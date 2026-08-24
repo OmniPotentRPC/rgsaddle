@@ -78,6 +78,7 @@ What just happened
 3. ``set_direction(Reverse)`` restored the saddle and flipped the
    kick. The two accepted points sit on opposite sides of the col.
 
-The host owns the loop after that: keep calling ``step`` until
-``at_minimum``, then flip. ``reset`` drops QN history at a
-model-update boundary, the same contract as ``BandSession``.
+The host owns the loop after that. ``run(surface, max_steps)`` is
+a convenience over ``step`` until ``at_minimum``. ``reset`` drops QN
+history at a model-update boundary, the same contract as
+``BandSession``.

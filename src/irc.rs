@@ -183,8 +183,32 @@ impl IrcSession {
         IrcTrust::from_atom_masses(self.d1.clone(), self.masses.as_slice().unwrap_or(&[]), self.config.dx)
     }
 
+    /// Sella: project `g` orthogonal to the path in the MW metric.
+    fn path_force(&self, g: &Array1<f64>) -> Array1<f64> {
+        let sqrtm = sqrt_masses_3n(self.masses.as_slice().unwrap_or(&[]));
+        let n = g.len().min(self.d1.len()).min(sqrtm.len());
+        let mut d1m = Array1::zeros(n);
+        let mut gm = Array1::zeros(n);
+        for i in 0..n {
+            d1m[i] = self.d1[i] * sqrtm[i];
+            gm[i] = g[i] / sqrtm[i].max(1e-16);
+        }
+        let dn = d1m.iter().map(|v| v * v).sum::<f64>().sqrt();
+        if dn > 1e-16 {
+            let proj = d1m.iter().zip(gm.iter()).map(|(d, gi)| d * gi).sum::<f64>() / dn;
+            for i in 0..n {
+                gm[i] -= (d1m[i] / dn) * proj;
+            }
+        }
+        let mut force = Array1::zeros(g.len());
+        for i in 0..n {
+            force[i] = -gm[i] * sqrtm[i];
+        }
+        force
+    }
+
     /// One outer IRC move: first call kicks; later calls take a
-    /// steepest step projected onto the MW sphere and accumulate `d1`.
+    /// path-projected steepest step on the MW sphere and accumulate `d1`.
     pub fn step<S: PointSurface>(&mut self, surface: &S) -> Result<IrcReport, SaddleError> {
         if self.first {
             self.x = &self.x + &self.d1;
@@ -216,13 +240,14 @@ impl IrcSession {
             });
         }
 
-        let trust = self.trust();
         let mut inner_steps = 0;
         let mut energy = energy0;
+        let mut g = g0;
         let mut max_force = max_force0;
         for _ in 0..self.config.max_inner {
             inner_steps += 1;
-            let mut s = -&g0;
+            let trust = self.trust();
+            let mut s = self.path_force(&g);
             let gn = s.iter().map(|v| v * v).sum::<f64>().sqrt();
             if gn > 1e-16 {
                 s.mapv_inplace(|v| v * (self.config.dx / gn));
@@ -232,7 +257,7 @@ impl IrcSession {
             let trial = &self.x + &s;
             let ev = surface.eval(trial.view())?;
             energy = ev.0;
-            let g = ev.1;
+            g = ev.1;
             max_force = g.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
             self.x = trial;
             if trust.on_bound(&s, 1e-8) || max_force <= self.config.force_tol {
@@ -249,5 +274,20 @@ impl IrcSession {
             inner_steps,
             at_minimum: max_force <= self.config.force_tol,
         })
+    }
+
+    /// Convenience loop over [`IrcSession::step`]; nothing more.
+    pub fn run<S: PointSurface>(
+        &mut self,
+        surface: &S,
+        max_steps: usize,
+    ) -> Result<IrcReport, SaddleError> {
+        let mut report = self.step(surface)?;
+        let mut n = 1;
+        while !report.at_minimum && n < max_steps {
+            report = self.step(surface)?;
+            n += 1;
+        }
+        Ok(report)
     }
 }
