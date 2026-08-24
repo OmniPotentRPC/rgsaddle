@@ -34,8 +34,11 @@ config refuses create.
 
 ``SellaSaddleSession`` ``eig=true`` runs Rayleigh-Ritz on
 the free Hessian every ``nsteps_per_diag`` steps.
-``EigenDevice.DLPK`` is the rgmin ``lowest_mode`` waist,
-not a second GPU stack.
+``gpu_eigh`` / ``gpu_qr`` / ``gpu_project`` are Sella
+``_gpu.py``. ``EigenDevice.DLPK`` is that factory
+(vecops / dlpk CUDA), not a second GPU stack. Opt-out is
+``SELLA_DISABLE_GPU``; the size floor is
+``SELLA_GPU_MIN_DIM`` (default 200).
 
 ``RationalFunctionOptimization`` is Sella ``method=rfo``:
 ``alpha`` in ``[0, 1]``, ``order`` selects the
