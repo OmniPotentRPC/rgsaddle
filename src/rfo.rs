@@ -3,18 +3,19 @@
 //! Algebra is [`rgmin::rfo_get_s`]: the `order`-th mode of the
 //! Banerjee-augmented matrix
 //! \(\alpha\begin{bmatrix}\alpha H & g\\ g^\top & 0\end{bmatrix}\).
-//! Distinct from [`rgmin::NewtonKind::Rfo`] (shift on unaugmented
-//! `H`). Alpha lives in \([0, 1]\); \(\alpha = 1\) is the
-//! unrestricted step. Sella `newton_safe` is false, so the
-//! trust-region companion is bisection ([`rgmin::rfo_restricted`]),
-//! not Newton on \(\|s(\alpha)\|\).
+//! [`rgmin::NewtonKind::Rfo`] is a different Banerjee form: lambda
+//! iteration on \((H-\lambda I)d=-g\). [`rgmin::NewtonKind::Shifted`]
+//! is a shift on unaugmented `H`. Alpha lives in \([0, 1]\);
+//! \(\alpha = 1\) is the unrestricted step. Sella `newton_safe` is
+//! false, so the trust-region companion is bisection
+//! ([`rgmin::rfo_restricted`]), not Newton on \(\|s(\alpha)\|\).
 //!
 //! Ambient reductions go through [`rgmin::vecops`]. A host that
 //! wants a point on a set calls [`RationalFunctionOptimization::step_on`]:
 //! `egrad2rgrad`, `project`, `retract`.
 
 use ndarray::{Array1, Array2};
-use rgmin::vecops::{Vector, dot, nrm2};
+use rgmin::vecops::nrm2;
 use rgmin::{Manifold, rfo_get_s, rfo_restricted};
 
 /// Sella `RationalFunctionOptimization` synonyms.
@@ -110,15 +111,11 @@ pub fn rfo_stepper(name: &str, order: usize) -> Option<RationalFunctionOptimizat
     RationalFunctionOptimization::from_name(name, order)
 }
 
-/// \(\|x\|_2\) through the vecops / DLPack seam.
-fn seam_nrm2(x: &Array1<f64>) -> f64 {
-    nrm2(Vector::from_host(x.clone()).host_view())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use ndarray::{Array2, array};
+    use rgmin::vecops::dot;
     use rgmin::ManifoldKind;
 
     #[test]
@@ -181,7 +178,7 @@ mod tests {
         let g = array![1.0, 0.2, -0.3];
         let stepper = RationalFunctionOptimization::new(0);
         let y = stepper.step_on(&man, &x, &h, &g, 1.0);
-        let n = seam_nrm2(&y);
+        let n = nrm2(y.view());
         assert!((n - 1.0).abs() < 1e-12, "||y||={n} y={y:?}");
         assert!(y.iter().all(|v| v.is_finite()));
 
@@ -219,5 +216,20 @@ mod tests {
             leak < 1e-12,
             "retracted increment left the horizontal: {leak}"
         );
+    }
+
+    #[test]
+    fn restricted_clips_a_long_rfo_step() {
+        let h = Array2::<f64>::eye(2);
+        let g = array![10.0, 0.0];
+        let stepper = RationalFunctionOptimization::new(0);
+        let full = nrm2(stepper.get_s(&h, &g, 1.0).view());
+        let delta = 0.05;
+        assert!(full > delta, "unrestricted ||s||={full}");
+        let s = stepper.restricted(&h, &g, delta);
+        let n = nrm2(s.view());
+        assert!(n <= delta + 1e-10, "||s||={n} delta={delta} full={full}");
+        assert!(s[0] < 0.0, "clipped step must stay downhill: {s:?}");
+        assert!(s.iter().all(|v| v.is_finite()));
     }
 }
