@@ -142,6 +142,27 @@ impl SellaMinSession {
         })
     }
 
+    /// QN in internals with Sella dummy 3-vectors on the Wilson frame.
+    pub fn on_internal_dummies(
+        config: SellaMinConfig,
+        x: Array1<f64>,
+        masses: Array1<f64>,
+        chart: Constraints,
+        dummies: Array1<f64>,
+    ) -> Result<Self, SaddleError> {
+        let pes = crate::InternalPes::with_dummies(x, masses, chart, dummies)?;
+        let n_free = pes.n_int().max(1);
+        let geom = SellaGeom::Chart(pes.chart().clone());
+        let delta = config.delta * n_free as f64;
+        Ok(Self {
+            pes: SellaPes::Internal(pes),
+            config,
+            geom,
+            delta,
+            rho: 1.0,
+        })
+    }
+
     /// QN in packed `[x_cart; cell_params]` (Sella `CellCartesianPES`).
     ///
     /// Cell DOF are the mask-true lattice entries. The force gate

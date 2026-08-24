@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 9u
+#define RGSADDLE_ABI_MINOR 10u
 
 /** Version head carried by every wire struct. */
 typedef struct {
@@ -419,6 +419,17 @@ typedef struct RgsaddleInternalPes RgsaddleInternalPes;
 RgsaddleInternalPes *rgsaddle_internal_pes_create(
     int64_t n_atoms, const double *position, const double *masses,
     const RgsaddleConstraints *cons);
+/**
+ * Same, with `n_dummy` extra 3-vectors. `cons` covers n_atoms + n_dummy.
+ * `dummies` is 3 * n_dummy.
+ */
+RgsaddleInternalPes *rgsaddle_internal_pes_create_dummies(
+    int64_t n_atoms, const double *position, const double *masses,
+    const RgsaddleConstraints *cons, int64_t n_dummy,
+    const double *dummies);
+/** Dummy 1 Å off the i-j bond. `out` is 3 doubles. */
+int rgsaddle_place_perp_dummy(int64_t n_atoms, const double *x, int64_t i,
+                              int64_t j, double *out);
 int rgsaddle_internal_pes_n_int(const RgsaddleInternalPes *pes, int64_t *out);
 /** `out` holds n_int doubles. */
 int rgsaddle_internal_pes_internals(const RgsaddleInternalPes *pes, double *out);

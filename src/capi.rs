@@ -26,7 +26,7 @@ use crate::spring::SpringKind;
 use crate::tangent::TangentKind;
 
 pub const RGSADDLE_ABI_MAJOR: u32 = 1;
-pub const RGSADDLE_ABI_MINOR: u32 = 9;
+pub const RGSADDLE_ABI_MINOR: u32 = 10;
 
 pub const RGSADDLE_OK: i32 = 0;
 pub const RGSADDLE_NULL_SESSION: i32 = -1;
@@ -2223,6 +2223,68 @@ pub unsafe extern "C" fn rgsaddle_internal_pes_create(
     match InternalPes::new(x, m, chart.cons.clone()) {
         Ok(pes) => Box::into_raw(Box::new(RgsaddleInternalPes { pes, n_atoms })),
         Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// # Safety
+/// `dummies` is 3 * n_dummy. `cons` covers n_atoms + n_dummy.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_internal_pes_create_dummies(
+    n_atoms: i64,
+    position: *const f64,
+    masses: *const f64,
+    cons: *const RgsaddleConstraints,
+    n_dummy: i64,
+    dummies: *const f64,
+) -> *mut RgsaddleInternalPes {
+    if position.is_null()
+        || masses.is_null()
+        || cons.is_null()
+        || dummies.is_null()
+        || n_atoms < 1
+        || n_dummy < 1
+    {
+        return std::ptr::null_mut();
+    }
+    let chart = unsafe { &*cons };
+    if chart.n_atoms != n_atoms + n_dummy {
+        return std::ptr::null_mut();
+    }
+    let dof = (3 * n_atoms) as usize;
+    let x = Array1::from(unsafe { slice::from_raw_parts(position, dof) }.to_vec());
+    let m = Array1::from(unsafe { slice::from_raw_parts(masses, n_atoms as usize) }.to_vec());
+    let d = Array1::from(
+        unsafe { slice::from_raw_parts(dummies, (3 * n_dummy) as usize) }.to_vec(),
+    );
+    match InternalPes::with_dummies(x, m, chart.cons.clone(), d) {
+        Ok(pes) => Box::into_raw(Box::new(RgsaddleInternalPes { pes, n_atoms })),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// # Safety
+/// `x` is 3N, `out` is 3.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_place_perp_dummy(
+    n_atoms: i64,
+    x: *const f64,
+    i: i64,
+    j: i64,
+    out: *mut f64,
+) -> i32 {
+    if x.is_null() || out.is_null() || n_atoms < 2 {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let pos = Array1::from(unsafe { slice::from_raw_parts(x, (3 * n_atoms) as usize) }.to_vec());
+    match crate::place_perp_dummy(pos.view(), i as usize, j as usize) {
+        Ok(r) => {
+            let dst = unsafe { slice::from_raw_parts_mut(out, 3) };
+            dst[0] = r[0];
+            dst[1] = r[1];
+            dst[2] = r[2];
+            RGSADDLE_OK
+        }
+        Err(e) => status_of(&e),
     }
 }
 
