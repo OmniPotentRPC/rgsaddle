@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 2u
+#define RGSADDLE_ABI_MINOR 3u
 
 /** Version head carried by every wire struct. */
 typedef struct {
@@ -309,6 +309,47 @@ int rgsaddle_sella_saddle_position(const RgsaddleSellaSaddle *session,
                                    double *out);
 int rgsaddle_sella_saddle_reset(RgsaddleSellaSaddle *session);
 void rgsaddle_sella_saddle_free(RgsaddleSellaSaddle *session);
+
+typedef struct RgsaddleConstraints RgsaddleConstraints;
+
+/** Empty Constraints chart. The caller stamps version and zeroes flags. */
+typedef struct {
+  rgsaddle_version_t version;
+  uint64_t flags;
+} rgsaddle_constraints_config_t;
+
+/**
+ * Create an empty Constraints chart on n_atoms. Returns NULL on a
+ * null config, an unknown ABI major, or n_atoms < 1.
+ */
+RgsaddleConstraints *rgsaddle_constraints_create(
+    const rgsaddle_constraints_config_t *config, int64_t n_atoms);
+
+/** Fix the fragment COM on every axis. `x` is 3N. */
+int rgsaddle_constraints_fix_com(RgsaddleConstraints *cons, const double *x);
+
+/**
+ * Fix a bond between atoms `i` and `j`. `x` is 3N. `target` is the
+ * length, or NULL for the current length.
+ */
+int rgsaddle_constraints_fix_bond(RgsaddleConstraints *cons, int64_t i,
+                                  int64_t j, const double *x,
+                                  const double *target);
+
+int rgsaddle_constraints_residual_norm(const RgsaddleConstraints *cons,
+                                       const double *x, double *out);
+
+/** Project `v` onto ker(J) at `x`. `x`, `v`, and `out` are 3N. */
+int rgsaddle_constraints_project(const RgsaddleConstraints *cons,
+                                 const double *x, const double *v,
+                                 double *out);
+
+/** Retract `x` along `v` and restore onto the level set. */
+int rgsaddle_constraints_retract(const RgsaddleConstraints *cons,
+                                 const double *x, const double *v,
+                                 double *out);
+
+void rgsaddle_constraints_free(RgsaddleConstraints *cons);
 
 #ifdef __cplusplus
 }
