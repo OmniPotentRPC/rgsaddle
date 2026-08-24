@@ -206,6 +206,9 @@ fn lanczos_mode<S: PointSurface>(
 
 /// Cyclic Jacobi for a small symmetric matrix. Returns eigenvalues
 /// and the column-major eigenvector table `v[row][col]`.
+// The rotation sweeps touch two columns of one row at a time, so an
+// index loop is the readable form here.
+#[allow(clippy::needless_range_loop)]
 fn jacobi_eigen(a: &mut [Vec<f64>]) -> (Vec<f64>, Vec<Vec<f64>>) {
     let n = a.len();
     let mut v = vec![vec![0.0; n]; n];
@@ -214,9 +217,9 @@ fn jacobi_eigen(a: &mut [Vec<f64>]) -> (Vec<f64>, Vec<Vec<f64>>) {
     }
     for _sweep in 0..64 {
         let mut off = 0.0;
-        for i in 0..n {
-            for j in (i + 1)..n {
-                off += a[i][j] * a[i][j];
+        for (i, row) in a.iter().enumerate() {
+            for value in row.iter().skip(i + 1) {
+                off += value * value;
             }
         }
         if off <= 1e-24 {

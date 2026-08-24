@@ -5,9 +5,13 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn cc() -> Option<String> {
-    for c in [std::env::var("CC").ok(), Some("cc".into()), Some("gcc".into())]
-        .into_iter()
-        .flatten()
+    for c in [
+        std::env::var("CC").ok(),
+        Some("cc".into()),
+        Some("gcc".into()),
+    ]
+    .into_iter()
+    .flatten()
     {
         if Command::new(&c).arg("--version").output().is_ok() {
             return Some(c);

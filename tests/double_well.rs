@@ -52,11 +52,19 @@ fn band_converges_to_the_double_well_saddle() {
             break;
         }
         if k % 200 == 0 {
-            eprintln!("step {k}: max_force={} ci={:?}", report.max_force, report.ci_index);
+            eprintln!(
+                "step {k}: max_force={} ci={:?}",
+                report.max_force, report.ci_index
+            );
         }
         report = session.step(&DoubleWell).unwrap();
     }
-    assert_eq!(report.status, BandStatus::Converged, "max_force={}", report.max_force);
+    assert_eq!(
+        report.status,
+        BandStatus::Converged,
+        "max_force={}",
+        report.max_force
+    );
 
     let pos = session.positions();
     // Endpoints pinned exactly.

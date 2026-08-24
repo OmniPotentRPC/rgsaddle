@@ -49,16 +49,13 @@ impl SpringKind {
                 let k_next = ks[i];
                 let k_prev = ks[i - 1];
                 SpringForces {
-                    parallel: tangent.to_owned()
-                        * (k_next * dist_next - k_prev * dist_prev),
+                    parallel: tangent.to_owned() * (k_next * dist_next - k_prev * dist_prev),
                     full: Array1::zeros(tangent.len()),
                 }
             }
             SpringKind::OnsagerMachlup { k, l_vecs } => {
                 // Mandelli Eq. 13 then Eq. 15 (project onto tangent).
-                let diff = &pos_next + &pos_prev - &(&pos * 2.0)
-                    + &l_vecs[i + 1]
-                    - &l_vecs[i];
+                let diff = &pos_next + &pos_prev - &(&pos * 2.0) + &l_vecs[i + 1] - &l_vecs[i];
                 let f_om = diff * *k;
                 let par = f_om.dot(&tangent);
                 SpringForces {

@@ -2,7 +2,7 @@
 //! the session must climb to the origin, where the Hessian has one
 //! negative eigenvalue.
 
-use ndarray::{array, Array1, ArrayView1};
+use ndarray::{Array1, ArrayView1, array};
 use rgsaddle::{
     MinModeConfig, MinModeKind, MinModeSession, MinModeStatus, PointSurface, SaddleError,
 };
@@ -42,7 +42,11 @@ fn converges(kind: MinModeKind) {
     // The lowest mode is the unstable x direction, curvature -2.
     let mode = session.mode();
     assert!(mode[0].abs() > 0.99, "{kind:?} mode={mode:?}");
-    assert!(report.curvature < -1.0, "{kind:?} curvature={}", report.curvature);
+    assert!(
+        report.curvature < -1.0,
+        "{kind:?} curvature={}",
+        report.curvature
+    );
 }
 
 #[test]

@@ -7,10 +7,10 @@ use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
 use rgmin::{Control, Method, Oracle, Solver};
 
 use crate::error::SaddleError;
-use crate::projection::{climbing_image_force, dneb_component, force_perp, ProjectionKind};
+use crate::projection::{ProjectionKind, climbing_image_force, dneb_component, force_perp};
 use crate::spring::SpringKind;
-use crate::tangent::compute_tangent;
 use crate::tangent::TangentKind;
+use crate::tangent::compute_tangent;
 
 /// Row-major 3x3 simulation cell for minimum-image differences. Band
 /// mechanics need nothing more from periodicity; neighbor lists (when
@@ -211,7 +211,9 @@ fn assemble_band(
             };
             climbing_image_force(force.view(), tangent.view(), dneb.view())
         } else {
-            config.projection.project(force.view(), tangent.view(), &spring)
+            config
+                .projection
+                .project(force.view(), tangent.view(), &spring)
         };
         for c in 0..dof {
             let v = image_force[c];
@@ -254,19 +256,19 @@ impl BandSession {
     pub fn new(config: BandConfig, initial: Array2<f64>) -> Result<Self, SaddleError> {
         let n_images = initial.nrows();
         let dof = initial.ncols();
-        if n_images < 3 || dof == 0 || dof % 3 != 0 {
+        if n_images < 3 || dof == 0 || !dof.is_multiple_of(3) {
             return Err(SaddleError::Shape(format!(
                 "band needs >= 3 images of 3N dof; got {n_images} x {dof}"
             )));
         }
-        if let SpringKind::Weighted { ks } = &config.spring {
-            if ks.len() != n_images - 1 {
-                return Err(SaddleError::Shape(format!(
-                    "weighted springs need n_images - 1 = {} constants; got {}",
-                    n_images - 1,
-                    ks.len()
-                )));
-            }
+        if let SpringKind::Weighted { ks } = &config.spring
+            && ks.len() != n_images - 1
+        {
+            return Err(SaddleError::Shape(format!(
+                "weighted springs need n_images - 1 = {} constants; got {}",
+                n_images - 1,
+                ks.len()
+            )));
         }
         let interior_dof = (n_images - 2) * dof;
         let control = Control {
@@ -366,8 +368,7 @@ impl BandSession {
         self.scatter_interior(x.view());
         self.iteration += 1;
 
-        let (_, _, max_force) =
-            assemble_band(&self.config, &self.climb, surface, &self.positions)?;
+        let (_, _, max_force) = assemble_band(&self.config, &self.climb, surface, &self.positions)?;
         let status = if max_force <= self.config.force_tol {
             BandStatus::Converged
         } else {

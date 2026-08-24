@@ -25,3 +25,14 @@ thiserror = "2"
 
 [dev-dependencies]
 approx = "0.5"
+
+[package.metadata.capi.header]
+name = "rgsaddle"
+subdirectory = false
+
+[package.metadata.capi.pkg_config]
+name = "rgsaddle"
+filename = "rgsaddle"
+
+[package.metadata.capi.library]
+name = "rgsaddle"

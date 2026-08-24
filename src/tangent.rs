@@ -76,7 +76,14 @@ mod tests {
     fn improved_picks_uphill_forward() {
         let next = array![1.0, 0.0];
         let prev = array![0.0, 1.0];
-        let t = compute_tangent(TangentKind::Improved, next.view(), prev.view(), 1.0, 0.0, 2.0);
+        let t = compute_tangent(
+            TangentKind::Improved,
+            next.view(),
+            prev.view(),
+            1.0,
+            0.0,
+            2.0,
+        );
         assert_abs_diff_eq!(t[0], 1.0, epsilon = 1e-12);
         assert_abs_diff_eq!(t[1], 0.0, epsilon = 1e-12);
     }
@@ -85,7 +92,14 @@ mod tests {
     fn improved_picks_downhill_backward() {
         let next = array![1.0, 0.0];
         let prev = array![0.0, 1.0];
-        let t = compute_tangent(TangentKind::Improved, next.view(), prev.view(), 1.0, 2.0, 0.0);
+        let t = compute_tangent(
+            TangentKind::Improved,
+            next.view(),
+            prev.view(),
+            1.0,
+            2.0,
+            0.0,
+        );
         assert_abs_diff_eq!(t[0], 0.0, epsilon = 1e-12);
         assert_abs_diff_eq!(t[1], 1.0, epsilon = 1e-12);
     }
@@ -95,7 +109,14 @@ mod tests {
         let next = array![1.0, 0.0];
         let prev = array![0.0, 1.0];
         // Maximum: prev side steeper (|dE_prev| = 2 > |dE_next| = 1).
-        let t = compute_tangent(TangentKind::Improved, next.view(), prev.view(), 3.0, 1.0, 2.0);
+        let t = compute_tangent(
+            TangentKind::Improved,
+            next.view(),
+            prev.view(),
+            3.0,
+            1.0,
+            2.0,
+        );
         // energy_diff_prev (-2) < energy_diff_next (-1): next*max + prev*min.
         let expected = (array![1.0, 0.0] * 2.0 + array![0.0, 1.0] * 1.0) / 5.0f64.sqrt();
         assert_abs_diff_eq!(t[0], expected[0], epsilon = 1e-12);
@@ -108,7 +129,14 @@ mod tests {
         let prev = array![-0.5, 0.0];
         // Extremum with equal, zero energy differences: combination is
         // zero-weighted; fallback normalizes the forward difference.
-        let t = compute_tangent(TangentKind::Improved, next.view(), prev.view(), 1.0, 1.0, 1.0);
+        let t = compute_tangent(
+            TangentKind::Improved,
+            next.view(),
+            prev.view(),
+            1.0,
+            1.0,
+            1.0,
+        );
         assert_abs_diff_eq!(t[0], 1.0, epsilon = 1e-12);
     }
 }

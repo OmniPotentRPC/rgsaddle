@@ -21,7 +21,7 @@ pub enum ProjectionKind {
 /// True force with its tangent component removed.
 pub fn force_perp(force: ArrayView1<f64>, tangent: ArrayView1<f64>) -> Array1<f64> {
     let par = force.dot(&tangent);
-    &force - &(tangent.to_owned() * par)
+    &force - (tangent.to_owned() * par)
 }
 
 /// Climbing-image force: `F - 2 (F . t) t + F_dneb`.
@@ -31,7 +31,7 @@ pub fn climbing_image_force(
     force_dneb: ArrayView1<f64>,
 ) -> Array1<f64> {
     let par = force.dot(&tangent);
-    &force - &(tangent.to_owned() * (2.0 * par)) + &force_dneb
+    &force - (tangent.to_owned() * (2.0 * par)) + force_dneb
 }
 
 /// DNEB correction with the Trygubenko–Wales atan switching.
@@ -50,9 +50,7 @@ pub fn dneb_component(
         let overlap = spring_perp.dot(&force_perp_hat);
         let mut dneb = &spring_perp - &(force_perp_hat * overlap);
         let switching = 2.0 / std::f64::consts::PI
-            * ((force_perp_norm * force_perp_norm)
-                / (spring_perp_norm * spring_perp_norm))
-                .atan();
+            * ((force_perp_norm * force_perp_norm) / (spring_perp_norm * spring_perp_norm)).atan();
         dneb *= switching;
         return dneb;
     }

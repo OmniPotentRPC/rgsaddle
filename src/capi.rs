@@ -51,8 +51,7 @@ pub struct RgsaddleSurfaceRequest {
     pub gradients: *mut f64,
 }
 
-pub type RgsaddleSurfaceFn =
-    extern "C" fn(*mut c_void, *mut RgsaddleSurfaceRequest) -> i32;
+pub type RgsaddleSurfaceFn = extern "C" fn(*mut c_void, *mut RgsaddleSurfaceRequest) -> i32;
 
 #[repr(C)]
 pub struct RgsaddleBandConfig {
@@ -276,8 +275,7 @@ pub unsafe extern "C" fn rgsaddle_band_create(
             if cfg.spring_ks.is_null() {
                 return std::ptr::null_mut();
             }
-            let ks =
-                unsafe { slice::from_raw_parts(cfg.spring_ks, (n_images - 1) as usize) };
+            let ks = unsafe { slice::from_raw_parts(cfg.spring_ks, (n_images - 1) as usize) };
             SpringKind::Weighted { ks: ks.to_vec() }
         }
         2 => SpringKind::OnsagerMachlup {
@@ -375,10 +373,7 @@ pub unsafe extern "C" fn rgsaddle_band_step(
 /// # Safety
 /// `out` must hold `n_images * 3 * n_atoms` doubles.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rgsaddle_band_positions(
-    band: *const RgsaddleBand,
-    out: *mut f64,
-) -> i32 {
+pub unsafe extern "C" fn rgsaddle_band_positions(band: *const RgsaddleBand, out: *mut f64) -> i32 {
     if band.is_null() {
         return RGSADDLE_NULL_BAND;
     }
