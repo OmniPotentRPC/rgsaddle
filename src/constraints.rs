@@ -300,6 +300,16 @@ impl Constraints {
         Ok(())
     }
 
+    /// Current internals values, length `equalities`.
+    pub fn values(&self, x: ArrayView1<f64>) -> Result<Array1<f64>, SaddleError> {
+        self.check_frame(x)?;
+        let mut q = Array1::zeros(self.eqs.len());
+        for (i, eq) in self.eqs.iter().enumerate() {
+            q[i] = eq.value(x)?;
+        }
+        Ok(q)
+    }
+
     /// Sella `Constraints.residual`.
     pub fn residual(&self, x: ArrayView1<f64>) -> Result<Array1<f64>, SaddleError> {
         self.check_frame(x)?;
