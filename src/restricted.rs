@@ -27,6 +27,23 @@ pub enum RestrictedKind {
     MaxInternalStep,
 }
 
+impl RestrictedKind {
+    pub const fn to_abi(self) -> i32 {
+        match self {
+            Self::TrustRegion => 0,
+            Self::MaxInternalStep => 1,
+        }
+    }
+
+    pub const fn try_from_abi(v: i32) -> Option<Self> {
+        match v {
+            0 => Some(Self::TrustRegion),
+            1 => Some(Self::MaxInternalStep),
+            _ => None,
+        }
+    }
+}
+
 /// Per-slot Sella weights (`wx`, `wb`, `wa`, `wd`, `wo`).
 ///
 /// Rotations reuse `translation` (`wx`), matching Sella

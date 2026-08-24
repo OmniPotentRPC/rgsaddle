@@ -4,7 +4,15 @@ from __future__ import annotations
 
 import enum
 
-from rgsaddle import EigenDevice, ExpandKind, ForceGate, HessUpdate, IrcKind, MinModeKind
+from rgsaddle import (
+    EigenDevice,
+    ExpandKind,
+    ForceGate,
+    HessUpdate,
+    IrcKind,
+    MinModeKind,
+    RestrictedKind,
+)
 
 
 def test_force_gate_is_an_enum():
@@ -59,3 +67,10 @@ def test_expand_kind_is_an_enum():
     assert ExpandKind.MJD0 == 4
     assert ExpandKind.MJD0_ALT == 5
     assert ExpandKind(2) is ExpandKind.JD0
+
+
+def test_restricted_kind_is_an_enum():
+    assert issubclass(RestrictedKind, enum.IntEnum)
+    assert RestrictedKind.TRUST_REGION == 0
+    assert RestrictedKind.MAX_INTERNAL_STEP == 1
+    assert RestrictedKind(1) is RestrictedKind.MAX_INTERNAL_STEP

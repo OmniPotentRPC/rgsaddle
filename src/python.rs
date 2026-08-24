@@ -4,7 +4,9 @@
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use crate::{EigenDevice, ExpandKind, ForceGate, HessUpdate, IrcKind, MinModeKind};
+use crate::{
+    EigenDevice, ExpandKind, ForceGate, HessUpdate, IrcKind, MinModeKind, RestrictedKind,
+};
 
 fn mint_int_enum<'py>(
     py: Python<'py>,
@@ -91,6 +93,20 @@ fn rgsaddle(m: &Bound<'_, PyModule>) -> PyResult<()> {
                 ("JD0_ALT", ExpandKind::Jd0Alt.to_abi()),
                 ("MJD0", ExpandKind::Mjd0.to_abi()),
                 ("MJD0_ALT", ExpandKind::Mjd0Alt.to_abi()),
+            ],
+        )?,
+    )?;
+    m.add(
+        "RestrictedKind",
+        mint_int_enum(
+            py,
+            "RestrictedKind",
+            &[
+                ("TRUST_REGION", RestrictedKind::TrustRegion.to_abi()),
+                (
+                    "MAX_INTERNAL_STEP",
+                    RestrictedKind::MaxInternalStep.to_abi(),
+                ),
             ],
         )?,
     )?;

@@ -1041,6 +1041,14 @@ mod irc_abi_tests {
             unsafe { rgsaddle_sella_min_set_hess_update(sess, 99) },
             RGSADDLE_INVALID_PARAMETER
         );
+        assert_eq!(
+            unsafe { rgsaddle_sella_min_set_restricted(sess, crate::RestrictedKind::MaxInternalStep.to_abi()) },
+            RGSADDLE_OK
+        );
+        assert_eq!(
+            unsafe { rgsaddle_sella_min_set_restricted(sess, 99) },
+            RGSADDLE_INVALID_PARAMETER
+        );
         unsafe { rgsaddle_sella_min_free(sess) };
     }
 
@@ -1420,6 +1428,23 @@ pub unsafe extern "C" fn rgsaddle_sella_min_set_hess_update(
         return RGSADDLE_INVALID_PARAMETER;
     };
     unsafe { (*session).session.set_update(kind) };
+    RGSADDLE_OK
+}
+
+/// # Safety
+/// `restricted` is RestrictedKind. Unknown refuses.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_sella_min_set_restricted(
+    session: *mut RgsaddleSellaMin,
+    restricted: i32,
+) -> i32 {
+    if session.is_null() {
+        return RGSADDLE_NULL_SESSION;
+    }
+    let Some(kind) = crate::RestrictedKind::try_from_abi(restricted) else {
+        return RGSADDLE_INVALID_PARAMETER;
+    };
+    unsafe { (*session).session.set_restricted(kind) };
     RGSADDLE_OK
 }
 
@@ -1811,6 +1836,23 @@ pub unsafe extern "C" fn rgsaddle_sella_saddle_set_expand(
         return RGSADDLE_INVALID_PARAMETER;
     };
     unsafe { (*session).session.set_expand(kind) };
+    RGSADDLE_OK
+}
+
+/// # Safety
+/// `restricted` is RestrictedKind. Unknown refuses.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_sella_saddle_set_restricted(
+    session: *mut RgsaddleSellaSaddle,
+    restricted: i32,
+) -> i32 {
+    if session.is_null() {
+        return RGSADDLE_NULL_SESSION;
+    }
+    let Some(kind) = crate::RestrictedKind::try_from_abi(restricted) else {
+        return RGSADDLE_INVALID_PARAMETER;
+    };
+    unsafe { (*session).session.set_restricted(kind) };
     RGSADDLE_OK
 }
 

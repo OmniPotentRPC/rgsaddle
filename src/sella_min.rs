@@ -198,6 +198,11 @@ impl SellaMinSession {
         self.pes.set_update(update);
     }
 
+    /// Internals increment clip. Cartesian sessions ignore this.
+    pub fn set_restricted(&mut self, kind: crate::RestrictedKind) {
+        self.config.restricted = kind;
+    }
+
     pub fn position(&self) -> ndarray::ArrayView1<'_, f64> {
         self.pes.position()
     }

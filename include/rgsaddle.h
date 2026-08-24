@@ -312,6 +312,8 @@ int rgsaddle_sella_min_position(const RgsaddleSellaMin *session, double *out);
 int rgsaddle_sella_min_reset(RgsaddleSellaMin *session);
 /** `update` is 0 = BFGS, 1 = TS-BFGS. Unknown refuses. */
 int rgsaddle_sella_min_set_hess_update(RgsaddleSellaMin *session, int32_t update);
+/** `restricted` is 0 = TrustRegion, 1 = MaxInternalStep. */
+int rgsaddle_sella_min_set_restricted(RgsaddleSellaMin *session, int32_t restricted);
 /** Niggli-reduce a cell session. `*applied` is 1 if rewritten. */
 int rgsaddle_sella_min_maybe_niggli(RgsaddleSellaMin *session,
                                     double angle_threshold, int32_t *applied);
@@ -357,6 +359,8 @@ int rgsaddle_sella_saddle_position(const RgsaddleSellaSaddle *session,
 int rgsaddle_sella_saddle_reset(RgsaddleSellaSaddle *session);
 int rgsaddle_sella_saddle_set_hess_update(RgsaddleSellaSaddle *session,
                                           int32_t update);
+int rgsaddle_sella_saddle_set_restricted(RgsaddleSellaSaddle *session,
+                                         int32_t restricted);
 int rgsaddle_sella_saddle_maybe_niggli(RgsaddleSellaSaddle *session,
                                        double angle_threshold,
                                        int32_t *applied);

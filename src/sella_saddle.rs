@@ -231,6 +231,11 @@ impl SellaSaddleSession {
         self.config.expand = expand;
     }
 
+    /// Internals increment clip. Cartesian sessions ignore this.
+    pub fn set_restricted(&mut self, kind: crate::RestrictedKind) {
+        self.config.restricted = kind;
+    }
+
     pub fn internal_pes(&self) -> Option<&InternalPes> {
         self.pes.internal()
     }
