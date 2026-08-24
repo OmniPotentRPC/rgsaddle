@@ -16,7 +16,10 @@ Unreleased
   internals and ``Constraints`` equality residual on the
   same manifold (``project`` / ``retract`` / ``transport``
   stay on the level set). Bond / angle / dihedral topology
-  stays in vocn.
+  stays in vocn. ``InternalPes.from_find`` loads a vocn
+  auto-find primitive set; dest does not generate Bond /
+  Angle / Dihedral topology. C ABI
+  ``rgsaddle_internal_pes_create_from_find``, ABI minor 11.
 
 - ``MaxInternalStep``: per-coordinate clip ``max |s_i w_i|``
   on an internals packing, applied before the Euclidean

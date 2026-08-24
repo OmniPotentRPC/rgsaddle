@@ -4,6 +4,7 @@
 //! ([`Constraints`] equalities as coordinates). Wilson `B = dc/dx`.
 //! An internals increment `dq` maps to Cartesian by the min-norm
 //! solve `B dx = dq`, then [`CartesianPes::kick`].
+//! [`InternalPes::from_find`] loads a vocn auto-find primitive set.
 //!
 //! [`CellCartesianPes`] and [`CellInternalPes`] carry a
 //! [`linkcell::Cell`]. Band / IRC MIC is still [`crate::mic`]; the
@@ -54,6 +55,21 @@ impl InternalPes {
         };
         pes.guess_hessian();
         Ok(pes)
+    }
+
+    /// Session kick: load a vocn auto-find primitive set.
+    ///
+    /// Dest does not generate Bond / Angle / Dihedral topology.
+    /// `found` is the set vocn auto-find returns.
+    pub fn from_find(
+        x: Array1<f64>,
+        masses: Array1<f64>,
+        found: &crate::vocn::Found,
+    ) -> Result<Self, SaddleError> {
+        let n = masses.len();
+        let mut chart = Constraints::new(n)?;
+        found.load(&mut chart, x.view())?;
+        Self::new(x, masses, chart)
     }
 
     /// Chart covers real atoms plus dummy 3-vectors (Sella dummies).
@@ -1243,6 +1259,30 @@ mod tests {
         assert_eq!(pes.packed_len(), 2);
         let p = pes.packed().unwrap();
         assert!((p[1] - 4.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn h2o_vocn_find_chart_matches_n_int() {
+        let x = crate::internal::pack_cart(&[
+            [0.0, 0.0, 0.0],
+            [0.96, 0.0, 0.0],
+            [-0.24, 0.93, 0.0],
+        ]);
+        let masses = Array1::from(vec![16.0, 1.0, 1.0]);
+        // vocn auto-find on H2O: two O-H bonds and the H-O-H angle.
+        let found = crate::vocn::Found::from_parts([[0, 1], [0, 2]], [[1, 0, 2]], []);
+        assert!(!found.is_empty());
+        assert!(found.n_int() > 0);
+        let pes = InternalPes::from_find(x, masses, &found).unwrap();
+        assert_eq!(pes.n_int(), found.n_int());
+        assert_eq!(pes.n_int(), 3);
+        let c = pes.chart().counts();
+        assert_eq!(c.nbonds, 2);
+        assert_eq!(c.nangles, 1);
+        assert_eq!(c.ndihedrals, 0);
+        let q = pes.internals().unwrap();
+        assert_eq!(q.len(), pes.n_int());
+        assert!(q.iter().all(|v| v.is_finite()));
     }
 
     #[test]

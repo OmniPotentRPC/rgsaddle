@@ -48,6 +48,8 @@ fix translations (COM), rotations (Kabsch quaternion),
 displacements, and host-supplied bonds / angles / dihedrals.
 ~project~ / ~retract~ / ~transport~ keep the point on the
 level set. Bond / angle / dihedral *topology* stays in vocn.
+~InternalPes::from_find~ is the session kick: dest loads the
+vocn auto-find primitive set into the internals chart.
 
 ~MaxInternalStep~ is the Sella per-coordinate clip
 (~max |s_i w_i| <= delta~) on an internals packing. It sits

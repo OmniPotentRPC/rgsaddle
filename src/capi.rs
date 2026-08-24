@@ -26,7 +26,7 @@ use crate::spring::SpringKind;
 use crate::tangent::TangentKind;
 
 pub const RGSADDLE_ABI_MAJOR: u32 = 1;
-pub const RGSADDLE_ABI_MINOR: u32 = 10;
+pub const RGSADDLE_ABI_MINOR: u32 = 11;
 
 pub const RGSADDLE_OK: i32 = 0;
 pub const RGSADDLE_NULL_SESSION: i32 = -1;
@@ -2263,6 +2263,82 @@ pub unsafe extern "C" fn rgsaddle_internal_pes_create_dummies(
 }
 
 /// # Safety
+/// `position` is 3N, `masses` is N. `bonds` is 2 * n_bonds when
+/// n_bonds > 0, else NULL. Same for angles (3) and dihedrals (4).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_internal_pes_create_from_find(
+    n_atoms: i64,
+    position: *const f64,
+    masses: *const f64,
+    n_bonds: i64,
+    bonds: *const i64,
+    n_angles: i64,
+    angles: *const i64,
+    n_dihedrals: i64,
+    dihedrals: *const i64,
+) -> *mut RgsaddleInternalPes {
+    if position.is_null() || masses.is_null() || n_atoms < 1 {
+        return std::ptr::null_mut();
+    }
+    if n_bonds < 0 || n_angles < 0 || n_dihedrals < 0 {
+        return std::ptr::null_mut();
+    }
+    if n_bonds > 0 && bonds.is_null() {
+        return std::ptr::null_mut();
+    }
+    if n_angles > 0 && angles.is_null() {
+        return std::ptr::null_mut();
+    }
+    if n_dihedrals > 0 && dihedrals.is_null() {
+        return std::ptr::null_mut();
+    }
+    let n = n_atoms as usize;
+    let mut bond_v = Vec::with_capacity(n_bonds as usize);
+    if n_bonds > 0 {
+        let raw = unsafe { slice::from_raw_parts(bonds, 2 * n_bonds as usize) };
+        for chunk in raw.chunks_exact(2) {
+            if chunk[0] < 0 || chunk[1] < 0 {
+                return std::ptr::null_mut();
+            }
+            bond_v.push([chunk[0] as usize, chunk[1] as usize]);
+        }
+    }
+    let mut angle_v = Vec::with_capacity(n_angles as usize);
+    if n_angles > 0 {
+        let raw = unsafe { slice::from_raw_parts(angles, 3 * n_angles as usize) };
+        for chunk in raw.chunks_exact(3) {
+            if chunk.iter().any(|&a| a < 0) {
+                return std::ptr::null_mut();
+            }
+            angle_v.push([chunk[0] as usize, chunk[1] as usize, chunk[2] as usize]);
+        }
+    }
+    let mut dih_v = Vec::with_capacity(n_dihedrals as usize);
+    if n_dihedrals > 0 {
+        let raw = unsafe { slice::from_raw_parts(dihedrals, 4 * n_dihedrals as usize) };
+        for chunk in raw.chunks_exact(4) {
+            if chunk.iter().any(|&a| a < 0) {
+                return std::ptr::null_mut();
+            }
+            dih_v.push([
+                chunk[0] as usize,
+                chunk[1] as usize,
+                chunk[2] as usize,
+                chunk[3] as usize,
+            ]);
+        }
+    }
+    let found = crate::vocn::Found::from_parts(bond_v, angle_v, dih_v);
+    let dof = 3 * n;
+    let x = Array1::from(unsafe { slice::from_raw_parts(position, dof) }.to_vec());
+    let m = Array1::from(unsafe { slice::from_raw_parts(masses, n) }.to_vec());
+    match InternalPes::from_find(x, m, &found) {
+        Ok(pes) => Box::into_raw(Box::new(RgsaddleInternalPes { pes, n_atoms })),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// # Safety
 /// `x` is 3N, `out` is 3.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rgsaddle_place_perp_dummy(
@@ -2595,6 +2671,55 @@ mod constraints_abi_tests {
             rgsaddle_sella_min_free(sess);
             rgsaddle_constraints_free(cons);
         }
+    }
+
+    #[test]
+    fn internal_pes_abi_from_find_h2o_n_int_matches() {
+        let x = water();
+        let masses = [16.0, 1.0, 1.0];
+        let bonds = [0i64, 1, 0, 2];
+        let angles = [1i64, 0, 2];
+        let pes = unsafe {
+            rgsaddle_internal_pes_create_from_find(
+                3,
+                x.as_ptr(),
+                masses.as_ptr(),
+                2,
+                bonds.as_ptr(),
+                1,
+                angles.as_ptr(),
+                0,
+                std::ptr::null(),
+            )
+        };
+        assert!(!pes.is_null());
+        let mut nint = 0i64;
+        assert_eq!(
+            unsafe { rgsaddle_internal_pes_n_int(pes, &mut nint) },
+            RGSADDLE_OK
+        );
+        assert_eq!(nint, 3);
+        let mut q = [0.0; 3];
+        assert_eq!(
+            unsafe { rgsaddle_internal_pes_internals(pes, q.as_mut_ptr()) },
+            RGSADDLE_OK
+        );
+        assert!(q.iter().all(|v| v.is_finite()));
+        unsafe { rgsaddle_internal_pes_free(pes) };
+        let empty = unsafe {
+            rgsaddle_internal_pes_create_from_find(
+                3,
+                x.as_ptr(),
+                masses.as_ptr(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+            )
+        };
+        assert!(empty.is_null());
     }
 
     #[test]

@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 10u
+#define RGSADDLE_ABI_MINOR 11u
 
 /** Version head carried by every wire struct. */
 typedef struct {
@@ -427,6 +427,20 @@ RgsaddleInternalPes *rgsaddle_internal_pes_create_dummies(
     int64_t n_atoms, const double *position, const double *masses,
     const RgsaddleConstraints *cons, int64_t n_dummy,
     const double *dummies);
+/**
+ * InternalPES from a vocn auto-find primitive set.
+ * `position` is 3N, `masses` is N. `bonds` is 2 * n_bonds (i, j),
+ * `angles` is 3 * n_angles (i, vertex, k), `dihedrals` is
+ * 4 * n_dihedrals. A NULL pointer is valid only when the matching
+ * count is 0. Dest does not generate Bond / Angle / Dihedral
+ * topology; the host supplies the vocn find payload. Returns NULL
+ * on an empty set or a shape miss.
+ */
+RgsaddleInternalPes *rgsaddle_internal_pes_create_from_find(
+    int64_t n_atoms, const double *position, const double *masses,
+    int64_t n_bonds, const int64_t *bonds, int64_t n_angles,
+    const int64_t *angles, int64_t n_dihedrals,
+    const int64_t *dihedrals);
 /** Dummy 1 Å off the i-j bond. `out` is 3 doubles. */
 int rgsaddle_place_perp_dummy(int64_t n_atoms, const double *x, int64_t i,
                               int64_t j, double *out);

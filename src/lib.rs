@@ -77,6 +77,7 @@ pub mod sella_min;
 pub mod sella_saddle;
 pub mod spring;
 pub mod tangent;
+pub mod vocn;
 
 pub use band::{BandConfig, BandReport, BandSession, BandStatus, BandSurface};
 pub use constraints::{Constraints, Equality, InternalCounts};
@@ -112,3 +113,4 @@ pub use sella_min::{SellaMinConfig, SellaMinReport, SellaMinSession};
 pub use sella_saddle::{SellaSaddleConfig, SellaSaddleReport, SellaSaddleSession};
 pub use spring::SpringKind;
 pub use tangent::TangentKind;
+pub use vocn::{Found as VocnFound, Primitive as VocnPrimitive};
