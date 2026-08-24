@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 6u
+#define RGSADDLE_ABI_MINOR 7u
 
 /** Version head carried by every wire struct. */
 typedef struct {
@@ -286,6 +286,11 @@ RgsaddleSellaMin *rgsaddle_sella_min_create_on(
     const rgsaddle_sella_min_config_t *config, int64_t n_atoms,
     const double *position, const double *masses,
     const RgsaddleConstraints *cons);
+/** Same, QN in the internals chart (Sella InternalPES). `cons` is copied. */
+RgsaddleSellaMin *rgsaddle_sella_min_create_internal(
+    const rgsaddle_sella_min_config_t *config, int64_t n_atoms,
+    const double *position, const double *masses,
+    const RgsaddleConstraints *cons);
 int rgsaddle_sella_min_step(RgsaddleSellaMin *session,
                             rgsaddle_surface_fn surface, void *user,
                             rgsaddle_report_t *out);
@@ -311,6 +316,10 @@ RgsaddleSellaSaddle *rgsaddle_sella_saddle_create(
     const rgsaddle_sella_saddle_config_t *config, int64_t n_atoms,
     const double *position, const double *masses);
 RgsaddleSellaSaddle *rgsaddle_sella_saddle_create_on(
+    const rgsaddle_sella_saddle_config_t *config, int64_t n_atoms,
+    const double *position, const double *masses,
+    const RgsaddleConstraints *cons);
+RgsaddleSellaSaddle *rgsaddle_sella_saddle_create_internal(
     const rgsaddle_sella_saddle_config_t *config, int64_t n_atoms,
     const double *position, const double *masses,
     const RgsaddleConstraints *cons);
@@ -362,6 +371,34 @@ int rgsaddle_constraints_retract(const RgsaddleConstraints *cons,
                                  double *out);
 
 void rgsaddle_constraints_free(RgsaddleConstraints *cons);
+
+typedef struct RgsaddleInternalPes RgsaddleInternalPes;
+
+/**
+ * InternalPES over a Constraints chart. `position` is 3N, `masses` is N.
+ * `cons` is copied. Returns NULL on an empty chart or a shape miss.
+ */
+RgsaddleInternalPes *rgsaddle_internal_pes_create(
+    int64_t n_atoms, const double *position, const double *masses,
+    const RgsaddleConstraints *cons);
+int rgsaddle_internal_pes_n_int(const RgsaddleInternalPes *pes, int64_t *out);
+/** `out` holds n_int doubles. */
+int rgsaddle_internal_pes_internals(const RgsaddleInternalPes *pes, double *out);
+int rgsaddle_internal_pes_position(const RgsaddleInternalPes *pes, double *out);
+/** `dq` is n_int. */
+int rgsaddle_internal_pes_kick(RgsaddleInternalPes *pes,
+                               rgsaddle_surface_fn surface, void *user,
+                               const double *dq);
+int rgsaddle_internal_pes_set_hess_update(RgsaddleInternalPes *pes,
+                                          int32_t update);
+void rgsaddle_internal_pes_free(RgsaddleInternalPes *pes);
+
+/**
+ * Niggli-reduce a row-major 3x3 cell in place when any angle is more
+ * than `angle_threshold` degrees from 90. `*applied` is 1 if rewritten.
+ */
+int rgsaddle_niggli_reduce(double *cell, double angle_threshold,
+                           int32_t *applied);
 
 typedef struct RgsaddleSamd RgsaddleSamd;
 
