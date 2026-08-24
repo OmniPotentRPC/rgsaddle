@@ -5,7 +5,7 @@
 //! [`Constraints`] chart passes that instead; the session then
 //! projects / retracts / transports on `ker(J)`.
 
-use ndarray::Array1;
+use ndarray::{Array1, Array2};
 use rgmin::{Manifold, ManifoldKind};
 
 use crate::constraints::Constraints;
@@ -42,6 +42,91 @@ impl SellaGeom {
             Self::Kind(_) => None,
         }
     }
+
+    /// Sella `Ufree`: orthonormal columns spanning the tangent.
+    ///
+    /// QN / P-RFO run in this chart (`U^T H U`, `U^T g`) and the
+    /// increment maps back as `U s_free`.
+    pub fn ufree(&self, x: &Array1<f64>) -> Array2<f64> {
+        use rgmin::vecops::{axpy, dot, nrm2};
+        let n = x.len();
+        let mut cols: Vec<Array1<f64>> = Vec::new();
+        for i in 0..n {
+            let mut e = Array1::zeros(n);
+            e[i] = 1.0;
+            let mut v = self.project(x, &e);
+            for b in &cols {
+                let c = dot(v.view(), b.view());
+                axpy(-c, b.view(), &mut v);
+            }
+            let nn = nrm2(v.view());
+            if nn > 1e-10 {
+                v.mapv_inplace(|a| a / nn);
+                cols.push(v);
+            }
+        }
+        let k = cols.len();
+        let mut u = Array2::zeros((n, k));
+        for (j, col) in cols.into_iter().enumerate() {
+            for i in 0..n {
+                u[(i, j)] = col[i];
+            }
+        }
+        u
+    }
+}
+
+/// `y = U^T v`.
+pub fn u_t_vec(u: &Array2<f64>, v: &Array1<f64>) -> Array1<f64> {
+    let mut y = Array1::zeros(u.ncols());
+    for j in 0..u.ncols() {
+        let mut acc = 0.0;
+        for i in 0..u.nrows() {
+            acc += u[(i, j)] * v[i];
+        }
+        y[j] = acc;
+    }
+    y
+}
+
+/// `y = U x`.
+pub fn u_vec(u: &Array2<f64>, x: &Array1<f64>) -> Array1<f64> {
+    let mut y = Array1::zeros(u.nrows());
+    for i in 0..u.nrows() {
+        let mut acc = 0.0;
+        for j in 0..u.ncols() {
+            acc += u[(i, j)] * x[j];
+        }
+        y[i] = acc;
+    }
+    y
+}
+
+/// `U^T H U`.
+pub fn u_t_h_u(u: &Array2<f64>, h: &ndarray::Array2<f64>) -> Array2<f64> {
+    let n = u.nrows();
+    let k = u.ncols();
+    let mut hu = Array2::<f64>::zeros((n, k));
+    for i in 0..n {
+        for j in 0..k {
+            let mut acc = 0.0;
+            for t in 0..n {
+                acc += h[(i, t)] * u[(t, j)];
+            }
+            hu[(i, j)] = acc;
+        }
+    }
+    let mut out = Array2::<f64>::zeros((k, k));
+    for i in 0..k {
+        for j in 0..k {
+            let mut acc = 0.0;
+            for t in 0..n {
+                acc += u[(t, i)] * hu[(t, j)];
+            }
+            out[(i, j)] = acc;
+        }
+    }
+    out
 }
 
 impl Manifold for SellaGeom {
@@ -146,6 +231,9 @@ mod tests {
         }
         assert_eq!(SellaGeom::cartesian(9).n_free(9), 3);
         assert_eq!(SellaGeom::cartesian(6).n_free(6), 6);
+        let x = Array1::from(vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+        let u = SellaGeom::cartesian(9).ufree(&x);
+        assert_eq!(u.ncols(), 3, "RigidQuotient Ufree is 3N-6");
     }
 
     #[test]
@@ -158,6 +246,12 @@ mod tests {
         let shift = Array1::from_elem(9, 0.1);
         let v = geom.project(&x, &shift);
         assert!(nrm2(v.view()) < 1e-12, "COM chart must kill a translation");
+        let u = geom.ufree(&x);
+        assert_eq!(u.ncols(), 6);
+        // A translation is orthogonal to every free column.
+        let t = Array1::from_elem(9, 1.0);
+        let t = geom.project(&x, &t);
+        assert!(nrm2(t.view()) < 1e-12);
     }
 
     #[test]

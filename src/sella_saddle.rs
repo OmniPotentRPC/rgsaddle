@@ -155,14 +155,18 @@ impl SellaSaddleSession {
                 delta: self.delta,
             });
         }
-        let (evals, evecs) = self.pes.hessian().eigh();
-        let mut s = prfo_restricted(
+        let u = self.geom.ufree(&x);
+        let g_free = crate::geom::u_t_vec(&u, &g_r);
+        let h_free = crate::geom::u_t_h_u(&u, self.pes.hessian().hessian());
+        let (evals, evecs) = crate::exact_eigh(h_free.view())?;
+        let s_free = prfo_restricted(
             &evals,
             &evecs,
-            &g_r,
+            &g_free,
             self.config.order.max(1),
             self.delta,
         );
+        let mut s = crate::geom::u_vec(&u, &s_free);
         s = self.geom.project(&x, &s);
         let sn = vnrm2(&Vector::from_host(s.clone()));
         if sn > self.delta && sn > 0.0 {
