@@ -847,9 +847,17 @@ mod tests {
         let g = t.gradient(x.view()).unwrap();
         let v = t.project(&x, &step);
         assert!(dot(g.view(), v.view()).abs() < 1e-12);
+        let shift = Array1::from_vec(vec![0.0, 0.3, 0.0, 0.0, 0.3, 0.0]);
+        let v_shift = t.project(&x, &shift);
+        assert!(
+            seam_nrm2(&v_shift) < 1e-12,
+            "uniform Y shift must be vertical"
+        );
         let w = t.transport(&x, &y, &v);
         let w_h = t.project(&y, &w);
         assert!(seam_nrm2(&(&w - &w_h)) < 1e-12);
+        assert!(t.required_dim(6).is_ok());
+        assert!(t.required_dim(5).is_err());
     }
 
     #[test]
@@ -863,6 +871,9 @@ mod tests {
         ];
         let x = pack_cart(&rows);
         let rz = Rotation::new(vec![0, 1, 2], CartAxis::Z, refpos).unwrap();
+        let q = rz.quaternion(x.view()).unwrap();
+        let qn = nrm2(Array1::from_vec(q.to_vec()).view());
+        assert!((qn - 1.0).abs() < 1e-12, "quaternion left S^3: {q:?}");
         let c0 = rz.value(x.view()).unwrap();
         let mut step = Array1::zeros(9);
         step[0] = 0.05;
@@ -881,6 +892,12 @@ mod tests {
         let w = rz.transport(&x, &y, &v);
         let w_h = rz.project(&y, &w);
         assert!(seam_nrm2(&(&w - &w_h)) < 1e-10);
+        let mut shifted = x.clone();
+        for i in 0..3 {
+            shifted[3 * i] += 0.4;
+            shifted[3 * i + 1] -= 0.2;
+        }
+        assert!((rz.value(shifted.view()).unwrap() - c0).abs() < 1e-10);
     }
 
     #[test]
