@@ -34,8 +34,13 @@ config refuses create.
 
 ``SellaSaddleSession`` ``eig=true`` runs Rayleigh-Ritz on
 the free Hessian every ``nsteps_per_diag`` steps.
-``EigenDevice.DLPK`` is the rgmin ``lowest_mode`` waist,
-not a second GPU stack.
+``EigenDevice.DLPK`` is Sella ``_gpu.py`` (``gpu_eigh`` /
+``gpu_qr`` / ``gpu_project``) on the rgmin vecops / dlpk
+CUDA tag, not a second GPU stack. ``SELLA_DISABLE_GPU=1``
+makes ``to_gpu`` return ``None``. A failed matrix claim
+records ``n`` (``A.shape[0]``), not ``n*n``. Below
+``GPU_MIN_DIM`` (200) or after an OOM floor the host
+Jacobi / Gram-Schmidt path runs.
 
 ``RationalFunctionOptimization`` is Sella ``method=rfo``:
 ``alpha`` in ``[0, 1]``, ``order`` selects the

@@ -12,8 +12,8 @@
 //! not the flattened length. `to_gpu` itself returns `None` when
 //! `SELLA_DISABLE_GPU=1`. A missing dlpk kernel is not an OOM.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use dlpk::sys::{DLDevice, DLDeviceType};
 use ndarray::{Array1, Array2, ArrayView2};
@@ -321,7 +321,7 @@ mod tests {
                 sella: std::env::var("SELLA_DISABLE_GPU").ok(),
                 rg: std::env::var("RGSADDLE_DISABLE_GPU").ok(),
             };
-            // Safety: caller holds OOM_TEST_LOCK, so GPU tests do not race on env.
+            // SAFETY: caller holds OOM_TEST_LOCK, so GPU tests do not race on env.
             unsafe {
                 std::env::remove_var("RGSADDLE_DISABLE_GPU");
                 std::env::set_var("SELLA_DISABLE_GPU", "1");

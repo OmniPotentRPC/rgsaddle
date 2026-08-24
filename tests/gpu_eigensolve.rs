@@ -200,19 +200,31 @@ fn missing_dlpk_kernel_does_not_record_oom() {
 fn to_gpu_returns_none_when_sella_disable_gpu() {
     let _guard = lock_oom_for_test();
     clear_oom_floor();
-    let prev = std::env::var("SELLA_DISABLE_GPU").ok();
+    let prev_sella = std::env::var("SELLA_DISABLE_GPU").ok();
+    let prev_rg = std::env::var("RGSADDLE_DISABLE_GPU").ok();
     // SAFETY: lock_oom_for_test serializes env mutation across GPU tests.
-    unsafe { std::env::set_var("SELLA_DISABLE_GPU", "1") };
+    unsafe {
+        std::env::remove_var("RGSADDLE_DISABLE_GPU");
+        std::env::set_var("SELLA_DISABLE_GPU", "1");
+    }
     fail_next_cuda_claim();
+    let refused = to_gpu(Array1::from(vec![1.0, 0.0, 0.0, 1.0]));
+    let floor = oom_floor();
+    unsafe {
+        match prev_sella {
+            Some(v) => std::env::set_var("SELLA_DISABLE_GPU", v),
+            None => std::env::remove_var("SELLA_DISABLE_GPU"),
+        }
+        match prev_rg {
+            Some(v) => std::env::set_var("RGSADDLE_DISABLE_GPU", v),
+            None => std::env::remove_var("RGSADDLE_DISABLE_GPU"),
+        }
+    }
     assert!(
-        to_gpu(Array1::from(vec![1.0, 0.0, 0.0, 1.0])).is_none(),
+        refused.is_none(),
         "SELLA_DISABLE_GPU=1 must make to_gpu return None"
     );
-    assert_eq!(oom_floor(), None, "disabled to_gpu must not upload");
-    match prev {
-        Some(v) => unsafe { std::env::set_var("SELLA_DISABLE_GPU", v) },
-        None => unsafe { std::env::remove_var("SELLA_DISABLE_GPU") },
-    }
+    assert_eq!(floor, None, "disabled to_gpu must not upload");
     clear_oom_floor();
 }
 

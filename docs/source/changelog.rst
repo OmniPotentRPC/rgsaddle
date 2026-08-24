@@ -6,6 +6,15 @@ Changelog
 Unreleased
 ~~~~~~~~~~
 
+- Sella ``_gpu.py`` on the rgmin vecops / dlpk waist:
+  ``gpu_eigh`` / ``gpu_qr`` / ``gpu_project``, size gate
+  (``GPU_MIN_DIM = 200``), OOM floor. CUDA is a dlpk
+  device tag, not a second GPU stack; missing kernels
+  fall back to host Jacobi / Gram-Schmidt. Eigenvectors
+  retract on the sphere (``proj`` / ``retr`` / ``transp``).
+  ``to_gpu`` returns ``None`` when ``SELLA_DISABLE_GPU=1``.
+  A failed matrix claim records ``n`` (``A.shape[0]``), not ``n*n``.
+
 - Force gate is the eOn / gpr ``ConvergenceForceNorm`` closed
   enum (``L2`` / ``Linf`` / ``MaxForceOnAtom``). C field type is
   ``rgsaddle_force_gate_t``; unknown discriminants refuse create.
