@@ -26,6 +26,8 @@
 //! [`rfo::RationalFunctionOptimization`]: `rgmin::rfo_get_s` with
 //! the Sella alpha / order contract, retracted through
 //! [`rgmin::Manifold`] `project` / `retract` / `transport`.
+//! Sella `samd.py` is [`samd::SamdSession`]: Euclidean BDP, or
+//! [`samd::retract_samd`] / [`SamdSession::step_on`] on a manifold.
 //! Equality internals are [`constraints::Constraints`] on the same
 //! manifold (`Translation` / `Rotation` / `Displacement`, plus
 //! host-fixed bonds / angles / dihedrals). [`SellaMinSession`] and
@@ -107,7 +109,9 @@ pub use restricted::{
     mis_clip, weights_for_equalities, InternalWeights, MaxInternalStep, RestrictedKind,
 };
 pub use rfo::{RationalFunctionOptimization, rfo_stepper};
-pub use samd::{SamdConfig, SamdReport, SamdSession};
+pub use samd::{
+    project_velocity, retract_samd, transport_velocity, SamdConfig, SamdReport, SamdSession,
+};
 pub use sella_min::{SellaMinConfig, SellaMinReport, SellaMinSession};
 pub use sella_saddle::{SellaSaddleConfig, SellaSaddleReport, SellaSaddleSession};
 pub use spring::SpringKind;

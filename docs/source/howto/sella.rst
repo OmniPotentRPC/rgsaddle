@@ -22,7 +22,9 @@ and ``3N - ncons`` on a chart.
 ``exact_eigh`` / ``rayleigh_ritz`` are Sella
 ``eigensolvers.py``. ``numerical_hvp`` is
 ``linalg.NumericalHessian``. ``SamdSession`` is the BDP
-thermostat (``samd.py``). ``force_match_hessian`` is the
+thermostat (``samd.py``). A host that needs the point on a
+set calls ``retract_samd`` / ``step_on`` (``project`` /
+``retract`` / ``transport``). ``force_match_hessian`` is the
 bond arm of ``force_match.pyx``.
 
 The C wire exposes ``rgsaddle_sella_min_*`` and

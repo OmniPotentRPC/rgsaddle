@@ -4,8 +4,14 @@
 //! The host supplies the Gaussian draw `r` so the session stays
 //! deterministic under test. Temperature schedules are the Sella
 //! linear and exponential ramps.
+//!
+//! [`SamdSession::step`] is the Euclidean Sella loop. A host that
+//! needs the point on a set calls [`retract_samd`] /
+//! [`SamdSession::step_on`]: project the Verlet increment, retract,
+//! transport the velocity, then the BDP rescale.
 
 use ndarray::{Array1, ArrayView1};
+use rgmin::Manifold;
 use rgmin::vecops::{axpy, dot};
 
 use crate::error::SaddleError;
@@ -132,18 +138,64 @@ impl SamdSession {
         };
         let k_target = d * t / 2.0;
         let k = dot(self.v.view(), self.v.view()) / 2.0;
-        if k > 1e-12 {
-            let edttau = (-dt / self.config.tau).exp();
-            let edttau2 = (-dt / (2.0 * self.config.tau)).exp();
-            let r2 = dot(r, r);
-            let alpha2 = edttau
-                + k * (1.0 - edttau) * r2 / (d * k)
-                + 2.0 * edttau2 * (k_target * (1.0 - edttau) / (d * k)).sqrt() * r[0];
-            if alpha2 > 0.0 && alpha2.is_finite() {
-                let s = alpha2.sqrt();
-                self.v.mapv_inplace(|vi| vi * s);
-            }
+        if let Some(s) = bdp_scale(k, k_target, d, dt, self.config.tau, r) {
+            self.v.mapv_inplace(|vi| vi * s);
         }
+        self.i += 1;
+        let kinetic = dot(self.v.view(), self.v.view()) / 2.0;
+        Ok(SamdReport {
+            energy,
+            kinetic,
+            temperature: t,
+        })
+    }
+
+    /// Riemannian BDP step: tangent Verlet, retract, transport, rescale.
+    pub fn step_on<M: Manifold>(
+        &mut self,
+        man: &M,
+        surface: &impl PointSurface,
+        r: ArrayView1<f64>,
+    ) -> Result<SamdReport, SaddleError> {
+        if r.len() != self.x.len() {
+            return Err(SaddleError::Shape(
+                "SAMD Gaussian draw must match the 3N frame".into(),
+            ));
+        }
+        if man.required_dim(self.x.len()).is_err() {
+            return Err(SaddleError::Shape(
+                "SAMD packing is not a legal manifold dim".into(),
+            ));
+        }
+        let d = self.x.len() as f64;
+        let dt = self.config.dt;
+        self.v = man.project(&self.x, &self.v);
+        let old_g = man.egrad2rgrad(&self.x, &self.g);
+        let y = retract_samd(man, &self.x, &self.v, &old_g, dt);
+        self.v = man.transport(&self.x, &y, &self.v);
+        let old_g_y = man.transport(&self.x, &y, &old_g);
+        let (energy, g_amb) = surface.eval(y.view())?;
+        if !g_amb.iter().all(|a| a.is_finite()) {
+            return Err(SaddleError::NonFinite("samd gradient"));
+        }
+        let g = man.egrad2rgrad(&y, &g_amb);
+        axpy(-0.5 * dt, g.view(), &mut self.v);
+        axpy(-0.5 * dt, old_g_y.view(), &mut self.v);
+        self.x = y;
+        self.g = g_amb;
+        self.energy = energy;
+
+        let t = if self.config.exponential {
+            t_exp(self.i, self.config.t0, self.config.tf, self.config.ngen)
+        } else {
+            t_linear(self.i, self.config.t0, self.config.tf, self.config.ngen)
+        };
+        let k_target = d * t / 2.0;
+        let k = dot(self.v.view(), self.v.view()) / 2.0;
+        if let Some(s) = bdp_scale(k, k_target, d, dt, self.config.tau, r) {
+            self.v.mapv_inplace(|vi| vi * s);
+        }
+        self.v = man.project(&self.x, &self.v);
         self.i += 1;
         let kinetic = dot(self.v.view(), self.v.view()) / 2.0;
         Ok(SamdReport {
@@ -173,17 +225,66 @@ impl SamdSession {
     }
 }
 
+/// Sella `samd.py` kinetic rescale. `None` leaves the velocity as-is.
+fn bdp_scale(k: f64, k_target: f64, d: f64, dt: f64, tau: f64, r: ArrayView1<f64>) -> Option<f64> {
+    if k <= 1e-12 {
+        return None;
+    }
+    let edttau = (-dt / tau).exp();
+    let edttau2 = (-dt / (2.0 * tau)).exp();
+    let r2 = dot(r, r);
+    let alpha2 = edttau
+        + k * (1.0 - edttau) * r2 / (d * k)
+        + 2.0 * edttau2 * (k_target * (1.0 - edttau) / (d * k)).sqrt() * r[0];
+    if alpha2 > 0.0 && alpha2.is_finite() {
+        Some(alpha2.sqrt())
+    } else {
+        None
+    }
+}
+
+/// Ambient Verlet increment `dt v - 0.5 dt^2 g`.
+pub fn verlet_increment(v: &Array1<f64>, g: &Array1<f64>, dt: f64) -> Array1<f64> {
+    let mut dx = Array1::zeros(v.len());
+    axpy(dt, v.view(), &mut dx);
+    axpy(-0.5 * dt * dt, g.view(), &mut dx);
+    dx
+}
+
 /// Project a SAMD increment onto a manifold (Sella waist: stay on set).
-pub fn project_velocity<M: rgmin::Manifold>(m: &M, x: &Array1<f64>, v: &Array1<f64>) -> Array1<f64> {
+pub fn project_velocity<M: Manifold>(m: &M, x: &Array1<f64>, v: &Array1<f64>) -> Array1<f64> {
     m.project(x, v)
+}
+
+/// Verlet increment, project, retract. The arrival point stays on the set.
+pub fn retract_samd<M: Manifold>(
+    man: &M,
+    x: &Array1<f64>,
+    v: &Array1<f64>,
+    g: &Array1<f64>,
+    dt: f64,
+) -> Array1<f64> {
+    let dx = verlet_increment(v, g, dt);
+    let s = man.project(x, &dx);
+    man.retract(x, &s)
+}
+
+/// Vector transport of a SAMD velocity from `x_from` to `x_to`.
+pub fn transport_velocity<M: Manifold>(
+    man: &M,
+    x_from: &Array1<f64>,
+    x_to: &Array1<f64>,
+    v: &Array1<f64>,
+) -> Array1<f64> {
+    man.transport(x_from, x_to, v)
 }
 
 #[cfg(test)]
 mod tests {
-    use rgmin::vecops::nrm2;
     use super::*;
     use crate::SaddleError;
     use ndarray::{Array1, ArrayView1};
+    use rgmin::vecops::nrm2;
     use rgmin::{Manifold, ManifoldKind};
 
     struct Well;
@@ -221,5 +322,14 @@ mod tests {
         let vp = project_velocity(&ManifoldKind::RigidQuotient, &x, &v);
         let vh = ManifoldKind::RigidQuotient.project(&x, &vp);
         assert!(nrm2((&vp - &vh).view()) < 1e-12);
+    }
+
+    #[test]
+    fn retract_samd_stays_on_the_sphere() {
+        let x = Array1::from(vec![0.0, 1.0, 0.0]);
+        let v = Array1::from(vec![0.3, 0.0, -0.1]);
+        let g = Array1::from(vec![0.4, -0.2, 0.3]);
+        let y = retract_samd(&rgmin::manifold::Sphere, &x, &v, &g, 0.1);
+        assert!((nrm2(y.view()) - 1.0).abs() < 1e-12);
     }
 }
