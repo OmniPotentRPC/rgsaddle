@@ -6,6 +6,15 @@ Changelog
 Unreleased
 ~~~~~~~~~~
 
+- ``exact_eigh`` / ``rayleigh_ritz`` / ``expand`` /
+  ``rayleigh_ritz_iter`` are Sella ``eigensolvers.py``.
+  ``eig=true`` walks a Ritz subspace (``jd0`` default).
+  Reductions go through ``rgmin.vecops`` so ``par`` applies.
+  A Ritz vector lives on the sphere: ``project`` /
+  ``retract`` / ``transport`` keep it on the set.
+  ``EigenDevice.DLPK`` is the rgmin ``lowest_mode`` waist,
+  not a second GPU stack.
+
 - ``SamdSession`` is Sella ``samd.py`` BDP: Euclidean ``step``
   on the C wire (``rgsaddle_samd_*``), and ``step_on`` /
   ``retract_samd`` / ``transport_velocity`` so a retracted
