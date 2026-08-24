@@ -33,6 +33,8 @@ pub struct SellaMinConfig {
     pub force_tol: f64,
     /// eOn / gpr_optim `ConvergenceForceNorm`.
     pub force_gate: crate::ForceGate,
+    /// Internals increment clip. Cartesian sessions ignore this.
+    pub restricted: crate::RestrictedKind,
 }
 
 impl SellaMinConfig {
@@ -59,6 +61,7 @@ impl Default for SellaMinConfig {
             delta_min: sch.delta_min,
             force_tol: 1e-3,
             force_gate: crate::ForceGate::MaxForceOnAtom,
+            restricted: crate::RestrictedKind::TrustRegion,
         }
     }
 }
@@ -278,6 +281,10 @@ impl SellaMinSession {
         let h = pes.hessian().hessian();
         let (evals, evecs) = crate::exact_eigh(h.view())?;
         let mut s = qn_restricted(&evals, &evecs, &g_int, 0, self.delta);
+        if self.config.restricted == crate::RestrictedKind::MaxInternalStep {
+            let w = crate::restricted::weights_for_equalities(pes.chart());
+            s = crate::mis_clip(&s, &w, self.delta);
+        }
         let sn = vnrm2(&Vector::from_host(s.clone()));
         if sn > self.delta && sn > 0.0 {
             s.mapv_inplace(|v| v * (self.delta / sn));
@@ -487,6 +494,31 @@ mod tests {
         let report = sess.run(&Well, 40).unwrap();
         assert!(report.at_minimum, "force {}", report.max_force);
         assert!((sess.position()[0].abs() - 1.0).abs() < 0.35);
+    }
+
+    #[test]
+    fn internals_mis_clip_stays_finite() {
+        use crate::internal::{CartAxis, Translation};
+        let mut x = Array1::zeros(6);
+        x[0] = 0.2;
+        let mut chart = Constraints::new(2).unwrap();
+        chart
+            .fix_translation(Translation::all(2, CartAxis::X).unwrap(), x.view(), Some(0.0))
+            .unwrap();
+        let mut sess = SellaMinSession::on_internal(
+            SellaMinConfig {
+                delta: 0.05,
+                restricted: crate::RestrictedKind::MaxInternalStep,
+                ..SellaMinConfig::default()
+            },
+            x,
+            Array1::from(vec![1.0, 1.0]),
+            chart,
+        )
+        .unwrap();
+        let report = sess.step(&Well).unwrap();
+        assert!(report.energy.is_finite());
+        assert!(sess.position().iter().all(|v| v.is_finite()));
     }
 
     #[test]

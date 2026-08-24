@@ -101,7 +101,9 @@ pub use pes_internal::{
 };
 pub use projection::ProjectionKind;
 pub use qn::{get_stepper, retract_qn, QuasiNewton, StepperKind};
-pub use restricted::{mis_clip, InternalWeights, MaxInternalStep, RestrictedKind};
+pub use restricted::{
+    mis_clip, weights_for_equalities, InternalWeights, MaxInternalStep, RestrictedKind,
+};
 pub use rfo::{RationalFunctionOptimization, rfo_stepper};
 pub use samd::{SamdConfig, SamdReport, SamdSession};
 pub use sella_min::{SellaMinConfig, SellaMinReport, SellaMinSession};

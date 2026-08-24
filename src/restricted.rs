@@ -12,7 +12,7 @@ use rgmin::Manifold;
 use rgmin::qn_get_s;
 
 use crate::SaddleError;
-use crate::constraints::InternalCounts;
+use crate::constraints::{Constraints, Equality, InternalCounts};
 
 /// Named Sella restricted step this crate dests on an internals chart.
 ///
@@ -178,6 +178,27 @@ pub fn pack_weights(counts: InternalCounts, w: InternalWeights) -> Array1<f64> {
     out
 }
 
+/// Per-equality weights in chart order (not Sella count packing).
+pub fn weights_for_equalities(chart: &Constraints) -> Array1<f64> {
+    weights_for_equalities_with(chart, InternalWeights::default())
+}
+
+/// [`weights_for_equalities`] with host weights.
+pub fn weights_for_equalities_with(chart: &Constraints, w: InternalWeights) -> Array1<f64> {
+    let eqs = chart.equalities();
+    let mut out = Array1::zeros(eqs.len());
+    for (i, eq) in eqs.iter().enumerate() {
+        out[i] = match eq {
+            Equality::Translation { .. } | Equality::Rotation { .. } => w.translation,
+            Equality::Bond { .. } => w.bond,
+            Equality::Angle { .. } => w.angle,
+            Equality::Dihedral { .. } => w.dihedral,
+            Equality::Displacement { .. } => w.other,
+        };
+    }
+    out
+}
+
 /// `max_i |s_i w_i|`.
 pub fn cons_max(s: &Array1<f64>, w: &Array1<f64>) -> f64 {
     let n = s.len().min(w.len());
@@ -211,6 +232,28 @@ mod tests {
 
     fn water() -> Array1<f64> {
         pack_cart(&[[0.0, 0.0, 0.0], [0.96, 0.0, 0.0], [-0.24, 0.93, 0.0]])
+    }
+
+    #[test]
+    fn chart_weights_follow_equality_order() {
+        let x = water();
+        let mut chart = Constraints::new(3).unwrap();
+        chart.fix_com(x.view()).unwrap();
+        chart.fix_bond(0, 1, x.view(), None).unwrap();
+        let w = weights_for_equalities(&chart);
+        assert_eq!(w.len(), 4);
+        assert!((w[0] - 1.0).abs() < 1e-14);
+        assert!((w[3] - 1.0).abs() < 1e-14);
+        let w2 = weights_for_equalities_with(
+            &chart,
+            InternalWeights {
+                translation: 2.0,
+                bond: 3.0,
+                ..InternalWeights::default()
+            },
+        );
+        assert!((w2[0] - 2.0).abs() < 1e-14);
+        assert!((w2[3] - 3.0).abs() < 1e-14);
     }
 
     #[test]

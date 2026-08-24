@@ -38,6 +38,8 @@ pub struct SellaSaddleConfig {
     pub eigen_device: crate::EigenDevice,
     /// Sella `rayleigh_ritz(..., method=)`.
     pub expand: crate::ExpandKind,
+    /// Internals increment clip. Cartesian sessions ignore this.
+    pub restricted: crate::RestrictedKind,
 }
 
 impl SellaSaddleConfig {
@@ -70,6 +72,7 @@ impl Default for SellaSaddleConfig {
             gamma: 0.1,
             eigen_device: crate::EigenDevice::Host,
             expand: crate::ExpandKind::Jd0,
+            restricted: crate::RestrictedKind::TrustRegion,
         }
     }
 }
@@ -359,6 +362,10 @@ impl SellaSaddleSession {
             self.config.order.max(1),
             self.delta,
         );
+        if self.config.restricted == crate::RestrictedKind::MaxInternalStep {
+            let w = crate::restricted::weights_for_equalities(pes.chart());
+            s = crate::mis_clip(&s, &w, self.delta);
+        }
         let sn = vnrm2(&Vector::from_host(s.clone()));
         if sn > self.delta && sn > 0.0 {
             s.mapv_inplace(|v| v * (self.delta / sn));
