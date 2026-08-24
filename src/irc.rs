@@ -3,16 +3,18 @@
 //!
 //! Inner geometry is rgmin `IrcTrust` (Sella IRCTrustRegion /
 //! Gonzalez--Schlegel MW sphere) on `ManifoldKind::MwRigid`. The
-//! increment is rgmin `qn_irc_restricted` (Sella QuasiNewtonIRC)
-//! with a persistent MW BFGS Hessian. Ambient algebra goes through
+//! default increment is rgmin `qn_irc_restricted` (Sella
+//! QuasiNewtonIRC). [`IrcKind::Morokuma`] is the
+//! Ishida--Morokuma--Komornicki predictor-corrector from
+//! `gpr_optim` `IRCDriver`. Ambient algebra goes through
 //! `rgmin::vecops`. The host owns the loop. `run` is a convenience
 //! over `step`.
 
 use ndarray::{Array1, ArrayView1};
 use rgmin::vecops::{axpy, dot, nrm2, nrminf, Vector};
 use rgmin::{
-    mw_pair, qn_irc_restricted, sqrt_masses_3n, BfgsModel, Control, EigensolverKind, IrcTrust,
-    ManifoldKind, Method, Solver,
+    mw_pair, qn_irc_restricted, sqrt_masses_3n, to_mw, BfgsModel, Control, EigensolverKind,
+    IrcTrust, ManifoldKind, Method, Solver,
 };
 
 use crate::error::SaddleError;
@@ -25,10 +27,21 @@ pub enum IrcDirection {
     Reverse,
 }
 
+/// How an outer IRC increment is formed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum IrcKind {
+    /// Gonzalez--Schlegel / Sella MW sphere. Default.
+    #[default]
+    Gs2,
+    /// Ishida--Morokuma--Komornicki predictor-corrector
+    /// (`gpr_optim` `IRCDriver` Morokuma). Not GS2.
+    Morokuma,
+}
+
 /// Outer IRC controls.
 #[derive(Clone, Debug)]
 pub struct IrcConfig {
-    /// Mass-weighted sphere radius (Sella `dx`).
+    /// Mass-weighted sphere radius (Sella `dx`) and Morokuma `h`.
     pub dx: f64,
     pub force_tol: f64,
     pub max_move: f64,
@@ -40,6 +53,8 @@ pub struct IrcConfig {
     pub krylov_dim: usize,
     /// Closed lowest-mode backend. Unlinked kinds fail closed.
     pub eigen_kind: EigensolverKind,
+    /// GS2 is the default; Morokuma is the ORCA / IRCDriver arm.
+    pub kind: IrcKind,
 }
 
 impl Default for IrcConfig {
@@ -53,6 +68,7 @@ impl Default for IrcConfig {
             dr: 1e-3,
             krylov_dim: 12,
             eigen_kind: EigensolverKind::Lanczos,
+            kind: IrcKind::Gs2,
         }
     }
 }
@@ -238,9 +254,16 @@ impl IrcSession {
         qn_irc_restricted(&self.trust(), &evals, &evecs, g, allow_interior)
     }
 
-    /// One Sella `IRC.step`: optional kick, then inner GS2 on the
-    /// current MW sphere, then `d1 = 0` for the next outer sphere.
+    /// One outer IRC move. [`IrcKind::Gs2`] is Sella / GS2;
+    /// [`IrcKind::Morokuma`] is the IRCDriver predictor-corrector.
     pub fn step<S: PointSurface>(&mut self, surface: &S) -> Result<IrcReport, SaddleError> {
+        if self.config.kind == IrcKind::Morokuma {
+            return self.step_morokuma(surface);
+        }
+        self.step_gs2(surface)
+    }
+
+    fn step_gs2<S: PointSurface>(&mut self, surface: &S) -> Result<IrcReport, SaddleError> {
         let kicked = self.first;
         if self.first {
             axpy(1.0, self.d1.view(), &mut self.x);
@@ -347,6 +370,107 @@ impl IrcSession {
         })
     }
 
+    /// Ishida--Morokuma--Komornicki PC in mass-weighted Cartesians.
+    /// Matches `gpr_optim` `IRCDriver` `IRCMethod::Morokuma`:
+    /// `x_pred = x - h g/|g|`, then `x += -h g_avg/|g_avg|`.
+    fn step_morokuma<S: PointSurface>(
+        &mut self,
+        surface: &S,
+    ) -> Result<IrcReport, SaddleError> {
+        let kicked = self.first;
+        if self.first {
+            axpy(1.0, self.d1.view(), &mut self.x);
+            self.first = false;
+        }
+
+        let (energy0, g0) = surface.eval(self.x.view())?;
+        if !g0.iter().all(|v| v.is_finite()) {
+            return Err(SaddleError::NonFinite("irc gradient"));
+        }
+        let max_force0 = nrminf(g0.view());
+        if !kicked && max_force0 <= self.config.force_tol {
+            return Ok(IrcReport {
+                energy: energy0,
+                max_force: max_force0,
+                arc: self.arc,
+                inner_steps: 0,
+                at_minimum: true,
+            });
+        }
+
+        let sqrtm = sqrt_masses_3n(self.masses.as_slice().unwrap_or(&[]));
+        let g_mw = to_mw(&g0, &sqrtm, true);
+        let gn = nrm2(g_mw.view());
+        if gn <= 1e-16 {
+            return Ok(IrcReport {
+                energy: energy0,
+                max_force: max_force0,
+                arc: self.arc,
+                inner_steps: 0,
+                at_minimum: !kicked,
+            });
+        }
+
+        let h = self.config.dx;
+        let mut x_pred = self.x.clone();
+        for i in 0..x_pred.len().min(sqrtm.len()) {
+            x_pred[i] += (-h * g_mw[i] / gn) / sqrtm[i].max(1e-16);
+        }
+        let ev_pred = surface.eval(x_pred.view())?;
+        if !ev_pred.1.iter().all(|v| v.is_finite()) {
+            return Err(SaddleError::NonFinite("irc gradient"));
+        }
+        let g_pred_mw = to_mw(&ev_pred.1, &sqrtm, true);
+        let mut g_avg = g_mw;
+        axpy(1.0, g_pred_mw.view(), &mut g_avg);
+        g_avg.mapv_inplace(|v| 0.5 * v);
+        let ga = nrm2(g_avg.view());
+        if ga <= 1e-12 {
+            return Ok(IrcReport {
+                energy: energy0,
+                max_force: max_force0,
+                arc: self.arc,
+                inner_steps: 1,
+                at_minimum: !kicked,
+            });
+        }
+
+        let mut s = Array1::zeros(self.x.len());
+        let mut dx_mw_n2 = 0.0;
+        for i in 0..s.len().min(sqrtm.len()) {
+            let dmw = -h * g_avg[i] / ga;
+            dx_mw_n2 += dmw * dmw;
+            s[i] = dmw / sqrtm[i].max(1e-16);
+        }
+        if let Some(prev) = &self.last_outer {
+            if self.arc > 2.0 * h && dot(prev.view(), s.view()) < 0.0 {
+                return Ok(IrcReport {
+                    energy: energy0,
+                    max_force: max_force0,
+                    arc: self.arc,
+                    inner_steps: 1,
+                    at_minimum: true,
+                });
+            }
+        }
+        axpy(1.0, s.view(), &mut self.x);
+        let ev = surface.eval(self.x.view())?;
+        if !ev.1.iter().all(|v| v.is_finite()) {
+            return Err(SaddleError::NonFinite("irc gradient"));
+        }
+        let max_force = nrminf(ev.1.view());
+        self.last_outer = Some(s);
+        self.d1.fill(0.0);
+        self.arc += dx_mw_n2.sqrt();
+        Ok(IrcReport {
+            energy: ev.0,
+            max_force,
+            arc: self.arc,
+            inner_steps: 2,
+            at_minimum: !kicked && max_force <= self.config.force_tol,
+        })
+    }
+
     /// Convenience loop over [`IrcSession::step`]; nothing more.
     pub fn run<S: PointSurface>(
         &mut self,
@@ -420,6 +544,45 @@ mod tests {
     fn mw_radius(x: &Array1<f64>, center: &Array1<f64>, masses: &Array1<f64>) -> f64 {
         let s = x - center;
         IrcTrust::from_atom_masses(Array1::zeros(x.len()), masses.as_slice().unwrap(), 0.0).cons(&s)
+    }
+
+    #[test]
+    fn default_kind_is_gs2() {
+        assert_eq!(IrcConfig::default().kind, IrcKind::Gs2);
+    }
+
+    #[test]
+    fn morokuma_corrector_has_mw_length_dx() {
+        let dx = 0.15;
+        let masses = Array1::from(vec![1.0, 1.0]);
+        let saddle = Array1::zeros(6);
+        let mut irc = IrcSession::new(
+            IrcConfig {
+                dx,
+                force_tol: 1e-12,
+                kind: IrcKind::Morokuma,
+                ..IrcConfig::default()
+            },
+            saddle.clone(),
+            masses.clone(),
+            {
+                let mut mode = Array1::zeros(6);
+                mode[0] = 1.0;
+                mode
+            },
+            IrcDirection::Forward,
+        )
+        .unwrap();
+        let x0 = irc.position().to_owned();
+        let _ = irc.step(&Well).unwrap();
+        let kicked = irc.position().to_owned();
+        let _ = irc.step(&Well).unwrap();
+        let x2 = irc.position().to_owned();
+        let r = mw_radius(&x2, &kicked, &masses);
+        assert!(
+            (r - dx).abs() < 1e-8,
+            "Morokuma ||dx||_M={r} h={dx} from {kicked:?} to {x2:?} kick-from {x0:?}"
+        );
     }
 
     #[test]

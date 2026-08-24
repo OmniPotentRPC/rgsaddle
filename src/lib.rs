@@ -49,7 +49,7 @@ pub mod tangent;
 pub use band::{BandConfig, BandReport, BandSession, BandStatus, BandSurface};
 pub use error::SaddleError;
 pub use mic::{wrap_difference, Cell};
-pub use irc::{IrcConfig, IrcDirection, IrcReport, IrcSession};
+pub use irc::{IrcConfig, IrcDirection, IrcKind, IrcReport, IrcSession};
 pub use minmode::{
     MinModeConfig, MinModeKind, MinModeReport, MinModeSession, MinModeStatus, PointSurface,
 };

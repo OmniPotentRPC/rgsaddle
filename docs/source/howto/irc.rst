@@ -22,6 +22,11 @@ pairs and re-seed.
 Directions
 ~~~~~~~~~~
 
+``IrcKind::Gs2`` (default) is Gonzalez--Schlegel / Sella.
+``IrcKind::Morokuma`` is the Ishida--Morokuma--Komornicki
+predictor-corrector used by ``gpr_optim`` ``IRCDriver`` (fixed
+mass-weighted step ``h = dx``).
+
 ``IrcDirection::Forward`` and ``Reverse`` are the sign of the kick.
 ``set_direction`` restores the saddle, rebuilds ``d1``, and forgets
 solver history.

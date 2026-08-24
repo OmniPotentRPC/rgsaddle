@@ -7,7 +7,7 @@
 
 use ndarray::{Array1, ArrayView1};
 use rgmin::IrcTrust;
-use rgsaddle::{IrcConfig, IrcDirection, IrcSession, PointSurface, SaddleError};
+use rgsaddle::{IrcConfig, IrcDirection, IrcKind, IrcSession, PointSurface, SaddleError};
 
 struct DoubleWell;
 
@@ -72,6 +72,40 @@ fn kick_mode_comes_from_matrix_free_lanczos_not_a_full_heev() {
     let _ = session.step(&DoubleWell).unwrap();
     let x0 = session.position()[0];
     assert!(x0.abs() > 1e-8, "Lanczos kick must leave the saddle");
+}
+
+#[test]
+fn morokuma_run_reaches_a_well() {
+    let saddle = Array1::zeros(6);
+    let masses = Array1::from(vec![1.0, 1.0]);
+    let seed = Array1::from(vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+    let mut session = IrcSession::from_surface(
+        IrcConfig {
+            dx: 0.15,
+            force_tol: 0.05,
+            kind: IrcKind::Morokuma,
+            ..IrcConfig::default()
+        },
+        saddle,
+        masses,
+        seed,
+        IrcDirection::Forward,
+        &DoubleWell,
+    )
+    .unwrap();
+    let report = session.run(&DoubleWell, 40).unwrap();
+    assert!(
+        report.at_minimum,
+        "force {} arc {}",
+        report.max_force,
+        report.arc
+    );
+    assert!(
+        (session.position()[0].abs() - 1.0).abs() < 0.25,
+        "x={}",
+        session.position()[0]
+    );
+    assert!(report.energy < 0.1, "energy {}", report.energy);
 }
 
 #[test]
