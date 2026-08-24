@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 96 96" fill="none" role="img" aria-labelledby="sadIconTitle">
+  <title id="sadIconTitle">rgsaddle</title>
+  <desc>A col with both downhill branches and a climbing image.</desc>
+  <rect x="0" y="0" width="96" height="96" rx="22" fill="#1E1B4B"/>
+  <rect x="7" y="7" width="82" height="82" rx="16" fill="none" stroke="#312E81" stroke-width="1.6"/>
+  <path d="M16 78 C28 78 34 30 48 30 C62 30 68 78 80 78" fill="none" stroke="#A5B4FC" stroke-width="2.6" stroke-linecap="round"/>
+  <path d="M16 78 C28 68 36 52 48 44 C60 52 68 68 80 78" fill="none" stroke="#F59E0B" stroke-width="2" stroke-linecap="round"/>
+  <circle cx="26" cy="72" r="3.1" fill="#C7D2FE"/>
+  <circle cx="48" cy="30" r="4.2" fill="#FBBF24" stroke="#F59E0B" stroke-width="1.1"/>
+  <circle cx="70" cy="72" r="3.1" fill="#C7D2FE"/>
+  <circle cx="38" cy="42" r="2.1" fill="#EEF2FF"/>
+  <circle cx="58" cy="42" r="2.1" fill="#EEF2FF"/>
+</svg>

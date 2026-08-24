@@ -1,0 +1,23 @@
+[workspace]
+name = "rgsaddle"
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[environments]
+docs = { features = ["docs"] }
+
+[feature.docs]
+platforms = ["linux-64"]
+
+[feature.docs.dependencies]
+sphinx = ">=8.0,<8.1"
+emacs = ">=30.2,<31"
+pandoc = ">=3.1,<4"
+
+[feature.docs.pypi-dependencies]
+sphinx-sitemap = ">=2.9.0, <3"
+shibuya = ">=2026.1.9, <2027"
+myst-parser = ">=4.0, <5"
+sphinxcontrib-bibtex = ">=2.6, <3"
+sphinxcontrib-rust = ">=1.0.0, <2"
+sphinx-rustdoc-postprocess = ">=0.1.0, <0.2"

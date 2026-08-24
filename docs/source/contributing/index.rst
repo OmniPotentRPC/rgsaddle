@@ -1,0 +1,17 @@
+
+
+Contributing
+------------
+
+Never compile on a laptop. rsync the checkout to the remote
+builder and run ``cargo test`` there.
+
+Narrative docs live in ``docs/orgmode/`` (Diataxis: one tutorial,
+howtos, explanation, reference). Export to RST with
+``emacs --script docs/export.el`` from ``docs/``. Sphinx (Shibuya)
+reads ``docs/source/``. Logos live in ``branding/logo/`` and are
+copied into ``docs/source/_static/``.
+
+The bibliography is ``docs/source/references.bib`` via
+``sphinxcontrib-bibtex``. Rust API pages come from
+``sphinxcontrib-rust`` when the docs environment is built.

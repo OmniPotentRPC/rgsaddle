@@ -1,0 +1,40 @@
+/* Homepage hero: full logo with wordmark; swap light/dark via Shibuya. */
+
+.rgsaddle-hero {
+  text-align: center;
+  margin: 0.5rem 0 1.25rem;
+}
+
+.rgsaddle-hero-logo {
+  display: none;
+  margin: 0 auto;
+  max-width: min(420px, 80vw);
+  height: auto;
+}
+
+html.light .rgsaddle-hero-logo--light,
+html:not(.dark) .rgsaddle-hero-logo--light {
+  display: block;
+}
+
+html.dark .rgsaddle-hero-logo--light {
+  display: none;
+}
+
+html.dark .rgsaddle-hero-logo--dark {
+  display: block;
+}
+
+html.light .rgsaddle-hero-logo--dark,
+html:not(.dark) .rgsaddle-hero-logo--dark {
+  display: none;
+}
+
+@media (prefers-color-scheme: dark) {
+  html:not(.light):not(.dark) .rgsaddle-hero-logo--light {
+    display: none;
+  }
+  html:not(.light):not(.dark) .rgsaddle-hero-logo--dark {
+    display: block;
+  }
+}

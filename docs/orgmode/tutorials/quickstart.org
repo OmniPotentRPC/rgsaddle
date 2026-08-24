@@ -1,0 +1,78 @@
+#+TITLE: Roll down from a first-order saddle
+#+OPTIONS: toc:nil todo:nil num:nil author:nil title:nil
+#+STARTUP: content
+
+* Roll down from a first-order saddle
+
+This is the one tutorial. A two-atom double well has a saddle at
+the origin and minima at \(x = \pm 1\). ~IrcSession~ kicks along
+the imaginary mode, then projects each inner step onto the
+mass-weighted sphere from [[https://github.com/OmniPotentRPC/rgmin][rgmin]] (~IrcTrust~). Forward and
+reverse leave the col in opposite directions.
+
+** What you will need
+
+A checkout of ~rgsaddle~ that can see ~rgmin~. Build on the
+remote builder, not a laptop.
+
+** The surface
+
+#+begin_src rust
+use ndarray::{Array1, ArrayView1};
+use rgsaddle::{PointSurface, SaddleError};
+
+struct DoubleWell;
+
+impl PointSurface for DoubleWell {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        let t = x[0];
+        let energy = (t * t - 1.0) * (t * t - 1.0);
+        let mut g = Array1::zeros(x.len());
+        g[0] = 4.0 * t * (t * t - 1.0);
+        Ok((energy, g))
+    }
+}
+#+end_src
+
+** Both branches
+
+#+begin_src rust
+use ndarray::Array1;
+use rgsaddle::{IrcConfig, IrcDirection, IrcSession};
+
+let saddle = Array1::zeros(6);
+let masses = Array1::from(vec![1.0, 1.0]);
+let seed = Array1::from(vec![1.0, 0.1, 0.0, 0.0, 0.0, 0.0]);
+let mut session = IrcSession::from_surface(
+    IrcConfig { dx: 0.2, ..IrcConfig::default() },
+    saddle,
+    masses,
+    seed,
+    IrcDirection::Forward,
+    &DoubleWell,
+)
+.unwrap();
+let _fwd = session.step(&DoubleWell).unwrap();
+let x_fwd = session.position()[0];
+session.set_direction(IrcDirection::Reverse);
+let _rev = session.step(&DoubleWell).unwrap();
+let x_rev = session.position()[0];
+assert!(x_fwd * x_rev < 0.0);
+#+end_src
+
+~from_surface~ estimates the imaginary mode with matrix-free
+Lanczos (finite-difference ~H v~). It does not form a dense
+Hessian and it does not call ELPA.
+
+** What just happened
+
+1. Lanczos took a handful of Hessian actions at the origin and
+   returned the downhill axis.
+2. The first ~step~ kicked along that mode onto the MW sphere of
+   radius ~dx~.
+3. ~set_direction(Reverse)~ restored the saddle and flipped the
+   kick. The two accepted points sit on opposite sides of the col.
+
+The host owns the loop after that: keep calling ~step~ until
+~at_minimum~, then flip. ~reset~ drops QN history at a
+model-update boundary, the same contract as ~BandSession~.

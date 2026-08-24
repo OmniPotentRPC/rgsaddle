@@ -1,0 +1,15 @@
+#+TITLE: Bibliography
+#+OPTIONS: toc:nil todo:nil num:nil author:nil title:nil
+#+STARTUP: content
+
+* Bibliography
+
+Validated DOIs only. The Sphinx bibliography is
+~docs/source/references.bib~, consumed by ~sphinxcontrib-bibtex~
+(biblatex .bib, unsrt). New citations enter through ookcite
+(~validate_doi~, then the collection), never as invented keys.
+
+#+begin_export rst
+.. bibliography::
+   :all:
+#+end_export

@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="560" height="112" viewBox="0 0 560 112" fill="none" role="img" aria-labelledby="sadLightTitle">
+  <title id="sadLightTitle">rgsaddle</title>
+  <desc>Saddle mechanics over rgmin steppers. Col, band, and both downhill branches.</desc>
+  <rect x="8" y="16" width="80" height="80" rx="18" fill="#1E1B4B"/>
+  <rect x="15" y="23" width="66" height="66" rx="14" fill="none" stroke="#312E81" stroke-width="1.4"/>
+  <path d="M22 78 C30 78 34 42 48 42 C62 42 66 78 74 78" fill="none" stroke="#A5B4FC" stroke-width="2.2" stroke-linecap="round"/>
+  <path d="M22 78 C30 70 36 58 48 52 C60 58 66 70 74 78" fill="none" stroke="#F59E0B" stroke-width="1.7" stroke-linecap="round"/>
+  <circle cx="30" cy="72" r="2.4" fill="#C7D2FE"/>
+  <circle cx="48" cy="42" r="3.1" fill="#FBBF24" stroke="#F59E0B" stroke-width="0.9"/>
+  <circle cx="66" cy="72" r="2.4" fill="#C7D2FE"/>
+  <circle cx="40" cy="50" r="1.6" fill="#EEF2FF"/>
+  <circle cx="56" cy="50" r="1.6" fill="#EEF2FF"/>
+  <text x="108" y="52" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
+        font-size="32" font-weight="750" letter-spacing="-1.0" fill="#1E1B4B">rgsaddle</text>
+  <text x="108" y="74" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
+        font-size="12" font-weight="600" letter-spacing="0.07em" fill="#4F46E5">SADDLE MECHANICS</text>
+  <text x="108" y="90" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
+        font-size="12" font-weight="600" letter-spacing="0.07em" fill="#4F46E5">OVER RGMIN STEPPERS</text>
+</svg>

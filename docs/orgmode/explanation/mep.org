@@ -1,0 +1,34 @@
+#+TITLE: Why IRC is a moving sphere on MwRigid
+#+OPTIONS: toc:nil todo:nil num:nil author:nil title:nil
+#+STARTUP: content
+
+* Why IRC is a moving sphere on MwRigid
+
+The intrinsic reaction coordinate is Fukui's ODE on
+mass-weighted configuration space
+([[https://doi.org/10.1021/j100717a029][10.1021/j100717a029]],
+[[https://doi.org/10.1021/ar00072a001][10.1021/ar00072a001]]).
+In \(x_{\mathrm{mw}} = \sqrt{m}\, x\),
+
+\[
+\frac{\mathrm{d}x_{\mathrm{mw}}}{\mathrm{d}s}
+= -\frac{g_{\mathrm{mw}}}{\|g_{\mathrm{mw}}\|}.
+\]
+
+That space is rgmin ~MwRigid~ (Page--McIver / Eckart,
+[[https://doi.org/10.1063/1.454172][10.1063/1.454172]]).
+
+Gonzalez--Schlegel / Sella discretize the ODE as implicit Euler:
+minimize energy on the sphere of radius ~dx~ about the last
+accepted point
+([[https://doi.org/10.1063/1.456010][10.1063/1.456010]],
+[[https://doi.org/10.1021/acs.jctc.2c00395][10.1021/acs.jctc.2c00395]]).
+ORCA's production IRC is Morokuma predictor-corrector on the
+same manifold
+([[https://doi.org/10.1063/1.434152][10.1063/1.434152]]),
+not GS2.
+
+The kick needs one extremal Hessian pair. That is
+~lowest_eigenpair~ / Lanczos on ~H v~, not a full ELPA spectrum.
+ELPA and SLATE pay when a dense ~H~ already exists and
+~n >= 512~.
