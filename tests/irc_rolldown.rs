@@ -75,6 +75,37 @@ fn kick_mode_comes_from_matrix_free_lanczos_not_a_full_heev() {
 }
 
 #[test]
+fn morokuma_forward_and_reverse_leave_opposite_ways() {
+    let saddle = Array1::zeros(6);
+    let masses = Array1::from(vec![1.0, 1.0]);
+    let mut mode = Array1::zeros(6);
+    mode[0] = 1.0;
+    let cfg = IrcConfig {
+        dx: 0.2,
+        force_tol: 1e-3,
+        kind: IrcKind::Morokuma,
+        ..IrcConfig::default()
+    };
+    let mut session = IrcSession::new(
+        cfg,
+        saddle,
+        masses,
+        mode,
+        IrcDirection::Forward,
+    )
+    .unwrap();
+    let _ = session.step(&DoubleWell).unwrap();
+    let x_fwd = session.position()[0];
+    session.set_direction(IrcDirection::Reverse);
+    let _ = session.step(&DoubleWell).unwrap();
+    let x_rev = session.position()[0];
+    assert!(
+        x_fwd * x_rev < 0.0,
+        "Morokuma forward {x_fwd} and reverse {x_rev} must have opposite signs"
+    );
+}
+
+#[test]
 fn morokuma_run_reaches_a_well() {
     let saddle = Array1::zeros(6);
     let masses = Array1::from(vec![1.0, 1.0]);
