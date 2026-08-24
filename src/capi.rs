@@ -13,13 +13,13 @@ use rgmin::{FireKind, Manifold, Method};
 
 use crate::band::{BandConfig, BandSession, BandStatus, BandSurface, CiConfig};
 use crate::constraints::Constraints;
+use crate::error::SaddleError;
 use crate::irc::{IrcConfig, IrcDirection, IrcKind, IrcSession};
 use crate::mic::Cell;
-use crate::error::SaddleError;
 use crate::minmode::{MinModeConfig, MinModeKind, MinModeSession, MinModeStatus, PointSurface};
+use crate::projection::ProjectionKind;
 use crate::sella_min::{SellaMinConfig, SellaMinSession};
 use crate::sella_saddle::{SellaSaddleConfig, SellaSaddleSession};
-use crate::projection::ProjectionKind;
 use crate::spring::SpringKind;
 use crate::tangent::TangentKind;
 
@@ -738,12 +738,7 @@ pub unsafe extern "C" fn rgsaddle_irc_create_from_surface(
     surface: Option<RgsaddleSurfaceFn>,
     user: *mut c_void,
 ) -> *mut RgsaddleIrc {
-    if config.is_null()
-        || saddle.is_null()
-        || masses.is_null()
-        || seed.is_null()
-        || n_atoms < 1
-    {
+    if config.is_null() || saddle.is_null() || masses.is_null() || seed.is_null() || n_atoms < 1 {
         return std::ptr::null_mut();
     }
     let Some(f) = surface else {
@@ -778,11 +773,7 @@ pub unsafe extern "C" fn rgsaddle_irc_create_from_surface(
     } else {
         IrcDirection::Forward
     };
-    let cs = CSurface {
-        f,
-        user,
-        n_atoms,
-    };
+    let cs = CSurface { f, user, n_atoms };
     match IrcSession::from_surface(irc_cfg, x, m, sd, dir, &cs) {
         Ok(session) => Box::into_raw(Box::new(RgsaddleIrc { session, n_atoms })),
         Err(_) => std::ptr::null_mut(),
@@ -833,10 +824,7 @@ pub unsafe extern "C" fn rgsaddle_irc_step(
 /// # Safety
 /// `out` holds 3N doubles.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rgsaddle_irc_position(
-    session: *const RgsaddleIrc,
-    out: *mut f64,
-) -> i32 {
+pub unsafe extern "C" fn rgsaddle_irc_position(session: *const RgsaddleIrc, out: *mut f64) -> i32 {
     if session.is_null() {
         return RGSADDLE_NULL_SESSION;
     }
@@ -898,10 +886,7 @@ mod irc_abi_tests {
 
     struct Well;
     impl PointSurface for Well {
-        fn eval(
-            &self,
-            x: ndarray::ArrayView1<f64>,
-        ) -> Result<(f64, Array1<f64>), SaddleError> {
+        fn eval(&self, x: ndarray::ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
             let t = x[0];
             let mut g = Array1::zeros(x.len());
             g[0] = 4.0 * t * (t * t - 1.0);
@@ -967,10 +952,14 @@ mod irc_abi_tests {
             curvature: 0.0,
             rotations: 0,
         };
-        let rc = unsafe { rgsaddle_irc_step(sess, Some(well_cb), std::ptr::null_mut(), &mut report) };
+        let rc =
+            unsafe { rgsaddle_irc_step(sess, Some(well_cb), std::ptr::null_mut(), &mut report) };
         assert_eq!(rc, RGSADDLE_OK);
         let mut out = [0.0; 6];
-        assert_eq!(unsafe { rgsaddle_irc_position(sess, out.as_mut_ptr()) }, RGSADDLE_OK);
+        assert_eq!(
+            unsafe { rgsaddle_irc_position(sess, out.as_mut_ptr()) },
+            RGSADDLE_OK
+        );
         assert!(out[0].abs() > 1e-8, "kick must leave the saddle");
         unsafe { rgsaddle_irc_free(sess) };
     }
@@ -1298,9 +1287,7 @@ pub unsafe extern "C" fn rgsaddle_sella_saddle_position(
 /// # Safety
 /// `session` must be a live pointer or NULL.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rgsaddle_sella_saddle_reset(
-    session: *mut RgsaddleSellaSaddle,
-) -> i32 {
+pub unsafe extern "C" fn rgsaddle_sella_saddle_reset(session: *mut RgsaddleSellaSaddle) -> i32 {
     if session.is_null() {
         return RGSADDLE_NULL_SESSION;
     }
@@ -1386,7 +1373,10 @@ pub unsafe extern "C" fn rgsaddle_constraints_fix_bond(
     } else {
         Some(unsafe { *target })
     };
-    match cons.cons.fix_bond([i as usize, j as usize], x.view(), target) {
+    match cons
+        .cons
+        .fix_bond([i as usize, j as usize], x.view(), target)
+    {
         Ok(()) => RGSADDLE_OK,
         Err(e) => status_of(&e),
     }
