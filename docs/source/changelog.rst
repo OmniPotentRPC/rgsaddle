@@ -6,6 +6,16 @@ Changelog
 Unreleased
 ~~~~~~~~~~
 
+- Sella ``Translation`` / ``Rotation`` / ``Displacement``
+  internals and ``Constraints`` equality residual on the
+  same manifold (``project`` / ``retract`` / ``transport``
+  stay on the level set). Bond / angle / dihedral topology
+  stays in vocn.
+
+- ``MaxInternalStep``: per-coordinate clip ``max |s_i w_i|``
+  on an internals packing, applied before the Euclidean
+  trust radius.
+
 - ``SellaMinSession`` is Sella order-0: QN + TrustRegion,
   ``delta0``/``sigma``/``rho`` schedule, ``eig=false``. Isolated
   molecules retract on ``ManifoldKind.RigidQuotient``; the

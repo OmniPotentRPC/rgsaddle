@@ -22,6 +22,18 @@ Banerjee-augmented mode. The increment is
 A host that needs a point on a set calls ``step_on``
 (``project`` / ``retract`` / ``transport``).
 
+Equality internals are ``Constraints`` on the same manifold:
+fix translations (COM), rotations (Kabsch quaternion),
+displacements, and host-supplied bonds / angles / dihedrals.
+``project`` / ``retract`` / ``transport`` keep the point on the
+level set. Bond / angle / dihedral topology stays in vocn.
+
+``MaxInternalStep`` is the Sella per-coordinate clip
+(``max |s_i w_i| <= delta``) on an internals packing. It sits
+in front of the Euclidean trust radius. Distinct from
+``rgmin.ras_clip`` (per-atom Cartesian) and from
+``qn_restricted`` (``||s||``).
+
 IRC stays ``IrcSession`` (``IrcKind.Gs2`` or ``Morokuma``).
 Minimum-mode following stays ``MinModeSession`` (dimer / Lanczos).
 
