@@ -57,6 +57,11 @@ impl CartesianPes {
         self.x.view()
     }
 
+    /// Per-atom masses, length N.
+    pub fn masses(&self) -> ArrayView1<'_, f64> {
+        self.masses.view()
+    }
+
     pub fn hessian(&self) -> &BfgsModel {
         &self.hess
     }
