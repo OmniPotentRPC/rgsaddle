@@ -8,7 +8,8 @@ use ndarray::{Array1, Array2, array};
 use rgmin::manifold::{Manifold, Sphere};
 use rgmin::vecops::{dot, nrm2};
 use rgsaddle::{
-    EigenDevice, GPU_MIN_DIM, GpuPolicy, eigh_on, gpu_eigh, gpu_ok, gpu_project, gpu_qr, to_gpu,
+    EigenDevice, GPU_MIN_DIM, GpuPolicy, clear_oom_floor, cuda_available, eigh_on, gpu_eigh,
+    gpu_eigh_t, gpu_ok, gpu_project, gpu_qr, lock_oom_for_test, oom_floor, record_oom, to_gpu,
 };
 
 fn diag3() -> Array2<f64> {
@@ -27,7 +28,6 @@ fn gpu_eigh_eigenvector_retract_stays_on_the_sphere() {
     let mut policy = GpuPolicy {
         enabled: true,
         min_dim: 1,
-        oom_floor: None,
     };
     let (lams, vecs) = gpu_eigh(a.view(), &mut policy).unwrap();
     assert_eq!(lams.len(), 3);
@@ -68,7 +68,6 @@ fn gpu_qr_q_is_on_stiefel() {
     let mut policy = GpuPolicy {
         enabled: true,
         min_dim: 1,
-        oom_floor: None,
     };
     let (q, r) = gpu_qr(a.view(), &mut policy).unwrap();
     assert_eq!(q.nrows(), 3);
@@ -91,7 +90,6 @@ fn gpu_project_is_ut_h_u() {
     let mut policy = GpuPolicy {
         enabled: true,
         min_dim: 1,
-        oom_floor: None,
     };
     let p = gpu_project(h.view(), u.view(), &mut policy).unwrap();
     assert_eq!(p.nrows(), 2);
@@ -105,23 +103,95 @@ fn gpu_project_is_ut_h_u() {
 #[test]
 fn dlpk_cuda_upload_is_refused_not_staged() {
     let a = Array1::zeros(4);
-    assert!(
-        to_gpu(a).is_none(),
-        "CUDA Vector must be refused without a kernel backend"
-    );
+    if !cuda_available() {
+        assert!(
+            to_gpu(a).is_none(),
+            "CUDA Vector must be refused without a kernel backend"
+        );
+    }
 }
 
 #[test]
 fn size_gate_matches_sella_default() {
-    let p = GpuPolicy::default();
+    let _guard = lock_oom_for_test();
+    clear_oom_floor();
+    let p = GpuPolicy {
+        enabled: true,
+        min_dim: GPU_MIN_DIM,
+    };
     assert_eq!(p.min_dim, GPU_MIN_DIM);
     assert_eq!(GPU_MIN_DIM, 200);
     assert!(!gpu_ok(&p, 50));
-    assert!(gpu_ok(&p, 200));
-    let mut floored = p.clone();
-    floored.record_oom(256);
-    assert!(!gpu_ok(&floored, 300));
-    assert!(gpu_ok(&floored, 200));
+    if cuda_available() {
+        assert!(gpu_ok(&p, 200));
+    } else {
+        // Sella `_gpu_ok`: no CUDA => false even above `SELLA_GPU_MIN_DIM`.
+        assert!(!gpu_ok(&GpuPolicy::default(), 200));
+        assert!(!gpu_ok(&p, 200));
+    }
+    record_oom(256);
+    assert!(!gpu_ok(&p, 300));
+    if cuda_available() {
+        assert!(gpu_ok(&p, 200));
+    } else {
+        assert!(!gpu_ok(&p, 200));
+    }
+    clear_oom_floor();
+}
+
+#[test]
+fn default_policy_reads_sella_env_keys() {
+    assert_eq!(GpuPolicy::default(), GpuPolicy::from_env());
+    if std::env::var("SELLA_DISABLE_GPU").is_err() && std::env::var("RGSADDLE_DISABLE_GPU").is_err()
+    {
+        assert!(GpuPolicy::from_env().enabled);
+    }
+    if std::env::var("SELLA_GPU_MIN_DIM").is_err() && std::env::var("RGSADDLE_GPU_MIN_DIM").is_err()
+    {
+        assert_eq!(GpuPolicy::from_env().min_dim, GPU_MIN_DIM);
+    }
+}
+
+#[test]
+fn eigh_on_dlpk_keeps_the_process_oom_floor() {
+    let _guard = lock_oom_for_test();
+    clear_oom_floor();
+    record_oom(64);
+    let a = diag3();
+    let _ = eigh_on(EigenDevice::Dlpk, a.view()).unwrap();
+    assert_eq!(
+        oom_floor(),
+        Some(64),
+        "eigh_on must not throw away Sella `_oom_floor`"
+    );
+    let p = GpuPolicy::default();
+    assert!(!gpu_ok(&p, 64));
+    assert!(!gpu_ok(&p, 128));
+    clear_oom_floor();
+}
+
+#[test]
+fn missing_dlpk_kernel_does_not_record_oom() {
+    let _guard = lock_oom_for_test();
+    clear_oom_floor();
+    let mut policy = GpuPolicy {
+        enabled: true,
+        min_dim: 1,
+    };
+    let a = Array2::<f64>::eye(2);
+    let uploaded = to_gpu(Array1::from(vec![1.0, 0.0, 0.0, 1.0]));
+    if let Some(ref dev) = uploaded {
+        assert!(gpu_eigh_t(dev).is_none());
+    }
+    let _ = gpu_eigh(a.view(), &mut policy).unwrap();
+    let _ = gpu_qr(a.view(), &mut policy).unwrap();
+    let _ = gpu_project(a.view(), a.view(), &mut policy).unwrap();
+    assert_eq!(
+        oom_floor(),
+        None,
+        "Sella records OOM only on RuntimeError/MemoryError"
+    );
+    clear_oom_floor();
 }
 
 #[test]

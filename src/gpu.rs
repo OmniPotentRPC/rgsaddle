@@ -4,8 +4,13 @@
 //! dlpk CUDA device. This crate does not grow a second GPU stack
 //! (no torch). A CUDA tag without a kernel backend is refused and
 //! the host Jacobi / Gram-Schmidt path runs, matching `_gpu.py`
-//! CPU fallback. Size-gating and the OOM floor are the Sella
-//! `SELLA_GPU_MIN_DIM` / `_oom_floor` contract.
+//! CPU fallback. Opt-out is `RGSADDLE_DISABLE_GPU` /
+//! `SELLA_DISABLE_GPU`. The size floor is `RGSADDLE_GPU_MIN_DIM` /
+//! `SELLA_GPU_MIN_DIM` (default 200). A failed CUDA claim records
+//! a process-global OOM floor so later calls of that size stay on
+//! the host. A missing dlpk kernel is not an OOM.
+
+use std::sync::Mutex;
 
 use dlpk::sys::{DLDevice, DLDeviceType};
 use ndarray::{Array1, Array2, ArrayView2};
@@ -18,33 +23,39 @@ use crate::linalg::modified_gram_schmidt;
 /// Sella `SELLA_GPU_MIN_DIM` default.
 pub const GPU_MIN_DIM: usize = 200;
 
-/// Opt-out / size / OOM policy from `_gpu.py`.
+static OOM_FLOOR: Mutex<Option<usize>> = Mutex::new(None);
+static OOM_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+/// Opt-out / size policy from `_gpu.py`. The OOM floor is
+/// process-global ([`oom_floor`]), matching Sella `_oom_floor`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GpuPolicy {
     /// `SELLA_DISABLE_GPU`. When false the host path always runs.
     pub enabled: bool,
     /// Upload only when `n >= min_dim`.
     pub min_dim: usize,
-    /// After a failure at dimension `N`, refuse `n >= N`.
-    pub oom_floor: Option<usize>,
 }
 
 impl Default for GpuPolicy {
     fn default() -> Self {
-        Self {
-            enabled: true,
-            min_dim: GPU_MIN_DIM,
-            oom_floor: None,
-        }
+        Self::from_env()
     }
 }
 
 impl GpuPolicy {
+    /// Read the Sella / rgsaddle environment gate.
+    pub fn from_env() -> Self {
+        Self {
+            enabled: !env_disabled(),
+            min_dim: env_min_dim(),
+        }
+    }
+
     /// Disabled policy (`SELLA_DISABLE_GPU=1`).
     pub fn disabled() -> Self {
         Self {
             enabled: false,
-            ..Self::default()
+            min_dim: GPU_MIN_DIM,
         }
     }
 
@@ -53,19 +64,74 @@ impl GpuPolicy {
         gpu_ok(self, n)
     }
 
-    /// Sella `_record_oom(n)`.
+    /// Sella `_record_oom(n)`: writes the process-global floor.
     pub fn record_oom(&mut self, n: usize) {
-        match self.oom_floor {
-            None => self.oom_floor = Some(n),
-            Some(floor) if n < floor => self.oom_floor = Some(n),
-            _ => {}
-        }
+        record_oom(n);
     }
 }
 
 /// Sella `_gpu_ok(n)`.
 pub fn gpu_ok(policy: &GpuPolicy, n: usize) -> bool {
-    policy.enabled && n >= policy.min_dim && policy.oom_floor.map(|floor| n < floor).unwrap_or(true)
+    policy.enabled
+        && cuda_available()
+        && n >= policy.min_dim
+        && oom_floor().is_none_or(|floor| n < floor)
+}
+
+fn flag_disables_gpu(raw: &str) -> bool {
+    matches!(raw.to_ascii_lowercase().as_str(), "1" | "true" | "yes")
+}
+
+fn min_dim_from_raw(raw: &str) -> Option<usize> {
+    raw.parse().ok()
+}
+
+fn env_disabled() -> bool {
+    for key in ["RGSADDLE_DISABLE_GPU", "SELLA_DISABLE_GPU"] {
+        if let Ok(v) = std::env::var(key) {
+            if flag_disables_gpu(&v) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn env_min_dim() -> usize {
+    for key in ["RGSADDLE_GPU_MIN_DIM", "SELLA_GPU_MIN_DIM"] {
+        if let Ok(v) = std::env::var(key) {
+            if let Some(n) = min_dim_from_raw(&v) {
+                return n;
+            }
+        }
+    }
+    GPU_MIN_DIM
+}
+
+/// Current Sella `_oom_floor`, if any.
+pub fn oom_floor() -> Option<usize> {
+    OOM_FLOOR.lock().ok().and_then(|g| *g)
+}
+
+/// Sella `_record_oom(n)`: refuse later offload for shapes `>= n`.
+pub fn record_oom(n: usize) {
+    if let Ok(mut g) = OOM_FLOOR.lock() {
+        if g.is_none_or(|floor| n < floor) {
+            *g = Some(n);
+        }
+    }
+}
+
+/// Drop the process-wide OOM floor (tests).
+pub fn clear_oom_floor() {
+    if let Ok(mut g) = OOM_FLOOR.lock() {
+        *g = None;
+    }
+}
+
+/// Hold while a test mutates the process-wide OOM floor.
+pub fn lock_oom_for_test() -> std::sync::MutexGuard<'static, ()> {
+    OOM_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner())
 }
 
 /// dlpk CUDA device 0. The only GPU tag this crate will name.
@@ -76,12 +142,27 @@ pub fn cuda_device() -> DLDevice {
     }
 }
 
+/// True when `Vector::try_on(kDLCUDA)` has a kernel backend.
+pub fn cuda_available() -> bool {
+    Vector::try_on(cuda_device(), Array1::zeros(1)).is_ok()
+}
+
 /// Sella `to_gpu`: claim host storage for dlpk CUDA.
 ///
-/// Returns `None` when this build has no CUDA kernel backend.
-/// The refusal is loud: device data is never staged through the host.
+/// A missing CUDA backend is not an OOM. A failed claim after the
+/// backend is present records [`record_oom`].
 pub fn to_gpu(data: Array1<f64>) -> Option<Vector> {
-    Vector::try_on(cuda_device(), data).ok()
+    if !cuda_available() {
+        return None;
+    }
+    let n = data.len();
+    match Vector::try_on(cuda_device(), data) {
+        Ok(v) => Some(v),
+        Err(_) => {
+            record_oom(n);
+            None
+        }
+    }
 }
 
 /// Flatten `a` and try the CUDA tag. `None` if the backend is missing.
@@ -91,8 +172,15 @@ pub fn to_gpu_matrix(a: ArrayView2<f64>) -> Option<Vector> {
 }
 
 /// Sella `gpu_eigh_t`: stay on device. No kernel in this build.
+///
+/// A missing kernel is not a Sella OOM (`RuntimeError`/`MemoryError`).
 pub fn gpu_eigh_t(_uploaded: &Vector) -> Option<(Array1<f64>, Array2<f64>)> {
     None
+}
+
+/// Sella `gpu_eigh` with the process env policy and global `_oom_floor`.
+pub fn gpu_eigh_env(a: ArrayView2<f64>) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
+    gpu_eigh(a, &mut GpuPolicy::from_env())
 }
 
 /// Sella `gpu_eigh`. GPU when beneficial, host Jacobi otherwise.
@@ -109,7 +197,6 @@ pub fn gpu_eigh(
             if let Some(pair) = gpu_eigh_t(&dev) {
                 return Ok(pair);
             }
-            policy.record_oom(n);
         }
     }
     exact_eigh(a)
@@ -124,10 +211,7 @@ pub fn gpu_qr(
 ) -> Result<(Array2<f64>, Array2<f64>), SaddleError> {
     let n = a.nrows();
     if policy.gpu_ok(n) {
-        if to_gpu_matrix(a).is_some() {
-            // A CUDA handle with no QR kernel is an OOM-equivalent miss.
-            policy.record_oom(n);
-        }
+        let _ = to_gpu_matrix(a);
     }
     host_qr(a)
 }
@@ -145,9 +229,8 @@ pub fn gpu_project(
     }
     let n = h.nrows();
     if policy.gpu_ok(n) {
-        if to_gpu_matrix(h).is_some() && to_gpu_matrix(u).is_some() {
-            policy.record_oom(n);
-        }
+        let _ = to_gpu_matrix(h);
+        let _ = to_gpu_matrix(u);
     }
     Ok(host_project(h, u))
 }
@@ -198,16 +281,69 @@ mod tests {
 
     #[test]
     fn default_policy_gates_at_two_hundred() {
-        let p = GpuPolicy::default();
+        let p = GpuPolicy {
+            enabled: true,
+            min_dim: GPU_MIN_DIM,
+        };
         assert!(!p.gpu_ok(199));
-        assert!(p.gpu_ok(200));
+        if cuda_available() {
+            assert!(p.gpu_ok(200));
+        } else {
+            assert!(!p.gpu_ok(200));
+        }
         assert!(!GpuPolicy::disabled().gpu_ok(1000));
     }
 
     #[test]
+    fn default_reads_sella_env_keys() {
+        assert_eq!(GpuPolicy::default(), GpuPolicy::from_env());
+        assert!(flag_disables_gpu("1"));
+        assert!(flag_disables_gpu("TRUE"));
+        assert!(flag_disables_gpu("yes"));
+        assert!(!flag_disables_gpu("0"));
+        assert!(!flag_disables_gpu("false"));
+        assert_eq!(min_dim_from_raw("64"), Some(64));
+        assert_eq!(min_dim_from_raw("nope"), None);
+    }
+
+    #[test]
     fn cuda_tag_is_refused() {
-        assert!(to_gpu(Array1::zeros(3)).is_none());
+        if !cuda_available() {
+            assert!(to_gpu(Array1::zeros(3)).is_none());
+        }
         assert_eq!(cuda_device().device_type, DLDeviceType::kDLCUDA);
+    }
+
+    #[test]
+    fn missing_kernel_after_upload_is_not_oom() {
+        let _guard = lock_oom_for_test();
+        clear_oom_floor();
+        let mut policy = GpuPolicy {
+            enabled: true,
+            min_dim: 1,
+        };
+        let a = Array2::<f64>::eye(2);
+        let _ = gpu_eigh(a.view(), &mut policy).unwrap();
+        let _ = gpu_qr(a.view(), &mut policy).unwrap();
+        let _ = gpu_project(a.view(), a.view(), &mut policy).unwrap();
+        assert_eq!(oom_floor(), None);
+        clear_oom_floor();
+    }
+
+    #[test]
+    fn oom_floor_is_process_global() {
+        let _guard = lock_oom_for_test();
+        clear_oom_floor();
+        record_oom(128);
+        assert_eq!(oom_floor(), Some(128));
+        record_oom(256);
+        assert_eq!(oom_floor(), Some(128));
+        record_oom(64);
+        assert_eq!(oom_floor(), Some(64));
+        let p = GpuPolicy::from_env();
+        assert!(!gpu_ok(&p, 64));
+        clear_oom_floor();
+        assert_eq!(oom_floor(), None);
     }
 
     #[test]
@@ -218,7 +354,6 @@ mod tests {
         let mut policy = GpuPolicy {
             enabled: true,
             min_dim: 1,
-            oom_floor: None,
         };
         let (lams, vecs) = gpu_eigh(a.view(), &mut policy).unwrap();
         assert!((lams[0] - 2.0).abs() < 1e-10);

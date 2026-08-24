@@ -136,14 +136,15 @@ pub fn rayleigh_ritz(
 }
 
 /// Dense eigen on `device`. Full spectrum is Host Jacobi.
-/// [`EigenDevice::Dlpk`] is Sella `_gpu.py` ([`crate::gpu_eigh`]).
+/// [`EigenDevice::Dlpk`] is Sella `_gpu.py` ([`crate::gpu::gpu_eigh_env`]):
+/// process env policy and the process-global OOM floor.
 pub fn eigh_on(
     device: EigenDevice,
     a: ArrayView2<f64>,
 ) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
     match device {
         EigenDevice::Host => exact_eigh(a),
-        EigenDevice::Dlpk => crate::gpu::gpu_eigh(a, &mut crate::gpu::GpuPolicy::default()),
+        EigenDevice::Dlpk => crate::gpu::gpu_eigh_env(a),
     }
 }
 
