@@ -239,7 +239,7 @@ mod tests {
         let x = water();
         let mut chart = Constraints::new(3).unwrap();
         chart.fix_com(x.view()).unwrap();
-        chart.fix_bond(0, 1, x.view(), None).unwrap();
+        chart.fix_bond([0, 1], x.view(), None).unwrap();
         let w = weights_for_equalities(&chart);
         assert_eq!(w.len(), 4);
         assert!((w[0] - 1.0).abs() < 1e-14);
