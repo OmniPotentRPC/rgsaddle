@@ -194,7 +194,7 @@ fn roll_branch(direction: IrcDirection) -> (Array1<f64>, f64, f64, f64, bool) {
         &MullerBrown,
     )
     .unwrap();
-    let report = session.run(&MullerBrown, 40).unwrap();
+    let report = session.run(&MullerBrown, 80).unwrap();
     let x = session.position().to_owned();
     let curv = fd_lowest_curvature(&MullerBrown, x.view(), 1e-4);
     (x, report.energy, curv, report.arc, report.at_minimum)
@@ -213,19 +213,21 @@ fn muller_brown_both_ways_ends_at_minima_with_positive_curvature() {
         xr[0],
         xr[1]
     );
-    for (label, x, energy, curv) in [
-        ("forward", xf, ef, cf),
-        ("reverse", xr, er, cr),
+    for (label, x, energy, curv, arc) in [
+        ("forward", xf, ef, cf, af),
+        ("reverse", xr, er, cr, ar),
     ] {
         assert!(
             curv > 0.0,
-            "{label} ended at ({}, {}) E={energy} lambda_min={curv}",
+            "{label} ended at ({}, {}) E={energy} arc={arc} lambda_min={curv}",
             x[0],
             x[1]
         );
         assert!(
             energy < -70.0,
-            "{label} energy {energy} is not a Müller–Brown well"
+            "{label} energy {energy} at ({}, {}) arc={arc} is not a Müller–Brown well",
+            x[0],
+            x[1]
         );
     }
 }
