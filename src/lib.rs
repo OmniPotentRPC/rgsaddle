@@ -17,6 +17,11 @@
 //! ([`irc::IrcSession`]): kick along the imaginary mode, then take
 //! Gonzalez--Schlegel / Sella steps on the mass-weighted sphere
 //! (`rgmin::IrcTrust` over [`rgmin::ManifoldKind::MwRigid`]).
+//! Sella `QuasiNewton` is [`qn::QuasiNewton`]: `rgmin::qn_get_s`
+//! with proj / retr / transp. Sella `RationalFunctionOptimization` is
+//! [`rfo::RationalFunctionOptimization`]: `rgmin::rfo_get_s` with
+//! the Sella alpha / order contract, retracted through
+//! [`rgmin::Manifold`] `project` / `retract` / `transport`.
 //!
 //! Force assembly is pure: tangents (Mills–Jonsson–Schenter simple,
 //! Henkelman–Jonsson improved), springs (uniform, energy-weighted,
@@ -32,32 +37,36 @@
 //! are vesin, when a surface needs them.
 
 pub mod band;
-pub mod irc;
 #[cfg(feature = "readcon")]
 pub mod io;
+pub mod irc;
 #[cfg(feature = "readcon")]
-pub use io::{frame_from_con, MolecularFrame};
+pub use io::{MolecularFrame, frame_from_con};
 pub mod capi;
 pub mod error;
 pub mod mic;
 pub mod minmode;
 pub mod pes;
+pub mod projection;
+pub mod qn;
+pub mod rfo;
 pub mod sella_min;
 pub mod sella_saddle;
-pub mod projection;
 pub mod spring;
 pub mod tangent;
 
 pub use band::{BandConfig, BandReport, BandSession, BandStatus, BandSurface};
 pub use error::SaddleError;
-pub use mic::{wrap_difference, Cell};
 pub use irc::{IrcConfig, IrcDirection, IrcKind, IrcReport, IrcSession};
+pub use mic::{Cell, wrap_difference};
 pub use minmode::{
     MinModeConfig, MinModeKind, MinModeReport, MinModeSession, MinModeStatus, PointSurface,
 };
 pub use pes::{CartesianPes, HessUpdate};
+pub use projection::ProjectionKind;
+pub use qn::{get_stepper, retract_qn, QuasiNewton, StepperKind};
+pub use rfo::{RationalFunctionOptimization, rfo_stepper};
 pub use sella_min::{SellaMinConfig, SellaMinReport, SellaMinSession};
 pub use sella_saddle::{SellaSaddleConfig, SellaSaddleReport, SellaSaddleSession};
-pub use projection::ProjectionKind;
 pub use spring::SpringKind;
 pub use tangent::TangentKind;

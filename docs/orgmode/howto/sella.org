@@ -8,6 +8,12 @@
 ~prfo_restricted~ plus the same kick. Both sit on
 ~CartesianPes~, not on ~IrcSession~.
 
+~RationalFunctionOptimization~ is Sella ~method=rfo~: ~alpha~
+in ~[0, 1]~, ~order~ selects the Banerjee-augmented mode.
+The increment is ~rgmin::rfo_get_s~. Distinct from
+~rgmin::NewtonKind::Rfo~. A host that needs a point on a
+set calls ~step_on~ (~project~ / ~retract~ / ~transport~).
+
 IRC stays ~IrcSession~ (~IrcKind::Gs2~ or ~Morokuma~).
 Minimum-mode following stays ~MinModeSession~ (dimer / Lanczos).
 
