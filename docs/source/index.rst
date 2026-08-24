@@ -60,6 +60,7 @@ you **find** that saddle.
 
    howto/band
    howto/irc
+   howto/sella
    howto/minmode
    howto/io
 
