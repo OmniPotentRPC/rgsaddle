@@ -56,6 +56,8 @@ pub mod force;
 pub mod internal;
 pub mod mic;
 pub mod minmode;
+#[cfg(feature = "python")]
+pub mod python;
 pub mod pes;
 pub mod pes_internal;
 pub mod projection;

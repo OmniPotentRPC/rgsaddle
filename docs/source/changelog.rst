@@ -9,6 +9,8 @@ Unreleased
 - Force gate is the eOn / gpr ``ConvergenceForceNorm`` closed
   enum (``L2`` / ``Linf`` / ``MaxForceOnAtom``). C field type is
   ``rgsaddle_force_gate_t``; unknown discriminants refuse create.
+  Maturin / PyO3 emit a real Python enum
+  (``ForceGate.L2_NORM``, ``LINF_NORM``, ``MAX_FORCE_ON_ATOM``).
 
 - Sella ``Translation`` / ``Rotation`` / ``Displacement``
   internals and ``Constraints`` equality residual on the

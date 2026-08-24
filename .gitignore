@@ -23,6 +23,9 @@ rustc-ice-*.txt
 docs/source/_build/
 docs/source/crates/
 .pixi/
+__pycache__/
+.pytest_cache/
+*.pyc
 
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can

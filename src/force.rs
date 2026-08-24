@@ -2,6 +2,7 @@
 //! `ConvergenceForceNorm` (`l2Norm`, `linfNorm`, `maxForceOnAtom`).
 //!
 //! The host picks one. Sessions do not invent a fourth scalar.
+//! Maturin / PyO3 emit a real Python enum (`ForceGate.L2_NORM`, …).
 
 use ndarray::ArrayView1;
 use rgmin::vecops::{nrm2, nrminf};
@@ -9,17 +10,31 @@ use rgmin::vecops::{nrm2, nrminf};
 /// How a session reduces a 3N force (or gradient) to one scalar.
 ///
 /// Discriminant matches `gprd_params.capnp` `ConvergenceForceNorm`
-/// and `rgsaddle_force_gate_t` on the C wire.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// and `rgsaddle_force_gate_t` on the C wire. Python names match
+/// eOn / gpr (`L2_NORM`, `LINF_NORM`, `MAX_FORCE_ON_ATOM`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[repr(C)]
+#[cfg_attr(
+    feature = "python",
+    pyo3::pyclass(
+        eq,
+        eq_int,
+        frozen,
+        name = "ForceGate",
+        module = "rgsaddle"
+    )
+)]
 pub enum ForceGate {
     /// Euclidean `||F||_2` over the full 3N vector.
+    #[cfg_attr(feature = "python", pyo3(name = "L2_NORM"))]
     L2 = 0,
     /// Max absolute component.
+    #[cfg_attr(feature = "python", pyo3(name = "LINF_NORM"))]
     Linf = 1,
     /// Max per-atom `||F_i||_2`. Sella `PES.converged` and the Baker
     /// production gate (`max_force_on_atom`).
     #[default]
+    #[cfg_attr(feature = "python", pyo3(name = "MAX_FORCE_ON_ATOM"))]
     MaxForceOnAtom = 2,
 }
 
@@ -55,6 +70,26 @@ impl ForceGate {
             Self::Linf => nrminf(g),
             Self::MaxForceOnAtom => max_force_on_atom(g),
         }
+    }
+}
+
+#[cfg(feature = "python")]
+#[pyo3::pymethods]
+impl ForceGate {
+    /// Construct from the C / Cap'n Proto ordinal. Unknown values raise.
+    #[new]
+    fn py_new(value: i32) -> pyo3::PyResult<Self> {
+        Self::try_from_abi(value).ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(format!("unknown force gate {value}"))
+        })
+    }
+
+    fn __int__(self) -> i32 {
+        self.to_abi()
+    }
+
+    fn __index__(self) -> i32 {
+        self.to_abi()
     }
 }
 

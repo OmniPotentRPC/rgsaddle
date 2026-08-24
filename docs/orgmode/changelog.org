@@ -9,7 +9,8 @@
 - Force gate is the eOn / gpr_optim closed enum
   (~L2~ / ~Linf~ / ~MaxForceOnAtom~), not a single implied
   scalar. Sessions take ~ForceGate~; the C ABI is
-  ~rgsaddle_force_gate_t~.
+  ~rgsaddle_force_gate_t~. Maturin / PyO3 emit a real Python
+  enum (~ForceGate.L2_NORM~, ~LINF_NORM~, ~MAX_FORCE_ON_ATOM~).
 - Sella ~Translation~ / ~Rotation~ / ~Displacement~ internals
   and ~Constraints~ equality residual on the same manifold
   (~project~ / ~retract~ / ~transport~ stay on the level set).
