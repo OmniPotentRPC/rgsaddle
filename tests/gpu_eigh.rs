@@ -144,10 +144,14 @@ fn gpu_ok_respects_min_dim_disable_and_oom_floor() {
     assert!(!wide.ok(64), "OOM floor must skip this size");
     assert!(!wide.ok(128), "OOM floor skips larger shapes too");
     clear_oom_floor();
-    // No CUDA backend in this build: even a tiny min_dim stays off.
+    // sella/_gpu.py:38 — `_gpu_ok` is false without a CUDA backend.
     if !cuda_available() {
         assert!(!wide.ok(8));
         assert!(!gpu_ok(512));
+        assert!(
+            !GpuPolicy::default().ok(200),
+            "gpu_ok(200) must be false without CUDA"
+        );
     }
 }
 
@@ -173,4 +177,45 @@ fn dlpk_eigh_on_shares_the_gpu_factory() {
     }
     assert!(columns_on_stiefel(&hv, 1e-10));
     assert!(columns_on_stiefel(&dv, 1e-10));
+}
+
+#[test]
+fn eigh_on_dlpk_keeps_the_process_oom_floor() {
+    let _guard = lock_oom_for_test();
+    clear_oom_floor();
+    record_oom(64);
+    let a = hilbert(3);
+    let _ = eigh_on(EigenDevice::Dlpk, a.view()).unwrap();
+    assert_eq!(
+        rgsaddle::oom_floor(),
+        Some(64),
+        "eigh_on Dlpk must keep the process-global OOM floor"
+    );
+    let wide = GpuPolicy {
+        enabled: true,
+        min_dim: 1,
+    };
+    assert!(!wide.ok(64));
+    clear_oom_floor();
+}
+
+#[test]
+fn missing_dlpk_kernel_is_not_an_oom() {
+    let _guard = lock_oom_for_test();
+    clear_oom_floor();
+    let a = hilbert(4);
+    let _ = gpu_eigh(a.view()).unwrap();
+    let _ = gpu_qr(a.view()).unwrap();
+    let u = Array2::eye(4);
+    let _ = gpu_project(a.view(), u.view()).unwrap();
+    assert_eq!(
+        rgsaddle::oom_floor(),
+        None,
+        "gpu_eigh_t None must not record_oom"
+    );
+    if let Some(v) = to_gpu(Array1::zeros(4).view()) {
+        assert!(gpu_eigh_t(&v).is_none());
+        assert_eq!(rgsaddle::oom_floor(), None);
+    }
+    clear_oom_floor();
 }

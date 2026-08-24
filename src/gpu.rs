@@ -83,13 +83,23 @@ impl GpuPolicy {
     }
 }
 
+/// Sella `_gpu.py`: `SELLA_DISABLE_GPU` in `{"1","true","yes"}`.
+fn env_flag_disabled(raw: Option<&str>) -> bool {
+    matches!(
+        raw.map(|v| v.to_ascii_lowercase()).as_deref(),
+        Some("1" | "true" | "yes")
+    )
+}
+
+/// Sella `_gpu.py`: `SELLA_GPU_MIN_DIM`, default 200.
+fn parse_min_dim(raw: Option<&str>) -> usize {
+    raw.and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_MIN_DIM)
+}
+
 fn env_disabled() -> bool {
     for key in ["RGSADDLE_DISABLE_GPU", "SELLA_DISABLE_GPU"] {
-        if let Ok(v) = std::env::var(key) {
-            let v = v.to_ascii_lowercase();
-            if v == "1" || v == "true" || v == "yes" {
-                return true;
-            }
+        if env_flag_disabled(std::env::var(key).ok().as_deref()) {
+            return true;
         }
     }
     false
@@ -98,8 +108,8 @@ fn env_disabled() -> bool {
 fn env_min_dim() -> usize {
     for key in ["RGSADDLE_GPU_MIN_DIM", "SELLA_GPU_MIN_DIM"] {
         if let Ok(v) = std::env::var(key) {
-            if let Ok(n) = v.parse::<usize>() {
-                return n;
+            if v.parse::<usize>().is_ok() {
+                return parse_min_dim(Some(v.as_str()));
             }
         }
     }
@@ -186,6 +196,13 @@ pub fn gpu_project(h: ArrayView2<f64>, u: ArrayView2<f64>) -> Result<Array2<f64>
     GpuPolicy::from_env().project(h, u)
 }
 
+/// Flatten and claim CUDA. `to_gpu` records OOM only on a failed
+/// claim after a backend is present, never on a missing kernel.
+fn try_device_upload(a: ArrayView2<f64>) -> Option<Vector> {
+    let flat = Array1::from_iter(a.iter().copied());
+    to_gpu(flat.view())
+}
+
 fn gpu_eigh_with(
     a: ArrayView2<f64>,
     policy: GpuPolicy,
@@ -194,19 +211,27 @@ fn gpu_eigh_with(
         return Err(SaddleError::Shape("gpu_eigh needs a square matrix".into()));
     }
     let n = a.nrows();
-    // Device eigh is gated by `policy.ok`; this build has no dlpk
-    // kernel, so the Sella CPU fallback runs and we do not stage
-    // the factor through a claimed CUDA buffer.
-    let _ = policy.ok(n);
+    if policy.ok(n) {
+        if let Some(dev) = try_device_upload(a) {
+            if let Some(pair) = gpu_eigh_t(&dev) {
+                return Ok(pair);
+            }
+            // Missing kernel is not an OOM. Sella `_gpu.py` records
+            // only RuntimeError / MemoryError.
+        }
+    }
     exact_eigh(a)
 }
 
 fn gpu_qr_with(
     a: ArrayView2<f64>,
-    _policy: GpuPolicy,
+    policy: GpuPolicy,
 ) -> Result<(Array2<f64>, Array2<f64>), SaddleError> {
     if a.ncols() == 0 || a.nrows() == 0 {
         return Err(SaddleError::Shape("gpu_qr needs a nonempty matrix".into()));
+    }
+    if policy.ok(a.nrows()) {
+        let _ = try_device_upload(a);
     }
     host_qr(a)
 }
@@ -214,12 +239,16 @@ fn gpu_qr_with(
 fn gpu_project_with(
     h: ArrayView2<f64>,
     u: ArrayView2<f64>,
-    _policy: GpuPolicy,
+    policy: GpuPolicy,
 ) -> Result<Array2<f64>, SaddleError> {
     if h.nrows() != h.ncols() || u.nrows() != h.nrows() {
         return Err(SaddleError::Shape(
             "gpu_project needs square H and matching U rows".into(),
         ));
+    }
+    if policy.ok(h.nrows()) {
+        let _ = try_device_upload(h);
+        let _ = try_device_upload(u);
     }
     Ok(host_project(h, u))
 }
@@ -307,5 +336,27 @@ mod tests {
         assert_eq!(oom_floor(), Some(64));
         clear_oom_floor();
         assert_eq!(oom_floor(), None);
+    }
+
+    #[test]
+    fn default_reads_sella_disable_and_min_dim_keys() {
+        assert!(env_flag_disabled(Some("1")));
+        assert!(env_flag_disabled(Some("true")));
+        assert!(env_flag_disabled(Some("YES")));
+        assert!(!env_flag_disabled(Some("0")));
+        assert!(!env_flag_disabled(None));
+        assert_eq!(parse_min_dim(None), 200);
+        assert_eq!(parse_min_dim(Some("64")), 64);
+        assert_eq!(parse_min_dim(Some("nope")), 200);
+        let p = GpuPolicy::default();
+        assert_eq!(p, GpuPolicy::from_env());
+    }
+
+    #[test]
+    fn gpu_ok_needs_cuda_at_sella_min_dim() {
+        if !cuda_available() {
+            assert!(!GpuPolicy::default().ok(200));
+            assert!(!gpu_ok(200));
+        }
     }
 }
