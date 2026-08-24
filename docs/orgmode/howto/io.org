@@ -18,8 +18,9 @@ rgsaddle does not parse CON itself. Enable ~--features readcon~ and
 call ~frame_from_con~ to get a 3N Cartesian, masses, and a
 ~linkcell::Cell~. Enable ~chemfiles~ for foreign formats through
 readcon-core. Enable ~readcon-db~ when the host persists an IRC
-or dimer trace. Enable ~vesin~ only if the potential needs a
-cutoff pair list.
+or dimer trace. vesin is not a Cargo feature here: a surface that needs a
+cutoff pair list depends on vesin itself. rgsaddle does not
+grow a second neighbour list.
 
 Minimum-image differences on the band go through
 ~wrap_difference~ (linkcell). They do not go through a private
