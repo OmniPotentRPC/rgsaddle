@@ -36,7 +36,9 @@ config refuses create.
 free Hessian every ~nsteps_per_diag~ steps. ~EigenDevice::Dlpk~
 is Sella ~_gpu.py~ (~gpu_eigh~ / ~gpu_qr~ / ~gpu_project~)
 on the rgmin vecops / dlpk CUDA tag, not a second GPU
-stack. Below ~GPU_MIN_DIM~ (200) or after an OOM floor
+stack. ~SELLA_DISABLE_GPU=1~ makes ~to_gpu~ return ~None~.
+A failed matrix claim records ~n~ (~A.shape[0]~), not
+~n*n~. Below ~GPU_MIN_DIM~ (200) or after an OOM floor
 the host Jacobi / Gram-Schmidt path runs.
 
 ~RationalFunctionOptimization~ is Sella ~method=rfo~: ~alpha~

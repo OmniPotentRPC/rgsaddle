@@ -8,8 +8,9 @@ use ndarray::{Array1, Array2, array};
 use rgmin::manifold::{Manifold, Sphere};
 use rgmin::vecops::{dot, nrm2};
 use rgsaddle::{
-    EigenDevice, GPU_MIN_DIM, GpuPolicy, clear_oom_floor, cuda_available, eigh_on, gpu_eigh,
-    gpu_eigh_t, gpu_ok, gpu_project, gpu_qr, lock_oom_for_test, oom_floor, record_oom, to_gpu,
+    EigenDevice, GPU_MIN_DIM, GpuPolicy, clear_oom_floor, cuda_available, eigh_on,
+    fail_next_cuda_claim, gpu_eigh, gpu_eigh_t, gpu_ok, gpu_project, gpu_qr, lock_oom_for_test,
+    oom_floor, record_oom, to_gpu, to_gpu_matrix,
 };
 
 fn diag3() -> Array2<f64> {
@@ -141,6 +142,7 @@ fn size_gate_matches_sella_default() {
 
 #[test]
 fn default_policy_reads_sella_env_keys() {
+    let _guard = lock_oom_for_test();
     assert_eq!(GpuPolicy::default(), GpuPolicy::from_env());
     if std::env::var("SELLA_DISABLE_GPU").is_err() && std::env::var("RGSADDLE_DISABLE_GPU").is_err()
     {
@@ -191,6 +193,48 @@ fn missing_dlpk_kernel_does_not_record_oom() {
         None,
         "Sella records OOM only on RuntimeError/MemoryError"
     );
+    clear_oom_floor();
+}
+
+#[test]
+fn to_gpu_returns_none_when_sella_disable_gpu() {
+    let _guard = lock_oom_for_test();
+    clear_oom_floor();
+    let prev = std::env::var("SELLA_DISABLE_GPU").ok();
+    // SAFETY: lock_oom_for_test serializes env mutation across GPU tests.
+    unsafe { std::env::set_var("SELLA_DISABLE_GPU", "1") };
+    fail_next_cuda_claim();
+    assert!(
+        to_gpu(Array1::from(vec![1.0, 0.0, 0.0, 1.0])).is_none(),
+        "SELLA_DISABLE_GPU=1 must make to_gpu return None"
+    );
+    assert_eq!(oom_floor(), None, "disabled to_gpu must not upload");
+    match prev {
+        Some(v) => unsafe { std::env::set_var("SELLA_DISABLE_GPU", v) },
+        None => unsafe { std::env::remove_var("SELLA_DISABLE_GPU") },
+    }
+    clear_oom_floor();
+}
+
+#[test]
+fn to_gpu_matrix_oom_floor_records_n_not_n_squared() {
+    let _guard = lock_oom_for_test();
+    clear_oom_floor();
+    let n = 8;
+    fail_next_cuda_claim();
+    let a = Array2::<f64>::zeros((n, n));
+    assert!(to_gpu_matrix(a.view()).is_none());
+    assert_eq!(
+        oom_floor(),
+        Some(n),
+        "failed to_gpu_matrix of shape (n,n) records n, not n*n"
+    );
+    assert_ne!(oom_floor(), Some(n * n));
+    let p = GpuPolicy {
+        enabled: true,
+        min_dim: 1,
+    };
+    assert!(!gpu_ok(&p, n));
     clear_oom_floor();
 }
 

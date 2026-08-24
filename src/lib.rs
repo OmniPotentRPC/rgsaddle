@@ -94,8 +94,9 @@ pub use force::ForceGate;
 pub use force_match::{covalent_pairs, force_match_hessian};
 pub use geom::{SellaGeom, TrustSchedule};
 pub use gpu::{
-    GPU_MIN_DIM, GpuPolicy, clear_oom_floor, cuda_available, gpu_eigh, gpu_eigh_t, gpu_ok,
-    gpu_project, gpu_qr, lock_oom_for_test, oom_floor, record_oom, to_gpu, to_gpu_matrix,
+    GPU_MIN_DIM, GpuPolicy, clear_oom_floor, cuda_available, fail_next_cuda_claim, gpu_eigh,
+    gpu_eigh_t, gpu_ok, gpu_project, gpu_qr, lock_oom_for_test, oom_floor, record_oom, to_gpu,
+    to_gpu_matrix,
 };
 pub use internal::{CartAxis, Displacement, InternalSlot, Rotation, Translation};
 pub use irc::{IrcConfig, IrcDirection, IrcKind, IrcReport, IrcSession};
