@@ -211,6 +211,30 @@ impl SellaMinSession {
         })
     }
 
+    /// QN on packed `[q_int; L]` (Sella `CellInternalPES` log chart).
+    pub fn on_cell_internal_log(
+        config: SellaMinConfig,
+        x: Array1<f64>,
+        masses: Array1<f64>,
+        chart: Constraints,
+        cell: crate::Cell,
+        mask: [bool; 9],
+    ) -> Result<Self, SaddleError> {
+        let mut pes = CellInternalPes::new(x, masses, chart, cell)?;
+        pes.set_mask(mask);
+        pes.set_chart(crate::CellChart::LogDeform);
+        let n_free = pes.packed_len().max(1);
+        let geom = SellaGeom::Chart(pes.internals().chart().clone());
+        let delta = config.delta * n_free as f64;
+        Ok(Self {
+            pes: SellaPes::CellInternal(pes),
+            config,
+            geom,
+            delta,
+            rho: 1.0,
+        })
+    }
+
     pub fn geom(&self) -> &SellaGeom {
         &self.geom
     }
@@ -227,10 +251,18 @@ impl SellaMinSession {
 
     /// Switch the cell chart. No-op on a non-cell session.
     pub fn set_cell_chart(&mut self, kind: crate::CellChart) {
-        if let SellaPes::Cell(p) = &mut self.pes {
-            p.set_chart(kind);
-            let n = p.packed_len().max(1);
-            self.delta = self.config.delta * n as f64;
+        match &mut self.pes {
+            SellaPes::Cell(p) => {
+                p.set_chart(kind);
+                let n = p.packed_len().max(1);
+                self.delta = self.config.delta * n as f64;
+            }
+            SellaPes::CellInternal(p) => {
+                p.set_chart(kind);
+                let n = p.packed_len().max(1);
+                self.delta = self.config.delta * n as f64;
+            }
+            SellaPes::Cartesian(_) | SellaPes::Internal(_) => {}
         }
     }
 
@@ -845,6 +877,40 @@ mod tests {
         )
         .unwrap();
         assert!(sess.cell_internal_pes().is_some());
+        let report = sess.step(&CellQuad).unwrap();
+        assert!(report.energy.is_finite());
+        assert!(sess.position().iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn cell_internal_log_qn_is_finite() {
+        use crate::internal::{CartAxis, Translation};
+        let mut x = Array1::zeros(6);
+        x[0] = 0.3;
+        let mut chart = Constraints::new(2).unwrap();
+        chart
+            .fix_translation(Translation::all(2, CartAxis::X).unwrap(), x.view(), Some(0.0))
+            .unwrap();
+        let cell = crate::Cell::ortho(3.0, 3.0, 3.0).unwrap();
+        let mut mask = [false; 9];
+        mask[0] = true;
+        let mut sess = SellaMinSession::on_cell_internal_log(
+            SellaMinConfig {
+                delta: 0.2,
+                force_tol: 0.05,
+                ..SellaMinConfig::default()
+            },
+            x,
+            Array1::from(vec![1.0, 1.0]),
+            chart,
+            cell,
+            mask,
+        )
+        .unwrap();
+        assert_eq!(
+            sess.cell_internal_pes().unwrap().chart(),
+            crate::CellChart::LogDeform
+        );
         let report = sess.step(&CellQuad).unwrap();
         assert!(report.energy.is_finite());
         assert!(sess.position().iter().all(|v| v.is_finite()));

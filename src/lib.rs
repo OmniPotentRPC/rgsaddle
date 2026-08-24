@@ -98,8 +98,8 @@ pub use minmode::{
 };
 pub use pes::{CartesianPes, HessUpdate};
 pub use pes_internal::{
-    niggli_reduce_cell, niggli_reduce_vectors, CellCartesianPes, CellInternalPes, InternalPes,
-    SellaPes,
+    niggli_reduce_cell, niggli_reduce_vectors, place_perp_dummy, CellCartesianPes,
+    CellInternalPes, InternalPes, SellaPes,
 };
 pub use projection::ProjectionKind;
 pub use qn::{get_stepper, retract_qn, QuasiNewton, StepperKind};

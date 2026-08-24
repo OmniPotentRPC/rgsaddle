@@ -25,6 +25,8 @@ pub struct InternalPes {
     chart: Constraints,
     hess: BfgsModel,
     update: HessUpdate,
+    /// Extra 3-vectors Sella hangs on linear fragments. Not in the surface.
+    dummies: Array1<f64>,
 }
 
 impl InternalPes {
@@ -48,9 +50,76 @@ impl InternalPes {
             chart,
             hess: BfgsModel::identity(nint),
             update: HessUpdate::Bfgs,
+            dummies: Array1::zeros(0),
         };
         pes.guess_hessian();
         Ok(pes)
+    }
+
+    /// Chart covers real atoms plus dummy 3-vectors (Sella dummies).
+    pub fn with_dummies(
+        x: Array1<f64>,
+        masses: Array1<f64>,
+        chart: Constraints,
+        dummies: Array1<f64>,
+    ) -> Result<Self, SaddleError> {
+        if dummies.len() % 3 != 0 {
+            return Err(SaddleError::Shape("dummy frame must be 3 n_dummy".into()));
+        }
+        if chart.n_atoms() * 3 != x.len() + dummies.len() {
+            return Err(SaddleError::Shape(
+                "internals chart must cover the real 3N plus dummy slots".into(),
+            ));
+        }
+        if chart.equalities().is_empty() {
+            return Err(SaddleError::Shape("internals chart is empty".into()));
+        }
+        let nint = chart.equalities().len();
+        let mut pes = Self {
+            cart: CartesianPes::new(x, masses)?,
+            chart,
+            hess: BfgsModel::identity(nint),
+            update: HessUpdate::Bfgs,
+            dummies,
+        };
+        pes.guess_hessian();
+        Ok(pes)
+    }
+
+    /// Number of dummy atoms (Sella `ndummies`).
+    pub fn n_dummy(&self) -> usize {
+        self.dummies.len() / 3
+    }
+
+    pub fn dummy_positions(&self) -> ArrayView1<'_, f64> {
+        self.dummies.view()
+    }
+
+    /// Concatenated real + dummy Cartesian (the Wilson-B frame).
+    pub fn frame(&self) -> Array1<f64> {
+        let x = self.cart.position();
+        if self.dummies.is_empty() {
+            return x.to_owned();
+        }
+        let mut f = Array1::zeros(x.len() + self.dummies.len());
+        for (i, v) in x.iter().enumerate() {
+            f[i] = *v;
+        }
+        for (i, v) in self.dummies.iter().enumerate() {
+            f[x.len() + i] = *v;
+        }
+        f
+    }
+
+    fn pad_grad(&self, g_cart: ArrayView1<f64>) -> Array1<f64> {
+        if self.dummies.is_empty() {
+            return g_cart.to_owned();
+        }
+        let mut g = Array1::zeros(g_cart.len() + self.dummies.len());
+        for (i, v) in g_cart.iter().enumerate() {
+            g[i] = *v;
+        }
+        g
     }
 
     /// Sella `Internals.guess_hessian` diagonal: translations 70,
@@ -105,26 +174,26 @@ impl InternalPes {
 
     /// Internals values at the current geometry.
     pub fn internals(&self) -> Result<Array1<f64>, SaddleError> {
-        self.chart.values(self.cart.position())
+        let f = self.frame();
+        self.chart.values(f.view())
     }
 
-    /// Wilson B, `nint x 3N`.
+    /// Wilson B, `nint x 3(N+n_dummy)`.
     pub fn b_matrix(&self) -> Result<ndarray::Array2<f64>, SaddleError> {
-        self.chart.jacobian(self.cart.position())
+        let f = self.frame();
+        self.chart.jacobian(f.view())
     }
 
-    /// Internals gradient `B^{+T} g_cart` via the same min-norm solve
-    /// as [`Constraints::scons`]: `(B B^T) y = B g`, so `y = B^{+T} g`.
+    /// Internals gradient `B^{+T} g` on the Wilson frame. Dummy
+    /// slots have zero Cartesian force.
     pub fn internals_grad(&self, g_cart: ArrayView1<f64>) -> Result<Array1<f64>, SaddleError> {
         let b = self.b_matrix()?;
-        internals_grad_from_b(&b, g_cart)
+        let g = self.pad_grad(g_cart);
+        internals_grad_from_b(&b, g.view())
     }
 
-    /// Map `dq` to Cartesian by `B dx = dq` and kick the Cartesian PES.
-    ///
-    /// The internals Hessian stores `(dq, dg_int)` (Sella
-    /// `InternalPES.kick`). The Cartesian model is updated with the
-    /// matching `(dx, dg_cart)`.
+    /// Map `dq` to the Wilson frame by `B dx = dq`. Real atoms go
+    /// through the Cartesian PES; dummy slots move in place.
     pub fn kick<S: PointSurface>(
         &mut self,
         surface: &S,
@@ -137,9 +206,16 @@ impl InternalPes {
             ));
         }
         let (_, g0) = surface.eval(self.cart.position())?;
-        let g0_int = internals_grad_from_b(&b, g0.view())?;
+        let g0_int = internals_grad_from_b(&b, self.pad_grad(g0.view()).view())?;
         let dx = min_norm_dx(&b, &dq.to_owned());
-        let (e, g1) = self.cart.kick_from(surface, dx.view(), g0.view())?;
+        let n = self.cart.position().len();
+        let dx_real = dx.slice(s![..n]).to_owned();
+        if self.dummies.len() + n == dx.len() {
+            for i in 0..self.dummies.len() {
+                self.dummies[i] += dx[n + i];
+            }
+        }
+        let (e, g1) = self.cart.kick_from(surface, dx_real.view(), g0.view())?;
         let g1_int = self.internals_grad(g1.view())?;
         let y = &g1_int - &g0_int;
         let s = dq.to_owned();
@@ -154,6 +230,42 @@ impl InternalPes {
         self.cart.reset();
         self.guess_hessian();
     }
+}
+
+/// Dummy 1 Å off the `i-j` bond, for a linear fragment angle.
+pub fn place_perp_dummy(
+    x: ArrayView1<f64>,
+    i: usize,
+    j: usize,
+) -> Result<[f64; 3], SaddleError> {
+    let n = x.len() / 3;
+    if i >= n || j >= n || i == j {
+        return Err(SaddleError::Shape(
+            "perp dummy needs two distinct real atoms".into(),
+        ));
+    }
+    let a = [x[3 * i], x[3 * i + 1], x[3 * i + 2]];
+    let b = [x[3 * j], x[3 * j + 1], x[3 * j + 2]];
+    let d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+    let dn = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+    if dn < 1e-12 {
+        return Err(SaddleError::Shape("perp dummy bond is zero".into()));
+    }
+    let axis = [d[0] / dn, d[1] / dn, d[2] / dn];
+    let helper = if axis[0].abs() < 0.9 {
+        [1.0, 0.0, 0.0]
+    } else {
+        [0.0, 1.0, 0.0]
+    };
+    let mut p = [
+        axis[1] * helper[2] - axis[2] * helper[1],
+        axis[2] * helper[0] - axis[0] * helper[2],
+        axis[0] * helper[1] - axis[1] * helper[0],
+    ];
+    let pn = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
+    p = [p[0] / pn, p[1] / pn, p[2] / pn];
+    let mid = [0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1]), 0.5 * (a[2] + b[2])];
+    Ok([mid[0] + p[0], mid[1] + p[1], mid[2] + p[2]])
 }
 
 /// Session PES: Cartesian BFGS, Sella InternalPES, or cell-packed Cartesian.
@@ -452,9 +564,8 @@ impl CellCartesianPes {
 /// Internals PES plus a periodic cell.
 pub struct CellInternalPes {
     inner: InternalPes,
-    cell: Cell,
-    mask: [bool; 9],
-    hess: BfgsModel,
+    state: CellState,
+    hess: PackedHess,
     update: HessUpdate,
 }
 
@@ -466,22 +577,23 @@ impl CellInternalPes {
         cell: Cell,
     ) -> Result<Self, SaddleError> {
         let inner = InternalPes::new(x, masses, chart)?;
-        let n = inner.n_int() + 9;
+        let n_atoms = inner.position().len() / 3;
+        let state = CellState::new(cell, n_atoms);
+        let n = inner.n_int() + state.n_cell_dof();
         Ok(Self {
             inner,
-            cell,
-            mask: [true; 9],
-            hess: BfgsModel::identity(n),
+            state,
+            hess: PackedHess::identity(n),
             update: HessUpdate::Bfgs,
         })
     }
 
     pub fn cell(&self) -> &Cell {
-        &self.cell
+        self.state.cell()
     }
 
     pub fn set_cell(&mut self, cell: Cell) {
-        self.cell = cell;
+        self.state.set_cell(cell);
     }
 
     pub fn set_update(&mut self, update: HessUpdate) {
@@ -489,21 +601,30 @@ impl CellInternalPes {
         self.inner.set_update(update);
     }
 
+    pub fn set_chart(&mut self, kind: CellChart) {
+        self.state.set_kind(kind);
+        self.hess = PackedHess::identity(self.packed_len());
+    }
+
+    pub fn chart(&self) -> CellChart {
+        self.state.kind()
+    }
+
     pub fn set_mask(&mut self, mask: [bool; 9]) {
-        self.mask = mask;
-        self.hess = BfgsModel::identity(self.packed_len());
+        self.state.set_mask(mask);
+        self.hess = PackedHess::identity(self.packed_len());
     }
 
     pub fn mask(&self) -> [bool; 9] {
-        self.mask
+        self.state.mask()
     }
 
-    pub fn hessian(&self) -> &BfgsModel {
+    pub fn hessian(&self) -> &PackedHess {
         &self.hess
     }
 
     pub fn n_cell_dof(&self) -> usize {
-        self.mask.iter().filter(|b| **b).count()
+        self.state.n_cell_dof()
     }
 
     pub fn packed_len(&self) -> usize {
@@ -511,21 +632,13 @@ impl CellInternalPes {
     }
 
     pub fn cell9(&self) -> [f64; 9] {
-        let [a, b, c] = lattice_of(&self.cell);
-        [a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2]]
+        self.state.cell9()
     }
 
     pub fn cell_params(&self) -> Array1<f64> {
-        let c = self.cell9();
-        let mut p = Array1::zeros(self.n_cell_dof());
-        let mut k = 0;
-        for i in 0..9 {
-            if self.mask[i] {
-                p[k] = c[i];
-                k += 1;
-            }
-        }
-        p
+        self.state
+            .params()
+            .unwrap_or_else(|_| Array1::zeros(self.n_cell_dof()))
     }
 
     /// `[q_int; cell_params]`.
@@ -542,16 +655,6 @@ impl CellInternalPes {
         Ok(out)
     }
 
-    fn apply_cell9(&mut self, c: [f64; 9]) -> Result<(), SaddleError> {
-        self.cell = cell_from_lattice(
-            [c[0], c[1], c[2]],
-            [c[3], c[4], c[5]],
-            [c[6], c[7], c[8]],
-            self.cell.origin(),
-        )?;
-        Ok(())
-    }
-
     pub fn packed_grad<S: PointSurface>(
         &self,
         surface: &S,
@@ -561,19 +664,16 @@ impl CellInternalPes {
         let c9 = self.cell9();
         let gcell = match surface.cell_grad(self.inner.position(), &c9)? {
             Some(g) => g,
-            None => fd_cell_grad(surface, self.inner.position(), &c9, &self.mask, 1e-5)?,
+            None => fd_cell_grad(surface, self.inner.position(), &c9, &self.state.mask(), 1e-5)?,
         };
+        let g_chart = self.state.chart_grad(gcell)?;
         let n = g_int.len();
-        let mut out = Array1::zeros(n + self.n_cell_dof());
+        let mut out = Array1::zeros(n + g_chart.len());
         for i in 0..n {
             out[i] = g_int[i];
         }
-        let mut k = 0;
-        for i in 0..9 {
-            if self.mask[i] {
-                out[n + k] = gcell[i];
-                k += 1;
-            }
+        for (k, v) in g_chart.iter().enumerate() {
+            out[n + k] = *v;
         }
         Ok(out)
     }
@@ -595,15 +695,8 @@ impl CellInternalPes {
         let (e0, g0) = surface.eval_in_cell(self.inner.position(), &c9)?;
         let g0p = self.packed_grad(surface, g0.view())?;
         let _ = e0;
-        let mut c1 = c9;
-        let mut k = 0;
-        for i in 0..9 {
-            if self.mask[i] {
-                c1[i] += d[nint + k];
-                k += 1;
-            }
-        }
-        self.apply_cell9(c1)?;
+        let dcell = d.slice(s![nint..]).to_owned();
+        self.state.kick_params(&dcell)?;
         let dq = d.slice(s![..nint]).to_owned();
         let (e, g1) = self.inner.kick(surface, dq.view())?;
         let g1p = self.packed_grad(surface, g1.view())?;
@@ -616,20 +709,22 @@ impl CellInternalPes {
         Ok((e, g1p))
     }
 
-    /// Sella `maybe_niggli_reduce`. Packed Hessian is dropped.
+    /// Sella `maybe_niggli_reduce`. Log chart transforms H; entries drops it.
     pub fn maybe_niggli_reduce(&mut self, angle_threshold: f64) -> Result<bool, SaddleError> {
-        let [a, b, c] = lattice_of(&self.cell);
-        let angs = [angle_deg(b, c), angle_deg(a, c), angle_deg(a, b)];
-        let max_dev = angs
-            .iter()
-            .map(|x| (x - 90.0).abs())
-            .fold(0.0_f64, f64::max);
-        if max_dev <= angle_threshold {
+        let n_noncell = self.inner.n_int();
+        let (applied, t) = self
+            .state
+            .maybe_niggli(angle_threshold, niggli_reduce_vectors)?;
+        if !applied {
             return Ok(false);
         }
-        let (a2, b2, c2) = niggli_reduce_vectors(a, b, c);
-        self.cell = cell_from_lattice(a2, b2, c2, self.cell.origin())?;
-        self.hess = BfgsModel::identity(self.packed_len());
+        if let Some(t) = t {
+            let mut h = self.hess.hessian().to_owned();
+            transform_cell_block(&mut h, n_noncell, &t);
+            self.hess = PackedHess::from_matrix(h);
+        } else {
+            self.hess = PackedHess::identity(self.packed_len());
+        }
         Ok(true)
     }
 
@@ -647,7 +742,7 @@ impl CellInternalPes {
 
     pub fn reset(&mut self) {
         self.inner.reset();
-        self.hess = BfgsModel::identity(self.packed_len());
+        self.hess = PackedHess::identity(self.packed_len());
     }
 
     pub fn kick<S: PointSurface>(
@@ -1148,5 +1243,37 @@ mod tests {
         assert_eq!(pes.packed_len(), 2);
         let p = pes.packed().unwrap();
         assert!((p[1] - 4.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn dummy_perp_defines_an_angle() {
+        let mut x = Array1::zeros(6);
+        x[3] = 1.0;
+        let dummy = place_perp_dummy(x.view(), 0, 1).unwrap();
+        assert!((dummy[1].abs() + dummy[2].abs()) > 0.5);
+        let mut frame = Array1::zeros(9);
+        for i in 0..6 {
+            frame[i] = x[i];
+        }
+        frame[6] = dummy[0];
+        frame[7] = dummy[1];
+        frame[8] = dummy[2];
+        let mut chart = Constraints::new(3).unwrap();
+        chart.fix_angle([0, 1, 2], frame.view(), None).unwrap();
+        let mut pes = InternalPes::with_dummies(
+            x,
+            Array1::from(vec![1.0, 1.0]),
+            chart,
+            Array1::from(vec![dummy[0], dummy[1], dummy[2]]),
+        )
+        .unwrap();
+        assert_eq!(pes.n_dummy(), 1);
+        assert_eq!(pes.b_matrix().unwrap().ncols(), 9);
+        let q = pes.internals().unwrap();
+        assert!(q[0].is_finite());
+        let dq = Array1::from(vec![0.05]);
+        pes.kick(&Well, dq.view()).unwrap();
+        assert!(pes.dummy_positions().iter().all(|v| v.is_finite()));
+        assert!(pes.position().iter().all(|v| v.is_finite()));
     }
 }

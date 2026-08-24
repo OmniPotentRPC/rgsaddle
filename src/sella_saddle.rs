@@ -205,6 +205,32 @@ impl SellaSaddleSession {
         })
     }
 
+    /// P-RFO on packed `[q_int; L]`.
+    pub fn on_cell_internal_log(
+        config: SellaSaddleConfig,
+        x: Array1<f64>,
+        masses: Array1<f64>,
+        chart: Constraints,
+        cell: crate::Cell,
+        mask: [bool; 9],
+    ) -> Result<Self, SaddleError> {
+        let mut pes = CellInternalPes::new(x, masses, chart, cell)?;
+        pes.set_mask(mask);
+        pes.set_chart(crate::CellChart::LogDeform);
+        let n_free = pes.packed_len().max(1);
+        let geom = SellaGeom::Chart(pes.internals().chart().clone());
+        let delta = config.delta * n_free as f64;
+        Ok(Self {
+            pes: SellaPes::CellInternal(pes),
+            config,
+            geom,
+            delta,
+            rho: 1.0,
+            steps_since_diag: 0,
+            ritz_v: None,
+        })
+    }
+
     pub fn position(&self) -> ndarray::ArrayView1<'_, f64> {
         self.pes.position()
     }
@@ -816,6 +842,35 @@ mod tests {
         let report = sess.step(&Well).unwrap();
         assert!(report.energy.is_finite());
         assert!(sess.position().iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn cell_internal_log_prfo_step_is_finite() {
+        use crate::internal::{CartAxis, Translation};
+        let mut x = Array1::zeros(6);
+        x[0] = 0.2;
+        let mut chart = Constraints::new(2).unwrap();
+        chart
+            .fix_translation(Translation::all(2, CartAxis::X).unwrap(), x.view(), Some(0.0))
+            .unwrap();
+        let cell = crate::Cell::ortho(3.0, 3.0, 3.0).unwrap();
+        let mut mask = [false; 9];
+        mask[0] = true;
+        let mut sess = SellaSaddleSession::on_cell_internal_log(
+            SellaSaddleConfig::default(),
+            x,
+            Array1::from(vec![1.0, 1.0]),
+            chart,
+            cell,
+            mask,
+        )
+        .unwrap();
+        assert_eq!(
+            sess.cell_internal_pes().unwrap().chart(),
+            crate::CellChart::LogDeform
+        );
+        let report = sess.step(&Well).unwrap();
+        assert!(report.energy.is_finite());
     }
 
     #[test]
