@@ -490,54 +490,6 @@ impl SellaMinSession {
             delta: self.delta,
         })
     }
-        };
-        let x = pes.position().to_owned();
-        let c9 = pes.cell9();
-        let (energy, g) = surface.eval_in_cell(x.view(), &c9)?;
-        if !g.iter().all(|v| v.is_finite()) {
-            return Err(SaddleError::NonFinite("sella gradient"));
-        }
-        let max_force = self.config.force_gate.value(g.view());
-        if max_force <= self.config.force_tol {
-            return Ok(SellaMinReport {
-                energy,
-                max_force,
-                at_minimum: true,
-                rho: self.rho,
-                delta: self.delta,
-            });
-        }
-        let g_p = pes.packed_grad(surface, g.view())?;
-        let vg = Vector::from_host(g_p.clone());
-        let h = pes.hessian().hessian();
-        let (evals, evecs) = crate::exact_eigh(h.view())?;
-        let mut s = qn_restricted(&evals, &evecs, &g_p, 0, self.delta);
-        let sn = vnrm2(&Vector::from_host(s.clone()));
-        if sn > self.delta && sn > 0.0 {
-            s.mapv_inplace(|v| v * (self.delta / sn));
-        }
-        let vs = Vector::from_host(s.clone());
-        let e0 = energy;
-        let hs = h.dot(&s);
-        let pred = vdot(&vg, &vs) + 0.5 * dot(s.view(), hs.view());
-        let (energy, g1p) = pes.kick_packed(surface, s.view())?;
-        let n = x.len();
-        let g1_cart = g1p.slice(s![..n]).to_owned();
-        let max_force = self.config.force_gate.value(g1_cart.view());
-        if pred.abs() >= 1e-14 {
-            self.rho = (energy - e0) / pred;
-            self.delta = update_trust(self.delta, self.rho, vnrm2(&vs), &self.config.schedule());
-        } else {
-            self.rho = 1.0;
-        }
-        Ok(SellaMinReport {
-            energy,
-            max_force,
-            at_minimum: max_force <= self.config.force_tol,
-            rho: self.rho,
-            delta: self.delta,
-        })
-    }
 
     pub fn run<S: PointSurface>(
         &mut self,
