@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 1u
+#define RGSADDLE_ABI_MINOR 2u
 
 /** Version head carried by every wire struct. */
 typedef struct {
@@ -261,6 +261,31 @@ int rgsaddle_irc_position(const RgsaddleIrc *session, double *out);
 int rgsaddle_irc_set_direction(RgsaddleIrc *session, int32_t direction);
 int rgsaddle_irc_reset(RgsaddleIrc *session);
 void rgsaddle_irc_free(RgsaddleIrc *session);
+
+typedef struct RgsaddleSellaMin RgsaddleSellaMin;
+
+/** Sella order-0 (QN + trust). Default geometry is the rigid quotient. */
+typedef struct {
+  rgsaddle_version_t version;
+  uint64_t flags;
+  double delta;
+  double force_tol;
+  rgsaddle_force_gate_t force_gate;
+} rgsaddle_sella_min_config_t;
+
+/**
+ * Create a Sella minimum session. `position` is 3N, `masses` is N.
+ * Unknown force_gate returns NULL.
+ */
+RgsaddleSellaMin *rgsaddle_sella_min_create(
+    const rgsaddle_sella_min_config_t *config, int64_t n_atoms,
+    const double *position, const double *masses);
+int rgsaddle_sella_min_step(RgsaddleSellaMin *session,
+                            rgsaddle_surface_fn surface, void *user,
+                            rgsaddle_report_t *out);
+int rgsaddle_sella_min_position(const RgsaddleSellaMin *session, double *out);
+int rgsaddle_sella_min_reset(RgsaddleSellaMin *session);
+void rgsaddle_sella_min_free(RgsaddleSellaMin *session);
 
 #ifdef __cplusplus
 }
