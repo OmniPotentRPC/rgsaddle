@@ -17,7 +17,7 @@ use crate::error::SaddleError;
 use crate::geom::{update_trust, SellaGeom, TrustSchedule};
 use crate::minmode::PointSurface;
 use crate::pes::CartesianPes;
-use crate::pes_internal::{InternalPes, SellaPes};
+use crate::pes_internal::{CellCartesianPes, InternalPes, SellaPes};
 
 pub struct SellaSaddleConfig {
     pub delta: f64,
@@ -156,6 +156,29 @@ impl SellaSaddleSession {
         })
     }
 
+    /// P-RFO in packed `[x_cart; cell_params]`.
+    pub fn on_cell(
+        config: SellaSaddleConfig,
+        x: Array1<f64>,
+        masses: Array1<f64>,
+        cell: crate::Cell,
+        mask: [bool; 9],
+    ) -> Result<Self, SaddleError> {
+        let mut pes = CellCartesianPes::new(x, masses, cell)?;
+        pes.set_mask(mask);
+        let n_free = pes.packed_len().max(1);
+        let delta = config.delta * n_free as f64;
+        Ok(Self {
+            pes: SellaPes::Cell(pes),
+            config,
+            geom: SellaGeom::Kind(rgmin::ManifoldKind::Euclidean),
+            delta,
+            rho: 1.0,
+            steps_since_diag: 0,
+            ritz_v: None,
+        })
+    }
+
     pub fn position(&self) -> ndarray::ArrayView1<'_, f64> {
         self.pes.position()
     }
@@ -186,6 +209,10 @@ impl SellaSaddleSession {
         self.pes.internal()
     }
 
+    pub fn cell_pes(&self) -> Option<&CellCartesianPes> {
+        self.pes.cell()
+    }
+
     pub fn reset(&mut self) {
         self.pes.reset();
         let n_free = match &self.pes {
@@ -205,11 +232,7 @@ impl SellaSaddleSession {
     ) -> Result<SellaSaddleReport, SaddleError> {
         match &self.pes {
             SellaPes::Internal(_) => self.step_internal(surface),
-            SellaPes::Cell(_) => {
-                return Err(SaddleError::Solver(
-                    "SellaSaddle on_cell is not wired".into(),
-                ));
-            }
+            SellaPes::Cell(_) => self.step_cell(surface),
             SellaPes::Cartesian(_) => self.step_cartesian(surface),
         }
     }
@@ -402,6 +425,84 @@ impl SellaSaddleSession {
         })
     }
 
+    fn step_cell<S: PointSurface>(
+        &mut self,
+        surface: &S,
+    ) -> Result<SellaSaddleReport, SaddleError> {
+        let x;
+        let energy;
+        let g;
+        let g_p;
+        let h;
+        {
+            let pes = match &self.pes {
+                SellaPes::Cell(p) => p,
+                SellaPes::Cartesian(_) | SellaPes::Internal(_) => unreachable!(),
+            };
+            x = pes.position().to_owned();
+            let c9 = pes.cell9();
+            let (e, gg) = surface.eval_in_cell(x.view(), &c9)?;
+            energy = e;
+            g = gg;
+            if !g.iter().all(|v| v.is_finite()) {
+                return Err(SaddleError::NonFinite("sella gradient"));
+            }
+            let max_force = self.config.force_gate.value(g.view());
+            if max_force <= self.config.force_tol {
+                return Ok(SellaSaddleReport {
+                    energy,
+                    max_force,
+                    at_saddle: true,
+                    rho: self.rho,
+                    delta: self.delta,
+                });
+            }
+            g_p = pes.packed_grad(surface, g.view())?;
+            h = pes.hessian().hessian().to_owned();
+        }
+        let vg = Vector::from_host(g_p.clone());
+        let (evals, evecs) = self.diag_free(&h)?;
+        let pes = match &mut self.pes {
+            SellaPes::Cell(p) => p,
+            SellaPes::Cartesian(_) | SellaPes::Internal(_) => unreachable!(),
+        };
+        let mut s = prfo_restricted(
+            &evals,
+            &evecs,
+            &g_p,
+            self.config.order.max(1),
+            self.delta,
+        );
+        let sn = vnrm2(&Vector::from_host(s.clone()));
+        if sn > self.delta && sn > 0.0 {
+            s.mapv_inplace(|v| v * (self.delta / sn));
+        }
+        let vs = Vector::from_host(s.clone());
+        let e0 = energy;
+        let hs = h.dot(&s);
+        let pred = vdot(&vg, &vs) + 0.5 * dot(s.view(), hs.view());
+        let (energy, g1p) = pes.kick_packed(surface, s.view())?;
+        let n = x.len();
+        let mut g1_cart = Array1::zeros(n);
+        for i in 0..n {
+            g1_cart[i] = g1p[i];
+        }
+        let max_force = self.config.force_gate.value(g1_cart.view());
+        if pred.abs() >= 1e-14 {
+            self.rho = (energy - e0) / pred;
+            self.delta = update_trust(self.delta, self.rho, vnrm2(&vs), &self.config.schedule());
+        } else {
+            self.rho = 1.0;
+        }
+        Ok(SellaSaddleReport {
+            energy,
+            max_force,
+            at_saddle: max_force <= self.config.force_tol,
+            rho: self.rho,
+            delta: self.delta,
+        })
+    }
+
     pub fn run<S: PointSurface>(
         &mut self,
         surface: &S,
@@ -528,6 +629,27 @@ mod tests {
         let d_h = ManifoldKind::RigidQuotient.project(&x0, &d);
         let err = nrm2((&d - &d_h).view());
         assert!(err < 1e-10, "step left the horizontal space: {err}");
+    }
+
+    #[test]
+    fn cell_prfo_step_is_finite() {
+        let mut x = Array1::zeros(6);
+        x[0] = 0.2;
+        let cell = crate::Cell::ortho(3.0, 3.0, 3.0).unwrap();
+        let mut mask = [false; 9];
+        mask[0] = true;
+        let mut sess = SellaSaddleSession::on_cell(
+            SellaSaddleConfig::default(),
+            x,
+            Array1::from(vec![1.0, 1.0]),
+            cell,
+            mask,
+        )
+        .unwrap();
+        let report = sess.step(&Well).unwrap();
+        assert!(report.energy.is_finite());
+        assert!(sess.position().iter().all(|v| v.is_finite()));
+        assert!(sess.cell_pes().is_some());
     }
 
     #[test]
