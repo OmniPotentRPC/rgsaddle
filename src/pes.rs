@@ -19,6 +19,16 @@ pub enum HessUpdate {
     TsBfgs,
 }
 
+impl HessUpdate {
+    /// C / Python ordinal. Unknown values stay out of the enum.
+    pub const fn to_abi(self) -> i32 {
+        match self {
+            Self::Bfgs => 0,
+            Self::TsBfgs => 1,
+        }
+    }
+}
+
 /// Cartesian geometry plus a persistent MW Hessian.
 pub struct CartesianPes {
     x: Array1<f64>,

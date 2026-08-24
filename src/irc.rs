@@ -38,6 +38,16 @@ pub enum IrcKind {
     Morokuma,
 }
 
+impl IrcKind {
+    /// C `rgsaddle_irc_kind_t`.
+    pub const fn to_abi(self) -> i32 {
+        match self {
+            Self::Gs2 => 0,
+            Self::Morokuma => 1,
+        }
+    }
+}
+
 /// Outer IRC controls.
 #[derive(Clone, Debug)]
 pub struct IrcConfig {
