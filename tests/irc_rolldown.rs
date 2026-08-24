@@ -51,3 +51,22 @@ fn forward_and_reverse_leave_the_saddle_opposite_ways() {
         "forward {x_fwd} and reverse {x_rev} must have opposite signs"
     );
 }
+
+#[test]
+fn kick_mode_comes_from_matrix_free_lanczos_not_a_full_heev() {
+    let saddle = Array1::zeros(6);
+    let masses = Array1::from(vec![1.0, 1.0]);
+    let seed = Array1::from(vec![1.0, 0.1, 0.0, 0.0, 0.0, 0.0]);
+    let mut session = IrcSession::from_surface(
+        IrcConfig::default(),
+        saddle,
+        masses,
+        seed,
+        IrcDirection::Forward,
+        &DoubleWell,
+    )
+    .unwrap();
+    let _ = session.step(&DoubleWell).unwrap();
+    let x0 = session.position()[0];
+    assert!(x0.abs() > 1e-8, "Lanczos kick must leave the saddle");
+}

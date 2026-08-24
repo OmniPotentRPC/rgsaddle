@@ -27,6 +27,10 @@ pub struct IrcConfig {
     pub max_move: f64,
     pub method: Method,
     pub max_inner: usize,
+    /// Finite-difference Hessian action length for the matrix-free kick.
+    pub dr: f64,
+    /// Krylov dimension for the lowest-mode Lanczos kick.
+    pub krylov_dim: usize,
 }
 
 impl Default for IrcConfig {
@@ -37,6 +41,8 @@ impl Default for IrcConfig {
             max_move: 0.2,
             method: Method::Steepest,
             max_inner: 10,
+            dr: 1e-3,
+            krylov_dim: 12,
         }
     }
 }
@@ -104,6 +110,28 @@ impl IrcSession {
         };
         session.set_direction(direction);
         Ok(session)
+    }
+
+    /// Estimate the imaginary mode with matrix-free Lanczos (FD Hessian
+    /// actions). This is the ChASE / PRIMME / Sella lesson: IRC needs
+    /// one extremal pair, not a full ELPA / SLATE heev of H.
+    pub fn from_surface<S: crate::minmode::PointSurface>(
+        config: IrcConfig,
+        saddle: Array1<f64>,
+        masses: Array1<f64>,
+        seed: Array1<f64>,
+        direction: IrcDirection,
+        surface: &S,
+    ) -> Result<Self, SaddleError> {
+        let (_, g0) = surface.eval(saddle.view())?;
+        let mm = crate::minmode::MinModeConfig {
+            dr: config.dr,
+            krylov_dim: config.krylov_dim,
+            ..crate::minmode::MinModeConfig::default()
+        };
+        let (mode, _curv, _actions) =
+            crate::minmode::lanczos_mode(surface, saddle.view(), g0.view(), seed, &mm)?;
+        Self::new(config, saddle, masses, mode, direction)
     }
 
     pub fn position(&self) -> ArrayView1<'_, f64> {

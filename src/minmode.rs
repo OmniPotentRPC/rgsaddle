@@ -136,7 +136,7 @@ fn rotate_dimer<S: PointSurface>(
 
 /// Lanczos: build a Krylov basis of finite-difference Hessian actions
 /// and take the lowest Ritz vector.
-fn lanczos_mode<S: PointSurface>(
+pub(crate) fn lanczos_mode<S: PointSurface>(
     surface: &S,
     x: ArrayView1<f64>,
     g0: ArrayView1<f64>,
