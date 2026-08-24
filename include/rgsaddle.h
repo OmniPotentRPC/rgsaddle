@@ -331,6 +331,9 @@ int rgsaddle_sella_saddle_position(const RgsaddleSellaSaddle *session,
 int rgsaddle_sella_saddle_reset(RgsaddleSellaSaddle *session);
 int rgsaddle_sella_saddle_set_hess_update(RgsaddleSellaSaddle *session,
                                           int32_t update);
+/** `expand` is ExpandKind: 0 lanczos, 1 gd, 2 jd0, 3 jd0_alt, 4 mjd0, 5 mjd0_alt. */
+int rgsaddle_sella_saddle_set_expand(RgsaddleSellaSaddle *session,
+                                     int32_t expand);
 void rgsaddle_sella_saddle_free(RgsaddleSellaSaddle *session);
 
 /** Empty Constraints chart. The caller stamps version and zeroes flags. */
@@ -391,6 +394,9 @@ int rgsaddle_internal_pes_kick(RgsaddleInternalPes *pes,
                                const double *dq);
 int rgsaddle_internal_pes_set_hess_update(RgsaddleInternalPes *pes,
                                           int32_t update);
+/** `g_cart` and `out` are 3N and n_int. */
+int rgsaddle_internal_pes_grad(const RgsaddleInternalPes *pes,
+                               const double *g_cart, double *out);
 void rgsaddle_internal_pes_free(RgsaddleInternalPes *pes);
 
 /**

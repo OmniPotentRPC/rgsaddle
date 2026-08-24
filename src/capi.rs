@@ -1532,6 +1532,23 @@ pub unsafe extern "C" fn rgsaddle_sella_saddle_set_hess_update(
 }
 
 /// # Safety
+/// `expand` is ExpandKind. Unknown refuses.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_sella_saddle_set_expand(
+    session: *mut RgsaddleSellaSaddle,
+    expand: i32,
+) -> i32 {
+    if session.is_null() {
+        return RGSADDLE_NULL_SESSION;
+    }
+    let Some(kind) = crate::ExpandKind::try_from_abi(expand) else {
+        return RGSADDLE_INVALID_PARAMETER;
+    };
+    unsafe { (*session).session.set_expand(kind) };
+    RGSADDLE_OK
+}
+
+/// # Safety
 /// `session` must come from [`rgsaddle_sella_saddle_create`], freed once.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rgsaddle_sella_saddle_free(session: *mut RgsaddleSellaSaddle) {
@@ -1976,6 +1993,34 @@ pub unsafe extern "C" fn rgsaddle_internal_pes_set_hess_update(
 }
 
 /// # Safety
+/// `g_cart` is 3N, `out` is n_int.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_internal_pes_grad(
+    pes: *const RgsaddleInternalPes,
+    g_cart: *const f64,
+    out: *mut f64,
+) -> i32 {
+    if pes.is_null() {
+        return RGSADDLE_NULL_SESSION;
+    }
+    if g_cart.is_null() || out.is_null() {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let pes = unsafe { &*pes };
+    let dof = (3 * pes.n_atoms) as usize;
+    let g = Array1::from(unsafe { slice::from_raw_parts(g_cart, dof) }.to_vec());
+    let gint = match pes.pes.internals_grad(g.view()) {
+        Ok(q) => q,
+        Err(e) => return status_of(&e),
+    };
+    let dst = unsafe { slice::from_raw_parts_mut(out, gint.len()) };
+    for (i, v) in gint.iter().enumerate() {
+        dst[i] = *v;
+    }
+    RGSADDLE_OK
+}
+
+/// # Safety
 /// Freed once.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rgsaddle_internal_pes_free(pes: *mut RgsaddleInternalPes) {
@@ -2182,6 +2227,13 @@ mod constraints_abi_tests {
             unsafe { rgsaddle_internal_pes_set_hess_update(pes, 99) },
             RGSADDLE_INVALID_PARAMETER
         );
+        let g_cart = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+        let mut gint = [0.0; 3];
+        assert_eq!(
+            unsafe { rgsaddle_internal_pes_grad(pes, g_cart.as_ptr(), gint.as_mut_ptr()) },
+            RGSADDLE_OK
+        );
+        assert!(gint.iter().all(|v| v.is_finite()));
         let min_cfg = RgsaddleSellaMinConfig {
             version: RgsaddleVersion {
                 major: RGSADDLE_ABI_MAJOR,

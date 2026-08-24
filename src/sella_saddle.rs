@@ -177,6 +177,11 @@ impl SellaSaddleSession {
         self.pes.set_update(update);
     }
 
+    /// Sella `rayleigh_ritz(..., method=)`.
+    pub fn set_expand(&mut self, expand: crate::ExpandKind) {
+        self.config.expand = expand;
+    }
+
     pub fn internal_pes(&self) -> Option<&InternalPes> {
         self.pes.internal()
     }
