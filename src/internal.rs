@@ -396,6 +396,8 @@ fn center_rows(pos: &mut Array2<f64>) {
     }
 }
 
+/// Sella `R = dx.T @ refpos`. The rightmost quaternion is the inverse
+/// Kabsch rotation: a +axis body rotation reads negative.
 fn kabsch_f(pos: &Array2<f64>, refpos: &Array2<f64>) -> [[f64; 4]; 4] {
     let mut r = [[0.0; 3]; 3];
     for i in 0..pos.nrows() {
@@ -644,9 +646,12 @@ mod tests {
         let x = pack_cart(&rows);
         let rz = Rotation::new(vec![0, 1, 2], CartAxis::Z, refpos.clone()).unwrap();
         let val = rz.value(x.view()).unwrap();
+        // Sella `R = dx.T @ refpos` is the inverse Kabsch angle: a
+        // +Z body rotation reads `-theta`.
         assert!(
-            (val - th).abs() < 1e-8,
-            "rotation Z = {val}, expected {th}; x0={x0:?}"
+            (val + th).abs() < 1e-8,
+            "rotation Z = {val}, expected {}; x0={x0:?}",
+            -th
         );
         let rx = Rotation::new(vec![0, 1, 2], CartAxis::X, refpos.clone()).unwrap();
         let ry = Rotation::new(vec![0, 1, 2], CartAxis::Y, refpos).unwrap();
