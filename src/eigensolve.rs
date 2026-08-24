@@ -31,6 +31,7 @@ impl EigenDevice {
         }
     }
 
+    /// Inverse of [`Self::to_abi`].
     pub const fn try_from_abi(v: i32) -> Option<Self> {
         match v {
             0 => Some(Self::Host),
@@ -274,9 +275,8 @@ pub fn expand(
             }
             let alpha = dot(vi.view(), pprojr.view()) / denom;
             let mut t = pprojv;
-            for i in 0..d {
-                t[i] = t[i] * alpha - pprojr[i];
-            }
+            t.mapv_inplace(|x| x * alpha);
+            axpy(-1.0, pprojr.view(), &mut t);
             Ok(t)
         }
         ExpandKind::Mjd0 => {
@@ -392,14 +392,11 @@ pub fn rayleigh_ritz_iter(
         if tn < 1e-18 {
             return Ok((lams, v, av));
         }
-        for x in t.iter_mut() {
-            *x /= tn;
-        }
-        // Sella: if the expand direction is still in span(V), use Lanczos.
+        t.mapv_inplace(|x| x / tn);
+        // Sella: expand already in span(V) falls back to Lanczos residual.
         let mut tproj = Array1::zeros(n);
         for j in 0..k {
-            let c = dot(v.column(j), t.view());
-            axpy(c, v.column(j), &mut tproj);
+            axpy(dot(v.column(j), t.view()), v.column(j), &mut tproj);
         }
         let mut tperp = t.clone();
         axpy(-1.0, tproj.view(), &mut tperp);
@@ -407,9 +404,7 @@ pub fn rayleigh_ritz_iter(
             let rn = nrm2(rcols[seeking].view());
             if rn >= 1e-18 {
                 t = rcols[seeking].clone();
-                for x in t.iter_mut() {
-                    *x /= rn;
-                }
+                t.mapv_inplace(|x| x / rn);
             }
         }
         let mut tcol = Array2::zeros((n, 1));
@@ -418,11 +413,10 @@ pub fn rayleigh_ritz_iter(
         }
         let mut tnew = modified_gram_schmidt(tcol.view(), Some(v.view()), 1e-8);
         if tnew.ncols() == 0 {
+            // Sella: try residual columns, then stop.
             for ri in &rcols {
                 let mut col = Array2::zeros((n, 1));
-                for i in 0..n {
-                    col[(i, 0)] = ri[i];
-                }
+                col.column_mut(0).assign(ri);
                 tnew = modified_gram_schmidt(col.view(), Some(v.view()), 1e-8);
                 if tnew.ncols() == 1 {
                     break;
@@ -661,15 +655,15 @@ mod tests {
     }
 
     #[test]
-    fn ritz_vector_retract_stays_on_the_sphere() {
+    fn ritz_vector_proj_retr_transp_stays_on_the_sphere() {
         let mut a = Array2::<f64>::zeros((3, 3));
         a[(0, 0)] = 4.0;
         a[(1, 1)] = 1.0;
         a[(2, 2)] = 9.0;
         a[(0, 1)] = 0.5;
         a[(1, 0)] = 0.5;
-        let v0 = Array2::eye(3);
-        let (_, vecs, _) = rayleigh_ritz(a.view(), v0.view(), 0.1).unwrap();
+        let (lams, vecs) = exact_eigh(a.view()).unwrap();
+        assert_eq!(lams.len(), 3);
         let x = vecs.column(0).to_owned();
         assert!(
             (nrm2(x.view()) - 1.0).abs() < 1e-12,
@@ -681,7 +675,8 @@ mod tests {
         let s = man.project(&x, &v_amb);
         assert!(
             dot(x.view(), s.view()).abs() < 1e-12,
-            "projected step must be tangent"
+            "projected step must be tangent: x·s={}",
+            dot(x.view(), s.view())
         );
         let y = man.retract(&x, &s);
         assert!(
@@ -692,8 +687,15 @@ mod tests {
         let t = man.transport(&x, &y, &s);
         assert!(
             dot(y.view(), t.view()).abs() < 1e-12,
-            "transported step must be tangent at arrival"
+            "transported step leaves T_y: y·t={}",
+            dot(y.view(), t.view())
         );
+        let v0 = Array2::eye(3);
+        let (_, vr, _) = rayleigh_ritz(a.view(), v0.view(), 0.1).unwrap();
+        let xr = vr.column(0).to_owned();
+        assert!((nrm2(xr.view()) - 1.0).abs() < 1e-12);
+        let yr = man.retract(&xr, &man.project(&xr, &v_amb));
+        assert!((nrm2(yr.view()) - 1.0).abs() < 1e-12);
     }
 
     fn expand_fixture() -> (
@@ -824,5 +826,16 @@ mod tests {
         assert!(v[0].abs() > v[1].abs());
         let (lam_d, _) = lowest_on(EigenDevice::Dlpk, a.view(), seed.view()).unwrap();
         assert!((lam - lam_d).abs() < 0.5, "{lam} vs {lam_d}");
+        assert!(
+            (nrm2(v.view()) - 1.0).abs() < 1e-8,
+            "lowest mode left the sphere"
+        );
+        let man = ManifoldKind::Sphere;
+        let s = man.project(&v, &array![0.1, -0.2]);
+        assert!(dot(v.view(), s.view()).abs() < 1e-12);
+        let y = man.retract(&v, &s);
+        assert!((nrm2(y.view()) - 1.0).abs() < 1e-12);
+        let w = man.transport(&v, &y, &s);
+        assert!(dot(y.view(), w.view()).abs() < 1e-12);
     }
 }

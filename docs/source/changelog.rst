@@ -12,7 +12,7 @@ Unreleased
   Reductions go through ``rgmin.vecops`` so ``par`` applies.
   A Ritz vector lives on the sphere: ``project`` /
   ``retract`` / ``transport`` keep it on the set.
-  ``EigenDevice.DLPK`` is the rgmin ``lowest_mode`` waist,
+  ``EigenDevice::Dlpk`` is the rgmin ``lowest_mode`` waist,
   not a second GPU stack.
 
 - ``SamdSession`` is Sella ``samd.py`` BDP: Euclidean ``step``
