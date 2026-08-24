@@ -22,7 +22,9 @@ and ``3N - ncons`` on a chart.
 ``exact_eigh`` / ``rayleigh_ritz`` are Sella
 ``eigensolvers.py``. ``numerical_hvp`` is
 ``linalg.NumericalHessian``. ``SamdSession`` is the BDP
-thermostat (``samd.py``). ``force_match_hessian`` is the
+thermostat (``samd.py``): Euclidean by default, or ``on`` /
+``with_chart`` so Verlet retracts on ``SellaGeom``
+(``project`` / ``retract`` / ``transport``). ``force_match_hessian`` is the
 bond arm of ``force_match.pyx``.
 
 The C wire exposes ``rgsaddle_sella_min_*`` and
