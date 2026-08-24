@@ -28,6 +28,11 @@ The C wire exposes ~rgsaddle_sella_min_*~ and
 ~rgsaddle_sella_saddle_*~ (ABI minor 2). Unknown
 ~force_gate~ refuses create.
 
+~SellaSaddleSession~ ~eig=true~ runs Rayleigh-Ritz on the
+free Hessian every ~nsteps_per_diag~ steps. ~EigenDevice::Dlpk~
+is the rgmin ~lowest_mode~ waist (vecops / dlpk), not a
+second GPU stack.
+
 ~RationalFunctionOptimization~ is Sella ~method=rfo~: ~alpha~
 in ~[0, 1]~, ~order~ selects the Banerjee-augmented mode.
 The increment is ~rgmin::rfo_get_s~. Distinct from

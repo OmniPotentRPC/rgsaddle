@@ -78,7 +78,7 @@ pub mod tangent;
 
 pub use band::{BandConfig, BandReport, BandSession, BandStatus, BandSurface};
 pub use constraints::{Constraints, Equality, InternalCounts};
-pub use eigensolve::{exact_eigh, rayleigh_ritz, EigenDevice};
+pub use eigensolve::{exact_eigh, eigh_on, lowest_on, rayleigh_ritz, EigenDevice};
 pub use error::SaddleError;
 pub use force::ForceGate;
 pub use force_match::{covalent_pairs, force_match_hessian};

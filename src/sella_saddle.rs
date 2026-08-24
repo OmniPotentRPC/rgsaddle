@@ -27,6 +27,13 @@ pub struct SellaSaddleConfig {
     pub force_tol: f64,
     pub force_gate: crate::ForceGate,
     pub order: usize,
+    /// Sella `eig=true`: periodic Rayleigh-Ritz on the free Hessian.
+    pub eig: bool,
+    /// Sella `nsteps_per_diag`.
+    pub nsteps_per_diag: usize,
+    /// Sella `gamma` residual scale. `<= 0` is exact eigh.
+    pub gamma: f64,
+    pub eigen_device: crate::EigenDevice,
 }
 
 impl SellaSaddleConfig {
@@ -54,6 +61,10 @@ impl Default for SellaSaddleConfig {
             force_tol: 1e-3,
             force_gate: crate::ForceGate::MaxForceOnAtom,
             order: 1,
+            eig: true,
+            nsteps_per_diag: 3,
+            gamma: 0.1,
+            eigen_device: crate::EigenDevice::Host,
         }
     }
 }
@@ -72,6 +83,7 @@ pub struct SellaSaddleSession {
     geom: SellaGeom,
     delta: f64,
     rho: f64,
+    steps_since_diag: usize,
 }
 
 impl SellaSaddleSession {
@@ -108,6 +120,7 @@ impl SellaSaddleSession {
             geom,
             delta,
             rho: 1.0,
+            steps_since_diag: 0,
         })
     }
 
@@ -132,6 +145,7 @@ impl SellaSaddleSession {
         let n = self.pes.position().len();
         self.delta = self.config.delta * self.geom.n_free(n) as f64;
         self.rho = 1.0;
+        self.steps_since_diag = 0;
     }
 
     pub fn step<S: PointSurface>(
@@ -158,7 +172,18 @@ impl SellaSaddleSession {
         let u = self.geom.ufree(&x);
         let g_free = crate::geom::u_t_vec(&u, &g_r);
         let h_free = crate::geom::u_t_h_u(&u, self.pes.hessian().hessian());
-        let (evals, evecs) = crate::exact_eigh(h_free.view())?;
+        let (evals, evecs) = if self.config.eig
+            && self.steps_since_diag >= self.config.nsteps_per_diag.max(1)
+        {
+            self.steps_since_diag = 0;
+            let v0 = ndarray::Array2::eye(h_free.nrows());
+            let (lams, vecs, _) =
+                crate::rayleigh_ritz(h_free.view(), v0.view(), self.config.gamma)?;
+            (lams, vecs)
+        } else {
+            self.steps_since_diag += 1;
+            crate::eigh_on(self.config.eigen_device, h_free.view())?
+        };
         let s_free = prfo_restricted(
             &evals,
             &evecs,
@@ -248,6 +273,25 @@ mod tests {
     }
 
     #[test]
+    fn eig_rayleigh_ritz_step_is_finite() {
+        let mut x = Array1::zeros(6);
+        x[0] = 0.2;
+        let mut sess = SellaSaddleSession::new(
+            SellaSaddleConfig {
+                eig: true,
+                nsteps_per_diag: 1,
+                gamma: 0.1,
+                ..SellaSaddleConfig::default()
+            },
+            x,
+            Array1::from(vec![1.0, 1.0]),
+        )
+        .unwrap();
+        let report = sess.step(&Well).unwrap();
+        assert!(report.energy.is_finite());
+        assert!(sess.position().iter().all(|v| v.is_finite()));
+    }
+
     fn prfo_step_is_finite() {
         let mut x = Array1::zeros(6);
         x[0] = 0.2;

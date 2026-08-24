@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import enum
 
-from rgsaddle import ForceGate, HessUpdate, IrcKind, MinModeKind
+from rgsaddle import EigenDevice, ForceGate, HessUpdate, IrcKind, MinModeKind
 
 
 def test_force_gate_is_an_enum():
@@ -42,3 +42,9 @@ def test_irc_and_minmode_match_the_c_wire():
     except ValueError:
         return
     raise AssertionError("IrcKind(99) must raise")
+
+
+def test_eigen_device_is_an_enum():
+    assert issubclass(EigenDevice, enum.IntEnum)
+    assert EigenDevice.HOST == 0
+    assert EigenDevice.DLPK == 1

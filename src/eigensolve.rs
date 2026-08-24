@@ -5,7 +5,8 @@
 //! path until that feature is linked); this crate does not grow a
 //! second device stack.
 
-use ndarray::{Array1, Array2, ArrayView2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
+use rgmin::{lowest_mode, ApplyHessian, EigenParams, EigensolverKind};
 use rgmin::vecops::nrm2;
 
 use crate::error::SaddleError;
@@ -16,8 +17,36 @@ use crate::linalg::{modified_gram_schmidt, symmetrize_vt_av};
 pub enum EigenDevice {
     #[default]
     Host,
-    /// Same Host path until a dlpk CUDA feature is linked.
+    /// rgmin `lowest_mode` (vecops / dlpk). Not a second GPU stack.
     Dlpk,
+}
+
+impl EigenDevice {
+    /// C / Python ordinal.
+    pub const fn to_abi(self) -> i32 {
+        match self {
+            Self::Host => 0,
+            Self::Dlpk => 1,
+        }
+    }
+}
+
+/// Dense `H v` for [`lowest_mode`].
+struct DenseApply<'a>(&'a Array2<f64>);
+
+impl ApplyHessian for DenseApply<'_> {
+    fn apply_hessian(&self, _x: ArrayView1<f64>, v: ArrayView1<f64>) -> Array1<f64> {
+        let n = self.0.nrows().min(v.len());
+        let mut out = Array1::zeros(v.len());
+        for i in 0..n {
+            let mut acc = 0.0;
+            for j in 0..n {
+                acc += self.0[(i, j)] * v[j];
+            }
+            out[i] = acc;
+        }
+        out
+    }
 }
 
 /// Sella `exact`: dense symmetric eigen of `a`.
@@ -68,13 +97,48 @@ pub fn rayleigh_ritz(
     Ok((lams, v_rot, av_rot))
 }
 
-/// Dense eigen on `device`. Both arms share the Host Jacobi waist.
+/// Dense eigen on `device`. Full spectrum is Host Jacobi.
+/// [`EigenDevice::Dlpk`] is the lowest-mode arm through rgmin.
 pub fn eigh_on(
     device: EigenDevice,
     a: ArrayView2<f64>,
 ) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
-    let _ = device;
-    exact_eigh(a)
+    match device {
+        EigenDevice::Host => exact_eigh(a),
+        EigenDevice::Dlpk => {
+            let (lams, vecs) = exact_eigh(a)?;
+            Ok((lams, vecs))
+        }
+    }
+}
+
+/// Lowest eigenpair through rgmin (`Lanczos` / `RayleighRitz`).
+///
+/// This is the dlpk waist Sella `_gpu.py` maps onto. Full spectrum
+/// stays [`exact_eigh`].
+pub fn lowest_on(
+    device: EigenDevice,
+    a: ArrayView2<f64>,
+    seed: ArrayView1<f64>,
+) -> Result<(f64, Array1<f64>), SaddleError> {
+    if a.nrows() != a.ncols() || seed.len() != a.nrows() {
+        return Err(SaddleError::Shape(
+            "lowest_on needs square A and a matching seed".into(),
+        ));
+    }
+    let x = Array1::zeros(seed.len());
+    let kind = match device {
+        EigenDevice::Host => EigensolverKind::Lanczos,
+        EigenDevice::Dlpk => EigensolverKind::RayleighRitz,
+    };
+    let params = EigenParams {
+        kind,
+        krylov: seed.len().min(8).max(2),
+        ..EigenParams::default()
+    };
+    let mode = lowest_mode(&DenseApply(&a.to_owned()), x.view(), seed, &params)
+        .map_err(|e| SaddleError::Solver(e.to_string()))?;
+    Ok((mode.value, mode.vector))
 }
 
 fn matmul(a: ArrayView2<f64>, b: ArrayView2<f64>) -> Array2<f64> {
@@ -211,5 +275,18 @@ mod tests {
         let (h, _) = eigh_on(EigenDevice::Host, a.view()).unwrap();
         let (d, _) = eigh_on(EigenDevice::Dlpk, a.view()).unwrap();
         assert!((h[0] - d[0]).abs() < 1e-14);
+    }
+
+    #[test]
+    fn lowest_on_finds_the_soft_mode() {
+        let mut a = Array2::<f64>::zeros((2, 2));
+        a[(0, 0)] = -3.0;
+        a[(1, 1)] = 8.0;
+        let seed = Array1::from(vec![1.0, 0.1]);
+        let (lam, v) = lowest_on(EigenDevice::Host, a.view(), seed.view()).unwrap();
+        assert!(lam < 0.0, "lam={lam}");
+        assert!(v[0].abs() > v[1].abs());
+        let (lam_d, _) = lowest_on(EigenDevice::Dlpk, a.view(), seed.view()).unwrap();
+        assert!((lam - lam_d).abs() < 0.5, "{lam} vs {lam_d}");
     }
 }
