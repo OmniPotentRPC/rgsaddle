@@ -70,7 +70,9 @@ impl SellaMinSession {
         } else {
             ManifoldKind::Euclidean
         };
-        let delta = config.delta;
+        // Sella optimize.py: TrustRegion delta = delta0 * n_free.
+        let n_free = if x.len() >= 9 { x.len() - 6 } else { x.len() };
+        let delta = config.delta * n_free as f64;
         Ok(Self {
             pes: CartesianPes::new(x, masses)?,
             config,
@@ -96,7 +98,9 @@ impl SellaMinSession {
 
     pub fn reset(&mut self) {
         self.pes.reset();
-        self.delta = self.config.delta;
+        let n = self.pes.position().len();
+        let n_free = if n >= 9 { n - 6 } else { n };
+        self.delta = self.config.delta * n_free as f64;
         self.rho = 1.0;
     }
 
@@ -108,7 +112,7 @@ impl SellaMinSession {
         }
         let g_r = self.manifold.egrad2rgrad(&x, &g);
         let vg = Vector::from_host(g_r.clone());
-        let max_force = vnrminf(&vg);
+        let max_force = atom_fmax(&g_r);
         if max_force <= self.config.force_tol {
             return Ok(SellaMinReport {
                 energy,
@@ -119,8 +123,12 @@ impl SellaMinSession {
             });
         }
         let (evals, evecs) = self.pes.hessian().eigh();
-        let s = qn_restricted(&evals, &evecs, &g_r, 0, self.delta);
-        let s = self.manifold.project(&x, &s);
+        let mut s = qn_restricted(&evals, &evecs, &g_r, 0, self.delta);
+        s = self.manifold.project(&x, &s);
+        let sn = vnrm2(&Vector::from_host(s.clone()));
+        if sn > self.delta && sn > 0.0 {
+            s.mapv_inplace(|v| v * (self.delta / sn));
+        }
         let vs = Vector::from_host(s.clone());
         let x1 = self.manifold.retract(&x, &s);
         let s1 = self.manifold.transport(&x, &x1, &s);
@@ -135,7 +143,7 @@ impl SellaMinSession {
         let (energy, g1) = self.pes.kick(surface, d.view())?;
         let x_new = self.pes.position().to_owned();
         let g1_r = self.manifold.egrad2rgrad(&x_new, &g1);
-        let max_force = vnrminf(&Vector::from_host(g1_r));
+        let max_force = atom_fmax(&g1_r);
         if pred.abs() >= 1e-14 {
             self.rho = (energy - e0) / pred;
             self.delta = update_trust(self.delta, self.rho, vnrm2(&vs), &self.config);
@@ -163,6 +171,26 @@ impl SellaMinSession {
             n += 1;
         }
         Ok(report)
+    }
+}
+
+/// Sella `PES.converged`: max over atoms of `||F_i||_2`.
+fn atom_fmax(g: &Array1<f64>) -> f64 {
+    let mut m = 0.0;
+    let n = g.len() / 3;
+    for i in 0..n {
+        let fx = g[3 * i];
+        let fy = g[3 * i + 1];
+        let fz = g[3 * i + 2];
+        let nrm = (fx * fx + fy * fy + fz * fz).sqrt();
+        if nrm > m {
+            m = nrm;
+        }
+    }
+    if n == 0 {
+        vnrminf(&Vector::from_host(g.clone()))
+    } else {
+        m
     }
 }
 
@@ -259,5 +287,61 @@ mod tests {
         let vt = ManifoldKind::RigidQuotient.transport(&x0, &x1, &v);
         let vt_h = ManifoldKind::RigidQuotient.project(&x1, &vt);
         assert!(nrm2((&vt - &vt_h).view()) < 1e-10);
+    }
+
+    #[test]
+    fn qn_trust_reaches_the_well_with_unequal_masses() {
+        let mut x = Array1::zeros(6);
+        x[0] = 0.2;
+        let mut sess = SellaMinSession::new(
+            SellaMinConfig {
+                delta: 0.2,
+                force_tol: 0.05,
+                ..SellaMinConfig::default()
+            },
+            x,
+            Array1::from(vec![1.0, 16.0]),
+        )
+        .unwrap();
+        let report = sess.run(&Well, 40).unwrap();
+        assert!(report.at_minimum, "force {}", report.max_force);
+        assert!((sess.position()[0].abs() - 1.0).abs() < 0.25);
+    }
+
+    #[test]
+    fn trust_radius_starts_at_delta0_times_n_free() {
+        let x = Array1::zeros(9);
+        let sess = SellaMinSession::new(
+            SellaMinConfig {
+                delta: 0.1,
+                ..SellaMinConfig::default()
+            },
+            x,
+            Array1::from(vec![1.0, 1.0, 1.0]),
+        )
+        .unwrap();
+        assert!((sess.delta() - 0.3).abs() < 1e-14, "delta={}", sess.delta());
+    }
+
+    #[test]
+    fn atom_fmax_is_the_largest_per_atom_norm() {
+        let mut g = Array1::zeros(6);
+        g[0] = 0.0008;
+        g[1] = 0.0008;
+        g[2] = 0.0008;
+        let n = atom_fmax(&g);
+        assert!(n > 1e-3, "component inf-norm would pass 1e-3; atom |F|={n}");
+        assert!((n - (3.0 * 0.0008 * 0.0008).sqrt()).abs() < 1e-14);
+    }
+
+    #[test]
+    fn update_trust_shrinks_on_a_bad_rho() {
+        let cfg = SellaMinConfig::default();
+        let shrunk = update_trust(0.2, 0.0, 0.2, &cfg);
+        assert!(shrunk < 0.2, "bad rho must shrink: {shrunk}");
+        assert!((shrunk - 0.2 * cfg.sigma_dec).abs() < 1e-14);
+        let grown = update_trust(0.2, 1.0, 0.2, &cfg);
+        assert!(grown > 0.2, "good rho must grow: {grown}");
+        assert!((grown - cfg.sigma_inc * 0.2).abs() < 1e-14);
     }
 }

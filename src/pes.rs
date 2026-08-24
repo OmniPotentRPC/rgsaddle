@@ -1,12 +1,12 @@
-//! Cartesian PES wrapper: position, gradient, MW-BFGS Hessian, kick.
+//! Cartesian PES wrapper: position, gradient, Cartesian BFGS Hessian, kick.
 //!
 //! Sella `peswrapper.PES` without internals. The Hessian lives in
-//! rgmin [`BfgsModel`]. `kick` is a displacement plus a pair update.
-//! Rigid projection is [`rgmin::ManifoldKind::MwRigid`] on the
-//! session, not here.
+//! rgmin [`BfgsModel`] and is updated in Cartesian `(s, y)`, matching
+//! Sella `_update_H`. IRC keeps a separate MW model on
+//! [`crate::irc::IrcSession`].
 
 use ndarray::{Array1, ArrayView1};
-use rgmin::{mw_pair, sqrt_masses_3n, BfgsModel};
+use rgmin::BfgsModel;
 
 use crate::error::SaddleError;
 use crate::minmode::PointSurface;
@@ -65,7 +65,10 @@ impl CartesianPes {
         self.hess.forget();
     }
 
-    /// Sella `PES.kick`: displace, eval, store a MW BFGS pair.
+    /// Sella `PES.kick`: displace, eval, store a Cartesian BFGS pair.
+    ///
+    /// Sella `_update_H(dx, dg)` is Cartesian. IRC keeps its own MW
+    /// [`BfgsModel`] on [`crate::irc::IrcSession`].
     pub fn kick<S: PointSurface>(
         &mut self,
         surface: &S,
@@ -82,11 +85,9 @@ impl CartesianPes {
         }
         let y = &g1 - &g0;
         let s = d.slice(ndarray::s![..n]).to_owned();
-        let sqrtm = sqrt_masses_3n(self.masses.as_slice().unwrap_or(&[]));
-        let (sm, ym) = mw_pair(&s, &y, &sqrtm);
         match self.update {
-            HessUpdate::Bfgs => self.hess.update(&sm, &ym),
-            HessUpdate::TsBfgs => self.hess.update_ts(&sm, &ym),
+            HessUpdate::Bfgs => self.hess.update(&s, &y),
+            HessUpdate::TsBfgs => self.hess.update_ts(&s, &y),
         }
         Ok((e, g1))
     }

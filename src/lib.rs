@@ -13,10 +13,13 @@
 //!   over `step` and nothing more.
 //!
 //! The same shape carries the minimum-mode search
-//! ([`minmode::MinModeSession`]) and the IRC roll-down
-//! ([`irc::IrcSession`]): kick along the imaginary mode, then take
-//! Gonzalez--Schlegel / Sella steps on the mass-weighted sphere
-//! (`rgmin::IrcTrust` over [`rgmin::ManifoldKind::MwRigid`]).
+//! ([`minmode::MinModeSession`]), the IRC roll-down
+//! ([`irc::IrcSession`]), and Sella order-0 / order-1 sessions
+//! ([`sella_min::SellaMinSession`], [`sella_saddle::SellaSaddleSession`]):
+//! kick along the imaginary mode, then take Gonzalez--Schlegel /
+//! Sella steps on the mass-weighted sphere (`rgmin::IrcTrust` over
+//! [`rgmin::ManifoldKind::MwRigid`]). SellaMin is QN + TrustRegion
+//! on [`pes::CartesianPes`] (Cartesian BFGS, per-atom `||F||_2`).
 //! Sella `QuasiNewton` is [`qn::QuasiNewton`]: `rgmin::qn_get_s`
 //! with proj / retr / transp. Sella `RationalFunctionOptimization` is
 //! [`rfo::RationalFunctionOptimization`]: `rgmin::rfo_get_s` with
