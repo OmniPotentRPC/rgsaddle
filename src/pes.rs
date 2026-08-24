@@ -6,6 +6,7 @@
 //! [`crate::irc::IrcSession`].
 
 use ndarray::{Array1, ArrayView1};
+use rgmin::vecops::axpy;
 use rgmin::BfgsModel;
 
 use crate::error::SaddleError;
@@ -87,6 +88,17 @@ impl CartesianPes {
 
     pub fn reset(&mut self) {
         self.hess.forget();
+    }
+
+    /// Add `d` into the living Cartesian frame. No surface eval.
+    pub fn displace(&mut self, d: ArrayView1<f64>) -> Result<(), SaddleError> {
+        if d.len() != self.x.len() {
+            return Err(SaddleError::Shape(
+                "displace d must match the 3N frame".into(),
+            ));
+        }
+        axpy(1.0, d, &mut self.x);
+        Ok(())
     }
 
     /// Sella `PES.kick`: displace, eval, store a Cartesian BFGS pair.

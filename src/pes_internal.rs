@@ -11,6 +11,7 @@
 //! cell here is the PES wrapper Sella hangs on periodic systems.
 
 use ndarray::{s, Array1, ArrayView1};
+use rgmin::vecops::axpy;
 use rgmin::BfgsModel;
 
 use crate::cell_log::{transform_cell_block, CellChart, CellState, PackedHess};
@@ -477,9 +478,14 @@ impl CellCartesianPes {
         let dcell = d.slice(s![n..]).to_owned();
         self.state.kick_params(&dcell)?;
         let dx = d.slice(s![..n]).to_owned();
-        let (e, g1) = self.cart.kick_from(surface, dx.view(), g0.view())?;
+        self.cart.displace(dx.view())?;
+        let (e, g1) = surface.eval_in_cell(self.cart.position(), &self.cell9())?;
+        if !g1.iter().all(|v| v.is_finite()) {
+            return Err(SaddleError::NonFinite("pes gradient"));
+        }
         let g1p = self.packed_grad(surface, g1.view())?;
-        let y = &g1p - &g0p;
+        let mut y = g1p.clone();
+        axpy(-1.0, g0p.view(), &mut y);
         let s = d.to_owned();
         match self.update {
             HessUpdate::Bfgs => self.hess.update(&s, &y),
@@ -1120,6 +1126,33 @@ mod tests {
         }
     }
 
+    /// Cartesian well plus `(a00 - 2)^2`. `eval` omits the cell term.
+    struct CellWell;
+    impl PointSurface for CellWell {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            let mut g = Array1::zeros(x.len());
+            g[0] = 2.0 * x[0];
+            Ok((x[0] * x[0], g))
+        }
+        fn eval_in_cell(
+            &self,
+            x: ArrayView1<f64>,
+            cell: &[f64; 9],
+        ) -> Result<(f64, Array1<f64>), SaddleError> {
+            let (e, g) = self.eval(x)?;
+            Ok((e + (cell[0] - 2.0) * (cell[0] - 2.0), g))
+        }
+        fn cell_grad(
+            &self,
+            _x: ArrayView1<f64>,
+            cell: &[f64; 9],
+        ) -> Result<Option<[f64; 9]>, SaddleError> {
+            let mut g = [0.0; 9];
+            g[0] = 2.0 * (cell[0] - 2.0);
+            Ok(Some(g))
+        }
+    }
+
     #[test]
     fn internals_kick_updates_the_int_hessian() {
         let mut x = Array1::zeros(6);
@@ -1201,6 +1234,56 @@ mod tests {
         assert!((p[0] - 4.0).abs() < 1e-12);
         assert!((p[1] - 5.0).abs() < 1e-12);
         assert!((p[2] - 6.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn packed_kick_stays_on_the_masked_cell_set() {
+        use rgmin::vecops::nrm2;
+        use rgmin::{Manifold, ManifoldKind};
+        let mut pes = CellCartesianPes::new(
+            Array1::zeros(6),
+            Array1::from(vec![1.0, 1.0]),
+            Cell::ortho(4.0, 5.0, 6.0).unwrap(),
+        )
+        .unwrap();
+        pes.set_mask([
+            true, false, false, false, true, false, false, false, true,
+        ]);
+        let cell0 = pes.cell9();
+        let mut d = Array1::zeros(pes.packed_len());
+        d[0] = 0.1;
+        d[6] = -0.25;
+        let (e, g) = pes.kick_packed(&CellWell, d.view()).unwrap();
+        assert!(e.is_finite());
+        assert!(g.iter().all(|v| v.is_finite()));
+        let cell1 = pes.cell9();
+        assert!((pes.position()[0] - 0.1).abs() < 1e-14);
+        assert!((cell1[0] - (cell0[0] - 0.25)).abs() < 1e-12);
+        for i in 0..9 {
+            if !pes.mask()[i] {
+                assert_eq!(cell1[i], cell0[i], "masked cell entry {i} left the set");
+            }
+        }
+        // Energy is eval_in_cell after the cell kick, not eval().
+        let want = 0.1 * 0.1 + (3.75 - 2.0) * (3.75 - 2.0);
+        assert!(
+            (e - want).abs() < 1e-12,
+            "kick energy {e} vs in-cell {want}"
+        );
+        let packed = pes.packed();
+        let step = Array1::from_elem(packed.len(), 0.05);
+        let man = ManifoldKind::Euclidean;
+        let v = man.project(&packed, &step);
+        let y = man.retract(&packed, &v);
+        let w = man.transport(&packed, &y, &v);
+        let w_h = man.project(&y, &w);
+        assert!((nrm2(w.view()) - nrm2(w_h.view())).abs() < 1e-14);
+        assert!(y.iter().all(|v| v.is_finite()));
+        let forbidden = pes.project_cell_step([1.0; 9]);
+        assert_eq!(forbidden[1], 0.0);
+        assert_eq!(forbidden[0], 1.0);
+        assert_eq!(forbidden[4], 1.0);
+        assert_eq!(forbidden[8], 1.0);
     }
 
     #[test]
