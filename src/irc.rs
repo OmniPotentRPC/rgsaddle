@@ -129,8 +129,19 @@ impl IrcSession {
             last_step: None,
             last_outer: None,
         };
+        session.seed_ts_mode();
         session.set_direction(direction);
         Ok(session)
+    }
+
+    fn seed_ts_mode(&mut self) {
+        let sqrtm = sqrt_masses_3n(self.masses.as_slice().unwrap_or(&[]));
+        let n = self.mode.len().min(sqrtm.len());
+        let mut u = Array1::zeros(self.mode.len());
+        for i in 0..n {
+            u[i] = self.mode[i] * sqrtm[i];
+        }
+        self.hess.seed_mode(&u, -1.0);
     }
 
     /// Estimate the imaginary mode with matrix-free Lanczos (FD Hessian
@@ -163,6 +174,7 @@ impl IrcSession {
     pub fn reset(&mut self) {
         self.solver.forget();
         self.hess.forget();
+        self.seed_ts_mode();
     }
 
     /// Restore the saddle and flip the kick sign.
@@ -175,6 +187,7 @@ impl IrcSession {
         self.last_outer = None;
         self.solver.forget();
         self.hess.forget();
+        self.seed_ts_mode();
     }
 
     fn kick_vector(&self, direction: IrcDirection) -> Array1<f64> {
@@ -221,7 +234,7 @@ impl IrcSession {
     /// inner pair; GS2 equality is `IrcTrust`.
     fn restricted_increment(&self, g: &Array1<f64>) -> Array1<f64> {
         let (evals, evecs) = self.hess.eigh();
-        let allow_interior = self.hess.is_posdef() && self.arc > 8.0 * self.config.dx;
+        let allow_interior = self.hess.is_posdef() && self.arc > 2.0 * self.config.dx;
         qn_irc_restricted(&self.trust(), &evals, &evecs, g, allow_interior)
     }
 
@@ -250,7 +263,7 @@ impl IrcSession {
             inner_steps += 1;
             let s = self.restricted_increment(&g);
             let interior = self.hess.is_posdef()
-                && self.arc > 8.0 * self.config.dx
+                && self.arc > 2.0 * self.config.dx
                 && self.trust().cons(&s) + 1e-8 < self.config.dx;
             if inner_steps == 1 {
                 if let Some(prev) = &self.last_outer {
@@ -258,7 +271,7 @@ impl IrcSession {
                     // model is positive definite. At a TS the kick and
                     // -g need not be aligned.
                     if self.hess.is_posdef()
-                        && self.arc > 8.0 * self.config.dx
+                        && self.arc > 2.0 * self.config.dx
                         && dot(prev.view(), s.view()) < 0.0
                     {
                         self.d1.fill(0.0);
@@ -277,7 +290,7 @@ impl IrcSession {
             if let Some(prev) = &self.last_step {
                 if !kicked
                     && self.hess.is_posdef()
-                    && self.arc > 8.0 * self.config.dx
+                    && self.arc > 2.0 * self.config.dx
                     && dot(prev.view(), s.view()) < 0.0
                 {
                     self.d1.fill(0.0);
@@ -330,7 +343,7 @@ impl IrcSession {
             at_minimum: !kicked
                 && max_force <= self.config.force_tol
                 && last_interior
-                && self.arc > 8.0 * self.config.dx,
+                && self.arc > 2.0 * self.config.dx,
         })
     }
 
