@@ -251,7 +251,10 @@ impl IrcSession {
             let interior = self.trust().cons(&s) + 1e-8 < self.config.dx;
             if inner_steps == 1 {
                 if let Some(prev) = &self.last_outer {
-                    if dot(prev.view(), s.view()) < 0.0 {
+                    // Reversal is a well overshoot only after the BFGS
+                    // model is positive definite. At a TS the kick and
+                    // -g need not be aligned.
+                    if self.hess.is_posdef() && dot(prev.view(), s.view()) < 0.0 {
                         self.d1.fill(0.0);
                         self.last_step = None;
                         self.solver.forget();
