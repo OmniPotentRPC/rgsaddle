@@ -64,10 +64,12 @@ impl SellaMinSession {
         x: Array1<f64>,
         masses: Array1<f64>,
     ) -> Result<Self, SaddleError> {
-        let mut manifold = ManifoldKind::RigidQuotient;
-        if manifold.required_dim(x.len()).is_err() {
-            manifold = ManifoldKind::Euclidean;
-        }
+        // SE(3) quotient needs leftover internals: N >= 3.
+        let manifold = if x.len() >= 9 {
+            ManifoldKind::RigidQuotient
+        } else {
+            ManifoldKind::Euclidean
+        };
         let delta = config.delta;
         Ok(Self {
             pes: CartesianPes::new(x, masses)?,

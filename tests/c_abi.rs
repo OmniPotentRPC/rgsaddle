@@ -64,3 +64,47 @@ fn c_abi_smoke() {
     assert!(stdout.contains("RGSADDLE_C_ABI_OK"), "stdout: {stdout}");
     let _ = std::fs::remove_file(&out);
 }
+
+#[test]
+#[cfg_attr(not(feature = "capi"), ignore)]
+fn c_abi_irc_analytic_well() {
+    let Some(cc) = cc() else {
+        eprintln!("no C compiler; skipping");
+        return;
+    };
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let out = std::env::temp_dir().join(format!("rgsaddle_irc_abi_{}", std::process::id()));
+
+    let mut libdir = std::env::current_exe().unwrap();
+    libdir.pop();
+    if libdir.ends_with("deps") {
+        libdir.pop();
+    }
+
+    let status = Command::new(&cc)
+        .arg(root.join("tests/c/irc_abi.c"))
+        .arg("-I")
+        .arg(root.join("include"))
+        .arg("-L")
+        .arg(&libdir)
+        .arg("-lrgsaddle")
+        .arg("-lm")
+        .arg("-o")
+        .arg(&out)
+        .status()
+        .expect("compile the IRC C ABI test");
+    assert!(status.success(), "IRC C ABI test failed to build");
+
+    let run = Command::new(&out)
+        .env("LD_LIBRARY_PATH", &libdir)
+        .output()
+        .expect("run the IRC C ABI test");
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        run.status.success(),
+        "IRC C ABI test failed:\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(stdout.contains("RGSADDLE_IRC_ABI_OK"), "stdout: {stdout}");
+    let _ = std::fs::remove_file(&out);
+}
