@@ -83,7 +83,8 @@ impl SellaMinSession {
         x: Array1<f64>,
         masses: Array1<f64>,
     ) -> Result<Self, SaddleError> {
-        Self::on(config, x, masses, SellaGeom::cartesian(x.len()))
+        let geom = SellaGeom::cartesian(x.len());
+        Self::on(config, x, masses, geom)
     }
 
     /// Retract on a live equality chart instead of the rigid quotient.
