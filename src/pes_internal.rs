@@ -328,6 +328,22 @@ impl CellInternalPes {
         self.cell = cell;
     }
 
+    /// Sella `maybe_niggli_reduce` on the cell, internals Hessian unchanged.
+    pub fn maybe_niggli_reduce(&mut self, angle_threshold: f64) -> Result<bool, SaddleError> {
+        let [a, b, c] = lattice_of(&self.cell);
+        let angs = [angle_deg(b, c), angle_deg(a, c), angle_deg(a, b)];
+        let max_dev = angs
+            .iter()
+            .map(|x| (x - 90.0).abs())
+            .fold(0.0_f64, f64::max);
+        if max_dev <= angle_threshold {
+            return Ok(false);
+        }
+        let (a2, b2, c2) = niggli_reduce_vectors(a, b, c);
+        self.cell = cell_from_lattice(a2, b2, c2, self.cell.origin())?;
+        Ok(true)
+    }
+
     pub fn internals(&self) -> &InternalPes {
         &self.inner
     }
