@@ -2697,6 +2697,22 @@ mod constraints_abi_tests {
     }
 
     #[test]
+    #[test]
+    fn perp_dummy_abi_is_off_the_bond() {
+        let x = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+        let mut d = [0.0; 3];
+        assert_eq!(
+            unsafe { rgsaddle_place_perp_dummy(2, x.as_ptr(), 0, 1, d.as_mut_ptr()) },
+            RGSADDLE_OK
+        );
+        assert!((d[1].abs() + d[2].abs()) > 0.5);
+        assert_eq!(
+            unsafe { rgsaddle_place_perp_dummy(2, x.as_ptr(), 0, 0, d.as_mut_ptr()) },
+            RGSADDLE_SHAPE
+        );
+    }
+
+    #[test]
     fn niggli_abi_rewrites_a_skewed_cell() {
         let mut cell = [1.0, 0.0, 0.0, 0.9, 0.15, 0.0, 0.4, 0.5, 1.0];
         let mut applied = 0i32;
