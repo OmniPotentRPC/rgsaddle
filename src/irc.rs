@@ -325,7 +325,11 @@ impl IrcSession {
             max_force,
             arc: self.arc,
             inner_steps,
-            at_minimum: max_force <= self.config.force_tol && last_interior,
+            // Sella: the kick outer step is never a minimum, even when
+            // |F| is already under fmax (a TS neighborhood).
+            at_minimum: !kicked
+                && max_force <= self.config.force_tol
+                && last_interior,
         })
     }
 
@@ -413,6 +417,46 @@ mod tests {
         let _ = irc.step(&Well).unwrap();
         let r = mw_radius(&irc.position().to_owned(), &saddle, &masses);
         assert!((r - dx).abs() < 1e-10, "cons={r} dx={dx}");
+    }
+
+    struct Flat;
+
+    impl PointSurface for Flat {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            Ok((0.0, Array1::zeros(x.len())))
+        }
+    }
+
+    #[test]
+    fn unequal_mass_kick_is_not_the_euclidean_sphere() {
+        let dx = 0.2;
+        let masses = Array1::from(vec![1.0, 16.0]);
+        let saddle = Array1::from(vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+        let mut mode = Array1::zeros(6);
+        mode[0] = 1.0;
+        mode[3] = 1.0;
+        let mut irc = IrcSession::new(
+            IrcConfig {
+                dx,
+                force_tol: 1e-12,
+                max_inner: 1,
+                ..IrcConfig::default()
+            },
+            saddle.clone(),
+            masses.clone(),
+            mode,
+            IrcDirection::Forward,
+        )
+        .unwrap();
+        let _ = irc.step(&Flat).unwrap();
+        let x = irc.position().to_owned();
+        let r = mw_radius(&x, &saddle, &masses);
+        assert!((r - dx).abs() < 1e-10, "cons={r} dx={dx}");
+        let eucl = (&x - &saddle).iter().map(|v| v * v).sum::<f64>().sqrt();
+        assert!(
+            (eucl - dx).abs() > 1e-6,
+            "unequal-mass kick must not sit on the Euclidean sphere (eucl={eucl})"
+        );
     }
 
     #[test]

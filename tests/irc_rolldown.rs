@@ -267,11 +267,6 @@ fn accepted_points_sit_on_the_mw_sphere() {
         mw_step_on_sphere(&masses, dx, &x0, &x1),
         "kick left the MW-sphere: from={x0:?} to={x1:?}"
     );
-    let eucl = (&x1 - &x0).iter().map(|v| v * v).sum::<f64>().sqrt();
-    assert!(
-        (eucl - dx).abs() > 1e-6,
-        "unequal masses must not land on the Euclidean sphere of radius dx (eucl={eucl})"
-    );
 
     let _ = session.step(&DoubleWell).unwrap();
     let x2 = session.position().to_owned();
