@@ -42,12 +42,37 @@ impl InternalPes {
             return Err(SaddleError::Shape("internals chart is empty".into()));
         }
         let nint = chart.equalities().len();
-        Ok(Self {
+        let mut pes = Self {
             cart: CartesianPes::new(x, masses)?,
             chart,
             hess: BfgsModel::identity(nint),
             update: HessUpdate::Bfgs,
-        })
+        };
+        pes.guess_hessian();
+        Ok(pes)
+    }
+
+    /// Sella `Internals.guess_hessian` diagonal: translations 70,
+    /// bonds 0.5, angles 0.2, dihedrals 0.1, rotations 1.
+    pub fn guess_hessian(&mut self) {
+        let nint = self.chart.equalities().len();
+        if nint == 0 {
+            return;
+        }
+        self.hess.forget();
+        for (i, eq) in self.chart.equalities().iter().enumerate() {
+            let lam = match eq {
+                crate::constraints::Equality::Translation { .. } => 70.0,
+                crate::constraints::Equality::Bond { .. } => 0.5,
+                crate::constraints::Equality::Angle { .. } => 0.2,
+                crate::constraints::Equality::Dihedral { .. } => 0.1,
+                crate::constraints::Equality::Rotation { .. } => 1.0,
+                crate::constraints::Equality::Displacement { .. } => 1.0,
+            };
+            let mut u = Array1::zeros(nint);
+            u[i] = 1.0;
+            self.hess.seed_mode(&u, lam);
+        }
     }
 
     pub fn set_update(&mut self, update: HessUpdate) {
@@ -126,7 +151,7 @@ impl InternalPes {
 
     pub fn reset(&mut self) {
         self.cart.reset();
-        self.hess.forget();
+        self.guess_hessian();
     }
 }
 
@@ -651,6 +676,11 @@ mod tests {
         let mut pes = InternalPes::new(x, masses, chart).unwrap();
         assert_eq!(pes.n_int(), 1);
         assert_eq!(pes.hessian().hessian().nrows(), 1);
+        assert!(
+            (pes.hessian().hessian()[(0, 0)] - 70.0).abs() < 1e-12,
+            "translation guess {}",
+            pes.hessian().hessian()[(0, 0)]
+        );
         let h0 = pes.hessian().hessian()[(0, 0)];
         let dq = Array1::from(vec![0.15]);
         pes.kick(&Well, dq.view()).unwrap();
