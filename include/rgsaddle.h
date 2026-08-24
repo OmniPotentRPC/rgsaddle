@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 4u
+#define RGSADDLE_ABI_MINOR 5u
 
 /** Version head carried by every wire struct. */
 typedef struct {
@@ -358,6 +358,35 @@ int rgsaddle_constraints_retract(const RgsaddleConstraints *cons,
                                  double *out);
 
 void rgsaddle_constraints_free(RgsaddleConstraints *cons);
+
+typedef struct RgsaddleSamd RgsaddleSamd;
+
+/** Sella BDP thermostat. Host supplies the Gaussian draw each step. */
+typedef struct {
+  rgsaddle_version_t version;
+  uint64_t flags;
+  double dt;
+  double tau;
+  double t0;
+  double tf;
+  int64_t ngen;
+  int32_t exponential;
+} rgsaddle_samd_config_t;
+
+/**
+ * Create a SAMD session. `x` and `v0` are 3N. First surface eval
+ * fills the living gradient. Returns NULL on a null config, unknown
+ * major, or n_atoms < 1.
+ */
+RgsaddleSamd *rgsaddle_samd_create(const rgsaddle_samd_config_t *config,
+                                   int64_t n_atoms, const double *x,
+                                   const double *v0,
+                                   rgsaddle_surface_fn surface, void *user);
+/** One BDP step. `r` is the 3N Gaussian draw. */
+int rgsaddle_samd_step(RgsaddleSamd *session, rgsaddle_surface_fn surface,
+                       void *user, const double *r, rgsaddle_report_t *out);
+int rgsaddle_samd_position(const RgsaddleSamd *session, double *out);
+void rgsaddle_samd_free(RgsaddleSamd *session);
 
 #ifdef __cplusplus
 }

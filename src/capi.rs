@@ -19,12 +19,13 @@ use crate::mic::Cell;
 use crate::minmode::{MinModeConfig, MinModeKind, MinModeSession, MinModeStatus, PointSurface};
 use crate::projection::ProjectionKind;
 use crate::sella_min::{SellaMinConfig, SellaMinSession};
+use crate::samd::{SamdConfig, SamdSession};
 use crate::sella_saddle::{SellaSaddleConfig, SellaSaddleSession};
 use crate::spring::SpringKind;
 use crate::tangent::TangentKind;
 
 pub const RGSADDLE_ABI_MAJOR: u32 = 1;
-pub const RGSADDLE_ABI_MINOR: u32 = 4;
+pub const RGSADDLE_ABI_MINOR: u32 = 5;
 
 pub const RGSADDLE_OK: i32 = 0;
 pub const RGSADDLE_NULL_SESSION: i32 = -1;
@@ -251,6 +252,23 @@ pub struct RgsaddleSellaSaddle {
 
 pub struct RgsaddleConstraints {
     cons: Constraints,
+    n_atoms: i64,
+}
+
+#[repr(C)]
+pub struct RgsaddleSamdConfig {
+    pub version: RgsaddleVersion,
+    pub flags: u64,
+    pub dt: f64,
+    pub tau: f64,
+    pub t0: f64,
+    pub tf: f64,
+    pub ngen: i64,
+    pub exponential: i32,
+}
+
+pub struct RgsaddleSamd {
+    session: SamdSession,
     n_atoms: i64,
 }
 
@@ -1556,6 +1574,136 @@ pub unsafe extern "C" fn rgsaddle_constraints_free(cons: *mut RgsaddleConstraint
     }
 }
 
+/// # Safety
+/// `x` and `v0` are 3N.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_samd_create(
+    config: *const RgsaddleSamdConfig,
+    n_atoms: i64,
+    x: *const f64,
+    v0: *const f64,
+    surface: Option<RgsaddleSurfaceFn>,
+    user: *mut c_void,
+) -> *mut RgsaddleSamd {
+    if config.is_null() || x.is_null() || v0.is_null() || n_atoms < 1 {
+        return std::ptr::null_mut();
+    }
+    let cfg = unsafe { &*config };
+    if cfg.version.major != RGSADDLE_ABI_MAJOR {
+        return std::ptr::null_mut();
+    }
+    let Some(f) = surface else {
+        return std::ptr::null_mut();
+    };
+    let dof = (3 * n_atoms) as usize;
+    let pos = Array1::from(unsafe { slice::from_raw_parts(x, dof) }.to_vec());
+    let vel = Array1::from(unsafe { slice::from_raw_parts(v0, dof) }.to_vec());
+    let mut samd = SamdConfig::default();
+    if cfg.dt > 0.0 {
+        samd.dt = cfg.dt;
+    }
+    if cfg.tau > 0.0 {
+        samd.tau = cfg.tau;
+    }
+    if cfg.t0 > 0.0 {
+        samd.t0 = cfg.t0;
+    }
+    if cfg.tf > 0.0 {
+        samd.tf = cfg.tf;
+    }
+    if cfg.ngen > 0 {
+        samd.ngen = cfg.ngen as usize;
+    }
+    samd.exponential = cfg.exponential != 0;
+    let cs = CSurface {
+        f,
+        user,
+        n_atoms,
+    };
+    match SamdSession::new(samd, pos, vel, &cs) {
+        Ok(session) => Box::into_raw(Box::new(RgsaddleSamd { session, n_atoms })),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// # Safety
+/// `r` is 3N. `out` must be valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_samd_step(
+    session: *mut RgsaddleSamd,
+    surface: Option<RgsaddleSurfaceFn>,
+    user: *mut c_void,
+    r: *const f64,
+    out: *mut RgsaddleReport,
+) -> i32 {
+    if session.is_null() {
+        return RGSADDLE_NULL_SESSION;
+    }
+    if out.is_null() {
+        return RGSADDLE_NULL_REPORT;
+    }
+    if r.is_null() {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let Some(f) = surface else {
+        return RGSADDLE_NULL_SURFACE;
+    };
+    let session = unsafe { &mut *session };
+    let dof = (3 * session.n_atoms) as usize;
+    let draw = Array1::from(unsafe { slice::from_raw_parts(r, dof) }.to_vec());
+    let cs = CSurface {
+        f,
+        user,
+        n_atoms: session.n_atoms,
+    };
+    match session.session.step(&cs, draw.view()) {
+        Ok(report) => {
+            let out = unsafe { &mut *out };
+            stamp_report(out);
+            out.status = 0;
+            out.reserved = 0;
+            out.max_force = report.kinetic;
+            out.ci_index = -1;
+            out.iteration = 0;
+            out.curvature = report.temperature;
+            out.rotations = 0;
+            RGSADDLE_OK
+        }
+        Err(e) => status_of(&e),
+    }
+}
+
+/// # Safety
+/// `out` must hold `3 * n_atoms` doubles.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_samd_position(
+    session: *const RgsaddleSamd,
+    out: *mut f64,
+) -> i32 {
+    if session.is_null() {
+        return RGSADDLE_NULL_SESSION;
+    }
+    if out.is_null() {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let session = unsafe { &*session };
+    let dof = (3 * session.n_atoms) as usize;
+    let dst = unsafe { slice::from_raw_parts_mut(out, dof) };
+    for (i, v) in session.session.position().iter().enumerate() {
+        dst[i] = *v;
+    }
+    RGSADDLE_OK
+}
+
+/// # Safety
+/// `session` must come from [`rgsaddle_samd_create`], freed once.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_samd_free(session: *mut RgsaddleSamd) {
+    if !session.is_null() {
+        drop(unsafe { Box::from_raw(session) });
+    }
+}
+
 #[cfg(test)]
 mod constraints_abi_tests {
     use super::*;
@@ -1702,5 +1850,77 @@ mod constraints_abi_tests {
             flags: 0,
         };
         assert!(unsafe { rgsaddle_constraints_create(&bad, 3) }.is_null());
+    }
+}
+
+#[cfg(test)]
+mod samd_abi_tests {
+    use super::*;
+
+    extern "C" fn well_cb(_user: *mut c_void, req: *mut RgsaddleSurfaceRequest) -> i32 {
+        unsafe {
+            let req = &mut *req;
+            let n = (req.n_atoms * 3) as usize;
+            let pos = slice::from_raw_parts(req.positions, n);
+            let e = req.energies;
+            let g = slice::from_raw_parts_mut(req.gradients, n);
+            *e = pos[0] * pos[0];
+            for gi in g.iter_mut() {
+                *gi = 0.0;
+            }
+            g[0] = 2.0 * pos[0];
+        }
+        0
+    }
+
+    #[test]
+    fn samd_abi_step_is_finite() {
+        let n_atoms = 2i64;
+        let x = [0.4, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let v0 = [0.3, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let r = [0.2, 0.1, 0.0, 0.0, 0.0, 0.0];
+        let cfg = RgsaddleSamdConfig {
+            version: RgsaddleVersion {
+                major: RGSADDLE_ABI_MAJOR,
+                minor: RGSADDLE_ABI_MINOR,
+            },
+            flags: 0,
+            dt: 0.1,
+            tau: 1.0,
+            t0: 1.0,
+            tf: 0.1,
+            ngen: 8,
+            exponential: 0,
+        };
+        let sess = unsafe {
+            rgsaddle_samd_create(&cfg, n_atoms, x.as_ptr(), v0.as_ptr(), Some(well_cb), std::ptr::null_mut())
+        };
+        assert!(!sess.is_null());
+        let mut report = RgsaddleReport {
+            version: RgsaddleVersion { major: 0, minor: 0 },
+            flags: 0,
+            status: 0,
+            reserved: 0,
+            max_force: 0.0,
+            ci_index: 0,
+            iteration: 0,
+            curvature: 0.0,
+            rotations: 0,
+        };
+        assert_eq!(
+            unsafe {
+                rgsaddle_samd_step(sess, Some(well_cb), std::ptr::null_mut(), r.as_ptr(), &mut report)
+            },
+            RGSADDLE_OK
+        );
+        assert!(report.max_force.is_finite());
+        let mut y = [0.0; 6];
+        assert_eq!(
+            unsafe { rgsaddle_samd_position(sess, y.as_mut_ptr()) },
+            RGSADDLE_OK
+        );
+        assert!(y.iter().all(|v| v.is_finite()));
+        assert!(unsafe { rgsaddle_samd_create(std::ptr::null(), n_atoms, x.as_ptr(), v0.as_ptr(), Some(well_cb), std::ptr::null_mut()) }.is_null());
+        unsafe { rgsaddle_samd_free(sess) };
     }
 }
