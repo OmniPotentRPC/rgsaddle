@@ -13,9 +13,11 @@ inner geometry is rgmin ``IrcTrust``:
     \|(s + d_1)\odot\sqrt{m}\| = dx.
 
 The increment is Sella ``QuasiNewtonIRC``
-(``rgmin::qn_irc_restricted``) on a mass-weighted BFGS Hessian that
-starts as the identity. ``reset`` and ``set_direction`` drop that
-curvature.
+(``rgmin::qn_irc_restricted``) on a mass-weighted BFGS Hessian
+seeded with the imaginary mode (``lambda = -1``). Interior Newton
+is allowed only after that model is positive definite and the arc
+is past eight radii. ``reset`` and ``set_direction`` drop the
+pairs and re-seed.
 
 Directions
 ~~~~~~~~~~
