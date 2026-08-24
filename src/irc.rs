@@ -234,7 +234,7 @@ impl IrcSession {
     /// inner pair; GS2 equality is `IrcTrust`.
     fn restricted_increment(&self, g: &Array1<f64>) -> Array1<f64> {
         let (evals, evecs) = self.hess.eigh();
-        let allow_interior = self.hess.is_posdef() && self.arc > 2.0 * self.config.dx;
+        let allow_interior = self.hess.is_posdef() && self.arc > 8.0 * self.config.dx;
         qn_irc_restricted(&self.trust(), &evals, &evecs, g, allow_interior)
     }
 
@@ -263,7 +263,7 @@ impl IrcSession {
             inner_steps += 1;
             let s = self.restricted_increment(&g);
             let interior = self.hess.is_posdef()
-                && self.arc > 2.0 * self.config.dx
+                && self.arc > 8.0 * self.config.dx
                 && self.trust().cons(&s) + 1e-8 < self.config.dx;
             if inner_steps == 1 {
                 if let Some(prev) = &self.last_outer {
@@ -271,7 +271,7 @@ impl IrcSession {
                     // model is positive definite. At a TS the kick and
                     // -g need not be aligned.
                     if self.hess.is_posdef()
-                        && self.arc > 2.0 * self.config.dx
+                        && self.arc > 8.0 * self.config.dx
                         && dot(prev.view(), s.view()) < 0.0
                     {
                         self.d1.fill(0.0);
@@ -290,7 +290,7 @@ impl IrcSession {
             if let Some(prev) = &self.last_step {
                 if !kicked
                     && self.hess.is_posdef()
-                    && self.arc > 2.0 * self.config.dx
+                    && self.arc > 8.0 * self.config.dx
                     && dot(prev.view(), s.view()) < 0.0
                 {
                     self.d1.fill(0.0);
@@ -343,7 +343,7 @@ impl IrcSession {
             at_minimum: !kicked
                 && max_force <= self.config.force_tol
                 && last_interior
-                && self.arc > 2.0 * self.config.dx,
+                && self.arc > 8.0 * self.config.dx,
         })
     }
 
