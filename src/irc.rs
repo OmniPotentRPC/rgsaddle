@@ -6,7 +6,7 @@
 //! convenience over `step`.
 
 use ndarray::{Array1, ArrayView1};
-use rgmin::{sqrt_masses_3n, Control, IrcTrust, Method, Solver};
+use rgmin::{sqrt_masses_3n, Control, EigensolverKind, IrcTrust, Method, Solver};
 
 use crate::error::SaddleError;
 use crate::minmode::PointSurface;
@@ -29,8 +29,10 @@ pub struct IrcConfig {
     pub max_inner: usize,
     /// Finite-difference Hessian action length for the matrix-free kick.
     pub dr: f64,
-    /// Krylov dimension for the lowest-mode Lanczos kick.
+    /// Krylov dimension for the lowest-mode kick.
     pub krylov_dim: usize,
+    /// Closed lowest-mode backend. Unlinked kinds fail closed.
+    pub eigen_kind: EigensolverKind,
 }
 
 impl Default for IrcConfig {
@@ -43,6 +45,7 @@ impl Default for IrcConfig {
             max_inner: 10,
             dr: 1e-3,
             krylov_dim: 12,
+            eigen_kind: EigensolverKind::Lanczos,
         }
     }
 }
@@ -129,6 +132,7 @@ impl IrcSession {
         let mm = crate::minmode::MinModeConfig {
             dr: config.dr,
             krylov_dim: config.krylov_dim,
+            eigen_kind: config.eigen_kind,
             ..crate::minmode::MinModeConfig::default()
         };
         let (mode, _curv, _actions) =

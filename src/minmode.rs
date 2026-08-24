@@ -2,7 +2,7 @@
 //! invert the force along it, take one step. Stepping, like the band.
 
 use ndarray::{Array1, ArrayView1};
-use rgmin::{Control, Method, Oracle, Solver};
+use rgmin::{ApplyHessian, Control, EigenParams, EigensolverKind, Method, Oracle, Solver};
 
 use crate::error::SaddleError;
 
@@ -34,6 +34,8 @@ pub struct MinModeConfig {
     pub max_rotations: usize,
     /// Krylov dimension for [`MinModeKind::Lanczos`].
     pub krylov_dim: usize,
+    /// Closed lowest-mode backend. Unlinked kinds fail closed.
+    pub eigen_kind: EigensolverKind,
     /// Translation stops when max|F| falls under this.
     pub force_tol: f64,
     pub max_move: f64,
@@ -48,6 +50,7 @@ impl Default for MinModeConfig {
             rotation_tol: 1e-4,
             max_rotations: 20,
             krylov_dim: 12,
+            eigen_kind: EigensolverKind::Lanczos,
             force_tol: 1e-3,
             max_move: 0.2,
             method: Method::Fire {
@@ -134,8 +137,22 @@ fn rotate_dimer<S: PointSurface>(
     Ok((tau, curvature, rotations))
 }
 
-/// Lanczos: build a Krylov basis of finite-difference Hessian actions
-/// and take the lowest Ritz vector.
+struct FdHvp<'a, S: PointSurface> {
+    surface: &'a S,
+    g0: Array1<f64>,
+    dr: f64,
+}
+
+impl<S: PointSurface> ApplyHessian for FdHvp<'_, S> {
+    fn apply_hessian(&self, x: ArrayView1<f64>, v: ArrayView1<f64>) -> Array1<f64> {
+        match hessian_action(self.surface, x, self.g0.view(), v, self.dr) {
+            Ok(hv) => hv,
+            Err(_) => Array1::from_elem(v.len(), f64::NAN),
+        }
+    }
+}
+
+/// Lowest-mode kick through the rgmin waist (FD Hessian actions).
 pub(crate) fn lanczos_mode<S: PointSurface>(
     surface: &S,
     x: ArrayView1<f64>,
@@ -143,120 +160,20 @@ pub(crate) fn lanczos_mode<S: PointSurface>(
     seed: Array1<f64>,
     config: &MinModeConfig,
 ) -> Result<(Array1<f64>, f64, usize), SaddleError> {
-    let n = seed.len();
-    let m = config.krylov_dim.min(n).max(1);
-    let mut q: Vec<Array1<f64>> = Vec::with_capacity(m);
-    let mut alpha = Vec::with_capacity(m);
-    let mut beta: Vec<f64> = Vec::with_capacity(m);
-    q.push(normalize(seed));
-
-    let mut actions = 0;
-    for j in 0..m {
-        let hv = hessian_action(surface, x, g0, q[j].view(), config.dr)?;
-        actions += 1;
-        let a = hv.dot(&q[j]);
-        alpha.push(a);
-        if j + 1 == m {
-            break;
-        }
-        let mut w = &hv - &(&q[j] * a);
-        if j > 0 {
-            let b = beta[j - 1];
-            w = &w - &(&q[j - 1] * b);
-        }
-        // Full reorthogonalization: the Krylov dimension is small and
-        // finite-difference actions are noisy.
-        for qi in q.iter() {
-            let overlap = w.dot(qi);
-            w = &w - &(qi * overlap);
-        }
-        let b = w.dot(&w).sqrt();
-        if b <= 1e-12 {
-            break;
-        }
-        beta.push(b);
-        q.push(w / b);
-    }
-
-    // Lowest eigenpair of the symmetric tridiagonal (alpha, beta) by
-    // inverse-free bisection-free QL: the dimension is tiny, so a
-    // dense Jacobi sweep on the tridiagonal is cheapest to get right.
-    let k = alpha.len();
-    let mut t = vec![vec![0.0; k]; k];
-    for i in 0..k {
-        t[i][i] = alpha[i];
-        if i + 1 < k && i < beta.len() {
-            t[i][i + 1] = beta[i];
-            t[i + 1][i] = beta[i];
-        }
-    }
-    let (evals, evecs) = jacobi_eigen(&mut t);
-    let mut lowest = 0;
-    for i in 1..k {
-        if evals[i] < evals[lowest] {
-            lowest = i;
-        }
-    }
-    let mut mode = Array1::zeros(n);
-    for (i, qi) in q.iter().enumerate().take(k) {
-        mode = &mode + &(qi * evecs[i][lowest]);
-    }
-    Ok((normalize(mode), evals[lowest], actions))
-}
-
-/// Cyclic Jacobi for a small symmetric matrix. Returns eigenvalues
-/// and the column-major eigenvector table `v[row][col]`.
-// The rotation sweeps touch two columns of one row at a time, so an
-// index loop is the readable form here.
-#[allow(clippy::needless_range_loop)]
-fn jacobi_eigen(a: &mut [Vec<f64>]) -> (Vec<f64>, Vec<Vec<f64>>) {
-    let n = a.len();
-    let mut v = vec![vec![0.0; n]; n];
-    for (i, row) in v.iter_mut().enumerate() {
-        row[i] = 1.0;
-    }
-    for _sweep in 0..64 {
-        let mut off = 0.0;
-        for (i, row) in a.iter().enumerate() {
-            for value in row.iter().skip(i + 1) {
-                off += value * value;
-            }
-        }
-        if off <= 1e-24 {
-            break;
-        }
-        for p in 0..n {
-            for qi in (p + 1)..n {
-                if a[p][qi].abs() < 1e-18 {
-                    continue;
-                }
-                let theta = (a[qi][qi] - a[p][p]) / (2.0 * a[p][qi]);
-                let t = theta.signum() / (theta.abs() + (theta * theta + 1.0).sqrt());
-                let c = 1.0 / (t * t + 1.0).sqrt();
-                let s = t * c;
-                for k in 0..n {
-                    let akp = a[k][p];
-                    let akq = a[k][qi];
-                    a[k][p] = c * akp - s * akq;
-                    a[k][qi] = s * akp + c * akq;
-                }
-                for k in 0..n {
-                    let apk = a[p][k];
-                    let aqk = a[qi][k];
-                    a[p][k] = c * apk - s * aqk;
-                    a[qi][k] = s * apk + c * aqk;
-                }
-                for k in 0..n {
-                    let vkp = v[k][p];
-                    let vkq = v[k][qi];
-                    v[k][p] = c * vkp - s * vkq;
-                    v[k][qi] = s * vkp + c * vkq;
-                }
-            }
-        }
-    }
-    let evals = (0..n).map(|i| a[i][i]).collect();
-    (evals, v)
+    let h = FdHvp {
+        surface,
+        g0: g0.to_owned(),
+        dr: config.dr,
+    };
+    let params = EigenParams {
+        kind: config.eigen_kind,
+        krylov: config.krylov_dim,
+        ..EigenParams::default()
+    };
+    let mode = rgmin::lowest_mode(&h, x, seed.view(), &params).map_err(|e| {
+        SaddleError::Solver(format!("lowest-mode {}: {e}", config.eigen_kind.name()))
+    })?;
+    Ok((mode.vector, mode.value, mode.actions))
 }
 
 /// Stepping minimum-mode saddle search.

@@ -23,7 +23,8 @@ Kick
 ~~~~
 
 Prefer ``IrcSession::from_surface`` so the mode comes from
-matrix-free Lanczos. Pass a precomputed mode to ``new`` only when
+the rgmin lowest-mode waist (default Lanczos; closed
+``EigensolverKind``). Pass a precomputed mode to ``new`` only when
 the host already has it.
 
 What not to do
