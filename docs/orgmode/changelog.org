@@ -6,6 +6,10 @@
 
 ** Unreleased
 
+- ~SellaMinSession~ is Sella order-0: QN + TrustRegion,
+  ~delta0~/~sigma~/~rho~ schedule, ~eig=false~. Isolated
+  molecules retract on ~ManifoldKind::RigidQuotient~; the
+  increment stays horizontal.
 - Sella ~RationalFunctionOptimization~ stepper: ~alpha~ /
   ~order~ over ~rgmin::rfo_get_s~. Distinct from
   ~NewtonKind::Rfo~. Riemannian ~step_on~ retracts onto
