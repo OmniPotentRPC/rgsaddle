@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 8u
+#define RGSADDLE_ABI_MINOR 9u
 
 /** Version head carried by every wire struct. */
 typedef struct {
@@ -299,6 +299,12 @@ RgsaddleSellaMin *rgsaddle_sella_min_create_cell(
     const rgsaddle_sella_min_config_t *config, int64_t n_atoms,
     const double *position, const double *masses, const double *cell,
     const int32_t *mask);
+/** Packed [q_int; cell_params]. `cons` is copied. */
+RgsaddleSellaMin *rgsaddle_sella_min_create_cell_internal(
+    const rgsaddle_sella_min_config_t *config, int64_t n_atoms,
+    const double *position, const double *masses,
+    const RgsaddleConstraints *cons, const double *cell,
+    const int32_t *mask);
 int rgsaddle_sella_min_step(RgsaddleSellaMin *session,
                             rgsaddle_surface_fn surface, void *user,
                             rgsaddle_report_t *out);
@@ -306,6 +312,9 @@ int rgsaddle_sella_min_position(const RgsaddleSellaMin *session, double *out);
 int rgsaddle_sella_min_reset(RgsaddleSellaMin *session);
 /** `update` is 0 = BFGS, 1 = TS-BFGS. Unknown refuses. */
 int rgsaddle_sella_min_set_hess_update(RgsaddleSellaMin *session, int32_t update);
+/** Niggli-reduce a cell session. `*applied` is 1 if rewritten. */
+int rgsaddle_sella_min_maybe_niggli(RgsaddleSellaMin *session,
+                                    double angle_threshold, int32_t *applied);
 void rgsaddle_sella_min_free(RgsaddleSellaMin *session);
 
 typedef struct RgsaddleSellaSaddle RgsaddleSellaSaddle;
@@ -335,6 +344,11 @@ RgsaddleSellaSaddle *rgsaddle_sella_saddle_create_cell(
     const rgsaddle_sella_saddle_config_t *config, int64_t n_atoms,
     const double *position, const double *masses, const double *cell,
     const int32_t *mask);
+RgsaddleSellaSaddle *rgsaddle_sella_saddle_create_cell_internal(
+    const rgsaddle_sella_saddle_config_t *config, int64_t n_atoms,
+    const double *position, const double *masses,
+    const RgsaddleConstraints *cons, const double *cell,
+    const int32_t *mask);
 int rgsaddle_sella_saddle_step(RgsaddleSellaSaddle *session,
                                rgsaddle_surface_fn surface, void *user,
                                rgsaddle_report_t *out);
@@ -343,6 +357,9 @@ int rgsaddle_sella_saddle_position(const RgsaddleSellaSaddle *session,
 int rgsaddle_sella_saddle_reset(RgsaddleSellaSaddle *session);
 int rgsaddle_sella_saddle_set_hess_update(RgsaddleSellaSaddle *session,
                                           int32_t update);
+int rgsaddle_sella_saddle_maybe_niggli(RgsaddleSellaSaddle *session,
+                                       double angle_threshold,
+                                       int32_t *applied);
 /** `expand` is ExpandKind: 0 lanczos, 1 gd, 2 jd0, 3 jd0_alt, 4 mjd0, 5 mjd0_alt. */
 int rgsaddle_sella_saddle_set_expand(RgsaddleSellaSaddle *session,
                                      int32_t expand);
