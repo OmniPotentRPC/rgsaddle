@@ -1,0 +1,27 @@
+
+
+Drive a Sella minimum or saddle session
+---------------------------------------
+
+``SellaMinSession`` is order 0: ``qn_restricted`` plus
+``CartesianPes.kick``. ``SellaSaddleSession`` is order 1:
+``prfo_restricted`` plus the same kick. Both sit on
+``CartesianPes``, not on ``IrcSession``.
+
+IRC stays ``IrcSession`` (``IrcKind.Gs2`` or ``Morokuma``).
+Minimum-mode following stays ``MinModeSession`` (dimer / Lanczos).
+
+Hessian
+~~~~~~~
+
+``CartesianPes`` defaults to MW BFGS. ``HessUpdate.TsBfgs`` is
+Sella TS-BFGS (``|B|`` in the secant weight) so a negative mode
+is not forced positive.
+
+What not to do
+~~~~~~~~~~~~~~
+
+- Do not use ``SellaSaddleSession`` as a substitute for
+  ``MinModeSession`` or ``IrcSession``.
+
+- Do not treat ``ManifoldKind.Sphere`` as the GS2 sphere.

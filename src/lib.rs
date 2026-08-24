@@ -56,7 +56,7 @@ pub use irc::{IrcConfig, IrcDirection, IrcKind, IrcReport, IrcSession};
 pub use minmode::{
     MinModeConfig, MinModeKind, MinModeReport, MinModeSession, MinModeStatus, PointSurface,
 };
-pub use pes::CartesianPes;
+pub use pes::{CartesianPes, HessUpdate};
 pub use sella_min::{SellaMinConfig, SellaMinReport, SellaMinSession};
 pub use sella_saddle::{SellaSaddleConfig, SellaSaddleReport, SellaSaddleSession};
 pub use projection::ProjectionKind;

@@ -11,11 +11,20 @@ use rgmin::{mw_pair, sqrt_masses_3n, BfgsModel};
 use crate::error::SaddleError;
 use crate::minmode::PointSurface;
 
+/// How [`CartesianPes::kick`] updates the Hessian.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HessUpdate {
+    #[default]
+    Bfgs,
+    TsBfgs,
+}
+
 /// Cartesian geometry plus a persistent MW Hessian.
 pub struct CartesianPes {
     x: Array1<f64>,
     masses: Array1<f64>,
     hess: BfgsModel,
+    update: HessUpdate,
 }
 
 impl CartesianPes {
@@ -36,7 +45,12 @@ impl CartesianPes {
             x,
             masses,
             hess: BfgsModel::identity(n),
+            update: HessUpdate::Bfgs,
         })
+    }
+
+    pub fn set_update(&mut self, update: HessUpdate) {
+        self.update = update;
     }
 
     pub fn position(&self) -> ArrayView1<'_, f64> {
@@ -70,7 +84,10 @@ impl CartesianPes {
         let s = d.slice(ndarray::s![..n]).to_owned();
         let sqrtm = sqrt_masses_3n(self.masses.as_slice().unwrap_or(&[]));
         let (sm, ym) = mw_pair(&s, &y, &sqrtm);
-        self.hess.update(&sm, &ym);
+        match self.update {
+            HessUpdate::Bfgs => self.hess.update(&sm, &ym),
+            HessUpdate::TsBfgs => self.hess.update_ts(&sm, &ym),
+        }
         Ok((e, g1))
     }
 }
