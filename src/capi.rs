@@ -9,21 +9,22 @@ use std::os::raw::c_char;
 use std::slice;
 
 use ndarray::{Array1, Array2, ArrayView2};
-use rgmin::{FireKind, Method};
+use rgmin::{FireKind, Manifold, Method};
 
 use crate::band::{BandConfig, BandSession, BandStatus, BandSurface, CiConfig};
+use crate::constraints::Constraints;
+use crate::error::SaddleError;
 use crate::irc::{IrcConfig, IrcDirection, IrcKind, IrcSession};
 use crate::mic::Cell;
-use crate::error::SaddleError;
 use crate::minmode::{MinModeConfig, MinModeKind, MinModeSession, MinModeStatus, PointSurface};
+use crate::projection::ProjectionKind;
 use crate::sella_min::{SellaMinConfig, SellaMinSession};
 use crate::sella_saddle::{SellaSaddleConfig, SellaSaddleSession};
-use crate::projection::ProjectionKind;
 use crate::spring::SpringKind;
 use crate::tangent::TangentKind;
 
 pub const RGSADDLE_ABI_MAJOR: u32 = 1;
-pub const RGSADDLE_ABI_MINOR: u32 = 2;
+pub const RGSADDLE_ABI_MINOR: u32 = 3;
 
 pub const RGSADDLE_OK: i32 = 0;
 pub const RGSADDLE_NULL_SESSION: i32 = -1;
@@ -125,6 +126,12 @@ pub struct RgsaddleSellaSaddleConfig {
     pub force_tol: f64,
     pub force_gate: i32,
     pub order: i64,
+}
+
+#[repr(C)]
+pub struct RgsaddleConstraintsConfig {
+    pub version: RgsaddleVersion,
+    pub flags: u64,
 }
 
 #[repr(C)]
@@ -239,6 +246,11 @@ pub struct RgsaddleSellaMin {
 
 pub struct RgsaddleSellaSaddle {
     session: SellaSaddleSession,
+    n_atoms: i64,
+}
+
+pub struct RgsaddleConstraints {
+    cons: Constraints,
     n_atoms: i64,
 }
 
@@ -726,12 +738,7 @@ pub unsafe extern "C" fn rgsaddle_irc_create_from_surface(
     surface: Option<RgsaddleSurfaceFn>,
     user: *mut c_void,
 ) -> *mut RgsaddleIrc {
-    if config.is_null()
-        || saddle.is_null()
-        || masses.is_null()
-        || seed.is_null()
-        || n_atoms < 1
-    {
+    if config.is_null() || saddle.is_null() || masses.is_null() || seed.is_null() || n_atoms < 1 {
         return std::ptr::null_mut();
     }
     let Some(f) = surface else {
@@ -766,11 +773,7 @@ pub unsafe extern "C" fn rgsaddle_irc_create_from_surface(
     } else {
         IrcDirection::Forward
     };
-    let cs = CSurface {
-        f,
-        user,
-        n_atoms,
-    };
+    let cs = CSurface { f, user, n_atoms };
     match IrcSession::from_surface(irc_cfg, x, m, sd, dir, &cs) {
         Ok(session) => Box::into_raw(Box::new(RgsaddleIrc { session, n_atoms })),
         Err(_) => std::ptr::null_mut(),
@@ -821,10 +824,7 @@ pub unsafe extern "C" fn rgsaddle_irc_step(
 /// # Safety
 /// `out` holds 3N doubles.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rgsaddle_irc_position(
-    session: *const RgsaddleIrc,
-    out: *mut f64,
-) -> i32 {
+pub unsafe extern "C" fn rgsaddle_irc_position(session: *const RgsaddleIrc, out: *mut f64) -> i32 {
     if session.is_null() {
         return RGSADDLE_NULL_SESSION;
     }
@@ -886,10 +886,7 @@ mod irc_abi_tests {
 
     struct Well;
     impl PointSurface for Well {
-        fn eval(
-            &self,
-            x: ndarray::ArrayView1<f64>,
-        ) -> Result<(f64, Array1<f64>), SaddleError> {
+        fn eval(&self, x: ndarray::ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
             let t = x[0];
             let mut g = Array1::zeros(x.len());
             g[0] = 4.0 * t * (t * t - 1.0);
@@ -955,10 +952,14 @@ mod irc_abi_tests {
             curvature: 0.0,
             rotations: 0,
         };
-        let rc = unsafe { rgsaddle_irc_step(sess, Some(well_cb), std::ptr::null_mut(), &mut report) };
+        let rc =
+            unsafe { rgsaddle_irc_step(sess, Some(well_cb), std::ptr::null_mut(), &mut report) };
         assert_eq!(rc, RGSADDLE_OK);
         let mut out = [0.0; 6];
-        assert_eq!(unsafe { rgsaddle_irc_position(sess, out.as_mut_ptr()) }, RGSADDLE_OK);
+        assert_eq!(
+            unsafe { rgsaddle_irc_position(sess, out.as_mut_ptr()) },
+            RGSADDLE_OK
+        );
         assert!(out[0].abs() > 1e-8, "kick must leave the saddle");
         unsafe { rgsaddle_irc_free(sess) };
     }
@@ -1286,9 +1287,7 @@ pub unsafe extern "C" fn rgsaddle_sella_saddle_position(
 /// # Safety
 /// `session` must be a live pointer or NULL.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rgsaddle_sella_saddle_reset(
-    session: *mut RgsaddleSellaSaddle,
-) -> i32 {
+pub unsafe extern "C" fn rgsaddle_sella_saddle_reset(session: *mut RgsaddleSellaSaddle) -> i32 {
     if session.is_null() {
         return RGSADDLE_NULL_SESSION;
     }
@@ -1302,5 +1301,237 @@ pub unsafe extern "C" fn rgsaddle_sella_saddle_reset(
 pub unsafe extern "C" fn rgsaddle_sella_saddle_free(session: *mut RgsaddleSellaSaddle) {
     if !session.is_null() {
         drop(unsafe { Box::from_raw(session) });
+    }
+}
+
+/// # Safety
+/// `config` must be a valid pointer or NULL.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_constraints_create(
+    config: *const RgsaddleConstraintsConfig,
+    n_atoms: i64,
+) -> *mut RgsaddleConstraints {
+    if config.is_null() || n_atoms < 1 {
+        return std::ptr::null_mut();
+    }
+    let cfg = unsafe { &*config };
+    if cfg.version.major != RGSADDLE_ABI_MAJOR {
+        return std::ptr::null_mut();
+    }
+    match Constraints::new(n_atoms as usize) {
+        Ok(cons) => Box::into_raw(Box::new(RgsaddleConstraints { cons, n_atoms })),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// # Safety
+/// `x` is 3N. `cons` is a live chart or NULL.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_constraints_fix_com(
+    cons: *mut RgsaddleConstraints,
+    x: *const f64,
+) -> i32 {
+    if cons.is_null() {
+        return RGSADDLE_NULL_SESSION;
+    }
+    if x.is_null() {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let cons = unsafe { &mut *cons };
+    let dof = (3 * cons.n_atoms) as usize;
+    let x = Array1::from(unsafe { slice::from_raw_parts(x, dof) }.to_vec());
+    match cons.cons.fix_com(x.view()) {
+        Ok(()) => RGSADDLE_OK,
+        Err(e) => status_of(&e),
+    }
+}
+
+/// # Safety
+/// `x` is 3N. `target` is one double or NULL (current length).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_constraints_fix_bond(
+    cons: *mut RgsaddleConstraints,
+    i: i64,
+    j: i64,
+    x: *const f64,
+    target: *const f64,
+) -> i32 {
+    if cons.is_null() {
+        return RGSADDLE_NULL_SESSION;
+    }
+    if x.is_null() {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let cons = unsafe { &mut *cons };
+    if i < 0 || j < 0 || i >= cons.n_atoms || j >= cons.n_atoms {
+        return RGSADDLE_SHAPE;
+    }
+    let dof = (3 * cons.n_atoms) as usize;
+    let x = Array1::from(unsafe { slice::from_raw_parts(x, dof) }.to_vec());
+    let target = if target.is_null() {
+        None
+    } else {
+        Some(unsafe { *target })
+    };
+    match cons
+        .cons
+        .fix_bond([i as usize, j as usize], x.view(), target)
+    {
+        Ok(()) => RGSADDLE_OK,
+        Err(e) => status_of(&e),
+    }
+}
+
+/// # Safety
+/// `x` is 3N. `out` is one double.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_constraints_residual_norm(
+    cons: *const RgsaddleConstraints,
+    x: *const f64,
+    out: *mut f64,
+) -> i32 {
+    if cons.is_null() {
+        return RGSADDLE_NULL_SESSION;
+    }
+    if x.is_null() || out.is_null() {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let cons = unsafe { &*cons };
+    let dof = (3 * cons.n_atoms) as usize;
+    let x = Array1::from(unsafe { slice::from_raw_parts(x, dof) }.to_vec());
+    match cons.cons.residual_norm(x.view()) {
+        Ok(n) => {
+            unsafe { *out = n };
+            RGSADDLE_OK
+        }
+        Err(e) => status_of(&e),
+    }
+}
+
+/// # Safety
+/// `x`, `v`, and `out` are 3N.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_constraints_project(
+    cons: *const RgsaddleConstraints,
+    x: *const f64,
+    v: *const f64,
+    out: *mut f64,
+) -> i32 {
+    if cons.is_null() {
+        return RGSADDLE_NULL_SESSION;
+    }
+    if x.is_null() || v.is_null() || out.is_null() {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let cons = unsafe { &*cons };
+    let dof = (3 * cons.n_atoms) as usize;
+    let x = Array1::from(unsafe { slice::from_raw_parts(x, dof) }.to_vec());
+    let v = Array1::from(unsafe { slice::from_raw_parts(v, dof) }.to_vec());
+    let p = cons.cons.project(&x, &v);
+    let dst = unsafe { slice::from_raw_parts_mut(out, dof) };
+    for (k, val) in p.iter().enumerate() {
+        dst[k] = *val;
+    }
+    RGSADDLE_OK
+}
+
+/// # Safety
+/// `x`, `v`, and `out` are 3N.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_constraints_retract(
+    cons: *const RgsaddleConstraints,
+    x: *const f64,
+    v: *const f64,
+    out: *mut f64,
+) -> i32 {
+    if cons.is_null() {
+        return RGSADDLE_NULL_SESSION;
+    }
+    if x.is_null() || v.is_null() || out.is_null() {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let cons = unsafe { &*cons };
+    let dof = (3 * cons.n_atoms) as usize;
+    let x = Array1::from(unsafe { slice::from_raw_parts(x, dof) }.to_vec());
+    let v = Array1::from(unsafe { slice::from_raw_parts(v, dof) }.to_vec());
+    let y = cons.cons.retract(&x, &v);
+    let dst = unsafe { slice::from_raw_parts_mut(out, dof) };
+    for (k, val) in y.iter().enumerate() {
+        dst[k] = *val;
+    }
+    RGSADDLE_OK
+}
+
+/// # Safety
+/// `cons` must come from [`rgsaddle_constraints_create`] and be freed once.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_constraints_free(cons: *mut RgsaddleConstraints) {
+    if !cons.is_null() {
+        drop(unsafe { Box::from_raw(cons) });
+    }
+}
+
+#[cfg(test)]
+mod constraints_abi_tests {
+    use super::*;
+    use rgmin::vecops::nrm2;
+
+    fn water() -> [f64; 9] {
+        [0.0, 0.0, 0.0, 0.96, 0.0, 0.0, -0.24, 0.93, 0.0]
+    }
+
+    fn stamped_cfg() -> RgsaddleConstraintsConfig {
+        RgsaddleConstraintsConfig {
+            version: RgsaddleVersion {
+                major: RGSADDLE_ABI_MAJOR,
+                minor: RGSADDLE_ABI_MINOR,
+            },
+            flags: 0,
+        }
+    }
+
+    #[test]
+    fn constraints_abi_com_kills_a_translation() {
+        let x = water();
+        let cfg = stamped_cfg();
+        let cons = unsafe { rgsaddle_constraints_create(&cfg, 3) };
+        assert!(!cons.is_null());
+        assert_eq!(
+            unsafe { rgsaddle_constraints_fix_com(cons, x.as_ptr()) },
+            RGSADDLE_OK
+        );
+        let mut r = f64::NAN;
+        assert_eq!(
+            unsafe { rgsaddle_constraints_residual_norm(cons, x.as_ptr(), &mut r) },
+            RGSADDLE_OK
+        );
+        assert!(r < 1e-14, "r={r}");
+
+        let shift = [0.1; 9];
+        let mut out = [0.0; 9];
+        assert_eq!(
+            unsafe {
+                rgsaddle_constraints_project(cons, x.as_ptr(), shift.as_ptr(), out.as_mut_ptr())
+            },
+            RGSADDLE_OK
+        );
+        let n = nrm2(Array1::from(out.to_vec()).view());
+        assert!(n < 1e-12, "projected translation {n}");
+        unsafe { rgsaddle_constraints_free(cons) };
+    }
+
+    #[test]
+    fn constraints_abi_unknown_or_null_refuses_create() {
+        let cfg = stamped_cfg();
+        assert!(unsafe { rgsaddle_constraints_create(std::ptr::null(), 3) }.is_null());
+        assert!(unsafe { rgsaddle_constraints_create(&cfg, 0) }.is_null());
+        let bad = RgsaddleConstraintsConfig {
+            version: RgsaddleVersion {
+                major: 99,
+                minor: 0,
+            },
+            flags: 0,
+        };
+        assert!(unsafe { rgsaddle_constraints_create(&bad, 3) }.is_null());
     }
 }

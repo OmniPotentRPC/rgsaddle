@@ -26,8 +26,11 @@ thermostat (``samd.py``). ``force_match_hessian`` is the
 bond arm of ``force_match.pyx``.
 
 The C wire exposes ``rgsaddle_sella_min_*`` and
-``rgsaddle_sella_saddle_*`` (ABI minor 2). Unknown
-``force_gate`` refuses create.
+``rgsaddle_sella_saddle_*``, plus ``rgsaddle_constraints_*``
+(ABI minor 3): create / fix_com / fix_bond /
+residual_norm / project / retract / free. Unknown
+``force_gate`` or a null / unknown-major Constraints
+config refuses create.
 
 ``SellaSaddleSession`` ``eig=true`` runs Rayleigh-Ritz on
 the free Hessian every ``nsteps_per_diag`` steps.
