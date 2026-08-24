@@ -464,7 +464,7 @@ pub fn rayleigh_ritz_iter(
     }
 }
 
-fn solve_dense(a: ArrayView2<f64>, b: ArrayView1<f64>) -> Result<Array1<f64>, SaddleError> {
+pub(crate) fn solve_dense(a: ArrayView2<f64>, b: ArrayView1<f64>) -> Result<Array1<f64>, SaddleError> {
     let n = a.nrows();
     if a.ncols() != n || b.len() != n {
         return Err(SaddleError::Shape("dense solve needs a square system".into()));

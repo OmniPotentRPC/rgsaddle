@@ -53,6 +53,7 @@ pub mod irc;
 #[cfg(feature = "readcon")]
 pub use io::{MolecularFrame, frame_from_con};
 pub mod capi;
+pub mod cell_log;
 pub mod constraints;
 pub mod eigensolve;
 pub mod error;
@@ -86,6 +87,7 @@ pub use eigensolve::{
 pub use error::SaddleError;
 pub use force::ForceGate;
 pub use force_match::{covalent_pairs, force_match_hessian};
+pub use cell_log::{expm_3x3, logm_3x3, CellChart};
 pub use geom::{SellaGeom, TrustSchedule};
 pub use linalg::{modified_gram_schmidt, numerical_hvp};
 pub use internal::{CartAxis, Displacement, InternalSlot, Rotation, Translation};

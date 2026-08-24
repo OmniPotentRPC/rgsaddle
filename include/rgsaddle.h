@@ -314,6 +314,8 @@ int rgsaddle_sella_min_reset(RgsaddleSellaMin *session);
 int rgsaddle_sella_min_set_hess_update(RgsaddleSellaMin *session, int32_t update);
 /** `restricted` is 0 = TrustRegion, 1 = MaxInternalStep. */
 int rgsaddle_sella_min_set_restricted(RgsaddleSellaMin *session, int32_t restricted);
+/** `chart` is 0 = entries, 1 = log-deform. Unknown refuses. */
+int rgsaddle_sella_min_set_cell_chart(RgsaddleSellaMin *session, int32_t chart);
 /** Niggli-reduce a cell session. `*applied` is 1 if rewritten. */
 int rgsaddle_sella_min_maybe_niggli(RgsaddleSellaMin *session,
                                     double angle_threshold, int32_t *applied);

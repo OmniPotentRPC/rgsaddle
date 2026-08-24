@@ -166,6 +166,28 @@ impl SellaMinSession {
         })
     }
 
+    /// QN on the Sella log-deformation cell chart.
+    pub fn on_cell_log(
+        config: SellaMinConfig,
+        x: Array1<f64>,
+        masses: Array1<f64>,
+        cell: crate::Cell,
+        mask: [bool; 9],
+    ) -> Result<Self, SaddleError> {
+        let mut pes = CellCartesianPes::new(x, masses, cell)?;
+        pes.set_mask(mask);
+        pes.set_chart(crate::CellChart::LogDeform);
+        let n_free = pes.packed_len().max(1);
+        let delta = config.delta * n_free as f64;
+        Ok(Self {
+            pes: SellaPes::Cell(pes),
+            config,
+            geom: SellaGeom::Kind(rgmin::ManifoldKind::Euclidean),
+            delta,
+            rho: 1.0,
+        })
+    }
+
     /// QN in packed `[q_int; cell_params]` (Sella `CellInternalPES`).
     pub fn on_cell_internal(
         config: SellaMinConfig,
@@ -201,6 +223,15 @@ impl SellaMinSession {
     /// Internals increment clip. Cartesian sessions ignore this.
     pub fn set_restricted(&mut self, kind: crate::RestrictedKind) {
         self.config.restricted = kind;
+    }
+
+    /// Switch the cell chart. No-op on a non-cell session.
+    pub fn set_cell_chart(&mut self, kind: crate::CellChart) {
+        if let SellaPes::Cell(p) = &mut self.pes {
+            p.set_chart(kind);
+            let n = p.packed_len().max(1);
+            self.delta = self.config.delta * n as f64;
+        }
     }
 
     pub fn position(&self) -> ndarray::ArrayView1<'_, f64> {
@@ -757,6 +788,34 @@ mod tests {
         assert!(
             (a00 - 2.0).abs() < 0.35,
             "lattice a00 should walk toward 2, got {a00}"
+        );
+    }
+
+    #[test]
+    fn log_cell_qn_moves_the_lattice() {
+        let mut x = Array1::zeros(6);
+        x[0] = 0.3;
+        let cell = crate::Cell::ortho(3.0, 3.0, 3.0).unwrap();
+        let mut mask = [false; 9];
+        mask[0] = true;
+        let mut sess = SellaMinSession::on_cell_log(
+            SellaMinConfig {
+                delta: 0.2,
+                force_tol: 0.05,
+                ..SellaMinConfig::default()
+            },
+            x,
+            Array1::from(vec![1.0, 1.0]),
+            cell,
+            mask,
+        )
+        .unwrap();
+        assert_eq!(sess.cell_pes().unwrap().chart(), crate::CellChart::LogDeform);
+        let _ = sess.run(&CellQuad, 40).unwrap();
+        let a00 = sess.cell_pes().unwrap().cell9()[0];
+        assert!(
+            (a00 - 2.0).abs() < 0.5,
+            "log-cell a00 should walk toward 2, got {a00}"
         );
     }
 

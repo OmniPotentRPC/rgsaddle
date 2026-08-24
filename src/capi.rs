@@ -1449,6 +1449,23 @@ pub unsafe extern "C" fn rgsaddle_sella_min_set_restricted(
 }
 
 /// # Safety
+/// `chart` is CellChart. Unknown refuses.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_sella_min_set_cell_chart(
+    session: *mut RgsaddleSellaMin,
+    chart: i32,
+) -> i32 {
+    if session.is_null() {
+        return RGSADDLE_NULL_SESSION;
+    }
+    let Some(kind) = crate::CellChart::try_from_abi(chart) else {
+        return RGSADDLE_INVALID_PARAMETER;
+    };
+    unsafe { (*session).session.set_cell_chart(kind) };
+    RGSADDLE_OK
+}
+
+/// # Safety
 /// `applied` may be NULL.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rgsaddle_sella_min_maybe_niggli(

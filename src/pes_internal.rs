@@ -12,6 +12,7 @@
 use ndarray::{s, Array1, ArrayView1};
 use rgmin::BfgsModel;
 
+use crate::cell_log::{transform_cell_block, CellChart, CellState, PackedHess};
 use crate::constraints::Constraints;
 use crate::error::SaddleError;
 use crate::mic::Cell;
@@ -234,23 +235,22 @@ impl SellaPes {
 /// Cartesian PES plus a periodic cell.
 pub struct CellCartesianPes {
     cart: CartesianPes,
-    cell: Cell,
-    /// Sella `cell_mask`: which of the 9 Cartesian cell entries are free.
-    mask: [bool; 9],
+    state: CellState,
     /// Packed BFGS on `[x_cart; cell_params]`.
-    hess: BfgsModel,
+    hess: PackedHess,
     update: HessUpdate,
 }
 
 impl CellCartesianPes {
     pub fn new(x: Array1<f64>, masses: Array1<f64>, cell: Cell) -> Result<Self, SaddleError> {
         let cart = CartesianPes::new(x, masses)?;
-        let n = cart.position().len() + 9;
+        let n_atoms = cart.position().len() / 3;
+        let state = CellState::new(cell, n_atoms);
+        let n = cart.position().len() + state.n_cell_dof();
         Ok(Self {
             cart,
-            cell,
-            mask: [true; 9],
-            hess: BfgsModel::identity(n),
+            state,
+            hess: PackedHess::identity(n),
             update: HessUpdate::Bfgs,
         })
     }
@@ -260,12 +260,21 @@ impl CellCartesianPes {
         self.cart.set_update(update);
     }
 
-    pub fn hessian(&self) -> &BfgsModel {
+    pub fn set_chart(&mut self, kind: CellChart) {
+        self.state.set_kind(kind);
+        self.hess = PackedHess::identity(self.packed_len());
+    }
+
+    pub fn chart(&self) -> CellChart {
+        self.state.kind()
+    }
+
+    pub fn hessian(&self) -> &PackedHess {
         &self.hess
     }
 
     pub fn n_cell_dof(&self) -> usize {
-        self.mask.iter().filter(|b| **b).count()
+        self.state.n_cell_dof()
     }
 
     /// Packed length: 3N plus the free cell entries.
@@ -275,22 +284,12 @@ impl CellCartesianPes {
 
     /// Row-major 3x3 lattice.
     pub fn cell9(&self) -> [f64; 9] {
-        let [a, b, c] = self.lattice();
-        [a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2]]
+        self.state.cell9()
     }
 
-    /// Free cell entries in mask order.
+    /// Free cell parameters in the active chart, mask order.
     pub fn cell_params(&self) -> Array1<f64> {
-        let c = self.cell9();
-        let mut p = Array1::zeros(self.n_cell_dof());
-        let mut k = 0;
-        for i in 0..9 {
-            if self.mask[i] {
-                p[k] = c[i];
-                k += 1;
-            }
-        }
-        p
+        self.state.params().unwrap_or_else(|_| Array1::zeros(self.n_cell_dof()))
     }
 
     /// `[x_cart; cell_params]`.
@@ -307,17 +306,7 @@ impl CellCartesianPes {
         out
     }
 
-    fn apply_cell9(&mut self, c: [f64; 9]) -> Result<(), SaddleError> {
-        self.cell = cell_from_lattice(
-            [c[0], c[1], c[2]],
-            [c[3], c[4], c[5]],
-            [c[6], c[7], c[8]],
-            self.cell.origin(),
-        )?;
-        Ok(())
-    }
-
-    /// Packed gradient: Cartesian `g` plus masked `dE/dC`.
+    /// Packed gradient: Cartesian `g` plus the chart cell gradient.
     pub fn packed_grad<S: PointSurface>(
         &self,
         surface: &S,
@@ -326,19 +315,16 @@ impl CellCartesianPes {
         let c9 = self.cell9();
         let gcell = match surface.cell_grad(self.cart.position(), &c9)? {
             Some(g) => g,
-            None => fd_cell_grad(surface, self.cart.position(), &c9, &self.mask, 1e-5)?,
+            None => fd_cell_grad(surface, self.cart.position(), &c9, &self.state.mask(), 1e-5)?,
         };
+        let g_chart = self.state.chart_grad(gcell)?;
         let n = self.cart.position().len();
-        let mut out = Array1::zeros(n + self.n_cell_dof());
+        let mut out = Array1::zeros(n + g_chart.len());
         for i in 0..n {
             out[i] = g_cart[i];
         }
-        let mut k = 0;
-        for i in 0..9 {
-            if self.mask[i] {
-                out[n + k] = gcell[i];
-                k += 1;
-            }
+        for (k, v) in g_chart.iter().enumerate() {
+            out[n + k] = *v;
         }
         Ok(out)
     }
@@ -360,16 +346,9 @@ impl CellCartesianPes {
         let (e0, g0) = surface.eval_in_cell(self.cart.position(), &c9)?;
         let g0p = self.packed_grad(surface, g0.view())?;
         let _ = e0;
-        let mut c1 = c9;
-        let mut k = 0;
-        for i in 0..9 {
-            if self.mask[i] {
-                c1[i] += d[n + k];
-                k += 1;
-            }
-        }
-        self.apply_cell9(c1)?;
-        let dx = d.slice(ndarray::s![..n]).to_owned();
+        let dcell = d.slice(s![n..]).to_owned();
+        self.state.kick_params(&dcell)?;
+        let dx = d.slice(s![..n]).to_owned();
         let (e, g1) = self.cart.kick_from(surface, dx.view(), g0.view())?;
         let g1p = self.packed_grad(surface, g1.view())?;
         let y = &g1p - &g0p;
@@ -383,31 +362,32 @@ impl CellCartesianPes {
 
     pub fn reset(&mut self) {
         self.cart.reset();
-        self.hess = BfgsModel::identity(self.packed_len());
+        self.hess = PackedHess::identity(self.packed_len());
     }
 
     pub fn cell(&self) -> &Cell {
-        &self.cell
+        self.state.cell()
     }
 
     pub fn set_cell(&mut self, cell: Cell) {
-        self.cell = cell;
+        self.state.set_cell(cell);
     }
 
     /// Sella `cell_mask`, row-major 3x3. Rebuilds the packed Hessian.
     pub fn set_mask(&mut self, mask: [bool; 9]) {
-        self.mask = mask;
-        self.hess = BfgsModel::identity(self.packed_len());
+        self.state.set_mask(mask);
+        self.hess = PackedHess::identity(self.packed_len());
     }
 
     pub fn mask(&self) -> [bool; 9] {
-        self.mask
+        self.state.mask()
     }
 
     /// Zero cell-step entries the mask forbids.
     pub fn project_cell_step(&self, mut dcell: [f64; 9]) -> [f64; 9] {
+        let mask = self.state.mask();
         for i in 0..9 {
-            if !self.mask[i] {
+            if !mask[i] {
                 dcell[i] = 0.0;
             }
         }
@@ -416,7 +396,7 @@ impl CellCartesianPes {
 
     /// Lattice vectors as three Cartesian columns of the cell.
     pub fn lattice(&self) -> [[f64; 3]; 3] {
-        lattice_of(&self.cell)
+        self.state.lattice()
     }
 
     /// Cell angles `α, β, γ` in degrees.
@@ -431,24 +411,24 @@ impl CellCartesianPes {
 
     /// Sella `maybe_niggli_reduce`: rewrite a skewed cell in place.
     ///
-    /// Triggers when any angle is more than `angle_threshold` degrees
-    /// from 90. The Cartesian Hessian is not rewritten (no log-cell
-    /// block lives here).
+    /// On the log chart the packed Hessian cell block is transformed
+    /// by `T = J_old^{-1} J_new`. On the entries chart the Hessian is
+    /// dropped.
     pub fn maybe_niggli_reduce(&mut self, angle_threshold: f64) -> Result<bool, SaddleError> {
-        let angs = self.angles_deg();
-        let max_dev = angs
-            .iter()
-            .map(|a| (a - 90.0).abs())
-            .fold(0.0_f64, f64::max);
-        if max_dev <= angle_threshold {
+        let n_noncell = self.cart.position().len();
+        let (applied, t) = self
+            .state
+            .maybe_niggli(angle_threshold, niggli_reduce_vectors)?;
+        if !applied {
             return Ok(false);
         }
-        let [a, b, c] = self.lattice();
-        let (a2, b2, c2) = niggli_reduce_vectors(a, b, c);
-        self.cell = cell_from_lattice(a2, b2, c2, self.cell.origin())?;
-        // Dest packs Cartesian cell entries, not Sella log-strain, so
-        // there is no Frechet T. Drop the mixed Hessian.
-        self.hess = BfgsModel::identity(self.packed_len());
+        if let Some(t) = t {
+            let mut h = self.hess.hessian().to_owned();
+            transform_cell_block(&mut h, n_noncell, &t);
+            self.hess = PackedHess::from_matrix(h);
+        } else {
+            self.hess = PackedHess::identity(self.packed_len());
+        }
         Ok(true)
     }
 
@@ -1110,6 +1090,38 @@ mod tests {
         assert!((p[0] - 4.0).abs() < 1e-12);
         assert!((p[1] - 5.0).abs() < 1e-12);
         assert!((p[2] - 6.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn log_chart_params_start_at_zero() {
+        let mut cart = CellCartesianPes::new(
+            Array1::zeros(6),
+            Array1::from(vec![1.0, 1.0]),
+            Cell::ortho(4.0, 5.0, 6.0).unwrap(),
+        )
+        .unwrap();
+        cart.set_chart(crate::CellChart::LogDeform);
+        let p = cart.cell_params();
+        assert!(p.iter().all(|v| v.abs() < 1e-10), "{p:?}");
+        let mut skewed = [
+            1.0, 0.0, 0.0, 0.9, 0.15, 0.0, 0.4, 0.5, 1.0,
+        ];
+        let _ = crate::niggli_reduce_cell(&mut skewed, 20.0).unwrap();
+        let cell = Cell::from_vectors(
+            [1.0, 0.0, 0.0],
+            [0.9, 0.15, 0.0],
+            [0.4, 0.5, 1.0],
+            [0.0, 0.0, 0.0],
+        )
+        .unwrap();
+        let mut logp = CellCartesianPes::new(
+            Array1::zeros(6),
+            Array1::from(vec![1.0, 1.0]),
+            cell,
+        )
+        .unwrap();
+        logp.set_chart(crate::CellChart::LogDeform);
+        assert!(logp.maybe_niggli_reduce(20.0).unwrap());
     }
 
     #[test]

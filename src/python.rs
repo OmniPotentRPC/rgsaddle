@@ -5,7 +5,8 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use crate::{
-    EigenDevice, ExpandKind, ForceGate, HessUpdate, IrcKind, MinModeKind, RestrictedKind,
+    CellChart, EigenDevice, ExpandKind, ForceGate, HessUpdate, IrcKind, MinModeKind,
+    RestrictedKind,
 };
 
 fn mint_int_enum<'py>(
@@ -93,6 +94,17 @@ fn rgsaddle(m: &Bound<'_, PyModule>) -> PyResult<()> {
                 ("JD0_ALT", ExpandKind::Jd0Alt.to_abi()),
                 ("MJD0", ExpandKind::Mjd0.to_abi()),
                 ("MJD0_ALT", ExpandKind::Mjd0Alt.to_abi()),
+            ],
+        )?,
+    )?;
+    m.add(
+        "CellChart",
+        mint_int_enum(
+            py,
+            "CellChart",
+            &[
+                ("ENTRIES", CellChart::Entries.to_abi()),
+                ("LOG_DEFORM", CellChart::LogDeform.to_abi()),
             ],
         )?,
     )?;

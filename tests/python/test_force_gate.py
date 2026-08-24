@@ -5,6 +5,7 @@ from __future__ import annotations
 import enum
 
 from rgsaddle import (
+    CellChart,
     EigenDevice,
     ExpandKind,
     ForceGate,
@@ -74,3 +75,10 @@ def test_restricted_kind_is_an_enum():
     assert RestrictedKind.TRUST_REGION == 0
     assert RestrictedKind.MAX_INTERNAL_STEP == 1
     assert RestrictedKind(1) is RestrictedKind.MAX_INTERNAL_STEP
+
+
+def test_cell_chart_is_an_enum():
+    assert issubclass(CellChart, enum.IntEnum)
+    assert CellChart.ENTRIES == 0
+    assert CellChart.LOG_DEFORM == 1
+    assert CellChart(1) is CellChart.LOG_DEFORM
