@@ -217,6 +217,16 @@ impl SellaMinSession {
         self.pes.cell_internal()
     }
 
+    /// Niggli-reduce a cell session. Cartesian and internals sessions
+    /// return `Ok(false)`.
+    pub fn maybe_niggli_reduce(&mut self, angle_threshold: f64) -> Result<bool, SaddleError> {
+        match &mut self.pes {
+            SellaPes::Cell(p) => p.maybe_niggli_reduce(angle_threshold),
+            SellaPes::CellInternal(p) => p.maybe_niggli_reduce(angle_threshold),
+            SellaPes::Cartesian(_) | SellaPes::Internal(_) => Ok(false),
+        }
+    }
+
     /// Living Sella trust radius.
     pub fn delta(&self) -> f64 {
         self.delta
@@ -701,6 +711,17 @@ mod tests {
             g[0] = 2.0 * (cell[0] - 2.0);
             Ok(Some(g))
         }
+    }
+
+    #[test]
+    fn cartesian_niggli_is_a_noop() {
+        let sess = SellaMinSession::new(
+            SellaMinConfig::default(),
+            Array1::zeros(6),
+            Array1::from(vec![1.0, 1.0]),
+        )
+        .unwrap();
+        assert!(!sess.maybe_niggli_reduce(20.0).unwrap());
     }
 
     #[test]
