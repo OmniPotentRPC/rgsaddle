@@ -7,8 +7,10 @@
 //! [`InternalPes::from_find`] loads a vocn auto-find primitive set.
 //!
 //! [`CellCartesianPes`] and [`CellInternalPes`] carry a
-//! [`linkcell::Cell`]. Band / IRC MIC is still [`crate::mic`]; the
-//! cell here is the PES wrapper Sella hangs on periodic systems.
+//! [`linkcell::Cell`]. Packed kicks rewrite the masked lattice
+//! then [`PointSurface::eval_in_cell`] so energy and `g` see the
+//! living cell. Band / IRC MIC is still [`crate::mic`]; the cell
+//! here is the PES wrapper Sella hangs on periodic systems.
 
 use ndarray::{s, Array1, ArrayView1};
 use rgmin::vecops::axpy;
@@ -207,6 +209,25 @@ impl InternalPes {
         let b = self.b_matrix()?;
         let g = self.pad_grad(g_cart);
         internals_grad_from_b(&b, g.view())
+    }
+
+    /// Map `dq` onto the Wilson frame by `B dx = dq`. No surface eval.
+    pub fn displace(&mut self, dq: ArrayView1<f64>) -> Result<(), SaddleError> {
+        let b = self.b_matrix()?;
+        if dq.len() != b.nrows() {
+            return Err(SaddleError::Shape(
+                "internals increment must match the chart".into(),
+            ));
+        }
+        let dx = min_norm_dx(&b, &dq.to_owned());
+        let n = self.cart.position().len();
+        let dx_real = dx.slice(s![..n]).to_owned();
+        if self.dummies.len() + n == dx.len() {
+            for i in 0..self.dummies.len() {
+                self.dummies[i] += dx[n + i];
+            }
+        }
+        self.cart.displace(dx_real.view())
     }
 
     /// Map `dq` to the Wilson frame by `B dx = dq`. Real atoms go
@@ -700,7 +721,7 @@ impl CellInternalPes {
         Ok(out)
     }
 
-    /// Kick `[dq; dcell_params]`.
+    /// Kick `[dq; dcell_params]`. Energy and `g` come from the living cell.
     pub fn kick_packed<S: PointSurface>(
         &mut self,
         surface: &S,
@@ -720,9 +741,14 @@ impl CellInternalPes {
         let dcell = d.slice(s![nint..]).to_owned();
         self.state.kick_params(&dcell)?;
         let dq = d.slice(s![..nint]).to_owned();
-        let (e, g1) = self.inner.kick(surface, dq.view())?;
+        self.inner.displace(dq.view())?;
+        let (e, g1) = surface.eval_in_cell(self.inner.position(), &self.cell9())?;
+        if !g1.iter().all(|v| v.is_finite()) {
+            return Err(SaddleError::NonFinite("pes gradient"));
+        }
         let g1p = self.packed_grad(surface, g1.view())?;
-        let y = &g1p - &g0p;
+        let mut y = g1p.clone();
+        axpy(-1.0, g0p.view(), &mut y);
         let s = d.to_owned();
         match self.update {
             HessUpdate::Bfgs => self.hess.update(&s, &y),
@@ -1342,6 +1368,116 @@ mod tests {
         assert_eq!(pes.packed_len(), 2);
         let p = pes.packed().unwrap();
         assert!((p[1] - 4.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn packed_cell_internal_kick_stays_on_the_masked_cell_set() {
+        use rgmin::vecops::nrm2;
+        use rgmin::{Manifold, ManifoldKind};
+        let mut chart = Constraints::new(2).unwrap();
+        chart
+            .fix_translation(
+                Translation::all(2, CartAxis::X).unwrap(),
+                Array1::zeros(6).view(),
+                Some(0.0),
+            )
+            .unwrap();
+        let mut pes = CellInternalPes::new(
+            Array1::zeros(6),
+            Array1::from(vec![1.0, 1.0]),
+            chart,
+            Cell::ortho(4.0, 5.0, 6.0).unwrap(),
+        )
+        .unwrap();
+        pes.set_mask([
+            true, false, false, false, false, false, false, false, false,
+        ]);
+        let cell0 = pes.cell9();
+        let mut d = Array1::zeros(pes.packed_len());
+        d[0] = 0.2;
+        d[1] = -0.25;
+        let (e, g) = pes.kick_packed(&CellWell, d.view()).unwrap();
+        assert!(e.is_finite());
+        assert!(g.iter().all(|v| v.is_finite()));
+        let cell1 = pes.cell9();
+        assert!((pes.position()[0] - 0.2).abs() < 1e-12);
+        assert!((pes.position()[3] - 0.2).abs() < 1e-12);
+        assert!((cell1[0] - (cell0[0] - 0.25)).abs() < 1e-12);
+        for i in 0..9 {
+            if !pes.mask()[i] {
+                assert_eq!(cell1[i], cell0[i], "masked cell entry {i} left the set");
+            }
+        }
+        // Energy is eval_in_cell after the cell kick, not eval().
+        let want = 0.2 * 0.2 + (3.75 - 2.0) * (3.75 - 2.0);
+        assert!(
+            (e - want).abs() < 1e-12,
+            "kick energy {e} vs in-cell {want}"
+        );
+        let q = pes.internals().internals().unwrap();
+        assert!((q[0] - 0.2).abs() < 1e-12);
+        let packed = pes.packed().unwrap();
+        assert!((packed[0] - 0.2).abs() < 1e-12);
+        assert!((packed[1] - 3.75).abs() < 1e-12);
+        let step = Array1::from_elem(packed.len(), 0.05);
+        let man = ManifoldKind::Euclidean;
+        let v = man.project(&packed, &step);
+        let y = man.retract(&packed, &v);
+        let w = man.transport(&packed, &y, &v);
+        let w_h = man.project(&y, &w);
+        assert!((nrm2(w.view()) - nrm2(w_h.view())).abs() < 1e-14);
+        assert!(y.iter().all(|v| v.is_finite()));
+        let x = pes.position().to_owned();
+        let chart = pes.internals().chart();
+        let cstep = Array1::from_elem(x.len(), 0.01);
+        let cv = chart.project(&x, &cstep);
+        let cv2 = chart.project(&x, &cv);
+        assert!((&cv2 - &cv).mapv(f64::abs).sum() < 1e-10);
+        let cy = chart.retract(&x, &cv);
+        assert!(cy.iter().all(|v| v.is_finite()));
+        let cw = chart.transport(&x, &cy, &cv);
+        let cw_h = chart.project(&cy, &cw);
+        assert!((nrm2(cw.view()) - nrm2(cw_h.view())).abs() < 1e-10);
+    }
+
+    #[test]
+    fn packed_cell_internal_log_kick_evals_in_the_living_cell() {
+        let mut chart = Constraints::new(2).unwrap();
+        chart
+            .fix_translation(
+                Translation::all(2, CartAxis::X).unwrap(),
+                Array1::zeros(6).view(),
+                Some(0.0),
+            )
+            .unwrap();
+        let mut pes = CellInternalPes::new(
+            Array1::zeros(6),
+            Array1::from(vec![1.0, 1.0]),
+            chart,
+            Cell::ortho(4.0, 5.0, 6.0).unwrap(),
+        )
+        .unwrap();
+        pes.set_mask([
+            true, false, false, false, false, false, false, false, false,
+        ]);
+        pes.set_chart(crate::CellChart::LogDeform);
+        assert_eq!(pes.chart(), crate::CellChart::LogDeform);
+        let mut d = Array1::zeros(pes.packed_len());
+        d[1] = 0.05;
+        let (e, g) = pes.kick_packed(&CellWell, d.view()).unwrap();
+        assert!(g.iter().all(|v| v.is_finite()));
+        let (want, _) = CellWell
+            .eval_in_cell(pes.position(), &pes.cell9())
+            .unwrap();
+        assert!(
+            (e - want).abs() < 1e-12,
+            "log-cell kick energy {e} vs in-cell {want}"
+        );
+        let eval_only = CellWell.eval(pes.position()).unwrap().0;
+        assert!(
+            (e - eval_only).abs() > 1e-6,
+            "log-cell kick must not report eval() energy {eval_only}"
+        );
     }
 
     #[test]
