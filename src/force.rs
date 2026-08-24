@@ -7,6 +7,9 @@
 use ndarray::ArrayView1;
 use rgmin::vecops::{nrm2, nrminf};
 
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+
 /// How a session reduces a 3N force (or gradient) to one scalar.
 ///
 /// Discriminant matches `gprd_params.capnp` `ConvergenceForceNorm`
