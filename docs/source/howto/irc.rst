@@ -12,6 +12,11 @@ inner geometry is rgmin ``IrcTrust``:
 
     \|(s + d_1)\odot\sqrt{m}\| = dx.
 
+The increment is Sella ``QuasiNewtonIRC``
+(``rgmin::qn_irc_restricted``) on a mass-weighted BFGS Hessian that
+starts as the identity. ``reset`` and ``set_direction`` drop that
+curvature.
+
 Directions
 ~~~~~~~~~~
 

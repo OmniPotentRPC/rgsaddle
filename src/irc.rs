@@ -2,14 +2,17 @@
 //! saddle to a minimum, one branch at a time.
 //!
 //! Inner geometry is rgmin `IrcTrust` (Sella IRCTrustRegion /
-//! Gonzalez--Schlegel MW sphere) on `ManifoldKind::MwRigid`. Ambient
-//! algebra goes through `rgmin::vecops`. The host owns the loop.
-//! `run` is a convenience over `step`.
+//! Gonzalez--Schlegel MW sphere) on `ManifoldKind::MwRigid`. The
+//! increment is rgmin `qn_irc_restricted` (Sella QuasiNewtonIRC)
+//! with a persistent MW BFGS Hessian. Ambient algebra goes through
+//! `rgmin::vecops`. The host owns the loop. `run` is a convenience
+//! over `step`.
 
 use ndarray::{Array1, ArrayView1};
 use rgmin::vecops::{axpy, dot, nrm2, nrminf, Vector};
 use rgmin::{
-    sqrt_masses_3n, Control, EigensolverKind, IrcTrust, ManifoldKind, Method, Solver,
+    mw_pair, qn_irc_restricted, sqrt_masses_3n, BfgsModel, Control, EigensolverKind, IrcTrust,
+    ManifoldKind, Method, Solver,
 };
 
 use crate::error::SaddleError;
@@ -73,9 +76,11 @@ pub struct IrcSession {
     d1: Array1<f64>,
     mode: Array1<f64>,
     solver: Solver,
+    hess: BfgsModel,
     first: bool,
     arc: f64,
     last_step: Option<Array1<f64>>,
+    last_outer: Option<Array1<f64>>,
 }
 
 impl IrcSession {
@@ -118,9 +123,11 @@ impl IrcSession {
             d1: Array1::zeros(n3),
             mode,
             solver,
+            hess: BfgsModel::identity(n3),
             first: true,
             arc: 0.0,
             last_step: None,
+            last_outer: None,
         };
         session.set_direction(direction);
         Ok(session)
@@ -155,6 +162,7 @@ impl IrcSession {
 
     pub fn reset(&mut self) {
         self.solver.forget();
+        self.hess.forget();
     }
 
     /// Restore the saddle and flip the kick sign.
@@ -164,7 +172,9 @@ impl IrcSession {
         self.first = true;
         self.arc = 0.0;
         self.last_step = None;
+        self.last_outer = None;
         self.solver.forget();
+        self.hess.forget();
     }
 
     fn kick_vector(&self, direction: IrcDirection) -> Array1<f64> {
@@ -206,32 +216,31 @@ impl IrcSession {
         path_projected_force(g, &self.d1, self.masses.as_slice().unwrap_or(&[]))
     }
 
-    /// Path-projected steepest descent, then `IrcTrust` onto
-    /// `||(s+d1) odot sqrt(m)|| = dx`. Sella `IRCTrustRegion.get_s`
-    /// with a first-order model.
+    /// Sella `QuasiNewtonIRC` plus `IRCTrustRegion` on the current
+    /// MW sphere. The BFGS model is identity until the first accepted
+    /// inner pair; GS2 equality is `IrcTrust`.
     fn restricted_increment(&self, g: &Array1<f64>) -> Array1<f64> {
-        let mut s = self.path_force(g);
-        let gn = nrm2(s.view());
-        if gn > 1e-16 {
-            s.mapv_inplace(|v| v * (self.config.dx / gn));
-        }
-        self.trust().project(&s)
+        let (evals, evecs) = self.hess.eigh();
+        qn_irc_restricted(&self.trust(), &evals, &evecs, g)
     }
 
     /// One Sella `IRC.step`: optional kick, then inner GS2 on the
     /// current MW sphere, then `d1 = 0` for the next outer sphere.
     pub fn step<S: PointSurface>(&mut self, surface: &S) -> Result<IrcReport, SaddleError> {
+        let kicked = self.first;
         if self.first {
             axpy(1.0, self.d1.view(), &mut self.x);
             self.first = false;
         }
+        let x_start = self.x.clone();
 
         let (energy0, g0) = surface.eval(self.x.view())?;
         if !g0.iter().all(|v| v.is_finite()) {
             return Err(SaddleError::NonFinite("irc gradient"));
         }
         let max_force0 = nrminf(g0.view());
-        if max_force0 <= self.config.force_tol {
+        // Sella: the kick is not a minimum even when |F| is already small.
+        if !kicked && max_force0 <= self.config.force_tol {
             self.d1.fill(0.0);
             self.solver.forget();
             return Ok(IrcReport {
@@ -248,9 +257,27 @@ impl IrcSession {
         let mut energy = energy0;
         let mut g = g0;
         let mut max_force = max_force0;
+        let mut last_interior = false;
         for _ in 0..self.config.max_inner {
             inner_steps += 1;
             let s = self.restricted_increment(&g);
+            let interior = self.trust().cons(&s) + 1e-8 < self.config.dx;
+            if inner_steps == 1 {
+                if let Some(prev) = &self.last_outer {
+                    if dot(prev.view(), s.view()) < 0.0 {
+                        self.d1.fill(0.0);
+                        self.last_step = None;
+                        self.solver.forget();
+                        return Ok(IrcReport {
+                            energy,
+                            max_force,
+                            arc: self.arc,
+                            inner_steps,
+                            at_minimum: true,
+                        });
+                    }
+                }
+            }
             if let Some(prev) = &self.last_step {
                 if dot(prev.view(), s.view()) < 0.0 {
                     self.d1.fill(0.0);
@@ -266,19 +293,29 @@ impl IrcSession {
                 }
             }
             self.last_step = Some(s.clone());
+            last_interior = interior;
             axpy(1.0, s.view(), &mut self.d1);
             axpy(1.0, s.view(), &mut self.x);
             let ev = surface.eval(self.x.view())?;
             energy = ev.0;
+            let y = &ev.1 - &g;
+            let sqrtm = sqrt_masses_3n(self.masses.as_slice().unwrap_or(&[]));
+            let (s_mw, y_mw) = mw_pair(&s, &y, &sqrtm);
+            self.hess.update(&s_mw, &y_mw);
             g = ev.1;
             max_force = nrminf(g.view());
             let g_path = self.path_force(&g);
             let fmax_path = nrminf(g_path.view());
             let bound = self.trust().on_bound(&Array1::zeros(s.len()), 1e-8);
-            if (bound && fmax_path <= fmax_inner) || max_force <= self.config.force_tol {
+            if (bound && fmax_path <= fmax_inner)
+                || (max_force <= self.config.force_tol && interior)
+            {
                 break;
             }
         }
+        let mut outer = self.x.clone();
+        axpy(-1.0, x_start.view(), &mut outer);
+        self.last_outer = Some(outer);
         self.d1.fill(0.0);
         self.last_step = None;
         self.arc += self.config.dx;
@@ -288,7 +325,7 @@ impl IrcSession {
             max_force,
             arc: self.arc,
             inner_steps,
-            at_minimum: max_force <= self.config.force_tol,
+            at_minimum: max_force <= self.config.force_tol && last_interior,
         })
     }
 
