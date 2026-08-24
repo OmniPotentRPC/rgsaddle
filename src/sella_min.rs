@@ -715,7 +715,7 @@ mod tests {
 
     #[test]
     fn cartesian_niggli_is_a_noop() {
-        let sess = SellaMinSession::new(
+        let mut sess = SellaMinSession::new(
             SellaMinConfig::default(),
             Array1::zeros(6),
             Array1::from(vec![1.0, 1.0]),
