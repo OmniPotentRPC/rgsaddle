@@ -118,6 +118,11 @@ impl SellaMinSession {
         &self.geom
     }
 
+    /// Sella Hessian update on the Cartesian PES.
+    pub fn set_update(&mut self, update: crate::HessUpdate) {
+        self.pes.set_update(update);
+    }
+
     pub fn position(&self) -> ndarray::ArrayView1<'_, f64> {
         self.pes.position()
     }

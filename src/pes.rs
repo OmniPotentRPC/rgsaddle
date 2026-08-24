@@ -27,6 +27,15 @@ impl HessUpdate {
             Self::TsBfgs => 1,
         }
     }
+
+    /// Inverse of [`Self::to_abi`]. Unknown ordinals are `None`.
+    pub const fn try_from_abi(v: i32) -> Option<Self> {
+        match v {
+            0 => Some(Self::Bfgs),
+            1 => Some(Self::TsBfgs),
+            _ => None,
+        }
+    }
 }
 
 /// Cartesian geometry plus a persistent MW Hessian.

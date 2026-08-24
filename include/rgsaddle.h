@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 5u
+#define RGSADDLE_ABI_MINOR 6u
 
 /** Version head carried by every wire struct. */
 typedef struct {
@@ -291,6 +291,8 @@ int rgsaddle_sella_min_step(RgsaddleSellaMin *session,
                             rgsaddle_report_t *out);
 int rgsaddle_sella_min_position(const RgsaddleSellaMin *session, double *out);
 int rgsaddle_sella_min_reset(RgsaddleSellaMin *session);
+/** `update` is 0 = BFGS, 1 = TS-BFGS. Unknown refuses. */
+int rgsaddle_sella_min_set_hess_update(RgsaddleSellaMin *session, int32_t update);
 void rgsaddle_sella_min_free(RgsaddleSellaMin *session);
 
 typedef struct RgsaddleSellaSaddle RgsaddleSellaSaddle;
@@ -318,6 +320,8 @@ int rgsaddle_sella_saddle_step(RgsaddleSellaSaddle *session,
 int rgsaddle_sella_saddle_position(const RgsaddleSellaSaddle *session,
                                    double *out);
 int rgsaddle_sella_saddle_reset(RgsaddleSellaSaddle *session);
+int rgsaddle_sella_saddle_set_hess_update(RgsaddleSellaSaddle *session,
+                                          int32_t update);
 void rgsaddle_sella_saddle_free(RgsaddleSellaSaddle *session);
 
 /** Empty Constraints chart. The caller stamps version and zeroes flags. */

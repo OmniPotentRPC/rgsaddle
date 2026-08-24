@@ -25,7 +25,7 @@ use crate::spring::SpringKind;
 use crate::tangent::TangentKind;
 
 pub const RGSADDLE_ABI_MAJOR: u32 = 1;
-pub const RGSADDLE_ABI_MINOR: u32 = 5;
+pub const RGSADDLE_ABI_MINOR: u32 = 6;
 
 pub const RGSADDLE_OK: i32 = 0;
 pub const RGSADDLE_NULL_SESSION: i32 = -1;
@@ -1233,6 +1233,23 @@ pub unsafe extern "C" fn rgsaddle_sella_min_reset(session: *mut RgsaddleSellaMin
 }
 
 /// # Safety
+/// `session` must be a live pointer or NULL.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_sella_min_set_hess_update(
+    session: *mut RgsaddleSellaMin,
+    update: i32,
+) -> i32 {
+    if session.is_null() {
+        return RGSADDLE_NULL_SESSION;
+    }
+    let Some(kind) = crate::HessUpdate::try_from_abi(update) else {
+        return RGSADDLE_INVALID_PARAMETER;
+    };
+    unsafe { (*session).session.set_update(kind) };
+    RGSADDLE_OK
+}
+
+/// # Safety
 /// `session` must come from [`rgsaddle_sella_min_create`], freed once.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rgsaddle_sella_min_free(session: *mut RgsaddleSellaMin) {
@@ -1395,6 +1412,23 @@ pub unsafe extern "C" fn rgsaddle_sella_saddle_reset(session: *mut RgsaddleSella
         return RGSADDLE_NULL_SESSION;
     }
     unsafe { (*session).session.reset() };
+    RGSADDLE_OK
+}
+
+/// # Safety
+/// `session` must be a live pointer or NULL.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_sella_saddle_set_hess_update(
+    session: *mut RgsaddleSellaSaddle,
+    update: i32,
+) -> i32 {
+    if session.is_null() {
+        return RGSADDLE_NULL_SESSION;
+    }
+    let Some(kind) = crate::HessUpdate::try_from_abi(update) else {
+        return RGSADDLE_INVALID_PARAMETER;
+    };
+    unsafe { (*session).session.set_update(kind) };
     RGSADDLE_OK
 }
 

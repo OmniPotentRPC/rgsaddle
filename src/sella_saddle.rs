@@ -140,6 +140,11 @@ impl SellaSaddleSession {
         &self.geom
     }
 
+    /// Sella Hessian update on the Cartesian PES.
+    pub fn set_update(&mut self, update: crate::HessUpdate) {
+        self.pes.set_update(update);
+    }
+
     pub fn reset(&mut self) {
         self.pes.reset();
         let n = self.pes.position().len();
@@ -292,6 +297,7 @@ mod tests {
         assert!(sess.position().iter().all(|v| v.is_finite()));
     }
 
+    #[test]
     fn prfo_step_is_finite() {
         let mut x = Array1::zeros(6);
         x[0] = 0.2;
