@@ -99,6 +99,21 @@ impl CartesianPes {
         d: ArrayView1<f64>,
     ) -> Result<(f64, Array1<f64>), SaddleError> {
         let (_, g0) = surface.eval(self.x.view())?;
+        self.kick_from(surface, d, g0.view())
+    }
+
+    /// [`Self::kick`] when the caller already evaluated `g0` at `x`.
+    pub fn kick_from<S: PointSurface>(
+        &mut self,
+        surface: &S,
+        d: ArrayView1<f64>,
+        g0: ArrayView1<f64>,
+    ) -> Result<(f64, Array1<f64>), SaddleError> {
+        if g0.len() != self.x.len() {
+            return Err(SaddleError::Shape(
+                "kick g0 must match the 3N frame".into(),
+            ));
+        }
         let n = self.x.len().min(d.len());
         for i in 0..n {
             self.x[i] += d[i];

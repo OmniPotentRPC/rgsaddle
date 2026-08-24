@@ -10,6 +10,7 @@
 //! cell here is the PES wrapper Sella hangs on periodic systems.
 
 use ndarray::{Array1, ArrayView1};
+use rgmin::BfgsModel;
 
 use crate::constraints::Constraints;
 use crate::error::SaddleError;
@@ -17,10 +18,12 @@ use crate::mic::Cell;
 use crate::minmode::PointSurface;
 use crate::pes::{CartesianPes, HessUpdate};
 
-/// Sella `InternalPES`: Cartesian geometry, internals chart, MW Hessian.
+/// Sella `InternalPES`: Cartesian geometry, internals chart, internals Hessian.
 pub struct InternalPes {
     cart: CartesianPes,
     chart: Constraints,
+    hess: BfgsModel,
+    update: HessUpdate,
 }
 
 impl InternalPes {
@@ -35,14 +38,31 @@ impl InternalPes {
                 "internals chart atom count must match the 3N frame".into(),
             ));
         }
+        if chart.equalities().is_empty() {
+            return Err(SaddleError::Shape("internals chart is empty".into()));
+        }
+        let nint = chart.equalities().len();
         Ok(Self {
             cart: CartesianPes::new(x, masses)?,
             chart,
+            hess: BfgsModel::identity(nint),
+            update: HessUpdate::Bfgs,
         })
     }
 
     pub fn set_update(&mut self, update: HessUpdate) {
+        self.update = update;
         self.cart.set_update(update);
+    }
+
+    /// Internals BFGS model (Sella `InternalPES.H`).
+    pub fn hessian(&self) -> &BfgsModel {
+        &self.hess
+    }
+
+    /// Number of internals (chart equalities).
+    pub fn n_int(&self) -> usize {
+        self.chart.equalities().len()
     }
 
     pub fn position(&self) -> ArrayView1<'_, f64> {
@@ -71,26 +91,14 @@ impl InternalPes {
     /// as [`Constraints::scons`]: `(B B^T) y = B g`, so `y = B^{+T} g`.
     pub fn internals_grad(&self, g_cart: ArrayView1<f64>) -> Result<Array1<f64>, SaddleError> {
         let b = self.b_matrix()?;
-        if b.nrows() == 0 {
-            return Ok(Array1::zeros(0));
-        }
-        if g_cart.len() != b.ncols() {
-            return Err(SaddleError::Shape(
-                "cartesian gradient must match the 3N frame".into(),
-            ));
-        }
-        let mut bg = Array1::zeros(b.nrows());
-        for i in 0..b.nrows() {
-            let mut acc = 0.0;
-            for k in 0..b.ncols() {
-                acc += b[(i, k)] * g_cart[k];
-            }
-            bg[i] = acc;
-        }
-        Ok(solve_bbt(&b, &bg))
+        internals_grad_from_b(&b, g_cart)
     }
 
     /// Map `dq` to Cartesian by `B dx = dq` and kick the Cartesian PES.
+    ///
+    /// The internals Hessian stores `(dq, dg_int)` (Sella
+    /// `InternalPES.kick`). The Cartesian model is updated with the
+    /// matching `(dx, dg_cart)`.
     pub fn kick<S: PointSurface>(
         &mut self,
         surface: &S,
@@ -102,12 +110,73 @@ impl InternalPes {
                 "internals increment must match the chart".into(),
             ));
         }
+        let (_, g0) = surface.eval(self.cart.position())?;
+        let g0_int = internals_grad_from_b(&b, g0.view())?;
         let dx = min_norm_dx(&b, &dq.to_owned());
-        self.cart.kick(surface, dx.view())
+        let (e, g1) = self.cart.kick_from(surface, dx.view(), g0.view())?;
+        let g1_int = self.internals_grad(g1.view())?;
+        let y = &g1_int - &g0_int;
+        let s = dq.to_owned();
+        match self.update {
+            HessUpdate::Bfgs => self.hess.update(&s, &y),
+            HessUpdate::TsBfgs => self.hess.update_ts(&s, &y),
+        }
+        Ok((e, g1))
     }
 
     pub fn reset(&mut self) {
         self.cart.reset();
+        self.hess.forget();
+    }
+}
+
+/// Session PES: Cartesian BFGS or Sella InternalPES.
+pub enum SellaPes {
+    Cartesian(CartesianPes),
+    Internal(InternalPes),
+}
+
+impl SellaPes {
+    pub fn position(&self) -> ArrayView1<'_, f64> {
+        match self {
+            Self::Cartesian(p) => p.position(),
+            Self::Internal(p) => p.position(),
+        }
+    }
+
+    pub fn set_update(&mut self, update: HessUpdate) {
+        match self {
+            Self::Cartesian(p) => p.set_update(update),
+            Self::Internal(p) => p.set_update(update),
+        }
+    }
+
+    pub fn reset(&mut self) {
+        match self {
+            Self::Cartesian(p) => p.reset(),
+            Self::Internal(p) => p.reset(),
+        }
+    }
+
+    pub fn cartesian(&self) -> Option<&CartesianPes> {
+        match self {
+            Self::Cartesian(p) => Some(p),
+            Self::Internal(p) => Some(p.cartesian()),
+        }
+    }
+
+    pub fn internal(&self) -> Option<&InternalPes> {
+        match self {
+            Self::Internal(p) => Some(p),
+            Self::Cartesian(_) => None,
+        }
+    }
+
+    pub fn internal_mut(&mut self) -> Option<&mut InternalPes> {
+        match self {
+            Self::Internal(p) => Some(p),
+            Self::Cartesian(_) => None,
+        }
     }
 }
 
@@ -153,6 +222,41 @@ impl CellCartesianPes {
             }
         }
         dcell
+    }
+
+    /// Lattice vectors as three Cartesian columns of the cell.
+    pub fn lattice(&self) -> [[f64; 3]; 3] {
+        lattice_of(&self.cell)
+    }
+
+    /// Cell angles `α, β, γ` in degrees.
+    pub fn angles_deg(&self) -> [f64; 3] {
+        let [a, b, c] = self.lattice();
+        [
+            angle_deg(b, c),
+            angle_deg(a, c),
+            angle_deg(a, b),
+        ]
+    }
+
+    /// Sella `maybe_niggli_reduce`: rewrite a skewed cell in place.
+    ///
+    /// Triggers when any angle is more than `angle_threshold` degrees
+    /// from 90. The Cartesian Hessian is not rewritten (no log-cell
+    /// block lives here).
+    pub fn maybe_niggli_reduce(&mut self, angle_threshold: f64) -> Result<bool, SaddleError> {
+        let angs = self.angles_deg();
+        let max_dev = angs
+            .iter()
+            .map(|a| (a - 90.0).abs())
+            .fold(0.0_f64, f64::max);
+        if max_dev <= angle_threshold {
+            return Ok(false);
+        }
+        let [a, b, c] = self.lattice();
+        let (a2, b2, c2) = niggli_reduce_vectors(a, b, c);
+        self.cell = cell_from_lattice(a2, b2, c2, self.cell.origin())?;
+        Ok(true)
     }
 
     pub fn cartesian(&self) -> &CartesianPes {
@@ -214,6 +318,198 @@ impl CellInternalPes {
     ) -> Result<(f64, Array1<f64>), SaddleError> {
         self.inner.kick(surface, dq)
     }
+}
+
+fn internals_grad_from_b(
+    b: &ndarray::Array2<f64>,
+    g_cart: ArrayView1<f64>,
+) -> Result<Array1<f64>, SaddleError> {
+    if b.nrows() == 0 {
+        return Ok(Array1::zeros(0));
+    }
+    if g_cart.len() != b.ncols() {
+        return Err(SaddleError::Shape(
+            "cartesian gradient must match the 3N frame".into(),
+        ));
+    }
+    let mut bg = Array1::zeros(b.nrows());
+    for i in 0..b.nrows() {
+        let mut acc = 0.0;
+        for k in 0..b.ncols() {
+            acc += b[(i, k)] * g_cart[k];
+        }
+        bg[i] = acc;
+    }
+    Ok(solve_bbt(b, &bg))
+}
+
+fn lattice_of(cell: &Cell) -> [[f64; 3]; 3] {
+    let o = cell.origin();
+    let a = cell.cartesian([1.0, 0.0, 0.0]);
+    let b = cell.cartesian([0.0, 1.0, 0.0]);
+    let c = cell.cartesian([0.0, 0.0, 1.0]);
+    [
+        [a[0] - o[0], a[1] - o[1], a[2] - o[2]],
+        [b[0] - o[0], b[1] - o[1], b[2] - o[2]],
+        [c[0] - o[0], c[1] - o[1], c[2] - o[2]],
+    ]
+}
+
+fn cell_from_lattice(
+    a: [f64; 3],
+    b: [f64; 3],
+    c: [f64; 3],
+    origin: [f64; 3],
+) -> Result<Cell, SaddleError> {
+    Cell::from_vectors(a, b, c, origin).map_err(|_| {
+        SaddleError::Shape("niggli produced a singular cell".into())
+    })
+}
+
+fn dot3(u: [f64; 3], v: [f64; 3]) -> f64 {
+    u[0] * v[0] + u[1] * v[1] + u[2] * v[2]
+}
+
+fn norm3(u: [f64; 3]) -> f64 {
+    dot3(u, u).sqrt()
+}
+
+fn angle_deg(u: [f64; 3], v: [f64; 3]) -> f64 {
+    let nu = norm3(u);
+    let nv = norm3(v);
+    if nu < 1e-18 || nv < 1e-18 {
+        return 0.0;
+    }
+    let c = (dot3(u, v) / (nu * nv)).clamp(-1.0, 1.0);
+    c.acos() * 180.0 / std::f64::consts::PI
+}
+
+/// Niggli-reduce a row-major 3x3 cell in place. Returns whether it rewrote.
+pub fn niggli_reduce_cell(cell: &mut [f64; 9], angle_threshold: f64) -> Result<bool, SaddleError> {
+    let a = [cell[0], cell[1], cell[2]];
+    let b = [cell[3], cell[4], cell[5]];
+    let c = [cell[6], cell[7], cell[8]];
+    let angs = [angle_deg(b, c), angle_deg(a, c), angle_deg(a, b)];
+    let max_dev = angs
+        .iter()
+        .map(|x| (x - 90.0).abs())
+        .fold(0.0_f64, f64::max);
+    if max_dev <= angle_threshold {
+        return Ok(false);
+    }
+    let (a2, b2, c2) = niggli_reduce_vectors(a, b, c);
+    *cell = [
+        a2[0], a2[1], a2[2], b2[0], b2[1], b2[2], c2[0], c2[1], c2[2],
+    ];
+    Ok(true)
+}
+
+/// Krivy–Gruber / Grosse-Kunstlere Niggli reduction of three lattice vectors.
+pub fn niggli_reduce_vectors(
+    mut a: [f64; 3],
+    mut b: [f64; 3],
+    mut c: [f64; 3],
+) -> ([f64; 3], [f64; 3], [f64; 3]) {
+    let eps = 1e-8;
+    fn add(u: [f64; 3], s: f64, v: [f64; 3]) -> [f64; 3] {
+        [u[0] + s * v[0], u[1] + s * v[1], u[2] + s * v[2]]
+    }
+    fn neg(u: [f64; 3]) -> [f64; 3] {
+        [-u[0], -u[1], -u[2]]
+    }
+    for _ in 0..10_000 {
+        let aa = dot3(a, a);
+        let bb = dot3(b, b);
+        let cc = dot3(c, c);
+        let xi = 2.0 * dot3(b, c);
+        let eta = 2.0 * dot3(a, c);
+        let zeta = 2.0 * dot3(a, b);
+        // (i)
+        if aa > bb + eps || ((aa - bb).abs() <= eps && xi.abs() > eta.abs() + eps) {
+            std::mem::swap(&mut a, &mut b);
+            continue;
+        }
+        // (ii)
+        if bb > cc + eps || ((bb - cc).abs() <= eps && eta.abs() > zeta.abs() + eps) {
+            std::mem::swap(&mut b, &mut c);
+            continue;
+        }
+        // (iii) type reduction
+        if xi * eta * zeta > 0.0 {
+            if xi < 0.0 {
+                b = neg(b);
+            }
+            if eta < 0.0 {
+                a = neg(a);
+            }
+            if zeta < 0.0 {
+                // flipping a or b already handled two signs; flip c if needed
+                if 2.0 * dot3(b, c) < 0.0 {
+                    c = neg(c);
+                }
+            }
+        } else {
+            if xi > 0.0 {
+                b = neg(b);
+            }
+            if eta > 0.0 {
+                a = neg(a);
+            }
+            if 2.0 * dot3(a, b) > 0.0 {
+                if 2.0 * dot3(b, c) > 0.0 {
+                    c = neg(c);
+                } else if 2.0 * dot3(a, c) > 0.0 {
+                    c = neg(c);
+                }
+            }
+        }
+        let aa = dot3(a, a);
+        let bb = dot3(b, b);
+        let cc = dot3(c, c);
+        let xi = 2.0 * dot3(b, c);
+        let eta = 2.0 * dot3(a, c);
+        let zeta = 2.0 * dot3(a, b);
+        // (iv)
+        if xi.abs() > bb + eps
+            || ((xi - bb).abs() <= eps && 2.0 * eta < zeta - eps)
+            || ((xi + bb).abs() <= eps && zeta < -eps)
+        {
+            let s = if xi > 0.0 { -1.0 } else { 1.0 };
+            b = add(b, s, c);
+            continue;
+        }
+        // (v)
+        if eta.abs() > aa + eps
+            || ((eta - aa).abs() <= eps && 2.0 * xi < zeta - eps)
+            || ((eta + aa).abs() <= eps && zeta < -eps)
+        {
+            let s = if eta > 0.0 { -1.0 } else { 1.0 };
+            a = add(a, s, c);
+            continue;
+        }
+        // (vi)
+        if zeta.abs() > aa + eps
+            || ((zeta - aa).abs() <= eps && 2.0 * xi < eta - eps)
+            || ((zeta + aa).abs() <= eps && eta < -eps)
+        {
+            let s = if zeta > 0.0 { -1.0 } else { 1.0 };
+            a = add(a, s, b);
+            continue;
+        }
+        // (vii) extra Grosse-Kunstlere
+        let sum = xi.abs() + eta.abs() + zeta.abs() + aa + bb;
+        if sum < cc - eps
+            || ((sum - cc).abs() <= eps
+                && 2.0 * (aa + eta) + zeta > eps)
+        {
+            let s = if xi + eta + zeta > 0.0 { -1.0 } else { 1.0 };
+            c = add(c, s, a);
+            c = add(c, s, b);
+            continue;
+        }
+        break;
+    }
+    (a, b, c)
 }
 
 /// Min-norm `dx` for `B dx = dq`: `(B B^T) y = dq`, `dx = B^T y`.
@@ -342,5 +638,61 @@ mod tests {
         )
         .unwrap();
         assert_eq!(inner.internals().chart().counts().ntrans, 3);
+    }
+
+    #[test]
+    fn internals_kick_updates_the_int_hessian() {
+        let x = Array1::zeros(6);
+        let masses = Array1::from(vec![1.0, 1.0]);
+        let mut chart = Constraints::new(2).unwrap();
+        chart
+            .fix_translation(Translation::all(2, CartAxis::X).unwrap(), x.view(), Some(0.0))
+            .unwrap();
+        let mut pes = InternalPes::new(x, masses, chart).unwrap();
+        assert_eq!(pes.n_int(), 1);
+        assert_eq!(pes.hessian().hessian().nrows(), 1);
+        let h0 = pes.hessian().hessian()[(0, 0)];
+        let dq = Array1::from(vec![0.15]);
+        pes.kick(&Well, dq.view()).unwrap();
+        let h1 = pes.hessian().hessian()[(0, 0)];
+        assert!(h1.is_finite());
+        assert!((h1 - h0).abs() > 1e-18, "internals Hessian must accept a pair");
+    }
+
+    #[test]
+    fn empty_chart_is_refused() {
+        let chart = Constraints::new(2).unwrap();
+        let err = InternalPes::new(Array1::zeros(6), Array1::from(vec![1.0, 1.0]), chart);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn niggli_rewrites_a_skewed_cell() {
+        let mut cell = [
+            1.0, 0.0, 0.0, 0.9, 0.15, 0.0, 0.4, 0.5, 1.0,
+        ];
+        let a = [cell[0], cell[1], cell[2]];
+        let b = [cell[3], cell[4], cell[5]];
+        let c = [cell[6], cell[7], cell[8]];
+        let before = [angle_deg(b, c), angle_deg(a, c), angle_deg(a, b)];
+        let applied = niggli_reduce_cell(&mut cell, 20.0).unwrap();
+        assert!(applied, "angles {before:?} should trigger");
+        let a2 = [cell[0], cell[1], cell[2]];
+        let b2 = [cell[3], cell[4], cell[5]];
+        let c2 = [cell[6], cell[7], cell[8]];
+        let vol = |u: [f64; 3], v: [f64; 3], w: [f64; 3]| {
+            u[0] * (v[1] * w[2] - v[2] * w[1])
+                - u[1] * (v[0] * w[2] - v[2] * w[0])
+                + u[2] * (v[0] * w[1] - v[1] * w[0])
+        };
+        assert!((vol(a, b, c).abs() - vol(a2, b2, c2).abs()).abs() < 1e-8);
+        let mut cart = CellCartesianPes::new(
+            Array1::zeros(6),
+            Array1::from(vec![1.0, 1.0]),
+            Cell::from_vectors(a, b, c, [0.0, 0.0, 0.0]).unwrap(),
+        )
+        .unwrap();
+        assert!(cart.maybe_niggli_reduce(20.0).unwrap());
+        assert!(!cart.maybe_niggli_reduce(90.0).unwrap());
     }
 }
