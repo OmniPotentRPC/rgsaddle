@@ -24,7 +24,7 @@ use crate::spring::SpringKind;
 use crate::tangent::TangentKind;
 
 pub const RGSADDLE_ABI_MAJOR: u32 = 1;
-pub const RGSADDLE_ABI_MINOR: u32 = 3;
+pub const RGSADDLE_ABI_MINOR: u32 = 4;
 
 pub const RGSADDLE_OK: i32 = 0;
 pub const RGSADDLE_NULL_SESSION: i32 = -1;
@@ -1100,6 +1100,47 @@ pub unsafe extern "C" fn rgsaddle_sella_min_create(
 }
 
 /// # Safety
+/// `cons` is copied; the caller still owns it.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_sella_min_create_on(
+    config: *const RgsaddleSellaMinConfig,
+    n_atoms: i64,
+    position: *const f64,
+    masses: *const f64,
+    cons: *const RgsaddleConstraints,
+) -> *mut RgsaddleSellaMin {
+    if config.is_null() || position.is_null() || masses.is_null() || cons.is_null() || n_atoms < 1 {
+        return std::ptr::null_mut();
+    }
+    let cfg = unsafe { &*config };
+    if cfg.version.major != RGSADDLE_ABI_MAJOR {
+        return std::ptr::null_mut();
+    }
+    let Some(force_gate) = force_gate_of(cfg.force_gate) else {
+        return std::ptr::null_mut();
+    };
+    let chart = unsafe { &*cons };
+    if chart.n_atoms != n_atoms {
+        return std::ptr::null_mut();
+    }
+    let dof = (3 * n_atoms) as usize;
+    let x = Array1::from(unsafe { slice::from_raw_parts(position, dof) }.to_vec());
+    let m = Array1::from(unsafe { slice::from_raw_parts(masses, n_atoms as usize) }.to_vec());
+    let mut sella = SellaMinConfig::default();
+    if cfg.delta > 0.0 {
+        sella.delta = cfg.delta;
+    }
+    if cfg.force_tol > 0.0 {
+        sella.force_tol = cfg.force_tol;
+    }
+    sella.force_gate = force_gate;
+    match SellaMinSession::with_chart(sella, x, m, chart.cons.clone()) {
+        Ok(session) => Box::into_raw(Box::new(RgsaddleSellaMin { session, n_atoms })),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// # Safety
 /// `session` and `out` must be valid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rgsaddle_sella_min_step(
@@ -1216,6 +1257,50 @@ pub unsafe extern "C" fn rgsaddle_sella_saddle_create(
     }
     sella.force_gate = force_gate;
     match SellaSaddleSession::new(sella, x, m) {
+        Ok(session) => Box::into_raw(Box::new(RgsaddleSellaSaddle { session, n_atoms })),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// # Safety
+/// `cons` is copied; the caller still owns it.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_sella_saddle_create_on(
+    config: *const RgsaddleSellaSaddleConfig,
+    n_atoms: i64,
+    position: *const f64,
+    masses: *const f64,
+    cons: *const RgsaddleConstraints,
+) -> *mut RgsaddleSellaSaddle {
+    if config.is_null() || position.is_null() || masses.is_null() || cons.is_null() || n_atoms < 1 {
+        return std::ptr::null_mut();
+    }
+    let cfg = unsafe { &*config };
+    if cfg.version.major != RGSADDLE_ABI_MAJOR {
+        return std::ptr::null_mut();
+    }
+    let Some(force_gate) = force_gate_of(cfg.force_gate) else {
+        return std::ptr::null_mut();
+    };
+    let chart = unsafe { &*cons };
+    if chart.n_atoms != n_atoms {
+        return std::ptr::null_mut();
+    }
+    let dof = (3 * n_atoms) as usize;
+    let x = Array1::from(unsafe { slice::from_raw_parts(position, dof) }.to_vec());
+    let m = Array1::from(unsafe { slice::from_raw_parts(masses, n_atoms as usize) }.to_vec());
+    let mut sella = SellaSaddleConfig::default();
+    if cfg.delta > 0.0 {
+        sella.delta = cfg.delta;
+    }
+    if cfg.force_tol > 0.0 {
+        sella.force_tol = cfg.force_tol;
+    }
+    if cfg.order > 0 {
+        sella.order = cfg.order as usize;
+    }
+    sella.force_gate = force_gate;
+    match SellaSaddleSession::with_chart(sella, x, m, chart.cons.clone()) {
         Ok(session) => Box::into_raw(Box::new(RgsaddleSellaSaddle { session, n_atoms })),
         Err(_) => std::ptr::null_mut(),
     }
@@ -1518,6 +1603,90 @@ mod constraints_abi_tests {
         let n = nrm2(Array1::from(out.to_vec()).view());
         assert!(n < 1e-12, "projected translation {n}");
         unsafe { rgsaddle_constraints_free(cons) };
+    }
+
+    extern "C" fn well_cb(_user: *mut c_void, req: *mut RgsaddleSurfaceRequest) -> i32 {
+        unsafe {
+            let req = &mut *req;
+            let n = (req.n_atoms * 3) as usize;
+            let pos = slice::from_raw_parts(req.positions, n);
+            let e = req.energies;
+            let g = slice::from_raw_parts_mut(req.gradients, n);
+            let t = pos[0];
+            *e = (t * t - 1.0).powi(2);
+            for gi in g.iter_mut() {
+                *gi = 0.0;
+            }
+            g[0] = 4.0 * t * (t * t - 1.0);
+        }
+        0
+    }
+
+    #[test]
+    fn sella_min_create_on_keeps_a_fixed_com() {
+        let x = water();
+        let masses = [1.0, 1.0, 1.0];
+        let cfg_c = stamped_cfg();
+        let cons = unsafe { rgsaddle_constraints_create(&cfg_c, 3) };
+        assert!(!cons.is_null());
+        assert_eq!(
+            unsafe { rgsaddle_constraints_fix_com(cons, x.as_ptr()) },
+            RGSADDLE_OK
+        );
+        let cfg = RgsaddleSellaMinConfig {
+            version: RgsaddleVersion {
+                major: RGSADDLE_ABI_MAJOR,
+                minor: RGSADDLE_ABI_MINOR,
+            },
+            flags: 0,
+            delta: 0.1,
+            force_tol: 0.05,
+            force_gate: crate::ForceGate::MaxForceOnAtom.to_abi(),
+        };
+        let sess = unsafe {
+            rgsaddle_sella_min_create_on(&cfg, 3, x.as_ptr(), masses.as_ptr(), cons)
+        };
+        assert!(!sess.is_null());
+        let mut report = RgsaddleReport {
+            version: RgsaddleVersion { major: 0, minor: 0 },
+            flags: 0,
+            status: 0,
+            reserved: 0,
+            max_force: 0.0,
+            ci_index: 0,
+            iteration: 0,
+            curvature: 0.0,
+            rotations: 0,
+        };
+        assert_eq!(
+            unsafe { rgsaddle_sella_min_step(sess, Some(well_cb), std::ptr::null_mut(), &mut report) },
+            RGSADDLE_OK
+        );
+        let mut y = [0.0; 9];
+        assert_eq!(
+            unsafe { rgsaddle_sella_min_position(sess, y.as_mut_ptr()) },
+            RGSADDLE_OK
+        );
+        let c0 = [
+            (x[0] + x[3] + x[6]) / 3.0,
+            (x[1] + x[4] + x[7]) / 3.0,
+            (x[2] + x[5] + x[8]) / 3.0,
+        ];
+        let c1 = [
+            (y[0] + y[3] + y[6]) / 3.0,
+            (y[1] + y[4] + y[7]) / 3.0,
+            (y[2] + y[5] + y[8]) / 3.0,
+        ];
+        assert!(
+            (c0[0] - c1[0]).abs() < 1e-8
+                && (c0[1] - c1[1]).abs() < 1e-8
+                && (c0[2] - c1[2]).abs() < 1e-8,
+            "COM drifted {c0:?} -> {c1:?}"
+        );
+        unsafe {
+            rgsaddle_sella_min_free(sess);
+            rgsaddle_constraints_free(cons);
+        }
     }
 
     #[test]

@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 3u
+#define RGSADDLE_ABI_MINOR 4u
 
 /** Version head carried by every wire struct. */
 typedef struct {
@@ -263,6 +263,7 @@ int rgsaddle_irc_reset(RgsaddleIrc *session);
 void rgsaddle_irc_free(RgsaddleIrc *session);
 
 typedef struct RgsaddleSellaMin RgsaddleSellaMin;
+typedef struct RgsaddleConstraints RgsaddleConstraints;
 
 /** Sella order-0 (QN + trust). Default geometry is the rigid quotient. */
 typedef struct {
@@ -280,6 +281,11 @@ typedef struct {
 RgsaddleSellaMin *rgsaddle_sella_min_create(
     const rgsaddle_sella_min_config_t *config, int64_t n_atoms,
     const double *position, const double *masses);
+/** Same, retracting on a live Constraints chart. `cons` is copied. */
+RgsaddleSellaMin *rgsaddle_sella_min_create_on(
+    const rgsaddle_sella_min_config_t *config, int64_t n_atoms,
+    const double *position, const double *masses,
+    const RgsaddleConstraints *cons);
 int rgsaddle_sella_min_step(RgsaddleSellaMin *session,
                             rgsaddle_surface_fn surface, void *user,
                             rgsaddle_report_t *out);
@@ -302,6 +308,10 @@ typedef struct {
 RgsaddleSellaSaddle *rgsaddle_sella_saddle_create(
     const rgsaddle_sella_saddle_config_t *config, int64_t n_atoms,
     const double *position, const double *masses);
+RgsaddleSellaSaddle *rgsaddle_sella_saddle_create_on(
+    const rgsaddle_sella_saddle_config_t *config, int64_t n_atoms,
+    const double *position, const double *masses,
+    const RgsaddleConstraints *cons);
 int rgsaddle_sella_saddle_step(RgsaddleSellaSaddle *session,
                                rgsaddle_surface_fn surface, void *user,
                                rgsaddle_report_t *out);
@@ -309,8 +319,6 @@ int rgsaddle_sella_saddle_position(const RgsaddleSellaSaddle *session,
                                    double *out);
 int rgsaddle_sella_saddle_reset(RgsaddleSellaSaddle *session);
 void rgsaddle_sella_saddle_free(RgsaddleSellaSaddle *session);
-
-typedef struct RgsaddleConstraints RgsaddleConstraints;
 
 /** Empty Constraints chart. The caller stamps version and zeroes flags. */
 typedef struct {
