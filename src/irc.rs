@@ -273,7 +273,11 @@ impl IrcSession {
                 }
             }
             if let Some(prev) = &self.last_step {
-                if !kicked && self.hess.is_posdef() && dot(prev.view(), s.view()) < 0.0 {
+                if !kicked
+                    && self.hess.is_posdef()
+                    && self.arc > 2.0 * self.config.dx
+                    && dot(prev.view(), s.view()) < 0.0
+                {
                     self.d1.fill(0.0);
                     self.last_step = None;
                     self.solver.forget();
