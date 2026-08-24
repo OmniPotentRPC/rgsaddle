@@ -6,9 +6,19 @@
 //! quaternion rotation against a reference, and a quadratic
 //! displacement form. Ambient reductions go through
 //! [`rgmin::vecops`].
+//!
+//! Each coordinate is the level set `{y | c(y) = c(x)}`:
+//! [`rgmin::Manifold`] `project` onto `ker(grad c)`, `retract` by a
+//! tangent step plus Gauss-Newton restore, `transport` by projecting
+//! at the arrival point.
 
 use ndarray::{Array1, Array2, ArrayView1};
-use rgmin::vecops::{dot, nrm2};
+use rgmin::Manifold;
+use rgmin::vecops::{axpy, dot, nrm2, sum};
+
+const RESTORE_ITERS: usize = 12;
+const RESTORE_TOL: f64 = 1e-12;
+const RANK_TOL: f64 = 1e-10;
 
 /// Cartesian axis a translation or rotation coordinate tracks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -70,11 +80,11 @@ impl Translation {
     /// Sella `_translation`: mean of `pos[i, dim]`.
     pub fn value(&self, x: ArrayView1<f64>) -> Result<f64, crate::SaddleError> {
         let n = self.indices.len() as f64;
-        let mut acc = 0.0;
-        for &i in &self.indices {
-            acc += atom_coord(x, i, self.axis.index())?;
+        let mut coords = Array1::zeros(self.indices.len());
+        for (k, &i) in self.indices.iter().enumerate() {
+            coords[k] = atom_coord(x, i, self.axis.index())?;
         }
-        Ok(acc / n)
+        Ok(sum(coords.view()) / n)
     }
 
     /// Cartesian gradient, length `x`. Uniform `1/n` on the axis slots.
@@ -341,6 +351,84 @@ impl Displacement {
     }
 }
 
+impl Manifold for Translation {
+    fn required_dim(&self, n: usize) -> Result<(), usize> {
+        let need = packed_need(&self.indices);
+        if n >= need && n % 3 == 0 {
+            Ok(())
+        } else {
+            Err(need)
+        }
+    }
+
+    fn project(&self, x: &Array1<f64>, v: &Array1<f64>) -> Array1<f64> {
+        match self.gradient(x.view()) {
+            Ok(g) => project_ker(&g, v),
+            Err(_) => v.clone(),
+        }
+    }
+
+    fn retract(&self, x: &Array1<f64>, v: &Array1<f64>) -> Array1<f64> {
+        restore_level(x, v, |z| self.value(z), |z| self.gradient(z))
+    }
+
+    fn transport(&self, _x_from: &Array1<f64>, x_to: &Array1<f64>, v: &Array1<f64>) -> Array1<f64> {
+        self.project(x_to, v)
+    }
+}
+
+impl Manifold for Rotation {
+    fn required_dim(&self, n: usize) -> Result<(), usize> {
+        let need = packed_need(&self.indices);
+        if n >= need && n % 3 == 0 {
+            Ok(())
+        } else {
+            Err(need)
+        }
+    }
+
+    fn project(&self, x: &Array1<f64>, v: &Array1<f64>) -> Array1<f64> {
+        match self.gradient(x.view()) {
+            Ok(g) => project_ker(&g, v),
+            Err(_) => v.clone(),
+        }
+    }
+
+    fn retract(&self, x: &Array1<f64>, v: &Array1<f64>) -> Array1<f64> {
+        restore_level(x, v, |z| self.value(z), |z| self.gradient(z))
+    }
+
+    fn transport(&self, _x_from: &Array1<f64>, x_to: &Array1<f64>, v: &Array1<f64>) -> Array1<f64> {
+        self.project(x_to, v)
+    }
+}
+
+impl Manifold for Displacement {
+    fn required_dim(&self, n: usize) -> Result<(), usize> {
+        let need = packed_need(&self.indices);
+        if n >= need && n % 3 == 0 {
+            Ok(())
+        } else {
+            Err(need)
+        }
+    }
+
+    fn project(&self, x: &Array1<f64>, v: &Array1<f64>) -> Array1<f64> {
+        match self.gradient(x.view()) {
+            Ok(g) => project_ker(&g, v),
+            Err(_) => v.clone(),
+        }
+    }
+
+    fn retract(&self, x: &Array1<f64>, v: &Array1<f64>) -> Array1<f64> {
+        restore_level(x, v, |z| self.value(z), |z| self.gradient(z))
+    }
+
+    fn transport(&self, _x_from: &Array1<f64>, x_to: &Array1<f64>, v: &Array1<f64>) -> Array1<f64> {
+        self.project(x_to, v)
+    }
+}
+
 /// Which Sella internal a host packed into an internals chart.
 ///
 /// Bond / angle / dihedral counts come from vocn; these three are
@@ -353,6 +441,58 @@ pub enum InternalSlot {
     Dihedral,
     Other,
     Rotation,
+}
+
+fn packed_need(indices: &[usize]) -> usize {
+    3 * (indices.iter().copied().max().unwrap_or(0) + 1)
+}
+
+/// Ambient projection onto `ker(g)`.
+fn project_ker(g: &Array1<f64>, v: &Array1<f64>) -> Array1<f64> {
+    if g.len() != v.len() {
+        return v.clone();
+    }
+    let gg = dot(g.view(), g.view());
+    if gg <= RANK_TOL * RANK_TOL {
+        return v.clone();
+    }
+    let mut out = v.clone();
+    axpy(-dot(g.view(), v.view()) / gg, g.view(), &mut out);
+    out
+}
+
+/// `x + v` then Gauss-Newton restore onto `{y | c(y) = c(x)}`.
+fn restore_level<F, G>(x: &Array1<f64>, v: &Array1<f64>, value: F, gradient: G) -> Array1<f64>
+where
+    F: Fn(ArrayView1<f64>) -> Result<f64, crate::SaddleError>,
+    G: Fn(ArrayView1<f64>) -> Result<Array1<f64>, crate::SaddleError>,
+{
+    if v.len() != x.len() {
+        return x.clone();
+    }
+    let Ok(target) = value(x.view()) else {
+        return x.clone();
+    };
+    let mut y = x.clone();
+    axpy(1.0, v.view(), &mut y);
+    for _ in 0..RESTORE_ITERS {
+        let Ok(c) = value(y.view()) else {
+            break;
+        };
+        let r = c - target;
+        if r.abs() <= RESTORE_TOL {
+            break;
+        }
+        let Ok(g) = gradient(y.view()) else {
+            break;
+        };
+        let gg = dot(g.view(), g.view());
+        if gg <= RANK_TOL * RANK_TOL {
+            break;
+        }
+        axpy(-r / gg, g.view(), &mut y);
+    }
+    y
 }
 
 fn check_cart(x: ArrayView1<f64>) -> Result<(), crate::SaddleError> {
@@ -380,18 +520,10 @@ fn center_rows(pos: &mut Array2<f64>) {
     if n == 0.0 {
         return;
     }
-    let mut c = [0.0; 3];
-    for i in 0..pos.nrows() {
-        for d in 0..3 {
-            c[d] += pos[(i, d)];
-        }
-    }
     for d in 0..3 {
-        c[d] /= n;
-    }
-    for i in 0..pos.nrows() {
-        for d in 0..3 {
-            pos[(i, d)] -= c[d];
+        let c = sum(pos.column(d)) / n;
+        for i in 0..pos.nrows() {
+            pos[(i, d)] -= c;
         }
     }
 }
@@ -591,6 +723,7 @@ pub fn seam_nrm2(x: &Array1<f64>) -> f64 {
 mod tests {
     use super::*;
     use ndarray::array;
+    use rgmin::Manifold;
 
     fn triangle() -> (Array1<f64>, Array2<f64>) {
         let rows = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.2, 0.8, 0.0]];
@@ -697,5 +830,77 @@ mod tests {
             Err(crate::SaddleError::Shape(_)) => {}
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn translation_retract_stays_on_the_set() {
+        let x = pack_cart(&[[0.0, 0.0, 0.0], [2.0, 4.0, 6.0]]);
+        let t = Translation::all(2, CartAxis::Y).unwrap();
+        let c0 = t.value(x.view()).unwrap();
+        let step = Array1::from_elem(6, 0.3);
+        let y = t.retract(&x, &step);
+        let c1 = t.value(y.view()).unwrap();
+        assert!(
+            (c0 - c1).abs() < 1e-12,
+            "translation retract left the set: {c0} -> {c1}"
+        );
+        let g = t.gradient(x.view()).unwrap();
+        let v = t.project(&x, &step);
+        assert!(dot(g.view(), v.view()).abs() < 1e-12);
+        let w = t.transport(&x, &y, &v);
+        let w_h = t.project(&y, &w);
+        assert!(seam_nrm2(&(&w - &w_h)) < 1e-12);
+    }
+
+    #[test]
+    fn rotation_retract_stays_on_the_set() {
+        let (_, refpos) = triangle();
+        let th = 0.08;
+        let rows = [
+            rot_z([0.0, 0.0, 0.0], th),
+            rot_z([1.0, 0.0, 0.0], th),
+            rot_z([0.2, 0.8, 0.0], th),
+        ];
+        let x = pack_cart(&rows);
+        let rz = Rotation::new(vec![0, 1, 2], CartAxis::Z, refpos).unwrap();
+        let c0 = rz.value(x.view()).unwrap();
+        let mut step = Array1::zeros(9);
+        step[0] = 0.05;
+        step[1] = -0.04;
+        step[3] = 0.02;
+        step[4] = 0.03;
+        let y = rz.retract(&x, &step);
+        let c1 = rz.value(y.view()).unwrap();
+        assert!(
+            (c0 - c1).abs() < 1e-8,
+            "rotation retract left the set: {c0} -> {c1}"
+        );
+        let g = rz.gradient(x.view()).unwrap();
+        let v = rz.project(&x, &step);
+        assert!(dot(g.view(), v.view()).abs() < 1e-10);
+        let w = rz.transport(&x, &y, &v);
+        let w_h = rz.project(&y, &w);
+        assert!(seam_nrm2(&(&w - &w_h)) < 1e-10);
+    }
+
+    #[test]
+    fn displacement_retract_stays_on_the_set() {
+        let refpos = array![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
+        let d = Displacement::identity(vec![0, 1], refpos).unwrap();
+        let x = pack_cart(&[[0.1, 0.0, 0.0], [1.0, 0.2, 0.0]]);
+        let c0 = d.value(x.view()).unwrap();
+        let step = Array1::from_elem(6, 0.05);
+        let y = d.retract(&x, &step);
+        let c1 = d.value(y.view()).unwrap();
+        assert!(
+            (c0 - c1).abs() < 1e-10,
+            "displacement retract left the set: {c0} -> {c1}"
+        );
+        let g = d.gradient(x.view()).unwrap();
+        let v = d.project(&x, &step);
+        assert!(dot(g.view(), v.view()).abs() < 1e-12);
+        let w = d.transport(&x, &y, &v);
+        let w_h = d.project(&y, &w);
+        assert!(seam_nrm2(&(&w - &w_h)) < 1e-12);
     }
 }
