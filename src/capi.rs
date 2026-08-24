@@ -487,6 +487,7 @@ pub unsafe extern "C" fn rgsaddle_minmode_create(
         rotation_tol: cfg.rotation_tol,
         max_rotations: cfg.max_rotations as usize,
         krylov_dim: cfg.krylov_dim as usize,
+        eigen_kind: rgmin::EigensolverKind::Lanczos,
         force_tol: cfg.force_tol,
         max_move: cfg.max_move,
         method: method_of(cfg.method),
