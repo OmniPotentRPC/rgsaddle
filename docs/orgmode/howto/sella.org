@@ -5,8 +5,9 @@
 
 The Sella QuasiNewton stepper is ~rgsaddle::QuasiNewton~
 (~rgmin::qn_get_s~). ~get_stepper("qn")~ is the factory;
-~step_on~ / ~retract_qn~ is the Riemannian step (proj / retr
-/ transp). This is a stepper, not a session.
+~step_on~ / ~retract_qn~ is project then retract.
+~transport_step~ is the vector transport. This is a
+stepper, not a session.
 
 ~SellaMinSession~ is order 0, ~eig=false~: project on
 ~ManifoldKind::RigidQuotient~, ~qn_restricted~, retract,
