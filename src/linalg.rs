@@ -162,10 +162,24 @@ mod tests {
     fn hvp_recovers_a_diagonal_hessian() {
         let x = Array1::from(vec![0.3, -0.2]);
         let (_, g) = Quad.eval(x.view()).unwrap();
-        let e0 = numerical_hvp(&Quad, x.view(), g.view(), Array1::from(vec![1.0, 0.0]).view(), 1e-5, true)
-            .unwrap();
-        let e1 = numerical_hvp(&Quad, x.view(), g.view(), Array1::from(vec![0.0, 1.0]).view(), 1e-5, true)
-            .unwrap();
+        let e0 = numerical_hvp(
+            &Quad,
+            x.view(),
+            g.view(),
+            Array1::from(vec![1.0, 0.0]).view(),
+            1e-5,
+            true,
+        )
+        .unwrap();
+        let e1 = numerical_hvp(
+            &Quad,
+            x.view(),
+            g.view(),
+            Array1::from(vec![0.0, 1.0]).view(),
+            1e-5,
+            true,
+        )
+        .unwrap();
         assert!((e0[0] - 2.0).abs() < 1e-6, "H00={}", e0[0]);
         assert!(e0[1].abs() < 1e-6);
         assert!((e1[1] - 8.0).abs() < 1e-6, "H11={}", e1[1]);

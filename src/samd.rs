@@ -174,16 +174,20 @@ impl SamdSession {
 }
 
 /// Project a SAMD increment onto a manifold (Sella waist: stay on set).
-pub fn project_velocity<M: rgmin::Manifold>(m: &M, x: &Array1<f64>, v: &Array1<f64>) -> Array1<f64> {
+pub fn project_velocity<M: rgmin::Manifold>(
+    m: &M,
+    x: &Array1<f64>,
+    v: &Array1<f64>,
+) -> Array1<f64> {
     m.project(x, v)
 }
 
 #[cfg(test)]
 mod tests {
-    use rgmin::vecops::nrm2;
     use super::*;
     use crate::SaddleError;
     use ndarray::{Array1, ArrayView1};
+    use rgmin::vecops::nrm2;
     use rgmin::{Manifold, ManifoldKind};
 
     struct Well;

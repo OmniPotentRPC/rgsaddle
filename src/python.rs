@@ -5,8 +5,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use crate::{
-    CellChart, EigenDevice, ExpandKind, ForceGate, HessUpdate, IrcKind, MinModeKind,
-    RestrictedKind,
+    CellChart, EigenDevice, ExpandKind, ForceGate, HessUpdate, IrcKind, MinModeKind, RestrictedKind,
 };
 
 fn mint_int_enum<'py>(

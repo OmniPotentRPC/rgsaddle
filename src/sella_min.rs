@@ -9,14 +9,14 @@
 //! [`SellaMinSession::on_internal`] to QN in the internals chart
 //! (Sella `InternalPES`). The host owns the loop. `run` is a convenience.
 
-use ndarray::{s, Array1};
-use rgmin::qn_restricted;
-use rgmin::vecops::{axpy, dot, vdot, vnrm2, Vector};
+use ndarray::{Array1, s};
 use rgmin::Manifold;
+use rgmin::qn_restricted;
+use rgmin::vecops::{Vector, axpy, dot, vdot, vnrm2};
 
 use crate::constraints::Constraints;
 use crate::error::SaddleError;
-use crate::geom::{update_trust, SellaGeom, TrustSchedule};
+use crate::geom::{SellaGeom, TrustSchedule, update_trust};
 use crate::minmode::PointSurface;
 use crate::pes::CartesianPes;
 use crate::pes_internal::{CellCartesianPes, CellInternalPes, InternalPes, SellaPes};
@@ -419,7 +419,9 @@ impl SellaMinSession {
     ) -> Result<SellaMinReport, SaddleError> {
         let pes = match &mut self.pes {
             SellaPes::Internal(p) => p,
-            SellaPes::Cartesian(_) | SellaPes::Cell(_) | SellaPes::CellInternal(_) => unreachable!(),
+            SellaPes::Cartesian(_) | SellaPes::Cell(_) | SellaPes::CellInternal(_) => {
+                unreachable!()
+            }
         };
         let x = pes.position().to_owned();
         let (energy, g) = surface.eval(x.view())?;
@@ -611,8 +613,8 @@ mod tests {
     use crate::geom::update_trust;
     use crate::minmode::PointSurface;
     use ndarray::{Array1, ArrayView1};
-    use rgmin::vecops::nrm2;
     use rgmin::ManifoldKind;
+    use rgmin::vecops::nrm2;
 
     struct Well;
     impl PointSurface for Well {
@@ -756,7 +758,11 @@ mod tests {
         x[0] = 0.2;
         let mut chart = Constraints::new(2).unwrap();
         chart
-            .fix_translation(Translation::all(2, CartAxis::X).unwrap(), x.view(), Some(0.0))
+            .fix_translation(
+                Translation::all(2, CartAxis::X).unwrap(),
+                x.view(),
+                Some(0.0),
+            )
             .unwrap();
         let mut sess = SellaMinSession::on_internal(
             SellaMinConfig {
@@ -863,7 +869,10 @@ mod tests {
             mask,
         )
         .unwrap();
-        assert_eq!(sess.cell_pes().unwrap().chart(), crate::CellChart::LogDeform);
+        assert_eq!(
+            sess.cell_pes().unwrap().chart(),
+            crate::CellChart::LogDeform
+        );
         let _ = sess.run(&CellQuad, 40).unwrap();
         let a00 = sess.cell_pes().unwrap().cell9()[0];
         assert!(
@@ -879,7 +888,11 @@ mod tests {
         x[0] = 0.3;
         let mut chart = Constraints::new(2).unwrap();
         chart
-            .fix_translation(Translation::all(2, CartAxis::X).unwrap(), x.view(), Some(0.0))
+            .fix_translation(
+                Translation::all(2, CartAxis::X).unwrap(),
+                x.view(),
+                Some(0.0),
+            )
             .unwrap();
         let cell = crate::Cell::ortho(3.0, 3.0, 3.0).unwrap();
         let mut mask = [false; 9];
@@ -910,7 +923,11 @@ mod tests {
         x[0] = 0.3;
         let mut chart = Constraints::new(2).unwrap();
         chart
-            .fix_translation(Translation::all(2, CartAxis::X).unwrap(), x.view(), Some(0.0))
+            .fix_translation(
+                Translation::all(2, CartAxis::X).unwrap(),
+                x.view(),
+                Some(0.0),
+            )
             .unwrap();
         let cell = crate::Cell::ortho(3.0, 3.0, 3.0).unwrap();
         let mut mask = [false; 9];
@@ -944,7 +961,11 @@ mod tests {
         x[0] = 0.2;
         let mut chart = Constraints::new(2).unwrap();
         chart
-            .fix_translation(Translation::all(2, CartAxis::X).unwrap(), x.view(), Some(0.0))
+            .fix_translation(
+                Translation::all(2, CartAxis::X).unwrap(),
+                x.view(),
+                Some(0.0),
+            )
             .unwrap();
         let mut sess = SellaMinSession::on_internal(
             SellaMinConfig {

@@ -114,8 +114,8 @@ pub fn rfo_stepper(name: &str, order: usize) -> Option<RationalFunctionOptimizat
 mod tests {
     use super::*;
     use ndarray::{Array2, array};
-    use rgmin::vecops::{dot, nrm2};
     use rgmin::ManifoldKind;
+    use rgmin::vecops::{dot, nrm2};
 
     #[test]
     fn factory_matches_sella_synonyms() {

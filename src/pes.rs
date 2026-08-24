@@ -110,9 +110,7 @@ impl CartesianPes {
         g0: ArrayView1<f64>,
     ) -> Result<(f64, Array1<f64>), SaddleError> {
         if g0.len() != self.x.len() {
-            return Err(SaddleError::Shape(
-                "kick g0 must match the 3N frame".into(),
-            ));
+            return Err(SaddleError::Shape("kick g0 must match the 3N frame".into()));
         }
         let n = self.x.len().min(d.len());
         for i in 0..n {

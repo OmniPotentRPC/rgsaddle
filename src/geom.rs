@@ -214,8 +214,8 @@ pub fn update_trust(delta: f64, rho: f64, smag: f64, sch: &TrustSchedule) -> f64
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::internal::pack_cart;
     use crate::Constraints;
+    use crate::internal::pack_cart;
     use ndarray::Array1;
     use rgmin::vecops::nrm2;
 
