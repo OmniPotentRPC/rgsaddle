@@ -6,6 +6,12 @@
 
 ** Unreleased
 
+- Sella `_gpu.py` on the rgmin vecops / dlpk waist:
+  ~gpu_eigh~ / ~gpu_qr~ / ~gpu_project~, size gate
+  (~GPU_MIN_DIM = 200~), OOM floor. CUDA is a dlpk
+  device tag, not a second GPU stack; missing kernels
+  fall back to host Jacobi / Gram-Schmidt. Eigenvectors
+  retract on the sphere (~proj~ / ~retr~ / ~transp~).
 - Force gate is the eOn / gpr_optim closed enum
   (~L2~ / ~Linf~ / ~MaxForceOnAtom~), not a single implied
   scalar. Sessions take ~ForceGate~; the C ABI is

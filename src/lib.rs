@@ -32,6 +32,9 @@
 //! [`SellaSaddleSession`] retract on [`geom::SellaGeom`]: the rigid
 //! quotient by default, or a live `Constraints` chart. [`restricted::MaxInternalStep`]
 //! is the per-coordinate clip Sella applies before the trust region.
+//! Sella `_gpu.py` is [`gpu`]: `gpu_eigh` / `gpu_qr` / `gpu_project`
+//! over a dlpk CUDA [`rgmin::vecops::Vector`], host fallback when
+//! this build has no kernel backend.
 //!
 //! Force assembly is pure: tangents (Mills–Jonsson–Schenter simple,
 //! Henkelman–Jonsson improved), springs (uniform, energy-weighted,
@@ -60,15 +63,16 @@ pub mod error;
 pub mod force;
 pub mod force_match;
 pub mod geom;
+pub mod gpu;
 pub mod internal;
 pub mod linalg;
 pub mod mic;
 pub mod minmode;
-#[cfg(feature = "python")]
-pub mod python;
 pub mod pes;
 pub mod pes_internal;
 pub mod projection;
+#[cfg(feature = "python")]
+pub mod python;
 pub mod qn;
 pub mod restricted;
 pub mod rfo;
@@ -79,32 +83,36 @@ pub mod spring;
 pub mod tangent;
 
 pub use band::{BandConfig, BandReport, BandSession, BandStatus, BandSurface};
+pub use cell_log::{CellChart, expm_3x3, logm_3x3};
 pub use constraints::{Constraints, Equality, InternalCounts};
 pub use eigensolve::{
-    exact_eigh, eigh_on, expand, lowest_on, rayleigh_ritz, rayleigh_ritz_iter, EigenDevice,
-    ExpandKind,
+    EigenDevice, ExpandKind, eigh_on, exact_eigh, expand, lowest_on, rayleigh_ritz,
+    rayleigh_ritz_iter,
 };
 pub use error::SaddleError;
 pub use force::ForceGate;
 pub use force_match::{covalent_pairs, force_match_hessian};
-pub use cell_log::{expm_3x3, logm_3x3, CellChart};
 pub use geom::{SellaGeom, TrustSchedule};
-pub use linalg::{modified_gram_schmidt, numerical_hvp};
+pub use gpu::{
+    GPU_MIN_DIM, GpuPolicy, gpu_eigh, gpu_eigh_t, gpu_ok, gpu_project, gpu_qr, to_gpu,
+    to_gpu_matrix,
+};
 pub use internal::{CartAxis, Displacement, InternalSlot, Rotation, Translation};
 pub use irc::{IrcConfig, IrcDirection, IrcKind, IrcReport, IrcSession};
+pub use linalg::{modified_gram_schmidt, numerical_hvp};
 pub use mic::{Cell, wrap_difference};
 pub use minmode::{
     MinModeConfig, MinModeKind, MinModeReport, MinModeSession, MinModeStatus, PointSurface,
 };
 pub use pes::{CartesianPes, HessUpdate};
 pub use pes_internal::{
-    niggli_reduce_cell, niggli_reduce_vectors, place_perp_dummy, CellCartesianPes,
-    CellInternalPes, InternalPes, SellaPes,
+    CellCartesianPes, CellInternalPes, InternalPes, SellaPes, niggli_reduce_cell,
+    niggli_reduce_vectors, place_perp_dummy,
 };
 pub use projection::ProjectionKind;
-pub use qn::{get_stepper, retract_qn, QuasiNewton, StepperKind};
+pub use qn::{QuasiNewton, StepperKind, get_stepper, retract_qn};
 pub use restricted::{
-    mis_clip, weights_for_equalities, InternalWeights, MaxInternalStep, RestrictedKind,
+    InternalWeights, MaxInternalStep, RestrictedKind, mis_clip, weights_for_equalities,
 };
 pub use rfo::{RationalFunctionOptimization, rfo_stepper};
 pub use samd::{SamdConfig, SamdReport, SamdSession};
