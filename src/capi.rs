@@ -277,8 +277,8 @@ pub extern "C" fn rgsaddle_status_name(status: i32) -> *const c_char {
 pub extern "C" fn rgsaddle_force_gate_name(gate: i32) -> *const c_char {
     match crate::ForceGate::try_from_abi(gate) {
         Some(g) => match g {
-            crate::ForceGate::L2 => b"L2\0".as_ptr() as *const c_char,
-            crate::ForceGate::Linf => b"LINF\0".as_ptr() as *const c_char,
+            crate::ForceGate::L2Norm => b"L2\0".as_ptr() as *const c_char,
+            crate::ForceGate::LinfNorm => b"LINF\0".as_ptr() as *const c_char,
             crate::ForceGate::MaxForceOnAtom => b"MAX_ATOM\0".as_ptr() as *const c_char,
         },
         None => std::ptr::null(),

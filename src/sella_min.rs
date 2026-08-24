@@ -315,7 +315,7 @@ mod tests {
         let n = crate::ForceGate::MaxForceOnAtom.value(g.view());
         assert!(n > 1e-3, "component inf-norm would pass 1e-3; atom |F|={n}");
         assert!((n - (3.0_f64 * 0.0008 * 0.0008).sqrt()).abs() < 1e-14);
-        let linf = crate::ForceGate::Linf.value(g.view());
+        let linf = crate::ForceGate::LinfNorm.value(g.view());
         assert!(linf < 1e-3);
     }
 

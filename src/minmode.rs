@@ -53,7 +53,7 @@ impl Default for MinModeConfig {
             krylov_dim: 12,
             eigen_kind: EigensolverKind::Lanczos,
             force_tol: 1e-3,
-            force_gate: crate::ForceGate::Linf,
+            force_gate: crate::ForceGate::LinfNorm,
             max_move: 0.2,
             method: Method::Fire {
                 kind: rgmin::FireKind::V2,

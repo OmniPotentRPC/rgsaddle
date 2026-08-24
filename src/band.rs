@@ -56,7 +56,7 @@ impl Default for BandConfig {
             }),
             cell: None,
             force_tol: 1e-3,
-            force_gate: crate::ForceGate::Linf,
+            force_gate: crate::ForceGate::LinfNorm,
             max_move: 0.2,
             method: Method::Fire {
                 kind: rgmin::FireKind::V2,

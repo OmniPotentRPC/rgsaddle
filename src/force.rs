@@ -23,21 +23,19 @@ use pyo3::prelude::*;
         eq,
         eq_int,
         frozen,
+        rename_all = "SCREAMING_SNAKE_CASE",
         name = "ForceGate",
         module = "rgsaddle"
     )
 )]
 pub enum ForceGate {
     /// Euclidean `||F||_2` over the full 3N vector.
-    #[cfg_attr(feature = "python", pyo3(name = "L2_NORM"))]
-    L2 = 0,
+    L2Norm = 0,
     /// Max absolute component.
-    #[cfg_attr(feature = "python", pyo3(name = "LINF_NORM"))]
-    Linf = 1,
+    LinfNorm = 1,
     /// Max per-atom `||F_i||_2`. Sella `PES.converged` and the Baker
     /// production gate (`max_force_on_atom`).
     #[default]
-    #[cfg_attr(feature = "python", pyo3(name = "MAX_FORCE_ON_ATOM"))]
     MaxForceOnAtom = 2,
 }
 
@@ -45,8 +43,8 @@ impl ForceGate {
     /// Closed C / Cap'n Proto ordinal. Unknown values are `None`.
     pub fn try_from_abi(v: i32) -> Option<Self> {
         match v {
-            0 => Some(Self::L2),
-            1 => Some(Self::Linf),
+            0 => Some(Self::L2Norm),
+            1 => Some(Self::LinfNorm),
             2 => Some(Self::MaxForceOnAtom),
             _ => None,
         }
@@ -60,8 +58,8 @@ impl ForceGate {
     /// Static C name, for bindings and `rgsaddle_force_gate_name`.
     pub const fn name(self) -> &'static str {
         match self {
-            Self::L2 => "L2",
-            Self::Linf => "LINF",
+            Self::L2Norm => "L2",
+            Self::LinfNorm => "LINF",
             Self::MaxForceOnAtom => "MAX_ATOM",
         }
     }
@@ -69,8 +67,8 @@ impl ForceGate {
     /// Reduce `g` (a gradient; same magnitude as `-F`) to the gate scalar.
     pub fn value(self, g: ArrayView1<f64>) -> f64 {
         match self {
-            Self::L2 => nrm2(g),
-            Self::Linf => nrminf(g),
+            Self::L2Norm => nrm2(g),
+            Self::LinfNorm => nrminf(g),
             Self::MaxForceOnAtom => max_force_on_atom(g),
         }
     }
@@ -87,11 +85,11 @@ impl ForceGate {
         })
     }
 
-    fn __int__(self) -> i32 {
+    fn __int__(&self) -> i32 {
         self.to_abi()
     }
 
-    fn __index__(self) -> i32 {
+    fn __index__(&self) -> i32 {
         self.to_abi()
     }
 }
@@ -122,8 +120,8 @@ mod tests {
     #[test]
     fn three_gates_disagree_on_a_tilted_atom() {
         let g = array![0.0008, 0.0008, 0.0008, 0.0, 0.0, 0.0];
-        let l2 = ForceGate::L2.value(g.view());
-        let linf = ForceGate::Linf.value(g.view());
+        let l2 = ForceGate::L2Norm.value(g.view());
+        let linf = ForceGate::LinfNorm.value(g.view());
         let atom = ForceGate::MaxForceOnAtom.value(g.view());
         assert!((linf - 0.0008).abs() < 1e-14);
         assert!((atom - (3.0_f64 * 0.0008 * 0.0008).sqrt()).abs() < 1e-14);
@@ -131,7 +129,7 @@ mod tests {
         assert!(linf < 1e-3);
         assert!((l2 - atom).abs() < 1e-14);
         assert_eq!(ForceGate::try_from_abi(2), Some(ForceGate::MaxForceOnAtom));
-        assert_eq!(ForceGate::Linf.to_abi(), 1);
+        assert_eq!(ForceGate::LinfNorm.to_abi(), 1);
         assert_eq!(ForceGate::try_from_abi(99), None);
     }
 }
