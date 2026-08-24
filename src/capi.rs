@@ -2536,12 +2536,6 @@ mod constraints_abi_tests {
             rgsaddle_sella_min_create_internal(&min_cfg, 2, x.as_ptr(), masses.as_ptr(), cons)
         };
         assert!(!sess.is_null());
-        unsafe {
-            rgsaddle_sella_min_free(sess);
-            rgsaddle_internal_pes_free(pes);
-            rgsaddle_constraints_free(cons);
-        }
-        assert!(unsafe { rgsaddle_internal_pes_create(2, x.as_ptr(), masses.as_ptr(), std::ptr::null()) }.is_null());
         let cell = [3.0, 0.0, 0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 3.0];
         let mask = [1, 0, 0, 0, 0, 0, 0, 0, 0];
         let cell_sess = unsafe {
@@ -2555,11 +2549,6 @@ mod constraints_abi_tests {
             )
         };
         assert!(!cell_sess.is_null());
-        unsafe { rgsaddle_sella_min_free(cell_sess) };
-        assert!(unsafe {
-            rgsaddle_sella_min_create_cell(&min_cfg, 2, x.as_ptr(), masses.as_ptr(), std::ptr::null(), mask.as_ptr())
-        }
-        .is_null());
         let cint = unsafe {
             rgsaddle_sella_min_create_cell_internal(
                 &min_cfg,
@@ -2572,7 +2561,18 @@ mod constraints_abi_tests {
             )
         };
         assert!(!cint.is_null());
-        unsafe { rgsaddle_sella_min_free(cint) };
+        unsafe {
+            rgsaddle_sella_min_free(sess);
+            rgsaddle_sella_min_free(cell_sess);
+            rgsaddle_sella_min_free(cint);
+            rgsaddle_internal_pes_free(pes);
+            rgsaddle_constraints_free(cons);
+        }
+        assert!(unsafe { rgsaddle_internal_pes_create(2, x.as_ptr(), masses.as_ptr(), std::ptr::null()) }.is_null());
+        assert!(unsafe {
+            rgsaddle_sella_min_create_cell(&min_cfg, 2, x.as_ptr(), masses.as_ptr(), std::ptr::null(), mask.as_ptr())
+        }
+        .is_null());
     }
 
     #[test]
