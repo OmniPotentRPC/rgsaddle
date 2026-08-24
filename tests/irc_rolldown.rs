@@ -174,7 +174,7 @@ fn fd_lowest_curvature(surface: &MullerBrown, x: ArrayView1<f64>, dr: f64) -> f6
     rgmin::lowest_eigenpair(&Dense(h), x, seed.view(), 6).value
 }
 
-fn roll_branch(direction: IrcDirection) -> (Array1<f64>, f64, f64) {
+fn roll_branch(direction: IrcDirection) -> (Array1<f64>, f64, f64, f64, bool) {
     let mut saddle = Array1::zeros(6);
     saddle[0] = -0.822;
     saddle[1] = 0.624;
@@ -197,17 +197,17 @@ fn roll_branch(direction: IrcDirection) -> (Array1<f64>, f64, f64) {
     let report = session.run(&MullerBrown, 40).unwrap();
     let x = session.position().to_owned();
     let curv = fd_lowest_curvature(&MullerBrown, x.view(), 1e-4);
-    (x, report.energy, curv)
+    (x, report.energy, curv, report.arc, report.at_minimum)
 }
 
 #[test]
 fn muller_brown_both_ways_ends_at_minima_with_positive_curvature() {
-    let (xf, ef, cf) = roll_branch(IrcDirection::Forward);
-    let (xr, er, cr) = roll_branch(IrcDirection::Reverse);
+    let (xf, ef, cf, af, minf) = roll_branch(IrcDirection::Forward);
+    let (xr, er, cr, ar, minr) = roll_branch(IrcDirection::Reverse);
     let sep = ((xf[0] - xr[0]) * (xf[0] - xr[0]) + (xf[1] - xr[1]) * (xf[1] - xr[1])).sqrt();
     assert!(
         sep > 0.5,
-        "forward ({}, {}) E={ef} and reverse ({}, {}) E={er} must be distinct wells (sep={sep})",
+        "forward ({}, {}) E={ef} arc={af} min={minf} and reverse ({}, {}) E={er} arc={ar} min={minr} must be distinct wells (sep={sep})",
         xf[0],
         xf[1],
         xr[0],
