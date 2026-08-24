@@ -410,9 +410,14 @@ impl IrcSession {
                 let mut force = g0.clone();
                 force.mapv_inplace(|v| -v);
                 if dot(prev.view(), force.view()) < 0.0 {
+                    // Current point is already on the far wall. Keep
+                    // the last downhill geometry.
+                    axpy(-1.0, prev.view(), &mut self.x);
+                    let (energy, g) = surface.eval(self.x.view())?;
+                    let max_force = nrminf(g.view());
                     return Ok(IrcReport {
-                        energy: energy0,
-                        max_force: max_force0,
+                        energy,
+                        max_force,
                         arc: self.arc,
                         inner_steps: 0,
                         at_minimum: true,
