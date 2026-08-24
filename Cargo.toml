@@ -1,0 +1,20 @@
+[package]
+name = "rgsaddle"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+description = "Band and minimum-mode saddle mechanics over rgmin steppers."
+repository = "https://github.com/OmniPotentRPC/rgsaddle"
+authors = ["Rohit Goswami <rgoswami@ieee.org>"]
+keywords = ["neb", "saddle", "transition-state", "optimization"]
+categories = ["science"]
+
+[dependencies]
+rgmin = { git = "https://github.com/OmniPotentRPC/rgmin.git", branch = "main" }
+eindir-core = { version = "0.6.0", git = "https://github.com/HaoZeke/eindir.git", rev = "f3c42130bb389ba6cd6e4cfdc8b2e182f4a764e9", features = ["capi"] }
+ndarray = "0.17"
+thiserror = "2"
+
+[dev-dependencies]
+approx = "0.5"
