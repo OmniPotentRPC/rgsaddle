@@ -61,6 +61,7 @@ you **find** that saddle.
    howto/band
    howto/irc
    howto/minmode
+   howto/io
 
 .. toctree::
    :maxdepth: 2

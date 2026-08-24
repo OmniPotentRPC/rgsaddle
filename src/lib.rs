@@ -24,14 +24,22 @@
 //! NEBTangent / NEBSpringForce / NEBForceProjection with identical
 //! branch structure.
 //!
-//! Positions are unwrapped Cartesian; a periodic host applies its
-//! minimum-image convention before handing differences in.
+//! Positions are unwrapped Cartesian. Minimum-image differences go
+//! through [linkcell](https://github.com/d-SEAMS/linkcell). Molecular
+//! frames come from readcon-core (CON), readcon-db (corpus), and
+//! readcon-chemfiles (foreign trajectories). Cutoff neighbour lists
+//! are vesin, when a surface needs them.
 
 pub mod band;
 pub mod irc;
+#[cfg(feature = "readcon")]
+pub mod io;
+#[cfg(feature = "readcon")]
+pub use io::{frame_from_con, MolecularFrame};
 #[cfg(feature = "capi")]
 pub mod capi;
 pub mod error;
+pub mod mic;
 pub mod minmode;
 pub mod projection;
 pub mod spring;
@@ -39,6 +47,7 @@ pub mod tangent;
 
 pub use band::{BandConfig, BandReport, BandSession, BandStatus, BandSurface};
 pub use error::SaddleError;
+pub use mic::{wrap_difference, Cell};
 pub use irc::{IrcConfig, IrcDirection, IrcReport, IrcSession};
 pub use minmode::{
     MinModeConfig, MinModeKind, MinModeReport, MinModeSession, MinModeStatus, PointSurface,

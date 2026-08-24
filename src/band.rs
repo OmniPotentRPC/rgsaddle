@@ -7,34 +7,13 @@ use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
 use rgmin::{Control, Method, Oracle, Solver};
 
 use crate::error::SaddleError;
+use crate::mic::{wrap_difference, Cell};
 use crate::projection::{ProjectionKind, climbing_image_force, dneb_component, force_perp};
 use crate::spring::SpringKind;
 use crate::tangent::TangentKind;
 use crate::tangent::compute_tangent;
 
-/// Row-major 3x3 simulation cell for minimum-image differences. Band
-/// mechanics need nothing more from periodicity; neighbor lists (when
-/// a surface wants them) are vesin's job, not this crate's.
-#[derive(Clone, Copy, Debug)]
-pub struct Cell(pub [[f64; 3]; 3]);
 
-impl Cell {
-    /// Wrap every per-atom 3-vector in `diff` to its minimum image.
-    /// Exact for the orthorhombic cells the current hosts use; a
-    /// triclinic host pre-wraps instead.
-    pub fn minimum_image(&self, diff: &mut Array1<f64>) {
-        let h = &self.0;
-        for a in 0..diff.len() / 3 {
-            for c in 0..3 {
-                let l = h[c][c];
-                if l > 0.0 {
-                    let x = diff[3 * a + c];
-                    diff[3 * a + c] = x - l * (x / l).round();
-                }
-            }
-        }
-    }
-}
 
 /// Climbing-image activation, the eOn trigger rule: CI arms when the
 /// convergence force falls under `factor * baseline` or under the
@@ -176,8 +155,8 @@ fn assemble_band(
         let mut pos_diff_next = (&positions.row(i + 1) - &positions.row(i)).to_owned();
         let mut pos_diff_prev = (&positions.row(i) - &positions.row(i - 1)).to_owned();
         if let Some(cell) = &config.cell {
-            cell.minimum_image(&mut pos_diff_next);
-            cell.minimum_image(&mut pos_diff_prev);
+            wrap_difference(cell, &mut pos_diff_next);
+            wrap_difference(cell, &mut pos_diff_prev);
         }
         let dist_next = pos_diff_next.dot(&pos_diff_next).sqrt();
         let dist_prev = pos_diff_prev.dot(&pos_diff_prev).sqrt();

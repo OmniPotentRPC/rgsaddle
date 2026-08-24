@@ -84,6 +84,16 @@ html_theme_options = {
                     "url": "https://github.com/TheochemUI/gpr_optim",
                     "summary": "GP-NEB and IRCDriver host",
                 },
+                {
+                    "title": "readcon-core",
+                    "url": "https://github.com/lode-org/readcon-core",
+                    "summary": "CON frames; chemfiles import is a feature",
+                },
+                {
+                    "title": "linkcell",
+                    "url": "https://github.com/d-SEAMS/linkcell",
+                    "summary": "Periodic MIC and linked-cell neighbours",
+                },
             ],
         },
     ],

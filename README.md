@@ -22,10 +22,13 @@ improved), springs (uniform, energy-weighted, Onsager-Machlup),
 projections (plain elastic band, NEB, doubly nudged), and the
 climbing-image force with the eOn trigger rule.
 
-Positions are unwrapped Cartesian. A `Cell` supplies orthorhombic
-minimum-image differences for the band mechanics; neighbor lists,
-when a surface wants them, are [vesin](https://github.com/Luthaf/vesin)'s
-job, not this crate's.
+Positions are unwrapped Cartesian. Minimum-image differences go
+through [linkcell](https://github.com/d-SEAMS/linkcell). Frames come
+from [readcon-core](https://github.com/lode-org/readcon-core)
+(CON), readcon-db (corpus), and readcon-chemfiles (foreign
+trajectories, `chemfiles` feature on readcon-core). Cutoff neighbour
+lists, when a surface needs them, are
+[vesin](https://github.com/Luthaf/vesin).
 
 `BandSession::reset` is the model-update boundary: quasi-Newton
 history taken on one surface epoch must not survive onto the next.

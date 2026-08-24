@@ -67,6 +67,7 @@ cargo test
    howto/band
    howto/irc
    howto/minmode
+   howto/io
 
 .. toctree::
    :maxdepth: 2

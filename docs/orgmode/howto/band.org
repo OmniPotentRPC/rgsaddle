@@ -14,5 +14,8 @@ history from one surface epoch must not survive onto the next.
 
 Tangents, springs, projections, and the climbing-image force
 follow eOn's branch structure. Positions stay unwrapped
-Cartesian. A ~Cell~ supplies orthorhombic minimum-image
-differences. Neighbor lists are vesin's job.
+Cartesian. Minimum-image differences go through
+[[https://github.com/d-SEAMS/linkcell][linkcell]] (~wrap_difference~). Cutoff neighbour lists are
+[[https://github.com/Luthaf/vesin][vesin]], when a surface needs them. Frames come from
+readcon-core / readcon-db / readcon-chemfiles; see
+[[file:io.org][howto/io]].

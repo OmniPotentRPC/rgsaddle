@@ -11,7 +11,8 @@ use std::slice;
 use ndarray::{Array1, Array2, ArrayView2};
 use rgmin::{FireKind, Method};
 
-use crate::band::{BandConfig, BandSession, BandStatus, BandSurface, Cell, CiConfig};
+use crate::band::{BandConfig, BandSession, BandStatus, BandSurface, CiConfig};
+use crate::mic::Cell;
 use crate::error::SaddleError;
 use crate::minmode::{MinModeConfig, MinModeKind, MinModeSession, MinModeStatus, PointSurface};
 use crate::projection::ProjectionKind;
@@ -288,11 +289,13 @@ pub unsafe extern "C" fn rgsaddle_band_create(
         None
     } else {
         let c = unsafe { slice::from_raw_parts(cfg.cell, 9) };
-        Some(Cell([
+        Cell::from_vectors(
             [c[0], c[1], c[2]],
             [c[3], c[4], c[5]],
             [c[6], c[7], c[8]],
-        ]))
+            [0.0, 0.0, 0.0],
+        )
+        .ok()
     };
     let band_config = BandConfig {
         tangent: if cfg.tangent == 0 {
