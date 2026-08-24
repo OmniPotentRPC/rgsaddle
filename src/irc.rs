@@ -221,7 +221,7 @@ impl IrcSession {
     /// inner pair; GS2 equality is `IrcTrust`.
     fn restricted_increment(&self, g: &Array1<f64>) -> Array1<f64> {
         let (evals, evecs) = self.hess.eigh();
-        qn_irc_restricted(&self.trust(), &evals, &evecs, g)
+        qn_irc_restricted(&self.trust(), &evals, &evecs, g, self.hess.is_posdef())
     }
 
     /// One Sella `IRC.step`: optional kick, then inner GS2 on the
@@ -239,19 +239,6 @@ impl IrcSession {
             return Err(SaddleError::NonFinite("irc gradient"));
         }
         let max_force0 = nrminf(g0.view());
-        // Sella: the kick is not a minimum even when |F| is already small.
-        if !kicked && max_force0 <= self.config.force_tol {
-            self.d1.fill(0.0);
-            self.solver.forget();
-            return Ok(IrcReport {
-                energy: energy0,
-                max_force: max_force0,
-                arc: self.arc,
-                inner_steps: 0,
-                at_minimum: true,
-            });
-        }
-
         let fmax_inner = self.config.force_tol.min(0.01);
         let mut inner_steps = 0;
         let mut energy = energy0;
