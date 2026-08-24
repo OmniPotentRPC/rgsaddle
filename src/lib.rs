@@ -108,7 +108,9 @@ pub use restricted::{
     mis_clip, weights_for_equalities, InternalWeights, MaxInternalStep, RestrictedKind,
 };
 pub use rfo::{RationalFunctionOptimization, rfo_stepper};
-pub use samd::{SamdConfig, SamdReport, SamdSession};
+pub use samd::{
+    project_velocity, retract_samd, transport_velocity, SamdConfig, SamdReport, SamdSession,
+};
 pub use sella_min::{SellaMinConfig, SellaMinReport, SellaMinSession};
 pub use sella_saddle::{SellaSaddleConfig, SellaSaddleReport, SellaSaddleSession};
 pub use spring::SpringKind;
