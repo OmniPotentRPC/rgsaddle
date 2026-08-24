@@ -331,7 +331,7 @@ mod tests {
         g[2] = 0.0008;
         let n = atom_fmax(&g);
         assert!(n > 1e-3, "component inf-norm would pass 1e-3; atom |F|={n}");
-        assert!((n - (3.0 * 0.0008 * 0.0008).sqrt()).abs() < 1e-14);
+        assert!((n - (3.0_f64 * 0.0008 * 0.0008).sqrt()).abs() < 1e-14);
     }
 
     #[test]
