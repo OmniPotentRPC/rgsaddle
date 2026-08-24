@@ -28,6 +28,7 @@
 //! minimum-image convention before handing differences in.
 
 pub mod band;
+pub mod irc;
 #[cfg(feature = "capi")]
 pub mod capi;
 pub mod error;
@@ -38,6 +39,7 @@ pub mod tangent;
 
 pub use band::{BandConfig, BandReport, BandSession, BandStatus, BandSurface};
 pub use error::SaddleError;
+pub use irc::{IrcConfig, IrcDirection, IrcReport, IrcSession};
 pub use minmode::{
     MinModeConfig, MinModeKind, MinModeReport, MinModeSession, MinModeStatus, PointSurface,
 };
