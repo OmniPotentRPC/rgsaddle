@@ -331,6 +331,10 @@ RgsaddleSellaSaddle *rgsaddle_sella_saddle_create_internal(
     const rgsaddle_sella_saddle_config_t *config, int64_t n_atoms,
     const double *position, const double *masses,
     const RgsaddleConstraints *cons);
+RgsaddleSellaSaddle *rgsaddle_sella_saddle_create_cell(
+    const rgsaddle_sella_saddle_config_t *config, int64_t n_atoms,
+    const double *position, const double *masses, const double *cell,
+    const int32_t *mask);
 int rgsaddle_sella_saddle_step(RgsaddleSellaSaddle *session,
                                rgsaddle_surface_fn surface, void *user,
                                rgsaddle_report_t *out);

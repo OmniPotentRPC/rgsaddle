@@ -1495,6 +1495,63 @@ pub unsafe extern "C" fn rgsaddle_sella_saddle_create_internal(
 }
 
 /// # Safety
+/// `cell` is 9 doubles. `mask` is 9 ints or NULL.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_sella_saddle_create_cell(
+    config: *const RgsaddleSellaSaddleConfig,
+    n_atoms: i64,
+    position: *const f64,
+    masses: *const f64,
+    cell: *const f64,
+    mask: *const i32,
+) -> *mut RgsaddleSellaSaddle {
+    if config.is_null() || position.is_null() || masses.is_null() || cell.is_null() || n_atoms < 1 {
+        return std::ptr::null_mut();
+    }
+    let cfg = unsafe { &*config };
+    if cfg.version.major != RGSADDLE_ABI_MAJOR {
+        return std::ptr::null_mut();
+    }
+    let Some(force_gate) = force_gate_of(cfg.force_gate) else {
+        return std::ptr::null_mut();
+    };
+    let dof = (3 * n_atoms) as usize;
+    let x = Array1::from(unsafe { slice::from_raw_parts(position, dof) }.to_vec());
+    let m = Array1::from(unsafe { slice::from_raw_parts(masses, n_atoms as usize) }.to_vec());
+    let c = unsafe { slice::from_raw_parts(cell, 9) };
+    let Ok(lc) = Cell::from_vectors(
+        [c[0], c[1], c[2]],
+        [c[3], c[4], c[5]],
+        [c[6], c[7], c[8]],
+        [0.0, 0.0, 0.0],
+    ) else {
+        return std::ptr::null_mut();
+    };
+    let mut bits = [true; 9];
+    if !mask.is_null() {
+        let mv = unsafe { slice::from_raw_parts(mask, 9) };
+        for i in 0..9 {
+            bits[i] = mv[i] != 0;
+        }
+    }
+    let mut sella = SellaSaddleConfig::default();
+    if cfg.delta > 0.0 {
+        sella.delta = cfg.delta;
+    }
+    if cfg.force_tol > 0.0 {
+        sella.force_tol = cfg.force_tol;
+    }
+    if cfg.order > 0 {
+        sella.order = cfg.order as usize;
+    }
+    sella.force_gate = force_gate;
+    match SellaSaddleSession::on_cell(sella, x, m, lc, bits) {
+        Ok(session) => Box::into_raw(Box::new(RgsaddleSellaSaddle { session, n_atoms })),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// # Safety
 /// `session` and `out` must be valid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rgsaddle_sella_saddle_step(
