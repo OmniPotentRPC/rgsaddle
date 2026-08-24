@@ -53,6 +53,7 @@ pub mod internal;
 pub mod mic;
 pub mod minmode;
 pub mod pes;
+pub mod pes_internal;
 pub mod projection;
 pub mod qn;
 pub mod restricted;
@@ -72,6 +73,7 @@ pub use minmode::{
     MinModeConfig, MinModeKind, MinModeReport, MinModeSession, MinModeStatus, PointSurface,
 };
 pub use pes::{CartesianPes, HessUpdate};
+pub use pes_internal::{CellCartesianPes, CellInternalPes, InternalPes};
 pub use projection::ProjectionKind;
 pub use qn::{get_stepper, retract_qn, QuasiNewton, StepperKind};
 pub use restricted::{mis_clip, InternalWeights, MaxInternalStep, RestrictedKind};
