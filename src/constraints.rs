@@ -4,8 +4,10 @@
 //! selected bonds / angles / dihedrals. This is the residual and
 //! the tangent projector, not the vocn primitive generator.
 //! Bond / angle / dihedral *values* use the same Wilson B-matrix
-//! formulas as gpr_optim `InternalCoordinates`; topology and dummy
-//! atoms stay in vocn.
+//! formulas as gpr_optim `InternalCoordinates`; topology generation
+//! stays in vocn. Dummy 3-vectors (Sella `ndummies`) are extra
+//! Cartesian slots: `Constraints::new(n_real + n_dummy)` so `ker(J)`
+//! covers the concatenated Wilson frame.
 //!
 //! The level set `{x | c(x) = c_target}` is a [`rgmin::Manifold`]:
 //! `project` onto `ker(J)`, `retract` by a tangent step plus
@@ -839,6 +841,33 @@ mod tests {
             "free step left the rigid quotient"
         );
         let _ = d_h;
+    }
+
+    #[test]
+    fn dummy_three_vector_dihedral_survives_a_retract() {
+        // Three real atoms plus one dummy 3-vector (Sella ndummies=1).
+        let x = pack_cart(&[
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [1.0, 1.0, 1.0],
+        ]);
+        let mut cons = Constraints::new(4).unwrap();
+        cons.fix_dihedral([0, 1, 2, 3], x.view(), None).unwrap();
+        let d0 = dihedral_value(x.view(), [0, 1, 2, 3]).unwrap();
+        let mut step = Array1::zeros(12);
+        step[9] = 0.05;
+        step[10] = -0.04;
+        let y = cons.retract(&x, &step);
+        let d1 = dihedral_value(y.view(), [0, 1, 2, 3]).unwrap();
+        assert!(
+            wrap_pi(d0 - d1).abs() < 1e-9,
+            "dummy dihedral {d0} -> {d1}"
+        );
+        assert!(cons.residual_norm(y.view()).unwrap() < 1e-10);
+        let t = cons.transport(&x, &y, &step);
+        let t_h = cons.project(&y, &t);
+        assert!(nrm2((&t - &t_h).view()) < 1e-12);
     }
 
     #[test]
