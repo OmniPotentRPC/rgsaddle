@@ -402,11 +402,10 @@ impl IrcSession {
         }
         // Averaged-gradient corrector can keep pointing downhill
         // after the well is passed. A force flip against the last
-        // accepted step is an overshoot only past the 8-dx window
-        // and only when the force is already under the host
-        // tolerance. Right after the kick the dummy or noisy mode
-        // need not align with -g.
-        if !kicked && self.arc > 8.0 * self.config.dx && max_force0 <= self.config.force_tol {
+        // accepted step past the 8-dx window is that overshoot;
+        // |g| has often already grown on the far wall. The 8-dx
+        // gate keeps the kick and the first downhill steps alive.
+        if !kicked && self.arc > 8.0 * self.config.dx {
             if let Some(prev) = &self.last_outer {
                 let mut force = g0.clone();
                 force.mapv_inplace(|v| -v);
@@ -467,10 +466,7 @@ impl IrcSession {
             s[i] = dmw / sqrtm[i].max(1e-16);
         }
         if let Some(prev) = &self.last_outer {
-            if self.arc > 8.0 * h
-                && max_force0 <= self.config.force_tol
-                && dot(prev.view(), s.view()) < 0.0
-            {
+            if self.arc > 8.0 * h && dot(prev.view(), s.view()) < 0.0 {
                 return Ok(IrcReport {
                     energy: energy0,
                     max_force: max_force0,
