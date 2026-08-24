@@ -11,10 +11,10 @@
 //! over `step`.
 
 use ndarray::{Array1, ArrayView1};
-use rgmin::vecops::{axpy, dot, nrm2, nrminf, Vector};
+use rgmin::vecops::{Vector, axpy, dot, nrm2, nrminf};
 use rgmin::{
-    mw_pair, qn_irc_restricted, sqrt_masses_3n, to_mw, BfgsModel, Control, EigensolverKind,
-    IrcTrust, ManifoldKind, Method, Solver,
+    BfgsModel, Control, EigensolverKind, IrcTrust, ManifoldKind, Method, Solver, mw_pair,
+    qn_irc_restricted, sqrt_masses_3n, to_mw,
 };
 
 use crate::error::SaddleError;
@@ -389,10 +389,7 @@ impl IrcSession {
     /// Ishida--Morokuma--Komornicki PC in mass-weighted Cartesians.
     /// Matches `gpr_optim` `IRCDriver` `IRCMethod::Morokuma`:
     /// `x_pred = x - h g/|g|`, then `x += -h g_avg/|g_avg|`.
-    fn step_morokuma<S: PointSurface>(
-        &mut self,
-        surface: &S,
-    ) -> Result<IrcReport, SaddleError> {
+    fn step_morokuma<S: PointSurface>(&mut self, surface: &S) -> Result<IrcReport, SaddleError> {
         let kicked = self.first;
         if self.first {
             axpy(1.0, self.d1.view(), &mut self.x);

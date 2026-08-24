@@ -168,8 +168,8 @@ pub fn qn_retract<M: Manifold>(
 mod tests {
     use super::*;
     use ndarray::array;
-    use rgmin::vecops::{dot, nrm2};
     use rgmin::ManifoldKind;
+    use rgmin::vecops::{dot, nrm2};
 
     #[test]
     fn matches_qn_and_rejects_rfo() {

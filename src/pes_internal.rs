@@ -9,10 +9,10 @@
 //! [`linkcell::Cell`]. Band / IRC MIC is still [`crate::mic`]; the
 //! cell here is the PES wrapper Sella hangs on periodic systems.
 
-use ndarray::{s, Array1, ArrayView1};
+use ndarray::{Array1, ArrayView1, s};
 use rgmin::BfgsModel;
 
-use crate::cell_log::{transform_cell_block, CellChart, CellState, PackedHess};
+use crate::cell_log::{CellChart, CellState, PackedHess, transform_cell_block};
 use crate::constraints::Constraints;
 use crate::error::SaddleError;
 use crate::mic::Cell;
@@ -233,11 +233,7 @@ impl InternalPes {
 }
 
 /// Dummy 1 Å off the `i-j` bond, for a linear fragment angle.
-pub fn place_perp_dummy(
-    x: ArrayView1<f64>,
-    i: usize,
-    j: usize,
-) -> Result<[f64; 3], SaddleError> {
+pub fn place_perp_dummy(x: ArrayView1<f64>, i: usize, j: usize) -> Result<[f64; 3], SaddleError> {
     let n = x.len() / 3;
     if i >= n || j >= n || i == j {
         return Err(SaddleError::Shape(
@@ -264,7 +260,11 @@ pub fn place_perp_dummy(
     ];
     let pn = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
     p = [p[0] / pn, p[1] / pn, p[2] / pn];
-    let mid = [0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1]), 0.5 * (a[2] + b[2])];
+    let mid = [
+        0.5 * (a[0] + b[0]),
+        0.5 * (a[1] + b[1]),
+        0.5 * (a[2] + b[2]),
+    ];
     Ok([mid[0] + p[0], mid[1] + p[1], mid[2] + p[2]])
 }
 
@@ -401,7 +401,9 @@ impl CellCartesianPes {
 
     /// Free cell parameters in the active chart, mask order.
     pub fn cell_params(&self) -> Array1<f64> {
-        self.state.params().unwrap_or_else(|_| Array1::zeros(self.n_cell_dof()))
+        self.state
+            .params()
+            .unwrap_or_else(|_| Array1::zeros(self.n_cell_dof()))
     }
 
     /// `[x_cart; cell_params]`.
@@ -514,11 +516,7 @@ impl CellCartesianPes {
     /// Cell angles `α, β, γ` in degrees.
     pub fn angles_deg(&self) -> [f64; 3] {
         let [a, b, c] = self.lattice();
-        [
-            angle_deg(b, c),
-            angle_deg(a, c),
-            angle_deg(a, b),
-        ]
+        [angle_deg(b, c), angle_deg(a, c), angle_deg(a, b)]
     }
 
     /// Sella `maybe_niggli_reduce`: rewrite a skewed cell in place.
@@ -664,7 +662,13 @@ impl CellInternalPes {
         let c9 = self.cell9();
         let gcell = match surface.cell_grad(self.inner.position(), &c9)? {
             Some(g) => g,
-            None => fd_cell_grad(surface, self.inner.position(), &c9, &self.state.mask(), 1e-5)?,
+            None => fd_cell_grad(
+                surface,
+                self.inner.position(),
+                &c9,
+                &self.state.mask(),
+                1e-5,
+            )?,
         };
         let g_chart = self.state.chart_grad(gcell)?;
         let n = g_int.len();
@@ -816,9 +820,8 @@ fn cell_from_lattice(
     c: [f64; 3],
     origin: [f64; 3],
 ) -> Result<Cell, SaddleError> {
-    Cell::from_vectors(a, b, c, origin).map_err(|_| {
-        SaddleError::Shape("niggli produced a singular cell".into())
-    })
+    Cell::from_vectors(a, b, c, origin)
+        .map_err(|_| SaddleError::Shape("niggli produced a singular cell".into()))
 }
 
 fn dot3(u: [f64; 3], v: [f64; 3]) -> f64 {
@@ -953,10 +956,7 @@ pub fn niggli_reduce_vectors(
         }
         // (vii) extra Grosse-Kunstlere
         let sum = xi.abs() + eta.abs() + zeta.abs() + aa + bb;
-        if sum < cc - eps
-            || ((sum - cc).abs() <= eps
-                && 2.0 * (aa + eta) + zeta > eps)
-        {
+        if sum < cc - eps || ((sum - cc).abs() <= eps && 2.0 * (aa + eta) + zeta > eps) {
             let s = if xi + eta + zeta > 0.0 { -1.0 } else { 1.0 };
             c = add(c, s, a);
             c = add(c, s, b);
@@ -1054,7 +1054,11 @@ mod tests {
         let masses = Array1::from(vec![1.0, 1.0]);
         let mut chart = Constraints::new(2).unwrap();
         chart
-            .fix_translation(Translation::all(2, CartAxis::X).unwrap(), x.view(), Some(0.0))
+            .fix_translation(
+                Translation::all(2, CartAxis::X).unwrap(),
+                x.view(),
+                Some(0.0),
+            )
             .unwrap();
         let mut pes = InternalPes::new(x, masses, chart).unwrap();
         let dq = Array1::from(vec![0.2]);
@@ -1076,9 +1080,7 @@ mod tests {
         .unwrap();
         let _ = cart.cell();
         let mut cart = cart;
-        cart.set_mask([
-            true, false, false, false, true, false, false, false, true,
-        ]);
+        cart.set_mask([true, false, false, false, true, false, false, false, true]);
         let step = cart.project_cell_step([1.0; 9]);
         assert_eq!(step[0], 1.0);
         assert_eq!(step[1], 0.0);
@@ -1111,7 +1113,11 @@ mod tests {
         let masses = Array1::from(vec![1.0, 1.0]);
         let mut chart = Constraints::new(2).unwrap();
         chart
-            .fix_translation(Translation::all(2, CartAxis::X).unwrap(), x.view(), Some(0.0))
+            .fix_translation(
+                Translation::all(2, CartAxis::X).unwrap(),
+                x.view(),
+                Some(0.0),
+            )
             .unwrap();
         let mut pes = InternalPes::new(x, masses, chart).unwrap();
         assert_eq!(pes.n_int(), 1);
@@ -1126,7 +1132,10 @@ mod tests {
         pes.kick(&Quad, dq.view()).unwrap();
         let h1 = pes.hessian().hessian()[(0, 0)];
         assert!(h1.is_finite());
-        assert!((h1 - h0).abs() > 1e-18, "internals Hessian must accept a pair");
+        assert!(
+            (h1 - h0).abs() > 1e-18,
+            "internals Hessian must accept a pair"
+        );
     }
 
     #[test]
@@ -1138,9 +1147,7 @@ mod tests {
 
     #[test]
     fn niggli_rewrites_a_skewed_cell() {
-        let mut cell = [
-            1.0, 0.0, 0.0, 0.9, 0.15, 0.0, 0.4, 0.5, 1.0,
-        ];
+        let mut cell = [1.0, 0.0, 0.0, 0.9, 0.15, 0.0, 0.4, 0.5, 1.0];
         let a = [cell[0], cell[1], cell[2]];
         let b = [cell[3], cell[4], cell[5]];
         let c = [cell[6], cell[7], cell[8]];
@@ -1151,8 +1158,7 @@ mod tests {
         let b2 = [cell[3], cell[4], cell[5]];
         let c2 = [cell[6], cell[7], cell[8]];
         let vol = |u: [f64; 3], v: [f64; 3], w: [f64; 3]| {
-            u[0] * (v[1] * w[2] - v[2] * w[1])
-                - u[1] * (v[0] * w[2] - v[2] * w[0])
+            u[0] * (v[1] * w[2] - v[2] * w[1]) - u[1] * (v[0] * w[2] - v[2] * w[0])
                 + u[2] * (v[0] * w[1] - v[1] * w[0])
         };
         assert!((vol(a, b, c).abs() - vol(a2, b2, c2).abs()).abs() < 1e-8);
@@ -1176,9 +1182,7 @@ mod tests {
         .unwrap();
         assert_eq!(cart.n_cell_dof(), 9);
         assert_eq!(cart.packed_len(), 15);
-        cart.set_mask([
-            true, false, false, false, true, false, false, false, true,
-        ]);
+        cart.set_mask([true, false, false, false, true, false, false, false, true]);
         assert_eq!(cart.n_cell_dof(), 3);
         assert_eq!(cart.packed_len(), 9);
         let p = cart.cell_params();
@@ -1198,9 +1202,7 @@ mod tests {
         cart.set_chart(crate::CellChart::LogDeform);
         let p = cart.cell_params();
         assert!(p.iter().all(|v| v.abs() < 1e-10), "{p:?}");
-        let mut skewed = [
-            1.0, 0.0, 0.0, 0.9, 0.15, 0.0, 0.4, 0.5, 1.0,
-        ];
+        let mut skewed = [1.0, 0.0, 0.0, 0.9, 0.15, 0.0, 0.4, 0.5, 1.0];
         let _ = crate::niggli_reduce_cell(&mut skewed, 20.0).unwrap();
         let cell = Cell::from_vectors(
             [1.0, 0.0, 0.0],
@@ -1209,12 +1211,8 @@ mod tests {
             [0.0, 0.0, 0.0],
         )
         .unwrap();
-        let mut logp = CellCartesianPes::new(
-            Array1::zeros(6),
-            Array1::from(vec![1.0, 1.0]),
-            cell,
-        )
-        .unwrap();
+        let mut logp =
+            CellCartesianPes::new(Array1::zeros(6), Array1::from(vec![1.0, 1.0]), cell).unwrap();
         logp.set_chart(crate::CellChart::LogDeform);
         assert!(logp.maybe_niggli_reduce(20.0).unwrap());
     }
@@ -1236,9 +1234,7 @@ mod tests {
             Cell::ortho(4.0, 5.0, 6.0).unwrap(),
         )
         .unwrap();
-        pes.set_mask([
-            true, false, false, false, false, false, false, false, false,
-        ]);
+        pes.set_mask([true, false, false, false, false, false, false, false, false]);
         assert_eq!(pes.n_cell_dof(), 1);
         assert_eq!(pes.packed_len(), 2);
         let p = pes.packed().unwrap();

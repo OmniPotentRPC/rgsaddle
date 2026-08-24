@@ -40,11 +40,7 @@ impl CellChart {
 pub type M3 = [[f64; 3]; 3];
 
 pub fn m3_from_row9(c: [f64; 9]) -> M3 {
-    [
-        [c[0], c[1], c[2]],
-        [c[3], c[4], c[5]],
-        [c[6], c[7], c[8]],
-    ]
+    [[c[0], c[1], c[2]], [c[3], c[4], c[5]], [c[6], c[7], c[8]]]
 }
 
 pub fn m3_to_row9(a: M3) -> [f64; 9] {
@@ -204,9 +200,7 @@ pub struct PackedHess {
 
 impl PackedHess {
     pub fn identity(n: usize) -> Self {
-        Self {
-            b: Array2::eye(n),
-        }
+        Self { b: Array2::eye(n) }
     }
 
     pub fn from_matrix(b: Array2<f64>) -> Self {

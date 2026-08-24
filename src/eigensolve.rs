@@ -6,9 +6,9 @@
 //! until that feature is linked); this crate does not grow a second
 //! device stack.
 
-use ndarray::{s, Array1, Array2, ArrayView1, ArrayView2};
-use rgmin::{lowest_mode, ApplyHessian, EigenParams, EigensolverKind};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
 use rgmin::vecops::nrm2;
+use rgmin::{ApplyHessian, EigenParams, EigensolverKind, lowest_mode};
 
 use crate::error::SaddleError;
 use crate::linalg::{modified_gram_schmidt, symmetrize_vt_av};
@@ -464,10 +464,15 @@ pub fn rayleigh_ritz_iter(
     }
 }
 
-pub(crate) fn solve_dense(a: ArrayView2<f64>, b: ArrayView1<f64>) -> Result<Array1<f64>, SaddleError> {
+pub(crate) fn solve_dense(
+    a: ArrayView2<f64>,
+    b: ArrayView1<f64>,
+) -> Result<Array1<f64>, SaddleError> {
     let n = a.nrows();
     if a.ncols() != n || b.len() != n {
-        return Err(SaddleError::Shape("dense solve needs a square system".into()));
+        return Err(SaddleError::Shape(
+            "dense solve needs a square system".into(),
+        ));
     }
     let mut m = a.to_owned();
     let mut x = b.to_owned();
@@ -602,7 +607,9 @@ fn jacobi_eigh(a: &mut Array2<f64>) -> Result<(Array1<f64>, Array2<f64>), Saddle
     for j in 0..n {
         let col = vecs.column(j).to_owned();
         if nrm2(col.view()) < 1e-18 {
-            return Err(SaddleError::Solver("Jacobi produced a zero eigenvector".into()));
+            return Err(SaddleError::Solver(
+                "Jacobi produced a zero eigenvector".into(),
+            ));
         }
     }
     Ok((ev_sorted, vecs))
@@ -638,7 +645,12 @@ mod tests {
         let (lams, _, _) = rayleigh_ritz(a.view(), v.view(), 0.1).unwrap();
         let (exact, _) = exact_eigh(a.view()).unwrap();
         for i in 0..3 {
-            assert!((lams[i] - exact[i]).abs() < 1e-10, "{} vs {}", lams[i], exact[i]);
+            assert!(
+                (lams[i] - exact[i]).abs() < 1e-10,
+                "{} vs {}",
+                lams[i],
+                exact[i]
+            );
         }
     }
 
@@ -700,9 +712,15 @@ mod tests {
         a[(1, 0)] = 0.2;
         let mut v0 = Array2::zeros((4, 1));
         v0[(0, 0)] = 1.0;
-        let (lams, vecs, _) = rayleigh_ritz_iter(a.view(), v0.view(), 0.1, ExpandKind::Jd0).unwrap();
+        let (lams, vecs, _) =
+            rayleigh_ritz_iter(a.view(), v0.view(), 0.1, ExpandKind::Jd0).unwrap();
         let (exact, _) = exact_eigh(a.view()).unwrap();
-        assert!((lams[0] - exact[0]).abs() < 1e-6, "{} vs {}", lams[0], exact[0]);
+        assert!(
+            (lams[0] - exact[0]).abs() < 1e-6,
+            "{} vs {}",
+            lams[0],
+            exact[0]
+        );
         assert_eq!(vecs.nrows(), 4);
     }
 
