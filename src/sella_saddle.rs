@@ -6,7 +6,6 @@
 
 use ndarray::Array1;
 use rgmin::prfo_restricted;
-use rgmin::vecops::nrminf;
 
 use crate::error::SaddleError;
 use crate::minmode::PointSurface;
@@ -15,6 +14,7 @@ use crate::pes::CartesianPes;
 pub struct SellaSaddleConfig {
     pub delta: f64,
     pub force_tol: f64,
+    pub force_gate: crate::ForceGate,
     pub order: usize,
 }
 
@@ -23,6 +23,7 @@ impl Default for SellaSaddleConfig {
         Self {
             delta: 0.2,
             force_tol: 1e-3,
+            force_gate: crate::ForceGate::MaxForceOnAtom,
             order: 1,
         }
     }
@@ -67,7 +68,7 @@ impl SellaSaddleSession {
         if !g.iter().all(|v| v.is_finite()) {
             return Err(SaddleError::NonFinite("sella gradient"));
         }
-        let max_force = nrminf(g.view());
+        let max_force = self.config.force_gate.value(g.view());
         if max_force <= self.config.force_tol {
             return Ok(SellaSaddleReport {
                 energy,
@@ -85,7 +86,7 @@ impl SellaSaddleSession {
         );
         self.pes.kick(surface, s.view())?;
         let (energy, g) = surface.eval(self.pes.position())?;
-        let max_force = nrminf(g.view());
+        let max_force = self.config.force_gate.value(g.view());
         Ok(SellaSaddleReport {
             energy,
             max_force,

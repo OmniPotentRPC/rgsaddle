@@ -24,8 +24,8 @@ pub struct CiConfig {
     pub trigger_force: f64,
 }
 
-/// Band configuration. `force_tol` is on the max absolute component
-/// of the projected force over interior images.
+/// Band configuration. `force_tol` is compared to
+/// [`crate::ForceGate::value`] of the projected interior force.
 #[derive(Clone, Debug)]
 pub struct BandConfig {
     pub tangent: TangentKind,
@@ -34,6 +34,7 @@ pub struct BandConfig {
     pub climbing: Option<CiConfig>,
     pub cell: Option<Cell>,
     pub force_tol: f64,
+    pub force_gate: crate::ForceGate,
     pub max_move: f64,
     /// Band stepper. FIRE by default: the projected band force is
     /// non-conservative, and rgmin's session L-BFGS currently applies
@@ -55,6 +56,7 @@ impl Default for BandConfig {
             }),
             cell: None,
             force_tol: 1e-3,
+            force_gate: crate::ForceGate::Linf,
             max_move: 0.2,
             method: Method::Fire {
                 kind: rgmin::FireKind::V2,
@@ -218,7 +220,8 @@ fn assemble_band(
     }
 
     let pseudo_energy: f64 = (1..n_images - 1).map(|i| energies[i]).sum();
-    Ok((pseudo_energy, projected, max_component))
+    let max_force = config.force_gate.value(projected.view());
+    Ok((pseudo_energy, projected, max_force))
 }
 
 /// Stepping band relaxation over an rgmin solver. Endpoints (rows 0

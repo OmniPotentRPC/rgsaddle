@@ -34,6 +34,7 @@ int main(void) {
   cfg.version.minor = RGSADDLE_ABI_MINOR;
   cfg.dx = 0.2;
   cfg.force_tol = 1e-3;
+  cfg.force_gate = RGSADDLE_FORCE_LINF;
   cfg.max_move = 0.2;
   cfg.max_inner = 10;
   cfg.kind = RGSADDLE_IRC_GS2;

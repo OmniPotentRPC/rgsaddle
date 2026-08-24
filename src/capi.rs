@@ -21,7 +21,7 @@ use crate::spring::SpringKind;
 use crate::tangent::TangentKind;
 
 pub const RGSADDLE_ABI_MAJOR: u32 = 1;
-pub const RGSADDLE_ABI_MINOR: u32 = 0;
+pub const RGSADDLE_ABI_MINOR: u32 = 1;
 
 pub const RGSADDLE_OK: i32 = 0;
 pub const RGSADDLE_NULL_SESSION: i32 = -1;
@@ -34,6 +34,10 @@ pub const RGSADDLE_NON_FINITE: i32 = -7;
 pub const RGSADDLE_SOLVER: i32 = -8;
 pub const RGSADDLE_ABI_MISMATCH: i32 = -9;
 pub const RGSADDLE_INVALID_PARAMETER: i32 = -11;
+
+fn force_gate_of(v: i32) -> Option<crate::ForceGate> {
+    crate::ForceGate::try_from_abi(v)
+}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -69,6 +73,7 @@ pub struct RgsaddleBandConfig {
     pub ci_trigger_force: f64,
     pub cell: *const f64,
     pub force_tol: f64,
+    pub force_gate: i32,
     pub max_move: f64,
     pub memory: i64,
 }
@@ -79,6 +84,7 @@ pub struct RgsaddleIrcConfig {
     pub flags: u64,
     pub dx: f64,
     pub force_tol: f64,
+    pub force_gate: i32,
     pub max_move: f64,
     pub max_inner: i64,
     pub kind: i32,
@@ -96,6 +102,7 @@ pub struct RgsaddleMinModeConfig {
     pub max_rotations: i64,
     pub krylov_dim: i64,
     pub force_tol: f64,
+    pub force_gate: i32,
     pub max_move: f64,
 }
 
@@ -265,6 +272,19 @@ pub extern "C" fn rgsaddle_status_name(status: i32) -> *const c_char {
     s.as_ptr() as *const c_char
 }
 
+/// C type is `rgsaddle_force_gate_t`. Unknown discriminants return NULL.
+#[unsafe(no_mangle)]
+pub extern "C" fn rgsaddle_force_gate_name(gate: i32) -> *const c_char {
+    match crate::ForceGate::try_from_abi(gate) {
+        Some(g) => match g {
+            crate::ForceGate::L2 => b"L2\0".as_ptr() as *const c_char,
+            crate::ForceGate::Linf => b"LINF\0".as_ptr() as *const c_char,
+            crate::ForceGate::MaxForceOnAtom => b"MAX_ATOM\0".as_ptr() as *const c_char,
+        },
+        None => std::ptr::null(),
+    }
+}
+
 /// # Safety
 /// `config` and `positions` must be valid for the declared shape.
 #[unsafe(no_mangle)]
@@ -315,6 +335,9 @@ pub unsafe extern "C" fn rgsaddle_band_create(
         )
         .ok()
     };
+    let Some(force_gate) = force_gate_of(cfg.force_gate) else {
+        return std::ptr::null_mut();
+    };
     let band_config = BandConfig {
         tangent: if cfg.tangent == 0 {
             TangentKind::Simple
@@ -333,6 +356,7 @@ pub unsafe extern "C" fn rgsaddle_band_create(
         }),
         cell,
         force_tol: cfg.force_tol,
+        force_gate,
         max_move: cfg.max_move,
         method: method_of(cfg.method),
     };
@@ -477,6 +501,9 @@ pub unsafe extern "C" fn rgsaddle_minmode_create(
     let dof = (3 * n_atoms) as usize;
     let x = Array1::from(unsafe { slice::from_raw_parts(position, dof) }.to_vec());
     let m = Array1::from(unsafe { slice::from_raw_parts(mode, dof) }.to_vec());
+    let Some(force_gate) = force_gate_of(cfg.force_gate) else {
+        return std::ptr::null_mut();
+    };
     let mm_config = MinModeConfig {
         kind: if cfg.kind == 1 {
             MinModeKind::Lanczos
@@ -489,6 +516,7 @@ pub unsafe extern "C" fn rgsaddle_minmode_create(
         krylov_dim: cfg.krylov_dim as usize,
         eigen_kind: rgmin::EigensolverKind::Lanczos,
         force_tol: cfg.force_tol,
+        force_gate,
         max_move: cfg.max_move,
         method: method_of(cfg.method),
     };
@@ -628,9 +656,13 @@ pub unsafe extern "C" fn rgsaddle_irc_create(
     let x = Array1::from(unsafe { slice::from_raw_parts(saddle, dof) }.to_vec());
     let m = Array1::from(unsafe { slice::from_raw_parts(masses, n_atoms as usize) }.to_vec());
     let md = Array1::from(unsafe { slice::from_raw_parts(mode, dof) }.to_vec());
+    let Some(force_gate) = force_gate_of(cfg.force_gate) else {
+        return std::ptr::null_mut();
+    };
     let irc_cfg = IrcConfig {
         dx: cfg.dx,
         force_tol: cfg.force_tol,
+        force_gate,
         max_move: cfg.max_move,
         max_inner: cfg.max_inner.max(1) as usize,
         kind: if cfg.kind == 1 {
@@ -682,9 +714,13 @@ pub unsafe extern "C" fn rgsaddle_irc_create_from_surface(
     let x = Array1::from(unsafe { slice::from_raw_parts(saddle, dof) }.to_vec());
     let m = Array1::from(unsafe { slice::from_raw_parts(masses, n_atoms as usize) }.to_vec());
     let sd = Array1::from(unsafe { slice::from_raw_parts(seed, dof) }.to_vec());
+    let Some(force_gate) = force_gate_of(cfg.force_gate) else {
+        return std::ptr::null_mut();
+    };
     let irc_cfg = IrcConfig {
         dx: cfg.dx,
         force_tol: cfg.force_tol,
+        force_gate,
         max_move: cfg.max_move,
         max_inner: cfg.max_inner.max(1) as usize,
         kind: if cfg.kind == 1 {
@@ -861,6 +897,7 @@ mod irc_abi_tests {
             flags: 0,
             dx: 0.15,
             force_tol: 0.05,
+            force_gate: crate::ForceGate::MaxForceOnAtom.to_abi(),
             max_move: 0.2,
             max_inner: 10,
             kind: 1,

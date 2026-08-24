@@ -9,7 +9,7 @@
 
 use ndarray::Array1;
 use rgmin::qn_restricted;
-use rgmin::vecops::{axpy, dot, vdot, vnrm2, vnrminf, Vector};
+use rgmin::vecops::{axpy, dot, vdot, vnrm2, Vector};
 use rgmin::{Manifold, ManifoldKind};
 
 use crate::error::SaddleError;
@@ -26,6 +26,8 @@ pub struct SellaMinConfig {
     pub rho_dec: f64,
     pub delta_min: f64,
     pub force_tol: f64,
+    /// eOn / gpr_optim `ConvergenceForceNorm`.
+    pub force_gate: crate::ForceGate,
 }
 
 impl Default for SellaMinConfig {
@@ -38,6 +40,7 @@ impl Default for SellaMinConfig {
             rho_dec: 100.0,
             delta_min: 1e-4,
             force_tol: 1e-3,
+            force_gate: crate::ForceGate::MaxForceOnAtom,
         }
     }
 }
@@ -112,7 +115,7 @@ impl SellaMinSession {
         }
         let g_r = self.manifold.egrad2rgrad(&x, &g);
         let vg = Vector::from_host(g_r.clone());
-        let max_force = atom_fmax(&g_r);
+        let max_force = self.config.force_gate.value(g_r.view());
         if max_force <= self.config.force_tol {
             return Ok(SellaMinReport {
                 energy,
@@ -143,7 +146,7 @@ impl SellaMinSession {
         let (energy, g1) = self.pes.kick(surface, d.view())?;
         let x_new = self.pes.position().to_owned();
         let g1_r = self.manifold.egrad2rgrad(&x_new, &g1);
-        let max_force = atom_fmax(&g1_r);
+        let max_force = self.config.force_gate.value(g1_r.view());
         if pred.abs() >= 1e-14 {
             self.rho = (energy - e0) / pred;
             self.delta = update_trust(self.delta, self.rho, vnrm2(&vs), &self.config);
@@ -171,26 +174,6 @@ impl SellaMinSession {
             n += 1;
         }
         Ok(report)
-    }
-}
-
-/// Sella `PES.converged`: max over atoms of `||F_i||_2`.
-fn atom_fmax(g: &Array1<f64>) -> f64 {
-    let mut m = 0.0;
-    let n = g.len() / 3;
-    for i in 0..n {
-        let fx = g[3 * i];
-        let fy = g[3 * i + 1];
-        let fz = g[3 * i + 2];
-        let nrm = (fx * fx + fy * fy + fz * fz).sqrt();
-        if nrm > m {
-            m = nrm;
-        }
-    }
-    if n == 0 {
-        vnrminf(&Vector::from_host(g.clone()))
-    } else {
-        m
     }
 }
 
@@ -329,9 +312,11 @@ mod tests {
         g[0] = 0.0008;
         g[1] = 0.0008;
         g[2] = 0.0008;
-        let n = atom_fmax(&g);
+        let n = crate::ForceGate::MaxForceOnAtom.value(g.view());
         assert!(n > 1e-3, "component inf-norm would pass 1e-3; atom |F|={n}");
         assert!((n - (3.0_f64 * 0.0008 * 0.0008).sqrt()).abs() < 1e-14);
+        let linf = crate::ForceGate::Linf.value(g.view());
+        assert!(linf < 1e-3);
     }
 
     #[test]

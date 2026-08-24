@@ -36,8 +36,9 @@ pub struct MinModeConfig {
     pub krylov_dim: usize,
     /// Closed lowest-mode backend. Unlinked kinds fail closed.
     pub eigen_kind: EigensolverKind,
-    /// Translation stops when max|F| falls under this.
+    /// Translation stops when the chosen force gate falls under this.
     pub force_tol: f64,
+    pub force_gate: crate::ForceGate,
     pub max_move: f64,
     pub method: Method,
 }
@@ -52,6 +53,7 @@ impl Default for MinModeConfig {
             krylov_dim: 12,
             eigen_kind: EigensolverKind::Lanczos,
             force_tol: 1e-3,
+            force_gate: crate::ForceGate::Linf,
             max_move: 0.2,
             method: Method::Fire {
                 kind: rgmin::FireKind::V2,
@@ -250,8 +252,7 @@ impl MinModeSession {
         };
         self.mode = mode;
 
-        let force = -&g0;
-        let max_force = force.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+        let max_force = self.config.force_gate.value(g0.view());
         if max_force <= self.config.force_tol {
             return Ok(MinModeReport {
                 status: MinModeStatus::Converged,
@@ -290,7 +291,7 @@ impl MinModeSession {
         self.iteration += 1;
 
         let (_, g_new) = surface.eval(self.x.view())?;
-        let max_force = g_new.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+        let max_force = self.config.force_gate.value(g_new.view());
         let status = if max_force <= self.config.force_tol {
             MinModeStatus::Converged
         } else {

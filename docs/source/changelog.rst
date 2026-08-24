@@ -6,6 +6,10 @@ Changelog
 Unreleased
 ~~~~~~~~~~
 
+- Force gate is the eOn / gpr ``ConvergenceForceNorm`` closed
+  enum (``L2`` / ``Linf`` / ``MaxForceOnAtom``). C field type is
+  ``rgsaddle_force_gate_t``; unknown discriminants refuse create.
+
 - Sella ``Translation`` / ``Rotation`` / ``Displacement``
   internals and ``Constraints`` equality residual on the
   same manifold (``project`` / ``retract`` / ``transport``

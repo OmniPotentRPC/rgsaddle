@@ -62,6 +62,7 @@ int main(void) {
   cfg.ci_trigger_factor = 0.5;
   cfg.ci_trigger_force = 0.0;
   cfg.force_tol = 1e-3;
+  cfg.force_gate = RGSADDLE_FORCE_LINF;
   cfg.max_move = 0.1;
 
   /* An unknown major must be refused. */
@@ -69,6 +70,17 @@ int main(void) {
   bad.version.major = 99;
   if (rgsaddle_band_create(&bad, n_images, n_atoms, pos) != NULL) {
     fprintf(stderr, "unknown major must be refused\n");
+    return 1;
+  }
+  rgsaddle_band_config_t bad_gate = cfg;
+  bad_gate.force_gate = (rgsaddle_force_gate_t)99;
+  if (rgsaddle_band_create(&bad_gate, n_images, n_atoms, pos) != NULL) {
+    fprintf(stderr, "unknown force gate must be refused\n");
+    return 1;
+  }
+  if (rgsaddle_force_gate_name(RGSADDLE_FORCE_MAX_ATOM) == NULL
+      || rgsaddle_force_gate_name((rgsaddle_force_gate_t)99) != NULL) {
+    fprintf(stderr, "force_gate_name contract\n");
     return 1;
   }
 

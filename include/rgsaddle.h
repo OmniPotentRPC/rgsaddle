@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 0u
+#define RGSADDLE_ABI_MINOR 1u
 
 /** Version head carried by every wire struct. */
 typedef struct {
@@ -81,6 +81,13 @@ typedef enum {
   RGSADDLE_MINMODE_LANCZOS = 1
 } rgsaddle_minmode_t;
 
+/** eOn / gpr_optim ConvergenceForceNorm. */
+typedef enum {
+  RGSADDLE_FORCE_L2 = 0,
+  RGSADDLE_FORCE_LINF = 1,
+  RGSADDLE_FORCE_MAX_ATOM = 2
+} rgsaddle_force_gate_t;
+
 typedef enum {
   RGSADDLE_STATUS_RUNNING = 0,
   RGSADDLE_STATUS_CONVERGED = 1
@@ -124,6 +131,7 @@ typedef struct {
   /** Row-major 3x3 cell for minimum-image differences; NULL for none. */
   const double *cell;
   double force_tol;
+  rgsaddle_force_gate_t force_gate;
   double max_move;
   int64_t memory;
 } rgsaddle_band_config_t;
@@ -148,6 +156,8 @@ int rgsaddle_abi_version(void);
 int rgsaddle_abi_stamp(rgsaddle_version_t *out);
 /** Human-readable name for a status code. Never NULL. */
 const char *rgsaddle_status_name(int status);
+/** Name of a force gate. NULL when the discriminant is unknown. */
+const char *rgsaddle_force_gate_name(rgsaddle_force_gate_t gate);
 
 /**
  * Create a band session over n_images x (3 * n_atoms) positions,
@@ -184,6 +194,7 @@ typedef struct {
   int64_t max_rotations;
   int64_t krylov_dim;
   double force_tol;
+  rgsaddle_force_gate_t force_gate;
   double max_move;
 } rgsaddle_minmode_config_t;
 
@@ -222,6 +233,7 @@ typedef struct {
   uint64_t flags;
   double dx;
   double force_tol;
+  rgsaddle_force_gate_t force_gate;
   double max_move;
   int64_t max_inner;
   int32_t kind;      /**< rgsaddle_irc_kind_t */

@@ -44,6 +44,8 @@ pub struct IrcConfig {
     /// Mass-weighted sphere radius (Sella `dx`) and Morokuma `h`.
     pub dx: f64,
     pub force_tol: f64,
+    /// eOn / gpr_optim `ConvergenceForceNorm`.
+    pub force_gate: crate::ForceGate,
     pub max_move: f64,
     pub method: Method,
     pub max_inner: usize,
@@ -62,6 +64,7 @@ impl Default for IrcConfig {
         Self {
             dx: 0.1,
             force_tol: 0.05,
+            force_gate: crate::ForceGate::MaxForceOnAtom,
             max_move: 0.2,
             method: Method::Steepest,
             max_inner: 10,
@@ -275,7 +278,7 @@ impl IrcSession {
         if !g0.iter().all(|v| v.is_finite()) {
             return Err(SaddleError::NonFinite("irc gradient"));
         }
-        let max_force0 = nrminf(g0.view());
+        let max_force0 = self.config.force_gate.value(g0.view());
         let fmax_inner = self.config.force_tol.min(0.01);
         let mut inner_steps = 0;
         let mut energy = energy0;
@@ -342,7 +345,7 @@ impl IrcSession {
             let (s_mw, y_mw) = mw_pair(&s, &y, &sqrtm);
             self.hess.update(&s_mw, &y_mw);
             g = ev.1;
-            max_force = nrminf(g.view());
+            max_force = self.config.force_gate.value(g.view());
             let g_path = self.path_force(&g);
             let fmax_path = nrminf(g_path.view());
             let bound = self.trust().on_bound(&Array1::zeros(s.len()), 1e-8);
@@ -390,7 +393,7 @@ impl IrcSession {
         if !g0.iter().all(|v| v.is_finite()) {
             return Err(SaddleError::NonFinite("irc gradient"));
         }
-        let max_force0 = nrminf(g0.view());
+        let max_force0 = self.config.force_gate.value(g0.view());
         if !kicked && max_force0 <= self.config.force_tol {
             return Ok(IrcReport {
                 energy: energy0,
@@ -414,7 +417,7 @@ impl IrcSession {
                     // the last downhill geometry.
                     axpy(-1.0, prev.view(), &mut self.x);
                     let (energy, g) = surface.eval(self.x.view())?;
-                    let max_force = nrminf(g.view());
+                    let max_force = self.config.force_gate.value(g.view());
                     return Ok(IrcReport {
                         energy,
                         max_force,
@@ -486,7 +489,7 @@ impl IrcSession {
         if !ev.1.iter().all(|v| v.is_finite()) {
             return Err(SaddleError::NonFinite("irc gradient"));
         }
-        let max_force = nrminf(ev.1.view());
+        let max_force = self.config.force_gate.value(ev.1.view());
         self.last_outer = Some(s);
         self.d1.fill(0.0);
         self.arc += dx_mw_n2.sqrt();
