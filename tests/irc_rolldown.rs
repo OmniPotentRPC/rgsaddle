@@ -183,7 +183,7 @@ fn roll_branch(direction: IrcDirection) -> (Array1<f64>, f64, f64) {
     let mut session = IrcSession::from_surface(
         IrcConfig {
             dx: 0.1,
-            force_tol: 1.0,
+            force_tol: 0.05,
             max_inner: 10,
             ..IrcConfig::default()
         },
@@ -204,9 +204,10 @@ fn roll_branch(direction: IrcDirection) -> (Array1<f64>, f64, f64) {
 fn muller_brown_both_ways_ends_at_minima_with_positive_curvature() {
     let (xf, ef, cf) = roll_branch(IrcDirection::Forward);
     let (xr, er, cr) = roll_branch(IrcDirection::Reverse);
+    let sep = ((xf[0] - xr[0]) * (xf[0] - xr[0]) + (xf[1] - xr[1]) * (xf[1] - xr[1])).sqrt();
     assert!(
-        xf[0] * xr[0] < 0.0 || (xf[0] - xr[0]).abs() > 0.4,
-        "forward ({}, {}) and reverse ({}, {}) must leave opposite wells",
+        sep > 0.5,
+        "forward ({}, {}) E={ef} and reverse ({}, {}) E={er} must be distinct wells (sep={sep})",
         xf[0],
         xf[1],
         xr[0],
