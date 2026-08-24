@@ -68,6 +68,7 @@ pub struct IrcSession {
     solver: Solver,
     first: bool,
     arc: f64,
+    last_step: Option<Array1<f64>>,
 }
 
 impl IrcSession {
@@ -107,6 +108,7 @@ impl IrcSession {
             solver,
             first: true,
             arc: 0.0,
+            last_step: None,
         };
         session.set_direction(direction);
         Ok(session)
@@ -148,6 +150,7 @@ impl IrcSession {
         self.d1 = self.kick_vector(direction);
         self.first = true;
         self.arc = 0.0;
+        self.last_step = None;
         self.solver.forget();
     }
 
@@ -253,6 +256,19 @@ impl IrcSession {
                 s.mapv_inplace(|v| v * (self.config.dx / gn));
             }
             s = trust.project(&s);
+            if let Some(prev) = &self.last_step {
+                if prev.iter().zip(s.iter()).map(|(a, b)| a * b).sum::<f64>() < 0.0 {
+                    // Path force flipped: the last point sits past the well.
+                    return Ok(IrcReport {
+                        energy: energy0,
+                        max_force: max_force0,
+                        arc: self.arc,
+                        inner_steps,
+                        at_minimum: true,
+                    });
+                }
+            }
+            self.last_step = Some(s.clone());
             self.d1 = &self.d1 + &s;
             let trial = &self.x + &s;
             let ev = surface.eval(trial.view())?;
