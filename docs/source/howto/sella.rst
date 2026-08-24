@@ -71,6 +71,13 @@ Hessian
 Sella TS-BFGS (``|B|`` in the secant weight) so a negative mode
 is not forced positive.
 
+``CellCartesianPes`` and ``CellInternalPes`` pack
+``[x; cell_params]`` and ``[q_int; cell_params]``.
+``kick_packed`` rewrites the masked lattice then
+``eval_in_cell`` so energy and ``g`` see the living cell.
+The log chart is ``CellChart.LogDeform``. Internals stay
+on the ``Constraints`` level set.
+
 What not to do
 ~~~~~~~~~~~~~~
 

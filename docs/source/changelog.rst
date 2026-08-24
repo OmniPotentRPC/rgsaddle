@@ -36,6 +36,12 @@ Unreleased
   Angle / Dihedral topology. C ABI
   ``rgsaddle_internal_pes_create_from_find``, ABI minor 11.
 
+- ``CellInternalPes`` is Sella ``CellInternalPES``: packed
+  ``[q_int; cell_params]``, log-cell ``CellChart.LogDeform``,
+  ``kick_packed`` evaluates in the living cell. Mask-false
+  cell DOF drop out of the packed chart. Internals stay
+  on the ``Constraints`` level set.
+
 - ``MaxInternalStep``: per-coordinate clip ``max |s_i w_i|``
   on an internals packing, applied before the Euclidean
   trust radius.
