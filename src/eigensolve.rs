@@ -1,11 +1,12 @@
-//! Sella `eigensolvers.py`: exact dense diag and Rayleigh-Ritz.
+//! Sella `eigensolvers.py`: exact dense diag, Rayleigh-Ritz, expand.
 //!
-//! `eig=true` on a Sella saddle walks a small Ritz subspace. The
-//! GPU waist is dlpk CUDA ([`EigenDevice::Dlpk`] is the same Host
-//! path until that feature is linked); this crate does not grow a
-//! second device stack.
+//! `eig=true` on a Sella saddle walks a small Ritz subspace via
+//! [`rayleigh_ritz_iter`] and [`expand`] (`jd0` default). The GPU
+//! waist is dlpk CUDA ([`EigenDevice::Dlpk`] is the same Host path
+//! until that feature is linked); this crate does not grow a second
+//! device stack.
 
-use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
+use ndarray::{s, Array1, Array2, ArrayView1, ArrayView2};
 use rgmin::{lowest_mode, ApplyHessian, EigenParams, EigensolverKind};
 use rgmin::vecops::nrm2;
 
@@ -27,6 +28,43 @@ impl EigenDevice {
         match self {
             Self::Host => 0,
             Self::Dlpk => 1,
+        }
+    }
+}
+
+/// Sella `eigensolvers.expand` method.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ExpandKind {
+    Lanczos,
+    Gd,
+    #[default]
+    Jd0,
+    Jd0Alt,
+    Mjd0,
+    Mjd0Alt,
+}
+
+impl ExpandKind {
+    pub const fn to_abi(self) -> i32 {
+        match self {
+            Self::Lanczos => 0,
+            Self::Gd => 1,
+            Self::Jd0 => 2,
+            Self::Jd0Alt => 3,
+            Self::Mjd0 => 4,
+            Self::Mjd0Alt => 5,
+        }
+    }
+
+    pub const fn try_from_abi(v: i32) -> Option<Self> {
+        match v {
+            0 => Some(Self::Lanczos),
+            1 => Some(Self::Gd),
+            2 => Some(Self::Jd0),
+            3 => Some(Self::Jd0Alt),
+            4 => Some(Self::Mjd0),
+            5 => Some(Self::Mjd0Alt),
+            _ => None,
         }
     }
 }
@@ -139,6 +177,341 @@ pub fn lowest_on(
     let mode = lowest_mode(&DenseApply(&a.to_owned()), x.view(), seed, &params)
         .map_err(|e| SaddleError::Solver(e.to_string()))?;
     Ok((mode.value, mode.vector))
+}
+
+/// Sella `expand`: one Davidson / Jacobi-Davidson / Lanczos direction.
+///
+/// `v` is the current Ritz basis `(d, n)`, `y` is `A @ v` (or the
+/// symmetrized action), `p` is the preconditioner, `b` the metric
+/// (`None` is `I`). `lams` / `vecs` are the current Ritz pairs.
+pub fn expand(
+    v: ArrayView2<f64>,
+    y: ArrayView2<f64>,
+    p: ArrayView2<f64>,
+    b: Option<ArrayView2<f64>>,
+    lams: ArrayView1<f64>,
+    vecs: ArrayView2<f64>,
+    shift: f64,
+    method: ExpandKind,
+    seeking: usize,
+) -> Result<Array1<f64>, SaddleError> {
+    let d = v.nrows();
+    let n = v.ncols();
+    if y.nrows() != d || y.ncols() != n || p.nrows() != d || p.ncols() != d {
+        return Err(SaddleError::Shape(
+            "expand needs matching V, Y, P shapes".into(),
+        ));
+    }
+    if seeking >= n || lams.len() != n || vecs.nrows() != n || vecs.ncols() != n {
+        return Err(SaddleError::Shape(
+            "expand Ritz pairs must match the subspace".into(),
+        ));
+    }
+    let bmat = b.map(|m| m.to_owned());
+    let bv = match &bmat {
+        Some(bm) => matmul(bm.view(), v),
+        None => v.to_owned(),
+    };
+    // R = Y V_rot - B V V_rot * lam  with V already rotated in Sella;
+    // here vecs rotates the current subspace.
+    let vrot = matmul(v, vecs);
+    let yrot = matmul(y, vecs);
+    let bvrot = matmul(bv.view(), vecs);
+    let mut r = yrot;
+    for j in 0..n {
+        for i in 0..d {
+            r[(i, j)] -= bvrot[(i, j)] * lams[j];
+        }
+    }
+    let mut pshift = p.to_owned();
+    match &bmat {
+        Some(bm) => {
+            for i in 0..d {
+                for j in 0..d {
+                    pshift[(i, j)] -= shift * bm[(i, j)];
+                }
+            }
+        }
+        None => {
+            for i in 0..d {
+                pshift[(i, i)] -= shift;
+            }
+        }
+    }
+    let mut rseek = Array1::zeros(d);
+    for i in 0..d {
+        rseek[i] = r[(i, seeking)];
+    }
+    match method {
+        ExpandKind::Lanczos => Ok(rseek),
+        ExpandKind::Gd => solve_dense(pshift.view(), rseek.view()),
+        ExpandKind::Jd0 => {
+            let mut vi = Array1::zeros(d);
+            for i in 0..d {
+                vi[i] = vrot[(i, seeking)];
+            }
+            let mut aaug = Array2::<f64>::zeros((d + 1, d + 1));
+            for i in 0..d {
+                for j in 0..d {
+                    aaug[(i, j)] = pshift[(i, j)];
+                }
+                aaug[(i, d)] = vi[i];
+                aaug[(d, i)] = vi[i];
+            }
+            let mut raug = Array1::zeros(d + 1);
+            for i in 0..d {
+                raug[i] = -rseek[i];
+            }
+            let z = solve_dense(aaug.view(), raug.view())?;
+            Ok(z.slice(s![..d]).to_owned())
+        }
+        ExpandKind::Jd0Alt => {
+            let mut vi = Array1::zeros(d);
+            for i in 0..d {
+                vi[i] = vrot[(i, seeking)];
+            }
+            let pprojr = solve_dense(pshift.view(), rseek.view())?;
+            let pprojv = solve_dense(pshift.view(), vi.view())?;
+            let mut denom = 0.0;
+            let mut num = 0.0;
+            for i in 0..d {
+                denom += vi[i] * pprojv[i];
+                num += vi[i] * pprojr[i];
+            }
+            if denom.abs() < 1e-12 {
+                return Ok(pprojr);
+            }
+            let alpha = num / denom;
+            let mut t = pprojv;
+            for i in 0..d {
+                t[i] = t[i] * alpha - pprojr[i];
+            }
+            Ok(t)
+        }
+        ExpandKind::Mjd0 => {
+            let mut aaug = Array2::<f64>::zeros((d + n, d + n));
+            for i in 0..d {
+                for j in 0..d {
+                    aaug[(i, j)] = pshift[(i, j)];
+                }
+                for j in 0..n {
+                    aaug[(i, d + j)] = vrot[(i, j)];
+                    aaug[(d + j, i)] = vrot[(i, j)];
+                }
+            }
+            let mut raug = Array1::zeros(d + n);
+            for i in 0..d {
+                raug[i] = -rseek[i];
+            }
+            let z = solve_dense(aaug.view(), raug.view())?;
+            Ok(z.slice(s![..d]).to_owned())
+        }
+        ExpandKind::Mjd0Alt => {
+            let pprojr = solve_dense(pshift.view(), rseek.view())?;
+            let mut rhs = Array1::zeros(n);
+            let mut gram = Array2::<f64>::zeros((n, n));
+            for j in 0..n {
+                let mut col = Array1::zeros(d);
+                for i in 0..d {
+                    col[i] = vrot[(i, j)];
+                }
+                let pj = solve_dense(pshift.view(), col.view())?;
+                for i in 0..n {
+                    let mut acc = 0.0;
+                    for t in 0..d {
+                        acc += vrot[(t, i)] * pj[t];
+                    }
+                    gram[(i, j)] = acc;
+                }
+                let mut acc = 0.0;
+                for t in 0..d {
+                    acc += vrot[(t, j)] * pprojr[t];
+                }
+                rhs[j] = acc;
+            }
+            let alpha = solve_dense(gram.view(), rhs.view())?;
+            let mut t = Array1::zeros(d);
+            for i in 0..d {
+                let mut acc = 0.0;
+                for j in 0..n {
+                    acc += vrot[(i, j)] * alpha[j];
+                }
+                t[i] = acc - rseek[i];
+            }
+            solve_dense(pshift.view(), t.view())
+        }
+    }
+}
+
+/// Sella `rayleigh_ritz` loop: grow `v` with [`expand`] until the
+/// residual is below `gamma |theta|` or the subspace hits `2 n + 1`.
+pub fn rayleigh_ritz_iter(
+    a: ArrayView2<f64>,
+    v0: ArrayView2<f64>,
+    gamma: f64,
+    method: ExpandKind,
+) -> Result<(Array1<f64>, Array2<f64>, Array2<f64>), SaddleError> {
+    if a.nrows() != a.ncols() || v0.nrows() != a.nrows() {
+        return Err(SaddleError::Shape(
+            "iterative Rayleigh-Ritz needs square A and matching V rows".into(),
+        ));
+    }
+    if gamma <= 0.0 {
+        let (lams, vecs) = exact_eigh(a)?;
+        let av = matmul(a, vecs.view());
+        return Ok((lams, vecs, av));
+    }
+    let n = a.nrows();
+    let maxiter = (2 * n + 1).max(2);
+    let mut v = modified_gram_schmidt(v0, None, 1e-14);
+    if v.ncols() == 0 {
+        return Err(SaddleError::Solver("empty Ritz subspace".into()));
+    }
+    let p = Array2::eye(n);
+    let mut av = matmul(a, v.view());
+    loop {
+        let a_tilde = symmetrize_vt_av(v.view(), av.view());
+        let (lams, vecs) = exact_eigh(a_tilde.view())?;
+        av = matmul(av.view(), vecs.view());
+        v = matmul(v.view(), vecs.view());
+        let k = v.ncols();
+        if k >= maxiter {
+            return Ok((lams, v, av));
+        }
+        let mut nneg = 1usize;
+        for &lam in lams.iter() {
+            if lam < 0.0 {
+                nneg += 1;
+            }
+        }
+        nneg = nneg.min(k);
+        let eye = Array2::eye(k);
+        let mut rnorm = Array1::zeros(nneg);
+        for j in 0..nneg {
+            let mut acc = 0.0;
+            for i in 0..n {
+                let ri = av[(i, j)] - lams[j] * v[(i, j)];
+                acc += ri * ri;
+            }
+            rnorm[j] = acc.sqrt();
+        }
+        let mut seeking = 0;
+        let mut found = false;
+        for j in 0..nneg {
+            if k == 1 || rnorm[j] >= gamma * lams[j].abs() {
+                seeking = j;
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return Ok((lams, v, av));
+        }
+        let t = expand(
+            v.view(),
+            av.view(),
+            p.view(),
+            None,
+            lams.view(),
+            eye.view(),
+            lams[seeking],
+            method,
+            seeking,
+        )?;
+        let tn = {
+            let mut s = 0.0;
+            for &x in t.iter() {
+                s += x * x;
+            }
+            s.sqrt()
+        };
+        if tn < 1e-18 {
+            return Ok((lams, v, av));
+        }
+        let mut tcol = Array2::zeros((n, 1));
+        for i in 0..n {
+            tcol[(i, 0)] = t[i] / tn;
+        }
+        let tnew = modified_gram_schmidt(tcol.view(), Some(v.view()), 1e-8);
+        if tnew.ncols() == 0 {
+            return Ok((lams, v, av));
+        }
+        let mut vnext = Array2::zeros((n, k + tnew.ncols()));
+        for j in 0..k {
+            for i in 0..n {
+                vnext[(i, j)] = v[(i, j)];
+            }
+        }
+        for j in 0..tnew.ncols() {
+            for i in 0..n {
+                vnext[(i, k + j)] = tnew[(i, j)];
+            }
+        }
+        let at = matmul(a, tnew.view());
+        let mut avnext = Array2::zeros((n, k + tnew.ncols()));
+        for j in 0..k {
+            for i in 0..n {
+                avnext[(i, j)] = av[(i, j)];
+            }
+        }
+        for j in 0..tnew.ncols() {
+            for i in 0..n {
+                avnext[(i, k + j)] = at[(i, j)];
+            }
+        }
+        v = vnext;
+        av = avnext;
+    }
+}
+
+fn solve_dense(a: ArrayView2<f64>, b: ArrayView1<f64>) -> Result<Array1<f64>, SaddleError> {
+    let n = a.nrows();
+    if a.ncols() != n || b.len() != n {
+        return Err(SaddleError::Shape("dense solve needs a square system".into()));
+    }
+    let mut m = a.to_owned();
+    let mut x = b.to_owned();
+    for k in 0..n {
+        let mut piv = k;
+        let mut best = m[(k, k)].abs();
+        for i in (k + 1)..n {
+            let mag = m[(i, k)].abs();
+            if mag > best {
+                best = mag;
+                piv = i;
+            }
+        }
+        if best < 1e-18 {
+            return Err(SaddleError::Solver("singular expand system".into()));
+        }
+        if piv != k {
+            for j in 0..n {
+                let tmp = m[(k, j)];
+                m[(k, j)] = m[(piv, j)];
+                m[(piv, j)] = tmp;
+            }
+            let tmp = x[k];
+            x[k] = x[piv];
+            x[piv] = tmp;
+        }
+        let akk = m[(k, k)];
+        for i in (k + 1)..n {
+            let f = m[(i, k)] / akk;
+            m[(i, k)] = 0.0;
+            for j in (k + 1)..n {
+                m[(i, j)] -= f * m[(k, j)];
+            }
+            x[i] -= f * x[k];
+        }
+    }
+    for i in (0..n).rev() {
+        let mut acc = x[i];
+        for j in (i + 1)..n {
+            acc -= m[(i, j)] * x[j];
+        }
+        x[i] = acc / m[(i, i)];
+    }
+    Ok(x)
 }
 
 fn matmul(a: ArrayView2<f64>, b: ArrayView2<f64>) -> Array2<f64> {
@@ -275,6 +648,62 @@ mod tests {
         let (h, _) = eigh_on(EigenDevice::Host, a.view()).unwrap();
         let (d, _) = eigh_on(EigenDevice::Dlpk, a.view()).unwrap();
         assert!((h[0] - d[0]).abs() < 1e-14);
+    }
+
+    #[test]
+    fn expand_jd0_is_orthogonal_to_the_ritz_vector() {
+        let mut a = Array2::<f64>::zeros((3, 3));
+        a[(0, 0)] = -2.0;
+        a[(1, 1)] = 1.0;
+        a[(2, 2)] = 4.0;
+        let v = Array2::eye(3).slice(s![.., ..1]).to_owned();
+        let y = matmul(a.view(), v.view());
+        let p = Array2::eye(3);
+        let lams = Array1::from(vec![-2.0]);
+        let vecs = Array2::eye(1);
+        let t = expand(
+            v.view(),
+            y.view(),
+            p.view(),
+            None,
+            lams.view(),
+            vecs.view(),
+            -2.0,
+            ExpandKind::Jd0,
+            0,
+        )
+        .unwrap();
+        assert!(t.iter().all(|x| x.is_finite()));
+        let t_l = expand(
+            v.view(),
+            y.view(),
+            p.view(),
+            None,
+            lams.view(),
+            vecs.view(),
+            -2.0,
+            ExpandKind::Lanczos,
+            0,
+        )
+        .unwrap();
+        assert_eq!(t_l.len(), 3);
+    }
+
+    #[test]
+    fn rayleigh_ritz_iter_recovers_the_lowest() {
+        let mut a = Array2::<f64>::zeros((4, 4));
+        a[(0, 0)] = -5.0;
+        a[(1, 1)] = 1.0;
+        a[(2, 2)] = 3.0;
+        a[(3, 3)] = 8.0;
+        a[(0, 1)] = 0.2;
+        a[(1, 0)] = 0.2;
+        let mut v0 = Array2::zeros((4, 1));
+        v0[(0, 0)] = 1.0;
+        let (lams, vecs, _) = rayleigh_ritz_iter(a.view(), v0.view(), 0.1, ExpandKind::Jd0).unwrap();
+        let (exact, _) = exact_eigh(a.view()).unwrap();
+        assert!((lams[0] - exact[0]).abs() < 1e-6, "{} vs {}", lams[0], exact[0]);
+        assert_eq!(vecs.nrows(), 4);
     }
 
     #[test]
