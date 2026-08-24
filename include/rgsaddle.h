@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 7u
+#define RGSADDLE_ABI_MINOR 8u
 
 /** Version head carried by every wire struct. */
 typedef struct {
@@ -291,6 +291,14 @@ RgsaddleSellaMin *rgsaddle_sella_min_create_internal(
     const rgsaddle_sella_min_config_t *config, int64_t n_atoms,
     const double *position, const double *masses,
     const RgsaddleConstraints *cons);
+/**
+ * QN in packed [x; cell_params]. `cell` is row-major 3x3. `mask` is
+ * 9 ints (nonzero = free); NULL means all nine free.
+ */
+RgsaddleSellaMin *rgsaddle_sella_min_create_cell(
+    const rgsaddle_sella_min_config_t *config, int64_t n_atoms,
+    const double *position, const double *masses, const double *cell,
+    const int32_t *mask);
 int rgsaddle_sella_min_step(RgsaddleSellaMin *session,
                             rgsaddle_surface_fn surface, void *user,
                             rgsaddle_report_t *out);

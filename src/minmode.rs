@@ -9,6 +9,28 @@ use crate::error::SaddleError;
 /// The caller's surface for a single geometry.
 pub trait PointSurface: Sync {
     fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError>;
+
+    /// Energy and Cartesian gradient in a periodic cell, row-major 3x3.
+    ///
+    /// Default ignores the cell and calls [`Self::eval`].
+    fn eval_in_cell(
+        &self,
+        x: ArrayView1<f64>,
+        _cell: &[f64; 9],
+    ) -> Result<(f64, Array1<f64>), SaddleError> {
+        self.eval(x)
+    }
+
+    /// Optional `dE/dC`, row-major 3x3. `None` means the session
+    /// finite-differences [`Self::eval_in_cell`].
+    fn cell_grad(
+        &self,
+        x: ArrayView1<f64>,
+        cell: &[f64; 9],
+    ) -> Result<Option<[f64; 9]>, SaddleError> {
+        let _ = (x, cell);
+        Ok(None)
+    }
 }
 
 /// How the lowest mode is estimated.

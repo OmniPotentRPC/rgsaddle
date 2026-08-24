@@ -9,7 +9,7 @@
 //! [`SellaMinSession::on_internal`] to QN in the internals chart
 //! (Sella `InternalPES`). The host owns the loop. `run` is a convenience.
 
-use ndarray::Array1;
+use ndarray::{s, Array1};
 use rgmin::qn_restricted;
 use rgmin::vecops::{axpy, dot, vdot, vnrm2, Vector};
 use rgmin::Manifold;
@@ -19,7 +19,7 @@ use crate::error::SaddleError;
 use crate::geom::{update_trust, SellaGeom, TrustSchedule};
 use crate::minmode::PointSurface;
 use crate::pes::CartesianPes;
-use crate::pes_internal::{InternalPes, SellaPes};
+use crate::pes_internal::{CellCartesianPes, InternalPes, SellaPes};
 
 /// Sella `_default_kwargs['minimum']` plus a force gate.
 pub struct SellaMinConfig {
@@ -142,6 +142,30 @@ impl SellaMinSession {
         })
     }
 
+    /// QN in packed `[x_cart; cell_params]` (Sella `CellCartesianPES`).
+    ///
+    /// Cell DOF are the mask-true lattice entries. The force gate
+    /// still reads the Cartesian gradient.
+    pub fn on_cell(
+        config: SellaMinConfig,
+        x: Array1<f64>,
+        masses: Array1<f64>,
+        cell: crate::Cell,
+        mask: [bool; 9],
+    ) -> Result<Self, SaddleError> {
+        let mut pes = CellCartesianPes::new(x, masses, cell)?;
+        pes.set_mask(mask);
+        let n_free = pes.packed_len().max(1);
+        let delta = config.delta * n_free as f64;
+        Ok(Self {
+            pes: SellaPes::Cell(pes),
+            config,
+            geom: SellaGeom::Kind(rgmin::ManifoldKind::Euclidean),
+            delta,
+            rho: 1.0,
+        })
+    }
+
     pub fn geom(&self) -> &SellaGeom {
         &self.geom
     }
@@ -160,6 +184,11 @@ impl SellaMinSession {
         self.pes.internal()
     }
 
+    /// Cell PES when the session was built with [`Self::on_cell`].
+    pub fn cell_pes(&self) -> Option<&CellCartesianPes> {
+        self.pes.cell()
+    }
+
     /// Living Sella trust radius.
     pub fn delta(&self) -> f64 {
         self.delta
@@ -174,6 +203,7 @@ impl SellaMinSession {
         self.pes.reset();
         let n_free = match &self.pes {
             SellaPes::Internal(p) => p.n_int().max(1),
+            SellaPes::Cell(p) => p.packed_len().max(1),
             SellaPes::Cartesian(_) => self.geom.n_free(self.pes.position().len()),
         };
         self.delta = self.config.delta * n_free as f64;
@@ -183,6 +213,7 @@ impl SellaMinSession {
     pub fn step<S: PointSurface>(&mut self, surface: &S) -> Result<SellaMinReport, SaddleError> {
         match &self.pes {
             SellaPes::Internal(_) => self.step_internal(surface),
+            SellaPes::Cell(_) => self.step_cell(surface),
             SellaPes::Cartesian(_) => self.step_cartesian(surface),
         }
     }
@@ -193,7 +224,7 @@ impl SellaMinSession {
     ) -> Result<SellaMinReport, SaddleError> {
         let pes = match &mut self.pes {
             SellaPes::Cartesian(p) => p,
-            SellaPes::Internal(_) => unreachable!(),
+            SellaPes::Internal(_) | SellaPes::Cell(_) => unreachable!(),
         };
         let x = pes.position().to_owned();
         let (energy, g) = surface.eval(x.view())?;
@@ -259,7 +290,7 @@ impl SellaMinSession {
     ) -> Result<SellaMinReport, SaddleError> {
         let pes = match &mut self.pes {
             SellaPes::Internal(p) => p,
-            SellaPes::Cartesian(_) => unreachable!(),
+            SellaPes::Cartesian(_) | SellaPes::Cell(_) => unreachable!(),
         };
         let x = pes.position().to_owned();
         let (energy, g) = surface.eval(x.view())?;
@@ -295,6 +326,59 @@ impl SellaMinSession {
         let pred = vdot(&vg, &vs) + 0.5 * dot(s.view(), hs.view());
         let (energy, g1) = pes.kick(surface, s.view())?;
         let max_force = self.config.force_gate.value(g1.view());
+        if pred.abs() >= 1e-14 {
+            self.rho = (energy - e0) / pred;
+            self.delta = update_trust(self.delta, self.rho, vnrm2(&vs), &self.config.schedule());
+        } else {
+            self.rho = 1.0;
+        }
+        Ok(SellaMinReport {
+            energy,
+            max_force,
+            at_minimum: max_force <= self.config.force_tol,
+            rho: self.rho,
+            delta: self.delta,
+        })
+    }
+
+    fn step_cell<S: PointSurface>(&mut self, surface: &S) -> Result<SellaMinReport, SaddleError> {
+        let pes = match &mut self.pes {
+            SellaPes::Cell(p) => p,
+            SellaPes::Cartesian(_) | SellaPes::Internal(_) => unreachable!(),
+        };
+        let x = pes.position().to_owned();
+        let c9 = pes.cell9();
+        let (energy, g) = surface.eval_in_cell(x.view(), &c9)?;
+        if !g.iter().all(|v| v.is_finite()) {
+            return Err(SaddleError::NonFinite("sella gradient"));
+        }
+        let max_force = self.config.force_gate.value(g.view());
+        if max_force <= self.config.force_tol {
+            return Ok(SellaMinReport {
+                energy,
+                max_force,
+                at_minimum: true,
+                rho: self.rho,
+                delta: self.delta,
+            });
+        }
+        let g_p = pes.packed_grad(surface, g.view())?;
+        let vg = Vector::from_host(g_p.clone());
+        let h = pes.hessian().hessian();
+        let (evals, evecs) = crate::exact_eigh(h.view())?;
+        let mut s = qn_restricted(&evals, &evecs, &g_p, 0, self.delta);
+        let sn = vnrm2(&Vector::from_host(s.clone()));
+        if sn > self.delta && sn > 0.0 {
+            s.mapv_inplace(|v| v * (self.delta / sn));
+        }
+        let vs = Vector::from_host(s.clone());
+        let e0 = energy;
+        let hs = h.dot(&s);
+        let pred = vdot(&vg, &vs) + 0.5 * dot(s.view(), hs.view());
+        let (energy, g1p) = pes.kick_packed(surface, s.view())?;
+        let n = x.len();
+        let g1_cart = g1p.slice(s![..n]).to_owned();
+        let max_force = self.config.force_gate.value(g1_cart.view());
         if pred.abs() >= 1e-14 {
             self.rho = (energy - e0) / pred;
             self.delta = update_trust(self.delta, self.rho, vnrm2(&vs), &self.config.schedule());
@@ -494,6 +578,63 @@ mod tests {
         let report = sess.run(&Well, 40).unwrap();
         assert!(report.at_minimum, "force {}", report.max_force);
         assert!((sess.position()[0].abs() - 1.0).abs() < 0.35);
+    }
+
+    struct CellQuad;
+    impl PointSurface for CellQuad {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            let mut g = Array1::zeros(x.len());
+            g[0] = 2.0 * x[0];
+            Ok((x[0] * x[0], g))
+        }
+        fn eval_in_cell(
+            &self,
+            x: ArrayView1<f64>,
+            cell: &[f64; 9],
+        ) -> Result<(f64, Array1<f64>), SaddleError> {
+            let (e, g) = self.eval(x)?;
+            Ok((e + (cell[0] - 2.0) * (cell[0] - 2.0), g))
+        }
+        fn cell_grad(
+            &self,
+            _x: ArrayView1<f64>,
+            cell: &[f64; 9],
+        ) -> Result<Option<[f64; 9]>, SaddleError> {
+            let mut g = [0.0; 9];
+            g[0] = 2.0 * (cell[0] - 2.0);
+            Ok(Some(g))
+        }
+    }
+
+    #[test]
+    fn cell_qn_moves_the_lattice() {
+        let mut x = Array1::zeros(6);
+        x[0] = 0.3;
+        let cell = crate::Cell::ortho(3.0, 3.0, 3.0).unwrap();
+        let mut mask = [false; 9];
+        mask[0] = true;
+        let mut sess = SellaMinSession::on_cell(
+            SellaMinConfig {
+                delta: 0.2,
+                force_tol: 0.05,
+                ..SellaMinConfig::default()
+            },
+            x,
+            Array1::from(vec![1.0, 1.0]),
+            cell,
+            mask,
+        )
+        .unwrap();
+        assert!(sess.cell_pes().is_some());
+        assert_eq!(sess.cell_pes().unwrap().n_cell_dof(), 1);
+        let a00 = sess.cell_pes().unwrap().cell9()[0];
+        assert!((a00 - 3.0).abs() < 1e-12);
+        let _ = sess.run(&CellQuad, 30).unwrap();
+        let a00 = sess.cell_pes().unwrap().cell9()[0];
+        assert!(
+            (a00 - 2.0).abs() < 0.35,
+            "lattice a00 should walk toward 2, got {a00}"
+        );
     }
 
     #[test]
