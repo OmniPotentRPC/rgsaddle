@@ -27,7 +27,9 @@
 //! [`rgmin::Manifold`] `project` / `retract` / `transport`.
 //! Equality internals are [`constraints::Constraints`] on the same
 //! manifold (`Translation` / `Rotation` / `Displacement`, plus
-//! host-fixed bonds / angles / dihedrals). [`restricted::MaxInternalStep`]
+//! host-fixed bonds / angles / dihedrals). [`SellaMinSession`] and
+//! [`SellaSaddleSession`] retract on [`geom::SellaGeom`]: the rigid
+//! quotient by default, or a live `Constraints` chart. [`restricted::MaxInternalStep`]
 //! is the per-coordinate clip Sella applies before the trust region.
 //!
 //! Force assembly is pure: tangents (Mills–Jonsson–Schenter simple,
@@ -51,9 +53,13 @@ pub mod irc;
 pub use io::{MolecularFrame, frame_from_con};
 pub mod capi;
 pub mod constraints;
+pub mod eigensolve;
 pub mod error;
 pub mod force;
+pub mod force_match;
+pub mod geom;
 pub mod internal;
+pub mod linalg;
 pub mod mic;
 pub mod minmode;
 #[cfg(feature = "python")]
@@ -64,6 +70,7 @@ pub mod projection;
 pub mod qn;
 pub mod restricted;
 pub mod rfo;
+pub mod samd;
 pub mod sella_min;
 pub mod sella_saddle;
 pub mod spring;
@@ -71,8 +78,12 @@ pub mod tangent;
 
 pub use band::{BandConfig, BandReport, BandSession, BandStatus, BandSurface};
 pub use constraints::{Constraints, Equality, InternalCounts};
+pub use eigensolve::{exact_eigh, rayleigh_ritz, EigenDevice};
 pub use error::SaddleError;
 pub use force::ForceGate;
+pub use force_match::{covalent_pairs, force_match_hessian};
+pub use geom::{SellaGeom, TrustSchedule};
+pub use linalg::{modified_gram_schmidt, numerical_hvp};
 pub use internal::{CartAxis, Displacement, InternalSlot, Rotation, Translation};
 pub use irc::{IrcConfig, IrcDirection, IrcKind, IrcReport, IrcSession};
 pub use mic::{Cell, wrap_difference};
@@ -85,6 +96,7 @@ pub use projection::ProjectionKind;
 pub use qn::{get_stepper, retract_qn, QuasiNewton, StepperKind};
 pub use restricted::{mis_clip, InternalWeights, MaxInternalStep, RestrictedKind};
 pub use rfo::{RationalFunctionOptimization, rfo_stepper};
+pub use samd::{SamdConfig, SamdReport, SamdSession};
 pub use sella_min::{SellaMinConfig, SellaMinReport, SellaMinSession};
 pub use sella_saddle::{SellaSaddleConfig, SellaSaddleReport, SellaSaddleSession};
 pub use spring::SpringKind;

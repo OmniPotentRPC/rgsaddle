@@ -3,16 +3,19 @@
 //! `sella.optimize.optimize.Sella` with `order=0`, `method=qn`,
 //! `eig=false`. One step is eval, project, `qn_restricted`, retract,
 //! transport, `PES.kick`, then the `delta0` / `sigma` / `rho` trust
-//! schedule. The geometry is [`ManifoldKind::RigidQuotient`] (Sella
-//! Cartesian `fix_translation` + `fix_rotation`). The host owns the
-//! loop. `run` is a convenience.
+//! schedule. Default geometry is [`crate::geom::SellaGeom::cartesian`]
+//! (RigidQuotient at N>=3). Pass a [`Constraints`] chart through
+//! [`SellaMinSession::with_chart`] to retract on `ker(J)`. The host
+//! owns the loop. `run` is a convenience.
 
 use ndarray::Array1;
 use rgmin::qn_restricted;
 use rgmin::vecops::{axpy, dot, vdot, vnrm2, Vector};
-use rgmin::{Manifold, ManifoldKind};
+use rgmin::Manifold;
 
+use crate::constraints::Constraints;
 use crate::error::SaddleError;
+use crate::geom::{update_trust, SellaGeom, TrustSchedule};
 use crate::minmode::PointSurface;
 use crate::pes::CartesianPes;
 
@@ -30,15 +33,28 @@ pub struct SellaMinConfig {
     pub force_gate: crate::ForceGate,
 }
 
+impl SellaMinConfig {
+    fn schedule(&self) -> TrustSchedule {
+        TrustSchedule {
+            sigma_inc: self.sigma_inc,
+            sigma_dec: self.sigma_dec,
+            rho_inc: self.rho_inc,
+            rho_dec: self.rho_dec,
+            delta_min: self.delta_min,
+        }
+    }
+}
+
 impl Default for SellaMinConfig {
     fn default() -> Self {
+        let sch = TrustSchedule::minimum();
         Self {
             delta: 1e-1,
-            sigma_inc: 1.15,
-            sigma_dec: 0.90,
-            rho_inc: 1.035,
-            rho_dec: 100.0,
-            delta_min: 1e-4,
+            sigma_inc: sch.sigma_inc,
+            sigma_dec: sch.sigma_dec,
+            rho_inc: sch.rho_inc,
+            rho_dec: sch.rho_dec,
+            delta_min: sch.delta_min,
             force_tol: 1e-3,
             force_gate: crate::ForceGate::MaxForceOnAtom,
         }
@@ -56,7 +72,7 @@ pub struct SellaMinReport {
 pub struct SellaMinSession {
     pes: CartesianPes,
     config: SellaMinConfig,
-    manifold: ManifoldKind,
+    geom: SellaGeom,
     delta: f64,
     rho: f64,
 }
@@ -67,22 +83,38 @@ impl SellaMinSession {
         x: Array1<f64>,
         masses: Array1<f64>,
     ) -> Result<Self, SaddleError> {
-        // SE(3) quotient needs leftover internals: N >= 3.
-        let manifold = if x.len() >= 9 {
-            ManifoldKind::RigidQuotient
-        } else {
-            ManifoldKind::Euclidean
-        };
-        // Sella optimize.py: TrustRegion delta = delta0 * n_free.
-        let n_free = if x.len() >= 9 { x.len() - 6 } else { x.len() };
+        Self::on(config, x, masses, SellaGeom::cartesian(x.len()))
+    }
+
+    /// Retract on a live equality chart instead of the rigid quotient.
+    pub fn with_chart(
+        config: SellaMinConfig,
+        x: Array1<f64>,
+        masses: Array1<f64>,
+        chart: Constraints,
+    ) -> Result<Self, SaddleError> {
+        Self::on(config, x, masses, SellaGeom::Chart(chart))
+    }
+
+    pub fn on(
+        config: SellaMinConfig,
+        x: Array1<f64>,
+        masses: Array1<f64>,
+        geom: SellaGeom,
+    ) -> Result<Self, SaddleError> {
+        let n_free = geom.n_free(x.len());
         let delta = config.delta * n_free as f64;
         Ok(Self {
             pes: CartesianPes::new(x, masses)?,
             config,
-            manifold,
+            geom,
             delta,
             rho: 1.0,
         })
+    }
+
+    pub fn geom(&self) -> &SellaGeom {
+        &self.geom
     }
 
     pub fn position(&self) -> ndarray::ArrayView1<'_, f64> {
@@ -102,8 +134,7 @@ impl SellaMinSession {
     pub fn reset(&mut self) {
         self.pes.reset();
         let n = self.pes.position().len();
-        let n_free = if n >= 9 { n - 6 } else { n };
-        self.delta = self.config.delta * n_free as f64;
+        self.delta = self.config.delta * self.geom.n_free(n) as f64;
         self.rho = 1.0;
     }
 
@@ -113,7 +144,7 @@ impl SellaMinSession {
         if !g.iter().all(|v| v.is_finite()) {
             return Err(SaddleError::NonFinite("sella gradient"));
         }
-        let g_r = self.manifold.egrad2rgrad(&x, &g);
+        let g_r = self.geom.egrad2rgrad(&x, &g);
         let vg = Vector::from_host(g_r.clone());
         let max_force = self.config.force_gate.value(g_r.view());
         if max_force <= self.config.force_tol {
@@ -127,14 +158,14 @@ impl SellaMinSession {
         }
         let (evals, evecs) = self.pes.hessian().eigh();
         let mut s = qn_restricted(&evals, &evecs, &g_r, 0, self.delta);
-        s = self.manifold.project(&x, &s);
+        s = self.geom.project(&x, &s);
         let sn = vnrm2(&Vector::from_host(s.clone()));
         if sn > self.delta && sn > 0.0 {
             s.mapv_inplace(|v| v * (self.delta / sn));
         }
         let vs = Vector::from_host(s.clone());
-        let x1 = self.manifold.retract(&x, &s);
-        let s1 = self.manifold.transport(&x, &x1, &s);
+        let x1 = self.geom.retract(&x, &s);
+        let s1 = self.geom.transport(&x, &x1, &s);
         if !s1.iter().all(|v| v.is_finite()) {
             return Err(SaddleError::NonFinite("sella transport"));
         }
@@ -145,11 +176,11 @@ impl SellaMinSession {
         let pred = vdot(&vg, &vs) + 0.5 * dot(s.view(), hs.view());
         let (energy, g1) = self.pes.kick(surface, d.view())?;
         let x_new = self.pes.position().to_owned();
-        let g1_r = self.manifold.egrad2rgrad(&x_new, &g1);
+        let g1_r = self.geom.egrad2rgrad(&x_new, &g1);
         let max_force = self.config.force_gate.value(g1_r.view());
         if pred.abs() >= 1e-14 {
             self.rho = (energy - e0) / pred;
-            self.delta = update_trust(self.delta, self.rho, vnrm2(&vs), &self.config);
+            self.delta = update_trust(self.delta, self.rho, vnrm2(&vs), &self.config.schedule());
         } else {
             self.rho = 1.0;
         }
@@ -177,23 +208,14 @@ impl SellaMinSession {
     }
 }
 
-/// Sella `optimize.py` trust update (`order=0` defaults).
-fn update_trust(delta: f64, rho: f64, smag: f64, cfg: &SellaMinConfig) -> f64 {
-    if rho < 1.0 / cfg.rho_dec || rho > cfg.rho_dec {
-        (smag * cfg.sigma_dec).max(cfg.delta_min)
-    } else if rho > 1.0 / cfg.rho_inc && rho < cfg.rho_inc {
-        (cfg.sigma_inc * smag).max(delta)
-    } else {
-        delta
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::geom::update_trust;
     use crate::minmode::PointSurface;
     use ndarray::{Array1, ArrayView1};
     use rgmin::vecops::nrm2;
+    use rgmin::ManifoldKind;
 
     struct Well;
     impl PointSurface for Well {
@@ -322,11 +344,41 @@ mod tests {
     #[test]
     fn update_trust_shrinks_on_a_bad_rho() {
         let cfg = SellaMinConfig::default();
-        let shrunk = update_trust(0.2, 0.0, 0.2, &cfg);
+        let shrunk = update_trust(0.2, 0.0, 0.2, &cfg.schedule());
         assert!(shrunk < 0.2, "bad rho must shrink: {shrunk}");
         assert!((shrunk - 0.2 * cfg.sigma_dec).abs() < 1e-14);
-        let grown = update_trust(0.2, 1.0, 0.2, &cfg);
+        let grown = update_trust(0.2, 1.0, 0.2, &cfg.schedule());
         assert!(grown > 0.2, "good rho must grow: {grown}");
         assert!((grown - cfg.sigma_inc * 0.2).abs() < 1e-14);
+    }
+
+    #[test]
+    fn chart_step_keeps_a_fixed_com() {
+        let mut x = Array1::zeros(9);
+        x[0] = 0.2;
+        x[4] = 1.0;
+        x[8] = 1.0;
+        let mut chart = Constraints::new(3).unwrap();
+        chart.fix_com(x.view()).unwrap();
+        let mut sess = SellaMinSession::with_chart(
+            SellaMinConfig::default(),
+            x,
+            Array1::from(vec![1.0, 1.0, 1.0]),
+            chart,
+        )
+        .unwrap();
+        assert_eq!(sess.geom().n_free(9), 6);
+        let x0 = sess.position().to_owned();
+        let c0 = com(x0.view());
+        let report = sess.step(&Well).unwrap();
+        assert!(report.energy.is_finite());
+        let x1 = sess.position().to_owned();
+        let c1 = com(x1.view());
+        assert!(
+            (c0[0] - c1[0]).abs() < 1e-8
+                && (c0[1] - c1[1]).abs() < 1e-8
+                && (c0[2] - c1[2]).abs() < 1e-8,
+            "COM drifted {c0:?} -> {c1:?}"
+        );
     }
 }

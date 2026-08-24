@@ -10,11 +10,20 @@ The Sella QuasiNewton stepper is ``rgsaddle.QuasiNewton``
 stepper, not a session.
 
 ``SellaMinSession`` is order 0, ``eig=false``: project on
-``ManifoldKind.RigidQuotient``, ``qn_restricted``, retract,
+``SellaGeom`` (RigidQuotient at N>=3, or a ``Constraints``
+chart via ``with_chart``), ``qn_restricted``, retract,
 transport, ``CartesianPes.kick``, then Sella's ``delta0`` /
 ``sigma`` / ``rho`` trust schedule. ``SellaSaddleSession`` is
-order 1: ``prfo_restricted`` plus the same kick. Both sit on
-``CartesianPes``, not on ``IrcSession``.
+order 1: the same geometry and the saddle trust numbers,
+then ``prfo_restricted``. Both sit on ``CartesianPes``, not
+on ``IrcSession``. ``n_free`` is ``3N-6`` on the quotient
+and ``3N - ncons`` on a chart.
+
+``exact_eigh`` / ``rayleigh_ritz`` are Sella
+``eigensolvers.py``. ``numerical_hvp`` is
+``linalg.NumericalHessian``. ``SamdSession`` is the BDP
+thermostat (``samd.py``). ``force_match_hessian`` is the
+bond arm of ``force_match.pyx``.
 
 ``RationalFunctionOptimization`` is Sella ``method=rfo``:
 ``alpha`` in ``[0, 1]``, ``order`` selects the
