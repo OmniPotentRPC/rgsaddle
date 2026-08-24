@@ -22,6 +22,10 @@
 //! [`rfo::RationalFunctionOptimization`]: `rgmin::rfo_get_s` with
 //! the Sella alpha / order contract, retracted through
 //! [`rgmin::Manifold`] `project` / `retract` / `transport`.
+//! Equality internals are [`constraints::Constraints`] on the same
+//! manifold (`Translation` / `Rotation` / `Displacement`, plus
+//! host-fixed bonds / angles / dihedrals). [`restricted::MaxInternalStep`]
+//! is the per-coordinate clip Sella applies before the trust region.
 //!
 //! Force assembly is pure: tangents (Mills–Jonsson–Schenter simple,
 //! Henkelman–Jonsson improved), springs (uniform, energy-weighted,
@@ -43,12 +47,15 @@ pub mod irc;
 #[cfg(feature = "readcon")]
 pub use io::{MolecularFrame, frame_from_con};
 pub mod capi;
+pub mod constraints;
 pub mod error;
+pub mod internal;
 pub mod mic;
 pub mod minmode;
 pub mod pes;
 pub mod projection;
 pub mod qn;
+pub mod restricted;
 pub mod rfo;
 pub mod sella_min;
 pub mod sella_saddle;
@@ -56,7 +63,9 @@ pub mod spring;
 pub mod tangent;
 
 pub use band::{BandConfig, BandReport, BandSession, BandStatus, BandSurface};
+pub use constraints::{Constraints, Equality, InternalCounts};
 pub use error::SaddleError;
+pub use internal::{CartAxis, Displacement, InternalSlot, Rotation, Translation};
 pub use irc::{IrcConfig, IrcDirection, IrcKind, IrcReport, IrcSession};
 pub use mic::{Cell, wrap_difference};
 pub use minmode::{
@@ -65,6 +74,7 @@ pub use minmode::{
 pub use pes::{CartesianPes, HessUpdate};
 pub use projection::ProjectionKind;
 pub use qn::{get_stepper, retract_qn, QuasiNewton, StepperKind};
+pub use restricted::{mis_clip, InternalWeights, MaxInternalStep, RestrictedKind};
 pub use rfo::{RationalFunctionOptimization, rfo_stepper};
 pub use sella_min::{SellaMinConfig, SellaMinReport, SellaMinSession};
 pub use sella_saddle::{SellaSaddleConfig, SellaSaddleReport, SellaSaddleSession};
