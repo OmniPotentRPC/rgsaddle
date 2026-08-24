@@ -8,7 +8,6 @@
 //! different pair list; there is no Python hot path.
 
 use ndarray::{Array1, Array2, ArrayView1};
-use rgmin::vecops::dot;
 
 use crate::error::SaddleError;
 
@@ -226,6 +225,7 @@ fn solve_spd(a: &Array2<f64>, b: &Array1<f64>) -> Array1<f64> {
 mod tests {
     use super::*;
     use ndarray::Array1;
+    use rgmin::vecops::dot;
 
     #[test]
     fn water_pairs_are_the_two_oh_bonds() {

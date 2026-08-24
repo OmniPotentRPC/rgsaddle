@@ -6,7 +6,7 @@
 //! linear and exponential ramps.
 
 use ndarray::{Array1, ArrayView1};
-use rgmin::vecops::{axpy, dot, nrm2};
+use rgmin::vecops::{axpy, dot};
 
 use crate::error::SaddleError;
 use crate::minmode::PointSurface;
@@ -180,6 +180,7 @@ pub fn project_velocity<M: rgmin::Manifold>(m: &M, x: &Array1<f64>, v: &Array1<f
 
 #[cfg(test)]
 mod tests {
+    use rgmin::vecops::nrm2;
     use super::*;
     use crate::SaddleError;
     use ndarray::{Array1, ArrayView1};

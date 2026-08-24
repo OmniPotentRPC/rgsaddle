@@ -17,7 +17,7 @@ use rgmin::Manifold;
 use rgmin::vecops::{axpy, dot, nrm2};
 
 use crate::SaddleError;
-use crate::internal::{CartAxis, Displacement, Rotation, Translation, pack_cart};
+use crate::internal::{CartAxis, Displacement, Rotation, Translation};
 
 const RESTORE_ITERS: usize = 12;
 const RESTORE_TOL: f64 = 1e-12;
@@ -719,6 +719,7 @@ fn solve_spd(a: &Array2<f64>, b: &Array1<f64>) -> Array1<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::internal::pack_cart;
     use rgmin::ManifoldKind;
 
     fn water() -> Array1<f64> {
