@@ -28,6 +28,8 @@
 //! minimum-image convention before handing differences in.
 
 pub mod band;
+#[cfg(feature = "capi")]
+pub mod capi;
 pub mod error;
 pub mod minmode;
 pub mod projection;
