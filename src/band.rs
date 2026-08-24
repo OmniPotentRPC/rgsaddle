@@ -36,11 +36,10 @@ pub struct BandConfig {
     pub force_tol: f64,
     pub force_gate: crate::ForceGate,
     pub max_move: f64,
-    /// Band stepper. FIRE by default: the projected band force is
-    /// non-conservative, and rgmin's session L-BFGS currently applies
-    /// an energy-decrease acceptance on the first-order path, which
-    /// refuses every NEB step (rgmin's Accept::None routing gap; FIRE
-    /// steps unconditionally, matching eOn's velocity NEB stepper).
+    /// Band stepper. FIRE by default, matching eOn's velocity NEB
+    /// stepper. The projected band force is non-conservative;
+    /// `Accept::None` on L-BFGS / BFGS / steepest takes the
+    /// maxmove-clipped step (rgmin-65z1).
     pub method: Method,
 }
 
