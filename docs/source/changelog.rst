@@ -18,9 +18,10 @@ Unreleased
   (``ForceGate.L2_NORM``, ``LINF_NORM``, ``MAX_FORCE_ON_ATOM``).
 
 - Sella ``Translation`` / ``Rotation`` / ``Displacement``
-  internals and ``Constraints`` equality residual on the
-  same manifold (``project`` / ``retract`` / ``transport``
-  stay on the level set). Bond / angle / dihedral topology
+  internals implement ``rgmin::Manifold`` (``project`` /
+  ``retract`` / ``transport`` stay on each coordinate's
+  level set) and feed the ``Constraints`` equality residual
+  on the same chart. Bond / angle / dihedral topology
   stays in vocn. ``InternalPes.from_find`` loads a vocn
   auto-find primitive set; dest does not generate Bond /
   Angle / Dihedral topology. C ABI
