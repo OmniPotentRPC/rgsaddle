@@ -665,9 +665,19 @@ mod tests {
         assert_eq!(inner.internals().chart().counts().ntrans, 3);
     }
 
+    struct Quad;
+    impl PointSurface for Quad {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            let mut g = Array1::zeros(x.len());
+            g[0] = 2.0 * x[0];
+            Ok((x[0] * x[0], g))
+        }
+    }
+
     #[test]
     fn internals_kick_updates_the_int_hessian() {
-        let x = Array1::zeros(6);
+        let mut x = Array1::zeros(6);
+        x[0] = 0.4;
         let masses = Array1::from(vec![1.0, 1.0]);
         let mut chart = Constraints::new(2).unwrap();
         chart
@@ -683,7 +693,7 @@ mod tests {
         );
         let h0 = pes.hessian().hessian()[(0, 0)];
         let dq = Array1::from(vec![0.15]);
-        pes.kick(&Well, dq.view()).unwrap();
+        pes.kick(&Quad, dq.view()).unwrap();
         let h1 = pes.hessian().hessian()[(0, 0)];
         assert!(h1.is_finite());
         assert!((h1 - h0).abs() > 1e-18, "internals Hessian must accept a pair");
