@@ -115,6 +115,8 @@ impl InternalPes {
 pub struct CellCartesianPes {
     cart: CartesianPes,
     cell: Cell,
+    /// Sella `cell_mask`: which of the 9 Cartesian cell entries are free.
+    mask: [bool; 9],
 }
 
 impl CellCartesianPes {
@@ -122,6 +124,7 @@ impl CellCartesianPes {
         Ok(Self {
             cart: CartesianPes::new(x, masses)?,
             cell,
+            mask: [true; 9],
         })
     }
 
@@ -131,6 +134,25 @@ impl CellCartesianPes {
 
     pub fn set_cell(&mut self, cell: Cell) {
         self.cell = cell;
+    }
+
+    /// Sella `cell_mask`, row-major 3x3.
+    pub fn set_mask(&mut self, mask: [bool; 9]) {
+        self.mask = mask;
+    }
+
+    pub fn mask(&self) -> [bool; 9] {
+        self.mask
+    }
+
+    /// Zero cell-step entries the mask forbids.
+    pub fn project_cell_step(&self, mut dcell: [f64; 9]) -> [f64; 9] {
+        for i in 0..9 {
+            if !self.mask[i] {
+                dcell[i] = 0.0;
+            }
+        }
+        dcell
     }
 
     pub fn cartesian(&self) -> &CartesianPes {
@@ -302,6 +324,14 @@ mod tests {
         )
         .unwrap();
         let _ = cart.cell();
+        let mut cart = cart;
+        cart.set_mask([
+            true, false, false, false, true, false, false, false, true,
+        ]);
+        let step = cart.project_cell_step([1.0; 9]);
+        assert_eq!(step[0], 1.0);
+        assert_eq!(step[1], 0.0);
+        assert_eq!(step[4], 1.0);
         let mut chart = Constraints::new(2).unwrap();
         chart.fix_com(Array1::zeros(6).view()).unwrap();
         let inner = CellInternalPes::new(
