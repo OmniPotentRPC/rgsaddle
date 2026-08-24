@@ -19,9 +19,9 @@ impl BandSurface for DoubleWell {
         for (i, row) in positions.outer_iter().enumerate() {
             let (x, y, z) = (row[0], row[1], row[2]);
             energies[i] = (x * x - 1.0).powi(2) + 2.0 * y * y + 2.0 * z * z;
-            gradients[i][0] = 4.0 * x * (x * x - 1.0);
-            gradients[i][1] = 4.0 * y;
-            gradients[i][2] = 4.0 * z;
+            gradients[(i, 0)] = 4.0 * x * (x * x - 1.0);
+            gradients[(i, 1)] = 4.0 * y;
+            gradients[(i, 2)] = 4.0 * z;
         }
         Ok(())
     }
@@ -46,7 +46,16 @@ fn band_converges_to_the_double_well_saddle() {
         ..BandConfig::default()
     };
     let mut session = BandSession::new(config, initial_band(n_images)).unwrap();
-    let report = session.run(&DoubleWell, 3000).unwrap();
+    let mut report = session.step(&DoubleWell).unwrap();
+    for k in 0..3000 {
+        if report.status == BandStatus::Converged {
+            break;
+        }
+        if k % 200 == 0 {
+            eprintln!("step {k}: max_force={} ci={:?}", report.max_force, report.ci_index);
+        }
+        report = session.step(&DoubleWell).unwrap();
+    }
     assert_eq!(report.status, BandStatus::Converged, "max_force={}", report.max_force);
 
     let pos = session.positions();

@@ -4,10 +4,7 @@
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
-use rgmin::control::Control;
-use rgmin::method::Method;
-use rgmin::oracle::Oracle;
-use rgmin::session::Solver;
+use rgmin::{Control, Method, Oracle, Solver};
 
 use crate::error::SaddleError;
 use crate::projection::{climbing_image_force, dneb_component, force_perp, ProjectionKind};
@@ -59,7 +56,12 @@ pub struct BandConfig {
     pub cell: Option<Cell>,
     pub force_tol: f64,
     pub max_move: f64,
-    pub memory: usize,
+    /// Band stepper. FIRE by default: the projected band force is
+    /// non-conservative, and rgmin's session L-BFGS currently applies
+    /// an energy-decrease acceptance on the first-order path, which
+    /// refuses every NEB step (rgmin's Accept::None routing gap; FIRE
+    /// steps unconditionally, matching eOn's velocity NEB stepper).
+    pub method: Method,
 }
 
 impl Default for BandConfig {
@@ -70,12 +72,14 @@ impl Default for BandConfig {
             projection: ProjectionKind::Neb,
             climbing: Some(CiConfig {
                 trigger_factor: 0.5,
-                trigger_force: f64::INFINITY,
+                trigger_force: 0.0,
             }),
             cell: None,
             force_tol: 1e-3,
             max_move: 0.2,
-            memory: 20,
+            method: Method::Fire {
+                kind: rgmin::FireKind::V2,
+            },
         }
     }
 }
@@ -266,13 +270,12 @@ impl BandSession {
         }
         let interior_dof = (n_images - 2) * dof;
         let control = Control {
-            maxiter: 1,
+            maxiter: usize::MAX,
             gtol: 0.0,
             istep: 1.0,
             maxmove: Some(config.max_move),
         };
-        let memory = config.memory;
-        let solver = Solver::new(Method::Lbfgs { memory }, control, interior_dof);
+        let solver = Solver::new(config.method.clone(), control, interior_dof);
         Ok(Self {
             config,
             positions: initial,
