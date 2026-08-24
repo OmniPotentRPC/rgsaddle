@@ -6,6 +6,10 @@
 
 ** Unreleased
 
+- ~SamdSession~ is Sella ~samd.py~ BDP: Euclidean ~step~ on
+  the C wire (~rgsaddle_samd_*~), and ~step_on~ /
+  ~retract_samd~ / ~transport_velocity~ so a retracted
+  Verlet increment stays on the set.
 - Force gate is the eOn / gpr_optim closed enum
   (~L2~ / ~Linf~ / ~MaxForceOnAtom~), not a single implied
   scalar. Sessions take ~ForceGate~; the C ABI is

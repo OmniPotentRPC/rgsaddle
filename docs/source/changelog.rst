@@ -6,6 +6,11 @@ Changelog
 Unreleased
 ~~~~~~~~~~
 
+- ``SamdSession`` is Sella ``samd.py`` BDP: Euclidean ``step``
+  on the C wire (``rgsaddle_samd_*``), and ``step_on`` /
+  ``retract_samd`` / ``transport_velocity`` so a retracted
+  Verlet increment stays on the set.
+
 - Force gate is the eOn / gpr ``ConvergenceForceNorm`` closed
   enum (``L2`` / ``Linf`` / ``MaxForceOnAtom``). C field type is
   ``rgsaddle_force_gate_t``; unknown discriminants refuse create.
