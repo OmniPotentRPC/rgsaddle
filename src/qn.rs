@@ -12,7 +12,6 @@
 pub use rgmin::{qn_get_s, qn_restricted};
 
 use ndarray::{Array1, Array2};
-use rgmin::vecops::{dot, nrm2, Vector};
 use rgmin::Manifold;
 
 /// Sella `QuasiNewton.alpha0`. Slope is \(-1\): larger \(\alpha\)
@@ -165,15 +164,11 @@ pub fn qn_retract<M: Manifold>(
     retract_qn(man, x, evals, evecs, egrad, order, alpha)
 }
 
-/// \(\|x\|_2\) through the vecops / DLPack seam.
-fn seam_nrm2(x: &Array1<f64>) -> f64 {
-    nrm2(Vector::from_host(x.clone()).host_view())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use ndarray::array;
+    use rgmin::vecops::{dot, nrm2};
     use rgmin::ManifoldKind;
 
     #[test]
@@ -214,7 +209,7 @@ mod tests {
         let evecs = Array2::<f64>::eye(2);
         let g = array![4.0, 0.0];
         let s = QuasiNewton::new(&evals, &evecs, &g, 0).restricted(0.5);
-        let n = seam_nrm2(&s);
+        let n = nrm2(s.view());
         assert!((n - 0.5).abs() < 1e-9, "||s||={n}");
     }
 
@@ -227,7 +222,7 @@ mod tests {
         let egrad = array![1.0, 0.2, -0.3];
         let stepper = QuasiNewton::new(&evals, &evecs, &egrad, 0);
         let y = stepper.step_on(&man, &x, &egrad, ALPHA0);
-        let n = seam_nrm2(&y);
+        let n = nrm2(y.view());
         assert!((n - 1.0).abs() < 1e-12, "||y||={n} y={y:?}");
         assert!(y.iter().all(|v| v.is_finite()));
 

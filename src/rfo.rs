@@ -15,7 +15,6 @@
 //! `egrad2rgrad`, `project`, `retract`.
 
 use ndarray::{Array1, Array2};
-use rgmin::vecops::nrm2;
 use rgmin::{Manifold, rfo_get_s, rfo_restricted};
 
 /// Sella `RationalFunctionOptimization` synonyms.
@@ -115,7 +114,7 @@ pub fn rfo_stepper(name: &str, order: usize) -> Option<RationalFunctionOptimizat
 mod tests {
     use super::*;
     use ndarray::{Array2, array};
-    use rgmin::vecops::dot;
+    use rgmin::vecops::{dot, nrm2};
     use rgmin::ManifoldKind;
 
     #[test]
