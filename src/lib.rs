@@ -19,7 +19,8 @@
 //! kick along the imaginary mode, then take Gonzalez--Schlegel /
 //! Sella steps on the mass-weighted sphere (`rgmin::IrcTrust` over
 //! [`rgmin::ManifoldKind::MwRigid`]). SellaMin is QN + TrustRegion
-//! on [`pes::CartesianPes`] (Cartesian BFGS, per-atom `||F||_2`).
+//! on [`pes::CartesianPes`] (Cartesian BFGS, per-atom `||F||_2`) or
+//! [`pes_internal::InternalPes`] (Sella `InternalPES`).
 //! Sella `QuasiNewton` is [`qn::QuasiNewton`]: `rgmin::qn_get_s`
 //! with proj / retr / transp. Sella `RationalFunctionOptimization` is
 //! [`rfo::RationalFunctionOptimization`]: `rgmin::rfo_get_s` with
@@ -78,7 +79,10 @@ pub mod tangent;
 
 pub use band::{BandConfig, BandReport, BandSession, BandStatus, BandSurface};
 pub use constraints::{Constraints, Equality, InternalCounts};
-pub use eigensolve::{exact_eigh, eigh_on, lowest_on, rayleigh_ritz, EigenDevice};
+pub use eigensolve::{
+    exact_eigh, eigh_on, expand, lowest_on, rayleigh_ritz, rayleigh_ritz_iter, EigenDevice,
+    ExpandKind,
+};
 pub use error::SaddleError;
 pub use force::ForceGate;
 pub use force_match::{covalent_pairs, force_match_hessian};
@@ -91,7 +95,10 @@ pub use minmode::{
     MinModeConfig, MinModeKind, MinModeReport, MinModeSession, MinModeStatus, PointSurface,
 };
 pub use pes::{CartesianPes, HessUpdate};
-pub use pes_internal::{CellCartesianPes, CellInternalPes, InternalPes};
+pub use pes_internal::{
+    niggli_reduce_cell, niggli_reduce_vectors, CellCartesianPes, CellInternalPes, InternalPes,
+    SellaPes,
+};
 pub use projection::ProjectionKind;
 pub use qn::{get_stepper, retract_qn, QuasiNewton, StepperKind};
 pub use restricted::{mis_clip, InternalWeights, MaxInternalStep, RestrictedKind};

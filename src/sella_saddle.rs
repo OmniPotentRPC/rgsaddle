@@ -1,9 +1,10 @@
-//! Sella order-1 session: P-RFO + TrustRegion over [`CartesianPes`].
+//! Sella order-1 session: P-RFO + TrustRegion over a Cartesian or internals PES.
 //!
 //! `sella.optimize.optimize.Sella` with `order=1`, `method=prfo`.
 //! Distinct from [`crate::minmode::MinModeSession`] (dimer / Lanczos
 //! force inversion). Default geometry is the rigid quotient; pass a
-//! [`Constraints`] chart through [`SellaSaddleSession::with_chart`].
+//! [`Constraints`] chart through [`SellaSaddleSession::with_chart`],
+//! or [`SellaSaddleSession::on_internal`] for Sella `InternalPES`.
 //! Hosts own the loop.
 
 use ndarray::Array1;
@@ -16,6 +17,7 @@ use crate::error::SaddleError;
 use crate::geom::{update_trust, SellaGeom, TrustSchedule};
 use crate::minmode::PointSurface;
 use crate::pes::CartesianPes;
+use crate::pes_internal::{InternalPes, SellaPes};
 
 pub struct SellaSaddleConfig {
     pub delta: f64,
@@ -34,6 +36,8 @@ pub struct SellaSaddleConfig {
     /// Sella `gamma` residual scale. `<= 0` is exact eigh.
     pub gamma: f64,
     pub eigen_device: crate::EigenDevice,
+    /// Sella `rayleigh_ritz(..., method=)`.
+    pub expand: crate::ExpandKind,
 }
 
 impl SellaSaddleConfig {
@@ -65,6 +69,7 @@ impl Default for SellaSaddleConfig {
             nsteps_per_diag: 3,
             gamma: 0.1,
             eigen_device: crate::EigenDevice::Host,
+            expand: crate::ExpandKind::Jd0,
         }
     }
 }
@@ -78,12 +83,13 @@ pub struct SellaSaddleReport {
 }
 
 pub struct SellaSaddleSession {
-    pes: CartesianPes,
+    pes: SellaPes,
     config: SellaSaddleConfig,
     geom: SellaGeom,
     delta: f64,
     rho: f64,
     steps_since_diag: usize,
+    ritz_v: Option<ndarray::Array2<f64>>,
 }
 
 impl SellaSaddleSession {
@@ -115,12 +121,35 @@ impl SellaSaddleSession {
         let n_free = geom.n_free(x.len());
         let delta = config.delta * n_free as f64;
         Ok(Self {
-            pes: CartesianPes::new(x, masses)?,
+            pes: SellaPes::Cartesian(CartesianPes::new(x, masses)?),
             config,
             geom,
             delta,
             rho: 1.0,
             steps_since_diag: 0,
+            ritz_v: None,
+        })
+    }
+
+    /// P-RFO in the internals chart (Sella `InternalPES`).
+    pub fn on_internal(
+        config: SellaSaddleConfig,
+        x: Array1<f64>,
+        masses: Array1<f64>,
+        chart: Constraints,
+    ) -> Result<Self, SaddleError> {
+        let pes = InternalPes::new(x, masses, chart)?;
+        let n_free = pes.n_int().max(1);
+        let geom = SellaGeom::Chart(pes.chart().clone());
+        let delta = config.delta * n_free as f64;
+        Ok(Self {
+            pes: SellaPes::Internal(pes),
+            config,
+            geom,
+            delta,
+            rho: 1.0,
+            steps_since_diag: 0,
+            ritz_v: None,
         })
     }
 
@@ -140,54 +169,104 @@ impl SellaSaddleSession {
         &self.geom
     }
 
-    /// Sella Hessian update on the Cartesian PES.
+    /// Sella Hessian update (Cartesian or internals, matching the PES).
     pub fn set_update(&mut self, update: crate::HessUpdate) {
         self.pes.set_update(update);
     }
 
+    pub fn internal_pes(&self) -> Option<&InternalPes> {
+        self.pes.internal()
+    }
+
     pub fn reset(&mut self) {
         self.pes.reset();
-        let n = self.pes.position().len();
-        self.delta = self.config.delta * self.geom.n_free(n) as f64;
+        let n_free = match &self.pes {
+            SellaPes::Internal(p) => p.n_int().max(1),
+            SellaPes::Cartesian(_) => self.geom.n_free(self.pes.position().len()),
+        };
+        self.delta = self.config.delta * n_free as f64;
         self.rho = 1.0;
         self.steps_since_diag = 0;
+        self.ritz_v = None;
     }
 
     pub fn step<S: PointSurface>(
         &mut self,
         surface: &S,
     ) -> Result<SellaSaddleReport, SaddleError> {
-        let x = self.pes.position().to_owned();
-        let (energy, g) = surface.eval(x.view())?;
-        if !g.iter().all(|v| v.is_finite()) {
-            return Err(SaddleError::NonFinite("sella gradient"));
+        match &self.pes {
+            SellaPes::Internal(_) => self.step_internal(surface),
+            SellaPes::Cartesian(_) => self.step_cartesian(surface),
         }
-        let g_r = self.geom.egrad2rgrad(&x, &g);
-        let vg = Vector::from_host(g_r.clone());
-        let max_force = self.config.force_gate.value(g_r.view());
-        if max_force <= self.config.force_tol {
-            return Ok(SellaSaddleReport {
-                energy,
-                max_force,
-                at_saddle: true,
-                rho: self.rho,
-                delta: self.delta,
-            });
-        }
-        let u = self.geom.ufree(&x);
-        let g_free = crate::geom::u_t_vec(&u, &g_r);
-        let h_free = crate::geom::u_t_h_u(&u, self.pes.hessian().hessian());
-        let (evals, evecs) = if self.config.eig
-            && self.steps_since_diag >= self.config.nsteps_per_diag.max(1)
-        {
+    }
+
+    fn diag_free(
+        &mut self,
+        h_free: &ndarray::Array2<f64>,
+    ) -> Result<(ndarray::Array1<f64>, ndarray::Array2<f64>), SaddleError> {
+        if self.config.eig && self.steps_since_diag >= self.config.nsteps_per_diag.max(1) {
             self.steps_since_diag = 0;
-            let v0 = ndarray::Array2::eye(h_free.nrows());
-            let (lams, vecs, _) =
-                crate::rayleigh_ritz(h_free.view(), v0.view(), self.config.gamma)?;
-            (lams, vecs)
+            let n = h_free.nrows();
+            let v0 = self
+                .ritz_v
+                .clone()
+                .filter(|v| v.nrows() == n)
+                .unwrap_or_else(|| ndarray::Array2::eye(n));
+            let (lams, vecs, _) = crate::rayleigh_ritz_iter(
+                h_free.view(),
+                v0.view(),
+                self.config.gamma,
+                self.config.expand,
+            )?;
+            self.ritz_v = Some(vecs.clone());
+            Ok((lams, vecs))
         } else {
             self.steps_since_diag += 1;
-            crate::eigh_on(self.config.eigen_device, h_free.view())?
+            crate::eigh_on(self.config.eigen_device, h_free.view())
+        }
+    }
+
+    fn step_cartesian<S: PointSurface>(
+        &mut self,
+        surface: &S,
+    ) -> Result<SellaSaddleReport, SaddleError> {
+        let x;
+        let energy;
+        let g_r;
+        let u;
+        let g_free;
+        let h_free;
+        {
+            let pes = match &self.pes {
+                SellaPes::Cartesian(p) => p,
+                SellaPes::Internal(_) => unreachable!(),
+            };
+            x = pes.position().to_owned();
+            let (e, g) = surface.eval(x.view())?;
+            energy = e;
+            if !g.iter().all(|v| v.is_finite()) {
+                return Err(SaddleError::NonFinite("sella gradient"));
+            }
+            g_r = self.geom.egrad2rgrad(&x, &g);
+            let max_force = self.config.force_gate.value(g_r.view());
+            if max_force <= self.config.force_tol {
+                return Ok(SellaSaddleReport {
+                    energy,
+                    max_force,
+                    at_saddle: true,
+                    rho: self.rho,
+                    delta: self.delta,
+                });
+            }
+            u = self.geom.ufree(&x);
+            g_free = crate::geom::u_t_vec(&u, &g_r);
+            h_free = crate::geom::u_t_h_u(&u, pes.hessian().hessian());
+        }
+        let vg = Vector::from_host(g_r.clone());
+        let (evals, evecs) = self.diag_free(&h_free)?;
+        let pes = match &mut self.pes {
+            SellaPes::Cartesian(p) => p,
+            SellaPes::Internal(_) => unreachable!(),
         };
         let s_free = prfo_restricted(
             &evals,
@@ -211,13 +290,85 @@ impl SellaSaddleSession {
         let mut d = x1;
         axpy(-1.0, x.view(), &mut d);
         let e0 = energy;
-        let hs = self.pes.hessian().hessian().dot(&s);
+        let hs = pes.hessian().hessian().dot(&s);
         let pred = vdot(&vg, &vs) + 0.5 * dot(s.view(), hs.view());
-        self.pes.kick(surface, d.view())?;
-        let x_new = self.pes.position().to_owned();
+        pes.kick(surface, d.view())?;
+        let x_new = pes.position().to_owned();
         let (energy, g1) = surface.eval(x_new.view())?;
         let g1_r = self.geom.egrad2rgrad(&x_new, &g1);
         let max_force = self.config.force_gate.value(g1_r.view());
+        if pred.abs() >= 1e-14 {
+            self.rho = (energy - e0) / pred;
+            self.delta = update_trust(self.delta, self.rho, vnrm2(&vs), &self.config.schedule());
+        } else {
+            self.rho = 1.0;
+        }
+        Ok(SellaSaddleReport {
+            energy,
+            max_force,
+            at_saddle: max_force <= self.config.force_tol,
+            rho: self.rho,
+            delta: self.delta,
+        })
+    }
+
+    fn step_internal<S: PointSurface>(
+        &mut self,
+        surface: &S,
+    ) -> Result<SellaSaddleReport, SaddleError> {
+        let x;
+        let energy;
+        let g;
+        let g_int;
+        let h;
+        {
+            let pes = match &self.pes {
+                SellaPes::Internal(p) => p,
+                SellaPes::Cartesian(_) => unreachable!(),
+            };
+            x = pes.position().to_owned();
+            let (e, gg) = surface.eval(x.view())?;
+            energy = e;
+            g = gg;
+            if !g.iter().all(|v| v.is_finite()) {
+                return Err(SaddleError::NonFinite("sella gradient"));
+            }
+            let max_force = self.config.force_gate.value(g.view());
+            if max_force <= self.config.force_tol {
+                return Ok(SellaSaddleReport {
+                    energy,
+                    max_force,
+                    at_saddle: true,
+                    rho: self.rho,
+                    delta: self.delta,
+                });
+            }
+            g_int = pes.internals_grad(g.view())?;
+            h = pes.hessian().hessian().to_owned();
+        }
+        let vg = Vector::from_host(g_int.clone());
+        let (evals, evecs) = self.diag_free(&h)?;
+        let pes = match &mut self.pes {
+            SellaPes::Internal(p) => p,
+            SellaPes::Cartesian(_) => unreachable!(),
+        };
+        let mut s = prfo_restricted(
+            &evals,
+            &evecs,
+            &g_int,
+            self.config.order.max(1),
+            self.delta,
+        );
+        let sn = vnrm2(&Vector::from_host(s.clone()));
+        if sn > self.delta && sn > 0.0 {
+            s.mapv_inplace(|v| v * (self.delta / sn));
+        }
+        let vs = Vector::from_host(s.clone());
+        let e0 = energy;
+        let hs = h.dot(&s);
+        let pred = vdot(&vg, &vs) + 0.5 * dot(s.view(), hs.view());
+        let (energy, g1) = pes.kick(surface, s.view())?;
+        let max_force = self.config.force_gate.value(g1.view());
         if pred.abs() >= 1e-14 {
             self.rho = (energy - e0) / pred;
             self.delta = update_trust(self.delta, self.rho, vnrm2(&vs), &self.config.schedule());
@@ -359,6 +510,28 @@ mod tests {
         let d_h = ManifoldKind::RigidQuotient.project(&x0, &d);
         let err = nrm2((&d - &d_h).view());
         assert!(err < 1e-10, "step left the horizontal space: {err}");
+    }
+
+    #[test]
+    fn internals_prfo_step_is_finite() {
+        use crate::internal::{CartAxis, Translation};
+        let mut x = Array1::zeros(6);
+        x[0] = 0.2;
+        let mut chart = Constraints::new(2).unwrap();
+        chart
+            .fix_translation(Translation::all(2, CartAxis::X).unwrap(), x.view(), Some(0.0))
+            .unwrap();
+        let mut sess = SellaSaddleSession::on_internal(
+            SellaSaddleConfig::default(),
+            x,
+            Array1::from(vec![1.0, 1.0]),
+            chart,
+        )
+        .unwrap();
+        assert!(sess.internal_pes().is_some());
+        let report = sess.step(&Well).unwrap();
+        assert!(report.energy.is_finite());
+        assert!(sess.position().iter().all(|v| v.is_finite()));
     }
 
     #[test]

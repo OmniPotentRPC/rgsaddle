@@ -1,12 +1,13 @@
-//! Sella order-0 session: QN + TrustRegion over [`CartesianPes`].
+//! Sella order-0 session: QN + TrustRegion over a Cartesian or internals PES.
 //!
 //! `sella.optimize.optimize.Sella` with `order=0`, `method=qn`,
 //! `eig=false`. One step is eval, project, `qn_restricted`, retract,
 //! transport, `PES.kick`, then the `delta0` / `sigma` / `rho` trust
 //! schedule. Default geometry is [`crate::geom::SellaGeom::cartesian`]
 //! (RigidQuotient at N>=3). Pass a [`Constraints`] chart through
-//! [`SellaMinSession::with_chart`] to retract on `ker(J)`. The host
-//! owns the loop. `run` is a convenience.
+//! [`SellaMinSession::with_chart`] to retract on `ker(J)`, or
+//! [`SellaMinSession::on_internal`] to QN in the internals chart
+//! (Sella `InternalPES`). The host owns the loop. `run` is a convenience.
 
 use ndarray::Array1;
 use rgmin::qn_restricted;
@@ -18,6 +19,7 @@ use crate::error::SaddleError;
 use crate::geom::{update_trust, SellaGeom, TrustSchedule};
 use crate::minmode::PointSurface;
 use crate::pes::CartesianPes;
+use crate::pes_internal::{InternalPes, SellaPes};
 
 /// Sella `_default_kwargs['minimum']` plus a force gate.
 pub struct SellaMinConfig {
@@ -70,7 +72,7 @@ pub struct SellaMinReport {
 }
 
 pub struct SellaMinSession {
-    pes: CartesianPes,
+    pes: SellaPes,
     config: SellaMinConfig,
     geom: SellaGeom,
     delta: f64,
@@ -106,7 +108,30 @@ impl SellaMinSession {
         let n_free = geom.n_free(x.len());
         let delta = config.delta * n_free as f64;
         Ok(Self {
-            pes: CartesianPes::new(x, masses)?,
+            pes: SellaPes::Cartesian(CartesianPes::new(x, masses)?),
+            config,
+            geom,
+            delta,
+            rho: 1.0,
+        })
+    }
+
+    /// QN in the internals chart (Sella `InternalPES`).
+    ///
+    /// `delta0` is scaled by the number of internals. The force gate
+    /// still reads the Cartesian gradient.
+    pub fn on_internal(
+        config: SellaMinConfig,
+        x: Array1<f64>,
+        masses: Array1<f64>,
+        chart: Constraints,
+    ) -> Result<Self, SaddleError> {
+        let pes = InternalPes::new(x, masses, chart)?;
+        let n_free = pes.n_int().max(1);
+        let geom = SellaGeom::Chart(pes.chart().clone());
+        let delta = config.delta * n_free as f64;
+        Ok(Self {
+            pes: SellaPes::Internal(pes),
             config,
             geom,
             delta,
@@ -118,13 +143,18 @@ impl SellaMinSession {
         &self.geom
     }
 
-    /// Sella Hessian update on the Cartesian PES.
+    /// Sella Hessian update (Cartesian or internals, matching the PES).
     pub fn set_update(&mut self, update: crate::HessUpdate) {
         self.pes.set_update(update);
     }
 
     pub fn position(&self) -> ndarray::ArrayView1<'_, f64> {
         self.pes.position()
+    }
+
+    /// Internals PES when the session was built with [`Self::on_internal`].
+    pub fn internal_pes(&self) -> Option<&InternalPes> {
+        self.pes.internal()
     }
 
     /// Living Sella trust radius.
@@ -139,13 +169,30 @@ impl SellaMinSession {
 
     pub fn reset(&mut self) {
         self.pes.reset();
-        let n = self.pes.position().len();
-        self.delta = self.config.delta * self.geom.n_free(n) as f64;
+        let n_free = match &self.pes {
+            SellaPes::Internal(p) => p.n_int().max(1),
+            SellaPes::Cartesian(_) => self.geom.n_free(self.pes.position().len()),
+        };
+        self.delta = self.config.delta * n_free as f64;
         self.rho = 1.0;
     }
 
     pub fn step<S: PointSurface>(&mut self, surface: &S) -> Result<SellaMinReport, SaddleError> {
-        let x = self.pes.position().to_owned();
+        match &self.pes {
+            SellaPes::Internal(_) => self.step_internal(surface),
+            SellaPes::Cartesian(_) => self.step_cartesian(surface),
+        }
+    }
+
+    fn step_cartesian<S: PointSurface>(
+        &mut self,
+        surface: &S,
+    ) -> Result<SellaMinReport, SaddleError> {
+        let pes = match &mut self.pes {
+            SellaPes::Cartesian(p) => p,
+            SellaPes::Internal(_) => unreachable!(),
+        };
+        let x = pes.position().to_owned();
         let (energy, g) = surface.eval(x.view())?;
         if !g.iter().all(|v| v.is_finite()) {
             return Err(SaddleError::NonFinite("sella gradient"));
@@ -164,7 +211,7 @@ impl SellaMinSession {
         }
         let u = self.geom.ufree(&x);
         let g_free = crate::geom::u_t_vec(&u, &g_r);
-        let h_free = crate::geom::u_t_h_u(&u, self.pes.hessian().hessian());
+        let h_free = crate::geom::u_t_h_u(&u, pes.hessian().hessian());
         let (evals, evecs) = crate::exact_eigh(h_free.view())?;
         let s_free = qn_restricted(&evals, &evecs, &g_free, 0, self.delta);
         let mut s = crate::geom::u_vec(&u, &s_free);
@@ -182,12 +229,65 @@ impl SellaMinSession {
         let mut d = x1;
         axpy(-1.0, x.view(), &mut d);
         let e0 = energy;
-        let hs = self.pes.hessian().hessian().dot(&s);
+        let hs = pes.hessian().hessian().dot(&s);
         let pred = vdot(&vg, &vs) + 0.5 * dot(s.view(), hs.view());
-        let (energy, g1) = self.pes.kick(surface, d.view())?;
-        let x_new = self.pes.position().to_owned();
+        let (energy, g1) = pes.kick(surface, d.view())?;
+        let x_new = pes.position().to_owned();
         let g1_r = self.geom.egrad2rgrad(&x_new, &g1);
         let max_force = self.config.force_gate.value(g1_r.view());
+        if pred.abs() >= 1e-14 {
+            self.rho = (energy - e0) / pred;
+            self.delta = update_trust(self.delta, self.rho, vnrm2(&vs), &self.config.schedule());
+        } else {
+            self.rho = 1.0;
+        }
+        Ok(SellaMinReport {
+            energy,
+            max_force,
+            at_minimum: max_force <= self.config.force_tol,
+            rho: self.rho,
+            delta: self.delta,
+        })
+    }
+
+    fn step_internal<S: PointSurface>(
+        &mut self,
+        surface: &S,
+    ) -> Result<SellaMinReport, SaddleError> {
+        let pes = match &mut self.pes {
+            SellaPes::Internal(p) => p,
+            SellaPes::Cartesian(_) => unreachable!(),
+        };
+        let x = pes.position().to_owned();
+        let (energy, g) = surface.eval(x.view())?;
+        if !g.iter().all(|v| v.is_finite()) {
+            return Err(SaddleError::NonFinite("sella gradient"));
+        }
+        let max_force = self.config.force_gate.value(g.view());
+        if max_force <= self.config.force_tol {
+            return Ok(SellaMinReport {
+                energy,
+                max_force,
+                at_minimum: true,
+                rho: self.rho,
+                delta: self.delta,
+            });
+        }
+        let g_int = pes.internals_grad(g.view())?;
+        let vg = Vector::from_host(g_int.clone());
+        let h = pes.hessian().hessian();
+        let (evals, evecs) = crate::exact_eigh(h.view())?;
+        let mut s = qn_restricted(&evals, &evecs, &g_int, 0, self.delta);
+        let sn = vnrm2(&Vector::from_host(s.clone()));
+        if sn > self.delta && sn > 0.0 {
+            s.mapv_inplace(|v| v * (self.delta / sn));
+        }
+        let vs = Vector::from_host(s.clone());
+        let e0 = energy;
+        let hs = h.dot(&s);
+        let pred = vdot(&vg, &vs) + 0.5 * dot(s.view(), hs.view());
+        let (energy, g1) = pes.kick(surface, s.view())?;
+        let max_force = self.config.force_gate.value(g1.view());
         if pred.abs() >= 1e-14 {
             self.rho = (energy - e0) / pred;
             self.delta = update_trust(self.delta, self.rho, vnrm2(&vs), &self.config.schedule());
@@ -360,6 +460,33 @@ mod tests {
         let grown = update_trust(0.2, 1.0, 0.2, &cfg.schedule());
         assert!(grown > 0.2, "good rho must grow: {grown}");
         assert!((grown - cfg.sigma_inc * 0.2).abs() < 1e-14);
+    }
+
+    #[test]
+    fn internals_qn_reaches_the_well() {
+        use crate::internal::{CartAxis, Translation};
+        let mut x = Array1::zeros(6);
+        x[0] = 0.2;
+        let mut chart = Constraints::new(2).unwrap();
+        chart
+            .fix_translation(Translation::all(2, CartAxis::X).unwrap(), x.view(), Some(0.0))
+            .unwrap();
+        let mut sess = SellaMinSession::on_internal(
+            SellaMinConfig {
+                delta: 0.2,
+                force_tol: 0.05,
+                ..SellaMinConfig::default()
+            },
+            x,
+            Array1::from(vec![1.0, 1.0]),
+            chart,
+        )
+        .unwrap();
+        assert!(sess.internal_pes().is_some());
+        assert!((sess.delta() - 0.2).abs() < 1e-14);
+        let report = sess.run(&Well, 40).unwrap();
+        assert!(report.at_minimum, "force {}", report.max_force);
+        assert!((sess.position()[0].abs() - 1.0).abs() < 0.35);
     }
 
     #[test]
