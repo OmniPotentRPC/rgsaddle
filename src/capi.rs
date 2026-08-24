@@ -811,3 +811,87 @@ pub unsafe extern "C" fn rgsaddle_irc_free(session: *mut RgsaddleIrc) {
         drop(unsafe { Box::from_raw(session) });
     }
 }
+
+#[cfg(test)]
+mod irc_abi_tests {
+    use super::*;
+    use ndarray::Array1;
+
+    struct Well;
+    impl PointSurface for Well {
+        fn eval(
+            &self,
+            x: ndarray::ArrayView1<f64>,
+        ) -> Result<(f64, Array1<f64>), SaddleError> {
+            let t = x[0];
+            let mut g = Array1::zeros(x.len());
+            g[0] = 4.0 * t * (t * t - 1.0);
+            Ok(((t * t - 1.0).powi(2), g))
+        }
+    }
+
+    extern "C" fn well_cb(_user: *mut c_void, req: *mut RgsaddleSurfaceRequest) -> i32 {
+        unsafe {
+            let req = &mut *req;
+            let n = (req.n_atoms * 3) as usize;
+            let pos = slice::from_raw_parts(req.positions, n);
+            let x = Array1::from(pos.to_vec());
+            let (e, g) = Well.eval(x.view()).unwrap();
+            *req.energies = e;
+            let gout = slice::from_raw_parts_mut(req.gradients, n);
+            for (i, v) in g.iter().enumerate() {
+                gout[i] = *v;
+            }
+        }
+        RGSADDLE_OK
+    }
+
+    #[test]
+    fn irc_abi_morokuma_leaves_the_saddle() {
+        let n_atoms = 2i64;
+        let saddle = [0.0; 6];
+        let masses = [1.0, 1.0];
+        let mut mode = [0.0; 6];
+        mode[0] = 1.0;
+        let cfg = RgsaddleIrcConfig {
+            version: RgsaddleVersion {
+                major: RGSADDLE_ABI_MAJOR,
+                minor: RGSADDLE_ABI_MINOR,
+            },
+            flags: 0,
+            dx: 0.15,
+            force_tol: 0.05,
+            max_move: 0.2,
+            max_inner: 10,
+            kind: 1,
+            direction: 0,
+        };
+        let sess = unsafe {
+            rgsaddle_irc_create(
+                &cfg,
+                n_atoms,
+                saddle.as_ptr(),
+                masses.as_ptr(),
+                mode.as_ptr(),
+            )
+        };
+        assert!(!sess.is_null());
+        let mut report = RgsaddleReport {
+            version: RgsaddleVersion { major: 0, minor: 0 },
+            flags: 0,
+            status: 0,
+            reserved: 0,
+            max_force: 0.0,
+            ci_index: 0,
+            iteration: 0,
+            curvature: 0.0,
+            rotations: 0,
+        };
+        let rc = unsafe { rgsaddle_irc_step(sess, Some(well_cb), std::ptr::null_mut(), &mut report) };
+        assert_eq!(rc, RGSADDLE_OK);
+        let mut out = [0.0; 6];
+        assert_eq!(unsafe { rgsaddle_irc_position(sess, out.as_mut_ptr()) }, RGSADDLE_OK);
+        assert!(out[0].abs() > 1e-8, "kick must leave the saddle");
+        unsafe { rgsaddle_irc_free(sess) };
+    }
+}
