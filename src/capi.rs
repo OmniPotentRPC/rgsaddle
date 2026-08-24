@@ -12,6 +12,7 @@ use ndarray::{Array1, Array2, ArrayView2};
 use rgmin::{FireKind, Method};
 
 use crate::band::{BandConfig, BandSession, BandStatus, BandSurface, CiConfig};
+use crate::irc::{IrcConfig, IrcDirection, IrcKind, IrcSession};
 use crate::mic::Cell;
 use crate::error::SaddleError;
 use crate::minmode::{MinModeConfig, MinModeKind, MinModeSession, MinModeStatus, PointSurface};
@@ -70,6 +71,18 @@ pub struct RgsaddleBandConfig {
     pub force_tol: f64,
     pub max_move: f64,
     pub memory: i64,
+}
+
+#[repr(C)]
+pub struct RgsaddleIrcConfig {
+    pub version: RgsaddleVersion,
+    pub flags: u64,
+    pub dx: f64,
+    pub force_tol: f64,
+    pub max_move: f64,
+    pub max_inner: i64,
+    pub kind: i32,
+    pub direction: i32,
 }
 
 #[repr(C)]
@@ -183,6 +196,11 @@ pub struct RgsaddleBand {
 
 pub struct RgsaddleMinMode {
     session: MinModeSession,
+    n_atoms: i64,
+}
+
+pub struct RgsaddleIrc {
+    session: IrcSession,
     n_atoms: i64,
 }
 
@@ -583,6 +601,211 @@ pub unsafe extern "C" fn rgsaddle_minmode_reset(session: *mut RgsaddleMinMode) -
 /// `session` must come from [`rgsaddle_minmode_create`], freed once.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rgsaddle_minmode_free(session: *mut RgsaddleMinMode) {
+    if !session.is_null() {
+        drop(unsafe { Box::from_raw(session) });
+    }
+}
+
+/// # Safety
+/// `saddle` and `mode` are 3N, `masses` is N.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_irc_create(
+    config: *const RgsaddleIrcConfig,
+    n_atoms: i64,
+    saddle: *const f64,
+    masses: *const f64,
+    mode: *const f64,
+) -> *mut RgsaddleIrc {
+    if config.is_null() || saddle.is_null() || masses.is_null() || mode.is_null() || n_atoms < 1 {
+        return std::ptr::null_mut();
+    }
+    let cfg = unsafe { &*config };
+    if cfg.version.major != RGSADDLE_ABI_MAJOR {
+        return std::ptr::null_mut();
+    }
+    let dof = (3 * n_atoms) as usize;
+    let x = Array1::from(unsafe { slice::from_raw_parts(saddle, dof) }.to_vec());
+    let m = Array1::from(unsafe { slice::from_raw_parts(masses, n_atoms as usize) }.to_vec());
+    let md = Array1::from(unsafe { slice::from_raw_parts(mode, dof) }.to_vec());
+    let irc_cfg = IrcConfig {
+        dx: cfg.dx,
+        force_tol: cfg.force_tol,
+        max_move: cfg.max_move,
+        max_inner: cfg.max_inner.max(1) as usize,
+        kind: if cfg.kind == 1 {
+            IrcKind::Morokuma
+        } else {
+            IrcKind::Gs2
+        },
+        ..IrcConfig::default()
+    };
+    let dir = if cfg.direction == 1 {
+        IrcDirection::Reverse
+    } else {
+        IrcDirection::Forward
+    };
+    match IrcSession::new(irc_cfg, x, m, md, dir) {
+        Ok(session) => Box::into_raw(Box::new(RgsaddleIrc { session, n_atoms })),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// # Safety
+/// `seed` is 3N. `surface` is called during the Lanczos kick.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_irc_create_from_surface(
+    config: *const RgsaddleIrcConfig,
+    n_atoms: i64,
+    saddle: *const f64,
+    masses: *const f64,
+    seed: *const f64,
+    surface: Option<RgsaddleSurfaceFn>,
+    user: *mut c_void,
+) -> *mut RgsaddleIrc {
+    if config.is_null()
+        || saddle.is_null()
+        || masses.is_null()
+        || seed.is_null()
+        || n_atoms < 1
+    {
+        return std::ptr::null_mut();
+    }
+    let Some(f) = surface else {
+        return std::ptr::null_mut();
+    };
+    let cfg = unsafe { &*config };
+    if cfg.version.major != RGSADDLE_ABI_MAJOR {
+        return std::ptr::null_mut();
+    }
+    let dof = (3 * n_atoms) as usize;
+    let x = Array1::from(unsafe { slice::from_raw_parts(saddle, dof) }.to_vec());
+    let m = Array1::from(unsafe { slice::from_raw_parts(masses, n_atoms as usize) }.to_vec());
+    let sd = Array1::from(unsafe { slice::from_raw_parts(seed, dof) }.to_vec());
+    let irc_cfg = IrcConfig {
+        dx: cfg.dx,
+        force_tol: cfg.force_tol,
+        max_move: cfg.max_move,
+        max_inner: cfg.max_inner.max(1) as usize,
+        kind: if cfg.kind == 1 {
+            IrcKind::Morokuma
+        } else {
+            IrcKind::Gs2
+        },
+        ..IrcConfig::default()
+    };
+    let dir = if cfg.direction == 1 {
+        IrcDirection::Reverse
+    } else {
+        IrcDirection::Forward
+    };
+    let cs = CSurface {
+        f,
+        user,
+        n_atoms,
+    };
+    match IrcSession::from_surface(irc_cfg, x, m, sd, dir, &cs) {
+        Ok(session) => Box::into_raw(Box::new(RgsaddleIrc { session, n_atoms })),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// # Safety
+/// `session` and `out` must be valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_irc_step(
+    session: *mut RgsaddleIrc,
+    surface: Option<RgsaddleSurfaceFn>,
+    user: *mut c_void,
+    out: *mut RgsaddleReport,
+) -> i32 {
+    if session.is_null() {
+        return RGSADDLE_NULL_SESSION;
+    }
+    if out.is_null() {
+        return RGSADDLE_NULL_REPORT;
+    }
+    let Some(f) = surface else {
+        return RGSADDLE_NULL_SURFACE;
+    };
+    let session = unsafe { &mut *session };
+    let cs = CSurface {
+        f,
+        user,
+        n_atoms: session.n_atoms,
+    };
+    match session.session.step(&cs) {
+        Ok(report) => {
+            let out = unsafe { &mut *out };
+            stamp_report(out);
+            out.status = if report.at_minimum { 1 } else { 0 };
+            out.reserved = 0;
+            out.max_force = report.max_force;
+            out.ci_index = -1;
+            out.iteration = report.inner_steps as i64;
+            out.curvature = report.arc;
+            out.rotations = 0;
+            RGSADDLE_OK
+        }
+        Err(e) => status_of(&e),
+    }
+}
+
+/// # Safety
+/// `out` holds 3N doubles.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_irc_position(
+    session: *const RgsaddleIrc,
+    out: *mut f64,
+) -> i32 {
+    if session.is_null() {
+        return RGSADDLE_NULL_SESSION;
+    }
+    if out.is_null() {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let session = unsafe { &*session };
+    let dof = (3 * session.n_atoms) as usize;
+    let dst = unsafe { slice::from_raw_parts_mut(out, dof) };
+    for (i, v) in session.session.position().iter().enumerate() {
+        dst[i] = *v;
+    }
+    RGSADDLE_OK
+}
+
+/// # Safety
+/// Live session or NULL.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_irc_set_direction(
+    session: *mut RgsaddleIrc,
+    direction: i32,
+) -> i32 {
+    if session.is_null() {
+        return RGSADDLE_NULL_SESSION;
+    }
+    let dir = if direction == 1 {
+        IrcDirection::Reverse
+    } else {
+        IrcDirection::Forward
+    };
+    unsafe { (*session).session.set_direction(dir) };
+    RGSADDLE_OK
+}
+
+/// # Safety
+/// Live session or NULL.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_irc_reset(session: *mut RgsaddleIrc) -> i32 {
+    if session.is_null() {
+        return RGSADDLE_NULL_SESSION;
+    }
+    unsafe { (*session).session.reset() };
+    RGSADDLE_OK
+}
+
+/// # Safety
+/// Pointer from [`rgsaddle_irc_create`], freed once.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_irc_free(session: *mut RgsaddleIrc) {
     if !session.is_null() {
         drop(unsafe { Box::from_raw(session) });
     }

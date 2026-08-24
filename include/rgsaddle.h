@@ -205,6 +205,51 @@ int rgsaddle_minmode_mode(const RgsaddleMinMode *session, double *out);
 int rgsaddle_minmode_reset(RgsaddleMinMode *session);
 void rgsaddle_minmode_free(RgsaddleMinMode *session);
 
+typedef enum {
+  RGSADDLE_IRC_GS2 = 0,
+  RGSADDLE_IRC_MOROKUMA = 1
+} rgsaddle_irc_kind_t;
+
+typedef enum {
+  RGSADDLE_IRC_FORWARD = 0,
+  RGSADDLE_IRC_REVERSE = 1
+} rgsaddle_irc_dir_t;
+
+typedef struct RgsaddleIrc RgsaddleIrc;
+
+typedef struct {
+  rgsaddle_version_t version;
+  uint64_t flags;
+  double dx;
+  double force_tol;
+  double max_move;
+  int64_t max_inner;
+  int32_t kind;      /**< rgsaddle_irc_kind_t */
+  int32_t direction; /**< rgsaddle_irc_dir_t */
+} rgsaddle_irc_config_t;
+
+/**
+ * Create an IRC session. `saddle` and `mode` are 3N, `masses` is N.
+ * Returns NULL on invalid shape.
+ */
+RgsaddleIrc *rgsaddle_irc_create(const rgsaddle_irc_config_t *config,
+                                 int64_t n_atoms, const double *saddle,
+                                 const double *masses, const double *mode);
+/**
+ * Same, but the imaginary mode is dest Lanczos on the host surface.
+ * `seed` is 3N.
+ */
+RgsaddleIrc *rgsaddle_irc_create_from_surface(
+    const rgsaddle_irc_config_t *config, int64_t n_atoms,
+    const double *saddle, const double *masses, const double *seed,
+    rgsaddle_surface_fn surface, void *user);
+int rgsaddle_irc_step(RgsaddleIrc *session, rgsaddle_surface_fn surface,
+                      void *user, rgsaddle_report_t *out);
+int rgsaddle_irc_position(const RgsaddleIrc *session, double *out);
+int rgsaddle_irc_set_direction(RgsaddleIrc *session, int32_t direction);
+int rgsaddle_irc_reset(RgsaddleIrc *session);
+void rgsaddle_irc_free(RgsaddleIrc *session);
+
 #ifdef __cplusplus
 }
 #endif

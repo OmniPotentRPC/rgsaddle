@@ -37,7 +37,6 @@ pub mod irc;
 pub mod io;
 #[cfg(feature = "readcon")]
 pub use io::{frame_from_con, MolecularFrame};
-#[cfg(feature = "capi")]
 pub mod capi;
 pub mod error;
 pub mod mic;
