@@ -221,7 +221,8 @@ impl IrcSession {
     /// inner pair; GS2 equality is `IrcTrust`.
     fn restricted_increment(&self, g: &Array1<f64>) -> Array1<f64> {
         let (evals, evecs) = self.hess.eigh();
-        qn_irc_restricted(&self.trust(), &evals, &evecs, g, self.hess.is_posdef())
+        let allow_interior = self.hess.is_posdef() && self.arc > 2.0 * self.config.dx;
+        qn_irc_restricted(&self.trust(), &evals, &evecs, g, allow_interior)
     }
 
     /// One Sella `IRC.step`: optional kick, then inner GS2 on the
@@ -254,7 +255,10 @@ impl IrcSession {
                     // Reversal is a well overshoot only after the BFGS
                     // model is positive definite. At a TS the kick and
                     // -g need not be aligned.
-                    if self.hess.is_posdef() && dot(prev.view(), s.view()) < 0.0 {
+                    if self.hess.is_posdef()
+                        && self.arc > 2.0 * self.config.dx
+                        && dot(prev.view(), s.view()) < 0.0
+                    {
                         self.d1.fill(0.0);
                         self.last_step = None;
                         self.solver.forget();
@@ -319,7 +323,8 @@ impl IrcSession {
             // |F| is already under fmax (a TS neighborhood).
             at_minimum: !kicked
                 && max_force <= self.config.force_tol
-                && last_interior,
+                && last_interior
+                && self.arc > 2.0 * self.config.dx,
         })
     }
 
