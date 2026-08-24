@@ -42,6 +42,7 @@ pub mod capi;
 pub mod error;
 pub mod mic;
 pub mod minmode;
+pub mod pes;
 pub mod projection;
 pub mod spring;
 pub mod tangent;
@@ -53,6 +54,7 @@ pub use irc::{IrcConfig, IrcDirection, IrcKind, IrcReport, IrcSession};
 pub use minmode::{
     MinModeConfig, MinModeKind, MinModeReport, MinModeSession, MinModeStatus, PointSurface,
 };
+pub use pes::CartesianPes;
 pub use projection::ProjectionKind;
 pub use spring::SpringKind;
 pub use tangent::TangentKind;
