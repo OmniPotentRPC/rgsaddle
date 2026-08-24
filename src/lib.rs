@@ -13,9 +13,10 @@
 //!   over `step` and nothing more.
 //!
 //! The same shape carries the minimum-mode search
-//! ([`minmode::MinModeSession`]): refresh the lowest curvature mode
-//! (dimer rotation or Lanczos over finite-difference Hessian
-//! actions), invert the force along it, take one solver step.
+//! ([`minmode::MinModeSession`]) and the IRC roll-down
+//! ([`irc::IrcSession`]): kick along the imaginary mode, then take
+//! Gonzalez--Schlegel / Sella steps on the mass-weighted sphere
+//! (`rgmin::IrcTrust` over [`rgmin::ManifoldKind::MwRigid`]).
 //!
 //! Force assembly is pure: tangents (Mills–Jonsson–Schenter simple,
 //! Henkelman–Jonsson improved), springs (uniform, energy-weighted,
