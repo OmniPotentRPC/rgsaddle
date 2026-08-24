@@ -397,6 +397,24 @@ impl IrcSession {
                 at_minimum: true,
             });
         }
+        // Averaged-gradient corrector can keep pointing downhill
+        // after the well is passed. If the force has flipped against
+        // the last accepted step, this point is the overshoot.
+        if !kicked {
+            if let Some(prev) = &self.last_outer {
+                let mut force = g0.clone();
+                force.mapv_inplace(|v| -v);
+                if dot(prev.view(), force.view()) < 0.0 {
+                    return Ok(IrcReport {
+                        energy: energy0,
+                        max_force: max_force0,
+                        arc: self.arc,
+                        inner_steps: 0,
+                        at_minimum: true,
+                    });
+                }
+            }
+        }
 
         let sqrtm = sqrt_masses_3n(self.masses.as_slice().unwrap_or(&[]));
         let g_mw = to_mw(&g0, &sqrtm, true);
