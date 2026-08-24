@@ -17,6 +17,7 @@ use crate::mic::Cell;
 use crate::error::SaddleError;
 use crate::minmode::{MinModeConfig, MinModeKind, MinModeSession, MinModeStatus, PointSurface};
 use crate::sella_min::{SellaMinConfig, SellaMinSession};
+use crate::sella_saddle::{SellaSaddleConfig, SellaSaddleSession};
 use crate::projection::ProjectionKind;
 use crate::spring::SpringKind;
 use crate::tangent::TangentKind;
@@ -114,6 +115,16 @@ pub struct RgsaddleSellaMinConfig {
     pub delta: f64,
     pub force_tol: f64,
     pub force_gate: i32,
+}
+
+#[repr(C)]
+pub struct RgsaddleSellaSaddleConfig {
+    pub version: RgsaddleVersion,
+    pub flags: u64,
+    pub delta: f64,
+    pub force_tol: f64,
+    pub force_gate: i32,
+    pub order: i64,
 }
 
 #[repr(C)]
@@ -223,6 +234,11 @@ pub struct RgsaddleIrc {
 
 pub struct RgsaddleSellaMin {
     session: SellaMinSession,
+    n_atoms: i64,
+}
+
+pub struct RgsaddleSellaSaddle {
+    session: SellaSaddleSession,
     n_atoms: i64,
 }
 
@@ -994,6 +1010,56 @@ mod irc_abi_tests {
         assert!(refused.is_null());
         unsafe { rgsaddle_sella_min_free(sess) };
     }
+
+    #[test]
+    fn sella_saddle_abi_steps() {
+        let n_atoms = 2i64;
+        let mut x = [0.2, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let masses = [1.0, 1.0];
+        let cfg = RgsaddleSellaSaddleConfig {
+            version: RgsaddleVersion {
+                major: RGSADDLE_ABI_MAJOR,
+                minor: RGSADDLE_ABI_MINOR,
+            },
+            flags: 0,
+            delta: 0.1,
+            force_tol: 0.05,
+            force_gate: crate::ForceGate::MaxForceOnAtom.to_abi(),
+            order: 1,
+        };
+        let sess =
+            unsafe { rgsaddle_sella_saddle_create(&cfg, n_atoms, x.as_ptr(), masses.as_ptr()) };
+        assert!(!sess.is_null());
+        let mut report = RgsaddleReport {
+            version: RgsaddleVersion { major: 0, minor: 0 },
+            flags: 0,
+            status: 0,
+            reserved: 0,
+            max_force: 0.0,
+            ci_index: 0,
+            iteration: 0,
+            curvature: 0.0,
+            rotations: 0,
+        };
+        let rc = unsafe {
+            rgsaddle_sella_saddle_step(sess, Some(well_cb), std::ptr::null_mut(), &mut report)
+        };
+        assert_eq!(rc, RGSADDLE_OK);
+        assert!(report.max_force.is_finite());
+        assert_eq!(
+            unsafe { rgsaddle_sella_saddle_position(sess, x.as_mut_ptr()) },
+            RGSADDLE_OK
+        );
+        assert!(x.iter().all(|v| v.is_finite()));
+        let bad = RgsaddleSellaSaddleConfig {
+            force_gate: 99,
+            ..cfg
+        };
+        let refused =
+            unsafe { rgsaddle_sella_saddle_create(&bad, n_atoms, x.as_ptr(), masses.as_ptr()) };
+        assert!(refused.is_null());
+        unsafe { rgsaddle_sella_saddle_free(sess) };
+    }
 }
 
 /// # Safety
@@ -1110,6 +1176,130 @@ pub unsafe extern "C" fn rgsaddle_sella_min_reset(session: *mut RgsaddleSellaMin
 /// `session` must come from [`rgsaddle_sella_min_create`], freed once.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rgsaddle_sella_min_free(session: *mut RgsaddleSellaMin) {
+    if !session.is_null() {
+        drop(unsafe { Box::from_raw(session) });
+    }
+}
+
+/// # Safety
+/// `position` is 3N, `masses` is N.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_sella_saddle_create(
+    config: *const RgsaddleSellaSaddleConfig,
+    n_atoms: i64,
+    position: *const f64,
+    masses: *const f64,
+) -> *mut RgsaddleSellaSaddle {
+    if config.is_null() || position.is_null() || masses.is_null() || n_atoms < 1 {
+        return std::ptr::null_mut();
+    }
+    let cfg = unsafe { &*config };
+    if cfg.version.major != RGSADDLE_ABI_MAJOR {
+        return std::ptr::null_mut();
+    }
+    let Some(force_gate) = force_gate_of(cfg.force_gate) else {
+        return std::ptr::null_mut();
+    };
+    let dof = (3 * n_atoms) as usize;
+    let x = Array1::from(unsafe { slice::from_raw_parts(position, dof) }.to_vec());
+    let m = Array1::from(unsafe { slice::from_raw_parts(masses, n_atoms as usize) }.to_vec());
+    let mut sella = SellaSaddleConfig::default();
+    if cfg.delta > 0.0 {
+        sella.delta = cfg.delta;
+    }
+    if cfg.force_tol > 0.0 {
+        sella.force_tol = cfg.force_tol;
+    }
+    if cfg.order > 0 {
+        sella.order = cfg.order as usize;
+    }
+    sella.force_gate = force_gate;
+    match SellaSaddleSession::new(sella, x, m) {
+        Ok(session) => Box::into_raw(Box::new(RgsaddleSellaSaddle { session, n_atoms })),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// # Safety
+/// `session` and `out` must be valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_sella_saddle_step(
+    session: *mut RgsaddleSellaSaddle,
+    surface: Option<RgsaddleSurfaceFn>,
+    user: *mut c_void,
+    out: *mut RgsaddleReport,
+) -> i32 {
+    if session.is_null() {
+        return RGSADDLE_NULL_SESSION;
+    }
+    if out.is_null() {
+        return RGSADDLE_NULL_REPORT;
+    }
+    let Some(f) = surface else {
+        return RGSADDLE_NULL_SURFACE;
+    };
+    let session = unsafe { &mut *session };
+    let cs = CSurface {
+        f,
+        user,
+        n_atoms: session.n_atoms,
+    };
+    match session.session.step(&cs) {
+        Ok(report) => {
+            let out = unsafe { &mut *out };
+            stamp_report(out);
+            out.status = if report.at_saddle { 1 } else { 0 };
+            out.reserved = 0;
+            out.max_force = report.max_force;
+            out.ci_index = -1;
+            out.iteration = 0;
+            out.curvature = report.rho;
+            out.rotations = 0;
+            RGSADDLE_OK
+        }
+        Err(e) => status_of(&e),
+    }
+}
+
+/// # Safety
+/// `out` must hold `3 * n_atoms` doubles.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_sella_saddle_position(
+    session: *const RgsaddleSellaSaddle,
+    out: *mut f64,
+) -> i32 {
+    if session.is_null() {
+        return RGSADDLE_NULL_SESSION;
+    }
+    if out.is_null() {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let session = unsafe { &*session };
+    let dof = (3 * session.n_atoms) as usize;
+    let dst = unsafe { slice::from_raw_parts_mut(out, dof) };
+    for (i, v) in session.session.position().iter().enumerate() {
+        dst[i] = *v;
+    }
+    RGSADDLE_OK
+}
+
+/// # Safety
+/// `session` must be a live pointer or NULL.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_sella_saddle_reset(
+    session: *mut RgsaddleSellaSaddle,
+) -> i32 {
+    if session.is_null() {
+        return RGSADDLE_NULL_SESSION;
+    }
+    unsafe { (*session).session.reset() };
+    RGSADDLE_OK
+}
+
+/// # Safety
+/// `session` must come from [`rgsaddle_sella_saddle_create`], freed once.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_sella_saddle_free(session: *mut RgsaddleSellaSaddle) {
     if !session.is_null() {
         drop(unsafe { Box::from_raw(session) });
     }

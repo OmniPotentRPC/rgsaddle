@@ -287,6 +287,29 @@ int rgsaddle_sella_min_position(const RgsaddleSellaMin *session, double *out);
 int rgsaddle_sella_min_reset(RgsaddleSellaMin *session);
 void rgsaddle_sella_min_free(RgsaddleSellaMin *session);
 
+typedef struct RgsaddleSellaSaddle RgsaddleSellaSaddle;
+
+/** Sella order-1 (P-RFO + trust). Default geometry is the rigid quotient. */
+typedef struct {
+  rgsaddle_version_t version;
+  uint64_t flags;
+  double delta;
+  double force_tol;
+  rgsaddle_force_gate_t force_gate;
+  int64_t order;
+} rgsaddle_sella_saddle_config_t;
+
+RgsaddleSellaSaddle *rgsaddle_sella_saddle_create(
+    const rgsaddle_sella_saddle_config_t *config, int64_t n_atoms,
+    const double *position, const double *masses);
+int rgsaddle_sella_saddle_step(RgsaddleSellaSaddle *session,
+                               rgsaddle_surface_fn surface, void *user,
+                               rgsaddle_report_t *out);
+int rgsaddle_sella_saddle_position(const RgsaddleSellaSaddle *session,
+                                   double *out);
+int rgsaddle_sella_saddle_reset(RgsaddleSellaSaddle *session);
+void rgsaddle_sella_saddle_free(RgsaddleSellaSaddle *session);
+
 #ifdef __cplusplus
 }
 #endif
