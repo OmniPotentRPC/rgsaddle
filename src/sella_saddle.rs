@@ -218,6 +218,7 @@ impl SellaSaddleSession {
         let n_free = match &self.pes {
             SellaPes::Internal(p) => p.n_int().max(1),
             SellaPes::Cell(p) => p.packed_len().max(1),
+            SellaPes::CellInternal(p) => p.packed_len().max(1),
             SellaPes::Cartesian(_) => self.geom.n_free(self.pes.position().len()),
         };
         self.delta = self.config.delta * n_free as f64;
@@ -233,6 +234,11 @@ impl SellaSaddleSession {
         match &self.pes {
             SellaPes::Internal(_) => self.step_internal(surface),
             SellaPes::Cell(_) => self.step_cell(surface),
+            SellaPes::CellInternal(_) => {
+                return Err(SaddleError::Solver(
+                    "SellaSaddle on_cell_internal is not wired".into(),
+                ));
+            }
             SellaPes::Cartesian(_) => self.step_cartesian(surface),
         }
     }
@@ -276,7 +282,9 @@ impl SellaSaddleSession {
         {
             let pes = match &self.pes {
                 SellaPes::Cartesian(p) => p,
-                SellaPes::Internal(_) | SellaPes::Cell(_) => unreachable!(),
+                SellaPes::Internal(_) | SellaPes::Cell(_) | SellaPes::CellInternal(_) => {
+                    unreachable!()
+                }
             };
             x = pes.position().to_owned();
             let (e, g) = surface.eval(x.view())?;
@@ -303,7 +311,7 @@ impl SellaSaddleSession {
         let (evals, evecs) = self.diag_free(&h_free)?;
         let pes = match &mut self.pes {
             SellaPes::Cartesian(p) => p,
-            SellaPes::Internal(_) | SellaPes::Cell(_) => unreachable!(),
+            SellaPes::Internal(_) | SellaPes::Cell(_) | SellaPes::CellInternal(_) => unreachable!(),
         };
         let s_free = prfo_restricted(
             &evals,
@@ -361,7 +369,9 @@ impl SellaSaddleSession {
         {
             let pes = match &self.pes {
                 SellaPes::Internal(p) => p,
-                SellaPes::Cartesian(_) | SellaPes::Cell(_) => unreachable!(),
+                SellaPes::Cartesian(_) | SellaPes::Cell(_) | SellaPes::CellInternal(_) => {
+                    unreachable!()
+                }
             };
             x = pes.position().to_owned();
             let (e, gg) = surface.eval(x.view())?;
@@ -387,7 +397,7 @@ impl SellaSaddleSession {
         let (evals, evecs) = self.diag_free(&h)?;
         let pes = match &mut self.pes {
             SellaPes::Internal(p) => p,
-            SellaPes::Cartesian(_) | SellaPes::Cell(_) => unreachable!(),
+            SellaPes::Cartesian(_) | SellaPes::Cell(_) | SellaPes::CellInternal(_) => unreachable!(),
         };
         let mut s = prfo_restricted(
             &evals,
@@ -437,7 +447,9 @@ impl SellaSaddleSession {
         {
             let pes = match &self.pes {
                 SellaPes::Cell(p) => p,
-                SellaPes::Cartesian(_) | SellaPes::Internal(_) => unreachable!(),
+                SellaPes::Cartesian(_) | SellaPes::Internal(_) | SellaPes::CellInternal(_) => {
+                    unreachable!()
+                }
             };
             x = pes.position().to_owned();
             let c9 = pes.cell9();
@@ -464,7 +476,9 @@ impl SellaSaddleSession {
         let (evals, evecs) = self.diag_free(&h)?;
         let pes = match &mut self.pes {
             SellaPes::Cell(p) => p,
-            SellaPes::Cartesian(_) | SellaPes::Internal(_) => unreachable!(),
+            SellaPes::Cartesian(_) | SellaPes::Internal(_) | SellaPes::CellInternal(_) => {
+                unreachable!()
+            }
         };
         let mut s = prfo_restricted(
             &evals,

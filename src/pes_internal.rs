@@ -160,6 +160,7 @@ pub enum SellaPes {
     Cartesian(CartesianPes),
     Internal(InternalPes),
     Cell(CellCartesianPes),
+    CellInternal(CellInternalPes),
 }
 
 impl SellaPes {
@@ -168,6 +169,7 @@ impl SellaPes {
             Self::Cartesian(p) => p.position(),
             Self::Internal(p) => p.position(),
             Self::Cell(p) => p.position(),
+            Self::CellInternal(p) => p.position(),
         }
     }
 
@@ -176,6 +178,7 @@ impl SellaPes {
             Self::Cartesian(p) => p.set_update(update),
             Self::Internal(p) => p.set_update(update),
             Self::Cell(p) => p.set_update(update),
+            Self::CellInternal(p) => p.set_update(update),
         }
     }
 
@@ -184,6 +187,7 @@ impl SellaPes {
             Self::Cartesian(p) => p.reset(),
             Self::Internal(p) => p.reset(),
             Self::Cell(p) => p.reset(),
+            Self::CellInternal(p) => p.reset(),
         }
     }
 
@@ -192,12 +196,14 @@ impl SellaPes {
             Self::Cartesian(p) => Some(p),
             Self::Internal(p) => Some(p.cartesian()),
             Self::Cell(p) => Some(p.cartesian()),
+            Self::CellInternal(p) => Some(p.internals().cartesian()),
         }
     }
 
     pub fn internal(&self) -> Option<&InternalPes> {
         match self {
             Self::Internal(p) => Some(p),
+            Self::CellInternal(p) => Some(p.internals()),
             Self::Cartesian(_) | Self::Cell(_) => None,
         }
     }
@@ -205,6 +211,7 @@ impl SellaPes {
     pub fn internal_mut(&mut self) -> Option<&mut InternalPes> {
         match self {
             Self::Internal(p) => Some(p),
+            Self::CellInternal(p) => Some(p.internals_mut()),
             Self::Cartesian(_) | Self::Cell(_) => None,
         }
     }
@@ -212,7 +219,14 @@ impl SellaPes {
     pub fn cell(&self) -> Option<&CellCartesianPes> {
         match self {
             Self::Cell(p) => Some(p),
-            Self::Cartesian(_) | Self::Internal(_) => None,
+            Self::Cartesian(_) | Self::Internal(_) | Self::CellInternal(_) => None,
+        }
+    }
+
+    pub fn cell_internal(&self) -> Option<&CellInternalPes> {
+        match self {
+            Self::CellInternal(p) => Some(p),
+            _ => None,
         }
     }
 }
@@ -432,6 +446,9 @@ impl CellCartesianPes {
         let [a, b, c] = self.lattice();
         let (a2, b2, c2) = niggli_reduce_vectors(a, b, c);
         self.cell = cell_from_lattice(a2, b2, c2, self.cell.origin())?;
+        // Dest packs Cartesian cell entries, not Sella log-strain, so
+        // there is no Frechet T. Drop the mixed Hessian.
+        self.hess = BfgsModel::identity(self.packed_len());
         Ok(true)
     }
 
@@ -456,6 +473,9 @@ impl CellCartesianPes {
 pub struct CellInternalPes {
     inner: InternalPes,
     cell: Cell,
+    mask: [bool; 9],
+    hess: BfgsModel,
+    update: HessUpdate,
 }
 
 impl CellInternalPes {
@@ -465,9 +485,14 @@ impl CellInternalPes {
         chart: Constraints,
         cell: Cell,
     ) -> Result<Self, SaddleError> {
+        let inner = InternalPes::new(x, masses, chart)?;
+        let n = inner.n_int() + 9;
         Ok(Self {
-            inner: InternalPes::new(x, masses, chart)?,
+            inner,
             cell,
+            mask: [true; 9],
+            hess: BfgsModel::identity(n),
+            update: HessUpdate::Bfgs,
         })
     }
 
@@ -479,7 +504,139 @@ impl CellInternalPes {
         self.cell = cell;
     }
 
-    /// Sella `maybe_niggli_reduce` on the cell, internals Hessian unchanged.
+    pub fn set_update(&mut self, update: HessUpdate) {
+        self.update = update;
+        self.inner.set_update(update);
+    }
+
+    pub fn set_mask(&mut self, mask: [bool; 9]) {
+        self.mask = mask;
+        self.hess = BfgsModel::identity(self.packed_len());
+    }
+
+    pub fn mask(&self) -> [bool; 9] {
+        self.mask
+    }
+
+    pub fn hessian(&self) -> &BfgsModel {
+        &self.hess
+    }
+
+    pub fn n_cell_dof(&self) -> usize {
+        self.mask.iter().filter(|b| **b).count()
+    }
+
+    pub fn packed_len(&self) -> usize {
+        self.inner.n_int() + self.n_cell_dof()
+    }
+
+    pub fn cell9(&self) -> [f64; 9] {
+        let [a, b, c] = lattice_of(&self.cell);
+        [a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2]]
+    }
+
+    pub fn cell_params(&self) -> Array1<f64> {
+        let c = self.cell9();
+        let mut p = Array1::zeros(self.n_cell_dof());
+        let mut k = 0;
+        for i in 0..9 {
+            if self.mask[i] {
+                p[k] = c[i];
+                k += 1;
+            }
+        }
+        p
+    }
+
+    /// `[q_int; cell_params]`.
+    pub fn packed(&self) -> Result<Array1<f64>, SaddleError> {
+        let q = self.inner.internals()?;
+        let p = self.cell_params();
+        let mut out = Array1::zeros(q.len() + p.len());
+        for (i, v) in q.iter().enumerate() {
+            out[i] = *v;
+        }
+        for (i, v) in p.iter().enumerate() {
+            out[q.len() + i] = *v;
+        }
+        Ok(out)
+    }
+
+    fn apply_cell9(&mut self, c: [f64; 9]) -> Result<(), SaddleError> {
+        self.cell = cell_from_lattice(
+            [c[0], c[1], c[2]],
+            [c[3], c[4], c[5]],
+            [c[6], c[7], c[8]],
+            self.cell.origin(),
+        )?;
+        Ok(())
+    }
+
+    pub fn packed_grad<S: PointSurface>(
+        &self,
+        surface: &S,
+        g_cart: ArrayView1<f64>,
+    ) -> Result<Array1<f64>, SaddleError> {
+        let g_int = self.inner.internals_grad(g_cart)?;
+        let c9 = self.cell9();
+        let gcell = match surface.cell_grad(self.inner.position(), &c9)? {
+            Some(g) => g,
+            None => fd_cell_grad(surface, self.inner.position(), &c9, &self.mask, 1e-5)?,
+        };
+        let n = g_int.len();
+        let mut out = Array1::zeros(n + self.n_cell_dof());
+        for i in 0..n {
+            out[i] = g_int[i];
+        }
+        let mut k = 0;
+        for i in 0..9 {
+            if self.mask[i] {
+                out[n + k] = gcell[i];
+                k += 1;
+            }
+        }
+        Ok(out)
+    }
+
+    /// Kick `[dq; dcell_params]`.
+    pub fn kick_packed<S: PointSurface>(
+        &mut self,
+        surface: &S,
+        d: ArrayView1<f64>,
+    ) -> Result<(f64, Array1<f64>), SaddleError> {
+        let nint = self.inner.n_int();
+        let ncell = self.n_cell_dof();
+        if d.len() != nint + ncell {
+            return Err(SaddleError::Shape(
+                "packed internals+cell kick length must match the chart".into(),
+            ));
+        }
+        let c9 = self.cell9();
+        let (e0, g0) = surface.eval_in_cell(self.inner.position(), &c9)?;
+        let g0p = self.packed_grad(surface, g0.view())?;
+        let _ = e0;
+        let mut c1 = c9;
+        let mut k = 0;
+        for i in 0..9 {
+            if self.mask[i] {
+                c1[i] += d[nint + k];
+                k += 1;
+            }
+        }
+        self.apply_cell9(c1)?;
+        let dq = d.slice(s![..nint]).to_owned();
+        let (e, g1) = self.inner.kick(surface, dq.view())?;
+        let g1p = self.packed_grad(surface, g1.view())?;
+        let y = &g1p - &g0p;
+        let s = d.to_owned();
+        match self.update {
+            HessUpdate::Bfgs => self.hess.update(&s, &y),
+            HessUpdate::TsBfgs => self.hess.update_ts(&s, &y),
+        }
+        Ok((e, g1p))
+    }
+
+    /// Sella `maybe_niggli_reduce`. Packed Hessian is dropped.
     pub fn maybe_niggli_reduce(&mut self, angle_threshold: f64) -> Result<bool, SaddleError> {
         let [a, b, c] = lattice_of(&self.cell);
         let angs = [angle_deg(b, c), angle_deg(a, c), angle_deg(a, b)];
@@ -492,6 +649,7 @@ impl CellInternalPes {
         }
         let (a2, b2, c2) = niggli_reduce_vectors(a, b, c);
         self.cell = cell_from_lattice(a2, b2, c2, self.cell.origin())?;
+        self.hess = BfgsModel::identity(self.packed_len());
         Ok(true)
     }
 
@@ -501,6 +659,15 @@ impl CellInternalPes {
 
     pub fn internals_mut(&mut self) -> &mut InternalPes {
         &mut self.inner
+    }
+
+    pub fn position(&self) -> ArrayView1<'_, f64> {
+        self.inner.position()
+    }
+
+    pub fn reset(&mut self) {
+        self.inner.reset();
+        self.hess = BfgsModel::identity(self.packed_len());
     }
 
     pub fn kick<S: PointSurface>(
@@ -943,5 +1110,31 @@ mod tests {
         assert!((p[0] - 4.0).abs() < 1e-12);
         assert!((p[1] - 5.0).abs() < 1e-12);
         assert!((p[2] - 6.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn packed_cell_internal_follows_the_mask() {
+        let mut chart = Constraints::new(2).unwrap();
+        chart
+            .fix_translation(
+                Translation::all(2, CartAxis::X).unwrap(),
+                Array1::zeros(6).view(),
+                Some(0.0),
+            )
+            .unwrap();
+        let mut pes = CellInternalPes::new(
+            Array1::zeros(6),
+            Array1::from(vec![1.0, 1.0]),
+            chart,
+            Cell::ortho(4.0, 5.0, 6.0).unwrap(),
+        )
+        .unwrap();
+        pes.set_mask([
+            true, false, false, false, false, false, false, false, false,
+        ]);
+        assert_eq!(pes.n_cell_dof(), 1);
+        assert_eq!(pes.packed_len(), 2);
+        let p = pes.packed().unwrap();
+        assert!((p[1] - 4.0).abs() < 1e-12);
     }
 }
