@@ -7,9 +7,6 @@
 use ndarray::ArrayView1;
 use rgmin::vecops::{nrm2, nrminf};
 
-#[cfg(feature = "python")]
-use pyo3::prelude::*;
-
 /// How a session reduces a 3N force (or gradient) to one scalar.
 ///
 /// Discriminant matches `gprd_params.capnp` `ConvergenceForceNorm`
@@ -17,17 +14,6 @@ use pyo3::prelude::*;
 /// eOn / gpr (`L2_NORM`, `LINF_NORM`, `MAX_FORCE_ON_ATOM`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[repr(C)]
-#[cfg_attr(
-    feature = "python",
-    pyo3::pyclass(
-        eq,
-        eq_int,
-        frozen,
-        rename_all = "SCREAMING_SNAKE_CASE",
-        name = "ForceGate",
-        module = "rgsaddle"
-    )
-)]
 pub enum ForceGate {
     /// Euclidean `||F||_2` over the full 3N vector.
     L2Norm = 0,
@@ -71,26 +57,6 @@ impl ForceGate {
             Self::LinfNorm => nrminf(g),
             Self::MaxForceOnAtom => max_force_on_atom(g),
         }
-    }
-}
-
-#[cfg(feature = "python")]
-#[pyo3::pymethods]
-impl ForceGate {
-    /// Construct from the C / Cap'n Proto ordinal. Unknown values raise.
-    #[new]
-    fn py_new(value: i32) -> pyo3::PyResult<Self> {
-        Self::try_from_abi(value).ok_or_else(|| {
-            pyo3::exceptions::PyValueError::new_err(format!("unknown force gate {value}"))
-        })
-    }
-
-    fn __int__(&self) -> i32 {
-        self.to_abi()
-    }
-
-    fn __index__(&self) -> i32 {
-        self.to_abi()
     }
 }
 
