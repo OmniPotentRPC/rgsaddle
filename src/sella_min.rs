@@ -1,26 +1,42 @@
 //! Sella order-0 session: QN + TrustRegion over [`CartesianPes`].
 //!
-//! `sella.optimize.optimize.Sella` with `order=0`, `method=qn`.
-//! One step is eval, `qn_restricted`, `PES.kick`. The host owns
-//! the loop. `run` is a convenience.
+//! `sella.optimize.optimize.Sella` with `order=0`, `method=qn`,
+//! `eig=false`. One step is eval, project, `qn_restricted`, retract,
+//! transport, `PES.kick`, then the `delta0` / `sigma` / `rho` trust
+//! schedule. The geometry is [`ManifoldKind::RigidQuotient`] (Sella
+//! Cartesian `fix_translation` + `fix_rotation`). The host owns the
+//! loop. `run` is a convenience.
 
 use ndarray::Array1;
-use rgmin::vecops::nrminf;
 use rgmin::qn_restricted;
+use rgmin::vecops::{axpy, dot, vdot, vnrm2, vnrminf, Vector};
+use rgmin::{Manifold, ManifoldKind};
 
 use crate::error::SaddleError;
 use crate::minmode::PointSurface;
 use crate::pes::CartesianPes;
 
+/// Sella `_default_kwargs['minimum']` plus a force gate.
 pub struct SellaMinConfig {
+    /// Sella `delta0`. The living trust radius starts here.
     pub delta: f64,
+    pub sigma_inc: f64,
+    pub sigma_dec: f64,
+    pub rho_inc: f64,
+    pub rho_dec: f64,
+    pub delta_min: f64,
     pub force_tol: f64,
 }
 
 impl Default for SellaMinConfig {
     fn default() -> Self {
         Self {
-            delta: 0.2,
+            delta: 1e-1,
+            sigma_inc: 1.15,
+            sigma_dec: 0.90,
+            rho_inc: 1.035,
+            rho_dec: 100.0,
+            delta_min: 1e-4,
             force_tol: 1e-3,
         }
     }
@@ -30,11 +46,16 @@ pub struct SellaMinReport {
     pub energy: f64,
     pub max_force: f64,
     pub at_minimum: bool,
+    pub rho: f64,
+    pub delta: f64,
 }
 
 pub struct SellaMinSession {
     pes: CartesianPes,
     config: SellaMinConfig,
+    manifold: ManifoldKind,
+    delta: f64,
+    rho: f64,
 }
 
 impl SellaMinSession {
@@ -43,9 +64,17 @@ impl SellaMinSession {
         x: Array1<f64>,
         masses: Array1<f64>,
     ) -> Result<Self, SaddleError> {
+        let mut manifold = ManifoldKind::RigidQuotient;
+        if manifold.required_dim(x.len()).is_err() {
+            manifold = ManifoldKind::Euclidean;
+        }
+        let delta = config.delta;
         Ok(Self {
             pes: CartesianPes::new(x, masses)?,
             config,
+            manifold,
+            delta,
+            rho: 1.0,
         })
     }
 
@@ -53,32 +82,70 @@ impl SellaMinSession {
         self.pes.position()
     }
 
+    /// Living Sella trust radius.
+    pub fn delta(&self) -> f64 {
+        self.delta
+    }
+
+    /// Last accepted `df_actual / df_pred`. `1` when the model is mute.
+    pub fn rho(&self) -> f64 {
+        self.rho
+    }
+
     pub fn reset(&mut self) {
         self.pes.reset();
+        self.delta = self.config.delta;
+        self.rho = 1.0;
     }
 
     pub fn step<S: PointSurface>(&mut self, surface: &S) -> Result<SellaMinReport, SaddleError> {
-        let (energy, g) = surface.eval(self.pes.position())?;
+        let x = self.pes.position().to_owned();
+        let (energy, g) = surface.eval(x.view())?;
         if !g.iter().all(|v| v.is_finite()) {
             return Err(SaddleError::NonFinite("sella gradient"));
         }
-        let max_force = nrminf(g.view());
+        let g_r = self.manifold.egrad2rgrad(&x, &g);
+        let vg = Vector::from_host(g_r.clone());
+        let max_force = vnrminf(&vg);
         if max_force <= self.config.force_tol {
             return Ok(SellaMinReport {
                 energy,
                 max_force,
                 at_minimum: true,
+                rho: self.rho,
+                delta: self.delta,
             });
         }
         let (evals, evecs) = self.pes.hessian().eigh();
-        let s = qn_restricted(&evals, &evecs, &g, 0, self.config.delta);
-        self.pes.kick(surface, s.view())?;
-        let (energy, g) = surface.eval(self.pes.position())?;
-        let max_force = nrminf(g.view());
+        let s = qn_restricted(&evals, &evecs, &g_r, 0, self.delta);
+        let s = self.manifold.project(&x, &s);
+        let vs = Vector::from_host(s.clone());
+        let x1 = self.manifold.retract(&x, &s);
+        let s1 = self.manifold.transport(&x, &x1, &s);
+        if !s1.iter().all(|v| v.is_finite()) {
+            return Err(SaddleError::NonFinite("sella transport"));
+        }
+        let mut d = x1;
+        axpy(-1.0, x.view(), &mut d);
+        let e0 = energy;
+        let hs = self.pes.hessian().hessian().dot(&s);
+        let pred = vdot(&vg, &vs) + 0.5 * dot(s.view(), hs.view());
+        let (energy, g1) = self.pes.kick(surface, d.view())?;
+        let x_new = self.pes.position().to_owned();
+        let g1_r = self.manifold.egrad2rgrad(&x_new, &g1);
+        let max_force = vnrminf(&Vector::from_host(g1_r));
+        if pred.abs() >= 1e-14 {
+            self.rho = (energy - e0) / pred;
+            self.delta = update_trust(self.delta, self.rho, vnrm2(&vs), &self.config);
+        } else {
+            self.rho = 1.0;
+        }
         Ok(SellaMinReport {
             energy,
             max_force,
             at_minimum: max_force <= self.config.force_tol,
+            rho: self.rho,
+            delta: self.delta,
         })
     }
 
@@ -97,11 +164,23 @@ impl SellaMinSession {
     }
 }
 
+/// Sella `optimize.py` trust update (`order=0` defaults).
+fn update_trust(delta: f64, rho: f64, smag: f64, cfg: &SellaMinConfig) -> f64 {
+    if rho < 1.0 / cfg.rho_dec || rho > cfg.rho_dec {
+        (smag * cfg.sigma_dec).max(cfg.delta_min)
+    } else if rho > 1.0 / cfg.rho_inc && rho < cfg.rho_inc {
+        (cfg.sigma_inc * smag).max(delta)
+    } else {
+        delta
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::minmode::PointSurface;
     use ndarray::{Array1, ArrayView1};
+    use rgmin::vecops::nrm2;
 
     struct Well;
     impl PointSurface for Well {
@@ -113,6 +192,18 @@ mod tests {
         }
     }
 
+    fn com(x: ArrayView1<f64>) -> [f64; 3] {
+        let nat = x.len() / 3;
+        let mut c = [0.0; 3];
+        for i in 0..nat {
+            c[0] += x[3 * i];
+            c[1] += x[3 * i + 1];
+            c[2] += x[3 * i + 2];
+        }
+        let n = nat as f64;
+        [c[0] / n, c[1] / n, c[2] / n]
+    }
+
     #[test]
     fn qn_trust_reaches_the_well() {
         let mut x = Array1::zeros(6);
@@ -121,6 +212,7 @@ mod tests {
             SellaMinConfig {
                 delta: 0.2,
                 force_tol: 0.05,
+                ..SellaMinConfig::default()
             },
             x,
             Array1::from(vec![1.0, 1.0]),
@@ -129,5 +221,41 @@ mod tests {
         let report = sess.run(&Well, 40).unwrap();
         assert!(report.at_minimum, "force {}", report.max_force);
         assert!((sess.position()[0].abs() - 1.0).abs() < 0.25);
+        assert!(report.rho.is_finite());
+        assert!(report.delta > 0.0);
+    }
+
+    #[test]
+    fn qn_step_stays_on_the_rigid_quotient() {
+        let mut x = Array1::zeros(9);
+        x[0] = 0.2;
+        x[4] = 1.0;
+        x[8] = 1.0;
+        let mut sess = SellaMinSession::new(
+            SellaMinConfig::default(),
+            x,
+            Array1::from(vec![1.0, 1.0, 1.0]),
+        )
+        .unwrap();
+        let x0 = sess.position().to_owned();
+        let c0 = com(x0.view());
+        let report = sess.step(&Well).unwrap();
+        assert!(report.energy.is_finite());
+        let x1 = sess.position().to_owned();
+        let c1 = com(x1.view());
+        assert!(
+            (c0[0] - c1[0]).abs() < 1e-10
+                && (c0[1] - c1[1]).abs() < 1e-10
+                && (c0[2] - c1[2]).abs() < 1e-10,
+            "COM drifted {c0:?} -> {c1:?}"
+        );
+        let d = &x1 - &x0;
+        let d_h = ManifoldKind::RigidQuotient.project(&x0, &d);
+        let err = nrm2((&d - &d_h).view());
+        assert!(err < 1e-10, "step left the horizontal space: {err}");
+        let v = ManifoldKind::RigidQuotient.project(&x0, &Array1::from_elem(9, 0.1));
+        let vt = ManifoldKind::RigidQuotient.transport(&x0, &x1, &v);
+        let vt_h = ManifoldKind::RigidQuotient.project(&x1, &vt);
+        assert!(nrm2((&vt - &vt_h).view()) < 1e-10);
     }
 }

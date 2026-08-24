@@ -3,9 +3,16 @@
 Drive a Sella minimum or saddle session
 ---------------------------------------
 
-``SellaMinSession`` is order 0: ``qn_restricted`` plus
-``CartesianPes.kick``. ``SellaSaddleSession`` is order 1:
-``prfo_restricted`` plus the same kick. Both sit on
+The Sella QuasiNewton stepper is ``rgsaddle.QuasiNewton``
+(``rgmin.qn_get_s``). ``get_stepper("qn")`` is the factory;
+``step_on`` / ``retract_qn`` is the Riemannian step (proj / retr
+/ transp). This is a stepper, not a session.
+
+``SellaMinSession`` is order 0, ``eig=false``: project on
+``ManifoldKind.RigidQuotient``, ``qn_restricted``, retract,
+transport, ``CartesianPes.kick``, then Sella's ``delta0`` /
+``sigma`` / ``rho`` trust schedule. ``SellaSaddleSession`` is
+order 1: ``prfo_restricted`` plus the same kick. Both sit on
 ``CartesianPes``, not on ``IrcSession``.
 
 ``RationalFunctionOptimization`` is Sella ``method=rfo``:
