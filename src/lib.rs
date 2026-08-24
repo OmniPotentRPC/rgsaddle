@@ -35,6 +35,7 @@ pub mod minmode;
 pub mod projection;
 pub mod spring;
 pub mod tangent;
+pub mod trust;
 
 pub use band::{BandConfig, BandReport, BandSession, BandStatus, BandSurface};
 pub use error::SaddleError;
@@ -44,3 +45,4 @@ pub use minmode::{
 pub use projection::ProjectionKind;
 pub use spring::SpringKind;
 pub use tangent::TangentKind;
+pub use trust::{RestrictedStep, TrustRegion};

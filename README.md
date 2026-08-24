@@ -25,3 +25,6 @@ job, not this crate's.
 
 `BandSession::reset` is the model-update boundary: quasi-Newton
 history taken on one surface epoch must not survive onto the next.
+
+Sella `TrustRegion` (`cons(s) = ||s||`, target `delta`) is
+`rgsaddle::TrustRegion`, solved in rgmin. It is not IRCTrustRegion.
