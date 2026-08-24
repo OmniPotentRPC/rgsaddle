@@ -44,6 +44,7 @@ pub mod mic;
 pub mod minmode;
 pub mod pes;
 pub mod sella_min;
+pub mod sella_saddle;
 pub mod projection;
 pub mod spring;
 pub mod tangent;
@@ -57,6 +58,7 @@ pub use minmode::{
 };
 pub use pes::CartesianPes;
 pub use sella_min::{SellaMinConfig, SellaMinReport, SellaMinSession};
+pub use sella_saddle::{SellaSaddleConfig, SellaSaddleReport, SellaSaddleSession};
 pub use projection::ProjectionKind;
 pub use spring::SpringKind;
 pub use tangent::TangentKind;
