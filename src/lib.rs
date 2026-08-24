@@ -12,6 +12,11 @@
 //!   between steps. [`band::BandSession::run`] is a convenience loop
 //!   over `step` and nothing more.
 //!
+//! The same shape carries the minimum-mode search
+//! ([`minmode::MinModeSession`]): refresh the lowest curvature mode
+//! (dimer rotation or Lanczos over finite-difference Hessian
+//! actions), invert the force along it, take one solver step.
+//!
 //! Force assembly is pure: tangents (Mills–Jonsson–Schenter simple,
 //! Henkelman–Jonsson improved), springs (uniform, energy-weighted,
 //! Onsager–Machlup), projections (plain elastic band, NEB,
@@ -24,12 +29,16 @@
 
 pub mod band;
 pub mod error;
+pub mod minmode;
 pub mod projection;
 pub mod spring;
 pub mod tangent;
 
 pub use band::{BandConfig, BandReport, BandSession, BandStatus, BandSurface};
 pub use error::SaddleError;
+pub use minmode::{
+    MinModeConfig, MinModeKind, MinModeReport, MinModeSession, MinModeStatus, PointSurface,
+};
 pub use projection::ProjectionKind;
 pub use spring::SpringKind;
 pub use tangent::TangentKind;
