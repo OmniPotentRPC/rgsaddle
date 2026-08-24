@@ -25,6 +25,10 @@ and ``3N - ncons`` on a chart.
 thermostat (``samd.py``). ``force_match_hessian`` is the
 bond arm of ``force_match.pyx``.
 
+The C wire exposes ``rgsaddle_sella_min_*`` and
+``rgsaddle_sella_saddle_*`` (ABI minor 2). Unknown
+``force_gate`` refuses create.
+
 ``RationalFunctionOptimization`` is Sella ``method=rfo``:
 ``alpha`` in ``[0, 1]``, ``order`` selects the
 Banerjee-augmented mode. The increment is
