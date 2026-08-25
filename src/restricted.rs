@@ -1,15 +1,22 @@
-//! Sella `MaxInternalStep`: per-coordinate clip on an internals chart.
+//! Sella restricted steps: `TrustRegion` and `MaxInternalStep`.
 //!
-//! `restricted_step.py` `MaxInternalStep`. `cons(s) = max_i |s_i w_i|`
-//! with Sella packing weights (`wx` trans/rot, `wb` bonds, `wa`
-//! angles, `wd` dihedrals, `wo` other). The clip runs on the
-//! internals increment *before* a Euclidean trust radius. Distinct
-//! from [`rgmin::ras_clip`] (per-atom Cartesian) and from
-//! `TrustRegion` (`||s||`). Algebra is [`rgmin::vecops`].
+//! `restricted_step.py` `TrustRegion` is `cons(s) = ||s||`. Distinct
+//! from `IRCTrustRegion` (`||(s + d1) * sqrt(m)||`,
+//! [`rgmin::IrcTrust`] / [`rgmin::qn_irc_restricted`]). The QN
+//! companion is [`rgmin::qn_restricted`].
+//!
+//! `MaxInternalStep` is the per-coordinate clip
+//! `cons(s) = max_i |s_i w_i|` with Sella packing weights (`wx`
+//! trans/rot, `wb` bonds, `wa` angles, `wd` dihedrals, `wo` other).
+//! That clip runs on the internals increment *before* a Euclidean
+//! trust radius. Distinct from [`rgmin::ras_clip`] (per-atom
+//! Cartesian). Algebra is [`rgmin::vecops`] so `par` applies.
 
 use ndarray::{Array1, Array2};
 use rgmin::Manifold;
 use rgmin::qn_get_s;
+use rgmin::qn_restricted;
+use rgmin::vecops::{axpy, nrm2};
 
 use crate::SaddleError;
 use crate::constraints::{Constraints, Equality, InternalCounts};
@@ -41,6 +48,129 @@ impl RestrictedKind {
             1 => Some(Self::MaxInternalStep),
             _ => None,
         }
+    }
+
+    /// Sella `get_restricted_step` names that this crate dests.
+    ///
+    /// `RestrictedAtomicStep` (`ras`) is not dested here.
+    pub fn from_name(name: &str) -> Option<Self> {
+        let n = name.trim().to_ascii_lowercase();
+        if TrustRegion::match_name(&n) {
+            Some(Self::TrustRegion)
+        } else if matches!(n.as_str(), "mis" | "max internal step") {
+            Some(Self::MaxInternalStep)
+        } else {
+            None
+        }
+    }
+}
+
+/// Sella `TrustRegion` synonyms.
+pub const TRUST_SYNONYMS: &[&str] = &[
+    "tr",
+    "trust region",
+    "trust-region",
+    "trust radius",
+    "trust-radius",
+];
+
+/// Sella `TrustRegion`: `cons(s) = ||s||`, target `delta`.
+///
+/// Distinct from [`rgmin::IrcTrust`] (`||(s + d1) * sqrt(m)||`).
+/// The QN companion is [`rgmin::qn_restricted`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TrustRegion {
+    delta: f64,
+}
+
+impl TrustRegion {
+    /// Euclidean trust radius `delta`.
+    pub fn new(delta: f64) -> Result<Self, SaddleError> {
+        if delta < 0.0 {
+            return Err(SaddleError::Shape(
+                "TrustRegion delta must be non-negative".into(),
+            ));
+        }
+        Ok(Self { delta })
+    }
+
+    /// Trust radius.
+    pub fn delta(&self) -> f64 {
+        self.delta
+    }
+
+    /// Exact Sella `TrustRegion.match`.
+    pub fn match_name(name: &str) -> bool {
+        let n = name.trim().to_ascii_lowercase();
+        TRUST_SYNONYMS.iter().any(|s| *s == n)
+    }
+
+    /// Sella `TrustRegion.cons`: `||s||` through vecops.
+    pub fn cons(&self, s: &Array1<f64>) -> f64 {
+        nrm2(s.view())
+    }
+
+    /// Scale `s` so `||s|| <= delta`.
+    pub fn clip(&self, s: &Array1<f64>) -> Array1<f64> {
+        let n = nrm2(s.view());
+        if n <= self.delta || n <= 1e-16 {
+            return s.clone();
+        }
+        let mut out = Array1::zeros(s.len());
+        axpy(self.delta / n, s.view(), &mut out);
+        out
+    }
+
+    /// Sella `TrustRegion` + `QuasiNewton.get_s`: [`qn_restricted`].
+    pub fn restrict_qn(
+        &self,
+        evals: &Array1<f64>,
+        evecs: &Array2<f64>,
+        g: &Array1<f64>,
+        order: usize,
+    ) -> Result<Array1<f64>, SaddleError> {
+        let n = g.len();
+        if evals.len() != n || evecs.nrows() != n || evecs.ncols() != n {
+            return Err(SaddleError::Shape(
+                "TrustRegion QN spectrum must match the gradient".into(),
+            ));
+        }
+        Ok(qn_restricted(evals, evecs, g, order, self.delta))
+    }
+
+    /// Riemannian QN + trust: rgrad, `qn_restricted`, project, clip, retract.
+    pub fn restrict_qn_on<M: Manifold>(
+        &self,
+        man: &M,
+        x: &Array1<f64>,
+        evals: &Array1<f64>,
+        evecs: &Array2<f64>,
+        egrad: &Array1<f64>,
+        order: usize,
+    ) -> Result<Array1<f64>, SaddleError> {
+        let g = man.egrad2rgrad(x, egrad);
+        let s = self.restrict_qn(evals, evecs, &g, order)?;
+        Ok(self.step_on(man, x, &s))
+    }
+
+    /// Riemannian clip: project, clip, retract.
+    pub fn step_on<M: Manifold>(&self, man: &M, x: &Array1<f64>, s: &Array1<f64>) -> Array1<f64> {
+        let v = man.project(x, s);
+        let c = self.clip(&v);
+        man.retract(x, &c)
+    }
+
+    /// Vector transport of the clipped projected increment.
+    pub fn transport_step<M: Manifold>(
+        &self,
+        man: &M,
+        x: &Array1<f64>,
+        x_to: &Array1<f64>,
+        s: &Array1<f64>,
+    ) -> Array1<f64> {
+        let v = man.project(x, s);
+        let c = self.clip(&v);
+        man.transport(x, x_to, &c)
     }
 }
 
@@ -243,9 +373,9 @@ mod tests {
     use super::*;
     use crate::constraints::Constraints;
     use crate::internal::pack_cart;
-    use ndarray::Array2;
-    use rgmin::Manifold;
-    use rgmin::vecops::nrm2;
+    use ndarray::{Array2, array};
+    use rgmin::vecops::{dot, nrm2};
+    use rgmin::{Manifold, ManifoldKind};
 
     fn water() -> Array1<f64> {
         pack_cart(&[[0.0, 0.0, 0.0], [0.96, 0.0, 0.0], [-0.24, 0.93, 0.0]])
@@ -393,6 +523,145 @@ mod tests {
     #[test]
     fn empty_counts_are_shape() {
         match MaxInternalStep::new(0.1, InternalCounts::default(), InternalWeights::default()) {
+            Err(SaddleError::Shape(_)) => {}
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn trust_synonyms_match_sella() {
+        assert!(TrustRegion::match_name("tr"));
+        assert!(TrustRegion::match_name("Trust-Region"));
+        assert!(TrustRegion::match_name("trust radius"));
+        assert!(TrustRegion::match_name("trust-radius"));
+        assert!(!TrustRegion::match_name("ras"));
+        assert!(!TrustRegion::match_name("irc"));
+        assert_eq!(
+            RestrictedKind::from_name("tr"),
+            Some(RestrictedKind::TrustRegion)
+        );
+        assert_eq!(
+            RestrictedKind::from_name("max internal step"),
+            Some(RestrictedKind::MaxInternalStep)
+        );
+        assert!(RestrictedKind::from_name("ras").is_none());
+    }
+
+    #[test]
+    fn trust_cons_is_euclidean_norm() {
+        let tr = TrustRegion::new(0.5).unwrap();
+        let s = Array1::from(vec![3.0, 4.0]);
+        assert!((tr.cons(&s) - 5.0).abs() < 1e-14);
+    }
+
+    #[test]
+    fn trust_cons_is_not_irc_mass_weighted() {
+        let tr = TrustRegion::new(1.0).unwrap();
+        let s = Array1::from(vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let d1 = Array1::from(vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        assert!((tr.cons(&s) - 1.0).abs() < 1e-14);
+        let irc_like = nrm2((&s + &d1).view());
+        assert!((irc_like - 2.0).abs() < 1e-14);
+        assert!((tr.cons(&s) - irc_like).abs() > 0.5);
+    }
+
+    #[test]
+    fn trust_clip_caps_the_norm() {
+        let tr = TrustRegion::new(0.5).unwrap();
+        let s = Array1::from(vec![3.0, 4.0]);
+        let c = tr.clip(&s);
+        assert!((tr.cons(&c) - 0.5).abs() < 1e-14);
+        assert!((c[0] - 0.3).abs() < 1e-14);
+        assert!((c[1] - 0.4).abs() < 1e-14);
+    }
+
+    #[test]
+    fn trust_short_step_is_not_scaled() {
+        let tr = TrustRegion::new(0.5).unwrap();
+        let s = Array1::from(vec![0.1, -0.2]);
+        let c = tr.clip(&s);
+        assert!((c[0] - 0.1).abs() < 1e-14);
+        assert!((c[1] + 0.2).abs() < 1e-14);
+    }
+
+    #[test]
+    fn trust_restrict_qn_clips_a_long_newton_step() {
+        let tr = TrustRegion::new(0.5).unwrap();
+        let evals = Array1::ones(2);
+        let evecs = Array2::<f64>::eye(2);
+        let g = Array1::from(vec![4.0, 0.0]);
+        let s = tr.restrict_qn(&evals, &evecs, &g, 0).unwrap();
+        assert!((tr.cons(&s) - 0.5).abs() < 1e-9, "||s||={}", tr.cons(&s));
+        assert!(s[0] < 0.0);
+    }
+
+    #[test]
+    fn trust_step_on_the_sphere_stays_on_the_set() {
+        let man = ManifoldKind::Sphere;
+        let tr = TrustRegion::new(0.2).unwrap();
+        let x = array![0.0, 1.0, 0.0];
+        let s = Array1::from(vec![4.0, 0.2, -0.3]);
+        let y = tr.step_on(&man, &x, &s);
+        let n = nrm2(y.view());
+        assert!((n - 1.0).abs() < 1e-12, "||y||={n} y={y:?}");
+        let v = man.project(&x, &s);
+        let c = tr.clip(&v);
+        assert!(tr.cons(&c) <= 0.2 + 1e-14);
+        assert!(dot(x.view(), c.view()).abs() < 1e-12);
+        let w = tr.transport_step(&man, &x, &y, &s);
+        assert!(
+            dot(y.view(), w.view()).abs() < 1e-12,
+            "transported step leaves T_y: y·w={}",
+            dot(y.view(), w.view())
+        );
+    }
+
+    #[test]
+    fn trust_restrict_qn_on_sphere_stays_on_the_set() {
+        let man = ManifoldKind::Sphere;
+        let tr = TrustRegion::new(0.15).unwrap();
+        let x = array![0.0, 1.0, 0.0];
+        let evals = Array1::ones(3);
+        let evecs = Array2::<f64>::eye(3);
+        let egrad = array![1.0, 0.2, -0.3];
+        let y = tr
+            .restrict_qn_on(&man, &x, &evals, &evecs, &egrad, 0)
+            .unwrap();
+        assert!((nrm2(y.view()) - 1.0).abs() < 1e-12);
+        let g = man.egrad2rgrad(&x, &egrad);
+        let s = tr.restrict_qn(&evals, &evecs, &g, 0).unwrap();
+        let v = man.project(&x, &s);
+        let c = tr.clip(&v);
+        assert!(tr.cons(&c) <= 0.15 + 1e-12);
+        let w = man.transport(&x, &y, &c);
+        assert!(dot(y.view(), w.view()).abs() < 1e-12);
+    }
+
+    #[test]
+    fn trust_clip_then_retract_stays_on_the_constraint_set() {
+        let x = water();
+        let mut cons = Constraints::new(3).unwrap();
+        cons.fix_com(x.view()).unwrap();
+        let tr = TrustRegion::new(0.05).unwrap();
+        let mut s = Array1::zeros(9);
+        s[0] = 0.4;
+        s[4] = -0.3;
+        let y = tr.step_on(&cons, &x, &s);
+        assert!(
+            cons.residual_norm(y.view()).unwrap() < 1e-10,
+            "clipped retract left the set"
+        );
+        let v = cons.project(&x, &s);
+        let c = tr.clip(&v);
+        assert!(tr.cons(&c) <= 0.05 + 1e-14);
+        let t = tr.transport_step(&cons, &x, &y, &s);
+        let t_h = cons.project(&y, &t);
+        assert!(nrm2((&t - &t_h).view()) < 1e-12);
+    }
+
+    #[test]
+    fn trust_negative_delta_is_shape() {
+        match TrustRegion::new(-0.1) {
             Err(SaddleError::Shape(_)) => {}
             other => panic!("{other:?}"),
         }

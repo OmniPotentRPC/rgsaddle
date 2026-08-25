@@ -30,8 +30,10 @@
 //! manifold (`Translation` / `Rotation` / `Displacement`, plus
 //! host-fixed bonds / angles / dihedrals). [`SellaMinSession`] and
 //! [`SellaSaddleSession`] retract on [`geom::SellaGeom`]: the rigid
-//! quotient by default, or a live `Constraints` chart. [`restricted::MaxInternalStep`]
-//! is the per-coordinate clip Sella applies before the trust region.
+//! quotient by default, or a live `Constraints` chart. [`restricted::TrustRegion`]
+//! is Sella `cons(s) = ||s||` over [`rgmin::qn_restricted`].
+//! [`restricted::MaxInternalStep`] is the per-coordinate clip Sella
+//! applies before that Euclidean radius.
 //!
 //! Force assembly is pure: tangents (Mills–Jonsson–Schenter simple,
 //! Henkelman–Jonsson improved), springs (uniform, energy-weighted,
@@ -106,6 +108,7 @@ pub use projection::ProjectionKind;
 pub use qn::{get_stepper, retract_qn, QuasiNewton, StepperKind};
 pub use restricted::{
     mis_clip, weights_for_equalities, InternalWeights, MaxInternalStep, RestrictedKind,
+    TrustRegion, TRUST_SYNONYMS,
 };
 pub use rfo::{RationalFunctionOptimization, rfo_stepper};
 pub use samd::{

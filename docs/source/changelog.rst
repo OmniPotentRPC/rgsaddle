@@ -42,6 +42,10 @@ Unreleased
   cell DOF drop out of the packed chart. Internals stay
   on the ``Constraints`` level set.
 
+- ``TrustRegion``: Sella ``cons(s) = ||s||`` over
+  ``rgmin.qn_restricted``. Distinct from ``IRCTrustRegion``
+  (``||(s+d1) odot sqrt(m)||``). ``step_on`` /
+  ``transport_step`` keep the clipped increment on the set.
 - ``MaxInternalStep``: per-coordinate clip ``max |s_i w_i|``
   on an internals packing, applied before the Euclidean
   trust radius.
