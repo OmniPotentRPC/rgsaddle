@@ -36,9 +36,9 @@ pub trait PointSurface: Sync {
 /// How the lowest mode is estimated.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum MinModeKind {
-    /// Finite-difference dimer rotation (Henkelman-Jonsson 1999 with
-    /// the Heyden 2005 rotation plane): one extra gradient per
-    /// rotation iteration.
+    /// Dimer finite-difference Hessian action, rotated by rgmin
+    /// Jacobi-Davidson (residual plane). One extra gradient per
+    /// Hessian action.
     #[default]
     Dimer,
     /// Lanczos on finite-difference Hessian actions: a Krylov
@@ -132,13 +132,12 @@ fn hessian_action<S: PointSurface>(
     Ok((&g1 - &g0) / dr)
 }
 
-/// Rayleigh quotient of the finite-difference Hessian along `v`.
-fn curvature_along(hv: ArrayView1<f64>, v: ArrayView1<f64>) -> f64 {
-    hv.dot(&v)
-}
-
-/// Dimer rotation: steepest-descent rotation of the mode toward the
-/// lowest curvature, stopping on the rotational force.
+/// Dimer rotation through rgmin's lowest-mode waist.
+///
+/// The Hessian action is the dimer finite-difference. The rotation
+/// itself is Jacobi-Davidson: residual-plane correction of the
+/// current mode, capped by `max_rotations` and `rotation_tol`.
+/// rgsaddle does not keep a second rotator.
 fn rotate_dimer<S: PointSurface>(
     surface: &S,
     x: ArrayView1<f64>,
@@ -146,29 +145,21 @@ fn rotate_dimer<S: PointSurface>(
     mode: Array1<f64>,
     config: &MinModeConfig,
 ) -> Result<(Array1<f64>, f64, usize), SaddleError> {
-    let mut tau = normalize(mode);
-    let mut rotations = 0;
-    let mut curvature;
-    loop {
-        let hv = hessian_action(surface, x, g0, tau.view(), config.dr)?;
-        curvature = curvature_along(hv.view(), tau.view());
-        // Rotational force: the component of H tau perpendicular to
-        // tau, which vanishes exactly at an eigenvector.
-        let perp = &hv - &(&tau * curvature);
-        let perp_norm = perp.dot(&perp).sqrt();
-        if perp_norm <= config.rotation_tol || rotations >= config.max_rotations {
-            break;
-        }
-        // Rotate against the perpendicular curvature component. The
-        // step is the normalized perpendicular direction scaled by a
-        // Rayleigh-based trust factor; renormalizing keeps tau a unit
-        // vector without a line search.
-        let theta = normalize(perp);
-        let scale = (perp_norm / (curvature.abs() + perp_norm)).min(0.5);
-        tau = normalize(&tau - &(&theta * scale));
-        rotations += 1;
-    }
-    Ok((tau, curvature, rotations))
+    let h = FdHvp {
+        surface,
+        g0: g0.to_owned(),
+        dr: config.dr,
+    };
+    let params = EigenParams {
+        kind: EigensolverKind::JacobiDavidson,
+        krylov: 2.max(config.krylov_dim.min(8)),
+        max_iter: config.max_rotations,
+        tol: config.rotation_tol,
+        ..EigenParams::default()
+    };
+    let out = rgmin::lowest_mode(&h, x, mode.view(), &params)
+        .map_err(|e| SaddleError::Solver(format!("dimer rotation: {e}")))?;
+    Ok((out.vector, out.value, out.actions))
 }
 
 struct FdHvp<'a, S: PointSurface> {
