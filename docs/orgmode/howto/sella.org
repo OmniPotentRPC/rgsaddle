@@ -16,11 +16,13 @@ unconstrained Hessian store ~InternalPes~ wraps.
 
 ~SellaMinSession~ is order 0, ~eig=false~: project on
 ~SellaGeom~ (RigidQuotient at N>=3, or a ~Constraints~
-chart via ~with_chart~), ~qn_restricted~, retract,
+chart via ~with_chart~), QN (TrustRegion ~qn_restricted~;
+RAS unrestricted then ~ras_clip~), retract,
 transport, ~CartesianPes::kick~, then Sella's ~delta0~ /
 ~sigma~ / ~rho~ trust schedule. ~SellaSaddleSession~ is
 order 1: the same geometry and trust numbers from
-~_default_kwargs['saddle']~, then ~prfo_restricted~. Both
+~_default_kwargs['saddle']~, then ~prfo_restricted~
+(RAS skips the Euclidean pre-scale). Both
 sit on ~CartesianPes~, not on ~IrcSession~. ~n_free~ is
 ~3N-6~ on the quotient and ~3N - ncons~ on a chart.
 
