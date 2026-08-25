@@ -69,6 +69,7 @@ cargo test
    howto/sella
    howto/minmode
    howto/io
+   howto/c-abi
 
 .. toctree::
    :maxdepth: 2

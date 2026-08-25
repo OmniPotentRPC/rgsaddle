@@ -108,3 +108,65 @@ fn c_abi_irc_analytic_well() {
     assert!(stdout.contains("RGSADDLE_IRC_ABI_OK"), "stdout: {stdout}");
     let _ = std::fs::remove_file(&out);
 }
+
+fn cxx() -> Option<String> {
+    for c in [
+        std::env::var("CXX").ok(),
+        Some("c++".into()),
+        Some("g++".into()),
+        Some("clang++".into()),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if Command::new(&c).arg("--version").output().is_ok() {
+            return Some(c);
+        }
+    }
+    None
+}
+
+#[test]
+#[cfg_attr(not(feature = "capi"), ignore)]
+fn cxx_wrap_smoke() {
+    let Some(cxx) = cxx() else {
+        eprintln!("no C++ compiler; skipping");
+        return;
+    };
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let out = std::env::temp_dir().join(format!("rgsaddle_cxx_wrap_{}", std::process::id()));
+
+    let mut libdir = std::env::current_exe().unwrap();
+    libdir.pop();
+    if libdir.ends_with("deps") {
+        libdir.pop();
+    }
+
+    let status = Command::new(&cxx)
+        .arg(root.join("tests/c/wrap_smoke.cpp"))
+        .arg("-std=c++17")
+        .arg("-I")
+        .arg(root.join("include"))
+        .arg("-L")
+        .arg(&libdir)
+        .arg("-lrgsaddle")
+        .arg("-lm")
+        .arg("-o")
+        .arg(&out)
+        .status()
+        .expect("compile the C++ wrap smoke test");
+    assert!(status.success(), "C++ wrap smoke test failed to build");
+
+    let run = Command::new(&out)
+        .env("LD_LIBRARY_PATH", &libdir)
+        .output()
+        .expect("run the C++ wrap smoke test");
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        run.status.success(),
+        "C++ wrap smoke test failed:\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(stdout.contains("RGSADDLE_CXX_WRAP_OK"), "stdout: {stdout}");
+    let _ = std::fs::remove_file(&out);
+}

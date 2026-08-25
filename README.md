@@ -33,9 +33,15 @@ lists, when a surface needs them, are
 `BandSession::reset` is the model-update boundary: quasi-Newton
 history taken on one surface epoch must not survive onto the next.
 
+C hosts include [`include/rgsaddle.h`](include/rgsaddle.h). C++ hosts
+include [`include/rgsaddle/session.hpp`](include/rgsaddle/session.hpp),
+the same hourglass wrap rgmin ships as `xts/optimize.hpp`. Sessions
+stay in Rust; the header is RAII over the C ABI.
+
 Narrative docs live in [`docs/orgmode/`](docs/orgmode/index.org)
 (Diataxis). The one tutorial is MEP roll-down from a first-order
-saddle. Export with `emacs --script docs/export.el` from `docs/`;
+saddle. C and C++ ABI: [`docs/orgmode/howto/c-abi.org`](docs/orgmode/howto/c-abi.org).
+Export with `emacs --script docs/export.el` from `docs/`;
 Sphinx (Shibuya) reads `docs/source/`. The mark is in
 [`branding/logo/`](branding/logo/README.md).
 
