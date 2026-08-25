@@ -5,9 +5,9 @@
 * Step a minimum-mode search
 
 ~MinModeSession::step~ refreshes the lowest curvature mode
-through rgmin ~lowest_mode~ (dimer: Jacobi-Davidson on the
-finite-difference Hessian action; Lanczos: the Krylov
-waist), inverts the force along it, and takes one rgmin
+through rgmin ~lowest_mode~ (dimer: ~EigensolverKind::Dimer~,
+the Jónsson dimer with Heyden plane rotations; Lanczos: the
+Krylov waist), inverts the force along it, and takes one rgmin
 solver step. The rotator is not a second loop in this crate.
 
 This finds a first-order saddle. Rolling off that saddle is

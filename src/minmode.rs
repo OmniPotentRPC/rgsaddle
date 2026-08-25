@@ -37,8 +37,8 @@ pub trait PointSurface: Sync {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum MinModeKind {
     /// Dimer finite-difference Hessian action, rotated by rgmin
-    /// Jacobi-Davidson (residual plane). One extra gradient per
-    /// Hessian action.
+    /// [`EigensolverKind::Dimer`] (Jónsson dimer, Heyden plane). One
+    /// extra gradient per Hessian action.
     #[default]
     Dimer,
     /// Lanczos on finite-difference Hessian actions: a Krylov
@@ -135,9 +135,9 @@ fn hessian_action<S: PointSurface>(
 /// Dimer rotation through rgmin's lowest-mode waist.
 ///
 /// The Hessian action is the dimer finite-difference. The rotation
-/// itself is Jacobi-Davidson: residual-plane correction of the
-/// current mode, capped by `max_rotations` and `rotation_tol`.
-/// rgsaddle does not keep a second rotator.
+/// is the Jónsson dimer with Heyden plane rotations, capped by
+/// `max_rotations` and `rotation_tol`. rgsaddle does not keep a
+/// second rotator.
 fn rotate_dimer<S: PointSurface>(
     surface: &S,
     x: ArrayView1<f64>,
@@ -151,8 +151,7 @@ fn rotate_dimer<S: PointSurface>(
         dr: config.dr,
     };
     let params = EigenParams {
-        kind: EigensolverKind::JacobiDavidson,
-        krylov: 2.max(config.krylov_dim.min(8)),
+        kind: EigensolverKind::Dimer,
         max_iter: config.max_rotations,
         tol: config.rotation_tol,
         ..EigenParams::default()
