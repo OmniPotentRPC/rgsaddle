@@ -114,6 +114,19 @@ impl RestrictedKind {
     pub const fn wants_unrestricted_ambient(self) -> bool {
         matches!(self, Self::RestrictedAtomicStep)
     }
+
+    /// Sella `get_s` second return: RAS `cons`, else `||s||`.
+    ///
+    /// `optimize.py` feeds this into the `delta0` / `sigma` / `rho`
+    /// schedule as `smag`. A RAS clip that binds has `cons = delta`
+    /// while `||s||` can be larger (`~sqrt(N) delta`); using the
+    /// Euclidean length can grow the radius on a rejected step.
+    pub fn step_magnitude(self, s: &Array1<f64>) -> f64 {
+        match self {
+            Self::RestrictedAtomicStep => ras_cons(s),
+            Self::TrustRegion | Self::MaxInternalStep => nrm2(s.view()),
+        }
+    }
 }
 
 /// Sella `TrustRegion` synonyms.
@@ -333,7 +346,10 @@ impl RestrictedAtomicStep {
     }
 }
 
-/// `max_i ||s_i||` over packed 3-vectors. Remainder uses [`nrm2`].
+/// `max_i ||s_i||` over packed 3-vectors.
+///
+/// Lengths below 3 use [`nrm2`]. Leftover components after
+/// `3 * (len / 3)` are not a packed atom (same as [`ras_clip`]).
 pub fn ras_cons(s: &Array1<f64>) -> f64 {
     let atoms = s.len() / 3;
     if atoms == 0 {
@@ -934,6 +950,56 @@ mod tests {
         let eucl = nrm2(s.view());
         assert!((eucl - (0.5_f64).sqrt()).abs() < 1e-14);
         assert!((ras.cons(&s) - eucl).abs() > 0.2);
+    }
+
+    #[test]
+    fn ras_cons_leftover_is_not_a_packed_atom() {
+        let leftover = Array1::from(vec![0.0, 0.0, 0.0, 5.0]);
+        assert!((ras_cons(&leftover) - 0.0).abs() < 1e-14);
+        let short = Array1::from(vec![3.0, 4.0]);
+        assert!((ras_cons(&short) - 5.0).abs() < 1e-14);
+    }
+
+    #[test]
+    fn ras_step_magnitude_is_cons_not_euclidean() {
+        use crate::geom::{update_trust, TrustSchedule};
+        let s = Array1::from(vec![0.1, 0.0, 0.0, 0.1, 0.0, 0.0, 0.1, 0.0, 0.0]);
+        let cons = RestrictedKind::RestrictedAtomicStep.step_magnitude(&s);
+        assert!((cons - 0.1).abs() < 1e-14);
+        let eucl = RestrictedKind::TrustRegion.step_magnitude(&s);
+        assert!((eucl - 0.1 * 3.0_f64.sqrt()).abs() < 1e-14);
+        let sch = TrustSchedule::minimum();
+        let d0 = 0.1;
+        let d_ras = update_trust(d0, 0.0, cons, &sch);
+        let d_eucl = update_trust(d0, 0.0, eucl, &sch);
+        assert!(d_ras < d0, "RAS cons smag must shrink: {d_ras}");
+        assert!(d_eucl > d0, "Euclidean smag grows: {d_eucl}");
+    }
+
+    #[test]
+    fn ras_binding_clip_bad_rho_shrinks_from_delta() {
+        use crate::geom::{update_trust, TrustSchedule};
+        let delta = 0.1;
+        let ras = RestrictedAtomicStep::new(delta).unwrap();
+        let mut s = Array1::zeros(9);
+        s[0] = 0.4;
+        s[3] = 0.4;
+        s[6] = 0.4;
+        let c = ras.clip(&s);
+        assert!((ras.cons(&c) - delta).abs() < 1e-12);
+        let eucl = nrm2(c.view());
+        assert!(eucl > delta);
+        let sch = TrustSchedule::minimum();
+        let from_cons = update_trust(
+            delta,
+            0.0,
+            RestrictedKind::RestrictedAtomicStep.step_magnitude(&c),
+            &sch,
+        );
+        let from_eucl = update_trust(delta, 0.0, eucl, &sch);
+        assert!(from_cons < delta, "cons smag grew: {from_cons}");
+        assert!((from_cons - delta * sch.sigma_dec).abs() < 1e-14);
+        assert!(from_eucl > delta, "euclidean smag must grow: {from_eucl}");
     }
 
     #[test]
