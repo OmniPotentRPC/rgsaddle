@@ -53,6 +53,14 @@ Banerjee-augmented mode. The increment is
 A host that needs a point on a set calls ``step_on``
 (``project`` / ``retract`` / ``transport``).
 
+``PartitionedRationalFunctionOptimization`` is Sella
+``method=prfo``: RFO in the ``order`` uphill modes plus RFO
+in the downhill complement. The increment is
+``rgmin.rfo_get_s`` per block; the trust companion is
+``rgmin.prfo_restricted``. Alpha / slope / ``newton_safe``
+are the RFO contract. A host that needs a point on a set
+calls ``step_on`` (``project`` / ``retract`` / ``transport``).
+
 Equality internals are ``Constraints`` on the same manifold:
 fix translations (COM), rotations (Kabsch quaternion),
 displacements, and host-supplied bonds / angles / dihedrals.
