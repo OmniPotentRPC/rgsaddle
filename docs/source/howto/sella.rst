@@ -36,8 +36,13 @@ on a set calls ``numerical_hvp_on`` (``project`` /
 thermostat (``samd.py``). Euclidean ``step`` is the Sella
 loop. A host that needs the point on a set calls
 ``step_on`` (``project`` / ``retract`` / ``transport``).
-``force_match_hessian`` is the bond arm of
-``force_match.pyx``.
+``force_match`` is Sella ``force_match.pyx``
+(``buck`` / ``morse`` / ``lj`` / ``bond``; default
+``DEFAULT_KINDS``). Reductions go through
+``rgmin.vecops``. ``force_match_hessian`` is the
+covalent-pair bond arm. A host that needs the
+increment on a set calls ``force_match_on``
+(``project`` / ``retract`` / ``transport``).
 
 The C wire exposes ``rgsaddle_sella_min_*`` and
 ``rgsaddle_sella_saddle_*``, plus ``rgsaddle_constraints_*``

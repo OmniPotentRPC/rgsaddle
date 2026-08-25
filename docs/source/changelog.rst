@@ -6,6 +6,15 @@ Changelog
 Unreleased
 ~~~~~~~~~~
 
+- ``force_match`` is Sella ``force_match.pyx``: Buckingham /
+  Morse / LJ / bond seed Hessian, linear LS plus boxed
+  nonlinear ``rho`` / ``r0``. Reductions go through
+  ``rgmin.vecops`` so ``par`` applies.
+  ``force_match_hessian`` is the covalent-pair bond arm.
+  A host that needs the increment on a set calls
+  ``force_match_on`` (``project`` / ``retract`` /
+  ``transport``).
+
 - ``numerical_hvp`` is Sella ``linalg.NumericalHessian``.
   Reductions go through ``rgmin.vecops`` so ``par`` applies.
   A host that needs the displaced point on a set calls
