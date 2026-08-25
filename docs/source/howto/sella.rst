@@ -83,9 +83,10 @@ calls ``step_on`` / ``transport_step``.
 ``RestrictedAtomicStep`` is Sella ``cons(s) = max_i ||s_i||``
 (``ras`` / ``restricted atomic step``) on 3N Cartesian. The
 clip dests ``rgmin.ras_clip``. Cartesian / cell sessions
-take unrestricted QN or P-RFO, then that clip. Internals
-refuse it. A host that needs the point on a set calls
-``step_on`` / ``transport_step``.
+take unrestricted QN or P-RFO, then that clip. The
+``delta0`` / ``sigma`` / ``rho`` schedule uses that ``cons``
+as ``smag``. Internals refuse it. A host that needs the
+point on a set calls ``step_on`` / ``transport_step``.
 
 ``MaxInternalStep`` is the Sella per-coordinate clip
 (``max |s_i w_i| <= delta``) on an internals packing. It sits

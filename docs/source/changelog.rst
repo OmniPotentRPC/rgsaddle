@@ -63,7 +63,8 @@ Unreleased
 - ``RestrictedAtomicStep``: Sella ``cons(s) = max_i ||s_i||``
   over ``rgmin.ras_clip`` (3N Cartesian). Internals refuse
   it. Cartesian / cell sessions take unrestricted QN or
-  P-RFO, then ``ras_clip``. ``step_on`` / ``transport_step``
+  P-RFO, then ``ras_clip``. The trust update uses that
+  ``cons`` as ``smag``. ``step_on`` / ``transport_step``
   keep the clipped increment on the set.
 - ``MaxInternalStep``: per-coordinate clip ``max |s_i w_i|``
   on an internals packing, applied before the Euclidean

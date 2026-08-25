@@ -17,14 +17,14 @@
 //! [`rgmin::vecops`] so `par` applies.
 
 use ndarray::{Array1, Array2};
+use rgmin::Manifold;
 use rgmin::qn_get_s;
 use rgmin::qn_restricted;
 use rgmin::ras_clip;
 use rgmin::vecops::{axpy, nrm2, nrminf};
-use rgmin::Manifold;
 
-use crate::constraints::{Constraints, Equality, InternalCounts};
 use crate::SaddleError;
+use crate::constraints::{Constraints, Equality, InternalCounts};
 
 /// Named Sella restricted step this crate dests.
 ///
@@ -113,6 +113,16 @@ impl RestrictedKind {
     /// RAS binds the per-atom clip on an unrestricted ambient step.
     pub const fn wants_unrestricted_ambient(self) -> bool {
         matches!(self, Self::RestrictedAtomicStep)
+    }
+
+    /// Sella `get_s` cons used as `smag` in the trust update.
+    ///
+    /// RAS is `max_i ||s_i||`. TrustRegion and MaxInternalStep use `||s||`.
+    pub fn step_smag(self, s: &Array1<f64>) -> f64 {
+        match self {
+            Self::RestrictedAtomicStep => ras_cons(s),
+            Self::TrustRegion | Self::MaxInternalStep => nrm2(s.view()),
+        }
     }
 }
 
@@ -333,7 +343,11 @@ impl RestrictedAtomicStep {
     }
 }
 
-/// `max_i ||s_i||` over packed 3-vectors. Remainder uses [`nrm2`].
+/// `max_i ||s_i||` over packed 3-vectors.
+///
+/// Components after `3 * floor(n / 3)` do not enter the max
+/// (same packed atoms [`ras_clip`] uses for the scale). [`nrm2`]
+/// is the whole vector only when `n < 3`.
 pub fn ras_cons(s: &Array1<f64>) -> f64 {
     let atoms = s.len() / 3;
     if atoms == 0 {
@@ -576,8 +590,9 @@ pub fn mis_clip(s: &Array1<f64>, w: &Array1<f64>, delta: f64) -> Array1<f64> {
 mod tests {
     use super::*;
     use crate::constraints::Constraints;
+    use crate::geom::update_trust;
     use crate::internal::pack_cart;
-    use ndarray::{array, Array2};
+    use ndarray::{Array2, array};
     use rgmin::vecops::{dot, nrm2};
     use rgmin::{Manifold, ManifoldKind};
 
@@ -934,6 +949,53 @@ mod tests {
         let eucl = nrm2(s.view());
         assert!((eucl - (0.5_f64).sqrt()).abs() < 1e-14);
         assert!((ras.cons(&s) - eucl).abs() > 0.2);
+    }
+
+    #[test]
+    fn ras_cons_ignores_remainder_past_packed_atoms() {
+        let leftover = Array1::from(vec![0.0, 0.0, 0.0, 5.0]);
+        assert!((ras_cons(&leftover) - 0.0).abs() < 1e-14);
+        let short = Array1::from(vec![3.0, 4.0]);
+        assert!((ras_cons(&short) - 5.0).abs() < 1e-14);
+    }
+
+    #[test]
+    fn ras_step_smag_is_cons_not_euclidean() {
+        let mut s = Array1::zeros(9);
+        s[0] = 0.1;
+        s[3] = 0.1;
+        s[6] = 0.1;
+        let cons = ras_cons(&s);
+        let eucl = nrm2(s.view());
+        assert!((cons - 0.1).abs() < 1e-14);
+        assert!((eucl - 0.1 * 3.0_f64.sqrt()).abs() < 1e-14);
+        assert!((RestrictedKind::RestrictedAtomicStep.step_smag(&s) - cons).abs() < 1e-14);
+        assert!((RestrictedKind::TrustRegion.step_smag(&s) - eucl).abs() < 1e-14);
+    }
+
+    #[test]
+    fn ras_binding_clip_bad_rho_shrinks_from_delta() {
+        let delta = 0.1;
+        let ras = RestrictedAtomicStep::new(delta).unwrap();
+        let mut s = Array1::zeros(9);
+        s[0] = 0.4;
+        s[3] = 0.4;
+        s[6] = 0.4;
+        let c = ras.clip(&s);
+        assert!((ras.cons(&c) - delta).abs() < 1e-12);
+        let eucl = nrm2(c.view());
+        assert!(eucl > delta);
+        let sch = crate::geom::TrustSchedule::minimum();
+        let from_cons = update_trust(
+            delta,
+            0.0,
+            RestrictedKind::RestrictedAtomicStep.step_smag(&c),
+            &sch,
+        );
+        let from_eucl = update_trust(delta, 0.0, eucl, &sch);
+        assert!(from_cons < delta, "cons smag grew: {from_cons}");
+        assert!((from_cons - delta * sch.sigma_dec).abs() < 1e-14);
+        assert!(from_eucl > delta, "euclidean smag must grow: {from_eucl}");
     }
 
     #[test]

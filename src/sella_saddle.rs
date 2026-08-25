@@ -8,14 +8,14 @@
 //! or [`SellaSaddleSession::on_cell_internal`] for `CellInternalPES`.
 //! Hosts own the loop.
 
-use ndarray::{s, Array1};
-use rgmin::prfo_restricted;
-use rgmin::vecops::{axpy, dot, vdot, vnrm2, Vector};
+use ndarray::{Array1, s};
 use rgmin::Manifold;
+use rgmin::prfo_restricted;
+use rgmin::vecops::{Vector, axpy, dot, vdot, vnrm2};
 
 use crate::constraints::Constraints;
 use crate::error::SaddleError;
-use crate::geom::{update_trust, SellaGeom, TrustSchedule};
+use crate::geom::{SellaGeom, TrustSchedule, update_trust};
 use crate::minmode::PointSurface;
 use crate::pes::CartesianPes;
 use crate::pes_internal::{CellCartesianPes, CellInternalPes, InternalPes, SellaPes};
@@ -411,7 +411,12 @@ impl SellaSaddleSession {
         let max_force = self.config.force_gate.value(g1_r.view());
         if pred.abs() >= 1e-14 {
             self.rho = (energy - e0) / pred;
-            self.delta = update_trust(self.delta, self.rho, vnrm2(&vs), &self.config.schedule());
+            self.delta = update_trust(
+                self.delta,
+                self.rho,
+                self.config.restricted.step_smag(&s),
+                &self.config.schedule(),
+            );
         } else {
             self.rho = 1.0;
         }
@@ -569,7 +574,12 @@ impl SellaSaddleSession {
         let max_force = self.config.force_gate.value(g1_cart.view());
         if pred.abs() >= 1e-14 {
             self.rho = (energy - e0) / pred;
-            self.delta = update_trust(self.delta, self.rho, vnrm2(&vs), &self.config.schedule());
+            self.delta = update_trust(
+                self.delta,
+                self.rho,
+                self.config.restricted.step_smag(&s),
+                &self.config.schedule(),
+            );
         } else {
             self.rho = 1.0;
         }
@@ -755,8 +765,8 @@ mod tests {
 
     #[test]
     fn prfo_step_stays_on_the_rigid_quotient() {
-        use rgmin::vecops::nrm2;
         use rgmin::ManifoldKind;
+        use rgmin::vecops::nrm2;
         let mut x = Array1::zeros(9);
         x[0] = 0.2;
         x[4] = 1.0;

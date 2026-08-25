@@ -4,20 +4,21 @@
 //! `eig=false`. One step is eval, project, the restricted increment
 //! (`qn_restricted`, or unrestricted QN then `ras_clip` for RAS), retract,
 //! transport, `PES.kick`, then the `delta0` / `sigma` / `rho` trust
-//! schedule. Default geometry is [`crate::geom::SellaGeom::cartesian`]
+//! schedule (RAS `smag` is `cons = max_i ||s_i||`). Default
+//! geometry is [`crate::geom::SellaGeom::cartesian`]
 //! (RigidQuotient at N>=3). Pass a [`Constraints`] chart through
 //! [`SellaMinSession::with_chart`] to retract on `ker(J)`, or
 //! [`SellaMinSession::on_internal`] to QN in the internals chart
 //! (Sella `InternalPES`). The host owns the loop. `run` is a convenience.
 
-use ndarray::{s, Array1};
-use rgmin::qn_restricted;
-use rgmin::vecops::{axpy, dot, vdot, vnrm2, Vector};
+use ndarray::{Array1, s};
 use rgmin::Manifold;
+use rgmin::qn_restricted;
+use rgmin::vecops::{Vector, axpy, dot, vdot, vnrm2};
 
 use crate::constraints::Constraints;
 use crate::error::SaddleError;
-use crate::geom::{update_trust, SellaGeom, TrustSchedule};
+use crate::geom::{SellaGeom, TrustSchedule, update_trust};
 use crate::minmode::PointSurface;
 use crate::pes::CartesianPes;
 use crate::pes_internal::{CellCartesianPes, CellInternalPes, InternalPes, SellaPes};
@@ -403,7 +404,12 @@ impl SellaMinSession {
         let max_force = self.config.force_gate.value(g1_r.view());
         if pred.abs() >= 1e-14 {
             self.rho = (energy - e0) / pred;
-            self.delta = update_trust(self.delta, self.rho, vnrm2(&vs), &self.config.schedule());
+            self.delta = update_trust(
+                self.delta,
+                self.rho,
+                self.config.restricted.step_smag(&s),
+                &self.config.schedule(),
+            );
         } else {
             self.rho = 1.0;
         }
@@ -518,7 +524,12 @@ impl SellaMinSession {
         let max_force = self.config.force_gate.value(g1_cart.view());
         if pred.abs() >= 1e-14 {
             self.rho = (energy - e0) / pred;
-            self.delta = update_trust(self.delta, self.rho, vnrm2(&vs), &self.config.schedule());
+            self.delta = update_trust(
+                self.delta,
+                self.rho,
+                self.config.restricted.step_smag(&s),
+                &self.config.schedule(),
+            );
         } else {
             self.rho = 1.0;
         }
@@ -618,8 +629,8 @@ mod tests {
     use crate::geom::update_trust;
     use crate::minmode::PointSurface;
     use ndarray::{Array1, ArrayView1};
-    use rgmin::vecops::nrm2;
     use rgmin::ManifoldKind;
+    use rgmin::vecops::nrm2;
 
     struct Well;
     impl PointSurface for Well {
@@ -628,6 +639,18 @@ mod tests {
             let mut g = Array1::zeros(x.len());
             g[0] = 4.0 * t * (t * t - 1.0);
             Ok(((t * t - 1.0).powi(2), g))
+        }
+    }
+
+    /// Constant energy, per-atom x-force. Pred is mute-free; rho is 0.
+    struct FlatForce;
+    impl PointSurface for FlatForce {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            let mut g = Array1::zeros(x.len());
+            for i in 0..(x.len() / 3) {
+                g[3 * i] = -4.0;
+            }
+            Ok((1000.0, g))
         }
     }
 
@@ -701,6 +724,49 @@ mod tests {
             "RAS session step matched TrustRegion: dx={dx} x_tr={:?} x_ras={:?}",
             tr.position(),
             ras.position()
+        );
+    }
+
+    #[test]
+    fn ras_session_trust_shrinks_from_cons_not_euclidean() {
+        let x = Array1::zeros(9);
+        let masses = Array1::from(vec![1.0, 1.0, 1.0]);
+        let mut sess = SellaMinSession::on(
+            SellaMinConfig {
+                delta: 0.1 / 9.0,
+                restricted: crate::RestrictedKind::RestrictedAtomicStep,
+                force_tol: 1e-12,
+                ..SellaMinConfig::default()
+            },
+            x,
+            masses,
+            SellaGeom::Kind(ManifoldKind::Euclidean),
+        )
+        .unwrap();
+        let delta0 = sess.delta();
+        assert!((delta0 - 0.1).abs() < 1e-14, "delta0={delta0}");
+        let report = sess.step(&FlatForce).unwrap();
+        assert!(
+            report.rho.abs() < 0.1,
+            "need a rejected step: rho={}",
+            report.rho
+        );
+        let bound = Array1::from(vec![0.1, 0.0, 0.0, 0.1, 0.0, 0.0, 0.1, 0.0, 0.0]);
+        let eucl = nrm2(bound.view());
+        let sch = sess.config.schedule();
+        let grown = update_trust(delta0, report.rho, eucl, &sch);
+        assert!(grown > delta0, "euclidean smag must grow: {grown}");
+        assert!(
+            report.delta < delta0,
+            "RAS trust grew from cons: {} from {delta0} rho={}",
+            report.delta,
+            report.rho
+        );
+        assert!(
+            (report.delta - delta0 * sch.sigma_dec).abs() < 1e-12,
+            "delta={} expected {}",
+            report.delta,
+            delta0 * sch.sigma_dec
         );
     }
 
