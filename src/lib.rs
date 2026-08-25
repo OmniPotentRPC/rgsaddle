@@ -101,7 +101,7 @@ pub use error::SaddleError;
 pub use force::ForceGate;
 pub use force_match::{
     ForceMatchOpts, ForceMatchReport, PairKind, covalent_pairs, force_match, force_match_hessian,
-    force_match_on,
+    force_match_on, project_force_match, retract_force_match, transport_force_match,
 };
 pub use geom::{SellaGeom, TrustSchedule};
 pub use internal::{CartAxis, Displacement, InternalSlot, Rotation, Translation};
