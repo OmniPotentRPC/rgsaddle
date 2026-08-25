@@ -64,11 +64,11 @@ pub mod internal;
 pub mod linalg;
 pub mod mic;
 pub mod minmode;
-#[cfg(feature = "python")]
-pub mod python;
 pub mod pes;
 pub mod pes_internal;
 pub mod projection;
+#[cfg(feature = "python")]
+pub mod python;
 pub mod qn;
 pub mod restricted;
 pub mod rfo;
@@ -80,36 +80,40 @@ pub mod tangent;
 pub mod vocn;
 
 pub use band::{BandConfig, BandReport, BandSession, BandStatus, BandSurface};
+pub use cell_log::{CellChart, expm_3x3, logm_3x3};
 pub use constraints::{Constraints, Equality, InternalCounts};
 pub use eigensolve::{
-    exact_eigh, eigh_on, expand, lowest_on, rayleigh_ritz, rayleigh_ritz_iter, EigenDevice,
-    ExpandKind,
+    EigenDevice, ExpandKind, eigh_on, exact_eigh, expand, lowest_on, rayleigh_ritz,
+    rayleigh_ritz_iter,
 };
 pub use error::SaddleError;
 pub use force::ForceGate;
 pub use force_match::{covalent_pairs, force_match_hessian};
-pub use cell_log::{expm_3x3, logm_3x3, CellChart};
 pub use geom::{SellaGeom, TrustSchedule};
-pub use linalg::{modified_gram_schmidt, numerical_hvp};
 pub use internal::{CartAxis, Displacement, InternalSlot, Rotation, Translation};
 pub use irc::{IrcConfig, IrcDirection, IrcKind, IrcReport, IrcSession};
+pub use linalg::{modified_gram_schmidt, numerical_hvp};
 pub use mic::{Cell, wrap_difference};
 pub use minmode::{
     MinModeConfig, MinModeKind, MinModeReport, MinModeSession, MinModeStatus, PointSurface,
 };
-pub use pes::{CartesianPes, HessUpdate};
+pub use pes::CartesianPes;
 pub use pes_internal::{
-    niggli_reduce_cell, niggli_reduce_vectors, place_perp_dummy, CellCartesianPes,
-    CellInternalPes, InternalPes, SellaPes,
+    CellCartesianPes, CellInternalPes, InternalPes, SellaPes, niggli_reduce_cell,
+    niggli_reduce_vectors, place_perp_dummy,
 };
 pub use projection::ProjectionKind;
-pub use qn::{get_stepper, retract_qn, QuasiNewton, StepperKind};
+pub use qn::{
+    HessUpdate, QuasiNewton, StepperKind, get_stepper, retract_qn, symmetrize_y, update_h,
+    update_h_ms,
+};
+
 pub use restricted::{
-    mis_clip, weights_for_equalities, InternalWeights, MaxInternalStep, RestrictedKind,
+    InternalWeights, MaxInternalStep, RestrictedKind, mis_clip, weights_for_equalities,
 };
 pub use rfo::{RationalFunctionOptimization, rfo_stepper};
 pub use samd::{
-    project_velocity, retract_samd, transport_velocity, SamdConfig, SamdReport, SamdSession,
+    SamdConfig, SamdReport, SamdSession, project_velocity, retract_samd, transport_velocity,
 };
 pub use sella_min::{SellaMinConfig, SellaMinReport, SellaMinSession};
 pub use sella_saddle::{SellaSaddleConfig, SellaSaddleReport, SellaSaddleSession};

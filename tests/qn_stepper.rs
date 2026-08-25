@@ -3,11 +3,11 @@
 //! Algebra is rgmin `qn_get_s`. Geometry is manopt proj / retr /
 //! transp. This is a stepper, not a session.
 
-use ndarray::{Array1, Array2, array};
+use ndarray::{array, Array1, Array2};
 use rgmin::manifold::{Manifold, Sphere};
 use rgmin::qn_get_s;
 use rgmin::vecops::{dot, nrm2};
-use rgsaddle::{QuasiNewton, get_stepper, retract_qn};
+use rgsaddle::{get_stepper, retract_qn, update_h, HessUpdate, QuasiNewton};
 
 #[test]
 fn get_stepper_matches_qn_synonyms() {
@@ -49,8 +49,37 @@ fn qn_retract_stays_on_the_sphere() {
 }
 
 #[test]
+fn hess_update_ts_bfgs_then_qn_stays_on_the_sphere() {
+    let mut b = Array2::<f64>::eye(3);
+    b[(0, 0)] = -1.0;
+    let s = array![0.0, 0.0, 0.15];
+    let y = array![0.0, 0.0, 0.3];
+    update_h(&mut b, &s, &y, HessUpdate::TsBfgs);
+    assert_eq!(HessUpdate::TsBfgs.to_abi(), 1);
+    let x = array![0.0, 1.0, 0.0];
+    let evals = Array1::from(vec![-1.0, 1.0, 2.0]);
+    let evecs = Array2::<f64>::eye(3);
+    let egrad = array![0.3, -0.1, 0.2];
+    let ynew = retract_qn(&Sphere, &x, &evals, &evecs, &egrad, 1, 0.0);
+    assert!(
+        (nrm2(ynew.view()) - 1.0).abs() < 1e-12,
+        "retracted point left the sphere: ||y||={}",
+        nrm2(ynew.view())
+    );
+    let t = Sphere.transport(&x, &ynew, &Sphere.project(&x, &egrad));
+    assert!(
+        dot(ynew.view(), t.view()).abs() < 1e-12,
+        "transported increment left T_y"
+    );
+}
+
+#[test]
 fn qn_step_is_riemannian_proj_retr_transp() {
-    let x = array![1.0 / 3.0_f64.sqrt(), 1.0 / 3.0_f64.sqrt(), 1.0 / 3.0_f64.sqrt()];
+    let x = array![
+        1.0 / 3.0_f64.sqrt(),
+        1.0 / 3.0_f64.sqrt(),
+        1.0 / 3.0_f64.sqrt()
+    ];
     let evals = Array1::from(vec![2.0, 1.0, 0.5]);
     let evecs = Array2::<f64>::eye(3);
     let egrad = array![1.2, -0.4, 0.1];

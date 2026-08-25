@@ -12,32 +12,7 @@ use rgmin::BfgsModel;
 use crate::error::SaddleError;
 use crate::minmode::PointSurface;
 
-/// How [`CartesianPes::kick`] updates the Hessian.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum HessUpdate {
-    #[default]
-    Bfgs,
-    TsBfgs,
-}
-
-impl HessUpdate {
-    /// C / Python ordinal. Unknown values stay out of the enum.
-    pub const fn to_abi(self) -> i32 {
-        match self {
-            Self::Bfgs => 0,
-            Self::TsBfgs => 1,
-        }
-    }
-
-    /// Inverse of [`Self::to_abi`]. Unknown ordinals are `None`.
-    pub const fn try_from_abi(v: i32) -> Option<Self> {
-        match v {
-            0 => Some(Self::Bfgs),
-            1 => Some(Self::TsBfgs),
-            _ => None,
-        }
-    }
-}
+pub use crate::qn::HessUpdate;
 
 /// Cartesian geometry plus a persistent MW Hessian.
 pub struct CartesianPes {
@@ -122,9 +97,7 @@ impl CartesianPes {
         g0: ArrayView1<f64>,
     ) -> Result<(f64, Array1<f64>), SaddleError> {
         if g0.len() != self.x.len() {
-            return Err(SaddleError::Shape(
-                "kick g0 must match the 3N frame".into(),
-            ));
+            return Err(SaddleError::Shape("kick g0 must match the 3N frame".into()));
         }
         let n = self.x.len().min(d.len());
         for i in 0..n {
