@@ -30,12 +30,7 @@ fn c_abi_smoke() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let out = std::env::temp_dir().join(format!("rgsaddle_abi_smoke_{}", std::process::id()));
 
-    // The cdylib lives beside the test binary.
-    let mut libdir = std::env::current_exe().unwrap();
-    libdir.pop();
-    if libdir.ends_with("deps") {
-        libdir.pop();
-    }
+    let libdir = cdylib_dir();
 
     let status = Command::new(&cc)
         .arg(root.join("tests/c/abi_smoke.c"))
@@ -75,11 +70,7 @@ fn c_abi_irc_analytic_well() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let out = std::env::temp_dir().join(format!("rgsaddle_irc_abi_{}", std::process::id()));
 
-    let mut libdir = std::env::current_exe().unwrap();
-    libdir.pop();
-    if libdir.ends_with("deps") {
-        libdir.pop();
-    }
+    let libdir = cdylib_dir();
 
     let status = Command::new(&cc)
         .arg(root.join("tests/c/irc_abi.c"))
@@ -109,6 +100,19 @@ fn c_abi_irc_analytic_well() {
     let _ = std::fs::remove_file(&out);
 }
 
+fn cdylib_dir() -> PathBuf {
+    let mut libdir = std::env::current_exe().unwrap();
+    libdir.pop();
+    if libdir.join("librgsaddle.so").exists() || libdir.join("librgsaddle.dylib").exists()
+    {
+        return libdir;
+    }
+    if libdir.ends_with("deps") {
+        libdir.pop();
+    }
+    libdir
+}
+
 fn cxx() -> Option<String> {
     for c in [
         std::env::var("CXX").ok(),
@@ -136,11 +140,7 @@ fn cxx_wrap_smoke() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let out = std::env::temp_dir().join(format!("rgsaddle_cxx_wrap_{}", std::process::id()));
 
-    let mut libdir = std::env::current_exe().unwrap();
-    libdir.pop();
-    if libdir.ends_with("deps") {
-        libdir.pop();
-    }
+    let libdir = cdylib_dir();
 
     let status = Command::new(&cxx)
         .arg(root.join("tests/c/wrap_smoke.cpp"))
