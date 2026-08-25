@@ -99,7 +99,10 @@ pub use eigensolve::{
 };
 pub use error::SaddleError;
 pub use force::ForceGate;
-pub use force_match::{covalent_pairs, force_match_hessian};
+pub use force_match::{
+    ForceMatchOpts, ForceMatchReport, PairKind, covalent_pairs, force_match, force_match_hessian,
+    force_match_on,
+};
 pub use geom::{SellaGeom, TrustSchedule};
 pub use internal::{CartAxis, Displacement, InternalSlot, Rotation, Translation};
 pub use irc::{IrcConfig, IrcDirection, IrcKind, IrcReport, IrcSession};

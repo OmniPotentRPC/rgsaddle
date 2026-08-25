@@ -1,34 +1,106 @@
-//! Sella `force_match.pyx`: pair-harmonic seed Hessian, in Rust.
+//! Sella `force_match.pyx`: pair force-field seed Hessian, in Rust.
 //!
-//! The Cython matcher fits Buckingham / Morse / LJ / bond terms to a
-//! residual gradient. This port is the bond arm: covalent-radius
-//! pairs, linear `k_ij` at fixed `r0` (covalent sum), least-squares
-//! against the Cartesian force, then the analytic pair Hessian.
-//! Hosts that need the other pair kinds call this again with a
-//! different pair list; there is no Python hot path.
+//! Linear coefficients are least-squares against the Cartesian force.
+//! Nonlinear `rho` / `r0` start at Sella's defaults and are boxed
+//! coordinate scans (`brute` when the Cython path has few nonlinear
+//! parameters). The hot path is the pair force / Hessian kernels
+//! (`lj` / `buck` / `morse` / `bond`); there is no Python optimizer.
+//! Reductions go through [`rgmin::vecops`] so `par` applies. A host
+//! that needs the increment on a set calls [`force_match_on`]
+//! (`project` / `retract` / `transport`).
 
 use ndarray::{Array1, Array2, ArrayView1};
+use rgmin::vecops::{axpy, dot, nrm2};
+use rgmin::Manifold;
 
 use crate::error::SaddleError;
 
-/// Default covalent radii (Å), indexed by Z when known, else 0.70.
+/// Sella default Buckingham / Morse `rho`.
+const DEFAULT_RHO: f64 = 2.5;
+
+/// Pair term in `force_match.pyx` `types`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PairKind {
+    /// Lennard-Jones `C6` / `C12`.
+    Lj,
+    /// Buckingham `A`, `C6`, `rho`.
+    Buckingham,
+    /// Morse `A`, `B`, `rho`.
+    Morse,
+    /// Harmonic bond `K` at `r0`.
+    Bond,
+}
+
+/// Options for the full Cython matcher.
+#[derive(Clone, Debug)]
+pub struct ForceMatchOpts {
+    /// Sella `types`. Default is `buck` then `bond`.
+    pub kinds: Vec<PairKind>,
+    /// Bond cutoff scale. Sella uses `1.5 * (rcov_i + rcov_j)`.
+    pub bond_scale: f64,
+    /// vdW cutoff as a multiple of the shortest pair distance. Sella uses 3.
+    pub rcut_factor: f64,
+    /// Lattice translations. Empty / identity is the isolated molecule.
+    pub tvecs: Vec<[f64; 3]>,
+}
+
+impl Default for ForceMatchOpts {
+    fn default() -> Self {
+        Self {
+            kinds: vec![PairKind::Buckingham, PairKind::Bond],
+            bond_scale: 1.5,
+            rcut_factor: 3.0,
+            tvecs: vec![[0.0, 0.0, 0.0]],
+        }
+    }
+}
+
+/// Fitted seed Hessian plus linear / nonlinear coefficients.
+#[derive(Clone, Debug)]
+pub struct ForceMatchReport {
+    pub hessian: Array2<f64>,
+    pub linpars: Array1<f64>,
+    pub nonlinpars: Array1<f64>,
+}
+
+/// ASE Cordero covalent radii (Å) by Z, else 0.70.
 pub fn covalent_radius(z: u8) -> f64 {
     match z {
         1 => 0.31,
+        2 => 0.28,
+        3 => 1.28,
+        4 => 0.96,
+        5 => 0.84,
         6 => 0.76,
         7 => 0.71,
         8 => 0.66,
         9 => 0.57,
+        10 => 0.58,
+        11 => 1.66,
+        12 => 1.41,
+        13 => 1.21,
         14 => 1.11,
         15 => 1.07,
         16 => 1.05,
         17 => 1.02,
+        18 => 1.06,
+        19 => 2.03,
+        20 => 1.76,
+        26 => 1.32,
+        29 => 1.32,
+        35 => 1.20,
+        53 => 1.39,
+        79 => 1.36,
         _ => 0.70,
     }
 }
 
 /// Pairs with `r < scale * (rcov_i + rcov_j)`.
-pub fn covalent_pairs(x: ArrayView1<f64>, z: &[u8], scale: f64) -> Result<Vec<[usize; 2]>, SaddleError> {
+pub fn covalent_pairs(
+    x: ArrayView1<f64>,
+    z: &[u8],
+    scale: f64,
+) -> Result<Vec<[usize; 2]>, SaddleError> {
     if x.len() % 3 != 0 || x.len() / 3 != z.len() {
         return Err(SaddleError::Shape(
             "force_match frame is not 3N with matching Z".into(),
@@ -38,10 +110,7 @@ pub fn covalent_pairs(x: ArrayView1<f64>, z: &[u8], scale: f64) -> Result<Vec<[u
     let mut pairs = Vec::new();
     for i in 0..n {
         for j in (i + 1)..n {
-            let dx = x[3 * j] - x[3 * i];
-            let dy = x[3 * j + 1] - x[3 * i + 1];
-            let dz = x[3 * j + 2] - x[3 * i + 2];
-            let r = (dx * dx + dy * dy + dz * dz).sqrt();
+            let (r, _) = pair_disp(x, i, j, [0.0, 0.0, 0.0])?;
             let cut = scale * (covalent_radius(z[i]) + covalent_radius(z[j]));
             if r > 1e-12 && r < cut {
                 pairs.push([i, j]);
@@ -51,10 +120,10 @@ pub fn covalent_pairs(x: ArrayView1<f64>, z: &[u8], scale: f64) -> Result<Vec<[u
     Ok(pairs)
 }
 
-/// Fit pair spring constants so `F_ff ≈ -g` in the least-squares sense.
+/// Fit pair spring constants so `F_ff ≈ -g`.
 ///
-/// Pair `i-j` contributes `k (r - r0) u` on `j` and the opposite on
-/// `i`, with `r0 = rcov_i + rcov_j`.
+/// Pair `i-j` contributes `k (r - r0) u` on `i` and the opposite on
+/// `j` (`V = 1/2 k (r-r0)^2`), with `r0 = rcov_i + rcov_j`.
 pub fn fit_bond_ks(
     x: ArrayView1<f64>,
     g: ArrayView1<f64>,
@@ -68,34 +137,14 @@ pub fn fit_bond_ks(
     }
     let nlin = pairs.len();
     let ndof = x.len();
-    let mut j = Array2::<f64>::zeros((ndof, nlin));
+    let mut jac = Array2::<f64>::zeros((ndof, nlin));
     for (p, pair) in pairs.iter().enumerate() {
         let (col, _) = pair_force_col(x, z, *pair)?;
         for i in 0..ndof {
-            j[(i, p)] = col[i];
+            jac[(i, p)] = col[i];
         }
     }
-    // Normal equations (J^T J) k = J^T (-g).
-    let mut a = Array2::<f64>::zeros((nlin, nlin));
-    let mut rhs = Array1::zeros(nlin);
-    let mut target = g.to_owned();
-    target.mapv_inplace(|v| -v);
-    for i in 0..nlin {
-        for k in 0..nlin {
-            let mut acc = 0.0;
-            for t in 0..ndof {
-                acc += j[(t, i)] * j[(t, k)];
-            }
-            a[(i, k)] = acc;
-        }
-        a[(i, i)] += 1e-12;
-        let mut acc = 0.0;
-        for t in 0..ndof {
-            acc += j[(t, i)] * target[t];
-        }
-        rhs[i] = acc;
-    }
-    Ok(solve_spd(&a, &rhs))
+    Ok(fit_linear(&jac, force_target(g)))
 }
 
 /// Analytic pair-harmonic Hessian at the current geometry.
@@ -110,40 +159,19 @@ pub fn bond_hessian(
             "force_match k vector must match the pair list".into(),
         ));
     }
-    let n = x.len();
-    let mut h = Array2::<f64>::zeros((n, n));
+    let mut h = Array2::<f64>::zeros((x.len(), x.len()));
     for (p, pair) in pairs.iter().enumerate() {
         let i = pair[0];
         let j = pair[1];
-        let dx = [
-            x[3 * j] - x[3 * i],
-            x[3 * j + 1] - x[3 * i + 1],
-            x[3 * j + 2] - x[3 * i + 2],
-        ];
-        let r2 = dx[0] * dx[0] + dx[1] * dx[1] + dx[2] * dx[2];
-        if r2 <= f64::MIN_POSITIVE {
-            return Err(SaddleError::NonFinite("force_match bond"));
-        }
-        let r = r2.sqrt();
+        let (r, dx) = pair_disp(x, i, j, [0.0, 0.0, 0.0])?;
         let r0 = covalent_radius(z[i]) + covalent_radius(z[j]);
-        let k = ks[p];
-        let u = [dx[0] / r, dx[1] / r, dx[2] / r];
-        // H_ii = k [ uu^T + (r-r0)/r (I - uu^T) ]
         let stretch = (r - r0) / r;
-        for a in 0..3 {
-            for b in 0..3 {
-                let hab = k * (u[a] * u[b] + stretch * ((a == b) as i32 as f64 - u[a] * u[b]));
-                h[(3 * i + a, 3 * i + b)] += hab;
-                h[(3 * j + a, 3 * j + b)] += hab;
-                h[(3 * i + a, 3 * j + b)] -= hab;
-                h[(3 * j + a, 3 * i + b)] -= hab;
-            }
-        }
+        accumulate_pair(&mut h, i, j, dx, ks[p] * stretch, ks[p] * r0 / (r * r * r));
     }
     Ok(h)
 }
 
-/// Fit `k` and return the seed Hessian in one call.
+/// Fit bond `k` and return the seed Hessian in one call.
 pub fn force_match_hessian(
     x: ArrayView1<f64>,
     g: ArrayView1<f64>,
@@ -159,6 +187,492 @@ pub fn force_match_hessian(
     Ok((h, ks, pairs))
 }
 
+/// Full Sella matcher. Default `kinds` is Buckingham then bond.
+pub fn force_match(
+    x: ArrayView1<f64>,
+    g: ArrayView1<f64>,
+    z: &[u8],
+    opts: &ForceMatchOpts,
+) -> Result<ForceMatchReport, SaddleError> {
+    if x.len() % 3 != 0 || x.len() / 3 != z.len() || g.len() != x.len() {
+        return Err(SaddleError::Shape(
+            "force_match frame is not 3N with matching Z and gradient".into(),
+        ));
+    }
+    let set = collect_pairs(x, z, opts)?;
+    let nlin = set.nlin();
+    let nnonlin = set.nnonlin();
+    if nlin == 0 {
+        return Ok(ForceMatchReport {
+            hessian: Array2::eye(x.len()),
+            linpars: Array1::zeros(0),
+            nonlinpars: Array1::zeros(0),
+        });
+    }
+    let ftrue = force_target(g);
+    let (guess, lo, hi) = nonlin_bounds(&set);
+    let nonlin = if nnonlin == 0 {
+        Array1::zeros(0)
+    } else {
+        refine_nonlin(&set, x.len(), &ftrue, guess, &lo, &hi)?
+    };
+    let (linpars, _) = jac_and_fit(&set, x.len(), nonlin.view(), &ftrue)?;
+    let hessian = assemble_hess(&set, x.len(), linpars.view(), nonlin.view())?;
+    Ok(ForceMatchReport {
+        hessian,
+        linpars,
+        nonlinpars: nonlin,
+    })
+}
+
+/// Project a force-match direction onto `T_x`.
+pub fn project_force_match<M: Manifold>(man: &M, x: &Array1<f64>, v: &Array1<f64>) -> Array1<f64> {
+    man.project(x, v)
+}
+
+/// Retract a force-match increment onto the set.
+pub fn retract_force_match<M: Manifold>(
+    man: &M,
+    x: &Array1<f64>,
+    v: &Array1<f64>,
+    eta: f64,
+) -> Array1<f64> {
+    let vn = nrm2(v.view());
+    if vn < 1e-12 {
+        return x.clone();
+    }
+    let mut s = Array1::zeros(v.len());
+    axpy(eta / vn, v.view(), &mut s);
+    let s = man.project(x, &s);
+    man.retract(x, &s)
+}
+
+/// Vector transport of a force-match increment from `x_from` to `x_to`.
+pub fn transport_force_match<M: Manifold>(
+    man: &M,
+    x_from: &Array1<f64>,
+    x_to: &Array1<f64>,
+    v: &Array1<f64>,
+) -> Array1<f64> {
+    man.transport(x_from, x_to, v)
+}
+
+/// Seed Hessian plus a retracted increment that stays on `man`.
+pub fn force_match_on<M: Manifold>(
+    man: &M,
+    x: ArrayView1<f64>,
+    g: ArrayView1<f64>,
+    z: &[u8],
+    opts: &ForceMatchOpts,
+) -> Result<(Array1<f64>, ForceMatchReport), SaddleError> {
+    let report = force_match(x, g, z, opts)?;
+    let x0 = x.to_owned();
+    let force = force_target(g);
+    let v = project_force_match(man, &x0, &force);
+    let y = retract_force_match(man, &x0, &v, 1e-4);
+    let _ = transport_force_match(man, &x0, &y, &v);
+    Ok((y, report))
+}
+
+struct Pair {
+    i: usize,
+    j: usize,
+    xij: [f64; 3],
+}
+
+struct Interaction {
+    pairs: Vec<Pair>,
+    r0: f64,
+}
+
+struct PairSet {
+    lj: Vec<Interaction>,
+    buck: Vec<Interaction>,
+    morse: Vec<Interaction>,
+    bond: Vec<Interaction>,
+}
+
+impl PairSet {
+    fn nlin(&self) -> usize {
+        2 * self.lj.len() + 2 * self.buck.len() + 2 * self.morse.len() + self.bond.len()
+    }
+
+    fn nnonlin(&self) -> usize {
+        self.buck.len() + self.morse.len() + self.bond.len()
+    }
+}
+
+fn collect_pairs(
+    x: ArrayView1<f64>,
+    z: &[u8],
+    opts: &ForceMatchOpts,
+) -> Result<PairSet, SaddleError> {
+    let n = z.len();
+    let tvecs = if opts.tvecs.is_empty() {
+        vec![[0.0, 0.0, 0.0]]
+    } else {
+        opts.tvecs.clone()
+    };
+    let mut rmin = f64::INFINITY;
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let (r, _) = pair_disp(x, i, j, [0.0, 0.0, 0.0])?;
+            if r > 1e-12 {
+                rmin = rmin.min(r);
+            }
+        }
+    }
+    if !rmin.is_finite() {
+        return Err(SaddleError::NonFinite("force_match rmin"));
+    }
+    let rcut2 = (opts.rcut_factor * rmin).powi(2);
+    let do_lj = opts.kinds.contains(&PairKind::Lj);
+    let do_buck = opts.kinds.contains(&PairKind::Buckingham);
+    let do_morse = opts.kinds.contains(&PairKind::Morse);
+    let do_bond = opts.kinds.contains(&PairKind::Bond);
+
+    let mut lj = Vec::<((u8, u8), Interaction)>::new();
+    let mut buck = Vec::<((u8, u8), Interaction)>::new();
+    let mut morse = Vec::<((u8, u8), Interaction)>::new();
+    let mut bond = Vec::<((u8, u8), Interaction)>::new();
+
+    for i in 0..n {
+        for j in i..n {
+            let rij = [
+                x[3 * j] - x[3 * i],
+                x[3 * j + 1] - x[3 * i + 1],
+                x[3 * j + 2] - x[3 * i + 2],
+            ];
+            for &tv in &tvecs {
+                if i == j && tv[0] == 0.0 && tv[1] == 0.0 && tv[2] == 0.0 {
+                    continue;
+                }
+                let xij = [rij[0] + tv[0], rij[1] + tv[1], rij[2] + tv[2]];
+                let r2 = xij[0] * xij[0] + xij[1] * xij[1] + xij[2] * xij[2];
+                if r2 > rcut2 || r2 <= f64::MIN_POSITIVE {
+                    continue;
+                }
+                let r = r2.sqrt();
+                let key = elem_key(z[i], z[j]);
+                let pair = Pair { i, j, xij };
+                if do_lj {
+                    push_pair(&mut lj, key, pair.i, pair.j, pair.xij, 0.0);
+                }
+                if do_buck {
+                    push_pair(&mut buck, key, pair.i, pair.j, pair.xij, 0.0);
+                }
+                if do_morse {
+                    push_pair(&mut morse, key, pair.i, pair.j, pair.xij, 0.0);
+                }
+                if do_bond {
+                    let rcov = covalent_radius(key.0) + covalent_radius(key.1);
+                    if r < opts.bond_scale * rcov {
+                        push_pair(&mut bond, key, pair.i, pair.j, pair.xij, rcov);
+                    }
+                }
+            }
+        }
+    }
+    Ok(PairSet {
+        lj: take_inter(lj),
+        buck: take_inter(buck),
+        morse: take_inter(morse),
+        bond: take_inter(bond),
+    })
+}
+
+fn elem_key(zi: u8, zj: u8) -> (u8, u8) {
+    if zi <= zj {
+        (zi, zj)
+    } else {
+        (zj, zi)
+    }
+}
+
+fn push_pair(
+    buckets: &mut Vec<((u8, u8), Interaction)>,
+    key: (u8, u8),
+    i: usize,
+    j: usize,
+    xij: [f64; 3],
+    r0: f64,
+) {
+    let pair = Pair { i, j, xij };
+    match buckets.iter_mut().find(|(k, _)| *k == key) {
+        Some((_, inter)) => inter.pairs.push(pair),
+        None => buckets.push((
+            key,
+            Interaction {
+                pairs: vec![pair],
+                r0,
+            },
+        )),
+    }
+}
+
+fn take_inter(buckets: Vec<((u8, u8), Interaction)>) -> Vec<Interaction> {
+    buckets.into_iter().map(|(_, inter)| inter).collect()
+}
+
+fn nonlin_bounds(set: &PairSet) -> (Array1<f64>, Array1<f64>, Array1<f64>) {
+    let n = set.nnonlin();
+    let mut x0 = Array1::zeros(n);
+    let mut lo = Array1::zeros(n);
+    let mut hi = Array1::zeros(n);
+    let mut k = 0;
+    for _ in &set.buck {
+        x0[k] = DEFAULT_RHO;
+        lo[k] = 0.1;
+        hi[k] = 10.0;
+        k += 1;
+    }
+    for _ in &set.morse {
+        x0[k] = DEFAULT_RHO;
+        lo[k] = 1.0;
+        hi[k] = 10.0;
+        k += 1;
+    }
+    for inter in &set.bond {
+        x0[k] = inter.r0;
+        lo[k] = 0.5 * inter.r0;
+        hi[k] = 2.0 * inter.r0;
+        k += 1;
+    }
+    (x0, lo, hi)
+}
+
+fn refine_nonlin(
+    set: &PairSet,
+    ndof: usize,
+    ftrue: &Array1<f64>,
+    mut x: Array1<f64>,
+    lo: &Array1<f64>,
+    hi: &Array1<f64>,
+) -> Result<Array1<f64>, SaddleError> {
+    let n = x.len();
+    if n == 0 {
+        return Ok(x);
+    }
+    let mut best = chisq(set, ndof, ftrue, x.view())?;
+    for _ in 0..2 {
+        for i in 0..n {
+            let mut pick = x[i];
+            let mut pick_chi = best;
+            for t in 0..5 {
+                let frac = t as f64 / 4.0;
+                let trial = lo[i] + frac * (hi[i] - lo[i]);
+                x[i] = trial;
+                let chi = chisq(set, ndof, ftrue, x.view())?;
+                if chi < pick_chi {
+                    pick_chi = chi;
+                    pick = trial;
+                }
+            }
+            x[i] = pick;
+            best = pick_chi;
+        }
+    }
+    Ok(x)
+}
+
+fn chisq(
+    set: &PairSet,
+    ndof: usize,
+    ftrue: &Array1<f64>,
+    pars: ArrayView1<f64>,
+) -> Result<f64, SaddleError> {
+    let (lin, jac) = jac_and_fit(set, ndof, pars, ftrue)?;
+    let mut pred = Array1::zeros(ndof);
+    for p in 0..lin.len() {
+        axpy(lin[p], jac.column(p), &mut pred);
+    }
+    let mut d = pred;
+    axpy(-1.0, ftrue.view(), &mut d);
+    Ok(dot(d.view(), d.view()))
+}
+
+fn jac_and_fit(
+    set: &PairSet,
+    ndof: usize,
+    pars: ArrayView1<f64>,
+    ftrue: &Array1<f64>,
+) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
+    let nlin = set.nlin();
+    let mut jac = Array2::<f64>::zeros((ndof, nlin));
+    let mut linstart = 0;
+    let mut nonlinstart = 0;
+    for inter in &set.lj {
+        for p in &inter.pairs {
+            lj_force(p, linstart, &mut jac);
+        }
+        linstart += 2;
+    }
+    for inter in &set.buck {
+        let rho = pars[nonlinstart];
+        for p in &inter.pairs {
+            buck_force(p, linstart, rho, &mut jac);
+        }
+        linstart += 2;
+        nonlinstart += 1;
+    }
+    for inter in &set.morse {
+        let rho = pars[nonlinstart];
+        for p in &inter.pairs {
+            morse_force(p, linstart, rho, &mut jac);
+        }
+        linstart += 2;
+        nonlinstart += 1;
+    }
+    for inter in &set.bond {
+        let r0 = pars[nonlinstart];
+        for p in &inter.pairs {
+            bond_force(p, linstart, r0, &mut jac);
+        }
+        linstart += 1;
+        nonlinstart += 1;
+    }
+    Ok((fit_linear(&jac, ftrue.clone()), jac))
+}
+
+fn assemble_hess(
+    set: &PairSet,
+    ndof: usize,
+    lin: ArrayView1<f64>,
+    nonlin: ArrayView1<f64>,
+) -> Result<Array2<f64>, SaddleError> {
+    let mut h = Array2::<f64>::zeros((ndof, ndof));
+    let mut linstart = 0;
+    let mut nonlinstart = 0;
+    for inter in &set.lj {
+        let c6 = lin[linstart];
+        let c12 = lin[linstart + 1];
+        for p in &inter.pairs {
+            lj_hess(p, c6, c12, &mut h);
+        }
+        linstart += 2;
+    }
+    for inter in &set.buck {
+        let a = lin[linstart];
+        let c6 = lin[linstart + 1];
+        let rho = nonlin[nonlinstart];
+        for p in &inter.pairs {
+            buck_hess(p, a, c6, rho, &mut h);
+        }
+        linstart += 2;
+        nonlinstart += 1;
+    }
+    for inter in &set.morse {
+        let a = lin[linstart];
+        let b = lin[linstart + 1];
+        let rho = nonlin[nonlinstart];
+        for p in &inter.pairs {
+            morse_hess(p, a, b, rho, &mut h);
+        }
+        linstart += 2;
+        nonlinstart += 1;
+    }
+    for inter in &set.bond {
+        let k = lin[linstart];
+        let r0 = nonlin[nonlinstart];
+        for p in &inter.pairs {
+            sella_bond_hess(p, k, r0, &mut h);
+        }
+        linstart += 1;
+        nonlinstart += 1;
+    }
+    Ok(h)
+}
+
+fn add_col(jac: &mut Array2<f64>, p: &Pair, scale: f64, col: usize) {
+    for a in 0..3 {
+        jac[(3 * p.i + a, col)] += scale * p.xij[a];
+        jac[(3 * p.j + a, col)] -= scale * p.xij[a];
+    }
+}
+
+fn lj_force(p: &Pair, col: usize, jac: &mut Array2<f64>) {
+    let r2 = dot3(p.xij);
+    let r8 = r2.powi(4);
+    let r14 = r8 * r2 * r2 * r2;
+    add_col(jac, p, 6.0 / r8, col);
+    add_col(jac, p, -12.0 / r14, col + 1);
+}
+
+fn buck_force(p: &Pair, col: usize, rho: f64, jac: &mut Array2<f64>) {
+    let r2 = dot3(p.xij);
+    let r = r2.sqrt();
+    let r8 = r2.powi(4);
+    let expterm = (-rho * r).exp();
+    add_col(jac, p, -rho * expterm / r, col);
+    add_col(jac, p, 6.0 / r8, col + 1);
+}
+
+fn morse_force(p: &Pair, col: usize, rho: f64, jac: &mut Array2<f64>) {
+    let r = dot3(p.xij).sqrt();
+    let expterm = (-rho * r).exp();
+    let exp2 = expterm * expterm;
+    add_col(jac, p, -2.0 * rho * exp2 / r, col);
+    add_col(jac, p, rho * expterm / r, col + 1);
+}
+
+fn bond_force(p: &Pair, col: usize, r0: f64, jac: &mut Array2<f64>) {
+    let r = dot3(p.xij).sqrt();
+    add_col(jac, p, 2.0 * (r - r0) / r, col);
+}
+
+fn lj_hess(p: &Pair, c6: f64, c12: f64, h: &mut Array2<f64>) {
+    let r2 = dot3(p.xij);
+    let r8 = r2.powi(4);
+    let r10 = r8 * r2;
+    let r14 = r10 * r2 * r2;
+    let r16 = r8 * r8;
+    let diag = -12.0 * c12 / r14 + 6.0 * c6 / r8;
+    let rest = 168.0 * c12 / r16 - 48.0 * c6 / r10;
+    accumulate_pair(h, p.i, p.j, p.xij, diag, rest);
+}
+
+fn buck_hess(p: &Pair, a: f64, c6: f64, b: f64, h: &mut Array2<f64>) {
+    let r2 = dot3(p.xij);
+    let r = r2.sqrt();
+    let r8 = r2.powi(4);
+    let r10 = r8 * r2;
+    let expterm = (-b * r).exp();
+    let diag = 6.0 * c6 / r8 - a * b * expterm / r;
+    let rest = -48.0 * c6 / r10 + a * b * expterm / (r * r * r) + a * b * b * expterm / r2;
+    accumulate_pair(h, p.i, p.j, p.xij, diag, rest);
+}
+
+fn morse_hess(p: &Pair, a: f64, b: f64, rho: f64, h: &mut Array2<f64>) {
+    let r2 = dot3(p.xij);
+    let r = r2.sqrt();
+    let expterm = (-rho * r).exp();
+    let exp2 = expterm * expterm;
+    let diag = (b * expterm - 2.0 * a * exp2) / r;
+    let rest =
+        rho * ((2.0 * a * exp2 - b * expterm) / r + rho * (4.0 * a * exp2 - b * expterm)) / r2;
+    accumulate_pair(h, p.i, p.j, p.xij, diag, rest);
+}
+
+fn sella_bond_hess(p: &Pair, k: f64, r0: f64, h: &mut Array2<f64>) {
+    let r2 = dot3(p.xij);
+    let r = r2.sqrt();
+    let diag = 2.0 * k * (r - r0) / r;
+    let rest = 2.0 * k * r0 / (r2 * r);
+    accumulate_pair(h, p.i, p.j, p.xij, diag, rest);
+}
+
+fn accumulate_pair(h: &mut Array2<f64>, i: usize, j: usize, xij: [f64; 3], diag: f64, rest: f64) {
+    for a in 0..3 {
+        for b in 0..3 {
+            let hab = if a == b { diag } else { 0.0 } + rest * xij[a] * xij[b];
+            h[(3 * i + a, 3 * i + b)] += hab;
+            h[(3 * j + a, 3 * j + b)] += hab;
+            h[(3 * i + a, 3 * j + b)] -= hab;
+            h[(3 * j + a, 3 * i + b)] -= hab;
+        }
+    }
+}
+
 fn pair_force_col(
     x: ArrayView1<f64>,
     z: &[u8],
@@ -166,24 +680,59 @@ fn pair_force_col(
 ) -> Result<(Array1<f64>, f64), SaddleError> {
     let i = pair[0];
     let j = pair[1];
-    let dx = [
-        x[3 * j] - x[3 * i],
-        x[3 * j + 1] - x[3 * i + 1],
-        x[3 * j + 2] - x[3 * i + 2],
-    ];
-    let r = (dx[0] * dx[0] + dx[1] * dx[1] + dx[2] * dx[2]).sqrt();
-    if r <= f64::MIN_POSITIVE {
-        return Err(SaddleError::NonFinite("force_match bond"));
-    }
+    let (r, dx) = pair_disp(x, i, j, [0.0, 0.0, 0.0])?;
     let r0 = covalent_radius(z[i]) + covalent_radius(z[j]);
     let factor = r - r0;
     let mut col = Array1::zeros(x.len());
     for a in 0..3 {
         let u = dx[a] / r;
-        col[3 * i + a] = -factor * u;
-        col[3 * j + a] = factor * u;
+        col[3 * i + a] = factor * u;
+        col[3 * j + a] = -factor * u;
     }
     Ok((col, r))
+}
+
+fn pair_disp(
+    x: ArrayView1<f64>,
+    i: usize,
+    j: usize,
+    tvec: [f64; 3],
+) -> Result<(f64, [f64; 3]), SaddleError> {
+    let dx = [
+        x[3 * j] - x[3 * i] + tvec[0],
+        x[3 * j + 1] - x[3 * i + 1] + tvec[1],
+        x[3 * j + 2] - x[3 * i + 2] + tvec[2],
+    ];
+    let r2 = dot3(dx);
+    if r2 <= f64::MIN_POSITIVE {
+        return Err(SaddleError::NonFinite("force_match bond"));
+    }
+    Ok((r2.sqrt(), dx))
+}
+
+fn dot3(v: [f64; 3]) -> f64 {
+    v[0] * v[0] + v[1] * v[1] + v[2] * v[2]
+}
+
+fn force_target(g: ArrayView1<f64>) -> Array1<f64> {
+    let mut target = g.to_owned();
+    target.mapv_inplace(|v| -v);
+    target
+}
+
+fn fit_linear(j: &Array2<f64>, target: Array1<f64>) -> Array1<f64> {
+    let nlin = j.ncols();
+    let mut a = Array2::<f64>::zeros((nlin, nlin));
+    let mut rhs = Array1::zeros(nlin);
+    for i in 0..nlin {
+        let ji = j.column(i);
+        for k in 0..nlin {
+            a[(i, k)] = dot(ji, j.column(k));
+        }
+        a[(i, i)] += 1e-12;
+        rhs[i] = dot(ji, target.view());
+    }
+    solve_spd(&a, &rhs)
 }
 
 fn solve_spd(a: &Array2<f64>, b: &Array1<f64>) -> Array1<f64> {
@@ -224,16 +773,13 @@ fn solve_spd(a: &Array2<f64>, b: &Array1<f64>) -> Array1<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::constraints::Constraints;
+    use crate::internal::pack_cart;
     use ndarray::Array1;
-    use rgmin::vecops::dot;
 
     #[test]
     fn water_pairs_are_the_two_oh_bonds() {
-        let x = Array1::from(vec![
-            0.0, 0.0, 0.0, // O
-            0.96, 0.0, 0.0, // H
-            -0.24, 0.93, 0.0, // H
-        ]);
+        let x = pack_cart(&[[0.0, 0.0, 0.0], [0.96, 0.0, 0.0], [-0.24, 0.93, 0.0]]);
         let z = [8u8, 1, 1];
         let pairs = covalent_pairs(x.view(), &z, 1.3).unwrap();
         assert_eq!(pairs.len(), 2);
@@ -255,21 +801,117 @@ mod tests {
                 assert!(h[(i, j)].is_finite());
             }
         }
-        // Residual force along the bond should be smaller than |g|.
         let (col, _) = pair_force_col(x.view(), &z, pairs[0]).unwrap();
         let mut pred = Array1::zeros(6);
-        for i in 0..6 {
-            pred[i] = ks[0] * col[i];
-        }
-        let mut target = g.clone();
-        target.mapv_inplace(|v| -v);
-        let err = {
-            let mut d = pred.clone();
-            for i in 0..6 {
-                d[i] -= target[i];
-            }
-            dot(d.view(), d.view()).sqrt()
-        };
+        axpy(ks[0], col.view(), &mut pred);
+        let target = force_target(g.view());
+        let mut d = pred;
+        axpy(-1.0, target.view(), &mut d);
+        let err = nrm2(d.view());
         assert!(err < 1e-8, "LS residual {err}");
+    }
+
+    #[test]
+    fn physical_spring_k_and_bond_curvature_are_positive() {
+        let x = Array1::from(vec![0.0, 0.0, 0.0, 1.1, 0.0, 0.0]);
+        let z = [6u8, 6];
+        let r0 = covalent_radius(6) + covalent_radius(6);
+        let fi = 1.0 * (1.1 - r0);
+        let g = Array1::from(vec![-fi, 0.0, 0.0, fi, 0.0, 0.0]);
+        let (h, ks, pairs) = force_match_hessian(x.view(), g.view(), &z, 1.5).unwrap();
+        assert_eq!(pairs.len(), 1);
+        assert!((ks[0] - 1.0).abs() < 1e-8, "k={}", ks[0]);
+        assert!(h[(0, 0)] > 0.0, "H_ii along the bond {}", h[(0, 0)]);
+    }
+
+    #[test]
+    fn default_buck_bond_hessian_is_symmetric_and_finite() {
+        let x = pack_cart(&[[0.0, 0.0, 0.0], [0.96, 0.0, 0.0], [-0.24, 0.93, 0.0]]);
+        let g = Array1::from(vec![0.1, 0.0, 0.0, -0.05, 0.02, 0.0, -0.05, -0.02, 0.0]);
+        let z = [8u8, 1, 1];
+        let report = force_match(x.view(), g.view(), &z, &ForceMatchOpts::default()).unwrap();
+        assert_eq!(report.hessian.nrows(), 9);
+        for i in 0..9 {
+            for j in 0..9 {
+                assert!((report.hessian[(i, j)] - report.hessian[(j, i)]).abs() < 1e-10);
+                assert!(report.hessian[(i, j)].is_finite());
+            }
+        }
+        assert!(report.linpars.iter().all(|v| v.is_finite()));
+        assert!(report.nonlinpars.iter().all(|v| v.is_finite()));
+        assert!(!report.nonlinpars.is_empty());
+    }
+
+    #[test]
+    fn lj_only_is_linear_and_finite() {
+        let x = Array1::from(vec![0.0, 0.0, 0.0, 1.2, 0.0, 0.0]);
+        let g = Array1::from(vec![-0.1, 0.0, 0.0, 0.1, 0.0, 0.0]);
+        let z = [10u8, 10];
+        let opts = ForceMatchOpts {
+            kinds: vec![PairKind::Lj],
+            ..ForceMatchOpts::default()
+        };
+        let report = force_match(x.view(), g.view(), &z, &opts).unwrap();
+        assert_eq!(report.nonlinpars.len(), 0);
+        assert_eq!(report.linpars.len(), 2);
+        assert!(report.linpars.iter().all(|v| v.is_finite()));
+        assert!(report.hessian.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn morse_arm_hessian_is_finite() {
+        let x = Array1::from(vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+        let g = Array1::from(vec![-0.3, 0.0, 0.0, 0.3, 0.0, 0.0]);
+        let z = [6u8, 8];
+        let opts = ForceMatchOpts {
+            kinds: vec![PairKind::Morse],
+            ..ForceMatchOpts::default()
+        };
+        let report = force_match(x.view(), g.view(), &z, &opts).unwrap();
+        assert_eq!(report.nonlinpars.len(), 1);
+        assert!(report.nonlinpars[0] >= 1.0);
+        assert!(report.hessian.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn lj_kernel_matches_sella_update_hess() {
+        let mut h = Array2::<f64>::zeros((6, 6));
+        let xij = [1.0_f64, 0.0, 0.0];
+        let c6 = 1.0_f64;
+        let c12 = 0.0_f64;
+        let r2 = 1.0_f64;
+        let r8 = r2.powi(4);
+        let r10 = r8 * r2;
+        let r14 = r10 * r2 * r2;
+        let r16 = r8 * r8;
+        let diag = -12.0 * c12 / r14 + 6.0 * c6 / r8;
+        let rest = 168.0 * c12 / r16 - 48.0 * c6 / r10;
+        accumulate_pair(&mut h, 0, 1, xij, diag, rest);
+        assert!((diag - 6.0).abs() < 1e-14);
+        assert!((rest + 48.0).abs() < 1e-14);
+        assert!((h[(0, 0)] - (diag + rest)).abs() < 1e-12);
+        assert!((h[(1, 1)] - diag).abs() < 1e-12);
+        assert!((h[(0, 3)] + h[(0, 0)]).abs() < 1e-12);
+    }
+
+    #[test]
+    fn force_match_on_com_stays_on_the_set() {
+        let x = pack_cart(&[[0.0, 0.0, 0.0], [0.96, 0.0, 0.0], [-0.24, 0.93, 0.0]]);
+        let mut cons = Constraints::new(3).unwrap();
+        cons.fix_com(x.view()).unwrap();
+        assert!(cons.residual_norm(x.view()).unwrap() < 1e-14);
+        let g = Array1::from(vec![0.1, 0.0, 0.0, -0.05, 0.02, 0.0, -0.05, -0.02, 0.0]);
+        let z = [8u8, 1, 1];
+        let (y, report) =
+            force_match_on(&cons, x.view(), g.view(), &z, &ForceMatchOpts::default()).unwrap();
+        let res = cons.residual_norm(y.view()).unwrap();
+        assert!(res < 1e-10, "force_match retract left the COM set: {res}");
+        let v = Array1::from_elem(9, 0.2);
+        let pv = project_force_match(&cons, &x, &v);
+        let y2 = retract_force_match(&cons, &x, &pv, 1e-4);
+        assert!(cons.residual_norm(y2.view()).unwrap() < 1e-10);
+        let tv = transport_force_match(&cons, &x, &y2, &pv);
+        assert_eq!(tv.len(), 9);
+        assert!(report.hessian.iter().all(|v| v.is_finite()));
     }
 }
