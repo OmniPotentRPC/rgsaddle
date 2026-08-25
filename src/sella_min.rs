@@ -1017,7 +1017,8 @@ mod tests {
             Err(SaddleError::Shape(msg)) => {
                 assert!(msg.contains("incompatible with internals"), "{msg}");
             }
-            other => panic!("{other:?}"),
+            Ok(_) => panic!("RAS on internals must refuse"),
+            Err(e) => panic!("expected Shape, got {e}"),
         }
     }
 
