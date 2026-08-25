@@ -58,3 +58,50 @@ fn dimer_rotation_finds_the_saddle() {
 fn lanczos_finds_the_saddle() {
     converges(MinModeKind::Lanczos);
 }
+
+/// Succeeds at the current point so the session reaches the rotator,
+/// then fails the displaced Hessian-action eval. The rotator must
+/// return that surface error instead of a NaN mode.
+struct FailOnShift;
+
+impl PointSurface for FailOnShift {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        if x.iter().any(|v| v.abs() > 1e-12) {
+            return Err(SaddleError::Surface("oracle refused the shift".into()));
+        }
+        Ok((0.0, Array1::zeros(x.len())))
+    }
+}
+
+fn rotation_fails_closed(kind: MinModeKind) {
+    let config = MinModeConfig {
+        kind,
+        force_tol: 1e-8,
+        max_move: 0.1,
+        dr: 1e-3,
+        ..MinModeConfig::default()
+    };
+    let start = array![0.0, 0.0, 0.0];
+    let seed = array![1.0, 0.0, 0.0];
+    let mut session = MinModeSession::new(config, start, seed).unwrap();
+    let err = session.step(&FailOnShift).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("oracle refused the shift"),
+        "{kind:?} swallowed the surface error: {msg}"
+    );
+    assert!(
+        !msg.to_ascii_lowercase().contains("nan"),
+        "{kind:?} leaked a NaN mode: {msg}"
+    );
+}
+
+#[test]
+fn dimer_rotation_fails_closed_on_oracle_error() {
+    rotation_fails_closed(MinModeKind::Dimer);
+}
+
+#[test]
+fn lanczos_rotation_fails_closed_on_oracle_error() {
+    rotation_fails_closed(MinModeKind::Lanczos);
+}

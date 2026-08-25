@@ -1,6 +1,8 @@
 //! Minimum-mode saddle search: find the lowest curvature direction,
 //! invert the force along it, take one step. Stepping, like the band.
 
+use std::cell::RefCell;
+
 use ndarray::{Array1, ArrayView1};
 use rgmin::{ApplyHessian, Control, EigenParams, EigensolverKind, Method, Oracle, Solver};
 
@@ -145,35 +147,65 @@ fn rotate_dimer<S: PointSurface>(
     mode: Array1<f64>,
     config: &MinModeConfig,
 ) -> Result<(Array1<f64>, f64, usize), SaddleError> {
-    let h = FdHvp {
-        surface,
-        g0: g0.to_owned(),
-        dr: config.dr,
-    };
     let params = EigenParams {
         kind: EigensolverKind::Dimer,
         max_iter: config.max_rotations,
         tol: config.rotation_tol,
         ..EigenParams::default()
     };
-    let out = rgmin::lowest_mode(&h, x, mode.view(), &params)
-        .map_err(|e| SaddleError::Solver(format!("dimer rotation: {e}")))?;
-    Ok((out.vector, out.value, out.actions))
+    lowest_via_fd(surface, x, g0, mode, config.dr, params, "dimer rotation")
 }
 
 struct FdHvp<'a, S: PointSurface> {
     surface: &'a S,
     g0: Array1<f64>,
     dr: f64,
+    fail: RefCell<Option<SaddleError>>,
 }
 
 impl<S: PointSurface> ApplyHessian for FdHvp<'_, S> {
     fn apply_hessian(&self, x: ArrayView1<f64>, v: ArrayView1<f64>) -> Array1<f64> {
         match hessian_action(self.surface, x, self.g0.view(), v, self.dr) {
             Ok(hv) => hv,
-            Err(_) => Array1::from_elem(v.len(), f64::NAN),
+            Err(e) => {
+                self.fail.replace(Some(e));
+                Array1::zeros(v.len())
+            }
         }
     }
+}
+
+fn lowest_via_fd<S: PointSurface>(
+    surface: &S,
+    x: ArrayView1<f64>,
+    g0: ArrayView1<f64>,
+    seed: Array1<f64>,
+    dr: f64,
+    params: EigenParams,
+    what: &str,
+) -> Result<(Array1<f64>, f64, usize), SaddleError> {
+    let h = FdHvp {
+        surface,
+        g0: g0.to_owned(),
+        dr,
+        fail: RefCell::new(None),
+    };
+    let out = match rgmin::lowest_mode(&h, x, seed.view(), &params) {
+        Ok(o) => o,
+        Err(e) => {
+            if let Some(surf) = h.fail.into_inner() {
+                return Err(surf);
+            }
+            return Err(SaddleError::Solver(format!("{what}: {e}")));
+        }
+    };
+    if let Some(surf) = h.fail.into_inner() {
+        return Err(surf);
+    }
+    if !out.vector.iter().all(|v| v.is_finite()) || !out.value.is_finite() {
+        return Err(SaddleError::NonFinite("lowest-mode eigenpair"));
+    }
+    Ok((out.vector, out.value, out.actions))
 }
 
 /// Lowest-mode kick through the rgmin waist (FD Hessian actions).
@@ -184,20 +216,20 @@ pub(crate) fn lanczos_mode<S: PointSurface>(
     seed: Array1<f64>,
     config: &MinModeConfig,
 ) -> Result<(Array1<f64>, f64, usize), SaddleError> {
-    let h = FdHvp {
-        surface,
-        g0: g0.to_owned(),
-        dr: config.dr,
-    };
     let params = EigenParams {
         kind: config.eigen_kind,
         krylov: config.krylov_dim,
         ..EigenParams::default()
     };
-    let mode = rgmin::lowest_mode(&h, x, seed.view(), &params).map_err(|e| {
-        SaddleError::Solver(format!("lowest-mode {}: {e}", config.eigen_kind.name()))
-    })?;
-    Ok((mode.vector, mode.value, mode.actions))
+    lowest_via_fd(
+        surface,
+        x,
+        g0,
+        seed,
+        config.dr,
+        params,
+        &format!("lowest-mode {}", config.eigen_kind.name()),
+    )
 }
 
 /// Stepping minimum-mode saddle search.
