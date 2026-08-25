@@ -8,9 +8,10 @@
 
 - ~force_match~ is Sella ~force_match.pyx~: linear least-squares
   pair seed Hessian (~lj~ / ~buck~ / ~morse~ / ~bond~) through
-  ~rgmin::vecops~. Nonlinear ~rho~ / ~r0~ are boxed scans.
-  ~force_match_hessian~ is the bond convenience. ~force_match_on~
-  retracts the increment onto a set.
+  ~rgmin::vecops~. Nonlinear ~rho~ / ~r0~ are joint ~brute~
+  then L-BFGS-B. ~force_match_hessian~ is the bond convenience.
+  ~force_match_on~ retracts a Newton increment of the seed
+  Hessian onto a set.
 - ~numerical_hvp~ is Sella ~linalg.NumericalHessian~. Reductions
   go through ~rgmin::vecops~ so ~par~ applies. A host that needs
   the displaced point on a set calls ~numerical_hvp_on~

@@ -38,12 +38,13 @@ loop. A host that needs the point on a set calls
 ``step_on`` (``project`` / ``retract`` / ``transport``).
 ``force_match`` is Sella ``force_match.pyx``: linear
 least-squares against the Cartesian force for ``lj`` /
-``buck`` / ``morse`` / ``bond``, with boxed nonlinear
-``rho`` / ``r0``. Reductions go through ``rgmin.vecops``.
-``force_match_hessian`` is the bond convenience
-(``V = 1/2 k (r-r0)^2``). A host that needs the increment
-on a set calls ``force_match_on`` (``project`` /
-``retract`` / ``transport``).
+``buck`` / ``morse`` / ``bond``, with joint ``brute``
+then L-BFGS-B on nonlinear ``rho`` / ``r0``. Reductions
+go through ``rgmin.vecops``. ``force_match_hessian`` is
+the bond convenience (``V = 1/2 k (r-r0)^2``). A host
+that needs the increment on a set calls ``force_match_on``
+(``project`` / ``retract`` / ``transport``), which retracts
+a regularized Newton step of the seed Hessian.
 
 The C wire exposes ``rgsaddle_sella_min_*`` and
 ``rgsaddle_sella_saddle_*``, plus ``rgsaddle_constraints_*``

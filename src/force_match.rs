@@ -1,18 +1,19 @@
 //! Sella `force_match.pyx`: pair force-field seed Hessian, in Rust.
 //!
 //! Linear coefficients are least-squares against the Cartesian force.
-//! Nonlinear `rho` / `r0` start at Sella's defaults and are boxed
-//! coordinate scans (`brute` when the Cython path has few nonlinear
-//! parameters). The hot path is the pair force / Hessian kernels
-//! (`lj` / `buck` / `morse` / `bond`); there is no Python optimizer.
-//! Reductions go through [`rgmin::vecops`] so `par` applies. A host
-//! that needs the increment on a set calls [`force_match_on`]
-//! (`project` / `retract` / `transport`).
+//! Nonlinear `rho` / `r0` follow Sella: joint `brute` (`Ns=10` when
+//! `nnonlin < 5`) then L-BFGS-B with `dFnonlin`. The hot path is the
+//! pair force / Hessian kernels (`lj` / `buck` / `morse` / `bond`);
+//! there is no Python optimizer. Reductions go through
+//! [`rgmin::vecops`] so `par` applies. A host that needs the increment
+//! on a set calls [`force_match_on`] (`project` / `retract` /
+//! `transport`).
 
-use ndarray::{Array1, Array2, ArrayView1};
-use rgmin::vecops::{axpy, dot, nrm2};
+use ndarray::{Array1, Array2, Array3, ArrayView1};
 use rgmin::Manifold;
+use rgmin::vecops::{axpy, dot, nrm2};
 
+use crate::eigensolve::solve_dense;
 use crate::error::SaddleError;
 
 /// Sella default Buckingham / Morse `rho`.
@@ -63,36 +64,23 @@ pub struct ForceMatchReport {
     pub nonlinpars: Array1<f64>,
 }
 
-/// ASE Cordero covalent radii (Å) by Z, else 0.70.
+/// ASE `covalent_radii` missing placeholder (Å).
+const CORDERO_MISSING: f64 = 0.2;
+
+/// ASE Cordero covalent radii (Å), Z = 0..=96 (`ase.data.covalent_radii`).
+const CORDERO: [f64; 97] = [
+    0.20, 0.31, 0.28, 1.28, 0.96, 0.84, 0.76, 0.71, 0.66, 0.57, 0.58, 1.66, 1.41, 1.21, 1.11, 1.07,
+    1.05, 1.02, 1.06, 2.03, 1.76, 1.70, 1.60, 1.53, 1.39, 1.39, 1.32, 1.26, 1.24, 1.32, 1.22, 1.22,
+    1.20, 1.19, 1.20, 1.20, 1.16, 2.20, 1.95, 1.90, 1.75, 1.64, 1.54, 1.47, 1.46, 1.42, 1.39, 1.45,
+    1.44, 1.42, 1.39, 1.39, 1.38, 1.39, 1.40, 2.44, 2.15, 2.07, 2.04, 2.03, 2.01, 1.99, 1.98, 1.98,
+    1.96, 1.94, 1.92, 1.92, 1.89, 1.90, 1.87, 1.87, 1.75, 1.70, 1.62, 1.51, 1.44, 1.41, 1.36, 1.36,
+    1.32, 1.45, 1.46, 1.48, 1.40, 1.50, 1.50, 2.60, 2.21, 2.15, 2.06, 2.00, 1.96, 1.90, 1.87, 1.80,
+    1.69,
+];
+
+/// ASE Cordero covalent radius (Å) by Z. Missing entries are 0.2.
 pub fn covalent_radius(z: u8) -> f64 {
-    match z {
-        1 => 0.31,
-        2 => 0.28,
-        3 => 1.28,
-        4 => 0.96,
-        5 => 0.84,
-        6 => 0.76,
-        7 => 0.71,
-        8 => 0.66,
-        9 => 0.57,
-        10 => 0.58,
-        11 => 1.66,
-        12 => 1.41,
-        13 => 1.21,
-        14 => 1.11,
-        15 => 1.07,
-        16 => 1.05,
-        17 => 1.02,
-        18 => 1.06,
-        19 => 2.03,
-        20 => 1.76,
-        26 => 1.32,
-        29 => 1.32,
-        35 => 1.20,
-        53 => 1.39,
-        79 => 1.36,
-        _ => 0.70,
-    }
+    CORDERO.get(z as usize).copied().unwrap_or(CORDERO_MISSING)
 }
 
 /// Pairs with `r < scale * (rcov_i + rcov_j)`.
@@ -110,9 +98,18 @@ pub fn covalent_pairs(
     let mut pairs = Vec::new();
     for i in 0..n {
         for j in (i + 1)..n {
-            let (r, _) = pair_disp(x, i, j, [0.0, 0.0, 0.0])?;
+            let dx = [
+                x[3 * j] - x[3 * i],
+                x[3 * j + 1] - x[3 * i + 1],
+                x[3 * j + 2] - x[3 * i + 2],
+            ];
+            let r2 = dot3(dx);
+            if r2 <= f64::MIN_POSITIVE {
+                continue;
+            }
+            let r = r2.sqrt();
             let cut = scale * (covalent_radius(z[i]) + covalent_radius(z[j]));
-            if r > 1e-12 && r < cut {
+            if r <= cut {
                 pairs.push([i, j]);
             }
         }
@@ -216,7 +213,7 @@ pub fn force_match(
     } else {
         refine_nonlin(&set, x.len(), &ftrue, guess, &lo, &hi)?
     };
-    let (linpars, _) = jac_and_fit(&set, x.len(), nonlin.view(), &ftrue)?;
+    let (linpars, _, _) = jac_and_fit(&set, x.len(), nonlin.view(), &ftrue)?;
     let hessian = assemble_hess(&set, x.len(), linpars.view(), nonlin.view())?;
     Ok(ForceMatchReport {
         hessian,
@@ -268,10 +265,24 @@ pub fn force_match_on<M: Manifold>(
     let report = force_match(x, g, z, opts)?;
     let x0 = x.to_owned();
     let force = force_target(g);
-    let v = project_force_match(man, &x0, &force);
+    let step = newton_increment(&report.hessian, &force);
+    let v = project_force_match(man, &x0, &step);
     let y = retract_force_match(man, &x0, &v, 1e-4);
     let _ = transport_force_match(man, &x0, &y, &v);
     Ok((y, report))
+}
+
+/// Regularized Newton increment `H s ≈ F` for the seed Hessian.
+fn newton_increment(h: &Array2<f64>, f: &Array1<f64>) -> Array1<f64> {
+    let n = f.len();
+    if h.nrows() != n || h.ncols() != n {
+        return f.clone();
+    }
+    let mut a = h.clone();
+    for i in 0..n {
+        a[(i, i)] += 1e-8;
+    }
+    solve_dense(a.view(), f.view()).unwrap_or_else(|_| f.clone())
 }
 
 struct Pair {
@@ -315,15 +326,31 @@ fn collect_pairs(
     };
     let mut rmin = f64::INFINITY;
     for i in 0..n {
-        for j in (i + 1)..n {
-            let (r, _) = pair_disp(x, i, j, [0.0, 0.0, 0.0])?;
-            if r > 1e-12 {
-                rmin = rmin.min(r);
+        for j in i..n {
+            let rij = [
+                x[3 * j] - x[3 * i],
+                x[3 * j + 1] - x[3 * i + 1],
+                x[3 * j + 2] - x[3 * i + 2],
+            ];
+            for &tv in &tvecs {
+                if i == j && tv[0] == 0.0 && tv[1] == 0.0 && tv[2] == 0.0 {
+                    continue;
+                }
+                let xij = [rij[0] + tv[0], rij[1] + tv[1], rij[2] + tv[2]];
+                let r2 = xij[0] * xij[0] + xij[1] * xij[1] + xij[2] * xij[2];
+                if r2 > f64::MIN_POSITIVE {
+                    rmin = rmin.min(r2.sqrt());
+                }
             }
         }
     }
     if !rmin.is_finite() {
-        return Err(SaddleError::NonFinite("force_match rmin"));
+        return Ok(PairSet {
+            lj: Vec::new(),
+            buck: Vec::new(),
+            morse: Vec::new(),
+            bond: Vec::new(),
+        });
     }
     let rcut2 = (opts.rcut_factor * rmin).powi(2);
     let do_lj = opts.kinds.contains(&PairKind::Lj);
@@ -366,7 +393,7 @@ fn collect_pairs(
                 }
                 if do_bond {
                     let rcov = covalent_radius(key.0) + covalent_radius(key.1);
-                    if r < opts.bond_scale * rcov {
+                    if r <= opts.bond_scale * rcov {
                         push_pair(&mut bond, key, pair.i, pair.j, pair.xij, rcov);
                     }
                 }
@@ -382,11 +409,7 @@ fn collect_pairs(
 }
 
 fn elem_key(zi: u8, zj: u8) -> (u8, u8) {
-    if zi <= zj {
-        (zi, zj)
-    } else {
-        (zj, zi)
-    }
+    if zi <= zj { (zi, zj) } else { (zj, zi) }
 }
 
 fn push_pair(
@@ -428,7 +451,7 @@ fn nonlin_bounds(set: &PairSet) -> (Array1<f64>, Array1<f64>, Array1<f64>) {
     }
     for _ in &set.morse {
         x0[k] = DEFAULT_RHO;
-        lo[k] = 1.0;
+        lo[k] = 0.1;
         hi[k] = 10.0;
         k += 1;
     }
@@ -441,7 +464,90 @@ fn nonlin_bounds(set: &PairSet) -> (Array1<f64>, Array1<f64>, Array1<f64>) {
     (x0, lo, hi)
 }
 
+fn lbfgs_bounds(set: &PairSet) -> (Array1<f64>, Array1<f64>) {
+    let n = set.nnonlin();
+    let mut lo = Array1::zeros(n);
+    let mut hi = Array1::from_elem(n, f64::INFINITY);
+    let mut k = 0;
+    for _ in &set.buck {
+        lo[k] = 0.0;
+        k += 1;
+    }
+    for _ in &set.morse {
+        lo[k] = 1.0;
+        k += 1;
+    }
+    for _ in &set.bond {
+        lo[k] = 0.0;
+        k += 1;
+    }
+    (lo, hi)
+}
+
 fn refine_nonlin(
+    set: &PairSet,
+    ndof: usize,
+    ftrue: &Array1<f64>,
+    guess: Array1<f64>,
+    lo: &Array1<f64>,
+    hi: &Array1<f64>,
+) -> Result<Array1<f64>, SaddleError> {
+    let n = guess.len();
+    if n == 0 {
+        return Ok(guess);
+    }
+    let x0 = if n < 5 {
+        brute_nonlin(set, ndof, ftrue, lo, hi)?
+    } else {
+        guess
+    };
+    let (blo, bhi) = lbfgs_bounds(set);
+    lbfgs_b(set, ndof, ftrue, x0, &blo, &bhi)
+}
+
+fn brute_nonlin(
+    set: &PairSet,
+    ndof: usize,
+    ftrue: &Array1<f64>,
+    lo: &Array1<f64>,
+    hi: &Array1<f64>,
+) -> Result<Array1<f64>, SaddleError> {
+    const NS: usize = 10;
+    let n = lo.len();
+    if n == 0 {
+        return Ok(Array1::zeros(0));
+    }
+    let mut idx = vec![0usize; n];
+    let mut best_x = lo.clone();
+    let mut best = f64::INFINITY;
+    loop {
+        let mut x = Array1::zeros(n);
+        for i in 0..n {
+            let frac = idx[i] as f64 / (NS - 1) as f64;
+            x[i] = lo[i] + frac * (hi[i] - lo[i]);
+        }
+        let chi = chisq(set, ndof, ftrue, x.view())?;
+        if chi < best {
+            best = chi;
+            best_x = x;
+        }
+        let mut k = 0;
+        while k < n {
+            idx[k] += 1;
+            if idx[k] < NS {
+                break;
+            }
+            idx[k] = 0;
+            k += 1;
+        }
+        if k == n {
+            break;
+        }
+    }
+    Ok(best_x)
+}
+
+fn lbfgs_b(
     set: &PairSet,
     ndof: usize,
     ftrue: &Array1<f64>,
@@ -449,30 +555,133 @@ fn refine_nonlin(
     lo: &Array1<f64>,
     hi: &Array1<f64>,
 ) -> Result<Array1<f64>, SaddleError> {
+    const M: usize = 6;
+    const MAXITER: usize = 200;
+    const GTOL: f64 = 1e-10;
+    const FTOL: f64 = 1e-8;
+    clip_box(&mut x, lo, hi);
     let n = x.len();
-    if n == 0 {
-        return Ok(x);
-    }
-    let mut best = chisq(set, ndof, ftrue, x.view())?;
-    for _ in 0..2 {
-        for i in 0..n {
-            let mut pick = x[i];
-            let mut pick_chi = best;
-            for t in 0..5 {
-                let frac = t as f64 / 4.0;
-                let trial = lo[i] + frac * (hi[i] - lo[i]);
-                x[i] = trial;
-                let chi = chisq(set, ndof, ftrue, x.view())?;
-                if chi < pick_chi {
-                    pick_chi = chi;
-                    pick = trial;
-                }
-            }
-            x[i] = pick;
-            best = pick_chi;
+    let (mut f, mut g) = objective_grad(set, ndof, ftrue, x.view())?;
+    let mut s_hist: Vec<Array1<f64>> = Vec::new();
+    let mut y_hist: Vec<Array1<f64>> = Vec::new();
+    let mut rho_hist: Vec<f64> = Vec::new();
+    for _ in 0..MAXITER {
+        let pg = projected_grad(x.view(), g.view(), lo, hi);
+        if nrm2(pg.view()) < GTOL {
+            break;
         }
+        let mut dir = lbfgs_direction(&g, &s_hist, &y_hist, &rho_hist);
+        for i in 0..n {
+            if x[i] <= lo[i] && dir[i] < 0.0 {
+                dir[i] = 0.0;
+            }
+            if x[i] >= hi[i] && dir[i] > 0.0 {
+                dir[i] = 0.0;
+            }
+        }
+        let dn = nrm2(dir.view());
+        if dn < 1e-18 {
+            break;
+        }
+        let mut alpha = 1.0;
+        let mut accepted = false;
+        let mut x_new = x.clone();
+        let mut f_new = f;
+        let mut g_new = g.clone();
+        for _ in 0..30 {
+            x_new = &x + &(alpha * &dir);
+            clip_box(&mut x_new, lo, hi);
+            let (fnv, gnv) = objective_grad(set, ndof, ftrue, x_new.view())?;
+            let dx = &x_new - &x;
+            let armijo = f + 1e-4 * alpha * dot(g.view(), dx.view());
+            if fnv <= armijo {
+                f_new = fnv;
+                g_new = gnv;
+                accepted = true;
+                break;
+            }
+            alpha *= 0.5;
+        }
+        if !accepted {
+            break;
+        }
+        if (f - f_new).abs() <= FTOL * (1.0 + f.abs()) {
+            x = x_new;
+            break;
+        }
+        let s = &x_new - &x;
+        let y = &g_new - &g;
+        let sy = dot(s.view(), y.view());
+        if sy > 1e-16 {
+            if s_hist.len() == M {
+                s_hist.remove(0);
+                y_hist.remove(0);
+                rho_hist.remove(0);
+            }
+            rho_hist.push(1.0 / sy);
+            s_hist.push(s);
+            y_hist.push(y);
+        }
+        x = x_new;
+        f = f_new;
+        g = g_new;
     }
     Ok(x)
+}
+
+fn clip_box(x: &mut Array1<f64>, lo: &Array1<f64>, hi: &Array1<f64>) {
+    for i in 0..x.len() {
+        if x[i] < lo[i] {
+            x[i] = lo[i];
+        } else if x[i] > hi[i] {
+            x[i] = hi[i];
+        }
+    }
+}
+
+fn projected_grad(
+    x: ArrayView1<f64>,
+    g: ArrayView1<f64>,
+    lo: &Array1<f64>,
+    hi: &Array1<f64>,
+) -> Array1<f64> {
+    let mut pg = g.to_owned();
+    for i in 0..x.len() {
+        if x[i] <= lo[i] {
+            pg[i] = pg[i].min(0.0);
+        } else if x[i] >= hi[i] {
+            pg[i] = pg[i].max(0.0);
+        }
+    }
+    pg
+}
+
+fn lbfgs_direction(
+    g: &Array1<f64>,
+    s_hist: &[Array1<f64>],
+    y_hist: &[Array1<f64>],
+    rho_hist: &[f64],
+) -> Array1<f64> {
+    let mut q = g.clone();
+    let m = s_hist.len();
+    let mut alpha = vec![0.0; m];
+    for i in (0..m).rev() {
+        alpha[i] = rho_hist[i] * dot(s_hist[i].view(), q.view());
+        axpy(-alpha[i], y_hist[i].view(), &mut q);
+    }
+    if m > 0 {
+        let yy = dot(y_hist[m - 1].view(), y_hist[m - 1].view());
+        if yy > 1e-18 {
+            let gamma = dot(s_hist[m - 1].view(), y_hist[m - 1].view()) / yy;
+            q.mapv_inplace(|v| v * gamma);
+        }
+    }
+    for i in 0..m {
+        let beta = rho_hist[i] * dot(y_hist[i].view(), q.view());
+        axpy(alpha[i] - beta, s_hist[i].view(), &mut q);
+    }
+    q.mapv_inplace(|v| -v);
+    q
 }
 
 fn chisq(
@@ -481,14 +690,39 @@ fn chisq(
     ftrue: &Array1<f64>,
     pars: ArrayView1<f64>,
 ) -> Result<f64, SaddleError> {
-    let (lin, jac) = jac_and_fit(set, ndof, pars, ftrue)?;
+    let (chi, _) = objective_grad(set, ndof, ftrue, pars)?;
+    Ok(chi)
+}
+
+fn objective_grad(
+    set: &PairSet,
+    ndof: usize,
+    ftrue: &Array1<f64>,
+    pars: ArrayView1<f64>,
+) -> Result<(f64, Array1<f64>), SaddleError> {
+    let (lin, jac, dfn) = jac_and_fit(set, ndof, pars, ftrue)?;
     let mut pred = Array1::zeros(ndof);
     for p in 0..lin.len() {
         axpy(lin[p], jac.column(p), &mut pred);
     }
     let mut d = pred;
     axpy(-1.0, ftrue.view(), &mut d);
-    Ok(dot(d.view(), d.view()))
+    let chi = dot(d.view(), d.view());
+    let nnonlin = pars.len();
+    let nlin = lin.len();
+    let mut dchi = Array1::zeros(nnonlin);
+    for q in 0..nnonlin {
+        let mut acc = 0.0;
+        for l in 0..nlin {
+            let mut col = Array1::zeros(ndof);
+            for i in 0..ndof {
+                col[i] = dfn[(i, q, l)];
+            }
+            acc += lin[l] * dot(d.view(), col.view());
+        }
+        dchi[q] = 2.0 * acc;
+    }
+    Ok((chi, dchi))
 }
 
 fn jac_and_fit(
@@ -496,9 +730,11 @@ fn jac_and_fit(
     ndof: usize,
     pars: ArrayView1<f64>,
     ftrue: &Array1<f64>,
-) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
+) -> Result<(Array1<f64>, Array2<f64>, Array3<f64>), SaddleError> {
     let nlin = set.nlin();
+    let nnonlin = set.nnonlin();
     let mut jac = Array2::<f64>::zeros((ndof, nlin));
+    let mut dfn = Array3::<f64>::zeros((ndof, nnonlin, nlin));
     let mut linstart = 0;
     let mut nonlinstart = 0;
     for inter in &set.lj {
@@ -510,7 +746,7 @@ fn jac_and_fit(
     for inter in &set.buck {
         let rho = pars[nonlinstart];
         for p in &inter.pairs {
-            buck_force(p, linstart, rho, &mut jac);
+            buck_force(p, linstart, nonlinstart, rho, &mut jac, &mut dfn);
         }
         linstart += 2;
         nonlinstart += 1;
@@ -518,7 +754,7 @@ fn jac_and_fit(
     for inter in &set.morse {
         let rho = pars[nonlinstart];
         for p in &inter.pairs {
-            morse_force(p, linstart, rho, &mut jac);
+            morse_force(p, linstart, nonlinstart, rho, &mut jac, &mut dfn);
         }
         linstart += 2;
         nonlinstart += 1;
@@ -526,12 +762,12 @@ fn jac_and_fit(
     for inter in &set.bond {
         let r0 = pars[nonlinstart];
         for p in &inter.pairs {
-            bond_force(p, linstart, r0, &mut jac);
+            bond_force(p, linstart, nonlinstart, r0, &mut jac, &mut dfn);
         }
         linstart += 1;
         nonlinstart += 1;
     }
-    Ok((fit_linear(&jac, ftrue.clone()), jac))
+    Ok((fit_linear(&jac, ftrue.clone()), jac, dfn))
 }
 
 fn assemble_hess(
@@ -590,6 +826,13 @@ fn add_col(jac: &mut Array2<f64>, p: &Pair, scale: f64, col: usize) {
     }
 }
 
+fn add_dnonlin(dfn: &mut Array3<f64>, p: &Pair, scale: f64, q: usize, col: usize) {
+    for a in 0..3 {
+        dfn[(3 * p.i + a, q, col)] += scale * p.xij[a];
+        dfn[(3 * p.j + a, q, col)] -= scale * p.xij[a];
+    }
+}
+
 fn lj_force(p: &Pair, col: usize, jac: &mut Array2<f64>) {
     let r2 = dot3(p.xij);
     let r8 = r2.powi(4);
@@ -598,26 +841,51 @@ fn lj_force(p: &Pair, col: usize, jac: &mut Array2<f64>) {
     add_col(jac, p, -12.0 / r14, col + 1);
 }
 
-fn buck_force(p: &Pair, col: usize, rho: f64, jac: &mut Array2<f64>) {
+fn buck_force(
+    p: &Pair,
+    col: usize,
+    q: usize,
+    rho: f64,
+    jac: &mut Array2<f64>,
+    dfn: &mut Array3<f64>,
+) {
     let r2 = dot3(p.xij);
     let r = r2.sqrt();
     let r8 = r2.powi(4);
     let expterm = (-rho * r).exp();
     add_col(jac, p, -rho * expterm / r, col);
     add_col(jac, p, 6.0 / r8, col + 1);
+    add_dnonlin(dfn, p, rho * expterm - expterm / r, q, col);
 }
 
-fn morse_force(p: &Pair, col: usize, rho: f64, jac: &mut Array2<f64>) {
+fn morse_force(
+    p: &Pair,
+    col: usize,
+    q: usize,
+    rho: f64,
+    jac: &mut Array2<f64>,
+    dfn: &mut Array3<f64>,
+) {
     let r = dot3(p.xij).sqrt();
     let expterm = (-rho * r).exp();
     let exp2 = expterm * expterm;
     add_col(jac, p, -2.0 * rho * exp2 / r, col);
     add_col(jac, p, rho * expterm / r, col + 1);
+    add_dnonlin(dfn, p, 2.0 * exp2 * (2.0 * rho * r - 1.0) / r, q, col);
+    add_dnonlin(dfn, p, expterm * (1.0 - rho * r) / r, q, col + 1);
 }
 
-fn bond_force(p: &Pair, col: usize, r0: f64, jac: &mut Array2<f64>) {
+fn bond_force(
+    p: &Pair,
+    col: usize,
+    q: usize,
+    r0: f64,
+    jac: &mut Array2<f64>,
+    dfn: &mut Array3<f64>,
+) {
     let r = dot3(p.xij).sqrt();
     add_col(jac, p, 2.0 * (r - r0) / r, col);
+    add_dnonlin(dfn, p, -2.0 / r, q, col);
 }
 
 fn lj_hess(p: &Pair, c6: f64, c12: f64, h: &mut Array2<f64>) {
@@ -775,7 +1043,7 @@ mod tests {
     use super::*;
     use crate::constraints::Constraints;
     use crate::internal::pack_cart;
-    use ndarray::Array1;
+    use ndarray::{Array1, Array2};
 
     #[test]
     fn water_pairs_are_the_two_oh_bonds() {
@@ -913,5 +1181,81 @@ mod tests {
         let tv = transport_force_match(&cons, &x, &y2, &pv);
         assert_eq!(tv.len(), 9);
         assert!(report.hessian.iter().all(|v| v.is_finite()));
+        let force = force_target(g.view());
+        let step = newton_increment(&report.hessian, &force);
+        let mut hs = Array1::zeros(9);
+        for i in 0..9 {
+            for j in 0..9 {
+                hs[i] += report.hessian[(i, j)] * step[j];
+            }
+        }
+        let mut resid = hs;
+        axpy(-1.0, force.view(), &mut resid);
+        assert!(
+            nrm2(resid.view()) < 1e-4,
+            "Newton increment does not use the seed Hessian"
+        );
+    }
+
+    #[test]
+    fn covalent_radius_matches_ase_cordero() {
+        assert!((covalent_radius(21) - 1.70).abs() < 1e-12);
+        assert!((covalent_radius(27) - 1.26).abs() < 1e-12);
+        assert!((covalent_radius(96) - 1.69).abs() < 1e-12);
+        assert!((covalent_radius(97) - 0.20).abs() < 1e-12);
+        assert!((covalent_radius(6) - 0.76).abs() < 1e-12);
+    }
+
+    #[test]
+    fn cutoff_equality_is_a_bond() {
+        let r0 = covalent_radius(6) + covalent_radius(6);
+        let r = 1.5 * r0;
+        let x = Array1::from(vec![0.0, 0.0, 0.0, r, 0.0, 0.0]);
+        let z = [6u8, 6];
+        let pairs = covalent_pairs(x.view(), &z, 1.5).unwrap();
+        assert_eq!(pairs, vec![[0, 1]]);
+        let opts = ForceMatchOpts {
+            kinds: vec![PairKind::Bond],
+            bond_scale: 1.5,
+            rcut_factor: 10.0,
+            tvecs: vec![[0.0, 0.0, 0.0]],
+        };
+        let set = collect_pairs(x.view(), &z, &opts).unwrap();
+        assert_eq!(set.bond.len(), 1);
+    }
+
+    #[test]
+    fn one_atom_force_match_is_identity() {
+        let x = Array1::from(vec![0.0, 0.0, 0.0]);
+        let g = Array1::from(vec![0.1, 0.0, 0.0]);
+        let z = [6u8];
+        let report = force_match(x.view(), g.view(), &z, &ForceMatchOpts::default()).unwrap();
+        assert_eq!(report.linpars.len(), 0);
+        assert_eq!(report.hessian, Array2::eye(3));
+    }
+
+    #[test]
+    fn rcut_uses_closest_tvec_image() {
+        let x_far = Array1::from(vec![0.0, 0.0, 0.0, 10.0, 0.0, 0.0]);
+        let x_near = Array1::from(vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+        let g = Array1::from(vec![-0.1, 0.0, 0.0, 0.1, 0.0, 0.0]);
+        let z = [10u8, 10];
+        let far = ForceMatchOpts {
+            kinds: vec![PairKind::Lj],
+            tvecs: vec![[0.0, 0.0, 0.0], [-9.0, 0.0, 0.0]],
+            ..ForceMatchOpts::default()
+        };
+        let near = ForceMatchOpts {
+            kinds: vec![PairKind::Lj],
+            tvecs: vec![[0.0, 0.0, 0.0]],
+            ..ForceMatchOpts::default()
+        };
+        let h_far = force_match(x_far.view(), g.view(), &z, &far).unwrap();
+        let h_near = force_match(x_near.view(), g.view(), &z, &near).unwrap();
+        for i in 0..6 {
+            for j in 0..6 {
+                assert!((h_far.hessian[(i, j)] - h_near.hessian[(i, j)]).abs() < 1e-10);
+            }
+        }
     }
 }
