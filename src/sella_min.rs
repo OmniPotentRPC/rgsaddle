@@ -9,14 +9,14 @@
 //! [`SellaMinSession::on_internal`] to QN in the internals chart
 //! (Sella `InternalPES`). The host owns the loop. `run` is a convenience.
 
-use ndarray::{s, Array1};
-use rgmin::qn_restricted;
-use rgmin::vecops::{axpy, dot, vdot, vnrm2, Vector};
+use ndarray::{Array1, s};
 use rgmin::Manifold;
+use rgmin::qn_restricted;
+use rgmin::vecops::{Vector, axpy, dot, vdot, vnrm2};
 
 use crate::constraints::Constraints;
 use crate::error::SaddleError;
-use crate::geom::{update_trust, SellaGeom, TrustSchedule};
+use crate::geom::{SellaGeom, TrustSchedule, update_trust};
 use crate::minmode::PointSurface;
 use crate::pes::CartesianPes;
 use crate::pes_internal::{CellCartesianPes, CellInternalPes, InternalPes, SellaPes};
@@ -33,7 +33,8 @@ pub struct SellaMinConfig {
     pub force_tol: f64,
     /// eOn / gpr_optim `ConvergenceForceNorm`.
     pub force_gate: crate::ForceGate,
-    /// Internals increment clip. Cartesian sessions ignore this.
+    /// Restricted step: TrustRegion, RestrictedAtomicStep (Cartesian),
+    /// MaxInternalStep (internals). RAS refuses internals.
     pub restricted: crate::RestrictedKind,
 }
 
@@ -379,10 +380,7 @@ impl SellaMinSession {
         let s_free = qn_restricted(&evals, &evecs, &g_free, 0, self.delta);
         let mut s = crate::geom::u_vec(&u, &s_free);
         s = self.geom.project(&x, &s);
-        let sn = vnrm2(&Vector::from_host(s.clone()));
-        if sn > self.delta && sn > 0.0 {
-            s.mapv_inplace(|v| v * (self.delta / sn));
-        }
+        s = self.config.restricted.clip_cartesian(&s, self.delta)?;
         let vs = Vector::from_host(s.clone());
         let x1 = self.geom.retract(&x, &s);
         let s1 = self.geom.transport(&x, &x1, &s);
@@ -419,7 +417,9 @@ impl SellaMinSession {
     ) -> Result<SellaMinReport, SaddleError> {
         let pes = match &mut self.pes {
             SellaPes::Internal(p) => p,
-            SellaPes::Cartesian(_) | SellaPes::Cell(_) | SellaPes::CellInternal(_) => unreachable!(),
+            SellaPes::Cartesian(_) | SellaPes::Cell(_) | SellaPes::CellInternal(_) => {
+                unreachable!()
+            }
         };
         let x = pes.position().to_owned();
         let (energy, g) = surface.eval(x.view())?;
@@ -436,6 +436,7 @@ impl SellaMinSession {
                 delta: self.delta,
             });
         }
+        self.config.restricted.refuse_internal()?;
         let g_int = pes.internals_grad(g.view())?;
         let vg = Vector::from_host(g_int.clone());
         let h = pes.hessian().hessian();
@@ -498,10 +499,7 @@ impl SellaMinSession {
         let h = pes.hessian().hessian();
         let (evals, evecs) = crate::exact_eigh(h.view())?;
         let mut s = qn_restricted(&evals, &evecs, &g_p, 0, self.delta);
-        let sn = vnrm2(&Vector::from_host(s.clone()));
-        if sn > self.delta && sn > 0.0 {
-            s.mapv_inplace(|v| v * (self.delta / sn));
-        }
+        s = self.config.restricted.clip_cartesian(&s, self.delta)?;
         let vs = Vector::from_host(s.clone());
         let e0 = energy;
         let hs = h.dot(&s);
@@ -549,6 +547,7 @@ impl SellaMinSession {
                 delta: self.delta,
             });
         }
+        self.config.restricted.refuse_internal()?;
         let g_p = pes.packed_grad(surface, g.view())?;
         let vg = Vector::from_host(g_p.clone());
         let h = pes.hessian().hessian();
@@ -611,8 +610,8 @@ mod tests {
     use crate::geom::update_trust;
     use crate::minmode::PointSurface;
     use ndarray::{Array1, ArrayView1};
-    use rgmin::vecops::nrm2;
     use rgmin::ManifoldKind;
+    use rgmin::vecops::nrm2;
 
     struct Well;
     impl PointSurface for Well {
@@ -655,6 +654,39 @@ mod tests {
         assert!((sess.position()[0].abs() - 1.0).abs() < 0.25);
         assert!(report.rho.is_finite());
         assert!(report.delta > 0.0);
+    }
+
+    #[test]
+    fn ras_step_stays_on_the_rigid_quotient() {
+        let mut x = Array1::zeros(9);
+        x[0] = 0.2;
+        x[4] = 1.0;
+        x[8] = 1.0;
+        let mut sess = SellaMinSession::new(
+            SellaMinConfig {
+                restricted: crate::RestrictedKind::RestrictedAtomicStep,
+                ..SellaMinConfig::default()
+            },
+            x,
+            Array1::from(vec![1.0, 1.0, 1.0]),
+        )
+        .unwrap();
+        let x0 = sess.position().to_owned();
+        let c0 = com(x0.view());
+        let report = sess.step(&Well).unwrap();
+        assert!(report.energy.is_finite());
+        let x1 = sess.position().to_owned();
+        let c1 = com(x1.view());
+        assert!(
+            (c0[0] - c1[0]).abs() < 1e-10
+                && (c0[1] - c1[1]).abs() < 1e-10
+                && (c0[2] - c1[2]).abs() < 1e-10,
+            "COM drifted {c0:?} -> {c1:?}"
+        );
+        let d = &x1 - &x0;
+        let d_h = ManifoldKind::RigidQuotient.project(&x0, &d);
+        let err = nrm2((&d - &d_h).view());
+        assert!(err < 1e-10, "step left the horizontal space: {err}");
     }
 
     #[test]
@@ -756,7 +788,11 @@ mod tests {
         x[0] = 0.2;
         let mut chart = Constraints::new(2).unwrap();
         chart
-            .fix_translation(Translation::all(2, CartAxis::X).unwrap(), x.view(), Some(0.0))
+            .fix_translation(
+                Translation::all(2, CartAxis::X).unwrap(),
+                x.view(),
+                Some(0.0),
+            )
             .unwrap();
         let mut sess = SellaMinSession::on_internal(
             SellaMinConfig {
@@ -863,7 +899,10 @@ mod tests {
             mask,
         )
         .unwrap();
-        assert_eq!(sess.cell_pes().unwrap().chart(), crate::CellChart::LogDeform);
+        assert_eq!(
+            sess.cell_pes().unwrap().chart(),
+            crate::CellChart::LogDeform
+        );
         let _ = sess.run(&CellQuad, 40).unwrap();
         let a00 = sess.cell_pes().unwrap().cell9()[0];
         assert!(
@@ -879,7 +918,11 @@ mod tests {
         x[0] = 0.3;
         let mut chart = Constraints::new(2).unwrap();
         chart
-            .fix_translation(Translation::all(2, CartAxis::X).unwrap(), x.view(), Some(0.0))
+            .fix_translation(
+                Translation::all(2, CartAxis::X).unwrap(),
+                x.view(),
+                Some(0.0),
+            )
             .unwrap();
         let cell = crate::Cell::ortho(3.0, 3.0, 3.0).unwrap();
         let mut mask = [false; 9];
@@ -910,7 +953,11 @@ mod tests {
         x[0] = 0.3;
         let mut chart = Constraints::new(2).unwrap();
         chart
-            .fix_translation(Translation::all(2, CartAxis::X).unwrap(), x.view(), Some(0.0))
+            .fix_translation(
+                Translation::all(2, CartAxis::X).unwrap(),
+                x.view(),
+                Some(0.0),
+            )
             .unwrap();
         let cell = crate::Cell::ortho(3.0, 3.0, 3.0).unwrap();
         let mut mask = [false; 9];
@@ -944,7 +991,11 @@ mod tests {
         x[0] = 0.2;
         let mut chart = Constraints::new(2).unwrap();
         chart
-            .fix_translation(Translation::all(2, CartAxis::X).unwrap(), x.view(), Some(0.0))
+            .fix_translation(
+                Translation::all(2, CartAxis::X).unwrap(),
+                x.view(),
+                Some(0.0),
+            )
             .unwrap();
         let mut sess = SellaMinSession::on_internal(
             SellaMinConfig {
@@ -960,6 +1011,39 @@ mod tests {
         let report = sess.step(&Well).unwrap();
         assert!(report.energy.is_finite());
         assert!(sess.position().iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn internals_ras_is_refused() {
+        use crate::internal::{CartAxis, Translation};
+        let mut x = Array1::zeros(6);
+        x[0] = 0.2;
+        let mut chart = Constraints::new(2).unwrap();
+        chart
+            .fix_translation(
+                Translation::all(2, CartAxis::X).unwrap(),
+                x.view(),
+                Some(0.0),
+            )
+            .unwrap();
+        let mut sess = SellaMinSession::on_internal(
+            SellaMinConfig {
+                delta: 0.05,
+                restricted: crate::RestrictedKind::RestrictedAtomicStep,
+                ..SellaMinConfig::default()
+            },
+            x,
+            Array1::from(vec![1.0, 1.0]),
+            chart,
+        )
+        .unwrap();
+        match sess.step(&Well) {
+            Err(SaddleError::Shape(msg)) => {
+                assert!(msg.contains("Internal coordinates"));
+            }
+            Ok(_) => panic!("RAS on internals must refuse"),
+            Err(other) => panic!("{other}"),
+        }
     }
 
     #[test]

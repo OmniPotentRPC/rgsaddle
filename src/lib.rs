@@ -37,8 +37,11 @@
 //! [`SellaSaddleSession`] retract on [`geom::SellaGeom`]: the rigid
 //! quotient by default, or a live `Constraints` chart. [`restricted::TrustRegion`]
 //! is Sella `cons(s) = ||s||` over [`rgmin::qn_restricted`].
-//! [`restricted::MaxInternalStep`] is the per-coordinate clip Sella
-//! applies before that Euclidean radius.
+//! [`restricted::RestrictedAtomicStep`] is Sella
+//! `cons(s) = max_i ||s_i||` over [`rgmin::ras_clip`] (Cartesian
+//! only; internals refuse it). [`restricted::MaxInternalStep`] is
+//! the per-coordinate clip Sella applies before that Euclidean
+//! radius.
 //!
 //! Force assembly is pure: tangents (Mills–Jonsson–Schenter simple,
 //! Henkelman–Jonsson improved), springs (uniform, energy-weighted,
@@ -118,8 +121,8 @@ pub use qn::{
 
 pub use prfo::{PartitionedRationalFunctionOptimization, prfo_stepper};
 pub use restricted::{
-    InternalWeights, MaxInternalStep, RestrictedKind, TRUST_SYNONYMS, TrustRegion, mis_clip,
-    weights_for_equalities,
+    InternalWeights, MaxInternalStep, RAS_SYNONYMS, RestrictedAtomicStep, RestrictedKind,
+    TRUST_SYNONYMS, TrustRegion, mis_clip, ras_cons, weights_for_equalities,
 };
 pub use rfo::{RationalFunctionOptimization, rfo_stepper};
 pub use samd::{

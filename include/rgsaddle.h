@@ -312,7 +312,7 @@ int rgsaddle_sella_min_position(const RgsaddleSellaMin *session, double *out);
 int rgsaddle_sella_min_reset(RgsaddleSellaMin *session);
 /** `update` is 0 = BFGS, 1 = TS-BFGS. Unknown refuses. */
 int rgsaddle_sella_min_set_hess_update(RgsaddleSellaMin *session, int32_t update);
-/** `restricted` is 0 = TrustRegion, 1 = MaxInternalStep. */
+/** `restricted` is 0 = TrustRegion, 1 = MaxInternalStep, 2 = RestrictedAtomicStep. */
 int rgsaddle_sella_min_set_restricted(RgsaddleSellaMin *session, int32_t restricted);
 /** `chart` is 0 = entries, 1 = log-deform. Unknown refuses. */
 int rgsaddle_sella_min_set_cell_chart(RgsaddleSellaMin *session, int32_t chart);

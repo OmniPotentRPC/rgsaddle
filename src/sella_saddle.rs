@@ -8,14 +8,14 @@
 //! or [`SellaSaddleSession::on_cell_internal`] for `CellInternalPES`.
 //! Hosts own the loop.
 
-use ndarray::{s, Array1};
-use rgmin::prfo_restricted;
-use rgmin::vecops::{axpy, dot, vdot, vnrm2, Vector};
+use ndarray::{Array1, s};
 use rgmin::Manifold;
+use rgmin::prfo_restricted;
+use rgmin::vecops::{Vector, axpy, dot, vdot, vnrm2};
 
 use crate::constraints::Constraints;
 use crate::error::SaddleError;
-use crate::geom::{update_trust, SellaGeom, TrustSchedule};
+use crate::geom::{SellaGeom, TrustSchedule, update_trust};
 use crate::minmode::PointSurface;
 use crate::pes::CartesianPes;
 use crate::pes_internal::{CellCartesianPes, CellInternalPes, InternalPes, SellaPes};
@@ -39,7 +39,8 @@ pub struct SellaSaddleConfig {
     pub eigen_device: crate::EigenDevice,
     /// Sella `rayleigh_ritz(..., method=)`.
     pub expand: crate::ExpandKind,
-    /// Internals increment clip. Cartesian sessions ignore this.
+    /// Restricted step: TrustRegion, RestrictedAtomicStep (Cartesian),
+    /// MaxInternalStep (internals). RAS refuses internals.
     pub restricted: crate::RestrictedKind,
 }
 
@@ -298,10 +299,7 @@ impl SellaSaddleSession {
         self.ritz_v = None;
     }
 
-    pub fn step<S: PointSurface>(
-        &mut self,
-        surface: &S,
-    ) -> Result<SellaSaddleReport, SaddleError> {
+    pub fn step<S: PointSurface>(&mut self, surface: &S) -> Result<SellaSaddleReport, SaddleError> {
         match &self.pes {
             SellaPes::Internal(_) => self.step_internal(surface),
             SellaPes::Cell(_) => self.step_cell(surface),
@@ -389,10 +387,7 @@ impl SellaSaddleSession {
         );
         let mut s = crate::geom::u_vec(&u, &s_free);
         s = self.geom.project(&x, &s);
-        let sn = vnrm2(&Vector::from_host(s.clone()));
-        if sn > self.delta && sn > 0.0 {
-            s.mapv_inplace(|v| v * (self.delta / sn));
-        }
+        s = self.config.restricted.clip_cartesian(&s, self.delta)?;
         let vs = Vector::from_host(s.clone());
         let x1 = self.geom.retract(&x, &s);
         let s1 = self.geom.transport(&x, &x1, &s);
@@ -460,19 +455,16 @@ impl SellaSaddleSession {
             g_int = pes.internals_grad(g.view())?;
             h = pes.hessian().hessian().to_owned();
         }
+        self.config.restricted.refuse_internal()?;
         let vg = Vector::from_host(g_int.clone());
         let (evals, evecs) = self.diag_free(&h)?;
         let pes = match &mut self.pes {
             SellaPes::Internal(p) => p,
-            SellaPes::Cartesian(_) | SellaPes::Cell(_) | SellaPes::CellInternal(_) => unreachable!(),
+            SellaPes::Cartesian(_) | SellaPes::Cell(_) | SellaPes::CellInternal(_) => {
+                unreachable!()
+            }
         };
-        let mut s = prfo_restricted(
-            &evals,
-            &evecs,
-            &g_int,
-            self.config.order.max(1),
-            self.delta,
-        );
+        let mut s = prfo_restricted(&evals, &evecs, &g_int, self.config.order.max(1), self.delta);
         if self.config.restricted == crate::RestrictedKind::MaxInternalStep {
             let w = crate::restricted::weights_for_equalities(pes.chart());
             s = crate::mis_clip(&s, &w, self.delta);
@@ -547,17 +539,8 @@ impl SellaSaddleSession {
                 unreachable!()
             }
         };
-        let mut s = prfo_restricted(
-            &evals,
-            &evecs,
-            &g_p,
-            self.config.order.max(1),
-            self.delta,
-        );
-        let sn = vnrm2(&Vector::from_host(s.clone()));
-        if sn > self.delta && sn > 0.0 {
-            s.mapv_inplace(|v| v * (self.delta / sn));
-        }
+        let mut s = prfo_restricted(&evals, &evecs, &g_p, self.config.order.max(1), self.delta);
+        s = self.config.restricted.clip_cartesian(&s, self.delta)?;
         let vs = Vector::from_host(s.clone());
         let e0 = energy;
         let hs = h.dot(&s);
@@ -621,19 +604,14 @@ impl SellaSaddleSession {
             h = pes.hessian().hessian().to_owned();
             nint = pes.internals().n_int();
         }
+        self.config.restricted.refuse_internal()?;
         let vg = Vector::from_host(g_p.clone());
         let (evals, evecs) = self.diag_free(&h)?;
         let pes = match &mut self.pes {
             SellaPes::CellInternal(p) => p,
             _ => unreachable!(),
         };
-        let mut s = prfo_restricted(
-            &evals,
-            &evecs,
-            &g_p,
-            self.config.order.max(1),
-            self.delta,
-        );
+        let mut s = prfo_restricted(&evals, &evecs, &g_p, self.config.order.max(1), self.delta);
         if self.config.restricted == crate::RestrictedKind::MaxInternalStep {
             let w = crate::restricted::weights_for_equalities(pes.internals().chart());
             let dq = s.slice(s![..nint]).to_owned();
@@ -686,8 +664,8 @@ impl SellaSaddleSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::minmode::PointSurface;
     use crate::constraints::Constraints;
+    use crate::minmode::PointSurface;
     use ndarray::{Array1, ArrayView1};
 
     struct Well;
@@ -757,17 +735,13 @@ mod tests {
             Array1::from(vec![1.0, 1.0, 1.0]),
         )
         .unwrap();
-        assert!(
-            (sess.delta() - 0.3).abs() < 1e-14,
-            "delta={}",
-            sess.delta()
-        );
+        assert!((sess.delta() - 0.3).abs() < 1e-14, "delta={}", sess.delta());
     }
 
     #[test]
     fn prfo_step_stays_on_the_rigid_quotient() {
-        use rgmin::vecops::nrm2;
         use rgmin::ManifoldKind;
+        use rgmin::vecops::nrm2;
         let mut x = Array1::zeros(9);
         x[0] = 0.2;
         x[4] = 1.0;
@@ -824,7 +798,11 @@ mod tests {
         x[0] = 0.2;
         let mut chart = Constraints::new(2).unwrap();
         chart
-            .fix_translation(Translation::all(2, CartAxis::X).unwrap(), x.view(), Some(0.0))
+            .fix_translation(
+                Translation::all(2, CartAxis::X).unwrap(),
+                x.view(),
+                Some(0.0),
+            )
             .unwrap();
         let cell = crate::Cell::ortho(3.0, 3.0, 3.0).unwrap();
         let mut mask = [false; 9];
@@ -851,7 +829,11 @@ mod tests {
         x[0] = 0.2;
         let mut chart = Constraints::new(2).unwrap();
         chart
-            .fix_translation(Translation::all(2, CartAxis::X).unwrap(), x.view(), Some(0.0))
+            .fix_translation(
+                Translation::all(2, CartAxis::X).unwrap(),
+                x.view(),
+                Some(0.0),
+            )
             .unwrap();
         let cell = crate::Cell::ortho(3.0, 3.0, 3.0).unwrap();
         let mut mask = [false; 9];
@@ -880,7 +862,11 @@ mod tests {
         x[0] = 0.2;
         let mut chart = Constraints::new(2).unwrap();
         chart
-            .fix_translation(Translation::all(2, CartAxis::X).unwrap(), x.view(), Some(0.0))
+            .fix_translation(
+                Translation::all(2, CartAxis::X).unwrap(),
+                x.view(),
+                Some(0.0),
+            )
             .unwrap();
         let mut sess = SellaSaddleSession::on_internal(
             SellaSaddleConfig::default(),
