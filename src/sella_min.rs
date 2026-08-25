@@ -1041,7 +1041,8 @@ mod tests {
             Err(SaddleError::Shape(msg)) => {
                 assert!(msg.contains("Internal coordinates"));
             }
-            other => panic!("{other:?}"),
+            Ok(_) => panic!("RAS on internals must refuse"),
+            Err(other) => panic!("{other}"),
         }
     }
 
