@@ -324,18 +324,17 @@ fn collect_pairs(
     } else {
         opts.tvecs.clone()
     };
+    // Sella `get_all_distances` after masking the diagonal: i < j only.
+    // Self-images (i == j, nonzero tvec) stay in the pair loop, not rmin.
     let mut rmin = f64::INFINITY;
     for i in 0..n {
-        for j in i..n {
+        for j in (i + 1)..n {
             let rij = [
                 x[3 * j] - x[3 * i],
                 x[3 * j + 1] - x[3 * i + 1],
                 x[3 * j + 2] - x[3 * i + 2],
             ];
             for &tv in &tvecs {
-                if i == j && tv[0] == 0.0 && tv[1] == 0.0 && tv[2] == 0.0 {
-                    continue;
-                }
                 let xij = [rij[0] + tv[0], rij[1] + tv[1], rij[2] + tv[2]];
                 let r2 = xij[0] * xij[0] + xij[1] * xij[1] + xij[2] * xij[2];
                 if r2 > f64::MIN_POSITIVE {
@@ -1232,6 +1231,36 @@ mod tests {
         let report = force_match(x.view(), g.view(), &z, &ForceMatchOpts::default()).unwrap();
         assert_eq!(report.linpars.len(), 0);
         assert_eq!(report.hessian, Array2::eye(3));
+        let extra = ForceMatchOpts {
+            tvecs: vec![[0.0, 0.0, 0.0], [5.0, 0.0, 0.0]],
+            ..ForceMatchOpts::default()
+        };
+        let report = force_match(x.view(), g.view(), &z, &extra).unwrap();
+        assert_eq!(report.linpars.len(), 0);
+        assert_eq!(report.hessian, Array2::eye(3));
+    }
+
+    #[test]
+    fn rmin_ignores_self_image_tvecs() {
+        let x = Array1::from(vec![0.0, 0.0, 0.0, 4.0, 0.0, 0.0]);
+        let z = [10u8, 10];
+        let opts = ForceMatchOpts {
+            kinds: vec![PairKind::Lj],
+            tvecs: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+            rcut_factor: 3.0,
+            ..ForceMatchOpts::default()
+        };
+        let set = collect_pairs(x.view(), &z, &opts).unwrap();
+        let n_ij = set
+            .lj
+            .iter()
+            .flat_map(|inter| inter.pairs.iter())
+            .filter(|p| p.i != p.j)
+            .count();
+        assert!(
+            n_ij >= 1,
+            "self-image tvec must not shrink rcut below the i<j pair"
+        );
     }
 
     #[test]
