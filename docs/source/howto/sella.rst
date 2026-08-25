@@ -55,11 +55,14 @@ level set. Bond / angle / dihedral topology stays in vocn.
 ``InternalPes.from_find`` is the session kick: dest loads the
 vocn auto-find primitive set into the internals chart.
 
+``TrustRegion`` is Sella ``cons(s) = ||s||`` (``rgmin.qn_restricted``).
+``step_on`` projects, clips to the ball, and retracts. Distinct
+from IRCTrustRegion (``||(s + d1) odot sqrt(m)||``).
 ``MaxInternalStep`` is the Sella per-coordinate clip
 (``max |s_i w_i| <= delta``) on an internals packing. It sits
 in front of the Euclidean trust radius. Distinct from
 ``rgmin.ras_clip`` (per-atom Cartesian) and from
-``qn_restricted`` (``||s||``).
+``TrustRegion`` (``||s||``).
 
 IRC stays ``IrcSession`` (``IrcKind.Gs2`` or ``Morokuma``).
 Minimum-mode following stays ``MinModeSession`` (dimer / Lanczos).
