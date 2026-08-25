@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 11u
+#define RGSADDLE_ABI_MINOR 12u
 
 /** Version head carried by every wire struct. */
 typedef struct {
@@ -409,6 +409,30 @@ int rgsaddle_constraints_retract(const RgsaddleConstraints *cons,
                                  double *out);
 
 void rgsaddle_constraints_free(RgsaddleConstraints *cons);
+
+typedef struct RgsaddlePes RgsaddlePes;
+
+/**
+ * Cartesian PES (Sella peswrapper.PES). `position` is 3N, `masses` is N.
+ * `proj_trans` / `proj_rot` nonzero hang fix_translation / fix_rotation.
+ * Returns NULL on a shape miss.
+ */
+RgsaddlePes *rgsaddle_pes_create(int64_t n_atoms, const double *position,
+                                 const double *masses, int32_t proj_trans,
+                                 int32_t proj_rot);
+int rgsaddle_pes_position(const RgsaddlePes *pes, double *out);
+/** `d` is 3N. */
+int rgsaddle_pes_kick(RgsaddlePes *pes, rgsaddle_surface_fn surface, void *user,
+                      const double *d);
+int rgsaddle_pes_set_hess_update(RgsaddlePes *pes, int32_t update);
+/** Project `v` onto ker(J) at the living position. `v` and `out` are 3N. */
+int rgsaddle_pes_project(const RgsaddlePes *pes, const double *v, double *out);
+/** Retract along `v` and restore onto the trans/rot set. */
+int rgsaddle_pes_retract(const RgsaddlePes *pes, const double *v, double *out);
+/** Transport `v` from the living point to `x_to`. All 3N. */
+int rgsaddle_pes_transport(const RgsaddlePes *pes, const double *x_to,
+                           const double *v, double *out);
+void rgsaddle_pes_free(RgsaddlePes *pes);
 
 typedef struct RgsaddleInternalPes RgsaddleInternalPes;
 

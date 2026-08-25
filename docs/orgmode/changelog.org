@@ -6,6 +6,11 @@
 
 ** Unreleased
 
+- ~CartesianPes::with_proj~ hangs Sella ~proj_trans~ / ~proj_rot~
+  (~fix_translation~ / ~fix_rotation~). ~project~ / ~retract~ /
+  ~transport~ stay on that set. ~new~ is the unconstrained
+  Hessian store ~InternalPes~ wraps. C ABI ~rgsaddle_pes_*~,
+  ABI minor 12.
 - ~exact_eigh~ / ~rayleigh_ritz~ / ~expand~ / ~rayleigh_ritz_iter~
   are Sella ~eigensolvers.py~. ~eig=true~ walks a Ritz subspace
   (~jd0~ default). Reductions go through ~rgmin::vecops~ so

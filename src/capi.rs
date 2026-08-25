@@ -17,16 +17,17 @@ use crate::error::SaddleError;
 use crate::irc::{IrcConfig, IrcDirection, IrcKind, IrcSession};
 use crate::mic::Cell;
 use crate::minmode::{MinModeConfig, MinModeKind, MinModeSession, MinModeStatus, PointSurface};
-use crate::projection::ProjectionKind;
-use crate::sella_min::{SellaMinConfig, SellaMinSession};
-use crate::samd::{SamdConfig, SamdSession};
-use crate::sella_saddle::{SellaSaddleConfig, SellaSaddleSession};
+use crate::pes::CartesianPes;
 use crate::pes_internal::InternalPes;
+use crate::projection::ProjectionKind;
+use crate::samd::{SamdConfig, SamdSession};
+use crate::sella_min::{SellaMinConfig, SellaMinSession};
+use crate::sella_saddle::{SellaSaddleConfig, SellaSaddleSession};
 use crate::spring::SpringKind;
 use crate::tangent::TangentKind;
 
 pub const RGSADDLE_ABI_MAJOR: u32 = 1;
-pub const RGSADDLE_ABI_MINOR: u32 = 11;
+pub const RGSADDLE_ABI_MINOR: u32 = 12;
 
 pub const RGSADDLE_OK: i32 = 0;
 pub const RGSADDLE_NULL_SESSION: i32 = -1;
@@ -258,6 +259,11 @@ pub struct RgsaddleConstraints {
 
 pub struct RgsaddleInternalPes {
     pes: InternalPes,
+    n_atoms: i64,
+}
+
+pub struct RgsaddlePes {
+    pes: CartesianPes,
     n_atoms: i64,
 }
 
@@ -1042,7 +1048,12 @@ mod irc_abi_tests {
             RGSADDLE_INVALID_PARAMETER
         );
         assert_eq!(
-            unsafe { rgsaddle_sella_min_set_restricted(sess, crate::RestrictedKind::MaxInternalStep.to_abi()) },
+            unsafe {
+                rgsaddle_sella_min_set_restricted(
+                    sess,
+                    crate::RestrictedKind::MaxInternalStep.to_abi(),
+                )
+            },
             RGSADDLE_OK
         );
         assert_eq!(
@@ -2112,11 +2123,7 @@ pub unsafe extern "C" fn rgsaddle_samd_create(
         samd.ngen = cfg.ngen as usize;
     }
     samd.exponential = cfg.exponential != 0;
-    let cs = CSurface {
-        f,
-        user,
-        n_atoms,
-    };
+    let cs = CSurface { f, user, n_atoms };
     match SamdSession::new(samd, pos, vel, &cs) {
         Ok(session) => Box::into_raw(Box::new(RgsaddleSamd { session, n_atoms })),
         Err(_) => std::ptr::null_mut(),
@@ -2202,6 +2209,181 @@ pub unsafe extern "C" fn rgsaddle_samd_free(session: *mut RgsaddleSamd) {
 }
 
 /// # Safety
+/// `position` is 3N, `masses` is N. Nonzero `proj_trans` / `proj_rot`
+/// hang fix_translation / fix_rotation.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_pes_create(
+    n_atoms: i64,
+    position: *const f64,
+    masses: *const f64,
+    proj_trans: i32,
+    proj_rot: i32,
+) -> *mut RgsaddlePes {
+    if position.is_null() || masses.is_null() || n_atoms < 1 {
+        return std::ptr::null_mut();
+    }
+    let dof = (3 * n_atoms) as usize;
+    let x = Array1::from(unsafe { slice::from_raw_parts(position, dof) }.to_vec());
+    let m = Array1::from(unsafe { slice::from_raw_parts(masses, n_atoms as usize) }.to_vec());
+    match CartesianPes::with_proj(x, m, proj_trans != 0, proj_rot != 0) {
+        Ok(pes) => Box::into_raw(Box::new(RgsaddlePes { pes, n_atoms })),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// # Safety
+/// `out` is 3N.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_pes_position(pes: *const RgsaddlePes, out: *mut f64) -> i32 {
+    if pes.is_null() {
+        return RGSADDLE_NULL_SESSION;
+    }
+    if out.is_null() {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let pes = unsafe { &*pes };
+    let dof = (3 * pes.n_atoms) as usize;
+    let dst = unsafe { slice::from_raw_parts_mut(out, dof) };
+    for (i, v) in pes.pes.position().iter().enumerate() {
+        dst[i] = *v;
+    }
+    RGSADDLE_OK
+}
+
+/// # Safety
+/// `d` is 3N. Surface is one image.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_pes_kick(
+    pes: *mut RgsaddlePes,
+    surface: Option<RgsaddleSurfaceFn>,
+    user: *mut c_void,
+    d: *const f64,
+) -> i32 {
+    if pes.is_null() {
+        return RGSADDLE_NULL_SESSION;
+    }
+    let Some(f) = surface else {
+        return RGSADDLE_NULL_SURFACE;
+    };
+    if d.is_null() {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let pes = unsafe { &mut *pes };
+    let dof = (3 * pes.n_atoms) as usize;
+    let dx = Array1::from(unsafe { slice::from_raw_parts(d, dof) }.to_vec());
+    let cs = CSurface {
+        f,
+        user,
+        n_atoms: pes.n_atoms,
+    };
+    match pes.pes.kick(&cs, dx.view()) {
+        Ok(_) => RGSADDLE_OK,
+        Err(e) => status_of(&e),
+    }
+}
+
+/// # Safety
+/// `update` is 0 = BFGS, 1 = TS-BFGS.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_pes_set_hess_update(pes: *mut RgsaddlePes, update: i32) -> i32 {
+    if pes.is_null() {
+        return RGSADDLE_NULL_SESSION;
+    }
+    let Some(kind) = crate::HessUpdate::try_from_abi(update) else {
+        return RGSADDLE_INVALID_PARAMETER;
+    };
+    unsafe { (*pes).pes.set_update(kind) };
+    RGSADDLE_OK
+}
+
+/// # Safety
+/// `v` and `out` are 3N.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_pes_project(
+    pes: *const RgsaddlePes,
+    v: *const f64,
+    out: *mut f64,
+) -> i32 {
+    if pes.is_null() {
+        return RGSADDLE_NULL_SESSION;
+    }
+    if v.is_null() || out.is_null() {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let pes = unsafe { &*pes };
+    let dof = (3 * pes.n_atoms) as usize;
+    let v = Array1::from(unsafe { slice::from_raw_parts(v, dof) }.to_vec());
+    let p = pes.pes.project(&v);
+    let dst = unsafe { slice::from_raw_parts_mut(out, dof) };
+    for (k, val) in p.iter().enumerate() {
+        dst[k] = *val;
+    }
+    RGSADDLE_OK
+}
+
+/// # Safety
+/// `v` and `out` are 3N.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_pes_retract(
+    pes: *const RgsaddlePes,
+    v: *const f64,
+    out: *mut f64,
+) -> i32 {
+    if pes.is_null() {
+        return RGSADDLE_NULL_SESSION;
+    }
+    if v.is_null() || out.is_null() {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let pes = unsafe { &*pes };
+    let dof = (3 * pes.n_atoms) as usize;
+    let v = Array1::from(unsafe { slice::from_raw_parts(v, dof) }.to_vec());
+    let y = pes.pes.retract(&v);
+    let dst = unsafe { slice::from_raw_parts_mut(out, dof) };
+    for (k, val) in y.iter().enumerate() {
+        dst[k] = *val;
+    }
+    RGSADDLE_OK
+}
+
+/// # Safety
+/// `x_to`, `v`, and `out` are 3N.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_pes_transport(
+    pes: *const RgsaddlePes,
+    x_to: *const f64,
+    v: *const f64,
+    out: *mut f64,
+) -> i32 {
+    if pes.is_null() {
+        return RGSADDLE_NULL_SESSION;
+    }
+    if x_to.is_null() || v.is_null() || out.is_null() {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let pes = unsafe { &*pes };
+    let dof = (3 * pes.n_atoms) as usize;
+    let x_from = pes.pes.position().to_owned();
+    let x_to = Array1::from(unsafe { slice::from_raw_parts(x_to, dof) }.to_vec());
+    let v = Array1::from(unsafe { slice::from_raw_parts(v, dof) }.to_vec());
+    let t = pes.pes.transport(&x_from, &x_to, &v);
+    let dst = unsafe { slice::from_raw_parts_mut(out, dof) };
+    for (k, val) in t.iter().enumerate() {
+        dst[k] = *val;
+    }
+    RGSADDLE_OK
+}
+
+/// # Safety
+/// `pes` must come from [`rgsaddle_pes_create`], freed once.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_pes_free(pes: *mut RgsaddlePes) {
+    if !pes.is_null() {
+        drop(unsafe { Box::from_raw(pes) });
+    }
+}
+
+/// # Safety
 /// `position` is 3N, `masses` is N. `cons` is copied.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rgsaddle_internal_pes_create(
@@ -2253,9 +2435,8 @@ pub unsafe extern "C" fn rgsaddle_internal_pes_create_dummies(
     let dof = (3 * n_atoms) as usize;
     let x = Array1::from(unsafe { slice::from_raw_parts(position, dof) }.to_vec());
     let m = Array1::from(unsafe { slice::from_raw_parts(masses, n_atoms as usize) }.to_vec());
-    let d = Array1::from(
-        unsafe { slice::from_raw_parts(dummies, (3 * n_dummy) as usize) }.to_vec(),
-    );
+    let d =
+        Array1::from(unsafe { slice::from_raw_parts(dummies, (3 * n_dummy) as usize) }.to_vec());
     match InternalPes::with_dummies(x, m, chart.cons.clone(), d) {
         Ok(pes) => Box::into_raw(Box::new(RgsaddleInternalPes { pes, n_atoms })),
         Err(_) => std::ptr::null_mut(),
@@ -2627,9 +2808,8 @@ mod constraints_abi_tests {
             force_tol: 0.05,
             force_gate: crate::ForceGate::MaxForceOnAtom.to_abi(),
         };
-        let sess = unsafe {
-            rgsaddle_sella_min_create_on(&cfg, 3, x.as_ptr(), masses.as_ptr(), cons)
-        };
+        let sess =
+            unsafe { rgsaddle_sella_min_create_on(&cfg, 3, x.as_ptr(), masses.as_ptr(), cons) };
         assert!(!sess.is_null());
         let mut report = RgsaddleReport {
             version: RgsaddleVersion { major: 0, minor: 0 },
@@ -2643,7 +2823,9 @@ mod constraints_abi_tests {
             rotations: 0,
         };
         assert_eq!(
-            unsafe { rgsaddle_sella_min_step(sess, Some(well_cb), std::ptr::null_mut(), &mut report) },
+            unsafe {
+                rgsaddle_sella_min_step(sess, Some(well_cb), std::ptr::null_mut(), &mut report)
+            },
             RGSADDLE_OK
         );
         let mut y = [0.0; 9];
@@ -2743,7 +2925,9 @@ mod constraints_abi_tests {
         assert_eq!(nint, 3);
         let dq = [0.2, 0.0, 0.0];
         assert_eq!(
-            unsafe { rgsaddle_internal_pes_kick(pes, Some(well_cb), std::ptr::null_mut(), dq.as_ptr()) },
+            unsafe {
+                rgsaddle_internal_pes_kick(pes, Some(well_cb), std::ptr::null_mut(), dq.as_ptr())
+            },
             RGSADDLE_OK
         );
         let mut y = [0.0; 6];
@@ -2814,11 +2998,25 @@ mod constraints_abi_tests {
             rgsaddle_internal_pes_free(pes);
             rgsaddle_constraints_free(cons);
         }
-        assert!(unsafe { rgsaddle_internal_pes_create(2, x.as_ptr(), masses.as_ptr(), std::ptr::null()) }.is_null());
-        assert!(unsafe {
-            rgsaddle_sella_min_create_cell(&min_cfg, 2, x.as_ptr(), masses.as_ptr(), std::ptr::null(), mask.as_ptr())
-        }
-        .is_null());
+        assert!(
+            unsafe {
+                rgsaddle_internal_pes_create(2, x.as_ptr(), masses.as_ptr(), std::ptr::null())
+            }
+            .is_null()
+        );
+        assert!(
+            unsafe {
+                rgsaddle_sella_min_create_cell(
+                    &min_cfg,
+                    2,
+                    x.as_ptr(),
+                    masses.as_ptr(),
+                    std::ptr::null(),
+                    mask.as_ptr(),
+                )
+            }
+            .is_null()
+        );
     }
 
     #[test]
@@ -2849,6 +3047,70 @@ mod constraints_abi_tests {
             flags: 0,
         };
         assert!(unsafe { rgsaddle_constraints_create(&bad, 3) }.is_null());
+    }
+
+    #[test]
+    fn pes_abi_proj_trans_kills_a_translation() {
+        let x = [0.0, 0.0, 0.0, 0.96, 0.0, 0.0, -0.24, 0.93, 0.0];
+        let masses = [16.0, 1.0, 1.0];
+        let pes = unsafe { rgsaddle_pes_create(3, x.as_ptr(), masses.as_ptr(), 1, 1) };
+        assert!(!pes.is_null());
+        let v = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+        let mut p = [0.0; 9];
+        assert_eq!(
+            unsafe { rgsaddle_pes_project(pes, v.as_ptr(), p.as_mut_ptr()) },
+            RGSADDLE_OK
+        );
+        let n = p.iter().map(|a| a * a).sum::<f64>().sqrt();
+        assert!(n < 1e-10, "translation survived: {p:?}");
+        let mut step = [0.0; 9];
+        step[0] = 0.2;
+        step[4] = -0.15;
+        step[8] = 0.05;
+        let mut y = [0.0; 9];
+        assert_eq!(
+            unsafe { rgsaddle_pes_retract(pes, step.as_ptr(), y.as_mut_ptr()) },
+            RGSADDLE_OK
+        );
+        let c0 = [
+            (x[0] + x[3] + x[6]) / 3.0,
+            (x[1] + x[4] + x[7]) / 3.0,
+            (x[2] + x[5] + x[8]) / 3.0,
+        ];
+        let c1 = [
+            (y[0] + y[3] + y[6]) / 3.0,
+            (y[1] + y[4] + y[7]) / 3.0,
+            (y[2] + y[5] + y[8]) / 3.0,
+        ];
+        assert!((c0[0] - c1[0]).abs() < 1e-10);
+        assert!((c0[1] - c1[1]).abs() < 1e-10);
+        assert!((c0[2] - c1[2]).abs() < 1e-10);
+        let mut t = [0.0; 9];
+        assert_eq!(
+            unsafe { rgsaddle_pes_transport(pes, y.as_ptr(), p.as_ptr(), t.as_mut_ptr()) },
+            RGSADDLE_OK
+        );
+        assert!(t.iter().all(|v| v.is_finite()));
+        let mut d = [0.0; 9];
+        d[0] = 0.05;
+        assert_eq!(
+            unsafe { rgsaddle_pes_kick(pes, Some(well_cb), std::ptr::null_mut(), d.as_ptr()) },
+            RGSADDLE_OK
+        );
+        let mut pos = [0.0; 9];
+        assert_eq!(
+            unsafe { rgsaddle_pes_position(pes, pos.as_mut_ptr()) },
+            RGSADDLE_OK
+        );
+        assert!((pos[0] - 0.05).abs() < 1e-12);
+        assert_eq!(unsafe { rgsaddle_pes_set_hess_update(pes, 0) }, RGSADDLE_OK);
+        assert_eq!(
+            unsafe { rgsaddle_pes_set_hess_update(pes, 99) },
+            RGSADDLE_INVALID_PARAMETER
+        );
+        unsafe { rgsaddle_pes_free(pes) };
+        assert!(unsafe { rgsaddle_pes_create(3, x.as_ptr(), std::ptr::null(), 1, 0) }.is_null());
+        assert!(unsafe { rgsaddle_pes_create(0, x.as_ptr(), masses.as_ptr(), 1, 1) }.is_null());
     }
 }
 
@@ -2892,7 +3154,14 @@ mod samd_abi_tests {
             exponential: 0,
         };
         let sess = unsafe {
-            rgsaddle_samd_create(&cfg, n_atoms, x.as_ptr(), v0.as_ptr(), Some(well_cb), std::ptr::null_mut())
+            rgsaddle_samd_create(
+                &cfg,
+                n_atoms,
+                x.as_ptr(),
+                v0.as_ptr(),
+                Some(well_cb),
+                std::ptr::null_mut(),
+            )
         };
         assert!(!sess.is_null());
         let mut report = RgsaddleReport {
@@ -2908,7 +3177,13 @@ mod samd_abi_tests {
         };
         assert_eq!(
             unsafe {
-                rgsaddle_samd_step(sess, Some(well_cb), std::ptr::null_mut(), r.as_ptr(), &mut report)
+                rgsaddle_samd_step(
+                    sess,
+                    Some(well_cb),
+                    std::ptr::null_mut(),
+                    r.as_ptr(),
+                    &mut report,
+                )
             },
             RGSADDLE_OK
         );
@@ -2919,7 +3194,19 @@ mod samd_abi_tests {
             RGSADDLE_OK
         );
         assert!(y.iter().all(|v| v.is_finite()));
-        assert!(unsafe { rgsaddle_samd_create(std::ptr::null(), n_atoms, x.as_ptr(), v0.as_ptr(), Some(well_cb), std::ptr::null_mut()) }.is_null());
+        assert!(
+            unsafe {
+                rgsaddle_samd_create(
+                    std::ptr::null(),
+                    n_atoms,
+                    x.as_ptr(),
+                    v0.as_ptr(),
+                    Some(well_cb),
+                    std::ptr::null_mut(),
+                )
+            }
+            .is_null()
+        );
         unsafe { rgsaddle_samd_free(sess) };
     }
 }

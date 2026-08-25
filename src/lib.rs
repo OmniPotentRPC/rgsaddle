@@ -19,8 +19,9 @@
 //! kick along the imaginary mode, then take Gonzalez--Schlegel /
 //! Sella steps on the mass-weighted sphere (`rgmin::IrcTrust` over
 //! [`rgmin::ManifoldKind::MwRigid`]). SellaMin is QN + TrustRegion
-//! on [`pes::CartesianPes`] (Cartesian BFGS, per-atom `||F||_2`) or
-//! [`pes_internal::InternalPes`] (Sella `InternalPES`).
+//! on [`pes::CartesianPes`] (Cartesian BFGS, per-atom `||F||_2`,
+//! Sella `proj_trans` / `proj_rot` via [`CartesianPes::with_proj`])
+//! or [`pes_internal::InternalPes`] (Sella `InternalPES`).
 //! Sella `QuasiNewton` is [`qn::QuasiNewton`]: `rgmin::qn_get_s`
 //! with proj / retr / transp. Sella `RationalFunctionOptimization` is
 //! [`rfo::RationalFunctionOptimization`]: `rgmin::rfo_get_s` with

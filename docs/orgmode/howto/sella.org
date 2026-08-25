@@ -9,6 +9,11 @@ The Sella QuasiNewton stepper is ~rgsaddle::QuasiNewton~
 ~transport_step~ is the vector transport. This is a
 stepper, not a session.
 
+~CartesianPes::with_proj~ hangs Sella ~proj_trans~ /
+~proj_rot~ (~fix_translation~ / ~fix_rotation~). ~project~
+/ ~retract~ / ~transport~ stay on that set. ~new~ is the
+unconstrained Hessian store ~InternalPes~ wraps.
+
 ~SellaMinSession~ is order 0, ~eig=false~: project on
 ~SellaGeom~ (RigidQuotient at N>=3, or a ~Constraints~
 chart via ~with_chart~), ~qn_restricted~, retract,
