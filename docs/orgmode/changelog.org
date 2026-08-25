@@ -6,6 +6,12 @@
 
 ** Unreleased
 
+- ~numerical_hvp~ / ~numerical_hvp_proj~ are Sella
+  ~linalg.NumericalHessian~ over ~rgmin::vecops~. Optional
+  ~Uproj~ keeps the product in the free chart.
+  ~project_hvp~ / ~retract_hvp~ / ~transport_hvp~ keep a
+  finite-difference increment on the set. Reserved rgmin
+  tokens 7-10 stay unused.
 - ~CartesianPes::with_proj~ hangs Sella ~proj_trans~ / ~proj_rot~
   (~fix_translation~ / ~fix_rotation~). ~project~ / ~retract~ /
   ~transport~ stay on that set. ~new~ is the unconstrained

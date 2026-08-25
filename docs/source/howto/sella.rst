@@ -26,8 +26,11 @@ on ``IrcSession``. ``n_free`` is ``3N-6`` on the quotient
 and ``3N - ncons`` on a chart.
 
 ``exact_eigh`` / ``rayleigh_ritz`` are Sella
-``eigensolvers.py``. ``numerical_hvp`` is
-``linalg.NumericalHessian``. ``SamdSession`` is the BDP
+``eigensolvers.py``. ``numerical_hvp`` /
+``numerical_hvp_proj`` is ``linalg.NumericalHessian``
+(``Uproj`` is the free chart). ``project_hvp`` /
+``retract_hvp`` / ``transport_hvp`` keep the
+finite-difference increment on the set. ``SamdSession`` is the BDP
 thermostat (``samd.py``). Euclidean ``step`` is the Sella
 loop. A host that needs the point on a set calls
 ``step_on`` (``project`` / ``retract`` / ``transport``).
