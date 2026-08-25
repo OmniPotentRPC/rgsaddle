@@ -55,11 +55,17 @@ level set. Bond / angle / dihedral topology stays in vocn.
 ``InternalPes.from_find`` is the session kick: dest loads the
 vocn auto-find primitive set into the internals chart.
 
+``TrustRegion`` is Sella ``cons(s) = ||s||`` (``tr`` /
+``trust-region``). The QN companion is ``qn_restricted``.
+Distinct from ``IRCTrustRegion`` (``IrcTrust`` /
+``qn_irc_restricted``). A host that needs the point on a set
+calls ``step_on`` / ``transport_step``.
+
 ``MaxInternalStep`` is the Sella per-coordinate clip
 (``max |s_i w_i| <= delta``) on an internals packing. It sits
 in front of the Euclidean trust radius. Distinct from
 ``rgmin.ras_clip`` (per-atom Cartesian) and from
-``qn_restricted`` (``||s||``).
+``TrustRegion`` (``||s||``).
 
 IRC stays ``IrcSession`` (``IrcKind.Gs2`` or ``Morokuma``).
 Minimum-mode following stays ``MinModeSession`` (dimer / Lanczos).
