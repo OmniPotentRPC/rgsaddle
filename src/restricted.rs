@@ -88,6 +88,18 @@ impl RestrictedKind {
             Self::TrustRegion | Self::MaxInternalStep => Ok(TrustRegion::new(delta)?.clip(s)),
         }
     }
+
+    /// Radius passed to a Euclidean QN / P-RFO stepper.
+    ///
+    /// RAS clips `max_i ||s_i||` after lift, so the Euclidean
+    /// stepper must not pre-scale `||s||`. TrustRegion and
+    /// MaxInternalStep keep the living `||s||` radius.
+    pub fn stepper_delta(self, delta: f64) -> f64 {
+        match self {
+            Self::RestrictedAtomicStep => f64::INFINITY,
+            Self::TrustRegion | Self::MaxInternalStep => delta,
+        }
+    }
 }
 
 /// Sella `TrustRegion` synonyms.
@@ -898,6 +910,13 @@ mod tests {
             RestrictedKind::try_from_abi(2),
             Some(RestrictedKind::RestrictedAtomicStep)
         );
+        assert!(
+            RestrictedKind::RestrictedAtomicStep
+                .stepper_delta(0.1)
+                .is_infinite()
+        );
+        assert!((RestrictedKind::TrustRegion.stepper_delta(0.1) - 0.1).abs() < 1e-18);
+        assert!((RestrictedKind::MaxInternalStep.stepper_delta(0.2) - 0.2).abs() < 1e-18);
     }
 
     #[test]

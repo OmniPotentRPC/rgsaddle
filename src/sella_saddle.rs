@@ -258,7 +258,8 @@ impl SellaSaddleSession {
         self.config.expand = expand;
     }
 
-    /// Internals increment clip. Cartesian sessions ignore this.
+    /// Restricted step: RAS clips per-atom Cartesian; MIS clips
+    /// internals; TrustRegion is `||s||` on every chart.
     pub fn set_restricted(&mut self, kind: crate::RestrictedKind) {
         self.config.restricted = kind;
     }
@@ -383,7 +384,7 @@ impl SellaSaddleSession {
             &evecs,
             &g_free,
             self.config.order.max(1),
-            self.delta,
+            self.config.restricted.stepper_delta(self.delta),
         );
         let mut s = crate::geom::u_vec(&u, &s_free);
         s = self.geom.project(&x, &s);
@@ -539,7 +540,13 @@ impl SellaSaddleSession {
                 unreachable!()
             }
         };
-        let mut s = prfo_restricted(&evals, &evecs, &g_p, self.config.order.max(1), self.delta);
+        let mut s = prfo_restricted(
+            &evals,
+            &evecs,
+            &g_p,
+            self.config.order.max(1),
+            self.config.restricted.stepper_delta(self.delta),
+        );
         s = self.config.restricted.clip_cartesian(&s, self.delta)?;
         let vs = Vector::from_host(s.clone());
         let e0 = energy;

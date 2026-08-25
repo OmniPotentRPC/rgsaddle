@@ -1,7 +1,8 @@
 //! Sella order-0 session: QN + TrustRegion over a Cartesian or internals PES.
 //!
 //! `sella.optimize.optimize.Sella` with `order=0`, `method=qn`,
-//! `eig=false`. One step is eval, project, `qn_restricted`, retract,
+//! `eig=false`. One step is eval, project, QN (TrustRegion
+//! `qn_restricted`; RAS unrestricted then `ras_clip`), retract,
 //! transport, `PES.kick`, then the `delta0` / `sigma` / `rho` trust
 //! schedule. Default geometry is [`crate::geom::SellaGeom::cartesian`]
 //! (RigidQuotient at N>=3). Pass a [`Constraints`] chart through
@@ -266,7 +267,8 @@ impl SellaMinSession {
         self.pes.set_update(update);
     }
 
-    /// Internals increment clip. Cartesian sessions ignore this.
+    /// Restricted step: RAS clips per-atom Cartesian; MIS clips
+    /// internals; TrustRegion is `||s||` on every chart.
     pub fn set_restricted(&mut self, kind: crate::RestrictedKind) {
         self.config.restricted = kind;
     }
@@ -377,7 +379,13 @@ impl SellaMinSession {
         let g_free = crate::geom::u_t_vec(&u, &g_r);
         let h_free = crate::geom::u_t_h_u(&u, pes.hessian().hessian());
         let (evals, evecs) = crate::exact_eigh(h_free.view())?;
-        let s_free = qn_restricted(&evals, &evecs, &g_free, 0, self.delta);
+        let s_free = qn_restricted(
+            &evals,
+            &evecs,
+            &g_free,
+            0,
+            self.config.restricted.stepper_delta(self.delta),
+        );
         let mut s = crate::geom::u_vec(&u, &s_free);
         s = self.geom.project(&x, &s);
         s = self.config.restricted.clip_cartesian(&s, self.delta)?;
@@ -498,7 +506,13 @@ impl SellaMinSession {
         let vg = Vector::from_host(g_p.clone());
         let h = pes.hessian().hessian();
         let (evals, evecs) = crate::exact_eigh(h.view())?;
-        let mut s = qn_restricted(&evals, &evecs, &g_p, 0, self.delta);
+        let mut s = qn_restricted(
+            &evals,
+            &evecs,
+            &g_p,
+            0,
+            self.config.restricted.stepper_delta(self.delta),
+        );
         s = self.config.restricted.clip_cartesian(&s, self.delta)?;
         let vs = Vector::from_host(s.clone());
         let e0 = energy;
@@ -654,6 +668,35 @@ mod tests {
         assert!((sess.position()[0].abs() - 1.0).abs() < 0.25);
         assert!(report.rho.is_finite());
         assert!(report.delta > 0.0);
+    }
+
+    #[test]
+    fn ras_session_step_is_not_trust_region() {
+        let mut x = Array1::zeros(9);
+        x[0] = 0.8;
+        x[4] = 1.0;
+        x[8] = 1.0;
+        let cfg_tr = SellaMinConfig {
+            delta: 0.02,
+            ..SellaMinConfig::default()
+        };
+        let cfg_ras = SellaMinConfig {
+            delta: 0.02,
+            restricted: crate::RestrictedKind::RestrictedAtomicStep,
+            ..SellaMinConfig::default()
+        };
+        let masses = Array1::from(vec![1.0, 1.0, 1.0]);
+        let mut tr = SellaMinSession::new(cfg_tr, x.clone(), masses.clone()).unwrap();
+        let mut ras = SellaMinSession::new(cfg_ras, x, masses).unwrap();
+        let r_tr = tr.step(&Well).unwrap();
+        let r_ras = ras.step(&Well).unwrap();
+        assert!(r_tr.energy.is_finite());
+        assert!(r_ras.energy.is_finite());
+        let d = nrm2((&tr.position().to_owned() - &ras.position().to_owned()).view());
+        assert!(
+            d > 1e-8,
+            "RAS after Euclidean qn_restricted is a no-op: ||x_tr-x_ras||={d}"
+        );
     }
 
     #[test]
