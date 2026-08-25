@@ -38,6 +38,10 @@ rgsaddle_band_free(band);
 #+end_src
 
 The host owns the loop. ~reset~ is the model-update boundary.
+Band, min-mode, and IRC sessions call ~Solver::set_highs(true)~.
+With the ~highs~ Cargo feature that is rgmin's HiGHS feasible-set
+step (box, L-inf trust, equalities). Without the feature the setter
+is a no-op.
 
 ** C++
 

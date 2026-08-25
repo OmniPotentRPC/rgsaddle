@@ -258,7 +258,8 @@ impl BandSession {
             istep: 1.0,
             maxmove: Some(config.max_move),
         };
-        let solver = Solver::new(config.method.clone(), control, interior_dof);
+        let mut solver = Solver::new(config.method.clone(), control, interior_dof);
+        solver.set_highs(true);
         Ok(Self {
             config,
             positions: initial,

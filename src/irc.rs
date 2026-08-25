@@ -139,6 +139,7 @@ impl IrcSession {
             maxmove: Some(config.max_move),
         };
         let mut solver = Solver::new(config.method.clone(), control, n3);
+        solver.set_highs(true);
         // SE(3) quotient needs leftover internal modes: N >= 3.
         if masses.len() >= 3 {
             solver.set_manifold(ManifoldKind::MwRigid);

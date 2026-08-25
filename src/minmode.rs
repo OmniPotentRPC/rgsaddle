@@ -236,7 +236,8 @@ impl MinModeSession {
             istep: 1.0,
             maxmove: Some(config.max_move),
         };
-        let solver = Solver::new(config.method.clone(), control, x.len());
+        let mut solver = Solver::new(config.method.clone(), control, x.len());
+        solver.set_highs(true);
         Ok(Self {
             config,
             x,
