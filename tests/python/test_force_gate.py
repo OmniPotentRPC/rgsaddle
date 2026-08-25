@@ -74,7 +74,9 @@ def test_restricted_kind_is_an_enum():
     assert issubclass(RestrictedKind, enum.IntEnum)
     assert RestrictedKind.TRUST_REGION == 0
     assert RestrictedKind.MAX_INTERNAL_STEP == 1
+    assert RestrictedKind.RESTRICTED_ATOMIC_STEP == 2
     assert RestrictedKind(1) is RestrictedKind.MAX_INTERNAL_STEP
+    assert RestrictedKind(2) is RestrictedKind.RESTRICTED_ATOMIC_STEP
 
 
 def test_cell_chart_is_an_enum():

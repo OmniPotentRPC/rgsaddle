@@ -1,7 +1,8 @@
 //! Sella order-0 session: QN + TrustRegion over a Cartesian or internals PES.
 //!
 //! `sella.optimize.optimize.Sella` with `order=0`, `method=qn`,
-//! `eig=false`. One step is eval, project, `qn_restricted`, retract,
+//! `eig=false`. One step is eval, project, the restricted increment
+//! (`qn_restricted`, or unrestricted QN then `ras_clip` for RAS), retract,
 //! transport, `PES.kick`, then the `delta0` / `sigma` / `rho` trust
 //! schedule. Default geometry is [`crate::geom::SellaGeom::cartesian`]
 //! (RigidQuotient at N>=3). Pass a [`Constraints`] chart through
@@ -9,14 +10,14 @@
 //! [`SellaMinSession::on_internal`] to QN in the internals chart
 //! (Sella `InternalPES`). The host owns the loop. `run` is a convenience.
 
-use ndarray::{Array1, s};
-use rgmin::Manifold;
+use ndarray::{s, Array1};
 use rgmin::qn_restricted;
-use rgmin::vecops::{Vector, axpy, dot, vdot, vnrm2};
+use rgmin::vecops::{axpy, dot, vdot, vnrm2, Vector};
+use rgmin::Manifold;
 
 use crate::constraints::Constraints;
 use crate::error::SaddleError;
-use crate::geom::{SellaGeom, TrustSchedule, update_trust};
+use crate::geom::{update_trust, SellaGeom, TrustSchedule};
 use crate::minmode::PointSurface;
 use crate::pes::CartesianPes;
 use crate::pes_internal::{CellCartesianPes, CellInternalPes, InternalPes, SellaPes};
@@ -266,7 +267,8 @@ impl SellaMinSession {
         self.pes.set_update(update);
     }
 
-    /// Internals increment clip. Cartesian sessions ignore this.
+    /// Restricted increment. RAS clips per-atom Cartesian steps.
+    /// MaxInternalStep clips internals. TrustRegion is `||s||`.
     pub fn set_restricted(&mut self, kind: crate::RestrictedKind) {
         self.config.restricted = kind;
     }
@@ -377,7 +379,10 @@ impl SellaMinSession {
         let g_free = crate::geom::u_t_vec(&u, &g_r);
         let h_free = crate::geom::u_t_h_u(&u, pes.hessian().hessian());
         let (evals, evecs) = crate::exact_eigh(h_free.view())?;
-        let s_free = qn_restricted(&evals, &evecs, &g_free, 0, self.delta);
+        let s_free = self
+            .config
+            .restricted
+            .qn_step(&evals, &evecs, &g_free, 0, self.delta);
         let mut s = crate::geom::u_vec(&u, &s_free);
         s = self.geom.project(&x, &s);
         s = self.config.restricted.clip_cartesian(&s, self.delta)?;
@@ -498,7 +503,10 @@ impl SellaMinSession {
         let vg = Vector::from_host(g_p.clone());
         let h = pes.hessian().hessian();
         let (evals, evecs) = crate::exact_eigh(h.view())?;
-        let mut s = qn_restricted(&evals, &evecs, &g_p, 0, self.delta);
+        let mut s = self
+            .config
+            .restricted
+            .qn_step(&evals, &evecs, &g_p, 0, self.delta);
         s = self.config.restricted.clip_cartesian(&s, self.delta)?;
         let vs = Vector::from_host(s.clone());
         let e0 = energy;
@@ -610,8 +618,8 @@ mod tests {
     use crate::geom::update_trust;
     use crate::minmode::PointSurface;
     use ndarray::{Array1, ArrayView1};
-    use rgmin::ManifoldKind;
     use rgmin::vecops::nrm2;
+    use rgmin::ManifoldKind;
 
     struct Well;
     impl PointSurface for Well {
@@ -654,6 +662,46 @@ mod tests {
         assert!((sess.position()[0].abs() - 1.0).abs() < 0.25);
         assert!(report.rho.is_finite());
         assert!(report.delta > 0.0);
+    }
+
+    #[test]
+    fn ras_session_step_differs_from_trust_region() {
+        let mut x = Array1::zeros(9);
+        x[0] = 0.2;
+        x[4] = 1.0;
+        x[8] = 1.0;
+        let masses = Array1::from(vec![1.0, 1.0, 1.0]);
+        let mut tr = SellaMinSession::new(
+            SellaMinConfig {
+                delta: 0.01,
+                restricted: crate::RestrictedKind::TrustRegion,
+                ..SellaMinConfig::default()
+            },
+            x.clone(),
+            masses.clone(),
+        )
+        .unwrap();
+        let mut ras = SellaMinSession::new(
+            SellaMinConfig {
+                delta: 0.01,
+                restricted: crate::RestrictedKind::RestrictedAtomicStep,
+                ..SellaMinConfig::default()
+            },
+            x,
+            masses,
+        )
+        .unwrap();
+        let r_tr = tr.step(&Well).unwrap();
+        let r_ras = ras.step(&Well).unwrap();
+        assert!(r_tr.energy.is_finite());
+        assert!(r_ras.energy.is_finite());
+        let dx = nrm2((&ras.position().to_owned() - &tr.position().to_owned()).view());
+        assert!(
+            dx > 1e-8,
+            "RAS session step matched TrustRegion: dx={dx} x_tr={:?} x_ras={:?}",
+            tr.position(),
+            ras.position()
+        );
     }
 
     #[test]

@@ -17,14 +17,14 @@
 //! [`rgmin::vecops`] so `par` applies.
 
 use ndarray::{Array1, Array2};
-use rgmin::Manifold;
 use rgmin::qn_get_s;
 use rgmin::qn_restricted;
 use rgmin::ras_clip;
 use rgmin::vecops::{axpy, nrm2, nrminf};
+use rgmin::Manifold;
 
-use crate::SaddleError;
 use crate::constraints::{Constraints, Equality, InternalCounts};
+use crate::SaddleError;
 
 /// Named Sella restricted step this crate dests.
 ///
@@ -87,6 +87,32 @@ impl RestrictedKind {
             Self::RestrictedAtomicStep => Ok(RestrictedAtomicStep::new(delta)?.clip(s)),
             Self::TrustRegion | Self::MaxInternalStep => Ok(TrustRegion::new(delta)?.clip(s)),
         }
+    }
+
+    /// Ambient QN increment before a Cartesian clip.
+    ///
+    /// RAS is unrestricted [`qn_get_s`] so [`Self::clip_cartesian`]
+    /// can bind `max_i ||s_i||`. `qn_restricted` first would leave
+    /// `||s|| <= delta`, and ras_clip would be a no-op.
+    pub fn qn_step(
+        self,
+        evals: &Array1<f64>,
+        evecs: &Array2<f64>,
+        g: &Array1<f64>,
+        order: usize,
+        delta: f64,
+    ) -> Array1<f64> {
+        match self {
+            Self::RestrictedAtomicStep => qn_get_s(evals, evecs, g, order, 0.0).0,
+            Self::TrustRegion | Self::MaxInternalStep => {
+                qn_restricted(evals, evecs, g, order, delta)
+            }
+        }
+    }
+
+    /// RAS binds the per-atom clip on an unrestricted ambient step.
+    pub const fn wants_unrestricted_ambient(self) -> bool {
+        matches!(self, Self::RestrictedAtomicStep)
     }
 }
 
@@ -551,7 +577,7 @@ mod tests {
     use super::*;
     use crate::constraints::Constraints;
     use crate::internal::pack_cart;
-    use ndarray::{Array2, array};
+    use ndarray::{array, Array2};
     use rgmin::vecops::{dot, nrm2};
     use rgmin::{Manifold, ManifoldKind};
 
@@ -949,6 +975,31 @@ mod tests {
         let s = ras.restrict_qn(&evals, &evecs, &g, 0).unwrap();
         assert!(ras.cons(&s) <= 0.1 + 1e-12, "cons={}", ras.cons(&s));
         assert!(s[0] < 0.0);
+    }
+
+    #[test]
+    fn ras_qn_step_is_not_qn_restricted_then_clip() {
+        let evals = Array1::ones(6);
+        let evecs = Array2::<f64>::eye(6);
+        let g = Array1::from(vec![4.0, 0.0, 0.0, 0.5, 0.0, 0.0]);
+        let delta = 0.1;
+        let ras = RestrictedKind::RestrictedAtomicStep.qn_step(&evals, &evecs, &g, 0, delta);
+        let ras = RestrictedKind::RestrictedAtomicStep
+            .clip_cartesian(&ras, delta)
+            .unwrap();
+        let tr = qn_restricted(&evals, &evecs, &g, 0, delta);
+        let tr = RestrictedKind::RestrictedAtomicStep
+            .clip_cartesian(&tr, delta)
+            .unwrap();
+        assert!(ras_cons(&ras) <= delta + 1e-12);
+        assert!(ras_cons(&tr) <= delta + 1e-12);
+        let d = nrm2((&ras - &tr).view());
+        assert!(
+            d > 1e-8,
+            "RAS qn_step+clip matched qn_restricted+clip: {d} ras={ras:?} tr={tr:?}"
+        );
+        assert!(RestrictedKind::RestrictedAtomicStep.wants_unrestricted_ambient());
+        assert!(!RestrictedKind::TrustRegion.wants_unrestricted_ambient());
     }
 
     #[test]
