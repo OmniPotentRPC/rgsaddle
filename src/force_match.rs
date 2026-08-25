@@ -467,7 +467,7 @@ fn nonlin_bounds(set: &PairSet) -> (Array1<f64>, Array1<f64>, Array1<f64>) {
 fn lbfgs_bounds(set: &PairSet) -> (Array1<f64>, Array1<f64>) {
     let n = set.nnonlin();
     let mut lo = Array1::zeros(n);
-    let mut hi = Array1::from_elem(n, f64::INFINITY);
+    let hi = Array1::from_elem(n, f64::INFINITY);
     let mut k = 0;
     for _ in &set.buck {
         lo[k] = 0.0;
