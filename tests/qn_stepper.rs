@@ -49,7 +49,6 @@ fn qn_retract_stays_on_the_sphere() {
 }
 
 #[test]
-#[test]
 fn hess_update_ts_bfgs_then_qn_stays_on_the_sphere() {
     let mut b = Array2::<f64>::eye(3);
     b[(0, 0)] = -1.0;
