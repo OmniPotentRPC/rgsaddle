@@ -103,7 +103,10 @@ pub use force_match::{covalent_pairs, force_match_hessian};
 pub use geom::{SellaGeom, TrustSchedule};
 pub use internal::{CartAxis, Displacement, InternalSlot, Rotation, Translation};
 pub use irc::{IrcConfig, IrcDirection, IrcKind, IrcReport, IrcSession};
-pub use linalg::{modified_gram_schmidt, numerical_hvp};
+pub use linalg::{
+    NumericalHessian, modified_gram_schmidt, numerical_hvp, numerical_hvp_on, numerical_hvp_proj,
+    project_hvp, retract_hvp, transport_hvp,
+};
 pub use mic::{Cell, wrap_difference};
 pub use minmode::{
     MinModeConfig, MinModeKind, MinModeReport, MinModeSession, MinModeStatus, PointSurface,

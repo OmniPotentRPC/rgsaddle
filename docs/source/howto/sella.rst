@@ -29,7 +29,10 @@ and ``3N - ncons`` on a chart.
 
 ``exact_eigh`` / ``rayleigh_ritz`` are Sella
 ``eigensolvers.py``. ``numerical_hvp`` is
-``linalg.NumericalHessian``. ``SamdSession`` is the BDP
+``linalg.NumericalHessian``. Reductions go through
+``rgmin.vecops``. A host that needs the displaced point
+on a set calls ``numerical_hvp_on`` (``project`` /
+``retract`` / ``transport``). ``SamdSession`` is the BDP
 thermostat (``samd.py``). Euclidean ``step`` is the Sella
 loop. A host that needs the point on a set calls
 ``step_on`` (``project`` / ``retract`` / ``transport``).

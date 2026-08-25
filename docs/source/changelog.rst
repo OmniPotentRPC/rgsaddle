@@ -6,6 +6,14 @@ Changelog
 Unreleased
 ~~~~~~~~~~
 
+- ``numerical_hvp`` is Sella ``linalg.NumericalHessian``.
+  Reductions go through ``rgmin.vecops`` so ``par`` applies.
+  A host that needs the displaced point on a set calls
+  ``numerical_hvp_on`` (``project`` / ``retract`` /
+  ``transport``). Dense eigen stays in ``eigensolve``.
+  Approximate Hessian stays in ``qn``. Sparse internals
+  stay in vocn.
+
 - ``CartesianPes.with_proj`` hangs Sella ``proj_trans`` /
   ``proj_rot`` (``fix_translation`` / ``fix_rotation``).
   ``project`` / ``retract`` / ``transport`` stay on that set.
