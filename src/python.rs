@@ -5,8 +5,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use crate::{
-    CellChart, EigenDevice, ExpandKind, ForceGate, HessUpdate, IrcKind, MinModeKind,
-    RestrictedKind,
+    CellChart, EigenDevice, ExpandKind, ForceGate, HessUpdate, IrcKind, MinModeKind, RestrictedKind,
 };
 
 fn mint_int_enum<'py>(
@@ -118,6 +117,10 @@ fn rgsaddle(m: &Bound<'_, PyModule>) -> PyResult<()> {
                 (
                     "MAX_INTERNAL_STEP",
                     RestrictedKind::MaxInternalStep.to_abi(),
+                ),
+                (
+                    "RESTRICTED_ATOMIC_STEP",
+                    RestrictedKind::RestrictedAtomicStep.to_abi(),
                 ),
             ],
         )?,
