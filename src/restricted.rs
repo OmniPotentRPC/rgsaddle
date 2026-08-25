@@ -840,11 +840,11 @@ mod tests {
     #[test]
     fn ras_cons_is_the_largest_per_atom_norm() {
         let ras = RestrictedAtomicStep::new(0.1).unwrap();
-        let s = Array1::from(vec![0.3, 0.4, 0.0, 0.1, 0.0, 0.0]);
+        let s = Array1::from(vec![0.3, 0.4, 0.0, 0.3, 0.4, 0.0]);
         assert!((ras.cons(&s) - 0.5).abs() < 1e-14);
         let eucl = nrm2(s.view());
-        assert!((eucl - (0.25 + 0.01_f64).sqrt()).abs() < 1e-14);
-        assert!((ras.cons(&s) - eucl).abs() > 0.1);
+        assert!((eucl - (0.5_f64).sqrt()).abs() < 1e-14);
+        assert!((ras.cons(&s) - eucl).abs() > 0.2);
     }
 
     #[test]
