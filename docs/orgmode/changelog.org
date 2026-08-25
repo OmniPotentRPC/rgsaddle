@@ -60,6 +60,11 @@
   ~order~ over ~rgmin::rfo_get_s~. Distinct from
   ~NewtonKind::Rfo~. Riemannian ~step_on~ retracts onto
   ~ManifoldKind~.
+- Sella ~PartitionedRationalFunctionOptimization~ stepper:
+  ~prfo~ / ~p-rfo~, RFO on the first ~order~ modes plus RFO
+  on the complement over ~rgmin::rfo_get_s~. Trust companion
+  is ~rgmin::prfo_restricted~. ~step_on~ / ~transport_step~
+  keep the retracted point on the set.
 - ~IrcSession~ forward / reverse roll-down over rgmin ~IrcTrust~.
 - ~IrcSession::step~ matches Sella ~IRC.step~: optional kick,
   inner GS2 on ~||(s+d1) odot sqrt(m)|| = dx~, then ~d1 = 0~.

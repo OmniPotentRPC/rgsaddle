@@ -26,4 +26,10 @@ Architecture
 
 ``rgsaddle`` never implements a stepper. Every accepted move is one
 rgmin ``Solver::step``, or an ``IrcTrust`` projection of a trial
-increment. ``reset`` is the only model-update seam.
+increment. Sella QuasiNewton ``get_s(alpha)`` is ``rgmin.qn_get_s``
+through ``QuasiNewton``. Sella RFO ``get_s(alpha)`` is
+``rgmin.rfo_get_s`` through ``RationalFunctionOptimization``.
+Sella P-RFO ``get_s(alpha)`` is ``rgsaddle.prfo_get_s`` (RFO on
+each eigen-partition) through
+``PartitionedRationalFunctionOptimization``. ``reset`` is the only
+model-update seam.

@@ -27,6 +27,10 @@
 //! [`rfo::RationalFunctionOptimization`]: `rgmin::rfo_get_s` with
 //! the Sella alpha / order contract, retracted through
 //! [`rgmin::Manifold`] `project` / `retract` / `transport`.
+//! Sella `PartitionedRationalFunctionOptimization` is
+//! [`prfo::PartitionedRationalFunctionOptimization`]: RFO on the
+//! first `order` modes plus RFO on the complement, then
+//! [`rgmin::prfo_restricted`].
 //! Equality internals are [`constraints::Constraints`] on the same
 //! manifold (`Translation` / `Rotation` / `Displacement`, plus
 //! host-fixed bonds / angles / dihedrals). [`SellaMinSession`] and
@@ -69,6 +73,7 @@ pub mod mic;
 pub mod minmode;
 pub mod pes;
 pub mod pes_internal;
+pub mod prfo;
 pub mod projection;
 #[cfg(feature = "python")]
 pub mod python;
@@ -111,6 +116,7 @@ pub use qn::{
     update_h_ms,
 };
 
+pub use prfo::{PartitionedRationalFunctionOptimization, prfo_get_s, prfo_stepper};
 pub use restricted::{
     InternalWeights, MaxInternalStep, RestrictedKind, TRUST_SYNONYMS, TrustRegion, mis_clip,
     weights_for_equalities,
