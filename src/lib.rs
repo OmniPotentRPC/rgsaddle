@@ -33,6 +33,8 @@
 //! [`SellaSaddleSession`] retract on [`geom::SellaGeom`]: the rigid
 //! quotient by default, or a live `Constraints` chart. [`restricted::TrustRegion`]
 //! is Sella `cons(s) = ||s||` over [`rgmin::qn_restricted`].
+//! [`restricted::RestrictedAtomicStep`] is Sella `ras`: max per-atom
+//! `||s_i||` over [`rgmin::ras_clip`], incompatible with internals.
 //! [`restricted::MaxInternalStep`] is the per-coordinate clip Sella
 //! applies before that Euclidean radius.
 //!
@@ -112,8 +114,8 @@ pub use qn::{
 };
 
 pub use restricted::{
-    InternalWeights, MaxInternalStep, RestrictedKind, TRUST_SYNONYMS, TrustRegion, mis_clip,
-    weights_for_equalities,
+    InternalWeights, MaxInternalStep, RAS_SYNONYMS, RestrictedAtomicStep, RestrictedKind,
+    TRUST_SYNONYMS, TrustRegion, mis_clip, ras_cons, weights_for_equalities,
 };
 pub use rfo::{RationalFunctionOptimization, rfo_stepper};
 pub use samd::{

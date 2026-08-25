@@ -1057,6 +1057,15 @@ mod irc_abi_tests {
             RGSADDLE_OK
         );
         assert_eq!(
+            unsafe {
+                rgsaddle_sella_min_set_restricted(
+                    sess,
+                    crate::RestrictedKind::RestrictedAtomicStep.to_abi(),
+                )
+            },
+            RGSADDLE_OK
+        );
+        assert_eq!(
             unsafe { rgsaddle_sella_min_set_restricted(sess, 99) },
             RGSADDLE_INVALID_PARAMETER
         );

@@ -67,10 +67,15 @@ Distinct from ``IRCTrustRegion`` (``IrcTrust`` /
 ``qn_irc_restricted``). A host that needs the point on a set
 calls ``step_on`` / ``transport_step``.
 
+``RestrictedAtomicStep`` is Sella ``ras``: ``max_atom ||s_i|| <=
+delta`` on 3N Cartesian (``rgmin.ras_clip``). Incompatible
+with internals. A host that needs the point on a set calls
+``step_on`` / ``transport_step``.
+
 ``MaxInternalStep`` is the Sella per-coordinate clip
 (``max |s_i w_i| <= delta``) on an internals packing. It sits
 in front of the Euclidean trust radius. Distinct from
-``rgmin.ras_clip`` (per-atom Cartesian) and from
+``RestrictedAtomicStep`` (per-atom Cartesian) and from
 ``TrustRegion`` (``||s||``).
 
 IRC stays ``IrcSession`` (``IrcKind.Gs2`` or ``Morokuma``).

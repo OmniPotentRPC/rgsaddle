@@ -1,9 +1,14 @@
-//! Sella restricted steps: `TrustRegion` and `MaxInternalStep`.
+//! Sella restricted steps: `TrustRegion`, `RestrictedAtomicStep`,
+//! and `MaxInternalStep`.
 //!
 //! `restricted_step.py` `TrustRegion` is `cons(s) = ||s||`. Distinct
 //! from `IRCTrustRegion` (`||(s + d1) * sqrt(m)||`,
 //! [`rgmin::IrcTrust`] / [`rgmin::qn_irc_restricted`]). The QN
 //! companion is [`rgmin::qn_restricted`].
+//!
+//! `RestrictedAtomicStep` is `cons(s) = max_atom ||s_i||` on 3N
+//! Cartesian. The clip is [`rgmin::ras_clip`]. Incompatible with
+//! internals.
 //!
 //! `MaxInternalStep` is the per-coordinate clip
 //! `cons(s) = max_i |s_i w_i|` with Sella packing weights (`wx`
@@ -12,16 +17,17 @@
 //! trust radius. Distinct from [`rgmin::ras_clip`] (per-atom
 //! Cartesian). Algebra is [`rgmin::vecops`] so `par` applies.
 
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, s};
 use rgmin::Manifold;
 use rgmin::qn_get_s;
 use rgmin::qn_restricted;
+use rgmin::ras_clip;
 use rgmin::vecops::{axpy, nrm2};
 
 use crate::SaddleError;
 use crate::constraints::{Constraints, Equality, InternalCounts};
 
-/// Named Sella restricted step this crate dests on an internals chart.
+/// Named Sella restricted step this crate dests.
 ///
 /// `TrustRegion` is `||s||` (rgmin `qn_restricted`). `MaxInternalStep`
 /// is the per-coordinate clip. `RestrictedAtomicStep` is rgmin
@@ -32,6 +38,8 @@ pub enum RestrictedKind {
     TrustRegion,
     /// Sella `MaxInternalStep`: `cons(s) = max |s_i w_i|`.
     MaxInternalStep,
+    /// Sella `RestrictedAtomicStep`: `cons(s) = max_atom ||s_i||`.
+    RestrictedAtomicStep,
 }
 
 impl RestrictedKind {
@@ -39,6 +47,7 @@ impl RestrictedKind {
         match self {
             Self::TrustRegion => 0,
             Self::MaxInternalStep => 1,
+            Self::RestrictedAtomicStep => 2,
         }
     }
 
@@ -46,21 +55,33 @@ impl RestrictedKind {
         match v {
             0 => Some(Self::TrustRegion),
             1 => Some(Self::MaxInternalStep),
+            2 => Some(Self::RestrictedAtomicStep),
             _ => None,
         }
     }
 
     /// Sella `get_restricted_step` names that this crate dests.
-    ///
-    /// `RestrictedAtomicStep` (`ras`) is not dested here.
     pub fn from_name(name: &str) -> Option<Self> {
         let n = name.trim().to_ascii_lowercase();
         if TrustRegion::match_name(&n) {
             Some(Self::TrustRegion)
         } else if matches!(n.as_str(), "mis" | "max internal step") {
             Some(Self::MaxInternalStep)
+        } else if RestrictedAtomicStep::match_name(&n) {
+            Some(Self::RestrictedAtomicStep)
         } else {
             None
+        }
+    }
+
+    /// Sella `RestrictedAtomicStep` refuses an internals chart.
+    pub fn refuse_internals(self) -> Result<(), SaddleError> {
+        if matches!(self, Self::RestrictedAtomicStep) {
+            Err(SaddleError::Shape(
+                "RestrictedAtomicStep is incompatible with internals".into(),
+            ))
+        } else {
+            Ok(())
         }
     }
 }
@@ -73,6 +94,9 @@ pub const TRUST_SYNONYMS: &[&str] = &[
     "trust radius",
     "trust-radius",
 ];
+
+/// Sella `RestrictedAtomicStep` synonyms.
+pub const RAS_SYNONYMS: &[&str] = &["ras", "restricted atomic step"];
 
 /// Sella `TrustRegion`: `cons(s) = ||s||`, target `delta`.
 ///
@@ -172,6 +196,133 @@ impl TrustRegion {
         let c = self.clip(&v);
         man.transport(x, x_to, &c)
     }
+}
+
+/// Sella `RestrictedAtomicStep`: `cons(s) = max_atom ||s_i||`.
+///
+/// `s` is 3N Cartesian. Incompatible with internals. The clip is
+/// [`ras_clip`]. Distinct from [`TrustRegion`] (`||s||`) and from
+/// [`MaxInternalStep`] (`max |s_i w_i|`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RestrictedAtomicStep {
+    delta: f64,
+}
+
+impl RestrictedAtomicStep {
+    /// Per-atom displacement cap `delta`.
+    pub fn new(delta: f64) -> Result<Self, SaddleError> {
+        if delta < 0.0 {
+            return Err(SaddleError::Shape(
+                "RestrictedAtomicStep delta must be non-negative".into(),
+            ));
+        }
+        Ok(Self { delta })
+    }
+
+    /// Per-atom cap.
+    pub fn delta(&self) -> f64 {
+        self.delta
+    }
+
+    /// Exact Sella `RestrictedAtomicStep.match`.
+    pub fn match_name(name: &str) -> bool {
+        let n = name.trim().to_ascii_lowercase();
+        RAS_SYNONYMS.iter().any(|s| *s == n)
+    }
+
+    /// Sella `RestrictedAtomicStep.cons`: max per-atom Euclidean norm.
+    pub fn cons(&self, s: &Array1<f64>) -> Result<f64, SaddleError> {
+        require_cart3n(s)?;
+        Ok(ras_cons(s))
+    }
+
+    /// Scale `s` so every atom moves at most `delta`.
+    pub fn clip(&self, s: &Array1<f64>) -> Result<Array1<f64>, SaddleError> {
+        require_cart3n(s)?;
+        Ok(ras_clip(s, self.delta))
+    }
+
+    /// Unrestricted QN step, then the per-atom clip.
+    pub fn restrict_qn(
+        &self,
+        evals: &Array1<f64>,
+        evecs: &Array2<f64>,
+        g: &Array1<f64>,
+        order: usize,
+    ) -> Result<Array1<f64>, SaddleError> {
+        require_cart3n(g)?;
+        let n = g.len();
+        if evals.len() != n || evecs.nrows() != n || evecs.ncols() != n {
+            return Err(SaddleError::Shape(
+                "RestrictedAtomicStep QN spectrum must match the 3N gradient".into(),
+            ));
+        }
+        let (s, _) = qn_get_s(evals, evecs, g, order, 0.0);
+        self.clip(&s)
+    }
+
+    /// Riemannian QN + RAS: rgrad, clip, project, retract.
+    pub fn restrict_qn_on<M: Manifold>(
+        &self,
+        man: &M,
+        x: &Array1<f64>,
+        evals: &Array1<f64>,
+        evecs: &Array2<f64>,
+        egrad: &Array1<f64>,
+        order: usize,
+    ) -> Result<Array1<f64>, SaddleError> {
+        let g = man.egrad2rgrad(x, egrad);
+        let s = self.restrict_qn(evals, evecs, &g, order)?;
+        self.step_on(man, x, &s)
+    }
+
+    /// Riemannian clip: project, ras_clip, retract.
+    pub fn step_on<M: Manifold>(
+        &self,
+        man: &M,
+        x: &Array1<f64>,
+        s: &Array1<f64>,
+    ) -> Result<Array1<f64>, SaddleError> {
+        let v = man.project(x, s);
+        let c = self.clip(&v)?;
+        Ok(man.retract(x, &c))
+    }
+
+    /// Vector transport of the clipped projected increment.
+    pub fn transport_step<M: Manifold>(
+        &self,
+        man: &M,
+        x: &Array1<f64>,
+        x_to: &Array1<f64>,
+        s: &Array1<f64>,
+    ) -> Result<Array1<f64>, SaddleError> {
+        let v = man.project(x, s);
+        let c = self.clip(&v)?;
+        Ok(man.transport(x, x_to, &c))
+    }
+}
+
+/// `s` is 3N Cartesian. Empty or leftover internals packing is a shape error.
+fn require_cart3n(s: &Array1<f64>) -> Result<(), SaddleError> {
+    if s.is_empty() || s.len() % 3 != 0 {
+        return Err(SaddleError::Shape(
+            "RestrictedAtomicStep needs 3N Cartesian (incompatible with internals)".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Max per-atom Euclidean displacement. Each atom uses [`nrm2`].
+pub fn ras_cons(s: &Array1<f64>) -> f64 {
+    let atoms = s.len() / 3;
+    let mut m = 0.0;
+    for i in 0..atoms {
+        let r = nrm2(s.slice(s![3 * i..3 * i + 3]));
+        if r > m {
+            m = r;
+        }
+    }
+    m
 }
 
 /// Per-slot Sella weights (`wx`, `wb`, `wa`, `wd`, `wo`).
@@ -544,7 +695,15 @@ mod tests {
             RestrictedKind::from_name("max internal step"),
             Some(RestrictedKind::MaxInternalStep)
         );
-        assert!(RestrictedKind::from_name("ras").is_none());
+        assert_eq!(
+            RestrictedKind::from_name("ras"),
+            Some(RestrictedKind::RestrictedAtomicStep)
+        );
+        assert_eq!(
+            RestrictedKind::from_name("restricted atomic step"),
+            Some(RestrictedKind::RestrictedAtomicStep)
+        );
+        assert!(RestrictedKind::from_name("irc").is_none());
     }
 
     #[test]
@@ -662,6 +821,150 @@ mod tests {
     #[test]
     fn trust_negative_delta_is_shape() {
         match TrustRegion::new(-0.1) {
+            Err(SaddleError::Shape(_)) => {}
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn ras_cons_is_max_atom_norm_not_euclidean() {
+        let ras = RestrictedAtomicStep::new(0.5).unwrap();
+        let s = Array1::from(vec![3.0, 0.0, 0.0, 4.0, 0.0, 0.0]);
+        assert!((ras.cons(&s).unwrap() - 4.0).abs() < 1e-14);
+        assert!((nrm2(s.view()) - 5.0).abs() < 1e-14);
+        assert!((ras.cons(&s).unwrap() - nrm2(s.view())).abs() > 0.5);
+    }
+
+    #[test]
+    fn ras_cons_is_not_irc_mass_weighted() {
+        let ras = RestrictedAtomicStep::new(1.0).unwrap();
+        let s = Array1::from(vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let d1 = Array1::from(vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        assert!((ras.cons(&s).unwrap() - 1.0).abs() < 1e-14);
+        let irc_like = nrm2((&s + &d1).view());
+        assert!((irc_like - 2.0).abs() < 1e-14);
+        assert!((ras.cons(&s).unwrap() - irc_like).abs() > 0.5);
+    }
+
+    #[test]
+    fn ras_clip_caps_the_largest_atom() {
+        let ras = RestrictedAtomicStep::new(0.1).unwrap();
+        let s = Array1::from(vec![0.4, 0.0, 0.0, 0.0, 0.05, 0.0]);
+        let c = ras.clip(&s).unwrap();
+        assert!((ras.cons(&c).unwrap() - 0.1).abs() < 1e-14);
+        assert!((c[0] - 0.1).abs() < 1e-14);
+        assert!(c[4].abs() < 0.1);
+    }
+
+    #[test]
+    fn ras_short_step_is_not_scaled() {
+        let ras = RestrictedAtomicStep::new(0.5).unwrap();
+        let s = Array1::from(vec![0.1, 0.0, 0.0, 0.0, -0.2, 0.0]);
+        let c = ras.clip(&s).unwrap();
+        assert!((c[0] - 0.1).abs() < 1e-14);
+        assert!((c[4] + 0.2).abs() < 1e-14);
+    }
+
+    #[test]
+    fn ras_restrict_qn_clips_a_long_newton_step() {
+        let ras = RestrictedAtomicStep::new(0.2).unwrap();
+        let evals = Array1::ones(6);
+        let evecs = Array2::<f64>::eye(6);
+        let g = Array1::from(vec![4.0, 0.0, 0.0, 0.5, 0.0, 0.0]);
+        let s = ras.restrict_qn(&evals, &evecs, &g, 0).unwrap();
+        assert!(ras.cons(&s).unwrap() <= 0.2 + 1e-14);
+        assert!(s[0] < 0.0);
+    }
+
+    #[test]
+    fn ras_step_on_the_sphere_stays_on_the_set() {
+        let man = ManifoldKind::Sphere;
+        let ras = RestrictedAtomicStep::new(0.2).unwrap();
+        let x = array![0.0, 1.0, 0.0];
+        let s = Array1::from(vec![4.0, 0.2, -0.3]);
+        let y = ras.step_on(&man, &x, &s).unwrap();
+        let n = nrm2(y.view());
+        assert!((n - 1.0).abs() < 1e-12, "||y||={n} y={y:?}");
+        let v = man.project(&x, &s);
+        let c = ras.clip(&v).unwrap();
+        assert!(ras.cons(&c).unwrap() <= 0.2 + 1e-14);
+        assert!(dot(x.view(), c.view()).abs() < 1e-12);
+        let w = ras.transport_step(&man, &x, &y, &s).unwrap();
+        assert!(
+            dot(y.view(), w.view()).abs() < 1e-12,
+            "transported step leaves T_y: y·w={}",
+            dot(y.view(), w.view())
+        );
+    }
+
+    #[test]
+    fn ras_restrict_qn_on_sphere_stays_on_the_set() {
+        let man = ManifoldKind::Sphere;
+        let ras = RestrictedAtomicStep::new(0.15).unwrap();
+        let x = array![0.0, 1.0, 0.0];
+        let evals = Array1::ones(3);
+        let evecs = Array2::<f64>::eye(3);
+        let egrad = array![1.0, 0.2, -0.3];
+        let y = ras
+            .restrict_qn_on(&man, &x, &evals, &evecs, &egrad, 0)
+            .unwrap();
+        assert!((nrm2(y.view()) - 1.0).abs() < 1e-12);
+        let g = man.egrad2rgrad(&x, &egrad);
+        let s = ras.restrict_qn(&evals, &evecs, &g, 0).unwrap();
+        let v = man.project(&x, &s);
+        let c = ras.clip(&v).unwrap();
+        assert!(ras.cons(&c).unwrap() <= 0.15 + 1e-12);
+        let w = man.transport(&x, &y, &c);
+        assert!(dot(y.view(), w.view()).abs() < 1e-12);
+    }
+
+    #[test]
+    fn ras_clip_then_retract_stays_on_the_constraint_set() {
+        let x = water();
+        let mut cons = Constraints::new(3).unwrap();
+        cons.fix_com(x.view()).unwrap();
+        let ras = RestrictedAtomicStep::new(0.05).unwrap();
+        let mut s = Array1::zeros(9);
+        s[0] = 0.4;
+        s[4] = -0.3;
+        let y = ras.step_on(&cons, &x, &s).unwrap();
+        assert!(
+            cons.residual_norm(y.view()).unwrap() < 1e-10,
+            "clipped retract left the set"
+        );
+        let v = cons.project(&x, &s);
+        let c = ras.clip(&v).unwrap();
+        assert!(ras.cons(&c).unwrap() <= 0.05 + 1e-14);
+        let t = ras.transport_step(&cons, &x, &y, &s).unwrap();
+        let t_h = cons.project(&y, &t);
+        assert!(nrm2((&t - &t_h).view()) < 1e-12);
+    }
+
+    #[test]
+    fn ras_rejects_internals_packing() {
+        let ras = RestrictedAtomicStep::new(0.1).unwrap();
+        let internals = Array1::from(vec![0.4, -0.2, 0.1, 0.05]);
+        match ras.cons(&internals) {
+            Err(SaddleError::Shape(msg)) => {
+                assert!(msg.contains("incompatible with internals"), "{msg}");
+            }
+            other => panic!("{other:?}"),
+        }
+        match ras.clip(&internals) {
+            Err(SaddleError::Shape(_)) => {}
+            other => panic!("{other:?}"),
+        }
+        match RestrictedKind::RestrictedAtomicStep.refuse_internals() {
+            Err(SaddleError::Shape(_)) => {}
+            other => panic!("{other:?}"),
+        }
+        RestrictedKind::TrustRegion.refuse_internals().unwrap();
+        RestrictedKind::MaxInternalStep.refuse_internals().unwrap();
+    }
+
+    #[test]
+    fn ras_negative_delta_is_shape() {
+        match RestrictedAtomicStep::new(-0.1) {
             Err(SaddleError::Shape(_)) => {}
             other => panic!("{other:?}"),
         }
