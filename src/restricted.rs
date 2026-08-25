@@ -16,7 +16,7 @@ use ndarray::{Array1, Array2};
 use rgmin::Manifold;
 use rgmin::qn_get_s;
 use rgmin::qn_restricted;
-use rgmin::vecops::{axpy, nrm2};
+use rgmin::vecops::{axpy, nrm2, nrminf};
 
 use crate::SaddleError;
 use crate::constraints::{Constraints, Equality, InternalCounts};
@@ -279,7 +279,7 @@ impl MaxInternalStep {
         self.clip(&s)
     }
 
-    /// Riemannian clip: project, clip in the chart, retract, transport.
+    /// Riemannian clip: project, clip in the chart, retract.
     pub fn step_on<M: Manifold>(
         &self,
         man: &M,
@@ -289,6 +289,34 @@ impl MaxInternalStep {
         let v = man.project(x, s);
         let c = self.clip(&v)?;
         Ok(man.retract(x, &c))
+    }
+
+    /// Vector transport of the clipped projected increment.
+    pub fn transport_step<M: Manifold>(
+        &self,
+        man: &M,
+        x: &Array1<f64>,
+        x_to: &Array1<f64>,
+        s: &Array1<f64>,
+    ) -> Result<Array1<f64>, SaddleError> {
+        let v = man.project(x, s);
+        let c = self.clip(&v)?;
+        Ok(man.transport(x, x_to, &c))
+    }
+
+    /// Riemannian QN + clip: rgrad, unrestricted QN, project, clip, retract.
+    pub fn restrict_qn_on<M: Manifold>(
+        &self,
+        man: &M,
+        x: &Array1<f64>,
+        evals: &Array1<f64>,
+        evecs: &Array2<f64>,
+        egrad: &Array1<f64>,
+        order: usize,
+    ) -> Result<Array1<f64>, SaddleError> {
+        let g = man.egrad2rgrad(x, egrad);
+        let s = self.restrict_qn(evals, evecs, &g, order)?;
+        self.step_on(man, x, &s)
     }
 }
 
@@ -346,17 +374,16 @@ pub fn weights_for_equalities_with(chart: &Constraints, w: InternalWeights) -> A
     out
 }
 
-/// `max_i |s_i w_i|`.
+/// `max_i |s_i w_i|` through vecops `nrminf` so `par` applies.
 pub fn cons_max(s: &Array1<f64>, w: &Array1<f64>) -> f64 {
-    let n = s.len().min(w.len());
-    let mut m = 0.0;
-    for i in 0..n {
-        let v = (s[i] * w[i]).abs();
-        if v > m {
-            m = v;
-        }
+    if s.len() == w.len() {
+        return nrminf((s * w).view());
     }
-    m
+    let n = s.len().min(w.len());
+    if n == 0 {
+        return 0.0;
+    }
+    nrminf((&s.slice(ndarray::s![..n]) * &w.slice(ndarray::s![..n])).view())
 }
 
 /// Scale `s` so `max |s_i w_i| <= delta`.
@@ -365,7 +392,9 @@ pub fn mis_clip(s: &Array1<f64>, w: &Array1<f64>, delta: f64) -> Array1<f64> {
     if val <= delta || val <= 1e-16 {
         return s.clone();
     }
-    s * (delta / val)
+    let mut out = Array1::zeros(s.len());
+    axpy(delta / val, s.view(), &mut out);
+    out
 }
 
 #[cfg(test)]
@@ -515,7 +544,41 @@ mod tests {
         let v = cons.project(&x, &s);
         let c = mis.clip(&v).unwrap();
         assert!(mis.cons(&c).unwrap() <= 0.05 + 1e-14);
-        let t = cons.transport(&x, &y, &c);
+        let t = mis.transport_step(&cons, &x, &y, &s).unwrap();
+        let t_h = cons.project(&y, &t);
+        assert!(nrm2((&t - &t_h).view()) < 1e-12);
+    }
+
+    #[test]
+    fn restrict_qn_on_stays_on_the_constraint_set() {
+        let x = water();
+        let mut cons = Constraints::new(3).unwrap();
+        cons.fix_com(x.view()).unwrap();
+        let mis = MaxInternalStep::new(
+            0.05,
+            InternalCounts {
+                ntrans: 9,
+                ..InternalCounts::default()
+            },
+            InternalWeights::default(),
+        )
+        .unwrap();
+        let evals = Array1::ones(9);
+        let evecs = Array2::<f64>::eye(9);
+        let mut egrad = Array1::zeros(9);
+        egrad[0] = 4.0;
+        egrad[4] = -0.3;
+        let y = mis
+            .restrict_qn_on(&cons, &x, &evals, &evecs, &egrad, 0)
+            .unwrap();
+        assert!(
+            cons.residual_norm(y.view()).unwrap() < 1e-10,
+            "QN clip retract left the set"
+        );
+        let g = cons.egrad2rgrad(&x, &egrad);
+        let s = mis.restrict_qn(&evals, &evecs, &g, 0).unwrap();
+        assert!(mis.cons(&s).unwrap() <= 0.05 + 1e-12);
+        let t = mis.transport_step(&cons, &x, &y, &s).unwrap();
         let t_h = cons.project(&y, &t);
         assert!(nrm2((&t - &t_h).view()) < 1e-12);
     }
