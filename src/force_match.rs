@@ -27,7 +27,10 @@ pub fn covalent_radius(z: u8) -> f64 {
     }
 }
 
-/// Pairs with `r < scale * (rcov_i + rcov_j)`.
+/// Pairs with `r <= scale * (rcov_i + rcov_j)`.
+///
+/// Sella `force_match.pyx` skips `dij > 1.5 * rcov`, so equality is a
+/// bond.
 pub fn covalent_pairs(x: ArrayView1<f64>, z: &[u8], scale: f64) -> Result<Vec<[usize; 2]>, SaddleError> {
     if x.len() % 3 != 0 || x.len() / 3 != z.len() {
         return Err(SaddleError::Shape(
@@ -43,7 +46,7 @@ pub fn covalent_pairs(x: ArrayView1<f64>, z: &[u8], scale: f64) -> Result<Vec<[u
             let dz = x[3 * j + 2] - x[3 * i + 2];
             let r = (dx * dx + dy * dy + dz * dz).sqrt();
             let cut = scale * (covalent_radius(z[i]) + covalent_radius(z[j]));
-            if r > 1e-12 && r < cut {
+            if r > 1e-12 && r <= cut {
                 pairs.push([i, j]);
             }
         }
@@ -239,6 +242,17 @@ mod tests {
         assert_eq!(pairs.len(), 2);
         assert!(pairs.contains(&[0, 1]));
         assert!(pairs.contains(&[0, 2]));
+    }
+
+    #[test]
+    fn cutoff_equality_is_a_bond() {
+        let rc = covalent_radius(6);
+        let scale = 1.5;
+        let r = scale * (rc + rc);
+        let x = Array1::from(vec![0.0, 0.0, 0.0, r, 0.0, 0.0]);
+        let z = [6u8, 6];
+        let pairs = covalent_pairs(x.view(), &z, scale).unwrap();
+        assert_eq!(pairs, vec![[0, 1]]);
     }
 
     #[test]
