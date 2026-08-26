@@ -21,8 +21,9 @@ RAS unrestricted then ~ras_clip~), retract,
 transport, ~CartesianPes::kick~, then Sella's ~delta0~ /
 ~sigma~ / ~rho~ trust schedule. ~SellaSaddleSession~ is
 order 1: the same geometry and trust numbers from
-~_default_kwargs['saddle']~, then ~prfo_restricted~
-(RAS skips the Euclidean pre-scale). Both
+~_default_kwargs['saddle']~, then ~prfo_trust_region~
+(Sella Optimizer ~rs=tr~; RAS skips the Euclidean
+pre-scale). Both
 sit on ~CartesianPes~, not on ~IrcSession~. ~n_free~ is
 ~3N-6~ on the quotient and ~3N - ncons~ on a chart.
 

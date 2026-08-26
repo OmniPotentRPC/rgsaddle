@@ -30,7 +30,9 @@
 //! Sella `PartitionedRationalFunctionOptimization` is
 //! [`prfo::PartitionedRationalFunctionOptimization`]: RFO in the
 //! `order` uphill modes plus RFO in the downhill complement, over
-//! [`rgmin::rfo_get_s`] / [`rgmin::prfo_restricted`].
+//! [`rgmin::rfo_get_s`] / [`prfo::prfo_trust_region`]
+//! (Sella Optimizer `rs=tr`; dest [`rgmin::prfo_restricted`]
+//! remains the stepper clip).
 //! Equality internals are [`constraints::Constraints`] on the same
 //! manifold (`Translation` / `Rotation` / `Displacement`, plus
 //! host-fixed bonds / angles / dihedrals). [`SellaMinSession`] and
@@ -122,7 +124,7 @@ pub use qn::{
     update_h_ms,
 };
 
-pub use prfo::{PartitionedRationalFunctionOptimization, prfo_stepper};
+pub use prfo::{PartitionedRationalFunctionOptimization, prfo_stepper, prfo_trust_region};
 pub use restricted::{
     InternalWeights, MaxInternalStep, RAS_SYNONYMS, RestrictedAtomicStep, RestrictedKind,
     TRUST_SYNONYMS, TrustRegion, mis_clip, ras_cons, weights_for_equalities,

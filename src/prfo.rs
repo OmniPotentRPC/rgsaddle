@@ -15,8 +15,53 @@
 //! `egrad2rgrad`, `project`, `retract`.
 
 use ndarray::{Array1, Array2};
-use rgmin::vecops::{axpy, dot};
+use rgmin::vecops::{axpy, dot, nrm2};
 use rgmin::{Manifold, prfo_restricted, rfo_get_s};
+
+const TRUST_ITERS: usize = 64;
+
+/// Sella `TrustRegion` + P-RFO: one alpha search on \(\|s\|\le\delta\).
+///
+/// Distinct from dest [`prfo_restricted`], which restricts each
+/// eigenblock then clips the sum. Sella Optimizer `rs=tr` is this
+/// search on the full partitioned step.
+pub fn prfo_trust_region(
+    evals: &Array1<f64>,
+    evecs: &Array2<f64>,
+    g: &Array1<f64>,
+    order: usize,
+    delta: f64,
+) -> Array1<f64> {
+    let stepper = PartitionedRationalFunctionOptimization::new(order);
+    let s1 = stepper.get_s(
+        evals,
+        evecs,
+        g,
+        PartitionedRationalFunctionOptimization::ALPHA0,
+    );
+    let n1 = nrm2(s1.view());
+    if n1 <= delta + 1e-14 {
+        return s1;
+    }
+    let mut lo = 0.0;
+    let mut hi = 1.0;
+    let mut best = s1;
+    for _ in 0..TRUST_ITERS {
+        let mid = 0.5 * (lo + hi);
+        let s = stepper.get_s(evals, evecs, g, mid);
+        let val = nrm2(s.view());
+        best = s;
+        if (val - delta).abs() <= 1e-10 {
+            return best;
+        }
+        if val > delta {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    best
+}
 
 use crate::rfo::RationalFunctionOptimization;
 
@@ -116,7 +161,7 @@ impl PartitionedRationalFunctionOptimization {
         s
     }
 
-    /// Trust-region companion: partitioned RFO with \(\|s\|\le\delta\).
+    /// Dest companion: per-block RFO then a Euclidean clip.
     pub fn restricted(
         &self,
         evals: &Array1<f64>,
@@ -125,6 +170,17 @@ impl PartitionedRationalFunctionOptimization {
         delta: f64,
     ) -> Array1<f64> {
         prfo_restricted(evals, evecs, g, self.order, delta)
+    }
+
+    /// Sella Optimizer `TrustRegion` + P-RFO (`rs=tr`).
+    pub fn trust_region(
+        &self,
+        evals: &Array1<f64>,
+        evecs: &Array2<f64>,
+        g: &Array1<f64>,
+        delta: f64,
+    ) -> Array1<f64> {
+        prfo_trust_region(evals, evecs, g, self.order, delta)
     }
 
     /// Riemannian P-RFO step: Riemannian gradient, tangent projection, retract.

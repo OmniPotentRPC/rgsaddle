@@ -8,14 +8,14 @@
 //! or [`SellaSaddleSession::on_cell_internal`] for `CellInternalPES`.
 //! Hosts own the loop.
 
-use ndarray::{s, Array1};
-use rgmin::prfo_restricted;
-use rgmin::vecops::{axpy, dot, vdot, vnrm2, Vector};
+use crate::prfo::prfo_trust_region;
+use ndarray::{Array1, s};
 use rgmin::Manifold;
+use rgmin::vecops::{Vector, axpy, dot, vdot, vnrm2};
 
 use crate::constraints::Constraints;
 use crate::error::SaddleError;
-use crate::geom::{update_trust, SellaGeom, TrustSchedule};
+use crate::geom::{SellaGeom, TrustSchedule, update_trust};
 use crate::minmode::PointSurface;
 use crate::pes::CartesianPes;
 use crate::pes_internal::{CellCartesianPes, CellInternalPes, InternalPes, SellaPes};
@@ -388,7 +388,7 @@ impl SellaSaddleSession {
                 crate::prfo::PartitionedRationalFunctionOptimization::ALPHA0,
             )
         } else {
-            prfo_restricted(&evals, &evecs, &g_free, order, self.delta)
+            prfo_trust_region(&evals, &evecs, &g_free, order, self.delta)
         };
         let mut s = crate::geom::u_vec(&u, &s_free);
         s = self.geom.project(&x, &s);
@@ -469,7 +469,7 @@ impl SellaSaddleSession {
                 unreachable!()
             }
         };
-        let mut s = prfo_restricted(&evals, &evecs, &g_int, self.config.order.max(1), self.delta);
+        let mut s = prfo_trust_region(&evals, &evecs, &g_int, self.config.order.max(1), self.delta);
         if self.config.restricted == crate::RestrictedKind::MaxInternalStep {
             let w = crate::restricted::weights_for_equalities(pes.chart());
             s = crate::mis_clip(&s, &w, self.delta);
@@ -553,7 +553,7 @@ impl SellaSaddleSession {
                 crate::prfo::PartitionedRationalFunctionOptimization::ALPHA0,
             )
         } else {
-            prfo_restricted(&evals, &evecs, &g_p, order, self.delta)
+            prfo_trust_region(&evals, &evecs, &g_p, order, self.delta)
         };
         s = self.config.restricted.clip_cartesian(&s, self.delta)?;
         let vs = Vector::from_host(s.clone());
@@ -626,7 +626,7 @@ impl SellaSaddleSession {
             SellaPes::CellInternal(p) => p,
             _ => unreachable!(),
         };
-        let mut s = prfo_restricted(&evals, &evecs, &g_p, self.config.order.max(1), self.delta);
+        let mut s = prfo_trust_region(&evals, &evecs, &g_p, self.config.order.max(1), self.delta);
         if self.config.restricted == crate::RestrictedKind::MaxInternalStep {
             let w = crate::restricted::weights_for_equalities(pes.internals().chart());
             let dq = s.slice(s![..nint]).to_owned();
@@ -755,8 +755,8 @@ mod tests {
 
     #[test]
     fn prfo_step_stays_on_the_rigid_quotient() {
-        use rgmin::vecops::nrm2;
         use rgmin::ManifoldKind;
+        use rgmin::vecops::nrm2;
         let mut x = Array1::zeros(9);
         x[0] = 0.2;
         x[4] = 1.0;
