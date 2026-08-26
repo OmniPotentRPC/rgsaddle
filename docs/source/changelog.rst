@@ -10,8 +10,8 @@ Unreleased
   (Sella Optimizer ``rs=tr``: one P-RFO alpha search on
   ``||s||``). dest ``prfo_restricted`` stays the stepper clip.
   Golden-master ``tests/sella_gold.rs`` compares RFO / QN /
-  P-RFO and SellaMin / SellaSaddle one-step to dest Sella
-  gold JSON.
+  P-RFO / TS-BFGS / RAS and SellaMin / SellaSaddle one-step
+  to dest Sella gold JSON.
 
 - ``numerical_hvp`` is Sella ``linalg.NumericalHessian``.
   Reductions go through ``rgmin.vecops`` so ``par`` applies.

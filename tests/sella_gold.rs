@@ -3,15 +3,15 @@
 //! `tests/sella_manopt_gold.json` is dest `tests/sella_manopt_gold.json`
 //! (zadorlab/sella `optimize/stepper.py`, `restricted_step.py`,
 //! `hessian_update.py`) plus SellaMin / SellaSaddle one-step golds
-//! minted from Sella Optimizer `rs=tr` on 1-atom Euclidean quadratics.
+//! minted from Sella Optimizer `rs=tr` on Euclidean quadratics.
 //! Remint lives next to dest (`tests/sella_manopt_gold.py`). These
 //! tests load the frozen JSON only.
 
-use ndarray::{Array1, Array2, ArrayView1, array};
+use ndarray::{array, Array1, Array2, ArrayView1};
 use rgsaddle::{
-    PartitionedRationalFunctionOptimization, PointSurface, QuasiNewton,
-    RationalFunctionOptimization, SaddleError, SellaMinConfig, SellaMinSession, SellaSaddleConfig,
-    SellaSaddleSession,
+    HessUpdate, PartitionedRationalFunctionOptimization, PointSurface, QuasiNewton,
+    RationalFunctionOptimization, RestrictedAtomicStep, SaddleError, SellaMinConfig,
+    SellaMinSession, SellaSaddleConfig, SellaSaddleSession,
 };
 
 const GOLD: &str = include_str!("sella_manopt_gold.json");
@@ -162,6 +162,8 @@ fn gold_json_names_sella_stepper() {
     assert!(GOLD.contains("\"kind\": \"rfo\""));
     assert!(GOLD.contains("\"kind\": \"qn\""));
     assert!(GOLD.contains("\"kind\": \"prfo\""));
+    assert!(GOLD.contains("\"kind\": \"ts_bfgs\""));
+    assert!(GOLD.contains("\"kind\": \"ras\""));
     assert!(GOLD.contains("\"kind\": \"sella_min\""));
     assert!(GOLD.contains("\"kind\": \"sella_saddle\""));
 }
@@ -219,6 +221,29 @@ fn rgsaddle_prfo_matches_sella_gold() {
     assert_close(&dest, &json_nums(blob, "s"), name);
 }
 
+#[test]
+fn rgsaddle_ts_bfgs_matches_sella_gold() {
+    let name = "ts_bfgs_keep_saddle";
+    let blob = case_slice(name);
+    let mut b = mat2(&json_nums(blob, "B"));
+    let step = vecn(&json_nums(blob, "step"));
+    let y = vecn(&json_nums(blob, "y"));
+    HessUpdate::TsBfgs.apply(&mut b, &step, &y);
+    let dest = Array1::from(vec![b[(0, 0)], b[(0, 1)], b[(1, 0)], b[(1, 1)]]);
+    assert_close(&dest, &json_nums(blob, "s"), name);
+}
+
+#[test]
+fn rgsaddle_ras_clip_matches_sella_gold() {
+    let name = "ras_clip_max_atom";
+    let blob = case_slice(name);
+    let step = vecn(&json_nums(blob, "step"));
+    let dest = RestrictedAtomicStep::new(json_num(blob, "delta"))
+        .unwrap()
+        .clip(&step);
+    assert_close(&dest, &json_nums(blob, "s"), name);
+}
+
 struct QuadMin;
 impl PointSurface for QuadMin {
     fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
@@ -226,11 +251,18 @@ impl PointSurface for QuadMin {
     }
 }
 
+/// E = -1/2 x0^2 + 1/2 sum_{i>0} xi^2.
 struct QuadSaddle;
 impl PointSurface for QuadSaddle {
     fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
-        let e = 0.5 * (-x[0] * x[0] + x[1] * x[1] + x[2] * x[2]);
-        Ok((e, array![-x[0], x[1], x[2]]))
+        let mut e = -0.5 * x[0] * x[0];
+        let mut g = Array1::zeros(x.len());
+        g[0] = -x[0];
+        for i in 1..x.len() {
+            e += 0.5 * x[i] * x[i];
+            g[i] = x[i];
+        }
+        Ok((e, g))
     }
 }
 
@@ -314,6 +346,91 @@ fn sella_saddle_onestep_matches_sella_optimizer() {
         report.delta,
         json_num(blob, "delta"),
         "sella_saddle.delta",
+        SESSION_TOL,
+    );
+}
+
+#[test]
+fn sella_min_qn_tr_matches_sella_optimizer() {
+    let name = "sella_min_quad_qn_tr";
+    let blob = case_slice(name);
+    let x0 = vecn(&json_nums(blob, "x0"));
+    let mut sess = SellaMinSession::new(
+        SellaMinConfig {
+            delta: json_num(blob, "delta0"),
+            ..SellaMinConfig::default()
+        },
+        x0,
+        Array1::from(vec![1.0, 1.0]),
+    )
+    .unwrap();
+    let report = sess.step(&QuadMin).unwrap();
+    assert_close_tol(
+        &sess.position().to_owned(),
+        &json_nums(blob, "x1"),
+        name,
+        SESSION_TOL,
+    );
+    assert_scalar(
+        report.energy,
+        json_num(blob, "energy"),
+        "sella_min_qn_tr.energy",
+        SESSION_TOL,
+    );
+    assert_scalar(
+        report.rho,
+        json_num(blob, "rho"),
+        "sella_min_qn_tr.rho",
+        SESSION_TOL,
+    );
+    assert_scalar(
+        report.delta,
+        json_num(blob, "delta"),
+        "sella_min_qn_tr.delta",
+        SESSION_TOL,
+    );
+    assert!(report.at_minimum, "{name} force {}", report.max_force);
+}
+
+#[test]
+fn sella_saddle_prfo_tr_matches_sella_optimizer() {
+    let name = "sella_saddle_quad_prfo_tr";
+    let blob = case_slice(name);
+    let x0 = vecn(&json_nums(blob, "x0"));
+    let mut sess = SellaSaddleSession::new(
+        SellaSaddleConfig {
+            delta: json_num(blob, "delta0"),
+            eig: false,
+            order: json_usize(blob, "order"),
+            ..SellaSaddleConfig::default()
+        },
+        x0,
+        Array1::from(vec![1.0, 1.0]),
+    )
+    .unwrap();
+    let report = sess.step(&QuadSaddle).unwrap();
+    assert_close_tol(
+        &sess.position().to_owned(),
+        &json_nums(blob, "x1"),
+        name,
+        SESSION_TOL,
+    );
+    assert_scalar(
+        report.energy,
+        json_num(blob, "energy"),
+        "sella_saddle_prfo_tr.energy",
+        SESSION_TOL,
+    );
+    assert_scalar(
+        report.rho,
+        json_num(blob, "rho"),
+        "sella_saddle_prfo_tr.rho",
+        SESSION_TOL,
+    );
+    assert_scalar(
+        report.delta,
+        json_num(blob, "delta"),
+        "sella_saddle_prfo_tr.delta",
         SESSION_TOL,
     );
 }
