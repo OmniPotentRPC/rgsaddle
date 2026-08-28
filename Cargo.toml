@@ -29,7 +29,7 @@ pyo3 = { version = "0.26", features = ["extension-module", "abi3-py310"], option
 eindir-core = { version = "0.6.0", git = "https://github.com/HaoZeke/eindir.git", rev = "f3c42130bb389ba6cd6e4cfdc8b2e182f4a764e9", features = ["capi"] }
 ndarray = "0.17"
 thiserror = "2"
-linkcell = { git = "https://github.com/d-SEAMS/linkcell", default-features = false }
+linkcell = { version = "0.3.3", git = "https://github.com/d-SEAMS/linkcell", rev = "a46717c564d01ea4f3dab09c07bd2d215290b2ab", default-features = false }
 readcon-core = { version = "0.14", optional = true }
 readcon-db = { version = "0.1", optional = true }
 
