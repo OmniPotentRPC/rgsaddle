@@ -42,8 +42,10 @@ Two seams, stepping at both:
   step, report. ~run~ is a convenience loop. Hosts own policy
   between steps.
 
-The product path is MEP roll-down: a first-order saddle to both
-adjacent minima (~IrcSession~). The band and the dimer are how
+The product path is roll-down from a first-order saddle to both
+adjacent minima (~IrcSession~). Atomistic paths use the mass-weighted
+rigid quotient; arbitrary-dimensional surfaces use the same session
+with a Euclidean coordinate metric. The band and the dimer are how
 you *find* that saddle.
 
 #+begin_src bash

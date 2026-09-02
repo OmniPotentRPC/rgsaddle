@@ -2,9 +2,12 @@
 //! saddle to a minimum, one branch at a time.
 //!
 //! Inner geometry is rgmin `IrcTrust` (Sella IRCTrustRegion /
-//! Gonzalez--Schlegel MW sphere) on `ManifoldKind::MwRigid`. The
-//! default increment is rgmin `qn_irc_restricted` (Sella
-//! QuasiNewtonIRC). [`IrcKind::Morokuma`] is the
+//! Gonzalez--Schlegel sphere) in the selected coordinate metric.
+//! [`IrcSession::new`] selects mass-weighted `ManifoldKind::MwRigid`
+//! for atomistic Cartesian coordinates; [`IrcSession::new_euclidean`]
+//! selects unit weights for a generic-dimensional surface. The default
+//! increment is rgmin `qn_irc_restricted` (Sella QuasiNewtonIRC).
+//! [`IrcKind::Morokuma`] is the
 //! Ishida--Morokuma--Komornicki predictor-corrector from
 //! `gpr_optim` `IRCDriver`. Ambient algebra goes through
 //! `rgmin::vecops`. The host owns the loop. `run` is a convenience
@@ -30,7 +33,7 @@ pub enum IrcDirection {
 /// How an outer IRC increment is formed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum IrcKind {
-    /// Gonzalez--Schlegel / Sella MW sphere. Default.
+    /// Gonzalez--Schlegel / Sella sphere in the session metric. Default.
     #[default]
     Gs2,
     /// Ishida--Morokuma--Komornicki predictor-corrector
@@ -51,7 +54,7 @@ impl IrcKind {
 /// Outer IRC controls.
 #[derive(Clone, Debug)]
 pub struct IrcConfig {
-    /// Mass-weighted sphere radius (Sella `dx`) and Morokuma `h`.
+    /// Sphere radius in the session metric (Sella `dx`) and Morokuma `h`.
     pub dx: f64,
     pub force_tol: f64,
     /// eOn / gpr_optim `ConvergenceForceNorm`.

@@ -33,6 +33,11 @@ lists, when a surface needs them, are
 `BandSession::reset` is the model-update boundary: quasi-Newton
 history taken on one surface epoch must not survive onto the next.
 
+`IrcSession` owns both Gonzalez--Schlegel/Sella and Morokuma
+predictor--corrector roll-down. Its atomistic constructor uses repeated
+mass weights and the rigid quotient; `IrcSession::new_euclidean` runs
+the same mechanics on an arbitrary-dimensional Euclidean surface.
+
 C hosts include [`include/rgsaddle.h`](include/rgsaddle.h). C++ hosts
 include [`include/rgsaddle/session.hpp`](include/rgsaddle/session.hpp),
 the same hourglass wrap rgmin ships as `xts/optimize.hpp`. Sessions
