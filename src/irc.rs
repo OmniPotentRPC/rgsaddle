@@ -656,7 +656,7 @@ mod tests {
     fn euclidean_session_kicks_an_arbitrary_dimension_by_dx() {
         let dx = 0.15;
         let saddle = Array1::zeros(5);
-        let mode = Array1::from(vec![1.0, 2.0, -1.0, 0.5, 0.25]);
+        let mode: Array1<f64> = Array1::from(vec![1.0, 2.0, -1.0, 0.5, 0.25]);
         let unit_mode = &mode / mode.dot(&mode).sqrt();
         let mut irc = IrcSession::new_euclidean(
             IrcConfig {
