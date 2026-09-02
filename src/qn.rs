@@ -16,8 +16,8 @@
 pub use rgmin::{qn_get_s, qn_restricted};
 
 use ndarray::{Array1, Array2, ArrayView2};
-use rgmin::vecops::nrm2;
 use rgmin::Manifold;
+use rgmin::vecops::nrm2;
 
 const STEP_FLOOR: f64 = 1e-8;
 const PIVOT_FLOOR: f64 = 1e-12;
@@ -462,8 +462,8 @@ fn solve_vec(a: &Array2<f64>, rhs: &Array1<f64>) -> Option<Array1<f64>> {
 mod tests {
     use super::*;
     use ndarray::array;
-    use rgmin::vecops::{dot, nrm2};
     use rgmin::ManifoldKind;
+    use rgmin::vecops::{dot, nrm2};
 
     #[test]
     fn matches_qn_and_rejects_rfo() {

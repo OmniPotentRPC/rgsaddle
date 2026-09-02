@@ -10,14 +10,14 @@
 //! [`SellaMinSession::on_internal`] to QN in the internals chart
 //! (Sella `InternalPES`). The host owns the loop. `run` is a convenience.
 
-use ndarray::{s, Array1};
-use rgmin::qn_restricted;
-use rgmin::vecops::{axpy, dot, vdot, vnrm2, Vector};
+use ndarray::{Array1, s};
 use rgmin::Manifold;
+use rgmin::qn_restricted;
+use rgmin::vecops::{Vector, axpy, dot, vdot, vnrm2};
 
 use crate::constraints::Constraints;
 use crate::error::SaddleError;
-use crate::geom::{update_trust, SellaGeom, TrustSchedule};
+use crate::geom::{SellaGeom, TrustSchedule, update_trust};
 use crate::minmode::PointSurface;
 use crate::pes::CartesianPes;
 use crate::pes_internal::{CellCartesianPes, CellInternalPes, InternalPes, SellaPes};
@@ -618,8 +618,8 @@ mod tests {
     use crate::geom::update_trust;
     use crate::minmode::PointSurface;
     use ndarray::{Array1, ArrayView1};
-    use rgmin::vecops::nrm2;
     use rgmin::ManifoldKind;
+    use rgmin::vecops::nrm2;
 
     struct Well;
     impl PointSurface for Well {

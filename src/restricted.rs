@@ -17,14 +17,14 @@
 //! [`rgmin::vecops`] so `par` applies.
 
 use ndarray::{Array1, Array2};
+use rgmin::Manifold;
 use rgmin::qn_get_s;
 use rgmin::qn_restricted;
 use rgmin::ras_clip;
 use rgmin::vecops::{axpy, nrm2, nrminf};
-use rgmin::Manifold;
 
-use crate::constraints::{Constraints, Equality, InternalCounts};
 use crate::SaddleError;
+use crate::constraints::{Constraints, Equality, InternalCounts};
 
 /// Named Sella restricted step this crate dests.
 ///
@@ -577,7 +577,7 @@ mod tests {
     use super::*;
     use crate::constraints::Constraints;
     use crate::internal::pack_cart;
-    use ndarray::{array, Array2};
+    use ndarray::{Array2, array};
     use rgmin::vecops::{dot, nrm2};
     use rgmin::{Manifold, ManifoldKind};
 

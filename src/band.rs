@@ -7,13 +7,11 @@ use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
 use rgmin::{Control, Method, Oracle, Solver};
 
 use crate::error::SaddleError;
-use crate::mic::{wrap_difference, Cell};
+use crate::mic::{Cell, wrap_difference};
 use crate::projection::{ProjectionKind, climbing_image_force, dneb_component, force_perp};
 use crate::spring::SpringKind;
 use crate::tangent::TangentKind;
 use crate::tangent::compute_tangent;
-
-
 
 /// Climbing-image activation, the eOn trigger rule: CI arms when the
 /// convergence force falls under `factor * baseline` or under the

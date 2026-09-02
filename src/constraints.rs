@@ -860,10 +860,7 @@ mod tests {
         step[10] = -0.04;
         let y = cons.retract(&x, &step);
         let d1 = dihedral_value(y.view(), [0, 1, 2, 3]).unwrap();
-        assert!(
-            wrap_pi(d0 - d1).abs() < 1e-9,
-            "dummy dihedral {d0} -> {d1}"
-        );
+        assert!(wrap_pi(d0 - d1).abs() < 1e-9, "dummy dihedral {d0} -> {d1}");
         assert!(cons.residual_norm(y.view()).unwrap() < 1e-10);
         let t = cons.transport(&x, &y, &step);
         let t_h = cons.project(&y, &t);

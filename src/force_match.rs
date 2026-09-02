@@ -31,7 +31,11 @@ pub fn covalent_radius(z: u8) -> f64 {
 ///
 /// Sella `force_match.pyx` skips `dij > 1.5 * rcov`, so equality is a
 /// bond.
-pub fn covalent_pairs(x: ArrayView1<f64>, z: &[u8], scale: f64) -> Result<Vec<[usize; 2]>, SaddleError> {
+pub fn covalent_pairs(
+    x: ArrayView1<f64>,
+    z: &[u8],
+    scale: f64,
+) -> Result<Vec<[usize; 2]>, SaddleError> {
     if x.len() % 3 != 0 || x.len() / 3 != z.len() {
         return Err(SaddleError::Shape(
             "force_match frame is not 3N with matching Z".into(),
