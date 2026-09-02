@@ -368,6 +368,7 @@ impl SellaSaddleSession {
     ) -> Result<SellaSaddleReport, SaddleError> {
         let x;
         let energy;
+        let gradient;
         let g_r;
         let u;
         let g_free;
@@ -386,6 +387,7 @@ impl SellaSaddleSession {
                 return Err(SaddleError::NonFinite("sella gradient"));
             }
             g_r = self.geom.egrad2rgrad(&x, &g);
+            gradient = g;
             let max_force = self.config.force_gate.value(g_r.view());
             if max_force <= self.config.force_tol {
                 return Ok(SellaSaddleReport {
@@ -431,9 +433,8 @@ impl SellaSaddleSession {
         let e0 = energy;
         let hs = pes.hessian().hessian().dot(&s);
         let pred = vdot(&vg, &vs) + 0.5 * dot(s.view(), hs.view());
-        pes.kick(surface, d.view())?;
+        let (energy, g1) = pes.kick_from(surface, d.view(), gradient.view())?;
         let x_new = pes.position().to_owned();
-        let (energy, g1) = surface.eval(x_new.view())?;
         let g1_r = self.geom.egrad2rgrad(&x_new, &g1);
         let max_force = self.config.force_gate.value(g1_r.view());
         if pred.abs() >= 1e-14 {
