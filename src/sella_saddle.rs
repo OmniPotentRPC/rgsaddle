@@ -705,6 +705,8 @@ impl SellaSaddleSession {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
     use crate::constraints::Constraints;
     use crate::minmode::PointSurface;
@@ -717,6 +719,17 @@ mod tests {
             let mut g = Array1::zeros(x.len());
             g[0] = 4.0 * t * (t * t - 1.0);
             Ok(((t * t - 1.0).powi(2), g))
+        }
+    }
+
+    struct CountingWell {
+        evaluations: AtomicUsize,
+    }
+
+    impl PointSurface for CountingWell {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            self.evaluations.fetch_add(1, Ordering::Relaxed);
+            Well.eval(x)
         }
     }
 
@@ -783,6 +796,25 @@ mod tests {
         assert!(report.energy.is_finite());
         assert!(sess.position().iter().all(|v| v.is_finite()));
         assert!(report.delta > 0.0);
+    }
+
+    #[test]
+    fn prfo_step_evaluates_each_endpoint_once() {
+        let mut x = Array1::zeros(6);
+        x[0] = 0.2;
+        let surface = CountingWell {
+            evaluations: AtomicUsize::new(0),
+        };
+        let mut session = SellaSaddleSession::new(
+            SellaSaddleConfig::default(),
+            x,
+            Array1::from(vec![1.0, 1.0]),
+        )
+        .unwrap();
+
+        session.step(&surface).unwrap();
+
+        assert_eq!(surface.evaluations.load(Ordering::Relaxed), 2);
     }
 
     #[test]
