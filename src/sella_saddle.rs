@@ -253,6 +253,33 @@ impl SellaSaddleSession {
         self.pes.set_update(update);
     }
 
+    /// Seed the Cartesian Hessian with a selected mode and curvature.
+    ///
+    /// A preceding dimer or Lanczos search can hand its unstable direction to
+    /// P-RFO without rebuilding the saddle mechanics in the host. The mode is
+    /// projected onto the session's live tangent space before it enters the
+    /// quasi-Newton model. Internal and variable-cell sessions use their own
+    /// coordinate Hessians and reject a Cartesian seed.
+    pub fn seed_mode(
+        &mut self,
+        mode: ndarray::ArrayView1<f64>,
+        curvature: f64,
+    ) -> Result<(), SaddleError> {
+        if mode.len() != self.pes.position().len() {
+            return Err(SaddleError::Shape(
+                "seed mode must match the session position".into(),
+            ));
+        }
+        let x = self.pes.position().to_owned();
+        let projected = self.geom.project(&x, &mode.to_owned());
+        match &mut self.pes {
+            SellaPes::Cartesian(pes) => pes.seed_mode(projected.view(), curvature),
+            SellaPes::Internal(_) | SellaPes::Cell(_) | SellaPes::CellInternal(_) => Err(
+                SaddleError::Shape("Cartesian mode seed requires a Cartesian session".into()),
+            ),
+        }
+    }
+
     /// Sella `rayleigh_ritz(..., method=)`.
     pub fn set_expand(&mut self, expand: crate::ExpandKind) {
         self.config.expand = expand;

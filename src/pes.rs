@@ -159,6 +159,24 @@ impl CartesianPes {
         &self.hess
     }
 
+    /// Seed one Cartesian Hessian mode before a quasi-Newton session.
+    pub fn seed_mode(&mut self, mode: ArrayView1<f64>, curvature: f64) -> Result<(), SaddleError> {
+        if mode.len() != self.x.len() {
+            return Err(SaddleError::Shape(
+                "seed mode must match the 3N Cartesian frame".into(),
+            ));
+        }
+        if mode.iter().any(|value| !value.is_finite()) || !curvature.is_finite() {
+            return Err(SaddleError::NonFinite("Cartesian Hessian mode seed"));
+        }
+        let norm = mode.dot(&mode).sqrt();
+        if norm <= 1e-16 {
+            return Err(SaddleError::Shape("seed mode must be nonzero".into()));
+        }
+        self.hess.seed_mode(&mode.to_owned(), curvature);
+        Ok(())
+    }
+
     pub fn reset(&mut self) {
         self.hess.forget();
     }
