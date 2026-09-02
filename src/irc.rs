@@ -591,6 +591,59 @@ mod tests {
     }
 
     #[test]
+    fn euclidean_session_kicks_an_arbitrary_dimension_by_dx() {
+        let dx = 0.15;
+        let saddle = Array1::zeros(5);
+        let mode = Array1::from(vec![1.0, 2.0, -1.0, 0.5, 0.25]);
+        let unit_mode = &mode / mode.dot(&mode).sqrt();
+        let mut irc = IrcSession::new_euclidean(
+            IrcConfig {
+                dx,
+                force_tol: 1e-12,
+                max_inner: 1,
+                ..IrcConfig::default()
+            },
+            saddle.clone(),
+            mode,
+            IrcDirection::Forward,
+        )
+        .unwrap();
+
+        let _ = irc.step(&Flat).unwrap();
+        let displacement = irc.position().to_owned() - &saddle;
+
+        assert!((displacement.dot(&displacement).sqrt() - dx).abs() < 1e-12);
+        assert!((displacement.dot(&unit_mode) - dx).abs() < 1e-12);
+    }
+
+    #[test]
+    fn euclidean_morokuma_corrector_has_length_dx_in_five_dimensions() {
+        let dx = 0.15;
+        let saddle = Array1::zeros(5);
+        let mut mode = Array1::zeros(5);
+        mode[0] = 1.0;
+        let mut irc = IrcSession::new_euclidean(
+            IrcConfig {
+                dx,
+                force_tol: 1e-12,
+                kind: IrcKind::Morokuma,
+                ..IrcConfig::default()
+            },
+            saddle,
+            mode,
+            IrcDirection::Forward,
+        )
+        .unwrap();
+
+        let _ = irc.step(&Well).unwrap();
+        let kicked = irc.position().to_owned();
+        let _ = irc.step(&Well).unwrap();
+        let displacement = irc.position().to_owned() - &kicked;
+
+        assert!((displacement.dot(&displacement).sqrt() - dx).abs() < 1e-8);
+    }
+
+    #[test]
     fn morokuma_corrector_has_mw_length_dx() {
         let dx = 0.15;
         let masses = Array1::from(vec![1.0, 1.0]);
