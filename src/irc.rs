@@ -101,7 +101,7 @@ pub struct IrcSession {
     config: IrcConfig,
     x: Array1<f64>,
     x_saddle: Array1<f64>,
-    masses: Array1<f64>,
+    sqrtm: Array1<f64>,
     d1: Array1<f64>,
     mode: Array1<f64>,
     solver: Solver,
@@ -145,15 +145,79 @@ impl IrcSession {
             solver.set_manifold(ManifoldKind::MwRigid);
             solver.set_masses(masses.clone());
         }
+        Self::with_coordinate_metric(
+            config,
+            saddle,
+            sqrt_masses_3n(masses.as_slice().unwrap_or(&[])),
+            mode,
+            direction,
+            solver,
+        )
+    }
+
+    /// Build an IRC over an arbitrary-dimensional Euclidean surface.
+    ///
+    /// The native coordinates are the path metric, so every coordinate has
+    /// unit mass weight. Use [`Self::new`] for atomistic Cartesian positions,
+    /// where atomic masses and the rigid-body quotient define the metric.
+    pub fn new_euclidean(
+        config: IrcConfig,
+        saddle: Array1<f64>,
+        mode: Array1<f64>,
+        direction: IrcDirection,
+    ) -> Result<Self, SaddleError> {
+        let dimension = saddle.len();
+        if dimension == 0 {
+            return Err(SaddleError::Shape(
+                "saddle must have a nonzero dimension".into(),
+            ));
+        }
+        if mode.len() != dimension {
+            return Err(SaddleError::Shape(
+                "mode must match the saddle dimension".into(),
+            ));
+        }
+        let control = Control {
+            maxiter: usize::MAX,
+            gtol: 0.0,
+            istep: 1.0,
+            maxmove: Some(config.max_move),
+        };
+        let mut solver = Solver::new(config.method.clone(), control, dimension);
+        solver.set_highs(true);
+        Self::with_coordinate_metric(
+            config,
+            saddle,
+            Array1::ones(dimension),
+            mode,
+            direction,
+            solver,
+        )
+    }
+
+    fn with_coordinate_metric(
+        config: IrcConfig,
+        saddle: Array1<f64>,
+        sqrtm: Array1<f64>,
+        mode: Array1<f64>,
+        direction: IrcDirection,
+        solver: Solver,
+    ) -> Result<Self, SaddleError> {
+        let dimension = saddle.len();
+        if sqrtm.len() != dimension || mode.len() != dimension {
+            return Err(SaddleError::Shape(
+                "coordinate weights and mode must match the saddle".into(),
+            ));
+        }
         let mut session = Self {
             config,
             x: saddle.clone(),
             x_saddle: saddle,
-            masses,
-            d1: Array1::zeros(n3),
+            sqrtm,
+            d1: Array1::zeros(dimension),
             mode,
             solver,
-            hess: BfgsModel::identity(n3),
+            hess: BfgsModel::identity(dimension),
             first: true,
             arc: 0.0,
             last_step: None,
@@ -165,11 +229,10 @@ impl IrcSession {
     }
 
     fn seed_ts_mode(&mut self) {
-        let sqrtm = sqrt_masses_3n(self.masses.as_slice().unwrap_or(&[]));
-        let n = self.mode.len().min(sqrtm.len());
+        let n = self.mode.len().min(self.sqrtm.len());
         let mut u = Array1::zeros(self.mode.len());
         for i in 0..n {
-            u[i] = self.mode[i] * sqrtm[i];
+            u[i] = self.mode[i] * self.sqrtm[i];
         }
         self.hess.seed_mode(&u, -1.0);
     }
@@ -221,10 +284,9 @@ impl IrcSession {
     }
 
     fn kick_vector(&self, direction: IrcDirection) -> Array1<f64> {
-        let sqrtm = sqrt_masses_3n(self.masses.as_slice().unwrap_or(&[]));
         let mut mw = Vector::from_host(self.mode.clone());
         for i in 0..mw.host_view().len() {
-            mw.host_mut()[i] *= sqrtm[i].max(1e-16);
+            mw.host_mut()[i] *= self.sqrtm[i].max(1e-16);
         }
         let n = nrm2(mw.host_view());
         if n <= 1e-16 {
@@ -232,7 +294,7 @@ impl IrcSession {
         }
         let mut v0ts = Array1::zeros(self.mode.len());
         for i in 0..self.mode.len() {
-            v0ts[i] = self.config.dx * (mw.host_view()[i] / n) / sqrtm[i].max(1e-16);
+            v0ts[i] = self.config.dx * (mw.host_view()[i] / n) / self.sqrtm[i].max(1e-16);
         }
         // Sella: first nonzero of v0ts is positive, then reverse is -v0ts.
         if let Some(&v) = v0ts.iter().find(|v| v.abs() > 1e-16) {
@@ -247,16 +309,16 @@ impl IrcSession {
     }
 
     fn trust(&self) -> IrcTrust {
-        IrcTrust::from_atom_masses(
-            self.d1.clone(),
-            self.masses.as_slice().unwrap_or(&[]),
-            self.config.dx,
-        )
+        IrcTrust {
+            d1: self.d1.clone(),
+            sqrtm: self.sqrtm.clone(),
+            dx: self.config.dx,
+        }
     }
 
     /// Sella: project `g` orthogonal to the path in the MW metric.
     fn path_force(&self, g: &Array1<f64>) -> Array1<f64> {
-        path_projected_force(g, &self.d1, self.masses.as_slice().unwrap_or(&[]))
+        path_projected_force(g, &self.d1, &self.sqrtm)
     }
 
     /// Sella `QuasiNewtonIRC` plus `IRCTrustRegion` on the current
@@ -352,8 +414,7 @@ impl IrcSession {
             let ev = surface.eval(self.x.view())?;
             energy = ev.0;
             let y = &ev.1 - &g;
-            let sqrtm = sqrt_masses_3n(self.masses.as_slice().unwrap_or(&[]));
-            let (s_mw, y_mw) = mw_pair(&s, &y, &sqrtm);
+            let (s_mw, y_mw) = mw_pair(&s, &y, &self.sqrtm);
             self.hess.update(&s_mw, &y_mw);
             g = ev.1;
             max_force = self.config.force_gate.value(g.view());
@@ -437,8 +498,7 @@ impl IrcSession {
             }
         }
 
-        let sqrtm = sqrt_masses_3n(self.masses.as_slice().unwrap_or(&[]));
-        let g_mw = to_mw(&g0, &sqrtm, true);
+        let g_mw = to_mw(&g0, &self.sqrtm, true);
         let gn = nrm2(g_mw.view());
         if gn <= 1e-16 {
             return Ok(IrcReport {
@@ -452,14 +512,14 @@ impl IrcSession {
 
         let h = self.config.dx;
         let mut x_pred = self.x.clone();
-        for i in 0..x_pred.len().min(sqrtm.len()) {
-            x_pred[i] += (-h * g_mw[i] / gn) / sqrtm[i].max(1e-16);
+        for i in 0..x_pred.len().min(self.sqrtm.len()) {
+            x_pred[i] += (-h * g_mw[i] / gn) / self.sqrtm[i].max(1e-16);
         }
         let ev_pred = surface.eval(x_pred.view())?;
         if !ev_pred.1.iter().all(|v| v.is_finite()) {
             return Err(SaddleError::NonFinite("irc gradient"));
         }
-        let g_pred_mw = to_mw(&ev_pred.1, &sqrtm, true);
+        let g_pred_mw = to_mw(&ev_pred.1, &self.sqrtm, true);
         let mut g_avg = g_mw;
         axpy(1.0, g_pred_mw.view(), &mut g_avg);
         g_avg.mapv_inplace(|v| 0.5 * v);
@@ -476,10 +536,10 @@ impl IrcSession {
 
         let mut s = Array1::zeros(self.x.len());
         let mut dx_mw_n2 = 0.0;
-        for i in 0..s.len().min(sqrtm.len()) {
+        for i in 0..s.len().min(self.sqrtm.len()) {
             let dmw = -h * g_avg[i] / ga;
             dx_mw_n2 += dmw * dmw;
-            s[i] = dmw / sqrtm[i].max(1e-16);
+            s[i] = dmw / self.sqrtm[i].max(1e-16);
         }
         if let Some(prev) = &self.last_outer {
             if self.arc > 8.0 * h && dot(prev.view(), s.view()) < 0.0 {
@@ -527,8 +587,7 @@ impl IrcSession {
 }
 
 /// Mass-weighted path-orthogonal force. Algebra is `rgmin::vecops`.
-fn path_projected_force(g: &Array1<f64>, d1: &Array1<f64>, masses: &[f64]) -> Array1<f64> {
-    let sqrtm = sqrt_masses_3n(masses);
+fn path_projected_force(g: &Array1<f64>, d1: &Array1<f64>, sqrtm: &Array1<f64>) -> Array1<f64> {
     let n = g.len().min(d1.len()).min(sqrtm.len());
     let mut d1m = Array1::zeros(n);
     let mut gm = Array1::zeros(n);
