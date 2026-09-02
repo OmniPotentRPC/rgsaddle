@@ -693,6 +693,23 @@ mod tests {
         }
     }
 
+    struct RotatedSaddle;
+
+    impl PointSurface for RotatedSaddle {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            let inv_sqrt_two = 2.0_f64.sqrt().recip();
+            let mode_coordinate = (x[0] + x[1]) * inv_sqrt_two;
+            let transverse_coordinate = (x[0] - x[1]) * inv_sqrt_two;
+            let mut gradient = x.to_owned();
+            gradient[0] = (-mode_coordinate + transverse_coordinate) * inv_sqrt_two;
+            gradient[1] = (-mode_coordinate - transverse_coordinate) * inv_sqrt_two;
+            let energy = -0.5 * mode_coordinate * mode_coordinate
+                + 0.5 * transverse_coordinate * transverse_coordinate
+                + 0.5 * x.slice(s![2..]).dot(&x.slice(s![2..]));
+            Ok((energy, gradient))
+        }
+    }
+
     fn com(x: ArrayView1<f64>) -> [f64; 3] {
         let nat = x.len() / 3;
         let mut c = [0.0; 3];
@@ -739,6 +756,29 @@ mod tests {
         assert!(report.energy.is_finite());
         assert!(sess.position().iter().all(|v| v.is_finite()));
         assert!(report.delta > 0.0);
+    }
+
+    #[test]
+    fn seeded_mode_hands_the_selected_unstable_direction_to_prfo() {
+        let inv_sqrt_two = 2.0_f64.sqrt().recip();
+        let mode = Array1::from(vec![inv_sqrt_two, inv_sqrt_two, 0.0, 0.0, 0.0, 0.0]);
+        let x = &mode * 0.2;
+        let mut sess = SellaSaddleSession::new(
+            SellaSaddleConfig::default(),
+            x,
+            Array1::from(vec![1.0, 1.0]),
+        )
+        .unwrap();
+
+        sess.seed_mode(mode.view(), -1.0).unwrap();
+        let before = sess.position().dot(&mode).abs();
+        sess.step(&RotatedSaddle).unwrap();
+        let after = sess.position().dot(&mode).abs();
+
+        assert!(
+            after < before,
+            "unstable coordinate did not contract: {before} -> {after}"
+        );
     }
 
     #[test]
