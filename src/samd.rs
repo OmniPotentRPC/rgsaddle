@@ -17,6 +17,117 @@ use rgmin::vecops::{axpy, dot};
 use crate::error::SaddleError;
 use crate::minmode::PointSurface;
 
+/// Fixed-cost modified-dimer softening for an MD launch direction.
+///
+/// Each iteration probes the surface at `center + displacement * direction`,
+/// removes the force component parallel to the direction, mixes the remaining
+/// force into the direction, and renormalizes it. The finite iteration count
+/// retains the stochastic component of the seed instead of converging every
+/// launch to one deterministic minimum mode.
+#[derive(Clone, Copy, Debug)]
+pub struct VelocitySofteningConfig {
+    /// Number of force probes. Each iteration costs one surface evaluation.
+    pub steps: usize,
+    /// Distance from the minimum at which the force is evaluated.
+    pub displacement: f64,
+    /// Perpendicular-force mixing factor.
+    pub mixing: f64,
+}
+
+impl Default for VelocitySofteningConfig {
+    fn default() -> Self {
+        Self {
+            steps: 0,
+            displacement: 0.1,
+            mixing: 0.15,
+        }
+    }
+}
+
+/// Softened unit direction and its exact force-evaluation cost.
+#[derive(Clone, Debug)]
+pub struct VelocitySofteningReport {
+    pub direction: Array1<f64>,
+    pub evaluations: usize,
+}
+
+/// Bias a stochastic MD direction toward low curvature on `man`.
+///
+/// This is the modified iterative dimer used by minima hopping: for unit
+/// direction `N`, probe `y = x + delta N`, form
+/// `F_perp = F(y) - (F(y) . N) N`, and update
+/// `N = normalize(N + alpha F_perp)`. Projection before and after every update
+/// keeps constrained or quotient-space launches in their physical tangent.
+pub fn soften_velocity_on<M, S>(
+    man: &M,
+    center: ArrayView1<f64>,
+    seed: ArrayView1<f64>,
+    surface: &S,
+    config: VelocitySofteningConfig,
+) -> Result<VelocitySofteningReport, SaddleError>
+where
+    M: Manifold + ?Sized,
+    S: PointSurface + ?Sized,
+{
+    if center.is_empty() || center.len() != seed.len() || man.required_dim(center.len()).is_err() {
+        return Err(SaddleError::Shape(
+            "velocity softening needs equal nonempty legal position and direction packings".into(),
+        ));
+    }
+    if !config.displacement.is_finite()
+        || config.displacement <= 0.0
+        || !config.mixing.is_finite()
+        || config.mixing <= 0.0
+    {
+        return Err(SaddleError::Shape(
+            "velocity softening needs positive finite displacement and mixing".into(),
+        ));
+    }
+
+    let center = center.to_owned();
+    let mut direction = man.project(&center, &seed.to_owned());
+    let mut norm = dot(direction.view(), direction.view()).sqrt();
+    if !norm.is_finite() || norm <= 1e-14 {
+        return Err(SaddleError::Solver(
+            "velocity-softening seed has no component in the free coordinates".into(),
+        ));
+    }
+    direction /= norm;
+
+    for _ in 0..config.steps {
+        let displacement = &direction * config.displacement;
+        let probe = man.retract(&center, &displacement);
+        let (_, gradient) = surface.eval(probe.view())?;
+        if gradient.len() != center.len() {
+            return Err(SaddleError::Shape(
+                "velocity-softening gradient must match the position packing".into(),
+            ));
+        }
+        if gradient.iter().any(|value| !value.is_finite()) {
+            return Err(SaddleError::NonFinite("velocity-softening gradient"));
+        }
+
+        let force = gradient.mapv(|value| -value);
+        let mut perpendicular = man.project(&center, &force);
+        let parallel = dot(perpendicular.view(), direction.view());
+        axpy(-parallel, direction.view(), &mut perpendicular);
+        axpy(config.mixing, perpendicular.view(), &mut direction);
+        direction = man.project(&center, &direction);
+        norm = dot(direction.view(), direction.view()).sqrt();
+        if !norm.is_finite() || norm <= 1e-14 {
+            return Err(SaddleError::Solver(
+                "velocity softening produced a zero direction".into(),
+            ));
+        }
+        direction /= norm;
+    }
+
+    Ok(VelocitySofteningReport {
+        direction,
+        evaluations: config.steps,
+    })
+}
+
 /// Linear ramp `T0 + i (Tf - T0) / (n - 1)`.
 pub fn t_linear(i: usize, t0: f64, tf: f64, n: usize) -> f64 {
     if n <= 1 {

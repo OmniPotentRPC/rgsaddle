@@ -131,7 +131,8 @@ pub use restricted::{
 };
 pub use rfo::{RationalFunctionOptimization, rfo_stepper};
 pub use samd::{
-    SamdConfig, SamdReport, SamdSession, project_velocity, retract_samd, transport_velocity,
+    SamdConfig, SamdReport, SamdSession, VelocitySofteningConfig, VelocitySofteningReport,
+    project_velocity, retract_samd, soften_velocity_on, transport_velocity,
 };
 pub use sella_min::{SellaMinConfig, SellaMinReport, SellaMinSession};
 pub use sella_saddle::{SellaSaddleConfig, SellaSaddleReport, SellaSaddleSession};
