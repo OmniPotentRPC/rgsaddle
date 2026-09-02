@@ -270,6 +270,7 @@ mod tests {
     use ndarray::{Array1, ArrayView1};
     use rgmin::vecops::nrm2;
     use rgmin::{Manifold, ManifoldKind};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct Well;
     impl PointSurface for Well {
@@ -277,6 +278,20 @@ mod tests {
             let mut g = Array1::zeros(x.len());
             g[0] = 2.0 * x[0];
             Ok((x[0] * x[0], g))
+        }
+    }
+
+    struct AnisotropicWell {
+        evaluations: AtomicUsize,
+    }
+
+    impl PointSurface for AnisotropicWell {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            self.evaluations.fetch_add(1, Ordering::Relaxed);
+            Ok((
+                0.5 * (100.0 * x[0] * x[0] + x[1] * x[1]),
+                Array1::from(vec![100.0 * x[0], x[1]]),
+            ))
         }
     }
 
@@ -288,6 +303,35 @@ mod tests {
     fn t_linear_hits_the_endpoints() {
         assert!((t_linear(0, 2.0, 0.5, 5) - 2.0).abs() < 1e-14);
         assert!((t_linear(4, 2.0, 0.5, 5) - 0.5).abs() < 1e-14);
+    }
+
+    #[test]
+    fn velocity_softening_removes_the_hard_mode_at_one_call_per_step() {
+        let surface = AnisotropicWell {
+            evaluations: AtomicUsize::new(0),
+        };
+        let center = Array1::zeros(2);
+        let seed = Array1::from(vec![1.0, 1.0]);
+        let config = VelocitySofteningConfig {
+            steps: 20,
+            displacement: 0.1,
+            mixing: 0.15,
+        };
+
+        let report = soften_velocity_on(
+            &ManifoldKind::Euclidean,
+            center.view(),
+            seed.view(),
+            &surface,
+            config,
+        )
+        .unwrap();
+
+        assert_eq!(report.evaluations, config.steps);
+        assert_eq!(surface.evaluations.load(Ordering::Relaxed), config.steps);
+        assert!((report.direction.dot(&report.direction) - 1.0).abs() < 1e-12);
+        assert!(report.direction[0].abs() < 1e-5, "{:?}", report.direction);
+        assert!(report.direction[1].abs() > 1.0 - 1e-10);
     }
 
     #[test]
