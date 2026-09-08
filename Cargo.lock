@@ -662,7 +662,10 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 [[package]]
 name = "linkcell"
 version = "0.3.3"
-source = "git+https://github.com/d-SEAMS/linkcell?rev=a46717c564d01ea4f3dab09c07bd2d215290b2ab#a46717c564d01ea4f3dab09c07bd2d215290b2ab"
+source = "git+https://github.com/d-SEAMS/linkcell?rev=f6cf5700ca9c90e1877c84b66fb68386de5ceffe#f6cf5700ca9c90e1877c84b66fb68386de5ceffe"
+dependencies = [
+ "minimage",
+]
 
 [[package]]
 name = "linux-raw-sys"
@@ -726,6 +729,11 @@ checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
 dependencies = [
  "autocfg",
 ]
+
+[[package]]
+name = "minimage"
+version = "0.1.1"
+source = "git+https://github.com/lode-org/minimage.git?rev=624d4395beae609281bb951e66299658bf313fc1#624d4395beae609281bb951e66299658bf313fc1"
 
 [[package]]
 name = "minimal-lexical"
@@ -1144,7 +1152,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 [[package]]
 name = "rgmin"
 version = "0.2.0"
-source = "git+https://github.com/OmniPotentRPC/rgmin.git?rev=65e7580121b01cbe054c0c818ee4b8d878c44271#65e7580121b01cbe054c0c818ee4b8d878c44271"
+source = "git+https://github.com/OmniPotentRPC/rgmin.git?rev=2dc2b7d07157e5468f9aa122fb2157a2d0208f08#2dc2b7d07157e5468f9aa122fb2157a2d0208f08"
 dependencies = [
  "cbindgen",
  "dlpk",
