@@ -193,7 +193,10 @@ pub fn lowest_on(
 /// `v` is the current Ritz basis `(d, n)`, `y` is `A @ v` (or the
 /// symmetrized action), `p` is the preconditioner, `b` the metric
 /// (`None` is `I`). `lams` / `vecs` are the current Ritz pairs.
-#[expect(clippy::too_many_arguments, reason = "The public expansion API names each operator and basis separately.")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The public expansion API names each operator and basis separately."
+)]
 pub fn expand(
     v: ArrayView2<f64>,
     y: ArrayView2<f64>,

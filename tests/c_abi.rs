@@ -103,8 +103,7 @@ fn c_abi_irc_analytic_well() {
 fn cdylib_dir() -> PathBuf {
     let mut libdir = std::env::current_exe().unwrap();
     libdir.pop();
-    if libdir.join("librgsaddle.so").exists() || libdir.join("librgsaddle.dylib").exists()
-    {
+    if libdir.join("librgsaddle.so").exists() || libdir.join("librgsaddle.dylib").exists() {
         return libdir;
     }
     if libdir.ends_with("deps") {

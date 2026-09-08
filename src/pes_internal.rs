@@ -939,9 +939,7 @@ pub fn niggli_reduce_vectors(
             if eta > 0.0 {
                 a = neg(a);
             }
-            if 2.0 * dot3(a, b) > 0.0
-                && (2.0 * dot3(b, c) > 0.0 || 2.0 * dot3(a, c) > 0.0)
-            {
+            if 2.0 * dot3(a, b) > 0.0 && (2.0 * dot3(b, c) > 0.0 || 2.0 * dot3(a, c) > 0.0) {
                 c = neg(c);
             }
         }
