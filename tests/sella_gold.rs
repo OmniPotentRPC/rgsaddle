@@ -7,7 +7,7 @@
 //! Remint lives next to dest (`tests/sella_manopt_gold.py`). These
 //! tests load the frozen JSON only.
 
-use ndarray::{array, Array1, Array2, ArrayView1};
+use ndarray::{Array1, Array2, ArrayView1, array};
 use rgsaddle::{
     HessUpdate, PartitionedRationalFunctionOptimization, PointSurface, QuasiNewton,
     RationalFunctionOptimization, RestrictedAtomicStep, SaddleError, SellaMinConfig,

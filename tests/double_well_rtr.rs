@@ -4,7 +4,9 @@
 //! accepted step decreases the force.
 
 use ndarray::{Array1, Array2, ArrayView2};
-use rgsaddle::{BandConfig, BandRtr, BandSession, BandStatus, BandSurface, RtrConfig, SaddleError, band_forces};
+use rgsaddle::{
+    BandConfig, BandRtr, BandSession, BandStatus, BandSurface, RtrConfig, SaddleError, band_forces,
+};
 
 /// V = (x^2 - 1)^2 + 2 y^2 + 2 z^2: minima at (+-1, 0, 0), saddle at
 /// the origin with barrier 1.
@@ -44,8 +46,17 @@ fn rtr_band_relaxes_onto_the_path_and_climbs_to_the_saddle() {
     let mut band = initial_band(n);
     let first = band.row(0).to_owned();
     let last = band.row(n - 1).to_owned();
-    let config = BandConfig { force_tol: 1e-6, ..BandConfig::default() };
-    let mut rtr = BandRtr::new(RtrConfig { radius_max: 0.5, ..RtrConfig::default() }, true);
+    let config = BandConfig {
+        force_tol: 1e-6,
+        ..BandConfig::default()
+    };
+    let mut rtr = BandRtr::new(
+        RtrConfig {
+            radius_max: 0.5,
+            ..RtrConfig::default()
+        },
+        true,
+    );
     let mut converged = false;
     let mut accepted = 0;
     for _ in 0..400 {
@@ -63,12 +74,22 @@ fn rtr_band_relaxes_onto_the_path_and_climbs_to_the_saddle() {
     assert_eq!(band.row(0), first.view());
     assert_eq!(band.row(n - 1), last.view());
     for i in 1..n - 1 {
-        assert!(band[(i, 1)].abs() < 1e-5, "image {i} off the path: {}", band[(i, 1)]);
+        assert!(
+            band[(i, 1)].abs() < 1e-5,
+            "image {i} off the path: {}",
+            band[(i, 1)]
+        );
         assert!(band[(i, 2)].abs() < 1e-5);
     }
     let forces = band_forces(&config, &DoubleWell, band.view(), None).unwrap();
-    let ci = (1..n - 1).max_by(|&a, &b| forces.energies[a].partial_cmp(&forces.energies[b]).unwrap()).unwrap();
-    assert!(band[(ci, 0)].abs() < 1e-4, "climbing image not at the saddle: {}", band[(ci, 0)]);
+    let ci = (1..n - 1)
+        .max_by(|&a, &b| forces.energies[a].partial_cmp(&forces.energies[b]).unwrap())
+        .unwrap();
+    assert!(
+        band[(ci, 0)].abs() < 1e-4,
+        "climbing image not at the saddle: {}",
+        band[(ci, 0)]
+    );
     assert!((forces.energies[ci] - 1.0).abs() < 1e-6);
 }
 
@@ -77,7 +98,13 @@ fn rejected_steps_shrink_the_radius_and_accepted_boundary_steps_grow_it() {
     let n = 5;
     let mut band = initial_band(n);
     let config = BandConfig::default();
-    let mut rtr = BandRtr::new(RtrConfig { radius_max: 4.0, ..RtrConfig::default() }, false);
+    let mut rtr = BandRtr::new(
+        RtrConfig {
+            radius_max: 4.0,
+            ..RtrConfig::default()
+        },
+        false,
+    );
     let r0 = rtr.radius.radius;
     let report = rtr.step(&config, &DoubleWell, &mut band).expect("step");
     if report.accepted {
@@ -94,7 +121,10 @@ fn band_session_steps_by_rtr_when_configured() {
     let band = initial_band(n);
     let config = BandConfig {
         force_tol: 1e-5,
-        rtr: Some(RtrConfig { radius_max: 0.5, ..RtrConfig::default() }),
+        rtr: Some(RtrConfig {
+            radius_max: 0.5,
+            ..RtrConfig::default()
+        }),
         ..BandConfig::default()
     };
     let mut session = BandSession::new(config, band).expect("session");
@@ -112,5 +142,9 @@ fn band_session_steps_by_rtr_when_configured() {
         assert!(pos[(i, 1)].abs() < 1e-4, "image {i} off the path");
     }
     let ci = session.climbing_image().expect("climbing image armed");
-    assert!(pos[(ci, 0)].abs() < 1e-3, "climbing image not at the saddle: {}", pos[(ci, 0)]);
+    assert!(
+        pos[(ci, 0)].abs() < 1e-3,
+        "climbing image not at the saddle: {}",
+        pos[(ci, 0)]
+    );
 }

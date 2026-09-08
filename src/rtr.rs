@@ -62,7 +62,9 @@ pub fn band_forces<S: BandSurface + ?Sized>(
     let n_images = positions.nrows();
     let dof = positions.ncols();
     if n_images < 3 {
-        return Err(SaddleError::Solver("a band needs at least one interior image".into()));
+        return Err(SaddleError::Solver(
+            "a band needs at least one interior image".into(),
+        ));
     }
     let mut energies = Array1::zeros(n_images);
     let mut gradients = Array2::zeros((n_images, dof));
@@ -110,13 +112,22 @@ pub fn band_forces<S: BandSurface + ?Sized>(
             };
             climbing_image_force(true_force.view(), tangent.view(), dneb.view())
         } else {
-            config.projection.project(true_force.view(), tangent.view(), &spring)
+            config
+                .projection
+                .project(true_force.view(), tangent.view(), &spring)
         };
-        force.slice_mut(s![(i - 1) * dof..i * dof]).assign(&image_force);
+        force
+            .slice_mut(s![(i - 1) * dof..i * dof])
+            .assign(&image_force);
         tangents.row_mut(i - 1).assign(&tangent);
     }
     let max_force = config.force_gate.value(force.view());
-    Ok(BandForces { energies, tangents, force, max_force })
+    Ok(BandForces {
+        energies,
+        tangents,
+        force,
+        max_force,
+    })
 }
 
 /// Place the interior images at equal chord length along the current
@@ -139,7 +150,11 @@ pub fn reparametrize_equal_arc(positions: &mut Array2<f64>, anchor: Option<usize
             k += 1;
         }
         let denom = s[k + 1] - s[k];
-        let alpha = if denom > f64::MIN_POSITIVE { (target - s[k]) / denom } else { 0.0 };
+        let alpha = if denom > f64::MIN_POSITIVE {
+            (target - s[k]) / denom
+        } else {
+            0.0
+        };
         let p = &orig.row(k) + &((&orig.row(k + 1) - &orig.row(k)) * alpha);
         positions.row_mut(j).assign(&p);
     };
@@ -180,7 +195,13 @@ pub struct RtrConfig {
 
 impl Default for RtrConfig {
     fn default() -> Self {
-        Self { radius_max: 1.0, theta: 1.0, kappa: 0.1, max_cg: 50, fd_step: 1e-4 }
+        Self {
+            radius_max: 1.0,
+            theta: 1.0,
+            kappa: 0.1,
+            max_cg: 50,
+            fd_step: 1e-4,
+        }
     }
 }
 
@@ -212,7 +233,12 @@ pub struct BandRtr {
 
 impl BandRtr {
     pub fn new(config: RtrConfig, climb: bool) -> Self {
-        Self { config, radius: RtrRadius::new(config.radius_max), climb, iteration: 0 }
+        Self {
+            config,
+            radius: RtrRadius::new(config.radius_max),
+            climb,
+            iteration: 0,
+        }
     }
 
     fn climbing_index(&self, energies: &Array1<f64>) -> Option<usize> {
@@ -243,7 +269,11 @@ impl BandRtr {
         let interior = (n_images - 2) * dof;
         let here = band_forces(band, surface, positions.view(), None)?;
         let ci = self.climbing_index(&here.energies);
-        let here = if ci.is_some() { band_forces(band, surface, positions.view(), ci)? } else { here };
+        let here = if ci.is_some() {
+            band_forces(band, surface, positions.view(), ci)?
+        } else {
+            here
+        };
         let grad = -&here.force;
         let tangents = here.tangents.clone();
         let project = move |v: &Array1<f64>| -> Array1<f64> {
@@ -312,8 +342,14 @@ impl BandRtr {
         let grad_there = -&there.force;
         let actual_decrease = -0.5 * dot((&grad + &grad_there).view(), tcg.eta.view());
         let eta_norm = nrm2(tcg.eta.view());
-        let rho = if tcg.model_decrease > 0.0 { actual_decrease / tcg.model_decrease } else { f64::NEG_INFINITY };
-        let accepted = self.radius.update(actual_decrease, tcg.model_decrease, eta_norm);
+        let rho = if tcg.model_decrease > 0.0 {
+            actual_decrease / tcg.model_decrease
+        } else {
+            f64::NEG_INFINITY
+        };
+        let accepted = self
+            .radius
+            .update(actual_decrease, tcg.model_decrease, eta_norm);
         // Retraction: the tangent step moves the images across the path, the
         // spacing along it is restored by re-parametrising the polyline at
         // equal chord length with the climbing image held where it landed.
@@ -334,7 +370,11 @@ impl BandRtr {
             cg_iterations: tcg.iterations,
             model_decrease: tcg.model_decrease,
             actual_decrease,
-            max_force: if accepted { there.max_force } else { here.max_force },
+            max_force: if accepted {
+                there.max_force
+            } else {
+                here.max_force
+            },
             ci,
         })
     }
@@ -359,7 +399,11 @@ mod tests {
         let g = array![1.0, -2.0, 0.5];
         let r = truncated_cg(identity, g.view(), quad_hvp(&h), 100.0, 1.0, 0.1, 50);
         let newton = array![-1.0, 1.0, -0.5 / 3.0];
-        assert!((r.eta.clone() - newton.clone()).mapv(f64::abs).sum() < 1e-10, "{:?}", r.eta);
+        assert!(
+            (r.eta.clone() - newton.clone()).mapv(f64::abs).sum() < 1e-10,
+            "{:?}",
+            r.eta
+        );
         let expected = -(g.dot(&newton) + 0.5 * newton.dot(&h.dot(&newton)));
         assert!((r.model_decrease - expected).abs() < 1e-10);
         assert_eq!(r.stop, TcgStop::Residual);

@@ -388,7 +388,11 @@ impl BandSession {
         rtr.climb = armed;
         let report = rtr.step(&self.config, surface, &mut self.positions)?;
         self.iteration += 1;
-        let max_force = if report.accepted { report.max_force } else { max_force_before };
+        let max_force = if report.accepted {
+            report.max_force
+        } else {
+            max_force_before
+        };
         let status = if max_force <= self.config.force_tol {
             BandStatus::Converged
         } else {

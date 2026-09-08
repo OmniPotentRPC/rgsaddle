@@ -3,11 +3,11 @@
 //! Algebra is rgmin `qn_get_s`. Geometry is manopt proj / retr /
 //! transp. This is a stepper, not a session.
 
-use ndarray::{array, Array1, Array2};
+use ndarray::{Array1, Array2, array};
 use rgmin::manifold::{Manifold, Sphere};
 use rgmin::qn_get_s;
 use rgmin::vecops::{dot, nrm2};
-use rgsaddle::{get_stepper, retract_qn, update_h, HessUpdate, QuasiNewton};
+use rgsaddle::{HessUpdate, QuasiNewton, get_stepper, retract_qn, update_h};
 
 #[test]
 fn get_stepper_matches_qn_synonyms() {

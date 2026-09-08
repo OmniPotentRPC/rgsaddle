@@ -86,14 +86,7 @@ fn morokuma_forward_and_reverse_leave_opposite_ways() {
         kind: IrcKind::Morokuma,
         ..IrcConfig::default()
     };
-    let mut session = IrcSession::new(
-        cfg,
-        saddle,
-        masses,
-        mode,
-        IrcDirection::Forward,
-    )
-    .unwrap();
+    let mut session = IrcSession::new(cfg, saddle, masses, mode, IrcDirection::Forward).unwrap();
     let _ = session.step(&DoubleWell).unwrap();
     let x_fwd = session.position()[0];
     session.set_direction(IrcDirection::Reverse);
@@ -128,8 +121,7 @@ fn morokuma_run_reaches_a_well() {
     assert!(
         report.at_minimum,
         "force {} arc {}",
-        report.max_force,
-        report.arc
+        report.max_force, report.arc
     );
     assert!(
         (session.position()[0].abs() - 1.0).abs() < 0.25,
@@ -158,7 +150,11 @@ fn run_reaches_a_well() {
     )
     .unwrap();
     let report = session.run(&DoubleWell, 40).unwrap();
-    assert!(report.at_minimum, "force {} arc {}", report.max_force, report.arc);
+    assert!(
+        report.at_minimum,
+        "force {} arc {}",
+        report.max_force, report.arc
+    );
     assert!(
         (session.position()[0].abs() - 1.0).abs() < 0.25,
         "x={}",
@@ -189,8 +185,8 @@ impl PointSurface for MullerBrown {
         for i in 0..4 {
             let dx = px - MB_X0[i];
             let dy = py - MB_Y0[i];
-            let e = MB_A[i]
-                * (MB_A_COEF[i] * dx * dx + MB_B[i] * dx * dy + MB_C[i] * dy * dy).exp();
+            let e =
+                MB_A[i] * (MB_A_COEF[i] * dx * dx + MB_B[i] * dx * dy + MB_C[i] * dy * dy).exp();
             energy += e;
             gx += e * (2.0 * MB_A_COEF[i] * dx + MB_B[i] * dy);
             gy += e * (MB_B[i] * dx + 2.0 * MB_C[i] * dy);
@@ -227,11 +223,7 @@ fn fd_lowest_curvature(surface: &MullerBrown, x: ArrayView1<f64>, dr: f64) -> f6
     }
     struct Dense(ndarray::Array2<f64>);
     impl rgmin::ApplyHessian for Dense {
-        fn apply_hessian(
-            &self,
-            _x: ArrayView1<f64>,
-            v: ArrayView1<f64>,
-        ) -> Array1<f64> {
+        fn apply_hessian(&self, _x: ArrayView1<f64>, v: ArrayView1<f64>) -> Array1<f64> {
             self.0.dot(&v)
         }
     }
@@ -278,10 +270,8 @@ fn muller_brown_both_ways_ends_at_minima_with_positive_curvature() {
         xr[0],
         xr[1]
     );
-    for (label, x, energy, curv, arc) in [
-        ("forward", xf, ef, cf, af),
-        ("reverse", xr, er, cr, ar),
-    ] {
+    for (label, x, energy, curv, arc) in [("forward", xf, ef, cf, af), ("reverse", xr, er, cr, ar)]
+    {
         assert!(
             curv > 0.0,
             "{label} ended at ({}, {}) E={energy} arc={arc} lambda_min={curv}",
