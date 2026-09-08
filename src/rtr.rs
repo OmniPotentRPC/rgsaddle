@@ -35,7 +35,7 @@ use crate::tangent::compute_tangent;
 
 pub use rgmin::rtr::{RtrRadius, TcgResult, TcgStop, truncated_cg_projected as truncated_cg};
 
-fn nrm2(a: ArrayView1<f64>) -> f64 { a.dot(&a).sqrt() }
+use rgmin::vecops::{dot, nrm2};
 
 /// The assembled band at one point: per-image energies, chord tangents of
 /// the interior images and the NEB force on the interior, flattened.
