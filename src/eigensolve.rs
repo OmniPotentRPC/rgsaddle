@@ -110,6 +110,9 @@ pub fn exact_eigh(a: ArrayView2<f64>) -> Result<(Array1<f64>, Array2<f64>), Sadd
     jacobi_eigh(&mut work)
 }
 
+/// Ritz eigenvalues, basis vectors, and the operator applied to those vectors.
+pub type RitzDecomposition = (Array1<f64>, Array2<f64>, Array2<f64>);
+
 /// Rayleigh-Ritz on the columns of `v` against a dense `a`.
 ///
 /// Returns `(lams, v_rot, a @ v_rot)`. `gamma <= 0` falls through to
@@ -118,7 +121,7 @@ pub fn rayleigh_ritz(
     a: ArrayView2<f64>,
     v: ArrayView2<f64>,
     gamma: f64,
-) -> Result<(Array1<f64>, Array2<f64>, Array2<f64>), SaddleError> {
+) -> Result<RitzDecomposition, SaddleError> {
     if a.nrows() != a.ncols() || v.nrows() != a.nrows() {
         return Err(SaddleError::Shape(
             "Rayleigh-Ritz needs square A and matching V rows".into(),
@@ -177,7 +180,7 @@ pub fn lowest_on(
     };
     let params = EigenParams {
         kind,
-        krylov: seed.len().min(8).max(2),
+        krylov: seed.len().clamp(2, 8),
         ..EigenParams::default()
     };
     let mode = lowest_mode(&DenseApply(&a.to_owned()), x.view(), seed, &params)
@@ -190,6 +193,7 @@ pub fn lowest_on(
 /// `v` is the current Ritz basis `(d, n)`, `y` is `A @ v` (or the
 /// symmetrized action), `p` is the preconditioner, `b` the metric
 /// (`None` is `I`). `lams` / `vecs` are the current Ritz pairs.
+#[expect(clippy::too_many_arguments, reason = "The public expansion API names each operator and basis separately.")]
 pub fn expand(
     v: ArrayView2<f64>,
     y: ArrayView2<f64>,
@@ -326,7 +330,7 @@ pub fn rayleigh_ritz_iter(
     v0: ArrayView2<f64>,
     gamma: f64,
     method: ExpandKind,
-) -> Result<(Array1<f64>, Array2<f64>, Array2<f64>), SaddleError> {
+) -> Result<RitzDecomposition, SaddleError> {
     if a.nrows() != a.ncols() || v0.nrows() != a.nrows() {
         return Err(SaddleError::Shape(
             "iterative Rayleigh-Ritz needs square A and matching V rows".into(),

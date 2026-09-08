@@ -240,8 +240,8 @@ impl Rotation {
     /// `dR_{αβ} / d pos_{kγ} = δ_{αγ} ref_{kβ}`.
     fn df_dpos(&self, local: usize, dim: usize) -> [[f64; 4]; 4] {
         let mut d_r = [[0.0; 3]; 3];
-        for beta in 0..3 {
-            d_r[dim][beta] = self.refpos[(local, beta)];
+        for (beta, value) in d_r[dim].iter_mut().enumerate() {
+            *value = self.refpos[(local, beta)];
         }
         let d_rtr = self.refpos[(local, dim)];
         let d_ftop = [
@@ -629,13 +629,14 @@ fn solve4(mut a: [[f64; 4]; 4], mut b: [f64; 4]) -> [f64; 4] {
             a.swap(k, piv);
             b.swap(k, piv);
         }
-        let akk = a[k][k];
-        for i in (k + 1)..4 {
-            let f = a[i][k] / akk;
-            for j in k..4 {
-                a[i][j] -= f * a[k][j];
+        let pivot_row = a[k];
+        let pivot_rhs = b[k];
+        for (row, rhs) in a.iter_mut().zip(b.iter_mut()).skip(k + 1) {
+            let f = row[k] / pivot_row[k];
+            for (value, pivot) in row.iter_mut().zip(pivot_row).skip(k) {
+                *value -= f * pivot;
             }
-            b[i] -= f * b[k];
+            *rhs -= f * pivot_rhs;
         }
     }
     let mut x = [0.0; 4];
@@ -655,14 +656,14 @@ fn solve4(mut a: [[f64; 4]; 4], mut b: [f64; 4]) -> [f64; 4] {
 
 fn jacobi4(mut a: [[f64; 4]; 4]) -> ([f64; 4], [[f64; 4]; 4]) {
     let mut v = [[0.0; 4]; 4];
-    for i in 0..4 {
-        v[i][i] = 1.0;
+    for (i, row) in v.iter_mut().enumerate() {
+        row[i] = 1.0;
     }
     for _ in 0..32 {
         let mut off = 0.0;
-        for p in 0..4 {
-            for q in (p + 1)..4 {
-                off += a[p][q] * a[p][q];
+        for (p, row) in a.iter().enumerate() {
+            for value in row.iter().skip(p + 1) {
+                off += value * value;
             }
         }
         if off.sqrt() <= 1e-15 {
@@ -679,23 +680,24 @@ fn jacobi4(mut a: [[f64; 4]; 4]) -> ([f64; 4], [[f64; 4]; 4]) {
                 let t = sign / (theta.abs() + (theta * theta + 1.0).sqrt());
                 let c = 1.0 / (t * t + 1.0).sqrt();
                 let s = t * c;
-                for i in 0..4 {
-                    let aip = a[i][p];
-                    let aiq = a[i][q];
-                    a[i][p] = c * aip - s * aiq;
-                    a[i][q] = s * aip + c * aiq;
+                for row in &mut a {
+                    let aip = row[p];
+                    let aiq = row[q];
+                    row[p] = c * aip - s * aiq;
+                    row[q] = s * aip + c * aiq;
                 }
-                for i in 0..4 {
-                    let api = a[p][i];
-                    let aqi = a[q][i];
-                    a[p][i] = c * api - s * aqi;
-                    a[q][i] = s * api + c * aqi;
+                let (before_q, from_q) = a.split_at_mut(q);
+                for (api, aqi) in before_q[p].iter_mut().zip(&mut from_q[0]) {
+                    let old_p = *api;
+                    let old_q = *aqi;
+                    *api = c * old_p - s * old_q;
+                    *aqi = s * old_p + c * old_q;
                 }
-                for i in 0..4 {
-                    let vip = v[i][p];
-                    let viq = v[i][q];
-                    v[i][p] = c * vip - s * viq;
-                    v[i][q] = s * vip + c * viq;
+                for row in &mut v {
+                    let vip = row[p];
+                    let viq = row[q];
+                    row[p] = c * vip - s * viq;
+                    row[q] = s * vip + c * viq;
                 }
             }
         }

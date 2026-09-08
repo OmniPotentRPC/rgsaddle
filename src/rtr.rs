@@ -303,7 +303,7 @@ impl BandRtr {
         let base = positions.clone();
         let hvp = |v: &Array1<f64>| -> Array1<f64> {
             let vn = nrm2(v.view());
-            if !(vn > 0.0) {
+            if vn <= 0.0 || vn.is_nan() {
                 return Array1::zeros(interior);
             }
             let scatter = |sign: f64| {

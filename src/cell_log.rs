@@ -95,9 +95,9 @@ pub fn m3_mul(a: M3, b: M3) -> M3 {
 
 fn frobenius(a: M3) -> f64 {
     let mut s = 0.0;
-    for i in 0..3 {
-        for j in 0..3 {
-            s += a[i][j] * a[i][j];
+    for row in a {
+        for value in row {
+            s += value * value;
         }
     }
     s.sqrt()
@@ -308,9 +308,9 @@ impl CellState {
         };
         let mut p = Array1::zeros(self.n_cell_dof());
         let mut k = 0;
-        for i in 0..9 {
+        for (i, value) in raw.iter().enumerate() {
             if self.mask[i] {
-                p[k] = raw[i];
+                p[k] = *value;
                 k += 1;
             }
         }
@@ -333,9 +333,9 @@ impl CellState {
             CellChart::Entries => {
                 let mut c = self.cell9();
                 let mut k = 0;
-                for i in 0..9 {
+                for (i, value) in c.iter_mut().enumerate() {
                     if self.mask[i] {
-                        c[i] += d[k];
+                        *value += d[k];
                         k += 1;
                     }
                 }
@@ -344,9 +344,9 @@ impl CellState {
             CellChart::LogDeform => {
                 let mut l = m3_to_row9(self.log_deform()?);
                 let mut k = 0;
-                for i in 0..9 {
+                for (i, value) in l.iter_mut().enumerate() {
                     if self.mask[i] {
-                        l[i] += d[k];
+                        *value += d[k];
                         k += 1;
                     }
                 }
@@ -377,9 +377,9 @@ impl CellState {
         };
         let mut out = Array1::zeros(self.n_cell_dof());
         let mut k = 0;
-        for i in 0..9 {
+        for (i, value) in g_raw.iter().enumerate() {
             if self.mask[i] {
-                out[k] = g_raw[i];
+                out[k] = *value;
                 k += 1;
             }
         }
@@ -458,11 +458,11 @@ impl CellState {
 fn j_new_l0(orig: M3, factor: f64) -> Array2<f64> {
     let mut j = Array2::<f64>::zeros((9, 9));
     for i in 0..3 {
-        for jcol in 0..3 {
+        for (jcol, row) in orig.iter().enumerate() {
             let ij = 3 * i + jcol;
-            for q in 0..3 {
+            for (q, value) in row.iter().enumerate() {
                 let ab = 3 * i + q;
-                j[(ab, ij)] = orig[jcol][q] / factor;
+                j[(ab, ij)] = value / factor;
             }
         }
     }

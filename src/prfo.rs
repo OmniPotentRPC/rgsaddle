@@ -194,6 +194,7 @@ impl PartitionedRationalFunctionOptimization {
     }
 
     /// Vector transport of the P-RFO increment from `x` to `x_to`.
+    #[expect(clippy::too_many_arguments, reason = "The public transport API names the two points and the spectral step inputs.")]
     pub fn transport_step<M: Manifold>(
         &self,
         man: &M,

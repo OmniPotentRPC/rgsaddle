@@ -150,13 +150,16 @@ pub fn bond_hessian(
     Ok(h)
 }
 
+/// Seed Hessian, fitted bond stiffnesses, and the corresponding atom pairs.
+pub type ForceMatchedHessian = (Array2<f64>, Array1<f64>, Vec<[usize; 2]>);
+
 /// Fit `k` and return the seed Hessian in one call.
 pub fn force_match_hessian(
     x: ArrayView1<f64>,
     g: ArrayView1<f64>,
     z: &[u8],
     scale: f64,
-) -> Result<(Array2<f64>, Array1<f64>, Vec<[usize; 2]>), SaddleError> {
+) -> Result<ForceMatchedHessian, SaddleError> {
     let pairs = covalent_pairs(x, z, scale)?;
     if pairs.is_empty() {
         return Ok((Array2::eye(x.len()), Array1::zeros(0), pairs));

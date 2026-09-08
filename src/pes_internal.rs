@@ -850,28 +850,6 @@ fn internals_grad_from_b(
     Ok(solve_bbt(b, &bg))
 }
 
-fn lattice_of(cell: &Cell) -> [[f64; 3]; 3] {
-    let o = cell.origin();
-    let a = cell.cartesian([1.0, 0.0, 0.0]);
-    let b = cell.cartesian([0.0, 1.0, 0.0]);
-    let c = cell.cartesian([0.0, 0.0, 1.0]);
-    [
-        [a[0] - o[0], a[1] - o[1], a[2] - o[2]],
-        [b[0] - o[0], b[1] - o[1], b[2] - o[2]],
-        [c[0] - o[0], c[1] - o[1], c[2] - o[2]],
-    ]
-}
-
-fn cell_from_lattice(
-    a: [f64; 3],
-    b: [f64; 3],
-    c: [f64; 3],
-    origin: [f64; 3],
-) -> Result<Cell, SaddleError> {
-    Cell::from_vectors(a, b, c, origin)
-        .map_err(|_| SaddleError::Shape("niggli produced a singular cell".into()))
-}
-
 fn dot3(u: [f64; 3], v: [f64; 3]) -> f64 {
     u[0] * v[0] + u[1] * v[1] + u[2] * v[2]
 }
@@ -961,12 +939,10 @@ pub fn niggli_reduce_vectors(
             if eta > 0.0 {
                 a = neg(a);
             }
-            if 2.0 * dot3(a, b) > 0.0 {
-                if 2.0 * dot3(b, c) > 0.0 {
-                    c = neg(c);
-                } else if 2.0 * dot3(a, c) > 0.0 {
-                    c = neg(c);
-                }
+            if 2.0 * dot3(a, b) > 0.0
+                && (2.0 * dot3(b, c) > 0.0 || 2.0 * dot3(a, c) > 0.0)
+            {
+                c = neg(c);
             }
         }
         let aa = dot3(a, a);
