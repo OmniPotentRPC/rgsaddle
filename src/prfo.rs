@@ -76,16 +76,10 @@ pub const SYNONYMS: &[&str] = &[
 ///
 /// Holds the saddle `order`. Spectrum and gradient are arguments of
 /// [`Self::get_s`], not stored state. `alpha` is an argument too.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct PartitionedRationalFunctionOptimization {
     /// Sella `order`: number of uphill modes (1 for a first-order saddle).
     pub order: usize,
-}
-
-impl Default for PartitionedRationalFunctionOptimization {
-    fn default() -> Self {
-        Self { order: 0 }
-    }
 }
 
 impl PartitionedRationalFunctionOptimization {
@@ -107,7 +101,7 @@ impl PartitionedRationalFunctionOptimization {
 
     /// Exact Sella `BaseStepper.match`.
     pub fn match_name(name: &str) -> bool {
-        SYNONYMS.iter().any(|s| *s == name)
+        SYNONYMS.contains(&name)
     }
 
     /// Factory: `Some` when `name` is a P-RFO synonym.

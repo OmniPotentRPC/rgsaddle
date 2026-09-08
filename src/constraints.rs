@@ -317,11 +317,11 @@ impl Constraints {
         self.check_frame(x)?;
         let mut r = Array1::zeros(self.eqs.len());
         for (i, eq) in self.eqs.iter().enumerate() {
-            if self.ignore_rotation {
-                if let Equality::Rotation { .. } = eq {
-                    r[i] = 0.0;
-                    continue;
-                }
+            if self.ignore_rotation
+                && let Equality::Rotation { .. } = eq
+            {
+                r[i] = 0.0;
+                continue;
             }
             r[i] = eq.residual(x)?;
         }

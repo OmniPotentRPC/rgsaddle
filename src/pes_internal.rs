@@ -82,7 +82,7 @@ impl InternalPes {
         chart: Constraints,
         dummies: Array1<f64>,
     ) -> Result<Self, SaddleError> {
-        if dummies.len() % 3 != 0 {
+        if !dummies.len().is_multiple_of(3) {
             return Err(SaddleError::Shape("dummy frame must be 3 n_dummy".into()));
         }
         if chart.n_atoms() * 3 != x.len() + dummies.len() {

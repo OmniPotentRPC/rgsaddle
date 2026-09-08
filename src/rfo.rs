@@ -24,16 +24,10 @@ pub const SYNONYMS: &[&str] = &["rfo", "rational function optimization"];
 ///
 /// Holds the saddle `order`. `alpha` is an argument of [`Self::get_s`],
 /// not stored state.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct RationalFunctionOptimization {
     /// Sella `order`: 0 for a minimum, 1 for a first-order saddle.
     pub order: usize,
-}
-
-impl Default for RationalFunctionOptimization {
-    fn default() -> Self {
-        Self { order: 0 }
-    }
 }
 
 impl RationalFunctionOptimization {
@@ -55,7 +49,7 @@ impl RationalFunctionOptimization {
 
     /// Exact Sella `BaseStepper.match`.
     pub fn match_name(name: &str) -> bool {
-        SYNONYMS.iter().any(|s| *s == name)
+        SYNONYMS.contains(&name)
     }
 
     /// Factory: `Some` when `name` is an RFO synonym.

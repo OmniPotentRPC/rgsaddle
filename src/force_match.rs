@@ -36,7 +36,7 @@ pub fn covalent_pairs(
     z: &[u8],
     scale: f64,
 ) -> Result<Vec<[usize; 2]>, SaddleError> {
-    if x.len() % 3 != 0 || x.len() / 3 != z.len() {
+    if !x.len().is_multiple_of(3) || x.len() / 3 != z.len() {
         return Err(SaddleError::Shape(
             "force_match frame is not 3N with matching Z".into(),
         ));

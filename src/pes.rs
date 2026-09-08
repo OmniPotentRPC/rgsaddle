@@ -36,7 +36,7 @@ pub struct CartesianPes {
 impl CartesianPes {
     /// `x` is 3N Cartesian; `masses` is length N.
     pub fn new(x: Array1<f64>, masses: Array1<f64>) -> Result<Self, SaddleError> {
-        if x.is_empty() || x.len() % 3 != 0 {
+        if x.is_empty() || !x.len().is_multiple_of(3) {
             return Err(SaddleError::Shape(
                 "saddle must be a nonzero 3N Cartesian".into(),
             ));

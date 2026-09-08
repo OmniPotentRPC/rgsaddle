@@ -354,7 +354,7 @@ impl Displacement {
 impl Manifold for Translation {
     fn required_dim(&self, n: usize) -> Result<(), usize> {
         let need = packed_need(&self.indices);
-        if n >= need && n % 3 == 0 {
+        if n >= need && n.is_multiple_of(3) {
             Ok(())
         } else {
             Err(need)
@@ -380,7 +380,7 @@ impl Manifold for Translation {
 impl Manifold for Rotation {
     fn required_dim(&self, n: usize) -> Result<(), usize> {
         let need = packed_need(&self.indices);
-        if n >= need && n % 3 == 0 {
+        if n >= need && n.is_multiple_of(3) {
             Ok(())
         } else {
             Err(need)
@@ -406,7 +406,7 @@ impl Manifold for Rotation {
 impl Manifold for Displacement {
     fn required_dim(&self, n: usize) -> Result<(), usize> {
         let need = packed_need(&self.indices);
-        if n >= need && n % 3 == 0 {
+        if n >= need && n.is_multiple_of(3) {
             Ok(())
         } else {
             Err(need)
@@ -496,7 +496,7 @@ where
 }
 
 fn check_cart(x: ArrayView1<f64>) -> Result<(), crate::SaddleError> {
-    if x.is_empty() || x.len() % 3 != 0 {
+    if x.is_empty() || !x.len().is_multiple_of(3) {
         return Err(crate::SaddleError::Shape(
             "internals need a nonzero 3N Cartesian".into(),
         ));

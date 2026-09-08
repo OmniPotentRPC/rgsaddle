@@ -38,7 +38,7 @@
 //! assert!((result.model_decrease - 1.0).abs() < 1e-12);
 //! ```
 
-use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
+use ndarray::{Array1, Array2, ArrayView2, s};
 
 use crate::band::{BandConfig, BandSurface};
 use crate::error::SaddleError;

@@ -2494,7 +2494,7 @@ pub unsafe extern "C" fn rgsaddle_internal_pes_create_from_find(
     let mut bond_v = Vec::with_capacity(n_bonds as usize);
     if n_bonds > 0 {
         let raw = unsafe { slice::from_raw_parts(bonds, 2 * n_bonds as usize) };
-        for chunk in raw.chunks_exact(2) {
+        for chunk in raw.as_chunks::<2>().0 {
             if chunk[0] < 0 || chunk[1] < 0 {
                 return std::ptr::null_mut();
             }
@@ -2504,7 +2504,7 @@ pub unsafe extern "C" fn rgsaddle_internal_pes_create_from_find(
     let mut angle_v = Vec::with_capacity(n_angles as usize);
     if n_angles > 0 {
         let raw = unsafe { slice::from_raw_parts(angles, 3 * n_angles as usize) };
-        for chunk in raw.chunks_exact(3) {
+        for chunk in raw.as_chunks::<3>().0 {
             if chunk.iter().any(|&a| a < 0) {
                 return std::ptr::null_mut();
             }
@@ -2514,7 +2514,7 @@ pub unsafe extern "C" fn rgsaddle_internal_pes_create_from_find(
     let mut dih_v = Vec::with_capacity(n_dihedrals as usize);
     if n_dihedrals > 0 {
         let raw = unsafe { slice::from_raw_parts(dihedrals, 4 * n_dihedrals as usize) };
-        for chunk in raw.chunks_exact(4) {
+        for chunk in raw.as_chunks::<4>().0 {
             if chunk.iter().any(|&a| a < 0) {
                 return std::ptr::null_mut();
             }

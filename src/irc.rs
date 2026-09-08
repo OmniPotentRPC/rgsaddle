@@ -125,7 +125,7 @@ impl IrcSession {
         direction: IrcDirection,
     ) -> Result<Self, SaddleError> {
         let n3 = saddle.len();
-        if n3 == 0 || n3 % 3 != 0 {
+        if n3 == 0 || !n3.is_multiple_of(3) {
             return Err(SaddleError::Shape(
                 "saddle must be a nonzero 3N Cartesian".into(),
             ));
@@ -300,10 +300,10 @@ impl IrcSession {
             v0ts[i] = self.config.dx * (mw.host_view()[i] / n) / self.sqrtm[i].max(1e-16);
         }
         // Sella: first nonzero of v0ts is positive, then reverse is -v0ts.
-        if let Some(&v) = v0ts.iter().find(|v| v.abs() > 1e-16) {
-            if v < 0.0 {
-                v0ts.mapv_inplace(|c| -c);
-            }
+        if let Some(&v) = v0ts.iter().find(|v| v.abs() > 1e-16)
+            && v < 0.0
+        {
+            v0ts.mapv_inplace(|c| -c);
         }
         match direction {
             IrcDirection::Forward => v0ts,
@@ -367,33 +367,14 @@ impl IrcSession {
             let interior = self.hess.is_posdef()
                 && self.arc > 8.0 * self.config.dx
                 && self.trust().cons(&s) + 1e-8 < self.config.dx;
-            if inner_steps == 1 {
-                if let Some(prev) = &self.last_outer {
-                    // Reversal after a PD model and a long enough arc
-                    // is a well overshoot only when the force is already
-                    // under the host tolerance. A stale BFGS pair can
-                    // reverse on a molecular surface far from a basin.
-                    if self.hess.is_posdef()
-                        && self.arc > 8.0 * self.config.dx
-                        && max_force <= self.config.force_tol
-                        && dot(prev.view(), s.view()) < 0.0
-                    {
-                        self.d1.fill(0.0);
-                        self.last_step = None;
-                        self.solver.forget();
-                        return Ok(IrcReport {
-                            energy,
-                            max_force,
-                            arc: self.arc,
-                            inner_steps,
-                            at_minimum: true,
-                        });
-                    }
-                }
-            }
-            if let Some(prev) = &self.last_step {
-                if !kicked
-                    && self.hess.is_posdef()
+            if inner_steps == 1
+                && let Some(prev) = &self.last_outer
+            {
+                // Reversal after a PD model and a long enough arc
+                // is a well overshoot only when the force is already
+                // under the host tolerance. A stale BFGS pair can
+                // reverse on a molecular surface far from a basin.
+                if self.hess.is_posdef()
                     && self.arc > 8.0 * self.config.dx
                     && max_force <= self.config.force_tol
                     && dot(prev.view(), s.view()) < 0.0
@@ -409,6 +390,24 @@ impl IrcSession {
                         at_minimum: true,
                     });
                 }
+            }
+            if let Some(prev) = &self.last_step
+                && !kicked
+                && self.hess.is_posdef()
+                && self.arc > 8.0 * self.config.dx
+                && max_force <= self.config.force_tol
+                && dot(prev.view(), s.view()) < 0.0
+            {
+                self.d1.fill(0.0);
+                self.last_step = None;
+                self.solver.forget();
+                return Ok(IrcReport {
+                    energy,
+                    max_force,
+                    arc: self.arc,
+                    inner_steps,
+                    at_minimum: true,
+                });
             }
             self.last_step = Some(s.clone());
             last_interior = interior;
@@ -480,24 +479,25 @@ impl IrcSession {
         // accepted step past the 8-dx window is that overshoot;
         // |g| has often already grown on the far wall. The 8-dx
         // gate keeps the kick and the first downhill steps alive.
-        if !kicked && self.arc > 8.0 * self.config.dx {
-            if let Some(prev) = &self.last_outer {
-                let mut force = g0.clone();
-                force.mapv_inplace(|v| -v);
-                if dot(prev.view(), force.view()) < 0.0 {
-                    // Current point is already on the far wall. Keep
-                    // the last downhill geometry.
-                    axpy(-1.0, prev.view(), &mut self.x);
-                    let (energy, g) = surface.eval(self.x.view())?;
-                    let max_force = self.config.force_gate.value(g.view());
-                    return Ok(IrcReport {
-                        energy,
-                        max_force,
-                        arc: self.arc,
-                        inner_steps: 0,
-                        at_minimum: true,
-                    });
-                }
+        if !kicked
+            && self.arc > 8.0 * self.config.dx
+            && let Some(prev) = &self.last_outer
+        {
+            let mut force = g0.clone();
+            force.mapv_inplace(|v| -v);
+            if dot(prev.view(), force.view()) < 0.0 {
+                // Current point is already on the far wall. Keep
+                // the last downhill geometry.
+                axpy(-1.0, prev.view(), &mut self.x);
+                let (energy, g) = surface.eval(self.x.view())?;
+                let max_force = self.config.force_gate.value(g.view());
+                return Ok(IrcReport {
+                    energy,
+                    max_force,
+                    arc: self.arc,
+                    inner_steps: 0,
+                    at_minimum: true,
+                });
             }
         }
 
@@ -544,16 +544,17 @@ impl IrcSession {
             dx_mw_n2 += dmw * dmw;
             s[i] = dmw / self.sqrtm[i].max(1e-16);
         }
-        if let Some(prev) = &self.last_outer {
-            if self.arc > 8.0 * h && dot(prev.view(), s.view()) < 0.0 {
-                return Ok(IrcReport {
-                    energy: energy0,
-                    max_force: max_force0,
-                    arc: self.arc,
-                    inner_steps: 1,
-                    at_minimum: true,
-                });
-            }
+        if let Some(prev) = &self.last_outer
+            && self.arc > 8.0 * h
+            && dot(prev.view(), s.view()) < 0.0
+        {
+            return Ok(IrcReport {
+                energy: energy0,
+                max_force: max_force0,
+                arc: self.arc,
+                inner_steps: 1,
+                at_minimum: true,
+            });
         }
         axpy(1.0, s.view(), &mut self.x);
         let ev = surface.eval(self.x.view())?;

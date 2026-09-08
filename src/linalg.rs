@@ -241,12 +241,12 @@ impl NumericalHessian {
                 "NumericalHessian g0 must match x0".into(),
             ));
         }
-        if let Some(u) = uproj.as_ref() {
-            if u.nrows() != x0.len() {
-                return Err(SaddleError::Shape(
-                    "Uproj rows must match the 3N frame".into(),
-                ));
-            }
+        if let Some(u) = uproj.as_ref()
+            && u.nrows() != x0.len()
+        {
+            return Err(SaddleError::Shape(
+                "Uproj rows must match the 3N frame".into(),
+            ));
         }
         let ntrue = x0.len();
         Ok(Self {
