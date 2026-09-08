@@ -432,6 +432,14 @@ pub unsafe extern "C" fn rgsaddle_band_create(
         force_gate,
         max_move: cfg.max_move,
         method: method_of(cfg.method),
+        // method 2: Riemannian trust region on the band; the trust radius
+        // is the per-atom cap max_move over the interior images in the
+        // flattened metric, so an accepted step moves no image further on
+        // average than the solver path allows.
+        rtr: (cfg.method == 2).then(|| crate::rtr::RtrConfig {
+            radius_max: cfg.max_move * ((n_images - 2) as f64).sqrt(),
+            ..crate::rtr::RtrConfig::default()
+        }),
     };
     match BandSession::new(band_config, initial) {
         Ok(session) => Box::into_raw(Box::new(RgsaddleBand {

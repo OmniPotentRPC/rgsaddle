@@ -84,6 +84,7 @@ pub mod projection;
 pub mod python;
 pub mod qn;
 pub mod restricted;
+pub mod rtr;
 pub mod rfo;
 pub mod samd;
 pub mod sella_min;
@@ -119,6 +120,7 @@ pub use pes_internal::{
     niggli_reduce_vectors, place_perp_dummy,
 };
 pub use projection::ProjectionKind;
+pub use rtr::{BandForces, BandRtr, RtrConfig, RtrRadius, RtrReport, TcgResult, TcgStop, band_forces, reparametrize_equal_arc, truncated_cg};
 pub use qn::{
     HessUpdate, QuasiNewton, StepperKind, get_stepper, retract_qn, symmetrize_y, update_h,
     update_h_ms,

@@ -39,6 +39,9 @@ pub struct BandConfig {
     /// `Accept::None` on L-BFGS / BFGS / steepest takes the
     /// maxmove-clipped step (rgmin-65z1).
     pub method: Method,
+    /// When set, the band steps by the Riemannian trust region
+    /// ([`crate::rtr::BandRtr`]) instead of the rgmin solver in `method`.
+    pub rtr: Option<crate::rtr::RtrConfig>,
 }
 
 impl Default for BandConfig {
@@ -58,6 +61,7 @@ impl Default for BandConfig {
             method: Method::Fire {
                 kind: rgmin::FireKind::V2,
             },
+            rtr: None,
         }
     }
 }
@@ -229,6 +233,7 @@ pub struct BandSession {
     solver: Solver,
     climb: ClimbState,
     iteration: usize,
+    rtr: Option<crate::rtr::BandRtr>,
 }
 
 impl BandSession {
@@ -258,12 +263,16 @@ impl BandSession {
         };
         let mut solver = Solver::new(config.method.clone(), control, interior_dof);
         solver.set_highs(true);
+        let rtr = config
+            .rtr
+            .map(|cfg| crate::rtr::BandRtr::new(cfg, config.climbing.is_some()));
         Ok(Self {
             config,
             positions: initial,
             solver,
             climb: ClimbState::new(),
             iteration: 0,
+            rtr,
         })
     }
 
@@ -292,6 +301,9 @@ impl BandSession {
     pub fn reset(&mut self) {
         self.solver.forget();
         self.climb.reset();
+        if let Some(rtr) = &mut self.rtr {
+            *rtr = crate::rtr::BandRtr::new(rtr.config, rtr.climb);
+        }
     }
 
     fn interior_flat(&self) -> Array1<f64> {
@@ -318,6 +330,9 @@ impl BandSession {
     /// One solver step over the assembled band force. The host
     /// interleaves its policy between calls.
     pub fn step<S: BandSurface>(&mut self, surface: &S) -> Result<BandReport, SaddleError> {
+        if self.rtr.is_some() {
+            return self.step_rtr(surface);
+        }
         let n_images = self.positions.nrows();
         let dof = self.positions.ncols();
         let interior_dof = (n_images - 2) * dof;
@@ -358,6 +373,31 @@ impl BandSession {
             status,
             max_force,
             ci_index: self.climb.ci(),
+            iteration: self.iteration,
+        })
+    }
+
+    /// One Riemannian trust-region step. The climbing image is armed by
+    /// the same baseline rule as the solver path (an assembled evaluation
+    /// at the current point arms it), then the RTR step climbs on it.
+    fn step_rtr<S: BandSurface>(&mut self, surface: &S) -> Result<BandReport, SaddleError> {
+        let (_, _, max_force_before) =
+            assemble_band(&self.config, &self.climb, surface, &self.positions)?;
+        let armed = self.config.climbing.is_some() && self.climb.ci().is_some();
+        let rtr = self.rtr.as_mut().expect("rtr configured");
+        rtr.climb = armed;
+        let report = rtr.step(&self.config, surface, &mut self.positions)?;
+        self.iteration += 1;
+        let max_force = if report.accepted { report.max_force } else { max_force_before };
+        let status = if max_force <= self.config.force_tol {
+            BandStatus::Converged
+        } else {
+            BandStatus::Running
+        };
+        Ok(BandReport {
+            status,
+            max_force,
+            ci_index: report.ci,
             iteration: self.iteration,
         })
     }

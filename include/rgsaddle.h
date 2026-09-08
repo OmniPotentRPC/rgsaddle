@@ -73,7 +73,10 @@ typedef enum {
 
 typedef enum {
   RGSADDLE_METHOD_FIRE = 0,
-  RGSADDLE_METHOD_LBFGS = 1
+  RGSADDLE_METHOD_LBFGS = 1,
+  /* Riemannian trust region with truncated CG on the band (rtr.rs); the
+     trust radius is max_move over the interior images. */
+  RGSADDLE_METHOD_RTR = 2
 } rgsaddle_method_t;
 
 typedef enum {

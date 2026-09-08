@@ -139,6 +139,46 @@ int main(void) {
   }
   rgsaddle_band_free(band);
   rgsaddle_band_free(NULL);
-  printf("RGSADDLE_C_ABI_OK steps=%d ci=%lld\n", steps, (long long)rep.ci_index);
+
+  /* The same band under the Riemannian trust region (method 2) must
+     converge to the same saddle with fixed endpoints. */
+  cfg.method = RGSADDLE_METHOD_RTR;
+  RgsaddleBand *rtr = rgsaddle_band_create(&cfg, n_images, n_atoms, pos);
+  if (!rtr) {
+    fprintf(stderr, "rtr band create failed\n");
+    return 1;
+  }
+  int rtr_steps = 0;
+  rgsaddle_report_t rrep;
+  memset(&rrep, 0, sizeof rrep);
+  do {
+    int rc = rgsaddle_band_step(rtr, surface, NULL, &rrep);
+    if (rc != RGSADDLE_OK) {
+      fprintf(stderr, "rtr step rc=%d (%s)\n", rc, rgsaddle_status_name(rc));
+      return 1;
+    }
+    ++rtr_steps;
+  } while (rrep.status == RGSADDLE_STATUS_RUNNING && rtr_steps < 3000);
+  if (rrep.status != RGSADDLE_STATUS_CONVERGED) {
+    fprintf(stderr, "rtr did not converge, max_force=%g\n", rrep.max_force);
+    return 1;
+  }
+  if (rgsaddle_band_positions(rtr, out) != RGSADDLE_OK) {
+    fprintf(stderr, "rtr positions failed\n");
+    return 1;
+  }
+  if (fabs(out[0] + 1.0) > 1e-12 || fabs(out[(n_images - 1) * 3] - 1.0) > 1e-12) {
+    fprintf(stderr, "rtr endpoints moved\n");
+    return 1;
+  }
+  if (rrep.ci_index < 1 || rrep.ci_index > n_images - 2 ||
+      fabs(out[rrep.ci_index * 3]) > 0.15) {
+    fprintf(stderr, "rtr climbing image off the saddle: ci=%lld x=%g\n",
+            (long long)rrep.ci_index, rrep.ci_index >= 0 ? out[rrep.ci_index * 3] : 0.0);
+    return 1;
+  }
+  rgsaddle_band_free(rtr);
+  printf("RGSADDLE_C_ABI_OK steps=%d ci=%lld rtr_steps=%d\n", steps,
+         (long long)rep.ci_index, rtr_steps);
   return 0;
 }
