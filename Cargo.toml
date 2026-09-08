@@ -24,7 +24,7 @@ readcon-db = ["readcon", "dep:readcon-db"]
 chemfiles = ["readcon", "readcon-core/chemfiles"]
 
 [dependencies]
-rgmin = { git = "https://github.com/OmniPotentRPC/rgmin.git", rev = "28f1fe671e71145ed40a3788352f93f9bb1ad56d" }
+rgmin = { git = "https://github.com/OmniPotentRPC/rgmin.git", rev = "65e7580121b01cbe054c0c818ee4b8d878c44271" }
 pyo3 = { version = "0.26", features = ["extension-module", "abi3-py310"], optional = true }
 eindir-core = { version = "0.6.0", git = "https://github.com/HaoZeke/eindir.git", rev = "f3c42130bb389ba6cd6e4cfdc8b2e182f4a764e9", features = ["capi"] }
 ndarray = "0.17"
