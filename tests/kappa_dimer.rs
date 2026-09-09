@@ -24,7 +24,7 @@ fn second_unstable_mode_produces_downhill_restraint() {
     let out = kappa_dimer_force(array![0.1,0.,0.].view(), array![1.,0.,0.].view(),
         Array2::zeros((0,3)).view(), |v| Ok(h.dot(&v)), &KappaDimerConfig::default()).unwrap();
     assert_abs_diff_eq!(out.kappa, 20., epsilon=1e-8);
-    assert_abs_diff_eq!(out.force, array![-0.1,0.,0.], epsilon=1e-12);
+    assert_vector(&out.force, &array![-0.1,0.,0.], 1e-12);
 }
 
 #[test]
@@ -53,7 +53,7 @@ fn curvature_and_force_obey_rotation_and_energy_scaling() {
     let scaled = kappa_dimer_force((q.dot(&g)*7.).view(),q.dot(&m).view(),
         Array2::zeros((0,3)).view(), |v| Ok(hg.dot(&v)), &cfg).unwrap();
     assert_abs_diff_eq!(bare.kappa, scaled.kappa, epsilon=1e-8);
-    assert_abs_diff_eq!(q.dot(&bare.force)*7., scaled.force, epsilon=1e-7);
+    assert_vector(&(q.dot(&bare.force)*7.), &scaled.force, 1e-7);
 }
 
 #[test]
@@ -61,7 +61,7 @@ fn zero_gradient_does_not_divide_or_evaluate_a_hessian() {
     let out = kappa_dimer_force(Array1::zeros(3).view(), array![1.,0.,0.].view(),
         Array2::zeros((0,3)).view(), |_| panic!("stationary force needs no kappa"),
         &KappaDimerConfig::default()).unwrap();
-    assert_abs_diff_eq!(out.force, Array1::zeros(3), epsilon=0.);
+    assert_vector(&out.force, &Array1::zeros(3), 0.);
     assert_eq!(out.actions, 0);
 }
 
@@ -92,4 +92,11 @@ fn invalid_beta_and_nonfinite_inputs_are_rejected() {
     }
     assert!(kappa_dimer_force(array![f64::NAN,0.,0.].view(),g.view(),
         Array2::zeros((0,3)).view(), |v| Ok(v.to_owned()), &KappaDimerConfig::default()).is_err());
+}
+
+fn assert_vector(actual: &Array1<f64>, expected: &Array1<f64>, tolerance: f64) {
+    assert_eq!(actual.len(), expected.len());
+    for (a,b) in actual.iter().zip(expected) {
+        assert_abs_diff_eq!(a,b,epsilon=tolerance);
+    }
 }
