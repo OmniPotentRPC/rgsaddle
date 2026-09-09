@@ -212,16 +212,22 @@ fn lowest_via_fd<S: PointSurface>(
 ) -> Result<(Array1<f64>, f64, usize), SaddleError> {
     let excluded = surface.excluded_modes(x)?;
     if excluded.ncols() != x.len() || !excluded.iter().all(|v| v.is_finite()) {
-        return Err(SaddleError::Shape("minimum-mode excluded directions".into()));
+        return Err(SaddleError::Shape(
+            "minimum-mode excluded directions".into(),
+        ));
     }
     let mut space = Complement::new(x.len());
-    for direction in excluded.rows() { space.exclude(direction); }
+    for direction in excluded.rows() {
+        space.exclude(direction);
+    }
     if space.dimension() == 0 {
         return Err(SaddleError::Shape("minimum-mode space is empty".into()));
     }
     let mut reduced_seed = space.reduce(seed.view());
-    if reduced_seed.dot(&reduced_seed).sqrt() <= 64.0*f64::EPSILON {
-        reduced_seed = Array1::from_iter((0..space.dimension()).map(|i| ((i+1) as f64*1.618033988749895).sin()));
+    if reduced_seed.dot(&reduced_seed).sqrt() <= 64.0 * f64::EPSILON {
+        reduced_seed = Array1::from_iter(
+            (0..space.dimension()).map(|i| ((i + 1) as f64 * 1.618033988749895).sin()),
+        );
     }
     let h = FdHvp {
         surface,

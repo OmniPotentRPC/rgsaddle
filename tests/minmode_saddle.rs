@@ -130,24 +130,38 @@ fn kappa_lbfgs_finds_the_saddle() {
 
 struct HarmonicWithRigidMode;
 impl PointSurface for HarmonicWithRigidMode {
-    fn eval(&self,x:ArrayView1<f64>) -> Result<(f64,Array1<f64>),SaddleError> {
-        Ok((x[0]*x[0]+1.5*x[1]*x[1], array![2.*x[0],3.*x[1],0.]))
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        Ok((
+            x[0] * x[0] + 1.5 * x[1] * x[1],
+            array![2. * x[0], 3. * x[1], 0.],
+        ))
     }
-    fn excluded_modes(&self,_:ArrayView1<f64>) -> Result<ndarray::Array2<f64>,SaddleError> {
-        Ok(array![[0.,0.,1.],[0.,0.,2.]])
+    fn excluded_modes(&self, _: ArrayView1<f64>) -> Result<ndarray::Array2<f64>, SaddleError> {
+        Ok(array![[0., 0., 1.], [0., 0., 2.]])
     }
-    fn hessian_vector(&self,_:ArrayView1<f64>,v:ArrayView1<f64>) -> Result<Option<Array1<f64>>,SaddleError> {
-        Ok(Some(array![2.*v[0],3.*v[1],0.]))
+    fn hessian_vector(
+        &self,
+        _: ArrayView1<f64>,
+        v: ArrayView1<f64>,
+    ) -> Result<Option<Array1<f64>>, SaddleError> {
+        Ok(Some(array![2. * v[0], 3. * v[1], 0.]))
     }
 }
 
 #[test]
 fn both_dimer_rotations_exclude_rigid_zero_modes() {
-    let config=MinModeConfig { max_move:0.05,method:rgmin::Method::Lbfgs {memory:20},..Default::default() };
-    let mut session=MinModeSession::new(config,array![0.35,0.4,0.],array![0.1,0.1,1.]).unwrap();
-    session.set_kappa(Some(rgsaddle::kappa::KappaDimerConfig::default())).unwrap();
-    let report=session.step(&HarmonicWithRigidMode).unwrap();
-    assert!((report.curvature-2.).abs()<1e-6);
-    assert!(session.mode()[2].abs()<1e-12);
-    assert_eq!(report.status,MinModeStatus::Running);
+    let config = MinModeConfig {
+        max_move: 0.05,
+        method: rgmin::Method::Lbfgs { memory: 20 },
+        ..Default::default()
+    };
+    let mut session =
+        MinModeSession::new(config, array![0.35, 0.4, 0.], array![0.1, 0.1, 1.]).unwrap();
+    session
+        .set_kappa(Some(rgsaddle::kappa::KappaDimerConfig::default()))
+        .unwrap();
+    let report = session.step(&HarmonicWithRigidMode).unwrap();
+    assert!((report.curvature - 2.).abs() < 1e-6);
+    assert!(session.mode()[2].abs() < 1e-12);
+    assert_eq!(report.status, MinModeStatus::Running);
 }
