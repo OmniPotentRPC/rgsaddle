@@ -1,0 +1,66 @@
+
+
+C and C++ ABI
+-------------
+
+Sessions live in Rust. Geometry hosts that call one outer iteration at
+a time hold an opaque ``RgsaddleBand`` / ``RgsaddleMinMode`` /
+``RgsaddleIrc``; there is no run-to-completion entry. The C header is
+``include/rgsaddle.h``. The C++ wrap is ``include/rgsaddle/session.hpp``,
+the same hourglass shape as rgmin's ``xts/optimize.hpp``.
+
+Session (C)
+~~~~~~~~~~~
+
+.. code:: c
+
+    #include "rgsaddle.h"
+
+    rgsaddle_band_config_t cfg;
+    memset(&cfg, 0, sizeof cfg);
+    cfg.version = (rgsaddle_version_t)RGSADDLE_VERSION_INIT;
+    cfg.tangent = RGSADDLE_TANGENT_IMPROVED;
+    cfg.spring = RGSADDLE_SPRING_UNIFORM;
+    cfg.projection = RGSADDLE_PROJECTION_NEB;
+    cfg.method = RGSADDLE_METHOD_LBFGS;
+    cfg.spring_k = 5.0;
+    cfg.force_tol = 1e-3;
+    cfg.force_gate = RGSADDLE_FORCE_LINF;
+    cfg.max_move = 0.1;
+
+    RgsaddleBand *band = rgsaddle_band_create(&cfg, n_images, n_atoms, positions);
+    rgsaddle_report_t report;
+    while (!done) {
+        rgsaddle_band_step(band, surface, user, &report);
+        if (report.status == RGSADDLE_STATUS_CONVERGED) break;
+    }
+    rgsaddle_band_reset(band);
+    rgsaddle_band_free(band);
+
+The host owns the loop. ``reset`` is the model-update boundary.
+Band, min-mode, and IRC sessions call ``Solver::set_highs(true)``.
+With the ``highs`` Cargo feature that is rgmin's HiGHS feasible-set
+step (box, L-inf trust, equalities). Without the feature the setter
+is a no-op.
+
+C++
+~~~
+
+.. code:: cpp
+
+    #include <rgsaddle/session.hpp>
+
+    auto cfg = rgsaddle::band_config();
+    rgsaddle::Band band(cfg, n_images, n_atoms, positions);
+    rgsaddle::Report report;
+    while (!done) {
+        report = band.step(surface, user);
+        if (report.converged()) break;
+    }
+    band.reset();
+
+The header is RAII over the C ABI. It does not reimplement NEB,
+dimer, or IRC. ``MinMode`` and ``Irc`` have the same shape.
+
+gpr\ :sub:`optim`\'s ``DestRgsaddleClient`` is a dlopen client of this same C
+ABI. Linking ``librgsaddle`` directly can use the header instead.

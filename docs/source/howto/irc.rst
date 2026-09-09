@@ -4,7 +4,8 @@ Drive an IRC session
 --------------------
 
 Hold an ``IrcSession``. Call ``step`` once per outer IRC move. The
-inner geometry is rgmin ``IrcTrust``:
+inner geometry is rgmin ``IrcTrust`` in the session's coordinate
+metric:
 
 
 
@@ -12,12 +13,18 @@ inner geometry is rgmin ``IrcTrust``:
 
     \|(s + d_1)\odot\sqrt{m}\| = dx.
 
-The increment is Sella ``QuasiNewtonIRC``
-(``rgmin::qn_irc_restricted``) on a mass-weighted BFGS Hessian
-seeded with the imaginary mode (``lambda = -1``). Interior Newton
-is allowed only after that model is positive definite and the arc
-is past eight radii. ``reset`` and ``set_direction`` drop the
-pairs and re-seed.
+The increment is Sella ``QuasiNewtonIRC`` (``rgmin::qn_irc_restricted``)
+on a mass-weighted BFGS Hessian seeded with the imaginary mode
+(:math:`\lambda = -1`). Interior Newton is allowed only after that
+model is positive definite and the arc is past eight radii.
+``reset`` and ``set_direction`` drop the pairs and re-seed.
+
+Use ``IrcSession::new`` for atomistic (3N) Cartesians. It repeats the
+atomic mass weights and selects rgmin ``MwRigid`` when the system has
+internal modes. Use ``IrcSession::new_euclidean`` for an arbitrary
+nonzero dimension; it applies the same GS2 or Morokuma mechanics with
+unit coordinate weights. A generic host should select ``L2Norm`` or
+``LinfNorm`` rather than the atom-grouped ``MaxForceOnAtom`` gate.
 
 Directions
 ~~~~~~~~~~
