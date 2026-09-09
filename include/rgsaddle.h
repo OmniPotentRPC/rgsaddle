@@ -243,6 +243,8 @@ typedef struct {
 typedef int (*rgsaddle_hessian_fn)(void *user, int64_t n_dof,
                                   const double *vector, double *action);
 int rgsaddle_kappa_config_default(rgsaddle_kappa_config_t *config);
+int rgsaddle_minmode_set_kappa(RgsaddleMinMode *session,
+    const rgsaddle_kappa_config_t *config);
 /** Inputs and outputs do not overlap. Callback errors leave outputs unchanged. */
 int rgsaddle_kappa_dimer_force(const rgsaddle_kappa_config_t *config,
     int64_t n_dof, const double *gradient, const double *mode,

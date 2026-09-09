@@ -3,7 +3,8 @@
 
 use std::cell::RefCell;
 
-use ndarray::{Array1, ArrayView1};
+use ndarray::{Array1, Array2, ArrayView1};
+use crate::kappa::{KappaDimerConfig, kappa_dimer_force};
 use rgmin::{ApplyHessian, Control, EigenParams, EigensolverKind, Method, Oracle, Solver};
 
 use crate::error::SaddleError;
@@ -11,6 +12,17 @@ use crate::error::SaddleError;
 /// The caller's surface for a single geometry.
 pub trait PointSurface: Sync {
     fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError>;
+
+    /// Optional analytic Cartesian Hessian action. None selects gradient differences.
+    fn hessian_vector(&self, _x: ArrayView1<f64>, _v: ArrayView1<f64>)
+        -> Result<Option<Array1<f64>>, SaddleError> { Ok(None) }
+
+    /// Rigid or constrained Cartesian directions, one direction per row.
+    /// Molecular callers supply translations and rotations; fixed substrates
+    /// supply only their actual symmetries. These are evaluated at the query.
+    fn excluded_modes(&self, x: ArrayView1<f64>) -> Result<Array2<f64>, SaddleError> {
+        Ok(Array2::zeros((0, x.len())))
+    }
 
     /// Energy and Cartesian gradient in a periodic cell, row-major 3x3.
     ///
@@ -128,10 +140,13 @@ fn hessian_action<S: PointSurface>(
     v: ArrayView1<f64>,
     dr: f64,
 ) -> Result<Array1<f64>, SaddleError> {
-    let unit = normalize(v.to_owned());
+    if let Some(hv) = surface.hessian_vector(x, v)? { return Ok(hv); }
+    let magnitude = v.dot(&v).sqrt();
+    if magnitude == 0.0 { return Ok(Array1::zeros(v.len())); }
+    let unit = &v / magnitude;
     let shifted = &x + &(&unit * dr);
     let (_, g1) = surface.eval(shifted.view())?;
-    Ok((&g1 - &g0) / dr)
+    Ok((&g1 - &g0) * (magnitude / dr))
 }
 
 /// Dimer rotation through rgmin's lowest-mode waist.
@@ -239,6 +254,7 @@ pub struct MinModeSession {
     mode: Array1<f64>,
     solver: Solver,
     iteration: usize,
+    kappa: Option<KappaDimerConfig>,
 }
 
 impl MinModeSession {
@@ -266,7 +282,20 @@ impl MinModeSession {
             mode: normalize(mode),
             solver,
             iteration: 0,
+            kappa: None,
         })
+    }
+
+    /// Select the basin constraint without changing the rotation or translation solver.
+    pub fn set_kappa(&mut self, config: Option<KappaDimerConfig>) -> Result<(), SaddleError> {
+        if let Some(c) = &config {
+            if !c.beta.is_finite() || c.beta <= 0.0 || !c.eigen.tol.is_finite() || c.eigen.tol <= 0.0 {
+                return Err(SaddleError::Solver("kappa beta and tolerance must be positive and finite".into()));
+            }
+        }
+        self.kappa = config;
+        self.reset();
+        Ok(())
     }
 
     pub fn position(&self) -> ArrayView1<'_, f64> {
@@ -308,7 +337,7 @@ impl MinModeSession {
         self.mode = mode;
 
         let max_force = self.config.force_gate.value(g0.view());
-        if max_force <= self.config.force_tol {
+        if max_force <= self.config.force_tol && (self.kappa.is_none() || curvature < 0.0) {
             return Ok(MinModeReport {
                 status: MinModeStatus::Converged,
                 max_force,
@@ -323,31 +352,44 @@ impl MinModeSession {
         // rest. Below a negative curvature this is the min-mode
         // force; above it, pure inversion still points off the ridge.
         let tau = self.mode.clone();
-        let config_dr = self.config.dr;
-        let kind = self.config.kind;
-        let _ = (config_dr, kind);
+        let dr = self.config.dr;
+        let kappa = self.kappa.as_ref();
+        let failure = std::sync::Mutex::new(None);
+        let fail = &failure;
         let oracle = Oracle::unbounded(self.x.len(), move |xv: ArrayView1<f64>| {
-            match surface.eval(xv) {
-                Ok((e, g)) => {
+            let evaluate = || -> Result<(f64, Array1<f64>), SaddleError> {
+                let (e, g) = surface.eval(xv)?;
+                let eff = if let Some(config) = kappa {
+                    let excluded = surface.excluded_modes(xv)?;
+                    let out = kappa_dimer_force(g.view(), tau.view(), excluded.view(),
+                        |v| hessian_action(surface, xv, g.view(), v, dr), config)?;
+                    -out.force
+                } else {
                     let par = g.dot(&tau);
-                    let eff = &g - &(&tau * (2.0 * par));
-                    (e, eff)
+                    &g - &(&tau * (2.0 * par))
+                };
+                Ok((e, eff))
+            };
+            match evaluate() {
+                Ok(out) => out,
+                Err(error) => {
+                    *fail.lock().unwrap() = Some(error);
+                    (f64::INFINITY, Array1::zeros(xv.len()))
                 }
-                Err(_) => (f64::INFINITY, Array1::zeros(xv.len())),
             }
         });
 
         let mut x = self.x.clone();
-        self.solver
-            .step(&oracle, &mut x)
-            .map_err(|e| SaddleError::Solver(e.to_string()))?;
+        let step = self.solver.step(&oracle, &mut x);
         drop(oracle);
+        if let Some(error) = failure.into_inner().unwrap() { return Err(error); }
+        step.map_err(|e| SaddleError::Solver(e.to_string()))?;
         self.x = x;
         self.iteration += 1;
 
         let (_, g_new) = surface.eval(self.x.view())?;
         let max_force = self.config.force_gate.value(g_new.view());
-        let status = if max_force <= self.config.force_tol {
+        let status = if max_force <= self.config.force_tol && self.kappa.is_none() {
             MinModeStatus::Converged
         } else {
             MinModeStatus::Running

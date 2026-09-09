@@ -224,6 +224,9 @@ public:
     }
 
     void reset() { check(rgsaddle_minmode_reset(handle_)); }
+    void set_kappa(rgsaddle_kappa_config_t const* config) {
+        check(rgsaddle_minmode_set_kappa(handle_, config));
+    }
 
     void position(double* out) const {
         check(rgsaddle_minmode_position(handle_, out));
