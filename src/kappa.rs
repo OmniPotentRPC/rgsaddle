@@ -185,18 +185,18 @@ fn coefficients(z: f64) -> (f64, f64) {
 /// The trailing columns of a product of Householder reflections. Each
 /// excluded direction consumes one leading coordinate. Storage is O(n*r)
 /// for r excluded directions; Hessian vectors stay in Cartesian coordinates.
-struct Complement {
+pub(crate) struct Complement {
     n: usize,
     reflectors: Vec<Array1<f64>>,
 }
 impl Complement {
-    fn new(n: usize) -> Self {
+    pub(crate) fn new(n: usize) -> Self {
         Self {
             n,
             reflectors: Vec::new(),
         }
     }
-    fn dimension(&self) -> usize {
+    pub(crate) fn dimension(&self) -> usize {
         self.n - self.reflectors.len()
     }
     fn reflect(v: &mut Array1<f64>, offset: usize, axis: &Array1<f64>) {
@@ -212,12 +212,12 @@ impl Complement {
         }
         out
     }
-    fn reduce(&self, v: ArrayView1<f64>) -> Array1<f64> {
+    pub(crate) fn reduce(&self, v: ArrayView1<f64>) -> Array1<f64> {
         self.forward(v)
             .slice(s![self.reflectors.len()..])
             .to_owned()
     }
-    fn lift(&self, v: ArrayView1<f64>) -> Array1<f64> {
+    pub(crate) fn lift(&self, v: ArrayView1<f64>) -> Array1<f64> {
         let mut out = Array1::zeros(self.n);
         out.slice_mut(s![self.reflectors.len()..]).assign(&v);
         for (offset, axis) in self.reflectors.iter().enumerate().rev() {
@@ -228,7 +228,7 @@ impl Complement {
     fn project(&self, v: ArrayView1<f64>) -> Array1<f64> {
         self.lift(self.reduce(v).view())
     }
-    fn exclude(&mut self, v: ArrayView1<f64>) {
+    pub(crate) fn exclude(&mut self, v: ArrayView1<f64>) {
         let input_norm = norm(v);
         if input_norm == 0.0 || self.dimension() == 0 {
             return;

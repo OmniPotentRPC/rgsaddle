@@ -3,7 +3,7 @@
 
 use std::cell::RefCell;
 
-use crate::kappa::{KappaDimerConfig, kappa_dimer_force};
+use crate::kappa::{Complement, KappaDimerConfig, kappa_dimer_force};
 use ndarray::{Array1, Array2, ArrayView1};
 use rgmin::{ApplyHessian, Control, EigenParams, EigensolverKind, Method, Oracle, Solver};
 
@@ -185,12 +185,14 @@ struct FdHvp<'a, S: PointSurface> {
     g0: Array1<f64>,
     dr: f64,
     fail: RefCell<Option<SaddleError>>,
+    space: Complement,
 }
 
 impl<S: PointSurface> ApplyHessian for FdHvp<'_, S> {
     fn apply_hessian(&self, x: ArrayView1<f64>, v: ArrayView1<f64>) -> Array1<f64> {
-        match hessian_action(self.surface, x, self.g0.view(), v, self.dr) {
-            Ok(hv) => hv,
+        let cartesian = self.space.lift(v);
+        match hessian_action(self.surface, x, self.g0.view(), cartesian.view(), self.dr) {
+            Ok(hv) => self.space.reduce(hv.view()),
             Err(e) => {
                 self.fail.replace(Some(e));
                 Array1::zeros(v.len())
@@ -208,13 +210,27 @@ fn lowest_via_fd<S: PointSurface>(
     params: EigenParams,
     what: &str,
 ) -> Result<(Array1<f64>, f64, usize), SaddleError> {
+    let excluded = surface.excluded_modes(x)?;
+    if excluded.ncols() != x.len() || !excluded.iter().all(|v| v.is_finite()) {
+        return Err(SaddleError::Shape("minimum-mode excluded directions".into()));
+    }
+    let mut space = Complement::new(x.len());
+    for direction in excluded.rows() { space.exclude(direction); }
+    if space.dimension() == 0 {
+        return Err(SaddleError::Shape("minimum-mode space is empty".into()));
+    }
+    let mut reduced_seed = space.reduce(seed.view());
+    if reduced_seed.dot(&reduced_seed).sqrt() <= 64.0*f64::EPSILON {
+        reduced_seed = Array1::from_iter((0..space.dimension()).map(|i| ((i+1) as f64*1.618033988749895).sin()));
+    }
     let h = FdHvp {
         surface,
         g0: g0.to_owned(),
         dr,
         fail: RefCell::new(None),
+        space,
     };
-    let out = match rgmin::lowest_mode(&h, x, seed.view(), &params) {
+    let out = match rgmin::lowest_mode(&h, x, reduced_seed.view(), &params) {
         Ok(o) => o,
         Err(e) => {
             if let Some(surf) = h.fail.into_inner() {
@@ -229,7 +245,7 @@ fn lowest_via_fd<S: PointSurface>(
     if !out.vector.iter().all(|v| v.is_finite()) || !out.value.is_finite() {
         return Err(SaddleError::NonFinite("lowest-mode eigenpair"));
     }
-    Ok((out.vector, out.value, out.actions))
+    Ok((h.space.lift(out.vector.view()), out.value, out.actions))
 }
 
 /// Lowest-mode kick through the rgmin waist (FD Hessian actions).
