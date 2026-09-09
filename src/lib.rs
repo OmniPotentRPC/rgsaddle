@@ -76,6 +76,7 @@ pub mod internal;
 pub mod linalg;
 pub mod mic;
 pub mod minmode;
+pub mod kappa;
 pub mod pes;
 pub mod pes_internal;
 pub mod prfo;
