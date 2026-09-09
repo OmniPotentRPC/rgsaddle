@@ -65,6 +65,7 @@ pub mod irc;
 #[cfg(feature = "readcon")]
 pub use io::{MolecularFrame, frame_from_con};
 pub mod capi;
+pub mod capi_kappa;
 pub mod cell_log;
 pub mod constraints;
 pub mod eigensolve;

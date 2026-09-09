@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 12u
+#define RGSADDLE_ABI_MINOR 13u
 
 /** Version head carried by every wire struct. */
 typedef struct {
@@ -218,6 +218,38 @@ int rgsaddle_minmode_position(const RgsaddleMinMode *session, double *out);
 int rgsaddle_minmode_mode(const RgsaddleMinMode *session, double *out);
 int rgsaddle_minmode_reset(RgsaddleMinMode *session);
 void rgsaddle_minmode_free(RgsaddleMinMode *session);
+
+/** Basin constrained dimer. Excluded directions are consecutive Cartesian rows. */
+typedef struct {
+  rgsaddle_version_t version;
+  double beta;
+  double tolerance;
+  int64_t max_iterations;
+  int64_t krylov_dimension;
+  int32_t eigen_kind;
+} rgsaddle_kappa_config_t;
+
+typedef struct {
+  rgsaddle_version_t version;
+  double kappa;
+  double tangent_curvature;
+  double gamma_parallel;
+  double gamma_perpendicular;
+  double residual;
+  int64_t hessian_actions;
+  int64_t tangent_dimension;
+} rgsaddle_kappa_report_t;
+
+typedef int (*rgsaddle_hessian_fn)(void *user, int64_t n_dof,
+                                  const double *vector, double *action);
+int rgsaddle_kappa_config_default(rgsaddle_kappa_config_t *config);
+/** Inputs and outputs do not overlap. Callback errors leave outputs unchanged. */
+int rgsaddle_kappa_dimer_force(const rgsaddle_kappa_config_t *config,
+    int64_t n_dof, const double *gradient, const double *mode,
+    int64_t n_excluded, const double *excluded, rgsaddle_hessian_fn hessian,
+    void *user, double *force, rgsaddle_kappa_report_t *report);
+
+
 
 typedef enum {
   RGSADDLE_IRC_GS2 = 0,
