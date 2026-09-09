@@ -3,8 +3,8 @@
 
 use std::cell::RefCell;
 
-use ndarray::{Array1, Array2, ArrayView1};
 use crate::kappa::{KappaDimerConfig, kappa_dimer_force};
+use ndarray::{Array1, Array2, ArrayView1};
 use rgmin::{ApplyHessian, Control, EigenParams, EigensolverKind, Method, Oracle, Solver};
 
 use crate::error::SaddleError;
@@ -14,8 +14,13 @@ pub trait PointSurface: Sync {
     fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError>;
 
     /// Optional analytic Cartesian Hessian action. None selects gradient differences.
-    fn hessian_vector(&self, _x: ArrayView1<f64>, _v: ArrayView1<f64>)
-        -> Result<Option<Array1<f64>>, SaddleError> { Ok(None) }
+    fn hessian_vector(
+        &self,
+        _x: ArrayView1<f64>,
+        _v: ArrayView1<f64>,
+    ) -> Result<Option<Array1<f64>>, SaddleError> {
+        Ok(None)
+    }
 
     /// Rigid or constrained Cartesian directions, one direction per row.
     /// Molecular callers supply translations and rotations; fixed substrates
@@ -140,9 +145,13 @@ fn hessian_action<S: PointSurface>(
     v: ArrayView1<f64>,
     dr: f64,
 ) -> Result<Array1<f64>, SaddleError> {
-    if let Some(hv) = surface.hessian_vector(x, v)? { return Ok(hv); }
+    if let Some(hv) = surface.hessian_vector(x, v)? {
+        return Ok(hv);
+    }
     let magnitude = v.dot(&v).sqrt();
-    if magnitude == 0.0 { return Ok(Array1::zeros(v.len())); }
+    if magnitude == 0.0 {
+        return Ok(Array1::zeros(v.len()));
+    }
     let unit = &v / magnitude;
     let shifted = &x + &(&unit * dr);
     let (_, g1) = surface.eval(shifted.view())?;
@@ -289,8 +298,14 @@ impl MinModeSession {
     /// Select the basin constraint without changing the rotation or translation solver.
     pub fn set_kappa(&mut self, config: Option<KappaDimerConfig>) -> Result<(), SaddleError> {
         if let Some(c) = &config {
-            if !c.beta.is_finite() || c.beta <= 0.0 || !c.eigen.tol.is_finite() || c.eigen.tol <= 0.0 {
-                return Err(SaddleError::Solver("kappa beta and tolerance must be positive and finite".into()));
+            if !c.beta.is_finite()
+                || c.beta <= 0.0
+                || !c.eigen.tol.is_finite()
+                || c.eigen.tol <= 0.0
+            {
+                return Err(SaddleError::Solver(
+                    "kappa beta and tolerance must be positive and finite".into(),
+                ));
             }
         }
         self.kappa = config;
@@ -361,8 +376,13 @@ impl MinModeSession {
                 let (e, g) = surface.eval(xv)?;
                 let eff = if let Some(config) = kappa {
                     let excluded = surface.excluded_modes(xv)?;
-                    let out = kappa_dimer_force(g.view(), tau.view(), excluded.view(),
-                        |v| hessian_action(surface, xv, g.view(), v, dr), config)?;
+                    let out = kappa_dimer_force(
+                        g.view(),
+                        tau.view(),
+                        excluded.view(),
+                        |v| hessian_action(surface, xv, g.view(), v, dr),
+                        config,
+                    )?;
                     -out.force
                 } else {
                     let par = g.dot(&tau);
@@ -382,7 +402,9 @@ impl MinModeSession {
         let mut x = self.x.clone();
         let step = self.solver.step(&oracle, &mut x);
         drop(oracle);
-        if let Some(error) = failure.into_inner().unwrap() { return Err(error); }
+        if let Some(error) = failure.into_inner().unwrap() {
+            return Err(error);
+        }
         step.map_err(|e| SaddleError::Solver(e.to_string()))?;
         self.x = x;
         self.iteration += 1;

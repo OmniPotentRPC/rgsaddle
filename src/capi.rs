@@ -567,22 +567,35 @@ pub unsafe extern "C" fn rgsaddle_band_free(band: *mut RgsaddleBand) {
 /// Session is live; a null configuration disables the basin constraint.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rgsaddle_minmode_set_kappa(
-    session: *mut RgsaddleMinMode, config: *const crate::capi_kappa::RgsaddleKappaConfig,
+    session: *mut RgsaddleMinMode,
+    config: *const crate::capi_kappa::RgsaddleKappaConfig,
 ) -> i32 {
-    if session.is_null() { return RGSADDLE_NULL_SESSION; }
-    let cfg = if config.is_null() { None } else {
+    if session.is_null() {
+        return RGSADDLE_NULL_SESSION;
+    }
+    let cfg = if config.is_null() {
+        None
+    } else {
         let c = unsafe { &*config };
-        if c.version.major != RGSADDLE_ABI_MAJOR { return RGSADDLE_ABI_MISMATCH; }
+        if c.version.major != RGSADDLE_ABI_MAJOR {
+            return RGSADDLE_ABI_MISMATCH;
+        }
         if c.max_iterations < 0 || c.krylov_dimension < 0 || !(0..=255).contains(&c.eigen_kind) {
             return RGSADDLE_INVALID_PARAMETER;
         }
         let Some(kind) = rgmin::EigensolverKind::from_ordinal(c.eigen_kind as u8) else {
             return RGSADDLE_INVALID_PARAMETER;
         };
-        Some(crate::kappa::KappaDimerConfig { beta: c.beta, eigen:rgmin::EigenParams {
-            kind, nev:1, krylov:c.krylov_dimension as usize,
-            max_iter:c.max_iterations as usize, tol:c.tolerance,
-        }})
+        Some(crate::kappa::KappaDimerConfig {
+            beta: c.beta,
+            eigen: rgmin::EigenParams {
+                kind,
+                nev: 1,
+                krylov: c.krylov_dimension as usize,
+                max_iter: c.max_iterations as usize,
+                tol: c.tolerance,
+            },
+        })
     };
     match unsafe { &mut *session }.session.set_kappa(cfg) {
         Ok(()) => RGSADDLE_OK,

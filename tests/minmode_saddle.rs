@@ -110,14 +110,20 @@ fn lanczos_rotation_fails_closed_on_oracle_error() {
 fn kappa_lbfgs_finds_the_saddle() {
     let config = MinModeConfig {
         method: rgmin::Method::Lbfgs { memory: 20 },
-        force_tol: 1e-4, max_move: 0.05,
+        force_tol: 1e-4,
+        max_move: 0.05,
         ..MinModeConfig::default()
     };
-    let mut session = MinModeSession::new(config, array![0.35,0.4,-0.3], array![0.8,0.5,0.1]).unwrap();
-    session.set_kappa(Some(rgsaddle::kappa::KappaDimerConfig::default())).unwrap();
-    let report = session.run(&QuadraticSaddle,4000).unwrap();
-    assert_eq!(report.status,MinModeStatus::Converged);
+    let mut session =
+        MinModeSession::new(config, array![0.35, 0.4, -0.3], array![0.8, 0.5, 0.1]).unwrap();
+    session
+        .set_kappa(Some(rgsaddle::kappa::KappaDimerConfig::default()))
+        .unwrap();
+    let report = session.run(&QuadraticSaddle, 4000).unwrap();
+    assert_eq!(report.status, MinModeStatus::Converged);
     assert!(report.max_force <= 1e-4);
     assert!(report.curvature < -1.);
-    for x in session.position() { assert!(x.abs() < 1e-3); }
+    for x in session.position() {
+        assert!(x.abs() < 1e-3);
+    }
 }
