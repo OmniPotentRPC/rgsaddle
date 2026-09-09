@@ -12,3 +12,53 @@ solver step. The rotator is not a second loop in this crate.
 
 This finds a first-order saddle. Rolling off that saddle is
 ~IrcSession~, not another min-mode step.
+
+* Basin constrained kappa dimer
+
+Xiao, Wu, and Henkelman ([[https://doi.org/10.1063/1.4898664][JCP 141, 164111]])
+use the minimum Hessian curvature perpendicular to the physical gradient
+as a local contour restraint. =kappa::kappa_dimer_force= implements their
+Equations (6) and (7). It accepts a Cartesian Hessian-action callback and
+excluded symmetry directions. Compact Householder projections eliminate
+the excluded directions and the gradient before calling rgmin's minimum
+mode solver. The force direction is not a zero eigenmode of that solve.
+
+=MinModeSession::set_kappa= selects the same force routine in the stepping
+session. For example, with an application-defined =surface=, =position=,
+and initial =mode=:
+
+#+begin_src rust
+let config = rgsaddle::MinModeConfig {
+    method: rgmin::Method::Lbfgs { memory: 20 },
+    max_move: 0.05,
+    ..Default::default()
+};
+let mut session = rgsaddle::MinModeSession::new(config, position, mode)?;
+session.set_kappa(Some(rgsaddle::kappa::KappaDimerConfig::default()))?;
+let report = session.step(&surface)?;
+#+end_src
+
+The default switching length is beta=5 in the position units, so beta*kappa
+is dimensionless. =PointSurface::hessian_vector= supplies an analytic
+Hessian action when available; otherwise the session differences gradients.
+=PointSurface::excluded_modes= supplies the query's rigid or constrained
+directions, one per row. A free molecule excludes translations and rotations;
+a fixed periodic lattice excludes translations only; an anchored subsystem
+excludes only its actual symmetries. Dependent rotations of a linear molecule
+are removed without consuming a degree of freedom.
+
+Zero physical gradient returns zero force without dividing by its norm.
+The host still checks physical force and saddle index. The contour restraint
+reduces disconnected searches in the paper's examples; it does not prove
+basin connectivity on an arbitrary potential.
+
+C callers use =rgsaddle_kappa_config_default= and
+=rgsaddle_kappa_dimer_force= in =include/rgsaddle.h=, or configure a session
+with =rgsaddle_minmode_set_kappa=. A null session configuration disables the
+restraint. C++ callers use =MinMode::set_kappa= over the same C interface.
+
+The symbolic audit is =tests/symbolic/prove_kappa.py=. The coefficient
+rounding audit is =tests/symbolic/check_kappa_coefficients.sollya=. The latter
+models correctly rounded binary64 exp and expm1 values across both signs,
+the zero neighbourhood, and exponential underflow; it is not a proof of
+any particular system libm implementation.
