@@ -29,6 +29,27 @@ fn constrained_mode_excludes_force_without_a_spurious_zero_eigenvalue() {
 }
 
 #[test]
+fn stiff_tangent_spectrum_meets_the_requested_residual() {
+    let h = Array2::from_diag(&array![-4., 1., 2., 1000.]);
+    let g = array![0.2, 0., 0., 0.];
+    let config = KappaDimerConfig::default();
+    let out = kappa_dimer_force(
+        g.view(),
+        array![1., 0., 0., 0.].view(),
+        Array2::zeros((0, 4)).view(),
+        |v| Ok(h.dot(&v)),
+        &config,
+    )
+    .unwrap();
+    let hc = h.dot(&out.tangent_mode);
+    let residual = &hc - &(&out.tangent_mode * out.tangent_curvature);
+    assert!(residual.dot(&residual).sqrt() <= config.eigen.tol * hc.dot(&hc).sqrt().max(1.));
+    assert_abs_diff_eq!(out.tangent_curvature, 1., epsilon = 1e-7);
+    assert_abs_diff_eq!(out.kappa, -5., epsilon = 1e-6);
+    assert_abs_diff_eq!(out.tangent_mode.dot(&g), 0., epsilon = 1e-12);
+}
+
+#[test]
 fn second_unstable_mode_produces_downhill_restraint() {
     let h = array![[-4., 0., 0.], [0., -2., 0.], [0., 0., 6.]];
     let out = kappa_dimer_force(
