@@ -31,6 +31,15 @@ h=s.Matrix([[1,2,3],[2,4,5],[3,5,-6]])
 checks["reduced_rayleigh"] = s.expand(((basis*w).T*h*(basis*w))[0]-(w.T*(basis.T*h*basis)*w)[0])
 checks["reduced_norm"] = s.expand((basis*w).dot(basis*w)-w.dot(w))
 checks["excluded_direction"] = s.simplify(q[:,0].dot(basis*w))
+stiff_h = s.diag(-4, 1, 2, 1000)
+stiff_g = s.Matrix([s.Rational(1, 5), 0, 0, 0])
+stiff_basis = s.eye(4)[:, 1:]
+stiff_tangent = stiff_basis.T * stiff_h * stiff_basis
+stiff_minimum = min(stiff_tangent.eigenvals())
+checks["stiff_contour_minimum"] = stiff_minimum - 1
+checks["stiff_contour_kappa"] = -stiff_minimum / stiff_g.norm() + 5
+checks["stiff_contour_force_exclusion"] = (stiff_basis.T * stiff_g).norm()
+checks["stiff_contour_exact_residual"] = (stiff_h[:, 1] - stiff_basis[:, 0]).norm()
 assert all(value == 0 for value in checks.values()), checks
 print(json.dumps({"sympy":s.__version__,"identities":{k:str(v) for k,v in checks.items()},
     "harmonic_axis_limit":"kappa(x,0)=b/(a*abs(x)); no direction-independent zero limit at the saddle",
