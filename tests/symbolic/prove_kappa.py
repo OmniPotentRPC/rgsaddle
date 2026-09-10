@@ -48,8 +48,8 @@ low_gap = s.simplify(1 - (1 + low_value) / 2)
 high_gap = s.simplify((1 + t) - (1 + (1 + t)) / 2)
 assert low_gap.is_nonnegative is True
 assert high_gap.is_nonnegative is True
-checks["refinement_tolerance_below_unit_scale"] = low_gap - 1 / (2 * (1 + t))
-checks["refinement_tolerance_above_unit_scale"] = high_gap - t / 2
+checks["refinement_tolerance_below_unit_scale"] = s.simplify(low_gap - 1 / (2 * (1 + t)))
+checks["refinement_tolerance_above_unit_scale"] = s.simplify(high_gap - t / 2)
 assert all(value == 0 for value in checks.values()), checks
 print(json.dumps({"sympy":s.__version__,"identities":{k:str(v) for k,v in checks.items()},
     "harmonic_axis_limit":"kappa(x,0)=b/(a*abs(x)); no direction-independent zero limit at the saddle",
