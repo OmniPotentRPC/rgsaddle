@@ -168,6 +168,9 @@ pub unsafe extern "C" fn rgsaddle_kappa_dimer_force(
         Err(SaddleError::Shape(_)) => RGSADDLE_SHAPE,
         Err(SaddleError::NonFinite(_)) => RGSADDLE_NON_FINITE,
         Err(SaddleError::Surface(_)) => RGSADDLE_SURFACE_FAILED,
-        Err(SaddleError::Solver(_)) => RGSADDLE_SOLVER,
+        Err(SaddleError::Solver(message)) => {
+            eprintln!("kappa eigensolver: {message}");
+            RGSADDLE_SOLVER
+        }
     }
 }
