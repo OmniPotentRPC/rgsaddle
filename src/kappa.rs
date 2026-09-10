@@ -123,36 +123,61 @@ where
     let seed = Array1::from_iter(
         (0..space.dimension()).map(|i| ((i + 1) as f64 * 1.618033988749895).sin()),
     );
-    let eigenpair = rgmin::lowest_mode(
-        &h,
-        Array1::zeros(space.dimension()).view(),
-        seed.view(),
-        &config.eigen,
-    );
-    if let Some(error) = h.failure.take() {
-        return Err(error);
-    }
-    let eigenpair = eigenpair.map_err(|error| SaddleError::Solver(error.to_string()))?;
-    let mut c = eigenpair.vector;
-    let c_norm = norm(c.view());
-    if !c_norm.is_finite() || c_norm == 0.0 {
-        return Err(SaddleError::NonFinite("kappa tangent mode"));
-    }
-    c /= c_norm;
-    let hc = h.apply_hessian(Array1::zeros(c.len()).view(), c.view());
-    if let Some(error) = h.failure.take() {
-        return Err(error);
-    }
-    let nu = c.dot(&hc);
-    let residual = norm((&hc - &(&c * nu)).view());
-    if !nu.is_finite() || !residual.is_finite() {
-        return Err(SaddleError::NonFinite("kappa tangent eigenpair"));
-    }
-    if residual > config.eigen.tol * norm(hc.view()).max(1.0) {
-        return Err(SaddleError::Solver(format!(
-            "kappa tangent eigenpair residual {residual} exceeds tolerance"
-        )));
-    }
+    let mut solve = config.eigen;
+    let mut mode_seed = seed;
+    let mut refining = false;
+    let (c, nu, residual) = loop {
+        let eigenpair = rgmin::lowest_mode(
+            &h,
+            Array1::zeros(space.dimension()).view(),
+            mode_seed.view(),
+            &solve,
+        );
+        if let Some(error) = h.failure.take() {
+            return Err(error);
+        }
+        let eigenpair = eigenpair.map_err(|error| SaddleError::Solver(error.to_string()))?;
+        let mut c = eigenpair.vector;
+        let c_norm = norm(c.view());
+        if !c_norm.is_finite() || c_norm == 0.0 {
+            return Err(SaddleError::NonFinite("kappa tangent mode"));
+        }
+        c /= c_norm;
+        let hc = h.apply_hessian(Array1::zeros(c.len()).view(), c.view());
+        if let Some(error) = h.failure.take() {
+            return Err(error);
+        }
+        let nu = c.dot(&hc);
+        let residual = norm((&hc - &(&c * nu)).view());
+        if !nu.is_finite() || !residual.is_finite() {
+            return Err(SaddleError::NonFinite("kappa tangent eigenpair"));
+        }
+        if residual <= config.eigen.tol * norm(hc.view()).max(1.0) {
+            break (c, nu, residual);
+        }
+        if refining && solve.krylov == space.dimension() {
+            return Err(SaddleError::Solver(format!(
+                "kappa tangent eigenpair residual {residual} exceeds tolerance"
+            )));
+        }
+        // The force requires a certified contour mode. An unresolved primary
+        // solve continues in increasing Rayleigh-Ritz spaces on the same
+        // reduced Hessian, retaining the physical residual requirement.
+        let dimension = if refining {
+            solve.krylov.saturating_mul(2)
+        } else if solve.krylov == 0 {
+            12
+        } else {
+            solve.krylov
+        };
+        solve.kind = EigensolverKind::RayleighRitz;
+        solve.krylov = dimension.max(2).min(space.dimension());
+        // rgmin scales its stopping tolerance by 1 + abs(nu); half the
+        // requested tolerance implies the stricter contour scale above.
+        solve.tol = config.eigen.tol * 0.5;
+        mode_seed = c;
+        refining = true;
+    };
     result.tangent_mode = space.lift(c.view());
     result.tangent_curvature = nu;
     result.kappa = -nu / force_norm;
