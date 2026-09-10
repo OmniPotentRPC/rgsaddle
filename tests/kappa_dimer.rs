@@ -50,6 +50,30 @@ fn stiff_tangent_spectrum_meets_the_requested_residual() {
 }
 
 #[test]
+fn broad_tangent_spectrum_meets_the_requested_residual() {
+    let mut diagonal = Array1::from_iter((0..25).map(|i| (i as f64).powi(3)));
+    diagonal[0] = -4.;
+    let h = Array2::from_diag(&diagonal);
+    let mut g = Array1::zeros(25);
+    g[0] = 0.2;
+    let config = KappaDimerConfig::default();
+    let out = kappa_dimer_force(
+        g.view(),
+        g.view(),
+        Array2::zeros((0, 25)).view(),
+        |v| Ok(h.dot(&v)),
+        &config,
+    )
+    .unwrap();
+    let hc = h.dot(&out.tangent_mode);
+    let residual = &hc - &(&out.tangent_mode * out.tangent_curvature);
+    assert!(residual.dot(&residual).sqrt() <= config.eigen.tol * hc.dot(&hc).sqrt().max(1.));
+    assert_abs_diff_eq!(out.tangent_curvature, 1., epsilon = 1e-7);
+    assert_abs_diff_eq!(out.kappa, -5., epsilon = 1e-6);
+    assert_abs_diff_eq!(out.tangent_mode.dot(&g), 0., epsilon = 1e-12);
+}
+
+#[test]
 fn second_unstable_mode_produces_downhill_restraint() {
     let h = array![[-4., 0., 0.], [0., -2., 0.], [0., 0., 6.]];
     let out = kappa_dimer_force(

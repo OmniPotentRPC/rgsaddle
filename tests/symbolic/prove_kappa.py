@@ -40,6 +40,8 @@ checks["stiff_contour_minimum"] = stiff_minimum - 1
 checks["stiff_contour_kappa"] = -stiff_minimum / stiff_g.norm() + 5
 checks["stiff_contour_force_exclusion"] = (stiff_basis.T * stiff_g).norm()
 checks["stiff_contour_exact_residual"] = (stiff_h[:, 1] - stiff_basis[:, 0]).norm()
+broad_tangent = s.diag(*(i**3 for i in range(1, 25)))
+checks["broad_contour_minimum"] = min(broad_tangent.eigenvals()) - 1
 assert all(value == 0 for value in checks.values()), checks
 print(json.dumps({"sympy":s.__version__,"identities":{k:str(v) for k,v in checks.items()},
     "harmonic_axis_limit":"kappa(x,0)=b/(a*abs(x)); no direction-independent zero limit at the saddle",
