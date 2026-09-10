@@ -42,6 +42,14 @@ checks["stiff_contour_force_exclusion"] = (stiff_basis.T * stiff_g).norm()
 checks["stiff_contour_exact_residual"] = (stiff_h[:, 1] - stiff_basis[:, 0]).norm()
 broad_tangent = s.diag(*(i**3 for i in range(1, 25)))
 checks["broad_contour_minimum"] = min(broad_tangent.eigenvals()) - 1
+t = s.symbols("t", nonnegative=True)
+low_value = t / (1 + t)
+low_gap = s.simplify(1 - (1 + low_value) / 2)
+high_gap = s.simplify((1 + t) - (1 + (1 + t)) / 2)
+assert low_gap.is_nonnegative is True
+assert high_gap.is_nonnegative is True
+checks["refinement_tolerance_below_unit_scale"] = low_gap - 1 / (2 * (1 + t))
+checks["refinement_tolerance_above_unit_scale"] = high_gap - t / 2
 assert all(value == 0 for value in checks.values()), checks
 print(json.dumps({"sympy":s.__version__,"identities":{k:str(v) for k,v in checks.items()},
     "harmonic_axis_limit":"kappa(x,0)=b/(a*abs(x)); no direction-independent zero limit at the saddle",
