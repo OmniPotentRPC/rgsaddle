@@ -1169,6 +1169,72 @@ mod irc_abi_tests {
         assert!(refused.is_null());
         unsafe { rgsaddle_sella_saddle_free(sess) };
     }
+
+    #[test]
+    fn sella_saddle_seed_abi_contracts_the_measured_unstable_mode() {
+        extern "C" fn rotated_saddle(_: *mut c_void, request: *mut RgsaddleSurfaceRequest) -> i32 {
+            let request = unsafe { &mut *request };
+            let x = unsafe { slice::from_raw_parts(request.positions, 6) };
+            let gradient = unsafe { slice::from_raw_parts_mut(request.gradients, 6) };
+            let unstable = (x[0] + x[1]) / 2.0_f64.sqrt();
+            let stable = (x[0] - x[1]) / 2.0_f64.sqrt();
+            let mut energy = 0.5 * (stable * stable - unstable * unstable);
+            gradient[0] = (-unstable + stable) / 2.0_f64.sqrt();
+            gradient[1] = (-unstable - stable) / 2.0_f64.sqrt();
+            for i in 2..6 {
+                energy += 0.5 * x[i] * x[i];
+                gradient[i] = x[i];
+            }
+            unsafe { *request.energies = energy };
+            RGSADDLE_OK
+        }
+
+        let inverse_sqrt_two = 2.0_f64.sqrt().recip();
+        let mode = [inverse_sqrt_two, inverse_sqrt_two, 0.0, 0.0, 0.0, 0.0];
+        let mut x = [0.3 * inverse_sqrt_two, 0.1 * inverse_sqrt_two, 0.0, 0.0, 0.0, 0.0];
+        let masses = [1.0, 1.0];
+        let cfg = RgsaddleSellaSaddleConfig {
+            version: RgsaddleVersion { major: RGSADDLE_ABI_MAJOR, minor: RGSADDLE_ABI_MINOR },
+            flags: 0,
+            delta: 0.1,
+            force_tol: 1e-6,
+            force_gate: crate::ForceGate::MaxForceOnAtom.to_abi(),
+            order: 1,
+        };
+        let session = unsafe { rgsaddle_sella_saddle_create(&cfg, 2, x.as_ptr(), masses.as_ptr()) };
+        assert!(!session.is_null());
+        assert_eq!(unsafe { rgsaddle_sella_saddle_seed_mode(session, mode.as_ptr(), -1.0) }, RGSADDLE_OK);
+        let mut report = RgsaddleReport {
+            version: RgsaddleVersion { major: 0, minor: 0 }, flags: 0, status: 0,
+            reserved: 0, max_force: 0.0, ci_index: 0, iteration: 0, curvature: 0.0, rotations: 0,
+        };
+        assert_eq!(unsafe { rgsaddle_sella_saddle_step(session, Some(rotated_saddle), std::ptr::null_mut(), &mut report) }, RGSADDLE_OK);
+        assert_eq!(unsafe { rgsaddle_sella_saddle_position(session, x.as_mut_ptr()) }, RGSADDLE_OK);
+        let unstable = (x[0] + x[1]) * inverse_sqrt_two;
+        let stable = (x[0] - x[1]) * inverse_sqrt_two;
+        assert!(unstable.abs() < 0.02, "unstable coordinate {unstable}");
+        assert!(stable.abs() < 0.02, "stable coordinate {stable}");
+        unsafe { rgsaddle_sella_saddle_free(session) };
+    }
+
+    #[test]
+    fn sella_saddle_seed_abi_refuses_invalid_modes() {
+        let cfg = RgsaddleSellaSaddleConfig {
+            version: RgsaddleVersion { major: RGSADDLE_ABI_MAJOR, minor: RGSADDLE_ABI_MINOR },
+            flags: 0, delta: 0.1, force_tol: 0.05,
+            force_gate: crate::ForceGate::MaxForceOnAtom.to_abi(), order: 1,
+        };
+        let x = [0.2, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let masses = [1.0, 1.0];
+        let session = unsafe { rgsaddle_sella_saddle_create(&cfg, 2, x.as_ptr(), masses.as_ptr()) };
+        assert!(!session.is_null());
+        assert_eq!(unsafe { rgsaddle_sella_saddle_seed_mode(std::ptr::null_mut(), x.as_ptr(), -1.0) }, RGSADDLE_NULL_SESSION);
+        assert_eq!(unsafe { rgsaddle_sella_saddle_seed_mode(session, std::ptr::null(), -1.0) }, RGSADDLE_INVALID_PARAMETER);
+        assert_eq!(unsafe { rgsaddle_sella_saddle_seed_mode(session, [0.0; 6].as_ptr(), -1.0) }, RGSADDLE_SHAPE);
+        assert_eq!(unsafe { rgsaddle_sella_saddle_seed_mode(session, x.as_ptr(), f64::NAN) }, RGSADDLE_NON_FINITE);
+        assert_eq!(unsafe { rgsaddle_sella_saddle_seed_mode(session, [f64::NAN; 6].as_ptr(), -1.0) }, RGSADDLE_NON_FINITE);
+        unsafe { rgsaddle_sella_saddle_free(session) };
+    }
 }
 
 /// # Safety
