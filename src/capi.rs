@@ -27,7 +27,7 @@ use crate::spring::SpringKind;
 use crate::tangent::TangentKind;
 
 pub const RGSADDLE_ABI_MAJOR: u32 = 1;
-pub const RGSADDLE_ABI_MINOR: u32 = 13;
+pub const RGSADDLE_ABI_MINOR: u32 = 14;
 
 pub const RGSADDLE_OK: i32 = 0;
 pub const RGSADDLE_NULL_SESSION: i32 = -1;
@@ -1888,6 +1888,32 @@ pub unsafe extern "C" fn rgsaddle_sella_saddle_reset(session: *mut RgsaddleSella
     }
     unsafe { (*session).session.reset() };
     RGSADDLE_OK
+}
+
+/// Seed the Cartesian quasi-Newton model with a measured mode and curvature.
+///
+/// # Safety
+/// `session` must be a live pointer or NULL. `mode` must hold `3 * n_atoms`
+/// doubles or be NULL. The session projects the mode onto its live tangent.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_sella_saddle_seed_mode(
+    session: *mut RgsaddleSellaSaddle,
+    mode: *const f64,
+    curvature: f64,
+) -> i32 {
+    if session.is_null() {
+        return RGSADDLE_NULL_SESSION;
+    }
+    if mode.is_null() {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let session = unsafe { &mut *session };
+    let dof = (3 * session.n_atoms) as usize;
+    let mode = ndarray::ArrayView1::from(unsafe { slice::from_raw_parts(mode, dof) });
+    match session.session.seed_mode(mode, curvature) {
+        Ok(()) => RGSADDLE_OK,
+        Err(error) => status_of(&error),
+    }
 }
 
 /// # Safety

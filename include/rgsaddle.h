@@ -396,6 +396,11 @@ int rgsaddle_sella_saddle_step(RgsaddleSellaSaddle *session,
 int rgsaddle_sella_saddle_position(const RgsaddleSellaSaddle *session,
                                    double *out);
 int rgsaddle_sella_saddle_reset(RgsaddleSellaSaddle *session);
+/** Seed a Cartesian session's Hessian with a 3N mode and its curvature.
+ * The mode is projected onto the live tangent space; no surface call is made.
+ * Internal and variable-cell sessions refuse Cartesian seeds. */
+int rgsaddle_sella_saddle_seed_mode(RgsaddleSellaSaddle *session,
+                                    const double *mode, double curvature);
 int rgsaddle_sella_saddle_set_hess_update(RgsaddleSellaSaddle *session,
                                           int32_t update);
 int rgsaddle_sella_saddle_set_restricted(RgsaddleSellaSaddle *session,
