@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 13u
+#define RGSADDLE_ABI_MINOR 14u
 
 /** Version head carried by every wire struct. */
 typedef struct {
