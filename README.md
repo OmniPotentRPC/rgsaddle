@@ -5,7 +5,16 @@
 </p>
 
 Band, min-mode, and IRC mechanics over
-[rgmin](https://github.com/OmniPotentRPC/rgmin) steppers.
+[rgmin](https://crates.io/crates/rgmin) steppers.
+
+```console
+$ cargo add rgsaddle
+# or: cargo install --git https://github.com/OmniPotentRPC/rgsaddle
+```
+
+On crates.io as `rgsaddle` 0.1.0. Neighbour lists go through
+[linkcell](https://crates.io/crates/linkcell) and
+[minimage](https://crates.io/crates/minimage).
 
 Two seams, stepping at both. The inner seam is rgmin's `Solver`: one
 optimizer step over an assembled band force; this crate defines no
