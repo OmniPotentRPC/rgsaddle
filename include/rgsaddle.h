@@ -2,7 +2,7 @@
  * @file rgsaddle.h
  * @brief C ABI for the rgsaddle band and minimum-mode sessions.
  *
- * The stepping contract in C. The host owns the loop: create a
+ * The stepping contract in C. The host runs the loop: create a
  * session, call step until it reports converged (or until the host's
  * own policy says otherwise), reset at a surface-epoch boundary,
  * free. There is no run-to-completion entry point.
