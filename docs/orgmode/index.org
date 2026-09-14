@@ -1,0 +1,6 @@
+#+title: rgsaddle
+#+options: toc:nil num:nil
+
+Band and minimum-mode saddle mechanics over rgmin. The host owns the
+loop. Force assembly ports eOn NEB branches. See the Sphinx tree under
+=docs/source/=.

@@ -1,0 +1,6 @@
+#+title: How-to
+#+options: toc:nil num:nil
+
+C ABI: feature =capi=, header =rgsaddle.h=, ABI major 1, host loop,
+no run-to-completion. Tangents, springs, projections as in
+=docs/source/howto.rst=. =MinModeSession= for dimer or Lanczos.

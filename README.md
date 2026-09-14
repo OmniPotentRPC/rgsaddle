@@ -3,6 +3,9 @@
 Band and minimum-mode saddle mechanics over
 [rgmin](https://github.com/OmniPotentRPC/rgmin) steppers.
 
+Docs: <https://omnipotentrpc.github.io/rgsaddle/>
+
+
 Two seams, stepping at both. The inner seam is rgmin's `Solver`: one
 optimizer step over an assembled band force; this crate defines no
 optimizer of its own. The outer seam is `BandSession::step`: assemble

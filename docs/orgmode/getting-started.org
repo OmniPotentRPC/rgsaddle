@@ -1,0 +1,6 @@
+#+title: Getting started
+#+options: toc:nil num:nil
+
+=cargo add rgsaddle=. Implement =BandSurface=. =BandSession::new= then
+=step= until =BandStatus::Converged=. Default stepper is FIRE. Call
+=reset= after a model update. Numbers live in =tests/double_well.rs=.

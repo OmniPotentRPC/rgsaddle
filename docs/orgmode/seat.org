@@ -1,0 +1,5 @@
+#+title: In the seat
+#+options: toc:nil num:nil
+
+Saddle mechanics, not a memory habitat. The seat is ljos. The name
+leiðarljós is a guiding light; see https://leidarljos.github.io/docs/about/ .

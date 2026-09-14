@@ -1,0 +1,7 @@
+#+title: Explanation
+#+options: toc:nil num:nil
+
+Two seams: rgmin =Solver= (inner), =BandSession::step= (outer). eOn
+branch structure. Unwrapped Cartesian; =Cell= for orthorhombic
+minimum image. FIRE default because the projected NEB force is not a
+gradient.
