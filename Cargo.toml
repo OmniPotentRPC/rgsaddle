@@ -18,8 +18,8 @@ default = []
 capi = []
 
 [dependencies]
-rgmin = { git = "https://github.com/OmniPotentRPC/rgmin.git", branch = "main" }
-eindir-core = { version = "0.6.0", git = "https://github.com/HaoZeke/eindir.git", rev = "f3c42130bb389ba6cd6e4cfdc8b2e182f4a764e9", features = ["capi"] }
+rgmin = "0.2"
+eindir-core = { version = "0.6.0", features = ["capi"] }
 ndarray = "0.17"
 thiserror = "2"
 
