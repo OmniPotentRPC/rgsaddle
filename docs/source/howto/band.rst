@@ -1,0 +1,20 @@
+
+
+Step a NEB band
+---------------
+
+``BandSession::step`` assembles eOn-shaped NEB forces and takes
+one rgmin ``Solver`` step. ``run`` is a convenience loop over
+``step``. Hosts own trust, drift, acquisition, and hybrid MMF
+between steps.
+
+``BandSession::reset`` is the model-update boundary: quasi-Newton
+history from one surface epoch must not survive onto the next.
+
+Tangents, springs, projections, and the climbing-image force
+follow eOn's branch structure. Positions stay unwrapped
+Cartesian. Minimum-image differences go through
+`linkcell <https://github.com/d-SEAMS/linkcell>`_ (``wrap_difference``). Cutoff neighbour lists are
+`vesin <https://github.com/Luthaf/vesin>`_, when a surface needs them. Frames come from
+readcon-core / readcon-db / readcon-chemfiles; see
+`howto/io <io.rst>`_.
