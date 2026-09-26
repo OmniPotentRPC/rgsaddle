@@ -317,6 +317,22 @@ dependencies = [
 [[package]]
 name = "eindir-core"
 version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e330e3abad9c1a597b144d40eb4b07ab3511d79f7d2cdbbcb37a44662f974db0"
+dependencies = [
+ "cbindgen",
+ "dlpk",
+ "ndarray",
+ "num-traits",
+ "rand 0.9.5",
+ "rand_distr",
+ "rayon",
+ "thiserror",
+]
+
+[[package]]
+name = "eindir-core"
+version = "0.6.0"
 source = "git+https://github.com/HaoZeke/eindir.git?rev=f3c42130bb389ba6cd6e4cfdc8b2e182f4a764e9#f3c42130bb389ba6cd6e4cfdc8b2e182f4a764e9"
 dependencies = [
  "cbindgen",
@@ -662,7 +678,8 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 [[package]]
 name = "linkcell"
 version = "0.3.3"
-source = "git+https://github.com/d-SEAMS/linkcell?rev=f6cf5700ca9c90e1877c84b66fb68386de5ceffe#f6cf5700ca9c90e1877c84b66fb68386de5ceffe"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "090c873ed95b622a0219175d9144ff45ea986947a20cc2f912b937920f5bd902"
 dependencies = [
  "minimage",
 ]
@@ -733,7 +750,8 @@ dependencies = [
 [[package]]
 name = "minimage"
 version = "0.1.1"
-source = "git+https://github.com/lode-org/minimage.git?rev=624d4395beae609281bb951e66299658bf313fc1#624d4395beae609281bb951e66299658bf313fc1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fac6d4edb4b59cc9deaae713b5f34e1abff2b9594eb5de88ff620ab210c81f68"
 
 [[package]]
 name = "minimal-lexical"
@@ -1152,11 +1170,11 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 [[package]]
 name = "rgmin"
 version = "0.2.0"
-source = "git+https://github.com/OmniPotentRPC/rgmin.git?rev=2dc2b7d07157e5468f9aa122fb2157a2d0208f08#2dc2b7d07157e5468f9aa122fb2157a2d0208f08"
+source = "git+https://github.com/HaoZeke/rgmin.git?branch=feat%2Fabi-highs-box#79835a3a2aa07a4e42c7c13ccf617c6567e6687e"
 dependencies = [
  "cbindgen",
  "dlpk",
- "eindir-core",
+ "eindir-core 0.6.0 (git+https://github.com/HaoZeke/eindir.git?rev=f3c42130bb389ba6cd6e4cfdc8b2e182f4a764e9)",
  "highs",
  "highs-sys",
  "ndarray",
@@ -1170,7 +1188,7 @@ name = "rgsaddle"
 version = "0.1.0"
 dependencies = [
  "approx",
- "eindir-core",
+ "eindir-core 0.6.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "linkcell",
  "ndarray",
  "pyo3",
