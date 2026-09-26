@@ -70,6 +70,7 @@ pub mod cell_log;
 pub mod constraints;
 pub mod eigensolve;
 pub mod error;
+pub mod afir;
 pub mod force;
 pub mod force_match;
 pub mod geom;
