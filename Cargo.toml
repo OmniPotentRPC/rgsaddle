@@ -24,7 +24,7 @@ readcon-db = ["readcon", "dep:readcon-db"]
 chemfiles = ["readcon", "readcon-core/chemfiles"]
 
 [dependencies]
-rgmin = "0.2.0"
+rgmin = { git = "https://github.com/HaoZeke/rgmin.git", branch = "feat/abi-highs-box" }
 pyo3 = { version = "0.26", features = ["extension-module", "abi3-py310"], optional = true }
 eindir-core = { version = "0.6.0", features = ["capi"] }
 ndarray = "0.17"
