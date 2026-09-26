@@ -1,0 +1,27 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "rgsaddle"
+version = "0.1.0"
+description = "Band, IRC, and Sella sessions over rgmin. Typed Python enums from the Rust waist."
+requires-python = ">=3.10"
+license = "MIT"
+readme = "README.md"
+keywords = ["neb", "saddle", "transition-state", "optimization"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Science/Research",
+  "Topic :: Scientific/Engineering :: Chemistry",
+  "Programming Language :: Rust",
+  "Programming Language :: Python :: Implementation :: CPython",
+]
+
+[project.urls]
+Homepage = "https://github.com/OmniPotentRPC/rgsaddle"
+Repository = "https://github.com/OmniPotentRPC/rgsaddle"
+
+[tool.maturin]
+features = ["python"]
+module-name = "rgsaddle"
