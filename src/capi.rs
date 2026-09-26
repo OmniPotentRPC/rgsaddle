@@ -594,6 +594,8 @@ pub unsafe extern "C" fn rgsaddle_minmode_set_kappa(
                 krylov: c.krylov_dimension as usize,
                 max_iter: c.max_iterations as usize,
                 tol: c.tolerance,
+                degree: 0,
+                extra: 0,
             },
         })
     };
