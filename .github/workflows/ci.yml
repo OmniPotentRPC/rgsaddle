@@ -11,6 +11,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      # The C ABI smoke test links the cdylib from target/debug. cargo test
+      # builds the library for the test harness only, so build it first.
+      - name: Build the C ABI library
+        run: cargo build --features capi --verbose
       - name: Test
         run: cargo test --features capi --verbose
       - name: Clippy
