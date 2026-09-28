@@ -7,10 +7,42 @@
 #include <stdlib.h>
 #include <string.h>
 
-static int surface(void *user, rgsaddle_surface_request_t *req) {
+static int surface_one_calls;
+
+static rgsaddle_status_t fail(rgsaddle_status_t st, const char *msg) {
+  fprintf(stderr, "%s (%s)\n", msg, rgsaddle_status_name(st));
+  return st;
+}
+
+static rgsaddle_status_t surface_one(void *user, rgsaddle_surface_request_t *req) {
+  int *seen = user;
+  if ((req->flags & RGSADDLE_REQ_ONE_IMAGE) == 0 || req->image < 0) {
+    return RGSADDLE_SHAPE;
+  }
+  if (req->image >= req->n_images) {
+    return RGSADDLE_SHAPE;
+  }
+  seen[req->image] += 1;
+  surface_one_calls += 1;
+  const long dof = 3 * (long)req->n_atoms;
+  const double *p = req->positions;
+  double *g = req->gradients;
+  double x = p[0], y = p[1], z = p[2];
+  req->energies[0] = (x * x - 1.0) * (x * x - 1.0) + 2.0 * y * y + 2.0 * z * z;
+  g[0] = 4.0 * x * (x * x - 1.0);
+  g[1] = 4.0 * y;
+  g[2] = 4.0 * z;
+  (void)dof;
+  return RGSADDLE_OK;
+}
+
+static rgsaddle_status_t surface(void *user, rgsaddle_surface_request_t *req) {
   (void)user;
   if (req->version.major != RGSADDLE_ABI_MAJOR) {
-    return -1;
+    return RGSADDLE_ABI_MISMATCH;
+  }
+  if (req->image != -1 || (req->flags & RGSADDLE_REQ_ONE_IMAGE) != 0) {
+    return RGSADDLE_SHAPE;
   }
   const long dof = 3 * (long)req->n_atoms;
   for (long i = 0; i < (long)req->n_images; ++i) {
@@ -22,23 +54,22 @@ static int surface(void *user, rgsaddle_surface_request_t *req) {
     g[1] = 4.0 * y;
     g[2] = 4.0 * z;
   }
-  return 0;
+  return RGSADDLE_OK;
 }
 
 int main(void) {
+  rgsaddle_status_t st = RGSADDLE_OK;
   if (rgsaddle_abi_version() !=
       (int)((RGSADDLE_ABI_MAJOR << 16) | RGSADDLE_ABI_MINOR)) {
-    fprintf(stderr, "abi version mismatch\n");
-    return 1;
+    return fail(RGSADDLE_ABI_MISMATCH, "abi version mismatch");
   }
   rgsaddle_version_t stamp = {0, 0};
-  if (rgsaddle_abi_stamp(&stamp) != RGSADDLE_OK || stamp.major != 1) {
-    fprintf(stderr, "abi stamp failed\n");
-    return 1;
+  st = rgsaddle_abi_stamp(&stamp);
+  if (st != RGSADDLE_OK || stamp.major != RGSADDLE_ABI_MAJOR) {
+    return fail(st == RGSADDLE_OK ? RGSADDLE_ABI_MISMATCH : st, "abi stamp failed");
   }
   if (rgsaddle_abi_stamp(NULL) != RGSADDLE_INVALID_PARAMETER) {
-    fprintf(stderr, "NULL stamp must fail closed\n");
-    return 1;
+    return fail(RGSADDLE_INVALID_PARAMETER, "NULL stamp must fail closed");
   }
 
   const long n_images = 9, n_atoms = 1;
@@ -68,65 +99,85 @@ int main(void) {
   rgsaddle_band_config_t bad = cfg;
   bad.version.major = 99;
   if (rgsaddle_band_create(&bad, n_images, n_atoms, pos) != NULL) {
-    fprintf(stderr, "unknown major must be refused\n");
-    return 1;
+    return fail(RGSADDLE_ABI_MISMATCH, "unknown major must be refused");
   }
 
   RgsaddleBand *band = rgsaddle_band_create(&cfg, n_images, n_atoms, pos);
   if (!band) {
-    fprintf(stderr, "band create failed\n");
-    return 1;
+    return fail(RGSADDLE_SHAPE, "band create failed");
   }
   if (rgsaddle_band_step(band, NULL, NULL, NULL) != RGSADDLE_NULL_REPORT) {
-    fprintf(stderr, "NULL report must fail closed\n");
-    return 1;
+    return fail(RGSADDLE_NULL_REPORT, "NULL report must fail closed");
   }
 
   rgsaddle_report_t rep;
   memset(&rep, 0, sizeof rep);
   int steps = 0;
   do {
-    int rc = rgsaddle_band_step(band, surface, NULL, &rep);
-    if (rc != RGSADDLE_OK) {
-      fprintf(stderr, "step rc=%d (%s)\n", rc, rgsaddle_status_name(rc));
-      return 1;
+    st = rgsaddle_band_step(band, surface, NULL, &rep);
+    if (st != RGSADDLE_OK) {
+      return fail(st, "step");
     }
     ++steps;
   } while (rep.status == RGSADDLE_STATUS_RUNNING && steps < 3000);
 
   if (rep.status != RGSADDLE_STATUS_CONVERGED) {
     fprintf(stderr, "did not converge, max_force=%g\n", rep.max_force);
-    return 1;
+    return fail(RGSADDLE_SOLVER, "did not converge");
   }
   if (rep.version.major != RGSADDLE_ABI_MAJOR) {
-    fprintf(stderr, "report not stamped\n");
-    return 1;
+    return fail(RGSADDLE_ABI_MISMATCH, "report not stamped");
   }
   if (rep.ci_index < 1 || rep.ci_index > n_images - 2) {
     fprintf(stderr, "climbing image not armed: %lld\n", (long long)rep.ci_index);
-    return 1;
+    return fail(RGSADDLE_SHAPE, "climbing image not armed");
   }
 
   double out[9 * 3];
-  if (rgsaddle_band_positions(band, out) != RGSADDLE_OK) {
-    fprintf(stderr, "positions failed\n");
-    return 1;
+  st = rgsaddle_band_positions(band, out);
+  if (st != RGSADDLE_OK) {
+    return fail(st, "positions");
   }
   if (fabs(out[0] + 1.0) > 1e-12 || fabs(out[(n_images - 1) * 3] - 1.0) > 1e-12) {
-    fprintf(stderr, "endpoints moved\n");
-    return 1;
+    return fail(RGSADDLE_SHAPE, "endpoints moved");
   }
   if (fabs(out[rep.ci_index * 3]) > 0.15) {
     fprintf(stderr, "climbing image off the saddle: %g\n", out[rep.ci_index * 3]);
-    return 1;
+    return fail(RGSADDLE_SOLVER, "climbing image off the saddle");
   }
 
-  if (rgsaddle_band_reset(band) != RGSADDLE_OK) {
-    fprintf(stderr, "reset failed\n");
-    return 1;
+  /* One callback per image, so the host can swap orbitals for that image. */
+  int seen[9] = {0};
+  surface_one_calls = 0;
+  cfg.flags = RGSADDLE_BAND_PER_IMAGE;
+  RgsaddleBand *per = rgsaddle_band_create(&cfg, n_images, n_atoms, pos);
+  if (!per) {
+    return fail(RGSADDLE_SHAPE, "per-image band create failed");
+  }
+  st = rgsaddle_band_step(per, surface_one, seen, &rep);
+  if (st != RGSADDLE_OK) {
+    return fail(st, "per-image step");
+  }
+  if (surface_one_calls < n_images || surface_one_calls % n_images != 0) {
+    fprintf(stderr, "per-image calls=%d not a multiple of %ld\n",
+            surface_one_calls, n_images);
+    return fail(RGSADDLE_SHAPE, "per-image call count");
+  }
+  for (long i = 0; i < n_images; ++i) {
+    if (seen[i] != seen[0] || seen[i] < 1) {
+      fprintf(stderr, "image %ld seen %d times, image 0 seen %d\n",
+              i, seen[i], seen[0]);
+      return fail(RGSADDLE_SHAPE, "per-image coverage");
+    }
+  }
+  rgsaddle_band_free(per);
+
+  st = rgsaddle_band_reset(band);
+  if (st != RGSADDLE_OK) {
+    return fail(st, "reset");
   }
   rgsaddle_band_free(band);
   rgsaddle_band_free(NULL);
   printf("RGSADDLE_C_ABI_OK steps=%d ci=%lld\n", steps, (long long)rep.ci_index);
-  return 0;
+  return RGSADDLE_OK;
 }

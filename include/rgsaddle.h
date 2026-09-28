@@ -28,7 +28,20 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 0u
+#define RGSADDLE_ABI_MINOR 1u
+
+/**
+ * Band config flags bit 0. When set, each step calls the surface once
+ * per image. The host copies that image's saved orbitals and density
+ * into the working set, evaluates the force on that image's
+ * subcommunicator, and broadcasts the energy and gradient to every
+ * rank that entered the step before returning. The library does not
+ * call MPI.
+ */
+#define RGSADDLE_BAND_PER_IMAGE (1ull << 0)
+
+/** Request flags bit 0. positions and gradients are one image. */
+#define RGSADDLE_REQ_ONE_IMAGE (1ull << 0)
 
 /** Version head carried by every wire struct. */
 typedef struct {
@@ -91,8 +104,11 @@ typedef struct RgsaddleMinMode RgsaddleMinMode;
 
 /**
  * Host-surface request. The session stamps version and flags.
- * positions and gradients are n_images * 3 * n_atoms, energies is
- * n_images. Return 0 on success, negative on failure.
+ * With flags clear, positions and gradients are n_images * 3 *
+ * n_atoms, energies is n_images, and image is -1. With
+ * RGSADDLE_REQ_ONE_IMAGE, image is the index, positions and gradients
+ * are 3 * n_atoms, energies is one value, and n_images is still the
+ * length of the band. Return RGSADDLE_OK or another rgsaddle_status_t.
  */
 typedef struct {
   rgsaddle_version_t version;
@@ -102,10 +118,11 @@ typedef struct {
   const double *positions;
   double *energies;
   double *gradients;
+  int64_t image;
 } rgsaddle_surface_request_t;
 
-typedef int (*rgsaddle_surface_fn)(void *user,
-                                   rgsaddle_surface_request_t *req);
+typedef rgsaddle_status_t (*rgsaddle_surface_fn)(void *user,
+                                                 rgsaddle_surface_request_t *req);
 
 /** Band configuration. The caller stamps version and zeroes flags. */
 typedef struct {
@@ -145,9 +162,9 @@ typedef struct {
 
 /** (major << 16) | minor. */
 int rgsaddle_abi_version(void);
-int rgsaddle_abi_stamp(rgsaddle_version_t *out);
+rgsaddle_status_t rgsaddle_abi_stamp(rgsaddle_version_t *out);
 /** Human-readable name for a status code. Never NULL. */
-const char *rgsaddle_status_name(int status);
+const char *rgsaddle_status_name(rgsaddle_status_t status);
 
 /**
  * Create a band session over n_images x (3 * n_atoms) positions,
@@ -159,17 +176,19 @@ RgsaddleBand *rgsaddle_band_create(const rgsaddle_band_config_t *config,
                                    const double *positions);
 
 /** One optimizer step over the assembled band force. */
-int rgsaddle_band_step(RgsaddleBand *band, rgsaddle_surface_fn surface,
-                       void *user, rgsaddle_report_t *out);
+rgsaddle_status_t rgsaddle_band_step(RgsaddleBand *band,
+                                     rgsaddle_surface_fn surface, void *user,
+                                     rgsaddle_report_t *out);
 
 /** Copy the current band out (n_images * 3 * n_atoms doubles). */
-int rgsaddle_band_positions(const RgsaddleBand *band, double *out);
+rgsaddle_status_t rgsaddle_band_positions(const RgsaddleBand *band, double *out);
 
 /** Replace the band; the host may move images between steps. */
-int rgsaddle_band_set_positions(RgsaddleBand *band, const double *positions);
+rgsaddle_status_t rgsaddle_band_set_positions(RgsaddleBand *band,
+                                              const double *positions);
 
 /** Drop optimizer history and climbing state at a surface boundary. */
-int rgsaddle_band_reset(RgsaddleBand *band);
+rgsaddle_status_t rgsaddle_band_reset(RgsaddleBand *band);
 
 void rgsaddle_band_free(RgsaddleBand *band);
 
@@ -196,13 +215,15 @@ RgsaddleMinMode *rgsaddle_minmode_create(
     const double *position, const double *mode);
 
 /** Refresh the lowest mode, invert along it, take one step. */
-int rgsaddle_minmode_step(RgsaddleMinMode *session,
-                          rgsaddle_surface_fn surface, void *user,
-                          rgsaddle_report_t *out);
+rgsaddle_status_t rgsaddle_minmode_step(RgsaddleMinMode *session,
+                                        rgsaddle_surface_fn surface, void *user,
+                                        rgsaddle_report_t *out);
 
-int rgsaddle_minmode_position(const RgsaddleMinMode *session, double *out);
-int rgsaddle_minmode_mode(const RgsaddleMinMode *session, double *out);
-int rgsaddle_minmode_reset(RgsaddleMinMode *session);
+rgsaddle_status_t rgsaddle_minmode_position(const RgsaddleMinMode *session,
+                                                double *out);
+rgsaddle_status_t rgsaddle_minmode_mode(const RgsaddleMinMode *session,
+                                        double *out);
+rgsaddle_status_t rgsaddle_minmode_reset(RgsaddleMinMode *session);
 void rgsaddle_minmode_free(RgsaddleMinMode *session);
 
 #ifdef __cplusplus

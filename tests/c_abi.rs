@@ -36,6 +36,12 @@ fn c_abi_smoke() {
     if libdir.ends_with("deps") {
         libdir.pop();
     }
+    if !libdir.join("librgsaddle.so").exists() {
+        let deps = libdir.join("deps");
+        if deps.join("librgsaddle.so").exists() {
+            libdir = deps;
+        }
+    }
 
     let status = Command::new(&cc)
         .arg(root.join("tests/c/abi_smoke.c"))

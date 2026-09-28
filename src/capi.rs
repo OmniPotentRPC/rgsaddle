@@ -19,7 +19,10 @@ use crate::spring::SpringKind;
 use crate::tangent::TangentKind;
 
 pub const RGSADDLE_ABI_MAJOR: u32 = 1;
-pub const RGSADDLE_ABI_MINOR: u32 = 0;
+pub const RGSADDLE_ABI_MINOR: u32 = 1;
+
+/// Band config bit 0. The C step calls the surface once per image.
+pub const RGSADDLE_BAND_PER_IMAGE: u64 = 1;
 
 pub const RGSADDLE_OK: i32 = 0;
 pub const RGSADDLE_NULL_SESSION: i32 = -1;
@@ -49,6 +52,8 @@ pub struct RgsaddleSurfaceRequest {
     pub positions: *const f64,
     pub energies: *mut f64,
     pub gradients: *mut f64,
+    /// -1 for the whole band. Otherwise the image this call fills.
+    pub image: i64,
 }
 
 pub type RgsaddleSurfaceFn = extern "C" fn(*mut c_void, *mut RgsaddleSurfaceRequest) -> i32;
@@ -104,6 +109,7 @@ struct CSurface {
     f: RgsaddleSurfaceFn,
     user: *mut c_void,
     n_atoms: i64,
+    per_image: bool,
 }
 
 // The C host is responsible for its own thread safety; the sessions
@@ -115,6 +121,7 @@ impl CSurface {
     fn call(
         &self,
         n_images: i64,
+        image: i64,
         positions: &[f64],
         energies: &mut [f64],
         gradients: &mut [f64],
@@ -124,12 +131,13 @@ impl CSurface {
                 major: RGSADDLE_ABI_MAJOR,
                 minor: RGSADDLE_ABI_MINOR,
             },
-            flags: 0,
+            flags: if image >= 0 { 1 } else { 0 },
             n_images,
             n_atoms: self.n_atoms,
             positions: positions.as_ptr(),
             energies: energies.as_mut_ptr(),
             gradients: gradients.as_mut_ptr(),
+            image,
         };
         let rc = (self.f)(self.user, &mut req);
         if rc != 0 {
@@ -147,10 +155,24 @@ impl BandSurface for CSurface {
         gradients: &mut Array2<f64>,
     ) -> Result<(), SaddleError> {
         let n_images = positions.nrows() as i64;
+        let dof = gradients.ncols();
+        if self.per_image {
+            for i in 0..positions.nrows() {
+                let flat: Vec<f64> = positions.row(i).iter().copied().collect();
+                let mut e = [0.0];
+                let mut g = vec![0.0; dof];
+                self.call(n_images, i as i64, &flat, &mut e, &mut g)?;
+                energies[i] = e[0];
+                for c in 0..dof {
+                    gradients[(i, c)] = g[c];
+                }
+            }
+            return Ok(());
+        }
         let flat: Vec<f64> = positions.iter().copied().collect();
         let mut e = vec![0.0; energies.len()];
         let mut g = vec![0.0; gradients.len()];
-        self.call(n_images, &flat, &mut e, &mut g)?;
+        self.call(n_images, -1, &flat, &mut e, &mut g)?;
         for (i, v) in e.iter().enumerate() {
             energies[i] = *v;
         }
@@ -169,7 +191,7 @@ impl PointSurface for CSurface {
         let flat: Vec<f64> = x.iter().copied().collect();
         let mut e = vec![0.0; 1];
         let mut g = vec![0.0; flat.len()];
-        self.call(1, &flat, &mut e, &mut g)?;
+        self.call(1, -1, &flat, &mut e, &mut g)?;
         Ok((e[0], Array1::from(g)))
     }
 }
@@ -178,6 +200,7 @@ pub struct RgsaddleBand {
     session: BandSession,
     n_images: i64,
     n_atoms: i64,
+    per_image: bool,
 }
 
 pub struct RgsaddleMinMode {
@@ -320,6 +343,7 @@ pub unsafe extern "C" fn rgsaddle_band_create(
             session,
             n_images,
             n_atoms,
+            per_image: cfg.flags & RGSADDLE_BAND_PER_IMAGE != 0,
         })),
         Err(_) => std::ptr::null_mut(),
     }
@@ -348,6 +372,7 @@ pub unsafe extern "C" fn rgsaddle_band_step(
         f,
         user,
         n_atoms: band.n_atoms,
+        per_image: band.per_image,
     };
     match band.session.step(&cs) {
         Ok(report) => {
@@ -499,6 +524,7 @@ pub unsafe extern "C" fn rgsaddle_minmode_step(
         f,
         user,
         n_atoms: session.n_atoms,
+        per_image: false,
     };
     match session.session.step(&cs) {
         Ok(report) => {
