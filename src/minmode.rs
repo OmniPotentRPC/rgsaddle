@@ -283,9 +283,13 @@ impl MinModeSession {
             maxiter: usize::MAX,
             gtol: 0.0,
             istep: 1.0,
-            maxmove: Some(config.max_move),
+            maxmove: None,
         };
-        let solver = Solver::new(config.method.clone(), control, x.len());
+        let mut solver = Solver::new(config.method.clone(), control, x.len());
+        // Per-atom cap over consecutive xyz triples (eOn
+        // maxAtomMotionApplied). A non-positive max_move leaves the
+        // step uncapped.
+        solver.set_atom_maxmove(config.max_move);
         Ok(Self {
             config,
             x,

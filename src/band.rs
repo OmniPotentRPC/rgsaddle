@@ -275,9 +275,14 @@ impl BandSession {
             maxiter: usize::MAX,
             gtol: 0.0,
             istep: 1.0,
-            maxmove: Some(config.max_move),
+            maxmove: None,
         };
-        let solver = Solver::new(config.method.clone(), control, interior_dof);
+        let mut solver = Solver::new(config.method.clone(), control, interior_dof);
+        // The flat band vector is consecutive xyz triples, so the cap
+        // applies to the largest single-atom displacement (eOn
+        // maxAtomMotionApplied), not to the L2 norm of the whole
+        // band step. A non-positive max_move leaves the step uncapped.
+        solver.set_atom_maxmove(config.max_move);
         Ok(Self {
             config,
             positions: initial,
