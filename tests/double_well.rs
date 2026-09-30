@@ -189,11 +189,13 @@ fn endpoints_are_evaluated_once_and_each_step_costs_one_interior_eval() {
         assert_eq!(rows, interior, "step {k}");
     }
 
-    // reset keeps the endpoint cache: the endpoints do not move.
+    // reset marks a surface change: the endpoint energies are taken
+    // again from one whole-band evaluation.
     session.reset();
     session.step(&surface).unwrap();
     let (calls, rows) = surface.take();
-    assert_eq!(rows, calls * interior, "calls={calls}");
+    assert!(calls >= 1);
+    assert_eq!(rows, n_images + (calls - 1) * interior, "calls={calls}");
 
     // set_positions may change the endpoint rows: one whole-band
     // evaluation again.

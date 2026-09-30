@@ -190,6 +190,9 @@ impl ClimbState {
     fn reset(&self) {
         self.baseline_bits.store(BASELINE_UNSET, Ordering::Relaxed);
         self.ci_index.store(CI_NONE, Ordering::Relaxed);
+        // reset marks a surface change, so the endpoint energies it cached
+        // belong to the old surface.
+        self.invalidate_endpoints();
     }
     /// Keep the first error of a step; later evaluations at garbage
     /// positions add nothing.
