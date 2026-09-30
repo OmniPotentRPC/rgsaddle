@@ -110,7 +110,8 @@ typedef struct RgsaddleMinMode RgsaddleMinMode;
  * once: the first evaluation after rgsaddle_band_create or
  * rgsaddle_band_set_positions carries the whole band, and every later
  * evaluation carries only the interior images 1 .. band - 2, in order.
- * rgsaddle_band_reset keeps the cached endpoint energies.
+ * rgsaddle_band_reset drops the cached endpoint energies, so the next
+ * evaluation carries the whole band again.
  *
  * With flags clear (batched), image is -1 and n_images is the number
  * of images carried by this request: the band length on the first

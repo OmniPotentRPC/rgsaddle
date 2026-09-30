@@ -406,8 +406,8 @@ impl BandSession {
 
     /// The model-update boundary: drop quasi-Newton history, the
     /// climbing baseline, and the armed climbing image. Mirrors
-    /// eon_relax_reset. The endpoint energies stay cached: the
-    /// endpoints do not move.
+    /// eon_relax_reset. The cached endpoint energies go too: they belong
+    /// to the surface that changed.
     pub fn reset(&mut self) {
         self.solver.forget();
         self.climb.reset();
