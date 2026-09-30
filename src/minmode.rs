@@ -34,7 +34,8 @@ pub struct MinModeConfig {
     pub max_rotations: usize,
     /// Krylov dimension for [`MinModeKind::Lanczos`].
     pub krylov_dim: usize,
-    /// Translation stops when max|F| falls under this.
+    /// Translation stops when max|F| falls under this and the
+    /// curvature along the lowest mode is negative.
     pub force_tol: f64,
     pub max_move: f64,
     pub method: Method,
@@ -70,6 +71,14 @@ pub struct MinModeReport {
     pub curvature: f64,
     pub rotations: usize,
     pub iteration: usize,
+}
+
+/// A first-order saddle has a vanishing force and one negative
+/// curvature. A vanishing force alone also describes a minimum, which
+/// the inverted-force step then leaves; the gate therefore requires
+/// `curvature < 0` alongside `max_force <= force_tol`.
+fn converged(max_force: f64, curvature: f64, force_tol: f64) -> bool {
+    max_force <= force_tol && curvature < 0.0
 }
 
 fn normalize(mut v: Array1<f64>) -> Array1<f64> {
@@ -339,7 +348,7 @@ impl MinModeSession {
 
         let force = -&g0;
         let max_force = force.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
-        if max_force <= self.config.force_tol {
+        if converged(max_force, curvature, self.config.force_tol) {
             return Ok(MinModeReport {
                 status: MinModeStatus::Converged,
                 max_force,
@@ -378,7 +387,7 @@ impl MinModeSession {
 
         let (_, g_new) = surface.eval(self.x.view())?;
         let max_force = g_new.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
-        let status = if max_force <= self.config.force_tol {
+        let status = if converged(max_force, curvature, self.config.force_tol) {
             MinModeStatus::Converged
         } else {
             MinModeStatus::Running

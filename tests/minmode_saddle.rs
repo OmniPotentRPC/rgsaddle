@@ -18,6 +18,19 @@ impl PointSurface for QuadraticSaddle {
     }
 }
 
+/// V = (x^2 - 1)^2 + 2 y^2 + 2 z^2: minima at (+-1, 0, 0) where every
+/// curvature is positive (8 along x, 4 along y and z).
+struct DoubleWell;
+
+impl PointSurface for DoubleWell {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        let (a, b, c) = (x[0], x[1], x[2]);
+        let e = (a * a - 1.0).powi(2) + 2.0 * b * b + 2.0 * c * c;
+        let g = array![4.0 * a * (a * a - 1.0), 4.0 * b, 4.0 * c];
+        Ok((e, g))
+    }
+}
+
 fn converges(kind: MinModeKind) {
     let config = MinModeConfig {
         kind,
@@ -57,4 +70,49 @@ fn dimer_rotation_finds_the_saddle() {
 #[test]
 fn lanczos_finds_the_saddle() {
     converges(MinModeKind::Lanczos);
+}
+
+/// The force vanishes at a minimum as it does at a saddle. A walker
+/// sitting there must report Running while the lowest curvature is
+/// positive, whatever the force says.
+fn minimum_is_not_converged(kind: MinModeKind) {
+    let config = MinModeConfig {
+        kind,
+        force_tol: 1e-3,
+        max_move: 0.1,
+        ..MinModeConfig::default()
+    };
+    let start = array![1.0, 0.0, 0.0];
+    let seed = array![1.0, 0.0, 0.0];
+    let mut session = MinModeSession::new(config, start, seed).unwrap();
+    for step in 0..50 {
+        let report = session.step(&DoubleWell).unwrap();
+        assert!(
+            report.max_force <= 1e-3,
+            "{kind:?} step {step}: max_force={} at a stationary point",
+            report.max_force
+        );
+        assert!(
+            report.curvature > 0.0,
+            "{kind:?} step {step}: curvature={} at a minimum",
+            report.curvature
+        );
+        assert_eq!(
+            report.status,
+            MinModeStatus::Running,
+            "{kind:?} step {step}: max_force={} curvature={}",
+            report.max_force,
+            report.curvature
+        );
+    }
+}
+
+#[test]
+fn dimer_does_not_converge_at_a_minimum() {
+    minimum_is_not_converged(MinModeKind::Dimer);
+}
+
+#[test]
+fn lanczos_does_not_converge_at_a_minimum() {
+    minimum_is_not_converged(MinModeKind::Lanczos);
 }
