@@ -169,13 +169,7 @@ impl BandSurface for CSurface {
                 let flat: Vec<f64> = positions.row(i).iter().copied().collect();
                 let mut e = [0.0];
                 let mut g = vec![0.0; dof];
-                self.call(
-                    self.n_images,
-                    first_image + i as i64,
-                    &flat,
-                    &mut e,
-                    &mut g,
-                )?;
+                self.call(self.n_images, first_image + i as i64, &flat, &mut e, &mut g)?;
                 energies[i] = e[0];
                 for c in 0..dof {
                     gradients[(i, c)] = g[c];

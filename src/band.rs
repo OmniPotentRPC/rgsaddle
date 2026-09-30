@@ -204,7 +204,10 @@ impl ClimbState {
         }
     }
     fn take_error(&self) -> Option<SaddleError> {
-        self.surface_error.lock().ok().and_then(|mut slot| slot.take())
+        self.surface_error
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take())
     }
 }
 
@@ -232,9 +235,7 @@ fn assemble_band(
             )?;
             energies[0] = e_first;
             energies[n_images - 1] = e_last;
-            energies
-                .slice_mut(s![1..n_images - 1])
-                .assign(&interior_e);
+            energies.slice_mut(s![1..n_images - 1]).assign(&interior_e);
             gradients
                 .slice_mut(s![1..n_images - 1, ..])
                 .assign(&interior_g);
