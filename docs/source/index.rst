@@ -23,10 +23,10 @@ rgsaddle
      </div>
    </div>
 
-The inner seam is rgmin's ``Solver``: one optimizer step over a force this
-crate assembled. The outer seam is ``BandSession::step`` or
-``MinModeSession::step``. There is no run-to-completion contract.
-``run`` is a loop over ``step``.
+The band and the minimum-mode search take one rgmin ``Solver`` step
+on a force this crate assembled. ``Index1Session`` takes the Nichols
+index-1 step on a Hessian and updates it with Powell or Bofill.
+There is no run-to-completion contract. ``run`` is a loop over ``step``.
 
 Force assembly ports eOn's NEB: Mills–Jónsson–Schenter and
 Henkelman–Jónsson tangents, uniform / energy-weighted / Onsager–Machlup

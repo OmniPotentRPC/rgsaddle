@@ -1,6 +1,6 @@
 /**
  * @file rgsaddle.h
- * @brief C ABI for the rgsaddle band and minimum-mode sessions.
+ * @brief C ABI for the rgsaddle band, minimum-mode, and index-1 sessions.
  *
  * The stepping contract in C. The host owns the loop: create a
  * session, call step until it reports converged (or until the host's
@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 2u
+#define RGSADDLE_ABI_MINOR 3u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -249,6 +249,87 @@ rgsaddle_status_t rgsaddle_minmode_mode(const RgsaddleMinMode *session,
                                         double *out);
 rgsaddle_status_t rgsaddle_minmode_reset(RgsaddleMinMode *session);
 void rgsaddle_minmode_free(RgsaddleMinMode *session);
+
+typedef enum {
+  RGSADDLE_HESS_POWELL = 0,
+  RGSADDLE_HESS_BOFILL = 1
+} rgsaddle_hess_update_t;
+
+typedef enum {
+  RGSADDLE_NICHOLS_MINIMIZE = 0,
+  RGSADDLE_NICHOLS_INDEX1 = 1
+} rgsaddle_nichols_mode_t;
+
+/**
+ * Nichols displacement from a spectrum of the mass-weighted energy
+ * Hessian. `gradient` is dE/dx (i-PI `nichols` takes forces, the
+ * negation of this vector). `evecs` is row-major `n` by `nmode`,
+ * column `k` the eigenvector of `evals[k]`. `nmode` may be smaller
+ * than `n` when external modes were dropped. `masses` is per
+ * coordinate, or NULL for unit mass.
+ *
+ * `RGSADDLE_NICHOLS_INDEX1` ignores `trust_radius`; cap the step with
+ * `rgsaddle_cap_max_abs`. `RGSADDLE_NICHOLS_MINIMIZE` uses
+ * `trust_radius` as i-PI `big_step`.
+ */
+rgsaddle_status_t rgsaddle_nichols_step(int64_t n, int64_t nmode,
+                                        const double *gradient,
+                                        const double *evals, const double *evecs,
+                                        const double *masses, double trust_radius,
+                                        int32_t mode, double *displacement);
+
+/**
+ * Powell symmetric Broyden update of a Cartesian energy Hessian.
+ * `step` and `dgradient` have length `n`. `hessian` is row-major
+ * `n` by `n` and is updated in place. `dgradient` is the change in
+ * dE/dx.
+ */
+rgsaddle_status_t rgsaddle_hessian_powell(int64_t n, const double *step,
+                                          const double *dgradient, double *hessian);
+
+/** Bofill mix of the Powell update and the symmetric rank-one term. */
+rgsaddle_status_t rgsaddle_hessian_bofill(int64_t n, const double *step,
+                                          const double *dgradient, double *hessian);
+
+/** Scale `step` so its largest absolute entry equals `trust_radius`. */
+rgsaddle_status_t rgsaddle_cap_max_abs(int64_t n, double *step, double trust_radius);
+
+typedef struct RgsaddleIndex1 RgsaddleIndex1;
+
+/** Index-1 Newton configuration. The caller stamps version. */
+typedef struct {
+  rgsaddle_version_t version;
+  uint64_t flags;
+  int32_t update; /**< rgsaddle_hess_update_t */
+  int32_t mode;   /**< rgsaddle_nichols_mode_t */
+  /** Max-abs cap on the Cartesian step. */
+  double trust_radius;
+  double force_tol;
+  /** Central-difference step when `hessian` is NULL. */
+  double fd_dr;
+} rgsaddle_index1_config_t;
+
+/**
+ * Index-1 session over one geometry of `3 * n_atoms` coordinates.
+ * `hessian` is row-major `dof` by `dof`, or NULL to build it by
+ * finite differences on the first step. `masses` is `dof` doubles
+ * or NULL for unit mass. For a bead polymer pass `n_atoms * n_beads`.
+ */
+RgsaddleIndex1 *rgsaddle_index1_create(const rgsaddle_index1_config_t *config,
+                                       int64_t n_atoms, const double *position,
+                                       const double *hessian, const double *masses);
+
+/** One Nichols step, trust cap, and Hessian update. */
+rgsaddle_status_t rgsaddle_index1_step(RgsaddleIndex1 *session,
+                                       rgsaddle_surface_fn surface, void *user,
+                                       rgsaddle_report_t *out);
+
+rgsaddle_status_t rgsaddle_index1_position(const RgsaddleIndex1 *session, double *out);
+/** Copies the Cartesian Hessian. `RGSADDLE_SHAPE` if it is not built. */
+rgsaddle_status_t rgsaddle_index1_hessian(const RgsaddleIndex1 *session, double *out);
+/** Drop the Hessian and the gradient cache at a surface boundary. */
+rgsaddle_status_t rgsaddle_index1_reset(RgsaddleIndex1 *session);
+void rgsaddle_index1_free(RgsaddleIndex1 *session);
 
 #ifdef __cplusplus
 }

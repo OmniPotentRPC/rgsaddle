@@ -36,6 +36,21 @@ static rgsaddle_status_t surface_one(void *user, rgsaddle_surface_request_t *req
   return RGSADDLE_OK;
 }
 
+static rgsaddle_status_t surface_quad(void *user, rgsaddle_surface_request_t *req) {
+  (void)user;
+  if (req->n_images != 1 || req->n_atoms != 1 || req->image != -1) {
+    return RGSADDLE_SHAPE;
+  }
+  const double x = req->positions[0];
+  const double y = req->positions[1];
+  const double z = req->positions[2];
+  req->energies[0] = -x * x + y * y + z * z;
+  req->gradients[0] = -2.0 * x;
+  req->gradients[1] = 2.0 * y;
+  req->gradients[2] = 2.0 * z;
+  return RGSADDLE_OK;
+}
+
 static rgsaddle_status_t surface(void *user, rgsaddle_surface_request_t *req) {
   (void)user;
   if (req->version.major != RGSADDLE_ABI_MAJOR) {
@@ -202,6 +217,84 @@ int main(void) {
   }
   rgsaddle_band_free(band);
   rgsaddle_band_free(NULL);
+
+  /* Raw Nichols step on V = -x^2 + y^2, the i-PI displacement. */
+  {
+    const double gradient[2] = {-0.8, -0.6};
+    const double evals[2] = {-2.0, 2.0};
+    const double evecs[4] = {1.0, 0.0, 0.0, 1.0};
+    double dx[2] = {0.0, 0.0};
+    st = rgsaddle_nichols_step(2, 2, gradient, evals, evecs, NULL, 10.0,
+                               RGSADDLE_NICHOLS_INDEX1, dx);
+    if (st != RGSADDLE_OK) {
+      return fail(st, "nichols step");
+    }
+    if (fabs(dx[0] + 0.4) > 1e-12 || fabs(dx[1] - 0.3) > 1e-12) {
+      fprintf(stderr, "nichols dx = %g %g\n", dx[0], dx[1]);
+      return fail(RGSADDLE_SOLVER, "nichols step mismatch");
+    }
+    if (rgsaddle_nichols_step(2, 2, NULL, evals, evecs, NULL, 10.0,
+                              RGSADDLE_NICHOLS_INDEX1, dx) !=
+        RGSADDLE_INVALID_PARAMETER) {
+      return fail(RGSADDLE_INVALID_PARAMETER, "NULL gradient must fail");
+    }
+    st = rgsaddle_cap_max_abs(2, dx, 0.2);
+    if (st != RGSADDLE_OK || fabs(fabs(dx[0]) - 0.2) > 1e-12) {
+      return fail(st == RGSADDLE_OK ? RGSADDLE_SOLVER : st, "trust cap");
+    }
+  }
+
+  /* Powell update against the i-PI formula on a 2x2 Hessian. */
+  {
+    double h[4] = {2.0, 0.1, 0.1, 3.0};
+    const double s[2] = {0.2, -0.1};
+    const double y[2] = {-0.05, 0.4};
+    st = rgsaddle_hessian_powell(2, s, y, h);
+    if (st != RGSADDLE_OK || fabs(h[0] - 0.976) > 1e-12 || fabs(h[1] - 2.452) > 1e-12 ||
+        fabs(h[2] - 2.452) > 1e-12 || fabs(h[3] - 0.904) > 1e-12) {
+      fprintf(stderr, "powell H = %g %g %g %g\n", h[0], h[1], h[2], h[3]);
+      return fail(st == RGSADDLE_OK ? RGSADDLE_SOLVER : st, "powell update");
+    }
+  }
+
+  /* One index-1 step on V = -x^2 + y^2 + z^2 reaches the origin. */
+  {
+    rgsaddle_index1_config_t icfg;
+    memset(&icfg, 0, sizeof icfg);
+    icfg.version.major = RGSADDLE_ABI_MAJOR;
+    icfg.version.minor = RGSADDLE_ABI_MINOR;
+    icfg.update = RGSADDLE_HESS_BOFILL;
+    icfg.mode = RGSADDLE_NICHOLS_INDEX1;
+    icfg.trust_radius = 1.0;
+    icfg.force_tol = 1e-8;
+    icfg.fd_dr = 1e-4;
+    const double x0[3] = {0.3, 0.2, -0.1};
+    const double hess[9] = {-2.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 2.0};
+    RgsaddleIndex1 *idx = rgsaddle_index1_create(&icfg, 1, x0, hess, NULL);
+    if (!idx) {
+      return fail(RGSADDLE_SHAPE, "index1 create failed");
+    }
+    rgsaddle_report_t irep;
+    memset(&irep, 0, sizeof irep);
+    st = rgsaddle_index1_step(idx, surface_quad, NULL, &irep);
+    if (st != RGSADDLE_OK) {
+      return fail(st, "index1 step");
+    }
+    if (irep.status != RGSADDLE_STATUS_CONVERGED || irep.curvature >= 0.0) {
+      fprintf(stderr, "index1 status=%d force=%g curv=%g\n", irep.status, irep.max_force,
+              irep.curvature);
+      return fail(RGSADDLE_SOLVER, "index1 did not converge");
+    }
+    double x1[3];
+    st = rgsaddle_index1_position(idx, x1);
+    if (st != RGSADDLE_OK || fabs(x1[0]) > 1e-8 || fabs(x1[1]) > 1e-8 || fabs(x1[2]) > 1e-8) {
+      fprintf(stderr, "index1 x = %g %g %g\n", x1[0], x1[1], x1[2]);
+      return fail(st == RGSADDLE_OK ? RGSADDLE_SOLVER : st, "index1 off the saddle");
+    }
+    rgsaddle_index1_free(idx);
+    rgsaddle_index1_free(NULL);
+  }
+
   printf("RGSADDLE_C_ABI_OK steps=%d ci=%lld\n", steps, (long long)rep.ci_index);
   return RGSADDLE_OK;
 }

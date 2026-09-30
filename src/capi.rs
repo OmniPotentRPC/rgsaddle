@@ -14,12 +14,16 @@ use rgmin::{FireKind, Method};
 use crate::band::{BandConfig, BandSession, BandStatus, BandSurface, Cell, CiConfig};
 use crate::error::SaddleError;
 use crate::minmode::{MinModeConfig, MinModeKind, MinModeSession, MinModeStatus, PointSurface};
+use crate::nichols::{
+    HessianUpdate, Index1Config, Index1Session, Index1Status, NicholsMode, bofill_update,
+    cap_max_abs, nichols_step, powell_update,
+};
 use crate::projection::ProjectionKind;
 use crate::spring::SpringKind;
 use crate::tangent::TangentKind;
 
 pub const RGSADDLE_ABI_MAJOR: u32 = 1;
-pub const RGSADDLE_ABI_MINOR: u32 = 2;
+pub const RGSADDLE_ABI_MINOR: u32 = 3;
 
 /// Band config bit 0. The C step calls the surface once per image
 /// carried by the evaluation: every image on the first evaluation
@@ -238,6 +242,7 @@ fn status_of(err: &SaddleError) -> i32 {
         SaddleError::Surface(_) => RGSADDLE_SURFACE_FAILED,
         SaddleError::NonFinite(_) => RGSADDLE_NON_FINITE,
         SaddleError::Solver(_) => RGSADDLE_SOLVER,
+        SaddleError::Invalid(_) => RGSADDLE_INVALID_PARAMETER,
     }
 }
 
@@ -273,6 +278,7 @@ pub extern "C" fn rgsaddle_status_name(status: i32) -> *const c_char {
         RGSADDLE_NON_FINITE => "NON_FINITE\0",
         RGSADDLE_SOLVER => "SOLVER\0",
         RGSADDLE_ABI_MISMATCH => "ABI_MISMATCH\0",
+        RGSADDLE_INVALID_PARAMETER => "INVALID_PARAMETER\0",
         _ => "UNKNOWN\0",
     };
     s.as_ptr() as *const c_char
@@ -617,6 +623,353 @@ pub unsafe extern "C" fn rgsaddle_minmode_reset(session: *mut RgsaddleMinMode) -
 /// `session` must come from [`rgsaddle_minmode_create`], freed once.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rgsaddle_minmode_free(session: *mut RgsaddleMinMode) {
+    if !session.is_null() {
+        drop(unsafe { Box::from_raw(session) });
+    }
+}
+
+#[repr(C)]
+pub struct RgsaddleIndex1Config {
+    pub version: RgsaddleVersion,
+    pub flags: u64,
+    pub update: i32,
+    pub mode: i32,
+    pub trust_radius: f64,
+    pub force_tol: f64,
+    pub fd_dr: f64,
+}
+
+pub struct RgsaddleIndex1 {
+    session: Index1Session,
+    n_atoms: i64,
+}
+
+fn nichols_mode(mode: i32) -> Option<NicholsMode> {
+    match mode {
+        0 => Some(NicholsMode::Minimize),
+        1 => Some(NicholsMode::Index1),
+        _ => None,
+    }
+}
+
+/// # Safety
+/// `gradient`, `evals`, and `evecs` are readable. `evecs` holds
+/// `n * nmode` doubles, row-major, eigenvector `k` in column `k`.
+/// `masses` is `n` doubles or NULL for unit mass. `displacement`
+/// holds `n` doubles.
+#[allow(clippy::too_many_arguments)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_nichols_step(
+    n: i64,
+    nmode: i64,
+    gradient: *const f64,
+    evals: *const f64,
+    evecs: *const f64,
+    masses: *const f64,
+    trust_radius: f64,
+    mode: i32,
+    displacement: *mut f64,
+) -> i32 {
+    if n < 1
+        || nmode < 1
+        || gradient.is_null()
+        || evals.is_null()
+        || evecs.is_null()
+        || displacement.is_null()
+    {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let Some(mode) = nichols_mode(mode) else {
+        return RGSADDLE_INVALID_PARAMETER;
+    };
+    let n = n as usize;
+    let nmode = nmode as usize;
+    if n.checked_mul(nmode).is_none() {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let g = Array1::from(unsafe { slice::from_raw_parts(gradient, n) }.to_vec());
+    let ev = Array1::from(unsafe { slice::from_raw_parts(evals, nmode) }.to_vec());
+    let vectors = unsafe { slice::from_raw_parts(evecs, n * nmode) }.to_vec();
+    let vectors = match Array2::from_shape_vec((n, nmode), vectors) {
+        Ok(m) => m,
+        Err(_) => return RGSADDLE_SHAPE,
+    };
+    let mass = if masses.is_null() {
+        None
+    } else {
+        Some(Array1::from(
+            unsafe { slice::from_raw_parts(masses, n) }.to_vec(),
+        ))
+    };
+    match nichols_step(
+        g.view(),
+        ev.view(),
+        vectors.view(),
+        mass.as_ref().map(|m| m.view()),
+        trust_radius,
+        mode,
+    ) {
+        Ok(dx) => {
+            let dst = unsafe { slice::from_raw_parts_mut(displacement, n) };
+            for (i, v) in dx.iter().enumerate() {
+                dst[i] = *v;
+            }
+            RGSADDLE_OK
+        }
+        Err(e) => status_of(&e),
+    }
+}
+
+/// # Safety
+/// `step` and `dgradient` hold `n` doubles. `hessian` holds `n * n`
+/// row-major doubles and is updated in place.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_hessian_powell(
+    n: i64,
+    step: *const f64,
+    dgradient: *const f64,
+    hessian: *mut f64,
+) -> i32 {
+    hessian_update(n, step, dgradient, hessian, true)
+}
+
+/// # Safety
+/// Same layout as [`rgsaddle_hessian_powell`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_hessian_bofill(
+    n: i64,
+    step: *const f64,
+    dgradient: *const f64,
+    hessian: *mut f64,
+) -> i32 {
+    hessian_update(n, step, dgradient, hessian, false)
+}
+
+fn hessian_update(
+    n: i64,
+    step: *const f64,
+    dgradient: *const f64,
+    hessian: *mut f64,
+    powell: bool,
+) -> i32 {
+    if n < 1 || step.is_null() || dgradient.is_null() || hessian.is_null() {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let n = n as usize;
+    let s = Array1::from(unsafe { slice::from_raw_parts(step, n) }.to_vec());
+    let y = Array1::from(unsafe { slice::from_raw_parts(dgradient, n) }.to_vec());
+    let raw = unsafe { slice::from_raw_parts(hessian, n * n) }.to_vec();
+    let mut h = match Array2::from_shape_vec((n, n), raw) {
+        Ok(m) => m,
+        Err(_) => return RGSADDLE_SHAPE,
+    };
+    let result = if powell {
+        powell_update(&mut h, s.view(), y.view())
+    } else {
+        bofill_update(&mut h, s.view(), y.view())
+    };
+    match result {
+        Ok(()) => {
+            let dst = unsafe { slice::from_raw_parts_mut(hessian, n * n) };
+            for (i, v) in h.iter().enumerate() {
+                dst[i] = *v;
+            }
+            RGSADDLE_OK
+        }
+        Err(e) => status_of(&e),
+    }
+}
+
+/// # Safety
+/// `step` holds `n` doubles and is scaled in place.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_cap_max_abs(n: i64, step: *mut f64, trust_radius: f64) -> i32 {
+    if n < 1 || step.is_null() {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let n = n as usize;
+    let mut dx = Array1::from(unsafe { slice::from_raw_parts(step, n) }.to_vec());
+    match cap_max_abs(&mut dx, trust_radius) {
+        Ok(()) => {
+            let dst = unsafe { slice::from_raw_parts_mut(step, n) };
+            for (i, v) in dx.iter().enumerate() {
+                dst[i] = *v;
+            }
+            RGSADDLE_OK
+        }
+        Err(e) => status_of(&e),
+    }
+}
+
+/// # Safety
+/// `config` and `position` are readable. `position` holds
+/// `3 * n_atoms` doubles. `hessian` is `dof * dof` row-major or NULL
+/// to build it by finite differences. `masses` is `dof` doubles or
+/// NULL for unit mass.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_index1_create(
+    config: *const RgsaddleIndex1Config,
+    n_atoms: i64,
+    position: *const f64,
+    hessian: *const f64,
+    masses: *const f64,
+) -> *mut RgsaddleIndex1 {
+    if config.is_null() || position.is_null() || n_atoms < 1 {
+        return std::ptr::null_mut();
+    }
+    let cfg = unsafe { &*config };
+    if cfg.version.major != RGSADDLE_ABI_MAJOR {
+        return std::ptr::null_mut();
+    }
+    let dof = (3 * n_atoms) as usize;
+    let x = Array1::from(unsafe { slice::from_raw_parts(position, dof) }.to_vec());
+    let hess = if hessian.is_null() {
+        None
+    } else {
+        let raw = unsafe { slice::from_raw_parts(hessian, dof * dof) }.to_vec();
+        match Array2::from_shape_vec((dof, dof), raw) {
+            Ok(m) => Some(m),
+            Err(_) => return std::ptr::null_mut(),
+        }
+    };
+    let mass = if masses.is_null() {
+        None
+    } else {
+        Some(Array1::from(
+            unsafe { slice::from_raw_parts(masses, dof) }.to_vec(),
+        ))
+    };
+    let Some(mode) = nichols_mode(cfg.mode) else {
+        return std::ptr::null_mut();
+    };
+    let update = match cfg.update {
+        0 => HessianUpdate::Powell,
+        1 => HessianUpdate::Bofill,
+        _ => return std::ptr::null_mut(),
+    };
+    let session_config = Index1Config {
+        update,
+        mode,
+        trust_radius: cfg.trust_radius,
+        force_tol: cfg.force_tol,
+        fd_dr: cfg.fd_dr,
+    };
+    match Index1Session::new(session_config, x, hess, mass) {
+        Ok(session) => Box::into_raw(Box::new(RgsaddleIndex1 { session, n_atoms })),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// # Safety
+/// `session` and `out` are valid. `surface` is called with `user`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_index1_step(
+    session: *mut RgsaddleIndex1,
+    surface: Option<RgsaddleSurfaceFn>,
+    user: *mut c_void,
+    out: *mut RgsaddleReport,
+) -> i32 {
+    if session.is_null() {
+        return RGSADDLE_NULL_SESSION;
+    }
+    if out.is_null() {
+        return RGSADDLE_NULL_REPORT;
+    }
+    let Some(f) = surface else {
+        return RGSADDLE_NULL_SURFACE;
+    };
+    let session = unsafe { &mut *session };
+    let cs = CSurface {
+        f,
+        user,
+        n_atoms: session.n_atoms,
+        n_images: 1,
+        per_image: false,
+    };
+    match session.session.step(&cs) {
+        Ok(report) => {
+            let out = unsafe { &mut *out };
+            stamp_report(out);
+            out.status = if report.status == Index1Status::Converged {
+                1
+            } else {
+                0
+            };
+            out.reserved = 0;
+            out.max_force = report.max_force;
+            out.ci_index = -1;
+            out.iteration = report.iteration as i64;
+            out.curvature = report.curvature;
+            out.rotations = 0;
+            RGSADDLE_OK
+        }
+        Err(e) => status_of(&e),
+    }
+}
+
+/// # Safety
+/// `out` holds `3 * n_atoms` doubles.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_index1_position(
+    session: *const RgsaddleIndex1,
+    out: *mut f64,
+) -> i32 {
+    if session.is_null() {
+        return RGSADDLE_NULL_SESSION;
+    }
+    if out.is_null() {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let session = unsafe { &*session };
+    let dof = (3 * session.n_atoms) as usize;
+    let dst = unsafe { slice::from_raw_parts_mut(out, dof) };
+    for (i, v) in session.session.position().iter().enumerate() {
+        dst[i] = *v;
+    }
+    RGSADDLE_OK
+}
+
+/// # Safety
+/// `out` holds `dof * dof` doubles. Fails with `RGSADDLE_SHAPE` when
+/// the Hessian has not been built yet.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_index1_hessian(
+    session: *const RgsaddleIndex1,
+    out: *mut f64,
+) -> i32 {
+    if session.is_null() {
+        return RGSADDLE_NULL_SESSION;
+    }
+    if out.is_null() {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let session = unsafe { &*session };
+    let Some(h) = session.session.hessian() else {
+        return RGSADDLE_SHAPE;
+    };
+    let dof = (3 * session.n_atoms) as usize;
+    let dst = unsafe { slice::from_raw_parts_mut(out, dof * dof) };
+    for (i, v) in h.iter().enumerate() {
+        dst[i] = *v;
+    }
+    RGSADDLE_OK
+}
+
+/// # Safety
+/// `session` is a live pointer or NULL.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_index1_reset(session: *mut RgsaddleIndex1) -> i32 {
+    if session.is_null() {
+        return RGSADDLE_NULL_SESSION;
+    }
+    unsafe { (*session).session.reset() };
+    RGSADDLE_OK
+}
+
+/// # Safety
+/// `session` comes from [`rgsaddle_index1_create`] and is freed once.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_index1_free(session: *mut RgsaddleIndex1) {
     if !session.is_null() {
         drop(unsafe { Box::from_raw(session) });
     }

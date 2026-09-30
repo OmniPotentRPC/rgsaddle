@@ -6,14 +6,18 @@ Band and minimum-mode saddle mechanics over
 Docs: <https://omnipotentrpc.github.io/rgsaddle/>
 
 
-Two seams, stepping at both. The inner seam is rgmin's `Solver`: one
-optimizer step over an assembled band force; this crate defines no
-optimizer of its own. The outer seam is `BandSession::step`: assemble
-NEB forces on the caller's surface, take one solver step, report. No
-run-to-completion contract exists; hosts own the loop and interleave
-their policy (trust regions, drift budgets, acquisition, hybrid MMF)
-between steps. `run` is a convenience loop over `step` and nothing
-more.
+The band and the minimum-mode search take one `rgmin` `Solver` step
+on a force this crate assembled. `BandSession::step` assembles the
+NEB force and reports. No run-to-completion contract exists; hosts
+own the loop and interleave their policy between steps. `run` is a
+convenience loop over `step`.
+
+`Index1Session` is the index-1 Newton search on a dense Hessian. The
+displacement is the Nichols level shift (climb the lowest mode,
+descend the rest), capped by a max-abs trust radius. Powell and
+Bofill update the Hessian. A host that already holds a spectrum from
+a dense or banded factorization calls `nichols_step`, or the C entry
+`rgsaddle_nichols_step`.
 
 Force assembly ports eOn's NEB mechanics with identical branch
 structure: tangents (Mills-Jonsson-Schenter simple, Henkelman-Jonsson

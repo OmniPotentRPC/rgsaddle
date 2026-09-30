@@ -1,21 +1,15 @@
-//! Band and minimum-mode saddle mechanics over rgmin steppers.
+//! Band, minimum-mode, and index-1 Newton saddle mechanics.
 //!
-//! Two seams, stepping at both:
+//! The band and the minimum-mode search take one [`rgmin::Solver`]
+//! step on a force this crate assembled. The host owns the loop.
+//! [`band::BandSession::run`] and [`minmode::MinModeSession::run`]
+//! are convenience loops over `step`.
 //!
-//! - The **inner seam** is rgmin's [`rgmin::Solver`]: one optimizer
-//!   step over an assembled band force. rgsaddle defines no optimizer
-//!   of its own.
-//! - The **outer seam** is [`band::BandSession::step`]: assemble NEB
-//!   forces on the caller's surface, take one solver step, report.
-//!   There is no run-to-completion contract; hosts own the loop and
-//!   interleave their policy (trust, drift, acquisition, MMF)
-//!   between steps. [`band::BandSession::run`] is a convenience loop
-//!   over `step` and nothing more.
-//!
-//! The same shape carries the minimum-mode search
-//! ([`minmode::MinModeSession`]): refresh the lowest curvature mode
-//! (dimer rotation or Lanczos over finite-difference Hessian
-//! actions), invert the force along it, take one solver step.
+//! [`nichols::Index1Session`] is the index-1 search on a dense
+//! Hessian: the Nichols displacement (climb the lowest mode, descend
+//! the rest), a max-abs trust cap, and a Powell or Bofill update.
+//! A host that already holds a spectrum, dense or banded, calls
+//! [`nichols::nichols_step`] with that spectrum.
 //!
 //! Force assembly is pure: tangents (Mills–Jonsson–Schenter simple,
 //! Henkelman–Jonsson improved), springs (uniform, energy-weighted,
@@ -32,6 +26,7 @@ pub mod band;
 pub mod capi;
 pub mod error;
 pub mod minmode;
+pub mod nichols;
 pub mod projection;
 pub mod spring;
 pub mod tangent;
@@ -40,6 +35,10 @@ pub use band::{BandConfig, BandReport, BandSession, BandStatus, BandSurface};
 pub use error::SaddleError;
 pub use minmode::{
     MinModeConfig, MinModeKind, MinModeReport, MinModeSession, MinModeStatus, PointSurface,
+};
+pub use nichols::{
+    HessianUpdate, Index1Config, Index1Report, Index1Session, Index1Status, NicholsMode,
+    bofill_update, cap_max_abs, nichols_displacement, nichols_step, powell_update,
 };
 pub use projection::ProjectionKind;
 pub use spring::SpringKind;

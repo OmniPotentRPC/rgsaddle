@@ -3,8 +3,8 @@ In the seat
 
 This crate is saddle mechanics, not a memory habitat. The seat that
 sits on a ticket is `ljos <https://leidarljos.github.io/docs/sit/>`_.
-rgmin is the stepper. rgpot is the potential RPC. rgsaddle is the
-band and the inverted mode between them.
+rgmin is the minimizer. rgpot is the potential RPC. rgsaddle is the
+band, the inverted mode, and the index-1 Newton step.
 
 The name
 --------

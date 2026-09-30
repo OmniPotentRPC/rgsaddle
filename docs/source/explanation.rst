@@ -1,16 +1,29 @@
 Explanation
 ===========
 
-Two seams
----------
+Band and minimum-mode
+---------------------
 
-rgsaddle does not implement an optimizer. rgmin does. This crate
-assembles a force (NEB band or inverted lowest mode) and asks
+The band and the minimum-mode search assemble a force and ask
 ``rgmin::Solver`` for one step. Hosts interleave trust regions, drift
-budgets, acquisition, or a hybrid MMF between steps.
+budgets, acquisition, or a hybrid MMF between steps. ``run`` is a
+loop over ``step``.
 
-That is why ``run`` is documented as a convenience loop over ``step``
-and nothing more.
+Index-1 Newton
+--------------
+
+``Index1Session`` searches an index-1 saddle on a Cartesian energy
+Hessian. The displacement is the Nichols level shift: maximize along
+the lowest mode and minimize along the rest, then cap the Cartesian
+step by its largest absolute component. Powell or Bofill updates the
+Hessian from the gradient difference. rgmin's Banerjee RFO minimizes
+a scalar and accepts a step only when that scalar falls, so the
+saddle step lives here.
+
+A host that already diagonalized a dense or banded Hessian calls
+``nichols_step`` with that spectrum. ``rgsaddle_nichols_step``,
+``rgsaddle_hessian_powell``, and ``rgsaddle_hessian_bofill`` are the
+same entry points in C.
 
 eOn branch structure
 --------------------

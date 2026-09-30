@@ -1,5 +1,6 @@
 #+title: Reference
 #+options: toc:nil num:nil
 
-=BandSession=, =BandConfig=, =BandSurface=, =MinModeSession=, =Cell=,
-=SaddleError=. C header =include/rgsaddle.h=.
+=BandSession=, =BandConfig=, =BandSurface=, =MinModeSession=,
+=Index1Session=, =nichols_step=, =Cell=, =SaddleError=. C header
+=include/rgsaddle.h=, ABI minor 3.

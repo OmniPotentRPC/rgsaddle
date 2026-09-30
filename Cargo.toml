@@ -1,10 +1,10 @@
 [package]
 name = "rgsaddle"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
-description = "Band and minimum-mode saddle mechanics over rgmin steppers."
+description = "Band, minimum-mode, and index-1 Newton saddle mechanics."
 repository = "https://github.com/OmniPotentRPC/rgsaddle"
 authors = ["Rohit Goswami <rgoswami@ieee.org>"]
 keywords = ["neb", "saddle", "transition-state", "optimization"]
