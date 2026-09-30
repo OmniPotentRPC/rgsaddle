@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 3u
+#define RGSADDLE_ABI_MINOR 4u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -277,6 +277,23 @@ rgsaddle_status_t rgsaddle_nichols_step(int64_t n, int64_t nmode,
                                         const double *evals, const double *evecs,
                                         const double *masses, double trust_radius,
                                         int32_t mode, double *displacement);
+
+typedef enum {
+  RGSADDLE_PRFO_MINIMIZE = 0,
+  RGSADDLE_PRFO_INDEX1 = 1
+} rgsaddle_prfo_t;
+
+/**
+ * Restricted-step partitioned RFO. `hessian` is the row-major
+ * Cartesian energy Hessian. `gradient` is dE/dx. `masses` is per
+ * coordinate, or NULL for unit mass. `mode` is `rgsaddle_prfo_t`.
+ * The Euclidean norm of `displacement` is at most `trust_radius`.
+ * Index-1 maximizes the lowest mode and minimizes the rest.
+ */
+rgsaddle_status_t rgsaddle_prfo_step(int64_t n, const double *gradient,
+                                     const double *hessian, const double *masses,
+                                     double trust_radius, int32_t mode,
+                                     double *displacement);
 
 /**
  * Powell symmetric Broyden update of a Cartesian energy Hessian.

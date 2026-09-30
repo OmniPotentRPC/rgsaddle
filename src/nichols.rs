@@ -53,7 +53,7 @@ pub enum HessianUpdate {
 pub struct Index1Config {
     pub update: HessianUpdate,
     pub mode: NicholsMode,
-    /// Max-abs cap on the Cartesian step, i-PI `big_step`.
+    /// Euclidean bound on the Cartesian step.
     pub trust_radius: f64,
     /// Stop when every |gradient| component is at or under this.
     pub force_tol: f64,
@@ -86,14 +86,16 @@ pub struct Index1Report {
     /// Lowest eigenvalue of the Hessian that produced this step.
     pub curvature: f64,
     pub iteration: usize,
-    /// Max-abs length of the step just taken. Zero when the gradient
-    /// was already under `force_tol`.
+    /// Euclidean length of the Cartesian step just taken. Zero when
+    /// the gradient was already under `force_tol`.
     pub max_step: f64,
 }
 
 /// Cyclic Jacobi eigendecomposition. Eigenvalues ascend. Columns of
 /// the second matrix are the eigenvectors.
-fn sym_eigh(hessian: ArrayView2<f64>) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
+pub(crate) fn sym_eigh(
+    hessian: ArrayView2<f64>,
+) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
     let n = hessian.nrows();
     if n == 0 || hessian.ncols() != n {
         return Err(SaddleError::Shape(
@@ -182,7 +184,10 @@ fn sort_spectrum(
     Ok((sorted_evals, sorted))
 }
 
-fn masses_or_ones(n: usize, masses: Option<ArrayView1<f64>>) -> Result<Array1<f64>, SaddleError> {
+pub(crate) fn masses_or_ones(
+    n: usize,
+    masses: Option<ArrayView1<f64>>,
+) -> Result<Array1<f64>, SaddleError> {
     match masses {
         None => Ok(Array1::ones(n)),
         Some(m) => {
@@ -356,7 +361,10 @@ pub fn nichols_displacement(
     )
 }
 
-fn mass_weight(hessian: ArrayView2<f64>, mass: &Array1<f64>) -> Result<Array2<f64>, SaddleError> {
+pub(crate) fn mass_weight(
+    hessian: ArrayView2<f64>,
+    mass: &Array1<f64>,
+) -> Result<Array2<f64>, SaddleError> {
     let n = mass.len();
     let mut weighted = Array2::<f64>::zeros((n, n));
     for i in 0..n {
@@ -543,20 +551,26 @@ fn check_config(config: &Index1Config, n: usize) -> Result<(), SaddleError> {
     Ok(())
 }
 
-/// Index-1 (or minimizing) Newton on one geometry.
+/// Index-1 (or minimizing) search on one geometry.
 ///
 /// The host owns the loop, as with the band and the minimum-mode
 /// session. Each [`Index1Session::step`] diagonalizes the current
-/// Cartesian Hessian, takes the Nichols displacement, caps it, and
-/// updates the Hessian with Powell or Bofill.
+/// Cartesian Hessian, takes a restricted-step partitioned RFO
+/// displacement, and updates the Hessian with Powell or Bofill.
+/// The trust radius shrinks when the rational-function model is a
+/// poor prediction and grows when the step sat on the sphere and
+/// the model agreed.
 pub struct Index1Session {
     config: Index1Config,
     x: Array1<f64>,
+    energy: f64,
     gradient: Array1<f64>,
     gradient_valid: bool,
     hessian: Array2<f64>,
     have_hessian: bool,
     masses: Array1<f64>,
+    trust: f64,
+    trust_max: f64,
     iteration: usize,
 }
 
@@ -590,13 +604,17 @@ impl Index1Session {
                 (h, true)
             }
         };
+        let trust = config.trust_radius;
         Ok(Self {
             config,
+            energy: 0.0,
             gradient: Array1::zeros(x.len()),
             gradient_valid: false,
             hessian,
             have_hessian,
             masses,
+            trust,
+            trust_max: (trust * 4.0).max(trust),
             iteration: 0,
             x,
         })
@@ -638,19 +656,22 @@ impl Index1Session {
         Ok(())
     }
 
-    /// Drop the Hessian and the gradient cache at a surface-epoch boundary.
+    /// Drop the Hessian, the gradient cache, and the grown trust
+    /// radius at a surface-epoch boundary.
     pub fn reset(&mut self) {
         self.have_hessian = false;
         self.gradient_valid = false;
         self.hessian.fill(0.0);
         self.gradient.fill(0.0);
+        self.trust = self.config.trust_radius;
     }
 
     fn ensure_gradient<S: PointSurface>(&mut self, surface: &S) -> Result<(), SaddleError> {
         if self.gradient_valid {
             return Ok(());
         }
-        let (_, g) = surface.eval(self.x.view())?;
+        let (energy, g) = surface.eval(self.x.view())?;
+        self.energy = energy;
         if g.len() != self.x.len() {
             return Err(SaddleError::Shape("surface gradient length changed".into()));
         }
@@ -671,7 +692,22 @@ impl Index1Session {
         Ok(evals[0])
     }
 
-    /// One Nichols step and one Hessian update.
+    fn adjust_trust(&mut self, actual: f64, predicted: f64, step_norm: f64) {
+        if predicted.abs() <= 1e-12 {
+            return;
+        }
+        let rho = actual / predicted;
+        if !(rho.is_finite()) {
+            return;
+        }
+        if rho < 0.25 {
+            self.trust = (self.trust * 0.5).max(1e-4);
+        } else if rho > 0.75 && step_norm >= 0.9 * self.trust {
+            self.trust = (self.trust * 2.0).min(self.trust_max);
+        }
+    }
+
+    /// One restricted-step partitioned RFO displacement and one Hessian update.
     pub fn step<S: PointSurface>(&mut self, surface: &S) -> Result<Index1Report, SaddleError> {
         self.ensure_gradient(surface)?;
         let max_force = self.gradient.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
@@ -688,23 +724,31 @@ impl Index1Session {
             self.hessian = finite_difference_hessian(surface, self.x.view(), self.config.fd_dr)?;
             self.have_hessian = true;
         }
-        let mut dx = nichols_displacement(
+        let kind = match self.config.mode {
+            NicholsMode::Index1 => crate::prfo::PrfoKind::Index1,
+            NicholsMode::Minimize => crate::prfo::PrfoKind::Minimize,
+        };
+        let dx = crate::prfo::restricted_prfo_displacement(
             self.hessian.view(),
             self.gradient.view(),
             Some(self.masses.view()),
-            self.config.trust_radius,
-            self.config.mode,
+            self.trust,
+            kind,
         )?;
-        cap_max_abs(&mut dx, self.config.trust_radius)?;
-        let max_step = dx.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+        let max_step = dx.dot(&dx).sqrt();
+        let hdx = self.hessian.dot(&dx);
+        let quadratic = self.gradient.dot(&dx) + 0.5 * dx.dot(&hdx);
+        let predicted = quadratic / (1.0 + dx.dot(&dx));
+        let energy_old = self.energy;
         let x_new = &self.x + &dx;
-        let (_, g_new) = surface.eval(x_new.view())?;
+        let (energy_new, g_new) = surface.eval(x_new.view())?;
         if g_new.len() != self.x.len() {
             return Err(SaddleError::Shape("surface gradient length changed".into()));
         }
-        if g_new.iter().any(|v| !v.is_finite()) {
+        if g_new.iter().any(|v| !v.is_finite()) || !energy_new.is_finite() {
             return Err(SaddleError::NonFinite("gradient"));
         }
+        self.adjust_trust(energy_new - energy_old, predicted, max_step);
         let dg = &g_new - &self.gradient;
         let curvature = self.curvature()?;
         match self.config.update {
@@ -712,6 +756,7 @@ impl Index1Session {
             HessianUpdate::Bofill => bofill_update(&mut self.hessian, dx.view(), dg.view())?,
         }
         self.x = x_new;
+        self.energy = energy_new;
         self.gradient = g_new;
         self.gradient_valid = true;
         self.iteration += 1;

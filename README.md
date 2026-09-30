@@ -12,12 +12,12 @@ NEB force and reports. No run-to-completion contract exists; hosts
 own the loop and interleave their policy between steps. `run` is a
 convenience loop over `step`.
 
-`Index1Session` is the index-1 Newton search on a dense Hessian. The
-displacement is the Nichols level shift (climb the lowest mode,
-descend the rest), capped by a max-abs trust radius. Powell and
-Bofill update the Hessian. A host that already holds a spectrum from
-a dense or banded factorization calls `nichols_step`, or the C entry
-`rgsaddle_nichols_step`.
+`Index1Session` is the index-1 search on a dense Hessian. The
+displacement is Baker's restricted-step partitioned RFO: maximize
+the lowest mode, minimize the rest, and solve the scaling so the
+Cartesian step lies inside the trust sphere. Powell and Bofill
+update the Hessian. `nichols_step` remains the i-PI level shift.
+`rgsaddle_prfo_step` is the C entry for the partition.
 
 Force assembly ports eOn's NEB mechanics with identical branch
 structure: tangents (Mills-Jonsson-Schenter simple, Henkelman-Jonsson

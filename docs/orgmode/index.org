@@ -2,6 +2,7 @@
 #+options: toc:nil num:nil
 
 Band, minimum-mode, and index-1 Newton saddle mechanics. The host
-owns the loop. Force assembly ports eOn NEB branches. The Nichols
-step, Powell update, and Bofill update are =Index1Session=. See the
+owns the loop. Force assembly ports eOn NEB branches.
+=Index1Session= is restricted-step partitioned RFO with Powell or
+Bofill. See the
 Sphinx tree under =docs/source/=.

@@ -3,4 +3,4 @@
 
 =BandSession=, =BandConfig=, =BandSurface=, =MinModeSession=,
 =Index1Session=, =nichols_step=, =Cell=, =SaddleError=. C header
-=include/rgsaddle.h=, ABI minor 3.
+=include/rgsaddle.h=, ABI minor 4.

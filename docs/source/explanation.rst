@@ -13,17 +13,19 @@ Index-1 Newton
 --------------
 
 ``Index1Session`` searches an index-1 saddle on a Cartesian energy
-Hessian. The displacement is the Nichols level shift: maximize along
-the lowest mode and minimize along the rest, then cap the Cartesian
-step by its largest absolute component. Powell or Bofill updates the
-Hessian from the gradient difference. rgmin's Banerjee RFO minimizes
-a scalar and accepts a step only when that scalar falls, so the
-saddle step lives here.
+Hessian. The displacement is Baker's restricted-step partitioned
+RFO: a 2 by 2 rational-function problem maximizes the lowest mode,
+a second rational-function problem minimizes the complement, and the
+Besalu-Bofill scaling is solved so the Cartesian step lies inside
+the trust sphere. Powell or Bofill updates the Hessian from the
+gradient difference. The trust radius shrinks when that model
+predicts the energy change poorly and grows when a step on the
+sphere agrees with it.
 
-A host that already diagonalized a dense or banded Hessian calls
-``nichols_step`` with that spectrum. ``rgsaddle_nichols_step``,
-``rgsaddle_hessian_powell``, and ``rgsaddle_hessian_bofill`` are the
-same entry points in C.
+``nichols_step`` is the separate i-PI level shift. A host that
+already holds a spectrum can call it. ``rgsaddle_prfo_step`` is the
+restricted-step partition. ``rgsaddle_hessian_powell`` and
+``rgsaddle_hessian_bofill`` update the Hessian.
 
 eOn branch structure
 --------------------

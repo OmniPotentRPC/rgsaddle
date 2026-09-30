@@ -18,12 +18,13 @@ use crate::nichols::{
     HessianUpdate, Index1Config, Index1Session, Index1Status, NicholsMode, bofill_update,
     cap_max_abs, nichols_step, powell_update,
 };
+use crate::prfo::{PrfoKind, restricted_prfo_displacement};
 use crate::projection::ProjectionKind;
 use crate::spring::SpringKind;
 use crate::tangent::TangentKind;
 
 pub const RGSADDLE_ABI_MAJOR: u32 = 1;
-pub const RGSADDLE_ABI_MINOR: u32 = 3;
+pub const RGSADDLE_ABI_MINOR: u32 = 4;
 
 /// Band config bit 0. The C step calls the surface once per image
 /// carried by the evaluation: every image on the first evaluation
@@ -708,6 +709,64 @@ pub unsafe extern "C" fn rgsaddle_nichols_step(
         mass.as_ref().map(|m| m.view()),
         trust_radius,
         mode,
+    ) {
+        Ok(dx) => {
+            let dst = unsafe { slice::from_raw_parts_mut(displacement, n) };
+            for (i, v) in dx.iter().enumerate() {
+                dst[i] = *v;
+            }
+            RGSADDLE_OK
+        }
+        Err(e) => status_of(&e),
+    }
+}
+
+/// # Safety
+/// `gradient` holds `n` doubles. `hessian` holds `n * n` row-major
+/// doubles, the Cartesian energy Hessian. `masses` holds `n` doubles
+/// or is NULL for unit mass. `displacement` holds `n` doubles.
+#[allow(clippy::too_many_arguments)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_prfo_step(
+    n: i64,
+    gradient: *const f64,
+    hessian: *const f64,
+    masses: *const f64,
+    trust_radius: f64,
+    mode: i32,
+    displacement: *mut f64,
+) -> i32 {
+    if n < 1 || gradient.is_null() || hessian.is_null() || displacement.is_null() {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let kind = match mode {
+        0 => PrfoKind::Minimize,
+        1 => PrfoKind::Index1,
+        _ => return RGSADDLE_INVALID_PARAMETER,
+    };
+    let n = n as usize;
+    let Some(len) = n.checked_mul(n) else {
+        return RGSADDLE_INVALID_PARAMETER;
+    };
+    let g = Array1::from(unsafe { slice::from_raw_parts(gradient, n) }.to_vec());
+    let raw = unsafe { slice::from_raw_parts(hessian, len) }.to_vec();
+    let h = match Array2::from_shape_vec((n, n), raw) {
+        Ok(m) => m,
+        Err(_) => return RGSADDLE_SHAPE,
+    };
+    let mass = if masses.is_null() {
+        None
+    } else {
+        Some(Array1::from(
+            unsafe { slice::from_raw_parts(masses, n) }.to_vec(),
+        ))
+    };
+    match restricted_prfo_displacement(
+        h.view(),
+        g.view(),
+        mass.as_ref().map(|m| m.view()),
+        trust_radius,
+        kind,
     ) {
         Ok(dx) => {
             let dst = unsafe { slice::from_raw_parts_mut(displacement, n) };

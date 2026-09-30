@@ -44,18 +44,19 @@ evals a single geometry.
 Index-1 Newton
 --------------
 
-``Index1Session`` takes the Nichols step on a dense Hessian and
-updates it with Powell or Bofill. Pass an initial Hessian, or leave
-it empty and the first step builds one by central differences. The
-trust radius is a max-abs cap on the Cartesian step.
+``Index1Session`` takes a restricted-step partitioned RFO step on a
+dense Hessian and updates it with Powell or Bofill. Pass an initial
+Hessian, or leave it empty and the first step builds one by central
+differences. The trust radius is the Euclidean bound on the
+Cartesian step.
 
 From C, ``rgsaddle_index1_create`` / ``rgsaddle_index1_step`` follow
 the same loop. The vector length is ``3 * n_atoms``; a bead polymer
 passes ``n_atoms * n_beads``. A host that owns the Hessian calls
-``rgsaddle_nichols_step`` with the spectrum (``nmode`` may be smaller
-than ``n`` when external modes were dropped) and
-``rgsaddle_hessian_bofill`` or ``rgsaddle_hessian_powell`` to update
-it. ``rgsaddle_cap_max_abs`` applies the trust cap. The gradient on
+``rgsaddle_prfo_step``. ``rgsaddle_nichols_step`` is the i-PI shift
+on a spectrum (``nmode`` may be smaller than ``n`` when external
+modes were dropped). ``rgsaddle_hessian_bofill`` or
+``rgsaddle_hessian_powell`` updates the Hessian. The gradient on
 the wire is dE/dx.
 
 Do not keep solver history across a potential change

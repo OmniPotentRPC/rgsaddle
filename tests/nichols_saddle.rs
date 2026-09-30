@@ -164,8 +164,16 @@ fn trust_cap_limits_the_quadratic_step() {
     let mut session =
         Index1Session::new(config, array![0.4, -0.3], Some(quadratic_hessian()), None).unwrap();
     let report = session.step(&Quadratic).unwrap();
-    assert!((report.max_step - 0.2).abs() < 1e-12);
-    close(session.position().as_slice().unwrap(), &[0.2, -0.15], 1e-12);
+    assert!(
+        (report.max_step - 0.2).abs() < 1e-8,
+        "step norm {}",
+        report.max_step
+    );
+    close(
+        session.position().as_slice().unwrap(),
+        &[0.25344335044460476, -0.16390757379230437],
+        1e-8,
+    );
 }
 
 fn quadratic_converges(update: HessianUpdate, hessian: Option<Array2<f64>>) {

@@ -6,10 +6,11 @@
 //! are convenience loops over `step`.
 //!
 //! [`nichols::Index1Session`] is the index-1 search on a dense
-//! Hessian: the Nichols displacement (climb the lowest mode, descend
-//! the rest), a max-abs trust cap, and a Powell or Bofill update.
-//! A host that already holds a spectrum, dense or banded, calls
-//! [`nichols::nichols_step`] with that spectrum.
+//! Hessian: Baker's restricted-step partitioned RFO (maximize the
+//! lowest mode, minimize the rest, with the step inside a Euclidean
+//! trust sphere) and a Powell or Bofill update. The i-PI Nichols
+//! shift remains [`nichols::nichols_step`] for a host that already
+//! holds a spectrum.
 //!
 //! Force assembly is pure: tangents (Mills–Jonsson–Schenter simple,
 //! Henkelman–Jonsson improved), springs (uniform, energy-weighted,
@@ -27,6 +28,7 @@ pub mod capi;
 pub mod error;
 pub mod minmode;
 pub mod nichols;
+pub mod prfo;
 pub mod projection;
 pub mod spring;
 pub mod tangent;
@@ -40,6 +42,7 @@ pub use nichols::{
     HessianUpdate, Index1Config, Index1Report, Index1Session, Index1Status, NicholsMode,
     bofill_update, cap_max_abs, nichols_displacement, nichols_step, powell_update,
 };
+pub use prfo::{PrfoKind, partitioned_rfo_eigen, restricted_prfo_displacement};
 pub use projection::ProjectionKind;
 pub use spring::SpringKind;
 pub use tangent::TangentKind;

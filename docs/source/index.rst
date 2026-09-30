@@ -24,8 +24,9 @@ rgsaddle
    </div>
 
 The band and the minimum-mode search take one rgmin ``Solver`` step
-on a force this crate assembled. ``Index1Session`` takes the Nichols
-index-1 step on a Hessian and updates it with Powell or Bofill.
+on a force this crate assembled. ``Index1Session`` takes a
+restricted-step partitioned RFO step and updates the Hessian with
+Powell or Bofill.
 There is no run-to-completion contract. ``run`` is a loop over ``step``.
 
 Force assembly ports eOn's NEB: Mills–Jónsson–Schenter and

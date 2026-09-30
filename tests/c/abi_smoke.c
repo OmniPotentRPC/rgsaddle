@@ -276,13 +276,17 @@ int main(void) {
     }
     rgsaddle_report_t irep;
     memset(&irep, 0, sizeof irep);
-    st = rgsaddle_index1_step(idx, surface_quad, NULL, &irep);
-    if (st != RGSADDLE_OK) {
-      return fail(st, "index1 step");
-    }
+    int istep = 0;
+    do {
+      st = rgsaddle_index1_step(idx, surface_quad, NULL, &irep);
+      if (st != RGSADDLE_OK) {
+        return fail(st, "index1 step");
+      }
+      ++istep;
+    } while (irep.status == RGSADDLE_STATUS_RUNNING && istep < 30);
     if (irep.status != RGSADDLE_STATUS_CONVERGED || irep.curvature >= 0.0) {
-      fprintf(stderr, "index1 status=%d force=%g curv=%g\n", irep.status, irep.max_force,
-              irep.curvature);
+      fprintf(stderr, "index1 status=%d force=%g curv=%g steps=%d\n", irep.status,
+              irep.max_force, irep.curvature, istep);
       return fail(RGSADDLE_SOLVER, "index1 did not converge");
     }
     double x1[3];
@@ -293,6 +297,20 @@ int main(void) {
     }
     rgsaddle_index1_free(idx);
     rgsaddle_index1_free(NULL);
+  }
+
+  {
+    const double gradient[2] = {-0.8, -0.6};
+    const double hessian[4] = {-2.0, 0.0, 0.0, 2.0};
+    double dx[2] = {0.0, 0.0};
+    st = rgsaddle_prfo_step(2, gradient, hessian, NULL, 10.0, RGSADDLE_PRFO_INDEX1, dx);
+    if (st != RGSADDLE_OK) {
+      return fail(st, "prfo step");
+    }
+    if (fabs(dx[0] + 0.3507810593582122) > 1e-8 || fabs(dx[1] - 0.27698396494843347) > 1e-8) {
+      fprintf(stderr, "prfo dx = %g %g\n", dx[0], dx[1]);
+      return fail(RGSADDLE_SOLVER, "prfo step mismatch");
+    }
   }
 
   printf("RGSADDLE_C_ABI_OK steps=%d ci=%lld\n", steps, (long long)rep.ci_index);

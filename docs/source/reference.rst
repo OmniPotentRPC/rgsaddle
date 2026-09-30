@@ -20,9 +20,11 @@ Public Rust types
    * - ``MinModeSession``
      - Dimer or Lanczos lowest-mode search, same stepping contract
    * - ``Index1Session``
-     - Nichols index-1 step, trust cap, Powell or Bofill update
+     - Restricted-step partitioned RFO, Powell or Bofill update
    * - ``nichols_step``
-     - Displacement from a supplied spectrum (dense or banded)
+     - i-PI Nichols shift from a supplied spectrum
+   * - ``restricted_prfo_displacement``
+     - Baker restricted-step partitioned RFO from ``H`` and ``g``
    * - ``Cell``
      - 3×3 orthorhombic minimum-image wrap
    * - ``SaddleError``
@@ -35,9 +37,10 @@ C ABI (feature ``capi``)
 include ``RGSADDLE_OK``, ``RGSADDLE_SHAPE``, ``RGSADDLE_SURFACE_FAILED``,
 ``RGSADDLE_ABI_MISMATCH``. Methods on the wire: FIRE and L-BFGS.
 Min-mode kinds: dimer and Lanczos. Index-1 entries:
-``rgsaddle_nichols_step``, ``rgsaddle_hessian_powell``,
-``rgsaddle_hessian_bofill``, ``rgsaddle_cap_max_abs``, and
-``rgsaddle_index1_step``. ``RGSADDLE_ABI_MINOR`` is 3.
+``rgsaddle_nichols_step``, ``rgsaddle_prfo_step``,
+``rgsaddle_hessian_powell``, ``rgsaddle_hessian_bofill``,
+``rgsaddle_cap_max_abs``, and ``rgsaddle_index1_step``.
+``RGSADDLE_ABI_MINOR`` is 4.
 
 Tests that pin the contract
 ---------------------------
@@ -47,4 +50,6 @@ Tests that pin the contract
 - ``tests/minmode_saddle.rs`` — dimer / Lanczos
 - ``tests/nichols_saddle.rs`` — Nichols step against i-PI on the same
   Hessian and gradient, Muller-Brown saddles, quadratic saddle
+- ``tests/prfo_saddle.rs`` — partitioned RFO against the augmented
+  Hessian, trust sphere changes the mode ratio
 - ``tests/c_abi.rs`` — header and symbols with ``capi``
