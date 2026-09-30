@@ -133,6 +133,78 @@ fn surface_error_inside_a_step_is_returned_and_the_band_stays_put() {
     assert_eq!(session.positions(), before.view());
 }
 
+/// Counts evaluations and the rows they carry.
+struct Counting {
+    calls: AtomicUsize,
+    rows: AtomicUsize,
+}
+
+impl Counting {
+    fn new() -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            rows: AtomicUsize::new(0),
+        }
+    }
+    fn take(&self) -> (usize, usize) {
+        (
+            self.calls.swap(0, Ordering::Relaxed),
+            self.rows.swap(0, Ordering::Relaxed),
+        )
+    }
+}
+
+impl BandSurface for Counting {
+    fn eval(
+        &self,
+        positions: ArrayView2<f64>,
+        energies: &mut Array1<f64>,
+        gradients: &mut ndarray::Array2<f64>,
+    ) -> Result<(), SaddleError> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        self.rows.fetch_add(positions.nrows(), Ordering::Relaxed);
+        DoubleWell.eval(positions, energies, gradients)
+    }
+}
+
+#[test]
+fn endpoints_are_evaluated_once_and_each_step_costs_one_interior_eval() {
+    let n_images = 7;
+    let interior = n_images - 2;
+    let mut session = BandSession::new(BandConfig::default(), initial_band(n_images)).unwrap();
+    let surface = Counting::new();
+
+    // First step: exactly one whole-band evaluation (the endpoint
+    // energies come from it), every other evaluation interior-only.
+    session.step(&surface).unwrap();
+    let (calls, rows) = surface.take();
+    assert!(calls >= 1);
+    assert_eq!(rows, n_images + (calls - 1) * interior, "calls={calls}");
+
+    // Every later step: one evaluation, interior rows only.
+    for k in 0..5 {
+        session.step(&surface).unwrap();
+        let (calls, rows) = surface.take();
+        assert_eq!(calls, 1, "step {k}");
+        assert_eq!(rows, interior, "step {k}");
+    }
+
+    // reset keeps the endpoint cache: the endpoints do not move.
+    session.reset();
+    session.step(&surface).unwrap();
+    let (calls, rows) = surface.take();
+    assert_eq!(rows, calls * interior, "calls={calls}");
+
+    // set_positions may change the endpoint rows: one whole-band
+    // evaluation again.
+    let current = session.positions().to_owned();
+    session.set_positions(current).unwrap();
+    session.step(&surface).unwrap();
+    let (calls, rows) = surface.take();
+    assert!(calls >= 1);
+    assert_eq!(rows, n_images + (calls - 1) * interior, "calls={calls}");
+}
+
 #[test]
 fn reset_clears_history_and_stepping_resumes() {
     let config = BandConfig::default();

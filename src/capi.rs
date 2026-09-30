@@ -19,9 +19,11 @@ use crate::spring::SpringKind;
 use crate::tangent::TangentKind;
 
 pub const RGSADDLE_ABI_MAJOR: u32 = 1;
-pub const RGSADDLE_ABI_MINOR: u32 = 1;
+pub const RGSADDLE_ABI_MINOR: u32 = 2;
 
-/// Band config bit 0. The C step calls the surface once per image.
+/// Band config bit 0. The C step calls the surface once per image
+/// carried by the evaluation: every image on the first evaluation
+/// after create or set_positions, the interior images afterwards.
 pub const RGSADDLE_BAND_PER_IMAGE: u64 = 1;
 
 pub const RGSADDLE_OK: i32 = 0;
@@ -109,6 +111,9 @@ struct CSurface {
     f: RgsaddleSurfaceFn,
     user: *mut c_void,
     n_atoms: i64,
+    /// Length of the band (1 for a min-mode session). Maps the rows of
+    /// an interior-only evaluation back to band image indices.
+    n_images: i64,
     per_image: bool,
 }
 
@@ -154,14 +159,23 @@ impl BandSurface for CSurface {
         energies: &mut Array1<f64>,
         gradients: &mut Array2<f64>,
     ) -> Result<(), SaddleError> {
-        let n_images = positions.nrows() as i64;
+        let n_rows = positions.nrows() as i64;
         let dof = gradients.ncols();
+        // Row r is band image r on a whole-band evaluation and image
+        // r + 1 on an interior-only one (see BandSurface).
+        let first_image: i64 = if n_rows == self.n_images { 0 } else { 1 };
         if self.per_image {
             for i in 0..positions.nrows() {
                 let flat: Vec<f64> = positions.row(i).iter().copied().collect();
                 let mut e = [0.0];
                 let mut g = vec![0.0; dof];
-                self.call(n_images, i as i64, &flat, &mut e, &mut g)?;
+                self.call(
+                    self.n_images,
+                    first_image + i as i64,
+                    &flat,
+                    &mut e,
+                    &mut g,
+                )?;
                 energies[i] = e[0];
                 for c in 0..dof {
                     gradients[(i, c)] = g[c];
@@ -169,10 +183,11 @@ impl BandSurface for CSurface {
             }
             return Ok(());
         }
+        // Batched: n_images in the request counts the rows carried.
         let flat: Vec<f64> = positions.iter().copied().collect();
         let mut e = vec![0.0; energies.len()];
         let mut g = vec![0.0; gradients.len()];
-        self.call(n_images, -1, &flat, &mut e, &mut g)?;
+        self.call(n_rows, -1, &flat, &mut e, &mut g)?;
         for (i, v) in e.iter().enumerate() {
             energies[i] = *v;
         }
@@ -372,6 +387,7 @@ pub unsafe extern "C" fn rgsaddle_band_step(
         f,
         user,
         n_atoms: band.n_atoms,
+        n_images: band.n_images,
         per_image: band.per_image,
     };
     match band.session.step(&cs) {
@@ -524,6 +540,7 @@ pub unsafe extern "C" fn rgsaddle_minmode_step(
         f,
         user,
         n_atoms: session.n_atoms,
+        n_images: 1,
         per_image: false,
     };
     match session.session.step(&cs) {

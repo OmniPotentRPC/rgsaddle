@@ -17,7 +17,9 @@ A host builds a band, steps until the projected force is under
 2. Implement ``BandSurface``
 ----------------------------
 
-One eval fills energies and gradients for every image. The double-well
+One eval fills energies and gradients for the rows it receives: the
+whole band on the first call, the interior images afterwards (the
+endpoints never move, so their energies are cached). The double-well
 test surface is the shortest honest example:
 
 .. code:: rust

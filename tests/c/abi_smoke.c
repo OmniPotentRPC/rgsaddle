@@ -146,7 +146,9 @@ int main(void) {
     return fail(RGSADDLE_SOLVER, "climbing image off the saddle");
   }
 
-  /* One callback per image, so the host can swap orbitals for that image. */
+  /* One callback per image, so the host can swap orbitals for that
+   * image. The endpoints are evaluated once, on the first evaluation;
+   * every interior image is evaluated the same number of times. */
   int seen[9] = {0};
   surface_one_calls = 0;
   cfg.flags = RGSADDLE_BAND_PER_IMAGE;
@@ -158,16 +160,38 @@ int main(void) {
   if (st != RGSADDLE_OK) {
     return fail(st, "per-image step");
   }
-  if (surface_one_calls < n_images || surface_one_calls % n_images != 0) {
-    fprintf(stderr, "per-image calls=%d not a multiple of %ld\n",
-            surface_one_calls, n_images);
+  if (seen[0] != 1 || seen[n_images - 1] != 1) {
+    fprintf(stderr, "endpoints seen %d and %d times, want 1\n", seen[0],
+            seen[n_images - 1]);
+    return fail(RGSADDLE_SHAPE, "endpoint evaluation count");
+  }
+  for (long i = 1; i < n_images - 1; ++i) {
+    if (seen[i] != seen[1] || seen[i] < 1) {
+      fprintf(stderr, "image %ld seen %d times, image 1 seen %d\n",
+              i, seen[i], seen[1]);
+      return fail(RGSADDLE_SHAPE, "per-image coverage");
+    }
+  }
+  if (surface_one_calls != 2 + (n_images - 2) * seen[1]) {
+    fprintf(stderr, "per-image calls=%d, seen[1]=%d\n", surface_one_calls,
+            seen[1]);
     return fail(RGSADDLE_SHAPE, "per-image call count");
   }
-  for (long i = 0; i < n_images; ++i) {
-    if (seen[i] != seen[0] || seen[i] < 1) {
-      fprintf(stderr, "image %ld seen %d times, image 0 seen %d\n",
-              i, seen[i], seen[0]);
-      return fail(RGSADDLE_SHAPE, "per-image coverage");
+  /* A second step touches the interior once each and the endpoints
+   * not at all. */
+  const int interior_before = seen[1];
+  st = rgsaddle_band_step(per, surface_one, seen, &rep);
+  if (st != RGSADDLE_OK) {
+    return fail(st, "per-image second step");
+  }
+  if (seen[0] != 1 || seen[n_images - 1] != 1) {
+    return fail(RGSADDLE_SHAPE, "endpoints re-evaluated");
+  }
+  for (long i = 1; i < n_images - 1; ++i) {
+    if (seen[i] != interior_before + 1) {
+      fprintf(stderr, "image %ld seen %d times after step 2, want %d\n", i,
+              seen[i], interior_before + 1);
+      return fail(RGSADDLE_SHAPE, "one interior evaluation per step");
     }
   }
   rgsaddle_band_free(per);

@@ -28,11 +28,12 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 1u
+#define RGSADDLE_ABI_MINOR 2u
 
 /**
- * Band config flags bit 0. When set, each step calls the surface once
- * per image. The host copies that image's saved orbitals and density
+ * Band config flags bit 0. When set, each evaluation calls the surface
+ * once per image it carries (see rgsaddle_surface_request_t for which
+ * images). The host copies that image's saved orbitals and density
  * into the working set, evaluates the force on that image's
  * subcommunicator, and broadcasts the energy and gradient to every
  * rank that entered the step before returning. The library does not
@@ -104,11 +105,26 @@ typedef struct RgsaddleMinMode RgsaddleMinMode;
 
 /**
  * Host-surface request. The session stamps version and flags.
- * With flags clear, positions and gradients are n_images * 3 *
- * n_atoms, energies is n_images, and image is -1. With
- * RGSADDLE_REQ_ONE_IMAGE, image is the index, positions and gradients
- * are 3 * n_atoms, energies is one value, and n_images is still the
- * length of the band. Return RGSADDLE_OK or another rgsaddle_status_t.
+ *
+ * The endpoints of a band never move, so the session evaluates them
+ * once: the first evaluation after rgsaddle_band_create or
+ * rgsaddle_band_set_positions carries the whole band, and every later
+ * evaluation carries only the interior images 1 .. band - 2, in order.
+ * rgsaddle_band_reset keeps the cached endpoint energies.
+ *
+ * With flags clear (batched), image is -1 and n_images is the number
+ * of images carried by this request: the band length on the first
+ * evaluation, band - 2 afterwards. Row r is image r when n_images is
+ * the band length and image r + 1 otherwise. positions and gradients
+ * are n_images * 3 * n_atoms, energies is n_images.
+ *
+ * With RGSADDLE_REQ_ONE_IMAGE, image is the band index of the one
+ * image carried (endpoints 0 and band - 1 appear only on the first
+ * evaluation), positions and gradients are 3 * n_atoms, energies is
+ * one value, and n_images is the length of the band.
+ *
+ * Return RGSADDLE_OK or another rgsaddle_status_t; a non-OK return
+ * fails the step with the band unchanged.
  */
 typedef struct {
   rgsaddle_version_t version;
@@ -183,11 +199,18 @@ rgsaddle_status_t rgsaddle_band_step(RgsaddleBand *band,
 /** Copy the current band out (n_images * 3 * n_atoms doubles). */
 rgsaddle_status_t rgsaddle_band_positions(const RgsaddleBand *band, double *out);
 
-/** Replace the band; the host may move images between steps. */
+/**
+ * Replace the band; the host may move images between steps. Drops the
+ * cached endpoint energies, so the next evaluation carries the whole
+ * band.
+ */
 rgsaddle_status_t rgsaddle_band_set_positions(RgsaddleBand *band,
                                               const double *positions);
 
-/** Drop optimizer history and climbing state at a surface boundary. */
+/**
+ * Drop optimizer history and climbing state at a surface boundary.
+ * The cached endpoint energies stay.
+ */
 rgsaddle_status_t rgsaddle_band_reset(RgsaddleBand *band);
 
 void rgsaddle_band_free(RgsaddleBand *band);

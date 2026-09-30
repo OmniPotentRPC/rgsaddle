@@ -2,7 +2,7 @@
 //! one rgmin solver step, report. Hosts own the loop.
 
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
 use rgmin::{Control, Method, Oracle, Solver};
@@ -100,9 +100,20 @@ pub struct BandReport {
     pub iteration: usize,
 }
 
-/// The caller's surface: fused energies and gradients for every image
-/// in one call (the batched channel is the measured win; a per-image
-/// surface implements this with a loop).
+/// The caller's surface: fused energies and gradients for a run of
+/// consecutive band images in one call (the batched channel is the
+/// measured win; a per-image surface implements this with a loop).
+///
+/// Rows are interior images only, once the endpoint energies are
+/// cached. The endpoints (band rows 0 and `n_images - 1`) never move,
+/// their gradients are never read, and their energies feed only the
+/// tangent, so the session evaluates them once: the first call after
+/// [`BandSession::new`] or [`BandSession::set_positions`] carries the
+/// whole band (`positions.nrows() == n_images`, row `r` is image `r`);
+/// every later call carries the `n_images - 2` interior images in
+/// order (row `r` is image `r + 1`). A host that keys per-image state
+/// (orbitals, densities) on the image index tells the two apart by
+/// the row count. [`BandSession::reset`] keeps the cache.
 pub trait BandSurface: Sync {
     fn eval(
         &self,
@@ -131,6 +142,11 @@ struct ClimbState {
     /// accepted trial point (Accept::None) and returns with `x` there,
     /// so after a step this is the max force at the new positions.
     last_max_force_bits: AtomicU64,
+    /// Energies of band rows 0 and `n_images - 1`, f64 bits, valid
+    /// while `endpoints_set` holds. The endpoints never move, so one
+    /// evaluation serves every later step.
+    endpoint_bits: [AtomicU64; 2],
+    endpoints_set: AtomicBool,
 }
 
 impl ClimbState {
@@ -140,10 +156,28 @@ impl ClimbState {
             ci_index: AtomicI64::new(CI_NONE),
             surface_error: Mutex::new(None),
             last_max_force_bits: AtomicU64::new(f64::INFINITY.to_bits()),
+            endpoint_bits: [AtomicU64::new(0), AtomicU64::new(0)],
+            endpoints_set: AtomicBool::new(false),
         }
     }
     fn last_max_force(&self) -> f64 {
         f64::from_bits(self.last_max_force_bits.load(Ordering::Relaxed))
+    }
+    fn endpoints(&self) -> Option<[f64; 2]> {
+        self.endpoints_set.load(Ordering::Acquire).then(|| {
+            [
+                f64::from_bits(self.endpoint_bits[0].load(Ordering::Relaxed)),
+                f64::from_bits(self.endpoint_bits[1].load(Ordering::Relaxed)),
+            ]
+        })
+    }
+    fn set_endpoints(&self, first: f64, last: f64) {
+        self.endpoint_bits[0].store(first.to_bits(), Ordering::Relaxed);
+        self.endpoint_bits[1].store(last.to_bits(), Ordering::Relaxed);
+        self.endpoints_set.store(true, Ordering::Release);
+    }
+    fn invalidate_endpoints(&self) {
+        self.endpoints_set.store(false, Ordering::Release);
     }
     fn baseline(&self) -> Option<f64> {
         let bits = self.baseline_bits.load(Ordering::Relaxed);
@@ -183,9 +217,34 @@ fn assemble_band(
     let dof = positions.ncols();
     let mut energies = Array1::zeros(n_images);
     let mut gradients = Array2::zeros((n_images, dof));
-    surface.eval(positions.view(), &mut energies, &mut gradients)?;
+    match climb.endpoints() {
+        Some([e_first, e_last]) => {
+            // Interior rows only; the endpoint gradients are never read.
+            let mut interior_e = Array1::zeros(n_images - 2);
+            let mut interior_g = Array2::zeros((n_images - 2, dof));
+            surface.eval(
+                positions.slice(s![1..n_images - 1, ..]),
+                &mut interior_e,
+                &mut interior_g,
+            )?;
+            energies[0] = e_first;
+            energies[n_images - 1] = e_last;
+            energies
+                .slice_mut(s![1..n_images - 1])
+                .assign(&interior_e);
+            gradients
+                .slice_mut(s![1..n_images - 1, ..])
+                .assign(&interior_g);
+        }
+        None => {
+            surface.eval(positions.view(), &mut energies, &mut gradients)?;
+        }
+    }
     if !energies.iter().all(|e| e.is_finite()) {
         return Err(SaddleError::NonFinite("band energies"));
+    }
+    if climb.endpoints().is_none() {
+        climb.set_endpoints(energies[0], energies[n_images - 1]);
     }
 
     let mut max_e = f64::NEG_INFINITY;
@@ -330,18 +389,22 @@ impl BandSession {
 
     /// Replace the band (host-side move between steps: acquisition,
     /// reparameterization). Optimizer history survives; call
-    /// [`BandSession::reset`] as well when the surface changed.
+    /// [`BandSession::reset`] as well when the surface changed. The
+    /// endpoint rows may change here, so the cached endpoint energies
+    /// are dropped and the next evaluation carries the whole band.
     pub fn set_positions(&mut self, positions: Array2<f64>) -> Result<(), SaddleError> {
         if positions.dim() != self.positions.dim() {
             return Err(SaddleError::Shape("set_positions shape".into()));
         }
         self.positions = positions;
+        self.climb.invalidate_endpoints();
         Ok(())
     }
 
     /// The model-update boundary: drop quasi-Newton history, the
     /// climbing baseline, and the armed climbing image. Mirrors
-    /// eon_relax_reset.
+    /// eon_relax_reset. The endpoint energies stay cached: the
+    /// endpoints do not move.
     pub fn reset(&mut self) {
         self.solver.forget();
         self.climb.reset();
