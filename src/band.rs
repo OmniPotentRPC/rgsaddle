@@ -126,6 +126,11 @@ struct ClimbState {
     /// error channel, so the closure parks the error here and
     /// [`BandSession::step`] raises it after the solver returns.
     surface_error: Mutex<Option<SaddleError>>,
+    /// Max abs projected-force component at the oracle's most recent
+    /// evaluation, f64 bits. rgmin evaluates the oracle at the
+    /// accepted trial point (Accept::None) and returns with `x` there,
+    /// so after a step this is the max force at the new positions.
+    last_max_force_bits: AtomicU64,
 }
 
 impl ClimbState {
@@ -134,7 +139,11 @@ impl ClimbState {
             baseline_bits: AtomicU64::new(BASELINE_UNSET),
             ci_index: AtomicI64::new(CI_NONE),
             surface_error: Mutex::new(None),
+            last_max_force_bits: AtomicU64::new(f64::INFINITY.to_bits()),
         }
+    }
+    fn last_max_force(&self) -> f64 {
+        f64::from_bits(self.last_max_force_bits.load(Ordering::Relaxed))
     }
     fn baseline(&self) -> Option<f64> {
         let bits = self.baseline_bits.load(Ordering::Relaxed);
@@ -385,7 +394,12 @@ impl BandSession {
                 full.row_mut(i).assign(&x.slice(s![(i - 1) * dof..i * dof]));
             }
             match assemble_band(config, climb, surface, &full) {
-                Ok((e, f, _)) => (e, -f),
+                Ok((e, f, max_force)) => {
+                    climb
+                        .last_max_force_bits
+                        .store(max_force.to_bits(), Ordering::Relaxed);
+                    (e, -f)
+                }
                 Err(err) => {
                     climb.record_error(err);
                     (f64::INFINITY, Array1::zeros(interior_dof))
@@ -408,7 +422,9 @@ impl BandSession {
         self.scatter_interior(x.view());
         self.iteration += 1;
 
-        let (_, _, max_force) = assemble_band(&self.config, &self.climb, surface, &self.positions)?;
+        // The oracle's last evaluation sits at the accepted trial point,
+        // which is the new band; one surface evaluation per step.
+        let max_force = self.climb.last_max_force();
         let status = if max_force <= self.config.force_tol {
             BandStatus::Converged
         } else {
