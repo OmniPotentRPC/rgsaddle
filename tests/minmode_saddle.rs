@@ -2,6 +2,8 @@
 //! the session must climb to the origin, where the Hessian has one
 //! negative eigenvalue.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use ndarray::{Array1, ArrayView1, array};
 use rgsaddle::{
     MinModeConfig, MinModeKind, MinModeSession, MinModeStatus, PointSurface, SaddleError,
@@ -105,6 +107,53 @@ fn minimum_is_not_converged(kind: MinModeKind) {
             report.curvature
         );
     }
+}
+
+/// The quadratic saddle, failing at any point farther than `radius`
+/// from `center`. The finite-difference shell (dr = 1e-3) stays
+/// inside; the first FIRE trial (max_move = 0.1) lands outside, so the
+/// failure happens inside the translation oracle.
+struct FailingBeyond {
+    center: Array1<f64>,
+    radius: f64,
+    calls: AtomicUsize,
+}
+
+impl PointSurface for FailingBeyond {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        let d = &x - &self.center;
+        if d.dot(&d).sqrt() > self.radius {
+            return Err(SaddleError::Surface("scf did not converge".into()));
+        }
+        QuadraticSaddle.eval(x)
+    }
+}
+
+#[test]
+fn surface_error_inside_a_step_is_returned_and_the_walker_stays_put() {
+    let config = MinModeConfig {
+        force_tol: 1e-4,
+        max_move: 0.1,
+        ..MinModeConfig::default()
+    };
+    let start = array![0.35, 0.4, -0.3];
+    let seed = array![0.8, 0.5, 0.1];
+    let mut session = MinModeSession::new(config, start.clone(), seed).unwrap();
+    let surface = FailingBeyond {
+        center: start.clone(),
+        radius: 0.01,
+        calls: AtomicUsize::new(0),
+    };
+    let err = session.step(&surface).unwrap_err();
+    assert!(
+        matches!(err, SaddleError::Surface(ref m) if m.contains("scf did not converge")),
+        "{err}"
+    );
+    assert_eq!(session.position(), start.view());
+    // Initial gradient, at least one rotation action, the oracle's
+    // evaluations: the failure came after the rotation phase.
+    assert!(surface.calls.load(Ordering::Relaxed) >= 3);
 }
 
 #[test]

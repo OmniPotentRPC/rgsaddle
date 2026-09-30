@@ -1,6 +1,8 @@
 //! Minimum-mode saddle search: find the lowest curvature direction,
 //! invert the force along it, take one step. Stepping, like the band.
 
+use std::sync::Mutex;
+
 use ndarray::{Array1, ArrayView1};
 use rgmin::{Control, Method, Oracle, Solver};
 
@@ -275,6 +277,10 @@ pub struct MinModeSession {
     mode: Array1<f64>,
     solver: Solver,
     iteration: usize,
+    /// The first surface error raised inside the translation oracle
+    /// during the current step; the rgmin oracle signature has no
+    /// error channel of its own.
+    surface_error: Mutex<Option<SaddleError>>,
 }
 
 impl MinModeSession {
@@ -305,6 +311,7 @@ impl MinModeSession {
             mode: normalize(mode),
             solver,
             iteration: 0,
+            surface_error: Mutex::new(None),
         })
     }
 
@@ -323,6 +330,11 @@ impl MinModeSession {
 
     /// One min-mode step: refresh the lowest mode, invert the force
     /// along it, take one solver step.
+    ///
+    /// A surface error inside the step returns `Err` with the position
+    /// unchanged. The solver's internal state has seen the failed
+    /// evaluation; a host that recovers the surface and steps again
+    /// may call [`MinModeSession::reset`] first to drop it.
     pub fn step<S: PointSurface>(&mut self, surface: &S) -> Result<MinModeReport, SaddleError> {
         let (_, g0) = surface.eval(self.x.view())?;
         if !g0.iter().all(|v| v.is_finite()) {
@@ -363,9 +375,10 @@ impl MinModeSession {
         // rest. Below a negative curvature this is the min-mode
         // force; above it, pure inversion still points off the ridge.
         let tau = self.mode.clone();
-        let config_dr = self.config.dr;
-        let kind = self.config.kind;
-        let _ = (config_dr, kind);
+        let error_slot = &self.surface_error;
+        if let Ok(mut slot) = error_slot.lock() {
+            slot.take();
+        }
         let oracle = Oracle::unbounded(self.x.len(), move |xv: ArrayView1<f64>| {
             match surface.eval(xv) {
                 Ok((e, g)) => {
@@ -373,15 +386,27 @@ impl MinModeSession {
                     let eff = &g - &(&tau * (2.0 * par));
                     (e, eff)
                 }
-                Err(_) => (f64::INFINITY, Array1::zeros(xv.len())),
+                Err(err) => {
+                    if let Ok(mut slot) = error_slot.lock()
+                        && slot.is_none()
+                    {
+                        *slot = Some(err);
+                    }
+                    (f64::INFINITY, Array1::zeros(xv.len()))
+                }
             }
         });
 
         let mut x = self.x.clone();
-        self.solver
-            .step(&oracle, &mut x)
-            .map_err(|e| SaddleError::Solver(e.to_string()))?;
+        let stepped = self.solver.step(&oracle, &mut x);
         drop(oracle);
+        // The surface error outranks whatever the solver made of an
+        // infinite energy and a zero gradient. `x` is a local copy;
+        // the session's position stays where it was.
+        if let Some(err) = self.surface_error.lock().ok().and_then(|mut s| s.take()) {
+            return Err(err);
+        }
+        stepped.map_err(|e| SaddleError::Solver(e.to_string()))?;
         self.x = x;
         self.iteration += 1;
 

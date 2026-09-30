@@ -2,6 +2,8 @@
 //! onto the reaction path, the climbing image must find the saddle,
 //! and the endpoints must never move.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use ndarray::{Array1, Array2, ArrayView2};
 use rgsaddle::{BandConfig, BandSession, BandStatus, BandSurface, SaddleError};
 
@@ -79,6 +81,56 @@ fn band_converges_to_the_double_well_saddle() {
     // The climbing image sits at the barrier top.
     let ci = report.ci_index.expect("climbing image armed");
     assert!(pos[(ci, 0)].abs() < 0.15, "ci x={}", pos[(ci, 0)]);
+}
+
+/// Fails every evaluation once `fail_after` calls have gone through.
+struct FailingWell {
+    calls: AtomicUsize,
+    fail_after: usize,
+}
+
+impl BandSurface for FailingWell {
+    fn eval(
+        &self,
+        positions: ArrayView2<f64>,
+        energies: &mut Array1<f64>,
+        gradients: &mut ndarray::Array2<f64>,
+    ) -> Result<(), SaddleError> {
+        let n = self.calls.fetch_add(1, Ordering::Relaxed);
+        if n >= self.fail_after {
+            return Err(SaddleError::Surface("scf did not converge".into()));
+        }
+        DoubleWell.eval(positions, energies, gradients)
+    }
+}
+
+#[test]
+fn surface_error_inside_a_step_is_returned_and_the_band_stays_put() {
+    let n_images = 7;
+    let mut session = BandSession::new(BandConfig::default(), initial_band(n_images)).unwrap();
+    let surface = FailingWell {
+        calls: AtomicUsize::new(0),
+        fail_after: 1,
+    };
+    // The first step sees at least one good evaluation followed by a
+    // failing one inside the solver step.
+    let before = session.positions().to_owned();
+    let err = session.step(&surface).unwrap_err();
+    assert!(
+        matches!(err, SaddleError::Surface(ref m) if m.contains("scf did not converge")),
+        "{err}"
+    );
+    assert_eq!(session.positions(), before.view());
+    assert!(surface.calls.load(Ordering::Relaxed) >= 2);
+
+    // A surface that fails from the very first evaluation.
+    let surface = FailingWell {
+        calls: AtomicUsize::new(0),
+        fail_after: 0,
+    };
+    let err = session.step(&surface).unwrap_err();
+    assert!(matches!(err, SaddleError::Surface(_)), "{err}");
+    assert_eq!(session.positions(), before.view());
 }
 
 #[test]

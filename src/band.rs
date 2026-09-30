@@ -1,6 +1,7 @@
 //! The band session: assemble NEB forces on a caller surface, take
 //! one rgmin solver step, report. Hosts own the loop.
 
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
@@ -120,6 +121,11 @@ const CI_NONE: i64 = -1;
 struct ClimbState {
     baseline_bits: AtomicU64,
     ci_index: AtomicI64,
+    /// The first surface or assembly error raised inside the oracle
+    /// during the current step. The rgmin oracle signature has no
+    /// error channel, so the closure parks the error here and
+    /// [`BandSession::step`] raises it after the solver returns.
+    surface_error: Mutex<Option<SaddleError>>,
 }
 
 impl ClimbState {
@@ -127,6 +133,7 @@ impl ClimbState {
         Self {
             baseline_bits: AtomicU64::new(BASELINE_UNSET),
             ci_index: AtomicI64::new(CI_NONE),
+            surface_error: Mutex::new(None),
         }
     }
     fn baseline(&self) -> Option<f64> {
@@ -140,6 +147,18 @@ impl ClimbState {
     fn reset(&self) {
         self.baseline_bits.store(BASELINE_UNSET, Ordering::Relaxed);
         self.ci_index.store(CI_NONE, Ordering::Relaxed);
+    }
+    /// Keep the first error of a step; later evaluations at garbage
+    /// positions add nothing.
+    fn record_error(&self, err: SaddleError) {
+        if let Ok(mut slot) = self.surface_error.lock()
+            && slot.is_none()
+        {
+            *slot = Some(err);
+        }
+    }
+    fn take_error(&self) -> Option<SaddleError> {
+        self.surface_error.lock().ok().and_then(|mut slot| slot.take())
     }
 }
 
@@ -342,6 +361,12 @@ impl BandSession {
 
     /// One solver step over the assembled band force. The host
     /// interleaves its policy between calls.
+    ///
+    /// A surface error inside the step returns `Err` with the band
+    /// unchanged. The solver's internal state (FIRE velocity,
+    /// quasi-Newton pairs) has seen the failed evaluation; a host that
+    /// recovers the surface and steps again may call
+    /// [`BandSession::reset`] first to drop it.
     pub fn step<S: BandSurface>(&mut self, surface: &S) -> Result<BandReport, SaddleError> {
         let n_images = self.positions.nrows();
         let dof = self.positions.ncols();
@@ -351,6 +376,7 @@ impl BandSession {
         let endpoint_last = self.positions.row(n_images - 1).to_owned();
         let config = &self.config;
         let climb = &self.climb;
+        climb.take_error();
         let oracle = Oracle::unbounded(interior_dof, move |x: ArrayView1<f64>| {
             let mut full = Array2::zeros((n_images, dof));
             full.row_mut(0).assign(&endpoint_first);
@@ -360,16 +386,25 @@ impl BandSession {
             }
             match assemble_band(config, climb, surface, &full) {
                 Ok((e, f, _)) => (e, -f),
-                Err(_) => (f64::INFINITY, Array1::zeros(interior_dof)),
+                Err(err) => {
+                    climb.record_error(err);
+                    (f64::INFINITY, Array1::zeros(interior_dof))
+                }
             }
         });
 
         let mut x = self.interior_flat();
         let solver = &mut self.solver;
-        solver
-            .step(&oracle, &mut x)
-            .map_err(|e| SaddleError::Solver(e.to_string()))?;
+        let stepped = solver.step(&oracle, &mut x);
         drop(oracle);
+        // The surface error is the root cause of whatever the solver
+        // did with an infinite energy and a zero gradient, so it
+        // outranks a solver error. `x` is a local copy; the session's
+        // positions stay where they were.
+        if let Some(err) = self.climb.take_error() {
+            return Err(err);
+        }
+        stepped.map_err(|e| SaddleError::Solver(e.to_string()))?;
         self.scatter_interior(x.view());
         self.iteration += 1;
 
