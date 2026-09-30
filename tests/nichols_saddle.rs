@@ -1,10 +1,12 @@
 //! Nichols displacement against i-PI `mintools.nichols`, and index-1
 //! searches on a quadratic saddle and on Muller-Brown.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use ndarray::{Array1, Array2, ArrayView1, array};
 use rgsaddle::{
     HessianUpdate, Index1Config, Index1Session, Index1Status, NicholsMode, PointSurface,
-    SaddleError, bofill_update, nichols_displacement, nichols_step, powell_update,
+    SaddleError, bofill_update, cap_max_abs, nichols_displacement, nichols_step, powell_update,
 };
 
 fn close(got: &[f64], expect: &[f64], tol: f64) {
@@ -263,6 +265,92 @@ fn muller_brown_gradient_matches_a_central_difference() {
     let (_, gp, _) = muller_brown(-0.7 + dr, 0.5);
     let (_, gm, _) = muller_brown(-0.7 - dr, 0.5);
     assert!(((gp[1] - gm[1]) / (2.0 * dr) - h[1][0]).abs() < 1e-3);
+}
+
+struct Counted<S> {
+    inner: S,
+    calls: AtomicUsize,
+}
+
+impl<S: PointSurface> PointSurface for Counted<S> {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        self.inner.eval(x)
+    }
+}
+
+/// The previous session: i-PI Nichols shift, max-abs cap, Bofill.
+fn nichols_bofill_calls(start: [f64; 2], trust: f64, force_tol: f64) -> (usize, [f64; 2]) {
+    let surface = Counted {
+        inner: MullerBrown,
+        calls: AtomicUsize::new(0),
+    };
+    let mut x = array![start[0], start[1]];
+    let mut hessian = mb_hessian(start[0], start[1]);
+    let mut gradient = {
+        let (_, g) = surface.eval(x.view()).unwrap();
+        g
+    };
+    for _ in 0..40 {
+        let max_force = gradient.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+        if max_force <= force_tol {
+            break;
+        }
+        let mut dx = nichols_displacement(
+            hessian.view(),
+            gradient.view(),
+            None,
+            trust,
+            NicholsMode::Index1,
+        )
+        .unwrap();
+        cap_max_abs(&mut dx, trust).unwrap();
+        let x_new = &x + &dx;
+        let (_, g_new) = surface.eval(x_new.view()).unwrap();
+        let dg = &g_new - &gradient;
+        bofill_update(&mut hessian, dx.view(), dg.view()).unwrap();
+        x = x_new;
+        gradient = g_new;
+    }
+    (surface.calls.load(Ordering::Relaxed), [x[0], x[1]])
+}
+
+fn prfo_bofill_calls(start: [f64; 2], trust: f64, force_tol: f64) -> (usize, [f64; 2]) {
+    let surface = Counted {
+        inner: MullerBrown,
+        calls: AtomicUsize::new(0),
+    };
+    let config = Index1Config {
+        update: HessianUpdate::Bofill,
+        trust_radius: trust,
+        force_tol,
+        fd_dr: 1e-4,
+        mode: NicholsMode::Index1,
+    };
+    let h0 = mb_hessian(start[0], start[1]);
+    let mut session =
+        Index1Session::new(config, array![start[0], start[1]], Some(h0), None).unwrap();
+    let report = session.run(&surface, 40).unwrap();
+    assert_eq!(report.status, Index1Status::Converged);
+    let x = session.position();
+    (surface.calls.load(Ordering::Relaxed), [x[0], x[1]])
+}
+
+#[test]
+fn partitioned_rfo_does_not_add_oracle_calls() {
+    // Same starts, trust radius, and tolerance as the saddle search.
+    // The restricted-step partition has to keep the saddle and must
+    // not spend more surface evaluations than the Nichols shift.
+    for start in [[-0.7, 0.5], [0.3, 0.4]] {
+        let (nichols_calls, nichols_x) = nichols_bofill_calls(start, 0.15, 1e-6);
+        let (prfo_calls, prfo_x) = prfo_bofill_calls(start, 0.15, 1e-6);
+        assert_eq!(mb_index(nichols_x[0], nichols_x[1]), 1, "nichols {start:?}");
+        assert_eq!(mb_index(prfo_x[0], prfo_x[1]), 1, "prfo {start:?}");
+        assert!(
+            prfo_calls <= nichols_calls,
+            "{start:?}: partitioned RFO used {prfo_calls} calls, Nichols used {nichols_calls}"
+        );
+    }
 }
 
 fn find_muller_saddle(update: HessianUpdate, start: [f64; 2], target: [f64; 2]) {
