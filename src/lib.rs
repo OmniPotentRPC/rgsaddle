@@ -80,7 +80,9 @@ pub mod minmode;
 pub mod kappa;
 pub mod pes;
 pub mod pes_internal;
+pub mod nichols;
 pub mod prfo;
+pub mod prfo_restricted;
 pub mod projection;
 #[cfg(feature = "python")]
 pub mod python;

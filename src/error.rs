@@ -12,4 +12,6 @@ pub enum SaddleError {
     NonFinite(&'static str),
     #[error("solver step failed: {0}")]
     Solver(String),
+    #[error("invalid parameter: {0}")]
+    Invalid(String),
 }
