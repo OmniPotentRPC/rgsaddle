@@ -499,9 +499,9 @@ dependencies = [
 
 [[package]]
 name = "rgmin"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "277687222fda29066adddaa1549c6e574c1f644f018e4a60153ebaa235321575"
+checksum = "fc53f7a18e1bcf217d483edd515efb9ba1bf9451c2c7dfc47b15175c396222e2"
 dependencies = [
  "cbindgen",
  "dlpk",

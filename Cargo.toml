@@ -18,7 +18,7 @@ default = []
 capi = []
 
 [dependencies]
-rgmin = "0.2"
+rgmin = "0.3"
 eindir-core = { version = "0.6.0", features = ["capi"] }
 ndarray = "0.17"
 thiserror = "2"

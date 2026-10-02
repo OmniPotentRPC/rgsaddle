@@ -299,6 +299,7 @@ impl MinModeSession {
             gtol: 0.0,
             istep: 1.0,
             maxmove: None,
+            ftol_rel: None,
         };
         let mut solver = Solver::new(config.method.clone(), control, x.len());
         // Per-atom cap over consecutive xyz triples (eOn

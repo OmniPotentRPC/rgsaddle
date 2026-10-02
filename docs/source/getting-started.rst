@@ -10,8 +10,8 @@ A host builds a band, steps until the projected force is under
 .. code:: toml
 
    [dependencies]
-   rgsaddle = "0.1"
-   rgmin = "0.2"
+   rgsaddle = "0.2"
+   rgmin = "0.3"
    ndarray = "0.17"
 
 2. Implement ``BandSurface``
