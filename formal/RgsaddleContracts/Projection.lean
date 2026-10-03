@@ -7,11 +7,10 @@ Contracts for `src/projection.rs` (`force_perp`, `climbing_image_force`,
 `src/spring.rs::SpringKind::compute`.
 
 Every statement about orthogonality needs a **unit** tangent `t`.
-`src/tangent.rs::normalize_tangent` divides by the norm when it exceeds
-`1e-10` and falls back to the normalised `pos_diff_next`; when that
-fallback also has norm `<= 1e-10` (two coincident images) it returns the
-vector unnormalised, and `perp_not_orth_of_short` shows the
-perpendicular projection then keeps a tangent component.
+`src/tangent.rs::normalize_tangent` tries the tangent, forward difference,
+and backward difference in order. It returns a unit direction or an error.
+`perp_not_orth_of_short` shows why returning a short direction would leave
+a tangent component in the perpendicular projection.
 -/
 
 open RealInnerProductSpace
@@ -137,7 +136,7 @@ theorem dneb_force_parallel {t : E} (ht : ‖t‖ = 1) (c σ : ℝ) (S F : E) :
   ring
 
 /-- **A short tangent breaks orthogonality.** With `t = (1/2) e` for a
-unit `e` (the unnormalised fallback of `normalize_tangent`), the
+unit `e`, the
 "perpendicular" force `perp t e` keeps a component `3/8` along `t`. -/
 theorem perp_not_orth_of_short {e : E} (he : ‖e‖ = 1) :
     ⟪perp ((1 / 2 : ℝ) • e) e, (1 / 2 : ℝ) • e⟫ = 3 / 8 := by

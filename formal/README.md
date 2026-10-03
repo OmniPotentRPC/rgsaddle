@@ -36,6 +36,7 @@ with [elan](https://github.com/leanprover/elan).
 | `climb_dneb_parallel` | `src/projection.rs::climbing_image_force` | A DNEB term orthogonal to `t`, which `dneb_orth_tangent` supplies. The climbing image still reverses the parallel part. |
 | `dneb_orth_tangent`, `dneb_orth_force`, `dneb_force_parallel` | `src/projection.rs::dneb_component` | A unit tangent, and a nonzero perpendicular force (the code requires a norm above `1e-10`). The DNEB term is then orthogonal to `t` and to `F_perp`, and leaves the parallel part `c`. |
 | `perp_not_orth_of_short` | `src/tangent.rs::normalize_tangent` | Shows the unit hypothesis matters. A tangent of norm `1/2` leaves a parallel residue of `3/8`. `normalize_tangent` returns a unit vector or an error. |
+| `normalized_mode_unit`, `normalized_mode_reflect_norm` | `src/minmode.rs::checked_mode`, called by `new` and `set_mode` | A nonzero mode. Division by its norm yields a unit direction whose reflected force preserves the norm. |
 | `quad_eq_sum`, `rayleigh_bounds`, `rayleigh_between_extremes`, `rayleigh_at_eigenvector` | `src/minmode.rs::rotate_dimer` and `lanczos_mode` (the curvature `h.n` of a unit mode) | A unit mode and a symmetric Hessian. The reported curvature then lies between the extreme eigenvalues and reaches each one at its eigenvector. |
 | `rotational_force_zero_iff` | `src/minmode.rs::rotate_dimer` | None. The rotational force vanishes exactly at an eigenvector. |
 | `minmode_force_parts`, `reflect_neg` | `src/minmode.rs::MinModeSession::step` | A unit mode (`normalize` keeps it unit). The inverted gradient flips the mode component and keeps the rest. |
@@ -64,3 +65,36 @@ with [elan](https://github.com/leanprover/elan).
   second order (`central_grad_diff_error`) for one more gradient per
   action. With `dr = 1e-3`, the forward error is `M3 * 5e-4` and the
   central error is `M4 * 1.7e-7`.
+
+## Host mode checks
+
+`MinModeSession::new` and `set_mode` use the same norm check.
+Both reject a computed norm that is nonfinite or at most `1e-14`.
+The accepted vector is divided by that norm.
+The Lean normalization theorem supplies the unit-direction premise for the reflection theorem over the reals.
+
+Run the symbolic identities and the interval certificates with:
+
+```sh
+python validation/check_mode_normalization.py
+```
+
+The command requires SymPy and Sollya on the same environment's path.
+It fails if any certificate is absent or any check fails.
+The Python scripts reject optimization flags that remove assertions.
+The Rust and C tests exercise valid and invalid seeds through the public entry points.
+
+For the floating-point bound, let `q` denote the exact squared norm and `u = 2^-53`.
+Assume the dot product has relative error at most `eta`, and the square root and divisions have relative error at most `u`.
+The normalized vector's squared norm then lies in:
+
+```text
+(1-u)^2 / ((1+eta)(1+u)^2) <= ||v_hat||^2
+||v_hat||^2 <= (1+u)^2 / ((1-eta)(1-u)^2)
+```
+
+Sollya encloses both bounds with interval arithmetic for dimensions 3, 75, 512, and 4096, using `eta = 2*n*u/(1-2*n*u)`.
+The checked error budget is `(4*n+16)*u`.
+This relative-error model assumes finite, normal intermediate results.
+Overflow and underflow require separate analysis; these certificates do not cover them.
+The entry-point tests include zero, tiny, infinite, NaN, and overflowing norms.

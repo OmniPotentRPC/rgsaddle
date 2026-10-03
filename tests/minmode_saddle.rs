@@ -390,3 +390,43 @@ fn central_difference_removes_the_first_order_curvature_error() {
     // central two displaced gradients and no centre.
     assert_eq!((fwd.evaluations, ctr.evaluations), (2, 2));
 }
+
+#[test]
+fn construction_rejects_modes_without_a_finite_nonzero_norm() {
+    for seed in [0.0, 1e-16, f64::NAN, f64::INFINITY, f64::MAX] {
+        let result = MinModeSession::new(
+            MinModeConfig::default(),
+            array![0.1, 0.2, 0.3],
+            array![seed, 0.0, 0.0],
+        );
+        assert!(
+            matches!(result, Err(SaddleError::Invalid(_))),
+            "invalid mode seed {seed} was accepted"
+        );
+    }
+}
+
+#[test]
+fn construction_and_replacement_use_the_same_unit_mode() {
+    let seed = array![2.0, -3.0, 6.0];
+    let mut session = MinModeSession::new(
+        MinModeConfig::default(),
+        array![0.1, 0.2, 0.3],
+        seed.clone(),
+    )
+    .unwrap();
+    let initial = session.mode().to_owned();
+    session.set_mode(seed.clone()).unwrap();
+    assert_eq!(session.mode(), initial.view());
+    for (actual, input) in initial.iter().zip(seed.iter()) {
+        assert!((actual - input / 7.0).abs() < 1e-15);
+    }
+    assert!((initial.dot(&initial) - 1.0).abs() < 1e-15);
+    for seed in [0.0, 1e-16, f64::NAN, f64::INFINITY, f64::MAX] {
+        assert!(matches!(
+            session.set_mode(array![seed, 0.0, 0.0]),
+            Err(SaddleError::Invalid(_))
+        ));
+        assert_eq!(session.mode(), initial.view());
+    }
+}

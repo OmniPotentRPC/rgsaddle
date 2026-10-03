@@ -16,6 +16,9 @@ C(phi) = (g(phi) - g0) . n(phi) / dr = n(phi)^T H n(phi) satisfy:
    1 - cos(phi) - sin(phi) tan(phi1/2).
 """
 
+if not __debug__:
+    raise SystemExit("Symbolic validation requires Python assertions; disable optimization.")
+
 import sympy as sp
 
 phi, phi1, dr = sp.symbols("phi phi1 dr", real=True)

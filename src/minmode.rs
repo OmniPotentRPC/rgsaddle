@@ -153,6 +153,18 @@ fn normalize(mut v: Array1<f64>) -> Array1<f64> {
     v
 }
 
+/// A host mode must admit the unit normalization used by the curvature
+/// and reflected-force contracts. Reject invalid norms before division.
+fn checked_mode(mode: Array1<f64>) -> Result<Array1<f64>, SaddleError> {
+    let norm = mode.dot(&mode).sqrt();
+    if !(norm.is_finite() && norm > 1e-14) {
+        return Err(SaddleError::Invalid(
+            "mode must have a finite norm above 1e-14".into(),
+        ));
+    }
+    Ok(mode / norm)
+}
+
 /// The surface, counting the calls one compute makes and checking
 /// what comes back.
 struct Counted<'a, S: PointSurface> {
@@ -486,6 +498,7 @@ impl MinModeSession {
                 "finite-difference step must be positive and finite".into(),
             ));
         }
+        let mode = checked_mode(mode)?;
         crate::band::check_force_driven(&config.method)?;
         let control = Control {
             maxiter: usize::MAX,
@@ -509,7 +522,7 @@ impl MinModeSession {
         Ok(Self {
             config,
             x,
-            mode: normalize(mode),
+            mode,
             curvature: f64::NAN,
             solver,
             iteration: 0,
@@ -583,13 +596,7 @@ impl MinModeSession {
         if mode.len() != self.x.len() {
             return Err(SaddleError::Shape("mode must match the position".into()));
         }
-        let n = mode.dot(&mode).sqrt();
-        if !(n.is_finite() && n > 1e-14) {
-            return Err(SaddleError::Invalid(
-                "mode must be finite and nonzero".into(),
-            ));
-        }
-        let mode = mode / n;
+        let mode = checked_mode(mode)?;
         // The solver's cached force at this point was inverted along the
         // old mode; a large turn also retires the stored pairs.
         let turned = self.mode.dot(&mode).abs().min(1.0).acos();
