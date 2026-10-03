@@ -2,6 +2,7 @@
  * convergence, read positions back, reset, free. Built and run by
  * tests/c_abi.rs against the cdylib. */
 #include "rgsaddle.h"
+#include "main_abi_contract.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>

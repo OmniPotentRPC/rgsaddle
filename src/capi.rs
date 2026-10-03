@@ -26,7 +26,7 @@ use crate::spring::SpringKind;
 use crate::tangent::TangentKind;
 
 pub const RGSADDLE_ABI_MAJOR: u32 = 1;
-pub const RGSADDLE_ABI_MINOR: u32 = 5;
+pub const RGSADDLE_ABI_MINOR: u32 = 14;
 
 /// Band config bit 0. The C step calls the surface once per image
 /// carried by the evaluation: every image on the first evaluation
@@ -1205,3 +1205,6 @@ pub unsafe extern "C" fn rgsaddle_index1_free(session: *mut RgsaddleIndex1) {
         drop(unsafe { Box::from_raw(session) });
     }
 }
+
+mod sessions;
+pub use sessions::*;

@@ -127,3 +127,6 @@ pub use prfo::{PartitionedRationalFunctionOptimization, prfo_stepper, prfo_trust
 
 pub mod irc;
 pub use irc::{IrcConfig, IrcDirection, IrcKind, IrcReport, IrcSession};
+
+#[cfg(feature = "capi")]
+pub mod capi_kappa;

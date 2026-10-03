@@ -8,6 +8,7 @@ use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
 use rgmin::{Accept, Control, Method, Oracle, Solver};
 
 use crate::error::SaddleError;
+use crate::force::ForceGate;
 use crate::projection::{ProjectionKind, climbing_image_force, dneb_component, force_perp};
 use crate::spring::SpringKind;
 use crate::tangent::TangentKind;
@@ -211,6 +212,7 @@ struct BandEval {
 /// with the evaluation closure. Atomics and mutexes because the rgmin
 /// oracle demands `Sync`; the oracle runs on the stepping thread.
 struct BandState {
+    force_gate: ForceGate,
     baseline: Mutex<Option<f64>>,
     /// Climbing armed: from then on the climbing image is the highest
     /// interior image of every evaluation (eOn's rule).
@@ -238,6 +240,7 @@ struct BandState {
 impl BandState {
     fn new() -> Self {
         Self {
+            force_gate: ForceGate::LinfNorm,
             baseline: Mutex::new(None),
             armed: AtomicBool::new(false),
             ci_index: AtomicI64::new(-1),
@@ -246,6 +249,12 @@ impl BandState {
             endpoints: Mutex::new(None),
             last: Mutex::new(None),
             rows: AtomicUsize::new(0),
+        }
+    }
+    fn convergence_force(&self, force: &Array1<f64>) -> f64 {
+        match self.force_gate {
+            ForceGate::LinfNorm => max_abs(force),
+            gate => gate.value(force.view()),
         }
     }
     fn ci(&self) -> Option<usize> {
@@ -481,7 +490,7 @@ fn assemble_band(
         )?;
         projected.slice_mut(s![(i - 1) * dof..i * dof]).assign(&f);
     }
-    let mut max_component = max_abs(&projected);
+    let mut max_component = state.convergence_force(&projected);
 
     // Baseline capture and arming read the relaxation force of the
     // first evaluation and of this one.
@@ -508,7 +517,7 @@ fn assemble_band(
         projected
             .slice_mut(s![(max_i - 1) * dof..max_i * dof])
             .assign(&f);
-        max_component = max_abs(&projected);
+        max_component = state.convergence_force(&projected);
     }
 
     if let Some(last) = state
@@ -624,6 +633,14 @@ impl BandSession {
             state: BandState::new(),
             iteration: 0,
         })
+    }
+
+    /// Select the convergence and climbing-trigger norm, retaining surface values.
+    pub fn set_force_gate(&mut self, gate: ForceGate) {
+        if self.state.force_gate != gate {
+            self.state.force_gate = gate;
+            self.restart();
+        }
     }
 
     pub fn positions(&self) -> ArrayView2<'_, f64> {

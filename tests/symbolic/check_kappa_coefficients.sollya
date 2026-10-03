@@ -1,0 +1,26 @@
+// Binary64 error audit of the kc_sign-split Eq. (7) coefficients.
+prec = 256!;
+display = decimal!;
+kc_checks=0;
+for kc_sign in [|-1,1|] do {
+    for kc_magnitude in [|2^(-100),2^(-53),2^(-20),0.125,1,5,40,100,700,745,1000|] do {
+        kc_z=kc_sign*kc_magnitude;
+        kc_e=round(exp(-abs(kc_z)),D,RN);
+        kc_em1=round(exp(-abs(kc_z))-1,D,RN);
+        kc_denominator=round(1+kc_e,D,RN);
+        kc_gp=round(kc_sign*kc_em1/kc_denominator,D,RN);
+        kc_gt=0;
+        if kc_sign>0 then kc_gt=round(1/kc_denominator,D,RN);
+        if kc_sign<0 then kc_gt=round(kc_e/kc_denominator,D,RN);
+        kc_reference_p=2/(1+exp(kc_z))-1;
+        kc_reference_t=1/(1+exp(kc_z));
+        kc_reference_t=1-kc_reference_t;
+        print("CHECK parallel-relative",abs((kc_gp-kc_reference_p)/kc_reference_p)<=2^(-50));
+        print("CHECK perpendicular-absolute",abs(kc_gt-kc_reference_t)<=2^(-51));
+        print("CHECK parallel-range",kc_gp>=-1 && kc_gp<=1);
+        print("CHECK perpendicular-range",kc_gt>=0 && kc_gt<=1);
+        kc_checks=kc_checks+4;
+    };
+};
+print("coefficient_checks",kc_checks);
+quit;

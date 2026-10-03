@@ -15,6 +15,8 @@ use ndarray::{Array1, Array2, ArrayView1};
 use rgmin::{Accept, Control, Method, Oracle, Solver};
 
 use crate::error::SaddleError;
+use crate::force::ForceGate;
+use crate::kappa::{Complement, KappaDimerConfig, kappa_dimer_force};
 
 /// The caller's surface for a single geometry.
 pub trait PointSurface: Sync {
@@ -208,6 +210,7 @@ fn checked_mode(mode: Array1<f64>) -> Result<Array1<f64>, SaddleError> {
 struct Counted<'a, S: PointSurface> {
     surface: &'a S,
     calls: &'a AtomicUsize,
+    space: Option<&'a Complement>,
 }
 
 impl<S: PointSurface> Counted<'_, S> {
@@ -243,15 +246,36 @@ impl<S: PointSurface> Counted<'_, S> {
         unit: ArrayView1<f64>,
         config: &MinModeConfig,
     ) -> Result<Array1<f64>, SaddleError> {
-        let dr = config.dr;
-        match config.difference {
-            FiniteDifference::Forward => Ok((&self.gradient_along(x, unit, dr)? - &g0) / dr),
-            FiniteDifference::Central => {
-                let plus = self.gradient_along(x, unit, dr)?;
-                let minus = self.gradient_along(x, unit, -dr)?;
-                Ok((&plus - &minus) / (2.0 * dr))
+        let lifted;
+        let direction = if let Some(space) = self.space {
+            lifted = space.lift(unit);
+            lifted.view()
+        } else {
+            unit
+        };
+        let action = if let Some(hv) = self.surface.hessian_vector(x, direction)? {
+            if hv.len() != x.len() {
+                return Err(SaddleError::Shape("surface Hessian action length changed".into()));
             }
-        }
+            if !hv.iter().all(|v| v.is_finite()) {
+                return Err(SaddleError::NonFinite("surface Hessian action"));
+            }
+            hv
+        } else {
+            let dr = config.dr;
+            match config.difference {
+                FiniteDifference::Forward => (&self.gradient_along(x, direction, dr)? - &g0) / dr,
+                FiniteDifference::Central => {
+                    let plus = self.gradient_along(x, direction, dr)?;
+                    let minus = self.gradient_along(x, direction, -dr)?;
+                    (&plus - &minus) / (2.0 * dr)
+                }
+            }
+        };
+        Ok(match self.space {
+            Some(space) => space.reduce(action.view()),
+            None => action,
+        })
     }
 }
 
@@ -506,6 +530,8 @@ struct PointEval {
 /// Stepping minimum-mode saddle search.
 pub struct MinModeSession {
     config: MinModeConfig,
+    force_gate: ForceGate,
+    kappa: Option<KappaDimerConfig>,
     x: Array1<f64>,
     mode: Array1<f64>,
     curvature: f64,
@@ -559,6 +585,8 @@ impl MinModeSession {
         }
         Ok(Self {
             config,
+            force_gate: ForceGate::LinfNorm,
+            kappa: None,
             x,
             mode,
             curvature: f64::NAN,
@@ -567,6 +595,26 @@ impl MinModeSession {
             centre: None,
             surface_error: Mutex::new(None),
         })
+    }
+
+    /// Select the convergence norm; the default is maximum absolute component.
+    pub fn set_force_gate(&mut self, gate: ForceGate) {
+        self.force_gate = gate;
+    }
+
+    /// Select the basin constraint without changing the rotation or translation method.
+    pub fn set_kappa(&mut self, config: Option<KappaDimerConfig>) -> Result<(), SaddleError> {
+        if let Some(c) = &config
+            && (!c.beta.is_finite() || c.beta <= 0.0
+                || !c.eigen.tol.is_finite() || c.eigen.tol <= 0.0)
+        {
+            return Err(SaddleError::Invalid(
+                "kappa beta and tolerance must be positive and finite".into(),
+            ));
+        }
+        self.kappa = config;
+        self.reset();
+        Ok(())
     }
 
     pub fn position(&self) -> ArrayView1<'_, f64> {
@@ -671,14 +719,37 @@ impl MinModeSession {
         position: ArrayView1<f64>,
         gradient: ArrayView1<f64>,
     ) -> Result<(Array1<f64>, f64, usize), SaddleError> {
-        match self.config.kind {
-            MinModeKind::Dimer => {
-                rotate_dimer(surface, position, gradient, self.mode.clone(), &self.config)
-            }
-            MinModeKind::Lanczos => {
-                lanczos_mode(surface, position, gradient, self.mode.clone(), &self.config)
-            }
+        let excluded = surface.surface.excluded_modes(position)?;
+        if excluded.ncols() != position.len() || !excluded.iter().all(|v| v.is_finite()) {
+            return Err(SaddleError::Shape("minimum-mode excluded directions".into()));
         }
+        let estimate = |surface: &Counted<'_, S>, seed| match self.config.kind {
+            MinModeKind::Dimer => rotate_dimer(surface, position, gradient, seed, &self.config),
+            MinModeKind::Lanczos => lanczos_mode(surface, position, gradient, seed, &self.config),
+        };
+        if excluded.nrows() == 0 {
+            return estimate(surface, self.mode.clone());
+        }
+        let mut space = Complement::new(position.len());
+        for direction in excluded.rows() {
+            space.exclude(direction);
+        }
+        if space.dimension() == 0 {
+            return Err(SaddleError::Shape("minimum-mode space is empty".into()));
+        }
+        let mut seed = space.reduce(self.mode.view());
+        if seed.dot(&seed).sqrt() <= 64.0 * f64::EPSILON {
+            seed = Array1::from_iter(
+                (0..space.dimension()).map(|i| ((i + 1) as f64 * 1.618033988749895).sin()),
+            );
+        }
+        let reduced = Counted {
+            surface: surface.surface,
+            calls: surface.calls,
+            space: Some(&space),
+        };
+        let (mode, curvature, rotations) = estimate(&reduced, checked_mode(seed)?)?;
+        Ok((space.lift(mode.view()), curvature, rotations))
     }
 
     fn refresh_mode<S: PointSurface>(
@@ -703,6 +774,7 @@ impl MinModeSession {
         let counted = Counted {
             surface,
             calls: &calls,
+            space: None,
         };
         // A central difference never reads the centre gradient, so a
         // rotation-only estimate does not evaluate it.
@@ -733,6 +805,7 @@ impl MinModeSession {
         let counted = Counted {
             surface,
             calls: &calls,
+            space: None,
         };
         let g0 = self.centre_gradient(&counted)?;
         let previous_mode = self.mode.clone();
@@ -747,7 +820,7 @@ impl MinModeSession {
             self.solver.forget_evaluation();
         }
 
-        let max_force = g0.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+        let max_force = self.force_gate.value(g0.view());
         if converged(max_force, curvature, self.config.force_tol) {
             return Ok(MinModeReport {
                 status: MinModeStatus::Converged,
@@ -764,6 +837,8 @@ impl MinModeSession {
         // rest. Below a negative curvature this is the min-mode
         // force; above it, pure inversion still points off the ridge.
         let tau = self.mode.clone();
+        let kappa = self.kappa.as_ref();
+        let config = &self.config;
         let error_slot = &self.surface_error;
         if let Ok(mut slot) = error_slot.lock() {
             slot.take();
@@ -783,10 +858,30 @@ impl MinModeSession {
                 Some(e) if xv == start => Ok((e, g0.clone())),
                 _ => counted.eval(xv),
             };
-            match answer {
-                Ok((e, g)) => {
+            let answer = answer.and_then(|(e, g)| {
+                let eff = if let Some(kappa) = kappa {
+                    let excluded = surface.excluded_modes(xv)?;
+                    let out = kappa_dimer_force(
+                        g.view(), tau.view(), excluded.view(),
+                        |v| {
+                            let magnitude = v.dot(&v).sqrt();
+                            if magnitude == 0.0 {
+                                return Ok(Array1::zeros(v.len()));
+                            }
+                            let unit = &v / magnitude;
+                            Ok(counted.action(xv, g.view(), unit.view(), config)? * magnitude)
+                        },
+                        kappa,
+                    )?;
+                    -out.force
+                } else {
                     let par = g.dot(&tau);
-                    let eff = &g - &(&tau * (2.0 * par));
+                    &g - &(&tau * (2.0 * par))
+                };
+                Ok((e, g, eff))
+            });
+            match answer {
+                Ok((e, g, eff)) => {
                     if let Ok(mut slot) = last.lock() {
                         *slot = Some(PointEval {
                             x: xv.to_owned(),
@@ -832,7 +927,7 @@ impl MinModeSession {
                 }
             }
         };
-        let max_force = centre.gradient.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+        let max_force = self.force_gate.value(centre.gradient.view());
         if max_force <= self.config.force_tol && x != self.x {
             // Force and curvature in a convergence decision describe the
             // same point. The accepted gradient supplies the centre, so
