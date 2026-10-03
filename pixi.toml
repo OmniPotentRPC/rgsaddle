@@ -1,0 +1,42 @@
+[workspace]
+name = "rgsaddle"
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[environments]
+docs = { features = ["docs"] }
+python = { features = ["python"] }
+
+[feature.python]
+platforms = ["linux-64"]
+
+[feature.python.dependencies]
+python = ">=3.10,<3.14"
+maturin = ">=1.5,<2"
+pytest = "*"
+rust = ">=1.88"
+
+[feature.python.tasks]
+python-build = "maturin develop --features python"
+python-test = { cmd = "pytest tests/python/ -q", depends-on = ["python-build"] }
+
+[feature.docs]
+platforms = ["linux-64"]
+
+[feature.docs.dependencies]
+sphinx = ">=8.0,<8.1"
+emacs = ">=30.2,<31"
+pandoc = ">=3.1,<4"
+
+[feature.docs.pypi-dependencies]
+sphinx-sitemap = ">=2.9.0, <3"
+shibuya = ">=2026.1.9, <2027"
+myst-parser = ">=4.0, <5"
+sphinxcontrib-bibtex = ">=2.6, <3"
+sphinx-design = ">=0.6, <1"
+sphinx-copybutton = ">=0.5.2, <1"
+sphinxcontrib-rust = ">=1.0.0, <2"
+sphinx-rustdoc-postprocess = ">=0.1.0, <0.2"
+
+[feature.docs.tasks]
+docs-build = "sphinx-build -W --keep-going -b html docs/source docs/build/html"
