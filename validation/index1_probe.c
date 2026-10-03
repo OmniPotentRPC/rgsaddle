@@ -72,7 +72,7 @@ static void run_case(int64_t n, int mode, int update, int weighted,
     initial[i * n + i] += 0.24 * x[i] * x[i];
   }
   rgsaddle_index1_config_t config = {0};
-  require(rgsaddle_abi_version(&config.version) == 0, "ABI version failed");
+  require(rgsaddle_abi_stamp(&config.version) == 0, "ABI version failed");
   config.update = update;
   config.mode = mode;
   config.trust_radius = radius;
