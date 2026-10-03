@@ -72,9 +72,7 @@ fn json_num(blob: &str, key: &str) -> f64 {
         .find(&pat)
         .unwrap_or_else(|| panic!("missing number {key}"));
     let after = &blob[start + pat.len()..];
-    let end = after
-        .find(|c: char| c == ',' || c == '\n' || c == '}')
-        .unwrap_or(after.len());
+    let end = after.find([',', '\n', '}']).unwrap_or(after.len());
     after[..end]
         .trim()
         .parse::<f64>()
