@@ -21,6 +21,7 @@ x = S.inv() * Q * z
 assert s.simplify(Q.T * Q - s.eye(3)) == s.zeros(3)
 assert s.simplify(S.inv() * H * S.inv() - W) == s.zeros(3)
 assert s.simplify((x.T * S**2 * x)[0] - (z.T * z)[0]) == 0
+assert s.simplify((x.T * x)[0] - (z.T * Q.T * S**-2 * Q * z)[0]) == 0
 for i in range(3):
     direction = S.inv() * Q[:, i]
     assert s.simplify(H * direction - lam[i] * S**2 * direction) == s.zeros(3, 1)
