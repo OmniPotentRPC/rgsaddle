@@ -62,6 +62,7 @@ pub mod linalg;
 pub mod mic;
 pub mod pes;
 pub mod pes_internal;
+pub mod prfo_restricted;
 pub mod qn;
 pub mod restricted;
 pub mod rfo;
@@ -69,7 +70,6 @@ pub mod samd;
 pub mod sella_min;
 pub mod sella_saddle;
 pub mod vocn;
-pub mod prfo_restricted;
 
 pub use cell_log::{CellChart, expm_3x3, logm_3x3};
 
@@ -101,8 +101,8 @@ pub use pes_internal::{
 };
 
 pub use qn::{
-    HessUpdate, QuasiNewton, StepperKind, get_stepper, retract_qn, symmetrize_y, update_h,
-    update_h_ms, symmetrize_y_pair, symmetrize_y_cols, update_hessian, update_hessian_cols,
+    HessUpdate, QuasiNewton, StepperKind, get_stepper, retract_qn, symmetrize_y, symmetrize_y_cols,
+    symmetrize_y_pair, update_h, update_h_ms, update_hessian, update_hessian_cols,
 };
 
 pub use restricted::{
@@ -135,22 +135,24 @@ pub mod afir;
 pub use afir::{afir_force, try_afir_force};
 
 pub mod rtr;
-pub use rtr::{BandForces, BandRtr, RtrConfig, RtrRadius, RtrReport, TcgResult, TcgStop, band_forces, reparametrize_equal_arc, truncated_cg};
+pub use rtr::{
+    BandForces, BandRtr, RtrConfig, RtrRadius, RtrReport, TcgResult, TcgStop, band_forces,
+    reparametrize_equal_arc, truncated_cg,
+};
 
-#[cfg(feature = "python")]
-mod python;
 #[cfg(feature = "readcon")]
 pub mod io;
+#[cfg(feature = "python")]
+mod python;
 #[cfg(feature = "readcon")]
 pub use io::{MolecularFrame, frame_from_con};
 
 pub mod gpu;
 pub use gpu::{
-    DEFAULT_MIN_DIM, GPU_MIN_DIM, GpuPolicy, clear_oom_floor, cuda_available,
-    cuda_device, fail_next_cuda_claim, gpu_eigh, gpu_eigh_env, gpu_eigh_t,
-    gpu_eigh_with, gpu_ok, gpu_ok_env, gpu_project, gpu_project_env,
-    gpu_project_with, gpu_qr, gpu_qr_env, gpu_qr_with, lock_oom_for_test,
-    oom_floor, record_oom, to_gpu, to_gpu_matrix, to_gpu_view,
+    DEFAULT_MIN_DIM, GPU_MIN_DIM, GpuPolicy, clear_oom_floor, cuda_available, cuda_device,
+    fail_next_cuda_claim, gpu_eigh, gpu_eigh_env, gpu_eigh_t, gpu_eigh_with, gpu_ok, gpu_ok_env,
+    gpu_project, gpu_project_env, gpu_project_with, gpu_qr, gpu_qr_env, gpu_qr_with,
+    lock_oom_for_test, oom_floor, record_oom, to_gpu, to_gpu_matrix, to_gpu_view,
 };
 
 pub mod trust;

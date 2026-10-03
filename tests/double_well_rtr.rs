@@ -124,7 +124,12 @@ fn band_session_steps_by_rtr_when_configured() {
         ..BandConfig::default()
     };
     let mut session = BandSession::new(config, band).expect("session");
-    session.set_rtr(Some(RtrConfig { radius_max: 0.5, ..RtrConfig::default() })).expect("RTR configuration");
+    session
+        .set_rtr(Some(RtrConfig {
+            radius_max: 0.5,
+            ..RtrConfig::default()
+        }))
+        .expect("RTR configuration");
     let mut converged = false;
     for _ in 0..400 {
         let report = session.step(&DoubleWell).expect("step");

@@ -7,8 +7,9 @@ use ndarray::{Array1, Array2, array};
 use rgmin::manifold::{Manifold, Sphere};
 use rgmin::vecops::{Vector, dot, nrm2};
 use rgsaddle::{
-    EigenDevice, GpuPolicy, clear_oom_floor, cuda_available, eigh_on, gpu_eigh_env as gpu_eigh, gpu_eigh_t, gpu_ok_env as gpu_ok,
-    gpu_project_env as gpu_project, gpu_qr_env as gpu_qr, lock_oom_for_test, record_oom, retract_qn, to_gpu_view as to_gpu,
+    EigenDevice, GpuPolicy, clear_oom_floor, cuda_available, eigh_on, gpu_eigh_env as gpu_eigh,
+    gpu_eigh_t, gpu_ok_env as gpu_ok, gpu_project_env as gpu_project, gpu_qr_env as gpu_qr,
+    lock_oom_for_test, record_oom, retract_qn, to_gpu_view as to_gpu,
 };
 
 fn hilbert(n: usize) -> Array2<f64> {
@@ -38,7 +39,9 @@ fn columns_on_stiefel(q: &Array2<f64>, tol: f64) -> bool {
 
 #[test]
 fn gpu_eigh_eigenbasis_stays_on_stiefel() {
-    if isolated_gpu_test("gpu_eigh_eigenbasis_stays_on_stiefel", false) { return; }
+    if isolated_gpu_test("gpu_eigh_eigenbasis_stays_on_stiefel", false) {
+        return;
+    }
     let a = hilbert(4);
     let (lams, vecs) = gpu_eigh(a.view()).unwrap();
     assert_eq!(lams.len(), 4);
@@ -60,7 +63,9 @@ fn gpu_eigh_eigenbasis_stays_on_stiefel() {
 
 #[test]
 fn gpu_qr_q_stays_on_stiefel() {
-    if isolated_gpu_test("gpu_qr_q_stays_on_stiefel", false) { return; }
+    if isolated_gpu_test("gpu_qr_q_stays_on_stiefel", false) {
+        return;
+    }
     let mut a = Array2::<f64>::zeros((3, 2));
     a[(0, 0)] = 1.0;
     a[(1, 0)] = 2.0;
@@ -86,7 +91,9 @@ fn gpu_qr_q_stays_on_stiefel() {
 
 #[test]
 fn gpu_project_matches_host_ut_h_u() {
-    if isolated_gpu_test("gpu_project_matches_host_ut_h_u", false) { return; }
+    if isolated_gpu_test("gpu_project_matches_host_ut_h_u", false) {
+        return;
+    }
     let mut h = Array2::<f64>::zeros((3, 3));
     h[(0, 0)] = 4.0;
     h[(1, 1)] = 1.0;
@@ -104,7 +111,9 @@ fn gpu_project_matches_host_ut_h_u() {
 
 #[test]
 fn gpu_eigh_then_retract_stays_on_the_sphere() {
-    if isolated_gpu_test("gpu_eigh_then_retract_stays_on_the_sphere", false) { return; }
+    if isolated_gpu_test("gpu_eigh_then_retract_stays_on_the_sphere", false) {
+        return;
+    }
     let a = hilbert(3);
     let (_lams, vecs) = gpu_eigh(a.view()).unwrap();
     let x = vecs.column(0).to_owned();
@@ -130,7 +139,9 @@ fn gpu_eigh_then_retract_stays_on_the_sphere() {
 
 #[test]
 fn gpu_ok_respects_min_dim_disable_and_oom_floor() {
-    if isolated_gpu_test("gpu_ok_respects_min_dim_disable_and_oom_floor", false) { return; }
+    if isolated_gpu_test("gpu_ok_respects_min_dim_disable_and_oom_floor", false) {
+        return;
+    }
     let _guard = lock_oom_for_test();
     clear_oom_floor();
     let host = GpuPolicy::host();
@@ -162,7 +173,9 @@ fn gpu_ok_respects_min_dim_disable_and_oom_floor() {
 
 #[test]
 fn to_gpu_refuses_cuda_without_a_backend() {
-    if isolated_gpu_test("to_gpu_refuses_cuda_without_a_backend", false) { return; }
+    if isolated_gpu_test("to_gpu_refuses_cuda_without_a_backend", false) {
+        return;
+    }
     let x = Array1::from(vec![1.0, 2.0, 3.0, 4.0]);
     if !cuda_available() {
         assert!(to_gpu(x.view()).is_none());
@@ -175,7 +188,9 @@ fn to_gpu_refuses_cuda_without_a_backend() {
 
 #[test]
 fn dlpk_eigh_on_shares_the_gpu_factory() {
-    if isolated_gpu_test("dlpk_eigh_on_shares_the_gpu_factory", false) { return; }
+    if isolated_gpu_test("dlpk_eigh_on_shares_the_gpu_factory", false) {
+        return;
+    }
     let a = hilbert(3);
     let (h, hv) = eigh_on(EigenDevice::Host, a.view()).unwrap();
     let (d, dv) = eigh_on(EigenDevice::Dlpk, a.view()).unwrap();
@@ -188,7 +203,9 @@ fn dlpk_eigh_on_shares_the_gpu_factory() {
 
 #[test]
 fn eigh_on_dlpk_keeps_the_process_oom_floor() {
-    if isolated_gpu_test("eigh_on_dlpk_keeps_the_process_oom_floor", false) { return; }
+    if isolated_gpu_test("eigh_on_dlpk_keeps_the_process_oom_floor", false) {
+        return;
+    }
     let _guard = lock_oom_for_test();
     clear_oom_floor();
     record_oom(64);
@@ -209,7 +226,9 @@ fn eigh_on_dlpk_keeps_the_process_oom_floor() {
 
 #[test]
 fn missing_dlpk_kernel_is_not_an_oom() {
-    if isolated_gpu_test("missing_dlpk_kernel_is_not_an_oom", false) { return; }
+    if isolated_gpu_test("missing_dlpk_kernel_is_not_an_oom", false) {
+        return;
+    }
     let _guard = lock_oom_for_test();
     clear_oom_floor();
     let a = hilbert(4);
@@ -229,4 +248,7 @@ fn missing_dlpk_kernel_is_not_an_oom() {
     clear_oom_floor();
 }
 
-include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/common/gpu_environment.rs"));
+include!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/common/gpu_environment.rs"
+));

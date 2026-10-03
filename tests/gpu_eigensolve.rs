@@ -25,7 +25,9 @@ fn diag3() -> Array2<f64> {
 
 #[test]
 fn gpu_eigh_eigenvector_retract_stays_on_the_sphere() {
-    if isolated_gpu_test("gpu_eigh_eigenvector_retract_stays_on_the_sphere", false) { return; }
+    if isolated_gpu_test("gpu_eigh_eigenvector_retract_stays_on_the_sphere", false) {
+        return;
+    }
     let a = diag3();
     let mut policy = GpuPolicy {
         enabled: true,
@@ -60,7 +62,9 @@ fn gpu_eigh_eigenvector_retract_stays_on_the_sphere() {
 
 #[test]
 fn gpu_qr_q_is_on_stiefel() {
-    if isolated_gpu_test("gpu_qr_q_is_on_stiefel", false) { return; }
+    if isolated_gpu_test("gpu_qr_q_is_on_stiefel", false) {
+        return;
+    }
     let mut a = Array2::<f64>::zeros((3, 2));
     a[(0, 0)] = 1.0;
     a[(1, 0)] = 1.0;
@@ -88,7 +92,9 @@ fn gpu_qr_q_is_on_stiefel() {
 
 #[test]
 fn gpu_project_is_ut_h_u() {
-    if isolated_gpu_test("gpu_project_is_ut_h_u", false) { return; }
+    if isolated_gpu_test("gpu_project_is_ut_h_u", false) {
+        return;
+    }
     let h = diag3();
     let u = Array2::<f64>::eye(3).slice(ndarray::s![.., ..2]).to_owned();
     let mut policy = GpuPolicy {
@@ -106,7 +112,9 @@ fn gpu_project_is_ut_h_u() {
 
 #[test]
 fn dlpk_cuda_upload_is_refused_not_staged() {
-    if isolated_gpu_test("dlpk_cuda_upload_is_refused_not_staged", false) { return; }
+    if isolated_gpu_test("dlpk_cuda_upload_is_refused_not_staged", false) {
+        return;
+    }
     let a = Array1::zeros(4);
     if !cuda_available() {
         assert!(
@@ -118,7 +126,9 @@ fn dlpk_cuda_upload_is_refused_not_staged() {
 
 #[test]
 fn size_gate_matches_sella_default() {
-    if isolated_gpu_test("size_gate_matches_sella_default", false) { return; }
+    if isolated_gpu_test("size_gate_matches_sella_default", false) {
+        return;
+    }
     let _guard = lock_oom_for_test();
     clear_oom_floor();
     let p = GpuPolicy {
@@ -147,7 +157,9 @@ fn size_gate_matches_sella_default() {
 
 #[test]
 fn default_policy_reads_sella_env_keys() {
-    if isolated_gpu_test("default_policy_reads_sella_env_keys", false) { return; }
+    if isolated_gpu_test("default_policy_reads_sella_env_keys", false) {
+        return;
+    }
     let _guard = lock_oom_for_test();
     assert_eq!(GpuPolicy::default(), GpuPolicy::from_env());
     if std::env::var("SELLA_DISABLE_GPU").is_err() && std::env::var("RGSADDLE_DISABLE_GPU").is_err()
@@ -162,7 +174,9 @@ fn default_policy_reads_sella_env_keys() {
 
 #[test]
 fn eigh_on_dlpk_keeps_the_process_oom_floor() {
-    if isolated_gpu_test("eigh_on_dlpk_keeps_the_process_oom_floor", false) { return; }
+    if isolated_gpu_test("eigh_on_dlpk_keeps_the_process_oom_floor", false) {
+        return;
+    }
     let _guard = lock_oom_for_test();
     clear_oom_floor();
     record_oom(64);
@@ -181,7 +195,9 @@ fn eigh_on_dlpk_keeps_the_process_oom_floor() {
 
 #[test]
 fn missing_dlpk_kernel_does_not_record_oom() {
-    if isolated_gpu_test("missing_dlpk_kernel_does_not_record_oom", false) { return; }
+    if isolated_gpu_test("missing_dlpk_kernel_does_not_record_oom", false) {
+        return;
+    }
     let _guard = lock_oom_for_test();
     clear_oom_floor();
     let mut policy = GpuPolicy {
@@ -206,7 +222,9 @@ fn missing_dlpk_kernel_does_not_record_oom() {
 
 #[test]
 fn to_gpu_returns_none_when_sella_disable_gpu() {
-    if isolated_gpu_test("to_gpu_returns_none_when_sella_disable_gpu", true) { return; }
+    if isolated_gpu_test("to_gpu_returns_none_when_sella_disable_gpu", true) {
+        return;
+    }
     let _guard = lock_oom_for_test();
     clear_oom_floor();
     fail_next_cuda_claim();
@@ -222,7 +240,9 @@ fn to_gpu_returns_none_when_sella_disable_gpu() {
 
 #[test]
 fn to_gpu_matrix_oom_floor_records_n_not_n_squared() {
-    if isolated_gpu_test("to_gpu_matrix_oom_floor_records_n_not_n_squared", false) { return; }
+    if isolated_gpu_test("to_gpu_matrix_oom_floor_records_n_not_n_squared", false) {
+        return;
+    }
     let _guard = lock_oom_for_test();
     clear_oom_floor();
     let n = 8;
@@ -245,7 +265,9 @@ fn to_gpu_matrix_oom_floor_records_n_not_n_squared() {
 
 #[test]
 fn eigh_on_dlpk_shares_the_host_spectrum() {
-    if isolated_gpu_test("eigh_on_dlpk_shares_the_host_spectrum", false) { return; }
+    if isolated_gpu_test("eigh_on_dlpk_shares_the_host_spectrum", false) {
+        return;
+    }
     let a = diag3();
     let (h, _) = eigh_on(EigenDevice::Host, a.view()).unwrap();
     let (d, _) = eigh_on(EigenDevice::Dlpk, a.view()).unwrap();
@@ -254,4 +276,7 @@ fn eigh_on_dlpk_shares_the_host_spectrum() {
     }
 }
 
-include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/common/gpu_environment.rs"));
+include!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/common/gpu_environment.rs"
+));

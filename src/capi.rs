@@ -166,7 +166,8 @@ impl CSurface {
             gradients: gradients.as_mut_ptr(),
             image,
         };
-        self.rows.fetch_add(energies.len(), std::sync::atomic::Ordering::Relaxed);
+        self.rows
+            .fetch_add(energies.len(), std::sync::atomic::Ordering::Relaxed);
         let rc = (self.f)(self.user, &mut req);
         if rc != 0 {
             return Err(SaddleError::Surface(format!("host callback rc={rc}")));
@@ -378,10 +379,14 @@ pub unsafe extern "C" fn rgsaddle_band_create(
     };
     match BandSession::new(band_config, initial) {
         Ok(mut session) => {
-            if cfg.method == 2 && session.set_rtr(Some(crate::rtr::RtrConfig {
-                radius_max: cfg.max_move * ((n_images - 2) as f64).sqrt(),
-                ..crate::rtr::RtrConfig::default()
-            })).is_err() {
+            if cfg.method == 2
+                && session
+                    .set_rtr(Some(crate::rtr::RtrConfig {
+                        radius_max: cfg.max_move * ((n_images - 2) as f64).sqrt(),
+                        ..crate::rtr::RtrConfig::default()
+                    }))
+                    .is_err()
+            {
                 return std::ptr::null_mut();
             }
             Box::into_raw(Box::new(RgsaddleBand {
@@ -390,7 +395,7 @@ pub unsafe extern "C" fn rgsaddle_band_create(
                 n_atoms,
                 per_image: cfg.flags & RGSADDLE_BAND_PER_IMAGE != 0,
             }))
-        },
+        }
         Err(_) => std::ptr::null_mut(),
     }
 }

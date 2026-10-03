@@ -579,7 +579,13 @@ impl<S: BandSurface> BandSurface for CachedBandSurface<'_, S> {
     ) -> Result<(), SaddleError> {
         let last = positions.nrows() - 1;
         let x: Array1<f64> = positions.slice(s![1..last, ..]).iter().copied().collect();
-        let (e, g) = evaluate_band(self.state, self.surface, positions.row(0), positions.row(last), x.view())?;
+        let (e, g) = evaluate_band(
+            self.state,
+            self.surface,
+            positions.row(0),
+            positions.row(last),
+            x.view(),
+        )?;
         energies.assign(&e);
         gradients.assign(&g);
         Ok(())
@@ -897,20 +903,45 @@ impl BandSession {
         let first = self.positions.row(0).to_owned();
         let last = self.positions.row(self.positions.nrows() - 1).to_owned();
         let initial = self.interior_flat();
-        assemble_band(&self.config, &self.state, surface, first.view(), last.view(), initial.view())?;
+        assemble_band(
+            &self.config,
+            &self.state,
+            surface,
+            first.view(),
+            last.view(),
+            initial.view(),
+        )?;
         let mut trial = self.positions.clone();
-        let cached = CachedBandSurface { state: &self.state, surface };
+        let cached = CachedBandSurface {
+            state: &self.state,
+            surface,
+        };
         let rtr = self.rtr.as_mut().expect("RTR configuration");
         rtr.climb = self.state.ci().is_some();
         rtr.set_force_gate(self.state.force_gate);
         rtr.step(&self.config, &cached, &mut trial)?;
-        let interior: Array1<f64> = trial.slice(s![1..trial.nrows() - 1, ..]).iter().copied().collect();
-        assemble_band(&self.config, &self.state, surface, first.view(), last.view(), interior.view())?;
+        let interior: Array1<f64> = trial
+            .slice(s![1..trial.nrows() - 1, ..])
+            .iter()
+            .copied()
+            .collect();
+        assemble_band(
+            &self.config,
+            &self.state,
+            surface,
+            first.view(),
+            last.view(),
+            interior.view(),
+        )?;
         self.positions.assign(&trial);
         self.iteration += 1;
         let max_force = self.state.last_max_force();
         Ok(BandReport {
-            status: if max_force <= self.config.force_tol { BandStatus::Converged } else { BandStatus::Running },
+            status: if max_force <= self.config.force_tol {
+                BandStatus::Converged
+            } else {
+                BandStatus::Running
+            },
             max_force,
             ci_index: self.state.ci(),
             iteration: self.iteration,

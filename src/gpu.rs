@@ -66,10 +66,14 @@ impl GpuPolicy {
     }
 
     /// A policy restricted to host kernels.
-    pub fn host() -> Self { Self::disabled() }
+    pub fn host() -> Self {
+        Self::disabled()
+    }
 
     /// Whether the size and device policy permit an upload.
-    pub fn ok(self, n: usize) -> bool { gpu_ok(&self, n) }
+    pub fn ok(self, n: usize) -> bool {
+        gpu_ok(&self, n)
+    }
 
     pub fn eigh(mut self, a: ArrayView2<f64>) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
         gpu_eigh(a, &mut self)
@@ -79,7 +83,11 @@ impl GpuPolicy {
         gpu_qr(a, &mut self)
     }
 
-    pub fn project(mut self, h: ArrayView2<f64>, u: ArrayView2<f64>) -> Result<Array2<f64>, SaddleError> {
+    pub fn project(
+        mut self,
+        h: ArrayView2<f64>,
+        u: ArrayView2<f64>,
+    ) -> Result<Array2<f64>, SaddleError> {
         gpu_project(h, u, &mut self)
     }
 
@@ -284,7 +292,9 @@ pub fn gpu_project(
     Ok(host_project(h, u))
 }
 
-pub fn gpu_ok_env(n: usize) -> bool { gpu_ok(&GpuPolicy::from_env(), n) }
+pub fn gpu_ok_env(n: usize) -> bool {
+    gpu_ok(&GpuPolicy::from_env(), n)
+}
 
 pub fn gpu_qr_env(a: ArrayView2<f64>) -> Result<(Array2<f64>, Array2<f64>), SaddleError> {
     gpu_qr(a, &mut GpuPolicy::from_env())
@@ -294,11 +304,29 @@ pub fn gpu_project_env(h: ArrayView2<f64>, u: ArrayView2<f64>) -> Result<Array2<
     gpu_project(h, u, &mut GpuPolicy::from_env())
 }
 
-pub fn to_gpu_view(data: ndarray::ArrayView1<f64>) -> Option<Vector> { to_gpu(data.to_owned()) }
+pub fn to_gpu_view(data: ndarray::ArrayView1<f64>) -> Option<Vector> {
+    to_gpu(data.to_owned())
+}
 
-pub fn gpu_eigh_with(a: ArrayView2<f64>, policy: GpuPolicy) -> Result<(Array1<f64>, Array2<f64>), SaddleError> { policy.eigh(a) }
-pub fn gpu_qr_with(a: ArrayView2<f64>, policy: GpuPolicy) -> Result<(Array2<f64>, Array2<f64>), SaddleError> { policy.qr(a) }
-pub fn gpu_project_with(h: ArrayView2<f64>, u: ArrayView2<f64>, policy: GpuPolicy) -> Result<Array2<f64>, SaddleError> { policy.project(h, u) }
+pub fn gpu_eigh_with(
+    a: ArrayView2<f64>,
+    policy: GpuPolicy,
+) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
+    policy.eigh(a)
+}
+pub fn gpu_qr_with(
+    a: ArrayView2<f64>,
+    policy: GpuPolicy,
+) -> Result<(Array2<f64>, Array2<f64>), SaddleError> {
+    policy.qr(a)
+}
+pub fn gpu_project_with(
+    h: ArrayView2<f64>,
+    u: ArrayView2<f64>,
+    policy: GpuPolicy,
+) -> Result<Array2<f64>, SaddleError> {
+    policy.project(h, u)
+}
 
 fn host_qr(a: ArrayView2<f64>) -> Result<(Array2<f64>, Array2<f64>), SaddleError> {
     if a.ncols() == 0 || a.nrows() == 0 {
@@ -344,11 +372,16 @@ mod tests {
     use rgmin::manifold::{Manifold, Sphere};
     use rgmin::vecops::nrm2;
 
-    include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/common/gpu_environment.rs"));
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/common/gpu_environment.rs"
+    ));
 
     #[test]
     fn default_policy_gates_at_two_hundred() {
-    if isolated_gpu_test("gpu::tests::default_policy_gates_at_two_hundred", false) { return; }
+        if isolated_gpu_test("gpu::tests::default_policy_gates_at_two_hundred", false) {
+            return;
+        }
         let p = GpuPolicy {
             enabled: true,
             min_dim: GPU_MIN_DIM,
@@ -364,7 +397,9 @@ mod tests {
 
     #[test]
     fn default_reads_sella_env_keys() {
-    if isolated_gpu_test("gpu::tests::default_reads_sella_env_keys", false) { return; }
+        if isolated_gpu_test("gpu::tests::default_reads_sella_env_keys", false) {
+            return;
+        }
         let _guard = lock_oom_for_test();
         assert_eq!(GpuPolicy::default(), GpuPolicy::from_env());
         assert!(flag_disables_gpu("1"));
@@ -378,7 +413,9 @@ mod tests {
 
     #[test]
     fn cuda_tag_is_refused() {
-    if isolated_gpu_test("gpu::tests::cuda_tag_is_refused", false) { return; }
+        if isolated_gpu_test("gpu::tests::cuda_tag_is_refused", false) {
+            return;
+        }
         if !cuda_available() {
             assert!(to_gpu(Array1::zeros(3)).is_none());
         }
@@ -387,7 +424,9 @@ mod tests {
 
     #[test]
     fn missing_kernel_after_upload_is_not_oom() {
-    if isolated_gpu_test("gpu::tests::missing_kernel_after_upload_is_not_oom", false) { return; }
+        if isolated_gpu_test("gpu::tests::missing_kernel_after_upload_is_not_oom", false) {
+            return;
+        }
         let _guard = lock_oom_for_test();
         clear_oom_floor();
         let mut policy = GpuPolicy {
@@ -404,7 +443,12 @@ mod tests {
 
     #[test]
     fn to_gpu_returns_none_when_sella_disable_gpu() {
-    if isolated_gpu_test("gpu::tests::to_gpu_returns_none_when_sella_disable_gpu", true) { return; }
+        if isolated_gpu_test(
+            "gpu::tests::to_gpu_returns_none_when_sella_disable_gpu",
+            true,
+        ) {
+            return;
+        }
         let _guard = lock_oom_for_test();
         clear_oom_floor();
         fail_next_cuda_claim();
@@ -423,7 +467,12 @@ mod tests {
 
     #[test]
     fn to_gpu_matrix_oom_floor_is_n_not_n_squared() {
-    if isolated_gpu_test("gpu::tests::to_gpu_matrix_oom_floor_is_n_not_n_squared", false) { return; }
+        if isolated_gpu_test(
+            "gpu::tests::to_gpu_matrix_oom_floor_is_n_not_n_squared",
+            false,
+        ) {
+            return;
+        }
         let _guard = lock_oom_for_test();
         clear_oom_floor();
         let n = 8;
@@ -442,7 +491,9 @@ mod tests {
 
     #[test]
     fn oom_floor_is_process_global() {
-    if isolated_gpu_test("gpu::tests::oom_floor_is_process_global", false) { return; }
+        if isolated_gpu_test("gpu::tests::oom_floor_is_process_global", false) {
+            return;
+        }
         let _guard = lock_oom_for_test();
         clear_oom_floor();
         record_oom(128);
@@ -459,7 +510,9 @@ mod tests {
 
     #[test]
     fn gpu_eigh_recovers_a_known_spectrum() {
-    if isolated_gpu_test("gpu::tests::gpu_eigh_recovers_a_known_spectrum", false) { return; }
+        if isolated_gpu_test("gpu::tests::gpu_eigh_recovers_a_known_spectrum", false) {
+            return;
+        }
         let mut a = Array2::<f64>::zeros((2, 2));
         a[(0, 0)] = 2.0;
         a[(1, 1)] = 8.0;

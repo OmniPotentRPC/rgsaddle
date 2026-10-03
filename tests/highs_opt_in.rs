@@ -4,15 +4,24 @@ use rgsaddle::{MinModeConfig, MinModeSession, MinModeStatus, PointSurface, Saddl
 struct Saddle;
 impl PointSurface for Saddle {
     fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
-        Ok((-x[0] * x[0] + x[1] * x[1] + x[2] * x[2], array![-2.0 * x[0], 2.0 * x[1], 2.0 * x[2]]))
+        Ok((
+            -x[0] * x[0] + x[1] * x[1] + x[2] * x[2],
+            array![-2.0 * x[0], 2.0 * x[1], 2.0 * x[2]],
+        ))
     }
 }
 
 #[test]
 fn optional_feasible_steps_preserve_the_saddle_and_atom_motion_cap() {
     for enabled in [false, true] {
-        let config = MinModeConfig { method: rgmin::Method::Lbfgs { memory: 5 }, max_move: 0.05, force_tol: 1e-5, ..Default::default() };
-        let mut session = MinModeSession::new(config, array![0.35, 0.4, -0.3], array![1.0, 0.0, 0.0]).unwrap();
+        let config = MinModeConfig {
+            method: rgmin::Method::Lbfgs { memory: 5 },
+            max_move: 0.05,
+            force_tol: 1e-5,
+            ..Default::default()
+        };
+        let mut session =
+            MinModeSession::new(config, array![0.35, 0.4, -0.3], array![1.0, 0.0, 0.0]).unwrap();
         session.set_highs(enabled);
         let mut converged = false;
         for _ in 0..4000 {

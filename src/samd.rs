@@ -14,11 +14,11 @@ use ndarray::{Array1, ArrayView1};
 use rgmin::Manifold;
 use rgmin::vecops::{axpy, dot};
 
+use crate::constraints::Constraints;
 use crate::error::SaddleError;
 use crate::geom::SellaGeom;
-use crate::constraints::Constraints;
-use rgmin::ManifoldKind;
 use crate::minmode::PointSurface;
+use rgmin::ManifoldKind;
 
 /// Fixed-cost modified-dimer softening for an MD launch direction.
 ///
@@ -262,10 +262,7 @@ impl SamdSession {
         r: ArrayView1<f64>,
     ) -> Result<SamdReport, SaddleError> {
         if !matches!(&self.geom, SellaGeom::Kind(ManifoldKind::Euclidean)) {
-            let geom = std::mem::replace(
-                &mut self.geom,
-                SellaGeom::Kind(ManifoldKind::Euclidean),
-            );
+            let geom = std::mem::replace(&mut self.geom, SellaGeom::Kind(ManifoldKind::Euclidean));
             let report = self.step_on(&geom, surface, r);
             self.geom = geom;
             return report;

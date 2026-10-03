@@ -1,5 +1,7 @@
 use ndarray::{Array1, Array2, ArrayView1, array};
-use rgsaddle::{ForceGate, MinModeConfig, MinModeKind, MinModeSession, MinModeStatus, PointSurface, SaddleError};
+use rgsaddle::{
+    ForceGate, MinModeConfig, MinModeKind, MinModeSession, MinModeStatus, PointSurface, SaddleError,
+};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -18,7 +20,11 @@ impl PointSurface for Quadratic {
         Ok((0.5 * g.dot(&x), g))
     }
 
-    fn hessian_vector(&self, _x: ArrayView1<f64>, v: ArrayView1<f64>) -> Result<Option<Array1<f64>>, SaddleError> {
+    fn hessian_vector(
+        &self,
+        _x: ArrayView1<f64>,
+        v: ArrayView1<f64>,
+    ) -> Result<Option<Array1<f64>>, SaddleError> {
         if self.analytic {
             self.actions.fetch_add(1, Ordering::Relaxed);
             Ok(Some(&self.diagonal * &v))
@@ -43,8 +49,13 @@ fn excluded_direction_is_absent_from_measured_actions_and_the_lowest_mode() {
                 points: Mutex::new(Vec::new()),
                 actions: AtomicUsize::new(0),
             };
-            let config = MinModeConfig { kind, rotation_tol: 1e-10, ..Default::default() };
-            let mut session = MinModeSession::new(config, Array1::zeros(3), array![1.0, 0.0, 0.0]).unwrap();
+            let config = MinModeConfig {
+                kind,
+                rotation_tol: 1e-10,
+                ..Default::default()
+            };
+            let mut session =
+                MinModeSession::new(config, Array1::zeros(3), array![1.0, 0.0, 0.0]).unwrap();
             let estimate = session.estimate_mode(&surface).unwrap();
             assert!((estimate.curvature + 2.0).abs() < 1e-9);
             assert!(estimate.mode[0].abs() < 1e-12);

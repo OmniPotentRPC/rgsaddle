@@ -307,7 +307,12 @@ pub fn update_hessian_cols(
     }
     let ytilde = symmetrize_y_cols(s, y, symm);
     for j in 0..s.ncols() {
-        update_hessian(b, &s.column(j).to_owned(), &ytilde.column(j).to_owned(), kind);
+        update_hessian(
+            b,
+            &s.column(j).to_owned(),
+            &ytilde.column(j).to_owned(),
+            kind,
+        );
     }
 }
 
@@ -725,8 +730,8 @@ mod tests {
 
 #[cfg(test)]
 mod retained_column_tests {
-    use super::*;
     use super::symmetrize_y_pair as symmetrize_y;
+    use super::*;
     use ndarray::array;
     use rgmin::ManifoldKind;
     use rgmin::vecops::{dot, nrm2};

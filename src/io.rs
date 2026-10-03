@@ -45,31 +45,52 @@ pub fn frame_from_con(path: impl AsRef<std::path::Path>) -> Result<MolecularFram
     })
 }
 
-
-fn cell_from_header(header: &readcon_core::types::FrameHeader) -> Result<Option<Cell>, SaddleError> {
+fn cell_from_header(
+    header: &readcon_core::types::FrameHeader,
+) -> Result<Option<Cell>, SaddleError> {
     let vectors = if let Some(vectors) = header.lattice_vectors() {
         vectors
     } else {
         let lengths = header.boxl;
-        if lengths.iter().all(|length| *length == 0.0) { return Ok(None); }
-        if !lengths.iter().all(|length| length.is_finite() && *length > 0.0) {
-            return Err(SaddleError::Invalid("CON cell lengths must be finite and positive, or all zero".into()));
+        if lengths.iter().all(|length| *length == 0.0) {
+            return Ok(None);
         }
-        if !header.angles.iter().all(|angle| angle.is_finite() && *angle > 0.0 && *angle < 180.0) {
-            return Err(SaddleError::Invalid("CON cell angles must lie between zero and 180 degrees".into()));
+        if !lengths
+            .iter()
+            .all(|length| length.is_finite() && *length > 0.0)
+        {
+            return Err(SaddleError::Invalid(
+                "CON cell lengths must be finite and positive, or all zero".into(),
+            ));
+        }
+        if !header
+            .angles
+            .iter()
+            .all(|angle| angle.is_finite() && *angle > 0.0 && *angle < 180.0)
+        {
+            return Err(SaddleError::Invalid(
+                "CON cell angles must lie between zero and 180 degrees".into(),
+            ));
         }
         let [alpha, beta, gamma] = header.angles.map(f64::to_radians);
         let cy = (alpha.cos() - beta.cos() * gamma.cos()) / gamma.sin();
         let cz_squared = 1.0 - beta.cos().powi(2) - cy * cy;
         if !(cz_squared.is_finite() && cz_squared > 0.0) {
-            return Err(SaddleError::Invalid("CON cell angles define a singular or invalid lattice".into()));
+            return Err(SaddleError::Invalid(
+                "CON cell angles define a singular or invalid lattice".into(),
+            ));
         }
         [
             [lengths[0], 0.0, 0.0],
             [lengths[1] * gamma.cos(), lengths[1] * gamma.sin(), 0.0],
-            [lengths[2] * beta.cos(), lengths[2] * cy, lengths[2] * cz_squared.sqrt()],
+            [
+                lengths[2] * beta.cos(),
+                lengths[2] * cy,
+                lengths[2] * cz_squared.sqrt(),
+            ],
         ]
     };
     Cell::from_vectors(vectors[0], vectors[1], vectors[2], [0.0; 3])
-        .map(Some).map_err(|error| SaddleError::Invalid(format!("invalid CON cell: {error}")))
+        .map(Some)
+        .map_err(|error| SaddleError::Invalid(format!("invalid CON cell: {error}")))
 }

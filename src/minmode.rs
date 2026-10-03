@@ -92,7 +92,10 @@ pub enum MinModeKind {
 impl MinModeKind {
     /// The discriminant used by the C and Python interfaces.
     pub fn to_abi(self) -> i32 {
-        match self { Self::Dimer => 0, Self::Lanczos => 1 }
+        match self {
+            Self::Dimer => 0,
+            Self::Lanczos => 1,
+        }
     }
 }
 
@@ -262,7 +265,9 @@ impl<S: PointSurface> Counted<'_, S> {
         };
         let action = if let Some(hv) = self.surface.hessian_vector(x, direction)? {
             if hv.len() != x.len() {
-                return Err(SaddleError::Shape("surface Hessian action length changed".into()));
+                return Err(SaddleError::Shape(
+                    "surface Hessian action length changed".into(),
+                ));
             }
             if !hv.iter().all(|v| v.is_finite()) {
                 return Err(SaddleError::NonFinite("surface Hessian action"));
@@ -618,8 +623,10 @@ impl MinModeSession {
     /// Select the basin constraint without changing the rotation or translation method.
     pub fn set_kappa(&mut self, config: Option<KappaDimerConfig>) -> Result<(), SaddleError> {
         if let Some(c) = &config
-            && (!c.beta.is_finite() || c.beta <= 0.0
-                || !c.eigen.tol.is_finite() || c.eigen.tol <= 0.0)
+            && (!c.beta.is_finite()
+                || c.beta <= 0.0
+                || !c.eigen.tol.is_finite()
+                || c.eigen.tol <= 0.0)
         {
             return Err(SaddleError::Invalid(
                 "kappa beta and tolerance must be positive and finite".into(),
@@ -734,7 +741,9 @@ impl MinModeSession {
     ) -> Result<(Array1<f64>, f64, usize), SaddleError> {
         let excluded = surface.surface.excluded_modes(position)?;
         if excluded.ncols() != position.len() || !excluded.iter().all(|v| v.is_finite()) {
-            return Err(SaddleError::Shape("minimum-mode excluded directions".into()));
+            return Err(SaddleError::Shape(
+                "minimum-mode excluded directions".into(),
+            ));
         }
         let estimate = |surface: &Counted<'_, S>, seed| match self.config.kind {
             MinModeKind::Dimer => rotate_dimer(surface, position, gradient, seed, &self.config),
@@ -875,7 +884,9 @@ impl MinModeSession {
                 let eff = if let Some(kappa) = kappa {
                     let excluded = surface.excluded_modes(xv)?;
                     let out = kappa_dimer_force(
-                        g.view(), tau.view(), excluded.view(),
+                        g.view(),
+                        tau.view(),
+                        excluded.view(),
                         |v| {
                             let magnitude = v.dot(&v).sqrt();
                             if magnitude == 0.0 {

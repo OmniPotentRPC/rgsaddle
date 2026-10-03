@@ -23,7 +23,6 @@
 //! assert!((result.model_decrease - 1.0).abs() < 1e-12);
 //! ```
 
-
 use ndarray::{Array1, Array2, ArrayView2, s};
 
 use crate::band::{BandConfig, BandSurface};
@@ -148,7 +147,9 @@ pub fn reparametrize_equal_arc(positions: &mut Array2<f64>, anchor: Option<usize
 
 /// Equal-arc interpolation using minimum-image chords, with fixed endpoints.
 pub fn reparametrize_equal_arc_in_cell(
-    positions: &mut Array2<f64>, anchor: Option<usize>, cell: &crate::Cell,
+    positions: &mut Array2<f64>,
+    anchor: Option<usize>,
+    cell: &crate::Cell,
 ) {
     reparametrize(positions, anchor, Some(cell));
 }
@@ -163,7 +164,9 @@ fn reparametrize(positions: &mut Array2<f64>, anchor: Option<usize>, cell: Optio
     let mut s = vec![0.0; n];
     for i in 1..n {
         let mut d = &original.row(i) - &original.row(i - 1);
-        if let Some(cell) = cell { cell.minimum_image(&mut d); }
+        if let Some(cell) = cell {
+            cell.minimum_image(&mut d);
+        }
         let unwrapped = &orig.row(i - 1) + &d;
         orig.row_mut(i).assign(&unwrapped);
         s[i] = s[i - 1] + d.dot(&d).sqrt();
@@ -181,8 +184,12 @@ fn reparametrize(positions: &mut Array2<f64>, anchor: Option<usize>, cell: Optio
         };
         let p = &orig.row(k) + &((&orig.row(k + 1) - &orig.row(k)) * alpha);
         let mut difference = &p - &original.row(j);
-        if let Some(cell) = cell { cell.minimum_image(&mut difference); }
-        positions.row_mut(j).assign(&(&original.row(j) + &difference));
+        if let Some(cell) = cell {
+            cell.minimum_image(&mut difference);
+        }
+        positions
+            .row_mut(j)
+            .assign(&(&original.row(j) + &difference));
     };
     match anchor {
         Some(a) if a > 0 && a < n - 1 => {
@@ -221,12 +228,19 @@ pub struct RtrConfig {
 
 impl RtrConfig {
     pub(crate) fn validate(&self) -> Result<(), SaddleError> {
-        if !(self.radius_max.is_finite() && self.radius_max > 0.0
-            && self.theta.is_finite() && self.theta >= 0.0
-            && self.kappa.is_finite() && self.kappa > 0.0
-            && self.fd_step.is_finite() && self.fd_step > 0.0
-            && self.max_cg > 0) {
-            return Err(SaddleError::Invalid("invalid band trust-region parameters".into()));
+        if !(self.radius_max.is_finite()
+            && self.radius_max > 0.0
+            && self.theta.is_finite()
+            && self.theta >= 0.0
+            && self.kappa.is_finite()
+            && self.kappa > 0.0
+            && self.fd_step.is_finite()
+            && self.fd_step > 0.0
+            && self.max_cg > 0)
+        {
+            return Err(SaddleError::Invalid(
+                "invalid band trust-region parameters".into(),
+            ));
         }
         Ok(())
     }
@@ -327,7 +341,9 @@ impl BandRtr {
             let mut out = v.clone();
             for i in 0..n_images - 2 {
                 // The climbing force includes the reaction-path component.
-                if ci == Some(i + 1) { continue; }
+                if ci == Some(i + 1) {
+                    continue;
+                }
                 let tau = tangents.row(i);
                 let mut seg = out.slice_mut(s![i * dof..(i + 1) * dof]);
                 let along = seg.dot(&tau);
@@ -352,12 +368,16 @@ impl BandRtr {
                 }
                 x
             };
-            let plus = band_forces_with_gate(band, surface, scatter(1.0).view(), ci, self.force_gate);
-            let minus = band_forces_with_gate(band, surface, scatter(-1.0).view(), ci, self.force_gate);
+            let plus =
+                band_forces_with_gate(band, surface, scatter(1.0).view(), ci, self.force_gate);
+            let minus =
+                band_forces_with_gate(band, surface, scatter(-1.0).view(), ci, self.force_gate);
             match (plus, minus) {
                 (Ok(p), Ok(m)) => (&m.force - &p.force) * (vn / (2.0 * h)),
                 (Err(error), _) | (_, Err(error)) => {
-                    if hvp_error.borrow().is_none() { *hvp_error.borrow_mut() = Some(error); }
+                    if hvp_error.borrow().is_none() {
+                        *hvp_error.borrow_mut() = Some(error);
+                    }
                     Array1::from_elem(interior, f64::INFINITY)
                 }
             }
@@ -371,7 +391,9 @@ impl BandRtr {
             self.config.kappa,
             self.config.max_cg,
         );
-        if let Some(error) = hvp_error.borrow_mut().take() { return Err(error); }
+        if let Some(error) = hvp_error.borrow_mut().take() {
+            return Err(error);
+        }
         self.iteration += 1;
         if tcg.stop == TcgStop::ZeroGradient {
             return Ok(RtrReport {
@@ -396,8 +418,12 @@ impl BandRtr {
         let mut displacement = Array1::zeros(interior);
         for i in 1..n_images - 1 {
             let mut difference = &trial.row(i) - &base.row(i);
-            if let Some(cell) = &band.cell { cell.minimum_image(&mut difference); }
-            displacement.slice_mut(s![(i - 1) * dof..i * dof]).assign(&difference);
+            if let Some(cell) = &band.cell {
+                cell.minimum_image(&mut difference);
+            }
+            displacement
+                .slice_mut(s![(i - 1) * dof..i * dof])
+                .assign(&difference);
         }
         let length = nrm2(displacement.view());
         if length > self.radius.radius {
@@ -408,7 +434,9 @@ impl BandRtr {
             trial.row_mut(i).assign(&row);
         }
         let h_displacement = hvp(&displacement);
-        if let Some(error) = hvp_error.borrow_mut().take() { return Err(error); }
+        if let Some(error) = hvp_error.borrow_mut().take() {
+            return Err(error);
+        }
         let model_decrease = -dot(grad.view(), displacement.view())
             - 0.5 * dot(displacement.view(), h_displacement.view());
         let there = band_forces_with_gate(band, surface, trial.view(), ci, self.force_gate)?;
@@ -420,8 +448,12 @@ impl BandRtr {
         } else {
             f64::NEG_INFINITY
         };
-        let accepted = self.radius.update(actual_decrease, model_decrease, eta_norm);
-        if accepted { positions.assign(&trial); }
+        let accepted = self
+            .radius
+            .update(actual_decrease, model_decrease, eta_norm);
+        if accepted {
+            positions.assign(&trial);
+        }
         Ok(RtrReport {
             accepted,
             rho,

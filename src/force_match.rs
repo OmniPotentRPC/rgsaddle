@@ -1360,7 +1360,11 @@ mod derivative_tests {
     use super::*;
 
     fn force(kind: PairKind, x: &Array1<f64>) -> Array1<f64> {
-        let pair = Pair { i: 0, j: 1, xij: [x[3] - x[0], x[4] - x[1], x[5] - x[2]] };
+        let pair = Pair {
+            i: 0,
+            j: 1,
+            xij: [x[3] - x[0], x[4] - x[1], x[5] - x[2]],
+        };
         let mut jac = Array2::zeros((6, 2));
         let mut dfn = Array3::zeros((6, 1, 2));
         match kind {
@@ -1375,9 +1379,18 @@ mod derivative_tests {
     #[test]
     fn every_pair_hessian_differentiates_its_physical_force() {
         let x = Array1::from(vec![0.1, -0.2, 0.3, 1.3, 0.5, 0.1]);
-        let pair = Pair { i: 0, j: 1, xij: [1.2, 0.7, -0.2] };
+        let pair = Pair {
+            i: 0,
+            j: 1,
+            xij: [1.2, 0.7, -0.2],
+        };
         let step = 1e-6;
-        for kind in [PairKind::Lj, PairKind::Buckingham, PairKind::Morse, PairKind::Bond] {
+        for kind in [
+            PairKind::Lj,
+            PairKind::Buckingham,
+            PairKind::Morse,
+            PairKind::Bond,
+        ] {
             let mut hessian = Array2::zeros((6, 6));
             match kind {
                 PairKind::Lj => lj_hess(&pair, 1.3, 0.8, &mut hessian),
@@ -1386,13 +1399,18 @@ mod derivative_tests {
                 PairKind::Bond => sella_bond_hess(&pair, 1.3, 0.9, &mut hessian),
             }
             for col in 0..6 {
-                let mut plus = x.clone(); plus[col] += step;
-                let mut minus = x.clone(); minus[col] -= step;
+                let mut plus = x.clone();
+                plus[col] += step;
+                let mut minus = x.clone();
+                minus[col] -= step;
                 let numerical = (force(kind, &minus) - force(kind, &plus)) / (2.0 * step);
                 for row in 0..6 {
                     let exact = hessian[(row, col)];
-                    assert!((exact - numerical[row]).abs() < 2e-7 * (1.0 + exact.abs()),
-                        "{kind:?} Hessian ({row},{col}): analytic={exact}, force derivative={}", numerical[row]);
+                    assert!(
+                        (exact - numerical[row]).abs() < 2e-7 * (1.0 + exact.abs()),
+                        "{kind:?} Hessian ({row},{col}): analytic={exact}, force derivative={}",
+                        numerical[row]
+                    );
                 }
             }
         }

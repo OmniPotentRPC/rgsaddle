@@ -16,8 +16,8 @@
 use ndarray::{Array1, ArrayView1};
 use rgmin::vecops::{Vector, axpy, dot, nrm2, nrminf};
 use rgmin::{
-    ApplyHessian, EigenParams, BfgsModel, Control, EigensolverKind, IrcTrust, ManifoldKind, Method, Solver, mw_pair,
-    qn_irc_restricted, sqrt_masses_3n, to_mw,
+    ApplyHessian, BfgsModel, Control, EigenParams, EigensolverKind, IrcTrust, ManifoldKind, Method,
+    Solver, mw_pair, qn_irc_restricted, sqrt_masses_3n, to_mw,
 };
 
 use std::cell::RefCell;
@@ -263,7 +263,13 @@ impl IrcSession {
             ..EigenParams::default()
         };
         let (mode, _curv, _actions) = lowest_via_fd(
-            surface, saddle.view(), g0.view(), seed, config.dr, params, "IRC lowest mode",
+            surface,
+            saddle.view(),
+            g0.view(),
+            seed,
+            config.dr,
+            params,
+            "IRC lowest mode",
         )?;
         Self::new(config, saddle, masses, mode, direction)
     }
@@ -917,4 +923,3 @@ mod tests {
         );
     }
 }
-

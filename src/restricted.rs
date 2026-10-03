@@ -962,7 +962,7 @@ mod tests {
 
     #[test]
     fn ras_step_magnitude_is_cons_not_euclidean() {
-        use crate::geom::{update_trust, TrustSchedule};
+        use crate::geom::{TrustSchedule, update_trust};
         let s = Array1::from(vec![0.1, 0.0, 0.0, 0.1, 0.0, 0.0, 0.1, 0.0, 0.0]);
         let cons = RestrictedKind::RestrictedAtomicStep.step_magnitude(&s);
         assert!((cons - 0.1).abs() < 1e-14);
@@ -978,7 +978,7 @@ mod tests {
 
     #[test]
     fn ras_binding_clip_bad_rho_shrinks_from_delta() {
-        use crate::geom::{update_trust, TrustSchedule};
+        use crate::geom::{TrustSchedule, update_trust};
         let delta = 0.1;
         let ras = RestrictedAtomicStep::new(delta).unwrap();
         let mut s = Array1::zeros(9);

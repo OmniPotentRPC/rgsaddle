@@ -1,7 +1,6 @@
 //! C entry points for IRC, Sella, constraints and potential-energy charts.
 
 use super::*;
-use rgmin::Manifold;
 use crate::constraints::Constraints;
 use crate::irc::{IrcConfig, IrcDirection, IrcKind, IrcSession};
 use crate::mic::Cell;
@@ -10,6 +9,7 @@ use crate::pes_internal::InternalPes;
 use crate::samd::{SamdConfig, SamdSession};
 use crate::sella_min::{SellaMinConfig, SellaMinSession};
 use crate::sella_saddle::{SellaSaddleConfig, SellaSaddleSession};
+use rgmin::Manifold;
 
 fn force_gate_of(v: i32) -> Option<crate::ForceGate> {
     crate::ForceGate::try_from_abi(v)
@@ -538,24 +538,44 @@ mod irc_abi_tests {
         let x = [0.2, 0.0, 0.0, 0.0, 0.0, 0.0];
         let masses = [1.0, 1.0];
         let config = RgsaddleSellaMinConfig {
-            version: RgsaddleVersion { major: RGSADDLE_ABI_MAJOR, minor: RGSADDLE_ABI_MINOR },
-            flags: 0, delta: 0.2, force_tol: 1e-8,
+            version: RgsaddleVersion {
+                major: RGSADDLE_ABI_MAJOR,
+                minor: RGSADDLE_ABI_MINOR,
+            },
+            flags: 0,
+            delta: 0.2,
+            force_tol: 1e-8,
             force_gate: crate::ForceGate::MaxForceOnAtom.to_abi(),
         };
         let session = unsafe { rgsaddle_sella_min_create(&config, 2, x.as_ptr(), masses.as_ptr()) };
         assert!(!session.is_null());
         let mut calls = AtomicUsize::new(0);
         let mut report = RgsaddleReport {
-            version: RgsaddleVersion { major: 0, minor: 0 }, flags: 0, status: 0,
-            evaluations: 0, max_force: 0.0, ci_index: 0, iteration: 0, curvature: 0.0, rotations: 0,
+            version: RgsaddleVersion { major: 0, minor: 0 },
+            flags: 0,
+            status: 0,
+            evaluations: 0,
+            max_force: 0.0,
+            ci_index: 0,
+            iteration: 0,
+            curvature: 0.0,
+            rotations: 0,
         };
         for _ in 0..3 {
             let before = calls.load(Ordering::Relaxed);
             let status = unsafe {
-                rgsaddle_sella_min_step(session, Some(counted_well), (&mut calls as *mut AtomicUsize).cast(), &mut report)
+                rgsaddle_sella_min_step(
+                    session,
+                    Some(counted_well),
+                    (&mut calls as *mut AtomicUsize).cast(),
+                    &mut report,
+                )
             };
             assert_eq!(status, RGSADDLE_OK);
-            assert_eq!(report.evaluations as usize, calls.load(Ordering::Relaxed) - before);
+            assert_eq!(
+                report.evaluations as usize,
+                calls.load(Ordering::Relaxed) - before
+            );
         }
         assert!(calls.load(Ordering::Relaxed) > 0);
         unsafe { rgsaddle_sella_min_free(session) };
@@ -729,7 +749,6 @@ mod irc_abi_tests {
         assert!(stable.abs() < 0.02, "stable coordinate {stable}");
         unsafe { rgsaddle_sella_saddle_free(session) };
     }
-
 }
 
 /// # Safety
@@ -1482,8 +1501,6 @@ pub unsafe extern "C" fn rgsaddle_sella_saddle_seed_mode(
         Err(error) => status_of(&error),
     }
 }
-
-
 
 /// # Safety
 /// `session` must be a live pointer or NULL.
@@ -2894,15 +2911,19 @@ mod samd_abi_tests {
     }
 }
 
-
 /// # Safety
 /// `session` is a live minimum-mode session or null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rgsaddle_minmode_set_force_gate(
-    session: *mut RgsaddleMinMode, gate: i32,
+    session: *mut RgsaddleMinMode,
+    gate: i32,
 ) -> i32 {
-    if session.is_null() { return RGSADDLE_NULL_SESSION; }
-    let Some(gate) = force_gate_of(gate) else { return RGSADDLE_INVALID_PARAMETER; };
+    if session.is_null() {
+        return RGSADDLE_NULL_SESSION;
+    }
+    let Some(gate) = force_gate_of(gate) else {
+        return RGSADDLE_INVALID_PARAMETER;
+    };
     unsafe { (*session).session.set_force_gate(gate) };
     RGSADDLE_OK
 }
@@ -2910,11 +2931,13 @@ pub unsafe extern "C" fn rgsaddle_minmode_set_force_gate(
 /// # Safety
 /// `band` is a live band session or null.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rgsaddle_band_set_force_gate(
-    band: *mut RgsaddleBand, gate: i32,
-) -> i32 {
-    if band.is_null() { return RGSADDLE_NULL_BAND; }
-    let Some(gate) = force_gate_of(gate) else { return RGSADDLE_INVALID_PARAMETER; };
+pub unsafe extern "C" fn rgsaddle_band_set_force_gate(band: *mut RgsaddleBand, gate: i32) -> i32 {
+    if band.is_null() {
+        return RGSADDLE_NULL_BAND;
+    }
+    let Some(gate) = force_gate_of(gate) else {
+        return RGSADDLE_INVALID_PARAMETER;
+    };
     unsafe { (*band).session.set_force_gate(gate) };
     RGSADDLE_OK
 }
@@ -2922,11 +2945,13 @@ pub unsafe extern "C" fn rgsaddle_band_set_force_gate(
 /// # Safety
 /// `band` is a live session or null. `enabled` is 0 or 1.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rgsaddle_band_set_highs(
-    band: *mut RgsaddleBand, enabled: i32,
-) -> i32 {
-    if band.is_null() { return RGSADDLE_NULL_BAND; }
-    if enabled != 0 && enabled != 1 { return RGSADDLE_INVALID_PARAMETER; }
+pub unsafe extern "C" fn rgsaddle_band_set_highs(band: *mut RgsaddleBand, enabled: i32) -> i32 {
+    if band.is_null() {
+        return RGSADDLE_NULL_BAND;
+    }
+    if enabled != 0 && enabled != 1 {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
     unsafe { (*band).session.set_highs(enabled == 1) };
     RGSADDLE_OK
 }
@@ -2935,10 +2960,15 @@ pub unsafe extern "C" fn rgsaddle_band_set_highs(
 /// `session` is a live session or null. `enabled` is 0 or 1.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rgsaddle_minmode_set_highs(
-    session: *mut RgsaddleMinMode, enabled: i32,
+    session: *mut RgsaddleMinMode,
+    enabled: i32,
 ) -> i32 {
-    if session.is_null() { return RGSADDLE_NULL_SESSION; }
-    if enabled != 0 && enabled != 1 { return RGSADDLE_INVALID_PARAMETER; }
+    if session.is_null() {
+        return RGSADDLE_NULL_SESSION;
+    }
+    if enabled != 0 && enabled != 1 {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
     unsafe { (*session).session.set_highs(enabled == 1) };
     RGSADDLE_OK
 }
