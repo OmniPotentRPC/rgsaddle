@@ -89,7 +89,8 @@ typedef enum {
 
 typedef enum {
   RGSADDLE_METHOD_FIRE = 0,
-  RGSADDLE_METHOD_LBFGS = 1
+  RGSADDLE_METHOD_LBFGS = 1,
+  RGSADDLE_METHOD_RTR = 2 /**< Band trust-region stepper. */
 } rgsaddle_method_t;
 
 typedef enum {

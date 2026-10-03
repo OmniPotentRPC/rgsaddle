@@ -565,6 +565,27 @@ pub struct BandEvaluation {
     pub projected: Array2<f64>,
 }
 
+struct CachedBandSurface<'a, S> {
+    state: &'a BandState,
+    surface: &'a S,
+}
+
+impl<S: BandSurface> BandSurface for CachedBandSurface<'_, S> {
+    fn eval(
+        &self,
+        positions: ArrayView2<f64>,
+        energies: &mut Array1<f64>,
+        gradients: &mut Array2<f64>,
+    ) -> Result<(), SaddleError> {
+        let last = positions.nrows() - 1;
+        let x: Array1<f64> = positions.slice(s![1..last, ..]).iter().copied().collect();
+        let (e, g) = evaluate_band(self.state, self.surface, positions.row(0), positions.row(last), x.view())?;
+        energies.assign(&e);
+        gradients.assign(&g);
+        Ok(())
+    }
+}
+
 /// Stepping band relaxation over an rgmin solver. Endpoints (rows 0
 /// and `n_images - 1`) never move.
 pub struct BandSession {
@@ -573,6 +594,7 @@ pub struct BandSession {
     solver: Solver,
     state: BandState,
     iteration: usize,
+    rtr: Option<crate::rtr::BandRtr>,
 }
 
 impl BandSession {
@@ -632,6 +654,7 @@ impl BandSession {
             solver,
             state: BandState::new(),
             iteration: 0,
+            rtr: None,
         })
     }
 
@@ -641,6 +664,16 @@ impl BandSession {
             self.state.force_gate = gate;
             self.restart();
         }
+    }
+
+    /// Select an optional trust-region stepper, retaining cached surface values.
+    pub fn set_rtr(&mut self, config: Option<crate::rtr::RtrConfig>) -> Result<(), SaddleError> {
+        if let Some(config) = config {
+            config.validate()?;
+        }
+        self.rtr = config.map(|config| crate::rtr::BandRtr::new(config, false));
+        self.restart();
+        Ok(())
     }
 
     pub fn positions(&self) -> ArrayView2<'_, f64> {
@@ -717,6 +750,10 @@ impl BandSession {
     pub fn restart(&mut self) {
         self.solver.forget();
         self.state.restart();
+        if let Some(rtr) = &mut self.rtr {
+            *rtr = crate::rtr::BandRtr::new(rtr.config, false);
+            rtr.set_force_gate(self.state.force_gate);
+        }
     }
 
     /// The last evaluation, if it was taken at the current positions:
@@ -769,6 +806,9 @@ impl BandSession {
     /// recovers the surface and steps again may call
     /// [`BandSession::restart`] first to drop it.
     pub fn step<S: BandSurface>(&mut self, surface: &S) -> Result<BandReport, SaddleError> {
+        if self.rtr.is_some() {
+            return self.step_rtr(surface);
+        }
         let n_images = self.positions.nrows();
         let dof = self.positions.ncols();
         let interior_dof = (n_images - 2) * dof;
@@ -838,6 +878,33 @@ impl BandSession {
         };
         Ok(BandReport {
             status,
+            max_force,
+            ci_index: self.state.ci(),
+            iteration: self.iteration,
+            surface_rows: self.state.rows.load(Ordering::Relaxed),
+        })
+    }
+
+    fn step_rtr<S: BandSurface>(&mut self, surface: &S) -> Result<BandReport, SaddleError> {
+        self.state.take_error();
+        self.state.rows.store(0, Ordering::Relaxed);
+        let first = self.positions.row(0).to_owned();
+        let last = self.positions.row(self.positions.nrows() - 1).to_owned();
+        let initial = self.interior_flat();
+        assemble_band(&self.config, &self.state, surface, first.view(), last.view(), initial.view())?;
+        let mut trial = self.positions.clone();
+        let cached = CachedBandSurface { state: &self.state, surface };
+        let rtr = self.rtr.as_mut().expect("RTR configuration");
+        rtr.climb = self.state.ci().is_some();
+        rtr.set_force_gate(self.state.force_gate);
+        rtr.step(&self.config, &cached, &mut trial)?;
+        let interior: Array1<f64> = trial.slice(s![1..trial.nrows() - 1, ..]).iter().copied().collect();
+        assemble_band(&self.config, &self.state, surface, first.view(), last.view(), interior.view())?;
+        self.positions.assign(&trial);
+        self.iteration += 1;
+        let max_force = self.state.last_max_force();
+        Ok(BandReport {
+            status: if max_force <= self.config.force_tol { BandStatus::Converged } else { BandStatus::Running },
             max_force,
             ci_index: self.state.ci(),
             iteration: self.iteration,

@@ -133,3 +133,6 @@ pub mod capi_kappa;
 
 pub mod afir;
 pub use afir::{afir_force, try_afir_force};
+
+pub mod rtr;
+pub use rtr::{BandForces, BandRtr, RtrConfig, RtrRadius, RtrReport, TcgResult, TcgStop, band_forces, reparametrize_equal_arc, truncated_cg};

@@ -377,12 +377,20 @@ pub unsafe extern "C" fn rgsaddle_band_create(
         method: method_of(cfg.method, cfg.memory),
     };
     match BandSession::new(band_config, initial) {
-        Ok(session) => Box::into_raw(Box::new(RgsaddleBand {
-            session,
-            n_images,
-            n_atoms,
-            per_image: cfg.flags & RGSADDLE_BAND_PER_IMAGE != 0,
-        })),
+        Ok(mut session) => {
+            if cfg.method == 2 && session.set_rtr(Some(crate::rtr::RtrConfig {
+                radius_max: cfg.max_move * ((n_images - 2) as f64).sqrt(),
+                ..crate::rtr::RtrConfig::default()
+            })).is_err() {
+                return std::ptr::null_mut();
+            }
+            Box::into_raw(Box::new(RgsaddleBand {
+                session,
+                n_images,
+                n_atoms,
+                per_image: cfg.flags & RGSADDLE_BAND_PER_IMAGE != 0,
+            }))
+        },
         Err(_) => std::ptr::null_mut(),
     }
 }
