@@ -22,7 +22,7 @@ capi = []
 # A git dependency cannot be published: an rgmin release that carries
 # it must come out, and this line return to a version, before rgsaddle
 # is released.
-rgmin = { git = "https://github.com/OmniPotentRPC/rgmin", rev = "6f1c9dd7e44f00c6e63ab6356dc00d2b7318d76f" }
+rgmin = { git = "https://github.com/OmniPotentRPC/rgmin", rev = "63156cb163b02f4760ff1afca93959dcd1e1ecff" }
 eindir-core = { version = "0.6.0", features = ["capi"] }
 ndarray = "0.17"
 thiserror = "2"
