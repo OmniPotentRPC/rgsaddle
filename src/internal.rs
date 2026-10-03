@@ -202,7 +202,8 @@ impl Rotation {
         Ok(pos)
     }
 
-    fn quaternion(&self, x: ArrayView1<f64>) -> Result<[f64; 4], crate::SaddleError> {
+    /// Sign-fixed Kabsch quaternion for the reference fragment.
+    pub fn quaternion(&self, x: ArrayView1<f64>) -> Result<[f64; 4], crate::SaddleError> {
         let (_, q) = self.f_eigen(x)?;
         Ok(q)
     }

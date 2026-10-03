@@ -341,6 +341,14 @@ fn bdp_scale(k: f64, k_target: f64, d: f64, dt: f64, tau: f64, r: ArrayView1<f64
     }
 }
 
+/// Ambient Verlet increment `dt v - 0.5 dt^2 g`.
+pub fn verlet_increment(v: &Array1<f64>, g: &Array1<f64>, dt: f64) -> Array1<f64> {
+    let mut dx = Array1::zeros(v.len());
+    axpy(dt, v.view(), &mut dx);
+    axpy(-0.5 * dt * dt, g.view(), &mut dx);
+    dx
+}
+
 /// Project a SAMD increment onto a manifold (Sella waist: stay on set).
 pub fn project_velocity<M: Manifold>(m: &M, x: &Array1<f64>, v: &Array1<f64>) -> Array1<f64> {
     m.project(x, v)
@@ -355,9 +363,7 @@ pub fn retract_samd<M: Manifold>(
     dt: f64,
 ) -> Array1<f64> {
     let g = man.egrad2rgrad(x, egrad);
-    let mut s = Array1::zeros(v.len());
-    axpy(dt, v.view(), &mut s);
-    axpy(-0.5 * dt * dt, g.view(), &mut s);
+    let s = verlet_increment(v, &g, dt);
     let s = man.project(x, &s);
     man.retract(x, &s)
 }

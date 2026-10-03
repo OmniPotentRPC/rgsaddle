@@ -275,6 +275,42 @@ pub fn update_h_ms(
     }
 }
 
+/// Symmetrize one secant pair. One column needs no correction.
+pub fn symmetrize_y_pair(_s: &Array1<f64>, y: &Array1<f64>) -> Array1<f64> {
+    y.clone()
+}
+
+/// Symmetrize secant columns with mode 0, 1, or the default mode 2.
+pub fn symmetrize_y_cols(s: ArrayView2<f64>, y: ArrayView2<f64>, symm: i32) -> Array2<f64> {
+    let mode = match symm {
+        0 | 1 => symm,
+        _ => 2,
+    };
+    symmetrize_y(s, y, Some(mode))
+}
+
+/// Apply one BFGS or TS-BFGS secant update.
+pub fn update_hessian(b: &mut Array2<f64>, s: &Array1<f64>, y: &Array1<f64>, kind: HessUpdate) {
+    update_h(b, s, y, kind);
+}
+
+/// Apply one Hessian update per symmetrized column, in column order.
+pub fn update_hessian_cols(
+    b: &mut Array2<f64>,
+    s: ArrayView2<f64>,
+    y: ArrayView2<f64>,
+    kind: HessUpdate,
+    symm: i32,
+) {
+    if s.nrows() != y.nrows() || s.ncols() != y.ncols() {
+        return;
+    }
+    let ytilde = symmetrize_y_cols(s, y, symm);
+    for j in 0..s.ncols() {
+        update_hessian(b, &s.column(j).to_owned(), &ytilde.column(j).to_owned(), kind);
+    }
+}
+
 /// `np.tril(STY - YTS, -1).T`.
 fn tril_skew_t(sty: Array2<f64>, yts: Array2<f64>) -> Array2<f64> {
     let k = sty.nrows();
@@ -684,5 +720,219 @@ mod tests {
         assert!(dot(x.view(), v.view()).abs() < 1e-12);
         let w = man.transport(&x, &ypt, &v);
         assert!(dot(ypt.view(), w.view()).abs() < 1e-12);
+    }
+}
+
+#[cfg(test)]
+mod retained_column_tests {
+    use super::*;
+    use super::symmetrize_y_pair as symmetrize_y;
+    use ndarray::array;
+    use rgmin::ManifoldKind;
+    use rgmin::vecops::{dot, nrm2};
+
+    #[test]
+    fn matches_qn_and_rejects_rfo() {
+        assert!(matches("QN"));
+        assert!(matches(" quasi-newton "));
+        assert!(matches("minimum-mode following"));
+        assert!(!matches("rfo"));
+        assert!(!matches("prfo"));
+        assert!(get_stepper("qn") == Some(StepperKind::QuasiNewton));
+        assert!(get_stepper("rfo").is_none());
+    }
+
+    #[test]
+    fn contract_bounds_match_sella() {
+        assert_eq!(ALPHA0, 0.0);
+        assert_eq!(ALPHA_MIN, 0.0);
+        assert!(ALPHA_MAX.is_infinite());
+        assert_eq!(SLOPE, -1.0);
+        assert!(NEWTON_SAFE);
+    }
+
+    #[test]
+    fn alpha_zero_is_signed_newton() {
+        let evals = array![4.0, -2.0];
+        let evecs = Array2::<f64>::eye(2);
+        let g = array![8.0, 2.0];
+        let (s, _) = QuasiNewton::new(&evals, &evecs, &g, 1).get_s(0.0);
+        // Sella flips the first `order` slots: L = (-|4|, |-2|) = (-4, 2);
+        // s = -g/L = (2, -1).
+        assert!((s[0] - 2.0).abs() < 1e-12);
+        assert!((s[1] + 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn restricted_clips_a_long_newton_step() {
+        let evals = array![1.0, 1.0];
+        let evecs = Array2::<f64>::eye(2);
+        let g = array![4.0, 0.0];
+        let s = QuasiNewton::new(&evals, &evecs, &g, 0).restricted(0.5);
+        let n = nrm2(s.view());
+        assert!((n - 0.5).abs() < 1e-9, "||s||={n}");
+    }
+
+    #[test]
+    fn qn_step_on_the_sphere_stays_on_the_set() {
+        let man = ManifoldKind::Sphere;
+        let x = array![0.0, 1.0, 0.0];
+        let evals = Array1::ones(3);
+        let evecs = Array2::<f64>::eye(3);
+        let egrad = array![1.0, 0.2, -0.3];
+        let stepper = QuasiNewton::new(&evals, &evecs, &egrad, 0);
+        let y = stepper.step_on(&man, &x, &egrad, ALPHA0);
+        let n = nrm2(y.view());
+        assert!((n - 1.0).abs() < 1e-12, "||y||={n} y={y:?}");
+        assert!(y.iter().all(|v| v.is_finite()));
+
+        let g_r = man.egrad2rgrad(&x, &egrad);
+        let (s, _) = qn_get_s(&evals, &evecs, &g_r, 0, ALPHA0);
+        let v = man.project(&x, &s);
+        assert!(
+            dot(x.view(), v.view()).abs() < 1e-12,
+            "step is not tangent: x·v={}",
+            dot(x.view(), v.view())
+        );
+
+        let w = stepper.transport_step(&man, &x, &y, &egrad, ALPHA0);
+        assert!(
+            dot(y.view(), w.view()).abs() < 1e-12,
+            "transported step leaves T_y: y·w={}",
+            dot(y.view(), w.view())
+        );
+    }
+
+    #[test]
+    fn hess_update_abi_is_bfgs_then_ts_bfgs() {
+        assert_eq!(HessUpdate::Bfgs.to_abi(), 0);
+        assert_eq!(HessUpdate::TsBfgs.to_abi(), 1);
+        assert_eq!(HessUpdate::try_from_abi(0), Some(HessUpdate::Bfgs));
+        assert_eq!(HessUpdate::try_from_abi(1), Some(HessUpdate::TsBfgs));
+        assert_eq!(HessUpdate::try_from_abi(2), None);
+        assert_eq!(HessUpdate::default(), HessUpdate::Bfgs);
+    }
+
+    #[test]
+    fn symmetrize_y_one_col_is_identity() {
+        let s = array![0.1, -0.2, 0.3];
+        let y = array![0.4, 0.0, -0.1];
+        let yt = symmetrize_y(&s, &y);
+        assert!((yt[0] - y[0]).abs() < 1e-16);
+        assert!((yt[1] - y[1]).abs() < 1e-16);
+        assert!((yt[2] - y[2]).abs() < 1e-16);
+        let sm = Array2::from_shape_vec((3, 1), s.to_vec()).unwrap();
+        let ym = Array2::from_shape_vec((3, 1), y.to_vec()).unwrap();
+        let yc = symmetrize_y_cols(sm.view(), ym.view(), 2);
+        assert!((yc[(0, 0)] - y[0]).abs() < 1e-16);
+    }
+
+    #[test]
+    fn symmetrize_y2_leaves_a_symmetric_pair() {
+        let mut s = Array2::<f64>::zeros((3, 2));
+        s[(0, 0)] = 1.0;
+        s[(1, 1)] = 1.0;
+        let mut h = Array2::<f64>::eye(3);
+        h[(0, 0)] = 2.0;
+        h[(1, 1)] = 3.0;
+        h[(2, 2)] = 4.0;
+        let y = h.dot(&s);
+        let yt = symmetrize_y_cols(s.view(), y.view(), 2);
+        for i in 0..3 {
+            for j in 0..2 {
+                assert!((yt[(i, j)] - y[(i, j)]).abs() < 1e-12, "yt={yt:?} y={y:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn ts_bfgs_keeps_a_negative_mode() {
+        let mut b = Array2::<f64>::zeros((2, 2));
+        b[(0, 0)] = -1.0;
+        b[(1, 1)] = 4.0;
+        let s = array![0.0, 0.1];
+        let y = array![0.0, 0.4];
+        update_hessian(&mut b, &s, &y, HessUpdate::TsBfgs);
+        let (evals, _) = crate::eigensolve::exact_eigh(b.view()).unwrap();
+        assert!(
+            evals.iter().any(|&e| e < 0.0),
+            "TS-BFGS must keep the saddle mode: {evals:?}"
+        );
+    }
+
+    #[test]
+    fn tiny_step_is_a_noop() {
+        let mut b = Array2::<f64>::eye(2);
+        b[(0, 0)] = 2.0;
+        let before = b.clone();
+        let s = array![1e-12, 0.0];
+        let y = array![2e-12, 0.0];
+        update_hessian(&mut b, &s, &y, HessUpdate::TsBfgs);
+        assert!((b[(0, 0)] - before[(0, 0)]).abs() < 1e-16);
+        assert!((b[(1, 1)] - before[(1, 1)]).abs() < 1e-16);
+    }
+
+    #[test]
+    fn bfgs_secant_on_a_posdef_pair() {
+        let mut b = Array2::<f64>::eye(2);
+        let s = array![0.2, 0.0];
+        let y = array![0.8, 0.0];
+        update_hessian(&mut b, &s, &y, HessUpdate::Bfgs);
+        let bs = b.dot(&s);
+        assert!((bs[0] - y[0]).abs() < 1e-10, "Bs={bs:?} y={y:?}");
+        assert!(bs[1].abs() < 1e-10);
+    }
+
+    #[test]
+    fn ts_bfgs_qn_step_stays_on_the_sphere() {
+        let man = ManifoldKind::Sphere;
+        let x = array![0.0, 1.0, 0.0];
+        let mut b = Array2::<f64>::eye(3);
+        b[(0, 0)] = -1.0;
+        let s = array![0.0, 0.0, 0.1];
+        let y = array![0.0, 0.0, 0.2];
+        update_hessian(&mut b, &s, &y, HessUpdate::TsBfgs);
+        let (evals, evecs) = crate::eigensolve::exact_eigh(b.view()).unwrap();
+        let egrad = array![0.4, 0.1, -0.2];
+        let stepper = QuasiNewton::new(&evals, &evecs, &egrad, 1);
+        let ynew = stepper.step_on(&man, &x, &egrad, ALPHA0);
+        let n = nrm2(ynew.view());
+        assert!((n - 1.0).abs() < 1e-12, "||y||={n} y={ynew:?}");
+        assert!(ynew.iter().all(|v| v.is_finite()));
+
+        let g_r = man.egrad2rgrad(&x, &egrad);
+        let (step, _) = qn_get_s(&evals, &evecs, &g_r, 1, ALPHA0);
+        let v = man.project(&x, &step);
+        assert!(
+            dot(x.view(), v.view()).abs() < 1e-12,
+            "step is not tangent: x·v={}",
+            dot(x.view(), v.view())
+        );
+        let w = stepper.transport_step(&man, &x, &ynew, &egrad, ALPHA0);
+        assert!(
+            dot(ynew.view(), w.view()).abs() < 1e-12,
+            "transported step leaves T_y: y·w={}",
+            dot(ynew.view(), w.view())
+        );
+    }
+
+    #[test]
+    fn qn_step_on_rigid_quotient_is_horizontal() {
+        let man = ManifoldKind::RigidQuotient;
+        let x = array![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let evals = Array1::ones(9);
+        let evecs = Array2::<f64>::eye(9);
+        let egrad = array![0.4, 0.1, 0.0, 0.2, -0.3, 0.0, -0.1, 0.05, 0.0];
+        let stepper = QuasiNewton::new(&evals, &evecs, &egrad, 0);
+        let y = stepper.step_on(&man, &x, &egrad, ALPHA0);
+        assert_eq!(y.len(), 9);
+        assert!(y.iter().all(|v| v.is_finite()));
+        let dx = &y - &x;
+        let horiz = man.project(&x, &dx);
+        let leak = nrm2((&dx - &horiz).view());
+        assert!(
+            leak < 1e-12,
+            "retracted increment left the horizontal: {leak}"
+        );
     }
 }

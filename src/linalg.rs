@@ -627,3 +627,107 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod retained_projection_tests {
+    use super::*;
+    use rgmin::Manifold;
+    #[test]
+    fn hvp_proj_retr_transp_stays_on_the_sphere() {
+        use rgmin::ManifoldKind;
+        let x = Array1::from(vec![0.0, 1.0, 0.0]);
+        let (_, g) = Quad3.eval(x.view()).unwrap();
+        let v = Array1::from(vec![0.3, 0.0, -0.1]);
+        let av = numerical_hvp(&Quad3, x.view(), g.view(), v.view(), 1e-5, true).unwrap();
+        let man = ManifoldKind::Sphere;
+        let s = project_hvp(&man, &x, &av);
+        assert!(
+            dot(x.view(), s.view()).abs() < 1e-12,
+            "projected HVP must be tangent: x·s={}",
+            dot(x.view(), s.view())
+        );
+        let y = retract_hvp(&man, &x, &av, nrm2(av.view()), 1.0);
+        assert!(
+            (nrm2(y.view()) - 1.0).abs() < 1e-12,
+            "retracted HVP left the sphere: ||y||={}",
+            nrm2(y.view())
+        );
+        let t = transport_hvp(&man, &x, &y, &s);
+        assert!(
+            dot(y.view(), t.view()).abs() < 1e-12,
+            "transported HVP leaves T_y: y·t={}",
+            dot(y.view(), t.view())
+        );
+        let th = man.project(&y, &t);
+        assert!(nrm2((&t - &th).view()) < 1e-12);
+    }
+
+    #[test]
+    fn uproj_hvp_stays_in_the_free_chart() {
+        use rgmin::ManifoldKind;
+        let man = ManifoldKind::Sphere;
+        let x = Array1::from(vec![0.0, 0.0, 1.0]);
+        let (_, g) = Quad3.eval(x.view()).unwrap();
+        let mut u = Array2::zeros((3, 2));
+        u[(0, 0)] = 1.0;
+        u[(1, 1)] = 1.0;
+        let v_free = Array1::from(vec![0.4, -0.2]);
+        let av_free = numerical_hvp_proj(
+            &Quad3,
+            x.view(),
+            g.view(),
+            v_free.view(),
+            1e-5,
+            true,
+            Some(u.view()),
+        )
+        .unwrap();
+        assert_eq!(av_free.len(), 2);
+        let av_full = lift_through(u.view(), av_free.view());
+        let s = project_hvp(&man, &x, &av_full);
+        assert!(dot(x.view(), s.view()).abs() < 1e-12);
+        let y = retract_hvp(&man, &x, &av_full, nrm2(av_full.view()), 1.0);
+        assert!((nrm2(y.view()) - 1.0).abs() < 1e-12);
+        let t = transport_hvp(&man, &x, &y, &s);
+        assert!(dot(y.view(), t.view()).abs() < 1e-12);
+    }
+
+    #[test]
+    fn hvp_proj_retr_transp_stays_on_the_com_set() {
+        use crate::constraints::Constraints;
+        let x = Array1::from(vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+        let mut cons = Constraints::new(3).unwrap();
+        cons.fix_com(x.view()).unwrap();
+        assert!(cons.residual_norm(x.view()).unwrap() < 1e-14);
+        let (_, g) = QuadN.eval(x.view()).unwrap();
+        let v = Array1::from_elem(9, 0.1);
+        let av = numerical_hvp(&QuadN, x.view(), g.view(), v.view(), 1e-5, true).unwrap();
+        let s = project_hvp(&cons, &x, &av);
+        let sh = cons.project(&x, &s);
+        assert!(nrm2((&s - &sh).view()) < 1e-12);
+        let y = retract_hvp(&cons, &x, &av, nrm2(av.view()), 1.0);
+        let res = cons.residual_norm(y.view()).unwrap();
+        assert!(res < 1e-10, "HVP retract left the COM set: {res}");
+        let t = transport_hvp(&cons, &x, &y, &s);
+        let th = cons.project(&y, &t);
+        assert!(nrm2((&t - &th).view()) < 1e-12);
+    }
+
+    struct Quad3;
+    impl PointSurface for Quad3 {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            Ok((
+                x[0] * x[0] + 4.0 * x[1] * x[1] + 9.0 * x[2] * x[2],
+                Array1::from(vec![2.0 * x[0], 8.0 * x[1], 18.0 * x[2]]),
+            ))
+        }
+    }
+
+    struct QuadN;
+    impl PointSurface for QuadN {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            let e: f64 = x.iter().map(|a| a * a).sum();
+            Ok((e, x.mapv(|a| 2.0 * a)))
+        }
+    }
+}

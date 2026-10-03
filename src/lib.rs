@@ -102,7 +102,7 @@ pub use pes_internal::{
 
 pub use qn::{
     HessUpdate, QuasiNewton, StepperKind, get_stepper, retract_qn, symmetrize_y, update_h,
-    update_h_ms,
+    update_h_ms, symmetrize_y_pair, symmetrize_y_cols, update_hessian, update_hessian_cols,
 };
 
 pub use restricted::{
@@ -114,7 +114,7 @@ pub use rfo::{RationalFunctionOptimization, rfo_stepper};
 
 pub use samd::{
     SamdConfig, SamdReport, SamdSession, VelocitySofteningConfig, VelocitySofteningReport,
-    project_velocity, retract_samd, soften_velocity_on, transport_velocity,
+    project_velocity, retract_samd, soften_velocity_on, transport_velocity, verlet_increment,
 };
 
 pub use sella_min::{SellaMinConfig, SellaMinReport, SellaMinSession};

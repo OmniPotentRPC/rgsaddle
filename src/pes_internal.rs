@@ -1339,6 +1339,83 @@ mod tests {
     }
 
     #[test]
+    fn packed_cell_internal_kick_stays_on_the_masked_set() {
+        use rgmin::Manifold;
+        use rgmin::vecops::nrm2;
+        let x = Array1::zeros(6);
+        let masses = Array1::from(vec![1.0, 1.0]);
+        let mut chart = Constraints::new(2).unwrap();
+        chart
+            .fix_translation(
+                Translation::all(2, CartAxis::X).unwrap(),
+                x.view(),
+                Some(0.0),
+            )
+            .unwrap();
+        let mut pes = CellInternalPes::new(
+            x,
+            masses,
+            chart.clone(),
+            Cell::ortho(4.0, 5.0, 6.0).unwrap(),
+        )
+        .unwrap();
+        pes.set_mask([true, false, false, false, true, false, false, false, true]);
+        let cell0 = pes.cell9();
+        let mut d = Array1::zeros(pes.packed_len());
+        d[0] = 0.1;
+        d[1] = -0.25;
+        let (e, g) = pes.kick_packed(&CellWell, d.view()).unwrap();
+        assert!(e.is_finite());
+        assert!(g.iter().all(|v| v.is_finite()));
+        let cell1 = pes.cell9();
+        assert!((pes.position()[0] - 0.1).abs() < 1e-12);
+        assert!((pes.position()[3] - 0.1).abs() < 1e-12);
+        assert!((cell1[0] - (cell0[0] - 0.25)).abs() < 1e-12);
+        for i in 0..9 {
+            if !pes.mask()[i] {
+                assert_eq!(cell1[i], cell0[i], "masked cell entry {i} left the set");
+            }
+        }
+        // Energy is eval_in_cell after the cell kick, not eval().
+        let want = 0.1 * 0.1 + (3.75 - 2.0) * (3.75 - 2.0);
+        assert!(
+            (e - want).abs() < 1e-12,
+            "kick energy {e} vs in-cell {want}"
+        );
+        let q = pes.internals().internals().unwrap();
+        assert!((q[0] - 0.1).abs() < 1e-12);
+        let pos = pes.position().to_owned();
+        let step = Array1::from_elem(pos.len(), 0.05);
+        let v = chart.project(&pos, &step);
+        let y = chart.retract(&pos, &v);
+        let w = chart.transport(&pos, &y, &v);
+        let w_h = chart.project(&y, &w);
+        assert!((nrm2(w.view()) - nrm2(w_h.view())).abs() < 1e-12);
+        assert!(y.iter().all(|v| v.is_finite()));
+
+        pes.set_chart(crate::CellChart::LogDeform);
+        let cell_log0 = pes.cell9();
+        let mut dlog = Array1::zeros(pes.packed_len());
+        dlog[1] = 0.02;
+        let (e_log, _) = pes.kick_packed(&CellWell, dlog.view()).unwrap();
+        let cell_log1 = pes.cell9();
+        let (want_log, _) = CellWell.eval_in_cell(pes.position(), &cell_log1).unwrap();
+        assert!(
+            (e_log - want_log).abs() < 1e-12,
+            "log-cell kick energy {e_log} vs in-cell {want_log}"
+        );
+        for i in 0..9 {
+            if !pes.mask()[i] {
+                assert_eq!(
+                    cell_log1[i], cell_log0[i],
+                    "log-chart masked cell entry {i} left the set"
+                );
+            }
+        }
+        assert_eq!(pes.chart(), crate::CellChart::LogDeform);
+    }
+
+    #[test]
     fn packed_cell_internal_kick_stays_on_the_masked_cell_set() {
         use rgmin::vecops::nrm2;
         use rgmin::{Manifold, ManifoldKind};
