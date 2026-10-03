@@ -17,18 +17,16 @@ impl PointSurface for Cubic {
     fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
         self.points.lock().unwrap().push(x.to_owned());
         if self.fail_accepted_probe && x[0] > 1.0 {
-            return Err(SaddleError::Surface("accepted curvature unavailable".into()));
+            return Err(SaddleError::Surface(
+                "accepted curvature unavailable".into(),
+            ));
         }
         let a = self.coefficient;
         let value = a * x[0].powi(3) / 3.0 - x[0] * x[0] / 2.0
             + (1.0 - a) * x[0]
             + x[1] * x[1]
             + x[2] * x[2];
-        let gradient = array![
-            a * x[0] * x[0] - x[0] + 1.0 - a,
-            2.0 * x[1],
-            2.0 * x[2]
-        ];
+        let gradient = array![a * x[0] * x[0] - x[0] + 1.0 - a, 2.0 * x[1], 2.0 * x[2]];
         Ok((value, gradient))
     }
 }
@@ -53,8 +51,7 @@ fn translated_stationary_point(
         points: Mutex::new(Vec::new()),
     };
     let mut session =
-        MinModeSession::new(config, array![-1.0, 0.0, 0.0], array![1.0, 0.0, 0.0])
-            .unwrap();
+        MinModeSession::new(config, array![-1.0, 0.0, 0.0], array![1.0, 0.0, 0.0]).unwrap();
     let report = session.step(&surface).unwrap();
     let points = surface.points.lock().unwrap();
     eprintln!(
@@ -115,8 +112,7 @@ fn failed_confirmation_preserves_position(kind: MinModeKind) {
         points: Mutex::new(Vec::new()),
     };
     let start = array![-1.0, 0.0, 0.0];
-    let mut session =
-        MinModeSession::new(config, start.clone(), array![1.0, 0.0, 0.0]).unwrap();
+    let mut session = MinModeSession::new(config, start.clone(), array![1.0, 0.0, 0.0]).unwrap();
     let error = session.step(&surface).unwrap_err();
     assert!(
         matches!(error, SaddleError::Surface(ref message)
