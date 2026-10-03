@@ -1,0 +1,10 @@
+name = "RgsaddleContracts"
+defaultTargets = ["RgsaddleContracts"]
+
+[[require]]
+name = "mathlib"
+scope = "leanprover-community"
+rev = "f2916a54665af851fc9a4da901cfc242c47a8922"
+
+[[lean_lib]]
+name = "RgsaddleContracts"
