@@ -500,7 +500,7 @@ dependencies = [
 [[package]]
 name = "rgmin"
 version = "0.3.0"
-source = "git+https://github.com/OmniPotentRPC/rgmin?rev=c77254a35993cef0697dc24167ad5bd01ab9d4a9#c77254a35993cef0697dc24167ad5bd01ab9d4a9"
+source = "git+https://github.com/OmniPotentRPC/rgmin?rev=d75a24d67a76ab9e8c6ba571d6b9adfa3ca47eaa#d75a24d67a76ab9e8c6ba571d6b9adfa3ca47eaa"
 dependencies = [
  "cbindgen",
  "dlpk",
