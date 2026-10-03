@@ -1232,14 +1232,14 @@ mod tests {
         let z = [6u8];
         let report = force_match(x.view(), g.view(), &z, &ForceMatchOpts::default()).unwrap();
         assert_eq!(report.linpars.len(), 0);
-        assert_eq!(report.hessian, Array2::eye(3));
+        assert_eq!(report.hessian, Array2::<f64>::eye(3));
         let extra = ForceMatchOpts {
             tvecs: vec![[0.0, 0.0, 0.0], [5.0, 0.0, 0.0]],
             ..ForceMatchOpts::default()
         };
         let report = force_match(x.view(), g.view(), &z, &extra).unwrap();
         assert_eq!(report.linpars.len(), 0);
-        assert_eq!(report.hessian, Array2::eye(3));
+        assert_eq!(report.hessian, Array2::<f64>::eye(3));
     }
 
     #[test]
