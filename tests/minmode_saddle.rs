@@ -310,3 +310,36 @@ fn a_step_reuses_its_accepted_point_as_the_next_centre() {
         assert_eq!(calls, 1 + report.rotations + 1, "step {k}");
     }
 }
+
+#[test]
+fn lbfgs_translation_costs_one_evaluation_per_step() {
+    let config = MinModeConfig {
+        force_tol: 1e-4,
+        max_move: 0.1,
+        method: rgmin::Method::Lbfgs { memory: 10 },
+        ..MinModeConfig::default()
+    };
+    let start = array![0.35, 0.4, -0.3];
+    let seed = array![0.8, 0.5, 0.1];
+    let mut session = MinModeSession::new(config, start, seed).unwrap();
+    let surface = CountingPoint {
+        inner: &QuadraticSaddle,
+        calls: AtomicUsize::new(0),
+    };
+    let mut report = session.step(&surface).unwrap();
+    let mut steps = 1;
+    while report.status == MinModeStatus::Running && steps < 500 {
+        surface.calls.store(0, Ordering::Relaxed);
+        report = session.step(&surface).unwrap();
+        let calls = surface.calls.load(Ordering::Relaxed);
+        if report.status == MinModeStatus::Running {
+            // One dimer gradient, one per rotation, one translation.
+            assert_eq!(calls, 1 + report.rotations + 1, "step {steps}");
+        }
+        steps += 1;
+    }
+    assert_eq!(report.status, MinModeStatus::Converged, "{report:?}");
+    for c in 0..3 {
+        assert!(session.position()[c].abs() < 1e-3);
+    }
+}

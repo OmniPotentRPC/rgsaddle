@@ -12,7 +12,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ndarray::{Array1, ArrayView1};
-use rgmin::{Control, Method, Oracle, Solver};
+use rgmin::{Accept, Control, Method, Oracle, Solver};
 
 use crate::error::SaddleError;
 
@@ -455,6 +455,13 @@ impl MinModeSession {
         // maxAtomMotionApplied). A non-positive max_move leaves the
         // step uncapped.
         solver.set_atom_maxmove(config.max_move);
+        // The inverted force is not the gradient of the energy the
+        // oracle reports, so a line search on that energy refuses good
+        // steps and burns evaluations: L-BFGS takes its two-loop
+        // direction with one oracle call (rgmin Accept::Step).
+        if matches!(config.method, Method::Lbfgs { .. }) {
+            solver.set_accept(Accept::Step);
+        }
         Ok(Self {
             config,
             x,
