@@ -1,33 +1,18 @@
-//! Riemannian trust region with truncated conjugate gradients (RTR-tCG)
-//! on the band.
+//! Projected trust-region relaxation of a band.
 //!
-//! Absil, Baker, Gallivan, "Trust-region methods on Riemannian manifolds",
-//! Found. Comput. Math. 7, 303 (2007). The band with `n` movable images is
-//! a point `X` of the product manifold whose tangent space at `X` is the
-//! direct sum of the chord-perpendicular subspaces `range(I - tau_i tau_i^T)`
-//! (the nudging projection of NEB), so the Riemannian gradient is the
-//! assembled NEB force with the sign flipped and a Hessian-vector product is
-//! the projected directional derivative of that force. At `X` the model
+//! The truncated conjugate-gradient subproblem follows Absil, Baker and
+//! Gallivan, Found. Comput. Math. 7, 303 (2007). Ordinary images move
+//! perpendicular to their chord tangents; the climbing image retains
+//! its reaction-path component.
 //!
-//! `m(eta) = f(X) + <grad f(X), eta> + 1/2 <Hess f(X)[eta], eta>`,
-//! for `eta` in the tangent space `T_X M`,
+//! A trial combines this increment with equal-arc reparameterization.
+//! Its complete displacement is capped by the trust radius before evaluation.
+//! The reported model decrease uses that displacement and a central
+//! finite difference of the assembled force. The measured decrease is
+//! its trapezoidal force integral. NEB forces are nonconservative, so this
+//! band update is a heuristic and carries no energy-descent guarantee.
 //!
-//! is minimised inside the ball `||eta|| <= Delta` by the Steihaug-Toint
-//! truncated CG iteration run entirely in the tangent space; the caller
-//! retracts the step (the images move, the endpoints stay), measures the
-//! decrease and feeds the ratio to [`RtrRadius::update`]. The NEB force is
-//! not the gradient of a potential once the springs and the climbing
-//! reflection are in, so the "actual decrease" is the line integral of the
-//! force along the step, `-1/2 <g(X) + g(X + eta), eta>` (trapezoid rule),
-//! which is the energy decrease whenever the force is conservative.
-//!
-//! The constants in the radius update are the theorem's: accept when
-//! `rho > rho' = 0.1`, shrink by 1/4 below `rho = 1/4`, grow by 2 above
-//! `rho = 3/4` at the boundary, never past `Delta_bar`. Nothing here is a
-//! per-fixture number.
-//!
-//! The shared subproblem solver gives the exact quadratic decrease in a
-//! Euclidean tangent space, as for `f(x) = x^2` at `x = 1`:
+//! This quadratic has its Newton point inside the trust sphere:
 //! ```
 //! use ndarray::array;
 //! use rgsaddle::truncated_cg;
@@ -37,6 +22,7 @@
 //! assert!((result.eta[0] + 1.0).abs() < 1e-12);
 //! assert!((result.model_decrease - 1.0).abs() < 1e-12);
 //! ```
+
 
 use ndarray::{Array1, Array2, ArrayView2, s};
 
@@ -157,14 +143,29 @@ fn band_forces_with_gate<S: BandSurface + ?Sized>(
 /// polyline; with `anchor` an interior image, each side of it is spaced on
 /// its own and the anchor stays. Endpoints never move.
 pub fn reparametrize_equal_arc(positions: &mut Array2<f64>, anchor: Option<usize>) {
+    reparametrize(positions, anchor, None);
+}
+
+/// Equal-arc interpolation using minimum-image chords, with fixed endpoints.
+pub fn reparametrize_equal_arc_in_cell(
+    positions: &mut Array2<f64>, anchor: Option<usize>, cell: &crate::Cell,
+) {
+    reparametrize(positions, anchor, Some(cell));
+}
+
+fn reparametrize(positions: &mut Array2<f64>, anchor: Option<usize>, cell: Option<&crate::Cell>) {
     let n = positions.nrows();
     if n < 3 {
         return;
     }
-    let orig = positions.clone();
+    let original = positions.clone();
+    let mut orig = original.clone();
     let mut s = vec![0.0; n];
     for i in 1..n {
-        let d = &orig.row(i) - &orig.row(i - 1);
+        let mut d = &original.row(i) - &original.row(i - 1);
+        if let Some(cell) = cell { cell.minimum_image(&mut d); }
+        let unwrapped = &orig.row(i - 1) + &d;
+        orig.row_mut(i).assign(&unwrapped);
         s[i] = s[i - 1] + d.dot(&d).sqrt();
     }
     let place = |positions: &mut Array2<f64>, j: usize, target: f64| {
@@ -179,7 +180,9 @@ pub fn reparametrize_equal_arc(positions: &mut Array2<f64>, anchor: Option<usize
             0.0
         };
         let p = &orig.row(k) + &((&orig.row(k + 1) - &orig.row(k)) * alpha);
-        positions.row_mut(j).assign(&p);
+        let mut difference = &p - &original.row(j);
+        if let Some(cell) = cell { cell.minimum_image(&mut difference); }
+        positions.row_mut(j).assign(&(&original.row(j) + &difference));
     };
     match anchor {
         Some(a) if a > 0 && a < n - 1 => {
@@ -362,13 +365,13 @@ impl BandRtr {
         let tcg = truncated_cg(
             project,
             grad.view(),
-            hvp,
+            &hvp,
             self.radius.radius,
             self.config.theta,
             self.config.kappa,
             self.config.max_cg,
         );
-        if let Some(error) = hvp_error.into_inner() { return Err(error); }
+        if let Some(error) = hvp_error.borrow_mut().take() { return Err(error); }
         self.iteration += 1;
         if tcg.stop == TcgStop::ZeroGradient {
             return Ok(RtrReport {
@@ -389,37 +392,43 @@ impl BandRtr {
             let mut row = trial.row_mut(i);
             row.scaled_add(1.0, &seg);
         }
+        reparametrize(&mut trial, ci, band.cell.as_ref());
+        let mut displacement = Array1::zeros(interior);
+        for i in 1..n_images - 1 {
+            let mut difference = &trial.row(i) - &base.row(i);
+            if let Some(cell) = &band.cell { cell.minimum_image(&mut difference); }
+            displacement.slice_mut(s![(i - 1) * dof..i * dof]).assign(&difference);
+        }
+        let length = nrm2(displacement.view());
+        if length > self.radius.radius {
+            displacement *= self.radius.radius / length;
+        }
+        for i in 1..n_images - 1 {
+            let row = &base.row(i) + &displacement.slice(s![(i - 1) * dof..i * dof]);
+            trial.row_mut(i).assign(&row);
+        }
+        let h_displacement = hvp(&displacement);
+        if let Some(error) = hvp_error.borrow_mut().take() { return Err(error); }
+        let model_decrease = -dot(grad.view(), displacement.view())
+            - 0.5 * dot(displacement.view(), h_displacement.view());
         let there = band_forces_with_gate(band, surface, trial.view(), ci, self.force_gate)?;
         let grad_there = -&there.force;
-        let actual_decrease = -0.5 * dot((&grad + &grad_there).view(), tcg.eta.view());
-        let eta_norm = nrm2(tcg.eta.view());
-        let rho = if tcg.model_decrease > 0.0 {
-            actual_decrease / tcg.model_decrease
+        let actual_decrease = -0.5 * dot((&grad + &grad_there).view(), displacement.view());
+        let eta_norm = nrm2(displacement.view());
+        let rho = if model_decrease > 0.0 {
+            actual_decrease / model_decrease
         } else {
             f64::NEG_INFINITY
         };
-        let accepted = self
-            .radius
-            .update(actual_decrease, tcg.model_decrease, eta_norm);
-        // Retraction: the tangent step moves the images across the path, the
-        // spacing along it is restored by re-parametrising the polyline at
-        // equal chord length with the climbing image held where it landed.
-        // The spring force therefore never enters the model; it is the
-        // retraction's job, as in the string method.
-        let there = if accepted {
-            reparametrize_equal_arc(&mut trial, ci);
-            positions.assign(&trial);
-            band_forces_with_gate(band, surface, positions.view(), ci, self.force_gate)?
-        } else {
-            there
-        };
+        let accepted = self.radius.update(actual_decrease, model_decrease, eta_norm);
+        if accepted { positions.assign(&trial); }
         Ok(RtrReport {
             accepted,
             rho,
             radius: self.radius.radius,
             stop: tcg.stop,
             cg_iterations: tcg.iterations,
-            model_decrease: tcg.model_decrease,
+            model_decrease,
             actual_decrease,
             max_force: if accepted {
                 there.max_force
