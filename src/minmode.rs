@@ -627,19 +627,28 @@ impl MinModeSession {
         Ok(gradient)
     }
 
+    fn mode_at<S: PointSurface>(
+        &self,
+        surface: &Counted<'_, S>,
+        position: ArrayView1<f64>,
+        gradient: ArrayView1<f64>,
+    ) -> Result<(Array1<f64>, f64, usize), SaddleError> {
+        match self.config.kind {
+            MinModeKind::Dimer => {
+                rotate_dimer(surface, position, gradient, self.mode.clone(), &self.config)
+            }
+            MinModeKind::Lanczos => {
+                lanczos_mode(surface, position, gradient, self.mode.clone(), &self.config)
+            }
+        }
+    }
+
     fn refresh_mode<S: PointSurface>(
         &mut self,
         surface: &Counted<'_, S>,
         g0: ArrayView1<f64>,
     ) -> Result<(f64, usize), SaddleError> {
-        let (mode, curvature, rotations) = match self.config.kind {
-            MinModeKind::Dimer => {
-                rotate_dimer(surface, self.x.view(), g0, self.mode.clone(), &self.config)?
-            }
-            MinModeKind::Lanczos => {
-                lanczos_mode(surface, self.x.view(), g0, self.mode.clone(), &self.config)?
-            }
-        };
+        let (mode, curvature, rotations) = self.mode_at(surface, self.x.view(), g0)?;
         self.mode = mode;
         self.curvature = curvature;
         Ok((curvature, rotations))
@@ -689,7 +698,7 @@ impl MinModeSession {
         };
         let g0 = self.centre_gradient(&counted)?;
         let previous_mode = self.mode.clone();
-        let (curvature, rotations) = self.refresh_mode(&counted, g0.view())?;
+        let (mut curvature, mut rotations) = self.refresh_mode(&counted, g0.view())?;
         // The solver cached the inverted force at this point under the
         // previous mode; the step must see the current one. The mode's
         // sign is arbitrary, so the angle reads |cos|.
@@ -770,25 +779,41 @@ impl MinModeSession {
             return Err(err);
         }
         stepped.map_err(|e| SaddleError::Solver(e.to_string()))?;
-        self.x = x;
-        self.iteration += 1;
-
         // The oracle's last evaluation is the accepted point for every
         // stepper that ends on its trial (FIRE, Accept::Step); it is
         // this report's force and the next step's centre.
-        let at_new = last.into_inner().ok().flatten().filter(|p| p.x == self.x);
+        let at_new = last.into_inner().ok().flatten().filter(|p| p.x == x);
         let centre = match at_new {
             Some(p) => p,
             None => {
-                let (energy, gradient) = counted.eval(self.x.view())?;
+                let (energy, gradient) = counted.eval(x.view())?;
                 PointEval {
-                    x: self.x.clone(),
+                    x: x.clone(),
                     energy: Some(energy),
                     gradient,
                 }
             }
         };
         let max_force = centre.gradient.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+        if max_force <= self.config.force_tol && x != self.x {
+            // Force and curvature in a convergence decision describe the
+            // same point. The accepted gradient supplies the centre, so
+            // confirmation pays only for the required Hessian actions.
+            let (mode, accepted_curvature, accepted_rotations) =
+                self.mode_at(&counted, x.view(), centre.gradient.view())?;
+            let turned = self.mode.dot(&mode).abs().min(1.0).acos();
+            if turned > MODE_RESET_ANGLE {
+                self.solver.forget();
+            } else {
+                self.solver.forget_evaluation();
+            }
+            self.mode = mode;
+            self.curvature = accepted_curvature;
+            curvature = accepted_curvature;
+            rotations += accepted_rotations;
+        }
+        self.x = x;
+        self.iteration += 1;
         self.centre = Some(centre);
         let status = if converged(max_force, curvature, self.config.force_tol) {
             MinModeStatus::Converged
