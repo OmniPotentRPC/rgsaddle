@@ -1,0 +1,17 @@
+prec = 256!;
+epsilon = 2^(-52);
+sx = round(1e-17, 53, RN);
+sy = round(-2e-17, 53, RN);
+squared = round(round(sx*sx, 53, RN) + round(sy*sy, 53, RN), 53, RN);
+magnitude = round(sqrt(squared), 53, RN);
+for radius in [|1e-18, 1e-20|] do {
+    radius = round(radius, 53, RN);
+    scale = round(radius/magnitude, 53, RN);
+    x = round(scale*sx, 53, RN);
+    y = round(scale*sy, 53, RN);
+    squared = round(round(x*x, 53, RN) + round(y*y, 53, RN), 53, RN);
+    length = round(sqrt(squared), 53, RN);
+    if (length <= radius*(1 + 8*epsilon) &&
+        length >= radius*(1 - 8*epsilon)) then print("CERTIFIED_RADIAL_WITNESS");
+};
+quit;
