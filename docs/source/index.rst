@@ -13,7 +13,7 @@ rgsaddle
      </div>
      <p class="vi-hero-tagline">One solver step on an assembled NEB or inverted-mode force. The host owns the loop.</p>
      <div class="vi-hero-pills">
-       <span>No optimizer of its own</span>
+       <span>Host-controlled sessions</span>
        <span>eOn NEB branches</span>
        <span>Rust + C ABI</span>
      </div>
@@ -33,7 +33,7 @@ Force assembly ports eOn's NEB: Mills–Jónsson–Schenter and
 Henkelman–Jónsson tangents, uniform / energy-weighted / Onsager–Machlup
 springs, PEB / NEB / DNEB projections, climbing image with the eOn
 trigger. Positions are unwrapped Cartesian. A ``Cell`` supplies
-orthorhombic minimum-image differences.
+minimum-image differences.
 
 Install
 -------
@@ -68,3 +68,20 @@ host loop, endpoints stay put.
    reference
    explanation
    seat
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Session guides
+
+   tutorials/quickstart
+   howto/band
+   howto/minmode
+   howto/sella
+   howto/irc
+   howto/io
+   howto/c-abi
+   explanation/mep
+   reference/architecture
+   reference/bibliography
+   contributing/index
+   changelog

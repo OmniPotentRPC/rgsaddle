@@ -1,0 +1,9 @@
+#+TITLE: Bibliography
+#+OPTIONS: toc:nil num:nil
+
+The method references are stored in ~docs/source/references.bib~.
+
+#+begin_export rst
+.. bibliography::
+   :all:
+#+end_export

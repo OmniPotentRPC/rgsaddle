@@ -1,0 +1,10 @@
+#+TITLE: Read a molecular frame
+#+OPTIONS: toc:nil num:nil
+
+Enable the ~readcon~ feature and call ~frame_from_con~ to obtain Cartesian positions, masses and an optional periodic cell. Parsing is provided by readcon-core.
+
+An explicit ~lattice_vectors~ matrix in the frame metadata takes precedence. Otherwise the cell is reconstructed from all three lengths and all three angles. A zero length triplet denotes a nonperiodic frame. Partial or invalid periodic cells return an error.
+
+The ~chemfiles~ feature enables the readcon-core format adapters. ~readcon-db~ supplies the corpus dependency for hosts that store traces and restarts. Surface implementations own their neighbour-list choice.
+
+The triclinic metric and exact-lattice precedence are exercised by ~tests/io_cells.rs~.

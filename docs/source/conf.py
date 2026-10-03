@@ -5,11 +5,12 @@ from __future__ import annotations
 project = "rgsaddle"
 copyright = "2026, Rohit Goswami"
 author = "Rohit Goswami"
-release = "0.1.0"
-version = "0.1"
+release = "0.2.2"
+version = "0.2"
 
 extensions = [
     "sphinx.ext.mathjax",
+    "sphinxcontrib.bibtex",
     "sphinx_copybutton",
     "sphinx_design",
 ]
@@ -50,3 +51,5 @@ intersphinx_mapping: dict = {}
 
 copybutton_prompt_text = r"\$ "
 copybutton_prompt_is_regexp = True
+
+bibtex_bibfiles = ["references.bib"]

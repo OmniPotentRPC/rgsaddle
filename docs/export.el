@@ -1,0 +1,12 @@
+;;; Export the nested guides without replacing the main landing pages.
+(require 'ox-rst)
+(let* ((docs (file-name-directory (or load-file-name buffer-file-name)))
+       (source (expand-file-name "orgmode" docs))
+       (output (expand-file-name "source" docs)))
+  (dolist (file (directory-files-recursively source "\\.org$"))
+    (let ((relative (file-relative-name file source)))
+      (when (or (string-match-p "/" relative) (equal relative "changelog.org"))
+        (with-current-buffer (find-file-noselect file)
+          (let ((destination (expand-file-name (concat (file-name-sans-extension relative) ".rst") output)))
+            (make-directory (file-name-directory destination) t)
+            (org-export-to-file 'rst destination)))))))
