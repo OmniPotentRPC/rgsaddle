@@ -152,5 +152,8 @@ fn analytic_trust_step_distinguishes_weighted_and_updated_curvature() {
         assert_eq!(session.position()[2], 0.0);
         assert!((session.hessian().unwrap()[(1, 1)] + 16.0).abs() < 1e-12);
         assert_eq!(surface.calls.load(Ordering::Relaxed), 2);
+        let second = session.step(&surface).unwrap();
+        assert!((second.curvature + 4.0).abs() < 1e-12);
+        assert_eq!(surface.calls.load(Ordering::Relaxed), 3);
     }
 }
