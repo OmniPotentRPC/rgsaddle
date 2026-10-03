@@ -2918,3 +2918,27 @@ pub unsafe extern "C" fn rgsaddle_band_set_force_gate(
     unsafe { (*band).session.set_force_gate(gate) };
     RGSADDLE_OK
 }
+
+/// # Safety
+/// `band` is a live session or null. `enabled` is 0 or 1.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_band_set_highs(
+    band: *mut RgsaddleBand, enabled: i32,
+) -> i32 {
+    if band.is_null() { return RGSADDLE_NULL_BAND; }
+    if enabled != 0 && enabled != 1 { return RGSADDLE_INVALID_PARAMETER; }
+    unsafe { (*band).session.set_highs(enabled == 1) };
+    RGSADDLE_OK
+}
+
+/// # Safety
+/// `session` is a live session or null. `enabled` is 0 or 1.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_minmode_set_highs(
+    session: *mut RgsaddleMinMode, enabled: i32,
+) -> i32 {
+    if session.is_null() { return RGSADDLE_NULL_SESSION; }
+    if enabled != 0 && enabled != 1 { return RGSADDLE_INVALID_PARAMETER; }
+    unsafe { (*session).session.set_highs(enabled == 1) };
+    RGSADDLE_OK
+}

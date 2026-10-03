@@ -32,6 +32,12 @@ int main() {
         return 1;
     }
 
+    if (rgsaddle_band_set_highs(nullptr, 0) != RGSADDLE_NULL_BAND ||
+        rgsaddle_minmode_set_highs(nullptr, 0) != RGSADDLE_NULL_SESSION) {
+        std::fprintf(stderr, "null feasible-step control\n");
+        return 1;
+    }
+
     const long n_images = 9, n_atoms = 1;
     std::vector<double> pos(static_cast<std::size_t>(n_images * 3));
     for (long i = 0; i < n_images; ++i) {
@@ -47,6 +53,8 @@ int main() {
     cfg.ci_trigger_factor = 0.5;
 
     rgsaddle::Band band(cfg, n_images, n_atoms, pos.data());
+    band.set_highs(true);
+    band.set_highs(false);
     rgsaddle::Report last;
     for (int i = 0; i < 200; ++i) {
         last = band.step(surface, nullptr);

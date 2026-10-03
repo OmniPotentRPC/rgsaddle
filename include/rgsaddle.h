@@ -787,6 +787,11 @@ void rgsaddle_samd_free(RgsaddleSamd *session);
 
 
 
+/** Select the optional HiGHS feasible-set step. enabled is 0 or 1.
+ * No-op in a library built without the highs Cargo feature. */
+rgsaddle_status_t rgsaddle_band_set_highs(RgsaddleBand *band, int32_t enabled);
+rgsaddle_status_t rgsaddle_minmode_set_highs(RgsaddleMinMode *session, int32_t enabled);
+
 #ifdef __cplusplus
 }
 #endif

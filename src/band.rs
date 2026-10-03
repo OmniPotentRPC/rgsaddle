@@ -658,6 +658,12 @@ impl BandSession {
         })
     }
 
+    /// Select the optional HiGHS feasible-set step; requires the `highs` feature.
+    /// Disabled by default.
+    pub fn set_highs(&mut self, enabled: bool) {
+        self.solver.set_highs(enabled);
+    }
+
     /// Select the convergence and climbing-trigger norm, retaining surface values.
     pub fn set_force_gate(&mut self, gate: ForceGate) {
         if self.state.force_gate != gate {

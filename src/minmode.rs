@@ -604,6 +604,12 @@ impl MinModeSession {
         })
     }
 
+    /// Select the optional HiGHS feasible-set step; requires the `highs` feature.
+    /// Disabled by default.
+    pub fn set_highs(&mut self, enabled: bool) {
+        self.solver.set_highs(enabled);
+    }
+
     /// Select the convergence norm; the default is maximum absolute component.
     pub fn set_force_gate(&mut self, gate: ForceGate) {
         self.force_gate = gate;

@@ -160,6 +160,10 @@ public:
         check(rgsaddle_band_set_force_gate(handle_, gate));
     }
 
+    void set_highs(bool enabled) {
+        check(rgsaddle_band_set_highs(handle_, enabled ? 1 : 0));
+    }
+
     void set_positions(double const* positions) {
         check(rgsaddle_band_set_positions(handle_, positions));
     }
@@ -234,6 +238,10 @@ public:
     void reset() { check(rgsaddle_minmode_reset(handle_)); }
     void set_force_gate(rgsaddle_force_gate_t gate) {
         check(rgsaddle_minmode_set_force_gate(handle_, gate));
+    }
+
+    void set_highs(bool enabled) {
+        check(rgsaddle_minmode_set_highs(handle_, enabled ? 1 : 0));
     }
     void set_position(double const* position, double const* gradient = nullptr) {
         check(rgsaddle_minmode_set_position(handle_, position, gradient));
