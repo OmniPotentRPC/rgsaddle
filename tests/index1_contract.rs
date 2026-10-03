@@ -1,4 +1,4 @@
-use std::cell::Cell;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ndarray::{Array1, Array2, ArrayView1, array, s};
 use rgsaddle::error::SaddleError;
@@ -8,12 +8,12 @@ use rgsaddle::prfo_restricted::{PrfoKind, restricted_partitioned_rfo};
 
 struct Quadratic {
     hessian: Array2<f64>,
-    calls: Cell<usize>,
+    calls: AtomicUsize,
 }
 
 impl PointSurface for Quadratic {
     fn eval(&self, x: ArrayView1<'_, f64>) -> Result<(f64, Array1<f64>), SaddleError> {
-        self.calls.set(self.calls.get() + 1);
+        self.calls.fetch_add(1, Ordering::Relaxed);
         let gradient = self.hessian.dot(&x);
         Ok((0.5 * x.dot(&gradient), gradient))
     }
@@ -30,7 +30,7 @@ fn curvature_belongs_to_the_hessian_that_produced_the_step() {
         let h = initial_hessian();
         let surface = Quadratic {
             hessian: &h + &Array2::from_diag(&array![0.4, 0.8, 1.2]),
-            calls: Cell::new(0),
+            calls: AtomicUsize::new(0),
         };
         let mut session = Index1Session::new(
             Index1Config {
@@ -47,17 +47,21 @@ fn curvature_belongs_to_the_hessian_that_produced_the_step() {
         let report = session.step(&surface).unwrap();
         assert!((report.curvature + 2.0).abs() < 1e-14, "{report:?}");
         assert!(report.max_step <= 0.1);
-        assert_eq!(surface.calls.get(), 2);
+        assert_eq!(surface.calls.load(Ordering::Relaxed), 2);
         let changed = (&session.hessian().unwrap() - &h).mapv(f64::abs).sum();
         assert!(
             changed > 1e-6,
             "the update must change the supplied Hessian"
         );
         session.step(&surface).unwrap();
-        assert_eq!(surface.calls.get(), 3);
+        assert_eq!(surface.calls.load(Ordering::Relaxed), 3);
         session.reset();
         session.step(&surface).unwrap();
-        assert_eq!(surface.calls.get(), 11, "reset needs 2n finite differences");
+        assert_eq!(
+            surface.calls.load(Ordering::Relaxed),
+            11,
+            "reset needs 2n finite differences"
+        );
     }
 }
 
@@ -66,7 +70,7 @@ fn a_stationary_point_reports_curvature_without_a_displacement() {
     let h = initial_hessian();
     let surface = Quadratic {
         hessian: h.clone(),
-        calls: Cell::new(0),
+        calls: AtomicUsize::new(0),
     };
     let mut session = Index1Session::new(
         Index1Config::default(),
@@ -80,7 +84,7 @@ fn a_stationary_point_reports_curvature_without_a_displacement() {
     assert_eq!(report.iteration, 0);
     assert_eq!(report.max_step, 0.0);
     assert!((report.curvature + 2.0).abs() < 1e-14);
-    assert_eq!(surface.calls.get(), 1);
+    assert_eq!(surface.calls.load(Ordering::Relaxed), 1);
 }
 
 #[test]
@@ -127,7 +131,7 @@ fn analytic_trust_step_distinguishes_weighted_and_updated_curvature() {
         let h = Array2::from_diag(&array![2.0, -8.0, 45.0]);
         let surface = Quadratic {
             hessian: &h * 2.0,
-            calls: Cell::new(0),
+            calls: AtomicUsize::new(0),
         };
         let mut session = Index1Session::new(
             Index1Config {
@@ -147,6 +151,6 @@ fn analytic_trust_step_distinguishes_weighted_and_updated_curvature() {
         assert_eq!(session.position()[0], 0.0);
         assert_eq!(session.position()[2], 0.0);
         assert!((session.hessian().unwrap()[(1, 1)] + 16.0).abs() < 1e-12);
-        assert_eq!(surface.calls.get(), 2);
+        assert_eq!(surface.calls.load(Ordering::Relaxed), 2);
     }
 }
