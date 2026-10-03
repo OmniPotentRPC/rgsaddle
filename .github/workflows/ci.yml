@@ -11,6 +11,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Build the C ABI library
+        run: cargo build --locked --features capi
       - name: Test
         run: cargo test --features capi --verbose
       - name: Clippy

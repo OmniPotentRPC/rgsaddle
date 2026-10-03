@@ -27,7 +27,9 @@ fn alpha_and_order_are_the_sella_rfo_contract() {
     assert_eq!(stepper.order, 1);
     assert!((PartitionedRationalFunctionOptimization::ALPHA0 - 1.0).abs() < 1e-15);
     assert_eq!(PartitionedRationalFunctionOptimization::SLOPE, 1.0);
-    assert!(!PartitionedRationalFunctionOptimization::NEWTON_SAFE);
+    const {
+        assert!(!PartitionedRationalFunctionOptimization::NEWTON_SAFE);
+    };
     let s0 = stepper.get_s(&evals, &evecs, &g, 0.0);
     assert!(nrm2(s0.view()) < 1e-12);
     let n_lo = nrm2(stepper.get_s(&evals, &evecs, &g, 0.2).view());

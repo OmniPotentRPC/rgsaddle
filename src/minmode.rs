@@ -319,16 +319,15 @@ impl MinModeSession {
 
     /// Select the basin constraint without changing the rotation or translation solver.
     pub fn set_kappa(&mut self, config: Option<KappaDimerConfig>) -> Result<(), SaddleError> {
-        if let Some(c) = &config {
-            if !c.beta.is_finite()
+        if let Some(c) = &config
+            && (!c.beta.is_finite()
                 || c.beta <= 0.0
                 || !c.eigen.tol.is_finite()
-                || c.eigen.tol <= 0.0
-            {
-                return Err(SaddleError::Solver(
-                    "kappa beta and tolerance must be positive and finite".into(),
-                ));
-            }
+                || c.eigen.tol <= 0.0)
+        {
+            return Err(SaddleError::Solver(
+                "kappa beta and tolerance must be positive and finite".into(),
+            ));
         }
         self.kappa = config;
         self.reset();

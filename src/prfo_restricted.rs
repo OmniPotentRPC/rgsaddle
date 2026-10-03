@@ -14,7 +14,7 @@
 //! The i-PI Nichols shift is a different displacement and stays in
 //! [`crate::nichols`].
 
-use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
+use ndarray::{Array1, ArrayView1, ArrayView2};
 
 use crate::error::SaddleError;
 use crate::nichols::{mass_weight, masses_or_ones, sym_eigh};
@@ -124,7 +124,11 @@ fn l2(v: ArrayView1<f64>) -> f64 {
     v.dot(&v).sqrt()
 }
 
-fn cartesian_of(evecs: &Array2<f64>, step_eig: &Array1<f64>, mass: &Array1<f64>) -> Array1<f64> {
+fn cartesian_of(
+    evecs: ArrayView2<f64>,
+    step_eig: &Array1<f64>,
+    mass: ArrayView1<f64>,
+) -> Array1<f64> {
     let n = mass.len();
     let mut step = Array1::<f64>::zeros(n);
     for i in 0..n {
@@ -158,7 +162,7 @@ pub fn restricted_partitioned_rfo(
     }
     let at = |alpha: f64| -> Result<Array1<f64>, SaddleError> {
         let step_eig = partitioned_rfo_eigen(evals, gradient, alpha, kind)?;
-        let step = cartesian_of(&evecs.to_owned(), &step_eig, &mass.to_owned());
+        let step = cartesian_of(evecs, &step_eig, mass);
         if step.iter().any(|v| !v.is_finite()) {
             return Err(SaddleError::NonFinite("restricted P-RFO step"));
         }
@@ -204,6 +208,19 @@ pub fn restricted_prfo_displacement(
     trust_radius: f64,
     kind: PrfoKind,
 ) -> Result<Array1<f64>, SaddleError> {
+    restricted_prfo_with_lowest(hessian, gradient, masses, trust_radius, kind).map(|(dx, _)| dx)
+}
+
+/// [`restricted_prfo_displacement`] and the lowest eigenvalue of the
+/// mass-weighted Hessian it diagonalized, so a caller that reports the
+/// curvature does not diagonalize the same matrix twice.
+pub(crate) fn restricted_prfo_with_lowest(
+    hessian: ArrayView2<f64>,
+    gradient: ArrayView1<f64>,
+    masses: Option<ArrayView1<f64>>,
+    trust_radius: f64,
+    kind: PrfoKind,
+) -> Result<(Array1<f64>, f64), SaddleError> {
     let n = gradient.len();
     if hessian.nrows() != n || hessian.ncols() != n {
         return Err(SaddleError::Shape(
@@ -224,12 +241,13 @@ pub fn restricted_prfo_displacement(
         }
         gradient_eig[k] = acc;
     }
-    restricted_partitioned_rfo(
+    let dx = restricted_partitioned_rfo(
         evals.view(),
         gradient_eig.view(),
         evecs.view(),
         mass.view(),
         trust_radius,
         kind,
-    )
+    )?;
+    Ok((dx, evals[0]))
 }

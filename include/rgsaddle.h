@@ -556,6 +556,48 @@ int rgsaddle_samd_step(RgsaddleSamd *session, rgsaddle_surface_fn surface,
 int rgsaddle_samd_position(const RgsaddleSamd *session, double *out);
 void rgsaddle_samd_free(RgsaddleSamd *session);
 
+
+typedef struct RgsaddleIndex1 RgsaddleIndex1;
+
+/**
+ * Restricted-step partitioned RFO. update: 0 Powell, 1 Bofill.
+ * mode: 0 minimize, 1 index-one saddle. trust_radius bounds the
+ * Cartesian Euclidean step. force_tol bounds each gradient component.
+ */
+typedef struct {
+  rgsaddle_version_t version;
+  uint64_t flags;
+  int32_t update;
+  int32_t mode;
+  double trust_radius;
+  double force_tol;
+  double fd_dr;
+} rgsaddle_index1_config_t;
+
+/**
+ * position holds 3N doubles. hessian is a row-major 3N by 3N matrix,
+ * or NULL for central differences with fd_dr. masses holds 3N
+ * positive per-coordinate masses, or NULL for unit masses.
+ */
+RgsaddleIndex1 *rgsaddle_index1_create(
+    const rgsaddle_index1_config_t *config, int64_t n_atoms,
+    const double *position, const double *hessian, const double *masses);
+
+/**
+ * One RFO step and Hessian update. out->curvature is the lowest
+ * eigenvalue of the mass-weighted Hessian that produced the step.
+ * The callback supplies energy gradients, not forces.
+ */
+int rgsaddle_index1_step(RgsaddleIndex1 *session, rgsaddle_surface_fn surface,
+                         void *user, rgsaddle_report_t *out);
+/** out holds 3N doubles. */
+int rgsaddle_index1_position(const RgsaddleIndex1 *session, double *out);
+/** out holds (3N)^2 doubles; returns RGSADDLE_SHAPE without a Hessian. */
+int rgsaddle_index1_hessian(const RgsaddleIndex1 *session, double *out);
+/** Drop the Hessian and gradient cache and restore the initial trust radius. */
+int rgsaddle_index1_reset(RgsaddleIndex1 *session);
+void rgsaddle_index1_free(RgsaddleIndex1 *session);
+
 #ifdef __cplusplus
 }
 #endif

@@ -128,7 +128,9 @@ mod tests {
         assert_eq!(RationalFunctionOptimization::ALPHAMIN, 0.0);
         assert_eq!(RationalFunctionOptimization::ALPHAMAX, 1.0);
         assert_eq!(RationalFunctionOptimization::SLOPE, 1.0);
-        assert!(!RationalFunctionOptimization::NEWTON_SAFE);
+        const {
+            assert!(!RationalFunctionOptimization::NEWTON_SAFE);
+        };
     }
 
     #[test]
