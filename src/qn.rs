@@ -482,7 +482,9 @@ mod tests {
         assert_eq!(ALPHA_MIN, 0.0);
         assert!(ALPHA_MAX.is_infinite());
         assert_eq!(SLOPE, -1.0);
-        assert!(NEWTON_SAFE);
+        const {
+            assert!(NEWTON_SAFE);
+        };
     }
 
     #[test]

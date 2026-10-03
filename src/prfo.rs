@@ -250,7 +250,9 @@ mod tests {
         assert_eq!(PartitionedRationalFunctionOptimization::ALPHAMIN, 0.0);
         assert_eq!(PartitionedRationalFunctionOptimization::ALPHAMAX, 1.0);
         assert_eq!(PartitionedRationalFunctionOptimization::SLOPE, 1.0);
-        assert!(!PartitionedRationalFunctionOptimization::NEWTON_SAFE);
+        const {
+            assert!(!PartitionedRationalFunctionOptimization::NEWTON_SAFE);
+        };
     }
 
     #[test]

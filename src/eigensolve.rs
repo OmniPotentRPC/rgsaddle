@@ -705,13 +705,15 @@ mod tests {
         assert!((nrm2(yr.view()) - 1.0).abs() < 1e-12);
     }
 
-    fn expand_fixture() -> (
+    type ExpandFixture = (
         Array2<f64>,
         Array2<f64>,
         Array2<f64>,
         Array1<f64>,
         Array2<f64>,
-    ) {
+    );
+
+    fn expand_fixture() -> ExpandFixture {
         let mut a = Array2::<f64>::zeros((3, 3));
         a[(0, 0)] = -2.0;
         a[(1, 1)] = 1.0;
