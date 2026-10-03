@@ -728,7 +728,7 @@ impl Index1Session {
             NicholsMode::Index1 => crate::prfo::PrfoKind::Index1,
             NicholsMode::Minimize => crate::prfo::PrfoKind::Minimize,
         };
-        let dx = crate::prfo::restricted_prfo_displacement(
+        let (dx, curvature) = crate::prfo::restricted_prfo_with_lowest(
             self.hessian.view(),
             self.gradient.view(),
             Some(self.masses.view()),
@@ -750,7 +750,6 @@ impl Index1Session {
         }
         self.adjust_trust(energy_new - energy_old, predicted, max_step);
         let dg = &g_new - &self.gradient;
-        let curvature = self.curvature()?;
         match self.config.update {
             HessianUpdate::Powell => powell_update(&mut self.hessian, dx.view(), dg.view())?,
             HessianUpdate::Bofill => bofill_update(&mut self.hessian, dx.view(), dg.view())?,
