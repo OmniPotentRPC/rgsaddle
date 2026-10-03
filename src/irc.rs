@@ -625,6 +625,102 @@ fn path_projected_force(g: &Array1<f64>, d1: &Array1<f64>, sqrtm: &Array1<f64>) 
     force
 }
 
+/// Finite-difference Hessian action `H v` at `x` with the forward
+/// difference of gradients: one surface call per action.
+fn hessian_action<S: PointSurface>(
+    surface: &S,
+    x: ArrayView1<f64>,
+    g0: ArrayView1<f64>,
+    v: ArrayView1<f64>,
+    dr: f64,
+) -> Result<Array1<f64>, SaddleError> {
+    if let Some(hv) = surface.hessian_vector(x, v)? {
+        return Ok(hv);
+    }
+    let magnitude = v.dot(&v).sqrt();
+    if magnitude == 0.0 {
+        return Ok(Array1::zeros(v.len()));
+    }
+    let unit = &v / magnitude;
+    let shifted = &x + &(&unit * dr);
+    let (_, g1) = surface.eval(shifted.view())?;
+    Ok((&g1 - &g0) * (magnitude / dr))
+}
+
+struct FdHvp<'a, S: PointSurface> {
+    surface: &'a S,
+    g0: Array1<f64>,
+    dr: f64,
+    fail: RefCell<Option<SaddleError>>,
+    space: Complement,
+}
+
+impl<S: PointSurface> ApplyHessian for FdHvp<'_, S> {
+    fn apply_hessian(&self, x: ArrayView1<f64>, v: ArrayView1<f64>) -> Array1<f64> {
+        let cartesian = self.space.lift(v);
+        match hessian_action(self.surface, x, self.g0.view(), cartesian.view(), self.dr) {
+            Ok(hv) => self.space.reduce(hv.view()),
+            Err(e) => {
+                self.fail.replace(Some(e));
+                Array1::zeros(v.len())
+            }
+        }
+    }
+}
+
+fn lowest_via_fd<S: PointSurface>(
+    surface: &S,
+    x: ArrayView1<f64>,
+    g0: ArrayView1<f64>,
+    seed: Array1<f64>,
+    dr: f64,
+    params: EigenParams,
+    what: &str,
+) -> Result<(Array1<f64>, f64, usize), SaddleError> {
+    let excluded = surface.excluded_modes(x)?;
+    if excluded.ncols() != x.len() || !excluded.iter().all(|v| v.is_finite()) {
+        return Err(SaddleError::Shape(
+            "minimum-mode excluded directions".into(),
+        ));
+    }
+    let mut space = Complement::new(x.len());
+    for direction in excluded.rows() {
+        space.exclude(direction);
+    }
+    if space.dimension() == 0 {
+        return Err(SaddleError::Shape("minimum-mode space is empty".into()));
+    }
+    let mut reduced_seed = space.reduce(seed.view());
+    if reduced_seed.dot(&reduced_seed).sqrt() <= 64.0 * f64::EPSILON {
+        reduced_seed = Array1::from_iter(
+            (0..space.dimension()).map(|i| ((i + 1) as f64 * 1.618033988749895).sin()),
+        );
+    }
+    let h = FdHvp {
+        surface,
+        g0: g0.to_owned(),
+        dr,
+        fail: RefCell::new(None),
+        space,
+    };
+    let out = match rgmin::lowest_mode(&h, x, reduced_seed.view(), &params) {
+        Ok(o) => o,
+        Err(e) => {
+            if let Some(surf) = h.fail.into_inner() {
+                return Err(surf);
+            }
+            return Err(SaddleError::Solver(format!("{what}: {e}")));
+        }
+    };
+    if let Some(surf) = h.fail.into_inner() {
+        return Err(surf);
+    }
+    if !out.vector.iter().all(|v| v.is_finite()) || !out.value.is_finite() {
+        return Err(SaddleError::NonFinite("lowest-mode eigenpair"));
+    }
+    Ok((h.space.lift(out.vector.view()), out.value, out.actions))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -820,101 +916,5 @@ mod tests {
             "inner step left the MW sphere: cons={r} dx={dx}"
         );
     }
-}
-
-/// Finite-difference Hessian action `H v` at `x` with the forward
-/// difference of gradients: one surface call per action.
-fn hessian_action<S: PointSurface>(
-    surface: &S,
-    x: ArrayView1<f64>,
-    g0: ArrayView1<f64>,
-    v: ArrayView1<f64>,
-    dr: f64,
-) -> Result<Array1<f64>, SaddleError> {
-    if let Some(hv) = surface.hessian_vector(x, v)? {
-        return Ok(hv);
-    }
-    let magnitude = v.dot(&v).sqrt();
-    if magnitude == 0.0 {
-        return Ok(Array1::zeros(v.len()));
-    }
-    let unit = &v / magnitude;
-    let shifted = &x + &(&unit * dr);
-    let (_, g1) = surface.eval(shifted.view())?;
-    Ok((&g1 - &g0) * (magnitude / dr))
-}
-
-struct FdHvp<'a, S: PointSurface> {
-    surface: &'a S,
-    g0: Array1<f64>,
-    dr: f64,
-    fail: RefCell<Option<SaddleError>>,
-    space: Complement,
-}
-
-impl<S: PointSurface> ApplyHessian for FdHvp<'_, S> {
-    fn apply_hessian(&self, x: ArrayView1<f64>, v: ArrayView1<f64>) -> Array1<f64> {
-        let cartesian = self.space.lift(v);
-        match hessian_action(self.surface, x, self.g0.view(), cartesian.view(), self.dr) {
-            Ok(hv) => self.space.reduce(hv.view()),
-            Err(e) => {
-                self.fail.replace(Some(e));
-                Array1::zeros(v.len())
-            }
-        }
-    }
-}
-
-fn lowest_via_fd<S: PointSurface>(
-    surface: &S,
-    x: ArrayView1<f64>,
-    g0: ArrayView1<f64>,
-    seed: Array1<f64>,
-    dr: f64,
-    params: EigenParams,
-    what: &str,
-) -> Result<(Array1<f64>, f64, usize), SaddleError> {
-    let excluded = surface.excluded_modes(x)?;
-    if excluded.ncols() != x.len() || !excluded.iter().all(|v| v.is_finite()) {
-        return Err(SaddleError::Shape(
-            "minimum-mode excluded directions".into(),
-        ));
-    }
-    let mut space = Complement::new(x.len());
-    for direction in excluded.rows() {
-        space.exclude(direction);
-    }
-    if space.dimension() == 0 {
-        return Err(SaddleError::Shape("minimum-mode space is empty".into()));
-    }
-    let mut reduced_seed = space.reduce(seed.view());
-    if reduced_seed.dot(&reduced_seed).sqrt() <= 64.0 * f64::EPSILON {
-        reduced_seed = Array1::from_iter(
-            (0..space.dimension()).map(|i| ((i + 1) as f64 * 1.618033988749895).sin()),
-        );
-    }
-    let h = FdHvp {
-        surface,
-        g0: g0.to_owned(),
-        dr,
-        fail: RefCell::new(None),
-        space,
-    };
-    let out = match rgmin::lowest_mode(&h, x, reduced_seed.view(), &params) {
-        Ok(o) => o,
-        Err(e) => {
-            if let Some(surf) = h.fail.into_inner() {
-                return Err(surf);
-            }
-            return Err(SaddleError::Solver(format!("{what}: {e}")));
-        }
-    };
-    if let Some(surf) = h.fail.into_inner() {
-        return Err(surf);
-    }
-    if !out.vector.iter().all(|v| v.is_finite()) || !out.value.is_finite() {
-        return Err(SaddleError::NonFinite("lowest-mode eigenpair"));
-    }
-    Ok((h.space.lift(out.vector.view()), out.value, out.actions))
 }
 
