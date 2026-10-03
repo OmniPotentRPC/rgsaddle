@@ -7,6 +7,7 @@
 // Overflow and underflow are outside that relative-error model.
 // The public entry points reject a nonfinite norm or a norm <= 1e-14.
 // The driver checks every certificate marker, including missing output.
+dieonerrormode = on!;
 prec = 200!;
 u = [2^(-53); 2^(-53)];
 for n in [| 3, 75, 512, 4096 |] do {
@@ -15,8 +16,9 @@ for n in [| 3, 75, 512, 4096 |] do {
     upper = (1 + u)^2 / ((1 - eta) * (1 - u)^2);
     budget = (4 * n + 16) * 2^(-53);
     if (sup(upper - 1) < budget) && (sup(1 - lower) < budget) then {
-        print("CERTIFIED_MODE_NORM ", n);
+        print("CERTIFIED_MODE_NORM", n);
     } else {
-        print("FAILED_MODE_NORM ", n);
+        print("FAILED_MODE_NORM", n);
     };
 };
+quit;

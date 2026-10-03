@@ -8,6 +8,7 @@
 //    its minimum at d* = 2 sqrt(eps / |T|); a root search on E' confirms
 //    the closed form from fd_curvature.py for the Morse Pt constants.
 
+dieonerrormode = on!;
 prec = 200;
 display = decimal;
 T = 6 * 0.7102 * 1.6047^3;   // |V'''| of eOn morse_pt at r0, eV/A^3
@@ -31,3 +32,4 @@ for eps in [| 1e-14, 1e-10, 1e-6, 1e-4, 1e-3 |] do {
         " E(d*) =", round(evaluate(E, dstar), 24, RN),
         " E(1e-3) =", round(evaluate(E, 1e-3), 24, RN));
 };
+quit;
