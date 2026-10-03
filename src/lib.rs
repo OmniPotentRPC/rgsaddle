@@ -130,3 +130,6 @@ pub use irc::{IrcConfig, IrcDirection, IrcKind, IrcReport, IrcSession};
 
 #[cfg(feature = "capi")]
 pub mod capi_kappa;
+
+pub mod afir;
+pub use afir::{afir_force, try_afir_force};
