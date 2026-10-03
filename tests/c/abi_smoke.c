@@ -76,6 +76,17 @@ static rgsaddle_status_t minmode_reuse(void) {
   cfg.max_move = 0.1;
   cfg.difference = RGSADDLE_DIFFERENCE_FORWARD;
   double x[3] = {0.2, 0.1, -0.1};
+  const double invalid_modes[][3] = {
+      {0.0, 0.0, 0.0}, {1e-16, 0.0, 0.0}, {NAN, 0.0, 0.0},
+      {INFINITY, 0.0, 0.0}, {1e308, 0.0, 0.0}};
+  for (size_t i = 0; i < sizeof invalid_modes / sizeof invalid_modes[0]; ++i) {
+    RgsaddleMinMode *invalid =
+        rgsaddle_minmode_create(&cfg, 1, x, invalid_modes[i]);
+    if (invalid) {
+      rgsaddle_minmode_free(invalid);
+      return fail(RGSADDLE_SOLVER, "minmode create accepted an invalid mode");
+    }
+  }
   double mode[3] = {0.6, 0.8, 0.0};
   RgsaddleMinMode *mm = rgsaddle_minmode_create(&cfg, 1, x, mode);
   if (!mm) {
