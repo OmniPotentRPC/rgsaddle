@@ -15,6 +15,9 @@ use rgmin::Manifold;
 use rgmin::vecops::{axpy, dot};
 
 use crate::error::SaddleError;
+use crate::geom::SellaGeom;
+use crate::constraints::Constraints;
+use rgmin::ManifoldKind;
 use crate::minmode::PointSurface;
 
 /// Fixed-cost modified-dimer softening for an MD launch direction.
@@ -178,6 +181,7 @@ pub struct SamdSession {
     g: Array1<f64>,
     energy: f64,
     config: SamdConfig,
+    geom: SellaGeom,
     i: usize,
 }
 
@@ -203,8 +207,44 @@ impl SamdSession {
             g,
             energy,
             config,
+            geom: SellaGeom::Kind(ManifoldKind::Euclidean),
             i: 0,
         })
+    }
+
+    /// Retain an equality chart for every Verlet step.
+    pub fn with_chart(
+        config: SamdConfig,
+        x: Array1<f64>,
+        v0: Array1<f64>,
+        surface: &impl PointSurface,
+        chart: Constraints,
+    ) -> Result<Self, SaddleError> {
+        Self::on(config, x, v0, surface, SellaGeom::Chart(chart))
+    }
+
+    /// Retain a geometry and project the initial velocity onto its tangent.
+    pub fn on(
+        config: SamdConfig,
+        x: Array1<f64>,
+        v0: Array1<f64>,
+        surface: &impl PointSurface,
+        geom: SellaGeom,
+    ) -> Result<Self, SaddleError> {
+        if geom.required_dim(x.len()).is_err() {
+            return Err(SaddleError::Shape(
+                "SAMD point is not a legal packing for the geometry".into(),
+            ));
+        }
+        let mut session = Self::new(config, x, v0, surface)?;
+        session.v = geom.project(&session.x, &session.v);
+        session.geom = geom;
+        Ok(session)
+    }
+
+    /// Geometry retained by this session.
+    pub fn geom(&self) -> &SellaGeom {
+        &self.geom
     }
 
     pub fn position(&self) -> ArrayView1<'_, f64> {
@@ -221,6 +261,15 @@ impl SamdSession {
         surface: &impl PointSurface,
         r: ArrayView1<f64>,
     ) -> Result<SamdReport, SaddleError> {
+        if !matches!(&self.geom, SellaGeom::Kind(ManifoldKind::Euclidean)) {
+            let geom = std::mem::replace(
+                &mut self.geom,
+                SellaGeom::Kind(ManifoldKind::Euclidean),
+            );
+            let report = self.step_on(&geom, surface, r);
+            self.geom = geom;
+            return report;
+        }
         if r.len() != self.x.len() {
             return Err(SaddleError::Shape(
                 "SAMD Gaussian draw must match the 3N frame".into(),
@@ -414,6 +463,63 @@ mod tests {
 
     fn water() -> Array1<f64> {
         pack_cart(&[[0.0, 0.0, 0.0], [0.96, 0.0, 0.0], [-0.24, 0.93, 0.0]])
+    }
+
+    #[test]
+    fn samd_retract_stays_on_the_sphere() {
+        let x = Array1::from(vec![0.0, 1.0, 0.0]);
+        let v = Array1::from(vec![0.3, 0.2, -0.1]);
+        let g = Array1::from(vec![0.4, 0.0, 0.0]);
+        let y = retract_samd(&ManifoldKind::Sphere, &x, &v, &g, 0.1);
+        let n = nrm2(y.view());
+        assert!(
+            (n - 1.0).abs() < 1e-14,
+            "retracted point left the sphere: {n}"
+        );
+        let mut sess = SamdSession::on(
+            SamdConfig::default(),
+            x,
+            v,
+            &Well,
+            SellaGeom::Kind(ManifoldKind::Sphere),
+        )
+        .unwrap();
+        let r = Array1::from(vec![0.2, 0.1, -0.05]);
+        sess.step(&Well, r.view()).unwrap();
+        let n = nrm2(sess.position());
+        assert!((n - 1.0).abs() < 1e-12, "SAMD step left the sphere: {n}");
+        let vt = sess.velocity().to_owned();
+        let vh = ManifoldKind::Sphere.project(&sess.position().to_owned(), &vt);
+        assert!(nrm2((&vt - &vh).view()) < 1e-12);
+    }
+
+    #[test]
+    fn samd_step_stays_on_the_com_set() {
+        let x = water();
+        let mut cons = Constraints::new(3).unwrap();
+        cons.fix_com(x.view()).unwrap();
+        assert!(cons.residual_norm(x.view()).unwrap() < 1e-14);
+        let v0 = Array1::from_elem(9, 0.2);
+        let mut sess =
+            SamdSession::with_chart(SamdConfig::default(), x, v0, &Well, cons.clone()).unwrap();
+        let r = Array1::from_elem(9, 0.1);
+        sess.step(&Well, r.view()).unwrap();
+        let res = cons.residual_norm(sess.position()).unwrap();
+        assert!(res < 1e-10, "SAMD step left the COM set: {res}");
+        let vt = sess.velocity().to_owned();
+        let y = sess.position().to_owned();
+        let vh = cons.project(&y, &vt);
+        assert!(nrm2((&vt - &vh).view()) < 1e-12);
+        let t = transport_velocity(&cons, &water(), &y, &vt);
+        let th = cons.project(&y, &t);
+        assert!(nrm2((&t - &th).view()) < 1e-12);
+    }
+
+    #[test]
+    fn t_exp_is_the_sella_ramp() {
+        assert!((t_exp(0, 2.0, 0.5, 4) - 2.0).abs() < 1e-14);
+        let mid = 2.0 * (0.5_f64 / 2.0).powf(0.5);
+        assert!((t_exp(2, 2.0, 0.5, 4) - mid).abs() < 1e-14);
     }
 
     #[test]
