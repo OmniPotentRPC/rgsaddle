@@ -54,9 +54,9 @@ test surface is the shortest honest example:
        }
    }
 
-Default stepper is FIRE. The projected band force is not conservative;
-rgmin's session L-BFGS currently applies an energy-decrease acceptance
-that refuses every NEB step. FIRE matches eOn's velocity NEB stepper.
+Default stepper is FIRE, as in eOn's velocity NEB stepper. L-BFGS
+runs under rgmin's ``Accept::Step``: the projected band force is not
+conservative, so a step is taken without an energy test.
 
 4. Reset when the surface changes
 ---------------------------------

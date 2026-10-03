@@ -39,14 +39,43 @@ Periodicity
 -----------
 
 Positions stay unwrapped Cartesian. ``Cell`` wraps per-atom
-differences for the band mechanics on an orthorhombic box. Neighbor
-lists, when a surface wants them, are vesin's job.
+differences for the band mechanics through fractional coordinates
+(rows are lattice vectors; a zero row is a non-periodic axis).
+Neighbor lists, when a surface wants them, are vesin's job.
 
-FIRE as the default
--------------------
+Evaluations per step
+--------------------
 
-The projected NEB force is not a gradient of a potential. rgmin's
-session L-BFGS still applies an energy-decrease acceptance on that
-path, so every NEB step is refused. FIRE steps unconditionally, which
-is what eOn's velocity NEB stepper does. Hosts that want L-BFGS set
-``BandConfig.method`` and own the acceptance gap.
+A warm band step costs ``n_images - 2`` image evaluations. The
+endpoint energies are evaluated once. The session keeps its last
+evaluation, keyed on the interior positions, so a step that starts
+where the previous one ended is assembled from it: a host resync
+through ``set_positions`` (rows equal up to the minimum image keep the
+session's own copy), an optimizer ``restart``, or a solver that
+dropped its own cache costs nothing. ``BandReport.surface_rows``
+counts what the surface evaluated. The climbing image is chosen on
+the energies of the evaluation it climbs on, so the step that arms it
+already climbs.
+
+Steppers
+--------
+
+FIRE is the default, as in eOn's velocity NEB stepper. The projected
+NEB force is not the gradient of the summed image energy the oracle
+reports, so L-BFGS runs under rgmin's ``Accept::Step``: the two-loop
+direction, capped per atom, with one evaluation and no energy test.
+
+Minimum mode
+------------
+
+The dimer rotation is the modified Newton step of Heyden, Bell, and
+Keil (2005) and Kastner and Sherwood (2008): one trial gradient fixes
+the Fourier model of the curvature in the rotation plane, the optimal
+angle is closed form, and the gradient at the rotated dimer is the
+exact (on a quadratic) combination of the two measured ones, so each
+rotation costs one evaluation. Rotation planes are Polak-Ribiere
+conjugate. Lanczos stops when the Ritz residual ``beta_j |s_j|`` meets
+``rotation_tol``. Both use the forward difference against the centre
+gradient; ``validation/fd_curvature.py`` gives its error,
+``dr |T| / 2 + 2 eps / dr``, and the ``dr`` that minimizes it for a
+given gradient noise.

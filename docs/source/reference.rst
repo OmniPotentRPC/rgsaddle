@@ -10,15 +10,18 @@ Public Rust types
    * - Type
      - Role
    * - ``BandSession``
-     - Outer seam. ``new``, ``step``, ``run``, ``reset``, ``positions``
+     - Outer seam. ``new``, ``step``, ``run``, ``restart``, ``reset``,
+       ``set_positions``, ``positions``, ``evaluation``
    * - ``BandConfig``
      - Tangent, spring, projection, climbing, cell, tolerances, method
    * - ``BandSurface``
      - Host potential on a band (energies + gradients per image)
    * - ``BandReport``
-     - ``status``, ``max_force``, ``ci_index``, ``iteration``
+     - ``status``, ``max_force``, ``ci_index``, ``iteration``,
+       ``surface_rows``
    * - ``MinModeSession``
-     - Dimer or Lanczos lowest-mode search, same stepping contract
+     - Dimer or Lanczos lowest-mode search, same stepping contract;
+       ``set_position``, ``set_mode``, ``estimate_mode`` for reuse
    * - ``Index1Session``
      - Restricted-step partitioned RFO, Powell or Bofill update
    * - ``nichols_step``
@@ -26,7 +29,7 @@ Public Rust types
    * - ``restricted_prfo_displacement``
      - Baker restricted-step partitioned RFO from ``H`` and ``g``
    * - ``Cell``
-     - 3×3 orthorhombic minimum-image wrap
+     - 3×3 lattice (rows are vectors), fractional minimum-image wrap
    * - ``SaddleError``
      - Shape, surface, non-finite, solver, ABI
 
@@ -40,7 +43,13 @@ Min-mode kinds: dimer and Lanczos. Index-1 entries:
 ``rgsaddle_nichols_step``, ``rgsaddle_prfo_step``,
 ``rgsaddle_hessian_powell``, ``rgsaddle_hessian_bofill``,
 ``rgsaddle_cap_max_abs``, and ``rgsaddle_index1_step``.
-``RGSADDLE_ABI_MINOR`` is 4.
+Band cache entries: ``rgsaddle_band_restart``,
+``rgsaddle_band_evaluation`` (``RGSADDLE_NO_EVALUATION`` when nothing
+is cached at the current band). Min-mode reuse:
+``rgsaddle_minmode_set_position``, ``rgsaddle_minmode_set_mode``,
+``rgsaddle_minmode_estimate``. ``RGSADDLE_ABI_MINOR`` is 5; the
+report's ``evaluations`` field took the place of ``reserved``.
+``cargo cinstall`` installs ``include/rgsaddle.h`` as written.
 
 Tests that pin the contract
 ---------------------------
@@ -53,3 +62,5 @@ Tests that pin the contract
 - ``tests/prfo_saddle.rs`` — partitioned RFO against the augmented
   Hessian, trust sphere changes the mode ratio
 - ``tests/c_abi.rs`` — header and symbols with ``capi``
+- ``validation/`` — sympy and sollya checks of the dimer rotation,
+  the Lanczos residual bound, and the finite-difference curvature

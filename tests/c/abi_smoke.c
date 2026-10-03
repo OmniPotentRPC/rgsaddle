@@ -209,6 +209,53 @@ int main(void) {
       return fail(RGSADDLE_SHAPE, "one interior evaluation per step");
     }
   }
+  if (rep.evaluations != n_images - 2) {
+    fprintf(stderr, "report evaluations %d, want %ld\n", rep.evaluations,
+            n_images - 2);
+    return fail(RGSADDLE_SHAPE, "report evaluations");
+  }
+
+  /* The host resyncs the band it read back and restarts the optimizer:
+   * neither costs an evaluation, the next step is one interior pass. */
+  double cur[9 * 3];
+  st = rgsaddle_band_positions(per, cur);
+  if (st != RGSADDLE_OK) {
+    return fail(st, "per-image positions");
+  }
+  double energies[9], gradients[9 * 3], projected[7 * 3];
+  st = rgsaddle_band_evaluation(per, energies, gradients, projected);
+  if (st != RGSADDLE_OK) {
+    return fail(st, "evaluation at the stepped band");
+  }
+  for (long i = 0; i < n_images; ++i) {
+    const double x = cur[i * 3], y = cur[i * 3 + 1], z = cur[i * 3 + 2];
+    const double e = (x * x - 1.0) * (x * x - 1.0) + 2.0 * y * y + 2.0 * z * z;
+    if (fabs(energies[i] - e) > 1e-12) {
+      return fail(RGSADDLE_SHAPE, "evaluation energies");
+    }
+  }
+  if (rgsaddle_band_set_positions(per, cur) != RGSADDLE_OK ||
+      rgsaddle_band_restart(per) != RGSADDLE_OK) {
+    return fail(RGSADDLE_SHAPE, "resync and restart");
+  }
+  const int interior_mid = seen[1];
+  st = rgsaddle_band_step(per, surface_one, seen, &rep);
+  if (st != RGSADDLE_OK) {
+    return fail(st, "per-image step after resync");
+  }
+  if (seen[0] != 1 || seen[1] != interior_mid + 1 ||
+      rep.evaluations != n_images - 2) {
+    fprintf(stderr, "after resync: seen[0]=%d seen[1]=%d evaluations=%d\n",
+            seen[0], seen[1], rep.evaluations);
+    return fail(RGSADDLE_SHAPE, "resync must not re-evaluate");
+  }
+  /* reset is a surface boundary: nothing cached survives. */
+  if (rgsaddle_band_reset(per) != RGSADDLE_OK) {
+    return fail(RGSADDLE_SHAPE, "reset");
+  }
+  if (rgsaddle_band_evaluation(per, NULL, NULL, NULL) != RGSADDLE_NO_EVALUATION) {
+    return fail(RGSADDLE_SHAPE, "reset must retire the evaluation");
+  }
   rgsaddle_band_free(per);
 
   st = rgsaddle_band_reset(band);

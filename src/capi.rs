@@ -24,7 +24,7 @@ use crate::spring::SpringKind;
 use crate::tangent::TangentKind;
 
 pub const RGSADDLE_ABI_MAJOR: u32 = 1;
-pub const RGSADDLE_ABI_MINOR: u32 = 4;
+pub const RGSADDLE_ABI_MINOR: u32 = 5;
 
 /// Band config bit 0. The C step calls the surface once per image
 /// carried by the evaluation: every image on the first evaluation
@@ -41,7 +41,9 @@ pub const RGSADDLE_SURFACE_FAILED: i32 = -6;
 pub const RGSADDLE_NON_FINITE: i32 = -7;
 pub const RGSADDLE_SOLVER: i32 = -8;
 pub const RGSADDLE_ABI_MISMATCH: i32 = -9;
+pub const RGSADDLE_ALLOC: i32 = -10;
 pub const RGSADDLE_INVALID_PARAMETER: i32 = -11;
+pub const RGSADDLE_NO_EVALUATION: i32 = -12;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -95,6 +97,9 @@ pub struct RgsaddleMinModeConfig {
     pub krylov_dim: i64,
     pub force_tol: f64,
     pub max_move: f64,
+    /// ABI minor 5: dimer rotation angle tolerance in radians (zero
+    /// disables it). Read only when the config's minor is 5 or more.
+    pub rotation_angle_tol: f64,
 }
 
 #[repr(C)]
@@ -102,7 +107,9 @@ pub struct RgsaddleReport {
     pub version: RgsaddleVersion,
     pub flags: u64,
     pub status: i32,
-    pub reserved: i32,
+    /// Geometries the surface evaluated during the step (band image
+    /// rows, or single points for the min-mode and index-1 sessions).
+    pub evaluations: i32,
     pub max_force: f64,
     pub ci_index: i64,
     pub iteration: i64,
@@ -222,9 +229,11 @@ pub struct RgsaddleMinMode {
     n_atoms: i64,
 }
 
-fn method_of(v: i32) -> Method {
+fn method_of(v: i32, memory: i64) -> Method {
     match v {
-        1 => Method::Lbfgs { memory: 20 },
+        1 => Method::Lbfgs {
+            memory: if memory > 0 { memory as usize } else { 20 },
+        },
         _ => Method::Fire { kind: FireKind::V2 },
     }
 }
@@ -279,7 +288,9 @@ pub extern "C" fn rgsaddle_status_name(status: i32) -> *const c_char {
         RGSADDLE_NON_FINITE => "NON_FINITE\0",
         RGSADDLE_SOLVER => "SOLVER\0",
         RGSADDLE_ABI_MISMATCH => "ABI_MISMATCH\0",
+        RGSADDLE_ALLOC => "ALLOC\0",
         RGSADDLE_INVALID_PARAMETER => "INVALID_PARAMETER\0",
+        RGSADDLE_NO_EVALUATION => "NO_EVALUATION\0",
         _ => "UNKNOWN\0",
     };
     s.as_ptr() as *const c_char
@@ -352,7 +363,7 @@ pub unsafe extern "C" fn rgsaddle_band_create(
         cell,
         force_tol: cfg.force_tol,
         max_move: cfg.max_move,
-        method: method_of(cfg.method),
+        method: method_of(cfg.method, cfg.memory),
     };
     match BandSession::new(band_config, initial) {
         Ok(session) => Box::into_raw(Box::new(RgsaddleBand {
@@ -400,7 +411,7 @@ pub unsafe extern "C" fn rgsaddle_band_step(
             } else {
                 0
             };
-            out.reserved = 0;
+            out.evaluations = i32::try_from(report.surface_rows).unwrap_or(i32::MAX);
             out.max_force = report.max_force;
             out.ci_index = report.ci_index.map(|i| i as i64).unwrap_or(-1);
             out.iteration = report.iteration as i64;
@@ -471,6 +482,61 @@ pub unsafe extern "C" fn rgsaddle_band_reset(band: *mut RgsaddleBand) -> i32 {
 }
 
 /// # Safety
+/// `band` must be a live session pointer or NULL.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_band_restart(band: *mut RgsaddleBand) -> i32 {
+    if band.is_null() {
+        return RGSADDLE_NULL_BAND;
+    }
+    unsafe { (*band).session.restart() };
+    RGSADDLE_OK
+}
+
+/// # Safety
+/// Each non-NULL output must hold its documented length:
+/// `energies` n_images, `gradients` n_images * 3 * n_atoms,
+/// `projected` (n_images - 2) * 3 * n_atoms.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_band_evaluation(
+    band: *const RgsaddleBand,
+    energies: *mut f64,
+    gradients: *mut f64,
+    projected: *mut f64,
+) -> i32 {
+    if band.is_null() {
+        return RGSADDLE_NULL_BAND;
+    }
+    let band = unsafe { &*band };
+    let Some(eval) = band.session.evaluation() else {
+        return RGSADDLE_NO_EVALUATION;
+    };
+    let copy = |dst: *mut f64, src: &mut dyn Iterator<Item = f64>, len: usize| {
+        if !dst.is_null() {
+            let out = unsafe { slice::from_raw_parts_mut(dst, len) };
+            for (o, v) in out.iter_mut().zip(src) {
+                *o = v;
+            }
+        }
+    };
+    copy(
+        energies,
+        &mut eval.energies.iter().copied(),
+        eval.energies.len(),
+    );
+    copy(
+        gradients,
+        &mut eval.gradients.iter().copied(),
+        eval.gradients.len(),
+    );
+    copy(
+        projected,
+        &mut eval.projected.iter().copied(),
+        eval.projected.len(),
+    );
+    RGSADDLE_OK
+}
+
+/// # Safety
 /// `band` must come from [`rgsaddle_band_create`] and be freed once.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rgsaddle_band_free(band: *mut RgsaddleBand) {
@@ -506,11 +572,16 @@ pub unsafe extern "C" fn rgsaddle_minmode_create(
         },
         dr: cfg.dr,
         rotation_tol: cfg.rotation_tol,
+        rotation_angle_tol: if cfg.version.minor >= 5 {
+            cfg.rotation_angle_tol
+        } else {
+            0.0
+        },
         max_rotations: cfg.max_rotations as usize,
         krylov_dim: cfg.krylov_dim as usize,
         force_tol: cfg.force_tol,
         max_move: cfg.max_move,
-        method: method_of(cfg.method),
+        method: method_of(cfg.method, 0),
     };
     match MinModeSession::new(mm_config, x, m) {
         Ok(session) => Box::into_raw(Box::new(RgsaddleMinMode { session, n_atoms })),
@@ -553,7 +624,7 @@ pub unsafe extern "C" fn rgsaddle_minmode_step(
             } else {
                 0
             };
-            out.reserved = 0;
+            out.evaluations = i32::try_from(report.evaluations).unwrap_or(i32::MAX);
             out.max_force = report.max_force;
             out.ci_index = -1;
             out.iteration = report.iteration as i64;
@@ -561,6 +632,97 @@ pub unsafe extern "C" fn rgsaddle_minmode_step(
             out.rotations = report.rotations as i64;
             RGSADDLE_OK
         }
+        Err(e) => status_of(&e),
+    }
+}
+
+/// # Safety
+/// `session` and `out` must be valid; `surface` is called with `user`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_minmode_estimate(
+    session: *mut RgsaddleMinMode,
+    surface: Option<RgsaddleSurfaceFn>,
+    user: *mut c_void,
+    out: *mut RgsaddleReport,
+) -> i32 {
+    if session.is_null() {
+        return RGSADDLE_NULL_SESSION;
+    }
+    if out.is_null() {
+        return RGSADDLE_NULL_REPORT;
+    }
+    let Some(f) = surface else {
+        return RGSADDLE_NULL_SURFACE;
+    };
+    let session = unsafe { &mut *session };
+    let cs = CSurface {
+        f,
+        user,
+        n_atoms: session.n_atoms,
+        n_images: 1,
+        per_image: false,
+    };
+    match session.session.estimate_mode(&cs) {
+        Ok(est) => {
+            let out = unsafe { &mut *out };
+            stamp_report(out);
+            out.status = 0;
+            out.evaluations = i32::try_from(est.evaluations).unwrap_or(i32::MAX);
+            out.max_force = f64::NAN;
+            out.ci_index = -1;
+            out.iteration = 0;
+            out.curvature = est.curvature;
+            out.rotations = est.rotations as i64;
+            RGSADDLE_OK
+        }
+        Err(e) => status_of(&e),
+    }
+}
+
+/// # Safety
+/// `position` must hold `3 * n_atoms` doubles; `gradient` is NULL or
+/// holds `3 * n_atoms` doubles.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_minmode_set_position(
+    session: *mut RgsaddleMinMode,
+    position: *const f64,
+    gradient: *const f64,
+) -> i32 {
+    if session.is_null() {
+        return RGSADDLE_NULL_SESSION;
+    }
+    if position.is_null() {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let session = unsafe { &mut *session };
+    let dof = (3 * session.n_atoms) as usize;
+    let x = Array1::from(unsafe { slice::from_raw_parts(position, dof) }.to_vec());
+    let g = (!gradient.is_null())
+        .then(|| Array1::from(unsafe { slice::from_raw_parts(gradient, dof) }.to_vec()));
+    match session.session.set_position(x, g) {
+        Ok(()) => RGSADDLE_OK,
+        Err(e) => status_of(&e),
+    }
+}
+
+/// # Safety
+/// `mode` must hold `3 * n_atoms` doubles.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_minmode_set_mode(
+    session: *mut RgsaddleMinMode,
+    mode: *const f64,
+) -> i32 {
+    if session.is_null() {
+        return RGSADDLE_NULL_SESSION;
+    }
+    if mode.is_null() {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let session = unsafe { &mut *session };
+    let dof = (3 * session.n_atoms) as usize;
+    let m = Array1::from(unsafe { slice::from_raw_parts(mode, dof) }.to_vec());
+    match session.session.set_mode(m) {
+        Ok(()) => RGSADDLE_OK,
         Err(e) => status_of(&e),
     }
 }
@@ -954,7 +1116,7 @@ pub unsafe extern "C" fn rgsaddle_index1_step(
             } else {
                 0
             };
-            out.reserved = 0;
+            out.evaluations = 0;
             out.max_force = report.max_force;
             out.ci_index = -1;
             out.iteration = report.iteration as i64;

@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 4u
+#define RGSADDLE_ABI_MINOR 5u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -65,7 +65,9 @@ typedef enum {
   RGSADDLE_SOLVER = -8,
   RGSADDLE_ABI_MISMATCH = -9,
   RGSADDLE_ALLOC = -10,
-  RGSADDLE_INVALID_PARAMETER = -11
+  RGSADDLE_INVALID_PARAMETER = -11,
+  /** rgsaddle_band_evaluation: no evaluation at the current band. */
+  RGSADDLE_NO_EVALUATION = -12
 } rgsaddle_status_t;
 
 typedef enum {
@@ -107,11 +109,13 @@ typedef struct RgsaddleMinMode RgsaddleMinMode;
  * Host-surface request. The session stamps version and flags.
  *
  * The endpoints of a band never move, so the session evaluates them
- * once: the first evaluation after rgsaddle_band_create or
- * rgsaddle_band_set_positions carries the whole band, and every later
- * evaluation carries only the interior images 1 .. band - 2, in order.
- * rgsaddle_band_reset drops the cached endpoint energies, so the next
- * evaluation carries the whole band again.
+ * once: the first evaluation after rgsaddle_band_create,
+ * rgsaddle_band_reset, or an rgsaddle_band_set_positions that moved an
+ * endpoint carries the whole band, and every later evaluation carries
+ * only the interior images 1 .. band - 2, in order. The session also
+ * keeps the last evaluation: a step that starts where the previous one
+ * ended (the host handed the band back unchanged, or only restarted
+ * the optimizer) costs one interior evaluation, at its trial point.
  *
  * With flags clear (batched), image is -1 and n_images is the number
  * of images carried by this request: the band length on the first
@@ -167,7 +171,12 @@ typedef struct {
   rgsaddle_version_t version;
   uint64_t flags;
   int32_t status; /**< rgsaddle_run_status_t */
-  int32_t reserved;
+  /**
+   * Geometries the surface evaluated during the step: band image rows
+   * (band - 2 on a warm band step, band + band - 2 on the first), or
+   * single points for the min-mode session. Zero for index-1.
+   */
+  int32_t evaluations;
   double max_force;
   /** Armed climbing image, or -1. */
   int64_t ci_index;
@@ -201,18 +210,44 @@ rgsaddle_status_t rgsaddle_band_step(RgsaddleBand *band,
 rgsaddle_status_t rgsaddle_band_positions(const RgsaddleBand *band, double *out);
 
 /**
- * Replace the band; the host may move images between steps. Drops the
- * cached endpoint energies, so the next evaluation carries the whole
- * band.
+ * Replace the band; the host may move images between steps. Rows equal
+ * to the session's up to the minimum image (1e-10 per component) are
+ * kept as the session holds them, so a host that wraps atoms into its
+ * cell and hands the band back changes nothing and loses no cached
+ * value. A moved endpoint drops the endpoint energies (the next
+ * evaluation carries the whole band); any moved row drops the last
+ * evaluation. Optimizer history stays.
  */
 rgsaddle_status_t rgsaddle_band_set_positions(RgsaddleBand *band,
                                               const double *positions);
 
 /**
- * Drop optimizer history and climbing state at a surface boundary.
- * The cached endpoint energies stay.
+ * Surface boundary: drop optimizer history, climbing state, the
+ * endpoint energies, and the last evaluation. Use it when the surface
+ * itself changed; the next evaluation carries the whole band.
  */
 rgsaddle_status_t rgsaddle_band_reset(RgsaddleBand *band);
+
+/**
+ * Optimizer restart on the same surface (after a reparameterization or
+ * a host policy reset): drop optimizer history and climbing state, keep
+ * the endpoint energies and the last evaluation.
+ */
+rgsaddle_status_t rgsaddle_band_restart(RgsaddleBand *band);
+
+/**
+ * The last evaluation, when it was taken at the current band (after a
+ * step, it is the accepted point). Each output may be NULL:
+ * energies holds n_images values, gradients n_images * 3 * n_atoms
+ * (endpoint rows from the last whole-band evaluation), projected
+ * (n_images - 2) * 3 * n_atoms (the interior force the solver stepped
+ * on, climbing image included). Returns RGSADDLE_NO_EVALUATION before
+ * the first step or after a change that retired it; a host reads these
+ * instead of evaluating the band again.
+ */
+rgsaddle_status_t rgsaddle_band_evaluation(const RgsaddleBand *band,
+                                           double *energies, double *gradients,
+                                           double *projected);
 
 void rgsaddle_band_free(RgsaddleBand *band);
 
@@ -228,6 +263,12 @@ typedef struct {
   int64_t krylov_dim;
   double force_tol;
   double max_move;
+  /**
+   * Minor 5: the dimer also stops rotating when an iteration's optimal
+   * angle falls under this (radians); 0 disables the test. Ignored
+   * when version.minor < 5.
+   */
+  double rotation_angle_tol;
 } rgsaddle_minmode_config_t;
 
 /**
@@ -242,6 +283,32 @@ RgsaddleMinMode *rgsaddle_minmode_create(
 rgsaddle_status_t rgsaddle_minmode_step(RgsaddleMinMode *session,
                                         rgsaddle_surface_fn surface, void *user,
                                         rgsaddle_report_t *out);
+
+/**
+ * Refresh the lowest mode at the current point without translating
+ * (a host that climbs with its own optimizer). The report carries
+ * curvature, rotations, and evaluations (surface calls, the centre
+ * included when it was neither cached nor supplied); max_force is NaN.
+ * Keep the session across a saddle search: the refreshed mode seeds
+ * the next estimate, so a mode that still holds costs one evaluation.
+ */
+rgsaddle_status_t rgsaddle_minmode_estimate(RgsaddleMinMode *session,
+                                            rgsaddle_surface_fn surface,
+                                            void *user, rgsaddle_report_t *out);
+
+/**
+ * Move the session to a new point (3 * n_atoms doubles). The mode and
+ * the optimizer history stay. gradient is the host's energy gradient
+ * at that point, or NULL; when given, the next estimate or step skips
+ * the centre evaluation.
+ */
+rgsaddle_status_t rgsaddle_minmode_set_position(RgsaddleMinMode *session,
+                                                const double *position,
+                                                const double *gradient);
+
+/** Replace the mode seed (3 * n_atoms doubles, normalized on entry). */
+rgsaddle_status_t rgsaddle_minmode_set_mode(RgsaddleMinMode *session,
+                                            const double *mode);
 
 rgsaddle_status_t rgsaddle_minmode_position(const RgsaddleMinMode *session,
                                                 double *out);

@@ -9,8 +9,16 @@ struct opens with ``rgsaddle_version_t``. The host:
 
 1. creates a session
 2. calls ``step`` until the report says converged, or until host policy stops
-3. calls ``reset`` at a surface-epoch boundary
-4. frees
+3. reads ``rgsaddle_band_evaluation`` for the energies and forces at the
+   new band instead of evaluating it again
+4. calls ``rgsaddle_band_restart`` to restart the optimizer on the same
+   surface, ``rgsaddle_band_reset`` at a surface-epoch boundary
+5. frees
+
+``rgsaddle_band_set_positions`` with the band the host read back (even
+wrapped into its cell) costs no evaluation; only moved rows retire the
+cached values. ``rgsaddle_report_t.evaluations`` counts the image
+evaluations of each step.
 
 There is no run-to-completion C entry point. Units are the caller's.
 Positions are unwrapped Cartesian, image-major, stride ``3 * n_atoms``.
@@ -41,6 +49,12 @@ or Lanczos on finite-difference Hessian actions), inverts the force
 along it, and takes one solver step. Same host loop. ``PointSurface``
 evals a single geometry.
 
+A host that climbs with its own optimizer keeps one session for the
+whole search: ``set_position`` (``rgsaddle_minmode_set_position``)
+with the gradient it already has, then ``estimate_mode``
+(``rgsaddle_minmode_estimate``). The previous mode seeds the next
+rotation, so a mode that still holds costs one evaluation.
+
 Index-1 Newton
 --------------
 
@@ -64,4 +78,5 @@ Do not keep solver history across a potential change
 
 Call ``reset`` after any model update. That is the documented
 boundary. A host that skips it mixes two surfaces in one L-BFGS
-memory.
+memory. ``restart`` is the optimizer-only reset for the same surface;
+it keeps the cached endpoint energies and the last evaluation.

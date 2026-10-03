@@ -26,9 +26,16 @@ thiserror = "2"
 [dev-dependencies]
 approx = "0.5"
 
+# include/rgsaddle.h is the hand-written contract (surface request,
+# status enum, stepping semantics); cargo-c installs it as is instead
+# of a cbindgen rendering of src/capi.rs.
 [package.metadata.capi.header]
 name = "rgsaddle"
 subdirectory = false
+generation = false
+
+[package.metadata.capi.install.include]
+asset = [{ from = "include/rgsaddle.h", to = "" }]
 
 [package.metadata.capi.pkg_config]
 name = "rgsaddle"

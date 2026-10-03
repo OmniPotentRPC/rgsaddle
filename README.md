@@ -25,10 +25,29 @@ improved), springs (uniform, energy-weighted, Onsager-Machlup),
 projections (plain elastic band, NEB, doubly nudged), and the
 climbing-image force with the eOn trigger rule.
 
-Positions are unwrapped Cartesian. A `Cell` supplies orthorhombic
-minimum-image differences for the band mechanics; neighbor lists,
-when a surface wants them, are [vesin](https://github.com/Luthaf/vesin)'s
-job, not this crate's.
+Positions are unwrapped Cartesian. A `Cell` (rows are lattice
+vectors, triclinic allowed) supplies minimum-image differences for the
+band mechanics; neighbor lists, when a surface wants them, are
+[vesin](https://github.com/Luthaf/vesin)'s job, not this crate's.
 
-`BandSession::reset` is the model-update boundary: quasi-Newton
-history taken on one surface epoch must not survive onto the next.
+A warm band step costs one evaluation of the interior images. The
+session caches the endpoint energies and its last evaluation, so a
+host that hands the band back unchanged (`set_positions`, wrapped
+into its cell or not) or restarts the optimizer (`restart`) pays no
+extra evaluation, and `evaluation` returns the energies, gradients,
+and projected forces at the current band so the host need not
+recompute them. `BandSession::reset` is the model-update boundary: it
+drops the optimizer history and every cached surface value.
+L-BFGS steps the band under rgmin's `Accept::Step` (one evaluation,
+no energy test on the non-conservative band force); FIRE is the
+default.
+
+`MinModeSession` is long-lived: `set_position` moves it (optionally
+with the host's gradient), `estimate_mode` refreshes the lowest mode
+without translating. The dimer rotates by the modified Newton step
+with an extrapolated gradient (one evaluation per rotation); Lanczos
+stops on the Ritz residual. `validation/` holds the sympy and sollya
+checks of the rotation formulas, the Lanczos residual bound, and the
+finite-difference curvature error terms
+(`uv run --with sympy python validation/<script>.py`,
+`sollya validation/fd_curvature.sollya`).
