@@ -118,7 +118,7 @@ public:
          std::int64_t n_atoms, double const* positions)
         : n_images_(n_images), n_atoms_(n_atoms) {
         if (!abi_compatible()) {
-            throw std::runtime_error("rgsaddle ABI 1.14 or later is required");
+            throw std::runtime_error("rgsaddle ABI 1.15 or later is required");
         }
         handle_ = rgsaddle_band_create(&config, n_images, n_atoms, positions);
         if (handle_ == nullptr) {
@@ -197,7 +197,7 @@ public:
             double const* position, double const* mode)
         : n_atoms_(n_atoms) {
         if (!abi_compatible()) {
-            throw std::runtime_error("rgsaddle ABI 1.14 or later is required");
+            throw std::runtime_error("rgsaddle ABI 1.15 or later is required");
         }
         handle_ = rgsaddle_minmode_create(&config, n_atoms, position, mode);
         if (handle_ == nullptr) {
@@ -276,7 +276,7 @@ public:
         double const* saddle, double const* masses, double const* mode)
         : n_atoms_(n_atoms) {
         if (!abi_compatible()) {
-            throw std::runtime_error("rgsaddle ABI 1.14 or later is required");
+            throw std::runtime_error("rgsaddle ABI 1.15 or later is required");
         }
         handle_ = rgsaddle_irc_create(&config, n_atoms, saddle, masses, mode);
         if (handle_ == nullptr) {

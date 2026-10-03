@@ -288,7 +288,7 @@ pub unsafe extern "C" fn rgsaddle_irc_step(
             let out = unsafe { &mut *out };
             stamp_report(out);
             out.status = if report.at_minimum { 1 } else { 0 };
-            out.reserved = 0;
+            out.evaluations = 0;
             out.max_force = report.max_force;
             out.ci_index = -1;
             out.iteration = report.inner_steps as i64;
@@ -424,7 +424,7 @@ mod irc_abi_tests {
             version: RgsaddleVersion { major: 0, minor: 0 },
             flags: 0,
             status: 0,
-            reserved: 0,
+            evaluations: 0,
             max_force: 0.0,
             ci_index: 0,
             iteration: 0,
@@ -464,7 +464,7 @@ mod irc_abi_tests {
             version: RgsaddleVersion { major: 0, minor: 0 },
             flags: 0,
             status: 0,
-            reserved: 0,
+            evaluations: 0,
             max_force: 0.0,
             ci_index: 0,
             iteration: 0,
@@ -544,7 +544,7 @@ mod irc_abi_tests {
             version: RgsaddleVersion { major: 0, minor: 0 },
             flags: 0,
             status: 0,
-            reserved: 0,
+            evaluations: 0,
             max_force: 0.0,
             ci_index: 0,
             iteration: 0,
@@ -621,7 +621,7 @@ mod irc_abi_tests {
             version: RgsaddleVersion { major: 0, minor: 0 },
             flags: 0,
             status: 0,
-            reserved: 0,
+            evaluations: 0,
             max_force: 0.0,
             ci_index: 0,
             iteration: 0,
@@ -920,7 +920,7 @@ pub unsafe extern "C" fn rgsaddle_sella_min_step(
             let out = unsafe { &mut *out };
             stamp_report(out);
             out.status = if report.at_minimum { 1 } else { 0 };
-            out.reserved = 0;
+            out.evaluations = 0;
             out.max_force = report.max_force;
             out.ci_index = -1;
             out.iteration = 0;
@@ -1330,7 +1330,7 @@ pub unsafe extern "C" fn rgsaddle_sella_saddle_step(
             let out = unsafe { &mut *out };
             stamp_report(out);
             out.status = if report.at_saddle { 1 } else { 0 };
-            out.reserved = 0;
+            out.evaluations = 0;
             out.max_force = report.max_force;
             out.ci_index = -1;
             out.iteration = 0;
@@ -1377,6 +1377,31 @@ pub unsafe extern "C" fn rgsaddle_sella_saddle_reset(session: *mut RgsaddleSella
 
 /// Seed the Cartesian quasi-Newton model with a measured mode and curvature.
 ///
+/// # Safety
+/// `session` must be a live pointer or NULL. `mode` must hold `3 * n_atoms`
+/// doubles or be NULL. The session projects the mode onto its live tangent.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_sella_saddle_seed_mode(
+    session: *mut RgsaddleSellaSaddle,
+    mode: *const f64,
+    curvature: f64,
+) -> i32 {
+    if session.is_null() {
+        return RGSADDLE_NULL_SESSION;
+    }
+    if mode.is_null() {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let session = unsafe { &mut *session };
+    let dof = (3 * session.n_atoms) as usize;
+    let mode = ndarray::ArrayView1::from(unsafe { slice::from_raw_parts(mode, dof) });
+    match session.session.seed_mode(mode, curvature) {
+        Ok(()) => RGSADDLE_OK,
+        Err(error) => status_of(&error),
+    }
+}
+
+
 
 /// # Safety
 /// `session` must be a live pointer or NULL.
@@ -1714,7 +1739,7 @@ pub unsafe extern "C" fn rgsaddle_samd_step(
             let out = unsafe { &mut *out };
             stamp_report(out);
             out.status = 0;
-            out.reserved = 0;
+            out.evaluations = 0;
             out.max_force = report.kinetic;
             out.ci_index = -1;
             out.iteration = 0;
@@ -2368,7 +2393,7 @@ mod constraints_abi_tests {
             version: RgsaddleVersion { major: 0, minor: 0 },
             flags: 0,
             status: 0,
-            reserved: 0,
+            evaluations: 0,
             max_force: 0.0,
             ci_index: 0,
             iteration: 0,
@@ -2721,7 +2746,7 @@ mod samd_abi_tests {
             version: RgsaddleVersion { major: 0, minor: 0 },
             flags: 0,
             status: 0,
-            reserved: 0,
+            evaluations: 0,
             max_force: 0.0,
             ci_index: 0,
             iteration: 0,
