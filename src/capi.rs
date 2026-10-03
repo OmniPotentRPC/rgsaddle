@@ -13,7 +13,9 @@ use rgmin::{FireKind, Method};
 
 use crate::band::{BandConfig, BandSession, BandStatus, BandSurface, Cell, CiConfig};
 use crate::error::SaddleError;
-use crate::minmode::{MinModeConfig, MinModeKind, MinModeSession, MinModeStatus, PointSurface};
+use crate::minmode::{
+    FiniteDifference, MinModeConfig, MinModeKind, MinModeSession, MinModeStatus, PointSurface,
+};
 use crate::nichols::{
     HessianUpdate, Index1Config, Index1Session, Index1Status, NicholsMode, bofill_update,
     cap_max_abs, nichols_step, powell_update,
@@ -100,6 +102,9 @@ pub struct RgsaddleMinModeConfig {
     /// ABI minor 5: dimer rotation angle tolerance in radians (zero
     /// disables it). Read only when the config's minor is 5 or more.
     pub rotation_angle_tol: f64,
+    /// ABI minor 5: 0 forward difference, 1 central.
+    pub difference: i32,
+    pub reserved: i32,
 }
 
 #[repr(C)]
@@ -576,6 +581,11 @@ pub unsafe extern "C" fn rgsaddle_minmode_create(
             cfg.rotation_angle_tol
         } else {
             0.0
+        },
+        difference: if cfg.version.minor >= 5 && cfg.difference == 1 {
+            FiniteDifference::Central
+        } else {
+            FiniteDifference::Forward
         },
         max_rotations: cfg.max_rotations as usize,
         krylov_dim: cfg.krylov_dim as usize,

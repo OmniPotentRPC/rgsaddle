@@ -18,7 +18,11 @@ default = []
 capi = []
 
 [dependencies]
-rgmin = "0.3"
+# Solver::forget_evaluation (rgmin main c77254a) is not in a release.
+# A git dependency cannot be published: an rgmin release that carries
+# it must come out, and this line return to a version, before rgsaddle
+# is released.
+rgmin = { git = "https://github.com/OmniPotentRPC/rgmin", rev = "c77254a35993cef0697dc24167ad5bd01ab9d4a9" }
 eindir-core = { version = "0.6.0", features = ["capi"] }
 ndarray = "0.17"
 thiserror = "2"

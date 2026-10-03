@@ -500,8 +500,7 @@ dependencies = [
 [[package]]
 name = "rgmin"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc53f7a18e1bcf217d483edd515efb9ba1bf9451c2c7dfc47b15175c396222e2"
+source = "git+https://github.com/OmniPotentRPC/rgmin?rev=c77254a35993cef0697dc24167ad5bd01ab9d4a9#c77254a35993cef0697dc24167ad5bd01ab9d4a9"
 dependencies = [
  "cbindgen",
  "dlpk",

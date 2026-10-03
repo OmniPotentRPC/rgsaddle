@@ -47,7 +47,9 @@ Band cache entries: ``rgsaddle_band_restart``,
 ``rgsaddle_band_evaluation`` (``RGSADDLE_NO_EVALUATION`` when nothing
 is cached at the current band). Min-mode reuse:
 ``rgsaddle_minmode_set_position``, ``rgsaddle_minmode_set_mode``,
-``rgsaddle_minmode_estimate``. ``RGSADDLE_ABI_MINOR`` is 5; the
+``rgsaddle_minmode_estimate``; ``rgsaddle_minmode_config_t.difference``
+picks ``RGSADDLE_DIFFERENCE_FORWARD`` or ``_CENTRAL``.
+``RGSADDLE_ABI_MINOR`` is 5; the
 report's ``evaluations`` field took the place of ``reserved``.
 ``cargo cinstall`` installs ``include/rgsaddle.h`` as written.
 

@@ -21,6 +21,18 @@ pub trait PointSurface: Sync {
     fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError>;
 }
 
+/// Finite difference behind every Hessian action.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FiniteDifference {
+    /// `(g(x + dr v) - g(x)) / dr`: one gradient per action (the centre
+    /// is known), error `dr/2 T[v,v,v]`.
+    #[default]
+    Forward,
+    /// `(g(x + dr v) - g(x - dr v)) / (2 dr)`: two gradients per action,
+    /// error `dr^2/6 Q[v,v,v,v]`.
+    Central,
+}
+
 /// How the lowest mode is estimated.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum MinModeKind {
@@ -46,6 +58,8 @@ pub struct MinModeConfig {
     /// derivative) and noise error `2 eps_g / dr` for gradient noise
     /// `eps_g`; see `validation/fd_curvature.py`.
     pub dr: f64,
+    /// Forward (default) or central difference for the actions.
+    pub difference: FiniteDifference,
     /// Rotation stops when the rotational force `|H v - (v.H v) v|`
     /// falls under this. For Lanczos it is the Ritz residual bound.
     pub rotation_tol: f64,
@@ -68,6 +82,7 @@ impl Default for MinModeConfig {
         Self {
             kind: MinModeKind::Dimer,
             dr: 1e-3,
+            difference: FiniteDifference::Forward,
             rotation_tol: 1e-4,
             rotation_angle_tol: 0.0,
             max_rotations: 20,
@@ -111,6 +126,17 @@ pub struct ModeEstimate {
     pub evaluations: usize,
 }
 
+/// Rotation of the mode between two steps past which the translation
+/// optimizer's memory is dropped. The effective gradient is `R g` with
+/// `R = I - 2 tau tau'`; when `tau` turns by `theta`,
+/// `|R' - R|_2 = 2 sin(theta)` (`validation/mode_reset.py`), so the
+/// effective Hessian `R H R` that the stored pairs describe moves by up
+/// to `4 sin(theta) |H|`. Under eOn's converged angle (5 degrees) that
+/// is at most `0.35 |H|` and the dimer counts the mode as unchanged: the
+/// pairs and the FIRE velocity stay and only the cached evaluation
+/// goes. Past it the mode is a different one and the memory is reset.
+pub const MODE_RESET_ANGLE: f64 = 5.0 * PI / 180.0;
+
 /// A first-order saddle has a vanishing force and one negative
 /// curvature. A vanishing force alone also describes a minimum, which
 /// the inverted-force step then leaves; the gate therefore requires
@@ -147,15 +173,35 @@ impl<S: PointSurface> Counted<'_, S> {
         Ok((e, g))
     }
 
-    /// Gradient at `x + dr * unit`.
+    /// Gradient at `x + step * unit`.
     fn gradient_along(
         &self,
         x: ArrayView1<f64>,
         unit: ArrayView1<f64>,
-        dr: f64,
+        step: f64,
     ) -> Result<Array1<f64>, SaddleError> {
-        let shifted = &x + &(&unit * dr);
+        let shifted = &x + &(&unit * step);
         Ok(self.eval(shifted.view())?.1)
+    }
+
+    /// Finite-difference Hessian action `H unit`: forward against the
+    /// centre gradient (one call) or central (two calls).
+    fn action(
+        &self,
+        x: ArrayView1<f64>,
+        g0: ArrayView1<f64>,
+        unit: ArrayView1<f64>,
+        config: &MinModeConfig,
+    ) -> Result<Array1<f64>, SaddleError> {
+        let dr = config.dr;
+        match config.difference {
+            FiniteDifference::Forward => Ok((&self.gradient_along(x, unit, dr)? - &g0) / dr),
+            FiniteDifference::Central => {
+                let plus = self.gradient_along(x, unit, dr)?;
+                let minus = self.gradient_along(x, unit, -dr)?;
+                Ok((&plus - &minus) / (2.0 * dr))
+            }
+        }
     }
 }
 
@@ -175,7 +221,8 @@ fn perpendicular(h: &Array1<f64>, n: &Array1<f64>) -> Array1<f64> {
 /// `a1`, the minimizing `phi` follows in closed form, and the gradient
 /// at the rotated dimer is the linear combination
 /// `g(phi) = g0 + sin(phi1 - phi)/sin(phi1) (g1 - g0)
-///          + sin(phi)/sin(phi1) (g1' - g0)`,
+///          + sin(phi)/sin(phi1) (g1' - g0)`, which for the Hessian
+/// action is `h(phi) = w_old h + w_trial h1` with the same weights,
 /// exact on a quadratic surface (`validation/dimer_rotation.py`), so
 /// the next iteration starts without a gradient call. Rotation
 /// directions are Polak-Ribiere conjugate on the rotational force,
@@ -187,10 +234,8 @@ fn rotate_dimer<S: PointSurface>(
     mode: Array1<f64>,
     config: &MinModeConfig,
 ) -> Result<(Array1<f64>, f64, usize), SaddleError> {
-    let dr = config.dr;
     let mut n = normalize(mode);
-    let mut g1 = surface.gradient_along(x, n.view(), dr)?;
-    let mut h = (&g1 - &g0) / dr;
+    let mut h = surface.action(x, g0, n.view(), config)?;
     let mut curvature = h.dot(&n);
     let mut rotations = 0;
     // Rotational force (descent direction of the curvature on the
@@ -222,8 +267,7 @@ fn rotate_dimer<S: PointSurface>(
         let b1 = h.dot(&theta);
         let phi1 = (0.5 * (b1.abs() / (curvature.abs() + 1e-300)).atan()).clamp(1e-4, 0.25 * PI);
         let n1 = normalize(&(&n * phi1.cos()) + &(&theta * phi1.sin()));
-        let g1_trial = surface.gradient_along(x, n1.view(), dr)?;
-        let h1 = (&g1_trial - &g0) / dr;
+        let h1 = surface.action(x, g0, n1.view(), config)?;
         let c1 = h1.dot(&n1);
         rotations += 1;
         // Fourier fit through C(0), C'(0) = 2 b1, and C(phi1).
@@ -245,7 +289,6 @@ fn rotate_dimer<S: PointSurface>(
             // dimers and continue from it.
             if c1 < curvature {
                 n = n1;
-                g1 = g1_trial;
                 h = h1;
                 curvature = c1;
             }
@@ -260,10 +303,9 @@ fn rotate_dimer<S: PointSurface>(
         let s1 = phi1.sin();
         let w_old = (phi1 - phi).sin() / s1;
         let w_trial = s / s1;
-        g1 = &(&(&g1 * w_old) + &(&g1_trial * w_trial)) + &(&g0 * (1.0 - w_old - w_trial));
+        h = &(&h * w_old) + &(&h1 * w_trial);
         let theta_rotated = &(&theta * c) - &(&n * s);
         n = normalize(&(&n * c) + &(&theta * s));
-        h = (&g1 - &g0) / dr;
         curvature = h.dot(&n);
         force_prev = Some(force);
         dir_prev = Some(theta_rotated * dir_norm);
@@ -296,8 +338,7 @@ fn lanczos_mode<S: PointSurface>(
     let mut actions = 0;
     loop {
         let j = alpha.len();
-        let g1 = surface.gradient_along(x, q[j].view(), config.dr)?;
-        let hv = (&g1 - &g0) / config.dr;
+        let hv = surface.action(x, g0, q[j].view(), config)?;
         actions += 1;
         let a = hv.dot(&q[j]);
         alpha.push(a);
@@ -407,6 +448,8 @@ fn jacobi_eigen(a: &mut [Vec<f64>]) -> (Vec<f64>, Vec<Vec<f64>>) {
 #[derive(Clone)]
 struct PointEval {
     x: Array1<f64>,
+    /// `None` when the host supplied the gradient alone.
+    energy: Option<f64>,
     gradient: Array1<f64>,
 }
 
@@ -443,6 +486,7 @@ impl MinModeSession {
                 "finite-difference step must be positive and finite".into(),
             ));
         }
+        crate::band::check_force_driven(&config.method)?;
         let control = Control {
             maxiter: usize::MAX,
             gtol: 0.0,
@@ -524,6 +568,7 @@ impl MinModeSession {
                 }
                 Some(PointEval {
                     x: x.clone(),
+                    energy: None,
                     gradient,
                 })
             }
@@ -544,7 +589,16 @@ impl MinModeSession {
                 "mode must be finite and nonzero".into(),
             ));
         }
-        self.mode = mode / n;
+        let mode = mode / n;
+        // The solver's cached force at this point was inverted along the
+        // old mode; a large turn also retires the stored pairs.
+        let turned = self.mode.dot(&mode).abs().min(1.0).acos();
+        if turned > MODE_RESET_ANGLE {
+            self.solver.forget();
+        } else {
+            self.solver.forget_evaluation();
+        }
+        self.mode = mode;
         Ok(())
     }
 
@@ -557,9 +611,10 @@ impl MinModeSession {
         {
             return Ok(c.gradient.clone());
         }
-        let (_, gradient) = surface.eval(self.x.view())?;
+        let (energy, gradient) = surface.eval(self.x.view())?;
         self.centre = Some(PointEval {
             x: self.x.clone(),
+            energy: Some(energy),
             gradient: gradient.clone(),
         });
         Ok(gradient)
@@ -595,7 +650,14 @@ impl MinModeSession {
             surface,
             calls: &calls,
         };
-        let g0 = self.centre_gradient(&counted)?;
+        // A central difference never reads the centre gradient, so a
+        // rotation-only estimate does not evaluate it.
+        let centre_known = self.centre.as_ref().is_some_and(|c| c.x == self.x);
+        let g0 = if self.config.difference == FiniteDifference::Central && !centre_known {
+            Array1::zeros(self.x.len())
+        } else {
+            self.centre_gradient(&counted)?
+        };
         let (curvature, rotations) = self.refresh_mode(&counted, g0.view())?;
         Ok(ModeEstimate {
             mode: self.mode.clone(),
@@ -619,7 +681,17 @@ impl MinModeSession {
             calls: &calls,
         };
         let g0 = self.centre_gradient(&counted)?;
+        let previous_mode = self.mode.clone();
         let (curvature, rotations) = self.refresh_mode(&counted, g0.view())?;
+        // The solver cached the inverted force at this point under the
+        // previous mode; the step must see the current one. The mode's
+        // sign is arbitrary, so the angle reads |cos|.
+        let turned = previous_mode.dot(&self.mode).abs().min(1.0).acos();
+        if turned > MODE_RESET_ANGLE {
+            self.solver.forget();
+        } else {
+            self.solver.forget_evaluation();
+        }
 
         let max_force = g0.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
         if converged(max_force, curvature, self.config.force_tol) {
@@ -643,14 +715,28 @@ impl MinModeSession {
             slot.take();
         }
         let last: Mutex<Option<PointEval>> = Mutex::new(None);
-        let oracle =
-            Oracle::unbounded(self.x.len(), |xv: ArrayView1<f64>| match counted.eval(xv) {
+        // The solver re-reads the start under the new mode (its cached
+        // force was inverted along the old one); the centre answers it
+        // without a surface call when its energy is known.
+        let start = self.x.clone();
+        let start_energy = self
+            .centre
+            .as_ref()
+            .filter(|c| c.x == start)
+            .and_then(|c| c.energy);
+        let oracle = Oracle::unbounded(self.x.len(), |xv: ArrayView1<f64>| {
+            let answer = match start_energy {
+                Some(e) if xv == start => Ok((e, g0.clone())),
+                _ => counted.eval(xv),
+            };
+            match answer {
                 Ok((e, g)) => {
                     let par = g.dot(&tau);
                     let eff = &g - &(&tau * (2.0 * par));
                     if let Ok(mut slot) = last.lock() {
                         *slot = Some(PointEval {
                             x: xv.to_owned(),
+                            energy: Some(e),
                             gradient: g,
                         });
                     }
@@ -664,7 +750,8 @@ impl MinModeSession {
                     }
                     (f64::INFINITY, Array1::zeros(xv.len()))
                 }
-            });
+            }
+        });
 
         let mut x = self.x.clone();
         let stepped = self.solver.step(&oracle, &mut x);
@@ -685,10 +772,14 @@ impl MinModeSession {
         let at_new = last.into_inner().ok().flatten().filter(|p| p.x == self.x);
         let centre = match at_new {
             Some(p) => p,
-            None => PointEval {
-                x: self.x.clone(),
-                gradient: counted.eval(self.x.view())?.1,
-            },
+            None => {
+                let (energy, gradient) = counted.eval(self.x.view())?;
+                PointEval {
+                    x: self.x.clone(),
+                    energy: Some(energy),
+                    gradient,
+                }
+            }
         };
         let max_force = centre.gradient.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
         self.centre = Some(centre);

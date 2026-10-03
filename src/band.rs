@@ -373,7 +373,7 @@ fn image_force(
     x: ArrayView1<f64>,
     energies: &Array1<f64>,
     gradients: &Array2<f64>,
-) -> Array1<f64> {
+) -> Result<Array1<f64>, SaddleError> {
     let dof = endpoint_first.len();
     let n_images = energies.len();
     let row = |k: usize| -> ArrayView1<f64> {
@@ -401,7 +401,8 @@ fn image_force(
         energies[i],
         energies[i - 1],
         energies[i + 1],
-    );
+    )
+    .map_err(|e| SaddleError::Invalid(format!("image {i}: {e}")))?;
     let force = -&gradients.row(i);
     let spring = config.spring.compute(
         i,
@@ -418,11 +419,15 @@ fn image_force(
         } else {
             Array1::zeros(dof)
         };
-        climbing_image_force(force.view(), tangent.view(), dneb.view())
+        Ok(climbing_image_force(
+            force.view(),
+            tangent.view(),
+            dneb.view(),
+        ))
     } else {
-        config
+        Ok(config
             .projection
-            .project(force.view(), tangent.view(), &spring)
+            .project(force.view(), tangent.view(), &spring))
     }
 }
 
@@ -473,7 +478,7 @@ fn assemble_band(
             x,
             &energies,
             &gradients,
-        );
+        )?;
         projected.slice_mut(s![(i - 1) * dof..i * dof]).assign(&f);
     }
     let mut max_component = max_abs(&projected);
@@ -499,7 +504,7 @@ fn assemble_band(
             x,
             &energies,
             &gradients,
-        );
+        )?;
         projected
             .slice_mut(s![(max_i - 1) * dof..max_i * dof])
             .assign(&f);
@@ -521,6 +526,22 @@ fn assemble_band(
         .unwrap_or_else(|e| e.into_inner()) = max_component;
     let pseudo_energy: f64 = energies.slice(s![1..n_images - 1]).sum();
     Ok((pseudo_energy, projected, max_component))
+}
+
+/// The oracle's value beside a projected (band) or inverted (min-mode)
+/// force is not the potential of that force, so a method that tests
+/// the value (a line search, an energy acceptance) refuses good steps.
+/// FIRE, L-BFGS under `Accept::Step`, and Barzilai-Borwein (one oracle
+/// call, no test under the session's `Accept::None`) step on the force
+/// alone.
+pub(crate) fn check_force_driven(method: &Method) -> Result<(), SaddleError> {
+    match method {
+        Method::Fire { .. } | Method::Lbfgs { .. } | Method::Bb => Ok(()),
+        other => Err(SaddleError::Invalid(format!(
+            "{other:?} tests the oracle value, which is not the potential of a \
+             projected or inverted force; use FIRE, L-BFGS, or BB"
+        ))),
+    }
 }
 
 /// What the band holds at its current positions after a step: the
@@ -573,6 +594,7 @@ impl BandSession {
         if !initial.iter().all(|v| v.is_finite()) {
             return Err(SaddleError::NonFinite("band positions"));
         }
+        check_force_driven(&config.method)?;
         let interior_dof = (n_images - 2) * dof;
         let control = Control {
             maxiter: usize::MAX,
@@ -643,6 +665,10 @@ impl BandSession {
             self.positions.row_mut(i).assign(&new_row);
             if i == 0 || i == n_images - 1 {
                 self.state.set_endpoints(None);
+                // The interior may be unchanged, so the solver's own
+                // cached force (assembled against the old endpoint)
+                // would answer the next step; drop it, keep the memory.
+                self.solver.forget_evaluation();
             }
             // The last evaluation's tangents read the neighbours, so
             // any moved row retires it.

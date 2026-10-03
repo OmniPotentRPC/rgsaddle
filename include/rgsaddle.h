@@ -97,6 +97,16 @@ typedef enum {
   RGSADDLE_MINMODE_LANCZOS = 1
 } rgsaddle_minmode_t;
 
+/**
+ * Finite difference of the min-mode Hessian actions. Forward costs one
+ * gradient per action (the centre is known) with an O(dr) curvature
+ * error; central costs two with O(dr^2).
+ */
+typedef enum {
+  RGSADDLE_DIFFERENCE_FORWARD = 0,
+  RGSADDLE_DIFFERENCE_CENTRAL = 1
+} rgsaddle_difference_t;
+
 typedef enum {
   RGSADDLE_STATUS_RUNNING = 0,
   RGSADDLE_STATUS_CONVERGED = 1
@@ -269,6 +279,9 @@ typedef struct {
    * when version.minor < 5.
    */
   double rotation_angle_tol;
+  /** Minor 5: rgsaddle_difference_t for the Hessian actions. */
+  int32_t difference;
+  int32_t reserved;
 } rgsaddle_minmode_config_t;
 
 /**

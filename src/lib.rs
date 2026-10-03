@@ -38,8 +38,8 @@ pub use band::{
 };
 pub use error::SaddleError;
 pub use minmode::{
-    MinModeConfig, MinModeKind, MinModeReport, MinModeSession, MinModeStatus, ModeEstimate,
-    PointSurface,
+    FiniteDifference, MinModeConfig, MinModeKind, MinModeReport, MinModeSession, MinModeStatus,
+    ModeEstimate, PointSurface,
 };
 pub use nichols::{
     HessianUpdate, Index1Config, Index1Report, Index1Session, Index1Status, NicholsMode,

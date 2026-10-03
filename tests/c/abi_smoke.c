@@ -51,6 +51,75 @@ static rgsaddle_status_t surface_quad(void *user, rgsaddle_surface_request_t *re
   return RGSADDLE_OK;
 }
 
+static int quad_calls;
+
+static rgsaddle_status_t surface_quad_counted(void *user,
+                                             rgsaddle_surface_request_t *req) {
+  quad_calls += 1;
+  return surface_quad(user, req);
+}
+
+/* One min-mode session kept across points: set_position with the
+ * host's gradient and the previous mode as seed costs one evaluation. */
+static rgsaddle_status_t minmode_reuse(void) {
+  rgsaddle_minmode_config_t cfg;
+  memset(&cfg, 0, sizeof cfg);
+  cfg.version.major = RGSADDLE_ABI_MAJOR;
+  cfg.version.minor = RGSADDLE_ABI_MINOR;
+  cfg.kind = RGSADDLE_MINMODE_DIMER;
+  cfg.method = RGSADDLE_METHOD_FIRE;
+  cfg.dr = 1e-3;
+  cfg.rotation_tol = 1e-6;
+  cfg.max_rotations = 20;
+  cfg.krylov_dim = 3;
+  cfg.force_tol = 1e-4;
+  cfg.max_move = 0.1;
+  cfg.difference = RGSADDLE_DIFFERENCE_FORWARD;
+  double x[3] = {0.2, 0.1, -0.1};
+  double mode[3] = {0.6, 0.8, 0.0};
+  RgsaddleMinMode *mm = rgsaddle_minmode_create(&cfg, 1, x, mode);
+  if (!mm) {
+    return fail(RGSADDLE_SHAPE, "minmode create");
+  }
+  rgsaddle_report_t rep;
+  memset(&rep, 0, sizeof rep);
+  quad_calls = 0;
+  rgsaddle_status_t st = rgsaddle_minmode_estimate(mm, surface_quad_counted, NULL, &rep);
+  if (st != RGSADDLE_OK || rep.evaluations != quad_calls ||
+      fabs(rep.curvature + 2.0) > 1e-8) {
+    fprintf(stderr, "estimate st=%d evaluations=%d calls=%d curvature=%g\n", st,
+            rep.evaluations, quad_calls, rep.curvature);
+    return fail(st == RGSADDLE_OK ? RGSADDLE_SOLVER : st, "minmode estimate");
+  }
+  double x2[3] = {0.1, -0.05, 0.02};
+  double g2[3] = {-2.0 * x2[0], 2.0 * x2[1], 2.0 * x2[2]};
+  if (rgsaddle_minmode_set_position(mm, x2, g2) != RGSADDLE_OK) {
+    return fail(RGSADDLE_SHAPE, "minmode set_position");
+  }
+  quad_calls = 0;
+  st = rgsaddle_minmode_estimate(mm, surface_quad_counted, NULL, &rep);
+  if (st != RGSADDLE_OK || quad_calls != 1 || rep.evaluations != 1 || rep.rotations != 0) {
+    fprintf(stderr, "warm estimate calls=%d evaluations=%d rotations=%lld\n",
+            quad_calls, rep.evaluations, (long long)rep.rotations);
+    return fail(RGSADDLE_SOLVER, "warm min-mode estimate must cost one evaluation");
+  }
+  double seed[3] = {0.0, 0.0, 1.0};
+  if (rgsaddle_minmode_set_mode(mm, seed) != RGSADDLE_OK) {
+    return fail(RGSADDLE_SHAPE, "minmode set_mode");
+  }
+  double back[3];
+  if (rgsaddle_minmode_mode(mm, back) != RGSADDLE_OK || fabs(back[2] - 1.0) > 1e-15) {
+    return fail(RGSADDLE_SHAPE, "minmode mode after set_mode");
+  }
+  /* A step from the reused session still climbs. */
+  st = rgsaddle_minmode_step(mm, surface_quad, NULL, &rep);
+  if (st != RGSADDLE_OK) {
+    return fail(st, "minmode step after reuse");
+  }
+  rgsaddle_minmode_free(mm);
+  return RGSADDLE_OK;
+}
+
 static rgsaddle_status_t surface(void *user, rgsaddle_surface_request_t *req) {
   (void)user;
   if (req->version.major != RGSADDLE_ABI_MAJOR) {
@@ -360,6 +429,10 @@ int main(void) {
     }
   }
 
+  st = minmode_reuse();
+  if (st != RGSADDLE_OK) {
+    return st;
+  }
   printf("RGSADDLE_C_ABI_OK steps=%d ci=%lld\n", steps, (long long)rep.ci_index);
   return RGSADDLE_OK;
 }

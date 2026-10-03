@@ -330,3 +330,29 @@ fn lbfgs_band_steps_once_per_evaluation_and_converges() {
     assert!(pos[(ci, 0)].abs() < 0.05, "ci x={}", pos[(ci, 0)]);
     eprintln!("lbfgs band steps: {steps}");
 }
+
+#[test]
+fn value_testing_methods_are_refused() {
+    for method in [rgmin::Method::Bfgs, rgmin::Method::Steepest] {
+        let config = BandConfig {
+            method: method.clone(),
+            ..BandConfig::default()
+        };
+        let err = BandSession::new(config, initial_band(7))
+            .err()
+            .expect("refused");
+        assert!(matches!(err, SaddleError::Invalid(_)), "{method:?}: {err}");
+    }
+}
+
+#[test]
+fn coincident_images_are_an_error_not_a_garbage_force() {
+    let mut band = initial_band(5);
+    let middle = band.row(2).to_owned();
+    band.row_mut(1).assign(&middle);
+    band.row_mut(3).assign(&middle);
+    let mut session = BandSession::new(BandConfig::default(), band.clone()).unwrap();
+    let err = session.step(&DoubleWell).unwrap_err();
+    assert!(matches!(err, SaddleError::Invalid(_)), "{err}");
+    assert_eq!(session.positions(), band.view());
+}

@@ -46,7 +46,10 @@ default.
 with the host's gradient), `estimate_mode` refreshes the lowest mode
 without translating. The dimer rotates by the modified Newton step
 with an extrapolated gradient (one evaluation per rotation); Lanczos
-stops on the Ritz residual. `validation/` holds the sympy and sollya
+stops on the Ritz residual; `FiniteDifference::Central` is available
+for the actions. Both sessions refuse line-searched methods: the
+oracle value beside a projected or inverted force is not its
+potential. `validation/` holds the sympy and sollya
 checks of the rotation formulas, the Lanczos residual bound, and the
 finite-difference curvature error terms
 (`uv run --with sympy python validation/<script>.py`,

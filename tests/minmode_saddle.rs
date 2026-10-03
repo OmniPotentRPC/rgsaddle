@@ -343,3 +343,50 @@ fn lbfgs_translation_costs_one_evaluation_per_step() {
         assert!(session.position()[c].abs() < 1e-3);
     }
 }
+
+#[test]
+fn value_testing_methods_are_refused() {
+    let config = MinModeConfig {
+        method: rgmin::Method::Bfgs,
+        ..MinModeConfig::default()
+    };
+    let err = MinModeSession::new(config, array![0.1, 0.2, 0.3], array![1.0, 0.0, 0.0])
+        .err()
+        .expect("refused");
+    assert!(matches!(err, SaddleError::Invalid(_)), "{err}");
+}
+
+/// V = -x^2/2 + x^3 + y^2 + z^2 at the origin: curvature -1 along x,
+/// third derivative 6 along x, no fourth.
+struct Cubic;
+
+impl PointSurface for Cubic {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        let (a, b, c) = (x[0], x[1], x[2]);
+        let e = -0.5 * a * a + a * a * a + b * b + c * c;
+        Ok((e, array![-a + 3.0 * a * a, 2.0 * b, 2.0 * c]))
+    }
+}
+
+#[test]
+fn central_difference_removes_the_first_order_curvature_error() {
+    let curvature = |difference| {
+        let config = MinModeConfig {
+            kind: MinModeKind::Lanczos,
+            difference,
+            dr: 1e-3,
+            ..MinModeConfig::default()
+        };
+        let mut session =
+            MinModeSession::new(config, array![0.0, 0.0, 0.0], array![1.0, 0.0, 0.0]).unwrap();
+        session.estimate_mode(&Cubic).unwrap()
+    };
+    let fwd = curvature(rgsaddle::FiniteDifference::Forward);
+    let ctr = curvature(rgsaddle::FiniteDifference::Central);
+    // Forward: -1 + dr/2 * 6 = -0.997; central: exact up to rounding.
+    assert!((fwd.curvature + 0.997).abs() < 1e-9, "{}", fwd.curvature);
+    assert!((ctr.curvature + 1.0).abs() < 1e-9, "{}", ctr.curvature);
+    // One action each: forward needs the centre plus one gradient,
+    // central two displaced gradients and no centre.
+    assert_eq!((fwd.evaluations, ctr.evaluations), (2, 2));
+}

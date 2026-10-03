@@ -76,6 +76,17 @@ exact (on a quadratic) combination of the two measured ones, so each
 rotation costs one evaluation. Rotation planes are Polak-Ribiere
 conjugate. Lanczos stops when the Ritz residual ``beta_j |s_j|`` meets
 ``rotation_tol``. Both use the forward difference against the centre
-gradient; ``validation/fd_curvature.py`` gives its error,
+gradient by default; ``validation/fd_curvature.py`` gives its error,
 ``dr |T| / 2 + 2 eps / dr``, and the ``dr`` that minimizes it for a
-given gradient noise.
+given gradient noise. ``FiniteDifference::Central`` trades one more
+gradient per action for an ``O(dr^2)`` error.
+
+The translation steps on the inverted force, whose value (the true
+energy) is not its potential, as the band's pseudo-energy is not the
+potential of the projected force. Both sessions accept only methods
+that step on the force alone (FIRE, L-BFGS under ``Accept::Step``,
+Barzilai-Borwein) and refuse line-searched ones. Between steps the
+solver's cached force, inverted along the previous mode, is dropped
+(rgmin ``forget_evaluation``) and the centre answers the re-read
+without a surface call; a turn past ``MODE_RESET_ANGLE`` (5 degrees,
+``validation/mode_reset.py``) also drops the optimizer memory.
