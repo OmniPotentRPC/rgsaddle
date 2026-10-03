@@ -215,6 +215,20 @@ impl PartitionedRationalFunctionOptimization {
     }
 }
 
+/// Sella partitioned rational-function step in an orthonormal eigenbasis.
+///
+/// The first `order` columns form the uphill block. Invalid dimensions
+/// return a zero displacement, as in the stepper interface.
+pub fn prfo_get_s(
+    evals: &Array1<f64>,
+    evecs: &Array2<f64>,
+    g: &Array1<f64>,
+    order: usize,
+    alpha: f64,
+) -> Array1<f64> {
+    PartitionedRationalFunctionOptimization::new(order).get_s(evals, evecs, g, alpha)
+}
+
 /// Factory matching Sella `get_stepper` for the P-RFO synonyms only.
 pub fn prfo_stepper(name: &str, order: usize) -> Option<PartitionedRationalFunctionOptimization> {
     PartitionedRationalFunctionOptimization::from_name(name, order)
@@ -368,5 +382,61 @@ mod tests {
         let n = nrm2(s.view());
         assert!(n <= delta + 1e-10, "||s||={n} delta={delta} full={full}");
         assert!(s.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn order_zero_is_downhill_rfo_on_the_whole_space() {
+        let evals = array![2.0, 4.0];
+        let evecs = Array2::<f64>::eye(2);
+        let g = array![2.0, 0.0];
+        let s = PartitionedRationalFunctionOptimization::new(0).get_s(&evals, &evecs, &g, 1.0);
+        assert!(s[0] < 0.0, "s={s:?}");
+        assert!(s[0].abs() > 1e-8);
+        let h = {
+            let mut m = Array2::<f64>::zeros((2, 2));
+            m[(0, 0)] = 2.0;
+            m[(1, 1)] = 4.0;
+            m
+        };
+        let s_r = crate::rfo::RationalFunctionOptimization::new(0).get_s(&h, &g, 1.0);
+        let diff = nrm2((&s - &s_r).view());
+        assert!(diff < 1e-10, "order-0 P-RFO must match RFO: {diff}");
+    }
+
+    #[test]
+    fn partition_differs_from_unpartitioned_rfo() {
+        let evals = array![-1.0, 4.0];
+        let evecs = Array2::<f64>::eye(2);
+        let g = array![0.5, 0.4];
+        let h = {
+            let mut m = Array2::<f64>::zeros((2, 2));
+            m[(0, 0)] = -1.0;
+            m[(1, 1)] = 4.0;
+            m
+        };
+        let s_p = PartitionedRationalFunctionOptimization::new(1).get_s(&evals, &evecs, &g, 1.0);
+        let s_r = crate::rfo::RationalFunctionOptimization::new(1).get_s(&h, &g, 1.0);
+        let diff = nrm2((&s_p - &s_r).view());
+        assert!(
+            diff > 1e-8,
+            "P-RFO collapsed to RFO: s_p={s_p:?} s_r={s_r:?}"
+        );
+    }
+
+    #[test]
+    fn free_step_uses_the_requested_uphill_partition() {
+        let evals = array![-1.0, 4.0];
+        let evecs = Array2::<f64>::eye(2);
+        let g = array![0.5, 0.4];
+        let step = prfo_get_s(&evals, &evecs, &g, 1, 1.0);
+        let uphill_shift = 0.5 * (-1.0 + 2.0_f64.sqrt());
+        let downhill_shift = 0.5 * (4.0 - 16.64_f64.sqrt());
+        let expected = array![
+            -g[0]/(evals[0] - uphill_shift),
+            -g[1]/(evals[1] - downhill_shift),
+        ];
+        assert!(nrm2((&step - &expected).view()) < 1e-12);
+        assert!(step[0] > 0.0);
+        assert!(step[1] < 0.0);
     }
 }

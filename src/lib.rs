@@ -123,7 +123,7 @@ pub use sella_saddle::{SellaSaddleConfig, SellaSaddleReport, SellaSaddleSession}
 
 pub use vocn::{Found as VocnFound, Primitive as VocnPrimitive};
 
-pub use prfo::{PartitionedRationalFunctionOptimization, prfo_stepper, prfo_trust_region};
+pub use prfo::{PartitionedRationalFunctionOptimization, prfo_get_s, prfo_stepper, prfo_trust_region};
 
 pub mod irc;
 pub use irc::{IrcConfig, IrcDirection, IrcKind, IrcReport, IrcSession};
