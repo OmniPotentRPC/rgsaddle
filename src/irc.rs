@@ -419,6 +419,15 @@ impl IrcSession {
             axpy(1.0, s.view(), &mut self.d1);
             axpy(1.0, s.view(), &mut self.x);
             let ev = surface.eval(self.x.view())?;
+            // A quasi-Newton displacement cannot raise the IRC energy beyond the tolerance.
+            if ev.0 > energy + 1.0e-8 {
+                axpy(-1.0, s.view(), &mut self.x);
+                axpy(-1.0, s.view(), &mut self.d1);
+                self.config.dx = (self.config.dx * 0.5).max(1.0e-4);
+                self.last_step = None;
+                last_interior = false;
+                break;
+            }
             energy = ev.0;
             let y = &ev.1 - &g;
             let (s_mw, y_mw) = mw_pair(&s, &y, &self.sqrtm);
