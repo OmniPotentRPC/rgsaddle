@@ -111,7 +111,7 @@
       "configFile": "lakefile.toml"
     }
   ],
-  "name": "RgsaddleContracts",
+  "name": "RgsaddleRuntimeContracts",
   "lakeDir": ".lake",
   "fixedToolchain": false
 }
