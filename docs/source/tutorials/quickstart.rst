@@ -68,16 +68,16 @@ Hessian or invoke a dense eigensolver.
 The resulting path
 ~~~~~~~~~~~~~~~~~~
 
-1. Lanczos took a handful of Hessian actions at the origin and
-   returned the negative-curvature direction.
+1. Lanczos evaluates Hessian actions at the origin and
+   returns the negative-curvature direction.
 
-2. The first ``step`` kicked along that mode onto the MW sphere of
+2. The first ``step`` kicked along that mode onto the mass-weighted sphere of
    radius ``dx``.
 
 3. ``set_direction(Reverse)`` restored the saddle and flipped the
    kick. The two accepted points sit on opposite sides of the col.
 
 The host owns the loop after that. ``run(surface, max_steps)`` is
-a convenience over ``step`` until ``at_minimum``. ``reset`` drops QN
+a convenience over ``step`` until ``at_minimum``. ``reset`` drops quasi-Newton
 history at a model-update boundary, as for
 ``BandSession``.
