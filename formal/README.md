@@ -81,6 +81,7 @@ python validation/check_mode_normalization.py
 
 The command requires SymPy and Sollya on the same environment's path.
 It fails if any certificate is absent or any check fails.
+The Python scripts reject optimization flags that remove assertions.
 The Rust and C tests exercise valid and invalid seeds through the public entry points.
 
 For the floating-point bound, let `q` denote the exact squared norm and `u = 2^-53`.

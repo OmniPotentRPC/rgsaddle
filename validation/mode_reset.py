@@ -13,6 +13,9 @@ is the basis of MODE_RESET_ANGLE in src/minmode.rs: at eOn's converged
 angle, 5 degrees, the bound is 0.349 |H|.
 """
 
+if not __debug__:
+    raise SystemExit("Symbolic validation requires Python assertions; disable optimization.")
+
 import sympy as sp
 
 th = sp.symbols("theta", real=True)

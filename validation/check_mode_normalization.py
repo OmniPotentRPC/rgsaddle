@@ -1,5 +1,8 @@
 """Run the normalization identities and require every interval certificate."""
 
+if not __debug__:
+    raise SystemExit("Symbolic validation requires Python assertions; disable optimization.")
+
 from pathlib import Path
 import subprocess
 import sys

@@ -14,6 +14,9 @@ symbolically and the identity numerically, at 50 digits, on a random
 symmetric matrix through every Krylov dimension.
 """
 
+if not __debug__:
+    raise SystemExit("Symbolic validation requires Python assertions; disable optimization.")
+
 import random
 
 import mpmath as mp

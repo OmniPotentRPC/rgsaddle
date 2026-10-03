@@ -24,6 +24,9 @@ fd_curvature.sollya checks the same optima and the floating-point cost
 of forming x + d v.
 """
 
+if not __debug__:
+    raise SystemExit("Symbolic validation requires Python assertions; disable optimization.")
+
 import sympy as sp
 
 d, eps = sp.symbols("d epsilon", positive=True)

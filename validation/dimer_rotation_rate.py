@@ -16,6 +16,9 @@ under the tolerance (2000 = did not converge).
   (src/minmode.rs).
 """
 
+if not __debug__:
+    raise SystemExit("Symbolic validation requires Python assertions; disable optimization.")
+
 import numpy as np
 
 H = np.diag([-1.0, 0.5, 1.0, 2.0, 4.0, 8.0])

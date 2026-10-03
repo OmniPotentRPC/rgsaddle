@@ -5,6 +5,9 @@ The square norm is positive. Floating-point bounds have their own check
 in mode_normalization.sollya; Rust and C tests exercise the entry points.
 """
 
+if not __debug__:
+    raise SystemExit("Symbolic validation requires Python assertions; disable optimization.")
+
 import sympy as sp
 
 q = sp.symbols("q", positive=True)
