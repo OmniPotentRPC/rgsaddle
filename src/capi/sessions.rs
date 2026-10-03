@@ -611,6 +611,46 @@ mod irc_abi_tests {
         unsafe { rgsaddle_sella_saddle_free(sess) };
     }
     #[test]
+    fn sella_saddle_seed_abi_refuses_invalid_modes() {
+        let cfg = RgsaddleSellaSaddleConfig {
+            version: RgsaddleVersion {
+                major: RGSADDLE_ABI_MAJOR,
+                minor: RGSADDLE_ABI_MINOR,
+            },
+            flags: 0,
+            delta: 0.1,
+            force_tol: 0.05,
+            force_gate: crate::ForceGate::MaxForceOnAtom.to_abi(),
+            order: 1,
+        };
+        let x = [0.2, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let masses = [1.0, 1.0];
+        let session = unsafe { rgsaddle_sella_saddle_create(&cfg, 2, x.as_ptr(), masses.as_ptr()) };
+        assert!(!session.is_null());
+        assert_eq!(
+            unsafe { rgsaddle_sella_saddle_seed_mode(std::ptr::null_mut(), x.as_ptr(), -1.0) },
+            RGSADDLE_NULL_SESSION
+        );
+        assert_eq!(
+            unsafe { rgsaddle_sella_saddle_seed_mode(session, std::ptr::null(), -1.0) },
+            RGSADDLE_INVALID_PARAMETER
+        );
+        assert_eq!(
+            unsafe { rgsaddle_sella_saddle_seed_mode(session, [0.0; 6].as_ptr(), -1.0) },
+            RGSADDLE_SHAPE
+        );
+        assert_eq!(
+            unsafe { rgsaddle_sella_saddle_seed_mode(session, x.as_ptr(), f64::NAN) },
+            RGSADDLE_NON_FINITE
+        );
+        assert_eq!(
+            unsafe { rgsaddle_sella_saddle_seed_mode(session, [f64::NAN; 6].as_ptr(), -1.0) },
+            RGSADDLE_NON_FINITE
+        );
+        unsafe { rgsaddle_sella_saddle_free(session) };
+    }
+
+    #[test]
     fn sella_saddle_seed_abi_contracts_the_measured_unstable_mode() {
         extern "C" fn rotated_saddle(_: *mut c_void, request: *mut RgsaddleSurfaceRequest) -> i32 {
             let request = unsafe { &mut *request };
@@ -2644,6 +2684,21 @@ mod constraints_abi_tests {
                 )
             }
             .is_null()
+        );
+    }
+
+    #[test]
+    fn perp_dummy_abi_is_off_the_bond() {
+        let x = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+        let mut d = [0.0; 3];
+        assert_eq!(
+            unsafe { rgsaddle_place_perp_dummy(2, x.as_ptr(), 0, 1, d.as_mut_ptr()) },
+            RGSADDLE_OK
+        );
+        assert!((d[1].abs() + d[2].abs()) > 0.5);
+        assert_eq!(
+            unsafe { rgsaddle_place_perp_dummy(2, x.as_ptr(), 0, 0, d.as_mut_ptr()) },
+            RGSADDLE_SHAPE
         );
     }
 
