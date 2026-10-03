@@ -248,8 +248,13 @@ pub unsafe extern "C" fn rgsaddle_irc_create_from_surface(
     } else {
         IrcDirection::Forward
     };
-    let cs = CSurface { f, user, n_atoms     n_images: 1,
+    let cs = CSurface {
+        f,
+        user,
+        n_atoms,
+        n_images: 1,
         per_image: false,
+        rows: Default::default(),
     };
     match IrcSession::from_surface(irc_cfg, x, m, sd, dir, &cs) {
         Ok(session) => Box::into_raw(Box::new(RgsaddleIrc { session, n_atoms })),
@@ -282,13 +287,14 @@ pub unsafe extern "C" fn rgsaddle_irc_step(
         n_atoms: session.n_atoms,
         n_images: 1,
         per_image: false,
+        rows: Default::default(),
     };
     match session.session.step(&cs) {
         Ok(report) => {
             let out = unsafe { &mut *out };
             stamp_report(out);
             out.status = if report.at_minimum { 1 } else { 0 };
-            out.evaluations = 0;
+            out.evaluations = cs.evaluation_rows();
             out.max_force = report.max_force;
             out.ci_index = -1;
             out.iteration = report.inner_steps as i64;
@@ -519,6 +525,40 @@ mod irc_abi_tests {
             RGSADDLE_INVALID_PARAMETER
         );
         unsafe { rgsaddle_sella_min_free(sess) };
+    }
+
+    #[test]
+    fn sella_min_report_counts_physical_surface_callbacks() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        extern "C" fn counted_well(user: *mut c_void, request: *mut RgsaddleSurfaceRequest) -> i32 {
+            let calls = unsafe { &*user.cast::<AtomicUsize>() };
+            calls.fetch_add(1, Ordering::Relaxed);
+            well_cb(std::ptr::null_mut(), request)
+        }
+        let x = [0.2, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let masses = [1.0, 1.0];
+        let config = RgsaddleSellaMinConfig {
+            version: RgsaddleVersion { major: RGSADDLE_ABI_MAJOR, minor: RGSADDLE_ABI_MINOR },
+            flags: 0, delta: 0.2, force_tol: 1e-8,
+            force_gate: crate::ForceGate::MaxForceOnAtom.to_abi(),
+        };
+        let session = unsafe { rgsaddle_sella_min_create(&config, 2, x.as_ptr(), masses.as_ptr()) };
+        assert!(!session.is_null());
+        let mut calls = AtomicUsize::new(0);
+        let mut report = RgsaddleReport {
+            version: RgsaddleVersion { major: 0, minor: 0 }, flags: 0, status: 0,
+            evaluations: 0, max_force: 0.0, ci_index: 0, iteration: 0, curvature: 0.0, rotations: 0,
+        };
+        for _ in 0..3 {
+            let before = calls.load(Ordering::Relaxed);
+            let status = unsafe {
+                rgsaddle_sella_min_step(session, Some(counted_well), (&mut calls as *mut AtomicUsize).cast(), &mut report)
+            };
+            assert_eq!(status, RGSADDLE_OK);
+            assert_eq!(report.evaluations as usize, calls.load(Ordering::Relaxed) - before);
+        }
+        assert!(calls.load(Ordering::Relaxed) > 0);
+        unsafe { rgsaddle_sella_min_free(session) };
     }
 
     #[test]
@@ -914,13 +954,14 @@ pub unsafe extern "C" fn rgsaddle_sella_min_step(
         n_atoms: session.n_atoms,
         n_images: 1,
         per_image: false,
+        rows: Default::default(),
     };
     match session.session.step(&cs) {
         Ok(report) => {
             let out = unsafe { &mut *out };
             stamp_report(out);
             out.status = if report.at_minimum { 1 } else { 0 };
-            out.evaluations = 0;
+            out.evaluations = cs.evaluation_rows();
             out.max_force = report.max_force;
             out.ci_index = -1;
             out.iteration = 0;
@@ -1324,13 +1365,14 @@ pub unsafe extern "C" fn rgsaddle_sella_saddle_step(
         n_atoms: session.n_atoms,
         n_images: 1,
         per_image: false,
+        rows: Default::default(),
     };
     match session.session.step(&cs) {
         Ok(report) => {
             let out = unsafe { &mut *out };
             stamp_report(out);
             out.status = if report.at_saddle { 1 } else { 0 };
-            out.evaluations = 0;
+            out.evaluations = cs.evaluation_rows();
             out.max_force = report.max_force;
             out.ci_index = -1;
             out.iteration = 0;
@@ -1693,8 +1735,13 @@ pub unsafe extern "C" fn rgsaddle_samd_create(
         samd.ngen = cfg.ngen as usize;
     }
     samd.exponential = cfg.exponential != 0;
-    let cs = CSurface { f, user, n_atoms     n_images: 1,
+    let cs = CSurface {
+        f,
+        user,
+        n_atoms,
+        n_images: 1,
         per_image: false,
+        rows: Default::default(),
     };
     match SamdSession::new(samd, pos, vel, &cs) {
         Ok(session) => Box::into_raw(Box::new(RgsaddleSamd { session, n_atoms })),
@@ -1733,13 +1780,14 @@ pub unsafe extern "C" fn rgsaddle_samd_step(
         n_atoms: session.n_atoms,
         n_images: 1,
         per_image: false,
+        rows: Default::default(),
     };
     match session.session.step(&cs, draw.view()) {
         Ok(report) => {
             let out = unsafe { &mut *out };
             stamp_report(out);
             out.status = 0;
-            out.evaluations = 0;
+            out.evaluations = cs.evaluation_rows();
             out.max_force = report.kinetic;
             out.ci_index = -1;
             out.iteration = 0;
@@ -1851,6 +1899,7 @@ pub unsafe extern "C" fn rgsaddle_pes_kick(
         n_atoms: pes.n_atoms,
         n_images: 1,
         per_image: false,
+        rows: Default::default(),
     };
     match pes.pes.kick(&cs, dx.view()) {
         Ok(_) => RGSADDLE_OK,
@@ -2212,6 +2261,7 @@ pub unsafe extern "C" fn rgsaddle_internal_pes_kick(
         n_atoms: pes.n_atoms,
         n_images: 1,
         per_image: false,
+        rows: Default::default(),
     };
     match pes.pes.kick(&cs, q.view()) {
         Ok(_) => RGSADDLE_OK,

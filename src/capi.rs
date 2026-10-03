@@ -132,6 +132,7 @@ struct CSurface {
     /// an interior-only evaluation back to band image indices.
     n_images: i64,
     per_image: bool,
+    rows: std::sync::atomic::AtomicUsize,
 }
 
 // The C host is responsible for its own thread safety; the sessions
@@ -140,6 +141,10 @@ unsafe impl Sync for CSurface {}
 unsafe impl Send for CSurface {}
 
 impl CSurface {
+    fn evaluation_rows(&self) -> i32 {
+        i32::try_from(self.rows.load(std::sync::atomic::Ordering::Relaxed)).unwrap_or(i32::MAX)
+    }
+
     fn call(
         &self,
         n_images: i64,
@@ -161,6 +166,7 @@ impl CSurface {
             gradients: gradients.as_mut_ptr(),
             image,
         };
+        self.rows.fetch_add(energies.len(), std::sync::atomic::Ordering::Relaxed);
         let rc = (self.f)(self.user, &mut req);
         if rc != 0 {
             return Err(SaddleError::Surface(format!("host callback rc={rc}")));
@@ -406,6 +412,7 @@ pub unsafe extern "C" fn rgsaddle_band_step(
         n_atoms: band.n_atoms,
         n_images: band.n_images,
         per_image: band.per_image,
+        rows: Default::default(),
     };
     match band.session.step(&cs) {
         Ok(report) => {
@@ -624,6 +631,7 @@ pub unsafe extern "C" fn rgsaddle_minmode_step(
         n_atoms: session.n_atoms,
         n_images: 1,
         per_image: false,
+        rows: Default::default(),
     };
     match session.session.step(&cs) {
         Ok(report) => {
@@ -671,6 +679,7 @@ pub unsafe extern "C" fn rgsaddle_minmode_estimate(
         n_atoms: session.n_atoms,
         n_images: 1,
         per_image: false,
+        rows: Default::default(),
     };
     match session.session.estimate_mode(&cs) {
         Ok(est) => {
@@ -1116,6 +1125,7 @@ pub unsafe extern "C" fn rgsaddle_index1_step(
         n_atoms: session.n_atoms,
         n_images: 1,
         per_image: false,
+        rows: Default::default(),
     };
     match session.session.step(&cs) {
         Ok(report) => {
