@@ -152,10 +152,7 @@ pub fn eigh_on(
 ) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
     match device {
         EigenDevice::Host => exact_eigh(a),
-        EigenDevice::Dlpk => {
-            let (lams, vecs) = exact_eigh(a)?;
-            Ok((lams, vecs))
-        }
+        EigenDevice::Dlpk => crate::gpu::gpu_eigh_env(a),
     }
 }
 

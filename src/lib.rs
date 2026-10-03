@@ -143,3 +143,12 @@ mod python;
 pub mod io;
 #[cfg(feature = "readcon")]
 pub use io::{MolecularFrame, frame_from_con};
+
+pub mod gpu;
+pub use gpu::{
+    DEFAULT_MIN_DIM, GPU_MIN_DIM, GpuPolicy, clear_oom_floor, cuda_available,
+    cuda_device, fail_next_cuda_claim, gpu_eigh, gpu_eigh_env, gpu_eigh_t,
+    gpu_eigh_with, gpu_ok, gpu_ok_env, gpu_project, gpu_project_env,
+    gpu_project_with, gpu_qr, gpu_qr_env, gpu_qr_with, lock_oom_for_test,
+    oom_floor, record_oom, to_gpu, to_gpu_matrix, to_gpu_view,
+};
