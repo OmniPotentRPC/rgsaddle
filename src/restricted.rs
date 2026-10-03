@@ -153,9 +153,9 @@ pub struct TrustRegion {
 impl TrustRegion {
     /// Euclidean trust radius `delta`.
     pub fn new(delta: f64) -> Result<Self, SaddleError> {
-        if delta < 0.0 {
+        if !delta.is_finite() || delta < 0.0 {
             return Err(SaddleError::Shape(
-                "TrustRegion delta must be non-negative".into(),
+                "TrustRegion delta must be finite and non-negative".into(),
             ));
         }
         Ok(Self { delta })
@@ -180,7 +180,7 @@ impl TrustRegion {
     /// Scale `s` so `||s|| <= delta`.
     pub fn clip(&self, s: &Array1<f64>) -> Array1<f64> {
         let n = nrm2(s.view());
-        if n <= self.delta || n <= 1e-16 {
+        if n <= self.delta || n == 0.0 {
             return s.clone();
         }
         let mut out = Array1::zeros(s.len());

@@ -41,3 +41,24 @@ fn unrestricted_step_requires_the_physical_radius() {
     assert!(length > 1e-8);
     check_binding_radius(&evals, &g, length * (1.0 - 1e-9));
 }
+
+
+#[test]
+fn euclidean_clip_respects_radii_below_its_step_scale() {
+    let step = array![1e-17, -2e-17];
+    let radius = 1e-18;
+    let trust = rgsaddle::restricted::TrustRegion::new(radius).unwrap();
+    let clipped = trust.clip(&step);
+    let length = nrm2(clipped.view());
+    assert!(length <= radius * (1.0 + 8.0 * f64::EPSILON));
+    assert!(length >= radius * (1.0 - 8.0 * f64::EPSILON));
+    let zero = rgsaddle::restricted::TrustRegion::new(0.0).unwrap();
+    assert_eq!(zero.clip(&step), Array1::<f64>::zeros(2));
+}
+
+#[test]
+fn euclidean_radius_rejects_nonfinite_values() {
+    for radius in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(rgsaddle::restricted::TrustRegion::new(radius).is_err());
+    }
+}

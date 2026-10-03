@@ -24,7 +24,9 @@ const TRUST_ITERS: usize = 64;
 ///
 /// Distinct from dest [`prfo_restricted`], which restricts each
 /// eigenblock then clips the sum. Sella Optimizer `rs=tr` is this
-/// search on the full partitioned step.
+/// search on the full partitioned step. The returned displacement is clipped
+/// to the physical radius independently of the alpha-search tolerance.
+/// A nonfinite or negative radius returns a zero displacement.
 pub fn prfo_trust_region(
     evals: &Array1<f64>,
     evecs: &Array2<f64>,
@@ -32,6 +34,9 @@ pub fn prfo_trust_region(
     order: usize,
     delta: f64,
 ) -> Array1<f64> {
+    let Ok(trust) = crate::restricted::TrustRegion::new(delta) else {
+        return Array1::zeros(g.len());
+    };
     let stepper = PartitionedRationalFunctionOptimization::new(order);
     let s1 = stepper.get_s(
         evals,
@@ -40,7 +45,7 @@ pub fn prfo_trust_region(
         PartitionedRationalFunctionOptimization::ALPHA0,
     );
     let n1 = nrm2(s1.view());
-    if n1 <= delta + 1e-14 {
+    if n1 <= delta {
         return s1;
     }
     let mut lo = 0.0;
@@ -52,7 +57,7 @@ pub fn prfo_trust_region(
         let val = nrm2(s.view());
         best = s;
         if (val - delta).abs() <= 1e-10 {
-            return best;
+            return trust.clip(&best);
         }
         if val > delta {
             hi = mid;
@@ -60,7 +65,7 @@ pub fn prfo_trust_region(
             lo = mid;
         }
     }
-    best
+    trust.clip(&best)
 }
 
 use crate::rfo::RationalFunctionOptimization;
