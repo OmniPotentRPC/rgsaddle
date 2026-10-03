@@ -152,3 +152,5 @@ pub use gpu::{
     gpu_project_with, gpu_qr, gpu_qr_env, gpu_qr_with, lock_oom_for_test,
     oom_floor, record_oom, to_gpu, to_gpu_matrix, to_gpu_view,
 };
+
+pub mod trust;
