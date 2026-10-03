@@ -165,3 +165,148 @@ fn dimer_does_not_converge_at_a_minimum() {
 fn lanczos_does_not_converge_at_a_minimum() {
     minimum_is_not_converged(MinModeKind::Lanczos);
 }
+
+/// V = 1/2 x^T diag(d) x with d = (-1, 0.5, 1, 2, 4, 8): lowest mode e0,
+/// curvature -1, and a spread of positive curvatures to rotate past.
+struct Anisotropic;
+
+const D: [f64; 6] = [-1.0, 0.5, 1.0, 2.0, 4.0, 8.0];
+
+impl PointSurface for Anisotropic {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        let g = Array1::from_iter(x.iter().zip(D.iter()).map(|(xi, di)| di * xi));
+        let e = 0.5 * x.iter().zip(g.iter()).map(|(a, b)| a * b).sum::<f64>();
+        Ok((e, g))
+    }
+}
+
+struct CountingPoint<'a, S: PointSurface> {
+    inner: &'a S,
+    calls: AtomicUsize,
+}
+
+impl<S: PointSurface> PointSurface for CountingPoint<'_, S> {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        self.inner.eval(x)
+    }
+}
+
+fn estimate_from_bad_seed(kind: MinModeKind) -> (f64, usize, usize, Array1<f64>) {
+    let config = MinModeConfig {
+        kind,
+        rotation_tol: 1e-6,
+        max_rotations: 50,
+        krylov_dim: 6,
+        ..MinModeConfig::default()
+    };
+    let x = Array1::from(vec![0.1, -0.2, 0.05, 0.3, -0.1, 0.02]);
+    let seed = Array1::from(vec![0.3, 0.5, 0.4, 0.4, 0.4, 0.4]);
+    let mut session = MinModeSession::new(config, x, seed).unwrap();
+    let surface = CountingPoint {
+        inner: &Anisotropic,
+        calls: AtomicUsize::new(0),
+    };
+    let est = session.estimate_mode(&surface).unwrap();
+    assert_eq!(est.evaluations, surface.calls.load(Ordering::Relaxed));
+    (est.curvature, est.rotations, est.evaluations, est.mode)
+}
+
+#[test]
+fn dimer_rotation_reaches_the_lowest_mode_of_a_quadratic() {
+    let (curvature, rotations, evaluations, mode) = estimate_from_bad_seed(MinModeKind::Dimer);
+    // Forward differences are exact on a quadratic, up to rounding at
+    // dr = 1e-3.
+    assert!((curvature + 1.0).abs() < 1e-8, "curvature {curvature}");
+    assert!(mode[0].abs() > 1.0 - 1e-9, "mode {mode:?}");
+    // Conjugate rotation planes with the exact in-plane step reach the
+    // 1e-6 rotational force in 16 rotations here (a numpy model of the
+    // same iteration agrees); steepest-descent planes need 45.
+    assert!(rotations <= 18, "rotations {rotations}");
+    // Centre, the first dimer gradient, one trial per rotation.
+    assert_eq!(evaluations, 2 + rotations);
+}
+
+#[test]
+fn lanczos_stops_on_the_ritz_residual() {
+    let (curvature, actions, evaluations, mode) = estimate_from_bad_seed(MinModeKind::Lanczos);
+    assert!((curvature + 1.0).abs() < 1e-8, "curvature {curvature}");
+    assert!(mode[0].abs() > 1.0 - 1e-9, "mode {mode:?}");
+    assert!(actions <= 6);
+    assert_eq!(evaluations, 1 + actions);
+}
+
+fn warm_session_costs_one_evaluation(kind: MinModeKind) {
+    let config = MinModeConfig {
+        kind,
+        rotation_tol: 1e-6,
+        ..MinModeConfig::default()
+    };
+    let x = Array1::from(vec![0.1, -0.2, 0.05, 0.3, -0.1, 0.02]);
+    let mut seed = Array1::zeros(6);
+    seed[0] = 1.0;
+    let mut session = MinModeSession::new(config, x.clone(), seed).unwrap();
+    let surface = CountingPoint {
+        inner: &Anisotropic,
+        calls: AtomicUsize::new(0),
+    };
+    // The seed is the mode: the centre plus one dimer gradient (for
+    // Lanczos, one Hessian action, which `rotations` counts).
+    let first_rotations = usize::from(kind == MinModeKind::Lanczos);
+    let est = session.estimate_mode(&surface).unwrap();
+    assert_eq!(
+        (est.rotations, est.evaluations),
+        (first_rotations, 2),
+        "{kind:?}"
+    );
+    // The same session moved to a new point with the host's gradient:
+    // one evaluation, the dimer endpoint.
+    let x2 = &x * 0.5;
+    let (_, g2) = Anisotropic.eval(x2.view()).unwrap();
+    session.set_position(x2, Some(g2)).unwrap();
+    surface.calls.store(0, Ordering::Relaxed);
+    let est = session.estimate_mode(&surface).unwrap();
+    assert_eq!(
+        (est.rotations, est.evaluations),
+        (first_rotations, 1),
+        "{kind:?}"
+    );
+    assert_eq!(surface.calls.load(Ordering::Relaxed), 1);
+    assert!((est.curvature + 1.0).abs() < 1e-8);
+}
+
+#[test]
+fn dimer_session_is_reusable_across_points() {
+    warm_session_costs_one_evaluation(MinModeKind::Dimer);
+}
+
+#[test]
+fn lanczos_session_is_reusable_across_points() {
+    warm_session_costs_one_evaluation(MinModeKind::Lanczos);
+}
+
+#[test]
+fn a_step_reuses_its_accepted_point_as_the_next_centre() {
+    let config = MinModeConfig {
+        force_tol: 1e-6,
+        max_move: 0.05,
+        ..MinModeConfig::default()
+    };
+    let start = array![0.35, 0.4, -0.3];
+    let seed = array![1.0, 0.0, 0.0];
+    let mut session = MinModeSession::new(config, start, seed).unwrap();
+    let surface = CountingPoint {
+        inner: &QuadraticSaddle,
+        calls: AtomicUsize::new(0),
+    };
+    session.step(&surface).unwrap();
+    for k in 0..5 {
+        surface.calls.store(0, Ordering::Relaxed);
+        let report = session.step(&surface).unwrap();
+        let calls = surface.calls.load(Ordering::Relaxed);
+        assert_eq!(report.evaluations, calls, "step {k}");
+        // No centre evaluation and no re-evaluation of the accepted
+        // point: one dimer gradient, one per rotation, one trial.
+        assert_eq!(calls, 1 + report.rotations + 1, "step {k}");
+    }
+}

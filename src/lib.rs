@@ -33,10 +33,13 @@ pub mod projection;
 pub mod spring;
 pub mod tangent;
 
-pub use band::{BandConfig, BandReport, BandSession, BandStatus, BandSurface};
+pub use band::{
+    BandConfig, BandEvaluation, BandReport, BandSession, BandStatus, BandSurface, Cell, CiConfig,
+};
 pub use error::SaddleError;
 pub use minmode::{
-    MinModeConfig, MinModeKind, MinModeReport, MinModeSession, MinModeStatus, PointSurface,
+    MinModeConfig, MinModeKind, MinModeReport, MinModeSession, MinModeStatus, ModeEstimate,
+    PointSurface,
 };
 pub use nichols::{
     HessianUpdate, Index1Config, Index1Report, Index1Session, Index1Status, NicholsMode,

@@ -1,7 +1,15 @@
 //! Minimum-mode saddle search: find the lowest curvature direction,
 //! invert the force along it, take one step. Stepping, like the band.
+//!
+//! A session is long-lived: [`MinModeSession::set_position`] moves it
+//! to a new point (with the host's gradient there, when the host has
+//! one) and keeps the mode as the next rotation's seed, and
+//! [`MinModeSession::estimate_mode`] refreshes the mode without a
+//! translation, for a host that climbs with its own optimizer.
 
+use std::f64::consts::PI;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ndarray::{Array1, ArrayView1};
 use rgmin::{Control, Method, Oracle, Solver};
@@ -16,13 +24,16 @@ pub trait PointSurface: Sync {
 /// How the lowest mode is estimated.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum MinModeKind {
-    /// Finite-difference dimer rotation (Henkelman-Jonsson 1999 with
-    /// the Heyden 2005 rotation plane): one extra gradient per
-    /// rotation iteration.
+    /// Finite-difference dimer (Henkelman-Jonsson 1999) rotated by the
+    /// modified Newton step of Heyden, Bell, and Keil (2005) and
+    /// Kastner and Sherwood (2008) along conjugate rotation
+    /// directions: one gradient per rotation, the gradient at the
+    /// rotated dimer is extrapolated.
     #[default]
     Dimer,
     /// Lanczos on finite-difference Hessian actions: a Krylov
-    /// subspace per compute, one gradient per action.
+    /// subspace per compute, one gradient per action, stopped when
+    /// the lowest Ritz pair's residual meets `rotation_tol`.
     Lanczos,
 }
 
@@ -30,9 +41,18 @@ pub enum MinModeKind {
 pub struct MinModeConfig {
     pub kind: MinModeKind,
     /// Dimer separation / finite-difference displacement, Angstrom.
+    /// The curvature is a forward difference against the centre
+    /// gradient, with truncation error `dr/2 * T[v,v,v]` (`T` the third
+    /// derivative) and noise error `2 eps_g / dr` for gradient noise
+    /// `eps_g`; see `validation/fd_curvature.py`.
     pub dr: f64,
-    /// Rotation stops when the rotational force falls under this.
+    /// Rotation stops when the rotational force `|H v - (v.H v) v|`
+    /// falls under this. For Lanczos it is the Ritz residual bound.
     pub rotation_tol: f64,
+    /// Dimer rotation also stops when the optimal rotation angle of an
+    /// iteration falls under this many radians (eOn
+    /// `converged_angle`). Zero disables the angle test.
+    pub rotation_angle_tol: f64,
     pub max_rotations: usize,
     /// Krylov dimension for [`MinModeKind::Lanczos`].
     pub krylov_dim: usize,
@@ -49,6 +69,7 @@ impl Default for MinModeConfig {
             kind: MinModeKind::Dimer,
             dr: 1e-3,
             rotation_tol: 1e-4,
+            rotation_angle_tol: 0.0,
             max_rotations: 20,
             krylov_dim: 12,
             force_tol: 1e-3,
@@ -71,8 +92,23 @@ pub struct MinModeReport {
     pub status: MinModeStatus,
     pub max_force: f64,
     pub curvature: f64,
+    /// Rotation iterations (dimer) or Hessian actions (Lanczos).
     pub rotations: usize,
     pub iteration: usize,
+    /// Surface evaluations during this call, centre included.
+    pub evaluations: usize,
+}
+
+/// A refreshed lowest mode at the current point.
+#[derive(Clone, Debug)]
+pub struct ModeEstimate {
+    pub mode: Array1<f64>,
+    pub curvature: f64,
+    /// Rotation iterations (dimer) or Hessian actions (Lanczos).
+    pub rotations: usize,
+    /// Surface evaluations, the centre included when it was neither
+    /// cached nor supplied by the host.
+    pub evaluations: usize,
 }
 
 /// A first-order saddle has a vanishing force and one negative
@@ -91,64 +127,160 @@ fn normalize(mut v: Array1<f64>) -> Array1<f64> {
     v
 }
 
-/// Finite-difference Hessian action `H v` at `x` with the forward
-/// difference of gradients: one surface call per action.
-fn hessian_action<S: PointSurface>(
-    surface: &S,
-    x: ArrayView1<f64>,
-    g0: ArrayView1<f64>,
-    v: ArrayView1<f64>,
-    dr: f64,
-) -> Result<Array1<f64>, SaddleError> {
-    let unit = normalize(v.to_owned());
-    let shifted = &x + &(&unit * dr);
-    let (_, g1) = surface.eval(shifted.view())?;
-    Ok((&g1 - &g0) / dr)
+/// The surface, counting the calls one compute makes and checking
+/// what comes back.
+struct Counted<'a, S: PointSurface> {
+    surface: &'a S,
+    calls: &'a AtomicUsize,
 }
 
-/// Rayleigh quotient of the finite-difference Hessian along `v`.
-fn curvature_along(hv: ArrayView1<f64>, v: ArrayView1<f64>) -> f64 {
-    hv.dot(&v)
+impl<S: PointSurface> Counted<'_, S> {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        let (e, g) = self.surface.eval(x)?;
+        if g.len() != x.len() {
+            return Err(SaddleError::Shape("surface gradient length changed".into()));
+        }
+        if !e.is_finite() || !g.iter().all(|v| v.is_finite()) {
+            return Err(SaddleError::NonFinite("min-mode gradient"));
+        }
+        Ok((e, g))
+    }
+
+    /// Gradient at `x + dr * unit`.
+    fn gradient_along(
+        &self,
+        x: ArrayView1<f64>,
+        unit: ArrayView1<f64>,
+        dr: f64,
+    ) -> Result<Array1<f64>, SaddleError> {
+        let shifted = &x + &(&unit * dr);
+        Ok(self.eval(shifted.view())?.1)
+    }
 }
 
-/// Dimer rotation: steepest-descent rotation of the mode toward the
-/// lowest curvature, stopping on the rotational force.
+/// Component of `h` perpendicular to the unit vector `n`.
+fn perpendicular(h: &Array1<f64>, n: &Array1<f64>) -> Array1<f64> {
+    h - &(n * h.dot(n))
+}
+
+/// Dimer rotation by the modified Newton step.
+///
+/// With `h(n) = (g(x + dr n) - g0) / dr`, the curvature along the unit
+/// vector `n` is `C = h.n` and its gradient on the sphere is
+/// `2 (h - C n)`. Rotating in the plane of `n` and a unit `theta`
+/// perpendicular to it, `n(phi) = n cos phi + theta sin phi`, a
+/// quadratic surface gives `C(phi) = a0/2 + a1 cos 2phi + b1 sin 2phi`
+/// with `b1 = h.theta`. One gradient at a trial angle `phi1` fixes
+/// `a1`, the minimizing `phi` follows in closed form, and the gradient
+/// at the rotated dimer is the linear combination
+/// `g(phi) = g0 + sin(phi1 - phi)/sin(phi1) (g1 - g0)
+///          + sin(phi)/sin(phi1) (g1' - g0)`,
+/// exact on a quadratic surface (`validation/dimer_rotation.py`), so
+/// the next iteration starts without a gradient call. Rotation
+/// directions are Polak-Ribiere conjugate on the rotational force,
+/// with the previous direction carried along the rotation.
 fn rotate_dimer<S: PointSurface>(
-    surface: &S,
+    surface: &Counted<'_, S>,
     x: ArrayView1<f64>,
     g0: ArrayView1<f64>,
     mode: Array1<f64>,
     config: &MinModeConfig,
 ) -> Result<(Array1<f64>, f64, usize), SaddleError> {
-    let mut tau = normalize(mode);
+    let dr = config.dr;
+    let mut n = normalize(mode);
+    let mut g1 = surface.gradient_along(x, n.view(), dr)?;
+    let mut h = (&g1 - &g0) / dr;
+    let mut curvature = h.dot(&n);
     let mut rotations = 0;
-    let mut curvature;
+    // Rotational force (descent direction of the curvature on the
+    // sphere) and the conjugate direction of the previous iteration.
+    let mut force_prev: Option<Array1<f64>> = None;
+    let mut dir_prev: Option<Array1<f64>> = None;
     loop {
-        let hv = hessian_action(surface, x, g0, tau.view(), config.dr)?;
-        curvature = curvature_along(hv.view(), tau.view());
-        // Rotational force: the component of H tau perpendicular to
-        // tau, which vanishes exactly at an eigenvector.
-        let perp = &hv - &(&tau * curvature);
-        let perp_norm = perp.dot(&perp).sqrt();
-        if perp_norm <= config.rotation_tol || rotations >= config.max_rotations {
+        let force = -perpendicular(&h, &n);
+        let force_norm = force.dot(&force).sqrt();
+        if force_norm <= config.rotation_tol || rotations >= config.max_rotations {
             break;
         }
-        // Rotate against the perpendicular curvature component. The
-        // step is the normalized perpendicular direction scaled by a
-        // Rayleigh-based trust factor; renormalizing keeps tau a unit
-        // vector without a line search.
-        let theta = normalize(perp);
-        let scale = (perp_norm / (curvature.abs() + perp_norm)).min(0.5);
-        tau = normalize(&tau - &(&theta * scale));
+        let mut dir = force.clone();
+        if let (Some(fp), Some(dp)) = (&force_prev, &dir_prev) {
+            let gamma = ((&force - fp).dot(&force) / fp.dot(fp)).max(0.0);
+            if gamma.is_finite() {
+                dir = &dir + &(dp * gamma);
+            }
+        }
+        dir = perpendicular(&dir, &n);
+        let dir_norm = dir.dot(&dir).sqrt();
+        if dir_norm <= 1e-14 * (1.0 + force_norm) {
+            break;
+        }
+        let theta = &dir / dir_norm;
+        // dC/dphi at phi = 0 is 2 h.theta (negative along a descent
+        // direction). The trial angle is the Kastner-Sherwood guess
+        // from a harmonic model, kept inside (1e-4, pi/4].
+        let b1 = h.dot(&theta);
+        let phi1 = (0.5 * (b1.abs() / (curvature.abs() + 1e-300)).atan()).clamp(1e-4, 0.25 * PI);
+        let n1 = normalize(&(&n * phi1.cos()) + &(&theta * phi1.sin()));
+        let g1_trial = surface.gradient_along(x, n1.view(), dr)?;
+        let h1 = (&g1_trial - &g0) / dr;
+        let c1 = h1.dot(&n1);
         rotations += 1;
+        // Fourier fit through C(0), C'(0) = 2 b1, and C(phi1).
+        let a1 = (curvature - c1 + b1 * (2.0 * phi1).sin()) / (1.0 - (2.0 * phi1).cos());
+        let a0 = 2.0 * (curvature - a1);
+        let c_at = |p: f64| 0.5 * a0 + a1 * (2.0 * p).cos() + b1 * (2.0 * p).sin();
+        let mut phi = 0.5 * (b1 / a1).atan();
+        if c_at(phi) > c_at(phi + 0.5 * PI) {
+            phi += 0.5 * PI;
+        }
+        if phi > 0.5 * PI {
+            phi -= PI;
+        }
+        let c_min = c_at(phi);
+        let slack = 1e-10 * (curvature.abs() + c1.abs() + 1.0);
+        if !(c_min.is_finite() && phi.is_finite()) || c_min > c1.min(curvature) + slack {
+            // The harmonic model does not hold here (anharmonic or
+            // noisy surface): keep the better of the two measured
+            // dimers and continue from it.
+            if c1 < curvature {
+                n = n1;
+                g1 = g1_trial;
+                h = h1;
+                curvature = c1;
+            }
+            force_prev = Some(force);
+            dir_prev = Some(theta * dir_norm);
+            if config.rotation_angle_tol > 0.0 && phi1 < config.rotation_angle_tol {
+                break;
+            }
+            continue;
+        }
+        let (s, c) = phi.sin_cos();
+        let s1 = phi1.sin();
+        let w_old = (phi1 - phi).sin() / s1;
+        let w_trial = s / s1;
+        g1 = &(&(&g1 * w_old) + &(&g1_trial * w_trial)) + &(&g0 * (1.0 - w_old - w_trial));
+        let theta_rotated = &(&theta * c) - &(&n * s);
+        n = normalize(&(&n * c) + &(&theta * s));
+        h = (&g1 - &g0) / dr;
+        curvature = h.dot(&n);
+        force_prev = Some(force);
+        dir_prev = Some(theta_rotated * dir_norm);
+        if config.rotation_angle_tol > 0.0 && phi.abs() < config.rotation_angle_tol {
+            break;
+        }
     }
-    Ok((tau, curvature, rotations))
+    Ok((n, curvature, rotations))
 }
 
 /// Lanczos: build a Krylov basis of finite-difference Hessian actions
-/// and take the lowest Ritz vector.
+/// and take the lowest Ritz vector. Stops once the Ritz residual
+/// `beta_j |s_j|` (the norm of `H y - theta y` for the lowest Ritz
+/// pair `(theta, y)` in exact arithmetic, Paige 1971) meets
+/// `rotation_tol`, so a seed that already is the mode costs one action.
 fn lanczos_mode<S: PointSurface>(
-    surface: &S,
+    surface: &Counted<'_, S>,
     x: ArrayView1<f64>,
     g0: ArrayView1<f64>,
     seed: Array1<f64>,
@@ -157,23 +289,21 @@ fn lanczos_mode<S: PointSurface>(
     let n = seed.len();
     let m = config.krylov_dim.min(n).max(1);
     let mut q: Vec<Array1<f64>> = Vec::with_capacity(m);
-    let mut alpha = Vec::with_capacity(m);
+    let mut alpha: Vec<f64> = Vec::with_capacity(m);
     let mut beta: Vec<f64> = Vec::with_capacity(m);
     q.push(normalize(seed));
 
     let mut actions = 0;
-    for j in 0..m {
-        let hv = hessian_action(surface, x, g0, q[j].view(), config.dr)?;
+    loop {
+        let j = alpha.len();
+        let g1 = surface.gradient_along(x, q[j].view(), config.dr)?;
+        let hv = (&g1 - &g0) / config.dr;
         actions += 1;
         let a = hv.dot(&q[j]);
         alpha.push(a);
-        if j + 1 == m {
-            break;
-        }
         let mut w = &hv - &(&q[j] * a);
         if j > 0 {
-            let b = beta[j - 1];
-            w = &w - &(&q[j - 1] * b);
+            w = &w - &(&q[j - 1] * beta[j - 1]);
         }
         // Full reorthogonalization: the Krylov dimension is small and
         // finite-difference actions are noisy.
@@ -182,21 +312,28 @@ fn lanczos_mode<S: PointSurface>(
             w = &w - &(qi * overlap);
         }
         let b = w.dot(&w).sqrt();
-        if b <= 1e-12 {
-            break;
+        let (theta, s) = lowest_ritz(&alpha, &beta);
+        let residual = b * s[j].abs();
+        if residual <= config.rotation_tol || alpha.len() == m || b <= 1e-12 {
+            let mut mode = Array1::zeros(n);
+            for (qi, si) in q.iter().zip(s.iter()) {
+                mode = &mode + &(qi * *si);
+            }
+            return Ok((normalize(mode), theta, actions));
         }
         beta.push(b);
         q.push(w / b);
     }
+}
 
-    // Lowest eigenpair of the symmetric tridiagonal (alpha, beta) by
-    // inverse-free bisection-free QL: the dimension is tiny, so a
-    // dense Jacobi sweep on the tridiagonal is cheapest to get right.
+/// Lowest eigenpair of the symmetric tridiagonal (alpha, beta), with
+/// the eigenvector in the Lanczos basis.
+fn lowest_ritz(alpha: &[f64], beta: &[f64]) -> (f64, Vec<f64>) {
     let k = alpha.len();
     let mut t = vec![vec![0.0; k]; k];
     for i in 0..k {
         t[i][i] = alpha[i];
-        if i + 1 < k && i < beta.len() {
+        if i + 1 < k {
             t[i][i + 1] = beta[i];
             t[i + 1][i] = beta[i];
         }
@@ -208,11 +345,7 @@ fn lanczos_mode<S: PointSurface>(
             lowest = i;
         }
     }
-    let mut mode = Array1::zeros(n);
-    for (i, qi) in q.iter().enumerate().take(k) {
-        mode = &mode + &(qi * evecs[i][lowest]);
-    }
-    Ok((normalize(mode), evals[lowest], actions))
+    (evals[lowest], evecs.iter().map(|row| row[lowest]).collect())
 }
 
 /// Cyclic Jacobi for a small symmetric matrix. Returns eigenvalues
@@ -270,13 +403,24 @@ fn jacobi_eigen(a: &mut [Vec<f64>]) -> (Vec<f64>, Vec<Vec<f64>>) {
     (evals, v)
 }
 
+/// The surface's answer at one point.
+#[derive(Clone)]
+struct PointEval {
+    x: Array1<f64>,
+    gradient: Array1<f64>,
+}
+
 /// Stepping minimum-mode saddle search.
 pub struct MinModeSession {
     config: MinModeConfig,
     x: Array1<f64>,
     mode: Array1<f64>,
+    curvature: f64,
     solver: Solver,
     iteration: usize,
+    /// Gradient at `x`, when known: from the last translation's
+    /// accepted point or from the host.
+    centre: Option<PointEval>,
     /// The first surface error raised inside the translation oracle
     /// during the current step; the rgmin oracle signature has no
     /// error channel of its own.
@@ -292,6 +436,11 @@ impl MinModeSession {
         if x.len() != mode.len() || x.is_empty() {
             return Err(SaddleError::Shape(
                 "position and mode must share a nonzero length".into(),
+            ));
+        }
+        if !(config.dr.is_finite() && config.dr > 0.0) {
+            return Err(SaddleError::Invalid(
+                "finite-difference step must be positive and finite".into(),
             ));
         }
         let control = Control {
@@ -310,8 +459,10 @@ impl MinModeSession {
             config,
             x,
             mode: normalize(mode),
+            curvature: f64::NAN,
             solver,
             iteration: 0,
+            centre: None,
             surface_error: Mutex::new(None),
         })
     }
@@ -324,9 +475,127 @@ impl MinModeSession {
         self.mode.view()
     }
 
-    /// Drop optimizer history at a surface-epoch boundary.
+    /// Curvature along [`MinModeSession::mode`] from the last
+    /// estimate; NaN before the first.
+    pub fn curvature(&self) -> f64 {
+        self.curvature
+    }
+
+    /// Drop optimizer history and the cached centre gradient at a
+    /// surface-epoch boundary. The mode stays as the next seed.
     pub fn reset(&mut self) {
         self.solver.forget();
+        self.centre = None;
+    }
+
+    /// Move to `x` and keep the session: the mode stays as the next
+    /// rotation's seed (a host stepping along a saddle search reuses
+    /// it, so a mode that still holds costs one rotation evaluation),
+    /// and the optimizer history stays. `gradient` is the host's
+    /// energy gradient at `x` when it has one; the next compute then
+    /// skips the centre evaluation.
+    pub fn set_position(
+        &mut self,
+        x: Array1<f64>,
+        gradient: Option<Array1<f64>>,
+    ) -> Result<(), SaddleError> {
+        if x.len() != self.x.len() {
+            return Err(SaddleError::Shape("position length must stay fixed".into()));
+        }
+        if !x.iter().all(|v| v.is_finite()) {
+            return Err(SaddleError::NonFinite("position"));
+        }
+        self.centre = match gradient {
+            Some(gradient) => {
+                if gradient.len() != x.len() {
+                    return Err(SaddleError::Shape(
+                        "gradient must match the position".into(),
+                    ));
+                }
+                if !gradient.iter().all(|v| v.is_finite()) {
+                    return Err(SaddleError::NonFinite("min-mode gradient"));
+                }
+                Some(PointEval {
+                    x: x.clone(),
+                    gradient,
+                })
+            }
+            None => None,
+        };
+        self.x = x;
+        Ok(())
+    }
+
+    /// Replace the mode seed with a host-chosen direction.
+    pub fn set_mode(&mut self, mode: Array1<f64>) -> Result<(), SaddleError> {
+        if mode.len() != self.x.len() {
+            return Err(SaddleError::Shape("mode must match the position".into()));
+        }
+        let n = mode.dot(&mode).sqrt();
+        if !(n.is_finite() && n > 1e-14) {
+            return Err(SaddleError::Invalid(
+                "mode must be finite and nonzero".into(),
+            ));
+        }
+        self.mode = mode / n;
+        Ok(())
+    }
+
+    fn centre_gradient<S: PointSurface>(
+        &mut self,
+        surface: &Counted<'_, S>,
+    ) -> Result<Array1<f64>, SaddleError> {
+        if let Some(c) = &self.centre
+            && c.x == self.x
+        {
+            return Ok(c.gradient.clone());
+        }
+        let (_, gradient) = surface.eval(self.x.view())?;
+        self.centre = Some(PointEval {
+            x: self.x.clone(),
+            gradient: gradient.clone(),
+        });
+        Ok(gradient)
+    }
+
+    fn refresh_mode<S: PointSurface>(
+        &mut self,
+        surface: &Counted<'_, S>,
+        g0: ArrayView1<f64>,
+    ) -> Result<(f64, usize), SaddleError> {
+        let (mode, curvature, rotations) = match self.config.kind {
+            MinModeKind::Dimer => {
+                rotate_dimer(surface, self.x.view(), g0, self.mode.clone(), &self.config)?
+            }
+            MinModeKind::Lanczos => {
+                lanczos_mode(surface, self.x.view(), g0, self.mode.clone(), &self.config)?
+            }
+        };
+        self.mode = mode;
+        self.curvature = curvature;
+        Ok((curvature, rotations))
+    }
+
+    /// Refresh the lowest mode at the current point without moving.
+    /// The centre gradient comes from the cache, from
+    /// [`MinModeSession::set_position`], or from one evaluation.
+    pub fn estimate_mode<S: PointSurface>(
+        &mut self,
+        surface: &S,
+    ) -> Result<ModeEstimate, SaddleError> {
+        let calls = AtomicUsize::new(0);
+        let counted = Counted {
+            surface,
+            calls: &calls,
+        };
+        let g0 = self.centre_gradient(&counted)?;
+        let (curvature, rotations) = self.refresh_mode(&counted, g0.view())?;
+        Ok(ModeEstimate {
+            mode: self.mode.clone(),
+            curvature,
+            rotations,
+            evaluations: calls.load(Ordering::Relaxed),
+        })
     }
 
     /// One min-mode step: refresh the lowest mode, invert the force
@@ -337,30 +606,15 @@ impl MinModeSession {
     /// evaluation; a host that recovers the surface and steps again
     /// may call [`MinModeSession::reset`] first to drop it.
     pub fn step<S: PointSurface>(&mut self, surface: &S) -> Result<MinModeReport, SaddleError> {
-        let (_, g0) = surface.eval(self.x.view())?;
-        if !g0.iter().all(|v| v.is_finite()) {
-            return Err(SaddleError::NonFinite("min-mode gradient"));
-        }
-        let (mode, curvature, rotations) = match self.config.kind {
-            MinModeKind::Dimer => rotate_dimer(
-                surface,
-                self.x.view(),
-                g0.view(),
-                self.mode.clone(),
-                &self.config,
-            )?,
-            MinModeKind::Lanczos => lanczos_mode(
-                surface,
-                self.x.view(),
-                g0.view(),
-                self.mode.clone(),
-                &self.config,
-            )?,
+        let calls = AtomicUsize::new(0);
+        let counted = Counted {
+            surface,
+            calls: &calls,
         };
-        self.mode = mode;
+        let g0 = self.centre_gradient(&counted)?;
+        let (curvature, rotations) = self.refresh_mode(&counted, g0.view())?;
 
-        let force = -&g0;
-        let max_force = force.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+        let max_force = g0.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
         if converged(max_force, curvature, self.config.force_tol) {
             return Ok(MinModeReport {
                 status: MinModeStatus::Converged,
@@ -368,6 +622,7 @@ impl MinModeSession {
                 curvature,
                 rotations,
                 iteration: self.iteration,
+                evaluations: calls.load(Ordering::Relaxed),
             });
         }
 
@@ -380,11 +635,18 @@ impl MinModeSession {
         if let Ok(mut slot) = error_slot.lock() {
             slot.take();
         }
-        let oracle = Oracle::unbounded(self.x.len(), move |xv: ArrayView1<f64>| {
-            match surface.eval(xv) {
+        let last: Mutex<Option<PointEval>> = Mutex::new(None);
+        let oracle =
+            Oracle::unbounded(self.x.len(), |xv: ArrayView1<f64>| match counted.eval(xv) {
                 Ok((e, g)) => {
                     let par = g.dot(&tau);
                     let eff = &g - &(&tau * (2.0 * par));
+                    if let Ok(mut slot) = last.lock() {
+                        *slot = Some(PointEval {
+                            x: xv.to_owned(),
+                            gradient: g,
+                        });
+                    }
                     (e, eff)
                 }
                 Err(err) => {
@@ -395,8 +657,7 @@ impl MinModeSession {
                     }
                     (f64::INFINITY, Array1::zeros(xv.len()))
                 }
-            }
-        });
+            });
 
         let mut x = self.x.clone();
         let stepped = self.solver.step(&oracle, &mut x);
@@ -411,8 +672,19 @@ impl MinModeSession {
         self.x = x;
         self.iteration += 1;
 
-        let (_, g_new) = surface.eval(self.x.view())?;
-        let max_force = g_new.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+        // The oracle's last evaluation is the accepted point for every
+        // stepper that ends on its trial (FIRE, Accept::Step); it is
+        // this report's force and the next step's centre.
+        let at_new = last.into_inner().ok().flatten().filter(|p| p.x == self.x);
+        let centre = match at_new {
+            Some(p) => p,
+            None => PointEval {
+                x: self.x.clone(),
+                gradient: counted.eval(self.x.view())?.1,
+            },
+        };
+        let max_force = centre.gradient.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+        self.centre = Some(centre);
         let status = if converged(max_force, curvature, self.config.force_tol) {
             MinModeStatus::Converged
         } else {
@@ -424,6 +696,7 @@ impl MinModeSession {
             curvature,
             rotations,
             iteration: self.iteration,
+            evaluations: calls.load(Ordering::Relaxed),
         })
     }
 

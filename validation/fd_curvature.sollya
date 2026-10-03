@@ -1,0 +1,33 @@
+// Floating-point side of the finite-difference curvature (src/minmode.rs).
+// Run: sollya validation/fd_curvature.sollya
+//
+// 1. The displacement actually realized when forming x + d v in binary64
+//    is RN(x + d) - x, not d. Its relative error, |x| u / d at worst, is
+//    an extra gradient noise of |H| |x| u that the dimer cannot see.
+// 2. The forward-difference error model E(d) = d |T| / 2 + 2 eps / d has
+//    its minimum at d* = 2 sqrt(eps / |T|); a root search on E' confirms
+//    the closed form from fd_curvature.py for the Morse Pt constants.
+
+prec = 200;
+display = decimal;
+T = 6 * 0.7102 * 1.6047^3;   // |V'''| of eOn morse_pt at r0, eV/A^3
+
+print("1. realized displacement of x + d in binary64");
+for x in [| 2.8970, 12.345678, 40.0 |] do {
+  for step in [| 1e-6, 1e-4, 1e-3, 1e-2 |] do {
+    realized = round(round(x, D, RN) + round(step, D, RN), D, RN) - round(x, D, RN);
+    rel = abs(realized - step) / step;
+    print("  x =", x, " d =", step, " relative step error =", round(rel, 24, RN));
+  };
+};
+
+print("2. forward-difference optimum, E(d) = d T / 2 + 2 eps / d");
+for eps in [| 1e-14, 1e-10, 1e-6, 1e-4, 1e-3 |] do {
+  dstar = 2 * sqrt(eps / T);
+  E = _x_ * T / 2 + 2 * eps / _x_;
+  roots = dirtyfindzeros(diff(E), [dstar / 10; dstar * 10]);
+  print("  eps =", eps, " closed form d* =", round(dstar, 24, RN),
+        " root of E' =", round(roots[0], 24, RN),
+        " E(d*) =", round(evaluate(E, dstar), 24, RN),
+        " E(1e-3) =", round(evaluate(E, 1e-3), 24, RN));
+};
