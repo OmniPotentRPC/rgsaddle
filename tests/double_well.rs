@@ -189,22 +189,107 @@ fn endpoints_are_evaluated_once_and_each_step_costs_one_interior_eval() {
         assert_eq!(rows, interior, "step {k}");
     }
 
-    // reset marks a surface change: the endpoint energies are taken
-    // again from one whole-band evaluation.
-    session.reset();
-    session.step(&surface).unwrap();
+    // The report counts the same rows the surface saw.
+    let report = session.step(&surface).unwrap();
     let (calls, rows) = surface.take();
-    assert!(calls >= 1);
-    assert_eq!(rows, n_images + (calls - 1) * interior, "calls={calls}");
+    assert_eq!((calls, rows), (1, interior));
+    assert_eq!(report.surface_rows, rows);
 
-    // set_positions may change the endpoint rows: one whole-band
-    // evaluation again.
+    // restart drops the optimizer history on the same surface: the
+    // start point comes from the cached evaluation, so the step costs
+    // one interior evaluation.
+    session.restart();
+    let report = session.step(&surface).unwrap();
+    let (calls, rows) = surface.take();
+    assert_eq!((calls, rows), (1, interior), "restart");
+    assert_eq!(report.surface_rows, interior);
+
+    // A host resync that hands the band back unchanged costs nothing.
     let current = session.positions().to_owned();
     session.set_positions(current).unwrap();
     session.step(&surface).unwrap();
     let (calls, rows) = surface.take();
+    assert_eq!((calls, rows), (1, interior), "unchanged resync");
+
+    // reset marks a surface change: the endpoint energies and the
+    // start point are taken again, the endpoints from one whole-band
+    // evaluation.
+    session.reset();
+    let report = session.step(&surface).unwrap();
+    let (calls, rows) = surface.take();
+    assert_eq!((calls, rows), (2, n_images + interior), "reset");
+    assert_eq!(report.surface_rows, rows);
+
+    // A moved endpoint: one whole-band evaluation again.
+    let mut moved = session.positions().to_owned();
+    moved[(0, 2)] += 1e-3;
+    session.set_positions(moved).unwrap();
+    session.step(&surface).unwrap();
+    let (calls, rows) = surface.take();
     assert!(calls >= 1);
-    assert_eq!(rows, n_images + (calls - 1) * interior, "calls={calls}");
+    assert_eq!(rows, n_images + (calls - 1) * interior, "moved endpoint");
+}
+
+#[test]
+fn wrapped_resync_keeps_the_cached_band() {
+    // A periodic host wraps atoms into its cell and hands the band
+    // back; the rows differ by lattice vectors only.
+    let n_images = 7;
+    let interior = n_images - 2;
+    let config = BandConfig {
+        cell: Some(rgsaddle::band::Cell([
+            [3.0, 0.0, 0.0],
+            [0.0, 3.0, 0.0],
+            [0.0, 0.0, 3.0],
+        ])),
+        ..BandConfig::default()
+    };
+    let mut session = BandSession::new(config, initial_band(n_images)).unwrap();
+    let surface = Counting::new();
+    for _ in 0..3 {
+        session.step(&surface).unwrap();
+    }
+    surface.take();
+    let before = session.positions().to_owned();
+    let mut wrapped = before.clone();
+    for mut row in wrapped.outer_iter_mut() {
+        row[0] -= 3.0 * (row[0] / 3.0).floor();
+    }
+    assert!(wrapped != before);
+    session.set_positions(wrapped).unwrap();
+    // The session keeps its own unwrapped rows.
+    assert_eq!(session.positions(), before.view());
+    session.step(&surface).unwrap();
+    let (calls, rows) = surface.take();
+    assert_eq!((calls, rows), (1, interior));
+}
+
+#[test]
+fn evaluation_matches_the_surface_at_the_current_band() {
+    let n_images = 7;
+    let mut session = BandSession::new(BandConfig::default(), initial_band(n_images)).unwrap();
+    assert!(session.evaluation().is_none());
+    let report = session.step(&DoubleWell).unwrap();
+    let eval = session.evaluation().expect("evaluation at the new band");
+    let pos = session.positions().to_owned();
+    let mut e = Array1::zeros(n_images);
+    let mut g = Array2::zeros((n_images, 3));
+    DoubleWell.eval(pos.view(), &mut e, &mut g).unwrap();
+    for i in 0..n_images {
+        assert_eq!(eval.energies[i], e[i], "energy {i}");
+    }
+    for i in 1..n_images - 1 {
+        for c in 0..3 {
+            assert_eq!(eval.gradients[(i, c)], g[(i, c)]);
+        }
+    }
+    let max = eval.projected.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+    assert_eq!(max, report.max_force);
+    // A moved interior image retires it.
+    let mut moved = pos.clone();
+    moved[(3, 1)] += 0.01;
+    session.set_positions(moved).unwrap();
+    assert!(session.evaluation().is_none());
 }
 
 #[test]
@@ -216,4 +301,32 @@ fn reset_clears_history_and_stepping_resumes() {
     session.reset();
     let after = session.step(&DoubleWell).unwrap();
     assert!(after.max_force.is_finite());
+}
+
+#[test]
+fn lbfgs_band_steps_once_per_evaluation_and_converges() {
+    let n_images = 9;
+    let interior = n_images - 2;
+    let config = BandConfig {
+        force_tol: 1e-3,
+        max_move: 0.1,
+        method: rgmin::Method::Lbfgs { memory: 10 },
+        ..BandConfig::default()
+    };
+    let mut session = BandSession::new(config, initial_band(n_images)).unwrap();
+    let surface = Counting::new();
+    let mut report = session.step(&surface).unwrap();
+    surface.take();
+    let mut steps = 1;
+    while report.status == BandStatus::Running && steps < 2000 {
+        report = session.step(&surface).unwrap();
+        let (calls, rows) = surface.take();
+        assert_eq!((calls, rows), (1, interior), "step {steps}");
+        steps += 1;
+    }
+    assert_eq!(report.status, BandStatus::Converged, "{report:?}");
+    let pos = session.positions();
+    let ci = report.ci_index.expect("climbing image armed");
+    assert!(pos[(ci, 0)].abs() < 0.05, "ci x={}", pos[(ci, 0)]);
+    eprintln!("lbfgs band steps: {steps}");
 }

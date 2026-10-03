@@ -26,8 +26,9 @@ pub enum SpringKind {
 
 impl SpringKind {
     /// Spring forces at interior image `i` (image indexing over the
-    /// whole band, endpoints included).
-    #[allow(clippy::too_many_arguments)]
+    /// whole band, endpoints included). `pos_diff_next` is
+    /// `R[i+1] - R[i]` and `pos_diff_prev` is `R[i] - R[i-1]`, both
+    /// minimum-imaged by a periodic host.
     pub fn compute(
         &self,
         i: usize,
@@ -36,9 +37,6 @@ impl SpringKind {
         dist_prev: f64,
         pos_diff_next: ArrayView1<f64>,
         pos_diff_prev: ArrayView1<f64>,
-        pos: ArrayView1<f64>,
-        pos_prev: ArrayView1<f64>,
-        pos_next: ArrayView1<f64>,
     ) -> SpringForces {
         match self {
             SpringKind::Uniform { k } => SpringForces {
@@ -50,12 +48,15 @@ impl SpringKind {
                 let k_prev = ks[i - 1];
                 SpringForces {
                     parallel: tangent.to_owned() * (k_next * dist_next - k_prev * dist_prev),
-                    full: Array1::zeros(tangent.len()),
+                    full: &pos_diff_next * k_next - &pos_diff_prev * k_prev,
                 }
             }
             SpringKind::OnsagerMachlup { k, l_vecs } => {
                 // Mandelli Eq. 13 then Eq. 15 (project onto tangent).
-                let diff = &pos_next + &pos_prev - &(&pos * 2.0) + &l_vecs[i + 1] - &l_vecs[i];
+                // R[i+1] + R[i-1] - 2 R[i] is written as the difference
+                // of the two minimum-imaged segments, so a periodic
+                // band whose atoms cross the cell sees the same spring.
+                let diff = &pos_diff_next - &pos_diff_prev + &l_vecs[i + 1] - &l_vecs[i];
                 let f_om = diff * *k;
                 let par = f_om.dot(&tangent);
                 SpringForces {
@@ -79,17 +80,7 @@ mod tests {
         let pdn = array![0.5, 0.0];
         let pdp = array![0.5, 0.0];
         let s = SpringKind::Uniform { k: 2.0 };
-        let f = s.compute(
-            1,
-            t.view(),
-            0.5,
-            0.5,
-            pdn.view(),
-            pdp.view(),
-            array![0.0, 0.0].view(),
-            array![-0.5, 0.0].view(),
-            array![0.5, 0.0].view(),
-        );
+        let f = s.compute(1, t.view(), 0.5, 0.5, pdn.view(), pdp.view());
         assert_abs_diff_eq!(f.parallel[0], 0.0, epsilon = 1e-12);
         assert_abs_diff_eq!(f.full[0], 0.0, epsilon = 1e-12);
     }
@@ -100,18 +91,38 @@ mod tests {
         let pdn = array![0.7, 0.0];
         let pdp = array![0.3, 0.0];
         let s = SpringKind::Uniform { k: 2.0 };
-        let f = s.compute(
-            1,
-            t.view(),
-            0.7,
-            0.3,
-            pdn.view(),
-            pdp.view(),
-            array![0.0, 0.0].view(),
-            array![-0.3, 0.0].view(),
-            array![0.7, 0.0].view(),
-        );
+        let f = s.compute(1, t.view(), 0.7, 0.3, pdn.view(), pdp.view());
         assert_abs_diff_eq!(f.parallel[0], 2.0 * 0.4, epsilon = 1e-12);
         assert_abs_diff_eq!(f.full[0], 2.0 * 0.4, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn onsager_machlup_reads_only_the_segment_differences() {
+        // An image whose neighbours sit across a periodic boundary: the
+        // host hands minimum-imaged segments, so the spring is the
+        // second difference of the segments, not of raw coordinates.
+        let t = array![1.0, 0.0];
+        let pdn = array![0.6, 0.0];
+        let pdp = array![0.4, 0.0];
+        let l = vec![array![0.0, 0.0]; 3];
+        let s = SpringKind::OnsagerMachlup { k: 3.0, l_vecs: l };
+        let f = s.compute(1, t.view(), 0.6, 0.4, pdn.view(), pdp.view());
+        assert_abs_diff_eq!(f.parallel[0], 3.0 * 0.2, epsilon = 1e-12);
+        assert_abs_diff_eq!(f.parallel[1], 0.0, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn weighted_full_spring_uses_the_segment_constants() {
+        let t = array![1.0, 0.0];
+        let pdn = array![0.5, 0.1];
+        let pdp = array![0.5, -0.1];
+        let s = SpringKind::Weighted {
+            ks: vec![1.0, 2.0, 4.0],
+        };
+        let f = s.compute(1, t.view(), 0.5, 0.5, pdn.view(), pdp.view());
+        // k_next = ks[1] = 2, k_prev = ks[0] = 1.
+        assert_abs_diff_eq!(f.full[0], 2.0 * 0.5 - 0.5, epsilon = 1e-12);
+        assert_abs_diff_eq!(f.full[1], 2.0 * 0.1 + 0.1, epsilon = 1e-12);
+        assert_abs_diff_eq!(f.parallel[0], 2.0 * 0.5 - 0.5, epsilon = 1e-12);
     }
 }
