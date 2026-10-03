@@ -1,0 +1,22 @@
+// Conditional binary64 bound for checked_mode in src/minmode.rs.
+// Let q be the exact squared norm. Assume qhat/q lies in 1 +/- eta,
+// and the square root and component divisions have relative error
+// at most u. Each squared component is bounded by the same positive
+// factor, so their sum lies between lower and upper below.
+// eta = gamma_(2n) covers a dot product with normal finite intermediates.
+// Overflow and underflow are outside that relative-error model.
+// The public entry points reject a nonfinite norm or a norm <= 1e-14.
+// The driver checks every certificate marker, including missing output.
+prec = 200!;
+u = [2^(-53); 2^(-53)];
+for n in [| 3, 75, 512, 4096 |] do {
+    eta = (2 * n * u) / (1 - 2 * n * u);
+    lower = (1 - u)^2 / ((1 + eta) * (1 + u)^2);
+    upper = (1 + u)^2 / ((1 - eta) * (1 - u)^2);
+    budget = (4 * n + 16) * 2^(-53);
+    if (sup(upper - 1) < budget) && (sup(1 - lower) < budget) then {
+        print("CERTIFIED_MODE_NORM ", n);
+    } else {
+        print("FAILED_MODE_NORM ", n);
+    };
+};

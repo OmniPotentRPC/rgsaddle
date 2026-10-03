@@ -20,6 +20,19 @@ namespace RgsaddleContracts
 
 variable {E : Type*} [NormedAddCommGroup E] [InnerProductSpace ℝ E]
 
+/-- `checked_mode` divides a nonzero host seed by its norm. The Rust
+entry points also require a finite computed norm above `1e-14`. -/
+theorem normalized_mode_unit {v : E} (hv : v ≠ 0) :
+    ‖(‖v‖⁻¹ : ℝ) • v‖ = 1 := by
+  rw [norm_smul, norm_inv, norm_norm]
+  exact inv_mul_cancel₀ (norm_ne_zero_iff.mpr hv)
+
+/-- Normalizing the accepted seed establishes the hypothesis of the
+reflected-force norm contract. -/
+theorem normalized_mode_reflect_norm {v : E} (hv : v ≠ 0) (F : E) :
+    ‖reflect ((‖v‖⁻¹ : ℝ) • v) F‖ = ‖F‖ :=
+  norm_reflect (normalized_mode_unit hv) F
+
 section Rayleigh
 
 variable [FiniteDimensional ℝ E] {n : ℕ} {T : E →ₗ[ℝ] E}
