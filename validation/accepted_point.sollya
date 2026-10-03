@@ -1,0 +1,11 @@
+prec = 256!;
+h = [0.0009999999999999999; 0.0010000000000000001];
+negativeOpening = -3 + h;
+positiveAccepted = 1 + h;
+positiveOpening = 1 - h;
+negativeAccepted = -3 - h;
+if (sup(negativeOpening) < 0) then print("CERTIFIED_MINIMUM_OPENING_NEGATIVE");
+if (inf(positiveAccepted) > 0) then print("CERTIFIED_MINIMUM_ACCEPTED_POSITIVE");
+if (inf(positiveOpening) > 0) then print("CERTIFIED_SADDLE_OPENING_POSITIVE");
+if (sup(negativeAccepted) < 0) then print("CERTIFIED_SADDLE_ACCEPTED_NEGATIVE");
+quit;
