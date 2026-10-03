@@ -1,11 +1,11 @@
-/* The main ABI 1.5 layouts and signatures remain compatible at minor 1.14. */
+/* The main ABI 1.5 layouts and signatures remain compatible at minor 1.15. */
 #ifndef RGSADDLE_MAIN_ABI_CONTRACT_H
 #define RGSADDLE_MAIN_ABI_CONTRACT_H
 #include "rgsaddle.h"
 #include <stddef.h>
 
 _Static_assert(RGSADDLE_ABI_MAJOR == 1u, "main ABI major");
-_Static_assert(RGSADDLE_ABI_MINOR == 14u, "consolidated main ABI minor");
+_Static_assert(RGSADDLE_ABI_MINOR == 15u, "consolidated main ABI minor");
 
 typedef struct {
   uint32_t major;

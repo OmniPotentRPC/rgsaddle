@@ -43,7 +43,7 @@ inline bool abi_compatible() noexcept {
     if (rgsaddle_abi_stamp(&stamp) != RGSADDLE_OK) {
         return false;
     }
-    return stamp.major == RGSADDLE_ABI_MAJOR && stamp.minor >= 14;
+    return stamp.major == RGSADDLE_ABI_MAJOR && stamp.minor >= 15;
 }
 
 struct Report {

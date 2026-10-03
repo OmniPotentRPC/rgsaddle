@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 14u
+#define RGSADDLE_ABI_MINOR 15u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -619,6 +619,11 @@ rgsaddle_status_t rgsaddle_sella_saddle_step(RgsaddleSellaSaddle *session,
 rgsaddle_status_t rgsaddle_sella_saddle_position(const RgsaddleSellaSaddle *session,
                                    double *out);
 rgsaddle_status_t rgsaddle_sella_saddle_reset(RgsaddleSellaSaddle *session);
+/** Seed a Cartesian session's Hessian with a 3N mode and its curvature.
+ * The mode is projected onto the live tangent space; no surface call is made.
+ * Internal and variable-cell sessions refuse Cartesian seeds. */
+rgsaddle_status_t rgsaddle_sella_saddle_seed_mode(
+    RgsaddleSellaSaddle *session, const double *mode, double curvature);
 rgsaddle_status_t rgsaddle_sella_saddle_set_hess_update(RgsaddleSellaSaddle *session,
                                           int32_t update);
 rgsaddle_status_t rgsaddle_sella_saddle_set_restricted(RgsaddleSellaSaddle *session,
