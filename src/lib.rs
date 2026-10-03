@@ -136,3 +136,10 @@ pub use afir::{afir_force, try_afir_force};
 
 pub mod rtr;
 pub use rtr::{BandForces, BandRtr, RtrConfig, RtrRadius, RtrReport, TcgResult, TcgStop, band_forces, reparametrize_equal_arc, truncated_cg};
+
+#[cfg(feature = "python")]
+mod python;
+#[cfg(feature = "readcon")]
+pub mod io;
+#[cfg(feature = "readcon")]
+pub use io::{MolecularFrame, frame_from_con};

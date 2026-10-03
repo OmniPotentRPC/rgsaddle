@@ -89,6 +89,13 @@ pub enum MinModeKind {
     Lanczos,
 }
 
+impl MinModeKind {
+    /// The discriminant used by the C and Python interfaces.
+    pub fn to_abi(self) -> i32 {
+        match self { Self::Dimer => 0, Self::Lanczos => 1 }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct MinModeConfig {
     pub kind: MinModeKind,

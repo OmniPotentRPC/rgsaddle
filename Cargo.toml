@@ -16,8 +16,17 @@ crate-type = ["lib", "cdylib", "staticlib"]
 [features]
 default = []
 capi = []
+par = ["rgmin/par"]
+highs = ["rgmin/highs"]
+python = ["dep:pyo3"]
+readcon = ["dep:readcon-core"]
+readcon-db = ["readcon", "dep:readcon-db"]
+chemfiles = ["readcon", "readcon-core/chemfiles"]
 
 [dependencies]
+pyo3 = { version = "0.26", features = ["extension-module", "abi3-py310"], optional = true }
+readcon-core = { version = "0.14", optional = true }
+readcon-db = { version = "0.1", optional = true }
 # The pinned rgmin main supplies retained evaluations and manifold steps.
 # A git dependency cannot be published: an rgmin release that carries
 # it must come out, and this line return to a version, before rgsaddle
@@ -40,7 +49,7 @@ subdirectory = false
 generation = false
 
 [package.metadata.capi.install.include]
-asset = [{ from = "include/rgsaddle.h", to = "" }]
+asset = [{ from = "include/rgsaddle.h", to = "" }, { from = "include/rgsaddle/session.hpp", to = "rgsaddle" }]
 
 [package.metadata.capi.pkg_config]
 name = "rgsaddle"
