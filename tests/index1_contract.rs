@@ -120,3 +120,33 @@ fn restricted_steps_accept_strided_eigenvectors_and_masses() {
         }
     }
 }
+
+#[test]
+fn analytic_trust_step_distinguishes_weighted_and_updated_curvature() {
+    for update in [HessianUpdate::Powell, HessianUpdate::Bofill] {
+        let h = Array2::from_diag(&array![2.0, -8.0, 45.0]);
+        let surface = Quadratic {
+            hessian: &h * 2.0,
+            calls: Cell::new(0),
+        };
+        let mut session = Index1Session::new(
+            Index1Config {
+                update,
+                trust_radius: 0.125,
+                force_tol: 0.0,
+                ..Index1Config::default()
+            },
+            array![0.0, 0.25, 0.0],
+            Some(h),
+            Some(array![1.0, 4.0, 9.0]),
+        )
+        .unwrap();
+        let report = session.step(&surface).unwrap();
+        assert_eq!(report.curvature, -2.0);
+        assert!((session.position()[1] - 0.125).abs() < 1e-14);
+        assert_eq!(session.position()[0], 0.0);
+        assert_eq!(session.position()[2], 0.0);
+        assert!((session.hessian().unwrap()[(1, 1)] + 16.0).abs() < 1e-12);
+        assert_eq!(surface.calls.get(), 2);
+    }
+}

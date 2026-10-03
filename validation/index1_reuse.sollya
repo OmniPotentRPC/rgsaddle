@@ -1,0 +1,28 @@
+// cartesian_of sums r products, then divides by sqrt(m_i).
+// With finite normal intermediates and correctly rounded operations,
+// gamma_(2r) bounds dot-product error by eta * sum |V_ik z_k|.
+// The square root and division each have relative error at most u.
+// The resulting absolute step error is bounded by coefficient times
+// sum |V_ik z_k| / sqrt(m_i); cancellation requires no relative bound.
+// Borrowed and copied entries execute the same recurrence.
+dieonerrormode = on!;
+prec = 200!;
+u = [2^(-53); 2^(-53)];
+for n in [| 3, 75, 300, 4096 |] do {
+    eta = (2 * n * u) / (1 - 2 * n * u);
+    coefficient = (1 + eta) * (1 + u) / (1 - u) - 1;
+    budget = (2 * n + 4) * 2^(-53);
+    if (inf(coefficient) > 0) && (sup(coefficient) < budget) then {
+        print("CERTIFIED_CARTESIAN_ERROR", n);
+    } else {
+        print("FAILED_CARTESIAN_ERROR", n);
+    };
+};
+mu = (-2 + sqrt([196; 196])) / 2;
+step = -1 / (mu + 2);
+if (inf(step) == -1/8) && (sup(step) == -1/8) then {
+    print("CERTIFIED_TRUST_FIXTURE");
+} else {
+    print("FAILED_TRUST_FIXTURE");
+};
+quit;
