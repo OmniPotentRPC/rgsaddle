@@ -101,7 +101,7 @@ theorem reusedResult_eq_recomputedResult {H M S D C E : Type}
 
 section ExactMassWeighting
 
-variable {ι : Type} [Fintype ι] [DecidableEq ι]
+variable {ι : Type} [Fintype ι]
 
 /-- With root_i = sqrt(m_i), an exact eigenpair of the weighted
 matrix gives a generalized eigenpair of the Cartesian Hessian.
@@ -121,9 +121,9 @@ theorem generalized_eigenpair
     rw [Finset.mul_sum]
     apply Finset.sum_congr rfl
     intro j _
-    field_simp [hr i, hr j] <;> ring
+    field_simp [hr i, hr j]
   rw [hscale, heig i]
-  field_simp [hr i] <;> ring
+  field_simp [hr i]
 
 /-- Cartesian division by square-root masses preserves the weighted
 norm of the transformed vector. -/
@@ -132,7 +132,7 @@ theorem cartesian_mass_norm
     (∑ i, (root i) ^ 2 * (q i / root i) ^ 2) = ∑ i, (q i) ^ 2 := by
   apply Finset.sum_congr rfl
   intro i _
-  field_simp [hr i] <;> ring
+  field_simp [hr i]
 
 end ExactMassWeighting
 end RgsaddleRuntimeContracts
