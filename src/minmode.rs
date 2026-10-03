@@ -11,7 +11,7 @@ use std::f64::consts::PI;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use ndarray::{Array1, ArrayView1};
+use ndarray::{Array1, Array2, ArrayView1};
 use rgmin::{Accept, Control, Method, Oracle, Solver};
 
 use crate::error::SaddleError;
@@ -19,6 +19,44 @@ use crate::error::SaddleError;
 /// The caller's surface for a single geometry.
 pub trait PointSurface: Sync {
     fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError>;
+
+    /// Optional analytic Cartesian Hessian action. None selects gradient differences.
+    fn hessian_vector(
+        &self,
+        _x: ArrayView1<f64>,
+        _v: ArrayView1<f64>,
+    ) -> Result<Option<Array1<f64>>, SaddleError> {
+        Ok(None)
+    }
+
+    /// Rigid or constrained Cartesian directions, one direction per row.
+    /// Molecular callers supply translations and rotations; fixed substrates
+    /// supply only their actual symmetries. These are evaluated at the query.
+    fn excluded_modes(&self, x: ArrayView1<f64>) -> Result<Array2<f64>, SaddleError> {
+        Ok(Array2::zeros((0, x.len())))
+    }
+
+    /// Energy and Cartesian gradient in a periodic cell, row-major 3x3.
+    ///
+    /// Default ignores the cell and calls [`Self::eval`].
+    fn eval_in_cell(
+        &self,
+        x: ArrayView1<f64>,
+        _cell: &[f64; 9],
+    ) -> Result<(f64, Array1<f64>), SaddleError> {
+        self.eval(x)
+    }
+
+    /// Optional `dE/dC`, row-major 3x3. `None` means the session
+    /// finite-differences [`Self::eval_in_cell`].
+    fn cell_grad(
+        &self,
+        x: ArrayView1<f64>,
+        cell: &[f64; 9],
+    ) -> Result<Option<[f64; 9]>, SaddleError> {
+        let _ = (x, cell);
+        Ok(None)
+    }
 }
 
 /// Finite difference behind every Hessian action.

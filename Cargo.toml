@@ -18,14 +18,15 @@ default = []
 capi = []
 
 [dependencies]
-# Solver::forget_evaluation (rgmin main d75a24d) is not in a release.
+# The pinned rgmin main supplies retained evaluations and manifold steps.
 # A git dependency cannot be published: an rgmin release that carries
 # it must come out, and this line return to a version, before rgsaddle
 # is released.
-rgmin = { git = "https://github.com/OmniPotentRPC/rgmin", rev = "d75a24d67a76ab9e8c6ba571d6b9adfa3ca47eaa" }
+rgmin = { git = "https://github.com/OmniPotentRPC/rgmin", rev = "467c020e85f36f6104c376611cea43aa924a15ad" }
 eindir-core = { version = "0.6.0", features = ["capi"] }
 ndarray = "0.17"
 thiserror = "2"
+linkcell = { version = "0.3.3", git = "https://github.com/d-SEAMS/linkcell", rev = "f6cf5700ca9c90e1877c84b66fb68386de5ceffe", default-features = false }
 
 [dev-dependencies]
 approx = "0.5"

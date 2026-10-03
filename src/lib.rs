@@ -49,3 +49,78 @@ pub use prfo::{PrfoKind, partitioned_rfo_eigen, restricted_prfo_displacement};
 pub use projection::ProjectionKind;
 pub use spring::SpringKind;
 pub use tangent::TangentKind;
+
+pub mod cell_log;
+pub mod constraints;
+pub mod eigensolve;
+pub mod force;
+pub mod force_match;
+pub mod geom;
+pub mod internal;
+pub mod kappa;
+pub mod linalg;
+pub mod mic;
+pub mod pes;
+pub mod pes_internal;
+pub mod qn;
+pub mod restricted;
+pub mod rfo;
+pub mod samd;
+pub mod sella_min;
+pub mod sella_saddle;
+pub mod vocn;
+pub mod prfo_restricted;
+
+pub use cell_log::{CellChart, expm_3x3, logm_3x3};
+
+pub use constraints::{Constraints, Equality, InternalCounts};
+
+pub use eigensolve::{
+    EigenDevice, ExpandKind, eigh_on, exact_eigh, expand, lowest_on, rayleigh_ritz,
+    rayleigh_ritz_iter,
+};
+
+pub use force::ForceGate;
+
+pub use force_match::{covalent_pairs, force_match_hessian};
+
+pub use geom::{SellaGeom, TrustSchedule};
+
+pub use internal::{CartAxis, Displacement, InternalSlot, Rotation, Translation};
+
+pub use linalg::{
+    NumericalHessian, modified_gram_schmidt, numerical_hvp, numerical_hvp_on, numerical_hvp_proj,
+    project_hvp, retract_hvp, transport_hvp,
+};
+
+pub use pes::CartesianPes;
+
+pub use pes_internal::{
+    CellCartesianPes, CellInternalPes, InternalPes, SellaPes, niggli_reduce_cell,
+    niggli_reduce_vectors, place_perp_dummy,
+};
+
+pub use qn::{
+    HessUpdate, QuasiNewton, StepperKind, get_stepper, retract_qn, symmetrize_y, update_h,
+    update_h_ms,
+};
+
+pub use restricted::{
+    InternalWeights, MaxInternalStep, RAS_SYNONYMS, RestrictedAtomicStep, RestrictedKind,
+    TRUST_SYNONYMS, TrustRegion, mis_clip, ras_cons, weights_for_equalities,
+};
+
+pub use rfo::{RationalFunctionOptimization, rfo_stepper};
+
+pub use samd::{
+    SamdConfig, SamdReport, SamdSession, VelocitySofteningConfig, VelocitySofteningReport,
+    project_velocity, retract_samd, soften_velocity_on, transport_velocity,
+};
+
+pub use sella_min::{SellaMinConfig, SellaMinReport, SellaMinSession};
+
+pub use sella_saddle::{SellaSaddleConfig, SellaSaddleReport, SellaSaddleSession};
+
+pub use vocn::{Found as VocnFound, Primitive as VocnPrimitive};
+
+pub use prfo::{PartitionedRationalFunctionOptimization, prfo_stepper, prfo_trust_region};

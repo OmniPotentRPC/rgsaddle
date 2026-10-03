@@ -251,3 +251,6 @@ pub(crate) fn restricted_prfo_with_lowest(
     )?;
     Ok((dx, evals[0]))
 }
+
+mod sella;
+pub use sella::{PartitionedRationalFunctionOptimization, SYNONYMS, prfo_stepper, prfo_trust_region};
