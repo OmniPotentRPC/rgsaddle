@@ -177,6 +177,29 @@ impl TrustRegion {
         nrm2(s.view())
     }
 
+    /// Derivative of `||s(alpha)||` from the step and its derivative.
+    ///
+    /// At a zero step, return the right directional derivative `||dsda||`.
+    /// Scaling by the largest component keeps the nonzero-step formula
+    /// meaningful when the squared Euclidean norm would underflow.
+    /// Scaling the derivative also bounds the dot-product accumulation.
+    pub fn cons_dalpha(&self, s: &Array1<f64>, dsda: &Array1<f64>) -> f64 {
+        assert_eq!(s.len(), dsda.len(), "step derivative dimensions must match");
+        let scale = nrminf(s.view());
+        if scale == 0.0 {
+            return dsda.iter().fold(0.0_f64, |length, value| length.hypot(*value));
+        }
+        let mut direction = s.mapv(|value| value/scale);
+        let length = nrm2(direction.view());
+        direction.mapv_inplace(|value| value/length);
+        let derivative_scale = nrminf(dsda.view());
+        if derivative_scale == 0.0 {
+            return 0.0;
+        }
+        let scaled_derivative = dsda.mapv(|value| value/derivative_scale);
+        rgmin::vecops::dot(scaled_derivative.view(), direction.view()) * derivative_scale
+    }
+
     /// Scale `s` so `||s|| <= delta`.
     pub fn clip(&self, s: &Array1<f64>) -> Array1<f64> {
         let n = nrm2(s.view());
