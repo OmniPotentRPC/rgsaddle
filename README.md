@@ -44,7 +44,10 @@ default.
 
 `MinModeSession` is long-lived: `set_position` moves it (optionally
 with the host's gradient), `estimate_mode` refreshes the lowest mode
-without translating. The dimer rotates by the modified Newton step
+without translating. Its translation force is switched by the sign of
+the curvature along the mode: below zero the mode component is
+reversed and the rest kept, at zero or above only the reversed mode
+component remains (`minmode::effective_gradient`). The dimer rotates by the modified Newton step
 with an extrapolated gradient (one evaluation per rotation); Lanczos
 stops on the Ritz residual; `FiniteDifference::Central` is available
 for the actions, and `rotation_angle_tol` stops a dimer rotation whose

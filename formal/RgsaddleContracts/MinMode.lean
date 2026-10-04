@@ -5,8 +5,9 @@ import RgsaddleContracts.Projection
 
 Contracts for `src/minmode.rs`: `curvature_along` (the Rayleigh
 quotient along the unit mode), the stopping test of `rotate_dimer`,
-and the effective gradient `g - 2 (g.tau) tau` that
-`MinModeSession::step` hands the translation solver.
+and the switched effective force of `effective_gradient` that
+`MinModeSession::step` hands the translation solver: `F - 2 (F.tau) tau`
+below a negative curvature, `-(F.tau) tau` at a nonnegative one.
 
 The quadratic model is `E(x) = 1/2 <H d, d>`, `d = x - x_s`, with `H`
 symmetric, a unit eigenvector `v` with eigenvalue `lam < 0`, and `H`
@@ -98,6 +99,51 @@ theorem minmode_force_parts {v : E} (hv : ‖v‖ = 1) (F : E) :
     ⟪reflect v F, v⟫ = -⟪F, v⟫ ∧ perp v (reflect v F) = perp v F :=
   ⟨reflect_parallel hv F, reflect_perp hv F⟩
 
+/-- The switched force of `src/minmode.rs::effective_gradient`
+(negated, `F = -g`): the reflection below a negative curvature `c`,
+the reversed mode component `-(F.v) v` alone otherwise. -/
+noncomputable def switchedForce (c : ℝ) (v F : E) : E :=
+  if c < 0 then reflect v F else -(⟪F, v⟫ • v)
+
+theorem switched_force_neg {c : ℝ} (hc : c < 0) (v F : E) :
+    switchedForce c v F = reflect v F := by
+  simp [switchedForce, hc]
+
+theorem switched_force_nonneg {c : ℝ} (hc : 0 ≤ c) (v F : E) :
+    switchedForce c v F = -(⟪F, v⟫ • v) := by
+  simp [switchedForce, not_lt.mpr hc]
+
+/-- **Both branches reverse the mode component.** -/
+theorem switched_force_parallel {v : E} (hv : ‖v‖ = 1) (c : ℝ) (F : E) :
+    ⟪switchedForce c v F, v⟫ = -⟪F, v⟫ := by
+  unfold switchedForce
+  split_ifs
+  · exact reflect_parallel hv F
+  · rw [inner_neg_left, real_inner_smul_left, inner_self_of_unit hv, mul_one]
+
+/-- **At a nonnegative curvature nothing across the mode remains.** -/
+theorem switched_force_perp_nonneg {v : E} (hv : ‖v‖ = 1) {c : ℝ} (hc : 0 ≤ c) (F : E) :
+    perp v (switchedForce c v F) = 0 := by
+  rw [switched_force_nonneg hc, ← neg_smul]
+  exact perp_parallel hv _
+
+/-- **Below a negative curvature the force across the mode is kept.** -/
+theorem switched_force_perp_neg {v : E} (hv : ‖v‖ = 1) {c : ℝ} (hc : c < 0) (F : E) :
+    perp v (switchedForce c v F) = perp v F := by
+  rw [switched_force_neg hc]
+  exact reflect_perp hv F
+
+/-- **In the convex region every step climbs.** Along the switched force
+at a nonnegative curvature the true energy changes at the rate
+`<g, F_eff> = (F.v)^2 >= 0` (`g = -F`): no step spends itself relaxing
+back into the basin. The reflected force's rate,
+`(F.v)^2 - |perp v F|^2`, has no sign. -/
+theorem switched_force_energy_rate {c : ℝ} (hc : 0 ≤ c) (v F : E) :
+    ⟪-F, switchedForce c v F⟫ = ⟪F, v⟫ ^ 2 := by
+  rw [switched_force_nonneg hc, inner_neg_left, inner_neg_right, neg_neg,
+    real_inner_smul_right]
+  ring
+
 section Quadratic
 
 variable {H : E →ₗ[ℝ] E} {v : E} {lam : ℝ}
@@ -172,6 +218,32 @@ theorem minmode_energy_mismatch (hS : H.IsSymmetric) (hv : ‖v‖ = 1) (hHv : H
     ⟪reflect v (H (a • v + w)), a • v + w⟫ - ⟪H (a • v + w), a • v + w⟫ = -2 * a ^ 2 * lam := by
   rw [(quad_key hS hv hHv a hw).1, (quad_key hS hv hHv a hw).2]
   ring
+
+/-- **From a minimum basin the switched force points out along the
+mode.** On the model with a unit eigenvector `v` of eigenvalue `lam`,
+the switched force at a nonnegative curvature is `lam a v`, `a = d.v`,
+and `<F_eff, d> = lam a^2`: with `lam > 0` the walker moves away from
+the minimum along `v` and keeps its coordinates across `v`. -/
+theorem switched_force_leaves_minimum (hS : H.IsSymmetric) (hHv : H v = lam • v)
+    {c : ℝ} (hc : 0 ≤ c) (d : E) :
+    switchedForce c v (-H d) = (lam * ⟪d, v⟫) • v ∧
+      ⟪switchedForce c v (-H d), d⟫ = lam * ⟪d, v⟫ ^ 2 := by
+  have hHd : ⟪H d, v⟫ = lam * ⟪d, v⟫ := by rw [hS d v, hHv, real_inner_smul_right]
+  have h1 : switchedForce c v (-H d) = (lam * ⟪d, v⟫) • v := by
+    rw [switched_force_nonneg hc, inner_neg_left, hHd, neg_smul, neg_neg]
+  refine ⟨h1, ?_⟩
+  rw [h1, real_inner_smul_left, real_inner_comm d v]
+  ring
+
+/-- **From the saddle region the switched force is the inverted force**
+and points at the saddle (`minmode_descends_to_saddle`). -/
+theorem switched_descends_to_saddle (hS : H.IsSymmetric) (hv : ‖v‖ = 1)
+    (hHv : H v = lam • v) (hlam : lam < 0)
+    (hpos : ∀ w, ⟪w, v⟫ = 0 → w ≠ 0 → 0 < ⟪H w, w⟫) {c : ℝ} (hc : c < 0)
+    {d : E} (hd : d ≠ 0) :
+    0 < ⟪switchedForce c v (-H d), -d⟫ := by
+  rw [switched_force_neg hc, reflect_neg]
+  exact minmode_descends_to_saddle hS hv hHv hlam hpos hd
 
 end Quadratic
 

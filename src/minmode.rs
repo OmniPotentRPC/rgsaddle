@@ -195,6 +195,37 @@ fn converged(max_force: f64, curvature: f64, force_tol: f64) -> bool {
     max_force <= force_tol && curvature < 0.0
 }
 
+/// Effective gradient of the min-mode translation along the unit mode
+/// `tau`, the negative of the switched force.
+///
+/// With `F = -g` and `F_par = (F.tau) tau`:
+///
+/// * negative curvature (`climb_only == false`): `F - 2 F_par`, the
+///   mode component reversed and the perpendicular force kept, so the
+///   walker climbs along the mode and relaxes across it;
+/// * nonnegative curvature (`climb_only == true`): `-F_par` alone.
+///   In a minimum basin the perpendicular force pulls the walker back
+///   to the minimum it is leaving; dropping it spends every step on
+///   the climb out of the basin (Henkelman and Jonsson 1999, Olsen
+///   et al. 2004).
+///
+/// Both branches reverse the mode component, so `g_eff . tau = -g . tau`
+/// either way. `validation/minmode_switch.py` derives the two branches
+/// on a quadratic model and `formal/RgsaddleContracts/MinMode.lean`
+/// states them (`switched_force_*`).
+pub fn effective_gradient(
+    g: ArrayView1<f64>,
+    tau: ArrayView1<f64>,
+    climb_only: bool,
+) -> Array1<f64> {
+    let par = g.dot(&tau);
+    if climb_only {
+        &tau * (-par)
+    } else {
+        &g - &(&tau * (2.0 * par))
+    }
+}
+
 fn normalize(mut v: Array1<f64>) -> Array1<f64> {
     let n = v.dot(&v).sqrt();
     if n > 1e-14 {
@@ -556,6 +587,9 @@ pub struct MinModeSession {
     /// during the current step; the rgmin oracle signature has no
     /// error channel of its own.
     surface_error: Mutex<Option<SaddleError>>,
+    /// Branch of the last translation: `true` when the curvature was
+    /// nonnegative and only the inverted mode component drove it.
+    climb_only: Option<bool>,
 }
 
 impl MinModeSession {
@@ -606,6 +640,7 @@ impl MinModeSession {
             iteration: 0,
             centre: None,
             surface_error: Mutex::new(None),
+            climb_only: None,
         })
     }
 
@@ -656,6 +691,7 @@ impl MinModeSession {
     pub fn reset(&mut self) {
         self.solver.forget();
         self.centre = None;
+        self.climb_only = None;
     }
 
     /// Move to `x` and keep the session: the mode stays as the next
@@ -854,10 +890,19 @@ impl MinModeSession {
             });
         }
 
-        // Effective gradient: invert the component along the lowest
-        // mode so the step climbs that direction and descends the
-        // rest. Below a negative curvature this is the min-mode
-        // force; above it, pure inversion still points off the ridge.
+        // Effective gradient (`effective_gradient`): below a negative
+        // curvature the mode component is inverted and the rest is
+        // kept; at a nonnegative curvature only the inverted mode
+        // component remains. A change of branch changes the operator
+        // the solver's memory describes, so the memory goes.
+        let climb_only = curvature >= 0.0;
+        if self
+            .climb_only
+            .is_some_and(|previous| previous != climb_only)
+        {
+            self.solver.forget();
+        }
+        self.climb_only = Some(climb_only);
         let tau = self.mode.clone();
         let kappa = self.kappa.as_ref();
         let config = &self.config;
@@ -899,8 +944,7 @@ impl MinModeSession {
                     )?;
                     -out.force
                 } else {
-                    let par = g.dot(&tau);
-                    &g - &(&tau * (2.0 * par))
+                    effective_gradient(g.view(), tau.view(), climb_only)
                 };
                 Ok((e, g, eff))
             });

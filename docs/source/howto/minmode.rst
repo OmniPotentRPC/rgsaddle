@@ -1,7 +1,7 @@
 Follow a minimum mode
 =====================
 
-``MinModeSession`` estimates a low-curvature direction by dimer rotation or Lanczos, then advances on the reflected force. ``FiniteDifference`` selects forward or central Hessian actions. A surface can supply analytic actions and excluded directions through ``PointSurface``.
+``MinModeSession`` estimates a low-curvature direction by dimer rotation or Lanczos, then advances on a force switched by the sign of the curvature along it. Below zero the mode component of the force is reversed and the rest kept, ``F - 2 (F.tau) tau``. At zero or above only the reversed mode component remains, ``-(F.tau) tau``, so the walker leaves a minimum basin along the mode instead of relaxing back towards the minimum (Henkelman and Jonsson 1999, Olsen et al. 2004). Both mode kinds use the switch. The session drops its optimizer memory when the branch changes. ``minmode::effective_gradient`` is the switch itself. ``FiniteDifference`` selects forward or central Hessian actions. A surface can supply analytic actions and excluded directions through ``PointSurface``.
 
 The reported force norm must satisfy the selected ``ForceGate``, and the estimated curvature must be negative. If a translation reaches a stationary point, the session measures curvature at that accepted position before reporting convergence. This directional test does not certify the full Hessian index.
 
