@@ -256,6 +256,8 @@ pub unsafe extern "C" fn rgsaddle_irc_create_from_surface(
         n_images: 1,
         per_image: false,
         rows: Default::default(),
+        stress: None,
+        stress_user: std::ptr::null_mut(),
     };
     match IrcSession::from_surface(irc_cfg, x, m, sd, dir, &cs) {
         Ok(session) => Box::into_raw(Box::new(RgsaddleIrc { session, n_atoms })),
@@ -289,6 +291,8 @@ pub unsafe extern "C" fn rgsaddle_irc_step(
         n_images: 1,
         per_image: false,
         rows: Default::default(),
+        stress: None,
+        stress_user: std::ptr::null_mut(),
     };
     match session.session.step(&cs) {
         Ok(report) => {
@@ -1015,6 +1019,8 @@ pub unsafe extern "C" fn rgsaddle_sella_min_step(
         n_images: 1,
         per_image: false,
         rows: Default::default(),
+        stress: None,
+        stress_user: std::ptr::null_mut(),
     };
     match session.session.step(&cs) {
         Ok(report) => {
@@ -1426,6 +1432,8 @@ pub unsafe extern "C" fn rgsaddle_sella_saddle_step(
         n_images: 1,
         per_image: false,
         rows: Default::default(),
+        stress: None,
+        stress_user: std::ptr::null_mut(),
     };
     match session.session.step(&cs) {
         Ok(report) => {
@@ -1800,6 +1808,8 @@ pub unsafe extern "C" fn rgsaddle_samd_create(
         n_images: 1,
         per_image: false,
         rows: Default::default(),
+        stress: None,
+        stress_user: std::ptr::null_mut(),
     };
     match SamdSession::new(samd, pos, vel, &cs) {
         Ok(session) => Box::into_raw(Box::new(RgsaddleSamd { session, n_atoms })),
@@ -1839,6 +1849,8 @@ pub unsafe extern "C" fn rgsaddle_samd_step(
         n_images: 1,
         per_image: false,
         rows: Default::default(),
+        stress: None,
+        stress_user: std::ptr::null_mut(),
     };
     match session.session.step(&cs, draw.view()) {
         Ok(report) => {
@@ -1958,6 +1970,8 @@ pub unsafe extern "C" fn rgsaddle_pes_kick(
         n_images: 1,
         per_image: false,
         rows: Default::default(),
+        stress: None,
+        stress_user: std::ptr::null_mut(),
     };
     match pes.pes.kick(&cs, dx.view()) {
         Ok(_) => RGSADDLE_OK,
@@ -2320,6 +2334,8 @@ pub unsafe extern "C" fn rgsaddle_internal_pes_kick(
         n_images: 1,
         per_image: false,
         rows: Default::default(),
+        stress: None,
+        stress_user: std::ptr::null_mut(),
     };
     match pes.pes.kick(&cs, q.view()) {
         Ok(_) => RGSADDLE_OK,

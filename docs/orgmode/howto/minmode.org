@@ -1,7 +1,7 @@
 #+TITLE: Follow a minimum mode
 #+OPTIONS: toc:nil num:nil
 
-~MinModeSession~ estimates a low-curvature direction by dimer rotation or Lanczos, then advances on the reflected force. ~FiniteDifference~ selects forward or central Hessian actions. A surface can supply analytic actions and excluded directions through ~PointSurface~.
+~MinModeSession~ estimates a low-curvature direction by dimer rotation or Lanczos, then advances on the min-mode force. While the curvature along that mode is not negative the effective gradient is minus the parallel part and the perpendicular force is dropped, so the step climbs the mode alone. Once the curvature is negative the perpendicular force stays and the parallel part is reflected. Lanczos uses the same translation. ~FiniteDifference~ selects forward or central Hessian actions. A surface can supply analytic actions and excluded directions through ~PointSurface~.
 
 The reported force norm must satisfy the selected ~ForceGate~, and the estimated curvature must be negative. If a translation reaches a stationary point, the session measures curvature at that accepted position before reporting convergence. This directional test does not certify the full Hessian index.
 

@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 15u
+#define RGSADDLE_ABI_MINOR 16u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -98,7 +98,9 @@ typedef enum {
 typedef enum {
   RGSADDLE_METHOD_FIRE = 0,
   RGSADDLE_METHOD_LBFGS = 1,
-  RGSADDLE_METHOD_RTR = 2 /**< Band trust-region stepper. */
+  RGSADDLE_METHOD_RTR = 2, /**< Band trust-region stepper. */
+  /** Quick-min band step. Min-mode create returns null for this code. */
+  RGSADDLE_METHOD_QUICKMIN = 3
 } rgsaddle_method_t;
 
 typedef enum {
@@ -219,6 +221,33 @@ const char *rgsaddle_status_name(rgsaddle_status_t status);
 RgsaddleBand *rgsaddle_band_create(const rgsaddle_band_config_t *config,
                                    int64_t n_images, int64_t n_atoms,
                                    const double *positions);
+
+/**
+ * Band with one cell per image. `cells` is n_images * 9 row-major
+ * lattice entries. The Jacobian is fixed from the mean endpoint
+ * volume. `weight` scales it and must be positive. ABI minor 16.
+ */
+RgsaddleBand *rgsaddle_band_create_solid(const rgsaddle_band_config_t *config,
+                                         int64_t n_images, int64_t n_atoms,
+                                         const double *positions,
+                                         const double *cells, double pressure,
+                                         double weight);
+
+/**
+ * Cauchy stress for a solid-state step. `n_images` is the row count of
+ * this call, `cells` and `stresses` are that many row-major 3x3
+ * matrices, and `image` is -1. Return RGSADDLE_OK or another status.
+ */
+typedef rgsaddle_status_t (*rgsaddle_stress_fn)(void *user, int64_t n_images,
+                                                int64_t n_atoms, int64_t image,
+                                                const double *positions,
+                                                const double *cells,
+                                                double *stresses);
+
+/** Register the stress callback. A null function clears it. ABI minor 16. */
+rgsaddle_status_t rgsaddle_band_set_stress(RgsaddleBand *band,
+                                           rgsaddle_stress_fn stress,
+                                           void *user);
 
 /** One optimizer step over the assembled band force. */
 rgsaddle_status_t rgsaddle_band_step(RgsaddleBand *band,

@@ -539,6 +539,27 @@ struct PointEval {
     gradient: Array1<f64>,
 }
 
+/// Effective gradient of a min-mode translation.
+///
+/// Henkelman and Jonsson, J. Chem. Phys. 111, 7010 (1999): while the
+/// curvature along the unit mode is not negative, the step climbs that
+/// mode alone. The effective gradient is minus the parallel part and
+/// the perpendicular force is dropped. Once the curvature is negative
+/// the perpendicular force stays and the parallel part is reflected,
+/// `g - 2 (g · τ) τ`.
+pub(crate) fn translated_gradient(
+    gradient: &Array1<f64>,
+    mode: &Array1<f64>,
+    curvature: f64,
+) -> Array1<f64> {
+    let parallel = gradient.dot(mode);
+    if curvature < 0.0 {
+        gradient - &(mode * (2.0 * parallel))
+    } else {
+        mode * (-parallel)
+    }
+}
+
 /// Stepping minimum-mode saddle search.
 pub struct MinModeSession {
     config: MinModeConfig,
@@ -854,11 +875,12 @@ impl MinModeSession {
             });
         }
 
-        // Effective gradient: invert the component along the lowest
-        // mode so the step climbs that direction and descends the
-        // rest. Below a negative curvature this is the min-mode
-        // force; above it, pure inversion still points off the ridge.
+        // Henkelman and Jonsson 1999: climb the mode alone while its
+        // curvature is not negative, and reflect the parallel part
+        // once the curvature is negative. The mode estimate for this
+        // step is the one just refreshed; Lanczos and the dimer share it.
         let tau = self.mode.clone();
+        let translation_curvature = curvature;
         let kappa = self.kappa.as_ref();
         let config = &self.config;
         let error_slot = &self.surface_error;
@@ -899,8 +921,7 @@ impl MinModeSession {
                     )?;
                     -out.force
                 } else {
-                    let par = g.dot(&tau);
-                    &g - &(&tau * (2.0 * par))
+                    translated_gradient(&g, &tau, translation_curvature)
                 };
                 Ok((e, g, eff))
             });
@@ -998,5 +1019,34 @@ impl MinModeSession {
             report = self.step(surface)?;
         }
         Ok(report)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::translated_gradient;
+    use approx::assert_abs_diff_eq;
+    use ndarray::array;
+
+    #[test]
+    fn positive_curvature_keeps_only_the_reversed_mode() {
+        let gradient = array![1.0, -4.0, 0.5];
+        let mode = array![1.0, 0.0, 0.0];
+        let eff = translated_gradient(&gradient, &mode, 0.25);
+        assert_abs_diff_eq!(eff[0], -1.0, epsilon = 1e-12);
+        assert_abs_diff_eq!(eff[1], 0.0, epsilon = 1e-12);
+        assert_abs_diff_eq!(eff[2], 0.0, epsilon = 1e-12);
+        let flat = translated_gradient(&gradient, &mode, 0.0);
+        assert_abs_diff_eq!(flat[1], 0.0, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn negative_curvature_reflects_the_parallel_part() {
+        let gradient = array![1.0, -4.0, 0.5];
+        let mode = array![1.0, 0.0, 0.0];
+        let eff = translated_gradient(&gradient, &mode, -1.5);
+        assert_abs_diff_eq!(eff[0], -1.0, epsilon = 1e-12);
+        assert_abs_diff_eq!(eff[1], -4.0, epsilon = 1e-12);
+        assert_abs_diff_eq!(eff[2], 0.5, epsilon = 1e-12);
     }
 }

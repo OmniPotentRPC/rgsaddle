@@ -5,7 +5,7 @@
 #include <stddef.h>
 
 _Static_assert(RGSADDLE_ABI_MAJOR == 1u, "main ABI major");
-_Static_assert(RGSADDLE_ABI_MINOR == 15u, "consolidated main ABI minor");
+_Static_assert(RGSADDLE_ABI_MINOR == 16u, "ABI minor");
 
 typedef struct {
   uint32_t major;
