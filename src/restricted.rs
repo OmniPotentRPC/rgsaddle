@@ -205,6 +205,29 @@ impl TrustRegion {
     /// Scale `s` so `||s|| <= delta`.
     pub fn clip(&self, s: &Array1<f64>) -> Array1<f64> {
         let n = nrm2(s.view());
+        let squared_normal_floor = f64::MIN_POSITIVE.sqrt();
+        if !n.is_finite()
+            || n < squared_normal_floor
+            || (self.delta > 0.0 && self.delta < squared_normal_floor)
+        {
+            let maximum = nrminf(s.view());
+            if maximum > 0.0 && maximum.is_finite() {
+                let mut scaled = s.mapv(|value| value/maximum);
+                let length = nrm2(scaled.view());
+                if maximum <= self.delta/length {
+                    return s.clone();
+                }
+                let factor = (self.delta/maximum)/length;
+                if factor > 0.0 {
+                    for (output, input) in scaled.iter_mut().zip(s.iter()) {
+                        *output = factor * input;
+                    }
+                } else {
+                    scaled.mapv_inplace(|value| (value/length) * self.delta);
+                }
+                return scaled;
+            }
+        }
         if n <= self.delta || n == 0.0 {
             return s.clone();
         }
