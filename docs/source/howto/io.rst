@@ -8,3 +8,12 @@ An explicit ``lattice_vectors`` matrix in the frame metadata takes precedence. O
 The ``chemfiles`` feature enables the readcon-core format adapters. ``readcon-db`` supplies the corpus dependency for hosts that store traces and restarts. Surface implementations own their neighbour-list choice.
 
 The triclinic metric and exact-lattice precedence are exercised by ``tests/io_cells.rs``.
+
+Build the optional native reader
+--------------------------------
+
+The ``chemfiles`` feature builds a native dependency with CMake. For CMake 4, set `the minimum policy version <https://cmake.org/cmake/help/latest/variable/CMAKE_POLICY_VERSION_MINIMUM.html>`_ to 3.5 for that dependency:
+
+.. code-block:: sh
+
+   CMAKE_POLICY_VERSION_MINIMUM=3.5 cargo build --locked --features chemfiles
