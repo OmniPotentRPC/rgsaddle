@@ -35,3 +35,9 @@ docs/source/explanation/
 docs/source/howto/
 docs/source/reference/
 docs/source/tutorials/
+docs/source/index.rst
+docs/source/getting-started.rst
+docs/source/explanation.rst
+docs/source/howto.rst
+docs/source/reference.rst
+docs/source/seat.rst

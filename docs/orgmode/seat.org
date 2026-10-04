@@ -1,5 +1,7 @@
 #+title: In the seat
 #+options: toc:nil num:nil
 
-Saddle mechanics, not a memory habitat. The seat is ljos. The name
-leiðarljós is a guiding light; see https://leidarljos.github.io/docs/about/ .
+This crate is saddle mechanics, not a memory habitat. The seat that sits on a ticket is [[https://leidarljos.github.io/docs/sit/][ljos]]. rgmin is the minimizer. rgpot is the potential RPC. rgsaddle is the band, the inverted mode, and the index-1 Newton step.
+
+* The name
+[[https://leidarljos.github.io/docs/about/][leiðarljós]] is Icelandic for guiding light. =ljos= is the CLI.
