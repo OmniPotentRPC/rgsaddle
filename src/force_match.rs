@@ -89,7 +89,7 @@ pub fn covalent_pairs(
     z: &[u8],
     scale: f64,
 ) -> Result<Vec<[usize; 2]>, SaddleError> {
-    if x.len() % 3 != 0 || x.len() / 3 != z.len() {
+    if !x.len().is_multiple_of(3) || x.len() / 3 != z.len() {
         return Err(SaddleError::Shape(
             "force_match frame is not 3N with matching Z".into(),
         ));
@@ -193,7 +193,7 @@ pub fn force_match(
     z: &[u8],
     opts: &ForceMatchOpts,
 ) -> Result<ForceMatchReport, SaddleError> {
-    if x.len() % 3 != 0 || x.len() / 3 != z.len() || g.len() != x.len() {
+    if !x.len().is_multiple_of(3) || x.len() / 3 != z.len() || g.len() != x.len() {
         return Err(SaddleError::Shape(
             "force_match frame is not 3N with matching Z and gradient".into(),
         ));
@@ -726,12 +726,14 @@ fn objective_grad(
     Ok((chi, dchi))
 }
 
+type LinearForceFit = (Array1<f64>, Array2<f64>, Array3<f64>);
+
 fn jac_and_fit(
     set: &PairSet,
     ndof: usize,
     pars: ArrayView1<f64>,
     ftrue: &Array1<f64>,
-) -> Result<(Array1<f64>, Array2<f64>, Array3<f64>), SaddleError> {
+) -> Result<LinearForceFit, SaddleError> {
     let nlin = set.nlin();
     let nnonlin = set.nnonlin();
     let mut jac = Array2::<f64>::zeros((ndof, nlin));

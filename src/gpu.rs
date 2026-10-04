@@ -120,10 +120,10 @@ fn min_dim_from_raw(raw: &str) -> Option<usize> {
 
 fn env_disabled() -> bool {
     for key in ["RGSADDLE_DISABLE_GPU", "SELLA_DISABLE_GPU"] {
-        if let Ok(v) = std::env::var(key) {
-            if flag_disables_gpu(&v) {
-                return true;
-            }
+        if let Ok(v) = std::env::var(key)
+            && flag_disables_gpu(&v)
+        {
+            return true;
         }
     }
     false
@@ -131,10 +131,10 @@ fn env_disabled() -> bool {
 
 fn env_min_dim() -> usize {
     for key in ["RGSADDLE_GPU_MIN_DIM", "SELLA_GPU_MIN_DIM"] {
-        if let Ok(v) = std::env::var(key) {
-            if let Some(n) = min_dim_from_raw(&v) {
-                return n;
-            }
+        if let Ok(v) = std::env::var(key)
+            && let Some(n) = min_dim_from_raw(&v)
+        {
+            return n;
         }
     }
     GPU_MIN_DIM
@@ -147,10 +147,10 @@ pub fn oom_floor() -> Option<usize> {
 
 /// Sella `_record_oom(n)`: refuse later offload for shapes `>= n`.
 pub fn record_oom(n: usize) {
-    if let Ok(mut g) = OOM_FLOOR.lock() {
-        if g.is_none_or(|floor| n < floor) {
-            *g = Some(n);
-        }
+    if let Ok(mut g) = OOM_FLOOR.lock()
+        && g.is_none_or(|floor| n < floor)
+    {
+        *g = Some(n);
     }
 }
 
@@ -249,12 +249,11 @@ pub fn gpu_eigh(
         return Err(SaddleError::Shape("gpu_eigh needs a square matrix".into()));
     }
     let n = a.nrows();
-    if policy.gpu_ok(n) {
-        if let Some(dev) = to_gpu_matrix(a) {
-            if let Some(pair) = gpu_eigh_t(&dev) {
-                return Ok(pair);
-            }
-        }
+    if policy.gpu_ok(n)
+        && let Some(dev) = to_gpu_matrix(a)
+        && let Some(pair) = gpu_eigh_t(&dev)
+    {
+        return Ok(pair);
     }
     exact_eigh(a)
 }
