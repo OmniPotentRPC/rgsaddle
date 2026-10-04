@@ -517,6 +517,16 @@ fn prepare_solid(
     ))
 }
 
+/// Energies, gradients, stresses, band positions and band cells of one
+/// solid-state evaluation.
+type SolidEvaluation = (
+    Array1<f64>,
+    Array2<f64>,
+    Array2<f64>,
+    Array2<f64>,
+    Vec<Cell>,
+);
+
 fn evaluate_solid(
     state: &BandState,
     surface: &dyn BandSurface,
@@ -525,16 +535,7 @@ fn evaluate_solid(
     cell_first: Cell,
     cell_last: Cell,
     x: ArrayView1<f64>,
-) -> Result<
-    (
-        Array1<f64>,
-        Array2<f64>,
-        Array2<f64>,
-        Array2<f64>,
-        Vec<Cell>,
-    ),
-    SaddleError,
-> {
+) -> Result<SolidEvaluation, SaddleError> {
     let dof = endpoint_first.len();
     let seg = dof + 9;
     let n_interior = x.len() / seg;

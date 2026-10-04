@@ -12,13 +12,19 @@ use ndarray::{Array1, ArrayView1};
 use crate::cell_log::{M3, m3_det, m3_inv, m3_mul};
 use crate::error::SaddleError;
 
+/// True when `value` is not strictly above `floor`; NaN is not above
+/// anything, so it fails every bound written with this test.
+fn not_above(value: f64, floor: f64) -> bool {
+    value.partial_cmp(&floor) != Some(std::cmp::Ordering::Greater)
+}
+
 /// `J = (V / N)^{1/3} N^{1/2} weight`, with `V` the mean endpoint volume.
 pub fn solid_state_jacobian(
     mean_volume: f64,
     n_atoms: usize,
     weight: f64,
 ) -> Result<f64, SaddleError> {
-    if !(mean_volume > 0.0) || n_atoms < 1 || !(weight > 0.0) || !weight.is_finite() {
+    if not_above(mean_volume, 0.0) || n_atoms < 1 || not_above(weight, 0.0) || !weight.is_finite() {
         return Err(SaddleError::Invalid(
             "solid-state Jacobian needs a positive volume, atom count, and weight".into(),
         ));
@@ -90,7 +96,7 @@ pub fn orient_lower_triangular(
     let a = cell[0];
     let b = cell[1];
     let na = norm3(a);
-    if !(na > 1e-12) {
+    if not_above(na, 1e-12) {
         return Err(SaddleError::Invalid(
             "solid-state cell has a vanishing first lattice vector".into(),
         ));
@@ -103,7 +109,7 @@ pub fn orient_lower_triangular(
         b[2] - along * e1[2],
     ];
     let nb = norm3(b_perp);
-    if !(nb > 1e-12) {
+    if not_above(nb, 1e-12) {
         return Err(SaddleError::Invalid(
             "solid-state cell has parallel lattice vectors".into(),
         ));
@@ -117,7 +123,7 @@ pub fn orient_lower_triangular(
     ];
     let mut oriented = m3_mul(*cell, rotation);
     zero_upper(&mut oriented);
-    if !(m3_det(oriented).abs() > 1e-18) {
+    if not_above(m3_det(oriented).abs(), 1e-18) {
         return Err(SaddleError::Invalid(
             "solid-state orientation produced a singular cell".into(),
         ));
@@ -177,7 +183,7 @@ pub fn joint_displacement(
     pos_to: ArrayView1<f64>,
     jacobian: f64,
 ) -> Result<(Array1<f64>, M3), SaddleError> {
-    if !(jacobian > 0.0) {
+    if not_above(jacobian, 0.0) {
         return Err(SaddleError::Invalid(
             "solid-state displacement needs a positive Jacobian".into(),
         ));
@@ -218,14 +224,14 @@ pub fn cell_neb_force(
     jacobian: f64,
     pressure: f64,
 ) -> Result<M3, SaddleError> {
-    if !(volume > 0.0) || !(jacobian > 0.0) || !pressure.is_finite() {
+    if not_above(volume, 0.0) || not_above(jacobian, 0.0) || !pressure.is_finite() {
         return Err(SaddleError::Invalid(
             "solid-state cell force needs a positive volume and Jacobian".into(),
         ));
     }
     let mut stress = cauchy;
-    for i in 0..3 {
-        stress[i][i] += pressure;
+    for (i, row) in stress.iter_mut().enumerate() {
+        row[i] += pressure;
     }
     let mut force = m3_scale(-(volume / jacobian), stress);
     zero_upper(&mut force);
@@ -261,7 +267,7 @@ pub fn cartesian_step(
     cell_force: M3,
     jacobian: f64,
 ) -> Result<(Array1<f64>, M3), SaddleError> {
-    if !(jacobian > 0.0) {
+    if not_above(jacobian, 0.0) {
         return Err(SaddleError::Invalid(
             "solid-state step needs a positive Jacobian".into(),
         ));
@@ -320,6 +326,22 @@ mod tests {
 
     fn diag(x: f64, y: f64, z: f64) -> M3 {
         [[x, 0.0, 0.0], [0.0, y, 0.0], [0.0, 0.0, z]]
+    }
+
+    #[test]
+    fn a_nan_bound_input_is_refused() {
+        let nan = f64::NAN;
+        assert!(solid_state_jacobian(nan, 8, 1.0).is_err());
+        assert!(solid_state_jacobian(64.0, 8, nan).is_err());
+        let id = diag(1.0, 1.0, 1.0);
+        assert!(cell_neb_force(id, nan, 1.0, 0.0).is_err());
+        assert!(cell_neb_force(id, 1.0, nan, 0.0).is_err());
+        let pos = array![0.0, 0.0, 0.0];
+        assert!(cartesian_step(pos.view(), id, pos.view(), id, nan).is_err());
+        assert!(joint_displacement(id, pos.view(), id, pos.view(), nan).is_err());
+        let mut cell = [[nan, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let mut positions = array![0.0, 0.0, 0.0];
+        assert!(orient_lower_triangular(&mut cell, &mut positions).is_err());
     }
 
     #[test]
