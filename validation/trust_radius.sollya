@@ -10,8 +10,8 @@ for radius in [|1e-18, 1e-20|] do {
     x = round(scale*sx, 53, RN);
     y = round(scale*sy, 53, RN);
     squared = round(round(x*x, 53, RN) + round(y*y, 53, RN), 53, RN);
-    length = round(sqrt(squared), 53, RN);
-    if (length <= radius*(1 + 8*epsilon) &&
-        length >= radius*(1 - 8*epsilon)) then print("CERTIFIED_RADIAL_WITNESS");
+    step_norm = round(sqrt(squared), 53, RN);
+    if (step_norm <= radius*(1 + 8*epsilon) &&
+        step_norm >= radius*(1 - 8*epsilon)) then print("CERTIFIED_RADIAL_WITNESS");
 };
 quit;

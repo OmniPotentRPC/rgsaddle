@@ -1,0 +1,30 @@
+prec = 256!;
+epsilon = 2^(-52);
+procedure witness(sx, sy, radius) {
+    var largest, nx, ny, squared, step_norm, quotient, factor, x, y, physical;
+    sx = round(sx, 53, RN);
+    sy = round(sy, 53, RN);
+    radius = round(radius, 53, RN);
+    largest = sy;
+    nx = round(sx/largest, 53, RN);
+    ny = round(sy/largest, 53, RN);
+    squared = round(round(nx*nx, 53, RN) + round(ny*ny, 53, RN), 53, RN);
+    step_norm = round(sqrt(squared), 53, RN);
+    quotient = radius/largest;
+    if quotient < 2^(-1075) then {
+        x = round(round(nx/step_norm, 53, RN)*radius, 53, RN);
+        y = round(round(ny/step_norm, 53, RN)*radius, 53, RN);
+    } else {
+        factor = round(round(quotient, 53, RN)/step_norm, 53, RN);
+        x = round(factor*sx, 53, RN);
+        y = round(factor*sy, 53, RN);
+    };
+    physical = sqrt(x*x + y*y);
+    if (physical <= radius*(1 + 8*epsilon) &&
+        physical >= radius*(1 - 8*epsilon)) then
+        print("CERTIFIED_FINITE_SCALE_CLIP");
+};
+witness(3e-200, 4e-200, 1e-201);
+witness(3e200, 4e200, 1.0);
+witness(3e200, 4e200, 1e-201);
+quit;
