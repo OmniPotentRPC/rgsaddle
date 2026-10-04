@@ -187,16 +187,18 @@ impl TrustRegion {
         assert_eq!(s.len(), dsda.len(), "step derivative dimensions must match");
         let scale = nrminf(s.view());
         if scale == 0.0 {
-            return dsda.iter().fold(0.0_f64, |length, value| length.hypot(*value));
+            return dsda
+                .iter()
+                .fold(0.0_f64, |length, value| length.hypot(*value));
         }
-        let mut direction = s.mapv(|value| value/scale);
+        let mut direction = s.mapv(|value| value / scale);
         let length = nrm2(direction.view());
-        direction.mapv_inplace(|value| value/length);
+        direction.mapv_inplace(|value| value / length);
         let derivative_scale = nrminf(dsda.view());
         if derivative_scale == 0.0 {
             return 0.0;
         }
-        let scaled_derivative = dsda.mapv(|value| value/derivative_scale);
+        let scaled_derivative = dsda.mapv(|value| value / derivative_scale);
         rgmin::vecops::dot(scaled_derivative.view(), direction.view()) * derivative_scale
     }
 
