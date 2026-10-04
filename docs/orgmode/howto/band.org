@@ -1,7 +1,7 @@
 #+TITLE: Step a NEB band
 #+OPTIONS: toc:nil num:nil
 
-~BandSession::step~ assembles the tangent, spring and projection forces and advances one host iteration. The fast inertial relaxation engine (~FIRE~) and limited-memory Broyden-Fletcher-Goldfarb-Shanno (~L-BFGS~) methods preserve the endpoints. ~L-BFGS~ computes its direction from the assembled force; summed image energy is not a descent criterion for that force.
+~BandSession::step~ assembles the tangent, spring and projection forces and advances one host iteration. The fast inertial relaxation engine (~FIRE~) and limited-memory Broyden-Fletcher-Goldfarb-Shanno (~L-BFGS~) methods preserve the endpoints. ~L-BFGS~ computes its direction from the assembled force; summed image energy is not a descent criterion for that force. It also arms eOn's resets: a two-loop step that reaches the per-atom cap or faces away from the force drops the stored pairs and steps along the force, and an empty memory scales that step by 0.01.
 
 Call ~reset~ when the surface changes. The session retains evaluated endpoints and the accepted band while the surface remains valid. A ~Cell~ supplies minimum-image differences for periodic configurations.
 

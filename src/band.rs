@@ -694,6 +694,11 @@ impl BandSession {
         // steps unconditionally.
         if matches!(config.method, Method::Lbfgs { .. }) {
             solver.set_accept(Accept::Step);
+            // eOn's L-BFGS resets: a two-loop step that reaches the
+            // per-atom cap or faces away from the force drops its
+            // pairs and steps along the force, and an empty memory
+            // scales that step by 0.01.
+            solver.set_lbfgs_neb_guards(true);
         }
         Ok(Self {
             config,

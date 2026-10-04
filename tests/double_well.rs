@@ -332,6 +332,31 @@ fn lbfgs_band_steps_once_per_evaluation_and_converges() {
 }
 
 #[test]
+fn lbfgs_band_opens_with_the_neb_scale() {
+    // Empty memory scales the first step by 0.01, so the opening step
+    // follows the force at one hundredth of its length. The unguarded
+    // step is the force itself, clipped at max_move.
+    let n_images = 9;
+    let max_move = 0.1;
+    let config = BandConfig {
+        max_move,
+        method: rgmin::Method::Lbfgs { memory: 10 },
+        ..BandConfig::default()
+    };
+    let start = initial_band(n_images);
+    let mut session = BandSession::new(config, start.clone()).unwrap();
+    session.step(&DoubleWell).unwrap();
+    let moved = session.positions();
+    let mut largest = 0.0_f64;
+    for i in 1..n_images - 1 {
+        let d = (&moved.row(i) - &start.row(i)).mapv(|v| v * v).sum().sqrt();
+        largest = largest.max(d);
+    }
+    assert!(largest > 0.0, "the band did not move");
+    assert!(largest < 0.2 * max_move, "opening step {largest}");
+}
+
+#[test]
 fn value_testing_methods_are_refused() {
     for method in [rgmin::Method::Bfgs, rgmin::Method::Steepest] {
         let config = BandConfig {
