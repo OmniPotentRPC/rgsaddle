@@ -482,8 +482,10 @@ fn max_abs(v: &Array1<f64>) -> f64 {
 ///
 /// The climbing image is decided on this evaluation's energies, so
 /// the force returned already carries the climb: once armed, the
-/// highest interior image climbs; on the evaluation that arms it, the
-/// climbing image's force is reassembled before returning.
+/// highest interior image climbs while it lies above both fixed
+/// endpoints (eOn's rule; a monotonic band keeps the spring on every
+/// image); on the evaluation that arms it, the climbing image's force
+/// is reassembled before returning.
 fn assemble_band(
     config: &BandConfig,
     state: &BandState,
@@ -502,7 +504,8 @@ fn assemble_band(
             max_i = i;
         }
     }
-    let climb_target = Some(max_i);
+    let endpoint_ceiling = energies[0].max(energies[n_images - 1]);
+    let climb_target = (energies[max_i] > endpoint_ceiling).then_some(max_i);
     let climbing = config.climbing.is_some();
     let armed = climbing && state.armed.load(Ordering::Relaxed);
     if armed {
@@ -1182,5 +1185,24 @@ mod tests {
             gradient,
         );
         assert_force(&projected, &[0.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn monotonic_band_keeps_the_spring_on_every_image() {
+        let (positions, gradient) = two_atom_band();
+        let (projected, state) =
+            assemble(&infinite_climb(), vec![0.0, 1.0, 5.0], &positions, gradient);
+        assert_force(&projected, &[-2.5, 1.0, 0.0, 2.5, -1.0, 0.0]);
+        assert_eq!(state.ci(), None);
+    }
+
+    #[test]
+    fn interior_peak_climbs() {
+        let (positions, gradient) = two_atom_band();
+        let (projected, state) =
+            assemble(&infinite_climb(), vec![0.0, 4.0, 1.0], &positions, gradient);
+        // Climbing force (-2, 3, 0, 5, 1, 0) minus its mean (1.5, 2, 0).
+        assert_force(&projected, &[-3.5, 1.0, 0.0, 3.5, -1.0, 0.0]);
+        assert_eq!(state.ci(), Some(1));
     }
 }
