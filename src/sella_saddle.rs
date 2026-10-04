@@ -439,7 +439,12 @@ impl SellaSaddleSession {
         let max_force = self.config.force_gate.value(g1_r.view());
         if pred.abs() >= 1e-14 {
             self.rho = (energy - e0) / pred;
-            self.delta = update_trust(self.delta, self.rho, vnrm2(&vs), &self.config.schedule());
+            self.delta = update_trust(
+                self.delta,
+                self.rho,
+                self.config.restricted.step_magnitude(&s),
+                &self.config.schedule(),
+            );
         } else {
             self.rho = 1.0;
         }
@@ -514,7 +519,12 @@ impl SellaSaddleSession {
         let max_force = self.config.force_gate.value(g1.view());
         if pred.abs() >= 1e-14 {
             self.rho = (energy - e0) / pred;
-            self.delta = update_trust(self.delta, self.rho, vnrm2(&vs), &self.config.schedule());
+            self.delta = update_trust(
+                self.delta,
+                self.rho,
+                self.config.restricted.step_magnitude(&s),
+                &self.config.schedule(),
+            );
         } else {
             self.rho = 1.0;
         }
@@ -597,7 +607,12 @@ impl SellaSaddleSession {
         let max_force = self.config.force_gate.value(g1_cart.view());
         if pred.abs() >= 1e-14 {
             self.rho = (energy - e0) / pred;
-            self.delta = update_trust(self.delta, self.rho, vnrm2(&vs), &self.config.schedule());
+            self.delta = update_trust(
+                self.delta,
+                self.rho,
+                self.config.restricted.step_magnitude(&s),
+                &self.config.schedule(),
+            );
         } else {
             self.rho = 1.0;
         }
@@ -676,7 +691,12 @@ impl SellaSaddleSession {
         let max_force = self.config.force_gate.value(g1.view());
         if pred.abs() >= 1e-14 {
             self.rho = (energy - e0) / pred;
-            self.delta = update_trust(self.delta, self.rho, vnrm2(&vs), &self.config.schedule());
+            self.delta = update_trust(
+                self.delta,
+                self.rho,
+                self.config.restricted.step_magnitude(&s),
+                &self.config.schedule(),
+            );
         } else {
             self.rho = 1.0;
         }
