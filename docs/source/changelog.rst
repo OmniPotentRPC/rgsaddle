@@ -4,6 +4,7 @@ Changelog
 Unreleased
 ----------
 
+- Remove the mean Cartesian force from each multi-atom band image, as eOn does when every atom is free. ``BandConfig::remove_translation`` and the ``RGSADDLE_BAND_KEEP_TRANSLATION`` band flag keep the mean for hosts with fixed atoms.
 - Retain main's band and minimum-mode solver contracts alongside the Sella, reaction-path, constraint, cell and dynamics interfaces.
 - Require curvature measured at a moved stationary point before minimum-mode convergence.
 - Update the restricted atomic step radius with the largest atom displacement.

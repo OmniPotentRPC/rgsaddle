@@ -115,11 +115,19 @@ pub struct BandConfig {
     pub cell: Option<Cell>,
     pub force_tol: f64,
     pub max_move: f64,
+    /// Drop the mean Cartesian force of every image that has two or
+    /// more atoms. eOn does this when every atom is free and leaves
+    /// the mean in place when any atom is fixed, so a host with fixed
+    /// atoms clears this flag.
+    pub remove_translation: bool,
     /// Band stepper. FIRE by default (eOn's velocity NEB stepper).
     /// L-BFGS runs under rgmin's `Accept::Step`: the two-loop
     /// direction, capped per atom, one band evaluation per step and no
     /// energy test, since the projected force is not the gradient of
-    /// the pseudo-energy.
+    /// the pseudo-energy. It also arms rgmin's NEB guards: a two-loop
+    /// step that reaches the per-atom cap or faces away from the force
+    /// drops its pairs and steps along the force, and an empty memory
+    /// scales that step by 0.01.
     pub method: Method,
 }
 
@@ -136,6 +144,7 @@ impl Default for BandConfig {
             cell: None,
             force_tol: 1e-3,
             max_move: 0.2,
+            remove_translation: true,
             method: Method::Fire {
                 kind: rgmin::FireKind::V2,
             },
@@ -371,6 +380,30 @@ fn evaluate_band(
     Ok((energies, gradients))
 }
 
+/// Remove the mean Cartesian force (eOn's `zeroTranslation`). An image
+/// with one atom has no internal force apart from the mean, so it
+/// keeps its force.
+pub(crate) fn remove_net_translation(force: &mut Array1<f64>) {
+    let n = force.len() / 3;
+    if n < 2 || force.len() != 3 * n {
+        return;
+    }
+    let mut mean = [0.0; 3];
+    for atom in 0..n {
+        for (c, m) in mean.iter_mut().enumerate() {
+            *m += force[3 * atom + c];
+        }
+    }
+    for m in &mut mean {
+        *m /= n as f64;
+    }
+    for atom in 0..n {
+        for (c, m) in mean.iter().enumerate() {
+            force[3 * atom + c] -= m;
+        }
+    }
+}
+
 /// Projected force on interior image `i`, climbing when `climb`.
 #[allow(clippy::too_many_arguments)]
 fn image_force(
@@ -421,23 +454,23 @@ fn image_force(
         pos_diff_next.view(),
         pos_diff_prev.view(),
     );
-    if climb {
+    let mut projected = if climb {
         let dneb = if config.projection == ProjectionKind::DoublyNudged {
             let fp = force_perp(force.view(), tangent.view());
             dneb_component(spring.full.view(), tangent.view(), fp.view())
         } else {
             Array1::zeros(dof)
         };
-        Ok(climbing_image_force(
-            force.view(),
-            tangent.view(),
-            dneb.view(),
-        ))
+        climbing_image_force(force.view(), tangent.view(), dneb.view())
     } else {
-        Ok(config
+        config
             .projection
-            .project(force.view(), tangent.view(), &spring))
+            .project(force.view(), tangent.view(), &spring)
+    };
+    if config.remove_translation {
+        remove_net_translation(&mut projected);
     }
+    Ok(projected)
 }
 
 fn max_abs(v: &Array1<f64>) -> f64 {
@@ -469,12 +502,15 @@ fn assemble_band(
             max_i = i;
         }
     }
+    let climb_target = Some(max_i);
     let climbing = config.climbing.is_some();
     let armed = climbing && state.armed.load(Ordering::Relaxed);
     if armed {
-        state.ci_index.store(max_i as i64, Ordering::Relaxed);
+        state
+            .ci_index
+            .store(climb_target.map_or(-1, |i| i as i64), Ordering::Relaxed);
     }
-    let ci_at = if armed { Some(max_i) } else { None };
+    let ci_at = if armed { climb_target } else { None };
 
     let mut projected = Array1::zeros((n_images - 2) * dof);
     for i in 1..n_images - 1 {
@@ -503,21 +539,23 @@ fn assemble_band(
         && (max_component < baseline * ci.trigger_factor || max_component < ci.trigger_force)
     {
         state.armed.store(true, Ordering::Relaxed);
-        state.ci_index.store(max_i as i64, Ordering::Relaxed);
-        let f = image_force(
-            config,
-            max_i,
-            true,
-            endpoint_first,
-            endpoint_last,
-            x,
-            &energies,
-            &gradients,
-        )?;
-        projected
-            .slice_mut(s![(max_i - 1) * dof..max_i * dof])
-            .assign(&f);
-        max_component = state.convergence_force(&projected);
+        if let Some(ci_i) = climb_target {
+            state.ci_index.store(ci_i as i64, Ordering::Relaxed);
+            let f = image_force(
+                config,
+                ci_i,
+                true,
+                endpoint_first,
+                endpoint_last,
+                x,
+                &energies,
+                &gradients,
+            )?;
+            projected
+                .slice_mut(s![(ci_i - 1) * dof..ci_i * dof])
+                .assign(&f);
+            max_component = state.convergence_force(&projected);
+        }
     }
 
     if let Some(last) = state
@@ -1007,5 +1045,142 @@ mod tests {
         assert_abs_diff_eq!(d[0], -1.0, epsilon = 1e-12);
         assert_abs_diff_eq!(d[1], 2.0, epsilon = 1e-12);
         assert_abs_diff_eq!(d[2], 12.0, epsilon = 1e-12);
+    }
+
+    struct Prescribed {
+        energy: Vec<f64>,
+        gradient: Array2<f64>,
+    }
+
+    impl BandSurface for Prescribed {
+        fn eval(
+            &self,
+            positions: ArrayView2<f64>,
+            energies: &mut Array1<f64>,
+            gradients: &mut Array2<f64>,
+        ) -> Result<(), SaddleError> {
+            assert_eq!(positions.nrows(), self.energy.len());
+            for (i, energy) in self.energy.iter().enumerate() {
+                energies[i] = *energy;
+            }
+            gradients.assign(&self.gradient);
+            Ok(())
+        }
+    }
+
+    fn infinite_climb() -> BandConfig {
+        BandConfig {
+            climbing: Some(CiConfig {
+                trigger_factor: 1.0,
+                trigger_force: f64::INFINITY,
+            }),
+            ..BandConfig::default()
+        }
+    }
+
+    /// Two atoms, three images at equal spacing; the tangent lies along
+    /// the first atom's x. The force on the middle image is (2, 3, 0)
+    /// and (5, 1, 0).
+    fn two_atom_band() -> (Array2<f64>, Array2<f64>) {
+        let positions = Array2::from_shape_vec(
+            (3, 6),
+            vec![
+                0.0, 0.0, 0.0, 5.0, 0.0, 0.0, 1.0, 0.0, 0.0, 5.0, 0.0, 0.0, 2.0, 0.0, 0.0, 5.0,
+                0.0, 0.0,
+            ],
+        )
+        .unwrap();
+        let gradient = Array2::from_shape_vec(
+            (3, 6),
+            vec![
+                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -2.0, -3.0, 0.0, -5.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                0.0, 0.0,
+            ],
+        )
+        .unwrap();
+        (positions, gradient)
+    }
+
+    fn assemble(
+        config: &BandConfig,
+        energy: Vec<f64>,
+        positions: &Array2<f64>,
+        gradient: Array2<f64>,
+    ) -> (Array1<f64>, BandState) {
+        let surface = Prescribed { energy, gradient };
+        let state = BandState::new();
+        let (_, projected, _) = assemble_band(
+            config,
+            &state,
+            &surface,
+            positions.row(0),
+            positions.row(2),
+            positions.row(1),
+        )
+        .unwrap();
+        (projected, state)
+    }
+
+    fn assert_force(got: &Array1<f64>, want: &[f64]) {
+        assert_eq!(got.len(), want.len());
+        for (g, w) in got.iter().zip(want) {
+            assert_abs_diff_eq!(*g, *w, epsilon = 1e-12);
+        }
+    }
+
+    #[test]
+    fn net_translation_leaves_a_multi_atom_image_force() {
+        let (positions, gradient) = two_atom_band();
+        let (projected, _) = assemble(
+            &BandConfig::default(),
+            vec![0.0, 1.0, 5.0],
+            &positions,
+            gradient,
+        );
+        // The perpendicular force is (0, 3, 0, 5, 1, 0); its mean
+        // (2.5, 2, 0) leaves atom 0 at (-2.5, 1, 0) and atom 1 at
+        // (2.5, -1, 0).
+        assert_force(&projected, &[-2.5, 1.0, 0.0, 2.5, -1.0, 0.0]);
+    }
+
+    #[test]
+    fn trust_region_force_drops_net_translation() {
+        let (positions, gradient) = two_atom_band();
+        let surface = Prescribed {
+            energy: vec![0.0, 1.0, 5.0],
+            gradient,
+        };
+        let forces =
+            crate::rtr::band_forces(&BandConfig::default(), &surface, positions.view(), None)
+                .unwrap();
+        assert_force(&forces.force, &[-2.5, 1.0, 0.0, 2.5, -1.0, 0.0]);
+    }
+
+    #[test]
+    fn keep_translation_leaves_the_mean_in_the_force() {
+        let (positions, gradient) = two_atom_band();
+        let config = BandConfig {
+            remove_translation: false,
+            ..BandConfig::default()
+        };
+        let (projected, _) = assemble(&config, vec![0.0, 1.0, 5.0], &positions, gradient);
+        assert_force(&projected, &[0.0, 3.0, 0.0, 5.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn one_atom_image_keeps_its_force() {
+        let positions =
+            Array2::from_shape_vec((3, 3), vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 2.0, 0.0, 0.0])
+                .unwrap();
+        let gradient =
+            Array2::from_shape_vec((3, 3), vec![0.0, 0.0, 0.0, -1.0, -2.0, -3.0, 0.0, 0.0, 0.0])
+                .unwrap();
+        let (projected, _) = assemble(
+            &BandConfig::default(),
+            vec![0.0, 1.0, 5.0],
+            &positions,
+            gradient,
+        );
+        assert_force(&projected, &[0.0, 2.0, 3.0]);
     }
 }

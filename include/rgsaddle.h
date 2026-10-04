@@ -41,6 +41,14 @@ extern "C" {
  */
 #define RGSADDLE_BAND_PER_IMAGE (1ull << 0)
 
+/**
+ * Band config flags bit 1. The projected force keeps its mean
+ * Cartesian part. Without it every image with two or more atoms loses
+ * that mean, as in eOn when every atom is free. Set it when any atom is
+ * fixed.
+ */
+#define RGSADDLE_BAND_KEEP_TRANSLATION (1ull << 1)
+
 /** Request flags bit 0. positions and gradients are one image. */
 #define RGSADDLE_REQ_ONE_IMAGE (1ull << 0)
 

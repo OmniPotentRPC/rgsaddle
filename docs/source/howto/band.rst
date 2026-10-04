@@ -5,6 +5,8 @@ Step a NEB band
 
 Call ``reset`` when the surface changes. The session retains evaluated endpoints and the accepted band while the surface remains valid. A ``Cell`` supplies minimum-image differences for periodic configurations.
 
+The projected force of every image with two or more atoms loses its mean Cartesian part, as in eOn when every atom is free. A host with fixed atoms sets ``BandConfig::remove_translation`` to ``false``, or ``RGSADDLE_BAND_KEEP_TRANSLATION`` in the C band config flags, to keep the mean. An image with one atom keeps its force.
+
 ``set_rtr(Some(RtrConfig::default()))`` selects the projected trust-region band method. Its model uses the complete displacement after equal-arc redistribution and the radius cap. The projected method is a heuristic for the nonconservative band force; the report does not certify an energy minimum.
 
 ``set_force_gate`` chooses the force norm. ``set_highs(true)`` enables rgmin's feasible-step control when the library has the ``highs`` feature. The default ``FIRE`` and ``L-BFGS`` dispatch is unchanged by compiling that feature.

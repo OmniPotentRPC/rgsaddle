@@ -32,6 +32,9 @@ pub const RGSADDLE_ABI_MINOR: u32 = 15;
 /// carried by the evaluation: every image on the first evaluation
 /// after create or set_positions, the interior images afterwards.
 pub const RGSADDLE_BAND_PER_IMAGE: u64 = 1;
+/// Band config bit 1. The projected force keeps its mean Cartesian
+/// part; a host with fixed atoms sets it, as eOn does.
+pub const RGSADDLE_BAND_KEEP_TRANSLATION: u64 = 2;
 
 pub const RGSADDLE_OK: i32 = 0;
 pub const RGSADDLE_NULL_SESSION: i32 = -1;
@@ -375,6 +378,7 @@ pub unsafe extern "C" fn rgsaddle_band_create(
         cell,
         force_tol: cfg.force_tol,
         max_move: cfg.max_move,
+        remove_translation: cfg.flags & RGSADDLE_BAND_KEEP_TRANSLATION == 0,
         method: method_of(cfg.method, cfg.memory),
     };
     match BandSession::new(band_config, initial) {
