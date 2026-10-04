@@ -30,11 +30,13 @@ pub mod minmode;
 pub mod nichols;
 pub mod prfo;
 pub mod projection;
+pub mod solid_state;
 pub mod spring;
 pub mod tangent;
 
 pub use band::{
     BandConfig, BandEvaluation, BandReport, BandSession, BandStatus, BandSurface, Cell, CiConfig,
+    SolidState,
 };
 pub use error::SaddleError;
 pub use minmode::{
