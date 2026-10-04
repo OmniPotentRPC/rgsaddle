@@ -1,6 +1,52 @@
 #+title: Getting started
 #+options: toc:nil num:nil
 
-=cargo add rgsaddle=. Implement =BandSurface=. =BandSession::new= then
-=step= until =BandStatus::Converged=. Default stepper is FIRE. Call
-=reset= after a model update. Numbers live in =tests/double_well.rs=.
+A host builds a band, steps until the projected force is under =force_tol=, and never lets this crate own the loop.
+
+* 1. Depend on the published crate
+#+begin_src toml
+[dependencies]
+rgsaddle = "0.2"
+rgmin = "0.3"
+ndarray = "0.17"
+#+end_src
+
+* 2. Implement =BandSurface=
+One eval fills energies and gradients for the rows it receives: the whole band on the first call, the interior images afterwards (the endpoints never move, so their energies are cached). The double-well test surface is the shortest honest example:
+
+#+begin_src rust
+impl BandSurface for DoubleWell {
+    fn eval(
+        &self,
+        positions: ArrayView2<f64>,
+        energies: &mut Array1<f64>,
+        gradients: &mut Array2<f64>,
+    ) -> Result<(), SaddleError> {
+        // V = (x² − 1)² + 2y² + 2z²
+        Ok(())
+    }
+}
+#+end_src
+
+* 3. Step
+#+begin_src rust
+let config = BandConfig {
+    force_tol: 1e-3,
+    max_move: 0.1,
+    ..BandConfig::default()
+};
+let mut session = BandSession::new(config, initial)?;
+loop {
+    let report = session.step(&surface)?;
+    if report.status == BandStatus::Converged {
+        break;
+    }
+}
+#+end_src
+
+Default stepper is FIRE, as in eOn's velocity NEB stepper. L-BFGS runs under rgmin's =Accept::Step=: the projected band force is not conservative, so a step is taken without an energy test.
+
+* 4. Reset when the surface changes
+=BandSession::reset= is the model-update boundary. Quasi-Newton history taken on one surface epoch must not survive onto the next.
+
+See =tests/double_well.rs= for the numbers the crate actually converges.

@@ -1,4 +1,4 @@
-;;; Export the nested guides without replacing the main landing pages.
+;;; Export every org page under docs/orgmode to reStructuredText under docs/source.
 (require 'package)
 (add-to-list 'package-archives '("melpa" . "https://melpa.org/packages/") t)
 (package-initialize)
@@ -11,8 +11,7 @@
        (output (expand-file-name "source" docs)))
   (dolist (file (directory-files-recursively source "\\.org$"))
     (let ((relative (file-relative-name file source)))
-      (when (or (string-match-p "/" relative) (equal relative "changelog.org"))
-        (with-current-buffer (find-file-noselect file)
-          (let ((destination (expand-file-name (concat (file-name-sans-extension relative) ".rst") output)))
-            (make-directory (file-name-directory destination) t)
-            (org-export-to-file 'rst destination)))))))
+      (with-current-buffer (find-file-noselect file)
+        (let ((destination (expand-file-name (concat (file-name-sans-extension relative) ".rst") output)))
+          (make-directory (file-name-directory destination) t)
+          (org-export-to-file 'rst destination))))))
