@@ -48,9 +48,11 @@ Band cache entries: ``rgsaddle_band_restart``,
 is cached at the current band). Min-mode reuse:
 ``rgsaddle_minmode_set_position``, ``rgsaddle_minmode_set_mode``,
 ``rgsaddle_minmode_estimate``; ``rgsaddle_minmode_config_t.difference``
-picks ``RGSADDLE_DIFFERENCE_FORWARD`` or ``_CENTRAL``.
-``RGSADDLE_ABI_MINOR`` is 5; the
-report's ``evaluations`` field took the place of ``reserved``.
+picks ``RGSADDLE_DIFFERENCE_FORWARD`` or ``_CENTRAL``, and
+``rotation_angle_tol`` stops a dimer rotation whose optimal angle falls
+under it (radians, 0 off). Both fields are read only from a config
+whose version minor is 5 or newer. ``RGSADDLE_ABI_MINOR`` is 15; the report's
+``evaluations`` field took the place of ``reserved`` at minor 5.
 ``cargo cinstall`` installs ``include/rgsaddle.h`` as written.
 
 Tests that pin the contract
