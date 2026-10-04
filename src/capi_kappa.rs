@@ -126,6 +126,7 @@ pub unsafe extern "C" fn rgsaddle_kappa_dimer_force(
             krylov: cfg.krylov_dimension as usize,
             max_iter: cfg.max_iterations as usize,
             tol: cfg.tolerance,
+            ..EigenParams::default()
         },
     };
     let result = kappa_dimer_force(
