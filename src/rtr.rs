@@ -111,7 +111,7 @@ fn band_forces_with_gate<S: BandSurface + ?Sized>(
             pos_diff_next.view(),
             pos_diff_prev.view(),
         );
-        let image_force = if ci == Some(i) {
+        let mut image_force = if ci == Some(i) {
             let dneb = if config.projection == ProjectionKind::DoublyNudged {
                 let fp = force_perp(true_force.view(), tangent.view());
                 dneb_component(spring.full.view(), tangent.view(), fp.view())
@@ -124,6 +124,9 @@ fn band_forces_with_gate<S: BandSurface + ?Sized>(
                 .projection
                 .project(true_force.view(), tangent.view(), &spring)
         };
+        if config.remove_translation {
+            crate::band::remove_net_translation(&mut image_force);
+        }
         force
             .slice_mut(s![(i - 1) * dof..i * dof])
             .assign(&image_force);
