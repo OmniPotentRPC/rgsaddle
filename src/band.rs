@@ -153,6 +153,10 @@ pub struct BandConfig {
     pub method: Method,
     /// Joint atomic and cell block. `None` is the atomic band.
     pub solid: Option<SolidState>,
+    /// Ask for the quick-min step. The pinned minimizer does not
+    /// provide it, so [`BandSession::new`] refuses until that revision
+    /// is the dependency and this flag maps onto `Method::QuickMin`.
+    pub quickmin: bool,
 }
 
 impl Default for BandConfig {
@@ -173,6 +177,7 @@ impl Default for BandConfig {
                 kind: rgmin::FireKind::V2,
             },
             solid: None,
+            quickmin: false,
         }
     }
 }
@@ -1101,6 +1106,11 @@ impl BandSession {
         }
         if !initial.iter().all(|v| v.is_finite()) {
             return Err(SaddleError::NonFinite("band positions"));
+        }
+        if config.quickmin {
+            return Err(SaddleError::Invalid(
+                "quick-min is not in the pinned minimizer; map BandConfig::quickmin onto Method::QuickMin and depend on the revision that defines it".into(),
+            ));
         }
         check_force_driven(&config.method)?;
         let (positions, solid) = prepare_solid(&config, initial)?;

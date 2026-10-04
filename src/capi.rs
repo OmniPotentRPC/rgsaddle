@@ -11,7 +11,7 @@ use std::slice;
 use ndarray::{Array1, Array2, ArrayView2};
 use rgmin::{FireKind, Method};
 
-use crate::band::{BandConfig, BandSession, BandStatus, BandSurface, Cell, CiConfig};
+use crate::band::{BandConfig, BandSession, BandStatus, BandSurface, Cell, CiConfig, SolidState};
 use crate::error::SaddleError;
 use crate::minmode::{
     FiniteDifference, MinModeConfig, MinModeKind, MinModeSession, MinModeStatus, PointSurface,
@@ -26,7 +26,7 @@ use crate::spring::SpringKind;
 use crate::tangent::TangentKind;
 
 pub const RGSADDLE_ABI_MAJOR: u32 = 1;
-pub const RGSADDLE_ABI_MINOR: u32 = 15;
+pub const RGSADDLE_ABI_MINOR: u32 = 16;
 
 /// Band config bit 0. The C step calls the surface once per image
 /// carried by the evaluation: every image on the first evaluation
@@ -136,7 +136,12 @@ struct CSurface {
     n_images: i64,
     per_image: bool,
     rows: std::sync::atomic::AtomicUsize,
+    stress: Option<RgsaddleStressFn>,
+    stress_user: *mut c_void,
 }
+
+pub type RgsaddleStressFn =
+    extern "C" fn(*mut c_void, i64, i64, i64, *const f64, *const f64, *mut f64) -> i32;
 
 // The C host is responsible for its own thread safety; the sessions
 // call the surface only from the thread that called step.
@@ -180,6 +185,54 @@ impl CSurface {
 }
 
 impl BandSurface for CSurface {
+    fn eval_cells(
+        &self,
+        positions: ArrayView2<f64>,
+        cells: &[Cell],
+        energies: &mut Array1<f64>,
+        gradients: &mut Array2<f64>,
+        stresses: &mut Array2<f64>,
+    ) -> Result<(), SaddleError> {
+        BandSurface::eval(self, positions, energies, gradients)?;
+        let Some(stress) = self.stress else {
+            return Err(SaddleError::Invalid(
+                "solid-state band requires a stress callback".into(),
+            ));
+        };
+        let n = positions.nrows();
+        if cells.len() != n {
+            return Err(SaddleError::Shape(
+                "solid-state stress call has a cell per image".into(),
+            ));
+        }
+        let pos: Vec<f64> = positions.iter().copied().collect();
+        let mut cell_flat = Vec::with_capacity(n * 9);
+        for cell in cells {
+            for row in cell.0 {
+                cell_flat.extend(row);
+            }
+        }
+        let mut out = vec![0.0; n * 9];
+        let rc = stress(
+            self.stress_user,
+            n as i64,
+            self.n_atoms,
+            -1,
+            pos.as_ptr(),
+            cell_flat.as_ptr(),
+            out.as_mut_ptr(),
+        );
+        if rc != 0 {
+            return Err(SaddleError::Surface(format!("stress callback rc={rc}")));
+        }
+        for row in 0..n {
+            for col in 0..9 {
+                stresses[(row, col)] = out[row * 9 + col];
+            }
+        }
+        Ok(())
+    }
+
     fn eval(
         &self,
         positions: ArrayView2<f64>,
@@ -237,6 +290,8 @@ pub struct RgsaddleBand {
     n_images: i64,
     n_atoms: i64,
     per_image: bool,
+    stress: Option<RgsaddleStressFn>,
+    stress_user: *mut c_void,
 }
 
 pub struct RgsaddleMinMode {
@@ -320,6 +375,57 @@ pub unsafe extern "C" fn rgsaddle_band_create(
     n_atoms: i64,
     positions: *const f64,
 ) -> *mut RgsaddleBand {
+    unsafe { band_from_parts(config, n_images, n_atoms, positions, None) }
+}
+
+/// # Safety
+/// `cells` holds `n_images * 9` row-major lattice entries. The other
+/// pointers follow [`rgsaddle_band_create`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_band_create_solid(
+    config: *const RgsaddleBandConfig,
+    n_images: i64,
+    n_atoms: i64,
+    positions: *const f64,
+    cells: *const f64,
+    pressure: f64,
+    weight: f64,
+) -> *mut RgsaddleBand {
+    if cells.is_null() || n_images < 3 {
+        return std::ptr::null_mut();
+    }
+    let raw = unsafe { slice::from_raw_parts(cells, (n_images as usize) * 9) };
+    let mut parsed = Vec::with_capacity(n_images as usize);
+    for image in 0..n_images as usize {
+        let c = &raw[image * 9..image * 9 + 9];
+        parsed.push(Cell([
+            [c[0], c[1], c[2]],
+            [c[3], c[4], c[5]],
+            [c[6], c[7], c[8]],
+        ]));
+    }
+    unsafe {
+        band_from_parts(
+            config,
+            n_images,
+            n_atoms,
+            positions,
+            Some(SolidState {
+                cells: parsed,
+                pressure,
+                weight,
+            }),
+        )
+    }
+}
+
+unsafe fn band_from_parts(
+    config: *const RgsaddleBandConfig,
+    n_images: i64,
+    n_atoms: i64,
+    positions: *const f64,
+    solid: Option<SolidState>,
+) -> *mut RgsaddleBand {
     if config.is_null() || positions.is_null() || n_images < 3 || n_atoms < 1 {
         return std::ptr::null_mut();
     }
@@ -380,6 +486,8 @@ pub unsafe extern "C" fn rgsaddle_band_create(
         max_move: cfg.max_move,
         remove_translation: cfg.flags & RGSADDLE_BAND_KEEP_TRANSLATION == 0,
         method: method_of(cfg.method, cfg.memory),
+        solid,
+        quickmin: cfg.method == 3,
     };
     match BandSession::new(band_config, initial) {
         Ok(mut session) => {
@@ -398,10 +506,29 @@ pub unsafe extern "C" fn rgsaddle_band_create(
                 n_images,
                 n_atoms,
                 per_image: cfg.flags & RGSADDLE_BAND_PER_IMAGE != 0,
+                stress: None,
+                stress_user: std::ptr::null_mut(),
             }))
         }
         Err(_) => std::ptr::null_mut(),
     }
+}
+
+/// # Safety
+/// `band` comes from a create call. `stress` may be null to clear it.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_band_set_stress(
+    band: *mut RgsaddleBand,
+    stress: Option<RgsaddleStressFn>,
+    user: *mut c_void,
+) -> i32 {
+    if band.is_null() {
+        return RGSADDLE_NULL_BAND;
+    }
+    let band = unsafe { &mut *band };
+    band.stress = stress;
+    band.stress_user = user;
+    RGSADDLE_OK
 }
 
 /// # Safety
@@ -430,6 +557,8 @@ pub unsafe extern "C" fn rgsaddle_band_step(
         n_images: band.n_images,
         per_image: band.per_image,
         rows: Default::default(),
+        stress: band.stress,
+        stress_user: band.stress_user,
     };
     match band.session.step(&cs) {
         Ok(report) => {
@@ -593,6 +722,9 @@ pub unsafe extern "C" fn rgsaddle_minmode_create(
     let dof = (3 * n_atoms) as usize;
     let x = Array1::from(unsafe { slice::from_raw_parts(position, dof) }.to_vec());
     let m = Array1::from(unsafe { slice::from_raw_parts(mode, dof) }.to_vec());
+    if cfg.method == 3 {
+        return std::ptr::null_mut();
+    }
     let mm_config = MinModeConfig {
         kind: if cfg.kind == 1 {
             MinModeKind::Lanczos
@@ -649,6 +781,8 @@ pub unsafe extern "C" fn rgsaddle_minmode_step(
         n_images: 1,
         per_image: false,
         rows: Default::default(),
+        stress: None,
+        stress_user: std::ptr::null_mut(),
     };
     match session.session.step(&cs) {
         Ok(report) => {
@@ -697,6 +831,8 @@ pub unsafe extern "C" fn rgsaddle_minmode_estimate(
         n_images: 1,
         per_image: false,
         rows: Default::default(),
+        stress: None,
+        stress_user: std::ptr::null_mut(),
     };
     match session.session.estimate_mode(&cs) {
         Ok(est) => {
@@ -1143,6 +1279,8 @@ pub unsafe extern "C" fn rgsaddle_index1_step(
         n_images: 1,
         per_image: false,
         rows: Default::default(),
+        stress: None,
+        stress_user: std::ptr::null_mut(),
     };
     match session.session.step(&cs) {
         Ok(report) => {
