@@ -35,13 +35,11 @@ fn unrestricted_step_requires_the_physical_radius() {
     let evals = array![-1.0, 4.0];
     let g = array![1e-6, 4e-7];
     let evecs = Array2::<f64>::eye(2);
-    let full = PartitionedRationalFunctionOptimization::new(1)
-        .get_s(&evals, &evecs, &g, 1.0);
+    let full = PartitionedRationalFunctionOptimization::new(1).get_s(&evals, &evecs, &g, 1.0);
     let length = nrm2(full.view());
     assert!(length > 1e-8);
     check_binding_radius(&evals, &g, length * (1.0 - 1e-9));
 }
-
 
 #[test]
 fn euclidean_clip_respects_radii_below_its_step_scale() {

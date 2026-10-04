@@ -437,8 +437,8 @@ mod tests {
         let uphill_shift = 0.5 * (-1.0 + 2.0_f64.sqrt());
         let downhill_shift = 0.5 * (4.0 - 16.64_f64.sqrt());
         let expected = array![
-            -g[0]/(evals[0] - uphill_shift),
-            -g[1]/(evals[1] - downhill_shift),
+            -g[0] / (evals[0] - uphill_shift),
+            -g[1] / (evals[1] - downhill_shift),
         ];
         assert!(nrm2((&step - &expected).view()) < 1e-12);
         assert!(step[0] > 0.0);
