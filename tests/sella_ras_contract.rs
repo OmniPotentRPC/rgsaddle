@@ -15,8 +15,9 @@ struct StiffQuadratic {
 impl PointSurface for StiffQuadratic {
     fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
         self.evaluations.fetch_add(1, Ordering::Relaxed);
-        let mut energy = 0.0;
+        let mut energy = -0.5 * x[0] * x[0];
         let mut gradient = Array1::zeros(x.len());
+        gradient[0] = -x[0];
         for i in [1, 4, 7] {
             energy += x[i] + 50.0 * x[i] * x[i];
             gradient[i] = 1.0 + 100.0 * x[i];
@@ -45,6 +46,9 @@ fn rejected_saddle_ras_model_shrinks_the_atomic_radius() {
         SellaGeom::Kind(ManifoldKind::Euclidean),
     )
     .unwrap();
+    let mut mode = Array1::zeros(9);
+    mode[0] = 1.0;
+    session.seed_mode(mode.view(), -1.0).unwrap();
     let initial_radius = session.delta();
     let report = session.step(&surface).unwrap();
 
