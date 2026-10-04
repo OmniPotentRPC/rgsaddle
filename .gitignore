@@ -27,3 +27,11 @@ rustc-ice-*.txt
 #.idea/
 docs/build/
 .pixi/
+
+# reStructuredText exported from docs/orgmode by docs/export.el
+docs/source/changelog.rst
+docs/source/contributing/
+docs/source/explanation/
+docs/source/howto/
+docs/source/reference/
+docs/source/tutorials/

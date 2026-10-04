@@ -1,4 +1,10 @@
 ;;; Export the nested guides without replacing the main landing pages.
+(require 'package)
+(add-to-list 'package-archives '("melpa" . "https://melpa.org/packages/") t)
+(package-initialize)
+(unless (package-installed-p 'ox-rst)
+  (package-refresh-contents)
+  (package-install 'ox-rst))
 (require 'ox-rst)
 (let* ((docs (file-name-directory (or load-file-name buffer-file-name)))
        (source (expand-file-name "orgmode" docs))

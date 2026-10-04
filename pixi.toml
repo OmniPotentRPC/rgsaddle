@@ -39,4 +39,5 @@ sphinxcontrib-rust = ">=1.0.0, <2"
 sphinx-rustdoc-postprocess = ">=0.1.0, <0.2"
 
 [feature.docs.tasks]
-docs-build = "sphinx-build -W --keep-going -b html docs/source docs/build/html"
+docs-export = "emacs --batch -l docs/export.el"
+docs-build = { cmd = "sphinx-build -W --keep-going -b html docs/source docs/build/html", depends-on = ["docs-export"] }
