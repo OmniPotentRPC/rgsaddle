@@ -23,5 +23,5 @@ Homepage = "https://github.com/OmniPotentRPC/rgsaddle"
 Repository = "https://github.com/OmniPotentRPC/rgsaddle"
 
 [tool.maturin]
-features = ["python"]
+features = ["python", "pyo3/extension-module"]
 module-name = "rgsaddle"

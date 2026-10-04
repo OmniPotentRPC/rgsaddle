@@ -25,7 +25,8 @@ chemfiles = ["readcon", "readcon-core/chemfiles"]
 
 [dependencies]
 dlpk = { version = "0.1.5", features = ["ndarray"] }
-pyo3 = { version = "0.26", features = ["extension-module", "abi3-py310"], optional = true }
+# Extension wheels select pyo3/extension-module in pyproject.toml.
+pyo3 = { version = "0.26", features = ["abi3-py310"], optional = true }
 readcon-core = { version = "0.14", optional = true }
 readcon-db = { version = "0.1", optional = true }
 # The pinned rgmin main supplies retained evaluations and manifold steps.
