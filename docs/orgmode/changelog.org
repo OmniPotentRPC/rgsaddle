@@ -3,7 +3,7 @@
 
 * Unreleased
 
-- C ABI minor 16. ~RGSADDLE_METHOD_QUICKMIN~ selects quick-min and is refused until the pinned minimizer defines ~Method::QuickMin~. ~rgsaddle_band_create_solid~ and ~rgsaddle_band_set_stress~ carry the solid-state cell block. ~BandConfig::quickmin~ is the same refusal on the Rust side. FIRE stays the default.
+- C ABI minor 16. ~RGSADDLE_METHOD_QUICKMIN~ runs quick-min on the band. ~rgsaddle_band_create_solid~ and ~rgsaddle_band_set_stress~ carry the solid-state cell block. ~BandConfig::quickmin~ selects the same step. A min-mode session returns null for that method code. FIRE stays the default.
 - The band can carry the generalized solid-state cell block. The tangent acts on the atomic displacement plus the averaged, Jacobian-scaled strain, and the cell force is minus the cell volume times the Cauchy stress plus hydrostatic pressure, divided by the Jacobian. ~BandSurface::eval_cells~ supplies the stress. The Jacobian is fixed from the mean endpoint volume.
 - Minimum-mode translation follows the curvature. While the curvature along the mode is not negative the effective gradient is minus the parallel part and the perpendicular force is dropped. A negative curvature keeps the perpendicular force and reflects the parallel part. The dimer and Lanczos share that step.
 - C ABI minor 5. ~rgsaddle_band_restart~ restarts the band optimizer and keeps the endpoint energies and the last evaluation. ~rgsaddle_band_reset~ is the surface-change boundary and drops both. ~rgsaddle_band_evaluation~ returns the energies, gradients and projected force at the current band, or ~RGSADDLE_NO_EVALUATION~. The report's ~evaluations~ field takes the place of ~reserved~ and counts the surface rows of a step.

@@ -153,9 +153,10 @@ pub struct BandConfig {
     pub method: Method,
     /// Joint atomic and cell block. `None` is the atomic band.
     pub solid: Option<SolidState>,
-    /// Ask for the quick-min step. The pinned minimizer does not
-    /// provide it, so [`BandSession::new`] refuses until that revision
-    /// is the dependency and this flag maps onto `Method::QuickMin`.
+    /// Ask for the quick-min step. The flag builds the solver as
+    /// `Method::QuickMin`. The velocity is one vector over the interior
+    /// coordinates, atoms and cell together. FIRE stays the default
+    /// when the flag is clear.
     pub quickmin: bool,
 }
 
@@ -1015,15 +1016,15 @@ fn assemble_band(
 /// The oracle's value beside a projected (band) or inverted (min-mode)
 /// force is not the potential of that force, so a method that tests
 /// the value (a line search, an energy acceptance) refuses good steps.
-/// FIRE, L-BFGS under `Accept::Step`, and Barzilai-Borwein (one oracle
-/// call, no test under the session's `Accept::None`) step on the force
-/// alone.
+/// FIRE, L-BFGS under `Accept::Step`, Barzilai-Borwein (one oracle
+/// call, no test under the session's `Accept::None`), and quick-min
+/// step on the force alone.
 pub(crate) fn check_force_driven(method: &Method) -> Result<(), SaddleError> {
     match method {
-        Method::Fire { .. } | Method::Lbfgs { .. } | Method::Bb => Ok(()),
+        Method::Fire { .. } | Method::Lbfgs { .. } | Method::Bb | Method::QuickMin => Ok(()),
         other => Err(SaddleError::Invalid(format!(
             "{other:?} tests the oracle value, which is not the potential of a \
-             projected or inverted force; use FIRE, L-BFGS, or BB"
+             projected or inverted force; use FIRE, L-BFGS, BB, or quick-min"
         ))),
     }
 }
@@ -1107,12 +1108,12 @@ impl BandSession {
         if !initial.iter().all(|v| v.is_finite()) {
             return Err(SaddleError::NonFinite("band positions"));
         }
-        if config.quickmin {
-            return Err(SaddleError::Invalid(
-                "quick-min is not in the pinned minimizer; map BandConfig::quickmin onto Method::QuickMin and depend on the revision that defines it".into(),
-            ));
-        }
-        check_force_driven(&config.method)?;
+        let method = if config.quickmin {
+            Method::QuickMin
+        } else {
+            config.method.clone()
+        };
+        check_force_driven(&method)?;
         let (positions, solid) = prepare_solid(&config, initial)?;
         let segment = if solid.is_some() { dof + 9 } else { dof };
         let interior_dof = (n_images - 2) * segment;
@@ -1123,7 +1124,7 @@ impl BandSession {
             maxmove: None,
             ftol_rel: None,
         };
-        let mut solver = Solver::new(config.method.clone(), control, interior_dof);
+        let mut solver = Solver::new(method.clone(), control, interior_dof);
         // The flat band vector is consecutive xyz triples, so the cap
         // applies to the largest single-atom displacement (eOn
         // maxAtomMotionApplied), not to the L2 norm of the whole
@@ -1134,7 +1135,7 @@ impl BandSession {
         // says nothing about a band step: L-BFGS takes its two-loop
         // direction with one oracle call (rgmin Accept::Step), as FIRE
         // steps unconditionally.
-        if matches!(config.method, Method::Lbfgs { .. }) {
+        if matches!(method, Method::Lbfgs { .. }) {
             solver.set_accept(Accept::Step);
             // eOn's L-BFGS resets: a two-loop step that reaches the
             // per-atom cap or faces away from the force drops its

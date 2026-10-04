@@ -99,7 +99,7 @@ typedef enum {
   RGSADDLE_METHOD_FIRE = 0,
   RGSADDLE_METHOD_LBFGS = 1,
   RGSADDLE_METHOD_RTR = 2, /**< Band trust-region stepper. */
-  /** Quick-min. Refused until the pinned minimizer defines it. */
+  /** Quick-min band step. Min-mode create returns null for this code. */
   RGSADDLE_METHOD_QUICKMIN = 3
 } rgsaddle_method_t;
 
