@@ -33,7 +33,7 @@ readcon-db = { version = "0.1", optional = true }
 # and quick-min. A git dependency cannot be published: an rgmin release
 # that carries them must come out, and this line return to a version,
 # before rgsaddle is released.
-rgmin = { git = "https://github.com/OmniPotentRPC/rgmin", rev = "6e37aa7f2bd8506fb2951a51ab59594ed168c900" }
+rgmin = { git = "https://github.com/OmniPotentRPC/rgmin", rev = "753b0afa99885bbfdc5ecea3e95580fd6a9af392" }
 eindir-core = { version = "0.6.0", features = ["capi"] }
 ndarray = "0.17"
 thiserror = "2"

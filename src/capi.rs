@@ -26,7 +26,7 @@ use crate::spring::SpringKind;
 use crate::tangent::TangentKind;
 
 pub const RGSADDLE_ABI_MAJOR: u32 = 1;
-pub const RGSADDLE_ABI_MINOR: u32 = 16;
+pub const RGSADDLE_ABI_MINOR: u32 = 17;
 
 /// Band config bit 0. The C step calls the surface once per image
 /// carried by the evaluation: every image on the first evaluation
@@ -303,6 +303,9 @@ fn method_of(v: i32, memory: i64) -> Method {
     match v {
         1 => Method::Lbfgs {
             memory: if memory > 0 { memory as usize } else { 20 },
+        },
+        4 => Method::Diis {
+            memory: if memory > 0 { memory as usize } else { 6 },
         },
         _ => Method::Fire { kind: FireKind::V2 },
     }

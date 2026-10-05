@@ -1018,14 +1018,18 @@ fn assemble_band(
 /// force is not the potential of that force, so a method that tests
 /// the value (a line search, an energy acceptance) refuses good steps.
 /// FIRE, L-BFGS under `Accept::Step`, Barzilai-Borwein (one oracle
-/// call, no test under the session's `Accept::None`), and quick-min
-/// step on the force alone.
+/// call, no test under the session's `Accept::None`), quick-min, and
+/// the Pulay residual subspace step on the force alone.
 pub(crate) fn check_force_driven(method: &Method) -> Result<(), SaddleError> {
     match method {
-        Method::Fire { .. } | Method::Lbfgs { .. } | Method::Bb | Method::QuickMin => Ok(()),
+        Method::Fire { .. }
+        | Method::Lbfgs { .. }
+        | Method::Bb
+        | Method::QuickMin
+        | Method::Diis { .. } => Ok(()),
         other => Err(SaddleError::Invalid(format!(
             "{other:?} tests the oracle value, which is not the potential of a \
-             projected or inverted force; use FIRE, L-BFGS, BB, or quick-min"
+             projected or inverted force; use FIRE, L-BFGS, BB, quick-min, or DIIS"
         ))),
     }
 }

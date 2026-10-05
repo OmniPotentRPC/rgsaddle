@@ -3,6 +3,7 @@
 
 * Unreleased
 
+- C ABI minor 17. ~RGSADDLE_METHOD_DIIS~ runs the Pulay residual subspace on the band and on a min-mode translation. ~memory~ 0 keeps 6 pairs. The step does not line search on the oracle value. FIRE stays the default.
 - C ABI minor 16. ~RGSADDLE_METHOD_QUICKMIN~ runs quick-min on the band. ~rgsaddle_band_create_solid~ and ~rgsaddle_band_set_stress~ carry the solid-state cell block. ~BandConfig::quickmin~ selects the same step. A min-mode session returns null for that method code. FIRE stays the default.
 - The band can carry the generalized solid-state cell block. The tangent acts on the atomic displacement plus the averaged, Jacobian-scaled strain, and the cell force is minus the cell volume times the Cauchy stress plus hydrostatic pressure, divided by the Jacobian. ~BandSurface::eval_cells~ supplies the stress. The Jacobian is fixed from the mean endpoint volume.
 - Minimum-mode translation follows the curvature. While the curvature along the mode is not negative the effective gradient is minus the parallel part and the perpendicular force is dropped. A negative curvature keeps the perpendicular force and reflects the parallel part. The dimer and Lanczos share that step.

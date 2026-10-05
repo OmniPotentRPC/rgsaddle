@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 16u
+#define RGSADDLE_ABI_MINOR 17u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -100,7 +100,9 @@ typedef enum {
   RGSADDLE_METHOD_LBFGS = 1,
   RGSADDLE_METHOD_RTR = 2, /**< Band trust-region stepper. */
   /** Quick-min band step. Min-mode create returns null for this code. */
-  RGSADDLE_METHOD_QUICKMIN = 3
+  RGSADDLE_METHOD_QUICKMIN = 3,
+  /** Pulay residual subspace. `memory` 0 keeps 6 pairs. */
+  RGSADDLE_METHOD_DIIS = 4
 } rgsaddle_method_t;
 
 typedef enum {
