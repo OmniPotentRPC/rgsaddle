@@ -865,6 +865,20 @@ pub unsafe extern "C" fn rgsaddle_minmode_estimate(
     }
 }
 
+/// xtsci name of [`rgsaddle_minmode_estimate`].
+///
+/// # Safety
+/// Same contract as [`rgsaddle_minmode_estimate`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn xts_minmode_estimate(
+    session: *mut RgsaddleMinMode,
+    surface: Option<RgsaddleSurfaceFn>,
+    user: *mut c_void,
+    out: *mut RgsaddleReport,
+) -> i32 {
+    unsafe { rgsaddle_minmode_estimate(session, surface, user, out) }
+}
+
 /// # Safety
 /// `position` must hold `3 * n_atoms` doubles; `gradient` is NULL or
 /// holds `3 * n_atoms` doubles.
