@@ -581,6 +581,20 @@ pub unsafe extern "C" fn rgsaddle_band_step(
     }
 }
 
+/// xtsci name of [`rgsaddle_band_step`].
+///
+/// # Safety
+/// Same contract as [`rgsaddle_band_step`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn xts_band_step(
+    band: *mut RgsaddleBand,
+    surface: Option<RgsaddleSurfaceFn>,
+    user: *mut c_void,
+    out: *mut RgsaddleReport,
+) -> i32 {
+    unsafe { rgsaddle_band_step(band, surface, user, out) }
+}
+
 /// # Safety
 /// `out` must hold `n_images * 3 * n_atoms` doubles.
 #[unsafe(no_mangle)]

@@ -254,6 +254,13 @@ rgsaddle_status_t rgsaddle_band_step(RgsaddleBand *band,
                                      rgsaddle_surface_fn surface, void *user,
                                      rgsaddle_report_t *out);
 
+/**
+ * xtsci name of rgsaddle_band_step. Same arguments, same status.
+ * The band session is the saddle ABI above the minimizer.
+ */
+rgsaddle_status_t xts_band_step(RgsaddleBand *band, rgsaddle_surface_fn surface,
+                                void *user, rgsaddle_report_t *out);
+
 /** Copy the current band out (n_images * 3 * n_atoms doubles). */
 rgsaddle_status_t rgsaddle_band_positions(const RgsaddleBand *band, double *out);
 

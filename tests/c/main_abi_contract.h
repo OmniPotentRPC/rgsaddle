@@ -179,6 +179,7 @@ typedef rgsaddle_status_t (*abi15_signature_rgsaddle_band_step)(RgsaddleBand *ba
                                      rgsaddle_surface_fn surface, void *user,
                                      rgsaddle_report_t *out);
 _Static_assert(_Generic(&rgsaddle_band_step, abi15_signature_rgsaddle_band_step: 1, default: 0), "rgsaddle_band_step signature");
+_Static_assert(_Generic(&xts_band_step, abi15_signature_rgsaddle_band_step: 1, default: 0), "xts_band_step signature");
 
 typedef rgsaddle_status_t (*abi15_signature_rgsaddle_band_positions)(const RgsaddleBand *band, double *out);
 _Static_assert(_Generic(&rgsaddle_band_positions, abi15_signature_rgsaddle_band_positions: 1, default: 0), "rgsaddle_band_positions signature");

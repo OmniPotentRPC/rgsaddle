@@ -205,6 +205,9 @@ int main(void) {
   if (rgsaddle_band_step(band, NULL, NULL, NULL) != RGSADDLE_NULL_REPORT) {
     return fail(RGSADDLE_NULL_REPORT, "NULL report must fail closed");
   }
+  if (xts_band_step(band, NULL, NULL, NULL) != RGSADDLE_NULL_REPORT) {
+    return fail(RGSADDLE_NULL_REPORT, "xts_band_step NULL report must fail closed");
+  }
 
   rgsaddle_report_t rep;
   memset(&rep, 0, sizeof rep);
