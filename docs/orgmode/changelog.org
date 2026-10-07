@@ -3,6 +3,7 @@
 
 * Unreleased
 
+- ~xts_band_step~ is the xtsci name of ~rgsaddle_band_step~. The arguments and the status codes are the same.
 - C ABI minor 16. ~RGSADDLE_METHOD_QUICKMIN~ runs quick-min on the band. ~rgsaddle_band_create_solid~ and ~rgsaddle_band_set_stress~ carry the solid-state cell block. ~BandConfig::quickmin~ selects the same step. A min-mode session returns null for that method code. FIRE stays the default.
 - The band can carry the generalized solid-state cell block. The tangent acts on the atomic displacement plus the averaged, Jacobian-scaled strain, and the cell force is minus the cell volume times the Cauchy stress plus hydrostatic pressure, divided by the Jacobian. ~BandSurface::eval_cells~ supplies the stress. The Jacobian is fixed from the mean endpoint volume.
 - Minimum-mode translation follows the curvature. While the curvature along the mode is not negative the effective gradient is minus the parallel part and the perpendicular force is dropped. A negative curvature keeps the perpendicular force and reflects the parallel part. The dimer and Lanczos share that step.
