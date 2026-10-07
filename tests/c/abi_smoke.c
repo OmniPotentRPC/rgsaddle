@@ -63,6 +63,9 @@ static rgsaddle_status_t surface_quad_counted(void *user,
 /* One min-mode session kept across points: set_position with the
  * host's gradient and the previous mode as seed costs one evaluation. */
 static rgsaddle_status_t minmode_reuse(void) {
+  if (xts_minmode_estimate(NULL, NULL, NULL, NULL) != RGSADDLE_NULL_SESSION) {
+    return fail(RGSADDLE_NULL_SESSION, "xts_minmode_estimate null session");
+  }
   rgsaddle_minmode_config_t cfg;
   memset(&cfg, 0, sizeof cfg);
   cfg.version.major = RGSADDLE_ABI_MAJOR;
@@ -109,7 +112,7 @@ static rgsaddle_status_t minmode_reuse(void) {
     return fail(RGSADDLE_SHAPE, "minmode set_position");
   }
   quad_calls = 0;
-  st = rgsaddle_minmode_estimate(mm, surface_quad_counted, NULL, &rep);
+  st = xts_minmode_estimate(mm, surface_quad_counted, NULL, &rep);
   if (st != RGSADDLE_OK || quad_calls != 1 || rep.evaluations != 1 || rep.rotations != 0) {
     fprintf(stderr, "warm estimate calls=%d evaluations=%d rotations=%lld\n",
             quad_calls, rep.evaluations, (long long)rep.rotations);

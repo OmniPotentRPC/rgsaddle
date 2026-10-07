@@ -354,6 +354,11 @@ rgsaddle_status_t rgsaddle_minmode_estimate(RgsaddleMinMode *session,
                                             rgsaddle_surface_fn surface,
                                             void *user, rgsaddle_report_t *out);
 
+/** xtsci name of rgsaddle_minmode_estimate. Same arguments and status. */
+rgsaddle_status_t xts_minmode_estimate(RgsaddleMinMode *session,
+                                       rgsaddle_surface_fn surface, void *user,
+                                       rgsaddle_report_t *out);
+
 /**
  * Move the session to a new point (3 * n_atoms doubles). The mode and
  * the optimizer history stay. gradient is the host's energy gradient

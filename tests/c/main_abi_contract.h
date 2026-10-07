@@ -216,6 +216,7 @@ typedef rgsaddle_status_t (*abi15_signature_rgsaddle_minmode_estimate)(RgsaddleM
                                             rgsaddle_surface_fn surface,
                                             void *user, rgsaddle_report_t *out);
 _Static_assert(_Generic(&rgsaddle_minmode_estimate, abi15_signature_rgsaddle_minmode_estimate: 1, default: 0), "rgsaddle_minmode_estimate signature");
+_Static_assert(_Generic(&xts_minmode_estimate, abi15_signature_rgsaddle_minmode_estimate: 1, default: 0), "xts_minmode_estimate signature");
 
 typedef rgsaddle_status_t (*abi15_signature_rgsaddle_minmode_set_position)(RgsaddleMinMode *session,
                                                 const double *position,
