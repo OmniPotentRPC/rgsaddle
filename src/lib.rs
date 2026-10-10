@@ -26,6 +26,7 @@ pub mod band;
 #[cfg(feature = "capi")]
 pub mod capi;
 pub mod error;
+pub mod idpp;
 pub mod minmode;
 pub mod nichols;
 pub mod prfo;
@@ -39,6 +40,7 @@ pub use band::{
     SolidState,
 };
 pub use error::SaddleError;
+pub use idpp::{IdppConfig, idpp_path, linear_path};
 pub use minmode::{
     FiniteDifference, MinModeConfig, MinModeKind, MinModeReport, MinModeSession, MinModeStatus,
     ModeEstimate, PointSurface,
