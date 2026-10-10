@@ -1203,6 +1203,31 @@ impl BandSession {
         self.state.ci()
     }
 
+    /// Convergence force of the first assembly. The climbing trigger
+    /// and the off-path hand-off both scale their thresholds from it.
+    /// `None` before the first successful step and after
+    /// [`BandSession::restart`] or [`BandSession::reset`].
+    pub(crate) fn force_baseline(&self) -> Option<f64> {
+        *self
+            .state
+            .baseline
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Drop optimizer history and keep the climbing image, its
+    /// baseline, and the cached surface values. A hand-off that moved
+    /// an image outside the solver uses this so the next band step
+    /// does not inherit a stale quasi-Newton pair.
+    pub(crate) fn forget_optimizer(&mut self) {
+        self.solver.forget();
+        if let Some(rtr) = &mut self.rtr {
+            let gate = self.state.force_gate;
+            *rtr = crate::rtr::BandRtr::new(rtr.config, false);
+            rtr.set_force_gate(gate);
+        }
+    }
+
     /// Replace the band (host-side move between steps: acquisition,
     /// reparameterization, or a resync of positions the host read
     /// back). Rows equal to the current ones up to the minimum image
