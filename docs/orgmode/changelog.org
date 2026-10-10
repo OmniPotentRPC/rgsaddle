@@ -3,6 +3,7 @@
 
 * Unreleased
 
+- C ABI minor 17. ~rgsaddle_ocineb_create~ and ~rgsaddle_ocineb_step~ hand the climbing image to a minimum-mode search (Goswami, Gunde, and Jónsson, Front. Chem. 14, 2026, doi:10.3389/fchem.2026.1807063). The report phase is the band, the tangent alignment, or the minimum-mode step. Positive curvature restores the climbing image. A mode that leaves the tangent cone returns the search to the band.
 - ~xts_minmode_estimate~ is the xtsci name of ~rgsaddle_minmode_estimate~. A null session still fails closed.
 - ~xts_band_step~ is the xtsci name of ~rgsaddle_band_step~. The arguments and the status codes are the same.
 - C ABI minor 16. ~RGSADDLE_METHOD_QUICKMIN~ runs quick-min on the band. ~rgsaddle_band_create_solid~ and ~rgsaddle_band_set_stress~ carry the solid-state cell block. ~BandConfig::quickmin~ selects the same step. A min-mode session returns null for that method code. FIRE stays the default.

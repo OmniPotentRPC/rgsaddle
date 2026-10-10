@@ -26,7 +26,7 @@ use crate::spring::SpringKind;
 use crate::tangent::TangentKind;
 
 pub const RGSADDLE_ABI_MAJOR: u32 = 1;
-pub const RGSADDLE_ABI_MINOR: u32 = 16;
+pub const RGSADDLE_ABI_MINOR: u32 = 17;
 
 /// Band config bit 0. The C step calls the surface once per image
 /// carried by the evaluation: every image on the first evaluation
@@ -419,6 +419,78 @@ pub unsafe extern "C" fn rgsaddle_band_create_solid(
     }
 }
 
+pub(super) struct ParsedBand {
+    pub config: BandConfig,
+    pub per_image: bool,
+    pub method: i32,
+}
+
+/// # Safety
+/// `spring_ks` and `cell`, when non-null, must point at the lengths
+/// the band config documents.
+pub(super) unsafe fn parse_band_config(
+    cfg: &RgsaddleBandConfig,
+    n_images: i64,
+    dof: usize,
+    solid: Option<SolidState>,
+) -> Option<ParsedBand> {
+    if cfg.version.major != RGSADDLE_ABI_MAJOR || n_images < 3 || dof == 0 {
+        return None;
+    }
+    let spring = match cfg.spring {
+        1 => {
+            if cfg.spring_ks.is_null() {
+                return None;
+            }
+            let ks = unsafe { slice::from_raw_parts(cfg.spring_ks, (n_images - 1) as usize) };
+            SpringKind::Weighted { ks: ks.to_vec() }
+        }
+        2 => SpringKind::OnsagerMachlup {
+            k: cfg.spring_k,
+            l_vecs: vec![Array1::zeros(dof); n_images as usize],
+        },
+        _ => SpringKind::Uniform { k: cfg.spring_k },
+    };
+    let cell = if cfg.cell.is_null() {
+        None
+    } else {
+        let c = unsafe { slice::from_raw_parts(cfg.cell, 9) };
+        Some(Cell([
+            [c[0], c[1], c[2]],
+            [c[3], c[4], c[5]],
+            [c[6], c[7], c[8]],
+        ]))
+    };
+    Some(ParsedBand {
+        config: BandConfig {
+            tangent: if cfg.tangent == 0 {
+                TangentKind::Simple
+            } else {
+                TangentKind::Improved
+            },
+            spring,
+            projection: match cfg.projection {
+                0 => ProjectionKind::PlainElasticBand,
+                2 => ProjectionKind::DoublyNudged,
+                _ => ProjectionKind::Neb,
+            },
+            climbing: (cfg.ci_trigger_factor > 0.0).then_some(CiConfig {
+                trigger_factor: cfg.ci_trigger_factor,
+                trigger_force: cfg.ci_trigger_force,
+            }),
+            cell,
+            force_tol: cfg.force_tol,
+            max_move: cfg.max_move,
+            remove_translation: cfg.flags & RGSADDLE_BAND_KEEP_TRANSLATION == 0,
+            method: method_of(cfg.method, cfg.memory),
+            solid,
+            quickmin: cfg.method == 3,
+        },
+        per_image: cfg.flags & RGSADDLE_BAND_PER_IMAGE != 0,
+        method: cfg.method,
+    })
+}
+
 unsafe fn band_from_parts(
     config: *const RgsaddleBandConfig,
     n_images: i64,
@@ -440,58 +512,14 @@ unsafe fn band_from_parts(
         Ok(a) => a,
         Err(_) => return std::ptr::null_mut(),
     };
-
-    let spring = match cfg.spring {
-        1 => {
-            if cfg.spring_ks.is_null() {
-                return std::ptr::null_mut();
-            }
-            let ks = unsafe { slice::from_raw_parts(cfg.spring_ks, (n_images - 1) as usize) };
-            SpringKind::Weighted { ks: ks.to_vec() }
-        }
-        2 => SpringKind::OnsagerMachlup {
-            k: cfg.spring_k,
-            l_vecs: vec![Array1::zeros(dof); n_images as usize],
-        },
-        _ => SpringKind::Uniform { k: cfg.spring_k },
+    let Some(parsed) = (unsafe { parse_band_config(cfg, n_images, dof, solid) }) else {
+        return std::ptr::null_mut();
     };
-    let cell = if cfg.cell.is_null() {
-        None
-    } else {
-        let c = unsafe { slice::from_raw_parts(cfg.cell, 9) };
-        Some(Cell([
-            [c[0], c[1], c[2]],
-            [c[3], c[4], c[5]],
-            [c[6], c[7], c[8]],
-        ]))
-    };
-    let band_config = BandConfig {
-        tangent: if cfg.tangent == 0 {
-            TangentKind::Simple
-        } else {
-            TangentKind::Improved
-        },
-        spring,
-        projection: match cfg.projection {
-            0 => ProjectionKind::PlainElasticBand,
-            2 => ProjectionKind::DoublyNudged,
-            _ => ProjectionKind::Neb,
-        },
-        climbing: (cfg.ci_trigger_factor > 0.0).then_some(CiConfig {
-            trigger_factor: cfg.ci_trigger_factor,
-            trigger_force: cfg.ci_trigger_force,
-        }),
-        cell,
-        force_tol: cfg.force_tol,
-        max_move: cfg.max_move,
-        remove_translation: cfg.flags & RGSADDLE_BAND_KEEP_TRANSLATION == 0,
-        method: method_of(cfg.method, cfg.memory),
-        solid,
-        quickmin: cfg.method == 3,
-    };
-    match BandSession::new(band_config, initial) {
+    let per_image = parsed.per_image;
+    let method = parsed.method;
+    match BandSession::new(parsed.config, initial) {
         Ok(mut session) => {
-            if cfg.method == 2
+            if method == 2
                 && session
                     .set_rtr(Some(crate::rtr::RtrConfig {
                         radius_max: cfg.max_move * ((n_images - 2) as f64).sqrt(),
@@ -505,7 +533,7 @@ unsafe fn band_from_parts(
                 session,
                 n_images,
                 n_atoms,
-                per_image: cfg.flags & RGSADDLE_BAND_PER_IMAGE != 0,
+                per_image,
                 stress: None,
                 stress_user: std::ptr::null_mut(),
             }))
@@ -1399,5 +1427,6 @@ pub unsafe extern "C" fn rgsaddle_index1_free(session: *mut RgsaddleIndex1) {
     }
 }
 
+mod ocineb;
 mod sessions;
 pub use sessions::*;
