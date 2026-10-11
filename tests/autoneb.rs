@@ -106,8 +106,46 @@ fn json_floats(text: &str, key: &str) -> Vec<f64> {
         .collect()
 }
 
+const ASE_SKIP: &str = "skipped: ASE parity needs numpy and ase";
+
+/// True when `python3` can import numpy and ASE.
+/// A missing interpreter or module prints the skip line and returns false.
+/// `RGSADDLE_REQUIRE_ASE=1` turns that skip into a failure.
+fn ase_parity_ready() -> bool {
+    let probe = Command::new("python3")
+        .args(["-c", "import numpy, ase"])
+        .output();
+    match probe {
+        Ok(out) if out.status.success() => true,
+        Ok(out) => {
+            let err = String::from_utf8_lossy(&out.stderr);
+            if err.contains("No module named") {
+                note_ase_skip();
+                false
+            } else {
+                panic!("ASE probe failed: {err}");
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            note_ase_skip();
+            false
+        }
+        Err(err) => panic!("ASE probe failed: {err}"),
+    }
+}
+
+fn note_ase_skip() {
+    if std::env::var_os("RGSADDLE_REQUIRE_ASE").is_some_and(|value| value == "1") {
+        panic!("{ASE_SKIP}");
+    }
+    eprintln!("{ASE_SKIP}");
+}
+
 #[test]
 fn muller_brown_matches_an_ase_autoneb_run() {
+    if !ase_parity_ready() {
+        return;
+    }
     let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/ase_autoneb_mb.py");
     let run = Command::new("python3")
         .arg(&script)
@@ -197,6 +235,9 @@ fn muller_brown_matches_an_ase_autoneb_run() {
 
 #[test]
 fn ase_decision_functions_match_worst_segment_and_the_window() {
+    if !ase_parity_ready() {
+        return;
+    }
     let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/ase_autoneb_mb.py");
     let run = Command::new("python3")
         .arg(&script)
