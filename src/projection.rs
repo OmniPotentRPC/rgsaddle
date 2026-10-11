@@ -35,6 +35,7 @@ pub fn climbing_image_force(
 }
 
 /// DNEB correction with the Trygubenko–Wales atan switching.
+/// The angle is the musl inverse tangent, not the host libm.
 pub fn dneb_component(
     force_spring: ArrayView1<f64>,
     tangent: ArrayView1<f64>,
@@ -50,7 +51,9 @@ pub fn dneb_component(
         let overlap = spring_perp.dot(&force_perp_hat);
         let mut dneb = &spring_perp - &(force_perp_hat * overlap);
         let switching = 2.0 / std::f64::consts::PI
-            * ((force_perp_norm * force_perp_norm) / (spring_perp_norm * spring_perp_norm)).atan();
+            * crate::trig::atan(
+                (force_perp_norm * force_perp_norm) / (spring_perp_norm * spring_perp_norm),
+            );
         dneb *= switching;
         return dneb;
     }

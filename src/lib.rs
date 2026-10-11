@@ -44,6 +44,7 @@ pub mod projection;
 pub mod solid_state;
 pub mod spring;
 pub mod tangent;
+mod trig;
 
 pub use autoneb::{AutoNeb, AutoNebReport, AutoNebTuning};
 pub use band::{

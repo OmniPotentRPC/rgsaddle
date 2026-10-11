@@ -351,16 +351,19 @@ fn rotate_dimer<S: PointSurface>(
         // direction). The trial angle is the Kastner-Sherwood guess
         // from a harmonic model, kept inside (1e-4, pi/4].
         let b1 = h.dot(&theta);
-        let phi1 = (0.5 * (b1.abs() / (curvature.abs() + 1e-300)).atan()).clamp(1e-4, 0.25 * PI);
-        let n1 = normalize(&(&n * phi1.cos()) + &(&theta * phi1.sin()));
+        let phi1 =
+            crate::trig::atan(0.5 * (b1.abs() / (curvature.abs() + 1e-300))).clamp(1e-4, 0.25 * PI);
+        let n1 = normalize(&(&n * crate::trig::cos(phi1)) + &(&theta * crate::trig::sin(phi1)));
         let h1 = surface.action(x, g0, n1.view(), config)?;
         let c1 = h1.dot(&n1);
         rotations += 1;
         // Fourier fit through C(0), C'(0) = 2 b1, and C(phi1).
-        let a1 = (curvature - c1 + b1 * (2.0 * phi1).sin()) / (1.0 - (2.0 * phi1).cos());
+        let a1 = (curvature - c1 + b1 * crate::trig::sin(2.0 * phi1))
+            / (1.0 - crate::trig::cos(2.0 * phi1));
         let a0 = 2.0 * (curvature - a1);
-        let c_at = |p: f64| 0.5 * a0 + a1 * (2.0 * p).cos() + b1 * (2.0 * p).sin();
-        let mut phi = 0.5 * (b1 / a1).atan();
+        let c_at =
+            |p: f64| 0.5 * a0 + a1 * crate::trig::cos(2.0 * p) + b1 * crate::trig::sin(2.0 * p);
+        let mut phi = 0.5 * crate::trig::atan(b1 / a1);
         if c_at(phi) > c_at(phi + 0.5 * PI) {
             phi += 0.5 * PI;
         }
@@ -385,9 +388,9 @@ fn rotate_dimer<S: PointSurface>(
             }
             continue;
         }
-        let (s, c) = phi.sin_cos();
-        let s1 = phi1.sin();
-        let w_old = (phi1 - phi).sin() / s1;
+        let (s, c) = crate::trig::sin_cos(phi);
+        let s1 = crate::trig::sin(phi1);
+        let w_old = crate::trig::sin(phi1 - phi) / s1;
         let w_trial = s / s1;
         h = &(&h * w_old) + &(&h1 * w_trial);
         let theta_rotated = &(&theta * c) - &(&n * s);
@@ -726,7 +729,7 @@ impl MinModeSession {
         let mode = checked_mode(mode)?;
         // The solver's cached force at this point was inverted along the
         // old mode; a large turn also retires the stored pairs.
-        let turned = self.mode.dot(&mode).abs().min(1.0).acos();
+        let turned = crate::trig::acos(self.mode.dot(&mode).abs().min(1.0));
         if turned > MODE_RESET_ANGLE {
             self.solver.forget();
         } else {
@@ -856,7 +859,7 @@ impl MinModeSession {
         // The solver cached the inverted force at this point under the
         // previous mode; the step must see the current one. The mode's
         // sign is arbitrary, so the angle reads |cos|.
-        let turned = previous_mode.dot(&self.mode).abs().min(1.0).acos();
+        let turned = crate::trig::acos(previous_mode.dot(&self.mode).abs().min(1.0));
         if turned > MODE_RESET_ANGLE {
             self.solver.forget();
         } else {
@@ -979,7 +982,7 @@ impl MinModeSession {
             // confirmation pays only for the required Hessian actions.
             let (mode, accepted_curvature, accepted_rotations) =
                 self.mode_at(&counted, x.view(), centre.gradient.view())?;
-            let turned = self.mode.dot(&mode).abs().min(1.0).acos();
+            let turned = crate::trig::acos(self.mode.dot(&mode).abs().min(1.0));
             if turned > MODE_RESET_ANGLE {
                 self.solver.forget();
             } else {

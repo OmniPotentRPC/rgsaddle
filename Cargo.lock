@@ -1596,6 +1596,7 @@ dependencies = [
  "dlpk",
  "eindir-core",
  "faer",
+ "libm",
  "linkcell",
  "ndarray",
  "rayon",
