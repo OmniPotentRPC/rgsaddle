@@ -158,6 +158,8 @@ pub struct BandConfig {
     /// coordinates, atoms and cell together. FIRE stays the default
     /// when the flag is clear.
     pub quickmin: bool,
+    /// `Some` selects AutoNEB on this configuration. `None` is a fixed band.
+    pub autoneb: Option<crate::autoneb::AutoNebTuning>,
 }
 
 impl Default for BandConfig {
@@ -179,6 +181,7 @@ impl Default for BandConfig {
             },
             solid: None,
             quickmin: false,
+            autoneb: None,
         }
     }
 }
@@ -1258,6 +1261,39 @@ impl BandSession {
         self.restart();
         self.state.set_endpoints(None);
         self.state.drop_last();
+    }
+
+    /// Set the force tolerance without dropping quasi-Newton pairs.
+    pub(crate) fn set_force_tol(&mut self, force_tol: f64) -> Result<(), SaddleError> {
+        if !(force_tol > 0.0 && force_tol.is_finite()) {
+            return Err(SaddleError::Invalid(
+                "band force tolerance must be finite and positive".into(),
+            ));
+        }
+        self.config.force_tol = force_tol;
+        Ok(())
+    }
+
+    /// Replace the climbing rule without dropping quasi-Newton pairs.
+    /// The cached force is forgotten so the next step uses the new rule.
+    pub(crate) fn set_climbing(&mut self, climbing: Option<CiConfig>) {
+        self.config.climbing = climbing;
+        self.state.restart();
+        self.solver.forget_evaluation();
+    }
+
+    /// Record endpoint energies the host already holds.
+    ///
+    /// The next evaluation asks only for the interior images. Endpoint
+    /// gradients are never read. Call this before the first step when
+    /// those two images were evaluated already, so a new window does
+    /// not repeat them.
+    pub(crate) fn seed_endpoint_energies(&mut self, energies: [f64; 2]) -> Result<(), SaddleError> {
+        if !energies.iter().all(|energy| energy.is_finite()) {
+            return Err(SaddleError::NonFinite("band endpoint energies"));
+        }
+        self.state.set_endpoints(Some(energies));
+        Ok(())
     }
 
     /// Restart the relaxation on the same surface: drop quasi-Newton

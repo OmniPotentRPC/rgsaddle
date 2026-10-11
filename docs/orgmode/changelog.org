@@ -3,6 +3,13 @@
 
 * Unreleased
 
+- AutoNEB stays in Rust until the stencil configuration lands. C, C++, and Python reach ~BandConfig::autoneb~ later as that configuration's AutoNEB preset. The C ABI stays at minor 16.
+- AutoNEB records a trajectory only when ~record_samples~ is set. The default stores nothing and takes no sample lock. One stored call is one ~f64~ per degree of freedom.
+- AutoNEB follows the ASE window and spring rescaling. The fill from two endpoints sets every segment to ~k * (n_simul + 1)~, and each insertion doubles the cut segment. The search stops after the climbing window unless ~full_band~ is set. On the double well that default used 1.42 times as many force calls as one fixed CI-NEB. Müller-Brown from B to C used 0.46 times as many, and the two-barrier path from A to B has mean ratio 0.95.
+- AutoNEB reuses one band session while the window indices do not change, so the L-BFGS pairs survive the climb on that window. A new index set starts empty. Known endpoint energies are not evaluated again.
+- AutoNEB image evaluation keeps one thread pool for the search. Each evaluation is a fixed set of contiguous blocks, stored by image index after every block has finished. One thread evaluates the batch in a single call. There is no SIMD path. The warm-step speedup is capped by ~n_simul~ free images.
+- AutoNEB temporarily refuses a weighted or Onsager-Machlup spring. Zoom-NEB will recompute those springs when an image is inserted.
+- AutoNEB grows a band from the supplied images. It inserts where the peak-weighted energy gap or the segment length is worst, relaxes that local window, and arms the climbing image on the last stage. The inserted image is the minimum-image midpoint.
 - ~xts_minmode_estimate~ is the xtsci name of ~rgsaddle_minmode_estimate~. A null session still fails closed.
 - ~xts_band_step~ is the xtsci name of ~rgsaddle_band_step~. The arguments and the status codes are the same.
 - C ABI minor 16. ~RGSADDLE_METHOD_QUICKMIN~ runs quick-min on the band. ~rgsaddle_band_create_solid~ and ~rgsaddle_band_set_stress~ carry the solid-state cell block. ~BandConfig::quickmin~ selects the same step. A min-mode session returns null for that method code. FIRE stays the default.

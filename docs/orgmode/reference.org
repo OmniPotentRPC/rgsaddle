@@ -5,7 +5,9 @@
 | Type                           | Role                                                                                                               |
 |--------------------------------+--------------------------------------------------------------------------------------------------------------------|
 | =BandSession=                  | Outer seam. =new=, =step=, =run=, =restart=, =reset=, =set_positions=, =positions=, =evaluation=                   |
-| =BandConfig=                   | Tangent, spring, projection, climbing, cell, tolerances, method                                                    |
+| =AutoNeb=                      | Insert on the worst gap, relax a local window, and climb. The full band runs only when =full_band= is set. =run= is one shot |
+| =AutoNebTuning=                | =n_simul=, =n_max=, local tolerance and step caps, =space_energy_ratio=, =climb=, =full_band=, =threads=, =record_samples=. Stored on =BandConfig= |
+| =BandConfig=                   | Tangent, spring, projection, climbing, cell, tolerances, method, optional AutoNEB tuning                           |
 | =BandSurface=                  | Host potential on a band (energies + gradients per image)                                                          |
 | =BandReport=                   | =status=, =max_force=, =ci_index=, =iteration=, =surface_rows=                                                     |
 | =MinModeSession=               | Dimer or Lanczos lowest-mode search, same stepping contract; =set_position=, =set_mode=, =estimate_mode= for reuse |
@@ -20,6 +22,7 @@
 
 * Tests that pin the contract
 - =tests/double_well.rs= — band finds the origin saddle, endpoints pinned
+- =tests/autoneb.rs= — ASE AutoNEB decisions and the Müller-Brown insertion sequence. =tests/autoneb_gate.rs= hashes the insertion list and the trajectory at 1, 2, 3 and 8 threads, and an ignored release run compares AutoNEB with CI-NEB at one force-call budget. Strong scaling of a full AutoNEB run is an ignored test in the crate.
 - =tests/minmode_saddle.rs= — dimer / Lanczos
 - =tests/nichols_saddle.rs= — Nichols step against i-PI on the same Hessian and gradient, Muller-Brown saddles, quadratic saddle
 - =tests/prfo_saddle.rs= — partitioned RFO against the augmented Hessian, trust sphere changes the mode ratio
