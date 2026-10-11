@@ -74,4 +74,5 @@ while report.status != BandStatus::Converged {
    reference/bibliography
    contributing/index
    changelog
+   notes/eigh-bench
 #+end_export

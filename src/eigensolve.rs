@@ -6,23 +6,23 @@
 //! until that feature is linked); this crate does not grow a second
 //! device stack.
 //!
-//! [`exact_eigh`] diagonalizes the symmetric part with faer's
-//! self-adjoint solver. Householder tridiagonalization is followed by
-//! the symmetric QR algorithm when the dimension is below faer's
-//! recursion threshold (128 in faer 0.24) and by Cuppen's
-//! divide-and-conquer above it (J. J. M. Cuppen, *Numer. Math.* 36
-//! (1980) 177-195, <https://doi.org/10.1007/BF01396757>; the QR step
-//! is Francis, *Comput. J.* 4 (1962) 332-345,
-//! <https://doi.org/10.1093/comjnl/4.4.332>). pulp selects the SIMD
-//! kernel at runtime. No system LAPACK is linked. The factorization
-//! passes [`faer::Par::Seq`]. A parallel partition associates
-//! floating-point sums in an order that depends on the thread count,
-//! so it is not used. Eigenpairs do not depend on the rayon pool or
-//! on how many ranks call the solver. Eigenvalues ascend and
-//! eigenvector columns are orthonormal. [`partial_eigh`] returns the
-//! lowest `k` pairs for a min-mode host that does not need the rest
-//! of the spectrum. Feature `jacobi` keeps the cyclic Jacobi solver
-//! used before this path.
+//! [`eigh`] is the dense symmetric entry point. [`exact_eigh`] is that
+//! same function. With feature `dense-faer` (on by default) the
+//! symmetric part is reduced to a fixed bandwidth by a tiled
+//! Householder panel and then to tridiagonal form by a bulge chase
+//! (Haidar, Ltaief, and Dongarra, SC '11,
+//! <https://doi.org/10.1145/2063384.2063394>). The full spectrum uses
+//! Cuppen's divide-and-conquer on that tridiagonal factor
+//! (J. J. M. Cuppen, *Numer. Math.* 36 (1980) 177-195,
+//! <https://doi.org/10.1007/BF01396757>; Gu and Eisenstat,
+//! <https://doi.org/10.1137/S0895479892241287>). [`partial_eigh`] bisects the
+//! same tridiagonal factor and runs inverse iteration for the lowest
+//! `k` vectors. Tile counts and the faer task count are fixed from the
+//! dimension. They do not read the rayon pool, so the pairs stay
+//! bit-identical across pool sizes. Each eigenvector is signed so its
+//! largest-magnitude component is positive. Feature `jacobi` keeps the
+//! cyclic Jacobi solver used before this path. Without `dense-faer`,
+//! [`eigh`] is that Jacobi solver.
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
 use rgmin::vecops::{axpy, dot, nrm2};
@@ -111,21 +111,32 @@ impl ApplyHessian for DenseApply<'_> {
     }
 }
 
-/// Sella `exact`: dense symmetric eigen of `a`.
+/// Dense symmetric eigen of `a`.
 ///
-/// The symmetric part is diagonalized by faer's self-adjoint solver.
-/// Eigenvalues ascend. Columns of the second array are orthonormal
-/// eigenvectors.
-pub fn exact_eigh(a: ArrayView2<f64>) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
+/// Eigenvalues ascend. Each column is an orthonormal eigenvector whose
+/// largest-magnitude component is positive. [`exact_eigh`] is this
+/// function.
+pub fn eigh(a: ArrayView2<f64>) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
     let work = symmetric_part(a)?;
-    faer_eigh(&work, work.nrows())
+    let (evals, mut vecs) = solve_full(&work)?;
+    #[cfg(feature = "dense-faer")]
+    crate::dense_eigh::positive_max_component(&mut vecs);
+    #[cfg(not(feature = "dense-faer"))]
+    positive_max_component_fallback(&mut vecs);
+    Ok((evals, vecs))
+}
+
+/// Sella `exact`: [`eigh`].
+pub fn exact_eigh(a: ArrayView2<f64>) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
+    eigh(a)
 }
 
 /// Lowest `k` eigenpairs of the symmetric part of `a`.
 ///
-/// Eigenvalues ascend. `k == 0` returns an empty spectrum with `n`
-/// rows. `k == n` matches [`exact_eigh`]. A min-mode host passes the
-/// number of soft modes it needs. `k` above the dimension is
+/// Eigenvalues ascend. Columns use the same sign rule as [`eigh`].
+/// `k == 0` returns an empty spectrum with `n` rows. `k == n` matches
+/// [`eigh`]. `k` below `n` is a partial tridiagonal solve, not a
+/// truncated full spectrum. `k` above the dimension is
 /// [`SaddleError::Invalid`].
 pub fn partial_eigh(
     a: ArrayView2<f64>,
@@ -137,7 +148,41 @@ pub fn partial_eigh(
             "partial eigh asks for more eigenpairs than the dimension".into(),
         ));
     }
-    faer_eigh(&work, k)
+    let (evals, mut vecs) = solve_partial(&work, k)?;
+    #[cfg(feature = "dense-faer")]
+    crate::dense_eigh::positive_max_component(&mut vecs);
+    #[cfg(not(feature = "dense-faer"))]
+    positive_max_component_fallback(&mut vecs);
+    Ok((evals, vecs))
+}
+
+/// Same pairs as [`eigh`], plus seconds in the band reduction, the
+/// bulge chase, the tridiagonal eigensolve, and the back-transformation.
+#[cfg(feature = "dense-faer")]
+pub fn eigh_timed(
+    a: ArrayView2<f64>,
+) -> Result<(Array1<f64>, Array2<f64>, crate::dense_eigh::StageSeconds), SaddleError> {
+    let work = symmetric_part(a)?;
+    let (evals, mut vecs, seconds) = crate::dense_eigh::eigh_symmetric(&work)?;
+    crate::dense_eigh::positive_max_component(&mut vecs);
+    Ok((evals, vecs, seconds))
+}
+
+/// Lowest `k` pairs and the same stage timers as [`eigh_timed`].
+#[cfg(feature = "dense-faer")]
+pub fn partial_eigh_timed(
+    a: ArrayView2<f64>,
+    k: usize,
+) -> Result<(Array1<f64>, Array2<f64>, crate::dense_eigh::StageSeconds), SaddleError> {
+    let work = symmetric_part(a)?;
+    if k > work.nrows() {
+        return Err(SaddleError::Invalid(
+            "partial eigh asks for more eigenpairs than the dimension".into(),
+        ));
+    }
+    let (evals, mut vecs, seconds) = crate::dense_eigh::partial_symmetric(&work, k)?;
+    crate::dense_eigh::positive_max_component(&mut vecs);
+    Ok((evals, vecs, seconds))
 }
 
 /// Cyclic Jacobi eigenpairs of the symmetric part of `a`.
@@ -172,57 +217,61 @@ fn symmetric_part(a: ArrayView2<f64>) -> Result<Array2<f64>, SaddleError> {
     Ok(work)
 }
 
-fn faer_eigh(work: &Array2<f64>, k: usize) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
-    // One sequential factorization. `Par::rayon(p)` splits the
-    // tridiagonalization and the divide-and-conquer updates into `p`
-    // deterministic chunks, and those chunks are summed in an order
-    // that changes with `p`.
-    faer_eigh_with(work, k, faer::Par::Seq)
+#[cfg(feature = "dense-faer")]
+fn solve_full(work: &Array2<f64>) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
+    let (evals, vecs, _) = crate::dense_eigh::eigh_symmetric(work)?;
+    Ok((evals, vecs))
 }
 
-fn faer_eigh_with(
-    work: &Array2<f64>,
-    k: usize,
-    par: faer::Par,
-) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
-    let n = work.nrows();
-    if k == 0 {
-        return Ok((Array1::zeros(0), Array2::zeros((n, 0))));
-    }
-    let mat = faer::Mat::from_fn(n, n, |i, j| work[(i, j)]);
-    let mut vectors = faer::Mat::<f64>::zeros(n, n);
-    let mut values = faer::diag::Diag::<f64>::zeros(n);
-    let params = faer::Spec::<faer::linalg::evd::SelfAdjointEvdParams, f64>::default();
-    let scratch = faer::linalg::evd::self_adjoint_evd_scratch::<f64>(
-        n,
-        faer::linalg::evd::ComputeEigenvectors::Yes,
-        par,
-        params,
-    );
-    let mut buffer = dyn_stack::MemBuffer::new(scratch);
-    faer::linalg::evd::self_adjoint_evd(
-        mat.as_ref(),
-        values.as_mut(),
-        Some(vectors.as_mut()),
-        par,
-        dyn_stack::MemStack::new(&mut buffer),
-        params,
-    )
-    .map_err(|_| SaddleError::Solver("self-adjoint eigensolver did not converge".into()))?;
-    let mut evals = Array1::zeros(k);
-    let mut vecs = Array2::zeros((n, k));
-    for col in 0..k {
-        evals[col] = values[col];
-        for row in 0..n {
-            vecs[(row, col)] = vectors[(row, col)];
-        }
-        if nrm2(vecs.column(col)) < 1e-18 {
-            return Err(SaddleError::Solver(
-                "eigensolver produced a zero eigenvector".into(),
-            ));
-        }
-    }
+#[cfg(not(feature = "dense-faer"))]
+fn solve_full(work: &Array2<f64>) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
+    let mut owned = work.clone();
+    jacobi_eigh_inplace(&mut owned)
+}
+
+#[cfg(feature = "dense-faer")]
+fn solve_partial(work: &Array2<f64>, k: usize) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
+    let (evals, vecs, _) = crate::dense_eigh::partial_symmetric(work, k)?;
     Ok((evals, vecs))
+}
+
+#[cfg(not(feature = "dense-faer"))]
+fn solve_partial(work: &Array2<f64>, k: usize) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
+    let (evals, vecs) = solve_full(work)?;
+    if k == evals.len() {
+        return Ok((evals, vecs));
+    }
+    let n = work.nrows();
+    let mut kept_evals = Array1::zeros(k);
+    let mut kept = Array2::zeros((n, k));
+    for col in 0..k {
+        kept_evals[col] = evals[col];
+        for row in 0..n {
+            kept[(row, col)] = vecs[(row, col)];
+        }
+    }
+    Ok((kept_evals, kept))
+}
+
+#[cfg(not(feature = "dense-faer"))]
+fn positive_max_component_fallback(vecs: &mut Array2<f64>) {
+    let n = vecs.nrows();
+    for col in 0..vecs.ncols() {
+        let mut best = 0usize;
+        let mut best_abs = 0.0;
+        for row in 0..n {
+            let magnitude = vecs[(row, col)].abs();
+            if magnitude > best_abs {
+                best_abs = magnitude;
+                best = row;
+            }
+        }
+        if vecs[(best, col)] < 0.0 {
+            for row in 0..n {
+                vecs[(row, col)] = -vecs[(row, col)];
+            }
+        }
+    }
 }
 
 /// Ritz eigenvalues, basis vectors, and the operator applied to those vectors.
@@ -640,7 +689,7 @@ fn matmul(a: ArrayView2<f64>, b: ArrayView2<f64>) -> Array2<f64> {
 }
 
 /// Cyclic Jacobi for a small dense symmetric matrix.
-#[cfg(any(test, feature = "jacobi"))]
+#[cfg(any(test, feature = "jacobi", not(feature = "dense-faer")))]
 fn jacobi_eigh_inplace(a: &mut Array2<f64>) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
     let n = a.nrows();
     let mut v = Array2::<f64>::zeros((n, n));
@@ -1125,6 +1174,153 @@ mod tests {
         Array2::from_shape_vec((n, n), nums).unwrap()
     }
 
+    fn largest_component_is_positive(vecs: &Array2<f64>) {
+        for col in 0..vecs.ncols() {
+            let mut best = 0usize;
+            let mut best_abs = 0.0;
+            for row in 0..vecs.nrows() {
+                let magnitude = vecs[(row, col)].abs();
+                if magnitude > best_abs {
+                    best_abs = magnitude;
+                    best = row;
+                }
+            }
+            assert!(
+                vecs[(best, col)] >= 0.0,
+                "column {col} largest component {} is negative",
+                vecs[(best, col)]
+            );
+        }
+    }
+
+    /// `Q diag(d) Q` with the symmetric Householder `Q = I - 2/n 11^T`.
+    fn similar_to_diagonal(diag: &[f64]) -> Array2<f64> {
+        let n = diag.len();
+        let scale = 2.0 / n as f64;
+        let mut q = Array2::zeros((n, n));
+        for i in 0..n {
+            for j in 0..n {
+                q[(i, j)] = if i == j { 1.0 - scale } else { -scale };
+            }
+        }
+        let mut qd = Array2::zeros((n, n));
+        for i in 0..n {
+            for j in 0..n {
+                qd[(i, j)] = q[(i, j)] * diag[j];
+            }
+        }
+        qd.dot(&q)
+    }
+
+    #[test]
+    fn eigh_signs_the_largest_component_positive() {
+        let a = random_indefinite(6, 0x516E_0001);
+        let (evals, vecs) = eigh(a.view()).unwrap();
+        largest_component_is_positive(&vecs);
+        let (partial, pvecs) = partial_eigh(a.view(), 2).unwrap();
+        assert!((partial[0] - evals[0]).abs() <= 1e-8);
+        assert!((partial[1] - evals[1]).abs() <= 1e-8);
+        largest_component_is_positive(&pvecs);
+    }
+
+    #[test]
+    fn clustered_indefinite_spectrum_matches_jacobi() {
+        let diag = [-1.5, -1.5, -1.5, -0.25, 0.5, 1.25, 2.0, 3.5];
+        let a = similar_to_diagonal(&diag);
+        assert_matches_jacobi(a.view(), diag.len());
+        assert_matches_jacobi(a.view(), 3);
+        let (_, vecs) = eigh(a.view()).unwrap();
+        largest_component_is_positive(&vecs);
+    }
+
+    #[test]
+    fn diagonal_past_one_tile_keeps_its_spectrum() {
+        let n = 72;
+        let mut a = Array2::zeros((n, n));
+        for i in 0..n {
+            a[(i, i)] = (i as f64) - 20.0;
+        }
+        let (evals, vecs) = eigh(a.view()).unwrap();
+        let mut expected: Vec<f64> = (0..n).map(|i| (i as f64) - 20.0).collect();
+        expected.sort_by(f64::total_cmp);
+        for i in 0..n {
+            assert!(
+                (evals[i] - expected[i]).abs() < 1e-8,
+                "diag eval {i}: {} vs {}",
+                evals[i],
+                expected[i]
+            );
+        }
+        assert_residual(a.view(), &evals, &vecs);
+    }
+
+    #[test]
+    fn banded_past_one_tile_keeps_its_spectrum() {
+        let n = 72;
+        let mut a = Array2::zeros((n, n));
+        for i in 0..n {
+            a[(i, i)] = 2.0;
+            if i + 1 < n {
+                a[(i, i + 1)] = -1.0;
+                a[(i + 1, i)] = -1.0;
+            }
+            if i + 8 < n {
+                a[(i, i + 8)] = 0.25;
+                a[(i + 8, i)] = 0.25;
+            }
+        }
+        let mut work = a.clone();
+        let (old, _) = jacobi_eigh_inplace(&mut work).unwrap();
+        let (evals, vecs) = eigh(a.view()).unwrap();
+        for i in 0..n {
+            assert!(
+                (evals[i] - old[i]).abs() < 1e-6,
+                "band eval {i}: {} vs {}",
+                evals[i],
+                old[i]
+            );
+        }
+        assert_residual(a.view(), &evals, &vecs);
+    }
+
+    #[test]
+    fn tall_panel_matches_the_sequential_spectrum() {
+        let mut sizes = vec![72usize, 140];
+        if !cfg!(debug_assertions) {
+            sizes.push(512);
+        }
+        for n in sizes {
+            let a = random_indefinite(n, 0x7A11_0000 + n as u64);
+            let (evals, vecs) = eigh(a.view()).unwrap();
+            let (reference, _) = crate::dense_eigh::faer_sequential(&a).unwrap();
+            let scale = spectrum_scale(&reference);
+            for i in 0..n {
+                assert!(
+                    (evals[i] - reference[i]).abs() <= 1e-8 * scale,
+                    "n={n} eigenvalue {i}: {} vs {}",
+                    evals[i],
+                    reference[i]
+                );
+            }
+            assert_residual(a.view(), &evals, &vecs);
+            largest_component_is_positive(&vecs);
+        }
+    }
+
+    #[test]
+    fn two_stage_matches_jacobi_past_one_tile() {
+        let a = random_indefinite(72, 0x711E_0048);
+        assert_matches_jacobi(a.view(), 72);
+        assert_matches_jacobi(a.view(), 4);
+        let (full, fvecs) = eigh(a.view()).unwrap();
+        let (partial, pvecs) = partial_eigh(a.view(), 4).unwrap();
+        largest_component_is_positive(&fvecs);
+        largest_component_is_positive(&pvecs);
+        for i in 0..4 {
+            assert!((partial[i] - full[i]).abs() <= 1e-8 * spectrum_scale(&full));
+        }
+    }
+
     #[test]
     fn faer_matches_jacobi_on_random_spd() {
         let a = random_spd(8, 0x5A11_E001);
@@ -1175,16 +1371,57 @@ mod tests {
         ));
     }
 
+    fn pair_fingerprint(evals: &Array1<f64>, vecs: &Array2<f64>) -> u64 {
+        let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+        for value in evals.iter().chain(vecs.iter()) {
+            hash ^= value.to_bits();
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        hash
+    }
+
+    #[cfg(feature = "dense-faer")]
+    #[test]
+    fn eigh_fingerprint_is_stable_inside_one_build() {
+        // pulp selects the widest compiled width. `eigh-avx512` compiles
+        // x86-v4 and there is no in-process cap, so the portable hashes
+        // belong to a build that leaves those kernels out. n = 48 agrees
+        // across the two builds. n = 256 does not.
+        let cases = [
+            (48usize, 0xA7C2_0048_u64, 0x7686_bb1a_1f04_ae7a_u64, true),
+            (256, 0xA7C2_0256, 0xa361_7526_1297_1a6d, false),
+        ];
+        for (n, seed, portable, same_with_avx512) in cases {
+            let a = random_spd(n, seed);
+            let (evals, vecs) = eigh(a.view()).unwrap();
+            let again = eigh(a.view()).unwrap();
+            assert!(
+                same_bits(&(evals.clone(), vecs.clone()), &again),
+                "n={n} changed inside one process"
+            );
+            let hash = pair_fingerprint(&evals, &vecs);
+            eprintln!("eigh_fingerprint_n{n}={hash:#x}");
+            if same_with_avx512 || cfg!(not(feature = "eigh-avx512")) {
+                assert_eq!(hash, portable, "n={n} left the portable fingerprint");
+            }
+        }
+    }
+
+    #[cfg(feature = "dense-faer")]
     #[test]
     fn eigenpairs_are_bit_identical_at_one_two_and_n_threads() {
-        // n = 512 is past faer's tridiagonal parallel threshold
-        // (`par_threshold` is 192 * 256). A solver that followed the
-        // pool size would not stay bitwise identical here.
-        for (n, seed) in [(48, 0x517E_0001_u64), (512, 0x517E_0512)] {
+        // n = 512 enters the tiled band reduction. n = 48 stays in
+        // the bulge chase. A split that read the pool size would
+        // change the bits. n = 3000 is the release check.
+        let mut cases = vec![(48usize, 0x517E_0001_u64), (512, 0x517E_0512)];
+        if !cfg!(debug_assertions) {
+            cases.push((3000, 0x517E_3000));
+        }
+        for (n, seed) in cases {
             let a = random_spd(n, seed);
-            let sequential = exact_eigh(a.view()).unwrap();
+            let sequential = eigh(a.view()).unwrap();
             let available = std::thread::available_parallelism().unwrap().get();
-            let mut counts = vec![1_usize, 2, available];
+            let mut counts = vec![1_usize, 2, 3, available];
             counts.sort_unstable();
             counts.dedup();
             for threads in counts {
@@ -1192,12 +1429,12 @@ mod tests {
                     .num_threads(threads)
                     .build()
                     .unwrap();
-                let on_pool = pool.install(|| exact_eigh(a.view()).unwrap());
+                let on_pool = pool.install(|| eigh(a.view()).unwrap());
                 assert!(
                     same_bits(&sequential, &on_pool),
                     "n={n} threads={threads} changed the eigenpairs"
                 );
-                let again = pool.install(|| exact_eigh(a.view()).unwrap());
+                let again = pool.install(|| eigh(a.view()).unwrap());
                 assert!(
                     same_bits(&sequential, &again),
                     "n={n} threads={threads} repeat changed the eigenpairs"

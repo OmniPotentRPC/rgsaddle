@@ -9,7 +9,8 @@
 //! The matrix is a random symmetric shift of `M^T M`, positive definite,
 //! built outside the timed section. Solvers are interleaved. Each reported
 //! time is the median of five solves, with the range (max - min).
-//! rgsaddle 0.2.2, faer 0.24.4, pulp runtime SIMD, `Par::Seq`.
+//! rgsaddle 0.2.2, faer 0.24.4. The dense path is the two-stage
+//! reduction. Feature `par` parallelizes its fixed tiles.
 
 use std::env;
 use std::hint::black_box;
@@ -66,7 +67,7 @@ fn main() {
     };
     println!("rgsaddle {}", env!("CARGO_PKG_VERSION"));
     println!("faer 0.24.4");
-    println!("solver faer self-adjoint (pulp runtime SIMD) vs cyclic Jacobi");
+    println!("solver two-stage dense spectrum vs cyclic Jacobi");
     for n in sizes {
         println!("building n={n}");
         let a = random_spd(n);

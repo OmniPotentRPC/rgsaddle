@@ -1,0 +1,97 @@
+#+TITLE: Dense symmetric eigensolver
+#+OPTIONS: toc:nil num:nil
+
+~eigh~ copies the symmetric part of its argument, reduces that matrix to bandwidth 64 with tiled Householder panels, chases the bulge to tridiagonal form, and solves the factor with Cuppen's method. The panel reduction is the two-stage algorithm of Haidar, Ltaief, and Dongarra (https://doi.org/10.1145/2063384.2063394). The chase stores a compact band of half-width 128, which holds the fill, and applies each reflector inside that band. The tridiagonal spectrum is Cuppen's divide-and-conquer (https://doi.org/10.1007/BF01396757) as implemented by Gu and Eisenstat (https://doi.org/10.1137/S0895479892241287). Francis QR (https://doi.org/10.1093/comjnl/4.4.332) is the step below faer's recursion threshold. ~partial_eigh~ bisects the same factor and runs inverse iteration for the lowest k pairs. ~k~ equal to the dimension calls ~eigh~.
+
+Every trailing update and the eigenvector product go through ~tile_gemm~. An Ozaki-II kernel can replace that function later. Tile ownership and the faer task count depend on the dimension and on the tile size. They do not read the rayon pool. Feature ~par~ runs those tiles on the pool. Without ~par~ the same partition runs on one thread, and the bits match. The tridiagonal solve uses ~Par::rayon~ with a task count that is a power of two, at most 32, and at least 2 once the dimension reaches 256. Below faer's recursion threshold of 128 the tridiagonal solve is sequential.
+
+Eigenvalues ascend. Each column is signed so that its lowest-index largest-magnitude component is positive. Lanczos ~lowest_ritz~ and ~jacobi_eigen~ call ~partial_eigh~ and ~eigh~.
+
+The tables are medians of 7 interleaved runs. The range is the maximum minus the minimum. Efficiency is the one-thread median divided by the product of the thread count and that count's median. The host is an 8-core Intel Xeon with one thread per core and AVX-512. The default build uses the AVX2 kernels.
+
+#+begin_src console
+$ cargo bench --features par --bench eigh_scale -- 1500 3000
+#+end_src
+
+* n = 3000, random SPD
+
+| threads | median (s) | range (s) | efficiency |
+|---------+------------+-----------+------------|
+| 1       | 28.494     | 2.196     | 1.000      |
+| 2       | 15.540     | 1.252     | 0.917      |
+| 4       | 8.876      | 0.299     | 0.803      |
+| 8       | 5.720      | 0.479     | 0.623      |
+
+Stage medians, in seconds. The share is that stage divided by the sum of the four stage medians.
+
+| threads | band  | bulge | tridiagonal | back-transform | share back |
+|---------+-------+-------+-------------+----------------+------------|
+| 1       | 1.305 | 0.860 | 0.927       | 25.041         | 0.890      |
+| 2       | 1.108 | 0.846 | 0.584       | 12.425         | 0.830      |
+| 4       | 0.977 | 0.843 | 0.435       | 6.226          | 0.734      |
+| 8       | 0.952 | 0.822 | 0.359       | 3.223          | 0.602      |
+
+The back-transformation scales. Its 8-thread efficiency against its own one-thread time is 0.971. The bulge chase stays near 0.83 s. The band reduction moves from 1.305 s to 0.952 s. Those two flat pieces set the 8-thread efficiency. E(8) is 0.623.
+
+faer's sequential self-adjoint solver, ~Par::Seq~, takes 3.397 s (range 0.273). The one-thread fixed partition is 8.4 times that. The extra cost is the panel reduction and the reflector back-transformation.
+
+* n = 3000, clustered indefinite spectrum
+
+The spectrum has a triple eigenvalue at -1.5 and then a spread of positive values.
+
+| threads | median (s) | range (s) | efficiency |
+|---------+------------+-----------+------------|
+| 1       | 28.208     | 0.890     | 1.000      |
+| 2       | 15.526     | 0.323     | 0.908      |
+| 4       | 9.036      | 0.572     | 0.780      |
+| 8       | 5.758      | 0.429     | 0.612      |
+
+* Partial spectrum, n = 3000, random SPD
+
+| threads | k    | median (s) | range (s) | versus full |
+|---------+------+------------+-----------+-------------|
+| 1       | full | 28.616     | 0.607     | 1           |
+| 1       | 1    | 2.518      | 0.213     | 0.088       |
+| 1       | 5    | 2.326      | 0.105     | 0.081       |
+| 1       | 10   | 2.350      | 0.057     | 0.082       |
+| 8       | full | 5.601      | 0.340     | 1           |
+| 8       | 1    | 1.888      | 0.116     | 0.337       |
+| 8       | 5    | 1.895      | 0.065     | 0.338       |
+| 8       | 10   | 1.896      | 0.167     | 0.339       |
+
+The partial solve still builds the tridiagonal factor. It skips the full Cuppen vectors and back-transforms only k columns. At one thread, k = 10 is 0.082 of the full solve.
+
+* n = 1500
+
+Random SPD. E(8) is 0.516. The back-transform is a smaller fraction of a shorter solve, so the flat bulge weighs more.
+
+| threads | median (s) | range (s) | efficiency |
+|---------+------------+-----------+------------|
+| 1       | 3.695      | 0.184     | 1.000      |
+| 2       | 2.031      | 0.063     | 0.910      |
+| 4       | 1.318      | 0.180     | 0.701      |
+| 8       | 0.895      | 0.101     | 0.516      |
+
+At 8 threads the stages are band 0.148 s, bulge 0.186 s, tridiagonal 0.086 s, and back-transform 0.424 s. The clustered indefinite matrix at this size has E(8) = 0.504 (median 0.900 s, range 0.063).
+
+Partial SPD times at one thread are 0.339 s, 0.347 s, and 0.359 s for k = 1, 5, and 10, against a full median of 3.676 s. At 8 threads those partial times are 0.330 s, 0.342 s, and 0.345 s, against a full median of 0.845 s.
+
+faer ~Par::Seq~ at n = 1500 takes 0.498 s (range 0.011). The one-thread fixed partition is 7.4 times that.
+
+* Compiled crates
+
+Counts are ~cargo tree -e normal --prefix none -p rgsaddle~, unique crate names. Optional dependencies stay in the lockfile either way. The count that matters is the crates a build compiles.
+
+| build                                  | rows |
+|----------------------------------------+------|
+| default (~dense-faer~)                 | 83   |
+| ~--no-default-features~                | 44   |
+| ~--no-default-features --features par~ | 96   |
+
+The default build compiles 39 more rows than a build with no default features. That difference is faer and its dependencies. ~eindir-core~ already depends on rayon, so a default build is not free of that crate. Feature ~par~ turns on ~faer/rayon~ and ~rgmin/par~, which is why the no-default build with ~par~ reaches 96 rows.
+
+* Instruction sets
+
+Feature ~eigh-portable~ is on by default. It compiles pulp and gemm at x86-v3 (AVX2) and leaves x86-v4 out. That build is the cross-node invariant mode. Feature ~eigh-avx512~ passes faer's ~nightly~ feature, which compiles the x86-v4 kernels. pulp then selects AVX-512 when the host has it. There is no in-process switch, so the comparison is two release builds of ~eigh_fingerprint_is_stable_inside_one_build~.
+
+The 48 by 48 fingerprint is ~0x7686bb1a1f04ae7a~ in both builds. The 256 by 256 fingerprint is ~0xa361752612971a6d~ in the portable build and ~0xc66540129e6c38e7~ with ~eigh-avx512~. The test pins the portable hashes. A wider build is not required to match them. ~RAYON_NUM_THREADS=1~ and ~RAYON_NUM_THREADS=8~ print the same 48 by 48 hash.

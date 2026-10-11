@@ -54,6 +54,8 @@ pub use tangent::TangentKind;
 
 pub mod cell_log;
 pub mod constraints;
+#[cfg(feature = "dense-faer")]
+pub mod dense_eigh;
 pub mod eigensolve;
 pub mod force;
 pub mod force_match;
@@ -80,8 +82,8 @@ pub use constraints::{Constraints, Equality, InternalCounts};
 #[cfg(feature = "jacobi")]
 pub use eigensolve::jacobi_eigh;
 pub use eigensolve::{
-    EigenDevice, ExpandKind, eigh_on, exact_eigh, expand, lowest_on, partial_eigh, rayleigh_ritz,
-    rayleigh_ritz_iter,
+    EigenDevice, ExpandKind, eigh, eigh_on, exact_eigh, expand, lowest_on, partial_eigh,
+    rayleigh_ritz, rayleigh_ritz_iter,
 };
 
 pub use force::ForceGate;

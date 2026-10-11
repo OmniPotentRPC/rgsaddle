@@ -14,11 +14,23 @@ categories = ["science"]
 crate-type = ["lib", "cdylib", "staticlib"]
 
 [features]
-default = []
+default = ["dense-faer", "eigh-portable"]
 capi = []
 # Cyclic Jacobi dense eigensolver, kept for comparison with the faer path.
 jacobi = []
-par = ["rgmin/par"]
+# faer for the dense symmetric eigensolver. On by default.
+dense-faer = ["dep:faer", "dep:dyn-stack"]
+# Rayon for rgmin and for the fixed-partition dense eigensolver.
+# Without it the dense solver runs the same tiles on one thread.
+par = ["rgmin/par", "dense-faer", "faer/rayon", "dep:rayon"]
+# Cross-node invariant spectra. Pins pulp and gemm to the AVX2
+# kernels by leaving x86-v4 uncompiled. pulp has no runtime cap, so
+# this is a build mode, not a flag inside a wider binary.
+eigh-portable = ["dense-faer"]
+# Compile pulp and gemm AVX-512 kernels. gemm then selects them at
+# runtime when the host has AVX-512. Those kernels do not match
+# eigh-portable pairs once the matrix passes one tile.
+eigh-avx512 = ["dense-faer", "faer/nightly"]
 highs = ["rgmin/highs"]
 python = ["dep:pyo3"]
 readcon = ["dep:readcon-core"]
@@ -41,11 +53,12 @@ ndarray = "0.17"
 thiserror = "2"
 linkcell = { version = "0.3.3", git = "https://github.com/d-SEAMS/linkcell", rev = "f6cf5700ca9c90e1877c84b66fb68386de5ceffe", default-features = false }
 # Dense symmetric spectra. `std` enables pulp's runtime SIMD dispatch.
-# `rayon` is linked so tests can compare thread counts. The solver
-# passes `Par::Seq`; a parallel partition is not rank-invariant.
-# The solver does not link a system LAPACK.
-dyn-stack = "0.13.2"
-faer = { version = "0.24", default-features = false, features = ["std", "rayon"] }
+# `rayon` is enabled only by feature `par`. The solver does not link
+# a system LAPACK. The default `eigh-portable` build leaves AVX-512
+# kernels out. Feature `eigh-avx512` compiles them.
+dyn-stack = { version = "0.13.2", optional = true }
+faer = { version = "0.24", default-features = false, features = ["std"], optional = true }
+rayon = { version = "1", optional = true }
 
 [dev-dependencies]
 approx = "0.5"
@@ -77,3 +90,4 @@ required-features = ["jacobi"]
 [[bench]]
 name = "eigh_scale"
 harness = false
+required-features = ["par"]

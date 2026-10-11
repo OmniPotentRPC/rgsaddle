@@ -439,7 +439,7 @@ fn lanczos_mode<S: PointSurface>(
             w = &w - &(qi * overlap);
         }
         let b = w.dot(&w).sqrt();
-        let (theta, s) = lowest_ritz(&alpha, &beta);
+        let (theta, s) = lowest_ritz(&alpha, &beta)?;
         let residual = b * s[j].abs();
         if residual <= config.rotation_tol || alpha.len() == m || b <= 1e-12 {
             let mut mode = Array1::zeros(n);
@@ -453,10 +453,17 @@ fn lanczos_mode<S: PointSurface>(
     }
 }
 
-/// Lowest eigenpair of the symmetric tridiagonal (alpha, beta), with
+/// Lowest eigenpair of the symmetric tridiagonal `(alpha, beta)`, with
 /// the eigenvector in the Lanczos basis.
-fn lowest_ritz(alpha: &[f64], beta: &[f64]) -> (f64, Vec<f64>) {
+///
+/// Dimension 1 is the full spectrum and goes through [`jacobi_eigen`].
+/// A longer projection uses [`crate::eigensolve::partial_eigh`] for the
+/// lowest pair. Eigenvalues ascend and the sign rule is the dense one.
+fn lowest_ritz(alpha: &[f64], beta: &[f64]) -> Result<(f64, Vec<f64>), SaddleError> {
     let k = alpha.len();
+    if k == 0 {
+        return Err(SaddleError::Solver("empty Ritz projection".into()));
+    }
     let mut t = vec![vec![0.0; k]; k];
     for i in 0..k {
         t[i][i] = alpha[i];
@@ -465,69 +472,40 @@ fn lowest_ritz(alpha: &[f64], beta: &[f64]) -> (f64, Vec<f64>) {
             t[i + 1][i] = beta[i];
         }
     }
-    let (evals, evecs) = jacobi_eigen(&mut t);
-    let mut lowest = 0;
-    for i in 1..k {
-        if evals[i] < evals[lowest] {
-            lowest = i;
+    if k == 1 {
+        let (evals, evecs) = jacobi_eigen(&mut t)?;
+        return Ok((evals[0], evecs.iter().map(|row| row[0]).collect()));
+    }
+    let mut dense = Array2::zeros((k, k));
+    for row in 0..k {
+        for col in 0..k {
+            dense[(row, col)] = t[row][col];
         }
     }
-    (evals[lowest], evecs.iter().map(|row| row[lowest]).collect())
+    let (evals, vecs) = crate::eigensolve::partial_eigh(dense.view(), 1)?;
+    Ok((evals[0], vecs.column(0).to_vec()))
 }
 
-/// Cyclic Jacobi for a small symmetric matrix. Returns eigenvalues
-/// and the column-major eigenvector table `v[row][col]`.
-// The rotation sweeps touch two columns of one row at a time, so an
-// index loop is the readable form here.
-#[allow(clippy::needless_range_loop)]
-fn jacobi_eigen(a: &mut [Vec<f64>]) -> (Vec<f64>, Vec<Vec<f64>>) {
+/// Full spectrum of a small symmetric matrix, through [`crate::eigensolve::eigh`].
+///
+/// Returns eigenvalues in ascending order and the column table
+/// `v[row][col]`. Each column has a positive largest-magnitude entry.
+fn jacobi_eigen(a: &mut [Vec<f64>]) -> Result<(Vec<f64>, Vec<Vec<f64>>), SaddleError> {
     let n = a.len();
+    let mut dense = Array2::zeros((n, n));
+    for row in 0..n {
+        for (col, value) in a[row].iter().enumerate() {
+            dense[(row, col)] = *value;
+        }
+    }
+    let (evals, vecs) = crate::eigensolve::eigh(dense.view())?;
     let mut v = vec![vec![0.0; n]; n];
-    for (i, row) in v.iter_mut().enumerate() {
-        row[i] = 1.0;
-    }
-    for _sweep in 0..64 {
-        let mut off = 0.0;
-        for (i, row) in a.iter().enumerate() {
-            for value in row.iter().skip(i + 1) {
-                off += value * value;
-            }
-        }
-        if off <= 1e-24 {
-            break;
-        }
-        for p in 0..n {
-            for qi in (p + 1)..n {
-                if a[p][qi].abs() < 1e-18 {
-                    continue;
-                }
-                let theta = (a[qi][qi] - a[p][p]) / (2.0 * a[p][qi]);
-                let t = theta.signum() / (theta.abs() + (theta * theta + 1.0).sqrt());
-                let c = 1.0 / (t * t + 1.0).sqrt();
-                let s = t * c;
-                for k in 0..n {
-                    let akp = a[k][p];
-                    let akq = a[k][qi];
-                    a[k][p] = c * akp - s * akq;
-                    a[k][qi] = s * akp + c * akq;
-                }
-                for k in 0..n {
-                    let apk = a[p][k];
-                    let aqk = a[qi][k];
-                    a[p][k] = c * apk - s * aqk;
-                    a[qi][k] = s * apk + c * aqk;
-                }
-                for k in 0..n {
-                    let vkp = v[k][p];
-                    let vkq = v[k][qi];
-                    v[k][p] = c * vkp - s * vkq;
-                    v[k][qi] = s * vkp + c * vkq;
-                }
-            }
+    for col in 0..n {
+        for row in 0..n {
+            v[row][col] = vecs[(row, col)];
         }
     }
-    let evals = (0..n).map(|i| a[i][i]).collect();
-    (evals, v)
+    Ok((evals.to_vec(), v))
 }
 
 /// The surface's answer at one point.
@@ -1038,6 +1016,44 @@ mod tests {
         assert_abs_diff_eq!(eff[2], 0.0, epsilon = 1e-12);
         let flat = translated_gradient(&gradient, &mode, 0.0);
         assert_abs_diff_eq!(flat[1], 0.0, epsilon = 1e-12);
+    }
+
+    #[test]
+    #[allow(clippy::needless_range_loop)]
+    fn jacobi_eigen_uses_the_dense_sign_rule() {
+        let mut a = vec![
+            vec![2.0, 1.0, 0.0],
+            vec![1.0, 2.0, 1.0],
+            vec![0.0, 1.0, 2.0],
+        ];
+        let (evals, vecs) = super::jacobi_eigen(&mut a).unwrap();
+        assert!(evals.windows(2).all(|pair| pair[0] <= pair[1]));
+        assert!((evals[0] - (2.0 - 2.0_f64.sqrt())).abs() < 1e-8);
+        assert!((evals[2] - (2.0 + 2.0_f64.sqrt())).abs() < 1e-8);
+        for col in 0..3 {
+            let mut best = 0usize;
+            let mut best_abs = 0.0;
+            for row in 0..3 {
+                let magnitude = vecs[row][col].abs();
+                if magnitude > best_abs {
+                    best_abs = magnitude;
+                    best = row;
+                }
+            }
+            assert!(vecs[best][col] >= 0.0, "column {col}");
+        }
+        let (theta, s) = super::lowest_ritz(&[2.0, 3.0, 4.0], &[0.5, -0.25]).unwrap();
+        assert!(theta < 2.0, "{theta}");
+        assert_eq!(s.len(), 3);
+        let mut best = 0usize;
+        let mut best_abs = 0.0;
+        for (row, value) in s.iter().enumerate() {
+            if value.abs() > best_abs {
+                best_abs = value.abs();
+                best = row;
+            }
+        }
+        assert!(s[best] >= 0.0);
     }
 
     #[test]

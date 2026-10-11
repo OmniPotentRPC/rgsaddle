@@ -7,7 +7,7 @@ The reported force norm must satisfy the selected ~ForceGate~, and the estimated
 
 ~set_kappa~ selects the basin constraint. ~set_highs~ selects the optional feasible-step control. Call ~reset~ at a surface change and use ~set_force_gate~ to select the physical stopping norm. Hosts that require exactly one imaginary mode must perform their full index check.
 
-A host that already holds a dense Hessian can take its softest modes from ~partial_eigh~. The dimer and Lanczos estimates stay the matrix-free path.
+A host that already holds a dense Hessian can take its softest modes from ~partial_eigh~. ~eigh~ is the full spectrum of the same symmetric matrix. Both return ascending eigenvalues and sign each column so its largest-magnitude component is positive. Lanczos builds a small tridiagonal projection and takes its lowest pair from ~partial_eigh~. The dimer estimate stays matrix-free.
 
 ** Keep one session across a host search
 
