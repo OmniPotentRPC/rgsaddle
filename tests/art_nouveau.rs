@@ -1,10 +1,19 @@
 //! ART nouveau on Muller-Brown and the double-well atom used by the
-//! minimum-mode and band tests. Seeded pushes report a success rate and
-//! the force calls per saddle next to the dimer driver.
+//! minimum-mode and band tests.
+//!
+//! The double well is `(x^2 - 1)^2 + 2 y^2 + 2 z^2` at `(1, 0, 0)`.
+//! The reaction coordinate is the stiffest mode there. An isotropic
+//! kick has a positive x component about half the time and runs into
+//! the outer wall, where no saddle exists. That half is the ceiling
+//! of the seeded double-well rate: 8/16 is the count this fixture
+//! reaches when every inward kick converges, not a published ARTn rate.
+//!
+//! Seeded pushes report a success rate and the force calls per saddle
+//! next to the dimer driver, in one interleaved loop.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use ndarray::{Array1, ArrayView1, array};
+use ndarray::{Array1, Array2, ArrayView1, array};
 use rgsaddle::{
     ArtConfig, ArtDisplacement, ArtEvent, ArtOutcome, ArtSession, ArtStatus, ArtSupport,
     FiniteDifference, ForceGate, MinModeConfig, MinModeKind, MinModeSession, MinModeStatus,
@@ -225,10 +234,7 @@ fn local_push_on_one_atom_of_the_double_well_keeps_the_other_in_its_well() {
     minimum[3] = 1.0;
     let support = ArtSupport::local_atoms(minimum.view(), 0, 0.0).unwrap();
     let mut session = ArtSession::new(
-        ArtConfig {
-            force_tol: 1e-3,
-            ..ArtConfig::default()
-        },
+        ArtConfig::default(),
         minimum,
         ArtDisplacement::Targeted {
             direction: array![-1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
@@ -291,14 +297,36 @@ impl PointSurface for GateCount {
     }
 }
 
+#[test]
+fn lanczos_waits_until_the_push_passes_the_activation_distance() {
+    let config = ArtConfig::builder()
+        .activation_distance(10.0)
+        .perp_steps_push(0)
+        .build()
+        .unwrap();
+    let mut session = ArtSession::new(
+        config,
+        array![1.0, 0.0, 0.0],
+        ArtDisplacement::Targeted {
+            direction: array![-1.0, 0.0, 0.0],
+            support: ArtSupport::Global,
+            amplitude: 0.2,
+        },
+    )
+    .unwrap();
+    let report = session.step(&DoubleWell).unwrap();
+    assert_eq!(report.lanczos_evaluations, 0);
+    assert!(report.curvature.is_nan());
+    assert_eq!(report.status, ArtStatus::Pushing);
+}
+
 fn double_well_config() -> ArtConfig {
-    ArtConfig {
-        // The reaction coordinate is the stiffest mode at the minimum.
-        // Perpendicular relaxation during the opening dumps the push
-        // into the soft axes and the well never opens.
-        perp_steps_push: 0,
-        ..ArtConfig::default()
-    }
+    // Library defaults: threshold -0.01, push 0.3, perpendicular
+    // relaxation during the opening, Lanczos after the activation
+    // distance. About half of the isotropic kicks have a positive x
+    // component and run into the outer wall, where no saddle exists.
+    // That share is the ceiling of this fixture.
+    ArtConfig::default()
 }
 
 fn random_double_well(seed: u64) -> (bool, usize, bool, usize) {
@@ -326,8 +354,8 @@ fn random_double_well(seed: u64) -> (bool, usize, bool, usize) {
         start,
         direction,
         &DoubleWell,
-        config.force_tol,
-        config.max_move,
+        config.mode.force_tol,
+        config.mode.max_move,
         50,
     );
     let dimer_saddle = dimer_ok && double_well_index(dimer_x.view()) == 1;
@@ -379,18 +407,32 @@ fn seeded_random_pushes_on_the_double_well_against_the_dimer() {
 
 fn mb_config() -> ArtConfig {
     ArtConfig {
-        force_tol: 5e-3,
+        mode: MinModeConfig {
+            kind: MinModeKind::Lanczos,
+            force_tol: 5e-3,
+            max_move: 0.05,
+            // The reflected climb is the min-mode step. L-BFGS keeps
+            // that force; FIRE's first capped step leaves this ridge.
+            method: rgmin::Method::Lbfgs { memory: 8 },
+            dr: 1e-4,
+            difference: FiniteDifference::Central,
+            rotation_tol: 1e-2,
+            krylov_dim: 4,
+            ..MinModeConfig::default()
+        },
         push_step: 0.03,
-        max_move: 0.05,
         max_pushes: 40,
         max_climbs: 80,
+        // The ridge is narrower than one extra FIRE step. The climb
+        // already moves on the min-mode reflected force, which keeps
+        // the perpendicular part once the curvature is negative.
         perp_steps_push: 0,
-        perp_steps_climb: 4,
-        dr: 1e-4,
-        difference: FiniteDifference::Central,
-        rotation_tol: 1e-2,
-        krylov_dim: 4,
-        eigen_threshold: 0.0,
+        perp_steps_climb: 0,
+        krylov_min: 1,
+        eigen_threshold: -0.01,
+        activation_distance: 0.0,
+        nsmooth: 0,
+        push_over: 0.0,
     }
 }
 
@@ -479,8 +521,8 @@ fn random_muller(seed: u64) -> (bool, usize, bool, usize) {
         start,
         direction,
         &MullerBrown,
-        config.force_tol,
-        config.max_move,
+        config.mode.force_tol,
+        config.mode.max_move,
         40,
     );
     let dimer_saddle = dimer_ok && muller_index(dimer_x[0], dimer_x[1]) == 1;
@@ -594,31 +636,63 @@ fn serial_outcomes(events: &[ArtEvent], max_steps: usize) -> Vec<ArtOutcome> {
 
 #[test]
 fn batch_matches_across_thread_counts_and_rank_splits() {
-    let events = batch_events(8);
+    let events = batch_events(9);
     let serial = serial_outcomes(&events, 40);
-    let width = std::thread::available_parallelism()
-        .map(|count| count.get())
-        .unwrap_or(2)
-        .max(2);
-    for threads in [1usize, 2, width] {
+    let serial_hash = outcome_hash(&serial);
+    for threads in [1usize, 2, 3, 8] {
         let parallel =
             run_events(&double_well_config(), &events, &DoubleWell, 40, threads).expect("batch");
         assert_bitwise(&serial, &parallel);
+        assert_eq!(outcome_hash(&parallel), serial_hash);
     }
-    let mid = events.len() / 2;
+    let third = events.len() / 3;
     let mut split =
-        run_events(&double_well_config(), &events[..mid], &DoubleWell, 40, 1).expect("low rank");
+        run_events(&double_well_config(), &events[..third], &DoubleWell, 40, 1).expect("rank 0");
     split.extend(
         run_events(
             &double_well_config(),
-            &events[mid..],
+            &events[third..2 * third],
             &DoubleWell,
             40,
-            width,
+            1,
         )
-        .expect("high rank"),
+        .expect("rank 1"),
+    );
+    split.extend(
+        run_events(
+            &double_well_config(),
+            &events[2 * third..],
+            &DoubleWell,
+            40,
+            3,
+        )
+        .expect("rank 2"),
     );
     assert_bitwise(&serial, &split);
+    assert_eq!(outcome_hash(&split), serial_hash);
+}
+
+fn outcome_hash(outcomes: &[ArtOutcome]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for outcome in outcomes {
+        hash = mix_bytes(hash, &(outcome.status as u8).to_le_bytes());
+        hash = mix_bytes(hash, &outcome.energy.to_le_bytes());
+        hash = mix_bytes(hash, &outcome.curvature.to_le_bytes());
+        hash = mix_bytes(hash, &outcome.max_force.to_le_bytes());
+        for value in outcome.position.iter() {
+            hash = mix_bytes(hash, &value.to_le_bytes());
+        }
+        hash = mix_bytes(hash, &outcome.evaluations.to_le_bytes());
+    }
+    hash
+}
+
+fn mix_bytes(mut hash: u64, bytes: &[u8]) -> u64 {
+    for byte in bytes {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x100_0000_01b3);
+    }
+    hash
 }
 
 struct FailByX;
@@ -649,11 +723,7 @@ fn batch_error_is_the_lowest_event_index() {
             },
         },
     ];
-    let width = std::thread::available_parallelism()
-        .map(|count| count.get())
-        .unwrap_or(2)
-        .max(2);
-    for threads in [1usize, 2, width] {
+    for threads in [1usize, 2, 3, 8] {
         let err = run_events(&ArtConfig::default(), &events, &FailByX, 4, threads)
             .expect_err("event 0 fails");
         let message = err.to_string();
@@ -741,4 +811,601 @@ fn strong_scaling_of_independent_art_events() {
     eprintln!(
         "ART_SCALE limiter={limiter} serial_fraction={serial:.3} widest_threads={p} widest_efficiency={efficiency:.3}"
     );
+}
+
+/// Henkelman–Jónsson model II: LEPS plus a harmonic oscillator.
+/// The third coordinate is a unit spring so the vector is a Cartesian triple.
+struct LepsHo;
+
+fn leps_morse(r: f64, d: f64) -> (f64, f64) {
+    let alpha = 1.942;
+    let r0 = 0.742;
+    let z = alpha * (r - r0);
+    let attract = (-z).exp();
+    let repel = (-2.0 * z).exp();
+    let q = d / 2.0 * (1.5 * repel - attract);
+    let j = d / 4.0 * (repel - 6.0 * attract);
+    (q, j)
+}
+
+fn leps_ho_energy(r_ab: f64, x: f64) -> f64 {
+    let r_ac = 3.742;
+    let r_bc = r_ac - r_ab;
+    let (q_ab, j_ab) = leps_morse(r_ab, 4.746);
+    let (q_bc, j_bc) = leps_morse(r_bc, 4.746);
+    let (q_ac, j_ac) = leps_morse(r_ac, 3.445);
+    let a = 0.05;
+    let b = 0.80;
+    let c = 0.05;
+    let q = q_ab / (1.0 + a) + q_bc / (1.0 + b) + q_ac / (1.0 + c);
+    let j_ab = j_ab / (1.0 + a);
+    let j_bc = j_bc / (1.0 + b);
+    let j_ac = j_ac / (1.0 + c);
+    let inside = j_ab * j_ab + j_bc * j_bc + j_ac * j_ac - j_ab * j_bc - j_bc * j_ac - j_ab * j_ac;
+    let kc = 0.2025;
+    let c_ho = 1.154;
+    let u = r_ab - r_ac / 2.0 + x / c_ho;
+    q - inside.max(0.0).sqrt() + 2.0 * kc * u * u
+}
+
+impl PointSurface for LepsHo {
+    fn eval(&self, point: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        let (r_ab, x, z) = (point[0], point[1], point[2]);
+        let dr = 1e-6;
+        let energy = leps_ho_energy(r_ab, x) + 0.5 * z * z;
+        let grad_r = (leps_ho_energy(r_ab + dr, x) - leps_ho_energy(r_ab - dr, x)) / (2.0 * dr);
+        let grad_x = (leps_ho_energy(r_ab, x + dr) - leps_ho_energy(r_ab, x - dr)) / (2.0 * dr);
+        Ok((energy, array![grad_r, grad_x, z]))
+    }
+}
+
+fn leps_index(point: ArrayView1<f64>) -> i32 {
+    let dr = 1e-5;
+    let g = |r: f64, x: f64| {
+        let shift = 1e-6;
+        let gr = (leps_ho_energy(r + shift, x) - leps_ho_energy(r - shift, x)) / (2.0 * shift);
+        let gx = (leps_ho_energy(r, x + shift) - leps_ho_energy(r, x - shift)) / (2.0 * shift);
+        (gr, gx)
+    };
+    let (r, x) = (point[0], point[1]);
+    let (gp, _) = g(r + dr, x);
+    let (gm, _) = g(r - dr, x);
+    let (_, hp) = g(r, x + dr);
+    let (_, hm) = g(r, x - dr);
+    let hrr = (gp - gm) / (2.0 * dr);
+    let hxx = (hp - hm) / (2.0 * dr);
+    let hrx = (g(r, x + dr).0 - g(r, x - dr).0) / (2.0 * dr);
+    let tr = hrr + hxx;
+    let det = hrr * hxx - hrx * hrx;
+    let disc = (tr * tr - 4.0 * det).max(0.0).sqrt();
+    let low = 0.5 * (tr - disc);
+    let high = 0.5 * (tr + disc);
+    i32::from(low < -1e-3) + i32::from(high < -1e-3)
+}
+
+fn leps_stationary(guess_r: f64, guess_x: f64) -> (f64, f64) {
+    let mut r = guess_r;
+    let mut x = guess_x;
+    for _ in 0..40 {
+        let (_, gradient) = LepsHo.eval(array![r, x, 0.0].view()).unwrap();
+        if gradient[0].hypot(gradient[1]) < 1e-8 {
+            break;
+        }
+        let dr = 1e-5;
+        let g = |r: f64, x: f64| {
+            let (_, gradient) = LepsHo.eval(array![r, x, 0.0].view()).unwrap();
+            (gradient[0], gradient[1])
+        };
+        let (gr, gx) = g(r, x);
+        let (grp, _) = g(r + dr, x);
+        let (grm, _) = g(r - dr, x);
+        let (_, gxp) = g(r, x + dr);
+        let (_, gxm) = g(r, x - dr);
+        let hrr = (grp - grm) / (2.0 * dr);
+        let hxx = (gxp - gxm) / (2.0 * dr);
+        let hrx = (g(r, x + dr).0 - g(r, x - dr).0) / (2.0 * dr);
+        let det = hrr * hxx - hrx * hrx;
+        if det.abs() < 1e-14 {
+            break;
+        }
+        r -= (hxx * gr - hrx * gx) / det;
+        x -= (hrr * gx - hrx * gr) / det;
+    }
+    (r, x)
+}
+
+fn leps_references() -> (Array1<f64>, Array1<f64>) {
+    let mut best_min = (f64::INFINITY, 0.74, 0.0);
+    let mut best_sad = (f64::INFINITY, 1.5, 0.0);
+    let mut r = 0.55;
+    while r < 3.2 {
+        let mut x = -1.6;
+        while x < 1.6 {
+            let point = array![r, x, 0.0];
+            let (energy, gradient) = LepsHo.eval(point.view()).unwrap();
+            let force = gradient[0].hypot(gradient[1]);
+            if force < 8.0 {
+                let index = leps_index(point.view());
+                if index == 0 && energy < best_min.0 {
+                    best_min = (energy, r, x);
+                }
+                if index == 1 && force < best_sad.0 {
+                    best_sad = (force, r, x);
+                }
+            }
+            x += 0.08;
+        }
+        r += 0.08;
+    }
+    let (r_min, x_min) = leps_stationary(best_min.1, best_min.2);
+    let (r_sad, x_sad) = leps_stationary(best_sad.1, best_sad.2);
+    (array![r_min, x_min, 0.0], array![r_sad, x_sad, 0.0])
+}
+
+struct Lj7;
+
+fn lj_pair(r2: f64) -> (f64, f64) {
+    let s = 1.0 / r2;
+    let s3 = s * s * s;
+    let s6 = s3 * s3;
+    let energy = 4.0 * (s6 - s3);
+    let d_dr2 = 4.0 * (-6.0 * s6 * s + 3.0 * s3 * s);
+    (energy, d_dr2)
+}
+
+impl PointSurface for Lj7 {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        let n = x.len() / 3;
+        let mut energy = 0.0;
+        let mut gradient = Array1::zeros(x.len());
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let mut r2 = 0.0;
+                let mut delta = [0.0; 3];
+                for c in 0..3 {
+                    delta[c] = x[3 * i + c] - x[3 * j + c];
+                    r2 += delta[c] * delta[c];
+                }
+                if r2 < 1e-12 {
+                    return Err(SaddleError::NonFinite("lj overlap"));
+                }
+                let (pair, d_dr2) = lj_pair(r2);
+                energy += pair;
+                for c in 0..3 {
+                    let component = d_dr2 * 2.0 * delta[c];
+                    gradient[3 * i + c] += component;
+                    gradient[3 * j + c] -= component;
+                }
+            }
+        }
+        Ok((energy, gradient))
+    }
+
+    fn excluded_modes(&self, x: ArrayView1<f64>) -> Result<Array2<f64>, SaddleError> {
+        Ok(rigid_modes(x))
+    }
+}
+
+fn rigid_modes(x: ArrayView1<f64>) -> Array2<f64> {
+    let n = x.len() / 3;
+    let mut com = [0.0; 3];
+    for i in 0..n {
+        for c in 0..3 {
+            com[c] += x[3 * i + c];
+        }
+    }
+    for value in &mut com {
+        *value /= n as f64;
+    }
+    let mut rows = Vec::new();
+    for axis in 0..3 {
+        let mut row = Array1::zeros(x.len());
+        for i in 0..n {
+            row[3 * i + axis] = 1.0;
+        }
+        rows.push(row / (n as f64).sqrt());
+    }
+    for axis in 0..3 {
+        let mut row = Array1::zeros(x.len());
+        for i in 0..n {
+            let r = [
+                x[3 * i] - com[0],
+                x[3 * i + 1] - com[1],
+                x[3 * i + 2] - com[2],
+            ];
+            let v = match axis {
+                0 => [0.0, -r[2], r[1]],
+                1 => [r[2], 0.0, -r[0]],
+                _ => [-r[1], r[0], 0.0],
+            };
+            row[3 * i] = v[0];
+            row[3 * i + 1] = v[1];
+            row[3 * i + 2] = v[2];
+        }
+        let norm = row.dot(&row).sqrt();
+        if norm > 1e-8 {
+            rows.push(row / norm);
+        }
+    }
+    let mut out = Array2::zeros((rows.len(), x.len()));
+    for (index, row) in rows.iter().enumerate() {
+        out.row_mut(index).assign(row);
+    }
+    out
+}
+
+fn relax_lj(start: Array1<f64>) -> Array1<f64> {
+    let mut solver = rgmin::Solver::new(
+        rgmin::Method::Fire {
+            kind: rgmin::FireKind::V2,
+        },
+        rgmin::Control {
+            maxiter: usize::MAX,
+            gtol: 0.0,
+            istep: 0.05,
+            maxmove: None,
+            ftol_rel: None,
+        },
+        start.len(),
+    );
+    solver.set_atom_maxmove(0.05);
+    let mut x = start;
+    for _ in 0..400 {
+        let oracle = rgmin::Oracle::unbounded(x.len(), |point: ArrayView1<f64>| {
+            Lj7.eval(point)
+                .unwrap_or((f64::INFINITY, Array1::zeros(point.len())))
+        });
+        solver.step(&oracle, &mut x).expect("lj relax");
+        let (_, gradient) = Lj7.eval(x.view()).unwrap();
+        if gradient.iter().all(|v| v.abs() < 1e-6) {
+            break;
+        }
+    }
+    x
+}
+
+fn pentagonal_bipyramid() -> Array1<f64> {
+    let bond = 2f64.powf(1.0 / 6.0);
+    let radius = bond / (2.0 * (std::f64::consts::PI / 5.0).sin());
+    let height = (bond * bond - radius * radius).max(0.0).sqrt();
+    let mut x = Array1::zeros(21);
+    x[2] = height;
+    x[5] = -height;
+    for k in 0..5 {
+        let angle = 2.0 * std::f64::consts::PI * (k as f64) / 5.0;
+        let base = 6 + 3 * k;
+        x[base] = radius * angle.cos();
+        x[base + 1] = radius * angle.sin();
+    }
+    relax_lj(x)
+}
+
+struct ModeExcluding<'a, S> {
+    inner: &'a S,
+    extra: Array1<f64>,
+}
+
+impl<S: PointSurface> PointSurface for ModeExcluding<'_, S> {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        self.inner.eval(x)
+    }
+
+    fn excluded_modes(&self, x: ArrayView1<f64>) -> Result<Array2<f64>, SaddleError> {
+        let mut modes = self.inner.excluded_modes(x)?;
+        if modes.ncols() == 0 {
+            modes = Array2::zeros((0, x.len()));
+        }
+        let mut stacked = Array2::zeros((modes.nrows() + 1, x.len()));
+        if modes.nrows() > 0 {
+            stacked
+                .slice_mut(ndarray::s![0..modes.nrows(), ..])
+                .assign(&modes);
+        }
+        stacked.row_mut(modes.nrows()).assign(&self.extra);
+        Ok(stacked)
+    }
+}
+
+fn lowest_curvature(surface: &impl PointSurface, x: ArrayView1<f64>) -> f64 {
+    let config = MinModeConfig {
+        kind: MinModeKind::Lanczos,
+        krylov_dim: 12,
+        rotation_tol: 1e-5,
+        dr: 1e-4,
+        ..MinModeConfig::default()
+    };
+    let mut session = MinModeSession::new(config, x.to_owned(), Array1::ones(x.len())).unwrap();
+    session.estimate_mode(surface).unwrap().curvature
+}
+
+fn lj_index(x: ArrayView1<f64>) -> i32 {
+    let lowest = lowest_curvature(&Lj7, x);
+    if lowest >= -1e-2 {
+        return 0;
+    }
+    let session_mode = {
+        let config = MinModeConfig {
+            kind: MinModeKind::Lanczos,
+            krylov_dim: 12,
+            rotation_tol: 1e-5,
+            dr: 1e-4,
+            ..MinModeConfig::default()
+        };
+        let mut session = MinModeSession::new(config, x.to_owned(), Array1::ones(x.len())).unwrap();
+        session.estimate_mode(&Lj7).unwrap().mode
+    };
+    let second = lowest_curvature(
+        &ModeExcluding {
+            inner: &Lj7,
+            extra: session_mode,
+        },
+        x,
+    );
+    if second < -1e-2 { 2 } else { 1 }
+}
+
+struct BenchRow {
+    surface: &'static str,
+    seed: u64,
+    method: &'static str,
+    status: &'static str,
+    success: bool,
+    reference: bool,
+    censored: bool,
+    evaluations: usize,
+    curvature: f64,
+    max_force: f64,
+}
+
+fn emit_bench(rows: &[BenchRow]) {
+    eprintln!(
+        "ART_CSV surface,seed,method,status,success,reference,censored,evaluations,curvature,max_force"
+    );
+    for row in rows {
+        eprintln!(
+            "ART_CSV {},{},{},{},{},{},{},{},{:.8},{:.8}",
+            row.surface,
+            row.seed,
+            row.method,
+            row.status,
+            u8::from(row.success),
+            u8::from(row.reference),
+            u8::from(row.censored),
+            row.evaluations,
+            row.curvature,
+            row.max_force
+        );
+    }
+    for method in ["art", "dimer"] {
+        let mut calls: Vec<usize> = rows
+            .iter()
+            .filter(|row| row.method == method && row.success)
+            .map(|row| row.evaluations)
+            .collect();
+        let successes = calls.len();
+        let censored = rows
+            .iter()
+            .filter(|row| row.method == method && row.censored)
+            .count();
+        let reference = rows
+            .iter()
+            .filter(|row| row.method == method && row.reference)
+            .count();
+        calls.sort_unstable();
+        let (median, low, high) = if calls.is_empty() {
+            (0.0, 0, 0)
+        } else {
+            (
+                calls[calls.len() / 2] as f64,
+                calls[0],
+                *calls.last().unwrap(),
+            )
+        };
+        eprintln!(
+            "ART_BENCH surface={} method={method} successes={successes} reference={reference} censored={censored} median_calls={median:.1} range=[{low}, {high}]",
+            rows.first().map(|row| row.surface).unwrap_or("none")
+        );
+    }
+}
+
+#[test]
+fn seeded_leps_and_lj7_against_the_dimer() {
+    let (minimum, saddle) = leps_references();
+    assert_eq!(leps_index(minimum.view()), 0, "leps minimum {minimum:?}");
+    assert_eq!(leps_index(saddle.view()), 1, "leps saddle {saddle:?}");
+    eprintln!(
+        "ART_BENCH surface=leps_ho minimum={:?} saddle={:?}",
+        minimum, saddle
+    );
+    let mut rows = Vec::new();
+    let config = ArtConfig::builder()
+        .push_step(0.08)
+        .max_move(0.08)
+        .activation_distance(0.08)
+        .force_tol(2e-3)
+        .perp_steps_push(1)
+        .perp_steps_climb(0)
+        .max_pushes(30)
+        .max_climbs(60)
+        .dr(1e-3)
+        .build()
+        .unwrap();
+    let config = ArtConfig {
+        mode: MinModeConfig {
+            method: rgmin::Method::Lbfgs { memory: 8 },
+            force_tol: 2e-3,
+            max_move: 0.08,
+            ..config.mode
+        },
+        ..config
+    };
+    for seed in 0..16 {
+        let seed = 7_000 + seed;
+        let mut session = ArtSession::new(
+            config.clone(),
+            minimum.clone(),
+            ArtDisplacement::Random {
+                seed,
+                support: ArtSupport::Global,
+                amplitude: 0.35,
+            },
+        )
+        .unwrap();
+        let start = session.position().to_owned();
+        let direction = session.push_direction().to_owned();
+        let report = session.run(&LepsHo, 80).unwrap();
+        let art_index = leps_index(session.position());
+        let art_success = report.status == ArtStatus::Converged && art_index == 1;
+        let distance = session
+            .position()
+            .iter()
+            .zip(saddle.iter())
+            .map(|(a, b)| (a - b) * (a - b))
+            .sum::<f64>()
+            .sqrt();
+        rows.push(BenchRow {
+            surface: "leps_ho",
+            seed,
+            method: "art",
+            status: art_status_name(report.status),
+            success: art_success,
+            reference: art_success && distance < 0.15,
+            censored: report.status == ArtStatus::Exhausted,
+            evaluations: report.total_evaluations,
+            curvature: report.curvature,
+            max_force: report.max_force,
+        });
+        let (dimer_ok, dimer_calls, dimer_x) = dimer_from(
+            start,
+            direction,
+            &LepsHo,
+            config.mode.force_tol,
+            config.mode.max_move,
+            40,
+        );
+        let dimer_index = leps_index(dimer_x.view());
+        let dimer_success = dimer_ok && dimer_index == 1;
+        let dimer_distance = dimer_x
+            .iter()
+            .zip(saddle.iter())
+            .map(|(a, b)| (a - b) * (a - b))
+            .sum::<f64>()
+            .sqrt();
+        rows.push(BenchRow {
+            surface: "leps_ho",
+            seed,
+            method: "dimer",
+            status: if dimer_ok { "converged" } else { "running" },
+            success: dimer_success,
+            reference: dimer_success && dimer_distance < 0.15,
+            censored: false,
+            evaluations: dimer_calls,
+            curvature: f64::NAN,
+            max_force: f64::NAN,
+        });
+    }
+    emit_bench(&rows);
+    let art_leps = rows
+        .iter()
+        .filter(|row| row.method == "art" && row.success)
+        .count();
+    assert!(
+        art_leps >= 1,
+        "LEPS+HO produced no index-1 saddle in 16 seeds"
+    );
+    assert_eq!(rows.len(), 32);
+
+    let lj_min = pentagonal_bipyramid();
+    let (_, lj_force) = Lj7.eval(lj_min.view()).unwrap();
+    assert!(
+        lj_force.iter().all(|v| v.abs() < 1e-4),
+        "lj7 minimum force {lj_force:?}"
+    );
+    let lj_config = ArtConfig::builder()
+        .push_step(0.08)
+        .max_move(0.08)
+        .activation_distance(0.08)
+        .perp_steps_push(1)
+        .perp_steps_climb(0)
+        .max_pushes(25)
+        .max_climbs(80)
+        .force_tol(1e-3)
+        .build()
+        .unwrap();
+    let lj_config = ArtConfig {
+        mode: MinModeConfig {
+            method: rgmin::Method::Lbfgs { memory: 8 },
+            force_tol: 1e-3,
+            max_move: 0.08,
+            ..lj_config.mode
+        },
+        ..lj_config
+    };
+    let mut lj_rows = Vec::new();
+    for offset in 0..16 {
+        let seed = 8_000 + offset;
+        let mut session = ArtSession::new(
+            lj_config.clone(),
+            lj_min.clone(),
+            ArtDisplacement::Random {
+                seed,
+                support: ArtSupport::Global,
+                amplitude: 0.3,
+            },
+        )
+        .unwrap();
+        let start = session.position().to_owned();
+        let direction = session.push_direction().to_owned();
+        let report = session.run(&Lj7, 100).unwrap();
+        let art_success =
+            report.status == ArtStatus::Converged && lj_index(session.position()) == 1;
+        lj_rows.push(BenchRow {
+            surface: "lj7",
+            seed,
+            method: "art",
+            status: art_status_name(report.status),
+            success: art_success,
+            reference: false,
+            censored: report.status == ArtStatus::Exhausted,
+            evaluations: report.total_evaluations,
+            curvature: report.curvature,
+            max_force: report.max_force,
+        });
+        let (dimer_ok, dimer_calls, dimer_x) = dimer_from(
+            start,
+            direction,
+            &Lj7,
+            lj_config.mode.force_tol,
+            lj_config.mode.max_move,
+            30,
+        );
+        lj_rows.push(BenchRow {
+            surface: "lj7",
+            seed,
+            method: "dimer",
+            status: if dimer_ok { "converged" } else { "running" },
+            success: dimer_ok && lj_index(dimer_x.view()) == 1,
+            reference: false,
+            censored: false,
+            evaluations: dimer_calls,
+            curvature: f64::NAN,
+            max_force: f64::NAN,
+        });
+    }
+    emit_bench(&lj_rows);
+    assert_eq!(lj_rows.len(), 32);
+    let art_lj = lj_rows
+        .iter()
+        .filter(|row| row.method == "art" && row.success)
+        .count();
+    eprintln!("ART_BENCH surface=lj7 art_index1={art_lj}/16");
+}
+
+fn art_status_name(status: ArtStatus) -> &'static str {
+    match status {
+        ArtStatus::Pushing => "pushing",
+        ArtStatus::Climbing => "climbing",
+        ArtStatus::Converged => "converged",
+        ArtStatus::Exhausted => "exhausted",
+    }
 }

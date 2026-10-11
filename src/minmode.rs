@@ -672,6 +672,23 @@ impl MinModeSession {
         self.curvature
     }
 
+    /// Energy at the cached centre, when the surface supplied one.
+    pub fn energy(&self) -> f64 {
+        self.centre
+            .as_ref()
+            .and_then(|centre| centre.energy)
+            .unwrap_or(f64::NAN)
+    }
+
+    /// Record the energy that belongs to a gradient planted by
+    /// [`MinModeSession::set_position`], so the next translation does
+    /// not evaluate that point again.
+    pub(crate) fn plant_energy(&mut self, energy: f64) {
+        if let Some(centre) = &mut self.centre {
+            centre.energy = Some(energy);
+        }
+    }
+
     /// Drop optimizer history and the cached centre gradient at a
     /// surface-epoch boundary. The mode stays as the next seed.
     pub fn reset(&mut self) {
@@ -832,6 +849,149 @@ impl MinModeSession {
             mode: self.mode.clone(),
             curvature,
             rotations,
+            evaluations: calls.load(Ordering::Relaxed),
+        })
+    }
+
+    /// One translation on the current mode and curvature.
+    ///
+    /// The effective force is [`translated_gradient`]: climb the mode
+    /// alone while its curvature is not negative, and reflect the
+    /// parallel part once the curvature is negative. The mode is not
+    /// refreshed first. A surface error leaves the position unchanged.
+    pub(crate) fn translate<S: PointSurface>(
+        &mut self,
+        surface: &S,
+    ) -> Result<MinModeReport, SaddleError> {
+        if !self.curvature.is_finite() {
+            return Err(SaddleError::Invalid(
+                "min-mode translation needs a finite curvature".into(),
+            ));
+        }
+        let calls = AtomicUsize::new(0);
+        let counted = Counted {
+            surface,
+            calls: &calls,
+            space: None,
+        };
+        let g0 = self.centre_gradient(&counted)?;
+        let mut curvature = self.curvature;
+        let mut rotations = 0usize;
+        let tau = self.mode.clone();
+        let translation_curvature = curvature;
+        let kappa = self.kappa.as_ref();
+        let config = &self.config;
+        let error_slot = &self.surface_error;
+        if let Ok(mut slot) = error_slot.lock() {
+            slot.take();
+        }
+        let last: Mutex<Option<PointEval>> = Mutex::new(None);
+        let start = self.x.clone();
+        let start_energy = self
+            .centre
+            .as_ref()
+            .filter(|c| c.x == start)
+            .and_then(|c| c.energy);
+        let oracle = Oracle::unbounded(self.x.len(), |xv: ArrayView1<f64>| {
+            let answer = match start_energy {
+                Some(e) if xv == start => Ok((e, g0.clone())),
+                _ => counted.eval(xv),
+            };
+            let answer = answer.and_then(|(e, g)| {
+                let eff = if let Some(kappa) = kappa {
+                    let excluded = surface.excluded_modes(xv)?;
+                    let out = kappa_dimer_force(
+                        g.view(),
+                        tau.view(),
+                        excluded.view(),
+                        |v| {
+                            let magnitude = v.dot(&v).sqrt();
+                            if magnitude == 0.0 {
+                                return Ok(Array1::zeros(v.len()));
+                            }
+                            let unit = &v / magnitude;
+                            Ok(counted.action(xv, g.view(), unit.view(), config)? * magnitude)
+                        },
+                        kappa,
+                    )?;
+                    -out.force
+                } else {
+                    translated_gradient(&g, &tau, translation_curvature)
+                };
+                Ok((e, g, eff))
+            });
+            match answer {
+                Ok((e, g, eff)) => {
+                    if let Ok(mut slot) = last.lock() {
+                        *slot = Some(PointEval {
+                            x: xv.to_owned(),
+                            energy: Some(e),
+                            gradient: g,
+                        });
+                    }
+                    (e, eff)
+                }
+                Err(err) => {
+                    if let Ok(mut slot) = error_slot.lock()
+                        && slot.is_none()
+                    {
+                        *slot = Some(err);
+                    }
+                    (f64::INFINITY, Array1::zeros(xv.len()))
+                }
+            }
+        });
+        let mut x = self.x.clone();
+        let stepped = self.solver.step(&oracle, &mut x);
+        drop(oracle);
+        if let Some(err) = self.surface_error.lock().ok().and_then(|mut s| s.take()) {
+            return Err(err);
+        }
+        stepped.map_err(|e| SaddleError::Solver(e.to_string()))?;
+        if !x.iter().all(|v| v.is_finite()) {
+            return Err(SaddleError::NonFinite("min-mode translation"));
+        }
+        let at_new = last.into_inner().ok().flatten().filter(|p| p.x == x);
+        let centre = match at_new {
+            Some(p) => p,
+            None => {
+                let (energy, gradient) = counted.eval(x.view())?;
+                PointEval {
+                    x: x.clone(),
+                    energy: Some(energy),
+                    gradient,
+                }
+            }
+        };
+        let max_force = self.force_gate.value(centre.gradient.view());
+        if max_force <= self.config.force_tol && x != self.x {
+            let (mode, accepted_curvature, accepted_rotations) =
+                self.mode_at(&counted, x.view(), centre.gradient.view())?;
+            let turned = self.mode.dot(&mode).abs().min(1.0).acos();
+            if turned > MODE_RESET_ANGLE {
+                self.solver.forget();
+            } else {
+                self.solver.forget_evaluation();
+            }
+            self.mode = mode;
+            self.curvature = accepted_curvature;
+            curvature = accepted_curvature;
+            rotations += accepted_rotations;
+        }
+        self.x = x;
+        self.iteration += 1;
+        self.centre = Some(centre);
+        let status = if converged(max_force, curvature, self.config.force_tol) {
+            MinModeStatus::Converged
+        } else {
+            MinModeStatus::Running
+        };
+        Ok(MinModeReport {
+            status,
+            max_force,
+            curvature,
+            rotations,
+            iteration: self.iteration,
             evaluations: calls.load(Ordering::Relaxed),
         })
     }

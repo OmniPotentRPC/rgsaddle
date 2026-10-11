@@ -22,12 +22,14 @@
 //! [`crate::MinModeKind::Lanczos`], including its finite-difference or
 //! analytic Hessian action and any excluded directions. `new` does not
 //! evaluate the surface. `step` is one macro-step. `run` repeats it.
-//! After the curvature crosses the threshold the session keeps climbing
-//! the lowest mode. While the well is still closed, Lanczos is seeded
-//! with the opening direction so a higher eigenvector left over from
-//! the previous estimate cannot hide the crossing.
-//! Convergence is a force at or under [`ArtConfig::force_tol`] together
-//! with a negative lowest curvature, both at the current point.
+//! After the curvature crosses the threshold the session climbs with
+//! the min-mode reflected force. While the well is still closed, the
+//! opening direction seeds the estimate so a higher eigenvector left
+//! over from the previous estimate cannot hide the crossing. The first
+//! estimate waits until the geometry has moved
+//! [`ArtConfig::activation_distance`] from the undisplaced minimum.
+//! Convergence is a force at or under the min-mode force tolerance
+//! together with a negative lowest curvature, both at the current point.
 //!
 //! [`run_events`] evaluates many events at once. Event `i` carries
 //! [`event_seed`], a counter-based stream key, and nothing is drawn
@@ -44,7 +46,9 @@ use rgmin::{Control, FireKind, Method, Oracle, Solver};
 
 use crate::error::SaddleError;
 use crate::force::ForceGate;
-use crate::minmode::{FiniteDifference, MinModeConfig, MinModeKind, MinModeSession, PointSurface};
+use crate::minmode::{
+    FiniteDifference, MinModeConfig, MinModeKind, MinModeSession, MinModeStatus, PointSurface,
+};
 
 /// Where the initial displacement is allowed to be nonzero.
 #[derive(Clone, Debug, PartialEq)]
@@ -117,50 +121,173 @@ pub enum ArtDisplacement {
 }
 
 /// Tolerances and budgets for one ART nouveau search.
+///
+/// Defaults follow pARTn (Poberžnik et al., Comput. Phys. Commun. 295
+/// (2024) 108961, <https://doi.org/10.1016/j.cpc.2023.108961>) and the
+/// opening in Malek and Mousseau, Phys. Rev. E 62 (2000) 7723,
+/// <https://doi.org/10.1103/PhysRevE.62.7723>. Lengths are in the host
+/// unit. The estimate and the reflected climb are a [`MinModeConfig`]
+/// on [`ArtConfig::mode`], the same fields a dimer or Lanczos search
+/// uses. [`ArtConfig::builder`] checks the same bounds as
+/// [`ArtSession::new`].
 #[derive(Clone, Debug)]
 pub struct ArtConfig {
+    /// Lowest-mode estimate and the reflected climb.
+    ///
+    /// `dr`, `difference`, `rotation_tol`, and `krylov_dim` live here
+    /// and nowhere else on this config. The default kind is Lanczos,
+    /// `krylov_dim` is 16 (pARTn `lanczos_max_size`), and `max_move` is
+    /// 0.3 so the push step is not shortened by the cap. `force_tol` is
+    /// the stationary-point tolerance.
+    pub mode: MinModeConfig,
     /// Leave the basin when the lowest curvature falls strictly below this.
+    /// Default `-0.01`, pARTn `eigval_thr`.
     pub eigen_threshold: f64,
-    /// Stationary-point tolerance on the selected force gate.
-    pub force_tol: f64,
     /// Length of one basin push along the initial direction.
+    /// Default `0.3`, pARTn's push step.
     pub push_step: f64,
-    /// Largest atom displacement accepted from a push, a climb, or one FIRE step.
-    pub max_move: f64,
     /// Basin pushes after the initial displacement. The search stops when this is spent while the curvature is still above the threshold.
     pub max_pushes: usize,
     /// Uphill macro-steps once the threshold has been crossed.
     pub max_climbs: usize,
     /// FIRE steps in the hyperplane after a basin push.
+    /// Default 3. Malek and Mousseau relax perpendicular to the opening;
+    /// pARTn drives that block with FIRE and stops after a fixed count
+    /// (`nperp` limited, rather than a full minimization).
     pub perp_steps_push: usize,
-    /// FIRE steps in the hyperplane after a climb.
+    /// FIRE steps in the hyperplane after a reflected climb.
     pub perp_steps_climb: usize,
-    /// Finite-difference displacement passed to the Lanczos session.
-    pub dr: f64,
-    /// Forward or central Hessian actions.
-    pub difference: FiniteDifference,
-    /// Lanczos Ritz residual bound.
-    pub rotation_tol: f64,
-    /// Lanczos Krylov dimension.
-    pub krylov_dim: usize,
+    /// Lanczos actions required before an opening estimate that stopped
+    /// early is trusted. Default 3, pARTn `lanczos_min_size`. A shorter
+    /// estimate is repeated from a direction orthogonal to that mode.
+    pub krylov_min: usize,
+    /// Distance from the undisplaced minimum before the first Lanczos call.
+    /// Default `0.3`, one push step. pARTn `ninit` / `delr_thr`: the
+    /// opening pushes and relaxes perpendicularly, and does not estimate
+    /// the lowest curvature on every push.
+    pub activation_distance: f64,
+    /// First climb steps that blend the opening direction into the mode.
+    /// Default 0, pARTn `nsmooth` left off. A positive value is the blend.
+    pub nsmooth: usize,
+    /// Length of [`ArtSession::push_over`], the step past a converged
+    /// saddle along the unstable mode. Default 0, so `run` stops on the
+    /// stationary point. pARTn's push over the saddle is this length.
+    pub push_over: f64,
 }
 
 impl Default for ArtConfig {
     fn default() -> Self {
         Self {
-            eigen_threshold: 0.0,
-            force_tol: 1e-3,
-            push_step: 0.1,
-            max_move: 0.1,
+            mode: MinModeConfig {
+                kind: MinModeKind::Lanczos,
+                krylov_dim: 16,
+                max_move: 0.3,
+                ..MinModeConfig::default()
+            },
+            eigen_threshold: -0.01,
+            push_step: 0.3,
             max_pushes: 40,
             max_climbs: 80,
             perp_steps_push: 3,
             perp_steps_climb: 8,
-            dr: 1e-3,
-            difference: FiniteDifference::Forward,
-            rotation_tol: 1e-4,
-            krylov_dim: 12,
+            krylov_min: 3,
+            activation_distance: 0.3,
+            nsmooth: 0,
+            push_over: 0.0,
         }
+    }
+}
+
+impl ArtConfig {
+    /// Start from [`ArtConfig::default`].
+    pub fn builder() -> ArtConfigBuilder {
+        ArtConfigBuilder {
+            config: Self::default(),
+        }
+    }
+}
+
+/// Typed construction of [`ArtConfig`]. Each setter takes the field's
+/// real type. [`ArtConfigBuilder::build`] returns [`SaddleError::Invalid`]
+/// for a non-finite or non-positive bound.
+#[derive(Clone, Debug)]
+pub struct ArtConfigBuilder {
+    config: ArtConfig,
+}
+
+impl ArtConfigBuilder {
+    /// Replace the shared min-mode block.
+    pub fn mode(mut self, mode: MinModeConfig) -> Self {
+        self.config.mode = mode;
+        self
+    }
+    pub fn eigen_threshold(mut self, value: f64) -> Self {
+        self.config.eigen_threshold = value;
+        self
+    }
+    pub fn force_tol(mut self, value: f64) -> Self {
+        self.config.mode.force_tol = value;
+        self
+    }
+    pub fn push_step(mut self, value: f64) -> Self {
+        self.config.push_step = value;
+        self
+    }
+    pub fn max_move(mut self, value: f64) -> Self {
+        self.config.mode.max_move = value;
+        self
+    }
+    pub fn max_pushes(mut self, value: usize) -> Self {
+        self.config.max_pushes = value;
+        self
+    }
+    pub fn max_climbs(mut self, value: usize) -> Self {
+        self.config.max_climbs = value;
+        self
+    }
+    pub fn perp_steps_push(mut self, value: usize) -> Self {
+        self.config.perp_steps_push = value;
+        self
+    }
+    pub fn perp_steps_climb(mut self, value: usize) -> Self {
+        self.config.perp_steps_climb = value;
+        self
+    }
+    pub fn dr(mut self, value: f64) -> Self {
+        self.config.mode.dr = value;
+        self
+    }
+    pub fn difference(mut self, value: FiniteDifference) -> Self {
+        self.config.mode.difference = value;
+        self
+    }
+    pub fn rotation_tol(mut self, value: f64) -> Self {
+        self.config.mode.rotation_tol = value;
+        self
+    }
+    pub fn krylov_dim(mut self, value: usize) -> Self {
+        self.config.mode.krylov_dim = value;
+        self
+    }
+    pub fn krylov_min(mut self, value: usize) -> Self {
+        self.config.krylov_min = value;
+        self
+    }
+    pub fn activation_distance(mut self, value: f64) -> Self {
+        self.config.activation_distance = value;
+        self
+    }
+    pub fn nsmooth(mut self, value: usize) -> Self {
+        self.config.nsmooth = value;
+        self
+    }
+    pub fn push_over(mut self, value: f64) -> Self {
+        self.config.push_over = value;
+        self
+    }
+    pub fn build(self) -> Result<ArtConfig, SaddleError> {
+        validate_config(&self.config)?;
+        Ok(self.config)
     }
 }
 
@@ -213,6 +340,16 @@ pub struct ArtReport {
     pub evaluations: usize,
     /// `PointSurface::eval` calls since [`ArtSession::new`].
     pub total_evaluations: usize,
+    /// Centre, push, and perpendicular calls before the curvature crossed.
+    /// Stays at the crossing value afterwards. An exhausted opening
+    /// reports every call here.
+    pub pre_inflection_evaluations: usize,
+    /// Cumulative Lanczos `PointSurface::eval` calls.
+    pub lanczos_evaluations: usize,
+    /// Cumulative perpendicular FIRE calls.
+    pub perp_evaluations: usize,
+    /// Cumulative centre evaluations.
+    pub centre_evaluations: usize,
     pub iteration: usize,
 }
 
@@ -237,12 +374,22 @@ pub struct ArtSession {
     curvature: f64,
     energy: f64,
     modes: MinModeSession,
+    /// Undisplaced minimum. Lanczos waits until the geometry has moved
+    /// at least [`ArtConfig::activation_distance`] from here.
+    origin: Array1<f64>,
     pushes: usize,
     climbs: usize,
     /// Set once the lowest curvature has fallen below the threshold.
     /// Later macro-steps stay on the lowest mode.
     opened: bool,
+    /// Latched once the opening has passed `activation_distance`.
+    lanczos_armed: bool,
     evaluations: usize,
+    pre_inflection_evaluations: usize,
+    pre_inflection_locked: bool,
+    lanczos_evaluations: usize,
+    perp_evaluations: usize,
+    centre_evaluations: usize,
     iteration: usize,
     centre: Option<Centre>,
 }
@@ -265,7 +412,7 @@ impl ArtSession {
         if !x.iter().all(|v| v.is_finite()) {
             return Err(SaddleError::NonFinite("displaced position"));
         }
-        let modes = MinModeSession::new(lanczos_config(&config), x.clone(), direction.clone())?;
+        let modes = MinModeSession::new(mode_config(&config), x.clone(), direction.clone())?;
         Ok(Self {
             config,
             force_gate: ForceGate::LinfNorm,
@@ -275,13 +422,47 @@ impl ArtSession {
             curvature: f64::NAN,
             energy: f64::NAN,
             modes,
+            origin: minimum,
             pushes: 0,
             climbs: 0,
             opened: false,
+            lanczos_armed: false,
             evaluations: 0,
+            pre_inflection_evaluations: 0,
+            pre_inflection_locked: false,
+            lanczos_evaluations: 0,
+            perp_evaluations: 0,
+            centre_evaluations: 0,
             iteration: 0,
             centre: None,
         })
+    }
+
+    /// One displacement of [`ArtConfig::push_over`] along the unstable
+    /// mode, aligned with the opening direction. No surface call. The
+    /// length 0 leaves the saddle where `run` stopped.
+    pub fn push_over(&mut self) -> Result<(), SaddleError> {
+        let length = self.config.push_over;
+        if length == 0.0 {
+            return Ok(());
+        }
+        if !(self.curvature.is_finite() && self.curvature < 0.0) {
+            return Err(SaddleError::Invalid(
+                "push over the saddle needs a negative curvature".into(),
+            ));
+        }
+        let sign = if self.push_direction.dot(&self.mode) >= 0.0 {
+            1.0
+        } else {
+            -1.0
+        };
+        let x = &self.x + &(&self.mode * (sign * length));
+        if !x.iter().all(|v| v.is_finite()) {
+            return Err(SaddleError::NonFinite("art push over"));
+        }
+        self.x = x;
+        self.centre = None;
+        Ok(())
     }
 
     /// Select the convergence norm. The default is the maximum absolute component.
@@ -338,100 +519,79 @@ impl ArtSession {
         calls: &AtomicUsize,
     ) -> Result<ArtReport, SaddleError> {
         let mut x = self.x.clone();
+        let centre_before = calls.load(Ordering::Relaxed);
         let (energy, gradient) = self.centre_at(surface, x.view(), calls)?;
-        self.modes.set_position(x.clone(), Some(gradient.clone()))?;
-        // While the well is still closed, seed Lanczos with the opening
-        // direction. The previous lowest mode can be an exact higher
-        // eigenvector (the soft axes of the double well). One Krylov
-        // step then reports that eigenvalue and never sees the reaction
-        // coordinate cross the threshold.
-        let lanczos_seed = if self.opened {
-            self.mode.clone()
-        } else {
-            self.push_direction.clone()
-        };
-        self.modes.set_mode(lanczos_seed)?;
-        let estimate = self.modes.estimate_mode(surface)?;
-        calls.fetch_add(estimate.evaluations, Ordering::Relaxed);
-        let max_force = self.force_gate.value(gradient.view());
-        self.mode = estimate.mode;
-        self.curvature = estimate.curvature;
+        self.centre_evaluations += calls.load(Ordering::Relaxed) - centre_before;
         self.energy = energy;
         self.centre = Some(Centre {
             x: x.clone(),
             energy,
             gradient: gradient.clone(),
         });
-
-        if max_force <= self.config.force_tol && estimate.curvature < 0.0 {
-            return Ok(self.commit(x, calls, ArtStatus::Converged, max_force));
-        }
-
-        if estimate.curvature < self.config.eigen_threshold {
-            self.opened = true;
-        }
+        let max_force = self.force_gate.value(gradient.view());
+        self.arm_lanczos();
+        let _curvature = if self.lanczos_armed || self.opened {
+            let estimate = self.lanczos(surface, calls)?;
+            self.mode = estimate.mode;
+            self.curvature = estimate.curvature;
+            if max_force <= self.config.mode.force_tol && estimate.curvature < 0.0 {
+                self.note_pre_inflection(true);
+                return Ok(self.commit(x, calls, ArtStatus::Converged, max_force));
+            }
+            if !self.opened && estimate.curvature < self.config.eigen_threshold {
+                self.opened = true;
+                self.note_pre_inflection(true);
+            }
+            estimate.curvature
+        } else {
+            self.curvature
+        };
         let climbing = self.opened;
         if climbing && self.climbs >= self.config.max_climbs {
             return Ok(self.commit(x, calls, ArtStatus::Exhausted, max_force));
         }
         if !climbing && self.pushes >= self.config.max_pushes {
+            self.note_pre_inflection(true);
             return Ok(self.commit(x, calls, ArtStatus::Exhausted, max_force));
         }
-        let tau = if climbing {
+        let mut tau = if climbing {
             self.mode.clone()
         } else {
             self.push_direction.clone()
         };
+        if climbing && self.climbs < self.config.nsmooth {
+            tau = blend_opening(&tau, &self.push_direction);
+        }
 
-        if climbing {
-            let g_par = gradient.dot(&tau);
-            let delta = parallel_displacement(
-                g_par,
-                estimate.curvature,
-                self.config.max_move,
-                self.config.push_step,
-            );
-            x = &x + &(&tau * delta);
+        let perp_cap = self.config.mode.max_move;
+        let perp_steps = if climbing {
+            self.modes.set_force_gate(self.force_gate);
+            self.modes.set_position(x.clone(), Some(gradient.clone()))?;
+            self.modes.plant_energy(energy);
+            self.modes.set_mode(tau.clone())?;
+            let translated = self.modes.translate(surface)?;
+            calls.fetch_add(translated.evaluations, Ordering::Relaxed);
+            self.centre_evaluations += translated.evaluations;
+            x = self.modes.position().to_owned();
+            self.mode = self.modes.mode().to_owned();
+            self.curvature = translated.curvature;
+            self.energy = self.modes.energy();
             self.climbs += 1;
-        } else {
-            let step = self.config.push_step.min(self.config.max_move);
-            x = &x + &(&tau * step);
-            self.pushes += 1;
-        }
-        if !x.iter().all(|v| v.is_finite()) {
-            if climbing {
-                self.climbs -= 1;
-            } else {
-                self.pushes -= 1;
+            if translated.status == MinModeStatus::Converged {
+                self.note_pre_inflection(true);
+                return Ok(self.commit(x, calls, ArtStatus::Converged, translated.max_force));
             }
-            return Err(SaddleError::NonFinite("art step"));
-        }
-
-        // Perpendicular FIRE waits until a negative-curvature Newton step
-        // fits in the cap. Earlier, the parallel climb is still long and a
-        // hyperplane step leaves the ridge. Once both components are short,
-        // one FIRE step uses the Newton length `g_perp / |curvature|`.
-        let newton_len = if estimate.curvature < 0.0 {
-            (gradient.dot(&tau) / estimate.curvature).abs()
+            self.config.perp_steps_climb
         } else {
-            f64::INFINITY
+            let step = self.config.push_step.min(self.config.mode.max_move);
+            x = &x + &(&tau * step);
+            if !x.iter().all(|v| v.is_finite()) {
+                return Err(SaddleError::NonFinite("art step"));
+            }
+            self.pushes += 1;
+            self.config.perp_steps_push
         };
-        let perp_gradient = perpendicular(&gradient, tau.view());
-        let perp_norm = perp_gradient.dot(&perp_gradient).sqrt();
-        let perp_newton = if estimate.curvature < 0.0 {
-            perp_norm / estimate.curvature.abs().max(1e-8)
-        } else {
-            self.config.max_move
-        };
-        let (perp_steps, perp_cap) = if !climbing {
-            (self.config.perp_steps_push, self.config.max_move)
-        } else if newton_len > self.config.max_move {
-            (0, self.config.max_move)
-        } else if perp_newton <= self.config.max_move {
-            (1, perp_newton.max(1e-8))
-        } else {
-            (self.config.perp_steps_climb, self.config.max_move)
-        };
+        let perp_before = calls.load(Ordering::Relaxed);
         let centre = match relax_perpendicular(
             surface,
             &mut x,
@@ -439,7 +599,7 @@ impl ArtSession {
             PerpBlock {
                 steps: perp_steps,
                 max_move: perp_cap,
-                force_tol: self.config.force_tol,
+                force_tol: self.config.mode.force_tol,
                 gate: self.force_gate,
             },
             calls,
@@ -454,6 +614,16 @@ impl ArtSession {
                 return Err(err);
             }
         };
+        self.perp_evaluations += calls.load(Ordering::Relaxed) - perp_before;
+        if climbing && centre.x != self.modes.position() {
+            self.modes.reset();
+            self.modes
+                .set_position(centre.x.clone(), Some(centre.gradient.clone()))?;
+            self.modes.plant_energy(centre.energy);
+        }
+        if !self.opened {
+            self.note_pre_inflection(false);
+        }
         let status = if climbing {
             ArtStatus::Climbing
         } else {
@@ -516,8 +686,68 @@ impl ArtSession {
             climbs: self.climbs,
             evaluations,
             total_evaluations: self.evaluations + evaluations,
+            pre_inflection_evaluations: self.pre_inflection_evaluations,
+            lanczos_evaluations: self.lanczos_evaluations,
+            perp_evaluations: self.perp_evaluations,
+            centre_evaluations: self.centre_evaluations,
             iteration: self.iteration,
         }
+    }
+
+    fn arm_lanczos(&mut self) {
+        if self.lanczos_armed || self.opened {
+            self.lanczos_armed = true;
+            return;
+        }
+        if self.config.activation_distance <= 0.0
+            || travelled(&self.x, &self.origin) >= self.config.activation_distance
+        {
+            self.lanczos_armed = true;
+        }
+    }
+
+    fn note_pre_inflection(&mut self, lock: bool) {
+        if self.pre_inflection_locked {
+            return;
+        }
+        self.pre_inflection_evaluations =
+            self.centre_evaluations + self.lanczos_evaluations + self.perp_evaluations;
+        if lock {
+            self.pre_inflection_locked = true;
+        }
+    }
+
+    fn lanczos<S: PointSurface>(
+        &mut self,
+        surface: &S,
+        calls: &AtomicUsize,
+    ) -> Result<crate::minmode::ModeEstimate, SaddleError> {
+        self.modes.set_position(
+            self.x.clone(),
+            Some(self.centre.as_ref().unwrap().gradient.clone()),
+        )?;
+        let seed = if self.opened {
+            self.mode.clone()
+        } else {
+            self.push_direction.clone()
+        };
+        self.modes.set_mode(seed)?;
+        let mut estimate = self.modes.estimate_mode(surface)?;
+        calls.fetch_add(estimate.evaluations, Ordering::Relaxed);
+        self.lanczos_evaluations += estimate.evaluations;
+        if !self.opened
+            && estimate.rotations < self.config.krylov_min
+            && self.x.len() > estimate.rotations
+        {
+            self.modes.set_mode(orthogonal_probe(&estimate.mode))?;
+            let second = self.modes.estimate_mode(surface)?;
+            calls.fetch_add(second.evaluations, Ordering::Relaxed);
+            self.lanczos_evaluations += second.evaluations;
+            if second.curvature < estimate.curvature {
+                estimate = second;
+            }
+        }
+        Ok(estimate)
     }
 }
 
@@ -618,34 +848,66 @@ fn execute_event<S: PointSurface>(
     })
 }
 
-/// Parallel coefficient along a unit mode.
-///
-/// Negative curvature uses the capped Newton step `-g_par / curvature`.
-/// Non-negative curvature walks uphill by at most `push_step`.
-fn parallel_displacement(g_par: f64, curvature: f64, cap: f64, push_step: f64) -> f64 {
-    if curvature < 0.0 && curvature.is_finite() && g_par.is_finite() {
-        let newton = -g_par / curvature;
-        if newton.is_finite() {
-            return newton.clamp(-cap, cap);
-        }
+fn travelled(x: &Array1<f64>, origin: &Array1<f64>) -> f64 {
+    x.iter()
+        .zip(origin.iter())
+        .map(|(a, b)| (a - b) * (a - b))
+        .sum::<f64>()
+        .sqrt()
+}
+
+fn blend_opening(mode: &Array1<f64>, opening: &Array1<f64>) -> Array1<f64> {
+    let sign = if opening.dot(mode) >= 0.0 { 1.0 } else { -1.0 };
+    let mixed = &(mode * sign) + opening;
+    let norm = mixed.dot(&mixed).sqrt();
+    if norm > 1e-14 {
+        mixed / norm
+    } else {
+        mode.clone()
     }
-    let length = cap.min(push_step);
-    if g_par >= 0.0 { length } else { -length }
+}
+
+fn orthogonal_probe(mode: &Array1<f64>) -> Array1<f64> {
+    let axis = mode
+        .iter()
+        .enumerate()
+        .max_by(|left, right| {
+            left.1
+                .abs()
+                .partial_cmp(&right.1.abs())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|(index, _)| index)
+        .unwrap_or(0);
+    let other = if axis + 1 < mode.len() { axis + 1 } else { 0 };
+    let mut probe = Array1::zeros(mode.len());
+    probe[other] = 1.0;
+    let parallel = probe.dot(mode);
+    probe = &probe - &(mode * parallel);
+    let norm = probe.dot(&probe).sqrt();
+    if norm > 1e-14 { probe / norm } else { probe }
 }
 
 fn validate_config(config: &ArtConfig) -> Result<(), SaddleError> {
+    let mode = &config.mode;
     if !(config.eigen_threshold.is_finite()
-        && config.force_tol.is_finite()
-        && config.force_tol > 0.0
+        && mode.force_tol.is_finite()
+        && mode.force_tol > 0.0
         && config.push_step.is_finite()
         && config.push_step > 0.0
-        && config.max_move.is_finite()
-        && config.max_move > 0.0
-        && config.dr.is_finite()
-        && config.dr > 0.0
-        && config.rotation_tol.is_finite()
-        && config.rotation_tol > 0.0
-        && config.krylov_dim >= 1)
+        && mode.max_move.is_finite()
+        && mode.max_move > 0.0
+        && mode.dr.is_finite()
+        && mode.dr > 0.0
+        && mode.rotation_tol.is_finite()
+        && mode.rotation_tol > 0.0
+        && mode.krylov_dim >= 1
+        && config.krylov_min >= 1
+        && config.krylov_min <= mode.krylov_dim
+        && config.activation_distance.is_finite()
+        && config.activation_distance >= 0.0
+        && config.push_over.is_finite()
+        && config.push_over >= 0.0)
     {
         return Err(SaddleError::Invalid(
             "art tolerances and step lengths must be finite, with positive force, push, move, difference, and rotation bounds"
@@ -655,18 +917,8 @@ fn validate_config(config: &ArtConfig) -> Result<(), SaddleError> {
     Ok(())
 }
 
-fn lanczos_config(config: &ArtConfig) -> MinModeConfig {
-    MinModeConfig {
-        kind: MinModeKind::Lanczos,
-        dr: config.dr,
-        difference: config.difference,
-        rotation_tol: config.rotation_tol,
-        krylov_dim: config.krylov_dim,
-        force_tol: config.force_tol,
-        max_move: config.max_move,
-        method: Method::Fire { kind: FireKind::V2 },
-        ..MinModeConfig::default()
-    }
+fn mode_config(config: &ArtConfig) -> MinModeConfig {
+    config.mode.clone()
 }
 
 fn resolve_displacement(
@@ -741,28 +993,26 @@ fn mask_and_normalize(
     Ok(masked / norm)
 }
 
+/// Component `index` of a random displacement. The only generator is
+/// [`event_seed`]: the draw is that key mapped onto `[-1, 1]`.
+fn event_component(seed: u64, index: u64) -> f64 {
+    let bits = event_seed(seed, index);
+    let unit = ((bits >> 11) as f64) / ((1u64 << 53) as f64);
+    let value = unit * 2.0 - 1.0;
+    if value.abs() < 1e-12 { 1e-12 } else { value }
+}
+
 fn random_unit(n: usize, seed: u64, active: Option<&[usize]>) -> Result<Array1<f64>, SaddleError> {
-    let mut state = seed;
-    let mut draw = || {
-        state = splitmix64(state);
-        let uniform = ((state >> 11) as f64) / ((1u64 << 53) as f64);
-        uniform.clamp(1e-12, 1.0 - 1e-12)
-    };
-    let mut normal = || {
-        let u1 = draw();
-        let u2 = draw();
-        (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
-    };
     let mut direction = Array1::zeros(n);
     match active {
         None => {
-            for value in direction.iter_mut() {
-                *value = normal();
+            for (index, value) in direction.iter_mut().enumerate() {
+                *value = event_component(seed, index as u64);
             }
         }
         Some(indices) => {
             for &index in indices {
-                direction[index] = normal();
+                direction[index] = event_component(seed, index as u64);
             }
         }
     }
@@ -912,15 +1162,21 @@ fn perpendicular(gradient: &Array1<f64>, tau: ArrayView1<f64>) -> Array1<f64> {
 
 #[cfg(test)]
 mod tests {
-    use super::parallel_displacement;
     use approx::assert_abs_diff_eq;
 
     #[test]
-    fn negative_curvature_takes_the_capped_newton_step() {
-        let step = parallel_displacement(1.5, -1.0, 0.1, 0.2);
-        assert_abs_diff_eq!(step, 0.1, epsilon = 1e-12);
-        let short = parallel_displacement(0.02, -2.0, 0.1, 0.2);
-        assert_abs_diff_eq!(short, 0.01, epsilon = 1e-12);
+    fn builder_rejects_a_non_positive_push_and_keeps_the_partn_defaults() {
+        let config = super::ArtConfig::builder().build().unwrap();
+        assert_abs_diff_eq!(config.eigen_threshold, -0.01, epsilon = 0.0);
+        assert_abs_diff_eq!(config.push_step, 0.3, epsilon = 0.0);
+        assert_abs_diff_eq!(config.activation_distance, 0.3, epsilon = 0.0);
+        assert_eq!(config.perp_steps_push, 3);
+        assert_eq!(config.mode.kind, super::MinModeKind::Lanczos);
+        assert_eq!(config.mode.krylov_dim, 16);
+        assert_abs_diff_eq!(config.mode.max_move, 0.3, epsilon = 0.0);
+        assert_eq!(config.krylov_min, 3);
+        assert!(super::ArtConfig::builder().push_step(0.0).build().is_err());
+        assert!(super::ArtConfig::builder().dr(0.0).build().is_err());
     }
 
     #[test]
@@ -934,16 +1190,27 @@ mod tests {
     }
 
     #[test]
-    fn non_negative_curvature_walks_uphill() {
-        assert_abs_diff_eq!(
-            parallel_displacement(0.4, 2.0, 0.3, 0.1),
-            0.1,
-            epsilon = 1e-12
-        );
-        assert_abs_diff_eq!(
-            parallel_displacement(-0.4, 0.0, 0.3, 0.1),
-            -0.1,
-            epsilon = 1e-12
-        );
+    fn random_displacement_uses_event_seed_components() {
+        use ndarray::array;
+        let session = super::ArtSession::new(
+            super::ArtConfig::default(),
+            array![1.0, 0.0, 0.0],
+            super::ArtDisplacement::Random {
+                seed: 17,
+                support: super::ArtSupport::Global,
+                amplitude: 0.2,
+            },
+        )
+        .unwrap();
+        let raw = array![
+            super::event_component(17, 0),
+            super::event_component(17, 1),
+            super::event_component(17, 2),
+        ];
+        let norm = raw.dot(&raw).sqrt();
+        let direction = session.push_direction();
+        for i in 0..3 {
+            assert_abs_diff_eq!(direction[i], raw[i] / norm, epsilon = 1e-12);
+        }
     }
 }

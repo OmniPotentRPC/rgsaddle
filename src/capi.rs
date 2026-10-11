@@ -26,7 +26,7 @@ use crate::spring::SpringKind;
 use crate::tangent::TangentKind;
 
 pub const RGSADDLE_ABI_MAJOR: u32 = 1;
-pub const RGSADDLE_ABI_MINOR: u32 = 16;
+pub const RGSADDLE_ABI_MINOR: u32 = 17;
 
 /// Band config bit 0. The C step calls the surface once per image
 /// carried by the evaluation: every image on the first evaluation
@@ -296,6 +296,9 @@ pub struct RgsaddleBand {
 
 pub struct RgsaddleMinMode {
     session: MinModeSession,
+    /// Set when the opaque search configuration selected ART nouveau.
+    /// Step, position, and mode then follow this session.
+    art: Option<crate::ArtSession>,
     n_atoms: i64,
 }
 
@@ -764,7 +767,11 @@ pub unsafe extern "C" fn rgsaddle_minmode_create(
         method: method_of(cfg.method, 0),
     };
     match MinModeSession::new(mm_config, x, m) {
-        Ok(session) => Box::into_raw(Box::new(RgsaddleMinMode { session, n_atoms })),
+        Ok(session) => Box::into_raw(Box::new(RgsaddleMinMode {
+            session,
+            art: None,
+            n_atoms,
+        })),
         Err(_) => std::ptr::null_mut(),
     }
 }
@@ -798,6 +805,16 @@ pub unsafe extern "C" fn rgsaddle_minmode_step(
         stress: None,
         stress_user: std::ptr::null_mut(),
     };
+    if let Some(art) = session.art.as_mut() {
+        return match art.step(&cs) {
+            Ok(report) => {
+                let out = unsafe { &mut *out };
+                fill_art_report(out, &report);
+                RGSADDLE_OK
+            }
+            Err(e) => status_of(&e),
+        };
+    }
     match session.session.step(&cs) {
         Ok(report) => {
             let out = unsafe { &mut *out };
@@ -894,6 +911,9 @@ pub unsafe extern "C" fn rgsaddle_minmode_set_position(
     if position.is_null() {
         return RGSADDLE_INVALID_PARAMETER;
     }
+    if unsafe { (*session).art.is_some() } {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
     let session = unsafe { &mut *session };
     let dof = (3 * session.n_atoms) as usize;
     let x = Array1::from(unsafe { slice::from_raw_parts(position, dof) }.to_vec());
@@ -916,6 +936,9 @@ pub unsafe extern "C" fn rgsaddle_minmode_set_mode(
         return RGSADDLE_NULL_SESSION;
     }
     if mode.is_null() {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    if unsafe { (*session).art.is_some() } {
         return RGSADDLE_INVALID_PARAMETER;
     }
     let session = unsafe { &mut *session };
@@ -943,7 +966,12 @@ pub unsafe extern "C" fn rgsaddle_minmode_position(
     let session = unsafe { &*session };
     let dof = (3 * session.n_atoms) as usize;
     let dst = unsafe { slice::from_raw_parts_mut(out, dof) };
-    for (i, v) in session.session.position().iter().enumerate() {
+    let position: Vec<f64> = if let Some(art) = &session.art {
+        art.position().iter().copied().collect()
+    } else {
+        session.session.position().iter().copied().collect()
+    };
+    for (i, v) in position.iter().enumerate() {
         dst[i] = *v;
     }
     RGSADDLE_OK
@@ -965,7 +993,12 @@ pub unsafe extern "C" fn rgsaddle_minmode_mode(
     let session = unsafe { &*session };
     let dof = (3 * session.n_atoms) as usize;
     let dst = unsafe { slice::from_raw_parts_mut(out, dof) };
-    for (i, v) in session.session.mode().iter().enumerate() {
+    let mode: Vec<f64> = if let Some(art) = &session.art {
+        art.mode().iter().copied().collect()
+    } else {
+        session.session.mode().iter().copied().collect()
+    };
+    for (i, v) in mode.iter().enumerate() {
         dst[i] = *v;
     }
     RGSADDLE_OK
@@ -988,6 +1021,397 @@ pub unsafe extern "C" fn rgsaddle_minmode_reset(session: *mut RgsaddleMinMode) -
 pub unsafe extern "C" fn rgsaddle_minmode_free(session: *mut RgsaddleMinMode) {
     if !session.is_null() {
         drop(unsafe { Box::from_raw(session) });
+    }
+}
+
+fn fill_art_report(out: &mut RgsaddleReport, report: &crate::ArtReport) {
+    stamp_report(out);
+    out.status = match report.status {
+        crate::ArtStatus::Converged => 1,
+        crate::ArtStatus::Exhausted => 2,
+        crate::ArtStatus::Pushing | crate::ArtStatus::Climbing => 0,
+    };
+    out.evaluations = i32::try_from(report.evaluations).unwrap_or(i32::MAX);
+    out.max_force = report.max_force;
+    // Push count. Rotations carries the climb count.
+    out.ci_index = i64::try_from(report.pushes).unwrap_or(i64::MAX);
+    out.iteration = i64::try_from(report.iteration).unwrap_or(i64::MAX);
+    out.curvature = report.curvature;
+    out.rotations = i64::try_from(report.climbs).unwrap_or(i64::MAX);
+}
+
+/// Opaque saddle-search configuration. Dimer, Lanczos, and ART nouveau
+/// are options on this handle.
+pub struct RgsaddleSearchConfig {
+    inner: crate::SearchConfig,
+}
+
+fn with_search(
+    config: *mut RgsaddleSearchConfig,
+    update: impl FnOnce(&mut crate::SearchConfig) -> Result<(), SaddleError>,
+) -> i32 {
+    if config.is_null() {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    match update(unsafe { &mut (*config).inner }) {
+        Ok(()) => RGSADDLE_OK,
+        Err(err) => status_of(&err),
+    }
+}
+
+/// # Safety
+/// The returned pointer is freed with [`rgsaddle_search_config_free`].
+#[unsafe(no_mangle)]
+pub extern "C" fn rgsaddle_search_config_create() -> *mut RgsaddleSearchConfig {
+    Box::into_raw(Box::new(RgsaddleSearchConfig {
+        inner: crate::SearchConfig::new(),
+    }))
+}
+
+/// # Safety
+/// `config` comes from [`rgsaddle_search_config_create`], freed once.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_search_config_free(config: *mut RgsaddleSearchConfig) {
+    if !config.is_null() {
+        drop(unsafe { Box::from_raw(config) });
+    }
+}
+
+/// # Safety
+/// `config` is a live search configuration or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_search_config_set_kind(
+    config: *mut RgsaddleSearchConfig,
+    kind: i32,
+) -> i32 {
+    with_search(config, |cfg| cfg.set_kind(kind))
+}
+
+/// # Safety
+/// `config` is a live search configuration or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_search_config_set_method(
+    config: *mut RgsaddleSearchConfig,
+    method: i32,
+) -> i32 {
+    with_search(config, |cfg| cfg.set_method(method))
+}
+
+/// # Safety
+/// `config` is a live search configuration or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_search_config_set_dr(
+    config: *mut RgsaddleSearchConfig,
+    value: f64,
+) -> i32 {
+    with_search(config, |cfg| cfg.set_dr(value))
+}
+
+/// # Safety
+/// `config` is a live search configuration or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_search_config_set_difference(
+    config: *mut RgsaddleSearchConfig,
+    value: i32,
+) -> i32 {
+    with_search(config, |cfg| cfg.set_difference(value))
+}
+
+/// # Safety
+/// `config` is a live search configuration or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_search_config_set_rotation_tol(
+    config: *mut RgsaddleSearchConfig,
+    value: f64,
+) -> i32 {
+    with_search(config, |cfg| cfg.set_rotation_tol(value))
+}
+
+/// # Safety
+/// `config` is a live search configuration or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_search_config_set_rotation_angle_tol(
+    config: *mut RgsaddleSearchConfig,
+    value: f64,
+) -> i32 {
+    with_search(config, |cfg| cfg.set_rotation_angle_tol(value))
+}
+
+/// # Safety
+/// `config` is a live search configuration or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_search_config_set_max_rotations(
+    config: *mut RgsaddleSearchConfig,
+    value: i64,
+) -> i32 {
+    with_search(config, |cfg| cfg.set_max_rotations(value))
+}
+
+/// # Safety
+/// `config` is a live search configuration or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_search_config_set_krylov_dim(
+    config: *mut RgsaddleSearchConfig,
+    value: i64,
+) -> i32 {
+    with_search(config, |cfg| cfg.set_krylov_dim(value))
+}
+
+/// # Safety
+/// `config` is a live search configuration or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_search_config_set_force_tol(
+    config: *mut RgsaddleSearchConfig,
+    value: f64,
+) -> i32 {
+    with_search(config, |cfg| cfg.set_force_tol(value))
+}
+
+/// # Safety
+/// `config` is a live search configuration or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_search_config_set_max_move(
+    config: *mut RgsaddleSearchConfig,
+    value: f64,
+) -> i32 {
+    with_search(config, |cfg| cfg.set_max_move(value))
+}
+
+/// # Safety
+/// `config` is a live search configuration or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_search_config_set_eigen_threshold(
+    config: *mut RgsaddleSearchConfig,
+    value: f64,
+) -> i32 {
+    with_search(config, |cfg| cfg.set_eigen_threshold(value))
+}
+
+/// # Safety
+/// `config` is a live search configuration or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_search_config_set_push_step(
+    config: *mut RgsaddleSearchConfig,
+    value: f64,
+) -> i32 {
+    with_search(config, |cfg| cfg.set_push_step(value))
+}
+
+/// # Safety
+/// `config` is a live search configuration or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_search_config_set_max_pushes(
+    config: *mut RgsaddleSearchConfig,
+    value: i64,
+) -> i32 {
+    with_search(config, |cfg| cfg.set_max_pushes(value))
+}
+
+/// # Safety
+/// `config` is a live search configuration or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_search_config_set_max_climbs(
+    config: *mut RgsaddleSearchConfig,
+    value: i64,
+) -> i32 {
+    with_search(config, |cfg| cfg.set_max_climbs(value))
+}
+
+/// # Safety
+/// `config` is a live search configuration or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_search_config_set_perp_steps_push(
+    config: *mut RgsaddleSearchConfig,
+    value: i64,
+) -> i32 {
+    with_search(config, |cfg| cfg.set_perp_steps_push(value))
+}
+
+/// # Safety
+/// `config` is a live search configuration or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_search_config_set_perp_steps_climb(
+    config: *mut RgsaddleSearchConfig,
+    value: i64,
+) -> i32 {
+    with_search(config, |cfg| cfg.set_perp_steps_climb(value))
+}
+
+/// # Safety
+/// `config` is a live search configuration or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_search_config_set_krylov_min(
+    config: *mut RgsaddleSearchConfig,
+    value: i64,
+) -> i32 {
+    with_search(config, |cfg| cfg.set_krylov_min(value))
+}
+
+/// # Safety
+/// `config` is a live search configuration or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_search_config_set_activation_distance(
+    config: *mut RgsaddleSearchConfig,
+    value: f64,
+) -> i32 {
+    with_search(config, |cfg| cfg.set_activation_distance(value))
+}
+
+/// # Safety
+/// `config` is a live search configuration or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_search_config_set_nsmooth(
+    config: *mut RgsaddleSearchConfig,
+    value: i64,
+) -> i32 {
+    with_search(config, |cfg| cfg.set_nsmooth(value))
+}
+
+/// # Safety
+/// `config` is a live search configuration or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_search_config_set_push_over(
+    config: *mut RgsaddleSearchConfig,
+    value: f64,
+) -> i32 {
+    with_search(config, |cfg| cfg.set_push_over(value))
+}
+
+/// # Safety
+/// `config` is a live search configuration or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_search_config_set_displacement_seed(
+    config: *mut RgsaddleSearchConfig,
+    seed: u64,
+) -> i32 {
+    with_search(config, |cfg| cfg.set_displacement_seed(seed))
+}
+
+/// # Safety
+/// `config` is a live search configuration or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_search_config_set_displacement_amplitude(
+    config: *mut RgsaddleSearchConfig,
+    value: f64,
+) -> i32 {
+    with_search(config, |cfg| cfg.set_displacement_amplitude(value))
+}
+
+/// # Safety
+/// `indices` holds `len` coordinate indices, or is null for every coordinate.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_search_config_set_support(
+    config: *mut RgsaddleSearchConfig,
+    indices: *const i64,
+    len: i64,
+) -> i32 {
+    if config.is_null() {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    if indices.is_null() {
+        return with_search(config, |cfg| cfg.set_support(None));
+    }
+    if len < 1 {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let raw = unsafe { slice::from_raw_parts(indices, len as usize) };
+    let mut owned = Vec::with_capacity(raw.len());
+    for index in raw {
+        if *index < 0 {
+            return RGSADDLE_INVALID_PARAMETER;
+        }
+        owned.push(*index as usize);
+    }
+    with_search(config, |cfg| cfg.set_support(Some(&owned)))
+}
+
+/// Create a min-mode session from the opaque search configuration.
+///
+/// `position` and, unless a displacement seed was set, `mode` are
+/// `3 * n_atoms` doubles. ART options make `position` the minimum and
+/// `mode` the targeted opening direction. The report then uses
+/// `ci_index` for the push count, `rotations` for the climb count, and
+/// status 2 when the budget is spent. Curvature is NaN before the first
+/// Lanczos estimate.
+///
+/// # Safety
+/// `config` is live. The pointers cover `3 * n_atoms` doubles.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_minmode_create_search(
+    config: *const RgsaddleSearchConfig,
+    n_atoms: i64,
+    position: *const f64,
+    mode: *const f64,
+) -> *mut RgsaddleMinMode {
+    if config.is_null() || position.is_null() || n_atoms < 1 {
+        return std::ptr::null_mut();
+    }
+    let cfg = unsafe { &*config };
+    let dof = (3 * n_atoms) as usize;
+    let x = Array1::from(unsafe { slice::from_raw_parts(position, dof) }.to_vec());
+    if cfg.inner.art_enabled() {
+        let direction = if mode.is_null() {
+            None
+        } else {
+            Some(Array1::from(
+                unsafe { slice::from_raw_parts(mode, dof) }.to_vec(),
+            ))
+        };
+        let displacement = match cfg.inner.displacement(direction) {
+            Ok(displacement) => displacement,
+            Err(_) => return std::ptr::null_mut(),
+        };
+        let art_config = match cfg.inner.art_config() {
+            Ok(art_config) => art_config,
+            Err(_) => return std::ptr::null_mut(),
+        };
+        let art = match crate::ArtSession::new(art_config, x, displacement) {
+            Ok(art) => art,
+            Err(_) => return std::ptr::null_mut(),
+        };
+        let dummy = match MinModeSession::new(
+            cfg.inner.mode().clone(),
+            art.position().to_owned(),
+            art.mode().to_owned(),
+        ) {
+            Ok(session) => session,
+            Err(_) => return std::ptr::null_mut(),
+        };
+        return Box::into_raw(Box::new(RgsaddleMinMode {
+            session: dummy,
+            art: Some(art),
+            n_atoms,
+        }));
+    }
+    if mode.is_null() {
+        return std::ptr::null_mut();
+    }
+    let m = Array1::from(unsafe { slice::from_raw_parts(mode, dof) }.to_vec());
+    match MinModeSession::new(cfg.inner.mode().clone(), x, m) {
+        Ok(session) => Box::into_raw(Box::new(RgsaddleMinMode {
+            session,
+            art: None,
+            n_atoms,
+        })),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Displace a converged ART search by the configured push-over length.
+///
+/// # Safety
+/// `session` comes from [`rgsaddle_minmode_create_search`] with ART options.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_minmode_push_over(session: *mut RgsaddleMinMode) -> i32 {
+    if session.is_null() {
+        return RGSADDLE_NULL_SESSION;
+    }
+    let Some(art) = (unsafe { &mut *session }).art.as_mut() else {
+        return RGSADDLE_INVALID_PARAMETER;
+    };
+    match art.push_over() {
+        Ok(()) => RGSADDLE_OK,
+        Err(err) => status_of(&err),
     }
 }
 

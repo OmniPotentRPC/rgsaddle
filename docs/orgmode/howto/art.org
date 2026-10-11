@@ -1,0 +1,37 @@
+#+TITLE: Leave a basin with ART nouveau
+#+OPTIONS: toc:nil num:nil
+
+~ArtSession~ starts at a displaced minimum. The kick is ~ArtDisplacement::Random~ or ~Targeted~, on ~ArtSupport::Global~ or on the indices from ~ArtSupport::local_atoms~. The direction of a random kick is ~event_seed~ mapped onto each coordinate. No other generator is used.
+
+Each macro-step pushes along that opening direction while the lowest curvature is at or above ~eigen_threshold~. The first Lanczos estimate waits until the geometry has moved ~activation_distance~ from the undisplaced minimum. FIRE from rgmin relaxes the force in the perpendicular hyperplane during that opening. After the threshold, the climb is the min-mode reflected force: the same translation a dimer or Lanczos search uses, with the estimate and the step tolerances stored on ~ArtConfig.mode~ (~MinModeConfig~). Convergence is that force tolerance together with a negative lowest curvature.
+
+The opening is Barkema and Mousseau, Phys. Rev. Lett. 77 (1996) 4358, https://doi.org/10.1103/PhysRevLett.77.4358, and Malek and Mousseau, Phys. Rev. E 62 (2000) 7723, https://doi.org/10.1103/PhysRevE.62.7723. The Lanczos mode is Machado-Charry et al., J. Chem. Phys. 135 (2011) 034102, https://doi.org/10.1063/1.3609924. The activation distance, the eigenvalue threshold, and the limited perpendicular block follow pARTn, Poberžnik et al., Comput. Phys. Commun. 295 (2024) 108961, https://doi.org/10.1016/j.cpc.2023.108961.
+
+rgmin is the minimizer. rgpot is the potential RPC. rgsaddle is the saddle mechanics. The seat that sits on a ticket is described in [[file:../seat.org][the seat note]].
+
+~event_seed(base, index)~ is the stream key for event ~index~. ~run_events~ only partitions events across threads and writes each outcome at that index. It does not parallelize the force. The force call, in rgpot or the host, is the parallel axis. One thread, several threads, and a split of the index range return the same positions and energies.
+
+** Parameters
+
+~ArtConfig::mode~ holds ~dr~, ~difference~, ~rotation_tol~, and ~krylov_dim~. The ART fields sit beside that block. Defaults below are the Rust ~ArtConfig::default~. The C, C++, and Python search configuration adopts them when an ART setter is used before any mode setter.
+
+| Field | pARTn name | Default | Role |
+|---+---+---+---+
+| ~eigen_threshold~ | ~eigval_thr~ | -0.01 | Leave the basin when the lowest curvature falls below this |
+| ~push_step~ | push step | 0.3 | Length of one opening push |
+| ~mode.max_move~ | | 0.3 | Cap on one push, climb, or FIRE step, so the push is not shortened |
+| ~mode.krylov_dim~ | ~lanczos_max_size~ | 16 | Lanczos subspace |
+| ~krylov_min~ | ~lanczos_min_size~ | 3 | Repeat a shorter opening estimate from an orthogonal direction |
+| ~activation_distance~ | ~ninit~ / ~delr_thr~ | 0.3 | No Lanczos until the push has travelled this far |
+| ~perp_steps_push~ | ~nperp~, limited | 3 | FIRE steps perpendicular to the opening |
+| ~nsmooth~ | ~nsmooth~ | 0 | Opening steps blended into the first climbs |
+| ~push_over~ | push over the saddle | 0 | ~ArtSession::push_over~ after convergence; ~run~ still stops on the stationary point |
+| ~mode.force_tol~ | | 1e-3 | Stationary-point tolerance |
+
+** From C, C++, and Python
+
+There is one saddle-search configuration. Dimer, Lanczos, and ART nouveau are setters on it, not a second family of entry points.
+
+From C the handle is ~rgsaddle_search_config_create~. ~rgsaddle_minmode_create_search~ builds the session, and ~rgsaddle_minmode_step~ advances it. An ART report stores pushes in ~ci_index~ and climbs in ~rotations~. Status 2 means the budget is spent. Curvature is NaN before the first estimate.
+
+From C++ the same handle is ~rgsaddle::SearchConfig~, passed to ~rgsaddle::MinMode~. From Python it is ~SearchConfig~, passed to ~MinMode~.

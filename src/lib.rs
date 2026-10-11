@@ -38,9 +38,10 @@ pub mod spring;
 pub mod tangent;
 
 pub use art::{
-    ArtConfig, ArtDisplacement, ArtEvent, ArtOutcome, ArtReport, ArtSession, ArtStatus, ArtSupport,
-    event_seed, run_events,
+    ArtConfig, ArtConfigBuilder, ArtDisplacement, ArtEvent, ArtOutcome, ArtReport, ArtSession,
+    ArtStatus, ArtSupport, event_seed, run_events,
 };
+pub mod search;
 pub use band::{
     BandConfig, BandEvaluation, BandReport, BandSession, BandStatus, BandSurface, Cell, CiConfig,
     SolidState,
@@ -56,6 +57,7 @@ pub use nichols::{
 };
 pub use prfo::{PrfoKind, partitioned_rfo_eigen, restricted_prfo_displacement};
 pub use projection::ProjectionKind;
+pub use search::SearchConfig;
 pub use spring::SpringKind;
 pub use tangent::TangentKind;
 

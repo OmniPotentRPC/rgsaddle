@@ -72,6 +72,30 @@ int main() {
         return 1;
     }
     band.reset();
+
+    rgsaddle::SearchConfig art;
+    art.set_eigen_threshold(-0.01)
+        .set_push_step(0.3)
+        .set_activation_distance(0.0)
+        .set_perp_steps_push(0)
+        .set_displacement_amplitude(0.2)
+        .set_max_move(0.3);
+    const double minimum[3] = {1.0, 0.0, 0.0};
+    const double direction[3] = {-1.0, 0.0, 0.0};
+    rgsaddle::MinMode opened(art, 1, minimum, direction);
+    auto stepped = opened.step(surface, nullptr);
+    double at[3] = {};
+    opened.position(at);
+    if (!(at[0] < 1.0)) {
+        std::fprintf(stderr, "ART step did not leave the minimum\n");
+        return 1;
+    }
+    if (stepped.status != RGSADDLE_STATUS_RUNNING &&
+        stepped.status != RGSADDLE_STATUS_CONVERGED) {
+        std::fprintf(stderr, "ART status %d\n", stepped.status);
+        return 1;
+    }
+    std::printf("RGSADDLE_CXX_ART_OK x=%.6g\n", at[0]);
     std::printf("RGSADDLE_CXX_WRAP_OK force=%.6g iter=%lld\n", last.max_force,
                 static_cast<long long>(last.iteration));
     return 0;

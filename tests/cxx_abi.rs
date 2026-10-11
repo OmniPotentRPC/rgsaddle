@@ -101,6 +101,8 @@ fn cxx_session_wrapper_uses_the_official_abi() {
         "C++ smoke failed: {}",
         String::from_utf8_lossy(&run.stderr)
     );
-    assert!(String::from_utf8_lossy(&run.stdout).contains("RGSADDLE_CXX_WRAP_OK"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(stdout.contains("RGSADDLE_CXX_WRAP_OK"), "{stdout}");
+    assert!(stdout.contains("RGSADDLE_CXX_ART_OK"), "{stdout}");
     std::fs::remove_file(out).expect("remove temporary smoke executable");
 }

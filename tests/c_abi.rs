@@ -65,3 +65,50 @@ fn c_abi_smoke() {
     assert!(stdout.contains("RGSADDLE_C_ABI_OK"), "stdout: {stdout}");
     let _ = std::fs::remove_file(&out);
 }
+
+#[test]
+#[cfg_attr(not(feature = "capi"), ignore)]
+fn c_art_search_config_steps_the_double_well() {
+    let Some(cc) = cc() else {
+        eprintln!("no C compiler; skipping");
+        return;
+    };
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let out = std::env::temp_dir().join(format!("rgsaddle_art_smoke_{}", std::process::id()));
+    let mut libdir = std::env::current_exe().unwrap();
+    libdir.pop();
+    if libdir.ends_with("deps") {
+        libdir.pop();
+    }
+    if !libdir.join("librgsaddle.so").exists() {
+        let deps = libdir.join("deps");
+        if deps.join("librgsaddle.so").exists() {
+            libdir = deps;
+        }
+    }
+    let status = Command::new(&cc)
+        .arg(root.join("tests/c/art_smoke.c"))
+        .arg("-I")
+        .arg(root.join("include"))
+        .arg("-L")
+        .arg(&libdir)
+        .arg("-lrgsaddle")
+        .arg("-lm")
+        .arg("-o")
+        .arg(&out)
+        .status()
+        .expect("compile the ART C binding");
+    assert!(status.success(), "ART C binding failed to build");
+    let run = Command::new(&out)
+        .env("LD_LIBRARY_PATH", &libdir)
+        .output()
+        .expect("run the ART C binding");
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        run.status.success(),
+        "ART C binding failed:\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(stdout.contains("RGSADDLE_C_ART_OK"), "stdout: {stdout}");
+    let _ = std::fs::remove_file(&out);
+}
