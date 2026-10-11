@@ -2,7 +2,8 @@
 //! minimum-mode search.
 //!
 //! Goswami, Gunde, and Jónsson, Front. Chem. 14 (2026),
-//! doi:10.3389/fchem.2026.1807063. The host calls [`OcinebSession::step`].
+//! doi:10.3389/fchem.2026.1807063, following eOn v3.6.0,
+//! doi:10.5281/zenodo.23166734. The host calls [`OcinebSession::step`].
 //! Each call is one band step, one alignment, or one minimum-mode step,
 //! and the report names that phase.
 //!
