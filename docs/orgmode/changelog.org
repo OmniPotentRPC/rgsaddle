@@ -3,6 +3,7 @@
 
 * Unreleased
 
+- The reproducible ~eigh~ product keeps several rows and columns in registers, and a chase wave may run several steps while those columns stay disjoint. The golden hashes are unchanged. One thread at n=3000 is still 2.76 times faer ~Par::Seq~, and E(8) is 0.322. The fixed multiply-add chain and the bulge dependency are the limit. ~eigh_unpinned~ stays the fast opt-in. Wall times are in [[file:notes/eigh-bench.org][the dense eigen bench note]].
 - ~eigh~ and ~partial_eigh~ return ascending eigenpairs of a symmetric matrix, and each column is signed so its largest-magnitude component is positive. The bits are the same on every CPU path and pool size. ~eigh_unpinned~, behind feature ~faer-unpinned~ (off by default), calls faer with the caller's thread count, and its bits depend on the CPU and the thread count. Wall times are in [[file:notes/eigh-bench.org][the dense eigen bench note]].
 - AutoNEB stays in Rust until the stencil configuration lands. C, C++, and Python reach ~BandConfig::autoneb~ later as that configuration's AutoNEB preset. The C ABI stays at minor 16.
 - AutoNEB records a trajectory only when ~record_samples~ is set. The default stores nothing and takes no sample lock. One stored call is one ~f64~ per degree of freedom.

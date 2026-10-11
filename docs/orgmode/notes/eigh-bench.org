@@ -1,121 +1,243 @@
 #+TITLE: Dense symmetric eigensolver
 #+OPTIONS: toc:nil num:nil
 
-~eigh~ copies the symmetric part of its argument, reduces that matrix to bandwidth 64 with tiled Householder panels, chases the bulge to tridiagonal form, and solves the factor with Cuppen's method. The panel reduction and the pipelined chase follow Haidar, Ltaief, and Dongarra (https://doi.org/10.1145/2063384.2063394). The chase stores a compact band of half-width 128. Several sweeps stay in flight: a sweep runs its next kernel only after every earlier sweep's columns lie strictly to the right. The tridiagonal spectrum is Cuppen's divide-and-conquer (https://doi.org/10.1007/BF01396757) as carried out by Gu and Eisenstat (https://doi.org/10.1137/S0895479892241287), with the merge tree fixed from the dimension (leaves at 128, split at n/2). Francis QR (https://doi.org/10.1093/comjnl/4.4.332) is the leaf step. ~partial_eigh~ bisects the same factor and runs inverse iteration for the lowest k pairs. ~k~ equal to the dimension calls ~eigh~.
+~eigh~ copies the symmetric part of its argument, reduces that matrix to bandwidth 64 with tiled Householder panels, chases the bulge to tridiagonal form, and solves the factor with Cuppen's method. The panel reduction and the pipelined chase follow Haidar, Ltaief, and Dongarra (https://doi.org/10.1145/2063384.2063394). The chase stores a compact band of half-width 128. Several sweeps stay in flight: a sweep runs only after every earlier sweep's columns lie strictly to its right. A task may then take up to 8 further steps while the predicted windows stay disjoint. Waves of fewer than 4 sweeps stay on the calling thread. The tridiagonal spectrum is Cuppen's divide-and-conquer (https://doi.org/10.1007/BF01396757) as carried out by Gu and Eisenstat (https://doi.org/10.1137/S0895479892241287), with the merge tree fixed from the dimension (leaves at 128, split at n/2). Francis QR (https://doi.org/10.1093/comjnl/4.4.332) is the leaf step. ~partial_eigh~ bisects the same factor and runs inverse iteration for the lowest k pairs. ~k~ equal to the dimension calls ~eigh~.
 
-Every trailing update and the blocked back-transform go through ~tile_gemm~. Each output accumulates over k in ascending order with a separate multiply and add. The kernel is dispatched at run time (~RGSADDLE_SIMD~ may force ~scalar~, ~avx2~, ~avx512~, or ~neon~). Tile ownership depends on the dimension and on the tile size, not on the rayon pool. Feature ~par~ runs those tiles on the pool. Without ~par~ the same partition runs on one thread. Chase reflectors from consecutive sweeps at one band position form a WY block of width at most 64, applied with three products on fixed column tiles. ~eigh_unpinned~ (feature ~faer-unpinned~, off by default) calls faer with the caller's thread count. Its bits depend on the CPU and the thread count. ~eigh~ does not.
+Every trailing update and the blocked back-transform go through ~tile_gemm~. Each output accumulates over k in ascending order as ~acc = acc + a * b~, with a separate multiply and add, then ~alpha * acc + beta * c~. The AVX-512, AVX2, and NEON kernels keep several rows and several columns in registers, and each of those accumulators repeats that same chain. A row panel is packed once and the column tasks share it. The kernel is dispatched at run time (~RGSADDLE_SIMD~ may force ~scalar~, ~avx2~, ~avx512~, or ~neon~). Tile ownership depends on the dimension and on the tile size, not on the rayon pool. Feature ~par~ runs those tiles on the pool. Without ~par~ the same partition runs on one thread. Chase reflectors from consecutive sweeps at one band position form a WY block of width at most 64, applied with three products on fixed column tiles. Widening that block changes the Householder association and the golden hashes, so the width stays 64. ~eigh_unpinned~ (feature ~faer-unpinned~, off by default) calls faer with the caller's thread count. Its bits depend on the CPU and the thread count. ~eigh~ does not.
 
 Eigenvalues ascend. Each column is signed so that its lowest-index largest-magnitude component is positive. Lanczos ~lowest_ritz~ and ~jacobi_eigen~ call ~partial_eigh~ and ~eigh~.
 
-Wall time depends on the dimension, so one matrix per spectrum class is enough. The tables below are that one draw. They are medians of 7 interleaved runs. The range is the maximum minus the minimum. Efficiency is the one-thread median divided by the product of the thread count and that count's median. The host is an 8-core Intel Xeon with one thread per core and AVX-512.
+Wall time depends on the dimension, so one matrix per spectrum class is enough. The tables below are that one draw. They are medians of 7 interleaved runs. The range is the maximum minus the minimum. Efficiency is the one-thread median divided by the product of the thread count and that count's median. The host is an 8-core Intel Xeon (family 6, model 207) with one thread per core, AVX-512, 48 KB of L1 data per core, 2 MB of L2 per core, and 320 MB of L3.
 
 #+begin_src console
-$ cargo bench --features par,faer-unpinned --bench eigh_scale -- 1500 3000
+$ cargo bench --features par,faer-unpinned --bench eigh_scale -- 48 96 256 600 1500 3000
 #+end_src
 
-* n = 3000, random SPD
+* Why one thread is not within 1.5 times faer
+
+The one-thread targets are 1.5 times faer ~Par::Seq~: 5.061 s at n=3000 and 0.712 s at n=1500. The measured medians are 9.328 s and 1.415 s, which are 2.76 and 2.98 times faer. Eight threads at n=3000 take 3.619 s, above faer's 3.374 s. E(8) there is 0.322. Eight threads at n=1500 take 0.620 s, above faer's 0.475 s.
+
+The back-transform and the Cuppen vector updates are several ~n³~ products with the fixed chain. At n=3000 and one thread they take 4.046 s and 2.659 s. Their sum, 6.705 s, is already above the 5.061 s budget, before the band reduction (1.332 s) and the bulge chase (0.930 s).
+
+This host issues two AVX-512 fused multiply-adds per cycle. A separate multiply and a separate add share those two ports, so the reproducible kernel's arithmetic peak is about half of an FMA GEMM. faer's 3.374 s sits near that higher peak for the whole solve. Replacing the separate multiply and add with a fused operation would change every golden hash. The Ozaki scheme and ReproBLAS indexed summation are reproducible, and they are not this chain. They also cost more than an FMA product, so they do not close the gap to faer.
+
+A wider WY block would put more reflectors in one product. The hashes are the bits of the current grouping, width at most 64, in the current reflector order. A wider group changes that association.
+
+The bulge wave at n=3000 holds on the order of 6 sweeps, 12 at most, because a sweep cannot enter columns an earlier sweep still owns. E(8) above 0.6 at a one-thread time of 9.328 s would need an eight-thread time under 1.943 s. At eight threads the band is still 0.815 s and the bulge is 0.861 s.
+
+~eigh~ stays the default. ~eigh_unpinned~ remains the opt-in when the caller wants faer's speed and can accept bits that depend on the CPU and the thread count.
+
+* Against faer, random SPD
+
+| n    | eigh 1 thread (s) | faer Seq (s) | ratio | eigh 8 threads (s) | faer rayon 8 (s) |
+|------+-------------------+--------------+-------+--------------------+------------------|
+| 48   | 0.000276          | 0.000132     | 2.09  | 0.000269           | 0.000121         |
+| 96   | 0.001237          | 0.000645     | 1.92  | 0.001214           | 0.000839         |
+| 256  | 0.017877          | 0.005894     | 3.03  | 0.012671           | 0.005686         |
+| 600  | 0.142231          | 0.034277     | 4.15  | 0.078560           | 0.029555         |
+| 1500 | 1.414863          | 0.474996     | 2.98  | 0.620086           | 0.289524         |
+| 3000 | 9.328402          | 3.374157     | 2.76  | 3.618725           | 1.083966         |
+
+Dense Hessians in saddle searches are mostly the smaller sizes. At n=48 and n=96 the chase and the tridiagonal solve dominate, and extra threads do not pay for themselves. From n=256 the back-transform and the tridiagonal solve start to scale, and the bulge does not.
+
+* n = 48, random SPD
+
+E(8) is 0.128.
 
 | threads | median (s) | range (s) | efficiency |
 |---------+------------+-----------+------------|
-| 1       | 14.950     | 2.088     | 1.000      |
-| 2       | 8.834      | 1.815     | 0.846      |
-| 4       | 6.561      | 1.010     | 0.570      |
-| 8       | 4.720      | 1.415     | 0.396      |
+| 1       | 0.000276   | 0.000048  | 1.000      |
+| 2       | 0.000262   | 0.000044  | 0.526      |
+| 4       | 0.000265   | 0.000032  | 0.260      |
+| 8       | 0.000269   | 0.000049  | 0.128      |
 
-Stage medians, in seconds. The share is that stage divided by the sum of the four stage medians.
+* n = 96, random SPD
 
-| threads | band  | bulge | tridiagonal | back-transform | share band | share bulge | share tridiagonal | share back |
-|---------+-------+-------+-------------+----------------+------------+-------------+-------------------+------------|
-| 1       | 2.247 | 1.213 | 5.129       | 5.910          | 0.155      | 0.084       | 0.354             | 0.408      |
-| 2       | 1.622 | 0.834 | 2.664       | 3.346          | 0.192      | 0.099       | 0.315             | 0.395      |
-| 4       | 1.414 | 1.127 | 1.482       | 2.310          | 0.223      | 0.178       | 0.234             | 0.365      |
-| 8       | 1.110 | 0.935 | 0.865       | 1.545          | 0.249      | 0.210       | 0.194             | 0.347      |
-
-E(8) is 0.396. The back-transform is the largest share at one thread (0.408) and at eight (0.347). The tridiagonal solve is the next largest share at one thread (0.354). The pipelined bulge moves from 1.213 s to 0.935 s. faer ~Par::Seq~ takes 3.466 s (range 0.035). The one-thread solve is 4.31 times that. The eight-thread median, 4.720 s, is still above that one faer thread. faer ~Par::rayon(8)~ takes 1.109 s (range 0.245).
-
-* n = 3000, clustered indefinite spectrum
-
-The spectrum has a triple eigenvalue at -1.5 and then a spread of positive values. E(8) is 0.414.
+E(8) is 0.127.
 
 | threads | median (s) | range (s) | efficiency |
 |---------+------------+-----------+------------|
-| 1       | 14.329     | 1.597     | 1.000      |
-| 2       | 8.399      | 0.405     | 0.853      |
-| 4       | 5.572      | 0.526     | 0.643      |
-| 8       | 4.324      | 1.153     | 0.414      |
+| 1       | 0.001237   | 0.000092  | 1.000      |
+| 2       | 0.001255   | 0.000192  | 0.493      |
+| 4       | 0.001256   | 0.000110  | 0.246      |
+| 8       | 0.001214   | 0.000156  | 0.127      |
 
-| threads | band  | bulge | tridiagonal | back-transform | share band | share bulge | share tridiagonal | share back |
-|---------+-------+-------+-------------+----------------+------------+-------------+-------------------+------------|
-| 1       | 2.132 | 1.198 | 5.046       | 5.851          | 0.150      | 0.084       | 0.355             | 0.411      |
-| 2       | 1.432 | 0.817 | 2.663       | 3.305          | 0.174      | 0.099       | 0.324             | 0.402      |
-| 4       | 1.169 | 0.779 | 1.416       | 1.851          | 0.224      | 0.149       | 0.272             | 0.355      |
-| 8       | 1.055 | 0.707 | 0.882       | 1.338          | 0.265      | 0.178       | 0.222             | 0.336      |
+* n = 256, random SPD
 
-* Partial spectrum, n = 3000, random SPD
+E(8) is 0.176. The bulge is the largest share at eight threads (0.402).
 
-| threads | k    | median (s) | range (s) | versus full |
-|---------+------+------------+-----------+-------------|
-| 1       | full | 14.230     | 1.514     | 1           |
-| 1       | 1    | 3.477      | 0.166     | 0.244       |
-| 1       | 5    | 3.521      | 0.157     | 0.247       |
-| 1       | 10   | 3.563      | 0.143     | 0.250       |
-| 8       | full | 4.160      | 0.675     | 1           |
-| 8       | 1    | 2.105      | 0.237     | 0.506       |
-| 8       | 5    | 1.851      | 0.322     | 0.445       |
-| 8       | 10   | 1.823      | 0.059     | 0.438       |
+| threads | median (s) | range (s) | efficiency |
+|---------+------------+-----------+------------|
+| 1       | 0.017877   | 0.001050  | 1.000      |
+| 2       | 0.014738   | 0.001540  | 0.607      |
+| 4       | 0.013440   | 0.001652  | 0.333      |
+| 8       | 0.012671   | 0.005190  | 0.176      |
 
-The partial solve still builds the tridiagonal factor. It skips the full Cuppen vectors and back-transforms only k columns.
+| threads | band   | bulge  | tridiagonal | back-transform | share band | share bulge | share tridiagonal | share back |
+|---------+--------+--------+-------------+----------------+------------+-------------+-------------------+------------|
+| 1       | 0.001897 | 0.004895 | 0.007606  | 0.002715       | 0.111      | 0.286       | 0.444             | 0.159      |
+| 2       | 0.002029 | 0.004872 | 0.005026  | 0.001927       | 0.146      | 0.352       | 0.363             | 0.139      |
+| 4       | 0.002008 | 0.004946 | 0.004268  | 0.001496       | 0.158      | 0.389       | 0.336             | 0.118      |
+| 8       | 0.001979 | 0.004846 | 0.003918  | 0.001312       | 0.164      | 0.402       | 0.325             | 0.109      |
+
+* n = 600, random SPD
+
+E(8) is 0.226. The bulge is the largest share at eight threads (0.397).
+
+| threads | median (s) | range (s) | efficiency |
+|---------+------------+-----------+------------|
+| 1       | 0.142231   | 0.008889  | 1.000      |
+| 2       | 0.105175   | 0.004419  | 0.676      |
+| 4       | 0.114064   | 0.020707  | 0.312      |
+| 8       | 0.078560   | 0.006991  | 0.226      |
+
+| threads | band   | bulge  | tridiagonal | back-transform | share band | share bulge | share tridiagonal | share back |
+|---------+--------+--------+-------------+----------------+------------+-------------+-------------------+------------|
+| 1       | 0.016577 | 0.027746 | 0.060750  | 0.033828       | 0.119      | 0.200       | 0.437             | 0.244      |
+| 2       | 0.015638 | 0.030007 | 0.036286  | 0.019476       | 0.154      | 0.296       | 0.358             | 0.192      |
+| 4       | 0.020840 | 0.043226 | 0.030049  | 0.015484       | 0.190      | 0.394       | 0.274             | 0.141      |
+| 8       | 0.014776 | 0.029902 | 0.020361  | 0.010256       | 0.196      | 0.397       | 0.270             | 0.136      |
 
 * n = 1500, random SPD
 
-E(8) is 0.354. At eight threads the bulge share is 0.319, which is the largest share on this shorter matrix.
+E(8) is 0.285. At eight threads the bulge share is 0.360, which is the largest share on this matrix.
 
 | threads | median (s) | range (s) | efficiency |
 |---------+------------+-----------+------------|
-| 1       | 2.003      | 0.291     | 1.000      |
-| 2       | 1.316      | 0.054     | 0.761      |
-| 4       | 0.933      | 0.079     | 0.537      |
-| 8       | 0.707      | 0.070     | 0.354      |
+| 1       | 1.415      | 0.047     | 1.000      |
+| 2       | 0.929      | 0.058     | 0.761      |
+| 4       | 0.722      | 0.062     | 0.490      |
+| 8       | 0.620      | 0.066     | 0.285      |
 
 | threads | band  | bulge | tridiagonal | back-transform | share band | share bulge | share tridiagonal | share back |
 |---------+-------+-------+-------------+----------------+------------+-------------+-------------------+------------|
-| 1       | 0.297 | 0.249 | 0.682       | 0.743          | 0.151      | 0.126       | 0.346             | 0.377      |
-| 2       | 0.220 | 0.221 | 0.437       | 0.408          | 0.171      | 0.172       | 0.340             | 0.318      |
-| 4       | 0.181 | 0.214 | 0.249       | 0.239          | 0.205      | 0.243       | 0.282             | 0.271      |
-| 8       | 0.165 | 0.215 | 0.146       | 0.149          | 0.244      | 0.319       | 0.217             | 0.220      |
+| 1       | 0.192 | 0.211 | 0.469       | 0.513          | 0.139      | 0.152       | 0.338             | 0.370      |
+| 2       | 0.159 | 0.208 | 0.266       | 0.265          | 0.177      | 0.231       | 0.296             | 0.295      |
+| 4       | 0.145 | 0.201 | 0.186       | 0.160          | 0.210      | 0.290       | 0.269             | 0.232      |
+| 8       | 0.135 | 0.211 | 0.135       | 0.106          | 0.231      | 0.360       | 0.230             | 0.180      |
 
-faer ~Par::Seq~ takes 0.488 s (range 0.031). The one-thread solve is 4.10 times that. faer ~Par::rayon(8)~ takes 0.286 s (range 0.017).
+faer ~Par::Seq~ takes 0.475 s (range 0.039). The one-thread solve is 2.98 times that. faer ~Par::rayon(8)~ takes 0.290 s (range 0.021).
 
 * n = 1500, clustered indefinite spectrum
 
-E(8) is 0.366.
+The spectrum has a triple eigenvalue at -1.5 and then a spread of positive values. E(8) is 0.294.
 
 | threads | median (s) | range (s) | efficiency |
 |---------+------------+-----------+------------|
-| 1       | 2.183      | 0.256     | 1.000      |
-| 2       | 1.354      | 0.202     | 0.806      |
-| 4       | 0.938      | 0.059     | 0.582      |
-| 8       | 0.745      | 0.053     | 0.366      |
+| 1       | 1.445      | 0.054     | 1.000      |
+| 2       | 0.949      | 0.024     | 0.761      |
+| 4       | 0.737      | 0.060     | 0.490      |
+| 8       | 0.614      | 0.021     | 0.294      |
 
 | threads | band  | bulge | tridiagonal | back-transform | share band | share bulge | share tridiagonal | share back |
 |---------+-------+-------+-------------+----------------+------------+-------------+-------------------+------------|
-| 1       | 0.289 | 0.247 | 0.871       | 0.765          | 0.133      | 0.114       | 0.401             | 0.352      |
-| 2       | 0.213 | 0.218 | 0.469       | 0.418          | 0.161      | 0.165       | 0.356             | 0.317      |
-| 4       | 0.181 | 0.217 | 0.271       | 0.234          | 0.201      | 0.240       | 0.300             | 0.259      |
-| 8       | 0.166 | 0.216 | 0.178       | 0.152          | 0.233      | 0.304       | 0.250             | 0.214      |
+| 1       | 0.196 | 0.205 | 0.501       | 0.511          | 0.139      | 0.145       | 0.355             | 0.362      |
+| 2       | 0.162 | 0.205 | 0.290       | 0.263          | 0.176      | 0.223       | 0.316             | 0.286      |
+| 4       | 0.143 | 0.206 | 0.192       | 0.166          | 0.203      | 0.291       | 0.271             | 0.235      |
+| 8       | 0.136 | 0.204 | 0.141       | 0.100          | 0.234      | 0.351       | 0.243             | 0.172      |
 
 * Partial spectrum, n = 1500, random SPD
 
 | threads | k    | median (s) | range (s) | versus full |
 |---------+------+------------+-----------+-------------|
-| 1       | full | 2.145      | 0.229     | 1           |
-| 1       | 1    | 0.547      | 0.017     | 0.255       |
-| 1       | 5    | 0.560      | 0.017     | 0.261       |
-| 1       | 10   | 0.570      | 0.012     | 0.266       |
-| 8       | full | 0.791      | 0.220     | 1           |
-| 8       | 1    | 0.403      | 0.070     | 0.509       |
-| 8       | 5    | 0.408      | 0.022     | 0.516       |
-| 8       | 10   | 0.481      | 0.100     | 0.608       |
+| 1       | full | 1.417      | 0.080     | 1           |
+| 1       | 1    | 0.416      | 0.014     | 0.293       |
+| 1       | 5    | 0.419      | 0.021     | 0.295       |
+| 1       | 10   | 0.421      | 0.051     | 0.297       |
+| 8       | full | 0.592      | 0.048     | 1           |
+| 8       | 1    | 0.347      | 0.007     | 0.586       |
+| 8       | 5    | 0.359      | 0.009     | 0.606       |
+| 8       | 10   | 0.363      | 0.013     | 0.613       |
+
+* n = 3000, random SPD
+
+E(8) is 0.322. The back-transform is the largest share at one thread (0.451). At eight threads the bulge share is 0.260 and the band share is 0.246.
+
+| threads | median (s) | range (s) | efficiency |
+|---------+------------+-----------+------------|
+| 1       | 9.328      | 0.310     | 1.000      |
+| 2       | 6.076      | 0.681     | 0.768      |
+| 4       | 4.162      | 0.683     | 0.560      |
+| 8       | 3.619      | 0.589     | 0.322      |
+
+| threads | band  | bulge | tridiagonal | back-transform | share band | share bulge | share tridiagonal | share back |
+|---------+-------+-------+-------------+----------------+------------+-------------+-------------------+------------|
+| 1       | 1.332 | 0.930 | 2.659       | 4.046          | 0.149      | 0.104       | 0.297             | 0.451      |
+| 2       | 1.184 | 0.837 | 1.528       | 2.124          | 0.209      | 0.148       | 0.269             | 0.374      |
+| 4       | 0.873 | 0.769 | 0.993       | 1.179          | 0.229      | 0.202       | 0.260             | 0.309      |
+| 8       | 0.815 | 0.861 | 0.698       | 0.940          | 0.246      | 0.260       | 0.211             | 0.284      |
+
+faer ~Par::Seq~ takes 3.374 s (range 0.095). The one-thread solve is 2.76 times that. The eight-thread median, 3.619 s, is still above that one faer thread. faer ~Par::rayon(8)~ takes 1.084 s (range 0.207).
+
+* n = 3000, clustered indefinite spectrum
+
+The spectrum has a triple eigenvalue at -1.5 and then a spread of positive values. E(8) is 0.358.
+
+| threads | median (s) | range (s) | efficiency |
+|---------+------------+-----------+------------|
+| 1       | 9.455      | 0.551     | 1.000      |
+| 2       | 5.803      | 0.248     | 0.815      |
+| 4       | 4.104      | 0.364     | 0.576      |
+| 8       | 3.302      | 0.288     | 0.358      |
+
+| threads | band  | bulge | tridiagonal | back-transform | share band | share bulge | share tridiagonal | share back |
+|---------+-------+-------+-------------+----------------+------------+-------------+-------------------+------------|
+| 1       | 1.344 | 0.930 | 2.809       | 4.076          | 0.147      | 0.102       | 0.307             | 0.445      |
+| 2       | 1.007 | 0.816 | 1.587       | 2.101          | 0.183      | 0.148       | 0.288             | 0.381      |
+| 4       | 0.844 | 0.790 | 0.994       | 1.175          | 0.222      | 0.208       | 0.261             | 0.309      |
+| 8       | 0.767 | 0.798 | 0.703       | 0.738          | 0.255      | 0.265       | 0.234             | 0.245      |
+
+* Partial spectrum, n = 3000, random SPD
+
+| threads | k    | median (s) | range (s) | versus full |
+|---------+------+------------+-----------+-------------|
+| 1       | full | 9.235      | 0.168     | 1           |
+| 1       | 1    | 2.466      | 0.021     | 0.267       |
+| 1       | 5    | 2.463      | 0.072     | 0.267       |
+| 1       | 10   | 2.484      | 0.150     | 0.269       |
+| 8       | full | 3.167      | 0.171     | 1           |
+| 8       | 1    | 1.747      | 0.079     | 0.552       |
+| 8       | 5    | 1.777      | 0.032     | 0.561       |
+| 8       | 10   | 1.801      | 0.047     | 0.569       |
+
+The partial solve still builds the tridiagonal factor. It skips the full Cuppen vectors and back-transforms only k columns.
+
+* Partial spectrum at the saddle-search sizes, random SPD
+
+| n   | threads | k    | median (s) | range (s) | versus full |
+|-----+---------+------+------------+-----------+-------------|
+| 48  | 1       | full | 0.000231   | 0.000028  | 1           |
+| 48  | 1       | 1    | 0.000114   | 0.000007  | 0.492       |
+| 48  | 1       | 5    | 0.000173   | 0.000010  | 0.749       |
+| 48  | 1       | 10   | 0.000249   | 0.000006  | 1.076       |
+| 48  | 8       | full | 0.000277   | 0.000082  | 1           |
+| 48  | 8       | 1    | 0.000114   | 0.000003  | 0.414       |
+| 48  | 8       | 5    | 0.000222   | 0.000084  | 0.804       |
+| 48  | 8       | 10   | 0.000337   | 0.000101  | 1.217       |
+| 96  | 1       | full | 0.001217   | 0.000197  | 1           |
+| 96  | 1       | 1    | 0.000555   | 0.000098  | 0.456       |
+| 96  | 1       | 5    | 0.000675   | 0.000034  | 0.555       |
+| 96  | 1       | 10   | 0.000843   | 0.000028  | 0.693       |
+| 96  | 8       | full | 0.001224   | 0.000162  | 1           |
+| 96  | 8       | 1    | 0.000563   | 0.000051  | 0.460       |
+| 96  | 8       | 5    | 0.000790   | 0.000103  | 0.645       |
+| 96  | 8       | 10   | 0.000979   | 0.000265  | 0.800       |
+| 256 | 1       | full | 0.017775   | 0.000988  | 1           |
+| 256 | 1       | 1    | 0.007062   | 0.000049  | 0.397       |
+| 256 | 1       | 5    | 0.007529   | 0.000130  | 0.424       |
+| 256 | 1       | 10   | 0.008181   | 0.001242  | 0.460       |
+| 256 | 8       | full | 0.013605   | 0.003305  | 1           |
+| 256 | 8       | 1    | 0.007269   | 0.000526  | 0.534       |
+| 256 | 8       | 5    | 0.008465   | 0.001426  | 0.622       |
+| 256 | 8       | 10   | 0.008821   | 0.002062  | 0.648       |
+| 600 | 1       | full | 0.139606   | 0.008558  | 1           |
+| 600 | 1       | 1    | 0.048039   | 0.003050  | 0.344       |
+| 600 | 1       | 5    | 0.048544   | 0.002881  | 0.348       |
+| 600 | 1       | 10   | 0.050255   | 0.000823  | 0.360       |
+| 600 | 8       | full | 0.075537   | 0.011877  | 1           |
+| 600 | 8       | 1    | 0.064332   | 0.025875  | 0.852       |
+| 600 | 8       | 5    | 0.048600   | 0.003179  | 0.643       |
+| 600 | 8       | 10   | 0.050248   | 0.006550  | 0.665       |
 
 * Compiled crates
 

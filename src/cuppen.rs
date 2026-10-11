@@ -470,30 +470,14 @@ fn secular_root(delta: *const f64, z2: *const f64, n: usize, rho: f64, i: usize)
 /// `1/ρ + Σ z² / ((δ - shift) - μ)`, same sign as `1 + ρ Σ z²/(δ-λ)`
 /// when `ρ > 0`. Subtracting `shift` before `μ` keeps a near-pole root.
 fn secular_shifted(delta: &[f64], z2: &[f64], rho: f64, shift: f64, mu: f64) -> f64 {
-    let mut sum = 1.0 / rho;
-    for i in 0..delta.len() {
-        let diff = (delta[i] - shift) - mu;
-        if diff == 0.0 {
-            return f64::NEG_INFINITY;
-        }
-        sum += z2[i] / diff;
-    }
-    sum
+    // The vector path adds the quotients in index order, the same chain
+    // as the scalar loop. A zero pole returns the same infinity.
+    crate::simd_gemm::sum_div_ordered(1.0 / rho, delta, z2, shift, mu).unwrap_or(f64::NEG_INFINITY)
 }
 
 fn secular_shifted_deriv(delta: &[f64], z2: &[f64], rho: f64, shift: f64, mu: f64) -> (f64, f64) {
-    let mut sum = 1.0 / rho;
-    let mut deriv = 0.0;
-    for i in 0..delta.len() {
-        let diff = (delta[i] - shift) - mu;
-        if diff == 0.0 {
-            return (f64::NEG_INFINITY, f64::INFINITY);
-        }
-        let term = z2[i] / diff;
-        sum += term;
-        deriv += term / diff;
-    }
-    (sum, deriv)
+    crate::simd_gemm::sum_div_deriv_ordered(1.0 / rho, delta, z2, shift, mu)
+        .unwrap_or((f64::NEG_INFINITY, f64::INFINITY))
 }
 
 fn lowener_signed(delta: &[f64], lambda: &[ShiftedRoot], rho: f64, z: &[f64]) -> Vec<f64> {

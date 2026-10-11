@@ -9,6 +9,8 @@
 //! Several sweeps stay in flight: a sweep runs its next kernel only
 //! after every earlier sweep's columns lie strictly to its right, the
 //! dependency from that paper, so one wave touches disjoint columns.
+//! Inside that wave each sweep may take several further steps, and only
+//! while the predicted windows stay disjoint.
 //! The tridiagonal eigenproblem is Cuppen's divide-and-conquer
 //! (J. J. M. Cuppen, *Numer. Math.* 36 (1980) 177-195,
 //! <https://doi.org/10.1007/BF01396757>) as carried out by Gu and
@@ -34,6 +36,10 @@ const NB: usize = 64;
 /// Half-bandwidth stored during the bulge chase. The chase fill stays
 /// inside `2 * NB - 1` subdiagonals; one extra diagonal is margin.
 const CHASE_KD: usize = NB * 2;
+
+/// Steps one chase task may run before the scheduler joins the wave.
+/// The count is fixed. It does not read the pool.
+const CHASE_BATCH: usize = 8;
 
 /// Seconds in the band reduction, the bulge chase, the tridiagonal
 /// eigensolve, and the back-transformation.
@@ -273,6 +279,11 @@ fn dense_to_band(matrix: &mut [f64], n: usize) -> Vec<WyPanel> {
     if n <= NB {
         return panels;
     }
+    let mut panel_buf = Vec::new();
+    let mut trailing = Vec::new();
+    let mut s2 = Vec::new();
+    let mut w = Vec::new();
+    let mut s1 = Vec::new();
     let mut i = 0;
     while i + NB < n {
         let pn = n - (i + NB);
@@ -280,20 +291,23 @@ fn dense_to_band(matrix: &mut [f64], n: usize) -> Vec<WyPanel> {
         if pn == 0 || pk == 0 {
             break;
         }
-        let mut panel = vec![0.0; pn * NB];
+        grow_buf(&mut panel_buf, pn * NB);
+        let panel = &mut panel_buf[..pn * NB];
         for c in 0..NB {
             let src = (i + c) * n + (i + NB);
             panel[c * pn..(c + 1) * pn].copy_from_slice(&matrix[src..src + pn]);
         }
-        let (v, tau, r_panel) = qr_panel(&panel, pn, NB);
-        let mut trailing = vec![0.0; pn * pn];
+        let (v, tau, r_panel) = qr_panel(panel, pn, NB);
+        grow_buf(&mut trailing, pn * pn);
+        let trailing = &mut trailing[..pn * pn];
         for c in 0..pn {
             let src = (i + NB + c) * n + (i + NB);
             trailing[c * pn..(c + 1) * pn].copy_from_slice(&matrix[src..src + pn]);
         }
         let mut t_factor = vec![0.0; pk * pk];
         dlarft(&v, pn, &tau, &mut t_factor);
-        let mut s2 = vec![0.0; pn * pk];
+        grow_buf(&mut s2, pn * pk);
+        let s2 = &mut s2[..pn * pk];
         tile_gemm(
             pn,
             pk,
@@ -310,9 +324,11 @@ fn dense_to_band(matrix: &mut [f64], n: usize) -> Vec<WyPanel> {
             1,
             pn as isize,
         );
-        let mut w = vec![0.0; pn * pk];
-        gemm_row_tiles(&trailing, pn, &s2, pk, &mut w);
-        let mut s1 = vec![0.0; pk * pk];
+        grow_buf(&mut w, pn * pk);
+        let w = &mut w[..pn * pk];
+        gemm_row_tiles(trailing, pn, s2, pk, w);
+        grow_buf(&mut s1, pk * pk);
+        let s1 = &mut s1[..pk * pk];
         tile_gemm(
             pk,
             pk,
@@ -345,7 +361,7 @@ fn dense_to_band(matrix: &mut [f64], n: usize) -> Vec<WyPanel> {
             1,
             pn as isize,
         );
-        syr2k_tiles(&mut trailing, pn, &v, &w, pk);
+        syr2k_tiles(trailing, pn, &v, w, pk);
         for c in 0..pn {
             let dst = (i + NB + c) * n + (i + NB);
             matrix[dst..dst + pn].copy_from_slice(&trailing[c * pn..(c + 1) * pn]);
@@ -475,7 +491,7 @@ fn band_to_tridiagonal(matrix: &mut [f64], n: usize, refs: &mut Vec<Reflector>) 
     let mut scratch_pool = Vec::new();
     let mut column_pool = Vec::new();
     let mut jobs: Vec<ChaseJob> = Vec::new();
-    let mut outs: Vec<Option<ChaseOut>> = Vec::new();
+    let mut outs: Vec<ChaseBatch> = Vec::new();
     loop {
         active.retain(|&index| {
             let sweep = &mut sweeps[index];
@@ -522,11 +538,13 @@ fn band_to_tridiagonal(matrix: &mut [f64], n: usize, refs: &mut Vec<Reflector>) 
             }
         }
         debug_assert!(!wave.is_empty());
+        let batches = batch_lengths(n, &sweeps, &wave);
         jobs.clear();
-        for &index in &wave {
+        for (slot, &index) in wave.iter().enumerate() {
             jobs.push(ChaseJob {
                 k: sweeps[index].k,
                 stage: sweeps[index].stage,
+                steps: batches[slot],
             });
         }
         let slots = jobs.len();
@@ -536,24 +554,21 @@ fn band_to_tridiagonal(matrix: &mut [f64], n: usize, refs: &mut Vec<Reflector>) 
         if column_pool.len() < slots * n {
             column_pool.resize(slots * n, 0.0);
         }
-        outs.clear();
-        outs.resize_with(slots, || None);
+        if outs.len() < slots {
+            outs.resize_with(slots, ChaseBatch::new);
+        }
         run_chase_wave(
             view,
             &jobs,
             &mut scratch_pool[..slots * scratch_len],
             &mut column_pool[..slots * n],
-            &mut outs,
+            &mut outs[..slots],
         );
         for (slot, &index) in wave.iter().enumerate() {
-            let out = outs[slot].take().expect("chase kernel wrote a result");
-            if let Some(reflector) = out.reflector {
-                sweeps[index].pending.push(reflector);
-            }
-            if matches!(sweeps[index].stage, ChaseStage::Chase(_)) {
-                sweeps[index].steps += 1;
-            }
-            sweeps[index].stage = out.next;
+            let batch = &mut outs[slot];
+            sweeps[index].pending.append(&mut batch.reflectors);
+            sweeps[index].steps += batch.chase_steps;
+            sweeps[index].stage = batch.next;
         }
         active.retain(|&index| !matches!(sweeps[index].stage, ChaseStage::Done));
         flush_chase(&mut sweeps, &mut flushed, refs);
@@ -583,14 +598,31 @@ struct ChaseOut {
     next: ChaseStage,
 }
 
+struct ChaseBatch {
+    reflectors: Vec<Reflector>,
+    chase_steps: usize,
+    next: ChaseStage,
+}
+
+impl ChaseBatch {
+    fn new() -> Self {
+        Self {
+            reflectors: Vec::new(),
+            chase_steps: 0,
+            next: ChaseStage::Done,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct ChaseJob {
     k: usize,
     stage: ChaseStage,
+    steps: u8,
 }
 
 #[derive(Clone, Copy)]
-struct ChaseSlots(*mut Option<ChaseOut>);
+struct ChaseSlots(*mut ChaseBatch);
 // SAFETY: each task writes its own slot. The slots partition the
 // outcome buffer, and the buffer outlives the wave.
 unsafe impl Send for ChaseSlots {}
@@ -598,11 +630,9 @@ unsafe impl Send for ChaseSlots {}
 unsafe impl Sync for ChaseSlots {}
 
 impl ChaseSlots {
-    fn write(self, index: usize, value: ChaseOut) {
+    fn batch(self, index: usize) -> *mut ChaseBatch {
         // SAFETY: `index` is this task's slot.
-        unsafe {
-            *self.0.add(index) = Some(value);
-        }
+        unsafe { self.0.add(index) }
     }
 }
 
@@ -678,6 +708,102 @@ fn touch_window(n: usize, col: usize, row0: usize, len_max: usize) -> (usize, us
     (lo, hi)
 }
 
+fn ranges_overlap(left: (usize, usize), right: (usize, usize)) -> bool {
+    left.0 < right.1 && right.0 < left.1
+}
+
+/// Next stage if the bulge is still present. An early exit in the
+/// kernel reserves columns it then does not write.
+fn predicted_next(n: usize, k: usize, stage: ChaseStage) -> ChaseStage {
+    match stage {
+        ChaseStage::Done => ChaseStage::Done,
+        ChaseStage::Annihilate => {
+            let col = k + 1;
+            if col + 2 < n {
+                ChaseStage::Chase(col)
+            } else {
+                ChaseStage::Done
+            }
+        }
+        ChaseStage::Chase(col) => {
+            let next_col = col + NB;
+            if next_col + 2 < n {
+                ChaseStage::Chase(next_col)
+            } else {
+                ChaseStage::Done
+            }
+        }
+    }
+}
+
+/// How many steps each sweep in this wave can take without entering
+/// another sweep's reserved columns.
+fn batch_lengths(n: usize, sweeps: &[ChaseSweep], wave: &[usize]) -> Vec<u8> {
+    let mut reserves: Vec<(usize, usize)> = wave
+        .iter()
+        .map(|&index| stage_window(n, sweeps[index].k, sweeps[index].stage).expect("wave window"))
+        .collect();
+    let mut batches = vec![1u8; wave.len()];
+    for _ in 1..CHASE_BATCH {
+        let mut grew = false;
+        for slot in 0..wave.len() {
+            if batches[slot] as usize >= CHASE_BATCH {
+                continue;
+            }
+            let index = wave[slot];
+            let mut stage = sweeps[index].stage;
+            for _ in 0..batches[slot] {
+                stage = predicted_next(n, sweeps[index].k, stage);
+            }
+            let Some(win) = stage_window(n, sweeps[index].k, stage) else {
+                continue;
+            };
+            let hits = reserves
+                .iter()
+                .enumerate()
+                .any(|(other, reserved)| other != slot && ranges_overlap(win, *reserved));
+            if hits {
+                continue;
+            }
+            reserves[slot].0 = reserves[slot].0.min(win.0);
+            reserves[slot].1 = reserves[slot].1.max(win.1);
+            batches[slot] = batches[slot].saturating_add(1);
+            grew = true;
+        }
+        if !grew {
+            break;
+        }
+    }
+    batches
+}
+
+fn run_batch(
+    band: BandPtr,
+    k: usize,
+    mut stage: ChaseStage,
+    steps: u8,
+    scratch: &mut [f64],
+    column: &mut [f64],
+    into: &mut ChaseBatch,
+) {
+    into.reflectors.clear();
+    into.chase_steps = 0;
+    for _ in 0..steps {
+        if matches!(stage, ChaseStage::Done) {
+            break;
+        }
+        let out = chase_job(band, k, stage, scratch, column);
+        if let Some(reflector) = out.reflector {
+            into.reflectors.push(reflector);
+        }
+        if matches!(stage, ChaseStage::Chase(_)) {
+            into.chase_steps += 1;
+        }
+        stage = out.next;
+    }
+    into.next = stage;
+}
+
 fn flush_chase(sweeps: &mut [ChaseSweep], flushed: &mut usize, refs: &mut Vec<Reflector>) {
     while *flushed < sweeps.len() && matches!(sweeps[*flushed].stage, ChaseStage::Done) {
         refs.append(&mut sweeps[*flushed].pending);
@@ -690,14 +816,26 @@ fn run_chase_wave(
     jobs: &[ChaseJob],
     scratch_pool: &mut [f64],
     column_pool: &mut [f64],
-    outs: &mut [Option<ChaseOut>],
+    outs: &mut [ChaseBatch],
 ) {
     let n = band.n;
     let scratch_len = n.saturating_mul(2);
-    if jobs.len() == 1 {
-        let scratch = &mut scratch_pool[..scratch_len];
-        let column = &mut column_pool[..n];
-        outs[0] = Some(chase_job(band, jobs[0].k, jobs[0].stage, scratch, column));
+    // A wave of one to three sweeps is a few microseconds of band
+    // updates. Joining the pool there costs more than the kernel.
+    if jobs.len() < 4 {
+        for (task, job) in jobs.iter().enumerate() {
+            let scratch = &mut scratch_pool[task * scratch_len..(task + 1) * scratch_len];
+            let column = &mut column_pool[task * n..(task + 1) * n];
+            run_batch(
+                band,
+                job.k,
+                job.stage,
+                job.steps,
+                scratch,
+                column,
+                &mut outs[task],
+            );
+        }
         return;
     }
     let slots = ChaseSlots(outs.as_mut_ptr());
@@ -708,14 +846,15 @@ fn run_chase_wave(
     let job_ptr = JobPtr(jobs.as_ptr());
     // SAFETY: task `t` writes outcome slot `t` and its own scratch and
     // column strides. The scheduler put disjoint band-column windows
-    // in this wave, so the band writes do not alias.
+    // in this wave, including every batched step, so the band writes
+    // do not alias.
     for_tiles(jobs.len(), move |task| {
         let job = job_ptr.get(task);
         let scratch =
             unsafe { std::slice::from_raw_parts_mut(pool.scratch(task, scratch_len), scratch_len) };
         let column = unsafe { std::slice::from_raw_parts_mut(pool.column(task, n), n) };
-        let out = chase_job(band, job.k, job.stage, scratch, column);
-        slots.write(task, out);
+        let batch = unsafe { &mut *slots.batch(task) };
+        run_batch(band, job.k, job.stage, job.steps, scratch, column, batch);
     });
 }
 
@@ -825,6 +964,15 @@ fn zero_column_tail(
 fn apply_sym_householder(band: BandPtr, start: usize, v: &[f64], tau: f64, scratch: &mut [f64]) {
     #[cfg(target_arch = "x86_64")]
     {
+        if simd_gemm::bulge_uses_avx512() {
+            // SAFETY: `bulge_uses_avx512` is true only when the CPU has
+            // AVX-512. The kernel writes the same window as the scalar
+            // update, one column at a time.
+            unsafe {
+                apply_sym_householder_avx512(band, start, v, tau, scratch);
+            }
+            return;
+        }
         if simd_gemm::bulge_uses_avx2() {
             // SAFETY: `bulge_uses_avx2` is true only when the CPU has
             // AVX2. The kernel writes the same window as the scalar
@@ -955,9 +1103,7 @@ fn householder_window(
         let (base, off, count) = band_span(band, col, lo, m);
         // SAFETY: `band_span` returns a range inside column `col`.
         let column = unsafe { std::slice::from_raw_parts(band.data.add(base), count) };
-        for (slot, &ai) in y[off..off + count].iter_mut().zip(column) {
-            *slot += ai * vj;
-        }
+        simd_gemm::axpy_add(&mut y[off..off + count], column, vj);
     }
     Some((lo, m, v_at))
 }
@@ -972,6 +1118,82 @@ fn band_span(band: BandPtr, col: usize, lo: usize, m: usize) -> (usize, usize, u
     }
     let base = col * band.ld + (row0 + band.kd - col);
     (base, row0 - lo, row1 - row0)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn apply_sym_householder_avx512(
+    band: BandPtr,
+    start: usize,
+    v: &[f64],
+    tau: f64,
+    scratch: &mut [f64],
+) {
+    unsafe {
+        let Some((lo, m, v_at)) = householder_window(band, start, v, tau, scratch) else {
+            return;
+        };
+        let n = band.n;
+        let (y, vwin) = scratch.split_at_mut(n);
+        let y = &mut y[..m];
+        let vwin = &vwin[..m];
+        let mut vmv = 0.0;
+        for (j, &vj) in v.iter().enumerate() {
+            vmv += vj * y[v_at + j];
+        }
+        let tau2 = tau * tau * vmv;
+        for j in 0..m {
+            let vj = vwin[j];
+            let yj = y[j];
+            if vj == 0.0 && yj == 0.0 {
+                continue;
+            }
+            let scale_v = tau2 * vj - tau * yj;
+            let scale_y = -tau * vj;
+            let col = lo + j;
+            let (base, off, count) = band_span(band, col, lo, m);
+            accumulate_avx512(
+                band.data.add(base),
+                vwin.as_ptr().add(off),
+                y.as_ptr().add(off),
+                count,
+                scale_v,
+                scale_y,
+            );
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn accumulate_avx512(
+    matrix: *mut f64,
+    vwin: *const f64,
+    y: *const f64,
+    count: usize,
+    scale_v: f64,
+    scale_y: f64,
+) {
+    use std::arch::x86_64::{
+        _mm512_add_pd, _mm512_loadu_pd, _mm512_mul_pd, _mm512_set1_pd, _mm512_storeu_pd,
+    };
+    unsafe {
+        let sv = _mm512_set1_pd(scale_v);
+        let sy = _mm512_set1_pd(scale_y);
+        let mut i = 0;
+        while i + 8 <= count {
+            let vi = _mm512_loadu_pd(vwin.add(i));
+            let yi = _mm512_loadu_pd(y.add(i));
+            let acc = _mm512_loadu_pd(matrix.add(i));
+            let prod = _mm512_add_pd(_mm512_mul_pd(vi, sv), _mm512_mul_pd(yi, sy));
+            _mm512_storeu_pd(matrix.add(i), _mm512_add_pd(acc, prod));
+            i += 8;
+        }
+        while i < count {
+            *matrix.add(i) += *vwin.add(i) * scale_v + *y.add(i) * scale_y;
+            i += 1;
+        }
+    }
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -1045,15 +1267,19 @@ fn qr_panel(panel: &[f64], m: usize, k: usize) -> (Vec<f64>, Vec<f64>, Vec<f64>)
         let (reflector, tau_j, beta) = householder(&column);
         tau[j] = tau_j;
         if tau_j != 0.0 && j + 1 < k {
-            for col in j + 1..k {
-                let mut dot = 0.0;
-                for (i, &vi) in reflector.iter().enumerate() {
-                    dot += vi * r[col * m + j + i];
-                }
-                let scale = tau_j * dot;
-                for (i, &vi) in reflector.iter().enumerate() {
-                    r[col * m + j + i] -= scale * vi;
-                }
+            // Each remaining column is an independent dot and axpy, in
+            // the same index order as the scalar reflector.
+            // SAFETY: columns `j + 1..k` of `r` exist, and the reflector
+            // length is `m - j`, so each column's touched rows stay in `r`.
+            unsafe {
+                simd_gemm::rank1_columns(
+                    r.as_mut_ptr().add((j + 1) * m + j),
+                    m,
+                    k - (j + 1),
+                    reflector.as_ptr(),
+                    reflector.len(),
+                    tau_j,
+                );
             }
         }
         r[j * m + j] = beta;
@@ -1331,6 +1557,28 @@ fn apply_back_transform(
     }
 }
 
+struct WyScratch {
+    vt: Vec<f64>,
+    y: Vec<f64>,
+    z: Vec<f64>,
+}
+
+thread_local! {
+    static WY_SCRATCH: std::cell::RefCell<WyScratch> = const {
+        std::cell::RefCell::new(WyScratch {
+            vt: Vec::new(),
+            y: Vec::new(),
+            z: Vec::new(),
+        })
+    };
+}
+
+fn grow_buf(buf: &mut Vec<f64>, len: usize) {
+    if buf.len() < len {
+        buf.resize(len, 0.0);
+    }
+}
+
 fn apply_wy(q: &mut [f64], n: usize, ncols: usize, panel: &WyPanel) {
     let m = panel.rows;
     let k = panel.cols;
@@ -1341,59 +1589,55 @@ fn apply_wy(q: &mut [f64], n: usize, ncols: usize, panel: &WyPanel) {
         simd_gemm::apply_rank1(q, n, ncols, panel.row, &panel.v[..m], panel.t[0]);
         return;
     }
-    let mut vt = vec![0.0; k * m];
-    for col in 0..k {
-        for row in 0..m {
-            vt[col + row * k] = panel.v[row + col * m];
+    WY_SCRATCH.with(|cell| {
+        let scratch = &mut *cell.borrow_mut();
+        grow_buf(&mut scratch.vt, k * m);
+        grow_buf(&mut scratch.y, k * ncols);
+        grow_buf(&mut scratch.z, k * ncols);
+        for col in 0..k {
+            for row in 0..m {
+                scratch.vt[col + row * k] = panel.v[row + col * m];
+            }
         }
-    }
-    let mut y = vec![0.0; k * ncols];
-    let mut z = vec![0.0; k * ncols];
-    // SAFETY: `vt` is k by m, the row block of `q` is m by `ncols`
-    // with column stride `n`, and `y` is k by `ncols`. The three
-    // products run one after another. Inside each product the column
-    // tiles of the destination are disjoint.
-    unsafe {
-        simd_gemm::gemm_nn(
-            k,
-            ncols,
-            m,
-            1.0,
-            vt.as_ptr(),
-            k,
-            q.as_ptr().add(panel.row),
-            n,
-            0.0,
-            y.as_mut_ptr(),
-            k,
-        );
-        simd_gemm::gemm_nn(
-            k,
-            ncols,
-            k,
-            1.0,
-            panel.t.as_ptr(),
-            k,
-            y.as_ptr(),
-            k,
-            0.0,
-            z.as_mut_ptr(),
-            k,
-        );
-        simd_gemm::gemm_nn(
-            m,
-            ncols,
-            k,
-            -1.0,
-            panel.v.as_ptr(),
-            m,
-            z.as_ptr(),
-            k,
-            1.0,
-            q.as_mut_ptr().add(panel.row),
-            n,
-        );
-    }
+        let vt = scratch.vt.as_ptr();
+        let y = scratch.y.as_mut_ptr();
+        let z = scratch.z.as_mut_ptr();
+        // SAFETY: `vt` is k by m, the row block of `q` is m by `ncols`
+        // with column stride `n`, and `y` is k by `ncols`. The three
+        // products run one after another on this thread. Inside each
+        // product the column tiles of the destination are disjoint.
+        // Workers only read these buffers, which stay allocated for the
+        // duration of the products.
+        unsafe {
+            simd_gemm::gemm_nn(
+                k,
+                ncols,
+                m,
+                1.0,
+                vt,
+                k,
+                q.as_ptr().add(panel.row),
+                n,
+                0.0,
+                y,
+                k,
+            );
+            simd_gemm::gemm_nn(k, ncols, k, 1.0, panel.t.as_ptr(), k, y, k, 0.0, z, k);
+            simd_gemm::gemm_nn(
+                m,
+                ncols,
+                k,
+                -1.0,
+                panel.v.as_ptr(),
+                m,
+                z,
+                k,
+                1.0,
+                q.as_mut_ptr().add(panel.row),
+                n,
+            );
+        }
+    });
 }
 
 fn tridiagonal_full(diag: &[f64], off: &[f64]) -> Result<(Vec<f64>, Vec<f64>), SaddleError> {

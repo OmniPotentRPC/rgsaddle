@@ -1,23 +1,41 @@
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::needless_range_loop)]
 #![allow(clippy::ptr_offset_with_cast)]
+#![allow(clippy::identity_op)]
+#![allow(clippy::erasing_op)]
+#![allow(unused_unsafe)]
 
 //! FMA-free tiled matrix product.
 //!
 //! Each output element accumulates `k` in ascending order as
 //! `acc = acc + a * b`, then `alpha * acc + beta * c`. The multiply
 //! and the add stay separate, so the bits do not depend on a fused
-//! multiply-add. Vector lanes run across output rows and each lane
-//! repeats that scalar sequence. Tile sizes are constants. They do
-//! not read the rayon pool.
+//! multiply-add. A kernel keeps several rows and several columns in
+//! registers. Each of those accumulators repeats the scalar `k` chain.
+//! Tile sizes are constants. They do not read the rayon pool.
 //!
 //! `RGSADDLE_SIMD=scalar|avx2|avx512|neon` selects the kernel for the
 //! next [`refresh_simd`] call. An unset variable uses the widest
 //! supported kernel. AVX-512, AVX2, NEON, and scalar agree on the bits.
 
+use std::cell::RefCell;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use crate::error::SaddleError;
+
+thread_local! {
+    static PACK: RefCell<Vec<f64>> = const { RefCell::new(Vec::new()) };
+}
+
+fn with_pack(len: usize, body: impl FnOnce(&mut [f64])) {
+    PACK.with(|cell| {
+        let mut buf = cell.borrow_mut();
+        if buf.len() < len {
+            buf.resize(len, 0.0);
+        }
+        body(&mut buf[..len]);
+    });
+}
 
 const KIND_UNSET: u8 = 0xFF;
 const KIND_SCALAR: u8 = 0;
@@ -112,8 +130,15 @@ fn current_kind() -> u8 {
 /// Bulge updates use the AVX2 kernel only when that kernel is the
 /// selected path or a wider x86 path. The kernel is a separate
 /// multiply and add, matching the scalar loop element for element.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn bulge_uses_avx2() -> bool {
     matches!(current_kind(), KIND_AVX2 | KIND_AVX512) && host_avx2()
+}
+
+/// Eight-wide bulge update. Selected only on the AVX-512 path.
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn bulge_uses_avx512() -> bool {
+    current_kind() == KIND_AVX512 && host_avx512()
 }
 
 /// Fixed column-task count. A power of two, at most 32, from `n` only.
@@ -141,6 +166,15 @@ pub(crate) fn for_tiles(n_tasks: usize, f: impl Fn(usize) + Send + Sync) {
     }
     #[cfg(feature = "par")]
     {
+        // One thread gains nothing from the pool, and a single task has
+        // no sibling to join. The column ranges stay the fixed partition
+        // of `n`, so either path writes the same bits.
+        if n_tasks == 1 || rayon::current_num_threads() == 1 {
+            for task in 0..n_tasks {
+                f(task);
+            }
+            return;
+        }
         use rayon::prelude::*;
         (0..n_tasks).into_par_iter().for_each(f);
     }
@@ -224,6 +258,9 @@ pub(crate) unsafe fn gemm_nn(
     ldc: usize,
 ) {
     if m == 0 || n == 0 {
+        return;
+    }
+    if k > 0 && alpha != 0.0 && blocked_parallel(m, n, k, alpha, a, lda, b, ldb, beta, c, ldc) {
         return;
     }
     let tasks = column_tasks(n).max(1);
@@ -465,340 +502,7 @@ fn pack_rows(
     }
 }
 
-const PACK_ROWS: usize = 32;
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx512f")]
-unsafe fn store512(
-    slot: *mut f64,
-    acc: std::arch::x86_64::__m512d,
-    alpha: std::arch::x86_64::__m512d,
-    beta_v: std::arch::x86_64::__m512d,
-    beta: f64,
-) {
-    use std::arch::x86_64::{_mm512_add_pd, _mm512_loadu_pd, _mm512_mul_pd, _mm512_storeu_pd};
-    unsafe {
-        let scaled = _mm512_mul_pd(alpha, acc);
-        if beta == 0.0 {
-            _mm512_storeu_pd(slot, scaled);
-        } else {
-            let old = _mm512_loadu_pd(slot);
-            _mm512_storeu_pd(slot, _mm512_add_pd(scaled, _mm512_mul_pd(beta_v, old)));
-        }
-    }
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-unsafe fn store256(
-    slot: *mut f64,
-    acc: std::arch::x86_64::__m256d,
-    alpha: std::arch::x86_64::__m256d,
-    beta_v: std::arch::x86_64::__m256d,
-    beta: f64,
-) {
-    use std::arch::x86_64::{_mm256_add_pd, _mm256_loadu_pd, _mm256_mul_pd, _mm256_storeu_pd};
-    unsafe {
-        let scaled = _mm256_mul_pd(alpha, acc);
-        if beta == 0.0 {
-            _mm256_storeu_pd(slot, scaled);
-        } else {
-            let old = _mm256_loadu_pd(slot);
-            _mm256_storeu_pd(slot, _mm256_add_pd(scaled, _mm256_mul_pd(beta_v, old)));
-        }
-    }
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx512f")]
-unsafe fn gemm_avx512(
-    m: usize,
-    n: usize,
-    k: usize,
-    alpha: f64,
-    a: *const f64,
-    a_col_stride: isize,
-    b: *const f64,
-    b_row_stride: isize,
-    b_col_stride: isize,
-    beta: f64,
-    c: *mut f64,
-    c_col_stride: isize,
-) {
-    use std::arch::x86_64::{
-        _mm512_add_pd, _mm512_loadu_pd, _mm512_mul_pd, _mm512_set1_pd, _mm512_setzero_pd,
-    };
-    unsafe {
-        let mut row0 = 0;
-        while row0 + 8 <= m {
-            let rows = PACK_ROWS.min(m - row0);
-            let rows = rows - rows % 8;
-            let mut packed = vec![0.0; rows * k];
-            pack_rows(a, a_col_stride, row0, rows, k, &mut packed);
-            let alpha_v = _mm512_set1_pd(alpha);
-            let beta_v = _mm512_set1_pd(beta);
-            for col in 0..n {
-                let mut row = 0;
-                // Four independent row groups. Each group still sums k
-                // in ascending order, so the bits match the scalar kernel.
-                while row + 32 <= rows {
-                    let mut acc0 = _mm512_setzero_pd();
-                    let mut acc1 = _mm512_setzero_pd();
-                    let mut acc2 = _mm512_setzero_pd();
-                    let mut acc3 = _mm512_setzero_pd();
-                    for p in 0..k {
-                        let bv = _mm512_set1_pd(
-                            *b.offset(b_row_stride * p as isize + b_col_stride * col as isize),
-                        );
-                        let base = packed.as_ptr().add(p * rows + row);
-                        acc0 = _mm512_add_pd(acc0, _mm512_mul_pd(_mm512_loadu_pd(base), bv));
-                        acc1 = _mm512_add_pd(acc1, _mm512_mul_pd(_mm512_loadu_pd(base.add(8)), bv));
-                        acc2 =
-                            _mm512_add_pd(acc2, _mm512_mul_pd(_mm512_loadu_pd(base.add(16)), bv));
-                        acc3 =
-                            _mm512_add_pd(acc3, _mm512_mul_pd(_mm512_loadu_pd(base.add(24)), bv));
-                    }
-                    let slot = c.offset((row0 + row) as isize + c_col_stride * col as isize);
-                    store512(slot, acc0, alpha_v, beta_v, beta);
-                    store512(slot.add(8), acc1, alpha_v, beta_v, beta);
-                    store512(slot.add(16), acc2, alpha_v, beta_v, beta);
-                    store512(slot.add(24), acc3, alpha_v, beta_v, beta);
-                    row += 32;
-                }
-                while row + 8 <= rows {
-                    let mut acc = _mm512_setzero_pd();
-                    for p in 0..k {
-                        let av = _mm512_loadu_pd(packed.as_ptr().add(p * rows + row));
-                        let bv = _mm512_set1_pd(
-                            *b.offset(b_row_stride * p as isize + b_col_stride * col as isize),
-                        );
-                        acc = _mm512_add_pd(acc, _mm512_mul_pd(av, bv));
-                    }
-                    let slot = c.offset((row0 + row) as isize + c_col_stride * col as isize);
-                    store512(slot, acc, alpha_v, beta_v, beta);
-                    row += 8;
-                }
-            }
-            row0 += rows;
-        }
-        if row0 < m {
-            gemm_scalar(
-                m - row0,
-                n,
-                k,
-                alpha,
-                a.offset(row0 as isize),
-                1,
-                a_col_stride,
-                b,
-                b_row_stride,
-                b_col_stride,
-                beta,
-                c.offset(row0 as isize),
-                1,
-                c_col_stride,
-            );
-        }
-    }
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-unsafe fn gemm_avx2(
-    m: usize,
-    n: usize,
-    k: usize,
-    alpha: f64,
-    a: *const f64,
-    a_col_stride: isize,
-    b: *const f64,
-    b_row_stride: isize,
-    b_col_stride: isize,
-    beta: f64,
-    c: *mut f64,
-    c_col_stride: isize,
-) {
-    use std::arch::x86_64::{
-        _mm256_add_pd, _mm256_loadu_pd, _mm256_mul_pd, _mm256_set1_pd, _mm256_setzero_pd,
-    };
-    unsafe {
-        let mut row0 = 0;
-        while row0 + 4 <= m {
-            let rows = PACK_ROWS.min(m - row0);
-            let rows = rows - rows % 4;
-            let mut packed = vec![0.0; rows * k];
-            pack_rows(a, a_col_stride, row0, rows, k, &mut packed);
-            let alpha_v = _mm256_set1_pd(alpha);
-            let beta_v = _mm256_set1_pd(beta);
-            for col in 0..n {
-                let mut row = 0;
-                while row + 16 <= rows {
-                    let mut acc0 = _mm256_setzero_pd();
-                    let mut acc1 = _mm256_setzero_pd();
-                    let mut acc2 = _mm256_setzero_pd();
-                    let mut acc3 = _mm256_setzero_pd();
-                    for p in 0..k {
-                        let bv = _mm256_set1_pd(
-                            *b.offset(b_row_stride * p as isize + b_col_stride * col as isize),
-                        );
-                        let base = packed.as_ptr().add(p * rows + row);
-                        acc0 = _mm256_add_pd(acc0, _mm256_mul_pd(_mm256_loadu_pd(base), bv));
-                        acc1 = _mm256_add_pd(acc1, _mm256_mul_pd(_mm256_loadu_pd(base.add(4)), bv));
-                        acc2 = _mm256_add_pd(acc2, _mm256_mul_pd(_mm256_loadu_pd(base.add(8)), bv));
-                        acc3 =
-                            _mm256_add_pd(acc3, _mm256_mul_pd(_mm256_loadu_pd(base.add(12)), bv));
-                    }
-                    let slot = c.offset((row0 + row) as isize + c_col_stride * col as isize);
-                    store256(slot, acc0, alpha_v, beta_v, beta);
-                    store256(slot.add(4), acc1, alpha_v, beta_v, beta);
-                    store256(slot.add(8), acc2, alpha_v, beta_v, beta);
-                    store256(slot.add(12), acc3, alpha_v, beta_v, beta);
-                    row += 16;
-                }
-                while row + 4 <= rows {
-                    let mut acc = _mm256_setzero_pd();
-                    for p in 0..k {
-                        let av = _mm256_loadu_pd(packed.as_ptr().add(p * rows + row));
-                        let bv = _mm256_set1_pd(
-                            *b.offset(b_row_stride * p as isize + b_col_stride * col as isize),
-                        );
-                        acc = _mm256_add_pd(acc, _mm256_mul_pd(av, bv));
-                    }
-                    let slot = c.offset((row0 + row) as isize + c_col_stride * col as isize);
-                    store256(slot, acc, alpha_v, beta_v, beta);
-                    row += 4;
-                }
-            }
-            row0 += rows;
-        }
-        if row0 < m {
-            gemm_scalar(
-                m - row0,
-                n,
-                k,
-                alpha,
-                a.offset(row0 as isize),
-                1,
-                a_col_stride,
-                b,
-                b_row_stride,
-                b_col_stride,
-                beta,
-                c.offset(row0 as isize),
-                1,
-                c_col_stride,
-            );
-        }
-    }
-}
-
-#[cfg(target_arch = "aarch64")]
-#[target_feature(enable = "neon")]
-unsafe fn store_neon(
-    slot: *mut f64,
-    acc: std::arch::aarch64::float64x2_t,
-    alpha: std::arch::aarch64::float64x2_t,
-    beta_v: std::arch::aarch64::float64x2_t,
-    beta: f64,
-) {
-    use std::arch::aarch64::{vaddq_f64, vld1q_f64, vmulq_f64, vst1q_f64};
-    unsafe {
-        let scaled = vmulq_f64(alpha, acc);
-        if beta == 0.0 {
-            vst1q_f64(slot, scaled);
-        } else {
-            let old = vld1q_f64(slot);
-            vst1q_f64(slot, vaddq_f64(scaled, vmulq_f64(beta_v, old)));
-        }
-    }
-}
-
-#[cfg(target_arch = "aarch64")]
-#[target_feature(enable = "neon")]
-unsafe fn gemm_neon(
-    m: usize,
-    n: usize,
-    k: usize,
-    alpha: f64,
-    a: *const f64,
-    a_col_stride: isize,
-    b: *const f64,
-    b_row_stride: isize,
-    b_col_stride: isize,
-    beta: f64,
-    c: *mut f64,
-    c_col_stride: isize,
-) {
-    use std::arch::aarch64::{vaddq_f64, vdupq_n_f64, vld1q_f64, vmulq_f64, vst1q_f64};
-    unsafe {
-        let mut row0 = 0;
-        while row0 + 2 <= m {
-            let rows = PACK_ROWS.min(m - row0);
-            let rows = rows - rows % 2;
-            let mut packed = vec![0.0; rows * k];
-            pack_rows(a, a_col_stride, row0, rows, k, &mut packed);
-            let alpha_v = vdupq_n_f64(alpha);
-            let beta_v = vdupq_n_f64(beta);
-            for col in 0..n {
-                let mut row = 0;
-                while row + 8 <= rows {
-                    let mut acc0 = vdupq_n_f64(0.0);
-                    let mut acc1 = vdupq_n_f64(0.0);
-                    let mut acc2 = vdupq_n_f64(0.0);
-                    let mut acc3 = vdupq_n_f64(0.0);
-                    for p in 0..k {
-                        let bv = vdupq_n_f64(
-                            *b.offset(b_row_stride * p as isize + b_col_stride * col as isize),
-                        );
-                        let base = packed.as_ptr().add(p * rows + row);
-                        acc0 = vaddq_f64(acc0, vmulq_f64(vld1q_f64(base), bv));
-                        acc1 = vaddq_f64(acc1, vmulq_f64(vld1q_f64(base.add(2)), bv));
-                        acc2 = vaddq_f64(acc2, vmulq_f64(vld1q_f64(base.add(4)), bv));
-                        acc3 = vaddq_f64(acc3, vmulq_f64(vld1q_f64(base.add(6)), bv));
-                    }
-                    let slot = c.offset((row0 + row) as isize + c_col_stride * col as isize);
-                    store_neon(slot, acc0, alpha_v, beta_v, beta);
-                    store_neon(slot.add(2), acc1, alpha_v, beta_v, beta);
-                    store_neon(slot.add(4), acc2, alpha_v, beta_v, beta);
-                    store_neon(slot.add(6), acc3, alpha_v, beta_v, beta);
-                    row += 8;
-                }
-                while row + 2 <= rows {
-                    let mut acc = vdupq_n_f64(0.0);
-                    for p in 0..k {
-                        let av = vld1q_f64(packed.as_ptr().add(p * rows + row));
-                        let bv = vdupq_n_f64(
-                            *b.offset(b_row_stride * p as isize + b_col_stride * col as isize),
-                        );
-                        acc = vaddq_f64(acc, vmulq_f64(av, bv));
-                    }
-                    let slot = c.offset((row0 + row) as isize + c_col_stride * col as isize);
-                    store_neon(slot, acc, alpha_v, beta_v, beta);
-                    row += 2;
-                }
-            }
-            row0 += rows;
-        }
-        if row0 < m {
-            gemm_scalar(
-                m - row0,
-                n,
-                k,
-                alpha,
-                a.offset(row0 as isize),
-                1,
-                a_col_stride,
-                b,
-                b_row_stride,
-                b_col_stride,
-                beta,
-                c.offset(row0 as isize),
-                1,
-                c_col_stride,
-            );
-        }
-    }
-}
+include!("tile_kernel.rs");
 
 #[cfg(not(target_arch = "x86_64"))]
 unsafe fn gemm_avx512(
@@ -921,7 +625,14 @@ pub(crate) fn apply_rank1(q: &mut [f64], n: usize, ncols: usize, row: usize, v: 
     });
 }
 
-fn rank1_columns(q: *mut f64, ld: usize, ncols: usize, v: *const f64, len: usize, tau: f64) {
+pub(crate) fn rank1_columns(
+    q: *mut f64,
+    ld: usize,
+    ncols: usize,
+    v: *const f64,
+    len: usize,
+    tau: f64,
+) {
     match current_kind() {
         KIND_AVX512 if cfg!(target_arch = "x86_64") => {
             // SAFETY: avx512 was selected only when the CPU has it.
@@ -963,30 +674,57 @@ fn rank1_scalar(q: *mut f64, ld: usize, ncols: usize, v: *const f64, len: usize,
 #[target_feature(enable = "avx512f")]
 unsafe fn rank1_avx512(q: *mut f64, ld: usize, ncols: usize, v: *const f64, len: usize, tau: f64) {
     use std::arch::x86_64::{
-        _mm512_add_pd, _mm512_loadu_pd, _mm512_mul_pd, _mm512_set1_pd, _mm512_setzero_pd,
-        _mm512_storeu_pd,
+        _mm512_add_pd, _mm512_i64gather_pd, _mm512_mul_pd, _mm512_set_epi64, _mm512_set1_pd,
+        _mm512_setzero_pd, _mm512_storeu_pd,
     };
     unsafe {
+        // Lane `t` reads column `t` at this row. The index is in elements
+        // and the scale is the size of `f64`.
+        let idx = _mm512_set_epi64(
+            (7 * ld) as i64,
+            (6 * ld) as i64,
+            (5 * ld) as i64,
+            (4 * ld) as i64,
+            (3 * ld) as i64,
+            (2 * ld) as i64,
+            ld as i64,
+            0,
+        );
         let mut col = 0;
-        while col + 8 <= ncols {
-            let mut dot = _mm512_setzero_pd();
+        while col + 16 <= ncols {
+            let mut dot0 = _mm512_setzero_pd();
+            let mut dot1 = _mm512_setzero_pd();
+            let base0 = q.add(col * ld);
+            let base1 = q.add((col + 8) * ld);
             for i in 0..len {
                 let vv = _mm512_set1_pd(*v.add(i));
-                let mut y = [0.0; 8];
-                for lane in 0..8 {
-                    y[lane] = *q.add((col + lane) * ld + i);
-                }
-                let yv = _mm512_loadu_pd(y.as_ptr());
+                let y0 = _mm512_i64gather_pd(idx, base0.add(i), 8);
+                let y1 = _mm512_i64gather_pd(idx, base1.add(i), 8);
+                dot0 = _mm512_add_pd(dot0, _mm512_mul_pd(vv, y0));
+                dot1 = _mm512_add_pd(dot1, _mm512_mul_pd(vv, y1));
+            }
+            let mut dots = [0.0; 16];
+            _mm512_storeu_pd(dots.as_mut_ptr(), dot0);
+            _mm512_storeu_pd(dots.as_mut_ptr().add(8), dot1);
+            for lane in 0..16 {
+                let scale = tau * dots[lane];
+                axpy_sub_avx512(q.add((col + lane) * ld), v, len, scale);
+            }
+            col += 16;
+        }
+        while col + 8 <= ncols {
+            let mut dot = _mm512_setzero_pd();
+            let base = q.add(col * ld);
+            for i in 0..len {
+                let vv = _mm512_set1_pd(*v.add(i));
+                let yv = _mm512_i64gather_pd(idx, base.add(i), 8);
                 dot = _mm512_add_pd(dot, _mm512_mul_pd(vv, yv));
             }
             let mut dots = [0.0; 8];
             _mm512_storeu_pd(dots.as_mut_ptr(), dot);
             for lane in 0..8 {
                 let scale = tau * dots[lane];
-                for i in 0..len {
-                    let slot = q.add((col + lane) * ld + i);
-                    *slot -= scale * *v.add(i);
-                }
+                axpy_sub_avx512(q.add((col + lane) * ld), v, len, scale);
             }
             col += 8;
         }
@@ -1000,30 +738,25 @@ unsafe fn rank1_avx512(q: *mut f64, ld: usize, ncols: usize, v: *const f64, len:
 #[target_feature(enable = "avx2")]
 unsafe fn rank1_avx2(q: *mut f64, ld: usize, ncols: usize, v: *const f64, len: usize, tau: f64) {
     use std::arch::x86_64::{
-        _mm256_add_pd, _mm256_loadu_pd, _mm256_mul_pd, _mm256_set1_pd, _mm256_setzero_pd,
-        _mm256_storeu_pd,
+        _mm256_add_pd, _mm256_i64gather_pd, _mm256_mul_pd, _mm256_set_epi64x, _mm256_set1_pd,
+        _mm256_setzero_pd, _mm256_storeu_pd,
     };
     unsafe {
+        let idx = _mm256_set_epi64x((3 * ld) as i64, (2 * ld) as i64, ld as i64, 0);
         let mut col = 0;
         while col + 4 <= ncols {
             let mut dot = _mm256_setzero_pd();
+            let base = q.add(col * ld);
             for i in 0..len {
                 let vv = _mm256_set1_pd(*v.add(i));
-                let mut y = [0.0; 4];
-                for lane in 0..4 {
-                    y[lane] = *q.add((col + lane) * ld + i);
-                }
-                let yv = _mm256_loadu_pd(y.as_ptr());
+                let yv = _mm256_i64gather_pd(base.add(i), idx, 8);
                 dot = _mm256_add_pd(dot, _mm256_mul_pd(vv, yv));
             }
             let mut dots = [0.0; 4];
             _mm256_storeu_pd(dots.as_mut_ptr(), dot);
             for lane in 0..4 {
                 let scale = tau * dots[lane];
-                for i in 0..len {
-                    let slot = q.add((col + lane) * ld + i);
-                    *slot -= scale * *v.add(i);
-                }
+                axpy_sub_avx2(q.add((col + lane) * ld), v, len, scale);
             }
             col += 4;
         }
@@ -1053,10 +786,7 @@ unsafe fn rank1_neon(q: *mut f64, ld: usize, ncols: usize, v: *const f64, len: u
             vst1q_f64(dots.as_mut_ptr(), dot);
             for lane in 0..2 {
                 let scale = tau * dots[lane];
-                for i in 0..len {
-                    let slot = q.add((col + lane) * ld + i);
-                    *slot -= scale * *v.add(i);
-                }
+                axpy_sub_neon(q.add((col + lane) * ld), v, len, scale);
             }
             col += 2;
         }
@@ -1103,18 +833,55 @@ mod tests {
     #[test]
     fn vector_kernels_match_the_scalar_product() {
         refresh_simd().unwrap();
-        let (m, n, k) = (13usize, 7, 11);
-        let (a, b, c0) = product(m, n, k, 0x6E77_0001);
-        let mut scalar = c0.clone();
-        tile_gemm_kind(KIND_SCALAR, m, n, k, 0.5, &a, &b, -1.25, &mut scalar);
-        let kinds = supported_kinds();
-        for kind in kinds {
-            let mut out = c0.clone();
-            tile_gemm_kind(kind, m, n, k, 0.5, &a, &b, -1.25, &mut out);
-            for (got, want) in out.iter().zip(&scalar) {
-                assert_eq!(got.to_bits(), want.to_bits(), "kind {kind}");
+        let shapes = [
+            (13usize, 7usize, 11usize),
+            (16, 8, 5),
+            (17, 9, 3),
+            (40, 24, 13),
+            (64, 64, 64),
+        ];
+        for (case, (m, n, k)) in shapes.into_iter().enumerate() {
+            let (a, b, c0) = product(m, n, k, 0x6E77_0001 + case as u64);
+            for &(alpha, beta) in &[(0.5, -1.25), (1.0, 0.0), (-1.0, 1.0)] {
+                let mut scalar = c0.clone();
+                tile_gemm_kind(KIND_SCALAR, m, n, k, alpha, &a, &b, beta, &mut scalar);
+                for kind in supported_kinds() {
+                    let mut out = c0.clone();
+                    tile_gemm_kind(kind, m, n, k, alpha, &a, &b, beta, &mut out);
+                    for (got, want) in out.iter().zip(&scalar) {
+                        assert_eq!(
+                            got.to_bits(),
+                            want.to_bits(),
+                            "kind {kind} m={m} n={n} k={k} alpha={alpha} beta={beta}"
+                        );
+                    }
+                }
             }
         }
+    }
+
+    #[test]
+    fn ordered_div_matches_the_scalar_sum() {
+        refresh_simd().unwrap();
+        let delta = [1.0, 2.5, -0.0, 4.0, 8.0, 9.0, 10.0, 11.0, f64::from_bits(1)];
+        let numer = [0.1, -0.2, 0.3, 0.4, -0.5, 0.6, 0.7, -0.8, 0.9];
+        let got = sum_div_ordered(0.25, &delta, &numer, 1.5, 0.125).unwrap();
+        let mut want = 0.25;
+        for i in 0..delta.len() {
+            want += numer[i] / ((delta[i] - 1.5) - 0.125);
+        }
+        assert_eq!(got.to_bits(), want.to_bits());
+        let (got_sum, got_deriv) = sum_div_deriv_ordered(0.25, &delta, &numer, 1.5, 0.125).unwrap();
+        let mut deriv = 0.0;
+        let mut sum = 0.25;
+        for i in 0..delta.len() {
+            let diff = (delta[i] - 1.5) - 0.125;
+            let term = numer[i] / diff;
+            sum += term;
+            deriv += term / diff;
+        }
+        assert_eq!(got_sum.to_bits(), sum.to_bits());
+        assert_eq!(got_deriv.to_bits(), deriv.to_bits());
     }
 
     fn supported_kinds() -> Vec<u8> {
