@@ -261,7 +261,7 @@ class Point:
             def read(self) -> None:
                 return None
 
-            def step(self) -> None:
+            def step(self) -> None:  # pyright: ignore[reportIncompatibleMethodOverride]
                 search = point._ensure()
                 report = search.step(point._surface)
                 count = len(point.atoms)
