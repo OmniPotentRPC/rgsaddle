@@ -129,14 +129,16 @@ if(MSVC)
 endif()
 
 # py-tsan.yml at bb82209 counts __tsan_func_entry in librust_core_demo.a.
-# The instrumented rgsaddle archive is copied to that name so the check
-# sees this package.
+# Corrosion writes the static archive to the build directory as
+# librgsaddle.a. The rgsaddle CMake target is an interface library, so
+# TARGET_FILE does not apply to it. Copying by path avoids that, and
+# avoids a cycle through the imported rgsaddle-static target.
 if(RGSADDLE_TSAN)
   add_custom_target(rgsaddle_tsan_archive_name ALL
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            $<TARGET_FILE:rgsaddle>
+            "${CMAKE_BINARY_DIR}/librgsaddle.a"
             "${CMAKE_BINARY_DIR}/librust_core_demo.a"
-    DEPENDS rgsaddle
+    DEPENDS cargo-build_rgsaddle
     VERBATIM)
 endif()
 
