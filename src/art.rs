@@ -6,6 +6,10 @@
 //! [`ArtConfig::eigen_threshold`]. It then climbs that mode and relaxes
 //! the force in the perpendicular hyperplane with FIRE.
 //!
+//! After the threshold the climb is the min-mode reflection of Goswami,
+//! Gunde and Jónsson, Front. Chem. (2026),
+//! <https://doi.org/10.3389/fchem.2026.1807063>, where dimer translation
+//! and the climbing image are one Householder reflection (Eqs. 1–9).
 //! The push is the opening of the well in Barkema and Mousseau, Phys.
 //! Rev. Lett. 77 (1996) 4358,
 //! <https://doi.org/10.1103/PhysRevLett.77.4358>, and Malek and Mousseau,
