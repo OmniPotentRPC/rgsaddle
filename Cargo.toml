@@ -26,15 +26,12 @@ par = ["rgmin/par"]
 # that its bits depend on the CPU and the thread count.
 faer-unpinned = ["dep:faer", "dep:dyn-stack", "faer/rayon"]
 highs = ["rgmin/highs"]
-python = ["dep:pyo3"]
 readcon = ["dep:readcon-core"]
 readcon-db = ["readcon", "dep:readcon-db"]
 chemfiles = ["readcon", "readcon-core/chemfiles"]
 
 [dependencies]
 dlpk = { version = "0.1.5", features = ["ndarray"] }
-# Extension wheels select pyo3/extension-module in pyproject.toml.
-pyo3 = { version = "0.26", features = ["abi3-py310"], optional = true }
 readcon-core = { version = "0.14", optional = true }
 readcon-db = { version = "0.1", optional = true }
 # The pinned revision supplies retained evaluations, manifold steps,

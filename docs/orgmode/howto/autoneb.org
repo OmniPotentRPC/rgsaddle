@@ -26,7 +26,7 @@ let report = search.run(&surface)?;
 ~run~ is one shot. A second call is refused. The endpoints never move.
 
 * What the knobs do
-C, C++, and Python reach these fields through the stencil configuration's AutoNEB preset.
+The knobs are the fields of =BandConfig::autoneb=.
 
 | Field                | Default | ASE name             | Role                                                                                     |
 |----------------------+---------+----------------------+------------------------------------------------------------------------------------------|

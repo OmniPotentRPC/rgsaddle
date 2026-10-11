@@ -1,0 +1,47 @@
+#+TITLE: Python package
+#+OPTIONS: toc:nil num:nil
+
+The package is a nanobind extension, =rgsaddle._core=, with a pure Python layer. =import rgsaddle= does not import ASE. Install ASE only when you construct =rgsaddle.ase.SurfaceAdapter=:
+
+#+begin_src sh
+pip install .
+pip install 'rgsaddle[ase]'
+#+end_src
+
+Wheels are cp310, cp311, cp312-abi3 (CPython 3.12 through 3.15 with the GIL), cp314t and cp315t. There is no musllinux wheel and no cp313t wheel.
+
+* Enum controls
+Eight =IntEnum= classes keep the names and values of the previous module: =ForceGate=, =HessUpdate=, =IrcKind=, =MinModeKind=, =EigenDevice=, =ExpandKind=, =CellChart=, =RestrictedKind=. An unknown ordinal raises =ValueError=. =rgsaddle.__version__= is the package version.
+
+#+begin_src python
+import rgsaddle
+assert rgsaddle.ForceGate.MAX_FORCE_ON_ATOM == 2
+assert rgsaddle.ForceGate(2) is rgsaddle.ForceGate.MAX_FORCE_ON_ATOM
+#+end_src
+
+* Status codes
+=raise_status(code)= maps =rgsaddle_status_t=. =RGSADDLE_OK= returns true. =RGSADDLE_SHAPE= and =RGSADDLE_INVALID_PARAMETER= raise =ValueError=. =RGSADDLE_NON_FINITE= raises =NumericalError=, a subclass of =ArithmeticError=. =RGSADDLE_SURFACE_FAILED= raises =RuntimeError=. It does not re-raise a stored calculator exception. Every other code raises =RuntimeError=. The exception message is the thread-local text when that text is non-empty, and the status name otherwise. =raise_status= clears that text. =last_error()= is reserved for the C ABI last-error text. It returns an empty string unless an error text was set. Convergence is not a status code.
+
+* Surface adapter
+=SurfaceAdapter(images, allow_shared_calculator=False)= checks the image list, then evaluates C ABI request rows =(ids, x) -> (energies, gradients)=.
+
+- Image ids are the list positions at construction.
+- =x= has shape =(rows, 3 * n_atoms)=, float64, C contiguous.
+- Positions are written with =set_positions(..., apply_constraint=False)=, so the row stays on the geometry the caller passed.
+- The gradient is minus =Atoms.get_forces()=, which applies constraints the way ASE does.
+- =raw_forces= keeps =get_forces(apply_constraint=False)= for those rows, in request order. The assignment happens while the call still holds the in-use claim.
+- Two images may share one calculator object only when =allow_shared_calculator= is true. The same check runs again at =__call__=, =owners=, and =reentrant=, using =atoms.calc= identity.
+- =owners(ids)= is the calculator identity of each row, as =uint64=. =reentrant(ids)= is =uint8=, 1 when that calculator sets =reentrant= true. A caller uses those arrays to group rows. The adapter does not start threads.
+
+=__call__(ids, x)= evaluates the given rows on the calling thread, in the given order.
+
+A calculator exception, including =KeyboardInterrupt=, propagates out of =__call__=. It is not wrapped. A second call on the same adapter, while the first call still holds it, raises =RuntimeError= with the text =SurfaceAdapter is in use by another thread=.
+
+Band, minimum-mode, IRC, Sella and AutoNEB sessions have no Python names yet.
+
+* Thread safety
+Immutable values, such as the enum members, are shared freely. =SurfaceAdapter= is a mutable session. Each call claims an atomic flag for the whole call and drops it when the call returns, including when the calculator raises. =raw_forces= is assigned before that drop. Do not call the adapter again from inside its own calculator.
+
+The adapter does not start threads. The caller passes request rows and the adapter evaluates them on that caller's thread. A Python exception raised by the calculator propagates on that thread. It does not unwind through the Rust static library. =PyErr_CheckSignals= runs on that thread.
+
+There is no global mutable state. The last-error string is thread-local. Arrays are float64 and C contiguous. Wrong dtype or order is =TypeError=. Wrong shape is =ValueError= that names the argument and both shapes. Outputs are new arrays. =-0.0=, NaN and subnormals pass through. Sub-interpreters are unsupported.
