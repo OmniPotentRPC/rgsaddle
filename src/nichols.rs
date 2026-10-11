@@ -744,11 +744,9 @@ impl Index1Session {
                 surface,
                 self.x.view(),
                 pattern,
-                SparseHessianOpts {
-                    difference: FiniteDifference::Central,
-                    step: self.config.fd_dr,
-                    ..SparseHessianOpts::default()
-                },
+                SparseHessianOpts::default()
+                    .with_difference(FiniteDifference::Central)
+                    .with_step(self.config.fd_dr),
             )?;
             return Ok(recovered.to_dense());
         }

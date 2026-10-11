@@ -9,10 +9,13 @@
 //! Math. 13, 117 (1974), <https://doi.org/10.1093/imamat/13.1.117>).
 //! The blocks are symmetrised as `(H + H^T) / 2`.
 //!
-//! Powell and Toint's symmetric substitution (SIAM J. Numer. Anal. 16,
-//! 1060 (1979), <https://doi.org/10.1137/0716078>) is not used. Star
-//! colouring is not used. The distance-2 rule is the direct partition
-//! in Gebremedhin, Manne, and Pothen, SIAM Rev. 47, 629 (2005),
+//! Powell and Toint, SIAM J. Numer. Anal. 16, 1060 (1979),
+//! <https://doi.org/10.1137/0716078>, cover both the symmetric direct
+//! read and the substitution. This recovery is the direct read.
+//! Star colouring (Coleman and Moré, Math. Program. 28, 243 (1984),
+//! <https://doi.org/10.1007/BF02612334>) is the direct method that uses
+//! symmetry and stays a later option. The distance-2 rule is the direct
+//! partition in Gebremedhin, Manne, and Pothen, SIAM Rev. 47, 629 (2005),
 //! <https://doi.org/10.1137/S0036144504444711>.
 //!
 //! [`sparse_hessian`] packs a block of colours into one
@@ -21,14 +24,14 @@
 //! written back in colour index order. The block holds as many colours
 //! as [`SparseHessianOpts::memory_budget`] can store, and every colour
 //! when the whole problem fits. The budget is not the thread count.
-//! Chunks hold 4 geometries, independent of the thread count.
+//! Each geometry is its own chunk, independent of the thread count.
 //! [`SparseHessian`] implements [`rgmin::ApplyHessian`] and exports the
 //! same matrix through [`SparseHessian::to_dense`]. The matrix is frozen
 //! at the recovery point.
 
 use ndarray::{Array1, Array2, ArrayView1};
 use rgmin::ApplyHessian;
-use rgmin::vecops::{axpy, dot};
+use rgmin::vecops::axpy;
 
 use crate::eigensolve::exact_eigh;
 use crate::error::SaddleError;
@@ -37,12 +40,22 @@ use crate::mic::Cell;
 use crate::minmode::{FiniteDifference, PointSurface};
 
 /// Geometries per parallel chunk. Independent of the rayon thread count.
-const GEOM_CHUNK: usize = 4;
+/// One geometry writes its own energy and gradient slots, so the bits
+/// do not depend on this size.
+const GEOM_CHUNK: usize = 1;
+
+/// Inner-product chunk. Partials are summed in this index order.
+const DOT_CHUNK: usize = 4096;
+
+/// Serial inner product below this length. At this length and above the
+/// reduction is chunked, so a rayon `sum` cannot reorder the addends.
+const DOT_SERIAL_BELOW: usize = 65536;
 
 #[cfg(test)]
 thread_local! {
     static BATCHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static PHASES: std::cell::Cell<Option<PhaseRecord>> = const { std::cell::Cell::new(None) };
+    static RESTARTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -709,11 +722,14 @@ fn greedy_distance2(pattern: &SparsityPattern, order: &[usize]) -> Vec<usize> {
 ///
 /// `step` is the displacement `h`. A central difference truncates as
 /// `O(h^2)`. A gradient known to absolute accuracy `eps_g` adds a
-/// roundoff `O(eps_g / h)`. On a shifted-force Lennard-Jones line and
-/// on the Gupta cluster, the entry error relative to the largest
-/// analytic entry falls by about 100 each time `h` drops by 10, from
-/// `1e-2` through `1e-5`. It is smallest at `1e-6` and rises at `1e-7`.
-/// The default `1e-6` is that measured minimum. An ECnoise estimate of
+/// roundoff `O(eps_g / h)`. Those terms meet near
+/// `(3 eps_g / |g'''|)^(1/3)`. On a shifted-force Lennard-Jones line and
+/// on the Gupta cluster, with noise-free f64 gradients, the entry error
+/// relative to the largest analytic entry falls by about 100 each time
+/// `h` drops by 10, from `1e-2` through `1e-5`, and is smallest at
+/// `1e-6`. At `1e-4` that sweep is `9.05e-7` for Lennard-Jones and
+/// `8.13e-8` for Gupta. The default `1e-4` matches
+/// [`crate::nichols::Index1Config`]'s `fd_dr`. An ECnoise estimate of
 /// `h` plugs in through the same field.
 ///
 /// `memory_budget` is the byte cap on one colour block's geometry buffer
@@ -726,6 +742,10 @@ fn greedy_distance2(pattern: &SparsityPattern, order: &[usize]) -> Vec<usize> {
 /// [`SparsityPattern::from_positions`] at
 /// `interaction_range + search_skin()`, where [`Self::search_skin`] is
 /// `max(2 * step, skin)`.
+///
+/// The struct is non-exhaustive. Build it with [`Default`] and the
+/// `with_*` setters.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug)]
 pub struct SparseHessianOpts {
     pub difference: FiniteDifference,
@@ -735,6 +755,30 @@ pub struct SparseHessianOpts {
 }
 
 impl SparseHessianOpts {
+    /// Finite-difference sides.
+    pub fn with_difference(mut self, difference: FiniteDifference) -> Self {
+        self.difference = difference;
+        self
+    }
+
+    /// Displacement `h`. See the struct docs for the truncation and roundoff.
+    pub fn with_step(mut self, step: f64) -> Self {
+        self.step = step;
+        self
+    }
+
+    /// Byte cap on one colour block's geometry and gradient buffers.
+    pub fn with_memory_budget(mut self, memory_budget: usize) -> Self {
+        self.memory_budget = memory_budget;
+        self
+    }
+
+    /// Extra pattern pad, combined with `2 * step` by [`Self::search_skin`].
+    pub fn with_skin(mut self, skin: f64) -> Self {
+        self.skin = skin;
+        self
+    }
+
     /// `max(2 * step, skin)`, the pad added to an interaction range.
     pub fn search_skin(self) -> f64 {
         (2.0 * self.step).max(self.skin)
@@ -745,7 +789,7 @@ impl Default for SparseHessianOpts {
     fn default() -> Self {
         Self {
             difference: FiniteDifference::Central,
-            step: 1e-6,
+            step: 1e-4,
             memory_budget: DEFAULT_MEMORY_BUDGET,
             skin: 0.0,
         }
@@ -761,7 +805,8 @@ impl Default for SparseHessianOpts {
 ///
 /// The matrix is frozen at the geometry where it was recovered.
 /// [`ApplyHessian::apply_hessian`] does not rebuild it. A position or a
-/// vector whose length is not [`Self::dof`] panics.
+/// vector whose length is not [`Self::dof`] panics, including
+/// [`Self::matvec`].
 #[derive(Clone, Debug)]
 pub struct SparseHessian {
     n_atoms: usize,
@@ -834,12 +879,17 @@ impl SparseHessian {
     }
 
     /// `y = H v` in row order. No surface evaluation.
+    ///
+    /// A vector whose length is not [`Self::dof`] panics. The matrix is
+    /// frozen at the recovery point.
     pub fn matvec(&self, v: ArrayView1<f64>) -> Array1<f64> {
         let n = self.dof();
-        let mut y = Array1::zeros(n.max(v.len()));
-        if v.len() != n {
-            return Array1::zeros(v.len());
-        }
+        assert_eq!(
+            v.len(),
+            n,
+            "SparseHessian is frozen at the recovery point and the vector length must match"
+        );
+        let mut y = Array1::zeros(n);
         for i in 0..self.n_atoms {
             for p in self.row_ptr[i]..self.row_ptr[i + 1] {
                 let j = self.col_idx[p];
@@ -876,9 +926,10 @@ impl SparseHessian {
 
     /// Lowest `k` eigenpairs of the recovered matrix.
     ///
-    /// Lanczos uses [`Self::matvec`] only. Inner products and axpy updates
-    /// go through [`rgmin::vecops`], the shared reduction helper. No
-    /// surface evaluation. Eigenvalues ascend. Eigenvectors are columns.
+    /// Lanczos uses [`Self::matvec`] only. Inner products use the
+    /// fixed-order dot in this module. Axpy updates go through
+    /// [`rgmin::vecops`]. No surface evaluation. Eigenvalues ascend.
+    /// Eigenvectors are columns.
     /// Residuals are `||H y - theta y||`. A pair is accepted when that
     /// residual is at most `1e-8` times an estimate of `||H||`.
     /// The iteration cap returns [`SaddleError::Solver`] instead of an
@@ -941,7 +992,7 @@ impl SparseHessian {
         let mut gram = Array2::zeros((nq, nq));
         for a in 0..nq {
             for b in 0..nq {
-                gram[(a, b)] = dot(q.column(a), hq.column(b));
+                gram[(a, b)] = fixed_dot(q.column(a), hq.column(b));
             }
         }
         let mut qm = Array2::zeros((n, nq));
@@ -986,6 +1037,10 @@ impl ApplyHessian for SparseHessian {
 }
 
 /// Lowest eigenpairs of a frozen Hessian, with Lanczos residuals.
+///
+/// Non-exhaustive. Read the fields. A later residual or iteration count
+/// can be added without a new constructor.
+#[non_exhaustive]
 #[derive(Clone, Debug)]
 pub struct LowestEigenpairs {
     pub values: Array1<f64>,
@@ -998,8 +1053,8 @@ pub struct LowestEigenpairs {
 /// Recovery calls this once per colour block. The rows of one block are
 /// the Cartesian probes of several colours and run together. A batch
 /// evaluator can replace the body. With the `par` feature the rows run
-/// in chunks of 4, combined in index order. Without it the same chunks
-/// run in order on the calling thread. The chunk size is not the thread
+/// one geometry at a time, combined in index order. Without it the same
+/// chunks run in order on the calling thread. The chunk size is not the thread
 /// count. Write-back of the blocks is outside this function and follows
 /// colour index order.
 pub fn eval_displacements<S: PointSurface>(
@@ -1122,10 +1177,11 @@ pub fn prefactor_hessian<S: PointSurface>(
     sparse_hessian(surface, x, pattern, opts)
 }
 
-/// One atom at a time, the eOn prefactor displacement.
+/// Per-atom baseline that eOn uses when a potential has no finite cutoff.
 ///
-/// Each atom is its own colour, so columns are not compressed. The
-/// blocks and the symmetrisation match [`sparse_hessian`].
+/// Each atom is its own colour, so columns are not compressed. eOn
+/// colours a finite cutoff itself. The blocks and the symmetrisation
+/// match [`sparse_hessian`].
 pub fn one_atom_hessian<S: PointSurface>(
     surface: &S,
     x: ArrayView1<f64>,
@@ -1474,6 +1530,60 @@ fn symmetrise(
     Ok(())
 }
 
+/// Thread-invariant inner product.
+///
+/// Below [`DOT_SERIAL_BELOW`] the sum is one serial pass. At that length
+/// and above, each [`DOT_CHUNK`] partial is computed on its own and the
+/// partials are added in chunk index order. The bits match at one thread
+/// and at many.
+fn fixed_dot(x: ArrayView1<f64>, y: ArrayView1<f64>) -> f64 {
+    let n = x.len();
+    if n < DOT_SERIAL_BELOW {
+        return serial_dot(x, y);
+    }
+    let mut sum = 0.0;
+    for partial in chunk_partials(x, y) {
+        sum += partial;
+    }
+    sum
+}
+
+fn serial_dot(x: ArrayView1<f64>, y: ArrayView1<f64>) -> f64 {
+    let mut sum = 0.0;
+    for i in 0..x.len() {
+        sum += x[i] * y[i];
+    }
+    sum
+}
+
+fn chunk_partials(x: ArrayView1<f64>, y: ArrayView1<f64>) -> Vec<f64> {
+    let starts: Vec<usize> = (0..x.len()).step_by(DOT_CHUNK).collect();
+    #[cfg(feature = "par")]
+    {
+        use rayon::prelude::*;
+        starts
+            .into_par_iter()
+            .map(|start| chunk_dot(x, y, start))
+            .collect()
+    }
+    #[cfg(not(feature = "par"))]
+    {
+        starts
+            .into_iter()
+            .map(|start| chunk_dot(x, y, start))
+            .collect()
+    }
+}
+
+fn chunk_dot(x: ArrayView1<f64>, y: ArrayView1<f64>, start: usize) -> f64 {
+    let end = (start + DOT_CHUNK).min(x.len());
+    let mut sum = 0.0;
+    for i in start..end {
+        sum += x[i] * y[i];
+    }
+    sum
+}
+
 fn lanczos_lowest(
     apply: impl Fn(ArrayView1<f64>) -> Array1<f64>,
     n: usize,
@@ -1505,7 +1615,7 @@ fn lanczos_full(
         if j + 1 == m {
             break;
         }
-        let beta = dot(w.view(), w.view()).sqrt();
+        let beta = fixed_dot(w.view(), w.view()).sqrt();
         if beta <= 1e-12 * (1.0 + alpha.abs()) {
             match orthogonal_direction(&basis[..=j], n) {
                 Some(next) => basis.push(next),
@@ -1533,14 +1643,14 @@ fn lanczos_full(
         for t_i in 0..m {
             axpy(vecs[(t_i, r)], basis[t_i].view(), &mut y);
         }
-        let norm = dot(y.view(), y.view()).sqrt();
+        let norm = fixed_dot(y.view(), y.view()).sqrt();
         if norm > 0.0 {
             y.mapv_inplace(|a| a / norm);
         }
         let hy = apply(y.view());
         let mut residual = hy;
         axpy(-vals[r], y.view(), &mut residual);
-        residuals[r] = dot(residual.view(), residual.view()).sqrt();
+        residuals[r] = fixed_dot(residual.view(), residual.view()).sqrt();
         for i in 0..n {
             out_vecs[(i, r)] = y[i];
         }
@@ -1557,8 +1667,8 @@ fn lanczos_thick(
     n: usize,
     k: usize,
 ) -> Result<LowestEigenpairs, SaddleError> {
-    let cap = (80 + 40 * k).clamp(k + 16, n);
-    let cycle = (k + 16).clamp(k + 2, 48).min(n);
+    let cap = (400 + 100 * k).clamp(k + 16, n);
+    let cycle = (k + 32).clamp(k + 2, 48).min(n);
     let mut matvecs = 0usize;
     let mut norm_est = 0.0f64;
     let mut locked_y: Vec<Array1<f64>> = Vec::new();
@@ -1579,7 +1689,7 @@ fn lanczos_thick(
             let mut next = vector.clone();
             orthogonalize_against(&mut next, &locked_y);
             orthogonalize_against(&mut next, &basis);
-            let norm = dot(next.view(), next.view()).sqrt();
+            let norm = fixed_dot(next.view(), next.view()).sqrt();
             if norm > 1e-12 {
                 next.mapv_inplace(|value| value / norm);
                 basis.push(next);
@@ -1602,7 +1712,7 @@ fn lanczos_thick(
                 let mut direction = applied[basis.len() - 1].clone();
                 orthogonalize_against(&mut direction, &locked_y);
                 let alpha = reorthogonalise(&mut direction, &basis);
-                let beta = dot(direction.view(), direction.view()).sqrt();
+                let beta = fixed_dot(direction.view(), direction.view()).sqrt();
                 if beta <= 1e-12 * (1.0 + alpha.abs() + norm_est) {
                     match orthogonal_direction_excluding(&basis, &locked_y, n) {
                         Some(next) => basis.push(next),
@@ -1623,7 +1733,7 @@ fn lanczos_thick(
             if image.len() != n {
                 return Err(SaddleError::Shape("Hessian action length changed".into()));
             }
-            norm_est = norm_est.max(dot(image.view(), image.view()).sqrt());
+            norm_est = norm_est.max(fixed_dot(image.view(), image.view()).sqrt());
             applied.push(image);
         }
         let mb = applied.len().min(basis.len());
@@ -1635,7 +1745,7 @@ fn lanczos_thick(
         let mut projected = Array2::zeros((mb, mb));
         for j in 0..mb {
             for i in 0..mb {
-                projected[(i, j)] = dot(basis[i].view(), applied[j].view());
+                projected[(i, j)] = fixed_dot(basis[i].view(), applied[j].view());
             }
         }
         for i in 0..mb {
@@ -1659,18 +1769,18 @@ fn lanczos_thick(
                 axpy(vecs[(i, r)], applied[i].view(), &mut hy);
             }
             orthogonalize_against(&mut y, &locked_y);
-            let norm = dot(y.view(), y.view()).sqrt();
+            let norm = fixed_dot(y.view(), y.view()).sqrt();
             if norm <= 1e-14 {
                 continue;
             }
             y.mapv_inplace(|value| value / norm);
             hy.mapv_inplace(|value| value / norm);
-            let theta = dot(y.view(), hy.view());
+            let theta = fixed_dot(y.view(), hy.view());
             norm_est = norm_est.max(theta.abs());
             let mut residual_vec = hy;
             axpy(-theta, y.view(), &mut residual_vec);
             orthogonalize_against(&mut residual_vec, &locked_y);
-            let residual = dot(residual_vec.view(), residual_vec.view()).sqrt();
+            let residual = fixed_dot(residual_vec.view(), residual_vec.view()).sqrt();
             let scale = norm_est.max(1e-30);
             if residual <= LANCZOS_TOL * scale || spanned {
                 locked_y.push(y);
@@ -1688,6 +1798,8 @@ fn lanczos_thick(
                 "Lanczos iteration cap reached before the residual test".into(),
             ));
         }
+        #[cfg(test)]
+        RESTARTS.with(|count| count.set(count.get() + 1));
         seed = restart;
     }
     let mut order: Vec<usize> = (0..locked_theta.len()).collect();
@@ -1716,7 +1828,7 @@ fn orthogonalize_against(w: &mut Array1<f64>, basis: &[Array1<f64>]) {
     }
     for _pass in 0..2 {
         for q in basis {
-            let coeff = dot(w.view(), q.view());
+            let coeff = fixed_dot(w.view(), q.view());
             axpy(-coeff, q.view(), w);
         }
     }
@@ -1732,7 +1844,7 @@ fn orthogonal_direction_excluding(
         w[seed] = 1.0;
         orthogonalize_against(&mut w, locked);
         orthogonalize_against(&mut w, basis);
-        let norm = dot(w.view(), w.view()).sqrt();
+        let norm = fixed_dot(w.view(), w.view()).sqrt();
         if norm > 1e-12 {
             w.mapv_inplace(|value| value / norm);
             return Some(w);
@@ -1746,7 +1858,7 @@ fn reorthogonalise(w: &mut Array1<f64>, basis: &[Array1<f64>]) -> f64 {
     let mut alpha = 0.0;
     for _pass in 0..2 {
         for (i, q) in basis.iter().enumerate() {
-            let c = dot(w.view(), q.view());
+            let c = fixed_dot(w.view(), q.view());
             if i == last {
                 alpha += c;
             }
@@ -1762,11 +1874,11 @@ fn orthogonal_direction(basis: &[Array1<f64>], n: usize) -> Option<Array1<f64>> 
         w[seed] = 1.0;
         for _pass in 0..2 {
             for q in basis {
-                let c = dot(w.view(), q.view());
+                let c = fixed_dot(w.view(), q.view());
                 axpy(-c, q.view(), &mut w);
             }
         }
-        let norm = dot(w.view(), w.view()).sqrt();
+        let norm = fixed_dot(w.view(), w.view()).sqrt();
         if norm > 1e-12 {
             w.mapv_inplace(|a| a / norm);
             return Some(w);
@@ -1784,7 +1896,7 @@ fn lanczos_start(n: usize) -> Array1<f64> {
         let t = (i as f64) * 0.618_033_988_749_894_9 + 0.125;
         v[i] = t.sin();
     }
-    let scale = dot(v.view(), v.view()).sqrt();
+    let scale = fixed_dot(v.view(), v.view()).sqrt();
     if scale > 0.0 {
         v.mapv_inplace(|a| a / scale);
     } else {
@@ -2131,11 +2243,9 @@ mod tests {
         let pattern = SparsityPattern::from_positions(coords.view(), None, 3.0, 0.0).unwrap();
         assert!(pattern.neighbors(3).is_empty());
         let surface = ShiftedForce::open(1.0, 2.5);
-        let opts = SparseHessianOpts {
-            difference: FiniteDifference::Central,
-            step: 1e-6,
-            ..SparseHessianOpts::default()
-        };
+        let opts = SparseHessianOpts::default()
+            .with_difference(FiniteDifference::Central)
+            .with_step(1e-6);
         let got = sparse_hessian(&surface, coords.view(), &pattern, opts).unwrap();
         assert_eq!(got.evaluations(), surface.calls.load(Ordering::Relaxed));
         assert_eq!(
@@ -2167,11 +2277,9 @@ mod tests {
         let coords = array![0.0, 0.0, 0.0, 1.3, 0.0, 0.0];
         let pattern = SparsityPattern::from_positions(coords.view(), None, 2.0, 0.0).unwrap();
         let surface = ShiftedForce::open(1.0, 2.5);
-        let opts = SparseHessianOpts {
-            difference: FiniteDifference::Forward,
-            step: 1e-5,
-            ..SparseHessianOpts::default()
-        };
+        let opts = SparseHessianOpts::default()
+            .with_difference(FiniteDifference::Forward)
+            .with_step(1e-5);
         let got = sparse_hessian(&surface, coords.view(), &pattern, opts).unwrap();
         assert_eq!(got.evaluations(), got.n_colours() * 3 + 1);
         assert_eq!(got.evaluations(), surface.calls.load(Ordering::Relaxed));
@@ -2188,11 +2296,9 @@ mod tests {
                 &Quadratic,
                 coords.view(),
                 &pattern,
-                SparseHessianOpts {
-                    difference,
-                    step: 1e-4,
-                    ..SparseHessianOpts::default()
-                },
+                SparseHessianOpts::default()
+                    .with_difference(difference)
+                    .with_step(1e-4),
             )
             .unwrap();
             let dense = got.to_dense();
@@ -2252,11 +2358,9 @@ mod tests {
             &DoubleWell,
             x.view(),
             &pattern,
-            SparseHessianOpts {
-                difference: FiniteDifference::Central,
-                step,
-                ..SparseHessianOpts::default()
-            },
+            SparseHessianOpts::default()
+                .with_difference(FiniteDifference::Central)
+                .with_step(step),
         )
         .unwrap();
         let dense = dense_central(&DoubleWell, x.view(), step);
@@ -2282,11 +2386,9 @@ mod tests {
         assert_eq!(pattern.neighbors(0), &[1]);
         let surface = ShiftedForce::open(1.0, 2.5);
         let step = 1e-6;
-        let opts = SparseHessianOpts {
-            difference: FiniteDifference::Central,
-            step,
-            ..SparseHessianOpts::default()
-        };
+        let opts = SparseHessianOpts::default()
+            .with_difference(FiniteDifference::Central)
+            .with_step(step);
         let got = sparse_hessian(&surface, coords.view(), &pattern, opts).unwrap();
         let dense = got.to_dense();
         for i in 0..dense.nrows() {
@@ -2313,11 +2415,9 @@ mod tests {
             &surface,
             coords.view(),
             &pattern,
-            SparseHessianOpts {
-                difference: FiniteDifference::Central,
-                step: 1e-6,
-                ..SparseHessianOpts::default()
-            },
+            SparseHessianOpts::default()
+                .with_difference(FiniteDifference::Central)
+                .with_step(1e-6),
         )
         .unwrap();
         let projected = got.project_excluded(&surface, coords.view()).unwrap();
@@ -2348,11 +2448,9 @@ mod tests {
         let coords = Array1::from(raw);
         let pattern = SparsityPattern::from_positions(coords.view(), None, 2.0, 0.0).unwrap();
         let surface = ShiftedForce::open(1.0, 2.5);
-        let opts = SparseHessianOpts {
-            difference: FiniteDifference::Central,
-            step: 1e-6,
-            ..SparseHessianOpts::default()
-        };
+        let opts = SparseHessianOpts::default()
+            .with_difference(FiniteDifference::Central)
+            .with_step(1e-6);
         let a = sparse_hessian(&surface, coords.view(), &pattern, opts).unwrap();
         let b = sparse_hessian(&surface, coords.view(), &pattern, opts).unwrap();
         assert_eq!(a.blocks(), b.blocks());
@@ -2447,11 +2545,9 @@ mod tests {
         let coords = Array1::from(fcc_open(2, 2, 2, a));
         let cell = Cell::ortho(2.0 * a, 2.0 * a, 2.0 * a).unwrap();
         let cutoff = 2.5;
-        let opts = SparseHessianOpts {
-            difference: FiniteDifference::Central,
-            step: 1e-6,
-            ..SparseHessianOpts::default()
-        };
+        let opts = SparseHessianOpts::default()
+            .with_difference(FiniteDifference::Central)
+            .with_step(1e-6);
         let pattern =
             SparsityPattern::from_positions(coords.view(), Some(&cell), cutoff, opts.search_skin())
                 .unwrap();
@@ -2471,6 +2567,49 @@ mod tests {
 
     #[test]
     #[cfg(feature = "par")]
+    fn eigenpair_hash_on_the_thick_restart_path() {
+        assert_spring_eigenpairs_match(5, 96, 0);
+    }
+
+    #[test]
+    #[cfg(feature = "par")]
+    fn eigenpair_hash_above_the_dot_threshold() {
+        assert_spring_eigenpairs_match(28, 96, 65536);
+    }
+
+    #[cfg(feature = "par")]
+    fn assert_spring_eigenpairs_match(nside: usize, above: usize, at_least: usize) {
+        let (coords, pattern, springs) = cubic_springs(nside);
+        assert!(coords.len() > above, "dof {}", coords.len());
+        assert!(coords.len() >= at_least, "dof {}", coords.len());
+        let opts = SparseHessianOpts::default();
+        let mut hashes = Vec::new();
+        for threads in [1usize, 2, 3, 8] {
+            let hash = with_threads(threads, || {
+                let recovered = sparse_hessian(&springs, coords.view(), &pattern, opts).unwrap();
+                let solved = recovered.lowest_eigenpairs(1).unwrap();
+                let mut words = solved.values.to_vec();
+                words.extend(solved.vectors.iter().copied());
+                words.extend(solved.residuals.iter().copied());
+                let hash = fnv1a(&words);
+                eprintln!(
+                    "spring nside {nside} threads {threads} dof {} hash {hash:016x} theta {} residual {}",
+                    recovered.dof(),
+                    solved.values[0],
+                    solved.residuals[0]
+                );
+                hash
+            });
+            hashes.push(hash);
+        }
+        assert!(
+            hashes.iter().all(|hash| *hash == hashes[0]),
+            "nside {nside} hashes {hashes:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "par")]
     fn colour_block_strong_scaling_on_vacancy_cells() {
         let systems = [
             (14usize, "fcc_vacancy_10975_shifted_force"),
@@ -2482,6 +2621,17 @@ mod tests {
         let mut counts = vec![1usize, 2, 4, 8, max_threads];
         counts.sort_unstable();
         counts.dedup();
+        if let Ok(out) = std::process::Command::new("lscpu").output() {
+            for line in String::from_utf8_lossy(&out.stdout).lines() {
+                if line.starts_with("CPU(s):")
+                    || line.starts_with("Thread(s) per core:")
+                    || line.starts_with("Core(s) per socket:")
+                    || line.starts_with("Socket(s):")
+                {
+                    eprintln!("{line}");
+                }
+            }
+        }
         for (n, name) in systems {
             let (positions, cell) = fcc_vacancy_cell(n);
             let coords = Array1::from(positions);
@@ -2491,6 +2641,10 @@ mod tests {
                 SparsityPattern::from_positions(coords.view(), Some(&cell), rc, opts.search_skin())
                     .unwrap();
             let surface = ShiftedForce::periodic(1.0, rc, cell);
+            let clock = EvalClock {
+                inner: &surface,
+                samples: std::sync::Mutex::new(Vec::new()),
+            };
             let colouring = distance2_colouring(&pattern);
             eprintln!(
                 "{name} atoms {} colours {} dof {}",
@@ -2499,27 +2653,34 @@ mod tests {
                 coords.len()
             );
             let mut samples = vec![Vec::new(); counts.len()];
-            let mut eval_frac = vec![Vec::new(); counts.len()];
-            let mut paint_frac = vec![Vec::new(); counts.len()];
-            let mut write_frac = vec![Vec::new(); counts.len()];
+            let mut eval_times = vec![Vec::new(); counts.len()];
+            let mut surface_walls = vec![Vec::new(); counts.len()];
+            let mut barriers = vec![Vec::new(); counts.len()];
+            let mut paints = vec![Vec::new(); counts.len()];
+            let mut assemblies = vec![Vec::new(); counts.len()];
             let mut hashes = Vec::new();
             for _rep in 0..5 {
                 for (i, &threads) in counts.iter().enumerate() {
-                    let (recovered, phases, wall) = with_threads(threads, || {
+                    let (recovered, phases, wall, evals) = with_threads(threads, || {
+                        clock.samples.lock().unwrap().clear();
                         PHASES.with(|slot| slot.set(Some(PhaseRecord::default())));
                         let started = std::time::Instant::now();
                         let recovered =
-                            recover(&surface, coords.view(), &pattern, colouring.groups(), opts)
+                            recover(&clock, coords.view(), &pattern, colouring.groups(), opts)
                                 .unwrap();
                         let wall = started.elapsed().as_secs_f64();
                         let phases = PHASES.with(|slot| slot.get()).unwrap_or_default();
-                        (recovered, phases, wall)
+                        let evals = std::mem::take(&mut *clock.samples.lock().unwrap());
+                        (recovered, phases, wall, evals)
                     });
                     samples[i].push(wall);
-                    let denom = (phases.eval + phases.paint + phases.write + phases.sym).max(1e-12);
-                    eval_frac[i].push(phases.eval / denom);
-                    paint_frac[i].push(phases.paint / denom);
-                    write_frac[i].push((phases.write + phases.sym) / denom);
+                    let cpu = evals.iter().sum::<f64>();
+                    let surface_wall = cpu / threads as f64;
+                    surface_walls[i].push(surface_wall);
+                    barriers[i].push((phases.eval - surface_wall).max(0.0));
+                    paints[i].push(phases.paint);
+                    assemblies[i].push(phases.write + phases.sym);
+                    eval_times[i].extend(evals);
                     if hashes.len() == i {
                         hashes.push(fnv1a(&csr_words(&recovered)));
                     }
@@ -2535,22 +2696,123 @@ mod tests {
                 let efficiency = t1 / (threads as f64 * med);
                 eprintln!("{threads} {med:.6} {min:.6} {max:.6} {efficiency:.3}");
             }
+            for threads in [1usize, 8] {
+                if let Some(i) = counts.iter().position(|&count| count == threads) {
+                    eprintln!(
+                        "{name} eval_median_s threads {threads} {:.6e}",
+                        median(&eval_times[i])
+                    );
+                }
+            }
             let last = counts.len() - 1;
-            let eval_m = median(&eval_frac[last]);
-            let paint_m = median(&paint_frac[last]);
-            let write_m = median(&write_frac[last]);
-            let limiter = if eval_m >= paint_m && eval_m >= write_m {
-                "surface evaluation"
-            } else if paint_m >= write_m {
-                "memory bandwidth of the geometry copies"
-            } else {
-                "serial assembly"
-            };
+            let parts = [
+                ("surface evaluation", median(&surface_walls[last])),
+                ("batch barrier", median(&barriers[last])),
+                (
+                    "memory bandwidth of the geometry copies",
+                    median(&paints[last]),
+                ),
+                ("serial assembly", median(&assemblies[last])),
+            ];
+            let (limiter, _) = parts
+                .iter()
+                .copied()
+                .max_by(|(_, a), (_, b)| a.total_cmp(b))
+                .unwrap();
             eprintln!(
-                "{name} limiter at {} threads: {limiter} (eval {eval_m:.2}, paint {paint_m:.2}, assembly {write_m:.2})",
-                counts[last]
+                "{name} limiter at {} threads: {limiter} (surface {:.3}, barrier {:.3}, paint {:.3}, assembly {:.3})",
+                counts[last], parts[0].1, parts[1].1, parts[2].1, parts[3].1
             );
         }
+    }
+
+    #[cfg(feature = "par")]
+    struct EvalClock<'a> {
+        inner: &'a ShiftedForce,
+        samples: std::sync::Mutex<Vec<f64>>,
+    }
+
+    #[cfg(feature = "par")]
+    impl PointSurface for EvalClock<'_> {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            let started = std::time::Instant::now();
+            let out = self.inner.eval(x)?;
+            self.samples
+                .lock()
+                .unwrap()
+                .push(started.elapsed().as_secs_f64());
+            Ok(out)
+        }
+    }
+
+    #[cfg(feature = "par")]
+    struct HarmonicSprings {
+        pairs: Vec<(usize, usize)>,
+    }
+
+    #[cfg(feature = "par")]
+    impl PointSurface for HarmonicSprings {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            let n = x.len() / 3;
+            let mut energy = 0.0;
+            let mut gradient = Array1::zeros(x.len());
+            // Atom 0 is a soft pin, softer along x than y or z. The other
+            // atoms share a stiffer pin, so the lowest mode is simple and
+            // split from the bulk. Neighbour springs stay weak.
+            for i in 0..n {
+                for axis in 0..3 {
+                    let weight = if i == 0 {
+                        0.01 * (axis as f64 + 1.0)
+                    } else {
+                        1.0
+                    };
+                    let value = x[3 * i + axis];
+                    energy += 0.5 * weight * value * value;
+                    gradient[3 * i + axis] += weight * value;
+                }
+            }
+            for &(i, j) in &self.pairs {
+                let mut dr = [0.0; 3];
+                for axis in 0..3 {
+                    dr[axis] = x[3 * j + axis] - x[3 * i + axis];
+                }
+                let mut r2 = 0.0;
+                for axis in 0..3 {
+                    r2 += dr[axis] * dr[axis];
+                    gradient[3 * i + axis] -= 0.01 * dr[axis];
+                    gradient[3 * j + axis] += 0.01 * dr[axis];
+                }
+                energy += 0.5 * 0.01 * r2;
+            }
+            Ok((energy, gradient))
+        }
+    }
+
+    #[cfg(feature = "par")]
+    fn cubic_springs(nside: usize) -> (Array1<f64>, SparsityPattern, HarmonicSprings) {
+        let n = nside * nside * nside;
+        let mut positions = Vec::with_capacity(n * 3);
+        let mut pairs = Vec::new();
+        let index = |x: usize, y: usize, z: usize| x + nside * (y + nside * z);
+        for z in 0..nside {
+            for y in 0..nside {
+                for x in 0..nside {
+                    positions.extend_from_slice(&[x as f64, y as f64, z as f64]);
+                    let i = index(x, y, z);
+                    if x + 1 < nside {
+                        pairs.push((i, index(x + 1, y, z)));
+                    }
+                    if y + 1 < nside {
+                        pairs.push((i, index(x, y + 1, z)));
+                    }
+                    if z + 1 < nside {
+                        pairs.push((i, index(x, y, z + 1)));
+                    }
+                }
+            }
+        }
+        let pattern = SparsityPattern::from_adjacency(n, &pairs).unwrap();
+        (Array1::from(positions), pattern, HarmonicSprings { pairs })
     }
 
     fn median(values: &[f64]) -> f64 {
@@ -2648,10 +2910,7 @@ mod tests {
     #[test]
     fn two_memory_budgets_match_and_a_wide_budget_is_one_batch() {
         let coords = Array1::from(line_cluster(6, 1.3));
-        let opts = SparseHessianOpts {
-            step: 1e-6,
-            ..SparseHessianOpts::default()
-        };
+        let opts = SparseHessianOpts::default().with_step(1e-6);
         let pattern =
             SparsityPattern::from_positions(coords.view(), None, 2.5, opts.search_skin()).unwrap();
         assert!(distance2_colouring(&pattern).n_colours() > 1);
@@ -2659,10 +2918,7 @@ mod tests {
         BATCHES.with(|count| count.set(0));
         let wide = sparse_hessian(&surface, coords.view(), &pattern, opts).unwrap();
         let wide_batches = BATCHES.with(|count| count.get());
-        let narrow_opts = SparseHessianOpts {
-            memory_budget: 1,
-            ..opts
-        };
+        let narrow_opts = opts.with_memory_budget(1);
         BATCHES.with(|count| count.set(0));
         let narrow = sparse_hessian(&surface, coords.view(), &pattern, narrow_opts).unwrap();
         let narrow_batches = BATCHES.with(|count| count.get());
@@ -2696,6 +2952,21 @@ mod tests {
         )
         .unwrap();
         let _ = got.apply_hessian(coords.view(), array![1.0].view());
+    }
+
+    #[test]
+    #[should_panic(expected = "frozen at the recovery point and the vector length must match")]
+    fn matvec_panics_when_the_vector_length_does_not_match() {
+        let coords = array![0.0, 0.0, 0.0];
+        let pattern = SparsityPattern::from_adjacency(1, &[]).unwrap();
+        let got = sparse_hessian(
+            &Quadratic,
+            coords.view(),
+            &pattern,
+            SparseHessianOpts::default(),
+        )
+        .unwrap();
+        let _ = got.matvec(array![1.0].view());
     }
 
     #[test]
@@ -2823,10 +3094,7 @@ mod tests {
         let cell = Cell::ortho(1.2, 8.0, 8.0).unwrap();
         let coords = array![0.1, 0.2, 0.3, 0.8, 0.25, 0.3];
         let rc = 2.5;
-        let opts = SparseHessianOpts {
-            step: 1e-6,
-            ..SparseHessianOpts::default()
-        };
+        let opts = SparseHessianOpts::default().with_step(1e-6);
         let pattern =
             SparsityPattern::from_positions(coords.view(), Some(&cell), rc, opts.search_skin())
                 .unwrap();
@@ -2844,10 +3112,7 @@ mod tests {
     #[test]
     fn a_short_pattern_has_a_large_analytic_error() {
         let coords = Array1::from(line_cluster(4, 1.2));
-        let opts = SparseHessianOpts {
-            step: 1e-6,
-            ..SparseHessianOpts::default()
-        };
+        let opts = SparseHessianOpts::default().with_step(1e-6);
         let short =
             SparsityPattern::from_positions(coords.view(), None, 0.5, opts.search_skin()).unwrap();
         assert!(short.neighbors(0).is_empty());
@@ -2856,6 +3121,32 @@ mod tests {
         let analytic = lj_analytic_blocks(coords.view(), None, 1.0, 2.5);
         let err = max_analytic_error(&got, &analytic);
         assert!(err > 0.1, "short pattern error {err}");
+    }
+
+    #[test]
+    fn gupta_pattern_at_rc_has_a_large_analytic_error() {
+        let coords = Array1::from(line_cluster(4, 1.2));
+        let params = GuptaParams::demo();
+        let opts = SparseHessianOpts::default().with_step(1e-6);
+        let surface = Gupta::new(params, None);
+        let analytic = gupta_analytic_blocks(coords.view(), None, params);
+        let narrow =
+            SparsityPattern::from_positions(coords.view(), None, params.rc, opts.search_skin())
+                .unwrap();
+        let narrow_got = sparse_hessian(&surface, coords.view(), &narrow, opts).unwrap();
+        let narrow_err = max_analytic_error(&narrow_got, &analytic);
+        let wide = SparsityPattern::from_positions(
+            coords.view(),
+            None,
+            2.0 * params.rc,
+            opts.search_skin(),
+        )
+        .unwrap();
+        let wide_got = sparse_hessian(&surface, coords.view(), &wide, opts).unwrap();
+        let wide_err = max_analytic_error(&wide_got, &analytic);
+        assert!(narrow_err > 5.0e-2, "gupta rc pattern error {narrow_err}");
+        assert!(wide_err < 1e-5, "gupta 2 rc pattern error {wide_err}");
+        assert!(narrow_err > 1.0e4 * wide_err);
     }
 
     #[test]
@@ -2895,10 +3186,7 @@ mod tests {
                 }
             }
         }
-        let opts = SparseHessianOpts {
-            step: h,
-            ..SparseHessianOpts::default()
-        };
+        let opts = SparseHessianOpts::default().with_step(h);
         let pattern = SparsityPattern::from_positions(
             coords.view(),
             Some(&cell),
@@ -2965,10 +3253,7 @@ mod tests {
         let mut gupta_err = Vec::new();
         eprintln!("h lj_rel gupta_rel");
         for step in steps {
-            let opts = SparseHessianOpts {
-                step,
-                ..SparseHessianOpts::default()
-            };
+            let opts = SparseHessianOpts::default().with_step(step);
             let lj_pattern =
                 SparsityPattern::from_positions(lj_coords.view(), None, 2.5, opts.search_skin())
                     .unwrap();
@@ -3016,7 +3301,7 @@ mod tests {
             gupta_err[5] > gupta_err[4],
             "Gupta roundoff branch {gupta_err:?}"
         );
-        assert!((SparseHessianOpts::default().step - 1e-6).abs() < 1e-15);
+        assert!((SparseHessianOpts::default().step - 1e-4).abs() < 1e-15);
         assert!(lj_err[4] <= lj_err[3] && lj_err[4] <= lj_err[5]);
         assert!(gupta_err[4] <= gupta_err[3] && gupta_err[4] <= gupta_err[5]);
     }
@@ -3047,10 +3332,7 @@ mod tests {
         let coords = Array1::from(raw);
         assert!(coords.len() > 96);
         let rc = 2.5;
-        let opts = SparseHessianOpts {
-            step: 1e-6,
-            ..SparseHessianOpts::default()
-        };
+        let opts = SparseHessianOpts::default().with_step(1e-6);
         let pattern =
             SparsityPattern::from_positions(coords.view(), None, rc, opts.search_skin()).unwrap();
         let surface = ShiftedForce::open(1.0, rc);
@@ -3073,6 +3355,66 @@ mod tests {
             overlap += solved.vectors[(i, 0)] * evecs[(i, 0)];
         }
         assert!(overlap.abs() > 1.0 - 1e-5, "overlap {overlap}");
+    }
+
+    #[test]
+    fn lanczos_on_a_rattled_vacancy_matches_the_dense_spectrum() {
+        if std::env::var("RGSADDLE_HESSIAN_BENCH").ok().as_deref() != Some("1") {
+            eprintln!(
+                "coupled vacancy Lanczos stays behind RGSADDLE_HESSIAN_BENCH because dense Jacobi on 1497 dof scans the full matrix for every rotation"
+            );
+            return;
+        }
+        let (positions, cell) = fcc_vacancy_cell(5);
+        let rattled = rattle(&positions, 1, 0.03);
+        let coords = Array1::from(rattled);
+        let rc = 2.5;
+        let opts = SparseHessianOpts::default().with_step(1e-6);
+        let pattern =
+            SparsityPattern::from_positions(coords.view(), Some(&cell), rc, opts.search_skin())
+                .unwrap();
+        let surface = ShiftedForce::periodic(1.0, rc, cell);
+        let got = sparse_hessian(&surface, coords.view(), &pattern, opts).unwrap();
+        assert_eq!(got.dof(), 1497);
+        let mut solved_pairs = Vec::new();
+        let mut saw_restart = false;
+        for k in [1usize, 4] {
+            RESTARTS.with(|count| count.set(0));
+            let solved = got.lowest_eigenpairs(k).unwrap();
+            let restarts = RESTARTS.with(|count| count.get());
+            saw_restart |= restarts >= 1;
+            eprintln!("vacancy k {k} restarts {restarts}");
+            for mode in 0..k {
+                eprintln!(
+                    "vacancy k {k} mode {mode} theta {} residual {}",
+                    solved.values[mode], solved.residuals[mode]
+                );
+            }
+            solved_pairs.push(solved);
+        }
+        assert!(saw_restart, "thick restart did not run");
+        let (evals, evecs) = exact_eigh(got.to_dense().view()).unwrap();
+        for (k, solved) in [1usize, 4].into_iter().zip(solved_pairs) {
+            for mode in 0..k {
+                let gap = (solved.values[mode] - evals[mode]).abs();
+                let theta = solved.values[mode];
+                let mut projected = 0.0;
+                for column in 0..got.dof() {
+                    if (evals[column] - theta).abs() > 1e-4 {
+                        continue;
+                    }
+                    let mut dot = 0.0;
+                    for row in 0..got.dof() {
+                        dot += solved.vectors[(row, mode)] * evecs[(row, column)];
+                    }
+                    projected += dot * dot;
+                }
+                let overlap = projected.sqrt();
+                eprintln!("vacancy k {k} mode {mode} gap {gap} overlap {overlap}");
+                assert!(gap < 1e-5, "k {k} mode {mode} gap {gap}");
+                assert!(overlap > 1.0 - 1e-4, "k {k} mode {mode} overlap {overlap}");
+            }
+        }
     }
 
     #[derive(Clone, Copy)]
@@ -3451,18 +3793,27 @@ mod tests {
         let mut lines =
             vec!["system,method,seed,converged,iters,calls,energy,fmax,wall_s".to_string()];
         for system in &systems {
+            let sigma = system
+                .lj_sigma
+                .or_else(|| system.gupta.map(|params| params.r0))
+                .unwrap();
             eprintln!(
-                "{} atoms {} rc {} pattern {}",
+                "{} atoms {} rc {} pattern {} rattle {}",
                 system.name,
                 system.positions.len() / 3,
                 system.rc,
-                system.pattern_range
+                system.pattern_range,
+                0.03 * sigma
             );
             let mut cpr_walls: Vec<Vec<f64>> = vec![Vec::new(); rattles];
             let mut atom_walls: Vec<Vec<f64>> = vec![Vec::new(); rattles];
             let mut errors = Vec::new();
             for seed in 0..rattles {
-                let amp = 0.01 * system.rc.min(0.05);
+                let sigma = system
+                    .lj_sigma
+                    .or_else(|| system.gupta.map(|params| params.r0))
+                    .unwrap();
+                let amp = 0.03 * sigma;
                 let rattled = rattle(&system.positions, seed as u64, amp);
                 let x = Array1::from(rattled);
                 let opts = SparseHessianOpts::default();
@@ -3515,8 +3866,11 @@ mod tests {
                     }
                 }
                 errors.push(fmax);
+                // A shifted-force curvature jumps at the cutoff. A rattle
+                // that leaves a pair inside the step makes both recoveries
+                // share that kink, near 1e-4. A missing shell is far larger.
                 assert!(
-                    fmax < 1e-5,
+                    fmax < 1e-3,
                     "{} seed {seed} analytic error {fmax}",
                     system.name
                 );
