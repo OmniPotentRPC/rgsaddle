@@ -2,8 +2,13 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      - "feat/**"
+      - "fix/**"
+      - "ci/**"
   pull_request:
+  workflow_dispatch:
 
 jobs:
   test:

@@ -11,7 +11,12 @@
 | =BandSurface=                  | Host potential on a band (energies + gradients per image)                                                          |
 | =BandReport=                   | =status=, =max_force=, =ci_index=, =iteration=, =surface_rows=                                                     |
 | =MinModeSession=               | Dimer or Lanczos lowest-mode search, same stepping contract; =set_position=, =set_mode=, =estimate_mode= for reuse |
-| =Index1Session=                | Restricted-step partitioned RFO, Powell or Bofill update                                                           |
+| =Index1Session=                | Restricted-step partitioned RFO, Powell or Bofill update. =Index1Config= is non-exhaustive. =with_sparse_pattern= selects a CPR seed |
+| =SparsityPattern=              | Atom-level symmetric CSR from a linkcell cutoff walk. Diagonal blocks are implied and not stored as loops          |
+| =Colouring=                    | Smallest-last distance-2 colouring and the max-degree lower bound                                                  |
+| =SparseHessian=                | Frozen recovered blocks. Implements =ApplyHessian=. =matvec= and =apply_hessian= panic on a length mismatch. =to_dense= and =lowest_eigenpairs= export the matrix. =LowestEigenpairs= is non-exhaustive |
+| =SparseHessianOpts=            | Non-exhaustive. =Default= and =with_difference=, =with_step=, =with_memory_budget=, =with_skin=. Default step 1e-4. The step carries O(h^2), O(eps_g / h), and the optimum near (3 eps_g / \|g'''\|)^(1/3) |
+| =prefactor_hessian=            | Direct CPR seed. =one_atom_hessian= is the per-atom baseline eOn uses when a potential has no finite cutoff        |
 | =nichols_step=                 | i-PI Nichols shift from a supplied spectrum                                                                        |
 | =restricted_prfo_displacement= | Baker restricted-step partitioned RFO from =H= and =g=                                                             |
 | =Cell=                         | 3×3 lattice (rows are vectors), fractional minimum-image wrap                                                      |
