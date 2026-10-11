@@ -184,6 +184,39 @@ def test_keyboard_interrupt() -> None:
         adapter(ids, x)
 
 
+def _fixture_blob() -> bytes:
+    calcs = [LogCalc([], i) for i in range(4)]
+    images = [_atoms(calc, i, 0.0) for i, calc in enumerate(calcs)]
+    adapter = SurfaceAdapter(images)
+    ids = np.array([3, 1, 0, 2], dtype=np.int64)
+    x = np.arange(4 * 6, dtype=np.float64).reshape(4, 6)
+    energies, gradients = adapter(ids, x)
+    assert adapter.raw_forces is not None
+    return energies.tobytes() + gradients.tobytes() + adapter.raw_forces.tobytes()
+
+
+def test_bytes_match_across_threads() -> None:
+    assert hashlib.sha256(_fixture_blob()).hexdigest() == BYTES_SHA256
+    for callers in (1, 2, 8):
+        barrier = threading.Barrier(callers)
+        found: list[str] = []
+        lock = threading.Lock()
+
+        def once() -> None:
+            barrier.wait()
+            digest = hashlib.sha256(_fixture_blob()).hexdigest()
+            with lock:
+                found.append(digest)
+
+        threads = [threading.Thread(target=once) for _ in range(callers)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert found == [BYTES_SHA256] * callers
+
+
+
 def test_claim_covers_raw_forces() -> None:
     calc = LogCalc([], 1)
     adapter = SurfaceAdapter([_atoms(calc, 0)])
