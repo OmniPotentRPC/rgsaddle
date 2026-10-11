@@ -25,6 +25,11 @@ improved), springs (uniform, energy-weighted, Onsager-Machlup),
 projections (plain elastic band, NEB, doubly nudged), and the
 climbing-image force with the eOn trigger rule.
 
+`AutoNeb` grows a short band. It inserts an image where the energy
+gap or the segment length is worst, relaxes a local window, and
+arms the climbing image on the last stage. `LinearInterpolation`
+places that image on the minimum-image segment.
+
 Positions are unwrapped Cartesian. A `Cell` (rows are lattice
 vectors, triclinic allowed) supplies minimum-image differences for the
 band mechanics; neighbor lists, when a surface wants them, are

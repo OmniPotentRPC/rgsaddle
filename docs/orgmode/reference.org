@@ -5,6 +5,8 @@
 | Type                           | Role                                                                                                               |
 |--------------------------------+--------------------------------------------------------------------------------------------------------------------|
 | =BandSession=                  | Outer seam. =new=, =step=, =run=, =restart=, =reset=, =set_positions=, =positions=, =evaluation=                   |
+| =AutoNeb=                      | Insert on the worst gap, relax a local window, climb at the end. =run= is one shot                                 |
+| =ImageInterpolation=           | Path used when an image is inserted. =LinearInterpolation= is the minimum-image segment                            |
 | =BandConfig=                   | Tangent, spring, projection, climbing, cell, tolerances, method                                                    |
 | =BandSurface=                  | Host potential on a band (energies + gradients per image)                                                          |
 | =BandReport=                   | =status=, =max_force=, =ci_index=, =iteration=, =surface_rows=                                                     |
@@ -20,6 +22,7 @@
 
 * Tests that pin the contract
 - =tests/double_well.rs= — band finds the origin saddle, endpoints pinned
+- =tests/autoneb.rs= — AutoNEB on the double well and on Müller-Brown, force calls against a fixed CI-NEB
 - =tests/minmode_saddle.rs= — dimer / Lanczos
 - =tests/nichols_saddle.rs= — Nichols step against i-PI on the same Hessian and gradient, Muller-Brown saddles, quadratic saddle
 - =tests/prfo_saddle.rs= — partitioned RFO against the augmented Hessian, trust sphere changes the mode ratio
