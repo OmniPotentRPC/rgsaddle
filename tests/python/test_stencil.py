@@ -83,9 +83,63 @@ def test_zoom_pack_reports_a_window() -> None:
     assert phase == 1
 
 
-def test_idpp_names_the_missing_piece() -> None:
+def test_idpp_rotation_bond_matches_ase(tmp_path: object) -> None:
+    from pathlib import Path
+
+    from ase import Atoms
+    from ase.mep import NEB
+    from ase.mep.neb import idpp_interpolate
+
+    out = Path(str(tmp_path))
+    images = []
+    for i in range(5):
+        t = i / 4.0
+        images.append(
+            Atoms(
+                "H2",
+                positions=[[0.0, 0.0, 0.0], [1.0 - t, t, 0.0]],
+            )
+        )
+    linear = min(bond(image.positions) for image in images[1:-1])
+    neb = NEB(images, method="improvedtangent")
+    idpp_interpolate(
+        neb,
+        traj=str(out / "idpp.traj"),
+        log=str(out / "idpp.log"),
+        fmax=0.05,
+        mic=False,
+        steps=100,
+    )
+    ase_bond = min(bond(image.positions) for image in images[1:-1])
+    assert ase_bond > linear + 0.15
+
+    band = np.zeros((5, 6), dtype=np.float64)
+    for i in range(5):
+        t = i / 4.0
+        band[i, 3] = 1.0 - t
+        band[i, 4] = t
+    search = Stencil.band(band, preset="idpp", k=0.1, force_tol=1e-6, max_move=0.2)
+
+    def refuse(rows: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        raise AssertionError("idpp must not evaluate the caller surface")
+
+    for _ in range(12):
+        search.step(refuse)
+    got = np.asarray(search.positions(), dtype=np.float64)
+    ours = min(bond(got[i].reshape(2, 3)) for i in range(1, 4))
+    assert ours > linear + 0.15
+    assert abs(float(got[0, 3]) - 1.0) < 1e-12
+    assert abs(float(got[-1, 4]) - 1.0) < 1e-12
+
+
+def bond(positions: np.ndarray) -> float:
+    delta = positions[1] - positions[0]
+    return float(np.sqrt(np.dot(delta, delta)))
+
+
+def test_idpp_needs_atom_triples() -> None:
     images = np.zeros((3, 2), dtype=np.float64)
-    with pytest.raises(ValueError, match="not implemented") as err:
+    with pytest.raises(ValueError, match="groups of three") as err:
         Stencil.band(images, preset="idpp")
     assert "feat/" not in str(err.value)
 

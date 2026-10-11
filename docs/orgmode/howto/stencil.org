@@ -15,7 +15,7 @@ let report = search.step(&surface)?;
 
 ART pushes along the seed until the curvature falls under =art_threshold= (default 0), then climbs with Lanczos. Malek and Mousseau (2000), doi:10.1103/PhysRevE.62.7723. Eigen following builds a central-difference Hessian, calls =exact_eigh=, and makes the largest-magnitude component of the lowest mode positive. =build= rejects =Climb::Reflect= on a minimiser, a window on a point, a zero thread count, and ART without a mode solver.
 
-=Stencil::band= runs NEB, doubly nudged elastic band, CI-NEB, energy-weighted springs, zoom-NEB, and AutoNEB. OCI-NEB, IDPP, and S-IDPP are refused with "not implemented yet". Zoom ends stay fixed unless the builder asks for perpendicular ends. The chain, the mesh (remesh, insert, window), and the point controller share this stencil.
+=Stencil::band= runs NEB, doubly nudged elastic band, CI-NEB, energy-weighted springs, zoom-NEB, AutoNEB, and IDPP. OCI-NEB and S-IDPP are refused with "not implemented yet". Zoom ends stay fixed unless the builder asks for perpendicular ends. The chain, the mesh (remesh, insert, window), and the point controller share this stencil. IDPP follows Smidstrup, Pedersen, Stokbro, and Jónsson, J. Chem. Phys. 140, 214106 (2014), doi:10.1063/1.4878664, and does not evaluate the caller surface.
 
 From C, =rgsaddle_stencil_config_new= takes the preset discriminant. Unknown keys return =RGSADDLE_INVALID_PARAMETER=. =rgsaddle_last_error= is thread-local. =rgsaddle_stencil_run= loops over =rgsaddle_stencil_step=. The report opens with =struct_size=. ABI minor 17 adds the band keys, starting at 11, and the trailing report fields. The older band and min-mode entries stay step-only.
 

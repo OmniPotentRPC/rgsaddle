@@ -215,7 +215,7 @@ static void refuse_bad_keys(void) {
   rgsaddle_stencil_t *handle = rgsaddle_stencil_new(idpp, 3, 2, images);
   expect(handle == NULL, "idpp refused");
   const char *text = rgsaddle_last_error();
-  expect(text != NULL && strstr(text, "not implemented") != NULL, "idpp message");
+  expect(text != NULL && strstr(text, "groups of three") != NULL, "idpp message");
   expect(text != NULL && strstr(text, "feat/") == NULL, "idpp names no branch");
   rgsaddle_stencil_config_free(idpp);
 }

@@ -18,12 +18,12 @@ use crate::stencil::spring_ew::{K_MAX_EV_PER_A2, K_MIN_EV_PER_A2, fill_constants
 
 use super::batch::{IdBook, bind_for_step};
 use super::chain::{Chain, EvalPool};
+use super::idpp::IdppRun;
 use super::triad::{Coupling, TangentRule, coupling_forces, perp, unit_tangent};
 use super::zoom::{ZoomEnds, ZoomParams, ZoomWatch, pack_window, select_window};
 use super::{PHASE_BAND, PHASE_INSERT, PHASE_ZOOM, Preset, StencilReport, StencilStatus, Surface};
 
 const UNSUPPORTED_OCI: &str = "OCI-NEB is not implemented yet";
-const UNSUPPORTED_IDPP: &str = "IDPP initial paths are not implemented yet";
 const UNSUPPORTED_SIDPP: &str = "S-IDPP initial paths are not implemented yet";
 
 #[derive(Clone, Copy)]
@@ -45,6 +45,7 @@ enum Kind {
     Weighted,
     Zoom,
     Auto,
+    Idpp,
 }
 
 struct Inner {
@@ -85,6 +86,7 @@ pub struct BandEngine {
     post_steps: usize,
     auto: Option<AutoNeb>,
     book: Option<Arc<IdBook>>,
+    idpp: Option<IdppRun>,
 }
 
 pub struct BandSpec {
@@ -159,6 +161,17 @@ impl BandEngine {
         let solver_n = free.max(dof);
         let solver = force_solver(spec.method.clone(), solver_n, spec.max_move)?;
         let flat_cache = spec.x.iter().copied().collect();
+        let idpp = if kind == Kind::Idpp {
+            Some(IdppRun::new(
+                spec.x.clone(),
+                spec.k,
+                spec.force_tol,
+                spec.max_move,
+                spec.method.clone(),
+            )?)
+        } else {
+            None
+        };
         let (auto, book) = if kind == Kind::Auto {
             let mut band = band_config(&spec, projection, climb);
             band.autoneb = Some(AutoNebTuning {
@@ -215,6 +228,7 @@ impl BandEngine {
             post_steps: 0,
             auto,
             book,
+            idpp,
         })
     }
 
@@ -269,6 +283,10 @@ impl BandEngine {
     }
 
     pub fn step<S: Surface>(&mut self, surface: &S) -> Result<StencilReport, SaddleError> {
+        if self.idpp.is_some() {
+            let _ = surface;
+            return self.step_idpp();
+        }
         if self.auto.is_some() {
             return self.step_auto(surface);
         }
@@ -309,6 +327,20 @@ impl BandEngine {
         {
             self.zoom_due = true;
         }
+        Ok(report)
+    }
+
+    fn step_idpp(&mut self) -> Result<StencilReport, SaddleError> {
+        let report = self.idpp.as_mut().expect("idpp").step()?;
+        let positions = self.idpp.as_ref().expect("idpp").positions();
+        {
+            let mut inner = self.lock();
+            let ids = inner.chain.ids().to_vec();
+            let next = inner.chain.next_id();
+            inner.chain.replace(positions, ids, next)?;
+        }
+        self.remember_flat();
+        self.iteration = report.iteration;
         Ok(report)
     }
 
@@ -710,8 +742,8 @@ fn kind_of(preset: Preset) -> Result<Kind, SaddleError> {
         Preset::EnergyWeightedNeb => Kind::Weighted,
         Preset::ZoomNeb => Kind::Zoom,
         Preset::AutoNeb => Kind::Auto,
+        Preset::Idpp => Kind::Idpp,
         Preset::OciNeb => return Err(SaddleError::Invalid(UNSUPPORTED_OCI.into())),
-        Preset::Idpp => return Err(SaddleError::Invalid(UNSUPPORTED_IDPP.into())),
         Preset::SIdpp => return Err(SaddleError::Invalid(UNSUPPORTED_SIDPP.into())),
         other => {
             return Err(SaddleError::Invalid(format!(

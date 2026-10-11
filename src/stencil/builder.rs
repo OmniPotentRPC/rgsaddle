@@ -1335,7 +1335,7 @@ mod tests {
             .build()
             .err()
             .expect("build rejects this row");
-        assert!(err.to_string().contains("not implemented"));
+        assert!(err.to_string().contains("groups of three"));
 
         let built = Stencil::band(Array2::zeros((3, 2)))
             .preset(Preset::CiNeb)

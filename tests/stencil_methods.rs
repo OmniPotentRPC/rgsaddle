@@ -60,7 +60,7 @@ fn energy_weighted_constants_match_the_assembly() {
 fn refused_presets_name_the_missing_piece() {
     let band = line(5);
     let idpp = must_err(Stencil::band(band.clone()).preset(Preset::Idpp).build());
-    assert!(idpp.contains("IDPP initial paths are not implemented yet"));
+    assert!(idpp.contains("at least two atoms"));
     let sidpp = must_err(Stencil::band(band.clone()).preset(Preset::SIdpp).build());
     assert!(sidpp.contains("S-IDPP initial paths are not implemented yet"));
     let oci = must_err(Stencil::band(band).preset(Preset::OciNeb).build());

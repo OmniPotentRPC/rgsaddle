@@ -18,7 +18,7 @@ There is no SIMD path, no BLAS, LAPACK, FFT, or GEMM call, and no MPI. Image blo
 |------+---------|
 | =k_min > k_max= | energy-weighted springs need k_min at most k_max |
 | OCI-NEB | OCI-NEB is not implemented yet |
-| IDPP | IDPP initial paths are not implemented yet |
+| one atom, or a length that is not a multiple of three, on IDPP | IDPP coordinates must come in groups of three, or IDPP needs at least two atoms |
 | S-IDPP | S-IDPP initial paths are not implemented yet |
 | a band preset on =Stencil::point= | the preset name, then "is a band preset" |
 | a point preset on =Stencil::band= | the preset name, then "is a point preset" |
@@ -39,5 +39,8 @@ Reports use the maximum absolute component (=ForceGate::LinfNorm=). The field =f
 
 A release timing on this 8-core host (1 thread per core, no SMT) used 18 images, so the fixed-end ceiling is 16 interiors and the free-end ceiling is 18. Each row burned about 1.1 ms and then evaluated the LJ13 potential. Five interleaved repeats of six steps gave, for CI-NEB, median 0.126 s, 0.066 s, 0.035 s, and 0.034 s at 1, 2, 4, and 8 threads (efficiency 1.00, 0.96, 0.90, 0.47). Zoom with fixed ends was the same shape once the pack had fired. Zoom with free ends was slower at one thread (0.137 s) and reached efficiency 0.52 at 8 threads. The serial fraction on that surface stayed near 0.04 until 8 threads, where it rose to about 0.15. Müller-Brown with no added burn was 0.1 ms at one thread and slower with more threads, so the limiter on a cheap surface is pool dispatch. On the slow surface it is the serial tangent, spring, and stepper assembly after the blocks join. The position hashes matched at every thread count.
 
+* IDPP
+IDPP follows Smidstrup, Pedersen, Stokbro, and Jónsson, J. Chem. Phys. 140, 214106 (2014), doi:10.1063/1.4878664. The ideal distance of each atom pair on image =l= is the linear interpolation of the reactant and product distances. The objective is the sum of squared distance errors weighted by the inverse fourth power of the current distance. =preset = idpp= relaxes that objective with the band optimizer and the improved tangent. Endpoints stay fixed. The caller surface is not evaluated. A row must be a multiple of three, with at least two atoms, and the band needs at least three images. The energy and the Cartesian force match the ASE =IDPP= calculator, including both triangles of the pair matrix and the factor of one half. Translation is left in the force.
+
 * What is not implemented
-IDPP initial paths, S-IDPP, and OCI-NEB. The message says what is missing. The tangent-overlap P-RFO hand-off is not wired. The old =rgsaddle_band_*= symbols are unchanged. =SpringKind::EnergyWeighted { k_min, k_max }= is a Rust enum variant. The historical C band spring codes stay 0, 1, and 2. The stencil spring key is 0 for a uniform spring and 1 for the energy-weighted law.
+S-IDPP and OCI-NEB. The message says what is missing. The tangent-overlap P-RFO hand-off is not wired. The old =rgsaddle_band_*= symbols are unchanged. =SpringKind::EnergyWeighted { k_min, k_max }= is a Rust enum variant. The historical C band spring codes stay 0, 1, and 2. The stencil spring key is 0 for a uniform spring and 1 for the energy-weighted law.

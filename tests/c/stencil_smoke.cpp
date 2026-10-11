@@ -52,7 +52,7 @@ int main() {
     return 1;
   }
   const char *text = rgsaddle_last_error();
-  if (text == nullptr || std::string(text).find("not implemented") == std::string::npos ||
+  if (text == nullptr || std::string(text).find("groups of three") == std::string::npos ||
       std::string(text).find("feat/") != std::string::npos) {
     std::fprintf(stderr, "idpp message: %s\n", text == nullptr ? "" : text);
     return 1;

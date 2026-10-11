@@ -1,7 +1,8 @@
 //! Opaque stencil handles.
 //!
-//! Point presets and band presets share these symbols. OCI-NEB, IDPP,
-//! and S-IDPP are named and refused. Every entry catches a panic and
+//! Point presets and band presets share these symbols. IDPP relaxes
+//! the pair-potential path. OCI-NEB and S-IDPP are named and refused.
+//! Every entry catches a panic and
 //! records [`rgsaddle_last_error`].
 
 use std::cell::RefCell;
@@ -1091,7 +1092,7 @@ mod tests {
         assert!(stencil.is_null());
         let text = unsafe { CStr::from_ptr(rgsaddle_last_error()) };
         let message = text.to_string_lossy();
-        assert!(message.contains("not implemented"));
+        assert!(message.contains("groups of three"));
         assert!(!message.contains("feat/"));
         unsafe { rgsaddle_stencil_config_free(idpp) };
 

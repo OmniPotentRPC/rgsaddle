@@ -5,7 +5,7 @@
 | Type                           | Role                                                                                                               |
 |--------------------------------+--------------------------------------------------------------------------------------------------------------------|
 | =BandSession=                  | Outer seam. =new=, =step=, =run=, =restart=, =reset=, =set_positions=, =positions=, =evaluation=                   |
-| =Stencil= / =BandBuilder=     | One step for NEB, DNEB, CI-NEB, energy-weighted springs, zoom-NEB, AutoNEB, and the point presets. IDPP and OCI-NEB return =Invalid=. =ZoomEnds::Fixed= is the default |
+| =Stencil= / =BandBuilder=     | One step for NEB, DNEB, CI-NEB, energy-weighted springs, zoom-NEB, AutoNEB, IDPP, and the point presets. S-IDPP and OCI-NEB return =Invalid=. =ZoomEnds::Fixed= is the default |
 | =SpringKind::EnergyWeighted=   | =k_min= and =k_max=. Flat at =k_min= when =E_max - E_ref < 1e-10=. Rust enum variant. Historical C band spring codes unchanged |
 | =AutoNeb=                      | Insert on the worst gap, relax a local window, and climb. The full band runs only when =full_band= is set. =run= is one shot |
 | =AutoNebTuning=                | =n_simul=, =n_max=, local tolerance and step caps, =space_energy_ratio=, =climb=, =full_band=, =threads=, =record_samples=. Stored on =BandConfig= |

@@ -16,6 +16,7 @@ mod batch;
 mod builder;
 mod chain;
 mod control;
+mod idpp;
 mod surface;
 mod triad;
 

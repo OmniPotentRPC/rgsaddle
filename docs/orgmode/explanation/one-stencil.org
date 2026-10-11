@@ -5,7 +5,7 @@
 
 The dimer translation and the climbing image are one Householder reflection of the true force. Goswami, Gunde, and Jónsson, Front. Chem. (2026), doi:10.3389/fchem.2026.1807063, Eq. 9. The dimer is that reflection on a three-image chain with free ends. Goswami (2026), arXiv:2603.10992, doi:10.48550/arXiv.2603.10992, Eqs. 2.14-2.16.
 
-A preset chooses the sides, the tangent, the coupling, the climb, and the mesh. =Stencil::point= runs a minimiser, the dimer, Lanczos, ART, and eigen following. Dimer and Lanczos construct =MinModeSession=, so those recorded hashes stay the same. =Stencil::band= runs NEB, doubly nudged elastic band, CI-NEB, energy-weighted CI-NEB, zoom-NEB, and AutoNEB on =Chain= and the shared triad. OCI-NEB, IDPP, and S-IDPP are named and return "not implemented yet".
+A preset chooses the sides, the tangent, the coupling, the climb, and the mesh. =Stencil::point= runs a minimiser, the dimer, Lanczos, ART, and eigen following. Dimer and Lanczos construct =MinModeSession=, so those recorded hashes stay the same. =Stencil::band= runs NEB, doubly nudged elastic band, CI-NEB, energy-weighted CI-NEB, zoom-NEB, AutoNEB, and IDPP on =Chain= and the shared triad. IDPP follows Smidstrup, Pedersen, Stokbro, and Jónsson, J. Chem. Phys. 140, 214106 (2014), doi:10.1063/1.4878664. OCI-NEB and S-IDPP are named and return "not implemented yet".
 
 | Preset | Tangent | Climb | Mode |
 |--------+---------+-------+------|
