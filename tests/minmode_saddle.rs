@@ -430,3 +430,48 @@ fn construction_and_replacement_use_the_same_unit_mode() {
         assert_eq!(session.mode(), initial.view());
     }
 }
+
+fn mix_bytes(mut hash: u64, bytes: &[u8]) -> u64 {
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100_0000_01b3);
+    }
+    hash
+}
+
+/// Twenty steps on the double well, hashed the way main's `step` left
+/// the trajectory: status, iteration, evaluations, rotations, curvature,
+/// max force, position, and energy.
+fn trajectory_hash(kind: MinModeKind) -> u64 {
+    let config = MinModeConfig {
+        kind,
+        ..MinModeConfig::default()
+    };
+    let mut session =
+        MinModeSession::new(config, array![0.4, 0.25, -0.2], array![1.0, 0.2, 0.05]).unwrap();
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for _ in 0..20 {
+        let report = session.step(&DoubleWell).unwrap();
+        hash = mix_bytes(hash, &(report.status as u8).to_le_bytes());
+        hash = mix_bytes(hash, &report.iteration.to_le_bytes());
+        hash = mix_bytes(hash, &report.evaluations.to_le_bytes());
+        hash = mix_bytes(hash, &report.rotations.to_le_bytes());
+        hash = mix_bytes(hash, &report.curvature.to_bits().to_le_bytes());
+        hash = mix_bytes(hash, &report.max_force.to_bits().to_le_bytes());
+        for value in session.position().iter() {
+            hash = mix_bytes(hash, &value.to_bits().to_le_bytes());
+        }
+        let energy = session.energy().unwrap_or(f64::NAN);
+        hash = mix_bytes(hash, &energy.to_bits().to_le_bytes());
+    }
+    hash
+}
+
+#[test]
+fn double_well_trajectories_match_main() {
+    // Fingerprint of a 20-step dimer and a 20-step Lanczos run on the
+    // double well, taken from main's `MinModeSession::step` before the
+    // translation was shared.
+    assert_eq!(trajectory_hash(MinModeKind::Dimer), 0xa42d_8b80_5c9e_dff1);
+    assert_eq!(trajectory_hash(MinModeKind::Lanczos), 0x44f0_e629_4cfa_df8c);
+}

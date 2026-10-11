@@ -673,11 +673,8 @@ impl MinModeSession {
     }
 
     /// Energy at the cached centre, when the surface supplied one.
-    pub fn energy(&self) -> f64 {
-        self.centre
-            .as_ref()
-            .and_then(|centre| centre.energy)
-            .unwrap_or(f64::NAN)
+    pub fn energy(&self) -> Option<f64> {
+        self.centre.as_ref().and_then(|centre| centre.energy)
     }
 
     /// Record the energy that belongs to a gradient planted by
@@ -996,8 +993,8 @@ impl MinModeSession {
         })
     }
 
-    /// One min-mode step: refresh the lowest mode, invert the force
-    /// along it, take one solver step.
+    /// One min-mode step: refresh the lowest mode, then
+    /// [`MinModeSession::translate`] on that mode.
     ///
     /// A surface error inside the step returns `Err` with the position
     /// unchanged. The solver's internal state has seen the failed
@@ -1012,7 +1009,7 @@ impl MinModeSession {
         };
         let g0 = self.centre_gradient(&counted)?;
         let previous_mode = self.mode.clone();
-        let (mut curvature, mut rotations) = self.refresh_mode(&counted, g0.view())?;
+        let (curvature, rotations) = self.refresh_mode(&counted, g0.view())?;
         // The solver cached the inverted force at this point under the
         // previous mode; the step must see the current one. The mode's
         // sign is arbitrary, so the angle reads |cos|.
@@ -1024,6 +1021,7 @@ impl MinModeSession {
         }
 
         let max_force = self.force_gate.value(g0.view());
+        let refresh_evals = calls.load(Ordering::Relaxed);
         if converged(max_force, curvature, self.config.force_tol) {
             return Ok(MinModeReport {
                 status: MinModeStatus::Converged,
@@ -1031,141 +1029,14 @@ impl MinModeSession {
                 curvature,
                 rotations,
                 iteration: self.iteration,
-                evaluations: calls.load(Ordering::Relaxed),
+                evaluations: refresh_evals,
             });
         }
 
-        // Henkelman and Jonsson 1999: climb the mode alone while its
-        // curvature is not negative, and reflect the parallel part
-        // once the curvature is negative. The mode estimate for this
-        // step is the one just refreshed; Lanczos and the dimer share it.
-        let tau = self.mode.clone();
-        let translation_curvature = curvature;
-        let kappa = self.kappa.as_ref();
-        let config = &self.config;
-        let error_slot = &self.surface_error;
-        if let Ok(mut slot) = error_slot.lock() {
-            slot.take();
-        }
-        let last: Mutex<Option<PointEval>> = Mutex::new(None);
-        // The solver re-reads the start under the new mode (its cached
-        // force was inverted along the old one); the centre answers it
-        // without a surface call when its energy is known.
-        let start = self.x.clone();
-        let start_energy = self
-            .centre
-            .as_ref()
-            .filter(|c| c.x == start)
-            .and_then(|c| c.energy);
-        let oracle = Oracle::unbounded(self.x.len(), |xv: ArrayView1<f64>| {
-            let answer = match start_energy {
-                Some(e) if xv == start => Ok((e, g0.clone())),
-                _ => counted.eval(xv),
-            };
-            let answer = answer.and_then(|(e, g)| {
-                let eff = if let Some(kappa) = kappa {
-                    let excluded = surface.excluded_modes(xv)?;
-                    let out = kappa_dimer_force(
-                        g.view(),
-                        tau.view(),
-                        excluded.view(),
-                        |v| {
-                            let magnitude = v.dot(&v).sqrt();
-                            if magnitude == 0.0 {
-                                return Ok(Array1::zeros(v.len()));
-                            }
-                            let unit = &v / magnitude;
-                            Ok(counted.action(xv, g.view(), unit.view(), config)? * magnitude)
-                        },
-                        kappa,
-                    )?;
-                    -out.force
-                } else {
-                    translated_gradient(&g, &tau, translation_curvature)
-                };
-                Ok((e, g, eff))
-            });
-            match answer {
-                Ok((e, g, eff)) => {
-                    if let Ok(mut slot) = last.lock() {
-                        *slot = Some(PointEval {
-                            x: xv.to_owned(),
-                            energy: Some(e),
-                            gradient: g,
-                        });
-                    }
-                    (e, eff)
-                }
-                Err(err) => {
-                    if let Ok(mut slot) = error_slot.lock()
-                        && slot.is_none()
-                    {
-                        *slot = Some(err);
-                    }
-                    (f64::INFINITY, Array1::zeros(xv.len()))
-                }
-            }
-        });
-
-        let mut x = self.x.clone();
-        let stepped = self.solver.step(&oracle, &mut x);
-        drop(oracle);
-        // The surface error outranks whatever the solver made of an
-        // infinite energy and a zero gradient. `x` is a local copy;
-        // the session's position stays where it was.
-        if let Some(err) = self.surface_error.lock().ok().and_then(|mut s| s.take()) {
-            return Err(err);
-        }
-        stepped.map_err(|e| SaddleError::Solver(e.to_string()))?;
-        // The oracle's last evaluation is the accepted point for every
-        // stepper that ends on its trial (FIRE, Accept::Step); it is
-        // this report's force and the next step's centre.
-        let at_new = last.into_inner().ok().flatten().filter(|p| p.x == x);
-        let centre = match at_new {
-            Some(p) => p,
-            None => {
-                let (energy, gradient) = counted.eval(x.view())?;
-                PointEval {
-                    x: x.clone(),
-                    energy: Some(energy),
-                    gradient,
-                }
-            }
-        };
-        let max_force = self.force_gate.value(centre.gradient.view());
-        if max_force <= self.config.force_tol && x != self.x {
-            // Force and curvature in a convergence decision describe the
-            // same point. The accepted gradient supplies the centre, so
-            // confirmation pays only for the required Hessian actions.
-            let (mode, accepted_curvature, accepted_rotations) =
-                self.mode_at(&counted, x.view(), centre.gradient.view())?;
-            let turned = self.mode.dot(&mode).abs().min(1.0).acos();
-            if turned > MODE_RESET_ANGLE {
-                self.solver.forget();
-            } else {
-                self.solver.forget_evaluation();
-            }
-            self.mode = mode;
-            self.curvature = accepted_curvature;
-            curvature = accepted_curvature;
-            rotations += accepted_rotations;
-        }
-        self.x = x;
-        self.iteration += 1;
-        self.centre = Some(centre);
-        let status = if converged(max_force, curvature, self.config.force_tol) {
-            MinModeStatus::Converged
-        } else {
-            MinModeStatus::Running
-        };
-        Ok(MinModeReport {
-            status,
-            max_force,
-            curvature,
-            rotations,
-            iteration: self.iteration,
-            evaluations: calls.load(Ordering::Relaxed),
-        })
+        let mut report = self.translate(surface)?;
+        report.rotations += rotations;
+        report.evaluations += refresh_evals;
+        Ok(report)
     }
 
     /// Convenience loop over [`MinModeSession::step`].

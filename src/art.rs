@@ -575,7 +575,7 @@ impl ArtSession {
             x = self.modes.position().to_owned();
             self.mode = self.modes.mode().to_owned();
             self.curvature = translated.curvature;
-            self.energy = self.modes.energy();
+            self.energy = self.modes.energy().unwrap_or(f64::NAN);
             self.climbs += 1;
             if translated.status == MinModeStatus::Converged {
                 self.note_pre_inflection(true);
