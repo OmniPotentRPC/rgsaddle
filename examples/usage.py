@@ -5,6 +5,8 @@ The values are the C discriminants. ``import rgsaddle`` does not import ASE.
 
 from __future__ import annotations
 
+from importlib.metadata import version
+
 import rgsaddle
 
 
@@ -14,7 +16,7 @@ def gate_name(gate: rgsaddle.ForceGate) -> str:
 
 
 def main() -> None:
-    assert rgsaddle.__version__ == "0.2.2"
+    assert version("rgsaddle") == rgsaddle.__version__
     assert gate_name(rgsaddle.ForceGate.L2_NORM) == "L2_NORM"
     assert int(rgsaddle.HessUpdate.TS_BFGS) == 1
     assert int(rgsaddle.MinModeKind.DIMER) == 0

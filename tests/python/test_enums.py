@@ -8,8 +8,10 @@ from __future__ import annotations
 import enum
 import subprocess
 import sys
+from importlib.metadata import version
 
 import rgsaddle
+from rgsaddle import _core
 from rgsaddle import (
     CellChart,
     EigenDevice,
@@ -46,11 +48,10 @@ TABLE: dict[type[enum.IntEnum], list[tuple[str, int]]] = {
 
 
 def test_version() -> None:
-    assert rgsaddle.__version__ == "0.2.2"
-    from rgsaddle import _core
-
-    assert _core.version() == rgsaddle.__version__
-    assert _core.__version__ == rgsaddle.__version__
+    installed = version("rgsaddle")
+    assert rgsaddle.__version__ == installed
+    assert _core.version() == installed
+    assert _core.__version__ == installed
 
 
 def test_header_constants_match_the_int_enums() -> None:

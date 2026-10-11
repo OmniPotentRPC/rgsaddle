@@ -71,7 +71,10 @@ endif()
 nanobind_add_module(_core FREE_THREADED STABLE_ABI NB_STATIC bind/ext.cpp)
 target_include_directories(_core PRIVATE include)
 target_link_libraries(_core PRIVATE rgsaddle Threads::Threads)
-target_compile_definitions(_core PRIVATE RGSADDLE_PY_VERSION="0.2.2")
+if(NOT DEFINED SKBUILD_PROJECT_VERSION OR SKBUILD_PROJECT_VERSION STREQUAL "")
+  message(FATAL_ERROR "SKBUILD_PROJECT_VERSION is required")
+endif()
+target_compile_definitions(_core PRIVATE "RGSADDLE_PY_VERSION=\"${SKBUILD_PROJECT_VERSION}\"")
 
 # The stub generator imports rgsaddle._core, so the extension has
 # to sit inside a package directory on PYTHON_PATH.
