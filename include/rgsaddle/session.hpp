@@ -112,6 +112,54 @@ inline rgsaddle_irc_config_t irc_config() {
     return c;
 }
 
+class Config {
+public:
+    Config() {
+        handle_ = rgsaddle_config_create();
+        if (handle_ == nullptr) {
+            throw std::runtime_error("rgsaddle_config_create failed");
+        }
+    }
+
+    Config(Config const&) = delete;
+    Config& operator=(Config const&) = delete;
+
+    Config(Config&& other) noexcept : handle_(other.handle_) {
+        other.handle_ = nullptr;
+    }
+
+    Config& operator=(Config&& other) noexcept {
+        if (this != &other) {
+            reset_handle();
+            handle_ = other.handle_;
+            other.handle_ = nullptr;
+        }
+        return *this;
+    }
+
+    ~Config() { reset_handle(); }
+
+    void set_float(char const* key, double value) {
+        check(rgsaddle_config_set_f64(handle_, key, value));
+    }
+
+    void set_int(char const* key, std::int64_t value) {
+        check(rgsaddle_config_set_i64(handle_, key, value));
+    }
+
+    [[nodiscard]] rgsaddle_config_t* native() const noexcept { return handle_; }
+
+private:
+    void reset_handle() {
+        if (handle_ != nullptr) {
+            rgsaddle_config_free(handle_);
+            handle_ = nullptr;
+        }
+    }
+
+    rgsaddle_config_t* handle_ = nullptr;
+};
+
 class Band {
 public:
     Band(rgsaddle_band_config_t const& config, std::int64_t n_images,
@@ -123,6 +171,23 @@ public:
         handle_ = rgsaddle_band_create(&config, n_images, n_atoms, positions);
         if (handle_ == nullptr) {
             throw std::runtime_error("rgsaddle_band_create failed");
+        }
+    }
+
+    Band(Config const& config, std::int64_t n_images, std::int64_t n_atoms,
+         double const* positions)
+        : n_images_(n_images), n_atoms_(n_atoms) {
+        if (!abi_compatible()) {
+            throw std::runtime_error("rgsaddle ABI 1.15 or later is required");
+        }
+        handle_ = rgsaddle_band_create_with(config.native(), n_images, n_atoms,
+                                            positions);
+        if (handle_ == nullptr) {
+            throw std::runtime_error("rgsaddle_band_create_with failed");
+        }
+        std::int64_t count = rgsaddle_band_image_count(handle_);
+        if (count > 0) {
+            n_images_ = count;
         }
     }
 
@@ -151,6 +216,26 @@ public:
     Report step(rgsaddle_surface_fn surface, void* user) {
         rgsaddle_report_t out{};
         check(rgsaddle_band_step(handle_, surface, user, &out));
+        return Report::from_c(out);
+    }
+
+    /**
+     * positions has room for capacity images on entry and is resized to
+     * the final band. AutoNEB needs capacity >= n_max.
+     */
+    Report run(rgsaddle_surface_fn surface, void* user,
+               std::vector<double>& positions) {
+        if (n_atoms_ < 1) {
+            throw std::runtime_error("rgsaddle band has no atoms");
+        }
+        std::int64_t capacity =
+            static_cast<std::int64_t>(positions.size() / static_cast<std::size_t>(3 * n_atoms_));
+        std::int64_t count = 0;
+        rgsaddle_report_t out{};
+        check(rgsaddle_band_run(handle_, surface, user, positions.data(), capacity,
+                                &count, &out));
+        n_images_ = count;
+        positions.resize(static_cast<std::size_t>(count * 3 * n_atoms_));
         return Report::from_c(out);
     }
 

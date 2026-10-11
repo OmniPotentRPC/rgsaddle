@@ -1,0 +1,77 @@
+#+TITLE: Grow a band with AutoNEB
+#+OPTIONS: toc:nil num:nil
+
+AutoNEB starts from the endpoints, inserts an image where the band is coarsest, relaxes that neighbourhood, and climbs at the end. Kolsbjerg, Groves, and Hammer, J. Chem. Phys. 145, 094107 (2016), doi:10.1063/1.4961868.
+
+#+begin_export rst
+:cite:`kolsbjergAutomatedNudgedElastic2016`
+#+end_export
+
+Use it when a fixed band would spend its force calls on images that are still far from the barrier. A short path with one barrier is often cheaper as one CI-NEB. The double well in ~tests/autoneb.rs~ is that case. Müller-Brown between minima B and C is the case that spends fewer calls.
+
+* Minimal example
+~BandConfig::autoneb~ carries the tuning. ~None~ is a fixed band. ~AutoNeb::new~ reads that tuning, or the defaults when it is ~None~.
+
+#+begin_src rust
+let mut config = BandConfig::default();
+config.autoneb = Some(AutoNebTuning {
+    n_simul: 3,
+    n_max: 7,
+    ..AutoNebTuning::default()
+});
+let mut search = AutoNeb::new(config, endpoints)?;
+let report = search.run(&surface)?;
+#+end_src
+
+~run~ is one shot. A second call is refused. The endpoints never move.
+
+* What the knobs do
+| Knob                 | Role                                                                                          |
+|----------------------+-----------------------------------------------------------------------------------------------|
+| ~n_simul~            | Free images in a local window. The window pins one image on each side. Default 3.            |
+| ~n_max~              | Images at the end, endpoints included. At least ~n_simul + 2~. Default 7.                    |
+| ~local_force_tol~    | Force stop for every window before the climb. Default 0.1.                                   |
+| ~local_max_steps~    | Step cap for those windows.                                                                   |
+| ~climb_max_steps~    | Step cap for the climbing window and for the final full band.                                |
+| ~space_energy_ratio~ | Threshold between the longest segment and the peak-weighted energy gap. Default 0.5, as ASE. |
+| ~climb~              | Arm the climbing image after the last insertion. Default on.                                 |
+| ~threads~            | Image-evaluation threads. Default 1.                                                          |
+
+Construction fills the band to ~n_simul + 2~ by cutting the longest segment, one image at a time. Each image is the minimum-image midpoint. ASE's AutoNEB, given only the two endpoints, places ~n_simul~ images in one equal-spaced interpolate. The two fills meet on a unit segment when ~n_simul~ is 1 or 3, and they differ for 2.
+
+~run~ then relaxes a local window, inserts one image, and repeats until ~n_max~. The window is the whole band when the band is still short. Otherwise it pins one image on each side of at least ~n_simul~ free images. An image with no energy yet is free, so a just-inserted image moves. With every energy known, the free images are centered on the highest interior energy.
+
+The peak-weighted gap of a segment is the absolute value of ~(E[j+1] - E[j]) * (E[j+1] + E[j] - 2 E_min) / (2 (E_max - E_min))~. ~f_R~ is the longest length over the endpoint separation. ~g_R~ is the largest weight over ~(E_max - E_min)~. The longest segment is cut when ~g_R~ is not positive or ~f_R / g_R~ exceeds ~space_energy_ratio~. Otherwise the largest weight is cut. Ties keep the lower index.
+
+Climbing uses ~BandConfig::climbing~. The default trigger factor is 0.5 and the trigger force is 0. The climbing window and the final full band stop at ~BandConfig::force_tol~. Buildup leaves climbing off.
+
+* One session per unchanged window
+An unchanged window keeps its ~BandSession~, so the L-BFGS pairs survive the moment climbing is armed on those same images. A new index set starts with empty memory. The final full band is a new session when it is not the same index set as the local window.
+
+* Force calls and threads
+~AutoNebReport::surface_rows~ counts force calls. One row of ~BandSurface::eval~ is one call. Known endpoint energies are seeded into a new window, so those two images are not evaluated again. A window that stops on its step cap clears only the free images.
+
+~threads~ above 1 keeps one thread pool for the whole search. Each evaluation is split into contiguous blocks, one per rank, and the block is stored at its image index after every rank has finished. The inserted image does not depend on which block finished first. There is no SIMD path. A warm step evaluates the free images of the window, so the speedup is capped by ~n_simul~.
+
+One thread evaluates the batch in a single call. The surface then sees one block per call when ~threads~ is above 1. A host that tells a whole-band evaluation from an interior evaluation by the row count should leave ~threads~ at 1.
+
+* Springs
+The spring is uniform for now. A weighted or Onsager-Machlup spring changes length when an image is inserted, so AutoNEB refuses both. The refusal is temporary: zoom-NEB will recompute those springs on insertion. The solid-state block is not part of this loop.
+
+* C, C++, and Python
+The opaque config handle carries the same keys. There is no ~rgsaddle_autoneb_*~ family, and ~rgsaddle_band_config_t~ does not grow.
+
+| Key                                     | Meaning                                              |
+|-----------------------------------------+------------------------------------------------------|
+| ~autoneb~                               | 1 turns AutoNEB on, 0 turns it off                   |
+| ~n_simul~, ~n_max~, ~threads~           | As above                                             |
+| ~local_force_tol~, ~space_energy_ratio~ | As above                                             |
+| ~local_max_steps~, ~climb_max_steps~    | As above                                             |
+| ~climb~                                 | 1 or 0                                               |
+| ~force_tol~, ~max_move~, ~spring_k~     | The band                                             |
+| ~method~, ~memory~, ~tangent~           | FIRE 0, L-BFGS 1, trust region 2, quick-min 3       |
+| ~max_steps~                             | Step cap for a fixed band's ~rgsaddle_band_run~     |
+
+Setting ~n_simul~ or any other AutoNEB key turns the tuning on. ~spring~ 1 or 2 is refused with the same temporary wording. ~rgsaddle_band_create_with~ builds the band. ~rgsaddle_band_run~ drives it. The positions buffer must hold ~n_max~ images. ~rgsaddle_band_image_count~ is the current count, which is already ~n_simul + 2~ after create when the start was shorter. ~step~, ~set_positions~, ~reset~, and ~restart~ return ~RGSADDLE_INVALID_PARAMETER~ on an AutoNEB band.
+
+The C++ wrapper is ~rgsaddle::Config~ with ~set_float~ and ~set_int~, and ~Band::run~. The Python class is ~rgsaddle.Config~ with the same setters and ~run_band~.

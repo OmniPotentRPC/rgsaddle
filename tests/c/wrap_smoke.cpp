@@ -72,6 +72,37 @@ int main() {
         return 1;
     }
     band.reset();
+
+    rgsaddle::Config options;
+    options.set_int("autoneb", 1);
+    options.set_int("n_simul", 1);
+    options.set_int("n_max", 4);
+    options.set_int("method", RGSADDLE_METHOD_LBFGS);
+    options.set_float("force_tol", 1e-2);
+    options.set_float("local_force_tol", 1e-1);
+    options.set_int("climb_max_steps", 200);
+    bool refused = false;
+    try {
+        options.set_int("spring", 1);
+    } catch (std::runtime_error const&) {
+        refused = true;
+    }
+    if (!refused) {
+        std::fprintf(stderr, "weighted spring was accepted\n");
+        return 1;
+    }
+    double ends[6] = {-1.0, 0.0, 0.0, 1.0, 0.0, 0.0};
+    rgsaddle::Band grown(options, 2, 1, ends);
+    if (rgsaddle_band_image_count(grown.native()) != 3) {
+        std::fprintf(stderr, "initial fill\n");
+        return 1;
+    }
+    std::vector<double> final_pos(4 * 3);
+    auto auto_report = grown.run(surface, nullptr, final_pos);
+    if (!auto_report.converged() || grown.n_images() != 4 || final_pos.size() != 12) {
+        std::fprintf(stderr, "autoneb did not converge\n");
+        return 1;
+    }
     std::printf("RGSADDLE_CXX_WRAP_OK force=%.6g iter=%lld\n", last.max_force,
                 static_cast<long long>(last.iteration));
     return 0;

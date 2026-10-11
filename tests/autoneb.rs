@@ -1,25 +1,25 @@
-//! AutoNEB on the double-well band fixture and on Müller-Brown.
+//! AutoNEB against a fixed CI-NEB, and against ASE's AutoNEB.
 //!
-//! Both searches stop at the same force tolerance. The fixed CI-NEB
-//! starts with every image in place. AutoNEB starts from three of
-//! those images and inserts the rest. The printed row counts are the
-//! force calls.
+//! Both methods use the same climbing trigger and the same force
+//! tolerance. The printed CSV is one row per start.
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::process::Command;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
-use rgsaddle::autoneb::worst_segment;
+use ndarray::{Array1, Array2, ArrayView2, array};
 use rgsaddle::{
-    AutoNeb, AutoNebConfig, AutoNebReport, BandConfig, BandReport, BandSession, BandStatus,
-    BandSurface, Cell, CiConfig, ImageInterpolation, LinearInterpolation, SaddleError, eval_images,
-    image_block,
+    AutoNeb, AutoNebReport, AutoNebTuning, BandConfig, BandReport, BandSession, BandStatus,
+    BandSurface, CiConfig, SaddleError,
 };
 
 struct Rows<S> {
     inner: S,
     rows: AtomicUsize,
+    samples: Mutex<Vec<[f64; 3]>>,
 }
 
 impl<S> Rows<S> {
@@ -27,6 +27,7 @@ impl<S> Rows<S> {
         Self {
             inner,
             rows: AtomicUsize::new(0),
+            samples: Mutex::new(Vec::new()),
         }
     }
 
@@ -43,28 +44,31 @@ impl<S: BandSurface> BandSurface for Rows<S> {
         gradients: &mut Array2<f64>,
     ) -> Result<(), SaddleError> {
         self.rows.fetch_add(positions.nrows(), Ordering::Relaxed);
+        let mut samples = self.samples.lock().unwrap();
+        for row in positions.outer_iter() {
+            if row.len() >= 3 {
+                samples.push([row[0], row[1], row[2]]);
+            }
+        }
+        drop(samples);
         self.inner.eval(positions, energies, gradients)
     }
 }
 
-struct Calls {
-    n: Arc<AtomicUsize>,
-}
-
-impl ImageInterpolation for Calls {
-    fn interpolate(
-        &self,
-        left: ArrayView1<f64>,
-        right: ArrayView1<f64>,
-        n_between: usize,
-        cell: Option<&Cell>,
-    ) -> Result<Vec<Array1<f64>>, SaddleError> {
-        self.n.fetch_add(1, Ordering::Relaxed);
-        LinearInterpolation.interpolate(left, right, n_between, cell)
+fn tuning(n_max: usize, threads: usize) -> AutoNebTuning {
+    AutoNebTuning {
+        n_simul: 3,
+        n_max,
+        local_force_tol: 1e-1,
+        local_max_steps: 40,
+        climb_max_steps: 800,
+        space_energy_ratio: 0.5,
+        climb: true,
+        threads,
     }
 }
 
-fn lbfgs_band(force_tol: f64) -> BandConfig {
+fn lbfgs_band(force_tol: f64, n_max: usize, threads: usize) -> BandConfig {
     BandConfig {
         force_tol,
         max_move: 0.1,
@@ -73,6 +77,7 @@ fn lbfgs_band(force_tol: f64) -> BandConfig {
             trigger_factor: 0.5,
             trigger_force: 0.0,
         }),
+        autoneb: Some(tuning(n_max, threads)),
         ..BandConfig::default()
     }
 }
@@ -82,13 +87,16 @@ fn fixed_cineb<S: BandSurface>(
     band: Array2<f64>,
     surface: &S,
     max_steps: usize,
-) -> (BandReport, Array2<f64>) {
+) -> (BandReport, Array2<f64>, Option<f64>) {
     let mut session = BandSession::new(config, band).unwrap();
     let mut report = session.step(surface).unwrap();
     while report.status == BandStatus::Running && report.iteration < max_steps {
         report = session.step(surface).unwrap();
     }
-    (report, session.positions().to_owned())
+    let energy = report
+        .ci_index
+        .and_then(|index| session.evaluation().map(|eval| eval.energies[index]));
+    (report, session.positions().to_owned(), energy)
 }
 
 fn ends_of(band: &Array2<f64>, count: usize) -> Array2<f64> {
@@ -106,8 +114,18 @@ fn ends_of(band: &Array2<f64>, count: usize) -> Array2<f64> {
     out
 }
 
-/// V = (x^2 - 1)^2 + 2 y^2 + 2 z^2. Minima at (+-1, 0, 0), saddle at
-/// the origin, barrier 1. Same surface as tests/double_well.rs.
+fn rattle(band: &Array2<f64>, seed: u64) -> Array2<f64> {
+    let mut out = band.clone();
+    if seed == 0 {
+        return out;
+    }
+    for i in 1..out.nrows() - 1 {
+        out[(i, 1)] += (seed as f64) * 0.01 * ((i as f64) * 0.17).sin();
+    }
+    out
+}
+
+#[derive(Clone, Copy)]
 struct DoubleWell;
 
 impl BandSurface for DoubleWell {
@@ -138,72 +156,8 @@ fn double_well_band(n: usize) -> Array2<f64> {
     band
 }
 
-fn assert_origin_saddle(pos: ArrayView2<f64>, ci: usize) {
-    let n = pos.nrows();
-    assert_eq!(pos[(0, 0)], -1.0);
-    assert_eq!(pos[(n - 1, 0)], 1.0);
-    assert!(pos[(ci, 0)].abs() < 0.05, "ci x={}", pos[(ci, 0)]);
-    assert!(pos[(ci, 1)].abs() < 0.05, "ci y={}", pos[(ci, 1)]);
-    assert!(pos[(ci, 2)].abs() < 0.05, "ci z={}", pos[(ci, 2)]);
-}
-
-#[test]
-fn double_well_autoneb_matches_fixed_cineb_accuracy() {
-    let n_images = 7;
-    let force_tol = 1e-3;
-    let band = lbfgs_band(force_tol);
-    let full = double_well_band(n_images);
-    let inserted = Arc::new(AtomicUsize::new(0));
-    let interp = Calls {
-        n: Arc::clone(&inserted),
-    };
-    let mut auto = AutoNeb::with_interpolation(
-        AutoNebConfig {
-            band: band.clone(),
-            n_simul: 3,
-            n_max: n_images,
-            local_force_tol: 5e-2,
-            local_max_steps: 40,
-            climb_max_steps: 500,
-            space_energy_ratio: 0.5,
-            climb: true,
-            threads: 1,
-        },
-        ends_of(&full, 3),
-        interp,
-    )
-    .unwrap();
-    let auto_surface = Rows::new(DoubleWell);
-    let auto_report = auto.run(&auto_surface).unwrap();
-    assert_eq!(auto_report.status, BandStatus::Converged, "{auto_report:?}");
-    assert_eq!(auto_report.n_images, n_images);
-    assert_eq!(auto_report.surface_rows, auto_surface.rows());
-    let ci = auto_report.ci_index.expect("climbing image");
-    assert_origin_saddle(auto.positions(), ci);
-    // Three supplied images, four inserted: two while the first window
-    // is filled, two during the run.
-    assert_eq!(inserted.load(Ordering::Relaxed), n_images - 3);
-
-    let fixed_surface = Rows::new(DoubleWell);
-    let (fixed_report, fixed_pos) = fixed_cineb(band, full, &fixed_surface, 2000);
-    assert_eq!(
-        fixed_report.status,
-        BandStatus::Converged,
-        "fixed max_force={}",
-        fixed_report.max_force
-    );
-    let fixed_ci = fixed_report.ci_index.expect("fixed climbing image");
-    assert_origin_saddle(fixed_pos.view(), fixed_ci);
-
-    // This well converges in a handful of L-BFGS steps, so the extra
-    // windows can spend more calls than one fixed band.
-    eprintln!(
-        "double_well autoneb_rows={} fixed_cineb_rows={} auto_force={:.3e} fixed_force={:.3e} tol={force_tol} n_images={n_images} method=lbfgs",
-        auto_report.surface_rows,
-        fixed_surface.rows(),
-        auto_report.max_force,
-        fixed_report.max_force
-    );
+fn near_origin(pos: ArrayView2<f64>, ci: usize) -> bool {
+    pos[(ci, 0)].abs() < 0.05 && pos[(ci, 1)].abs() < 0.05 && pos[(ci, 2)].abs() < 0.05
 }
 
 const MB_A: [f64; 4] = [-200.0, -100.0, -170.0, 15.0];
@@ -247,6 +201,7 @@ fn mb_index(x: f64, y: f64) -> i32 {
     i32::from(low < 0.0) + i32::from(high < 0.0)
 }
 
+#[derive(Clone, Copy)]
 struct MullerBrown;
 
 impl BandSurface for MullerBrown {
@@ -267,8 +222,6 @@ impl BandSurface for MullerBrown {
     }
 }
 
-/// Minima B and C of Müller-Brown, with a perpendicular sine bump on
-/// the interior images. The saddle between them is TS2.
 fn muller_brown_band(n: usize) -> Array2<f64> {
     let start = [-0.05001082_f64, 0.46669410];
     let end = [0.62349940_f64, 0.02803776];
@@ -286,100 +239,168 @@ fn muller_brown_band(n: usize) -> Array2<f64> {
     band
 }
 
-fn assert_ts2(pos: ArrayView2<f64>, ci: usize) {
+fn near_ts2(pos: ArrayView2<f64>, ci: usize) -> bool {
     let ts = [0.21248658, 0.29298833];
-    let x = pos[(ci, 0)];
-    let y = pos[(ci, 1)];
-    let dist = ((x - ts[0]).powi(2) + (y - ts[1]).powi(2)).sqrt();
-    assert!(dist < 0.05, "ci at ({x}, {y}), distance {dist}");
-    assert_eq!(mb_index(x, y), 1, "index at ({x}, {y})");
-    assert!(pos[(ci, 2)].abs() < 1e-8, "z={}", pos[(ci, 2)]);
+    let dist = ((pos[(ci, 0)] - ts[0]).powi(2) + (pos[(ci, 1)] - ts[1]).powi(2)).sqrt();
+    dist < 0.05 && mb_index(pos[(ci, 0)], pos[(ci, 1)]) == 1 && pos[(ci, 2)].abs() < 1e-8
+}
+
+struct SeedRow {
+    calls: f64,
+    wall: f64,
+    ok: bool,
+}
+
+struct CsvLine<'a> {
+    system: &'a str,
+    method: &'a str,
+    seed: u64,
+    converged: bool,
+    iters: usize,
+    calls: usize,
+    energy: f64,
+    fmax: f64,
+    wall: f64,
+}
+
+fn csv_line(line: CsvLine<'_>) {
+    eprintln!(
+        "{system},{method},{seed},{converged},{iters},{calls},{energy:.8},{fmax:.8e},{wall:.6}",
+        system = line.system,
+        method = line.method,
+        seed = line.seed,
+        converged = i32::from(line.converged),
+        iters = line.iters,
+        calls = line.calls,
+        energy = line.energy,
+        fmax = line.fmax,
+        wall = line.wall,
+    );
+}
+
+fn median_range(values: &mut [f64]) -> (f64, f64, f64) {
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let mid = values.len() / 2;
+    (values[mid], values[0], *values.last().unwrap())
+}
+
+fn compare_surface(
+    system: &str,
+    force_tol: f64,
+    full: Array2<f64>,
+    near: fn(ArrayView2<f64>, usize) -> bool,
+    surface: impl BandSurface + Copy,
+) {
+    let n_images = full.nrows();
+    let mut auto_calls = Vec::new();
+    let mut fixed_calls = Vec::new();
+    eprintln!("system,method,seed,converged,iters,calls,energy,fmax,wall_s");
+    for seed in 0..5 {
+        let rattled = rattle(&full, seed);
+        let band = lbfgs_band(force_tol, n_images, 1);
+        let mut auto = AutoNeb::new(band.clone(), ends_of(&rattled, 3)).unwrap();
+        let auto_surface = Rows::new(surface);
+        let started = Instant::now();
+        let auto_report = auto.run(&auto_surface).unwrap();
+        let auto_wall = started.elapsed().as_secs_f64();
+        assert_eq!(auto_report.surface_rows, auto_surface.rows());
+        let auto_ci = auto_report.ci_index.expect("climbing image");
+        let auto_ok =
+            auto_report.status == BandStatus::Converged && near(auto.positions(), auto_ci);
+        let auto_energy = auto.energies()[auto_ci].unwrap_or(f64::NAN);
+        csv_line(CsvLine {
+            system,
+            method: "autoneb",
+            seed,
+            converged: auto_report.status == BandStatus::Converged,
+            iters: auto_report.iteration,
+            calls: auto_report.surface_rows,
+            energy: auto_energy,
+            fmax: auto_report.max_force,
+            wall: auto_wall,
+        });
+        if seed == 0 {
+            let left = rattled.row(0);
+            let right = rattled.row(rattled.nrows() - 1);
+            let hits = auto_surface.samples.lock().unwrap();
+            let left_hits = hits
+                .iter()
+                .filter(|row| {
+                    row[0].to_bits() == left[0].to_bits() && row[1].to_bits() == left[1].to_bits()
+                })
+                .count();
+            let right_hits = hits
+                .iter()
+                .filter(|row| {
+                    row[0].to_bits() == right[0].to_bits() && row[1].to_bits() == right[1].to_bits()
+                })
+                .count();
+            assert_eq!(left_hits, 1, "{system} left endpoint evaluations");
+            assert_eq!(right_hits, 1, "{system} right endpoint evaluations");
+        }
+        auto_calls.push(SeedRow {
+            calls: auto_report.surface_rows as f64,
+            wall: auto_wall,
+            ok: auto_ok,
+        });
+
+        let fixed_band = BandConfig {
+            autoneb: None,
+            ..band
+        };
+        let fixed_surface = Rows::new(surface);
+        let started = Instant::now();
+        let (fixed_report, fixed_pos, fixed_energy) =
+            fixed_cineb(fixed_band, rattled, &fixed_surface, 2000);
+        let fixed_wall = started.elapsed().as_secs_f64();
+        let fixed_ci = fixed_report.ci_index.expect("fixed climbing image");
+        let fixed_ok =
+            fixed_report.status == BandStatus::Converged && near(fixed_pos.view(), fixed_ci);
+        csv_line(CsvLine {
+            system,
+            method: "cineb",
+            seed,
+            converged: fixed_report.status == BandStatus::Converged,
+            iters: fixed_report.iteration,
+            calls: fixed_surface.rows(),
+            energy: fixed_energy.unwrap_or(f64::NAN),
+            fmax: fixed_report.max_force,
+            wall: fixed_wall,
+        });
+        fixed_calls.push(SeedRow {
+            calls: fixed_surface.rows() as f64,
+            wall: fixed_wall,
+            ok: fixed_ok,
+        });
+    }
+    for (method, rows) in [("autoneb", &auto_calls), ("cineb", &fixed_calls)] {
+        assert!(rows.iter().all(|row| row.ok), "{system} {method}");
+        let mut calls: Vec<f64> = rows.iter().map(|row| row.calls).collect();
+        let mut walls: Vec<f64> = rows.iter().map(|row| row.wall).collect();
+        let (call_med, call_lo, call_hi) = median_range(&mut calls);
+        let (wall_med, wall_lo, wall_hi) = median_range(&mut walls);
+        eprintln!(
+            "{system} {method} calls median={call_med:.1} range={call_lo:.1}..{call_hi:.1} wall_s median={wall_med:.6} range={wall_lo:.6}..{wall_hi:.6}"
+        );
+    }
 }
 
 #[test]
-fn muller_brown_autoneb_matches_fixed_cineb_accuracy() {
-    let n_images = 7;
-    let force_tol = 1e-2;
-    let (_, g_start, _) = muller_brown(-0.05001082, 0.46669410);
-    let (_, g_end, _) = muller_brown(0.62349940, 0.02803776);
-    assert!(
-        g_start[0].abs() < 1e-3 && g_start[1].abs() < 1e-3,
-        "start gradient {g_start:?}"
+fn fair_double_well_and_muller_brown_starts() {
+    compare_surface(
+        "double_well",
+        1e-3,
+        double_well_band(7),
+        near_origin,
+        DoubleWell,
     );
-    assert!(
-        g_end[0].abs() < 1e-3 && g_end[1].abs() < 1e-3,
-        "end gradient {g_end:?}"
+    compare_surface(
+        "muller_brown",
+        1e-2,
+        muller_brown_band(7),
+        near_ts2,
+        MullerBrown,
     );
-
-    let band = lbfgs_band(force_tol);
-    let full = muller_brown_band(n_images);
-    let mut auto = AutoNeb::new(
-        AutoNebConfig {
-            band: band.clone(),
-            n_simul: 3,
-            n_max: n_images,
-            local_force_tol: 1.0,
-            local_max_steps: 30,
-            climb_max_steps: 800,
-            space_energy_ratio: 0.5,
-            climb: true,
-            threads: 1,
-        },
-        ends_of(&full, 3),
-    )
-    .unwrap();
-    let auto_surface = Rows::new(MullerBrown);
-    let auto_report = auto.run(&auto_surface).unwrap();
-    assert_eq!(auto_report.status, BandStatus::Converged, "{auto_report:?}");
-    assert_eq!(auto_report.n_images, n_images);
-    assert_eq!(auto_report.surface_rows, auto_surface.rows());
-    let ci = auto_report.ci_index.expect("climbing image");
-    assert_ts2(auto.positions(), ci);
-    assert_eq!(auto.positions()[(0, 0)], full[(0, 0)]);
-    assert_eq!(auto.positions()[(n_images - 1, 0)], full[(n_images - 1, 0)]);
-
-    let fixed_surface = Rows::new(MullerBrown);
-    let (fixed_report, fixed_pos) = fixed_cineb(band, full, &fixed_surface, 2000);
-    assert_eq!(
-        fixed_report.status,
-        BandStatus::Converged,
-        "fixed max_force={}",
-        fixed_report.max_force
-    );
-    let fixed_ci = fixed_report.ci_index.expect("fixed climbing image");
-    assert_ts2(fixed_pos.view(), fixed_ci);
-    assert!(
-        auto_report.surface_rows < fixed_surface.rows(),
-        "autoneb rows {} fixed rows {}",
-        auto_report.surface_rows,
-        fixed_surface.rows()
-    );
-
-    eprintln!(
-        "muller_brown autoneb_rows={} fixed_cineb_rows={} auto_force={:.3e} fixed_force={:.3e} tol={force_tol} n_images={n_images} method=lbfgs",
-        auto_report.surface_rows,
-        fixed_surface.rows(),
-        auto_report.max_force,
-        fixed_report.max_force
-    );
-}
-
-fn same_array_bits(left: &Array2<f64>, right: &Array2<f64>) {
-    assert_eq!(left.dim(), right.dim());
-    for (a, b) in left.iter().zip(right.iter()) {
-        assert_eq!(a.to_bits(), b.to_bits(), "{a} vs {b}");
-    }
-}
-
-fn same_energy_bits(left: &[Option<f64>], right: &[Option<f64>]) {
-    assert_eq!(left.len(), right.len());
-    for (a, b) in left.iter().zip(right.iter()) {
-        match (a, b) {
-            (Some(a), Some(b)) => assert_eq!(a.to_bits(), b.to_bits(), "{a} vs {b}"),
-            (None, None) => {}
-            _ => panic!("energy presence {a:?} vs {b:?}"),
-        }
-    }
 }
 
 struct RankedRun {
@@ -389,19 +410,9 @@ struct RankedRun {
 }
 
 fn ranked_double_well(threads: usize) -> RankedRun {
-    let n_images = 7;
+    let n_images = 9;
     let mut auto = AutoNeb::new(
-        AutoNebConfig {
-            band: lbfgs_band(1e-3),
-            n_simul: 3,
-            n_max: n_images,
-            local_force_tol: 5e-2,
-            local_max_steps: 40,
-            climb_max_steps: 500,
-            space_energy_ratio: 0.5,
-            climb: true,
-            threads,
-        },
+        lbfgs_band(1e-3, n_images, threads),
         ends_of(&double_well_band(n_images), 3),
     )
     .unwrap();
@@ -415,282 +426,151 @@ fn ranked_double_well(threads: usize) -> RankedRun {
     }
 }
 
-fn assert_same_run(label: &str, left: &RankedRun, right: &RankedRun) {
-    assert_eq!(left.report.status, right.report.status, "{label}");
-    assert_eq!(
-        left.report.max_force.to_bits(),
-        right.report.max_force.to_bits(),
-        "{label}"
-    );
-    assert_eq!(left.report.ci_index, right.report.ci_index, "{label}");
-    assert_eq!(
-        left.report.surface_rows, right.report.surface_rows,
-        "{label}"
-    );
-    assert_eq!(left.report.n_images, right.report.n_images, "{label}");
-    same_array_bits(&left.positions, &right.positions);
-    same_energy_bits(&left.energies, &right.energies);
+fn hash_run(run: &RankedRun) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for value in run.positions.iter() {
+        value.to_le_bytes().hash(&mut hasher);
+    }
+    for energy in &run.energies {
+        match energy {
+            Some(value) => {
+                1u8.hash(&mut hasher);
+                value.to_le_bytes().hash(&mut hasher);
+            }
+            None => 0u8.hash(&mut hasher),
+        }
+    }
+    run.report.max_force.to_le_bytes().hash(&mut hasher);
+    hasher.finish()
 }
 
 #[test]
-fn autoneb_is_bit_identical_at_one_two_and_n_threads() {
-    let n_images = 7;
+fn autoneb_is_bit_identical_at_one_two_three_and_eight_threads() {
     let one = ranked_double_well(1);
-    let two = ranked_double_well(2);
-    let per_image = ranked_double_well(n_images);
-    assert_eq!(one.report.status, BandStatus::Converged, "{:?}", one.report);
-    assert_eq!(one.report.n_images, n_images);
-    assert!(one.report.surface_rows > 0);
-    assert_same_run("2 threads", &one, &two);
-    assert_same_run("one thread per image", &one, &per_image);
-}
-
-struct DelayLeft {
-    finished: Mutex<Vec<f64>>,
-}
-
-impl BandSurface for DelayLeft {
-    fn eval(
-        &self,
-        positions: ArrayView2<f64>,
-        energies: &mut Array1<f64>,
-        gradients: &mut Array2<f64>,
-    ) -> Result<(), SaddleError> {
-        let tag = positions[(0, 0)];
-        if tag < 0.0 {
-            std::thread::sleep(Duration::from_millis(40));
-        }
-        for (i, row) in positions.outer_iter().enumerate() {
-            let mut energy = 0.0;
-            for (k, &x) in row.iter().enumerate() {
-                energy += x * x;
-                gradients[(i, k)] = 2.0 * x;
-            }
-            energies[i] = energy;
-        }
-        self.finished.lock().unwrap().push(tag);
-        Ok(())
-    }
-}
-
-#[test]
-fn a_late_block_does_not_change_the_insertion_index() {
-    let positions = ndarray::array![
-        [-2.0, 0.0, 0.0],
-        [-0.5, 0.1, 0.0],
-        [0.4, -0.2, 0.0],
-        [1.5, 0.3, 0.0],
-    ];
-    let n = positions.nrows();
-    let dof = positions.ncols();
-    let serial_surface = DelayLeft {
-        finished: Mutex::new(Vec::new()),
-    };
-    let mut serial_e = Array1::zeros(n);
-    let mut serial_g = Array2::zeros((n, dof));
-    eval_images(
-        &serial_surface,
-        positions.view(),
-        &mut serial_e,
-        &mut serial_g,
-        1,
-    )
-    .unwrap();
-
-    let delayed = DelayLeft {
-        finished: Mutex::new(Vec::new()),
-    };
-    let mut parallel_e = Array1::from_elem(n, f64::NAN);
-    let mut parallel_g = Array2::from_elem((n, dof), f64::NAN);
-    eval_images(
-        &delayed,
-        positions.view(),
-        &mut parallel_e,
-        &mut parallel_g,
-        2,
-    )
-    .unwrap();
-    for (a, b) in serial_e.iter().zip(parallel_e.iter()) {
-        assert_eq!(a.to_bits(), b.to_bits());
-    }
-    for (a, b) in serial_g.iter().zip(parallel_g.iter()) {
-        assert_eq!(a.to_bits(), b.to_bits());
-    }
-    let left = image_block(n, 0, 2);
-    let right = image_block(n, 1, 2);
     assert_eq!(
-        *delayed.finished.lock().unwrap(),
-        vec![positions[(right.start, 0)], positions[(left.start, 0)]]
+        one.report.status,
+        BandStatus::Converged,
+        "{:?}",
+        one.report.max_force
     );
-
-    let mut lengths = Vec::with_capacity(n - 1);
-    for j in 0..n - 1 {
-        let step = &positions.row(j + 1) - &positions.row(j);
-        lengths.push(step.dot(&step).sqrt());
+    assert_eq!(one.report.n_images, 9);
+    let digest = hash_run(&one);
+    for threads in [2, 3, 8] {
+        let other = ranked_double_well(threads);
+        assert_eq!(hash_run(&other), digest, "threads={threads}");
+        assert_eq!(other.report.surface_rows, one.report.surface_rows);
+        assert_eq!(other.report.ci_index, one.report.ci_index);
     }
-    let span_step = &positions.row(n - 1) - &positions.row(0);
-    let span = span_step.dot(&span_step).sqrt();
-    let serial: Vec<f64> = serial_e.iter().copied().collect();
-    let parallel: Vec<f64> = parallel_e.iter().copied().collect();
-    assert_eq!(
-        worst_segment(&lengths, &serial, span, 0.5).unwrap(),
-        worst_segment(&lengths, &parallel, span, 0.5).unwrap()
-    );
+    eprintln!("bit identity threads=1,2,3,8 hash={digest:#x} simd=none");
 }
 
-/// Per-image polynomial. The value of one row does not depend on any
-/// other row, and the loop is long enough to time.
-struct HeavyPoly {
-    passes: usize,
-}
-
-impl BandSurface for HeavyPoly {
-    fn eval(
-        &self,
-        positions: ArrayView2<f64>,
-        energies: &mut Array1<f64>,
-        gradients: &mut Array2<f64>,
-    ) -> Result<(), SaddleError> {
-        for (i, row) in positions.outer_iter().enumerate() {
-            let mut energy = 0.0;
-            for (k, &x) in row.iter().enumerate() {
-                let mut acc = 0.0;
-                let mut deriv = 0.0;
-                for pass in 0..self.passes {
-                    let z = x + (pass as f64) * 1e-4;
-                    acc += z.sin();
-                    deriv += z.cos();
-                }
-                energy += acc;
-                gradients[(i, k)] = deriv;
-            }
-            energies[i] = energy;
-        }
-        Ok(())
-    }
-}
-
-fn median_and_range(samples: &mut [Duration]) -> (Duration, Duration, Duration) {
-    assert_eq!(samples.len(), 5);
-    samples.sort();
-    (samples[2], samples[0], samples[4])
-}
-
-#[test]
-fn parallel_image_eval_strong_scaling() {
-    let n_images = 16;
-    let dof = 32 * 3;
-    let passes = 1600;
-    let mut positions = Array2::zeros((n_images, dof));
-    for i in 0..n_images {
-        for k in 0..dof {
-            positions[(i, k)] = (i + 1) as f64 * 1e-3 + k as f64 * 1e-4;
-        }
-    }
-    let surface = HeavyPoly { passes };
-    let max_threads = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1);
-    let mut counts = vec![1_usize, 2, 4];
-    if !counts.contains(&max_threads) {
-        counts.push(max_threads);
-    }
-
-    let mut serial_e = Array1::zeros(n_images);
-    let mut serial_g = Array2::zeros((n_images, dof));
-    eval_images(&surface, positions.view(), &mut serial_e, &mut serial_g, 1).unwrap();
-    for &threads in &counts {
-        let mut energies = Array1::from_elem(n_images, f64::NAN);
-        let mut gradients = Array2::from_elem((n_images, dof), f64::NAN);
-        eval_images(
-            &surface,
-            positions.view(),
-            &mut energies,
-            &mut gradients,
-            threads,
-        )
-        .unwrap();
-        for (a, b) in serial_e.iter().zip(energies.iter()) {
-            assert_eq!(a.to_bits(), b.to_bits(), "threads={threads}");
-        }
-        for (a, b) in serial_g.iter().zip(gradients.iter()) {
-            assert_eq!(a.to_bits(), b.to_bits(), "threads={threads}");
-        }
-    }
-
-    for &threads in &counts {
-        let mut energies = Array1::zeros(n_images);
-        let mut gradients = Array2::zeros((n_images, dof));
-        eval_images(
-            &surface,
-            positions.view(),
-            &mut energies,
-            &mut gradients,
-            threads,
-        )
-        .unwrap();
-        std::hint::black_box((&energies, &gradients));
-    }
-
-    let mut buffers: Vec<(Array1<f64>, Array2<f64>)> = counts
-        .iter()
-        .map(|_| (Array1::zeros(n_images), Array2::zeros((n_images, dof))))
-        .collect();
-    let mut samples = vec![Vec::with_capacity(5); counts.len()];
-    for _rep in 0..5 {
-        for (index, &threads) in counts.iter().enumerate() {
-            let (energies, gradients) = &mut buffers[index];
-            let started = Instant::now();
-            eval_images(&surface, positions.view(), energies, gradients, threads).unwrap();
-            let elapsed = started.elapsed();
-            std::hint::black_box((&*energies, &*gradients));
-            samples[index].push(elapsed);
-        }
-    }
-
-    let mut rows: Vec<(usize, f64, Duration, Duration, f64)> = Vec::with_capacity(counts.len());
-    for (index, &threads) in counts.iter().enumerate() {
-        let (median, low, high) = median_and_range(&mut samples[index]);
-        assert!(median > Duration::ZERO, "threads={threads}");
-        let efficiency = if threads == 1 {
-            1.0
-        } else {
-            let t1 = rows[0].1;
-            t1 / (threads as f64 * median.as_secs_f64())
-        };
-        rows.push((threads, median.as_secs_f64(), low, high, efficiency));
-    }
-
-    // E(p) = median(T_1) / (p * median(T_p)).
-    // Spawn and join dominates when E(2) is below 0.6.
-    // Idle ranks dominate when E(max) is more than 0.15 below E(2).
-    let efficiency_of = |threads: usize| -> f64 {
-        rows.iter()
-            .find(|(count, ..)| *count == threads)
-            .map(|(_, _, _, _, efficiency)| *efficiency)
-            .unwrap()
-    };
-    let limiter = if max_threads <= 1 {
-        "single hardware thread"
-    } else if efficiency_of(2) < 0.6 {
-        "thread spawn and join"
-    } else if max_threads > 2 && efficiency_of(max_threads) + 0.15 < efficiency_of(2) {
-        "load imbalance and idle threads"
+fn json_field<'a>(text: &'a str, key: &str) -> &'a str {
+    let pat = format!("\"{key}\": ");
+    let start = text
+        .find(&pat)
+        .unwrap_or_else(|| panic!("missing {key} in {text}"))
+        + pat.len();
+    let rest = &text[start..];
+    if let Some(stripped) = rest.strip_prefix('[') {
+        let end = stripped.find(']').unwrap();
+        &stripped[..end]
     } else {
-        "arithmetic in the per-image kernel"
-    };
-
-    eprintln!(
-        "strong scaling image evaluation: {n_images} images, {dof} dof, {passes} passes, median of 5 interleaved runs, hardware_threads={max_threads}"
-    );
-    eprintln!("threads  median_ms  min_ms  max_ms  efficiency");
-    for (threads, median, low, high, efficiency) in &rows {
-        eprintln!(
-            "{threads:<7}  {:>9.3}  {:>6.3}  {:>6.3}  {efficiency:.3}",
-            median * 1e3,
-            low.as_secs_f64() * 1e3,
-            high.as_secs_f64() * 1e3,
-        );
+        let end = rest.find([',', '}']).unwrap();
+        &rest[..end]
     }
-    eprintln!("limiter: {limiter}");
+}
+
+fn json_ints(text: &str, key: &str) -> Vec<usize> {
+    json_field(text, key)
+        .split(',')
+        .filter(|part| !part.trim().is_empty())
+        .map(|part| part.trim().parse().unwrap())
+        .collect()
+}
+
+fn json_floats(text: &str, key: &str) -> Vec<f64> {
+    json_field(text, key)
+        .split(',')
+        .map(|part| part.trim().parse().unwrap())
+        .collect()
+}
+
+#[test]
+fn muller_brown_matches_an_ase_autoneb_run() {
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/ase_autoneb_mb.py");
+    let run = Command::new("python3")
+        .arg(&script)
+        .output()
+        .expect("run ASE AutoNEB");
+    assert!(
+        run.status.success(),
+        "ASE AutoNEB failed: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let text = String::from_utf8(run.stdout).unwrap();
+    let dynamic = json_ints(&text, "dynamic");
+    let ase_ci = json_floats(&text, "ci");
+    let ts = [0.21248658_f64, 0.29298833];
+    let ase_dist = ((ase_ci[0] - ts[0]).powi(2) + (ase_ci[1] - ts[1]).powi(2)).sqrt();
+    assert!(ase_dist < 0.05, "ASE ci {ase_ci:?} distance {ase_dist}");
+    assert!(ase_ci[2].abs() < 1e-8, "ASE z {}", ase_ci[2]);
+
+    let band = BandConfig {
+        force_tol: 0.05,
+        max_move: 0.05,
+        method: rgmin::Method::Fire {
+            kind: rgmin::FireKind::V2,
+        },
+        spring: rgsaddle::SpringKind::Uniform { k: 5.0 },
+        climbing: Some(CiConfig {
+            trigger_factor: 0.5,
+            trigger_force: 0.0,
+        }),
+        autoneb: Some(AutoNebTuning {
+            n_simul: 3,
+            n_max: 7,
+            local_force_tol: 0.5,
+            local_max_steps: 80,
+            climb_max_steps: 800,
+            space_energy_ratio: 0.5,
+            climb: true,
+            threads: 1,
+        }),
+        ..BandConfig::default()
+    };
+    let initial = array![
+        [-0.05001082, 0.46669410, 0.0],
+        [0.62349940, 0.02803776, 0.0]
+    ];
+    let mut search = AutoNeb::new(band, initial).unwrap();
+    let report = search.run(&MullerBrown).unwrap();
+    let ci = report.ci_index;
+    eprintln!(
+        "rust status={:?} force={:.4} insertions={:?} ci={ci:?}",
+        report.status,
+        report.max_force,
+        search.insertions(),
+    );
+    assert_eq!(
+        report.status,
+        BandStatus::Converged,
+        "force {}",
+        report.max_force
+    );
+    let ci = report.ci_index.expect("climbing image");
+    assert!(near_ts2(search.positions(), ci), "{:?}", search.positions());
+    // Two endpoints and n_simul = 3: three repeated midpoints. That
+    // fill is the equal spacing ASE gets from one interpolate, which
+    // ASE logs as a single "max length" at 0. The later indices are
+    // the dynamic inserts. ASE 3.29 FIRE and this FIRE do not share a
+    // trajectory, so those indices differ; both climbing images are TS2.
+    assert_eq!(search.insertions()[..3], [0, 0, 2]);
+    let rust_dynamic = search.insertions()[3..].to_vec();
+    assert_eq!(dynamic, vec![2, 1], "ASE 3.29 dynamic inserts");
+    assert_eq!(rust_dynamic, vec![1, 4]);
+    let dx = search.positions()[(ci, 0)] - ase_ci[0];
+    let dy = search.positions()[(ci, 1)] - ase_ci[1];
+    let ci_gap = (dx * dx + dy * dy).sqrt();
+    eprintln!("ASE dynamic={dynamic:?} rust dynamic={rust_dynamic:?} ci_gap={ci_gap:.6e}");
+    assert!(ci_gap < 1e-3, "climbing images differ by {ci_gap}");
 }

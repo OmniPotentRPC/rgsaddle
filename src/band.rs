@@ -158,6 +158,8 @@ pub struct BandConfig {
     /// coordinates, atoms and cell together. FIRE stays the default
     /// when the flag is clear.
     pub quickmin: bool,
+    /// `Some` selects AutoNEB on this configuration. `None` is a fixed band.
+    pub autoneb: Option<crate::autoneb::AutoNebTuning>,
 }
 
 impl Default for BandConfig {
@@ -179,8 +181,266 @@ impl Default for BandConfig {
             },
             solid: None,
             quickmin: false,
+            autoneb: None,
         }
     }
+}
+
+/// Band options carried by the opaque C, C++, and Python config handle.
+///
+/// Keys are strings so a later method can add its own without a new
+/// function family. Unknown keys are [`SaddleError::Invalid`].
+#[derive(Clone, Debug)]
+pub(crate) struct HostConfig {
+    pub band: BandConfig,
+    pub max_steps: usize,
+    pub memory: usize,
+    pub rtr: bool,
+    ci_factor: f64,
+    ci_force: f64,
+}
+
+impl Default for HostConfig {
+    fn default() -> Self {
+        Self {
+            band: BandConfig::default(),
+            max_steps: 2_000,
+            memory: 20,
+            rtr: false,
+            ci_factor: 0.5,
+            ci_force: 0.0,
+        }
+    }
+}
+
+impl HostConfig {
+    fn tuning(&mut self) -> &mut crate::autoneb::AutoNebTuning {
+        self.band
+            .autoneb
+            .get_or_insert_with(crate::autoneb::AutoNebTuning::default)
+    }
+
+    fn sync_ci(&mut self) {
+        self.band.climbing = (self.ci_factor > 0.0).then_some(CiConfig {
+            trigger_factor: self.ci_factor,
+            trigger_force: self.ci_force,
+        });
+    }
+
+    fn apply_method(&mut self, method: i64) -> Result<(), SaddleError> {
+        self.rtr = false;
+        self.band.quickmin = false;
+        match method {
+            0 => {
+                self.band.method = Method::Fire {
+                    kind: rgmin::FireKind::V2,
+                };
+            }
+            1 => {
+                self.band.method = Method::Lbfgs {
+                    memory: self.memory,
+                };
+            }
+            2 => {
+                self.rtr = true;
+                self.band.method = Method::Fire {
+                    kind: rgmin::FireKind::V2,
+                };
+            }
+            3 => {
+                self.band.quickmin = true;
+                self.band.method = Method::QuickMin;
+            }
+            _ => {
+                return Err(SaddleError::Invalid(format!(
+                    "unknown band method {method}"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn finite(value: f64, what: &str) -> Result<(), SaddleError> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(SaddleError::Invalid(format!("{what} must be finite")))
+    }
+}
+
+fn positive(value: f64, what: &str) -> Result<(), SaddleError> {
+    if value.is_finite() && value > 0.0 {
+        Ok(())
+    } else {
+        Err(SaddleError::Invalid(format!(
+            "{what} must be finite and positive"
+        )))
+    }
+}
+
+/// Temporary. Zoom-NEB recomputes a weighted spring when an image is
+/// inserted. The opaque handle has no per-image constant list, so both
+/// weighted kinds are refused until that lands.
+fn refuse_weighted_spring() -> SaddleError {
+    SaddleError::Invalid(
+        "weighted and Onsager-Machlup springs are refused here for now; zoom-NEB will recompute them when an image is inserted"
+            .into(),
+    )
+}
+
+pub(crate) fn set_f64(cfg: &mut HostConfig, key: &str, value: f64) -> Result<(), SaddleError> {
+    match key {
+        "force_tol" => {
+            positive(value, "force_tol")?;
+            cfg.band.force_tol = value;
+        }
+        "max_move" => {
+            positive(value, "max_move")?;
+            cfg.band.max_move = value;
+        }
+        "spring_k" => {
+            finite(value, "spring_k")?;
+            cfg.band.spring = SpringKind::Uniform { k: value };
+        }
+        "ci_trigger_factor" => {
+            finite(value, "ci_trigger_factor")?;
+            cfg.ci_factor = value;
+            cfg.sync_ci();
+        }
+        "ci_trigger_force" => {
+            finite(value, "ci_trigger_force")?;
+            cfg.ci_force = value;
+            cfg.sync_ci();
+        }
+        "local_force_tol" => {
+            positive(value, "local_force_tol")?;
+            cfg.tuning().local_force_tol = value;
+        }
+        "space_energy_ratio" => {
+            if !(value.is_finite() && value >= 0.0) {
+                return Err(SaddleError::Invalid(
+                    "space_energy_ratio must be finite and non-negative".into(),
+                ));
+            }
+            cfg.tuning().space_energy_ratio = value;
+        }
+        _ => {
+            return Err(SaddleError::Invalid(format!(
+                "unknown band config key {key}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn set_i64(cfg: &mut HostConfig, key: &str, value: i64) -> Result<(), SaddleError> {
+    match key {
+        "method" => cfg.apply_method(value)?,
+        "memory" => {
+            if value < 1 {
+                return Err(SaddleError::Invalid("memory must be at least 1".into()));
+            }
+            cfg.memory = value as usize;
+            if let Method::Lbfgs { memory } = &mut cfg.band.method {
+                *memory = cfg.memory;
+            }
+        }
+        "tangent" => {
+            cfg.band.tangent = match value {
+                0 => TangentKind::Simple,
+                1 => TangentKind::Improved,
+                _ => {
+                    return Err(SaddleError::Invalid(format!("unknown tangent {value}")));
+                }
+            };
+        }
+        "spring" => match value {
+            0 => {
+                let k = match &cfg.band.spring {
+                    SpringKind::Uniform { k } => *k,
+                    _ => 5.0,
+                };
+                cfg.band.spring = SpringKind::Uniform { k };
+            }
+            1 | 2 => return Err(refuse_weighted_spring()),
+            _ => {
+                return Err(SaddleError::Invalid(format!("unknown spring {value}")));
+            }
+        },
+        "projection" => {
+            cfg.band.projection = match value {
+                0 => ProjectionKind::PlainElasticBand,
+                1 => ProjectionKind::Neb,
+                2 => ProjectionKind::DoublyNudged,
+                _ => {
+                    return Err(SaddleError::Invalid(format!("unknown projection {value}")));
+                }
+            };
+        }
+        "autoneb" => match value {
+            0 => cfg.band.autoneb = None,
+            1 => {
+                cfg.tuning();
+            }
+            _ => {
+                return Err(SaddleError::Invalid("autoneb must be 0 or 1".into()));
+            }
+        },
+        "n_simul" => {
+            if value < 1 {
+                return Err(SaddleError::Invalid("n_simul must be at least 1".into()));
+            }
+            cfg.tuning().n_simul = value as usize;
+        }
+        "n_max" => {
+            if value < 1 {
+                return Err(SaddleError::Invalid("n_max must be at least 1".into()));
+            }
+            cfg.tuning().n_max = value as usize;
+        }
+        "local_max_steps" => {
+            if value < 1 {
+                return Err(SaddleError::Invalid(
+                    "local_max_steps must be at least 1".into(),
+                ));
+            }
+            cfg.tuning().local_max_steps = value as usize;
+        }
+        "climb_max_steps" => {
+            if value < 1 {
+                return Err(SaddleError::Invalid(
+                    "climb_max_steps must be at least 1".into(),
+                ));
+            }
+            cfg.tuning().climb_max_steps = value as usize;
+        }
+        "climb" => match value {
+            0 => cfg.tuning().climb = false,
+            1 => cfg.tuning().climb = true,
+            _ => {
+                return Err(SaddleError::Invalid("climb must be 0 or 1".into()));
+            }
+        },
+        "threads" => {
+            if value < 1 {
+                return Err(SaddleError::Invalid("threads must be at least 1".into()));
+            }
+            cfg.tuning().threads = value as usize;
+        }
+        "max_steps" => {
+            if value < 1 {
+                return Err(SaddleError::Invalid("max_steps must be at least 1".into()));
+            }
+            cfg.max_steps = value as usize;
+        }
+        _ => {
+            return Err(SaddleError::Invalid(format!(
+                "unknown band config key {key}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1258,6 +1518,38 @@ impl BandSession {
         self.restart();
         self.state.set_endpoints(None);
         self.state.drop_last();
+    }
+
+    /// Record endpoint energies the host already holds.
+    ///
+    /// The next evaluation asks only for the interior images. Endpoint
+    /// gradients are never read. Call this before the first step when
+    /// those two images were evaluated already, so a new window does
+    /// not repeat them.
+    pub(crate) fn set_force_tol(&mut self, force_tol: f64) -> Result<(), SaddleError> {
+        if !(force_tol > 0.0 && force_tol.is_finite()) {
+            return Err(SaddleError::Invalid(
+                "band force tolerance must be finite and positive".into(),
+            ));
+        }
+        self.config.force_tol = force_tol;
+        Ok(())
+    }
+
+    /// Replace the climbing rule without dropping quasi-Newton pairs.
+    /// The cached force is forgotten so the next step uses the new rule.
+    pub(crate) fn set_climbing(&mut self, climbing: Option<CiConfig>) {
+        self.config.climbing = climbing;
+        self.state.restart();
+        self.solver.forget_evaluation();
+    }
+
+    pub fn seed_endpoint_energies(&mut self, energies: [f64; 2]) -> Result<(), SaddleError> {
+        if !energies.iter().all(|energy| energy.is_finite()) {
+            return Err(SaddleError::NonFinite("band endpoint energies"));
+        }
+        self.state.set_endpoints(Some(energies));
+        Ok(())
     }
 
     /// Restart the relaxation on the same surface: drop quasi-Newton

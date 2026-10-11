@@ -3,8 +3,11 @@
 
 * Unreleased
 
-- AutoNEB image evaluation splits the band into contiguous blocks, one per thread, and writes each energy and gradient at the image index after every block has finished. The insertion index is read from that array. ~image_block~ is the range one rank owns. One thread evaluates the batch in a single call.
-- AutoNEB grows a band from the supplied images. It inserts where the peak-weighted energy gap or the segment length is worst, relaxes that local window, and arms the climbing image on the last stage. ~ImageInterpolation~ places the new images. ~LinearInterpolation~ is the straight minimum-image segment.
+- C ABI minor 17. ~rgsaddle_config_create~, ~rgsaddle_config_set_f64~, and ~rgsaddle_config_set_i64~ are an opaque band config. ~rgsaddle_band_create_with~ and ~rgsaddle_band_run~ build and finish it. AutoNEB is the ~autoneb~ key on that config, in C, C++, and Python. ~rgsaddle_band_config_t~ is unchanged. There is no ~rgsaddle_autoneb_*~ family.
+- AutoNEB reuses one band session while the window indices do not change, so the L-BFGS pairs survive the climb on that window. A new index set starts empty. The final stage converges the full band at the same climbing settings and the same force tolerance as a fixed CI-NEB. Known endpoint energies are not evaluated again.
+- AutoNEB image evaluation keeps one thread pool for the search. Each evaluation is a fixed set of contiguous blocks, stored by image index after every block has finished. One thread evaluates the batch in a single call. There is no SIMD path. The warm-step speedup is capped by ~n_simul~ free images.
+- AutoNEB temporarily refuses a weighted or Onsager-Machlup spring. Zoom-NEB will recompute those springs when an image is inserted.
+- AutoNEB grows a band from the supplied images. It inserts where the peak-weighted energy gap or the segment length is worst, relaxes that local window, and arms the climbing image on the last stage. The inserted image is the minimum-image midpoint.
 - ~xts_minmode_estimate~ is the xtsci name of ~rgsaddle_minmode_estimate~. A null session still fails closed.
 - ~xts_band_step~ is the xtsci name of ~rgsaddle_band_step~. The arguments and the status codes are the same.
 - C ABI minor 16. ~RGSADDLE_METHOD_QUICKMIN~ runs quick-min on the band. ~rgsaddle_band_create_solid~ and ~rgsaddle_band_set_stress~ carry the solid-state cell block. ~BandConfig::quickmin~ selects the same step. A min-mode session returns null for that method code. FIRE stays the default.

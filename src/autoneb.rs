@@ -7,23 +7,32 @@
 //! Construction fills the band until it holds `n_simul + 2` images, or
 //! `n_max` if that is smaller, by cutting the longest segment.
 //! [`AutoNeb::run`] relaxes a local window, inserts one image where the
-//! resolution is worst, and repeats until `n_max` images. The last
-//! stage arms the climbing image on the window around the highest
-//! interior energy and relaxes that window to [`BandConfig::force_tol`].
+//! resolution is worst, and repeats until `n_max` images. Climbing
+//! then runs on the window around the highest interior energy, and
+//! the full band is relaxed to [`BandConfig::force_tol`] with the
+//! same climbing settings. An unchanged window keeps one
+//! [`BandSession`], so its L-BFGS pairs survive a climb that starts
+//! on the same images. A new index set, including the full band when
+//! that set differs, starts with empty memory.
 //!
-//! [`ImageInterpolation`] places every new image.
+//! [`ImageInterpolation`] places every new image. The initial fill
+//! inserts one midpoint of the longest segment at a time. ASE's
+//! AutoNEB, given only the two endpoints, places `n_simul` images in
+//! one equal-spaced interpolate. Those two fills meet on a unit
+//! segment when `n_simul` is 1 or 3, and they differ for 2.
 //! [`LinearInterpolation`] is the straight minimum-image segment. An
 //! IDPP path implements the same trait; this crate does not ship one.
-//! Buildup leaves climbing off. The spring is uniform, because a
+//! Buildup leaves climbing off. The spring is uniform for now. A
 //! weighted or Onsager-Machlup spring changes length when an image is
-//! inserted. The solid-state block is not part of this loop.
+//! inserted; zoom-NEB will recompute those springs, and the refusal
+//! is temporary. The solid-state block is not part of this loop.
 //!
 //! `surface_rows` counts force evaluations: one row of
 //! [`BandSurface::eval`] is one force call. A surface error discards
 //! the window that was in progress and leaves the previous window in
 //! place. [`AutoNeb::run`] starts once.
 //!
-//! [`AutoNebConfig::threads`] splits each evaluation into that many
+//! [`AutoNebTuning::threads`] splits each evaluation into that many
 //! contiguous image blocks. Block `r` of `n` is [`image_block`]. Each
 //! block is evaluated on its own thread, and the energy and gradient
 //! are stored at the image index after every block has finished.
@@ -39,63 +48,58 @@ use crate::band::{BandConfig, BandSession, BandStatus, BandSurface, Cell, CiConf
 use crate::error::SaddleError;
 use crate::spring::SpringKind;
 
-/// Where a new image is placed between two neighbours.
+/// Where one new image is placed.
 ///
-/// `n_between` is at least 1. Image `k` in `1..=n_between` sits at
-/// fraction `k / (n_between + 1)` from `left` toward `right`. `cell`
-/// is the band cell; `None` is free space. The vectors have the same
-/// length as `left`.
-///
-/// [`LinearInterpolation`] steps in the minimum image. An IDPP
-/// interpolant minimizes the image-dependent pair potential at those
-/// fractions and returns the same shape.
-pub trait ImageInterpolation: Sync {
-    fn interpolate(
+/// `insert` returns the coordinates of the image that goes after
+/// chain row `after`. `energies` is one entry per chain row; a linear
+/// insert ignores it. An IDPP insert minimizes the image-dependent
+/// pair potential on that segment.
+pub(crate) trait ImageInterpolation: Sync {
+    fn insert(
         &self,
-        left: ArrayView1<f64>,
-        right: ArrayView1<f64>,
-        n_between: usize,
-        cell: Option<&Cell>,
-    ) -> Result<Vec<Array1<f64>>, SaddleError>;
+        chain: ArrayView2<f64>,
+        energies: &[Option<f64>],
+        after: usize,
+    ) -> Result<Array1<f64>, SaddleError>;
 }
 
-/// Straight minimum-image segment between two images.
+/// Straight minimum-image midpoint of the chosen segment.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct LinearInterpolation;
+pub(crate) struct LinearInterpolation {
+    cell: Option<Cell>,
+}
+
+impl LinearInterpolation {
+    fn new(cell: Option<Cell>) -> Self {
+        Self { cell }
+    }
+}
 
 impl ImageInterpolation for LinearInterpolation {
-    fn interpolate(
+    fn insert(
         &self,
-        left: ArrayView1<f64>,
-        right: ArrayView1<f64>,
-        n_between: usize,
-        cell: Option<&Cell>,
-    ) -> Result<Vec<Array1<f64>>, SaddleError> {
-        if n_between == 0 {
-            return Err(SaddleError::Invalid(
-                "interpolation needs at least one image".into(),
-            ));
-        }
-        let dof = left.len();
-        if right.len() != dof || dof == 0 || !dof.is_multiple_of(3) {
+        chain: ArrayView2<f64>,
+        energies: &[Option<f64>],
+        after: usize,
+    ) -> Result<Array1<f64>, SaddleError> {
+        let _ = energies;
+        let n = chain.nrows();
+        let dof = chain.ncols();
+        if n < 2 || after + 1 >= n || dof == 0 || !dof.is_multiple_of(3) {
             return Err(SaddleError::Shape(format!(
-                "interpolation endpoints must be matching 3N vectors; got {dof} and {}",
-                right.len()
+                "interpolation needs a segment inside a 3N chain; got {n} x {dof}, after {after}"
             )));
         }
+        let left = chain.row(after);
+        let right = chain.row(after + 1);
         if !left.iter().chain(right.iter()).all(|v| v.is_finite()) {
             return Err(SaddleError::NonFinite("interpolation"));
         }
         let mut step = &right - &left;
-        if let Some(cell) = cell {
+        if let Some(cell) = &self.cell {
             cell.minimum_image(&mut step);
         }
-        let denom = (n_between + 1) as f64;
-        let mut images = Vec::with_capacity(n_between);
-        for k in 1..=n_between {
-            images.push(&left + &step * ((k as f64) / denom));
-        }
-        Ok(images)
+        Ok(&left + &step * 0.5)
     }
 }
 
@@ -178,7 +182,7 @@ fn first_max(values: &[f64]) -> usize {
 /// `n_images % n_ranks` ranks own one extra image. A rank past
 /// `n_ranks`, a zero rank count, or an empty band returns an empty
 /// range.
-pub fn image_block(n_images: usize, rank: usize, n_ranks: usize) -> std::ops::Range<usize> {
+pub(crate) fn image_block(n_images: usize, rank: usize, n_ranks: usize) -> std::ops::Range<usize> {
     if n_ranks == 0 || rank >= n_ranks || n_images == 0 {
         return 0..0;
     }
@@ -195,18 +199,62 @@ struct OwnedBlock {
     gradients: Array2<f64>,
 }
 
+/// Worker threads kept for every image evaluation of one search.
+///
+/// [`eval_images`] builds a pool for a single call. [`AutoNeb`] keeps
+/// one pool for the whole run, so a band step does not spawn operating
+/// system threads. Each rank still owns [`image_block`], and the block
+/// is stored at that image index after every rank has finished.
+pub(crate) struct ImageEvalPool {
+    threads: usize,
+    pool: rayon::ThreadPool,
+}
+
+impl ImageEvalPool {
+    /// `threads` is the worker count. Zero is an error.
+    pub(crate) fn new(threads: usize) -> Result<Self, SaddleError> {
+        if threads == 0 {
+            return Err(SaddleError::Invalid(
+                "image evaluation needs at least one thread".into(),
+            ));
+        }
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .map_err(|err| SaddleError::Invalid(format!("image evaluation pool: {err}")))?;
+        Ok(Self { threads, pool })
+    }
+
+    #[allow(dead_code)]
+    pub fn threads(&self) -> usize {
+        self.threads
+    }
+
+    /// Evaluate `positions` on this pool. See [`eval_images`].
+    pub fn eval<S: BandSurface + ?Sized>(
+        &self,
+        surface: &S,
+        positions: ArrayView2<f64>,
+        energies: &mut Array1<f64>,
+        gradients: &mut Array2<f64>,
+    ) -> Result<(), SaddleError> {
+        eval_checked(surface, positions, energies, gradients, Some(self))
+    }
+}
+
 /// Evaluate every image and store the answer at that image's index.
 ///
 /// `threads` is the rank count. Rank `r` evaluates
-/// [`image_block`] of `min(threads, n)` on its own thread when that
-/// count is greater than one. The block is written back only after
-/// every rank has finished, in image order, so a slower rank cannot
-/// change which slot receives which row. One thread, or a single
-/// image, calls [`BandSurface::eval`] once on the whole batch. The
-/// stored values match that call when the surface depends only on the
-/// row it is given. `threads == 0` is an error. An empty batch is a
-/// no-op.
-pub fn eval_images<S: BandSurface + ?Sized>(
+/// [`image_block`] of `min(threads, n)` on the pool when that count is
+/// greater than one. The block is written back only after every rank
+/// has finished, in image order, so a slower rank cannot change which
+/// slot receives which row. One thread, or a single image, calls
+/// [`BandSurface::eval`] once on the whole batch. The stored values
+/// match that call when the surface depends only on the row it is
+/// given. `threads == 0` is an error. An empty batch is a no-op.
+/// There is no SIMD path: each row is scalar `f64` arithmetic.
+#[allow(dead_code)]
+pub(crate) fn eval_images<S: BandSurface + ?Sized>(
     surface: &S,
     positions: ArrayView2<f64>,
     energies: &mut Array1<f64>,
@@ -218,6 +266,21 @@ pub fn eval_images<S: BandSurface + ?Sized>(
             "image evaluation needs at least one thread".into(),
         ));
     }
+    let n = positions.nrows();
+    if n > 1 && threads > 1 {
+        let pool = ImageEvalPool::new(threads)?;
+        return pool.eval(surface, positions, energies, gradients);
+    }
+    eval_checked(surface, positions, energies, gradients, None)
+}
+
+fn eval_checked<S: BandSurface + ?Sized>(
+    surface: &S,
+    positions: ArrayView2<f64>,
+    energies: &mut Array1<f64>,
+    gradients: &mut Array2<f64>,
+    pool: Option<&ImageEvalPool>,
+) -> Result<(), SaddleError> {
     let n = positions.nrows();
     let dof = positions.ncols();
     if energies.len() != n || gradients.dim() != (n, dof) {
@@ -231,60 +294,49 @@ pub fn eval_images<S: BandSurface + ?Sized>(
     if n == 0 {
         return Ok(());
     }
+    let threads = pool.map(|pool| pool.threads).unwrap_or(1);
     let ranks = threads.min(n);
-    if ranks == 1 {
+    if ranks == 1 || pool.is_none() {
         return surface.eval(positions, energies, gradients);
     }
+    let pool = pool.expect("pool");
     let blocks: Vec<std::ops::Range<usize>> = (0..ranks)
         .map(|rank| image_block(n, rank, ranks))
         .filter(|range| !range.is_empty())
         .collect();
-    let mut joined: Vec<std::thread::Result<Result<OwnedBlock, SaddleError>>> =
-        Vec::with_capacity(blocks.len());
-    std::thread::scope(|scope| {
-        let mut handles = Vec::with_capacity(blocks.len());
-        for range in blocks {
-            handles.push(scope.spawn(move || {
+    let slots: Vec<std::sync::Mutex<Option<Result<OwnedBlock, SaddleError>>>> = (0..blocks.len())
+        .map(|_| std::sync::Mutex::new(None))
+        .collect();
+    pool.pool.scope(|scope| {
+        for (slot, range) in slots.iter().zip(blocks.iter()) {
+            let range = range.clone();
+            scope.spawn(move |_| {
                 let rows = range.end - range.start;
-                let view = positions.slice(ndarray::s![range.clone(), ..]);
+                let view = positions.slice(ndarray::s![range.start..range.end, ..]);
                 let mut block_energies = Array1::zeros(rows);
                 let mut block_gradients = Array2::zeros((rows, dof));
-                surface
+                let result = surface
                     .eval(view, &mut block_energies, &mut block_gradients)
-                    .map(|_| OwnedBlock {
+                    .map(|()| OwnedBlock {
                         start: range.start,
                         energies: block_energies,
                         gradients: block_gradients,
-                    })
-            }));
-        }
-        for handle in handles {
-            joined.push(handle.join());
+                    });
+                *slot.lock().unwrap_or_else(|err| err.into_inner()) = Some(result);
+            });
         }
     });
-    let mut panic_payload = None;
-    let mut ok = Vec::with_capacity(joined.len());
-    let mut error = None;
-    for item in joined {
-        match item {
-            Ok(Ok(block)) => ok.push(block),
-            Ok(Err(err)) => {
-                if error.is_none() {
-                    error = Some(err);
-                }
-            }
-            Err(payload) => {
-                if panic_payload.is_none() {
-                    panic_payload = Some(payload);
-                }
+    let mut ok = Vec::with_capacity(slots.len());
+    for slot in &slots {
+        match slot.lock().unwrap_or_else(|err| err.into_inner()).take() {
+            Some(Ok(block)) => ok.push(block),
+            Some(Err(err)) => return Err(err),
+            None => {
+                return Err(SaddleError::Invalid(
+                    "image evaluation rank did not finish".into(),
+                ));
             }
         }
-    }
-    if let Some(payload) = panic_payload {
-        std::panic::resume_unwind(payload);
-    }
-    if let Some(err) = error {
-        return Err(err);
     }
     ok.sort_by_key(|block| block.start);
     debug_assert!(blocks_cover(&ok, n));
@@ -311,10 +363,10 @@ fn blocks_cover(blocks: &[OwnedBlock], n: usize) -> bool {
     next == n
 }
 
-/// Surface that evaluates images through [`eval_images`].
+/// Surface that evaluates images on a search's pool.
 struct RankedEval<'a, S> {
     surface: &'a S,
-    threads: usize,
+    pool: Option<&'a ImageEvalPool>,
 }
 
 impl<S: BandSurface> BandSurface for RankedEval<'_, S> {
@@ -324,17 +376,19 @@ impl<S: BandSurface> BandSurface for RankedEval<'_, S> {
         energies: &mut Array1<f64>,
         gradients: &mut Array2<f64>,
     ) -> Result<(), SaddleError> {
-        eval_images(self.surface, positions, energies, gradients, self.threads)
+        match self.pool {
+            Some(pool) => pool.eval(self.surface, positions, energies, gradients),
+            None => self.surface.eval(positions, energies, gradients),
+        }
     }
 }
 
-/// AutoNEB controls. Distances and forces are in the caller's units.
+/// AutoNEB controls stored on [`BandConfig::autoneb`].
+///
+/// Distances and forces are in the caller's units. Climbing uses the
+/// parent band's [`BandConfig::climbing`] settings.
 #[derive(Clone, Debug)]
-pub struct AutoNebConfig {
-    /// Band mechanics for every window. Climbing on this config is
-    /// not read: buildup leaves it off, and the last stage arms it
-    /// when [`AutoNebConfig::climb`] is set.
-    pub band: BandConfig,
+pub struct AutoNebTuning {
     /// Free images in a local window. The window pins one image on
     /// each side, so it holds `n_simul + 2` images when the band is
     /// at least that long.
@@ -357,13 +411,9 @@ pub struct AutoNebConfig {
     pub threads: usize,
 }
 
-impl Default for AutoNebConfig {
+impl Default for AutoNebTuning {
     fn default() -> Self {
         Self {
-            band: BandConfig {
-                climbing: None,
-                ..BandConfig::default()
-            },
             n_simul: 3,
             n_max: 7,
             local_force_tol: 1e-1,
@@ -376,8 +426,8 @@ impl Default for AutoNebConfig {
     }
 }
 
-impl AutoNebConfig {
-    fn validate(&self) -> Result<(), SaddleError> {
+impl AutoNebTuning {
+    fn validate(&self, band: &BandConfig) -> Result<(), SaddleError> {
         if self.n_simul == 0 {
             return Err(SaddleError::Invalid(
                 "AutoNEB n_simul must be at least 1".into(),
@@ -407,7 +457,7 @@ impl AutoNebConfig {
                 "AutoNEB local force tolerance must be finite and positive".into(),
             ));
         }
-        if !(self.band.force_tol > 0.0 && self.band.force_tol.is_finite()) {
+        if !(band.force_tol > 0.0 && band.force_tol.is_finite()) {
             return Err(SaddleError::Invalid(
                 "AutoNEB force tolerance must be finite and positive".into(),
             ));
@@ -417,29 +467,31 @@ impl AutoNebConfig {
                 "AutoNEB space_energy_ratio must be finite and non-negative".into(),
             ));
         }
-        if self.band.solid.is_some() {
+        if band.solid.is_some() {
             return Err(SaddleError::Invalid(
                 "AutoNEB does not carry the solid-state block".into(),
             ));
         }
-        match &self.band.spring {
+        match &band.spring {
             SpringKind::Uniform { k } if k.is_finite() => {}
             SpringKind::Uniform { .. } => {
                 return Err(SaddleError::Invalid(
                     "AutoNEB spring constant must be finite".into(),
                 ));
             }
+            // Temporary. Zoom-NEB recomputes springs when an image is
+            // inserted, which removes this refusal.
             SpringKind::Weighted { .. } | SpringKind::OnsagerMachlup { .. } => {
                 return Err(SaddleError::Invalid(
-                    "AutoNEB needs a uniform spring; other springs change length when an image is inserted"
+                    "AutoNEB temporarily needs a uniform spring; weighted springs will be recomputed on insertion with zoom-NEB"
                         .into(),
                 ));
             }
         }
-        let method = if self.band.quickmin {
+        let method = if band.quickmin {
             rgmin::Method::QuickMin
         } else {
-            self.band.method.clone()
+            band.method.clone()
         };
         crate::band::check_force_driven(&method)
     }
@@ -458,45 +510,76 @@ pub struct AutoNebReport {
     /// Rows passed to [`BandSurface::eval`]. One row is one force call.
     pub surface_rows: usize,
     pub n_images: usize,
+    /// Steps of the final full-band session.
+    pub iteration: usize,
 }
 
-/// Growing band. `I` places inserted images.
-pub struct AutoNeb<I: ImageInterpolation = LinearInterpolation> {
-    config: AutoNebConfig,
-    interpolation: I,
+/// One band session kept while its image indices do not change.
+struct OpenWindow {
+    indices: Vec<usize>,
+    session: BandSession,
+}
+
+/// Growing band.
+///
+/// The interpolant is internal. [`AutoNeb::new`] places each image at
+/// the minimum-image midpoint.
+pub struct AutoNeb {
+    band: BandConfig,
+    tuning: AutoNebTuning,
+    interpolation: Box<dyn ImageInterpolation + Sync>,
     positions: Array2<f64>,
     energies: Vec<Option<f64>>,
+    /// Segment index of each insertion, including the initial fill.
+    insertions: Vec<usize>,
     surface_rows: usize,
     ci_index: Option<usize>,
     started: bool,
+    pool: Option<ImageEvalPool>,
+    open: Option<OpenWindow>,
+    /// Times [`BandSession::new`] ran. An unchanged window does not
+    /// increment it.
+    sessions_opened: usize,
 }
 
-impl AutoNeb<LinearInterpolation> {
+impl AutoNeb {
     /// Fill `initial` up to the first window and keep linear insertion
     /// for the rest. `initial` has at least the two endpoints.
-    pub fn new(config: AutoNebConfig, initial: Array2<f64>) -> Result<Self, SaddleError> {
-        Self::with_interpolation(config, initial, LinearInterpolation)
+    /// [`BandConfig::autoneb`] supplies the tuning; `None` uses
+    /// [`AutoNebTuning::default`].
+    pub fn new(config: BandConfig, initial: Array2<f64>) -> Result<Self, SaddleError> {
+        let interpolation = LinearInterpolation::new(config.cell);
+        Self::with_interpolation(config, initial, interpolation)
     }
-}
 
-impl<I: ImageInterpolation> AutoNeb<I> {
     /// Same as [`AutoNeb::new`] with a caller-supplied interpolant.
-    pub fn with_interpolation(
-        config: AutoNebConfig,
+    pub(crate) fn with_interpolation(
+        config: BandConfig,
         initial: Array2<f64>,
-        interpolation: I,
+        interpolation: impl ImageInterpolation + 'static,
     ) -> Result<Self, SaddleError> {
-        config.validate()?;
-        check_initial(&initial, config.n_max)?;
+        let tuning = config.autoneb.clone().unwrap_or_default();
+        tuning.validate(&config)?;
+        check_initial(&initial, tuning.n_max)?;
+        let pool = if tuning.threads > 1 {
+            Some(ImageEvalPool::new(tuning.threads)?)
+        } else {
+            None
+        };
         let n = initial.nrows();
         let mut search = Self {
-            config,
-            interpolation,
+            band: config,
+            tuning,
+            interpolation: Box::new(interpolation),
             positions: initial,
             energies: vec![None; n],
+            insertions: Vec::new(),
             surface_rows: 0,
             ci_index: None,
             started: false,
+            pool,
+            open: None,
+            sessions_opened: 0,
         };
         search.fill_initial()?;
         Ok(search)
@@ -520,7 +603,21 @@ impl<I: ImageInterpolation> AutoNeb<I> {
         self.surface_rows
     }
 
-    /// Relax, insert, and climb. See the module docs for the stages.
+    /// Segment index of each insertion, initial fill included.
+    ///
+    /// The index is the image after which the new images were placed,
+    /// in the band as it stood before that insertion.
+    pub fn insertions(&self) -> &[usize] {
+        &self.insertions
+    }
+
+    /// Relax, insert, climb, then converge the full band.
+    ///
+    /// The local windows use [`AutoNebTuning::local_force_tol`]. The
+    /// climbing window and the final full band use
+    /// [`BandConfig::force_tol`] and the band's climbing settings.
+    /// An unchanged window keeps its [`BandSession`]. A different
+    /// index set starts a new one, with empty L-BFGS memory.
     pub fn run<S: BandSurface>(&mut self, surface: &S) -> Result<AutoNebReport, SaddleError> {
         if self.started {
             return Err(SaddleError::Invalid(
@@ -528,52 +625,57 @@ impl<I: ImageInterpolation> AutoNeb<I> {
             ));
         }
         self.started = true;
-        let mut last = self.relax(
+        self.relax(
             surface,
             false,
-            self.config.local_force_tol,
-            self.config.local_max_steps,
+            false,
+            self.tuning.local_force_tol,
+            self.tuning.local_max_steps,
         )?;
         self.ensure_energies(surface)?;
-        while self.positions.nrows() < self.config.n_max {
+        while self.positions.nrows() < self.tuning.n_max {
             let gap = self.next_gap()?;
-            self.insert_gap(gap, 1)?;
-            last = self.relax(
+            self.insert_one(gap)?;
+            self.relax(
                 surface,
                 false,
-                self.config.local_force_tol,
-                self.config.local_max_steps,
+                false,
+                self.tuning.local_force_tol,
+                self.tuning.local_max_steps,
             )?;
             self.ensure_energies(surface)?;
         }
-        if self.config.climb {
-            last = self.relax(
+        if self.tuning.climb {
+            self.relax(
                 surface,
+                false,
                 true,
-                self.config.band.force_tol,
-                self.config.climb_max_steps,
+                self.band.force_tol,
+                self.tuning.climb_max_steps,
             )?;
         }
+        let last = self.relax(
+            surface,
+            true,
+            self.tuning.climb,
+            self.band.force_tol,
+            self.tuning.climb_max_steps,
+        )?;
         Ok(AutoNebReport {
             status: last.status,
             max_force: last.max_force,
             ci_index: self.ci_index,
             surface_rows: self.surface_rows,
             n_images: self.positions.nrows(),
+            iteration: last.iteration,
         })
     }
 
     fn fill_initial(&mut self) -> Result<(), SaddleError> {
-        let target = (self.config.n_simul + 2).min(self.config.n_max);
+        let target = (self.tuning.n_simul + 2).min(self.tuning.n_max);
         while self.positions.nrows() < target {
-            let room = target - self.positions.nrows();
-            let n_between = if self.positions.nrows() == 2 {
-                self.config.n_simul.min(room)
-            } else {
-                1
-            };
             let gap = self.longest_segment();
-            self.insert_gap(gap, n_between)?;
+            self.insert_one(gap)?;
         }
         Ok(())
     }
@@ -586,7 +688,7 @@ impl<I: ImageInterpolation> AutoNeb<I> {
             let len = segment_length(
                 self.positions.row(j),
                 self.positions.row(j + 1),
-                self.config.band.cell.as_ref(),
+                self.band.cell.as_ref(),
             );
             if len > best_len {
                 best_len = len;
@@ -603,7 +705,7 @@ impl<I: ImageInterpolation> AutoNeb<I> {
             lengths.push(segment_length(
                 self.positions.row(j),
                 self.positions.row(j + 1),
-                self.config.band.cell.as_ref(),
+                self.band.cell.as_ref(),
             ));
         }
         let mut energies = Vec::with_capacity(n);
@@ -618,79 +720,143 @@ impl<I: ImageInterpolation> AutoNeb<I> {
         let span = segment_length(
             self.positions.row(0),
             self.positions.row(n - 1),
-            self.config.band.cell.as_ref(),
+            self.band.cell.as_ref(),
         );
-        worst_segment(&lengths, &energies, span, self.config.space_energy_ratio)
+        worst_segment(&lengths, &energies, span, self.tuning.space_energy_ratio)
     }
 
-    fn insert_gap(&mut self, after: usize, n_between: usize) -> Result<(), SaddleError> {
-        let left = self.positions.row(after).to_owned();
-        let right = self.positions.row(after + 1).to_owned();
-        let cell = self.config.band.cell;
-        let images =
-            self.interpolation
-                .interpolate(left.view(), right.view(), n_between, cell.as_ref())?;
-        let images = checked_images(images, n_between, left.len())?;
-        self.positions = splice_rows(&self.positions, after, &images);
-        self.energies
-            .splice(after + 1..after + 1, std::iter::repeat_n(None, n_between));
+    fn insert_one(&mut self, after: usize) -> Result<(), SaddleError> {
+        let image = self
+            .interpolation
+            .insert(self.positions.view(), &self.energies, after)?;
+        let dof = self.positions.ncols();
+        if image.len() != dof {
+            return Err(SaddleError::Shape(
+                "interpolation image length does not match the band".into(),
+            ));
+        }
+        if !image.iter().all(|value| value.is_finite()) {
+            return Err(SaddleError::NonFinite("interpolation"));
+        }
+        self.positions = splice_rows(&self.positions, after, &[image]);
+        self.energies.insert(after + 1, None);
+        self.insertions.push(after);
+        self.open = None;
         Ok(())
+    }
+
+    fn eval_rows<S: BandSurface>(
+        &self,
+        surface: &S,
+        positions: ArrayView2<f64>,
+        energies: &mut Array1<f64>,
+        gradients: &mut Array2<f64>,
+    ) -> Result<(), SaddleError> {
+        match &self.pool {
+            Some(pool) => pool.eval(surface, positions, energies, gradients),
+            None => surface.eval(positions, energies, gradients),
+        }
     }
 
     fn ensure_energies<S: BandSurface>(&mut self, surface: &S) -> Result<(), SaddleError> {
-        if self.energies.iter().all(Option::is_some) {
+        let missing: Vec<usize> = self
+            .energies
+            .iter()
+            .enumerate()
+            .filter(|(_, energy)| energy.is_none())
+            .map(|(index, _)| index)
+            .collect();
+        if missing.is_empty() {
             return Ok(());
         }
-        let n = self.positions.nrows();
         let dof = self.positions.ncols();
-        let mut energies = Array1::zeros(n);
-        let mut gradients = Array2::zeros((n, dof));
-        eval_images(
-            surface,
-            self.positions.view(),
-            &mut energies,
-            &mut gradients,
-            self.config.threads,
-        )?;
-        self.surface_rows += n;
-        if !energies.iter().all(|energy| energy.is_finite()) {
-            return Err(SaddleError::NonFinite("AutoNEB energy"));
+        let mut positions = Array2::zeros((missing.len(), dof));
+        for (row, &index) in missing.iter().enumerate() {
+            positions.row_mut(row).assign(&self.positions.row(index));
         }
-        self.energies = energies.iter().copied().map(Some).collect();
+        let mut energies = Array1::zeros(missing.len());
+        let mut gradients = Array2::zeros((missing.len(), dof));
+        self.eval_rows(surface, positions.view(), &mut energies, &mut gradients)?;
+        self.surface_rows += missing.len();
+        for (row, &index) in missing.iter().enumerate() {
+            let energy = energies[row];
+            if !energy.is_finite() {
+                return Err(SaddleError::NonFinite("AutoNEB energy"));
+            }
+            self.energies[index] = Some(energy);
+        }
         Ok(())
+    }
+
+    fn ci_settings(&self) -> CiConfig {
+        self.band.climbing.unwrap_or(CiConfig {
+            trigger_factor: 0.5,
+            trigger_force: 0.0,
+        })
     }
 
     fn relax<S: BandSurface>(
         &mut self,
         surface: &S,
+        full: bool,
         climb: bool,
         force_tol: f64,
         max_steps: usize,
     ) -> Result<crate::band::BandReport, SaddleError> {
-        let window = local_window(self.positions.nrows(), self.config.n_simul, &self.energies);
-        let dof = self.positions.ncols();
-        let mut sub = Array2::zeros((window.len(), dof));
-        for (row, &index) in window.iter().enumerate() {
-            sub.row_mut(row).assign(&self.positions.row(index));
-        }
-        let mut band = self.config.band.clone();
-        band.force_tol = force_tol;
-        band.climbing = climb.then_some(CiConfig {
-            trigger_factor: 1.0,
-            trigger_force: f64::INFINITY,
-        });
-        let ranked = RankedEval {
-            surface,
-            threads: self.config.threads,
+        let window = if full {
+            (0..self.positions.nrows()).collect::<Vec<_>>()
+        } else {
+            local_window(self.positions.nrows(), self.tuning.n_simul, &self.energies)
         };
-        let mut session = BandSession::new(band, sub)?;
-        let mut report = session.step(&ranked)?;
-        self.surface_rows += report.surface_rows;
-        while report.status == BandStatus::Running && report.iteration < max_steps {
-            report = session.step(&ranked)?;
-            self.surface_rows += report.surface_rows;
+        let climbing = climb.then_some(self.ci_settings());
+        let reuse = self
+            .open
+            .as_ref()
+            .is_some_and(|open| open.indices == window);
+        if reuse {
+            let open = self.open.as_mut().expect("open window");
+            open.session.set_force_tol(force_tol)?;
+            open.session.set_climbing(climbing);
+        } else {
+            let dof = self.positions.ncols();
+            let mut sub = Array2::zeros((window.len(), dof));
+            for (row, &index) in window.iter().enumerate() {
+                sub.row_mut(row).assign(&self.positions.row(index));
+            }
+            let mut band = self.band.clone();
+            band.force_tol = force_tol;
+            band.climbing = climbing;
+            band.autoneb = None;
+            let mut session = BandSession::new(band, sub)?;
+            let last = *window.last().expect("window");
+            if let (Some(left), Some(right)) = (self.energies[window[0]], self.energies[last]) {
+                session.seed_endpoint_energies([left, right])?;
+            }
+            self.sessions_opened += 1;
+            self.open = Some(OpenWindow {
+                indices: window.clone(),
+                session,
+            });
         }
-        let relaxed = session.positions().to_owned();
+
+        let pool = self.pool.as_ref();
+        let ranked = RankedEval { surface, pool };
+        let (report, rows, relaxed, evaluation) = {
+            let open = self.open.as_mut().expect("open window");
+            let mut taken = 0usize;
+            let mut report = open.session.step(&ranked)?;
+            let mut rows = report.surface_rows;
+            taken += 1;
+            while report.status == BandStatus::Running && taken < max_steps {
+                report = open.session.step(&ranked)?;
+                rows += report.surface_rows;
+                taken += 1;
+            }
+            let relaxed = open.session.positions().to_owned();
+            let evaluation = open.session.evaluation();
+            (report, rows, relaxed, evaluation)
+        };
+        self.surface_rows += rows;
         if !relaxed.iter().all(|value| value.is_finite()) {
             return Err(SaddleError::NonFinite("AutoNEB positions"));
         }
@@ -700,7 +866,7 @@ impl<I: ImageInterpolation> AutoNeb<I> {
             }
             self.positions.row_mut(index).assign(&relaxed.row(row));
         }
-        if let Some(eval) = session.evaluation() {
+        if let Some(eval) = evaluation {
             for (row, &index) in window.iter().enumerate() {
                 let energy = eval.energies[row];
                 if !energy.is_finite() {
@@ -709,9 +875,9 @@ impl<I: ImageInterpolation> AutoNeb<I> {
                 self.energies[index] = Some(energy);
             }
         } else {
-            // The next insertion reads these energies. Drop them so the
-            // following whole-band evaluation fills the moved window.
-            for &index in &window {
+            // Pins did not move. Drop only the free images so the next
+            // evaluation does not repeat a known energy.
+            for &index in window.iter().skip(1).take(window.len().saturating_sub(2)) {
                 self.energies[index] = None;
             }
         }
@@ -739,30 +905,6 @@ fn check_initial(initial: &Array2<f64>, n_max: usize) -> Result<(), SaddleError>
         return Err(SaddleError::NonFinite("AutoNEB positions"));
     }
     Ok(())
-}
-
-fn checked_images(
-    images: Vec<Array1<f64>>,
-    n_between: usize,
-    dof: usize,
-) -> Result<Vec<Array1<f64>>, SaddleError> {
-    if images.len() != n_between {
-        return Err(SaddleError::Shape(format!(
-            "interpolation returned {} images; expected {n_between}",
-            images.len()
-        )));
-    }
-    for image in &images {
-        if image.len() != dof {
-            return Err(SaddleError::Shape(
-                "interpolation image length does not match the band".into(),
-            ));
-        }
-        if !image.iter().all(|value| value.is_finite()) {
-            return Err(SaddleError::NonFinite("interpolation"));
-        }
-    }
-    Ok(images)
 }
 
 fn segment_length(left: ArrayView1<f64>, right: ArrayView1<f64>, cell: Option<&Cell>) -> f64 {
@@ -864,14 +1006,12 @@ mod tests {
     #[test]
     fn linear_midpoint_uses_the_minimum_image() {
         let cell = Cell([[10.0, 0.0, 0.0], [0.0, 8.0, 0.0], [0.0, 0.0, 6.0]]);
-        let left = array![0.0, 0.0, 0.0];
-        let right = array![9.0, 0.0, 0.0];
-        let images = LinearInterpolation
-            .interpolate(left.view(), right.view(), 1, Some(&cell))
+        let chain = array![[0.0, 0.0, 0.0], [9.0, 0.0, 0.0]];
+        let image = LinearInterpolation::new(Some(cell))
+            .insert(chain.view(), &[None, None], 0)
             .unwrap();
-        assert_eq!(images.len(), 1);
-        assert_abs_diff_eq!(images[0][0], -0.5, epsilon = 1e-12);
-        assert_abs_diff_eq!(images[0][1], 0.0, epsilon = 1e-12);
+        assert_abs_diff_eq!(image[0], -0.5, epsilon = 1e-12);
+        assert_abs_diff_eq!(image[1], 0.0, epsilon = 1e-12);
     }
 
     #[test]
@@ -898,13 +1038,20 @@ mod tests {
         assert_eq!(worst_segment(&lengths, &energies, 4.0, 0.5).unwrap(), 1);
     }
 
+    fn band_with(tuning: AutoNebTuning) -> BandConfig {
+        BandConfig {
+            autoneb: Some(tuning),
+            ..BandConfig::default()
+        }
+    }
+
     #[test]
     fn construction_fills_the_first_window_on_the_longest_segment() {
-        let config = AutoNebConfig {
+        let config = band_with(AutoNebTuning {
             n_simul: 1,
             n_max: 4,
-            ..AutoNebConfig::default()
-        };
+            ..AutoNebTuning::default()
+        });
         let initial = array![[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]];
         let search = AutoNeb::new(config, initial).unwrap();
         assert_eq!(search.positions().nrows(), 3);
@@ -914,18 +1061,20 @@ mod tests {
 
     #[test]
     fn weighted_springs_and_a_short_budget_are_refused() {
-        let mut config = AutoNebConfig::default();
-        config.band.spring = SpringKind::Weighted { ks: vec![1.0, 1.0] };
+        let config = BandConfig {
+            spring: SpringKind::Weighted { ks: vec![1.0, 1.0] },
+            ..BandConfig::default()
+        };
         let initial = array![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
-        assert!(matches!(
-            AutoNeb::new(config, initial.clone()),
-            Err(SaddleError::Invalid(_))
-        ));
-        let config = AutoNebConfig {
+        let Err(SaddleError::Invalid(message)) = AutoNeb::new(config, initial.clone()) else {
+            panic!("weighted spring");
+        };
+        assert!(message.contains("temporarily"), "{message}");
+        let config = band_with(AutoNebTuning {
             n_simul: 3,
             n_max: 4,
-            ..AutoNebConfig::default()
-        };
+            ..AutoNebTuning::default()
+        });
         assert!(matches!(
             AutoNeb::new(config, initial),
             Err(SaddleError::Invalid(_))
@@ -972,13 +1121,13 @@ mod tests {
 
     #[test]
     fn a_second_run_is_refused_and_the_ends_stay_put() {
-        let config = AutoNebConfig {
+        let config = band_with(AutoNebTuning {
             n_simul: 1,
             n_max: 4,
             local_max_steps: 5,
-            climb_max_steps: 5,
-            ..AutoNebConfig::default()
-        };
+            climb_max_steps: 80,
+            ..AutoNebTuning::default()
+        });
         let initial = array![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
         let mut search = AutoNeb::new(config, initial).unwrap();
         let report = search.run(&Flat).unwrap();
@@ -1104,14 +1253,361 @@ mod tests {
 
     #[test]
     fn zero_image_threads_are_refused() {
-        let config = AutoNebConfig {
+        let config = band_with(AutoNebTuning {
             threads: 0,
-            ..AutoNebConfig::default()
-        };
+            ..AutoNebTuning::default()
+        });
         let initial = array![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
         assert!(matches!(
             AutoNeb::new(config, initial),
             Err(SaddleError::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn three_midpoints_of_a_unit_segment_are_equally_spaced() {
+        let config = band_with(AutoNebTuning {
+            n_simul: 3,
+            n_max: 5,
+            ..AutoNebTuning::default()
+        });
+        let search = AutoNeb::new(config, array![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]).unwrap();
+        for (index, want) in [0.0, 0.25, 0.5, 0.75, 1.0].into_iter().enumerate() {
+            assert_abs_diff_eq!(search.positions()[(index, 0)], want, epsilon = 1e-12);
+        }
+    }
+
+    #[test]
+    fn two_repeated_midpoints_are_not_equal_thirds() {
+        let config = band_with(AutoNebTuning {
+            n_simul: 2,
+            n_max: 4,
+            ..AutoNebTuning::default()
+        });
+        let search = AutoNeb::new(config, array![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]).unwrap();
+        assert_abs_diff_eq!(search.positions()[(1, 0)], 0.25, epsilon = 1e-12);
+        assert_abs_diff_eq!(search.positions()[(2, 0)], 0.5, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn an_unchanged_window_keeps_one_session() {
+        let config = band_with(AutoNebTuning {
+            n_simul: 1,
+            n_max: 3,
+            local_max_steps: 2,
+            climb_max_steps: 40,
+            ..AutoNebTuning::default()
+        });
+        let initial = array![[0.0, 0.0, 0.0], [0.5, 0.0, 0.0], [1.0, 0.0, 0.0]];
+        let mut search = AutoNeb::new(config, initial).unwrap();
+        let report = search.run(&Flat).unwrap();
+        assert_eq!(report.status, BandStatus::Converged);
+        assert_eq!(search.sessions_opened, 1);
+    }
+
+    #[test]
+    fn an_autoneb_key_turns_tuning_on_and_weighted_springs_stay_temporary() {
+        let mut cfg = crate::band::HostConfig::default();
+        assert!(cfg.band.autoneb.is_none());
+        crate::band::set_i64(&mut cfg, "n_max", 9).unwrap();
+        assert_eq!(cfg.band.autoneb.as_ref().unwrap().n_max, 9);
+        let err = crate::band::set_i64(&mut cfg, "spring", 1).unwrap_err();
+        let SaddleError::Invalid(message) = err else {
+            panic!("spring");
+        };
+        assert!(message.contains("zoom-NEB"), "{message}");
+        assert!(crate::band::set_f64(&mut cfg, "not_a_key", 1.0).is_err());
+    }
+
+    struct DelayLeft {
+        finished: std::sync::Mutex<Vec<f64>>,
+    }
+
+    impl BandSurface for DelayLeft {
+        fn eval(
+            &self,
+            positions: ArrayView2<f64>,
+            energies: &mut Array1<f64>,
+            gradients: &mut Array2<f64>,
+        ) -> Result<(), SaddleError> {
+            let tag = positions[(0, 0)];
+            if tag < 0.0 {
+                std::thread::sleep(std::time::Duration::from_millis(40));
+            }
+            for (i, row) in positions.outer_iter().enumerate() {
+                let mut energy = 0.0;
+                for (k, &x) in row.iter().enumerate() {
+                    energy += x * x;
+                    gradients[(i, k)] = 2.0 * x;
+                }
+                energies[i] = energy;
+            }
+            self.finished.lock().unwrap().push(tag);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_late_block_does_not_change_the_insertion_index() {
+        let positions = array![
+            [-2.0, 0.0, 0.0],
+            [-0.5, 0.1, 0.0],
+            [0.4, -0.2, 0.0],
+            [1.5, 0.3, 0.0],
+        ];
+        let n = positions.nrows();
+        let dof = positions.ncols();
+        let mut serial_e = Array1::zeros(n);
+        let mut serial_g = Array2::zeros((n, dof));
+        eval_images(
+            &DelayLeft {
+                finished: std::sync::Mutex::new(Vec::new()),
+            },
+            positions.view(),
+            &mut serial_e,
+            &mut serial_g,
+            1,
+        )
+        .unwrap();
+        let delayed = DelayLeft {
+            finished: std::sync::Mutex::new(Vec::new()),
+        };
+        let mut parallel_e = Array1::from_elem(n, f64::NAN);
+        let mut parallel_g = Array2::from_elem((n, dof), f64::NAN);
+        eval_images(
+            &delayed,
+            positions.view(),
+            &mut parallel_e,
+            &mut parallel_g,
+            2,
+        )
+        .unwrap();
+        assert!(same_bits(&serial_e, &parallel_e));
+        assert!(
+            serial_g
+                .iter()
+                .zip(parallel_g.iter())
+                .all(|(a, b)| a.to_bits() == b.to_bits())
+        );
+        let right = image_block(n, 1, 2);
+        let left = image_block(n, 0, 2);
+        assert_eq!(
+            *delayed.finished.lock().unwrap(),
+            vec![positions[(right.start, 0)], positions[(left.start, 0)]]
+        );
+        let mut lengths = Vec::with_capacity(n - 1);
+        for j in 0..n - 1 {
+            let step = &positions.row(j + 1) - &positions.row(j);
+            lengths.push(step.dot(&step).sqrt());
+        }
+        let span_step = &positions.row(n - 1) - &positions.row(0);
+        let span = span_step.dot(&span_step).sqrt();
+        let serial: Vec<f64> = serial_e.iter().copied().collect();
+        let parallel: Vec<f64> = parallel_e.iter().copied().collect();
+        assert_eq!(
+            worst_segment(&lengths, &serial, span, 0.5).unwrap(),
+            worst_segment(&lengths, &parallel, span, 0.5).unwrap()
+        );
+    }
+
+    struct HeavyPoly {
+        passes: usize,
+        blocks: std::sync::Mutex<Vec<std::time::Duration>>,
+    }
+
+    impl BandSurface for HeavyPoly {
+        fn eval(
+            &self,
+            positions: ArrayView2<f64>,
+            energies: &mut Array1<f64>,
+            gradients: &mut Array2<f64>,
+        ) -> Result<(), SaddleError> {
+            let started = std::time::Instant::now();
+            for (i, row) in positions.outer_iter().enumerate() {
+                let mut energy = 0.0;
+                for (k, &x) in row.iter().enumerate() {
+                    let mut acc = 0.0;
+                    let mut deriv = 0.0;
+                    for pass in 0..self.passes {
+                        let z = x + (pass as f64) * 1e-4;
+                        acc += z.sin();
+                        deriv += z.cos();
+                    }
+                    energy += acc;
+                    gradients[(i, k)] = deriv;
+                }
+                energies[i] = energy;
+            }
+            self.blocks.lock().unwrap().push(started.elapsed());
+            Ok(())
+        }
+    }
+
+    fn median_range(
+        samples: &mut [std::time::Duration],
+    ) -> (
+        std::time::Duration,
+        std::time::Duration,
+        std::time::Duration,
+    ) {
+        assert!(samples.len() >= 5);
+        samples.sort();
+        let mid = samples.len() / 2;
+        (samples[mid], samples[0], *samples.last().unwrap())
+    }
+
+    /// Strong scaling of one persistent pool. The limiter is read from
+    /// the measured block times of the widest run, not from an
+    /// efficiency threshold. Ignored so it stays out of CI.
+    #[test]
+    #[ignore = "timing; run alone in release with --test-threads=1"]
+    fn parallel_image_eval_strong_scaling() {
+        use std::time::Duration;
+        let n_images = 16;
+        let dof = 32 * 3;
+        let passes = 1600;
+        let mut positions = Array2::zeros((n_images, dof));
+        for i in 0..n_images {
+            for k in 0..dof {
+                positions[(i, k)] = (i + 1) as f64 * 1e-3 + k as f64 * 1e-4;
+            }
+        }
+        let hardware = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        let processors = std::fs::read_to_string("/proc/cpuinfo")
+            .map(|text| {
+                text.lines()
+                    .filter(|line| line.starts_with("processor"))
+                    .count()
+            })
+            .unwrap_or(0);
+        let mut counts = vec![1_usize, 2, 4];
+        if hardware > 1 && !counts.contains(&hardware) {
+            counts.push(hardware);
+        }
+        let pools: Vec<ImageEvalPool> = counts
+            .iter()
+            .map(|&threads| ImageEvalPool::new(threads).unwrap())
+            .collect();
+        let surface = HeavyPoly {
+            passes,
+            blocks: std::sync::Mutex::new(Vec::new()),
+        };
+        let mut serial_e = Array1::zeros(n_images);
+        let mut serial_g = Array2::zeros((n_images, dof));
+        pools[0]
+            .eval(&surface, positions.view(), &mut serial_e, &mut serial_g)
+            .unwrap();
+        for pool in pools.iter().skip(1) {
+            let mut energies = Array1::from_elem(n_images, f64::NAN);
+            let mut gradients = Array2::from_elem((n_images, dof), f64::NAN);
+            pool.eval(&surface, positions.view(), &mut energies, &mut gradients)
+                .unwrap();
+            assert!(
+                same_bits(&serial_e, &energies),
+                "threads={}",
+                pool.threads()
+            );
+        }
+
+        let mut buffers: Vec<(Array1<f64>, Array2<f64>)> = counts
+            .iter()
+            .map(|_| (Array1::zeros(n_images), Array2::zeros((n_images, dof))))
+            .collect();
+        let mut samples = vec![Vec::with_capacity(5); counts.len()];
+        let mut widest_runs: Vec<(Duration, Vec<Duration>)> = Vec::new();
+        let widest = counts.len() - 1;
+        for _rep in 0..5 {
+            for (index, pool) in pools.iter().enumerate() {
+                surface.blocks.lock().unwrap().clear();
+                let (energies, gradients) = &mut buffers[index];
+                let started = std::time::Instant::now();
+                pool.eval(&surface, positions.view(), energies, gradients)
+                    .unwrap();
+                let elapsed = started.elapsed();
+                std::hint::black_box((energies.as_slice(), gradients.as_slice()));
+                samples[index].push(elapsed);
+                if index == widest {
+                    widest_runs.push((elapsed, surface.blocks.lock().unwrap().clone()));
+                }
+            }
+        }
+
+        let mut rows: Vec<(usize, f64, Duration, Duration, f64)> = Vec::new();
+        for (index, &threads) in counts.iter().enumerate() {
+            let (median, low, high) = median_range(&mut samples[index]);
+            let efficiency = if threads == 1 {
+                1.0
+            } else {
+                rows[0].1 / (threads as f64 * median.as_secs_f64())
+            };
+            rows.push((threads, median.as_secs_f64(), low, high, efficiency));
+        }
+        widest_runs.sort_by_key(|(wall, _)| *wall);
+        let chosen = &widest_runs[widest_runs.len() / 2];
+        let block_max = chosen.1.iter().copied().max().unwrap_or(Duration::ZERO);
+        let block_min = chosen.1.iter().copied().min().unwrap_or(Duration::ZERO);
+        let wall = chosen.0.as_secs_f64();
+        let overhead = wall - block_max.as_secs_f64();
+        let limiter = if block_max > Duration::ZERO && overhead > 0.4 * block_max.as_secs_f64() {
+            "scheduling and join"
+        } else if block_min > Duration::ZERO
+            && block_max.as_secs_f64() > 1.25 * block_min.as_secs_f64()
+        {
+            "load imbalance"
+        } else {
+            "per-image arithmetic"
+        };
+
+        let n_simul = 3;
+        let window = positions.slice(ndarray::s![0..n_simul, ..]).to_owned();
+        let mut window_samples = [Vec::new(), Vec::new()];
+        let window_pools = [pools[0].threads(), *counts.last().unwrap()];
+        for _rep in 0..5 {
+            for (slot, &threads) in window_pools.iter().enumerate() {
+                let pool = pools.iter().find(|pool| pool.threads() == threads).unwrap();
+                let mut energies = Array1::zeros(n_simul);
+                let mut gradients = Array2::zeros((n_simul, dof));
+                let started = std::time::Instant::now();
+                pool.eval(&surface, window.view(), &mut energies, &mut gradients)
+                    .unwrap();
+                std::hint::black_box((energies.as_slice(), gradients.as_slice()));
+                window_samples[slot].push(started.elapsed());
+            }
+        }
+        let (w1, _, _) = median_range(&mut window_samples[0]);
+        let (wp, _, _) = median_range(&mut window_samples[1]);
+        let speedup = w1.as_secs_f64() / wp.as_secs_f64();
+
+        eprintln!(
+            "hardware_threads={hardware} processors={processors} simd=none images={n_images} dof={dof} passes={passes}"
+        );
+        eprintln!("threads  median_ms  min_ms  max_ms  efficiency");
+        for (threads, median, low, high, efficiency) in &rows {
+            eprintln!(
+                "{threads:<7}  {:>9.3}  {:>6.3}  {:>6.3}  {efficiency:.3}",
+                median * 1e3,
+                low.as_secs_f64() * 1e3,
+                high.as_secs_f64() * 1e3,
+            );
+        }
+        eprintln!(
+            "widest blocks: max_ms={:.3} min_ms={:.3} wall_ms={:.3} overhead_ms={:.3} spread={:.3} limiter={limiter}",
+            block_max.as_secs_f64() * 1e3,
+            block_min.as_secs_f64() * 1e3,
+            wall * 1e3,
+            overhead * 1e3,
+            block_max.as_secs_f64() / block_min.as_secs_f64().max(1e-12),
+        );
+        eprintln!(
+            "autoneb window: free_images={n_simul} (n_simul cap) threads={} median_ms={:.3} threads={} median_ms={:.3} speedup={speedup:.3}",
+            window_pools[0],
+            w1.as_secs_f64() * 1e3,
+            window_pools[1],
+            wp.as_secs_f64() * 1e3,
+        );
+        assert!(rows[0].1 > 0.0);
+        assert!(!limiter.is_empty());
     }
 }

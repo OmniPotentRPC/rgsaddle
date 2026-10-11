@@ -2955,7 +2955,11 @@ pub unsafe extern "C" fn rgsaddle_band_set_force_gate(band: *mut RgsaddleBand, g
     let Some(gate) = force_gate_of(gate) else {
         return RGSADDLE_INVALID_PARAMETER;
     };
-    unsafe { (*band).session.set_force_gate(gate) };
+    let band = unsafe { &mut *band };
+    let Ok(session) = band.fixed_mut() else {
+        return RGSADDLE_INVALID_PARAMETER;
+    };
+    session.set_force_gate(gate);
     RGSADDLE_OK
 }
 
@@ -2969,7 +2973,11 @@ pub unsafe extern "C" fn rgsaddle_band_set_highs(band: *mut RgsaddleBand, enable
     if enabled != 0 && enabled != 1 {
         return RGSADDLE_INVALID_PARAMETER;
     }
-    unsafe { (*band).session.set_highs(enabled == 1) };
+    let band = unsafe { &mut *band };
+    let Ok(session) = band.fixed_mut() else {
+        return RGSADDLE_INVALID_PARAMETER;
+    };
+    session.set_highs(enabled == 1);
     RGSADDLE_OK
 }
 

@@ -5,7 +5,7 @@
 //! [`band::BandSession::run`] and [`minmode::MinModeSession::run`]
 //! are convenience loops over `step`. [`autoneb::AutoNeb`] inserts
 //! images where the energy gap or the segment length is worst,
-//! relaxes that window, and arms climbing on the last stage.
+//! relaxes that window, climbs, and converges the full band.
 //! Image blocks are stored by image index after every rank finishes,
 //! so the band does not depend on which block finished first.
 //!
@@ -39,10 +39,7 @@ pub mod solid_state;
 pub mod spring;
 pub mod tangent;
 
-pub use autoneb::{
-    AutoNeb, AutoNebConfig, AutoNebReport, ImageInterpolation, LinearInterpolation, eval_images,
-    image_block,
-};
+pub use autoneb::{AutoNeb, AutoNebReport, AutoNebTuning};
 pub use band::{
     BandConfig, BandEvaluation, BandReport, BandSession, BandStatus, BandSurface, Cell, CiConfig,
     SolidState,

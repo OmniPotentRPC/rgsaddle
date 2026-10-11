@@ -2,16 +2,20 @@
 //!
 //! The host owns the loop here exactly as it does in Rust: create,
 //! step until the report says converged, reset at a surface-epoch
-//! boundary, free. No run-to-completion entry exists.
+//! boundary, free. `rgsaddle_band_run` is the completion loop for a
+//! band built from the opaque config handle, including AutoNEB.
 
-use std::ffi::c_void;
+use std::ffi::{CStr, c_void};
 use std::os::raw::c_char;
 use std::slice;
 
 use ndarray::{Array1, Array2, ArrayView2};
 use rgmin::{FireKind, Method};
 
-use crate::band::{BandConfig, BandSession, BandStatus, BandSurface, Cell, CiConfig, SolidState};
+use crate::autoneb::AutoNeb;
+use crate::band::{
+    BandConfig, BandSession, BandStatus, BandSurface, Cell, CiConfig, HostConfig, SolidState,
+};
 use crate::error::SaddleError;
 use crate::minmode::{
     FiniteDifference, MinModeConfig, MinModeKind, MinModeSession, MinModeStatus, PointSurface,
@@ -26,7 +30,7 @@ use crate::spring::SpringKind;
 use crate::tangent::TangentKind;
 
 pub const RGSADDLE_ABI_MAJOR: u32 = 1;
-pub const RGSADDLE_ABI_MINOR: u32 = 16;
+pub const RGSADDLE_ABI_MINOR: u32 = 17;
 
 /// Band config bit 0. The C step calls the surface once per image
 /// carried by the evaluation: every image on the first evaluation
@@ -285,13 +289,41 @@ impl PointSurface for CSurface {
     }
 }
 
+enum BandInner {
+    Fixed(Box<BandSession>),
+    Auto(Box<AutoNeb>),
+}
+
 pub struct RgsaddleBand {
-    session: BandSession,
+    inner: BandInner,
     n_images: i64,
     n_atoms: i64,
+    /// Images the caller must reserve for [`rgsaddle_band_run`].
+    n_cap: i64,
     per_image: bool,
     stress: Option<RgsaddleStressFn>,
     stress_user: *mut c_void,
+    max_steps: usize,
+}
+
+impl RgsaddleBand {
+    fn fixed_mut(&mut self) -> Result<&mut BandSession, i32> {
+        match &mut self.inner {
+            BandInner::Fixed(session) => Ok(session.as_mut()),
+            BandInner::Auto(_) => Err(RGSADDLE_INVALID_PARAMETER),
+        }
+    }
+
+    fn fixed(&self) -> Result<&BandSession, i32> {
+        match &self.inner {
+            BandInner::Fixed(session) => Ok(session.as_ref()),
+            BandInner::Auto(_) => Err(RGSADDLE_INVALID_PARAMETER),
+        }
+    }
+}
+
+pub struct RgsaddleConfig {
+    inner: HostConfig,
 }
 
 pub struct RgsaddleMinMode {
@@ -488,6 +520,7 @@ unsafe fn band_from_parts(
         method: method_of(cfg.method, cfg.memory),
         solid,
         quickmin: cfg.method == 3,
+        autoneb: None,
     };
     match BandSession::new(band_config, initial) {
         Ok(mut session) => {
@@ -502,12 +535,14 @@ unsafe fn band_from_parts(
                 return std::ptr::null_mut();
             }
             Box::into_raw(Box::new(RgsaddleBand {
-                session,
+                inner: BandInner::Fixed(Box::new(session)),
                 n_images,
                 n_atoms,
+                n_cap: n_images,
                 per_image: cfg.flags & RGSADDLE_BAND_PER_IMAGE != 0,
                 stress: None,
                 stress_user: std::ptr::null_mut(),
+                max_steps: 2_000,
             }))
         }
         Err(_) => std::ptr::null_mut(),
@@ -550,17 +585,25 @@ pub unsafe extern "C" fn rgsaddle_band_step(
         return RGSADDLE_NULL_SURFACE;
     };
     let band = unsafe { &mut *band };
+    let n_atoms = band.n_atoms;
+    let n_images = band.n_images;
+    let per_image = band.per_image;
+    let stress = band.stress;
+    let stress_user = band.stress_user;
+    let Ok(session) = band.fixed_mut() else {
+        return RGSADDLE_INVALID_PARAMETER;
+    };
     let cs = CSurface {
         f,
         user,
-        n_atoms: band.n_atoms,
-        n_images: band.n_images,
-        per_image: band.per_image,
+        n_atoms,
+        n_images,
+        per_image,
         rows: Default::default(),
-        stress: band.stress,
-        stress_user: band.stress_user,
+        stress,
+        stress_user,
     };
-    match band.session.step(&cs) {
+    match session.step(&cs) {
         Ok(report) => {
             let out = unsafe { &mut *out };
             stamp_report(out);
@@ -606,7 +649,10 @@ pub unsafe extern "C" fn rgsaddle_band_positions(band: *const RgsaddleBand, out:
         return RGSADDLE_INVALID_PARAMETER;
     }
     let band = unsafe { &*band };
-    let pos = band.session.positions();
+    let pos = match &band.inner {
+        BandInner::Fixed(session) => session.positions().to_owned(),
+        BandInner::Auto(search) => search.positions().to_owned(),
+    };
     let total = (band.n_images * 3 * band.n_atoms) as usize;
     let dst = unsafe { slice::from_raw_parts_mut(out, total) };
     for (i, v) in pos.iter().enumerate() {
@@ -629,14 +675,19 @@ pub unsafe extern "C" fn rgsaddle_band_set_positions(
         return RGSADDLE_INVALID_PARAMETER;
     }
     let band = unsafe { &mut *band };
-    let dof = (3 * band.n_atoms) as usize;
-    let total = dof * band.n_images as usize;
+    let n_atoms = band.n_atoms;
+    let n_images = band.n_images;
+    let Ok(session) = band.fixed_mut() else {
+        return RGSADDLE_INVALID_PARAMETER;
+    };
+    let dof = (3 * n_atoms) as usize;
+    let total = dof * n_images as usize;
     let flat = unsafe { slice::from_raw_parts(positions, total) };
-    let arr = match Array2::from_shape_vec((band.n_images as usize, dof), flat.to_vec()) {
+    let arr = match Array2::from_shape_vec((n_images as usize, dof), flat.to_vec()) {
         Ok(a) => a,
         Err(_) => return RGSADDLE_SHAPE,
     };
-    match band.session.set_positions(arr) {
+    match session.set_positions(arr) {
         Ok(()) => RGSADDLE_OK,
         Err(e) => status_of(&e),
     }
@@ -649,7 +700,11 @@ pub unsafe extern "C" fn rgsaddle_band_reset(band: *mut RgsaddleBand) -> i32 {
     if band.is_null() {
         return RGSADDLE_NULL_BAND;
     }
-    unsafe { (*band).session.reset() };
+    let band = unsafe { &mut *band };
+    let Ok(session) = band.fixed_mut() else {
+        return RGSADDLE_INVALID_PARAMETER;
+    };
+    session.reset();
     RGSADDLE_OK
 }
 
@@ -660,7 +715,11 @@ pub unsafe extern "C" fn rgsaddle_band_restart(band: *mut RgsaddleBand) -> i32 {
     if band.is_null() {
         return RGSADDLE_NULL_BAND;
     }
-    unsafe { (*band).session.restart() };
+    let band = unsafe { &mut *band };
+    let Ok(session) = band.fixed_mut() else {
+        return RGSADDLE_INVALID_PARAMETER;
+    };
+    session.restart();
     RGSADDLE_OK
 }
 
@@ -679,7 +738,10 @@ pub unsafe extern "C" fn rgsaddle_band_evaluation(
         return RGSADDLE_NULL_BAND;
     }
     let band = unsafe { &*band };
-    let Some(eval) = band.session.evaluation() else {
+    let Ok(session) = band.fixed() else {
+        return RGSADDLE_INVALID_PARAMETER;
+    };
+    let Some(eval) = session.evaluation() else {
         return RGSADDLE_NO_EVALUATION;
     };
     let copy = |dst: *mut f64, src: &mut dyn Iterator<Item = f64>, len: usize| {
@@ -705,6 +767,320 @@ pub unsafe extern "C" fn rgsaddle_band_evaluation(
         &mut eval.projected.iter().copied(),
         eval.projected.len(),
     );
+    RGSADDLE_OK
+}
+
+fn c_key<'a>(key: *const c_char) -> Result<&'a str, i32> {
+    if key.is_null() {
+        return Err(RGSADDLE_INVALID_PARAMETER);
+    }
+    let text = unsafe { CStr::from_ptr(key) };
+    text.to_str().map_err(|_| RGSADDLE_INVALID_PARAMETER)
+}
+
+/// # Safety
+/// The returned pointer is freed with [`rgsaddle_config_free`].
+#[unsafe(no_mangle)]
+pub extern "C" fn rgsaddle_config_create() -> *mut RgsaddleConfig {
+    Box::into_raw(Box::new(RgsaddleConfig {
+        inner: HostConfig::default(),
+    }))
+}
+
+/// # Safety
+/// `config` comes from [`rgsaddle_config_create`] and is freed once.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_config_free(config: *mut RgsaddleConfig) {
+    if !config.is_null() {
+        drop(unsafe { Box::from_raw(config) });
+    }
+}
+
+/// # Safety
+/// `config` is live. `key` is a NUL-terminated UTF-8 string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_config_set_f64(
+    config: *mut RgsaddleConfig,
+    key: *const c_char,
+    value: f64,
+) -> i32 {
+    if config.is_null() {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let Ok(key) = c_key(key) else {
+        return RGSADDLE_INVALID_PARAMETER;
+    };
+    match crate::band::set_f64(&mut unsafe { &mut *config }.inner, key, value) {
+        Ok(()) => RGSADDLE_OK,
+        Err(err) => status_of(&err),
+    }
+}
+
+/// # Safety
+/// `config` is live. `key` is a NUL-terminated UTF-8 string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_config_set_i64(
+    config: *mut RgsaddleConfig,
+    key: *const c_char,
+    value: i64,
+) -> i32 {
+    if config.is_null() {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let Ok(key) = c_key(key) else {
+        return RGSADDLE_INVALID_PARAMETER;
+    };
+    match crate::band::set_i64(&mut unsafe { &mut *config }.inner, key, value) {
+        Ok(()) => RGSADDLE_OK,
+        Err(err) => status_of(&err),
+    }
+}
+
+fn refuse_autoneb_pair(cfg: &HostConfig) -> bool {
+    cfg.rtr && cfg.band.autoneb.is_some()
+}
+
+unsafe fn band_from_host(
+    cfg: &HostConfig,
+    n_images: i64,
+    n_atoms: i64,
+    positions: *const f64,
+) -> *mut RgsaddleBand {
+    if positions.is_null() || n_atoms < 1 || n_images < 2 {
+        return std::ptr::null_mut();
+    }
+    if refuse_autoneb_pair(cfg) {
+        return std::ptr::null_mut();
+    }
+    let auto = cfg.band.autoneb.is_some();
+    if !auto && n_images < 3 {
+        return std::ptr::null_mut();
+    }
+    let dof = (3 * n_atoms) as usize;
+    let total = dof * n_images as usize;
+    let flat = unsafe { slice::from_raw_parts(positions, total) };
+    let initial = match Array2::from_shape_vec((n_images as usize, dof), flat.to_vec()) {
+        Ok(array) => array,
+        Err(_) => return std::ptr::null_mut(),
+    };
+    if auto {
+        let n_cap = cfg
+            .band
+            .autoneb
+            .as_ref()
+            .map(|tuning| tuning.n_max as i64)
+            .unwrap_or(n_images);
+        return match AutoNeb::new(cfg.band.clone(), initial) {
+            Ok(search) => {
+                let n_images = search.positions().nrows() as i64;
+                Box::into_raw(Box::new(RgsaddleBand {
+                    inner: BandInner::Auto(Box::new(search)),
+                    n_images,
+                    n_atoms,
+                    n_cap,
+                    per_image: false,
+                    stress: None,
+                    stress_user: std::ptr::null_mut(),
+                    max_steps: cfg.max_steps,
+                }))
+            }
+            Err(_) => std::ptr::null_mut(),
+        };
+    }
+    match BandSession::new(cfg.band.clone(), initial) {
+        Ok(mut session) => {
+            if cfg.rtr
+                && session
+                    .set_rtr(Some(crate::rtr::RtrConfig {
+                        radius_max: cfg.band.max_move * ((n_images - 2) as f64).sqrt(),
+                        ..crate::rtr::RtrConfig::default()
+                    }))
+                    .is_err()
+            {
+                return std::ptr::null_mut();
+            }
+            Box::into_raw(Box::new(RgsaddleBand {
+                inner: BandInner::Fixed(Box::new(session)),
+                n_images,
+                n_atoms,
+                n_cap: n_images,
+                per_image: false,
+                stress: None,
+                stress_user: std::ptr::null_mut(),
+                max_steps: cfg.max_steps,
+            }))
+        }
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// # Safety
+/// `config` is live. `positions` holds `n_images * 3 * n_atoms` doubles.
+/// AutoNEB may already hold more images than `n_images` when this
+/// returns; [`rgsaddle_band_image_count`] is that count. A fixed band
+/// still needs at least 3 images.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_band_create_with(
+    config: *const RgsaddleConfig,
+    n_images: i64,
+    n_atoms: i64,
+    positions: *const f64,
+) -> *mut RgsaddleBand {
+    if config.is_null() {
+        return std::ptr::null_mut();
+    }
+    unsafe { band_from_host(&(*config).inner, n_images, n_atoms, positions) }
+}
+
+/// Current image count, or -1 when `band` is null.
+///
+/// # Safety
+/// `band` is a live session or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_band_image_count(band: *const RgsaddleBand) -> i64 {
+    if band.is_null() {
+        -1
+    } else {
+        unsafe { (*band).n_images }
+    }
+}
+
+fn write_report(
+    out: &mut RgsaddleReport,
+    status: BandStatus,
+    max_force: f64,
+    ci: Option<usize>,
+    iteration: usize,
+    rows: usize,
+) {
+    stamp_report(out);
+    out.status = if status == BandStatus::Converged {
+        1
+    } else {
+        0
+    };
+    out.evaluations = i32::try_from(rows).unwrap_or(i32::MAX);
+    out.max_force = max_force;
+    out.ci_index = ci.map(|index| index as i64).unwrap_or(-1);
+    out.iteration = iteration as i64;
+    out.curvature = 0.0;
+    out.rotations = 0;
+}
+
+fn copy_band_positions(dst: *mut f64, positions: ndarray::ArrayView2<f64>) -> i32 {
+    if dst.is_null() {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let total = positions.len();
+    let out = unsafe { slice::from_raw_parts_mut(dst, total) };
+    for (slot, value) in out.iter_mut().zip(positions.iter()) {
+        *slot = *value;
+    }
+    RGSADDLE_OK
+}
+
+/// Run a fixed band or AutoNEB to completion.
+///
+/// `positions` holds room for `capacity_images` images and receives the
+/// final band. `*n_images` is that count on success. AutoNEB needs
+/// `capacity_images >= n_max`. `step`, `set_positions`, `reset`, and
+/// `restart` return [`RGSADDLE_INVALID_PARAMETER`] on an AutoNEB band.
+/// `threads` above 1 calls `surface` from the pool threads.
+///
+/// # Safety
+/// `band` is live. `positions` has `capacity_images * 3 * n_atoms`
+/// doubles. `n_images` and `out` are non-null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_band_run(
+    band: *mut RgsaddleBand,
+    surface: Option<RgsaddleSurfaceFn>,
+    user: *mut c_void,
+    positions: *mut f64,
+    capacity_images: i64,
+    n_images: *mut i64,
+    out: *mut RgsaddleReport,
+) -> i32 {
+    if band.is_null() {
+        return RGSADDLE_NULL_BAND;
+    }
+    if out.is_null() || n_images.is_null() || positions.is_null() {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let Some(f) = surface else {
+        return RGSADDLE_NULL_SURFACE;
+    };
+    let band = unsafe { &mut *band };
+    if capacity_images < band.n_cap {
+        return RGSADDLE_SHAPE;
+    }
+    let n_atoms = band.n_atoms;
+    let stored_images = band.n_images;
+    let per_image = band.per_image;
+    let stress = band.stress;
+    let stress_user = band.stress_user;
+    let max_steps = band.max_steps;
+    let cs = CSurface {
+        f,
+        user,
+        n_atoms,
+        n_images: stored_images,
+        per_image,
+        rows: Default::default(),
+        stress,
+        stress_user,
+    };
+    let result = match &mut band.inner {
+        BandInner::Fixed(session) => {
+            let mut total = 0usize;
+            let mut report = match session.step(&cs) {
+                Ok(report) => report,
+                Err(err) => return status_of(&err),
+            };
+            total += report.surface_rows;
+            while report.status == BandStatus::Running && report.iteration < max_steps {
+                report = match session.step(&cs) {
+                    Ok(report) => report,
+                    Err(err) => return status_of(&err),
+                };
+                total += report.surface_rows;
+            }
+            let pos = session.positions().to_owned();
+            (
+                report.status,
+                report.max_force,
+                report.ci_index,
+                report.iteration,
+                total,
+                pos,
+            )
+        }
+        BandInner::Auto(search) => match search.run(&cs) {
+            Ok(report) => {
+                let pos = search.positions().to_owned();
+                (
+                    report.status,
+                    report.max_force,
+                    report.ci_index,
+                    report.iteration,
+                    report.surface_rows,
+                    pos,
+                )
+            }
+            Err(err) => return status_of(&err),
+        },
+    };
+    let (status, max_force, ci, iteration, rows, pos) = result;
+    if pos.nrows() as i64 > capacity_images {
+        return RGSADDLE_SHAPE;
+    }
+    if copy_band_positions(positions, pos.view()) != RGSADDLE_OK {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    band.n_images = pos.nrows() as i64;
+    unsafe {
+        *n_images = band.n_images;
+        write_report(&mut *out, status, max_force, ci, iteration, rows);
+    }
     RGSADDLE_OK
 }
 

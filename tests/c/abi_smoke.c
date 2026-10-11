@@ -451,6 +451,79 @@ int main(void) {
   if (st != RGSADDLE_OK) {
     return st;
   }
+
+  {
+    rgsaddle_config_t *cfg = rgsaddle_config_create();
+    if (cfg == NULL) {
+      return fail(RGSADDLE_ALLOC, "config create");
+    }
+    if (rgsaddle_config_set_i64(cfg, "not_a_key", 1) != RGSADDLE_INVALID_PARAMETER) {
+      return fail(RGSADDLE_INVALID_PARAMETER, "unknown key was accepted");
+    }
+    if (rgsaddle_config_set_i64(cfg, "spring", 1) != RGSADDLE_INVALID_PARAMETER) {
+      return fail(RGSADDLE_INVALID_PARAMETER, "weighted spring was accepted");
+    }
+    st = rgsaddle_config_set_i64(cfg, "autoneb", 1);
+    if (st != RGSADDLE_OK) {
+      return fail(st, "autoneb key");
+    }
+    st = rgsaddle_config_set_i64(cfg, "n_simul", 1);
+    if (st != RGSADDLE_OK) {
+      return fail(st, "n_simul");
+    }
+    st = rgsaddle_config_set_i64(cfg, "n_max", 4);
+    if (st != RGSADDLE_OK) {
+      return fail(st, "n_max");
+    }
+    st = rgsaddle_config_set_i64(cfg, "method", RGSADDLE_METHOD_LBFGS);
+    if (st != RGSADDLE_OK) {
+      return fail(st, "method");
+    }
+    st = rgsaddle_config_set_f64(cfg, "force_tol", 1e-2);
+    if (st != RGSADDLE_OK) {
+      return fail(st, "force_tol");
+    }
+    st = rgsaddle_config_set_f64(cfg, "local_force_tol", 1e-1);
+    if (st != RGSADDLE_OK) {
+      return fail(st, "local_force_tol");
+    }
+    st = rgsaddle_config_set_i64(cfg, "climb_max_steps", 200);
+    if (st != RGSADDLE_OK) {
+      return fail(st, "climb_max_steps");
+    }
+    double ends[6] = {-1.0, 0.0, 0.0, 1.0, 0.0, 0.0};
+    RgsaddleBand *grown = rgsaddle_band_create_with(cfg, 2, 1, ends);
+    if (grown == NULL) {
+      return fail(RGSADDLE_ALLOC, "band create_with");
+    }
+    if (rgsaddle_band_image_count(grown) != 3) {
+      fprintf(stderr, "filled images %lld\n", (long long)rgsaddle_band_image_count(grown));
+      return fail(RGSADDLE_SHAPE, "initial fill");
+    }
+    rgsaddle_report_t arep;
+    memset(&arep, 0, sizeof arep);
+    if (rgsaddle_band_step(grown, surface, NULL, &arep) != RGSADDLE_INVALID_PARAMETER) {
+      return fail(RGSADDLE_INVALID_PARAMETER, "step on autoneb");
+    }
+    double outpos[12];
+    memset(outpos, 0, sizeof outpos);
+    int64_t nimg = 0;
+    st = rgsaddle_band_run(grown, surface, NULL, outpos, 4, &nimg, &arep);
+    if (st != RGSADDLE_OK || arep.status != RGSADDLE_STATUS_CONVERGED || nimg != 4) {
+      fprintf(stderr, "autoneb st=%d status=%d n=%lld force=%g\n", st, arep.status,
+              (long long)nimg, arep.max_force);
+      return fail(st == RGSADDLE_OK ? RGSADDLE_SOLVER : st, "autoneb run");
+    }
+    if (arep.ci_index < 1 || arep.ci_index > 2 || fabs(outpos[arep.ci_index * 3]) > 0.05) {
+      fprintf(stderr, "autoneb ci=%lld x=%g\n", (long long)arep.ci_index,
+              arep.ci_index >= 0 ? outpos[arep.ci_index * 3] : 0.0);
+      return fail(RGSADDLE_SOLVER, "autoneb saddle");
+    }
+    rgsaddle_band_free(grown);
+    rgsaddle_config_free(cfg);
+    rgsaddle_config_free(NULL);
+  }
+
   printf("RGSADDLE_C_ABI_OK steps=%d ci=%lld\n", steps, (long long)rep.ci_index);
   return RGSADDLE_OK;
 }
