@@ -26,12 +26,12 @@ projections (plain elastic band, NEB, doubly nudged), and the
 climbing-image force with the eOn trigger rule.
 
 `AutoNeb` grows a short band. It inserts an image where the energy
-gap or the segment length is worst, relaxes a local window, climbs,
-and converges the full band. Image evaluation keeps one thread pool;
-each block is stored at its image index after every block has
-finished. The C, C++, and Python config handles turn it on with the
-`autoneb` key. A weighted spring is refused until zoom-NEB recomputes
-it.
+gap or the segment length is worst, relaxes a local window, and
+climbs. Image evaluation keeps one thread pool; each block is stored
+at its image index after every block has finished. The tuning sits on
+`BandConfig::autoneb`. Bindings reach it later as the AutoNEB preset
+of the stencil configuration. A weighted spring supplied by the host
+is refused until zoom-NEB recomputes it.
 
 Positions are unwrapped Cartesian. A `Cell` (rows are lattice
 vectors, triclinic allowed) supplies minimum-image differences for the

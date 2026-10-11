@@ -3,7 +3,7 @@
 
 * Unreleased
 
-- C ABI minor 17. ~rgsaddle_config_create~, ~rgsaddle_config_set_f64~, and ~rgsaddle_config_set_i64~ are an opaque band config. ~rgsaddle_band_create_with~ and ~rgsaddle_band_run~ build and finish it. AutoNEB is the ~autoneb~ key on that config, in C, C++, and Python. ~rgsaddle_band_config_t~ is unchanged. There is no ~rgsaddle_autoneb_*~ family.
+- AutoNEB stays in Rust until the stencil configuration lands. C, C++, and Python reach ~BandConfig::autoneb~ later as that configuration's AutoNEB preset. The C ABI stays at minor 16.
 - AutoNEB reuses one band session while the window indices do not change, so the L-BFGS pairs survive the climb on that window. A new index set starts empty. The final stage converges the full band at the same climbing settings and the same force tolerance as a fixed CI-NEB. Known endpoint energies are not evaluated again.
 - AutoNEB image evaluation keeps one thread pool for the search. Each evaluation is a fixed set of contiguous blocks, stored by image index after every block has finished. One thread evaluates the batch in a single call. There is no SIMD path. The warm-step speedup is capped by ~n_simul~ free images.
 - AutoNEB temporarily refuses a weighted or Onsager-Machlup spring. Zoom-NEB will recompute those springs when an image is inserted.

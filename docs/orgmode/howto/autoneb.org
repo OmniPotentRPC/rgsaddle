@@ -26,16 +26,18 @@ let report = search.run(&surface)?;
 ~run~ is one shot. A second call is refused. The endpoints never move.
 
 * What the knobs do
-| Knob                 | Role                                                                                          |
-|----------------------+-----------------------------------------------------------------------------------------------|
-| ~n_simul~            | Free images in a local window. The window pins one image on each side. Default 3.            |
-| ~n_max~              | Images at the end, endpoints included. At least ~n_simul + 2~. Default 7.                    |
-| ~local_force_tol~    | Force stop for every window before the climb. Default 0.1.                                   |
-| ~local_max_steps~    | Step cap for those windows.                                                                   |
-| ~climb_max_steps~    | Step cap for the climbing window and for the final full band.                                |
-| ~space_energy_ratio~ | Threshold between the longest segment and the peak-weighted energy gap. Default 0.5, as ASE. |
-| ~climb~              | Arm the climbing image after the last insertion. Default on.                                 |
-| ~threads~            | Image-evaluation threads. Default 1.                                                          |
+C, C++, and Python reach these fields through the stencil configuration's AutoNEB preset.
+
+| Field                | Default | ASE name             | Role                                                                                     |
+|----------------------+---------+----------------------+------------------------------------------------------------------------------------------|
+| ~n_simul~            | 3       | ~n_simul~            | Free images in a local window. The window pins one image on each side.                  |
+| ~n_max~              | 7       | ~n_max~              | Images at the end, endpoints included. At least ~n_simul + 2~.                           |
+| ~local_force_tol~    | 0.1     | ~fmax[0]~            | Force stop for every window before the climb.                                           |
+| ~local_max_steps~    | 100     | ~maxsteps[0]~        | Step cap for those windows.                                                              |
+| ~climb_max_steps~    | 2000    | ~maxsteps[1]~        | Step cap for the climbing window.                                                        |
+| ~space_energy_ratio~ | 0.5     | ~space_energy_ratio~ | Threshold between the longest segment and the peak-weighted energy gap.                 |
+| ~climb~              | on      | ~climb~              | Arm the climbing image after the last insertion.                                        |
+| ~threads~            | 1       |                      | Image-evaluation threads. ASE's world size is the nearest name, and it is not this knob. |
 
 Construction fills the band to ~n_simul + 2~ by cutting the longest segment, one image at a time. Each image is the minimum-image midpoint. ASE's AutoNEB, given only the two endpoints, places ~n_simul~ images in one equal-spaced interpolate. The two fills meet on a unit segment when ~n_simul~ is 1 or 3, and they differ for 2.
 
@@ -56,22 +58,4 @@ An unchanged window keeps its ~BandSession~, so the L-BFGS pairs survive the mom
 One thread evaluates the batch in a single call. The surface then sees one block per call when ~threads~ is above 1. A host that tells a whole-band evaluation from an interior evaluation by the row count should leave ~threads~ at 1.
 
 * Springs
-The spring is uniform for now. A weighted or Onsager-Machlup spring changes length when an image is inserted, so AutoNEB refuses both. The refusal is temporary: zoom-NEB will recompute those springs on insertion. The solid-state block is not part of this loop.
-
-* C, C++, and Python
-The opaque config handle carries the same keys. There is no ~rgsaddle_autoneb_*~ family, and ~rgsaddle_band_config_t~ does not grow.
-
-| Key                                     | Meaning                                              |
-|-----------------------------------------+------------------------------------------------------|
-| ~autoneb~                               | 1 turns AutoNEB on, 0 turns it off                   |
-| ~n_simul~, ~n_max~, ~threads~           | As above                                             |
-| ~local_force_tol~, ~space_energy_ratio~ | As above                                             |
-| ~local_max_steps~, ~climb_max_steps~    | As above                                             |
-| ~climb~                                 | 1 or 0                                               |
-| ~force_tol~, ~max_move~, ~spring_k~     | The band                                             |
-| ~method~, ~memory~, ~tangent~           | FIRE 0, L-BFGS 1, trust region 2, quick-min 3       |
-| ~max_steps~                             | Step cap for a fixed band's ~rgsaddle_band_run~     |
-
-Setting ~n_simul~ or any other AutoNEB key turns the tuning on. ~spring~ 1 or 2 is refused with the same temporary wording. ~rgsaddle_band_create_with~ builds the band. ~rgsaddle_band_run~ drives it. The positions buffer must hold ~n_max~ images. ~rgsaddle_band_image_count~ is the current count, which is already ~n_simul + 2~ after create when the start was shorter. ~step~, ~set_positions~, ~reset~, and ~restart~ return ~RGSADDLE_INVALID_PARAMETER~ on an AutoNEB band.
-
-The C++ wrapper is ~rgsaddle::Config~ with ~set_float~ and ~set_int~, and ~Band::run~. The Python class is ~rgsaddle.Config~ with the same setters and ~run_band~.
+The search keeps a private per-segment spring list. A weighted or Onsager-Machlup spring supplied on ~BandConfig~ is refused. The refusal is temporary: zoom-NEB will recompute those springs on insertion. The solid-state block is not part of this loop.

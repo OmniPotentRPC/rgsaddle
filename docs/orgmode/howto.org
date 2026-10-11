@@ -15,7 +15,7 @@ Enable =capi=. The header is =rgsaddle.h=. ABI major 1. Every wire struct opens 
 There is no run-to-completion C entry point. Units are the caller's. Positions are unwrapped Cartesian, image-major, stride =3 * n_atoms=.
 
 * Grow the band with AutoNEB
-=howto/autoneb= is the AutoNEB loop: insert where the resolution is worst, relax a local window, climb, then converge the full band. The tuning sits on =BandConfig::autoneb=. The C, C++, and Python config handles set the same keys. A weighted spring is refused for now; zoom-NEB will recompute it.
+=howto/autoneb= is the AutoNEB loop: insert where the resolution is worst, relax a local window, and climb. The tuning sits on =BandConfig::autoneb=. C, C++, and Python reach those fields through the stencil configuration's AutoNEB preset. A weighted spring supplied by the host is refused for now; zoom-NEB will recompute it.
 
 * Pick tangents, springs, projections
 | Kind             | Variants                                                             |

@@ -3,51 +3,9 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-fn compiler_accepts_cstddef(compiler: &str) -> bool {
-    let dir = std::env::temp_dir();
-    let src = dir.join(format!(
-        "rgsaddle_cxx_probe_{}_{}.cpp",
-        std::process::id(),
-        compiler.replace('/', "_")
-    ));
-    let bin = dir.join(format!(
-        "rgsaddle_cxx_probe_{}_{}",
-        std::process::id(),
-        compiler.replace('/', "_")
-    ));
-    if std::fs::write(&src, "#include <cstddef>\nint main(){return 0;}\n").is_err() {
-        return false;
-    }
-    let ok = Command::new(compiler)
-        .arg(&src)
-        .arg("-o")
-        .arg(&bin)
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false);
-    let _ = std::fs::remove_file(&src);
-    let _ = std::fs::remove_file(&bin);
-    ok
-}
-
-fn cxx_compiler() -> String {
-    if let Ok(cxx) = std::env::var("CXX")
-        && compiler_accepts_cstddef(&cxx)
-    {
-        return cxx;
-    }
-    if compiler_accepts_cstddef("c++") {
-        return "c++".into();
-    }
-    if compiler_accepts_cstddef("g++") {
-        return "g++".into();
-    }
-    std::env::var("CXX").unwrap_or_else(|_| "c++".into())
-}
-
 #[test]
 fn cxx_session_wrapper_uses_the_official_abi() {
-    let compiler = cxx_compiler();
+    let compiler = std::env::var("CXX").unwrap_or_else(|_| "c++".into());
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let out = std::env::temp_dir().join(format!("rgsaddle_cxx_smoke_{}", std::process::id()));
     let mut libdir = std::env::current_exe().unwrap();

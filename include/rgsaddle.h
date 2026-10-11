@@ -5,9 +5,7 @@
  * The stepping contract in C. The host owns the loop: create a
  * session, call step until it reports converged (or until the host's
  * own policy says otherwise), reset at a surface-epoch boundary,
- * free. rgsaddle_band_run is the completion loop for a band built
- * from the opaque config handle. AutoNEB is that handle's "autoneb"
- * key, not a separate function family.
+ * free. There is no run-to-completion entry point.
  *
  * Layout discipline follows dlpack.h, the same as the rest of the
  * stack: every wire struct opens with an rgsaddle_version_t and a
@@ -30,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 17u
+#define RGSADDLE_ABI_MINOR 16u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -234,56 +232,6 @@ RgsaddleBand *rgsaddle_band_create_solid(const rgsaddle_band_config_t *config,
                                          const double *positions,
                                          const double *cells, double pressure,
                                          double weight);
-
-/**
- * Opaque band configuration. Keys are NUL-terminated strings.
- * Unknown keys return RGSADDLE_INVALID_PARAMETER. Setting n_simul,
- * n_max, local_force_tol, local_max_steps, climb_max_steps,
- * space_energy_ratio, climb, threads, or autoneb=1 turns AutoNEB on.
- * autoneb=0 turns it off. Float keys: force_tol, max_move, spring_k,
- * ci_trigger_factor, ci_trigger_force, local_force_tol,
- * space_energy_ratio. Integer keys: method, memory, tangent, spring,
- * projection, autoneb, n_simul, n_max, local_max_steps,
- * climb_max_steps, climb, threads, max_steps. Weighted and
- * Onsager-Machlup springs are refused for now; zoom-NEB will
- * recompute them when an image is inserted. Does not change the size
- * of rgsaddle_band_config_t. ABI minor 17.
- */
-typedef struct rgsaddle_config rgsaddle_config_t;
-
-rgsaddle_config_t *rgsaddle_config_create(void);
-void rgsaddle_config_free(rgsaddle_config_t *config);
-rgsaddle_status_t rgsaddle_config_set_f64(rgsaddle_config_t *config,
-                                          const char *key, double value);
-rgsaddle_status_t rgsaddle_config_set_i64(rgsaddle_config_t *config,
-                                          const char *key, int64_t value);
-
-/**
- * Band from an opaque config. A fixed band needs at least 3 images.
- * AutoNEB accepts the two endpoints and may already hold more images
- * than n_images; rgsaddle_band_image_count is the current count.
- * Returns NULL on an invalid configuration.
- */
-RgsaddleBand *rgsaddle_band_create_with(const rgsaddle_config_t *config,
-                                        int64_t n_images, int64_t n_atoms,
-                                        const double *positions);
-
-/** Current image count, or -1 when band is NULL. */
-int64_t rgsaddle_band_image_count(const RgsaddleBand *band);
-
-/**
- * Run a fixed band or AutoNEB until it converges or hits its step cap.
- * positions has room for capacity_images images and receives the final
- * band. *n_images is that count. AutoNEB requires
- * capacity_images >= n_max. step, set_positions, reset, restart, and
- * evaluation return RGSADDLE_INVALID_PARAMETER on an AutoNEB band.
- * threads above 1 calls surface from the worker threads. One thread
- * evaluates each batch in a single call.
- */
-rgsaddle_status_t rgsaddle_band_run(RgsaddleBand *band,
-                                    rgsaddle_surface_fn surface, void *user,
-                                    double *positions, int64_t capacity_images,
-                                    int64_t *n_images, rgsaddle_report_t *out);
 
 /**
  * Cauchy stress for a solid-state step. `n_images` is the row count of

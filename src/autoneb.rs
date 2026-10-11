@@ -1305,20 +1305,6 @@ mod tests {
         assert_eq!(search.sessions_opened, 1);
     }
 
-    #[test]
-    fn an_autoneb_key_turns_tuning_on_and_weighted_springs_stay_temporary() {
-        let mut cfg = crate::band::HostConfig::default();
-        assert!(cfg.band.autoneb.is_none());
-        crate::band::set_i64(&mut cfg, "n_max", 9).unwrap();
-        assert_eq!(cfg.band.autoneb.as_ref().unwrap().n_max, 9);
-        let err = crate::band::set_i64(&mut cfg, "spring", 1).unwrap_err();
-        let SaddleError::Invalid(message) = err else {
-            panic!("spring");
-        };
-        assert!(message.contains("zoom-NEB"), "{message}");
-        assert!(crate::band::set_f64(&mut cfg, "not_a_key", 1.0).is_err());
-    }
-
     struct DelayLeft {
         finished: std::sync::Mutex<Vec<f64>>,
     }
