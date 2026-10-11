@@ -1,0 +1,24 @@
+#+title: Step a point stencil
+#+options: toc:nil num:nil
+
+:cite:`goswamiEnhancedClimbingImage2026,henkelmanDimer1999,malekArtNouveau2000`
+
+=Stencil::point= builds a minimiser, a dimer, Lanczos, ART, or eigen following. The defaults match =MinModeConfig=: forward difference, =dr = 1e-3=, rotation tolerance =1e-4=, 20 rotations, Krylov dimension 12, FIRE, maximum move 0.2. Dimer and Lanczos are a =MinModeSession=. A negative curvature reflects the parallel force. A curvature that is not negative ascends along the mode and drops the perpendicular force. Henkelman and Jónsson (1999), doi:10.1063/1.480097. Goswami, Gunde, and Jónsson, Front. Chem. (2026), doi:10.3389/fchem.2026.1807063, Eq. 9.
+
+#+begin_src rust
+let mut search = Stencil::point(x0)
+    .preset(Preset::Dimer)
+    .mode(seed)
+    .build()?;
+let report = search.step(&surface)?;
+#+end_src
+
+ART pushes along the seed until the curvature falls under =art_threshold= (default 0), then climbs with Lanczos. Malek and Mousseau (2000), doi:10.1103/PhysRevE.62.7723. Eigen following builds a central-difference Hessian, calls =exact_eigh=, and makes the largest-magnitude component of the lowest mode positive. =build= rejects =Climb::Reflect= on a minimiser, a window on a point, a zero thread count, and ART without a mode solver.
+
+=Stencil::band= checks the array and then returns =band presets stay on feat/band-methods-zoom=. Zoom, energy-weighted springs, and the band side of the builder are that branch. The chain, the mesh (remesh, insert, window), and the point controller are on this branch.
+
+From C, =rgsaddle_stencil_config_new= takes the preset discriminant. Unknown keys return =RGSADDLE_INVALID_PARAMETER=. =rgsaddle_last_error= is thread-local. =rgsaddle_stencil_run= loops over =rgsaddle_stencil_step=. The report opens with =struct_size=. The older band and min-mode entries stay step-only, and the ABI minor stays 16.
+
+From Python, =rgsaddle.Stencil.point(x, preset="dimer")= takes a C-contiguous float64 vector. =step(surface)= releases the thread, and the surface callback re-attaches. =rgsaddle.ase.Point(atoms, preset="dimer").run(fmax, steps)= is an ASE =Optimizer= whose =step= is one stencil step. A second thread that enters the same handle raises =RuntimeError=.
+
+=Chain::evaluate= writes each image from a block of one. Threads 1, 2, 3, and 8 produce the same bytes. A point preset is one row, so its thread count does not change the bytes either.

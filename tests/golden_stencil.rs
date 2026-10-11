@@ -13,8 +13,8 @@ use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use rayon::ThreadPoolBuilder;
 use rgsaddle::{
     AutoNeb, AutoNebTuning, BandConfig, BandSession, BandSurface, CiConfig, FiniteDifference,
-    MinModeConfig, MinModeKind, MinModeSession, PointSurface, ProjectionKind, SaddleError,
-    SpringKind, TangentKind,
+    MinModeConfig, MinModeKind, MinModeSession, PointSurface, Preset, ProjectionKind, SaddleError,
+    SpringKind, Stencil, TangentKind,
 };
 use sha2::{Digest, Sha256};
 
@@ -471,6 +471,77 @@ fn collect_lines() -> Vec<String> {
         }
     }
     lines
+}
+
+#[test]
+fn stencil_dimer_and_lanczos_match_the_recorded_bytes() {
+    let recorded = fs::read_to_string(golden_path()).expect("golden file");
+    for preset in ["dimer", "lanczos"] {
+        for fixture in ["double-well", "muller-brown", "harmonic-chain"] {
+            let (positions, energies) = run_stencil_mode(preset, fixture);
+            let digest = hash_bytes(positions.view(), &energies);
+            let prefix = format!("{preset} {fixture} 1 ");
+            let line = recorded
+                .lines()
+                .find(|line| line.starts_with(&prefix))
+                .unwrap_or_else(|| panic!("missing golden line {prefix}"));
+            let want = line.rsplit(' ').next().expect("hash");
+            assert_eq!(digest, want, "{preset} {fixture}");
+            let (direct, direct_e) = run_mode(preset, fixture);
+            assert_eq!(positions.len(), direct.len());
+            for (got, reference) in positions.iter().zip(direct.iter()) {
+                assert_eq!(got.to_le_bytes(), reference.to_le_bytes());
+            }
+            for (got, reference) in energies.iter().zip(direct_e.iter()) {
+                assert_eq!(got.to_le_bytes(), reference.to_le_bytes());
+            }
+        }
+    }
+}
+
+fn run_stencil_mode(preset: &str, fixture: &str) -> (Array2<f64>, Vec<f64>) {
+    let (x0, mode) = match fixture {
+        "double-well" => (vec![0.4, 0.25, 0.05], vec![1.0, 0.0, 0.0]),
+        "muller-brown" => (vec![-0.7, 0.5], vec![1.0, 0.0]),
+        "harmonic-chain" => (
+            vec![-1.0, 0.1, 0.0, 0.05, 0.3, 0.02, 1.0, -0.1, 0.0],
+            vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        ),
+        other => panic!("unknown fixture {other}"),
+    };
+    let kind = match preset {
+        "dimer" => Preset::Dimer,
+        "lanczos" => Preset::Lanczos,
+        other => panic!("unknown mode preset {other}"),
+    };
+    let mut search = Stencil::point(array_from(&x0))
+        .preset(kind)
+        .mode(array_from(&mode))
+        .dr(1e-3)
+        .max_rotations(8)
+        .krylov_dim(6)
+        .force_tol(1e-12)
+        .max_move(0.1)
+        .build()
+        .expect("stencil");
+    match fixture {
+        "double-well" => {
+            search.run(&DoubleWell, MODE_STEPS).expect("stencil steps");
+        }
+        "muller-brown" => {
+            search.run(&MullerBrown, MODE_STEPS).expect("stencil steps");
+        }
+        "harmonic-chain" => {
+            search
+                .run(&HarmonicChain, MODE_STEPS)
+                .expect("stencil steps");
+        }
+        _ => unreachable!(),
+    }
+    let x = search.position().to_owned();
+    let positions = x.to_shape((1, x.len())).expect("row").to_owned();
+    let energies = energies_of(fixture, positions.view());
+    (positions, energies)
 }
 
 #[test]

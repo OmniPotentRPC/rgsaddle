@@ -841,6 +841,90 @@ void rgsaddle_samd_free(RgsaddleSamd *session);
 rgsaddle_status_t rgsaddle_band_set_highs(RgsaddleBand *band, int32_t enabled);
 rgsaddle_status_t rgsaddle_minmode_set_highs(RgsaddleMinMode *session, int32_t enabled);
 
+/**
+ * Point stencil. Opaque config, typed keys, one callback.
+ * rgsaddle_stencil_run is a loop over rgsaddle_stencil_step.
+ * The older band and min-mode sessions stay step-only.
+ * Band presets (5 through 13) fail at rgsaddle_stencil_new with
+ * rgsaddle_last_error(); the band builder is feat/band-methods-zoom.
+ * ABI minor stays 16. These symbols are additive.
+ */
+typedef struct rgsaddle_stencil_config rgsaddle_stencil_config_t;
+typedef struct rgsaddle_stencil rgsaddle_stencil_t;
+
+#define RGSADDLE_STENCIL_MIN 0
+#define RGSADDLE_STENCIL_DIMER 1
+#define RGSADDLE_STENCIL_LANCZOS 2
+#define RGSADDLE_STENCIL_ART 3
+#define RGSADDLE_STENCIL_EIGEN 4
+#define RGSADDLE_STENCIL_NEB 5
+#define RGSADDLE_STENCIL_DNEB 6
+#define RGSADDLE_STENCIL_CI_NEB 7
+#define RGSADDLE_STENCIL_ENERGY_WEIGHTED_NEB 8
+#define RGSADDLE_STENCIL_ZOOM_NEB 9
+#define RGSADDLE_STENCIL_AUTONEB 10
+#define RGSADDLE_STENCIL_OCI_NEB 11
+#define RGSADDLE_STENCIL_IDPP 12
+#define RGSADDLE_STENCIL_SIDPP 13
+
+#define RGSADDLE_STENCIL_KEY_DR 1
+#define RGSADDLE_STENCIL_KEY_FORCE_TOL 2
+#define RGSADDLE_STENCIL_KEY_MAX_MOVE 3
+#define RGSADDLE_STENCIL_KEY_ROTATION_TOL 4
+#define RGSADDLE_STENCIL_KEY_MAX_ROTATIONS 5
+#define RGSADDLE_STENCIL_KEY_KRYLOV_DIM 6
+#define RGSADDLE_STENCIL_KEY_THREADS 7
+#define RGSADDLE_STENCIL_KEY_ART_THRESHOLD 8
+#define RGSADDLE_STENCIL_KEY_ART_PUSH 9
+#define RGSADDLE_STENCIL_KEY_MODE 10
+
+#define RGSADDLE_STENCIL_QUERY_POSITIONS 1
+#define RGSADDLE_STENCIL_QUERY_MODE 2
+#define RGSADDLE_STENCIL_QUERY_CURVATURE 3
+
+typedef int (*rgsaddle_stencil_eval_fn)(void *user, size_t rows, size_t dof,
+                                        const uint64_t *ids, const double *x,
+                                        double *e, double *g);
+
+/** Leading struct_size is sizeof(rgsaddle_stencil_report_t). Zero means
+ * the current size. status is 0 while running and 1 when converged.
+ * The function return is the error status. */
+typedef struct {
+  uint64_t struct_size;
+  int32_t status;
+  int32_t reserved;
+  double max_force;
+  double curvature;
+  uint64_t iteration;
+  uint64_t evaluations;
+} rgsaddle_stencil_report_t;
+
+const char *rgsaddle_last_error(void);
+
+rgsaddle_stencil_config_t *rgsaddle_stencil_config_new(int32_t preset);
+rgsaddle_status_t rgsaddle_stencil_config_set_f64(rgsaddle_stencil_config_t *config,
+                                                  int32_t key, double value);
+rgsaddle_status_t rgsaddle_stencil_config_set_i64(rgsaddle_stencil_config_t *config,
+                                                  int32_t key, int64_t value);
+rgsaddle_status_t rgsaddle_stencil_config_set_array(rgsaddle_stencil_config_t *config,
+                                                    int32_t key, const double *values,
+                                                    size_t n);
+void rgsaddle_stencil_config_free(rgsaddle_stencil_config_t *config);
+
+rgsaddle_stencil_t *rgsaddle_stencil_new(const rgsaddle_stencil_config_t *config,
+                                         size_t rows, size_t dof, const double *x);
+rgsaddle_status_t rgsaddle_stencil_step(rgsaddle_stencil_t *stencil,
+                                        rgsaddle_stencil_eval_fn eval, void *user,
+                                        rgsaddle_stencil_report_t *out);
+rgsaddle_status_t rgsaddle_stencil_run(rgsaddle_stencil_t *stencil,
+                                       rgsaddle_stencil_eval_fn eval, void *user,
+                                       size_t max_steps, rgsaddle_stencil_report_t *out);
+rgsaddle_status_t rgsaddle_stencil_positions(const rgsaddle_stencil_t *stencil, double *out,
+                                             size_t n);
+rgsaddle_status_t rgsaddle_stencil_query(const rgsaddle_stencil_t *stencil, int32_t key,
+                                         double *out, size_t n);
+void rgsaddle_stencil_free(rgsaddle_stencil_t *stencil);
+
 #ifdef __cplusplus
 }
 #endif

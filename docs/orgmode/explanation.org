@@ -2,7 +2,7 @@
 #+options: toc:nil num:nil
 
 * Band and minimum-mode
-The band and the minimum-mode search assemble a force and ask =rgmin::Solver= for one step. Hosts interleave trust regions, drift budgets, acquisition, or a hybrid MMF between steps. =run= is a loop over =step=.
+The band and the minimum-mode search assemble a force and ask =rgmin::Solver= for one step. Hosts interleave trust regions, drift budgets, acquisition, or a hybrid MMF between steps. =run= is a loop over =step=. The shared reflection, the point presets, and the chain are in [[file:explanation/one-stencil.org][one stencil]].
 
 * Index-1 Newton
 =Index1Session= searches an index-1 saddle on a Cartesian energy Hessian. The displacement is Baker's restricted-step partitioned RFO: a 2 by 2 rational-function problem maximizes the lowest mode, a second rational-function problem minimizes the complement, and the Besalu-Bofill scaling is solved so the Cartesian step lies inside the trust sphere. Powell or Bofill updates the Hessian from the gradient difference. The trust radius shrinks when that model predicts the energy change poorly and grows when a step on the sphere agrees with it.

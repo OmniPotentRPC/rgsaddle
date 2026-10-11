@@ -63,6 +63,10 @@ pub use nichols::{
 pub use prfo::{PrfoKind, partitioned_rfo_eigen, restricted_prfo_displacement};
 pub use projection::ProjectionKind;
 pub use spring::SpringKind;
+pub use stencil::{
+    BAND_PRESET_SEAM, BandBuilder, Chain, Climb, EvalPool, Mesh, MeshEvent, PointBuilder, Preset,
+    Role, Stencil, StencilReport, StencilStatus,
+};
 pub use tangent::TangentKind;
 
 pub mod cell_log;
