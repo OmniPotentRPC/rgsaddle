@@ -50,7 +50,13 @@ stops on the Ritz residual; `FiniteDifference::Central` is available
 for the actions, and `rotation_angle_tol` stops a dimer rotation whose
 optimal angle falls under it. Both sessions refuse line-searched methods: the
 oracle value beside a projected or inverted force is not its
-potential. `validation/` holds the sympy and sollya
+potential.
+
+`ArtSession` pushes a minimum along one direction until the lowest
+Lanczos curvature crosses a threshold, then climbs that mode and
+relaxes the perpendicular force with FIRE. `event_seed` keys each
+event, and `run_events` returns the batch in index order for any
+thread count. `validation/` holds the sympy and sollya
 checks of the rotation formulas, the Lanczos residual bound, and the
 finite-difference curvature error terms
 (`uv run --with sympy python validation/<script>.py`,

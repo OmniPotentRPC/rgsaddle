@@ -33,5 +33,10 @@ A host that climbs with its own optimizer keeps one session for the whole search
 
 From C, =rgsaddle_index1_create= / =rgsaddle_index1_step= follow the same loop. The vector length is =3 * n_atoms=; a bead polymer passes =n_atoms * n_beads=. A host that owns the Hessian calls =rgsaddle_prfo_step=. =rgsaddle_nichols_step= is the i-PI shift on a spectrum (=nmode= may be smaller than =n= when external modes were dropped). =rgsaddle_hessian_bofill= or =rgsaddle_hessian_powell= updates the Hessian. The gradient on the wire is dE/dx.
 
+* Leave a basin with ART nouveau
+=ArtSession= starts at a displaced minimum. The kick is =ArtDisplacement::Random= or =Targeted=, on =ArtSupport::Global= or on the indices from =ArtSupport::local_atoms=. Each macro-step estimates the lowest mode with the existing Lanczos session, pushes along the opening direction while that curvature is at or above =eigen_threshold=, then climbs the mode. FIRE from rgmin relaxes the force in the perpendicular hyperplane. The perpendicular block waits until a negative-curvature Newton step fits in =max_move=, and one FIRE step then uses the Newton length of the perpendicular force. Convergence is the selected force gate at or under =force_tol= together with a negative lowest curvature.
+
+=event_seed(base, index)= is the stream key for event =index=. It does not advance a generator, so the direction does not depend on which thread or rank evaluates the event. =run_events= writes each outcome at that event index. One thread, several threads, and a split of the index range return the same positions and energies. A failure is the error at the lowest event index.
+
 * Do not keep solver history across a potential change
 Call =reset= after any model update. That is the documented boundary. A host that skips it mixes two surfaces in one L-BFGS memory. =restart= is the optimizer-only reset for the same surface; it keeps the cached endpoint energies and the last evaluation.

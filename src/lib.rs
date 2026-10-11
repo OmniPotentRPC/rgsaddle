@@ -1,9 +1,11 @@
-//! Band, minimum-mode, and index-1 Newton saddle mechanics.
+//! Band, minimum-mode, index-1 Newton, and ART nouveau saddle mechanics.
 //!
 //! The band and the minimum-mode search take one [`rgmin::Solver`]
 //! step on a force this crate assembled. The host owns the loop.
 //! [`band::BandSession::run`] and [`minmode::MinModeSession::run`]
-//! are convenience loops over `step`.
+//! are convenience loops over `step`. [`art::ArtSession`] pushes off a
+//! minimum until the lowest Lanczos curvature crosses a threshold, then
+//! climbs that mode and relaxes the perpendicular force with FIRE.
 //!
 //! [`nichols::Index1Session`] is the index-1 search on a dense
 //! Hessian: Baker's restricted-step partitioned RFO (maximize the
@@ -22,6 +24,7 @@
 //! Positions are unwrapped Cartesian; a periodic host applies its
 //! minimum-image convention before handing differences in.
 
+pub mod art;
 pub mod band;
 #[cfg(feature = "capi")]
 pub mod capi;
@@ -34,6 +37,10 @@ pub mod solid_state;
 pub mod spring;
 pub mod tangent;
 
+pub use art::{
+    ArtConfig, ArtDisplacement, ArtEvent, ArtOutcome, ArtReport, ArtSession, ArtStatus, ArtSupport,
+    event_seed, run_events,
+};
 pub use band::{
     BandConfig, BandEvaluation, BandReport, BandSession, BandStatus, BandSurface, Cell, CiConfig,
     SolidState,
