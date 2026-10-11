@@ -3,7 +3,12 @@
 //! The band and the minimum-mode search take one [`rgmin::Solver`]
 //! step on a force this crate assembled. The host owns the loop.
 //! [`band::BandSession::run`] and [`minmode::MinModeSession::run`]
-//! are convenience loops over `step`.
+//! are convenience loops over `step`. [`autoneb::AutoNeb`] inserts
+//! images where the energy gap or the segment length is worst,
+//! relaxes that window, and climbs. The full band runs only when
+//! requested.
+//! Image blocks are stored by image index after every rank finishes,
+//! so the band does not depend on which block finished first.
 //!
 //! [`nichols::Index1Session`] is the index-1 search on a dense
 //! Hessian: Baker's restricted-step partitioned RFO (maximize the
@@ -21,7 +26,13 @@
 //!
 //! Positions are unwrapped Cartesian; a periodic host applies its
 //! minimum-image convention before handing differences in.
+//!
+//! [`sparse_hessian::sparse_hessian`] recovers a cutoff Hessian by a
+//! direct Curtis-Powell-Reid partition: a smallest-last distance-2
+//! colouring and one batched gradient difference per colour and
+//! Cartesian axis.
 
+pub mod autoneb;
 pub mod band;
 #[cfg(feature = "capi")]
 pub mod capi;
@@ -35,6 +46,7 @@ pub mod solid_state;
 pub mod spring;
 pub mod tangent;
 
+pub use autoneb::{AutoNeb, AutoNebReport, AutoNebTuning};
 pub use band::{
     BandConfig, BandEvaluation, BandReport, BandSession, BandStatus, BandSurface, Cell, CiConfig,
     SolidState,
@@ -92,6 +104,12 @@ pub use geom::{SellaGeom, TrustSchedule};
 
 pub use internal::{CartAxis, Displacement, InternalSlot, Rotation, Translation};
 
+pub mod sparse_hessian;
+pub use sparse_hessian::{
+    Colouring, LowestEigenpairs, SparseHessian, SparseHessianOpts, SparsityPattern,
+    distance2_colouring, eval_displacements, one_atom_hessian, prefactor_hessian, sparse_hessian,
+};
+
 pub use linalg::{
     NumericalHessian, modified_gram_schmidt, numerical_hvp, numerical_hvp_on, numerical_hvp_proj,
     project_hvp, retract_hvp, transport_hvp,
@@ -148,8 +166,6 @@ pub use rtr::{
 
 #[cfg(feature = "readcon")]
 pub mod io;
-#[cfg(feature = "python")]
-mod python;
 #[cfg(feature = "readcon")]
 pub use io::{MolecularFrame, frame_from_con};
 

@@ -2,8 +2,13 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      - "feat/**"
+      - "fix/**"
+      - "ci/**"
   pull_request:
+  workflow_dispatch:
 
 jobs:
   test:
@@ -21,3 +26,18 @@ jobs:
         run: cargo clippy --features capi -- -D warnings
       - name: Format
         run: cargo fmt --check
+
+  ase-parity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install numpy and ASE 3.29.0
+        run: python3 -m pip install 'numpy' 'ase==3.29.0'
+      - name: Compare AutoNEB with ASE
+        env:
+          RGSADDLE_REQUIRE_ASE: "1"
+        run: cargo test --test autoneb --verbose

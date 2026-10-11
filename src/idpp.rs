@@ -3,6 +3,10 @@
 //! Goswami, MethodsX (2026), doi:10.1016/j.mex.2026.103899.
 //! Smidstrup, Pedersen, Stokbro, and Jonsson, J. Chem. Phys. 140,
 //! 214106 (2014), doi:10.1063/1.4878664.
+//! The sequential construction is Schmerwitz, Ásgeirsson, and Jónsson,
+//! J. Chem. Theory Comput. 20, 155 (2024), doi:10.1021/acs.jctc.3c01111.
+//! [`idpp_path`] is the linear-interpolation objective, not that
+//! sequential traversal.
 //!
 //! Linear interpolation of the Cartesian endpoints can place two atoms
 //! on top of each other. The path below keeps the endpoints and relaxes

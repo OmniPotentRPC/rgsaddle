@@ -488,6 +488,7 @@ unsafe fn band_from_parts(
         method: method_of(cfg.method, cfg.memory),
         solid,
         quickmin: cfg.method == 3,
+        autoneb: None,
     };
     match BandSession::new(band_config, initial) {
         Ok(mut session) => {
@@ -1274,6 +1275,7 @@ pub unsafe extern "C" fn rgsaddle_index1_create(
         trust_radius: cfg.trust_radius,
         force_tol: cfg.force_tol,
         fd_dr: cfg.fd_dr,
+        sparse_pattern: None,
     };
     match Index1Session::new(session_config, x, hess, mass) {
         Ok(session) => Box::into_raw(Box::new(RgsaddleIndex1 { session, n_atoms })),

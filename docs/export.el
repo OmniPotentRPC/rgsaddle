@@ -1,9 +1,15 @@
 ;;; Export every org page under docs/orgmode to reStructuredText under docs/source.
 (require 'package)
+(add-to-list 'package-archives '("gnu" . "https://elpa.gnu.org/packages/") t)
 (add-to-list 'package-archives '("melpa" . "https://melpa.org/packages/") t)
 (package-initialize)
+(package-refresh-contents)
+;; ox-rst calls Org 9.7 element predicates. Emacs 29 ships Org 9.6.
+(let* ((desc (cadr (assoc 'org package-archive-contents)))
+       (version (package-desc-version desc)))
+  (unless (package-installed-p 'org version)
+    (package-install desc)))
 (unless (package-installed-p 'ox-rst)
-  (package-refresh-contents)
   (package-install 'ox-rst))
 (require 'ox-rst)
 (let* ((docs (file-name-directory (or load-file-name buffer-file-name)))

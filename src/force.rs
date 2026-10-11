@@ -2,7 +2,7 @@
 //! `ConvergenceForceNorm` (`l2Norm`, `linfNorm`, `maxForceOnAtom`).
 //!
 //! The host picks one. Sessions do not invent a fourth scalar.
-//! Maturin / PyO3 emit a real Python enum (`ForceGate.L2_NORM`, …).
+//! The Python package exposes these discriminants as `ForceGate`.
 
 use ndarray::ArrayView1;
 use rgmin::vecops::{nrm2, nrminf};
