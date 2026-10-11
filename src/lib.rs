@@ -97,8 +97,8 @@ pub use internal::{CartAxis, Displacement, InternalSlot, Rotation, Translation};
 
 pub mod sparse_hessian;
 pub use sparse_hessian::{
-    Colouring, SparseHessian, SparseHessianOpts, SparsityPattern, distance2_colouring,
-    eval_displacements, one_atom_hessian, prefactor_hessian, sparse_hessian,
+    Colouring, LowestEigenpairs, SparseHessian, SparseHessianOpts, SparsityPattern,
+    distance2_colouring, eval_displacements, one_atom_hessian, prefactor_hessian, sparse_hessian,
 };
 
 pub use linalg::{

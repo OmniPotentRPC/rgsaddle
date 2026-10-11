@@ -33,12 +33,10 @@ fn curvature_belongs_to_the_hessian_that_produced_the_step() {
             calls: AtomicUsize::new(0),
         };
         let mut session = Index1Session::new(
-            Index1Config {
-                update,
-                trust_radius: 0.1,
-                force_tol: 0.0,
-                ..Index1Config::default()
-            },
+            Index1Config::default()
+                .with_update(update)
+                .with_trust_radius(0.1)
+                .with_force_tol(0.0),
             array![0.15, -0.25, 0.1],
             Some(h.clone()),
             Some(array![1.0, 4.0, 9.0]),
@@ -134,12 +132,10 @@ fn analytic_trust_step_distinguishes_weighted_and_updated_curvature() {
             calls: AtomicUsize::new(0),
         };
         let mut session = Index1Session::new(
-            Index1Config {
-                update,
-                trust_radius: 0.125,
-                force_tol: 0.0,
-                ..Index1Config::default()
-            },
+            Index1Config::default()
+                .with_update(update)
+                .with_trust_radius(0.125)
+                .with_force_tol(0.0),
             array![0.0, 0.25, 0.0],
             Some(h),
             Some(array![1.0, 4.0, 9.0]),

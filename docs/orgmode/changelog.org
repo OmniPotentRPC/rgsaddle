@@ -3,7 +3,7 @@
 
 * Unreleased
 
-- ~sparse_hessian~ recovers a cutoff Hessian by a direct Curtis-Powell-Reid partition. ~distance2_colouring~ is greedy in smallest-last order. Each colour is one batched surface call, in colour order, and ~SparseHessian~ implements ~ApplyHessian~. ~Index1Config::sparse_pattern~ selects that seed and stays off unless set. Star colouring is not used.
+- ~sparse_hessian~ recovers a cutoff Hessian by a direct Curtis-Powell-Reid partition. ~distance2_colouring~ is greedy in smallest-last order. A block of colours is one batched surface call, sized by ~SparseHessianOpts::memory_budget~ rather than by the thread count, and the blocks are written back in colour order. ~SparseHessian~ implements ~ApplyHessian~ and is frozen at the recovery point: a length mismatch panics. ~from_positions~ builds the pattern with a linkcell cutoff walk plus ~search_skin~, which is ~max(2 * step, skin)~. ~lowest_eigenpairs~ is a thick-restart Lanczos with a residual stop, an iteration cap, and the residuals in the result. The default step is ~1e-6~. ~Index1Config~ is non-exhaustive, and ~with_sparse_pattern~ selects the CPR seed. The seed stays off unless set. Star colouring is not used.
 - ~xts_minmode_estimate~ is the xtsci name of ~rgsaddle_minmode_estimate~. A null session still fails closed.
 - ~xts_band_step~ is the xtsci name of ~rgsaddle_band_step~. The arguments and the status codes are the same.
 - C ABI minor 16. ~RGSADDLE_METHOD_QUICKMIN~ runs quick-min on the band. ~rgsaddle_band_create_solid~ and ~rgsaddle_band_set_stress~ carry the solid-state cell block. ~BandConfig::quickmin~ selects the same step. A min-mode session returns null for that method code. FIRE stays the default.

@@ -50,6 +50,11 @@ pub enum HessianUpdate {
 }
 
 /// Stepping controls for [`Index1Session`].
+///
+/// The struct is non-exhaustive. Set [`Self::sparse_pattern`] with
+/// [`Self::with_sparse_pattern`]. The seed stays dense unless that
+/// builder is used.
+#[non_exhaustive]
 #[derive(Clone, Debug)]
 pub struct Index1Config {
     pub update: HessianUpdate,
@@ -65,6 +70,44 @@ pub struct Index1Config {
     /// `None` keeps the dense central-difference seed. A pattern is
     /// used only when no Hessian was supplied. The width is `fd_dr`.
     pub sparse_pattern: Option<SparsityPattern>,
+}
+
+impl Index1Config {
+    /// Hessian update used after the seed step.
+    pub fn with_update(mut self, update: HessianUpdate) -> Self {
+        self.update = update;
+        self
+    }
+
+    /// Nichols target, index-1 by default.
+    pub fn with_mode(mut self, mode: NicholsMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    /// Euclidean bound on the Cartesian step.
+    pub fn with_trust_radius(mut self, trust_radius: f64) -> Self {
+        self.trust_radius = trust_radius;
+        self
+    }
+
+    /// Stop when every gradient component is at or under this.
+    pub fn with_force_tol(mut self, force_tol: f64) -> Self {
+        self.force_tol = force_tol;
+        self
+    }
+
+    /// Central-difference width used when no Hessian was supplied.
+    pub fn with_fd_dr(mut self, fd_dr: f64) -> Self {
+        self.fd_dr = fd_dr;
+        self
+    }
+
+    /// Opt into the direct CPR seed. The default seed stays dense.
+    pub fn with_sparse_pattern(mut self, pattern: SparsityPattern) -> Self {
+        self.sparse_pattern = Some(pattern);
+        self
+    }
 }
 
 impl Default for Index1Config {
@@ -704,6 +747,7 @@ impl Index1Session {
                 SparseHessianOpts {
                     difference: FiniteDifference::Central,
                     step: self.config.fd_dr,
+                    ..SparseHessianOpts::default()
                 },
             )?;
             return Ok(recovered.to_dense());
