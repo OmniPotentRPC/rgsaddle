@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 
 import numpy as np
+import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
@@ -22,6 +23,10 @@ VALUES = st.one_of(
 )
 
 
+def _callback(ids: np.ndarray, x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    return np.zeros(ids.shape[0], dtype=np.float64), np.zeros(x.shape, dtype=np.float64)
+
+
 @settings(max_examples=30)
 @given(values=st.lists(VALUES, min_size=0, max_size=8))
 def test_echo_round_trip(values: list[float]) -> None:
@@ -34,29 +39,25 @@ def test_echo_round_trip(values: list[float]) -> None:
 
 
 def test_echo_rejects_dtype_and_order() -> None:
-    with pytest_raises_type():
+    with pytest.raises(TypeError):
         echo_f64(np.array([1, 2, 3], dtype=np.int64))
     fortran = np.asfortranarray(np.ones((2, 2), dtype=np.float64))
-    with pytest_raises_type():
+    with pytest.raises(TypeError):
         echo_f64(fortran)
 
 
 def test_drive_eval_shape() -> None:
     slot = ClaimSlot()
-
-    def callback(ids: np.ndarray, x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        return np.zeros(ids.shape[0]), np.zeros_like(x)
-
     ids = np.array([0], dtype=np.int64)
     x = np.zeros((2, 3), dtype=np.float64)
     owners = np.array([1], dtype=np.uint64)
     flags = np.array([0], dtype=np.uint8)
-    try:
-        drive_eval(callback, ids, x, owners, flags, 1, slot)
-    except ValueError as exc:
-        assert "x:" in str(exc)
-        return
-    raise AssertionError("shape mismatch must raise")
+    with pytest.raises(ValueError, match=r"x:") as exc:
+        drive_eval(_callback, ids, x, owners, flags, 1, slot)
+    text = str(exc.value)
+    assert "(1, 3)" in text
+    assert "(2, 3)" in text
+
 
 def test_callback_dtype_and_order_name_the_array() -> None:
     slot = ClaimSlot()
@@ -81,6 +82,37 @@ def test_callback_dtype_and_order_name_the_array() -> None:
 
 
 @settings(max_examples=20)
+@given(values=st.lists(st.integers(min_value=0, max_value=6), min_size=1, max_size=4))
+def test_int32_ids_raise_type_error(values: list[int]) -> None:
+    ids = np.array(values, dtype=np.int32)
+    x = np.zeros((len(values), 1), dtype=np.float64)
+    owners = np.zeros(len(values), dtype=np.uint64)
+    flags = np.zeros(len(values), dtype=np.uint8)
+    with pytest.raises(TypeError):
+        drive_eval(_callback, ids, x, owners, flags, 1, ClaimSlot())
+
+
+@settings(max_examples=20)
+@given(
+    rows=st.integers(min_value=0, max_value=4),
+    cols=st.integers(min_value=1, max_value=4),
+    bad_rows=st.integers(min_value=0, max_value=6),
+)
+def test_shape_error_names_both_shapes(rows: int, cols: int, bad_rows: int) -> None:
+    if bad_rows == rows:
+        return
+    ids = np.arange(rows, dtype=np.int64)
+    x = np.zeros((bad_rows, cols), dtype=np.float64)
+    owners = np.arange(rows, dtype=np.uint64)
+    flags = np.zeros(rows, dtype=np.uint8)
+    with pytest.raises(ValueError) as exc:
+        drive_eval(_callback, ids, x, owners, flags, 1, ClaimSlot())
+    text = str(exc.value)
+    assert f"({rows}, {cols})" in text
+    assert f"({bad_rows}, {cols})" in text
+
+
+@settings(max_examples=20)
 @given(code=st.integers(min_value=-20, max_value=20))
 def test_status_class(code: int) -> None:
     set_last_error("")
@@ -94,18 +126,5 @@ def test_status_class(code: int) -> None:
         expected = NumericalError
     else:
         expected = RuntimeError
-    try:
+    with pytest.raises(expected):
         rgsaddle.raise_status(code)
-    except expected:
-        return
-    raise AssertionError(f"{code} did not raise {expected.__name__}")
-
-
-class _TypeErrorBox:
-    pass
-
-
-def pytest_raises_type():
-    import pytest
-
-    return pytest.raises(TypeError)
