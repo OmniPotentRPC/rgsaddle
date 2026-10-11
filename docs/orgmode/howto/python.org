@@ -10,8 +10,6 @@ pip install 'rgsaddle[ase]'
 
 Wheels are cp310, cp311, cp312-abi3 (CPython 3.12 through 3.15 with the GIL), cp314t and cp315t. There is no musllinux wheel and no cp313t wheel.
 
-:cite:`goswamiEnhancedClimbingImage2026,larsenAtomicSimulationEnvironment2017`
-
 * Enum controls
 Eight =IntEnum= classes keep the names and values of the previous module: =ForceGate=, =HessUpdate=, =IrcKind=, =MinModeKind=, =EigenDevice=, =ExpandKind=, =CellChart=, =RestrictedKind=. An unknown ordinal raises =ValueError=. =rgsaddle.__version__= is the package version.
 
