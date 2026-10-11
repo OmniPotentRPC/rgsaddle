@@ -5,13 +5,16 @@
 //! those images and inserts the rest. The printed row counts are the
 //! force calls.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
+use rgsaddle::autoneb::worst_segment;
 use rgsaddle::{
-    AutoNeb, AutoNebConfig, BandConfig, BandReport, BandSession, BandStatus, BandSurface, Cell,
-    CiConfig, ImageInterpolation, LinearInterpolation, SaddleError,
+    AutoNeb, AutoNebConfig, AutoNebReport, BandConfig, BandReport, BandSession, BandStatus,
+    BandSurface, Cell, CiConfig, ImageInterpolation, LinearInterpolation, SaddleError, eval_images,
+    image_block,
 };
 
 struct Rows<S> {
@@ -164,6 +167,7 @@ fn double_well_autoneb_matches_fixed_cineb_accuracy() {
             climb_max_steps: 500,
             space_energy_ratio: 0.5,
             climb: true,
+            threads: 1,
         },
         ends_of(&full, 3),
         interp,
@@ -319,6 +323,7 @@ fn muller_brown_autoneb_matches_fixed_cineb_accuracy() {
             climb_max_steps: 800,
             space_energy_ratio: 0.5,
             climb: true,
+            threads: 1,
         },
         ends_of(&full, 3),
     )
@@ -357,4 +362,335 @@ fn muller_brown_autoneb_matches_fixed_cineb_accuracy() {
         auto_report.max_force,
         fixed_report.max_force
     );
+}
+
+fn same_array_bits(left: &Array2<f64>, right: &Array2<f64>) {
+    assert_eq!(left.dim(), right.dim());
+    for (a, b) in left.iter().zip(right.iter()) {
+        assert_eq!(a.to_bits(), b.to_bits(), "{a} vs {b}");
+    }
+}
+
+fn same_energy_bits(left: &[Option<f64>], right: &[Option<f64>]) {
+    assert_eq!(left.len(), right.len());
+    for (a, b) in left.iter().zip(right.iter()) {
+        match (a, b) {
+            (Some(a), Some(b)) => assert_eq!(a.to_bits(), b.to_bits(), "{a} vs {b}"),
+            (None, None) => {}
+            _ => panic!("energy presence {a:?} vs {b:?}"),
+        }
+    }
+}
+
+struct RankedRun {
+    report: AutoNebReport,
+    positions: Array2<f64>,
+    energies: Vec<Option<f64>>,
+}
+
+fn ranked_double_well(threads: usize) -> RankedRun {
+    let n_images = 7;
+    let mut auto = AutoNeb::new(
+        AutoNebConfig {
+            band: lbfgs_band(1e-3),
+            n_simul: 3,
+            n_max: n_images,
+            local_force_tol: 5e-2,
+            local_max_steps: 40,
+            climb_max_steps: 500,
+            space_energy_ratio: 0.5,
+            climb: true,
+            threads,
+        },
+        ends_of(&double_well_band(n_images), 3),
+    )
+    .unwrap();
+    let surface = Rows::new(DoubleWell);
+    let report = auto.run(&surface).unwrap();
+    assert_eq!(report.surface_rows, surface.rows());
+    RankedRun {
+        report,
+        positions: auto.positions().to_owned(),
+        energies: auto.energies().to_vec(),
+    }
+}
+
+fn assert_same_run(label: &str, left: &RankedRun, right: &RankedRun) {
+    assert_eq!(left.report.status, right.report.status, "{label}");
+    assert_eq!(
+        left.report.max_force.to_bits(),
+        right.report.max_force.to_bits(),
+        "{label}"
+    );
+    assert_eq!(left.report.ci_index, right.report.ci_index, "{label}");
+    assert_eq!(
+        left.report.surface_rows, right.report.surface_rows,
+        "{label}"
+    );
+    assert_eq!(left.report.n_images, right.report.n_images, "{label}");
+    same_array_bits(&left.positions, &right.positions);
+    same_energy_bits(&left.energies, &right.energies);
+}
+
+#[test]
+fn autoneb_is_bit_identical_at_one_two_and_n_threads() {
+    let n_images = 7;
+    let one = ranked_double_well(1);
+    let two = ranked_double_well(2);
+    let per_image = ranked_double_well(n_images);
+    assert_eq!(one.report.status, BandStatus::Converged, "{:?}", one.report);
+    assert_eq!(one.report.n_images, n_images);
+    assert!(one.report.surface_rows > 0);
+    assert_same_run("2 threads", &one, &two);
+    assert_same_run("one thread per image", &one, &per_image);
+}
+
+struct DelayLeft {
+    finished: Mutex<Vec<f64>>,
+}
+
+impl BandSurface for DelayLeft {
+    fn eval(
+        &self,
+        positions: ArrayView2<f64>,
+        energies: &mut Array1<f64>,
+        gradients: &mut Array2<f64>,
+    ) -> Result<(), SaddleError> {
+        let tag = positions[(0, 0)];
+        if tag < 0.0 {
+            std::thread::sleep(Duration::from_millis(40));
+        }
+        for (i, row) in positions.outer_iter().enumerate() {
+            let mut energy = 0.0;
+            for (k, &x) in row.iter().enumerate() {
+                energy += x * x;
+                gradients[(i, k)] = 2.0 * x;
+            }
+            energies[i] = energy;
+        }
+        self.finished.lock().unwrap().push(tag);
+        Ok(())
+    }
+}
+
+#[test]
+fn a_late_block_does_not_change_the_insertion_index() {
+    let positions = ndarray::array![
+        [-2.0, 0.0, 0.0],
+        [-0.5, 0.1, 0.0],
+        [0.4, -0.2, 0.0],
+        [1.5, 0.3, 0.0],
+    ];
+    let n = positions.nrows();
+    let dof = positions.ncols();
+    let serial_surface = DelayLeft {
+        finished: Mutex::new(Vec::new()),
+    };
+    let mut serial_e = Array1::zeros(n);
+    let mut serial_g = Array2::zeros((n, dof));
+    eval_images(
+        &serial_surface,
+        positions.view(),
+        &mut serial_e,
+        &mut serial_g,
+        1,
+    )
+    .unwrap();
+
+    let delayed = DelayLeft {
+        finished: Mutex::new(Vec::new()),
+    };
+    let mut parallel_e = Array1::from_elem(n, f64::NAN);
+    let mut parallel_g = Array2::from_elem((n, dof), f64::NAN);
+    eval_images(
+        &delayed,
+        positions.view(),
+        &mut parallel_e,
+        &mut parallel_g,
+        2,
+    )
+    .unwrap();
+    for (a, b) in serial_e.iter().zip(parallel_e.iter()) {
+        assert_eq!(a.to_bits(), b.to_bits());
+    }
+    for (a, b) in serial_g.iter().zip(parallel_g.iter()) {
+        assert_eq!(a.to_bits(), b.to_bits());
+    }
+    let left = image_block(n, 0, 2);
+    let right = image_block(n, 1, 2);
+    assert_eq!(
+        *delayed.finished.lock().unwrap(),
+        vec![positions[(right.start, 0)], positions[(left.start, 0)]]
+    );
+
+    let mut lengths = Vec::with_capacity(n - 1);
+    for j in 0..n - 1 {
+        let step = &positions.row(j + 1) - &positions.row(j);
+        lengths.push(step.dot(&step).sqrt());
+    }
+    let span_step = &positions.row(n - 1) - &positions.row(0);
+    let span = span_step.dot(&span_step).sqrt();
+    let serial: Vec<f64> = serial_e.iter().copied().collect();
+    let parallel: Vec<f64> = parallel_e.iter().copied().collect();
+    assert_eq!(
+        worst_segment(&lengths, &serial, span, 0.5).unwrap(),
+        worst_segment(&lengths, &parallel, span, 0.5).unwrap()
+    );
+}
+
+/// Per-image polynomial. The value of one row does not depend on any
+/// other row, and the loop is long enough to time.
+struct HeavyPoly {
+    passes: usize,
+}
+
+impl BandSurface for HeavyPoly {
+    fn eval(
+        &self,
+        positions: ArrayView2<f64>,
+        energies: &mut Array1<f64>,
+        gradients: &mut Array2<f64>,
+    ) -> Result<(), SaddleError> {
+        for (i, row) in positions.outer_iter().enumerate() {
+            let mut energy = 0.0;
+            for (k, &x) in row.iter().enumerate() {
+                let mut acc = 0.0;
+                let mut deriv = 0.0;
+                for pass in 0..self.passes {
+                    let z = x + (pass as f64) * 1e-4;
+                    acc += z.sin();
+                    deriv += z.cos();
+                }
+                energy += acc;
+                gradients[(i, k)] = deriv;
+            }
+            energies[i] = energy;
+        }
+        Ok(())
+    }
+}
+
+fn median_and_range(samples: &mut [Duration]) -> (Duration, Duration, Duration) {
+    assert_eq!(samples.len(), 5);
+    samples.sort();
+    (samples[2], samples[0], samples[4])
+}
+
+#[test]
+fn parallel_image_eval_strong_scaling() {
+    let n_images = 16;
+    let dof = 32 * 3;
+    let passes = 1600;
+    let mut positions = Array2::zeros((n_images, dof));
+    for i in 0..n_images {
+        for k in 0..dof {
+            positions[(i, k)] = (i + 1) as f64 * 1e-3 + k as f64 * 1e-4;
+        }
+    }
+    let surface = HeavyPoly { passes };
+    let max_threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    let mut counts = vec![1_usize, 2, 4];
+    if !counts.contains(&max_threads) {
+        counts.push(max_threads);
+    }
+
+    let mut serial_e = Array1::zeros(n_images);
+    let mut serial_g = Array2::zeros((n_images, dof));
+    eval_images(&surface, positions.view(), &mut serial_e, &mut serial_g, 1).unwrap();
+    for &threads in &counts {
+        let mut energies = Array1::from_elem(n_images, f64::NAN);
+        let mut gradients = Array2::from_elem((n_images, dof), f64::NAN);
+        eval_images(
+            &surface,
+            positions.view(),
+            &mut energies,
+            &mut gradients,
+            threads,
+        )
+        .unwrap();
+        for (a, b) in serial_e.iter().zip(energies.iter()) {
+            assert_eq!(a.to_bits(), b.to_bits(), "threads={threads}");
+        }
+        for (a, b) in serial_g.iter().zip(gradients.iter()) {
+            assert_eq!(a.to_bits(), b.to_bits(), "threads={threads}");
+        }
+    }
+
+    for &threads in &counts {
+        let mut energies = Array1::zeros(n_images);
+        let mut gradients = Array2::zeros((n_images, dof));
+        eval_images(
+            &surface,
+            positions.view(),
+            &mut energies,
+            &mut gradients,
+            threads,
+        )
+        .unwrap();
+        std::hint::black_box((&energies, &gradients));
+    }
+
+    let mut buffers: Vec<(Array1<f64>, Array2<f64>)> = counts
+        .iter()
+        .map(|_| (Array1::zeros(n_images), Array2::zeros((n_images, dof))))
+        .collect();
+    let mut samples = vec![Vec::with_capacity(5); counts.len()];
+    for _rep in 0..5 {
+        for (index, &threads) in counts.iter().enumerate() {
+            let (energies, gradients) = &mut buffers[index];
+            let started = Instant::now();
+            eval_images(&surface, positions.view(), energies, gradients, threads).unwrap();
+            let elapsed = started.elapsed();
+            std::hint::black_box((&*energies, &*gradients));
+            samples[index].push(elapsed);
+        }
+    }
+
+    let mut rows: Vec<(usize, f64, Duration, Duration, f64)> = Vec::with_capacity(counts.len());
+    for (index, &threads) in counts.iter().enumerate() {
+        let (median, low, high) = median_and_range(&mut samples[index]);
+        assert!(median > Duration::ZERO, "threads={threads}");
+        let efficiency = if threads == 1 {
+            1.0
+        } else {
+            let t1 = rows[0].1;
+            t1 / (threads as f64 * median.as_secs_f64())
+        };
+        rows.push((threads, median.as_secs_f64(), low, high, efficiency));
+    }
+
+    // E(p) = median(T_1) / (p * median(T_p)).
+    // Spawn and join dominates when E(2) is below 0.6.
+    // Idle ranks dominate when E(max) is more than 0.15 below E(2).
+    let efficiency_of = |threads: usize| -> f64 {
+        rows.iter()
+            .find(|(count, ..)| *count == threads)
+            .map(|(_, _, _, _, efficiency)| *efficiency)
+            .unwrap()
+    };
+    let limiter = if max_threads <= 1 {
+        "single hardware thread"
+    } else if efficiency_of(2) < 0.6 {
+        "thread spawn and join"
+    } else if max_threads > 2 && efficiency_of(max_threads) + 0.15 < efficiency_of(2) {
+        "load imbalance and idle threads"
+    } else {
+        "arithmetic in the per-image kernel"
+    };
+
+    eprintln!(
+        "strong scaling image evaluation: {n_images} images, {dof} dof, {passes} passes, median of 5 interleaved runs, hardware_threads={max_threads}"
+    );
+    eprintln!("threads  median_ms  min_ms  max_ms  efficiency");
+    for (threads, median, low, high, efficiency) in &rows {
+        eprintln!(
+            "{threads:<7}  {:>9.3}  {:>6.3}  {:>6.3}  {efficiency:.3}",
+            median * 1e3,
+            low.as_secs_f64() * 1e3,
+            high.as_secs_f64() * 1e3,
+        );
+    }
+    eprintln!("limiter: {limiter}");
 }

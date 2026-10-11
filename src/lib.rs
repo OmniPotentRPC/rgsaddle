@@ -6,6 +6,8 @@
 //! are convenience loops over `step`. [`autoneb::AutoNeb`] inserts
 //! images where the energy gap or the segment length is worst,
 //! relaxes that window, and arms climbing on the last stage.
+//! Image blocks are stored by image index after every rank finishes,
+//! so the band does not depend on which block finished first.
 //!
 //! [`nichols::Index1Session`] is the index-1 search on a dense
 //! Hessian: Baker's restricted-step partitioned RFO (maximize the
@@ -37,7 +39,10 @@ pub mod solid_state;
 pub mod spring;
 pub mod tangent;
 
-pub use autoneb::{AutoNeb, AutoNebConfig, AutoNebReport, ImageInterpolation, LinearInterpolation};
+pub use autoneb::{
+    AutoNeb, AutoNebConfig, AutoNebReport, ImageInterpolation, LinearInterpolation, eval_images,
+    image_block,
+};
 pub use band::{
     BandConfig, BandEvaluation, BandReport, BandSession, BandStatus, BandSurface, Cell, CiConfig,
     SolidState,

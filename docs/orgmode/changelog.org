@@ -3,6 +3,7 @@
 
 * Unreleased
 
+- AutoNEB image evaluation splits the band into contiguous blocks, one per thread, and writes each energy and gradient at the image index after every block has finished. The insertion index is read from that array. ~image_block~ is the range one rank owns. One thread evaluates the batch in a single call.
 - AutoNEB grows a band from the supplied images. It inserts where the peak-weighted energy gap or the segment length is worst, relaxes that local window, and arms the climbing image on the last stage. ~ImageInterpolation~ places the new images. ~LinearInterpolation~ is the straight minimum-image segment.
 - ~xts_minmode_estimate~ is the xtsci name of ~rgsaddle_minmode_estimate~. A null session still fails closed.
 - ~xts_band_step~ is the xtsci name of ~rgsaddle_band_step~. The arguments and the status codes are the same.

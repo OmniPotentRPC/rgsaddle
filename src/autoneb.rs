@@ -22,6 +22,16 @@
 //! [`BandSurface::eval`] is one force call. A surface error discards
 //! the window that was in progress and leaves the previous window in
 //! place. [`AutoNeb::run`] starts once.
+//!
+//! [`AutoNebConfig::threads`] splits each evaluation into that many
+//! contiguous image blocks. Block `r` of `n` is [`image_block`]. Each
+//! block is evaluated on its own thread, and the energy and gradient
+//! are stored at the image index after every block has finished.
+//! [`worst_segment`] then reads that array from low index to high, so
+//! the inserted image does not depend on which block finished first.
+//! One thread evaluates the batch as a single call. The surface sees
+//! one block per call. A host that tells a whole-band evaluation from
+//! an interior evaluation by the row count should leave `threads` at 1.
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 
@@ -162,6 +172,162 @@ fn first_max(values: &[f64]) -> usize {
     best
 }
 
+/// Contiguous images owned by one rank.
+///
+/// Ranks `0..n_ranks` cover `0..n_images` without overlap. The first
+/// `n_images % n_ranks` ranks own one extra image. A rank past
+/// `n_ranks`, a zero rank count, or an empty band returns an empty
+/// range.
+pub fn image_block(n_images: usize, rank: usize, n_ranks: usize) -> std::ops::Range<usize> {
+    if n_ranks == 0 || rank >= n_ranks || n_images == 0 {
+        return 0..0;
+    }
+    let base = n_images / n_ranks;
+    let extra = n_images % n_ranks;
+    let start = rank * base + rank.min(extra);
+    let len = base + usize::from(rank < extra);
+    start..start + len
+}
+
+struct OwnedBlock {
+    start: usize,
+    energies: Array1<f64>,
+    gradients: Array2<f64>,
+}
+
+/// Evaluate every image and store the answer at that image's index.
+///
+/// `threads` is the rank count. Rank `r` evaluates
+/// [`image_block`] of `min(threads, n)` on its own thread when that
+/// count is greater than one. The block is written back only after
+/// every rank has finished, in image order, so a slower rank cannot
+/// change which slot receives which row. One thread, or a single
+/// image, calls [`BandSurface::eval`] once on the whole batch. The
+/// stored values match that call when the surface depends only on the
+/// row it is given. `threads == 0` is an error. An empty batch is a
+/// no-op.
+pub fn eval_images<S: BandSurface + ?Sized>(
+    surface: &S,
+    positions: ArrayView2<f64>,
+    energies: &mut Array1<f64>,
+    gradients: &mut Array2<f64>,
+    threads: usize,
+) -> Result<(), SaddleError> {
+    if threads == 0 {
+        return Err(SaddleError::Invalid(
+            "image evaluation needs at least one thread".into(),
+        ));
+    }
+    let n = positions.nrows();
+    let dof = positions.ncols();
+    if energies.len() != n || gradients.dim() != (n, dof) {
+        return Err(SaddleError::Shape(format!(
+            "image evaluation needs one energy and one gradient row per image; got {n} positions, {} energies, {} x {} gradients",
+            energies.len(),
+            gradients.nrows(),
+            gradients.ncols()
+        )));
+    }
+    if n == 0 {
+        return Ok(());
+    }
+    let ranks = threads.min(n);
+    if ranks == 1 {
+        return surface.eval(positions, energies, gradients);
+    }
+    let blocks: Vec<std::ops::Range<usize>> = (0..ranks)
+        .map(|rank| image_block(n, rank, ranks))
+        .filter(|range| !range.is_empty())
+        .collect();
+    let mut joined: Vec<std::thread::Result<Result<OwnedBlock, SaddleError>>> =
+        Vec::with_capacity(blocks.len());
+    std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(blocks.len());
+        for range in blocks {
+            handles.push(scope.spawn(move || {
+                let rows = range.end - range.start;
+                let view = positions.slice(ndarray::s![range.clone(), ..]);
+                let mut block_energies = Array1::zeros(rows);
+                let mut block_gradients = Array2::zeros((rows, dof));
+                surface
+                    .eval(view, &mut block_energies, &mut block_gradients)
+                    .map(|_| OwnedBlock {
+                        start: range.start,
+                        energies: block_energies,
+                        gradients: block_gradients,
+                    })
+            }));
+        }
+        for handle in handles {
+            joined.push(handle.join());
+        }
+    });
+    let mut panic_payload = None;
+    let mut ok = Vec::with_capacity(joined.len());
+    let mut error = None;
+    for item in joined {
+        match item {
+            Ok(Ok(block)) => ok.push(block),
+            Ok(Err(err)) => {
+                if error.is_none() {
+                    error = Some(err);
+                }
+            }
+            Err(payload) => {
+                if panic_payload.is_none() {
+                    panic_payload = Some(payload);
+                }
+            }
+        }
+    }
+    if let Some(payload) = panic_payload {
+        std::panic::resume_unwind(payload);
+    }
+    if let Some(err) = error {
+        return Err(err);
+    }
+    ok.sort_by_key(|block| block.start);
+    debug_assert!(blocks_cover(&ok, n));
+    for block in ok {
+        let end = block.start + block.energies.len();
+        energies
+            .slice_mut(ndarray::s![block.start..end])
+            .assign(&block.energies);
+        gradients
+            .slice_mut(ndarray::s![block.start..end, ..])
+            .assign(&block.gradients);
+    }
+    Ok(())
+}
+
+fn blocks_cover(blocks: &[OwnedBlock], n: usize) -> bool {
+    let mut next = 0;
+    for block in blocks {
+        if block.start != next {
+            return false;
+        }
+        next += block.energies.len();
+    }
+    next == n
+}
+
+/// Surface that evaluates images through [`eval_images`].
+struct RankedEval<'a, S> {
+    surface: &'a S,
+    threads: usize,
+}
+
+impl<S: BandSurface> BandSurface for RankedEval<'_, S> {
+    fn eval(
+        &self,
+        positions: ArrayView2<f64>,
+        energies: &mut Array1<f64>,
+        gradients: &mut Array2<f64>,
+    ) -> Result<(), SaddleError> {
+        eval_images(self.surface, positions, energies, gradients, self.threads)
+    }
+}
+
 /// AutoNEB controls. Distances and forces are in the caller's units.
 #[derive(Clone, Debug)]
 pub struct AutoNebConfig {
@@ -185,6 +351,10 @@ pub struct AutoNebConfig {
     pub space_energy_ratio: f64,
     /// Arm the climbing image after the last insertion.
     pub climb: bool,
+    /// Threads that evaluate images. `1` evaluates the batch on the
+    /// calling thread. A larger value uses [`image_block`] and stores
+    /// each result by image index. The surface sees one block per call.
+    pub threads: usize,
 }
 
 impl Default for AutoNebConfig {
@@ -201,6 +371,7 @@ impl Default for AutoNebConfig {
             climb_max_steps: 2000,
             space_energy_ratio: 0.5,
             climb: true,
+            threads: 1,
         }
     }
 }
@@ -224,6 +395,11 @@ impl AutoNebConfig {
         if self.local_max_steps == 0 || self.climb_max_steps == 0 {
             return Err(SaddleError::Invalid(
                 "AutoNEB step caps must be at least 1".into(),
+            ));
+        }
+        if self.threads == 0 {
+            return Err(SaddleError::Invalid(
+                "AutoNEB needs at least one image-evaluation thread".into(),
             ));
         }
         if !(self.local_force_tol > 0.0 && self.local_force_tol.is_finite()) {
@@ -469,7 +645,13 @@ impl<I: ImageInterpolation> AutoNeb<I> {
         let dof = self.positions.ncols();
         let mut energies = Array1::zeros(n);
         let mut gradients = Array2::zeros((n, dof));
-        surface.eval(self.positions.view(), &mut energies, &mut gradients)?;
+        eval_images(
+            surface,
+            self.positions.view(),
+            &mut energies,
+            &mut gradients,
+            self.config.threads,
+        )?;
         self.surface_rows += n;
         if !energies.iter().all(|energy| energy.is_finite()) {
             return Err(SaddleError::NonFinite("AutoNEB energy"));
@@ -497,11 +679,15 @@ impl<I: ImageInterpolation> AutoNeb<I> {
             trigger_factor: 1.0,
             trigger_force: f64::INFINITY,
         });
+        let ranked = RankedEval {
+            surface,
+            threads: self.config.threads,
+        };
         let mut session = BandSession::new(band, sub)?;
-        let mut report = session.step(surface)?;
+        let mut report = session.step(&ranked)?;
         self.surface_rows += report.surface_rows;
         while report.status == BandStatus::Running && report.iteration < max_steps {
-            report = session.step(surface)?;
+            report = session.step(&ranked)?;
             self.surface_rows += report.surface_rows;
         }
         let relaxed = session.positions().to_owned();
@@ -802,5 +988,130 @@ mod tests {
         assert_eq!(search.positions()[(3, 0)], 1.0);
         assert!(report.surface_rows > 0);
         assert!(matches!(search.run(&Flat), Err(SaddleError::Invalid(_))));
+    }
+
+    #[test]
+    fn image_blocks_partition_the_band() {
+        assert_eq!(image_block(7, 0, 2), 0..4);
+        assert_eq!(image_block(7, 1, 2), 4..7);
+        assert_eq!(image_block(7, 0, 4), 0..2);
+        assert_eq!(image_block(7, 1, 4), 2..4);
+        assert_eq!(image_block(7, 2, 4), 4..6);
+        assert_eq!(image_block(7, 3, 4), 6..7);
+        assert_eq!(image_block(7, 4, 4), 0..0);
+        assert_eq!(image_block(0, 0, 2), 0..0);
+        assert_eq!(image_block(4, 0, 0), 0..0);
+        for n in 1..12 {
+            for ranks in 1..=n {
+                let mut hits = vec![0_u8; n];
+                for rank in 0..ranks {
+                    for index in image_block(n, rank, ranks) {
+                        hits[index] += 1;
+                    }
+                }
+                assert!(
+                    hits.iter().all(|&hit| hit == 1),
+                    "n={n} ranks={ranks} {hits:?}"
+                );
+            }
+        }
+    }
+
+    struct Quadratic;
+
+    impl BandSurface for Quadratic {
+        fn eval(
+            &self,
+            positions: ArrayView2<f64>,
+            energies: &mut Array1<f64>,
+            gradients: &mut Array2<f64>,
+        ) -> Result<(), SaddleError> {
+            for (i, row) in positions.outer_iter().enumerate() {
+                let mut energy = 0.0;
+                for (k, &x) in row.iter().enumerate() {
+                    energy += x * x;
+                    gradients[(i, k)] = 2.0 * x;
+                }
+                energies[i] = energy;
+            }
+            Ok(())
+        }
+    }
+
+    fn same_bits(left: &Array1<f64>, right: &Array1<f64>) -> bool {
+        left.iter()
+            .zip(right.iter())
+            .all(|(a, b)| a.to_bits() == b.to_bits())
+    }
+
+    #[test]
+    fn parallel_eval_matches_one_thread_bit_for_bit() {
+        let positions = array![
+            [-1.5, 0.25, 0.0],
+            [0.5, -0.5, 1.0],
+            [1.25, 0.0, -0.25],
+            [-0.75, 0.5, 0.5],
+            [0.0, 1.0, -1.0],
+        ];
+        let n = positions.nrows();
+        let dof = positions.ncols();
+        let mut serial_e = Array1::zeros(n);
+        let mut serial_g = Array2::zeros((n, dof));
+        eval_images(
+            &Quadratic,
+            positions.view(),
+            &mut serial_e,
+            &mut serial_g,
+            1,
+        )
+        .unwrap();
+        for threads in [2, 3, n] {
+            let mut energies = Array1::from_elem(n, f64::NAN);
+            let mut gradients = Array2::from_elem((n, dof), f64::NAN);
+            eval_images(
+                &Quadratic,
+                positions.view(),
+                &mut energies,
+                &mut gradients,
+                threads,
+            )
+            .unwrap();
+            assert!(same_bits(&serial_e, &energies), "threads={threads}");
+            assert!(
+                serial_g
+                    .iter()
+                    .zip(gradients.iter())
+                    .all(|(a, b)| a.to_bits() == b.to_bits()),
+                "threads={threads}"
+            );
+        }
+        let err = eval_images(
+            &Quadratic,
+            positions.view(),
+            &mut serial_e,
+            &mut serial_g,
+            0,
+        );
+        assert!(matches!(err, Err(SaddleError::Invalid(_))));
+        let mut short = Array1::zeros(n - 1);
+        let err = eval_images(&Quadratic, positions.view(), &mut short, &mut serial_g, 1);
+        assert!(matches!(err, Err(SaddleError::Shape(_))));
+        let empty = Array2::<f64>::zeros((0, 3));
+        let mut empty_e = Array1::zeros(0);
+        let mut empty_g = Array2::zeros((0, 3));
+        eval_images(&Quadratic, empty.view(), &mut empty_e, &mut empty_g, 4).unwrap();
+    }
+
+    #[test]
+    fn zero_image_threads_are_refused() {
+        let config = AutoNebConfig {
+            threads: 0,
+            ..AutoNebConfig::default()
+        };
+        let initial = array![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
+        assert!(matches!(
+            AutoNeb::new(config, initial),
+            Err(SaddleError::Invalid(_))
+        ));
     }
 }
