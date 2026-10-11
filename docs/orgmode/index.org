@@ -72,6 +72,7 @@ while report.status != BandStatus::Converged {
    howto/io
    howto/c-abi
    howto/python
+   howto/formal
    explanation/mep
    reference/architecture
    reference/bibliography
