@@ -26,6 +26,11 @@
 //!
 //! Positions are unwrapped Cartesian; a periodic host applies its
 //! minimum-image convention before handing differences in.
+//!
+//! [`sparse_hessian::sparse_hessian`] recovers a cutoff Hessian by a
+//! direct Curtis-Powell-Reid partition: a smallest-last distance-2
+//! colouring and one batched gradient difference per colour and
+//! Cartesian axis.
 
 pub mod autoneb;
 pub mod band;
@@ -101,6 +106,12 @@ pub use force_match::{covalent_pairs, force_match_hessian};
 pub use geom::{SellaGeom, TrustSchedule};
 
 pub use internal::{CartAxis, Displacement, InternalSlot, Rotation, Translation};
+
+pub mod sparse_hessian;
+pub use sparse_hessian::{
+    Colouring, LowestEigenpairs, SparseHessian, SparseHessianOpts, SparsityPattern,
+    distance2_colouring, eval_displacements, one_atom_hessian, prefactor_hessian, sparse_hessian,
+};
 
 pub use linalg::{
     NumericalHessian, modified_gram_schmidt, numerical_hvp, numerical_hvp_on, numerical_hvp_proj,
