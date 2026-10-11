@@ -546,8 +546,10 @@ bool raise_status(int code) {
 
 } // namespace
 
+void rgsaddle_bind_stencil(nb::module_ &m);
+
 NB_MODULE(_core, m) {
-  m.doc() = "rgsaddle nanobind surface: status mapping and the ASE image callback.";
+  m.doc() = "rgsaddle nanobind surface: status mapping, the ASE image callback, and Stencil.";
   m.attr("__version__") = RGSADDLE_PY_VERSION;
   m.def("version", []() { return std::string(RGSADDLE_PY_VERSION); }, "Package version string.");
   m.attr("RGSADDLE_FORCE_L2") = static_cast<int>(RGSADDLE_FORCE_L2);
@@ -583,6 +585,8 @@ NB_MODULE(_core, m) {
         "Map an rgsaddle_status_t value. The message is the stored text, or the "
         "status name when that text is empty. The stored text is cleared. True on OK. "
         "False is not used: convergence is not a status code.");
+
+  rgsaddle_bind_stencil(m);
 
   // Test-only surface. stubgen skips a private submodule, so these
   // names stay off the public stub.
