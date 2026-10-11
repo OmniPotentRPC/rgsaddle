@@ -15,6 +15,18 @@ def test_claim_released_across_calls() -> None:
     assert claim_work(slot, 0) == 1
 
 
+def test_claim_context_manager() -> None:
+    slot = ClaimSlot()
+    with slot:
+        try:
+            claim_work(slot, 0)
+        except RuntimeError as exc:
+            assert str(exc) == "SurfaceAdapter is in use by another thread"
+        else:
+            raise AssertionError("the context manager must hold the claim")
+    assert claim_work(slot, 0) == 1
+
+
 def test_claim_held_until_release() -> None:
     slot = ClaimSlot()
     gate = HoldGate()

@@ -37,7 +37,9 @@ class SurfaceAdapter:
 
     The adapter does not own a thread count. ``__call__`` evaluates the
     given rows on the calling thread, in the given order. ``owners`` and
-    ``reentrant`` tell a driver which rows share a calculator.
+    ``reentrant`` tell a driver which rows share a calculator. A second
+    call raises ``RuntimeError`` while the first call still holds the
+    claim (F3).
     """
 
     def __init__(
@@ -74,6 +76,10 @@ class SurfaceAdapter:
             self._images[index] = atoms
         self._natoms = 0 if natoms is None else natoms
 
+    def claim(self) -> ClaimSlot:
+        """In-use claim. Hold it across the whole ``__call__``."""
+        return self._slot
+
     def owners(self, ids: Int64) -> Uint64:
         """Calculator identity of each requested image, as ``uint64``."""
         ids_arr = self._row_ids(ids)
@@ -96,6 +102,7 @@ class SurfaceAdapter:
 
         ``ids`` is int64, shape ``(rows,)``. ``x`` is float64,
         shape ``(rows, dof)``. The result arrays are new copies (F6).
+        ``raw_forces`` is written before the claim drops.
         """
         ids_arr = self._row_ids(ids)
         x_arr = np.ascontiguousarray(x, dtype=np.float64)
@@ -105,16 +112,18 @@ class SurfaceAdapter:
         dof = self._natoms * 3
         if x_arr.shape != (n, dof):
             raise ValueError(f"x: expected shape ({n}, {dof}), got {tuple(int(v) for v in x_arr.shape)}")
-        energies = np.empty(n, dtype=np.float64)
-        gradients = np.empty((n, dof), dtype=np.float64)
-        raw = np.empty((n, dof), dtype=np.float64)
-        for row, image_id in enumerate(ids_arr.tolist()):
-            energy, gradient, raw_force = self._eval_one(int(image_id), x_arr[row], dof)
-            energies[row] = energy
-            gradients[row] = gradient
-            raw[row] = raw_force
-        self.raw_forces = raw
-        return energies, gradients
+        with self.claim():
+            energies = np.empty(n, dtype=np.float64)
+            gradients = np.empty((n, dof), dtype=np.float64)
+            raw = np.empty((n, dof), dtype=np.float64)
+            for row, image_id in enumerate(ids_arr.tolist()):
+                energy, gradient, raw_force = self._eval_one(int(image_id), x_arr[row], dof)
+                energies[row] = energy
+                gradients[row] = gradient
+                raw[row] = raw_force
+            self.raw_forces = raw
+            return energies, gradients
+        raise AssertionError("SurfaceAdapter claim ended without a result")
 
     def _row_ids(self, ids: Int64) -> Int64:
         ids_arr = np.ascontiguousarray(ids, dtype=np.int64)

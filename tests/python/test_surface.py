@@ -182,3 +182,34 @@ def test_keyboard_interrupt() -> None:
     x = np.zeros((1, 6), dtype=np.float64)
     with pytest.raises(KeyboardInterrupt):
         adapter(ids, x)
+
+
+def test_claim_covers_raw_forces() -> None:
+    calc = LogCalc([], 1)
+    adapter = SurfaceAdapter([_atoms(calc, 0)])
+    ids = np.array([0], dtype=np.int64)
+    x = np.zeros((1, 6), dtype=np.float64)
+    seen = threading.Event()
+    release = threading.Event()
+
+    def hold() -> None:
+        with adapter.claim():
+            seen.set()
+            assert release.wait(timeout=5)
+
+    holder = threading.Thread(target=hold)
+    holder.start()
+    assert seen.wait(timeout=5)
+    try:
+        adapter(ids, x)
+    except RuntimeError as exc:
+        assert str(exc) == "SurfaceAdapter is in use by another thread"
+        assert adapter.raw_forces is None
+    else:
+        raise AssertionError("the call must see the in-use claim")
+    finally:
+        release.set()
+        holder.join()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pool.submit(lambda: adapter(ids, x)).result()
+    assert adapter.raw_forces is not None
