@@ -43,6 +43,7 @@ pub mod prfo;
 pub mod projection;
 pub mod solid_state;
 pub mod spring;
+pub mod stencil;
 pub mod tangent;
 
 pub use autoneb::{AutoNeb, AutoNebReport, AutoNebTuning};

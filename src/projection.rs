@@ -20,18 +20,19 @@ pub enum ProjectionKind {
 
 /// True force with its tangent component removed.
 pub fn force_perp(force: ArrayView1<f64>, tangent: ArrayView1<f64>) -> Array1<f64> {
-    let par = force.dot(&tangent);
-    &force - (tangent.to_owned() * par)
+    crate::stencil::perp(force, tangent)
 }
 
 /// Climbing-image force: `F - 2 (F . t) t + F_dneb`.
+///
+/// The reflection is [`crate::stencil::reflect`] (Goswami, Gunde, and
+/// Jónsson, Front. Chem. (2026), doi:10.3389/fchem.2026.1807063, Eq. 9).
 pub fn climbing_image_force(
     force: ArrayView1<f64>,
     tangent: ArrayView1<f64>,
     force_dneb: ArrayView1<f64>,
 ) -> Array1<f64> {
-    let par = force.dot(&tangent);
-    &force - (tangent.to_owned() * (2.0 * par)) + force_dneb
+    crate::stencil::reflect(force, tangent) + force_dneb
 }
 
 /// DNEB correction with the Trygubenko–Wales atan switching.
