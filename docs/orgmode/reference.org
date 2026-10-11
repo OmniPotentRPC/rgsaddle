@@ -5,12 +5,19 @@
 | Type                           | Role                                                                                                               |
 |--------------------------------+--------------------------------------------------------------------------------------------------------------------|
 | =BandSession=                  | Outer seam. =new=, =step=, =run=, =restart=, =reset=, =set_positions=, =positions=, =evaluation=                   |
-| =BandConfig=                   | Tangent, spring, projection, climbing, cell, tolerances, method                                                    |
+| =AutoNeb=                      | Insert on the worst gap, relax a local window, and climb. The full band runs only when =full_band= is set. =run= is one shot |
+| =AutoNebTuning=                | =n_simul=, =n_max=, local tolerance and step caps, =space_energy_ratio=, =climb=, =full_band=, =threads=, =record_samples=. Stored on =BandConfig= |
+| =BandConfig=                   | Tangent, spring, projection, climbing, cell, tolerances, method, optional AutoNEB tuning                           |
 | =BandSurface=                  | Host potential on a band (energies + gradients per image)                                                          |
 | =BandReport=                   | =status=, =max_force=, =ci_index=, =iteration=, =surface_rows=                                                     |
 | =MinModeSession=               | Dimer or Lanczos lowest-mode search, same stepping contract; =set_position=, =set_mode=, =estimate_mode= for reuse |
 | =ArtSession=                   | ART nouveau. =new=, =step=, =run=. =mode= is a =MinModeConfig=. =run_events= partitions events from =event_seed= |
-| =Index1Session=                | Restricted-step partitioned RFO, Powell or Bofill update                                                           |
+| =Index1Session=                | Restricted-step partitioned RFO, Powell or Bofill update. =Index1Config= is non-exhaustive. =with_sparse_pattern= selects a CPR seed |
+| =SparsityPattern=              | Atom-level symmetric CSR from a linkcell cutoff walk. Diagonal blocks are implied and not stored as loops          |
+| =Colouring=                    | Smallest-last distance-2 colouring and the max-degree lower bound                                                  |
+| =SparseHessian=                | Frozen recovered blocks. Implements =ApplyHessian=. =matvec= and =apply_hessian= panic on a length mismatch. =to_dense= and =lowest_eigenpairs= export the matrix. =LowestEigenpairs= is non-exhaustive |
+| =SparseHessianOpts=            | Non-exhaustive. =Default= and =with_difference=, =with_step=, =with_memory_budget=, =with_skin=. Default step 1e-4. The step carries O(h^2), O(eps_g / h), and the optimum near (3 eps_g / \|g'''\|)^(1/3) |
+| =prefactor_hessian=            | Direct CPR seed. =one_atom_hessian= is the per-atom baseline eOn uses when a potential has no finite cutoff        |
 | =nichols_step=                 | i-PI Nichols shift from a supplied spectrum                                                                        |
 | =restricted_prfo_displacement= | Baker restricted-step partitioned RFO from =H= and =g=                                                             |
 | =Cell=                         | 3×3 lattice (rows are vectors), fractional minimum-image wrap                                                      |
@@ -19,8 +26,22 @@
 * C ABI (feature =capi=)
 =include/rgsaddle.h=. =RGSADDLE_ABI_MAJOR= is 1. Status codes include =RGSADDLE_OK=, =RGSADDLE_SHAPE=, =RGSADDLE_SURFACE_FAILED=, =RGSADDLE_ABI_MISMATCH=. Methods on the wire: FIRE, L-BFGS, and quick-min. Min-mode kinds: dimer and Lanczos. Index-1 entries: =rgsaddle_nichols_step=, =rgsaddle_prfo_step=, =rgsaddle_hessian_powell=, =rgsaddle_hessian_bofill=, =rgsaddle_cap_max_abs=, and =rgsaddle_index1_step=. Band cache entries: =rgsaddle_band_restart=, =rgsaddle_band_evaluation= (=RGSADDLE_NO_EVALUATION= when nothing is cached at the current band). Min-mode reuse: =rgsaddle_minmode_set_position=, =rgsaddle_minmode_set_mode=, =rgsaddle_minmode_estimate=; =rgsaddle_minmode_config_t.difference= picks =RGSADDLE_DIFFERENCE_FORWARD= or =_CENTRAL=, and =rotation_angle_tol= stops a dimer rotation whose optimal angle falls under it (radians, 0 off). Both fields are read only from a config whose version minor is 5 or newer. =RGSADDLE_ABI_MINOR= is 16. =RGSADDLE_METHOD_QUICKMIN= runs quick-min on the band. A min-mode session returns null for that code. =rgsaddle_band_create_solid= and =rgsaddle_band_set_stress= carry the solid-state cell block. The report's =evaluations= field took the place of =reserved= at minor 5. =cargo cinstall= installs =include/rgsaddle.h= as written.
 
+* Python package
+The importable package is =rgsaddle=. =rgsaddle._core= is the nanobind extension. =import rgsaddle= does not import ASE.
+
+| Name | Role |
+|------+------|
+| =ForceGate=, =HessUpdate=, =IrcKind=, =MinModeKind=, =EigenDevice=, =ExpandKind=, =CellChart=, =RestrictedKind= | =enum.IntEnum= controls. Names and values match the previous module |
+| =NumericalError= | =ArithmeticError= for =RGSADDLE_NON_FINITE= |
+| =last_error= | Thread-local text reserved for the C ABI last-error call. Empty unless an error text was set. =raise_status= reads it and then clears the slot |
+| =raise_status= | Map an =rgsaddle_status_t= value. The message is the stored text, or the status name when that text is empty. =RGSADDLE_OK= returns true |
+| =rgsaddle.ase.SurfaceAdapter= | =list[Atoms]= evaluated as =(ids, x) -> (energies, gradients)= request rows. Optional extra =ase= |
+
+=SurfaceAdapter= keeps =get_forces(apply_constraint=False)= on =raw_forces=. The returned gradient is minus =get_forces()= after constraints. The adapter evaluates the given rows in order on the calling thread. =owners()= and =reentrant()= are what a driver uses to group. A second call while the first holds the adapter raises =RuntimeError=.
+
 * Tests that pin the contract
 - =tests/double_well.rs= — band finds the origin saddle, endpoints pinned
+- =tests/autoneb.rs= — ASE AutoNEB decisions and the Müller-Brown insertion sequence. =tests/autoneb_gate.rs= hashes the insertion list and the trajectory at 1, 2, 3 and 8 threads, and an ignored release run compares AutoNEB with CI-NEB at one force-call budget. Strong scaling of a full AutoNEB run is an ignored test in the crate.
 - =tests/minmode_saddle.rs= — dimer / Lanczos
 - =tests/art_nouveau.rs= — ART nouveau on the double well, Muller-Brown, LEPS plus harmonic oscillator, and LJ7, including a 1/2/3/8 thread match and a three-rank split
 - =tests/nichols_saddle.rs= — Nichols step against i-PI on the same Hessian and gradient, Muller-Brown saddles, quadratic saddle

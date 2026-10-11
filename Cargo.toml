@@ -18,15 +18,12 @@ default = []
 capi = []
 par = ["rgmin/par"]
 highs = ["rgmin/highs"]
-python = ["dep:pyo3"]
 readcon = ["dep:readcon-core"]
 readcon-db = ["readcon", "dep:readcon-db"]
 chemfiles = ["readcon", "readcon-core/chemfiles"]
 
 [dependencies]
 dlpk = { version = "0.1.5", features = ["ndarray"] }
-# Extension wheels select pyo3/extension-module in pyproject.toml.
-pyo3 = { version = "0.26", features = ["abi3-py310"], optional = true }
 readcon-core = { version = "0.14", optional = true }
 readcon-db = { version = "0.1", optional = true }
 # The pinned revision supplies retained evaluations, manifold steps,
@@ -36,12 +33,26 @@ readcon-db = { version = "0.1", optional = true }
 rgmin = { git = "https://github.com/OmniPotentRPC/rgmin", rev = "6e37aa7f2bd8506fb2951a51ab59594ed168c900" }
 eindir-core = { version = "0.6.0", features = ["capi"] }
 ndarray = "0.17"
+rayon = "1.12"
 thiserror = "2"
 linkcell = { version = "0.3.3", git = "https://github.com/d-SEAMS/linkcell", rev = "f6cf5700ca9c90e1877c84b66fb68386de5ceffe", default-features = false }
 
 [dev-dependencies]
 approx = "0.5"
-rgmin = { git = "https://github.com/OmniPotentRPC/rgmin", rev = "6e37aa7f2bd8506fb2951a51ab59594ed168c900" }
+faer = { version = "0.24.4", default-features = false, features = ["std", "linalg"] }
+sha2 = "0.10"
+
+[profile.dev.package.faer]
+opt-level = 3
+
+[profile.dev.package.pulp]
+opt-level = 3
+
+[profile.dev.package.gemm-f64]
+opt-level = 3
+
+[profile.dev.package.gemm-common]
+opt-level = 3
 
 # include/rgsaddle.h is the hand-written contract (surface request,
 # status enum, stepping semantics); cargo-c installs it as is instead

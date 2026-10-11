@@ -157,12 +157,10 @@ fn powell_and_bofill_match_the_reference_update() {
 
 #[test]
 fn trust_cap_limits_the_quadratic_step() {
-    let config = Index1Config {
-        update: HessianUpdate::Bofill,
-        trust_radius: 0.2,
-        force_tol: 1e-10,
-        ..Index1Config::default()
-    };
+    let config = Index1Config::default()
+        .with_update(HessianUpdate::Bofill)
+        .with_trust_radius(0.2)
+        .with_force_tol(1e-10);
     let mut session =
         Index1Session::new(config, array![0.4, -0.3], Some(quadratic_hessian()), None).unwrap();
     let report = session.step(&Quadratic).unwrap();
@@ -179,13 +177,12 @@ fn trust_cap_limits_the_quadratic_step() {
 }
 
 fn quadratic_converges(update: HessianUpdate, hessian: Option<Array2<f64>>) {
-    let config = Index1Config {
-        update,
-        trust_radius: 0.2,
-        force_tol: 1e-8,
-        fd_dr: 1e-5,
-        mode: NicholsMode::Index1,
-    };
+    let config = Index1Config::default()
+        .with_update(update)
+        .with_trust_radius(0.2)
+        .with_force_tol(1e-8)
+        .with_fd_dr(1e-5)
+        .with_mode(NicholsMode::Index1);
     let mut session = Index1Session::new(config, array![0.4, -0.3], hessian, None).unwrap();
     let report = session.run(&Quadratic, 20).unwrap();
     assert_eq!(report.status, Index1Status::Converged, "{update:?}");
@@ -320,13 +317,12 @@ fn prfo_bofill_calls(start: [f64; 2], trust: f64, force_tol: f64) -> (usize, [f6
         inner: MullerBrown,
         calls: AtomicUsize::new(0),
     };
-    let config = Index1Config {
-        update: HessianUpdate::Bofill,
-        trust_radius: trust,
-        force_tol,
-        fd_dr: 1e-4,
-        mode: NicholsMode::Index1,
-    };
+    let config = Index1Config::default()
+        .with_update(HessianUpdate::Bofill)
+        .with_trust_radius(trust)
+        .with_force_tol(force_tol)
+        .with_fd_dr(1e-4)
+        .with_mode(NicholsMode::Index1);
     let h0 = mb_hessian(start[0], start[1]);
     let mut session =
         Index1Session::new(config, array![start[0], start[1]], Some(h0), None).unwrap();
@@ -354,13 +350,12 @@ fn partitioned_rfo_does_not_add_oracle_calls() {
 }
 
 fn find_muller_saddle(update: HessianUpdate, start: [f64; 2], target: [f64; 2]) {
-    let config = Index1Config {
-        update,
-        trust_radius: 0.15,
-        force_tol: 1e-6,
-        fd_dr: 1e-4,
-        mode: NicholsMode::Index1,
-    };
+    let config = Index1Config::default()
+        .with_update(update)
+        .with_trust_radius(0.15)
+        .with_force_tol(1e-6)
+        .with_fd_dr(1e-4)
+        .with_mode(NicholsMode::Index1);
     let h0 = mb_hessian(start[0], start[1]);
     let mut session =
         Index1Session::new(config, array![start[0], start[1]], Some(h0), None).unwrap();

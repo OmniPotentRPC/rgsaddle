@@ -3,9 +3,15 @@
 //! The band and the minimum-mode search take one [`rgmin::Solver`]
 //! step on a force this crate assembled. The host owns the loop.
 //! [`band::BandSession::run`] and [`minmode::MinModeSession::run`]
-//! are convenience loops over `step`. [`art::ArtSession`] pushes off a
-//! minimum until the lowest Lanczos curvature crosses a threshold, then
-//! climbs that mode and relaxes the perpendicular force with FIRE.
+//! are convenience loops over `step`. [`autoneb::AutoNeb`] inserts
+//! images where the energy gap or the segment length is worst,
+//! relaxes that window, and climbs. The full band runs only when
+//! requested.
+//! Image blocks are stored by image index after every rank finishes,
+//! so the band does not depend on which block finished first.
+//! [`art::ArtSession`] pushes off a minimum until the lowest Lanczos
+//! curvature crosses a threshold, then climbs that mode: Malek and
+//! Mousseau, Phys. Rev. E 62, 7723 (2000), doi:10.1103/PhysRevE.62.7723.
 //!
 //! [`nichols::Index1Session`] is the index-1 search on a dense
 //! Hessian: Baker's restricted-step partitioned RFO (maximize the
@@ -23,8 +29,14 @@
 //!
 //! Positions are unwrapped Cartesian; a periodic host applies its
 //! minimum-image convention before handing differences in.
+//!
+//! [`sparse_hessian::sparse_hessian`] recovers a cutoff Hessian by a
+//! direct Curtis-Powell-Reid partition: a smallest-last distance-2
+//! colouring and one batched gradient difference per colour and
+//! Cartesian axis.
 
 pub mod art;
+pub mod autoneb;
 pub mod band;
 #[cfg(feature = "capi")]
 pub mod capi;
@@ -41,6 +53,7 @@ pub use art::{
     ArtConfig, ArtConfigBuilder, ArtDisplacement, ArtEvent, ArtOutcome, ArtReport, ArtSession,
     ArtStatus, ArtSupport, event_seed, run_events,
 };
+pub use autoneb::{AutoNeb, AutoNebReport, AutoNebTuning};
 pub use band::{
     BandConfig, BandEvaluation, BandReport, BandSession, BandStatus, BandSurface, Cell, CiConfig,
     SolidState,
@@ -96,6 +109,12 @@ pub use force_match::{covalent_pairs, force_match_hessian};
 pub use geom::{SellaGeom, TrustSchedule};
 
 pub use internal::{CartAxis, Displacement, InternalSlot, Rotation, Translation};
+
+pub mod sparse_hessian;
+pub use sparse_hessian::{
+    Colouring, LowestEigenpairs, SparseHessian, SparseHessianOpts, SparsityPattern,
+    distance2_colouring, eval_displacements, one_atom_hessian, prefactor_hessian, sparse_hessian,
+};
 
 pub use linalg::{
     NumericalHessian, modified_gram_schmidt, numerical_hvp, numerical_hvp_on, numerical_hvp_proj,
@@ -153,8 +172,6 @@ pub use rtr::{
 
 #[cfg(feature = "readcon")]
 pub mod io;
-#[cfg(feature = "python")]
-mod python;
 #[cfg(feature = "readcon")]
 pub use io::{MolecularFrame, frame_from_con};
 
