@@ -171,11 +171,22 @@ fn log_simd_path() {
     );
     #[cfg(not(target_arch = "x86_64"))]
     let (avx512, avx2, fma) = (false, false, false);
-    eprintln!(
-        "eigh-bits simd arch={} requested={requested} host_avx512={avx512} host_avx2={avx2} host_fma={fma} paths={:?}",
+    let line = format!(
+        "eigh-bits simd arch={} requested={requested} host_avx512={avx512} host_avx2={avx2} host_fma={fma} paths={:?}\n",
         std::env::consts::ARCH,
         supported_simd()
     );
+    // libtest keeps eprintln in a capture buffer, so a passing run
+    // never reaches the Actions log. A new open of /dev/stderr is the
+    // process stderr the job record stores.
+    let mut emitted = false;
+    if let Ok(mut err) = std::fs::OpenOptions::new().write(true).open("/dev/stderr") {
+        use std::io::Write;
+        emitted = err.write_all(line.as_bytes()).is_ok();
+    }
+    if !emitted {
+        eprint!("{line}");
+    }
 }
 
 #[test]
