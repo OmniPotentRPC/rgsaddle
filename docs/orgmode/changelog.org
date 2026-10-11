@@ -3,6 +3,7 @@
 
 * Unreleased
 
+- `Surface` is the batched row trait. A type that implements it also implements `PointSurface` and `BandSurface`. `FromPoint` and `FromBand` lift an existing surface. Callers of the old traits are unchanged, and the golden hashes match.
 - The band tangent, the spring coupling, and the climbing rules `reflect`, `perp`, and `ascend` go through one `Triad`. Goswami, Gunde, and Jónsson, Front. Chem. (2026), doi:10.3389/fchem.2026.1807063, Eq. 9, is the shared reflection. The golden position and energy hashes are unchanged.
 - Golden hashes of raw little-endian f64 positions and energies, after a fixed step count, for neb, ci-neb, dneb, weighted-neb, dimer, Lanczos, and AutoNEB. Fixtures are the double well, Müller-Brown, and a three-atom harmonic chain. Threads 1, 2, 3, and 8 match.
 - Breaking: the python cargo feature and the pyo3 dependency are removed.
