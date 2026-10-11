@@ -185,6 +185,7 @@ fn quadratic_converges(update: HessianUpdate, hessian: Option<Array2<f64>>) {
         force_tol: 1e-8,
         fd_dr: 1e-5,
         mode: NicholsMode::Index1,
+        sparse_pattern: None,
     };
     let mut session = Index1Session::new(config, array![0.4, -0.3], hessian, None).unwrap();
     let report = session.run(&Quadratic, 20).unwrap();
@@ -326,6 +327,7 @@ fn prfo_bofill_calls(start: [f64; 2], trust: f64, force_tol: f64) -> (usize, [f6
         force_tol,
         fd_dr: 1e-4,
         mode: NicholsMode::Index1,
+        sparse_pattern: None,
     };
     let h0 = mb_hessian(start[0], start[1]);
     let mut session =
@@ -360,6 +362,7 @@ fn find_muller_saddle(update: HessianUpdate, start: [f64; 2], target: [f64; 2]) 
         force_tol: 1e-6,
         fd_dr: 1e-4,
         mode: NicholsMode::Index1,
+        sparse_pattern: None,
     };
     let h0 = mb_hessian(start[0], start[1]);
     let mut session =

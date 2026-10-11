@@ -22,8 +22,10 @@
 //! Positions are unwrapped Cartesian; a periodic host applies its
 //! minimum-image convention before handing differences in.
 //!
-//! [`colouring::star_colour`] partitions a symmetric sparsity pattern
-//! into seed columns. It does not evaluate the surface.
+//! [`sparse_hessian::sparse_hessian`] recovers a cutoff Hessian by a
+//! direct Curtis-Powell-Reid partition: a smallest-last distance-2
+//! colouring and one batched gradient difference per colour and
+//! Cartesian axis.
 
 pub mod band;
 #[cfg(feature = "capi")]
@@ -56,7 +58,6 @@ pub use spring::SpringKind;
 pub use tangent::TangentKind;
 
 pub mod cell_log;
-pub mod colouring;
 pub mod constraints;
 pub mod eigensolve;
 pub mod force;
@@ -94,9 +95,10 @@ pub use geom::{SellaGeom, TrustSchedule};
 
 pub use internal::{CartAxis, Displacement, InternalSlot, Rotation, Translation};
 
-pub use colouring::{
-    StarColouring, atom_axis_seeds, coordinate_edges, interacting_atom_pairs, is_star_colouring,
-    star_colour,
+pub mod sparse_hessian;
+pub use sparse_hessian::{
+    Colouring, SparseHessian, SparseHessianOpts, SparsityPattern, distance2_colouring,
+    eval_displacements, one_atom_hessian, prefactor_hessian, sparse_hessian,
 };
 
 pub use linalg::{

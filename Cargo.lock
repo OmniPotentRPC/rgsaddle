@@ -1177,6 +1177,7 @@ dependencies = [
  "linkcell",
  "ndarray",
  "pyo3",
+ "rayon",
  "readcon-core",
  "readcon-db",
  "rgmin",

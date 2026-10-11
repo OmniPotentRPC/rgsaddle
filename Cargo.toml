@@ -16,7 +16,7 @@ crate-type = ["lib", "cdylib", "staticlib"]
 [features]
 default = []
 capi = []
-par = ["rgmin/par"]
+par = ["rgmin/par", "dep:rayon"]
 highs = ["rgmin/highs"]
 python = ["dep:pyo3"]
 readcon = ["dep:readcon-core"]
@@ -36,6 +36,7 @@ readcon-db = { version = "0.1", optional = true }
 rgmin = { git = "https://github.com/OmniPotentRPC/rgmin", rev = "6e37aa7f2bd8506fb2951a51ab59594ed168c900" }
 eindir-core = { version = "0.6.0", features = ["capi"] }
 ndarray = "0.17"
+rayon = { version = "1.10", optional = true }
 thiserror = "2"
 linkcell = { version = "0.3.3", git = "https://github.com/d-SEAMS/linkcell", rev = "f6cf5700ca9c90e1877c84b66fb68386de5ceffe", default-features = false }
 

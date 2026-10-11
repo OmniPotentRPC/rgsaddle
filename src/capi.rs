@@ -1274,6 +1274,7 @@ pub unsafe extern "C" fn rgsaddle_index1_create(
         trust_radius: cfg.trust_radius,
         force_tol: cfg.force_tol,
         fd_dr: cfg.fd_dr,
+        sparse_pattern: None,
     };
     match Index1Session::new(session_config, x, hess, mass) {
         Ok(session) => Box::into_raw(Box::new(RgsaddleIndex1 { session, n_atoms })),

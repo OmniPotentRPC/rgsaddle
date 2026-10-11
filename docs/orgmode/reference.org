@@ -9,7 +9,11 @@
 | =BandSurface=                  | Host potential on a band (energies + gradients per image)                                                          |
 | =BandReport=                   | =status=, =max_force=, =ci_index=, =iteration=, =surface_rows=                                                     |
 | =MinModeSession=               | Dimer or Lanczos lowest-mode search, same stepping contract; =set_position=, =set_mode=, =estimate_mode= for reuse |
-| =Index1Session=                | Restricted-step partitioned RFO, Powell or Bofill update                                                           |
+| =Index1Session=                | Restricted-step partitioned RFO, Powell or Bofill update. =sparse_pattern= selects a CPR seed                      |
+| =SparsityPattern=              | Atom-level symmetric CSR. Diagonal blocks are implied and not stored as loops                                      |
+| =Colouring=                    | Smallest-last distance-2 colouring and the max-degree lower bound                                                  |
+| =SparseHessian=                | Recovered blocks. Implements =ApplyHessian=, with =matvec=, =to_dense=, and =lowest_eigenpairs=                    |
+| =prefactor_hessian=            | Direct CPR seed. =one_atom_hessian= is the one-atom displacement baseline                                          |
 | =nichols_step=                 | i-PI Nichols shift from a supplied spectrum                                                                        |
 | =restricted_prfo_displacement= | Baker restricted-step partitioned RFO from =H= and =g=                                                             |
 | =Cell=                         | 3×3 lattice (rows are vectors), fractional minimum-image wrap                                                      |
