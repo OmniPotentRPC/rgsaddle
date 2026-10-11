@@ -81,10 +81,6 @@ mypy_path = "python"
 strict = true
 python_version = "3.10"
 
-[[tool.mypy.overrides]]
-module = "rgsaddle._core"
-disallow_any_generics = false
-
 [tool.pyright]
 include = ["python/rgsaddle", "examples"]
 extraPaths = ["python"]
