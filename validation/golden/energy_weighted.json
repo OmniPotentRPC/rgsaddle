@@ -1,0 +1,12 @@
+{
+  "k_at_E_max": "k_max",
+  "k_at_E_ref": "k_min",
+  "slope": "(k_max - k_min)/(E_max - E_ref)",
+  "uniform_reduces_to_eq6": true,
+  "equal_ends_extension": "k_min",
+  "rust_guard": "Rust must not divide when E_max == E_ref; k_i = k_min",
+  "citation": [
+    "doi:10.1021/acs.jctc.1c00462",
+    "doi:10.3389/fchem.2026.1807063"
+  ]
+}
