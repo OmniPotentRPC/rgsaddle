@@ -251,7 +251,7 @@ impl ImageEvalPool {
         energies: &mut Array1<f64>,
         gradients: &mut Array2<f64>,
     ) -> Result<(), SaddleError> {
-        eval_checked(surface, positions, energies, gradients, Some(self))
+        eval_checked(surface, positions, energies, gradients, Some(self), None)
     }
 }
 
@@ -284,7 +284,7 @@ pub(crate) fn eval_images<S: BandSurface + ?Sized>(
         let pool = ImageEvalPool::new(threads)?;
         return pool.eval(surface, positions, energies, gradients);
     }
-    eval_checked(surface, positions, energies, gradients, None)
+    eval_checked(surface, positions, energies, gradients, None, None)
 }
 
 fn eval_checked<S: BandSurface + ?Sized>(
@@ -293,6 +293,7 @@ fn eval_checked<S: BandSurface + ?Sized>(
     energies: &mut Array1<f64>,
     gradients: &mut Array2<f64>,
     pool: Option<&ImageEvalPool>,
+    indices: Option<&[usize]>,
 ) -> Result<(), SaddleError> {
     let n = positions.nrows();
     let dof = positions.ncols();
@@ -310,6 +311,7 @@ fn eval_checked<S: BandSurface + ?Sized>(
     let threads = pool.map(|pool| pool.threads).unwrap_or(1);
     let ranks = threads.min(n);
     if ranks == 1 || pool.is_none() {
+        let _guard = crate::stencil::publish_indices(indices, 0..n);
         return surface.eval(positions, energies, gradients);
     }
     let pool = pool.expect("pool");
@@ -328,6 +330,7 @@ fn eval_checked<S: BandSurface + ?Sized>(
                 let view = positions.slice(ndarray::s![range.start..range.end, ..]);
                 let mut block_energies = Array1::zeros(rows);
                 let mut block_gradients = Array2::zeros((rows, dof));
+                let _guard = crate::stencil::publish_indices(indices, range.clone());
                 let result = surface
                     .eval(view, &mut block_energies, &mut block_gradients)
                     .map(|()| OwnedBlock {
@@ -408,9 +411,20 @@ impl<S: BandSurface> BandSurface for RankedEval<'_, S> {
                 });
             }
         }
+        let images = batch_images(self.window, positions.nrows())?;
         match self.pool {
-            Some(pool) => pool.eval(self.surface, positions, energies, gradients),
-            None => self.surface.eval(positions, energies, gradients),
+            Some(pool) => eval_checked(
+                self.surface,
+                positions,
+                energies,
+                gradients,
+                Some(pool),
+                Some(&images),
+            ),
+            None => {
+                let _guard = crate::stencil::publish_indices(Some(&images), 0..images.len());
+                self.surface.eval(positions, energies, gradients)
+            }
         }
     }
 }
@@ -1340,6 +1354,7 @@ impl AutoNeb {
         }
         self.insertions.push(after);
         self.open = None;
+        crate::stencil::note_image_insert(after);
         Ok(())
     }
 
@@ -1349,10 +1364,21 @@ impl AutoNeb {
         positions: ArrayView2<f64>,
         energies: &mut Array1<f64>,
         gradients: &mut Array2<f64>,
+        indices: &[usize],
     ) -> Result<(), SaddleError> {
         match &self.pool {
-            Some(pool) => pool.eval(surface, positions, energies, gradients),
-            None => surface.eval(positions, energies, gradients),
+            Some(pool) => eval_checked(
+                surface,
+                positions,
+                energies,
+                gradients,
+                Some(pool),
+                Some(indices),
+            ),
+            None => {
+                let _guard = crate::stencil::publish_indices(Some(indices), 0..indices.len());
+                surface.eval(positions, energies, gradients)
+            }
         }
     }
 
@@ -1387,7 +1413,13 @@ impl AutoNeb {
                 });
             }
         }
-        self.eval_rows(surface, positions.view(), &mut energies, &mut gradients)?;
+        self.eval_rows(
+            surface,
+            positions.view(),
+            &mut energies,
+            &mut gradients,
+            &missing,
+        )?;
         self.surface_rows += missing.len();
         for (row, &index) in missing.iter().enumerate() {
             let energy = energies[row];

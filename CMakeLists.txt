@@ -49,7 +49,8 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(corrosion)
 
 # The staticlib is the C ABI (feature capi). Python calls rgsaddle_status_name
-# and nothing else from it. Session entry points stay off the Python surface.
+# and the rgsaddle_stencil_* point-search entry points. Those symbols stay
+# hidden in the extension. The older session entry points stay off this surface.
 corrosion_import_crate(
   MANIFEST_PATH "${CMAKE_CURRENT_SOURCE_DIR}/Cargo.toml"
   CRATES rgsaddle
@@ -68,7 +69,7 @@ endif()
 # free-threaded interpreter. On a GIL interpreter nanobind keeps
 # STABLE_ABI and ignores FREE_THREADED. cp312-abi3 covers 3.12+ GIL.
 # cp314t and cp315t are version-specific free-threaded wheels.
-nanobind_add_module(_core FREE_THREADED STABLE_ABI NB_STATIC bind/ext.cpp bind/stencil.cpp)
+nanobind_add_module(_core FREE_THREADED STABLE_ABI NB_STATIC bind/ext.cpp)
 target_include_directories(_core PRIVATE include)
 target_link_libraries(_core PRIVATE rgsaddle Threads::Threads)
 if(NOT DEFINED SKBUILD_PROJECT_VERSION OR SKBUILD_PROJECT_VERSION STREQUAL "")

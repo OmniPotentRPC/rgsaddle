@@ -10,12 +10,9 @@ use std::time::Instant;
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use rgsaddle::stencil::{
-    AutoNebParams, BandMethod, Method, Phase, Preset, SpringModel, Stencil, StencilConfig,
-    ZoomEnds, ZoomForce, ZoomParams,
+    PHASE_ZOOM, Preset, Stencil, StencilStatus, ZoomEnds, ZoomForce, ZoomParams,
 };
-use rgsaddle::{
-    BandStatus, BandSurface, Index1Config, Index1Session, Index1Status, PointSurface, SaddleError,
-};
+use rgsaddle::{BandSurface, Index1Config, Index1Session, Index1Status, PointSurface, SaddleError};
 use sha2::{Digest, Sha256};
 
 const SEEDS: usize = 10;
@@ -400,19 +397,14 @@ fn build(sys: Sys, kind: Kind, stepper: Stepper, seed: usize) -> Result<Stencil,
         }
     };
     let initial = line(&start, &end, 7, seed);
-    let mut config = StencilConfig::from_preset(match kind {
+    let preset = match kind {
         Kind::Auto => Preset::AutoNeb,
-        Kind::ZoomFixed | Kind::ZoomFree => Preset::EonZoom,
+        Kind::ZoomFixed | Kind::ZoomFree => Preset::ZoomNeb,
         Kind::Ci | Kind::Ew => Preset::CiNeb,
-    });
-    match kind {
-        Kind::Ew | Kind::ZoomFixed | Kind::ZoomFree => {
-            config.spring = SpringModel::EnergyWeighted {
-                k_min: 0.972,
-                k_max: 9.72,
-            };
-        }
-        Kind::Ci | Kind::Auto => {}
+    };
+    let mut builder = Stencil::band(initial).preset(preset).force_tol(1.0e-3);
+    if matches!(kind, Kind::Ew | Kind::ZoomFixed | Kind::ZoomFree) {
+        builder = builder.energy_weighted(0.972, 9.72);
     }
     if matches!(kind, Kind::ZoomFixed | Kind::ZoomFree) {
         let mut params = ZoomParams::default();
@@ -421,19 +413,17 @@ fn build(sys: Sys, kind: Kind, stepper: Stepper, seed: usize) -> Result<Stencil,
         } else {
             ZoomEnds::Fixed
         };
-        config.method = Method::Band(BandMethod::Zoom(params));
+        builder = builder.zoom(params);
     }
     if matches!(kind, Kind::Auto) {
-        let mut params = AutoNebParams::default();
-        params.n_max = 8;
-        config.method = Method::Band(BandMethod::AutoNeb(params));
+        builder = builder.autoneb_limits(3, 8);
     }
     if matches!(stepper, Stepper::Lbfgs) {
-        config.band.method = rgmin::Method::Lbfgs { memory: 10 };
-        config.band.max_move = 0.1;
+        builder = builder
+            .method(rgmin::Method::Lbfgs { memory: 10 })
+            .max_move(0.1);
     }
-    config.converge.ci_tol = 1.0e-3;
-    Stencil::new(config, initial)
+    builder.build()
 }
 
 fn negative_modes(sys: Sys, x: &[f64]) -> usize {
@@ -729,9 +719,9 @@ fn drive_with(sys: Sys, kind: Kind, stepper: Stepper, seed: usize) -> Row {
         };
         let Ok(report) = stepped else { break };
         out.iters = report.iteration;
-        out.calls = report.total_rows;
+        out.calls = report.total_evaluations;
         out.fmax = report.max_force;
-        if report.status == BandStatus::Converged {
+        if report.status == StencilStatus::Converged {
             break;
         }
     }
@@ -1151,13 +1141,19 @@ fn scaling_band(lj: bool, images: usize) -> Array2<f64> {
     }
 }
 
-fn scaling_config(kind: Kind, threads: usize) -> StencilConfig {
-    let mut config = StencilConfig::from_preset(match kind {
-        Kind::ZoomFixed | Kind::ZoomFree => Preset::EonZoom,
+fn scaling_config(
+    kind: Kind,
+    threads: usize,
+    band: ndarray::Array2<f64>,
+) -> Result<Stencil, SaddleError> {
+    let preset = match kind {
+        Kind::ZoomFixed | Kind::ZoomFree => Preset::ZoomNeb,
         _ => Preset::CiNeb,
-    });
-    config.threads = threads;
-    config.climb.trigger_force = 1.0e300;
+    };
+    let mut builder = Stencil::band(band)
+        .preset(preset)
+        .threads(threads)
+        .climb_trigger(0.5, 1.0e300);
     if matches!(kind, Kind::ZoomFixed | Kind::ZoomFree) {
         let mut params = ZoomParams::default();
         params.stability = 1;
@@ -1167,9 +1163,9 @@ fn scaling_config(kind: Kind, threads: usize) -> StencilConfig {
         } else {
             ZoomEnds::Fixed
         };
-        config.method = Method::Band(BandMethod::Zoom(params));
+        builder = builder.zoom(params);
     }
-    config
+    builder.build()
 }
 
 #[test]
@@ -1213,12 +1209,11 @@ fn strong_scaling_names_the_limiter() {
                     calls: Mutex::new(Vec::new()),
                 };
                 let started = Instant::now();
-                let mut stencil =
-                    Stencil::new(scaling_config(*kind, count), scaling_band(*lj, images)).unwrap();
+                let mut stencil = scaling_config(*kind, count, scaling_band(*lj, images)).unwrap();
                 let mut saw_zoom = false;
                 for _ in 0..steps {
-                    let report = stencil.step(&host).unwrap();
-                    saw_zoom |= report.phase == Phase::Zoom;
+                    let report = stencil.step_band(&host).unwrap();
+                    saw_zoom |= report.phase == PHASE_ZOOM;
                 }
                 let wall = started.elapsed().as_secs_f64();
                 let slot = job_i * threads.len() + thread_i;

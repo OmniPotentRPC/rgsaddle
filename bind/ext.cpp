@@ -14,7 +14,8 @@
  * rgbind::serialise_by_owner. Float64 C-contiguous arrays use
  * noconvert on the way in and capsule copies on the way out.
  * raise_status maps rgsaddle_status_t. The schedule text does not
- * depend on the worker count. The link exports PyInit__core.
+ * depend on the worker count. Stencil is the point and band handle.
+ * The link exports PyInit__core.
  *
  * SurfaceAdapter does not own threads. The caller passes C ABI
  * request rows and the adapter evaluates them on that thread. The
@@ -23,18 +24,24 @@
  */
 
 #include <rgsaddle.h>
+#include <rgsaddle/stencil.hpp>
 
 #include <rgbind/rgbind.hpp>
 
 #include <nanobind/nanobind.h>
+#include <nanobind/eval.h>
 #include <nanobind/ndarray.h>
+#include <nanobind/stl/optional.h>
 #include <nanobind/stl/string.h>
+#include <nanobind/stl/vector.h>
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <exception>
 #include <map>
 #include <string>
@@ -528,6 +535,305 @@ std::string schedule_canonical(IdArray ids, OwnerArray owners, FlagArray reentra
   }
 }
 
+int preset_code(const std::string &name) {
+  if (name == "min") {
+    return RGSADDLE_STENCIL_MIN;
+  }
+  if (name == "dimer") {
+    return RGSADDLE_STENCIL_DIMER;
+  }
+  if (name == "lanczos") {
+    return RGSADDLE_STENCIL_LANCZOS;
+  }
+  if (name == "art") {
+    return RGSADDLE_STENCIL_ART;
+  }
+  if (name == "eigen-follow") {
+    return RGSADDLE_STENCIL_EIGEN;
+  }
+  if (name == "neb") {
+    return RGSADDLE_STENCIL_NEB;
+  }
+  if (name == "dneb") {
+    return RGSADDLE_STENCIL_DNEB;
+  }
+  if (name == "ci-neb") {
+    return RGSADDLE_STENCIL_CI_NEB;
+  }
+  if (name == "energy-weighted-neb") {
+    return RGSADDLE_STENCIL_ENERGY_WEIGHTED_NEB;
+  }
+  if (name == "zoom-neb") {
+    return RGSADDLE_STENCIL_ZOOM_NEB;
+  }
+  if (name == "autoneb") {
+    return RGSADDLE_STENCIL_AUTONEB;
+  }
+  if (name == "oci-neb") {
+    return RGSADDLE_STENCIL_OCI_NEB;
+  }
+  if (name == "idpp") {
+    return RGSADDLE_STENCIL_IDPP;
+  }
+  if (name == "s-idpp") {
+    return RGSADDLE_STENCIL_SIDPP;
+  }
+  throw nb::value_error("unknown stencil preset");
+}
+
+void copy_callback_result(nb::object result, std::size_t rows, std::size_t dof, double *e, double *g) {
+  if (!nb::isinstance<nb::tuple>(result)) {
+    throw std::invalid_argument("stencil callback must return (energy, gradient)");
+  }
+  nb::tuple pair = nb::cast<nb::tuple>(result);
+  if (pair.size() != 2) {
+    throw std::invalid_argument("stencil callback must return (energy, gradient)");
+  }
+  auto energy = nb::cast<nb::ndarray<const double, nb::ndim<1>, nb::c_contig>>(pair[0]);
+  auto gradient = nb::cast<nb::ndarray<const double, nb::ndim<2>, nb::c_contig>>(pair[1]);
+  if (static_cast<std::size_t>(energy.shape(0)) != rows ||
+      static_cast<std::size_t>(gradient.shape(0)) != rows ||
+      static_cast<std::size_t>(gradient.shape(1)) != dof) {
+    throw std::invalid_argument("stencil callback arrays do not match the position");
+  }
+  std::memcpy(e, energy.data(), rows * sizeof(double));
+  std::memcpy(g, gradient.data(), rows * dof * sizeof(double));
+}
+
+int detect_form(nb::handle fn) {
+  try {
+    nb::dict scope;
+    nb::exec(
+        "def form(fn):\n"
+        "    import inspect\n"
+        "    names = []\n"
+        "    for param in inspect.signature(fn).parameters.values():\n"
+        "        if param.kind in (inspect.Parameter.POSITIONAL_ONLY,\n"
+        "                          inspect.Parameter.POSITIONAL_OR_KEYWORD):\n"
+        "            names.append(param.name)\n"
+        "    if names and names[0] in ('ids', 'id'):\n"
+        "        return 0\n"
+        "    if len(names) <= 1:\n"
+        "        return 1\n"
+        "    return 2\n",
+        scope, scope);
+    return nb::cast<int>(scope["form"](fn));
+  } catch (const nb::python_error &) {
+    return 1;
+  } catch (const std::exception &) {
+    return 1;
+  }
+}
+
+nb::object ids_array(const std::uint64_t *ids, std::size_t rows) {
+  const std::size_t n = rows == 0 ? 1 : rows;
+  auto *raw = new std::int64_t[n];
+  for (std::size_t row = 0; row < rows; ++row) {
+    raw[row] = static_cast<std::int64_t>(ids[row]);
+  }
+  nb::capsule owner(raw, [](void *ptr) noexcept { delete[] static_cast<std::int64_t *>(ptr); });
+  const std::size_t shape[1] = {rows};
+  nb::ndarray<nb::numpy, std::int64_t> arr(raw, 1, shape, owner);
+  return nb::cast(arr);
+}
+
+void call_python_surface(const nb::callable &fn, int form, std::size_t rows, std::size_t dof,
+                         const std::uint64_t *ids, const double *x, double *e, double *g) {
+  const std::size_t n = rows * dof == 0 ? 1 : rows * dof;
+  auto *raw = new double[n];
+  if (rows * dof != 0) {
+    std::memcpy(raw, x, rows * dof * sizeof(double));
+  }
+  nb::capsule owner(raw, [](void *ptr) noexcept { delete[] static_cast<double *>(ptr); });
+  const std::size_t shape[2] = {rows, dof};
+  nb::ndarray<nb::numpy, double> arr(raw, 2, shape, owner);
+  nb::object result;
+  if (form == 0) {
+    result = fn(ids_array(ids, rows), arr);
+  } else if (form == 2) {
+    result = fn(arr, ids_array(ids, rows));
+  } else {
+    result = fn(arr);
+  }
+  copy_callback_result(result, rows, dof, e, g);
+}
+
+struct PyStencil {
+  rgsaddle::Stencil inner;
+  std::size_t threads = 1;
+};
+
+PyStencil make_point(nb::ndarray<const double, nb::ndim<1>, nb::c_contig> x, const std::string &preset,
+                     nb::handle mode, double dr, double force_tol, double max_move, double rotation_tol,
+                     std::int64_t max_rotations, std::int64_t krylov_dim, std::int64_t threads,
+                     double art_threshold, std::int64_t art_push) {
+  if (x.shape(0) <= 0) {
+    throw nb::value_error("a point stencil needs a position");
+  }
+  try {
+    rgsaddle::PointBuilder builder(x.data(), static_cast<std::size_t>(x.shape(0)), preset_code(preset));
+    if (!mode.is_none()) {
+      auto values = nb::cast<nb::ndarray<const double, nb::ndim<1>, nb::c_contig>>(mode);
+      builder.mode(values.data(), static_cast<std::size_t>(values.shape(0)));
+    }
+    builder.set_f64(RGSADDLE_STENCIL_KEY_DR, dr);
+    builder.set_f64(RGSADDLE_STENCIL_KEY_FORCE_TOL, force_tol);
+    builder.set_f64(RGSADDLE_STENCIL_KEY_MAX_MOVE, max_move);
+    builder.set_f64(RGSADDLE_STENCIL_KEY_ROTATION_TOL, rotation_tol);
+    builder.set_f64(RGSADDLE_STENCIL_KEY_ART_THRESHOLD, art_threshold);
+    builder.set_i64(RGSADDLE_STENCIL_KEY_MAX_ROTATIONS, max_rotations);
+    builder.set_i64(RGSADDLE_STENCIL_KEY_KRYLOV_DIM, krylov_dim);
+    builder.set_i64(RGSADDLE_STENCIL_KEY_THREADS, threads);
+    builder.set_i64(RGSADDLE_STENCIL_KEY_ART_PUSH, art_push);
+    PyStencil out{builder.build(), static_cast<std::size_t>(threads < 0 ? 0 : threads)};
+    return out;
+  } catch (const rgsaddle::Error &err) {
+    rgsaddle_py_set_last_error(err.what());
+    throw nb::value_error(err.what());
+  }
+}
+
+PyStencil make_band(nb::ndarray<const double, nb::ndim<2>, nb::c_contig> x, const std::string &preset,
+                    double k, double k_min, double k_max, double force_tol, double max_move,
+                    std::int64_t threads, std::int64_t spring, std::int64_t zoom_stability,
+                    double zoom_alpha, std::int64_t zoom_offset, std::int64_t zoom_interp,
+                    std::int64_t zoom_ends, double zoom_force, std::int64_t zoom_force_kind,
+                    double image_scale, double band_slack, double ci_trigger, double ci_trigger_force,
+                    std::int64_t n_simul, std::int64_t n_max, std::int64_t tangent,
+                    std::int64_t zoom_max_iter) {
+  if (x.shape(0) < 2 || x.shape(1) <= 0) {
+    throw nb::value_error("a band needs images and degrees of freedom");
+  }
+  try {
+    rgsaddle::BandBuilder builder(x.data(), static_cast<std::size_t>(x.shape(0)),
+                                  static_cast<std::size_t>(x.shape(1)), preset_code(preset));
+    builder.set_f64(RGSADDLE_STENCIL_KEY_K, k);
+    builder.set_f64(RGSADDLE_STENCIL_KEY_FORCE_TOL, force_tol);
+    builder.set_f64(RGSADDLE_STENCIL_KEY_MAX_MOVE, max_move);
+    builder.set_f64(RGSADDLE_STENCIL_KEY_BAND_SLACK, band_slack);
+    builder.set_f64(RGSADDLE_STENCIL_KEY_CI_TRIGGER, ci_trigger);
+    builder.set_f64(RGSADDLE_STENCIL_KEY_CI_TRIGGER_FORCE, ci_trigger_force);
+    builder.set_i64(RGSADDLE_STENCIL_KEY_THREADS, threads);
+    builder.set_i64(RGSADDLE_STENCIL_KEY_AUTONEB_N_SIMUL, n_simul);
+    builder.set_i64(RGSADDLE_STENCIL_KEY_AUTONEB_N_MAX, n_max);
+    builder.set_i64(RGSADDLE_STENCIL_KEY_TANGENT, tangent);
+    if (spring >= 0) {
+      builder.set_i64(RGSADDLE_STENCIL_KEY_SPRING, spring);
+    }
+    if (std::isfinite(k_min) && std::isfinite(k_max) && (spring == 1 || preset == "energy-weighted-neb")) {
+      builder.set_f64(RGSADDLE_STENCIL_KEY_K_MIN, k_min);
+      builder.set_f64(RGSADDLE_STENCIL_KEY_K_MAX, k_max);
+    }
+    const bool zoom = preset == "zoom-neb" || zoom_stability >= 0 || zoom_ends >= 0 ||
+                      zoom_force_kind >= 0 || std::isfinite(zoom_force);
+    if (zoom) {
+      if (zoom_stability >= 0) {
+        builder.set_i64(RGSADDLE_STENCIL_KEY_ZOOM_STABILITY, zoom_stability);
+      }
+      if (zoom_offset >= 0) {
+        builder.set_i64(RGSADDLE_STENCIL_KEY_ZOOM_OFFSET, zoom_offset);
+      }
+      if (zoom_interp >= 0) {
+        builder.set_i64(RGSADDLE_STENCIL_KEY_ZOOM_INTERP, zoom_interp);
+      }
+      if (zoom_ends >= 0) {
+        builder.set_i64(RGSADDLE_STENCIL_KEY_ZOOM_ENDS, zoom_ends);
+      }
+      if (zoom_force_kind >= 0) {
+        builder.set_i64(RGSADDLE_STENCIL_KEY_ZOOM_FORCE_KIND, zoom_force_kind);
+      }
+      if (std::isfinite(zoom_alpha)) {
+        builder.set_f64(RGSADDLE_STENCIL_KEY_ZOOM_ALPHA, zoom_alpha);
+      }
+      if (std::isfinite(zoom_force)) {
+        builder.set_f64(RGSADDLE_STENCIL_KEY_ZOOM_FORCE, zoom_force);
+      }
+      if (zoom_max_iter >= 0) {
+        builder.set_i64(RGSADDLE_STENCIL_KEY_MAX_ITER_ZOOM, zoom_max_iter);
+      }
+    }
+    if (std::isfinite(image_scale)) {
+      builder.set_f64(RGSADDLE_STENCIL_KEY_IMAGE_SCALE, image_scale);
+    }
+    PyStencil out{builder.build(), static_cast<std::size_t>(threads < 0 ? 0 : threads)};
+    return out;
+  } catch (const rgsaddle::Error &err) {
+    rgsaddle_py_set_last_error(err.what());
+    throw nb::value_error(err.what());
+  }
+}
+
+rgsaddle::StencilReport step_python(PyStencil &self, nb::callable fn, std::size_t max_steps, bool run_to_end) {
+  if (self.threads > 1) {
+    throw nb::value_error("threads > 1 is not supported for a Python surface");
+  }
+  const int form = detect_form(fn);
+  rgbind::CallContext ctx;
+  rgsaddle::StencilReport report;
+  std::exception_ptr pending;
+  {
+    nb::gil_scoped_release release;
+    try {
+      auto call = [&](std::size_t rows, std::size_t dof, const std::uint64_t *ids, const double *x, double *e,
+                      double *g) {
+        nb::gil_scoped_acquire gil;
+        if (!gil.is_valid()) {
+          throw std::runtime_error("stencil callback could not attach");
+        }
+        try {
+          call_python_surface(fn, form, rows, dof, ids, x, e, g);
+          if (PyErr_CheckSignals() < 0) {
+            nb::python_error err;
+            ctx.capture(err);
+            throw std::runtime_error("callback");
+          }
+        } catch (nb::python_error &err) {
+          ctx.capture(err);
+          throw std::runtime_error("callback");
+        }
+      };
+      report = run_to_end ? self.inner.run(call, max_steps) : self.inner.step(call);
+    } catch (...) {
+      pending = std::current_exception();
+    }
+  }
+  if (ctx.has_error()) {
+    ctx.rethrow_if_set();
+  }
+  if (pending) {
+    try {
+      std::rethrow_exception(pending);
+    } catch (const rgsaddle::Error &err) {
+      rgsaddle_py_set_last_error(err.what());
+      throw nb::value_error(err.what());
+    }
+  }
+  return report;
+}
+
+nb::ndarray<nb::numpy, double> copy_vector(const std::vector<double> &values) {
+  const std::size_t n = values.empty() ? 1 : values.size();
+  auto *raw = new double[n];
+  if (!values.empty()) {
+    std::memcpy(raw, values.data(), values.size() * sizeof(double));
+  }
+  nb::capsule owner(raw, [](void *ptr) noexcept { delete[] static_cast<double *>(ptr); });
+  const std::size_t shape[1] = {values.size()};
+  return nb::ndarray<nb::numpy, double>(raw, 1, shape, owner);
+}
+
+nb::ndarray<nb::numpy, double> copy_matrix(const std::vector<double> &values, std::size_t rows,
+                                           std::size_t dof) {
+  const std::size_t n = values.empty() ? 1 : values.size();
+  auto *raw = new double[n];
+  if (!values.empty()) {
+    std::memcpy(raw, values.data(), values.size() * sizeof(double));
+  }
+  nb::capsule owner(raw, [](void *ptr) noexcept { delete[] static_cast<double *>(ptr); });
+  const std::size_t shape[2] = {rows, dof};
+  return nb::ndarray<nb::numpy, double>(raw, 2, shape, owner);
+}
+
 bool raise_status(int code) {
   // The status name is a local fallback. Storing it would make the next
   // call reuse this code's name, including after OK.
@@ -545,8 +851,6 @@ bool raise_status(int code) {
 }
 
 } // namespace
-
-void rgsaddle_bind_stencil(nb::module_ &m);
 
 NB_MODULE(_core, m) {
   m.doc() = "rgsaddle nanobind surface: status mapping, the ASE image callback, and Stencil.";
@@ -581,12 +885,101 @@ NB_MODULE(_core, m) {
   m.def("last_error", []() { return std::string(rgsaddle_py_last_error()); },
         "Thread-local slot reserved for the C ABI last-error text. Returns an empty "
         "string unless an error text was set. raise_status reads it and then clears it.");
+  nb::class_<rgsaddle::StencilReport>(m, "StencilReport")
+      .def_prop_ro("status", [](const rgsaddle::StencilReport &report) { return report.status; },
+                   "0 while running, 1 when converged.")
+      .def_prop_ro("max_force", [](const rgsaddle::StencilReport &report) { return report.max_force; },
+                   "Maximum absolute force component at the step.")
+      .def_prop_ro("curvature", [](const rgsaddle::StencilReport &report) { return report.curvature; },
+                   "Curvature along the mode. NaN for a minimiser.")
+      .def_prop_ro("iteration", [](const rgsaddle::StencilReport &report) { return report.iteration; },
+                   "Steps taken.")
+      .def_prop_ro("evaluations", [](const rgsaddle::StencilReport &report) { return report.evaluations; },
+                   "Surface evaluations in this call.")
+      .def_prop_ro("phase", [](const rgsaddle::StencilReport &report) { return report.phase; },
+                   "0 for a band or point step, 1 for a zoom pack, 2 for an insertion.")
+      .def_prop_ro("ci_index", [](const rgsaddle::StencilReport &report) { return report.ci_index; },
+                   "Climbing image, or -1 when there is none.")
+      .def_prop_ro("zoom_lo", [](const rgsaddle::StencilReport &report) { return report.zoom_lo; },
+                   "First row of the zoom window, or -1.")
+      .def_prop_ro("zoom_hi", [](const rgsaddle::StencilReport &report) { return report.zoom_hi; },
+                   "Last row of the zoom window, or -1.")
+      .def("converged", &rgsaddle::StencilReport::converged, "True when status is converged.");
+
+  nb::class_<PyStencil>(m, "Stencil")
+      .def_static(
+          "point", &make_point, nb::arg("x").noconvert(), nb::arg("preset") = "dimer",
+          nb::arg("mode") = nb::none(), nb::arg("dr") = 1e-3, nb::arg("force_tol") = 1e-3,
+          nb::arg("max_move") = 0.2, nb::arg("rotation_tol") = 1e-4, nb::arg("max_rotations") = 20,
+          nb::arg("krylov_dim") = 12, nb::arg("threads") = 1, nb::arg("art_threshold") = 0.0,
+          nb::arg("art_push") = 20,
+          "Point search. dimer and lanczos follow MinModeSession. A band preset name raises ValueError.")
+      .def_static(
+          "band", &make_band, nb::arg("x").noconvert(), nb::arg("preset") = "ci-neb", nb::arg("k") = 5.0,
+          nb::arg("k_min") = 0.972, nb::arg("k_max") = 9.72, nb::arg("force_tol") = 1e-3,
+          nb::arg("max_move") = 0.2, nb::arg("threads") = 1, nb::arg("spring") = -1,
+          nb::arg("zoom_stability") = -1, nb::arg("zoom_alpha") = 0.5, nb::arg("zoom_offset") = -1,
+          nb::arg("zoom_interp") = -1,           nb::arg("zoom_ends") = -1,
+          nb::arg("zoom_force") = std::numeric_limits<double>::quiet_NaN(),
+          nb::arg("zoom_force_kind") = -1,
+          nb::arg("image_scale") = std::numeric_limits<double>::quiet_NaN(),
+          nb::arg("band_slack") = 10.0, nb::arg("ci_trigger") = 0.5, nb::arg("ci_trigger_force") = 0.0,
+          nb::arg("n_simul") = 3, nb::arg("n_max") = 10, nb::arg("tangent") = 1,
+          nb::arg("zoom_max_iter") = -1,
+          "Band search. neb, dneb, ci-neb, energy-weighted-neb, zoom-neb, and autoneb run. "
+          "oci-neb, idpp, and s-idpp raise ValueError. Zoom ends stay fixed unless zoom_ends is 1.")
+      .def(
+          "step", [](PyStencil &self, nb::callable fn) { return step_python(self, fn, 1, false); },
+          nb::arg("surface"),
+          nb::sig("def step(self, surface: collections.abc.Callable[..., StencilReport]) -> StencilReport"),
+          "One step. surface(x) returns (energy, gradient) with x shaped (rows, dof).")
+      .def(
+          "run",
+          [](PyStencil &self, nb::callable fn, std::size_t max_steps) {
+            return step_python(self, fn, max_steps, true);
+          },
+          nb::arg("surface"), nb::arg("max_steps"),
+          nb::sig("def run(self, surface: collections.abc.Callable[..., StencilReport], max_steps: int) -> StencilReport"),
+          "Loop of step until convergence or max_steps.")
+      .def(
+          "positions",
+          [](PyStencil &self) -> nb::object {
+            std::vector<double> values = self.inner.positions();
+            if (self.inner.rows() <= 1) {
+              return nb::cast(copy_vector(values));
+            }
+            return nb::cast(copy_matrix(values, self.inner.rows(), self.inner.dof()));
+          },
+          "Copy of the current position. A point is one dimension. A band is (rows, dof).")
+      .def(
+          "image_ids",
+          [](PyStencil &self) {
+            try {
+              return self.inner.image_ids();
+            } catch (const rgsaddle::Error &err) {
+              rgsaddle_py_set_last_error(err.what());
+              throw nb::value_error(err.what());
+            }
+          },
+          "Stable image ids. A point stencil raises ValueError.")
+      .def(
+          "mode",
+          [](PyStencil &self) -> nb::object {
+            std::vector<double> values = self.inner.mode();
+            if (values.empty()) {
+              return nb::none();
+            }
+            return nb::cast(copy_vector(values));
+          },
+          nb::sig("def mode(self) -> numpy.typing.NDArray[numpy.float64] | None"),
+          "Copy of the mode, or None for a minimiser.")
+      .def("curvature", [](PyStencil &self) { return self.inner.curvature(); },
+           "Curvature along the mode.");
+
   m.def("raise_status", &raise_status, nb::arg("code"),
         "Map an rgsaddle_status_t value. The message is the stored text, or the "
         "status name when that text is empty. The stored text is cleared. True on OK. "
         "False is not used: convergence is not a status code.");
-
-  rgsaddle_bind_stencil(m);
 
   // Test-only surface. stubgen skips a private submodule, so these
   // names stay off the public stub.

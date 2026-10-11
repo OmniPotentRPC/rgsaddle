@@ -1,1437 +1,1144 @@
-//! Opaque stencil config and the one-callback session.
+//! Opaque stencil handles.
 //!
-//! ABI minor 17. Existing `rgsaddle_band_*` symbols are unchanged.
-//! Keys are one leaf of [`crate::stencil::StencilConfig`]. A wrong
-//! key, a wrong type, or a key that does not apply to the method
-//! returns a status and sets [`rgsaddle_last_error`].
+//! Point presets and band presets share these symbols. OCI-NEB, IDPP,
+//! and S-IDPP are named and refused. Every entry catches a panic and
+//! records [`rgsaddle_last_error`].
 
 use std::cell::RefCell;
-use std::ffi::{CStr, CString};
+use std::ffi::CString;
 use std::os::raw::{c_char, c_void};
+use std::panic::AssertUnwindSafe;
 
-use ndarray::{Array1, Array2, ArrayView2};
-use rgmin::{FireKind, Method};
+use ndarray::{Array1, Array2, ArrayView2, ArrayViewMut2};
 
-use crate::band::{BandStatus, Cell};
 use crate::error::SaddleError;
-use crate::minmode::{FiniteDifference, MinModeKind};
-use crate::projection::ProjectionKind;
 use crate::stencil::{
-    AutoNebParams, BandMethod, EfParams, Interp, Method as StencilMethod, OcinebParams, Phase,
-    PointMethod, Preset, Refine, SpringModel, Stencil, StencilConfig, StencilReport,
-    StencilSurface, ZoomEnds, ZoomForce, ZoomParams, ZoomWindow, method_ordinal, phase_ordinal,
+    ImageId, Interp, Preset, Stencil, StencilReport, StencilStatus, Surface, TangentRule, ZoomEnds,
+    ZoomForce, ZoomParams, ZoomWindow,
 };
-use crate::tangent::TangentKind;
 
 use super::{
-    RGSADDLE_INVALID_PARAMETER, RGSADDLE_NO_EVALUATION, RGSADDLE_NULL_SESSION, RGSADDLE_OK,
-    status_of,
+    RGSADDLE_INVALID_PARAMETER, RGSADDLE_NULL_REPORT, RGSADDLE_NULL_SESSION, RGSADDLE_NULL_SURFACE,
+    RGSADDLE_OK, RGSADDLE_SHAPE, RGSADDLE_SOLVER, status_of,
 };
 
-pub const RGSADDLE_STENCIL_KEY_METHOD: i32 = 1;
-pub const RGSADDLE_STENCIL_KEY_SPRING_MODEL: i32 = 2;
-pub const RGSADDLE_STENCIL_KEY_ZOOM_STABILITY: i32 = 3;
-pub const RGSADDLE_STENCIL_KEY_ZOOM_WINDOW: i32 = 4;
-pub const RGSADDLE_STENCIL_KEY_ZOOM_OFFSET: i32 = 5;
-pub const RGSADDLE_STENCIL_KEY_ZOOM_INTERP: i32 = 6;
-pub const RGSADDLE_STENCIL_KEY_ZOOM_ENDS: i32 = 7;
-pub const RGSADDLE_STENCIL_KEY_ZOOM_MAX_ITERATIONS: i32 = 8;
-pub const RGSADDLE_STENCIL_KEY_ZOOM_FORCE_KIND: i32 = 9;
-pub const RGSADDLE_STENCIL_KEY_AUTONEB_N_SIMUL: i32 = 10;
-pub const RGSADDLE_STENCIL_KEY_AUTONEB_N_MAX: i32 = 11;
-pub const RGSADDLE_STENCIL_KEY_AUTONEB_LOCAL_MAX_STEPS: i32 = 12;
-pub const RGSADDLE_STENCIL_KEY_AUTONEB_CLIMB_MAX_STEPS: i32 = 13;
-pub const RGSADDLE_STENCIL_KEY_AUTONEB_CLIMB: i32 = 14;
-pub const RGSADDLE_STENCIL_KEY_AUTONEB_FULL_BAND: i32 = 15;
-pub const RGSADDLE_STENCIL_KEY_REFINE: i32 = 16;
-pub const RGSADDLE_STENCIL_KEY_TANGENT: i32 = 17;
-pub const RGSADDLE_STENCIL_KEY_PROJECTION: i32 = 18;
-pub const RGSADDLE_STENCIL_KEY_STEPPER: i32 = 19;
-pub const RGSADDLE_STENCIL_KEY_THREADS: i32 = 20;
-pub const RGSADDLE_STENCIL_KEY_MINMODE_KIND: i32 = 21;
-pub const RGSADDLE_STENCIL_KEY_MINMODE_DIFFERENCE: i32 = 22;
-pub const RGSADDLE_STENCIL_KEY_MINMODE_MAX_ROTATIONS: i32 = 23;
-pub const RGSADDLE_STENCIL_KEY_MINMODE_KRYLOV: i32 = 24;
-pub const RGSADDLE_STENCIL_KEY_LBFGS_MEMORY: i32 = 25;
+pub const RGSADDLE_STENCIL_KEY_DR: i32 = 1;
+pub const RGSADDLE_STENCIL_KEY_FORCE_TOL: i32 = 2;
+pub const RGSADDLE_STENCIL_KEY_MAX_MOVE: i32 = 3;
+pub const RGSADDLE_STENCIL_KEY_ROTATION_TOL: i32 = 4;
+pub const RGSADDLE_STENCIL_KEY_MAX_ROTATIONS: i32 = 5;
+pub const RGSADDLE_STENCIL_KEY_KRYLOV_DIM: i32 = 6;
+pub const RGSADDLE_STENCIL_KEY_THREADS: i32 = 7;
+pub const RGSADDLE_STENCIL_KEY_ART_THRESHOLD: i32 = 8;
+pub const RGSADDLE_STENCIL_KEY_ART_PUSH: i32 = 9;
+pub const RGSADDLE_STENCIL_KEY_MODE: i32 = 10;
 
-pub const RGSADDLE_STENCIL_KEY_K: i32 = 101;
-pub const RGSADDLE_STENCIL_KEY_K_MIN: i32 = 102;
-pub const RGSADDLE_STENCIL_KEY_K_MAX: i32 = 103;
-pub const RGSADDLE_STENCIL_KEY_ZOOM_ALPHA: i32 = 104;
-pub const RGSADDLE_STENCIL_KEY_ZOOM_FORCE: i32 = 105;
-pub const RGSADDLE_STENCIL_KEY_AUTONEB_LOCAL_FORCE_TOL: i32 = 106;
-pub const RGSADDLE_STENCIL_KEY_AUTONEB_SPACE_ENERGY_RATIO: i32 = 107;
-pub const RGSADDLE_STENCIL_KEY_CI_TOL: i32 = 108;
-pub const RGSADDLE_STENCIL_KEY_CI_RMS_TOL: i32 = 109;
-pub const RGSADDLE_STENCIL_KEY_IMAGE_SCALE: i32 = 110;
-pub const RGSADDLE_STENCIL_KEY_BAND_SLACK: i32 = 111;
-pub const RGSADDLE_STENCIL_KEY_CI_TRIGGER_FACTOR: i32 = 112;
-pub const RGSADDLE_STENCIL_KEY_CI_TRIGGER_FORCE: i32 = 113;
-pub const RGSADDLE_STENCIL_KEY_MAX_MOVE: i32 = 114;
-pub const RGSADDLE_STENCIL_KEY_EF_ACTIVATE: i32 = 115;
-pub const RGSADDLE_STENCIL_KEY_OCINEB_TRUST: i32 = 116;
-pub const RGSADDLE_STENCIL_KEY_MINMODE_DR: i32 = 117;
-pub const RGSADDLE_STENCIL_KEY_MINMODE_ROTATION_TOL: i32 = 118;
-pub const RGSADDLE_STENCIL_KEY_MINMODE_FORCE_TOL: i32 = 119;
-pub const RGSADDLE_STENCIL_KEY_MINMODE_MAX_MOVE: i32 = 120;
-pub const RGSADDLE_STENCIL_KEY_MINMODE_ROTATION_ANGLE_TOL: i32 = 121;
+pub const RGSADDLE_STENCIL_KEY_SPRING: i32 = 11;
+pub const RGSADDLE_STENCIL_KEY_K: i32 = 12;
+pub const RGSADDLE_STENCIL_KEY_K_MIN: i32 = 13;
+pub const RGSADDLE_STENCIL_KEY_K_MAX: i32 = 14;
+pub const RGSADDLE_STENCIL_KEY_ZOOM_STABILITY: i32 = 15;
+pub const RGSADDLE_STENCIL_KEY_ZOOM_ALPHA: i32 = 16;
+pub const RGSADDLE_STENCIL_KEY_ZOOM_OFFSET: i32 = 17;
+pub const RGSADDLE_STENCIL_KEY_ZOOM_INTERP: i32 = 18;
+pub const RGSADDLE_STENCIL_KEY_ZOOM_ENDS: i32 = 19;
+pub const RGSADDLE_STENCIL_KEY_ZOOM_FORCE: i32 = 20;
+pub const RGSADDLE_STENCIL_KEY_ZOOM_FORCE_KIND: i32 = 21;
+pub const RGSADDLE_STENCIL_KEY_IMAGE_SCALE: i32 = 22;
+pub const RGSADDLE_STENCIL_KEY_BAND_SLACK: i32 = 23;
+pub const RGSADDLE_STENCIL_KEY_CI_TRIGGER: i32 = 24;
+pub const RGSADDLE_STENCIL_KEY_CI_TRIGGER_FORCE: i32 = 25;
+pub const RGSADDLE_STENCIL_KEY_AUTONEB_N_SIMUL: i32 = 26;
+pub const RGSADDLE_STENCIL_KEY_AUTONEB_N_MAX: i32 = 27;
+pub const RGSADDLE_STENCIL_KEY_TANGENT: i32 = 28;
+pub const RGSADDLE_STENCIL_KEY_MAX_ITER_ZOOM: i32 = 29;
 
-pub const RGSADDLE_STENCIL_KEY_EXPLICIT_KS: i32 = 201;
-pub const RGSADDLE_STENCIL_KEY_CELL: i32 = 202;
-
-pub const RGSADDLE_STENCIL_QUERY_MODE: i32 = 1;
-pub const RGSADDLE_STENCIL_QUERY_CURVATURE: i32 = 2;
-pub const RGSADDLE_STENCIL_QUERY_CLIMBING_INDEX: i32 = 3;
-pub const RGSADDLE_STENCIL_QUERY_ZOOM_WINDOW: i32 = 4;
+pub const RGSADDLE_STENCIL_QUERY_POSITIONS: i32 = 1;
+pub const RGSADDLE_STENCIL_QUERY_MODE: i32 = 2;
+pub const RGSADDLE_STENCIL_QUERY_CURVATURE: i32 = 3;
+pub const RGSADDLE_STENCIL_QUERY_CLIMBING: i32 = 4;
 pub const RGSADDLE_STENCIL_QUERY_IMAGE_IDS: i32 = 5;
-pub const RGSADDLE_STENCIL_QUERY_SHAPE: i32 = 6;
+pub const RGSADDLE_STENCIL_QUERY_ENERGIES: i32 = 6;
+pub const RGSADDLE_STENCIL_QUERY_ZOOM_WINDOW: i32 = 7;
 
 thread_local! {
-    static LAST_ERROR: RefCell<CString> = RefCell::new(CString::new("").unwrap());
+    static LAST_ERROR: RefCell<CString> = RefCell::new(c_string(""));
+}
+
+fn c_string(text: &str) -> CString {
+    let bytes: Vec<u8> = text.bytes().filter(|byte| *byte != 0).collect();
+    unsafe { CString::from_vec_unchecked(bytes) }
 }
 
 fn set_last_error(text: &str) {
-    let clean = text.replace('\0', " ");
-    let owned = CString::new(clean).unwrap_or_else(|_| CString::new("stencil error").unwrap());
-    LAST_ERROR.with(|slot| *slot.borrow_mut() = owned);
+    let owned = c_string(text);
+    LAST_ERROR.with(|slot| {
+        *slot.borrow_mut() = owned;
+    });
 }
 
 fn clear_last_error() {
     set_last_error("");
 }
 
+#[repr(C)]
+pub struct RgsaddleStencilReport {
+    pub struct_size: u64,
+    pub status: i32,
+    pub reserved: i32,
+    pub max_force: f64,
+    pub curvature: f64,
+    pub iteration: u64,
+    pub evaluations: u64,
+    pub ci_index: i64,
+    pub zoom_lo: i64,
+    pub zoom_hi: i64,
+    pub phase: i32,
+    pub phase_pad: i32,
+}
+
+struct Config {
+    preset: i32,
+    dr: f64,
+    force_tol: f64,
+    max_move: f64,
+    rotation_tol: f64,
+    max_rotations: usize,
+    krylov_dim: usize,
+    threads: usize,
+    art_threshold: f64,
+    art_push: usize,
+    mode: Vec<f64>,
+    spring: i64,
+    k: f64,
+    k_min: f64,
+    k_max: f64,
+    k_bounds_set: bool,
+    zoom_stability: usize,
+    zoom_alpha: f64,
+    zoom_offset: usize,
+    zoom_interp: i64,
+    zoom_ends: i64,
+    zoom_force: f64,
+    zoom_force_kind: i64,
+    zoom_set: bool,
+    image_scale: Option<f64>,
+    band_slack: f64,
+    trigger_factor: f64,
+    trigger_force: f64,
+    n_simul: usize,
+    n_max: usize,
+    tangent: i64,
+    zoom_max_iter: usize,
+}
+
+impl Config {
+    fn new(preset: i32) -> Self {
+        Self {
+            preset,
+            dr: 1e-3,
+            force_tol: 1e-3,
+            max_move: 0.2,
+            rotation_tol: 1e-4,
+            max_rotations: 20,
+            krylov_dim: 12,
+            threads: 1,
+            art_threshold: 0.0,
+            art_push: 20,
+            mode: Vec::new(),
+            spring: 0,
+            k: 5.0,
+            k_min: 0.972,
+            k_max: 9.72,
+            k_bounds_set: false,
+            zoom_stability: 5,
+            zoom_alpha: 0.5,
+            zoom_offset: 1,
+            zoom_interp: 1,
+            zoom_ends: 0,
+            zoom_force: 10.0,
+            zoom_force_kind: 0,
+            zoom_set: false,
+            image_scale: None,
+            band_slack: 10.0,
+            trigger_factor: 0.5,
+            trigger_force: 0.0,
+            n_simul: 3,
+            n_max: 10,
+            tangent: 1,
+            zoom_max_iter: 0,
+        }
+    }
+
+    fn preset(&self) -> Option<Preset> {
+        Preset::from_abi(self.preset)
+    }
+
+    fn is_point(&self) -> bool {
+        self.preset().is_some_and(Preset::is_point)
+    }
+}
+
+struct Handle {
+    stencil: Stencil,
+    n_coords: usize,
+    band: bool,
+}
+
+pub type StencilEvalFn = unsafe extern "C" fn(
+    *mut c_void,
+    usize,
+    usize,
+    *const u64,
+    *const f64,
+    *mut f64,
+    *mut f64,
+) -> i32;
+
+struct CbSurface {
+    eval: StencilEvalFn,
+    user: *mut c_void,
+}
+
+unsafe impl Send for CbSurface {}
+unsafe impl Sync for CbSurface {}
+
+impl Surface for CbSurface {
+    fn eval(
+        &self,
+        ids: &[ImageId],
+        x: ArrayView2<f64>,
+        e: &mut [f64],
+        mut g: ArrayViewMut2<f64>,
+    ) -> Result<(), SaddleError> {
+        let rows = x.nrows();
+        let dof = x.ncols();
+        if ids.len() != rows || e.len() != rows || g.dim() != (rows, dof) {
+            return Err(SaddleError::Shape(
+                "stencil callback shape does not match the position".into(),
+            ));
+        }
+        let Some(flat) = x.as_slice() else {
+            return Err(SaddleError::Shape(
+                "stencil position is not contiguous".into(),
+            ));
+        };
+        let Some(gradient) = g.as_slice_mut() else {
+            return Err(SaddleError::Shape(
+                "stencil gradient is not contiguous".into(),
+            ));
+        };
+        let code = unsafe {
+            (self.eval)(
+                self.user,
+                rows,
+                dof,
+                ids.as_ptr(),
+                flat.as_ptr(),
+                e.as_mut_ptr(),
+                gradient.as_mut_ptr(),
+            )
+        };
+        if code != 0 {
+            return Err(SaddleError::Surface(format!(
+                "stencil callback status {code}"
+            )));
+        }
+        if e.iter().any(|value| !value.is_finite())
+            || gradient.iter().any(|value| !value.is_finite())
+        {
+            return Err(SaddleError::NonFinite("stencil callback"));
+        }
+        Ok(())
+    }
+}
+
+fn guard(body: impl FnOnce() -> i32) -> i32 {
+    clear_last_error();
+    match std::panic::catch_unwind(AssertUnwindSafe(body)) {
+        Ok(code) => code,
+        Err(_) => {
+            set_last_error("stencil call panicked");
+            RGSADDLE_SOLVER
+        }
+    }
+}
+
+fn guard_ptr<T>(body: impl FnOnce() -> *mut T) -> *mut T {
+    clear_last_error();
+    match std::panic::catch_unwind(AssertUnwindSafe(body)) {
+        Ok(ptr) => ptr,
+        Err(_) => {
+            set_last_error("stencil call panicked");
+            std::ptr::null_mut()
+        }
+    }
+}
+
+fn fail(err: &SaddleError) -> i32 {
+    set_last_error(&err.to_string());
+    status_of(err)
+}
+
+fn finite_key(value: f64) -> Result<(), i32> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        set_last_error("stencil key is not finite");
+        Err(super::RGSADDLE_NON_FINITE)
+    }
+}
+
+fn reject_family(point_key: bool, config: &Config) -> Option<i32> {
+    if point_key && !config.is_point() {
+        set_last_error("this key is for a point stencil");
+        return Some(RGSADDLE_INVALID_PARAMETER);
+    }
+    if !point_key && config.is_point() {
+        set_last_error("this key is for a band stencil");
+        return Some(RGSADDLE_INVALID_PARAMETER);
+    }
+    None
+}
+
+fn zoom_from(config: &Config) -> ZoomParams {
+    let force = if config.zoom_force_kind == 1 {
+        ZoomForce::Abs(config.zoom_force)
+    } else {
+        ZoomForce::RelTol(config.zoom_force)
+    };
+    ZoomParams {
+        stability: config.zoom_stability,
+        force,
+        window: ZoomWindow::Auto {
+            alpha: config.zoom_alpha,
+            offset: config.zoom_offset,
+        },
+        interpolation: if config.zoom_interp == 0 {
+            Interp::Linear
+        } else {
+            Interp::Cubic
+        },
+        ends: if config.zoom_ends == 1 {
+            ZoomEnds::FreePerp
+        } else {
+            ZoomEnds::Fixed
+        },
+        max_iterations: config.zoom_max_iter,
+    }
+}
+
+fn apply(config: &Config, rows: usize, dof: usize, values: &[f64]) -> Result<Stencil, SaddleError> {
+    let Some(preset) = config.preset() else {
+        return Err(SaddleError::Invalid("unknown stencil preset".into()));
+    };
+    if preset.is_point() {
+        let mut builder = Stencil::point(Array1::from_vec(values.to_vec()))
+            .preset(preset)
+            .dr(config.dr)
+            .force_tol(config.force_tol)
+            .max_move(config.max_move)
+            .rotation_tol(config.rotation_tol)
+            .max_rotations(config.max_rotations)
+            .krylov_dim(config.krylov_dim)
+            .threads(config.threads)
+            .art_threshold(config.art_threshold)
+            .art_push_steps(config.art_push);
+        if !config.mode.is_empty() {
+            builder = builder.mode(Array1::from_vec(config.mode.clone()));
+        }
+        return builder.build();
+    }
+    let x = Array2::from_shape_vec((rows, dof), values.to_vec())
+        .map_err(|_| SaddleError::Shape("band position is not a matrix".into()))?;
+    let mut builder = Stencil::band(x)
+        .preset(preset)
+        .threads(config.threads)
+        .force_tol(config.force_tol)
+        .max_move(config.max_move)
+        .k(config.k)
+        .tangent(if config.tangent == 0 {
+            TangentRule::Simple
+        } else {
+            TangentRule::Improved
+        })
+        .climb_trigger(config.trigger_factor, config.trigger_force)
+        .band_slack(config.band_slack)
+        .autoneb_limits(config.n_simul, config.n_max);
+    if config.spring == 1 || config.k_bounds_set {
+        builder = builder.energy_weighted(config.k_min, config.k_max);
+    }
+    if let Some(scale) = config.image_scale {
+        builder = builder.image_scale(Some(scale));
+    }
+    if preset == Preset::ZoomNeb || config.zoom_set {
+        builder = builder.zoom(zoom_from(config));
+    }
+    builder.build()
+}
+
+fn write_report(out: *mut RgsaddleStencilReport, report: &StencilReport) -> i32 {
+    if out.is_null() {
+        set_last_error("stencil report is null");
+        return RGSADDLE_NULL_REPORT;
+    }
+    let full = std::mem::size_of::<RgsaddleStencilReport>() as u64;
+    let given = unsafe { (*out).struct_size };
+    if given != 0 && given < full {
+        set_last_error("stencil report struct_size is short");
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let (zoom_lo, zoom_hi) = report
+        .zoom_window
+        .map_or((-1, -1), |(lo, hi)| (lo as i64, hi as i64));
+    unsafe {
+        (*out).struct_size = full;
+        (*out).status = match report.status {
+            StencilStatus::Running => 0,
+            StencilStatus::Converged => 1,
+        };
+        (*out).reserved = 0;
+        (*out).max_force = report.max_force;
+        (*out).curvature = report.curvature;
+        (*out).iteration = report.iteration as u64;
+        (*out).evaluations = report.evaluations as u64;
+        (*out).ci_index = report.ci_index.map_or(-1, |index| index as i64);
+        (*out).zoom_lo = zoom_lo;
+        (*out).zoom_hi = zoom_hi;
+        (*out).phase = report.phase;
+        (*out).phase_pad = 0;
+    }
+    RGSADDLE_OK
+}
+
+fn copy_f64(out: *mut f64, values: &[f64]) {
+    unsafe { std::ptr::copy_nonoverlapping(values.as_ptr(), out, values.len()) };
+}
+
+/// # Safety
+/// The returned pointer is valid until the next stencil call on this thread.
 #[unsafe(no_mangle)]
 pub extern "C" fn rgsaddle_last_error() -> *const c_char {
     LAST_ERROR.with(|slot| slot.borrow().as_ptr())
 }
 
-struct ConfigInner {
-    config: StencilConfig,
-    lbfgs_memory: usize,
-    force_kind_abs: bool,
-}
-
-pub struct RgsaddleStencilConfig {
-    inner: ConfigInner,
-}
-
-#[repr(C)]
-pub struct RgsaddleStencilReport {
-    pub struct_size: usize,
-    pub phase: i32,
-    pub status: i32,
-    pub max_force: f64,
-    pub ci_index: i64,
-    pub iteration: i64,
-    pub surface_rows: i64,
-    pub total_evaluations: i64,
-    pub zoom_lo: i64,
-    pub zoom_hi: i64,
-    pub curvature: f64,
-}
-
-pub struct RgsaddleStencil {
-    stencil: Stencil,
-    rows: usize,
-    dof: usize,
-    last: StencilReport,
-}
-
-fn preset_of(code: i32) -> Result<Preset, String> {
-    match code {
-        0 => Ok(Preset::CiNeb),
-        1 => Ok(Preset::EonZoom),
-        2 => Ok(Preset::OrcaZoomNebTs),
-        3 => Ok(Preset::AutoNeb),
-        4 => Ok(Preset::Dimer),
-        5 => Ok(Preset::Lanczos),
-        6 => Ok(Preset::Art),
-        7 => Ok(Preset::Plain),
-        _ => Err(format!("unknown stencil preset {code}")),
-    }
-}
-
-fn is_point(config: &StencilConfig) -> bool {
-    matches!(config.method, StencilMethod::Point(_))
-}
-
-fn band_key_error() -> String {
-    "a point stencil cannot take band options (spring, zoom, autoneb, refine)".into()
-}
-
-fn point_key_error() -> String {
-    "a min-mode key does not apply to a band method".into()
-}
-
-fn zoom_params(config: &StencilConfig) -> Result<ZoomParams, String> {
-    match config.method {
-        StencilMethod::Band(BandMethod::Zoom(params)) => Ok(params),
-        _ => Err("zoom key does not apply to this method".into()),
-    }
-}
-
-fn zoom_params_mut(config: &mut StencilConfig) -> Result<&mut ZoomParams, String> {
-    match &mut config.method {
-        StencilMethod::Band(BandMethod::Zoom(params)) => Ok(params),
-        _ => Err("zoom key does not apply to this method".into()),
-    }
-}
-
-fn auto_params(config: &StencilConfig) -> Result<&AutoNebParams, String> {
-    match &config.method {
-        StencilMethod::Band(BandMethod::AutoNeb(params)) => Ok(params),
-        _ => Err("AutoNEB key does not apply to this method".into()),
-    }
-}
-
-fn auto_params_mut(config: &mut StencilConfig) -> Result<&mut AutoNebParams, String> {
-    match &mut config.method {
-        StencilMethod::Band(BandMethod::AutoNeb(params)) => Ok(params),
-        _ => Err("AutoNEB key does not apply to this method".into()),
-    }
-}
-
-fn require_band(config: &StencilConfig) -> Result<(), String> {
-    if is_point(config) {
-        Err(band_key_error())
-    } else {
-        Ok(())
-    }
-}
-
-fn require_point(config: &StencilConfig) -> Result<(), String> {
-    if is_point(config) {
-        Ok(())
-    } else {
-        Err(point_key_error())
-    }
-}
-
-fn set_method(config: &mut StencilConfig, value: i64) -> Result<(), String> {
-    config.method = match value {
-        0 => StencilMethod::Band(BandMethod::Plain),
-        1 => StencilMethod::Band(BandMethod::CiNeb),
-        2 => {
-            let params = auto_params(config).cloned().unwrap_or_default();
-            StencilMethod::Band(BandMethod::AutoNeb(params))
-        }
-        3 => {
-            let params = zoom_params(config).unwrap_or_default();
-            StencilMethod::Band(BandMethod::Zoom(params))
-        }
-        4 => StencilMethod::Point(PointMethod::Dimer),
-        5 => StencilMethod::Point(PointMethod::Lanczos),
-        6 => StencilMethod::Point(PointMethod::Art),
-        _ => return Err(format!("unknown stencil method {value}")),
-    };
-    if value == 0 {
-        config.band.climbing = None;
-    }
-    Ok(())
-}
-
-fn spring_ordinal(spring: &SpringModel) -> i64 {
-    match spring {
-        SpringModel::Uniform { .. } => 0,
-        SpringModel::EnergyWeighted { .. } => 1,
-        SpringModel::OnsagerMachlup { .. } => 2,
-        SpringModel::Explicit { .. } => 3,
-    }
-}
-
-fn set_i64_inner(inner: &mut ConfigInner, key: i32, value: i64) -> Result<(), String> {
-    let config = &mut inner.config;
-    match key {
-        RGSADDLE_STENCIL_KEY_METHOD => set_method(config, value),
-        RGSADDLE_STENCIL_KEY_SPRING_MODEL => {
-            require_band(config)?;
-            let (k_min, k_max, k, ks) = match &config.spring {
-                SpringModel::Uniform { k } => (0.972, 9.72, *k, Vec::new()),
-                SpringModel::EnergyWeighted { k_min, k_max } => {
-                    (*k_min, *k_max, *k_min, Vec::new())
-                }
-                SpringModel::OnsagerMachlup { k } => (0.972, 9.72, *k, Vec::new()),
-                SpringModel::Explicit { ks } => (0.972, 9.72, 5.0, ks.clone()),
-            };
-            config.spring = match value {
-                0 => SpringModel::Uniform { k },
-                1 => SpringModel::EnergyWeighted { k_min, k_max },
-                2 => SpringModel::OnsagerMachlup { k },
-                3 => SpringModel::Explicit { ks },
-                _ => return Err(format!("unknown spring model {value}")),
-            };
-            Ok(())
-        }
-        RGSADDLE_STENCIL_KEY_ZOOM_STABILITY => {
-            zoom_params_mut(config)?.stability = value.max(0) as usize;
-            Ok(())
-        }
-        RGSADDLE_STENCIL_KEY_ZOOM_WINDOW => {
-            let params = zoom_params_mut(config)?;
-            let offset = match params.window {
-                ZoomWindow::Auto { offset, .. } | ZoomWindow::Manual { offset } => offset,
-            };
-            let alpha = match params.window {
-                ZoomWindow::Auto { alpha, .. } => alpha,
-                ZoomWindow::Manual { .. } => 0.5,
-            };
-            params.window = match value {
-                0 => ZoomWindow::Auto { alpha, offset },
-                1 => ZoomWindow::Manual { offset },
-                _ => return Err(format!("unknown zoom window {value}")),
-            };
-            Ok(())
-        }
-        RGSADDLE_STENCIL_KEY_ZOOM_OFFSET => {
-            let params = zoom_params_mut(config)?;
-            let offset = value.max(0) as usize;
-            params.window = match params.window {
-                ZoomWindow::Auto { alpha, .. } => ZoomWindow::Auto { alpha, offset },
-                ZoomWindow::Manual { .. } => ZoomWindow::Manual { offset },
-            };
-            Ok(())
-        }
-        RGSADDLE_STENCIL_KEY_ZOOM_INTERP => {
-            zoom_params_mut(config)?.interpolation = match value {
-                0 => Interp::Linear,
-                1 => Interp::Cubic,
-                _ => return Err(format!("unknown zoom interpolation {value}")),
-            };
-            Ok(())
-        }
-        RGSADDLE_STENCIL_KEY_ZOOM_ENDS => {
-            zoom_params_mut(config)?.ends = match value {
-                0 => ZoomEnds::Fixed,
-                1 => ZoomEnds::FreePerp,
-                _ => return Err(format!("unknown zoom ends {value}")),
-            };
-            Ok(())
-        }
-        RGSADDLE_STENCIL_KEY_ZOOM_MAX_ITERATIONS => {
-            zoom_params_mut(config)?.max_iterations = value.max(0) as usize;
-            Ok(())
-        }
-        RGSADDLE_STENCIL_KEY_ZOOM_FORCE_KIND => {
-            let _ = zoom_params(config)?;
-            inner.force_kind_abs = match value {
-                0 => false,
-                1 => true,
-                _ => return Err(format!("unknown zoom force kind {value}")),
-            };
-            let params = zoom_params_mut(config)?;
-            let magnitude = match params.force {
-                ZoomForce::RelTol(scale) => scale,
-                ZoomForce::Abs(force) => force,
-            };
-            params.force = if inner.force_kind_abs {
-                ZoomForce::Abs(magnitude)
-            } else {
-                ZoomForce::RelTol(magnitude)
-            };
-            Ok(())
-        }
-        RGSADDLE_STENCIL_KEY_AUTONEB_N_SIMUL => {
-            auto_params_mut(config)?.n_simul = value.max(0) as usize;
-            Ok(())
-        }
-        RGSADDLE_STENCIL_KEY_AUTONEB_N_MAX => {
-            auto_params_mut(config)?.n_max = value.max(0) as usize;
-            Ok(())
-        }
-        RGSADDLE_STENCIL_KEY_AUTONEB_LOCAL_MAX_STEPS => {
-            auto_params_mut(config)?.local_max_steps = value.max(0) as usize;
-            Ok(())
-        }
-        RGSADDLE_STENCIL_KEY_AUTONEB_CLIMB_MAX_STEPS => {
-            auto_params_mut(config)?.climb_max_steps = value.max(0) as usize;
-            Ok(())
-        }
-        RGSADDLE_STENCIL_KEY_AUTONEB_CLIMB => {
-            auto_params_mut(config)?.climb = value != 0;
-            Ok(())
-        }
-        RGSADDLE_STENCIL_KEY_AUTONEB_FULL_BAND => {
-            auto_params_mut(config)?.full_band = value != 0;
-            Ok(())
-        }
-        RGSADDLE_STENCIL_KEY_REFINE => {
-            require_band(config)?;
-            config.refine = match value {
-                0 => Refine::None,
-                1 => Refine::Ocineb(OcinebParams::default()),
-                2 => Refine::EigenvectorFollowing(EfParams::default()),
-                _ => return Err(format!("unknown refine {value}")),
-            };
-            Ok(())
-        }
-        RGSADDLE_STENCIL_KEY_TANGENT => {
-            require_band(config)?;
-            config.band.tangent = match value {
-                0 => TangentKind::Simple,
-                1 => TangentKind::Improved,
-                _ => return Err(format!("unknown tangent {value}")),
-            };
-            Ok(())
-        }
-        RGSADDLE_STENCIL_KEY_PROJECTION => {
-            require_band(config)?;
-            config.band.projection = match value {
-                0 => ProjectionKind::PlainElasticBand,
-                1 => ProjectionKind::Neb,
-                2 => ProjectionKind::DoublyNudged,
-                _ => return Err(format!("unknown projection {value}")),
-            };
-            Ok(())
-        }
-        RGSADDLE_STENCIL_KEY_STEPPER => {
-            require_band(config)?;
-            config.band.method = match value {
-                0 => Method::Fire { kind: FireKind::V2 },
-                1 => Method::Lbfgs {
-                    memory: inner.lbfgs_memory,
-                },
-                _ => return Err(format!("unknown stepper {value}")),
-            };
-            config.band.quickmin = false;
-            Ok(())
-        }
-        RGSADDLE_STENCIL_KEY_THREADS => {
-            if value <= 0 {
-                return Err("stencil needs at least one image-evaluation thread".into());
-            }
-            config.threads = value as usize;
-            Ok(())
-        }
-        RGSADDLE_STENCIL_KEY_MINMODE_KIND => {
-            require_point(config)?;
-            config.point.kind = match value {
-                0 => MinModeKind::Dimer,
-                1 => MinModeKind::Lanczos,
-                _ => return Err(format!("unknown min-mode kind {value}")),
-            };
-            Ok(())
-        }
-        RGSADDLE_STENCIL_KEY_MINMODE_DIFFERENCE => {
-            require_point(config)?;
-            config.point.difference = match value {
-                0 => FiniteDifference::Forward,
-                1 => FiniteDifference::Central,
-                _ => return Err(format!("unknown difference {value}")),
-            };
-            Ok(())
-        }
-        RGSADDLE_STENCIL_KEY_MINMODE_MAX_ROTATIONS => {
-            require_point(config)?;
-            config.point.max_rotations = value.max(0) as usize;
-            Ok(())
-        }
-        RGSADDLE_STENCIL_KEY_MINMODE_KRYLOV => {
-            require_point(config)?;
-            config.point.krylov_dim = value.max(0) as usize;
-            Ok(())
-        }
-        RGSADDLE_STENCIL_KEY_LBFGS_MEMORY => {
-            require_band(config)?;
-            if value <= 0 {
-                return Err("L-BFGS memory must be positive".into());
-            }
-            inner.lbfgs_memory = value as usize;
-            if let Method::Lbfgs { memory } = &mut config.band.method {
-                *memory = inner.lbfgs_memory;
-            }
-            Ok(())
-        }
-        RGSADDLE_STENCIL_KEY_K
-        | RGSADDLE_STENCIL_KEY_K_MIN
-        | RGSADDLE_STENCIL_KEY_K_MAX
-        | RGSADDLE_STENCIL_KEY_ZOOM_ALPHA
-        | RGSADDLE_STENCIL_KEY_ZOOM_FORCE
-        | RGSADDLE_STENCIL_KEY_AUTONEB_LOCAL_FORCE_TOL
-        | RGSADDLE_STENCIL_KEY_AUTONEB_SPACE_ENERGY_RATIO
-        | RGSADDLE_STENCIL_KEY_CI_TOL
-        | RGSADDLE_STENCIL_KEY_CI_RMS_TOL
-        | RGSADDLE_STENCIL_KEY_IMAGE_SCALE
-        | RGSADDLE_STENCIL_KEY_BAND_SLACK
-        | RGSADDLE_STENCIL_KEY_CI_TRIGGER_FACTOR
-        | RGSADDLE_STENCIL_KEY_CI_TRIGGER_FORCE
-        | RGSADDLE_STENCIL_KEY_MAX_MOVE
-        | RGSADDLE_STENCIL_KEY_EF_ACTIVATE
-        | RGSADDLE_STENCIL_KEY_OCINEB_TRUST
-        | RGSADDLE_STENCIL_KEY_MINMODE_DR
-        | RGSADDLE_STENCIL_KEY_MINMODE_ROTATION_TOL
-        | RGSADDLE_STENCIL_KEY_MINMODE_FORCE_TOL
-        | RGSADDLE_STENCIL_KEY_MINMODE_MAX_MOVE
-        | RGSADDLE_STENCIL_KEY_MINMODE_ROTATION_ANGLE_TOL => {
-            Err("stencil key takes a double".into())
-        }
-        RGSADDLE_STENCIL_KEY_EXPLICIT_KS | RGSADDLE_STENCIL_KEY_CELL => {
-            Err("stencil key takes an array".into())
-        }
-        _ => Err(format!("unknown stencil key {key}")),
-    }
-}
-
-fn set_f64_inner(inner: &mut ConfigInner, key: i32, value: f64) -> Result<(), String> {
-    let config = &mut inner.config;
-    match key {
-        RGSADDLE_STENCIL_KEY_K => {
-            require_band(config)?;
-            match &mut config.spring {
-                SpringModel::Uniform { k } | SpringModel::OnsagerMachlup { k } => *k = value,
-                SpringModel::EnergyWeighted { .. } | SpringModel::Explicit { .. } => {
-                    return Err("K applies to a uniform or Onsager-Machlup spring".into());
-                }
-            }
-            Ok(())
-        }
-        RGSADDLE_STENCIL_KEY_K_MIN => {
-            require_band(config)?;
-            match &mut config.spring {
-                SpringModel::EnergyWeighted { k_min, .. } => *k_min = value,
-                _ => return Err("K_MIN applies to energy-weighted springs".into()),
-            }
-            Ok(())
-        }
-        RGSADDLE_STENCIL_KEY_K_MAX => {
-            require_band(config)?;
-            match &mut config.spring {
-                SpringModel::EnergyWeighted { k_max, .. } => *k_max = value,
-                _ => return Err("K_MAX applies to energy-weighted springs".into()),
-            }
-            Ok(())
-        }
-        RGSADDLE_STENCIL_KEY_ZOOM_ALPHA => {
-            let params = zoom_params_mut(config)?;
-            match &mut params.window {
-                ZoomWindow::Auto { alpha, .. } => *alpha = value,
-                ZoomWindow::Manual { .. } => {
-                    return Err("ZOOM_ALPHA applies to an automatic window".into());
-                }
-            }
-            Ok(())
-        }
-        RGSADDLE_STENCIL_KEY_ZOOM_FORCE => {
-            let abs = inner.force_kind_abs;
-            let params = zoom_params_mut(config)?;
-            params.force = if abs {
-                ZoomForce::Abs(value)
-            } else {
-                ZoomForce::RelTol(value)
-            };
-            Ok(())
-        }
-        RGSADDLE_STENCIL_KEY_AUTONEB_LOCAL_FORCE_TOL => {
-            auto_params_mut(config)?.local_force_tol = value;
-            Ok(())
-        }
-        RGSADDLE_STENCIL_KEY_AUTONEB_SPACE_ENERGY_RATIO => {
-            auto_params_mut(config)?.space_energy_ratio = value;
-            Ok(())
-        }
-        RGSADDLE_STENCIL_KEY_CI_TOL => {
-            require_band(config)?;
-            config.converge.ci_tol = value;
-            Ok(())
-        }
-        RGSADDLE_STENCIL_KEY_CI_RMS_TOL => {
-            require_band(config)?;
-            config.converge.ci_rms_tol = if value.is_nan() || value < 0.0 {
-                None
-            } else {
-                Some(value)
-            };
-            Ok(())
-        }
-        RGSADDLE_STENCIL_KEY_IMAGE_SCALE => {
-            require_band(config)?;
-            config.converge.image_scale = if value.is_nan() || value < 0.0 {
-                None
-            } else {
-                Some(value)
-            };
-            Ok(())
-        }
-        RGSADDLE_STENCIL_KEY_BAND_SLACK => {
-            require_band(config)?;
-            config.converge.band_slack = value;
-            Ok(())
-        }
-        RGSADDLE_STENCIL_KEY_CI_TRIGGER_FACTOR => {
-            require_band(config)?;
-            config.climb.trigger_factor = value;
-            Ok(())
-        }
-        RGSADDLE_STENCIL_KEY_CI_TRIGGER_FORCE => {
-            require_band(config)?;
-            config.climb.trigger_force = value;
-            Ok(())
-        }
-        RGSADDLE_STENCIL_KEY_MAX_MOVE => {
-            require_band(config)?;
-            config.band.max_move = value;
-            Ok(())
-        }
-        RGSADDLE_STENCIL_KEY_EF_ACTIVATE => {
-            require_band(config)?;
-            match &mut config.refine {
-                Refine::EigenvectorFollowing(params) => params.activate = value,
-                _ => return Err("EF_ACTIVATE applies to eigenvector-following refine".into()),
-            }
-            Ok(())
-        }
-        RGSADDLE_STENCIL_KEY_OCINEB_TRUST => {
-            require_band(config)?;
-            match &mut config.refine {
-                Refine::Ocineb(params) => params.trust = value,
-                _ => return Err("OCINEB_TRUST applies to OCI-NEB refine".into()),
-            }
-            Ok(())
-        }
-        RGSADDLE_STENCIL_KEY_MINMODE_DR => {
-            require_point(config)?;
-            config.point.dr = value;
-            Ok(())
-        }
-        RGSADDLE_STENCIL_KEY_MINMODE_ROTATION_TOL => {
-            require_point(config)?;
-            config.point.rotation_tol = value;
-            Ok(())
-        }
-        RGSADDLE_STENCIL_KEY_MINMODE_FORCE_TOL => {
-            require_point(config)?;
-            config.point.force_tol = value;
-            Ok(())
-        }
-        RGSADDLE_STENCIL_KEY_MINMODE_MAX_MOVE => {
-            require_point(config)?;
-            config.point.max_move = value;
-            Ok(())
-        }
-        RGSADDLE_STENCIL_KEY_MINMODE_ROTATION_ANGLE_TOL => {
-            require_point(config)?;
-            config.point.rotation_angle_tol = value;
-            Ok(())
-        }
-        key if (1..=25).contains(&key) => Err("stencil key takes an integer".into()),
-        RGSADDLE_STENCIL_KEY_EXPLICIT_KS | RGSADDLE_STENCIL_KEY_CELL => {
-            Err("stencil key takes an array".into())
-        }
-        _ => Err(format!("unknown stencil key {key}")),
-    }
-}
-
-fn get_i64_inner(inner: &ConfigInner, key: i32) -> Result<i64, String> {
-    let config = &inner.config;
-    match key {
-        RGSADDLE_STENCIL_KEY_METHOD => Ok(method_ordinal(&config.method) as i64),
-        RGSADDLE_STENCIL_KEY_SPRING_MODEL => {
-            require_band(config)?;
-            Ok(spring_ordinal(&config.spring))
-        }
-        RGSADDLE_STENCIL_KEY_ZOOM_STABILITY => Ok(zoom_params(config)?.stability as i64),
-        RGSADDLE_STENCIL_KEY_ZOOM_WINDOW => Ok(match zoom_params(config)?.window {
-            ZoomWindow::Auto { .. } => 0,
-            ZoomWindow::Manual { .. } => 1,
-        }),
-        RGSADDLE_STENCIL_KEY_ZOOM_OFFSET => Ok(match zoom_params(config)?.window {
-            ZoomWindow::Auto { offset, .. } | ZoomWindow::Manual { offset } => offset as i64,
-        }),
-        RGSADDLE_STENCIL_KEY_ZOOM_INTERP => Ok(match zoom_params(config)?.interpolation {
-            Interp::Linear => 0,
-            Interp::Cubic => 1,
-        }),
-        RGSADDLE_STENCIL_KEY_ZOOM_ENDS => Ok(match zoom_params(config)?.ends {
-            ZoomEnds::Fixed => 0,
-            ZoomEnds::FreePerp => 1,
-        }),
-        RGSADDLE_STENCIL_KEY_ZOOM_MAX_ITERATIONS => Ok(zoom_params(config)?.max_iterations as i64),
-        RGSADDLE_STENCIL_KEY_ZOOM_FORCE_KIND => {
-            let _ = zoom_params(config)?;
-            Ok(i64::from(inner.force_kind_abs))
-        }
-        RGSADDLE_STENCIL_KEY_AUTONEB_N_SIMUL => Ok(auto_params(config)?.n_simul as i64),
-        RGSADDLE_STENCIL_KEY_AUTONEB_N_MAX => Ok(auto_params(config)?.n_max as i64),
-        RGSADDLE_STENCIL_KEY_AUTONEB_LOCAL_MAX_STEPS => {
-            Ok(auto_params(config)?.local_max_steps as i64)
-        }
-        RGSADDLE_STENCIL_KEY_AUTONEB_CLIMB_MAX_STEPS => {
-            Ok(auto_params(config)?.climb_max_steps as i64)
-        }
-        RGSADDLE_STENCIL_KEY_AUTONEB_CLIMB => Ok(i64::from(auto_params(config)?.climb)),
-        RGSADDLE_STENCIL_KEY_AUTONEB_FULL_BAND => Ok(i64::from(auto_params(config)?.full_band)),
-        RGSADDLE_STENCIL_KEY_REFINE => {
-            require_band(config)?;
-            Ok(match config.refine {
-                Refine::None => 0,
-                Refine::Ocineb(_) => 1,
-                Refine::EigenvectorFollowing(_) => 2,
-            })
-        }
-        RGSADDLE_STENCIL_KEY_TANGENT => {
-            require_band(config)?;
-            Ok(match config.band.tangent {
-                TangentKind::Simple => 0,
-                TangentKind::Improved => 1,
-            })
-        }
-        RGSADDLE_STENCIL_KEY_PROJECTION => {
-            require_band(config)?;
-            Ok(match config.band.projection {
-                ProjectionKind::PlainElasticBand => 0,
-                ProjectionKind::Neb => 1,
-                ProjectionKind::DoublyNudged => 2,
-            })
-        }
-        RGSADDLE_STENCIL_KEY_STEPPER => {
-            require_band(config)?;
-            Ok(match config.band.method {
-                Method::Lbfgs { .. } => 1,
-                _ => 0,
-            })
-        }
-        RGSADDLE_STENCIL_KEY_THREADS => Ok(config.threads as i64),
-        RGSADDLE_STENCIL_KEY_MINMODE_KIND => {
-            require_point(config)?;
-            Ok(match config.point.kind {
-                MinModeKind::Dimer => 0,
-                MinModeKind::Lanczos => 1,
-            })
-        }
-        RGSADDLE_STENCIL_KEY_MINMODE_DIFFERENCE => {
-            require_point(config)?;
-            Ok(match config.point.difference {
-                FiniteDifference::Forward => 0,
-                FiniteDifference::Central => 1,
-            })
-        }
-        RGSADDLE_STENCIL_KEY_MINMODE_MAX_ROTATIONS => {
-            require_point(config)?;
-            Ok(config.point.max_rotations as i64)
-        }
-        RGSADDLE_STENCIL_KEY_MINMODE_KRYLOV => {
-            require_point(config)?;
-            Ok(config.point.krylov_dim as i64)
-        }
-        RGSADDLE_STENCIL_KEY_LBFGS_MEMORY => {
-            require_band(config)?;
-            Ok(inner.lbfgs_memory as i64)
-        }
-        key if (101..=121).contains(&key) => Err("stencil key takes a double".into()),
-        RGSADDLE_STENCIL_KEY_EXPLICIT_KS | RGSADDLE_STENCIL_KEY_CELL => {
-            Err("stencil key takes an array".into())
-        }
-        _ => Err(format!("unknown stencil key {key}")),
-    }
-}
-
-fn get_f64_inner(inner: &ConfigInner, key: i32) -> Result<f64, String> {
-    let config = &inner.config;
-    match key {
-        RGSADDLE_STENCIL_KEY_K => {
-            require_band(config)?;
-            match &config.spring {
-                SpringModel::Uniform { k } | SpringModel::OnsagerMachlup { k } => Ok(*k),
-                _ => Err("K applies to a uniform or Onsager-Machlup spring".into()),
-            }
-        }
-        RGSADDLE_STENCIL_KEY_K_MIN => {
-            require_band(config)?;
-            match &config.spring {
-                SpringModel::EnergyWeighted { k_min, .. } => Ok(*k_min),
-                _ => Err("K_MIN applies to energy-weighted springs".into()),
-            }
-        }
-        RGSADDLE_STENCIL_KEY_K_MAX => {
-            require_band(config)?;
-            match &config.spring {
-                SpringModel::EnergyWeighted { k_max, .. } => Ok(*k_max),
-                _ => Err("K_MAX applies to energy-weighted springs".into()),
-            }
-        }
-        RGSADDLE_STENCIL_KEY_ZOOM_ALPHA => match zoom_params(config)?.window {
-            ZoomWindow::Auto { alpha, .. } => Ok(alpha),
-            ZoomWindow::Manual { .. } => Err("ZOOM_ALPHA applies to an automatic window".into()),
-        },
-        RGSADDLE_STENCIL_KEY_ZOOM_FORCE => Ok(match zoom_params(config)?.force {
-            ZoomForce::RelTol(scale) => scale,
-            ZoomForce::Abs(force) => force,
-        }),
-        RGSADDLE_STENCIL_KEY_AUTONEB_LOCAL_FORCE_TOL => Ok(auto_params(config)?.local_force_tol),
-        RGSADDLE_STENCIL_KEY_AUTONEB_SPACE_ENERGY_RATIO => {
-            Ok(auto_params(config)?.space_energy_ratio)
-        }
-        RGSADDLE_STENCIL_KEY_CI_TOL => {
-            require_band(config)?;
-            Ok(config.converge.ci_tol)
-        }
-        RGSADDLE_STENCIL_KEY_CI_RMS_TOL => {
-            require_band(config)?;
-            Ok(config.converge.ci_rms_tol.unwrap_or(f64::NAN))
-        }
-        RGSADDLE_STENCIL_KEY_IMAGE_SCALE => {
-            require_band(config)?;
-            Ok(config.converge.image_scale.unwrap_or(f64::NAN))
-        }
-        RGSADDLE_STENCIL_KEY_BAND_SLACK => {
-            require_band(config)?;
-            Ok(config.converge.band_slack)
-        }
-        RGSADDLE_STENCIL_KEY_CI_TRIGGER_FACTOR => {
-            require_band(config)?;
-            Ok(config.climb.trigger_factor)
-        }
-        RGSADDLE_STENCIL_KEY_CI_TRIGGER_FORCE => {
-            require_band(config)?;
-            Ok(config.climb.trigger_force)
-        }
-        RGSADDLE_STENCIL_KEY_MAX_MOVE => {
-            require_band(config)?;
-            Ok(config.band.max_move)
-        }
-        RGSADDLE_STENCIL_KEY_EF_ACTIVATE => {
-            require_band(config)?;
-            match &config.refine {
-                Refine::EigenvectorFollowing(params) => Ok(params.activate),
-                _ => Err("EF_ACTIVATE applies to eigenvector-following refine".into()),
-            }
-        }
-        RGSADDLE_STENCIL_KEY_OCINEB_TRUST => {
-            require_band(config)?;
-            match &config.refine {
-                Refine::Ocineb(params) => Ok(params.trust),
-                _ => Err("OCINEB_TRUST applies to OCI-NEB refine".into()),
-            }
-        }
-        RGSADDLE_STENCIL_KEY_MINMODE_DR => {
-            require_point(config)?;
-            Ok(config.point.dr)
-        }
-        RGSADDLE_STENCIL_KEY_MINMODE_ROTATION_TOL => {
-            require_point(config)?;
-            Ok(config.point.rotation_tol)
-        }
-        RGSADDLE_STENCIL_KEY_MINMODE_FORCE_TOL => {
-            require_point(config)?;
-            Ok(config.point.force_tol)
-        }
-        RGSADDLE_STENCIL_KEY_MINMODE_MAX_MOVE => {
-            require_point(config)?;
-            Ok(config.point.max_move)
-        }
-        RGSADDLE_STENCIL_KEY_MINMODE_ROTATION_ANGLE_TOL => {
-            require_point(config)?;
-            Ok(config.point.rotation_angle_tol)
-        }
-        key if (1..=25).contains(&key) => Err("stencil key takes an integer".into()),
-        _ => Err(format!("unknown stencil key {key}")),
-    }
-}
-
-fn fail(err: String) -> i32 {
-    set_last_error(&err);
-    RGSADDLE_INVALID_PARAMETER
-}
-
-fn fail_saddle(err: SaddleError) -> i32 {
-    let text = match &err {
-        SaddleError::Invalid(message) => message.clone(),
-        other => other.to_string(),
-    };
-    set_last_error(&text);
-    status_of(&err)
-}
-
+/// # Safety
+/// The pointer is opaque. `preset` is a `Preset::to_abi` value.
 #[unsafe(no_mangle)]
-pub extern "C" fn rgsaddle_stencil_config_new(preset: i32) -> *mut RgsaddleStencilConfig {
-    match preset_of(preset) {
-        Ok(preset) => {
-            clear_last_error();
-            let config = StencilConfig::from_preset(preset);
-            let force_kind_abs = matches!(
-                config.method,
-                StencilMethod::Band(BandMethod::Zoom(ZoomParams {
-                    force: ZoomForce::Abs(_),
-                    ..
-                }))
-            );
-            Box::into_raw(Box::new(RgsaddleStencilConfig {
-                inner: ConfigInner {
-                    config,
-                    lbfgs_memory: 10,
-                    force_kind_abs,
-                },
-            }))
+pub extern "C" fn rgsaddle_stencil_config_new(preset: i32) -> *mut c_void {
+    guard_ptr(|| {
+        if Preset::from_abi(preset).is_none() {
+            set_last_error("unknown stencil preset");
+            return std::ptr::null_mut();
         }
-        Err(err) => {
-            set_last_error(&err);
-            std::ptr::null_mut()
-        }
-    }
+        Box::into_raw(Box::new(Config::new(preset))).cast()
+    })
 }
 
 /// # Safety
-/// `cfg` is null or a live config.
+/// `config` comes from [`rgsaddle_stencil_config_new`] or is null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rgsaddle_stencil_config_set_f64(
-    cfg: *mut RgsaddleStencilConfig,
+    config: *mut c_void,
     key: i32,
     value: f64,
 ) -> i32 {
-    if cfg.is_null() {
-        return fail("stencil config is null".into());
-    }
-    match set_f64_inner(&mut unsafe { &mut *cfg }.inner, key, value) {
-        Ok(()) => {
-            clear_last_error();
-            RGSADDLE_OK
+    guard(|| {
+        if config.is_null() {
+            set_last_error("stencil config is null");
+            return RGSADDLE_NULL_SESSION;
         }
-        Err(err) => fail(err),
-    }
+        let config = unsafe { &mut *(config as *mut Config) };
+        let point_only = matches!(
+            key,
+            RGSADDLE_STENCIL_KEY_DR
+                | RGSADDLE_STENCIL_KEY_ROTATION_TOL
+                | RGSADDLE_STENCIL_KEY_ART_THRESHOLD
+        );
+        let shared = matches!(
+            key,
+            RGSADDLE_STENCIL_KEY_FORCE_TOL | RGSADDLE_STENCIL_KEY_MAX_MOVE
+        );
+        let band_only = matches!(
+            key,
+            RGSADDLE_STENCIL_KEY_K
+                | RGSADDLE_STENCIL_KEY_K_MIN
+                | RGSADDLE_STENCIL_KEY_K_MAX
+                | RGSADDLE_STENCIL_KEY_ZOOM_ALPHA
+                | RGSADDLE_STENCIL_KEY_ZOOM_FORCE
+                | RGSADDLE_STENCIL_KEY_IMAGE_SCALE
+                | RGSADDLE_STENCIL_KEY_BAND_SLACK
+                | RGSADDLE_STENCIL_KEY_CI_TRIGGER
+                | RGSADDLE_STENCIL_KEY_CI_TRIGGER_FORCE
+        );
+        if matches!(
+            key,
+            RGSADDLE_STENCIL_KEY_MAX_ROTATIONS
+                | RGSADDLE_STENCIL_KEY_KRYLOV_DIM
+                | RGSADDLE_STENCIL_KEY_THREADS
+                | RGSADDLE_STENCIL_KEY_ART_PUSH
+                | RGSADDLE_STENCIL_KEY_MODE
+                | RGSADDLE_STENCIL_KEY_SPRING
+                | RGSADDLE_STENCIL_KEY_ZOOM_STABILITY
+                | RGSADDLE_STENCIL_KEY_ZOOM_OFFSET
+                | RGSADDLE_STENCIL_KEY_ZOOM_INTERP
+                | RGSADDLE_STENCIL_KEY_ZOOM_ENDS
+                | RGSADDLE_STENCIL_KEY_ZOOM_FORCE_KIND
+                | RGSADDLE_STENCIL_KEY_AUTONEB_N_SIMUL
+                | RGSADDLE_STENCIL_KEY_AUTONEB_N_MAX
+                | RGSADDLE_STENCIL_KEY_TANGENT
+                | RGSADDLE_STENCIL_KEY_MAX_ITER_ZOOM
+        ) {
+            set_last_error("this key takes an integer");
+            return RGSADDLE_INVALID_PARAMETER;
+        }
+        if !(point_only || shared || band_only) {
+            set_last_error("unknown stencil key");
+            return RGSADDLE_INVALID_PARAMETER;
+        }
+        if !shared && let Some(code) = reject_family(point_only, config) {
+            return code;
+        }
+        if let Err(code) = finite_key(value) {
+            return code;
+        }
+        match key {
+            RGSADDLE_STENCIL_KEY_DR => config.dr = value,
+            RGSADDLE_STENCIL_KEY_FORCE_TOL => config.force_tol = value,
+            RGSADDLE_STENCIL_KEY_MAX_MOVE => config.max_move = value,
+            RGSADDLE_STENCIL_KEY_ROTATION_TOL => config.rotation_tol = value,
+            RGSADDLE_STENCIL_KEY_ART_THRESHOLD => config.art_threshold = value,
+            RGSADDLE_STENCIL_KEY_K => config.k = value,
+            RGSADDLE_STENCIL_KEY_K_MIN => {
+                config.k_min = value;
+                config.k_bounds_set = true;
+            }
+            RGSADDLE_STENCIL_KEY_K_MAX => {
+                config.k_max = value;
+                config.k_bounds_set = true;
+            }
+            RGSADDLE_STENCIL_KEY_ZOOM_ALPHA => {
+                config.zoom_alpha = value;
+                config.zoom_set = true;
+            }
+            RGSADDLE_STENCIL_KEY_ZOOM_FORCE => {
+                config.zoom_force = value;
+                config.zoom_set = true;
+            }
+            RGSADDLE_STENCIL_KEY_IMAGE_SCALE => config.image_scale = Some(value),
+            RGSADDLE_STENCIL_KEY_BAND_SLACK => config.band_slack = value,
+            RGSADDLE_STENCIL_KEY_CI_TRIGGER => config.trigger_factor = value,
+            RGSADDLE_STENCIL_KEY_CI_TRIGGER_FORCE => config.trigger_force = value,
+            _ => unreachable!("key family was checked"),
+        }
+        RGSADDLE_OK
+    })
 }
 
 /// # Safety
-/// `cfg` is null or a live config.
+/// `config` comes from [`rgsaddle_stencil_config_new`] or is null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rgsaddle_stencil_config_set_i64(
-    cfg: *mut RgsaddleStencilConfig,
+    config: *mut c_void,
     key: i32,
     value: i64,
 ) -> i32 {
-    if cfg.is_null() {
-        return fail("stencil config is null".into());
-    }
-    match set_i64_inner(&mut unsafe { &mut *cfg }.inner, key, value) {
-        Ok(()) => {
-            clear_last_error();
-            RGSADDLE_OK
+    guard(|| {
+        if config.is_null() {
+            set_last_error("stencil config is null");
+            return RGSADDLE_NULL_SESSION;
         }
-        Err(err) => fail(err),
-    }
+        if value < 0 {
+            set_last_error("stencil integer key is negative");
+            return RGSADDLE_INVALID_PARAMETER;
+        }
+        let config = unsafe { &mut *(config as *mut Config) };
+        let point_only = matches!(
+            key,
+            RGSADDLE_STENCIL_KEY_MAX_ROTATIONS
+                | RGSADDLE_STENCIL_KEY_KRYLOV_DIM
+                | RGSADDLE_STENCIL_KEY_ART_PUSH
+        );
+        let shared = key == RGSADDLE_STENCIL_KEY_THREADS;
+        let band_only = matches!(
+            key,
+            RGSADDLE_STENCIL_KEY_SPRING
+                | RGSADDLE_STENCIL_KEY_ZOOM_STABILITY
+                | RGSADDLE_STENCIL_KEY_ZOOM_OFFSET
+                | RGSADDLE_STENCIL_KEY_ZOOM_INTERP
+                | RGSADDLE_STENCIL_KEY_ZOOM_ENDS
+                | RGSADDLE_STENCIL_KEY_ZOOM_FORCE_KIND
+                | RGSADDLE_STENCIL_KEY_AUTONEB_N_SIMUL
+                | RGSADDLE_STENCIL_KEY_AUTONEB_N_MAX
+                | RGSADDLE_STENCIL_KEY_TANGENT
+                | RGSADDLE_STENCIL_KEY_MAX_ITER_ZOOM
+        );
+        if matches!(
+            key,
+            RGSADDLE_STENCIL_KEY_DR
+                | RGSADDLE_STENCIL_KEY_FORCE_TOL
+                | RGSADDLE_STENCIL_KEY_MAX_MOVE
+                | RGSADDLE_STENCIL_KEY_ROTATION_TOL
+                | RGSADDLE_STENCIL_KEY_ART_THRESHOLD
+                | RGSADDLE_STENCIL_KEY_MODE
+                | RGSADDLE_STENCIL_KEY_K
+                | RGSADDLE_STENCIL_KEY_K_MIN
+                | RGSADDLE_STENCIL_KEY_K_MAX
+                | RGSADDLE_STENCIL_KEY_ZOOM_ALPHA
+                | RGSADDLE_STENCIL_KEY_ZOOM_FORCE
+                | RGSADDLE_STENCIL_KEY_IMAGE_SCALE
+                | RGSADDLE_STENCIL_KEY_BAND_SLACK
+                | RGSADDLE_STENCIL_KEY_CI_TRIGGER
+                | RGSADDLE_STENCIL_KEY_CI_TRIGGER_FORCE
+        ) {
+            set_last_error("this key takes a float");
+            return RGSADDLE_INVALID_PARAMETER;
+        }
+        if !(point_only || shared || band_only) {
+            set_last_error("unknown stencil key");
+            return RGSADDLE_INVALID_PARAMETER;
+        }
+        if !shared && let Some(code) = reject_family(point_only, config) {
+            return code;
+        }
+        let count = value as usize;
+        match key {
+            RGSADDLE_STENCIL_KEY_MAX_ROTATIONS => config.max_rotations = count,
+            RGSADDLE_STENCIL_KEY_KRYLOV_DIM => config.krylov_dim = count,
+            RGSADDLE_STENCIL_KEY_THREADS => config.threads = count,
+            RGSADDLE_STENCIL_KEY_ART_PUSH => config.art_push = count,
+            RGSADDLE_STENCIL_KEY_SPRING => {
+                if value > 1 {
+                    set_last_error("unknown spring");
+                    return RGSADDLE_INVALID_PARAMETER;
+                }
+                config.spring = value;
+            }
+            RGSADDLE_STENCIL_KEY_ZOOM_STABILITY => {
+                config.zoom_stability = count;
+                config.zoom_set = true;
+            }
+            RGSADDLE_STENCIL_KEY_ZOOM_OFFSET => {
+                config.zoom_offset = count;
+                config.zoom_set = true;
+            }
+            RGSADDLE_STENCIL_KEY_ZOOM_INTERP => {
+                if value > 1 {
+                    set_last_error("unknown interpolation");
+                    return RGSADDLE_INVALID_PARAMETER;
+                }
+                config.zoom_interp = value;
+                config.zoom_set = true;
+            }
+            RGSADDLE_STENCIL_KEY_ZOOM_ENDS => {
+                if value > 1 {
+                    set_last_error("unknown zoom end");
+                    return RGSADDLE_INVALID_PARAMETER;
+                }
+                config.zoom_ends = value;
+                config.zoom_set = true;
+            }
+            RGSADDLE_STENCIL_KEY_ZOOM_FORCE_KIND => {
+                if value > 1 {
+                    set_last_error("unknown zoom force");
+                    return RGSADDLE_INVALID_PARAMETER;
+                }
+                config.zoom_force_kind = value;
+                config.zoom_set = true;
+            }
+            RGSADDLE_STENCIL_KEY_AUTONEB_N_SIMUL => config.n_simul = count,
+            RGSADDLE_STENCIL_KEY_AUTONEB_N_MAX => config.n_max = count,
+            RGSADDLE_STENCIL_KEY_TANGENT => {
+                if value > 1 {
+                    set_last_error("unknown tangent");
+                    return RGSADDLE_INVALID_PARAMETER;
+                }
+                config.tangent = value;
+            }
+            RGSADDLE_STENCIL_KEY_MAX_ITER_ZOOM => {
+                config.zoom_max_iter = count;
+                config.zoom_set = true;
+            }
+            _ => unreachable!("key family was checked"),
+        }
+        RGSADDLE_OK
+    })
 }
 
 /// # Safety
-/// `cfg` is null or a live config. `values` has `n` doubles when `n > 0`.
+/// `config` comes from [`rgsaddle_stencil_config_new`] or is null.
+/// `values` points at `n` finite f64s when `n > 0`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rgsaddle_stencil_config_set_array(
-    cfg: *mut RgsaddleStencilConfig,
+    config: *mut c_void,
     key: i32,
     values: *const f64,
     n: usize,
 ) -> i32 {
-    if cfg.is_null() {
-        return fail("stencil config is null".into());
-    }
-    if n > 0 && values.is_null() {
-        return fail("stencil array is null".into());
-    }
-    let slice = if n == 0 {
-        &[]
-    } else {
-        unsafe { std::slice::from_raw_parts(values, n) }
-    };
-    let inner = &mut unsafe { &mut *cfg }.inner;
-    let result = (|| -> Result<(), String> {
-        match key {
-            RGSADDLE_STENCIL_KEY_EXPLICIT_KS => {
-                require_band(&inner.config)?;
-                inner.config.spring = SpringModel::Explicit { ks: slice.to_vec() };
-                Ok(())
+    guard(|| {
+        if config.is_null() {
+            set_last_error("stencil config is null");
+            return RGSADDLE_NULL_SESSION;
+        }
+        let config = unsafe { &mut *(config as *mut Config) };
+        if key != RGSADDLE_STENCIL_KEY_MODE {
+            if matches!(
+                key,
+                RGSADDLE_STENCIL_KEY_DR
+                    | RGSADDLE_STENCIL_KEY_FORCE_TOL
+                    | RGSADDLE_STENCIL_KEY_MAX_MOVE
+                    | RGSADDLE_STENCIL_KEY_ROTATION_TOL
+                    | RGSADDLE_STENCIL_KEY_ART_THRESHOLD
+                    | RGSADDLE_STENCIL_KEY_K
+                    | RGSADDLE_STENCIL_KEY_K_MIN
+                    | RGSADDLE_STENCIL_KEY_K_MAX
+                    | RGSADDLE_STENCIL_KEY_ZOOM_ALPHA
+                    | RGSADDLE_STENCIL_KEY_ZOOM_FORCE
+                    | RGSADDLE_STENCIL_KEY_IMAGE_SCALE
+                    | RGSADDLE_STENCIL_KEY_BAND_SLACK
+                    | RGSADDLE_STENCIL_KEY_CI_TRIGGER
+                    | RGSADDLE_STENCIL_KEY_CI_TRIGGER_FORCE
+            ) {
+                set_last_error("this key takes a float");
+            } else if (1..=29).contains(&key) {
+                set_last_error("this key takes an integer");
+            } else {
+                set_last_error("unknown stencil key");
             }
-            RGSADDLE_STENCIL_KEY_CELL => {
-                require_band(&inner.config)?;
-                if slice.len() != 9 {
-                    return Err("a cell needs 9 entries".into());
-                }
-                inner.config.band.cell = Some(Cell([
-                    [slice[0], slice[1], slice[2]],
-                    [slice[3], slice[4], slice[5]],
-                    [slice[6], slice[7], slice[8]],
-                ]));
-                Ok(())
-            }
-            key if (1..=25).contains(&key) => Err("stencil key takes an integer".into()),
-            key if (101..=121).contains(&key) => Err("stencil key takes a double".into()),
-            _ => Err(format!("unknown stencil key {key}")),
+            return RGSADDLE_INVALID_PARAMETER;
         }
-    })();
-    match result {
-        Ok(()) => {
-            clear_last_error();
-            RGSADDLE_OK
+        if let Some(code) = reject_family(true, config) {
+            return code;
         }
-        Err(err) => fail(err),
-    }
-}
-
-/// # Safety
-/// `cfg` is null or a live config. `out` is a double.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rgsaddle_stencil_config_get_f64(
-    cfg: *const RgsaddleStencilConfig,
-    key: i32,
-    out: *mut f64,
-) -> i32 {
-    if cfg.is_null() || out.is_null() {
-        return fail("stencil config get is null".into());
-    }
-    match get_f64_inner(&unsafe { &*cfg }.inner, key) {
-        Ok(value) => {
-            unsafe { *out = value };
-            clear_last_error();
-            RGSADDLE_OK
+        if n > 0 && values.is_null() {
+            set_last_error("stencil mode pointer is null");
+            return RGSADDLE_INVALID_PARAMETER;
         }
-        Err(err) => fail(err),
-    }
-}
-
-/// # Safety
-/// `cfg` is null or a live config. `out` is an int64.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rgsaddle_stencil_config_get_i64(
-    cfg: *const RgsaddleStencilConfig,
-    key: i32,
-    out: *mut i64,
-) -> i32 {
-    if cfg.is_null() || out.is_null() {
-        return fail("stencil config get is null".into());
-    }
-    match get_i64_inner(&unsafe { &*cfg }.inner, key) {
-        Ok(value) => {
-            unsafe { *out = value };
-            clear_last_error();
-            RGSADDLE_OK
-        }
-        Err(err) => fail(err),
-    }
-}
-
-/// # Safety
-/// `cfg` comes from [`rgsaddle_stencil_config_new`] and is freed once.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rgsaddle_stencil_config_free(cfg: *mut RgsaddleStencilConfig) {
-    if !cfg.is_null() {
-        drop(unsafe { Box::from_raw(cfg) });
-    }
-}
-
-type EvalFn =
-    extern "C" fn(*mut c_void, usize, usize, *const u64, *const f64, *mut f64, *mut f64) -> i32;
-
-struct CSurface {
-    eval: EvalFn,
-    user: *mut c_void,
-}
-
-unsafe impl Send for CSurface {}
-unsafe impl Sync for CSurface {}
-
-impl StencilSurface for CSurface {
-    fn eval(
-        &self,
-        ids: &[u64],
-        positions: ArrayView2<f64>,
-        energies: &mut Array1<f64>,
-        gradients: &mut Array2<f64>,
-    ) -> Result<(), SaddleError> {
-        let x = positions
-            .as_slice()
-            .ok_or_else(|| SaddleError::Invalid("stencil positions are not contiguous".into()))?;
-        let e = energies
-            .as_slice_mut()
-            .ok_or_else(|| SaddleError::Invalid("stencil energies are not contiguous".into()))?;
-        let g = gradients
-            .as_slice_mut()
-            .ok_or_else(|| SaddleError::Invalid("stencil gradients are not contiguous".into()))?;
-        let code = (self.eval)(
-            self.user,
-            positions.nrows(),
-            positions.ncols(),
-            ids.as_ptr(),
-            x.as_ptr(),
-            e.as_mut_ptr(),
-            g.as_mut_ptr(),
-        );
-        if code == 0 {
-            Ok(())
+        let mode = if n == 0 {
+            Vec::new()
         } else {
-            Err(SaddleError::Surface(format!(
-                "stencil callback returned {code}"
-            )))
-        }
-    }
-}
-
-fn write_report(out: &mut RgsaddleStencilReport, report: &StencilReport) {
-    let (zoom_lo, zoom_hi) = report
-        .zoom_window
-        .map(|(lo, hi)| (lo as i64, hi as i64))
-        .unwrap_or((-1, -1));
-    out.phase = phase_ordinal(report.phase);
-    out.status = match report.status {
-        BandStatus::Running => 0,
-        BandStatus::Converged => 1,
-    };
-    out.max_force = report.max_force;
-    out.ci_index = report.ci_index.map(|index| index as i64).unwrap_or(-1);
-    out.iteration = report.iteration as i64;
-    out.surface_rows = report.surface_rows as i64;
-    out.total_evaluations = report.total_rows as i64;
-    out.zoom_lo = zoom_lo;
-    out.zoom_hi = zoom_hi;
-    out.curvature = report.curvature.unwrap_or(f64::NAN);
-}
-
-fn check_report(
-    out: *mut RgsaddleStencilReport,
-) -> Result<&'static mut RgsaddleStencilReport, i32> {
-    if out.is_null() {
-        set_last_error("stencil report is null");
-        return Err(RGSADDLE_INVALID_PARAMETER);
-    }
-    let report = unsafe { &mut *out };
-    if report.struct_size < std::mem::size_of::<RgsaddleStencilReport>() {
-        set_last_error("stencil report struct_size is short");
-        return Err(RGSADDLE_INVALID_PARAMETER);
-    }
-    Ok(report)
+            let slice = unsafe { std::slice::from_raw_parts(values, n) };
+            if slice.iter().any(|value| !value.is_finite()) {
+                set_last_error("non-finite value in mode");
+                return super::RGSADDLE_NON_FINITE;
+            }
+            slice.to_vec()
+        };
+        config.mode = mode;
+        RGSADDLE_OK
+    })
 }
 
 /// # Safety
-/// `cfg` is null or a live config. `x` has `rows * dof` doubles.
+/// `config` comes from [`rgsaddle_stencil_config_new`] and is freed once.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_stencil_config_free(config: *mut c_void) {
+    if config.is_null() {
+        return;
+    }
+    let _ = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        drop(unsafe { Box::from_raw(config as *mut Config) });
+    }));
+}
+
+/// # Safety
+/// `config` is live. `x` points at `rows * dof` values.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rgsaddle_stencil_new(
-    cfg: *const RgsaddleStencilConfig,
+    config: *const c_void,
     rows: usize,
     dof: usize,
     x: *const f64,
-) -> *mut RgsaddleStencil {
-    if cfg.is_null() || x.is_null() || rows == 0 || dof == 0 {
-        set_last_error("stencil create needs a config, rows, dof, and positions");
-        return std::ptr::null_mut();
-    }
-    let values = unsafe { std::slice::from_raw_parts(x, rows * dof) };
-    let initial = match Array2::from_shape_vec((rows, dof), values.to_vec()) {
-        Ok(initial) => initial,
-        Err(err) => {
-            set_last_error(&err.to_string());
+) -> *mut c_void {
+    guard_ptr(|| {
+        if config.is_null() {
+            set_last_error("stencil config is null");
             return std::ptr::null_mut();
         }
-    };
-    let config = unsafe { &*cfg }.inner.config.clone();
-    match Stencil::new(config, initial) {
-        Ok(stencil) => {
-            clear_last_error();
-            let rows = stencil.positions().nrows();
-            let dof = stencil.positions().ncols();
-            Box::into_raw(Box::new(RgsaddleStencil {
+        let config_ref = unsafe { &*(config as *const Config) };
+        let Some(preset) = config_ref.preset() else {
+            set_last_error("unknown stencil preset");
+            return std::ptr::null_mut();
+        };
+        if preset.is_point() && rows != 1 {
+            set_last_error("point presets take one row");
+            return std::ptr::null_mut();
+        }
+        if !preset.is_point() && rows < 2 {
+            set_last_error("a band needs at least two images");
+            return std::ptr::null_mut();
+        }
+        if dof == 0 || x.is_null() {
+            set_last_error("stencil position is empty");
+            return std::ptr::null_mut();
+        }
+        let n = rows.saturating_mul(dof);
+        let values = unsafe { std::slice::from_raw_parts(x, n) };
+        match apply(config_ref, rows, dof, values) {
+            Ok(stencil) => Box::into_raw(Box::new(Handle {
                 stencil,
-                rows,
-                dof,
-                last: StencilReport {
-                    phase: Phase::Band,
-                    status: BandStatus::Running,
-                    max_force: f64::NAN,
-                    ci_index: None,
-                    iteration: 0,
-                    surface_rows: 0,
-                    total_rows: 0,
-                    zoom_window: None,
-                    curvature: None,
-                    force_gate: "max-abs-component",
-                },
+                n_coords: n,
+                band: !preset.is_point(),
             }))
+            .cast(),
+            Err(err) => {
+                let _ = fail(&err);
+                std::ptr::null_mut()
+            }
         }
-        Err(err) => {
-            fail_saddle(err);
-            std::ptr::null_mut()
-        }
-    }
+    })
 }
 
 /// # Safety
-/// `handle` is null or live. `eval` is a callback. `out` is a report whose
-/// `struct_size` is at least the size of `rgsaddle_stencil_report_t`.
+/// `stencil` is live or null. `eval` is a callback the host keeps valid
+/// for the call. `out` is a report whose `struct_size` is 0 or the full size.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rgsaddle_stencil_step(
-    handle: *mut RgsaddleStencil,
-    eval: Option<EvalFn>,
+    stencil: *mut c_void,
+    eval: Option<StencilEvalFn>,
     user: *mut c_void,
     out: *mut RgsaddleStencilReport,
 ) -> i32 {
-    if handle.is_null() {
-        set_last_error("stencil is null");
-        return RGSADDLE_NULL_SESSION;
-    }
-    let Some(eval) = eval else {
-        return fail("stencil callback is null".into());
-    };
-    let report = match check_report(out) {
-        Ok(report) => report,
-        Err(code) => return code,
-    };
-    let session = unsafe { &mut *handle };
-    let surface = CSurface { eval, user };
-    match session.stencil.step(&surface) {
-        Ok(step) => {
-            session.rows = session.stencil.positions().nrows();
-            session.dof = session.stencil.positions().ncols();
-            session.last = step.clone();
-            write_report(report, &step);
-            clear_last_error();
-            RGSADDLE_OK
-        }
-        Err(err) => fail_saddle(err),
-    }
+    guard(|| step_or_run(stencil, eval, user, 1, out, false))
 }
 
 /// # Safety
-/// Same as [`rgsaddle_stencil_step`].
+/// Same as [`rgsaddle_stencil_step`]. `max_steps` is the step cap.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rgsaddle_stencil_run(
-    handle: *mut RgsaddleStencil,
-    eval: Option<EvalFn>,
+    stencil: *mut c_void,
+    eval: Option<StencilEvalFn>,
     user: *mut c_void,
     max_steps: usize,
     out: *mut RgsaddleStencilReport,
 ) -> i32 {
-    if handle.is_null() {
+    guard(|| step_or_run(stencil, eval, user, max_steps, out, true))
+}
+
+fn step_or_run(
+    stencil: *mut c_void,
+    eval: Option<StencilEvalFn>,
+    user: *mut c_void,
+    max_steps: usize,
+    out: *mut RgsaddleStencilReport,
+    run_to_end: bool,
+) -> i32 {
+    if stencil.is_null() {
         set_last_error("stencil is null");
         return RGSADDLE_NULL_SESSION;
     }
     let Some(eval) = eval else {
-        return fail("stencil callback is null".into());
+        set_last_error("stencil callback is null");
+        return RGSADDLE_NULL_SURFACE;
     };
-    let report = match check_report(out) {
-        Ok(report) => report,
-        Err(code) => return code,
-    };
-    let session = unsafe { &mut *handle };
-    let surface = CSurface { eval, user };
-    match session.stencil.run(&surface, max_steps) {
-        Ok(step) => {
-            session.rows = session.stencil.positions().nrows();
-            session.dof = session.stencil.positions().ncols();
-            session.last = step.clone();
-            write_report(report, &step);
-            clear_last_error();
-            RGSADDLE_OK
+    let surface = CbSurface { eval, user };
+    let stencil = unsafe { &mut *(stencil as *mut Handle) };
+    let result = if run_to_end {
+        if stencil.band {
+            stencil.stencil.run_surface(&surface, max_steps)
+        } else {
+            stencil.stencil.run(&surface, max_steps)
         }
-        Err(err) => fail_saddle(err),
+    } else if stencil.band {
+        stencil.stencil.step_surface(&surface)
+    } else {
+        stencil.stencil.step(&surface)
+    };
+    match result {
+        Ok(report) => write_report(out, &report),
+        Err(err) => fail(&err),
     }
 }
 
 /// # Safety
-/// `out` holds `rows * dof` doubles.
+/// `stencil` is live or null. `out` has room for `n` values, with `n` equal
+/// to the number of coordinates.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rgsaddle_stencil_positions(
-    handle: *const RgsaddleStencil,
+    stencil: *const c_void,
     out: *mut f64,
-) -> i32 {
-    if handle.is_null() || out.is_null() {
-        return fail("stencil positions are null".into());
-    }
-    let session = unsafe { &*handle };
-    let positions = session.stencil.positions();
-    let slice = match positions.as_slice() {
-        Some(slice) => slice,
-        None => return fail("stencil positions are not contiguous".into()),
-    };
-    if slice.len() != session.rows.saturating_mul(session.dof) {
-        return fail("stencil position length does not match the band".into());
-    }
-    unsafe {
-        std::ptr::copy_nonoverlapping(slice.as_ptr(), out, slice.len());
-    }
-    clear_last_error();
-    RGSADDLE_OK
-}
-
-/// # Safety
-/// `out` holds one double per image.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rgsaddle_stencil_energies(
-    handle: *const RgsaddleStencil,
-    out: *mut f64,
-) -> i32 {
-    if handle.is_null() || out.is_null() {
-        return fail("stencil energies are null".into());
-    }
-    let session = unsafe { &*handle };
-    let Some(energies) = session.stencil.energies() else {
-        set_last_error("stencil has no energies");
-        return RGSADDLE_NO_EVALUATION;
-    };
-    let slice = energies.as_slice().unwrap_or(&[]);
-    unsafe {
-        std::ptr::copy_nonoverlapping(slice.as_ptr(), out, slice.len());
-    }
-    clear_last_error();
-    RGSADDLE_OK
-}
-
-/// # Safety
-/// `out` holds `n` bytes of the value named by `key`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rgsaddle_stencil_query(
-    handle: *const RgsaddleStencil,
-    key: i32,
-    out: *mut c_void,
     n: usize,
 ) -> i32 {
-    if handle.is_null() || out.is_null() {
-        return fail("stencil query is null".into());
-    }
-    let session = unsafe { &*handle };
-    match key {
-        RGSADDLE_STENCIL_QUERY_MODE => {
-            let Some(mode) = session.stencil.mode() else {
-                return fail("stencil has no mode".into());
-            };
-            if n < mode.len() {
-                return fail("mode query is short".into());
-            }
-            unsafe {
-                std::ptr::copy_nonoverlapping(mode.as_ptr(), out.cast::<f64>(), mode.len());
-            }
+    guard(|| {
+        if stencil.is_null() {
+            set_last_error("stencil is null");
+            return RGSADDLE_NULL_SESSION;
         }
-        RGSADDLE_STENCIL_QUERY_CURVATURE => {
-            if n < 1 {
-                return fail("curvature query is short".into());
-            }
-            let value = session.stencil.curvature().unwrap_or(f64::NAN);
-            unsafe { *out.cast::<f64>() = value };
+        let stencil = unsafe { &*(stencil as *const Handle) };
+        if n != stencil.n_coords || out.is_null() {
+            set_last_error("stencil position length does not match");
+            return RGSADDLE_SHAPE;
         }
-        RGSADDLE_STENCIL_QUERY_CLIMBING_INDEX => {
-            if n < 1 {
-                return fail("climbing-index query is short".into());
-            }
-            let value = session
-                .stencil
-                .climbing_image()
-                .map(|index| index as i64)
-                .unwrap_or(-1);
-            unsafe { *out.cast::<i64>() = value };
-        }
-        RGSADDLE_STENCIL_QUERY_ZOOM_WINDOW => {
-            if n < 2 {
-                return fail("zoom-window query is short".into());
-            }
-            let (lo, hi) = session
-                .stencil
-                .zoom_window()
-                .map(|(lo, hi)| (lo as i64, hi as i64))
-                .unwrap_or((-1, -1));
-            let dest = unsafe { std::slice::from_raw_parts_mut(out.cast::<i64>(), 2) };
-            dest[0] = lo;
-            dest[1] = hi;
-        }
-        RGSADDLE_STENCIL_QUERY_IMAGE_IDS => {
-            let ids = session.stencil.image_ids();
-            if n < ids.len() {
-                return fail("image-id query is short".into());
-            }
-            unsafe {
-                std::ptr::copy_nonoverlapping(ids.as_ptr(), out.cast::<u64>(), ids.len());
-            }
-        }
-        RGSADDLE_STENCIL_QUERY_SHAPE => {
-            if n < 2 {
-                return fail("shape query is short".into());
-            }
-            let dest = unsafe { std::slice::from_raw_parts_mut(out.cast::<i64>(), 2) };
-            dest[0] = session.rows as i64;
-            dest[1] = session.dof as i64;
-        }
-        _ => return fail(format!("unknown stencil query {key}")),
-    }
-    clear_last_error();
-    RGSADDLE_OK
+        let position = stencil.stencil.position();
+        let Some(slice) = position.as_slice() else {
+            set_last_error("stencil position is not contiguous");
+            return RGSADDLE_SHAPE;
+        };
+        unsafe { std::ptr::copy_nonoverlapping(slice.as_ptr(), out, n) };
+        RGSADDLE_OK
+    })
 }
 
 /// # Safety
-/// `out` is a report whose `struct_size` is large enough.
+/// `stencil` is live or null. `out` has room for `n` values.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rgsaddle_stencil_report(
-    handle: *const RgsaddleStencil,
-    out: *mut RgsaddleStencilReport,
+pub unsafe extern "C" fn rgsaddle_stencil_query(
+    stencil: *const c_void,
+    key: i32,
+    out: *mut f64,
+    n: usize,
 ) -> i32 {
-    if handle.is_null() {
-        set_last_error("stencil is null");
-        return RGSADDLE_NULL_SESSION;
-    }
-    let report = match check_report(out) {
-        Ok(report) => report,
-        Err(code) => return code,
-    };
-    write_report(report, &unsafe { &*handle }.last);
-    clear_last_error();
-    RGSADDLE_OK
+    guard(|| {
+        if stencil.is_null() {
+            set_last_error("stencil is null");
+            return RGSADDLE_NULL_SESSION;
+        }
+        if out.is_null() && n > 0 {
+            set_last_error("stencil query pointer is null");
+            return RGSADDLE_INVALID_PARAMETER;
+        }
+        let stencil = unsafe { &*(stencil as *const Handle) };
+        match key {
+            RGSADDLE_STENCIL_QUERY_POSITIONS => {
+                if n != stencil.n_coords {
+                    set_last_error("stencil position length does not match");
+                    return RGSADDLE_SHAPE;
+                }
+                let position = stencil.stencil.position();
+                let Some(slice) = position.as_slice() else {
+                    set_last_error("stencil position is not contiguous");
+                    return RGSADDLE_SHAPE;
+                };
+                unsafe { std::ptr::copy_nonoverlapping(slice.as_ptr(), out, n) };
+                RGSADDLE_OK
+            }
+            RGSADDLE_STENCIL_QUERY_MODE => {
+                let Some(mode) = stencil.stencil.mode() else {
+                    set_last_error("this stencil has no mode");
+                    return RGSADDLE_INVALID_PARAMETER;
+                };
+                if n != mode.len() {
+                    set_last_error("stencil mode length does not match");
+                    return RGSADDLE_SHAPE;
+                }
+                let Some(slice) = mode.as_slice() else {
+                    set_last_error("stencil mode is not contiguous");
+                    return RGSADDLE_SHAPE;
+                };
+                unsafe { std::ptr::copy_nonoverlapping(slice.as_ptr(), out, n) };
+                RGSADDLE_OK
+            }
+            RGSADDLE_STENCIL_QUERY_CURVATURE => {
+                if n < 1 {
+                    set_last_error("stencil curvature needs one value");
+                    return RGSADDLE_SHAPE;
+                }
+                unsafe { *out = stencil.stencil.curvature() };
+                RGSADDLE_OK
+            }
+            RGSADDLE_STENCIL_QUERY_CLIMBING => {
+                if !stencil.band {
+                    set_last_error("this key is for a band stencil");
+                    return RGSADDLE_INVALID_PARAMETER;
+                }
+                if n < 1 {
+                    set_last_error("climbing index needs one value");
+                    return RGSADDLE_SHAPE;
+                }
+                let index = stencil
+                    .stencil
+                    .climbing_index()
+                    .map_or(-1.0, |value| value as f64);
+                unsafe { *out = index };
+                RGSADDLE_OK
+            }
+            RGSADDLE_STENCIL_QUERY_IMAGE_IDS => {
+                if !stencil.band {
+                    set_last_error("this key is for a band stencil");
+                    return RGSADDLE_INVALID_PARAMETER;
+                }
+                let ids = stencil.stencil.image_ids();
+                if n != ids.len() {
+                    set_last_error("image id length does not match");
+                    return RGSADDLE_SHAPE;
+                }
+                let values: Vec<f64> = ids.iter().map(|id| *id as f64).collect();
+                copy_f64(out, &values);
+                RGSADDLE_OK
+            }
+            RGSADDLE_STENCIL_QUERY_ENERGIES => {
+                if !stencil.band {
+                    set_last_error("this key is for a band stencil");
+                    return RGSADDLE_INVALID_PARAMETER;
+                }
+                let Some(energies) = stencil.stencil.energies() else {
+                    set_last_error("energies are not known yet");
+                    return RGSADDLE_INVALID_PARAMETER;
+                };
+                if n != energies.len() {
+                    set_last_error("energy length does not match");
+                    return RGSADDLE_SHAPE;
+                }
+                copy_f64(out, &energies);
+                RGSADDLE_OK
+            }
+            RGSADDLE_STENCIL_QUERY_ZOOM_WINDOW => {
+                if !stencil.band {
+                    set_last_error("this key is for a band stencil");
+                    return RGSADDLE_INVALID_PARAMETER;
+                }
+                if n < 2 {
+                    set_last_error("zoom window needs two values");
+                    return RGSADDLE_SHAPE;
+                }
+                let Some((lo, hi)) = stencil.stencil.zoom_window() else {
+                    set_last_error("zoom has not packed");
+                    return RGSADDLE_INVALID_PARAMETER;
+                };
+                unsafe {
+                    *out = lo as f64;
+                    *out.add(1) = hi as f64;
+                }
+                RGSADDLE_OK
+            }
+            _ => {
+                set_last_error("unknown stencil key");
+                RGSADDLE_INVALID_PARAMETER
+            }
+        }
+    })
 }
 
 /// # Safety
-/// `handle` comes from [`rgsaddle_stencil_new`] and is freed once.
+/// `stencil` comes from [`rgsaddle_stencil_new`] and is freed once.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rgsaddle_stencil_free(handle: *mut RgsaddleStencil) {
-    if !handle.is_null() {
-        drop(unsafe { Box::from_raw(handle) });
+pub unsafe extern "C" fn rgsaddle_stencil_free(stencil: *mut c_void) {
+    if stencil.is_null() {
+        return;
     }
-}
-
-#[allow(dead_code)]
-fn _cstr_keep(text: &CStr) -> &CStr {
-    text
+    let _ = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        drop(unsafe { Box::from_raw(stencil as *mut Handle) });
+    }));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::CStr;
+
+    unsafe extern "C" fn bowl(
+        _user: *mut c_void,
+        rows: usize,
+        dof: usize,
+        _ids: *const u64,
+        x: *const f64,
+        e: *mut f64,
+        g: *mut f64,
+    ) -> i32 {
+        if rows != 1 || dof != 2 || x.is_null() || e.is_null() || g.is_null() {
+            return -1;
+        }
+        let x0 = unsafe { *x };
+        let y = unsafe { *x.add(1) };
+        unsafe {
+            *e = 2.0 * x0 * x0 + 5.0 * y * y;
+            *g = 4.0 * x0;
+            *g.add(1) = 10.0 * y;
+        }
+        0
+    }
+
+    fn blank_report() -> RgsaddleStencilReport {
+        RgsaddleStencilReport {
+            struct_size: 0,
+            status: -1,
+            reserved: 0,
+            max_force: 0.0,
+            curvature: 0.0,
+            iteration: 0,
+            evaluations: 0,
+            ci_index: -1,
+            zoom_lo: -1,
+            zoom_hi: -1,
+            phase: -1,
+            phase_pad: 0,
+        }
+    }
 
     #[test]
-    fn header_keys_match_the_rust_ordinals() {
-        let header = include_str!("../../include/rgsaddle.h");
-        let define = |name: &str| -> i32 {
-            header
-                .lines()
-                .find_map(|line| {
-                    let rest = line.trim().strip_prefix("#define ")?;
-                    let mut parts = rest.split_whitespace();
-                    let found = parts.next()?;
-                    if found == name {
-                        let raw = parts.next()?.trim_end_matches('u');
-                        Some(raw.parse().unwrap())
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or_else(|| panic!("missing {name}"))
+    fn unknown_keys_and_unsupported_presets_fail_closed() {
+        let config = rgsaddle_stencil_config_new(99);
+        assert!(config.is_null());
+        let text = unsafe { CStr::from_ptr(rgsaddle_last_error()) };
+        assert!(text.to_string_lossy().contains("unknown"));
+
+        let config = rgsaddle_stencil_config_new(Preset::CiNeb.to_abi());
+        assert!(!config.is_null());
+        let status = unsafe { rgsaddle_stencil_config_set_f64(config, 99, 1.0) };
+        assert_eq!(status, RGSADDLE_INVALID_PARAMETER);
+        let text = unsafe { CStr::from_ptr(rgsaddle_last_error()) };
+        assert!(text.to_string_lossy().contains("unknown stencil key"));
+
+        let status =
+            unsafe { rgsaddle_stencil_config_set_f64(config, RGSADDLE_STENCIL_KEY_DR, 1e-3) };
+        assert_eq!(status, RGSADDLE_INVALID_PARAMETER);
+        let text = unsafe { CStr::from_ptr(rgsaddle_last_error()) };
+        assert!(text.to_string_lossy().contains("point stencil"));
+
+        let images = [0.0_f64, 0.0, 0.5, 0.0, 1.0, 0.0];
+        let idpp = rgsaddle_stencil_config_new(Preset::Idpp.to_abi());
+        let stencil = unsafe { rgsaddle_stencil_new(idpp, 3, 2, images.as_ptr()) };
+        assert!(stencil.is_null());
+        let text = unsafe { CStr::from_ptr(rgsaddle_last_error()) };
+        let message = text.to_string_lossy();
+        assert!(message.contains("not implemented"));
+        assert!(!message.contains("feat/"));
+        unsafe { rgsaddle_stencil_config_free(idpp) };
+
+        let stencil = unsafe { rgsaddle_stencil_new(config, 3, 2, images.as_ptr()) };
+        assert!(!stencil.is_null());
+        unsafe {
+            rgsaddle_stencil_free(stencil);
+            rgsaddle_stencil_config_free(config);
+        }
+    }
+
+    #[test]
+    fn a_point_dimer_steps_through_the_callback() {
+        let config = rgsaddle_stencil_config_new(Preset::Dimer.to_abi());
+        let mode = [1.0_f64, 0.0];
+        let status = unsafe {
+            rgsaddle_stencil_config_set_array(config, RGSADDLE_STENCIL_KEY_MODE, mode.as_ptr(), 2)
         };
-        assert_eq!(
-            define("RGSADDLE_STENCIL_KEY_METHOD"),
-            RGSADDLE_STENCIL_KEY_METHOD
-        );
-        assert_eq!(define("RGSADDLE_STENCIL_KEY_K"), RGSADDLE_STENCIL_KEY_K);
-        assert_eq!(
-            define("RGSADDLE_STENCIL_KEY_EXPLICIT_KS"),
-            RGSADDLE_STENCIL_KEY_EXPLICIT_KS
-        );
-        assert_eq!(define("RGSADDLE_STENCIL_METHOD_PLAIN"), 0);
-        assert_eq!(define("RGSADDLE_STENCIL_METHOD_ART"), 6);
-        assert_eq!(define("RGSADDLE_PRESET_PLAIN"), 7);
-        assert_eq!(define("RGSADDLE_STENCIL_PHASE_TRANSLATE"), 7);
-        assert_eq!(
-            define("RGSADDLE_STENCIL_QUERY_SHAPE"),
-            RGSADDLE_STENCIL_QUERY_SHAPE
-        );
-        assert_eq!(define("RGSADDLE_ABI_MINOR"), 17);
-        assert_eq!(
-            method_ordinal(&StencilMethod::Band(
-                BandMethod::Zoom(ZoomParams::default())
-            )),
-            define("RGSADDLE_STENCIL_METHOD_ZOOM")
-        );
-        assert_eq!(
-            phase_ordinal(Phase::Zoom),
-            define("RGSADDLE_STENCIL_PHASE_ZOOM")
-        );
+        assert_eq!(status, RGSADDLE_OK);
+        let status = unsafe {
+            rgsaddle_stencil_config_set_f64(config, RGSADDLE_STENCIL_KEY_FORCE_TOL, 1e-3)
+        };
+        assert_eq!(status, RGSADDLE_OK);
+        let status =
+            unsafe { rgsaddle_stencil_config_set_i64(config, RGSADDLE_STENCIL_KEY_THREADS, 1) };
+        assert_eq!(status, RGSADDLE_OK);
+        let status =
+            unsafe { rgsaddle_stencil_config_set_f64(config, RGSADDLE_STENCIL_KEY_K, 5.0) };
+        assert_eq!(status, RGSADDLE_INVALID_PARAMETER);
+        let text = unsafe { CStr::from_ptr(rgsaddle_last_error()) };
+        assert!(text.to_string_lossy().contains("band stencil"));
+        let x = [0.4_f64, 0.3];
+        let stencil = unsafe { rgsaddle_stencil_new(config, 1, 2, x.as_ptr()) };
+        assert!(!stencil.is_null());
+        let mut report = blank_report();
+        let status = unsafe {
+            rgsaddle_stencil_step(stencil, Some(bowl), std::ptr::null_mut(), &mut report)
+        };
+        assert_eq!(status, RGSADDLE_OK);
+        let mut out = [0.0; 2];
+        let status = unsafe { rgsaddle_stencil_positions(stencil, out.as_mut_ptr(), 2) };
+        assert_eq!(status, RGSADDLE_OK);
+        assert_eq!(out[1].to_le_bytes(), (0.3_f64).to_le_bytes());
+        assert_ne!(out[0].to_le_bytes(), (0.4_f64).to_le_bytes());
+        unsafe {
+            rgsaddle_stencil_free(stencil);
+            rgsaddle_stencil_config_free(config);
+        }
     }
 }

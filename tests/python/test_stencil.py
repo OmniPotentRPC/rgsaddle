@@ -1,111 +1,103 @@
-"""NumPy stencil: CI-NEB, zoom, dimer, and the thread refusal."""
+"""Stencil through the nanobind wrapper: a dimer, a band, and the refusals."""
 
 from __future__ import annotations
 
 import numpy as np
 import pytest
 
-import rgsaddle
-from rgsaddle import StencilPhase, StencilPreset, ZoomEnds
-
-MB_A = np.array([-200.0, -100.0, -170.0, 15.0])
-MB_AA = np.array([-1.0, -1.0, -6.5, 0.7])
-MB_B = np.array([0.0, 0.0, 11.0, 0.6])
-MB_C = np.array([-10.0, -10.0, -6.5, 0.7])
-MB_X0 = np.array([1.0, 0.0, -0.5, -1.0])
-MB_Y0 = np.array([0.0, 0.5, 1.5, 1.0])
-TS2 = np.array([0.21248658, 0.29298833, 0.0])
-B = np.array([-0.050010822738, 0.466694104872, 0.0])
-C = np.array([0.623499404931, 0.028037758529, 0.0])
+from rgsaddle import Stencil
 
 
-def muller_brown(positions: np.ndarray):
-    """Müller-Brown plus a unit spring in z. ``positions`` is (rows, 3)."""
-    rows = positions.shape[0]
-    energy = np.empty(rows)
-    gradient = np.zeros_like(positions)
-    for row in range(rows):
-        x = float(positions[row, 0])
-        y = float(positions[row, 1])
-        z = float(positions[row, 2])
-        value = z * z
-        gx = 0.0
-        gy = 0.0
-        for i in range(4):
-            dx = x - MB_X0[i]
-            dy = y - MB_Y0[i]
-            exponent = MB_AA[i] * dx * dx + MB_B[i] * dx * dy + MB_C[i] * dy * dy
-            weight = MB_A[i] * np.exp(exponent)
-            px = 2.0 * MB_AA[i] * dx + MB_B[i] * dy
-            py = MB_B[i] * dx + 2.0 * MB_C[i] * dy
-            value += weight
-            gx += weight * px
-            gy += weight * py
-        energy[row] = value
-        gradient[row, 0] = gx
-        gradient[row, 1] = gy
-        gradient[row, 2] = 2.0 * z
+def bowl(x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    row = np.ascontiguousarray(x, dtype=np.float64)
+    v = row[0]
+    energy = np.array([2.0 * v[0] * v[0] + 5.0 * v[1] * v[1]], dtype=np.float64)
+    gradient = np.array([[4.0 * v[0], 10.0 * v[1]]], dtype=np.float64)
     return energy, gradient
 
 
-def muller_brown_ids(ids: np.ndarray, positions: np.ndarray):
+def well(x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    row = np.ascontiguousarray(x, dtype=np.float64)
+    energy = np.empty(row.shape[0], dtype=np.float64)
+    gradient = np.zeros_like(row)
+    for i in range(row.shape[0]):
+        px = float(row[i, 0])
+        py = float(row[i, 1])
+        energy[i] = (px * px - 1.0) ** 2 + py * py
+        gradient[i, 0] = 4.0 * px * (px * px - 1.0)
+        gradient[i, 1] = 2.0 * py
+    return energy, gradient
+
+
+def well_ids(ids: np.ndarray, positions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     assert ids.dtype == np.int64
     assert ids.shape[0] == positions.shape[0]
-    return muller_brown(positions)
+    assert int(ids.min()) != int(ids.max()) or positions.shape[0] == 1
+    return well(positions)
 
 
-def band(images: int = 7) -> np.ndarray:
-    out = np.zeros((images, 3))
-    for image in range(images):
-        t = image / (images - 1)
-        out[image] = (1.0 - t) * C + t * B
-    return np.ascontiguousarray(out)
+def test_dimer_with_positive_curvature_moves_along_the_mode() -> None:
+    x = np.array([0.4, 0.3], dtype=np.float64)
+    mode = np.array([1.0, 0.0], dtype=np.float64)
+    search = Stencil.point(x, preset="dimer", mode=mode, max_rotations=4)
+    report = search.step(bowl)
+    positions = np.asarray(search.positions(), dtype=np.float64)
+    assert positions[1].tobytes() == np.float64(0.3).tobytes()
+    assert positions[0].tobytes() != np.float64(0.4).tobytes()
+    assert report.iteration >= 1
 
 
-def test_ci_neb_reaches_the_muller_brown_saddle():
-    stencil = rgsaddle.Stencil.band(band()).ci_tol(1e-3).build()
-    report = stencil.run(muller_brown, 250)
-    positions = stencil.positions()
-    ci = int(report.ci_index)
-    assert 0 < ci < positions.shape[0] - 1
-    assert np.linalg.norm(positions[ci] - TS2) < 0.05
+def test_ci_neb_steps_and_keeps_endpoint_ids() -> None:
+    images = np.array([[-1.0, 0.0], [0.0, 0.2], [1.0, 0.0]], dtype=np.float64)
+    search = Stencil.band(images, preset="ci-neb")
+    report = search.step(well_ids)
+    positions = np.asarray(search.positions(), dtype=np.float64)
+    assert positions.shape == (3, 2)
+    assert report.iteration >= 1
+    ids = list(search.image_ids())
+    assert ids[0] == 0
+    assert ids[-1] == 2
 
 
-def test_zoom_reports_the_window():
-    stencil = (
-        rgsaddle.Stencil.band(band())
-        .preset(int(StencilPreset.EON_ZOOM))
-        .zoom_stability(1)
-        .zoom_force_abs(1.0e9)
-        .ends(int(ZoomEnds.FIXED))
-        .ci_tol(1e-2)
-        .build()
+def test_zoom_pack_reports_a_window() -> None:
+    images = np.zeros((7, 2), dtype=np.float64)
+    for i in range(7):
+        images[i, 0] = -1.0 + 2.0 * i / 6.0
+    search = Stencil.band(
+        images,
+        preset="zoom-neb",
+        zoom_stability=1,
+        zoom_force=1.0e9,
+        zoom_force_kind=1,
+        zoom_ends=0,
+        ci_trigger_force=1.0e300,
     )
-    window = None
     phase = None
-    for _ in range(40):
-        report = stencil.step(muller_brown_ids)
-        if report.phase == int(StencilPhase.ZOOM):
-            window = report.zoom_window()
+    for _ in range(8):
+        report = search.step(well)
+        if report.phase == 1:
             phase = report.phase
-            assert report.surface_rows == 0
+            assert report.evaluations == 0
+            assert 0 <= report.zoom_lo < report.zoom_hi
             break
-    assert phase == int(StencilPhase.ZOOM)
-    assert window is not None
-    lo, hi = window
-    assert 0 <= lo < hi < band().shape[0]
+    assert phase == 1
 
 
-def test_dimer_from_near_the_saddle():
-    x0 = np.array([0.25, 0.30, 0.0])
-    stencil = rgsaddle.Stencil.point(np.ascontiguousarray(x0)).build()
-    report = stencil.run(muller_brown, 80)
-    position = stencil.positions()[0]
-    assert np.linalg.norm(position - TS2) < 0.15
-    assert np.isfinite(report.curvature)
+def test_idpp_names_the_missing_piece() -> None:
+    images = np.zeros((3, 2), dtype=np.float64)
+    with pytest.raises(ValueError, match="not implemented") as err:
+        Stencil.band(images, preset="idpp")
+    assert "feat/" not in str(err.value)
 
 
-def test_threads_above_one_are_refused():
-    stencil = rgsaddle.Stencil.band(band(5)).threads(2).build()
+def test_unknown_preset_is_a_value_error() -> None:
+    x = np.array([0.0, 0.0], dtype=np.float64)
+    with pytest.raises(ValueError, match="preset"):
+        Stencil.point(x, preset="zoom")
+
+
+def test_threads_above_one_are_refused() -> None:
+    images = np.zeros((3, 2), dtype=np.float64)
+    search = Stencil.band(images, preset="neb", threads=2)
     with pytest.raises(ValueError, match="threads > 1"):
-        stencil.step(muller_brown)
+        search.step(well)

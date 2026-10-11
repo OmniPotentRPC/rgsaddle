@@ -193,3 +193,88 @@ class SurfaceAdapter:
         constrained = np.array(atoms.get_forces(), dtype=np.float64, copy=True)
         gradient = -constrained.reshape(dof)
         return energy, gradient, raw_force.reshape(dof)
+
+
+class Point:
+    """Drive one ASE ``Atoms`` object with a point stencil.
+
+    ``run`` constructs an ``ase.optimize.optimize.Optimizer`` whose
+    ``step`` is one ``Stencil`` step, so the log, the trajectory, and
+    the return value are ASE's. ASE is imported on first use.
+    ``preset`` is ``dimer``, ``lanczos``, ``art``, ``eigen-follow``,
+    or ``min``. A band uses ``Stencil.band``.
+    """
+
+    def __init__(self, atoms: Any, *, preset: str = "dimer", **options: Any) -> None:
+        self.atoms = atoms
+        self.preset = preset
+        self.options = options
+        self._stencil: Any = None
+        self.mode: Float64 | None = None
+        self.curvature = float("nan")
+        self._observers: list[tuple[Any, int, tuple[Any, ...], dict[str, Any]]] = []
+
+    def __ase_optimizable__(self) -> Any:
+        return self.atoms.__ase_optimizable__()
+
+    def attach(self, function: Any, interval: int = 1, *args: Any, **kwargs: Any) -> None:
+        self._observers.append((function, interval, args, kwargs))
+
+    def _surface(self, positions: Float64) -> tuple[Float64, Float64]:
+        saved = np.array(self.atoms.get_positions(), dtype=np.float64, copy=True)
+        count = len(self.atoms)
+        try:
+            self.atoms.set_positions(
+                np.ascontiguousarray(positions, dtype=np.float64).reshape(count, 3),
+                apply_constraint=False,
+            )
+            energy = float(self.atoms.get_potential_energy())
+            gradient = -np.ascontiguousarray(self.atoms.get_forces(), dtype=np.float64).reshape(1, -1)
+        finally:
+            self.atoms.set_positions(saved, apply_constraint=False)
+        return np.array([energy], dtype=np.float64), gradient
+
+    def _ensure(self) -> Any:
+        if self._stencil is None:
+            from rgsaddle._core import Stencil
+
+            coordinates = np.ascontiguousarray(self.atoms.get_positions(), dtype=np.float64).reshape(-1)
+            self._stencil = Stencil.point(coordinates, preset=self.preset, **self.options)
+        return self._stencil
+
+    def run(
+        self,
+        fmax: float = 0.05,
+        steps: int | None = None,
+        *,
+        logfile: Any = None,
+        trajectory: Any = None,
+    ) -> bool:
+        from ase.optimize.optimize import DEFAULT_MAX_STEPS, Optimizer
+
+        point = self
+
+        class StencilDriver(Optimizer):
+            def initialize(self) -> None:
+                return None
+
+            def read(self) -> None:
+                return None
+
+            def step(self) -> None:  # pyright: ignore[reportIncompatibleMethodOverride]
+                search = point._ensure()
+                report = search.step(point._surface)
+                count = len(point.atoms)
+                updated = np.asarray(search.positions(), dtype=np.float64).reshape(count, 3)
+                point.atoms.set_positions(updated, apply_constraint=False)
+                point.curvature = float(report.curvature)
+                mode = search.mode()
+                point.mode = None if mode is None else np.asarray(mode, dtype=np.float64)
+
+        if steps is None:
+            steps = DEFAULT_MAX_STEPS
+        driver = StencilDriver(self.atoms, logfile=logfile, trajectory=trajectory)
+        host: Any = driver
+        for function, interval, args, kwargs in self._observers:
+            host.attach(function, interval, *args, **kwargs)
+        return bool(host.run(fmax=fmax, steps=steps))

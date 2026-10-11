@@ -293,7 +293,7 @@ impl<S: PointSurface> Counted<'_, S> {
 
 /// Component of `h` perpendicular to the unit vector `n`.
 fn perpendicular(h: &Array1<f64>, n: &Array1<f64>) -> Array1<f64> {
-    h - &(n * h.dot(n))
+    crate::stencil::perp(h.view(), n.view())
 }
 
 /// Dimer rotation by the modified Newton step.
@@ -322,7 +322,7 @@ fn rotate_dimer<S: PointSurface>(
 ) -> Result<(Array1<f64>, f64, usize), SaddleError> {
     let mut n = normalize(mode);
     let mut h = surface.action(x, g0, n.view(), config)?;
-    let mut curvature = h.dot(&n);
+    let mut curvature = crate::stencil::curvature_along(h.view(), n.view());
     let mut rotations = 0;
     // Rotational force (descent direction of the curvature on the
     // sphere) and the conjugate direction of the previous iteration.
@@ -354,7 +354,7 @@ fn rotate_dimer<S: PointSurface>(
         let phi1 = (0.5 * (b1.abs() / (curvature.abs() + 1e-300)).atan()).clamp(1e-4, 0.25 * PI);
         let n1 = normalize(&(&n * phi1.cos()) + &(&theta * phi1.sin()));
         let h1 = surface.action(x, g0, n1.view(), config)?;
-        let c1 = h1.dot(&n1);
+        let c1 = crate::stencil::curvature_along(h1.view(), n1.view());
         rotations += 1;
         // Fourier fit through C(0), C'(0) = 2 b1, and C(phi1).
         let a1 = (curvature - c1 + b1 * (2.0 * phi1).sin()) / (1.0 - (2.0 * phi1).cos());
@@ -392,7 +392,7 @@ fn rotate_dimer<S: PointSurface>(
         h = &(&h * w_old) + &(&h1 * w_trial);
         let theta_rotated = &(&theta * c) - &(&n * s);
         n = normalize(&(&n * c) + &(&theta * s));
-        curvature = h.dot(&n);
+        curvature = crate::stencil::curvature_along(h.view(), n.view());
         force_prev = Some(force);
         dir_prev = Some(theta_rotated * dir_norm);
         if config.rotation_angle_tol > 0.0 && phi.abs() < config.rotation_angle_tol {
@@ -426,7 +426,7 @@ fn lanczos_mode<S: PointSurface>(
         let j = alpha.len();
         let hv = surface.action(x, g0, q[j].view(), config)?;
         actions += 1;
-        let a = hv.dot(&q[j]);
+        let a = crate::stencil::curvature_along(hv.view(), q[j].view());
         alpha.push(a);
         let mut w = &hv - &(&q[j] * a);
         if j > 0 {
@@ -552,11 +552,10 @@ pub(crate) fn translated_gradient(
     mode: &Array1<f64>,
     curvature: f64,
 ) -> Array1<f64> {
-    let parallel = gradient.dot(mode);
     if curvature < 0.0 {
-        gradient - &(mode * (2.0 * parallel))
+        crate::stencil::reflect(gradient.view(), mode.view())
     } else {
-        mode * (-parallel)
+        crate::stencil::ascend(gradient.view(), mode.view())
     }
 }
 

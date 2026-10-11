@@ -1,20 +1,28 @@
-#+TITLE: One stencil
-#+OPTIONS: toc:nil num:nil
+#+title: One stencil
+#+options: toc:nil num:nil
 
-The stencil is one session for a three-point pattern: two side points, a tangent, a spring or a curvature, a climb rule, and a mesh. Goswami, Gunde, and Jónsson, Front. Chem. 14, 1807063 (2026), doi:10.3389/fchem.2026.1807063, Eq. 9, write the dimer translation and the climbing image as one Householder reflection. Goswami, arXiv:2603.10992 (2026), Eqs. 2.14-2.16, writes the dimer as a truncated free-ended three-image chain. The band methods on this builder are CI-NEB, AutoNEB, and zoom-NEB. Point methods call the existing minimum-mode session.
+:cite:`goswamiEnhancedClimbingImage2026,eon2901,kolsbjergAutomatedNudgedElastic2016`
 
-rgmin began as xtsci-optimize, which built minimisers from small strategy objects. The =Stencil= API extends that composition to saddle and band methods. This page is the only place that credit appears.
+The dimer translation and the climbing image are one Householder reflection of the true force. Goswami, Gunde, and Jónsson, Front. Chem. (2026), doi:10.3389/fchem.2026.1807063, Eq. 9. The dimer is that reflection on a three-image chain with free ends. Goswami (2026), arXiv:2603.10992, doi:10.48550/arXiv.2603.10992, Eqs. 2.14-2.16.
 
-#+begin_export rst
-:cite:`goswamiEnhancedClimbingImage2026,goswamiTutorialReview2026`
-#+end_export
+A preset chooses the sides, the tangent, the coupling, the climb, and the mesh. =Stencil::point= runs a minimiser, the dimer, Lanczos, ART, and eigen following. Dimer and Lanczos construct =MinModeSession=, so those recorded hashes stay the same. =Stencil::band= runs NEB, doubly nudged elastic band, CI-NEB, energy-weighted CI-NEB, zoom-NEB, and AutoNEB on =Chain= and the shared triad. OCI-NEB, IDPP, and S-IDPP are named and return "not implemented yet".
 
-A parallel change owns the point-method core. The types here (=Stencil=, =StencilBuilder=, =StencilConfig=, =BandMethod=, =SpringModel=, =ZoomEnds=) are the band surface that change merges. =PointMethod= is only complete enough that =build= can select a dimer or Lanczos, or refuse ART.
+| Preset | Tangent | Climb | Mode |
+|--------+---------+-------+------|
+| minimiser | none | none | none |
+| dimer | axis | reflect if the curvature is negative, otherwise ascend | rotation |
+| Lanczos | Ritz | as the dimer | Lanczos |
+| ART | seed, then Ritz | ascend until the curvature drops, then reflect | Lanczos |
+| eigen following | lowest eigenvector | as the dimer | dense central-difference =exact_eigh= |
+| NEB | improved | none | none |
+| CI-NEB, energy-weighted, zoom, AutoNEB | improved | climbing image | none |
 
-The C ABI adds an opaque =rgsaddle_stencil_t= at minor 17. Keys are integers, not a nested struct. One callback receives image ids. The historical =rgsaddle_band_*= entry points are the same minor-16 symbols.
+rgmin started as Rohit Goswami's xtsci-optimize (2023-2024), which composed minimisers from small strategy objects. The stencil extends that composition to saddle and band methods. This page is the only place that credit appears. eOn v2.9.0.1 is doi:10.5281/zenodo.18529495. Goswami (2025), arXiv:2510.21368, doi:10.48550/arXiv.2510.21368.
 
-Python is nanobind. =Stencil.band= and =Stencil.point= return a builder. The callback form is read once with =inspect.signature=. A first parameter named =ids= or =id= is called as =(ids, positions)= so =SurfaceAdapter= keeps working. One parameter is positions only. Anything else is =(positions, ids)=. =threads > 1= with that callable raises =ValueError=. Free-threaded builds set =Py_MOD_GIL_NOT_USED=. The GIL is held across the Python call.
+=Chain::evaluate= owns one block per image. The block size is fixed at one image and does not depend on the thread count. Image ids survive an insert and a zoom pack. Zoom keeps the window-end ids and assigns fresh ids to the new interiors. =ZoomEnds::Fixed= is the default.
 
-Results are bit-identical across the thread counts 1, 2, 3, and 8 on Müller-Brown and on a seven-atom Lennard-Jones cluster, for CI-NEB, energy-weighted CI-NEB, zoom with fixed ends, zoom with free ends, and AutoNEB. A block that sleeps does not change the SHA-256 of the little-endian position bytes. There is no ISA-specific arithmetic path on this code.
+The C surface is =rgsaddle_stencil_*=. Keys 1 through 10 are the point keys. Band keys start at 11. The report grows, after the point fields, by =ci_index=, =zoom_lo=, =zoom_hi=, and =phase=. ABI minor is 17. =rgsaddle_last_error= is thread-local. =include/rgsaddle/stencil.hpp= is the RAII wrapper for =point= and =band=. Python =rgsaddle.Stencil.point= and =rgsaddle.Stencil.band= call that wrapper. The extension is nanobind with =Py_MOD_GIL_NOT_USED= on a free-threaded build. A Python callable with =threads > 1= raises =ValueError=. The callback form is read once: a first parameter named =ids= or =id= is called as =(ids, positions)=, one parameter is positions only, and anything else is =(positions, ids)=.
 
-The force reported by every stencil step is the maximum absolute component. =StencilReport.force_gate= records that choice as "max-abs-component" so a host does not have to guess which norm was reduced. =energies()= returns an owned vector because an AutoNEB step can change the row count.
+Energy-weighted springs follow Ásgeirsson et al., J. Chem. Theory Comput. 17, 4929 (2021), doi:10.1021/acs.jctc.1c00462. Zoom-NEB follows eOn 3.6.0, doi:10.5281/zenodo.23166734. AutoNEB follows Kolsbjerg, Groves, and Hammer, J. Chem. Phys. 145, 094107 (2016), doi:10.1063/1.4961868.
+
+A benchmark that changes iterates cites Goswami, AIP Adv. (2025), doi:10.1063/5.0283639, first. The hashes already recorded for neb, ci-neb, dneb, weighted-neb, dimer, Lanczos, and AutoNEB are unchanged. Zoom and energy-weighted presets add their own lines.

@@ -1416,6 +1416,7 @@ impl BandSession {
     /// end force is that force with the parallel part removed, and
     /// there is no spring on the end. Every step evaluates all `n`
     /// images. The public [`BandSession::new`] keeps the ends fixed.
+    #[allow(dead_code)]
     pub(crate) fn new_free_ends(
         config: BandConfig,
         initial: Array2<f64>,
@@ -1474,6 +1475,7 @@ impl BandSession {
             .clone()
     }
 
+    #[allow(dead_code)]
     fn rebuild_solver(&mut self) -> Result<(), SaddleError> {
         let n_images = self.positions.nrows();
         let dof = self.positions.ncols();
@@ -1834,6 +1836,7 @@ impl BandSession {
 
     /// Projected force rows of the last assembly. Fixed ends omit the
     /// two endpoints. Free ends include every image.
+    #[allow(dead_code)]
     pub(crate) fn last_projected(&self) -> Option<Array2<f64>> {
         let flat = if self.free_ends {
             self.all_flat()

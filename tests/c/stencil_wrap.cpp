@@ -1,69 +1,77 @@
-/* C++ stencil builder: one CI-NEB step on the double well. */
-#include "rgsaddle/session.hpp"
+/* C++ stencil wrapper: a dimer step and one climbing-image band step. */
+#include "rgsaddle/stencil.hpp"
 
 #include <cstdio>
+#include <string>
 #include <vector>
 
-namespace {
-
-int well(uint64_t const* ids, std::size_t rows, std::size_t dof, double const* x, double* energy,
-         double* gradient) {
-    (void)ids;
-    if (dof != 3) {
-        return 1;
-    }
-    for (std::size_t row = 0; row < rows; ++row) {
-        double px = x[row * 3];
-        double py = x[row * 3 + 1];
-        double pz = x[row * 3 + 2];
-        energy[row] = (px * px - 1.0) * (px * px - 1.0) + 2.0 * py * py + 2.0 * pz * pz;
-        gradient[row * 3] = 4.0 * px * (px * px - 1.0);
-        gradient[row * 3 + 1] = 4.0 * py;
-        gradient[row * 3 + 2] = 4.0 * pz;
-    }
-    return 0;
+static void bowl(std::size_t rows, std::size_t dof, const std::uint64_t *, const double *x,
+                 double *e, double *g) {
+  if (rows != 1 || dof != 2) {
+    throw rgsaddle::Error("shape");
+  }
+  const double x0 = x[0];
+  const double y = x[1];
+  e[0] = 2.0 * x0 * x0 + 5.0 * y * y;
+  g[0] = 4.0 * x0;
+  g[1] = 10.0 * y;
 }
 
-}  // namespace
+static void band_well(std::size_t rows, std::size_t dof, const std::uint64_t *ids, const double *x,
+                      double *e, double *g) {
+  if (dof != 2 || ids == nullptr) {
+    throw rgsaddle::Error("shape");
+  }
+  for (std::size_t row = 0; row < rows; ++row) {
+    const double px = x[row * 2];
+    const double py = x[row * 2 + 1];
+    e[row] = (px * px - 1.0) * (px * px - 1.0) + py * py;
+    g[row * 2] = 4.0 * px * (px * px - 1.0);
+    g[row * 2 + 1] = 2.0 * py;
+  }
+}
 
 int main() {
-    std::vector<double> band;
-    for (int image = 0; image < 5; ++image) {
-        double t = static_cast<double>(image) / 4.0;
-        band.push_back(-1.0 + 2.0 * t);
-        band.push_back(0.0);
-        band.push_back(0.0);
-    }
-    auto stencil = rgsaddle::Stencil::band(band, 5, 3)
-                       .energy_weighted(0.972, 9.72)
-                       .threads(1)
-                       .build();
-    auto surface = [](uint64_t const* ids, std::size_t rows, std::size_t dof, double const* x,
-                      double* energy, double* gradient) {
-        return well(ids, rows, dof, x, energy, gradient);
-    };
-    auto report = stencil.step(surface);
-    if (report.iteration < 1) {
-        std::fprintf(stderr, "stencil step did not advance\n");
-        return 1;
-    }
-    auto positions = stencil.positions();
-    if (positions.size() != band.size()) {
-        std::fprintf(stderr, "position length\n");
-        return 1;
-    }
-    bool thrown = false;
-    try {
-        auto point = rgsaddle::Stencil::point(std::vector<double>{0.0, 0.0, 0.0});
-        auto rejected = point.energy_weighted(1.0, 2.0).build();
-        (void)rejected;
-    } catch (std::runtime_error const&) {
-        thrown = true;
-    }
-    if (!thrown) {
-        std::fprintf(stderr, "point spring was accepted\n");
-        return 1;
-    }
-    std::printf("RGSADDLE_STENCIL_CXX_OK\n");
-    return 0;
+  const double x[2] = {0.4, 0.3};
+  const double mode[2] = {1.0, 0.0};
+  auto search = rgsaddle::PointBuilder(x, 2, RGSADDLE_STENCIL_DIMER)
+                    .mode(mode, 2)
+                    .set_i64(RGSADDLE_STENCIL_KEY_MAX_ROTATIONS, 4)
+                    .build();
+  rgsaddle::StencilReport report = search.step(bowl);
+  std::vector<double> out = search.positions();
+  if (out.size() != 2 || out[1] != 0.3 || out[0] == 0.4 || report.iteration < 1) {
+    std::fprintf(stderr, "dimer step\n");
+    return 1;
+  }
+  bool threw = false;
+  try {
+    rgsaddle::PointBuilder(x, 2, RGSADDLE_STENCIL_DIMER).set_f64(RGSADDLE_STENCIL_KEY_K_MIN, 0.972);
+  } catch (const rgsaddle::Error &err) {
+    threw = std::string(err.what()).find("band stencil") != std::string::npos;
+  }
+  if (!threw) {
+    std::fprintf(stderr, "point accepted a band key\n");
+    return 1;
+  }
+
+  const double images[6] = {-1.0, 0.0, 0.0, 0.2, 1.0, 0.0};
+  auto band = rgsaddle::BandBuilder(images, 3, 2, RGSADDLE_STENCIL_ENERGY_WEIGHTED_NEB)
+                  .set_f64(RGSADDLE_STENCIL_KEY_K_MIN, 0.972)
+                  .set_f64(RGSADDLE_STENCIL_KEY_K_MAX, 9.72)
+                  .build();
+  rgsaddle::StencilReport stepped = band.step(band_well);
+  if (stepped.iteration < 1 || band.positions().size() != 6 || band.rows() != 3) {
+    std::fprintf(stderr, "band step\n");
+    return 1;
+  }
+  std::vector<std::uint64_t> ids = band.image_ids();
+  if (ids.size() != 3 || ids[0] != 0 || ids[2] != 2) {
+    std::fprintf(stderr, "band ids\n");
+    return 1;
+  }
+
+  std::printf("RGSADDLE_STENCIL_CXX_OK y=%.17g iter=%llu\n", out[1],
+              static_cast<unsigned long long>(report.iteration));
+  return 0;
 }
