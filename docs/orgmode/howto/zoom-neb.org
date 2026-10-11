@@ -1,0 +1,42 @@
+#+TITLE: Zoom-NEB
+#+OPTIONS: toc:nil num:nil
+
+Zoom-NEB runs CI-NEB until the climbing image has stayed on the same interior image for =stability= iterations and the force is under the zoom threshold, then packs the same number of images onto that window. eOn 3.6.0, doi:10.5281/zenodo.23166734, is the source of the window, the cubic Hermite, and the fixed ends. Goswami, Gunde, and Jónsson, Front. Chem. 14, 1807063 (2026), doi:10.3389/fchem.2026.1807063, is the climbing-image account. The energy-weighted law, when it is asked for, is Ásgeirsson et al., J. Chem. Theory Comput. 17, 4929 (2021), doi:10.1021/acs.jctc.1c00462.
+
+#+begin_export rst
+:cite:`goswamiEnhancedClimbingImage2026,eon360,asgeirssonNudgedElasticBand2021,goswamiBayesianHierarchical2025`
+#+end_export
+
+* Default ends
+=ZoomEnds::Fixed= is the default. The window ends are copied from the pre-zoom band and seeded, so the pack costs no force evaluation and the next step costs =n - 2= rows. =ZoomEnds::FreePerp= is ORCA's free-end variant. Those ends move on the component of the true force perpendicular to the tangent, with no spring, and every later step costs =n= rows. The endpoint cache is off.
+
+The default flips to =ZoomEnds::FreePerp= only when a gate shows fewer force calls, the BCa 95% interval of the free-to-fixed call ratio excludes 1, on at least three of the four surfaces (Müller-Brown, LEPS+HO, 2D LJ7, eOn LJ13), and the success rate is not lower. =tests/stencil_gate.rs= is that measurement. The release run used 10 seeds, 5 wall repeats, FIRE and L-BFGS, and budgets of 80 steps (40 on LJ13). On FIRE the free-to-fixed call ratio was 1 on Müller-Brown, LJ7, and LJ13, and above 1 on LEPS+HO. No surface had a BCa upper bound below 1, so this tree keeps =ZoomEnds::Fixed=. =validation/stencil_gate/gate.csv= is that run. LJ7 and LJ13 did not reach the reference saddle inside the budget, so those rows are censored rather than dropped.
+
+* Window
+The automatic window uses =alpha = 0.5= and =offset = 1=, then widens so the climbing image stays interior: =lo = min(lo, ci - 1)= and =hi = max(hi, ci + 1)=. A climber on an endpoint does not open a window. The pack places =n= images at equal minimum-image chord arc on =[lo, hi]=. Linear interpolation is eOn's =linearResample=. Cubic interpolation is eOn's =resamplePath=: the end tangent is the raw chord, and an interior tangent is the mean of the two chords, normalized, times =(arc[i+1] - arc[i-1]) / 2=. The zoom step itself takes no optimizer step. =phase= is =Zoom=, =surface_rows= is 0, and =zoom_window= is =(lo, hi)=. The optimizer restarts on the packed band.
+
+* Presets
+| Knob | eOn =Preset::EonZoom= | ORCA =Preset::OrcaZoomNebTs= |
+|------+-----------------------+------------------------------|
+| spring | uniform =k = 5= eV/Å² | energy-weighted 0.972 to 9.72 eV/Å² |
+| ORCA keyword |  | =SpringConst= 0.01, =SpringConst2= 0.1 Eh/Bohr² |
+| ends | fixed | free perpendicular |
+| interpolation | cubic | linear |
+| stability | 5 | 5 |
+| zoom force | relative 10 times =ci_tol= | absolute 5.142 eV/Å (=Tol_Turn_On_Zoom= 0.1 Eh/Bohr) |
+| other images | CI only, slack 10 | =Tol_Scale= 10 |
+| refine | none | eigenvector following at 0.1028 eV/Å (2e-3 Eh/Bohr) |
+
+The ORCA refine returns an error on the step that would hand off. =prfo.rs= is not rewritten here.
+
+* Image ids
+The original images are =0 .. n-1=. After a pack the window ends keep the ids they had. New interior images receive fresh ids. AutoNEB insertions also receive fresh ids, from the insertion list. The AutoNEB surface callback still sees a zero id per row of the block it is given. The stable ids are on =image_ids= after the step. A host that needs them on the callback should read that list.
+
+* Force calls
+A warm fixed-end step evaluates the interiors only. A free-end step evaluates every image. The parallel ceiling is =n - 2= for fixed ends and =n= for free ends. AutoNEB's ceiling is =n_simul=. One thread is one call. More threads split the moving images into contiguous blocks.
+
+* Golden files
+=validation/eon_zoom/neb_lj13= holds the reactant, product, and saddle from eOn =2f84d583=, path =client/unit_tests/data/systems/neb_lj13=. The energies stored in those files match an ASE Lennard-Jones potential with =epsilon = 1=, =sigma = 1=, =rc = 10=, =ro = 0=, =smooth = False=, within =1e-4= eV. eOn itself was not executed on this branch, and the Pt heptamer was not run. ORCA was not run. =validation/eon_zoom/hermite_reference.py= rebuilds the cubic pack on a quarter circle.
+
+* Censoring
+Kaplan-Meier survival is the chance a seed has not yet matched the reference saddle. A budget hit is censored at its call count and stays in =validation/stencil_gate/gate.csv=. On LEPS+HO, CI-NEB with FIRE goes from S(297) = 0.80 to S(407) = 0, and CI-NEB with L-BFGS goes from S(122) = 0.90 to S(222) = 0. Zoom with fixed ends and L-BFGS reaches S(382) = 0.10 (9 of 10). Zoom with free ends has no events on either stepper, so S stays 1. Müller-Brown events sit on the 407-call budget, so the curve is one step. LJ7 and LJ13 have no events inside the budget, so S stays 1. The paired ratios and the BCa intervals follow Goswami, AIP Adv. 15, 085210 (2025), doi:10.1063/5.0283639.

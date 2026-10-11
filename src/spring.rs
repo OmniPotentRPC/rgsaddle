@@ -18,6 +18,11 @@ pub enum SpringKind {
     /// Henkelman-style energy-weighted constants, one per segment
     /// (`ks[i]` couples images `i` and `i+1`; length `n_images - 1`).
     Weighted { ks: Vec<f64> },
+    /// Ásgeirsson et al. (2021), doi:10.1021/acs.jctc.1c00462.
+    /// Recomputed from the energies of the evaluation being assembled.
+    /// `k_min` and `k_max` are in the host energy unit per length squared.
+    /// eOn's defaults are 0.972 and 9.72 eV/Å^2 (ORCA 0.01 and 0.1 Eh/Bohr^2).
+    EnergyWeighted { k_min: f64, k_max: f64 },
     /// Mandelli & Parrinello (2021) Onsager–Machlup springs; `l_vecs`
     /// holds one force-scaled displacement per image (zero at the
     /// endpoints).
@@ -49,6 +54,15 @@ impl SpringKind {
                 SpringForces {
                     parallel: tangent.to_owned() * (k_next * dist_next - k_prev * dist_prev),
                     full: &pos_diff_next * k_next - &pos_diff_prev * k_prev,
+                }
+            }
+            SpringKind::EnergyWeighted { .. } => {
+                // [`crate::band::BandSession`] fills the constants for
+                // this evaluation and passes them in as a weighted list.
+                // A direct call has no energies, so the spring is zero.
+                SpringForces {
+                    parallel: Array1::zeros(tangent.len()),
+                    full: Array1::zeros(tangent.len()),
                 }
             }
             SpringKind::OnsagerMachlup { k, l_vecs } => {

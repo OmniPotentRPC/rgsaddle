@@ -16,7 +16,8 @@ Tangents, springs, projections, and the climbing-image force follow eOn's =NEBTa
 Positions stay unwrapped Cartesian. =Cell= wraps per-atom differences for the band mechanics through fractional coordinates (rows are lattice vectors; a zero row is a non-periodic axis). Neighbor lists, when a surface wants them, are vesin's job.
 
 * Evaluations per step
-A warm band step costs =n_images - 2= image evaluations. The endpoint energies are evaluated once. The session keeps its last evaluation, keyed on the interior positions, so a step that starts where the previous one ended is assembled from it: a host resync through =set_positions= (rows equal up to the minimum image keep the session's own copy), an optimizer =restart=, or a solver that dropped its own cache costs nothing. =BandReport.surface_rows= counts what the surface evaluated. The climbing image is chosen on the energies of the evaluation it climbs on, so the step that arms it already climbs.
+A warm fixed-end band step costs =n_images - 2= image evaluations. Zoom-NEB with free perpendicular ends evaluates all =n_images= rows. See [[file:one-stencil.org][one stencil]].
+ The endpoint energies are evaluated once. The session keeps its last evaluation, keyed on the interior positions, so a step that starts where the previous one ended is assembled from it: a host resync through =set_positions= (rows equal up to the minimum image keep the session's own copy), an optimizer =restart=, or a solver that dropped its own cache costs nothing. =BandReport.surface_rows= counts what the surface evaluated. The climbing image is chosen on the energies of the evaluation it climbs on, so the step that arms it already climbs.
 
 * Steppers
 FIRE is the default, as in eOn's velocity NEB stepper. The projected NEB force is not the gradient of the summed image energy the oracle reports, so L-BFGS runs under rgmin's =Accept::Step=: the two-loop direction, capped per atom, with one evaluation and no energy test.

@@ -851,11 +851,14 @@ fn hash_band<S: BandSurface + Copy>(
     points: [[f64; 3]; 3],
     force_tol: f64,
     threads: usize,
+    n_simul: usize,
+    n_max: usize,
 ) -> String {
     let mut cfg = config(force_tol, false);
     if let Some(tuning) = cfg.autoneb.as_mut() {
         tuning.threads = threads;
-        tuning.n_max = 6;
+        tuning.n_simul = n_simul;
+        tuning.n_max = n_max;
         tuning.local_max_steps = 12;
         tuning.climb_max_steps = 20;
         tuning.record_samples = true;
@@ -878,12 +881,17 @@ fn autoneb_digest_matches_at_one_two_three_and_eight_threads() {
         ("double_well", dw, 1e-2, SurfaceKind::Well),
         ("muller_brown", mb, 5e-2, SurfaceKind::Muller),
     ] {
-        let one = hash_kind(surface, points, tol, 1);
-        eprintln!("sha256 {name} threads=1 {one}");
+        let one = hash_kind(surface, points, tol, 1, 3, 6);
+        eprintln!("sha256 {name} n_simul=3 threads=1 {one}");
         for threads in [2, 3, 8] {
-            let other = hash_kind(surface, points, tol, threads);
-            assert_eq!(other, one, "{name} threads={threads}");
-            eprintln!("sha256 {name} threads={threads} {other}");
+            let other = hash_kind(surface, points, tol, threads, 3, 6);
+            assert_eq!(other, one, "{name} n_simul=3 threads={threads}");
+        }
+        let wide = hash_kind(surface, points, tol, 1, 8, 10);
+        eprintln!("sha256 {name} n_simul=8 threads=1 {wide}");
+        for threads in [2, 3, 8] {
+            let other = hash_kind(surface, points, tol, threads, 8, 10);
+            assert_eq!(other, wide, "{name} n_simul=8 threads={threads}");
         }
     }
 }
@@ -894,9 +902,16 @@ enum SurfaceKind {
     Muller,
 }
 
-fn hash_kind(kind: SurfaceKind, points: [[f64; 3]; 3], tol: f64, threads: usize) -> String {
+fn hash_kind(
+    kind: SurfaceKind,
+    points: [[f64; 3]; 3],
+    tol: f64,
+    threads: usize,
+    n_simul: usize,
+    n_max: usize,
+) -> String {
     match kind {
-        SurfaceKind::Well => hash_band(DoubleWell, points, tol, threads),
-        SurfaceKind::Muller => hash_band(MullerBrown, points, tol, threads),
+        SurfaceKind::Well => hash_band(DoubleWell, points, tol, threads, n_simul, n_max),
+        SurfaceKind::Muller => hash_band(MullerBrown, points, tol, threads, n_simul, n_max),
     }
 }

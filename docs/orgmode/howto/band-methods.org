@@ -1,0 +1,47 @@
+#+TITLE: Band methods on one stencil
+#+OPTIONS: toc:nil num:nil
+
+=Stencil= is the band side of the hourglass. One =step= runs plain NEB, CI-NEB, AutoNEB, or zoom-NEB. Point methods (dimer, Lanczos) use the same builder so a later merge can replace them. ART nouveau is refused until =feat/art-nouveau= is on main. The message is "ART nouveau lands with rgsaddle feat/art-nouveau".
+
+Goswami, Gunde, and Jónsson, Front. Chem. 14, 1807063 (2026), doi:10.3389/fchem.2026.1807063, is the climbing-image and dimer account this crate follows. Zoom-NEB follows eOn 3.6.0, doi:10.5281/zenodo.23166734. Energy-weighted springs follow Ásgeirsson et al., J. Chem. Theory Comput. 17, 4929 (2021), doi:10.1021/acs.jctc.1c00462. AutoNEB follows Kolsbjerg, Groves, and Hammer, J. Chem. Phys. 145, 094107 (2016), doi:10.1063/1.4961868.
+
+#+begin_export rst
+:cite:`goswamiEnhancedClimbingImage2026,eon360,asgeirssonNudgedElasticBand2021,kolsbjergAutomatedNudgedElastic2016`
+#+end_export
+
+There is no SIMD path, no BLAS, LAPACK, FFT, or GEMM call, and no MPI. Image blocks are a fixed partition. The raw bits do not depend on the thread count or on which block finishes first.
+
+* Build
+=+Stencil::band(positions)+ starts CI-NEB. =+point(x0)+ starts a dimer. =build= returns =Invalid= for a pair that this branch cannot run:
+
+| Pair | Message |
+|------+---------|
+| AutoNEB and zoom together | both re-mesh the band |
+| a point method plus a spring, zoom, AutoNEB, or refine | a point stencil cannot take band options |
+| =k_min > k_max= | energy-weighted springs need k_min at most k_max |
+| explicit list of the wrong length | explicit springs need n-1 constants |
+| solid cell plus zoom or AutoNEB | do not carry the solid-state block |
+| OCI-NEB refine | OCI-NEB refine needs rgsaddle#11 |
+| =idpp()= | IDPP initial path needs rgsaddle#10 |
+| ART | feat/art-nouveau |
+
+Eigenvector-following is accepted at =build= for the ORCA preset. The step returns =Invalid= once the climbing-image force is at or under the activation threshold, because =prfo.rs= is unchanged and there is no tangent-overlap adapter.
+
+* Springs
+Uniform =k = 5= eV/Å² is the default. Energy-weighted constants are recomputed from the energies of the assembly in progress. For segment =i=, =E_i= is the higher of the two image energies, =E_max= is the highest energy on the band, and =E_ref= is the higher endpoint. Above =E_ref=,
+
+: alpha = clamp((E_max - E_i) / (E_max - E_ref), 0, 1)
+: k = (1 - alpha) * k_max + alpha * k_min
+
+Otherwise =k = k_min=. When =E_max - E_ref < 1e-10=, including =E_max = E_ref=, every constant is =k_min=. That is the continuous extension of a zero denominator. The climbing image does not use its constants. Defaults are =k_min = 0.972= and =k_max = 9.72= eV/Å², which are ORCA's 0.01 and 0.1 Eh/Bohr². Onsager-Machlup stays on =BandConfig= and is refused by the stencil until the host passes the displacement list.
+
+* Force
+Reports use the maximum absolute component (=ForceGate::LinfNorm=). The field =force_gate= is the string "max-abs-component". With a climbing image and no =image_scale=, only the climbing image must meet =ci_tol=, and any other moving image above =band_slack * ci_tol= (default 10) fails the step. =image_scale = Some(s)= also requires the other interiors under =s * ci_tol=. No climbing image means every interior is under =ci_tol=.
+
+* Threads
+=threads = 1= is one surface call. =threads > 1= evaluates one contiguous block per call. The first =n % ranks= ranks own one extra image. Writes land by image index after every block has finished. There is no cross-thread sum. AutoNEB keeps its own pool, so the stencil thread count is the pool size it is given. A Python callable with =threads > 1= raises =ValueError=. The GIL is released around the Rust step and taken again inside the callback.
+
+A release timing on this 8-core host (1 thread per core, no SMT) used 18 images, so the fixed-end ceiling is 16 interiors and the free-end ceiling is 18. Each row burned about 1.1 ms and then evaluated the LJ13 potential. Five interleaved repeats of six steps gave, for CI-NEB, median 0.126 s, 0.066 s, 0.035 s, and 0.034 s at 1, 2, 4, and 8 threads (efficiency 1.00, 0.96, 0.90, 0.47). Zoom with fixed ends was the same shape once the pack had fired. Zoom with free ends was slower at one thread (0.137 s) and reached efficiency 0.52 at 8 threads. The serial fraction on that surface stayed near 0.04 until 8 threads, where it rose to about 0.15. Müller-Brown with no added burn was 0.1 ms at one thread and slower with more threads, so the limiter on a cheap surface is pool dispatch. On the slow surface it is the serial tangent, spring, and stepper assembly after the blocks join. The position hashes matched at every thread count.
+
+* What is not on this branch
+IDPP initial paths (rgsaddle#10), OCI-NEB refine (rgsaddle#11), ART nouveau, and the tangent-overlap P-RFO hand-off. The old =rgsaddle_band_*= symbols are unchanged. =SpringKind::EnergyWeighted { k_min, k_max }= is a new Rust variant. The C band spring enum stays 0, 1, 2.

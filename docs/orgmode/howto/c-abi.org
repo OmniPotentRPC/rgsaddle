@@ -1,7 +1,7 @@
 #+TITLE: Use the C and C++ interfaces
 #+OPTIONS: toc:nil num:nil
 
-~include/rgsaddle.h~ declares the C application binary interface (ABI), version 1.15. It preserves the main band, minimum-mode and index-1 layouts and adds intrinsic reaction coordinate (IRC), Sella, constraint and geometry controls. Include this header rather than duplicating its structures. Check ~rgsaddle_abi_stamp~ before constructing a session.
+~include/rgsaddle.h~ declares the C application binary interface (ABI), version 1.17. The stencil entries are opaque and keyed. Band, minimum-mode, and index-1 layouts from 1.15 stay. It preserves the main band, minimum-mode and index-1 layouts and adds intrinsic reaction coordinate (IRC), Sella, constraint and geometry controls. Include this header rather than duplicating its structures. Check ~rgsaddle_abi_stamp~ before constructing a session.
 
 A surface callback returns ~rgsaddle_status_t~ and receives one ~rgsaddle_surface_request_t~. Positions and gradients are image-major Cartesian triples. The host supplies the energy and gradient arrays for every requested image; the library performs no Message Passing Interface (MPI) communication.
 

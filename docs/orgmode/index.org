@@ -65,6 +65,8 @@ while report.status != BandStatus::Converged {
    tutorials/quickstart
    howto/band
    howto/autoneb
+   howto/band-methods
+   howto/zoom-neb
    howto/minmode
    howto/sparse-hessian
    howto/sella
@@ -73,6 +75,7 @@ while report.status != BandStatus::Converged {
    howto/c-abi
    howto/python
    explanation/mep
+   explanation/one-stencil
    reference/architecture
    reference/bibliography
    contributing/index

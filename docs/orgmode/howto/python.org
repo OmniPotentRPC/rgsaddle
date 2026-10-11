@@ -37,7 +37,7 @@ assert rgsaddle.ForceGate(2) is rgsaddle.ForceGate.MAX_FORCE_ON_ATOM
 
 A calculator exception, including =KeyboardInterrupt=, propagates out of =__call__=. It is not wrapped. A second call on the same adapter, while the first call still holds it, raises =RuntimeError= with the text =SurfaceAdapter is in use by another thread=.
 
-Band, minimum-mode, IRC, Sella and AutoNEB sessions have no Python names yet.
+=Stencil.band(positions)= and =Stencil.point(x0)= are the nanobind band and dimer. =threads(n)= with =n > 1= raises =ValueError= when the surface is a Python callable. =StencilPreset=, =ZoomEnds=, and =StencilPhase= match the C ordinals. IRC and Sella still have no Python names.
 
 * Thread safety
 Immutable values, such as the enum members, are shared freely. =SurfaceAdapter= is a mutable session. Each call claims an atomic flag for the whole call and drops it when the call returns, including when the calculator raises. =raw_forces= is assigned before that drop. Do not call the adapter again from inside its own calculator.

@@ -310,6 +310,10 @@ struct BandState {
     last: Mutex<Option<BandEval>>,
     /// Rows evaluated by the surface during the current step.
     rows: AtomicUsize,
+    /// Energy-weighted law. `None` uses [`BandConfig::spring`] as stored.
+    energy_weighted: Mutex<Option<(f64, f64)>>,
+    /// Segment constants of the most recent assembly. Preallocated.
+    ew_ks: Mutex<Vec<f64>>,
 }
 
 impl BandState {
@@ -324,6 +328,8 @@ impl BandState {
             endpoints: Mutex::new(None),
             last: Mutex::new(None),
             rows: AtomicUsize::new(0),
+            energy_weighted: Mutex::new(None),
+            ew_ks: Mutex::new(Vec::new()),
         }
     }
     fn convergence_force(&self, force: &Array1<f64>) -> f64 {
@@ -845,6 +851,21 @@ fn assemble_solid(
 
 /// Projected force on interior image `i`, climbing when `climb`.
 #[allow(clippy::too_many_arguments)]
+fn check_energy_weighted(k_min: f64, k_max: f64) -> Result<(), SaddleError> {
+    if !(k_min.is_finite() && k_max.is_finite() && k_min > 0.0 && k_max > 0.0) {
+        return Err(SaddleError::Invalid(
+            "energy-weighted spring bounds must be finite and positive".into(),
+        ));
+    }
+    if k_min > k_max {
+        return Err(SaddleError::Invalid(
+            "energy-weighted springs need k_min at most k_max".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 fn image_force(
     config: &BandConfig,
     i: usize,
@@ -854,6 +875,7 @@ fn image_force(
     x: ArrayView1<f64>,
     energies: &Array1<f64>,
     gradients: &Array2<f64>,
+    ks: Option<&[f64]>,
 ) -> Result<Array1<f64>, SaddleError> {
     let dof = endpoint_first.len();
     let n_images = energies.len();
@@ -885,14 +907,23 @@ fn image_force(
     )
     .map_err(|e| SaddleError::Invalid(format!("image {i}: {e}")))?;
     let force = -&gradients.row(i);
-    let spring = config.spring.compute(
-        i,
-        tangent.view(),
-        dist_next,
-        dist_prev,
-        pos_diff_next.view(),
-        pos_diff_prev.view(),
-    );
+    let spring = if let Some(ks) = ks {
+        let k_next = ks[i];
+        let k_prev = ks[i - 1];
+        crate::spring::SpringForces {
+            parallel: &tangent * (k_next * dist_next - k_prev * dist_prev),
+            full: &pos_diff_next * k_next - &pos_diff_prev * k_prev,
+        }
+    } else {
+        config.spring.compute(
+            i,
+            tangent.view(),
+            dist_next,
+            dist_prev,
+            pos_diff_next.view(),
+            pos_diff_prev.view(),
+        )
+    };
     let mut projected = if climb {
         let dneb = if config.projection == ProjectionKind::DoublyNudged {
             let fp = force_perp(force.view(), tangent.view());
@@ -954,6 +985,21 @@ fn assemble_band(
     }
     let ci_at = if armed { climb_target } else { None };
 
+    let mut ks_guard = state.ew_ks.lock().unwrap_or_else(|err| err.into_inner());
+    let law = *state
+        .energy_weighted
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    if let Some((k_min, k_max)) = law {
+        if ks_guard.len() != n_images - 1 {
+            ks_guard.resize(n_images - 1, k_min);
+        }
+        let slice = energies
+            .as_slice()
+            .ok_or_else(|| SaddleError::Invalid("band energies are not contiguous".into()))?;
+        crate::stencil::spring_ew::fill_constants(slice, k_min, k_max, &mut ks_guard);
+    }
+    let ks = law.map(|_| ());
     let mut projected = Array1::zeros((n_images - 2) * dof);
     for i in 1..n_images - 1 {
         let f = image_force(
@@ -965,6 +1011,7 @@ fn assemble_band(
             x,
             &energies,
             &gradients,
+            ks.map(|_| ks_guard.as_slice()),
         )?;
         projected.slice_mut(s![(i - 1) * dof..i * dof]).assign(&f);
     }
@@ -992,6 +1039,7 @@ fn assemble_band(
                 x,
                 &energies,
                 &gradients,
+                ks.map(|_| ks_guard.as_slice()),
             )?;
             projected
                 .slice_mut(s![(ci_i - 1) * dof..ci_i * dof])
@@ -1015,6 +1063,186 @@ fn assemble_band(
         .unwrap_or_else(|e| e.into_inner()) = max_component;
     let pseudo_energy: f64 = energies.slice(s![1..n_images - 1]).sum();
     Ok((pseudo_energy, projected, max_component))
+}
+
+fn free_end_force(
+    config: &BandConfig,
+    pos: ArrayView1<f64>,
+    neighbour: ArrayView1<f64>,
+    gradient: ArrayView1<f64>,
+) -> Array1<f64> {
+    let mut diff = &neighbour - &pos;
+    if let Some(cell) = &config.cell {
+        cell.minimum_image(&mut diff);
+    }
+    let norm = diff.dot(&diff).sqrt();
+    let tangent = if norm > 1e-15 {
+        &diff / norm
+    } else {
+        Array1::zeros(diff.len())
+    };
+    let force = -&gradient.to_owned();
+    let parallel = force.dot(&tangent);
+    let mut projected = &force - &(&tangent * parallel);
+    if config.remove_translation {
+        remove_net_translation(&mut projected);
+    }
+    projected
+}
+
+/// Assemble a free-end band. Every image is evaluated. Ends carry the
+/// perpendicular force and no spring.
+fn assemble_free(
+    config: &BandConfig,
+    state: &BandState,
+    surface: &dyn BandSurface,
+    x: ArrayView1<f64>,
+    dof: usize,
+) -> Result<(f64, Array1<f64>, f64), SaddleError> {
+    if dof == 0 || !x.len().is_multiple_of(dof) {
+        return Err(SaddleError::Shape(
+            "free-end band vector is not a whole number of images".into(),
+        ));
+    }
+    let n_images = x.len() / dof;
+    let slot = state.last.lock().unwrap_or_else(|err| err.into_inner());
+    let (energies, gradients) = if let Some(prev) = slot.as_ref().filter(|prev| prev.x == x) {
+        (prev.energies.clone(), prev.gradients.clone())
+    } else {
+        let raw = x
+            .as_slice()
+            .ok_or_else(|| SaddleError::Invalid("free-end band vector is not contiguous".into()))?;
+        let positions = ArrayView2::from_shape((n_images, dof), raw)
+            .map_err(|err| SaddleError::Shape(err.to_string()))?;
+        let mut energies = Array1::zeros(n_images);
+        let mut gradients = Array2::zeros((n_images, dof));
+        surface.eval(positions, &mut energies, &mut gradients)?;
+        state.rows.fetch_add(n_images, Ordering::Relaxed);
+        if !energies.iter().all(|energy| energy.is_finite())
+            || !gradients.iter().all(|value| value.is_finite())
+        {
+            return Err(SaddleError::NonFinite("free-end band"));
+        }
+        (energies, gradients)
+    };
+    drop(slot);
+    let mut ks_guard = state.ew_ks.lock().unwrap_or_else(|err| err.into_inner());
+    let law = *state
+        .energy_weighted
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    if let Some((k_min, k_max)) = law {
+        if ks_guard.len() != n_images - 1 {
+            ks_guard.resize(n_images - 1, k_min);
+        }
+        let slice = energies
+            .as_slice()
+            .ok_or_else(|| SaddleError::Invalid("band energies are not contiguous".into()))?;
+        crate::stencil::spring_ew::fill_constants(slice, k_min, k_max, &mut ks_guard);
+    }
+    let use_ks = law.is_some();
+    let positions = ArrayView2::from_shape(
+        (n_images, dof),
+        x.as_slice()
+            .ok_or_else(|| SaddleError::Invalid("free-end band vector is not contiguous".into()))?,
+    )
+    .map_err(|err| SaddleError::Shape(err.to_string()))?;
+    let interior = x.slice(s![dof..x.len() - dof]);
+    let mut max_i = 1usize;
+    for i in 2..n_images - 1 {
+        if energies[i] > energies[max_i] {
+            max_i = i;
+        }
+    }
+    let endpoint_ceiling = energies[0].max(energies[n_images - 1]);
+    let climb_target = (energies[max_i] > endpoint_ceiling).then_some(max_i);
+    let climbing = config.climbing.is_some();
+    let armed = climbing && state.armed.load(Ordering::Relaxed);
+    if armed {
+        state.ci_index.store(
+            climb_target.map_or(-1, |index| index as i64),
+            Ordering::Relaxed,
+        );
+    }
+    let ci_at = if armed { climb_target } else { None };
+    let mut projected = Array1::zeros(n_images * dof);
+    projected.slice_mut(s![..dof]).assign(&free_end_force(
+        config,
+        positions.row(0),
+        positions.row(1),
+        gradients.row(0),
+    ));
+    for i in 1..n_images - 1 {
+        let force = image_force(
+            config,
+            i,
+            ci_at == Some(i),
+            positions.row(0),
+            positions.row(n_images - 1),
+            interior,
+            &energies,
+            &gradients,
+            use_ks.then_some(ks_guard.as_slice()),
+        )?;
+        projected
+            .slice_mut(s![i * dof..(i + 1) * dof])
+            .assign(&force);
+    }
+    projected
+        .slice_mut(s![(n_images - 1) * dof..])
+        .assign(&free_end_force(
+            config,
+            positions.row(n_images - 1),
+            positions.row(n_images - 2),
+            gradients.row(n_images - 1),
+        ));
+    let mut max_component = state.convergence_force(&projected);
+    let baseline = {
+        let mut baseline = state.baseline.lock().unwrap_or_else(|err| err.into_inner());
+        *baseline.get_or_insert(max_component)
+    };
+    if let Some(ci) = &config.climbing
+        && !armed
+        && (max_component < baseline * ci.trigger_factor || max_component < ci.trigger_force)
+    {
+        state.armed.store(true, Ordering::Relaxed);
+        if let Some(ci_i) = climb_target {
+            state.ci_index.store(ci_i as i64, Ordering::Relaxed);
+            let force = image_force(
+                config,
+                ci_i,
+                true,
+                positions.row(0),
+                positions.row(n_images - 1),
+                interior,
+                &energies,
+                &gradients,
+                use_ks.then_some(ks_guard.as_slice()),
+            )?;
+            projected
+                .slice_mut(s![ci_i * dof..(ci_i + 1) * dof])
+                .assign(&force);
+            max_component = state.convergence_force(&projected);
+        }
+    }
+    drop(ks_guard);
+    let mut slot = state.last.lock().unwrap_or_else(|err| err.into_inner());
+    *slot = Some(BandEval {
+        x: x.to_owned(),
+        energies: energies.clone(),
+        gradients,
+        projected: projected.clone(),
+        stresses: Array2::zeros((0, 9)),
+        band_positions: Array2::zeros((0, dof)),
+        band_cells: Vec::new(),
+    });
+    drop(slot);
+    *state
+        .last_max_force
+        .lock()
+        .unwrap_or_else(|err| err.into_inner()) = max_component;
+    let pseudo = energies.slice(s![1..n_images - 1]).sum();
+    Ok((pseudo, projected, max_component))
 }
 
 /// The oracle's value beside a projected (band) or inverted (min-mode)
@@ -1082,6 +1310,9 @@ pub struct BandSession {
     iteration: usize,
     rtr: Option<crate::rtr::BandRtr>,
     solid: Option<SolidRun>,
+    /// Window ends move on the perpendicular force. Off for the
+    /// public band: endpoints stay fixed.
+    free_ends: bool,
 }
 
 impl BandSession {
@@ -1101,6 +1332,14 @@ impl BandSession {
                 n_images - 1,
                 ks.len()
             )));
+        }
+        if let SpringKind::EnergyWeighted { k_min, k_max } = config.spring {
+            check_energy_weighted(k_min, k_max)?;
+            if config.solid.is_some() {
+                return Err(SaddleError::Invalid(
+                    "energy-weighted springs do not carry the solid-state block".into(),
+                ));
+            }
         }
         if let SpringKind::OnsagerMachlup { l_vecs, .. } = &config.spring
             && (l_vecs.len() != n_images || l_vecs.iter().any(|l| l.len() != dof))
@@ -1147,15 +1386,124 @@ impl BandSession {
             // scales that step by 0.01.
             solver.set_lbfgs_neb_guards(true);
         }
+        let state = BandState::new();
+        if let SpringKind::EnergyWeighted { k_min, k_max } = config.spring {
+            *state
+                .energy_weighted
+                .lock()
+                .unwrap_or_else(|err| err.into_inner()) = Some((k_min, k_max));
+            state
+                .ew_ks
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .resize(n_images - 1, k_min);
+        }
         Ok(Self {
             config,
             positions,
             solver,
-            state: BandState::new(),
+            state,
             iteration: 0,
             rtr: None,
             solid,
+            free_ends: false,
         })
+    }
+
+    /// Band whose ends move on the perpendicular atomic force.
+    ///
+    /// The tangent at an end is the unit chord to its neighbour. The
+    /// end force is that force with the parallel part removed, and
+    /// there is no spring on the end. Every step evaluates all `n`
+    /// images. The public [`BandSession::new`] keeps the ends fixed.
+    pub(crate) fn new_free_ends(
+        config: BandConfig,
+        initial: Array2<f64>,
+    ) -> Result<Self, SaddleError> {
+        if config.solid.is_some() {
+            return Err(SaddleError::Invalid(
+                "a free-end band does not carry the solid-state block".into(),
+            ));
+        }
+        let mut session = Self::new(config, initial)?;
+        session.free_ends = true;
+        session.rebuild_solver()?;
+        Ok(session)
+    }
+
+    /// Recompute segment constants from the energies of each assembly.
+    ///
+    /// Pass `None` to use [`BandConfig::spring`] unchanged. The vector
+    /// is allocated here, not on the step.
+    pub fn set_spring_model(&mut self, model: Option<(f64, f64)>) -> Result<(), SaddleError> {
+        if self.solid.is_some() && model.is_some() {
+            return Err(SaddleError::Invalid(
+                "energy-weighted springs do not carry the solid-state block".into(),
+            ));
+        }
+        if let Some((k_min, k_max)) = model {
+            check_energy_weighted(k_min, k_max)?;
+            let n = self.positions.nrows();
+            let mut ks = self
+                .state
+                .ew_ks
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+            if ks.len() != n - 1 {
+                ks.resize(n - 1, k_min);
+            }
+        }
+        *self
+            .state
+            .energy_weighted
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = model;
+        Ok(())
+    }
+
+    /// Constants used by the most recent assembly.
+    ///
+    /// Empty until an energy-weighted assembly has run. The values
+    /// match [`crate::stencil::spring_ew::fill_constants`] on that
+    /// assembly's energies.
+    pub fn spring_constants(&self) -> Vec<f64> {
+        self.state
+            .ew_ks
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
+    }
+
+    fn rebuild_solver(&mut self) -> Result<(), SaddleError> {
+        let n_images = self.positions.nrows();
+        let dof = self.positions.ncols();
+        let moving = if self.free_ends {
+            n_images
+        } else {
+            n_images - 2
+        };
+        let method = if self.config.quickmin {
+            Method::QuickMin
+        } else {
+            self.config.method.clone()
+        };
+        check_force_driven(&method)?;
+        let interior_dof = moving * dof;
+        let control = Control {
+            maxiter: usize::MAX,
+            gtol: 0.0,
+            istep: 1.0,
+            maxmove: None,
+            ftol_rel: None,
+        };
+        let mut solver = Solver::new(method.clone(), control, interior_dof);
+        solver.set_atom_maxmove(self.config.max_move);
+        if matches!(method, Method::Lbfgs { .. }) {
+            solver.set_accept(Accept::Step);
+            solver.set_lbfgs_neb_guards(true);
+        }
+        self.solver = solver;
+        Ok(())
     }
 
     /// Select the optional HiGHS feasible-set step; requires the `highs` feature.
@@ -1380,6 +1728,9 @@ impl BandSession {
     /// recovers the surface and steps again may call
     /// [`BandSession::restart`] first to drop it.
     pub fn step<S: BandSurface>(&mut self, surface: &S) -> Result<BandReport, SaddleError> {
+        if self.free_ends {
+            return self.step_free(surface);
+        }
         if self.solid.is_some() {
             if self.rtr.is_some() {
                 return Err(SaddleError::Invalid(
@@ -1451,6 +1802,102 @@ impl BandSession {
                 endpoint_last.view(),
                 x.view(),
             )?;
+        }
+        let max_force = self.state.last_max_force();
+        let status = if max_force <= self.config.force_tol {
+            BandStatus::Converged
+        } else {
+            BandStatus::Running
+        };
+        Ok(BandReport {
+            status,
+            max_force,
+            ci_index: self.state.ci(),
+            iteration: self.iteration,
+            surface_rows: self.state.rows.load(Ordering::Relaxed),
+        })
+    }
+
+    fn all_flat(&self) -> Array1<f64> {
+        self.positions.iter().copied().collect()
+    }
+
+    fn scatter_all(&mut self, flat: ArrayView1<f64>) {
+        let n_images = self.positions.nrows();
+        let dof = self.positions.ncols();
+        for i in 0..n_images {
+            self.positions
+                .row_mut(i)
+                .assign(&flat.slice(s![i * dof..(i + 1) * dof]));
+        }
+    }
+
+    /// Projected force rows of the last assembly. Fixed ends omit the
+    /// two endpoints. Free ends include every image.
+    pub(crate) fn last_projected(&self) -> Option<Array2<f64>> {
+        let flat = if self.free_ends {
+            self.all_flat()
+        } else if self.solid.is_some() {
+            return None;
+        } else {
+            self.interior_flat()
+        };
+        let slot = self
+            .state
+            .last
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let last = slot.as_ref().filter(|eval| eval.x == flat)?;
+        let rows = if self.free_ends {
+            self.positions.nrows()
+        } else {
+            self.positions.nrows() - 2
+        };
+        let dof = self.positions.ncols();
+        if last.projected.len() != rows * dof {
+            return None;
+        }
+        last.projected
+            .clone()
+            .into_shape_with_order((rows, dof))
+            .ok()
+    }
+
+    fn step_free<S: BandSurface>(&mut self, surface: &S) -> Result<BandReport, SaddleError> {
+        let n_images = self.positions.nrows();
+        let dof = self.positions.ncols();
+        let flat_dof = n_images * dof;
+        let config = &self.config;
+        let state = &self.state;
+        state.take_error();
+        state.rows.store(0, Ordering::Relaxed);
+        let oracle = Oracle::unbounded(flat_dof, |x: ArrayView1<f64>| {
+            match assemble_free(config, state, surface, x, dof) {
+                Ok((energy, force, _)) => (energy, -force),
+                Err(err) => {
+                    state.record_error(err);
+                    (f64::INFINITY, Array1::zeros(flat_dof))
+                }
+            }
+        });
+        let mut x = self.all_flat();
+        let stepped = self.solver.step(&oracle, &mut x);
+        drop(oracle);
+        if let Some(err) = self.state.take_error() {
+            return Err(err);
+        }
+        stepped.map_err(|err| SaddleError::Solver(err.to_string()))?;
+        self.scatter_all(x.view());
+        self.iteration += 1;
+        let at_last = self
+            .state
+            .last
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .as_ref()
+            .is_some_and(|eval| eval.x == x && eval.projected.len() == flat_dof);
+        if !at_last {
+            assemble_free(&self.config, &self.state, surface, x.view(), dof)?;
         }
         let max_force = self.state.last_max_force();
         let status = if max_force <= self.config.force_tol {

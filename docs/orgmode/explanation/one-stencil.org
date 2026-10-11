@@ -1,0 +1,20 @@
+#+TITLE: One stencil
+#+OPTIONS: toc:nil num:nil
+
+The stencil is one session for a three-point pattern: two side points, a tangent, a spring or a curvature, a climb rule, and a mesh. Goswami, Gunde, and Jónsson, Front. Chem. 14, 1807063 (2026), doi:10.3389/fchem.2026.1807063, Eq. 9, write the dimer translation and the climbing image as one Householder reflection. Goswami, arXiv:2603.10992 (2026), Eqs. 2.14-2.16, writes the dimer as a truncated free-ended three-image chain. The band methods on this builder are CI-NEB, AutoNEB, and zoom-NEB. Point methods call the existing minimum-mode session.
+
+rgmin began as xtsci-optimize, which built minimisers from small strategy objects. The =Stencil= API extends that composition to saddle and band methods. This page is the only place that credit appears.
+
+#+begin_export rst
+:cite:`goswamiEnhancedClimbingImage2026,goswamiTutorialReview2026`
+#+end_export
+
+A parallel change owns the point-method core. The types here (=Stencil=, =StencilBuilder=, =StencilConfig=, =BandMethod=, =SpringModel=, =ZoomEnds=) are the band surface that change merges. =PointMethod= is only complete enough that =build= can select a dimer or Lanczos, or refuse ART.
+
+The C ABI adds an opaque =rgsaddle_stencil_t= at minor 17. Keys are integers, not a nested struct. One callback receives image ids. The historical =rgsaddle_band_*= entry points are the same minor-16 symbols.
+
+Python is nanobind. =Stencil.band= and =Stencil.point= return a builder. The callback form is read once with =inspect.signature=. A first parameter named =ids= or =id= is called as =(ids, positions)= so =SurfaceAdapter= keeps working. One parameter is positions only. Anything else is =(positions, ids)=. =threads > 1= with that callable raises =ValueError=. Free-threaded builds set =Py_MOD_GIL_NOT_USED=. The GIL is held across the Python call.
+
+Results are bit-identical across the thread counts 1, 2, 3, and 8 on Müller-Brown and on a seven-atom Lennard-Jones cluster, for CI-NEB, energy-weighted CI-NEB, zoom with fixed ends, zoom with free ends, and AutoNEB. A block that sleeps does not change the SHA-256 of the little-endian position bytes. There is no ISA-specific arithmetic path on this code.
+
+The force reported by every stencil step is the maximum absolute component. =StencilReport.force_gate= records that choice as "max-abs-component" so a host does not have to guess which norm was reduced. =energies()= returns an owned vector because an AutoNEB step can change the row count.
