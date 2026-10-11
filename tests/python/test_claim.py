@@ -5,6 +5,8 @@ from __future__ import annotations
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
+import pytest
+
 from rgsaddle._core import ClaimSlot
 from rgsaddle._core._testing import HoldGate, claim_hold_until, claim_work
 
@@ -47,6 +49,35 @@ def test_claim_held_until_release() -> None:
         holder.join()
         raise AssertionError("second caller must see the F3 error")
     gate.release()
+    holder.join()
+    assert claim_work(slot, 0) == 1
+
+
+def test_exit_from_another_thread_keeps_the_claim() -> None:
+    slot = ClaimSlot()
+    entered = threading.Event()
+    release = threading.Event()
+
+    def worker() -> None:
+        slot.__enter__()
+        entered.set()
+        release.wait()
+        slot.__exit__(None, None, None)
+
+    holder = threading.Thread(target=worker)
+    holder.start()
+    assert entered.wait(2.0)
+    with pytest.raises(RuntimeError, match="does not hold the claim"):
+        slot.__exit__(None, None, None)
+    try:
+        claim_work(slot, 0)
+    except RuntimeError as exc:
+        assert str(exc) == "SurfaceAdapter is in use by another thread"
+    else:
+        release.set()
+        holder.join()
+        raise AssertionError("a foreign exit must leave the claim held")
+    release.set()
     holder.join()
     assert claim_work(slot, 0) == 1
 

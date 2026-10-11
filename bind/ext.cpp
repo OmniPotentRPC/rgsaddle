@@ -95,10 +95,11 @@ struct HoldGate {
 
 struct ClaimSlot {
   rgbind::Busy busy;
-  // The published pointer is the only shared write. The Claim object
-  // itself is owned by the thread that stored it, so enter from
-  // several threads does not race on that object.
+  // The published pointer is the only shared write of the Claim object.
+  // enter records this thread. exit from any other thread is refused,
+  // so only the thread that entered deletes the Claim.
   std::atomic<rgbind::Claim *> held{nullptr};
+  std::atomic<std::thread::id> owner{};
 
   void enter() {
     if (held.load(std::memory_order_acquire) != nullptr) {
@@ -110,9 +111,15 @@ struct ClaimSlot {
       delete claim;
       throw rgbind::InUse("SurfaceAdapter");
     }
+    owner.store(std::this_thread::get_id(), std::memory_order_release);
   }
 
   void exit() {
+    const auto self = std::this_thread::get_id();
+    if (owner.load(std::memory_order_acquire) != self) {
+      throw std::runtime_error("ClaimSlot exit from a thread that does not hold the claim");
+    }
+    owner.store(std::thread::id(), std::memory_order_release);
     rgbind::Claim *claim = held.exchange(nullptr, std::memory_order_acq_rel);
     delete claim;
   }
