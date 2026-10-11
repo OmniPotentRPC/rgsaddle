@@ -14,11 +14,15 @@
 //! (1980) 177-195, <https://doi.org/10.1007/BF01396757>; the QR step
 //! is Francis, *Comput. J.* 4 (1962) 332-345,
 //! <https://doi.org/10.1093/comjnl/4.4.332>). pulp selects the SIMD
-//! kernel at runtime. No system LAPACK is linked. Eigenvalues ascend
-//! and eigenvector columns are orthonormal. [`partial_eigh`] returns
-//! the lowest `k` pairs for a min-mode host that does not need the
-//! rest of the spectrum. Feature `jacobi` keeps the cyclic Jacobi
-//! solver used before this path.
+//! kernel at runtime. No system LAPACK is linked. The factorization
+//! passes [`faer::Par::Seq`]. A parallel partition associates
+//! floating-point sums in an order that depends on the thread count,
+//! so it is not used. Eigenpairs do not depend on the rayon pool or
+//! on how many ranks call the solver. Eigenvalues ascend and
+//! eigenvector columns are orthonormal. [`partial_eigh`] returns the
+//! lowest `k` pairs for a min-mode host that does not need the rest
+//! of the spectrum. Feature `jacobi` keeps the cyclic Jacobi solver
+//! used before this path.
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
 use rgmin::vecops::{axpy, dot, nrm2};
@@ -169,16 +173,42 @@ fn symmetric_part(a: ArrayView2<f64>) -> Result<Array2<f64>, SaddleError> {
 }
 
 fn faer_eigh(work: &Array2<f64>, k: usize) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
+    // One sequential factorization. `Par::rayon(p)` splits the
+    // tridiagonalization and the divide-and-conquer updates into `p`
+    // deterministic chunks, and those chunks are summed in an order
+    // that changes with `p`.
+    faer_eigh_with(work, k, faer::Par::Seq)
+}
+
+fn faer_eigh_with(
+    work: &Array2<f64>,
+    k: usize,
+    par: faer::Par,
+) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
     let n = work.nrows();
     if k == 0 {
         return Ok((Array1::zeros(0), Array2::zeros((n, 0))));
     }
     let mat = faer::Mat::from_fn(n, n, |i, j| work[(i, j)]);
-    let evd = mat
-        .self_adjoint_eigen(faer::Side::Lower)
-        .map_err(|_| SaddleError::Solver("self-adjoint eigensolver did not converge".into()))?;
-    let values = evd.S();
-    let vectors = evd.U();
+    let mut vectors = faer::Mat::<f64>::zeros(n, n);
+    let mut values = faer::diag::Diag::<f64>::zeros(n);
+    let params = faer::Spec::<faer::linalg::evd::SelfAdjointEvdParams, f64>::default();
+    let scratch = faer::linalg::evd::self_adjoint_evd_scratch::<f64>(
+        n,
+        faer::linalg::evd::ComputeEigenvectors::Yes,
+        par,
+        params,
+    );
+    let mut buffer = dyn_stack::MemBuffer::new(scratch);
+    faer::linalg::evd::self_adjoint_evd(
+        mat.as_ref(),
+        values.as_mut(),
+        Some(vectors.as_mut()),
+        par,
+        dyn_stack::MemStack::new(&mut buffer),
+        params,
+    )
+    .map_err(|_| SaddleError::Solver("self-adjoint eigensolver did not converge".into()))?;
     let mut evals = Array1::zeros(k);
     let mut vecs = Array2::zeros((n, k));
     for col in 0..k {
@@ -699,6 +729,21 @@ mod tests {
     use rgmin::Manifold;
     use rgmin::ManifoldKind;
 
+    fn same_bits(left: &(Array1<f64>, Array2<f64>), right: &(Array1<f64>, Array2<f64>)) -> bool {
+        left.0.len() == right.0.len()
+            && left.1.dim() == right.1.dim()
+            && left
+                .0
+                .iter()
+                .zip(right.0.iter())
+                .all(|(x, y)| x.to_bits() == y.to_bits())
+            && left
+                .1
+                .iter()
+                .zip(right.1.iter())
+                .all(|(x, y)| x.to_bits() == y.to_bits())
+    }
+
     #[test]
     fn exact_eigh_recovers_a_known_spectrum() {
         let mut a = Array2::<f64>::zeros((2, 2));
@@ -1128,5 +1173,36 @@ mod tests {
             exact_eigh(array![[f64::NAN, 0.0], [0.0, 1.0]].view()),
             Err(SaddleError::NonFinite(_))
         ));
+    }
+
+    #[test]
+    fn eigenpairs_are_bit_identical_at_one_two_and_n_threads() {
+        // n = 512 is past faer's tridiagonal parallel threshold
+        // (`par_threshold` is 192 * 256). A solver that followed the
+        // pool size would not stay bitwise identical here.
+        for (n, seed) in [(48, 0x517E_0001_u64), (512, 0x517E_0512)] {
+            let a = random_spd(n, seed);
+            let sequential = exact_eigh(a.view()).unwrap();
+            let available = std::thread::available_parallelism().unwrap().get();
+            let mut counts = vec![1_usize, 2, available];
+            counts.sort_unstable();
+            counts.dedup();
+            for threads in counts {
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .build()
+                    .unwrap();
+                let on_pool = pool.install(|| exact_eigh(a.view()).unwrap());
+                assert!(
+                    same_bits(&sequential, &on_pool),
+                    "n={n} threads={threads} changed the eigenpairs"
+                );
+                let again = pool.install(|| exact_eigh(a.view()).unwrap());
+                assert!(
+                    same_bits(&sequential, &again),
+                    "n={n} threads={threads} repeat changed the eigenpairs"
+                );
+            }
+        }
     }
 }

@@ -41,11 +41,15 @@ ndarray = "0.17"
 thiserror = "2"
 linkcell = { version = "0.3.3", git = "https://github.com/d-SEAMS/linkcell", rev = "f6cf5700ca9c90e1877c84b66fb68386de5ceffe", default-features = false }
 # Dense symmetric spectra. `std` enables pulp's runtime SIMD dispatch.
+# `rayon` is linked so tests can compare thread counts. The solver
+# passes `Par::Seq`; a parallel partition is not rank-invariant.
 # The solver does not link a system LAPACK.
-faer = { version = "0.24", default-features = false, features = ["std"] }
+dyn-stack = "0.13.2"
+faer = { version = "0.24", default-features = false, features = ["std", "rayon"] }
 
 [dev-dependencies]
 approx = "0.5"
+rayon = "1"
 
 # include/rgsaddle.h is the hand-written contract (surface request,
 # status enum, stepping semantics); cargo-c installs it as is instead
@@ -69,3 +73,7 @@ name = "rgsaddle"
 name = "eigh"
 harness = false
 required-features = ["jacobi"]
+
+[[bench]]
+name = "eigh_scale"
+harness = false

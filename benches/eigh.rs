@@ -7,10 +7,9 @@
 //! Sizes are 30, 300, 1500 and 3000 unless arguments select a subset.
 //! `EIGH_WHICH=faer`, `jacobi`, or `both` (the default) selects a solver.
 //! The matrix is a random symmetric shift of `M^T M`, positive definite,
-//! built outside the timed section. Reported times are mean seconds per
-//! solve: 20 repetitions at n = 30, 3 at n = 300, and 1 above that.
-//! Sizes below 1500 take one untimed warmup. rgsaddle 0.2.2, faer 0.24.4,
-//! pulp runtime SIMD.
+//! built outside the timed section. Solvers are interleaved. Each reported
+//! time is the median of five solves, with the range (max - min).
+//! rgsaddle 0.2.2, faer 0.24.4, pulp runtime SIMD, `Par::Seq`.
 
 use std::env;
 use std::hint::black_box;
@@ -42,22 +41,13 @@ fn random_spd(n: usize) -> Array2<f64> {
     a
 }
 
-fn mean_secs(reps: usize, mut body: impl FnMut()) -> f64 {
-    let start = Instant::now();
-    for _ in 0..reps {
-        body();
-    }
-    start.elapsed().as_secs_f64() / f64::from(u32::try_from(reps).expect("reps"))
-}
+const REPS: usize = 5;
 
-fn reps_for(n: usize) -> usize {
-    if n <= 30 {
-        20
-    } else if n <= 300 {
-        3
-    } else {
-        1
-    }
+fn median_and_range(samples: &mut [f64]) -> (f64, f64) {
+    samples.sort_by(f64::total_cmp);
+    let median = samples[samples.len() / 2];
+    let range = samples[samples.len() - 1] - samples[0];
+    (median, range)
 }
 
 fn main() {
@@ -80,44 +70,55 @@ fn main() {
     for n in sizes {
         println!("building n={n}");
         let a = random_spd(n);
-        let reps = reps_for(n);
         let which = env::var("EIGH_WHICH").unwrap_or_else(|_| "both".into());
         let run_faer = which == "both" || which == "faer";
-        let run_jacobi = which == "both" || which == "jacobi";
-        let warmup = n < 1500;
-        let mut faer_lowest = f64::NAN;
-        let mut faer_secs = f64::NAN;
+        // Five Jacobi solves at n = 1500 are hours. The default comparison
+        // keeps Jacobi on the sizes that finish in a run of five.
+        let run_jacobi = which == "jacobi" || (which == "both" && n < 1500);
         if run_faer {
-            if warmup {
-                let _ = black_box(exact_eigh(black_box(a.view())).expect("faer warmup"));
-            }
-            println!("timing faer n={n} reps={reps}");
-            faer_secs = mean_secs(reps, || {
+            black_box(exact_eigh(black_box(a.view())).expect("faer warmup"));
+        }
+        if run_jacobi {
+            black_box(jacobi_eigh(black_box(a.view())).expect("jacobi warmup"));
+        }
+        let mut faer_samples = Vec::new();
+        let mut jacobi_samples = Vec::new();
+        let mut faer_lowest = f64::NAN;
+        let mut jacobi_lowest = f64::NAN;
+        println!("timing n={n} reps={REPS} interleaved");
+        for _ in 0..REPS {
+            if run_faer {
+                let start = Instant::now();
                 let (evals, _) = exact_eigh(black_box(a.view())).expect("faer");
+                faer_samples.push(start.elapsed().as_secs_f64());
                 faer_lowest = evals[0];
                 black_box(faer_lowest);
-            });
-        }
-        let mut jacobi_lowest = f64::NAN;
-        let mut jacobi_secs = f64::NAN;
-        if run_jacobi {
-            if warmup {
-                let _ = black_box(jacobi_eigh(black_box(a.view())).expect("jacobi warmup"));
             }
-            println!("timing jacobi n={n} reps={reps}");
-            jacobi_secs = mean_secs(reps, || {
+            if run_jacobi {
+                let start = Instant::now();
                 let (evals, _) = jacobi_eigh(black_box(a.view())).expect("jacobi");
+                jacobi_samples.push(start.elapsed().as_secs_f64());
                 jacobi_lowest = evals[0];
                 black_box(jacobi_lowest);
-            });
+            }
         }
+        let (faer_median, faer_range) = if run_faer {
+            median_and_range(&mut faer_samples)
+        } else {
+            (f64::NAN, f64::NAN)
+        };
+        let (jacobi_median, jacobi_range) = if run_jacobi {
+            median_and_range(&mut jacobi_samples)
+        } else {
+            (f64::NAN, f64::NAN)
+        };
         let gap = if run_faer && run_jacobi {
             (faer_lowest - jacobi_lowest).abs()
         } else {
             f64::NAN
         };
         println!(
-            "n={n} reps={reps} faer_s={faer_secs:.6} jacobi_s={jacobi_secs:.6} lowest_gap={gap:.3e}"
+            "n={n} reps={REPS} faer_median_s={faer_median:.6} faer_range_s={faer_range:.6} jacobi_median_s={jacobi_median:.6} jacobi_range_s={jacobi_range:.6} lowest_gap={gap:.3e}"
         );
     }
 }

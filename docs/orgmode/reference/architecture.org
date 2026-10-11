@@ -7,4 +7,4 @@ Band and minimum-mode translation use rgmin's solver. Dense quadratic restrictio
 
 ~PointSurface~ accepts one coordinate vector. ~BandSurface~ accepts a collection of images. The C callback expresses either request with the same official structure. The library has no Message Passing Interface (MPI) dependency; a host can evaluate a request collectively or distribute image work itself.
 
-Hessian storage and updates live in ~pes~ and ~qn~. ~linalg~ supplies numerical actions and cached direction/action pairs. ~eigensolve~ supplies dense and iterative eigenproblems. The dense symmetric solver is faer, and ~partial_eigh~ returns its lowest k pairs. Molecular topology enters through ~vocn~ and the equality chart. Periodic differences use linkcell.
+Hessian storage and updates live in ~pes~ and ~qn~. ~linalg~ supplies numerical actions and cached direction/action pairs. ~eigensolve~ supplies dense and iterative eigenproblems. The dense symmetric solver is faer pinned to one thread, and ~partial_eigh~ returns its lowest k pairs. Molecular topology enters through ~vocn~ and the equality chart. Periodic differences use linkcell.
