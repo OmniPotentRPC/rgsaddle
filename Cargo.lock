@@ -988,8 +988,8 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "linkcell"
-version = "0.3.3"
-source = "git+https://github.com/d-SEAMS/linkcell?rev=f6cf5700ca9c90e1877c84b66fb68386de5ceffe#f6cf5700ca9c90e1877c84b66fb68386de5ceffe"
+version = "0.3.11"
+source = "git+https://github.com/d-SEAMS/linkcell?rev=2e26b83c0c9bbc07d09eb056011dd8e2cec6f4a5#2e26b83c0c9bbc07d09eb056011dd8e2cec6f4a5"
 dependencies = [
  "minimage",
 ]
@@ -1050,8 +1050,9 @@ dependencies = [
 
 [[package]]
 name = "minimage"
-version = "0.1.1"
-source = "git+https://github.com/lode-org/minimage.git?rev=624d4395beae609281bb951e66299658bf313fc1#624d4395beae609281bb951e66299658bf313fc1"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e0c930112bcf7c3606a5e4dd67c90522432cb536a250d879967d094f1803abe"
 
 [[package]]
 name = "minimal-lexical"

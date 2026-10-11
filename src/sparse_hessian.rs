@@ -141,11 +141,9 @@ impl SparsityPattern {
 
     /// Pairs within `interaction_range + skin`.
     ///
-    /// The search uses a linkcell binning on [`Cell`] primitives
-    /// (`fractional`, `widths`, `lattice_shift`, `dist2`,
-    /// `dist2_shifted`). The pinned linkcell crate exposes k-nearest
-    /// queries, not a cutoff pair list, so the cutoff walk lives here.
-    /// An open cluster (`cell == None`) is binned in Cartesian space.
+    /// The search is [`linkcell::pairs_within`]. An open cluster
+    /// (`cell == None`) is placed in a box large enough that no periodic
+    /// image falls inside the cutoff.
     /// The range is inclusive. A periodic image of an atom is not stored
     /// as a loop. Coordinates are Cartesian, atom-major.
     ///
@@ -209,6 +207,11 @@ fn coords_of(positions: ArrayView1<f64>) -> Vec<[f64; 3]> {
 /// Every image of an unordered pair whose Cartesian distance is at most
 /// `range`. `dr` points from `i` to that image of `j`, with `i < j`.
 /// A lattice image of one atom is not reported.
+///
+/// The list is [`linkcell::pairs_within`]. That call is strict
+/// (`dist2 < cutoff²`), so the query is the next value above `range`
+/// and rows past `range²` are dropped. Rows are visited in `(i, j, shift)`
+/// order.
 fn visit_cutoff(
     points: &[[f64; 3]],
     cell: Option<&Cell>,
@@ -219,22 +222,100 @@ fn visit_cutoff(
     if n < 2 || !(range.is_finite() && range > 0.0) {
         return;
     }
-    match cell {
-        None => visit_open(points, range, &mut visit),
-        Some(cell) if ortho_single_image(cell, range) => {
-            visit_ortho_mic(points, cell, range, &mut visit);
+    let owned;
+    let sim = match cell {
+        Some(cell) => cell,
+        None => {
+            owned = open_search_box(points, range);
+            &owned
         }
-        Some(cell) if n <= 64 => visit_brute_images(points, cell, range, &mut visit),
-        Some(cell) => visit_binned_images(points, cell, range, &mut visit),
+    };
+    // `pairs_within` drops `dist2 == cutoff²`, and its squared distance
+    // can sit a few ulps above the Cartesian value. The pad is filtered
+    // back to an inclusive `range` on the reconstructed displacement.
+    let query = range.mul_add(1.0 + 1e-8, 1e-12);
+    let Ok(mut pairs) = linkcell::pairs_within(points, sim, query, None, None, true) else {
+        match cell {
+            Some(cell) => visit_brute_images(points, cell, range, &mut visit),
+            None => visit_open_brute(points, range, &mut visit),
+        }
+        return;
+    };
+    pairs.sort_by_key(|pair| (pair.i, pair.j, pair.shift));
+    let range2 = range * range;
+    for pair in pairs {
+        if pair.i >= pair.j {
+            continue;
+        }
+        let shift = sim.lattice_shift(pair.shift[0], pair.shift[1], pair.shift[2]);
+        let dr = [
+            points[pair.j][0] + shift[0] - points[pair.i][0],
+            points[pair.j][1] + shift[1] - points[pair.i][1],
+            points[pair.j][2] + shift[2] - points[pair.i][2],
+        ];
+        let d2 = dr[0] * dr[0] + dr[1] * dr[1] + dr[2] * dr[2];
+        if d2 > 0.0 && d2 <= range2 {
+            visit(pair.i, pair.j, dr);
+        }
     }
 }
 
-fn ortho_single_image(cell: &Cell, range: f64) -> bool {
-    if !cell.is_ortho() {
-        return false;
+/// Orthorhombic box around an open cluster. The gap to the nearest
+/// periodic image is larger than `range`, so a cutoff pair is a real
+/// Cartesian pair.
+fn open_search_box(points: &[[f64; 3]], range: f64) -> Cell {
+    let mut lo = [f64::INFINITY; 3];
+    let mut hi = [f64::NEG_INFINITY; 3];
+    for point in points {
+        for axis in 0..3 {
+            lo[axis] = lo[axis].min(point[axis]);
+            hi[axis] = hi[axis].max(point[axis]);
+        }
     }
-    let widths = cell.widths();
-    widths.iter().all(|width| *width > 2.0 * range)
+    let pad = range + range.abs() * 1e-6 + 1e-8;
+    let mut widths = [0.0; 3];
+    let mut origin = [0.0; 3];
+    for axis in 0..3 {
+        let span = hi[axis] - lo[axis];
+        widths[axis] = if span.is_finite() && span >= 0.0 {
+            span + 2.0 * pad
+        } else {
+            2.0 * pad
+        };
+        origin[axis] = if lo[axis].is_finite() {
+            lo[axis] - pad
+        } else {
+            -pad
+        };
+    }
+    Cell::from_vectors(
+        [widths[0], 0.0, 0.0],
+        [0.0, widths[1], 0.0],
+        [0.0, 0.0, widths[2]],
+        origin,
+    )
+    .expect("open cutoff box has positive widths")
+}
+
+fn visit_open_brute(
+    points: &[[f64; 3]],
+    range: f64,
+    visit: &mut impl FnMut(usize, usize, [f64; 3]),
+) {
+    let range2 = range * range;
+    for i in 0..points.len() {
+        for j in (i + 1)..points.len() {
+            let dr = [
+                points[j][0] - points[i][0],
+                points[j][1] - points[i][1],
+                points[j][2] - points[i][2],
+            ];
+            let d2 = dr[0] * dr[0] + dr[1] * dr[1] + dr[2] * dr[2];
+            if d2 > 0.0 && d2 <= range2 {
+                visit(i, j, dr);
+            }
+        }
+    }
 }
 
 fn image_reach(cell: &Cell, range: f64) -> [i32; 3] {
@@ -290,249 +371,6 @@ fn emit_images(
             }
         }
     }
-}
-
-fn visit_open(points: &[[f64; 3]], range: f64, visit: &mut impl FnMut(usize, usize, [f64; 3])) {
-    let n = points.len();
-    let mut lo = [f64::MAX; 3];
-    let mut hi = [f64::MIN; 3];
-    for point in points {
-        for axis in 0..3 {
-            lo[axis] = lo[axis].min(point[axis]);
-            hi[axis] = hi[axis].max(point[axis]);
-        }
-    }
-    let inv = 1.0 / range;
-    let dims = [0, 1, 2].map(|axis| {
-        let span = ((hi[axis] - lo[axis]) * inv).floor();
-        if span.is_finite() && span >= 0.0 {
-            (span as usize).saturating_add(1).clamp(1, 4096)
-        } else {
-            1
-        }
-    });
-    let bins = fill_bins(n, dims, |atom| {
-        let point = points[atom];
-        [0, 1, 2].map(|axis| {
-            let slot = ((point[axis] - lo[axis]) * inv).floor();
-            if slot.is_finite() && slot >= 0.0 {
-                (slot as usize).min(dims[axis] - 1)
-            } else {
-                0
-            }
-        })
-    });
-    let range2 = range * range;
-    for i in 0..n {
-        let origin = bin_of_open(points[i], lo, inv, dims);
-        for dz in -1isize..=1 {
-            for dy in -1isize..=1 {
-                for dx in -1isize..=1 {
-                    let x = origin[0] as isize + dx;
-                    let y = origin[1] as isize + dy;
-                    let z = origin[2] as isize + dz;
-                    if x < 0 || y < 0 || z < 0 {
-                        continue;
-                    }
-                    let x = x as usize;
-                    let y = y as usize;
-                    let z = z as usize;
-                    if x >= dims[0] || y >= dims[1] || z >= dims[2] {
-                        continue;
-                    }
-                    let slot = bin_slot([x, y, z], dims);
-                    for &j in &bins[slot] {
-                        if j <= i {
-                            continue;
-                        }
-                        let dr = [
-                            points[j][0] - points[i][0],
-                            points[j][1] - points[i][1],
-                            points[j][2] - points[i][2],
-                        ];
-                        let d2 = dr[0] * dr[0] + dr[1] * dr[1] + dr[2] * dr[2];
-                        if d2 > 0.0 && d2 <= range2 {
-                            visit(i, j, dr);
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn bin_of_open(point: [f64; 3], lo: [f64; 3], inv: f64, dims: [usize; 3]) -> [usize; 3] {
-    [0, 1, 2].map(|axis| {
-        let slot = ((point[axis] - lo[axis]) * inv).floor();
-        if slot.is_finite() && slot >= 0.0 {
-            (slot as usize).min(dims[axis] - 1)
-        } else {
-            0
-        }
-    })
-}
-
-fn visit_ortho_mic(
-    points: &[[f64; 3]],
-    cell: &Cell,
-    range: f64,
-    visit: &mut impl FnMut(usize, usize, [f64; 3]),
-) {
-    let n = points.len();
-    let widths = cell.widths();
-    let dims = [0, 1, 2].map(|axis| (widths[axis] / range).floor().max(1.0) as usize);
-    let frac: Vec<[f64; 3]> = points
-        .iter()
-        .copied()
-        .map(|point| cell.fractional(point))
-        .collect();
-    let bins = fill_bins(n, dims, |atom| {
-        [0, 1, 2].map(|axis| {
-            let slot = (frac[atom][axis] * dims[axis] as f64).floor();
-            if slot.is_finite() && slot >= 0.0 {
-                (slot as usize) % dims[axis]
-            } else {
-                0
-            }
-        })
-    });
-    let range2 = range * range;
-    for i in 0..n {
-        let origin = [0, 1, 2].map(|axis| {
-            let slot = (frac[i][axis] * dims[axis] as f64).floor();
-            if slot.is_finite() && slot >= 0.0 {
-                (slot as usize) % dims[axis]
-            } else {
-                0
-            }
-        });
-        for dz in -1isize..=1 {
-            for dy in -1isize..=1 {
-                for dx in -1isize..=1 {
-                    let slot = bin_slot(
-                        [
-                            wrap_bin(origin[0] as isize + dx, dims[0]),
-                            wrap_bin(origin[1] as isize + dy, dims[1]),
-                            wrap_bin(origin[2] as isize + dz, dims[2]),
-                        ],
-                        dims,
-                    );
-                    for &j in &bins[slot] {
-                        if j <= i {
-                            continue;
-                        }
-                        let dr = cell.displacement(points[i], points[j]);
-                        let d2 = dr[0] * dr[0] + dr[1] * dr[1] + dr[2] * dr[2];
-                        if d2 > 0.0 && d2 <= range2 {
-                            visit(i, j, dr);
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn visit_binned_images(
-    points: &[[f64; 3]],
-    cell: &Cell,
-    range: f64,
-    visit: &mut impl FnMut(usize, usize, [f64; 3]),
-) {
-    let n = points.len();
-    let widths = cell.widths();
-    let dims = [0, 1, 2].map(|axis| {
-        let bins = (widths[axis] / range).floor();
-        if bins.is_finite() && bins >= 1.0 {
-            bins as usize
-        } else {
-            1
-        }
-    });
-    let stencil = [0, 1, 2].map(|axis| {
-        let width = widths[axis].abs().max(1e-15);
-        let frac_radius = range / width;
-        let bins = (frac_radius * dims[axis] as f64).ceil();
-        let bins = if bins.is_finite() { bins as isize } else { 1 };
-        bins.saturating_add(1).clamp(1, dims[axis] as isize)
-    });
-    let frac: Vec<[f64; 3]> = points
-        .iter()
-        .copied()
-        .map(|point| cell.fractional(point))
-        .collect();
-    let bins = fill_bins(n, dims, |atom| {
-        [0, 1, 2].map(|axis| {
-            let slot = (frac[atom][axis] * dims[axis] as f64).floor();
-            if slot.is_finite() && slot >= 0.0 {
-                (slot as usize) % dims[axis]
-            } else {
-                0
-            }
-        })
-    });
-    let reach = image_reach(cell, range);
-    let range2 = range * range;
-    for (i, frac_i) in frac.iter().enumerate() {
-        let origin = [0, 1, 2].map(|axis| {
-            let slot = (frac_i[axis] * dims[axis] as f64).floor();
-            if slot.is_finite() && slot >= 0.0 {
-                (slot as usize) % dims[axis]
-            } else {
-                0
-            }
-        });
-        for dz in -stencil[2]..=stencil[2] {
-            for dy in -stencil[1]..=stencil[1] {
-                for dx in -stencil[0]..=stencil[0] {
-                    let slot = bin_slot(
-                        [
-                            wrap_bin(origin[0] as isize + dx, dims[0]),
-                            wrap_bin(origin[1] as isize + dy, dims[1]),
-                            wrap_bin(origin[2] as isize + dz, dims[2]),
-                        ],
-                        dims,
-                    );
-                    for &j in &bins[slot] {
-                        if j <= i {
-                            continue;
-                        }
-                        emit_images(points, cell, i, j, reach, range2, visit);
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn fill_bins(n: usize, dims: [usize; 3], bin: impl Fn(usize) -> [usize; 3]) -> Vec<Vec<usize>> {
-    let mut bins = vec![
-        Vec::new();
-        dims[0]
-            .saturating_mul(dims[1])
-            .saturating_mul(dims[2])
-            .max(1)
-    ];
-    for atom in 0..n {
-        let slot = bin_slot(bin(atom), dims);
-        if slot < bins.len() {
-            bins[slot].push(atom);
-        }
-    }
-    bins
-}
-
-fn bin_slot(index: [usize; 3], dims: [usize; 3]) -> usize {
-    index[0] + dims[0] * (index[1] + dims[1] * index[2])
-}
-
-fn wrap_bin(index: isize, dim: usize) -> usize {
-    let dim = dim.max(1) as isize;
-    let mut wrapped = index % dim;
-    if wrapped < 0 {
-        wrapped += dim;
-    }
-    wrapped as usize
 }
 
 fn pack_rows(mut rows: Vec<Vec<usize>>) -> SparsityPattern {
@@ -3115,11 +2953,11 @@ mod tests {
             let range = 1.1 + 0.2 * u01(seed, 99);
             let points = coords_of(positions.view());
             let brute = oracle_pairs(&points, Some(&cell), range);
-            let mut binned = std::collections::BTreeSet::new();
-            visit_binned_images(&points, &cell, range, &mut |i, j, _| {
-                binned.insert((i, j));
-            });
-            assert_eq!(brute, binned, "seed {seed}");
+            assert_eq!(
+                brute,
+                walked_pairs(&points, Some(&cell), range),
+                "seed {seed}"
+            );
             let pattern =
                 SparsityPattern::from_positions(positions.view(), Some(&cell), range, 0.0).unwrap();
             assert_eq!(brute, pattern_pairs(&pattern));
@@ -3137,13 +2975,35 @@ mod tests {
         let points = coords_of(positions.view());
         let range = 2.5;
         let brute = oracle_pairs(&points, Some(&cell), range);
-        let mut mic = std::collections::BTreeSet::new();
-        visit_ortho_mic(&points, &cell, range, &mut |i, j, _| {
-            mic.insert((i, j));
-        });
-        assert_eq!(brute, mic);
+        assert_eq!(brute, walked_pairs(&points, Some(&cell), range));
         let open = SparsityPattern::from_positions(positions.view(), None, range, 0.0).unwrap();
         assert_eq!(oracle_pairs(&points, None, range), pattern_pairs(&open));
+
+        let touching = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
+        assert_eq!(walked_pairs(&touching, None, 1.0).len(), 1);
+        let tiny = Cell::ortho(0.3, 0.3, 0.3).unwrap();
+        let crowded = Array1::from(vec![0.05, 0.05, 0.05, 0.2, 0.05, 0.05]);
+        let pattern =
+            SparsityPattern::from_positions(crowded.view(), Some(&tiny), 1.0, 0.0).unwrap();
+        for atom in 0..pattern.n_atoms() {
+            assert!(pattern.neighbors(atom).binary_search(&atom).is_err());
+        }
+        assert_eq!(
+            pattern_pairs(&pattern),
+            oracle_pairs(&coords_of(crowded.view()), Some(&tiny), 1.0)
+        );
+    }
+
+    fn walked_pairs(
+        points: &[[f64; 3]],
+        cell: Option<&Cell>,
+        range: f64,
+    ) -> std::collections::BTreeSet<(usize, usize)> {
+        let mut pairs = std::collections::BTreeSet::new();
+        visit_cutoff(points, cell, range, |i, j, _| {
+            pairs.insert((i, j));
+        });
+        pairs
     }
 
     fn pattern_pairs(pattern: &SparsityPattern) -> std::collections::BTreeSet<(usize, usize)> {

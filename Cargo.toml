@@ -35,7 +35,7 @@ eindir-core = { version = "0.6.0", features = ["capi"] }
 ndarray = "0.17"
 rayon = "1.12"
 thiserror = "2"
-linkcell = { version = "0.3.3", git = "https://github.com/d-SEAMS/linkcell", rev = "f6cf5700ca9c90e1877c84b66fb68386de5ceffe", default-features = false }
+linkcell = { version = "0.3.11", git = "https://github.com/d-SEAMS/linkcell", rev = "2e26b83c0c9bbc07d09eb056011dd8e2cec6f4a5", default-features = false }
 
 [dev-dependencies]
 approx = "0.5"
