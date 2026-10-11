@@ -1,10 +1,11 @@
-"""SurfaceAdapter through the fake C eval loop."""
+"""SurfaceAdapter on the calling thread, in request order."""
 
 from __future__ import annotations
 
 import hashlib
-import sys
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import pytest
@@ -14,7 +15,14 @@ from ase import Atoms
 from ase.calculators.calculator import Calculator, all_changes
 from ase.constraints import FixAtoms
 
+from rgsaddle._core import ClaimSlot
+from rgsaddle._core._testing import drive_eval
 from rgsaddle.ase import SurfaceAdapter
+
+# SHA-256 of energies, gradients, and raw forces for the fixture below.
+# 3.14 and 3.14t must match this constant. The bytes do not depend on
+# how many Python threads call an adapter of their own.
+BYTES_SHA256 = "8a60b8fa36c70a2ae7d7069418500aeb12b3e61e6205b6e7e96f4357dd916b4e"
 
 
 class LogCalc(Calculator):
@@ -63,6 +71,42 @@ class BoomCalc(Calculator):
         raise self.kind(self.text)
 
 
+class OverlapCalc(Calculator):
+    """Fails if calculate is entered a second time before the first returns."""
+
+    implemented_properties = ["energy", "forces"]
+    nolabel = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._lock = threading.Lock()
+        self.active = 0
+        self.max_active = 0
+        self.overlap = False
+
+    def calculate(
+        self,
+        atoms: Atoms | None = None,
+        properties: list[str] | None = None,
+        system_changes: list[str] = all_changes,
+    ) -> None:
+        super().calculate(atoms, properties, system_changes)
+        with self._lock:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            if self.active > 1:
+                self.overlap = True
+        try:
+            time.sleep(0.05)
+            assert atoms is not None
+            n = len(atoms)
+            self.results["energy"] = 0.0
+            self.results["forces"] = np.zeros((n, 3))
+        finally:
+            with self._lock:
+                self.active -= 1
+
+
 def _atoms(calc: Calculator, image: int, x0: float = 0.0) -> Atoms:
     atoms = Atoms("Au2", positions=[[x0, 0.0, 0.0], [1.5, 0.0, 0.0]], pbc=False)
     atoms.info["image"] = image
@@ -87,16 +131,20 @@ def test_row_order_and_constraints() -> None:
         _atoms(shared, 2, 0.0),
     ]
     images[0].set_constraint(FixAtoms(indices=[0]))
-    adapter = SurfaceAdapter(images, allow_shared_calculator=True, threads=1)
+    adapter = SurfaceAdapter(images, allow_shared_calculator=True)
     ids = np.array([2, 0, 1], dtype=np.int64)
+    assert adapter.owners(ids).dtype == np.uint64
+    assert int(adapter.owners(ids)[0]) == int(adapter.owners(ids)[1])
+    assert int(adapter.owners(ids)[0]) != int(adapter.owners(ids)[2])
+    assert adapter.reentrant(ids).dtype == np.uint8
+    assert adapter.reentrant(ids).tolist() == [0, 0, 0]
     x = np.stack([image.positions.reshape(-1).copy() for image in (images[2], images[0], images[1])])
     x[0, 0] = 4.0
     x[1, 0] = 5.0
     x[2, 0] = 6.0
     energies, gradients = adapter(ids, x)
-    # Request order is 2, 0, 1. One worker runs the shared calculator
-    # (images 0 then 2, the ascending ids) before the other calculator.
-    assert log == [0, 2, 1]
+    # The calling thread keeps the request order. It does not regroup.
+    assert log == [2, 0, 1]
     assert energies.shape == (3,)
     assert gradients.shape == (3, 6)
     assert energies[0] == 4.0
@@ -116,10 +164,10 @@ def test_row_order_and_constraints() -> None:
     assert gradients[0, 4] == -7.0
 
 
-def test_worker_exception_is_the_original() -> None:
+def test_exception_leaves_raw_forces_unset() -> None:
     ok = LogCalc([], 1)
     bad = BoomCalc(RuntimeError, "worker-boom")
-    adapter = SurfaceAdapter([_atoms(ok, 0), _atoms(bad, 1)], threads=2)
+    adapter = SurfaceAdapter([_atoms(ok, 0), _atoms(bad, 1)])
     ids = np.arange(2, dtype=np.int64)
     x = np.zeros((2, 6), dtype=np.float64)
     with pytest.raises(RuntimeError, match="worker-boom"):
@@ -129,57 +177,8 @@ def test_worker_exception_is_the_original() -> None:
 
 def test_keyboard_interrupt() -> None:
     bad = BoomCalc(KeyboardInterrupt, "stop")
-    adapter = SurfaceAdapter([_atoms(bad, 0)], threads=1)
+    adapter = SurfaceAdapter([_atoms(bad, 0)])
     ids = np.array([0], dtype=np.int64)
     x = np.zeros((1, 6), dtype=np.float64)
     with pytest.raises(KeyboardInterrupt):
         adapter(ids, x)
-
-
-def test_bytes_match_across_threads() -> None:
-    def run(threads: int) -> bytes:
-        calcs = [LogCalc([], i) for i in range(4)]
-        images = [_atoms(calc, i, 0.0) for i, calc in enumerate(calcs)]
-        adapter = SurfaceAdapter(images, threads=threads)
-        ids = np.array([3, 1, 0, 2], dtype=np.int64)
-        x = np.arange(4 * 6, dtype=np.float64).reshape(4, 6)
-        energies, gradients = adapter(ids, x)
-        blob = energies.tobytes() + gradients.tobytes()
-        assert adapter.raw_forces is not None
-        return blob + adapter.raw_forces.tobytes()
-
-    hashes = [hashlib.sha256(run(threads)).hexdigest() for threads in (1, 2, 3, 8)]
-    assert len(set(hashes)) == 1
-
-
-def test_distinct_owners_overlap_without_the_gil() -> None:
-    gil = getattr(sys, "_is_gil_enabled", lambda: True)
-    if gil():
-        pytest.skip("Python serialises callbacks while the GIL is enabled")
-    barrier = threading.Barrier(2)
-    entered = threading.Barrier(2)
-
-    class WaitCalc(Calculator):
-        implemented_properties = ["energy", "forces"]
-        nolabel = True
-
-        def calculate(
-            self,
-            atoms: Atoms | None = None,
-            properties: list[str] | None = None,
-            system_changes: list[str] = all_changes,
-        ) -> None:
-            super().calculate(atoms, properties, system_changes)
-            entered.wait(timeout=5)
-            barrier.wait(timeout=5)
-            assert atoms is not None
-            n = len(atoms)
-            self.results["energy"] = 0.0
-            self.results["forces"] = np.zeros((n, 3))
-
-    adapter = SurfaceAdapter([_atoms(WaitCalc(), 0), _atoms(WaitCalc(), 1)], threads=2)
-    ids = np.arange(2, dtype=np.int64)
-    x = np.zeros((2, 6), dtype=np.float64)
-    energies, gradients = adapter(ids, x)
-    assert energies.shape == (2,)
-    assert gradients.shape == (2, 6)

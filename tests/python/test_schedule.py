@@ -6,7 +6,7 @@ import hashlib
 
 import numpy as np
 
-from rgsaddle._core import schedule_canonical
+from rgsaddle._core._testing import schedule_canonical
 
 IDS = np.array([0, 2, 1, 4, 3, 5], dtype=np.int64)
 OWNERS = np.array([10, 10, 20, 10, 30, 20], dtype=np.uint64)

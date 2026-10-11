@@ -20,9 +20,6 @@ from rgsaddle._core import (
     raise_status as raise_status,
 )
 from rgsaddle._core import (
-    set_last_error as set_last_error,
-)
-from rgsaddle._core import (
     version as _version,
 )
 
@@ -106,5 +103,4 @@ __all__ = [
     "__version__",
     "last_error",
     "raise_status",
-    "set_last_error",
 ]

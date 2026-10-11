@@ -36,7 +36,7 @@ The importable package is =rgsaddle=. =rgsaddle._core= is the nanobind extension
 | =raise_status= | Map an =rgsaddle_status_t= value. =RGSADDLE_OK= returns true |
 | =rgsaddle.ase.SurfaceAdapter= | =list[Atoms]= to the =(ids, x) -> (energies, gradients)= callback. Optional extra =ase= |
 
-=SurfaceAdapter= keeps =get_forces(apply_constraint=False)= on =raw_forces=. The returned gradient is minus =get_forces()= after constraints. Rows that share a calculator run on one worker in ascending image id. A second call while the first holds the adapter raises =RuntimeError=.
+=SurfaceAdapter= keeps =get_forces(apply_constraint=False)= on =raw_forces=. The returned gradient is minus =get_forces()= after constraints. The adapter evaluates the given rows in order on the calling thread. =owners()= and =reentrant()= are what a driver uses to group. A second call while the first holds the adapter raises =RuntimeError=.
 
 * Tests that pin the contract
 - =tests/double_well.rs= — band finds the origin saddle, endpoints pinned

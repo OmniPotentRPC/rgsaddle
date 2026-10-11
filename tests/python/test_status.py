@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import rgsaddle
 from rgsaddle import NumericalError
+from rgsaddle._core._testing import set_last_error
 
 # Codes from include/rgsaddle.h. Convergence is a run report, not a status.
 OK = 0
@@ -37,13 +38,13 @@ RUNTIME = {
 
 
 def test_ok_returns_true() -> None:
-    rgsaddle.set_last_error("")
+    set_last_error("")
     assert rgsaddle.raise_status(OK) is True
 
 
 def test_value_and_numerical_and_runtime() -> None:
     for code in sorted(VALUE):
-        rgsaddle.set_last_error("")
+        set_last_error("")
         try:
             rgsaddle.raise_status(code)
         except ValueError as exc:
@@ -52,7 +53,7 @@ def test_value_and_numerical_and_runtime() -> None:
         else:
             raise AssertionError(f"{code} must be ValueError")
     for code in NUMERICAL:
-        rgsaddle.set_last_error("")
+        set_last_error("")
         try:
             rgsaddle.raise_status(code)
         except NumericalError as exc:
@@ -62,7 +63,7 @@ def test_value_and_numerical_and_runtime() -> None:
         else:
             raise AssertionError("NON_FINITE must be NumericalError")
     for code in RUNTIME:
-        rgsaddle.set_last_error("")
+        set_last_error("")
         try:
             rgsaddle.raise_status(code)
         except RuntimeError as exc:
@@ -72,7 +73,7 @@ def test_value_and_numerical_and_runtime() -> None:
 
 
 def test_last_error_is_the_message() -> None:
-    rgsaddle.set_last_error("singular update")
+    set_last_error("singular update")
     try:
         rgsaddle.raise_status(NON_FINITE)
     except NumericalError as exc:
@@ -83,7 +84,7 @@ def test_last_error_is_the_message() -> None:
 
 
 def test_surface_failed_without_a_python_error_is_runtime() -> None:
-    rgsaddle.set_last_error("callback failed")
+    set_last_error("callback failed")
     try:
         rgsaddle.raise_status(SURFACE_FAILED)
     except RuntimeError as exc:

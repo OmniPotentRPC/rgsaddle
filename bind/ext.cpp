@@ -6,20 +6,21 @@
  * @brief Nanobind frontend for the rgsaddle Python package.
  *
  * F1 FREE_THREADED via nanobind_add_module. F2 the only mutable slot
- * is the thread-local last-error string. F3 ClaimSlot and
- * SurfaceAdapter take rgbind::Claim. F4 the eval loop drops the GIL
- * before workers run. F5 Python callbacks go through rgbind::trampoline
- * and rows are grouped by rgbind::serialise_by_owner. F6 float64
- * C-contiguous arrays, noconvert on the way in, capsule copies on the
- * way out. F7 raise_status maps rgsaddle_status_t. F8 the schedule
- * does not depend on the worker count. F9 the link exports PyInit__core.
+ * is the thread-local last-error string. F3 ClaimSlot takes
+ * rgbind::Claim for the whole SurfaceAdapter call. F4 the test eval
+ * loop drops the GIL before workers run. F5 Python callbacks in that
+ * loop go through rgbind::trampoline and rows are grouped by
+ * rgbind::serialise_by_owner. F6 float64 C-contiguous arrays,
+ * noconvert on the way in, capsule copies on the way out. F7
+ * raise_status maps rgsaddle_status_t. F8 the schedule does not
+ * depend on the worker count. F9 the link exports PyInit__core.
  *
- * This module does not wrap band, minimum-mode, IRC, Sella, AutoNEB
- * or xts sessions. Those stay on the C ABI until the stencil owns them.
+ * SurfaceAdapter itself does not own threads. The stencil calls it
+ * from the stencil's workers. The fake eval loop, the claim probes,
+ * and the float echo live in the _testing submodule.
  */
 
 #include <rgsaddle.h>
-
 #include <rgsaddle/bind.h>
 
 #include <rgbind/rgbind.hpp>
@@ -77,6 +78,12 @@ namespace {
 
 thread_local std::string g_last_error;
 
+const char *rgsaddle_last_error() { return g_last_error.c_str(); }
+
+void rgsaddle_set_last_error(const char *text) {
+  g_last_error.assign(text == nullptr ? "" : text);
+}
+
 struct HoldGate {
   std::atomic<bool> release_flag{false};
   std::atomic<bool> held_flag{false};
@@ -88,6 +95,27 @@ struct HoldGate {
 
 struct ClaimSlot {
   rgbind::Busy busy;
+  // The published pointer is the only shared write. The Claim object
+  // itself is owned by the thread that stored it, so enter from
+  // several threads does not race on that object.
+  std::atomic<rgbind::Claim *> held{nullptr};
+
+  void enter() {
+    if (held.load(std::memory_order_acquire) != nullptr) {
+      throw rgbind::InUse("SurfaceAdapter");
+    }
+    auto *claim = new rgbind::Claim(busy.flag(), "SurfaceAdapter");
+    rgbind::Claim *expected = nullptr;
+    if (!held.compare_exchange_strong(expected, claim, std::memory_order_acq_rel, std::memory_order_acquire)) {
+      delete claim;
+      throw rgbind::InUse("SurfaceAdapter");
+    }
+  }
+
+  void exit() {
+    rgbind::Claim *claim = held.exchange(nullptr, std::memory_order_acq_rel);
+    delete claim;
+  }
 
   // F4: native hold, GIL released before the claim. F3: atomic claim.
   int work(int hold_ms) {
@@ -113,18 +141,101 @@ using IdArray = nb::ndarray<const std::int64_t, nb::ndim<1>, nb::c_contig, nb::d
 using OwnerArray = nb::ndarray<const std::uint64_t, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
 using FlagArray = nb::ndarray<const std::uint8_t, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
 using Matrix = nb::ndarray<const double, nb::ndim<2>, nb::c_contig, nb::device::cpu>;
+using Loose = nb::ndarray<nb::numpy, nb::device::cpu>;
 
 [[noreturn]] void shape_error(const char *name, const std::string &expected, const std::string &got) {
   const std::string msg = std::string(name) + ": expected shape " + expected + ", got " + got;
   throw nb::value_error(msg.c_str());
 }
 
-std::string vec1(std::size_t n) {
-  return "(" + std::to_string(n) + ",)";
+[[noreturn]] void dtype_error(const char *name) {
+  const std::string msg = std::string(name) + ": expected float64 C-contiguous";
+  throw nb::type_error(msg.c_str());
 }
+
+std::string vec1(std::size_t n) { return "(" + std::to_string(n) + ",)"; }
 
 std::string vec2(std::size_t rows, std::size_t cols) {
   return "(" + std::to_string(rows) + ", " + std::to_string(cols) + ")";
+}
+
+std::string shape_text(const Loose &arr) {
+  std::string text = "(";
+  for (std::size_t axis = 0; axis < arr.ndim(); ++axis) {
+    if (axis != 0) {
+      text += ", ";
+    }
+    text += std::to_string(arr.shape(axis));
+  }
+  if (arr.ndim() == 1) {
+    text += ",";
+  }
+  text += ")";
+  return text;
+}
+
+bool is_c_contiguous(const Loose &arr) {
+  std::int64_t expect = 1;
+  if (arr.stride_ptr() == nullptr) {
+    return true;
+  }
+  for (std::size_t axis = arr.ndim(); axis-- > 0;) {
+    const auto n = arr.shape(axis);
+    if (n > 1 && arr.stride(axis) != expect) {
+      return false;
+    }
+    if (n > 0) {
+      expect *= static_cast<std::int64_t>(n);
+    }
+  }
+  return true;
+}
+
+// NumPy's flags see Fortran order. A missing DLPack stride vector is defined
+// to mean C order, so the stride walk alone can accept a Fortran array.
+bool c_contiguous(nb::handle obj, const Loose &arr) {
+  nb::object flags = nb::getattr(obj, "flags", nb::handle());
+  if (flags.is_valid()) {
+    nb::object bit = nb::getattr(flags, "c_contiguous", nb::handle());
+    if (bit.is_valid()) {
+      return nb::cast<bool>(bit);
+    }
+  }
+  return is_c_contiguous(arr);
+}
+
+Loose loosen(nb::handle obj, const char *name) {
+  try {
+    return nb::cast<Loose>(obj);
+  } catch (const nb::cast_error &) {
+    dtype_error(name);
+  }
+}
+
+nb::ndarray<const double, nb::ndim<1>, nb::c_contig, nb::device::cpu> take_f64_1d(nb::handle obj,
+                                                                                    const char *name,
+                                                                                    std::size_t expect_n) {
+  const Loose loose = loosen(obj, name);
+  if (loose.dtype() != nb::dtype<double>() || !c_contiguous(obj, loose)) {
+    dtype_error(name);
+  }
+  if (loose.ndim() != 1 || static_cast<std::size_t>(loose.shape(0)) != expect_n) {
+    shape_error(name, vec1(expect_n), shape_text(loose));
+  }
+  return nb::cast<nb::ndarray<const double, nb::ndim<1>, nb::c_contig, nb::device::cpu>>(obj);
+}
+
+nb::ndarray<const double, nb::ndim<2>, nb::c_contig, nb::device::cpu>
+take_f64_2d(nb::handle obj, const char *name, std::size_t expect_rows, std::size_t expect_cols) {
+  const Loose loose = loosen(obj, name);
+  if (loose.dtype() != nb::dtype<double>() || !c_contiguous(obj, loose)) {
+    dtype_error(name);
+  }
+  if (loose.ndim() != 2 || static_cast<std::size_t>(loose.shape(0)) != expect_rows ||
+      static_cast<std::size_t>(loose.shape(1)) != expect_cols) {
+    shape_error(name, vec2(expect_rows, expect_cols), shape_text(loose));
+  }
+  return nb::cast<nb::ndarray<const double, nb::ndim<2>, nb::c_contig, nb::device::cpu>>(obj);
 }
 
 struct GroupWork {
@@ -142,21 +253,13 @@ struct EvalCall {
 
   void operator()() const {
     const std::size_t m = job->row_ids.size();
-    std::vector<std::int64_t> ids(m);
-    std::vector<double> rows(m * dof == 0 ? 1 : m * dof);
-    for (std::size_t k = 0; k < m; ++k) {
-      ids[k] = job->row_ids[k];
-      const std::size_t src = dest->at(ids[k]);
-      if (dof != 0) {
-        std::memcpy(rows.data() + k * dof, positions->data() + src * dof, dof * sizeof(double));
-      }
-    }
     auto *id_raw = new std::int64_t[m == 0 ? 1 : m];
     auto *x_raw = new double[m * dof == 0 ? 1 : m * dof];
-    if (m != 0) {
-      std::memcpy(id_raw, ids.data(), m * sizeof(std::int64_t));
+    for (std::size_t k = 0; k < m; ++k) {
+      id_raw[k] = job->row_ids[k];
+      const std::size_t src = dest->at(id_raw[k]);
       if (dof != 0) {
-        std::memcpy(x_raw, rows.data(), m * dof * sizeof(double));
+        std::memcpy(x_raw + k * dof, positions->data() + src * dof, dof * sizeof(double));
       }
     }
     nb::capsule id_owner(id_raw, [](void *ptr) noexcept { delete[] static_cast<std::int64_t *>(ptr); });
@@ -173,15 +276,8 @@ struct EvalCall {
     if (tup.size() != 2) {
       throw nb::value_error("eval callback must return (energies, gradients)");
     }
-    auto e = nb::cast<nb::ndarray<const double, nb::ndim<1>, nb::c_contig, nb::device::cpu>>(tup[0]);
-    auto g = nb::cast<nb::ndarray<const double, nb::ndim<2>, nb::c_contig, nb::device::cpu>>(tup[1]);
-    if (e.shape(0) != m) {
-      shape_error("energies", vec1(m), vec1(static_cast<std::size_t>(e.shape(0))));
-    }
-    if (g.shape(0) != m || g.shape(1) != dof) {
-      shape_error("gradients", vec2(m, dof),
-                  vec2(static_cast<std::size_t>(g.shape(0)), static_cast<std::size_t>(g.shape(1))));
-    }
+    auto e = take_f64_1d(tup[0], "energies", m);
+    auto g = take_f64_2d(tup[1], "gradients", m, dof);
     for (std::size_t k = 0; k < m; ++k) {
       const std::size_t dst = dest->at(job->row_ids[k]);
       energies[dst] = e(k);
@@ -191,6 +287,16 @@ struct EvalCall {
     }
   }
 };
+
+void note_signal(rgbind::CallContext &ctx) {
+  if (PyErr_CheckSignals() < 0) {
+    ctx.stop.store(true, std::memory_order_release);
+    if (!ctx.has_error()) {
+      nb::python_error err;
+      ctx.capture(err);
+    }
+  }
+}
 
 void run_jobs(nb::callable &callback, const std::vector<GroupWork> &jobs, const std::vector<double> &positions,
               std::size_t dof, const std::map<std::int64_t, std::size_t> &dest, double *energies, double *gradients,
@@ -234,28 +340,58 @@ void run_jobs(nb::callable &callback, const std::vector<GroupWork> &jobs, const 
   for (std::size_t i = 0; i < jobs.size(); ++i) {
     buckets[i % static_cast<std::size_t>(nworkers)].push_back(i);
   }
-  {
-    nb::gil_scoped_release rel;
-    std::vector<std::thread> pool;
-    pool.reserve(buckets.size());
+
+  std::atomic<int> remaining{0};
+  std::vector<std::thread> pool;
+  pool.reserve(buckets.size());
+  nb::gil_scoped_release rel;
+  try {
     for (std::size_t worker = 0; worker < buckets.size(); ++worker) {
       if (buckets[worker].empty()) {
         continue;
       }
-      pool.emplace_back([&, worker]() {
-        for (std::size_t index : buckets[worker]) {
-          one(jobs[index], false);
-        }
-      });
+      remaining.fetch_add(1, std::memory_order_relaxed);
+      try {
+        pool.emplace_back([&, worker]() {
+          for (std::size_t index : buckets[worker]) {
+            one(jobs[index], false);
+          }
+          remaining.fetch_sub(1, std::memory_order_release);
+        });
+      } catch (...) {
+        remaining.fetch_sub(1, std::memory_order_release);
+        throw;
+      }
     }
+  } catch (...) {
+    ctx.stop.store(true, std::memory_order_release);
     for (std::thread &worker : pool) {
+      if (worker.joinable()) {
+        worker.join();
+      }
+    }
+    throw;
+  }
+
+  while (remaining.load(std::memory_order_acquire) > 0) {
+    {
+      nb::gil_scoped_acquire gil;
+      note_signal(ctx);
+    }
+    if (remaining.load(std::memory_order_acquire) == 0) {
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  for (std::thread &worker : pool) {
+    if (worker.joinable()) {
       worker.join();
     }
   }
 }
 
-nb::tuple drive_eval(nb::callable callback, IdArray ids, Matrix x, OwnerArray owners, FlagArray reentrant,
-                     int threads, ClaimSlot &slot) {
+nb::tuple drive_eval(nb::callable callback, IdArray ids, Matrix x, OwnerArray owners, FlagArray reentrant, int threads,
+                     ClaimSlot &slot) {
   const std::size_t n = static_cast<std::size_t>(ids.shape(0));
   const std::size_t x_rows = static_cast<std::size_t>(x.shape(0));
   const std::size_t dof = static_cast<std::size_t>(x.shape(1));
@@ -308,7 +444,7 @@ nb::tuple drive_eval(nb::callable callback, IdArray ids, Matrix x, OwnerArray ow
   auto energies = std::vector<double>(n == 0 ? 1 : n, 0.0);
   auto gradients = std::vector<double>(n * dof == 0 ? 1 : n * dof, 0.0);
 
-  // F3: one adapter call at a time. The claim is an atomic flag, not a mutex.
+  // F3: one eval at a time. The claim is an atomic flag, not a mutex.
   rgbind::Claim claim(slot.busy.flag(), "SurfaceAdapter");
   rgbind::CallContext ctx;
   run_jobs(callback, jobs, positions, dof, dest, energies.data(), gradients.data(), threads, ctx);
@@ -376,44 +512,74 @@ bool raise_status(int code) {
 
 } // namespace
 
-extern "C" const char *rgsaddle_last_error(void) { return g_last_error.c_str(); }
-
-extern "C" void rgsaddle_set_last_error(const char *text) {
-  g_last_error.assign(text == nullptr ? "" : text);
-}
-
 NB_MODULE(_core, m) {
-  m.doc() = "rgsaddle nanobind surface: status mapping and the F5 eval loop.";
+  m.doc() = "rgsaddle nanobind surface: status mapping and the ASE image callback.";
   m.attr("__version__") = RGSADDLE_PY_VERSION;
   m.def("version", []() { return std::string(RGSADDLE_PY_VERSION); }, "Package version string.");
+  m.attr("RGSADDLE_FORCE_L2") = static_cast<int>(RGSADDLE_FORCE_L2);
+  m.attr("RGSADDLE_FORCE_LINF") = static_cast<int>(RGSADDLE_FORCE_LINF);
+  m.attr("RGSADDLE_FORCE_MAX_ATOM") = static_cast<int>(RGSADDLE_FORCE_MAX_ATOM);
+  m.attr("RGSADDLE_MINMODE_DIMER") = static_cast<int>(RGSADDLE_MINMODE_DIMER);
+  m.attr("RGSADDLE_MINMODE_LANCZOS") = static_cast<int>(RGSADDLE_MINMODE_LANCZOS);
+  m.attr("RGSADDLE_IRC_GS2") = static_cast<int>(RGSADDLE_IRC_GS2);
+  m.attr("RGSADDLE_IRC_MOROKUMA") = static_cast<int>(RGSADDLE_IRC_MOROKUMA);
   rgbind::install_policy(m);
 
-  nb::class_<HoldGate>(m, "HoldGate")
+  nb::class_<ClaimSlot>(m, "ClaimSlot")
+      .def(nb::init<>())
+      .def("__enter__",
+           [](ClaimSlot &slot) -> ClaimSlot & {
+             slot.enter();
+             return slot;
+           },
+           nb::rv_policy::reference, "Claim SurfaceAdapter until __exit__.")
+      .def(
+          "__exit__",
+          [](ClaimSlot &slot, nb::handle, nb::handle, nb::handle) {
+            slot.exit();
+            return false;
+          },
+          nb::arg("exc_type").none(), nb::arg("exc_value").none(), nb::arg("traceback").none(),
+          "Release the claim. Exceptions propagate.");
+
+  m.def("last_error", []() { return std::string(rgsaddle_last_error()); },
+        "Thread-local last-error text (F2, F7).");
+  m.def("raise_status", &raise_status, nb::arg("code"),
+        "Map an rgsaddle_status_t value (F7). True on OK. False is not used: "
+        "convergence is not a status code.");
+
+  // Test-only surface. stubgen skips a private submodule, so these
+  // names stay off the public stub.
+  nb::module_ testing = m.def_submodule("_testing", "Eval-loop probes. Not part of the public surface.");
+
+  nb::class_<HoldGate>(testing, "HoldGate")
       .def(nb::init<>())
       .def("release", &HoldGate::release, "Let the holding thread drop the claim.")
       .def("held", &HoldGate::held, "True once the holding thread owns the claim.");
 
-  nb::class_<ClaimSlot>(m, "ClaimSlot")
-      .def(nb::init<>())
-      .def("work", &ClaimSlot::work, nb::arg("hold_ms") = 0,
-           "Claim SurfaceAdapter, hold, and release (F3, F4).")
-      .def("hold_until", &ClaimSlot::hold_until, nb::arg("gate"),
-           "Claim and wait, with the GIL released, until gate.release().");
-
-  m.def("last_error", []() { return std::string(rgsaddle_last_error()); },
-        "Thread-local last-error text (F2, F7).");
-  m.def("set_last_error", [](const std::string &text) { rgsaddle_set_last_error(text.c_str()); },
-        nb::arg("text"), "Replace the thread-local last-error text.");
-  m.def("raise_status", &raise_status, nb::arg("code"),
-        "Map an rgsaddle_status_t value (F7). True on OK. False is not used: "
-        "convergence is not a status code.");
-  m.def("schedule_canonical", &schedule_canonical, nb::arg("ids").noconvert(), nb::arg("owners").noconvert(),
-        nb::arg("reentrant").noconvert(), nb::arg("threads"),
-        "Canonical F5 schedule. The worker count is not part of the text (F8).");
-  m.def("echo_f64", &rgbind::echo_f64, nb::arg("values").noconvert(),
-        "Byte-copy a float64 array. -0.0, NaN and subnormals pass through (F6).");
-  m.def("drive_eval", &drive_eval, nb::arg("callback"), nb::arg("ids").noconvert(), nb::arg("x").noconvert(),
-        nb::arg("owners").noconvert(), nb::arg("reentrant").noconvert(), nb::arg("threads"), nb::arg("slot"),
-        "Fake stencil eval loop. Groups rows with the F5 scheduler and calls "
-        "callback(ids, x) through the trampoline.");
+  testing.def(
+      "claim_work", [](ClaimSlot &slot, int hold_ms) { return slot.work(hold_ms); }, nb::arg("slot"),
+      nb::arg("hold_ms") = 0, "Claim SurfaceAdapter, hold, and release (F3, F4).");
+  testing.def(
+      "claim_hold_until", [](ClaimSlot &slot, HoldGate &gate) { slot.hold_until(gate); }, nb::arg("slot"),
+      nb::arg("gate"), "Claim and wait, with the GIL released, until gate.release().");
+  testing.def("set_last_error", [](const std::string &text) { rgsaddle_set_last_error(text.c_str()); },
+              nb::arg("text"), "Replace the thread-local last-error text.");
+  testing.def("schedule_canonical", &schedule_canonical, nb::arg("ids").noconvert(), nb::arg("owners").noconvert(),
+              nb::arg("reentrant").noconvert(), nb::arg("threads"),
+              "Canonical F5 schedule. The worker count is not part of the text (F8).");
+  testing.def("echo_f64", &rgbind::echo_f64, nb::arg("values").noconvert(),
+              "Byte-copy a float64 array. -0.0, NaN and subnormals pass through (F6).");
+  testing.def(
+      "drive_eval", &drive_eval,
+      nb::sig("def drive_eval(callback: collections.abc.Callable[[numpy.typing.NDArray[numpy.int64], "
+              "numpy.typing.NDArray[numpy.float64]], tuple[numpy.typing.NDArray[numpy.float64], "
+              "numpy.typing.NDArray[numpy.float64]]], ids: numpy.typing.NDArray[numpy.int64], x: "
+              "numpy.typing.NDArray[numpy.float64], owners: numpy.typing.NDArray[numpy.uint64], reentrant: "
+              "numpy.typing.NDArray[numpy.uint8], threads: int, slot: ClaimSlot) -> "
+              "tuple[numpy.typing.NDArray[numpy.float64], numpy.typing.NDArray[numpy.float64]]"),
+      nb::arg("callback"), nb::arg("ids").noconvert(), nb::arg("x").noconvert(), nb::arg("owners").noconvert(),
+      nb::arg("reentrant").noconvert(), nb::arg("threads"), nb::arg("slot"),
+      "Fake stencil eval loop. Groups rows with the F5 scheduler and calls "
+      "callback(ids, x) through the trampoline.");
 }

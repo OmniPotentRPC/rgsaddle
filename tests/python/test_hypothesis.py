@@ -10,7 +10,8 @@ from hypothesis import strategies as st
 
 import rgsaddle
 from rgsaddle import NumericalError
-from rgsaddle._core import ClaimSlot, drive_eval, echo_f64
+from rgsaddle._core import ClaimSlot
+from rgsaddle._core._testing import drive_eval, echo_f64, set_last_error
 
 VALUES = st.one_of(
     st.floats(allow_nan=False, allow_infinity=False, width=64),
@@ -61,7 +62,7 @@ def test_drive_eval_shape() -> None:
 @settings(max_examples=20)
 @given(code=st.integers(min_value=-20, max_value=20))
 def test_status_class(code: int) -> None:
-    rgsaddle.set_last_error("")
+    set_last_error("")
     if code == 0:
         assert rgsaddle.raise_status(code) is True
         return
