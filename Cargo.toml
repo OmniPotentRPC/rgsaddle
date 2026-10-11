@@ -42,6 +42,7 @@ linkcell = { version = "0.3.3", git = "https://github.com/d-SEAMS/linkcell", rev
 
 [dev-dependencies]
 approx = "0.5"
+sha2 = "0.10"
 
 # include/rgsaddle.h is the hand-written contract (surface request,
 # status enum, stepping semantics); cargo-c installs it as is instead
