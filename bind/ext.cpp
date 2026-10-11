@@ -6,7 +6,8 @@
  * @brief Nanobind frontend for the rgsaddle Python package.
  *
  * F1 FREE_THREADED via nanobind_add_module. F2 the only mutable slot
- * is the thread-local last-error string. F3 ClaimSlot takes
+ * is the thread-local last-error string, named with the rgsaddle_py_
+ * prefix and kept inside this translation unit. F3 ClaimSlot takes
  * rgbind::Claim for the whole SurfaceAdapter call. F4 the test eval
  * loop drops the GIL before workers run. F5 Python callbacks in that
  * loop go through rgbind::trampoline and rows are grouped by
@@ -21,7 +22,6 @@
  */
 
 #include <rgsaddle.h>
-#include <rgsaddle/bind.h>
 
 #include <rgbind/rgbind.hpp>
 
@@ -78,9 +78,9 @@ namespace {
 
 thread_local std::string g_last_error;
 
-const char *rgsaddle_last_error() { return g_last_error.c_str(); }
+const char *rgsaddle_py_last_error() { return g_last_error.c_str(); }
 
-void rgsaddle_set_last_error(const char *text) {
+void rgsaddle_py_set_last_error(const char *text) {
   g_last_error.assign(text == nullptr ? "" : text);
 }
 
@@ -497,11 +497,11 @@ std::string schedule_canonical(IdArray ids, OwnerArray owners, FlagArray reentra
 }
 
 bool raise_status(int code) {
-  std::string last = rgsaddle_last_error();
+  std::string last = rgsaddle_py_last_error();
   if (code != RGSADDLE_OK && last.empty()) {
     const char *name = rgsaddle_status_name(static_cast<rgsaddle_status_t>(code));
     if (name != nullptr && name[0] != '\0') {
-      rgsaddle_set_last_error(name);
+      rgsaddle_py_set_last_error(name);
       last = name;
     }
   }
@@ -542,7 +542,7 @@ NB_MODULE(_core, m) {
           nb::arg("exc_type").none(), nb::arg("exc_value").none(), nb::arg("traceback").none(),
           "Release the claim. Exceptions propagate.");
 
-  m.def("last_error", []() { return std::string(rgsaddle_last_error()); },
+  m.def("last_error", []() { return std::string(rgsaddle_py_last_error()); },
         "Thread-local last-error text (F2, F7).");
   m.def("raise_status", &raise_status, nb::arg("code"),
         "Map an rgsaddle_status_t value (F7). True on OK. False is not used: "
@@ -563,7 +563,7 @@ NB_MODULE(_core, m) {
   testing.def(
       "claim_hold_until", [](ClaimSlot &slot, HoldGate &gate) { slot.hold_until(gate); }, nb::arg("slot"),
       nb::arg("gate"), "Claim and wait, with the GIL released, until gate.release().");
-  testing.def("set_last_error", [](const std::string &text) { rgsaddle_set_last_error(text.c_str()); },
+  testing.def("set_last_error", [](const std::string &text) { rgsaddle_py_set_last_error(text.c_str()); },
               nb::arg("text"), "Replace the thread-local last-error text.");
   testing.def("schedule_canonical", &schedule_canonical, nb::arg("ids").noconvert(), nb::arg("owners").noconvert(),
               nb::arg("reentrant").noconvert(), nb::arg("threads"),
