@@ -2,22 +2,32 @@
 //!
 //! The merge tree is fixed from the dimension: leaves at
 //! [`RECURSION_THRESHOLD`], split at `n / 2`, siblings by `rayon::join`
-//! under feature `par`. Deflation is serial. Each Gu-Eisenstat secular
+//! under feature `par`. Both the leaf size and the split are part of
+//! the bit definition. Deflation is serial. Each Gu-Eisenstat secular
 //! root is one task. The update weights are recomputed by the Löwner
 //! formula, and `Q U` goes through [`crate::simd_gemm::gemm_nn`] on a
 //! fixed column partition.
 //!
-//! Leaves use Francis's implicit QL step (J. G. F. Francis, *Comput. J.*
-//! 4 (1962) 332-345, <https://doi.org/10.1093/comjnl/4.4.332>). Products
-//! accumulate with `f64::mul_add`. J. J. M. Cuppen, *Numer. Math.* 36 (1980)
-//! 177-195 (<https://doi.org/10.1007/BF01396757>). Ming Gu and Stanley
+//! Leaves are the implicit-shift QL iteration of EISPACK `tql2`
+//! (B. T. Smith, J. M. Boyle, J. J. Dongarra, B. S. Garbow, Y. Ikebe,
+//! V. C. Klema, and C. B. Moler, *Matrix Eigensystem Routines —
+//! EISPACK Guide*, Springer LNCS 6, 1976,
+//! <https://doi.org/10.1007/3-540-07546-1>), which is the QL algorithm
+//! of Bowdler, Martin, Reinsch, and Wilkinson, *Numer. Math.* 11 (1968)
+//! 293-306 (<https://doi.org/10.1007/BF02165223>). It is not Francis QR.
+//! A subdiagonal is negligible when adding it to the neighbouring
+//! diagonal magnitudes does not change that sum, the `tql2` test.
+//! Products accumulate with `f64::mul_add`. J. J. M. Cuppen,
+//! *Numer. Math.* 36 (1980) 177-195
+//! (<https://doi.org/10.1007/BF01396757>). Ming Gu and Stanley
 //! C. Eisenstat, *SIAM J. Matrix Anal. Appl.* 16 (1995) 172-191
 //! (<https://doi.org/10.1137/S0895479892241287>).
 
 use crate::error::SaddleError;
 use crate::simd_gemm::gemm_nn;
 
-/// Leaf size for the Francis QL step. Fixed. Not a hardware query.
+/// Leaf size for the EISPACK `tql2` QL step. Fixed. Part of the bit
+/// definition. Not a hardware query. The parent splits at `n / 2`.
 const RECURSION_THRESHOLD: usize = 128;
 
 struct Spectrum {
@@ -52,7 +62,7 @@ pub(crate) fn hypot(x: f64, y: f64) -> f64 {
 fn cuppen(diag: &[f64], off: &[f64]) -> Result<Spectrum, SaddleError> {
     let n = diag.len();
     if n <= RECURSION_THRESHOLD {
-        return francis(diag, off);
+        return tql2(diag, off);
     }
     let n1 = n / 2;
     let beta = off[n1 - 1];
@@ -204,7 +214,9 @@ fn merge_rank_one(
         crate::simd_gemm::for_tiles(tasks, move |tile| {
             let (start, count) = crate::simd_gemm::split_range(m, tasks, tile);
             for j in start..start + count {
-                let root = secular_root(d_ptr.get(), z_ptr.get(), m, rho, j);
+                // SAFETY: `d_act` and `z2` each have `m` entries, and
+                // `j` is inside this task's slice of `0..m`.
+                let root = unsafe { secular_root(d_ptr.get(), z_ptr.get(), m, rho, j) };
                 unsafe {
                     let slot = root_ptr.add(j * 2);
                     *slot = root.shift;
@@ -399,15 +411,25 @@ struct ShiftedRoot {
     mu: f64,
 }
 
-fn secular_root(delta: *const f64, z2: *const f64, n: usize, rho: f64, i: usize) -> ShiftedRoot {
-    // SAFETY: `delta` and `z2` each have `n` entries. `i < n` because
-    // the caller splits `0..n`.
+/// # Safety
+///
+/// `delta` and `z2` must each point at `n` initialized `f64`s, and
+/// `i` must be strictly less than `n`.
+unsafe fn secular_root(
+    delta: *const f64,
+    z2: *const f64,
+    n: usize,
+    rho: f64,
+    i: usize,
+) -> ShiftedRoot {
     let delta = unsafe { std::slice::from_raw_parts(delta, n) };
     let z2 = unsafe { std::slice::from_raw_parts(z2, n) };
+    // The bracket width follows the pole scale. An absolute floor of 1
+    // would open a unit-sized search on a matrix whose entries are
+    // much smaller than 1.
     let scale = delta
         .iter()
-        .fold(rho.abs(), |acc, value| acc.max(value.abs()))
-        .max(1.0);
+        .fold(rho.abs(), |acc, value| acc.max(value.abs()));
     let (shift, mut lo, mut hi) = if i + 1 < n {
         let left = delta[i];
         let right = delta[i + 1];
@@ -599,23 +621,31 @@ fn scale_pow2(mut value: f64, mut exp: i32) -> f64 {
     value
 }
 
-fn francis(diag: &[f64], off: &[f64]) -> Result<Spectrum, SaddleError> {
+fn tql2(diag: &[f64], off: &[f64]) -> Result<Spectrum, SaddleError> {
     #[cfg(target_arch = "x86_64")]
     if std::is_x86_feature_detected!("fma") {
         // SAFETY: this CPU has FMA. Rotations stay `mul_add` in the same order.
-        return unsafe { francis_fma(diag, off) };
+        return unsafe { tql2_fma(diag, off) };
     }
-    francis_body(diag, off)
+    tql2_body(diag, off)
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "fma")]
-unsafe fn francis_fma(diag: &[f64], off: &[f64]) -> Result<Spectrum, SaddleError> {
-    francis_body(diag, off)
+unsafe fn tql2_fma(diag: &[f64], off: &[f64]) -> Result<Spectrum, SaddleError> {
+    tql2_body(diag, off)
 }
 
+/// Implicit-shift QL, EISPACK `tql2`.
+///
+/// For each unreduced diagonal index `l`, the shift is Wilkinson's:
+/// the eigenvalue of the leading 2×2 that lies closer to `d[l]`.
+/// Givens rotations then chase that shift from the bottom of the
+/// unreduced block back up to `l`. A subdiagonal `f[m]` is accepted as
+/// zero when `f[m].abs() + |d[m]| + |d[m+1]|` does not change the sum
+/// of those two diagonal magnitudes.
 #[inline(always)]
-fn francis_body(diag: &[f64], off: &[f64]) -> Result<Spectrum, SaddleError> {
+fn tql2_body(diag: &[f64], off: &[f64]) -> Result<Spectrum, SaddleError> {
     let n = diag.len();
     if n == 0 {
         return Ok(Spectrum {
@@ -699,9 +729,9 @@ fn francis_body(diag: &[f64], off: &[f64]) -> Result<Spectrum, SaddleError> {
     }
     // A converged QL step has killed the subdiagonal to a few ulps.
     // Accepting `1e-6 · scale` left residuals above the dense tests.
-    let tol = 32.0 * f64::EPSILON * scale.max(1.0) * (n as f64);
+    let tol = 32.0 * f64::EPSILON * scale * (n as f64);
     if max_off > tol {
-        return Err(SaddleError::Solver("Francis QL did not converge".into()));
+        return Err(SaddleError::Solver("tql2 QL did not converge".into()));
     }
     let mut order: Vec<usize> = (0..n).collect();
     order.sort_by(|&i, &j| d[i].total_cmp(&d[j]).then(i.cmp(&j)));

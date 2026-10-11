@@ -34,7 +34,7 @@ fn supported_simd() -> Vec<&'static str> {
         if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
             paths.push("avx2");
         }
-        if std::is_x86_feature_detected!("avx512f") {
+        if std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("fma") {
             paths.push("avx512");
         }
     }
@@ -149,6 +149,7 @@ fn write_golden() {
             .to_string(),
         "# Band width 64, WY width 64, chase half-width 128. Those widths are part of the bits."
             .to_string(),
+        "# Partial spectra split where an off-diagonal is at most eps times the norm.".to_string(),
     ];
     for (n, op, k) in cases() {
         let a = matrix(n);
@@ -160,8 +161,26 @@ fn write_golden() {
     std::fs::write(&path, lines.join("\n") + "\n").unwrap();
 }
 
+fn log_simd_path() {
+    let requested = std::env::var("RGSADDLE_SIMD").unwrap_or_else(|_| "auto".to_string());
+    #[cfg(target_arch = "x86_64")]
+    let (avx512, avx2, fma) = (
+        std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("fma"),
+        std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma"),
+        std::is_x86_feature_detected!("fma"),
+    );
+    #[cfg(not(target_arch = "x86_64"))]
+    let (avx512, avx2, fma) = (false, false, false);
+    eprintln!(
+        "eigh-bits simd arch={} requested={requested} host_avx512={avx512} host_avx2={avx2} host_fma={fma} paths={:?}",
+        std::env::consts::ARCH,
+        supported_simd()
+    );
+}
+
 #[test]
 fn eigenpairs_match_the_golden_file_on_every_simd_path() {
+    log_simd_path();
     if std::env::var_os("RGSADDLE_WRITE_GOLDEN").is_some() {
         write_golden();
         return;

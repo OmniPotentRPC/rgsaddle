@@ -69,7 +69,11 @@ fn parse_override(value: &str) -> Result<u8, SaddleError> {
         "avx2" => KIND_AVX2,
         "avx512" => KIND_AVX512,
         "neon" => KIND_NEON,
-        _ => KIND_SCALAR,
+        _ => {
+            return Err(SaddleError::Solver(format!(
+                "RGSADDLE_SIMD={value} is not one of scalar, avx2, avx512, neon"
+            )));
+        }
     };
     if !kind_supported(kind) {
         return Err(SaddleError::Solver(
@@ -95,7 +99,10 @@ fn host_avx2() -> bool {
 fn host_avx512() -> bool {
     #[cfg(target_arch = "x86_64")]
     {
-        std::is_x86_feature_detected!("avx512f")
+        // The AVX-512 kernels and the band update enable `avx512f` and
+        // `fma` together. `avx512f` alone does not make scalar
+        // `mul_add` a hardware instruction, so both features are required.
+        std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("fma")
     }
     #[cfg(not(target_arch = "x86_64"))]
     {
@@ -149,6 +156,10 @@ pub(crate) fn bulge_uses_avx512() -> bool {
 }
 
 /// Fixed column-task count. A power of two, at most 32, from `n` only.
+///
+/// The count is part of the schedule, not of the bit definition: every
+/// task count writes the same partition of the columns, and a pool of
+/// one thread runs that partition serially.
 pub(crate) fn column_tasks(ncols: usize) -> usize {
     if ncols == 0 {
         return 0;
@@ -214,9 +225,11 @@ impl SyncPtr {
         self.0
     }
 
-    pub(crate) fn add(self, count: usize) -> *const f64 {
-        // SAFETY: the caller keeps `count` inside the allocation the
-        // pointer was derived from.
+    /// # Safety
+    ///
+    /// `count` elements from this pointer must lie inside the allocation
+    /// it was derived from, and the allocation must outlive the result.
+    pub(crate) unsafe fn add(self, count: usize) -> *const f64 {
         unsafe { self.0.add(count) }
     }
 }
@@ -235,9 +248,11 @@ impl SyncMut {
         Self(ptr)
     }
 
-    pub(crate) fn add(self, count: usize) -> *mut f64 {
-        // SAFETY: the caller keeps `count` inside the allocation the
-        // pointer was derived from.
+    /// # Safety
+    ///
+    /// `count` elements from this pointer must lie inside the allocation
+    /// it was derived from, and the allocation must outlive the result.
+    pub(crate) unsafe fn add(self, count: usize) -> *mut f64 {
         unsafe { self.0.add(count) }
     }
 }
@@ -267,7 +282,10 @@ pub(crate) unsafe fn gemm_nn(
     if m == 0 || n == 0 {
         return;
     }
-    if k > 0 && alpha != 0.0 && blocked_parallel(m, n, k, alpha, a, lda, b, ldb, beta, c, ldc) {
+    if k > 0
+        && alpha != 0.0
+        && tile_kernel::blocked_parallel(m, n, k, alpha, a, lda, b, ldb, beta, c, ldc)
+    {
         return;
     }
     let tasks = column_tasks(n).max(1);
@@ -282,22 +300,26 @@ pub(crate) unsafe fn gemm_nn(
         if count == 0 {
             return;
         }
-        tile_gemm(
-            m,
-            count,
-            k,
-            alpha,
-            a_ptr.get(),
-            1,
-            lda as isize,
-            b_ptr.add(col0 * ldb),
-            1,
-            ldb as isize,
-            beta,
-            c_ptr.add(col0 * ldc),
-            1,
-            ldc as isize,
-        );
+        // SAFETY: this task writes columns `[col0, col0 + count)` of C.
+        // A and B are immutable for the duration of the product.
+        unsafe {
+            tile_gemm(
+                m,
+                count,
+                k,
+                alpha,
+                a_ptr.get(),
+                1,
+                lda as isize,
+                b_ptr.add(col0 * ldb),
+                1,
+                ldb as isize,
+                beta,
+                c_ptr.add(col0 * ldc),
+                1,
+                ldc as isize,
+            );
+        }
     });
 }
 
@@ -305,8 +327,14 @@ pub(crate) unsafe fn gemm_nn(
 ///
 /// Row and column strides are in elements. The kernel is sequential.
 /// Callers that split columns own disjoint writes.
+///
+/// # Safety
+///
+/// `a` must address an `m` by `k` matrix with the given strides. `b`
+/// must address a `k` by `n` matrix. `c` must address an `m` by `n`
+/// matrix. Every indexed element must be inside its allocation.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn tile_gemm(
+pub(crate) unsafe fn tile_gemm(
     m: usize,
     n: usize,
     k: usize,
@@ -334,11 +362,11 @@ pub(crate) fn tile_gemm(
         match current_kind() {
             KIND_AVX512 if m >= 8 && cfg!(target_arch = "x86_64") => {
                 // SAFETY: `refresh_simd` rejects avx512 when the CPU
-                // lacks it, and the auto path checks `avx512f` first.
+                // lacks `avx512f` or `fma`.
                 // Rows are contiguous, so each 8-wide load stays inside
                 // the `m` rows of its column.
                 unsafe {
-                    gemm_avx512(
+                    tile_kernel::gemm_avx512(
                         m,
                         n,
                         k,
@@ -359,7 +387,7 @@ pub(crate) fn tile_gemm(
                 // SAFETY: same contract as the AVX-512 kernel, with
                 // 4-wide AVX2 loads.
                 unsafe {
-                    gemm_avx2(
+                    tile_kernel::gemm_avx2(
                         m,
                         n,
                         k,
@@ -380,7 +408,7 @@ pub(crate) fn tile_gemm(
                 // SAFETY: NEON is baseline on aarch64. Loads are 2-wide
                 // and stay inside the column.
                 unsafe {
-                    gemm_neon(
+                    tile_kernel::gemm_neon(
                         m,
                         n,
                         k,
@@ -509,106 +537,9 @@ fn pack_rows(
     }
 }
 
-include!("tile_kernel.rs");
-
-#[cfg(not(target_arch = "x86_64"))]
-unsafe fn gemm_avx512(
-    m: usize,
-    n: usize,
-    k: usize,
-    alpha: f64,
-    a: *const f64,
-    a_col_stride: isize,
-    b: *const f64,
-    b_row_stride: isize,
-    b_col_stride: isize,
-    beta: f64,
-    c: *mut f64,
-    c_col_stride: isize,
-) {
-    gemm_scalar(
-        m,
-        n,
-        k,
-        alpha,
-        a,
-        1,
-        a_col_stride,
-        b,
-        b_row_stride,
-        b_col_stride,
-        beta,
-        c,
-        1,
-        c_col_stride,
-    );
-}
-
-#[cfg(not(target_arch = "x86_64"))]
-unsafe fn gemm_avx2(
-    m: usize,
-    n: usize,
-    k: usize,
-    alpha: f64,
-    a: *const f64,
-    a_col_stride: isize,
-    b: *const f64,
-    b_row_stride: isize,
-    b_col_stride: isize,
-    beta: f64,
-    c: *mut f64,
-    c_col_stride: isize,
-) {
-    gemm_scalar(
-        m,
-        n,
-        k,
-        alpha,
-        a,
-        1,
-        a_col_stride,
-        b,
-        b_row_stride,
-        b_col_stride,
-        beta,
-        c,
-        1,
-        c_col_stride,
-    );
-}
-
-#[cfg(not(target_arch = "aarch64"))]
-unsafe fn gemm_neon(
-    m: usize,
-    n: usize,
-    k: usize,
-    alpha: f64,
-    a: *const f64,
-    a_col_stride: isize,
-    b: *const f64,
-    b_row_stride: isize,
-    b_col_stride: isize,
-    beta: f64,
-    c: *mut f64,
-    c_col_stride: isize,
-) {
-    gemm_scalar(
-        m,
-        n,
-        k,
-        alpha,
-        a,
-        1,
-        a_col_stride,
-        b,
-        b_row_stride,
-        b_col_stride,
-        beta,
-        c,
-        1,
-        c_col_stride,
-    );
-}
+#[path = "tile_kernel.rs"]
+mod tile_kernel;
+pub(crate) use tile_kernel::{axpy_add, sum_div_deriv_ordered, sum_div_ordered};
 
 /// Rank-1 `Q[:, cols] -= tau * v * (v · Q[:, cols])` on rows `[row, row + v.len())`.
 ///
@@ -627,12 +558,20 @@ pub(crate) fn apply_rank1(q: &mut [f64], n: usize, ncols: usize, row: usize, v: 
     // immutable. Rows outside `[row, row + len)` are not written.
     for_tiles(tasks, move |tile| {
         let (col0, count) = split_range(ncols, tasks, tile);
-        let base = q_ptr.add(col0 * n + row);
-        rank1_columns(base, n, count, v_ptr.get(), len, tau);
+        // SAFETY: this task owns columns `[col0, col0 + count)` and
+        // rows `[row, row + len)`. `v` has `len` entries.
+        unsafe {
+            let base = q_ptr.add(col0 * n + row);
+            rank1_columns(base, n, count, v_ptr.get(), len, tau);
+        }
     });
 }
 
-pub(crate) fn rank1_columns(
+/// # Safety
+///
+/// `q` must address `ncols` columns of `len` rows at stride `ld`. `v`
+/// must address `len` entries. Column writes in one call do not alias.
+pub(crate) unsafe fn rank1_columns(
     q: *mut f64,
     ld: usize,
     ncols: usize,
@@ -653,11 +592,14 @@ pub(crate) fn rank1_columns(
             // SAFETY: neon is baseline on aarch64.
             unsafe { rank1_neon(q, ld, ncols, v, len, tau) };
         }
-        _ => rank1_scalar(q, ld, ncols, v, len, tau),
+        _ => unsafe { rank1_scalar(q, ld, ncols, v, len, tau) },
     }
 }
 
-fn rank1_scalar(q: *mut f64, ld: usize, ncols: usize, v: *const f64, len: usize, tau: f64) {
+/// # Safety
+///
+/// Same contract as [`rank1_columns`].
+unsafe fn rank1_scalar(q: *mut f64, ld: usize, ncols: usize, v: *const f64, len: usize, tau: f64) {
     for col in 0..ncols {
         let mut dot = 0.0;
         for i in 0..len {
@@ -714,7 +656,7 @@ unsafe fn rank1_avx512(q: *mut f64, ld: usize, ncols: usize, v: *const f64, len:
             _mm512_storeu_pd(dots.as_mut_ptr().add(8), dot1);
             for lane in 0..16 {
                 let scale = tau * dots[lane];
-                axpy_sub_avx512(q.add((col + lane) * ld), v, len, scale);
+                tile_kernel::axpy_sub_avx512(q.add((col + lane) * ld), v, len, scale);
             }
             col += 16;
         }
@@ -730,12 +672,12 @@ unsafe fn rank1_avx512(q: *mut f64, ld: usize, ncols: usize, v: *const f64, len:
             _mm512_storeu_pd(dots.as_mut_ptr(), dot);
             for lane in 0..8 {
                 let scale = tau * dots[lane];
-                axpy_sub_avx512(q.add((col + lane) * ld), v, len, scale);
+                tile_kernel::axpy_sub_avx512(q.add((col + lane) * ld), v, len, scale);
             }
             col += 8;
         }
         if col < ncols {
-            rank1_scalar(q.add(col * ld), ld, ncols - col, v, len, tau);
+            unsafe { rank1_scalar(q.add(col * ld), ld, ncols - col, v, len, tau) };
         }
     }
 }
@@ -762,12 +704,12 @@ unsafe fn rank1_avx2(q: *mut f64, ld: usize, ncols: usize, v: *const f64, len: u
             _mm256_storeu_pd(dots.as_mut_ptr(), dot);
             for lane in 0..4 {
                 let scale = tau * dots[lane];
-                axpy_sub_avx2(q.add((col + lane) * ld), v, len, scale);
+                tile_kernel::axpy_sub_avx2(q.add((col + lane) * ld), v, len, scale);
             }
             col += 4;
         }
         if col < ncols {
-            rank1_scalar(q.add(col * ld), ld, ncols - col, v, len, tau);
+            unsafe { rank1_scalar(q.add(col * ld), ld, ncols - col, v, len, tau) };
         }
     }
 }
@@ -792,29 +734,29 @@ unsafe fn rank1_neon(q: *mut f64, ld: usize, ncols: usize, v: *const f64, len: u
             vst1q_f64(dots.as_mut_ptr(), dot);
             for lane in 0..2 {
                 let scale = tau * dots[lane];
-                axpy_sub_neon(q.add((col + lane) * ld), v, len, scale);
+                tile_kernel::axpy_sub_neon(q.add((col + lane) * ld), v, len, scale);
             }
             col += 2;
         }
         if col < ncols {
-            rank1_scalar(q.add(col * ld), ld, ncols - col, v, len, tau);
+            unsafe { rank1_scalar(q.add(col * ld), ld, ncols - col, v, len, tau) };
         }
     }
 }
 
 #[cfg(not(target_arch = "x86_64"))]
 unsafe fn rank1_avx512(q: *mut f64, ld: usize, ncols: usize, v: *const f64, len: usize, tau: f64) {
-    rank1_scalar(q, ld, ncols, v, len, tau);
+    unsafe { rank1_scalar(q, ld, ncols, v, len, tau) };
 }
 
 #[cfg(not(target_arch = "x86_64"))]
 unsafe fn rank1_avx2(q: *mut f64, ld: usize, ncols: usize, v: *const f64, len: usize, tau: f64) {
-    rank1_scalar(q, ld, ncols, v, len, tau);
+    unsafe { rank1_scalar(q, ld, ncols, v, len, tau) };
 }
 
 #[cfg(not(target_arch = "aarch64"))]
 unsafe fn rank1_neon(q: *mut f64, ld: usize, ncols: usize, v: *const f64, len: usize, tau: f64) {
-    rank1_scalar(q, ld, ncols, v, len, tau);
+    unsafe { rank1_scalar(q, ld, ncols, v, len, tau) };
 }
 
 #[cfg(test)]
@@ -890,6 +832,54 @@ mod tests {
         assert_eq!(got_deriv.to_bits(), deriv.to_bits());
     }
 
+    /// Times the back-transform shape. `m = 178` leaves two rows after
+    /// the 16-row panels; `m = 176` does not. The print is the measurement.
+    #[test]
+    #[ignore = "times the leftover-row GEMM tail"]
+    fn leftover_row_gemm_throughput() {
+        refresh_simd().ok();
+        let n = 64usize;
+        let k = 64usize;
+        let reps = 4000usize;
+        for m in [64usize, 176, 178] {
+            let a = vec![0.25; m * k];
+            let b = vec![0.5; k * n];
+            let mut c = vec![0.0; m * n];
+            let start = std::time::Instant::now();
+            for _ in 0..reps {
+                // SAFETY: the three buffers match `m`, `n`, and `k`.
+                unsafe {
+                    gemm_nn(
+                        m,
+                        n,
+                        k,
+                        1.0,
+                        a.as_ptr(),
+                        m,
+                        b.as_ptr(),
+                        k,
+                        0.0,
+                        c.as_mut_ptr(),
+                        m,
+                    );
+                }
+            }
+            let seconds = start.elapsed().as_secs_f64();
+            let flops = 2.0 * (m * n * k * reps) as f64;
+            eprintln!(
+                "leftover-row gemm m={m} n={n} k={k} reps={reps} seconds={seconds:.6} gflops={:.2}",
+                flops / seconds / 1.0e9
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_simd_override_is_an_error() {
+        let err = parse_override("avx").expect_err("unknown name");
+        let message = err.to_string();
+        assert!(message.contains("RGSADDLE_SIMD=avx"), "{message}");
+    }
+
     fn supported_kinds() -> Vec<u8> {
         let mut kinds = vec![KIND_SCALAR];
         if host_avx2() {
@@ -916,21 +906,25 @@ mod tests {
         c: &mut [f64],
     ) {
         SIMD_KIND.store(kind, Ordering::Release);
-        tile_gemm(
-            m,
-            n,
-            k,
-            alpha,
-            a.as_ptr(),
-            1,
-            m as isize,
-            b.as_ptr(),
-            1,
-            k as isize,
-            beta,
-            c.as_mut_ptr(),
-            1,
-            m as isize,
-        );
+        // SAFETY: `a`, `b`, and `c` are contiguous column-major buffers
+        // sized for this product.
+        unsafe {
+            tile_gemm(
+                m,
+                n,
+                k,
+                alpha,
+                a.as_ptr(),
+                1,
+                m as isize,
+                b.as_ptr(),
+                1,
+                k as isize,
+                beta,
+                c.as_mut_ptr(),
+                1,
+                m as isize,
+            );
+        }
     }
 }

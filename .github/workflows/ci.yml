@@ -56,6 +56,14 @@ jobs:
         run: cargo test --release --no-default-features -- --test-threads=1
       - name: Release tests with par
         run: cargo test --release --features par -- --test-threads=1
+
+  sparse-hessian-scaling:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Vacancy-cell colour scaling
+        run: cargo test --release --features par --lib colour_block_strong_scaling_on_vacancy_cells -- --ignored --test-threads=1
       - name: Nehalem, no AVX and no FMA
         run: |
           set -euo pipefail

@@ -67,7 +67,11 @@ pub use tangent::TangentKind;
 pub mod cell_log;
 pub mod constraints;
 mod cuppen;
+#[cfg(feature = "bench")]
+#[doc(hidden)]
 pub mod dense_eigh;
+#[cfg(not(feature = "bench"))]
+pub(crate) mod dense_eigh;
 pub mod eigensolve;
 pub mod force;
 pub mod force_match;

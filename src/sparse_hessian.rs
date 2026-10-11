@@ -2728,6 +2728,7 @@ mod tests {
 
     #[test]
     #[cfg(feature = "par")]
+    #[ignore = "vacancy-cell colouring is the long strong-scaling check; the sparse-hessian-scaling job runs it"]
     fn colour_block_strong_scaling_on_vacancy_cells() {
         let systems = [
             (14usize, "fcc_vacancy_10975_shifted_force"),

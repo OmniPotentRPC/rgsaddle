@@ -18,6 +18,8 @@ default = []
 capi = []
 # Cyclic Jacobi dense eigensolver, kept for comparison.
 jacobi = []
+# Exposes `dense_eigh` to benches. Not a public API.
+bench = []
 # Rayon for rgmin and for the fixed-partition dense eigensolver.
 # Without it the dense solver runs the same tiles on one thread.
 par = ["rgmin/par"]
@@ -90,4 +92,4 @@ required-features = ["jacobi"]
 [[bench]]
 name = "eigh_scale"
 harness = false
-required-features = ["par", "faer-unpinned"]
+required-features = ["par", "faer-unpinned", "bench"]

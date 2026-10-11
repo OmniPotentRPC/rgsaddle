@@ -1,11 +1,85 @@
-// Register-tiled kernels for [`crate::simd_gemm`].
-//
-// Included into that module so the pack buffer and the stores stay in
-// scope. Each accumulator walks `k` from `0` upward as
-// `acc = fma(a, b, acc)`. Columns in one kernel are independent, so a
-// wider register tile matches the scalar `f64::mul_add` chain.
-// Each B column is its own pointer, advanced by `b_row_stride`. One
-// shared index would chain the column addresses and stall the FMAs.
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::needless_range_loop)]
+#![allow(clippy::ptr_offset_with_cast)]
+#![allow(clippy::identity_op)]
+#![allow(clippy::erasing_op)]
+#![allow(unused_unsafe)]
+
+//! Register-tiled kernels.
+//!
+//! Each accumulator walks `k` from `0` upward as `acc = fma(a, b, acc)`.
+//! Columns in one kernel are independent, so a wider register tile matches
+//! the scalar `f64::mul_add` chain. Each B column is its own pointer,
+//! advanced by `b_row_stride`. The column updates are the `fma_col` macros
+//! so every unrolled kernel uses the same association.
+
+#[cfg(target_arch = "aarch64")]
+use super::KIND_NEON;
+#[cfg(target_arch = "x86_64")]
+use super::{KIND_AVX2, KIND_AVX512};
+use super::{
+    SyncMut, SyncPtr, column_tasks, current_kind, for_tiles, gemm_scalar, pack_rows, split_range,
+    tile_gemm, with_pack,
+};
+
+/// One column of a two-row panel: broadcast B, advance that column pointer,
+/// then `acc = fma(g, b, acc)` on each row group, in that order.
+#[cfg(target_arch = "x86_64")]
+macro_rules! fma_col_pair {
+    ($broadcast:path, $fma:path, $g0:ident, $g1:ident, $stride:expr, $($bp:ident, $lo:ident, $hi:ident),+ $(,)?) => {
+        $(
+            {
+                let bv = $broadcast(*$bp);
+                $bp = $bp.offset($stride);
+                $lo = $fma($g0, bv, $lo);
+                $hi = $fma($g1, bv, $hi);
+            }
+        )+
+    };
+}
+
+/// One column of a single-row panel. Same association as [`fma_col_pair`].
+#[cfg(target_arch = "x86_64")]
+macro_rules! fma_col {
+    ($broadcast:path, $fma:path, $g0:ident, $stride:expr, $($bp:ident, $acc:ident),+ $(,)?) => {
+        $(
+            {
+                let bv = $broadcast(*$bp);
+                $bp = $bp.offset($stride);
+                $acc = $fma($g0, bv, $acc);
+            }
+        )+
+    };
+}
+
+/// NEON `vfmaq_f64(acc, a, b)` is `acc + a * b`, the same product as
+/// `fma(a, b, acc)` with the accumulator written first.
+#[cfg(target_arch = "aarch64")]
+macro_rules! fma_col_pair_neon {
+    ($g0:ident, $g1:ident, $stride:expr, $($bp:ident, $lo:ident, $hi:ident),+ $(,)?) => {
+        $(
+            {
+                let bv = vdupq_n_f64(*$bp);
+                $bp = $bp.offset($stride);
+                $lo = vfmaq_f64($lo, $g0, bv);
+                $hi = vfmaq_f64($hi, $g1, bv);
+            }
+        )+
+    };
+}
+
+#[cfg(target_arch = "aarch64")]
+macro_rules! fma_col_neon {
+    ($g0:ident, $stride:expr, $($bp:ident, $acc:ident),+ $(,)?) => {
+        $(
+            {
+                let bv = vdupq_n_f64(*$bp);
+                $bp = $bp.offset($stride);
+                $acc = vfmaq_f64($acc, $g0, bv);
+            }
+        )+
+    };
+}
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f")]
@@ -115,38 +189,37 @@ unsafe fn kernel512_16x8(
             let g0 = _mm512_loadu_pd(ap);
             let g1 = _mm512_loadu_pd(ap.add(8));
             ap = ap.add(16);
-            let bv_0 = _mm512_set1_pd(*bp0);
-            bp0 = bp0.offset(b_row_stride);
-            a_0_0 = _mm512_fmadd_pd(g0, bv_0, a_0_0);
-            a_0_1 = _mm512_fmadd_pd(g1, bv_0, a_0_1);
-            let bv_1 = _mm512_set1_pd(*bp1);
-            bp1 = bp1.offset(b_row_stride);
-            a_1_0 = _mm512_fmadd_pd(g0, bv_1, a_1_0);
-            a_1_1 = _mm512_fmadd_pd(g1, bv_1, a_1_1);
-            let bv_2 = _mm512_set1_pd(*bp2);
-            bp2 = bp2.offset(b_row_stride);
-            a_2_0 = _mm512_fmadd_pd(g0, bv_2, a_2_0);
-            a_2_1 = _mm512_fmadd_pd(g1, bv_2, a_2_1);
-            let bv_3 = _mm512_set1_pd(*bp3);
-            bp3 = bp3.offset(b_row_stride);
-            a_3_0 = _mm512_fmadd_pd(g0, bv_3, a_3_0);
-            a_3_1 = _mm512_fmadd_pd(g1, bv_3, a_3_1);
-            let bv_4 = _mm512_set1_pd(*bp4);
-            bp4 = bp4.offset(b_row_stride);
-            a_4_0 = _mm512_fmadd_pd(g0, bv_4, a_4_0);
-            a_4_1 = _mm512_fmadd_pd(g1, bv_4, a_4_1);
-            let bv_5 = _mm512_set1_pd(*bp5);
-            bp5 = bp5.offset(b_row_stride);
-            a_5_0 = _mm512_fmadd_pd(g0, bv_5, a_5_0);
-            a_5_1 = _mm512_fmadd_pd(g1, bv_5, a_5_1);
-            let bv_6 = _mm512_set1_pd(*bp6);
-            bp6 = bp6.offset(b_row_stride);
-            a_6_0 = _mm512_fmadd_pd(g0, bv_6, a_6_0);
-            a_6_1 = _mm512_fmadd_pd(g1, bv_6, a_6_1);
-            let bv_7 = _mm512_set1_pd(*bp7);
-            bp7 = bp7.offset(b_row_stride);
-            a_7_0 = _mm512_fmadd_pd(g0, bv_7, a_7_0);
-            a_7_1 = _mm512_fmadd_pd(g1, bv_7, a_7_1);
+            fma_col_pair!(
+                _mm512_set1_pd,
+                _mm512_fmadd_pd,
+                g0,
+                g1,
+                b_row_stride,
+                bp0,
+                a_0_0,
+                a_0_1,
+                bp1,
+                a_1_0,
+                a_1_1,
+                bp2,
+                a_2_0,
+                a_2_1,
+                bp3,
+                a_3_0,
+                a_3_1,
+                bp4,
+                a_4_0,
+                a_4_1,
+                bp5,
+                a_5_0,
+                a_5_1,
+                bp6,
+                a_6_0,
+                a_6_1,
+                bp7,
+                a_7_0,
+                a_7_1,
+            );
         }
         let slot_0 = c.offset(c_col_stride * 0);
         store512(slot_0, a_0_0, alpha_v, beta_v, beta);
@@ -208,22 +281,25 @@ unsafe fn kernel512_16x4(
             let g0 = _mm512_loadu_pd(ap);
             let g1 = _mm512_loadu_pd(ap.add(8));
             ap = ap.add(16);
-            let bv_0 = _mm512_set1_pd(*bp0);
-            bp0 = bp0.offset(b_row_stride);
-            a_0_0 = _mm512_fmadd_pd(g0, bv_0, a_0_0);
-            a_0_1 = _mm512_fmadd_pd(g1, bv_0, a_0_1);
-            let bv_1 = _mm512_set1_pd(*bp1);
-            bp1 = bp1.offset(b_row_stride);
-            a_1_0 = _mm512_fmadd_pd(g0, bv_1, a_1_0);
-            a_1_1 = _mm512_fmadd_pd(g1, bv_1, a_1_1);
-            let bv_2 = _mm512_set1_pd(*bp2);
-            bp2 = bp2.offset(b_row_stride);
-            a_2_0 = _mm512_fmadd_pd(g0, bv_2, a_2_0);
-            a_2_1 = _mm512_fmadd_pd(g1, bv_2, a_2_1);
-            let bv_3 = _mm512_set1_pd(*bp3);
-            bp3 = bp3.offset(b_row_stride);
-            a_3_0 = _mm512_fmadd_pd(g0, bv_3, a_3_0);
-            a_3_1 = _mm512_fmadd_pd(g1, bv_3, a_3_1);
+            fma_col_pair!(
+                _mm512_set1_pd,
+                _mm512_fmadd_pd,
+                g0,
+                g1,
+                b_row_stride,
+                bp0,
+                a_0_0,
+                a_0_1,
+                bp1,
+                a_1_0,
+                a_1_1,
+                bp2,
+                a_2_0,
+                a_2_1,
+                bp3,
+                a_3_0,
+                a_3_1,
+            );
         }
         let slot_0 = c.offset(c_col_stride * 0);
         store512(slot_0, a_0_0, alpha_v, beta_v, beta);
@@ -308,30 +384,28 @@ unsafe fn kernel512_8x8(
         for _p in 0..k {
             let g0 = _mm512_loadu_pd(ap);
             ap = ap.add(8);
-            let bv_0 = _mm512_set1_pd(*bp0);
-            bp0 = bp0.offset(b_row_stride);
-            a_0_0 = _mm512_fmadd_pd(g0, bv_0, a_0_0);
-            let bv_1 = _mm512_set1_pd(*bp1);
-            bp1 = bp1.offset(b_row_stride);
-            a_1_0 = _mm512_fmadd_pd(g0, bv_1, a_1_0);
-            let bv_2 = _mm512_set1_pd(*bp2);
-            bp2 = bp2.offset(b_row_stride);
-            a_2_0 = _mm512_fmadd_pd(g0, bv_2, a_2_0);
-            let bv_3 = _mm512_set1_pd(*bp3);
-            bp3 = bp3.offset(b_row_stride);
-            a_3_0 = _mm512_fmadd_pd(g0, bv_3, a_3_0);
-            let bv_4 = _mm512_set1_pd(*bp4);
-            bp4 = bp4.offset(b_row_stride);
-            a_4_0 = _mm512_fmadd_pd(g0, bv_4, a_4_0);
-            let bv_5 = _mm512_set1_pd(*bp5);
-            bp5 = bp5.offset(b_row_stride);
-            a_5_0 = _mm512_fmadd_pd(g0, bv_5, a_5_0);
-            let bv_6 = _mm512_set1_pd(*bp6);
-            bp6 = bp6.offset(b_row_stride);
-            a_6_0 = _mm512_fmadd_pd(g0, bv_6, a_6_0);
-            let bv_7 = _mm512_set1_pd(*bp7);
-            bp7 = bp7.offset(b_row_stride);
-            a_7_0 = _mm512_fmadd_pd(g0, bv_7, a_7_0);
+            fma_col!(
+                _mm512_set1_pd,
+                _mm512_fmadd_pd,
+                g0,
+                b_row_stride,
+                bp0,
+                a_0_0,
+                bp1,
+                a_1_0,
+                bp2,
+                a_2_0,
+                bp3,
+                a_3_0,
+                bp4,
+                a_4_0,
+                bp5,
+                a_5_0,
+                bp6,
+                a_6_0,
+                bp7,
+                a_7_0,
+            );
         }
         let slot_0 = c.offset(c_col_stride * 0);
         store512(slot_0, a_0_0, alpha_v, beta_v, beta);
@@ -515,7 +589,7 @@ fn call_apply512(
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f")]
-unsafe fn gemm_avx512(
+pub(super) unsafe fn gemm_avx512(
     m: usize,
     n: usize,
     k: usize,
@@ -1001,7 +1075,7 @@ fn call_apply256(
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
-unsafe fn gemm_avx2(
+pub(super) unsafe fn gemm_avx2(
     m: usize,
     n: usize,
     k: usize,
@@ -1174,22 +1248,23 @@ unsafe fn kernel_neon_4x4(
             let g0 = vld1q_f64(ap);
             let g1 = vld1q_f64(ap.add(2));
             ap = ap.add(4);
-            let bv_0 = vdupq_n_f64(*bp0);
-            bp0 = bp0.offset(b_row_stride);
-            a_0_0 = vfmaq_f64(a_0_0, g0, bv_0);
-            a_0_1 = vfmaq_f64(a_0_1, g1, bv_0);
-            let bv_1 = vdupq_n_f64(*bp1);
-            bp1 = bp1.offset(b_row_stride);
-            a_1_0 = vfmaq_f64(a_1_0, g0, bv_1);
-            a_1_1 = vfmaq_f64(a_1_1, g1, bv_1);
-            let bv_2 = vdupq_n_f64(*bp2);
-            bp2 = bp2.offset(b_row_stride);
-            a_2_0 = vfmaq_f64(a_2_0, g0, bv_2);
-            a_2_1 = vfmaq_f64(a_2_1, g1, bv_2);
-            let bv_3 = vdupq_n_f64(*bp3);
-            bp3 = bp3.offset(b_row_stride);
-            a_3_0 = vfmaq_f64(a_3_0, g0, bv_3);
-            a_3_1 = vfmaq_f64(a_3_1, g1, bv_3);
+            fma_col_pair_neon!(
+                g0,
+                g1,
+                b_row_stride,
+                bp0,
+                a_0_0,
+                a_0_1,
+                bp1,
+                a_1_0,
+                a_1_1,
+                bp2,
+                a_2_0,
+                a_2_1,
+                bp3,
+                a_3_0,
+                a_3_1,
+            );
         }
         let slot_0 = c.offset(c_col_stride * 0);
         store_neon(slot_0, a_0_0, alpha_v, beta_v, beta);
@@ -1266,18 +1341,18 @@ unsafe fn kernel_neon_2x4(
         for _p in 0..k {
             let g0 = vld1q_f64(ap);
             ap = ap.add(2);
-            let bv_0 = vdupq_n_f64(*bp0);
-            bp0 = bp0.offset(b_row_stride);
-            a_0_0 = vfmaq_f64(a_0_0, g0, bv_0);
-            let bv_1 = vdupq_n_f64(*bp1);
-            bp1 = bp1.offset(b_row_stride);
-            a_1_0 = vfmaq_f64(a_1_0, g0, bv_1);
-            let bv_2 = vdupq_n_f64(*bp2);
-            bp2 = bp2.offset(b_row_stride);
-            a_2_0 = vfmaq_f64(a_2_0, g0, bv_2);
-            let bv_3 = vdupq_n_f64(*bp3);
-            bp3 = bp3.offset(b_row_stride);
-            a_3_0 = vfmaq_f64(a_3_0, g0, bv_3);
+            fma_col_neon!(
+                g0,
+                b_row_stride,
+                bp0,
+                a_0_0,
+                bp1,
+                a_1_0,
+                bp2,
+                a_2_0,
+                bp3,
+                a_3_0
+            );
         }
         let slot_0 = c.offset(c_col_stride * 0);
         store_neon(slot_0, a_0_0, alpha_v, beta_v, beta);
@@ -1437,7 +1512,7 @@ fn call_apply_neon(
 
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
-unsafe fn gemm_neon(
+pub(super) unsafe fn gemm_neon(
     m: usize,
     n: usize,
     k: usize,
@@ -1580,7 +1655,7 @@ unsafe fn gemm_parallel_neon(
 /// Pack once per row panel and split columns on the fixed task grid.
 ///
 /// Returns false when this build has no vector kernel for `m`.
-fn blocked_parallel(
+pub(super) fn blocked_parallel(
     m: usize,
     n: usize,
     k: usize,
@@ -1680,7 +1755,7 @@ unsafe fn axpy_add_avx512(y: *mut f64, x: *const f64, n: usize, alpha: f64) {
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f")]
-unsafe fn axpy_sub_avx512(y: *mut f64, x: *const f64, n: usize, alpha: f64) {
+pub(super) unsafe fn axpy_sub_avx512(y: *mut f64, x: *const f64, n: usize, alpha: f64) {
     use std::arch::x86_64::{_mm512_fnmadd_pd, _mm512_loadu_pd, _mm512_set1_pd, _mm512_storeu_pd};
     unsafe {
         let scale = _mm512_set1_pd(alpha);
@@ -1720,7 +1795,7 @@ unsafe fn axpy_add_avx2(y: *mut f64, x: *const f64, n: usize, alpha: f64) {
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
-unsafe fn axpy_sub_avx2(y: *mut f64, x: *const f64, n: usize, alpha: f64) {
+pub(super) unsafe fn axpy_sub_avx2(y: *mut f64, x: *const f64, n: usize, alpha: f64) {
     use std::arch::x86_64::{_mm256_fnmadd_pd, _mm256_loadu_pd, _mm256_set1_pd, _mm256_storeu_pd};
     unsafe {
         let scale = _mm256_set1_pd(alpha);
@@ -1760,7 +1835,7 @@ unsafe fn axpy_add_neon(y: *mut f64, x: *const f64, n: usize, alpha: f64) {
 
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
-unsafe fn axpy_sub_neon(y: *mut f64, x: *const f64, n: usize, alpha: f64) {
+pub(super) unsafe fn axpy_sub_neon(y: *mut f64, x: *const f64, n: usize, alpha: f64) {
     use std::arch::aarch64::{vdupq_n_f64, vfmsq_f64, vld1q_f64, vst1q_f64};
     unsafe {
         let scale = vdupq_n_f64(alpha);
@@ -2088,4 +2163,103 @@ unsafe fn sum_div_deriv_neon(
         }
         i
     }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+pub(super) unsafe fn gemm_avx512(
+    m: usize,
+    n: usize,
+    k: usize,
+    alpha: f64,
+    a: *const f64,
+    a_col_stride: isize,
+    b: *const f64,
+    b_row_stride: isize,
+    b_col_stride: isize,
+    beta: f64,
+    c: *mut f64,
+    c_col_stride: isize,
+) {
+    gemm_scalar(
+        m,
+        n,
+        k,
+        alpha,
+        a,
+        1,
+        a_col_stride,
+        b,
+        b_row_stride,
+        b_col_stride,
+        beta,
+        c,
+        1,
+        c_col_stride,
+    );
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+pub(super) unsafe fn gemm_avx2(
+    m: usize,
+    n: usize,
+    k: usize,
+    alpha: f64,
+    a: *const f64,
+    a_col_stride: isize,
+    b: *const f64,
+    b_row_stride: isize,
+    b_col_stride: isize,
+    beta: f64,
+    c: *mut f64,
+    c_col_stride: isize,
+) {
+    gemm_scalar(
+        m,
+        n,
+        k,
+        alpha,
+        a,
+        1,
+        a_col_stride,
+        b,
+        b_row_stride,
+        b_col_stride,
+        beta,
+        c,
+        1,
+        c_col_stride,
+    );
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+pub(super) unsafe fn gemm_neon(
+    m: usize,
+    n: usize,
+    k: usize,
+    alpha: f64,
+    a: *const f64,
+    a_col_stride: isize,
+    b: *const f64,
+    b_row_stride: isize,
+    b_col_stride: isize,
+    beta: f64,
+    c: *mut f64,
+    c_col_stride: isize,
+) {
+    gemm_scalar(
+        m,
+        n,
+        k,
+        alpha,
+        a,
+        1,
+        a_col_stride,
+        b,
+        b_row_stride,
+        b_col_stride,
+        beta,
+        c,
+        1,
+        c_col_stride,
+    );
 }

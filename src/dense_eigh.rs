@@ -15,22 +15,37 @@
 //! predicted windows stay disjoint. The task id is the sweep index and
 //! the step, and reflectors are flushed in sweep order, so the pool
 //! size does not change the bits.
-//! The tridiagonal eigenproblem is Cuppen's divide-and-conquer
+//! The first stage is the symmetric band reduction of Bischof, Lang,
+//! and Sun, *ACM Trans. Math. Softw.* 26 (2000) 581-601
+//! (<https://doi.org/10.1145/365723.365735>). The tridiagonal
+//! eigenproblem is Cuppen's divide-and-conquer
 //! (J. J. M. Cuppen, *Numer. Math.* 36 (1980) 177-195,
 //! <https://doi.org/10.1007/BF01396757>) as carried out by Gu and
 //! Eisenstat, *SIAM J. Matrix Anal. Appl.* 16 (1995) 172-191
-//! (<https://doi.org/10.1137/S0895479892241287>). The QR step below the
-//! recursion threshold is Francis, *Comput. J.* 4 (1962) 332-345
-//! (<https://doi.org/10.1093/comjnl/4.4.332>). Bisection plus inverse
-//! iteration is used when only the lowest vectors are required.
+//! (<https://doi.org/10.1137/S0895479892241287>). The leaf below
+//! [`crate::cuppen`] is the implicit-shift QL step of EISPACK `tql2`
+//! (Smith et al., *Matrix Eigensystem Routines — EISPACK Guide*,
+//! Springer LNCS 6, 1976, <https://doi.org/10.1007/3-540-07546-1>;
+//! Bowdler, Martin, Reinsch, and Wilkinson, *Numer. Math.* 11 (1968)
+//! 293-306, <https://doi.org/10.1007/BF02165223>). `partial_eigh`
+//! bisects with a tolerance relative to ‖T‖, in the style of LAPACK
+//! `dstebz`, and inverse-iterates inside each irreducible block, in
+//! the style of LAPACK `dstein` (Dhillon, *BIT* 38 (1998) 685-704,
+//! <https://doi.org/10.1007/BF02510408>).
 //!
 //! Every trailing update and the blocked back-transform go through
 //! [`crate::simd_gemm::tile_gemm`]. That kernel accumulates
 //! `acc = fma(a, b, acc)` in ascending `k`. Tile ownership depends on
 //! the dimension and on [`NB`], not on the rayon pool. The WY product
-//! width is [`WY_NB`]. [`NB`], [`WY_NB`], and [`CHASE_KD`] are part of
-//! the bit definition. They do not depend on the instruction set, the
-//! core count, or the thread count.
+//! width is [`WY_NB`]. [`NB`], [`WY_NB`], [`CHASE_KD`], the Cuppen
+//! leaf size and the `n / 2` split, and the partial-spectrum constants
+//! [`RESIDUAL_C`], [`INVERSE_ITERS`], and [`CLUSTER_REL`] are part of
+//! the bit definition. [`CHASE_BATCH`] and
+//! [`crate::simd_gemm::column_tasks`] do not change the bits: the
+//! chase still flushes reflectors in sweep order, and the column
+//! partition is a function of the dimension alone. None of these
+//! constants depend on the instruction set, the core count, or the
+//! thread count.
 
 use ndarray::{Array1, Array2};
 
@@ -55,7 +70,8 @@ const WY_NB: usize = 64;
 const CHASE_KD: usize = NB * 2;
 
 /// Steps one chase task may run before the scheduler joins the wave.
-/// The count is fixed. It does not read the pool.
+/// The count is fixed. It does not read the pool, and it does not
+/// change the bits: reflectors are still flushed in sweep order.
 const CHASE_BATCH: usize = 8;
 
 /// Seconds in the band reduction, the bulge chase, the tridiagonal
@@ -118,7 +134,7 @@ pub fn eigh_symmetric(
     let t1 = std::time::Instant::now();
     apply_back_transform(&mut vectors, n, n, &panels, &chase);
     seconds.back_transform = t1.elapsed().as_secs_f64();
-    reject_zero_columns(&vectors, n, n)?;
+    reject_zero_columns(&vectors, n, n, tridiagonal_norm(&diag, &off))?;
     Ok((pack_evals(&evals), pack_columns(&vectors, n, n), seconds))
 }
 
@@ -158,7 +174,7 @@ pub fn partial_symmetric(
     let t1 = std::time::Instant::now();
     apply_back_transform(&mut vectors, n, k, &panels, &chase);
     seconds.back_transform = t1.elapsed().as_secs_f64();
-    reject_zero_columns(&vectors, n, k)?;
+    reject_zero_columns(&vectors, n, k, tridiagonal_norm(&diag, &off))?;
     Ok((pack_evals(&evals), pack_columns(&vectors, n, k), seconds))
 }
 
@@ -325,59 +341,67 @@ fn dense_to_band(matrix: &mut [f64], n: usize) -> Vec<WyPanel> {
         dlarft(&v, pn, &tau, &mut t_factor);
         grow_buf(&mut s2, pn * pk);
         let s2 = &mut s2[..pn * pk];
-        tile_gemm(
-            pn,
-            pk,
-            pk,
-            1.0,
-            v.as_ptr(),
-            1,
-            pn as isize,
-            t_factor.as_ptr(),
-            1,
-            pk as isize,
-            0.0,
-            s2.as_mut_ptr(),
-            1,
-            pn as isize,
-        );
+        // SAFETY: `v` is `pn` by `pk`, `t_factor` is `pk` by `pk`, and
+        // `s2` is `pn` by `pk`, all column-major.
+        unsafe {
+            tile_gemm(
+                pn,
+                pk,
+                pk,
+                1.0,
+                v.as_ptr(),
+                1,
+                pn as isize,
+                t_factor.as_ptr(),
+                1,
+                pk as isize,
+                0.0,
+                s2.as_mut_ptr(),
+                1,
+                pn as isize,
+            );
+        }
         grow_buf(&mut w, pn * pk);
         let w = &mut w[..pn * pk];
         gemm_row_tiles(trailing, pn, s2, pk, w);
         grow_buf(&mut s1, pk * pk);
         let s1 = &mut s1[..pk * pk];
-        tile_gemm(
-            pk,
-            pk,
-            pn,
-            1.0,
-            s2.as_ptr(),
-            pn as isize,
-            1,
-            w.as_ptr(),
-            1,
-            pn as isize,
-            0.0,
-            s1.as_mut_ptr(),
-            1,
-            pk as isize,
-        );
-        tile_gemm(
-            pn,
-            pk,
-            pk,
-            -0.5,
-            v.as_ptr(),
-            1,
-            pn as isize,
-            s1.as_ptr(),
-            1,
-            pk as isize,
-            1.0,
-            w.as_mut_ptr(),
-            1,
-            pn as isize,
-        );
+        // SAFETY: `s2` and `w` are `pn` by `pk`, `s1` is `pk` by `pk`,
+        // and `v` is `pn` by `pk`.
+        unsafe {
+            tile_gemm(
+                pk,
+                pk,
+                pn,
+                1.0,
+                s2.as_ptr(),
+                pn as isize,
+                1,
+                w.as_ptr(),
+                1,
+                pn as isize,
+                0.0,
+                s1.as_mut_ptr(),
+                1,
+                pk as isize,
+            );
+            tile_gemm(
+                pn,
+                pk,
+                pk,
+                -0.5,
+                v.as_ptr(),
+                1,
+                pn as isize,
+                s1.as_ptr(),
+                1,
+                pk as isize,
+                1.0,
+                w.as_mut_ptr(),
+                1,
+                pn as isize,
+            );
+        }
         syr2k_tiles(trailing, pn, &v, w, pk);
         for c in 0..pn {
             let dst = (i + NB + c) * n + (i + NB);
@@ -449,6 +473,9 @@ struct BandPtr {
     n: usize,
     kd: usize,
     ld: usize,
+    /// Max-norm of the band at the start of the chase. Bulge tests
+    /// scale with it.
+    scale: f64,
 }
 
 // SAFETY: a chase wave shares this pointer only across tasks whose
@@ -459,23 +486,39 @@ unsafe impl Send for BandPtr {}
 unsafe impl Sync for BandPtr {}
 
 impl BandPtr {
-    fn get(self, row: usize, col: usize) -> f64 {
-        if row.abs_diff(col) > self.kd {
-            return 0.0;
+    fn index(self, row: usize, col: usize) -> Option<usize> {
+        if row >= self.n || col >= self.n || row.abs_diff(col) > self.kd {
+            return None;
         }
-        // SAFETY: `col` is inside `0..n` and the row lies in this
-        // column's stored band, so the index is inside the allocation.
-        unsafe { *self.data.add(col * self.ld + (row + self.kd - col)) }
+        let index = col * self.ld + (row + self.kd - col);
+        if index >= self.n.saturating_mul(self.ld) {
+            return None;
+        }
+        Some(index)
+    }
+
+    fn get(self, row: usize, col: usize) -> f64 {
+        match self.index(row, col) {
+            Some(index) => {
+                // SAFETY: `index` was checked against `n * ld`, the
+                // length of the band allocation.
+                unsafe { *self.data.add(index) }
+            }
+            None => 0.0,
+        }
     }
 
     fn set(self, row: usize, col: usize, value: f64) {
-        if row.abs_diff(col) > self.kd {
-            debug_assert!(value == 0.0);
+        let Some(index) = self.index(row, col) else {
+            assert!(
+                value == 0.0,
+                "nonzero fill outside the symmetric band at ({row}, {col})"
+            );
             return;
-        }
-        // SAFETY: same index contract as `get`.
+        };
+        // SAFETY: `index` was checked against `n * ld`.
         unsafe {
-            *self.data.add(col * self.ld + (row + self.kd - col)) = value;
+            *self.data.add(index) = value;
         }
     }
 }
@@ -485,11 +528,16 @@ fn band_to_tridiagonal(matrix: &mut [f64], n: usize, refs: &mut Vec<Reflector>) 
         return;
     }
     let mut band = SymBand::from_dense(matrix, n);
+    let scale = band
+        .data
+        .iter()
+        .fold(0.0_f64, |acc, value| acc.max(value.abs()));
     let view = BandPtr {
         data: band.data.as_mut_ptr(),
         n: band.n,
         kd: band.kd,
         ld: band.ld,
+        scale,
     };
     let nsweeps = n - 2;
     let mut sweeps: Vec<ChaseSweep> = (0..nsweeps)
@@ -756,8 +804,11 @@ unsafe impl Send for ChaseSlots {}
 unsafe impl Sync for ChaseSlots {}
 
 impl ChaseSlots {
-    fn batch(self, index: usize) -> *mut ChaseBatch {
-        // SAFETY: `index` is this task's slot.
+    /// # Safety
+    ///
+    /// `index` must be a slot of the outcome buffer this pointer was
+    /// derived from, and that slot must not be written by another task.
+    unsafe fn batch(self, index: usize) -> *mut ChaseBatch {
         unsafe { self.0.add(index) }
     }
 }
@@ -774,13 +825,19 @@ unsafe impl Send for ChaseScratch {}
 unsafe impl Sync for ChaseScratch {}
 
 impl ChaseScratch {
-    fn scratch(self, index: usize, len: usize) -> *mut f64 {
-        // SAFETY: `index * len` stays inside the scratch pool.
+    /// # Safety
+    ///
+    /// `index * len` elements from `scratch` must lie inside the pool
+    /// this pointer was derived from, and no other task may write them.
+    unsafe fn scratch(self, index: usize, len: usize) -> *mut f64 {
         unsafe { self.scratch.add(index * len) }
     }
 
-    fn column(self, index: usize, n: usize) -> *mut f64 {
-        // SAFETY: `index * n` stays inside the column pool.
+    /// # Safety
+    ///
+    /// `index * n` elements from `column` must lie inside the pool this
+    /// pointer was derived from, and no other task may write them.
+    unsafe fn column(self, index: usize, n: usize) -> *mut f64 {
         unsafe { self.column.add(index * n) }
     }
 }
@@ -793,8 +850,10 @@ unsafe impl Send for JobPtr {}
 unsafe impl Sync for JobPtr {}
 
 impl JobPtr {
-    fn get(self, index: usize) -> ChaseJob {
-        // SAFETY: `index` is inside the job list.
+    /// # Safety
+    ///
+    /// `index` must be inside the job list this pointer was derived from.
+    unsafe fn get(self, index: usize) -> ChaseJob {
         unsafe { *self.0.add(index) }
     }
 }
@@ -871,7 +930,7 @@ fn run_chase_wave(
     // in this wave, including every batched step, so the band writes
     // do not alias.
     for_tiles(jobs.len(), move |task| {
-        let job = job_ptr.get(task);
+        let job = unsafe { job_ptr.get(task) };
         let scratch =
             unsafe { std::slice::from_raw_parts_mut(pool.scratch(task, scratch_len), scratch_len) };
         let column = unsafe { std::slice::from_raw_parts_mut(pool.column(task, n), n) };
@@ -920,7 +979,11 @@ fn chase_one(band: BandPtr, col: usize, scratch: &mut [f64], column: &mut [f64])
     let mut last = col + 1;
     let mut found = false;
     for row in (bulge_row..scan_hi).rev() {
-        if band.get(row, col).abs() > 1e-18 {
+        // A bulge below a few ulps of the band norm is rounding dust.
+        // The test scales with that norm, so a Hessian in atomic units
+        // is not compared with an absolute cutoff.
+        let bulge_tol = 8.0 * f64::EPSILON * band.scale;
+        if band.get(row, col).abs() > bulge_tol {
             last = row + 1;
             found = true;
             break;
@@ -1393,22 +1456,26 @@ fn gemm_row_tiles(c: &[f64], pn: usize, s2: &[f64], pk: usize, w: &mut [f64]) {
     for_tiles(n_tiles, move |tile| {
         let row0 = tile * NB;
         let rows = NB.min(pn - row0);
-        tile_gemm(
-            rows,
-            pk,
-            pn,
-            1.0,
-            c_ptr.add(row0),
-            1,
-            pn as isize,
-            s2_ptr.get(),
-            1,
-            pn as isize,
-            0.0,
-            w_ptr.add(row0),
-            1,
-            pn as isize,
-        );
+        // SAFETY: this tile writes rows `[row0, row0 + rows)` of `w`.
+        // `c` and `s2` are read-only and cover the product.
+        unsafe {
+            tile_gemm(
+                rows,
+                pk,
+                pn,
+                1.0,
+                c_ptr.add(row0),
+                1,
+                pn as isize,
+                s2_ptr.get(),
+                1,
+                pn as isize,
+                0.0,
+                w_ptr.add(row0),
+                1,
+                pn as isize,
+            );
+        }
     });
 }
 
@@ -1429,38 +1496,42 @@ fn syr2k_tiles(c: &mut [f64], pn: usize, v: &[f64], w: &[f64], pk: usize) {
         let rows = NB.min(pn - row0);
         let cols = NB.min(pn - col0);
         // C_ij -= V_i W_j^T + W_i V_j^T.
-        tile_gemm(
-            rows,
-            cols,
-            pk,
-            -1.0,
-            v_ptr.add(row0),
-            1,
-            pn as isize,
-            w_ptr.add(col0),
-            pn as isize,
-            1,
-            1.0,
-            c_ptr.add(col0 * pn + row0),
-            1,
-            pn as isize,
-        );
-        tile_gemm(
-            rows,
-            cols,
-            pk,
-            -1.0,
-            w_ptr.add(row0),
-            1,
-            pn as isize,
-            v_ptr.add(col0),
-            pn as isize,
-            1,
-            1.0,
-            c_ptr.add(col0 * pn + row0),
-            1,
-            pn as isize,
-        );
+        // SAFETY: this tile owns the lower-triangular block `(bi, bj)`.
+        // `v` and `w` are read-only.
+        unsafe {
+            tile_gemm(
+                rows,
+                cols,
+                pk,
+                -1.0,
+                v_ptr.add(row0),
+                1,
+                pn as isize,
+                w_ptr.add(col0),
+                pn as isize,
+                1,
+                1.0,
+                c_ptr.add(col0 * pn + row0),
+                1,
+                pn as isize,
+            );
+            tile_gemm(
+                rows,
+                cols,
+                pk,
+                -1.0,
+                w_ptr.add(row0),
+                1,
+                pn as isize,
+                v_ptr.add(col0),
+                pn as isize,
+                1,
+                1.0,
+                c_ptr.add(col0 * pn + row0),
+                1,
+                pn as isize,
+            );
+        }
     });
     // The tiles wrote the lower triangle, including the lower half of
     // each diagonal block. Copy that onto the upper triangle.
@@ -1743,6 +1814,70 @@ fn tridiagonal_norm(diag: &[f64], off: &[f64]) -> f64 {
     norm
 }
 
+/// An off-diagonal at most `ε ‖T‖` splits the tridiagonal. The test is
+/// relative to the matrix norm, so a zero coupling and a soft mode at
+/// atomic-unit scale both separate.
+fn negligible_off(value: f64, nrm: f64) -> bool {
+    value.abs() <= f64::EPSILON * nrm
+}
+
+/// Irreducible blocks as half-open index ranges.
+fn tridiagonal_blocks(off: &[f64], nrm: f64) -> Vec<(usize, usize)> {
+    let n = off.len() + 1;
+    let mut blocks = Vec::new();
+    let mut start = 0usize;
+    for (i, value) in off.iter().enumerate() {
+        if negligible_off(*value, nrm) {
+            blocks.push((start, i + 1));
+            start = i + 1;
+        }
+    }
+    if start < n {
+        blocks.push((start, n));
+    }
+    if blocks.is_empty() {
+        blocks.push((0, n));
+    }
+    blocks
+}
+
+struct BlockEigen {
+    value: f64,
+    block: usize,
+    local: usize,
+}
+
+/// Fixed start positions inside a block. The sequence does not depend
+/// on the pool or on a random draw, so a restart stays bit-stable.
+fn push_start(out: &mut Vec<usize>, idx: usize, m: usize) {
+    if idx < m && !out.contains(&idx) {
+        out.push(idx);
+    }
+}
+
+fn start_positions(m: usize) -> Vec<usize> {
+    if m == 0 {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    push_start(&mut out, 0, m);
+    push_start(&mut out, m - 1, m);
+    push_start(&mut out, m / 2, m);
+    let mut step = m / 2;
+    while step >= 1 && out.len() < 16 {
+        let mut pos = step / 2;
+        while pos < m && out.len() < 16 {
+            push_start(&mut out, pos, m);
+            pos += step.max(1);
+        }
+        if step == 1 {
+            break;
+        }
+        step /= 2;
+    }
+    out
+}
+
 fn tridiagonal_partial(
     diag: &[f64],
     off: &[f64],
@@ -1757,11 +1892,40 @@ fn tridiagonal_partial(
         }
         return Ok((vec![0.0; k], vectors));
     }
-    let (lo, hi) = gershgorin(diag, off);
-    let mut evals = Vec::with_capacity(k);
-    for which in 0..k {
-        evals.push(bisect(diag, off, which, lo, hi, nrm));
+    let blocks = tridiagonal_blocks(off, nrm);
+    // The k smallest eigenvalues of the union sit among the k smallest
+    // of each block. A 1×1 block is its diagonal entry.
+    let mut candidates = Vec::new();
+    for (bi, &(start, end)) in blocks.iter().enumerate() {
+        let m = end - start;
+        let take = m.min(k);
+        if m == 1 {
+            candidates.push(BlockEigen {
+                value: diag[start],
+                block: bi,
+                local: 0,
+            });
+            continue;
+        }
+        let block_diag = &diag[start..end];
+        let block_off = &off[start..end - 1];
+        let (lo, hi) = gershgorin(block_diag, block_off);
+        for which in 0..take {
+            candidates.push(BlockEigen {
+                value: bisect(block_diag, block_off, which, lo, hi, nrm),
+                block: bi,
+                local: which,
+            });
+        }
     }
+    candidates.sort_by(|left, right| {
+        left.value
+            .total_cmp(&right.value)
+            .then(left.block.cmp(&right.block))
+            .then(left.local.cmp(&right.local))
+    });
+    candidates.truncate(k);
+    let evals: Vec<f64> = candidates.iter().map(|item| item.value).collect();
     let mut cluster = vec![0usize; k];
     let mut id = 0usize;
     for j in 1..k {
@@ -1772,46 +1936,63 @@ fn tridiagonal_partial(
     }
     let tol = RESIDUAL_C * (n as f64) * f64::EPSILON * nrm;
     let mut vectors = vec![0.0; n * k];
-    for (j, &lambda) in evals.iter().enumerate() {
-        let cluster_start = (0..j)
-            .rev()
-            .find(|&prev| cluster[prev] != cluster[j])
-            .map(|prev| prev + 1)
-            .unwrap_or(0);
-        let mut y = vec![0.0; n];
-        y[j % n] = 1.0;
+    for (j, cand) in candidates.iter().enumerate() {
+        let (start, end) = blocks[cand.block];
+        let m = end - start;
+        if m == 1 {
+            vectors[j * n + start] = 1.0;
+            continue;
+        }
+        let cluster_prev: Vec<usize> = (0..j).filter(|&prev| cluster[prev] == cluster[j]).collect();
+        let block_diag = &diag[start..end];
+        let block_off = &off[start..end - 1];
+        let lambda = cand.value;
+        let positions = start_positions(m);
         let mut converged = false;
-        for iter in 0..INVERSE_ITERS {
-            let shifted: Vec<f64> = diag.iter().map(|value| value - lambda).collect();
-            let mut z = tridiag_solve(off, &shifted, off, &y, nrm);
-            for _ in 0..2 {
-                for prev in cluster_start..j {
-                    let mut dot = 0.0f64;
-                    for row in 0..n {
-                        let left: f64 = vectors[prev * n + row];
-                        dot = left.mul_add(z[row], dot);
-                    }
-                    for row in 0..n {
-                        let column: f64 = vectors[prev * n + row];
-                        z[row] = (-dot).mul_add(column, z[row]);
+        let mut accepted = vec![0.0; m];
+        for attempt in 0..=positions.len() {
+            let mut y = vec![0.0; m];
+            if attempt < positions.len() {
+                y[positions[attempt]] = 1.0;
+            } else {
+                y.fill(1.0);
+            }
+            for _iter in 0..INVERSE_ITERS {
+                let shifted: Vec<f64> = block_diag.iter().map(|value| value - lambda).collect();
+                let mut z = tridiag_solve(block_off, &shifted, block_off, &y, nrm);
+                for _ in 0..2 {
+                    for &prev in &cluster_prev {
+                        let mut dot = 0.0f64;
+                        for row in 0..m {
+                            let left: f64 = vectors[prev * n + start + row];
+                            dot = left.mul_add(z[row], dot);
+                        }
+                        for row in 0..m {
+                            let column: f64 = vectors[prev * n + start + row];
+                            z[row] = (-dot).mul_add(column, z[row]);
+                        }
                     }
                 }
+                let mut norm = 0.0;
+                for value in &z {
+                    norm = value.mul_add(*value, norm);
+                }
+                norm = norm.sqrt();
+                if norm == 0.0 || !norm.is_finite() {
+                    break;
+                }
+                for (slot, value) in y.iter_mut().zip(&z) {
+                    *slot = value / norm;
+                }
+                let mut full = vec![0.0; n];
+                full[start..end].copy_from_slice(&y);
+                if tridiagonal_residual(diag, off, lambda, &full) <= tol {
+                    accepted.clone_from(&y);
+                    converged = true;
+                    break;
+                }
             }
-            let mut norm = 0.0;
-            for value in &z {
-                norm = value.mul_add(*value, norm);
-            }
-            norm = norm.sqrt();
-            if norm == 0.0 || !norm.is_finite() {
-                y.fill(0.0);
-                y[(j + iter + 1) % n] = 1.0;
-                continue;
-            }
-            for (slot, value) in y.iter_mut().zip(&z) {
-                *slot = value / norm;
-            }
-            if tridiagonal_residual(diag, off, lambda, &y) <= tol {
-                converged = true;
+            if converged {
                 break;
             }
         }
@@ -1820,9 +2001,7 @@ fn tridiagonal_partial(
                 "inverse iteration did not converge".into(),
             ));
         }
-        for row in 0..n {
-            vectors[j * n + row] = y[row];
-        }
+        vectors[j * n + start..j * n + end].copy_from_slice(&accepted);
     }
     Ok((evals, vectors))
 }
@@ -1858,12 +2037,16 @@ fn gershgorin(diag: &[f64], off: &[f64]) -> (f64, f64) {
         lo = lo.min(diag[i] - radius);
         hi = hi.max(diag[i] + radius);
     }
-    let span = (hi - lo).abs().max(1.0);
-    (lo - span * 1e-12, hi + span * 1e-12)
+    let span = (hi - lo).abs();
+    let pad = f64::EPSILON * span.max(tridiagonal_norm(diag, off)) * (n as f64).max(1.0);
+    (lo - pad, hi + pad)
 }
 
 fn bisect(diag: &[f64], off: &[f64], which: usize, mut lo: f64, mut hi: f64, nrm: f64) -> f64 {
-    let scale = hi.abs().max(lo.abs()).max(1.0);
+    // LAPACK `dstebz` scales the bisection width by the matrix norm.
+    // An absolute floor of 1 would leave a soft mode, whose residual
+    // target is `c n ε ‖T‖`, with an eigenvalue coarser than that target.
+    let scale = nrm.max(hi.abs()).max(lo.abs());
     let tol = 8.0 * f64::EPSILON * scale * (diag.len().max(1) as f64);
     for _ in 0..200 {
         if hi - lo <= tol {
@@ -1971,14 +2154,15 @@ fn pack_columns(columns: &[f64], n: usize, k: usize) -> Array2<f64> {
     out
 }
 
-fn reject_zero_columns(columns: &[f64], n: usize, k: usize) -> Result<(), SaddleError> {
+fn reject_zero_columns(columns: &[f64], n: usize, k: usize, nrm: f64) -> Result<(), SaddleError> {
+    let tol = 8.0 * f64::EPSILON * (n.max(1) as f64) * nrm;
     for col in 0..k {
         let mut norm = 0.0;
         for row in 0..n {
             let value = columns[col * n + row];
             norm += value * value;
         }
-        if norm.sqrt() < 1e-18 {
+        if norm.sqrt() <= tol {
             return Err(SaddleError::Solver(
                 "eigensolver produced a zero eigenvector".into(),
             ));

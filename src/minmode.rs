@@ -456,7 +456,7 @@ fn lanczos_mode<S: PointSurface>(
 /// Lowest eigenpair of the symmetric tridiagonal `(alpha, beta)`, with
 /// the eigenvector in the Lanczos basis.
 ///
-/// Dimension 1 is the full spectrum and goes through [`jacobi_eigen`].
+/// Dimension 1 is the full spectrum and goes through [`dense_eigen`].
 /// A longer projection uses [`crate::eigensolve::partial_eigh`] for the
 /// lowest pair. Eigenvalues ascend and the sign rule is the dense one.
 fn lowest_ritz(alpha: &[f64], beta: &[f64]) -> Result<(f64, Vec<f64>), SaddleError> {
@@ -473,7 +473,7 @@ fn lowest_ritz(alpha: &[f64], beta: &[f64]) -> Result<(f64, Vec<f64>), SaddleErr
         }
     }
     if k == 1 {
-        let (evals, evecs) = jacobi_eigen(&mut t)?;
+        let (evals, evecs) = dense_eigen(&mut t)?;
         return Ok((evals[0], evecs.iter().map(|row| row[0]).collect()));
     }
     let mut dense = Array2::zeros((k, k));
@@ -488,9 +488,10 @@ fn lowest_ritz(alpha: &[f64], beta: &[f64]) -> Result<(f64, Vec<f64>), SaddleErr
 
 /// Full spectrum of a small symmetric matrix, through [`crate::eigensolve::eigh`].
 ///
-/// Returns eigenvalues in ascending order and the column table
+/// The historical name was `jacobi_eigen`. It now calls the two-stage
+/// solver. Returns eigenvalues in ascending order and the column table
 /// `v[row][col]`. Each column has a positive largest-magnitude entry.
-fn jacobi_eigen(a: &mut [Vec<f64>]) -> Result<(Vec<f64>, Vec<Vec<f64>>), SaddleError> {
+fn dense_eigen(a: &mut [Vec<f64>]) -> Result<(Vec<f64>, Vec<Vec<f64>>), SaddleError> {
     let n = a.len();
     let mut dense = Array2::zeros((n, n));
     for row in 0..n {
@@ -1020,13 +1021,13 @@ mod tests {
 
     #[test]
     #[allow(clippy::needless_range_loop)]
-    fn jacobi_eigen_uses_the_dense_sign_rule() {
+    fn dense_eigen_uses_the_dense_sign_rule() {
         let mut a = vec![
             vec![2.0, 1.0, 0.0],
             vec![1.0, 2.0, 1.0],
             vec![0.0, 1.0, 2.0],
         ];
-        let (evals, vecs) = super::jacobi_eigen(&mut a).unwrap();
+        let (evals, vecs) = super::dense_eigen(&mut a).unwrap();
         assert!(evals.windows(2).all(|pair| pair[0] <= pair[1]));
         assert!((evals[0] - (2.0 - 2.0_f64.sqrt())).abs() < 1e-8);
         assert!((evals[2] - (2.0 + 2.0_f64.sqrt())).abs() < 1e-8);

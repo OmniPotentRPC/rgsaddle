@@ -1,12 +1,13 @@
 # SHA-256 of little-endian f64 eigenvalues, then column-major eigenvectors.
 # Scalar f64::mul_add, one thread. AVX2+FMA, AVX-512, and NEON match these digests.
 # Band width 64, WY width 64, chase half-width 128. Those widths are part of the bits.
+# Partial spectra split where an off-diagonal is at most eps times the norm.
 n=48 op=eigh k=48 43bd2221a5aa520e71572135a8bcf739771f36b274ff871cdc4b6219bfec1653
-n=48 op=partial k=1 860d9bb92bf01da273c588f1fcf43351e580ae4c3ee17a1e7a48f2ac493e3790
-n=48 op=partial k=10 c0c3abc8de4dc39d39ef5d9b5a5cd2056fff1c2d40c0293b1740c7cadcb895a0
+n=48 op=partial k=1 f61d7c4c72f106e15192d26b3bfc556af84cd114c88849a3e08fb585e2a6bc1e
+n=48 op=partial k=10 cecb9f5ddc6b5b59388ee04b4717b3ecbdf8c36fff5c17fce0ab1aa67a06a143
 n=256 op=eigh k=256 9e6fbdd7b0c61e6e431a7f1f6842fdc448e87298b3160b131c8651055ed47ac6
-n=256 op=partial k=1 d1f985701f105020da7ce9cb145f8baba0efeff38a6bc8484b94d57434f15348
-n=256 op=partial k=10 22b15c64d6e0656fdd435ea119efa1b27f0e08c5b576145105feed083a2de630
+n=256 op=partial k=1 ca962db945931aa0010e6ca34bf787a8bb9f4bf20ce2d81ab19aaf61bfb05fb3
+n=256 op=partial k=10 afe2be2b44c83ab5cadef080a7efba1fcb268c85df1677774d9984a92e82cda2
 n=600 op=eigh k=600 79a65f6cbe4add376a8814e0bd0a708ccfa4fad18cc39f70ecb4be04ca52ddec
-n=600 op=partial k=1 2547644ddab21734e3c837ef33ae7c7f32d2035300d788a29fc93ef65a9e57b2
-n=600 op=partial k=10 2f749aa1e3dfaa734fda886dd470293a4dc702c19e21b14f845ca2099c2fb3fd
+n=600 op=partial k=1 ae08acf9edd9776ce6f6a498b5d1a78ab7b4b21ed760d27e383f11be0a56be60
+n=600 op=partial k=10 ffd7c66ffbf9fdae47046a3b4d1b26a1976a137ca0c5169ac3976b6d535895a2

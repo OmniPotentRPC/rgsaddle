@@ -14,12 +14,19 @@
 //! Cuppen's divide-and-conquer on that tridiagonal factor
 //! (J. J. M. Cuppen, *Numer. Math.* 36 (1980) 177-195,
 //! <https://doi.org/10.1007/BF01396757>; Gu and Eisenstat,
-//! <https://doi.org/10.1137/S0895479892241287>). [`partial_eigh`] bisects the
-//! same tridiagonal factor and runs inverse iteration for the lowest
-//! `k` vectors. Tile counts are fixed from the dimension. They do not
-//! read the rayon pool. Each product is `acc = fma(a, b, acc)` in
-//! ascending order, so the pairs stay bit-identical across pool sizes
-//! and CPU paths. Each eigenvector is signed so its largest-magnitude component
+//! <https://doi.org/10.1137/S0895479892241287>). The band reduction is
+//! the symmetric band reduction of Bischof, Lang, and Sun
+//! (<https://doi.org/10.1145/365723.365735>). The Cuppen leaf is
+//! EISPACK `tql2` (<https://doi.org/10.1007/3-540-07546-1>,
+//! <https://doi.org/10.1007/BF02165223>). [`partial_eigh`] splits that
+//! factor at negligible off-diagonals, bisects each block with a
+//! tolerance relative to ‖T‖, and inverse-iterates from a fixed
+//! sequence of start vectors (Dhillon, *BIT* 38 (1998) 685-704,
+//! <https://doi.org/10.1007/BF02510408>). Tile counts are fixed from
+//! the dimension. They do not read the rayon pool, and neither the
+//! chase batch nor the column-task count changes the bits. Each
+//! product is `acc = fma(a, b, acc)` in ascending order, so the pairs
+//! stay bit-identical across pool sizes and CPU paths. Each eigenvector is signed so its largest-magnitude component
 //! is positive. Feature `jacobi` keeps the cyclic Jacobi solver used
 //! before this path. [`eigh_unpinned`] (feature `faer-unpinned`, off by
 //! default) calls faer with the caller's thread count. Its bits depend
@@ -197,7 +204,7 @@ pub fn eigh_unpinned(a: ArrayView2<f64>) -> Result<(Array1<f64>, Array2<f64>), S
 /// Cyclic Jacobi eigenpairs of the symmetric part of `a`.
 ///
 /// Eigenvalues ascend. This is the solver [`exact_eigh`] used before
-/// the faer path, kept for comparison.
+/// the two-stage reduction, kept for comparison.
 #[cfg(feature = "jacobi")]
 pub fn jacobi_eigh(a: ArrayView2<f64>) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
     let mut work = symmetric_part(a)?;
@@ -270,7 +277,7 @@ pub fn rayleigh_ritz(
     Ok((lams, v_rot, av_rot))
 }
 
-/// Dense eigen on `device`. Full spectrum is the host faer solver.
+/// Dense eigen on `device`. Full spectrum is [`exact_eigh`].
 /// [`EigenDevice::Dlpk`] is the lowest-mode arm through rgmin.
 pub fn eigh_on(
     device: EigenDevice,
@@ -1025,14 +1032,25 @@ mod tests {
         a
     }
 
-    fn spectrum_scale(evals: &Array1<f64>) -> f64 {
-        evals
-            .iter()
-            .fold(1.0, |scale, value| scale.max(value.abs()))
+    fn matrix_norm(a: ArrayView2<f64>) -> f64 {
+        let n = a.nrows();
+        let mut norm = 0.0f64;
+        for i in 0..n {
+            let mut row = 0.0f64;
+            for j in 0..n {
+                row += a[(i, j)].abs();
+            }
+            norm = norm.max(row);
+        }
+        norm
+    }
+
+    fn eigen_bound(n: usize, norm: f64) -> f64 {
+        1000.0 * (n as f64) * f64::EPSILON * norm
     }
 
     fn assert_residual(a: ArrayView2<f64>, evals: &Array1<f64>, vecs: &Array2<f64>) {
-        let scale = spectrum_scale(evals);
+        let bound = eigen_bound(a.nrows(), matrix_norm(a));
         let av = matmul(a, vecs.view());
         for col in 0..evals.len() {
             let mut err = 0.0;
@@ -1041,15 +1059,16 @@ mod tests {
                 err += diff * diff;
             }
             assert!(
-                err.sqrt() <= 1e-8 * scale,
-                "residual {} at column {col}",
+                err.sqrt() <= bound,
+                "residual {} at column {col}, bound {bound}",
                 err.sqrt()
             );
             let mut norm = 0.0;
             for row in 0..a.nrows() {
                 norm += vecs[(row, col)] * vecs[(row, col)];
             }
-            assert!((norm.sqrt() - 1.0).abs() <= 1e-8);
+            let unit = 1000.0 * (a.nrows() as f64) * f64::EPSILON;
+            assert!((norm.sqrt() - 1.0).abs() <= unit);
         }
     }
 
@@ -1059,10 +1078,11 @@ mod tests {
         let (evals, vecs) = partial_eigh(a, k).unwrap();
         assert_eq!(evals.len(), k);
         assert_eq!(vecs.ncols(), k);
-        let scale = spectrum_scale(&old_evals);
+        let scale = matrix_norm(a);
+        let bound = eigen_bound(a.nrows(), scale);
         for i in 0..k {
             assert!(
-                (evals[i] - old_evals[i]).abs() <= 1e-8 * scale,
+                (evals[i] - old_evals[i]).abs() <= bound,
                 "eigenvalue {i}: {} vs {}",
                 evals[i],
                 old_evals[i]
@@ -1071,7 +1091,7 @@ mod tests {
         let mut start = 0;
         while start < k {
             let mut end = start + 1;
-            while end < k && (old_evals[end] - old_evals[start]).abs() <= 1e-6 * scale {
+            while end < k && (old_evals[end] - old_evals[start]).abs() <= bound.max(1e-6 * scale) {
                 end += 1;
             }
             for col in start..end {
@@ -1259,7 +1279,9 @@ mod tests {
             largest_component_is_positive(&vecs);
             let (partial, pvecs) = partial_eigh(a.view(), 4).unwrap();
             for i in 0..4 {
-                assert!((partial[i] - evals[i]).abs() <= 1e-8 * spectrum_scale(&evals));
+                assert!(
+                    (partial[i] - evals[i]).abs() <= eigen_bound(a.nrows(), matrix_norm(a.view()))
+                );
             }
             assert_residual(a.view(), &partial, &pvecs);
         }
@@ -1330,12 +1352,12 @@ mod tests {
         largest_component_is_positive(&fvecs);
         largest_component_is_positive(&pvecs);
         for i in 0..4 {
-            assert!((partial[i] - full[i]).abs() <= 1e-8 * spectrum_scale(&full));
+            assert!((partial[i] - full[i]).abs() <= eigen_bound(a.nrows(), matrix_norm(a.view())));
         }
     }
 
     #[test]
-    fn faer_matches_jacobi_on_random_spd() {
+    fn eigh_matches_jacobi_on_random_spd() {
         let a = random_spd(8, 0x5A11_E001);
         let (evals, _) = exact_eigh(a.view()).unwrap();
         assert!(evals.iter().all(|value| *value > 0.0), "{evals:?}");
@@ -1344,7 +1366,7 @@ mod tests {
     }
 
     #[test]
-    fn faer_matches_jacobi_on_random_indefinite() {
+    fn eigh_matches_jacobi_on_random_indefinite() {
         let a = random_indefinite(7, 0x1D_E1_7E);
         let (evals, _) = exact_eigh(a.view()).unwrap();
         assert!(evals[0] < 0.0 && *evals.last().unwrap() > 0.0, "{evals:?}");
@@ -1353,7 +1375,7 @@ mod tests {
     }
 
     #[test]
-    fn faer_matches_jacobi_on_the_sella_gold_hessian() {
+    fn eigh_matches_jacobi_on_the_sella_gold_hessian() {
         let a = gold_hessian("prfo_saddle_order1_alpha1");
         assert_eq!(a.dim(), (2, 2));
         assert!((a[(0, 1)] - 0.2).abs() < 1e-15);
