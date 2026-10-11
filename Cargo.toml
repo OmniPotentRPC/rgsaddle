@@ -2,7 +2,7 @@
 name = "rgsaddle"
 version = "0.2.2"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 license = "MIT"
 description = "Band, minimum-mode, and index-1 Newton saddle mechanics."
 repository = "https://github.com/OmniPotentRPC/rgsaddle"
@@ -14,23 +14,17 @@ categories = ["science"]
 crate-type = ["lib", "cdylib", "staticlib"]
 
 [features]
-default = ["dense-faer", "eigh-portable"]
+default = []
 capi = []
-# Cyclic Jacobi dense eigensolver, kept for comparison with the faer path.
+# Cyclic Jacobi dense eigensolver, kept for comparison.
 jacobi = []
-# faer for the dense symmetric eigensolver. On by default.
-dense-faer = ["dep:faer", "dep:dyn-stack"]
 # Rayon for rgmin and for the fixed-partition dense eigensolver.
 # Without it the dense solver runs the same tiles on one thread.
-par = ["rgmin/par", "dense-faer", "faer/rayon"]
-# Cross-node invariant spectra. Pins pulp and gemm to the AVX2
-# kernels by leaving x86-v4 uncompiled. pulp has no runtime cap, so
-# this is a build mode, not a flag inside a wider binary.
-eigh-portable = ["dense-faer"]
-# Compile pulp and gemm AVX-512 kernels. gemm then selects them at
-# runtime when the host has AVX-512. Those kernels do not match
-# eigh-portable pairs once the matrix passes one tile.
-eigh-avx512 = ["dense-faer", "faer/nightly"]
+par = ["rgmin/par"]
+# faer's self-adjoint solver as an explicit opt-out. Off by default,
+# so a default build does not pull faer. `eigh_unpinned` documents
+# that its bits depend on the CPU and the thread count.
+faer-unpinned = ["dep:faer", "dep:dyn-stack", "faer/rayon"]
 highs = ["rgmin/highs"]
 python = ["dep:pyo3"]
 readcon = ["dep:readcon-core"]
@@ -86,4 +80,4 @@ required-features = ["jacobi"]
 [[bench]]
 name = "eigh_scale"
 harness = false
-required-features = ["par"]
+required-features = ["par", "faer-unpinned"]

@@ -1,0 +1,11 @@
+# SHA-256 of little-endian f64 eigenvalues, then column-major eigenvectors.
+# Scalar kernel, one thread. Every SIMD path and pool size matches these digests.
+n=48 op=eigh k=48 d6369d9f7dc73df33b219c843ee77d44f5aea4216cd3340246bb3a85c43c8bd4
+n=48 op=partial k=1 f50b09fc740ee6392a1796b6290c57257277fbb1e61fa5611bb5ace317cf91f6
+n=48 op=partial k=10 1202b322dab48b30353af56f38b731309751b1cbf5c79ed272214a9fd0affd0a
+n=256 op=eigh k=256 9ef6bd7ac4d498e7edb84037b7934634ff82f91bcb41e86fa06bd506ae6646a0
+n=256 op=partial k=1 cafaab46971859cff121456a9ab98d245de2d1b1b9aa9c444cf124712d18e2b4
+n=256 op=partial k=10 0b87dac1957d7e167bca099262b5ac9cafb8e5ab9695ec4958ef51893553d84f
+n=600 op=eigh k=600 41c43e94fc5baba7ea57e7197e1179f7e363b9e37e2b3319373b3c4436782c5f
+n=600 op=partial k=1 e10fb4c4abf968c28ea3a6073b8ac5634197cec7df6ff576e8fe9dccd8f6a0fd
+n=600 op=partial k=10 f10affca1a0ee830b361a58a9df785d980b1b4106068f7dcb5521836b7c1fca3

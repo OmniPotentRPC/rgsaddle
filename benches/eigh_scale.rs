@@ -1,7 +1,7 @@
 //! Strong scaling of the two-stage dense eigensolver.
 //!
 //! ```text
-//! cargo bench --features par --bench eigh_scale
+//! cargo bench --features par,faer-unpinned --bench eigh_scale -- 1500 3000
 //! ```
 //!
 //! Optional arguments are matrix sizes. `EIGH_REPS` overrides the
@@ -17,7 +17,7 @@ use std::time::Instant;
 
 use ndarray::Array2;
 use rayon::ThreadPoolBuilder;
-use rgsaddle::dense_eigh::{StageSeconds, faer_sequential};
+use rgsaddle::dense_eigh::{StageSeconds, faer_sequential, faer_with_threads};
 use rgsaddle::eigensolve::{eigh_timed, partial_eigh_timed};
 
 const DEFAULT_REPS: usize = 7;
@@ -94,12 +94,12 @@ fn median_stages(samples: &mut [StageSeconds]) -> StageSeconds {
     let mut bulge: Vec<f64> = samples.iter().map(|stage| stage.bulge).collect();
     let mut tridiagonal: Vec<f64> = samples.iter().map(|stage| stage.tridiagonal).collect();
     let mut back: Vec<f64> = samples.iter().map(|stage| stage.back_transform).collect();
-    StageSeconds {
-        band: median_and_range(&mut band).0,
-        bulge: median_and_range(&mut bulge).0,
-        tridiagonal: median_and_range(&mut tridiagonal).0,
-        back_transform: median_and_range(&mut back).0,
-    }
+    StageSeconds::from_parts(
+        median_and_range(&mut band).0,
+        median_and_range(&mut bulge).0,
+        median_and_range(&mut tridiagonal).0,
+        median_and_range(&mut back).0,
+    )
 }
 
 fn print_stages(n: usize, threads: usize, wall: f64, stage: StageSeconds) {
@@ -225,8 +225,8 @@ fn main() {
     threads.sort_unstable();
     threads.dedup();
     println!("rgsaddle {}", env!("CARGO_PKG_VERSION"));
-    println!("solver two-stage Householder band, bulge chase, faer tridiagonal Cuppen");
-    println!("tile 64, faer tasks fixed from n, reps={reps}");
+    println!("solver two-stage Householder band, bulge chase, Cuppen tridiagonal");
+    println!("tile 64, tasks fixed from n, reps={reps}");
     println!("threads={threads:?} max={max_threads}");
 
     let quick = env::var_os("EIGH_QUICK").is_some();
@@ -253,6 +253,15 @@ fn main() {
             }
             let (median, range) = median_and_range(&mut samples);
             println!("faer_seq n={n} threads=1 median_s={median:.6} range_s={range:.6}");
+            black_box(faer_with_threads(&spd, 8).expect("rayon warmup"));
+            let mut wide = Vec::with_capacity(reps);
+            for _ in 0..reps {
+                let start = Instant::now();
+                black_box(faer_with_threads(&spd, 8).expect("rayon"));
+                wide.push(start.elapsed().as_secs_f64());
+            }
+            let (median, range) = median_and_range(&mut wide);
+            println!("faer_rayon n={n} threads=8 median_s={median:.6} range_s={range:.6}");
         }
     }
 }

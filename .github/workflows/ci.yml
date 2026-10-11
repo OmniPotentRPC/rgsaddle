@@ -2,7 +2,7 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [main, "perf/**", "fix/**"]
   pull_request:
 
 jobs:
@@ -36,3 +36,31 @@ jobs:
         env:
           RGSADDLE_REQUIRE_ASE: "1"
         run: cargo test --test autoneb --verbose
+
+  eigh-bits:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+      - name: Install qemu and the aarch64 linker
+        run: sudo apt-get update && sudo apt-get install -y qemu-user gcc-aarch64-linux-gnu
+      - name: Release tests without default features
+        run: cargo test --release --no-default-features -- --test-threads=1
+      - name: Release tests with par
+        run: cargo test --release --features par -- --test-threads=1
+      - name: Nehalem, no AVX and no FMA
+        run: |
+          set -euo pipefail
+          cargo test --release --features par --test eigh_bits --no-run --message-format=json > /tmp/eigh-bits-x86.json
+          bin=$(python3 -c 'import json,sys; msgs=[json.loads(l) for l in open("/tmp/eigh-bits-x86.json") if l.strip()]; print(next(m["executable"] for m in msgs if m.get("target",{}).get("name")=="eigh_bits" and m.get("executable")))')
+          qemu-x86_64 -cpu Nehalem "$bin" --test-threads=1
+      - name: aarch64 under qemu
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: |
+          set -euo pipefail
+          cargo test --release --features par --target aarch64-unknown-linux-gnu --test eigh_bits --no-run --message-format=json > /tmp/eigh-bits-arm.json
+          bin=$(python3 -c 'import json; msgs=[json.loads(l) for l in open("/tmp/eigh-bits-arm.json") if l.strip()]; print(next(m["executable"] for m in msgs if m.get("target",{}).get("name")=="eigh_bits" and m.get("executable")))')
+          qemu-aarch64 -L /usr/aarch64-linux-gnu "$bin" --test-threads=1

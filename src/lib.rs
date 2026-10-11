@@ -61,7 +61,7 @@ pub use tangent::TangentKind;
 
 pub mod cell_log;
 pub mod constraints;
-#[cfg(feature = "dense-faer")]
+mod cuppen;
 pub mod dense_eigh;
 pub mod eigensolve;
 pub mod force;
@@ -80,6 +80,7 @@ pub mod rfo;
 pub mod samd;
 pub mod sella_min;
 pub mod sella_saddle;
+mod simd_gemm;
 pub mod vocn;
 
 pub use cell_log::{CellChart, expm_3x3, logm_3x3};

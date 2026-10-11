@@ -6,23 +6,27 @@
 //! <https://doi.org/10.1145/2063384.2063394>). Stage 2 chases the bulge
 //! down to tridiagonal form on a compact band of width [`CHASE_KD`],
 //! which is wide enough for the fill and keeps each window contiguous.
-//! The tridiagonal eigenproblem is Cuppen's
-//! divide-and-conquer through faer when every vector is required
+//! Several sweeps stay in flight: a sweep runs its next kernel only
+//! after every earlier sweep's columns lie strictly to its right, the
+//! dependency from that paper, so one wave touches disjoint columns.
+//! The tridiagonal eigenproblem is Cuppen's divide-and-conquer
 //! (J. J. M. Cuppen, *Numer. Math.* 36 (1980) 177-195,
-//! <https://doi.org/10.1007/BF01396757>). faer's solver follows Gu
-//! and Eisenstat, *SIAM J. Matrix Anal. Appl.* 16 (1995) 172-191
-//! (<https://doi.org/10.1137/S0895479892241287>). The QR step below
-//! faer's recursion threshold is Francis, *Comput. J.* 4 (1962) 332-345
+//! <https://doi.org/10.1007/BF01396757>) as carried out by Gu and
+//! Eisenstat, *SIAM J. Matrix Anal. Appl.* 16 (1995) 172-191
+//! (<https://doi.org/10.1137/S0895479892241287>). The QR step below the
+//! recursion threshold is Francis, *Comput. J.* 4 (1962) 332-345
 //! (<https://doi.org/10.1093/comjnl/4.4.332>). Bisection plus inverse
 //! iteration is used when only the lowest vectors are required.
 //!
-//! Every trailing-update and eigenvector product goes through
-//! [`tile_gemm`]. Tile ownership and the faer task count depend on the
-//! dimension and on [`NB`], not on the rayon pool.
+//! Every trailing update and the blocked back-transform go through
+//! [`crate::simd_gemm::tile_gemm`]. That kernel accumulates with a
+//! separate multiply and add. Tile ownership depends on the dimension
+//! and on [`NB`], not on the rayon pool.
 
 use ndarray::{Array1, Array2};
 
 use crate::error::SaddleError;
+use crate::simd_gemm::{self, SyncMut, SyncPtr, for_tiles, tile_gemm};
 
 /// Tile size and target half-bandwidth. Fixed. Not a hardware query.
 const NB: usize = 64;
@@ -31,12 +35,10 @@ const NB: usize = 64;
 /// inside `2 * NB - 1` subdiagonals; one extra diagonal is margin.
 const CHASE_KD: usize = NB * 2;
 
-/// Faer divide-and-conquer task count. A power of two, capped, and
-/// independent of the pool size.
-const EIGH_TASKS: usize = 32;
-
 /// Seconds in the band reduction, the bulge chase, the tridiagonal
 /// eigensolve, and the back-transformation.
+#[doc(hidden)]
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug)]
 pub struct StageSeconds {
     pub band: f64,
@@ -49,6 +51,17 @@ struct Reflector {
     start: usize,
     v: Vec<f64>,
     tau: f64,
+}
+
+/// Compact WY block `I - V T Vᵀ`. `v` is `rows × cols` column-major
+/// and `t` is `cols × cols` column-major. The block acts on rows
+/// `[row, row + rows)`.
+struct WyPanel {
+    row: usize,
+    rows: usize,
+    cols: usize,
+    v: Vec<f64>,
+    t: Vec<f64>,
 }
 
 /// Full spectrum of a symmetric matrix. Eigenvalues ascend. Columns are
@@ -64,10 +77,11 @@ pub fn eigh_symmetric(
             StageSeconds::zero(),
         ));
     }
+    simd_gemm::refresh_simd()?;
     let mut seconds = StageSeconds::zero();
     let TridiagonalFactor {
-        mut matrix,
-        refs,
+        panels,
+        chase,
         band_s,
         bulge_s,
         diag,
@@ -75,12 +89,11 @@ pub fn eigh_symmetric(
     } = tridiagonalize(a)?;
     seconds.band = band_s;
     seconds.bulge = bulge_s;
-    let _ = &mut matrix;
     let t0 = std::time::Instant::now();
     let (evals, mut vectors) = tridiagonal_full(&diag, &off)?;
     seconds.tridiagonal = t0.elapsed().as_secs_f64();
     let t1 = std::time::Instant::now();
-    apply_reflectors(&mut vectors, n, n, &refs);
+    apply_back_transform(&mut vectors, n, n, &panels, &chase);
     seconds.back_transform = t1.elapsed().as_secs_f64();
     reject_zero_columns(&vectors, n, n)?;
     Ok((pack_evals(&evals), pack_columns(&vectors, n, n), seconds))
@@ -104,10 +117,11 @@ pub fn partial_symmetric(
             StageSeconds::zero(),
         ));
     }
+    simd_gemm::refresh_simd()?;
     let mut seconds = StageSeconds::zero();
     let TridiagonalFactor {
-        matrix: _matrix,
-        refs,
+        panels,
+        chase,
         band_s,
         bulge_s,
         diag,
@@ -119,15 +133,22 @@ pub fn partial_symmetric(
     let (evals, mut vectors) = tridiagonal_partial(&diag, &off, k)?;
     seconds.tridiagonal = t0.elapsed().as_secs_f64();
     let t1 = std::time::Instant::now();
-    apply_reflectors(&mut vectors, n, k, &refs);
+    apply_back_transform(&mut vectors, n, k, &panels, &chase);
     seconds.back_transform = t1.elapsed().as_secs_f64();
     reject_zero_columns(&vectors, n, k)?;
     Ok((pack_evals(&evals), pack_columns(&vectors, n, k), seconds))
 }
 
-/// faer's sequential self-adjoint solver, for the single-thread cost of
-/// the fixed partition against `Par::Seq`. Not the shipped entry point.
-pub fn faer_sequential(a: &Array2<f64>) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
+/// faer's self-adjoint solver on `threads` workers.
+///
+/// `threads <= 1` is `Par::Seq`. A larger count is `Par::rayon`. The
+/// bits depend on the CPU and the thread count. Not the shipped entry.
+#[doc(hidden)]
+#[cfg(feature = "faer-unpinned")]
+pub fn faer_with_threads(
+    a: &Array2<f64>,
+    threads: usize,
+) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
     let n = a.nrows();
     if n == 0 {
         return Ok((Array1::zeros(0), Array2::zeros((0, 0))));
@@ -140,7 +161,11 @@ pub fn faer_sequential(a: &Array2<f64>) -> Result<(Array1<f64>, Array2<f64>), Sa
     }
     let mut vectors = faer::Mat::<f64>::zeros(n, n);
     let mut values = faer::diag::Diag::<f64>::zeros(n);
-    let par = faer::Par::Seq;
+    let par = if threads <= 1 {
+        faer::Par::Seq
+    } else {
+        faer::Par::rayon(threads)
+    };
     let params = faer::Spec::<faer::linalg::evd::SelfAdjointEvdParams, f64>::default();
     let scratch = faer::linalg::evd::self_adjoint_evd_scratch::<f64>(
         n,
@@ -169,7 +194,27 @@ pub fn faer_sequential(a: &Array2<f64>) -> Result<(Array1<f64>, Array2<f64>), Sa
     Ok((evals, vecs))
 }
 
+/// faer's sequential self-adjoint solver, for the single-thread cost of
+/// the fixed partition against `Par::Seq`. Not the shipped entry point.
+/// The bits depend on the CPU.
+#[doc(hidden)]
+#[cfg(feature = "faer-unpinned")]
+pub fn faer_sequential(a: &Array2<f64>) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
+    faer_with_threads(a, 1)
+}
+
 impl StageSeconds {
+    /// Median stage times for the bench harness.
+    #[doc(hidden)]
+    pub fn from_parts(band: f64, bulge: f64, tridiagonal: f64, back_transform: f64) -> Self {
+        Self {
+            band,
+            bulge,
+            tridiagonal,
+            back_transform,
+        }
+    }
+
     const fn zero() -> Self {
         Self {
             band: 0.0,
@@ -181,8 +226,8 @@ impl StageSeconds {
 }
 
 struct TridiagonalFactor {
-    matrix: Vec<f64>,
-    refs: Vec<Reflector>,
+    panels: Vec<WyPanel>,
+    chase: Vec<WyPanel>,
     band_s: f64,
     bulge_s: f64,
     diag: Vec<f64>,
@@ -198,10 +243,12 @@ fn tridiagonalize(a: &Array2<f64>) -> Result<TridiagonalFactor, SaddleError> {
         }
     }
     let t0 = std::time::Instant::now();
-    let mut refs = dense_to_band(&mut matrix, n);
+    let panels = dense_to_band(&mut matrix, n);
     let band_s = t0.elapsed().as_secs_f64();
     let t1 = std::time::Instant::now();
-    band_to_tridiagonal(&mut matrix, n, &mut refs);
+    let mut chase_refs = Vec::new();
+    band_to_tridiagonal(&mut matrix, n, &mut chase_refs);
+    let chase = group_chase(&chase_refs);
     let bulge_s = t1.elapsed().as_secs_f64();
     let mut diag = vec![0.0; n];
     let mut off = vec![0.0; n.saturating_sub(1)];
@@ -212,8 +259,8 @@ fn tridiagonalize(a: &Array2<f64>) -> Result<TridiagonalFactor, SaddleError> {
         }
     }
     Ok(TridiagonalFactor {
-        matrix,
-        refs,
+        panels,
+        chase,
         band_s,
         bulge_s,
         diag,
@@ -221,10 +268,10 @@ fn tridiagonalize(a: &Array2<f64>) -> Result<TridiagonalFactor, SaddleError> {
     })
 }
 
-fn dense_to_band(matrix: &mut [f64], n: usize) -> Vec<Reflector> {
-    let mut refs = Vec::new();
+fn dense_to_band(matrix: &mut [f64], n: usize) -> Vec<WyPanel> {
+    let mut panels = Vec::new();
     if n <= NB {
-        return refs;
+        return panels;
     }
     let mut i = 0;
     while i + NB < n {
@@ -312,21 +359,16 @@ fn dense_to_band(matrix: &mut [f64], n: usize) -> Vec<Reflector> {
                 matrix[row * n + col] = val;
             }
         }
-        for j in 0..pk {
-            let start = i + NB + j;
-            let mut reflector = vec![0.0; pn - j];
-            for (row, slot) in reflector.iter_mut().enumerate() {
-                *slot = v[(j + row) + j * pn];
-            }
-            refs.push(Reflector {
-                start,
-                v: reflector,
-                tau: tau[j],
-            });
-        }
+        panels.push(WyPanel {
+            row: i + NB,
+            rows: pn,
+            cols: pk,
+            v,
+            t: t_factor,
+        });
         i += NB;
     }
-    refs
+    panels
 }
 
 /// Symmetric band in column-major order. Column `col` holds rows
@@ -354,23 +396,6 @@ impl SymBand {
         Self { n, kd, ld, data }
     }
 
-    #[inline]
-    fn get(&self, row: usize, col: usize) -> f64 {
-        if row.abs_diff(col) > self.kd {
-            return 0.0;
-        }
-        self.data[col * self.ld + (row + self.kd - col)]
-    }
-
-    #[inline]
-    fn set(&mut self, row: usize, col: usize, value: f64) {
-        if row.abs_diff(col) > self.kd {
-            debug_assert!(value == 0.0);
-            return;
-        }
-        self.data[col * self.ld + (row + self.kd - col)] = value;
-    }
-
     fn scatter(&self, matrix: &mut [f64]) {
         let n = self.n;
         for col in 0..n {
@@ -383,70 +408,395 @@ impl SymBand {
     }
 }
 
+/// Compact band addressed by a raw pointer so one chase wave can update
+/// disjoint columns from several tasks.
+#[derive(Clone, Copy)]
+struct BandPtr {
+    data: *mut f64,
+    n: usize,
+    kd: usize,
+    ld: usize,
+}
+
+// SAFETY: a chase wave shares this pointer only across tasks whose
+// column windows are disjoint. Each task reads and writes its own
+// columns.
+unsafe impl Send for BandPtr {}
+// SAFETY: same disjoint-column contract as `Send`.
+unsafe impl Sync for BandPtr {}
+
+impl BandPtr {
+    fn get(self, row: usize, col: usize) -> f64 {
+        if row.abs_diff(col) > self.kd {
+            return 0.0;
+        }
+        // SAFETY: `col` is inside `0..n` and the row lies in this
+        // column's stored band, so the index is inside the allocation.
+        unsafe { *self.data.add(col * self.ld + (row + self.kd - col)) }
+    }
+
+    fn set(self, row: usize, col: usize, value: f64) {
+        if row.abs_diff(col) > self.kd {
+            debug_assert!(value == 0.0);
+            return;
+        }
+        // SAFETY: same index contract as `get`.
+        unsafe {
+            *self.data.add(col * self.ld + (row + self.kd - col)) = value;
+        }
+    }
+}
+
 fn band_to_tridiagonal(matrix: &mut [f64], n: usize, refs: &mut Vec<Reflector>) {
     if n < 3 {
         return;
     }
     let mut band = SymBand::from_dense(matrix, n);
-    let mut scratch = vec![0.0; n.saturating_mul(2)];
-    let mut column = vec![0.0; n];
-    let kd = NB;
-    for k in 0..n - 2 {
-        let end = n.min(k + 1 + kd);
-        zero_column_tail(&mut band, k, k + 1, end, refs, &mut scratch, &mut column);
-        let mut col = k + 1;
-        let mut guard = 0usize;
-        let guard_limit = n.saturating_mul(kd.max(1));
-        while col + 2 < n && guard < guard_limit {
-            guard += 1;
-            let bulge_row = col + kd + 1;
-            let scan_hi = n.min(col + band.kd + 1);
-            if bulge_row >= scan_hi {
+    let view = BandPtr {
+        data: band.data.as_mut_ptr(),
+        n: band.n,
+        kd: band.kd,
+        ld: band.ld,
+    };
+    let nsweeps = n - 2;
+    let mut sweeps: Vec<ChaseSweep> = (0..nsweeps)
+        .map(|k| ChaseSweep {
+            k,
+            stage: ChaseStage::Annihilate,
+            steps: 0,
+            pending: Vec::new(),
+        })
+        .collect();
+    let mut active: Vec<usize> = Vec::new();
+    let mut next_k = 0usize;
+    let mut flushed = 0usize;
+    let guard_limit = n.saturating_mul(NB.max(1));
+    let scratch_len = n.saturating_mul(2);
+    let mut scratch_pool = Vec::new();
+    let mut column_pool = Vec::new();
+    let mut jobs: Vec<ChaseJob> = Vec::new();
+    let mut outs: Vec<Option<ChaseOut>> = Vec::new();
+    loop {
+        active.retain(|&index| {
+            let sweep = &mut sweeps[index];
+            let exhausted =
+                matches!(sweep.stage, ChaseStage::Chase(_)) && sweep.steps >= guard_limit;
+            if exhausted || stage_window(n, sweep.k, sweep.stage).is_none() {
+                sweep.stage = ChaseStage::Done;
+                false
+            } else {
+                true
+            }
+        });
+        flush_chase(&mut sweeps, &mut flushed, refs);
+        while next_k < nsweeps {
+            let win = stage_window(n, next_k, ChaseStage::Annihilate).expect("annihilator window");
+            let blocked = active.iter().any(|&index| {
+                let sweep = &sweeps[index];
+                let earlier = stage_window(n, sweep.k, sweep.stage).expect("active window");
+                earlier.0 < win.1
+            });
+            if blocked {
                 break;
             }
-            let mut last = col + 1;
-            let mut found = false;
-            for r in (bulge_row..scan_hi).rev() {
-                if band.get(r, col).abs() > 1e-18 {
-                    last = r + 1;
-                    found = true;
-                    break;
-                }
-            }
-            if !found {
-                break;
-            }
-            let before = refs.len();
-            zero_column_tail(
-                &mut band,
-                col,
-                col + kd,
-                last,
-                refs,
-                &mut scratch,
-                &mut column,
-            );
-            if refs.len() == before {
-                break;
-            }
-            col += kd;
+            active.push(next_k);
+            next_k += 1;
         }
+        if active.is_empty() {
+            break;
+        }
+        let mut wave = Vec::new();
+        for &index in &active {
+            let sweep = &sweeps[index];
+            let win = stage_window(n, sweep.k, sweep.stage).expect("wave window");
+            let blocked = active.iter().any(|&earlier| {
+                let previous = &sweeps[earlier];
+                if previous.k >= sweep.k {
+                    return false;
+                }
+                let left = stage_window(n, previous.k, previous.stage).expect("earlier window");
+                left.0 < win.1
+            });
+            if !blocked {
+                wave.push(index);
+            }
+        }
+        debug_assert!(!wave.is_empty());
+        jobs.clear();
+        for &index in &wave {
+            jobs.push(ChaseJob {
+                k: sweeps[index].k,
+                stage: sweeps[index].stage,
+            });
+        }
+        let slots = jobs.len();
+        if scratch_pool.len() < slots * scratch_len {
+            scratch_pool.resize(slots * scratch_len, 0.0);
+        }
+        if column_pool.len() < slots * n {
+            column_pool.resize(slots * n, 0.0);
+        }
+        outs.clear();
+        outs.resize_with(slots, || None);
+        run_chase_wave(
+            view,
+            &jobs,
+            &mut scratch_pool[..slots * scratch_len],
+            &mut column_pool[..slots * n],
+            &mut outs,
+        );
+        for (slot, &index) in wave.iter().enumerate() {
+            let out = outs[slot].take().expect("chase kernel wrote a result");
+            if let Some(reflector) = out.reflector {
+                sweeps[index].pending.push(reflector);
+            }
+            if matches!(sweeps[index].stage, ChaseStage::Chase(_)) {
+                sweeps[index].steps += 1;
+            }
+            sweeps[index].stage = out.next;
+        }
+        active.retain(|&index| !matches!(sweeps[index].stage, ChaseStage::Done));
+        flush_chase(&mut sweeps, &mut flushed, refs);
     }
+    flush_chase(&mut sweeps, &mut flushed, refs);
+    debug_assert_eq!(flushed, nsweeps);
     matrix.fill(0.0);
     band.scatter(matrix);
 }
 
+#[derive(Clone, Copy)]
+enum ChaseStage {
+    Annihilate,
+    Chase(usize),
+    Done,
+}
+
+struct ChaseSweep {
+    k: usize,
+    stage: ChaseStage,
+    steps: usize,
+    pending: Vec<Reflector>,
+}
+
+struct ChaseOut {
+    reflector: Option<Reflector>,
+    next: ChaseStage,
+}
+
+#[derive(Clone, Copy)]
+struct ChaseJob {
+    k: usize,
+    stage: ChaseStage,
+}
+
+#[derive(Clone, Copy)]
+struct ChaseSlots(*mut Option<ChaseOut>);
+// SAFETY: each task writes its own slot. The slots partition the
+// outcome buffer, and the buffer outlives the wave.
+unsafe impl Send for ChaseSlots {}
+// SAFETY: same per-slot contract as `Send`.
+unsafe impl Sync for ChaseSlots {}
+
+impl ChaseSlots {
+    fn write(self, index: usize, value: ChaseOut) {
+        // SAFETY: `index` is this task's slot.
+        unsafe {
+            *self.0.add(index) = Some(value);
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ChaseScratch {
+    scratch: *mut f64,
+    column: *mut f64,
+}
+// SAFETY: task `t` uses scratch and column strides that do not overlap
+// any other task's stride.
+unsafe impl Send for ChaseScratch {}
+// SAFETY: same stride contract as `Send`.
+unsafe impl Sync for ChaseScratch {}
+
+impl ChaseScratch {
+    fn scratch(self, index: usize, len: usize) -> *mut f64 {
+        // SAFETY: `index * len` stays inside the scratch pool.
+        unsafe { self.scratch.add(index * len) }
+    }
+
+    fn column(self, index: usize, n: usize) -> *mut f64 {
+        // SAFETY: `index * n` stays inside the column pool.
+        unsafe { self.column.add(index * n) }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct JobPtr(*const ChaseJob);
+// SAFETY: tasks only read the job list.
+unsafe impl Send for JobPtr {}
+// SAFETY: same read-only contract as `Send`.
+unsafe impl Sync for JobPtr {}
+
+impl JobPtr {
+    fn get(self, index: usize) -> ChaseJob {
+        // SAFETY: `index` is inside the job list.
+        unsafe { *self.0.add(index) }
+    }
+}
+
+fn stage_window(n: usize, k: usize, stage: ChaseStage) -> Option<(usize, usize)> {
+    match stage {
+        ChaseStage::Done => None,
+        ChaseStage::Annihilate => {
+            let row0 = k + 1;
+            if row0 >= n {
+                return None;
+            }
+            let len_max = NB.min(n - row0);
+            Some(touch_window(n, k, row0, len_max))
+        }
+        ChaseStage::Chase(col) => {
+            if col + 2 >= n {
+                return None;
+            }
+            let row0 = col + NB;
+            if row0 >= n {
+                return None;
+            }
+            let scan_hi = n.min(col + CHASE_KD + 1);
+            if row0 + 1 >= scan_hi {
+                return None;
+            }
+            let len_max = scan_hi - row0;
+            Some(touch_window(n, col, row0, len_max))
+        }
+    }
+}
+
+fn touch_window(n: usize, col: usize, row0: usize, len_max: usize) -> (usize, usize) {
+    let lo = row0.saturating_sub(NB).min(col);
+    let hi = (row0 + len_max + NB).min(n);
+    (lo, hi)
+}
+
+fn flush_chase(sweeps: &mut [ChaseSweep], flushed: &mut usize, refs: &mut Vec<Reflector>) {
+    while *flushed < sweeps.len() && matches!(sweeps[*flushed].stage, ChaseStage::Done) {
+        refs.append(&mut sweeps[*flushed].pending);
+        *flushed += 1;
+    }
+}
+
+fn run_chase_wave(
+    band: BandPtr,
+    jobs: &[ChaseJob],
+    scratch_pool: &mut [f64],
+    column_pool: &mut [f64],
+    outs: &mut [Option<ChaseOut>],
+) {
+    let n = band.n;
+    let scratch_len = n.saturating_mul(2);
+    if jobs.len() == 1 {
+        let scratch = &mut scratch_pool[..scratch_len];
+        let column = &mut column_pool[..n];
+        outs[0] = Some(chase_job(band, jobs[0].k, jobs[0].stage, scratch, column));
+        return;
+    }
+    let slots = ChaseSlots(outs.as_mut_ptr());
+    let pool = ChaseScratch {
+        scratch: scratch_pool.as_mut_ptr(),
+        column: column_pool.as_mut_ptr(),
+    };
+    let job_ptr = JobPtr(jobs.as_ptr());
+    // SAFETY: task `t` writes outcome slot `t` and its own scratch and
+    // column strides. The scheduler put disjoint band-column windows
+    // in this wave, so the band writes do not alias.
+    for_tiles(jobs.len(), move |task| {
+        let job = job_ptr.get(task);
+        let scratch =
+            unsafe { std::slice::from_raw_parts_mut(pool.scratch(task, scratch_len), scratch_len) };
+        let column = unsafe { std::slice::from_raw_parts_mut(pool.column(task, n), n) };
+        let out = chase_job(band, job.k, job.stage, scratch, column);
+        slots.write(task, out);
+    });
+}
+
+fn chase_job(
+    band: BandPtr,
+    k: usize,
+    stage: ChaseStage,
+    scratch: &mut [f64],
+    column: &mut [f64],
+) -> ChaseOut {
+    match stage {
+        ChaseStage::Annihilate => {
+            let end = band.n.min(k + 1 + NB);
+            let reflector = zero_column_tail(band, k, k + 1, end, scratch, column);
+            let col = k + 1;
+            let next = if col + 2 < band.n {
+                ChaseStage::Chase(col)
+            } else {
+                ChaseStage::Done
+            };
+            ChaseOut { reflector, next }
+        }
+        ChaseStage::Chase(col) => chase_one(band, col, scratch, column),
+        ChaseStage::Done => ChaseOut {
+            reflector: None,
+            next: ChaseStage::Done,
+        },
+    }
+}
+
+fn chase_one(band: BandPtr, col: usize, scratch: &mut [f64], column: &mut [f64]) -> ChaseOut {
+    let n = band.n;
+    let bulge_row = col + NB + 1;
+    let scan_hi = n.min(col + band.kd + 1);
+    if bulge_row >= scan_hi {
+        return ChaseOut {
+            reflector: None,
+            next: ChaseStage::Done,
+        };
+    }
+    let mut last = col + 1;
+    let mut found = false;
+    for row in (bulge_row..scan_hi).rev() {
+        if band.get(row, col).abs() > 1e-18 {
+            last = row + 1;
+            found = true;
+            break;
+        }
+    }
+    if !found {
+        return ChaseOut {
+            reflector: None,
+            next: ChaseStage::Done,
+        };
+    }
+    let reflector = zero_column_tail(band, col, col + NB, last, scratch, column);
+    if reflector.is_none() {
+        return ChaseOut {
+            reflector: None,
+            next: ChaseStage::Done,
+        };
+    }
+    let next_col = col + NB;
+    let next = if next_col + 2 < n {
+        ChaseStage::Chase(next_col)
+    } else {
+        ChaseStage::Done
+    };
+    ChaseOut { reflector, next }
+}
+
 fn zero_column_tail(
-    band: &mut SymBand,
+    band: BandPtr,
     col: usize,
     row0: usize,
     row1: usize,
-    refs: &mut Vec<Reflector>,
     scratch: &mut [f64],
     column: &mut [f64],
-) {
+) -> Option<Reflector> {
     if row1 <= row0 + 1 || row0 >= band.n {
-        return;
+        return None;
     }
     let row1 = row1.min(band.n);
     let len = row1 - row0;
@@ -456,7 +806,7 @@ fn zero_column_tail(
     }
     let (v, tau, beta) = householder(x);
     if tau == 0.0 {
-        return;
+        return None;
     }
     apply_sym_householder(band, row0, &v, tau, scratch);
     band.set(row0, col, beta);
@@ -465,23 +815,20 @@ fn zero_column_tail(
         band.set(r, col, 0.0);
         band.set(col, r, 0.0);
     }
-    refs.push(Reflector {
+    Some(Reflector {
         start: row0,
         v,
         tau,
-    });
+    })
 }
 
-fn apply_sym_householder(
-    band: &mut SymBand,
-    start: usize,
-    v: &[f64],
-    tau: f64,
-    scratch: &mut [f64],
-) {
+fn apply_sym_householder(band: BandPtr, start: usize, v: &[f64], tau: f64, scratch: &mut [f64]) {
     #[cfg(target_arch = "x86_64")]
     {
-        if is_x86_feature_detected!("avx2") {
+        if simd_gemm::bulge_uses_avx2() {
+            // SAFETY: `bulge_uses_avx2` is true only when the CPU has
+            // AVX2. The kernel writes the same window as the scalar
+            // update, one column at a time.
             unsafe {
                 apply_sym_householder_avx2(band, start, v, tau, scratch);
             }
@@ -492,7 +839,7 @@ fn apply_sym_householder(
 }
 
 fn apply_sym_householder_scalar(
-    band: &mut SymBand,
+    band: BandPtr,
     start: usize,
     v: &[f64],
     tau: f64,
@@ -520,8 +867,11 @@ fn apply_sym_householder_scalar(
         let scale_y = -tau * vj;
         let col = lo + j;
         let (base, off, count) = band_span(band, col, lo, m);
+        // SAFETY: `band_span` returns a range inside column `col`, and
+        // this kernel only runs on columns inside its chase window.
+        let dest = unsafe { std::slice::from_raw_parts_mut(band.data.add(base), count) };
         for i in 0..count {
-            band.data[base + i] += vwin[off + i] * scale_v + y[off + i] * scale_y;
+            dest[i] += vwin[off + i] * scale_v + y[off + i] * scale_y;
         }
     }
 }
@@ -529,7 +879,7 @@ fn apply_sym_householder_scalar(
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn apply_sym_householder_avx2(
-    band: &mut SymBand,
+    band: BandPtr,
     start: usize,
     v: &[f64],
     tau: f64,
@@ -559,7 +909,7 @@ unsafe fn apply_sym_householder_avx2(
             let col = lo + j;
             let (base, off, count) = band_span(band, col, lo, m);
             accumulate_avx2(
-                band.data.as_mut_ptr().add(base),
+                band.data.add(base),
                 vwin.as_ptr().add(off),
                 y.as_ptr().add(off),
                 count,
@@ -573,7 +923,7 @@ unsafe fn apply_sym_householder_avx2(
 /// Fills `scratch` with `y` then `v` on the reflector window.
 /// Returns `(lo, m, v_at)` when the reflector is live.
 fn householder_window(
-    band: &SymBand,
+    band: BandPtr,
     start: usize,
     v: &[f64],
     tau: f64,
@@ -603,7 +953,8 @@ fn householder_window(
         }
         let col = start + j;
         let (base, off, count) = band_span(band, col, lo, m);
-        let column = &band.data[base..base + count];
+        // SAFETY: `band_span` returns a range inside column `col`.
+        let column = unsafe { std::slice::from_raw_parts(band.data.add(base), count) };
         for (slot, &ai) in y[off..off + count].iter_mut().zip(column) {
             *slot += ai * vj;
         }
@@ -612,7 +963,7 @@ fn householder_window(
 }
 
 #[inline]
-fn band_span(band: &SymBand, col: usize, lo: usize, m: usize) -> (usize, usize, usize) {
+fn band_span(band: BandPtr, col: usize, lo: usize, m: usize) -> (usize, usize, usize) {
     let hi = lo + m;
     let row0 = lo.max(col.saturating_sub(band.kd));
     let row1 = hi.min(col + band.kd + 1);
@@ -670,7 +1021,7 @@ fn householder(x: &[f64]) -> (Vec<f64>, f64, f64) {
         v[0] = 1.0;
         return (v, 0.0, beta);
     }
-    let norm = beta.hypot(sigma.sqrt());
+    let norm = crate::cuppen::hypot(beta, sigma.sqrt());
     let beta_out = if beta >= 0.0 { -norm } else { norm };
     v[0] = 1.0;
     let denom = x[0] - beta_out;
@@ -751,9 +1102,12 @@ fn dlarft(v: &[f64], m: usize, tau: &[f64], t: &mut [f64]) {
 
 fn gemm_row_tiles(c: &[f64], pn: usize, s2: &[f64], pk: usize, w: &mut [f64]) {
     let n_tiles = pn.div_ceil(NB);
-    let c_ptr = SyncPtr(c.as_ptr());
-    let s2_ptr = SyncPtr(s2.as_ptr());
-    let w_ptr = SyncMut(w.as_mut_ptr());
+    let c_ptr = SyncPtr::new(c.as_ptr());
+    let s2_ptr = SyncPtr::new(s2.as_ptr());
+    let w_ptr = SyncMut::new(w.as_mut_ptr());
+    // SAFETY: tile `tile` writes rows `[row0, row0 + rows)` of `w`.
+    // Those row ranges partition `0..pn`, so the writes are disjoint.
+    // `c` and `s2` are read-only.
     for_tiles(n_tiles, move |tile| {
         let row0 = tile * NB;
         let rows = NB.min(pn - row0);
@@ -779,9 +1133,13 @@ fn gemm_row_tiles(c: &[f64], pn: usize, s2: &[f64], pk: usize, w: &mut [f64]) {
 fn syr2k_tiles(c: &mut [f64], pn: usize, v: &[f64], w: &[f64], pk: usize) {
     let n_blocks = pn.div_ceil(NB);
     let n_tiles = n_blocks * (n_blocks + 1) / 2;
-    let c_ptr = SyncMut(c.as_mut_ptr());
-    let v_ptr = SyncPtr(v.as_ptr());
-    let w_ptr = SyncPtr(w.as_ptr());
+    let c_ptr = SyncMut::new(c.as_mut_ptr());
+    let v_ptr = SyncPtr::new(v.as_ptr());
+    let w_ptr = SyncPtr::new(w.as_ptr());
+    // SAFETY: each tile owns one lower-triangular block `(bi, bj)`.
+    // Those blocks partition the lower triangle, so their writes in `c`
+    // are disjoint. `v` and `w` are read-only. The upper triangle is
+    // copied after every tile has finished.
     for_tiles(n_tiles, move |tile| {
         let (bi, bj) = lower_tile(n_blocks, tile);
         let row0 = bi * NB;
@@ -840,110 +1198,229 @@ fn lower_tile(n_blocks: usize, mut tile: usize) -> (usize, usize) {
     (bj + tile, bj)
 }
 
-fn apply_reflectors(q: &mut [f64], n: usize, ncols: usize, refs: &[Reflector]) {
-    if ncols == 0 || refs.is_empty() {
+/// Group chase reflectors the way ELPA2 and Haidar, Ltaief and Dongarra
+/// apply `Q2`. Reflectors from consecutive sweeps at one band position
+/// form a diamond of width at most [`NB`]. Stored panels are applied in
+/// reverse, so the vector sees the latest sweep at the latest position
+/// first.
+fn group_chase(refs: &[Reflector]) -> Vec<WyPanel> {
+    let mut sweeps: Vec<Vec<&Reflector>> = Vec::new();
+    let mut current: Vec<&Reflector> = Vec::new();
+    for reflector in refs {
+        if reflector.tau == 0.0 || reflector.v.is_empty() {
+            continue;
+        }
+        if let Some(previous) = current.last() {
+            // One sweep walks down the band in steps of `NB`. The next
+            // sweep starts a row lower than this sweep's first reflector,
+            // which is not a step of `NB`.
+            if reflector.start != previous.start + NB {
+                sweeps.push(std::mem::take(&mut current));
+            }
+        }
+        current.push(reflector);
+    }
+    if !current.is_empty() {
+        sweeps.push(current);
+    }
+    let max_steps = sweeps.iter().map(Vec::len).max().unwrap_or(0);
+    // Build panels in the order they are applied to the eigenvectors.
+    // `apply_back_transform` walks the stored list backwards, so the
+    // list is reversed once at the end. Within a band position the
+    // latest sweep is applied first; band positions run from the top
+    // of the matrix downward. That product matches the reverse of the
+    // order in which the chase created the reflectors.
+    let mut apply_order = Vec::new();
+    for step in 0..max_steps {
+        let mut sweep = sweeps.len();
+        while sweep > 0 {
+            if step >= sweeps[sweep - 1].len() {
+                sweep -= 1;
+                continue;
+            }
+            let mut group = Vec::new();
+            while sweep > 0 && group.len() < NB && step < sweeps[sweep - 1].len() {
+                sweep -= 1;
+                group.push(sweeps[sweep][step]);
+            }
+            // Columns run from the earliest sweep to the latest. The
+            // forward WY product applies the latest column first.
+            group.reverse();
+            apply_order.push(panel_from_refs(&group));
+        }
+    }
+    apply_order.reverse();
+    apply_order
+}
+
+fn panel_from_refs(refs: &[&Reflector]) -> WyPanel {
+    let lo = refs
+        .iter()
+        .map(|reflector| reflector.start)
+        .min()
+        .unwrap_or(0);
+    let hi = refs
+        .iter()
+        .map(|reflector| reflector.start + reflector.v.len())
+        .max()
+        .unwrap_or(lo);
+    let rows = (hi - lo).max(1);
+    let cols = refs.len();
+    let mut v = vec![0.0; rows * cols];
+    let mut tau = vec![0.0; cols];
+    for (col, reflector) in refs.iter().enumerate() {
+        tau[col] = reflector.tau;
+        let local = reflector.start - lo;
+        for (row, &value) in reflector.v.iter().enumerate() {
+            v[(local + row) + col * rows] = value;
+        }
+    }
+    let mut t = vec![0.0; cols * cols];
+    dlarft_general(&v, rows, &tau, &mut t);
+    WyPanel {
+        row: lo,
+        rows,
+        cols,
+        v,
+        t,
+    }
+}
+
+/// `H_1 ... H_k = I - V T Vᵀ` for full columns of `V`, including the
+/// explicit zeros outside each reflector's support.
+fn dlarft_general(v: &[f64], m: usize, tau: &[f64], t: &mut [f64]) {
+    let pk = tau.len();
+    t.fill(0.0);
+    for j in 0..pk {
+        if tau[j] == 0.0 {
+            continue;
+        }
+        if j > 0 {
+            let mut y = vec![0.0; j];
+            for c in 0..j {
+                let mut dot = 0.0;
+                for r in 0..m {
+                    dot += v[r + c * m] * v[r + j * m];
+                }
+                y[c] = -tau[j] * dot;
+            }
+            for r in 0..j {
+                let mut acc = 0.0;
+                for c in 0..j {
+                    acc += t[r + c * pk] * y[c];
+                }
+                t[r + j * pk] = acc;
+            }
+        }
+        t[j + j * pk] = tau[j];
+    }
+}
+
+fn apply_back_transform(
+    q: &mut [f64],
+    n: usize,
+    ncols: usize,
+    panels: &[WyPanel],
+    chase: &[WyPanel],
+) {
+    for panel in chase.iter().rev() {
+        apply_wy(q, n, ncols, panel);
+    }
+    for panel in panels.iter().rev() {
+        apply_wy(q, n, ncols, panel);
+    }
+}
+
+fn apply_wy(q: &mut [f64], n: usize, ncols: usize, panel: &WyPanel) {
+    let m = panel.rows;
+    let k = panel.cols;
+    if k == 0 || m == 0 || ncols == 0 {
         return;
     }
-    let tasks = column_tasks(ncols);
-    let q_ptr = SyncMut(q.as_mut_ptr());
-    for_tiles(tasks, move |tile| {
-        let (col0, count) = split_range(ncols, tasks, tile);
-        for col in col0..col0 + count {
-            for reflector in refs.iter().rev() {
-                if reflector.tau == 0.0 {
-                    continue;
-                }
-                let mut dot = 0.0;
-                for (i, &vi) in reflector.v.iter().enumerate() {
-                    dot += vi * unsafe { *q_ptr.add(col * n + reflector.start + i) };
-                }
-                let scale = reflector.tau * dot;
-                for (i, &vi) in reflector.v.iter().enumerate() {
-                    unsafe {
-                        *q_ptr.add(col * n + reflector.start + i) -= scale * vi;
-                    }
-                }
-            }
-        }
-    });
-}
-
-fn column_tasks(ncols: usize) -> usize {
-    let capped = EIGH_TASKS.min(ncols).max(1);
-    1usize << (usize::BITS - 1 - capped.leading_zeros())
-}
-
-fn split_range(n: usize, tasks: usize, tile: usize) -> (usize, usize) {
-    let base = n / tasks;
-    let extra = n % tasks;
-    if tile < extra {
-        (tile * (base + 1), base + 1)
-    } else {
-        (extra * (base + 1) + (tile - extra) * base, base)
+    if k == 1 {
+        simd_gemm::apply_rank1(q, n, ncols, panel.row, &panel.v[..m], panel.t[0]);
+        return;
     }
-}
-
-fn tridiag_par(n: usize) -> faer::Par {
-    #[cfg(feature = "par")]
-    {
-        if n < 128 {
-            faer::Par::Seq
-        } else {
-            let q = n / 128;
-            let tasks = if q <= 1 {
-                1
-            } else {
-                let floor = 1usize << (usize::BITS - 1 - q.leading_zeros());
-                floor.clamp(2, EIGH_TASKS)
-            };
-            if tasks <= 1 {
-                faer::Par::Seq
-            } else {
-                faer::Par::rayon(tasks)
-            }
+    let mut vt = vec![0.0; k * m];
+    for col in 0..k {
+        for row in 0..m {
+            vt[col + row * k] = panel.v[row + col * m];
         }
     }
-    #[cfg(not(feature = "par"))]
-    {
-        let _ = n;
-        faer::Par::Seq
+    let mut y = vec![0.0; k * ncols];
+    let mut z = vec![0.0; k * ncols];
+    // SAFETY: `vt` is k by m, the row block of `q` is m by `ncols`
+    // with column stride `n`, and `y` is k by `ncols`. The three
+    // products run one after another. Inside each product the column
+    // tiles of the destination are disjoint.
+    unsafe {
+        simd_gemm::gemm_nn(
+            k,
+            ncols,
+            m,
+            1.0,
+            vt.as_ptr(),
+            k,
+            q.as_ptr().add(panel.row),
+            n,
+            0.0,
+            y.as_mut_ptr(),
+            k,
+        );
+        simd_gemm::gemm_nn(
+            k,
+            ncols,
+            k,
+            1.0,
+            panel.t.as_ptr(),
+            k,
+            y.as_ptr(),
+            k,
+            0.0,
+            z.as_mut_ptr(),
+            k,
+        );
+        simd_gemm::gemm_nn(
+            m,
+            ncols,
+            k,
+            -1.0,
+            panel.v.as_ptr(),
+            m,
+            z.as_ptr(),
+            k,
+            1.0,
+            q.as_mut_ptr().add(panel.row),
+            n,
+        );
     }
 }
 
 fn tridiagonal_full(diag: &[f64], off: &[f64]) -> Result<(Vec<f64>, Vec<f64>), SaddleError> {
-    let n = diag.len();
-    if n == 0 {
-        return Ok((Vec::new(), Vec::new()));
+    crate::cuppen::tridiagonal_evd(diag, off)
+}
+
+/// Residual factor in `c · n · ε · ‖T‖`. The cluster test asks for
+/// `10 n ε`, so `c` is 10.
+const RESIDUAL_C: f64 = 10.0;
+const INVERSE_ITERS: usize = 40;
+/// LAPACK `dstein` treats eigenvalues closer than this multiple of
+/// ‖T‖ as one cluster.
+const CLUSTER_REL: f64 = 1e-3;
+
+fn tridiagonal_norm(diag: &[f64], off: &[f64]) -> f64 {
+    let mut norm = 0.0f64;
+    for i in 0..diag.len() {
+        let mut row = diag[i].abs();
+        if i > 0 {
+            row += off[i - 1].abs();
+        }
+        if i + 1 < diag.len() {
+            row += off[i].abs();
+        }
+        norm = norm.max(row);
     }
-    if n == 1 {
-        return Ok((vec![diag[0]], vec![1.0]));
-    }
-    let mut evals = diag.to_vec();
-    let mut vectors = vec![0.0; n * n];
-    let par = tridiag_par(n);
-    let params = faer::Spec::<faer::linalg::evd::SelfAdjointEvdParams, f64>::default();
-    let scratch = faer::linalg::evd::self_adjoint_evd_scratch::<f64>(
-        n,
-        faer::linalg::evd::ComputeEigenvectors::Yes,
-        par,
-        params,
-    );
-    let mut buffer = dyn_stack::MemBuffer::new(scratch);
-    let diag_ref = faer::diag::DiagRef::from_slice(diag);
-    let off_ref = faer::diag::DiagRef::from_slice(off);
-    let values = faer::diag::DiagMut::from_slice_mut(&mut evals);
-    let u = faer::MatMut::from_column_major_slice_mut(&mut vectors, n, n);
-    faer::linalg::evd::tridiagonal_self_adjoint_evd(
-        diag_ref,
-        off_ref,
-        values,
-        Some(u),
-        par,
-        dyn_stack::MemStack::new(&mut buffer),
-        params,
-    )
-    .map_err(|_| SaddleError::Solver("tridiagonal eigensolver did not converge".into()))?;
-    Ok((evals, vectors))
+    norm
 }
 
 fn tridiagonal_partial(
@@ -952,26 +1429,50 @@ fn tridiagonal_partial(
     k: usize,
 ) -> Result<(Vec<f64>, Vec<f64>), SaddleError> {
     let n = diag.len();
+    let nrm = tridiagonal_norm(diag, off);
+    if nrm == 0.0 {
+        let mut vectors = vec![0.0; n * k];
+        for col in 0..k {
+            vectors[col * n + col] = 1.0;
+        }
+        return Ok((vec![0.0; k], vectors));
+    }
     let (lo, hi) = gershgorin(diag, off);
     let mut evals = Vec::with_capacity(k);
     for which in 0..k {
-        evals.push(bisect(diag, off, which, lo, hi));
+        evals.push(bisect(diag, off, which, lo, hi, nrm));
     }
+    let mut cluster = vec![0usize; k];
+    let mut id = 0usize;
+    for j in 1..k {
+        if (evals[j] - evals[j - 1]).abs() > CLUSTER_REL * nrm {
+            id += 1;
+        }
+        cluster[j] = id;
+    }
+    let tol = RESIDUAL_C * (n as f64) * f64::EPSILON * nrm;
     let mut vectors = vec![0.0; n * k];
-    let scale = hi.abs().max(lo.abs()).max(1.0);
     for (j, &lambda) in evals.iter().enumerate() {
+        let cluster_start = (0..j)
+            .rev()
+            .find(|&prev| cluster[prev] != cluster[j])
+            .map(|prev| prev + 1)
+            .unwrap_or(0);
         let mut y = vec![0.0; n];
         y[j % n] = 1.0;
-        for _ in 0..6 {
+        let mut converged = false;
+        for iter in 0..INVERSE_ITERS {
             let shifted: Vec<f64> = diag.iter().map(|value| value - lambda).collect();
-            let mut z = tridiag_solve(off, &shifted, off, &y);
-            for prev in 0..j {
-                let mut dot = 0.0;
-                for row in 0..n {
-                    dot += vectors[prev * n + row] * z[row];
-                }
-                for row in 0..n {
-                    z[row] -= dot * vectors[prev * n + row];
+            let mut z = tridiag_solve(off, &shifted, off, &y, nrm);
+            for _ in 0..2 {
+                for prev in cluster_start..j {
+                    let mut dot = 0.0;
+                    for row in 0..n {
+                        dot += vectors[prev * n + row] * z[row];
+                    }
+                    for row in 0..n {
+                        z[row] -= dot * vectors[prev * n + row];
+                    }
                 }
             }
             let mut norm = 0.0;
@@ -979,28 +1480,20 @@ fn tridiagonal_partial(
                 norm += value * value;
             }
             norm = norm.sqrt();
-            if norm < 1e-14 {
+            if norm == 0.0 || !norm.is_finite() {
                 y.fill(0.0);
-                y[(j.saturating_mul(5).saturating_add(3)) % n] = 1.0;
+                y[(j + iter + 1) % n] = 1.0;
                 continue;
             }
-            for (slot, value) in y.iter_mut().zip(z) {
+            for (slot, value) in y.iter_mut().zip(&z) {
                 *slot = value / norm;
             }
-        }
-        let mut residual = 0.0;
-        for row in 0..n {
-            let mut acc = diag[row] * y[row];
-            if row > 0 {
-                acc += off[row - 1] * y[row - 1];
+            if tridiagonal_residual(diag, off, lambda, &y) <= tol {
+                converged = true;
+                break;
             }
-            if row + 1 < n {
-                acc += off[row] * y[row + 1];
-            }
-            let diff = acc - lambda * y[row];
-            residual += diff * diff;
         }
-        if residual.sqrt() > 1e-6 * scale * (n as f64).sqrt() {
+        if !converged {
             return Err(SaddleError::Solver(
                 "inverse iteration did not converge".into(),
             ));
@@ -1010,6 +1503,22 @@ fn tridiagonal_partial(
         }
     }
     Ok((evals, vectors))
+}
+
+fn tridiagonal_residual(diag: &[f64], off: &[f64], lambda: f64, y: &[f64]) -> f64 {
+    let mut residual = 0.0;
+    for row in 0..diag.len() {
+        let mut acc = diag[row] * y[row];
+        if row > 0 {
+            acc += off[row - 1] * y[row - 1];
+        }
+        if row + 1 < diag.len() {
+            acc += off[row] * y[row + 1];
+        }
+        let diff = acc - lambda * y[row];
+        residual += diff * diff;
+    }
+    residual.sqrt()
 }
 
 fn gershgorin(diag: &[f64], off: &[f64]) -> (f64, f64) {
@@ -1031,7 +1540,7 @@ fn gershgorin(diag: &[f64], off: &[f64]) -> (f64, f64) {
     (lo - span * 1e-12, hi + span * 1e-12)
 }
 
-fn bisect(diag: &[f64], off: &[f64], which: usize, mut lo: f64, mut hi: f64) -> f64 {
+fn bisect(diag: &[f64], off: &[f64], which: usize, mut lo: f64, mut hi: f64, nrm: f64) -> f64 {
     let scale = hi.abs().max(lo.abs()).max(1.0);
     let tol = 8.0 * f64::EPSILON * scale * (diag.len().max(1) as f64);
     for _ in 0..200 {
@@ -1039,7 +1548,7 @@ fn bisect(diag: &[f64], off: &[f64], which: usize, mut lo: f64, mut hi: f64) -> 
             break;
         }
         let mid = 0.5 * (lo + hi);
-        if sturm(diag, off, mid) <= which {
+        if sturm(diag, off, mid, nrm) <= which {
             lo = mid;
         } else {
             hi = mid;
@@ -1048,34 +1557,37 @@ fn bisect(diag: &[f64], off: &[f64], which: usize, mut lo: f64, mut hi: f64) -> 
     0.5 * (lo + hi)
 }
 
-fn sturm(diag: &[f64], off: &[f64], sigma: f64) -> usize {
+fn sturm(diag: &[f64], off: &[f64], sigma: f64, nrm: f64) -> usize {
     let mut count = 0usize;
     let mut q = diag[0] - sigma;
     if q < 0.0 {
         count += 1;
     }
-    q = soften(q);
+    q = soften(q, nrm);
     for i in 1..diag.len() {
         q = (diag[i] - sigma) - (off[i - 1] * off[i - 1]) / q;
         if q < 0.0 {
             count += 1;
         }
-        q = soften(q);
+        q = soften(q, nrm);
     }
     count
 }
 
-fn soften(q: f64) -> f64 {
-    if q.abs() < 1e-300 {
-        if q < 0.0 { -1e-300 } else { 1e-300 }
-    } else {
+fn soften(q: f64, nrm: f64) -> f64 {
+    let floor = 1e-300 * nrm;
+    if floor == 0.0 || q.abs() >= floor {
         q
+    } else if q < 0.0 {
+        -floor
+    } else {
+        floor
     }
 }
 
 /// Solve `(diag, sub, super) x = rhs` with partial pivoting.
 /// `sub` and `super` each have length `diag.len() - 1`.
-fn tridiag_solve(sub: &[f64], diag: &[f64], sup: &[f64], rhs: &[f64]) -> Vec<f64> {
+fn tridiag_solve(sub: &[f64], diag: &[f64], sup: &[f64], rhs: &[f64], nrm: f64) -> Vec<f64> {
     let n = diag.len();
     if n == 0 {
         return Vec::new();
@@ -1095,9 +1607,7 @@ fn tridiag_solve(sub: &[f64], diag: &[f64], sup: &[f64], rhs: &[f64]) -> Vec<f64
             }
             r.swap(i, i + 1);
         }
-        if b[i].abs() < 1e-30 {
-            b[i] = if b[i] < 0.0 { -1e-30 } else { 1e-30 };
-        }
+        b[i] = pivot_floor(b[i], nrm);
         let factor = a[i] / b[i];
         b[i + 1] -= factor * c[i];
         if i + 1 < n - 1 {
@@ -1105,9 +1615,7 @@ fn tridiag_solve(sub: &[f64], diag: &[f64], sup: &[f64], rhs: &[f64]) -> Vec<f64
         }
         r[i + 1] -= factor * r[i];
     }
-    if b[n - 1].abs() < 1e-30 {
-        b[n - 1] = if b[n - 1] < 0.0 { -1e-30 } else { 1e-30 };
-    }
+    b[n - 1] = pivot_floor(b[n - 1], nrm);
     r[n - 1] /= b[n - 1];
     if n > 1 {
         r[n - 2] = (r[n - 2] - c[n - 2] * r[n - 1]) / b[n - 2];
@@ -1118,121 +1626,12 @@ fn tridiag_solve(sub: &[f64], diag: &[f64], sup: &[f64], rhs: &[f64]) -> Vec<f64
     r
 }
 
-/// `C = alpha * A * B + beta * C` for one tile.
-///
-/// This is the only GEMM in the reduction and in the eigenvector
-/// product. An Ozaki-II backend replaces the body. The call is
-/// sequential inside the tile. The caller owns the tile, so the
-/// product does not depend on which thread runs it.
-#[allow(clippy::too_many_arguments)]
-fn tile_gemm(
-    m: usize,
-    n: usize,
-    k: usize,
-    alpha: f64,
-    a: *const f64,
-    a_row_stride: isize,
-    a_col_stride: isize,
-    b: *const f64,
-    b_row_stride: isize,
-    b_col_stride: isize,
-    beta: f64,
-    c: *mut f64,
-    c_row_stride: isize,
-    c_col_stride: isize,
-) {
-    if m == 0 || n == 0 {
-        return;
-    }
-    if k == 0 || alpha == 0.0 {
-        if beta == 0.0 {
-            for col in 0..n {
-                for row in 0..m {
-                    unsafe {
-                        *c.offset(c_row_stride * row as isize + c_col_stride * col as isize) = 0.0;
-                    }
-                }
-            }
-        } else if beta != 1.0 {
-            for col in 0..n {
-                for row in 0..m {
-                    unsafe {
-                        let slot =
-                            c.offset(c_row_stride * row as isize + c_col_stride * col as isize);
-                        *slot *= beta;
-                    }
-                }
-            }
-        }
-        return;
-    }
-    if beta != 0.0 && beta != 1.0 {
-        for col in 0..n {
-            for row in 0..m {
-                unsafe {
-                    let slot = c.offset(c_row_stride * row as isize + c_col_stride * col as isize);
-                    *slot *= beta;
-                }
-            }
-        }
-    }
-    let accum = if beta == 0.0 {
-        faer::Accum::Replace
+fn pivot_floor(value: f64, nrm: f64) -> f64 {
+    let floor = 1e-30 * nrm;
+    if floor != 0.0 && value.abs() < floor {
+        if value < 0.0 { -floor } else { floor }
     } else {
-        faer::Accum::Add
-    };
-    unsafe {
-        let dst = faer::MatMut::<f64>::from_raw_parts_mut(c, m, n, c_row_stride, c_col_stride);
-        let lhs = faer::MatRef::<f64>::from_raw_parts(a, m, k, a_row_stride, a_col_stride);
-        let rhs = faer::MatRef::<f64>::from_raw_parts(b, k, n, b_row_stride, b_col_stride);
-        faer::linalg::matmul::matmul(dst, accum, lhs, rhs, alpha, faer::Par::Seq);
-    }
-}
-
-fn for_tiles(n_tasks: usize, f: impl Fn(usize) + Send + Sync) {
-    if n_tasks == 0 {
-        return;
-    }
-    #[cfg(feature = "par")]
-    {
-        use rayon::prelude::*;
-        (0..n_tasks).into_par_iter().for_each(f);
-    }
-    #[cfg(not(feature = "par"))]
-    {
-        for task in 0..n_tasks {
-            f(task);
-        }
-    }
-}
-
-/// Read pointer shared by tiles. A method keeps the wrapper as the
-/// closure capture. A public field would be captured as a raw pointer,
-/// which is not `Sync`.
-#[derive(Clone, Copy)]
-struct SyncPtr(*const f64);
-unsafe impl Send for SyncPtr {}
-unsafe impl Sync for SyncPtr {}
-
-impl SyncPtr {
-    fn get(self) -> *const f64 {
-        self.0
-    }
-
-    fn add(self, count: usize) -> *const f64 {
-        unsafe { self.0.add(count) }
-    }
-}
-
-/// Pointer shared by tiles that write disjoint entries.
-#[derive(Clone, Copy)]
-struct SyncMut(*mut f64);
-unsafe impl Send for SyncMut {}
-unsafe impl Sync for SyncMut {}
-
-impl SyncMut {
-    fn add(self, count: usize) -> *mut f64 {
-        unsafe { self.0.add(count) }
+        value
     }
 }
 
@@ -1303,8 +1702,8 @@ mod reduction_tests {
                 right[(row, col)] = b[col * n + row];
             }
         }
-        let (ea, _) = faer_sequential(&left).unwrap();
-        let (eb, _) = faer_sequential(&right).unwrap();
+        let (ea, _, _) = eigh_symmetric(&left).unwrap();
+        let (eb, _, _) = eigh_symmetric(&right).unwrap();
         let mut gap = 0.0f64;
         for i in 0..n {
             gap = gap.max((ea[i] - eb[i]).abs());
@@ -1314,7 +1713,11 @@ mod reduction_tests {
 
     #[test]
     fn reduction_preserves_the_spectrum() {
-        for n in [70usize, 140, 256] {
+        let mut sizes = vec![70usize, 140];
+        if !cfg!(debug_assertions) {
+            sizes.push(256);
+        }
+        for n in sizes {
             let mut state = 0x70_u64.wrapping_add(n as u64);
             let mut a = vec![0.0; n * n];
             for col in 0..n {
@@ -1322,19 +1725,67 @@ mod reduction_tests {
                     state = state
                         .wrapping_mul(0x5851_F42D_4C95_7F2D)
                         .wrapping_add(0x1405_7B7E_F767_814F);
-                    let value = ((state >> 11) as u32 as f64 / u32::MAX as f64).mul_add(2.0, -1.0);
+                    let unit = (state >> 11) as u32 as f64 / u32::MAX as f64;
+                    let value = unit * 2.0 - 1.0;
                     a[col * n + row] = value;
                     a[row * n + col] = value;
                 }
             }
             let mut matrix = a.clone();
-            let mut refs = dense_to_band(&mut matrix, n);
+            let _panels = dense_to_band(&mut matrix, n);
             assert!(eval_gap(&a, &matrix, n) < 1e-8, "n={n} band reduction");
-            band_to_tridiagonal(&mut matrix, n, &mut refs);
+            let mut chase = Vec::new();
+            band_to_tridiagonal(&mut matrix, n, &mut chase);
             assert!(
                 eval_gap(&a, &matrix, n) < 1e-8,
                 "n={n} tridiagonal reduction"
             );
+        }
+    }
+
+    #[test]
+    fn chase_blocks_match_the_reflector_product() {
+        for n in [96usize, 220] {
+            let mut state = 0x96_u64.wrapping_add(n as u64);
+            let mut a = vec![0.0; n * n];
+            for col in 0..n {
+                for row in col..n {
+                    state = state
+                        .wrapping_mul(0x5851_F42D_4C95_7F2D)
+                        .wrapping_add(0x1405_7B7E_F767_814F);
+                    let unit = (state >> 11) as u32 as f64 / u32::MAX as f64;
+                    let value = unit * 2.0 - 1.0;
+                    a[col * n + row] = value;
+                    a[row * n + col] = value;
+                }
+            }
+            let mut matrix = a;
+            let _panels = dense_to_band(&mut matrix, n);
+            let mut refs = Vec::new();
+            band_to_tridiagonal(&mut matrix, n, &mut refs);
+            let chase = group_chase(&refs);
+            let mut single = vec![0.0; n];
+            let mut blocked = vec![0.0; n];
+            for i in 0..n {
+                single[i] = (i as f64) * 0.01;
+                blocked[i] = single[i];
+            }
+            for reflector in refs.iter().rev() {
+                let mut dot = 0.0;
+                for (offset, &value) in reflector.v.iter().enumerate() {
+                    dot += value * single[reflector.start + offset];
+                }
+                let scale = reflector.tau * dot;
+                for (offset, &value) in reflector.v.iter().enumerate() {
+                    single[reflector.start + offset] -= scale * value;
+                }
+            }
+            apply_back_transform(&mut blocked, n, 1, &[], &chase);
+            let mut gap = 0.0f64;
+            for i in 0..n {
+                gap = gap.max((single[i] - blocked[i]).abs());
+            }
+            assert!(gap < 1e-8, "n={n} blocked chase product gap {gap}");
         }
     }
 }
