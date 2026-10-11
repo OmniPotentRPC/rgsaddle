@@ -53,6 +53,16 @@ def test_version() -> None:
     assert _core.__version__ == rgsaddle.__version__
 
 
+def test_header_constants_match_the_int_enums() -> None:
+    assert int(ForceGate.L2_NORM) == _core.RGSADDLE_FORCE_L2
+    assert int(ForceGate.LINF_NORM) == _core.RGSADDLE_FORCE_LINF
+    assert int(ForceGate.MAX_FORCE_ON_ATOM) == _core.RGSADDLE_FORCE_MAX_ATOM
+    assert int(MinModeKind.DIMER) == _core.RGSADDLE_MINMODE_DIMER
+    assert int(MinModeKind.LANCZOS) == _core.RGSADDLE_MINMODE_LANCZOS
+    assert int(IrcKind.GS2) == _core.RGSADDLE_IRC_GS2
+    assert int(IrcKind.MOROKUMA) == _core.RGSADDLE_IRC_MOROKUMA
+
+
 def test_names_and_values() -> None:
     for cls, members in TABLE.items():
         assert issubclass(cls, enum.IntEnum)
