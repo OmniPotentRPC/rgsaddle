@@ -1,6 +1,6 @@
 # MIT License
 # Copyright 2026 Rohit Goswami
-"""Typed controls for band, IRC, and Sella sessions.
+"""Status codes and enum controls for the stencil surface.
 
 The extension module is ``rgsaddle._core``. Importing this package does
 not import ASE. Use ``rgsaddle.ase`` for the image adapter.
