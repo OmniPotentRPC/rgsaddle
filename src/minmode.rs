@@ -120,6 +120,16 @@ pub struct MinModeConfig {
     pub max_rotations: usize,
     /// Krylov dimension for [`MinModeKind::Lanczos`].
     pub krylov_dim: usize,
+    /// Ritz vectors kept when a Lanczos basis fills before the residual
+    /// test. Zero keeps the single-pass stop at [`Self::krylov_dim`].
+    /// Wu and Simon, SIAM J. Matrix Anal. Appl. 22, 602 (2000),
+    /// doi:10.1137/S0895479898334605.
+    pub lanczos_restart_keep: usize,
+    /// Recycle the previous second Ritz vector when
+    /// `(theta_2 - theta_1) / |theta_1|` is strictly below this.
+    /// The vector is only a direction: the next estimate applies a fresh
+    /// Hessian action and never reuses the old one.
+    pub lanczos_recycle_gap: f64,
     /// Translation stops when max|F| falls under this and the
     /// curvature along the lowest mode is negative.
     pub force_tol: f64,
@@ -137,6 +147,8 @@ impl Default for MinModeConfig {
             rotation_angle_tol: 0.0,
             max_rotations: 20,
             krylov_dim: 12,
+            lanczos_restart_keep: 2,
+            lanczos_recycle_gap: 0.2,
             force_tol: 1e-3,
             max_move: 0.2,
             method: Method::Fire {
@@ -174,6 +186,11 @@ pub struct ModeEstimate {
     /// Surface evaluations, the centre included when it was neither
     /// cached nor supplied by the host.
     pub evaluations: usize,
+    /// Lanczos reached the residual bound (or an invariant subspace).
+    /// False when the action budget or, with `lanczos_restart_keep = 0`,
+    /// the Krylov dimension stopped the basis first. The dimer sets this
+    /// when the rotation exits before `max_rotations`.
+    pub converged: bool,
 }
 
 /// Rotation of the mode between two steps past which the translation
@@ -402,24 +419,123 @@ fn rotate_dimer<S: PointSurface>(
     Ok((n, curvature, rotations))
 }
 
+struct LanczosOut {
+    mode: Array1<f64>,
+    curvature: f64,
+    actions: usize,
+    converged: bool,
+    /// Second-lowest Ritz vector and `(theta_2 - theta_1) / |theta_1|`.
+    second: RitzTail,
+}
+
+/// Second-lowest Ritz vector and its gap ratio.
+type RitzTail = Option<(Array1<f64>, f64)>;
+
+/// Mode, curvature, actions, residual flag, and the optional second vector.
+type ModeSample = (Array1<f64>, f64, usize, bool, RitzTail);
+
+struct LanczosBasis {
+    q: Vec<Array1<f64>>,
+    alpha: Vec<f64>,
+    beta: Vec<f64>,
+    w: Array1<f64>,
+    beta_next: f64,
+    actions: usize,
+}
+
+/// `Q^T w` over columns in index order, then `w - Q (Q^T w)`.
+///
+/// The product stays in this function so a deterministic emulated
+/// kernel can replace it later. The sum is one dot per column, in
+/// column order, which does not depend on the thread count.
+const REORTH_SERIAL_BELOW: usize = 65_536;
+const REORTH_CHUNK: usize = 4_096;
+
+fn reorthogonalize(basis: &[Array1<f64>], mut w: Array1<f64>) -> Array1<f64> {
+    for column in basis {
+        let overlap = column_overlap(w.view(), column.view());
+        if w.len() < REORTH_SERIAL_BELOW {
+            w = &w - &(column * overlap);
+        } else {
+            let ws = w.as_slice_mut().expect("mode storage is contiguous");
+            let cs = column.as_slice().expect("mode storage is contiguous");
+            scale_sub(ws, cs, overlap);
+        }
+    }
+    w
+}
+
+/// One dot. Short vectors use the serial `ndarray` product, which is
+/// the single-pass Lanczos overlap. Long vectors split into fixed
+/// chunks and add the partials in chunk order, so the bits do not
+/// depend on the thread count.
+fn column_overlap(w: ArrayView1<f64>, column: ArrayView1<f64>) -> f64 {
+    if w.len() < REORTH_SERIAL_BELOW {
+        return w.dot(&column);
+    }
+    use rayon::prelude::{IntoParallelIterator, ParallelIterator};
+    let starts: Vec<usize> = (0..w.len()).step_by(REORTH_CHUNK).collect();
+    let partials: Vec<f64> = starts
+        .into_par_iter()
+        .map(|start| {
+            let end = (start + REORTH_CHUNK).min(w.len());
+            let mut sum = 0.0;
+            for i in start..end {
+                sum += w[i] * column[i];
+            }
+            sum
+        })
+        .collect();
+    let mut sum = 0.0;
+    for partial in partials {
+        sum += partial;
+    }
+    sum
+}
+
+fn scale_sub(w: &mut [f64], column: &[f64], overlap: f64) {
+    use rayon::prelude::{IndexedParallelIterator, ParallelIterator, ParallelSliceMut};
+    // Same chunk width as [`column_overlap`]. Each chunk writes its
+    // own indices, so the update matches at one thread and at many.
+    w.par_chunks_mut(REORTH_CHUNK)
+        .enumerate()
+        .for_each(|(chunk, dest)| {
+            let start = chunk * REORTH_CHUNK;
+            for (offset, value) in dest.iter_mut().enumerate() {
+                *value -= column[start + offset] * overlap;
+            }
+        });
+}
+
 /// Lanczos: build a Krylov basis of finite-difference Hessian actions
-/// and take the lowest Ritz vector. Stops once the Ritz residual
-/// `beta_j |s_j|` (the norm of `H y - theta y` for the lowest Ritz
-/// pair `(theta, y)` in exact arithmetic, Paige 1971) meets
-/// `rotation_tol`, so a seed that already is the mode costs one action.
+/// and take the lowest Ritz vector. The residual is `beta_j |s_j|`
+/// (Paige 1971). A seed that already is the mode costs one action.
+///
+/// With `lanczos_restart_keep = 0` the basis stops at `krylov_dim`,
+/// which is the previous single pass. A positive keep thick-restarts
+/// that basis (Wu and Simon, SIAM J. Matrix Anal. Appl. 22, 602 (2000),
+/// doi:10.1137/S0895479898334605) until the residual meets
+/// `rotation_tol` or `max_rotations` actions are spent.
+/// `recycle`, when the caller kept it, is a direction from the previous
+/// point. It is orthogonalized and costs one new action. The old action
+/// is not reused.
 fn lanczos_mode<S: PointSurface>(
     surface: &Counted<'_, S>,
     x: ArrayView1<f64>,
     g0: ArrayView1<f64>,
     seed: Array1<f64>,
     config: &MinModeConfig,
-) -> Result<(Array1<f64>, f64, usize), SaddleError> {
+    recycle: Option<&Array1<f64>>,
+) -> Result<LanczosOut, SaddleError> {
     let n = seed.len();
     let m = config.krylov_dim.min(n).max(1);
     let mut q: Vec<Array1<f64>> = Vec::with_capacity(m);
     let mut alpha: Vec<f64> = Vec::with_capacity(m);
     let mut beta: Vec<f64> = Vec::with_capacity(m);
     q.push(normalize(seed));
+    if let Some(extra) = recycle.filter(|_| config.lanczos_restart_keep > 0) {
+        return lanczos_recycled(surface, x, g0, config, q, extra);
+    }
 
     let mut actions = 0;
     loop {
@@ -432,25 +548,585 @@ fn lanczos_mode<S: PointSurface>(
         if j > 0 {
             w = &w - &(&q[j - 1] * beta[j - 1]);
         }
-        // Full reorthogonalization: the Krylov dimension is small and
-        // finite-difference actions are noisy.
-        for qi in q.iter() {
-            let overlap = w.dot(qi);
-            w = &w - &(qi * overlap);
-        }
+        w = reorthogonalize(&q, w);
         let b = w.dot(&w).sqrt();
         let (theta, s) = lowest_ritz(&alpha, &beta);
+        let second = if config.lanczos_restart_keep > 0 {
+            ritz_pair(&alpha, &beta, &q).2
+        } else {
+            None
+        };
         let residual = b * s[j].abs();
-        if residual <= config.rotation_tol || alpha.len() == m || b <= 1e-12 {
-            let mut mode = Array1::zeros(n);
-            for (qi, si) in q.iter().zip(s.iter()) {
-                mode = &mode + &(qi * *si);
-            }
-            return Ok((normalize(mode), theta, actions));
+        let ok = residual <= config.rotation_tol || b <= 1e-12;
+        let budget = config.lanczos_restart_keep > 0 && actions >= config.max_rotations;
+        let cap = alpha.len() == m;
+        if ok || budget || (cap && config.lanczos_restart_keep == 0) {
+            return Ok(LanczosOut {
+                mode: combine_ritz(&q, &s),
+                curvature: theta,
+                actions,
+                converged: ok,
+                second,
+            });
+        }
+        if cap {
+            return lanczos_restarted(
+                surface,
+                x,
+                g0,
+                config,
+                LanczosBasis {
+                    q,
+                    alpha,
+                    beta,
+                    w,
+                    beta_next: b,
+                    actions,
+                },
+            );
         }
         beta.push(b);
         q.push(w / b);
     }
+}
+
+fn combine_ritz(q: &[Array1<f64>], s: &[f64]) -> Array1<f64> {
+    let mut mode = Array1::zeros(q[0].len());
+    for (qi, si) in q.iter().zip(s.iter()) {
+        mode = &mode + &(qi * *si);
+    }
+    normalize(mode)
+}
+
+fn ritz_pair(alpha: &[f64], beta: &[f64], q: &[Array1<f64>]) -> (f64, Vec<f64>, RitzTail) {
+    let (evals, evecs) = tridiagonal_eigen(alpha, beta);
+    let mut order: Vec<usize> = (0..evals.len()).collect();
+    order.sort_by(|&i, &j| evals[i].total_cmp(&evals[j]));
+    let lowest = order[0];
+    let s: Vec<f64> = evecs.iter().map(|row| row[lowest]).collect();
+    let second = order.get(1).map(|&col| {
+        let coeffs: Vec<f64> = evecs.iter().map(|row| row[col]).collect();
+        let gap = if evals[lowest].abs() > 0.0 {
+            (evals[col] - evals[lowest]) / evals[lowest].abs()
+        } else {
+            f64::INFINITY
+        };
+        (combine_ritz(q, &coeffs), gap)
+    });
+    (evals[lowest], s, second)
+}
+
+/// Tridiagonal factor of a Lanczos projection. The single-pass return
+/// still goes through [`lowest_ritz`], so `lanczos_restart_keep = 0`
+/// does not call this.
+fn tridiagonal_eigen(alpha: &[f64], beta: &[f64]) -> (Vec<f64>, Vec<Vec<f64>>) {
+    let k = alpha.len();
+    let mut t = vec![vec![0.0; k]; k];
+    for i in 0..k {
+        t[i][i] = alpha[i];
+        if i + 1 < k {
+            t[i][i + 1] = beta[i];
+            t[i + 1][i] = beta[i];
+        }
+    }
+    projected_eigen(&t)
+}
+
+fn dense_eigen(proj: &[Vec<f64>]) -> (Vec<f64>, Vec<Vec<f64>>) {
+    projected_eigen(proj)
+}
+
+/// Eigenpairs of a small symmetric projection.
+///
+/// Householder reduction, then an implicit-shift QL. Columns of the
+/// second matrix are the eigenvectors, `v[row][col]`. Duersch, Shao,
+/// Yang, and Gu, SIAM J. Sci. Comput. 40, C655 (2018),
+/// doi:10.1137/17M1129830, is the stable reference for this tridiagonal
+/// eigenproblem at larger order. The Krylov projection stays small
+/// enough for the QL. [`lowest_ritz`] keeps its Jacobi sweep so a keep
+/// of zero matches the single pass.
+#[allow(clippy::needless_range_loop)]
+fn projected_eigen(a: &[Vec<f64>]) -> (Vec<f64>, Vec<Vec<f64>>) {
+    let n = a.len();
+    if n == 0 {
+        return (Vec::new(), Vec::new());
+    }
+    if n == 1 {
+        return (vec![a[0][0]], vec![vec![1.0]]);
+    }
+    let mut symmetric = a.to_vec();
+    for i in 0..n {
+        for j in 0..i {
+            let value = 0.5 * (symmetric[i][j] + symmetric[j][i]);
+            symmetric[i][j] = value;
+            symmetric[j][i] = value;
+        }
+    }
+    let (mut diag, mut off, mut vectors) = householder_tridiagonal(&symmetric);
+    implicit_shift_ql(&mut diag, &mut off, &mut vectors);
+    (diag, vectors)
+}
+
+struct Arrow {
+    q: Vec<Array1<f64>>,
+    proj: Vec<Vec<f64>>,
+    /// Next column that still needs a Hessian action.
+    acted: usize,
+}
+
+fn arrow_from_tridiagonal(
+    q: &[Array1<f64>],
+    alpha: &[f64],
+    beta: &[f64],
+    w: Array1<f64>,
+    b: f64,
+    k_keep: usize,
+) -> Arrow {
+    let (evals, evecs) = tridiagonal_eigen(alpha, beta);
+    let mut order: Vec<usize> = (0..evals.len()).collect();
+    order.sort_by(|&i, &j| evals[i].total_cmp(&evals[j]));
+    let k = k_keep.min(order.len().saturating_sub(1)).max(1);
+    let m = q.len();
+    let mut kept = Vec::with_capacity(k + 1);
+    let mut thetas = Vec::with_capacity(k);
+    let mut couplings = Vec::with_capacity(k);
+    for &col in &order[..k] {
+        let coeffs: Vec<f64> = evecs.iter().map(|row| row[col]).collect();
+        let mut y = Array1::zeros(q[0].len());
+        for (qi, si) in q.iter().zip(coeffs.iter()) {
+            y = &y + &(qi * *si);
+        }
+        kept.push(y);
+        thetas.push(evals[col]);
+        couplings.push(b * evecs[m - 1][col]);
+    }
+    kept.push(&w / b);
+    let n = kept.len();
+    let mut proj = vec![vec![0.0; n]; n];
+    for i in 0..k {
+        proj[i][i] = thetas[i];
+        proj[i][k] = couplings[i];
+        proj[k][i] = couplings[i];
+    }
+    Arrow {
+        q: kept,
+        proj,
+        acted: k,
+    }
+}
+
+fn lanczos_restarted<S: PointSurface>(
+    surface: &Counted<'_, S>,
+    x: ArrayView1<f64>,
+    g0: ArrayView1<f64>,
+    config: &MinModeConfig,
+    built: LanczosBasis,
+) -> Result<LanczosOut, SaddleError> {
+    let LanczosBasis {
+        q,
+        alpha,
+        beta,
+        w,
+        beta_next: b,
+        actions,
+    } = built;
+    let k_keep = config.lanczos_restart_keep;
+    if k_keep == 0 || q.len() < 2 {
+        let (theta, s, second) = ritz_pair(&alpha, &beta, &q);
+        return Ok(LanczosOut {
+            mode: combine_ritz(&q, &s),
+            curvature: theta,
+            actions,
+            converged: false,
+            second,
+        });
+    }
+    let arrow = arrow_from_tridiagonal(&q, &alpha, &beta, w, b, k_keep);
+    lanczos_arrow(surface, x, g0, config, arrow, actions)
+}
+
+fn lanczos_recycled<S: PointSurface>(
+    surface: &Counted<'_, S>,
+    x: ArrayView1<f64>,
+    g0: ArrayView1<f64>,
+    config: &MinModeConfig,
+    mut q: Vec<Array1<f64>>,
+    extra: &Array1<f64>,
+) -> Result<LanczosOut, SaddleError> {
+    let hv = surface.action(x, g0, q[0].view(), config)?;
+    let mut actions = 1;
+    let a = hv.dot(&q[0]);
+    let w = reorthogonalize(&q, &hv - &(&q[0] * a));
+    let b = w.dot(&w).sqrt();
+    let mut direction = reorthogonalize(&q, extra.clone());
+    let norm = direction.dot(&direction).sqrt();
+    if norm <= 1e-12 {
+        let (theta, s, second) = ritz_pair(&[a], &[], &q);
+        let residual = b * s[0].abs();
+        return Ok(LanczosOut {
+            mode: combine_ritz(&q, &s),
+            curvature: theta,
+            actions,
+            converged: residual <= config.rotation_tol || b <= 1e-12,
+            second,
+        });
+    }
+    let _ = (w, b);
+    direction /= norm;
+    q.push(direction);
+    let mut proj = vec![vec![0.0; 2]; 2];
+    proj[0][0] = a;
+    proj[0][1] = 0.0;
+    proj[1][0] = 0.0;
+    actions += 1;
+    let hv2 = surface.action(x, g0, q[1].view(), config)?;
+    proj[1][1] = hv2.dot(&q[1]);
+    proj[0][1] = hv2.dot(&q[0]);
+    proj[1][0] = proj[0][1];
+    let mut acc = &hv2 - &(&q[0] * proj[0][1]);
+    acc = &acc - &(&q[1] * proj[1][1]);
+    acc = reorthogonalize(&q, acc);
+    let b2 = acc.dot(&acc).sqrt();
+    let (theta, s, residual, second) = dense_ritz(&proj, &q, b2);
+    let ok = residual <= config.rotation_tol || b2 <= 1e-12;
+    let m = config.krylov_dim.min(q[0].len()).max(1);
+    if ok || actions >= config.max_rotations || q.len() >= m {
+        return Ok(LanczosOut {
+            mode: combine_ritz(&q, &s),
+            curvature: theta,
+            actions,
+            converged: ok,
+            second,
+        });
+    }
+    for row in proj.iter_mut() {
+        row.push(0.0);
+    }
+    let mut col = vec![0.0; q.len() + 1];
+    col[1] = b2;
+    proj.push(col);
+    q.push(&acc / b2);
+    lanczos_arrow(surface, x, g0, config, Arrow { q, proj, acted: 2 }, actions)
+}
+
+fn lanczos_arrow<S: PointSurface>(
+    surface: &Counted<'_, S>,
+    x: ArrayView1<f64>,
+    g0: ArrayView1<f64>,
+    config: &MinModeConfig,
+    mut arrow: Arrow,
+    mut actions: usize,
+) -> Result<LanczosOut, SaddleError> {
+    let m = config.krylov_dim.min(arrow.q[0].len()).max(1);
+    let k_keep = config.lanczos_restart_keep.max(1);
+    loop {
+        if arrow.acted >= arrow.q.len() {
+            return Ok(arrow_out(&arrow, actions, false, 0.0));
+        }
+        if actions >= config.max_rotations {
+            return Ok(arrow_out(&arrow, actions, false, 0.0));
+        }
+        let j = arrow.acted;
+        let hv = surface.action(x, g0, arrow.q[j].view(), config)?;
+        actions += 1;
+        let n = arrow.q.len();
+        for i in 0..n {
+            let dot = hv.dot(&arrow.q[i]);
+            arrow.proj[i][j] = dot;
+            arrow.proj[j][i] = dot;
+        }
+        let mut w = hv;
+        for i in 0..n {
+            w = &w - &(&arrow.q[i] * arrow.proj[i][j]);
+        }
+        w = reorthogonalize(&arrow.q, w);
+        let b = w.dot(&w).sqrt();
+        let (theta, s, residual, second) = dense_ritz(&arrow.proj, &arrow.q, b);
+        let ok = residual <= config.rotation_tol || b <= 1e-12;
+        if ok || actions >= config.max_rotations {
+            return Ok(LanczosOut {
+                mode: combine_ritz(&arrow.q, &s),
+                curvature: theta,
+                actions,
+                converged: ok,
+                second,
+            });
+        }
+        if arrow.q.len() == m {
+            if k_keep + 1 >= arrow.q.len() {
+                return Ok(LanczosOut {
+                    mode: combine_ritz(&arrow.q, &s),
+                    curvature: theta,
+                    actions,
+                    converged: false,
+                    second,
+                });
+            }
+            arrow = arrow_from_dense(&arrow, &w, b, k_keep);
+            continue;
+        }
+        for row in arrow.proj.iter_mut() {
+            row.push(0.0);
+        }
+        let mut col = vec![0.0; n + 1];
+        col[j] = b;
+        arrow.proj.push(col);
+        arrow.q.push(&w / b);
+        arrow.acted = j + 1;
+    }
+}
+
+fn arrow_out(arrow: &Arrow, actions: usize, converged: bool, b: f64) -> LanczosOut {
+    let n = arrow.acted.min(arrow.q.len()).max(1);
+    let proj: Vec<Vec<f64>> = arrow.proj[..n]
+        .iter()
+        .map(|row| row[..n].to_vec())
+        .collect();
+    let (theta, s, _, second) = dense_ritz(&proj, &arrow.q[..n], b);
+    LanczosOut {
+        mode: combine_ritz(&arrow.q[..n], &s),
+        curvature: theta,
+        actions,
+        converged,
+        second,
+    }
+}
+
+fn dense_ritz(proj: &[Vec<f64>], q: &[Array1<f64>], b: f64) -> (f64, Vec<f64>, f64, RitzTail) {
+    let (evals, evecs) = dense_eigen(proj);
+    let mut order: Vec<usize> = (0..evals.len()).collect();
+    order.sort_by(|&i, &j| evals[i].total_cmp(&evals[j]));
+    let lowest = order[0];
+    let s: Vec<f64> = evecs.iter().map(|row| row[lowest]).collect();
+    let residual = b * s.last().copied().unwrap_or(0.0).abs();
+    let second = order.get(1).and_then(|&col| {
+        if col >= evecs[0].len() {
+            return None;
+        }
+        let coeffs: Vec<f64> = evecs.iter().map(|row| row[col]).collect();
+        let gap = if evals[lowest].abs() > 0.0 {
+            (evals[col] - evals[lowest]) / evals[lowest].abs()
+        } else {
+            f64::INFINITY
+        };
+        Some((combine_ritz(q, &coeffs), gap))
+    });
+    (evals[lowest], s, residual, second)
+}
+
+fn arrow_from_dense(arrow: &Arrow, w: &Array1<f64>, b: f64, k_keep: usize) -> Arrow {
+    let (evals, evecs) = dense_eigen(&arrow.proj);
+    let mut order: Vec<usize> = (0..evals.len()).collect();
+    order.sort_by(|&i, &j| evals[i].total_cmp(&evals[j]));
+    let k = k_keep.min(order.len().saturating_sub(1)).max(1);
+    let m = arrow.q.len();
+    let mut kept = Vec::with_capacity(k + 1);
+    let mut thetas = Vec::with_capacity(k);
+    let mut couplings = Vec::with_capacity(k);
+    for &col in &order[..k] {
+        let coeffs: Vec<f64> = evecs.iter().map(|row| row[col]).collect();
+        let mut y = Array1::zeros(arrow.q[0].len());
+        for (qi, si) in arrow.q.iter().zip(coeffs.iter()) {
+            y = &y + &(qi * *si);
+        }
+        kept.push(y);
+        thetas.push(evals[col]);
+        couplings.push(b * evecs[m - 1][col]);
+    }
+    kept.push(w / b);
+    let n = kept.len();
+    let mut proj = vec![vec![0.0; n]; n];
+    for i in 0..k {
+        proj[i][i] = thetas[i];
+        proj[i][k] = couplings[i];
+        proj[k][i] = couplings[i];
+    }
+    Arrow {
+        q: kept,
+        proj,
+        acted: k,
+    }
+}
+
+#[allow(clippy::needless_range_loop)]
+/// Symmetric Householder reduction. Returns the diagonal, the
+/// subdiagonal in Numerical Recipes layout (`off[0] = 0`, `off[i]`
+/// couples rows `i - 1` and `i`), and the orthogonal factor as columns.
+fn householder_tridiagonal(a_in: &[Vec<f64>]) -> (Vec<f64>, Vec<f64>, Vec<Vec<f64>>) {
+    let n = a_in.len();
+    let mut a = vec![vec![0.0; n + 1]; n + 1];
+    for i in 1..=n {
+        for j in 1..=n {
+            a[i][j] = a_in[i - 1][j - 1];
+        }
+    }
+    let mut diag = vec![0.0; n + 1];
+    let mut off = vec![0.0; n + 1];
+    for i in (2..=n).rev() {
+        let l = i - 1;
+        let mut h = 0.0;
+        if l > 1 {
+            let mut scale = 0.0;
+            for k in 1..=l {
+                scale += a[i][k].abs();
+            }
+            if scale == 0.0 {
+                off[i] = a[i][l];
+            } else {
+                for k in 1..=l {
+                    a[i][k] /= scale;
+                    h += a[i][k] * a[i][k];
+                }
+                let pivot = a[i][l];
+                let signed = if pivot >= 0.0 { -h.sqrt() } else { h.sqrt() };
+                off[i] = scale * signed;
+                h -= pivot * signed;
+                a[i][l] = pivot - signed;
+                let mut dot_u = 0.0;
+                for j in 1..=l {
+                    a[j][i] = a[i][j] / h;
+                    let mut row = 0.0;
+                    for k in 1..=j {
+                        row += a[j][k] * a[i][k];
+                    }
+                    for k in (j + 1)..=l {
+                        row += a[k][j] * a[i][k];
+                    }
+                    off[j] = row / h;
+                    dot_u += off[j] * a[i][j];
+                }
+                let half = dot_u / (h + h);
+                for j in 1..=l {
+                    let column = a[i][j];
+                    let corrected = off[j] - half * column;
+                    off[j] = corrected;
+                    for k in 1..=j {
+                        a[j][k] -= column * off[k] + corrected * a[i][k];
+                    }
+                }
+            }
+        } else {
+            off[i] = a[i][l];
+        }
+        diag[i] = h;
+    }
+    diag[1] = 0.0;
+    off[1] = 0.0;
+    for i in 1..=n {
+        let l = i - 1;
+        if diag[i] != 0.0 {
+            for j in 1..=l {
+                let mut product = 0.0;
+                for k in 1..=l {
+                    product += a[i][k] * a[k][j];
+                }
+                for k in 1..=l {
+                    a[k][j] -= product * a[k][i];
+                }
+            }
+        }
+        diag[i] = a[i][i];
+        a[i][i] = 1.0;
+        for j in 1..=l {
+            a[j][i] = 0.0;
+            a[i][j] = 0.0;
+        }
+    }
+    let mut vectors = vec![vec![0.0; n]; n];
+    for i in 0..n {
+        for j in 0..n {
+            vectors[i][j] = a[i + 1][j + 1];
+        }
+    }
+    (diag[1..=n].to_vec(), off[1..=n].to_vec(), vectors)
+}
+
+/// Implicit-shift QL for a symmetric tridiagonal matrix.
+///
+/// `diag` is overwritten with the eigenvalues. `off` uses the
+/// Householder layout. `vectors` is multiplied on the right by the QL
+/// factors, so a Householder factor in `vectors` becomes the
+/// eigenvectors of the original matrix.
+fn implicit_shift_ql(diag: &mut [f64], off_in: &mut [f64], vectors: &mut [Vec<f64>]) {
+    let n = diag.len();
+    if n <= 1 {
+        return;
+    }
+    let mut d = vec![0.0; n + 1];
+    let mut e = vec![0.0; n + 1];
+    d[1..=n].copy_from_slice(diag);
+    e[1..=n].copy_from_slice(off_in);
+    for i in 2..=n {
+        e[i - 1] = e[i];
+    }
+    e[n] = 0.0;
+    for l in 1..=n {
+        let mut iter = 0;
+        loop {
+            let mut m = l;
+            while m < n {
+                let scale = d[m].abs() + d[m + 1].abs();
+                if e[m].abs() + scale == scale {
+                    break;
+                }
+                m += 1;
+            }
+            if m == l {
+                break;
+            }
+            iter += 1;
+            if iter > 64 {
+                break;
+            }
+            let shift = (d[l + 1] - d[l]) / (2.0 * e[l]);
+            let radius = (shift * shift + 1.0).sqrt();
+            let denom = if shift >= 0.0 {
+                shift + radius
+            } else {
+                shift - radius
+            };
+            let mut g = d[m] - d[l] + e[l] / denom;
+            let mut s = 1.0;
+            let mut c = 1.0;
+            let mut p = 0.0;
+            let mut underflow = false;
+            let mut i = m;
+            while i > l {
+                i -= 1;
+                let f = s * e[i];
+                let b = c * e[i];
+                let r = (f * f + g * g).sqrt();
+                e[i + 1] = r;
+                if r == 0.0 {
+                    d[i + 1] -= p;
+                    e[m] = 0.0;
+                    underflow = true;
+                    break;
+                }
+                s = f / r;
+                c = g / r;
+                g = d[i + 1] - p;
+                let rot = (d[i] - g) * s + 2.0 * c * b;
+                p = s * rot;
+                d[i + 1] = g + p;
+                g = c * rot - b;
+                let left = i - 1;
+                let right = i;
+                for row in vectors.iter_mut() {
+                    let upper = row[right];
+                    row[right] = s * row[left] + c * upper;
+                    row[left] = c * row[left] - s * upper;
+                }
+            }
+            if underflow {
+                continue;
+            }
+            d[l] -= p;
+            e[l] = g;
+            e[m] = 0.0;
+        }
+    }
+    diag.copy_from_slice(&d[1..=n]);
 }
 
 /// Lowest eigenpair of the symmetric tridiagonal (alpha, beta), with
@@ -573,6 +1249,12 @@ pub struct MinModeSession {
     /// Gradient at `x`, when known: from the last translation's
     /// accepted point or from the host.
     centre: Option<PointEval>,
+    /// Second-lowest Ritz vector from the previous Lanczos estimate,
+    /// with `(theta_2 - theta_1) / |theta_1|`.
+    recycle: Option<(Array1<f64>, f64)>,
+    /// Residual test from the last Lanczos estimate. The dimer uses the
+    /// rotation-cap test.
+    mode_converged: bool,
     /// The first surface error raised inside the translation oracle
     /// during the current step; the rgmin oracle signature has no
     /// error channel of its own.
@@ -626,6 +1308,8 @@ impl MinModeSession {
             solver,
             iteration: 0,
             centre: None,
+            recycle: None,
+            mode_converged: false,
             surface_error: Mutex::new(None),
         })
     }
@@ -759,19 +1443,19 @@ impl MinModeSession {
         surface: &Counted<'_, S>,
         position: ArrayView1<f64>,
         gradient: ArrayView1<f64>,
-    ) -> Result<(Array1<f64>, f64, usize), SaddleError> {
+    ) -> Result<ModeSample, SaddleError> {
         let excluded = surface.surface.excluded_modes(position)?;
         if excluded.ncols() != position.len() || !excluded.iter().all(|v| v.is_finite()) {
             return Err(SaddleError::Shape(
                 "minimum-mode excluded directions".into(),
             ));
         }
-        let estimate = |surface: &Counted<'_, S>, seed| match self.config.kind {
-            MinModeKind::Dimer => rotate_dimer(surface, position, gradient, seed, &self.config),
-            MinModeKind::Lanczos => lanczos_mode(surface, position, gradient, seed, &self.config),
-        };
+        let recycle = self
+            .recycle
+            .as_ref()
+            .and_then(|(vector, gap)| (*gap < self.config.lanczos_recycle_gap).then_some(vector));
         if excluded.nrows() == 0 {
-            return estimate(surface, self.mode.clone());
+            return self.estimate_in(surface, position, gradient, self.mode.clone(), recycle);
         }
         let mut space = Complement::new(position.len());
         for direction in excluded.rows() {
@@ -786,13 +1470,60 @@ impl MinModeSession {
                 (0..space.dimension()).map(|i| ((i + 1) as f64 * 1.618033988749895).sin()),
             );
         }
+        let reduced_recycle = recycle.map(|vector| space.reduce(vector.view()));
         let reduced = Counted {
             surface: surface.surface,
             calls: surface.calls,
             space: Some(&space),
         };
-        let (mode, curvature, rotations) = estimate(&reduced, checked_mode(seed)?)?;
-        Ok((space.lift(mode.view()), curvature, rotations))
+        let (mode, curvature, rotations, converged, second) = self.estimate_in(
+            &reduced,
+            position,
+            gradient,
+            checked_mode(seed)?,
+            reduced_recycle.as_ref(),
+        )?;
+        let second = second.map(|(vector, gap)| (space.lift(vector.view()), gap));
+        Ok((
+            space.lift(mode.view()),
+            curvature,
+            rotations,
+            converged,
+            second,
+        ))
+    }
+
+    fn estimate_in<S: PointSurface>(
+        &self,
+        surface: &Counted<'_, S>,
+        position: ArrayView1<f64>,
+        gradient: ArrayView1<f64>,
+        seed: Array1<f64>,
+        recycle: Option<&Array1<f64>>,
+    ) -> Result<ModeSample, SaddleError> {
+        match self.config.kind {
+            MinModeKind::Dimer => {
+                let (mode, curvature, rotations) =
+                    rotate_dimer(surface, position, gradient, seed, &self.config)?;
+                Ok((
+                    mode,
+                    curvature,
+                    rotations,
+                    rotations < self.config.max_rotations,
+                    None,
+                ))
+            }
+            MinModeKind::Lanczos => {
+                let out = lanczos_mode(surface, position, gradient, seed, &self.config, recycle)?;
+                Ok((
+                    out.mode,
+                    out.curvature,
+                    out.actions,
+                    out.converged,
+                    out.second,
+                ))
+            }
+        }
     }
 
     fn refresh_mode<S: PointSurface>(
@@ -800,9 +1531,16 @@ impl MinModeSession {
         surface: &Counted<'_, S>,
         g0: ArrayView1<f64>,
     ) -> Result<(f64, usize), SaddleError> {
-        let (mode, curvature, rotations) = self.mode_at(surface, self.x.view(), g0)?;
+        let (mode, curvature, rotations, converged, second) =
+            self.mode_at(surface, self.x.view(), g0)?;
         self.mode = mode;
         self.curvature = curvature;
+        self.mode_converged = converged;
+        self.recycle = if self.config.lanczos_restart_keep > 0 {
+            second
+        } else {
+            None
+        };
         Ok((curvature, rotations))
     }
 
@@ -833,6 +1571,7 @@ impl MinModeSession {
             curvature,
             rotations,
             evaluations: calls.load(Ordering::Relaxed),
+            converged: self.mode_converged,
         })
     }
 
@@ -977,8 +1716,14 @@ impl MinModeSession {
             // Force and curvature in a convergence decision describe the
             // same point. The accepted gradient supplies the centre, so
             // confirmation pays only for the required Hessian actions.
-            let (mode, accepted_curvature, accepted_rotations) =
+            let (mode, accepted_curvature, accepted_rotations, accepted_converged, second) =
                 self.mode_at(&counted, x.view(), centre.gradient.view())?;
+            self.mode_converged = accepted_converged;
+            self.recycle = if self.config.lanczos_restart_keep > 0 {
+                second
+            } else {
+                None
+            };
             let turned = self.mode.dot(&mode).abs().min(1.0).acos();
             if turned > MODE_RESET_ANGLE {
                 self.solver.forget();
@@ -1026,7 +1771,7 @@ impl MinModeSession {
 mod tests {
     use super::translated_gradient;
     use approx::assert_abs_diff_eq;
-    use ndarray::array;
+    use ndarray::{Array1, array};
 
     #[test]
     fn positive_curvature_keeps_only_the_reversed_mode() {
@@ -1048,5 +1793,133 @@ mod tests {
         assert_abs_diff_eq!(eff[0], -1.0, epsilon = 1e-12);
         assert_abs_diff_eq!(eff[1], -4.0, epsilon = 1e-12);
         assert_abs_diff_eq!(eff[2], 0.5, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn projected_eigen_residuals_stay_small() {
+        let samples = [
+            vec![vec![2.0, 0.0], vec![0.0, -1.0]],
+            vec![vec![1.0, 2.0], vec![2.0, 1.0]],
+            vec![
+                vec![4.0, 0.3, 0.0, 0.0],
+                vec![0.3, -1.0, 0.2, 0.0],
+                vec![0.0, 0.2, 0.5, 0.1],
+                vec![0.0, 0.0, 0.1, 3.0],
+            ],
+        ];
+        for matrix in samples {
+            let (evals, evecs) = super::projected_eigen(&matrix);
+            let n = matrix.len();
+            assert_eq!(evals.len(), n);
+            for col in 0..n {
+                let mut residual = 0.0;
+                for row in 0..n {
+                    let mut product = 0.0;
+                    for k in 0..n {
+                        product += matrix[row][k] * evecs[k][col];
+                    }
+                    let diff = product - evals[col] * evecs[row][col];
+                    residual += diff * diff;
+                }
+                assert!(
+                    residual.sqrt() < 1e-8,
+                    "col {col} residual {} evals {evals:?}",
+                    residual.sqrt()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn reorthogonalization_matches_at_one_and_eight_threads() {
+        let n = 70_000usize;
+        let mut w = Array1::zeros(n);
+        for (i, value) in w.iter_mut().enumerate() {
+            *value = ((i + 1) as f64 * 0.017).sin();
+        }
+        let mut basis = Vec::new();
+        for col in 0..3 {
+            let mut q = Array1::zeros(n);
+            for (i, value) in q.iter_mut().enumerate() {
+                *value = ((i + 3) as f64 * 0.013 * (col + 1) as f64).sin();
+            }
+            basis.push(super::normalize(q));
+        }
+        let mut digests = Vec::new();
+        for threads in [1usize, 2, 8] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            let digest = pool.install(|| {
+                let out = super::reorthogonalize(&basis, w.clone());
+                out.iter()
+                    .flat_map(|v| v.to_le_bytes())
+                    .collect::<Vec<u8>>()
+            });
+            digests.push(digest);
+        }
+        assert_eq!(digests[0], digests[1]);
+        assert_eq!(digests[1], digests[2]);
+    }
+
+    /// Reorthogonalization at n = 3e5. The working set is the basis plus
+    /// one vector. Modified Gram-Schmidt walks columns in order. Each
+    /// dot and update is chunked, so the limit is memory bandwidth.
+    #[test]
+    #[ignore = "times reorthogonalization at n = 3e5"]
+    fn reorthogonalization_scales_with_the_basis() {
+        let n = 300_000usize;
+        let mut w = Array1::from_elem(n, 0.0);
+        for (i, value) in w.iter_mut().enumerate() {
+            *value = ((i + 1) as f64 * 0.017).sin();
+        }
+        let pools: Vec<_> = [1usize, 2, 4, 8]
+            .into_iter()
+            .map(|threads| {
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .build()
+                    .unwrap()
+            })
+            .collect();
+        for k in [12usize, 20, 30] {
+            let mut basis = Vec::with_capacity(k);
+            for col in 0..k {
+                let mut q = Array1::from_elem(n, 0.0);
+                for (i, value) in q.iter_mut().enumerate() {
+                    *value = ((i + 3) as f64 * 0.013 * (col + 1) as f64).sin();
+                }
+                basis.push(super::normalize(q));
+            }
+            let mut samples = vec![Vec::new(); pools.len()];
+            for _ in 0..5 {
+                for (slot, pool) in pools.iter().enumerate() {
+                    let seconds = pool.install(|| {
+                        let start = std::time::Instant::now();
+                        let _ = super::reorthogonalize(&basis, w.clone());
+                        start.elapsed().as_secs_f64()
+                    });
+                    samples[slot].push(seconds);
+                }
+            }
+            let mut medians = Vec::new();
+            for (slot, threads) in [1usize, 2, 4, 8].into_iter().enumerate() {
+                samples[slot].sort_by(|a, b| a.total_cmp(b));
+                let median = samples[slot][2];
+                let range = samples[slot][4] - samples[slot][0];
+                medians.push(median);
+                let bytes = (k + 1) as f64 * n as f64 * 8.0 * 2.0;
+                let gib_s = bytes / median / 1e9;
+                eprintln!(
+                    "k={k} threads={threads} median_s={median:.6} range_s={range:.6} GB/s={gib_s:.2}"
+                );
+            }
+            let t1 = medians[0];
+            for (slot, threads) in [2usize, 4, 8].into_iter().enumerate() {
+                let efficiency = t1 / (threads as f64 * medians[slot + 1]);
+                eprintln!("k={k} threads={threads} efficiency={efficiency:.3}");
+            }
+        }
     }
 }

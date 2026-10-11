@@ -760,6 +760,8 @@ pub unsafe extern "C" fn rgsaddle_minmode_create(
         },
         max_rotations: cfg.max_rotations as usize,
         krylov_dim: cfg.krylov_dim as usize,
+        lanczos_restart_keep: 2,
+        lanczos_recycle_gap: 0.2,
         force_tol: cfg.force_tol,
         max_move: cfg.max_move,
         method: method_of(cfg.method, 0),

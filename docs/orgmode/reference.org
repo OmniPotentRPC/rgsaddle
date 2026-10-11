@@ -10,7 +10,7 @@
 | =BandConfig=                   | Tangent, spring, projection, climbing, cell, tolerances, method, optional AutoNEB tuning                           |
 | =BandSurface=                  | Host potential on a band (energies + gradients per image)                                                          |
 | =BandReport=                   | =status=, =max_force=, =ci_index=, =iteration=, =surface_rows=                                                     |
-| =MinModeSession=               | Dimer or Lanczos lowest-mode search, same stepping contract; =set_position=, =set_mode=, =estimate_mode= for reuse |
+| =MinModeSession=               | Dimer or thick-restart Lanczos lowest-mode search, same stepping contract; =set_position=, =set_mode=, =estimate_mode= for reuse |
 | =Index1Session=                | Restricted-step partitioned RFO, Powell or Bofill update. =Index1Config= is non-exhaustive. =with_sparse_pattern= selects a CPR seed |
 | =SparsityPattern=              | Atom-level symmetric CSR from a linkcell cutoff walk. Diagonal blocks are implied and not stored as loops          |
 | =Colouring=                    | Smallest-last distance-2 colouring and the max-degree lower bound                                                  |

@@ -1,7 +1,7 @@
 #+TITLE: Follow a minimum mode
 #+OPTIONS: toc:nil num:nil
 
-~MinModeSession~ estimates a low-curvature direction by dimer rotation or Lanczos, then advances on the min-mode force. While the curvature along that mode is not negative the effective gradient is minus the parallel part and the perpendicular force is dropped, so the step climbs the mode alone. Once the curvature is negative the perpendicular force stays and the parallel part is reflected. Lanczos uses the same translation. ~FiniteDifference~ selects forward or central Hessian actions. A surface can supply analytic actions and excluded directions through ~PointSurface~.
+~MinModeSession~ estimates a low-curvature direction by dimer rotation or Lanczos, then advances on the min-mode force. Lanczos thick-restarts a full basis, keeping ~lanczos_restart_keep~ Ritz vectors (default 2), until the residual meets ~rotation_tol~ or ~max_rotations~ actions are spent. Wu and Simon, SIAM J. Matrix Anal. Appl. 22, 602 (2000), doi:10.1137/S0895479898334605. A keep of zero is the single pass that stops at ~krylov_dim~. The next estimate starts from the previous mode and, when ~(theta_2 - theta_1) / |theta_1|~ is below ~lanczos_recycle_gap~ (default 0.2), spends one fresh action on the previous second Ritz vector. Parks, de Sturler, Mackey, Johnson, and Maiti, SIAM J. Sci. Comput. 28, 1651 (2006), doi:10.1137/040607277. The projected matrix is diagonalized by an implicit-shift QL after a Householder reduction. Duersch, Shao, Yang, and Gu, SIAM J. Sci. Comput. 40, C655 (2018), doi:10.1137/17M1129830. The reflected climb is Goswami, Gunde, and Jónsson, Front. Chem. 14 (2026), doi:10.3389/fchem.2026.1807063. ~ModeEstimate::converged~ reports whether the residual test was met. While the curvature along that mode is not negative the effective gradient is minus the parallel part and the perpendicular force is dropped, so the step climbs the mode alone. Once the curvature is negative the perpendicular force stays and the parallel part is reflected. Lanczos uses the same translation. ~FiniteDifference~ selects forward or central Hessian actions. A surface can supply analytic actions and excluded directions through ~PointSurface~.
 
 The reported force norm must satisfy the selected ~ForceGate~, and the estimated curvature must be negative. If a translation reaches a stationary point, the session measures curvature at that accepted position before reporting convergence. This directional test does not certify the full Hessian index.
 
@@ -17,5 +17,7 @@ Two ~MinModeConfig~ fields set the cost of an estimate:
 |---+---+---|
 | ~difference~ | ~Forward~: one gradient per Hessian action, error O(dr). ~Central~: two, error O(dr^2) | ~Forward~ |
 | ~rotation_angle_tol~ | The dimer stops rotating when an iteration's optimal angle falls under this many radians; 0 turns the test off | 0 |
+| ~lanczos_restart_keep~ | Ritz vectors kept when a Lanczos basis fills before the residual test. Zero is the single pass that stops at ~krylov_dim~ | 2 |
+| ~lanczos_recycle_gap~ | Recycle the previous second Ritz vector when the gap ratio ~(theta_2 - theta_1) / abs(theta_1)~ is below this. The next estimate pays one fresh action for that direction | 0.2 |
 
 From C both fields sit in ~rgsaddle_minmode_config_t~ and are read only when the config's ~version.minor~ is 5 or more.
