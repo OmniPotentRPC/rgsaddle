@@ -21,6 +21,9 @@ highs = ["rgmin/highs"]
 readcon = ["dep:readcon-core"]
 readcon-db = ["readcon", "dep:readcon-db"]
 chemfiles = ["readcon", "readcon-core/chemfiles"]
+# GMP and MPFR stay off the default build. `cargo test --features capi`
+# does not compile this feature.
+verify = ["dep:proptest", "dep:rug"]
 
 [dependencies]
 dlpk = { version = "0.1.5", features = ["ndarray"] }
@@ -36,6 +39,8 @@ ndarray = "0.17"
 rayon = "1.12"
 thiserror = "2"
 linkcell = { version = "0.3.3", git = "https://github.com/d-SEAMS/linkcell", rev = "f6cf5700ca9c90e1877c84b66fb68386de5ceffe", default-features = false }
+proptest = { version = "1.6", optional = true }
+rug = { version = "1.27", optional = true }
 
 [dev-dependencies]
 approx = "0.5"
@@ -71,3 +76,6 @@ filename = "rgsaddle"
 
 [package.metadata.capi.library]
 name = "rgsaddle"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }

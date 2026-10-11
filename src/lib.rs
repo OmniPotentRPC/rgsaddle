@@ -45,6 +45,16 @@ pub mod solid_state;
 pub mod spring;
 pub mod tangent;
 
+// `translated_gradient` is crate-private, so the golden-bit test lives in
+// this module under `cfg(test)`. The Kani harnesses are the same module
+// under `cfg(kani)`, which `cargo test` does not set, so the default
+// build does not name the Kani crate.
+#[cfg(any(test, kani))]
+mod kani_proofs;
+
+#[cfg(all(test, feature = "verify"))]
+mod differential;
+
 pub use autoneb::{AutoNeb, AutoNebReport, AutoNebTuning};
 pub use band::{
     BandConfig, BandEvaluation, BandReport, BandSession, BandStatus, BandSurface, Cell, CiConfig,
