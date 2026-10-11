@@ -56,14 +56,6 @@ jobs:
         run: cargo test --release --no-default-features -- --test-threads=1
       - name: Release tests with par
         run: cargo test --release --features par -- --test-threads=1
-
-  sparse-hessian-scaling:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Vacancy-cell colour scaling
-        run: cargo test --release --features par --lib colour_block_strong_scaling_on_vacancy_cells -- --ignored --test-threads=1
       - name: Nehalem, no AVX and no FMA
         run: |
           set -euo pipefail
@@ -78,3 +70,11 @@ jobs:
           cargo test --release --features par --target aarch64-unknown-linux-gnu --test eigh_bits --no-run --message-format=json > /tmp/eigh-bits-arm.json
           bin=$(python3 -c 'import json; msgs=[json.loads(l) for l in open("/tmp/eigh-bits-arm.json") if l.strip()]; print(next(m["executable"] for m in msgs if m.get("target",{}).get("name")=="eigh_bits" and m.get("executable")))')
           qemu-aarch64 -L /usr/aarch64-linux-gnu "$bin" --test-threads=1
+
+  sparse-hessian-scaling:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Vacancy-cell colour scaling
+        run: cargo test --release --features par --lib colour_block_strong_scaling_on_vacancy_cells -- --ignored --test-threads=1
