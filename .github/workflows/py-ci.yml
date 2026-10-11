@@ -1,0 +1,62 @@
+name: Python binding CI
+
+on:
+  push:
+    branches:
+      - main
+      - "feat/**"
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: py-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  wheels:
+    uses: OmniPotentRPC/rgpot/.github/workflows/py-wheels.yml@bb82209d778dbe7fe55855abee5f783708bad893
+    with:
+      package-dir: .
+      import-names: rgsaddle._core
+      test-path: tests/python
+      extras: test
+
+  freethreading:
+    uses: OmniPotentRPC/rgpot/.github/workflows/py-freethreading.yml@bb82209d778dbe7fe55855abee5f783708bad893
+    with:
+      package-dir: .
+      import-names: rgsaddle._core
+      test-path: tests/python
+      extras: test
+      iterations: "20"
+      rust-crate-dir: .
+
+  tsan:
+    uses: OmniPotentRPC/rgpot/.github/workflows/py-tsan.yml@bb82209d778dbe7fe55855abee5f783708bad893
+    with:
+      package-dir: .
+      import-names: rgsaddle._core
+      test-path: tests/python
+      extras: test
+      rust-crate-dir: .
+      rust-toolchain: nightly-2026-01-20
+      tsan-cmake-args: -DRGSADDLE_TSAN=ON
+
+  typing:
+    uses: OmniPotentRPC/rgpot/.github/workflows/py-typing.yml@bb82209d778dbe7fe55855abee5f783708bad893
+    with:
+      package-dir: .
+      import-names: rgsaddle._core
+      stub-dir: python
+      typecheck-paths: python/rgsaddle examples
+      extras: test
+      rust-crate-dir: .
+
+  rgbind-sync:
+    uses: OmniPotentRPC/rgpot/.github/workflows/py-rgbind-sync.yml@bb82209d778dbe7fe55855abee5f783708bad893
+    with:
+      vendored-path: include/rgbind/rgbind.hpp
+      rgpot-ref: bb82209d778dbe7fe55855abee5f783708bad893
