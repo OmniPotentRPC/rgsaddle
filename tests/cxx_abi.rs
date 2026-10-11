@@ -99,3 +99,43 @@ fn cxx_session_wrapper_uses_the_official_abi() {
     assert!(String::from_utf8_lossy(&run.stdout).contains("RGSADDLE_CXX_WRAP_OK"));
     std::fs::remove_file(out).expect("remove temporary smoke executable");
 }
+
+#[test]
+fn cxx_stencil_wrapper_steps_a_band() {
+    let compiler = cxx_compiler();
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let out = std::env::temp_dir().join(format!("rgsaddle_cxx_stencil_{}", std::process::id()));
+    let libdir = libdir();
+    let build = Command::new(compiler)
+        .arg("-std=c++17")
+        .arg("-Wall")
+        .arg("-Wextra")
+        .arg("-Werror")
+        .arg(root.join("tests/c/stencil_wrap.cpp"))
+        .arg("-I")
+        .arg(root.join("include"))
+        .arg("-L")
+        .arg(&libdir)
+        .arg("-lrgsaddle")
+        .arg("-o")
+        .arg(&out)
+        .output()
+        .expect("compile the C++ stencil wrapper");
+    assert!(
+        build.status.success(),
+        "C++ stencil compile failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let run = Command::new(&out)
+        .env("LD_LIBRARY_PATH", &libdir)
+        .output()
+        .expect("run C++ stencil wrapper");
+    assert!(
+        run.status.success(),
+        "C++ stencil failed: stdout {} stderr {}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(String::from_utf8_lossy(&run.stdout).contains("RGSADDLE_STENCIL_CXX_OK"));
+    std::fs::remove_file(out).expect("remove temporary stencil executable");
+}
