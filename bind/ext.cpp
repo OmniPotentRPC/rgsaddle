@@ -497,11 +497,13 @@ std::string schedule_canonical(IdArray ids, OwnerArray owners, FlagArray reentra
 }
 
 bool raise_status(int code) {
+  // The status name is a local fallback. Storing it would make the next
+  // call reuse this code's name, including after OK.
   std::string last = rgsaddle_py_last_error();
+  rgsaddle_py_set_last_error("");
   if (code != RGSADDLE_OK && last.empty()) {
     const char *name = rgsaddle_status_name(static_cast<rgsaddle_status_t>(code));
     if (name != nullptr && name[0] != '\0') {
-      rgsaddle_py_set_last_error(name);
       last = name;
     }
   }
@@ -543,10 +545,11 @@ NB_MODULE(_core, m) {
           "Release the claim. Exceptions propagate.");
 
   m.def("last_error", []() { return std::string(rgsaddle_py_last_error()); },
-        "Thread-local last-error text (F2, F7).");
+        "Thread-local text on this thread. raise_status clears it.");
   m.def("raise_status", &raise_status, nb::arg("code"),
-        "Map an rgsaddle_status_t value (F7). True on OK. False is not used: "
-        "convergence is not a status code.");
+        "Map an rgsaddle_status_t value. The message is the stored text, or the "
+        "status name when that text is empty. The stored text is cleared. True on OK. "
+        "False is not used: convergence is not a status code.");
 
   // Test-only surface. stubgen skips a private submodule, so these
   // names stay off the public stub.

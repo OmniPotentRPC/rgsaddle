@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 import rgsaddle
 from rgsaddle import NumericalError
 from rgsaddle._core._testing import set_last_error
@@ -36,58 +38,68 @@ RUNTIME = {
     99,
 }
 
+NAMES = {
+    OK: "OK",
+    NULL_SESSION: "NULL_SESSION",
+    NULL_BAND: "NULL_BAND",
+    NULL_SURFACE: "NULL_SURFACE",
+    NULL_REPORT: "NULL_REPORT",
+    SHAPE: "SHAPE",
+    SURFACE_FAILED: "SURFACE_FAILED",
+    NON_FINITE: "NON_FINITE",
+    SOLVER: "SOLVER",
+    ABI_MISMATCH: "ABI_MISMATCH",
+    ALLOC: "ALLOC",
+    INVALID_PARAMETER: "INVALID_PARAMETER",
+    NO_EVALUATION: "NO_EVALUATION",
+    99: "UNKNOWN",
+}
+
 
 def test_ok_returns_true() -> None:
-    set_last_error("")
     assert rgsaddle.raise_status(OK) is True
+    assert rgsaddle.last_error() == ""
 
 
 def test_value_and_numerical_and_runtime() -> None:
     for code in sorted(VALUE):
-        set_last_error("")
-        try:
+        with pytest.raises(ValueError, match=f"^{NAMES[code]}$"):
             rgsaddle.raise_status(code)
-        except ValueError as exc:
-            assert rgsaddle.last_error() == str(exc)
-            assert rgsaddle.last_error() != ""
-        else:
-            raise AssertionError(f"{code} must be ValueError")
+        assert rgsaddle.last_error() == ""
     for code in NUMERICAL:
-        set_last_error("")
-        try:
+        with pytest.raises(NumericalError, match=f"^{NAMES[code]}$"):
             rgsaddle.raise_status(code)
-        except NumericalError as exc:
-            assert issubclass(NumericalError, ArithmeticError)
-            assert str(exc) == "NON_FINITE"
-            assert rgsaddle.last_error() == "NON_FINITE"
-        else:
-            raise AssertionError("NON_FINITE must be NumericalError")
-    for code in RUNTIME:
-        set_last_error("")
-        try:
+        assert issubclass(NumericalError, ArithmeticError)
+        assert rgsaddle.last_error() == ""
+    for code in sorted(RUNTIME):
+        with pytest.raises(RuntimeError, match=f"^{NAMES[code]}$"):
             rgsaddle.raise_status(code)
-        except RuntimeError as exc:
-            assert rgsaddle.last_error() == str(exc)
-        else:
-            raise AssertionError(f"{code} must be RuntimeError")
+        assert rgsaddle.last_error() == ""
+
+
+def test_back_to_back_status_uses_each_name() -> None:
+    with pytest.raises(ValueError, match="^SHAPE$"):
+        rgsaddle.raise_status(SHAPE)
+    assert rgsaddle.last_error() == ""
+    with pytest.raises(NumericalError, match="^NON_FINITE$"):
+        rgsaddle.raise_status(NON_FINITE)
+    assert rgsaddle.last_error() == ""
+    assert rgsaddle.raise_status(OK) is True
+    assert rgsaddle.last_error() == ""
 
 
 def test_last_error_is_the_message() -> None:
     set_last_error("singular update")
-    try:
+    with pytest.raises(NumericalError, match="^singular update$"):
         rgsaddle.raise_status(NON_FINITE)
-    except NumericalError as exc:
-        assert str(exc) == "singular update"
-    else:
-        raise AssertionError("expected NumericalError")
-    assert rgsaddle.last_error() == "singular update"
+    assert rgsaddle.last_error() == ""
+    with pytest.raises(NumericalError, match="^NON_FINITE$"):
+        rgsaddle.raise_status(NON_FINITE)
+    assert rgsaddle.last_error() == ""
 
 
 def test_surface_failed_without_a_python_error_is_runtime() -> None:
     set_last_error("callback failed")
-    try:
+    with pytest.raises(RuntimeError, match="^callback failed$"):
         rgsaddle.raise_status(SURFACE_FAILED)
-    except RuntimeError as exc:
-        assert str(exc) == "callback failed"
-    else:
-        raise AssertionError("expected RuntimeError")
+    assert rgsaddle.last_error() == ""

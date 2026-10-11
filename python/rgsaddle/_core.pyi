@@ -32,9 +32,9 @@ class ClaimSlot:
         """Release the claim. Exceptions propagate."""
 
 def last_error() -> str:
-    """Thread-local last-error text (F2, F7)."""
+    """Thread-local text on this thread. raise_status clears it."""
 
 def raise_status(code: int) -> bool:
     """
-    Map an rgsaddle_status_t value (F7). True on OK. False is not used: convergence is not a status code.
+    Map an rgsaddle_status_t value. The message is the stored text, or the status name when that text is empty. The stored text is cleared. True on OK. False is not used: convergence is not a status code.
     """

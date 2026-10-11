@@ -32,8 +32,8 @@ The importable package is =rgsaddle=. =rgsaddle._core= is the nanobind extension
 |------+------|
 | =ForceGate=, =HessUpdate=, =IrcKind=, =MinModeKind=, =EigenDevice=, =ExpandKind=, =CellChart=, =RestrictedKind= | =enum.IntEnum= controls. Names and values match the previous module |
 | =NumericalError= | =ArithmeticError= for a non-finite energy or a singular update (F7) |
-| =last_error= | Thread-local text read on the same thread (F2, F7) |
-| =raise_status= | Map an =rgsaddle_status_t= value. =RGSADDLE_OK= returns true |
+| =last_error= | Thread-local text. =raise_status= reads it and then clears the slot (F2, F7) |
+| =raise_status= | Map an =rgsaddle_status_t= value. The message is the stored text, or the status name when that text is empty. =RGSADDLE_OK= returns true |
 | =rgsaddle.ase.SurfaceAdapter= | =list[Atoms]= to the =(ids, x) -> (energies, gradients)= callback. Optional extra =ase= |
 
 =SurfaceAdapter= keeps =get_forces(apply_constraint=False)= on =raw_forces=. The returned gradient is minus =get_forces()= after constraints. The adapter evaluates the given rows in order on the calling thread. =owners()= and =reentrant()= are what a driver uses to group. A second call while the first holds the adapter raises =RuntimeError=.

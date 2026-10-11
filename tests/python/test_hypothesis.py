@@ -12,7 +12,7 @@ from hypothesis import strategies as st
 import rgsaddle
 from rgsaddle import NumericalError
 from rgsaddle._core import ClaimSlot
-from rgsaddle._core._testing import drive_eval, echo_f64, set_last_error
+from rgsaddle._core._testing import drive_eval, echo_f64
 
 VALUES = st.one_of(
     st.floats(allow_nan=False, allow_infinity=False, width=64),
@@ -115,7 +115,6 @@ def test_shape_error_names_both_shapes(rows: int, cols: int, bad_rows: int) -> N
 @settings(max_examples=20)
 @given(code=st.integers(min_value=-20, max_value=20))
 def test_status_class(code: int) -> None:
-    set_last_error("")
     if code == 0:
         assert rgsaddle.raise_status(code) is True
         return
