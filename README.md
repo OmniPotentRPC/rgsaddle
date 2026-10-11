@@ -63,3 +63,21 @@ checks of the rotation formulas, the Lanczos residual bound, and the
 finite-difference curvature error terms
 (`uv run --with sympy python validation/<script>.py`,
 `sollya validation/fd_curvature.sollya`).
+
+## Python
+
+The package is a nanobind extension. `import rgsaddle` does not import
+ASE.
+
+```
+pip install .
+pip install 'rgsaddle[ase]'
+```
+
+`ForceGate`, `HessUpdate`, `IrcKind`, `MinModeKind`, `EigenDevice`,
+`ExpandKind`, `CellChart` and `RestrictedKind` are `IntEnum` controls
+with the same names and values as before. `NumericalError`,
+`last_error` and `raise_status` map `rgsaddle_status_t`.
+`rgsaddle.ase.SurfaceAdapter` turns a list of ASE `Atoms` into the
+stencil eval callback. Band, minimum-mode, IRC, Sella and AutoNEB
+sessions are not wrapped here.

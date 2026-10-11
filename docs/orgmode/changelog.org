@@ -3,6 +3,7 @@
 
 * Unreleased
 
+- The Python package is a nanobind extension built with scikit-build-core and Corrosion. PyO3 and maturin are gone. The eight =IntEnum= controls keep the names and values of the previous module. =NumericalError=, =last_error= and =raise_status= map =rgsaddle_status_t=. =rgsaddle.ase.SurfaceAdapter= turns an ASE image list into the stencil eval callback. Session types stay off the Python surface until the stencil owns them.
 - AutoNEB stays in Rust until the stencil configuration lands. C, C++, and Python reach ~BandConfig::autoneb~ later as that configuration's AutoNEB preset. The C ABI stays at minor 16.
 - AutoNEB records a trajectory only when ~record_samples~ is set. The default stores nothing and takes no sample lock. One stored call is one ~f64~ per degree of freedom.
 - AutoNEB follows the ASE window and spring rescaling. The fill from two endpoints sets every segment to ~k * (n_simul + 1)~, and each insertion doubles the cut segment. The search stops after the climbing window unless ~full_band~ is set. On the double well that default used 1.42 times as many force calls as one fixed CI-NEB. Müller-Brown from B to C used 0.46 times as many, and the two-barrier path from A to B has mean ratio 0.95.

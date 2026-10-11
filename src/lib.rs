@@ -153,8 +153,6 @@ pub use rtr::{
 
 #[cfg(feature = "readcon")]
 pub mod io;
-#[cfg(feature = "python")]
-mod python;
 #[cfg(feature = "readcon")]
 pub use io::{MolecularFrame, frame_from_con};
 
