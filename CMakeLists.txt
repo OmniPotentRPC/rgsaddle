@@ -17,11 +17,11 @@ find_package(Python 3.10 REQUIRED COMPONENTS Interpreter Development.Module Deve
 find_package(nanobind CONFIG REQUIRED)
 find_package(Threads REQUIRED)
 
-# T2: nightly rustc, an explicit target triple, and a std rebuilt with
+# Nightly rustc, an explicit target triple, and a std rebuilt with
 # the thread sanitizer. Rust_TOOLCHAIN and Rust_CARGO_TARGET are read
 # when Corrosion is included, so they are set first. The workflow passes
 # the dated nightly that matches the image clang.
-option(RGSADDLE_TSAN "Build the Rust staticlib with -Zsanitizer=thread (T2)." OFF)
+option(RGSADDLE_TSAN "Build the Rust staticlib with -Zsanitizer=thread." OFF)
 if(RGSADDLE_TSAN)
   if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
     set(_rgsaddle_tsan_target "aarch64-unknown-linux-gnu")
@@ -64,7 +64,7 @@ else()
   corrosion_set_cargo_flags(rgsaddle --locked)
 endif()
 
-# F1: FREE_THREADED sets Py_mod_gil = Py_MOD_GIL_NOT_USED on a
+# FREE_THREADED sets Py_mod_gil = Py_MOD_GIL_NOT_USED on a
 # free-threaded interpreter. On a GIL interpreter nanobind keeps
 # STABLE_ABI and ignores FREE_THREADED. cp312-abi3 covers 3.12+ GIL.
 # cp314t and cp315t are version-specific free-threaded wheels.
@@ -92,13 +92,13 @@ if(NOT MSVC)
   target_compile_options(_core PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
-# F9: Windows free-threaded builds define Py_GIL_DISABLED when the
+# Windows free-threaded builds define Py_GIL_DISABLED when the
 # Python headers did not.
 if(WIN32 AND NB_FREE_THREADED)
   target_compile_definitions(_core PRIVATE Py_GIL_DISABLED=1)
 endif()
 
-# F9: hidden visibility is the default above. --exclude-libs,ALL drops
+# Hidden visibility is the default above. --exclude-libs,ALL drops
 # the staticlib from the dynamic table. The version script (Linux) and
 # the export list (macOS) leave only PyInit__core.
 if(UNIX AND NOT APPLE)
@@ -114,7 +114,7 @@ if(APPLE)
     "LINKER:-exported_symbols_list,${CMAKE_CURRENT_BINARY_DIR}/core_exports.txt")
 endif()
 # A Rust staticlib exports every public symbol. On Windows the shared
-# library limits that set with a module-definition file (F9).
+# library limits that set with a module-definition file.
 # __declspec(dllexport) symbols from the static nanobind library are not
 # removed by the .def file, so the export directory is rewritten after
 # the link.
@@ -131,7 +131,8 @@ if(MSVC)
     VERBATIM)
 endif()
 
-# py-tsan.yml at bb82209 counts __tsan_func_entry in librust_core_demo.a.
+# py-tsan.yml counts __tsan_func_entry in librust_core_demo.a.
+# The archive name stays until rgpot's workflow takes it as an input.
 # Corrosion writes the static archive to the build directory as
 # librgsaddle.a. The rgsaddle CMake target is an interface library, so
 # TARGET_FILE does not apply to it. Copying by path avoids that, and

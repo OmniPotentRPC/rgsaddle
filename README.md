@@ -29,8 +29,7 @@ climbing-image force with the eOn trigger rule.
 gap or the segment length is worst, relaxes a local window, and
 climbs. Image evaluation keeps one thread pool; each block is stored
 at its image index after every block has finished. The tuning sits on
-`BandConfig::autoneb`. Bindings reach it later as the AutoNEB preset
-of the stencil configuration. A weighted spring supplied by the host
+`BandConfig::autoneb`. A weighted spring supplied by the host
 is refused until zoom-NEB recomputes it.
 
 Positions are unwrapped Cartesian. A `Cell` (rows are lattice
@@ -78,6 +77,5 @@ pip install 'rgsaddle[ase]'
 `ExpandKind`, `CellChart` and `RestrictedKind` are `IntEnum` controls
 with the same names and values as before. `NumericalError`,
 `last_error` and `raise_status` map `rgsaddle_status_t`.
-`rgsaddle.ase.SurfaceAdapter` turns a list of ASE `Atoms` into the
-stencil eval callback. Band, minimum-mode, IRC, Sella and AutoNEB
-sessions are not wrapped here.
+`rgsaddle.ase.SurfaceAdapter` evaluates a list of ASE `Atoms` as
+request rows `(ids, x)`.

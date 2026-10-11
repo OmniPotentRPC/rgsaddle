@@ -8,7 +8,7 @@ version = "0.2.2"
 description = "ASE image surface and the rgsaddle status map."
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = "MIT"
 authors = [{ name = "Rohit Goswami", email = "rgoswami@ieee.org" }]
 keywords = ["neb", "saddle", "transition-state", "optimization"]
 classifiers = [
@@ -16,7 +16,7 @@ classifiers = [
   "Intended Audience :: Science/Research",
   "Topic :: Scientific/Engineering :: Chemistry",
   "Programming Language :: Python :: Implementation :: CPython",
-  "Programming Language :: Python :: Free Threading",
+  "Programming Language :: Python :: Free Threading :: 3 - Stable",
 ]
 dependencies = ["numpy>=1.24"]
 
