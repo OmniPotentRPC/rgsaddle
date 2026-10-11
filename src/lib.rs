@@ -21,6 +21,9 @@
 //!
 //! Positions are unwrapped Cartesian; a periodic host applies its
 //! minimum-image convention before handing differences in.
+//!
+//! [`colouring::star_colour`] partitions a symmetric sparsity pattern
+//! into seed columns. It does not evaluate the surface.
 
 pub mod band;
 #[cfg(feature = "capi")]
@@ -53,6 +56,7 @@ pub use spring::SpringKind;
 pub use tangent::TangentKind;
 
 pub mod cell_log;
+pub mod colouring;
 pub mod constraints;
 pub mod eigensolve;
 pub mod force;
@@ -89,6 +93,11 @@ pub use force_match::{covalent_pairs, force_match_hessian};
 pub use geom::{SellaGeom, TrustSchedule};
 
 pub use internal::{CartAxis, Displacement, InternalSlot, Rotation, Translation};
+
+pub use colouring::{
+    StarColouring, atom_axis_seeds, coordinate_edges, interacting_atom_pairs, is_star_colouring,
+    star_colour,
+};
 
 pub use linalg::{
     NumericalHessian, modified_gram_schmidt, numerical_hvp, numerical_hvp_on, numerical_hvp_proj,

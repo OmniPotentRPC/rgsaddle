@@ -3,6 +3,7 @@
 
 * Unreleased
 
+- ~star_colour~ star-colours a symmetric sparsity pattern and returns the seed columns for a direct sparse Hessian. The colouring does not evaluate the surface. ~interacting_atom_pairs~ builds the atom graph from a cutoff, with the minimum image when a cell is supplied.
 - ~xts_minmode_estimate~ is the xtsci name of ~rgsaddle_minmode_estimate~. A null session still fails closed.
 - ~xts_band_step~ is the xtsci name of ~rgsaddle_band_step~. The arguments and the status codes are the same.
 - C ABI minor 16. ~RGSADDLE_METHOD_QUICKMIN~ runs quick-min on the band. ~rgsaddle_band_create_solid~ and ~rgsaddle_band_set_stress~ carry the solid-state cell block. ~BandConfig::quickmin~ selects the same step. A min-mode session returns null for that method code. FIRE stays the default.
