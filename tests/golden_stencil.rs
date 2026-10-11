@@ -11,6 +11,7 @@ use std::path::PathBuf;
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use rayon::ThreadPoolBuilder;
+use rgsaddle::stencil::{ZoomForce, ZoomParams};
 use rgsaddle::{
     AutoNeb, AutoNebTuning, BandConfig, BandSession, BandSurface, CiConfig, FiniteDifference,
     MinModeConfig, MinModeKind, MinModeSession, PointSurface, Preset, ProjectionKind, SaddleError,
@@ -450,7 +451,110 @@ fn cases() -> Vec<(&'static str, &'static str)> {
             out.push((preset, fixture));
         }
     }
+    // Activated zoom. The four-step zoom-neb lines above stay, because
+    // stability 5 does not pack inside BAND_STEPS.
+    out.push(("zoom-pack", "double-well"));
+    out.push(("zoom-pack", "muller-brown"));
     out
+}
+
+/// Evaluating steps after the pack. One step puts the double-well
+/// image on the saddle. Eight steps bring the Müller-Brown climber
+/// onto the analytic saddle at (-0.822, 0.624).
+fn zoom_pack_post(fixture: &str) -> usize {
+    match fixture {
+        "double-well" => 1,
+        "muller-brown" => 8,
+        other => panic!("zoom-pack has no {other} case"),
+    }
+}
+
+fn analytic_saddle(fixture: &str) -> [f64; 3] {
+    match fixture {
+        "double-well" => [0.0, 0.0, 0.0],
+        "muller-brown" => [-0.822001558732, 0.624312802418, 0.0],
+        other => panic!("no analytic saddle for {other}"),
+    }
+}
+
+fn activated_zoom_params() -> ZoomParams {
+    let mut params = ZoomParams::default();
+    params.stability = 2;
+    params.force = ZoomForce::Abs(1.0e9);
+    params
+}
+
+fn run_until<S: BandSurface>(
+    search: &mut Stencil,
+    surface: &S,
+    zoom: bool,
+    stop_calls: usize,
+    post_steps: usize,
+) -> usize {
+    let mut packed = false;
+    let mut after = 0usize;
+    let mut calls = 0usize;
+    for _ in 0..80 {
+        let report = search.step_band(surface).expect("band step");
+        calls = report.total_evaluations;
+        if !zoom {
+            if calls >= stop_calls {
+                break;
+            }
+            continue;
+        }
+        if report.phase == 1 {
+            packed = true;
+            continue;
+        }
+        if packed {
+            after += 1;
+            if after >= post_steps {
+                break;
+            }
+        }
+    }
+    calls
+}
+
+fn run_activated(
+    fixture: &str,
+    threads: usize,
+    zoom: bool,
+    stop_calls: usize,
+) -> (Array2<f64>, usize) {
+    let initial = match fixture {
+        "double-well" => double_well_band(),
+        "muller-brown" => muller_band(),
+        other => panic!("unknown fixture {other}"),
+    };
+    let mut builder = Stencil::band(initial)
+        .threads(threads)
+        .force_tol(1e-3)
+        .max_move(0.2)
+        .preset(if zoom { Preset::ZoomNeb } else { Preset::CiNeb });
+    if zoom {
+        builder = builder.zoom(activated_zoom_params());
+    }
+    let mut search = builder.build().expect("band");
+    let calls = match fixture {
+        "double-well" => run_until(
+            &mut search,
+            &DoubleWell,
+            zoom,
+            stop_calls,
+            zoom_pack_post(fixture),
+        ),
+        "muller-brown" => run_until(
+            &mut search,
+            &MullerBrown,
+            zoom,
+            stop_calls,
+            zoom_pack_post(fixture),
+        ),
+        _ => unreachable!(),
+    };
+    (search.positions(), calls)
 }
 
 fn run_stencil_band(preset: &str, fixture: &str) -> (Array2<f64>, Vec<f64>) {
@@ -493,6 +597,10 @@ fn digest(preset: &str, fixture: &str, threads: usize) -> String {
         run_autoneb(fixture, threads)
     } else if preset == "zoom-neb" || preset == "energy-weighted-neb" {
         run_stencil_band(preset, fixture)
+    } else if preset == "zoom-pack" {
+        let (positions, _) = run_activated(fixture, threads, true, 0);
+        let energies = energies_of(fixture, positions.view());
+        (positions, energies)
     } else {
         run_band(preset, fixture)
     };
@@ -579,6 +687,97 @@ fn run_stencil_mode(preset: &str, fixture: &str) -> (Array2<f64>, Vec<f64>) {
     let positions = x.to_shape((1, x.len())).expect("row").to_owned();
     let energies = energies_of(fixture, positions.view());
     (positions, energies)
+}
+
+fn image_saddle_distance(positions: &Array2<f64>, saddle: &[f64; 3]) -> f64 {
+    positions
+        .outer_iter()
+        .map(|row| {
+            row.iter()
+                .zip(saddle.iter())
+                .map(|(a, b)| (a - b).powi(2))
+                .sum::<f64>()
+                .sqrt()
+        })
+        .fold(f64::INFINITY, f64::min)
+}
+
+fn spacing_near_saddle(positions: &Array2<f64>, saddle: &[f64; 3]) -> f64 {
+    let mut best = 0usize;
+    let mut best_d = f64::INFINITY;
+    for (i, row) in positions.outer_iter().enumerate() {
+        let d = row
+            .iter()
+            .zip(saddle.iter())
+            .map(|(a, b)| (a - b).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        if d < best_d {
+            best_d = d;
+            best = i;
+        }
+    }
+    let mut chords = Vec::new();
+    if best > 0 {
+        chords.push(chord_len(positions, best - 1, best));
+    }
+    if best + 1 < positions.nrows() {
+        chords.push(chord_len(positions, best, best + 1));
+    }
+    chords.into_iter().fold(f64::INFINITY, f64::min)
+}
+
+fn chord_len(positions: &Array2<f64>, i: usize, j: usize) -> f64 {
+    positions
+        .row(i)
+        .iter()
+        .zip(positions.row(j).iter())
+        .map(|(a, b)| (a - b).powi(2))
+        .sum::<f64>()
+        .sqrt()
+}
+
+#[test]
+fn zoom_pack_beats_ci_neb_on_the_same_call_budget() {
+    // CI-NEB is stepped until its image-row count is at least the zoom
+    // count. Whole steps do not land on the same integer, so the CI
+    // budget is the next step at or above the zoom count.
+    for (fixture, zoom_calls, ci_calls) in [
+        ("double-well", 56usize, 63usize),
+        ("muller-brown", 110, 115),
+    ] {
+        let (zoom, zc) = run_activated(fixture, 1, true, 0);
+        let (ci, cc) = run_activated(fixture, 1, false, zc);
+        assert_eq!(zc, zoom_calls, "{fixture} zoom calls");
+        assert_eq!(cc, ci_calls, "{fixture} ci calls");
+        assert!(zc <= cc, "{fixture} zoom used more calls than CI");
+        let saddle = analytic_saddle(fixture);
+        let zoom_dist = image_saddle_distance(&zoom, &saddle);
+        let ci_dist = image_saddle_distance(&ci, &saddle);
+        let zoom_space = spacing_near_saddle(&zoom, &saddle);
+        let ci_space = spacing_near_saddle(&ci, &saddle);
+        assert!(
+            zoom_dist < ci_dist,
+            "{fixture} zoom distance {zoom_dist} ci {ci_dist}"
+        );
+        assert!(
+            zoom_space < ci_space,
+            "{fixture} zoom spacing {zoom_space} ci {ci_space}"
+        );
+        let zoom_hash = hash_bytes(zoom.view(), &energies_of(fixture, zoom.view()));
+        let ci_hash = hash_bytes(ci.view(), &energies_of(fixture, ci.view()));
+        assert_ne!(zoom_hash, ci_hash, "{fixture} zoom matched this CI path");
+        let recorded = fs::read_to_string(golden_path()).expect("golden");
+        let ci_line = recorded
+            .lines()
+            .find(|line| line.starts_with(&format!("ci-neb {fixture} 1 ")))
+            .expect("ci golden");
+        let ci_recorded = ci_line.rsplit(' ').next().expect("hash");
+        assert_ne!(
+            zoom_hash, ci_recorded,
+            "{fixture} zoom matched the four-step CI hash"
+        );
+    }
 }
 
 #[test]

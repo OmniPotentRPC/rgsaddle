@@ -35,6 +35,8 @@ The original images are =0 .. n-1=. After a pack the window ends keep the ids th
 * Force calls
 A warm fixed-end step evaluates the interiors only. A free-end step evaluates every image. The parallel ceiling is =n - 2= for fixed ends and =n= for free ends. AutoNEB's ceiling is =n_simul=. One thread is one call. More threads split the moving images into contiguous blocks.
 
+The four-step zoom-NEB hashes match CI-NEB because the default stability of 5 does not pack inside four steps. A second set uses stability 2 and an absolute force gate of 1e9, then one evaluating step on the double well and eight on Müller-Brown. Those hashes differ from CI-NEB. The image spacing next to the saddle is shorter, and the closest image is nearer the analytic saddle. CI-NEB keeps stepping until its force-call count reaches the zoom count.
+
 * Golden files
 =validation/eon_zoom/neb_lj13= holds the reactant, product, and saddle from eOn =2f84d583=, path =client/unit_tests/data/systems/neb_lj13=. The energies stored in those files match an ASE Lennard-Jones potential with =epsilon = 1=, =sigma = 1=, =rc = 10=, =ro = 0=, =smooth = False=, within =1e-4= eV. eOn itself was not executed on this branch, and the Pt heptamer was not run. ORCA was not run. =validation/eon_zoom/hermite_reference.py= rebuilds the cubic pack on a quarter circle.
 
