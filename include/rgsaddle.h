@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 16u
+#define RGSADDLE_ABI_MINOR 17u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -840,6 +840,153 @@ void rgsaddle_samd_free(RgsaddleSamd *session);
  * No-op in a library built without the highs Cargo feature. */
 rgsaddle_status_t rgsaddle_band_set_highs(RgsaddleBand *band, int32_t enabled);
 rgsaddle_status_t rgsaddle_minmode_set_highs(RgsaddleMinMode *session, int32_t enabled);
+
+/**
+ * Stencil family, ABI minor 17. The band symbols above are unchanged.
+ * The config is opaque. One key is one StencilConfig leaf. A wrong
+ * key, a wrong type, or a key that does not apply to the method sets
+ * rgsaddle_last_error and returns a status. threads defaults to 1.
+ * Above 1 the callback must be safe to call from those threads.
+ * The callback is the only surface: point methods pass one row.
+ */
+#define RGSADDLE_PRESET_CI_NEB 0
+#define RGSADDLE_PRESET_EON_ZOOM 1
+#define RGSADDLE_PRESET_ORCA_ZOOM_NEB_TS 2
+#define RGSADDLE_PRESET_AUTONEB 3
+#define RGSADDLE_PRESET_DIMER 4
+#define RGSADDLE_PRESET_LANCZOS 5
+#define RGSADDLE_PRESET_ART 6
+#define RGSADDLE_PRESET_PLAIN 7
+
+#define RGSADDLE_STENCIL_METHOD_PLAIN 0
+#define RGSADDLE_STENCIL_METHOD_CI_NEB 1
+#define RGSADDLE_STENCIL_METHOD_AUTONEB 2
+#define RGSADDLE_STENCIL_METHOD_ZOOM 3
+#define RGSADDLE_STENCIL_METHOD_DIMER 4
+#define RGSADDLE_STENCIL_METHOD_LANCZOS 5
+#define RGSADDLE_STENCIL_METHOD_ART 6
+
+#define RGSADDLE_STENCIL_SPRING_UNIFORM 0
+#define RGSADDLE_STENCIL_SPRING_ENERGY_WEIGHTED 1
+#define RGSADDLE_STENCIL_SPRING_ONSAGER 2
+#define RGSADDLE_STENCIL_SPRING_EXPLICIT 3
+
+#define RGSADDLE_STENCIL_PHASE_BAND 0
+#define RGSADDLE_STENCIL_PHASE_ZOOM 1
+#define RGSADDLE_STENCIL_PHASE_INSERT 2
+#define RGSADDLE_STENCIL_PHASE_ALIGN 3
+#define RGSADDLE_STENCIL_PHASE_MINMODE 4
+#define RGSADDLE_STENCIL_PHASE_EF 5
+#define RGSADDLE_STENCIL_PHASE_ROTATE 6
+#define RGSADDLE_STENCIL_PHASE_TRANSLATE 7
+
+#define RGSADDLE_STENCIL_KEY_METHOD 1
+#define RGSADDLE_STENCIL_KEY_SPRING_MODEL 2
+#define RGSADDLE_STENCIL_KEY_ZOOM_STABILITY 3
+#define RGSADDLE_STENCIL_KEY_ZOOM_WINDOW 4
+#define RGSADDLE_STENCIL_KEY_ZOOM_OFFSET 5
+#define RGSADDLE_STENCIL_KEY_ZOOM_INTERP 6
+#define RGSADDLE_STENCIL_KEY_ZOOM_ENDS 7
+#define RGSADDLE_STENCIL_KEY_ZOOM_MAX_ITERATIONS 8
+#define RGSADDLE_STENCIL_KEY_ZOOM_FORCE_KIND 9
+#define RGSADDLE_STENCIL_KEY_AUTONEB_N_SIMUL 10
+#define RGSADDLE_STENCIL_KEY_AUTONEB_N_MAX 11
+#define RGSADDLE_STENCIL_KEY_AUTONEB_LOCAL_MAX_STEPS 12
+#define RGSADDLE_STENCIL_KEY_AUTONEB_CLIMB_MAX_STEPS 13
+#define RGSADDLE_STENCIL_KEY_AUTONEB_CLIMB 14
+#define RGSADDLE_STENCIL_KEY_AUTONEB_FULL_BAND 15
+#define RGSADDLE_STENCIL_KEY_REFINE 16
+#define RGSADDLE_STENCIL_KEY_TANGENT 17
+#define RGSADDLE_STENCIL_KEY_PROJECTION 18
+#define RGSADDLE_STENCIL_KEY_STEPPER 19
+#define RGSADDLE_STENCIL_KEY_THREADS 20
+#define RGSADDLE_STENCIL_KEY_MINMODE_KIND 21
+#define RGSADDLE_STENCIL_KEY_MINMODE_DIFFERENCE 22
+#define RGSADDLE_STENCIL_KEY_MINMODE_MAX_ROTATIONS 23
+#define RGSADDLE_STENCIL_KEY_MINMODE_KRYLOV 24
+#define RGSADDLE_STENCIL_KEY_LBFGS_MEMORY 25
+
+#define RGSADDLE_STENCIL_KEY_K 101
+#define RGSADDLE_STENCIL_KEY_K_MIN 102
+#define RGSADDLE_STENCIL_KEY_K_MAX 103
+#define RGSADDLE_STENCIL_KEY_ZOOM_ALPHA 104
+#define RGSADDLE_STENCIL_KEY_ZOOM_FORCE 105
+#define RGSADDLE_STENCIL_KEY_AUTONEB_LOCAL_FORCE_TOL 106
+#define RGSADDLE_STENCIL_KEY_AUTONEB_SPACE_ENERGY_RATIO 107
+#define RGSADDLE_STENCIL_KEY_CI_TOL 108
+#define RGSADDLE_STENCIL_KEY_CI_RMS_TOL 109
+#define RGSADDLE_STENCIL_KEY_IMAGE_SCALE 110
+#define RGSADDLE_STENCIL_KEY_BAND_SLACK 111
+#define RGSADDLE_STENCIL_KEY_CI_TRIGGER_FACTOR 112
+#define RGSADDLE_STENCIL_KEY_CI_TRIGGER_FORCE 113
+#define RGSADDLE_STENCIL_KEY_MAX_MOVE 114
+#define RGSADDLE_STENCIL_KEY_EF_ACTIVATE 115
+#define RGSADDLE_STENCIL_KEY_OCINEB_TRUST 116
+#define RGSADDLE_STENCIL_KEY_MINMODE_DR 117
+#define RGSADDLE_STENCIL_KEY_MINMODE_ROTATION_TOL 118
+#define RGSADDLE_STENCIL_KEY_MINMODE_FORCE_TOL 119
+#define RGSADDLE_STENCIL_KEY_MINMODE_MAX_MOVE 120
+#define RGSADDLE_STENCIL_KEY_MINMODE_ROTATION_ANGLE_TOL 121
+
+#define RGSADDLE_STENCIL_KEY_EXPLICIT_KS 201
+#define RGSADDLE_STENCIL_KEY_CELL 202
+
+#define RGSADDLE_STENCIL_QUERY_MODE 1
+#define RGSADDLE_STENCIL_QUERY_CURVATURE 2
+#define RGSADDLE_STENCIL_QUERY_CLIMBING_INDEX 3
+#define RGSADDLE_STENCIL_QUERY_ZOOM_WINDOW 4
+#define RGSADDLE_STENCIL_QUERY_IMAGE_IDS 5
+#define RGSADDLE_STENCIL_QUERY_SHAPE 6
+
+typedef struct RgsaddleStencilConfig RgsaddleStencilConfig;
+typedef struct RgsaddleStencil RgsaddleStencil;
+
+typedef struct {
+  size_t struct_size;
+  int32_t phase;
+  int32_t status;
+  double max_force;
+  int64_t ci_index;
+  int64_t iteration;
+  int64_t surface_rows;
+  int64_t total_evaluations;
+  int64_t zoom_lo;
+  int64_t zoom_hi;
+  double curvature;
+} rgsaddle_stencil_report_t;
+
+/**
+ * One evaluation. rows is the block length, dof is 3 * n_atoms.
+ * ids has rows entries. x and g have rows * dof entries, e has rows.
+ * Return 0 on success.
+ */
+typedef int (*rgsaddle_stencil_eval_fn)(void *user, size_t rows, size_t dof,
+                                        const uint64_t *ids, const double *x,
+                                        double *e, double *g);
+
+/** Thread-local text of the last stencil error. Empty when there is none. */
+const char *rgsaddle_last_error(void);
+
+RgsaddleStencilConfig *rgsaddle_stencil_config_new(int32_t preset);
+int rgsaddle_stencil_config_set_f64(RgsaddleStencilConfig *cfg, int32_t key, double value);
+int rgsaddle_stencil_config_set_i64(RgsaddleStencilConfig *cfg, int32_t key, int64_t value);
+int rgsaddle_stencil_config_set_array(RgsaddleStencilConfig *cfg, int32_t key,
+                                      const double *values, size_t n);
+int rgsaddle_stencil_config_get_f64(const RgsaddleStencilConfig *cfg, int32_t key, double *out);
+int rgsaddle_stencil_config_get_i64(const RgsaddleStencilConfig *cfg, int32_t key, int64_t *out);
+void rgsaddle_stencil_config_free(RgsaddleStencilConfig *cfg);
+
+RgsaddleStencil *rgsaddle_stencil_new(const RgsaddleStencilConfig *cfg, size_t rows, size_t dof,
+                                      const double *x);
+int rgsaddle_stencil_step(RgsaddleStencil *handle, rgsaddle_stencil_eval_fn eval, void *user,
+                          rgsaddle_stencil_report_t *out);
+int rgsaddle_stencil_run(RgsaddleStencil *handle, rgsaddle_stencil_eval_fn eval, void *user,
+                         size_t max_steps, rgsaddle_stencil_report_t *out);
+int rgsaddle_stencil_positions(const RgsaddleStencil *handle, double *out);
+int rgsaddle_stencil_energies(const RgsaddleStencil *handle, double *out);
+int rgsaddle_stencil_query(const RgsaddleStencil *handle, int32_t key, void *out, size_t n);
+int rgsaddle_stencil_report(const RgsaddleStencil *handle, rgsaddle_stencil_report_t *out);
+void rgsaddle_stencil_free(RgsaddleStencil *handle);
 
 #ifdef __cplusplus
 }

@@ -26,7 +26,7 @@ use crate::spring::SpringKind;
 use crate::tangent::TangentKind;
 
 pub const RGSADDLE_ABI_MAJOR: u32 = 1;
-pub const RGSADDLE_ABI_MINOR: u32 = 16;
+pub const RGSADDLE_ABI_MINOR: u32 = 17;
 
 /// Band config bit 0. The C step calls the surface once per image
 /// carried by the evaluation: every image on the first evaluation
@@ -316,7 +316,7 @@ fn stamp_report(out: &mut RgsaddleReport) {
     out.flags = 0;
 }
 
-fn status_of(err: &SaddleError) -> i32 {
+pub(crate) fn status_of(err: &SaddleError) -> i32 {
     match err {
         SaddleError::Shape(_) => RGSADDLE_SHAPE,
         SaddleError::Surface(_) => RGSADDLE_SURFACE_FAILED,
@@ -1403,3 +1403,5 @@ pub unsafe extern "C" fn rgsaddle_index1_free(session: *mut RgsaddleIndex1) {
 
 mod sessions;
 pub use sessions::*;
+mod stencil;
+pub use stencil::*;
