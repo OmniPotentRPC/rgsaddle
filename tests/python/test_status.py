@@ -1,4 +1,4 @@
-"""F7 mapping of rgsaddle_status_t."""
+"""Mapping of rgsaddle_status_t onto Python exceptions."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""F5 schedule. The worker count is not an input."""
+"""Owner schedule. The worker count is not an input."""
 
 from __future__ import annotations
 
@@ -44,5 +44,7 @@ def test_schedule_rejects_duplicate_row_id() -> None:
         schedule_canonical(ids, owners, flags, 1)
     except ValueError as exc:
         assert "duplicate row_id" in str(exc)
+        assert "rgbind" not in str(exc)
+        assert "::" not in str(exc)
         return
     raise AssertionError("duplicate row id must raise")

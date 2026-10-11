@@ -5,20 +5,21 @@
  * @file ext.cpp
  * @brief Nanobind frontend for the rgsaddle Python package.
  *
- * F1 FREE_THREADED via nanobind_add_module. F2 the only mutable slot
+ * Free-threaded builds use nanobind_add_module. The only mutable slot
  * is the thread-local last-error string, named with the rgsaddle_py_
- * prefix and kept inside this translation unit. F3 ClaimSlot takes
- * rgbind::Claim for the whole SurfaceAdapter call. F4 the test eval
- * loop drops the GIL before workers run. F5 Python callbacks in that
+ * prefix and kept inside this translation unit. ClaimSlot takes
+ * rgbind::Claim for the whole SurfaceAdapter call. The test eval
+ * loop drops the GIL before workers run. Python callbacks in that
  * loop go through rgbind::trampoline and rows are grouped by
- * rgbind::serialise_by_owner. F6 float64 C-contiguous arrays,
- * noconvert on the way in, capsule copies on the way out. F7
- * raise_status maps rgsaddle_status_t. F8 the schedule does not
- * depend on the worker count. F9 the link exports PyInit__core.
+ * rgbind::serialise_by_owner. Float64 C-contiguous arrays use
+ * noconvert on the way in and capsule copies on the way out.
+ * raise_status maps rgsaddle_status_t. The schedule text does not
+ * depend on the worker count. The link exports PyInit__core.
  *
- * SurfaceAdapter itself does not own threads. The stencil calls it
- * from the stencil's workers. The fake eval loop, the claim probes,
- * and the float echo live in the _testing submodule.
+ * SurfaceAdapter does not own threads. The caller passes C ABI
+ * request rows and the adapter evaluates them on that thread. The
+ * test eval loop, the claim probes, and the float echo live in the
+ * _testing submodule.
  */
 
 #include <rgsaddle.h>
@@ -76,12 +77,12 @@ namespace nb = nanobind;
 
 namespace {
 
-thread_local std::string g_last_error;
+thread_local std::string rgsaddle_py_last_error_text;
 
-const char *rgsaddle_py_last_error() { return g_last_error.c_str(); }
+const char *rgsaddle_py_last_error() { return rgsaddle_py_last_error_text.c_str(); }
 
 void rgsaddle_py_set_last_error(const char *text) {
-  g_last_error.assign(text == nullptr ? "" : text);
+  rgsaddle_py_last_error_text.assign(text == nullptr ? "" : text);
 }
 
 struct HoldGate {
@@ -96,10 +97,16 @@ struct HoldGate {
 struct ClaimSlot {
   rgbind::Busy busy;
   // The published pointer is the only shared write of the Claim object.
-  // enter records this thread. exit from any other thread is refused,
-  // so only the thread that entered deletes the Claim.
+  // enter records this thread. exit from any other thread is refused.
+  // The destructor releases a claim that is still held when Python frees the object.
   std::atomic<rgbind::Claim *> held{nullptr};
   std::atomic<std::thread::id> owner{};
+
+  ClaimSlot() = default;
+  ClaimSlot(const ClaimSlot &) = delete;
+  ClaimSlot &operator=(const ClaimSlot &) = delete;
+  ClaimSlot(ClaimSlot &&) = delete;
+  ClaimSlot &operator=(ClaimSlot &&) = delete;
 
   void enter() {
     if (held.load(std::memory_order_acquire) != nullptr) {
@@ -114,6 +121,14 @@ struct ClaimSlot {
     owner.store(std::this_thread::get_id(), std::memory_order_release);
   }
 
+  // Python may free the object on a thread that did not enter. Release
+  // the claim here. exit() still refuses that thread while the object lives.
+  ~ClaimSlot() {
+    owner.store(std::thread::id(), std::memory_order_release);
+    rgbind::Claim *claim = held.exchange(nullptr, std::memory_order_acq_rel);
+    delete claim;
+  }
+
   void exit() {
     const auto self = std::this_thread::get_id();
     if (owner.load(std::memory_order_acquire) != self) {
@@ -124,7 +139,7 @@ struct ClaimSlot {
     delete claim;
   }
 
-  // F4: native hold, GIL released before the claim. F3: atomic claim.
+  // Native hold. The GIL is released before the atomic claim.
   int work(int hold_ms) {
     nb::gil_scoped_release rel;
     rgbind::Claim claim(busy.flag(), "SurfaceAdapter");
@@ -277,7 +292,7 @@ struct EvalCall {
     nb::ndarray<nb::numpy, double> x_arr(x_raw, 2, x_shape, x_owner);
     nb::object result = (*callback)(id_arr, x_arr);
     if (!nb::isinstance<nb::tuple>(result)) {
-      throw nb::value_error("eval callback must return (energies, gradients)");
+      throw nb::type_error("eval callback must return (energies, gradients)");
     }
     nb::tuple tup = nb::cast<nb::tuple>(result);
     if (tup.size() != 2) {
@@ -332,7 +347,7 @@ void run_jobs(nb::callable &callback, const std::vector<GroupWork> &jobs, const 
   };
 
   // threads == 1 stays on the calling thread so PyErr_CheckSignals runs
-  // between callbacks (F5). More than one worker detaches first (F4).
+  // between callbacks. More than one worker detaches first.
   if (nworkers <= 1) {
     for (const GroupWork &job : jobs) {
       one(job, true);
@@ -397,6 +412,16 @@ void run_jobs(nb::callable &callback, const std::vector<GroupWork> &jobs, const 
   }
 }
 
+[[noreturn]] void raise_owner_error(const std::invalid_argument &err) {
+  std::string text = err.what();
+  const std::string prefix = "rgbind::serialise_by_owner: ";
+  const auto at = text.find(prefix);
+  if (at != std::string::npos) {
+    text.erase(at, prefix.size());
+  }
+  throw nb::value_error(text.c_str());
+}
+
 nb::tuple drive_eval(nb::callable callback, IdArray ids, Matrix x, OwnerArray owners, FlagArray reentrant, int threads,
                      ClaimSlot &slot) {
   const std::size_t n = static_cast<std::size_t>(ids.shape(0));
@@ -425,7 +450,7 @@ nb::tuple drive_eval(nb::callable callback, IdArray ids, Matrix x, OwnerArray ow
     row.owner = owners(i);
     row.reentrant = reentrant(i) != 0;
     if (!dest.emplace(row.row_id, i).second) {
-      throw nb::value_error("rgbind::serialise_by_owner: duplicate row_id");
+      throw nb::value_error("duplicate row_id");
     }
     rows.push_back(row);
     if (dof != 0 && x.data() != nullptr) {
@@ -437,7 +462,7 @@ nb::tuple drive_eval(nb::callable callback, IdArray ids, Matrix x, OwnerArray ow
   try {
     schedule = rgbind::serialise_by_owner(rows, threads);
   } catch (const std::invalid_argument &err) {
-    throw nb::value_error(err.what());
+    raise_owner_error(err);
   }
 
   std::vector<GroupWork> jobs;
@@ -451,7 +476,7 @@ nb::tuple drive_eval(nb::callable callback, IdArray ids, Matrix x, OwnerArray ow
   auto energies = std::vector<double>(n == 0 ? 1 : n, 0.0);
   auto gradients = std::vector<double>(n * dof == 0 ? 1 : n * dof, 0.0);
 
-  // F3: one eval at a time. The claim is an atomic flag, not a mutex.
+  // One eval at a time. The claim is an atomic flag, not a mutex.
   rgbind::Claim claim(slot.busy.flag(), "SurfaceAdapter");
   rgbind::CallContext ctx;
   run_jobs(callback, jobs, positions, dof, dest, energies.data(), gradients.data(), threads, ctx);
@@ -499,7 +524,7 @@ std::string schedule_canonical(IdArray ids, OwnerArray owners, FlagArray reentra
   try {
     return rgbind::serialise_by_owner(rows, threads).canonical();
   } catch (const std::invalid_argument &err) {
-    throw nb::value_error(err.what());
+    raise_owner_error(err);
   }
 }
 
@@ -552,7 +577,8 @@ NB_MODULE(_core, m) {
           "Release the claim. Exceptions propagate.");
 
   m.def("last_error", []() { return std::string(rgsaddle_py_last_error()); },
-        "Thread-local text on this thread. raise_status clears it.");
+        "Thread-local slot reserved for the C ABI last-error text. Returns an empty "
+        "string unless an error text was set. raise_status reads it and then clears it.");
   m.def("raise_status", &raise_status, nb::arg("code"),
         "Map an rgsaddle_status_t value. The message is the stored text, or the "
         "status name when that text is empty. The stored text is cleared. True on OK. "
@@ -590,6 +616,6 @@ NB_MODULE(_core, m) {
               "tuple[numpy.typing.NDArray[numpy.float64], numpy.typing.NDArray[numpy.float64]]"),
       nb::arg("callback"), nb::arg("ids").noconvert(), nb::arg("x").noconvert(), nb::arg("owners").noconvert(),
       nb::arg("reentrant").noconvert(), nb::arg("threads"), nb::arg("slot"),
-      "Fake stencil eval loop. Groups rows by owner and calls "
+      "Test eval loop. Groups rows by owner and calls "
       "callback(ids, x) through the trampoline.");
 }

@@ -1,7 +1,4 @@
-"""Enum names and values match the PyO3 module on main.
-
-The table is the module built from acf239252b82741c6a635b8096c5bc47c8b70eeb.
-"""
+"""Enum names and values match the previous module."""
 
 from __future__ import annotations
 

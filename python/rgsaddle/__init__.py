@@ -1,6 +1,6 @@
 # MIT License
 # Copyright 2026 Rohit Goswami
-"""Status codes and enum controls for the stencil surface.
+"""Status codes and enum controls for the ASE image surface.
 
 The extension module is ``rgsaddle._core``. Importing this package does
 not import ASE. Use ``rgsaddle.ase`` for the image adapter.
@@ -12,20 +12,14 @@ from enum import IntEnum
 
 from rgsaddle._core import (
     NumericalError as NumericalError,
-)
-from rgsaddle._core import (
     last_error as last_error,
-)
-from rgsaddle._core import (
     raise_status as raise_status,
-)
-from rgsaddle._core import (
     version as _version,
 )
 
 __version__ = _version()
 
-# Names and values match the PyO3 module on main at acf239252b82741c6a635b8096c5bc47c8b70eeb.
+# Names and values match the previous module.
 
 
 class ForceGate(IntEnum):

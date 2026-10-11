@@ -1,4 +1,4 @@
-"""F6 round trips and the F7 status table."""
+"""Float64 round trips and the status table."""
 
 from __future__ import annotations
 
@@ -57,6 +57,20 @@ def test_drive_eval_shape() -> None:
     text = str(exc.value)
     assert "(1, 3)" in text
     assert "(2, 3)" in text
+
+
+def test_callback_non_tuple_is_type_error() -> None:
+    slot = ClaimSlot()
+    ids = np.array([0], dtype=np.int64)
+    x = np.zeros((1, 1), dtype=np.float64)
+    owners = np.array([1], dtype=np.uint64)
+    flags = np.array([0], dtype=np.uint8)
+
+    def bad(group_ids: np.ndarray, group_x: np.ndarray) -> np.ndarray:
+        return np.zeros(group_ids.shape[0], dtype=np.float64)
+
+    with pytest.raises(TypeError, match="energies, gradients"):
+        drive_eval(bad, ids, x, owners, flags, 1, slot)
 
 
 def test_callback_dtype_and_order_name_the_array() -> None:

@@ -1,4 +1,4 @@
-"""F3 claim. A second caller gets RuntimeError and the flag is released."""
+"""A second caller gets RuntimeError and the flag is released."""
 
 from __future__ import annotations
 
@@ -47,7 +47,7 @@ def test_claim_held_until_release() -> None:
     else:
         gate.release()
         holder.join()
-        raise AssertionError("second caller must see the F3 error")
+        raise AssertionError("second caller must see the in-use error")
     gate.release()
     holder.join()
     assert claim_work(slot, 0) == 1
@@ -80,6 +80,29 @@ def test_exit_from_another_thread_keeps_the_claim() -> None:
     release.set()
     holder.join()
     assert claim_work(slot, 0) == 1
+
+
+def test_freeing_a_held_slot_releases_the_claim() -> None:
+    slot = ClaimSlot()
+    slot.__enter__()
+    del slot
+    assert claim_work(ClaimSlot(), 0) == 1
+
+
+def test_freeing_a_held_slot_from_another_thread() -> None:
+    held: list[ClaimSlot] = []
+
+    def enter() -> None:
+        slot = ClaimSlot()
+        slot.__enter__()
+        held.append(slot)
+
+    worker = threading.Thread(target=enter)
+    worker.start()
+    worker.join()
+    slot = held.pop()
+    del slot
+    assert claim_work(ClaimSlot(), 0) == 1
 
 
 def test_eight_threads_raise_or_finish() -> None:

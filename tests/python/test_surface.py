@@ -238,35 +238,74 @@ def test_bytes_match_across_threads() -> None:
 
 
 def test_eight_threads_hammer_the_adapter() -> None:
-    calc = OverlapCalc()
-    adapter = SurfaceAdapter([_atoms(calc, 0)])
+    entered = threading.Event()
+    release = threading.Event()
+    state = threading.Lock()
+    active = 0
+    max_active = 0
+
+    class HoldCalc(Calculator):
+        implemented_properties = ["energy", "forces"]
+        nolabel = True
+
+        def calculate(
+            self,
+            atoms: Atoms | None = None,
+            properties: list[str] | None = None,
+            system_changes: list[str] = all_changes,
+        ) -> None:
+            nonlocal active, max_active
+            super().calculate(atoms, properties, system_changes)
+            with state:
+                active += 1
+                max_active = max(max_active, active)
+                overlapped = active > 1
+            try:
+                assert not overlapped
+                entered.set()
+                assert release.wait(timeout=5)
+                assert atoms is not None
+                n = len(atoms)
+                self.results["energy"] = 0.0
+                self.results["forces"] = np.zeros((n, 3))
+            finally:
+                with state:
+                    active -= 1
+
+    adapter = SurfaceAdapter([_atoms(HoldCalc(), 0)])
     ids = np.array([0], dtype=np.int64)
     x = np.zeros((1, 6), dtype=np.float64)
-    start = threading.Barrier(8)
+    started = threading.Barrier(8)
     results: list[str] = []
-    lock = threading.Lock()
+    done = threading.Condition()
 
     def once() -> None:
-        start.wait()
+        started.wait()
         try:
             adapter(ids, x)
+            text = "ok"
         except RuntimeError as exc:
             text = str(exc)
-        else:
-            text = "ok"
-        with lock:
+        with done:
             results.append(text)
+            done.notify_all()
 
     threads = [threading.Thread(target=once) for _ in range(8)]
     for thread in threads:
         thread.start()
+    assert entered.wait(timeout=5)
+    with done:
+        saw_contention = done.wait_for(
+            lambda: sum(item == "SurfaceAdapter is in use by another thread" for item in results) >= 7,
+            timeout=5,
+        )
+    release.set()
     for thread in threads:
         thread.join()
-    assert "ok" in results
-    assert "SurfaceAdapter is in use by another thread" in results
-    for item in results:
-        assert item == "ok" or item == "SurfaceAdapter is in use by another thread"
-    assert not calc.overlap
+    assert saw_contention
+    assert results.count("ok") == 1
+    assert results.count("SurfaceAdapter is in use by another thread") == 7
+    assert max_active == 1
     energies, gradients = adapter(ids, x)
     assert energies.shape == (1,)
     assert gradients.shape == (1, 6)
@@ -274,38 +313,112 @@ def test_eight_threads_hammer_the_adapter() -> None:
 
 def test_shared_calculator_calculate_stays_serial() -> None:
     """One calculator is never inside calculate on two workers at once."""
+    calc = OverlapCalc()
+    calc.reentrant = False
+    images = [_atoms(calc, 0), _atoms(calc, 1)]
+    adapter = SurfaceAdapter(images, allow_shared_calculator=True)
 
-    def run(flag: bool) -> None:
-        calc = OverlapCalc()
-        calc.reentrant = flag
-        images = [_atoms(calc, 0), _atoms(calc, 1)]
-        adapter = SurfaceAdapter(images, allow_shared_calculator=True)
+    def callback(group_ids: np.ndarray, group_x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        energies = np.empty(group_ids.shape[0], dtype=np.float64)
+        gradients = np.empty_like(group_x)
+        for local, image_id in enumerate(group_ids.tolist()):
+            atoms = images[int(image_id)]
+            coords = np.array(group_x[local], dtype=np.float64, copy=True).reshape((-1, 3))
+            atoms.set_positions(coords, apply_constraint=False)
+            energies[local] = float(atoms.get_potential_energy())
+            gradients[local] = -np.array(atoms.get_forces(), dtype=np.float64, copy=True).reshape(-1)
+        return energies, gradients
 
-        def callback(group_ids: np.ndarray, group_x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-            energies = np.empty(group_ids.shape[0], dtype=np.float64)
-            gradients = np.empty_like(group_x)
-            for local, image_id in enumerate(group_ids.tolist()):
-                atoms = images[int(image_id)]
-                coords = np.array(group_x[local], dtype=np.float64, copy=True).reshape((-1, 3))
-                atoms.set_positions(coords, apply_constraint=False)
-                energies[local] = float(atoms.get_potential_energy())
-                gradients[local] = -np.array(atoms.get_forces(), dtype=np.float64, copy=True).reshape(-1)
-            return energies, gradients
+    ids = np.array([1, 0], dtype=np.int64)
+    x = np.zeros((2, 6), dtype=np.float64)
+    owners = adapter.owners(ids)
+    flags = adapter.reentrant(ids)
+    assert flags.tolist() == [0, 0]
+    assert owners.tolist() == [owners[0], owners[0]]
+    energies, gradients = drive_eval(callback, ids, x, owners, flags, 8, ClaimSlot())
+    assert energies.shape == (2,)
+    assert gradients.shape == (2, 6)
+    assert not calc.overlap
+    assert calc.max_active == 1
 
-        ids = np.array([1, 0], dtype=np.int64)
-        x = np.zeros((2, 6), dtype=np.float64)
-        owners = adapter.owners(ids)
-        flags = np.full(2, 1 if flag else 0, dtype=np.uint8)
-        assert int(adapter.reentrant(ids)[0]) == (1 if flag else 0)
-        assert owners.tolist() == [owners[0], owners[0]]
-        energies, gradients = drive_eval(callback, ids, x, owners, flags, 8, ClaimSlot())
-        assert energies.shape == (2,)
-        assert gradients.shape == (2, 6)
-        assert not calc.overlap
-        assert calc.max_active == 1
 
-    run(False)
-    run(True)
+def test_reentrant_owner_groups_run_concurrently() -> None:
+    n = 4
+    gate = threading.Barrier(n)
+    state = threading.Lock()
+    active = 0
+    max_active = 0
+
+    class GateCalc(Calculator):
+        implemented_properties = ["energy", "forces"]
+        nolabel = True
+
+        def calculate(
+            self,
+            atoms: Atoms | None = None,
+            properties: list[str] | None = None,
+            system_changes: list[str] = all_changes,
+        ) -> None:
+            nonlocal active, max_active
+            super().calculate(atoms, properties, system_changes)
+            with state:
+                active += 1
+                max_active = max(max_active, active)
+            try:
+                gate.wait(timeout=5)
+                assert atoms is not None
+                count = len(atoms)
+                self.results["energy"] = 0.0
+                self.results["forces"] = np.zeros((count, 3))
+            finally:
+                with state:
+                    active -= 1
+    calcs = [GateCalc() for _ in range(n)]
+    for calc in calcs:
+        calc.reentrant = True
+    images = [_atoms(calc, i) for i, calc in enumerate(calcs)]
+    adapter = SurfaceAdapter(images)
+    ids = np.arange(n, dtype=np.int64)
+    x = np.zeros((n, 6), dtype=np.float64)
+    owners = adapter.owners(ids)
+    flags = adapter.reentrant(ids)
+    assert len(set(int(item) for item in owners.tolist())) == n
+    assert flags.tolist() == [1] * n
+
+    def callback(group_ids: np.ndarray, group_x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        energies = np.empty(group_ids.shape[0], dtype=np.float64)
+        gradients = np.empty_like(group_x)
+        for local, image_id in enumerate(group_ids.tolist()):
+            atoms = images[int(image_id)]
+            coords = np.array(group_x[local], dtype=np.float64, copy=True).reshape((-1, 3))
+            atoms.set_positions(coords, apply_constraint=False)
+            energies[local] = float(atoms.get_potential_energy())
+            gradients[local] = -np.array(atoms.get_forces(), dtype=np.float64, copy=True).reshape(-1)
+        return energies, gradients
+
+    energies, gradients = drive_eval(callback, ids, x, owners, flags, n, ClaimSlot())
+    assert energies.shape == (n,)
+    assert gradients.shape == (n, 6)
+    assert max_active == n
+
+
+def test_shared_calculator_is_checked_at_call_time() -> None:
+    first = LogCalc([], 1)
+    second = LogCalc([], 2)
+    images = [_atoms(first, 0), _atoms(second, 1)]
+    adapter = SurfaceAdapter(images)
+    images[1].calc = first
+    ids = np.array([0, 1], dtype=np.int64)
+    x = np.zeros((2, 6), dtype=np.float64)
+    with pytest.raises(ValueError, match="share a calculator"):
+        adapter(ids, x)
+    with pytest.raises(ValueError, match="share a calculator"):
+        adapter.owners(ids)
+    with pytest.raises(ValueError, match="share a calculator"):
+        adapter.reentrant(ids)
+    shared = SurfaceAdapter([_atoms(first, 0), _atoms(first, 1)], allow_shared_calculator=True)
+    energies, _gradients = shared(ids, x)
+    assert energies.shape == (2,)
 
 
 def test_claim_covers_raw_forces() -> None:

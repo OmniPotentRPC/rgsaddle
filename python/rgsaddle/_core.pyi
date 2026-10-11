@@ -32,7 +32,9 @@ class ClaimSlot:
         """Release the claim. Exceptions propagate."""
 
 def last_error() -> str:
-    """Thread-local text on this thread. raise_status clears it."""
+    """
+    Thread-local slot reserved for the C ABI last-error text. Returns an empty string unless an error text was set. raise_status reads it and then clears it.
+    """
 
 def raise_status(code: int) -> bool:
     """

@@ -1,20 +1,18 @@
 # MIT License
 # Copyright 2026 Rohit Goswami
-"""ASE image list as the stencil surface callback.
+"""Evaluate ASE images for C ABI request rows ``(ids, x)``.
 
 ASE is imported on first use. ``import rgsaddle`` does not import it.
 
-The saddle step that will consume this callback is the one in
-Goswami, Gunde, and Jónsson, Front. Chem. 2026
-(doi:10.3389/fchem.2026.1807063). Calculator calls follow
-Hjorth Larsen et al., J. Phys.: Condens. Matter 29, 273002 (2017)
-(doi:10.1088/1361-648X/aa680e): ``get_forces()`` applies constraints,
-and ``get_forces(apply_constraint=False)`` is the raw force.
+Calculator calls follow Hjorth Larsen et al., J. Phys.: Condens. Matter
+29, 273002 (2017) (doi:10.1088/1361-648X/aa680e): ``get_forces()``
+applies constraints, and ``get_forces(apply_constraint=False)`` is the
+raw force.
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 from numpy.typing import NDArray
@@ -27,6 +25,20 @@ Uint64 = NDArray[np.uint64]
 Uint8 = NDArray[np.uint8]
 
 
+class _Claim:
+    """Hold a claim. ``__exit__`` returns false so exceptions propagate."""
+
+    def __init__(self, slot: ClaimSlot) -> None:
+        self._slot = slot
+
+    def __enter__(self) -> ClaimSlot:
+        return self._slot.__enter__()
+
+    def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> Literal[False]:
+        self._slot.__exit__(exc_type, exc_value, traceback)
+        return False
+
+
 class SurfaceAdapter:
     """Map ``list[Atoms]`` onto ``(ids, x) -> (energies, gradients)``.
 
@@ -37,9 +49,13 @@ class SurfaceAdapter:
 
     The adapter does not own a thread count. ``__call__`` evaluates the
     given rows on the calling thread, in the given order. ``owners`` and
-    ``reentrant`` tell a driver which rows share a calculator. A second
+    ``reentrant`` tell a caller which rows share a calculator. A second
     call raises ``RuntimeError`` while the first call still holds the
     claim.
+
+    A shared calculator is refused at construction and again on
+    ``__call__``, ``owners``, and ``reentrant``, using ``atoms.calc``
+    identity.
     """
 
     def __init__(
@@ -119,7 +135,7 @@ class SurfaceAdapter:
         dof = self._natoms * 3
         if x_arr.shape != (n, dof):
             raise ValueError(f"x: expected shape ({n}, {dof}), got {tuple(int(v) for v in x_arr.shape)}")
-        with self.claim():
+        with _Claim(self.claim()):
             energies = np.empty(n, dtype=np.float64)
             gradients = np.empty((n, dof), dtype=np.float64)
             raw = np.empty((n, dof), dtype=np.float64)
@@ -130,9 +146,25 @@ class SurfaceAdapter:
                 raw[row] = raw_force
             self.raw_forces = raw
             return energies, gradients
-        raise AssertionError("SurfaceAdapter claim ended without a result")
+
+    def _check_shared_calculators(self) -> None:
+        if self.allow_shared_calculator:
+            return
+        seen: dict[int, int] = {}
+        for image_id, atoms in self._images.items():
+            calc = getattr(atoms, "calc", None)
+            if calc is None:
+                raise ValueError(f"image {image_id} has no calculator")
+            owner = id(calc)
+            if owner in seen:
+                raise ValueError(
+                    f"images {seen[owner]} and {image_id} share a calculator; "
+                    "pass allow_shared_calculator=True"
+                )
+            seen[owner] = image_id
 
     def _row_ids(self, ids: Int64) -> Int64:
+        self._check_shared_calculators()
         if (
             not isinstance(ids, np.ndarray)
             or ids.dtype != np.dtype(np.int64)
