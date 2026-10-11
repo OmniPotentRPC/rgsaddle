@@ -1,0 +1,181 @@
+name: verify
+
+on:
+  push:
+    branches:
+      - "verify/**"
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  formal:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install elan
+        run: |
+          curl -sSfL https://github.com/leanprover/elan/releases/download/v4.2.4/elan-x86_64-unknown-linux-gnu.tar.gz | tar xz
+          ./elan-init -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+      - uses: actions/cache@v4
+        with:
+          path: formal/.lake
+          key: lake-${{ hashFiles('formal/lake-manifest.json') }}
+      - name: Check the contracts
+        working-directory: formal
+        run: ./check.sh
+      - name: Export the mirror
+        working-directory: formal
+        run: lake exe mirror
+      - name: Check exported floors
+        run: python3 scripts/export_constants.py --check
+
+  validation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Sollya and a C toolchain
+        run: sudo apt-get update && sudo apt-get install -y sollya build-essential pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install uv 0.13.0
+        run: curl -LsSf https://astral.sh/uv/0.13.0/install.sh | sh
+      - name: Symbolic scripts
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.local/bin:$PATH"
+          shopt -s globstar nullglob
+          for script in validation/**/*.py tests/symbolic/*.py; do
+            if [[ "$(basename "$script")" == "check_index1.py" ]]; then
+              continue
+            fi
+            echo "== $script"
+            uv run --no-project --with sympy --with mpmath --with numpy --with scipy --with z3-solver python "$script"
+          done
+      - name: Sollya scripts
+        run: |
+          set -euo pipefail
+          shopt -s globstar nullglob
+          for script in validation/**/*.sollya tests/symbolic/*.sollya; do
+            echo "== $script"
+            sollya "$script"
+          done
+      - name: Index-1 ABI probe
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.local/bin:$PATH"
+          cargo build --features capi
+          gcc -I include validation/index1_probe.c -L target/debug -lrgsaddle -lm -Wl,-rpath,"$PWD/target/debug" -o /tmp/index1_probe
+          cp /tmp/index1_probe /tmp/index1_probe_candidate
+          mkdir -p /tmp/index1_out
+          uv run --no-project python validation/check_index1.py /tmp/index1_probe /tmp/index1_probe_candidate /tmp/index1_out
+
+  kani:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: model-checking/kani-github-action@v1.1
+        with:
+          kani-version: "0.68.0"
+      - name: Compile the Kani crate
+        run: cargo kani --features capi --only-codegen
+      - name: Null and short-length harnesses
+        run: |
+          set +e
+          # Codegen already finished, so the limit below is CBMC time.
+          # One harness at a time. A few function bodies make CBMC run for
+          # many minutes even on the early return, so a hang does not hide
+          # the harnesses that do finish. 90 seconds is enough for the
+          # guards that stay on the null path. A timeout is reported, not
+          # treated as a proof. A finished counterexample fails the job.
+          names=$(grep -oE 'fn [A-Za-z0-9_]+_null_and_short' src/kani_proofs.rs | awk '{print $2}')
+          fail=0
+          for name in $names; do
+            echo "== $name"
+            timeout 90 cargo kani --features capi --harness "kani_proofs::abi_guards::$name" --output-format terse > "/tmp/kani-$name.txt" 2>&1
+            status=$?
+            if grep -q "VERIFICATION:- SUCCESSFUL" "/tmp/kani-$name.txt"; then
+              echo "$name success"
+            elif [[ "$status" -eq 124 ]]; then
+              echo "$name timeout"
+              echo "CBMC did not finish within 90 seconds. See validation/kani_unsupported.md."
+            else
+              echo "$name exit $status"
+              tail -n 30 "/tmp/kani-$name.txt"
+              fail=1
+            fi
+          done
+          exit "$fail"
+
+  libm:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            packages: ""
+          - target: x86_64-unknown-linux-musl
+            packages: musl-tools
+          - target: aarch64-unknown-linux-gnu
+            packages: gcc-aarch64-linux-gnu qemu-user
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cross packages
+        if: matrix.packages != ''
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.packages }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: aarch64 runner
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          mkdir -p .cargo
+          cat >> .cargo/config.toml << 'EOF'
+          [target.aarch64-unknown-linux-gnu]
+          linker = "aarch64-linux-gnu-gcc"
+          runner = "qemu-aarch64 -L /usr/aarch64-linux-gnu"
+          EOF
+      - name: Print transcendental bits
+        run: |
+          cargo test --test libm_report --target ${{ matrix.target }} -- --nocapture --exact print_transcendental_bits \
+            | awk '/^[0-9]+ [0-9a-f]{16} /' > libm-bits.txt
+          test "$(wc -l < libm-bits.txt)" -eq 1000
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libm-${{ matrix.target }}
+          path: libm-bits.txt
+
+  libm-diff:
+    runs-on: ubuntu-latest
+    needs: libm
+    steps:
+      - uses: actions/download-artifact@v4
+      - name: Diff the three targets
+        run: |
+          set +e
+          echo "glibc versus musl"
+          diff -u libm-x86_64-unknown-linux-gnu/libm-bits.txt libm-x86_64-unknown-linux-musl/libm-bits.txt
+          echo "glibc versus aarch64"
+          diff -u libm-x86_64-unknown-linux-gnu/libm-bits.txt libm-aarch64-unknown-linux-gnu/libm-bits.txt
+          echo "libm diff is report-only"
+          exit 0
+
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build tools for the bundled MPFR
+        run: sudo apt-get update && sudo apt-get install -y m4 make
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Format
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --features capi,verify --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --features capi,verify
