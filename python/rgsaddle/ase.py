@@ -101,11 +101,18 @@ class SurfaceAdapter:
         """Evaluate the requested rows on this thread, in the given order.
 
         ``ids`` is int64, shape ``(rows,)``. ``x`` is float64,
-        shape ``(rows, dof)``. The result arrays are new copies (F6).
-        ``raw_forces`` is written before the claim drops.
+        shape ``(rows, dof)``. A wrong dtype or order raises
+        ``TypeError`` naming ``ids`` or ``x``. The result arrays are
+        new copies (F6). ``raw_forces`` is written before the claim drops.
         """
         ids_arr = self._row_ids(ids)
-        x_arr = np.ascontiguousarray(x, dtype=np.float64)
+        if (
+            not isinstance(x, np.ndarray)
+            or x.dtype != np.dtype(np.float64)
+            or not x.flags.c_contiguous
+        ):
+            raise TypeError("x: expected float64 C-contiguous")
+        x_arr = x
         if x_arr.ndim != 2:
             raise ValueError(f"x: expected rank 2, got rank {x_arr.ndim}")
         n = int(ids_arr.shape[0])
@@ -126,10 +133,15 @@ class SurfaceAdapter:
         raise AssertionError("SurfaceAdapter claim ended without a result")
 
     def _row_ids(self, ids: Int64) -> Int64:
-        ids_arr = np.ascontiguousarray(ids, dtype=np.int64)
-        if ids_arr.ndim != 1:
-            raise ValueError(f"ids: expected rank 1, got rank {ids_arr.ndim}")
-        return ids_arr
+        if (
+            not isinstance(ids, np.ndarray)
+            or ids.dtype != np.dtype(np.int64)
+            or not ids.flags.c_contiguous
+        ):
+            raise TypeError("ids: expected int64 C-contiguous")
+        if ids.ndim != 1:
+            raise ValueError(f"ids: expected rank 1, got rank {ids.ndim}")
+        return ids
 
     def _atoms_for(self, image_id: int) -> Any:
         atoms = self._images.get(image_id)

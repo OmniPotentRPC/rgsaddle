@@ -114,6 +114,27 @@ def _atoms(calc: Calculator, image: int, x0: float = 0.0) -> Atoms:
     return atoms
 
 
+def test_ids_and_x_reject_dtype_and_order() -> None:
+    first = LogCalc([], 1)
+    second = LogCalc([], 2)
+    adapter = SurfaceAdapter([_atoms(first, 0), _atoms(second, 1)])
+    ids = np.array([0, 1], dtype=np.int64)
+    x = np.zeros((2, 6), dtype=np.float64)
+    with pytest.raises(TypeError, match="ids"):
+        adapter(np.array([0.9, 1.2]), x)
+    with pytest.raises(TypeError, match="ids"):
+        adapter.owners(np.array([0.0, 1.0]))
+    with pytest.raises(TypeError, match="ids"):
+        adapter.reentrant(np.arange(4, dtype=np.int64)[::2])
+    with pytest.raises(TypeError, match="x"):
+        adapter(ids, np.zeros((2, 6), dtype=np.float32))
+    fortran = np.asfortranarray(np.zeros((2, 6), dtype=np.float64))
+    with pytest.raises(TypeError, match="x"):
+        adapter(ids, fortran)
+    energies, _gradients = adapter(ids, x)
+    assert energies.shape == (2,)
+
+
 def test_shared_calculator_is_refused() -> None:
     calc = LogCalc([], 0)
     images = [_atoms(calc, 0, 0.0), _atoms(calc, 1, 1.0)]
