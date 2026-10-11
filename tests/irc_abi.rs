@@ -13,6 +13,12 @@ fn c_abi_irc_analytic_well() {
     if libdir.ends_with("deps") {
         libdir.pop();
     }
+    if !libdir.join("librgsaddle.so").exists() {
+        let deps = libdir.join("deps");
+        if deps.join("librgsaddle.so").exists() {
+            libdir = deps;
+        }
+    }
     assert!(
         libdir.join("librgsaddle.so").exists(),
         "build the C ABI library before testing"
