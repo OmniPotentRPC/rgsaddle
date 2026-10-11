@@ -1,13 +1,13 @@
 #+TITLE: Grow a band with AutoNEB
 #+OPTIONS: toc:nil num:nil
 
-AutoNEB starts from the endpoints, inserts an image where the band is coarsest, relaxes that neighbourhood, and climbs at the end. Kolsbjerg, Groves, and Hammer, J. Chem. Phys. 145, 094107 (2016), doi:10.1063/1.4961868.
+AutoNEB starts from the endpoints, inserts an image where the band is coarsest, relaxes that neighbourhood, and climbs at the end. The climbing image and the dimer are one Householder reflection: Goswami, Gunde, and Jónsson, Front. Chem. (2026), doi:10.3389/fchem.2026.1807063. The band and this climb stage follow that step, then Chill et al., Modelling Simul. Mater. Sci. Eng. 22, 055002 (2014), doi:10.1088/0965-0393/22/5/055002, with eOn v2.9.0.1, doi:10.5281/zenodo.18529495, then Kolsbjerg, Groves, and Hammer, J. Chem. Phys. 145, 094107 (2016), doi:10.1063/1.4961868.
 
 #+begin_export rst
-:cite:`kolsbjergAutomatedNudgedElastic2016`
+:cite:`goswamiEnhancedClimbingImage2026,chillBenchmarksCharacterization2014,eon2901,kolsbjergAutomatedNudgedElastic2016`
 #+end_export
 
-Use it when a fixed band would spend its force calls on images that are still far from the barrier. A short path with one barrier is often cheaper as one CI-NEB. The double well in ~tests/autoneb.rs~ is that case. Müller-Brown between minima B and C is the case that spends fewer calls.
+On the double well, AutoNEB used more force calls than one fixed CI-NEB: 1.42 times as many, median 71 against 52, with a 95% BCa interval of 1.33 to 1.52. Prefer CI-NEB for that single barrier. Müller-Brown from B to C has mean ratio 0.46 (median 268 against 762, interval 0.35 to 0.79), and one CI-NEB seed was censored at the 5000-call budget. The two-barrier path from A to B through the intermediate minimum has mean ratio 0.95, interval 0.81 to 1.23, medians 643 and 740. Zoom-NEB is the growth method under development.
 
 * Minimal example
 ~BandConfig::autoneb~ carries the tuning. ~None~ is a fixed band. ~AutoNeb::new~ reads that tuning, or the defaults when it is ~None~.
@@ -37,25 +37,29 @@ C, C++, and Python reach these fields through the stencil configuration's AutoNE
 | ~climb_max_steps~    | 2000    | ~maxsteps[1]~        | Step cap for the climbing window.                                                        |
 | ~space_energy_ratio~ | 0.5     | ~space_energy_ratio~ | Threshold between the longest segment and the peak-weighted energy gap.                 |
 | ~climb~              | on      | ~climb~              | Arm the climbing image after the last insertion.                                        |
+| ~full_band~          | off     |                      | Also relax the full band after the climbing window. ASE stops without this stage.       |
 | ~threads~            | 1       |                      | Image-evaluation threads. ASE's world size is the nearest name, and it is not this knob. |
 
 Construction fills the band to ~n_simul + 2~ by cutting the longest segment, one image at a time. Each image is the minimum-image midpoint. ASE's AutoNEB, given only the two endpoints, places ~n_simul~ images in one equal-spaced interpolate. The two fills meet on a unit segment when ~n_simul~ is 1 or 3, and they differ for 2.
 
-~run~ then relaxes a local window, inserts one image, and repeats until ~n_max~. The window is the whole band when the band is still short. Otherwise it pins one image on each side of at least ~n_simul~ free images. An image with no energy yet is free, so a just-inserted image moves. With every energy known, the free images are centered on the highest interior energy.
+~run~ then relaxes a local window, inserts one image, and repeats until ~n_max~. The window is ASE's ~which_images_to_run_on~. ~nneb~ starts at ~h - 1 - n_simul / 2~, where ~h~ is the highest-energy image, endpoints included. Ties keep the lower index. The four clamps are ~max(nneb, 0)~, ~min(nneb, n - n_simul - 2)~, ~min(nneb, first_missing - 1)~, and ~max(nneb + n_simul, last_missing) - n_simul~. ~first_missing~ and ~last_missing~ look only at interior images. The ends then walk outward until both hold an energy.
 
-The peak-weighted gap of a segment is the absolute value of ~(E[j+1] - E[j]) * (E[j+1] + E[j] - 2 E_min) / (2 (E_max - E_min))~. ~f_R~ is the longest length over the endpoint separation. ~g_R~ is the largest weight over ~(E_max - E_min)~. The longest segment is cut when ~g_R~ is not positive or ~f_R / g_R~ exceeds ~space_energy_ratio~. Otherwise the largest weight is cut. Ties keep the lower index.
+The peak-weighted gap of a segment is the absolute value of ~(E[j+1] - E[j]) * (E[j+1] + E[j] - 2 E_min) / (2 (E_max - E_min))~. ~f_R~ is the longest length over the endpoint separation. ~g_R~ is the largest weight over ~(E_max - E_min)~. The longest segment is cut when ~g_R~ is not positive or ~f_R / g_R~ exceeds ~space_energy_ratio~. Otherwise the largest weight is cut. Ties keep the lower index, including ~+0.0~ against ~-0.0~.
 
-Climbing uses ~BandConfig::climbing~. The default trigger factor is 0.5 and the trigger force is 0. The climbing window and the final full band stop at ~BandConfig::force_tol~. Buildup leaves climbing off.
+Climbing uses ~BandConfig::climbing~. The default trigger factor is 0.5 and the trigger force is 0. The climbing window and, when ~full_band~ is set, the full band stop at ~BandConfig::force_tol~. Buildup leaves climbing off. The default leaves ~full_band~ off and stops after the climbing window, as ASE and the paper do. The extra stage costs calls: on the same budget comparison its median was 30 on the double well, 315 from B to C, and 285 from A to B, and it raised the two-barrier call ratio to 1.70.
+
+* How it differs from ASE
+The inserted image is the minimum-image midpoint. The fill from two endpoints cuts one midpoint at a time, while ASE places ~n_simul~ images in one interpolate. The Müller-Brown comparison uses FIRE 1.0, ASE's original FIRE, with this crate's step cap of 2.5 times the starting step. Both codes then insert at index 2 and then at index 1.
 
 * One session per unchanged window
-An unchanged window keeps its ~BandSession~, so the L-BFGS pairs survive the moment climbing is armed on those same images. A new index set starts with empty memory. The final full band is a new session when it is not the same index set as the local window.
+An unchanged window keeps its ~BandSession~, so the L-BFGS pairs survive the moment climbing is armed on those same images. A new index set starts with empty memory. The optional full band is a new session when it is not the same index set as the local window.
 
 * Force calls and threads
 ~AutoNebReport::surface_rows~ counts force calls. One row of ~BandSurface::eval~ is one call. Known endpoint energies are seeded into a new window, so those two images are not evaluated again. A window that stops on its step cap clears only the free images.
 
-~threads~ above 1 keeps one thread pool for the whole search. Each evaluation is split into contiguous blocks, one per rank, and the block is stored at its image index after every rank has finished. The inserted image does not depend on which block finished first. There is no SIMD path. A warm step evaluates the free images of the window, so the speedup is capped by ~n_simul~.
+~threads~ changes speed only for a surface whose rows do not depend on the batch they arrive in. There is no SIMD path. Above 1, one thread pool lasts for the whole search. Each evaluation is split into contiguous blocks, one per rank, and the block is stored at its image index after every rank has finished. The inserted image does not depend on which block finished first. A warm step evaluates the free images of the window, so that step is capped by ~n_simul~. A release timing of a full AutoNEB run, on a surface that spends at least 1 ms in each force call and with the median of five interleaved repetitions, reaches 6.20 times at 8 threads when ~n_simul~ is 8 (63.9 ms to 10.3 ms, efficiency 0.78). With ~n_simul~ 3 the same run goes from 5.52 ms to 1.23 ms. The fill evaluates more than the warm free set, so that speedup can pass ~n_simul~. A pool microbenchmark of 16 images is separate. Its spawn-and-join cost is 0.013 ms per call at 8 threads.
 
 One thread evaluates the batch in a single call. The surface then sees one block per call when ~threads~ is above 1. A host that tells a whole-band evaluation from an interior evaluation by the row count should leave ~threads~ at 1.
 
 * Springs
-The search keeps a private per-segment spring list. A weighted or Onsager-Machlup spring supplied on ~BandConfig~ is refused. The refusal is temporary: zoom-NEB will recompute those springs on insertion. The solid-state block is not part of this loop.
+The search keeps a private per-segment spring list. A fill from two endpoints sets every segment to ~k * (n_simul + 1)~. Each later insertion replaces the cut segment with two segments of twice that constant. A start that already holds more than two images doubles on every fill insert. A weighted or Onsager-Machlup spring supplied on ~BandConfig~ is refused. The refusal is temporary: zoom-NEB will recompute those springs on insertion. The solid-state block is not part of this loop.

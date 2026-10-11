@@ -5,7 +5,8 @@
 //! [`band::BandSession::run`] and [`minmode::MinModeSession::run`]
 //! are convenience loops over `step`. [`autoneb::AutoNeb`] inserts
 //! images where the energy gap or the segment length is worst,
-//! relaxes that window, climbs, and converges the full band.
+//! relaxes that window, and climbs. The full band runs only when
+//! requested.
 //! Image blocks are stored by image index after every rank finishes,
 //! so the band does not depend on which block finished first.
 //!
