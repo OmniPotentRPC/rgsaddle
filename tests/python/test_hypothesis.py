@@ -58,6 +58,27 @@ def test_drive_eval_shape() -> None:
         return
     raise AssertionError("shape mismatch must raise")
 
+def test_callback_dtype_and_order_name_the_array() -> None:
+    slot = ClaimSlot()
+    ids = np.array([0, 1], dtype=np.int64)
+    x = np.zeros((2, 3), dtype=np.float64)
+    # One owner keeps both rows in a single callback, so the gradient
+    # matrix has two columns of extent and Fortran order is visible.
+    owners = np.array([7, 7], dtype=np.uint64)
+    flags = np.zeros(2, dtype=np.uint8)
+
+    def bad_energy(group_ids: np.ndarray, group_x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        return np.zeros(group_ids.shape[0], dtype=np.float32), np.zeros_like(group_x)
+
+    def bad_order(group_ids: np.ndarray, group_x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        gradients = np.asfortranarray(np.zeros_like(group_x))
+        return np.zeros(group_ids.shape[0], dtype=np.float64), gradients
+
+    with pytest.raises(TypeError, match="energies"):
+        drive_eval(bad_energy, ids, x, owners, flags, 1, slot)
+    with pytest.raises(TypeError, match="gradients"):
+        drive_eval(bad_order, ids, x, owners, flags, 1, slot)
+
 
 @settings(max_examples=20)
 @given(code=st.integers(min_value=-20, max_value=20))
