@@ -710,8 +710,9 @@ fn greedy_distance2(pattern: &SparsityPattern, order: &[usize]) -> Vec<usize> {
 /// `step` is the displacement `h`. A central difference truncates as
 /// `O(h^2)`. A gradient known to absolute accuracy `eps_g` adds a
 /// roundoff `O(eps_g / h)`. On a shifted-force Lennard-Jones line and
-/// on the Gupta cluster, the block error falls by about 100 each time
-/// `h` drops by 10, from `1e-2` through `1e-6`, then rises at `1e-7`.
+/// on the Gupta cluster, the entry error relative to the largest
+/// analytic entry falls by about 100 each time `h` drops by 10, from
+/// `1e-2` through `1e-5`. It is smallest at `1e-6` and rises at `1e-7`.
 /// The default `1e-6` is that measured minimum. An ECnoise estimate of
 /// `h` plugs in through the same field.
 ///
@@ -1941,17 +1942,26 @@ mod tests {
         }
     }
 
+    /// Largest entrywise gap, divided by the largest absolute analytic entry.
     fn max_analytic_error(
         got: &SparseHessian,
         analytic: &std::collections::HashMap<(usize, usize), [f64; 9]>,
     ) -> f64 {
+        let mut scale = 0.0_f64;
+        for block in analytic.values() {
+            for value in block {
+                scale = scale.max(value.abs());
+            }
+        }
         let mut worst = 0.0_f64;
         for (&(i, j), reference) in analytic {
             let mut stored = [0.0; 9];
             if let Ok(slot) = block_index(got.row_ptr(), got.col_idx(), i, j) {
                 stored = got.blocks()[slot];
             }
-            worst = worst.max(block_error(&stored, reference));
+            for (got_entry, reference_entry) in stored.iter().zip(reference.iter()) {
+                worst = worst.max((got_entry - reference_entry).abs());
+            }
         }
         for i in 0..got.n_atoms() {
             for p in got.row_ptr()[i]..got.row_ptr()[i + 1] {
@@ -1959,20 +1969,12 @@ mod tests {
                 if analytic.contains_key(&(i, j)) {
                     continue;
                 }
-                worst = worst.max(block_error(&got.blocks()[p], &[0.0; 9]));
+                for value in &got.blocks()[p] {
+                    worst = worst.max(value.abs());
+                }
             }
         }
-        worst
-    }
-
-    fn block_error(got: &[f64; 9], reference: &[f64; 9]) -> f64 {
-        let mut num = 0.0_f64;
-        let mut den = 0.0_f64;
-        for (g, r) in got.iter().zip(reference.iter()) {
-            num = num.max((g - r).abs());
-            den = den.max(r.abs());
-        }
-        if den < 1e-8 { num } else { num / den }
+        worst / scale.max(1e-30)
     }
 
     struct DoubleWell;
@@ -2857,6 +2859,64 @@ mod tests {
     }
 
     #[test]
+    fn gupta_vacancy_matches_a_finite_difference_column() {
+        let (positions, cell) = fcc_vacancy_cell(5);
+        let coords = Array1::from(positions);
+        let gupta_rc = 1.5 * 2f64.powf(1.0 / 6.0);
+        let params = GuptaParams {
+            amplitude: 0.2,
+            p: 9.0,
+            q: 3.0,
+            r0: 2f64.powf(1.0 / 6.0),
+            rc: gupta_rc,
+        };
+        let surface = Gupta::new(params, Some(cell));
+        let h = 1e-6;
+        let analytic = gupta_analytic_blocks(coords.view(), Some(&cell), params);
+        let mut worst = 0.0_f64;
+        let mut scale = 0.0_f64;
+        for col in 0..3 {
+            let mut plus = coords.clone();
+            let mut minus = coords.clone();
+            plus[col] += h;
+            minus[col] -= h;
+            let (_, gp) = surface.eval(plus.view()).unwrap();
+            let (_, gm) = surface.eval(minus.view()).unwrap();
+            for (&(i, j), block) in &analytic {
+                if j != 0 {
+                    continue;
+                }
+                for a in 0..3 {
+                    let fd = (gp[3 * i + a] - gm[3 * i + a]) / (2.0 * h);
+                    let expect = block[a * 3 + col];
+                    let gap = (fd - expect).abs();
+                    scale = scale.max(expect.abs());
+                    worst = worst.max(gap);
+                }
+            }
+        }
+        let opts = SparseHessianOpts {
+            step: h,
+            ..SparseHessianOpts::default()
+        };
+        let pattern = SparsityPattern::from_positions(
+            coords.view(),
+            Some(&cell),
+            2.0 * gupta_rc,
+            opts.search_skin(),
+        )
+        .unwrap();
+        let recovered = sparse_hessian(&surface, coords.view(), &pattern, opts).unwrap();
+        let cpr_err = max_analytic_error(&recovered, &analytic);
+        assert!(
+            worst / scale.max(1e-12) < 1e-6,
+            "analytic column {}",
+            worst / scale.max(1e-12)
+        );
+        assert!(cpr_err < 1e-6, "cpr analytic error {cpr_err}");
+    }
+
+    #[test]
     fn gupta_matches_a_finite_difference_hessian() {
         let coords = array![
             0.0, 0.0, 0.0, 1.15, 0.0, 0.0, 0.4, 1.05, 0.05, 1.05, 0.95, 0.15,
@@ -3456,7 +3516,7 @@ mod tests {
                 }
                 errors.push(fmax);
                 assert!(
-                    fmax < 1e-2,
+                    fmax < 1e-5,
                     "{} seed {seed} analytic error {fmax}",
                     system.name
                 );
