@@ -3,15 +3,16 @@
 //!
 //! The double well is `(x^2 - 1)^2 + 2 y^2 + 2 z^2` at `(1, 0, 0)`.
 //! The reaction coordinate is the stiffest mode there. An isotropic
-//! kick has a positive x component about half the time and runs into
-//! the outer wall, where no saddle exists. That half is the ceiling
-//! of the seeded double-well rate: 8/16 is the count this fixture
-//! reaches when every inward kick converges, not a published ARTn rate.
+//! kick has a negative x component about half the time and points
+//! toward the saddle at the origin. The comparison counts success
+//! among those seeds.
 //!
-//! Seeded pushes report a success rate and the force calls per saddle
-//! next to the dimer driver, in one interleaved loop.
+//! ART, the dimer, and Lanczos min-mode following share one force-call
+//! budget and the same displaced start.
 
+use std::io::Write;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
 
 use ndarray::{Array1, Array2, ArrayView1, array};
 use rgsaddle::{
@@ -258,45 +259,6 @@ fn local_push_on_one_atom_of_the_double_well_keeps_the_other_in_its_well() {
     assert_eq!(double_well_index(x), 1);
 }
 
-fn dimer_from(
-    start: Array1<f64>,
-    seed: Array1<f64>,
-    surface: &impl PointSurface,
-    force_tol: f64,
-    max_move: f64,
-    max_steps: usize,
-) -> (bool, usize, Array1<f64>) {
-    let config = MinModeConfig {
-        kind: MinModeKind::Dimer,
-        force_tol,
-        max_move,
-        ..MinModeConfig::default()
-    };
-    let mut session = MinModeSession::new(config, start, seed).unwrap();
-    let mut total = 0;
-    let mut converged = false;
-    for _ in 0..max_steps {
-        let report = session.step(surface).unwrap();
-        total += report.evaluations;
-        if report.status == MinModeStatus::Converged {
-            converged = true;
-            break;
-        }
-    }
-    (converged, total, session.position().to_owned())
-}
-
-struct GateCount {
-    calls: AtomicUsize,
-}
-
-impl PointSurface for GateCount {
-    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
-        self.calls.fetch_add(1, Ordering::Relaxed);
-        DoubleWell.eval(x)
-    }
-}
-
 #[test]
 fn lanczos_waits_until_the_push_passes_the_activation_distance() {
     let config = ArtConfig::builder()
@@ -321,88 +283,7 @@ fn lanczos_waits_until_the_push_passes_the_activation_distance() {
 }
 
 fn double_well_config() -> ArtConfig {
-    // Library defaults: threshold -0.01, push 0.3, perpendicular
-    // relaxation during the opening, Lanczos after the activation
-    // distance. About half of the isotropic kicks have a positive x
-    // component and run into the outer wall, where no saddle exists.
-    // That share is the ceiling of this fixture.
     ArtConfig::default()
-}
-
-fn random_double_well(seed: u64) -> (bool, usize, bool, usize) {
-    let minimum = array![1.0, 0.0, 0.0];
-    let config = double_well_config();
-    let displacement = ArtDisplacement::Random {
-        seed,
-        support: ArtSupport::Global,
-        amplitude: 0.15,
-    };
-    let mut session = ArtSession::new(config.clone(), minimum, displacement).unwrap();
-    let start = session.position().to_owned();
-    let direction = session.push_direction().to_owned();
-    let surface = GateCount {
-        calls: AtomicUsize::new(0),
-    };
-    let report = session.run(&surface, 50).unwrap();
-    assert_eq!(
-        report.total_evaluations,
-        surface.calls.load(Ordering::Relaxed)
-    );
-    let art_ok =
-        report.status == ArtStatus::Converged && double_well_index(session.position()) == 1;
-    let (dimer_ok, dimer_calls, dimer_x) = dimer_from(
-        start,
-        direction,
-        &DoubleWell,
-        config.mode.force_tol,
-        config.mode.max_move,
-        50,
-    );
-    let dimer_saddle = dimer_ok && double_well_index(dimer_x.view()) == 1;
-    (art_ok, report.total_evaluations, dimer_saddle, dimer_calls)
-}
-
-#[test]
-fn seeded_random_pushes_on_the_double_well_against_the_dimer() {
-    let seeds: Vec<u64> = (0..16).map(|i| 1_000 + i).collect();
-    let mut art_ok = 0;
-    let mut art_calls = 0;
-    let mut dimer_ok = 0;
-    let mut dimer_calls = 0;
-    for seed in &seeds {
-        let (art_success, art_n, dimer_success, dimer_n) = random_double_well(*seed);
-        if art_success {
-            art_ok += 1;
-            art_calls += art_n;
-        }
-        if dimer_success {
-            dimer_ok += 1;
-            dimer_calls += dimer_n;
-        }
-    }
-    let art_mean = if art_ok == 0 {
-        0.0
-    } else {
-        art_calls as f64 / art_ok as f64
-    };
-    let dimer_mean = if dimer_ok == 0 {
-        0.0
-    } else {
-        dimer_calls as f64 / dimer_ok as f64
-    };
-    eprintln!(
-        "ART_BENCH surface=double_well seeds={} art_success={art_ok} art_mean_calls={art_mean:.1} dimer_success={dimer_ok} dimer_mean_calls={dimer_mean:.1}",
-        seeds.len()
-    );
-    assert!(
-        art_ok * 4 >= seeds.len(),
-        "ART success {art_ok}/{} is below a quarter of the seeded pushes",
-        seeds.len()
-    );
-    assert!(
-        art_ok >= dimer_ok,
-        "ART {art_ok} converged fewer seeded pushes than the dimer {dimer_ok}"
-    );
 }
 
 fn mb_config() -> ArtConfig {
@@ -478,96 +359,6 @@ fn targeted_muller_brown_reaches_the_saddle_between_the_deep_wells() {
     eprintln!(
         "ART_BENCH surface=muller_brown_targeted art_calls={} distance={distance}",
         report.total_evaluations
-    );
-}
-
-struct MbCount {
-    calls: AtomicUsize,
-}
-
-impl PointSurface for MbCount {
-    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
-        self.calls.fetch_add(1, Ordering::Relaxed);
-        MullerBrown.eval(x)
-    }
-}
-
-fn random_muller(seed: u64) -> (bool, usize, bool, usize) {
-    let minimum = array![MIN_A[0], MIN_A[1]];
-    let config = mb_config();
-    let mut session = ArtSession::new(
-        config.clone(),
-        minimum,
-        ArtDisplacement::Random {
-            seed,
-            support: ArtSupport::Global,
-            amplitude: 0.08,
-        },
-    )
-    .unwrap();
-    let start = session.position().to_owned();
-    let direction = session.push_direction().to_owned();
-    let surface = MbCount {
-        calls: AtomicUsize::new(0),
-    };
-    let report = session.run(&surface, 200).unwrap();
-    assert_eq!(
-        report.total_evaluations,
-        surface.calls.load(Ordering::Relaxed)
-    );
-    let x = session.position();
-    let art_ok = report.status == ArtStatus::Converged && muller_index(x[0], x[1]) == 1;
-    let (dimer_ok, dimer_calls, dimer_x) = dimer_from(
-        start,
-        direction,
-        &MullerBrown,
-        config.mode.force_tol,
-        config.mode.max_move,
-        40,
-    );
-    let dimer_saddle = dimer_ok && muller_index(dimer_x[0], dimer_x[1]) == 1;
-    (art_ok, report.total_evaluations, dimer_saddle, dimer_calls)
-}
-
-#[test]
-fn seeded_random_pushes_on_muller_brown_against_the_dimer() {
-    let seeds: Vec<u64> = (0..12).map(|i| 4_000 + i).collect();
-    let mut art_ok = 0;
-    let mut art_calls = 0;
-    let mut dimer_ok = 0;
-    let mut dimer_calls = 0;
-    for seed in &seeds {
-        let (art_success, art_n, dimer_success, dimer_n) = random_muller(*seed);
-        if art_success {
-            art_ok += 1;
-            art_calls += art_n;
-        }
-        if dimer_success {
-            dimer_ok += 1;
-            dimer_calls += dimer_n;
-        }
-    }
-    let art_mean = if art_ok == 0 {
-        0.0
-    } else {
-        art_calls as f64 / art_ok as f64
-    };
-    let dimer_mean = if dimer_ok == 0 {
-        0.0
-    } else {
-        dimer_calls as f64 / dimer_ok as f64
-    };
-    eprintln!(
-        "ART_BENCH surface=muller_brown seeds={} art_success={art_ok} art_mean_calls={art_mean:.1} dimer_success={dimer_ok} dimer_mean_calls={dimer_mean:.1}",
-        seeds.len()
-    );
-    assert!(
-        art_ok >= 1,
-        "no seeded Muller-Brown push reached an index-1 saddle"
-    );
-    assert!(
-        art_ok >= dimer_ok,
-        "ART {art_ok} converged fewer seeded pushes than the dimer {dimer_ok}"
     );
 }
 
@@ -749,7 +540,7 @@ fn strong_scaling_of_independent_art_events() {
         .map(|n| n.get())
         .unwrap_or(1)
         .max(1);
-    let mut widths = vec![1usize, 2, 4];
+    let mut widths = vec![1usize, 2, 4, 8];
     if !widths.contains(&max_threads) {
         widths.push(max_threads);
     }
@@ -1144,261 +935,51 @@ fn lj_index(x: ArrayView1<f64>) -> i32 {
     if second < -1e-2 { 2 } else { 1 }
 }
 
+struct Tally<'a, S> {
+    inner: &'a S,
+    calls: AtomicUsize,
+}
+
+impl<S: PointSurface> PointSurface for Tally<'_, S> {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        self.inner.eval(x)
+    }
+
+    fn excluded_modes(&self, x: ArrayView1<f64>) -> Result<Array2<f64>, SaddleError> {
+        self.inner.excluded_modes(x)
+    }
+}
+
+#[derive(Clone)]
 struct BenchRow {
-    surface: &'static str,
-    seed: u64,
+    system: &'static str,
     method: &'static str,
+    seed: u64,
     status: &'static str,
-    success: bool,
-    reference: bool,
+    converged: bool,
     censored: bool,
-    evaluations: usize,
+    iters: usize,
+    calls: usize,
+    energy: f64,
+    fmax: f64,
     curvature: f64,
-    max_force: f64,
+    wall_s: f64,
+    endpoint: Array1<f64>,
+    index: i32,
+    reference: bool,
+    inward: bool,
+    pre_lanczos: usize,
+    pre_push: usize,
+    pre_perp: usize,
 }
 
-fn emit_bench(rows: &[BenchRow]) {
-    eprintln!(
-        "ART_CSV surface,seed,method,status,success,reference,censored,evaluations,curvature,max_force"
-    );
-    for row in rows {
-        eprintln!(
-            "ART_CSV {},{},{},{},{},{},{},{},{:.8},{:.8}",
-            row.surface,
-            row.seed,
-            row.method,
-            row.status,
-            u8::from(row.success),
-            u8::from(row.reference),
-            u8::from(row.censored),
-            row.evaluations,
-            row.curvature,
-            row.max_force
-        );
+fn follower(kind: MinModeKind, max_move: f64) -> MinModeConfig {
+    MinModeConfig {
+        kind,
+        max_move,
+        ..MinModeConfig::default()
     }
-    for method in ["art", "dimer"] {
-        let mut calls: Vec<usize> = rows
-            .iter()
-            .filter(|row| row.method == method && row.success)
-            .map(|row| row.evaluations)
-            .collect();
-        let successes = calls.len();
-        let censored = rows
-            .iter()
-            .filter(|row| row.method == method && row.censored)
-            .count();
-        let reference = rows
-            .iter()
-            .filter(|row| row.method == method && row.reference)
-            .count();
-        calls.sort_unstable();
-        let (median, low, high) = if calls.is_empty() {
-            (0.0, 0, 0)
-        } else {
-            (
-                calls[calls.len() / 2] as f64,
-                calls[0],
-                *calls.last().unwrap(),
-            )
-        };
-        eprintln!(
-            "ART_BENCH surface={} method={method} successes={successes} reference={reference} censored={censored} median_calls={median:.1} range=[{low}, {high}]",
-            rows.first().map(|row| row.surface).unwrap_or("none")
-        );
-    }
-}
-
-#[test]
-fn seeded_leps_and_lj7_against_the_dimer() {
-    let (minimum, saddle) = leps_references();
-    assert_eq!(leps_index(minimum.view()), 0, "leps minimum {minimum:?}");
-    assert_eq!(leps_index(saddle.view()), 1, "leps saddle {saddle:?}");
-    eprintln!(
-        "ART_BENCH surface=leps_ho minimum={:?} saddle={:?}",
-        minimum, saddle
-    );
-    let mut rows = Vec::new();
-    let config = ArtConfig::builder()
-        .push_step(0.08)
-        .max_move(0.08)
-        .activation_distance(0.08)
-        .force_tol(2e-3)
-        .perp_steps_push(1)
-        .perp_steps_climb(0)
-        .max_pushes(30)
-        .max_climbs(60)
-        .dr(1e-3)
-        .build()
-        .unwrap();
-    let config = ArtConfig {
-        mode: MinModeConfig {
-            method: rgmin::Method::Lbfgs { memory: 8 },
-            force_tol: 2e-3,
-            max_move: 0.08,
-            ..config.mode
-        },
-        ..config
-    };
-    for seed in 0..16 {
-        let seed = 7_000 + seed;
-        let mut session = ArtSession::new(
-            config.clone(),
-            minimum.clone(),
-            ArtDisplacement::Random {
-                seed,
-                support: ArtSupport::Global,
-                amplitude: 0.35,
-            },
-        )
-        .unwrap();
-        let start = session.position().to_owned();
-        let direction = session.push_direction().to_owned();
-        let report = session.run(&LepsHo, 80).unwrap();
-        let art_index = leps_index(session.position());
-        let art_success = report.status == ArtStatus::Converged && art_index == 1;
-        let distance = session
-            .position()
-            .iter()
-            .zip(saddle.iter())
-            .map(|(a, b)| (a - b) * (a - b))
-            .sum::<f64>()
-            .sqrt();
-        rows.push(BenchRow {
-            surface: "leps_ho",
-            seed,
-            method: "art",
-            status: art_status_name(report.status),
-            success: art_success,
-            reference: art_success && distance < 0.15,
-            censored: report.status == ArtStatus::Exhausted,
-            evaluations: report.total_evaluations,
-            curvature: report.curvature,
-            max_force: report.max_force,
-        });
-        let (dimer_ok, dimer_calls, dimer_x) = dimer_from(
-            start,
-            direction,
-            &LepsHo,
-            config.mode.force_tol,
-            config.mode.max_move,
-            40,
-        );
-        let dimer_index = leps_index(dimer_x.view());
-        let dimer_success = dimer_ok && dimer_index == 1;
-        let dimer_distance = dimer_x
-            .iter()
-            .zip(saddle.iter())
-            .map(|(a, b)| (a - b) * (a - b))
-            .sum::<f64>()
-            .sqrt();
-        rows.push(BenchRow {
-            surface: "leps_ho",
-            seed,
-            method: "dimer",
-            status: if dimer_ok { "converged" } else { "running" },
-            success: dimer_success,
-            reference: dimer_success && dimer_distance < 0.15,
-            censored: false,
-            evaluations: dimer_calls,
-            curvature: f64::NAN,
-            max_force: f64::NAN,
-        });
-    }
-    emit_bench(&rows);
-    let art_leps = rows
-        .iter()
-        .filter(|row| row.method == "art" && row.success)
-        .count();
-    assert!(
-        art_leps >= 1,
-        "LEPS+HO produced no index-1 saddle in 16 seeds"
-    );
-    assert_eq!(rows.len(), 32);
-
-    let lj_min = pentagonal_bipyramid();
-    let (_, lj_force) = Lj7.eval(lj_min.view()).unwrap();
-    assert!(
-        lj_force.iter().all(|v| v.abs() < 1e-4),
-        "lj7 minimum force {lj_force:?}"
-    );
-    let lj_config = ArtConfig::builder()
-        .push_step(0.08)
-        .max_move(0.08)
-        .activation_distance(0.08)
-        .perp_steps_push(1)
-        .perp_steps_climb(0)
-        .max_pushes(25)
-        .max_climbs(80)
-        .force_tol(1e-3)
-        .build()
-        .unwrap();
-    let lj_config = ArtConfig {
-        mode: MinModeConfig {
-            method: rgmin::Method::Lbfgs { memory: 8 },
-            force_tol: 1e-3,
-            max_move: 0.08,
-            ..lj_config.mode
-        },
-        ..lj_config
-    };
-    let mut lj_rows = Vec::new();
-    for offset in 0..16 {
-        let seed = 8_000 + offset;
-        let mut session = ArtSession::new(
-            lj_config.clone(),
-            lj_min.clone(),
-            ArtDisplacement::Random {
-                seed,
-                support: ArtSupport::Global,
-                amplitude: 0.3,
-            },
-        )
-        .unwrap();
-        let start = session.position().to_owned();
-        let direction = session.push_direction().to_owned();
-        let report = session.run(&Lj7, 100).unwrap();
-        let art_success =
-            report.status == ArtStatus::Converged && lj_index(session.position()) == 1;
-        lj_rows.push(BenchRow {
-            surface: "lj7",
-            seed,
-            method: "art",
-            status: art_status_name(report.status),
-            success: art_success,
-            reference: false,
-            censored: report.status == ArtStatus::Exhausted,
-            evaluations: report.total_evaluations,
-            curvature: report.curvature,
-            max_force: report.max_force,
-        });
-        let (dimer_ok, dimer_calls, dimer_x) = dimer_from(
-            start,
-            direction,
-            &Lj7,
-            lj_config.mode.force_tol,
-            lj_config.mode.max_move,
-            30,
-        );
-        lj_rows.push(BenchRow {
-            surface: "lj7",
-            seed,
-            method: "dimer",
-            status: if dimer_ok { "converged" } else { "running" },
-            success: dimer_ok && lj_index(dimer_x.view()) == 1,
-            reference: false,
-            censored: false,
-            evaluations: dimer_calls,
-            curvature: f64::NAN,
-            max_force: f64::NAN,
-        });
-    }
-    emit_bench(&lj_rows);
-    assert_eq!(lj_rows.len(), 32);
-    let art_lj = lj_rows
-        .iter()
-        .filter(|row| row.method == "art" && row.success)
-        .count();
-    eprintln!("ART_BENCH surface=lj7 art_index1={art_lj}/16");
 }
 
 fn art_status_name(status: ArtStatus) -> &'static str {
@@ -1408,4 +989,794 @@ fn art_status_name(status: ArtStatus) -> &'static str {
         ArtStatus::Converged => "converged",
         ArtStatus::Exhausted => "exhausted",
     }
+}
+
+fn distance(left: &Array1<f64>, right: &Array1<f64>) -> f64 {
+    left.iter()
+        .zip(right.iter())
+        .map(|(a, b)| (a - b) * (a - b))
+        .sum::<f64>()
+        .sqrt()
+}
+
+/// One method from a shared displaced start, stopped when the counting
+/// surface passes `budget`. A finish past that count is censored.
+fn drive_art<S: PointSurface>(
+    minimum: &Array1<f64>,
+    seed: u64,
+    amplitude: f64,
+    surface: &S,
+    budget: usize,
+) -> (Array1<f64>, Array1<f64>, BenchRow) {
+    let mut session = ArtSession::new(
+        ArtConfig::default(),
+        minimum.clone(),
+        ArtDisplacement::Random {
+            seed,
+            support: ArtSupport::Global,
+            amplitude,
+        },
+    )
+    .unwrap();
+    let start = session.position().to_owned();
+    let direction = session.push_direction().to_owned();
+    let tally = Tally {
+        inner: surface,
+        calls: AtomicUsize::new(0),
+    };
+    let started = Instant::now();
+    let mut status = ArtStatus::Pushing;
+    let mut iters = 0usize;
+    let mut converged = false;
+    let mut curvature = f64::NAN;
+    let mut fmax = f64::NAN;
+    let mut pre_lanczos = 0usize;
+    let mut pre_push = 0usize;
+    let mut pre_perp = 0usize;
+    let censored = loop {
+        if tally.calls.load(Ordering::Relaxed) > budget {
+            break true;
+        }
+        let report = session.step(&tally).unwrap();
+        iters += 1;
+        status = report.status;
+        curvature = report.curvature;
+        fmax = report.max_force;
+        pre_lanczos = report.pre_inflection_lanczos;
+        pre_push = report.pre_inflection_push;
+        pre_perp = report.pre_inflection_perp;
+        let over = tally.calls.load(Ordering::Relaxed) > budget;
+        if report.status == ArtStatus::Converged {
+            converged = !over;
+            break over;
+        }
+        if report.status == ArtStatus::Exhausted || over || iters > budget {
+            converged = false;
+            break over || iters > budget;
+        }
+    };
+    let row = BenchRow {
+        system: "",
+        method: "art",
+        seed,
+        status: art_status_name(status),
+        converged,
+        censored,
+        iters,
+        calls: tally.calls.load(Ordering::Relaxed),
+        energy: session.energy(),
+        fmax,
+        curvature,
+        wall_s: started.elapsed().as_secs_f64(),
+        endpoint: session.position().to_owned(),
+        index: 0,
+        reference: false,
+        inward: direction.first().copied().unwrap_or(0.0) < 0.0,
+        pre_lanczos,
+        pre_push,
+        pre_perp,
+    };
+    (start, direction, row)
+}
+
+fn drive_minmode<S: PointSurface>(
+    kind: MinModeKind,
+    method: &'static str,
+    start: &Array1<f64>,
+    direction: &Array1<f64>,
+    max_move: f64,
+    surface: &S,
+    budget: usize,
+) -> (BenchRow, Vec<(f64, f64)>) {
+    let mut session =
+        MinModeSession::new(follower(kind, max_move), start.clone(), direction.clone()).unwrap();
+    let tally = Tally {
+        inner: surface,
+        calls: AtomicUsize::new(0),
+    };
+    let started = Instant::now();
+    let mut status = "running";
+    let mut iters = 0usize;
+    let mut converged = false;
+    let mut curvature = f64::NAN;
+    let mut fmax = f64::NAN;
+    let mut steps = Vec::new();
+    let censored = loop {
+        if tally.calls.load(Ordering::Relaxed) > budget {
+            break true;
+        }
+        let report = session.step(&tally).unwrap();
+        iters += 1;
+        curvature = report.curvature;
+        fmax = report.max_force;
+        steps.push((curvature, fmax));
+        let over = tally.calls.load(Ordering::Relaxed) > budget;
+        if report.status == MinModeStatus::Converged {
+            status = "converged";
+            converged = !over;
+            break over;
+        }
+        if over || iters > budget {
+            break true;
+        }
+    };
+    let row = BenchRow {
+        system: "",
+        method,
+        seed: 0,
+        status,
+        converged,
+        censored,
+        iters,
+        calls: tally.calls.load(Ordering::Relaxed),
+        energy: session.energy().unwrap_or(f64::NAN),
+        fmax,
+        curvature,
+        wall_s: started.elapsed().as_secs_f64(),
+        endpoint: session.position().to_owned(),
+        index: 0,
+        reference: false,
+        inward: direction.first().copied().unwrap_or(0.0) < 0.0,
+        pre_lanczos: 0,
+        pre_push: 0,
+        pre_perp: 0,
+    };
+    (row, steps)
+}
+
+fn median_range(values: &[usize]) -> (f64, usize, usize) {
+    if values.is_empty() {
+        return (0.0, 0, 0);
+    }
+    let mut ordered = values.to_vec();
+    ordered.sort_unstable();
+    (
+        ordered[ordered.len() / 2] as f64,
+        ordered[0],
+        *ordered.last().unwrap(),
+    )
+}
+
+fn distinct_points(points: &[&Array1<f64>], tol: f64) -> usize {
+    let mut reps: Vec<&Array1<f64>> = Vec::new();
+    for point in points {
+        let known = reps.iter().any(|rep| distance(point, rep) < tol);
+        if !known {
+            reps.push(point);
+        }
+    }
+    reps.len()
+}
+
+fn atoms_of(x: &Array1<f64>) -> Vec<[f64; 3]> {
+    (0..x.len() / 3)
+        .map(|i| [x[3 * i], x[3 * i + 1], x[3 * i + 2]])
+        .collect()
+}
+
+#[allow(clippy::needless_range_loop)]
+fn jacobi_eig(mut a: [[f64; 3]; 3]) -> ([[f64; 3]; 3], [f64; 3]) {
+    let mut vectors = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    for _ in 0..24 {
+        let (p, q) = if a[0][1].abs() >= a[0][2].abs() && a[0][1].abs() >= a[1][2].abs() {
+            (0, 1)
+        } else if a[0][2].abs() >= a[1][2].abs() {
+            (0, 2)
+        } else {
+            (1, 2)
+        };
+        if a[p][q].abs() < 1e-15 {
+            break;
+        }
+        let tau = (a[q][q] - a[p][p]) / (2.0 * a[p][q]);
+        let root = (1.0 + tau * tau).sqrt();
+        let t = if tau >= 0.0 {
+            1.0 / (tau + root)
+        } else {
+            -1.0 / (-tau + root)
+        };
+        let c = 1.0 / (1.0 + t * t).sqrt();
+        let s = t * c;
+        let app = a[p][p];
+        let aqq = a[q][q];
+        let apq = a[p][q];
+        a[p][p] = c * c * app - 2.0 * s * c * apq + s * s * aqq;
+        a[q][q] = s * s * app + 2.0 * s * c * apq + c * c * aqq;
+        a[p][q] = 0.0;
+        a[q][p] = 0.0;
+        for r in 0..3 {
+            if r == p || r == q {
+                continue;
+            }
+            let arp = a[r][p];
+            let arq = a[r][q];
+            a[r][p] = c * arp - s * arq;
+            a[p][r] = a[r][p];
+            a[r][q] = s * arp + c * arq;
+            a[q][r] = a[r][q];
+        }
+        for r in 0..3 {
+            let vip = vectors[r][p];
+            let viq = vectors[r][q];
+            vectors[r][p] = c * vip - s * viq;
+            vectors[r][q] = s * vip + c * viq;
+        }
+    }
+    (vectors, [a[0][0], a[1][1], a[2][2]])
+}
+
+fn det3(m: [[f64; 3]; 3]) -> f64 {
+    m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+        - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+        + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+}
+
+fn matmul3(left: [[f64; 3]; 3], right: [[f64; 3]; 3]) -> [[f64; 3]; 3] {
+    let mut out = [[0.0; 3]; 3];
+    for i in 0..3 {
+        for j in 0..3 {
+            for k in 0..3 {
+                out[i][j] += left[i][k] * right[k][j];
+            }
+        }
+    }
+    out
+}
+
+fn transpose3(m: [[f64; 3]; 3]) -> [[f64; 3]; 3] {
+    [
+        [m[0][0], m[1][0], m[2][0]],
+        [m[0][1], m[1][1], m[2][1]],
+        [m[0][2], m[1][2], m[2][2]],
+    ]
+}
+
+/// Root-mean-square distance after a rigid alignment, reflections included.
+#[allow(clippy::needless_range_loop)]
+fn kabsch_rmsd(left: &[[f64; 3]], right: &[[f64; 3]]) -> f64 {
+    let n = left.len() as f64;
+    let mut ca = [0.0; 3];
+    let mut cb = [0.0; 3];
+    for i in 0..left.len() {
+        for c in 0..3 {
+            ca[c] += left[i][c];
+            cb[c] += right[i][c];
+        }
+    }
+    for c in 0..3 {
+        ca[c] /= n;
+        cb[c] /= n;
+    }
+    let mut cov = [[0.0; 3]; 3];
+    for k in 0..left.len() {
+        for i in 0..3 {
+            for j in 0..3 {
+                cov[i][j] += (left[k][i] - ca[i]) * (right[k][j] - cb[j]);
+            }
+        }
+    }
+    let mut gram = [[0.0; 3]; 3];
+    for i in 0..3 {
+        for j in 0..3 {
+            for k in 0..3 {
+                gram[i][j] += cov[k][i] * cov[k][j];
+            }
+        }
+    }
+    let (mut v, evals) = jacobi_eig(gram);
+    let mut sigma = [0.0; 3];
+    for i in 0..3 {
+        sigma[i] = evals[i].max(0.0).sqrt();
+    }
+    let mut u = [[0.0; 3]; 3];
+    for col in 0..3 {
+        if sigma[col] > 1e-12 {
+            for i in 0..3 {
+                let mut sum = 0.0;
+                for j in 0..3 {
+                    sum += cov[i][j] * v[j][col];
+                }
+                u[i][col] = sum / sigma[col];
+            }
+        }
+    }
+    // Complete a rank-deficient left basis so the rotation stays orthogonal.
+    if sigma.iter().filter(|s| **s <= 1e-12).count() > 0 {
+        for col in 0..3 {
+            if sigma[col] > 1e-12 {
+                continue;
+            }
+            let mut axis = [0.0, 0.0, 0.0];
+            axis[col] = 1.0;
+            for known in 0..3 {
+                if sigma[known] <= 1e-12 {
+                    continue;
+                }
+                let mut dot = 0.0;
+                for i in 0..3 {
+                    dot += axis[i] * u[i][known];
+                }
+                for i in 0..3 {
+                    axis[i] -= dot * u[i][known];
+                }
+            }
+            let norm = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
+            if norm > 1e-12 {
+                for i in 0..3 {
+                    u[i][col] = axis[i] / norm;
+                }
+            }
+        }
+    }
+    let mut rotation = matmul3(v, transpose3(u));
+    if det3(rotation) < 0.0 {
+        let flip = sigma
+            .iter()
+            .enumerate()
+            .min_by(|left, right| left.1.partial_cmp(right.1).unwrap())
+            .map(|(index, _)| index)
+            .unwrap_or(2);
+        for i in 0..3 {
+            v[i][flip] = -v[i][flip];
+        }
+        rotation = matmul3(v, transpose3(u));
+    }
+    let proper = rmsd_of(left, right, &ca, &cb, rotation);
+    // The mirror image of a free cluster is the same saddle.
+    for i in 0..3 {
+        v[i][2] = -v[i][2];
+    }
+    let mirrored = matmul3(v, transpose3(u));
+    proper.min(rmsd_of(left, right, &ca, &cb, mirrored))
+}
+
+fn rmsd_of(
+    left: &[[f64; 3]],
+    right: &[[f64; 3]],
+    ca: &[f64; 3],
+    cb: &[f64; 3],
+    rotation: [[f64; 3]; 3],
+) -> f64 {
+    let mut err = 0.0;
+    for k in 0..left.len() {
+        for i in 0..3 {
+            let mut moved = 0.0;
+            for j in 0..3 {
+                moved += rotation[i][j] * (right[k][j] - cb[j]);
+            }
+            let delta = left[k][i] - ca[i] - moved;
+            err += delta * delta;
+        }
+    }
+    (err / left.len() as f64).sqrt()
+}
+
+fn heap_permutations(n: usize) -> Vec<Vec<usize>> {
+    let mut out = Vec::new();
+    let mut order: Vec<usize> = (0..n).collect();
+    let mut count = vec![0usize; n];
+    out.push(order.clone());
+    let mut i = 0;
+    while i < n {
+        if count[i] < i {
+            if i % 2 == 0 {
+                order.swap(0, i);
+            } else {
+                order.swap(count[i], i);
+            }
+            out.push(order.clone());
+            count[i] += 1;
+            i = 0;
+        } else {
+            count[i] = 0;
+            i += 1;
+        }
+    }
+    out
+}
+
+fn aligned_rmsd(left: &Array1<f64>, right: &Array1<f64>, permutations: &[Vec<usize>]) -> f64 {
+    let a = atoms_of(left);
+    let b = atoms_of(right);
+    let mut best = f64::INFINITY;
+    let mut trial = vec![[0.0; 3]; b.len()];
+    for order in permutations {
+        for (slot, &index) in order.iter().enumerate() {
+            trial[slot] = b[index];
+        }
+        best = best.min(kabsch_rmsd(&a, &trial));
+    }
+    best
+}
+
+struct LjSaddle {
+    energy: f64,
+    point: Array1<f64>,
+}
+
+fn lj_reference_list(rows: &[BenchRow], permutations: &[Vec<usize>]) -> Vec<LjSaddle> {
+    let mut saddles = Vec::new();
+    for row in rows.iter().filter(|row| row.converged && !row.censored) {
+        let known = saddles.iter().any(|saddle: &LjSaddle| {
+            (saddle.energy - row.energy).abs() <= 1e-4
+                && aligned_rmsd(&saddle.point, &row.endpoint, permutations) <= 0.05
+        });
+        if !known {
+            saddles.push(LjSaddle {
+                energy: row.energy,
+                point: row.endpoint.clone(),
+            });
+        }
+    }
+    saddles
+}
+
+fn quote_endpoint(point: &Array1<f64>) -> String {
+    let body = point
+        .iter()
+        .map(|value| format!("{value:.8}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("\"{body}\"")
+}
+
+fn write_csv(path: &std::path::Path, rows: &[BenchRow]) {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("bench directory");
+    }
+    let mut file = std::fs::File::create(path).expect("bench csv");
+    writeln!(
+        file,
+        "system,method,seed,converged,iters,calls,energy,fmax,wall_s,endpoint,censored,reference"
+    )
+    .unwrap();
+    for row in rows {
+        writeln!(
+            file,
+            "{},{},{},{},{},{},{:.8},{:.8},{:.6},{},{},{}",
+            row.system,
+            row.method,
+            row.seed,
+            u8::from(row.converged),
+            row.iters,
+            row.calls,
+            row.energy,
+            row.fmax,
+            row.wall_s,
+            quote_endpoint(&row.endpoint),
+            u8::from(row.censored),
+            u8::from(row.reference)
+        )
+        .unwrap();
+    }
+}
+
+fn summarize(rows: &[BenchRow], lj: bool, permutations: &[Vec<usize>]) {
+    let system = rows.first().map(|row| row.system).unwrap_or("none");
+    let lj_list = if lj {
+        lj_reference_list(rows, permutations)
+    } else {
+        Vec::new()
+    };
+    for method in ["art", "dimer", "lanczos"] {
+        let mine: Vec<&BenchRow> = rows.iter().filter(|row| row.method == method).collect();
+        let successes: Vec<&BenchRow> = mine
+            .iter()
+            .copied()
+            .filter(|row| row.converged && !row.censored)
+            .collect();
+        let calls: Vec<usize> = successes.iter().map(|row| row.calls).collect();
+        let (median, low, high) = median_range(&calls);
+        let censored = mine.iter().filter(|row| row.censored).count();
+        let reference = mine.iter().filter(|row| row.reference).count();
+        let exhausted = mine.iter().filter(|row| row.status == "exhausted").count();
+        let curvature_median = {
+            let mut values: Vec<f64> = successes.iter().map(|row| row.curvature).collect();
+            values.sort_by(|left, right| {
+                left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            values.get(values.len() / 2).copied().unwrap_or(f64::NAN)
+        };
+        let distinct = if lj {
+            let hits: Vec<BenchRow> = successes.iter().map(|row| (*row).clone()).collect();
+            lj_reference_list(&hits, permutations).len()
+        } else {
+            let points: Vec<&Array1<f64>> = successes.iter().map(|row| &row.endpoint).collect();
+            distinct_points(&points, 0.15)
+        };
+        eprintln!(
+            "ART_BENCH system={system} method={method} successes={} censored={censored} exhausted={exhausted} reference={reference} median_calls={median:.1} range=[{low}, {high}] distinct={distinct} curvature_median={curvature_median:.4}",
+            successes.len()
+        );
+    }
+    if lj {
+        eprintln!(
+            "ART_BENCH system={system} reference_saddles={}",
+            lj_list.len()
+        );
+    }
+    let art: Vec<&BenchRow> = rows.iter().filter(|row| row.method == "art").collect();
+    for (label, values) in [
+        (
+            "lanczos",
+            art.iter().map(|row| row.pre_lanczos).collect::<Vec<_>>(),
+        ),
+        (
+            "push",
+            art.iter().map(|row| row.pre_push).collect::<Vec<_>>(),
+        ),
+        (
+            "perp",
+            art.iter().map(|row| row.pre_perp).collect::<Vec<_>>(),
+        ),
+    ] {
+        let (median, low, high) = median_range(&values);
+        eprintln!(
+            "ART_PUSH system={system} phase={label} median={median:.1} range=[{low}, {high}]"
+        );
+    }
+}
+
+fn mb_index(point: ArrayView1<f64>) -> i32 {
+    muller_index(point[0], point[1])
+}
+
+fn finish_row(
+    mut row: BenchRow,
+    system: &'static str,
+    index_of: &dyn Fn(ArrayView1<f64>) -> i32,
+    named: Option<&Array1<f64>>,
+) -> BenchRow {
+    row.system = system;
+    row.index = index_of(row.endpoint.view());
+    if let Some(target) = named {
+        row.reference = distance(&row.endpoint, target) < 0.15;
+    }
+    row
+}
+
+#[test]
+fn fair_force_budget_art_dimer_and_lanczos() {
+    let (leps_min, leps_saddle) = leps_references();
+    assert_eq!(leps_index(leps_min.view()), 0, "leps minimum {leps_min:?}");
+    assert_eq!(
+        leps_index(leps_saddle.view()),
+        1,
+        "leps saddle {leps_saddle:?}"
+    );
+    eprintln!(
+        "ART_BENCH surface=leps_ho minimum={:?} saddle={:?}",
+        leps_min, leps_saddle
+    );
+    let lj_min = pentagonal_bipyramid();
+    let (_, lj_force) = Lj7.eval(lj_min.view()).unwrap();
+    assert!(
+        lj_force.iter().all(|value| value.abs() < 1e-4),
+        "lj7 minimum force {lj_force:?}"
+    );
+
+    let permutations = heap_permutations(7);
+    assert!(aligned_rmsd(&lj_min, &lj_min, &permutations) < 1e-6);
+    let mut swapped = lj_min.clone();
+    for c in 0..3 {
+        swapped.swap(c, 3 + c);
+    }
+    assert!(
+        aligned_rmsd(&lj_min, &swapped, &permutations) < 1e-6,
+        "a permutation of LJ7 must align"
+    );
+    let mut rows = Vec::new();
+    let mut leps_dimer_trace = Vec::new();
+
+    let dw_min = array![1.0, 0.0, 0.0];
+    let dw_saddle = array![0.0, 0.0, 0.0];
+    let mb_min = array![MIN_A[0], MIN_A[1]];
+    let mb_saddle = array![TS1[0], TS1[1]];
+    rows.extend(compare_named(
+        &Compare {
+            system: "double_well",
+            minimum: &dw_min,
+            named: Some(&dw_saddle),
+            amplitude: 0.15,
+            seed0: 1_000,
+            seeds: 32,
+            budget: 2_000,
+            max_move: 0.1,
+            surface: &DoubleWell,
+            index_of: &double_well_index,
+            trace_dimer: false,
+        },
+        &mut leps_dimer_trace,
+    ));
+    rows.extend(compare_named(
+        &Compare {
+            system: "muller_brown",
+            minimum: &mb_min,
+            named: Some(&mb_saddle),
+            amplitude: 0.08,
+            seed0: 4_000,
+            seeds: 32,
+            budget: 2_000,
+            max_move: 0.1,
+            surface: &MullerBrown,
+            index_of: &mb_index,
+            trace_dimer: false,
+        },
+        &mut leps_dimer_trace,
+    ));
+    rows.extend(compare_named(
+        &Compare {
+            system: "leps_ho",
+            minimum: &leps_min,
+            named: Some(&leps_saddle),
+            amplitude: 0.35,
+            seed0: 7_000,
+            seeds: 32,
+            budget: 2_000,
+            max_move: 0.1,
+            surface: &LepsHo,
+            index_of: &leps_index,
+            trace_dimer: true,
+        },
+        &mut leps_dimer_trace,
+    ));
+    rows.extend(compare_named(
+        &Compare {
+            system: "lj7",
+            minimum: &lj_min,
+            named: None,
+            amplitude: 0.3,
+            seed0: 8_000,
+            seeds: 32,
+            budget: 5_000,
+            max_move: 0.2,
+            surface: &Lj7,
+            index_of: &lj_index,
+            trace_dimer: false,
+        },
+        &mut leps_dimer_trace,
+    ));
+
+    let lj_rows: Vec<BenchRow> = rows
+        .iter()
+        .filter(|row| row.system == "lj7")
+        .cloned()
+        .collect();
+    let lj_list = lj_reference_list(&lj_rows, &permutations);
+    for row in rows.iter_mut().filter(|row| row.system == "lj7") {
+        row.reference = lj_list
+            .iter()
+            .any(|saddle| (saddle.energy - row.energy).abs() <= 1e-4);
+    }
+
+    for system in ["double_well", "muller_brown", "leps_ho", "lj7"] {
+        let slice: Vec<BenchRow> = rows
+            .iter()
+            .filter(|row| row.system == system)
+            .cloned()
+            .collect();
+        summarize(&slice, system == "lj7", &permutations);
+        if system == "double_well" {
+            let inward = slice
+                .iter()
+                .filter(|row| row.method == "art" && row.inward)
+                .count();
+            eprintln!("ART_BENCH system=double_well inward_seeds={inward}");
+            for method in ["art", "dimer", "lanczos"] {
+                let hits = slice
+                    .iter()
+                    .filter(|row| {
+                        row.method == method && row.inward && row.converged && !row.censored
+                    })
+                    .count();
+                eprintln!(
+                    "ART_BENCH system=double_well method={method} inward_success={hits}/{inward}"
+                );
+            }
+        }
+    }
+
+    let leps_dimer_ok = rows
+        .iter()
+        .filter(|row| row.system == "leps_ho" && row.method == "dimer" && row.converged)
+        .count();
+    if leps_dimer_ok == 0 {
+        eprintln!(
+            "ART_DIMER_SETTINGS kind=dimer max_move=0.1 force_tol=1e-3 dr=1e-3 rotation_tol=1e-4 max_rotations=20 method=fire_v2 difference=forward"
+        );
+        for (step, (curvature, force)) in leps_dimer_trace.iter().enumerate() {
+            eprintln!("ART_DIMER_TRAJ step={step} curvature={curvature:.6} fmax={force:.6}");
+        }
+    }
+
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/art_bench.csv");
+    write_csv(&path, &rows);
+    eprintln!("ART_BENCH csv={}", path.display());
+    assert_eq!(rows.len(), 4 * 32 * 3);
+    let art_inward = rows
+        .iter()
+        .filter(|row| {
+            row.system == "double_well" && row.method == "art" && row.inward && row.converged
+        })
+        .count();
+    assert!(
+        art_inward >= 1,
+        "no inward double-well ART search converged inside the force budget"
+    );
+}
+
+struct Compare<'a, S> {
+    system: &'static str,
+    minimum: &'a Array1<f64>,
+    named: Option<&'a Array1<f64>>,
+    amplitude: f64,
+    seed0: u64,
+    seeds: u64,
+    budget: usize,
+    max_move: f64,
+    surface: &'a S,
+    index_of: &'a dyn Fn(ArrayView1<f64>) -> i32,
+    trace_dimer: bool,
+}
+
+fn compare_named<S: PointSurface>(
+    job: &Compare<'_, S>,
+    trace_out: &mut Vec<(f64, f64)>,
+) -> Vec<BenchRow> {
+    let mut rows = Vec::new();
+    for offset in 0..job.seeds {
+        let seed = job.seed0 + offset;
+        let (start, direction, art) =
+            drive_art(job.minimum, seed, job.amplitude, job.surface, job.budget);
+        let art = finish_row(art, job.system, job.index_of, job.named);
+        let (mut dimer, trace) = drive_minmode(
+            MinModeKind::Dimer,
+            "dimer",
+            &start,
+            &direction,
+            job.max_move,
+            job.surface,
+            job.budget,
+        );
+        dimer.seed = seed;
+        if job.trace_dimer && offset == 0 {
+            *trace_out = trace;
+        }
+        let dimer = finish_row(dimer, job.system, job.index_of, job.named);
+        let (mut lanczos, _) = drive_minmode(
+            MinModeKind::Lanczos,
+            "lanczos",
+            &start,
+            &direction,
+            job.max_move,
+            job.surface,
+            job.budget,
+        );
+        lanczos.seed = seed;
+        let lanczos = finish_row(lanczos, job.system, job.index_of, job.named);
+        rows.push(art);
+        rows.push(dimer);
+        rows.push(lanczos);
+    }
+    rows
 }

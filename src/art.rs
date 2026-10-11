@@ -344,6 +344,12 @@ pub struct ArtReport {
     /// Stays at the crossing value afterwards. An exhausted opening
     /// reports every call here.
     pub pre_inflection_evaluations: usize,
+    /// Lanczos calls in [`ArtReport::pre_inflection_evaluations`].
+    pub pre_inflection_lanczos: usize,
+    /// Centre evaluations of the opening, the push-phase geometry calls.
+    pub pre_inflection_push: usize,
+    /// Perpendicular FIRE calls during the opening.
+    pub pre_inflection_perp: usize,
     /// Cumulative Lanczos `PointSurface::eval` calls.
     pub lanczos_evaluations: usize,
     /// Cumulative perpendicular FIRE calls.
@@ -386,6 +392,9 @@ pub struct ArtSession {
     lanczos_armed: bool,
     evaluations: usize,
     pre_inflection_evaluations: usize,
+    pre_inflection_lanczos: usize,
+    pre_inflection_push: usize,
+    pre_inflection_perp: usize,
     pre_inflection_locked: bool,
     lanczos_evaluations: usize,
     perp_evaluations: usize,
@@ -429,6 +438,9 @@ impl ArtSession {
             lanczos_armed: false,
             evaluations: 0,
             pre_inflection_evaluations: 0,
+            pre_inflection_lanczos: 0,
+            pre_inflection_push: 0,
+            pre_inflection_perp: 0,
             pre_inflection_locked: false,
             lanczos_evaluations: 0,
             perp_evaluations: 0,
@@ -687,6 +699,9 @@ impl ArtSession {
             evaluations,
             total_evaluations: self.evaluations + evaluations,
             pre_inflection_evaluations: self.pre_inflection_evaluations,
+            pre_inflection_lanczos: self.pre_inflection_lanczos,
+            pre_inflection_push: self.pre_inflection_push,
+            pre_inflection_perp: self.pre_inflection_perp,
             lanczos_evaluations: self.lanczos_evaluations,
             perp_evaluations: self.perp_evaluations,
             centre_evaluations: self.centre_evaluations,
@@ -712,6 +727,9 @@ impl ArtSession {
         }
         self.pre_inflection_evaluations =
             self.centre_evaluations + self.lanczos_evaluations + self.perp_evaluations;
+        self.pre_inflection_lanczos = self.lanczos_evaluations;
+        self.pre_inflection_push = self.centre_evaluations;
+        self.pre_inflection_perp = self.perp_evaluations;
         if lock {
             self.pre_inflection_locked = true;
         }
