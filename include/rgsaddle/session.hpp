@@ -112,102 +112,6 @@ inline rgsaddle_irc_config_t irc_config() {
     return c;
 }
 
-class SearchConfig {
-public:
-    SearchConfig() : handle_(rgsaddle_search_config_create()) {
-        if (handle_ == nullptr) {
-            throw std::runtime_error("rgsaddle_search_config_create failed");
-        }
-    }
-
-    SearchConfig(SearchConfig const&) = delete;
-    SearchConfig& operator=(SearchConfig const&) = delete;
-
-    SearchConfig(SearchConfig&& other) noexcept : handle_(other.handle_) {
-        other.handle_ = nullptr;
-    }
-
-    SearchConfig& operator=(SearchConfig&& other) noexcept {
-        if (this != &other) {
-            reset_handle();
-            handle_ = other.handle_;
-            other.handle_ = nullptr;
-        }
-        return *this;
-    }
-
-    ~SearchConfig() { reset_handle(); }
-
-    SearchConfig& set_kind(std::int32_t kind) {
-        check(rgsaddle_search_config_set_kind(handle_, kind));
-        return *this;
-    }
-    SearchConfig& set_method(std::int32_t method) {
-        check(rgsaddle_search_config_set_method(handle_, method));
-        return *this;
-    }
-    SearchConfig& set_dr(double value) {
-        check(rgsaddle_search_config_set_dr(handle_, value));
-        return *this;
-    }
-    SearchConfig& set_difference(std::int32_t value) {
-        check(rgsaddle_search_config_set_difference(handle_, value));
-        return *this;
-    }
-    SearchConfig& set_rotation_tol(double value) {
-        check(rgsaddle_search_config_set_rotation_tol(handle_, value));
-        return *this;
-    }
-    SearchConfig& set_force_tol(double value) {
-        check(rgsaddle_search_config_set_force_tol(handle_, value));
-        return *this;
-    }
-    SearchConfig& set_max_move(double value) {
-        check(rgsaddle_search_config_set_max_move(handle_, value));
-        return *this;
-    }
-    SearchConfig& set_krylov_dim(std::int64_t value) {
-        check(rgsaddle_search_config_set_krylov_dim(handle_, value));
-        return *this;
-    }
-    SearchConfig& set_eigen_threshold(double value) {
-        check(rgsaddle_search_config_set_eigen_threshold(handle_, value));
-        return *this;
-    }
-    SearchConfig& set_push_step(double value) {
-        check(rgsaddle_search_config_set_push_step(handle_, value));
-        return *this;
-    }
-    SearchConfig& set_activation_distance(double value) {
-        check(rgsaddle_search_config_set_activation_distance(handle_, value));
-        return *this;
-    }
-    SearchConfig& set_displacement_seed(std::uint64_t seed) {
-        check(rgsaddle_search_config_set_displacement_seed(handle_, seed));
-        return *this;
-    }
-    SearchConfig& set_displacement_amplitude(double value) {
-        check(rgsaddle_search_config_set_displacement_amplitude(handle_, value));
-        return *this;
-    }
-    SearchConfig& set_perp_steps_push(std::int64_t value) {
-        check(rgsaddle_search_config_set_perp_steps_push(handle_, value));
-        return *this;
-    }
-
-    [[nodiscard]] RgsaddleSearchConfig* native() const noexcept { return handle_; }
-
-private:
-    void reset_handle() {
-        if (handle_ != nullptr) {
-            rgsaddle_search_config_free(handle_);
-            handle_ = nullptr;
-        }
-    }
-
-    RgsaddleSearchConfig* handle_ = nullptr;
-};
-
 class Band {
 public:
     Band(rgsaddle_band_config_t const& config, std::int64_t n_images,
@@ -305,18 +209,6 @@ public:
         }
     }
 
-    MinMode(SearchConfig const& config, std::int64_t n_atoms, double const* position,
-            double const* mode)
-        : n_atoms_(n_atoms) {
-        if (!abi_compatible()) {
-            throw std::runtime_error("rgsaddle ABI 1.15 or later is required");
-        }
-        handle_ = rgsaddle_minmode_create_search(config.native(), n_atoms, position, mode);
-        if (handle_ == nullptr) {
-            throw std::runtime_error("rgsaddle_minmode_create_search failed");
-        }
-    }
-
     MinMode(MinMode const&) = delete;
     MinMode& operator=(MinMode const&) = delete;
 
@@ -371,8 +263,6 @@ public:
     }
 
     void mode(double* out) const { check(rgsaddle_minmode_mode(handle_, out)); }
-
-    void push_over() { check(rgsaddle_minmode_push_over(handle_)); }
 
     [[nodiscard]] RgsaddleMinMode* native() const noexcept { return handle_; }
 

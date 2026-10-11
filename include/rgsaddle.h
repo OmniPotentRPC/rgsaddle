@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 17u
+#define RGSADDLE_ABI_MINOR 16u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -120,15 +120,11 @@ typedef enum {
 
 typedef enum {
   RGSADDLE_STATUS_RUNNING = 0,
-  RGSADDLE_STATUS_CONVERGED = 1,
-  /** ART budget spent. Hosts that test equality with converged ignore it. */
-  RGSADDLE_STATUS_EXHAUSTED = 2
+  RGSADDLE_STATUS_CONVERGED = 1
 } rgsaddle_run_status_t;
 
 typedef struct RgsaddleBand RgsaddleBand;
 typedef struct RgsaddleMinMode RgsaddleMinMode;
-/** Opaque saddle-search configuration. Dimer, Lanczos, and ART share it. */
-typedef struct RgsaddleSearchConfig RgsaddleSearchConfig;
 
 /**
  * Host-surface request. The session stamps version and flags.
@@ -844,76 +840,6 @@ void rgsaddle_samd_free(RgsaddleSamd *session);
  * No-op in a library built without the highs Cargo feature. */
 rgsaddle_status_t rgsaddle_band_set_highs(RgsaddleBand *band, int32_t enabled);
 rgsaddle_status_t rgsaddle_minmode_set_highs(RgsaddleMinMode *session, int32_t enabled);
-
-/**
- * Opaque saddle-search configuration, ABI minor 17. Dimer, Lanczos,
- * and ART nouveau are options on this handle. Setters take the field's
- * real type. An ART setter selects the opening; until a mode field is
- * set, that opening adopts the ART Lanczos defaults (Krylov 16, push
- * cap 0.3, eigenvalue threshold -0.01).
- */
-RgsaddleSearchConfig *rgsaddle_search_config_create(void);
-void rgsaddle_search_config_free(RgsaddleSearchConfig *config);
-rgsaddle_status_t rgsaddle_search_config_set_kind(RgsaddleSearchConfig *config,
-                                                  int32_t kind);
-rgsaddle_status_t rgsaddle_search_config_set_method(RgsaddleSearchConfig *config,
-                                                    int32_t method);
-rgsaddle_status_t rgsaddle_search_config_set_dr(RgsaddleSearchConfig *config,
-                                                double value);
-rgsaddle_status_t rgsaddle_search_config_set_difference(
-    RgsaddleSearchConfig *config, int32_t value);
-rgsaddle_status_t rgsaddle_search_config_set_rotation_tol(
-    RgsaddleSearchConfig *config, double value);
-rgsaddle_status_t rgsaddle_search_config_set_rotation_angle_tol(
-    RgsaddleSearchConfig *config, double value);
-rgsaddle_status_t rgsaddle_search_config_set_max_rotations(
-    RgsaddleSearchConfig *config, int64_t value);
-rgsaddle_status_t rgsaddle_search_config_set_krylov_dim(
-    RgsaddleSearchConfig *config, int64_t value);
-rgsaddle_status_t rgsaddle_search_config_set_force_tol(RgsaddleSearchConfig *config,
-                                                      double value);
-rgsaddle_status_t rgsaddle_search_config_set_max_move(RgsaddleSearchConfig *config,
-                                                     double value);
-rgsaddle_status_t rgsaddle_search_config_set_eigen_threshold(
-    RgsaddleSearchConfig *config, double value);
-rgsaddle_status_t rgsaddle_search_config_set_push_step(RgsaddleSearchConfig *config,
-                                                      double value);
-rgsaddle_status_t rgsaddle_search_config_set_max_pushes(
-    RgsaddleSearchConfig *config, int64_t value);
-rgsaddle_status_t rgsaddle_search_config_set_max_climbs(
-    RgsaddleSearchConfig *config, int64_t value);
-rgsaddle_status_t rgsaddle_search_config_set_perp_steps_push(
-    RgsaddleSearchConfig *config, int64_t value);
-rgsaddle_status_t rgsaddle_search_config_set_perp_steps_climb(
-    RgsaddleSearchConfig *config, int64_t value);
-rgsaddle_status_t rgsaddle_search_config_set_krylov_min(
-    RgsaddleSearchConfig *config, int64_t value);
-rgsaddle_status_t rgsaddle_search_config_set_activation_distance(
-    RgsaddleSearchConfig *config, double value);
-rgsaddle_status_t rgsaddle_search_config_set_nsmooth(RgsaddleSearchConfig *config,
-                                                    int64_t value);
-rgsaddle_status_t rgsaddle_search_config_set_push_over(RgsaddleSearchConfig *config,
-                                                      double value);
-rgsaddle_status_t rgsaddle_search_config_set_displacement_seed(
-    RgsaddleSearchConfig *config, uint64_t seed);
-rgsaddle_status_t rgsaddle_search_config_set_displacement_amplitude(
-    RgsaddleSearchConfig *config, double value);
-/** indices null selects every coordinate. */
-rgsaddle_status_t rgsaddle_search_config_set_support(
-    RgsaddleSearchConfig *config, const int64_t *indices, int64_t len);
-
-/**
- * Min-mode or ART session from the opaque configuration. position is
- * 3 * n_atoms. mode is the min-mode seed, or the targeted ART direction;
- * it may be null when a displacement seed was set. An ART report stores
- * the push count in ci_index and the climb count in rotations. Status 2
- * means the budget is spent. Curvature is NaN before the first estimate.
- */
-RgsaddleMinMode *rgsaddle_minmode_create_search(
-    const RgsaddleSearchConfig *config, int64_t n_atoms, const double *position,
-    const double *mode);
-/** Step past a converged ART saddle by the configured length. No surface call. */
-rgsaddle_status_t rgsaddle_minmode_push_over(RgsaddleMinMode *session);
 
 #ifdef __cplusplus
 }

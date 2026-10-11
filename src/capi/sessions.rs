@@ -2941,11 +2941,7 @@ pub unsafe extern "C" fn rgsaddle_minmode_set_force_gate(
     let Some(gate) = force_gate_of(gate) else {
         return RGSADDLE_INVALID_PARAMETER;
     };
-    let session = unsafe { &mut *session };
-    session.session.set_force_gate(gate);
-    if let Some(art) = session.art.as_mut() {
-        art.set_force_gate(gate);
-    }
+    unsafe { (*session).session.set_force_gate(gate) };
     RGSADDLE_OK
 }
 

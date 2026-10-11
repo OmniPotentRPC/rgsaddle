@@ -13,7 +13,7 @@ rgmin is the minimizer. rgpot is the potential RPC. rgsaddle is the saddle mecha
 
 ** Parameters
 
-~ArtConfig::mode~ holds ~dr~, ~difference~, ~rotation_tol~, and ~krylov_dim~. The ART fields sit beside that block. Defaults below are the Rust ~ArtConfig::default~. The C, C++, and Python search configuration adopts them when an ART setter is used before any mode setter.
+~ArtConfig::mode~ holds ~dr~, ~difference~, ~rotation_tol~, and ~krylov_dim~. The ART fields sit beside that block. Defaults below are the Rust ~ArtConfig::default~.
 
 | Field | pARTn name | Default | Role |
 |---+---+---+---+
@@ -28,10 +28,4 @@ rgmin is the minimizer. rgpot is the potential RPC. rgsaddle is the saddle mecha
 | ~push_over~ | push over the saddle | 0 | ~ArtSession::push_over~ after convergence; ~run~ still stops on the stationary point |
 | ~mode.force_tol~ | | 1e-3 | Stationary-point tolerance |
 
-** From C, C++, and Python
-
-There is one saddle-search configuration. Dimer, Lanczos, and ART nouveau are setters on it, not a second family of entry points.
-
-From C the handle is ~rgsaddle_search_config_create~. ~rgsaddle_minmode_create_search~ builds the session, and ~rgsaddle_minmode_step~ advances it. An ART report stores pushes in ~ci_index~ and climbs in ~rotations~. Status 2 means the budget is spent. Curvature is NaN before the first estimate.
-
-From C++ the same handle is ~rgsaddle::SearchConfig~, passed to ~rgsaddle::MinMode~. From Python it is ~SearchConfig~, passed to ~MinMode~.
+C, C++ and Python reach these fields through the stencil configuration's ART preset.
