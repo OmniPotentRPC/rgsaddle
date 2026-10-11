@@ -22,7 +22,7 @@ assert rgsaddle.ForceGate(2) is rgsaddle.ForceGate.MAX_FORCE_ON_ATOM
 #+end_src
 
 * Status codes
-=raise_status(code)= maps =rgsaddle_status_t= (F7). =RGSADDLE_OK= returns true. =RGSADDLE_SHAPE= and =RGSADDLE_INVALID_PARAMETER= raise =ValueError=. =RGSADDLE_NON_FINITE= raises =NumericalError=, a subclass of =ArithmeticError=. =RGSADDLE_SURFACE_FAILED= raises =RuntimeError=. It does not re-raise a stored calculator exception. The original calculator exception is re-raised inside the eval loop. Every other code raises =RuntimeError=. The exception message is the thread-local text when that text is non-empty, and the status name otherwise. =raise_status= clears that text, so =last_error()= is empty afterwards and a later call does not reuse it. =last_error()= stays public because it is the read of the slot before =raise_status= consumes it. Convergence is not a status code. A later =run= returns false when a search stops short. That is ASE's contract, and it is not this layer.
+=raise_status(code)= maps =rgsaddle_status_t=. =RGSADDLE_OK= returns true. =RGSADDLE_SHAPE= and =RGSADDLE_INVALID_PARAMETER= raise =ValueError=. =RGSADDLE_NON_FINITE= raises =NumericalError=, a subclass of =ArithmeticError=. =RGSADDLE_SURFACE_FAILED= raises =RuntimeError=. It does not re-raise a stored calculator exception. Every other code raises =RuntimeError=. The exception message is the thread-local text when that text is non-empty, and the status name otherwise. =raise_status= clears that text, so =last_error()= is empty afterwards and a later call does not reuse it. =last_error()= stays public because it is the read of the slot before =raise_status= consumes it. Convergence is not a status code. A later =run= returns false when a search stops short. That is ASE's contract, and it is not this layer.
 
 * Surface adapter
 =SurfaceAdapter(images, allow_shared_calculator=False)= checks the list, then acts as the stencil callback =(ids, x) -> (energies, gradients)=.
@@ -37,13 +37,13 @@ assert rgsaddle.ForceGate(2) is rgsaddle.ForceGate.MAX_FORCE_ON_ATOM
 
 =__call__(ids, x)= evaluates the given rows on the calling thread, in the given order.
 
-The original calculator exception, including =KeyboardInterrupt=, is re-raised inside the eval loop. It is not wrapped. A second call on the same adapter, while the first call still holds it, raises =RuntimeError= with the text =SurfaceAdapter is in use by another thread= (F3).
+A calculator exception, including =KeyboardInterrupt=, propagates out of =__call__=. It is not wrapped. A second call on the same adapter, while the first call still holds it, raises =RuntimeError= with the text =SurfaceAdapter is in use by another thread=.
 
 Band, minimum-mode, IRC, Sella and AutoNEB sessions have no Python names here. The stencil configuration is what will own those.
 
 * Thread safety
-Immutable values (the enums, a built adapter's image list length) are shared freely. =SurfaceAdapter= is a mutable session. Each call claims an atomic flag for the whole call and drops it when the call returns, including when the calculator raises (F3). =raw_forces= is assigned before that drop. Do not call the adapter again from inside its own calculator.
+Immutable values (the enums, a built adapter's image list length) are shared freely. =SurfaceAdapter= is a mutable session. Each call claims an atomic flag for the whole call and drops it when the call returns, including when the calculator raises. =raw_forces= is assigned before that drop. Do not call the adapter again from inside its own calculator.
 
 The adapter does not start threads. The stencil calls it from the stencil's workers. A Python exception raised by the calculator propagates on the calling thread. It does not unwind through the Rust static library. =PyErr_CheckSignals= runs on that thread.
 
-There is no global mutable state. The last-error string is thread-local (F2). Arrays are float64 and C contiguous. Wrong dtype or order is =TypeError=. Wrong shape is =ValueError= that names the argument and both shapes. Outputs are new arrays. =-0.0=, NaN and subnormals pass through (F6). Sub-interpreters are unsupported (F9).
+There is no global mutable state. The last-error string is thread-local. Arrays are float64 and C contiguous. Wrong dtype or order is =TypeError=. Wrong shape is =ValueError= that names the argument and both shapes. Outputs are new arrays. =-0.0=, NaN and subnormals pass through. Sub-interpreters are unsupported.

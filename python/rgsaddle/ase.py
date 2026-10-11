@@ -39,7 +39,7 @@ class SurfaceAdapter:
     given rows on the calling thread, in the given order. ``owners`` and
     ``reentrant`` tell a driver which rows share a calculator. A second
     call raises ``RuntimeError`` while the first call still holds the
-    claim (F3).
+    claim.
     """
 
     def __init__(
@@ -103,7 +103,7 @@ class SurfaceAdapter:
         ``ids`` is int64, shape ``(rows,)``. ``x`` is float64,
         shape ``(rows, dof)``. A wrong dtype or order raises
         ``TypeError`` naming ``ids`` or ``x``. The result arrays are
-        new copies (F6). ``raw_forces`` is written before the claim drops.
+        new copies. ``raw_forces`` is written before the claim drops.
         """
         ids_arr = self._row_ids(ids)
         if (

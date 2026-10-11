@@ -562,7 +562,7 @@ NB_MODULE(_core, m) {
 
   testing.def(
       "claim_work", [](ClaimSlot &slot, int hold_ms) { return slot.work(hold_ms); }, nb::arg("slot"),
-      nb::arg("hold_ms") = 0, "Claim SurfaceAdapter, hold, and release (F3, F4).");
+      nb::arg("hold_ms") = 0, "Claim SurfaceAdapter, hold, and release.");
   testing.def(
       "claim_hold_until", [](ClaimSlot &slot, HoldGate &gate) { slot.hold_until(gate); }, nb::arg("slot"),
       nb::arg("gate"), "Claim and wait, with the GIL released, until gate.release().");
@@ -570,9 +570,9 @@ NB_MODULE(_core, m) {
               nb::arg("text"), "Replace the thread-local last-error text.");
   testing.def("schedule_canonical", &schedule_canonical, nb::arg("ids").noconvert(), nb::arg("owners").noconvert(),
               nb::arg("reentrant").noconvert(), nb::arg("threads"),
-              "Canonical F5 schedule. The worker count is not part of the text (F8).");
+              "Canonical owner schedule. The worker count is not part of the text.");
   testing.def("echo_f64", &rgbind::echo_f64, nb::arg("values").noconvert(),
-              "Byte-copy a float64 array. -0.0, NaN and subnormals pass through (F6).");
+              "Byte-copy a float64 array. -0.0, NaN and subnormals pass through.");
   testing.def(
       "drive_eval", &drive_eval,
       nb::sig("def drive_eval(callback: collections.abc.Callable[[numpy.typing.NDArray[numpy.int64], "
@@ -583,6 +583,6 @@ NB_MODULE(_core, m) {
               "tuple[numpy.typing.NDArray[numpy.float64], numpy.typing.NDArray[numpy.float64]]"),
       nb::arg("callback"), nb::arg("ids").noconvert(), nb::arg("x").noconvert(), nb::arg("owners").noconvert(),
       nb::arg("reentrant").noconvert(), nb::arg("threads"), nb::arg("slot"),
-      "Fake stencil eval loop. Groups rows with the F5 scheduler and calls "
+      "Fake stencil eval loop. Groups rows by owner and calls "
       "callback(ids, x) through the trampoline.");
 }

@@ -31,8 +31,8 @@ The importable package is =rgsaddle=. =rgsaddle._core= is the nanobind extension
 | Name | Role |
 |------+------|
 | =ForceGate=, =HessUpdate=, =IrcKind=, =MinModeKind=, =EigenDevice=, =ExpandKind=, =CellChart=, =RestrictedKind= | =enum.IntEnum= controls. Names and values match the previous module |
-| =NumericalError= | =ArithmeticError= for a non-finite energy or a singular update (F7) |
-| =last_error= | Thread-local text. =raise_status= reads it and then clears the slot (F2, F7) |
+| =NumericalError= | =ArithmeticError= for a non-finite energy or a singular update |
+| =last_error= | Thread-local text. =raise_status= reads it and then clears the slot |
 | =raise_status= | Map an =rgsaddle_status_t= value. The message is the stored text, or the status name when that text is empty. =RGSADDLE_OK= returns true |
 | =rgsaddle.ase.SurfaceAdapter= | =list[Atoms]= to the =(ids, x) -> (energies, gradients)= callback. Optional extra =ase= |
 
