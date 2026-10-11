@@ -1985,6 +1985,102 @@ mod tests {
         Some((shifted, dv - dvc, d2))
     }
 
+    fn lj_energy(r: f64, sigma: f64) -> f64 {
+        let s = sigma / r;
+        let s2 = s * s;
+        let s6 = s2 * s2 * s2;
+        4.0 * (s6 * s6 - s6)
+    }
+
+    /// Quintic switch. Value and the first two derivatives vanish at `x = 1`
+    /// and match the identity at `x = 0`, so `u * S` is C2 across the cutoff.
+    fn quintic_switch(x: f64) -> (f64, f64, f64) {
+        let x2 = x * x;
+        let x3 = x2 * x;
+        let x4 = x2 * x2;
+        let s = 1.0 - 10.0 * x3 + 15.0 * x4 - 6.0 * x4 * x;
+        let ds = -30.0 * x2 + 60.0 * x3 - 30.0 * x4;
+        let d2s = -60.0 * x + 180.0 * x2 - 120.0 * x3;
+        (s, ds, d2s)
+    }
+
+    /// Lennard-Jones with a C2 switch on `[ron, rc]`.
+    fn switched_lj_derivs(r: f64, sigma: f64, ron: f64, rc: f64) -> Option<(f64, f64, f64)> {
+        if !(r > 0.0 && r < rc) {
+            return None;
+        }
+        let energy = lj_energy(r, sigma);
+        let (dv, d2) = lj_derivs(r, sigma);
+        if r <= ron {
+            return Some((energy, dv, d2));
+        }
+        let width = rc - ron;
+        let x = (r - ron) / width;
+        let (s, ds_dx, d2s_dx2) = quintic_switch(x);
+        let ds = ds_dx / width;
+        let d2s = d2s_dx2 / (width * width);
+        Some((
+            energy * s,
+            dv * s + energy * ds,
+            d2 * s + 2.0 * dv * ds + energy * d2s,
+        ))
+    }
+
+    /// Pair Lennard-Jones whose value, force, and curvature vanish at `rc`.
+    struct SwitchedLj {
+        sigma: f64,
+        ron: f64,
+        rc: f64,
+        cell: Option<Cell>,
+        calls: AtomicUsize,
+    }
+
+    impl SwitchedLj {
+        fn open(sigma: f64, ron: f64, rc: f64) -> Self {
+            Self {
+                sigma,
+                ron,
+                rc,
+                cell: None,
+                calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn periodic(sigma: f64, ron: f64, rc: f64, cell: Cell) -> Self {
+            Self {
+                sigma,
+                ron,
+                rc,
+                cell: Some(cell),
+                calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl PointSurface for SwitchedLj {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            let mut g = Array1::zeros(x.len());
+            let mut energy = 0.0;
+            let points = coords_of(x);
+            visit_cutoff(&points, self.cell.as_ref(), self.rc, |i, j, dr| {
+                let r2 = dr[0] * dr[0] + dr[1] * dr[1] + dr[2] * dr[2];
+                let r = r2.sqrt();
+                let Some((pot, dv, _)) = switched_lj_derivs(r, self.sigma, self.ron, self.rc)
+                else {
+                    return;
+                };
+                energy += pot;
+                for axis in 0..3 {
+                    let u = dr[axis] / r;
+                    g[3 * i + axis] -= dv * u;
+                    g[3 * j + axis] += dv * u;
+                }
+            });
+            Ok((energy, g))
+        }
+    }
+
     impl PointSurface for ShiftedForce {
         fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
             self.calls.fetch_add(1, Ordering::Relaxed);
@@ -2020,6 +2116,28 @@ mod tests {
             let r2 = dr[0] * dr[0] + dr[1] * dr[1] + dr[2] * dr[2];
             let r = r2.sqrt();
             let Some((_, dv, d2)) = shifted_force_derivs(r, sigma, rc) else {
+                return;
+            };
+            let u = [dr[0] / r, dr[1] / r, dr[2] / r];
+            let block = pair_block(d2, dv, r, u);
+            add_pair_blocks(&mut blocks, i, j, &block);
+        });
+        blocks
+    }
+
+    fn switched_lj_blocks(
+        positions: ArrayView1<f64>,
+        cell: Option<&Cell>,
+        sigma: f64,
+        ron: f64,
+        rc: f64,
+    ) -> std::collections::HashMap<(usize, usize), [f64; 9]> {
+        let mut blocks = std::collections::HashMap::new();
+        let points = coords_of(positions);
+        visit_cutoff(&points, cell, rc, |i, j, dr| {
+            let r2 = dr[0] * dr[0] + dr[1] * dr[1] + dr[2] * dr[2];
+            let r = r2.sqrt();
+            let Some((_, dv, d2)) = switched_lj_derivs(r, sigma, ron, rc) else {
                 return;
             };
             let u = [dr[0] / r, dr[1] / r, dr[2] / r];
@@ -3357,14 +3475,30 @@ mod tests {
         assert!(overlap.abs() > 1.0 - 1e-5, "overlap {overlap}");
     }
 
+    /// Self-adjoint spectrum from faer, eigenvalues in nondecreasing order.
+    /// Columns of the second array are the eigenvectors.
+    fn dense_sym_eigh(a: ndarray::ArrayView2<f64>) -> (Array1<f64>, Array2<f64>) {
+        let n = a.nrows();
+        assert_eq!(n, a.ncols());
+        let mat = faer::Mat::from_fn(n, n, |i, j| 0.5 * (a[(i, j)] + a[(j, i)]));
+        let evd = mat
+            .self_adjoint_eigen(faer::Side::Lower)
+            .expect("self-adjoint eigendecomposition");
+        let values_ref = evd.S();
+        let vectors_ref = evd.U();
+        let mut values = Array1::zeros(n);
+        let mut vectors = Array2::zeros((n, n));
+        for column in 0..n {
+            values[column] = values_ref[column];
+            for row in 0..n {
+                vectors[(row, column)] = vectors_ref[(row, column)];
+            }
+        }
+        (values, vectors)
+    }
+
     #[test]
     fn lanczos_on_a_rattled_vacancy_matches_the_dense_spectrum() {
-        if std::env::var("RGSADDLE_HESSIAN_BENCH").ok().as_deref() != Some("1") {
-            eprintln!(
-                "coupled vacancy Lanczos stays behind RGSADDLE_HESSIAN_BENCH because dense Jacobi on 1497 dof scans the full matrix for every rotation"
-            );
-            return;
-        }
         let (positions, cell) = fcc_vacancy_cell(5);
         let rattled = rattle(&positions, 1, 0.03);
         let coords = Array1::from(rattled);
@@ -3393,7 +3527,7 @@ mod tests {
             solved_pairs.push(solved);
         }
         assert!(saw_restart, "thick restart did not run");
-        let (evals, evecs) = exact_eigh(got.to_dense().view()).unwrap();
+        let (evals, evecs) = dense_sym_eigh(got.to_dense().view());
         for (k, solved) in [1usize, 4].into_iter().zip(solved_pairs) {
             for mode in 0..k {
                 let gap = (solved.values[mode] - evals[mode]).abs();
@@ -3732,7 +3866,7 @@ mod tests {
     }
 
     enum BenchSurface {
-        Lj(ShiftedForce),
+        Lj(SwitchedLj),
         Gupta(Gupta),
     }
 
@@ -3750,9 +3884,10 @@ mod tests {
             BenchSurface::Gupta(Gupta::new(params, system.cell))
         } else {
             let sigma = system.lj_sigma.unwrap();
+            let ron = 0.8 * system.rc;
             match system.cell {
-                Some(cell) => BenchSurface::Lj(ShiftedForce::periodic(sigma, system.rc, cell)),
-                None => BenchSurface::Lj(ShiftedForce::open(sigma, system.rc)),
+                Some(cell) => BenchSurface::Lj(SwitchedLj::periodic(sigma, ron, system.rc, cell)),
+                None => BenchSurface::Lj(SwitchedLj::open(sigma, ron, system.rc)),
             }
         }
     }
@@ -3762,10 +3897,11 @@ mod tests {
             let analytic = gupta_analytic_blocks(positions, system.cell.as_ref(), params);
             max_analytic_error(got, &analytic)
         } else {
-            let analytic = lj_analytic_blocks(
+            let analytic = switched_lj_blocks(
                 positions,
                 system.cell.as_ref(),
                 system.lj_sigma.unwrap(),
+                0.8 * system.rc,
                 system.rc,
             );
             max_analytic_error(got, &analytic)
@@ -3778,6 +3914,50 @@ mod tests {
             .enumerate()
             .map(|(i, &p)| p + (u01(seed, i as u64) - 0.5) * 2.0 * amp)
             .collect()
+    }
+
+    /// Shifted-force curvature jumps at `rc`. A pair inside the finite-difference
+    /// step makes one side leave the cutoff, so the recovered block and the
+    /// interior analytic block disagree. A quintic switch is C2 across that
+    /// point, and the same geometry stays under 1e-5.
+    #[test]
+    fn shifted_force_kink_inside_the_step_is_a_limitation() {
+        let rc = 2.5;
+        let h = 1e-4;
+        let ron = 0.8 * rc;
+        let coords = Array1::from(vec![
+            0.0,
+            0.0,
+            0.0,
+            1.2,
+            0.0,
+            0.0,
+            1.2 + rc - 0.5 * h,
+            0.0,
+            0.0,
+        ]);
+        let opts = SparseHessianOpts::default().with_step(h);
+        let pattern =
+            SparsityPattern::from_positions(coords.view(), None, rc, opts.search_skin()).unwrap();
+        let shifted =
+            sparse_hessian(&ShiftedForce::open(1.0, rc), coords.view(), &pattern, opts).unwrap();
+        let shifted_err =
+            max_analytic_error(&shifted, &lj_analytic_blocks(coords.view(), None, 1.0, rc));
+        let smooth = sparse_hessian(
+            &SwitchedLj::open(1.0, ron, rc),
+            coords.view(),
+            &pattern,
+            opts,
+        )
+        .unwrap();
+        let smooth_err = max_analytic_error(
+            &smooth,
+            &switched_lj_blocks(coords.view(), None, 1.0, ron, rc),
+        );
+        eprintln!("kink shifted {shifted_err} switched {smooth_err}");
+        assert!(shifted_err > 1e-3, "shifted-force kink error {shifted_err}");
+        assert!(smooth_err < 1e-5, "switched cutoff error {smooth_err}");
+        assert!(shifted_err > 100.0 * smooth_err);
     }
 
     #[test]
@@ -3866,11 +4046,11 @@ mod tests {
                     }
                 }
                 errors.push(fmax);
-                // A shifted-force curvature jumps at the cutoff. A rattle
-                // that leaves a pair inside the step makes both recoveries
-                // share that kink, near 1e-4. A missing shell is far larger.
+                // The switched cutoff is C2, so this is truncation at the
+                // default step. Clusters land near 1e-7 and the rattled
+                // vacancy near 1e-6.
                 assert!(
-                    fmax < 1e-3,
+                    fmax < 2e-6,
                     "{} seed {seed} analytic error {fmax}",
                     system.name
                 );
