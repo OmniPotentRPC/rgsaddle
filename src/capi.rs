@@ -488,6 +488,7 @@ unsafe fn band_from_parts(
         method: method_of(cfg.method, cfg.memory),
         solid,
         quickmin: cfg.method == 3,
+        autoneb: None,
     };
     match BandSession::new(band_config, initial) {
         Ok(mut session) => {

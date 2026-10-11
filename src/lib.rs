@@ -3,7 +3,12 @@
 //! The band and the minimum-mode search take one [`rgmin::Solver`]
 //! step on a force this crate assembled. The host owns the loop.
 //! [`band::BandSession::run`] and [`minmode::MinModeSession::run`]
-//! are convenience loops over `step`.
+//! are convenience loops over `step`. [`autoneb::AutoNeb`] inserts
+//! images where the energy gap or the segment length is worst,
+//! relaxes that window, and climbs. The full band runs only when
+//! requested.
+//! Image blocks are stored by image index after every rank finishes,
+//! so the band does not depend on which block finished first.
 //!
 //! [`nichols::Index1Session`] is the index-1 search on a dense
 //! Hessian: Baker's restricted-step partitioned RFO (maximize the
@@ -22,6 +27,7 @@
 //! Positions are unwrapped Cartesian; a periodic host applies its
 //! minimum-image convention before handing differences in.
 
+pub mod autoneb;
 pub mod band;
 #[cfg(feature = "capi")]
 pub mod capi;
@@ -34,6 +40,7 @@ pub mod solid_state;
 pub mod spring;
 pub mod tangent;
 
+pub use autoneb::{AutoNeb, AutoNebReport, AutoNebTuning};
 pub use band::{
     BandConfig, BandEvaluation, BandReport, BandSession, BandStatus, BandSurface, Cell, CiConfig,
     SolidState,

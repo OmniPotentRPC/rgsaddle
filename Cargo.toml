@@ -22,7 +22,7 @@ jacobi = []
 dense-faer = ["dep:faer", "dep:dyn-stack"]
 # Rayon for rgmin and for the fixed-partition dense eigensolver.
 # Without it the dense solver runs the same tiles on one thread.
-par = ["rgmin/par", "dense-faer", "faer/rayon", "dep:rayon"]
+par = ["rgmin/par", "dense-faer", "faer/rayon"]
 # Cross-node invariant spectra. Pins pulp and gemm to the AVX2
 # kernels by leaving x86-v4 uncompiled. pulp has no runtime cap, so
 # this is a build mode, not a flag inside a wider binary.
@@ -50,19 +50,15 @@ readcon-db = { version = "0.1", optional = true }
 rgmin = { git = "https://github.com/OmniPotentRPC/rgmin", rev = "6e37aa7f2bd8506fb2951a51ab59594ed168c900" }
 eindir-core = { version = "0.6.0", features = ["capi"] }
 ndarray = "0.17"
+rayon = "1.12"
 thiserror = "2"
 linkcell = { version = "0.3.3", git = "https://github.com/d-SEAMS/linkcell", rev = "f6cf5700ca9c90e1877c84b66fb68386de5ceffe", default-features = false }
-# Dense symmetric spectra. `std` enables pulp's runtime SIMD dispatch.
-# `rayon` is enabled only by feature `par`. The solver does not link
-# a system LAPACK. The default `eigh-portable` build leaves AVX-512
-# kernels out. Feature `eigh-avx512` compiles them.
 dyn-stack = { version = "0.13.2", optional = true }
 faer = { version = "0.24", default-features = false, features = ["std"], optional = true }
-rayon = { version = "1", optional = true }
 
 [dev-dependencies]
 approx = "0.5"
-rayon = "1"
+sha2 = "0.10"
 
 # include/rgsaddle.h is the hand-written contract (surface request,
 # status enum, stepping semantics); cargo-c installs it as is instead
