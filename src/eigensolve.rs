@@ -5,6 +5,20 @@
 //! waist is dlpk CUDA ([`EigenDevice::Dlpk`] is the same Host path
 //! until that feature is linked); this crate does not grow a second
 //! device stack.
+//!
+//! [`exact_eigh`] diagonalizes the symmetric part with faer's
+//! self-adjoint solver. Householder tridiagonalization is followed by
+//! the symmetric QR algorithm when the dimension is below faer's
+//! recursion threshold (128 in faer 0.24) and by Cuppen's
+//! divide-and-conquer above it (J. J. M. Cuppen, *Numer. Math.* 36
+//! (1980) 177-195, <https://doi.org/10.1007/BF01396757>; the QR step
+//! is Francis, *Comput. J.* 4 (1962) 332-345,
+//! <https://doi.org/10.1093/comjnl/4.4.332>). pulp selects the SIMD
+//! kernel at runtime. No system LAPACK is linked. Eigenvalues ascend
+//! and eigenvector columns are orthonormal. [`partial_eigh`] returns
+//! the lowest `k` pairs for a min-mode host that does not need the
+//! rest of the spectrum. Feature `jacobi` keeps the cyclic Jacobi
+//! solver used before this path.
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
 use rgmin::vecops::{axpy, dot, nrm2};
@@ -94,20 +108,91 @@ impl ApplyHessian for DenseApply<'_> {
 }
 
 /// Sella `exact`: dense symmetric eigen of `a`.
+///
+/// The symmetric part is diagonalized by faer's self-adjoint solver.
+/// Eigenvalues ascend. Columns of the second array are orthonormal
+/// eigenvectors.
 pub fn exact_eigh(a: ArrayView2<f64>) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
+    let work = symmetric_part(a)?;
+    faer_eigh(&work, work.nrows())
+}
+
+/// Lowest `k` eigenpairs of the symmetric part of `a`.
+///
+/// Eigenvalues ascend. `k == 0` returns an empty spectrum with `n`
+/// rows. `k == n` matches [`exact_eigh`]. A min-mode host passes the
+/// number of soft modes it needs. `k` above the dimension is
+/// [`SaddleError::Invalid`].
+pub fn partial_eigh(
+    a: ArrayView2<f64>,
+    k: usize,
+) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
+    let work = symmetric_part(a)?;
+    if k > work.nrows() {
+        return Err(SaddleError::Invalid(
+            "partial eigh asks for more eigenpairs than the dimension".into(),
+        ));
+    }
+    faer_eigh(&work, k)
+}
+
+/// Cyclic Jacobi eigenpairs of the symmetric part of `a`.
+///
+/// Eigenvalues ascend. This is the solver [`exact_eigh`] used before
+/// the faer path, kept for comparison.
+#[cfg(feature = "jacobi")]
+pub fn jacobi_eigh(a: ArrayView2<f64>) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
+    let mut work = symmetric_part(a)?;
+    jacobi_eigh_inplace(&mut work)
+}
+
+fn symmetric_part(a: ArrayView2<f64>) -> Result<Array2<f64>, SaddleError> {
     if a.nrows() != a.ncols() {
         return Err(SaddleError::Shape("eigh needs a square matrix".into()));
     }
     let n = a.nrows();
     let mut work = a.to_owned();
     for i in 0..n {
+        if !work[(i, i)].is_finite() {
+            return Err(SaddleError::NonFinite("eigh"));
+        }
         for j in 0..i {
             let s = 0.5 * (work[(i, j)] + work[(j, i)]);
+            if !s.is_finite() {
+                return Err(SaddleError::NonFinite("eigh"));
+            }
             work[(i, j)] = s;
             work[(j, i)] = s;
         }
     }
-    jacobi_eigh(&mut work)
+    Ok(work)
+}
+
+fn faer_eigh(work: &Array2<f64>, k: usize) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
+    let n = work.nrows();
+    if k == 0 {
+        return Ok((Array1::zeros(0), Array2::zeros((n, 0))));
+    }
+    let mat = faer::Mat::from_fn(n, n, |i, j| work[(i, j)]);
+    let evd = mat
+        .self_adjoint_eigen(faer::Side::Lower)
+        .map_err(|_| SaddleError::Solver("self-adjoint eigensolver did not converge".into()))?;
+    let values = evd.S();
+    let vectors = evd.U();
+    let mut evals = Array1::zeros(k);
+    let mut vecs = Array2::zeros((n, k));
+    for col in 0..k {
+        evals[col] = values[col];
+        for row in 0..n {
+            vecs[(row, col)] = vectors[(row, col)];
+        }
+        if nrm2(vecs.column(col)) < 1e-18 {
+            return Err(SaddleError::Solver(
+                "eigensolver produced a zero eigenvector".into(),
+            ));
+        }
+    }
+    Ok((evals, vecs))
 }
 
 /// Ritz eigenvalues, basis vectors, and the operator applied to those vectors.
@@ -144,7 +229,7 @@ pub fn rayleigh_ritz(
     Ok((lams, v_rot, av_rot))
 }
 
-/// Dense eigen on `device`. Full spectrum is Host Jacobi.
+/// Dense eigen on `device`. Full spectrum is the host faer solver.
 /// [`EigenDevice::Dlpk`] is the lowest-mode arm through rgmin.
 pub fn eigh_on(
     device: EigenDevice,
@@ -525,7 +610,8 @@ fn matmul(a: ArrayView2<f64>, b: ArrayView2<f64>) -> Array2<f64> {
 }
 
 /// Cyclic Jacobi for a small dense symmetric matrix.
-fn jacobi_eigh(a: &mut Array2<f64>) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
+#[cfg(any(test, feature = "jacobi"))]
+fn jacobi_eigh_inplace(a: &mut Array2<f64>) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
     let n = a.nrows();
     let mut v = Array2::<f64>::zeros((n, n));
     for i in 0..n {
@@ -843,5 +929,204 @@ mod tests {
         assert!((nrm2(y.view()) - 1.0).abs() < 1e-12);
         let w = man.transport(&v, &y, &s);
         assert!(dot(y.view(), w.view()).abs() < 1e-12);
+    }
+
+    fn next_open(state: &mut u64) -> f64 {
+        *state = state
+            .wrapping_mul(0x5851_F42D_4C95_7F2D)
+            .wrapping_add(0x1405_7B7E_F767_814F);
+        let bits = (*state >> 11) as u32;
+        (f64::from(bits) / f64::from(u32::MAX)).mul_add(2.0, -1.0)
+    }
+
+    fn random_symmetric(n: usize, seed: u64) -> Array2<f64> {
+        let mut state = seed;
+        let mut a = Array2::zeros((n, n));
+        for i in 0..n {
+            for j in 0..=i {
+                let value = next_open(&mut state);
+                a[(i, j)] = value;
+                a[(j, i)] = value;
+            }
+        }
+        a
+    }
+
+    fn random_spd(n: usize, seed: u64) -> Array2<f64> {
+        let factor = random_symmetric(n, seed);
+        let mut a = factor.t().dot(&factor);
+        for i in 0..n {
+            a[(i, i)] += 0.5;
+        }
+        a
+    }
+
+    fn random_indefinite(n: usize, seed: u64) -> Array2<f64> {
+        let mut a = random_symmetric(n, seed);
+        a[(0, 0)] = -4.0;
+        a[(n - 1, n - 1)] = 4.0;
+        a
+    }
+
+    fn spectrum_scale(evals: &Array1<f64>) -> f64 {
+        evals
+            .iter()
+            .fold(1.0, |scale, value| scale.max(value.abs()))
+    }
+
+    fn assert_residual(a: ArrayView2<f64>, evals: &Array1<f64>, vecs: &Array2<f64>) {
+        let scale = spectrum_scale(evals);
+        let av = matmul(a, vecs.view());
+        for col in 0..evals.len() {
+            let mut err = 0.0;
+            for row in 0..a.nrows() {
+                let diff = av[(row, col)] - evals[col] * vecs[(row, col)];
+                err += diff * diff;
+            }
+            assert!(
+                err.sqrt() <= 1e-8 * scale,
+                "residual {} at column {col}",
+                err.sqrt()
+            );
+            let mut norm = 0.0;
+            for row in 0..a.nrows() {
+                norm += vecs[(row, col)] * vecs[(row, col)];
+            }
+            assert!((norm.sqrt() - 1.0).abs() <= 1e-8);
+        }
+    }
+
+    fn assert_matches_jacobi(a: ArrayView2<f64>, k: usize) {
+        let mut work = symmetric_part(a).unwrap();
+        let (old_evals, old_vecs) = jacobi_eigh_inplace(&mut work).unwrap();
+        let (evals, vecs) = partial_eigh(a, k).unwrap();
+        assert_eq!(evals.len(), k);
+        assert_eq!(vecs.ncols(), k);
+        let scale = spectrum_scale(&old_evals);
+        for i in 0..k {
+            assert!(
+                (evals[i] - old_evals[i]).abs() <= 1e-8 * scale,
+                "eigenvalue {i}: {} vs {}",
+                evals[i],
+                old_evals[i]
+            );
+        }
+        let mut start = 0;
+        while start < k {
+            let mut end = start + 1;
+            while end < k && (old_evals[end] - old_evals[start]).abs() <= 1e-6 * scale {
+                end += 1;
+            }
+            for col in start..end {
+                let mut overlap = 0.0;
+                for basis in start..end {
+                    let product = dot(vecs.column(col), old_vecs.column(basis));
+                    overlap += product * product;
+                }
+                assert!(
+                    overlap >= 1.0 - 1e-6,
+                    "column {col} overlap {overlap} on cluster {start}..{end}"
+                );
+            }
+            start = end;
+        }
+        assert_residual(a, &evals, &vecs);
+    }
+
+    fn gold_hessian(name: &str) -> Array2<f64> {
+        let gold = include_str!("../tests/sella_manopt_gold.json");
+        let marker = format!("\"name\": \"{name}\"");
+        let start = gold
+            .find(&marker)
+            .unwrap_or_else(|| panic!("missing gold case {name}"));
+        let rest = &gold[start..];
+        let next = rest[marker.len()..]
+            .find("\"name\": ")
+            .map_or(rest.len(), |offset| offset + marker.len());
+        let case = &rest[..next];
+        let key = "\"H\":";
+        let h_at = case
+            .find(key)
+            .unwrap_or_else(|| panic!("gold case {name} has no H"));
+        let after = &case[h_at + key.len()..];
+        let lb = after.find('[').expect("H array");
+        let mut depth = 0;
+        let mut rb = lb;
+        for (i, c) in after[lb..].char_indices() {
+            match c {
+                '[' => depth += 1,
+                ']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        rb = lb + i;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let body = &after[lb..=rb];
+        let nums: Vec<f64> = body
+            .split(|c: char| c == ',' || c == '[' || c == ']' || c.is_whitespace())
+            .filter(|token| !token.is_empty())
+            .map(|token| {
+                token
+                    .parse::<f64>()
+                    .unwrap_or_else(|err| panic!("H parse {token}: {err}"))
+            })
+            .collect();
+        let n = nums.len().isqrt();
+        assert_eq!(n * n, nums.len(), "gold H is not square");
+        Array2::from_shape_vec((n, n), nums).unwrap()
+    }
+
+    #[test]
+    fn faer_matches_jacobi_on_random_spd() {
+        let a = random_spd(8, 0x5A11_E001);
+        let (evals, _) = exact_eigh(a.view()).unwrap();
+        assert!(evals.iter().all(|value| *value > 0.0), "{evals:?}");
+        assert_matches_jacobi(a.view(), evals.len());
+        assert_matches_jacobi(a.view(), 1);
+    }
+
+    #[test]
+    fn faer_matches_jacobi_on_random_indefinite() {
+        let a = random_indefinite(7, 0x1D_E1_7E);
+        let (evals, _) = exact_eigh(a.view()).unwrap();
+        assert!(evals[0] < 0.0 && *evals.last().unwrap() > 0.0, "{evals:?}");
+        assert_matches_jacobi(a.view(), evals.len());
+        assert_matches_jacobi(a.view(), 2);
+    }
+
+    #[test]
+    fn faer_matches_jacobi_on_the_sella_gold_hessian() {
+        let a = gold_hessian("prfo_saddle_order1_alpha1");
+        assert_eq!(a.dim(), (2, 2));
+        assert!((a[(0, 1)] - 0.2).abs() < 1e-15);
+        let (evals, vecs) = exact_eigh(a.view()).unwrap();
+        assert!(evals[0] < 0.0 && evals[1] > 0.0, "{evals:?}");
+        assert_matches_jacobi(a.view(), 2);
+        let (lowest, mode) = partial_eigh(a.view(), 1).unwrap();
+        assert!((lowest[0] - evals[0]).abs() <= 1e-12);
+        let overlap = dot(mode.column(0), vecs.column(0)).abs();
+        assert!(overlap >= 1.0 - 1e-8, "min-mode overlap {overlap}");
+    }
+
+    #[test]
+    fn partial_eigh_rejects_a_request_past_the_dimension() {
+        let a = Array2::eye(2);
+        let err = partial_eigh(a.view(), 3).unwrap_err();
+        assert!(matches!(err, SaddleError::Invalid(_)));
+        let (evals, vecs) = partial_eigh(a.view(), 0).unwrap();
+        assert_eq!(evals.len(), 0);
+        assert_eq!(vecs.dim(), (2, 0));
+        assert!(matches!(
+            exact_eigh(Array2::zeros((2, 3)).view()),
+            Err(SaddleError::Shape(_))
+        ));
+        assert!(matches!(
+            exact_eigh(array![[f64::NAN, 0.0], [0.0, 1.0]].view()),
+            Err(SaddleError::NonFinite(_))
+        ));
     }
 }

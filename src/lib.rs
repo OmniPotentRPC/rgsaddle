@@ -77,8 +77,10 @@ pub use cell_log::{CellChart, expm_3x3, logm_3x3};
 
 pub use constraints::{Constraints, Equality, InternalCounts};
 
+#[cfg(feature = "jacobi")]
+pub use eigensolve::jacobi_eigh;
 pub use eigensolve::{
-    EigenDevice, ExpandKind, eigh_on, exact_eigh, expand, lowest_on, rayleigh_ritz,
+    EigenDevice, ExpandKind, eigh_on, exact_eigh, expand, lowest_on, partial_eigh, rayleigh_ritz,
     rayleigh_ritz_iter,
 };
 

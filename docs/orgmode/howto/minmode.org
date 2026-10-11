@@ -7,6 +7,8 @@ The reported force norm must satisfy the selected ~ForceGate~, and the estimated
 
 ~set_kappa~ selects the basin constraint. ~set_highs~ selects the optional feasible-step control. Call ~reset~ at a surface change and use ~set_force_gate~ to select the physical stopping norm. Hosts that require exactly one imaginary mode must perform their full index check.
 
+A host that already holds a dense Hessian can take its softest modes from ~partial_eigh~. The dimer and Lanczos estimates stay the matrix-free path.
+
 ** Keep one session across a host search
 
 A host that climbs with its own optimizer keeps one session for the whole search. At each new centre it calls ~set_position~ (~rgsaddle_minmode_set_position~) with the gradient it already has, so the session does not evaluate the centre, then ~estimate_mode~ (~rgsaddle_minmode_estimate~). The previous mode seeds the next rotation, so an unchanged mode costs one evaluation. ~set_mode~ (~rgsaddle_minmode_set_mode~) replaces the seed. All three need ABI minor 5.

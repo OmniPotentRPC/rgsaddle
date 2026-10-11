@@ -16,6 +16,8 @@ crate-type = ["lib", "cdylib", "staticlib"]
 [features]
 default = []
 capi = []
+# Cyclic Jacobi dense eigensolver, kept for comparison with the faer path.
+jacobi = []
 par = ["rgmin/par"]
 highs = ["rgmin/highs"]
 python = ["dep:pyo3"]
@@ -38,6 +40,9 @@ eindir-core = { version = "0.6.0", features = ["capi"] }
 ndarray = "0.17"
 thiserror = "2"
 linkcell = { version = "0.3.3", git = "https://github.com/d-SEAMS/linkcell", rev = "f6cf5700ca9c90e1877c84b66fb68386de5ceffe", default-features = false }
+# Dense symmetric spectra. `std` enables pulp's runtime SIMD dispatch.
+# The solver does not link a system LAPACK.
+faer = { version = "0.24", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 approx = "0.5"
@@ -59,3 +64,8 @@ filename = "rgsaddle"
 
 [package.metadata.capi.library]
 name = "rgsaddle"
+
+[[bench]]
+name = "eigh"
+harness = false
+required-features = ["jacobi"]
