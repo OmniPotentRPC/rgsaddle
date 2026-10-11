@@ -31,7 +31,7 @@ fn supported_simd() -> Vec<&'static str> {
     let mut paths = vec!["scalar"];
     #[cfg(target_arch = "x86_64")]
     {
-        if std::is_x86_feature_detected!("avx2") {
+        if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
             paths.push("avx2");
         }
         if std::is_x86_feature_detected!("avx512f") {
@@ -46,7 +46,7 @@ fn supported_simd() -> Vec<&'static str> {
 }
 
 /// Symmetric matrix with a negative zero, a subnormal, and a repeated
-/// eigenvalue. The generator is a separate multiply and add.
+/// eigenvalue. The generator is `f64::mul_add`, matching hardware FMA.
 fn matrix(n: usize) -> Array2<f64> {
     let mut state = 0xE161_u64.wrapping_add(n as u64);
     let mut a = Array2::zeros((n, n));
@@ -145,7 +145,9 @@ fn write_golden() {
     }
     let mut lines = vec![
         "# SHA-256 of little-endian f64 eigenvalues, then column-major eigenvectors.".to_string(),
-        "# Scalar kernel, one thread. Every SIMD path and pool size matches these digests."
+        "# Scalar f64::mul_add, one thread. AVX2+FMA, AVX-512, and NEON match these digests."
+            .to_string(),
+        "# Band width 64, WY width 64, chase half-width 128. Those widths are part of the bits."
             .to_string(),
     ];
     for (n, op, k) in cases() {

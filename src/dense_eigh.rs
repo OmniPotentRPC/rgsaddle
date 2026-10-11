@@ -6,11 +6,15 @@
 //! <https://doi.org/10.1145/2063384.2063394>). Stage 2 chases the bulge
 //! down to tridiagonal form on a compact band of width [`CHASE_KD`],
 //! which is wide enough for the fill and keeps each window contiguous.
-//! Several sweeps stay in flight: a sweep runs its next kernel only
-//! after every earlier sweep's columns lie strictly to its right, the
-//! dependency from that paper, so one wave touches disjoint columns.
-//! Inside that wave each sweep may take several further steps, and only
-//! while the predicted windows stay disjoint.
+//! The chase is a task graph. Task `(sweep, step)` becomes ready when
+//! its column window is disjoint from every earlier sweep, the
+//! dependency in that paper and in ELPA's two-stage solver (Marek et
+//! al., *J. Phys.: Condens. Matter* 26 (2014) 213201,
+//! <https://doi.org/10.1088/0953-8984/26/21/213201>). Each wave runs
+//! that ready set, and a task may take several further steps while the
+//! predicted windows stay disjoint. The task id is the sweep index and
+//! the step, and reflectors are flushed in sweep order, so the pool
+//! size does not change the bits.
 //! The tridiagonal eigenproblem is Cuppen's divide-and-conquer
 //! (J. J. M. Cuppen, *Numer. Math.* 36 (1980) 177-195,
 //! <https://doi.org/10.1007/BF01396757>) as carried out by Gu and
@@ -21,17 +25,30 @@
 //! iteration is used when only the lowest vectors are required.
 //!
 //! Every trailing update and the blocked back-transform go through
-//! [`crate::simd_gemm::tile_gemm`]. That kernel accumulates with a
-//! separate multiply and add. Tile ownership depends on the dimension
-//! and on [`NB`], not on the rayon pool.
+//! [`crate::simd_gemm::tile_gemm`]. That kernel accumulates
+//! `acc = fma(a, b, acc)` in ascending `k`. Tile ownership depends on
+//! the dimension and on [`NB`], not on the rayon pool. The WY product
+//! width is [`WY_NB`]. [`NB`], [`WY_NB`], and [`CHASE_KD`] are part of
+//! the bit definition. They do not depend on the instruction set, the
+//! core count, or the thread count.
 
 use ndarray::{Array1, Array2};
 
 use crate::error::SaddleError;
 use crate::simd_gemm::{self, SyncMut, SyncPtr, for_tiles, tile_gemm};
 
-/// Tile size and target half-bandwidth. Fixed. Not a hardware query.
+/// Tile size and target half-bandwidth. Fixed. Part of the bit
+/// definition: a different width builds different Householder vectors.
 const NB: usize = 64;
+
+/// Columns accumulated into one WY product before the back-transform.
+/// Fixed. Part of the bit definition, because the block changes the
+/// order of the Householder product. A wider diamond also grows the
+/// union of the row supports, so the product does more arithmetic and
+/// `dlarft_general` builds a larger `T`. On the bench host, 128 columns
+/// was slower than 64 (n=3000, one thread, one rep: 13.4 s against
+/// 12.0 s). Not a hardware query and not a function of the pool.
+const WY_NB: usize = 64;
 
 /// Half-bandwidth stored during the bulge chase. The chase fill stays
 /// inside `2 * NB - 1` subdiagonals; one extra diagonal is margin.
@@ -483,6 +500,10 @@ fn band_to_tridiagonal(matrix: &mut [f64], n: usize, refs: &mut Vec<Reflector>) 
             pending: Vec::new(),
         })
         .collect();
+    // Task (sweep, step) is ready when its column window is disjoint
+    // from every earlier sweep. That is the Haidar / ELPA wavefront.
+    // Reflectors are flushed in sweep order, so the worker that runs a
+    // ready task does not change the bits.
     let mut active: Vec<usize> = Vec::new();
     let mut next_k = 0usize;
     let mut flushed = 0usize;
@@ -510,7 +531,7 @@ fn band_to_tridiagonal(matrix: &mut [f64], n: usize, refs: &mut Vec<Reflector>) 
             let blocked = active.iter().any(|&index| {
                 let sweep = &sweeps[index];
                 let earlier = stage_window(n, sweep.k, sweep.stage).expect("active window");
-                earlier.0 < win.1
+                ranges_overlap(earlier, win)
             });
             if blocked {
                 break;
@@ -531,7 +552,7 @@ fn band_to_tridiagonal(matrix: &mut [f64], n: usize, refs: &mut Vec<Reflector>) 
                     return false;
                 }
                 let left = stage_window(n, previous.k, previous.stage).expect("earlier window");
-                left.0 < win.1
+                ranges_overlap(left, win)
             });
             if !blocked {
                 wave.push(index);
@@ -614,65 +635,6 @@ impl ChaseBatch {
     }
 }
 
-#[derive(Clone, Copy)]
-struct ChaseJob {
-    k: usize,
-    stage: ChaseStage,
-    steps: u8,
-}
-
-#[derive(Clone, Copy)]
-struct ChaseSlots(*mut ChaseBatch);
-// SAFETY: each task writes its own slot. The slots partition the
-// outcome buffer, and the buffer outlives the wave.
-unsafe impl Send for ChaseSlots {}
-// SAFETY: same per-slot contract as `Send`.
-unsafe impl Sync for ChaseSlots {}
-
-impl ChaseSlots {
-    fn batch(self, index: usize) -> *mut ChaseBatch {
-        // SAFETY: `index` is this task's slot.
-        unsafe { self.0.add(index) }
-    }
-}
-
-#[derive(Clone, Copy)]
-struct ChaseScratch {
-    scratch: *mut f64,
-    column: *mut f64,
-}
-// SAFETY: task `t` uses scratch and column strides that do not overlap
-// any other task's stride.
-unsafe impl Send for ChaseScratch {}
-// SAFETY: same stride contract as `Send`.
-unsafe impl Sync for ChaseScratch {}
-
-impl ChaseScratch {
-    fn scratch(self, index: usize, len: usize) -> *mut f64 {
-        // SAFETY: `index * len` stays inside the scratch pool.
-        unsafe { self.scratch.add(index * len) }
-    }
-
-    fn column(self, index: usize, n: usize) -> *mut f64 {
-        // SAFETY: `index * n` stays inside the column pool.
-        unsafe { self.column.add(index * n) }
-    }
-}
-
-#[derive(Clone, Copy)]
-struct JobPtr(*const ChaseJob);
-// SAFETY: tasks only read the job list.
-unsafe impl Send for JobPtr {}
-// SAFETY: same read-only contract as `Send`.
-unsafe impl Sync for JobPtr {}
-
-impl JobPtr {
-    fn get(self, index: usize) -> ChaseJob {
-        // SAFETY: `index` is inside the job list.
-        unsafe { *self.0.add(index) }
-    }
-}
-
 fn stage_window(n: usize, k: usize, stage: ChaseStage) -> Option<(usize, usize)> {
     match stage {
         ChaseStage::Done => None,
@@ -736,6 +698,7 @@ fn predicted_next(n: usize, k: usize, stage: ChaseStage) -> ChaseStage {
     }
 }
 
+/// Steps one sweep can take before its window meets another sweep.
 /// How many steps each sweep in this wave can take without entering
 /// another sweep's reserved columns.
 fn batch_lengths(n: usize, sweeps: &[ChaseSweep], wave: &[usize]) -> Vec<u8> {
@@ -775,6 +738,65 @@ fn batch_lengths(n: usize, sweeps: &[ChaseSweep], wave: &[usize]) -> Vec<u8> {
         }
     }
     batches
+}
+
+#[derive(Clone, Copy)]
+struct ChaseJob {
+    k: usize,
+    stage: ChaseStage,
+    steps: u8,
+}
+
+#[derive(Clone, Copy)]
+struct ChaseSlots(*mut ChaseBatch);
+// SAFETY: each task writes its own slot. The slots partition the
+// outcome buffer, and the buffer outlives the wave.
+unsafe impl Send for ChaseSlots {}
+// SAFETY: same per-slot contract as `Send`.
+unsafe impl Sync for ChaseSlots {}
+
+impl ChaseSlots {
+    fn batch(self, index: usize) -> *mut ChaseBatch {
+        // SAFETY: `index` is this task's slot.
+        unsafe { self.0.add(index) }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ChaseScratch {
+    scratch: *mut f64,
+    column: *mut f64,
+}
+// SAFETY: task `t` uses scratch and column strides that do not overlap
+// any other task's stride.
+unsafe impl Send for ChaseScratch {}
+// SAFETY: same stride contract as `Send`.
+unsafe impl Sync for ChaseScratch {}
+
+impl ChaseScratch {
+    fn scratch(self, index: usize, len: usize) -> *mut f64 {
+        // SAFETY: `index * len` stays inside the scratch pool.
+        unsafe { self.scratch.add(index * len) }
+    }
+
+    fn column(self, index: usize, n: usize) -> *mut f64 {
+        // SAFETY: `index * n` stays inside the column pool.
+        unsafe { self.column.add(index * n) }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct JobPtr(*const ChaseJob);
+// SAFETY: tasks only read the job list.
+unsafe impl Send for JobPtr {}
+// SAFETY: same read-only contract as `Send`.
+unsafe impl Sync for JobPtr {}
+
+impl JobPtr {
+    fn get(self, index: usize) -> ChaseJob {
+        // SAFETY: `index` is inside the job list.
+        unsafe { *self.0.add(index) }
+    }
 }
 
 fn run_batch(
@@ -1002,7 +1024,7 @@ fn apply_sym_householder_scalar(
     let vwin = &vwin[..m];
     let mut vmv = 0.0;
     for (j, &vj) in v.iter().enumerate() {
-        vmv += vj * y[v_at + j];
+        vmv = vj.mul_add(y[v_at + j], vmv);
     }
     let tau2 = tau * tau * vmv;
     for j in 0..m {
@@ -1019,13 +1041,14 @@ fn apply_sym_householder_scalar(
         // this kernel only runs on columns inside its chase window.
         let dest = unsafe { std::slice::from_raw_parts_mut(band.data.add(base), count) };
         for i in 0..count {
-            dest[i] += vwin[off + i] * scale_v + y[off + i] * scale_y;
+            let acc = scale_y.mul_add(y[off + i], dest[i]);
+            dest[i] = scale_v.mul_add(vwin[off + i], acc);
         }
     }
 }
 
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
+#[target_feature(enable = "avx2,fma")]
 unsafe fn apply_sym_householder_avx2(
     band: BandPtr,
     start: usize,
@@ -1043,7 +1066,7 @@ unsafe fn apply_sym_householder_avx2(
         let vwin = &vwin[..m];
         let mut vmv = 0.0;
         for (j, &vj) in v.iter().enumerate() {
-            vmv += vj * y[v_at + j];
+            vmv = vj.mul_add(y[v_at + j], vmv);
         }
         let tau2 = tau * tau * vmv;
         for j in 0..m {
@@ -1121,7 +1144,7 @@ fn band_span(band: BandPtr, col: usize, lo: usize, m: usize) -> (usize, usize, u
 }
 
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx512f")]
+#[target_feature(enable = "avx512f,fma")]
 unsafe fn apply_sym_householder_avx512(
     band: BandPtr,
     start: usize,
@@ -1139,7 +1162,7 @@ unsafe fn apply_sym_householder_avx512(
         let vwin = &vwin[..m];
         let mut vmv = 0.0;
         for (j, &vj) in v.iter().enumerate() {
-            vmv += vj * y[v_at + j];
+            vmv = vj.mul_add(y[v_at + j], vmv);
         }
         let tau2 = tau * tau * vmv;
         for j in 0..m {
@@ -1165,7 +1188,7 @@ unsafe fn apply_sym_householder_avx512(
 }
 
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx512f")]
+#[target_feature(enable = "avx512f,fma")]
 unsafe fn accumulate_avx512(
     matrix: *mut f64,
     vwin: *const f64,
@@ -1174,9 +1197,7 @@ unsafe fn accumulate_avx512(
     scale_v: f64,
     scale_y: f64,
 ) {
-    use std::arch::x86_64::{
-        _mm512_add_pd, _mm512_loadu_pd, _mm512_mul_pd, _mm512_set1_pd, _mm512_storeu_pd,
-    };
+    use std::arch::x86_64::{_mm512_fmadd_pd, _mm512_loadu_pd, _mm512_set1_pd, _mm512_storeu_pd};
     unsafe {
         let sv = _mm512_set1_pd(scale_v);
         let sy = _mm512_set1_pd(scale_y);
@@ -1184,20 +1205,22 @@ unsafe fn accumulate_avx512(
         while i + 8 <= count {
             let vi = _mm512_loadu_pd(vwin.add(i));
             let yi = _mm512_loadu_pd(y.add(i));
-            let acc = _mm512_loadu_pd(matrix.add(i));
-            let prod = _mm512_add_pd(_mm512_mul_pd(vi, sv), _mm512_mul_pd(yi, sy));
-            _mm512_storeu_pd(matrix.add(i), _mm512_add_pd(acc, prod));
+            let mut acc = _mm512_loadu_pd(matrix.add(i));
+            acc = _mm512_fmadd_pd(sy, yi, acc);
+            acc = _mm512_fmadd_pd(sv, vi, acc);
+            _mm512_storeu_pd(matrix.add(i), acc);
             i += 8;
         }
         while i < count {
-            *matrix.add(i) += *vwin.add(i) * scale_v + *y.add(i) * scale_y;
+            let acc = scale_y.mul_add(*y.add(i), *matrix.add(i));
+            *matrix.add(i) = scale_v.mul_add(*vwin.add(i), acc);
             i += 1;
         }
     }
 }
 
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
+#[target_feature(enable = "avx2,fma")]
 unsafe fn accumulate_avx2(
     matrix: *mut f64,
     vwin: *const f64,
@@ -1206,9 +1229,7 @@ unsafe fn accumulate_avx2(
     scale_v: f64,
     scale_y: f64,
 ) {
-    use std::arch::x86_64::{
-        _mm256_add_pd, _mm256_loadu_pd, _mm256_mul_pd, _mm256_set1_pd, _mm256_storeu_pd,
-    };
+    use std::arch::x86_64::{_mm256_fmadd_pd, _mm256_loadu_pd, _mm256_set1_pd, _mm256_storeu_pd};
     unsafe {
         let sv = _mm256_set1_pd(scale_v);
         let sy = _mm256_set1_pd(scale_y);
@@ -1216,19 +1237,37 @@ unsafe fn accumulate_avx2(
         while i + 4 <= count {
             let vi = _mm256_loadu_pd(vwin.add(i));
             let yi = _mm256_loadu_pd(y.add(i));
-            let acc = _mm256_loadu_pd(matrix.add(i));
-            let prod = _mm256_add_pd(_mm256_mul_pd(vi, sv), _mm256_mul_pd(yi, sy));
-            _mm256_storeu_pd(matrix.add(i), _mm256_add_pd(acc, prod));
+            let mut acc = _mm256_loadu_pd(matrix.add(i));
+            acc = _mm256_fmadd_pd(sy, yi, acc);
+            acc = _mm256_fmadd_pd(sv, vi, acc);
+            _mm256_storeu_pd(matrix.add(i), acc);
             i += 4;
         }
         while i < count {
-            *matrix.add(i) += *vwin.add(i) * scale_v + *y.add(i) * scale_y;
+            let acc = scale_y.mul_add(*y.add(i), *matrix.add(i));
+            *matrix.add(i) = scale_v.mul_add(*vwin.add(i), acc);
             i += 1;
         }
     }
 }
 
 fn householder(x: &[f64]) -> (Vec<f64>, f64, f64) {
+    #[cfg(target_arch = "x86_64")]
+    if std::is_x86_feature_detected!("fma") {
+        // SAFETY: this CPU has FMA. The body is the same `mul_add` chain.
+        return unsafe { householder_fma(x) };
+    }
+    householder_body(x)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "fma")]
+unsafe fn householder_fma(x: &[f64]) -> (Vec<f64>, f64, f64) {
+    householder_body(x)
+}
+
+#[inline(always)]
+fn householder_body(x: &[f64]) -> (Vec<f64>, f64, f64) {
     let n = x.len();
     let mut v = vec![0.0; n];
     if n == 0 {
@@ -1236,7 +1275,7 @@ fn householder(x: &[f64]) -> (Vec<f64>, f64, f64) {
     }
     let mut sigma = 0.0;
     for value in x.iter().skip(1) {
-        sigma += value * value;
+        sigma = value.mul_add(*value, sigma);
     }
     let beta = x[0];
     if sigma == 0.0 {
@@ -1294,6 +1333,23 @@ fn qr_panel(panel: &[f64], m: usize, k: usize) -> (Vec<f64>, Vec<f64>, Vec<f64>)
 }
 
 fn dlarft(v: &[f64], m: usize, tau: &[f64], t: &mut [f64]) {
+    #[cfg(target_arch = "x86_64")]
+    if std::is_x86_feature_detected!("fma") {
+        // SAFETY: this CPU has FMA. The body is the same `mul_add` chain.
+        unsafe { dlarft_fma(v, m, tau, t) }
+        return;
+    }
+    dlarft_body(v, m, tau, t);
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "fma")]
+unsafe fn dlarft_fma(v: &[f64], m: usize, tau: &[f64], t: &mut [f64]) {
+    dlarft_body(v, m, tau, t);
+}
+
+#[inline(always)]
+fn dlarft_body(v: &[f64], m: usize, tau: &[f64], t: &mut [f64]) {
     let pk = tau.len();
     t.fill(0.0);
     for j in 0..pk {
@@ -1306,7 +1362,7 @@ fn dlarft(v: &[f64], m: usize, tau: &[f64], t: &mut [f64]) {
             for c in 0..j {
                 let mut dot = 0.0;
                 for r in 0..rows {
-                    dot += v[(j + r) + c * m] * v[(j + r) + j * m];
+                    dot = v[(j + r) + c * m].mul_add(v[(j + r) + j * m], dot);
                 }
                 y[c] = -tau[j] * dot;
             }
@@ -1314,7 +1370,7 @@ fn dlarft(v: &[f64], m: usize, tau: &[f64], t: &mut [f64]) {
             for r in 0..j {
                 let mut acc = 0.0;
                 for c in 0..j {
-                    acc += t[r + c * pk] * y[c];
+                    acc = t[r + c * pk].mul_add(y[c], acc);
                 }
                 product[r] = acc;
             }
@@ -1426,9 +1482,12 @@ fn lower_tile(n_blocks: usize, mut tile: usize) -> (usize, usize) {
 
 /// Group chase reflectors the way ELPA2 and Haidar, Ltaief and Dongarra
 /// apply `Q2`. Reflectors from consecutive sweeps at one band position
-/// form a diamond of width at most [`NB`]. Stored panels are applied in
-/// reverse, so the vector sees the latest sweep at the latest position
-/// first.
+/// form a diamond of width at most [`WY_NB`]. That width is part of the
+/// bit definition. Stored panels are applied in reverse, so the vector
+/// sees the latest sweep at the latest position first.
+/// Merge consecutive stage-1 panels until the column count reaches
+/// [`WY_NB`]. One panel is left as the QR built it. Two or more are
+/// rebuilt with [`dlarft_general`], which is the wider product.
 fn group_chase(refs: &[Reflector]) -> Vec<WyPanel> {
     let mut sweeps: Vec<Vec<&Reflector>> = Vec::new();
     let mut current: Vec<&Reflector> = Vec::new();
@@ -1465,7 +1524,7 @@ fn group_chase(refs: &[Reflector]) -> Vec<WyPanel> {
                 continue;
             }
             let mut group = Vec::new();
-            while sweep > 0 && group.len() < NB && step < sweeps[sweep - 1].len() {
+            while sweep > 0 && group.len() < WY_NB && step < sweeps[sweep - 1].len() {
                 sweep -= 1;
                 group.push(sweeps[sweep][step]);
             }
@@ -1515,6 +1574,23 @@ fn panel_from_refs(refs: &[&Reflector]) -> WyPanel {
 /// `H_1 ... H_k = I - V T Vᵀ` for full columns of `V`, including the
 /// explicit zeros outside each reflector's support.
 fn dlarft_general(v: &[f64], m: usize, tau: &[f64], t: &mut [f64]) {
+    #[cfg(target_arch = "x86_64")]
+    if std::is_x86_feature_detected!("fma") {
+        // SAFETY: this CPU has FMA. The body is the same `mul_add` chain.
+        unsafe { dlarft_general_fma(v, m, tau, t) }
+        return;
+    }
+    dlarft_general_body(v, m, tau, t);
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "fma")]
+unsafe fn dlarft_general_fma(v: &[f64], m: usize, tau: &[f64], t: &mut [f64]) {
+    dlarft_general_body(v, m, tau, t);
+}
+
+#[inline(always)]
+fn dlarft_general_body(v: &[f64], m: usize, tau: &[f64], t: &mut [f64]) {
     let pk = tau.len();
     t.fill(0.0);
     for j in 0..pk {
@@ -1526,14 +1602,14 @@ fn dlarft_general(v: &[f64], m: usize, tau: &[f64], t: &mut [f64]) {
             for c in 0..j {
                 let mut dot = 0.0;
                 for r in 0..m {
-                    dot += v[r + c * m] * v[r + j * m];
+                    dot = v[r + c * m].mul_add(v[r + j * m], dot);
                 }
                 y[c] = -tau[j] * dot;
             }
             for r in 0..j {
                 let mut acc = 0.0;
                 for c in 0..j {
-                    acc += t[r + c * pk] * y[c];
+                    acc = t[r + c * pk].mul_add(y[c], acc);
                 }
                 t[r + j * pk] = acc;
             }
@@ -1710,18 +1786,20 @@ fn tridiagonal_partial(
             let mut z = tridiag_solve(off, &shifted, off, &y, nrm);
             for _ in 0..2 {
                 for prev in cluster_start..j {
-                    let mut dot = 0.0;
+                    let mut dot = 0.0f64;
                     for row in 0..n {
-                        dot += vectors[prev * n + row] * z[row];
+                        let left: f64 = vectors[prev * n + row];
+                        dot = left.mul_add(z[row], dot);
                     }
                     for row in 0..n {
-                        z[row] -= dot * vectors[prev * n + row];
+                        let column: f64 = vectors[prev * n + row];
+                        z[row] = (-dot).mul_add(column, z[row]);
                     }
                 }
             }
             let mut norm = 0.0;
             for value in &z {
-                norm += value * value;
+                norm = value.mul_add(*value, norm);
             }
             norm = norm.sqrt();
             if norm == 0.0 || !norm.is_finite() {
@@ -1754,10 +1832,10 @@ fn tridiagonal_residual(diag: &[f64], off: &[f64], lambda: f64, y: &[f64]) -> f6
     for row in 0..diag.len() {
         let mut acc = diag[row] * y[row];
         if row > 0 {
-            acc += off[row - 1] * y[row - 1];
+            acc = off[row - 1].mul_add(y[row - 1], acc);
         }
         if row + 1 < diag.len() {
-            acc += off[row] * y[row + 1];
+            acc = off[row].mul_add(y[row + 1], acc);
         }
         let diff = acc - lambda * y[row];
         residual += diff * diff;
@@ -2017,11 +2095,12 @@ mod reduction_tests {
             for reflector in refs.iter().rev() {
                 let mut dot = 0.0;
                 for (offset, &value) in reflector.v.iter().enumerate() {
-                    dot += value * single[reflector.start + offset];
+                    dot = value.mul_add(single[reflector.start + offset], dot);
                 }
                 let scale = reflector.tau * dot;
                 for (offset, &value) in reflector.v.iter().enumerate() {
-                    single[reflector.start + offset] -= scale * value;
+                    let slot = &mut single[reflector.start + offset];
+                    *slot = (-scale).mul_add(value, *slot);
                 }
             }
             apply_back_transform(&mut blocked, n, 1, &[], &chase);

@@ -5,18 +5,23 @@
 #![allow(clippy::erasing_op)]
 #![allow(unused_unsafe)]
 
-//! FMA-free tiled matrix product.
+//! Tiled matrix product.
 //!
 //! Each output element accumulates `k` in ascending order as
-//! `acc = acc + a * b`, then `alpha * acc + beta * c`. The multiply
-//! and the add stay separate, so the bits do not depend on a fused
-//! multiply-add. A kernel keeps several rows and several columns in
+//! `acc = fma(a, b, acc)`, then stores `alpha * acc` when `beta` is
+//! zero and `fma(beta, c, alpha * acc)` otherwise. The scalar path
+//! uses [`f64::mul_add`], which is a correctly rounded fused
+//! multiply-add, so it matches the AVX2+FMA, AVX-512, and NEON
+//! hardware instructions bit for bit. On a CPU without FMA,
+//! `mul_add` is a library call rather than one instruction, and that
+//! path is slower. A kernel keeps several rows and several columns in
 //! registers. Each of those accumulators repeats the scalar `k` chain.
 //! Tile sizes are constants. They do not read the rayon pool.
 //!
 //! `RGSADDLE_SIMD=scalar|avx2|avx512|neon` selects the kernel for the
 //! next [`refresh_simd`] call. An unset variable uses the widest
-//! supported kernel. AVX-512, AVX2, NEON, and scalar agree on the bits.
+//! supported kernel. `avx2` requires FMA. AVX-512, AVX2+FMA, NEON, and
+//! scalar agree on the bits.
 
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -77,7 +82,9 @@ fn parse_override(value: &str) -> Result<u8, SaddleError> {
 fn host_avx2() -> bool {
     #[cfg(target_arch = "x86_64")]
     {
-        std::is_x86_feature_detected!("avx2")
+        // The AVX2 kernel is built from `vfmadd`. Nehalem has neither
+        // AVX nor FMA and stays on the scalar `mul_add` path.
+        std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma")
     }
     #[cfg(not(target_arch = "x86_64"))]
     {
@@ -127,9 +134,9 @@ fn current_kind() -> u8 {
     }
 }
 
-/// Bulge updates use the AVX2 kernel only when that kernel is the
-/// selected path or a wider x86 path. The kernel is a separate
-/// multiply and add, matching the scalar loop element for element.
+/// Bulge updates use the AVX2+FMA kernel only when that kernel is the
+/// selected path or a wider x86 path. Each element is `fma`, matching
+/// the scalar `mul_add` loop.
 #[cfg(target_arch = "x86_64")]
 pub(crate) fn bulge_uses_avx2() -> bool {
     matches!(current_kind(), KIND_AVX2 | KIND_AVX512) && host_avx2()
@@ -463,20 +470,20 @@ fn gemm_scalar(
             for p in 0..k {
                 // SAFETY: `p` runs over the shared dimension and
                 // `(row, col)` stays inside A, B, and C.
-                let term = unsafe {
+                acc = unsafe {
                     let av = *a.offset(a_row_stride * row as isize + a_col_stride * p as isize);
                     let bv = *b.offset(b_row_stride * p as isize + b_col_stride * col as isize);
-                    av * bv
+                    av.mul_add(bv, acc)
                 };
-                acc += term;
             }
             // SAFETY: `(row, col)` is inside C.
             unsafe {
                 let slot = c.offset(c_row_stride * row as isize + c_col_stride * col as isize);
+                let scaled = alpha * acc;
                 *slot = if beta == 0.0 {
-                    alpha * acc
+                    scaled
                 } else {
-                    alpha * acc + beta * *slot
+                    beta.mul_add(*slot, scaled)
                 };
             }
         }
@@ -656,15 +663,14 @@ fn rank1_scalar(q: *mut f64, ld: usize, ncols: usize, v: *const f64, len: usize,
         for i in 0..len {
             // SAFETY: `i < len` and `col < ncols` stay inside the
             // column tile the caller passed.
-            let term = unsafe { *v.add(i) * *q.add(col * ld + i) };
-            dot += term;
+            dot = unsafe { (*v.add(i)).mul_add(*q.add(col * ld + i), dot) };
         }
         let scale = tau * dot;
         for i in 0..len {
-            // SAFETY: same tile as the dot.
+            // SAFETY: same tile as the dot. `fnmadd(scale, v, y)`.
             unsafe {
                 let slot = q.add(col * ld + i);
-                *slot -= scale * *v.add(i);
+                *slot = (-scale).mul_add(*v.add(i), *slot);
             }
         }
     }
@@ -674,8 +680,8 @@ fn rank1_scalar(q: *mut f64, ld: usize, ncols: usize, v: *const f64, len: usize,
 #[target_feature(enable = "avx512f")]
 unsafe fn rank1_avx512(q: *mut f64, ld: usize, ncols: usize, v: *const f64, len: usize, tau: f64) {
     use std::arch::x86_64::{
-        _mm512_add_pd, _mm512_i64gather_pd, _mm512_mul_pd, _mm512_set_epi64, _mm512_set1_pd,
-        _mm512_setzero_pd, _mm512_storeu_pd,
+        _mm512_fmadd_pd, _mm512_i64gather_pd, _mm512_set_epi64, _mm512_set1_pd, _mm512_setzero_pd,
+        _mm512_storeu_pd,
     };
     unsafe {
         // Lane `t` reads column `t` at this row. The index is in elements
@@ -700,8 +706,8 @@ unsafe fn rank1_avx512(q: *mut f64, ld: usize, ncols: usize, v: *const f64, len:
                 let vv = _mm512_set1_pd(*v.add(i));
                 let y0 = _mm512_i64gather_pd(idx, base0.add(i), 8);
                 let y1 = _mm512_i64gather_pd(idx, base1.add(i), 8);
-                dot0 = _mm512_add_pd(dot0, _mm512_mul_pd(vv, y0));
-                dot1 = _mm512_add_pd(dot1, _mm512_mul_pd(vv, y1));
+                dot0 = _mm512_fmadd_pd(vv, y0, dot0);
+                dot1 = _mm512_fmadd_pd(vv, y1, dot1);
             }
             let mut dots = [0.0; 16];
             _mm512_storeu_pd(dots.as_mut_ptr(), dot0);
@@ -718,7 +724,7 @@ unsafe fn rank1_avx512(q: *mut f64, ld: usize, ncols: usize, v: *const f64, len:
             for i in 0..len {
                 let vv = _mm512_set1_pd(*v.add(i));
                 let yv = _mm512_i64gather_pd(idx, base.add(i), 8);
-                dot = _mm512_add_pd(dot, _mm512_mul_pd(vv, yv));
+                dot = _mm512_fmadd_pd(vv, yv, dot);
             }
             let mut dots = [0.0; 8];
             _mm512_storeu_pd(dots.as_mut_ptr(), dot);
@@ -735,11 +741,11 @@ unsafe fn rank1_avx512(q: *mut f64, ld: usize, ncols: usize, v: *const f64, len:
 }
 
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
+#[target_feature(enable = "avx2,fma")]
 unsafe fn rank1_avx2(q: *mut f64, ld: usize, ncols: usize, v: *const f64, len: usize, tau: f64) {
     use std::arch::x86_64::{
-        _mm256_add_pd, _mm256_i64gather_pd, _mm256_mul_pd, _mm256_set_epi64x, _mm256_set1_pd,
-        _mm256_setzero_pd, _mm256_storeu_pd,
+        _mm256_fmadd_pd, _mm256_i64gather_pd, _mm256_set_epi64x, _mm256_set1_pd, _mm256_setzero_pd,
+        _mm256_storeu_pd,
     };
     unsafe {
         let idx = _mm256_set_epi64x((3 * ld) as i64, (2 * ld) as i64, ld as i64, 0);
@@ -750,7 +756,7 @@ unsafe fn rank1_avx2(q: *mut f64, ld: usize, ncols: usize, v: *const f64, len: u
             for i in 0..len {
                 let vv = _mm256_set1_pd(*v.add(i));
                 let yv = _mm256_i64gather_pd(base.add(i), idx, 8);
-                dot = _mm256_add_pd(dot, _mm256_mul_pd(vv, yv));
+                dot = _mm256_fmadd_pd(vv, yv, dot);
             }
             let mut dots = [0.0; 4];
             _mm256_storeu_pd(dots.as_mut_ptr(), dot);
@@ -769,7 +775,7 @@ unsafe fn rank1_avx2(q: *mut f64, ld: usize, ncols: usize, v: *const f64, len: u
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
 unsafe fn rank1_neon(q: *mut f64, ld: usize, ncols: usize, v: *const f64, len: usize, tau: f64) {
-    use std::arch::aarch64::{vaddq_f64, vdupq_n_f64, vld1q_f64, vmulq_f64, vst1q_f64};
+    use std::arch::aarch64::{vdupq_n_f64, vfmaq_f64, vld1q_f64, vst1q_f64};
     unsafe {
         let mut col = 0;
         while col + 2 <= ncols {
@@ -780,7 +786,7 @@ unsafe fn rank1_neon(q: *mut f64, ld: usize, ncols: usize, v: *const f64, len: u
                 y[0] = *q.add(col * ld + i);
                 y[1] = *q.add((col + 1) * ld + i);
                 let yv = vld1q_f64(y.as_ptr());
-                dot = vaddq_f64(dot, vmulq_f64(vv, yv));
+                dot = vfmaq_f64(dot, vv, yv);
             }
             let mut dots = [0.0; 2];
             vst1q_f64(dots.as_mut_ptr(), dot);

@@ -226,7 +226,7 @@ fn main() {
     threads.dedup();
     println!("rgsaddle {}", env!("CARGO_PKG_VERSION"));
     println!("solver two-stage Householder band, bulge chase, Cuppen tridiagonal");
-    println!("tile 64, tasks fixed from n, reps={reps}");
+    println!("band width 64, WY width 64, FMA product, tasks fixed from n, reps={reps}");
     println!("threads={threads:?} max={max_threads}");
 
     let quick = env::var_os("EIGH_QUICK").is_some();

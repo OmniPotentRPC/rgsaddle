@@ -17,9 +17,9 @@
 //! <https://doi.org/10.1137/S0895479892241287>). [`partial_eigh`] bisects the
 //! same tridiagonal factor and runs inverse iteration for the lowest
 //! `k` vectors. Tile counts are fixed from the dimension. They do not
-//! read the rayon pool, and each product is a separate multiply and
-//! add, so the pairs stay bit-identical across pool sizes and CPU
-//! paths. Each eigenvector is signed so its largest-magnitude component
+//! read the rayon pool. Each product is `acc = fma(a, b, acc)` in
+//! ascending order, so the pairs stay bit-identical across pool sizes
+//! and CPU paths. Each eigenvector is signed so its largest-magnitude component
 //! is positive. Feature `jacobi` keeps the cyclic Jacobi solver used
 //! before this path. [`eigh_unpinned`] (feature `faer-unpinned`, off by
 //! default) calls faer with the caller's thread count. Its bits depend

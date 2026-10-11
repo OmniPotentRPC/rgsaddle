@@ -1,9 +1,11 @@
 // Register-tiled kernels for [`crate::simd_gemm`].
 //
 // Included into that module so the pack buffer and the stores stay in
-// scope. Each accumulator sums `k` from `0` upward with a separate
-// multiply and add. Columns in one kernel are independent, which is
-// why a wider register tile matches the scalar product bit for bit.
+// scope. Each accumulator walks `k` from `0` upward as
+// `acc = fma(a, b, acc)`. Columns in one kernel are independent, so a
+// wider register tile matches the scalar `f64::mul_add` chain.
+// Each B column is its own pointer, advanced by `b_row_stride`. One
+// shared index would chain the column addresses and stall the FMAs.
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f")]
@@ -14,20 +16,20 @@ unsafe fn store512(
     beta_v: std::arch::x86_64::__m512d,
     beta: f64,
 ) {
-    use std::arch::x86_64::{_mm512_add_pd, _mm512_loadu_pd, _mm512_mul_pd, _mm512_storeu_pd};
+    use std::arch::x86_64::{_mm512_fmadd_pd, _mm512_loadu_pd, _mm512_mul_pd, _mm512_storeu_pd};
     unsafe {
         let scaled = _mm512_mul_pd(alpha, acc);
         if beta == 0.0 {
             _mm512_storeu_pd(slot, scaled);
         } else {
             let old = _mm512_loadu_pd(slot);
-            _mm512_storeu_pd(slot, _mm512_add_pd(scaled, _mm512_mul_pd(beta_v, old)));
+            _mm512_storeu_pd(slot, _mm512_fmadd_pd(beta_v, old, scaled));
         }
     }
 }
 
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
+#[target_feature(enable = "avx2,fma")]
 unsafe fn store256(
     slot: *mut f64,
     acc: std::arch::x86_64::__m256d,
@@ -35,14 +37,14 @@ unsafe fn store256(
     beta_v: std::arch::x86_64::__m256d,
     beta: f64,
 ) {
-    use std::arch::x86_64::{_mm256_add_pd, _mm256_loadu_pd, _mm256_mul_pd, _mm256_storeu_pd};
+    use std::arch::x86_64::{_mm256_fmadd_pd, _mm256_loadu_pd, _mm256_mul_pd, _mm256_storeu_pd};
     unsafe {
         let scaled = _mm256_mul_pd(alpha, acc);
         if beta == 0.0 {
             _mm256_storeu_pd(slot, scaled);
         } else {
             let old = _mm256_loadu_pd(slot);
-            _mm256_storeu_pd(slot, _mm256_add_pd(scaled, _mm256_mul_pd(beta_v, old)));
+            _mm256_storeu_pd(slot, _mm256_fmadd_pd(beta_v, old, scaled));
         }
     }
 }
@@ -56,14 +58,14 @@ unsafe fn store_neon(
     beta_v: std::arch::aarch64::float64x2_t,
     beta: f64,
 ) {
-    use std::arch::aarch64::{vaddq_f64, vld1q_f64, vmulq_f64, vst1q_f64};
+    use std::arch::aarch64::{vfmaq_f64, vld1q_f64, vmulq_f64, vst1q_f64};
     unsafe {
         let scaled = vmulq_f64(alpha, acc);
         if beta == 0.0 {
             vst1q_f64(slot, scaled);
         } else {
             let old = vld1q_f64(slot);
-            vst1q_f64(slot, vaddq_f64(scaled, vmulq_f64(beta_v, old)));
+            vst1q_f64(slot, vfmaq_f64(scaled, beta_v, old));
         }
     }
 }
@@ -82,8 +84,7 @@ unsafe fn kernel512_16x8(
     c: *mut f64,
     c_col_stride: isize,
 ) {
-
-    use std::arch::x86_64::{_mm512_add_pd, _mm512_loadu_pd, _mm512_mul_pd, _mm512_set1_pd, _mm512_setzero_pd};
+    use std::arch::x86_64::{_mm512_fmadd_pd, _mm512_loadu_pd, _mm512_set1_pd, _mm512_setzero_pd};
     unsafe {
         let mut a_0_0 = _mm512_setzero_pd();
         let mut a_0_1 = _mm512_setzero_pd();
@@ -101,34 +102,51 @@ unsafe fn kernel512_16x8(
         let mut a_6_1 = _mm512_setzero_pd();
         let mut a_7_0 = _mm512_setzero_pd();
         let mut a_7_1 = _mm512_setzero_pd();
-        for p in 0..k {
-            let ap = packed.add(p * 16);
-            let g0 = _mm512_loadu_pd(ap.add(0));
+        let mut bp0 = b;
+        let mut bp1 = b.offset(b_col_stride);
+        let mut bp2 = b.offset(b_col_stride * 2);
+        let mut bp3 = b.offset(b_col_stride * 3);
+        let mut bp4 = b.offset(b_col_stride * 4);
+        let mut bp5 = b.offset(b_col_stride * 5);
+        let mut bp6 = b.offset(b_col_stride * 6);
+        let mut bp7 = b.offset(b_col_stride * 7);
+        let mut ap = packed;
+        for _p in 0..k {
+            let g0 = _mm512_loadu_pd(ap);
             let g1 = _mm512_loadu_pd(ap.add(8));
-            let bv_0 = _mm512_set1_pd(*b.offset(b_row_stride * p as isize + b_col_stride * 0));
-            a_0_0 = _mm512_add_pd(a_0_0, _mm512_mul_pd(g0, bv_0));
-            a_0_1 = _mm512_add_pd(a_0_1, _mm512_mul_pd(g1, bv_0));
-            let bv_1 = _mm512_set1_pd(*b.offset(b_row_stride * p as isize + b_col_stride * 1));
-            a_1_0 = _mm512_add_pd(a_1_0, _mm512_mul_pd(g0, bv_1));
-            a_1_1 = _mm512_add_pd(a_1_1, _mm512_mul_pd(g1, bv_1));
-            let bv_2 = _mm512_set1_pd(*b.offset(b_row_stride * p as isize + b_col_stride * 2));
-            a_2_0 = _mm512_add_pd(a_2_0, _mm512_mul_pd(g0, bv_2));
-            a_2_1 = _mm512_add_pd(a_2_1, _mm512_mul_pd(g1, bv_2));
-            let bv_3 = _mm512_set1_pd(*b.offset(b_row_stride * p as isize + b_col_stride * 3));
-            a_3_0 = _mm512_add_pd(a_3_0, _mm512_mul_pd(g0, bv_3));
-            a_3_1 = _mm512_add_pd(a_3_1, _mm512_mul_pd(g1, bv_3));
-            let bv_4 = _mm512_set1_pd(*b.offset(b_row_stride * p as isize + b_col_stride * 4));
-            a_4_0 = _mm512_add_pd(a_4_0, _mm512_mul_pd(g0, bv_4));
-            a_4_1 = _mm512_add_pd(a_4_1, _mm512_mul_pd(g1, bv_4));
-            let bv_5 = _mm512_set1_pd(*b.offset(b_row_stride * p as isize + b_col_stride * 5));
-            a_5_0 = _mm512_add_pd(a_5_0, _mm512_mul_pd(g0, bv_5));
-            a_5_1 = _mm512_add_pd(a_5_1, _mm512_mul_pd(g1, bv_5));
-            let bv_6 = _mm512_set1_pd(*b.offset(b_row_stride * p as isize + b_col_stride * 6));
-            a_6_0 = _mm512_add_pd(a_6_0, _mm512_mul_pd(g0, bv_6));
-            a_6_1 = _mm512_add_pd(a_6_1, _mm512_mul_pd(g1, bv_6));
-            let bv_7 = _mm512_set1_pd(*b.offset(b_row_stride * p as isize + b_col_stride * 7));
-            a_7_0 = _mm512_add_pd(a_7_0, _mm512_mul_pd(g0, bv_7));
-            a_7_1 = _mm512_add_pd(a_7_1, _mm512_mul_pd(g1, bv_7));
+            ap = ap.add(16);
+            let bv_0 = _mm512_set1_pd(*bp0);
+            bp0 = bp0.offset(b_row_stride);
+            a_0_0 = _mm512_fmadd_pd(g0, bv_0, a_0_0);
+            a_0_1 = _mm512_fmadd_pd(g1, bv_0, a_0_1);
+            let bv_1 = _mm512_set1_pd(*bp1);
+            bp1 = bp1.offset(b_row_stride);
+            a_1_0 = _mm512_fmadd_pd(g0, bv_1, a_1_0);
+            a_1_1 = _mm512_fmadd_pd(g1, bv_1, a_1_1);
+            let bv_2 = _mm512_set1_pd(*bp2);
+            bp2 = bp2.offset(b_row_stride);
+            a_2_0 = _mm512_fmadd_pd(g0, bv_2, a_2_0);
+            a_2_1 = _mm512_fmadd_pd(g1, bv_2, a_2_1);
+            let bv_3 = _mm512_set1_pd(*bp3);
+            bp3 = bp3.offset(b_row_stride);
+            a_3_0 = _mm512_fmadd_pd(g0, bv_3, a_3_0);
+            a_3_1 = _mm512_fmadd_pd(g1, bv_3, a_3_1);
+            let bv_4 = _mm512_set1_pd(*bp4);
+            bp4 = bp4.offset(b_row_stride);
+            a_4_0 = _mm512_fmadd_pd(g0, bv_4, a_4_0);
+            a_4_1 = _mm512_fmadd_pd(g1, bv_4, a_4_1);
+            let bv_5 = _mm512_set1_pd(*bp5);
+            bp5 = bp5.offset(b_row_stride);
+            a_5_0 = _mm512_fmadd_pd(g0, bv_5, a_5_0);
+            a_5_1 = _mm512_fmadd_pd(g1, bv_5, a_5_1);
+            let bv_6 = _mm512_set1_pd(*bp6);
+            bp6 = bp6.offset(b_row_stride);
+            a_6_0 = _mm512_fmadd_pd(g0, bv_6, a_6_0);
+            a_6_1 = _mm512_fmadd_pd(g1, bv_6, a_6_1);
+            let bv_7 = _mm512_set1_pd(*bp7);
+            bp7 = bp7.offset(b_row_stride);
+            a_7_0 = _mm512_fmadd_pd(g0, bv_7, a_7_0);
+            a_7_1 = _mm512_fmadd_pd(g1, bv_7, a_7_1);
         }
         let slot_0 = c.offset(c_col_stride * 0);
         store512(slot_0, a_0_0, alpha_v, beta_v, beta);
@@ -171,8 +189,7 @@ unsafe fn kernel512_16x4(
     c: *mut f64,
     c_col_stride: isize,
 ) {
-
-    use std::arch::x86_64::{_mm512_add_pd, _mm512_loadu_pd, _mm512_mul_pd, _mm512_set1_pd, _mm512_setzero_pd};
+    use std::arch::x86_64::{_mm512_fmadd_pd, _mm512_loadu_pd, _mm512_set1_pd, _mm512_setzero_pd};
     unsafe {
         let mut a_0_0 = _mm512_setzero_pd();
         let mut a_0_1 = _mm512_setzero_pd();
@@ -182,22 +199,31 @@ unsafe fn kernel512_16x4(
         let mut a_2_1 = _mm512_setzero_pd();
         let mut a_3_0 = _mm512_setzero_pd();
         let mut a_3_1 = _mm512_setzero_pd();
-        for p in 0..k {
-            let ap = packed.add(p * 16);
-            let g0 = _mm512_loadu_pd(ap.add(0));
+        let mut bp0 = b;
+        let mut bp1 = b.offset(b_col_stride);
+        let mut bp2 = b.offset(b_col_stride * 2);
+        let mut bp3 = b.offset(b_col_stride * 3);
+        let mut ap = packed;
+        for _p in 0..k {
+            let g0 = _mm512_loadu_pd(ap);
             let g1 = _mm512_loadu_pd(ap.add(8));
-            let bv_0 = _mm512_set1_pd(*b.offset(b_row_stride * p as isize + b_col_stride * 0));
-            a_0_0 = _mm512_add_pd(a_0_0, _mm512_mul_pd(g0, bv_0));
-            a_0_1 = _mm512_add_pd(a_0_1, _mm512_mul_pd(g1, bv_0));
-            let bv_1 = _mm512_set1_pd(*b.offset(b_row_stride * p as isize + b_col_stride * 1));
-            a_1_0 = _mm512_add_pd(a_1_0, _mm512_mul_pd(g0, bv_1));
-            a_1_1 = _mm512_add_pd(a_1_1, _mm512_mul_pd(g1, bv_1));
-            let bv_2 = _mm512_set1_pd(*b.offset(b_row_stride * p as isize + b_col_stride * 2));
-            a_2_0 = _mm512_add_pd(a_2_0, _mm512_mul_pd(g0, bv_2));
-            a_2_1 = _mm512_add_pd(a_2_1, _mm512_mul_pd(g1, bv_2));
-            let bv_3 = _mm512_set1_pd(*b.offset(b_row_stride * p as isize + b_col_stride * 3));
-            a_3_0 = _mm512_add_pd(a_3_0, _mm512_mul_pd(g0, bv_3));
-            a_3_1 = _mm512_add_pd(a_3_1, _mm512_mul_pd(g1, bv_3));
+            ap = ap.add(16);
+            let bv_0 = _mm512_set1_pd(*bp0);
+            bp0 = bp0.offset(b_row_stride);
+            a_0_0 = _mm512_fmadd_pd(g0, bv_0, a_0_0);
+            a_0_1 = _mm512_fmadd_pd(g1, bv_0, a_0_1);
+            let bv_1 = _mm512_set1_pd(*bp1);
+            bp1 = bp1.offset(b_row_stride);
+            a_1_0 = _mm512_fmadd_pd(g0, bv_1, a_1_0);
+            a_1_1 = _mm512_fmadd_pd(g1, bv_1, a_1_1);
+            let bv_2 = _mm512_set1_pd(*bp2);
+            bp2 = bp2.offset(b_row_stride);
+            a_2_0 = _mm512_fmadd_pd(g0, bv_2, a_2_0);
+            a_2_1 = _mm512_fmadd_pd(g1, bv_2, a_2_1);
+            let bv_3 = _mm512_set1_pd(*bp3);
+            bp3 = bp3.offset(b_row_stride);
+            a_3_0 = _mm512_fmadd_pd(g0, bv_3, a_3_0);
+            a_3_1 = _mm512_fmadd_pd(g1, bv_3, a_3_1);
         }
         let slot_0 = c.offset(c_col_stride * 0);
         store512(slot_0, a_0_0, alpha_v, beta_v, beta);
@@ -228,8 +254,7 @@ unsafe fn kernel512_16x1(
     c: *mut f64,
     c_col_stride: isize,
 ) {
-
-    use std::arch::x86_64::{_mm512_add_pd, _mm512_loadu_pd, _mm512_mul_pd, _mm512_set1_pd, _mm512_setzero_pd};
+    use std::arch::x86_64::{_mm512_fmadd_pd, _mm512_loadu_pd, _mm512_set1_pd, _mm512_setzero_pd};
     unsafe {
         let mut a_0_0 = _mm512_setzero_pd();
         let mut a_0_1 = _mm512_setzero_pd();
@@ -238,8 +263,8 @@ unsafe fn kernel512_16x1(
             let g0 = _mm512_loadu_pd(ap.add(0));
             let g1 = _mm512_loadu_pd(ap.add(8));
             let bv_0 = _mm512_set1_pd(*b.offset(b_row_stride * p as isize + b_col_stride * 0));
-            a_0_0 = _mm512_add_pd(a_0_0, _mm512_mul_pd(g0, bv_0));
-            a_0_1 = _mm512_add_pd(a_0_1, _mm512_mul_pd(g1, bv_0));
+            a_0_0 = _mm512_fmadd_pd(g0, bv_0, a_0_0);
+            a_0_1 = _mm512_fmadd_pd(g1, bv_0, a_0_1);
         }
         let slot_0 = c.offset(c_col_stride * 0);
         store512(slot_0, a_0_0, alpha_v, beta_v, beta);
@@ -261,8 +286,7 @@ unsafe fn kernel512_8x8(
     c: *mut f64,
     c_col_stride: isize,
 ) {
-
-    use std::arch::x86_64::{_mm512_add_pd, _mm512_loadu_pd, _mm512_mul_pd, _mm512_set1_pd, _mm512_setzero_pd};
+    use std::arch::x86_64::{_mm512_fmadd_pd, _mm512_loadu_pd, _mm512_set1_pd, _mm512_setzero_pd};
     unsafe {
         let mut a_0_0 = _mm512_setzero_pd();
         let mut a_1_0 = _mm512_setzero_pd();
@@ -272,25 +296,42 @@ unsafe fn kernel512_8x8(
         let mut a_5_0 = _mm512_setzero_pd();
         let mut a_6_0 = _mm512_setzero_pd();
         let mut a_7_0 = _mm512_setzero_pd();
-        for p in 0..k {
-            let ap = packed.add(p * 8);
-            let g0 = _mm512_loadu_pd(ap.add(0));
-            let bv_0 = _mm512_set1_pd(*b.offset(b_row_stride * p as isize + b_col_stride * 0));
-            a_0_0 = _mm512_add_pd(a_0_0, _mm512_mul_pd(g0, bv_0));
-            let bv_1 = _mm512_set1_pd(*b.offset(b_row_stride * p as isize + b_col_stride * 1));
-            a_1_0 = _mm512_add_pd(a_1_0, _mm512_mul_pd(g0, bv_1));
-            let bv_2 = _mm512_set1_pd(*b.offset(b_row_stride * p as isize + b_col_stride * 2));
-            a_2_0 = _mm512_add_pd(a_2_0, _mm512_mul_pd(g0, bv_2));
-            let bv_3 = _mm512_set1_pd(*b.offset(b_row_stride * p as isize + b_col_stride * 3));
-            a_3_0 = _mm512_add_pd(a_3_0, _mm512_mul_pd(g0, bv_3));
-            let bv_4 = _mm512_set1_pd(*b.offset(b_row_stride * p as isize + b_col_stride * 4));
-            a_4_0 = _mm512_add_pd(a_4_0, _mm512_mul_pd(g0, bv_4));
-            let bv_5 = _mm512_set1_pd(*b.offset(b_row_stride * p as isize + b_col_stride * 5));
-            a_5_0 = _mm512_add_pd(a_5_0, _mm512_mul_pd(g0, bv_5));
-            let bv_6 = _mm512_set1_pd(*b.offset(b_row_stride * p as isize + b_col_stride * 6));
-            a_6_0 = _mm512_add_pd(a_6_0, _mm512_mul_pd(g0, bv_6));
-            let bv_7 = _mm512_set1_pd(*b.offset(b_row_stride * p as isize + b_col_stride * 7));
-            a_7_0 = _mm512_add_pd(a_7_0, _mm512_mul_pd(g0, bv_7));
+        let mut bp0 = b;
+        let mut bp1 = b.offset(b_col_stride);
+        let mut bp2 = b.offset(b_col_stride * 2);
+        let mut bp3 = b.offset(b_col_stride * 3);
+        let mut bp4 = b.offset(b_col_stride * 4);
+        let mut bp5 = b.offset(b_col_stride * 5);
+        let mut bp6 = b.offset(b_col_stride * 6);
+        let mut bp7 = b.offset(b_col_stride * 7);
+        let mut ap = packed;
+        for _p in 0..k {
+            let g0 = _mm512_loadu_pd(ap);
+            ap = ap.add(8);
+            let bv_0 = _mm512_set1_pd(*bp0);
+            bp0 = bp0.offset(b_row_stride);
+            a_0_0 = _mm512_fmadd_pd(g0, bv_0, a_0_0);
+            let bv_1 = _mm512_set1_pd(*bp1);
+            bp1 = bp1.offset(b_row_stride);
+            a_1_0 = _mm512_fmadd_pd(g0, bv_1, a_1_0);
+            let bv_2 = _mm512_set1_pd(*bp2);
+            bp2 = bp2.offset(b_row_stride);
+            a_2_0 = _mm512_fmadd_pd(g0, bv_2, a_2_0);
+            let bv_3 = _mm512_set1_pd(*bp3);
+            bp3 = bp3.offset(b_row_stride);
+            a_3_0 = _mm512_fmadd_pd(g0, bv_3, a_3_0);
+            let bv_4 = _mm512_set1_pd(*bp4);
+            bp4 = bp4.offset(b_row_stride);
+            a_4_0 = _mm512_fmadd_pd(g0, bv_4, a_4_0);
+            let bv_5 = _mm512_set1_pd(*bp5);
+            bp5 = bp5.offset(b_row_stride);
+            a_5_0 = _mm512_fmadd_pd(g0, bv_5, a_5_0);
+            let bv_6 = _mm512_set1_pd(*bp6);
+            bp6 = bp6.offset(b_row_stride);
+            a_6_0 = _mm512_fmadd_pd(g0, bv_6, a_6_0);
+            let bv_7 = _mm512_set1_pd(*bp7);
+            bp7 = bp7.offset(b_row_stride);
+            a_7_0 = _mm512_fmadd_pd(g0, bv_7, a_7_0);
         }
         let slot_0 = c.offset(c_col_stride * 0);
         store512(slot_0, a_0_0, alpha_v, beta_v, beta);
@@ -325,15 +366,14 @@ unsafe fn kernel512_8x1(
     c: *mut f64,
     c_col_stride: isize,
 ) {
-
-    use std::arch::x86_64::{_mm512_add_pd, _mm512_loadu_pd, _mm512_mul_pd, _mm512_set1_pd, _mm512_setzero_pd};
+    use std::arch::x86_64::{_mm512_fmadd_pd, _mm512_loadu_pd, _mm512_set1_pd, _mm512_setzero_pd};
     unsafe {
         let mut a_0_0 = _mm512_setzero_pd();
         for p in 0..k {
             let ap = packed.add(p * 8);
             let g0 = _mm512_loadu_pd(ap.add(0));
             let bv_0 = _mm512_set1_pd(*b.offset(b_row_stride * p as isize + b_col_stride * 0));
-            a_0_0 = _mm512_add_pd(a_0_0, _mm512_mul_pd(g0, bv_0));
+            a_0_0 = _mm512_fmadd_pd(g0, bv_0, a_0_0);
         }
         let slot_0 = c.offset(c_col_stride * 0);
         store512(slot_0, a_0_0, alpha_v, beta_v, beta);
@@ -498,17 +538,17 @@ unsafe fn gemm_avx512(
                 // pack lives until `apply512` returns.
                 unsafe {
                     call_apply512(
-                    16,
-                    n,
-                    k,
-                    alpha,
-                    packed.as_ptr(),
-                    b,
-                    b_row_stride,
-                    b_col_stride,
-                    beta,
-                    c.offset(row0 as isize),
-                    c_col_stride,
+                        16,
+                        n,
+                        k,
+                        alpha,
+                        packed.as_ptr(),
+                        b,
+                        b_row_stride,
+                        b_col_stride,
+                        beta,
+                        c.offset(row0 as isize),
+                        c_col_stride,
                     );
                 }
             });
@@ -520,17 +560,17 @@ unsafe fn gemm_avx512(
                 // SAFETY: same AVX-512 entry contract as the 16-row panel.
                 unsafe {
                     call_apply512(
-                    8,
-                    n,
-                    k,
-                    alpha,
-                    packed.as_ptr(),
-                    b,
-                    b_row_stride,
-                    b_col_stride,
-                    beta,
-                    c.offset(row0 as isize),
-                    c_col_stride,
+                        8,
+                        n,
+                        k,
+                        alpha,
+                        packed.as_ptr(),
+                        b,
+                        b_row_stride,
+                        b_col_stride,
+                        beta,
+                        c.offset(row0 as isize),
+                        c_col_stride,
                     );
                 }
             });
@@ -665,7 +705,7 @@ unsafe fn gemm_parallel_avx512(
 }
 
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
+#[target_feature(enable = "avx2,fma")]
 unsafe fn kernel256_8x4(
     k: usize,
     alpha_v: std::arch::x86_64::__m256d,
@@ -678,8 +718,7 @@ unsafe fn kernel256_8x4(
     c: *mut f64,
     c_col_stride: isize,
 ) {
-
-    use std::arch::x86_64::{_mm256_add_pd, _mm256_loadu_pd, _mm256_mul_pd, _mm256_set1_pd, _mm256_setzero_pd};
+    use std::arch::x86_64::{_mm256_fmadd_pd, _mm256_loadu_pd, _mm256_set1_pd, _mm256_setzero_pd};
     unsafe {
         let mut a_0_0 = _mm256_setzero_pd();
         let mut a_0_1 = _mm256_setzero_pd();
@@ -689,22 +728,31 @@ unsafe fn kernel256_8x4(
         let mut a_2_1 = _mm256_setzero_pd();
         let mut a_3_0 = _mm256_setzero_pd();
         let mut a_3_1 = _mm256_setzero_pd();
-        for p in 0..k {
-            let ap = packed.add(p * 8);
-            let g0 = _mm256_loadu_pd(ap.add(0));
+        let mut bp0 = b;
+        let mut bp1 = b.offset(b_col_stride);
+        let mut bp2 = b.offset(b_col_stride * 2);
+        let mut bp3 = b.offset(b_col_stride * 3);
+        let mut ap = packed;
+        for _p in 0..k {
+            let g0 = _mm256_loadu_pd(ap);
             let g1 = _mm256_loadu_pd(ap.add(4));
-            let bv_0 = _mm256_set1_pd(*b.offset(b_row_stride * p as isize + b_col_stride * 0));
-            a_0_0 = _mm256_add_pd(a_0_0, _mm256_mul_pd(g0, bv_0));
-            a_0_1 = _mm256_add_pd(a_0_1, _mm256_mul_pd(g1, bv_0));
-            let bv_1 = _mm256_set1_pd(*b.offset(b_row_stride * p as isize + b_col_stride * 1));
-            a_1_0 = _mm256_add_pd(a_1_0, _mm256_mul_pd(g0, bv_1));
-            a_1_1 = _mm256_add_pd(a_1_1, _mm256_mul_pd(g1, bv_1));
-            let bv_2 = _mm256_set1_pd(*b.offset(b_row_stride * p as isize + b_col_stride * 2));
-            a_2_0 = _mm256_add_pd(a_2_0, _mm256_mul_pd(g0, bv_2));
-            a_2_1 = _mm256_add_pd(a_2_1, _mm256_mul_pd(g1, bv_2));
-            let bv_3 = _mm256_set1_pd(*b.offset(b_row_stride * p as isize + b_col_stride * 3));
-            a_3_0 = _mm256_add_pd(a_3_0, _mm256_mul_pd(g0, bv_3));
-            a_3_1 = _mm256_add_pd(a_3_1, _mm256_mul_pd(g1, bv_3));
+            ap = ap.add(8);
+            let bv_0 = _mm256_set1_pd(*bp0);
+            bp0 = bp0.offset(b_row_stride);
+            a_0_0 = _mm256_fmadd_pd(g0, bv_0, a_0_0);
+            a_0_1 = _mm256_fmadd_pd(g1, bv_0, a_0_1);
+            let bv_1 = _mm256_set1_pd(*bp1);
+            bp1 = bp1.offset(b_row_stride);
+            a_1_0 = _mm256_fmadd_pd(g0, bv_1, a_1_0);
+            a_1_1 = _mm256_fmadd_pd(g1, bv_1, a_1_1);
+            let bv_2 = _mm256_set1_pd(*bp2);
+            bp2 = bp2.offset(b_row_stride);
+            a_2_0 = _mm256_fmadd_pd(g0, bv_2, a_2_0);
+            a_2_1 = _mm256_fmadd_pd(g1, bv_2, a_2_1);
+            let bv_3 = _mm256_set1_pd(*bp3);
+            bp3 = bp3.offset(b_row_stride);
+            a_3_0 = _mm256_fmadd_pd(g0, bv_3, a_3_0);
+            a_3_1 = _mm256_fmadd_pd(g1, bv_3, a_3_1);
         }
         let slot_0 = c.offset(c_col_stride * 0);
         store256(slot_0, a_0_0, alpha_v, beta_v, beta);
@@ -722,7 +770,7 @@ unsafe fn kernel256_8x4(
 }
 
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
+#[target_feature(enable = "avx2,fma")]
 unsafe fn kernel256_8x1(
     k: usize,
     alpha_v: std::arch::x86_64::__m256d,
@@ -735,8 +783,7 @@ unsafe fn kernel256_8x1(
     c: *mut f64,
     c_col_stride: isize,
 ) {
-
-    use std::arch::x86_64::{_mm256_add_pd, _mm256_loadu_pd, _mm256_mul_pd, _mm256_set1_pd, _mm256_setzero_pd};
+    use std::arch::x86_64::{_mm256_fmadd_pd, _mm256_loadu_pd, _mm256_set1_pd, _mm256_setzero_pd};
     unsafe {
         let mut a_0_0 = _mm256_setzero_pd();
         let mut a_0_1 = _mm256_setzero_pd();
@@ -745,8 +792,8 @@ unsafe fn kernel256_8x1(
             let g0 = _mm256_loadu_pd(ap.add(0));
             let g1 = _mm256_loadu_pd(ap.add(4));
             let bv_0 = _mm256_set1_pd(*b.offset(b_row_stride * p as isize + b_col_stride * 0));
-            a_0_0 = _mm256_add_pd(a_0_0, _mm256_mul_pd(g0, bv_0));
-            a_0_1 = _mm256_add_pd(a_0_1, _mm256_mul_pd(g1, bv_0));
+            a_0_0 = _mm256_fmadd_pd(g0, bv_0, a_0_0);
+            a_0_1 = _mm256_fmadd_pd(g1, bv_0, a_0_1);
         }
         let slot_0 = c.offset(c_col_stride * 0);
         store256(slot_0, a_0_0, alpha_v, beta_v, beta);
@@ -755,7 +802,7 @@ unsafe fn kernel256_8x1(
 }
 
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
+#[target_feature(enable = "avx2,fma")]
 unsafe fn kernel256_4x4(
     k: usize,
     alpha_v: std::arch::x86_64::__m256d,
@@ -768,24 +815,32 @@ unsafe fn kernel256_4x4(
     c: *mut f64,
     c_col_stride: isize,
 ) {
-
-    use std::arch::x86_64::{_mm256_add_pd, _mm256_loadu_pd, _mm256_mul_pd, _mm256_set1_pd, _mm256_setzero_pd};
+    use std::arch::x86_64::{_mm256_fmadd_pd, _mm256_loadu_pd, _mm256_set1_pd, _mm256_setzero_pd};
     unsafe {
         let mut a_0_0 = _mm256_setzero_pd();
         let mut a_1_0 = _mm256_setzero_pd();
         let mut a_2_0 = _mm256_setzero_pd();
         let mut a_3_0 = _mm256_setzero_pd();
-        for p in 0..k {
-            let ap = packed.add(p * 4);
-            let g0 = _mm256_loadu_pd(ap.add(0));
-            let bv_0 = _mm256_set1_pd(*b.offset(b_row_stride * p as isize + b_col_stride * 0));
-            a_0_0 = _mm256_add_pd(a_0_0, _mm256_mul_pd(g0, bv_0));
-            let bv_1 = _mm256_set1_pd(*b.offset(b_row_stride * p as isize + b_col_stride * 1));
-            a_1_0 = _mm256_add_pd(a_1_0, _mm256_mul_pd(g0, bv_1));
-            let bv_2 = _mm256_set1_pd(*b.offset(b_row_stride * p as isize + b_col_stride * 2));
-            a_2_0 = _mm256_add_pd(a_2_0, _mm256_mul_pd(g0, bv_2));
-            let bv_3 = _mm256_set1_pd(*b.offset(b_row_stride * p as isize + b_col_stride * 3));
-            a_3_0 = _mm256_add_pd(a_3_0, _mm256_mul_pd(g0, bv_3));
+        let mut bp0 = b;
+        let mut bp1 = b.offset(b_col_stride);
+        let mut bp2 = b.offset(b_col_stride * 2);
+        let mut bp3 = b.offset(b_col_stride * 3);
+        let mut ap = packed;
+        for _p in 0..k {
+            let g0 = _mm256_loadu_pd(ap);
+            ap = ap.add(4);
+            let bv_0 = _mm256_set1_pd(*bp0);
+            bp0 = bp0.offset(b_row_stride);
+            a_0_0 = _mm256_fmadd_pd(g0, bv_0, a_0_0);
+            let bv_1 = _mm256_set1_pd(*bp1);
+            bp1 = bp1.offset(b_row_stride);
+            a_1_0 = _mm256_fmadd_pd(g0, bv_1, a_1_0);
+            let bv_2 = _mm256_set1_pd(*bp2);
+            bp2 = bp2.offset(b_row_stride);
+            a_2_0 = _mm256_fmadd_pd(g0, bv_2, a_2_0);
+            let bv_3 = _mm256_set1_pd(*bp3);
+            bp3 = bp3.offset(b_row_stride);
+            a_3_0 = _mm256_fmadd_pd(g0, bv_3, a_3_0);
         }
         let slot_0 = c.offset(c_col_stride * 0);
         store256(slot_0, a_0_0, alpha_v, beta_v, beta);
@@ -799,7 +854,7 @@ unsafe fn kernel256_4x4(
 }
 
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
+#[target_feature(enable = "avx2,fma")]
 unsafe fn kernel256_4x1(
     k: usize,
     alpha_v: std::arch::x86_64::__m256d,
@@ -812,22 +867,21 @@ unsafe fn kernel256_4x1(
     c: *mut f64,
     c_col_stride: isize,
 ) {
-
-    use std::arch::x86_64::{_mm256_add_pd, _mm256_loadu_pd, _mm256_mul_pd, _mm256_set1_pd, _mm256_setzero_pd};
+    use std::arch::x86_64::{_mm256_fmadd_pd, _mm256_loadu_pd, _mm256_set1_pd, _mm256_setzero_pd};
     unsafe {
         let mut a_0_0 = _mm256_setzero_pd();
         for p in 0..k {
             let ap = packed.add(p * 4);
             let g0 = _mm256_loadu_pd(ap.add(0));
             let bv_0 = _mm256_set1_pd(*b.offset(b_row_stride * p as isize + b_col_stride * 0));
-            a_0_0 = _mm256_add_pd(a_0_0, _mm256_mul_pd(g0, bv_0));
+            a_0_0 = _mm256_fmadd_pd(g0, bv_0, a_0_0);
         }
         let slot_0 = c.offset(c_col_stride * 0);
         store256(slot_0, a_0_0, alpha_v, beta_v, beta);
     }
 }
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
+#[target_feature(enable = "avx2,fma")]
 unsafe fn apply256(
     rows: usize,
     n: usize,
@@ -912,7 +966,6 @@ unsafe fn apply256(
     }
 }
 
-
 #[cfg(target_arch = "x86_64")]
 fn call_apply256(
     rows: usize,
@@ -947,7 +1000,7 @@ fn call_apply256(
 }
 
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
+#[target_feature(enable = "avx2,fma")]
 unsafe fn gemm_avx2(
     m: usize,
     n: usize,
@@ -1024,7 +1077,7 @@ unsafe fn gemm_avx2(
 }
 
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
+#[target_feature(enable = "avx2,fma")]
 unsafe fn gemm_parallel_avx2(
     m: usize,
     n: usize,
@@ -1102,8 +1155,7 @@ unsafe fn kernel_neon_4x4(
     c: *mut f64,
     c_col_stride: isize,
 ) {
-
-    use std::arch::aarch64::{vaddq_f64, vdupq_n_f64, vld1q_f64, vmulq_f64};
+    use std::arch::aarch64::{vdupq_n_f64, vfmaq_f64, vld1q_f64};
     unsafe {
         let mut a_0_0 = vdupq_n_f64(0.0);
         let mut a_0_1 = vdupq_n_f64(0.0);
@@ -1113,22 +1165,31 @@ unsafe fn kernel_neon_4x4(
         let mut a_2_1 = vdupq_n_f64(0.0);
         let mut a_3_0 = vdupq_n_f64(0.0);
         let mut a_3_1 = vdupq_n_f64(0.0);
-        for p in 0..k {
-            let ap = packed.add(p * 4);
-            let g0 = vld1q_f64(ap.add(0));
+        let mut bp0 = b;
+        let mut bp1 = b.offset(b_col_stride);
+        let mut bp2 = b.offset(b_col_stride * 2);
+        let mut bp3 = b.offset(b_col_stride * 3);
+        let mut ap = packed;
+        for _p in 0..k {
+            let g0 = vld1q_f64(ap);
             let g1 = vld1q_f64(ap.add(2));
-            let bv_0 = vdupq_n_f64(*b.offset(b_row_stride * p as isize + b_col_stride * 0));
-            a_0_0 = vaddq_f64(a_0_0, vmulq_f64(g0, bv_0));
-            a_0_1 = vaddq_f64(a_0_1, vmulq_f64(g1, bv_0));
-            let bv_1 = vdupq_n_f64(*b.offset(b_row_stride * p as isize + b_col_stride * 1));
-            a_1_0 = vaddq_f64(a_1_0, vmulq_f64(g0, bv_1));
-            a_1_1 = vaddq_f64(a_1_1, vmulq_f64(g1, bv_1));
-            let bv_2 = vdupq_n_f64(*b.offset(b_row_stride * p as isize + b_col_stride * 2));
-            a_2_0 = vaddq_f64(a_2_0, vmulq_f64(g0, bv_2));
-            a_2_1 = vaddq_f64(a_2_1, vmulq_f64(g1, bv_2));
-            let bv_3 = vdupq_n_f64(*b.offset(b_row_stride * p as isize + b_col_stride * 3));
-            a_3_0 = vaddq_f64(a_3_0, vmulq_f64(g0, bv_3));
-            a_3_1 = vaddq_f64(a_3_1, vmulq_f64(g1, bv_3));
+            ap = ap.add(4);
+            let bv_0 = vdupq_n_f64(*bp0);
+            bp0 = bp0.offset(b_row_stride);
+            a_0_0 = vfmaq_f64(a_0_0, g0, bv_0);
+            a_0_1 = vfmaq_f64(a_0_1, g1, bv_0);
+            let bv_1 = vdupq_n_f64(*bp1);
+            bp1 = bp1.offset(b_row_stride);
+            a_1_0 = vfmaq_f64(a_1_0, g0, bv_1);
+            a_1_1 = vfmaq_f64(a_1_1, g1, bv_1);
+            let bv_2 = vdupq_n_f64(*bp2);
+            bp2 = bp2.offset(b_row_stride);
+            a_2_0 = vfmaq_f64(a_2_0, g0, bv_2);
+            a_2_1 = vfmaq_f64(a_2_1, g1, bv_2);
+            let bv_3 = vdupq_n_f64(*bp3);
+            bp3 = bp3.offset(b_row_stride);
+            a_3_0 = vfmaq_f64(a_3_0, g0, bv_3);
+            a_3_1 = vfmaq_f64(a_3_1, g1, bv_3);
         }
         let slot_0 = c.offset(c_col_stride * 0);
         store_neon(slot_0, a_0_0, alpha_v, beta_v, beta);
@@ -1159,8 +1220,7 @@ unsafe fn kernel_neon_4x1(
     c: *mut f64,
     c_col_stride: isize,
 ) {
-
-    use std::arch::aarch64::{vaddq_f64, vdupq_n_f64, vld1q_f64, vmulq_f64};
+    use std::arch::aarch64::{vdupq_n_f64, vfmaq_f64, vld1q_f64};
     unsafe {
         let mut a_0_0 = vdupq_n_f64(0.0);
         let mut a_0_1 = vdupq_n_f64(0.0);
@@ -1169,8 +1229,8 @@ unsafe fn kernel_neon_4x1(
             let g0 = vld1q_f64(ap.add(0));
             let g1 = vld1q_f64(ap.add(2));
             let bv_0 = vdupq_n_f64(*b.offset(b_row_stride * p as isize + b_col_stride * 0));
-            a_0_0 = vaddq_f64(a_0_0, vmulq_f64(g0, bv_0));
-            a_0_1 = vaddq_f64(a_0_1, vmulq_f64(g1, bv_0));
+            a_0_0 = vfmaq_f64(a_0_0, g0, bv_0);
+            a_0_1 = vfmaq_f64(a_0_1, g1, bv_0);
         }
         let slot_0 = c.offset(c_col_stride * 0);
         store_neon(slot_0, a_0_0, alpha_v, beta_v, beta);
@@ -1192,24 +1252,32 @@ unsafe fn kernel_neon_2x4(
     c: *mut f64,
     c_col_stride: isize,
 ) {
-
-    use std::arch::aarch64::{vaddq_f64, vdupq_n_f64, vld1q_f64, vmulq_f64};
+    use std::arch::aarch64::{vdupq_n_f64, vfmaq_f64, vld1q_f64};
     unsafe {
         let mut a_0_0 = vdupq_n_f64(0.0);
         let mut a_1_0 = vdupq_n_f64(0.0);
         let mut a_2_0 = vdupq_n_f64(0.0);
         let mut a_3_0 = vdupq_n_f64(0.0);
-        for p in 0..k {
-            let ap = packed.add(p * 2);
-            let g0 = vld1q_f64(ap.add(0));
-            let bv_0 = vdupq_n_f64(*b.offset(b_row_stride * p as isize + b_col_stride * 0));
-            a_0_0 = vaddq_f64(a_0_0, vmulq_f64(g0, bv_0));
-            let bv_1 = vdupq_n_f64(*b.offset(b_row_stride * p as isize + b_col_stride * 1));
-            a_1_0 = vaddq_f64(a_1_0, vmulq_f64(g0, bv_1));
-            let bv_2 = vdupq_n_f64(*b.offset(b_row_stride * p as isize + b_col_stride * 2));
-            a_2_0 = vaddq_f64(a_2_0, vmulq_f64(g0, bv_2));
-            let bv_3 = vdupq_n_f64(*b.offset(b_row_stride * p as isize + b_col_stride * 3));
-            a_3_0 = vaddq_f64(a_3_0, vmulq_f64(g0, bv_3));
+        let mut bp0 = b;
+        let mut bp1 = b.offset(b_col_stride);
+        let mut bp2 = b.offset(b_col_stride * 2);
+        let mut bp3 = b.offset(b_col_stride * 3);
+        let mut ap = packed;
+        for _p in 0..k {
+            let g0 = vld1q_f64(ap);
+            ap = ap.add(2);
+            let bv_0 = vdupq_n_f64(*bp0);
+            bp0 = bp0.offset(b_row_stride);
+            a_0_0 = vfmaq_f64(a_0_0, g0, bv_0);
+            let bv_1 = vdupq_n_f64(*bp1);
+            bp1 = bp1.offset(b_row_stride);
+            a_1_0 = vfmaq_f64(a_1_0, g0, bv_1);
+            let bv_2 = vdupq_n_f64(*bp2);
+            bp2 = bp2.offset(b_row_stride);
+            a_2_0 = vfmaq_f64(a_2_0, g0, bv_2);
+            let bv_3 = vdupq_n_f64(*bp3);
+            bp3 = bp3.offset(b_row_stride);
+            a_3_0 = vfmaq_f64(a_3_0, g0, bv_3);
         }
         let slot_0 = c.offset(c_col_stride * 0);
         store_neon(slot_0, a_0_0, alpha_v, beta_v, beta);
@@ -1236,15 +1304,14 @@ unsafe fn kernel_neon_2x1(
     c: *mut f64,
     c_col_stride: isize,
 ) {
-
-    use std::arch::aarch64::{vaddq_f64, vdupq_n_f64, vld1q_f64, vmulq_f64};
+    use std::arch::aarch64::{vdupq_n_f64, vfmaq_f64, vld1q_f64};
     unsafe {
         let mut a_0_0 = vdupq_n_f64(0.0);
         for p in 0..k {
             let ap = packed.add(p * 2);
             let g0 = vld1q_f64(ap.add(0));
             let bv_0 = vdupq_n_f64(*b.offset(b_row_stride * p as isize + b_col_stride * 0));
-            a_0_0 = vaddq_f64(a_0_0, vmulq_f64(g0, bv_0));
+            a_0_0 = vfmaq_f64(a_0_0, g0, bv_0);
         }
         let slot_0 = c.offset(c_col_stride * 0);
         store_neon(slot_0, a_0_0, alpha_v, beta_v, beta);
@@ -1335,7 +1402,6 @@ unsafe fn apply_neon(
         }
     }
 }
-
 
 #[cfg(target_arch = "aarch64")]
 fn call_apply_neon(
@@ -1588,27 +1654,25 @@ pub(crate) fn axpy_add(y: &mut [f64], x: &[f64], alpha: f64) {
         }
     }
     for i in 0..n {
-        y[i] += alpha * x[i];
+        y[i] = alpha.mul_add(x[i], y[i]);
     }
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f")]
 unsafe fn axpy_add_avx512(y: *mut f64, x: *const f64, n: usize, alpha: f64) {
-    use std::arch::x86_64::{
-        _mm512_add_pd, _mm512_loadu_pd, _mm512_mul_pd, _mm512_set1_pd, _mm512_storeu_pd,
-    };
+    use std::arch::x86_64::{_mm512_fmadd_pd, _mm512_loadu_pd, _mm512_set1_pd, _mm512_storeu_pd};
     unsafe {
         let scale = _mm512_set1_pd(alpha);
         let mut i = 0;
         while i + 8 <= n {
             let yv = _mm512_loadu_pd(y.add(i));
             let xv = _mm512_loadu_pd(x.add(i));
-            _mm512_storeu_pd(y.add(i), _mm512_add_pd(yv, _mm512_mul_pd(scale, xv)));
+            _mm512_storeu_pd(y.add(i), _mm512_fmadd_pd(scale, xv, yv));
             i += 8;
         }
         while i < n {
-            *y.add(i) += alpha * *x.add(i);
+            *y.add(i) = alpha.mul_add(*x.add(i), *y.add(i));
             i += 1;
         }
     }
@@ -1617,64 +1681,58 @@ unsafe fn axpy_add_avx512(y: *mut f64, x: *const f64, n: usize, alpha: f64) {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f")]
 unsafe fn axpy_sub_avx512(y: *mut f64, x: *const f64, n: usize, alpha: f64) {
-    use std::arch::x86_64::{
-        _mm512_loadu_pd, _mm512_mul_pd, _mm512_set1_pd, _mm512_storeu_pd, _mm512_sub_pd,
-    };
+    use std::arch::x86_64::{_mm512_fnmadd_pd, _mm512_loadu_pd, _mm512_set1_pd, _mm512_storeu_pd};
     unsafe {
         let scale = _mm512_set1_pd(alpha);
         let mut i = 0;
         while i + 8 <= n {
             let yv = _mm512_loadu_pd(y.add(i));
             let xv = _mm512_loadu_pd(x.add(i));
-            _mm512_storeu_pd(y.add(i), _mm512_sub_pd(yv, _mm512_mul_pd(scale, xv)));
+            _mm512_storeu_pd(y.add(i), _mm512_fnmadd_pd(scale, xv, yv));
             i += 8;
         }
         while i < n {
-            *y.add(i) -= alpha * *x.add(i);
+            *y.add(i) = (-alpha).mul_add(*x.add(i), *y.add(i));
             i += 1;
         }
     }
 }
 
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
+#[target_feature(enable = "avx2,fma")]
 unsafe fn axpy_add_avx2(y: *mut f64, x: *const f64, n: usize, alpha: f64) {
-    use std::arch::x86_64::{
-        _mm256_add_pd, _mm256_loadu_pd, _mm256_mul_pd, _mm256_set1_pd, _mm256_storeu_pd,
-    };
+    use std::arch::x86_64::{_mm256_fmadd_pd, _mm256_loadu_pd, _mm256_set1_pd, _mm256_storeu_pd};
     unsafe {
         let scale = _mm256_set1_pd(alpha);
         let mut i = 0;
         while i + 4 <= n {
             let yv = _mm256_loadu_pd(y.add(i));
             let xv = _mm256_loadu_pd(x.add(i));
-            _mm256_storeu_pd(y.add(i), _mm256_add_pd(yv, _mm256_mul_pd(scale, xv)));
+            _mm256_storeu_pd(y.add(i), _mm256_fmadd_pd(scale, xv, yv));
             i += 4;
         }
         while i < n {
-            *y.add(i) += alpha * *x.add(i);
+            *y.add(i) = alpha.mul_add(*x.add(i), *y.add(i));
             i += 1;
         }
     }
 }
 
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
+#[target_feature(enable = "avx2,fma")]
 unsafe fn axpy_sub_avx2(y: *mut f64, x: *const f64, n: usize, alpha: f64) {
-    use std::arch::x86_64::{
-        _mm256_loadu_pd, _mm256_mul_pd, _mm256_set1_pd, _mm256_storeu_pd, _mm256_sub_pd,
-    };
+    use std::arch::x86_64::{_mm256_fnmadd_pd, _mm256_loadu_pd, _mm256_set1_pd, _mm256_storeu_pd};
     unsafe {
         let scale = _mm256_set1_pd(alpha);
         let mut i = 0;
         while i + 4 <= n {
             let yv = _mm256_loadu_pd(y.add(i));
             let xv = _mm256_loadu_pd(x.add(i));
-            _mm256_storeu_pd(y.add(i), _mm256_sub_pd(yv, _mm256_mul_pd(scale, xv)));
+            _mm256_storeu_pd(y.add(i), _mm256_fnmadd_pd(scale, xv, yv));
             i += 4;
         }
         while i < n {
-            *y.add(i) -= alpha * *x.add(i);
+            *y.add(i) = (-alpha).mul_add(*x.add(i), *y.add(i));
             i += 1;
         }
     }
@@ -1683,18 +1741,18 @@ unsafe fn axpy_sub_avx2(y: *mut f64, x: *const f64, n: usize, alpha: f64) {
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
 unsafe fn axpy_add_neon(y: *mut f64, x: *const f64, n: usize, alpha: f64) {
-    use std::arch::aarch64::{vaddq_f64, vdupq_n_f64, vld1q_f64, vmulq_f64, vst1q_f64};
+    use std::arch::aarch64::{vdupq_n_f64, vfmaq_f64, vld1q_f64, vst1q_f64};
     unsafe {
         let scale = vdupq_n_f64(alpha);
         let mut i = 0;
         while i + 2 <= n {
             let yv = vld1q_f64(y.add(i));
             let xv = vld1q_f64(x.add(i));
-            vst1q_f64(y.add(i), vaddq_f64(yv, vmulq_f64(scale, xv)));
+            vst1q_f64(y.add(i), vfmaq_f64(yv, scale, xv));
             i += 2;
         }
         while i < n {
-            *y.add(i) += alpha * *x.add(i);
+            *y.add(i) = alpha.mul_add(*x.add(i), *y.add(i));
             i += 1;
         }
     }
@@ -1703,18 +1761,18 @@ unsafe fn axpy_add_neon(y: *mut f64, x: *const f64, n: usize, alpha: f64) {
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
 unsafe fn axpy_sub_neon(y: *mut f64, x: *const f64, n: usize, alpha: f64) {
-    use std::arch::aarch64::{vdupq_n_f64, vld1q_f64, vmulq_f64, vst1q_f64, vsubq_f64};
+    use std::arch::aarch64::{vdupq_n_f64, vfmsq_f64, vld1q_f64, vst1q_f64};
     unsafe {
         let scale = vdupq_n_f64(alpha);
         let mut i = 0;
         while i + 2 <= n {
             let yv = vld1q_f64(y.add(i));
             let xv = vld1q_f64(x.add(i));
-            vst1q_f64(y.add(i), vsubq_f64(yv, vmulq_f64(scale, xv)));
+            vst1q_f64(y.add(i), vfmsq_f64(yv, scale, xv));
             i += 2;
         }
         while i < n {
-            *y.add(i) -= alpha * *x.add(i);
+            *y.add(i) = (-alpha).mul_add(*x.add(i), *y.add(i));
             i += 1;
         }
     }
@@ -1812,8 +1870,8 @@ unsafe fn sum_div_avx512(
     mu: f64,
 ) -> usize {
     use std::arch::x86_64::{
-        _mm512_cmp_pd_mask, _mm512_div_pd, _mm512_loadu_pd, _mm512_set1_pd, _mm512_setzero_pd,
-        _mm512_storeu_pd, _mm512_sub_pd, _CMP_EQ_OQ,
+        _CMP_EQ_OQ, _mm512_cmp_pd_mask, _mm512_div_pd, _mm512_loadu_pd, _mm512_set1_pd,
+        _mm512_setzero_pd, _mm512_storeu_pd, _mm512_sub_pd,
     };
     unsafe {
         let shift_v = _mm512_set1_pd(shift);
@@ -1852,8 +1910,8 @@ unsafe fn sum_div_deriv_avx512(
     mu: f64,
 ) -> usize {
     use std::arch::x86_64::{
-        _mm512_cmp_pd_mask, _mm512_div_pd, _mm512_loadu_pd, _mm512_set1_pd, _mm512_setzero_pd,
-        _mm512_storeu_pd, _mm512_sub_pd, _CMP_EQ_OQ,
+        _CMP_EQ_OQ, _mm512_cmp_pd_mask, _mm512_div_pd, _mm512_loadu_pd, _mm512_set1_pd,
+        _mm512_setzero_pd, _mm512_storeu_pd, _mm512_sub_pd,
     };
     unsafe {
         let shift_v = _mm512_set1_pd(shift);
@@ -1887,17 +1945,11 @@ unsafe fn sum_div_deriv_avx512(
 }
 
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-unsafe fn sum_div_avx2(
-    sum: &mut f64,
-    delta: &[f64],
-    numer: &[f64],
-    shift: f64,
-    mu: f64,
-) -> usize {
+#[target_feature(enable = "avx2,fma")]
+unsafe fn sum_div_avx2(sum: &mut f64, delta: &[f64], numer: &[f64], shift: f64, mu: f64) -> usize {
     use std::arch::x86_64::{
-        _mm256_cmp_pd, _mm256_div_pd, _mm256_loadu_pd, _mm256_movemask_pd, _mm256_set1_pd,
-        _mm256_setzero_pd, _mm256_storeu_pd, _mm256_sub_pd, _CMP_EQ_OQ,
+        _CMP_EQ_OQ, _mm256_cmp_pd, _mm256_div_pd, _mm256_loadu_pd, _mm256_movemask_pd,
+        _mm256_set1_pd, _mm256_setzero_pd, _mm256_storeu_pd, _mm256_sub_pd,
     };
     unsafe {
         let shift_v = _mm256_set1_pd(shift);
@@ -1927,7 +1979,7 @@ unsafe fn sum_div_avx2(
 }
 
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
+#[target_feature(enable = "avx2,fma")]
 unsafe fn sum_div_deriv_avx2(
     sum: &mut f64,
     deriv: &mut f64,
@@ -1937,8 +1989,8 @@ unsafe fn sum_div_deriv_avx2(
     mu: f64,
 ) -> usize {
     use std::arch::x86_64::{
-        _mm256_cmp_pd, _mm256_div_pd, _mm256_loadu_pd, _mm256_movemask_pd, _mm256_set1_pd,
-        _mm256_setzero_pd, _mm256_storeu_pd, _mm256_sub_pd, _CMP_EQ_OQ,
+        _CMP_EQ_OQ, _mm256_cmp_pd, _mm256_div_pd, _mm256_loadu_pd, _mm256_movemask_pd,
+        _mm256_set1_pd, _mm256_setzero_pd, _mm256_storeu_pd, _mm256_sub_pd,
     };
     unsafe {
         let shift_v = _mm256_set1_pd(shift);
@@ -1974,13 +2026,7 @@ unsafe fn sum_div_deriv_avx2(
 
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
-unsafe fn sum_div_neon(
-    sum: &mut f64,
-    delta: &[f64],
-    numer: &[f64],
-    shift: f64,
-    mu: f64,
-) -> usize {
+unsafe fn sum_div_neon(sum: &mut f64, delta: &[f64], numer: &[f64], shift: f64, mu: f64) -> usize {
     use std::arch::aarch64::{vdivq_f64, vdupq_n_f64, vld1q_f64, vst1q_f64, vsubq_f64};
     unsafe {
         let shift_v = vdupq_n_f64(shift);

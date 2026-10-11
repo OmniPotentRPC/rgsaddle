@@ -8,8 +8,8 @@
 //! fixed column partition.
 //!
 //! Leaves use Francis's implicit QL step (J. G. F. Francis, *Comput. J.*
-//! 4 (1962) 332-345, <https://doi.org/10.1093/comjnl/4.4.332>) with a
-//! separate multiply and add. J. J. M. Cuppen, *Numer. Math.* 36 (1980)
+//! 4 (1962) 332-345, <https://doi.org/10.1093/comjnl/4.4.332>). Products
+//! accumulate with `f64::mul_add`. J. J. M. Cuppen, *Numer. Math.* 36 (1980)
 //! 177-195 (<https://doi.org/10.1007/BF01396757>). Ming Gu and Stanley
 //! C. Eisenstat, *SIAM J. Matrix Anal. Appl.* 16 (1995) 172-191
 //! (<https://doi.org/10.1137/S0895479892241287>).
@@ -224,7 +224,7 @@ fn merge_rank_one(
                     z_tilde[local] / denom
                 };
                 columns[j * n + index] = value;
-                norm += value * value;
+                norm = value.mul_add(value, norm);
             }
             norm = norm.sqrt();
             if norm == 0.0 || !norm.is_finite() {
@@ -364,11 +364,29 @@ fn deflate(delta: &mut [f64], z: &mut [f64], q: &mut [f64], rho: f64) -> Vec<boo
 }
 
 fn givens_columns(q: &mut [f64], n: usize, i: usize, j: usize, c: f64, s: f64) {
+    #[cfg(target_arch = "x86_64")]
+    if std::is_x86_feature_detected!("fma") {
+        // SAFETY: this CPU has FMA. The body is the same `mul_add` chain,
+        // so a machine without FMA matches it through the libcall.
+        unsafe { givens_columns_fma(q, n, i, j, c, s) }
+        return;
+    }
+    givens_columns_body(q, n, i, j, c, s);
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "fma")]
+unsafe fn givens_columns_fma(q: &mut [f64], n: usize, i: usize, j: usize, c: f64, s: f64) {
+    givens_columns_body(q, n, i, j, c, s);
+}
+
+#[inline(always)]
+fn givens_columns_body(q: &mut [f64], n: usize, i: usize, j: usize, c: f64, s: f64) {
     for row in 0..n {
         let qi = q[i * n + row];
         let qj = q[j * n + row];
-        q[i * n + row] = c * qi + s * qj;
-        q[j * n + row] = c * qj - s * qi;
+        q[i * n + row] = s.mul_add(qj, c * qi);
+        q[j * n + row] = (-s).mul_add(qi, c * qj);
     }
 }
 
@@ -582,6 +600,22 @@ fn scale_pow2(mut value: f64, mut exp: i32) -> f64 {
 }
 
 fn francis(diag: &[f64], off: &[f64]) -> Result<Spectrum, SaddleError> {
+    #[cfg(target_arch = "x86_64")]
+    if std::is_x86_feature_detected!("fma") {
+        // SAFETY: this CPU has FMA. Rotations stay `mul_add` in the same order.
+        return unsafe { francis_fma(diag, off) };
+    }
+    francis_body(diag, off)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "fma")]
+unsafe fn francis_fma(diag: &[f64], off: &[f64]) -> Result<Spectrum, SaddleError> {
+    francis_body(diag, off)
+}
+
+#[inline(always)]
+fn francis_body(diag: &[f64], off: &[f64]) -> Result<Spectrum, SaddleError> {
     let n = diag.len();
     if n == 0 {
         return Ok(Spectrum {
@@ -640,10 +674,10 @@ fn francis(diag: &[f64], off: &[f64]) -> Result<Spectrum, SaddleError> {
                 s = f_part / radius;
                 c = g / radius;
                 g = d[i + 1] - p;
-                let mixed = (d[i] - g) * s + 2.0 * c * b;
+                let mixed = (2.0 * c).mul_add(b, s.mul_add(d[i] - g, 0.0));
                 p = s * mixed;
                 d[i + 1] = g + p;
-                g = c * mixed - b;
+                g = c.mul_add(mixed, -b);
                 rotate_columns(&mut z, n, i, c, s);
                 if i == l {
                     d[l] -= p;
@@ -691,12 +725,29 @@ fn sign_abs(magnitude: f64, sign_of: f64) -> f64 {
 }
 
 fn rotate_columns(z: &mut [f64], n: usize, i: usize, c: f64, s: f64) {
+    #[cfg(target_arch = "x86_64")]
+    if std::is_x86_feature_detected!("fma") {
+        // SAFETY: this CPU has FMA. The body is the same `mul_add` chain.
+        unsafe { rotate_columns_fma(z, n, i, c, s) }
+        return;
+    }
+    rotate_columns_body(z, n, i, c, s);
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "fma")]
+unsafe fn rotate_columns_fma(z: &mut [f64], n: usize, i: usize, c: f64, s: f64) {
+    rotate_columns_body(z, n, i, c, s);
+}
+
+#[inline(always)]
+fn rotate_columns_body(z: &mut [f64], n: usize, i: usize, c: f64, s: f64) {
     let j = i + 1;
     for row in 0..n {
         let zi = z[i * n + row];
         let zj = z[j * n + row];
-        z[j * n + row] = s * zi + c * zj;
-        z[i * n + row] = c * zi - s * zj;
+        z[j * n + row] = s.mul_add(zi, c * zj);
+        z[i * n + row] = (-s).mul_add(zj, c * zi);
     }
 }
 
