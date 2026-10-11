@@ -67,7 +67,89 @@ def attach(images):
         atoms.set_constraint(FixCartesian(0, mask=[False, False, True]))
 
 
+def ase_window(n_simul, energies):
+    """ASE AutoNEB.which_images_to_run_on on images with these energies."""
+    from ase.calculators.singlepoint import SinglePointCalculator
+
+    images = []
+    for energy in energies:
+        atoms = Atoms("H", positions=[[0.0, 0.0, 0.0]])
+        if energy is not None:
+            atoms.calc = SinglePointCalculator(atoms, energy=float(energy), forces=[[0.0, 0.0, 0.0]])
+        images.append(atoms)
+    neb = AutoNEB.__new__(AutoNEB)
+    neb.n_simul = n_simul
+    neb.all_images = images
+    to_use, _climb_safe = AutoNEB.which_images_to_run_on(neb)
+    return list(to_use)
+
+
+def ase_worst(lengths, energies, span, ratio):
+    """The f_R / g_R block from ase/mep/autoneb.py, unchanged."""
+    fR = max(lengths) / span
+    emin = min(energies)
+    enorm = max(energies) - emin
+    ed = []
+    n_cur = len(energies)
+    for j in range(n_cur - 1):
+        delta_E = (energies[j + 1] - energies[j]) * (
+            energies[j + 1] + energies[j] - 2 * emin
+        ) / 2 / enorm
+        ed.append(abs(delta_E))
+    gR = max(ed) / enorm
+    if fR / gR > ratio:
+        jmax = int(np.argmax(lengths))
+    else:
+        jmax = int(np.argmax(ed))
+    return jmax
+
+
+def decision_cases():
+    cases = []
+    window_energies = [0.0, 0.2, 0.4, 1.0, 0.5, 0.1, 0.0]
+    cases.append(
+        {
+            "kind": "window",
+            "n_simul": 3,
+            "energies": window_energies,
+            "window": ase_window(3, window_energies),
+        }
+    )
+    missing = window_energies.copy()
+    missing[5] = None
+    cases.append(
+        {
+            "kind": "window",
+            "n_simul": 3,
+            "energies": missing,
+            "window": ase_window(3, missing),
+        }
+    )
+    length_cases = [
+        ([1.0, 1.0, 1.0, 1.0], [0.0, 0.0, 10.0, 0.0, 0.0], 4.0, 0.5),
+        ([1.0, 1.0, 1.0, 10.0], [0.0, 0.0, 10.0, 0.0, 0.0], 4.0, 0.5),
+        ([1.0, 1.0, 1.0], [0.0, 1.0, 1.0, 0.0], 3.0, 0.0),
+        ([1.0, 1.0], [0.0, 1.0, 0.0], 2.0, 2.0),
+        ([0.0, -0.0], [1.0, 2.0, 1.0], 1.0, 0.0),
+    ]
+    for lengths, energies, span, ratio in length_cases:
+        cases.append(
+            {
+                "kind": "worst",
+                "lengths": lengths,
+                "energies": energies,
+                "span": span,
+                "ratio": ratio,
+                "index": ase_worst(lengths, energies, span, ratio),
+            }
+        )
+    print(json.dumps({"cases": cases}))
+
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "--decisions":
+        decision_cases()
+        return
     start = np.array([-0.05001082, 0.46669410, 0.0])
     end = np.array([0.62349940, 0.02803776, 0.0])
     root = tempfile.mkdtemp(prefix="ase-autoneb-")
@@ -78,6 +160,31 @@ def main():
         atoms.get_potential_energy()
         write(f"{prefix}{index:03d}.traj", atoms)
     log_path = os.path.join(root, "log.txt")
+    traces = []
+    decisions = []
+    original_energies = AutoNEB.get_energies
+
+    def logged_energies(self):
+        energies = original_energies(self)
+        positions = [[float(v) for v in atoms.positions[0]] for atoms in self.all_images]
+        finite = []
+        for energy in energies:
+            finite.append(None if energy != energy else float(energy))
+        traces.append({"energies": finite, "positions": positions})
+        return energies
+
+    AutoNEB.get_energies = logged_energies
+    real_print = print
+
+    def marking_print(*args, **kwargs):
+        text_line = " ".join(str(arg) for arg in args)
+        if "Adding image between" in text_line and traces:
+            decisions.append(traces[-1])
+        return real_print(*args, **kwargs)
+
+    import builtins
+
+    builtins.print = marking_print
     saved = sys.stdout
     sys.stdout = open(log_path, "w")
     try:
@@ -102,6 +209,7 @@ def main():
     finally:
         sys.stdout.close()
         sys.stdout = saved
+        builtins.print = real_print
     text = open(log_path).read()
     geometric = [int(m) for m in re.findall(r"Max length between images is at\s+(\d+)", text)]
     dynamic = [int(m) for m in re.findall(r"Adding image between (\d+) and", text)]
@@ -123,6 +231,7 @@ def main():
                 "ci": positions[ci],
                 "energies": energies,
                 "positions": positions,
+                "decisions": decisions,
                 "log": text[-2000:],
             }
         )

@@ -8,12 +8,12 @@
 //! `n_max` if that is smaller, by cutting the longest segment.
 //! [`AutoNeb::run`] relaxes a local window, inserts one image where the
 //! resolution is worst, and repeats until `n_max` images. Climbing
-//! then runs on the window around the highest interior energy, and
-//! the full band is relaxed to [`BandConfig::force_tol`] with the
-//! same climbing settings. An unchanged window keeps one
-//! [`BandSession`], so its L-BFGS pairs survive a climb that starts
-//! on the same images. A new index set, including the full band when
-//! that set differs, starts with empty memory.
+//! then runs on the window around the highest-energy image, as ASE's
+//! `which_images_to_run_on` does. With [`AutoNebTuning::full_band`]
+//! the full band is relaxed afterwards; the default stops after the
+//! climbing window. An unchanged window keeps one [`BandSession`], so
+//! its L-BFGS pairs survive a climb that starts on the same images.
+//! A new index set starts with empty memory.
 //!
 //! [`ImageInterpolation`] places every new image. The initial fill
 //! inserts one midpoint of the longest segment at a time. ASE's
@@ -22,10 +22,14 @@
 //! segment when `n_simul` is 1 or 3, and they differ for 2.
 //! [`LinearInterpolation`] is the straight minimum-image segment. An
 //! IDPP path implements the same trait; this crate does not ship one.
-//! Buildup leaves climbing off. The spring is uniform for now. A
-//! weighted or Onsager-Machlup spring changes length when an image is
-//! inserted; zoom-NEB will recompute those springs, and the refusal
-//! is temporary. The solid-state block is not part of this loop.
+//! Buildup leaves climbing off. The host spring is uniform. The search
+//! keeps a private per-segment list: the fill from two endpoints sets
+//! every segment to `k * (n_simul + 1)`, and each later insertion
+//! replaces the cut segment with two segments of twice that constant.
+//! A weighted or Onsager-Machlup spring supplied by the host is
+//! refused. The refusal is temporary: zoom-NEB will recompute those
+//! springs when an image is inserted. The solid-state block is not
+//! part of this loop.
 //!
 //! `surface_rows` counts force evaluations: one row of
 //! [`BandSurface::eval`] is one force call. A surface error discards
@@ -41,6 +45,9 @@
 //! One thread evaluates the batch as a single call. The surface sees
 //! one block per call. A host that tells a whole-band evaluation from
 //! an interior evaluation by the row count should leave `threads` at 1.
+
+use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 
@@ -367,6 +374,8 @@ fn blocks_cover(blocks: &[OwnedBlock], n: usize) -> bool {
 struct RankedEval<'a, S> {
     surface: &'a S,
     pool: Option<&'a ImageEvalPool>,
+    trace: &'a Trace,
+    window: &'a [usize],
 }
 
 impl<S: BandSurface> BandSurface for RankedEval<'_, S> {
@@ -376,9 +385,52 @@ impl<S: BandSurface> BandSurface for RankedEval<'_, S> {
         energies: &mut Array1<f64>,
         gradients: &mut Array2<f64>,
     ) -> Result<(), SaddleError> {
+        let stage = AutoNebStage::from_byte(self.trace.stage.load(Ordering::Relaxed));
+        let step = self.trace.step.load(Ordering::Relaxed);
+        let whole = positions.nrows() == self.window.len();
+        {
+            let mut samples = self
+                .trace
+                .samples
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+            for (row, position) in positions.outer_iter().enumerate() {
+                let image = if whole {
+                    self.window[row]
+                } else {
+                    self.window[row + 1]
+                };
+                samples.push(AutoNebSample {
+                    stage,
+                    step,
+                    image,
+                    position: position.iter().copied().collect(),
+                });
+            }
+        }
         match self.pool {
             Some(pool) => pool.eval(self.surface, positions, energies, gradients),
             None => self.surface.eval(positions, energies, gradients),
+        }
+    }
+}
+
+impl AutoNebStage {
+    fn from_byte(byte: u8) -> Self {
+        match byte {
+            1 => Self::Insertion,
+            2 => Self::Climb,
+            3 => Self::FullBand,
+            _ => Self::Initial,
+        }
+    }
+
+    fn as_byte(self) -> u8 {
+        match self {
+            Self::Initial => 0,
+            Self::Insertion => 1,
+            Self::Climb => 2,
+            Self::FullBand => 3,
         }
     }
 }
@@ -405,6 +457,11 @@ pub struct AutoNebTuning {
     pub space_energy_ratio: f64,
     /// Arm the climbing image after the last insertion.
     pub climb: bool,
+    /// Also relax the full band after the climbing window.
+    ///
+    /// ASE and Kolsbjerg stop after the climbing window, so this is
+    /// off by default.
+    pub full_band: bool,
     /// Threads that evaluate images. `1` evaluates the batch on the
     /// calling thread. A larger value uses [`image_block`] and stores
     /// each result by image index. The surface sees one block per call.
@@ -421,6 +478,7 @@ impl Default for AutoNebTuning {
             climb_max_steps: 2000,
             space_energy_ratio: 0.5,
             climb: true,
+            full_band: false,
             threads: 1,
         }
     }
@@ -510,8 +568,55 @@ pub struct AutoNebReport {
     /// Rows passed to [`BandSurface::eval`]. One row is one force call.
     pub surface_rows: usize,
     pub n_images: usize,
-    /// Steps of the final full-band session.
+    /// Steps of the last stage's band session.
     pub iteration: usize,
+}
+
+/// One stretch of [`AutoNeb::run`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AutoNebStage {
+    /// Fill plus the first local window.
+    Initial,
+    /// One insertion and the window that follows it.
+    Insertion,
+    /// Climbing window.
+    Climb,
+    /// Full band, only when [`AutoNebTuning::full_band`] is set.
+    FullBand,
+}
+
+/// Positions of one evaluated image, keyed so block order does not matter.
+#[derive(Clone, Debug)]
+pub struct AutoNebSample {
+    pub stage: AutoNebStage,
+    pub step: u32,
+    pub image: usize,
+    pub position: Vec<f64>,
+}
+
+/// One optimizer step inside a stage.
+#[derive(Clone, Debug)]
+pub struct AutoNebStep {
+    pub iteration: usize,
+    pub ci_index: Option<usize>,
+    pub max_force: f64,
+}
+
+/// Calls and climbing image for one stage.
+#[derive(Clone, Debug)]
+pub struct AutoNebStageLog {
+    pub stage: AutoNebStage,
+    pub calls: usize,
+    pub ci_index: Option<usize>,
+    /// A new [`BandSession`] was opened for this stage.
+    pub opened_session: bool,
+    pub steps: Vec<AutoNebStep>,
+}
+
+struct Trace {
+    samples: Mutex<Vec<AutoNebSample>>,
+    stage: AtomicU8,
+    step: AtomicU32,
 }
 
 /// One band session kept while its image indices do not change.
@@ -530,6 +635,11 @@ pub struct AutoNeb {
     interpolation: Box<dyn ImageInterpolation + Sync>,
     positions: Array2<f64>,
     energies: Vec<Option<f64>>,
+    /// Per-segment spring constants. `springs[j]` couples images `j`
+    /// and `j + 1`. Crate-private until the explicit spring row lands.
+    springs: Vec<f64>,
+    /// Uniform host constant the fill scales from.
+    base_k: f64,
     /// Segment index of each insertion, including the initial fill.
     insertions: Vec<usize>,
     surface_rows: usize,
@@ -540,6 +650,17 @@ pub struct AutoNeb {
     /// Times [`BandSession::new`] ran. An unchanged window does not
     /// increment it.
     sessions_opened: usize,
+    trace: Arc<Trace>,
+    stages: Vec<AutoNebStageLog>,
+    cuts: Vec<AutoNebCut>,
+}
+
+/// Energies and lengths at one insertion decision.
+#[derive(Clone, Debug)]
+pub struct AutoNebCut {
+    pub index: usize,
+    pub energies: Vec<f64>,
+    pub lengths: Vec<f64>,
 }
 
 impl AutoNeb {
@@ -567,12 +688,23 @@ impl AutoNeb {
             None
         };
         let n = initial.nrows();
+        let base_k = match &config.spring {
+            SpringKind::Uniform { k } => *k,
+            _ => {
+                return Err(SaddleError::Invalid(
+                    "AutoNEB temporarily needs a uniform spring; weighted springs will be recomputed on insertion with zoom-NEB"
+                        .into(),
+                ));
+            }
+        };
         let mut search = Self {
             band: config,
             tuning,
             interpolation: Box::new(interpolation),
             positions: initial,
             energies: vec![None; n],
+            springs: vec![base_k; n - 1],
+            base_k,
             insertions: Vec::new(),
             surface_rows: 0,
             ci_index: None,
@@ -580,6 +712,13 @@ impl AutoNeb {
             pool,
             open: None,
             sessions_opened: 0,
+            trace: Arc::new(Trace {
+                samples: Mutex::new(Vec::new()),
+                stage: AtomicU8::new(0),
+                step: AtomicU32::new(0),
+            }),
+            stages: Vec::new(),
+            cuts: Vec::new(),
         };
         search.fill_initial()?;
         Ok(search)
@@ -603,6 +742,37 @@ impl AutoNeb {
         self.surface_rows
     }
 
+    /// Times a new band session was opened.
+    pub fn sessions_opened(&self) -> usize {
+        self.sessions_opened
+    }
+
+    /// Evaluated rows, stored by stage, step, and image index.
+    pub fn samples(&self) -> Vec<AutoNebSample> {
+        self.trace
+            .samples
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
+    }
+
+    /// Per-stage force calls, climbing image, and step log.
+    pub fn stages(&self) -> &[AutoNebStageLog] {
+        &self.stages
+    }
+
+    /// Insertion decisions after the initial fill, with the energies
+    /// and segment lengths that selected them.
+    pub fn cuts(&self) -> &[AutoNebCut] {
+        &self.cuts
+    }
+
+    /// Private per-segment springs after fill and insertion.
+    #[cfg(test)]
+    pub(crate) fn springs(&self) -> &[f64] {
+        &self.springs
+    }
+
     /// Segment index of each insertion, initial fill included.
     ///
     /// The index is the image after which the new images were placed,
@@ -611,10 +781,11 @@ impl AutoNeb {
         &self.insertions
     }
 
-    /// Relax, insert, climb, then converge the full band.
+    /// Relax, insert, and climb. The full band follows only when
+    /// [`AutoNebTuning::full_band`] is set.
     ///
     /// The local windows use [`AutoNebTuning::local_force_tol`]. The
-    /// climbing window and the final full band use
+    /// climbing window and the optional full band use
     /// [`BandConfig::force_tol`] and the band's climbing settings.
     /// An unchanged window keeps its [`BandSession`]. A different
     /// index set starts a new one, with empty L-BFGS memory.
@@ -625,42 +796,47 @@ impl AutoNeb {
             ));
         }
         self.started = true;
-        self.relax(
+        let mut last = self.stage(
             surface,
+            AutoNebStage::Initial,
             false,
             false,
             self.tuning.local_force_tol,
             self.tuning.local_max_steps,
         )?;
-        self.ensure_energies(surface)?;
         while self.positions.nrows() < self.tuning.n_max {
             let gap = self.next_gap()?;
-            self.insert_one(gap)?;
-            self.relax(
+            self.cuts.push(self.cut_record(gap));
+            self.insert_one(gap, true)?;
+            last = self.stage(
                 surface,
+                AutoNebStage::Insertion,
                 false,
                 false,
                 self.tuning.local_force_tol,
                 self.tuning.local_max_steps,
             )?;
-            self.ensure_energies(surface)?;
         }
         if self.tuning.climb {
-            self.relax(
+            last = self.stage(
                 surface,
+                AutoNebStage::Climb,
                 false,
                 true,
                 self.band.force_tol,
                 self.tuning.climb_max_steps,
             )?;
         }
-        let last = self.relax(
-            surface,
-            true,
-            self.tuning.climb,
-            self.band.force_tol,
-            self.tuning.climb_max_steps,
-        )?;
+        if self.tuning.full_band {
+            last = self.stage(
+                surface,
+                AutoNebStage::FullBand,
+                true,
+                self.tuning.climb,
+                self.band.force_tol,
+                self.tuning.climb_max_steps,
+            )?;
+        }
         Ok(AutoNebReport {
             status: last.status,
             max_force: last.max_force,
@@ -671,11 +847,40 @@ impl AutoNeb {
         })
     }
 
+    fn stage<S: BandSurface>(
+        &mut self,
+        surface: &S,
+        stage: AutoNebStage,
+        full: bool,
+        climb: bool,
+        force_tol: f64,
+        max_steps: usize,
+    ) -> Result<crate::band::BandReport, SaddleError> {
+        let before = self.surface_rows;
+        let opened_before = self.sessions_opened;
+        self.trace.stage.store(stage.as_byte(), Ordering::Relaxed);
+        let (report, steps) = self.relax(surface, full, climb, force_tol, max_steps)?;
+        self.ensure_energies(surface)?;
+        self.stages.push(AutoNebStageLog {
+            stage,
+            calls: self.surface_rows - before,
+            ci_index: self.ci_index,
+            opened_session: self.sessions_opened > opened_before,
+            steps,
+        });
+        Ok(report)
+    }
+
     fn fill_initial(&mut self) -> Result<(), SaddleError> {
+        let from_two = self.positions.nrows() == 2;
         let target = (self.tuning.n_simul + 2).min(self.tuning.n_max);
         while self.positions.nrows() < target {
             let gap = self.longest_segment();
-            self.insert_one(gap)?;
+            self.insert_one(gap, !from_two)?;
+        }
+        if from_two {
+            let scaled = self.base_k * (self.tuning.n_simul as f64 + 1.0);
+            self.springs = vec![scaled; self.positions.nrows() - 1];
         }
         Ok(())
     }
@@ -725,7 +930,28 @@ impl AutoNeb {
         worst_segment(&lengths, &energies, span, self.tuning.space_energy_ratio)
     }
 
-    fn insert_one(&mut self, after: usize) -> Result<(), SaddleError> {
+    fn cut_record(&self, index: usize) -> AutoNebCut {
+        let n = self.positions.nrows();
+        let mut lengths = Vec::with_capacity(n - 1);
+        for j in 0..n - 1 {
+            lengths.push(segment_length(
+                self.positions.row(j),
+                self.positions.row(j + 1),
+                self.band.cell.as_ref(),
+            ));
+        }
+        AutoNebCut {
+            index,
+            energies: self
+                .energies
+                .iter()
+                .map(|energy| energy.unwrap_or(f64::NAN))
+                .collect(),
+            lengths,
+        }
+    }
+
+    fn insert_one(&mut self, after: usize, rescale: bool) -> Result<(), SaddleError> {
         let image = self
             .interpolation
             .insert(self.positions.view(), &self.energies, after)?;
@@ -740,6 +966,19 @@ impl AutoNeb {
         }
         self.positions = splice_rows(&self.positions, after, &[image]);
         self.energies.insert(after + 1, None);
+        if rescale {
+            // ASE: the cut segment of constant k becomes two segments of 2k
+            // when one image is inserted, or (n_between + 1) copies of
+            // k * (n_between + 1) when several are inserted at once.
+            let cut = self.springs[after];
+            let scaled = cut * 2.0;
+            let mut next = Vec::with_capacity(self.springs.len() + 1);
+            next.extend_from_slice(&self.springs[..after]);
+            next.push(scaled);
+            next.push(scaled);
+            next.extend_from_slice(&self.springs[after + 1..]);
+            self.springs = next;
+        }
         self.insertions.push(after);
         self.open = None;
         Ok(())
@@ -776,6 +1015,23 @@ impl AutoNeb {
         }
         let mut energies = Array1::zeros(missing.len());
         let mut gradients = Array2::zeros((missing.len(), dof));
+        self.trace.step.store(0, Ordering::Relaxed);
+        let stage = AutoNebStage::from_byte(self.trace.stage.load(Ordering::Relaxed));
+        {
+            let mut samples = self
+                .trace
+                .samples
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+            for &index in &missing {
+                samples.push(AutoNebSample {
+                    stage,
+                    step: 0,
+                    image: index,
+                    position: self.positions.row(index).iter().copied().collect(),
+                });
+            }
+        }
         self.eval_rows(surface, positions.view(), &mut energies, &mut gradients)?;
         self.surface_rows += missing.len();
         for (row, &index) in missing.iter().enumerate() {
@@ -802,7 +1058,7 @@ impl AutoNeb {
         climb: bool,
         force_tol: f64,
         max_steps: usize,
-    ) -> Result<crate::band::BandReport, SaddleError> {
+    ) -> Result<(crate::band::BandReport, Vec<AutoNebStep>), SaddleError> {
         let window = if full {
             (0..self.positions.nrows()).collect::<Vec<_>>()
         } else {
@@ -823,10 +1079,13 @@ impl AutoNeb {
             for (row, &index) in window.iter().enumerate() {
                 sub.row_mut(row).assign(&self.positions.row(index));
             }
+            let start = window[0];
+            let ks = self.springs[start..start + window.len() - 1].to_vec();
             let mut band = self.band.clone();
             band.force_tol = force_tol;
             band.climbing = climbing;
             band.autoneb = None;
+            band.spring = SpringKind::Weighted { ks };
             let mut session = BandSession::new(band, sub)?;
             let last = *window.last().expect("window");
             if let (Some(left), Some(right)) = (self.energies[window[0]], self.energies[last]) {
@@ -840,21 +1099,40 @@ impl AutoNeb {
         }
 
         let pool = self.pool.as_ref();
-        let ranked = RankedEval { surface, pool };
-        let (report, rows, relaxed, evaluation) = {
+        let trace = Arc::clone(&self.trace);
+        let ranked = RankedEval {
+            surface,
+            pool,
+            trace: &trace,
+            window: &window,
+        };
+        let (report, rows, relaxed, evaluation, steps) = {
             let open = self.open.as_mut().expect("open window");
             let mut taken = 0usize;
+            let mut steps = Vec::new();
+            trace.step.store(1, Ordering::Relaxed);
             let mut report = open.session.step(&ranked)?;
             let mut rows = report.surface_rows;
             taken += 1;
+            steps.push(AutoNebStep {
+                iteration: report.iteration,
+                ci_index: report.ci_index.map(|local| window[local]),
+                max_force: report.max_force,
+            });
             while report.status == BandStatus::Running && taken < max_steps {
+                trace.step.store((taken as u32) + 1, Ordering::Relaxed);
                 report = open.session.step(&ranked)?;
                 rows += report.surface_rows;
                 taken += 1;
+                steps.push(AutoNebStep {
+                    iteration: report.iteration,
+                    ci_index: report.ci_index.map(|local| window[local]),
+                    max_force: report.max_force,
+                });
             }
             let relaxed = open.session.positions().to_owned();
             let evaluation = open.session.evaluation();
-            (report, rows, relaxed, evaluation)
+            (report, rows, relaxed, evaluation, steps)
         };
         self.surface_rows += rows;
         if !relaxed.iter().all(|value| value.is_finite()) {
@@ -885,7 +1163,7 @@ impl AutoNeb {
             .then_some(report.ci_index)
             .flatten()
             .map(|local| window[local]);
-        Ok(report)
+        Ok((report, steps))
     }
 }
 
@@ -931,70 +1209,77 @@ fn splice_rows(positions: &Array2<f64>, after: usize, rows: &[Array1<f64>]) -> A
     out
 }
 
-/// Free images are the interior of the returned index run.
+/// ASE `which_images_to_run_on`.
 ///
-/// A short band is returned whole. Otherwise the run pins one image
-/// on each side of at least `n_simul` free images. Every image that
-/// still has no energy is free, so a just-inserted image moves; the
-/// window grows past `n_simul` when several are missing. With every
-/// energy known, the free set is centered on the highest interior
-/// energy and that image is not a pin.
-fn local_window(n_images: usize, n_simul: usize, energies: &[Option<f64>]) -> Vec<usize> {
-    let pins = n_simul + 2;
-    if n_images <= pins {
-        return (0..n_images).collect();
+/// `nneb` starts at `h - 1 - n_simul / 2`, where `h` is the
+/// highest-energy image, endpoints included. Ties keep the lower
+/// index. The four clamps are `max(nneb, 0)`,
+/// `min(nneb, n - n_simul - 2)`, `min(nneb, first_missing - 1)`, and
+/// `max(nneb + n_simul, last_missing) - n_simul`. `first_missing` and
+/// `last_missing` look only at interior images. The ends then walk
+/// outward until both hold an energy.
+pub(crate) fn local_window(
+    n_images: usize,
+    n_simul: usize,
+    energies: &[Option<f64>],
+) -> Vec<usize> {
+    if n_images == 0 || n_simul == 0 {
+        return Vec::new();
     }
-    let missing: Vec<usize> = (1..n_images - 1)
-        .filter(|&index| energies[index].is_none())
-        .collect();
-    let (focus_lo, focus_hi) = if let (Some(&lo), Some(&hi)) = (missing.first(), missing.last()) {
-        (lo, hi)
-    } else {
-        let highest = highest_interior(energies);
-        (highest, highest)
-    };
-    let need = focus_hi - focus_lo + 1;
-    let interior = need.max(n_simul);
-    let spare = interior - need;
-    let mut interior_start = focus_lo.saturating_sub(spare / 2);
-    if interior_start < 1 {
-        interior_start = 1;
-    }
-    let max_start = (n_images - 1) - interior;
-    if interior_start > max_start {
-        interior_start = max_start;
-    }
-    let start = interior_start - 1;
-    let end = interior_start + interior;
-    (start..=end).collect()
-}
-
-fn highest_interior(energies: &[Option<f64>]) -> usize {
-    let n = energies.len();
-    let mut best_i = n / 2;
-    let mut best_e = f64::NEG_INFINITY;
+    let mut highest = 0usize;
+    let mut best = f64::NEG_INFINITY;
     let mut any = false;
-    for (index, energy) in energies
-        .iter()
-        .enumerate()
-        .skip(1)
-        .take(n.saturating_sub(2))
-    {
+    for (index, energy) in energies.iter().enumerate().take(n_images) {
         if let Some(energy) = energy
-            && *energy > best_e
+            && (!any || *energy > best)
         {
-            best_e = *energy;
-            best_i = index;
+            best = *energy;
+            highest = index;
             any = true;
         }
     }
-    if any {
-        best_i
-    } else if n >= 3 {
-        n / 2
-    } else {
-        0
+    let mut first_missing = n_images;
+    let mut last_missing = 0isize;
+    if n_images >= 2 {
+        for index in 1..n_images - 1 {
+            if energies.get(index).and_then(|energy| *energy).is_none() {
+                first_missing = first_missing.min(index);
+                last_missing = last_missing.max(index as isize);
+            }
+        }
     }
+    let mut nneb = highest as isize - 1 - (n_simul as isize) / 2;
+    nneb = nneb.max(0);
+    nneb = nneb.min(n_images as isize - n_simul as isize - 2);
+    nneb = nneb.min(first_missing as isize - 1);
+    nneb = (nneb + n_simul as isize).max(last_missing) - n_simul as isize;
+    let width = n_simul as isize + 2;
+    let mut start = nneb;
+    let mut end = nneb + width - 1;
+    let known = |index: isize| -> bool {
+        index >= 0
+            && (index as usize) < n_images
+            && energies
+                .get(index as usize)
+                .and_then(|energy| *energy)
+                .is_some()
+    };
+    while start > 0 && !known(start) {
+        start -= 1;
+    }
+    while end + 1 < n_images as isize && !known(end) {
+        end += 1;
+    }
+    if start < 0 {
+        start = 0;
+    }
+    if end >= n_images as isize {
+        end = n_images as isize - 1;
+    }
+    if end < start {
+        return (0..n_images).collect();
+    }
+    (start as usize..=end as usize).collect()
 }
 
 #[cfg(test)]
@@ -1094,13 +1379,43 @@ mod tests {
         ];
         let window = local_window(7, 3, &energies);
         assert_eq!(window, vec![1, 2, 3, 4, 5]);
-        assert!(window[1..window.len() - 1].contains(&3));
 
         let mut missing = energies;
         missing[5] = None;
-        let window = local_window(7, 3, &missing);
-        let free = &window[1..window.len() - 1];
-        assert!(free.contains(&5), "{window:?}");
+        assert_eq!(local_window(7, 3, &missing), vec![2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn ties_keep_the_lower_index_including_signed_zero() {
+        assert_eq!(
+            worst_segment(&[1.0, 1.0, 1.0], &[0.0, 1.0, 1.0, 0.0], 3.0, 0.0).unwrap(),
+            0
+        );
+        assert_eq!(
+            worst_segment(&[1.0, 1.0], &[0.0, 1.0, 0.0], 2.0, 2.0).unwrap(),
+            0
+        );
+        assert_eq!(first_max(&[0.0, -0.0, 0.0]), 0);
+        assert_eq!(
+            worst_segment(&[0.0, -0.0], &[1.0, 2.0, 1.0], 1.0, 0.0).unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn fill_scales_like_ase_and_an_insertion_doubles_the_cut() {
+        let config = band_with(AutoNebTuning {
+            n_simul: 3,
+            n_max: 6,
+            local_max_steps: 1,
+            climb_max_steps: 1,
+            climb: false,
+            ..AutoNebTuning::default()
+        });
+        let mut search = AutoNeb::new(config, array![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]).unwrap();
+        assert_eq!(search.springs(), &[20.0, 20.0, 20.0, 20.0]);
+        search.run(&Flat).unwrap();
+        assert_eq!(search.springs(), &[40.0, 40.0, 20.0, 20.0, 20.0]);
     }
 
     struct Flat;
@@ -1535,39 +1850,113 @@ mod tests {
         let block_max = chosen.1.iter().copied().max().unwrap_or(Duration::ZERO);
         let block_min = chosen.1.iter().copied().min().unwrap_or(Duration::ZERO);
         let wall = chosen.0.as_secs_f64();
-        let overhead = wall - block_max.as_secs_f64();
-        let limiter = if block_max > Duration::ZERO && overhead > 0.4 * block_max.as_secs_f64() {
-            "scheduling and join"
-        } else if block_min > Duration::ZERO
-            && block_max.as_secs_f64() > 1.25 * block_min.as_secs_f64()
-        {
-            "load imbalance"
-        } else {
-            "per-image arithmetic"
-        };
 
-        let n_simul = 3;
-        let window = positions.slice(ndarray::s![0..n_simul, ..]).to_owned();
-        let mut window_samples = [Vec::new(), Vec::new()];
-        let window_pools = [pools[0].threads(), *counts.last().unwrap()];
-        for _rep in 0..5 {
-            for (slot, &threads) in window_pools.iter().enumerate() {
-                let pool = pools.iter().find(|pool| pool.threads() == threads).unwrap();
-                let mut energies = Array1::zeros(n_simul);
-                let mut gradients = Array2::zeros((n_simul, dof));
-                let started = std::time::Instant::now();
-                pool.eval(&surface, window.view(), &mut energies, &mut gradients)
-                    .unwrap();
-                std::hint::black_box((energies.as_slice(), gradients.as_slice()));
-                window_samples[slot].push(started.elapsed());
+        struct ZeroCost;
+        impl BandSurface for ZeroCost {
+            fn eval(
+                &self,
+                positions: ArrayView2<f64>,
+                energies: &mut Array1<f64>,
+                gradients: &mut Array2<f64>,
+            ) -> Result<(), SaddleError> {
+                let _ = positions;
+                energies.fill(0.0);
+                gradients.fill(0.0);
+                Ok(())
             }
         }
-        let (w1, _, _) = median_range(&mut window_samples[0]);
-        let (wp, _, _) = median_range(&mut window_samples[1]);
-        let speedup = w1.as_secs_f64() / wp.as_secs_f64();
+        let zero = ZeroCost;
+        let join_pool = pools.last().unwrap();
+        let mut join_samples = Vec::with_capacity(5);
+        for _rep in 0..5 {
+            let mut energies = Array1::zeros(n_images);
+            let mut gradients = Array2::zeros((n_images, dof));
+            let started = std::time::Instant::now();
+            join_pool
+                .eval(&zero, positions.view(), &mut energies, &mut gradients)
+                .unwrap();
+            std::hint::black_box(energies.as_slice());
+            join_samples.push(started.elapsed());
+        }
+        let (join_median, _, _) = median_range(&mut join_samples);
 
+        struct Spin;
+        impl BandSurface for Spin {
+            fn eval(
+                &self,
+                positions: ArrayView2<f64>,
+                energies: &mut Array1<f64>,
+                gradients: &mut Array2<f64>,
+            ) -> Result<(), SaddleError> {
+                for (i, row) in positions.outer_iter().enumerate() {
+                    let started = std::time::Instant::now();
+                    while started.elapsed() < Duration::from_micros(1_100) {
+                        std::hint::spin_loop();
+                    }
+                    energies[i] = row[0];
+                    gradients.row_mut(i).fill(0.0);
+                    gradients[(i, 0)] = 0.2;
+                }
+                Ok(())
+            }
+        }
+
+        let thread_counts = [1_usize, 2, 3, 4, 8];
+        let mut e2e = Vec::new();
+        for &n_simul in &[3_usize, 8] {
+            let mut buckets = vec![Vec::new(); thread_counts.len()];
+            for _rep in 0..5 {
+                for (index, &threads) in thread_counts.iter().enumerate() {
+                    let config = BandConfig {
+                        force_tol: 1e-6,
+                        max_move: 0.05,
+                        autoneb: Some(AutoNebTuning {
+                            n_simul,
+                            n_max: n_simul + 2,
+                            local_force_tol: 1e-6,
+                            local_max_steps: 3,
+                            climb_max_steps: 3,
+                            climb: true,
+                            full_band: false,
+                            threads,
+                            ..AutoNebTuning::default()
+                        }),
+                        ..BandConfig::default()
+                    };
+                    let initial = array![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
+                    let mut search = AutoNeb::new(config, initial).unwrap();
+                    let started = std::time::Instant::now();
+                    search.run(&Spin).unwrap();
+                    std::hint::black_box(search.positions());
+                    buckets[index].push(started.elapsed());
+                }
+            }
+            e2e.push((n_simul, buckets));
+        }
+
+        eprintln!("end-to-end AutoNEB, spin >= 1 ms per force call, simd=none");
+        for (n_simul, buckets) in &mut e2e {
+            eprintln!("n_simul={n_simul} ceiling={n_simul} free images");
+            eprintln!("threads  median_ms  min_ms  max_ms  efficiency");
+            let mut medians = Vec::new();
+            for (index, &threads) in thread_counts.iter().enumerate() {
+                let (median, low, high) = median_range(&mut buckets[index]);
+                medians.push(median.as_secs_f64());
+                let efficiency = if threads == 1 {
+                    1.0
+                } else {
+                    medians[0] / (threads as f64 * median.as_secs_f64())
+                };
+                eprintln!(
+                    "{threads:<7}  {:>9.3}  {:>6.3}  {:>6.3}  {efficiency:.3}",
+                    median.as_secs_f64() * 1e3,
+                    low.as_secs_f64() * 1e3,
+                    high.as_secs_f64() * 1e3,
+                );
+            }
+        }
         eprintln!(
-            "hardware_threads={hardware} processors={processors} simd=none images={n_images} dof={dof} passes={passes}"
+            "pool microbenchmark hardware_threads={hardware} processors={processors} simd=none images={n_images} dof={dof} passes={passes}"
         );
         eprintln!("threads  median_ms  min_ms  max_ms  efficiency");
         for (threads, median, low, high, efficiency) in &rows {
@@ -1579,21 +1968,17 @@ mod tests {
             );
         }
         eprintln!(
-            "widest blocks: max_ms={:.3} min_ms={:.3} wall_ms={:.3} overhead_ms={:.3} spread={:.3} limiter={limiter}",
+            "pool microbenchmark widest blocks: max_ms={:.3} min_ms={:.3} wall_ms={:.3}",
             block_max.as_secs_f64() * 1e3,
             block_min.as_secs_f64() * 1e3,
             wall * 1e3,
-            overhead * 1e3,
-            block_max.as_secs_f64() / block_min.as_secs_f64().max(1e-12),
         );
         eprintln!(
-            "autoneb window: free_images={n_simul} (n_simul cap) threads={} median_ms={:.3} threads={} median_ms={:.3} speedup={speedup:.3}",
-            window_pools[0],
-            w1.as_secs_f64() * 1e3,
-            window_pools[1],
-            wp.as_secs_f64() * 1e3,
+            "pool microbenchmark spawn_and_join_ms={:.3} per call at {} threads",
+            join_median.as_secs_f64() * 1e3,
+            join_pool.threads(),
         );
         assert!(rows[0].1 > 0.0);
-        assert!(!limiter.is_empty());
+        assert!(join_median > Duration::ZERO || join_pool.threads() == 1);
     }
 }
