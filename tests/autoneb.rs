@@ -147,6 +147,7 @@ fn muller_brown_matches_an_ase_autoneb_run() {
             climb: true,
             full_band: false,
             threads: 1,
+            record_samples: false,
         }),
         ..BandConfig::default()
     };

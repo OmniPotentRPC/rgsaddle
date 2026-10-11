@@ -4,6 +4,7 @@
 * Unreleased
 
 - AutoNEB stays in Rust until the stencil configuration lands. C, C++, and Python reach ~BandConfig::autoneb~ later as that configuration's AutoNEB preset. The C ABI stays at minor 16.
+- AutoNEB records a trajectory only when ~record_samples~ is set. The default stores nothing and takes no sample lock. One stored call is one ~f64~ per degree of freedom.
 - AutoNEB follows the ASE window and spring rescaling. The fill from two endpoints sets every segment to ~k * (n_simul + 1)~, and each insertion doubles the cut segment. The search stops after the climbing window unless ~full_band~ is set. On the double well that default used 1.42 times as many force calls as one fixed CI-NEB. Müller-Brown from B to C used 0.46 times as many, and the two-barrier path from A to B has mean ratio 0.95.
 - AutoNEB reuses one band session while the window indices do not change, so the L-BFGS pairs survive the climb on that window. A new index set starts empty. Known endpoint energies are not evaluated again.
 - AutoNEB image evaluation keeps one thread pool for the search. Each evaluation is a fixed set of contiguous blocks, stored by image index after every block has finished. One thread evaluates the batch in a single call. There is no SIMD path. The warm-step speedup is capped by ~n_simul~ free images.

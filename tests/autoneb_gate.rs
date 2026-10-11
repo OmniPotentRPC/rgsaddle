@@ -183,6 +183,7 @@ fn config(force_tol: f64, full_band: bool) -> BandConfig {
             climb: true,
             full_band,
             threads: 1,
+            record_samples: false,
         }),
         ..BandConfig::default()
     }
@@ -805,6 +806,7 @@ fn stage_byte(stage: AutoNebStage) -> u8 {
         AutoNebStage::Insertion => 1,
         AutoNebStage::Climb => 2,
         AutoNebStage::FullBand => 3,
+        _ => 4,
     }
 }
 
@@ -856,6 +858,7 @@ fn hash_band<S: BandSurface + Copy>(
         tuning.n_max = 6;
         tuning.local_max_steps = 12;
         tuning.climb_max_steps = 20;
+        tuning.record_samples = true;
     }
     let initial = Array2::from_shape_vec((3, 3), points.into_iter().flatten().collect()).unwrap();
     let mut search = AutoNeb::new(cfg, initial).unwrap();

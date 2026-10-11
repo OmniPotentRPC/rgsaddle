@@ -6,7 +6,7 @@
 |--------------------------------+--------------------------------------------------------------------------------------------------------------------|
 | =BandSession=                  | Outer seam. =new=, =step=, =run=, =restart=, =reset=, =set_positions=, =positions=, =evaluation=                   |
 | =AutoNeb=                      | Insert on the worst gap, relax a local window, and climb. The full band runs only when =full_band= is set. =run= is one shot |
-| =AutoNebTuning=                | =n_simul=, =n_max=, local tolerance and step caps, =space_energy_ratio=, =climb=, =full_band=, =threads=. Stored on =BandConfig= |
+| =AutoNebTuning=                | =n_simul=, =n_max=, local tolerance and step caps, =space_energy_ratio=, =climb=, =full_band=, =threads=, =record_samples=. Stored on =BandConfig= |
 | =BandConfig=                   | Tangent, spring, projection, climbing, cell, tolerances, method, optional AutoNEB tuning                           |
 | =BandSurface=                  | Host potential on a band (energies + gradients per image)                                                          |
 | =BandReport=                   | =status=, =max_force=, =ci_index=, =iteration=, =surface_rows=                                                     |
