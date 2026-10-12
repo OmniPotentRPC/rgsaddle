@@ -19,11 +19,10 @@ use crate::stencil::spring_ew::{K_MAX_EV_PER_A2, K_MIN_EV_PER_A2, fill_constants
 use super::batch::{IdBook, bind_for_step};
 use super::chain::{Chain, EvalPool};
 use super::idpp::IdppRun;
+use super::oci::OciControl;
 use super::triad::{Coupling, TangentRule, coupling_forces, perp, unit_tangent};
 use super::zoom::{ZoomEnds, ZoomParams, ZoomWatch, pack_window, select_window};
 use super::{PHASE_BAND, PHASE_INSERT, PHASE_ZOOM, Preset, StencilReport, StencilStatus, Surface};
-
-const UNSUPPORTED_OCI: &str = "OCI-NEB is not implemented yet";
 
 #[derive(Clone, Copy)]
 struct ForceLaw {
@@ -46,6 +45,7 @@ enum Kind {
     Auto,
     Idpp,
     SIdpp,
+    Oci,
 }
 
 struct Inner {
@@ -57,6 +57,7 @@ struct Inner {
     total_rows: usize,
     last_projected: Option<Array1<f64>>,
     last_max: f64,
+    true_peak: Option<f64>,
     error: Option<SaddleError>,
 }
 
@@ -87,6 +88,8 @@ pub struct BandEngine {
     auto: Option<AutoNeb>,
     book: Option<Arc<IdBook>>,
     idpp: Option<IdppRun>,
+    oci: Option<OciControl>,
+    last_curvature: f64,
 }
 
 pub struct BandSpec {
@@ -147,7 +150,10 @@ impl BandEngine {
         } else {
             ProjectionKind::Neb
         };
-        let climb = matches!(kind, Kind::Ci | Kind::Weighted | Kind::Zoom | Kind::Auto);
+        let climb = matches!(
+            kind,
+            Kind::Ci | Kind::Weighted | Kind::Zoom | Kind::Auto | Kind::Oci
+        );
         let zoom = match kind {
             Kind::Zoom => Some(ZoomWatch::new(spec.zoom.unwrap_or_default())),
             _ => None,
@@ -215,6 +221,7 @@ impl BandEngine {
                 total_rows: 0,
                 last_projected: None,
                 last_max: f64::NAN,
+                true_peak: None,
                 error: None,
             })),
             flat_cache,
@@ -242,6 +249,8 @@ impl BandEngine {
             auto,
             book,
             idpp,
+            oci: (kind == Kind::Oci).then(OciControl::new),
+            last_curvature: f64::NAN,
         })
     }
 
@@ -296,9 +305,13 @@ impl BandEngine {
     }
 
     pub fn step<S: Surface>(&mut self, surface: &S) -> Result<StencilReport, SaddleError> {
+        self.last_curvature = f64::NAN;
         if self.idpp.is_some() {
             let _ = surface;
             return self.step_idpp();
+        }
+        if self.oci.is_some() {
+            return self.step_oci(surface);
         }
         if self.auto.is_some() {
             return self.step_auto(surface);
@@ -506,6 +519,9 @@ impl BandEngine {
         let positions = inner.chain.positions().to_owned();
         let energies = inner.chain.energies().to_vec();
         let gradients = inner.chain.gradients().to_owned();
+        if inner.true_peak.is_none() {
+            inner.true_peak = Some(peak_true_force(&gradients));
+        }
         if energies.iter().any(|value| !value.is_finite())
             || gradients.iter().any(|value| !value.is_finite())
         {
@@ -716,6 +732,173 @@ impl BandEngine {
         Ok(self.report(StencilStatus::Running, 0.0, 0, PHASE_ZOOM))
     }
 
+    fn step_oci<S: Surface>(&mut self, surface: &S) -> Result<StencilReport, SaddleError> {
+        let skip = self.oci.as_ref().is_some_and(|control| control.skip);
+        if skip {
+            if let Some(control) = self.oci.as_mut() {
+                control.skip = false;
+            }
+        } else if self.oci.as_ref().is_some_and(|control| control.trigger())
+            && self.lock().chain.filled()
+        {
+            return self.step_mmf(surface);
+        }
+        let report = self.optimizer_step(surface)?;
+        self.observe_oci()?;
+        Ok(report)
+    }
+
+    fn observe_oci(&mut self) -> Result<(), SaddleError> {
+        let (ci, peak, projected, dof, free_ends) = {
+            let inner = self.lock();
+            (
+                inner.ci,
+                inner.true_peak,
+                inner.last_projected.clone(),
+                inner.chain.positions().ncols(),
+                inner.free_ends,
+            )
+        };
+        let f_ci = match (ci, projected) {
+            (Some(index), Some(projected)) if dof > 0 && projected.len().is_multiple_of(dof) => {
+                let row = if free_ends {
+                    Some(index)
+                } else {
+                    index.checked_sub(1)
+                };
+                row.filter(|row| (*row + 1) * dof <= projected.len())
+                    .map(|row| {
+                        let force = projected.slice(s![row * dof..(row + 1) * dof]);
+                        force.dot(&force).sqrt()
+                    })
+                    .unwrap_or(f64::INFINITY)
+            }
+            _ => f64::INFINITY,
+        };
+        if let Some(control) = self.oci.as_mut() {
+            control.observe(ci, f_ci, peak);
+        }
+        Ok(())
+    }
+
+    fn step_mmf<S: Surface>(&mut self, surface: &S) -> Result<StencilReport, SaddleError> {
+        let (ci, positions, energies, gradients, ids) = {
+            let inner = self.lock();
+            if !inner.chain.filled() {
+                return Err(SaddleError::Invalid(
+                    "OCI-NEB needs the forces from the previous step".into(),
+                ));
+            }
+            (
+                inner.ci,
+                inner.chain.positions().to_owned(),
+                inner.chain.energies().to_vec(),
+                inner.chain.gradients().to_owned(),
+                inner.chain.ids().to_vec(),
+            )
+        };
+        let ci = ci.ok_or_else(|| SaddleError::Invalid("OCI-NEB needs a climbing image".into()))?;
+        if ci == 0 || ci + 1 >= positions.nrows() {
+            return Err(SaddleError::Invalid(
+                "OCI-NEB climbing image must be an interior image".into(),
+            ));
+        }
+        let diff_next = &positions.row(ci + 1) - &positions.row(ci);
+        let diff_prev = &positions.row(ci) - &positions.row(ci - 1);
+        let tangent = unit_tangent(
+            self.tangent,
+            diff_next.view(),
+            diff_prev.view(),
+            energies[ci],
+            energies[ci - 1],
+            energies[ci + 1],
+        )
+        .map_err(|err| SaddleError::Invalid(format!("image {ci}: {err}")))?;
+        let control = self.oci.as_ref().expect("oci");
+        let f_ci = control.f_ci;
+        let request = super::oci::DimerRequest {
+            alpha_tol: control.alpha_tol,
+            max_mmf: control.max_mmf,
+            force_tol: self.force_tol,
+            max_move: self.max_move,
+            method: self.method.clone(),
+        };
+        let cached = control.cached_mode.clone();
+        let end = super::oci::run_dimer(
+            surface,
+            ids[ci],
+            positions.row(ci).to_owned(),
+            gradients.row(ci).to_owned(),
+            tangent.clone(),
+            cached,
+            &request,
+        )?;
+        {
+            let mut inner = self.lock();
+            inner.total_rows += end.evaluations;
+        }
+        self.last_curvature = end.curvature;
+        if end.positive_curvature {
+            if let Some(control) = self.oci.as_mut() {
+                control.cached_mode = None;
+                control.skip = true;
+            }
+            self.iteration += 1;
+            return Ok(self.report(StencilStatus::Running, f_ci, end.evaluations, PHASE_BAND));
+        }
+        let mut trial = positions.clone();
+        trial.row_mut(ci).assign(&end.position);
+        let mut trial_grad = gradients.clone();
+        trial_grad.row_mut(ci).assign(&end.gradient);
+        let mut trial_energy = energies.clone();
+        trial_energy[ci] = end.energy;
+        let n = trial.nrows();
+        let mut ks = vec![self.k; n - 1];
+        let law = ForceLaw {
+            projection: self.projection,
+            climb: true,
+            tangent: self.tangent,
+            k: self.k,
+            energy_weighted: self.energy_weighted,
+            trigger_factor: self.trigger_factor,
+            trigger_force: self.trigger_force,
+        };
+        if let Some((k_min, k_max)) = self.energy_weighted {
+            fill_constants(&trial_energy, k_min, k_max, &mut ks);
+        }
+        let climb_force = image_force(&trial, &trial_energy, &trial_grad, &ks, ci, true, law)?;
+        let f_new = climb_force.dot(&climb_force).sqrt();
+        let improved = f_new < f_ci;
+        if improved {
+            super::chain::hermite_equal_arc(&mut trial)?;
+        }
+        let next = self.lock().chain.next_id();
+        {
+            let mut inner = self.lock();
+            inner.chain.replace(trial, ids, next)?;
+            inner.ci = Some(ci);
+            inner.last_projected = None;
+        }
+        self.remember_flat();
+        if improved {
+            self.solver.forget();
+        }
+        if let Some(control) = self.oci.as_mut() {
+            let f0 = control.f0.unwrap_or(f_ci);
+            if improved {
+                let ratio = if f_ci > 0.0 { f_new / f_ci } else { 0.0 };
+                control.t_mmf = f_new * (0.5 + 0.4 * ratio);
+                control.cached_mode = Some(end.mode);
+            } else {
+                control.t_mmf = f0 * control.lambda * (0.5 + 0.5 * end.alpha);
+                control.cached_mode = None;
+            }
+            control.f_ci = f_new;
+        }
+        self.iteration += 1;
+        Ok(self.report(StencilStatus::Running, f_new, end.evaluations, PHASE_BAND))
+    }
+
     fn report(
         &self,
         status: StencilStatus,
@@ -726,7 +909,7 @@ impl BandEngine {
         StencilReport {
             status,
             max_force,
-            curvature: f64::NAN,
+            curvature: self.last_curvature,
             iteration: self.iteration,
             evaluations,
             total_evaluations: {
@@ -757,7 +940,7 @@ fn kind_of(preset: Preset) -> Result<Kind, SaddleError> {
         Preset::AutoNeb => Kind::Auto,
         Preset::Idpp => Kind::Idpp,
         Preset::SIdpp => Kind::SIdpp,
-        Preset::OciNeb => return Err(SaddleError::Invalid(UNSUPPORTED_OCI.into())),
+        Preset::OciNeb => Kind::Oci,
         other => {
             return Err(SaddleError::Invalid(format!(
                 "{} is a point preset",
@@ -905,6 +1088,29 @@ fn free_end_force(
     let mut projected = perp(force.view(), tangent.view());
     crate::band::remove_net_translation(&mut projected);
     projected
+}
+
+fn peak_true_force(gradients: &Array2<f64>) -> f64 {
+    let dof = gradients.ncols();
+    let mut peak = 0.0_f64;
+    if dof.is_multiple_of(3) && dof >= 3 {
+        let atoms = dof / 3;
+        for image in gradients.rows() {
+            for atom in 0..atoms {
+                let mut square = 0.0;
+                for k in 0..3 {
+                    let value = image[3 * atom + k];
+                    square += value * value;
+                }
+                peak = peak.max(square.sqrt());
+            }
+        }
+    } else {
+        for image in gradients.rows() {
+            peak = peak.max(image.dot(&image).sqrt());
+        }
+    }
+    peak
 }
 
 fn max_abs(values: &Array1<f64>) -> f64 {

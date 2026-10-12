@@ -63,8 +63,10 @@ fn refused_presets_name_the_missing_piece() {
     assert!(idpp.contains("at least two atoms"));
     let sidpp = must_err(Stencil::band(band.clone()).preset(Preset::SIdpp).build());
     assert!(sidpp.contains("at least two atoms"));
-    let oci = must_err(Stencil::band(band).preset(Preset::OciNeb).build());
-    assert!(oci.contains("OCI-NEB is not implemented yet"));
+    Stencil::band(band)
+        .preset(Preset::OciNeb)
+        .build()
+        .expect("oci-neb");
     let point = must_err(Stencil::point(Array1::zeros(3)).preset(Preset::Neb).build());
     assert!(point.contains("band preset"));
     for text in [must_err(

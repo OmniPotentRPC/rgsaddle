@@ -1,8 +1,8 @@
 //! Opaque stencil handles.
 //!
 //! Point presets and band presets share these symbols. IDPP and S-IDPP
-//! relax the pair-potential path. OCI-NEB is named and refused.
-//! Every entry catches a panic and
+//! relax the pair-potential path. OCI-NEB follows the climbing image
+//! with the dimer. Every entry catches a panic and
 //! records [`rgsaddle_last_error`].
 
 use std::cell::RefCell;

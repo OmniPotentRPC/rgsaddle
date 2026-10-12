@@ -137,6 +137,17 @@ def bond(positions: np.ndarray) -> float:
     return float(np.sqrt(np.dot(delta, delta)))
 
 
+def test_oci_neb_steps_on_the_double_well() -> None:
+    images = np.zeros((5, 2), dtype=np.float64)
+    for i in range(5):
+        images[i, 0] = -1.0 + 2.0 * i / 4.0
+        images[i, 1] = 0.4
+    search = Stencil.band(images, preset="oci-neb", ci_trigger_force=1.0e300)
+    report = search.step(well)
+    assert report.iteration >= 1
+    assert np.asarray(search.positions()).shape == (5, 2)
+
+
 def test_idpp_needs_atom_triples() -> None:
     images = np.zeros((3, 2), dtype=np.float64)
     with pytest.raises(ValueError, match="groups of three") as err:

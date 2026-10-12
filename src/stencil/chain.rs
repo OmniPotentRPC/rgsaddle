@@ -510,7 +510,7 @@ fn peak_index(energies: &[f64]) -> usize {
 
 /// Equal-arc cubic Hermite. Endpoints stay put. A straight uniform
 /// chain is unchanged.
-fn hermite_equal_arc(x: &mut Array2<f64>) -> Result<(), SaddleError> {
+pub(crate) fn hermite_equal_arc(x: &mut Array2<f64>) -> Result<(), SaddleError> {
     let n = x.nrows();
     if n < 3 {
         return Ok(());

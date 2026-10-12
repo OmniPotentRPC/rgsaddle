@@ -844,9 +844,9 @@ rgsaddle_status_t rgsaddle_minmode_set_highs(RgsaddleMinMode *session, int32_t e
 /**
  * Stencil. Opaque config, typed keys, one callback.
  * rgsaddle_stencil_run loops over rgsaddle_stencil_step.
- * Point presets are 0 through 4. Band presets 5 through 10 run.
+ * Point presets are 0 through 4. Band presets 5 through 13 run.
  * IDPP (12) and S-IDPP (13) relax the image dependent pair potential.
- * OCI-NEB (11) is named and refused.
+ * OCI-NEB (11) follows the climbing image with the dimer.
  * ABI minor 17 adds the band keys and the trailing report fields.
  * Keys 1 through 10 are the point keys. Band keys start at 11.
  * FORCE_TOL, MAX_MOVE, and THREADS apply to a point and to a band.

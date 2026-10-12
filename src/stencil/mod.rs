@@ -17,6 +17,7 @@ mod builder;
 mod chain;
 mod control;
 mod idpp;
+mod oci;
 mod sidpp;
 mod surface;
 mod triad;
