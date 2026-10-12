@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+
 import numpy as np
 
 from rgsaddle import Stencil
@@ -34,6 +36,39 @@ def test_band_preset_names_the_zoom_seam() -> None:
         assert "feat/band-methods-zoom" in str(err)
     else:
         raise AssertionError("band build returned")
+
+
+def test_a_second_step_is_a_runtime_error() -> None:
+    x = np.array([0.4, 0.3], dtype=np.float64)
+    mode = np.array([1.0, 0.0], dtype=np.float64)
+    search = Stencil.point(x, preset="dimer", mode=mode, max_rotations=1)
+    started = threading.Event()
+    release = threading.Event()
+    seen: list[BaseException] = []
+
+    def holding(row: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        started.set()
+        assert release.wait(timeout=5)
+        return bowl(row)
+
+    def other() -> None:
+        assert started.wait(timeout=5)
+        try:
+            search.step(bowl)
+        except BaseException as err:
+            seen.append(err)
+        finally:
+            release.set()
+
+    worker = threading.Thread(target=other)
+    worker.start()
+    search.step(holding)
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert len(seen) == 1
+    assert isinstance(seen[0], RuntimeError)
+    assert str(seen[0]) == "Stencil is in use by another thread"
+    search.step(bowl)
 
 
 def test_unknown_preset_is_a_value_error() -> None:

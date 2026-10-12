@@ -699,6 +699,9 @@ rgsaddle::StencilReport step_python(PyStencil &self, nb::callable fn, std::size_
       std::rethrow_exception(pending);
     } catch (const rgsaddle::Error &err) {
       rgsaddle_py_set_last_error(err.what());
+      if (std::string(err.what()) == "Stencil is in use by another thread") {
+        throw rgbind::InUse("Stencil");
+      }
       throw nb::value_error(err.what());
     }
   }

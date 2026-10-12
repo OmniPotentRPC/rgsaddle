@@ -9,7 +9,7 @@
 
 use std::ops::Range;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ndarray::{Array1, Array2, ArrayView2};
 
@@ -121,11 +121,15 @@ impl Chain {
     /// The block width is [`EVAL_BLOCK`], not the worker count.
     /// Workers write their own block after the surface call returns, so
     /// the lock is not held across the evaluation.
+    /// Every block runs. The returned error is the lowest image index,
+    /// on one thread or many, and the energy cache stays unread until
+    /// every block succeeds.
     pub fn evaluate<S: Surface + ?Sized>(
         &mut self,
         surface: &S,
         pool: &EvalPool,
     ) -> Result<(), SaddleError> {
+        self.filled = false;
         let n = self.x.nrows();
         let dof = self.x.ncols();
         let blocks = n.div_ceil(EVAL_BLOCK);
@@ -144,14 +148,16 @@ impl Chain {
         }
         if pool.threads == 1 || blocks == 1 {
             for block in &mut outs {
-                eval_block(
+                if let Err(err) = eval_block(
                     surface,
                     &positions,
                     &ids,
                     block.start,
                     &mut block.energy,
                     &mut block.gradient,
-                )?;
+                ) {
+                    block.error = Some(err);
+                }
             }
         } else {
             evaluate_blocks(surface, pool, &positions, &ids, &mut outs, dof);
@@ -192,7 +198,6 @@ fn evaluate_blocks<S: Surface + ?Sized>(
     dof: usize,
 ) {
     let next = AtomicUsize::new(0);
-    let failed = AtomicBool::new(false);
     let slots: Vec<Mutex<BlockOut>> = outs
         .iter_mut()
         .map(|block| Mutex::new(take_block(block, dof)))
@@ -202,9 +207,6 @@ fn evaluate_blocks<S: Surface + ?Sized>(
         for _ in 0..workers {
             scope.spawn(|_| {
                 loop {
-                    if failed.load(Ordering::Acquire) {
-                        break;
-                    }
                     let b = next.fetch_add(1, Ordering::Relaxed);
                     if b >= slots.len() {
                         break;
@@ -224,7 +226,6 @@ fn evaluate_blocks<S: Surface + ?Sized>(
                     guard.gradient = gradient;
                     if let Err(err) = result {
                         guard.error = Some(err);
-                        failed.store(true, Ordering::Release);
                     }
                 }
             });
@@ -402,8 +403,10 @@ fn peak_index(energies: &[f64]) -> usize {
     best
 }
 
-/// Equal-arc cubic Hermite. Endpoints stay put. A straight uniform
-/// chain is unchanged.
+/// Equal-arc cubic Hermite. Endpoints stay put. The tangent at the
+/// right end of a segment is the next chord, scaled to this segment,
+/// so a straight chain matches the linear remesh. The last segment
+/// has no next chord and stays linear.
 fn hermite_equal_arc(x: &mut Array2<f64>) -> Result<(), SaddleError> {
     let n = x.nrows();
     if n < 3 {
@@ -434,17 +437,38 @@ fn hermite_equal_arc(x: &mut Array2<f64>) -> Result<(), SaddleError> {
         } else {
             0.0
         };
-        let u2 = u * u;
-        let u3 = u2 * u;
-        let h00 = 2.0 * u3 - 3.0 * u2 + 1.0;
-        let h10 = u3 - 2.0 * u2 + u;
-        let h01 = -2.0 * u3 + 3.0 * u2;
-        let h11 = u3 - u2;
         let p0 = orig.row(k - 1).to_owned();
         let p1 = orig.row(k).to_owned();
         let m0 = seg[k - 1].clone();
-        let m1 = seg[k - 1].clone();
-        let p = &p0 * h00 + &m0 * h10 + &p1 * h01 + &m1 * h11;
+        let m1 = if k + 1 < n {
+            let next = &seg[k];
+            let next_len = next.dot(next).sqrt();
+            let here = m0.dot(&m0).sqrt();
+            if next_len.is_finite() && next_len > 1e-15 && here.is_finite() {
+                next * (here / next_len)
+            } else {
+                m0.clone()
+            }
+        } else {
+            m0.clone()
+        };
+        // Equal tangents are the linear chord. The same product as
+        // `reparametrize_equal_arc` keeps those bits.
+        let p = if m0
+            .iter()
+            .zip(m1.iter())
+            .all(|(a, b)| a.to_le_bytes() == b.to_le_bytes())
+        {
+            &p0 + &((&p1 - &p0) * u)
+        } else {
+            let u2 = u * u;
+            let u3 = u2 * u;
+            let h00 = 2.0 * u3 - 3.0 * u2 + 1.0;
+            let h10 = u3 - 2.0 * u2 + u;
+            let h01 = -2.0 * u3 + 3.0 * u2;
+            let h11 = u3 - u2;
+            &p0 * h00 + &m0 * h10 + &p1 * h01 + &m1 * h11
+        };
         x.row_mut(j).assign(&p);
     }
     Ok(())
@@ -478,8 +502,9 @@ impl EvalPool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::SaddleError;
     use crate::stencil::Surface;
-    use ndarray::{ArrayViewMut2, array};
+    use ndarray::{ArrayView2, ArrayViewMut2, array};
 
     struct Quad;
 
@@ -567,5 +592,86 @@ mod tests {
         assert_eq!(chain.roles()[2], Role::Climb);
         assert_eq!(chain.roles()[1], Role::Pinned);
         assert_eq!(chain.roles()[3], Role::Pinned);
+    }
+
+    struct FailNegative;
+
+    impl Surface for FailNegative {
+        fn eval(
+            &self,
+            ids: &[ImageId],
+            x: ArrayView2<f64>,
+            e: &mut [f64],
+            mut g: ArrayViewMut2<f64>,
+        ) -> Result<(), SaddleError> {
+            for (row, id) in ids.iter().enumerate() {
+                if x[(row, 0)] < 0.0 {
+                    return Err(SaddleError::Surface(format!("image {id}")));
+                }
+                e[row] = x[(row, 0)];
+                g[(row, 0)] = 0.0;
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn the_lowest_failing_image_matches_at_one_and_eight_threads() {
+        let x = Array2::from_shape_fn((4, 1), |(i, _)| if i == 0 || i == 3 { -1.0 } else { 1.0 });
+        let mut one = Chain::new(x.clone()).unwrap();
+        let mut eight = Chain::new(x).unwrap();
+        let err_one = one
+            .evaluate(&FailNegative, &EvalPool::new(1).unwrap())
+            .unwrap_err();
+        let err_eight = eight
+            .evaluate(&FailNegative, &EvalPool::new(8).unwrap())
+            .unwrap_err();
+        assert_eq!(err_one.to_string(), err_eight.to_string());
+        assert!(err_one.to_string().contains("image 0"));
+        assert!(!one.filled);
+        assert!(!eight.filled);
+    }
+
+    #[test]
+    fn an_uneven_line_matches_the_linear_remesh() {
+        let x = array![[0.0], [1.0], [3.0], [4.0]];
+        let mut linear = Chain::new(x.clone()).unwrap();
+        let mut cubic = Chain::new(x).unwrap();
+        Mesh::RemeshLinear.apply(&mut linear).unwrap();
+        Mesh::RemeshHermite.apply(&mut cubic).unwrap();
+        for i in 0..4 {
+            assert_eq!(
+                cubic.positions()[(i, 0)].to_le_bytes(),
+                linear.positions()[(i, 0)].to_le_bytes()
+            );
+        }
+    }
+
+    #[test]
+    fn a_bend_is_not_the_linear_remesh() {
+        let x = array![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [3.0, 1.0]];
+        let mut linear = Chain::new(x.clone()).unwrap();
+        let mut cubic = Chain::new(x).unwrap();
+        Mesh::RemeshLinear.apply(&mut linear).unwrap();
+        Mesh::RemeshHermite.apply(&mut cubic).unwrap();
+        assert_eq!(
+            cubic.positions()[(0, 0)].to_le_bytes(),
+            linear.positions()[(0, 0)].to_le_bytes()
+        );
+        assert_eq!(
+            cubic.positions()[(3, 1)].to_le_bytes(),
+            linear.positions()[(3, 1)].to_le_bytes()
+        );
+        let mut differ = false;
+        for i in 1..3 {
+            for k in 0..2 {
+                if cubic.positions()[(i, k)].to_le_bytes()
+                    != linear.positions()[(i, k)].to_le_bytes()
+                {
+                    differ = true;
+                }
+            }
+        }
+        assert!(differ);
     }
 }

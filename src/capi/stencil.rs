@@ -118,7 +118,10 @@ struct CbSurface {
     user: *mut c_void,
 }
 
-unsafe impl Send for CbSurface {}
+// SAFETY: `PointSurface` requires `Sync`. This value stays inside
+// `rgsaddle_stencil_step` and `rgsaddle_stencil_run`, and those calls
+// invoke the callback on the thread that entered the C ABI. The chain
+// pool never sees it. The raw `user` pointer is therefore not shared.
 unsafe impl Sync for CbSurface {}
 
 impl PointSurface for CbSurface {

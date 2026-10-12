@@ -9,6 +9,7 @@
 //! doi:10.1063/1.480097.
 
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ndarray::{Array1, Array2, ArrayView1};
 use rgmin::{Accept, Control, FireKind, Method, Oracle, Solver};
@@ -650,8 +651,9 @@ fn forward_curvature<S: crate::minmode::PointSurface>(
 ) -> Result<f64, SaddleError> {
     let shifted = x + &(mode * dr);
     let (_energy, g_plus) = surface.eval(shifted.view())?;
-    let action = &g_plus - gradient;
-    Ok(curvature_along(action.view(), mode.view()) / dr)
+    // Same order as the min-mode forward action: divide, then dot.
+    let action = (&g_plus - gradient) / dr;
+    Ok(curvature_along(action.view(), mode.view()))
 }
 
 fn art_step<S: crate::minmode::PointSurface>(
@@ -758,14 +760,14 @@ fn eigen_step<S: crate::minmode::PointSurface>(
     engine.curvature = curvature;
     let max_force = ForceGate::LinfNorm.value(gradient.view());
     engine.max_force = max_force;
-    let evals = 1 + 2 * engine.x.len();
+    let calls = AtomicUsize::new(1 + 2 * engine.x.len());
     if max_force <= engine.force_tol && curvature < 0.0 {
         return Ok(StencilReport {
             status: StencilStatus::Converged,
             max_force,
             curvature,
             iteration: engine.iteration,
-            evaluations: evals,
+            evaluations: calls.load(Ordering::Relaxed),
         });
     }
     let turned = previous.dot(&engine.mode).abs().min(1.0).acos();
@@ -781,6 +783,7 @@ fn eigen_step<S: crate::minmode::PointSurface>(
         let answer = if xv == start.view() {
             Ok((0.0, gradient.clone()))
         } else {
+            calls.fetch_add(1, Ordering::Relaxed);
             surface.eval(xv)
         };
         match answer {
@@ -807,7 +810,7 @@ fn eigen_step<S: crate::minmode::PointSurface>(
         max_force,
         curvature,
         iteration: engine.iteration,
-        evaluations: evals,
+        evaluations: calls.load(Ordering::Relaxed),
     })
 }
 
