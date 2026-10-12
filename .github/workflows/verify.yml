@@ -75,39 +75,36 @@ jobs:
 
   kani:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: create
+            harnesses: band_create_null_and_short band_create_solid_null_and_short minmode_create_null_and_short index1_create_null_and_short irc_create_null_and_short irc_create_from_surface_null_and_short constraints_create_null_and_short
+          - shard: step
+            harnesses: nichols_step_null_and_short prfo_step_null_and_short hessian_powell_null_and_short hessian_bofill_null_and_short cap_max_abs_null cap_max_abs_short
+          - shard: sella-min
+            harnesses: sella_min_create_null_and_short sella_min_create_on_null_and_short sella_min_create_internal_null_and_short sella_min_create_cell_null_and_short sella_min_create_cell_internal_null_and_short
+          - shard: sella-saddle
+            harnesses: sella_saddle_create_null_and_short sella_saddle_create_on_null_and_short sella_saddle_create_internal_null_and_short sella_saddle_create_cell_null_and_short sella_saddle_create_cell_internal_null_and_short
+          - shard: pes
+            harnesses: samd_create_null_and_short pes_create_null_and_short internal_pes_create_null_and_short internal_pes_create_dummies_null_and_short internal_pes_create_from_find_null_and_short place_perp_dummy_null_and_short
     steps:
       - uses: actions/checkout@v4
       - uses: model-checking/kani-github-action@v1.1
         with:
           kani-version: "0.68.0"
-      - name: Compile the Kani crate
-        run: cargo kani --features capi --only-codegen
-      - name: Null and short-length harnesses
+      - name: Prove ${{ matrix.shard }}
         run: |
-          set +e
-          # These five returned VERIFICATION SUCCESSFUL within 90 seconds.
-          # The other twenty-three did not, and CBMC keeps allocating on
-          # that path. Re-running them stopped the hosted runner (exit 143)
-          # during cap_max_abs_null_and_short. They stay in
-          # validation/kani_unsupported.md and are not started here.
-          # A finished counterexample, or a hang of a previously finished
-          # harness, fails the job. 180 seconds is the cap for one proof.
-          names="irc_create_from_surface_null_and_short constraints_create_null_and_short samd_create_null_and_short pes_create_null_and_short place_perp_dummy_null_and_short"
-          fail=0
-          for name in $names; do
-            echo "== $name"
-            timeout 180 cargo kani --features capi --harness "kani_proofs::abi_guards::$name" --output-format terse > "/tmp/kani-$name.txt" 2>&1
-            status=$?
-            if grep -q "VERIFICATION:- SUCCESSFUL" "/tmp/kani-$name.txt"; then
-              echo "$name success"
-            else
-              echo "$name exit $status"
-              tail -n 40 "/tmp/kani-$name.txt"
-              fail=1
-            fi
+          set -euo pipefail
+          args=()
+          for name in ${{ matrix.harnesses }}; do
+            args+=(--harness "kani_proofs::abi_guards::$name")
           done
-          echo "Recorded timeouts are not re-run. See validation/kani_unsupported.md."
-          exit "$fail"
+          # One shard is a few seconds of CBMC after codegen.
+          # Ten minutes is a hang detector. A timeout fails the shard
+          # and is not a proof. See validation/kani_unsupported.md.
+          timeout 600 cargo kani --features capi --output-format terse "${args[@]}"
 
   libm:
     runs-on: ubuntu-latest
