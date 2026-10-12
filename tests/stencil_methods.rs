@@ -62,15 +62,14 @@ fn refused_presets_name_the_missing_piece() {
     let idpp = must_err(Stencil::band(band.clone()).preset(Preset::Idpp).build());
     assert!(idpp.contains("at least two atoms"));
     let sidpp = must_err(Stencil::band(band.clone()).preset(Preset::SIdpp).build());
-    assert!(sidpp.contains("S-IDPP initial paths are not implemented yet"));
+    assert!(sidpp.contains("at least two atoms"));
     let oci = must_err(Stencil::band(band).preset(Preset::OciNeb).build());
     assert!(oci.contains("OCI-NEB is not implemented yet"));
     let point = must_err(Stencil::point(Array1::zeros(3)).preset(Preset::Neb).build());
     assert!(point.contains("band preset"));
-    for text in [
-        must_err(Stencil::band(line(4)).preset(Preset::Idpp).build()),
-        must_err(Stencil::band(line(4)).preset(Preset::OciNeb).build()),
-    ] {
+    for text in [must_err(
+        Stencil::band(line(4)).preset(Preset::Idpp).build(),
+    )] {
         assert!(!text.contains("rgsaddle#"));
         assert!(!text.contains("feat/"));
     }

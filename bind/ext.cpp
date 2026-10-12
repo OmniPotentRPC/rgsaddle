@@ -926,8 +926,8 @@ NB_MODULE(_core, m) {
           nb::arg("band_slack") = 10.0, nb::arg("ci_trigger") = 0.5, nb::arg("ci_trigger_force") = 0.0,
           nb::arg("n_simul") = 3, nb::arg("n_max") = 10, nb::arg("tangent") = 1,
           nb::arg("zoom_max_iter") = -1,
-          "Band search. neb, dneb, ci-neb, energy-weighted-neb, zoom-neb, autoneb, and idpp run. "
-          "oci-neb and s-idpp raise ValueError. Zoom ends stay fixed unless zoom_ends is 1.")
+          "Band search. neb, dneb, ci-neb, energy-weighted-neb, zoom-neb, autoneb, idpp, and s-idpp run. "
+          "oci-neb raises ValueError. Zoom ends stay fixed unless zoom_ends is 1.")
       .def(
           "step", [](PyStencil &self, nb::callable fn) { return step_python(self, fn, 1, false); },
           nb::arg("surface"),

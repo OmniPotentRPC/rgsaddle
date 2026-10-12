@@ -94,7 +94,7 @@ class Stencil:
     @staticmethod
     def band(x: Annotated[NDArray[numpy.float64], dict(shape=(None, None), order='C', writable=False)], preset: str = 'ci-neb', k: float = 5.0, k_min: float = 0.972, k_max: float = 9.72, force_tol: float = 0.001, max_move: float = 0.2, threads: int = 1, spring: int = -1, zoom_stability: int = -1, zoom_alpha: float = 0.5, zoom_offset: int = -1, zoom_interp: int = -1, zoom_ends: int = -1, zoom_force: float = float('nan'), zoom_force_kind: int = -1, image_scale: float = float('nan'), band_slack: float = 10.0, ci_trigger: float = 0.5, ci_trigger_force: float = 0.0, n_simul: int = 3, n_max: int = 10, tangent: int = 1, zoom_max_iter: int = -1) -> Stencil:
         """
-        Band search. neb, dneb, ci-neb, energy-weighted-neb, zoom-neb, autoneb, and idpp run. oci-neb and s-idpp raise ValueError. Zoom ends stay fixed unless zoom_ends is 1.
+        Band search. neb, dneb, ci-neb, energy-weighted-neb, zoom-neb, autoneb, idpp, and s-idpp run. oci-neb raises ValueError. Zoom ends stay fixed unless zoom_ends is 1.
         """
 
     def step(self, surface: Callable[..., StencilReport]) -> StencilReport:

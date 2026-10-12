@@ -24,7 +24,6 @@ use super::zoom::{ZoomEnds, ZoomParams, ZoomWatch, pack_window, select_window};
 use super::{PHASE_BAND, PHASE_INSERT, PHASE_ZOOM, Preset, StencilReport, StencilStatus, Surface};
 
 const UNSUPPORTED_OCI: &str = "OCI-NEB is not implemented yet";
-const UNSUPPORTED_SIDPP: &str = "S-IDPP initial paths are not implemented yet";
 
 #[derive(Clone, Copy)]
 struct ForceLaw {
@@ -46,6 +45,7 @@ enum Kind {
     Zoom,
     Auto,
     Idpp,
+    SIdpp,
 }
 
 struct Inner {
@@ -134,7 +134,7 @@ impl BandEngine {
                 "max move must be finite and positive".into(),
             ));
         }
-        let chain = Chain::new(spec.x.clone())?;
+        let mut chain = Chain::new(spec.x.clone())?;
         let n = spec.x.nrows();
         let dof = spec.x.ncols();
         if n < 2 {
@@ -160,18 +160,31 @@ impl BandEngine {
         let free = (n.saturating_sub(2)) * dof;
         let solver_n = free.max(dof);
         let solver = force_solver(spec.method.clone(), solver_n, spec.max_move)?;
-        let flat_cache = spec.x.iter().copied().collect();
-        let idpp = if kind == Kind::Idpp {
-            Some(IdppRun::new(
+        let mut flat_cache = Array1::from_iter(spec.x.iter().copied());
+        let idpp = match kind {
+            Kind::Idpp => Some(IdppRun::new(
                 spec.x.clone(),
                 spec.k,
                 spec.force_tol,
                 spec.max_move,
                 spec.method.clone(),
-            )?)
-        } else {
-            None
+            )?),
+            Kind::SIdpp => Some(super::sidpp::prepare(
+                spec.x.clone(),
+                spec.k,
+                spec.force_tol,
+                spec.max_move,
+                spec.method.clone(),
+            )?),
+            _ => None,
         };
+        if let Some(run) = &idpp {
+            let positions = run.positions();
+            let ids = chain.ids().to_vec();
+            let next = chain.next_id();
+            chain.replace(positions.clone(), ids, next)?;
+            flat_cache = Array1::from_iter(positions.iter().copied());
+        }
         let (auto, book) = if kind == Kind::Auto {
             let mut band = band_config(&spec, projection, climb);
             band.autoneb = Some(AutoNebTuning {
@@ -743,8 +756,8 @@ fn kind_of(preset: Preset) -> Result<Kind, SaddleError> {
         Preset::ZoomNeb => Kind::Zoom,
         Preset::AutoNeb => Kind::Auto,
         Preset::Idpp => Kind::Idpp,
+        Preset::SIdpp => Kind::SIdpp,
         Preset::OciNeb => return Err(SaddleError::Invalid(UNSUPPORTED_OCI.into())),
-        Preset::SIdpp => return Err(SaddleError::Invalid(UNSUPPORTED_SIDPP.into())),
         other => {
             return Err(SaddleError::Invalid(format!(
                 "{} is a point preset",

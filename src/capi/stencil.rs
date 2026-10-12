@@ -1,7 +1,7 @@
 //! Opaque stencil handles.
 //!
-//! Point presets and band presets share these symbols. IDPP relaxes
-//! the pair-potential path. OCI-NEB and S-IDPP are named and refused.
+//! Point presets and band presets share these symbols. IDPP and S-IDPP
+//! relax the pair-potential path. OCI-NEB is named and refused.
 //! Every entry catches a panic and
 //! records [`rgsaddle_last_error`].
 

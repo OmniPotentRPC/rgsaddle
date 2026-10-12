@@ -117,14 +117,38 @@ pub(crate) fn atom_count(dof: usize) -> Result<usize, SaddleError> {
     Ok(n)
 }
 
+/// Tangent used by the IDPP NEB force.
+///
+/// `Improved` matches ASE. `Prenormalized` normalises each chord before
+/// the weighted average, which sequential construction needs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TangentStyle {
+    Improved,
+    Prenormalized,
+}
+
+/// Force on one interior image: maximum absolute component and RMS.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct InteriorLoad {
+    pub max_abs: f64,
+    pub rms: f64,
+}
+
+pub(crate) struct NebLoad {
+    pub objective: f64,
+    pub projected: Array1<f64>,
+    pub max_component: f64,
+    pub interiors: Vec<InteriorLoad>,
+}
+
 /// NEB force on the interior images. The true force is the IDPP force.
-/// Springs are uniform. Translation is left in the force so a two-atom
-/// path can rotate.
-pub(crate) fn neb_force(
+/// Translation is left in the force so a two-atom path can rotate.
+pub(crate) fn neb_load(
     images: ArrayView2<f64>,
     targets: &[Array2<f64>],
     ks: &[f64],
-) -> Result<(f64, Array1<f64>, f64), SaddleError> {
+    tangent_style: TangentStyle,
+) -> Result<NebLoad, SaddleError> {
     let n = images.nrows();
     let dof = images.ncols();
     if targets.len() != n || ks.len() + 1 != n {
@@ -141,6 +165,7 @@ pub(crate) fn neb_force(
     }
     let mut projected = Array1::zeros((n - 2) * dof);
     let mut max_component = 0.0_f64;
+    let mut interiors = Vec::with_capacity(n.saturating_sub(2));
     for i in 1..n - 1 {
         let pos_prev = images.row(i - 1);
         let pos = images.row(i);
@@ -149,8 +174,8 @@ pub(crate) fn neb_force(
         let diff_prev = &pos - &pos_prev;
         let dist_next = diff_next.dot(&diff_next).sqrt();
         let dist_prev = diff_prev.dot(&diff_prev).sqrt();
-        let tangent = super::unit_tangent(
-            super::TangentRule::Improved,
+        let tangent = tangent_of(
+            tangent_style,
             diff_next.view(),
             diff_prev.view(),
             energies[i],
@@ -162,16 +187,92 @@ pub(crate) fn neb_force(
         let perp = super::perp(true_force.view(), tangent.view());
         let spring = tangent.to_owned() * (ks[i] * dist_next - ks[i - 1] * dist_prev);
         let neb = &perp + &spring;
+        let mut sum_sq = 0.0_f64;
+        let mut count = 0.0_f64;
+        let mut max_abs = 0.0_f64;
         for value in neb.iter() {
+            max_abs = max_abs.max(value.abs());
             max_component = max_component.max(value.abs());
+            sum_sq += value * value;
+            count += 1.0;
         }
+        interiors.push(InteriorLoad {
+            max_abs,
+            rms: if count == 0.0 {
+                0.0
+            } else {
+                (sum_sq / count).sqrt()
+            },
+        });
         let row = i - 1;
         projected
             .slice_mut(ndarray::s![row * dof..(row + 1) * dof])
             .assign(&neb);
     }
     let objective: f64 = energies[1..n - 1].iter().sum();
-    Ok((objective, projected, max_component))
+    Ok(NebLoad {
+        objective,
+        projected,
+        max_component,
+        interiors,
+    })
+}
+
+pub(crate) fn tangent_of(
+    style: TangentStyle,
+    pos_diff_next: ArrayView1<f64>,
+    pos_diff_prev: ArrayView1<f64>,
+    energy: f64,
+    energy_prev: f64,
+    energy_next: f64,
+) -> Result<Array1<f64>, SaddleError> {
+    if style == TangentStyle::Improved {
+        return super::unit_tangent(
+            super::TangentRule::Improved,
+            pos_diff_next,
+            pos_diff_prev,
+            energy,
+            energy_prev,
+            energy_next,
+        );
+    }
+    let hat = |v: ArrayView1<f64>| {
+        let norm = v.dot(&v).sqrt();
+        if norm > 1e-15 && norm.is_finite() {
+            v.to_owned() / norm
+        } else {
+            Array1::zeros(v.len())
+        }
+    };
+    let tang = if energy_next > energy && energy > energy_prev {
+        pos_diff_next.to_owned()
+    } else if energy > energy_next && energy_prev > energy {
+        pos_diff_prev.to_owned()
+    } else {
+        let next_hat = hat(pos_diff_next);
+        let prev_hat = hat(pos_diff_prev);
+        let diff_prev = energy_prev - energy;
+        let diff_next = energy_next - energy;
+        let min_diff = diff_prev.abs().min(diff_next.abs());
+        let max_diff = diff_prev.abs().max(diff_next.abs());
+        if diff_prev > diff_next {
+            &next_hat * min_diff + &prev_hat * max_diff
+        } else {
+            &next_hat * max_diff + &prev_hat * min_diff
+        }
+    };
+    let norm = tang.dot(&tang).sqrt();
+    if norm > 1e-10 && norm.is_finite() {
+        return Ok(tang / norm);
+    }
+    super::unit_tangent(
+        super::TangentRule::Simple,
+        pos_diff_next,
+        pos_diff_prev,
+        energy,
+        energy_prev,
+        energy_next,
+    )
 }
 
 pub(crate) fn write_interior(
@@ -203,6 +304,7 @@ pub struct IdppRun {
     force_tol: f64,
     max_move: f64,
     method: Method,
+    tangent: TangentStyle,
     solver: Solver,
     solver_n: usize,
     iteration: usize,
@@ -230,14 +332,39 @@ impl IdppRun {
         max_move: f64,
         method: Method,
     ) -> Result<Self, SaddleError> {
+        let targets = interpolated_targets(images.view())?;
+        Self::from_targets(
+            images,
+            targets,
+            ks,
+            force_tol,
+            max_move,
+            method,
+            TangentStyle::Improved,
+        )
+    }
+
+    pub(crate) fn from_targets(
+        images: Array2<f64>,
+        targets: Vec<Array2<f64>>,
+        ks: Vec<f64>,
+        force_tol: f64,
+        max_move: f64,
+        method: Method,
+        tangent: TangentStyle,
+    ) -> Result<Self, SaddleError> {
         let k = *ks.first().unwrap_or(&1.0);
         check_band(&images, k, force_tol, max_move)?;
-        if ks.len() + 1 != images.nrows() {
+        if ks.len() + 1 != images.nrows() || targets.len() != images.nrows() {
             return Err(SaddleError::Shape(
                 "IDPP springs must match the image count".into(),
             ));
         }
-        let targets = interpolated_targets(images.view())?;
+        if ks.iter().any(|value| !(value.is_finite() && *value > 0.0)) {
+            return Err(SaddleError::Invalid(
+                "spring constant must be finite and positive".into(),
+            ));
+        }
         let width = (images.nrows() - 2) * images.ncols();
         let solver = idpp_solver(method.clone(), width, max_move)?;
         Ok(Self {
@@ -247,11 +374,16 @@ impl IdppRun {
             force_tol,
             max_move,
             method,
+            tangent,
             solver,
             solver_n: width,
             iteration: 0,
             max_force: f64::NAN,
         })
+    }
+
+    pub(crate) fn interior_loads(&self) -> Result<Vec<InteriorLoad>, SaddleError> {
+        Ok(neb_load(self.images.view(), &self.targets, &self.ks, self.tangent)?.interiors)
     }
 
     pub fn positions(&self) -> Array2<f64> {
@@ -269,13 +401,14 @@ impl IdppRun {
         let images0 = self.images.clone();
         let targets = self.targets.clone();
         let ks = self.ks.clone();
+        let tangent = self.tangent;
         let oracle = Oracle::unbounded(width, move |flat: ArrayView1<f64>| {
             let mut trial = images0.clone();
             if write_interior(&mut trial, flat).is_err() {
                 return (f64::INFINITY, Array1::zeros(width));
             }
-            match neb_force(trial.view(), &targets, &ks) {
-                Ok((energy, force, _)) => (energy, -force),
+            match neb_load(trial.view(), &targets, &ks, tangent) {
+                Ok(load) => (load.objective, -load.projected),
                 Err(_) => (f64::INFINITY, Array1::zeros(width)),
             }
         });
@@ -284,7 +417,8 @@ impl IdppRun {
             .step(&oracle, &mut flat)
             .map_err(|err| SaddleError::Solver(err.to_string()))?;
         write_interior(&mut self.images, flat.view())?;
-        let (_, _, max_force) = neb_force(self.images.view(), &self.targets, &self.ks)?;
+        let max_force =
+            neb_load(self.images.view(), &self.targets, &self.ks, self.tangent)?.max_component;
         self.max_force = max_force;
         self.iteration += 1;
         let status = if max_force <= self.force_tol {
