@@ -84,6 +84,7 @@ def test_zoom_pack_reports_a_window() -> None:
 
 
 def test_idpp_rotation_bond_matches_ase(tmp_path: object) -> None:
+    pytest.importorskip("ase")
     from pathlib import Path
 
     from ase import Atoms
