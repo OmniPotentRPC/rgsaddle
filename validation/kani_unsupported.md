@@ -21,10 +21,15 @@ The following are not harnesses.
   It does not take a length.
 
 `cargo kani --features capi --only-codegen` compiles the crate. CBMC
-then checks one harness at a time. The limit is 90 seconds of CBMC
-time, after codegen. A harness that does not finish is not a proof.
-The job prints `timeout` for that function and continues. A finished
-counterexample fails the job.
+then checks one harness at a time. On this machine the limit was 90
+seconds. A harness that does not finish is not a proof.
+
+The verify workflow re-runs only the five harnesses that finished.
+Each of those must report `VERIFICATION:- SUCCESSFUL` within 180
+seconds. The other twenty-three are not started. CBMC does not return
+on those null paths, and a hosted runner was stopped (exit 143) while
+`cap_max_abs_null_and_short` was still running. A finished
+counterexample on one of the five fails the job.
 
 Kani 0.68.0 on this machine, `timeout 90 cargo kani --features capi --harness kani_proofs::abi_guards::<name>`:
 
@@ -60,9 +65,10 @@ Kani 0.68.0 on this machine, `timeout 90 cargo kani --features capi --harness ka
 | `place_perp_dummy_null_and_short` | success, 11.411 s, 0 of 1171 failed |
 
 Five harnesses finished with no failed properties. Twenty-three hit the
-limit. `rgsaddle_internal_pes_create_from_find` is one of those: an
-earlier run left CBMC on the null path for fifteen minutes without a
-result. The same limit covers any other harness that grows the same way.
+90 second limit and are not re-run in CI. `rgsaddle_internal_pes_create_from_find`
+is one of those: an earlier run left CBMC on the null path for fifteen
+minutes without a result. The same bound covers any other harness that
+grows the same way.
 
 Kani warns that `caller_location`, foreign functions, and atomics are
 unsupported. Those warnings are not a skipped harness. A proof is
