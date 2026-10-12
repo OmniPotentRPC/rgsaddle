@@ -84,7 +84,14 @@ def test_zoom_pack_reports_a_window() -> None:
 
 
 def test_idpp_rotation_bond_matches_ase(tmp_path: object) -> None:
-    pytest.importorskip("ase")
+    import os
+
+    try:
+        import ase  # noqa: F401
+    except ImportError:
+        if os.environ.get("RGSADDLE_REQUIRE_ASE") == "1":
+            pytest.fail("ASE is required for the IDPP comparison")
+        pytest.skip("ASE is not installed")
     from pathlib import Path
 
     from ase import Atoms

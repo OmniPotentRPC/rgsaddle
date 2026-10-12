@@ -41,3 +41,9 @@ jobs:
         env:
           RGSADDLE_REQUIRE_ASE: "1"
         run: cargo test --test autoneb --verbose
+      - name: Install the Python binding
+        run: python3 -m pip install -e '.[test]' 'ase==3.29.0'
+      - name: Compare IDPP with ASE
+        env:
+          RGSADDLE_REQUIRE_ASE: "1"
+        run: python3 -m pytest -vv tests/python/test_stencil.py::test_idpp_rotation_bond_matches_ase
