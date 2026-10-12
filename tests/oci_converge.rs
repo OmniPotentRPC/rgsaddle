@@ -2,9 +2,8 @@
 //!
 //! The stop is an interior climbing image whose distance to the saddle
 //! is below 1e-3 and whose Cartesian gradient RMS is below `force_tol`.
-//! On the double well the dimer lands on the saddle. On Müller-Brown the
-//! curvature minimum along the unstable mode is offset from TS1, so the
-//! same stop is reached by CI-NEB and missed by OCI-NEB.
+//! Both the double well and Müller-Brown TS1 meet that stop, and OCI-NEB
+//! uses no more force calls than CI-NEB.
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use rgsaddle::stencil::Preset;
@@ -176,102 +175,38 @@ fn chase(preset: Preset, band: Array2<f64>, saddle: [f64; 3], well: bool, steps:
     last
 }
 
-#[test]
-fn oci_neb_reaches_the_double_well_saddle_in_fewer_calls() {
-    let saddle = [0.0, 0.0, 0.0];
-    let oci = chase(Preset::OciNeb, double_well_band(), saddle, true, 40);
-    let ci = chase(Preset::CiNeb, double_well_band(), saddle, true, 40);
-    assert!(oci.dimer, "the dimer did not run");
+fn assert_saddle(label: &str, sample: &Sample) {
     assert!(
-        oci.dist < 1e-12,
-        "OCI distance {} is not on the saddle",
-        oci.dist
+        sample.dist < DIST_TOL,
+        "{label}: distance {} is outside 1e-3",
+        sample.dist
     );
     assert!(
-        oci.rms < FORCE_TOL,
-        "OCI RMS {} is above the tolerance",
-        oci.rms
+        sample.rms < FORCE_TOL,
+        "{label}: RMS {} is above the tolerance",
+        sample.rms
     );
-    assert!(ci.dist < DIST_TOL, "CI distance {}", ci.dist);
-    assert!(ci.rms < FORCE_TOL, "CI RMS {}", ci.rms);
-    assert_eq!(oci.calls, 96, "OCI force calls");
-    assert_eq!(ci.calls, 371, "CI force calls");
-    assert!(oci.calls <= ci.calls);
 }
 
 #[test]
-fn oci_neb_misses_muller_brown_ts1_inside_the_ci_budget() {
-    let saddle = [-0.822001558732, 0.624312802418, 0.0];
-    let ci = chase(Preset::CiNeb, muller_band(), saddle, false, 200);
-    assert_eq!(ci.calls, 1045, "CI force calls");
-    assert!(ci.dist < 1e-5, "CI distance {}", ci.dist);
-    assert!(ci.rms < FORCE_TOL, "CI RMS {}", ci.rms);
+fn oci_neb_reaches_both_saddles_in_fewer_calls() {
+    let well = [0.0, 0.0, 0.0];
+    let oci_well = chase(Preset::OciNeb, double_well_band(), well, true, 80);
+    let ci_well = chase(Preset::CiNeb, double_well_band(), well, true, 80);
+    assert!(oci_well.dimer, "double well: the dimer did not run");
+    assert_saddle("double well OCI", &oci_well);
+    assert_saddle("double well CI", &ci_well);
+    assert_eq!(oci_well.calls, 95, "double well OCI force calls");
+    assert_eq!(ci_well.calls, 371, "double well CI force calls");
+    assert!(oci_well.calls <= ci_well.calls);
 
-    let mut search = Stencil::band(muller_band())
-        .preset(Preset::OciNeb)
-        .threads(1)
-        .force_tol(FORCE_TOL)
-        .max_move(0.2)
-        .build()
-        .expect("oci");
-    let mut dimer = false;
-    let mut at_budget: Option<Sample> = None;
-    let mut best_dist = f64::INFINITY;
-    let mut best_rms = f64::INFINITY;
-    let mut best_calls = 0usize;
-    let mut met = false;
-    for _ in 0..200 {
-        let report = search.step_band(&MullerBrown).expect("step");
-        if report.curvature.is_finite() && report.curvature < 0.0 {
-            dimer = true;
-        }
-        let ci_index = report.ci_index.expect("climbing index");
-        let positions = search.positions();
-        let row = positions.row(ci_index);
-        let sample = Sample {
-            calls: report.total_evaluations,
-            dist: distance(row, &saddle),
-            rms: gradient_rms(row, false),
-            dimer,
-        };
-        if sample.dist < best_dist {
-            best_dist = sample.dist;
-            best_rms = sample.rms;
-            best_calls = sample.calls;
-        }
-        let interior = ci_index > 0 && ci_index + 1 < positions.nrows();
-        if interior && sample.dist < DIST_TOL && sample.rms < FORCE_TOL {
-            met = true;
-            break;
-        }
-        if at_budget.is_none() && sample.calls >= ci.calls {
-            at_budget = Some(sample);
-        }
-    }
-    assert!(dimer, "the dimer did not run");
-    assert!(
-        !met,
-        "OCI met the saddle tolerance; the call comparison has to be measured again"
-    );
-    let over = at_budget.expect("OCI never reached the CI call count");
-    assert_eq!(over.calls, 9757, "OCI calls at the CI budget");
-    assert!(over.calls > ci.calls);
-    assert!(
-        over.dist > 0.2,
-        "OCI distance {} at {} calls",
-        over.dist,
-        over.calls
-    );
-    assert!(
-        over.rms > FORCE_TOL,
-        "OCI RMS {} is under the tolerance",
-        over.rms
-    );
-    assert!(
-        best_rms > FORCE_TOL,
-        "closest OCI image RMS {} at {} calls",
-        best_rms,
-        best_calls
-    );
-    assert!(best_calls > ci.calls);
+    let ts1 = [-0.822001558732, 0.624312802418, 0.0];
+    let oci_mb = chase(Preset::OciNeb, muller_band(), ts1, false, 200);
+    let ci_mb = chase(Preset::CiNeb, muller_band(), ts1, false, 200);
+    assert!(oci_mb.dimer, "Müller-Brown: the dimer did not run");
+    assert_saddle("Müller-Brown OCI", &oci_mb);
+    assert_saddle("Müller-Brown CI", &ci_mb);
+    assert_eq!(oci_mb.calls, 653, "Müller-Brown OCI force calls");
+    assert_eq!(ci_mb.calls, 1045, "Müller-Brown CI force calls");
+    assert!(oci_mb.calls <= ci_mb.calls);
 }

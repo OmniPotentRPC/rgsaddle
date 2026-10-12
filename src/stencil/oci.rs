@@ -4,17 +4,20 @@
 //! doi:10.3389/fchem.2026.1807063. CI-NEB runs until the climbing index
 //! has been stable for five steps and the climbing force is under
 //! `lambda` times the initial peak force. The dimer then follows the
-//! lowest mode. Positive curvature restores the saved image. A drop in
-//! the climbing force reparameterizes the path. A poor alignment lowers
-//! the next trigger threshold. Ásgeirsson et al., J. Chem. Theory
-//! Comput. 17, 4929 (2021), doi:10.1021/acs.jctc.1c00462, is the static
-//! one-shot handover this loop replaces.
+//! reflected force. Each translation is the Newton step `|F| / |λ|`,
+//! capped by the band maximum move. The point kept is the one with the
+//! smallest force, which is the first-order saddle. Positive
+//! curvature stops the walk. A walk that never lowers the force restores
+//! the saved image. A drop in the climbing force reparameterizes the path, except
+//! when the climber is already inside the force tolerance. A poor
+//! alignment lowers the next trigger threshold. Ásgeirsson et al.,
+//! J. Chem. Theory Comput. 17, 4929 (2021), doi:10.1021/acs.jctc.1c00462,
+//! is the static one-shot handover this loop replaces.
 
 use ndarray::{Array1, Array2, ArrayView1, Axis};
 
 use crate::error::SaddleError;
-use crate::minmode::{MinModeConfig, MinModeKind, MinModeSession, MinModeStatus, PointSurface};
-use rgmin::Method;
+use crate::minmode::{MinModeConfig, MinModeKind, MinModeSession, PointSurface};
 
 use super::Surface;
 
@@ -95,6 +98,9 @@ pub struct DimerEnd {
     pub alpha: f64,
     pub evaluations: usize,
     pub positive_curvature: bool,
+    /// Leave the climbing image where it was. Set on positive curvature
+    /// and when no translation lowered the force.
+    pub restore: bool,
 }
 
 struct Row<'a, S> {
@@ -118,10 +124,60 @@ pub struct DimerRequest {
     pub max_mmf: usize,
     pub force_tol: f64,
     pub max_move: f64,
-    pub method: Method,
 }
 
-/// Run the dimer at the climbing image. Positive curvature restores `saved`.
+fn linf(force: &Array1<f64>) -> f64 {
+    force.iter().fold(0.0_f64, |m, v| m.max(v.abs()))
+}
+
+/// Newton step on the translated force, capped by the band move.
+///
+/// The translated force is the reflection while the curvature is
+/// negative. Its length equals the true force, so dividing by `|λ|`
+/// is the Newton length. Empty-memory L-BFGS with that scale takes
+/// the same step; the cap is the trust radius.
+fn newton_step(
+    gradient: &Array1<f64>,
+    mode: &Array1<f64>,
+    curvature: f64,
+    limit: f64,
+) -> Array1<f64> {
+    let eff = if curvature < 0.0 {
+        super::reflect(gradient.view(), mode.view())
+    } else {
+        super::ascend(gradient.view(), mode.view())
+    };
+    let mut step = &eff * (-1.0 / curvature.abs().max(1e-8));
+    let length = step.dot(&step).sqrt();
+    let cap = limit.max(1e-8);
+    if length > cap {
+        step *= cap / length;
+    }
+    step
+}
+
+/// Forward-difference curvature along a unit mode. The rotator's
+/// Fourier model extrapolates the action, and on an anharmonic surface
+/// that extrapolation can change sign away from the true eigenvalue.
+fn fd_curvature<S: Surface>(
+    adapter: &Row<'_, S>,
+    x: &Array1<f64>,
+    gradient: &Array1<f64>,
+    mode: &Array1<f64>,
+    dr: f64,
+) -> Result<f64, SaddleError> {
+    let shifted = x + &(mode * dr);
+    let gp = adapter.eval(shifted.view())?.1;
+    Ok((&gp - gradient).dot(mode) / dr)
+}
+
+/// Run the dimer at the climbing image.
+///
+/// Rotation runs before every translation. The step follows the
+/// reflected force by at most the Newton length `|F| / |λ|`. The
+/// installed point is the lowest force on that walk. Positive
+/// curvature stops the walk. A walk that never lowers the force
+/// restores `saved`.
 pub fn run_dimer<S: Surface>(
     surface: &S,
     id: u64,
@@ -135,46 +191,87 @@ pub fn run_dimer<S: Surface>(
         Some(mode) if mode.len() == saved.len() && mode.iter().any(|v| v.abs() > 0.0) => mode,
         _ => tangent.clone(),
     };
-    let mut session = MinModeSession::new(
-        MinModeConfig {
-            kind: MinModeKind::Dimer,
-            force_tol: request.force_tol,
-            max_move: request.max_move,
-            method: request.method.clone(),
-            ..MinModeConfig::default()
-        },
-        saved.clone(),
-        mode,
-    )?;
-    session.set_position(saved.clone(), Some(gradient))?;
+    let config = MinModeConfig {
+        kind: MinModeKind::Dimer,
+        force_tol: request.force_tol,
+        max_move: request.max_move,
+        max_rotations: 8,
+        rotation_tol: 1e-2,
+        ..MinModeConfig::default()
+    };
+    let dr = config.dr;
+    let mut session = MinModeSession::new(config, saved.clone(), mode)?;
+    session.set_position(saved.clone(), Some(gradient.clone()))?;
     let adapter = Row { surface, id };
-    let mut best_curvature = f64::INFINITY;
+    let mut x = saved.clone();
+    let mut g = gradient.clone();
+    let start_force = linf(&gradient);
+    let mut evals = 0usize;
+    let mut best_force = f64::INFINITY;
     let mut best_pos = saved.clone();
     let mut best_mode = session.mode().to_owned();
-    let mut evals = 0usize;
+    let mut best_curvature = f64::NAN;
+    let mut best_alpha = 1.0;
     let mut curvature = f64::NAN;
     let mut alpha = 1.0;
     let mut positive = false;
-    for _ in 0..request.max_mmf {
-        let report = session.step(&adapter)?;
-        evals += report.evaluations;
-        curvature = report.curvature;
-        let mode_now = session.mode().to_owned();
+    let mut converged = false;
+    let mut stalled = 0usize;
+    let budget = request.max_mmf.min(16);
+    for _ in 0..budget {
+        let estimate = session.estimate_mode(&adapter)?;
+        evals += estimate.evaluations;
+        let mode_now = estimate.mode;
         alpha = mode_now.dot(&tangent).abs().min(1.0);
+        curvature = fd_curvature(&adapter, &x, &g, &mode_now, dr)?;
+        evals += 1;
         if curvature > 0.0 {
             positive = true;
-            best_pos = saved.clone();
-            best_mode = mode_now;
             break;
         }
-        if curvature < best_curvature {
+        if alpha < request.alpha_tol {
+            break;
+        }
+        let x_new = &x + &newton_step(&g, &mode_now, curvature, request.max_move);
+        let (_, g_new) = adapter.eval(x_new.view())?;
+        evals += 1;
+        let force = linf(&g_new);
+        if force < best_force {
+            best_force = force;
+            best_pos = x_new.clone();
+            best_mode = mode_now.clone();
             best_curvature = curvature;
-            best_pos = session.position().to_owned();
-            best_mode = mode_now;
+            best_alpha = alpha;
         }
-        if alpha < request.alpha_tol || report.status == MinModeStatus::Converged {
+        if force <= request.force_tol {
+            converged = true;
             break;
         }
+        if force < start_force {
+            stalled = 0;
+        } else {
+            stalled += 1;
+        }
+        if stalled >= 3 && best_force >= start_force {
+            break;
+        }
+        x = x_new;
+        g = g_new;
+        session.set_position(x.clone(), Some(g.clone()))?;
+    }
+    let improved = best_force < start_force || converged;
+    if !improved {
+        return Ok(DimerEnd {
+            position: saved,
+            gradient,
+            energy: f64::NAN,
+            mode: best_mode,
+            curvature,
+            alpha,
+            evaluations: evals,
+            positive_curvature: positive,
+            restore: true,
+        });
     }
     let (energy, gradient) = adapter.eval(best_pos.view())?;
     evals += 1;
@@ -183,9 +280,10 @@ pub fn run_dimer<S: Surface>(
         gradient,
         energy,
         mode: best_mode,
-        curvature,
-        alpha,
+        curvature: best_curvature,
+        alpha: best_alpha,
         evaluations: evals,
-        positive_curvature: positive,
+        positive_curvature: false,
+        restore: false,
     })
 }

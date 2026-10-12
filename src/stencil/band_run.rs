@@ -821,7 +821,6 @@ impl BandEngine {
             max_mmf: control.max_mmf,
             force_tol: self.force_tol,
             max_move: self.max_move,
-            method: self.method.clone(),
         };
         let cached = control.cached_mode.clone();
         let end = super::oci::run_dimer(
@@ -838,10 +837,13 @@ impl BandEngine {
             inner.total_rows += end.evaluations;
         }
         self.last_curvature = end.curvature;
-        if end.positive_curvature {
+        if end.restore {
             if let Some(control) = self.oci.as_mut() {
                 control.cached_mode = None;
                 control.skip = true;
+                if end.positive_curvature {
+                    control.stable = 0;
+                }
             }
             self.iteration += 1;
             return Ok(self.report(StencilStatus::Running, f_ci, end.evaluations, PHASE_BAND));
@@ -869,7 +871,9 @@ impl BandEngine {
         let climb_force = image_force(&trial, &trial_energy, &trial_grad, &ks, ci, true, law)?;
         let f_new = climb_force.dot(&climb_force).sqrt();
         let improved = f_new < f_ci;
-        if improved {
+        let true_linf = end.gradient.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+        let parked = true_linf <= self.force_tol && end.curvature < 0.0;
+        if improved && !parked {
             super::chain::hermite_equal_arc(&mut trial)?;
         }
         let next = self.lock().chain.next_id();
