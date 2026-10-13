@@ -11,5 +11,5 @@ The launch direction is one extremal Hessian mode. A surface that supports Hessi
 CI-NEB, zoom-NEB, and AutoNEB produce the saddle the IRC leaves. Goswami, Gunde, and Jónsson, Front. Chem. 14, 1807063 (2026), doi:10.3389/fchem.2026.1807063. Zoom-NEB with fixed window ends follows eOn 3.6.0, doi:10.5281/zenodo.23166734. A warm fixed-end step costs =n - 2= evaluations. Free perpendicular ends cost =n=. Energy-weighted springs follow Ásgeirsson et al., J. Chem. Theory Comput. 17, 4929 (2021), doi:10.1021/acs.jctc.1c00462. The LEPS plus harmonic oscillator surface used as a gate is the model in Henkelman, Jóhannesson, and Jónsson, doi:10.1007/0-306-46949-9_10. The seven-atom Lennard-Jones cluster follows Dellago, Bolhuis, and Chandler, J. Chem. Phys. 108, 9236 (1998), doi:10.1063/1.476378.
 
 #+begin_export rst
-:cite:`goswamiEnhancedClimbingImage2026,eon2901`
+:cite:`goswamiEnhancedClimbingImage2026,rohitgoswamiTheochemuieonV3602026,asgeirssonNudgedElasticBand2021,henkelmanMethodsFindingSaddle2005,dellagoEfficientTransitionPath1998`
 #+end_export

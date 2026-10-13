@@ -4,7 +4,7 @@
 Zoom-NEB runs CI-NEB until the climbing image has stayed on the same interior image for =stability= iterations and the force is under the zoom threshold, then packs the same number of images onto that window. eOn 3.6.0, doi:10.5281/zenodo.23166734, is the source of the window, the cubic Hermite, and the fixed ends. Goswami, Gunde, and Jónsson, Front. Chem. 14, 1807063 (2026), doi:10.3389/fchem.2026.1807063, is the climbing-image account. The energy-weighted law, when it is asked for, is Ásgeirsson et al., J. Chem. Theory Comput. 17, 4929 (2021), doi:10.1021/acs.jctc.1c00462.
 
 #+begin_export rst
-:cite:`goswamiEnhancedClimbingImage2026,eon2901`
+:cite:`rohitgoswamiTheochemuieonV3602026,goswamiEnhancedClimbingImage2026,asgeirssonNudgedElasticBand2021,goswamiBayesianHierarchicalModels2025`
 #+end_export
 
 * Default ends

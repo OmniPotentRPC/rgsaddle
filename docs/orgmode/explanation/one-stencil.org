@@ -1,7 +1,9 @@
 #+title: One stencil
 #+options: toc:nil num:nil
 
-:cite:`goswamiEnhancedClimbingImage2026,eon2901,kolsbjergAutomatedNudgedElastic2016`
+#+begin_export rst
+:cite:`goswamiEnhancedClimbingImage2026,goswamiBayesianOptimizationGaussian2026,smidstrupImprovedInitialGuess2014,schmerwitzImprovedInitializationOptimal2023,goswamiEfficientExplorationChemical2025,asgeirssonNudgedElasticBand2021,rohitgoswamiTheochemuieonV3602026,goswamiBayesianHierarchicalModels2025`
+#+end_export
 
 The dimer translation and the climbing image are one Householder reflection of the true force. Goswami, Gunde, and Jónsson, Front. Chem. (2026), doi:10.3389/fchem.2026.1807063, Eq. 9. The dimer is that reflection on a three-image chain with free ends. Goswami (2026), arXiv:2603.10992, doi:10.48550/arXiv.2603.10992, Eqs. 2.14-2.16.
 

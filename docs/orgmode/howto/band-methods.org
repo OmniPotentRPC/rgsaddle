@@ -6,7 +6,7 @@
 Goswami, Gunde, and Jónsson, Front. Chem. 14, 1807063 (2026), doi:10.3389/fchem.2026.1807063, is the climbing-image and dimer account this crate follows. Zoom-NEB follows eOn 3.6.0, doi:10.5281/zenodo.23166734. Energy-weighted springs follow Ásgeirsson et al., J. Chem. Theory Comput. 17, 4929 (2021), doi:10.1021/acs.jctc.1c00462. AutoNEB follows Kolsbjerg, Groves, and Hammer, J. Chem. Phys. 145, 094107 (2016), doi:10.1063/1.4961868.
 
 #+begin_export rst
-:cite:`goswamiEnhancedClimbingImage2026,eon2901,kolsbjergAutomatedNudgedElastic2016`
+:cite:`goswamiEnhancedClimbingImage2026,rohitgoswamiTheochemuieonV3602026,asgeirssonNudgedElasticBand2021,smidstrupImprovedInitialGuess2014,schmerwitzImprovedInitializationOptimal2023`
 #+end_export
 
 There is no SIMD path, no BLAS, LAPACK, FFT, or GEMM call, and no MPI. Image blocks are a fixed partition. The raw bits do not depend on the thread count or on which block finishes first.

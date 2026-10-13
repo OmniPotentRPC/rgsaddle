@@ -4,7 +4,7 @@
 AutoNEB starts from the endpoints, inserts an image where the band is coarsest, relaxes that neighbourhood, and climbs at the end. The climbing image and the dimer are one Householder reflection: Goswami, Gunde, and Jónsson, Front. Chem. (2026), doi:10.3389/fchem.2026.1807063. The band and this climb stage follow that step, then Chill et al., Modelling Simul. Mater. Sci. Eng. 22, 055002 (2014), doi:10.1088/0965-0393/22/5/055002, with eOn v2.9.0.1, doi:10.5281/zenodo.18529495, then Kolsbjerg, Groves, and Hammer, J. Chem. Phys. 145, 094107 (2016), doi:10.1063/1.4961868.
 
 #+begin_export rst
-:cite:`goswamiEnhancedClimbingImage2026,chillBenchmarksCharacterization2014,eon2901,kolsbjergAutomatedNudgedElastic2016`
+:cite:`goswamiEnhancedClimbingImage2026,rohitgoswamiTheochemuieonV3602026`
 #+end_export
 
 On the double well, AutoNEB used more force calls than one fixed CI-NEB: 1.42 times as many, median 71 against 52, with a 95% BCa interval of 1.33 to 1.52 over 32 paired seeds. Prefer CI-NEB for that single barrier. Müller-Brown from B to C has mean ratio 0.46 (median 268 against 762, interval 0.35 to 0.79) over 31 paired seeds. The two-barrier path from A to B through the intermediate minimum has mean ratio 0.95, interval 0.81 to 1.23, medians 643 and 740, over 32 paired seeds. A pair with a censored side is dropped. Zoom-NEB is the growth method under development.
