@@ -10,6 +10,7 @@ use rgmin::{Accept, Control, Method, Oracle, Solver};
 use crate::error::SaddleError;
 use crate::force::ForceGate;
 use crate::projection::{ProjectionKind, climbing_image_force, dneb_component, force_perp};
+use crate::solid::{self, SolidStateConfig};
 use crate::spring::SpringKind;
 use crate::tangent::TangentKind;
 use crate::tangent::compute_tangent;
@@ -129,6 +130,12 @@ pub struct BandConfig {
     /// drops its pairs and steps along the force, and an empty memory
     /// scales that step by 0.01.
     pub method: Method,
+    /// Solid-state band (G-SSNEB, [`crate::solid`]): every image
+    /// carries its cell in the last nine entries of its row and the
+    /// band relaxes atoms and cells together. `None` keeps the cell
+    /// fixed. Requires `cell == None`, a lower-triangular cell per
+    /// image, and [`BandSession::step_solid`].
+    pub solid_state: Option<SolidStateConfig>,
 }
 
 impl Default for BandConfig {
@@ -148,6 +155,7 @@ impl Default for BandConfig {
             method: Method::Fire {
                 kind: rgmin::FireKind::V2,
             },
+            solid_state: None,
         }
     }
 }
@@ -195,6 +203,51 @@ pub trait BandSurface: Sync {
         energies: &mut Array1<f64>,
         gradients: &mut Array2<f64>,
     ) -> Result<(), SaddleError>;
+}
+
+/// The caller's surface for a solid-state band: energies, gradients
+/// and Cauchy stresses for a run of consecutive images, each with its
+/// own cell. Row `r` of `positions` (`3N`) and `cells` (9, row-major,
+/// row `i` lattice vector `a_i`) is one image; the rows follow the
+/// whole-band and interior-only rule of [`BandSurface`]. `stresses`
+/// receives `sigma = (1/V) dE/deps` row-major, energy per length
+/// cubed, for the right strain `h <- h (I + eps)` at fixed fractional
+/// coordinates (the rgpot and eOn convention).
+pub trait SolidBandSurface: Sync {
+    fn eval(
+        &self,
+        positions: ArrayView2<f64>,
+        cells: ArrayView2<f64>,
+        energies: &mut Array1<f64>,
+        gradients: &mut Array2<f64>,
+        stresses: &mut Array2<f64>,
+    ) -> Result<(), SaddleError>;
+}
+
+/// A solid-state surface seen as a band surface over `3N + 9` rows:
+/// positions then cell in, gradient then stress out.
+struct SolidRows<'a, S> {
+    surface: &'a S,
+}
+
+impl<S: SolidBandSurface> BandSurface for SolidRows<'_, S> {
+    fn eval(
+        &self,
+        rows: ArrayView2<f64>,
+        energies: &mut Array1<f64>,
+        gradients: &mut Array2<f64>,
+    ) -> Result<(), SaddleError> {
+        let atom_dof = rows.ncols() - 9;
+        let positions = rows.slice(s![.., ..atom_dof]);
+        let cells = rows.slice(s![.., atom_dof..]);
+        let mut g = Array2::zeros((rows.nrows(), atom_dof));
+        let mut stress = Array2::zeros((rows.nrows(), 9));
+        self.surface
+            .eval(positions, cells, energies, &mut g, &mut stress)?;
+        gradients.slice_mut(s![.., ..atom_dof]).assign(&g);
+        gradients.slice_mut(s![.., atom_dof..]).assign(&stress);
+        Ok(())
+    }
 }
 
 /// Rows within this distance (per Cartesian component, after the
@@ -404,7 +457,11 @@ pub(crate) fn remove_net_translation(force: &mut Array1<f64>) {
     }
 }
 
-/// Projected force on interior image `i`, climbing when `climb`.
+/// Projected force on interior image `i`, climbing when `climb`:
+/// `(force, step)`, the projected force the convergence test reads and
+/// the move the solver takes. They coincide for a fixed-cell band; a
+/// solid-state band reports the joint force and steps on its
+/// positions-and-cell image ([`solid::cartesian_step`]).
 #[allow(clippy::too_many_arguments)]
 fn image_force(
     config: &BandConfig,
@@ -415,7 +472,7 @@ fn image_force(
     x: ArrayView1<f64>,
     energies: &Array1<f64>,
     gradients: &Array2<f64>,
-) -> Result<Array1<f64>, SaddleError> {
+) -> Result<(Array1<f64>, Array1<f64>), SaddleError> {
     let dof = endpoint_first.len();
     let n_images = energies.len();
     let row = |k: usize| -> ArrayView1<f64> {
@@ -428,12 +485,31 @@ fn image_force(
         }
     };
     let (pos_prev, pos, pos_next) = (row(i - 1), row(i), row(i + 1));
-    let mut pos_diff_next = &pos_next - &pos;
-    let mut pos_diff_prev = &pos - &pos_prev;
-    if let Some(cell) = &config.cell {
-        cell.minimum_image(&mut pos_diff_next);
-        cell.minimum_image(&mut pos_diff_prev);
-    }
+    let solid = config
+        .solid_state
+        .as_ref()
+        .map(|ss| -> Result<(f64, f64), SaddleError> {
+            Ok((
+                solid::band_jacobian(endpoint_first, endpoint_last, ss.weight)?,
+                ss.pressure,
+            ))
+        })
+        .transpose()?;
+    let (pos_diff_next, pos_diff_prev) = match solid {
+        Some((jacobian, _)) => (
+            solid::joint_displacement(pos, pos_next, jacobian)?,
+            solid::joint_displacement(pos_prev, pos, jacobian)?,
+        ),
+        None => {
+            let mut next = &pos_next - &pos;
+            let mut prev = &pos - &pos_prev;
+            if let Some(cell) = &config.cell {
+                cell.minimum_image(&mut next);
+                cell.minimum_image(&mut prev);
+            }
+            (next, prev)
+        }
+    };
     let dist_next = pos_diff_next.dot(&pos_diff_next).sqrt();
     let dist_prev = pos_diff_prev.dot(&pos_diff_prev).sqrt();
     let tangent = compute_tangent(
@@ -445,7 +521,12 @@ fn image_force(
         energies[i + 1],
     )
     .map_err(|e| SaddleError::Invalid(format!("image {i}: {e}")))?;
-    let force = -&gradients.row(i);
+    let force = match solid {
+        Some((jacobian, pressure)) => {
+            solid::joint_force(pos, gradients.row(i), jacobian, pressure)
+        }
+        None => -&gradients.row(i),
+    };
     let spring = config.spring.compute(
         i,
         tangent.view(),
@@ -467,10 +548,29 @@ fn image_force(
             .projection
             .project(force.view(), tangent.view(), &spring)
     };
-    if config.remove_translation {
-        remove_net_translation(&mut projected);
+    match solid {
+        Some((jacobian, _)) => {
+            let atom_dof = dof - 9;
+            if config.remove_translation {
+                let mut atoms = projected.slice(s![..atom_dof]).to_owned();
+                remove_net_translation(&mut atoms);
+                projected.slice_mut(s![..atom_dof]).assign(&atoms);
+            }
+            let step = solid::cartesian_step(pos, projected.view(), jacobian);
+            // The rotational part of the projected cell force is cleared
+            // as it is in the step.
+            for (r, c) in [(0, 1), (0, 2), (1, 2)] {
+                projected[atom_dof + 3 * r + c] = 0.0;
+            }
+            Ok((projected, step))
+        }
+        None => {
+            if config.remove_translation {
+                remove_net_translation(&mut projected);
+            }
+            Ok((projected.clone(), projected))
+        }
     }
-    Ok(projected)
 }
 
 fn max_abs(v: &Array1<f64>) -> f64 {
@@ -494,9 +594,29 @@ fn assemble_band(
     endpoint_last: ArrayView1<f64>,
     x: ArrayView1<f64>,
 ) -> Result<(f64, Array1<f64>, f64), SaddleError> {
-    let (energies, gradients) = evaluate_band(state, surface, endpoint_first, endpoint_last, x)?;
-    let n_images = energies.len();
+    let (surface_energies, gradients) =
+        evaluate_band(state, surface, endpoint_first, endpoint_last, x)?;
+    let n_images = surface_energies.len();
     let dof = endpoint_first.len();
+    // A solid-state band under pressure ranks and tangents its images
+    // on the enthalpy E + p V.
+    let energies = match &config.solid_state {
+        Some(ss) if ss.pressure != 0.0 => {
+            let mut h = surface_energies.clone();
+            for (k, e) in h.iter_mut().enumerate() {
+                let row = if k == 0 {
+                    endpoint_first
+                } else if k == n_images - 1 {
+                    endpoint_last
+                } else {
+                    x.slice_move(s![(k - 1) * dof..k * dof])
+                };
+                *e = solid::enthalpy(*e, row, ss.pressure);
+            }
+            h
+        }
+        _ => surface_energies,
+    };
 
     let mut max_i = 1;
     for i in 2..n_images - 1 {
@@ -516,8 +636,9 @@ fn assemble_band(
     let ci_at = if armed { climb_target } else { None };
 
     let mut projected = Array1::zeros((n_images - 2) * dof);
+    let mut step = Array1::zeros((n_images - 2) * dof);
     for i in 1..n_images - 1 {
-        let f = image_force(
+        let (f, d) = image_force(
             config,
             i,
             ci_at == Some(i),
@@ -528,6 +649,7 @@ fn assemble_band(
             &gradients,
         )?;
         projected.slice_mut(s![(i - 1) * dof..i * dof]).assign(&f);
+        step.slice_mut(s![(i - 1) * dof..i * dof]).assign(&d);
     }
     let mut max_component = state.convergence_force(&projected);
 
@@ -544,7 +666,7 @@ fn assemble_band(
         state.armed.store(true, Ordering::Relaxed);
         if let Some(ci_i) = climb_target {
             state.ci_index.store(ci_i as i64, Ordering::Relaxed);
-            let f = image_force(
+            let (f, d) = image_force(
                 config,
                 ci_i,
                 true,
@@ -557,6 +679,7 @@ fn assemble_band(
             projected
                 .slice_mut(s![(ci_i - 1) * dof..ci_i * dof])
                 .assign(&f);
+            step.slice_mut(s![(ci_i - 1) * dof..ci_i * dof]).assign(&d);
             max_component = state.convergence_force(&projected);
         }
     }
@@ -575,7 +698,7 @@ fn assemble_band(
         .lock()
         .unwrap_or_else(|e| e.into_inner()) = max_component;
     let pseudo_energy: f64 = energies.slice(s![1..n_images - 1]).sum();
-    Ok((pseudo_energy, projected, max_component))
+    Ok((pseudo_energy, step, max_component))
 }
 
 /// The oracle's value beside a projected (band) or inverted (min-mode)
@@ -598,6 +721,12 @@ pub(crate) fn check_force_driven(method: &Method) -> Result<(), SaddleError> {
 /// surface's energies (whole band) and gradients (whole band; the
 /// endpoint rows are those of the last whole-band evaluation), and the
 /// projected interior force the solver stepped on.
+///
+/// For a solid-state band each gradient row ends with the image's
+/// Cauchy stress (row-major, 9 entries) after its `3N` gradient, and
+/// each projected row is the joint force: the atomic block, then the
+/// cell block `-(V/J)(sigma + p I)` after projection, upper triangle
+/// zero.
 #[derive(Clone, Debug)]
 pub struct BandEvaluation {
     pub energies: Array1<f64>,
@@ -672,6 +801,28 @@ impl BandSession {
         if !initial.iter().all(|v| v.is_finite()) {
             return Err(SaddleError::NonFinite("band positions"));
         }
+        if let Some(ss) = &config.solid_state {
+            ss.validate()?;
+            if dof < 12 {
+                return Err(SaddleError::Shape(format!(
+                    "a solid-state band row is 3N + 9 long with N >= 1; got {dof}"
+                )));
+            }
+            if config.cell.is_some() {
+                return Err(SaddleError::Invalid(
+                    "a solid-state band carries a cell per image; leave the fixed cell unset"
+                        .into(),
+                ));
+            }
+            if matches!(config.spring, SpringKind::OnsagerMachlup { .. }) {
+                return Err(SaddleError::Invalid(
+                    "the Onsager-Machlup spring has no cell block".into(),
+                ));
+            }
+            for (i, row) in initial.outer_iter().enumerate() {
+                solid::check_row(row, i)?;
+            }
+        }
         check_force_driven(&config.method)?;
         let interior_dof = (n_images - 2) * dof;
         let control = Control {
@@ -728,6 +879,11 @@ impl BandSession {
     pub fn set_rtr(&mut self, config: Option<crate::rtr::RtrConfig>) -> Result<(), SaddleError> {
         if let Some(config) = config {
             config.validate()?;
+            if self.config.solid_state.is_some() {
+                return Err(SaddleError::Invalid(
+                    "the trust-region band stepper has no cell block".into(),
+                ));
+            }
         }
         self.rtr = config.map(|config| crate::rtr::BandRtr::new(config, false));
         self.restart();
@@ -740,6 +896,14 @@ impl BandSession {
 
     pub fn climbing_image(&self) -> Option<usize> {
         self.state.ci()
+    }
+
+    /// The solid-state Jacobian `J = (V/N)^(1/3) sqrt(N) w` of the
+    /// current endpoints, length units; `None` for a fixed-cell band.
+    pub fn solid_jacobian(&self) -> Option<f64> {
+        let ss = self.config.solid_state.as_ref()?;
+        let last = self.positions.nrows() - 1;
+        solid::band_jacobian(self.positions.row(0), self.positions.row(last), ss.weight).ok()
     }
 
     /// Replace the band (host-side move between steps: acquisition,
@@ -759,6 +923,11 @@ impl BandSession {
         }
         if !positions.iter().all(|v| v.is_finite()) {
             return Err(SaddleError::NonFinite("band positions"));
+        }
+        if self.config.solid_state.is_some() {
+            for (i, row) in positions.outer_iter().enumerate() {
+                solid::check_row(row, i)?;
+            }
         }
         let n_images = positions.nrows();
         let mut moved = false;
@@ -864,9 +1033,47 @@ impl BandSession {
     /// recovers the surface and steps again may call
     /// [`BandSession::restart`] first to drop it.
     pub fn step<S: BandSurface>(&mut self, surface: &S) -> Result<BandReport, SaddleError> {
+        if self.config.solid_state.is_some() {
+            return Err(SaddleError::Invalid(
+                "a solid-state band steps on a SolidBandSurface (step_solid)".into(),
+            ));
+        }
         if self.rtr.is_some() {
             return self.step_rtr(surface);
         }
+        self.step_rows(surface)
+    }
+
+    /// One solver step of a solid-state band
+    /// ([`BandConfig::solid_state`]): atoms and interior cells move
+    /// together, the endpoint cells stay. Rows of
+    /// [`BandSession::positions`] are positions then cell.
+    pub fn step_solid<S: SolidBandSurface>(
+        &mut self,
+        surface: &S,
+    ) -> Result<BandReport, SaddleError> {
+        if self.config.solid_state.is_none() {
+            return Err(SaddleError::Invalid(
+                "step_solid needs BandConfig::solid_state".into(),
+            ));
+        }
+        self.step_rows(&SolidRows { surface })
+    }
+
+    /// Convenience loop over [`BandSession::step_solid`].
+    pub fn run_solid<S: SolidBandSurface>(
+        &mut self,
+        surface: &S,
+        max_steps: usize,
+    ) -> Result<BandReport, SaddleError> {
+        let mut report = self.step_solid(surface)?;
+        while report.status == BandStatus::Running && self.iteration < max_steps {
+            report = self.step_solid(surface)?;
+        }
+        Ok(report)
+    }
+
+    fn step_rows<S: BandSurface>(&mut self, surface: &S) -> Result<BandReport, SaddleError> {
         let n_images = self.positions.nrows();
         let dof = self.positions.ncols();
         let interior_dof = (n_images - 2) * dof;

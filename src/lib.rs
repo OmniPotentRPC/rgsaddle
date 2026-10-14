@@ -31,10 +31,12 @@ pub mod nichols;
 pub mod prfo;
 pub mod projection;
 pub mod spring;
+pub mod solid;
 pub mod tangent;
 
 pub use band::{
     BandConfig, BandEvaluation, BandReport, BandSession, BandStatus, BandSurface, Cell, CiConfig,
+    SolidBandSurface,
 };
 pub use error::SaddleError;
 pub use minmode::{
@@ -47,6 +49,7 @@ pub use nichols::{
 };
 pub use prfo::{PrfoKind, partitioned_rfo_eigen, restricted_prfo_displacement};
 pub use projection::ProjectionKind;
+pub use solid::SolidStateConfig;
 pub use spring::SpringKind;
 pub use tangent::TangentKind;
 
