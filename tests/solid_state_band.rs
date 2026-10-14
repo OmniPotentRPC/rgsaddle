@@ -66,11 +66,11 @@ fn equal_cells_and_zero_stress_match_the_atomic_band() {
         BandConfig {
             climbing: None,
             max_move: 0.2,
-            solid: Some(SolidState {
-                cells: vec![diagonal(5.0), diagonal(5.0), diagonal(5.0)],
-                pressure: 0.0,
-                weight: 1.0,
-            }),
+            solid: Some(SolidState::new(vec![
+                diagonal(5.0),
+                diagonal(5.0),
+                diagonal(5.0),
+            ])),
             ..BandConfig::default()
         },
         positions,
@@ -98,11 +98,9 @@ fn positive_pressure_shrinks_the_interior_cell() {
     let config = BandConfig {
         climbing: None,
         max_move: 0.05,
-        solid: Some(SolidState {
-            cells: vec![diagonal(5.0), diagonal(5.0), diagonal(5.0)],
-            pressure: 0.02,
-            weight: 1.0,
-        }),
+        solid: Some(
+            SolidState::new(vec![diagonal(5.0), diagonal(5.0), diagonal(5.0)]).with_pressure(0.02),
+        ),
         ..BandConfig::default()
     };
     let mut session = BandSession::new(
@@ -130,11 +128,11 @@ fn a_longer_product_cell_pulls_the_middle_cell_out() {
     let config = BandConfig {
         climbing: None,
         max_move: 0.2,
-        solid: Some(SolidState {
-            cells: vec![diagonal(4.0), diagonal(4.0), diagonal(6.0)],
-            pressure: 0.0,
-            weight: 1.0,
-        }),
+        solid: Some(SolidState::new(vec![
+            diagonal(4.0),
+            diagonal(4.0),
+            diagonal(6.0),
+        ])),
         ..BandConfig::default()
     };
     // Matching fractional coordinates, so the atomic block of the

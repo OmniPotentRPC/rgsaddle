@@ -115,7 +115,11 @@ pub struct CiConfig {
 /// 136, 074103 (2012). The Jacobian is fixed from the mean endpoint
 /// volume when the session is built. Each cell is put in
 /// lower-triangular form, and that image's positions rotate with it.
+///
+/// Fields may be added: build it with [`SolidState::new`] and the
+/// `with_*` setters.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct SolidState {
     /// One cell per image, endpoints included.
     pub cells: Vec<Cell>,
@@ -124,6 +128,29 @@ pub struct SolidState {
     pub pressure: f64,
     /// Positive scale on the Jacobian. 1 is the 2012 value.
     pub weight: f64,
+}
+
+impl SolidState {
+    /// One cell per image, zero pressure, the 2012 Jacobian (weight 1).
+    pub fn new(cells: Vec<Cell>) -> Self {
+        Self {
+            cells,
+            pressure: 0.0,
+            weight: 1.0,
+        }
+    }
+
+    /// Hydrostatic pressure, energy per length cubed.
+    pub fn with_pressure(mut self, pressure: f64) -> Self {
+        self.pressure = pressure;
+        self
+    }
+
+    /// Positive scale on the Jacobian.
+    pub fn with_weight(mut self, weight: f64) -> Self {
+        self.weight = weight;
+        self
+    }
 }
 
 /// Band configuration. `force_tol` is on the max absolute component
