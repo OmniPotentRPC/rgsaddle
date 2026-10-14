@@ -26,6 +26,9 @@ There is no run-to-completion C entry point. Units are the caller's. Positions a
 
 Defaults: improved tangent, uniform spring =k = 5=, NEB projection, climbing image with trigger factor 0.5.
 
+* Step one point with a stencil
+=howto/stencil= builds =Stencil::point= for a minimiser, the dimer, Lanczos, ART, or eigen following. =Stencil::band= is the =feat/band-methods-zoom= seam. The C names are =rgsaddle_stencil_*= and =rgsaddle_last_error=. Python is =rgsaddle.Stencil.point= and =rgsaddle.ase.Point=.
+
 * Minimum-mode instead of a band
 =MinModeSession= refreshes the lowest curvature mode (dimer rotation or Lanczos on finite-difference Hessian actions), inverts the force along it, and takes one solver step. Same host loop. =PointSurface= evals a single geometry.
 

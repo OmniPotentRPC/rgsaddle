@@ -49,7 +49,8 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(corrosion)
 
 # The staticlib is the C ABI (feature capi). Python calls rgsaddle_status_name
-# and nothing else from it. Session entry points stay off the Python surface.
+# and the rgsaddle_stencil_* point-search entry points. Those symbols stay
+# hidden in the extension. The older session entry points stay off this surface.
 corrosion_import_crate(
   MANIFEST_PATH "${CMAKE_CURRENT_SOURCE_DIR}/Cargo.toml"
   CRATES rgsaddle
