@@ -1,0 +1,16 @@
+{
+  "symmetric": true,
+  "orthogonal": true,
+  "involutive": true,
+  "det": -1,
+  "spectrum": [
+    -1,
+    1,
+    1
+  ],
+  "climbing_image_force_zero_dneb": "T(tau) F",
+  "neg_translated_gradient_negative_curvature": "T(N) (-g)",
+  "reflect_zero_iff_zero": true,
+  "ascend_equals_reflect_iff": "F is parallel to v",
+  "citation": "doi:10.3389/fchem.2026.1807063"
+}

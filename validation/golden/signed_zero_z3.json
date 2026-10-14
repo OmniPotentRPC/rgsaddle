@@ -1,0 +1,9 @@
+{
+  "reflect_forms_finite_binary64": "unknown",
+  "reflect_forms_signed_zero_inputs": "unsat",
+  "reflect_forms_statement": "Z3 returned unknown on the full finite domain within 20 seconds. The query restricted to signed-zero inputs is unsat: the two formulas agree as bits, or both results are zero.",
+  "add_pos_zero": "unsat",
+  "add_pos_zero_statement": "x + 0.0 keeps every binary64 bit pattern except -0, which becomes +0.",
+  "consequence": "Adding a zero DNEB vector maps a -0 component to +0. On signed-zero scalar inputs the two reflector formulas agree up to that sign. Z3 did not decide the formulas on every finite binary64 value, so the Rust forms stay as written until a deciding query exists.",
+  "citation": "doi:10.1007/978-3-540-78800-3_24"
+}

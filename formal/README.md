@@ -46,6 +46,43 @@ with [elan](https://github.com/leanprover/elan).
 | `forward_grad_diff_error`, `forward_grad_diff_exact_cubic` | `src/minmode.rs::Counted::action` (`FiniteDifference::Forward`) | A bound on the third derivative along the mode. The forward-difference curvature error is then at most `M3 dr / 2`, and this order is attained. |
 | `central_grad_diff_error` | `src/minmode.rs::Counted::action` (`FiniteDifference::Central`) | A bound on the fourth derivative. The error is then at most `M4 dr^2 / 6`, for one more gradient per action. |
 | `central_second_diff_error`, `central_second_diff_error_contDiff` | (energy-only curvature) | A bound on the fourth derivative. The error of `(E(x+h) - 2E(x) + E(x-h)) / h^2` is then at most `M4 h^2 / 12`. |
+| `climbingImageForce_eq_reflect` | `src/projection.rs::climbing_image_force` | A zero DNEB vector. The force is `reflect` of the true force. |
+| `translatedForce_eq_reflect`, `translated_neg_curvature`, `dimer_translation_eq_climbing` | `src/minmode.rs::translated_gradient` | Negative curvature and a unit mode. Minus the translated gradient of `g`, with force `F = -g`, is `reflect` of `F`. |
+| `reflect_eq_zero_iff` | `src/projection.rs::climbing_image_force` | A unit tangent. The reflected force is zero exactly when the force is zero. |
+| `ascend_eq_reflect_iff` | `src/minmode.rs::translated_gradient` (non-negative curvature) | A unit mode. The ascend branch `-(F · v) v` equals `reflect` exactly when the component of `F` orthogonal to `v` is zero. |
+| `improvedTangent_dimer` | `src/tangent.rs::compute_tangent` (`TangentKind::Improved`) | `R± = R0 ± δ N`, `|N| = 1`, `δ > 0`, and equal side energies strictly below the centre. The improved tangent is `N`. The Lean normalisation uses a nonzero test. Rust uses the floor `1e-10` (`scripts/constants.json`). |
+| `dimer_forces_eq` | `climbing_image_force` and `translated_gradient` | The hypotheses of `improvedTangent_dimer`, negative curvature, and the improved tangent already equal to `N`. The climbing-image force and the dimer translation force then agree. |
+| `frozenAxis_two_dim` | `src/projection.rs::climbing_image_force` (the reflector `I - 2 v vᵀ` applied to `H = diag(-a, b)`) | `a > 0`, `b > 0`, and a unit `v = (c, s)`. The eigenvalues of the reflected Hessian have positive real part exactly when `|c| > 1/√2`. |
+
+## Stencil notes
+
+`lake exe mirror` writes `formal/golden/stencil.json` over the rationals.
+`tests/formal_mirror.rs` compares `climbing_image_force` and
+`compute_tangent` to those bits. `translated_gradient` is `pub(crate)`.
+Its rows are compared from `src/kani_proofs.rs` under `#[cfg(test)]`.
+There is no public shim.
+
+The n-dimensional frozen-axis statement is open. The two-dimensional
+theorem is the one above. A search for `n = 3..6`
+(`validation/stencil/fortyfive.py`) did not produce a counterexample
+with `|v · e_min| > 1/√2` and a negative real part below `1e-6`.
+The best candidates sit just above the threshold, with smallest real
+part about `8.7e-4`. That is not a proof.
+
+Signed zero, from `validation/signed_zero_z3.py` (de Moura and Bjørner,
+Z3, TACAS 2008, doi:10.1007/978-3-540-78800-3_24). Z3 proves that
+`x + 0.0` preserves every binary64 bit pattern except `-0`, which
+becomes `+0`. Adding a zero DNEB vector can therefore change a `-0`
+component. The ascend branch scales the mode by `-parallel`, so a zero
+component becomes `-0` while the rational golden writes `0/1`. On inputs that are both signed zeros, the two scalar
+reflector formulas agree as bits or both return zero. Z3 did not decide
+the formulas on every finite binary64 value, so the Rust forms stay as
+written.
+
+`SpringKind::Weighted` does not evaluate
+`α = (E_max - E_i) / (E_max - E_ref)`. The caller must not divide when
+`E_max = E_ref`. On `E_i ≤ E_max` that case is `k_i = k_min`.
+The golden rows check this formula, not the spring method.
 
 ## Preconditions and how the Rust code meets them
 

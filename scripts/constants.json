@@ -1,0 +1,22 @@
+{
+  "default_dr": {
+    "literal": "dr: 1e-3",
+    "path": "src/minmode.rs"
+  },
+  "dneb_norm_floor": {
+    "literal": "spring_perp_norm > 1e-10",
+    "path": "src/projection.rs"
+  },
+  "mode_norm_floor": {
+    "literal": "norm > 1e-14",
+    "path": "src/minmode.rs"
+  },
+  "mode_reset_angle": {
+    "literal": "5.0 * PI / 180.0",
+    "path": "src/minmode.rs"
+  },
+  "tangent_norm_floor": {
+    "literal": "norm > 1e-10",
+    "path": "src/tangent.rs"
+  }
+}
