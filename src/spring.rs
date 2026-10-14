@@ -38,32 +38,29 @@ impl SpringKind {
         pos_diff_next: ArrayView1<f64>,
         pos_diff_prev: ArrayView1<f64>,
     ) -> SpringForces {
-        match self {
-            SpringKind::Uniform { k } => SpringForces {
-                parallel: tangent.to_owned() * (k * (dist_next - dist_prev)),
-                full: (&pos_diff_next - &pos_diff_prev) * *k,
+        let coupling = match self {
+            SpringKind::Uniform { k } => crate::stencil::Coupling::Uniform { k: *k },
+            SpringKind::Weighted { ks } => crate::stencil::Coupling::Weighted {
+                k_next: ks[i],
+                k_prev: ks[i - 1],
             },
-            SpringKind::Weighted { ks } => {
-                let k_next = ks[i];
-                let k_prev = ks[i - 1];
-                SpringForces {
-                    parallel: tangent.to_owned() * (k_next * dist_next - k_prev * dist_prev),
-                    full: &pos_diff_next * k_next - &pos_diff_prev * k_prev,
-                }
-            }
-            SpringKind::OnsagerMachlup { k, l_vecs } => {
-                // Mandelli Eq. 13 then Eq. 15 (project onto tangent).
-                // R[i+1] + R[i-1] - 2 R[i] is written as the difference
-                // of the two minimum-imaged segments, so a periodic
-                // band whose atoms cross the cell sees the same spring.
-                let diff = &pos_diff_next - &pos_diff_prev + &l_vecs[i + 1] - &l_vecs[i];
-                let f_om = diff * *k;
-                let par = f_om.dot(&tangent);
-                SpringForces {
-                    parallel: tangent.to_owned() * par,
-                    full: Array1::zeros(tangent.len()),
-                }
-            }
+            SpringKind::OnsagerMachlup { k, l_vecs } => crate::stencil::Coupling::Onsager {
+                k: *k,
+                l_next: l_vecs[i + 1].view(),
+                l_here: l_vecs[i].view(),
+            },
+        };
+        let forces = crate::stencil::coupling_forces(
+            &coupling,
+            tangent,
+            dist_next,
+            dist_prev,
+            pos_diff_next,
+            pos_diff_prev,
+        );
+        SpringForces {
+            parallel: forces.parallel,
+            full: forces.full,
         }
     }
 }

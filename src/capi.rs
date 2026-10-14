@@ -1403,3 +1403,5 @@ pub unsafe extern "C" fn rgsaddle_index1_free(session: *mut RgsaddleIndex1) {
 
 mod sessions;
 pub use sessions::*;
+mod stencil;
+pub use stencil::*;
