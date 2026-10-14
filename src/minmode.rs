@@ -313,6 +313,17 @@ fn perpendicular(h: &Array1<f64>, n: &Array1<f64>) -> Array1<f64> {
 /// the next iteration starts without a gradient call. Rotation
 /// directions are Polak-Ribiere conjugate on the rotational force,
 /// with the previous direction carried along the rotation.
+/// Floor of the dimer's trial angle, radians. The Kastner-Sherwood
+/// guess `phi1 = atan(|b1| / |C|) / 2` falls under it once the
+/// rotational force is under `2e-4 |C|`.
+const MIN_TRIAL_ANGLE: f64 = 1e-4;
+
+/// Largest weight `|sin(phi1 - phi)| / sin(phi1)` or
+/// `|sin(phi)| / sin(phi1)` with which `rotate_dimer` extrapolates the
+/// measured actions from a trial angle on its floor. Past it the rotated
+/// dimer is measured (`validation/dimer_extrapolation.py`).
+const MAX_EXTRAPOLATION: f64 = 8.0;
+
 fn rotate_dimer<S: PointSurface>(
     surface: &Counted<'_, S>,
     x: ArrayView1<f64>,
@@ -351,7 +362,8 @@ fn rotate_dimer<S: PointSurface>(
         // direction). The trial angle is the Kastner-Sherwood guess
         // from a harmonic model, kept inside (1e-4, pi/4].
         let b1 = h.dot(&theta);
-        let phi1 = (0.5 * (b1.abs() / (curvature.abs() + 1e-300)).atan()).clamp(1e-4, 0.25 * PI);
+        let phi1 = (0.5 * (b1.abs() / (curvature.abs() + 1e-300)).atan())
+            .clamp(MIN_TRIAL_ANGLE, 0.25 * PI);
         let n1 = normalize(&(&n * phi1.cos()) + &(&theta * phi1.sin()));
         let h1 = surface.action(x, g0, n1.view(), config)?;
         let c1 = crate::stencil::curvature_along(h1.view(), n1.view());
@@ -389,10 +401,37 @@ fn rotate_dimer<S: PointSurface>(
         let s1 = phi1.sin();
         let w_old = (phi1 - phi).sin() / s1;
         let w_trial = s / s1;
-        h = &(&h * w_old) + &(&h1 * w_trial);
         let theta_rotated = &(&theta * c) - &(&n * s);
-        n = normalize(&(&n * c) + &(&theta * s));
-        curvature = crate::stencil::curvature_along(h.view(), n.view());
+        let n_new = normalize(&(&n * c) + &(&theta * s));
+        if phi1 <= MIN_TRIAL_ANGLE && w_old.abs().max(w_trial.abs()) > MAX_EXTRAPOLATION {
+            // A forward-difference action is not the exact H v: its
+            // Rayleigh quotient carries dr/2 T[v,v,v], so C'(0) differs
+            // from 2 h.theta by dr/2 T[n,n,theta] and the fitted a1 by
+            // that over phi1. On the floor of the trial angle that
+            // ratio is largest, and a step far past it, with the gradient
+            // extrapolated there, inherits the error multiplied by
+            // sin(phi1 - phi) / sin(phi1). Measure the
+            // rotated dimer instead; when it contradicts the model the
+            // model is below its resolution here and the better
+            // measured dimer is the estimate.
+            let h_new = surface.action(x, g0, n_new.view(), config)?;
+            let c_new = crate::stencil::curvature_along(h_new.view(), n_new.view());
+            rotations += 1;
+            if c_new.is_nan() || c_new > c1.min(curvature) + slack {
+                if c1 < curvature {
+                    n = n1;
+                    curvature = c1;
+                }
+                break;
+            }
+            h = h_new;
+            n = n_new;
+            curvature = c_new;
+        } else {
+            h = &(&h * w_old) + &(&h1 * w_trial);
+            n = n_new;
+            curvature = crate::stencil::curvature_along(h.view(), n.view());
+        }
         force_prev = Some(force);
         dir_prev = Some(theta_rotated * dir_norm);
         if config.rotation_angle_tol > 0.0 && phi.abs() < config.rotation_angle_tol {

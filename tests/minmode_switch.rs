@@ -97,3 +97,27 @@ fn lanczos_fire_escapes_the_basin() {
 fn lanczos_lbfgs_escapes_the_basin() {
     escapes_the_basin(MinModeKind::Lanczos, rgmin::Method::Lbfgs { memory: 10 });
 }
+
+/// The dimer's estimate is a measured Rayleigh quotient, inside the
+/// Hessian's spectrum [4.62, 10.05] at the basin start, also once its
+/// rotational force falls under what forward differences resolve
+/// (validation/dimer_extrapolation.py).
+#[test]
+fn dimer_estimate_stays_inside_the_spectrum() {
+    let config = MinModeConfig {
+        kind: MinModeKind::Dimer,
+        ..MinModeConfig::default()
+    };
+    let surface = BentWell {
+        visited: Mutex::new(Vec::new()),
+    };
+    let mut session =
+        MinModeSession::new(config, array![0.85, 0.05, -0.04], array![1.0, 0.1, 0.0]).unwrap();
+    let estimate = session.estimate_mode(&surface).unwrap();
+    assert!(
+        (4.62..=4.65).contains(&estimate.curvature),
+        "curvature {} outside the lowest eigenvalue 4.6235 + dr/2 T",
+        estimate.curvature
+    );
+    assert!(estimate.mode[0].abs() > 0.99, "{:?}", estimate.mode);
+}
