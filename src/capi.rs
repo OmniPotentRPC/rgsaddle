@@ -26,7 +26,7 @@ use crate::spring::SpringKind;
 use crate::tangent::TangentKind;
 
 pub const RGSADDLE_ABI_MAJOR: u32 = 1;
-pub const RGSADDLE_ABI_MINOR: u32 = 15;
+pub const RGSADDLE_ABI_MINOR: u32 = 16;
 
 /// Band config bit 0. The C step calls the surface once per image
 /// carried by the evaluation: every image on the first evaluation
@@ -237,6 +237,14 @@ pub struct RgsaddleBand {
     n_images: i64,
     n_atoms: i64,
     per_image: bool,
+    /// Rows carry the cell after the positions (ABI minor 16).
+    solid: bool,
+}
+
+impl RgsaddleBand {
+    fn atom_dof(&self) -> usize {
+        (3 * self.n_atoms) as usize
+    }
 }
 
 pub struct RgsaddleMinMode {
@@ -269,6 +277,62 @@ fn status_of(err: &SaddleError) -> i32 {
         SaddleError::Solver(_) => RGSADDLE_SOLVER,
         SaddleError::Invalid(_) => RGSADDLE_INVALID_PARAMETER,
     }
+}
+
+/// The Rust band configuration of a C one, `None` when a pointer the
+/// configuration needs is NULL. `dof` is the length of a band row.
+///
+/// # Safety
+/// `cfg.spring_ks` and `cfg.cell` must be NULL or valid for their
+/// documented lengths.
+unsafe fn band_config_of(cfg: &RgsaddleBandConfig, n_images: i64, dof: usize) -> Option<BandConfig> {
+    let spring = match cfg.spring {
+        1 => {
+            if cfg.spring_ks.is_null() {
+                return None;
+            }
+            let ks = unsafe { slice::from_raw_parts(cfg.spring_ks, (n_images - 1) as usize) };
+            SpringKind::Weighted { ks: ks.to_vec() }
+        }
+        2 => SpringKind::OnsagerMachlup {
+            k: cfg.spring_k,
+            l_vecs: vec![Array1::zeros(dof); n_images as usize],
+        },
+        _ => SpringKind::Uniform { k: cfg.spring_k },
+    };
+    let cell = if cfg.cell.is_null() {
+        None
+    } else {
+        let c = unsafe { slice::from_raw_parts(cfg.cell, 9) };
+        Some(Cell([
+            [c[0], c[1], c[2]],
+            [c[3], c[4], c[5]],
+            [c[6], c[7], c[8]],
+        ]))
+    };
+    Some(BandConfig {
+        tangent: if cfg.tangent == 0 {
+            TangentKind::Simple
+        } else {
+            TangentKind::Improved
+        },
+        spring,
+        projection: match cfg.projection {
+            0 => ProjectionKind::PlainElasticBand,
+            2 => ProjectionKind::DoublyNudged,
+            _ => ProjectionKind::Neb,
+        },
+        climbing: (cfg.ci_trigger_factor > 0.0).then_some(CiConfig {
+            trigger_factor: cfg.ci_trigger_factor,
+            trigger_force: cfg.ci_trigger_force,
+        }),
+        cell,
+        force_tol: cfg.force_tol,
+        max_move: cfg.max_move,
+        remove_translation: cfg.flags & RGSADDLE_BAND_KEEP_TRANSLATION == 0,
+        method: method_of(cfg.method, cfg.memory),
+        solid_state: None,
+    })
 }
 
 #[unsafe(no_mangle)]
@@ -335,51 +399,8 @@ pub unsafe extern "C" fn rgsaddle_band_create(
         Err(_) => return std::ptr::null_mut(),
     };
 
-    let spring = match cfg.spring {
-        1 => {
-            if cfg.spring_ks.is_null() {
-                return std::ptr::null_mut();
-            }
-            let ks = unsafe { slice::from_raw_parts(cfg.spring_ks, (n_images - 1) as usize) };
-            SpringKind::Weighted { ks: ks.to_vec() }
-        }
-        2 => SpringKind::OnsagerMachlup {
-            k: cfg.spring_k,
-            l_vecs: vec![Array1::zeros(dof); n_images as usize],
-        },
-        _ => SpringKind::Uniform { k: cfg.spring_k },
-    };
-    let cell = if cfg.cell.is_null() {
-        None
-    } else {
-        let c = unsafe { slice::from_raw_parts(cfg.cell, 9) };
-        Some(Cell([
-            [c[0], c[1], c[2]],
-            [c[3], c[4], c[5]],
-            [c[6], c[7], c[8]],
-        ]))
-    };
-    let band_config = BandConfig {
-        tangent: if cfg.tangent == 0 {
-            TangentKind::Simple
-        } else {
-            TangentKind::Improved
-        },
-        spring,
-        projection: match cfg.projection {
-            0 => ProjectionKind::PlainElasticBand,
-            2 => ProjectionKind::DoublyNudged,
-            _ => ProjectionKind::Neb,
-        },
-        climbing: (cfg.ci_trigger_factor > 0.0).then_some(CiConfig {
-            trigger_factor: cfg.ci_trigger_factor,
-            trigger_force: cfg.ci_trigger_force,
-        }),
-        cell,
-        force_tol: cfg.force_tol,
-        max_move: cfg.max_move,
-        remove_translation: cfg.flags & RGSADDLE_BAND_KEEP_TRANSLATION == 0,
-        method: method_of(cfg.method, cfg.memory),
+    let Some(band_config) = (unsafe { band_config_of(cfg, n_images, dof) }) else {
+        return std::ptr::null_mut();
     };
     match BandSession::new(band_config, initial) {
         Ok(mut session) => {
@@ -398,6 +419,7 @@ pub unsafe extern "C" fn rgsaddle_band_create(
                 n_images,
                 n_atoms,
                 per_image: cfg.flags & RGSADDLE_BAND_PER_IMAGE != 0,
+                solid: false,
             }))
         }
         Err(_) => std::ptr::null_mut(),
@@ -423,6 +445,9 @@ pub unsafe extern "C" fn rgsaddle_band_step(
         return RGSADDLE_NULL_SURFACE;
     };
     let band = unsafe { &mut *band };
+    if band.solid {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
     let cs = CSurface {
         f,
         user,
@@ -464,10 +489,13 @@ pub unsafe extern "C" fn rgsaddle_band_positions(band: *const RgsaddleBand, out:
     }
     let band = unsafe { &*band };
     let pos = band.session.positions();
-    let total = (band.n_images * 3 * band.n_atoms) as usize;
+    let dof = band.atom_dof();
+    let total = band.n_images as usize * dof;
     let dst = unsafe { slice::from_raw_parts_mut(out, total) };
-    for (i, v) in pos.iter().enumerate() {
-        dst[i] = *v;
+    for (i, row) in pos.outer_iter().enumerate() {
+        for c in 0..dof {
+            dst[i * dof + c] = row[c];
+        }
     }
     RGSADDLE_OK
 }
@@ -486,13 +514,16 @@ pub unsafe extern "C" fn rgsaddle_band_set_positions(
         return RGSADDLE_INVALID_PARAMETER;
     }
     let band = unsafe { &mut *band };
-    let dof = (3 * band.n_atoms) as usize;
+    let dof = band.atom_dof();
     let total = dof * band.n_images as usize;
     let flat = unsafe { slice::from_raw_parts(positions, total) };
-    let arr = match Array2::from_shape_vec((band.n_images as usize, dof), flat.to_vec()) {
-        Ok(a) => a,
-        Err(_) => return RGSADDLE_SHAPE,
-    };
+    // A solid-state band keeps its cells.
+    let mut arr = band.session.positions().to_owned();
+    for (i, mut row) in arr.outer_iter_mut().enumerate() {
+        for c in 0..dof {
+            row[c] = flat[i * dof + c];
+        }
+    }
     match band.session.set_positions(arr) {
         Ok(()) => RGSADDLE_OK,
         Err(e) => status_of(&e),
@@ -538,6 +569,14 @@ pub unsafe extern "C" fn rgsaddle_band_evaluation(
     let band = unsafe { &*band };
     let Some(eval) = band.session.evaluation() else {
         return RGSADDLE_NO_EVALUATION;
+    };
+    // A solid-state band reports the atomic columns here and the cell
+    // columns through rgsaddle_band_solid_evaluation.
+    let dof = band.atom_dof();
+    let eval = crate::band::BandEvaluation {
+        energies: eval.energies,
+        gradients: eval.gradients.slice(ndarray::s![.., ..dof]).to_owned(),
+        projected: eval.projected.slice(ndarray::s![.., ..dof]).to_owned(),
     };
     let copy = |dst: *mut f64, src: &mut dyn Iterator<Item = f64>, len: usize| {
         if !dst.is_null() {
@@ -1235,3 +1274,5 @@ pub unsafe extern "C" fn rgsaddle_index1_free(session: *mut RgsaddleIndex1) {
 
 mod sessions;
 pub use sessions::*;
+mod solid;
+pub use solid::*;
