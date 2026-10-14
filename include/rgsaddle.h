@@ -234,20 +234,51 @@ RgsaddleBand *rgsaddle_band_create_solid(const rgsaddle_band_config_t *config,
                                          double weight);
 
 /**
- * Cauchy stress for a solid-state step. `n_images` is the row count of
- * this call, `cells` and `stresses` are that many row-major 3x3
- * matrices, and `image` is -1. Return RGSADDLE_OK or another status.
+ * Surface request of a solid-state band, ABI minor 16. The rows follow
+ * rgsaddle_surface_request_t (batched with image -1, or one image with
+ * RGSADDLE_REQ_ONE_IMAGE). Per row the host reads 3 * n_atoms
+ * positions and a row-major lower-triangular 3x3 cell, and writes the
+ * energy, the 3 * n_atoms gradient and the row-major Cauchy stress
+ * sigma = (1/V) dE/deps for the right strain h <- h (I + eps) at fixed
+ * fractional coordinates (energy per length cubed, the rgpot and eOn
+ * convention). One call answers all three, so a potential that
+ * returns its stress with its force costs one evaluation per image.
  */
-typedef rgsaddle_status_t (*rgsaddle_stress_fn)(void *user, int64_t n_images,
-                                                int64_t n_atoms, int64_t image,
-                                                const double *positions,
-                                                const double *cells,
-                                                double *stresses);
+typedef struct {
+  rgsaddle_version_t version;
+  uint64_t flags;
+  int64_t n_images;
+  int64_t n_atoms;
+  const double *positions;
+  const double *cells;
+  double *energies;
+  double *gradients;
+  double *stresses;
+  int64_t image;
+} rgsaddle_solid_surface_request_t;
 
-/** Register the stress callback. A null function clears it. ABI minor 16. */
-rgsaddle_status_t rgsaddle_band_set_stress(RgsaddleBand *band,
-                                           rgsaddle_stress_fn stress,
-                                           void *user);
+typedef rgsaddle_status_t (*rgsaddle_solid_surface_fn)(
+    void *user, rgsaddle_solid_surface_request_t *req);
+
+/**
+ * One optimizer step of a band from rgsaddle_band_create_solid: atoms
+ * and interior cells move together, endpoint cells stay. A solid-state
+ * band refuses rgsaddle_band_step with RGSADDLE_INVALID_PARAMETER, and
+ * a fixed-cell band refuses this call the same way. ABI minor 16.
+ */
+rgsaddle_status_t rgsaddle_band_step_solid(RgsaddleBand *band,
+                                           rgsaddle_solid_surface_fn surface,
+                                           void *user, rgsaddle_report_t *out);
+
+/** Copy the band's cells out (n_images * 9 doubles). ABI minor 16. */
+rgsaddle_status_t rgsaddle_band_cells(const RgsaddleBand *band, double *out);
+
+/**
+ * The fixed Jacobian J = (V/N)^(1/3) sqrt(N) weight, V the mean
+ * endpoint volume: the length unit of the cell block. ABI minor 16.
+ */
+rgsaddle_status_t rgsaddle_band_solid_jacobian(const RgsaddleBand *band,
+                                               double *out);
 
 /** One optimizer step over the assembled band force. */
 rgsaddle_status_t rgsaddle_band_step(RgsaddleBand *band,

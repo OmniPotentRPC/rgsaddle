@@ -136,12 +136,7 @@ struct CSurface {
     n_images: i64,
     per_image: bool,
     rows: std::sync::atomic::AtomicUsize,
-    stress: Option<RgsaddleStressFn>,
-    stress_user: *mut c_void,
 }
-
-pub type RgsaddleStressFn =
-    extern "C" fn(*mut c_void, i64, i64, i64, *const f64, *const f64, *mut f64) -> i32;
 
 // The C host is responsible for its own thread safety; the sessions
 // call the surface only from the thread that called step.
@@ -185,54 +180,6 @@ impl CSurface {
 }
 
 impl BandSurface for CSurface {
-    fn eval_cells(
-        &self,
-        positions: ArrayView2<f64>,
-        cells: &[Cell],
-        energies: &mut Array1<f64>,
-        gradients: &mut Array2<f64>,
-        stresses: &mut Array2<f64>,
-    ) -> Result<(), SaddleError> {
-        BandSurface::eval(self, positions, energies, gradients)?;
-        let Some(stress) = self.stress else {
-            return Err(SaddleError::Invalid(
-                "solid-state band requires a stress callback".into(),
-            ));
-        };
-        let n = positions.nrows();
-        if cells.len() != n {
-            return Err(SaddleError::Shape(
-                "solid-state stress call has a cell per image".into(),
-            ));
-        }
-        let pos: Vec<f64> = positions.iter().copied().collect();
-        let mut cell_flat = Vec::with_capacity(n * 9);
-        for cell in cells {
-            for row in cell.0 {
-                cell_flat.extend(row);
-            }
-        }
-        let mut out = vec![0.0; n * 9];
-        let rc = stress(
-            self.stress_user,
-            n as i64,
-            self.n_atoms,
-            -1,
-            pos.as_ptr(),
-            cell_flat.as_ptr(),
-            out.as_mut_ptr(),
-        );
-        if rc != 0 {
-            return Err(SaddleError::Surface(format!("stress callback rc={rc}")));
-        }
-        for row in 0..n {
-            for col in 0..9 {
-                stresses[(row, col)] = out[row * 9 + col];
-            }
-        }
-        Ok(())
-    }
-
     fn eval(
         &self,
         positions: ArrayView2<f64>,
@@ -290,8 +237,6 @@ pub struct RgsaddleBand {
     n_images: i64,
     n_atoms: i64,
     per_image: bool,
-    stress: Option<RgsaddleStressFn>,
-    stress_user: *mut c_void,
 }
 
 pub struct RgsaddleMinMode {
@@ -507,29 +452,10 @@ unsafe fn band_from_parts(
                 n_images,
                 n_atoms,
                 per_image: cfg.flags & RGSADDLE_BAND_PER_IMAGE != 0,
-                stress: None,
-                stress_user: std::ptr::null_mut(),
             }))
         }
         Err(_) => std::ptr::null_mut(),
     }
-}
-
-/// # Safety
-/// `band` comes from a create call. `stress` may be null to clear it.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rgsaddle_band_set_stress(
-    band: *mut RgsaddleBand,
-    stress: Option<RgsaddleStressFn>,
-    user: *mut c_void,
-) -> i32 {
-    if band.is_null() {
-        return RGSADDLE_NULL_BAND;
-    }
-    let band = unsafe { &mut *band };
-    band.stress = stress;
-    band.stress_user = user;
-    RGSADDLE_OK
 }
 
 /// # Safety
@@ -558,8 +484,6 @@ pub unsafe extern "C" fn rgsaddle_band_step(
         n_images: band.n_images,
         per_image: band.per_image,
         rows: Default::default(),
-        stress: band.stress,
-        stress_user: band.stress_user,
     };
     match band.session.step(&cs) {
         Ok(report) => {
@@ -796,8 +720,6 @@ pub unsafe extern "C" fn rgsaddle_minmode_step(
         n_images: 1,
         per_image: false,
         rows: Default::default(),
-        stress: None,
-        stress_user: std::ptr::null_mut(),
     };
     match session.session.step(&cs) {
         Ok(report) => {
@@ -846,8 +768,6 @@ pub unsafe extern "C" fn rgsaddle_minmode_estimate(
         n_images: 1,
         per_image: false,
         rows: Default::default(),
-        stress: None,
-        stress_user: std::ptr::null_mut(),
     };
     match session.session.estimate_mode(&cs) {
         Ok(est) => {
@@ -1309,8 +1229,6 @@ pub unsafe extern "C" fn rgsaddle_index1_step(
         n_images: 1,
         per_image: false,
         rows: Default::default(),
-        stress: None,
-        stress_user: std::ptr::null_mut(),
     };
     match session.session.step(&cs) {
         Ok(report) => {
@@ -1403,5 +1321,7 @@ pub unsafe extern "C" fn rgsaddle_index1_free(session: *mut RgsaddleIndex1) {
 
 mod sessions;
 pub use sessions::*;
+mod solid;
+pub use solid::*;
 mod stencil;
 pub use stencil::*;
