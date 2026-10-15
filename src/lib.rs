@@ -169,8 +169,13 @@ pub use rtr::{
 
 #[cfg(feature = "readcon")]
 pub mod io;
+#[cfg(feature = "readcon-db")]
+pub use io::store_band;
 #[cfg(feature = "readcon")]
-pub use io::{MolecularFrame, frame_from_con};
+pub use io::{
+    ConImage, ConSpecies, MolecularFrame, frame_from_con, frame_from_con_nth, frames_from_con,
+    write_band, write_restart,
+};
 
 pub mod gpu;
 pub use gpu::{
