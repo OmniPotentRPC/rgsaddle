@@ -31,6 +31,19 @@ pub trait PointSurface: Sync {
         Ok(None)
     }
 
+    /// Optional exact Hessian in a free basis.
+    ///
+    /// The basis has one free direction per column and the Hessian is
+    /// that basis applied on both sides. `None` means the caller has
+    /// no analytic matrix. A finite-difference product belongs in
+    /// [`Self::hessian_vector`], not here.
+    fn projected_hessian(
+        &self,
+        _x: ArrayView1<f64>,
+    ) -> Result<Option<(Array2<f64>, Array2<f64>)>, SaddleError> {
+        Ok(None)
+    }
+
     /// Rigid or constrained Cartesian directions, one direction per row.
     /// Molecular callers supply translations and rotations; fixed substrates
     /// supply only their actual symmetries. These are evaluated at the query.

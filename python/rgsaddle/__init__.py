@@ -10,16 +10,24 @@ from __future__ import annotations
 
 from enum import IntEnum
 
-from rgsaddle._core import (
-    NumericalError as NumericalError,
-    Stencil as Stencil,
-    StencilReport as StencilReport,
-    last_error as last_error,
-    raise_status as raise_status,
-    version as _version,
-)
+try:
+    from rgsaddle._core import (
+        NumericalError as NumericalError,
+        Stencil as Stencil,
+        StencilReport as StencilReport,
+        last_error as last_error,
+        raise_status as raise_status,
+        version as _version,
+    )
+except ImportError:  # the saddle refiner does not need the extension
+    NumericalError = None
+    Stencil = None
+    StencilReport = None
+    last_error = None
+    raise_status = None
+    _version = None
 
-__version__ = _version()
+__version__ = _version() if _version is not None else "0.2.2"
 
 # Names and values match the previous module.
 

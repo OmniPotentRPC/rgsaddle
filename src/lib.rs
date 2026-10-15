@@ -88,6 +88,7 @@ pub mod rfo;
 pub mod samd;
 pub mod sella_min;
 pub mod sella_saddle;
+pub mod tsopt;
 pub mod vocn;
 
 pub use cell_log::{CellChart, expm_3x3, logm_3x3};
@@ -145,6 +146,8 @@ pub use samd::{
 pub use sella_min::{SellaMinConfig, SellaMinReport, SellaMinSession};
 
 pub use sella_saddle::{SellaSaddleConfig, SellaSaddleReport, SellaSaddleSession};
+
+pub use tsopt::{RefineKind, RefineReport, refine as refine_index1};
 
 pub use vocn::{Found as VocnFound, Primitive as VocnPrimitive};
 
