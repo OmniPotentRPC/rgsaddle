@@ -98,5 +98,9 @@ fn a_failed_evaluation_is_not_reused_by_the_next_step() {
     assert_eq!(session.positions(), band.view());
     let report = session.step(&surface).unwrap();
     assert!(report.surface_rows > 0, "{report:?}");
-    assert!(session.positions()[(1, 1)] < 0.0, "{:?}", session.positions());
+    assert!(
+        session.positions()[(1, 1)] < 0.0,
+        "{:?}",
+        session.positions()
+    );
 }
