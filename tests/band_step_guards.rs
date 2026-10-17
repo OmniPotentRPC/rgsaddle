@@ -62,3 +62,41 @@ fn a_step_that_cannot_move_the_band_is_stalled() {
     assert!(matches!(err, SaddleError::Stalled(_)), "{err}");
     assert_eq!(session.positions(), band.view());
 }
+
+/// Fails its first call, then answers as `Constant`.
+struct FailOnce {
+    failed: std::sync::atomic::AtomicBool,
+    inner: Constant,
+}
+
+impl BandSurface for FailOnce {
+    fn eval(
+        &self,
+        positions: ArrayView2<f64>,
+        energies: &mut Array1<f64>,
+        gradients: &mut Array2<f64>,
+    ) -> Result<(), SaddleError> {
+        if !self.failed.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            return Err(SaddleError::Surface("first call".into()));
+        }
+        self.inner.eval(positions, energies, gradients)
+    }
+}
+
+#[test]
+fn a_failed_evaluation_is_not_reused_by_the_next_step() {
+    let band = array![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]];
+    let mut session = BandSession::new(config(), band.clone()).unwrap();
+    let surface = FailOnce {
+        failed: std::sync::atomic::AtomicBool::new(false),
+        inner: Constant([0.0, 1.0, 0.0]),
+    };
+    assert!(matches!(
+        session.step(&surface),
+        Err(SaddleError::Surface(_))
+    ));
+    assert_eq!(session.positions(), band.view());
+    let report = session.step(&surface).unwrap();
+    assert!(report.surface_rows > 0, "{report:?}");
+    assert!(session.positions()[(1, 1)] < 0.0, "{:?}", session.positions());
+}

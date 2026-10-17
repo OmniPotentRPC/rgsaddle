@@ -1590,6 +1590,9 @@ impl BandSession {
         // outranks a solver error. `x` is a local copy; the session's
         // positions stay where they were.
         if let Some(err) = self.state.take_error() {
+            // The solver cached the failed point's infinite energy and
+            // zero force; the next step must evaluate the band again.
+            self.solver.forget_evaluation();
             return Err(err);
         }
         stepped.map_err(|e| SaddleError::Solver(e.to_string()))?;
@@ -1714,6 +1717,9 @@ impl BandSession {
         let stepped = self.solver.step(&oracle, &mut x);
         drop(oracle);
         if let Some(err) = self.state.take_error() {
+            // The solver cached the failed point's infinite energy and
+            // zero force; the next step must evaluate the band again.
+            self.solver.forget_evaluation();
             return Err(err);
         }
         stepped.map_err(|e| SaddleError::Solver(e.to_string()))?;
