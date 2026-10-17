@@ -341,7 +341,7 @@ int main(int argc, char **argv) {
    * fixed-fraction path, image by image. */
   double *grad = malloc((size_t)dof * sizeof(double));
   double stress[9];
-  double shear = 0.0, upper = 0.0, square = 0.0, drift = 0.0;
+  double shear = 0.0, upper = 0.0, square = 0.0, drift = 0.0, translation = 0.0;
   printf("image   c/a          v (A^3/atom)   E - E_bcc (eV/atom)\n");
   double *energy = malloc((size_t)n_images * sizeof(double));
   for (int64_t i = 0; i < n_images; ++i) {
@@ -358,10 +358,20 @@ int main(int argc, char **argv) {
      * shows as a jump by one; a drift as anything else. */
     double inv[9];
     inverse3(h, inv);
+    double mean[3] = {0.0, 0.0, 0.0};
     for (int64_t a = 0; a < n_atoms; ++a) {
       for (int c = 0; c < 3; ++c) {
         const double s = x[3 * a] * inv[c] + x[3 * a + 1] * inv[3 + c] + x[3 * a + 2] * inv[6 + c];
-        drift = fmax(drift, fabs(s - frac[3 * a + c]));
+        mean[c] += (s - frac[3 * a + c]) / (double)n_atoms;
+      }
+    }
+    /* A rigid translation of the image costs no energy; the drift is
+     * measured from it. */
+    for (int64_t a = 0; a < n_atoms; ++a) {
+      for (int c = 0; c < 3; ++c) {
+        const double s = x[3 * a] * inv[c] + x[3 * a + 1] * inv[3 + c] + x[3 * a + 2] * inv[6 + c];
+        drift = fmax(drift, fabs(s - frac[3 * a + c] - mean[c]));
+        translation = fmax(translation, fabs(mean[c]));
       }
     }
     printf("%5lld   %.8f   %.10f   % .10f%s\n", (long long)i, (h[8] / nz) / (h[0] / nx),
@@ -379,7 +389,8 @@ int main(int argc, char **argv) {
   printf("barrier %.10f eV/atom (scan %.10f) c/a %.8f (scan %.8f)\n", barrier, BARRIER, q_ci,
          Q_SADDLE);
   printf("bcc endpoint %.10f eV/atom (scan %.10f)\n", energy[0], E_BCC);
-  printf("shear %.3e upper %.3e a-b %.3e fractional drift %.3e\n", shear, upper, square, drift);
+  printf("shear %.3e upper %.3e a-b %.3e fractional drift %.3e translation %.3e\n", shear, upper,
+         square, drift, translation);
 
   int failed = 0;
   if (rep.status != RGSADDLE_STATUS_CONVERGED) {
