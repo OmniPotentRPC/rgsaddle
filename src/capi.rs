@@ -431,10 +431,11 @@ unsafe fn band_from_parts(
             2 => ProjectionKind::DoublyNudged,
             _ => ProjectionKind::Neb,
         },
-        climbing: (cfg.ci_trigger_factor > 0.0 || cfg.flags & RGSADDLE_BAND_CI_AFTER != 0).then_some(CiConfig {
-            trigger_factor: cfg.ci_trigger_factor,
-            trigger_force: cfg.ci_trigger_force,
-        }),
+        climbing: (cfg.ci_trigger_factor > 0.0 || cfg.flags & RGSADDLE_BAND_CI_AFTER != 0)
+            .then_some(CiConfig {
+                trigger_factor: cfg.ci_trigger_factor,
+                trigger_force: cfg.ci_trigger_force,
+            }),
         cell,
         force_tol: cfg.force_tol,
         max_move: cfg.max_move,
