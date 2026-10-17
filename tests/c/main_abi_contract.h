@@ -5,7 +5,7 @@
 #include <stddef.h>
 
 _Static_assert(RGSADDLE_ABI_MAJOR == 1u, "main ABI major");
-_Static_assert(RGSADDLE_ABI_MINOR == 16u, "ABI minor");
+_Static_assert(RGSADDLE_ABI_MINOR == 17u, "ABI minor");
 
 typedef struct {
   uint32_t major;
@@ -15,6 +15,19 @@ _Static_assert(sizeof(rgsaddle_version_t) == sizeof(abi15_rgsaddle_version_t), "
 _Static_assert(_Alignof(rgsaddle_version_t) == _Alignof(abi15_rgsaddle_version_t), "rgsaddle_version_t alignment");
 _Static_assert(offsetof(rgsaddle_version_t, major) == offsetof(abi15_rgsaddle_version_t, major), "rgsaddle_version_t.major");
 _Static_assert(offsetof(rgsaddle_version_t, minor) == offsetof(abi15_rgsaddle_version_t, minor), "rgsaddle_version_t.minor");
+
+typedef struct {
+  abi15_rgsaddle_version_t version;
+  uint64_t flags;
+  double delta;
+  double force_tol;
+  int32_t force_gate;
+  int64_t order;
+  double gamma;
+} abi17_rgsaddle_sella_saddle_config_t;
+_Static_assert(sizeof(rgsaddle_sella_saddle_config_t) == sizeof(abi17_rgsaddle_sella_saddle_config_t), "rgsaddle_sella_saddle_config_t size");
+_Static_assert(_Alignof(rgsaddle_sella_saddle_config_t) == _Alignof(abi17_rgsaddle_sella_saddle_config_t), "rgsaddle_sella_saddle_config_t alignment");
+_Static_assert(offsetof(rgsaddle_sella_saddle_config_t, gamma) == offsetof(abi17_rgsaddle_sella_saddle_config_t, gamma), "rgsaddle_sella_saddle_config_t.gamma");
 
 typedef struct {
   abi15_rgsaddle_version_t version;

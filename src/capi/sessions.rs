@@ -45,6 +45,49 @@ pub struct RgsaddleSellaSaddleConfig {
     pub force_tol: f64,
     pub force_gate: i32,
     pub order: i64,
+    /// ABI minor 17. Read only when `version.minor >= 17`.
+    pub gamma: f64,
+}
+
+/// Minor 16 prefix. A host that allocated this smaller struct must not
+/// have `gamma` read.
+#[repr(C)]
+struct SaddleConfigPrefix {
+    version: RgsaddleVersion,
+    flags: u64,
+    delta: f64,
+    force_tol: f64,
+    force_gate: i32,
+    order: i64,
+}
+
+fn saddle_config_from(config: *const RgsaddleSellaSaddleConfig) -> Option<SellaSaddleConfig> {
+    if config.is_null() {
+        return None;
+    }
+    let head = unsafe { &*(config as *const SaddleConfigPrefix) };
+    if head.version.major != RGSADDLE_ABI_MAJOR {
+        return None;
+    }
+    let force_gate = force_gate_of(head.force_gate)?;
+    let mut sella = SellaSaddleConfig::default();
+    if head.delta > 0.0 {
+        sella.delta = head.delta;
+    }
+    if head.force_tol > 0.0 {
+        sella.force_tol = head.force_tol;
+    }
+    if head.order > 0 {
+        sella.order = head.order as usize;
+    }
+    sella.force_gate = force_gate;
+    if head.version.minor >= 17 {
+        let gamma = unsafe { (*config).gamma };
+        if gamma.is_finite() && gamma != 0.0 {
+            sella.gamma = gamma;
+        }
+    }
+    Some(sella)
 }
 
 #[repr(C)]
@@ -597,6 +640,7 @@ mod irc_abi_tests {
             force_tol: 0.05,
             force_gate: crate::ForceGate::MaxForceOnAtom.to_abi(),
             order: 1,
+            gamma: 0.0,
         };
         let sess =
             unsafe { rgsaddle_sella_saddle_create(&cfg, n_atoms, x.as_ptr(), masses.as_ptr()) };
@@ -643,6 +687,7 @@ mod irc_abi_tests {
             force_tol: 0.05,
             force_gate: crate::ForceGate::MaxForceOnAtom.to_abi(),
             order: 1,
+            gamma: 0.0,
         };
         let x = [0.2, 0.0, 0.0, 0.0, 0.0, 0.0];
         let masses = [1.0, 1.0];
@@ -711,6 +756,7 @@ mod irc_abi_tests {
             force_tol: 1e-6,
             force_gate: crate::ForceGate::MaxForceOnAtom.to_abi(),
             order: 1,
+            gamma: 0.0,
         };
         let session = unsafe { rgsaddle_sella_saddle_create(&cfg, 2, x.as_ptr(), masses.as_ptr()) };
         assert!(!session.is_null());
@@ -749,6 +795,39 @@ mod irc_abi_tests {
         assert!(unstable.abs() < 0.02, "unstable coordinate {unstable}");
         assert!(stable.abs() < 0.02, "stable coordinate {stable}");
         unsafe { rgsaddle_sella_saddle_free(session) };
+    }
+
+    #[test]
+    fn minor_16_saddle_config_does_not_read_gamma() {
+        assert_eq!(
+            std::mem::offset_of!(RgsaddleSellaSaddleConfig, gamma),
+            std::mem::size_of::<SaddleConfigPrefix>()
+        );
+        let mut cfg = RgsaddleSellaSaddleConfig {
+            version: RgsaddleVersion {
+                major: RGSADDLE_ABI_MAJOR,
+                minor: 16,
+            },
+            flags: 0,
+            delta: 0.0,
+            force_tol: 0.0,
+            force_gate: crate::ForceGate::L2Norm.to_abi(),
+            order: 1,
+            gamma: 99.0,
+        };
+        let parsed = saddle_config_from(&cfg).unwrap();
+        assert!(
+            (parsed.gamma - 0.4).abs() < 1e-15,
+            "minor 16 must keep the library gamma, got {}",
+            parsed.gamma
+        );
+        cfg.version.minor = 17;
+        cfg.gamma = 0.25;
+        let parsed = saddle_config_from(&cfg).unwrap();
+        assert!((parsed.gamma - 0.25).abs() < 1e-15);
+        cfg.gamma = -1.0;
+        let parsed = saddle_config_from(&cfg).unwrap();
+        assert!(parsed.gamma < 0.0);
     }
 }
 
@@ -1160,27 +1239,12 @@ pub unsafe extern "C" fn rgsaddle_sella_saddle_create(
     if config.is_null() || position.is_null() || masses.is_null() || n_atoms < 1 {
         return std::ptr::null_mut();
     }
-    let cfg = unsafe { &*config };
-    if cfg.version.major != RGSADDLE_ABI_MAJOR {
-        return std::ptr::null_mut();
-    }
-    let Some(force_gate) = force_gate_of(cfg.force_gate) else {
+    let Some(sella) = saddle_config_from(config) else {
         return std::ptr::null_mut();
     };
     let dof = (3 * n_atoms) as usize;
     let x = Array1::from(unsafe { slice::from_raw_parts(position, dof) }.to_vec());
     let m = Array1::from(unsafe { slice::from_raw_parts(masses, n_atoms as usize) }.to_vec());
-    let mut sella = SellaSaddleConfig::default();
-    if cfg.delta > 0.0 {
-        sella.delta = cfg.delta;
-    }
-    if cfg.force_tol > 0.0 {
-        sella.force_tol = cfg.force_tol;
-    }
-    if cfg.order > 0 {
-        sella.order = cfg.order as usize;
-    }
-    sella.force_gate = force_gate;
     match SellaSaddleSession::new(sella, x, m) {
         Ok(session) => Box::into_raw(Box::new(RgsaddleSellaSaddle { session, n_atoms })),
         Err(_) => std::ptr::null_mut(),
@@ -1200,11 +1264,7 @@ pub unsafe extern "C" fn rgsaddle_sella_saddle_create_on(
     if config.is_null() || position.is_null() || masses.is_null() || cons.is_null() || n_atoms < 1 {
         return std::ptr::null_mut();
     }
-    let cfg = unsafe { &*config };
-    if cfg.version.major != RGSADDLE_ABI_MAJOR {
-        return std::ptr::null_mut();
-    }
-    let Some(force_gate) = force_gate_of(cfg.force_gate) else {
+    let Some(sella) = saddle_config_from(config) else {
         return std::ptr::null_mut();
     };
     let chart = unsafe { &*cons };
@@ -1214,17 +1274,6 @@ pub unsafe extern "C" fn rgsaddle_sella_saddle_create_on(
     let dof = (3 * n_atoms) as usize;
     let x = Array1::from(unsafe { slice::from_raw_parts(position, dof) }.to_vec());
     let m = Array1::from(unsafe { slice::from_raw_parts(masses, n_atoms as usize) }.to_vec());
-    let mut sella = SellaSaddleConfig::default();
-    if cfg.delta > 0.0 {
-        sella.delta = cfg.delta;
-    }
-    if cfg.force_tol > 0.0 {
-        sella.force_tol = cfg.force_tol;
-    }
-    if cfg.order > 0 {
-        sella.order = cfg.order as usize;
-    }
-    sella.force_gate = force_gate;
     match SellaSaddleSession::with_chart(sella, x, m, chart.cons.clone()) {
         Ok(session) => Box::into_raw(Box::new(RgsaddleSellaSaddle { session, n_atoms })),
         Err(_) => std::ptr::null_mut(),
@@ -1244,11 +1293,7 @@ pub unsafe extern "C" fn rgsaddle_sella_saddle_create_internal(
     if config.is_null() || position.is_null() || masses.is_null() || cons.is_null() || n_atoms < 1 {
         return std::ptr::null_mut();
     }
-    let cfg = unsafe { &*config };
-    if cfg.version.major != RGSADDLE_ABI_MAJOR {
-        return std::ptr::null_mut();
-    }
-    let Some(force_gate) = force_gate_of(cfg.force_gate) else {
+    let Some(sella) = saddle_config_from(config) else {
         return std::ptr::null_mut();
     };
     let chart = unsafe { &*cons };
@@ -1258,17 +1303,6 @@ pub unsafe extern "C" fn rgsaddle_sella_saddle_create_internal(
     let dof = (3 * n_atoms) as usize;
     let x = Array1::from(unsafe { slice::from_raw_parts(position, dof) }.to_vec());
     let m = Array1::from(unsafe { slice::from_raw_parts(masses, n_atoms as usize) }.to_vec());
-    let mut sella = SellaSaddleConfig::default();
-    if cfg.delta > 0.0 {
-        sella.delta = cfg.delta;
-    }
-    if cfg.force_tol > 0.0 {
-        sella.force_tol = cfg.force_tol;
-    }
-    if cfg.order > 0 {
-        sella.order = cfg.order as usize;
-    }
-    sella.force_gate = force_gate;
     match SellaSaddleSession::on_internal(sella, x, m, chart.cons.clone()) {
         Ok(session) => Box::into_raw(Box::new(RgsaddleSellaSaddle { session, n_atoms })),
         Err(_) => std::ptr::null_mut(),
@@ -1289,11 +1323,7 @@ pub unsafe extern "C" fn rgsaddle_sella_saddle_create_cell(
     if config.is_null() || position.is_null() || masses.is_null() || cell.is_null() || n_atoms < 1 {
         return std::ptr::null_mut();
     }
-    let cfg = unsafe { &*config };
-    if cfg.version.major != RGSADDLE_ABI_MAJOR {
-        return std::ptr::null_mut();
-    }
-    let Some(force_gate) = force_gate_of(cfg.force_gate) else {
+    let Some(sella) = saddle_config_from(config) else {
         return std::ptr::null_mut();
     };
     let dof = (3 * n_atoms) as usize;
@@ -1315,17 +1345,6 @@ pub unsafe extern "C" fn rgsaddle_sella_saddle_create_cell(
             bits[i] = mv[i] != 0;
         }
     }
-    let mut sella = SellaSaddleConfig::default();
-    if cfg.delta > 0.0 {
-        sella.delta = cfg.delta;
-    }
-    if cfg.force_tol > 0.0 {
-        sella.force_tol = cfg.force_tol;
-    }
-    if cfg.order > 0 {
-        sella.order = cfg.order as usize;
-    }
-    sella.force_gate = force_gate;
     match SellaSaddleSession::on_cell(sella, x, m, lc, bits) {
         Ok(session) => Box::into_raw(Box::new(RgsaddleSellaSaddle { session, n_atoms })),
         Err(_) => std::ptr::null_mut(),
@@ -1353,11 +1372,7 @@ pub unsafe extern "C" fn rgsaddle_sella_saddle_create_cell_internal(
     {
         return std::ptr::null_mut();
     }
-    let cfg = unsafe { &*config };
-    if cfg.version.major != RGSADDLE_ABI_MAJOR {
-        return std::ptr::null_mut();
-    }
-    let Some(force_gate) = force_gate_of(cfg.force_gate) else {
+    let Some(sella) = saddle_config_from(config) else {
         return std::ptr::null_mut();
     };
     let chart = unsafe { &*cons };
@@ -1383,17 +1398,6 @@ pub unsafe extern "C" fn rgsaddle_sella_saddle_create_cell_internal(
             bits[i] = mv[i] != 0;
         }
     }
-    let mut sella = SellaSaddleConfig::default();
-    if cfg.delta > 0.0 {
-        sella.delta = cfg.delta;
-    }
-    if cfg.force_tol > 0.0 {
-        sella.force_tol = cfg.force_tol;
-    }
-    if cfg.order > 0 {
-        sella.order = cfg.order as usize;
-    }
-    sella.force_gate = force_gate;
     match SellaSaddleSession::on_cell_internal(sella, x, m, chart.cons.clone(), lc, bits) {
         Ok(session) => Box::into_raw(Box::new(RgsaddleSellaSaddle { session, n_atoms })),
         Err(_) => std::ptr::null_mut(),
@@ -1517,6 +1521,21 @@ pub unsafe extern "C" fn rgsaddle_sella_saddle_set_hess_update(
         return RGSADDLE_INVALID_PARAMETER;
     };
     unsafe { (*session).session.set_update(kind) };
+    RGSADDLE_OK
+}
+
+/// # Safety
+/// `session` must be a live pointer or NULL. `gamma <= 0` selects an
+/// exact diagonalisation. Non-finite values are ignored.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_sella_saddle_set_gamma(
+    session: *mut RgsaddleSellaSaddle,
+    gamma: f64,
+) -> i32 {
+    if session.is_null() {
+        return RGSADDLE_NULL_SESSION;
+    }
+    unsafe { (*session).session.set_gamma(gamma) };
     RGSADDLE_OK
 }
 

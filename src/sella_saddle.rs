@@ -60,7 +60,14 @@ impl Default for SellaSaddleConfig {
     fn default() -> Self {
         let sch = TrustSchedule::saddle();
         Self {
-            delta: 0.1,
+            // Sella's own `delta0` is 0.1, then multiplied by `n_free`
+            // (Hermes, Sargsyan, Najm, and Zádor, J. Chem. Theory
+            // Comput. 15, 6536, 2019). On LJ38 that trust radius is
+            // 10.8 and the search stops on a higher-index stationary
+            // point. 1.3e-3 per free coordinate is the LJ38 driver
+            // (`sella_lj38.py`). `gamma` 0.4 is that driver's residual
+            // scale; `<= 0` is still an exact diagonalisation.
+            delta: 1.3e-3,
             sigma_inc: sch.sigma_inc,
             sigma_dec: sch.sigma_dec,
             rho_inc: sch.rho_inc,
@@ -71,7 +78,7 @@ impl Default for SellaSaddleConfig {
             order: 1,
             eig: true,
             nsteps_per_diag: 3,
-            gamma: 0.1,
+            gamma: 0.4,
             eigen_device: crate::EigenDevice::Host,
             expand: crate::ExpandKind::Jd0,
             restricted: crate::RestrictedKind::TrustRegion,
@@ -125,8 +132,10 @@ impl SellaSaddleSession {
     ) -> Result<Self, SaddleError> {
         let n_free = geom.n_free(x.len());
         let delta = config.delta * n_free as f64;
+        let mut pes = SellaPes::Cartesian(CartesianPes::new(x, masses)?);
+        pes.set_update(crate::HessUpdate::TsBfgs);
         Ok(Self {
-            pes: SellaPes::Cartesian(CartesianPes::new(x, masses)?),
+            pes,
             config,
             geom,
             delta,
@@ -143,7 +152,8 @@ impl SellaSaddleSession {
         masses: Array1<f64>,
         chart: Constraints,
     ) -> Result<Self, SaddleError> {
-        let pes = InternalPes::new(x, masses, chart)?;
+        let mut pes = InternalPes::new(x, masses, chart)?;
+        pes.set_update(crate::HessUpdate::TsBfgs);
         let n_free = pes.n_int().max(1);
         let geom = SellaGeom::Chart(pes.chart().clone());
         let delta = config.delta * n_free as f64;
@@ -168,6 +178,7 @@ impl SellaSaddleSession {
     ) -> Result<Self, SaddleError> {
         let mut pes = CellCartesianPes::new(x, masses, cell)?;
         pes.set_mask(mask);
+        pes.set_update(crate::HessUpdate::TsBfgs);
         let n_free = pes.packed_len().max(1);
         let delta = config.delta * n_free as f64;
         Ok(Self {
@@ -192,6 +203,7 @@ impl SellaSaddleSession {
     ) -> Result<Self, SaddleError> {
         let mut pes = CellInternalPes::new(x, masses, chart, cell)?;
         pes.set_mask(mask);
+        pes.set_update(crate::HessUpdate::TsBfgs);
         let n_free = pes.packed_len().max(1);
         let geom = SellaGeom::Chart(pes.internals().chart().clone());
         let delta = config.delta * n_free as f64;
@@ -217,6 +229,7 @@ impl SellaSaddleSession {
     ) -> Result<Self, SaddleError> {
         let mut pes = CellInternalPes::new(x, masses, chart, cell)?;
         pes.set_mask(mask);
+        pes.set_update(crate::HessUpdate::TsBfgs);
         pes.set_chart(crate::CellChart::LogDeform);
         let n_free = pes.packed_len().max(1);
         let geom = SellaGeom::Chart(pes.internals().chart().clone());
@@ -249,8 +262,36 @@ impl SellaSaddleSession {
     }
 
     /// Sella Hessian update (Cartesian or internals, matching the PES).
+    ///
+    /// A request for minimization BFGS is stored as TS-BFGS. Sella's
+    /// saddle Hessian is TS-BFGS (Hermes, Sargsyan, Najm, and Zádor,
+    /// J. Chem. Theory Comput. 15, 6536, 2019). Minimization BFGS skips
+    /// a pair with `y·s ≤ 0` (Nocedal and Wright, eq. 6.19), so the
+    /// negative mode never moves and P-RFO converges to the wrong index.
     pub fn set_update(&mut self, update: crate::HessUpdate) {
+        let update = match update {
+            crate::HessUpdate::Bfgs | crate::HessUpdate::TsBfgs => crate::HessUpdate::TsBfgs,
+        };
         self.pes.set_update(update);
+    }
+
+    /// Sella `gamma`. `<= 0` selects an exact diagonalisation.
+    pub fn set_gamma(&mut self, gamma: f64) {
+        if gamma.is_finite() {
+            self.config.gamma = gamma;
+        }
+    }
+
+    pub fn gamma(&self) -> f64 {
+        self.config.gamma
+    }
+
+    /// Cartesian quasi-Newton model, when this session is Cartesian.
+    pub fn model_hessian(&self) -> Option<ndarray::ArrayView2<'_, f64>> {
+        match &self.pes {
+            SellaPes::Cartesian(pes) => Some(pes.hessian().hessian().view()),
+            SellaPes::Internal(_) | SellaPes::Cell(_) | SellaPes::CellInternal(_) => None,
+        }
     }
 
     /// Seed the Cartesian Hessian with a selected mode and curvature.
@@ -861,6 +902,56 @@ mod tests {
         );
     }
 
+    /// Minimization BFGS skips `y·s < 0` and leaves the seeded curvature
+    /// untouched. The saddle session must apply TS-BFGS instead, including
+    /// when the host asks for BFGS. The seed is not the true curvature:
+    /// a secant that already holds is a no-op for both updates.
+    struct NegativeMode;
+
+    impl PointSurface for NegativeMode {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            let mut energy = -x[0] * x[0] + 2.5 * x[1] * x[1];
+            let mut gradient = x.to_owned();
+            gradient[0] = -2.0 * x[0];
+            gradient[1] = 5.0 * x[1];
+            for value in x.iter().skip(2) {
+                energy += 0.5 * value * value;
+            }
+            Ok((energy, gradient))
+        }
+    }
+
+    #[test]
+    fn saddle_bfgs_request_updates_the_negative_mode() {
+        let x = Array1::from(vec![0.4, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let mut sess = SellaSaddleSession::new(
+            SellaSaddleConfig {
+                delta: 0.05,
+                gamma: -1.0,
+                ..SellaSaddleConfig::default()
+            },
+            x,
+            Array1::from(vec![1.0, 1.0]),
+        )
+        .unwrap();
+        let mode = Array1::from(vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        sess.seed_mode(mode.view(), -0.5).unwrap();
+        sess.set_update(crate::HessUpdate::Bfgs);
+        let before = sess.model_hessian().unwrap()[(0, 0)];
+        sess.step(&NegativeMode).unwrap();
+        let after = sess.model_hessian().unwrap()[(0, 0)];
+        assert!(
+            (after - before).abs() > 1e-8,
+            "negative mode stayed frozen: {before} -> {after}"
+        );
+        let h = sess.model_hessian().unwrap().to_owned();
+        let (evals, _) = crate::exact_eigh(h.view()).unwrap();
+        assert!(
+            evals.iter().any(|&value| value < 0.0),
+            "TS-BFGS lost the saddle mode: {evals:?}"
+        );
+    }
+
     #[test]
     fn trust_radius_starts_at_delta0_times_n_free() {
         let x = Array1::zeros(9);
@@ -870,7 +961,11 @@ mod tests {
             Array1::from(vec![1.0, 1.0, 1.0]),
         )
         .unwrap();
-        assert!((sess.delta() - 0.3).abs() < 1e-14, "delta={}", sess.delta());
+        assert!(
+            (sess.delta() - 3.9e-3).abs() < 1e-14,
+            "delta={}",
+            sess.delta()
+        );
     }
 
     #[test]

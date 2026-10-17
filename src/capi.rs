@@ -26,7 +26,7 @@ use crate::spring::SpringKind;
 use crate::tangent::TangentKind;
 
 pub const RGSADDLE_ABI_MAJOR: u32 = 1;
-pub const RGSADDLE_ABI_MINOR: u32 = 16;
+pub const RGSADDLE_ABI_MINOR: u32 = 17;
 
 /// Band config bit 0. The C step calls the surface once per image
 /// carried by the evaluation: every image on the first evaluation
@@ -230,6 +230,18 @@ impl PointSurface for CSurface {
         self.call(1, -1, &flat, &mut e, &mut g)?;
         Ok((e[0], Array1::from(g)))
     }
+
+    fn excluded_modes(
+        &self,
+        x: ndarray::ArrayView1<f64>,
+    ) -> Result<ndarray::Array2<f64>, SaddleError> {
+        // Goswami, Masterov, et al., JCTC 21, 7935 (2025), run the dimer
+        // in Cartesian coordinates and compare it with Sella. A free
+        // cluster's translations and rotations are null modes (Henkelman
+        // and Jónsson, JCP 111, 7010, 1999; eOn projects them out). A
+        // fixed substrate is not invariant, and those directions stay.
+        crate::minmode::symmetry_excluded_modes(self, x)
+    }
 }
 
 pub struct RgsaddleBand {
@@ -244,12 +256,18 @@ pub struct RgsaddleMinMode {
     n_atoms: i64,
 }
 
-fn method_of(v: i32, memory: i64) -> Method {
+fn method_of(v: i32, memory: i64) -> Option<Method> {
     match v {
-        1 => Method::Lbfgs {
+        0 | 2 => Some(Method::Fire { kind: FireKind::V2 }),
+        1 => Some(Method::Lbfgs {
             memory: if memory > 0 { memory as usize } else { 20 },
-        },
-        _ => Method::Fire { kind: FireKind::V2 },
+        }),
+        3 => Some(Method::QuickMin),
+        // Polak-Ribiere. The inverted force is not the gradient of the
+        // reported energy, so the session takes it under Accept::Step
+        // (Nocedal and Wright, algorithm 5.4).
+        4 => Some(Method::polak_ribiere()),
+        _ => None,
     }
 }
 
@@ -430,7 +448,10 @@ unsafe fn band_from_parts(
         force_tol: cfg.force_tol,
         max_move: cfg.max_move,
         remove_translation: cfg.flags & RGSADDLE_BAND_KEEP_TRANSLATION == 0,
-        method: method_of(cfg.method, cfg.memory),
+        method: match method_of(cfg.method, cfg.memory) {
+            Some(method) => method,
+            None => return std::ptr::null_mut(),
+        },
         solid,
         quickmin: cfg.method == 3,
         autoneb: None,
@@ -661,9 +682,15 @@ pub unsafe extern "C" fn rgsaddle_minmode_create(
     let dof = (3 * n_atoms) as usize;
     let x = Array1::from(unsafe { slice::from_raw_parts(position, dof) }.to_vec());
     let m = Array1::from(unsafe { slice::from_raw_parts(mode, dof) }.to_vec());
-    if cfg.method == 3 {
+    // FIRE, L-BFGS, and Polak-Ribiere. Quick-min and the band trust
+    // region are not minimum-mode translators, and an unknown code is
+    // not silently FIRE.
+    if !matches!(cfg.method, 0 | 1 | 4) {
         return std::ptr::null_mut();
     }
+    let Some(method) = method_of(cfg.method, 0) else {
+        return std::ptr::null_mut();
+    };
     let mm_config = MinModeConfig {
         kind: if cfg.kind == 1 {
             MinModeKind::Lanczos
@@ -686,7 +713,7 @@ pub unsafe extern "C" fn rgsaddle_minmode_create(
         krylov_dim: cfg.krylov_dim as usize,
         force_tol: cfg.force_tol,
         max_move: cfg.max_move,
-        method: method_of(cfg.method, 0),
+        method,
     };
     match MinModeSession::new(mm_config, x, m) {
         Ok(session) => Box::into_raw(Box::new(RgsaddleMinMode { session, n_atoms })),
@@ -1316,6 +1343,58 @@ pub unsafe extern "C" fn rgsaddle_index1_reset(session: *mut RgsaddleIndex1) -> 
 pub unsafe extern "C" fn rgsaddle_index1_free(session: *mut RgsaddleIndex1) {
     if !session.is_null() {
         drop(unsafe { Box::from_raw(session) });
+    }
+}
+
+#[cfg(test)]
+mod c_surface_rigid {
+    use super::*;
+    use ndarray::Array1;
+
+    extern "C" fn bonds(_user: *mut c_void, req: *mut RgsaddleSurfaceRequest) -> i32 {
+        let req = unsafe { &mut *req };
+        let n = (req.n_atoms * 3) as usize;
+        let x = unsafe { slice::from_raw_parts(req.positions, n) };
+        let g = unsafe { slice::from_raw_parts_mut(req.gradients, n) };
+        let atoms = req.n_atoms as usize;
+        let mut energy = 0.0;
+        for value in g.iter_mut() {
+            *value = 0.0;
+        }
+        for i in 0..atoms {
+            for j in (i + 1)..atoms {
+                let dx = x[3 * j] - x[3 * i];
+                let dy = x[3 * j + 1] - x[3 * i + 1];
+                let dz = x[3 * j + 2] - x[3 * i + 2];
+                let r = (dx * dx + dy * dy + dz * dz).sqrt();
+                let mismatch = r - 1.0;
+                energy += 0.5 * mismatch * mismatch;
+                let scale = mismatch / r;
+                g[3 * i] -= scale * dx;
+                g[3 * i + 1] -= scale * dy;
+                g[3 * i + 2] -= scale * dz;
+                g[3 * j] += scale * dx;
+                g[3 * j + 1] += scale * dy;
+                g[3 * j + 2] += scale * dz;
+            }
+        }
+        unsafe { *req.energies = energy };
+        0
+    }
+
+    #[test]
+    fn c_surface_excludes_rigid_modes_of_a_free_trimer() {
+        let surface = CSurface {
+            f: bonds,
+            user: std::ptr::null_mut(),
+            n_atoms: 3,
+            n_images: 1,
+            per_image: false,
+            rows: Default::default(),
+        };
+        let x = Array1::from(vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.5, 0.8, 0.0]);
+        let modes = PointSurface::excluded_modes(&surface, x.view()).unwrap();
+        assert_eq!(modes.nrows(), 6, "rows {}", modes.nrows());
     }
 }
 

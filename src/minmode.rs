@@ -598,6 +598,331 @@ pub(crate) fn translated_gradient(
     }
 }
 
+/// Whether rigid motions of the potential are symmetries.
+///
+/// A C surface is constructed for one step, so the probe cannot live
+/// there. [`MinModeSession::reset`] drops the decision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RigidSymmetry {
+    Unknown,
+    Absent,
+    Present,
+}
+
+/// Orthonormal rigid motions, one direction per row.
+///
+/// One atom has no separate rigid subspace. Two or more atoms
+/// contribute three translations. Three or more also contribute
+/// rotations about the centroid. Modified Gram-Schmidt drops a column
+/// whose norm is at most `1e-8`, including the bond-axis rotation of a
+/// dimer. Henkelman and Jónsson, J. Chem. Phys. 111, 7010 (1999), and
+/// eOn remove these from a free cluster before the minimum-mode
+/// estimate. Goswami, Masterov, et al., J. Chem. Theory Comput. 21,
+/// 7935 (2025), doi:10.1021/acs.jctc.5c00866, use that dimer as the
+/// minimum-mode estimator.
+pub(crate) fn rigid_body_modes(x: ArrayView1<f64>) -> Array2<f64> {
+    let n = x.len();
+    if n < 6 || !n.is_multiple_of(3) {
+        return Array2::zeros((0, n));
+    }
+    let n_atoms = n / 3;
+    if n_atoms < 2 {
+        return Array2::zeros((0, n));
+    }
+    let mut columns: Vec<Array1<f64>> = Vec::with_capacity(6);
+    for axis in 0..3 {
+        let mut column = Array1::zeros(n);
+        for atom in 0..n_atoms {
+            column[3 * atom + axis] = 1.0;
+        }
+        columns.push(column);
+    }
+    if n_atoms >= 3 {
+        let mut centroid = [0.0; 3];
+        for atom in 0..n_atoms {
+            centroid[0] += x[3 * atom];
+            centroid[1] += x[3 * atom + 1];
+            centroid[2] += x[3 * atom + 2];
+        }
+        let scale = 1.0 / n_atoms as f64;
+        for value in &mut centroid {
+            *value *= scale;
+        }
+        for axis in 0..3 {
+            let mut column = Array1::zeros(n);
+            for atom in 0..n_atoms {
+                let rx = x[3 * atom] - centroid[0];
+                let ry = x[3 * atom + 1] - centroid[1];
+                let rz = x[3 * atom + 2] - centroid[2];
+                let (cx, cy, cz) = match axis {
+                    0 => (0.0, -rz, ry),
+                    1 => (rz, 0.0, -rx),
+                    _ => (-ry, rx, 0.0),
+                };
+                column[3 * atom] = cx;
+                column[3 * atom + 1] = cy;
+                column[3 * atom + 2] = cz;
+            }
+            columns.push(column);
+        }
+    }
+    let mut raw = Array2::zeros((n, columns.len()));
+    for (column, values) in columns.iter().enumerate() {
+        for (row, value) in values.iter().enumerate() {
+            raw[(row, column)] = *value;
+        }
+    }
+    let basis = crate::linalg::modified_gram_schmidt(raw.view(), None, 1e-8);
+    let mut modes = Array2::zeros((basis.ncols(), n));
+    for column in 0..basis.ncols() {
+        for row in 0..n {
+            modes[(column, row)] = basis[(row, column)];
+        }
+    }
+    modes
+}
+
+fn row_dot(row: ndarray::ArrayView1<f64>, gradient: ArrayView1<f64>) -> f64 {
+    let n = row.len().min(gradient.len());
+    let mut acc = 0.0;
+    for i in 0..n {
+        acc += row[i] * gradient[i];
+    }
+    acc
+}
+
+fn modes_match_rigid_basis(modes: &Array2<f64>, x: ArrayView1<f64>) -> bool {
+    let basis = rigid_body_modes(x);
+    if modes.nrows() == 0 || modes.nrows() != basis.nrows() || modes.ncols() != basis.ncols() {
+        return false;
+    }
+    for row in modes.rows() {
+        let mut overlap = 0.0;
+        for basis_row in basis.rows() {
+            let dot = row_dot(row, basis_row);
+            overlap += dot * dot;
+        }
+        if (overlap.sqrt() - 1.0).abs() > 1e-5 {
+            return false;
+        }
+    }
+    true
+}
+
+#[cfg(any(test, feature = "capi"))]
+fn same_atom_shift(mode: ndarray::ArrayView1<f64>) -> bool {
+    let atoms = mode.len() / 3;
+    if atoms == 0 {
+        return false;
+    }
+    let (ax, ay, az) = (mode[0], mode[1], mode[2]);
+    (1..atoms).all(|atom| {
+        (mode[3 * atom] - ax).abs() <= 1e-6
+            && (mode[3 * atom + 1] - ay).abs() <= 1e-6
+            && (mode[3 * atom + 2] - az).abs() <= 1e-6
+    })
+}
+
+#[cfg(any(test, feature = "capi"))]
+fn centroid_of(x: ArrayView1<f64>) -> [f64; 3] {
+    let atoms = x.len() / 3;
+    let mut centroid = [0.0; 3];
+    if atoms == 0 {
+        return centroid;
+    }
+    for atom in 0..atoms {
+        centroid[0] += x[3 * atom];
+        centroid[1] += x[3 * atom + 1];
+        centroid[2] += x[3 * atom + 2];
+    }
+    let scale = 1.0 / atoms as f64;
+    for value in &mut centroid {
+        *value *= scale;
+    }
+    centroid
+}
+
+/// Unit angular velocity of an infinitesimal rotation `mode`.
+///
+/// `A ω = Σ r × v` with `A` the inertia tensor about the centroid.
+/// A translation has `ω = 0` and is classified before this runs.
+#[cfg(any(test, feature = "capi"))]
+fn rotation_axis(x: ArrayView1<f64>, mode: ndarray::ArrayView1<f64>) -> Option<[f64; 3]> {
+    let atoms = x.len() / 3;
+    let centroid = centroid_of(x);
+    let mut inertia = [[0.0; 3]; 3];
+    let mut torque = [0.0; 3];
+    for atom in 0..atoms {
+        let r = [
+            x[3 * atom] - centroid[0],
+            x[3 * atom + 1] - centroid[1],
+            x[3 * atom + 2] - centroid[2],
+        ];
+        let v = [mode[3 * atom], mode[3 * atom + 1], mode[3 * atom + 2]];
+        torque[0] += r[1] * v[2] - r[2] * v[1];
+        torque[1] += r[2] * v[0] - r[0] * v[2];
+        torque[2] += r[0] * v[1] - r[1] * v[0];
+        let r2 = r[0] * r[0] + r[1] * r[1] + r[2] * r[2];
+        for i in 0..3 {
+            for j in 0..3 {
+                let diagonal = if i == j { r2 } else { 0.0 };
+                inertia[i][j] += diagonal - r[i] * r[j];
+            }
+        }
+    }
+    let det = inertia[0][0] * (inertia[1][1] * inertia[2][2] - inertia[1][2] * inertia[2][1])
+        - inertia[0][1] * (inertia[1][0] * inertia[2][2] - inertia[1][2] * inertia[2][0])
+        + inertia[0][2] * (inertia[1][0] * inertia[2][1] - inertia[1][1] * inertia[2][0]);
+    if det.abs() <= 1e-12 {
+        return None;
+    }
+    let mut axis = [0.0; 3];
+    for column in 0..3 {
+        let mut matrix = inertia;
+        for row in 0..3 {
+            matrix[row][column] = torque[row];
+        }
+        let det_k = matrix[0][0] * (matrix[1][1] * matrix[2][2] - matrix[1][2] * matrix[2][1])
+            - matrix[0][1] * (matrix[1][0] * matrix[2][2] - matrix[1][2] * matrix[2][0])
+            + matrix[0][2] * (matrix[1][0] * matrix[2][1] - matrix[1][1] * matrix[2][0]);
+        axis[column] = det_k / det;
+    }
+    let norm = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
+    if norm <= 1e-8 {
+        return None;
+    }
+    Some([axis[0] / norm, axis[1] / norm, axis[2] / norm])
+}
+
+#[cfg(any(test, feature = "capi"))]
+fn rotate_about(x: ArrayView1<f64>, axis: [f64; 3], theta: f64) -> Array1<f64> {
+    let centroid = centroid_of(x);
+    let (sine, cosine) = theta.sin_cos();
+    let mut out = x.to_owned();
+    let atoms = x.len() / 3;
+    for atom in 0..atoms {
+        let r = [
+            x[3 * atom] - centroid[0],
+            x[3 * atom + 1] - centroid[1],
+            x[3 * atom + 2] - centroid[2],
+        ];
+        let cross = [
+            axis[1] * r[2] - axis[2] * r[1],
+            axis[2] * r[0] - axis[0] * r[2],
+            axis[0] * r[1] - axis[1] * r[0],
+        ];
+        let parallel = axis[0] * r[0] + axis[1] * r[1] + axis[2] * r[2];
+        for k in 0..3 {
+            out[3 * atom + k] =
+                centroid[k] + r[k] * cosine + cross[k] * sine + axis[k] * parallel * (1.0 - cosine);
+        }
+    }
+    out
+}
+
+/// `(τ · axis) / ||axis × r||`, the gradient along the unit rotation.
+#[cfg(any(test, feature = "capi"))]
+fn axial_coupling(x: ArrayView1<f64>, gradient: ArrayView1<f64>, axis: [f64; 3]) -> f64 {
+    let centroid = centroid_of(x);
+    let atoms = x.len().min(gradient.len()) / 3;
+    let mut torque = 0.0;
+    let mut generator = 0.0;
+    for atom in 0..atoms {
+        let r = [
+            x[3 * atom] - centroid[0],
+            x[3 * atom + 1] - centroid[1],
+            x[3 * atom + 2] - centroid[2],
+        ];
+        let force = [
+            gradient[3 * atom],
+            gradient[3 * atom + 1],
+            gradient[3 * atom + 2],
+        ];
+        torque += axis[0] * (r[1] * force[2] - r[2] * force[1])
+            + axis[1] * (r[2] * force[0] - r[0] * force[2])
+            + axis[2] * (r[0] * force[1] - r[1] * force[0]);
+        let crossed = [
+            axis[1] * r[2] - axis[2] * r[1],
+            axis[2] * r[0] - axis[0] * r[2],
+            axis[0] * r[1] - axis[1] * r[0],
+        ];
+        generator += crossed[0] * crossed[0] + crossed[1] * crossed[1] + crossed[2] * crossed[2];
+    }
+    let norm = generator.sqrt();
+    if norm <= 1e-12 {
+        return f64::INFINITY;
+    }
+    torque / norm
+}
+
+/// Rigid motions that are symmetries of `surface` at `x`.
+///
+/// A column is kept only when the gradient is orthogonal to it here and
+/// after a finite rigid motion along it. A translation is probed by a
+/// shift. A rotation is probed by Rodrigues' formula: `x + ε u` is not
+/// a rotation, and the quadratic mismatch drops a true rotational
+/// symmetry. A free cluster (Goswami et al., JCTC 2025; Henkelman and
+/// Jónsson, JCP 1999) keeps the whole rigid subspace. A fixed substrate
+/// has a net force or a torque, and those directions stay in the
+/// minimum-mode space. The finite motion is what separates a symmetry
+/// from a stationary point, where every direction is orthogonal to `g`.
+#[cfg(any(test, feature = "capi"))]
+pub(crate) fn symmetry_excluded_modes<S: PointSurface + ?Sized>(
+    surface: &S,
+    x: ArrayView1<f64>,
+) -> Result<Array2<f64>, SaddleError> {
+    let modes = rigid_body_modes(x);
+    if modes.nrows() == 0 {
+        return Ok(modes);
+    }
+    let (_, gradient) = surface.eval(x)?;
+    if gradient.len() != x.len() || !gradient.iter().all(|value| value.is_finite()) {
+        return Err(SaddleError::Shape(
+            "rigid-mode gradient must match the position".into(),
+        ));
+    }
+    let mut keep = Vec::new();
+    let tolerance = 1e-8 * (1.0 + gradient.dot(&gradient).sqrt());
+    for row in 0..modes.nrows() {
+        let direction = modes.row(row);
+        if row_dot(direction, gradient.view()).abs() > tolerance {
+            continue;
+        }
+        let (shifted, coupling) = if same_atom_shift(direction) {
+            let mut displaced = x.to_owned();
+            for i in 0..displaced.len() {
+                displaced[i] += 1e-3 * direction[i];
+            }
+            let (_, shifted) = surface.eval(displaced.view())?;
+            let coupling = row_dot(direction, shifted.view());
+            (shifted, coupling)
+        } else {
+            let Some(axis) = rotation_axis(x, direction) else {
+                continue;
+            };
+            let displaced = rotate_about(x, axis, 1e-3);
+            let (_, shifted) = surface.eval(displaced.view())?;
+            let coupling = axial_coupling(displaced.view(), shifted.view(), axis);
+            (shifted, coupling)
+        };
+        if shifted.len() != x.len() || !shifted.iter().all(|value| value.is_finite()) {
+            return Err(SaddleError::Shape(
+                "rigid-mode gradient must match the position".into(),
+            ));
+        }
+        let shifted_tolerance = 1e-8 * (1.0 + shifted.dot(&shifted).sqrt());
+        if !coupling.is_finite() || coupling.abs() > shifted_tolerance {
+            continue;
+        }
+        keep.push(row);
+    }
+    let mut out = Array2::zeros((keep.len(), x.len()));
+    for (destination, source) in keep.iter().enumerate() {
+        out.row_mut(destination).assign(&modes.row(*source));
+    }
+    Ok(out)
+}
+
 /// Stepping minimum-mode saddle search.
 pub struct MinModeSession {
     config: MinModeConfig,
@@ -608,6 +933,9 @@ pub struct MinModeSession {
     curvature: f64,
     solver: Solver,
     iteration: usize,
+    /// Whether rigid motions of this potential are symmetries. Probed
+    /// once, because a C surface is rebuilt on every step.
+    rigid_symmetry: RigidSymmetry,
     /// Gradient at `x`, when known: from the last translation's
     /// accepted point or from the host.
     centre: Option<PointEval>,
@@ -648,10 +976,13 @@ impl MinModeSession {
         // step uncapped.
         solver.set_atom_maxmove(config.max_move);
         // The inverted force is not the gradient of the energy the
-        // oracle reports, so a line search on that energy refuses good
-        // steps and burns evaluations: L-BFGS takes its two-loop
-        // direction with one oracle call (rgmin Accept::Step).
-        if matches!(config.method, Method::Lbfgs { .. }) {
+        // oracle reports. A line search on that energy refuses the
+        // climb (Nocedal and Wright, algorithm 5.4, for Polak-Ribiere)
+        // and burns evaluations. L-BFGS and nonlinear CG take one
+        // oracle call under rgmin `Accept::Step`. FIRE ignores the
+        // acceptance test; its repeated-geometry stall is handled in
+        // [`MinModeSession::step`].
+        if matches!(config.method, Method::Lbfgs { .. } | Method::Nlcg { .. }) {
             solver.set_accept(Accept::Step);
         }
         Ok(Self {
@@ -664,6 +995,7 @@ impl MinModeSession {
             solver,
             iteration: 0,
             centre: None,
+            rigid_symmetry: RigidSymmetry::Unknown,
             surface_error: Mutex::new(None),
         })
     }
@@ -715,6 +1047,7 @@ impl MinModeSession {
     pub fn reset(&mut self) {
         self.solver.forget();
         self.centre = None;
+        self.rigid_symmetry = RigidSymmetry::Unknown;
     }
 
     /// Move to `x` and keep the session: the mode stays as the next
@@ -792,13 +1125,32 @@ impl MinModeSession {
         Ok(gradient)
     }
 
+    fn excluded_for<S: PointSurface + ?Sized>(
+        &mut self,
+        surface: &S,
+        position: ArrayView1<f64>,
+    ) -> Result<Array2<f64>, SaddleError> {
+        match self.rigid_symmetry {
+            RigidSymmetry::Absent => return Ok(Array2::zeros((0, position.len()))),
+            RigidSymmetry::Present => return Ok(rigid_body_modes(position)),
+            RigidSymmetry::Unknown => {}
+        }
+        let supplied = surface.excluded_modes(position)?;
+        if supplied.nrows() == 0 {
+            self.rigid_symmetry = RigidSymmetry::Absent;
+        } else if modes_match_rigid_basis(&supplied, position) {
+            self.rigid_symmetry = RigidSymmetry::Present;
+        }
+        Ok(supplied)
+    }
+
     fn mode_at<S: PointSurface>(
-        &self,
+        &mut self,
         surface: &Counted<'_, S>,
         position: ArrayView1<f64>,
         gradient: ArrayView1<f64>,
     ) -> Result<(Array1<f64>, f64, usize), SaddleError> {
-        let excluded = surface.surface.excluded_modes(position)?;
+        let excluded = self.excluded_for(surface.surface, position)?;
         if excluded.ncols() != position.len() || !excluded.iter().all(|v| v.is_finite()) {
             return Err(SaddleError::Shape(
                 "minimum-mode excluded directions".into(),
@@ -838,7 +1190,8 @@ impl MinModeSession {
         surface: &Counted<'_, S>,
         g0: ArrayView1<f64>,
     ) -> Result<(f64, usize), SaddleError> {
-        let (mode, curvature, rotations) = self.mode_at(surface, self.x.view(), g0)?;
+        let position = self.x.clone();
+        let (mode, curvature, rotations) = self.mode_at(surface, position.view(), g0)?;
         self.mode = mode;
         self.curvature = curvature;
         Ok((curvature, rotations))
@@ -986,7 +1339,30 @@ impl MinModeSession {
         });
 
         let mut x = self.x.clone();
-        let stepped = self.solver.step(&oracle, &mut x);
+        let mut stepped = self.solver.step(&oracle, &mut x);
+        // FIRE 2.0 floors `dt` at 1e-12 and `FireState::reset` does not
+        // restore it (Bitzek et al., PRL 97, 170201, 2006; Guénolé et
+        // al., Comput. Mater. Sci. 175, 109584, 2020). After enough
+        // negative-power steps the displacement underflows, the oracle
+        // short-circuits, and the harness counts the repeated geometry
+        // as divergence. A step smaller than 1e-10 is that stall: the
+        // coordinate does not change at the harness cache's equality,
+        // or it changes by less than the next useful move. Rebuilding
+        // the FIRE state restores `dt` from `Control::istep` and one
+        // more step leaves the point.
+        let stalled = x
+            .iter()
+            .zip(start.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f64::max);
+        if stepped.is_ok() && matches!(self.config.method, Method::Fire { .. }) && stalled <= 1e-10
+        {
+            self.solver.set_fire_variant(rgmin::FireVariant::Rgmin);
+            // The collapsed step cached a gradient at this geometry.
+            // Drop it so the rebuilt integrator reads the force again.
+            self.solver.forget_evaluation();
+            stepped = self.solver.step(&oracle, &mut x);
+        }
         drop(oracle);
         // The surface error outranks whatever the solver made of an
         // infinite energy and a zero gradient. `x` is a local copy;
@@ -1062,9 +1438,12 @@ impl MinModeSession {
 
 #[cfg(test)]
 mod tests {
-    use super::translated_gradient;
+    use super::{MinModeConfig, MinModeSession, PointSurface, translated_gradient};
+    use crate::error::SaddleError;
     use approx::assert_abs_diff_eq;
-    use ndarray::array;
+    use ndarray::{Array1, ArrayView1, array};
+    use rgmin::Method;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn positive_curvature_keeps_only_the_reversed_mode() {
@@ -1086,5 +1465,168 @@ mod tests {
         assert_abs_diff_eq!(eff[0], -1.0, epsilon = 1e-12);
         assert_abs_diff_eq!(eff[1], -4.0, epsilon = 1e-12);
         assert_abs_diff_eq!(eff[2], 0.5, epsilon = 1e-12);
+    }
+
+    /// Polak-Ribiere on the inverted force. The oracle value is the true
+    /// energy, which rises on the climb, so a line search refuses the step.
+    /// `Accept::Step` takes it. Nocedal and Wright, algorithm 5.4.
+    struct Climb;
+
+    impl PointSurface for Climb {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            let energy = -x[0] * x[0] + 2.0 * x[1] * x[1];
+            let gradient = array![-2.0 * x[0], 4.0 * x[1]];
+            Ok((energy, gradient))
+        }
+    }
+
+    #[test]
+    fn nlcg_takes_the_climb_when_the_true_energy_rises() {
+        let config = MinModeConfig {
+            method: Method::polak_ribiere(),
+            max_rotations: 0,
+            force_tol: 1e-12,
+            max_move: 0.0,
+            ..MinModeConfig::default()
+        };
+        let x = array![0.4, 0.05];
+        let mode = array![1.0, 0.0];
+        let mut session = MinModeSession::new(config, x.clone(), mode).unwrap();
+        let before = -x[0] * x[0] + 2.0 * x[1] * x[1];
+        session.step(&Climb).unwrap();
+        let y = session.position();
+        let after = -y[0] * y[0] + 2.0 * y[1] * y[1];
+        assert!(
+            (y[0] - x[0]).abs() > 1e-6,
+            "Polak-Ribiere did not move: {y:?}"
+        );
+        assert!(
+            after > before,
+            "the climb must be allowed to raise the true energy: {before} -> {after}"
+        );
+    }
+
+    /// FIRE 2.0 halves `dt` whenever the power is not positive and floors it
+    /// at 1e-12 (Bitzek et al., PRL 97, 170201, 2006; Guénolé et al.,
+    /// Comput. Mater. Sci. 175, 109584, 2020). `FireState::reset` keeps that
+    /// `dt`. The analytic action freezes the mode, and the parallel gradient
+    /// flips at every new geometry, so the power stays negative until the
+    /// displacement underflows. A repeated geometry is what the harness
+    /// counts as divergence.
+    struct Flip {
+        calls: AtomicUsize,
+    }
+
+    impl PointSurface for Flip {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            let k = self.calls.fetch_add(1, Ordering::Relaxed);
+            let sign = if k.is_multiple_of(2) { 1.0 } else { -1.0 };
+            let _ = x;
+            Ok((0.0, array![sign, 0.02 * sign]))
+        }
+
+        fn hessian_vector(
+            &self,
+            _x: ArrayView1<f64>,
+            v: ArrayView1<f64>,
+        ) -> Result<Option<Array1<f64>>, SaddleError> {
+            Ok(Some(array![-2.0 * v[0], 4.0 * v[1]]))
+        }
+    }
+
+    #[test]
+    fn fire_still_moves_after_the_time_step_has_collapsed() {
+        let config = MinModeConfig {
+            method: Method::Fire {
+                kind: rgmin::FireKind::V2,
+            },
+            max_rotations: 0,
+            force_tol: 1e-18,
+            max_move: 0.2,
+            ..MinModeConfig::default()
+        };
+        let x = array![0.3, 0.1];
+        let mode = array![1.0, 0.0];
+        let mut session = MinModeSession::new(config, x, mode).unwrap();
+        let surface = Flip {
+            calls: AtomicUsize::new(0),
+        };
+        for _ in 0..70 {
+            session.step(&surface).unwrap();
+        }
+        let frozen = session.position().to_owned();
+        session.step(&surface).unwrap();
+        let moved = session.position();
+        let shift = (moved[0] - frozen[0]).abs() + (moved[1] - frozen[1]).abs();
+        assert!(
+            shift > 1e-8,
+            "FIRE repeated the geometry after dt collapsed: shift={shift} pos={moved:?}"
+        );
+    }
+
+    struct PairPotential {
+        field: f64,
+    }
+
+    impl PointSurface for PairPotential {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            let atoms = x.len() / 3;
+            let mut energy = 0.0;
+            let mut gradient = Array1::zeros(x.len());
+            for i in 0..atoms {
+                gradient[3 * i] += self.field;
+                energy += self.field * x[3 * i];
+                for j in (i + 1)..atoms {
+                    let dx = x[3 * j] - x[3 * i];
+                    let dy = x[3 * j + 1] - x[3 * i + 1];
+                    let dz = x[3 * j + 2] - x[3 * i + 2];
+                    let r = (dx * dx + dy * dy + dz * dz).sqrt();
+                    let mismatch = r - 1.0;
+                    energy += 0.5 * mismatch * mismatch;
+                    let scale = mismatch / r;
+                    gradient[3 * i] -= scale * dx;
+                    gradient[3 * i + 1] -= scale * dy;
+                    gradient[3 * i + 2] -= scale * dz;
+                    gradient[3 * j] += scale * dx;
+                    gradient[3 * j + 1] += scale * dy;
+                    gradient[3 * j + 2] += scale * dz;
+                }
+            }
+            Ok((energy, gradient))
+        }
+    }
+
+    #[test]
+    fn a_free_trimer_excludes_six_rigid_modes() {
+        let x = array![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.5, 0.8, 0.0];
+        let surface = PairPotential { field: 0.0 };
+        let modes = super::symmetry_excluded_modes(&surface, x.view()).unwrap();
+        assert_eq!(modes.nrows(), 6, "rows {}", modes.nrows());
+        let forced = PairPotential { field: 0.4 };
+        let modes = super::symmetry_excluded_modes(&forced, x.view()).unwrap();
+        assert!(
+            modes.nrows() < 6,
+            "a net force must drop translations, rows {}",
+            modes.nrows()
+        );
+        let mut translation = 0.0;
+        let axis = array![
+            1.0 / 3.0_f64.sqrt(),
+            0.0,
+            0.0,
+            1.0 / 3.0_f64.sqrt(),
+            0.0,
+            0.0,
+            1.0 / 3.0_f64.sqrt(),
+            0.0,
+            0.0
+        ];
+        for row in modes.rows() {
+            translation += super::row_dot(row, axis.view()).abs();
+        }
+        assert!(
+            translation < 1e-6,
+            "translation survived the field: {translation}"
+        );
     }
 }

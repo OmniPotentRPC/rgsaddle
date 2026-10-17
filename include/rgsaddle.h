@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 16u
+#define RGSADDLE_ABI_MINOR 17u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -100,7 +100,14 @@ typedef enum {
   RGSADDLE_METHOD_LBFGS = 1,
   RGSADDLE_METHOD_RTR = 2, /**< Band trust-region stepper. */
   /** Quick-min band step. Min-mode create returns null for this code. */
-  RGSADDLE_METHOD_QUICKMIN = 3
+  RGSADDLE_METHOD_QUICKMIN = 3,
+  /**
+   * Polak-Ribiere nonlinear CG. The band and the minimum-mode session
+   * take the step under Accept::Step, because the oracle value is not
+   * the potential of the projected or inverted force. An unknown code
+   * returns null instead of FIRE.
+   */
+  RGSADDLE_METHOD_NLCG = 4
 } rgsaddle_method_t;
 
 typedef enum {
@@ -672,6 +679,13 @@ typedef struct {
   double force_tol;
   rgsaddle_force_gate_t force_gate;
   int64_t order;
+  /**
+   * Minor 17: Sella `gamma`. `> 0` sets the Rayleigh-Ritz residual
+   * scale, `< 0` selects an exact diagonalisation, and `0` keeps the
+   * library default (0.4). Ignored when `version.minor < 17`, so a
+   * caller that allocated the minor-16 struct is not read past its end.
+   */
+  double gamma;
 } rgsaddle_sella_saddle_config_t;
 
 RgsaddleSellaSaddle *rgsaddle_sella_saddle_create(
@@ -707,6 +721,9 @@ rgsaddle_status_t rgsaddle_sella_saddle_seed_mode(
     RgsaddleSellaSaddle *session, const double *mode, double curvature);
 rgsaddle_status_t rgsaddle_sella_saddle_set_hess_update(RgsaddleSellaSaddle *session,
                                           int32_t update);
+/** Sella `gamma`. `<= 0` selects an exact diagonalisation. */
+rgsaddle_status_t rgsaddle_sella_saddle_set_gamma(RgsaddleSellaSaddle *session,
+                                    double gamma);
 rgsaddle_status_t rgsaddle_sella_saddle_set_restricted(RgsaddleSellaSaddle *session,
                                          int32_t restricted);
 rgsaddle_status_t rgsaddle_sella_saddle_maybe_niggli(RgsaddleSellaSaddle *session,

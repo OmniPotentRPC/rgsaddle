@@ -1052,10 +1052,14 @@ fn assemble_band(
 /// step on the force alone.
 pub(crate) fn check_force_driven(method: &Method) -> Result<(), SaddleError> {
     match method {
-        Method::Fire { .. } | Method::Lbfgs { .. } | Method::Bb | Method::QuickMin => Ok(()),
+        Method::Fire { .. }
+        | Method::Lbfgs { .. }
+        | Method::Nlcg { .. }
+        | Method::Bb
+        | Method::QuickMin => Ok(()),
         other => Err(SaddleError::Invalid(format!(
             "{other:?} tests the oracle value, which is not the potential of a \
-             projected or inverted force; use FIRE, L-BFGS, BB, or quick-min"
+             projected or inverted force; use FIRE, L-BFGS, Polak-Ribiere, BB, or quick-min"
         ))),
     }
 }
@@ -1166,8 +1170,10 @@ impl BandSession {
         // says nothing about a band step: L-BFGS takes its two-loop
         // direction with one oracle call (rgmin Accept::Step), as FIRE
         // steps unconditionally.
-        if matches!(method, Method::Lbfgs { .. }) {
+        if matches!(method, Method::Lbfgs { .. } | Method::Nlcg { .. }) {
             solver.set_accept(Accept::Step);
+        }
+        if matches!(method, Method::Lbfgs { .. }) {
             // eOn's L-BFGS resets: a two-loop step that reaches the
             // per-atom cap or faces away from the force drops its
             // pairs and steps along the force, and an empty memory

@@ -107,7 +107,35 @@ pub fn exact_eigh(a: ArrayView2<f64>) -> Result<(Array1<f64>, Array2<f64>), Sadd
             work[(j, i)] = s;
         }
     }
-    jacobi_eigh(&mut work)
+    sym_eigh_faer(&work)
+}
+
+/// Symmetric eigendecomposition, eigenvalues nondecreasing.
+///
+/// faer is the LAPACK `dsyevr` path already used to check the sparse
+/// Hessian. The previous cyclic Jacobi stopped after `8 n^2` rotations
+/// or at an absolute off-diagonal of `1e-14`. On the free Hessian of
+/// LJ38 (`n ≈ 108`) that cap is the minutes-long P-RFO step.
+fn sym_eigh_faer(a: &Array2<f64>) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
+    let n = a.nrows();
+    if n == 0 {
+        return Ok((Array1::zeros(0), Array2::zeros((0, 0))));
+    }
+    let mat = faer::Mat::from_fn(n, n, |i, j| a[(i, j)]);
+    let evd = mat
+        .self_adjoint_eigen(faer::Side::Lower)
+        .map_err(|_| SaddleError::Solver("symmetric eigensolve failed".into()))?;
+    let values_ref = evd.S();
+    let vectors_ref = evd.U();
+    let mut values = Array1::zeros(n);
+    let mut vectors = Array2::zeros((n, n));
+    for column in 0..n {
+        values[column] = values_ref[column];
+        for row in 0..n {
+            vectors[(row, column)] = vectors_ref[(row, column)];
+        }
+    }
+    Ok((values, vectors))
 }
 
 /// Ritz eigenvalues, basis vectors, and the operator applied to those vectors.
@@ -144,8 +172,9 @@ pub fn rayleigh_ritz(
     Ok((lams, v_rot, av_rot))
 }
 
-/// Dense eigen on `device`. Full spectrum is Host Jacobi.
-/// [`EigenDevice::Dlpk`] is the lowest-mode arm through rgmin.
+/// Dense eigen on `device`. The full spectrum is faer's symmetric
+/// tridiagonal reduction ([`exact_eigh`]). [`EigenDevice::Dlpk`] is
+/// the lowest-mode arm through rgmin.
 pub fn eigh_on(
     device: EigenDevice,
     a: ArrayView2<f64>,
@@ -347,6 +376,14 @@ pub fn rayleigh_ritz_iter(
     if v.ncols() == 0 {
         return Err(SaddleError::Solver("empty Ritz subspace".into()));
     }
+    // A complete basis is already the exact problem. Seeding the first
+    // iterative diagonalisation with `I` used to grow the subspace
+    // toward `2 n + 1` whenever the inner Jacobi residual missed `gamma`.
+    if v.ncols() >= n {
+        let (lams, vecs) = exact_eigh(a)?;
+        let av = matmul(a, vecs.view());
+        return Ok((lams, vecs, av));
+    }
     let p = Array2::eye(n);
     let mut av = matmul(a, v.view());
     loop {
@@ -522,88 +559,6 @@ fn matmul(a: ArrayView2<f64>, b: ArrayView2<f64>) -> Array2<f64> {
         }
     }
     c
-}
-
-/// Cyclic Jacobi for a small dense symmetric matrix.
-fn jacobi_eigh(a: &mut Array2<f64>) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
-    let n = a.nrows();
-    let mut v = Array2::<f64>::zeros((n, n));
-    for i in 0..n {
-        v[(i, i)] = 1.0;
-    }
-    for _ in 0..(8 * n * n).max(16) {
-        let mut p = 0;
-        let mut q = 1;
-        let mut max = 0.0;
-        for i in 0..n {
-            for j in (i + 1)..n {
-                let mag = a[(i, j)].abs();
-                if mag > max {
-                    max = mag;
-                    p = i;
-                    q = j;
-                }
-            }
-        }
-        if max < 1e-14 {
-            break;
-        }
-        let app = a[(p, p)];
-        let aqq = a[(q, q)];
-        let apq = a[(p, q)];
-        let tau = (aqq - app) / (2.0 * apq);
-        let t = if tau >= 0.0 {
-            1.0 / (tau + (1.0 + tau * tau).sqrt())
-        } else {
-            -1.0 / (-tau + (1.0 + tau * tau).sqrt())
-        };
-        let c = 1.0 / (1.0 + t * t).sqrt();
-        let s = t * c;
-        for k in 0..n {
-            if k != p && k != q {
-                let aik = a[(k.min(p), k.max(p))];
-                let aiq = a[(k.min(q), k.max(q))];
-                let npk = c * aik - s * aiq;
-                let nqk = s * aik + c * aiq;
-                a[(k.min(p), k.max(p))] = npk;
-                a[(k.max(p), k.min(p))] = npk;
-                a[(k.min(q), k.max(q))] = nqk;
-                a[(k.max(q), k.min(q))] = nqk;
-            }
-            let vip = v[(k, p)];
-            let viq = v[(k, q)];
-            v[(k, p)] = c * vip - s * viq;
-            v[(k, q)] = s * vip + c * viq;
-        }
-        a[(p, p)] = c * c * app - 2.0 * s * c * apq + s * s * aqq;
-        a[(q, q)] = s * s * app + 2.0 * s * c * apq + c * c * aqq;
-        a[(p, q)] = 0.0;
-        a[(q, p)] = 0.0;
-    }
-    let mut evals = Array1::zeros(n);
-    for i in 0..n {
-        evals[i] = a[(i, i)];
-    }
-    // Sort ascending.
-    let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by(|&i, &j| evals[i].total_cmp(&evals[j]));
-    let mut ev_sorted = Array1::zeros(n);
-    let mut vecs = Array2::zeros((n, n));
-    for (dst, &src) in order.iter().enumerate() {
-        ev_sorted[dst] = evals[src];
-        for r in 0..n {
-            vecs[(r, dst)] = v[(r, src)];
-        }
-    }
-    for j in 0..n {
-        let col = vecs.column(j).to_owned();
-        if nrm2(col.view()) < 1e-18 {
-            return Err(SaddleError::Solver(
-                "Jacobi produced a zero eigenvector".into(),
-            ));
-        }
-    }
-    Ok((ev_sorted, vecs))
 }
 
 #[cfg(test)]
@@ -819,6 +774,58 @@ mod tests {
             exact[0]
         );
         assert_eq!(vecs.nrows(), 4);
+    }
+
+    /// The sweep-capped Jacobi took 1.9 s for this n = 72 matrix in a
+    /// debug build. n = 80 must finish well under a second and match
+    /// the matrix to `1e-8 ||A||`.
+    #[test]
+    fn exact_eigh_residuals_stay_small_on_a_scaled_spectrum() {
+        let n = 80;
+        let mut a = Array2::<f64>::zeros((n, n));
+        for i in 0..n {
+            for j in 0..n {
+                let phase = ((i + 1) * (j + 3)) as f64;
+                a[(i, j)] = phase.sin() + 0.15 * ((i as isize - j as isize).abs() as f64);
+            }
+        }
+        for i in 0..n {
+            for j in 0..i {
+                let s = 0.5 * (a[(i, j)] + a[(j, i)]);
+                a[(i, j)] = s;
+                a[(j, i)] = s;
+            }
+        }
+        let mut frobenius = 0.0;
+        for v in a.iter() {
+            frobenius += v * v;
+        }
+        frobenius = frobenius.sqrt();
+        let started = std::time::Instant::now();
+        let (lams, vecs) = exact_eigh(a.view()).unwrap();
+        let elapsed = started.elapsed();
+        let mut worst: f64 = 0.0;
+        for j in 0..n {
+            let mut residual = 0.0;
+            for i in 0..n {
+                let mut av = 0.0;
+                for k in 0..n {
+                    av += a[(i, k)] * vecs[(k, j)];
+                }
+                let diff = av - lams[j] * vecs[(i, j)];
+                residual += diff * diff;
+            }
+            worst = worst.max(residual.sqrt());
+        }
+        let relative = worst / frobenius;
+        assert!(
+            elapsed.as_secs_f64() < 0.75,
+            "dense eigh of n={n} took {elapsed:?}; the sweep-capped Jacobi is the slow path"
+        );
+        assert!(
+            relative < 1e-8,
+            "eigenpair residual {worst} / ||A|| {frobenius} = {relative}"
+        );
     }
 
     #[test]

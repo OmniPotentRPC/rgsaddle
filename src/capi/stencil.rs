@@ -156,6 +156,10 @@ impl PointSurface for CbSurface {
         }
         Ok((energy[0], Array1::from_vec(gradient)))
     }
+
+    fn excluded_modes(&self, x: ArrayView1<f64>) -> Result<ndarray::Array2<f64>, SaddleError> {
+        crate::minmode::symmetry_excluded_modes(self, x)
+    }
 }
 
 fn guard(body: impl FnOnce() -> i32) -> i32 {
