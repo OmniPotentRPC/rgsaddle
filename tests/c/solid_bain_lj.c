@@ -6,6 +6,13 @@
  * two-atom body-centred tetragonal cell diag(a, a, c) repeated
  * nx x ny x nz times. The band climbs to the tetragonal saddle.
  *
+ * Every atom sits on an inversion centre, so the path is the cell
+ * strain alone. The two-atom cell has no lattice wave vector but k = 0,
+ * so its saddle is the scan's. That saddle is unstable to the
+ * k = (1/2, 0, 1/2) shuffle: a supercell that admits it (5 x 5 x 4 does)
+ * leaves the tetragonal path for a lower one once rounding seeds the
+ * mode, and the check below fails there by design.
+ *
  * Reference: validation/bain_lj_reference.py, a relaxed scan of the
  * energy per atom over c/a with spacing DQ = 2.5e-4:
  *   bcc     a = 1.228441371,                 E = -7.4148256256 eV/atom

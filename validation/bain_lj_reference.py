@@ -27,9 +27,12 @@ maximum by a bounded search. The script checks, and prints:
    exactly one negative eigenvalue: an index-1 saddle in cell space.
 3. Both minima are dynamically stable: the lowest phonon eigenvalue
    on a 12^3 grid of wave vectors is positive.
-4. Along the whole relaxed path, the 5 x 5 x 4 supercell used by the
-   eOn test keeps every width above twice the cutoff, so a
-   minimum-image pair list sees every pair inside the cutoff once.
+4. The saddle is not: the phonon at k = (1/2, 0, 1/2) of the
+   conventional cell is unstable there. The two-atom cell has no wave
+   vector but k = 0, so in that cell the scan's saddle is the band's
+   saddle. A supercell that admits the shuffle (5 x 5 x 4 does, at
+   (3/5, 0, 1/2)) has a lower path off the tetragonal one, and the scan
+   is no reference for it.
 5. The analytic Cauchy stress matches a central difference of the
    energy along each lower-triangular strain.
 
@@ -129,20 +132,35 @@ def strain_hessian(h, step=1e-4):
     return np.linalg.eigvalsh(0.5 * (hess + hess.T))
 
 
-def lowest_phonon(h, nk=12):
-    """Lowest eigenvalue of the dynamical matrix over an nk^3 grid, k = 0 excluded."""
+def lowest_phonon(h, fractions):
+    """Lowest dynamical-matrix eigenvalue over wave vectors given as
+    fractions of the conventional reciprocal cell, lattice points excluded,
+    and the wave vector that attains it."""
     vec, r = lattice(h)
     _, d1, d2 = pair(r)
     u = vec / r[:, None]
     blocks = (d2 - d1 / r)[:, None, None] * u[:, :, None] * u[:, None, :] + (d1 / r)[:, None, None] * np.eye(3)
     recip = 2.0 * np.pi * np.linalg.inv(h).T
+    lowest, where = np.inf, None
+    for f in fractions:
+        if np.allclose(f, np.round(f)):
+            continue
+        dyn = (blocks * (1.0 - np.cos(vec @ (f @ recip)))[:, None, None]).sum(axis=0)
+        value = np.linalg.eigvalsh(dyn)[0]
+        if value < lowest:
+            lowest, where = value, f
+    return lowest, where
+
+
+def grid(nk):
     f = np.arange(nk) / nk
-    ks = np.array(np.meshgrid(f, f, f, indexing="ij")).reshape(3, -1).T @ recip
-    lowest = np.inf
-    for k in ks[1:]:
-        dyn = (blocks * (1.0 - np.cos(vec @ k))[:, None, None]).sum(axis=0)
-        lowest = min(lowest, np.linalg.eigvalsh(dyn)[0])
-    return lowest
+    return np.array(np.meshgrid(f, f, f, indexing="ij")).reshape(3, -1).T
+
+
+def commensurate(reps):
+    return np.array(
+        [[i / reps[0], j / reps[1], k / reps[2]] for i in range(reps[0]) for j in range(reps[1]) for k in range(reps[2])]
+    )
 
 
 # 5. Stress against the energy, at a strained triclinic sample cell.
@@ -183,16 +201,18 @@ saddle_eigs = strain_hessian(cell(q_saddle, v_saddle))
 assert (saddle_eigs < 0.0).sum() == 1, saddle_eigs
 energy_step = e_saddle - min(relaxed(q_saddle - DQ)[0], relaxed(q_saddle + DQ)[0])
 
-# 3. Phonons.
-phonon_bcc = lowest_phonon(cell(1.0, v_bcc))
-phonon_fcc = lowest_phonon(cell(np.sqrt(2.0), v_fcc))
+# 3. Phonons at the minima.
+phonon_bcc, _ = lowest_phonon(cell(1.0, v_bcc), grid(12))
+phonon_fcc, _ = lowest_phonon(cell(np.sqrt(2.0), v_fcc), grid(12))
 assert phonon_bcc > 0.0 and phonon_fcc > 0.0
 
-# 4. Supercell widths along the relaxed path.
-nx, ny, nz = SUPERCELL
-width = min(min(nx, ny) * cell(q, relaxed(q)[1])[0, 0] for q in qs[::40])
-width = min(width, nz * cell(1.0, v_bcc)[2, 2])
-assert width > 2.0 * RC, width
+# 4. Phonons at the saddle: the shuffle at k = (1/2, 0, 1/2) is unstable,
+# and the supercell admits a wave vector next to it.
+phonon_saddle, k_saddle = lowest_phonon(cell(q_saddle, v_saddle), grid(12))
+assert phonon_saddle < 0.0
+assert np.allclose(np.sort(np.abs(k_saddle - np.round(k_saddle)))[1:], 0.5), k_saddle
+phonon_super, k_super = lowest_phonon(cell(q_saddle, v_saddle), commensurate(SUPERCELL))
+assert phonon_super < 0.0
 
 
 def lattice_constants(q, v):
@@ -219,4 +239,5 @@ print(f"strain Hessian (eV/atom)     bcc min {strain_hessian(cell(1.0, v_bcc)).m
 print(f"                             saddle {np.array2string(saddle_eigs, precision=4)}")
 print(f"                             fcc min {strain_hessian(cell(np.sqrt(2.0), v_fcc)).min():.4f}")
 print(f"lowest phonon (eV/A^2)       bcc {phonon_bcc:.4f}, fcc {phonon_fcc:.4f}")
-print(f"narrowest {nx}x{ny}x{nz} width     {width:.4f} A > 2 rc = {2 * RC} A")
+print(f"saddle phonon (eV/A^2)       {phonon_saddle:.4f} at k = {k_saddle} (12^3 grid)")
+print(f"                             {phonon_super:.4f} at k = {np.round(k_super, 3)} ({SUPERCELL} supercell)")
