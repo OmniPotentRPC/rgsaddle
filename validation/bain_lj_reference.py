@@ -30,9 +30,9 @@ maximum by a bounded search. The script checks, and prints:
 4. The saddle is not: the phonon at k = (1/2, 0, 1/2) of the
    conventional cell is unstable there. The two-atom cell has no wave
    vector but k = 0, so in that cell the scan's saddle is the band's
-   saddle. A supercell that admits the shuffle (5 x 5 x 4 has
-   (2/5, 0, 1/2) next to it) has a lower path off the tetragonal one, and the scan
-   is no reference for it.
+   saddle. A supercell with a wave vector near the shuffle (5 x 5 x 4
+   has (2/5, 0, 1/2)) has a lower path off the tetragonal one, and the
+   scan is no reference for it.
 5. The analytic Cauchy stress matches a central difference of the
    energy along each lower-triangular strain.
 
