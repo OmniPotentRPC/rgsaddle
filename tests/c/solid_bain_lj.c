@@ -16,7 +16,8 @@
  * barrier within the energy change over one grid step at the saddle,
  * 1.2e-6 eV/atom, plus the band's own force tolerance.
  *
- * Usage: solid_bain_lj [nx ny nz interior force_tol max_iter]. With no
+ * Usage: solid_bain_lj [nx ny nz interior force_tol max_iter max_move].
+ * With no
  * arguments it runs the two-atom cell and checks the reference; with
  * arguments it prints the same report for a larger supercell. */
 #include "rgsaddle.h"
@@ -215,6 +216,7 @@ int main(int argc, char **argv) {
   const int interior = argc > 4 ? atoi(argv[4]) : 7;
   const double force_tol = argc > 5 ? atof(argv[5]) : 1e-4;
   const int max_iter = argc > 6 ? atoi(argv[6]) : 5000;
+  const double max_move = argc > 7 ? atof(argv[7]) : 0.1;
   const int64_t n_atoms = 2LL * nx * ny * nz;
   const int64_t n_images = interior + 2;
   const int64_t dof = 3 * n_atoms;
@@ -264,10 +266,11 @@ int main(int argc, char **argv) {
   cfg.projection = RGSADDLE_PROJECTION_NEB;
   cfg.method = RGSADDLE_METHOD_FIRE;
   cfg.spring_k = 5.0;
-  cfg.ci_trigger_factor = 0.0;
-  cfg.ci_trigger_force = 0.5;
+  /* Climb from the first evaluation, as eOn does by default. */
+  cfg.ci_trigger_factor = 1.0;
+  cfg.ci_trigger_force = INFINITY;
   cfg.force_tol = force_tol;
-  cfg.max_move = 0.1;
+  cfg.max_move = max_move;
 
   RgsaddleBand *band =
       rgsaddle_band_create_solid(&cfg, n_images, n_atoms, positions, cells, 0.0, 1.0);
@@ -370,8 +373,12 @@ int main(int argc, char **argv) {
       failed = 1;
     }
   }
-  /* No rigid rotation, no shear drift, no hop. */
-  if (upper != 0.0 || shear > 1e-10 || square > 1e-10 || drift > 1e-9) {
+  /* No rigid rotation, no shear drift, no hop. A hop moves a
+   * fractional coordinate by one. The band steps atoms and cell
+   * together, but its per-atom step cap can scale an atom and a cell
+   * row differently; the restoring force on each site then holds the
+   * fractional coordinates to well under 1e-6. */
+  if (upper != 0.0 || shear > 1e-10 || square > 1e-10 || drift > 1e-6) {
     printf("FAIL: the band left the tetragonal fixed-fraction path\n");
     failed = 1;
   }
