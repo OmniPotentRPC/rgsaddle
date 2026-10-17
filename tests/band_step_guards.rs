@@ -48,16 +48,17 @@ fn an_overflowing_force_norm_is_non_finite() {
 
 #[test]
 fn a_step_that_cannot_move_the_band_is_stalled() {
-    // At 1e17 one unit in the last place is 16, so a step of order 1e-3
-    // rounds to no move while the force stays at 1e-3.
-    let big = 1e17;
+    // At 1e11 one unit in the last place is 1.5e-5, so a step of order
+    // 1e-7 rounds to no move while the force stays at 1e-7. (rgmin keeps
+    // coordinates inside +-1e12, so the band stays below that.)
+    let big = 1e11;
     let band = array![
         [big, big, big],
-        [big + 1024.0, big, big],
-        [big + 2048.0, big, big]
+        [big + 1.0, big, big],
+        [big + 2.0, big, big]
     ];
     let mut session = BandSession::new(config(), band.clone()).unwrap();
-    let err = session.step(&Constant([0.0, 1e-3, 0.0])).unwrap_err();
+    let err = session.step(&Constant([0.0, 1e-7, 0.0])).unwrap_err();
     assert!(matches!(err, SaddleError::Stalled(_)), "{err}");
     assert_eq!(session.positions(), band.view());
 }
