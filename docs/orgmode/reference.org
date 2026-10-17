@@ -50,4 +50,5 @@ The importable package is =rgsaddle=. =rgsaddle._core= is the nanobind extension
 - =tests/nichols_saddle.rs= — Nichols step against i-PI on the same Hessian and gradient, Muller-Brown saddles, quadratic saddle
 - =tests/prfo_saddle.rs= — partitioned RFO against the augmented Hessian, trust sphere changes the mode ratio
 - =tests/c_abi.rs= — header and symbols with =capi=
-- =validation/= — sympy and sollya checks of the dimer rotation, the Lanczos residual bound, and the finite-difference curvature
+- =tests/solid_bain_lj.rs= — =tests/c/solid_bain_lj.c= runs the solid-state band from bcc to fcc for switched LJ on the two-atom tetragonal cell through =rgsaddle_band_create_solid=; the climbing image matches the relaxed scan of =validation/bain_lj_reference.py= in c/a within 2.5e-4 and in barrier within 1.2e-6 eV/atom, and every image keeps a diagonal tetragonal cell and its fractional coordinates
+- =validation/= — sympy and sollya checks of the dimer rotation, the Lanczos residual bound, and the finite-difference curvature; =bain_lj_reference.py= (numpy, scipy) scans the relaxed Bain path that =tests/c/solid_bain_lj.c= checks against, and =ssneb_bain_cell.py= (sympy) checks its strain parametrisation and Jacobian

@@ -62,6 +62,10 @@ checks of the rotation formulas, the Lanczos residual bound, and the
 finite-difference curvature error terms
 (`uv run --with sympy python validation/<script>.py`,
 `sollya validation/fd_curvature.sollya`).
+`validation/bain_lj_reference.py` scans the relaxed Bain path (bcc to
+fcc) of a switched Lennard-Jones crystal, the reference for
+`tests/c/solid_bain_lj.c`, which runs the solid-state band on it
+through `rgsaddle_band_create_solid`.
 
 ## Python
 
