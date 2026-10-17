@@ -169,10 +169,9 @@ fn config(force_tol: f64, full_band: bool) -> BandConfig {
         force_tol,
         max_move: 0.1,
         method: rgmin::Method::Lbfgs { memory: 10 },
-        climbing: Some(CiConfig {
-            trigger_factor: 1.0,
-            trigger_force: f64::INFINITY,
-        }),
+        // The band's default arming: climb once the largest component is
+        // under 0.5.
+        climbing: Some(CiConfig::default()),
         autoneb: Some(AutoNebTuning {
             n_simul: 3,
             n_max: 7,
