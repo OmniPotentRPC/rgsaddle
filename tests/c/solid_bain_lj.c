@@ -16,9 +16,12 @@
  * barrier within the energy change over one grid step at the saddle,
  * 1.2e-6 eV/atom, plus the band's own force tolerance.
  *
- * Usage: solid_bain_lj [nx ny nz interior force_tol max_iter max_move].
- * With no arguments it runs the two-atom cell and checks the reference;
- * with arguments it prints the same report for a larger supercell. */
+ * Usage: solid_bain_lj [nx ny nz interior force_tol max_iter max_move
+ * ci_force trace]. ci_force arms the climbing image once the band force
+ * is under it (inf: from the first evaluation); trace > 0 prints every
+ * trace-th step. With no arguments it runs the two-atom cell and checks
+ * the reference; with arguments it prints the same report for a larger
+ * supercell. */
 #include "rgsaddle.h"
 
 #include <math.h>
@@ -75,14 +78,19 @@ static void pair(double r, double *phi, double *dphi) {
  * image, summed over every lattice translation inside the cutoff, so
  * the cell may be narrower than twice the cutoff. Rows of h are the
  * lattice vectors. */
-static void lj(int64_t n, const double *x, const double *h, double *energy, double *grad,
-               double *stress) {
+static int lj(int64_t n, const double *x, const double *h, double *energy, double *grad,
+              double *stress) {
   double inv[9];
   inverse3(h, inv);
   int reach[3];
   for (int k = 0; k < 3; ++k) {
     const double col = sqrt(inv[k] * inv[k] + inv[3 + k] * inv[3 + k] + inv[6 + k] * inv[6 + k]);
     reach[k] = (int)ceil(RC * col + 0.5);
+    /* A cell this thin has left the path; refuse it rather than sum
+     * millions of translations. */
+    if (reach[k] > 64) {
+      return 1;
+    }
   }
   double e = 0.0;
   double w[9] = {0};
@@ -143,6 +151,7 @@ static void lj(int64_t n, const double *x, const double *h, double *energy, doub
   for (int k = 0; k < 9; ++k) {
     stress[k] = w[k] / vol;
   }
+  return 0;
 }
 
 static rgsaddle_status_t surface(void *user, rgsaddle_solid_surface_request_t *req) {
@@ -153,8 +162,10 @@ static rgsaddle_status_t surface(void *user, rgsaddle_solid_surface_request_t *r
   const int64_t rows = (req->flags & RGSADDLE_REQ_ONE_IMAGE) ? 1 : req->n_images;
   const int64_t dof = 3 * req->n_atoms;
   for (int64_t r = 0; r < rows; ++r) {
-    lj(req->n_atoms, req->positions + dof * r, req->cells + 9 * r, req->energies + r,
-       req->gradients + dof * r, req->stresses + 9 * r);
+    if (lj(req->n_atoms, req->positions + dof * r, req->cells + 9 * r, req->energies + r,
+           req->gradients + dof * r, req->stresses + 9 * r) != 0) {
+      return RGSADDLE_SURFACE_FAILED;
+    }
   }
   rows_evaluated += rows;
   return RGSADDLE_OK;
@@ -216,6 +227,8 @@ int main(int argc, char **argv) {
   const double force_tol = argc > 5 ? atof(argv[5]) : 1e-4;
   const int max_iter = argc > 6 ? atoi(argv[6]) : 5000;
   const double max_move = argc > 7 ? atof(argv[7]) : 0.1;
+  const double ci_force = argc > 8 ? atof(argv[8]) : INFINITY;
+  const int trace = argc > 9 ? atoi(argv[9]) : 0;
   const int64_t n_atoms = 2LL * nx * ny * nz;
   const int64_t n_images = interior + 2;
   const int64_t dof = 3 * n_atoms;
@@ -265,9 +278,9 @@ int main(int argc, char **argv) {
   cfg.projection = RGSADDLE_PROJECTION_NEB;
   cfg.method = RGSADDLE_METHOD_FIRE;
   cfg.spring_k = 5.0;
-  /* Climb from the first evaluation, as eOn does by default. */
-  cfg.ci_trigger_factor = 1.0;
-  cfg.ci_trigger_force = INFINITY;
+  cfg.flags = RGSADDLE_BAND_CI_AFTER;
+  cfg.ci_trigger_factor = 0.0;
+  cfg.ci_trigger_force = ci_force;
   cfg.force_tol = force_tol;
   cfg.max_move = max_move;
 
@@ -297,6 +310,16 @@ int main(int argc, char **argv) {
       printf("step %d: %s\n", it, rgsaddle_status_name(status));
       return 5;
     }
+    if (trace > 0 && it % trace == 0) {
+      double tc[9 * 64];
+      if (n_images <= 64 && rgsaddle_band_cells(band, tc) == RGSADDLE_OK) {
+        printf("it %5d max_force %.3e ci %lld c/a", it, rep.max_force, (long long)rep.ci_index);
+        for (int64_t i = 1; i < n_images - 1; ++i) {
+          printf(" %.4f", (tc[9 * i + 8] / nz) / (tc[9 * i] / nx));
+        }
+        printf("\n");
+      }
+    }
   }
   const long long force_calls = rows_evaluated;
 
@@ -317,7 +340,9 @@ int main(int argc, char **argv) {
   for (int64_t i = 0; i < n_images; ++i) {
     const double *h = out_cells + 9 * i;
     const double *x = out_pos + dof * i;
-    lj(n_atoms, x, h, energy + i, grad, stress);
+    if (lj(n_atoms, x, h, energy + i, grad, stress) != 0) {
+      energy[i] = NAN;
+    }
     energy[i] /= (double)n_atoms;
     shear = fmax(shear, fmax(fabs(h[3]), fmax(fabs(h[6]), fabs(h[7]))));
     upper = fmax(upper, fmax(fabs(h[1]), fmax(fabs(h[2]), fabs(h[5]))));
