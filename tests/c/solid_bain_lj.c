@@ -18,8 +18,8 @@
  *
  * Usage: solid_bain_lj [nx ny nz interior force_tol max_iter max_move
  * ci_force trace]. ci_force arms the climbing image once the band force
- * is under it (inf: from the first evaluation); trace > 0 prints every
- * trace-th step. With no arguments it runs the two-atom cell and checks
+ * is under it: 0.5 by default, rgsaddle's CiConfig default; inf climbs
+ * from the first evaluation. trace > 0 prints every trace-th step. With no arguments it runs the two-atom cell and checks
  * the reference; with arguments it prints the same report for a larger
  * supercell. */
 #include "rgsaddle.h"
@@ -227,7 +227,7 @@ int main(int argc, char **argv) {
   const double force_tol = argc > 5 ? atof(argv[5]) : 1e-4;
   const int max_iter = argc > 6 ? atoi(argv[6]) : 5000;
   const double max_move = argc > 7 ? atof(argv[7]) : 0.1;
-  const double ci_force = argc > 8 ? atof(argv[8]) : INFINITY;
+  const double ci_force = argc > 8 ? atof(argv[8]) : 0.5;
   const int trace = argc > 9 ? atoi(argv[9]) : 0;
   const int64_t n_atoms = 2LL * nx * ny * nz;
   const int64_t n_images = interior + 2;
