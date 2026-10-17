@@ -7,7 +7,7 @@ Call ~reset~ when the surface changes. The session retains evaluated endpoints a
 
 The projected force of every image with two or more atoms loses its mean Cartesian part, as in eOn when every atom is free. A host with fixed atoms sets ~BandConfig::remove_translation~ to ~false~, or ~RGSADDLE_BAND_KEEP_TRANSLATION~ in the C band config flags, to keep the mean. An image with one atom keeps its force.
 
-The climbing image is the highest interior image, and it climbs only while its energy exceeds both fixed endpoints. A monotonic band keeps the spring force on every image and reports no climbing image.
+The climbing image is the highest interior image, and it climbs only while its energy exceeds both fixed endpoints. A monotonic band keeps the spring force on every image and reports no climbing image. ~CiConfig~ decides when it arms. The default, ~CiConfig::after(0.5)~, arms once the band's largest force component falls under 0.5 in the host's force units (eOn's ~ci_after~ in eV/A; climbing-image NEB is run on a roughly converged band, Henkelman, Uberuaga and Jonsson, J. Chem. Phys. 113, 9901 (2000), doi:10.1063/1.1329672). ~CiConfig::after_rel(f)~ arms under ~f~ times the first evaluation's force (eOn ~ci_after_rel~), and ~CiConfig::always()~ climbs from the first evaluation. From C, ~RGSADDLE_BAND_CI_AFTER~ (ABI minor 17) turns climbing on with ~ci_trigger_force~ and ~ci_trigger_factor~ as given; without it climbing needs a positive ~ci_trigger_factor~.
 
 ~set_rtr(Some(RtrConfig::default()))~ selects the projected trust-region band method. Its model uses the complete displacement after equal-arc redistribution and the radius cap. The projected method is a heuristic for the nonconservative band force; the report does not certify an energy minimum.
 

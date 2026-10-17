@@ -49,6 +49,18 @@ extern "C" {
  */
 #define RGSADDLE_BAND_KEEP_TRANSLATION (1ull << 1)
 
+/**
+ * Band config flags bit 2, ABI minor 17. Climbing is on and arms once
+ * the band's largest force component is under ci_trigger_force (eOn
+ * ci_after) or under ci_trigger_factor times the first evaluation's
+ * (eOn ci_after_rel); either may be 0. ci_trigger_force = INFINITY
+ * climbs from the first evaluation. Without the bit, climbing is on
+ * only for a positive ci_trigger_factor, as before minor 17. A host
+ * that wants the Rust default (arm under 0.5) sets the bit, factor 0
+ * and force 0.5.
+ */
+#define RGSADDLE_BAND_CI_AFTER (1ull << 2)
+
 /** Request flags bit 0. positions and gradients are one image. */
 #define RGSADDLE_REQ_ONE_IMAGE (1ull << 0)
 
@@ -182,7 +194,7 @@ typedef struct {
   double spring_k;
   /** Weighted springs: n_images - 1 constants, else NULL. */
   const double *spring_ks;
-  /** Climbing image off when trigger_factor <= 0. */
+  /** Climbing image off when trigger_factor <= 0, unless RGSADDLE_BAND_CI_AFTER. */
   double ci_trigger_factor;
   double ci_trigger_force;
   /** Row-major 3x3 cell for minimum-image differences; NULL for none. */

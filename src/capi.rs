@@ -35,6 +35,12 @@ pub const RGSADDLE_BAND_PER_IMAGE: u64 = 1;
 /// Band config bit 1. The projected force keeps its mean Cartesian
 /// part; a host with fixed atoms sets it, as eOn does.
 pub const RGSADDLE_BAND_KEEP_TRANSLATION: u64 = 2;
+/// Band config bit 2 (ABI minor 17). Climbing is on with the arming
+/// rule as given: it arms once the force is under `ci_trigger_force` or
+/// under `ci_trigger_factor` times the first force, either of which may
+/// be 0. Without the bit, climbing is on only when `ci_trigger_factor`
+/// is positive.
+pub const RGSADDLE_BAND_CI_AFTER: u64 = 4;
 
 pub const RGSADDLE_OK: i32 = 0;
 pub const RGSADDLE_NULL_SESSION: i32 = -1;
@@ -425,7 +431,7 @@ unsafe fn band_from_parts(
             2 => ProjectionKind::DoublyNudged,
             _ => ProjectionKind::Neb,
         },
-        climbing: (cfg.ci_trigger_factor > 0.0).then_some(CiConfig {
+        climbing: (cfg.ci_trigger_factor > 0.0 || cfg.flags & RGSADDLE_BAND_CI_AFTER != 0).then_some(CiConfig {
             trigger_factor: cfg.ci_trigger_factor,
             trigger_force: cfg.ci_trigger_force,
         }),

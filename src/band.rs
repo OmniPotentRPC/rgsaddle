@@ -101,12 +101,55 @@ impl Cell {
 }
 
 /// Climbing-image activation, the eOn trigger rule: CI arms when the
-/// convergence force falls under `factor * baseline` or under the
-/// absolute trigger.
+/// convergence force falls under `trigger_factor * baseline` (eOn
+/// `ci_after_rel`, the baseline is the first evaluation's force) or
+/// under `trigger_force` (eOn `ci_after`).
+///
+/// The default, [`CiConfig::after`]`(0.5)`, arms the climbing image
+/// once the band has settled to a largest force component under 0.5
+/// in the host's force units (eOn's recommended `ci_after`, eV/A), as
+/// climbing-image NEB is run once the band is roughly converged
+/// (Henkelman, Uberuaga and Jonsson, J. Chem. Phys. 113, 9901 (2000),
+/// doi:10.1063/1.1329672). [`CiConfig::always`] climbs from the first
+/// evaluation.
 #[derive(Clone, Copy, Debug)]
 pub struct CiConfig {
     pub trigger_factor: f64,
     pub trigger_force: f64,
+}
+
+impl CiConfig {
+    /// Arm once the largest force component is under `force` (eOn
+    /// `ci_after` with `ci_after_rel = 0`).
+    pub fn after(force: f64) -> Self {
+        Self {
+            trigger_factor: 0.0,
+            trigger_force: force,
+        }
+    }
+
+    /// Arm once the force is under `factor` times the first
+    /// evaluation's (eOn `ci_after_rel`).
+    pub fn after_rel(factor: f64) -> Self {
+        Self {
+            trigger_factor: factor,
+            trigger_force: 0.0,
+        }
+    }
+
+    /// Climb from the first evaluation.
+    pub fn always() -> Self {
+        Self {
+            trigger_factor: 1.0,
+            trigger_force: f64::INFINITY,
+        }
+    }
+}
+
+impl Default for CiConfig {
+    fn default() -> Self {
+        Self::after(0.5)
+    }
 }
 
 /// Per-image cells for the generalized solid-state band.
@@ -205,10 +248,7 @@ impl Default for BandConfig {
             tangent: TangentKind::Improved,
             spring: SpringKind::Uniform { k: 5.0 },
             projection: ProjectionKind::Neb,
-            climbing: Some(CiConfig {
-                trigger_factor: 0.5,
-                trigger_force: 0.0,
-            }),
+            climbing: Some(CiConfig::default()),
             cell: None,
             force_tol: 1e-3,
             max_move: 0.2,
