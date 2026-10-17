@@ -1,21 +1,91 @@
 //! Sella `RationalFunctionOptimization` stepper contract.
 //!
-//! Algebra is [`rgmin::rfo_get_s`]: the `order`-th mode of the
-//! Banerjee-augmented matrix
-//! \(\alpha\begin{bmatrix}\alpha H & g\\ g^\top & 0\end{bmatrix}\).
-//! [`rgmin::NewtonKind::Rfo`] is a different Banerjee form: lambda
-//! iteration on \((H-\lambda I)d=-g\). [`rgmin::NewtonKind::Shifted`]
-//! is a shift on unaugmented `H`. Alpha lives in \([0, 1]\);
-//! \(\alpha = 1\) is the unrestricted step. Sella `newton_safe` is
-//! false, so the trust-region companion is bisection
-//! ([`rgmin::rfo_restricted`]), not Newton on \(\|s(\alpha)\|\).
+//! Algebra is the `order`-th mode of the Banerjee-augmented matrix
+//! \(\alpha\begin{bmatrix}\alpha H & g\\ g^\top & 0\end{bmatrix}\),
+//! factored with [`crate::exact_eigh`]. [`rgmin::NewtonKind::Rfo`] is
+//! a different Banerjee form: lambda iteration on \((H-\lambda I)d=-g\).
+//! [`rgmin::NewtonKind::Shifted`] is a shift on unaugmented `H`. Alpha
+//! lives in \([0, 1]\); \(\alpha = 1\) is the unrestricted step. Sella
+//! `newton_safe` is false, so the trust-region companion is bisection,
+//! not Newton on \(\|s(\alpha)\|\).
 //!
 //! Ambient reductions go through [`rgmin::vecops`]. A host that
 //! wants a point on a set calls [`RationalFunctionOptimization::step_on`]:
 //! `egrad2rgrad`, `project`, `retract`.
 
 use ndarray::{Array1, Array2};
-use rgmin::{Manifold, rfo_get_s, rfo_restricted};
+use rgmin::Manifold;
+use rgmin::vecops::nrm2;
+
+use crate::exact_eigh;
+
+const DENOM_FLOOR: f64 = 1e-12;
+const ALPHA_MAXITER: usize = 64;
+
+/// Sella `RationalFunctionOptimization.get_s`.
+///
+/// The augmented matrix is factored with faer. rgmin's Jacobi sweep of
+/// this matrix is what made one P-RFO step on LJ38 take minutes.
+pub fn banerjee_step(h: &Array2<f64>, g: &Array1<f64>, order: usize, alpha: f64) -> Array1<f64> {
+    let n = g.len();
+    if n == 0 || h.nrows() != n || h.ncols() != n {
+        return Array1::zeros(n);
+    }
+    let a = alpha.max(0.0);
+    let mut aug = Array2::<f64>::zeros((n + 1, n + 1));
+    for i in 0..n {
+        for j in 0..n {
+            aug[(i, j)] = h[(i, j)] * a * a;
+        }
+        aug[(i, n)] = g[i] * a;
+        aug[(n, i)] = g[i] * a;
+    }
+    let Ok((evals, evecs)) = exact_eigh(aug.view()) else {
+        return Array1::zeros(n);
+    };
+    if evals.len() != n + 1 || evecs.nrows() != n + 1 || evecs.ncols() != n + 1 {
+        return Array1::zeros(n);
+    }
+    let col = order.min(n);
+    let mut denom = evecs[(n, col)];
+    if denom.abs() < DENOM_FLOOR {
+        denom = if denom == 0.0 {
+            DENOM_FLOOR
+        } else {
+            denom.signum() * DENOM_FLOOR
+        };
+    }
+    let mut s = Array1::zeros(n);
+    for i in 0..n {
+        s[i] = evecs[(i, col)] * a / denom;
+    }
+    s
+}
+
+fn banerjee_restricted(h: &Array2<f64>, g: &Array1<f64>, order: usize, delta: f64) -> Array1<f64> {
+    let s1 = banerjee_step(h, g, order, 1.0);
+    if nrm2(s1.view()) <= delta + 1e-14 {
+        return s1;
+    }
+    let mut lo = 0.0;
+    let mut hi = 1.0;
+    let mut best = s1;
+    for _ in 0..ALPHA_MAXITER {
+        let mid = 0.5 * (lo + hi);
+        let s = banerjee_step(h, g, order, mid);
+        let val = nrm2(s.view());
+        best = s;
+        if (val - delta).abs() <= 1e-10 {
+            return best;
+        }
+        if val > delta {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    best
+}
 
 /// Sella `RationalFunctionOptimization` synonyms.
 pub const SYNONYMS: &[&str] = &["rfo", "rational function optimization"];
@@ -59,12 +129,12 @@ impl RationalFunctionOptimization {
 
     /// Sella `get_s(alpha)`. The increment is ambient Euclidean.
     pub fn get_s(&self, h: &Array2<f64>, g: &Array1<f64>, alpha: f64) -> Array1<f64> {
-        rfo_get_s(h, g, self.order, alpha)
+        banerjee_step(h, g, self.order, alpha)
     }
 
     /// Trust-region companion: \(\|s\|\le\delta\), alpha bisected in \([0,1]\).
     pub fn restricted(&self, h: &Array2<f64>, g: &Array1<f64>, delta: f64) -> Array1<f64> {
-        rfo_restricted(h, g, self.order, delta)
+        banerjee_restricted(h, g, self.order, delta)
     }
 
     /// Riemannian RFO step: Riemannian gradient, tangent projection, retract.

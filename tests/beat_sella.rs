@@ -9,11 +9,29 @@ use ndarray::{Array1, Array2, ArrayView1, array};
 use rgmin::Method;
 use rgsaddle::{
     CartesianPes, Constraints, HessUpdate, MinModeConfig, MinModeKind, MinModeSession,
-    PointSurface, SaddleError, SellaSaddleConfig, SellaSaddleSession, rigid_body_modes,
+    PointSurface, SaddleError, SellaSaddleConfig, SellaSaddleSession, prfo_trust_region,
+    rigid_body_modes,
 };
 
 fn water() -> Array1<f64> {
     array![0.0, 0.0, 0.0, 0.96, 0.0, 0.0, -0.24, 0.93, 0.0]
+}
+
+#[test]
+fn prfo_trust_step_on_a_wide_spectrum_stays_under_a_second() {
+    let n = 96;
+    let evals = Array1::from_iter((0..n).map(|i| if i == 0 { -2.0 } else { 0.2 + i as f64 }));
+    let evecs = Array2::<f64>::eye(n);
+    let gradient = Array1::from_iter((0..n).map(|i| 0.05 * (1.0 + (i % 7) as f64)));
+    let started = std::time::Instant::now();
+    let step = prfo_trust_region(&evals, &evecs, &gradient, 1, 1.0e6);
+    let elapsed = started.elapsed();
+    assert!(step.iter().all(|value| value.is_finite()));
+    assert!(step[0].abs() > 1e-8, "{step:?}");
+    assert!(
+        elapsed.as_millis() < 1000,
+        "a {n}-dimensional P-RFO step took {elapsed:?}"
+    );
 }
 
 fn overlap(mode: ArrayView1<f64>, row: ArrayView1<f64>) -> f64 {

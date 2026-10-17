@@ -2,7 +2,7 @@
 //!
 //! Algebra splits the Hessian eigenbasis into the `order` uphill
 //! modes and the downhill complement, then runs
-//! [`rgmin::rfo_get_s`] in each block. The restricted companion is
+//! [`crate::rfo::banerjee_step`] in each block. The restricted companion is
 //! [`rgmin::prfo_restricted`]. Sella inherits the RFO alpha
 //! contract: \(\alpha\in[0,1]\), slope \(+1\), `newton_safe` false.
 //! Distinct from [`crate::rfo::RationalFunctionOptimization`] (one
@@ -16,7 +16,9 @@
 
 use ndarray::{Array1, Array2};
 use rgmin::vecops::{axpy, dot, nrm2};
-use rgmin::{Manifold, prfo_restricted, rfo_get_s};
+use rgmin::{Manifold, prfo_restricted};
+
+use crate::rfo::banerjee_step;
 
 const TRUST_ITERS: usize = 64;
 
@@ -139,7 +141,7 @@ impl PartitionedRationalFunctionOptimization {
                 hmax[(i, i)] = evals[i];
                 gmax[i] = dot(evecs.column(i), g.view());
             }
-            let smax = rfo_get_s(&hmax, &gmax, order, alpha);
+            let smax = banerjee_step(&hmax, &gmax, order, alpha);
             for i in 0..order {
                 axpy(smax[i], evecs.column(i), &mut s);
             }
@@ -152,7 +154,7 @@ impl PartitionedRationalFunctionOptimization {
                 hmin[(i, i)] = evals[order + i];
                 gmin[i] = dot(evecs.column(order + i), g.view());
             }
-            let smin = rfo_get_s(&hmin, &gmin, 0, alpha);
+            let smin = banerjee_step(&hmin, &gmin, 0, alpha);
             for i in 0..nmin {
                 axpy(smin[i], evecs.column(order + i), &mut s);
             }
