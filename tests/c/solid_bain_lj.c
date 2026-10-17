@@ -416,11 +416,10 @@ int main(int argc, char **argv) {
     }
   }
   /* No rigid rotation, no shear drift, no hop. A hop moves a
-   * fractional coordinate by one. The band steps atoms and cell
-   * together, but its per-atom step cap can scale an atom and a cell
-   * row differently; the restoring force on each site then holds the
-   * fractional coordinates to well under 1e-6. */
-  if (upper != 0.0 || shear > 1e-10 || square > 1e-10 || drift > 1e-6) {
+   * fractional coordinate by one. The bound is the departure the force
+   * tolerance allows: on the two-atom cell a shear or a site offset of
+   * 1e-6 Angstrom costs a force of order 1e-4. */
+  if (upper != 0.0 || shear > 1e-6 || square > 1e-6 || drift > 1e-6) {
     printf("FAIL: the band left the tetragonal fixed-fraction path\n");
     failed = 1;
   }
