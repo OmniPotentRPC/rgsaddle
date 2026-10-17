@@ -17,9 +17,8 @@
  * 1.2e-6 eV/atom, plus the band's own force tolerance.
  *
  * Usage: solid_bain_lj [nx ny nz interior force_tol max_iter max_move].
- * With no
- * arguments it runs the two-atom cell and checks the reference; with
- * arguments it prints the same report for a larger supercell. */
+ * With no arguments it runs the two-atom cell and checks the reference;
+ * with arguments it prints the same report for a larger supercell. */
 #include "rgsaddle.h"
 
 #include <math.h>
