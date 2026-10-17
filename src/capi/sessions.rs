@@ -784,6 +784,10 @@ mod irc_abi_tests {
             force_tol: 1e-6,
             force_gate: crate::ForceGate::MaxForceOnAtom.to_abi(),
             order: 1,
+            // The seed is the curvature this step must follow. The default
+            // eig path replaces that model with a finite-difference
+            // diagonalisation before the step.
+            eig: 0,
             ..RgsaddleSellaSaddleConfig::default()
         };
         let session = unsafe { rgsaddle_sella_saddle_create(&cfg, 2, x.as_ptr(), masses.as_ptr()) };

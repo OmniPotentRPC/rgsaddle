@@ -483,6 +483,161 @@ pub fn rayleigh_ritz_iter(
     }
 }
 
+/// Rayleigh-Ritz for a matrix-free operator.
+///
+/// `apply` is one column of Sella `NumericalHessian`: a finite-difference
+/// Hessian-vector product, not a product with the quasi-Newton model.
+/// `preconditioner` is that model (Sella `P`). The subspace stops at `n`
+/// columns or when every negative Ritz residual is at or below
+/// `gamma |theta|`. Hermes, Sargsyan, Najm, and Zádor, J. Chem. Theory
+/// Comput. 18, 6974 (2022), doi:10.1021/acs.jctc.2c00395.
+pub fn rayleigh_ritz_apply<F>(
+    n: usize,
+    apply: &mut F,
+    v0: ArrayView2<f64>,
+    preconditioner: ArrayView2<f64>,
+    gamma: f64,
+    method: ExpandKind,
+    max_columns: usize,
+) -> Result<RitzDecomposition, SaddleError>
+where
+    F: FnMut(ArrayView1<f64>) -> Result<Array1<f64>, SaddleError>,
+{
+    if n == 0 || v0.nrows() != n || preconditioner.nrows() != n || preconditioner.ncols() != n {
+        return Err(SaddleError::Shape(
+            "matrix-free Rayleigh-Ritz needs a square preconditioner and matching rows".into(),
+        ));
+    }
+    if gamma <= 0.0 {
+        return Err(SaddleError::Shape(
+            "matrix-free Rayleigh-Ritz needs a positive residual scale".into(),
+        ));
+    }
+    let mut v = modified_gram_schmidt(v0, None, 1e-14);
+    if v.ncols() == 0 {
+        return Err(SaddleError::Solver("empty Ritz subspace".into()));
+    }
+    let mut av = Array2::zeros((n, v.ncols()));
+    for column in 0..v.ncols() {
+        let action = apply(v.column(column))?;
+        if action.len() != n || action.iter().any(|value| !value.is_finite()) {
+            return Err(SaddleError::NonFinite("matrix-free Hessian action"));
+        }
+        av.column_mut(column).assign(&action);
+    }
+    loop {
+        let a_tilde = symmetrize_vt_av(v.view(), av.view());
+        let (lams, vecs) = exact_eigh(a_tilde.view())?;
+        av = matmul(av.view(), vecs.view());
+        v = matmul(v.view(), vecs.view());
+        let k = v.ncols();
+        let column_cap = n.min(max_columns.max(1));
+        if k >= column_cap {
+            return Ok((lams, v, av));
+        }
+        let nneg = lams.iter().filter(|&&lam| lam < 0.0).count().max(1).min(k);
+        let eye = Array2::eye(k);
+        let mut rnorm = Array1::zeros(nneg);
+        let mut rcols: Vec<Array1<f64>> = Vec::with_capacity(nneg);
+        for j in 0..nneg {
+            let mut ri = av.column(j).to_owned();
+            axpy(-lams[j], v.column(j), &mut ri);
+            rnorm[j] = nrm2(ri.view());
+            rcols.push(ri);
+        }
+        let mut seeking = 0;
+        let mut found = false;
+        for j in 0..nneg {
+            if k == 1 || rnorm[j] > gamma * lams[j].abs() {
+                seeking = j;
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return Ok((lams, v, av));
+        }
+        let mut t = match expand(
+            v.view(),
+            av.view(),
+            preconditioner,
+            None,
+            lams.view(),
+            eye.view(),
+            lams[seeking],
+            method,
+            seeking,
+        ) {
+            Ok(direction) => direction,
+            Err(_) => return Ok((lams, v, av)),
+        };
+        let tn = nrm2(t.view());
+        if tn < 1e-18 {
+            return Ok((lams, v, av));
+        }
+        t.mapv_inplace(|value| value / tn);
+        let mut tproj = Array1::zeros(n);
+        for j in 0..k {
+            axpy(dot(v.column(j), t.view()), v.column(j), &mut tproj);
+        }
+        let mut tperp = t.clone();
+        axpy(-1.0, tproj.view(), &mut tperp);
+        if nrm2(tperp.view()) < 1e-2 {
+            let rn = nrm2(rcols[seeking].view());
+            if rn >= 1e-18 {
+                t = rcols[seeking].clone();
+                t.mapv_inplace(|value| value / rn);
+            }
+        }
+        let mut tcol = Array2::zeros((n, 1));
+        for i in 0..n {
+            tcol[(i, 0)] = t[i];
+        }
+        let mut tnew = modified_gram_schmidt(tcol.view(), Some(v.view()), 1e-8);
+        if tnew.ncols() == 0 {
+            for ri in &rcols {
+                let mut col = Array2::zeros((n, 1));
+                col.column_mut(0).assign(ri);
+                tnew = modified_gram_schmidt(col.view(), Some(v.view()), 1e-8);
+                if tnew.ncols() == 1 {
+                    break;
+                }
+            }
+            if tnew.ncols() == 0 {
+                return Ok((lams, v, av));
+            }
+        }
+        let mut vnext = Array2::zeros((n, k + tnew.ncols()));
+        for j in 0..k {
+            for i in 0..n {
+                vnext[(i, j)] = v[(i, j)];
+            }
+        }
+        for j in 0..tnew.ncols() {
+            for i in 0..n {
+                vnext[(i, k + j)] = tnew[(i, j)];
+            }
+        }
+        let mut avnext = Array2::zeros((n, k + tnew.ncols()));
+        for j in 0..k {
+            for i in 0..n {
+                avnext[(i, j)] = av[(i, j)];
+            }
+        }
+        for j in 0..tnew.ncols() {
+            let action = apply(tnew.column(j))?;
+            if action.len() != n || action.iter().any(|value| !value.is_finite()) {
+                return Err(SaddleError::NonFinite("matrix-free Hessian action"));
+            }
+            for i in 0..n {
+                avnext[(i, k + j)] = action[i];
+            }
+        }
+        v = vnext;
+        av = avnext;
+    }
+}
+
 pub(crate) fn solve_dense(
     a: ArrayView2<f64>,
     b: ArrayView1<f64>,

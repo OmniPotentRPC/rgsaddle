@@ -96,7 +96,7 @@ pub use constraints::{Constraints, Equality, InternalCounts};
 
 pub use eigensolve::{
     EigenDevice, ExpandKind, eigh_on, exact_eigh, expand, lowest_on, rayleigh_ritz,
-    rayleigh_ritz_iter,
+    rayleigh_ritz_apply, rayleigh_ritz_iter,
 };
 
 pub use force::ForceGate;

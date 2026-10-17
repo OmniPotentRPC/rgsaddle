@@ -34,8 +34,14 @@ pub struct SellaSaddleConfig {
     pub eig: bool,
     /// Sella `nsteps_per_diag`.
     pub nsteps_per_diag: usize,
-    /// Sella `gamma` residual scale. `<= 0` is exact eigh.
+    /// Sella `gamma` residual scale. `<= 0` skips the finite-difference
+    /// diagonalisation and factors the quasi-Newton model exactly.
     pub gamma: f64,
+    /// Sella `eta`, the finite-difference step of a true Hessian-vector
+    /// product. `<= 0` keeps `1e-4`.
+    pub eta: f64,
+    /// Sella `threepoint`. False is the one-sided product.
+    pub threepoint: bool,
     pub eigen_device: crate::EigenDevice,
     /// Sella `rayleigh_ritz(..., method=)`.
     pub expand: crate::ExpandKind,
@@ -72,6 +78,8 @@ impl Default for SellaSaddleConfig {
             eig: true,
             nsteps_per_diag: 3,
             gamma: 0.1,
+            eta: 1e-4,
+            threepoint: false,
             eigen_device: crate::EigenDevice::Host,
             expand: crate::ExpandKind::Jd0,
             restricted: crate::RestrictedKind::TrustRegion,
@@ -87,13 +95,24 @@ pub struct SellaSaddleReport {
     pub delta: f64,
 }
 
+struct CurvatureFrame<'a> {
+    x: &'a ndarray::Array1<f64>,
+    gradient: &'a ndarray::Array1<f64>,
+    u: &'a ndarray::Array2<f64>,
+    h_free: &'a ndarray::Array2<f64>,
+    g_free: &'a ndarray::Array1<f64>,
+    first: bool,
+}
+
 pub struct SellaSaddleSession {
     pes: SellaPes,
     config: SellaSaddleConfig,
     geom: SellaGeom,
     delta: f64,
     rho: f64,
-    steps_since_diag: usize,
+    steps_since_diag: isize,
+    /// The opening finite-difference diagonalisation has run.
+    curvature_initialized: bool,
     ritz_v: Option<ndarray::Array2<f64>>,
     /// The trust radius was scaled to the deflated free dimension once.
     free_matched: bool,
@@ -134,6 +153,7 @@ impl SellaSaddleSession {
             delta,
             rho: 1.0,
             steps_since_diag: 0,
+            curvature_initialized: false,
             ritz_v: None,
             free_matched: false,
         })
@@ -157,6 +177,7 @@ impl SellaSaddleSession {
             delta,
             rho: 1.0,
             steps_since_diag: 0,
+            curvature_initialized: false,
             ritz_v: None,
             free_matched: false,
         })
@@ -181,6 +202,7 @@ impl SellaSaddleSession {
             delta,
             rho: 1.0,
             steps_since_diag: 0,
+            curvature_initialized: false,
             ritz_v: None,
             free_matched: false,
         })
@@ -207,6 +229,7 @@ impl SellaSaddleSession {
             delta,
             rho: 1.0,
             steps_since_diag: 0,
+            curvature_initialized: false,
             ritz_v: None,
             free_matched: false,
         })
@@ -234,6 +257,7 @@ impl SellaSaddleSession {
             delta,
             rho: 1.0,
             steps_since_diag: 0,
+            curvature_initialized: false,
             ritz_v: None,
             free_matched: false,
         })
@@ -331,6 +355,7 @@ impl SellaSaddleSession {
         self.delta = self.config.delta * n_free as f64;
         self.rho = 1.0;
         self.steps_since_diag = 0;
+        self.curvature_initialized = false;
         self.ritz_v = None;
         self.free_matched = false;
     }
@@ -344,22 +369,169 @@ impl SellaSaddleSession {
         }
     }
 
+    fn wants_true_diag(&self) -> bool {
+        self.config.eig && self.config.gamma > 0.0 && matches!(self.pes, SellaPes::Cartesian(_))
+    }
+
+    fn finite_difference_step(&self) -> f64 {
+        if self.config.eta.is_finite() && self.config.eta > 0.0 {
+            self.config.eta
+        } else {
+            1e-4
+        }
+    }
+
+    fn cartesian_free_hessian(
+        &self,
+        u: &ndarray::Array2<f64>,
+    ) -> Result<ndarray::Array2<f64>, SaddleError> {
+        let SellaPes::Cartesian(pes) = &self.pes else {
+            return Err(SaddleError::Shape(
+                "Cartesian Hessian requires a Cartesian session".into(),
+            ));
+        };
+        Ok(crate::geom::u_t_h_u(u, pes.hessian().hessian()))
+    }
+
+    /// Finite-difference Rayleigh-Ritz of the true Hessian, then a
+    /// multi-secant update of the quasi-Newton model.
+    ///
+    /// Sella `PES.diag`: the operator is the projected numerical Hessian,
+    /// the preconditioner is the current approximate Hessian, and the
+    /// collected secants update that model before the next P-RFO step.
+    /// The first seed is the normalized free gradient. A later seed is
+    /// the negative eigenspace of the model, which is where the previous
+    /// update planted the unstable mode.
+    fn refresh_true_curvature<S: PointSurface>(
+        &mut self,
+        surface: &S,
+        frame: &CurvatureFrame<'_>,
+    ) -> Result<(), SaddleError> {
+        use crate::linalg::NumericalHessian;
+        use crate::qn::update_h_ms;
+
+        let x = frame.x;
+        let gradient = frame.gradient;
+        let u = frame.u;
+        let h_free = frame.h_free;
+        let g_free = frame.g_free;
+        let nfree = u.ncols();
+        if nfree == 0 {
+            return Ok(());
+        }
+        let mut numerical = NumericalHessian::new(
+            x.clone(),
+            gradient.clone(),
+            self.finite_difference_step(),
+            self.config.threepoint,
+            Some(u.clone()),
+        )?;
+        let seed = if frame.first {
+            free_ritz_seed(nfree, g_free, None)
+        } else {
+            let (lams, vecs) = crate::eigensolve::exact_eigh(h_free.view())?;
+            let kept = lams
+                .iter()
+                .filter(|value| **value < 0.0)
+                .count()
+                .max(1)
+                .min(nfree);
+            vecs.slice(ndarray::s![.., ..kept]).to_owned()
+        };
+        let (_lams, vecs, _actions) = crate::eigensolve::rayleigh_ritz_apply(
+            nfree,
+            &mut |column| numerical.matvec(surface, column),
+            seed.view(),
+            h_free.view(),
+            self.config.gamma,
+            self.config.expand,
+            nfree.min(40),
+        )?;
+        self.ritz_v = Some(vecs);
+        let samples = numerical.vs().to_owned();
+        let actions = numerical.avs().to_owned();
+        if samples.ncols() == 0 || samples.nrows() != x.len() {
+            return Ok(());
+        }
+        let symmetrized = crate::qn::symmetrize_y(samples.view(), actions.view(), Some(2));
+        let projected = samples.t().dot(&symmetrized);
+        let (_secant_lams, rotation) = crate::eigensolve::exact_eigh(projected.view())?;
+        let rotated_steps = samples.dot(&rotation);
+        let rotated_actions = actions.dot(&rotation);
+        let SellaPes::Cartesian(pes) = &mut self.pes else {
+            return Ok(());
+        };
+        let update = pes.update_kind();
+        // Sella `update_H` builds the first model as lam0 * I, with lam0
+        // the geometric mean of the absolute secant Ritz values. An
+        // identity leaves the unexplored LJ curvature an order of
+        // magnitude too soft.
+        let previous = pes.hessian().hessian().clone();
+        let mut dense = if frame.first {
+            let mut log_sum = 0.0;
+            let mut count = 0.0;
+            for theta in _secant_lams.iter() {
+                log_sum += theta.abs().max(1e-12).ln();
+                count += 1.0;
+            }
+            let scale = if count > 0.0 {
+                (log_sum / count).exp()
+            } else {
+                1.0
+            };
+            let mut scaled = ndarray::Array2::<f64>::eye(x.len());
+            scaled *= scale;
+            scaled
+        } else {
+            previous.clone()
+        };
+        update_h_ms(
+            &mut dense,
+            rotated_steps.view(),
+            rotated_actions.view(),
+            update,
+            Some(2),
+        );
+        pes.install_hessian(dense)?;
+        // A full-space secant on a lost mode can report curvatures of
+        // 10^4. That model takes hundreds of trust steps, so keep the
+        // previous Hessian instead.
+        let free = crate::geom::u_t_h_u(u, pes.hessian().hessian());
+        let absurd = crate::eigensolve::exact_eigh(free.view())
+            .map(|(lams, _)| {
+                lams.iter()
+                    .any(|value| !value.is_finite() || value.abs() > 1.0e4)
+            })
+            .unwrap_or(true);
+        if absurd {
+            pes.install_hessian(previous)?;
+        }
+        Ok(())
+    }
+
+    fn schedule_true_diag(&self, evals: &ndarray::Array1<f64>) -> bool {
+        if !self.wants_true_diag() || !self.curvature_initialized {
+            return false;
+        }
+        if self.steps_since_diag < self.config.nsteps_per_diag.max(1) as isize {
+            return false;
+        }
+        let order = self.config.order.max(1);
+        evals.iter().take(order).any(|value| *value > 0.0)
+    }
+
     fn diag_free(
         &mut self,
         h_free: &ndarray::Array2<f64>,
         g_free: &ndarray::Array1<f64>,
     ) -> Result<(ndarray::Array1<f64>, ndarray::Array2<f64>), SaddleError> {
-        // Hermes, Sargsyan, Najm, and Zádor, J. Chem. Theory Comput. 18,
-        // 6974 (2022), doi:10.1021/acs.jctc.2c00395: the leftmost modes of
-        // the approximate Hessian come from a Davidson or Lanczos
-        // expansion. The first seed is the normalized gradient; later
-        // seeds are the previous leftmost Ritz vectors. The identity is
-        // not a seed: it forces a full projection on the first call.
-        // The displacement itself uses the complete spectrum. A partial
-        // Ritz basis would make P-RFO return a zero step, and the dense
-        // factorisation is faer rather than a Jacobi sweep.
+        // Internal and cell sessions factor the quasi-Newton model.
+        // Cartesian sessions finite-difference the true Hessian in
+        // [`Self::refresh_true_curvature`] instead. The displacement
+        // still uses the complete spectrum: a partial Ritz basis makes
+        // P-RFO return a zero step. The factorisation is faer.
         let n = h_free.nrows();
-        let due = self.steps_since_diag >= self.config.nsteps_per_diag.max(1);
+        let due = self.steps_since_diag >= self.config.nsteps_per_diag.max(1) as isize;
         if self.config.eig && self.config.gamma > 0.0 && due {
             self.steps_since_diag = 0;
             let v0 = free_ritz_seed(n, g_free, self.ritz_v.as_ref());
@@ -425,6 +597,25 @@ impl SellaSaddleSession {
             g_free = crate::geom::u_t_vec(&u, &g_r);
             h_free = crate::geom::u_t_h_u(&u, pes.hessian().hessian());
         }
+        let mut h_free = h_free;
+        if self.wants_true_diag() && !self.curvature_initialized {
+            self.refresh_true_curvature(
+                surface,
+                &CurvatureFrame {
+                    x: &x,
+                    gradient: &gradient,
+                    u: &u,
+                    h_free: &h_free,
+                    g_free: &g_free,
+                    first: true,
+                },
+            )?;
+            self.curvature_initialized = true;
+            // Sella sets the counter to -1 after the opening diagonalisation.
+            // The kick below does not diagonalise, so the counter lands on 0.
+            self.steps_since_diag = -1;
+            h_free = self.cartesian_free_hessian(&u)?;
+        }
         if !self.free_matched {
             let nominal = self.geom.n_free(x.len()).max(1);
             let kept = u.ncols().max(1);
@@ -434,11 +625,7 @@ impl SellaSaddleSession {
             self.free_matched = true;
         }
         let vg = Vector::from_host(g_r.clone());
-        let (evals, evecs) = self.diag_free(&h_free, &g_free)?;
-        let pes = match &mut self.pes {
-            SellaPes::Cartesian(p) => p,
-            SellaPes::Internal(_) | SellaPes::Cell(_) | SellaPes::CellInternal(_) => unreachable!(),
-        };
+        let (evals, evecs) = crate::eigensolve::exact_eigh(h_free.view())?;
         let order = self.config.order.max(1);
         let s_free = if self.config.restricted.wants_unrestricted_ambient() {
             crate::prfo::PartitionedRationalFunctionOptimization::new(order).get_s(
@@ -462,10 +649,19 @@ impl SellaSaddleSession {
         let mut d = x1;
         axpy(-1.0, x.view(), &mut d);
         let e0 = energy;
-        let hs = pes.hessian().hessian().dot(&s);
-        let pred = vdot(&vg, &vs) + 0.5 * dot(s.view(), hs.view());
-        let (energy, g1) = pes.kick_from(surface, d.view(), gradient.view())?;
-        let x_new = pes.position().to_owned();
+        let (energy, g1, x_new, pred) = {
+            let pes = match &mut self.pes {
+                SellaPes::Cartesian(p) => p,
+                SellaPes::Internal(_) | SellaPes::Cell(_) | SellaPes::CellInternal(_) => {
+                    unreachable!()
+                }
+            };
+            let hs = pes.hessian().hessian().dot(&s);
+            let pred = vdot(&vg, &vs) + 0.5 * dot(s.view(), hs.view());
+            let (energy, g1) = pes.kick_from(surface, d.view(), gradient.view())?;
+            let x_new = pes.position().to_owned();
+            (energy, g1, x_new, pred)
+        };
         let g1_r = self.geom.egrad2rgrad(&x_new, &g1);
         let max_force = self.config.force_gate.value(g1_r.view());
         if pred.abs() >= 1e-14 {
@@ -479,10 +675,36 @@ impl SellaSaddleSession {
         } else {
             self.rho = 1.0;
         }
+        let at_saddle = max_force <= self.config.force_tol;
+        if self.wants_true_diag() && !at_saddle {
+            if self.schedule_true_diag(&evals) {
+                let basis = self.geom.ufree(&x_new);
+                let excluded = surface.excluded_modes(x_new.view())?;
+                let u_new = crate::geom::deflate_excluded(&basis, excluded.view());
+                if u_new.ncols() > 0 {
+                    let g_free_new = crate::geom::u_t_vec(&u_new, &g1_r);
+                    let h_free_new = self.cartesian_free_hessian(&u_new)?;
+                    self.refresh_true_curvature(
+                        surface,
+                        &CurvatureFrame {
+                            x: &x_new,
+                            gradient: &g1,
+                            u: &u_new,
+                            h_free: &h_free_new,
+                            g_free: &g_free_new,
+                            first: false,
+                        },
+                    )?;
+                    self.steps_since_diag = 0;
+                }
+            } else {
+                self.steps_since_diag += 1;
+            }
+        }
         Ok(SellaSaddleReport {
             energy,
             max_force,
-            at_saddle: max_force <= self.config.force_tol,
+            at_saddle,
             rho: self.rho,
             delta: self.delta,
         })
@@ -893,7 +1115,10 @@ mod tests {
             evaluations: AtomicUsize::new(0),
         };
         let mut session = SellaSaddleSession::new(
-            SellaSaddleConfig::default(),
+            SellaSaddleConfig {
+                eig: false,
+                ..SellaSaddleConfig::default()
+            },
             x,
             Array1::from(vec![1.0, 1.0]),
         )
@@ -902,6 +1127,23 @@ mod tests {
         session.step(&surface).unwrap();
 
         assert_eq!(surface.evaluations.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn true_hessian_diag_uses_more_than_the_two_endpoints() {
+        let mut x = Array1::zeros(6);
+        x[0] = 0.2;
+        let surface = CountingWell {
+            evaluations: AtomicUsize::new(0),
+        };
+        let mut session = SellaSaddleSession::new(
+            SellaSaddleConfig::default(),
+            x,
+            Array1::from(vec![1.0, 1.0]),
+        )
+        .unwrap();
+        session.step(&surface).unwrap();
+        assert!(surface.evaluations.load(Ordering::Relaxed) > 2);
     }
 
     #[test]

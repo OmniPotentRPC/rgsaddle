@@ -423,7 +423,14 @@ fn ms_ts_bfgs(b: &mut Array2<f64>, s: ArrayView2<f64>, y: ArrayView2<f64>) {
     let x2 = s.t().dot(&absbs).dot(&absbs.t());
     let xs = &x1 + &x2;
     let xss = xs.dot(&s);
+    // Sella falls back to Powell's symmetric Broyden update when the
+    // TS-BFGS normal matrix is singular or has condition above 1e12.
+    if ill_conditioned(&xss) {
+        ms_psb(b, s, y);
+        return;
+    }
     let Some(ut) = solve_right(&xss, &xs) else {
+        ms_psb(b, s, y);
         return;
     };
     let u = ut.t().to_owned();
@@ -432,6 +439,44 @@ fn ms_ts_bfgs(b: &mut Array2<f64>, s: ArrayView2<f64>, y: ArrayView2<f64>) {
     let delta = &ujt + &ujt.t() - u.dot(&jts).dot(&u.t());
     *b = &*b + &delta;
     symmetrize_in_place(b);
+}
+
+/// Sella `_MS_PSB` added into `b`.
+fn ms_psb(b: &mut Array2<f64>, s: ArrayView2<f64>, y: ArrayView2<f64>) {
+    let sts = s.t().dot(&s);
+    if ill_conditioned(&sts) {
+        return;
+    }
+    let Some(solved) = solve_right(&sts, &s.t().to_owned()) else {
+        return;
+    };
+    let u = solved.t().to_owned();
+    let j = &y - &b.dot(&s);
+    let ujt = u.dot(&j.t());
+    let jts = j.t().dot(&s);
+    let delta = &ujt + &ujt.t() - u.dot(&jts).dot(&u.t());
+    *b = &*b + &delta;
+    symmetrize_in_place(b);
+}
+
+fn ill_conditioned(a: &Array2<f64>) -> bool {
+    let Ok((lams, _)) = crate::eigensolve::exact_eigh(a.view()) else {
+        return true;
+    };
+    let mut max_abs = 0.0_f64;
+    let mut min_abs = f64::MAX;
+    for value in lams.iter() {
+        if !value.is_finite() {
+            return true;
+        }
+        let mag = value.abs();
+        max_abs = max_abs.max(mag);
+        min_abs = min_abs.min(mag);
+    }
+    if max_abs == 0.0 {
+        return true;
+    }
+    max_abs > 1e12 * min_abs.max(0.0)
 }
 
 fn symmetrize_in_place(b: &mut Array2<f64>) {

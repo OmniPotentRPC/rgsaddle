@@ -13,6 +13,63 @@ use rgsaddle::{
     rigid_body_modes,
 };
 
+#[test]
+fn cartesian_prfo_finite_difference_diag_finds_a_quadratic_saddle() {
+    struct Quadratic {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+    impl PointSurface for Quadratic {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let curvature = [-1.0, 2.0, 3.0];
+            let mut gradient = Array1::zeros(3);
+            let mut energy = 0.0;
+            for axis in 0..3 {
+                energy += 0.5 * curvature[axis] * x[axis] * x[axis];
+                gradient[axis] = curvature[axis] * x[axis];
+            }
+            Ok((energy, gradient))
+        }
+    }
+    let surface = Quadratic {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    };
+    let mut session = SellaSaddleSession::new(
+        SellaSaddleConfig {
+            delta: 10.0,
+            gamma: 0.1,
+            force_tol: 1e-8,
+            ..SellaSaddleConfig::default()
+        },
+        array![0.5, 0.4, 0.3],
+        Array1::ones(1),
+    )
+    .unwrap();
+    session.set_update(HessUpdate::TsBfgs);
+    let mut report = session.step(&surface).unwrap();
+    for _ in 0..4 {
+        if report.at_saddle {
+            break;
+        }
+        report = session.step(&surface).unwrap();
+    }
+    let calls = surface.calls.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        report.at_saddle,
+        "force {} after {calls} calls",
+        report.max_force
+    );
+    assert!(
+        calls > 2,
+        "the opening step did not finite-difference the Hessian"
+    );
+    assert!(
+        calls < 20,
+        "quadratic saddle took {calls} calls; the secant update did not install the curvature"
+    );
+}
+
 fn water() -> Array1<f64> {
     array![0.0, 0.0, 0.0, 0.96, 0.0, 0.0, -0.24, 0.93, 0.0]
 }

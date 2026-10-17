@@ -9,7 +9,7 @@
 //! [`crate::InternalPes`] wraps. IRC keeps a separate MW model on
 //! [`crate::irc::IrcSession`].
 
-use ndarray::{Array1, ArrayView1};
+use ndarray::{Array1, Array2, ArrayView1};
 use rgmin::BfgsModel;
 use rgmin::Manifold;
 use rgmin::vecops::axpy;
@@ -144,6 +144,30 @@ impl CartesianPes {
 
     pub fn set_update(&mut self, update: HessUpdate) {
         self.update = update;
+    }
+
+    pub fn update_kind(&self) -> HessUpdate {
+        self.update
+    }
+
+    /// Replace the stored Cartesian Hessian with `hessian`.
+    ///
+    /// The model keeps its matrix private. A complete eigenbasis written
+    /// back through [`BfgsModel::seed_mode`] rebuilds `B = Σ λ u uᵀ`.
+    pub fn install_hessian(&mut self, hessian: Array2<f64>) -> Result<(), SaddleError> {
+        let n = self.x.len();
+        if hessian.nrows() != n || hessian.ncols() != n {
+            return Err(SaddleError::Shape(
+                "installed Hessian must match the 3N frame".into(),
+            ));
+        }
+        let (evals, evecs) = crate::eigensolve::exact_eigh(hessian.view())?;
+        self.hess.forget();
+        for column in 0..evals.len() {
+            self.hess
+                .seed_mode(&evecs.column(column).to_owned(), evals[column]);
+        }
+        Ok(())
     }
 
     pub fn position(&self) -> ArrayView1<'_, f64> {
