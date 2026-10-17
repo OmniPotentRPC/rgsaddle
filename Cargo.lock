@@ -861,6 +861,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "multiversion"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4ca4bea16ffc3f443cf7d866912118196bfef4c6a1556ca00f9f9b00bb43f7c"
+dependencies = [
+ "multiversion-macros",
+]
+
+[[package]]
+name = "multiversion-macros"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d416831a7317ef4b08bee00b69cbbb9c8763da7959a7026244d6266869f9c83"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "rustversion",
+ "syn 3.0.7",
+]
+
+[[package]]
 name = "nano-gemm"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1252,14 +1273,16 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "rgmin"
-version = "0.3.0"
-source = "git+https://github.com/OmniPotentRPC/rgmin?rev=6e37aa7f2bd8506fb2951a51ab59594ed168c900#6e37aa7f2bd8506fb2951a51ab59594ed168c900"
+version = "0.4.0"
+source = "git+https://github.com/OmniPotentRPC/rgmin?rev=d76539dbe40695c0032e0d96a56e7932f2cc49ab#d76539dbe40695c0032e0d96a56e7932f2cc49ab"
 dependencies = [
  "cbindgen",
  "dlpk",
  "eindir-core",
  "highs",
  "highs-sys",
+ "libm",
+ "multiversion",
  "ndarray",
  "rand",
  "rayon",
@@ -1301,6 +1324,12 @@ dependencies = [
  "linux-raw-sys",
  "windows-sys",
 ]
+
+[[package]]
+name = "rustversion"
+version = "1.0.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "ryu"

@@ -1154,6 +1154,7 @@ impl BandSession {
             istep: 1.0,
             maxmove: None,
             ftol_rel: None,
+            noise_floor: None,
         };
         let mut solver = Solver::new(method.clone(), control, interior_dof);
         // The flat band vector is consecutive xyz triples, so the cap
