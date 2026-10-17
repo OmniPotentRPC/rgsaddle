@@ -270,6 +270,33 @@ rgsaddle_status_t rgsaddle_band_step_solid(RgsaddleBand *band,
                                            rgsaddle_solid_surface_fn surface,
                                            void *user, rgsaddle_report_t *out);
 
+/** Quick-min variants (rgmin QuickMinOptions). ABI minor 16. */
+typedef enum {
+  /** FIRE time-step control, one projection over the band (default). */
+  RGSADDLE_QUICKMIN_RGMIN = 0,
+  /** eOn's quick-min: fixed time step, the velocity kept at the cap. */
+  RGSADDLE_QUICKMIN_EON = 1,
+  /** RGSADDLE_QUICKMIN_RGMIN with a projection per atom. */
+  RGSADDLE_QUICKMIN_PER_ATOM = 2
+} rgsaddle_quickmin_t;
+
+/**
+ * Select the quick-min variant of a band made with
+ * RGSADDLE_METHOD_QUICKMIN; the velocity and time step restart. Any
+ * other band returns RGSADDLE_INVALID_PARAMETER. ABI minor 16.
+ */
+rgsaddle_status_t rgsaddle_band_set_quickmin_variant(RgsaddleBand *band,
+                                                     int32_t variant);
+
+/**
+ * Initial time step of FIRE and quick-min (rgmin Control::istep, 1 at
+ * create); RGSADDLE_QUICKMIN_EON keeps it fixed. The band's optimizer is
+ * rebuilt, so its history and the HiGHS selection go. A non-positive or
+ * non-finite step returns RGSADDLE_INVALID_PARAMETER. ABI minor 16.
+ */
+rgsaddle_status_t rgsaddle_band_set_time_step(RgsaddleBand *band,
+                                              double time_step);
+
 /** Copy the band's cells out (n_images * 9 doubles). ABI minor 16. */
 rgsaddle_status_t rgsaddle_band_cells(const RgsaddleBand *band, double *out);
 

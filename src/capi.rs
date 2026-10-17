@@ -433,6 +433,8 @@ unsafe fn band_from_parts(
         method: method_of(cfg.method, cfg.memory),
         solid,
         quickmin: cfg.method == 3,
+        quickmin_options: rgmin::QuickMinOptions::rgmin(),
+        time_step: 1.0,
         autoneb: None,
     };
     match BandSession::new(band_config, initial) {
@@ -1321,6 +1323,8 @@ pub unsafe extern "C" fn rgsaddle_index1_free(session: *mut RgsaddleIndex1) {
 
 mod sessions;
 pub use sessions::*;
+mod quickmin;
+pub use quickmin::*;
 mod solid;
 pub use solid::*;
 mod stencil;

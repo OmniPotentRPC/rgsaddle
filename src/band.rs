@@ -185,6 +185,16 @@ pub struct BandConfig {
     /// coordinates, atoms and cell together. FIRE stays the default
     /// when the flag is clear.
     pub quickmin: bool,
+    /// Quick-min variant when `quickmin` is set: `QuickMinOptions::rgmin`
+    /// (default; FIRE time-step control, one projection),
+    /// `QuickMinOptions::eon` (eOn's fixed `dt`), or
+    /// `QuickMinOptions::per_atom` (a projection per atom).
+    pub quickmin_options: rgmin::QuickMinOptions,
+    /// Initial time step of FIRE and quick-min (rgmin `Control::istep`);
+    /// quick-min `QuickMinOptions::eon` keeps it fixed. 1 by default. On
+    /// the EAM Al vacancy hop and the Pt heptamer bands the eOn variant
+    /// converges at 0.1 and 0.25 and not at 0.5 or 1.
+    pub time_step: f64,
     /// `Some` selects AutoNEB on this configuration. `None` is a fixed band.
     pub autoneb: Option<crate::autoneb::AutoNebTuning>,
 }
@@ -208,6 +218,8 @@ impl Default for BandConfig {
             },
             solid: None,
             quickmin: false,
+            quickmin_options: rgmin::QuickMinOptions::rgmin(),
+            time_step: 1.0,
             autoneb: None,
         }
     }
@@ -1099,6 +1111,42 @@ impl<S: BandSurface> BandSurface for CachedBandSurface<'_, S> {
     }
 }
 
+/// The rgmin solver of a band: the per-atom cap, the quick-min options,
+/// and L-BFGS under `Accept::Step` with eOn's NEB resets.
+fn build_solver(config: &BandConfig, method: &Method, interior_dof: usize) -> Solver {
+    let control = Control {
+        maxiter: usize::MAX,
+        gtol: 0.0,
+        istep: config.time_step,
+        maxmove: None,
+        ftol_rel: None,
+        noise_floor: None,
+    };
+    let mut solver = Solver::new(method.clone(), control, interior_dof);
+    // The flat band vector is consecutive xyz triples, so the cap
+    // applies to the largest single-atom displacement (eOn
+    // maxAtomMotionApplied), not to the L2 norm of the whole
+    // band step. A non-positive max_move leaves the step uncapped.
+    solver.set_atom_maxmove(config.max_move);
+    if config.quickmin {
+        solver.set_quickmin_options(config.quickmin_options.clone());
+    }
+    // The projected band force is not the gradient of the summed
+    // image energy the oracle reports, so an energy-decrease test
+    // says nothing about a band step: L-BFGS takes its two-loop
+    // direction with one oracle call (rgmin Accept::Step), as FIRE
+    // steps unconditionally.
+    if matches!(method, Method::Lbfgs { .. }) {
+        solver.set_accept(Accept::Step);
+        // eOn's L-BFGS resets: a two-loop step that reaches the
+        // per-atom cap or faces away from the force drops its
+        // pairs and steps along the force, and an empty memory
+        // scales that step by 0.01.
+        solver.set_lbfgs_neb_guards(true);
+    }
+    solver
+}
+
 /// Stepping band relaxation over an rgmin solver. Endpoints (rows 0
 /// and `n_images - 1`) never move.
 pub struct BandSession {
@@ -1145,36 +1193,15 @@ impl BandSession {
             config.method.clone()
         };
         check_force_driven(&method)?;
+        if !(config.time_step.is_finite() && config.time_step > 0.0) {
+            return Err(SaddleError::Invalid(
+                "band time step must be positive and finite".into(),
+            ));
+        }
         let (positions, solid) = prepare_solid(&config, initial)?;
         let segment = if solid.is_some() { dof + 9 } else { dof };
         let interior_dof = (n_images - 2) * segment;
-        let control = Control {
-            maxiter: usize::MAX,
-            gtol: 0.0,
-            istep: 1.0,
-            maxmove: None,
-            ftol_rel: None,
-            noise_floor: None,
-        };
-        let mut solver = Solver::new(method.clone(), control, interior_dof);
-        // The flat band vector is consecutive xyz triples, so the cap
-        // applies to the largest single-atom displacement (eOn
-        // maxAtomMotionApplied), not to the L2 norm of the whole
-        // band step. A non-positive max_move leaves the step uncapped.
-        solver.set_atom_maxmove(config.max_move);
-        // The projected band force is not the gradient of the summed
-        // image energy the oracle reports, so an energy-decrease test
-        // says nothing about a band step: L-BFGS takes its two-loop
-        // direction with one oracle call (rgmin Accept::Step), as FIRE
-        // steps unconditionally.
-        if matches!(method, Method::Lbfgs { .. }) {
-            solver.set_accept(Accept::Step);
-            // eOn's L-BFGS resets: a two-loop step that reaches the
-            // per-atom cap or faces away from the force drops its
-            // pairs and steps along the force, and an empty memory
-            // scales that step by 0.01.
-            solver.set_lbfgs_neb_guards(true);
-        }
+        let solver = build_solver(&config, &method, interior_dof);
         Ok(Self {
             config,
             positions,
@@ -1226,6 +1253,43 @@ impl BandSession {
     }
 
     /// Jacobian fixed from the mean endpoint volume at session build.
+    /// Replace the initial time step of FIRE and quick-min
+    /// (`BandConfig::time_step`). The solver is rebuilt, so optimizer
+    /// history and the HiGHS selection go; cached surface values stay.
+    pub fn set_time_step(&mut self, time_step: f64) -> Result<(), SaddleError> {
+        if !(time_step.is_finite() && time_step > 0.0) {
+            return Err(SaddleError::Invalid(
+                "band time step must be positive and finite".into(),
+            ));
+        }
+        self.config.time_step = time_step;
+        let method = if self.config.quickmin {
+            Method::QuickMin
+        } else {
+            self.config.method.clone()
+        };
+        let dof = self.positions.ncols();
+        let segment = if self.solid.is_some() { dof + 9 } else { dof };
+        let interior_dof = (self.positions.nrows() - 2) * segment;
+        self.solver = build_solver(&self.config, &method, interior_dof);
+        self.state.restart();
+        Ok(())
+    }
+
+    /// The band steps with quick-min (`BandConfig::quickmin`).
+    pub fn is_quickmin(&self) -> bool {
+        self.config.quickmin
+    }
+
+    /// Replace the quick-min variant of a quick-min band; the velocity
+    /// and `dt` restart. A band on another method ignores the call.
+    pub fn set_quickmin_options(&mut self, options: rgmin::QuickMinOptions) {
+        if self.config.quickmin {
+            self.solver.set_quickmin_options(options.clone());
+            self.config.quickmin_options = options;
+        }
+    }
+
     pub fn solid_jacobian(&self) -> Option<f64> {
         self.solid.as_ref().map(|solid| solid.jacobian)
     }

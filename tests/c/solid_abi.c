@@ -153,7 +153,24 @@ int main(void) {
     printf("the solid step was accepted on a fixed-cell band\n");
     return 11;
   }
+  if (rgsaddle_band_set_quickmin_variant(plain, RGSADDLE_QUICKMIN_PER_ATOM) !=
+      RGSADDLE_INVALID_PARAMETER) {
+    printf("a FIRE band took a quick-min variant\n");
+    return 12;
+  }
   rgsaddle_band_free(plain);
+  cfg.method = RGSADDLE_METHOD_QUICKMIN;
+  RgsaddleBand *quick = rgsaddle_band_create(&cfg, 3, 1, flat);
+  if (quick == NULL ||
+      rgsaddle_band_set_quickmin_variant(quick, RGSADDLE_QUICKMIN_PER_ATOM) != RGSADDLE_OK ||
+      rgsaddle_band_set_quickmin_variant(quick, RGSADDLE_QUICKMIN_EON) != RGSADDLE_OK ||
+      rgsaddle_band_set_quickmin_variant(quick, 7) != RGSADDLE_INVALID_PARAMETER ||
+      rgsaddle_band_set_time_step(quick, 0.25) != RGSADDLE_OK ||
+      rgsaddle_band_set_time_step(quick, -1.0) != RGSADDLE_INVALID_PARAMETER) {
+    printf("quick-min variants were not taken as documented\n");
+    return 13;
+  }
+  rgsaddle_band_free(quick);
   printf("calls %d iterations %lld climbing cell %.6f\n", calls, (long long)rep.iteration, ci[0]);
   printf("RGSADDLE_SOLID_ABI_OK\n");
   return 0;
