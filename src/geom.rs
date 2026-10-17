@@ -5,7 +5,8 @@
 //! [`Constraints`] chart passes that instead; the session then
 //! projects / retracts / transports on `ker(J)`.
 
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView2};
+use rgmin::vecops::{axpy, dot, nrm2};
 use rgmin::{Manifold, ManifoldKind};
 
 use crate::constraints::Constraints;
@@ -74,6 +75,79 @@ impl SellaGeom {
         }
         u
     }
+}
+
+/// Drop excluded Cartesian rows that still overlap the columns of `u`.
+///
+/// A rigid-quotient basis is already orthogonal to translations and
+/// rotations, so those rows leave it alone. A Euclidean chart (an empty
+/// constraint set, which is what a host passes after it has removed
+/// fixed atoms) still contains them, and P-RFO would otherwise follow a
+/// null rigid mode. Overlap at or below `1e-8` is left in place so a
+/// direction the basis has already removed is not counted twice.
+pub fn deflate_excluded(u: &Array2<f64>, excluded: ArrayView2<f64>) -> Array2<f64> {
+    let n = u.nrows();
+    let mut cols: Vec<Array1<f64>> = (0..u.ncols()).map(|j| u.column(j).to_owned()).collect();
+    if n == 0 || excluded.ncols() != n {
+        return pack_columns(n, cols);
+    }
+    for row in excluded.rows() {
+        let mut direction = row.to_owned();
+        let norm = nrm2(direction.view());
+        if norm <= 1e-14 {
+            continue;
+        }
+        direction.mapv_inplace(|v| v / norm);
+        let mut overlap2 = 0.0;
+        for column in &cols {
+            let coef = dot(column.view(), direction.view());
+            overlap2 += coef * coef;
+        }
+        if overlap2.sqrt() <= 1e-8 {
+            continue;
+        }
+        let mut projected = Array1::zeros(n);
+        for column in &cols {
+            axpy(
+                dot(column.view(), direction.view()),
+                column.view(),
+                &mut projected,
+            );
+        }
+        let projected_norm = nrm2(projected.view());
+        if projected_norm <= 1e-14 {
+            continue;
+        }
+        projected.mapv_inplace(|v| v / projected_norm);
+        let mut next: Vec<Array1<f64>> = Vec::new();
+        for mut column in cols {
+            axpy(
+                -dot(column.view(), projected.view()),
+                projected.view(),
+                &mut column,
+            );
+            for kept in &next {
+                axpy(-dot(column.view(), kept.view()), kept.view(), &mut column);
+            }
+            let column_norm = nrm2(column.view());
+            if column_norm > 1e-10 {
+                column.mapv_inplace(|v| v / column_norm);
+                next.push(column);
+            }
+        }
+        cols = next;
+    }
+    pack_columns(n, cols)
+}
+
+fn pack_columns(n: usize, cols: Vec<Array1<f64>>) -> Array2<f64> {
+    let mut out = Array2::zeros((n, cols.len()));
+    for (j, column) in cols.into_iter().enumerate() {
+        for i in 0..n {
+            out[(i, j)] = column[i];
+        }
+    }
+    out
 }
 
 /// `y = U^T v`.

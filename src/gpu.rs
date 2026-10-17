@@ -3,7 +3,7 @@
 //! The device waist is an rgmin [`vecops::Vector`] tagged with a
 //! dlpk CUDA device. This crate does not grow a second GPU stack
 //! (no torch). A CUDA tag without a kernel backend is refused and
-//! the host Jacobi / Gram-Schmidt path runs, matching `_gpu.py`
+//! the host faer / Gram-Schmidt path runs, matching `_gpu.py`
 //! CPU fallback. Opt-out is `RGSADDLE_DISABLE_GPU` /
 //! `SELLA_DISABLE_GPU`. The size floor is `RGSADDLE_GPU_MIN_DIM` /
 //! `SELLA_GPU_MIN_DIM` (default 200). A failed CUDA claim records

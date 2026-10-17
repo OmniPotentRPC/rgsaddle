@@ -93,21 +93,46 @@ impl ApplyHessian for DenseApply<'_> {
     }
 }
 
-/// Sella `exact`: dense symmetric eigen of `a`.
+/// Dense symmetric eigen of `a`. Eigenvalues ascend. Columns of the
+/// second array are the eigenvectors.
+///
+/// This is faer's self-adjoint factorisation, the same one the sparse
+/// Hessian tests use. A Jacobi sweep of an `n ≈ 100` free Hessian is
+/// what made one P-RFO step take minutes.
 pub fn exact_eigh(a: ArrayView2<f64>) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
     if a.nrows() != a.ncols() {
         return Err(SaddleError::Shape("eigh needs a square matrix".into()));
     }
     let n = a.nrows();
-    let mut work = a.to_owned();
-    for i in 0..n {
-        for j in 0..i {
-            let s = 0.5 * (work[(i, j)] + work[(j, i)]);
-            work[(i, j)] = s;
-            work[(j, i)] = s;
+    if n == 0 {
+        return Ok((Array1::zeros(0), Array2::zeros((0, 0))));
+    }
+    for value in a.iter() {
+        if !value.is_finite() {
+            return Err(SaddleError::NonFinite("eigh"));
         }
     }
-    jacobi_eigh(&mut work)
+    let mat = faer::Mat::from_fn(n, n, |i, j| 0.5 * (a[(i, j)] + a[(j, i)]));
+    let evd = mat
+        .self_adjoint_eigen(faer::Side::Lower)
+        .map_err(|_| SaddleError::Solver("self-adjoint eigen failed".into()))?;
+    let values_ref = evd.S();
+    let vectors_ref = evd.U();
+    let mut values = Array1::zeros(n);
+    let mut vectors = Array2::zeros((n, n));
+    for column in 0..n {
+        values[column] = values_ref[column];
+        if !values[column].is_finite() {
+            return Err(SaddleError::NonFinite("eigh"));
+        }
+        for row in 0..n {
+            vectors[(row, column)] = vectors_ref[(row, column)];
+            if !vectors[(row, column)].is_finite() {
+                return Err(SaddleError::NonFinite("eigh"));
+            }
+        }
+    }
+    Ok((values, vectors))
 }
 
 /// Ritz eigenvalues, basis vectors, and the operator applied to those vectors.
@@ -144,8 +169,8 @@ pub fn rayleigh_ritz(
     Ok((lams, v_rot, av_rot))
 }
 
-/// Dense eigen on `device`. Full spectrum is Host Jacobi.
-/// [`EigenDevice::Dlpk`] is the lowest-mode arm through rgmin.
+/// Dense eigen on `device`. The full spectrum is the host faer
+/// factorisation. [`EigenDevice::Dlpk`] is the lowest-mode arm through rgmin.
 pub fn eigh_on(
     device: EigenDevice,
     a: ArrayView2<f64>,
@@ -524,88 +549,6 @@ fn matmul(a: ArrayView2<f64>, b: ArrayView2<f64>) -> Array2<f64> {
     c
 }
 
-/// Cyclic Jacobi for a small dense symmetric matrix.
-fn jacobi_eigh(a: &mut Array2<f64>) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
-    let n = a.nrows();
-    let mut v = Array2::<f64>::zeros((n, n));
-    for i in 0..n {
-        v[(i, i)] = 1.0;
-    }
-    for _ in 0..(8 * n * n).max(16) {
-        let mut p = 0;
-        let mut q = 1;
-        let mut max = 0.0;
-        for i in 0..n {
-            for j in (i + 1)..n {
-                let mag = a[(i, j)].abs();
-                if mag > max {
-                    max = mag;
-                    p = i;
-                    q = j;
-                }
-            }
-        }
-        if max < 1e-14 {
-            break;
-        }
-        let app = a[(p, p)];
-        let aqq = a[(q, q)];
-        let apq = a[(p, q)];
-        let tau = (aqq - app) / (2.0 * apq);
-        let t = if tau >= 0.0 {
-            1.0 / (tau + (1.0 + tau * tau).sqrt())
-        } else {
-            -1.0 / (-tau + (1.0 + tau * tau).sqrt())
-        };
-        let c = 1.0 / (1.0 + t * t).sqrt();
-        let s = t * c;
-        for k in 0..n {
-            if k != p && k != q {
-                let aik = a[(k.min(p), k.max(p))];
-                let aiq = a[(k.min(q), k.max(q))];
-                let npk = c * aik - s * aiq;
-                let nqk = s * aik + c * aiq;
-                a[(k.min(p), k.max(p))] = npk;
-                a[(k.max(p), k.min(p))] = npk;
-                a[(k.min(q), k.max(q))] = nqk;
-                a[(k.max(q), k.min(q))] = nqk;
-            }
-            let vip = v[(k, p)];
-            let viq = v[(k, q)];
-            v[(k, p)] = c * vip - s * viq;
-            v[(k, q)] = s * vip + c * viq;
-        }
-        a[(p, p)] = c * c * app - 2.0 * s * c * apq + s * s * aqq;
-        a[(q, q)] = s * s * app + 2.0 * s * c * apq + c * c * aqq;
-        a[(p, q)] = 0.0;
-        a[(q, p)] = 0.0;
-    }
-    let mut evals = Array1::zeros(n);
-    for i in 0..n {
-        evals[i] = a[(i, i)];
-    }
-    // Sort ascending.
-    let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by(|&i, &j| evals[i].total_cmp(&evals[j]));
-    let mut ev_sorted = Array1::zeros(n);
-    let mut vecs = Array2::zeros((n, n));
-    for (dst, &src) in order.iter().enumerate() {
-        ev_sorted[dst] = evals[src];
-        for r in 0..n {
-            vecs[(r, dst)] = v[(r, src)];
-        }
-    }
-    for j in 0..n {
-        let col = vecs.column(j).to_owned();
-        if nrm2(col.view()) < 1e-18 {
-            return Err(SaddleError::Solver(
-                "Jacobi produced a zero eigenvector".into(),
-            ));
-        }
-    }
-    Ok((ev_sorted, vecs))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -843,5 +786,82 @@ mod tests {
         assert!((nrm2(y.view()) - 1.0).abs() < 1e-12);
         let w = man.transport(&v, &y, &s);
         assert!(dot(y.view(), w.view()).abs() < 1e-12);
+    }
+
+    #[test]
+    fn exact_eigh_matches_a_constructed_spectrum() {
+        let evals = [-2.0, -0.5, 0.25, 1.0, 4.5, 7.0];
+        let mut q = Array2::<f64>::eye(6);
+        let rotate = |q: &mut Array2<f64>, i: usize, j: usize, c: f64, s: f64| {
+            for row in 0..6 {
+                let a = q[(row, i)];
+                let b = q[(row, j)];
+                q[(row, i)] = c * a - s * b;
+                q[(row, j)] = s * a + c * b;
+            }
+        };
+        rotate(&mut q, 0, 1, 0.6, 0.8);
+        rotate(&mut q, 2, 4, 0.8, 0.6);
+        rotate(&mut q, 1, 5, 0.6, 0.8);
+        let mut a = Array2::<f64>::zeros((6, 6));
+        for i in 0..6 {
+            for j in 0..6 {
+                let mut acc = 0.0;
+                for k in 0..6 {
+                    acc += q[(i, k)] * evals[k] * q[(j, k)];
+                }
+                a[(i, j)] = acc;
+            }
+        }
+        let (lams, vecs) = exact_eigh(a.view()).unwrap();
+        for (got, want) in lams.iter().zip(evals) {
+            assert!((got - want).abs() < 1e-8, "{got} vs {want}");
+        }
+        for column in 0..6 {
+            let mut residual = 0.0;
+            for row in 0..6 {
+                let mut acc = 0.0;
+                for k in 0..6 {
+                    acc += a[(row, k)] * vecs[(k, column)];
+                }
+                let diff = acc - lams[column] * vecs[(row, column)];
+                residual += diff * diff;
+            }
+            assert!(
+                residual.sqrt() < 1e-8,
+                "column {column} residual {residual}"
+            );
+        }
+    }
+
+    #[test]
+    fn lanczos_and_davidson_find_the_lowest_mode_from_the_gradient() {
+        let n = 12;
+        let mut a = Array2::<f64>::eye(n);
+        for i in 0..n {
+            a[(i, i)] = 1.0 + i as f64;
+        }
+        a[(3, 3)] = -2.5;
+        // A coordinate axis is already an eigenvector, so the residual
+        // test would accept it and never look for the soft mode. The
+        // gradient of a quadratic at a generic point overlaps every mode.
+        let mut seed = Array2::ones((n, 1));
+        seed[(3, 0)] = 0.2;
+        for method in [ExpandKind::Lanczos, ExpandKind::Jd0] {
+            let (lams, vecs, _) = rayleigh_ritz_iter(a.view(), seed.view(), 0.4, method).unwrap();
+            assert!(
+                lams[0] < 0.0 && (lams[0] + 2.5).abs() < 0.15,
+                "{method:?} gamma 0.4 gave {} in {} columns",
+                lams[0],
+                vecs.ncols()
+            );
+            assert!(vecs.ncols() < n, "{method:?} grew to a full basis");
+            let (tight, _, _) = rayleigh_ritz_iter(a.view(), seed.view(), 1e-8, method).unwrap();
+            assert!(
+                (tight[0] + 2.5).abs() < 1e-6,
+                "{method:?} tight residual gave {}",
+                tight[0]
+            );
+        }
     }
 }

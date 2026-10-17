@@ -225,11 +225,39 @@ impl CartesianPes {
         }
         let y = &g1 - &g0;
         let s = d.slice(ndarray::s![..n]).to_owned();
-        match self.update {
-            HessUpdate::Bfgs => self.hess.update(&s, &y),
-            HessUpdate::TsBfgs => self.hess.update_ts(&s, &y),
-        }
+        apply_model_update(&mut self.hess, self.update, &s, &y);
         Ok((e, g1))
+    }
+}
+
+/// Apply one secant update to a stored BFGS model.
+///
+/// Bofill mixes Powell's update with the symmetric rank-one term
+/// (Bofill, J. Comput. Chem. 15, 1, 1994). The model keeps its Hessian
+/// private, so the updated matrix is written back through its spectrum:
+/// `B = Σ λ u uᵀ` on a complete orthonormal basis.
+pub(crate) fn apply_model_update(
+    hess: &mut rgmin::BfgsModel,
+    update: HessUpdate,
+    s: &Array1<f64>,
+    y: &Array1<f64>,
+) {
+    match update {
+        HessUpdate::Bfgs => hess.update(s, y),
+        HessUpdate::TsBfgs => hess.update_ts(s, y),
+        HessUpdate::Bofill => {
+            let mut h = hess.hessian().clone();
+            if crate::nichols::bofill_update(&mut h, s.view(), y.view()).is_err() {
+                return;
+            }
+            let Ok((evals, evecs)) = crate::eigensolve::exact_eigh(h.view()) else {
+                return;
+            };
+            hess.forget();
+            for column in 0..evals.len() {
+                hess.seed_mode(&evecs.column(column).to_owned(), evals[column]);
+            }
+        }
     }
 }
 

@@ -23,6 +23,24 @@ use crate::mic::Cell;
 use crate::minmode::PointSurface;
 use crate::pes::{CartesianPes, HessUpdate};
 
+fn apply_packed_update(
+    hess: &mut PackedHess,
+    update: HessUpdate,
+    s: &Array1<f64>,
+    y: &Array1<f64>,
+) {
+    match update {
+        HessUpdate::Bfgs => hess.update(s, y),
+        HessUpdate::TsBfgs => hess.update_ts(s, y),
+        HessUpdate::Bofill => {
+            let mut h = hess.hessian().clone();
+            if crate::nichols::bofill_update(&mut h, s.view(), y.view()).is_ok() {
+                *hess = PackedHess::from_matrix(h);
+            }
+        }
+    }
+}
+
 /// Sella `InternalPES`: Cartesian geometry, internals chart, internals Hessian.
 pub struct InternalPes {
     cart: CartesianPes,
@@ -257,10 +275,7 @@ impl InternalPes {
         let g1_int = self.internals_grad(g1.view())?;
         let y = &g1_int - &g0_int;
         let s = dq.to_owned();
-        match self.update {
-            HessUpdate::Bfgs => self.hess.update(&s, &y),
-            HessUpdate::TsBfgs => self.hess.update_ts(&s, &y),
-        }
+        crate::pes::apply_model_update(&mut self.hess, self.update, &s, &y);
         Ok((e, g1))
     }
 
@@ -510,10 +525,7 @@ impl CellCartesianPes {
         let mut y = g1p.clone();
         axpy(-1.0, g0p.view(), &mut y);
         let s = d.to_owned();
-        match self.update {
-            HessUpdate::Bfgs => self.hess.update(&s, &y),
-            HessUpdate::TsBfgs => self.hess.update_ts(&s, &y),
-        }
+        apply_packed_update(&mut self.hess, self.update, &s, &y);
         Ok((e, g1p))
     }
 
@@ -754,10 +766,7 @@ impl CellInternalPes {
         let mut y = g1p.clone();
         axpy(-1.0, g0p.view(), &mut y);
         let s = d.to_owned();
-        match self.update {
-            HessUpdate::Bfgs => self.hess.update(&s, &y),
-            HessUpdate::TsBfgs => self.hess.update_ts(&s, &y),
-        }
+        apply_packed_update(&mut self.hess, self.update, &s, &y);
         Ok((e, g1p))
     }
 

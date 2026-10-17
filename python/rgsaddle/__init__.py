@@ -37,6 +37,7 @@ class HessUpdate(IntEnum):
 
     BFGS = 0
     TS_BFGS = 1
+    BOFILL = 2
 
 
 class IrcKind(IntEnum):

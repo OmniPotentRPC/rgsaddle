@@ -8,7 +8,7 @@ use std::ffi::CString;
 use std::os::raw::{c_char, c_void};
 use std::panic::AssertUnwindSafe;
 
-use ndarray::{Array1, ArrayView1};
+use ndarray::{Array1, Array2, ArrayView1};
 
 use crate::error::SaddleError;
 use crate::minmode::PointSurface;
@@ -155,6 +155,10 @@ impl PointSurface for CbSurface {
             return Err(SaddleError::NonFinite("stencil callback"));
         }
         Ok((energy[0], Array1::from_vec(gradient)))
+    }
+
+    fn excluded_modes(&self, x: ArrayView1<f64>) -> Result<Array2<f64>, SaddleError> {
+        Ok(crate::minmode::rigid_body_modes(x))
     }
 }
 

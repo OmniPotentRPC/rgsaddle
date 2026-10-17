@@ -95,6 +95,8 @@ pub struct SellaSaddleSession {
     rho: f64,
     steps_since_diag: usize,
     ritz_v: Option<ndarray::Array2<f64>>,
+    /// The trust radius was scaled to the deflated free dimension once.
+    free_matched: bool,
 }
 
 impl SellaSaddleSession {
@@ -133,6 +135,7 @@ impl SellaSaddleSession {
             rho: 1.0,
             steps_since_diag: 0,
             ritz_v: None,
+            free_matched: false,
         })
     }
 
@@ -155,6 +158,7 @@ impl SellaSaddleSession {
             rho: 1.0,
             steps_since_diag: 0,
             ritz_v: None,
+            free_matched: false,
         })
     }
 
@@ -178,6 +182,7 @@ impl SellaSaddleSession {
             rho: 1.0,
             steps_since_diag: 0,
             ritz_v: None,
+            free_matched: false,
         })
     }
 
@@ -203,6 +208,7 @@ impl SellaSaddleSession {
             rho: 1.0,
             steps_since_diag: 0,
             ritz_v: None,
+            free_matched: false,
         })
     }
 
@@ -229,6 +235,7 @@ impl SellaSaddleSession {
             rho: 1.0,
             steps_since_diag: 0,
             ritz_v: None,
+            free_matched: false,
         })
     }
 
@@ -325,6 +332,7 @@ impl SellaSaddleSession {
         self.rho = 1.0;
         self.steps_since_diag = 0;
         self.ritz_v = None;
+        self.free_matched = false;
     }
 
     pub fn step<S: PointSurface>(&mut self, surface: &S) -> Result<SellaSaddleReport, SaddleError> {
@@ -339,27 +347,34 @@ impl SellaSaddleSession {
     fn diag_free(
         &mut self,
         h_free: &ndarray::Array2<f64>,
+        g_free: &ndarray::Array1<f64>,
     ) -> Result<(ndarray::Array1<f64>, ndarray::Array2<f64>), SaddleError> {
-        if self.config.eig && self.steps_since_diag >= self.config.nsteps_per_diag.max(1) {
+        // Hermes, Sargsyan, Najm, and Zádor, J. Chem. Theory Comput. 18,
+        // 6974 (2022), doi:10.1021/acs.jctc.2c00395: the leftmost modes of
+        // the approximate Hessian come from a Davidson or Lanczos
+        // expansion. The first seed is the normalized gradient; later
+        // seeds are the previous leftmost Ritz vectors. The identity is
+        // not a seed: it forces a full projection on the first call.
+        // The displacement itself uses the complete spectrum. A partial
+        // Ritz basis would make P-RFO return a zero step, and the dense
+        // factorisation is faer rather than a Jacobi sweep.
+        let n = h_free.nrows();
+        let due = self.steps_since_diag >= self.config.nsteps_per_diag.max(1);
+        if self.config.eig && self.config.gamma > 0.0 && due {
             self.steps_since_diag = 0;
-            let n = h_free.nrows();
-            let v0 = self
-                .ritz_v
-                .clone()
-                .filter(|v| v.nrows() == n)
-                .unwrap_or_else(|| ndarray::Array2::eye(n));
-            let (lams, vecs, _) = crate::rayleigh_ritz_iter(
+            let v0 = free_ritz_seed(n, g_free, self.ritz_v.as_ref());
+            if let Ok((_lams, vecs, _)) = crate::rayleigh_ritz_iter(
                 h_free.view(),
                 v0.view(),
                 self.config.gamma,
                 self.config.expand,
-            )?;
-            self.ritz_v = Some(vecs.clone());
-            Ok((lams, vecs))
+            ) {
+                self.ritz_v = Some(vecs);
+            }
         } else {
             self.steps_since_diag += 1;
-            crate::eigh_on(self.config.eigen_device, h_free.view())
         }
+        crate::eigensolve::exact_eigh(h_free.view())
     }
 
     fn step_cartesian<S: PointSurface>(
@@ -398,12 +413,28 @@ impl SellaSaddleSession {
                     delta: self.delta,
                 });
             }
-            u = self.geom.ufree(&x);
+            let basis = self.geom.ufree(&x);
+            let excluded = surface.excluded_modes(x.view())?;
+            if excluded.ncols() != x.len() || !excluded.iter().all(|v| v.is_finite()) {
+                return Err(SaddleError::Shape("P-RFO excluded directions".into()));
+            }
+            u = crate::geom::deflate_excluded(&basis, excluded.view());
+            if u.ncols() == 0 {
+                return Err(SaddleError::Shape("P-RFO free space is empty".into()));
+            }
             g_free = crate::geom::u_t_vec(&u, &g_r);
             h_free = crate::geom::u_t_h_u(&u, pes.hessian().hessian());
         }
+        if !self.free_matched {
+            let nominal = self.geom.n_free(x.len()).max(1);
+            let kept = u.ncols().max(1);
+            if kept != nominal {
+                self.delta *= kept as f64 / nominal as f64;
+            }
+            self.free_matched = true;
+        }
         let vg = Vector::from_host(g_r.clone());
-        let (evals, evecs) = self.diag_free(&h_free)?;
+        let (evals, evecs) = self.diag_free(&h_free, &g_free)?;
         let pes = match &mut self.pes {
             SellaPes::Cartesian(p) => p,
             SellaPes::Internal(_) | SellaPes::Cell(_) | SellaPes::CellInternal(_) => unreachable!(),
@@ -495,7 +526,7 @@ impl SellaSaddleSession {
         }
         self.config.restricted.refuse_internal()?;
         let vg = Vector::from_host(g_int.clone());
-        let (evals, evecs) = self.diag_free(&h)?;
+        let (evals, evecs) = self.diag_free(&h, &g_int)?;
         let pes = match &mut self.pes {
             SellaPes::Internal(p) => p,
             SellaPes::Cartesian(_) | SellaPes::Cell(_) | SellaPes::CellInternal(_) => {
@@ -575,7 +606,7 @@ impl SellaSaddleSession {
             h = pes.hessian().hessian().to_owned();
         }
         let vg = Vector::from_host(g_p.clone());
-        let (evals, evecs) = self.diag_free(&h)?;
+        let (evals, evecs) = self.diag_free(&h, &g_p)?;
         let pes = match &mut self.pes {
             SellaPes::Cell(p) => p,
             SellaPes::Cartesian(_) | SellaPes::Internal(_) | SellaPes::CellInternal(_) => {
@@ -664,7 +695,7 @@ impl SellaSaddleSession {
         }
         self.config.restricted.refuse_internal()?;
         let vg = Vector::from_host(g_p.clone());
-        let (evals, evecs) = self.diag_free(&h)?;
+        let (evals, evecs) = self.diag_free(&h, &g_p)?;
         let pes = match &mut self.pes {
             SellaPes::CellInternal(p) => p,
             _ => unreachable!(),
@@ -724,6 +755,41 @@ impl SellaSaddleSession {
     }
 }
 
+/// Columns that seed [`crate::rayleigh_ritz_iter`]. The first call uses
+/// the normalized free gradient. A later call uses the stored Ritz
+/// vectors. Neither call uses the identity.
+pub(crate) fn free_ritz_seed(
+    n: usize,
+    gradient: &ndarray::Array1<f64>,
+    previous: Option<&ndarray::Array2<f64>>,
+) -> ndarray::Array2<f64> {
+    if let Some(previous) = previous
+        && previous.nrows() == n
+        && previous.ncols() > 0
+        && previous.ncols() <= n
+        && previous.iter().all(|v| v.is_finite())
+    {
+        return previous.to_owned();
+    }
+    let mut column = ndarray::Array2::zeros((n, 1));
+    let mut seed = if gradient.len() == n {
+        gradient.to_owned()
+    } else {
+        ndarray::Array1::zeros(n)
+    };
+    let norm = rgmin::vecops::nrm2(seed.view());
+    if norm > 1e-14 {
+        seed.mapv_inplace(|value| value / norm);
+    } else if n > 0 {
+        seed.fill(0.0);
+        seed[0] = 1.0;
+    }
+    if n > 0 {
+        column.column_mut(0).assign(&seed);
+    }
+    column
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -731,7 +797,7 @@ mod tests {
     use super::*;
     use crate::constraints::Constraints;
     use crate::minmode::PointSurface;
-    use ndarray::{Array1, ArrayView1};
+    use ndarray::{Array1, Array2, ArrayView1, array};
 
     struct Well;
     impl PointSurface for Well {
@@ -1041,5 +1107,27 @@ mod tests {
                 && (c0[2] - c1[2]).abs() < 1e-8,
             "COM drifted {c0:?} -> {c1:?}"
         );
+    }
+
+    #[test]
+    fn ritz_seed_is_the_gradient_and_not_the_identity() {
+        let gradient = array![0.0, 3.0, 0.0, -4.0];
+        let seed = free_ritz_seed(4, &gradient, None);
+        assert_eq!(seed.ncols(), 1);
+        assert_eq!(seed.nrows(), 4);
+        let norm = (3.0_f64 * 3.0 + 4.0 * 4.0).sqrt();
+        assert!((seed[(1, 0)] - 3.0 / norm).abs() < 1e-12);
+        assert!((seed[(3, 0)] + 4.0 / norm).abs() < 1e-12);
+        assert!(seed[(0, 0)].abs() < 1e-12);
+        let mut previous = Array2::<f64>::zeros((4, 2));
+        previous[(0, 0)] = 1.0;
+        previous[(2, 1)] = 1.0;
+        let again = free_ritz_seed(4, &gradient, Some(&previous));
+        assert_eq!(again.ncols(), 2);
+        assert!((again[(0, 0)] - 1.0).abs() < 1e-15);
+        assert!((again[(2, 1)] - 1.0).abs() < 1e-15);
+        let eye = Array2::<f64>::eye(4);
+        assert_ne!(seed, eye);
+        assert_ne!(again, eye);
     }
 }

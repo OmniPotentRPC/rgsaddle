@@ -42,13 +42,13 @@ readcon-core = { git = "https://github.com/lode-org/readcon-core", rev = "694e80
 rgmin = { git = "https://github.com/OmniPotentRPC/rgmin", rev = "6e37aa7f2bd8506fb2951a51ab59594ed168c900" }
 eindir-core = { version = "0.6.0", features = ["capi"] }
 ndarray = "0.17"
+faer = { version = "0.24.4", default-features = false, features = ["std", "linalg"] }
 rayon = "1.12"
 thiserror = "2"
 linkcell = { version = "0.3.3", git = "https://github.com/d-SEAMS/linkcell", rev = "f6cf5700ca9c90e1877c84b66fb68386de5ceffe", default-features = false }
 
 [dev-dependencies]
 approx = "0.5"
-faer = { version = "0.24.4", default-features = false, features = ["std", "linalg"] }
 sha2 = "0.10"
 
 [profile.dev.package.faer]

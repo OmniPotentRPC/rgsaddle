@@ -12,6 +12,9 @@ fn to_abi_matches_the_python_and_c_table() {
 
     assert_eq!(HessUpdate::Bfgs.to_abi(), 0);
     assert_eq!(HessUpdate::TsBfgs.to_abi(), 1);
+    assert_eq!(HessUpdate::Bofill.to_abi(), 2);
+    assert_eq!(HessUpdate::try_from_abi(2), Some(HessUpdate::Bofill));
+    assert_eq!(HessUpdate::try_from_abi(99), None);
 
     assert_eq!(IrcKind::Gs2.to_abi(), 0);
     assert_eq!(IrcKind::Morokuma.to_abi(), 1);

@@ -4,7 +4,9 @@
 //! `preset fixture threads sha256`. The digest is SHA-256 over the
 //! raw little-endian f64 bytes of the final positions, row-major,
 //! followed by the energies at those positions. Threads are 1, 2, 3
-//! and 8. A pure refactor must reproduce every digest.
+//! and 8. A pure refactor must reproduce every digest. The
+//! Müller-Brown dimer digest is the path after the rotation stops on
+//! a resolved mode instead of extrapolating a right angle.
 
 use std::fs;
 use std::path::PathBuf;
@@ -471,6 +473,34 @@ fn collect_lines() -> Vec<String> {
         }
     }
     lines
+}
+
+#[test]
+fn dimer_keeps_the_resolved_muller_brown_mode() {
+    // One rotation brings the rotational force under 1. The next
+    // Kastner-Sherwood trial is about 1e-3 rad and the Fourier fit asks
+    // for a right angle. Measuring that step rejects it, so the estimate
+    // stays on the negative mode (curvature near -113) instead of the
+    // extrapolated curvature near -4000, and it does not spend the budget.
+    let mut session = MinModeSession::new(
+        mode_config("dimer"),
+        array_from(&[-0.7, 0.5]),
+        array_from(&[1.0, 0.0]),
+    )
+    .unwrap();
+    let estimate = session.estimate_mode(&MullerBrown).unwrap();
+    assert!(
+        estimate.rotations < 8,
+        "rotations {} curvature {}",
+        estimate.rotations,
+        estimate.curvature
+    );
+    assert!(
+        (-200.0..=-50.0).contains(&estimate.curvature),
+        "curvature {} mode {:?}",
+        estimate.curvature,
+        estimate.mode
+    );
 }
 
 #[test]

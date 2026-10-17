@@ -1052,12 +1052,26 @@ fn assemble_band(
 /// step on the force alone.
 pub(crate) fn check_force_driven(method: &Method) -> Result<(), SaddleError> {
     match method {
-        Method::Fire { .. } | Method::Lbfgs { .. } | Method::Bb | Method::QuickMin => Ok(()),
+        Method::Fire { .. }
+        | Method::Lbfgs { .. }
+        | Method::Bb
+        | Method::QuickMin
+        | Method::Nlcg { .. } => Ok(()),
         other => Err(SaddleError::Invalid(format!(
             "{other:?} tests the oracle value, which is not the potential of a \
-             projected or inverted force; use FIRE, L-BFGS, BB, or quick-min"
+             projected or inverted force; use FIRE, L-BFGS, nonlinear CG, BB, or quick-min"
         ))),
     }
+}
+
+/// FIRE, L-BFGS, and nonlinear CG take one clipped step. A line search
+/// would test the oracle value, which is not the potential of the force
+/// the session assembled.
+pub(crate) fn accepts_inverted_force(method: &Method) -> bool {
+    matches!(
+        method,
+        Method::Fire { .. } | Method::Lbfgs { .. } | Method::Nlcg { .. }
+    )
 }
 
 /// What the band holds at its current positions after a step: the
@@ -1163,10 +1177,9 @@ impl BandSession {
         solver.set_atom_maxmove(config.max_move);
         // The projected band force is not the gradient of the summed
         // image energy the oracle reports, so an energy-decrease test
-        // says nothing about a band step: L-BFGS takes its two-loop
-        // direction with one oracle call (rgmin Accept::Step), as FIRE
-        // steps unconditionally.
-        if matches!(method, Method::Lbfgs { .. }) {
+        // says nothing about a band step. FIRE, L-BFGS, and nonlinear CG
+        // take one clipped step (rgmin Accept::Step).
+        if accepts_inverted_force(&method) {
             solver.set_accept(Accept::Step);
             // eOn's L-BFGS resets: a two-loop step that reaches the
             // per-atom cap or faces away from the force drops its

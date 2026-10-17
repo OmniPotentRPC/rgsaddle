@@ -26,7 +26,7 @@ use crate::spring::SpringKind;
 use crate::tangent::TangentKind;
 
 pub const RGSADDLE_ABI_MAJOR: u32 = 1;
-pub const RGSADDLE_ABI_MINOR: u32 = 16;
+pub const RGSADDLE_ABI_MINOR: u32 = 17;
 
 /// Band config bit 0. The C step calls the surface once per image
 /// carried by the evaluation: every image on the first evaluation
@@ -230,6 +230,10 @@ impl PointSurface for CSurface {
         self.call(1, -1, &flat, &mut e, &mut g)?;
         Ok((e[0], Array1::from(g)))
     }
+
+    fn excluded_modes(&self, x: ndarray::ArrayView1<f64>) -> Result<Array2<f64>, SaddleError> {
+        Ok(crate::minmode::rigid_body_modes(x))
+    }
 }
 
 pub struct RgsaddleBand {
@@ -244,12 +248,27 @@ pub struct RgsaddleMinMode {
     n_atoms: i64,
 }
 
-fn method_of(v: i32, memory: i64) -> Method {
+/// Optimizer codes. Unknown values, and codes a session cannot run, are
+/// `None` rather than a silent FIRE session.
+///
+/// 0 FIRE, 1 L-BFGS, 4 Polak–Ribière nonlinear CG. Band trust-region (2)
+/// and quick-min (3) are resolved by the band constructor.
+fn method_of(v: i32, memory: i64) -> Option<Method> {
     match v {
-        1 => Method::Lbfgs {
+        0 => Some(Method::Fire { kind: FireKind::V2 }),
+        1 => Some(Method::Lbfgs {
             memory: if memory > 0 { memory as usize } else { 20 },
-        },
-        _ => Method::Fire { kind: FireKind::V2 },
+        }),
+        4 => Some(Method::polak_ribiere()),
+        _ => None,
+    }
+}
+
+fn band_method(v: i32, memory: i64) -> Option<Method> {
+    match v {
+        2 => Some(Method::Fire { kind: FireKind::V2 }),
+        3 => Some(Method::QuickMin),
+        _ => method_of(v, memory),
     }
 }
 
@@ -430,7 +449,10 @@ unsafe fn band_from_parts(
         force_tol: cfg.force_tol,
         max_move: cfg.max_move,
         remove_translation: cfg.flags & RGSADDLE_BAND_KEEP_TRANSLATION == 0,
-        method: method_of(cfg.method, cfg.memory),
+        method: match band_method(cfg.method, cfg.memory) {
+            Some(method) => method,
+            None => return std::ptr::null_mut(),
+        },
         solid,
         quickmin: cfg.method == 3,
         autoneb: None,
@@ -661,9 +683,9 @@ pub unsafe extern "C" fn rgsaddle_minmode_create(
     let dof = (3 * n_atoms) as usize;
     let x = Array1::from(unsafe { slice::from_raw_parts(position, dof) }.to_vec());
     let m = Array1::from(unsafe { slice::from_raw_parts(mode, dof) }.to_vec());
-    if cfg.method == 3 {
+    let Some(method) = method_of(cfg.method, 0) else {
         return std::ptr::null_mut();
-    }
+    };
     let mm_config = MinModeConfig {
         kind: if cfg.kind == 1 {
             MinModeKind::Lanczos
@@ -686,7 +708,7 @@ pub unsafe extern "C" fn rgsaddle_minmode_create(
         krylov_dim: cfg.krylov_dim as usize,
         force_tol: cfg.force_tol,
         max_move: cfg.max_move,
-        method: method_of(cfg.method, 0),
+        method,
     };
     match MinModeSession::new(mm_config, x, m) {
         Ok(session) => Box::into_raw(Box::new(RgsaddleMinMode { session, n_atoms })),

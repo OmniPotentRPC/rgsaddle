@@ -152,67 +152,10 @@ pub(crate) fn sym_eigh(
             "Hessian must be square and nonempty".into(),
         ));
     }
-    let mut a = Array2::<f64>::zeros((n, n));
-    for i in 0..n {
-        for j in 0..n {
-            let v = 0.5 * (hessian[(i, j)] + hessian[(j, i)]);
-            if !v.is_finite() {
-                return Err(SaddleError::NonFinite("Hessian"));
-            }
-            a[(i, j)] = v;
-        }
+    if hessian.iter().any(|v| !v.is_finite()) {
+        return Err(SaddleError::NonFinite("Hessian"));
     }
-    let mut v = Array2::<f64>::eye(n);
-    if n > 1 {
-        for _ in 0..64 {
-            let mut off = 0.0;
-            for p in 0..n {
-                for q in (p + 1)..n {
-                    off += a[(p, q)] * a[(p, q)];
-                }
-            }
-            let scale = a.diag().iter().fold(1.0_f64, |m, d| m.max(d.abs()));
-            if off.sqrt() <= 1e-15 * scale {
-                break;
-            }
-            for p in 0..n {
-                for q in (p + 1)..n {
-                    let apq = a[(p, q)];
-                    if apq.abs() <= 1e-300 {
-                        continue;
-                    }
-                    let theta = (a[(q, q)] - a[(p, p)]) / (2.0 * apq);
-                    let sign = if theta >= 0.0 { 1.0 } else { -1.0 };
-                    let t = sign / (theta.abs() + (theta * theta + 1.0).sqrt());
-                    let c = 1.0 / (t * t + 1.0).sqrt();
-                    let s = t * c;
-                    for i in 0..n {
-                        let aip = a[(i, p)];
-                        let aiq = a[(i, q)];
-                        a[(i, p)] = c * aip - s * aiq;
-                        a[(i, q)] = s * aip + c * aiq;
-                    }
-                    for i in 0..n {
-                        let api = a[(p, i)];
-                        let aqi = a[(q, i)];
-                        a[(p, i)] = c * api - s * aqi;
-                        a[(q, i)] = s * api + c * aqi;
-                    }
-                    for i in 0..n {
-                        let vip = v[(i, p)];
-                        let viq = v[(i, q)];
-                        v[(i, p)] = c * vip - s * viq;
-                        v[(i, q)] = s * vip + c * viq;
-                    }
-                }
-            }
-        }
-    }
-    let evals = a.diag().to_owned();
-    if evals.iter().any(|e| !e.is_finite()) {
-        return Err(SaddleError::NonFinite("Hessian eigenvalues"));
-    }
-    sort_spectrum(evals, v)
+    crate::eigensolve::exact_eigh(hessian)
 }
 
 fn sort_spectrum(

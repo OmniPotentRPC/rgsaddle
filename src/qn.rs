@@ -173,12 +173,14 @@ pub fn qn_retract<M: Manifold>(
 }
 
 /// How [`update_h`] treats the secant pair. Sella
-/// `hessian_update.update_H` methods `BFGS` and `TS-BFGS`.
+/// `hessian_update.update_H` methods `BFGS` and `TS-BFGS`, plus Bofill's
+/// mix of Powell and symmetric rank-one (J. Comput. Chem. 15, 1, 1994).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum HessUpdate {
     #[default]
     Bfgs,
     TsBfgs,
+    Bofill,
 }
 
 impl HessUpdate {
@@ -187,6 +189,7 @@ impl HessUpdate {
         match self {
             Self::Bfgs => 0,
             Self::TsBfgs => 1,
+            Self::Bofill => 2,
         }
     }
 
@@ -195,6 +198,7 @@ impl HessUpdate {
         match v {
             0 => Some(Self::Bfgs),
             1 => Some(Self::TsBfgs),
+            2 => Some(Self::Bofill),
             _ => None,
         }
     }
@@ -248,6 +252,9 @@ pub fn update_h(b: &mut Array2<f64>, s: &Array1<f64>, y: &Array1<f64>, method: H
     match method {
         HessUpdate::Bfgs => rgmin::bfgs_hessian_update(b, s, y),
         HessUpdate::TsBfgs => rgmin::ts_bfgs_update(b, s, y),
+        HessUpdate::Bofill => {
+            let _ = crate::nichols::bofill_update(b, s.view(), y.view());
+        }
     }
 }
 
@@ -272,6 +279,16 @@ pub fn update_h_ms(
     match method {
         HessUpdate::Bfgs => ms_bfgs(b, s, yt.view()),
         HessUpdate::TsBfgs => ms_ts_bfgs(b, s, yt.view()),
+        HessUpdate::Bofill => {
+            for j in 0..s.ncols() {
+                update_h(
+                    b,
+                    &s.column(j).to_owned(),
+                    &yt.column(j).to_owned(),
+                    HessUpdate::Bofill,
+                );
+            }
+        }
     }
 }
 
@@ -608,7 +625,9 @@ mod tests {
         assert_eq!(HessUpdate::TsBfgs.to_abi(), 1);
         assert_eq!(HessUpdate::try_from_abi(0), Some(HessUpdate::Bfgs));
         assert_eq!(HessUpdate::try_from_abi(1), Some(HessUpdate::TsBfgs));
-        assert!(HessUpdate::try_from_abi(2).is_none());
+        assert_eq!(HessUpdate::Bofill.to_abi(), 2);
+        assert_eq!(HessUpdate::try_from_abi(2), Some(HessUpdate::Bofill));
+        assert!(HessUpdate::try_from_abi(99).is_none());
     }
 
     #[test]
@@ -818,7 +837,9 @@ mod retained_column_tests {
         assert_eq!(HessUpdate::TsBfgs.to_abi(), 1);
         assert_eq!(HessUpdate::try_from_abi(0), Some(HessUpdate::Bfgs));
         assert_eq!(HessUpdate::try_from_abi(1), Some(HessUpdate::TsBfgs));
-        assert_eq!(HessUpdate::try_from_abi(2), None);
+        assert_eq!(HessUpdate::Bofill.to_abi(), 2);
+        assert_eq!(HessUpdate::try_from_abi(2), Some(HessUpdate::Bofill));
+        assert_eq!(HessUpdate::try_from_abi(99), None);
         assert_eq!(HessUpdate::default(), HessUpdate::Bfgs);
     }
 

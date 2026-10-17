@@ -23,7 +23,7 @@ from rgsaddle import (
 # member name -> discriminant, in declaration order.
 TABLE: dict[type[enum.IntEnum], list[tuple[str, int]]] = {
     ForceGate: [("L2_NORM", 0), ("LINF_NORM", 1), ("MAX_FORCE_ON_ATOM", 2)],
-    HessUpdate: [("BFGS", 0), ("TS_BFGS", 1)],
+    HessUpdate: [("BFGS", 0), ("TS_BFGS", 1), ("BOFILL", 2)],
     IrcKind: [("GS2", 0), ("MOROKUMA", 1)],
     MinModeKind: [("DIMER", 0), ("LANCZOS", 1)],
     EigenDevice: [("HOST", 0), ("DLPK", 1)],

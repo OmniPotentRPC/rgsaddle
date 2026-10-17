@@ -61,6 +61,76 @@ pub trait PointSurface: Sync {
     }
 }
 
+/// Translations and rotations of the coordinates the caller passed, one
+/// direction per row.
+///
+/// A free cluster has three translations. Two atoms add the two rotations
+/// perpendicular to the bond; three or more add three rotations about the
+/// centre of mass, and a linear molecule loses the null rotation about its
+/// axis. The dimer (Henkelman and Jónsson, J. Chem. Phys. 111, 7010, 1999;
+/// Olsen, Kroes, Henkelman, Arnaldsson, and Jónsson, J. Chem. Phys. 121,
+/// 9776, 2004) and Lanczos read the lowest mode in the complement, which is
+/// the same projection an OCI-NEB tangent uses (Goswami, Gunde, and Jónsson,
+/// Front. Chem. 2026, doi:10.3389/fchem.2026.1807063). Cartesian P-RFO drops
+/// the same rows when they still overlap the free basis. A single atom is
+/// returned unchanged: its whole space is translation.
+pub fn rigid_body_modes(x: ArrayView1<f64>) -> Array2<f64> {
+    let n_coord = x.len();
+    let n = n_coord / 3;
+    if n < 2 || n_coord != 3 * n || !x.iter().all(|v| v.is_finite()) {
+        return Array2::zeros((0, n_coord));
+    }
+    let mut com = [0.0; 3];
+    for i in 0..n {
+        com[0] += x[3 * i];
+        com[1] += x[3 * i + 1];
+        com[2] += x[3 * i + 2];
+    }
+    let inv = 1.0 / n as f64;
+    com[0] *= inv;
+    com[1] *= inv;
+    com[2] *= inv;
+    let mut candidates = Vec::with_capacity(6);
+    for axis in 0..3 {
+        let mut row = Array1::zeros(n_coord);
+        for atom in 0..n {
+            row[3 * atom + axis] = 1.0;
+        }
+        candidates.push(row);
+    }
+    for axis in 0..3 {
+        let mut row = Array1::zeros(n_coord);
+        for atom in 0..n {
+            let rx = x[3 * atom] - com[0];
+            let ry = x[3 * atom + 1] - com[1];
+            let rz = x[3 * atom + 2] - com[2];
+            let (dx, dy, dz) = match axis {
+                0 => (0.0, -rz, ry),
+                1 => (rz, 0.0, -rx),
+                _ => (-ry, rx, 0.0),
+            };
+            row[3 * atom] = dx;
+            row[3 * atom + 1] = dy;
+            row[3 * atom + 2] = dz;
+        }
+        candidates.push(row);
+    }
+    let mut space = Complement::new(n_coord);
+    let mut kept = Vec::new();
+    for row in candidates {
+        let before = space.dimension();
+        space.exclude(row.view());
+        if space.dimension() < before {
+            kept.push(row);
+        }
+    }
+    let mut out = Array2::zeros((kept.len(), n_coord));
+    for (i, row) in kept.into_iter().enumerate() {
+        out.row_mut(i).assign(&row);
+    }
+    out
+}
+
 /// Finite difference behind every Hessian action.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum FiniteDifference {
@@ -320,8 +390,11 @@ const MIN_TRIAL_ANGLE: f64 = 1e-4;
 
 /// Largest weight `|sin(phi1 - phi)| / sin(phi1)` or
 /// `|sin(phi)| / sin(phi1)` with which `rotate_dimer` extrapolates the
-/// measured actions from a trial angle on its floor. Past it the rotated
-/// dimer is measured (`validation/dimer_extrapolation.py`).
+/// measured actions. Past it the rotated dimer is measured
+/// (`validation/dimer_extrapolation.py`). The ratio is worst on the
+/// trial floor, and a trial only slightly above the floor fails the
+/// same way: Müller-Brown at (-0.7, 0.5) fits a right angle from a
+/// trial of about 10^-3 rad.
 const MAX_EXTRAPOLATION: f64 = 8.0;
 
 fn rotate_dimer<S: PointSurface>(
@@ -339,12 +412,26 @@ fn rotate_dimer<S: PointSurface>(
     // sphere) and the conjugate direction of the previous iteration.
     let mut force_prev: Option<Array1<f64>> = None;
     let mut dir_prev: Option<Array1<f64>> = None;
+    let mut prev_force = f64::INFINITY;
+    let mut stall = 0usize;
     loop {
         let force = -perpendicular(&h, &n);
         let force_norm = force.dot(&force).sqrt();
         if force_norm <= config.rotation_tol || rotations >= config.max_rotations {
             break;
         }
+        // A rotational force that finite differences cannot reduce any
+        // further used to spend the whole rotation budget. Two iterations
+        // without a drop means the estimate has stopped improving.
+        if force_norm < prev_force * (1.0 - 1e-6) {
+            stall = 0;
+        } else {
+            stall += 1;
+            if stall >= 2 {
+                break;
+            }
+        }
+        prev_force = force_norm;
         let mut dir = force.clone();
         if let (Some(fp), Some(dp)) = (&force_prev, &dir_prev) {
             let gamma = ((&force - fp).dot(&force) / fp.dot(fp)).max(0.0);
@@ -362,8 +449,16 @@ fn rotate_dimer<S: PointSurface>(
         // direction). The trial angle is the Kastner-Sherwood guess
         // from a harmonic model, kept inside (1e-4, pi/4].
         let b1 = h.dot(&theta);
-        let phi1 = (0.5 * (b1.abs() / (curvature.abs() + 1e-300)).atan())
-            .clamp(MIN_TRIAL_ANGLE, 0.25 * PI);
+        // The Kastner-Sherwood angle. Below the trial floor the forward
+        // difference cannot resolve another rotation, so the estimate stops
+        // before that trial (a resolved seed has already paid for its first
+        // action). A fit that then asks for a large extrapolation is measured
+        // below, whether or not the trial sat exactly on the floor.
+        let phi1_raw = 0.5 * (b1.abs() / (curvature.abs() + 1e-300)).atan();
+        if phi1_raw < MIN_TRIAL_ANGLE {
+            break;
+        }
+        let phi1 = phi1_raw.clamp(MIN_TRIAL_ANGLE, 0.25 * PI);
         let n1 = normalize(&(&n * phi1.cos()) + &(&theta * phi1.sin()));
         let h1 = surface.action(x, g0, n1.view(), config)?;
         let c1 = crate::stencil::curvature_along(h1.view(), n1.view());
@@ -403,17 +498,18 @@ fn rotate_dimer<S: PointSurface>(
         let w_trial = s / s1;
         let theta_rotated = &(&theta * c) - &(&n * s);
         let n_new = normalize(&(&n * c) + &(&theta * s));
-        if phi1 <= MIN_TRIAL_ANGLE && w_old.abs().max(w_trial.abs()) > MAX_EXTRAPOLATION {
+        if w_old.abs().max(w_trial.abs()) > MAX_EXTRAPOLATION {
             // A forward-difference action is not the exact H v: its
             // Rayleigh quotient carries dr/2 T[v,v,v], so C'(0) differs
             // from 2 h.theta by dr/2 T[n,n,theta] and the fitted a1 by
-            // that over phi1. On the floor of the trial angle that
-            // ratio is largest, and a step far past it, with the gradient
-            // extrapolated there, inherits the error multiplied by
-            // sin(phi1 - phi) / sin(phi1). Measure the
-            // rotated dimer instead; when it contradicts the model the
-            // model is below its resolution here and the better
-            // measured dimer is the estimate.
+            // that over phi1. A step far past the trial inherits that
+            // error multiplied by sin(phi1 - phi) / sin(phi1). The
+            // multiplier is largest on the trial floor, and a trial only
+            // slightly above the floor does the same thing: Müller-Brown
+            // at (-0.7, 0.5) fits a right angle from phi1 ≈ 10^-3
+            // (weight ~ 10^3) and the extrapolated curvature is not a
+            // mode. Measure the rotated dimer; when it contradicts the
+            // model, the better measured dimer is the estimate.
             let h_new = surface.action(x, g0, n_new.view(), config)?;
             let c_new = crate::stencil::curvature_along(h_new.view(), n_new.view());
             rotations += 1;
@@ -598,6 +694,61 @@ pub(crate) fn translated_gradient(
     }
 }
 
+/// One finite displacement when the solver proposes the current point.
+///
+/// The direction is minus the effective gradient. A vanishing effective
+/// gradient with a real Cartesian force is the positive-curvature rule
+/// dropping the perpendicular part, and the step follows the mode so the
+/// geometry changes. A vanishing Cartesian force is a stationary point,
+/// including a minimum, and is left where it is.
+fn finite_rescue(
+    x: ArrayView1<f64>,
+    gradient: &Array1<f64>,
+    effective: &Array1<f64>,
+    mode: ArrayView1<f64>,
+    max_move: f64,
+    dr: f64,
+) -> Option<Array1<f64>> {
+    let mut dir = -effective;
+    if dir.dot(&dir).sqrt() <= 1e-14 {
+        if gradient.dot(gradient).sqrt() <= 1e-14 {
+            return None;
+        }
+        dir = mode.to_owned();
+    }
+    let dir = normalize(dir);
+    if dir.dot(&dir).sqrt() <= 1e-14 {
+        return None;
+    }
+    let cap = if max_move.is_finite() && max_move > 0.0 {
+        max_move
+    } else if dr.is_finite() && dr > 0.0 {
+        dr
+    } else {
+        1e-3
+    };
+    let n_atoms = dir.len() / 3;
+    let mut max_atom = 0.0_f64;
+    if n_atoms > 0 && dir.len() == 3 * n_atoms {
+        for atom in 0..n_atoms {
+            let mut acc = 0.0;
+            for k in 0..3 {
+                acc += dir[3 * atom + k] * dir[3 * atom + k];
+            }
+            max_atom = max_atom.max(acc.sqrt());
+        }
+    } else {
+        max_atom = dir.dot(&dir).sqrt();
+    }
+    let scale = if max_atom > 1e-14 {
+        cap / max_atom
+    } else {
+        cap
+    };
+    let trial = &x + &(&dir * scale);
+    if trial == x { None } else { Some(trial) }
+}
+
 /// Stepping minimum-mode saddle search.
 pub struct MinModeSession {
     config: MinModeConfig,
@@ -649,9 +800,9 @@ impl MinModeSession {
         solver.set_atom_maxmove(config.max_move);
         // The inverted force is not the gradient of the energy the
         // oracle reports, so a line search on that energy refuses good
-        // steps and burns evaluations: L-BFGS takes its two-loop
-        // direction with one oracle call (rgmin Accept::Step).
-        if matches!(config.method, Method::Lbfgs { .. }) {
+        // steps and burns evaluations. FIRE, L-BFGS, and nonlinear CG
+        // take one clipped step (rgmin Accept::Step).
+        if crate::band::accepts_inverted_force(&config.method) {
             solver.set_accept(Accept::Step);
         }
         Ok(Self {
@@ -995,6 +1146,33 @@ impl MinModeSession {
             return Err(err);
         }
         stepped.map_err(|e| SaddleError::Solver(e.to_string()))?;
+        // FIRE's time step collapses when the power stays non-positive,
+        // and the displacement then underflows to the same f64 geometry.
+        // A host that treats a repeated geometry as divergence stops the
+        // search. Restore the FIRE step and take one finite move along
+        // the inverted force. A zero Cartesian force is a stationary
+        // point and is not pushed off it.
+        if x == self.x && !converged(max_force, curvature, self.config.force_tol) {
+            self.solver.set_fire_variant(rgmin::FireVariant::Rgmin);
+            if let Some(trial) = finite_rescue(
+                self.x.view(),
+                &g0,
+                &translated_gradient(&g0, &self.mode, curvature),
+                self.mode.view(),
+                self.config.max_move,
+                self.config.dr,
+            ) {
+                let (energy, gradient) = counted.eval(trial.view())?;
+                if let Ok(mut slot) = last.lock() {
+                    *slot = Some(PointEval {
+                        x: trial.clone(),
+                        energy: Some(energy),
+                        gradient,
+                    });
+                }
+                x = trial;
+            }
+        }
         // The oracle's last evaluation is the accepted point for every
         // stepper that ends on its trial (FIRE, Accept::Step); it is
         // this report's force and the next step's centre.

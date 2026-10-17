@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 16u
+#define RGSADDLE_ABI_MINOR 17u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -100,7 +100,9 @@ typedef enum {
   RGSADDLE_METHOD_LBFGS = 1,
   RGSADDLE_METHOD_RTR = 2, /**< Band trust-region stepper. */
   /** Quick-min band step. Min-mode create returns null for this code. */
-  RGSADDLE_METHOD_QUICKMIN = 3
+  RGSADDLE_METHOD_QUICKMIN = 3,
+  /** Polak-Ribiere nonlinear CG. Accepted by the band and by min-mode. */
+  RGSADDLE_METHOD_NLCG = 4
 } rgsaddle_method_t;
 
 typedef enum {
@@ -651,7 +653,7 @@ rgsaddle_status_t rgsaddle_sella_min_step(RgsaddleSellaMin *session,
                             rgsaddle_report_t *out);
 rgsaddle_status_t rgsaddle_sella_min_position(const RgsaddleSellaMin *session, double *out);
 rgsaddle_status_t rgsaddle_sella_min_reset(RgsaddleSellaMin *session);
-/** `update` is 0 = BFGS, 1 = TS-BFGS. Unknown refuses. */
+/** `update` is 0 = BFGS, 1 = TS-BFGS, 2 = Bofill. Unknown refuses. */
 rgsaddle_status_t rgsaddle_sella_min_set_hess_update(RgsaddleSellaMin *session, int32_t update);
 /** `restricted` is 0 = TrustRegion, 1 = MaxInternalStep, 2 = RestrictedAtomicStep. */
 rgsaddle_status_t rgsaddle_sella_min_set_restricted(RgsaddleSellaMin *session, int32_t restricted);
@@ -664,7 +666,18 @@ void rgsaddle_sella_min_free(RgsaddleSellaMin *session);
 
 typedef struct RgsaddleSellaSaddle RgsaddleSellaSaddle;
 
-/** Sella order-1 (P-RFO + trust). Default geometry is the rigid quotient. */
+/**
+ * Sella order-1 (P-RFO + trust). Default geometry is the rigid quotient.
+ *
+ * ABI minor 17 appends the trust schedule and the iterative Hessian
+ * controls. A config whose minor is below 17 keeps the library defaults
+ * (gamma 0.1, the saddle trust schedule, iterative diagonalisation on).
+ * Hermes, Sargsyan, Najm, and Zador, J. Chem. Theory Comput. 18, 6974
+ * (2022), doi:10.1021/acs.jctc.2c00395, use gamma 0.4. A non-positive
+ * gamma, sigma, rho, or delta_min keeps that library default. eig 0
+ * turns the iterative solve off; any other value leaves it on.
+ * nsteps_per_diag <= 0 keeps the library default of 3.
+ */
 typedef struct {
   rgsaddle_version_t version;
   uint64_t flags;
@@ -672,6 +685,16 @@ typedef struct {
   double force_tol;
   rgsaddle_force_gate_t force_gate;
   int64_t order;
+  /** Residual scale ||r|| < gamma |theta|. Library default 0.1. */
+  double gamma;
+  double sigma_inc;
+  double sigma_dec;
+  double rho_inc;
+  double rho_dec;
+  double delta_min;
+  int64_t nsteps_per_diag;
+  int32_t eig;
+  int32_t reserved;
 } rgsaddle_sella_saddle_config_t;
 
 RgsaddleSellaSaddle *rgsaddle_sella_saddle_create(
