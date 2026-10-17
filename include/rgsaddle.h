@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 16u
+#define RGSADDLE_ABI_MINOR 17u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -75,7 +75,12 @@ typedef enum {
   RGSADDLE_ALLOC = -10,
   RGSADDLE_INVALID_PARAMETER = -11,
   /** rgsaddle_band_evaluation: no evaluation at the current band. */
-  RGSADDLE_NO_EVALUATION = -12
+  RGSADDLE_NO_EVALUATION = -12,
+  /**
+   * A band step left the band unchanged while its largest force
+   * component is above force_tol; the band is unchanged. ABI minor 17.
+   */
+  RGSADDLE_STALLED = -13
 } rgsaddle_status_t;
 
 typedef enum {

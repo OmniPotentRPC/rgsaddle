@@ -14,4 +14,8 @@ pub enum SaddleError {
     Solver(String),
     #[error("invalid parameter: {0}")]
     Invalid(String),
+    /// The solver returned the state unchanged while the force is above
+    /// its tolerance: the step can no longer make progress.
+    #[error("solver step left the state unchanged: {0}")]
+    Stalled(String),
 }

@@ -865,6 +865,11 @@ fn assemble_solid(
             max_component = state.convergence_force(&joint);
         }
     }
+    // A force whose squared norm overflows defeats every solver's
+    // dot products long before a component turns non-finite.
+    if !joint.dot(&joint).is_finite() {
+        return Err(SaddleError::NonFinite("band force norm"));
+    }
     if let Some(last) = state
         .last
         .lock()
@@ -1039,6 +1044,11 @@ fn assemble_band(
         }
     }
 
+    // A force whose squared norm overflows defeats every solver's
+    // dot products long before a component turns non-finite.
+    if !projected.dot(&projected).is_finite() {
+        return Err(SaddleError::NonFinite("band force norm"));
+    }
     if let Some(last) = state
         .last
         .lock()
@@ -1054,6 +1064,27 @@ fn assemble_band(
         .unwrap_or_else(|e| e.into_inner()) = max_component;
     let pseudo_energy: f64 = energies.slice(s![1..n_images - 1]).sum();
     Ok((pseudo_energy, projected, max_component))
+}
+
+/// A solver step must leave finite coordinates, and must move the band
+/// unless the band was already within its tolerance; otherwise a host
+/// loop on [`BandSession::step`] would spin on cached evaluations.
+fn check_moved(
+    state: &BandState,
+    before: &Array1<f64>,
+    after: &Array1<f64>,
+    force_tol: f64,
+) -> Result<(), SaddleError> {
+    if !after.iter().all(|v| v.is_finite()) {
+        return Err(SaddleError::NonFinite("band step"));
+    }
+    let max_force = state.last_max_force();
+    if after == before && max_force > force_tol {
+        return Err(SaddleError::Stalled(format!(
+            "band unchanged with max force {max_force:e} above {force_tol:e}"
+        )));
+    }
+    Ok(())
 }
 
 /// The oracle's value beside a projected (band) or inverted (min-mode)
@@ -1511,6 +1542,7 @@ impl BandSession {
         });
 
         let mut x = self.interior_flat();
+        let before = x.clone();
         let stepped = self.solver.step(&oracle, &mut x);
         drop(oracle);
         // The surface error is the root cause of whatever the solver
@@ -1521,6 +1553,7 @@ impl BandSession {
             return Err(err);
         }
         stepped.map_err(|e| SaddleError::Solver(e.to_string()))?;
+        check_moved(&self.state, &before, &x, self.config.force_tol)?;
         self.scatter_interior(x.view());
         self.iteration += 1;
 
@@ -1637,12 +1670,14 @@ impl BandSession {
             }
         });
         let mut x = self.pack_interior();
+        let before = x.clone();
         let stepped = self.solver.step(&oracle, &mut x);
         drop(oracle);
         if let Some(err) = self.state.take_error() {
             return Err(err);
         }
         stepped.map_err(|e| SaddleError::Solver(e.to_string()))?;
+        check_moved(&self.state, &before, &x, self.config.force_tol)?;
         self.scatter_packed(x.view());
         self.iteration += 1;
         let at_last = self

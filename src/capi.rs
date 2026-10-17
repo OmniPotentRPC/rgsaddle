@@ -26,7 +26,7 @@ use crate::spring::SpringKind;
 use crate::tangent::TangentKind;
 
 pub const RGSADDLE_ABI_MAJOR: u32 = 1;
-pub const RGSADDLE_ABI_MINOR: u32 = 16;
+pub const RGSADDLE_ABI_MINOR: u32 = 17;
 
 /// Band config bit 0. The C step calls the surface once per image
 /// carried by the evaluation: every image on the first evaluation
@@ -49,6 +49,7 @@ pub const RGSADDLE_ABI_MISMATCH: i32 = -9;
 pub const RGSADDLE_ALLOC: i32 = -10;
 pub const RGSADDLE_INVALID_PARAMETER: i32 = -11;
 pub const RGSADDLE_NO_EVALUATION: i32 = -12;
+pub const RGSADDLE_STALLED: i32 = -13;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -268,6 +269,7 @@ fn status_of(err: &SaddleError) -> i32 {
         SaddleError::NonFinite(_) => RGSADDLE_NON_FINITE,
         SaddleError::Solver(_) => RGSADDLE_SOLVER,
         SaddleError::Invalid(_) => RGSADDLE_INVALID_PARAMETER,
+        SaddleError::Stalled(_) => RGSADDLE_STALLED,
     }
 }
 
@@ -306,6 +308,7 @@ pub extern "C" fn rgsaddle_status_name(status: i32) -> *const c_char {
         RGSADDLE_ALLOC => "ALLOC\0",
         RGSADDLE_INVALID_PARAMETER => "INVALID_PARAMETER\0",
         RGSADDLE_NO_EVALUATION => "NO_EVALUATION\0",
+        RGSADDLE_STALLED => "STALLED\0",
         _ => "UNKNOWN\0",
     };
     s.as_ptr() as *const c_char
