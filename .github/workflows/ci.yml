@@ -42,8 +42,6 @@ jobs:
           RGSADDLE_REQUIRE_ASE: "1"
         run: cargo test --test autoneb --verbose
 
-  # readcon-db 0.1.9 is not published. "0.1" would pull readcon-core 0.16.1,
-  # so this job is --features readcon and does not enable readcon-db.
   readcon:
     runs-on: ubuntu-latest
     steps:
@@ -53,3 +51,7 @@ jobs:
         run: cargo test --features readcon --verbose
       - name: Clippy
         run: cargo clippy --features readcon -- -D warnings
+      - name: Test with the corpus
+        run: cargo test --features readcon-db --verbose
+      - name: Clippy with the corpus
+        run: cargo clippy --features readcon-db -- -D warnings

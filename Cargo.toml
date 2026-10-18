@@ -19,22 +19,16 @@ capi = []
 par = ["rgmin/par"]
 highs = ["rgmin/highs"]
 readcon = ["dep:readcon-core"]
-# readcon-db 0.1.9 is the release that pins readcon-core = "=0.17.1".
-# It is not on crates.io. A "0.1" requirement resolves to 0.1.8 and
-# pulls readcon-core = "=0.16.1", and an optional crates.io pin is
-# still resolved, so the dependency is omitted. The feature name stays
-# so store_band can be enabled once that crate is a dependency. CI
-# does not pass --features readcon-db.
-readcon-db = ["readcon"]
+# readcon-db 0.2 pins readcon-core = "=0.17.1", the same release as
+# below, so the corpus and the CON writer share one readcon-core.
+readcon-db = ["readcon", "dep:readcon-db"]
 chemfiles = ["readcon", "readcon-core/chemfiles"]
 
 [dependencies]
 dlpk = { version = "0.1.5", features = ["ndarray"] }
-# readcon-core 0.17.1 is the version in revision 694e808 (git main).
-# crates.io is still 0.17.0 and there is no v0.17.1 tag. This line
-# returns to version = "=0.17.1" once that release exists.
 # ConFrameWriter::new is RoundTrip and canonical stays off.
-readcon-core = { git = "https://github.com/lode-org/readcon-core", rev = "694e808080c49979ee3099afcfa18e5420c40433", optional = true }
+readcon-core = { version = "=0.17.1", optional = true }
+readcon-db = { version = "0.2", optional = true }
 # The pinned revision supplies retained evaluations, manifold steps,
 # and quick-min with its options. A git dependency cannot be published: an rgmin release
 # that carries them must come out, and this line return to a version,
