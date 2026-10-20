@@ -16,7 +16,7 @@ use rgsaddle::capi::{
 };
 use rgsaddle::{
     BandConfig, BandReport, BandSession, BandStatus, BandSurface, CiConfig, ConnectConfig,
-    ForceGate, ProjectionKind, SaddleError, SpringKind, TangentKind, connect,
+    ConnectProfile, ForceGate, ProjectionKind, SaddleError, SpringKind, TangentKind, connect,
 };
 
 fn toy(x: &[f64]) -> Result<(f64, Vec<f64>), SaddleError> {
@@ -104,14 +104,19 @@ fn pair(index: usize) -> (Vec<f64>, Vec<f64>) {
 }
 
 #[test]
-fn lj38_pair_00_matches_the_compass_saddle() {
+fn lj38_pair_00_is_index_1() {
     let (left, right) = pair(0);
     let report = connect(lj, &left, &right, &ConnectConfig::optbench(250_000)).unwrap();
     assert_eq!(report.kind, 's');
     assert_eq!(report.hessian_index, 1);
+    assert_eq!(verification_index(&report.position), 1);
     assert!(report.force_norm <= 1e-3);
-    assert!(report.evaluations <= 250_000);
-    assert!((report.energy - (-170.047586900225)).abs() < 1e-8);
+    assert!(report.evaluations < 1_000, "calls {}", report.evaluations);
+    assert!(
+        (report.energy - (-170.079076703090)).abs() < 1e-9,
+        "energy {}",
+        report.energy
+    );
 }
 
 #[test]
@@ -120,10 +125,11 @@ fn lj38_pair_39_is_not_the_index_3_point() {
     let report = connect(lj, &left, &right, &ConnectConfig::optbench(250_000)).unwrap();
     assert_eq!(report.kind, 's');
     assert_eq!(report.hessian_index, 1, "index {}", report.hessian_index);
+    assert_eq!(verification_index(&report.position), 1);
     assert!(report.force_norm <= 1e-3, "|g| {}", report.force_norm);
-    assert!(report.evaluations < 20_000, "calls {}", report.evaluations);
+    assert!(report.evaluations < 2_000, "calls {}", report.evaluations);
     assert!(
-        (report.energy - (-168.105889260981)).abs() < 1e-6,
+        (report.energy - (-167.855473185910)).abs() < 1e-9,
         "energy {}",
         report.energy
     );
@@ -192,6 +198,21 @@ fn c_abi_connects_the_toy() {
     assert!((position[0].abs() - (4.0 / 3.0_f64).sqrt()).abs() < 1e-4);
 }
 
+fn add_profile(total: &mut ConnectProfile, profile: &ConnectProfile) {
+    total.sqnm_calls += profile.sqnm_calls;
+    total.sqnm_steps += profile.sqnm_steps;
+    total.sqnm_segments += profile.sqnm_segments;
+    total.hessian_calls += profile.hessian_calls;
+    total.hessian_checks += profile.hessian_checks;
+    total.hessian_coordinates = profile.hessian_coordinates;
+    total.quench_calls += profile.quench_calls;
+    total.quenches += profile.quenches;
+    total.searches += profile.searches;
+    total.minmode_calls += profile.minmode_calls;
+    total.band_calls += profile.band_calls;
+    total.other_calls += profile.other_calls;
+}
+
 /// Full optbench sample. Release: `cargo test --release --features capi --test connect_driver -- --ignored --nocapture`.
 #[test]
 #[ignore]
@@ -199,16 +220,33 @@ fn lj38_fifty_one_par2() {
     let cap = 250_000usize;
     let mut scores = Vec::new();
     let mut failures = Vec::new();
+    let mut total = ConnectProfile::default();
     for index in 0..51 {
         let (left, right) = pair(index);
         let report = connect(lj, &left, &right, &ConnectConfig::optbench(cap)).unwrap();
+        let verified = verification_index(&report.position);
         let ok = report.kind == 's'
-            && report.hessian_index == 1
+            && verified == 1
             && report.force_norm <= 1e-3
             && report.evaluations <= cap;
+        let profile = report.profile;
+        add_profile(&mut total, &profile);
         println!(
-            "pair_{index:02} calls {} energy {:.12} |g| {:.6e} kind {} index {}",
-            report.evaluations, report.energy, report.force_norm, report.kind, report.hessian_index
+            "pair_{index:02} calls {} energy {:.12} |g| {:.6e} kind {} index {} verified {verified} sqnm {}/{} hess {}x{} quench {}/{} searches {} minmode {} band {}",
+            report.evaluations,
+            report.energy,
+            report.force_norm,
+            report.kind,
+            report.hessian_index,
+            profile.sqnm_calls,
+            profile.sqnm_steps,
+            profile.hessian_calls,
+            profile.hessian_checks,
+            profile.quench_calls,
+            profile.quenches,
+            profile.searches,
+            profile.minmode_calls,
+            profile.band_calls,
         );
         if ok {
             scores.push(report.evaluations);
@@ -220,6 +258,21 @@ fn lj38_fifty_one_par2() {
     let mean = scores.iter().sum::<usize>() as f64 / scores.len() as f64;
     let mut ordered = scores.clone();
     ordered.sort_unstable();
+    println!(
+        "profile sqnm_calls {} sqnm_steps {} sqnm_segments {} hessian_calls {} hessian_checks {} hessian_coordinates {} quench_calls {} quenches {} searches {} minmode_calls {} band_calls {} other {}",
+        total.sqnm_calls,
+        total.sqnm_steps,
+        total.sqnm_segments,
+        total.hessian_calls,
+        total.hessian_checks,
+        total.hessian_coordinates,
+        total.quench_calls,
+        total.quenches,
+        total.searches,
+        total.minmode_calls,
+        total.band_calls,
+        total.other_calls,
+    );
     println!(
         "n {} failures {} mean {:.2} median {} max {} PAR2 {mean:.6}",
         scores.len(),
@@ -235,7 +288,10 @@ fn lj38_fifty_one_par2() {
             .unwrap_or(0),
     );
     assert!(failures.is_empty(), "{failures:?}");
-    assert!(mean < 17530.0, "PAR-2 {mean}");
+    assert!(
+        mean < 502.7843137254902,
+        "PAR-2 {mean} does not beat EON r2549 Lanczos improved"
+    );
 }
 
 /// Henkelman segment constants, frozen from one energy pass.

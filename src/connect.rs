@@ -7,23 +7,49 @@
     reason = "the two-image step carries the COMPASS loop state"
 )]
 
-//! Double-ended connect by a COMPASS chain.
+//! Double-ended connect.
 //!
-//! The local search is the two-image equal-energy walk of
+//! The first attempt is a min-mode climb from the highest image of an
+//! IDPP band. Goswami, Gunde, and Jónsson, Front. Chem. 14 (2026),
+//! doi:10.3389/fchem.2026.1807063, climb the highest image; Goswami,
+//! arXiv:2603.14737, is the energy-weighted band this search is measured
+//! against. The initial path is the image-dependent pair potential of
+//! Smidstrup, Pedersen, Stokbro, and Jónsson, J. Chem. Phys. 140, 214106
+//! (2014), doi:10.1063/1.4878664. The climb is Lanczos min-mode following
+//! (Malek and Mousseau, Phys. Rev. E 62, 7723 (2000),
+//! doi:10.1103/PhysRevE.62.7723; Olsen, Kroes, Henkelman, Arnaldsson,
+//! and Jónsson, J. Chem. Phys. 121, 9776 (2004), doi:10.1063/1.1809574)
+//! with the improved relative-eigenvalue stop. The seed tangent is the
+//! improved tangent of Henkelman and Jónsson, J. Chem. Phys. 113, 9978
+//! (2000), doi:10.1063/1.1323224. The translation is L-BFGS
+//! (Liu and Nocedal, Math. Program. 45, 503 (1989),
+//! doi:10.1007/BF01589116) on the effective force of Henkelman and
+//! Jónsson, J. Chem. Phys. 111, 7010 (1999), doi:10.1063/1.480097:
+//! climb the mode while its curvature is positive, and reflect the
+//! parallel force once the curvature is negative. The initial inverse
+//! curvature is 0.01 and later steps use `s·y / y·y`. A negative
+//! secant drops the history and takes a long step along the force.
+//! A segment is accepted when that climb meets the force tolerance,
+//! the lowest curvature is negative, and a two-action Lanczos estimate
+//! in the orthogonal complement is not negative. That Ritz value
+//! upper-bounds the next curvature, so the dense Hessian is not built.
+//!
+//! Otherwise the search is the two-image equal-energy walk of
 //! Sommer-Jörgensen and Goedecker, J. Chem. Phys. 160, 064110 (2024),
 //! with the SQNM step of Schaefer, Ghasemi, Roy, and Goedecker,
 //! J. Chem. Phys. 142, 034112 (2015). A split quenches the new nodes
 //! before the next segment, in the sense of OPTIM NEWCONNECT
 //! (Carr, Trygubenko, and Wales, J. Chem. Phys. 122, 234903 (2005),
 //! doi:10.1063/1.1931587)
-//! and pele `DoubleEndedConnect`. The chain's stationary point is
+//! and pele `DoubleEndedConnect`. That chain's stationary point is
 //! kept only when a counted, rigid-projected Hessian has index 1.
-//! Goswami, Gunde, and Jónsson, Front. Chem. 14 (2026),
-//! doi:10.3389/fchem.2026.1807063, and Goswami, arXiv:2603.14737,
-//! are the band references this search is measured against.
 //!
 //! The callback returns energy and the Cartesian gradient. Finite
-//! differences that decide the index are included in `evaluations`.
+//! differences that decide a step or an index are included in
+//! `evaluations`. The IDPP relaxation calls only the surrogate.
+
+use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 
 use faer::Mat;
 use ndarray::{Array1, Array2, ArrayView1};
@@ -31,7 +57,9 @@ use rgmin::Method;
 
 use crate::error::SaddleError;
 use crate::force::ForceGate;
-use crate::minmode::{MinModeConfig, MinModeSession, MinModeStatus, PointSurface};
+use crate::minmode::{
+    MinModeConfig, MinModeKind, MinModeSession, MinModeStatus, PointSurface, translated_gradient,
+};
 use crate::sqnm::ConstrainedOpt;
 
 type SurfaceFn<'a> = dyn FnMut(&[f64]) -> Result<(f64, Vec<f64>), SaddleError> + 'a;
@@ -62,6 +90,25 @@ pub struct ConnectConfig {
     pub n_loops: usize,
     /// Minimize chain nodes created by a split before the next search.
     pub quench_nodes: bool,
+    /// Interior images on the IDPP band that seeds the min-mode climb.
+    pub band_images: usize,
+    /// Relative change of the lowest Lanczos Ritz value that ends an
+    /// estimate. 0.05 is the improved Lanczos tolerance (quit early
+    /// when the curvature along the incoming mode has settled);
+    /// Olsen, Kroes, Henkelman, Arnaldsson, and Jónsson, J. Chem. Phys.
+    /// 121, 9776 (2004). The eOn schema default without that setting
+    /// is 0.001.
+    pub lanczos_rel_tol: f64,
+    /// Lanczos actions in one translation estimate. The relative test
+    /// usually returns sooner. Eight is the subspace kept when it has
+    /// not: a followed mode is recovered in a few iterations (Olsen,
+    /// Kroes, Henkelman, Arnaldsson, and Jónsson, J. Chem. Phys. 121,
+    /// 9776 (2004)).
+    pub lanczos_iterations: usize,
+    /// Per-atom cap on a min-mode translation.
+    pub minmode_max_move: f64,
+    /// L-BFGS memory of the min-mode translation.
+    pub minmode_memory: usize,
 }
 
 impl ConnectConfig {
@@ -87,8 +134,34 @@ impl ConnectConfig {
             minimize_maxrise: 0.001,
             n_loops: cap,
             quench_nodes: true,
+            band_images: 5,
+            lanczos_rel_tol: 0.05,
+            lanczos_iterations: 8,
+            minmode_max_move: 0.1,
+            minmode_memory: 20,
         }
     }
+}
+
+/// Where one connect spent its surface calls.
+///
+/// `hessian_calls` counts the dense finite-difference Hessian.
+/// One check is a central difference, two evaluations per coordinate
+/// (`hessian_coordinates`). Lanczos actions sit in `minmode_calls`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ConnectProfile {
+    pub sqnm_calls: usize,
+    pub sqnm_steps: usize,
+    pub sqnm_segments: usize,
+    pub hessian_calls: usize,
+    pub hessian_checks: usize,
+    pub hessian_coordinates: usize,
+    pub quench_calls: usize,
+    pub quenches: usize,
+    pub searches: usize,
+    pub minmode_calls: usize,
+    pub band_calls: usize,
+    pub other_calls: usize,
 }
 
 /// One connect result. `kind` is `s` for a pinned saddle, `u` for an
@@ -99,28 +172,98 @@ pub struct ConnectReport {
     pub energy: f64,
     pub force_norm: f64,
     pub kind: char,
-    /// Surface evaluations, including the Hessian that accepts the point.
+    /// Surface evaluations. Finite differences that decide a step or an
+    /// index are included. The Lanczos acceptance does not build a dense
+    /// Hessian; the COMPASS fallback does.
     pub evaluations: usize,
-    /// Negative eigenvalues of the rigid-projected Hessian, or `-1`
-    /// when the search stopped before that Hessian.
+    /// Negative eigenvalues of the rigid-projected Hessian, or the
+    /// Lanczos index estimate when that estimate accepted the point,
+    /// or `-1` when the search stopped before either check.
     pub hessian_index: i32,
+    pub profile: ConnectProfile,
 }
 
 type Settings = ConnectConfig;
 
-/// COMPASS chain, then a counted Hessian. An index other than 1 is
-/// replaced by the highest index-1 saddle on a segment between a
-/// quenched endpoint and a minimum reached by stepping off the
-/// unwanted mode.
+#[derive(Clone, Copy)]
+enum Phase {
+    Other,
+    Sqnm,
+    Hessian,
+    Quench,
+    MinMode,
+    Band,
+}
+
+thread_local! {
+    static PHASE: Cell<Phase> = const { Cell::new(Phase::Other) };
+    static PROFILE: RefCell<ConnectProfile> = const { RefCell::new(ConnectProfile {
+        sqnm_calls: 0,
+        sqnm_steps: 0,
+        sqnm_segments: 0,
+        hessian_calls: 0,
+        hessian_checks: 0,
+        hessian_coordinates: 0,
+        quench_calls: 0,
+        quenches: 0,
+        searches: 0,
+        minmode_calls: 0,
+        band_calls: 0,
+        other_calls: 0,
+    }) };
+}
+
+struct PhaseGuard(Phase);
+
+impl PhaseGuard {
+    fn enter(phase: Phase) -> Self {
+        let previous = PHASE.with(|slot| slot.replace(phase));
+        Self(previous)
+    }
+}
+
+impl Drop for PhaseGuard {
+    fn drop(&mut self) {
+        PHASE.with(|slot| slot.set(self.0));
+    }
+}
+
+fn note_call() {
+    PROFILE.with(|slot| {
+        let mut profile = slot.borrow_mut();
+        match PHASE.with(Cell::get) {
+            Phase::Sqnm => profile.sqnm_calls += 1,
+            Phase::Hessian => profile.hessian_calls += 1,
+            Phase::Quench => profile.quench_calls += 1,
+            Phase::MinMode => profile.minmode_calls += 1,
+            Phase::Band => profile.band_calls += 1,
+            Phase::Other => profile.other_calls += 1,
+        }
+    });
+}
+
+fn tally(update: impl FnOnce(&mut ConnectProfile)) {
+    PROFILE.with(|slot| update(&mut slot.borrow_mut()));
+}
+
+/// IDPP band and a Lanczos climb, then the COMPASS chain. The climb
+/// is kept when its force is under the tolerance, its curvature is
+/// negative, and a Lanczos estimate in the complement is not. Otherwise
+/// an index other than 1 on the chain is replaced by the highest
+/// index-1 saddle on a segment between a quenched endpoint and a
+/// minimum reached by stepping off the unwanted mode.
 pub fn connect(
     mut energy_gradient: impl FnMut(&[f64]) -> Result<(f64, Vec<f64>), SaddleError>,
     left: &[f64],
     right: &[f64],
     settings: &ConnectConfig,
 ) -> Result<ConnectReport, SaddleError> {
+    PROFILE.with(|slot| *slot.borrow_mut() = ConnectProfile::default());
+    PHASE.with(|slot| slot.set(Phase::Other));
     let mut evaluations = 0usize;
     let found = connect_force(
         |x| {
+            note_call();
             evaluations += 1;
             let (energy, gradient) = energy_gradient(x)?;
             if gradient.len() != x.len() {
@@ -144,6 +287,7 @@ pub fn connect(
         kind: found.kind,
         evaluations,
         hessian_index: found.hessian_index,
+        profile: PROFILE.with(|slot| *slot.borrow()),
     })
 }
 
@@ -153,6 +297,9 @@ fn connect_force(
     right: &[f64],
     settings: &Settings,
 ) -> Result<Found, SaddleError> {
+    if let Some(climbed) = climb_idpp_band(&mut energy_force, left, right, settings)? {
+        return Ok(climbed);
+    }
     let mut found = search_pair(&mut energy_force, left, right, settings)?;
     let best = {
         let mut ev = Eval {
@@ -225,7 +372,11 @@ fn climb_between(
     right: &[f64],
     settings: &Settings,
 ) -> Result<Option<Found>, SaddleError> {
-    let surface = CallbackSurface { f: energy_force };
+    let surface = CallbackSurface {
+        f: energy_force,
+        extra: Vec::new(),
+        project_rigid: true,
+    };
     let mut seed = Array1::from_iter(left.iter().zip(right).map(|(a, b)| b - a));
     let seed_norm = seed.dot(&seed).sqrt();
     if seed_norm < 1e-12 {
@@ -282,6 +433,11 @@ fn climb_between(
 /// host thread; the unsafe `Sync` impl does not share the callback.
 struct CallbackSurface<'a> {
     f: *mut SurfaceFn<'a>,
+    /// One extra direction removed with the rigid modes, used for the
+    /// second Lanczos curvature.
+    extra: Vec<Vec<f64>>,
+    /// Drop rigid translations and rotations before the mode estimate.
+    project_rigid: bool,
 }
 
 // SAFETY: `MinModeSession::step` evaluates the surface on the calling
@@ -307,7 +463,16 @@ impl PointSurface for CallbackSurface<'_> {
         let Some(slice) = x.as_slice() else {
             return Ok(Array2::zeros((0, x.len())));
         };
-        let basis = rigid_basis(slice);
+        let mut basis = if self.project_rigid {
+            rigid_basis(slice)
+        } else {
+            Vec::new()
+        };
+        for mode in &self.extra {
+            if mode.len() == slice.len() {
+                basis.push(mode.clone());
+            }
+        }
         let mut modes = Array2::zeros((basis.len(), x.len()));
         for (row, mode) in basis.iter().enumerate() {
             for (col, value) in mode.iter().enumerate() {
@@ -348,12 +513,600 @@ impl Eval<'_> {
     }
 }
 
+/// IDPP band, then one Lanczos climb from the highest image.
+///
+/// Smidstrup, Pedersen, Stokbro, and Jónsson, J. Chem. Phys. 140,
+/// 214106 (2014): the surrogate keeps interpolated pair distances, so
+/// the guess does not stack atoms. Its relaxation is not a surface
+/// call. The highest image is the climb of Henkelman, Uberuaga, and
+/// Jónsson, J. Chem. Phys. 113, 9901 (2000), doi:10.1063/1.1329672,
+/// and of Goswami, Gunde, and Jónsson, Front. Chem. 14 (2026). The
+/// seed is the improved tangent. A miss tries the linear midpoint,
+/// which is the displacement used by the Lanczos saddle search, and
+/// then the COMPASS chain.
+fn climb_idpp_band(
+    energy_force: &mut SurfaceFn<'_>,
+    left: &[f64],
+    right: &[f64],
+    settings: &Settings,
+) -> Result<Option<Found>, SaddleError> {
+    if left.len() != right.len() || left.is_empty() || !left.len().is_multiple_of(3) {
+        return Ok(None);
+    }
+    let interiors = settings.band_images.clamp(1, 32);
+    let mut path = Vec::with_capacity(interiors + 2);
+    path.push(left.to_vec());
+    for image in 1..=interiors {
+        let fraction = image as f64 / (interiors as f64 + 1.0);
+        let linear = linear_mix(left, right, fraction);
+        let target = mix_distances(&upper_distances(left), &upper_distances(right), fraction);
+        path.push(relax_idpp(&linear, &target));
+    }
+    path.push(right.to_vec());
+
+    // The endpoints are already known. Only the interior images are
+    // candidates, so their energies are the ones that pick the climb.
+    // A neighbor energy is read only when that neighbor is an endpoint
+    // of the highest image; the improved tangent does not need the
+    // other one.
+    let mut energy = vec![0.0; path.len()];
+    let mut force = vec![Vec::new(); path.len()];
+    for index in 1..path.len() - 1 {
+        let _phase = PhaseGuard::enter(Phase::Band);
+        let (value, gradient) = energy_force(&path[index])?;
+        energy[index] = value;
+        force[index] = gradient;
+    }
+    let mut highest = 1usize;
+    for index in 2..path.len() - 1 {
+        if energy[index] > energy[highest] {
+            highest = index;
+        }
+    }
+    if highest == 1 {
+        let _phase = PhaseGuard::enter(Phase::Band);
+        let (value, gradient) = energy_force(&path[0])?;
+        energy[0] = value;
+        force[0] = gradient;
+    }
+    if highest + 2 == path.len() {
+        let last = path.len() - 1;
+        let _phase = PhaseGuard::enter(Phase::Band);
+        let (value, gradient) = energy_force(&path[last])?;
+        energy[last] = value;
+        force[last] = gradient;
+    }
+    let tangent = improved_tangent(&path, &energy, highest);
+    if let Some(found) = climb_lanczos(
+        energy_force,
+        &path[highest],
+        energy[highest],
+        &force[highest],
+        &tangent,
+        settings,
+    )? {
+        return Ok(Some(found));
+    }
+    let linear = linear_mix(left, right, 0.5);
+    if distance(&linear, &path[highest]) > 1e-6 {
+        let (value, gradient) = {
+            let _phase = PhaseGuard::enter(Phase::Band);
+            energy_force(&linear)?
+        };
+        if let Some(found) = climb_lanczos(
+            energy_force,
+            &linear,
+            value,
+            &gradient,
+            &endpoint_tangent(left, right),
+            settings,
+        )? {
+            return Ok(Some(found));
+        }
+    }
+    Ok(None)
+}
+
+/// Lanczos min-mode from one image. The translation is
+/// [`TranslationMemory`]. Accepted when the Cartesian force is under
+/// the tolerance, the tracked curvature is negative, and a Lanczos
+/// estimate with that mode removed is not clearly negative.
+fn climb_lanczos(
+    energy_force: &mut SurfaceFn<'_>,
+    start: &[f64],
+    mut energy: f64,
+    force: &[f64],
+    tangent: &[f64],
+    settings: &Settings,
+) -> Result<Option<Found>, SaddleError> {
+    let _phase = PhaseGuard::enter(Phase::MinMode);
+    let mut surface = CallbackSurface {
+        f: energy_force,
+        extra: Vec::new(),
+        // The seed is the path tangent. Rigid modes stay out of that
+        // Krylov when the tangent has no rigid part, which matches the
+        // Lanczos saddle search (no rigid projection inside the product).
+        project_rigid: false,
+    };
+    let config = MinModeConfig {
+        kind: MinModeKind::Lanczos,
+        krylov_dim: settings.lanczos_iterations.max(1),
+        force_tol: settings.forcetol,
+        max_move: settings.minmode_max_move,
+        method: Method::Lbfgs {
+            memory: settings.minmode_memory.max(1),
+        },
+        ..MinModeConfig::default()
+    };
+    let mut session = MinModeSession::new(
+        config.clone(),
+        Array1::from_vec(start.to_vec()),
+        Array1::from_vec(tangent.to_vec()),
+    )?;
+    session.set_lanczos_rel_tol(Some(settings.lanczos_rel_tol))?;
+    session.set_force_gate(ForceGate::L2Norm);
+    let mut pos = start.to_vec();
+    let mut force = force.to_vec();
+    let mut memory = TranslationMemory::new(settings.minmode_memory, settings.minmode_max_move);
+    let steps = settings.nsteps.clamp(1, 1_000);
+    for _ in 0..steps {
+        let gradient = Array1::from_iter(force.iter().copied().map(|value| -value));
+        session.set_position(Array1::from_vec(pos.clone()), Some(gradient))?;
+        let estimate = session.estimate_mode(&surface)?;
+        if norm(&force) <= settings.forcetol && estimate.curvature < 0.0 {
+            return accept_lanczos(
+                &mut surface,
+                &config,
+                &pos,
+                energy,
+                &force,
+                &estimate.mode.to_vec(),
+                settings,
+            );
+        }
+        let gradient = Array1::from_iter(force.iter().copied().map(|value| -value));
+        let effective = translated_gradient(&gradient, &estimate.mode, estimate.curvature);
+        let move_force: Vec<f64> = effective.iter().map(|value| -value).collect();
+        let delta = memory.step(&pos, &move_force, estimate.curvature);
+        if norm(&delta) <= 1e-16 {
+            return Ok(None);
+        }
+        for (coord, step) in pos.iter_mut().zip(&delta) {
+            *coord += *step;
+        }
+        let (value, next_force) = surface.energy_force(&pos)?;
+        energy = value;
+        force = next_force;
+    }
+    Ok(None)
+}
+
+/// A forward difference is coarser than the harness Hessian. A clearly
+/// negative second curvature is index 2 or higher and is not accepted.
+const SECOND_CURVATURE: f64 = -1.0e-4;
+
+/// Complement subspace for the index estimate. Past a single Rayleigh
+/// quotient, two actions is the smallest Lanczos basis.
+const INDEX_KRYLOV: usize = 2;
+
+fn accept_lanczos(
+    surface: &mut CallbackSurface<'_>,
+    config: &MinModeConfig,
+    pos: &[f64],
+    energy: f64,
+    force: &[f64],
+    mode: &[f64],
+    settings: &Settings,
+) -> Result<Option<Found>, SaddleError> {
+    if norm(force) > settings.forcetol {
+        return Ok(None);
+    }
+    surface.project_rigid = true;
+    surface.extra = vec![mode.to_vec()];
+    // Two Lanczos actions in the complement. The lowest Ritz value
+    // upper-bounds the next curvature, so a negative value is another
+    // unstable mode. A dense Hessian is not built.
+    let (curvature, _) = complement_curvature(
+        surface,
+        config,
+        pos,
+        force,
+        mode,
+        INDEX_KRYLOV,
+        Some(settings.lanczos_rel_tol),
+    )?;
+    if curvature < SECOND_CURVATURE {
+        return Ok(None);
+    }
+    Ok(Some(Found {
+        pos: pos.to_vec(),
+        energy,
+        force_norm: norm(force),
+        kind: 's',
+        hessian_index: 1,
+    }))
+}
+
+fn complement_curvature(
+    surface: &CallbackSurface<'_>,
+    config: &MinModeConfig,
+    pos: &[f64],
+    force: &[f64],
+    mode: &[f64],
+    krylov: usize,
+    rel_tol: Option<f64>,
+) -> Result<(f64, usize), SaddleError> {
+    let mut check_config = config.clone();
+    check_config.krylov_dim = krylov.max(1);
+    let mut check = MinModeSession::new(
+        check_config,
+        Array1::from_vec(pos.to_vec()),
+        Array1::from_vec(spread_seed(pos.len(), mode)),
+    )?;
+    check.set_lanczos_rel_tol(rel_tol)?;
+    check.set_force_gate(ForceGate::L2Norm);
+    let gradient = Array1::from_iter(force.iter().copied().map(|value| -value));
+    check.set_position(Array1::from_vec(pos.to_vec()), Some(gradient))?;
+    let estimate = check.estimate_mode(surface)?;
+    Ok((estimate.curvature, estimate.rotations))
+}
+
+impl CallbackSurface<'_> {
+    fn energy_force(&self, pos: &[f64]) -> Result<(f64, Vec<f64>), SaddleError> {
+        // SAFETY: the mode estimate has returned, so this is the only
+        // live evaluation of the callback.
+        unsafe { (*self.f)(pos) }
+    }
+}
+
+/// L-BFGS on the min-mode force.
+///
+/// Liu and Nocedal, Math. Program. 45, 503 (1989),
+/// doi:10.1007/BF01589116. The empty-memory scale is the inverse
+/// curvature 0.01. After one accepted step the scale is `s·y / y·y`
+/// (Nocedal and Wright, Numerical Optimization, eq. 7.20). The first
+/// step uses `1/|λ|` when the tracked curvature `λ` is negative, which
+/// is that mode's own scale. A non-positive secant drops the stored
+/// pairs and steps `1000` times the force, clipped so the largest atom
+/// moves by at most `max_move`. A proposed step that reaches that cap,
+/// or that faces away from the force, drops the pairs and steps with
+/// the current scale instead.
+struct TranslationMemory {
+    s: VecDeque<Vec<f64>>,
+    y: VecDeque<Vec<f64>>,
+    rho: VecDeque<f64>,
+    prev_pos: Option<Vec<f64>>,
+    prev_force: Option<Vec<f64>>,
+    memory: usize,
+    inverse_curvature: f64,
+    max_move: f64,
+}
+
+impl TranslationMemory {
+    fn new(memory: usize, max_move: f64) -> Self {
+        Self {
+            s: VecDeque::new(),
+            y: VecDeque::new(),
+            rho: VecDeque::new(),
+            prev_pos: None,
+            prev_force: None,
+            memory: memory.max(1),
+            inverse_curvature: 0.01,
+            max_move,
+        }
+    }
+
+    fn clear_pairs(&mut self) {
+        self.s.clear();
+        self.y.clear();
+        self.rho.clear();
+    }
+
+    fn push_pair(&mut self, s: Vec<f64>, y: Vec<f64>, sy: f64) {
+        self.rho.push_back(1.0 / sy);
+        self.s.push_back(s);
+        self.y.push_back(y);
+        while self.s.len() > self.memory {
+            self.s.pop_front();
+            self.y.pop_front();
+            self.rho.pop_front();
+        }
+    }
+
+    fn two_loop(&self, force: &[f64], h0: f64) -> Vec<f64> {
+        let n = self.s.len();
+        let mut q: Vec<f64> = force.iter().map(|value| -value).collect();
+        let mut alpha = vec![0.0; n];
+        for k in (0..n).rev() {
+            alpha[k] = self.rho[k] * dot(&self.s[k], &q);
+            for (coord, direction) in q.iter_mut().zip(&self.y[k]) {
+                *coord -= alpha[k] * direction;
+            }
+        }
+        for coord in &mut q {
+            *coord *= h0;
+        }
+        for k in 0..n {
+            let beta = self.rho[k] * dot(&self.y[k], &q);
+            for (coord, direction) in q.iter_mut().zip(&self.s[k]) {
+                *coord += (alpha[k] - beta) * direction;
+            }
+        }
+        q.iter().map(|value| -value).collect()
+    }
+
+    fn step(&mut self, pos: &[f64], force: &[f64], curvature: f64) -> Vec<f64> {
+        let mut h0 = self.inverse_curvature;
+        let mut reset_negative = false;
+        let carried = self.prev_pos.as_ref().zip(self.prev_force.as_ref()).map(
+            |(previous, previous_force)| {
+                let disp: Vec<f64> = pos.iter().zip(previous).map(|(a, b)| a - b).collect();
+                let secant: Vec<f64> = previous_force
+                    .iter()
+                    .zip(force)
+                    .map(|(a, b)| a - b)
+                    .collect();
+                (disp, secant)
+            },
+        );
+        if let Some((disp, secant)) = carried {
+            let sy = dot(&disp, &secant);
+            let yy = dot(&secant, &secant);
+            if !(sy.is_finite() && yy.is_finite()) || sy <= 1.0e-30 {
+                self.clear_pairs();
+                reset_negative = true;
+            } else {
+                h0 = sy / yy;
+                self.push_pair(disp, secant, sy);
+            }
+        } else if curvature.is_finite() && curvature < 0.0 {
+            let scale = -curvature;
+            if scale > 1.0e-8 {
+                h0 = (1.0 / scale).min(1.0e6);
+            }
+        }
+        let direction = if reset_negative {
+            cap_atom(&scale(force, 1000.0), self.max_move)
+        } else {
+            let proposed = self.two_loop(force, h0);
+            let too_far = self.max_move > 0.0 && max_atom(&proposed) >= self.max_move;
+            let facing = cosine(&proposed, force);
+            if too_far || facing.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
+                self.clear_pairs();
+                cap_atom(&scale(force, h0), self.max_move)
+            } else {
+                cap_atom(&proposed, self.max_move)
+            }
+        };
+        self.prev_pos = Some(pos.to_vec());
+        self.prev_force = Some(force.to_vec());
+        direction
+    }
+}
+
+fn cap_atom(step: &[f64], cap: f64) -> Vec<f64> {
+    if cap.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
+        return step.to_vec();
+    }
+    let largest = max_atom(step);
+    if largest > cap && largest.is_finite() {
+        scale(step, cap / largest)
+    } else {
+        step.to_vec()
+    }
+}
+
+/// Henkelman and Jónsson, J. Chem. Phys. 113, 9978 (2000).
+fn improved_tangent(path: &[Vec<f64>], energy: &[f64], index: usize) -> Vec<f64> {
+    let previous = &path[index - 1];
+    let here = &path[index];
+    let next = &path[index + 1];
+    let toward_next: Vec<f64> = next.iter().zip(here).map(|(a, b)| a - b).collect();
+    let from_previous: Vec<f64> = here.iter().zip(previous).map(|(a, b)| a - b).collect();
+    let e_prev = energy[index - 1];
+    let e_here = energy[index];
+    let e_next = energy[index + 1];
+    let tangent = if e_next > e_here && e_here > e_prev {
+        toward_next
+    } else if e_next < e_here && e_here < e_prev {
+        from_previous
+    } else {
+        let rise_prev = (e_prev - e_here).abs();
+        let rise_next = (e_next - e_here).abs();
+        let (larger, smaller) = if rise_prev > rise_next {
+            (rise_prev, rise_next)
+        } else {
+            (rise_next, rise_prev)
+        };
+        if e_next > e_prev {
+            toward_next
+                .iter()
+                .zip(&from_previous)
+                .map(|(next_step, prev_step)| larger * next_step + smaller * prev_step)
+                .collect()
+        } else {
+            toward_next
+                .iter()
+                .zip(&from_previous)
+                .map(|(next_step, prev_step)| smaller * next_step + larger * prev_step)
+                .collect()
+        }
+    };
+    unit_direction(&tangent)
+}
+
+fn endpoint_tangent(left: &[f64], right: &[f64]) -> Vec<f64> {
+    let mode: Vec<f64> = right
+        .iter()
+        .zip(left)
+        .map(|(end, start)| end - start)
+        .collect();
+    unit_direction(&mode)
+}
+
+fn unit_direction(mode: &[f64]) -> Vec<f64> {
+    let scale = norm(mode);
+    if scale < 1e-12 {
+        let mut axis = vec![0.0; mode.len().max(1)];
+        axis[0] = 1.0;
+        return axis;
+    }
+    scale_copy(mode, 1.0 / scale)
+}
+
+fn scale_copy(mode: &[f64], factor: f64) -> Vec<f64> {
+    mode.iter().map(|value| value * factor).collect()
+}
+
+/// Delocalized direction in the orthogonal complement of `mode`.
+/// A coordinate axis can miss a soft mode for many Lanczos steps.
+fn spread_seed(n: usize, mode: &[f64]) -> Vec<f64> {
+    let mut seed = vec![0.0; n];
+    for (i, value) in seed.iter_mut().enumerate() {
+        *value = ((i + 1) as f64 * 1.618033988749895).sin();
+    }
+    let projection = dot(&seed, mode);
+    for (value, mode_value) in seed.iter_mut().zip(mode) {
+        *value -= projection * mode_value;
+    }
+    let scale = norm(&seed);
+    if scale > 1e-8 {
+        for value in &mut seed {
+            *value /= scale;
+        }
+        return seed;
+    }
+    orthogonal_seed(n, mode)
+}
+
+fn orthogonal_seed(n: usize, mode: &[f64]) -> Vec<f64> {
+    for axis in 0..n {
+        let mut seed = vec![0.0; n];
+        seed[axis] = 1.0;
+        let projection = dot(&seed, mode);
+        for (value, mode_value) in seed.iter_mut().zip(mode) {
+            *value -= projection * mode_value;
+        }
+        let scale = norm(&seed);
+        if scale > 1e-8 {
+            for value in &mut seed {
+                *value /= scale;
+            }
+            return seed;
+        }
+    }
+    let mut axis = vec![0.0; n.max(1)];
+    axis[0] = 1.0;
+    axis
+}
+
+fn linear_mix(left: &[f64], right: &[f64], fraction: f64) -> Vec<f64> {
+    left.iter()
+        .zip(right)
+        .map(|(start, end)| start + fraction * (end - start))
+        .collect()
+}
+
+fn mix_distances(left: &[f64], right: &[f64], fraction: f64) -> Vec<f64> {
+    left.iter()
+        .zip(right)
+        .map(|(start, end)| (1.0 - fraction) * start + fraction * end)
+        .collect()
+}
+
+fn upper_distances(pos: &[f64]) -> Vec<f64> {
+    let n = pos.len() / 3;
+    let mut distances = Vec::with_capacity(n.saturating_sub(1) * n / 2);
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let mut acc = 0.0;
+            for k in 0..3 {
+                let delta = pos[3 * i + k] - pos[3 * j + k];
+                acc += delta * delta;
+            }
+            distances.push(acc.sqrt());
+        }
+    }
+    distances
+}
+
+/// Smidstrup, Pedersen, Stokbro, and Jónsson, J. Chem. Phys. 140,
+/// 214106 (2014): `S = sum_{i<j} d_ij^{-4} (r_ij - d_ij)^2`.
+fn idpp_gradient(pos: &[f64], target: &[f64]) -> (f64, Vec<f64>) {
+    let n = pos.len() / 3;
+    let mut energy = 0.0;
+    let mut gradient = vec![0.0; pos.len()];
+    let mut pair = 0usize;
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let desired = target.get(pair).copied().unwrap_or(1.0).max(1e-8);
+            pair += 1;
+            let mut delta = [0.0; 3];
+            let mut r2 = 0.0;
+            for k in 0..3 {
+                delta[k] = pos[3 * i + k] - pos[3 * j + k];
+                r2 += delta[k] * delta[k];
+            }
+            // Coincident atoms have no distance direction. A deterministic
+            // axis and a tiny stand-in length keep the repulsion finite
+            // and independent of a random draw.
+            let (distance, unit) = if r2 <= 1e-16 {
+                let mut unit = [0.0; 3];
+                unit[(i + j) % 3] = 1.0;
+                (1.0e-8, unit)
+            } else {
+                let distance = r2.sqrt();
+                (distance, delta.map(|value| value / distance))
+            };
+            let weight = desired.powi(-4);
+            let gap = distance - desired;
+            energy += weight * gap * gap;
+            let radial = 2.0 * weight * gap;
+            for k in 0..3 {
+                let component = radial * unit[k];
+                gradient[3 * i + k] += component;
+                gradient[3 * j + k] -= component;
+            }
+        }
+    }
+    (energy, gradient)
+}
+
+/// Steepest descent on the IDPP surrogate. Stops at a max atom force of
+/// 0.001 or 80 steps. The cap per atom is 0.1. None of these calls is a
+/// surface evaluation.
+fn relax_idpp(start: &[f64], target: &[f64]) -> Vec<f64> {
+    if target.is_empty() {
+        return start.to_vec();
+    }
+    let mut position = start.to_vec();
+    for _ in 0..80 {
+        let (_energy, gradient) = idpp_gradient(&position, target);
+        let mut largest = 0.0_f64;
+        for atom in gradient.chunks(3) {
+            largest = largest.max(norm(atom));
+        }
+        if largest < 1.0e-3 {
+            break;
+        }
+        for (atom, step) in position.chunks_mut(3).zip(gradient.chunks(3)) {
+            let scale = norm(step);
+            let cap = if scale > 0.1 { 0.1 / scale } else { 1.0 };
+            for k in 0..3 {
+                atom[k] -= cap * step[k];
+            }
+        }
+    }
+    position
+}
+
 fn search_pair(
     energy_force: &mut SurfaceFn<'_>,
     left: &[f64],
     right: &[f64],
     settings: &Settings,
 ) -> Result<Found, SaddleError> {
+    tally(|profile| profile.searches += 1);
     let mut ev = Eval { f: energy_force };
     let a = minimize(&mut ev, left, settings)?;
     let mut b = minimize(&mut ev, right, settings)?;
@@ -565,6 +1318,8 @@ fn optimization_loop(
     pair: [Img; 2],
     settings: &Settings,
 ) -> Result<Outcome, SaddleError> {
+    tally(|profile| profile.sqnm_segments += 1);
+    let _phase = PhaseGuard::enter(Phase::Sqnm);
     let n = pair[0].pos.len();
     let mut opt = ConstrainedOpt::new(
         2 * n,
@@ -653,6 +1408,7 @@ fn optimization_loop(
         moving_sides,
         moving_side,
     })
+    .inspect(|outcome| tally(|profile| profile.sqnm_steps += outcome.iterations))
 }
 
 enum StepResult {
@@ -1007,6 +1763,8 @@ fn select(segments: &[Segment], nodes: &[Img], threshold: f64) -> (usize, Vec<us
 }
 
 fn minimize(ev: &mut Eval<'_>, pos: &[f64], settings: &Settings) -> Result<Img, SaddleError> {
+    tally(|profile| profile.quenches += 1);
+    let _phase = PhaseGuard::enter(Phase::Quench);
     let mut opt = ConstrainedOpt::new(
         pos.len(),
         settings.alpha0,
@@ -1309,6 +2067,11 @@ fn gradient(ev: &mut Eval<'_>, pos: &[f64]) -> Result<Vec<f64>, SaddleError> {
 /// Rigid-projected Hessian index and its most negative eigenvector.
 /// Finite-difference calls go through `ev` and are part of the search cost.
 fn vibrational_mode(ev: &mut Eval<'_>, pos: &[f64]) -> Result<(usize, Vec<f64>), SaddleError> {
+    tally(|profile| {
+        profile.hessian_checks += 1;
+        profile.hessian_coordinates = pos.len();
+    });
+    let _phase = PhaseGuard::enter(Phase::Hessian);
     let n = pos.len();
     let step = 1e-5;
     let mut hess = vec![vec![0.0; n]; n];
@@ -1467,4 +2230,55 @@ fn eigh_dense(matrix: &[Vec<f64>]) -> (Vec<f64>, Vec<Vec<f64>>) {
         evecs[k] = col;
     }
     (evals, evecs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::relax_idpp;
+    use super::upper_distances;
+    use super::{TranslationMemory, improved_tangent};
+
+    #[test]
+    fn idpp_separates_a_crossed_pair() {
+        // The endpoints are 2 apart. The linear midpoint stacks both
+        // atoms. The interpolated distance is still 2.
+        let left = [0.0, 0.0, 0.0, 2.0, 0.0, 0.0];
+        let right = [2.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let linear = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+        let target = upper_distances(&left);
+        let relaxed = relax_idpp(&linear, &target);
+        let distance = upper_distances(&relaxed)[0];
+        assert!((distance - 2.0).abs() < 0.05, "relaxed distance {distance}");
+        let _ = right;
+    }
+
+    #[test]
+    fn negative_secant_steps_along_the_force() {
+        let mut memory = TranslationMemory::new(5, 0.1);
+        let first = memory.step(&[0.0, 0.0, 0.0], &[1.0, 0.0, 0.0], 1.0);
+        assert!((first[0] - 0.01).abs() < 1e-12);
+        let second = memory.step(&[0.01, 0.0, 0.0], &[2.0, 0.0, 0.0], 1.0);
+        assert!((second[0] - 0.1).abs() < 1e-12);
+        assert!(second[1].abs() < 1e-12 && second[2].abs() < 1e-12);
+    }
+
+    #[test]
+    fn negative_curvature_scales_the_first_step() {
+        let mut memory = TranslationMemory::new(5, 0.2);
+        let step = memory.step(&[0.0, 0.0, 0.0], &[0.1, 0.0, 0.0], -4.0);
+        assert!((step[0] - 0.025).abs() < 1e-12);
+    }
+
+    #[test]
+    fn improved_tangent_climbs_toward_the_higher_neighbor() {
+        let path = vec![
+            vec![0.0, 0.0, 0.0],
+            vec![1.0, 0.0, 0.0],
+            vec![2.0, 0.0, 0.0],
+        ];
+        let up = improved_tangent(&path, &[0.0, 1.0, 3.0], 1);
+        assert!((up[0] - 1.0).abs() < 1e-12);
+        let down = improved_tangent(&path, &[3.0, 1.0, 0.0], 1);
+        assert!((down[0] - 1.0).abs() < 1e-12);
+    }
 }
