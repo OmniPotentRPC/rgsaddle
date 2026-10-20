@@ -36,6 +36,7 @@ pub mod autoneb;
 pub mod band;
 #[cfg(feature = "capi")]
 pub mod capi;
+pub mod connect;
 pub mod error;
 pub mod minmode;
 pub mod nichols;
@@ -46,11 +47,13 @@ pub mod spring;
 pub mod stencil;
 pub mod tangent;
 
+mod sqnm;
 pub use autoneb::{AutoNeb, AutoNebReport, AutoNebTuning};
 pub use band::{
     BandConfig, BandEvaluation, BandReport, BandSession, BandStatus, BandSurface, Cell, CiConfig,
     SolidState,
 };
+pub use connect::{ConnectConfig, ConnectReport, connect};
 pub use error::SaddleError;
 pub use minmode::{
     FiniteDifference, MinModeConfig, MinModeKind, MinModeReport, MinModeSession, MinModeStatus,

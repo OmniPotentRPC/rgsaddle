@@ -94,6 +94,40 @@ class Stencil:
     def curvature(self) -> float:
         """Curvature along the mode."""
 
+class ConnectReport:
+    @property
+    def position(self) -> NDArray[numpy.float64]:
+        """Copy of the returned geometry."""
+
+    @property
+    def energy(self) -> float:
+        """Energy at that geometry."""
+
+    @property
+    def force_norm(self) -> float:
+        """Euclidean norm of the Cartesian gradient."""
+
+    @property
+    def kind(self) -> str:
+        """
+        s for an accepted saddle, u for an upper bound, f when a segment could not be split.
+        """
+
+    @property
+    def hessian_index(self) -> int:
+        """
+        Negative eigenvalues of the rigid-projected Hessian, or -1 when it was not computed.
+        """
+
+    @property
+    def evaluations(self) -> int:
+        """Surface evaluations, including a Hessian that decided acceptance."""
+
+def connect(surface: Callable[..., tuple[numpy.typing.NDArray[numpy.float64], numpy.typing.NDArray[numpy.float64]]], left: numpy.typing.NDArray[numpy.float64], right: numpy.typing.NDArray[numpy.float64], force_tol: float = 0.001, max_calls: int = 250000, quench_nodes: bool = True) -> ConnectReport:
+    """
+    Double-ended connect. surface(x) returns (energy, gradient) for one image shaped (1, 3N).
+    """
+
 def raise_status(code: int) -> bool:
     """
     Map an rgsaddle_status_t value. The message is the stored text, or the status name when that text is empty. The stored text is cleared. True on OK. False is not used: convergence is not a status code.

@@ -12,6 +12,7 @@ use ndarray::{Array1, Array2, ArrayView2};
 use rgmin::{FireKind, Method};
 
 use crate::band::{BandConfig, BandSession, BandStatus, BandSurface, Cell, CiConfig, SolidState};
+use crate::connect::{ConnectConfig, connect};
 use crate::error::SaddleError;
 use crate::minmode::{
     FiniteDifference, MinModeConfig, MinModeKind, MinModeSession, MinModeStatus, PointSurface,
@@ -26,7 +27,7 @@ use crate::spring::SpringKind;
 use crate::tangent::TangentKind;
 
 pub const RGSADDLE_ABI_MAJOR: u32 = 1;
-pub const RGSADDLE_ABI_MINOR: u32 = 17;
+pub const RGSADDLE_ABI_MINOR: u32 = 18;
 
 /// Band config bit 0. The C step calls the surface once per image
 /// carried by the evaluation: every image on the first evaluation
@@ -1328,6 +1329,119 @@ pub unsafe extern "C" fn rgsaddle_index1_reset(session: *mut RgsaddleIndex1) -> 
 pub unsafe extern "C" fn rgsaddle_index1_free(session: *mut RgsaddleIndex1) {
     if !session.is_null() {
         drop(unsafe { Box::from_raw(session) });
+    }
+}
+
+#[repr(C)]
+pub struct RgsaddleConnectConfig {
+    pub version: RgsaddleVersion,
+    pub flags: u64,
+    pub force_tol: f64,
+    pub max_calls: i64,
+    pub quench_nodes: i32,
+}
+
+#[repr(C)]
+pub struct RgsaddleConnectReport {
+    pub version: RgsaddleVersion,
+    pub flags: u64,
+    pub energy: f64,
+    pub force_norm: f64,
+    pub kind: i32,
+    pub hessian_index: i32,
+    pub evaluations: i32,
+}
+
+/// # Safety
+/// `left` and `right` each hold `3 * n_atoms` positions. `position`
+/// has room for the same number. `surface` is called with one image
+/// and must write the energy and the Cartesian gradient.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_connect(
+    config: *const RgsaddleConnectConfig,
+    n_atoms: i64,
+    left: *const f64,
+    right: *const f64,
+    surface: Option<RgsaddleSurfaceFn>,
+    user: *mut c_void,
+    position: *mut f64,
+    report: *mut RgsaddleConnectReport,
+) -> i32 {
+    if config.is_null() || report.is_null() {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    if left.is_null() || right.is_null() || position.is_null() {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let Some(surface) = surface else {
+        return RGSADDLE_NULL_SURFACE;
+    };
+    if n_atoms <= 0 {
+        return RGSADDLE_SHAPE;
+    }
+    let cfg = unsafe { &*config };
+    if cfg.version.major != RGSADDLE_ABI_MAJOR {
+        return RGSADDLE_ABI_MISMATCH;
+    }
+    if cfg.max_calls <= 0 || !(cfg.force_tol.is_finite() && cfg.force_tol > 0.0) {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let dof = (n_atoms as usize).saturating_mul(3);
+    let left = unsafe { slice::from_raw_parts(left, dof) };
+    let right = unsafe { slice::from_raw_parts(right, dof) };
+    let mut settings = ConnectConfig::optbench(cfg.max_calls as usize);
+    settings.forcetol = cfg.force_tol;
+    settings.quench_nodes = cfg.quench_nodes != 0;
+    let result = connect(
+        |x| {
+            let mut energy = 0.0;
+            let mut gradient = vec![0.0; x.len()];
+            let mut request = RgsaddleSurfaceRequest {
+                version: RgsaddleVersion {
+                    major: RGSADDLE_ABI_MAJOR,
+                    minor: RGSADDLE_ABI_MINOR,
+                },
+                flags: 0,
+                n_images: 1,
+                n_atoms,
+                positions: x.as_ptr(),
+                energies: &mut energy,
+                gradients: gradient.as_mut_ptr(),
+                image: 0,
+            };
+            let status = surface(user, &mut request);
+            if status != RGSADDLE_OK {
+                return Err(SaddleError::Surface(format!(
+                    "connect surface status {status}"
+                )));
+            }
+            Ok((energy, gradient))
+        },
+        left,
+        right,
+        &settings,
+    );
+    match result {
+        Ok(found) => {
+            let dst = unsafe { slice::from_raw_parts_mut(position, dof) };
+            dst.copy_from_slice(&found.position);
+            unsafe {
+                *report = RgsaddleConnectReport {
+                    version: RgsaddleVersion {
+                        major: RGSADDLE_ABI_MAJOR,
+                        minor: RGSADDLE_ABI_MINOR,
+                    },
+                    flags: 0,
+                    energy: found.energy,
+                    force_norm: found.force_norm,
+                    kind: found.kind as i32,
+                    hessian_index: found.hessian_index,
+                    evaluations: i32::try_from(found.evaluations).unwrap_or(i32::MAX),
+                };
+            }
+            RGSADDLE_OK
+        }
+        Err(err) => status_of(&err),
     }
 }
 
