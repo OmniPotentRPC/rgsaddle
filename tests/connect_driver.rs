@@ -3,6 +3,8 @@
 //! The Lennard-Jones kernel is the unshifted 12-6 potential with
 //! cutoff 40, the optbench lj38_2ts_separation convention.
 
+#![cfg(feature = "capi")]
+
 use std::io::Write;
 use std::os::raw::c_void;
 use std::sync::Mutex;
@@ -168,7 +170,7 @@ fn c_abi_connects_the_toy() {
     };
     let left = [-2.0, 0.0, 0.0];
     let right = [2.0, 0.0, 0.0];
-    let mut position = [0.0; 3];
+    let mut position = [0.0_f64; 3];
     let mut report = RgsaddleConnectReport {
         version: RgsaddleVersion { major: 0, minor: 0 },
         flags: 0,
@@ -411,8 +413,8 @@ fn bench_rigid_basis(pos: &[f64]) -> Vec<Vec<f64>> {
             center[axis] += pos[3 * atom + axis];
         }
     }
-    for axis in 0..3 {
-        center[axis] /= n as f64;
+    for value in &mut center {
+        *value /= n as f64;
     }
     let mut seeds = Vec::new();
     for axis in 0..3 {
@@ -486,8 +488,8 @@ fn bench_project_rigid(hess: &[Vec<f64>], modes: &[Vec<f64>]) -> Vec<Vec<f64>> {
             out[row][column] = *value;
         }
     }
-    for row in 0..n {
-        out[row] = bench_project_out(&out[row], modes);
+    for row in &mut out {
+        *row = bench_project_out(row, modes);
     }
     for mode in modes {
         for i in 0..n {
@@ -516,6 +518,10 @@ fn verification_index(pos: &[f64]) -> i32 {
             column[i] = (gp[j] - gm[j]) / (2.0 * step);
         }
     }
+    #[expect(
+        clippy::needless_range_loop,
+        reason = "both triangles of the finite-difference Hessian share one index pair"
+    )]
     for i in 0..n {
         for j in 0..i {
             let mean = 0.5 * (hess[i][j] + hess[j][i]);
