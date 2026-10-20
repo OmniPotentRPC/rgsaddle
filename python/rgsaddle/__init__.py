@@ -11,9 +11,11 @@ from __future__ import annotations
 from enum import IntEnum
 
 from rgsaddle._core import (
+    ConnectReport as ConnectReport,
     NumericalError as NumericalError,
     Stencil as Stencil,
     StencilReport as StencilReport,
+    connect as connect,
     last_error as last_error,
     raise_status as raise_status,
     version as _version,
@@ -88,6 +90,7 @@ class RestrictedKind(IntEnum):
 
 __all__ = [
     "CellChart",
+    "ConnectReport",
     "EigenDevice",
     "ExpandKind",
     "ForceGate",
@@ -99,6 +102,7 @@ __all__ = [
     "Stencil",
     "StencilReport",
     "__version__",
+    "connect",
     "last_error",
     "raise_status",
 ]

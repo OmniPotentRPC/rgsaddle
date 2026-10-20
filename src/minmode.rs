@@ -452,6 +452,8 @@ fn lanczos_mode<S: PointSurface>(
     g0: ArrayView1<f64>,
     seed: Array1<f64>,
     config: &MinModeConfig,
+    rel_tol: Option<f64>,
+    carried: Option<f64>,
 ) -> Result<(Array1<f64>, f64, usize), SaddleError> {
     let n = seed.len();
     let m = config.krylov_dim.min(n).max(1);
@@ -461,12 +463,28 @@ fn lanczos_mode<S: PointSurface>(
     q.push(normalize(seed));
 
     let mut actions = 0;
+    let mut previous_ritz: Option<f64> = None;
     loop {
         let j = alpha.len();
         let hv = surface.action(x, g0, q[j].view(), config)?;
         actions += 1;
         let a = crate::stencil::curvature_along(hv.view(), q[j].view());
         alpha.push(a);
+        // eOn quit_early: the curvature along the incoming mode is
+        // already within tolerance of the previous estimate, so the
+        // direction is kept. One Hessian action, then the translation.
+        if j == 0
+            && let (Some(tol), Some(previous)) = (rel_tol, carried)
+        {
+            let scale = if previous.abs() > 0.0 {
+                previous.abs()
+            } else {
+                1.0
+            };
+            if (a - previous).abs() <= tol * scale {
+                return Ok((q[0].clone(), a, actions));
+            }
+        }
         let mut w = &hv - &(&q[j] * a);
         if j > 0 {
             w = &w - &(&q[j - 1] * beta[j - 1]);
@@ -480,7 +498,23 @@ fn lanczos_mode<S: PointSurface>(
         let b = w.dot(&w).sqrt();
         let (theta, s) = lowest_ritz(&alpha, &beta);
         let residual = b * s[j].abs();
-        if residual <= config.rotation_tol || alpha.len() == m || b <= 1e-12 {
+        // eOn's tolerance is the relative change of the lowest Ritz
+        // value, not the residual. The first value is the curvature
+        // along the seed; later values are the growing Krylov estimate.
+        let rel_stop = match (rel_tol, previous_ritz) {
+            (Some(tol), Some(previous)) => {
+                // eOn: |λ - λ_prev| / |λ_prev|, with denominator 1 at 0.
+                let scale = if previous.abs() > 0.0 {
+                    previous.abs()
+                } else {
+                    1.0
+                };
+                (theta - previous).abs() <= tol * scale
+            }
+            _ => false,
+        };
+        previous_ritz = Some(theta);
+        if rel_stop || residual <= config.rotation_tol || alpha.len() == m || b <= 1e-12 {
             let mut mode = Array1::zeros(n);
             for (qi, si) in q.iter().zip(s.iter()) {
                 mode = &mode + &(qi * *si);
@@ -608,6 +642,10 @@ pub struct MinModeSession {
     curvature: f64,
     solver: Solver,
     iteration: usize,
+    /// Improved Lanczos: stop when the lowest Ritz value changes by
+    /// less than this fraction of `|λ|`, or of 1 when `λ` is 0.
+    /// `None` keeps the residual test alone.
+    lanczos_rel_tol: Option<f64>,
     /// Gradient at `x`, when known: from the last translation's
     /// accepted point or from the host.
     centre: Option<PointEval>,
@@ -664,9 +702,26 @@ impl MinModeSession {
             curvature: f64::NAN,
             solver,
             iteration: 0,
+            lanczos_rel_tol: None,
             centre: None,
             surface_error: Mutex::new(None),
         })
+    }
+
+    /// Stop a Lanczos estimate when the lowest Ritz value's relative
+    /// change falls under `tol`. The improved Lanczos search uses this
+    /// so a translation does not wait for a tight residual. `None`
+    /// restores the residual test.
+    pub fn set_lanczos_rel_tol(&mut self, tol: Option<f64>) -> Result<(), SaddleError> {
+        if let Some(tol) = tol
+            && !(tol.is_finite() && tol > 0.0)
+        {
+            return Err(SaddleError::Invalid(
+                "Lanczos relative tolerance must be positive and finite".into(),
+            ));
+        }
+        self.lanczos_rel_tol = tol;
+        Ok(())
     }
 
     /// Select the optional HiGHS feasible-set step; requires the `highs` feature.
@@ -807,7 +862,15 @@ impl MinModeSession {
         }
         let estimate = |surface: &Counted<'_, S>, seed| match self.config.kind {
             MinModeKind::Dimer => rotate_dimer(surface, position, gradient, seed, &self.config),
-            MinModeKind::Lanczos => lanczos_mode(surface, position, gradient, seed, &self.config),
+            MinModeKind::Lanczos => lanczos_mode(
+                surface,
+                position,
+                gradient,
+                seed,
+                &self.config,
+                self.lanczos_rel_tol,
+                self.curvature.is_finite().then_some(self.curvature),
+            ),
         };
         if excluded.nrows() == 0 {
             return estimate(surface, self.mode.clone());

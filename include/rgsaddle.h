@@ -5,7 +5,7 @@
  * The stepping contract in C. The host owns the loop: create a
  * session, call step until it reports converged (or until the host's
  * own policy says otherwise), reset at a surface-epoch boundary,
- * free. There is no run-to-completion entry point.
+ * free. `rgsaddle_connect` is the run-to-completion double-ended search.
  *
  * Layout discipline follows dlpack.h, the same as the rest of the
  * stack: every wire struct opens with an rgsaddle_version_t and a
@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 17u
+#define RGSADDLE_ABI_MINOR 18u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -999,6 +999,46 @@ rgsaddle_status_t rgsaddle_stencil_positions(const rgsaddle_stencil_t *stencil, 
 rgsaddle_status_t rgsaddle_stencil_query(const rgsaddle_stencil_t *stencil, int32_t key,
                                          double *out, size_t n);
 void rgsaddle_stencil_free(rgsaddle_stencil_t *stencil);
+
+/**
+ * Double-ended connect, ABI minor 18. The caller stamps version.
+ * max_calls is the COMPASS iteration cap and must be positive.
+ * force_tol is the Euclidean force stop. quench_nodes nonzero
+ * minimizes nodes created by a split before the next segment.
+ * Unspecified COMPASS constants stay at the optbench values
+ * (alpha0 0.001, history 10, trust radius 0.05).
+ */
+typedef struct {
+  rgsaddle_version_t version;
+  uint64_t flags;
+  double force_tol;
+  int64_t max_calls;
+  int32_t quench_nodes;
+} rgsaddle_connect_config_t;
+
+/** kind is 's', 'u', or 'f'. evaluations counts every surface call. */
+typedef struct {
+  rgsaddle_version_t version;
+  uint64_t flags;
+  double energy;
+  double force_norm;
+  int32_t kind;
+  int32_t hessian_index;
+  int32_t evaluations;
+} rgsaddle_connect_report_t;
+
+/**
+ * Run the connect search. left and right each hold 3 * n_atoms
+ * positions. position receives the returned geometry. The surface is
+ * called with one image and writes the energy and the Cartesian
+ * gradient. A non-OK surface status fails the search.
+ */
+rgsaddle_status_t rgsaddle_connect(const rgsaddle_connect_config_t *config,
+                                   int64_t n_atoms, const double *left,
+                                   const double *right,
+                                   rgsaddle_surface_fn surface, void *user,
+                                   double *position,
+                                   rgsaddle_connect_report_t *report);
 
 #ifdef __cplusplus
 }
