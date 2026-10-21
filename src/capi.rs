@@ -27,7 +27,7 @@ use crate::spring::SpringKind;
 use crate::tangent::TangentKind;
 
 pub const RGSADDLE_ABI_MAJOR: u32 = 1;
-pub const RGSADDLE_ABI_MINOR: u32 = 20;
+pub const RGSADDLE_ABI_MINOR: u32 = 21;
 
 /// Band config bit 0. The C step calls the surface once per image
 /// carried by the evaluation: every image on the first evaluation
@@ -42,8 +42,8 @@ pub const RGSADDLE_BAND_KEEP_TRANSLATION: u64 = 2;
 /// be 0. Without the bit, climbing is on only when `ci_trigger_factor`
 /// is positive.
 pub const RGSADDLE_BAND_CI_AFTER: u64 = 4;
-/// Band config bit 3 (ABI minor 19). No min-mode refinement of the
-/// climbing image: the plain CI-NEB of minor 18 and earlier.
+/// Band config bit 3 (ABI minor 21). No min-mode refinement of the
+/// climbing image: the plain CI-NEB of minor 20 and earlier.
 pub const RGSADDLE_BAND_NO_MIN_MODE: u64 = 8;
 
 pub const RGSADDLE_OK: i32 = 0;

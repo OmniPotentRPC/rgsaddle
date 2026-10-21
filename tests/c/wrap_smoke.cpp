@@ -66,12 +66,29 @@ int main() {
         std::fprintf(stderr, "band did not converge\n");
         return 1;
     }
+    if (!(last.curvature < 0.0)) {
+        std::fprintf(stderr, "refined band curvature %g\n", last.curvature);
+        return 1;
+    }
     auto out = band.positions();
     if (out.size() != static_cast<std::size_t>(n_images * 3)) {
         std::fprintf(stderr, "position size\n");
         return 1;
     }
     band.reset();
+
+    cfg.flags |= RGSADDLE_BAND_NO_MIN_MODE;
+    rgsaddle::Band plain(cfg, n_images, n_atoms, pos.data());
+    for (int i = 0; i < 400; ++i) {
+        auto report = plain.step(surface, nullptr);
+        if (report.curvature != 0.0) {
+            std::fprintf(stderr, "plain band reported a curvature\n");
+            return 1;
+        }
+        if (report.converged()) {
+            break;
+        }
+    }
     std::printf("RGSADDLE_CXX_WRAP_OK force=%.6g iter=%lld\n", last.max_force,
                 static_cast<long long>(last.iteration));
     return 0;
