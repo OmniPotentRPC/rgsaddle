@@ -16,13 +16,27 @@ stubbed: the session body is not reached, and replacing it would drop
 the real function from the proof. No harness is deferred to a schedule.
 A shard that does not report success fails the workflow.
 
-The harness build passes `--no-default-features`. The default `faer`
-feature stays off, so `pulp` is not compiled. `pulp` contains global
-assembly, which Kani rejects, and it arrives through faer
-(`cargo tree -i pulp`). Connect and SQNM call faer for a dense
-self-adjoint spectrum. These guards return before that call. With the
-feature off those functions still compile, and they panic if reached,
-so a harness that entered them would fail.
+The prove step is the only `cargo kani` invocation. It passes
+`--no-default-features --features capi`. The default `faer` feature
+stays off, so `pulp` is not compiled. `pulp` contains global assembly,
+which Kani 0.68 rejects. Its only path into this crate is faer
+(`faer`, `faer-traits`, `gemm-common`, and `qd`; `cargo tree -i pulp`
+on a default build). Sella's dense spectrum is the Jacobi
+`exact_eigh`, not faer. The sella harnesses do not enable a feature
+or a dependency the other shards lack.
+
+`model-checking/kani-github-action` defaults to `cargo-kani` with no
+arguments. That command enables `faer` and compiles `pulp` before this
+step, and it failed every shard. The workflow overrides that command
+so the action only installs Kani. `--ignore-global-asm` is not used:
+the proofs do not reach `pulp`, and hiding its assembly would not be
+a proof of code this build does not contain.
+
+Connect and SQNM call faer for a dense self-adjoint spectrum. These
+guards return on a null pointer or a non-positive length before
+`from_raw_parts`, so they do not enter a session or those spectra.
+With the feature off those functions still compile, and they panic if
+reached, so a harness that entered them would fail.
 
 `cap_max_abs` is two harnesses, null and short. The other 27 entry
 points keep both obligations in one harness. That is 29 proofs of 28

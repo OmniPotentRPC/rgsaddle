@@ -91,9 +91,18 @@ jobs:
             harnesses: samd_create_null_and_short pes_create_null_and_short internal_pes_create_null_and_short internal_pes_create_dummies_null_and_short internal_pes_create_from_find_null_and_short place_perp_dummy_null_and_short
     steps:
       - uses: actions/checkout@v4
+      # Install Kani only. The action's default command is `cargo-kani`
+      # with no arguments, which enables the default `faer` feature and
+      # compiles `pulp`. Kani 0.68 rejects pulp's global assembly, so
+      # that step failed every shard (create, step, sella-min,
+      # sella-saddle, and pes) and the prove step never ran. The sella
+      # harnesses do not enable a feature or a dependency the other
+      # shards lack. `echo` is a successful no-op.
       - uses: model-checking/kani-github-action@v1.1
         with:
           kani-version: "0.68.0"
+          command: echo
+          args: "Kani installed. This shard is proved in the next step."
       - name: Prove ${{ matrix.shard }}
         run: |
           set -euo pipefail
@@ -104,10 +113,14 @@ jobs:
           # One shard is a few seconds of CBMC after codegen.
           # Ten minutes is a hang detector. A timeout fails the shard
           # and is not a proof. See validation/kani_unsupported.md.
-          # `--no-default-features` leaves faer, and the pulp crate it
-          # pulls in, out of this build. pulp contains global assembly,
-          # which Kani rejects. The harnesses return before the connect
-          # and SQNM spectra that call faer.
+          # This is the only `cargo kani` invocation. `--no-default-features`
+          # leaves faer off, so pulp is not compiled. pulp's only path
+          # into this crate is faer (faer, faer-traits, gemm-common, qd),
+          # and its global assembly is not supported. Sella's dense
+          # spectrum is the Jacobi `exact_eigh`, not faer. The harnesses
+          # return on a null pointer or a non-positive length before
+          # `from_raw_parts`, so they do not reach a Sella session or the
+          # connect and SQNM spectra. `--ignore-global-asm` is not used.
           timeout 600 cargo kani --no-default-features --features capi --output-format terse "${args[@]}"
 
   libm:

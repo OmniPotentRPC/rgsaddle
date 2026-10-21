@@ -27,8 +27,11 @@ chemfiles = ["readcon", "readcon-core/chemfiles"]
 # does not compile this feature.
 verify = ["dep:proptest", "dep:rug"]
 # Dense self-adjoint spectra in connect and SQNM. On by default.
-# `cargo kani` passes `--no-default-features` so this stays off:
+# The Kani prove step passes `--no-default-features` so this stays off:
 # faer pulls pulp, and pulp's global assembly does not compile under Kani.
+# The kani-github-action default command is a bare `cargo-kani`, which
+# would turn this feature on. The verify workflow overrides that command
+# and does not pass `--ignore-global-asm`.
 faer = ["dep:faer"]
 
 [dependencies]
