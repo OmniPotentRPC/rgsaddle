@@ -223,6 +223,23 @@ const STOCK_ROTATION_TOL: f64 = 1e-4;
 /// `rotations_min` = 1).
 const TORQUE_MAX: f64 = 1.0;
 
+/// Scale of the step that replaces a capped FIRE move which left the
+/// negative-curvature neighborhood.
+///
+/// The reflected force is not a potential gradient (Goswami, Gunde, and
+/// Jónsson, Front. Chem. (2026), doi:10.3389/fchem.2026.1807063, Eq. 9).
+/// From rest, FIRE 2.0 treats a zero power as a missed step and moves by
+/// `F / 4` (Bitzek, Koskinen, Gähler, Moseler, and Gumbsch, Phys. Rev.
+/// Lett. 97, 170201 (2006), doi:10.1103/PhysRevLett.97.170201; rgmin
+/// halves `dt` before that Euler step, and the initial `dt` is 1). When
+/// that move exceeds `max_move` the per-atom cap truncates it, and the
+/// truncated move can leave the negative-curvature neighborhood. The
+/// replacement, taken from the last point that was still negative, is
+/// the empty-memory L-BFGS step `0.01 F`. A capped step whose arrival
+/// stays negative is kept, so a basin wider than `max_move` follows the
+/// integrator.
+const FIRE_EMPTY_SCALE: f64 = 0.01;
+
 /// A first-order saddle has a vanishing force and one negative
 /// curvature. A vanishing force alone also describes a minimum, which
 /// the inverted-force step then leaves; the gate therefore requires
@@ -526,10 +543,7 @@ pub(crate) fn convex_displacement(
 /// equals `cap`. A trailing partial triple counts as one more atom,
 /// matching rgmin `scale_step_atom` and eOn `maxAtomMotionApplied`. The
 /// direction is unchanged; a step shorter than the cap is lengthened.
-fn scale_to_atom_cap(origin: ArrayView1<f64>, trial: &mut Array1<f64>, cap: f64) {
-    if !(cap.is_finite() && cap > 0.0) {
-        return;
-    }
+fn largest_atom_move(origin: ArrayView1<f64>, trial: ArrayView1<f64>) -> f64 {
     let n = trial.len();
     let mut max_atom = 0.0;
     let mut i = 0;
@@ -552,8 +566,46 @@ fn scale_to_atom_cap(origin: ArrayView1<f64>, trial: &mut Array1<f64>, cap: f64)
         }
         max_atom = max_atom.max(r2.sqrt());
     }
+    max_atom
+}
+
+fn scale_to_atom_cap(origin: ArrayView1<f64>, trial: &mut Array1<f64>, cap: f64) {
+    if !(cap.is_finite() && cap > 0.0) {
+        return;
+    }
+    let max_atom = largest_atom_move(origin, trial.view());
     if max_atom > 0.0 {
         let scale = cap / max_atom;
+        let n = trial.len();
+        for k in 0..n {
+            trial[k] = origin[k] + scale * (trial[k] - origin[k]);
+        }
+    }
+}
+
+/// `origin - FIRE_EMPTY_SCALE * eff`, shortened so no atom moves by
+/// more than `max_move`.
+fn empty_scaled_step(origin: ArrayView1<f64>, eff: ArrayView1<f64>, max_move: f64) -> Array1<f64> {
+    let mut trial = origin.to_owned();
+    for (slot, component) in trial.iter_mut().zip(eff.iter()) {
+        *slot -= FIRE_EMPTY_SCALE * *component;
+    }
+    if max_move.is_finite() && max_move > 0.0 {
+        shorten_to_atom_cap(origin, &mut trial, max_move);
+    }
+    trial
+}
+
+/// Shorten `trial` so its largest per-atom move is at most `cap`.
+/// A step that already fits is left as it is.
+fn shorten_to_atom_cap(origin: ArrayView1<f64>, trial: &mut Array1<f64>, cap: f64) {
+    if !(cap.is_finite() && cap > 0.0) {
+        return;
+    }
+    let max_atom = largest_atom_move(origin, trial.view());
+    if max_atom > cap {
+        let scale = cap / max_atom;
+        let n = trial.len();
         for k in 0..n {
             trial[k] = origin[k] + scale * (trial[k] - origin[k]);
         }
@@ -817,6 +869,15 @@ struct LanczosCarry {
     beta: Vec<f64>,
 }
 
+/// A FIRE translation the per-atom cap shortened while the curvature
+/// was negative. `origin` is that point; `eff` is the effective
+/// gradient the step descended.
+struct CappedFireStep {
+    origin: Array1<f64>,
+    eff: Array1<f64>,
+    curvature: f64,
+}
+
 /// Stepping minimum-mode saddle search.
 pub struct MinModeSession {
     config: MinModeConfig,
@@ -851,6 +912,11 @@ pub struct MinModeSession {
     /// calls at one geometry. [`MinModeSession::estimate_mode`] and
     /// [`MinModeSession::step`] do not read it.
     lanczos_carry: Option<LanczosCarry>,
+    /// Last FIRE translation that the per-atom cap shortened, when its
+    /// curvature was negative. The next step drops it if the arrival is
+    /// still negative. An arrival with non-negative curvature left the
+    /// neighborhood; the step is replaced from [`CappedFireStep::origin`].
+    capped_fire: Option<CappedFireStep>,
     /// The first surface error raised inside the translation oracle
     /// during the current step; the rgmin oracle signature has no
     /// error channel of its own.
@@ -918,6 +984,7 @@ impl MinModeSession {
             pending_turn: 0.0,
             lanczos_ready: false,
             lanczos_carry: None,
+            capped_fire: None,
         })
     }
 
@@ -991,6 +1058,7 @@ impl MinModeSession {
     /// surface-epoch boundary. The mode stays as the next seed.
     pub fn reset(&mut self) {
         self.solver.forget();
+        self.capped_fire = None;
         self.centre = None;
         self.mode_fresh = false;
         self.pending_turn = 0.0;
@@ -1033,6 +1101,7 @@ impl MinModeSession {
             None => None,
         };
         self.x = x;
+        self.capped_fire = None;
         self.mode_fresh = false;
         self.pending_turn = 0.0;
         self.lanczos_carry = None;
@@ -1050,6 +1119,7 @@ impl MinModeSession {
         let turned = self.mode.dot(&mode).abs().min(1.0).acos();
         self.retire_translation_memory(turned);
         self.mode = mode;
+        self.capped_fire = None;
         self.mode_fresh = false;
         self.pending_turn = 0.0;
         self.lanczos_ready = false;
@@ -1453,7 +1523,7 @@ impl MinModeSession {
             calls: &calls,
             space: None,
         };
-        let g0 = self.centre_gradient(&counted)?;
+        let mut g0 = self.centre_gradient(&counted)?;
         // A host that just called `estimate_mode` already paid for this
         // mode. Translating it again would repeat those Hessian actions.
         let (mut curvature, mut rotations) = if self.mode_fresh {
@@ -1472,6 +1542,36 @@ impl MinModeSession {
             self.retire_translation_memory(turned);
             refreshed
         };
+
+        // A capped FIRE step whose arrival is no longer negative left the
+        // neighborhood. Replace it from the last negative point with the
+        // empty-memory step, then estimate the mode there. A capped step
+        // that is still negative is unchanged, and so is L-BFGS.
+        if let Some(left) = self.capped_fire.take()
+            && left.curvature < 0.0
+            && curvature >= 0.0
+            && self.kappa.is_none()
+        {
+            let retreated =
+                empty_scaled_step(left.origin.view(), left.eff.view(), self.config.max_move);
+            if largest_atom_move(left.origin.view(), retreated.view()) > 0.0 {
+                let (energy, gradient) = counted.eval(retreated.view())?;
+                self.solver.forget();
+                self.x = retreated;
+                self.centre = Some(PointEval {
+                    x: self.x.clone(),
+                    energy: Some(energy),
+                    gradient: gradient.clone(),
+                });
+                let previous_mode = self.mode.clone();
+                let (arrived, arrived_rotations) = self.refresh_mode(&counted, gradient.view())?;
+                let turned = previous_mode.dot(&self.mode).abs().min(1.0).acos();
+                self.retire_translation_memory(turned);
+                curvature = arrived;
+                rotations += arrived_rotations;
+                g0 = gradient;
+            }
+        }
 
         let max_force = self.force_gate.value(g0.view());
         if converged(max_force, curvature, self.config.force_tol) {
@@ -1514,6 +1614,23 @@ impl MinModeSession {
             (climbed, Some(point))
         } else {
             self.translate_with_solver(surface, &counted, &g0, &tau, translation_curvature)?
+        };
+        let hit_cap = self.config.max_move.is_finite()
+            && self.config.max_move > 0.0
+            && largest_atom_move(self.x.view(), x.view()) + 1e-8 >= self.config.max_move;
+        self.capped_fire = if hit_cap
+            && translation_curvature < 0.0
+            && !full_climb
+            && self.kappa.is_none()
+            && matches!(self.config.method, Method::Fire { .. })
+        {
+            Some(CappedFireStep {
+                origin: self.x.clone(),
+                eff: translated_gradient(&g0, &tau, translation_curvature),
+                curvature: translation_curvature,
+            })
+        } else {
+            None
         };
         let centre = match at_new {
             Some(p) => p,

@@ -142,6 +142,86 @@ fn lanczos_fire_climbs_the_double_well() {
     );
 }
 
+/// `V = 400 ((x^2 - a^2)^2 + 2 y^2 + 2 z^2)` with `a^2 = 3 * 0.08^2`.
+/// The curvature along x is negative only for `|x| < 0.08`. At
+/// x = 0.06 the from-rest FIRE step exceeds `max_move`, so the cap
+/// moves to about -0.14, where the curvature is positive. The stock
+/// step stays there. Replacing that capped move from the last negative
+/// point keeps the reported curvature negative and reaches the saddle.
+struct NarrowRidge;
+
+impl PointSurface for NarrowRidge {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        let (a, b, c) = (x[0], x[1], x[2]);
+        let width2 = 0.08_f64 * 0.08 * 3.0;
+        let scale = 400.0;
+        let dx = a * a - width2;
+        let energy = scale * (dx * dx + 2.0 * b * b + 2.0 * c * c);
+        let gradient = array![scale * 4.0 * a * dx, scale * 4.0 * b, scale * 4.0 * c];
+        Ok((energy, gradient))
+    }
+}
+
+struct CountingRidge {
+    calls: AtomicUsize,
+}
+
+impl PointSurface for CountingRidge {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        NarrowRidge.eval(x)
+    }
+}
+
+#[test]
+fn fire_returns_to_a_narrow_negative_ridge() {
+    let surface = CountingRidge {
+        calls: AtomicUsize::new(0),
+    };
+    let start = array![0.06, 0.0, 0.0];
+    let seed = array![1.0, 0.0, 0.0];
+    let mut session = MinModeSession::new(
+        harness(
+            MinModeKind::Dimer,
+            rgmin::Method::Fire {
+                kind: rgmin::FireKind::V2,
+            },
+        ),
+        start,
+        seed,
+    )
+    .unwrap();
+    let mut report = session.step(&surface).unwrap();
+    let mut steps = 1usize;
+    let mut entered = false;
+    let mut left = false;
+    loop {
+        if report.curvature < 0.0 {
+            entered = true;
+        } else if entered {
+            left = true;
+        }
+        if report.status != MinModeStatus::Running || steps >= 80 {
+            break;
+        }
+        report = session.step(&surface).unwrap();
+        steps += 1;
+    }
+    let calls = surface.calls.load(Ordering::Relaxed);
+    assert!(entered, "never saw negative curvature, {report:?}");
+    assert!(!left, "left the negative ridge");
+    assert_eq!(
+        report.status,
+        MinModeStatus::Converged,
+        "running after {steps} steps, {calls} evals, x={:?}, force {}",
+        session.position(),
+        report.max_force
+    );
+    assert!(calls < 400, "{calls} evals");
+    let x = session.position();
+    assert!(x[0].abs() < 2e-2, "a={}", x[0]);
+}
+
 #[test]
 fn rust_default_angle_is_five_degrees() {
     let tol = MinModeConfig::default().rotation_angle_tol;
