@@ -1,0 +1,39 @@
+{
+  "note": "sha256 of the index1_probe trace and the %.17g bench checksums. The fixture is rational. The bytes match at dev opt-level 0 and opt-level 3.",
+  "cases": 128,
+  "steps": 768,
+  "trace_bytes": 9280512,
+  "trace_sha256": "2e408fa3f461c16627db1b7de3be4df29035f5e8c9594b27c5a6dbfab8aa20f8",
+  "bench": [
+    {
+      "dimension": 3,
+      "repeats": 1000,
+      "calls": 4000,
+      "checksum": "-6022.3725729916196"
+    },
+    {
+      "dimension": 15,
+      "repeats": 100,
+      "calls": 400,
+      "checksum": "-601.7681673628357"
+    },
+    {
+      "dimension": 75,
+      "repeats": 8,
+      "calls": 32,
+      "checksum": "-48.116224386396809"
+    },
+    {
+      "dimension": 150,
+      "repeats": 3,
+      "calls": 12,
+      "checksum": "-18.043222206808053"
+    },
+    {
+      "dimension": 300,
+      "repeats": 1,
+      "calls": 4,
+      "checksum": "-6.0141132700416975"
+    }
+  ]
+}

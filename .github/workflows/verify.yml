@@ -36,6 +36,11 @@ jobs:
 
   validation:
     runs-on: ubuntu-latest
+    # Symbolic scripts finish in about a minute. The ABI probe used to
+    # stay in this job for about an hour and a half with no timeout,
+    # so a repeat of that run would hold the job until the runner
+    # limit. Twenty minutes still covers a cold build.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Install Sollya and a C toolchain
@@ -67,11 +72,16 @@ jobs:
         run: |
           set -euo pipefail
           export PATH="$HOME/.local/bin:$PATH"
-          cargo build --features capi
+          # sym_eigh is a cyclic Jacobi, O(n^3) per sweep, and the dev
+          # profile does not optimize this crate. One dimension-300
+          # bench call then takes about three minutes. The previous
+          # step copied the binary and timed that call sixteen times.
+          # The printed ratio was not asserted. Optimize this package
+          # only. validation/golden/index1_abi.json is the check.
+          cargo build --features capi --config 'profile.dev.package.rgsaddle.opt-level=3'
           gcc -I include validation/index1_probe.c -L target/debug -lrgsaddle -lm -Wl,-rpath,"$PWD/target/debug" -o /tmp/index1_probe
-          cp /tmp/index1_probe /tmp/index1_probe_candidate
           mkdir -p /tmp/index1_out
-          uv run --no-project python validation/check_index1.py /tmp/index1_probe /tmp/index1_probe_candidate /tmp/index1_out
+          uv run --no-project python validation/check_index1.py /tmp/index1_probe /tmp/index1_out
 
   kani:
     runs-on: ubuntu-latest
