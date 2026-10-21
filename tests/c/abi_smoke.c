@@ -9,6 +9,7 @@
 #include <string.h>
 
 static int surface_one_calls;
+static int climb_alone_calls;
 
 static rgsaddle_status_t fail(rgsaddle_status_t st, const char *msg) {
   fprintf(stderr, "%s (%s)\n", msg, rgsaddle_status_name(st));
@@ -140,8 +141,15 @@ static rgsaddle_status_t surface(void *user, rgsaddle_surface_request_t *req) {
   if (req->version.major != RGSADDLE_ABI_MAJOR) {
     return RGSADDLE_ABI_MISMATCH;
   }
-  if (req->image != -1 || (req->flags & RGSADDLE_REQ_ONE_IMAGE) != 0) {
+  if ((req->flags & RGSADDLE_REQ_ONE_IMAGE) != 0) {
     return RGSADDLE_SHAPE;
+  }
+  /* A handed-off climbing image comes alone with its band index. */
+  if (req->image != -1 && (req->n_images != 1 || req->image < 1 || req->image > 7)) {
+    return RGSADDLE_SHAPE;
+  }
+  if (req->image != -1) {
+    climb_alone_calls += 1;
   }
   const long dof = 3 * (long)req->n_atoms;
   for (long i = 0; i < (long)req->n_images; ++i) {
@@ -233,6 +241,11 @@ int main(void) {
   if (rep.ci_index < 1 || rep.ci_index > n_images - 2) {
     fprintf(stderr, "climbing image not armed: %lld\n", (long long)rep.ci_index);
     return fail(RGSADDLE_SHAPE, "climbing image not armed");
+  }
+  if (climb_alone_calls < 1 || rep.curvature >= 0.0) {
+    fprintf(stderr, "hand-off calls=%d curvature=%g\n", climb_alone_calls,
+            rep.curvature);
+    return fail(RGSADDLE_SOLVER, "climbing image not handed off");
   }
 
   double out[9 * 3];

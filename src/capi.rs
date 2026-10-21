@@ -27,7 +27,7 @@ use crate::spring::SpringKind;
 use crate::tangent::TangentKind;
 
 pub const RGSADDLE_ABI_MAJOR: u32 = 1;
-pub const RGSADDLE_ABI_MINOR: u32 = 18;
+pub const RGSADDLE_ABI_MINOR: u32 = 19;
 
 /// Band config bit 0. The C step calls the surface once per image
 /// carried by the evaluation: every image on the first evaluation
@@ -42,6 +42,10 @@ pub const RGSADDLE_BAND_KEEP_TRANSLATION: u64 = 2;
 /// be 0. Without the bit, climbing is on only when `ci_trigger_factor`
 /// is positive.
 pub const RGSADDLE_BAND_CI_AFTER: u64 = 4;
+/// Band config bit 3 (ABI minor 19). The climbing image stays on the
+/// band until every image converges. Without the bit a climbing band
+/// hands its climbing image off (`BandConfig::climb_refine`).
+pub const RGSADDLE_BAND_CI_ON_BAND: u64 = 8;
 
 pub const RGSADDLE_OK: i32 = 0;
 pub const RGSADDLE_NULL_SESSION: i32 = -1;
@@ -164,12 +168,36 @@ impl CSurface {
         energies: &mut [f64],
         gradients: &mut [f64],
     ) -> Result<(), SaddleError> {
+        let flags = if image >= 0 { 1 } else { 0 };
+        self.request(flags, n_images, image, positions, energies, gradients)
+    }
+
+    fn call_batched(
+        &self,
+        n_images: i64,
+        image: i64,
+        positions: &[f64],
+        energies: &mut [f64],
+        gradients: &mut [f64],
+    ) -> Result<(), SaddleError> {
+        self.request(0, n_images, image, positions, energies, gradients)
+    }
+
+    fn request(
+        &self,
+        flags: u64,
+        n_images: i64,
+        image: i64,
+        positions: &[f64],
+        energies: &mut [f64],
+        gradients: &mut [f64],
+    ) -> Result<(), SaddleError> {
         let mut req = RgsaddleSurfaceRequest {
             version: RgsaddleVersion {
                 major: RGSADDLE_ABI_MAJOR,
                 minor: RGSADDLE_ABI_MINOR,
             },
-            flags: if image >= 0 { 1 } else { 0 },
+            flags,
             n_images,
             n_atoms: self.n_atoms,
             positions: positions.as_ptr(),
@@ -227,6 +255,24 @@ impl BandSurface for CSurface {
             }
         }
         Ok(())
+    }
+
+    /// Per-image: the one-image request for `image`. Batched: one row,
+    /// `n_images` 1 and `image` the band index.
+    fn eval_image(
+        &self,
+        image: usize,
+        position: ndarray::ArrayView1<f64>,
+    ) -> Result<(f64, Array1<f64>), SaddleError> {
+        let flat: Vec<f64> = position.iter().copied().collect();
+        let mut e = [0.0];
+        let mut g = vec![0.0; flat.len()];
+        if self.per_image {
+            self.call(self.n_images, image as i64, &flat, &mut e, &mut g)?;
+        } else {
+            self.call_batched(1, image as i64, &flat, &mut e, &mut g)?;
+        }
+        Ok((e[0], Array1::from(g)))
     }
 }
 
@@ -447,6 +493,8 @@ unsafe fn band_from_parts(
         quickmin_options: rgmin::QuickMinOptions::rgmin(),
         time_step: 1.0,
         autoneb: None,
+        climb_refine: (cfg.flags & RGSADDLE_BAND_CI_ON_BAND == 0)
+            .then(crate::climb::ClimbRefine::default),
     };
     match BandSession::new(band_config, initial) {
         Ok(mut session) => {
@@ -511,7 +559,7 @@ pub unsafe extern "C" fn rgsaddle_band_step(
             out.max_force = report.max_force;
             out.ci_index = report.ci_index.map(|i| i as i64).unwrap_or(-1);
             out.iteration = report.iteration as i64;
-            out.curvature = 0.0;
+            out.curvature = band.session.climbing_curvature().unwrap_or(0.0);
             out.rotations = 0;
             RGSADDLE_OK
         }

@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 18u
+#define RGSADDLE_ABI_MINOR 19u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -60,6 +60,21 @@ extern "C" {
  * and force 0.5.
  */
 #define RGSADDLE_BAND_CI_AFTER (1ull << 2)
+
+/**
+ * Band config flags bit 3, ABI minor 19. The climbing image stays on
+ * the band and the step converges when every image is under
+ * force_tol. Without the bit a climbing band hands its climbing image
+ * off once the same image has climbed for two evaluations in a row:
+ * from then on each step evaluates that image alone (one request, see
+ * rgsaddle_surface_request_t), the other images stay where they are,
+ * max_force is the climbing image's force under the band's force
+ * gate, curvature is the curvature along the mode it follows, and
+ * the step converges when that force is under force_tol. If the
+ * image's lowest mode is not negative or turns away from the band,
+ * the image goes back to the band unmoved.
+ */
+#define RGSADDLE_BAND_CI_ON_BAND (1ull << 3)
 
 /** Request flags bit 0. positions and gradients are one image. */
 #define RGSADDLE_REQ_ONE_IMAGE (1ull << 0)
@@ -159,12 +174,16 @@ typedef struct RgsaddleMinMode RgsaddleMinMode;
  * of images carried by this request: the band length on the first
  * evaluation, band - 2 afterwards. Row r is image r when n_images is
  * the band length and image r + 1 otherwise. positions and gradients
- * are n_images * 3 * n_atoms, energies is n_images.
+ * are n_images * 3 * n_atoms, energies is n_images. The one
+ * exception is the handed-off climbing image (ABI minor 19, see
+ * RGSADDLE_BAND_CI_ON_BAND): n_images is 1 and image is its band
+ * index.
  *
  * With RGSADDLE_REQ_ONE_IMAGE, image is the band index of the one
  * image carried (endpoints 0 and band - 1 appear only on the first
  * evaluation), positions and gradients are 3 * n_atoms, energies is
- * one value, and n_images is the length of the band.
+ * one value, and n_images is the length of the band. The handed-off
+ * climbing image comes as this request for its band index.
  *
  * Return RGSADDLE_OK or another rgsaddle_status_t; a non-OK return
  * fails the step with the band unchanged.
@@ -219,7 +238,11 @@ typedef struct {
   /** Armed climbing image, or -1. */
   int64_t ci_index;
   int64_t iteration;
-  /** Min-mode only: curvature along the lowest mode. */
+  /**
+   * Min-mode: curvature along the lowest mode. Band (ABI minor 19):
+   * curvature along the mode the handed-off climbing image follows,
+   * else 0.
+   */
   double curvature;
   int64_t rotations;
 } rgsaddle_report_t;

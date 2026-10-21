@@ -168,5 +168,5 @@ fn mid_run_con_restart_matches_an_uninterrupted_run() {
     let straight_bytes = std::fs::read(&straight_file.0).unwrap();
     let resumed_bytes = std::fs::read(&resumed_file.0).unwrap();
     assert_eq!(straight_bytes, resumed_bytes);
-    assert_eq!(straight_bytes.len(), 1602);
+    assert_eq!(straight_bytes.len(), 1581);
 }

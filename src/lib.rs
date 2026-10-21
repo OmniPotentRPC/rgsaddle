@@ -36,6 +36,7 @@ pub mod autoneb;
 pub mod band;
 #[cfg(feature = "capi")]
 pub mod capi;
+pub mod climb;
 pub mod connect;
 pub mod error;
 pub mod minmode;
@@ -53,6 +54,7 @@ pub use band::{
     BandConfig, BandEvaluation, BandReport, BandSession, BandStatus, BandSurface, Cell, CiConfig,
     SolidState,
 };
+pub use climb::ClimbRefine;
 pub use connect::{ConnectConfig, ConnectProfile, ConnectReport, connect};
 pub use error::SaddleError;
 pub use minmode::{

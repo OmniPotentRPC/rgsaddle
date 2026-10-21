@@ -39,13 +39,22 @@ fn initial_band(n_images: usize) -> Array2<f64> {
     band
 }
 
+/// Keeps the climbing image on the band, so every step relaxes the
+/// interior images and evaluates them together.
+fn on_band() -> BandConfig {
+    BandConfig {
+        climb_refine: None,
+        ..BandConfig::default()
+    }
+}
+
 #[test]
 fn band_converges_to_the_double_well_saddle() {
     let n_images = 9;
     let config = BandConfig {
         force_tol: 1e-3,
         max_move: 0.1,
-        ..BandConfig::default()
+        ..on_band()
     };
     let mut session = BandSession::new(config, initial_band(n_images)).unwrap();
     let mut report = session.step(&DoubleWell).unwrap();
@@ -171,7 +180,7 @@ impl BandSurface for Counting {
 fn endpoints_are_evaluated_once_and_each_step_costs_one_interior_eval() {
     let n_images = 7;
     let interior = n_images - 2;
-    let mut session = BandSession::new(BandConfig::default(), initial_band(n_images)).unwrap();
+    let mut session = BandSession::new(on_band(), initial_band(n_images)).unwrap();
     let surface = Counting::new();
 
     // First step: exactly one whole-band evaluation (the endpoint
@@ -242,7 +251,7 @@ fn wrapped_resync_keeps_the_cached_band() {
             [0.0, 3.0, 0.0],
             [0.0, 0.0, 3.0],
         ])),
-        ..BandConfig::default()
+        ..on_band()
     };
     let mut session = BandSession::new(config, initial_band(n_images)).unwrap();
     let surface = Counting::new();
@@ -311,7 +320,7 @@ fn lbfgs_band_steps_once_per_evaluation_and_converges() {
         force_tol: 1e-3,
         max_move: 0.1,
         method: rgmin::Method::Lbfgs { memory: 10 },
-        ..BandConfig::default()
+        ..on_band()
     };
     let mut session = BandSession::new(config, initial_band(n_images)).unwrap();
     let surface = Counting::new();

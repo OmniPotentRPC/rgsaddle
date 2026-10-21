@@ -1090,6 +1090,9 @@ impl AutoNeb {
             band.force_tol = force_tol;
             band.climbing = climbing;
             band.autoneb = None;
+            // A window converges as a band: its images feed the next
+            // insertion, so none of them leaves it.
+            band.climb_refine = None;
             band.spring = SpringKind::Weighted { ks };
             let mut session = BandSession::new(band, sub)?;
             let last = *window.last().expect("window");

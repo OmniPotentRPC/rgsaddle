@@ -8,6 +8,7 @@ use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
 use rgmin::{Accept, Control, Method, Oracle, Solver};
 
 use crate::cell_log::{M3, m3_det};
+use crate::climb::{ClimbOutcome, ClimbRefine, Climber};
 use crate::error::SaddleError;
 use crate::force::ForceGate;
 use crate::projection::{ProjectionKind, climbing_image_force, dneb_component, force_perp};
@@ -240,6 +241,16 @@ pub struct BandConfig {
     pub time_step: f64,
     /// `Some` selects AutoNEB on this configuration. `None` is a fixed band.
     pub autoneb: Option<crate::autoneb::AutoNebTuning>,
+    /// With climbing on, hand the climbing image off the band once it
+    /// is stable and refine it alone to the saddle (see
+    /// [`crate::climb`]). From then on a step costs one evaluation of
+    /// that image through [`BandSurface::eval_image`], the other images
+    /// stay where they are, and the step reports the climbing image's
+    /// force and converges on it. `None` keeps the climbing image on
+    /// the band until every image is under `force_tol`. Atomic bands
+    /// on the solver step only; the trust-region and solid-state steps
+    /// ignore it.
+    pub climb_refine: Option<ClimbRefine>,
 }
 
 impl Default for BandConfig {
@@ -261,6 +272,7 @@ impl Default for BandConfig {
             quickmin_options: rgmin::QuickMinOptions::rgmin(),
             time_step: 1.0,
             autoneb: None,
+            climb_refine: Some(ClimbRefine::default()),
         }
     }
 }
@@ -326,6 +338,28 @@ pub trait BandSurface: Sync {
         Err(SaddleError::Invalid(
             "solid-state band requires BandSurface::eval_cells".into(),
         ))
+    }
+
+    /// Energy and gradient of band image `image` alone, at `position`.
+    /// Called only for the climbing image once it is handed off the
+    /// band ([`BandConfig::climb_refine`]). The default is one
+    /// [`BandSurface::eval`] call with a single row, which a host
+    /// keying per-image state on the row count must tell apart from
+    /// the band calls by overriding this method.
+    fn eval_image(
+        &self,
+        image: usize,
+        position: ArrayView1<f64>,
+    ) -> Result<(f64, Array1<f64>), SaddleError> {
+        let _ = image;
+        let n = position.len();
+        let rows = position
+            .to_shape((1, n))
+            .map_err(|e| SaddleError::Shape(e.to_string()))?;
+        let mut energies = Array1::zeros(1);
+        let mut gradients = Array2::zeros((1, n));
+        self.eval(rows.view(), &mut energies, &mut gradients)?;
+        Ok((energies[0], gradients.row(0).to_owned()))
     }
 }
 
@@ -1180,6 +1214,14 @@ impl<S: BandSurface> BandSurface for CachedBandSurface<'_, S> {
         gradients.assign(&g);
         Ok(())
     }
+
+    fn eval_image(
+        &self,
+        image: usize,
+        position: ArrayView1<f64>,
+    ) -> Result<(f64, Array1<f64>), SaddleError> {
+        self.surface.eval_image(image, position)
+    }
 }
 
 /// The rgmin solver of a band: the per-atom cap, the quick-min options,
@@ -1228,6 +1270,15 @@ pub struct BandSession {
     iteration: usize,
     rtr: Option<crate::rtr::BandRtr>,
     solid: Option<SolidRun>,
+    climber: Option<Climber>,
+    /// Climbing image of the last band evaluation and how many
+    /// evaluations in a row before it had the same one.
+    streak: (Option<usize>, usize),
+    /// After a refused hand-off the next waits for a climbing force
+    /// under this.
+    retry_gate: f64,
+    /// Climbing force when the image was handed off.
+    handoff_gate: f64,
 }
 
 impl BandSession {
@@ -1269,6 +1320,9 @@ impl BandSession {
                 "band time step must be positive and finite".into(),
             ));
         }
+        if let Some(refine) = &config.climb_refine {
+            refine.validate()?;
+        }
         let (positions, solid) = prepare_solid(&config, initial)?;
         let segment = if solid.is_some() { dof + 9 } else { dof };
         let interior_dof = (n_images - 2) * segment;
@@ -1281,7 +1335,30 @@ impl BandSession {
             iteration: 0,
             rtr: None,
             solid,
+            climber: None,
+            streak: (None, 0),
+            retry_gate: f64::INFINITY,
+            handoff_gate: f64::INFINITY,
         })
+    }
+
+    /// The climbing image goes back to the band where it stands.
+    fn drop_climb(&mut self) {
+        self.climber = None;
+        self.streak = (None, 0);
+        self.retry_gate = f64::INFINITY;
+    }
+
+    /// Whether the climbing image is refined off the band
+    /// ([`BandConfig::climb_refine`]).
+    pub fn climbing_refined(&self) -> bool {
+        self.climber.is_some()
+    }
+
+    /// Curvature along the mode the handed-off climbing image follows,
+    /// once its first Krylov run has ended.
+    pub fn climbing_curvature(&self) -> Option<f64> {
+        self.climber.as_ref().and_then(Climber::curvature)
     }
 
     /// Select the optional HiGHS feasible-set step; requires the `highs` feature.
@@ -1344,6 +1421,7 @@ impl BandSession {
         let interior_dof = (self.positions.nrows() - 2) * segment;
         self.solver = build_solver(&self.config, &method, interior_dof);
         self.state.restart();
+        self.drop_climb();
         Ok(())
     }
 
@@ -1411,6 +1489,7 @@ impl BandSession {
         }
         if moved {
             self.state.drop_last();
+            self.drop_climb();
         }
         Ok(())
     }
@@ -1442,6 +1521,7 @@ impl BandSession {
     pub(crate) fn set_climbing(&mut self, climbing: Option<CiConfig>) {
         self.config.climbing = climbing;
         self.state.restart();
+        self.drop_climb();
         self.solver.forget_evaluation();
     }
 
@@ -1468,6 +1548,7 @@ impl BandSession {
     pub fn restart(&mut self) {
         self.solver.forget();
         self.state.restart();
+        self.drop_climb();
         if let Some(rtr) = &mut self.rtr {
             *rtr = crate::rtr::BandRtr::new(rtr.config, false);
             rtr.set_force_gate(self.state.force_gate);
@@ -1554,6 +1635,9 @@ impl BandSession {
         if self.rtr.is_some() {
             return self.step_rtr(surface);
         }
+        if self.climber.is_some() {
+            return self.step_climb(surface);
+        }
         let n_images = self.positions.nrows();
         let dof = self.positions.ncols();
         let interior_dof = (n_images - 2) * dof;
@@ -1626,6 +1710,9 @@ impl BandSession {
         } else {
             BandStatus::Running
         };
+        if status == BandStatus::Running {
+            self.consider_handoff();
+        }
         Ok(BandReport {
             status,
             max_force,
@@ -1633,6 +1720,129 @@ impl BandSession {
             iteration: self.iteration,
             surface_rows: self.state.rows.load(Ordering::Relaxed),
         })
+    }
+
+    /// Hand the climbing image off once it has held for
+    /// `stable_steps` evaluations after the one that chose it. The
+    /// tangent is the central difference of its neighbours.
+    fn consider_handoff(&mut self) {
+        let ci = self.state.ci();
+        self.streak = match (ci, self.streak) {
+            (Some(i), (Some(prev), count)) if i == prev => (ci, count + 1),
+            _ => (ci, 0),
+        };
+        let (Some(refine), Some(_), Some(ci)) =
+            (self.config.climb_refine, &self.config.climbing, ci)
+        else {
+            return;
+        };
+        if self.streak.1 < refine.stable_steps {
+            return;
+        }
+        let x = self.interior_flat();
+        let (e, g) = {
+            let slot = self.state.last.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(last) = slot.as_ref().filter(|l| l.x == x) else {
+                return;
+            };
+            (last.energies[ci], last.gradients.row(ci).to_owned())
+        };
+        let gate = self.state.convergence_force(&(-&g));
+        if gate.is_nan() || gate >= self.retry_gate {
+            return;
+        }
+        let mut tangent = &self.positions.row(ci + 1) - &self.positions.row(ci - 1);
+        if let Some(cell) = &self.config.cell {
+            cell.minimum_image(&mut tangent);
+        }
+        if let Ok(climber) = Climber::new(
+            refine,
+            ci,
+            self.positions.row(ci).to_owned(),
+            e,
+            g,
+            tangent,
+            self.config.cell,
+            self.config.remove_translation,
+            self.config.max_move,
+        ) {
+            self.climber = Some(climber);
+            self.handoff_gate = gate;
+        }
+    }
+
+    /// One evaluation of the handed-off climbing image. A refused
+    /// first mode sends the image back to the band unmoved.
+    fn step_climb<S: BandSurface>(&mut self, surface: &S) -> Result<BandReport, SaddleError> {
+        let climber = self.climber.as_mut().expect("handed-off climbing image");
+        let image = climber.image();
+        let mut calls = 0;
+        let outcome = climber.step(|x| {
+            calls += 1;
+            surface.eval_image(image, x)
+        })?;
+        self.iteration += 1;
+        let running = |max_force: f64, this: &Self| BandReport {
+            status: BandStatus::Running,
+            max_force,
+            ci_index: this.state.ci(),
+            iteration: this.iteration,
+            surface_rows: calls,
+        };
+        match outcome {
+            ClimbOutcome::Refused => {
+                self.climber = None;
+                let factor = self.config.climb_refine.map_or(1.0, |r| r.retry_factor);
+                self.retry_gate = factor * self.handoff_gate;
+                self.solver.forget_evaluation();
+                Ok(running(self.state.last_max_force(), self))
+            }
+            ClimbOutcome::Probed => Ok(running(self.state.last_max_force(), self)),
+            ClimbOutcome::Moved => {
+                let climber = self.climber.as_ref().expect("handed-off climbing image");
+                let g = climber.gradient().to_owned();
+                let mode = climber.mode().to_owned();
+                self.positions.row_mut(image).assign(&climber.position());
+                let energy = climber.energy();
+                let mut force = -&g;
+                force.scaled_add(2.0 * g.dot(&mode), &mode);
+                if self.config.remove_translation {
+                    remove_net_translation(&mut force);
+                }
+                let max_force = self.state.convergence_force(&(-&g));
+                let x = self.interior_flat();
+                let dof = self.positions.ncols();
+                if let Some(last) = self
+                    .state
+                    .last
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .as_mut()
+                {
+                    last.x = x;
+                    last.energies[image] = energy;
+                    last.gradients.row_mut(image).assign(&g);
+                    if last.projected.len() == last.x.len() {
+                        last.projected
+                            .slice_mut(s![(image - 1) * dof..image * dof])
+                            .assign(&force);
+                    }
+                }
+                *self
+                    .state
+                    .last_max_force
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = max_force;
+                Ok(BandReport {
+                    status: if max_force <= self.config.force_tol {
+                        BandStatus::Converged
+                    } else {
+                        BandStatus::Running
+                    },
+                    ..running(max_force, self)
+                })
+            }
+        }
     }
 
     fn pack_interior(&self) -> Array1<f64> {
