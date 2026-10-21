@@ -38,7 +38,8 @@
 use ndarray::{Array1, ArrayView1, Axis, s};
 
 use super::climb::ModelClimb;
-use super::{BandReport, BandSession, BandStatus, BandSurface};
+use super::pair_model::rigid_basis;
+use super::{BandReport, BandSession, BandStatus, BandSurface, Cell};
 use crate::error::SaddleError;
 use crate::minmode::{
     FiniteDifference, MinModeConfig, MinModeKind, MinModeSession, ModeEstimate, PointSurface,
@@ -200,31 +201,64 @@ impl Run {
         self.session.estimate_mode(surface)
     }
 
-    /// The `h_0` probe along the force perpendicular to `mode`, and the
-    /// model that carries `curvature` on `mode`.
+    /// The Krylov block of the last estimate, or the estimated mode
+    /// with its curvature when the estimate kept none.
+    fn block(&self, estimate: &ModeEstimate) -> Vec<(Array1<f64>, Array1<f64>)> {
+        let block = self.session.krylov_block();
+        if block.is_empty() {
+            vec![(estimate.mode.clone(), &estimate.mode * estimate.curvature)]
+        } else {
+            block.to_vec()
+        }
+    }
+
+    /// The climb model fit to the estimate's block. Without a Krylov
+    /// block (a dimer estimate) one Hessian action along the force
+    /// perpendicular to the mode joins the mode.
     fn start_climb<P: PointSurface>(
         &mut self,
         surface: &P,
-        mode: &Array1<f64>,
-        curvature: f64,
+        estimate: &ModeEstimate,
         dr: f64,
         max_move: f64,
+        cell: Option<&Cell>,
+        remove_translation: bool,
     ) -> Result<(), SaddleError> {
-        let g = &self.current.gradient;
-        let mut d = g - &(mode * mode.dot(g));
-        let norm = d.dot(&d).sqrt();
-        let mut h0 = 1.0;
-        if norm > 0.0 {
-            d /= norm;
-            let probe = &self.current.x + &(&d * dr);
-            let (_, gp) = surface.eval(probe.view())?;
-            h0 = ((&gp - g).dot(&d) / dr).abs().max(1e-3);
+        let mut block = self.block(estimate);
+        if self.session.krylov_block().is_empty() {
+            let g = &self.current.gradient;
+            let mode = &estimate.mode;
+            let mut d = g - &(mode * mode.dot(g));
+            let norm = d.dot(&d).sqrt();
+            if norm > 0.0 {
+                d /= norm;
+                let probe = &self.current.x + &(&d * dr);
+                let (_, gp) = surface.eval(probe.view())?;
+                block.push((d, (&gp - g) / dr));
+            }
         }
-        let mut climb = ModelClimb::new(g.len(), h0, max_move);
-        climb.set_mode(mode, curvature)?;
-        self.climb = Some(climb);
+        let rigid = rigid_motions(&self.current.x, cell, remove_translation);
+        self.climb = Some(ModelClimb::fitted(
+            &self.current.x,
+            cell,
+            rigid,
+            &block,
+            max_move,
+        ));
         Ok(())
     }
+}
+
+/// The rigid motions a band without its mean force removes: the
+/// translations, and the rotations too when there is no cell.
+fn rigid_motions(
+    x: &Array1<f64>,
+    cell: Option<&Cell>,
+    remove_translation: bool,
+) -> Option<ndarray::Array2<f64>> {
+    remove_translation
+        .then(|| rigid_basis(x, cell.is_none()))
+        .flatten()
 }
 
 /// Trigger, stability latch, cached mode and the running refinement.
@@ -348,6 +382,8 @@ impl BandSession {
         }
         let max_move = self.config.max_move;
         let force_gate = self.state.force_gate;
+        let cell = self.config.cell;
+        let remove_translation = self.config.remove_translation;
         let run = self.refine.run.as_mut().expect("refinement run");
         let image_surface = ImageSurface {
             surface,
@@ -364,6 +400,11 @@ impl BandSession {
                 &(&run.current.gradient - &g),
                 run.current.energy,
             );
+            climb.set_rigid(rigid_motions(
+                &run.current.x,
+                cell.as_ref(),
+                remove_translation,
+            ));
             run.refresh_gate = run.refresh_gate.min(gate);
             run.since_refresh += 1;
             let (lowest, _) = climb.lowest()?;
@@ -374,10 +415,8 @@ impl BandSession {
             let grew = gate > config.refresh_factor * run.refresh_gate && run.since_refresh >= 2;
             if turned || grew {
                 let estimate = run.estimate(&image_surface)?;
-                run.climb
-                    .as_mut()
-                    .expect("climb model")
-                    .set_mode(&estimate.mode, estimate.curvature)?;
+                let block = run.block(&estimate);
+                run.climb.as_mut().expect("climb model").impose(&block);
                 run.refresh_gate = gate;
                 run.since_refresh = 0;
                 rotations = estimate.rotations;
@@ -393,8 +432,9 @@ impl BandSession {
             // curvature is still negative, so only a measured one ends
             // the climb.
             let estimate = run.estimate(&image_surface)?;
+            let block = run.block(&estimate);
             let climb = run.climb.as_mut().expect("climb model");
-            climb.set_mode(&estimate.mode, estimate.curvature)?;
+            climb.impose(&block);
             run.refresh_gate = gate;
             run.since_refresh = 0;
             rotations = estimate.rotations;
@@ -476,6 +516,8 @@ impl BandSession {
         let max_move = self.config.max_move;
         let force_tol = self.config.force_tol;
         let gate_of = self.state.force_gate;
+        let cell = self.config.cell;
+        let remove_translation = self.config.remove_translation;
         let run = self.refine.run.as_mut().expect("refinement run");
         let image_surface = ImageSurface {
             surface,
@@ -512,10 +554,11 @@ impl BandSession {
         }
         run.start_climb(
             &image_surface,
-            &estimate.mode,
-            estimate.curvature,
+            &estimate,
             config.dr,
             max_move,
+            cell.as_ref(),
+            remove_translation,
         )?;
         run.refresh_gate = gate;
         run.since_refresh = 0;

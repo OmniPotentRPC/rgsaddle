@@ -21,6 +21,7 @@ use crate::tangent::compute_tangent;
 
 mod climb;
 mod min_mode;
+mod pair_model;
 pub use min_mode::MinModeRefine;
 pub(crate) use min_mode::RefinePhase;
 
