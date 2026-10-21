@@ -9,7 +9,9 @@ The reported force norm must satisfy the selected ~ForceGate~, and the estimated
 
 ** Keep one session across a host search
 
-A host that climbs with its own optimizer keeps one session for the whole search. At each new centre it calls ~set_position~ (~rgsaddle_minmode_set_position~) with the gradient it already has, so the session does not evaluate the centre, then ~estimate_mode~ (~rgsaddle_minmode_estimate~). The previous mode seeds the next rotation, so an unchanged mode costs one evaluation. ~set_mode~ (~rgsaddle_minmode_set_mode~) replaces the seed. All three need ABI minor 5.
+A host that climbs with its own optimizer keeps one session for the whole search. At each new centre it calls ~set_position~ (~rgsaddle_minmode_set_position~) with the gradient it already has, so the session does not evaluate the centre, then ~estimate_mode~ (~rgsaddle_minmode_estimate~). The previous mode seeds the next rotation. Dimer rotations also retain their Polak--Ribiere force and direction across a translation; a repeated estimate at exactly one centre restarts that rotational history. ~set_mode~ (~rgsaddle_minmode_set_mode~) replaces the seed and clears both rotational history and the carried curvature. ~reset~ clears them at a surface-epoch boundary. All three need ABI minor 5.
+
+The stock Lanczos translation stops when the lowest Ritz value changes by at most 0.05 relative to the previous value, including the value carried from the preceding translation. A standalone ~estimate_mode~ keeps the stricter Ritz-residual stop, so it remains suitable when the mode itself is the result. ~set_lanczos_rel_tol(Some(tol))~ explicitly uses one relative tolerance in both contexts; ~None~ explicitly restores residual-only stopping.
 
 Two ~MinModeConfig~ fields set the cost of an estimate:
 

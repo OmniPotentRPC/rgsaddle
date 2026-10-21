@@ -423,7 +423,9 @@ rgsaddle_status_t rgsaddle_minmode_step(RgsaddleMinMode *session,
  * curvature, rotations, and evaluations (surface calls, the centre
  * included when it was neither cached nor supplied); max_force is NaN.
  * Keep the session across a saddle search: the refreshed mode seeds
- * the next estimate, so a mode that still holds costs one evaluation.
+ * the next estimate. Standalone Lanczos estimates use the Ritz-residual
+ * stop; translations use the stock relative Ritz-value stop. A repeated
+ * dimer estimate at one geometry restarts rotational CG history.
  */
 rgsaddle_status_t rgsaddle_minmode_estimate(RgsaddleMinMode *session,
                                             rgsaddle_surface_fn surface,
@@ -435,16 +437,19 @@ rgsaddle_status_t xts_minmode_estimate(RgsaddleMinMode *session,
                                        rgsaddle_report_t *out);
 
 /**
- * Move the session to a new point (3 * n_atoms doubles). The mode and
- * the optimizer history stay. gradient is the host's energy gradient
- * at that point, or NULL; when given, the next estimate or step skips
- * the centre evaluation.
+ * Move the session to a new point (3 * n_atoms doubles). The mode,
+ * translation optimizer history, and dimer rotational CG history stay.
+ * gradient is the host's energy gradient at that point, or NULL; when
+ * given, the next estimate or step skips the centre evaluation.
  */
 rgsaddle_status_t rgsaddle_minmode_set_position(RgsaddleMinMode *session,
                                                 const double *position,
                                                 const double *gradient);
 
-/** Replace the mode seed (3 * n_atoms doubles, normalized on entry). */
+/**
+ * Replace the mode seed (3 * n_atoms doubles, normalized on entry) and
+ * clear dimer rotational history and carried Lanczos curvature.
+ */
 rgsaddle_status_t rgsaddle_minmode_set_mode(RgsaddleMinMode *session,
                                             const double *mode);
 
@@ -452,6 +457,7 @@ rgsaddle_status_t rgsaddle_minmode_position(const RgsaddleMinMode *session,
                                                 double *out);
 rgsaddle_status_t rgsaddle_minmode_mode(const RgsaddleMinMode *session,
                                         double *out);
+/** Clear optimizer/rotation history, carried curvature, and the centre cache. */
 rgsaddle_status_t rgsaddle_minmode_reset(RgsaddleMinMode *session);
 void rgsaddle_minmode_free(RgsaddleMinMode *session);
 

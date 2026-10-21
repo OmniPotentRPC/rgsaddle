@@ -70,7 +70,7 @@ class Stencil:
     @staticmethod
     def point(x: Annotated[NDArray[numpy.float64], dict(shape=(None,), order='C', writable=False)], preset: str = 'dimer', mode: object | None = None, dr: float = 0.001, force_tol: float = 0.001, max_move: float = 0.2, rotation_tol: float = 0.0001, max_rotations: int = 20, krylov_dim: int = 12, threads: int = 1, art_threshold: float = 0.0, art_push: int = 20) -> Stencil:
         """
-        Point search. dimer and lanczos follow MinModeSession. Band preset names raise ValueError.
+        Point search. Dimer keeps rotational CG history across translations; Lanczos translations use relative Ritz-value stopping. Band preset names raise ValueError.
         """
 
     @staticmethod

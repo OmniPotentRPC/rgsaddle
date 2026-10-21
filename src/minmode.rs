@@ -83,9 +83,10 @@ pub enum MinModeKind {
     /// rotated dimer is extrapolated.
     #[default]
     Dimer,
-    /// Lanczos on finite-difference Hessian actions: a Krylov
-    /// subspace per compute, one gradient per action, stopped when
-    /// the lowest Ritz pair's residual meets `rotation_tol`.
+    /// Lanczos on finite-difference Hessian actions: a Krylov subspace
+    /// per compute and one gradient per action. Standalone mode estimates
+    /// stop when the lowest Ritz pair's residual meets `rotation_tol`;
+    /// stock translations also stop at a 0.05 relative Ritz-value change.
     Lanczos,
 }
 
@@ -186,6 +187,11 @@ pub struct ModeEstimate {
 /// pairs and the FIRE velocity stay and only the cached evaluation
 /// goes. Past it the mode is a different one and the memory is reset.
 pub const MODE_RESET_ANGLE: f64 = 5.0 * PI / 180.0;
+
+/// Relative Ritz-value convergence threshold for stock Lanczos translations.
+/// Standalone mode estimates keep the residual test unless the host explicitly
+/// selects a relative tolerance.
+pub const DEFAULT_LANCZOS_REL_TOL: f64 = 0.05;
 
 /// A first-order saddle has a vanishing force and one negative
 /// curvature. A vanishing force alone also describes a minimum, which
@@ -324,25 +330,79 @@ const MIN_TRIAL_ANGLE: f64 = 1e-4;
 /// dimer is measured (`validation/dimer_extrapolation.py`).
 const MAX_EXTRAPOLATION: f64 = 8.0;
 
+/// Polak-Ribiere state for dimer rotations.
+///
+/// The rotational objective moves smoothly with the dimer centre, so the
+/// previous force and direction remain useful after a translation. Keeping
+/// them makes the first rotation at the new centre conjugate instead of
+/// restarting as steepest descent. The vectors live in Cartesian space;
+/// the session maps them through any excluded-mode quotient.
+#[derive(Clone, Debug, Default)]
+struct DimerRotationHistory {
+    force: Option<Array1<f64>>,
+    direction: Option<Array1<f64>>,
+    centre: Option<Array1<f64>>,
+}
+
+impl DimerRotationHistory {
+    fn clear(&mut self) {
+        self.force = None;
+        self.direction = None;
+        self.centre = None;
+    }
+
+    fn retain_dimension(&mut self, dimension: usize) {
+        if self
+            .force
+            .as_ref()
+            .is_some_and(|force| force.len() != dimension)
+            || self
+                .direction
+                .as_ref()
+                .is_some_and(|direction| direction.len() != dimension)
+        {
+            self.clear();
+        }
+    }
+}
+
 fn rotate_dimer<S: PointSurface>(
     surface: &Counted<'_, S>,
     x: ArrayView1<f64>,
     g0: ArrayView1<f64>,
     mode: Array1<f64>,
     config: &MinModeConfig,
+    history: &mut DimerRotationHistory,
 ) -> Result<(Array1<f64>, f64, usize), SaddleError> {
     let mut n = normalize(mode);
     let mut h = surface.action(x, g0, n.view(), config)?;
     let mut curvature = crate::stencil::curvature_along(h.view(), n.view());
     let mut rotations = 0;
     // Rotational force (descent direction of the curvature on the
-    // sphere) and the conjugate direction of the previous iteration.
-    let mut force_prev: Option<Array1<f64>> = None;
-    let mut dir_prev: Option<Array1<f64>> = None;
+    // sphere) and the conjugate direction of the previous iteration,
+    // including the last iteration at the previous translated centre.
+    // A repeated estimate at one centre is an independent refinement:
+    // only translations activate the carried conjugate direction.
+    if history.centre.as_ref().is_some_and(|centre| centre == x) {
+        history.force = None;
+        history.direction = None;
+    }
+    history.retain_dimension(n.len());
+    let mut force_prev = history.force.take();
+    let mut dir_prev = history.direction.take();
     loop {
         let force = -perpendicular(&h, &n);
         let force_norm = force.dot(&force).sqrt();
         if force_norm <= config.rotation_tol || rotations >= config.max_rotations {
+            if rotations < config.max_rotations {
+                force_prev = Some(force);
+                if let Some(direction) = dir_prev.take() {
+                    let carried = perpendicular(&direction, &n);
+                    if carried.dot(&carried).sqrt() > 1e-14 {
+                        dir_prev = Some(carried);
+                    }
+                }
+            }
             break;
         }
         let mut dir = force.clone();
@@ -438,6 +498,9 @@ fn rotate_dimer<S: PointSurface>(
             break;
         }
     }
+    history.force = force_prev;
+    history.direction = dir_prev;
+    history.centre = Some(x.to_owned());
     Ok((n, curvature, rotations))
 }
 
@@ -644,8 +707,12 @@ pub struct MinModeSession {
     iteration: usize,
     /// Improved Lanczos: stop when the lowest Ritz value changes by
     /// less than this fraction of `|λ|`, or of 1 when `λ` is 0.
-    /// `None` keeps the residual test alone.
-    lanczos_rel_tol: Option<f64>,
+    /// `None` selects the context default: relative stopping for translation,
+    /// residual-only for standalone mode estimates. `Some(None)` explicitly
+    /// selects residual-only in both contexts.
+    lanczos_rel_tol: Option<Option<f64>>,
+    /// Dimer rotational CG state retained across translations.
+    dimer_rotation: DimerRotationHistory,
     /// Gradient at `x`, when known: from the last translation's
     /// accepted point or from the host.
     centre: Option<PointEval>,
@@ -703,6 +770,7 @@ impl MinModeSession {
             solver,
             iteration: 0,
             lanczos_rel_tol: None,
+            dimer_rotation: DimerRotationHistory::default(),
             centre: None,
             surface_error: Mutex::new(None),
         })
@@ -720,7 +788,7 @@ impl MinModeSession {
                 "Lanczos relative tolerance must be positive and finite".into(),
             ));
         }
-        self.lanczos_rel_tol = tol;
+        self.lanczos_rel_tol = Some(tol);
         Ok(())
     }
 
@@ -770,6 +838,8 @@ impl MinModeSession {
     /// surface-epoch boundary. The mode stays as the next seed.
     pub fn reset(&mut self) {
         self.solver.forget();
+        self.dimer_rotation.clear();
+        self.curvature = f64::NAN;
         self.centre = None;
     }
 
@@ -826,6 +896,8 @@ impl MinModeSession {
         } else {
             self.solver.forget_evaluation();
         }
+        self.dimer_rotation.clear();
+        self.curvature = f64::NAN;
         self.mode = mode;
         Ok(())
     }
@@ -849,10 +921,11 @@ impl MinModeSession {
     }
 
     fn mode_at<S: PointSurface>(
-        &self,
+        &mut self,
         surface: &Counted<'_, S>,
         position: ArrayView1<f64>,
         gradient: ArrayView1<f64>,
+        translating: bool,
     ) -> Result<(Array1<f64>, f64, usize), SaddleError> {
         let excluded = surface.surface.excluded_modes(position)?;
         if excluded.ncols() != position.len() || !excluded.iter().all(|v| v.is_finite()) {
@@ -860,20 +933,30 @@ impl MinModeSession {
                 "minimum-mode excluded directions".into(),
             ));
         }
-        let estimate = |surface: &Counted<'_, S>, seed| match self.config.kind {
-            MinModeKind::Dimer => rotate_dimer(surface, position, gradient, seed, &self.config),
-            MinModeKind::Lanczos => lanczos_mode(
-                surface,
-                position,
-                gradient,
-                seed,
-                &self.config,
-                self.lanczos_rel_tol,
-                self.curvature.is_finite().then_some(self.curvature),
-            ),
-        };
+        let rel_tol = self
+            .lanczos_rel_tol
+            .unwrap_or_else(|| translating.then_some(DEFAULT_LANCZOS_REL_TOL));
+        let carried = self.curvature.is_finite().then_some(self.curvature);
         if excluded.nrows() == 0 {
-            return estimate(surface, self.mode.clone());
+            return match self.config.kind {
+                MinModeKind::Dimer => rotate_dimer(
+                    surface,
+                    position,
+                    gradient,
+                    self.mode.clone(),
+                    &self.config,
+                    &mut self.dimer_rotation,
+                ),
+                MinModeKind::Lanczos => lanczos_mode(
+                    surface,
+                    position,
+                    gradient,
+                    self.mode.clone(),
+                    &self.config,
+                    rel_tol,
+                    carried,
+                ),
+            };
         }
         let mut space = Complement::new(position.len());
         for direction in excluded.rows() {
@@ -883,17 +966,64 @@ impl MinModeSession {
             return Err(SaddleError::Shape("minimum-mode space is empty".into()));
         }
         let mut seed = space.reduce(self.mode.view());
-        if seed.dot(&seed).sqrt() <= 64.0 * f64::EPSILON {
+        let replaced_seed = seed.dot(&seed).sqrt() <= 64.0 * f64::EPSILON;
+        if replaced_seed {
             seed = Array1::from_iter(
                 (0..space.dimension()).map(|i| ((i + 1) as f64 * 1.618033988749895).sin()),
             );
+            // Neither a curvature measured along the old mode nor its
+            // rotational CG state describes this unrelated fallback seed.
+            self.dimer_rotation.clear();
         }
+        let carried = if replaced_seed { None } else { carried };
         let reduced = Counted {
             surface: surface.surface,
             calls: surface.calls,
             space: Some(&space),
         };
-        let (mode, curvature, rotations) = estimate(&reduced, checked_mode(seed)?)?;
+        let seed = checked_mode(seed)?;
+        let (mode, curvature, rotations) = match self.config.kind {
+            MinModeKind::Dimer => {
+                let mut history = DimerRotationHistory {
+                    force: self
+                        .dimer_rotation
+                        .force
+                        .as_ref()
+                        .map(|force| space.reduce(force.view())),
+                    direction: self
+                        .dimer_rotation
+                        .direction
+                        .as_ref()
+                        .map(|direction| space.reduce(direction.view())),
+                    centre: self.dimer_rotation.centre.clone(),
+                };
+                let answer = rotate_dimer(
+                    &reduced,
+                    position,
+                    gradient,
+                    seed,
+                    &self.config,
+                    &mut history,
+                )?;
+                self.dimer_rotation.force =
+                    history.force.as_ref().map(|force| space.lift(force.view()));
+                self.dimer_rotation.direction = history
+                    .direction
+                    .as_ref()
+                    .map(|direction| space.lift(direction.view()));
+                self.dimer_rotation.centre = history.centre;
+                answer
+            }
+            MinModeKind::Lanczos => lanczos_mode(
+                &reduced,
+                position,
+                gradient,
+                seed,
+                &self.config,
+                rel_tol,
+                carried,
+            )?,
+        };
         Ok((space.lift(mode.view()), curvature, rotations))
     }
 
@@ -901,8 +1031,11 @@ impl MinModeSession {
         &mut self,
         surface: &Counted<'_, S>,
         g0: ArrayView1<f64>,
+        translating: bool,
     ) -> Result<(f64, usize), SaddleError> {
-        let (mode, curvature, rotations) = self.mode_at(surface, self.x.view(), g0)?;
+        let position = self.x.clone();
+        let (mode, curvature, rotations) =
+            self.mode_at(surface, position.view(), g0, translating)?;
         self.mode = mode;
         self.curvature = curvature;
         Ok((curvature, rotations))
@@ -929,7 +1062,7 @@ impl MinModeSession {
         } else {
             self.centre_gradient(&counted)?
         };
-        let (curvature, rotations) = self.refresh_mode(&counted, g0.view())?;
+        let (curvature, rotations) = self.refresh_mode(&counted, g0.view(), false)?;
         Ok(ModeEstimate {
             mode: self.mode.clone(),
             curvature,
@@ -954,7 +1087,7 @@ impl MinModeSession {
         };
         let g0 = self.centre_gradient(&counted)?;
         let previous_mode = self.mode.clone();
-        let (mut curvature, mut rotations) = self.refresh_mode(&counted, g0.view())?;
+        let (mut curvature, mut rotations) = self.refresh_mode(&counted, g0.view(), true)?;
         // The solver cached the inverted force at this point under the
         // previous mode; the step must see the current one. The mode's
         // sign is arbitrary, so the angle reads |cos|.
@@ -1080,7 +1213,7 @@ impl MinModeSession {
             // same point. The accepted gradient supplies the centre, so
             // confirmation pays only for the required Hessian actions.
             let (mode, accepted_curvature, accepted_rotations) =
-                self.mode_at(&counted, x.view(), centre.gradient.view())?;
+                self.mode_at(&counted, x.view(), centre.gradient.view(), true)?;
             let turned = self.mode.dot(&mode).abs().min(1.0).acos();
             if turned > MODE_RESET_ANGLE {
                 self.solver.forget();
@@ -1126,9 +1259,46 @@ impl MinModeSession {
 
 #[cfg(test)]
 mod tests {
-    use super::translated_gradient;
+    use super::{MinModeConfig, MinModeSession, PointSurface, translated_gradient};
     use approx::assert_abs_diff_eq;
-    use ndarray::array;
+    use ndarray::{Array1, ArrayView1, array};
+
+    struct RotatingQuadratic;
+
+    impl PointSurface for RotatingQuadratic {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), crate::SaddleError> {
+            Ok((
+                -x[0] * x[0] + 2.0 * x[1] * x[1],
+                array![-2.0 * x[0], 4.0 * x[1]],
+            ))
+        }
+    }
+
+    struct AnisotropicQuadratic;
+
+    impl PointSurface for AnisotropicQuadratic {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), crate::SaddleError> {
+            Ok((
+                -x[0] * x[0] + 0.5 * x[1] * x[1] + 2.0 * x[2] * x[2] + 4.0 * x[3] * x[3],
+                array![-2.0 * x[0], x[1], 4.0 * x[2], 8.0 * x[3]],
+            ))
+        }
+    }
+
+    struct ExcludedAnisotropicQuadratic;
+
+    impl PointSurface for ExcludedAnisotropicQuadratic {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), crate::SaddleError> {
+            AnisotropicQuadratic.eval(x)
+        }
+
+        fn excluded_modes(
+            &self,
+            _x: ArrayView1<f64>,
+        ) -> Result<ndarray::Array2<f64>, crate::SaddleError> {
+            Ok(array![[1.0, 0.0, 0.0, 0.0]])
+        }
+    }
 
     #[test]
     fn positive_curvature_keeps_only_the_reversed_mode() {
@@ -1150,5 +1320,100 @@ mod tests {
         assert_abs_diff_eq!(eff[0], -1.0, epsilon = 1e-12);
         assert_abs_diff_eq!(eff[1], -4.0, epsilon = 1e-12);
         assert_abs_diff_eq!(eff[2], 0.5, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn dimer_rotation_history_crosses_translations_but_resets_at_boundaries() {
+        let config = MinModeConfig {
+            max_rotations: 1,
+            rotation_tol: 1e-12,
+            ..MinModeConfig::default()
+        };
+        let mut session = MinModeSession::new(config, array![0.3, 0.2], array![0.8, 0.6]).unwrap();
+        session.estimate_mode(&RotatingQuadratic).unwrap();
+        assert!(session.dimer_rotation.force.is_some());
+        assert!(session.dimer_rotation.direction.is_some());
+
+        session.set_position(array![0.31, 0.19], None).unwrap();
+        assert!(session.dimer_rotation.force.is_some());
+        assert!(session.dimer_rotation.direction.is_some());
+
+        session.set_mode(array![1.0, 0.0]).unwrap();
+        assert!(session.dimer_rotation.force.is_none());
+        assert!(session.dimer_rotation.direction.is_none());
+        assert!(session.curvature().is_nan());
+
+        session.estimate_mode(&RotatingQuadratic).unwrap();
+        session.reset();
+        assert!(session.dimer_rotation.force.is_none());
+        assert!(session.dimer_rotation.direction.is_none());
+        assert!(session.curvature().is_nan());
+    }
+
+    #[test]
+    fn lanczos_relative_stop_is_a_translation_default() {
+        let config = MinModeConfig {
+            kind: super::MinModeKind::Lanczos,
+            rotation_tol: 1e-12,
+            krylov_dim: 2,
+            ..MinModeConfig::default()
+        };
+        let position = array![0.3, 0.2, 0.1, 0.4];
+        let mode = array![0.6, 0.5, 0.4, 0.3];
+        let mut stock =
+            MinModeSession::new(config.clone(), position.clone(), mode.clone()).unwrap();
+        assert_eq!(
+            stock
+                .estimate_mode(&AnisotropicQuadratic)
+                .unwrap()
+                .rotations,
+            2
+        );
+        stock
+            .set_position(array![0.31, 0.19, 0.11, 0.39], None)
+            .unwrap();
+        assert_eq!(stock.step(&AnisotropicQuadratic).unwrap().rotations, 1);
+
+        let mut residual = MinModeSession::new(config, position, mode).unwrap();
+        residual.set_lanczos_rel_tol(None).unwrap();
+        residual.estimate_mode(&AnisotropicQuadratic).unwrap();
+        residual
+            .set_position(array![0.31, 0.19, 0.11, 0.39], None)
+            .unwrap();
+        assert_eq!(residual.step(&AnisotropicQuadratic).unwrap().rotations, 2);
+    }
+
+    #[test]
+    fn an_excluded_mode_drops_unrelated_curvature_and_rotation_history() {
+        let config = MinModeConfig {
+            kind: super::MinModeKind::Lanczos,
+            rotation_tol: 1e-12,
+            krylov_dim: 3,
+            ..MinModeConfig::default()
+        };
+        let position = array![0.3, 0.2, 0.1, 0.4];
+        let mut session =
+            MinModeSession::new(config, position, array![1.0, 0.0, 0.0, 0.0]).unwrap();
+        let fallback =
+            Array1::from_iter((0..3).map(|i| ((i + 1) as f64 * 1.618033988749895).sin()));
+        session.curvature = fallback
+            .iter()
+            .zip([1.0, 4.0, 8.0])
+            .map(|(component, eigenvalue)| component * component * eigenvalue)
+            .sum::<f64>()
+            / fallback.dot(&fallback);
+        session.dimer_rotation.force = Some(array![1.0, 0.0, 0.0, 0.0]);
+        session.dimer_rotation.direction = Some(array![0.0, 1.0, 0.0, 0.0]);
+        session.dimer_rotation.centre = Some(session.position().to_owned());
+
+        assert!(
+            session
+                .step(&ExcludedAnisotropicQuadratic)
+                .unwrap()
+                .rotations
+                > 1
+        );
+        assert!(session.dimer_rotation.force.is_none());
+        assert!(session.dimer_rotation.direction.is_none());
     }
 }

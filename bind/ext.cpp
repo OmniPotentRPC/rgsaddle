@@ -880,7 +880,8 @@ NB_MODULE(_core, m) {
           nb::arg("max_move") = 0.2, nb::arg("rotation_tol") = 1e-4, nb::arg("max_rotations") = 20,
           nb::arg("krylov_dim") = 12, nb::arg("threads") = 1, nb::arg("art_threshold") = 0.0,
           nb::arg("art_push") = 20,
-          "Point search. dimer and lanczos follow MinModeSession. Band preset names raise ValueError.")
+          "Point search. Dimer keeps rotational CG history across translations; Lanczos translations use "
+          "relative Ritz-value stopping. Band preset names raise ValueError.")
       .def_static("band", &make_band, nb::arg("x").noconvert(), nb::arg("preset") = "ci-neb",
                   "Band presets stay on feat/band-methods-zoom and raise ValueError.")
       .def(
