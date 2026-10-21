@@ -341,4 +341,114 @@ private:
     std::int64_t n_atoms_ = 0;
 };
 
+inline rgsaddle_ocineb_config_t ocineb_config() {
+    rgsaddle_ocineb_config_t c{};
+    c.version.major = RGSADDLE_ABI_MAJOR;
+    c.version.minor = RGSADDLE_ABI_MINOR;
+    c.trigger_factor = 0.31;
+    c.trigger_force = 0.0;
+    c.angle_tol = 0.85;
+    c.stability_count = 5;
+    c.max_mmf_steps = 1000;
+    c.restore_unhelpful = 0;
+    return c;
+}
+
+struct OcinebReport {
+    int status = RGSADDLE_STATUS_RUNNING;
+    int phase = RGSADDLE_OCINEB_BAND;
+    bool fell_back = false;
+    int evaluations = 0;
+    double max_force = 0.0;
+    double curvature = 0.0;
+    double alignment = 0.0;
+    double threshold = 0.0;
+    std::int64_t ci_index = -1;
+    std::int64_t iteration = 0;
+    std::int64_t rotations = 0;
+
+    static OcinebReport from_c(rgsaddle_ocineb_report_t const& r) {
+        OcinebReport out;
+        out.status = r.status;
+        out.phase = r.phase;
+        out.fell_back = r.fell_back != 0;
+        out.evaluations = r.evaluations;
+        out.max_force = r.max_force;
+        out.curvature = r.curvature;
+        out.alignment = r.alignment;
+        out.threshold = r.threshold;
+        out.ci_index = r.ci_index;
+        out.iteration = r.iteration;
+        out.rotations = r.rotations;
+        return out;
+    }
+
+    [[nodiscard]] bool converged() const noexcept {
+        return status == RGSADDLE_STATUS_CONVERGED;
+    }
+};
+
+class Ocineb {
+public:
+    Ocineb(rgsaddle_band_config_t const& band, rgsaddle_minmode_config_t const& minmode,
+           rgsaddle_ocineb_config_t const& config, std::int64_t n_images, std::int64_t n_atoms,
+           double const* positions)
+        : n_images_(n_images), n_atoms_(n_atoms) {
+        if (!abi_compatible()) {
+            throw std::runtime_error("rgsaddle ABI 1.15 or later is required");
+        }
+        handle_ = rgsaddle_ocineb_create(&band, &minmode, &config, n_images, n_atoms, positions);
+        if (handle_ == nullptr) {
+            throw std::runtime_error("rgsaddle_ocineb_create failed");
+        }
+    }
+
+    Ocineb(Ocineb const&) = delete;
+    Ocineb& operator=(Ocineb const&) = delete;
+
+    Ocineb(Ocineb&& other) noexcept
+        : handle_(other.handle_), n_images_(other.n_images_), n_atoms_(other.n_atoms_) {
+        other.handle_ = nullptr;
+    }
+
+    Ocineb& operator=(Ocineb&& other) noexcept {
+        if (this != &other) {
+            reset_handle();
+            handle_ = other.handle_;
+            n_images_ = other.n_images_;
+            n_atoms_ = other.n_atoms_;
+            other.handle_ = nullptr;
+        }
+        return *this;
+    }
+
+    ~Ocineb() { reset_handle(); }
+
+    OcinebReport step(rgsaddle_surface_fn surface, void* user) {
+        rgsaddle_ocineb_report_t out{};
+        check(rgsaddle_ocineb_step(handle_, surface, user, &out));
+        return OcinebReport::from_c(out);
+    }
+
+    void reset() { check(rgsaddle_ocineb_reset(handle_)); }
+
+    [[nodiscard]] std::vector<double> positions() const {
+        std::vector<double> out(static_cast<std::size_t>(n_images_ * 3 * n_atoms_));
+        check(rgsaddle_ocineb_positions(handle_, out.data()));
+        return out;
+    }
+
+private:
+    void reset_handle() {
+        if (handle_ != nullptr) {
+            rgsaddle_ocineb_free(handle_);
+            handle_ = nullptr;
+        }
+    }
+
+    RgsaddleOcineb* handle_ = nullptr;
+    std::int64_t n_images_ = 0;
+    std::int64_t n_atoms_ = 0;
+};
+
 }  // namespace rgsaddle

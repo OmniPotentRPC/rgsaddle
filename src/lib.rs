@@ -3,7 +3,11 @@
 //! The band and the minimum-mode search take one [`rgmin::Solver`]
 //! step on a force this crate assembled. The host owns the loop.
 //! [`band::BandSession::run`] and [`minmode::MinModeSession::run`]
-//! are convenience loops over `step`. [`autoneb::AutoNeb`] inserts
+//! are convenience loops over `step`.
+//! [`ocineb::OcinebSession`] hands the climbing image to a minimum-mode
+//! search once that image is stable: Goswami, Gunde, and Jónsson,
+//! Front. Chem. 14 (2026), doi:10.3389/fchem.2026.1807063.
+//! [`autoneb::AutoNeb`] inserts
 //! images where the energy gap or the segment length is worst,
 //! relaxes that window, and climbs. The full band runs only when
 //! requested.
@@ -41,6 +45,7 @@ pub mod error;
 pub mod idpp;
 pub mod minmode;
 pub mod nichols;
+pub mod ocineb;
 pub mod prfo;
 pub mod projection;
 pub mod solid_state;
@@ -64,6 +69,11 @@ pub use minmode::{
 pub use nichols::{
     HessianUpdate, Index1Config, Index1Report, Index1Session, Index1Status, NicholsMode,
     bofill_update, cap_max_abs, nichols_displacement, nichols_step, powell_update,
+};
+pub use ocineb::{
+    MIN_ALIGNMENT, OcinebConfig, OcinebPhase, OcinebReport, OcinebSession, OcinebStatus,
+    backoff_threshold, initial_threshold, mode_alignment, should_trigger, success_threshold,
+    walk_helped,
 };
 pub use prfo::{PrfoKind, partitioned_rfo_eigen, restricted_prfo_displacement};
 pub use projection::ProjectionKind;
