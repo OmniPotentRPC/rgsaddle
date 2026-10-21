@@ -831,7 +831,7 @@ pub unsafe extern "C" fn rgsaddle_minmode_estimate(
         per_image: false,
         rows: Default::default(),
     };
-    match session.session.estimate_mode(&cs) {
+    match session.session.push_estimate(&cs) {
         Ok(est) => {
             let out = unsafe { &mut *out };
             stamp_report(out);
