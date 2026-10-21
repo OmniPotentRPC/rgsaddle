@@ -116,14 +116,12 @@ impl ModelClimb {
 /// Ascending eigenpairs of a symmetric matrix, eigenvectors as columns.
 fn eigh(matrix: &Array2<f64>) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
     let n = matrix.nrows();
-    let m = faer::Mat::<f64>::from_fn(n, n, |i, j| 0.5 * (matrix[(i, j)] + matrix[(j, i)]));
-    let eig = m
-        .self_adjoint_eigen(faer::Side::Lower)
-        .map_err(|_| SaddleError::NonFinite("climb model spectrum"))?;
+    let symmetric = Array2::from_shape_fn((n, n), |(i, j)| 0.5 * (matrix[(i, j)] + matrix[(j, i)]));
+    let (vals, vecs) = crate::eigensolve::faer_eigh(&symmetric)?;
     let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by(|&i, &j| eig.S()[i].total_cmp(&eig.S()[j]));
-    let vals = Array1::from_iter(order.iter().map(|&k| eig.S()[k]));
-    let vecs = Array2::from_shape_fn((n, n), |(i, c)| eig.U()[(i, order[c])]);
+    order.sort_by(|&i, &j| vals[i].total_cmp(&vals[j]));
+    let vals = Array1::from_iter(order.iter().map(|&k| vals[k]));
+    let vecs = Array2::from_shape_fn((n, n), |(i, c)| vecs[(i, order[c])]);
     Ok((vals, vecs))
 }
 
