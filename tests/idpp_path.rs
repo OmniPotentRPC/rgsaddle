@@ -4,8 +4,8 @@
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, array};
 use rgsaddle::mic::{self, Cell};
 use rgsaddle::{
-    BandConfig, BandSession, BandStatus, BandSurface, CiConfig, IdppConfig, SaddleError,
-    SpringKind, TangentKind, idpp_path, linear_path,
+    BandConfig, BandSession, BandStatus, BandSurface, IdppConfig, SaddleError, SpringKind,
+    TangentKind, idpp_path, linear_path,
 };
 
 fn pair_distance(pos: ArrayView1<f64>, i: usize, j: usize, cell: Option<&Cell>) -> f64 {
@@ -241,14 +241,14 @@ fn exchange_endpoints() -> (Array1<f64>, Array1<f64>) {
     (reactant, product)
 }
 
-fn ci_neb(initial: Array2<f64>) -> (rgsaddle::BandReport, Array2<f64>) {
+// The reactant is an index-2 stationary point of this cluster (Hessian
+// eigenvalues near -7.9 and -2.2), and a climbing image climbs into it
+// from either start, so the start comparison runs the band unclimbed.
+fn neb(initial: Array2<f64>) -> (rgsaddle::BandReport, Array2<f64>) {
     let config = BandConfig {
         tangent: TangentKind::Improved,
         spring: SpringKind::Uniform { k: 5.0 },
-        climbing: Some(CiConfig {
-            trigger_factor: 0.5,
-            trigger_force: 0.0,
-        }),
+        climbing: None,
         force_tol: 0.01,
         max_move: 0.2,
         remove_translation: true,
@@ -303,8 +303,8 @@ fn idpp_start_reaches_a_converged_band_in_fewer_force_calls() {
     assert!(linear_clash < 0.2, "{linear_clash}");
     assert!(idpp_gap > 1.0, "{idpp_gap}");
 
-    let (linear_report, linear_end) = ci_neb(linear);
-    let (idpp_report, idpp_end) = ci_neb(idpp);
+    let (linear_report, linear_end) = neb(linear);
+    let (idpp_report, idpp_end) = neb(idpp);
     let max_interior = |path: &Array2<f64>| {
         let mut energies = Array1::zeros(path.nrows());
         let mut gradients = Array2::zeros(path.dim());
@@ -317,7 +317,7 @@ fn idpp_start_reaches_a_converged_band_in_fewer_force_calls() {
             .fold(f64::NEG_INFINITY, f64::max)
     };
     eprintln!(
-        "ci-neb force rows: linear {} (status {:?}, max force {}, interior energy {}), idpp {} (status {:?}, max force {}, interior energy {})",
+        "neb force rows: linear {} (status {:?}, max force {}, interior energy {}), idpp {} (status {:?}, max force {}, interior energy {})",
         linear_report.surface_rows,
         linear_report.status,
         linear_report.max_force,
