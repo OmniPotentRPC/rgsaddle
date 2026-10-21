@@ -14,7 +14,7 @@ categories = ["science"]
 crate-type = ["lib", "cdylib", "staticlib"]
 
 [features]
-default = []
+default = ["faer"]
 capi = []
 par = ["rgmin/par"]
 highs = ["rgmin/highs"]
@@ -23,6 +23,17 @@ readcon = ["dep:readcon-core"]
 # below, so the corpus and the CON writer share one readcon-core.
 readcon-db = ["readcon", "dep:readcon-db"]
 chemfiles = ["readcon", "readcon-core/chemfiles"]
+# GMP and MPFR stay off the default build. `cargo test --features capi`
+# does not compile this feature.
+verify = ["dep:proptest", "dep:rug"]
+# Dense self-adjoint spectra in connect, SQNM, and exact_eigh above
+# dimension 128. On by default.
+# The Kani prove step passes `--no-default-features` so this stays off:
+# faer pulls pulp, and pulp's global assembly does not compile under Kani.
+# The kani-github-action default command is a bare `cargo-kani`, which
+# would turn this feature on. The verify workflow overrides that command
+# and does not pass `--ignore-global-asm`.
+faer = ["dep:faer"]
 
 [dependencies]
 dlpk = { version = "0.1.5", features = ["ndarray"] }
@@ -36,10 +47,12 @@ readcon-db = { version = "0.2", optional = true }
 rgmin = { git = "https://github.com/OmniPotentRPC/rgmin", rev = "d76539dbe40695c0032e0d96a56e7932f2cc49ab" }
 eindir-core = { version = "0.6.0", features = ["capi"] }
 ndarray = "0.17"
+faer = { version = "0.24.4", optional = true, default-features = false, features = ["std", "linalg"] }
 rayon = "1.12"
 thiserror = "2"
-faer = { version = "0.24.4", default-features = false, features = ["std", "linalg"] }
 linkcell = { version = "0.3.3", git = "https://github.com/d-SEAMS/linkcell", rev = "f6cf5700ca9c90e1877c84b66fb68386de5ceffe", default-features = false }
+proptest = { version = "1.6", optional = true }
+rug = { version = "1.27", optional = true }
 
 [dev-dependencies]
 approx = "0.5"
@@ -74,3 +87,6 @@ filename = "rgsaddle"
 
 [package.metadata.capi.library]
 name = "rgsaddle"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }

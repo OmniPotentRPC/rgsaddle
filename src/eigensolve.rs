@@ -97,14 +97,16 @@ impl ApplyHessian for DenseApply<'_> {
 ///
 /// The LJ38 free block is 108, so that search keeps the Jacobi
 /// spectrum. A larger block, including a Pt island free block of 525,
-/// uses [`faer_eigh`].
+/// uses [`faer_eigh`] when the `faer` feature is on.
 const DENSE_JACOBI_LIMIT: usize = 128;
 
 /// Sella `exact`: dense symmetric eigen of `a`.
 ///
 /// Eigenvalues come back in nondecreasing order. Dimension
 /// [`DENSE_JACOBI_LIMIT`] and below uses cyclic Jacobi. A larger
-/// matrix uses faer's self-adjoint eigensolver.
+/// matrix uses faer's self-adjoint eigensolver. The Kani build leaves
+/// that feature off and panics if a block above the Jacobi limit is
+/// reached; those harnesses return before a Sella session.
 pub fn exact_eigh(a: ArrayView2<f64>) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
     if a.nrows() != a.ncols() {
         return Err(SaddleError::Shape("eigh needs a square matrix".into()));
@@ -127,30 +129,42 @@ pub fn exact_eigh(a: ArrayView2<f64>) -> Result<(Array1<f64>, Array2<f64>), Sadd
 
 /// Self-adjoint spectrum from faer. `a` is already symmetric.
 /// Eigenvalues are nondecreasing. Columns are the eigenvectors.
+///
+/// The `faer` feature is on by default. A build without it still
+/// compiles, and this function panics if a caller reaches it. Connect
+/// and SQNM use the same gate.
 fn faer_eigh(a: &Array2<f64>) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
-    let n = a.nrows();
-    let mat = faer::Mat::from_fn(n, n, |i, j| a[(i, j)]);
-    let evd = mat
-        .self_adjoint_eigen(faer::Side::Lower)
-        .map_err(|_| SaddleError::Solver("self-adjoint eigen did not converge".into()))?;
-    let values_ref = evd.S();
-    let vectors_ref = evd.U();
-    let mut values = Array1::zeros(n);
-    let mut vectors = Array2::zeros((n, n));
-    for column in 0..n {
-        values[column] = values_ref[column];
-        for row in 0..n {
-            vectors[(row, column)] = vectors_ref[(row, column)];
-        }
+    #[cfg(not(feature = "faer"))]
+    {
+        let _ = a;
+        panic!("self-adjoint spectrum requires the faer feature");
     }
-    for column in 0..n {
-        if nrm2(vectors.column(column)) < 1e-18 {
-            return Err(SaddleError::Solver(
-                "self-adjoint eigen produced a zero eigenvector".into(),
-            ));
+    #[cfg(feature = "faer")]
+    {
+        let n = a.nrows();
+        let mat = faer::Mat::from_fn(n, n, |i, j| a[(i, j)]);
+        let evd = mat
+            .self_adjoint_eigen(faer::Side::Lower)
+            .map_err(|_| SaddleError::Solver("self-adjoint eigen did not converge".into()))?;
+        let values_ref = evd.S();
+        let vectors_ref = evd.U();
+        let mut values = Array1::zeros(n);
+        let mut vectors = Array2::zeros((n, n));
+        for column in 0..n {
+            values[column] = values_ref[column];
+            for row in 0..n {
+                vectors[(row, column)] = vectors_ref[(row, column)];
+            }
         }
+        for column in 0..n {
+            if nrm2(vectors.column(column)) < 1e-18 {
+                return Err(SaddleError::Solver(
+                    "self-adjoint eigen produced a zero eigenvector".into(),
+                ));
+            }
+        }
+        Ok((values, vectors))
     }
-    Ok((values, vectors))
 }
 
 /// Ritz eigenvalues, basis vectors, and the operator applied to those vectors.
