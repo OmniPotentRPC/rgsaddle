@@ -5,7 +5,7 @@
 #include <stddef.h>
 
 _Static_assert(RGSADDLE_ABI_MAJOR == 1u, "main ABI major");
-_Static_assert(RGSADDLE_ABI_MINOR == 17u, "ABI minor");
+_Static_assert(RGSADDLE_ABI_MINOR == 19u, "ABI minor");
 
 typedef struct {
   uint32_t major;
@@ -286,5 +286,32 @@ _Static_assert(_Generic(&rgsaddle_index1_reset, abi15_signature_rgsaddle_index1_
 
 typedef void (*abi15_signature_rgsaddle_index1_free)(RgsaddleIndex1 *session);
 _Static_assert(_Generic(&rgsaddle_index1_free, abi15_signature_rgsaddle_index1_free: 1, default: 0), "rgsaddle_index1_free signature");
+
+typedef rgsaddle_status_t (*abi18_signature_rgsaddle_connect)(
+    const rgsaddle_connect_config_t *config, int64_t n_atoms, const double *left,
+    const double *right, rgsaddle_surface_fn surface, void *user, double *position,
+    rgsaddle_connect_report_t *report);
+_Static_assert(_Generic(&rgsaddle_connect, abi18_signature_rgsaddle_connect: 1, default: 0), "rgsaddle_connect signature");
+
+typedef RgsaddleOcineb *(*abi19_signature_rgsaddle_ocineb_create)(
+    const rgsaddle_band_config_t *band, const rgsaddle_minmode_config_t *minmode,
+    const rgsaddle_ocineb_config_t *config, int64_t n_images, int64_t n_atoms,
+    const double *positions);
+_Static_assert(_Generic(&rgsaddle_ocineb_create, abi19_signature_rgsaddle_ocineb_create: 1, default: 0), "rgsaddle_ocineb_create signature");
+
+typedef rgsaddle_status_t (*abi19_signature_rgsaddle_ocineb_step)(
+    RgsaddleOcineb *session, rgsaddle_surface_fn surface, void *user,
+    rgsaddle_ocineb_report_t *out);
+_Static_assert(_Generic(&rgsaddle_ocineb_step, abi19_signature_rgsaddle_ocineb_step: 1, default: 0), "rgsaddle_ocineb_step signature");
+
+typedef rgsaddle_status_t (*abi19_signature_rgsaddle_ocineb_positions)(
+    const RgsaddleOcineb *session, double *out);
+_Static_assert(_Generic(&rgsaddle_ocineb_positions, abi19_signature_rgsaddle_ocineb_positions: 1, default: 0), "rgsaddle_ocineb_positions signature");
+
+typedef rgsaddle_status_t (*abi19_signature_rgsaddle_ocineb_reset)(RgsaddleOcineb *session);
+_Static_assert(_Generic(&rgsaddle_ocineb_reset, abi19_signature_rgsaddle_ocineb_reset: 1, default: 0), "rgsaddle_ocineb_reset signature");
+
+typedef void (*abi19_signature_rgsaddle_ocineb_free)(RgsaddleOcineb *session);
+_Static_assert(_Generic(&rgsaddle_ocineb_free, abi19_signature_rgsaddle_ocineb_free: 1, default: 0), "rgsaddle_ocineb_free signature");
 
 #endif

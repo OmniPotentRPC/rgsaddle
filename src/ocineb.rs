@@ -27,7 +27,7 @@
 
 use ndarray::{Array1, Array2, ArrayView1};
 
-use crate::band::{BandConfig, BandSession, BandStatus, BandSurface};
+use crate::band::{BandConfig, BandSession, BandStatus, BandSurface, CiConfig};
 use crate::error::SaddleError;
 use crate::force::ForceGate;
 use crate::minmode::{MinModeConfig, MinModeSession, MinModeStatus, PointSurface};
@@ -79,7 +79,13 @@ pub struct OcinebConfig {
 
 impl Default for OcinebConfig {
     fn default() -> Self {
-        let band = BandConfig::default();
+        // The hand-off waits on a relative band force, the eOn
+        // ci_after_rel rule. BandConfig::default climbs under an
+        // absolute force of 0.5, which is a different arming point.
+        let band = BandConfig {
+            climbing: Some(CiConfig::after_rel(0.5)),
+            ..BandConfig::default()
+        };
         let minmode = MinModeConfig {
             force_tol: band.force_tol,
             max_move: band.max_move,
@@ -906,12 +912,51 @@ mod tests {
 
     #[test]
     fn angle_below_the_cone_is_rejected() {
-        let mut config = OcinebConfig::default();
-        config.angle_tol = 0.5;
-        assert!(validate(&config).is_err());
-        config.angle_tol = 0.7071;
+        let low = OcinebConfig {
+            angle_tol: 0.5,
+            ..OcinebConfig::default()
+        };
+        assert!(validate(&low).is_err());
+        let edge = OcinebConfig {
+            angle_tol: MIN_ALIGNMENT,
+            ..OcinebConfig::default()
+        };
+        assert!(validate(&edge).is_ok());
+        let no_climb = OcinebConfig {
+            band: crate::band::BandConfig {
+                climbing: None,
+                ..edge.band.clone()
+            },
+            ..edge
+        };
+        assert!(validate(&no_climb).is_err());
+    }
+
+    #[test]
+    fn default_climbing_is_relative_and_a_solid_block_is_refused() {
+        let config = OcinebConfig::default();
+        let climbing = config.band.climbing.expect("climbing image");
+        assert_eq!(climbing.trigger_factor, 0.5);
+        assert_eq!(climbing.trigger_force, 0.0);
         assert!(validate(&config).is_ok());
-        config.band.climbing = None;
-        assert!(validate(&config).is_err());
+        let mut solid = config.clone();
+        solid.band.solid = Some(crate::band::SolidState::new(Vec::new()));
+        match validate(&solid) {
+            Err(crate::error::SaddleError::Invalid(msg)) => {
+                assert!(msg.contains("solid-state"), "{msg}");
+            }
+            other => panic!("expected a refused solid block, got {other:?}"),
+        }
+        let built = OcinebSession::new(
+            solid,
+            array![[-1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+        );
+        match built {
+            Err(crate::error::SaddleError::Invalid(msg)) => {
+                assert!(msg.contains("solid-state"), "{msg}");
+            }
+            Ok(_) => panic!("expected a refused solid block"),
+            Err(err) => panic!("expected a refused solid block, got {err}"),
+        }
     }
 }

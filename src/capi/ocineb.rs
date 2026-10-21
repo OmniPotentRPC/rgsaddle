@@ -184,8 +184,6 @@ pub unsafe extern "C" fn rgsaddle_ocineb_step(
         n_images: session.n_images,
         per_image: session.per_image,
         rows: Default::default(),
-        stress: None,
-        stress_user: std::ptr::null_mut(),
     };
     match session.session.step(&cs) {
         Ok(report) => {

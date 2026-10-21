@@ -101,12 +101,55 @@ impl Cell {
 }
 
 /// Climbing-image activation, the eOn trigger rule: CI arms when the
-/// convergence force falls under `factor * baseline` or under the
-/// absolute trigger.
+/// convergence force falls under `trigger_factor * baseline` (eOn
+/// `ci_after_rel`, the baseline is the first evaluation's force) or
+/// under `trigger_force` (eOn `ci_after`).
+///
+/// The default, [`CiConfig::after`]`(0.5)`, arms the climbing image
+/// once the band has settled to a largest force component under 0.5
+/// in the host's force units (eOn's recommended `ci_after`, eV/A), as
+/// climbing-image NEB is run once the band is roughly converged
+/// (Henkelman, Uberuaga and Jonsson, J. Chem. Phys. 113, 9901 (2000),
+/// doi:10.1063/1.1329672). [`CiConfig::always`] climbs from the first
+/// evaluation.
 #[derive(Clone, Copy, Debug)]
 pub struct CiConfig {
     pub trigger_factor: f64,
     pub trigger_force: f64,
+}
+
+impl CiConfig {
+    /// Arm once the largest force component is under `force` (eOn
+    /// `ci_after` with `ci_after_rel = 0`).
+    pub fn after(force: f64) -> Self {
+        Self {
+            trigger_factor: 0.0,
+            trigger_force: force,
+        }
+    }
+
+    /// Arm once the force is under `factor` times the first
+    /// evaluation's (eOn `ci_after_rel`).
+    pub fn after_rel(factor: f64) -> Self {
+        Self {
+            trigger_factor: factor,
+            trigger_force: 0.0,
+        }
+    }
+
+    /// Climb from the first evaluation.
+    pub fn always() -> Self {
+        Self {
+            trigger_factor: 1.0,
+            trigger_force: f64::INFINITY,
+        }
+    }
+}
+
+impl Default for CiConfig {
+    fn default() -> Self {
+        Self::after(0.5)
+    }
 }
 
 /// Per-image cells for the generalized solid-state band.
@@ -115,7 +158,11 @@ pub struct CiConfig {
 /// 136, 074103 (2012). The Jacobian is fixed from the mean endpoint
 /// volume when the session is built. Each cell is put in
 /// lower-triangular form, and that image's positions rotate with it.
+///
+/// Fields may be added: build it with [`SolidState::new`] and the
+/// `with_*` setters.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct SolidState {
     /// One cell per image, endpoints included.
     pub cells: Vec<Cell>,
@@ -124,6 +171,29 @@ pub struct SolidState {
     pub pressure: f64,
     /// Positive scale on the Jacobian. 1 is the 2012 value.
     pub weight: f64,
+}
+
+impl SolidState {
+    /// One cell per image, zero pressure, the 2012 Jacobian (weight 1).
+    pub fn new(cells: Vec<Cell>) -> Self {
+        Self {
+            cells,
+            pressure: 0.0,
+            weight: 1.0,
+        }
+    }
+
+    /// Hydrostatic pressure, energy per length cubed.
+    pub fn with_pressure(mut self, pressure: f64) -> Self {
+        self.pressure = pressure;
+        self
+    }
+
+    /// Positive scale on the Jacobian.
+    pub fn with_weight(mut self, weight: f64) -> Self {
+        self.weight = weight;
+        self
+    }
 }
 
 /// Band configuration. `force_tol` is on the max absolute component
@@ -158,6 +228,18 @@ pub struct BandConfig {
     /// coordinates, atoms and cell together. FIRE stays the default
     /// when the flag is clear.
     pub quickmin: bool,
+    /// Quick-min variant when `quickmin` is set: `QuickMinOptions::rgmin`
+    /// (default; FIRE time-step control, one projection),
+    /// `QuickMinOptions::eon` (eOn's fixed `dt`), or
+    /// `QuickMinOptions::per_atom` (a projection per atom).
+    pub quickmin_options: rgmin::QuickMinOptions,
+    /// Initial time step of FIRE and quick-min (rgmin `Control::istep`);
+    /// quick-min `QuickMinOptions::eon` keeps it fixed. 1 by default. On
+    /// the EAM Al vacancy hop and the Pt heptamer bands the eOn variant
+    /// converges at 0.1 and 0.25 and not at 0.5 or 1.
+    pub time_step: f64,
+    /// `Some` selects AutoNEB on this configuration. `None` is a fixed band.
+    pub autoneb: Option<crate::autoneb::AutoNebTuning>,
 }
 
 impl Default for BandConfig {
@@ -166,10 +248,7 @@ impl Default for BandConfig {
             tangent: TangentKind::Improved,
             spring: SpringKind::Uniform { k: 5.0 },
             projection: ProjectionKind::Neb,
-            climbing: Some(CiConfig {
-                trigger_factor: 0.5,
-                trigger_force: 0.0,
-            }),
+            climbing: Some(CiConfig::default()),
             cell: None,
             force_tol: 1e-3,
             max_move: 0.2,
@@ -179,6 +258,9 @@ impl Default for BandConfig {
             },
             solid: None,
             quickmin: false,
+            quickmin_options: rgmin::QuickMinOptions::rgmin(),
+            time_step: 1.0,
+            autoneb: None,
         }
     }
 }
@@ -823,6 +905,11 @@ fn assemble_solid(
             max_component = state.convergence_force(&joint);
         }
     }
+    // A force whose squared norm overflows defeats every solver's
+    // dot products long before a component turns non-finite.
+    if !joint.dot(&joint).is_finite() {
+        return Err(SaddleError::NonFinite("band force norm"));
+    }
     if let Some(last) = state
         .last
         .lock()
@@ -997,6 +1084,11 @@ fn assemble_band(
         }
     }
 
+    // A force whose squared norm overflows defeats every solver's
+    // dot products long before a component turns non-finite.
+    if !projected.dot(&projected).is_finite() {
+        return Err(SaddleError::NonFinite("band force norm"));
+    }
     if let Some(last) = state
         .last
         .lock()
@@ -1012,6 +1104,27 @@ fn assemble_band(
         .unwrap_or_else(|e| e.into_inner()) = max_component;
     let pseudo_energy: f64 = energies.slice(s![1..n_images - 1]).sum();
     Ok((pseudo_energy, projected, max_component))
+}
+
+/// A solver step must leave finite coordinates, and must move the band
+/// unless the band was already within its tolerance; otherwise a host
+/// loop on [`BandSession::step`] would spin on cached evaluations.
+fn check_moved(
+    state: &BandState,
+    before: &Array1<f64>,
+    after: &Array1<f64>,
+    force_tol: f64,
+) -> Result<(), SaddleError> {
+    if !after.iter().all(|v| v.is_finite()) {
+        return Err(SaddleError::NonFinite("band step"));
+    }
+    let max_force = state.last_max_force();
+    if after == before && max_force > force_tol {
+        return Err(SaddleError::Stalled(format!(
+            "band unchanged with max force {max_force:e} above {force_tol:e}"
+        )));
+    }
+    Ok(())
 }
 
 /// The oracle's value beside a projected (band) or inverted (min-mode)
@@ -1069,6 +1182,42 @@ impl<S: BandSurface> BandSurface for CachedBandSurface<'_, S> {
     }
 }
 
+/// The rgmin solver of a band: the per-atom cap, the quick-min options,
+/// and L-BFGS under `Accept::Step` with eOn's NEB resets.
+fn build_solver(config: &BandConfig, method: &Method, interior_dof: usize) -> Solver {
+    let control = Control {
+        maxiter: usize::MAX,
+        gtol: 0.0,
+        istep: config.time_step,
+        maxmove: None,
+        ftol_rel: None,
+        noise_floor: None,
+    };
+    let mut solver = Solver::new(method.clone(), control, interior_dof);
+    // The flat band vector is consecutive xyz triples, so the cap
+    // applies to the largest single-atom displacement (eOn
+    // maxAtomMotionApplied), not to the L2 norm of the whole
+    // band step. A non-positive max_move leaves the step uncapped.
+    solver.set_atom_maxmove(config.max_move);
+    if config.quickmin {
+        solver.set_quickmin_options(config.quickmin_options.clone());
+    }
+    // The projected band force is not the gradient of the summed
+    // image energy the oracle reports, so an energy-decrease test
+    // says nothing about a band step: L-BFGS takes its two-loop
+    // direction with one oracle call (rgmin Accept::Step), as FIRE
+    // steps unconditionally.
+    if matches!(method, Method::Lbfgs { .. }) {
+        solver.set_accept(Accept::Step);
+        // eOn's L-BFGS resets: a two-loop step that reaches the
+        // per-atom cap or faces away from the force drops its
+        // pairs and steps along the force, and an empty memory
+        // scales that step by 0.01.
+        solver.set_lbfgs_neb_guards(true);
+    }
+    solver
+}
+
 /// Stepping band relaxation over an rgmin solver. Endpoints (rows 0
 /// and `n_images - 1`) never move.
 pub struct BandSession {
@@ -1115,35 +1264,15 @@ impl BandSession {
             config.method.clone()
         };
         check_force_driven(&method)?;
+        if !(config.time_step.is_finite() && config.time_step > 0.0) {
+            return Err(SaddleError::Invalid(
+                "band time step must be positive and finite".into(),
+            ));
+        }
         let (positions, solid) = prepare_solid(&config, initial)?;
         let segment = if solid.is_some() { dof + 9 } else { dof };
         let interior_dof = (n_images - 2) * segment;
-        let control = Control {
-            maxiter: usize::MAX,
-            gtol: 0.0,
-            istep: 1.0,
-            maxmove: None,
-            ftol_rel: None,
-        };
-        let mut solver = Solver::new(method.clone(), control, interior_dof);
-        // The flat band vector is consecutive xyz triples, so the cap
-        // applies to the largest single-atom displacement (eOn
-        // maxAtomMotionApplied), not to the L2 norm of the whole
-        // band step. A non-positive max_move leaves the step uncapped.
-        solver.set_atom_maxmove(config.max_move);
-        // The projected band force is not the gradient of the summed
-        // image energy the oracle reports, so an energy-decrease test
-        // says nothing about a band step: L-BFGS takes its two-loop
-        // direction with one oracle call (rgmin Accept::Step), as FIRE
-        // steps unconditionally.
-        if matches!(method, Method::Lbfgs { .. }) {
-            solver.set_accept(Accept::Step);
-            // eOn's L-BFGS resets: a two-loop step that reaches the
-            // per-atom cap or faces away from the force drops its
-            // pairs and steps along the force, and an empty memory
-            // scales that step by 0.01.
-            solver.set_lbfgs_neb_guards(true);
-        }
+        let solver = build_solver(&config, &method, interior_dof);
         Ok(Self {
             config,
             positions,
@@ -1195,6 +1324,43 @@ impl BandSession {
     }
 
     /// Jacobian fixed from the mean endpoint volume at session build.
+    /// Replace the initial time step of FIRE and quick-min
+    /// (`BandConfig::time_step`). The solver is rebuilt, so optimizer
+    /// history and the HiGHS selection go; cached surface values stay.
+    pub fn set_time_step(&mut self, time_step: f64) -> Result<(), SaddleError> {
+        if !(time_step.is_finite() && time_step > 0.0) {
+            return Err(SaddleError::Invalid(
+                "band time step must be positive and finite".into(),
+            ));
+        }
+        self.config.time_step = time_step;
+        let method = if self.config.quickmin {
+            Method::QuickMin
+        } else {
+            self.config.method.clone()
+        };
+        let dof = self.positions.ncols();
+        let segment = if self.solid.is_some() { dof + 9 } else { dof };
+        let interior_dof = (self.positions.nrows() - 2) * segment;
+        self.solver = build_solver(&self.config, &method, interior_dof);
+        self.state.restart();
+        Ok(())
+    }
+
+    /// The band steps with quick-min (`BandConfig::quickmin`).
+    pub fn is_quickmin(&self) -> bool {
+        self.config.quickmin
+    }
+
+    /// Replace the quick-min variant of a quick-min band; the velocity
+    /// and `dt` restart. A band on another method ignores the call.
+    pub fn set_quickmin_options(&mut self, options: rgmin::QuickMinOptions) {
+        if self.config.quickmin {
+            self.solver.set_quickmin_options(options.clone());
+            self.config.quickmin_options = options;
+        }
+    }
+
     pub fn solid_jacobian(&self) -> Option<f64> {
         self.solid.as_ref().map(|solid| solid.jacobian)
     }
@@ -1283,6 +1449,39 @@ impl BandSession {
         self.restart();
         self.state.set_endpoints(None);
         self.state.drop_last();
+    }
+
+    /// Set the force tolerance without dropping quasi-Newton pairs.
+    pub(crate) fn set_force_tol(&mut self, force_tol: f64) -> Result<(), SaddleError> {
+        if !(force_tol > 0.0 && force_tol.is_finite()) {
+            return Err(SaddleError::Invalid(
+                "band force tolerance must be finite and positive".into(),
+            ));
+        }
+        self.config.force_tol = force_tol;
+        Ok(())
+    }
+
+    /// Replace the climbing rule without dropping quasi-Newton pairs.
+    /// The cached force is forgotten so the next step uses the new rule.
+    pub(crate) fn set_climbing(&mut self, climbing: Option<CiConfig>) {
+        self.config.climbing = climbing;
+        self.state.restart();
+        self.solver.forget_evaluation();
+    }
+
+    /// Record endpoint energies the host already holds.
+    ///
+    /// The next evaluation asks only for the interior images. Endpoint
+    /// gradients are never read. Call this before the first step when
+    /// those two images were evaluated already, so a new window does
+    /// not repeat them.
+    pub(crate) fn seed_endpoint_energies(&mut self, energies: [f64; 2]) -> Result<(), SaddleError> {
+        if !energies.iter().all(|energy| energy.is_finite()) {
+            return Err(SaddleError::NonFinite("band endpoint energies"));
+        }
+        self.state.set_endpoints(Some(energies));
+        Ok(())
     }
 
     /// Restart the relaxation on the same surface: drop quasi-Newton
@@ -1408,6 +1607,7 @@ impl BandSession {
         });
 
         let mut x = self.interior_flat();
+        let before = x.clone();
         let stepped = self.solver.step(&oracle, &mut x);
         drop(oracle);
         // The surface error is the root cause of whatever the solver
@@ -1415,9 +1615,13 @@ impl BandSession {
         // outranks a solver error. `x` is a local copy; the session's
         // positions stay where they were.
         if let Some(err) = self.state.take_error() {
+            // The solver cached the failed point's infinite energy and
+            // zero force; the next step must evaluate the band again.
+            self.solver.forget_evaluation();
             return Err(err);
         }
         stepped.map_err(|e| SaddleError::Solver(e.to_string()))?;
+        check_moved(&self.state, &before, &x, self.config.force_tol)?;
         self.scatter_interior(x.view());
         self.iteration += 1;
 
@@ -1534,12 +1738,17 @@ impl BandSession {
             }
         });
         let mut x = self.pack_interior();
+        let before = x.clone();
         let stepped = self.solver.step(&oracle, &mut x);
         drop(oracle);
         if let Some(err) = self.state.take_error() {
+            // The solver cached the failed point's infinite energy and
+            // zero force; the next step must evaluate the band again.
+            self.solver.forget_evaluation();
             return Err(err);
         }
         stepped.map_err(|e| SaddleError::Solver(e.to_string()))?;
+        check_moved(&self.state, &before, &x, self.config.force_tol)?;
         self.scatter_packed(x.view());
         self.iteration += 1;
         let at_last = self

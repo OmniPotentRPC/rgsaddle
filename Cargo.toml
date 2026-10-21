@@ -18,29 +18,45 @@ default = []
 capi = []
 par = ["rgmin/par"]
 highs = ["rgmin/highs"]
-python = ["dep:pyo3"]
 readcon = ["dep:readcon-core"]
+# readcon-db 0.2 pins readcon-core = "=0.17.1", the same release as
+# below, so the corpus and the CON writer share one readcon-core.
 readcon-db = ["readcon", "dep:readcon-db"]
 chemfiles = ["readcon", "readcon-core/chemfiles"]
 
 [dependencies]
 dlpk = { version = "0.1.5", features = ["ndarray"] }
-# Extension wheels select pyo3/extension-module in pyproject.toml.
-pyo3 = { version = "0.26", features = ["abi3-py310"], optional = true }
-readcon-core = { version = "0.14", optional = true }
-readcon-db = { version = "0.1", optional = true }
+# ConFrameWriter::new is RoundTrip and canonical stays off.
+readcon-core = { version = "=0.17.1", optional = true }
+readcon-db = { version = "0.2", optional = true }
 # The pinned revision supplies retained evaluations, manifold steps,
-# and quick-min. A git dependency cannot be published: an rgmin release
+# and quick-min with its options. A git dependency cannot be published: an rgmin release
 # that carries them must come out, and this line return to a version,
 # before rgsaddle is released.
-rgmin = { git = "https://github.com/OmniPotentRPC/rgmin", rev = "6e37aa7f2bd8506fb2951a51ab59594ed168c900" }
+rgmin = { git = "https://github.com/OmniPotentRPC/rgmin", rev = "d76539dbe40695c0032e0d96a56e7932f2cc49ab" }
 eindir-core = { version = "0.6.0", features = ["capi"] }
 ndarray = "0.17"
+faer = { version = "0.24.4", default-features = false, features = ["std", "linalg"] }
+rayon = "1.12"
 thiserror = "2"
 linkcell = { version = "0.3.3", git = "https://github.com/d-SEAMS/linkcell", rev = "f6cf5700ca9c90e1877c84b66fb68386de5ceffe", default-features = false }
 
 [dev-dependencies]
 approx = "0.5"
+faer = { version = "0.24.4", default-features = false, features = ["std", "linalg"] }
+sha2 = "0.10"
+
+[profile.dev.package.faer]
+opt-level = 3
+
+[profile.dev.package.pulp]
+opt-level = 3
+
+[profile.dev.package.gemm-f64]
+opt-level = 3
+
+[profile.dev.package.gemm-common]
+opt-level = 3
 
 # include/rgsaddle.h is the hand-written contract (surface request,
 # status enum, stepping semantics); cargo-c installs it as is instead

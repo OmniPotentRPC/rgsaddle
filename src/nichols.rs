@@ -24,7 +24,8 @@
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 
 use crate::error::SaddleError;
-use crate::minmode::PointSurface;
+use crate::minmode::{FiniteDifference, PointSurface};
+use crate::sparse_hessian::{SparseHessianOpts, SparsityPattern, prefactor_hessian};
 
 /// Which stationary point the Nichols shift is aimed at.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,6 +50,11 @@ pub enum HessianUpdate {
 }
 
 /// Stepping controls for [`Index1Session`].
+///
+/// The struct is non-exhaustive. Set [`Self::sparse_pattern`] with
+/// [`Self::with_sparse_pattern`]. The seed stays dense unless that
+/// builder is used.
+#[non_exhaustive]
 #[derive(Clone, Debug)]
 pub struct Index1Config {
     pub update: HessianUpdate,
@@ -59,6 +65,49 @@ pub struct Index1Config {
     pub force_tol: f64,
     /// Central-difference step used when no Hessian was supplied.
     pub fd_dr: f64,
+    /// Atom sparsity for the seed Hessian.
+    ///
+    /// `None` keeps the dense central-difference seed. A pattern is
+    /// used only when no Hessian was supplied. The width is `fd_dr`.
+    pub sparse_pattern: Option<SparsityPattern>,
+}
+
+impl Index1Config {
+    /// Hessian update used after the seed step.
+    pub fn with_update(mut self, update: HessianUpdate) -> Self {
+        self.update = update;
+        self
+    }
+
+    /// Nichols target, index-1 by default.
+    pub fn with_mode(mut self, mode: NicholsMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    /// Euclidean bound on the Cartesian step.
+    pub fn with_trust_radius(mut self, trust_radius: f64) -> Self {
+        self.trust_radius = trust_radius;
+        self
+    }
+
+    /// Stop when every gradient component is at or under this.
+    pub fn with_force_tol(mut self, force_tol: f64) -> Self {
+        self.force_tol = force_tol;
+        self
+    }
+
+    /// Central-difference width used when no Hessian was supplied.
+    pub fn with_fd_dr(mut self, fd_dr: f64) -> Self {
+        self.fd_dr = fd_dr;
+        self
+    }
+
+    /// Opt into the direct CPR seed. The default seed stays dense.
+    pub fn with_sparse_pattern(mut self, pattern: SparsityPattern) -> Self {
+        self.sparse_pattern = Some(pattern);
+        self
+    }
 }
 
 impl Default for Index1Config {
@@ -69,6 +118,7 @@ impl Default for Index1Config {
             trust_radius: 0.2,
             force_tol: 1e-5,
             fd_dr: 1e-4,
+            sparse_pattern: None,
         }
     }
 }
@@ -683,6 +733,26 @@ impl Index1Session {
         Ok(())
     }
 
+    fn seed_hessian<S: PointSurface>(&self, surface: &S) -> Result<Array2<f64>, SaddleError> {
+        if let Some(pattern) = &self.config.sparse_pattern {
+            if pattern.n_atoms().saturating_mul(3) != self.x.len() {
+                return Err(SaddleError::Shape(
+                    "sparse pattern atom count must match the position".into(),
+                ));
+            }
+            let recovered = prefactor_hessian(
+                surface,
+                self.x.view(),
+                pattern,
+                SparseHessianOpts::default()
+                    .with_difference(FiniteDifference::Central)
+                    .with_step(self.config.fd_dr),
+            )?;
+            return Ok(recovered.to_dense());
+        }
+        finite_difference_hessian(surface, self.x.view(), self.config.fd_dr)
+    }
+
     fn curvature(&self) -> Result<f64, SaddleError> {
         if !self.have_hessian {
             return Ok(0.0);
@@ -721,7 +791,7 @@ impl Index1Session {
             });
         }
         if !self.have_hessian {
-            self.hessian = finite_difference_hessian(surface, self.x.view(), self.config.fd_dr)?;
+            self.hessian = self.seed_hessian(surface)?;
             self.have_hessian = true;
         }
         let kind = match self.config.mode {
