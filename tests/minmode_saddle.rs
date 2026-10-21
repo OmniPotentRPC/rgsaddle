@@ -86,27 +86,22 @@ fn minimum_is_not_converged(kind: MinModeKind) {
     };
     let start = array![1.0, 0.0, 0.0];
     let seed = array![1.0, 0.0, 0.0];
-    let mut session = MinModeSession::new(config, start, seed).unwrap();
-    for step in 0..50 {
-        let report = session.step(&DoubleWell).unwrap();
-        assert!(
-            report.max_force <= 1e-3,
-            "{kind:?} step {step}: max_force={} at a stationary point",
-            report.max_force
-        );
-        assert!(
-            report.curvature > 0.0,
-            "{kind:?} step {step}: curvature={} at a minimum",
-            report.curvature
-        );
-        assert_eq!(
-            report.status,
-            MinModeStatus::Running,
-            "{kind:?} step {step}: max_force={} curvature={}",
-            report.max_force,
-            report.curvature
-        );
-    }
+    let mut session = MinModeSession::new(config, start.clone(), seed).unwrap();
+    let report = session.step(&DoubleWell).unwrap();
+    // A vanishing force at a minimum is not a saddle. The convex escape
+    // leaves along the mode by max_move instead of reporting convergence.
+    assert_eq!(report.status, MinModeStatus::Running, "{kind:?}");
+    assert!(
+        report.curvature > 0.0,
+        "{kind:?} curvature={}",
+        report.curvature
+    );
+    let moved = &session.position() - &start;
+    let travel = moved.dot(&moved).sqrt();
+    assert!(
+        (travel - 0.1).abs() < 1e-9,
+        "{kind:?} left by {travel}, expected max_move"
+    );
 }
 
 /// The quadratic saddle, failing at any point farther than `radius`
@@ -196,6 +191,7 @@ fn estimate_from_bad_seed(kind: MinModeKind) -> (f64, usize, usize, Array1<f64>)
     let config = MinModeConfig {
         kind,
         rotation_tol: 1e-6,
+        rotation_angle_tol: 0.0,
         max_rotations: 50,
         krylov_dim: 6,
         ..MinModeConfig::default()
@@ -240,6 +236,7 @@ fn warm_session_costs_one_evaluation(kind: MinModeKind) {
     let config = MinModeConfig {
         kind,
         rotation_tol: 1e-6,
+        rotation_angle_tol: 0.0,
         ..MinModeConfig::default()
     };
     let x = Array1::from(vec![0.1, -0.2, 0.05, 0.3, -0.1, 0.02]);
@@ -404,6 +401,77 @@ fn construction_rejects_modes_without_a_finite_nonzero_norm() {
             "invalid mode seed {seed} was accepted"
         );
     }
+}
+
+#[test]
+fn lanczos_push_follows_the_lowest_mode_one_action_at_a_time() {
+    let config = MinModeConfig {
+        kind: MinModeKind::Lanczos,
+        rotation_tol: 1e-6,
+        // The pushed basis must keep going past this cap. A full
+        // solve with dimension 1 cannot leave the seed.
+        krylov_dim: 1,
+        ..MinModeConfig::default()
+    };
+    let x = Array1::from(vec![0.1, -0.2, 0.05, 0.3, -0.1, 0.02]);
+    let seed = Array1::from(vec![0.3, 0.5, 0.4, 0.4, 0.4, 0.4]);
+    let mut session = MinModeSession::new(config, x, seed).unwrap();
+    let surface = CountingPoint {
+        inner: &Anisotropic,
+        calls: AtomicUsize::new(0),
+    };
+    let mut actions = 0usize;
+    for _ in 0..12 {
+        let before = surface.calls.load(Ordering::Relaxed);
+        let est = session.push_estimate(&surface).unwrap();
+        let used = surface.calls.load(Ordering::Relaxed) - before;
+        assert_eq!(est.evaluations, used);
+        if before == 0 {
+            assert_eq!(used, 2, "centre plus one action");
+        } else {
+            assert_eq!(used, 1, "one action on a warm centre");
+        }
+        actions += 1;
+        if session.mode()[0].abs() >= 0.99 {
+            break;
+        }
+    }
+    assert!(actions > 1, "krylov cap of 1 must not end the push");
+    assert!(session.mode()[0].abs() >= 0.99, "mode {:?}", session.mode());
+    // The mode takes its component on the residual direction, so four
+    // actions reach the overlap where the Ritz vector of the basis needs
+    // five. The curvature is the Ritz value of the four vectors, an
+    // upper bound on -1.
+    assert_eq!(actions, 4);
+    assert!(
+        (-1.0 - 1e-9..-0.8).contains(&session.curvature()),
+        "curvature {}",
+        session.curvature()
+    );
+    // A translation after a partial basis still finishes the mode.
+    let report = session.step(&surface).unwrap();
+    assert!(report.evaluations >= 1);
+    assert!(session.mode()[0].abs() > 0.99);
+}
+
+#[test]
+fn dimer_push_runs_the_full_rotation() {
+    let (curvature, _rotations, _evaluations, mode) = {
+        let config = MinModeConfig {
+            kind: MinModeKind::Dimer,
+            rotation_tol: 1e-6,
+            rotation_angle_tol: 0.0,
+            max_rotations: 50,
+            ..MinModeConfig::default()
+        };
+        let x = Array1::from(vec![0.1, -0.2, 0.05, 0.3, -0.1, 0.02]);
+        let seed = Array1::from(vec![0.3, 0.5, 0.4, 0.4, 0.4, 0.4]);
+        let mut session = MinModeSession::new(config, x, seed).unwrap();
+        let est = session.push_estimate(&Anisotropic).unwrap();
+        (est.curvature, est.rotations, est.evaluations, est.mode)
+    };
+    assert!((curvature + 1.0).abs() < 1e-8, "curvature {curvature}");
+    assert!(mode[0].abs() > 1.0 - 1e-9, "mode {mode:?}");
 }
 
 #[test]

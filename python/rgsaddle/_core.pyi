@@ -70,7 +70,7 @@ class Stencil:
     @staticmethod
     def point(x: Annotated[NDArray[numpy.float64], dict(shape=(None,), order='C', writable=False)], preset: str = 'dimer', mode: object | None = None, dr: float = 0.001, force_tol: float = 0.001, max_move: float = 0.2, rotation_tol: float = 0.0001, max_rotations: int = 20, krylov_dim: int = 12, threads: int = 1, art_threshold: float = 0.0, art_push: int = 20) -> Stencil:
         """
-        Point search. Dimer keeps rotational CG history across translations; Lanczos translations use relative Ritz-value stopping. Band preset names raise ValueError.
+        Point search. dimer and lanczos follow MinModeSession. The dimer keeps its Polak-Ribiere rotation history across translations. rotation_tol 1e-4 also stops the dimer after one rotation once the rotational force is under 1. rotation_angle_tol is the Rust default of five degrees (0 would disable that angle test) and is not a Python argument. A curvature that is not negative steps by max_move along the mode. Band preset names raise ValueError.
         """
 
     @staticmethod

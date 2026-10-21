@@ -1,10 +1,13 @@
 //! Golden hashes of positions and energies after a fixed step count.
 //!
-//! Recorded on main before the stencil refactor. Each line is
-//! `preset fixture threads sha256`. The digest is SHA-256 over the
-//! raw little-endian f64 bytes of the final positions, row-major,
-//! followed by the energies at those positions. Threads are 1, 2, 3
-//! and 8. A pure refactor must reproduce every digest.
+//! Recorded after the stock min-mode step (torque window, full
+//! `max_move` climb, memory kept inside the Householder cone). Each
+//! line is `preset fixture threads sha256`. The digest is SHA-256
+//! over the raw little-endian f64 bytes of the final positions,
+//! row-major, followed by the energies at those positions. Threads
+//! are 1, 2, 3 and 8. A band or AutoNEB refactor must reproduce
+//! those digests; a min-mode step change records dimer and Lanczos
+//! again.
 
 use std::fs;
 use std::path::PathBuf;
@@ -518,6 +521,7 @@ fn run_stencil_mode(preset: &str, fixture: &str) -> (Array2<f64>, Vec<f64>) {
         .preset(kind)
         .mode(array_from(&mode))
         .dr(1e-3)
+        .rotation_angle_tol(0.0)
         .max_rotations(8)
         .krylov_dim(6)
         .force_tol(1e-12)

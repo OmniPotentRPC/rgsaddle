@@ -880,8 +880,14 @@ NB_MODULE(_core, m) {
           nb::arg("max_move") = 0.2, nb::arg("rotation_tol") = 1e-4, nb::arg("max_rotations") = 20,
           nb::arg("krylov_dim") = 12, nb::arg("threads") = 1, nb::arg("art_threshold") = 0.0,
           nb::arg("art_push") = 20,
-          "Point search. Dimer keeps rotational CG history across translations; Lanczos translations use "
-          "relative Ritz-value stopping. Band preset names raise ValueError.")
+          "Point search. dimer and lanczos follow MinModeSession. "
+          "The dimer keeps its Polak-Ribiere rotation history across "
+          "translations. rotation_tol 1e-4 also stops the dimer after one "
+          "rotation once the rotational force is under 1. rotation_angle_tol "
+          "is the Rust default of five degrees (0 would disable that angle "
+          "test) and is not a Python argument. A curvature that is not "
+          "negative steps by max_move along the mode. Band preset names "
+          "raise ValueError.")
       .def_static("band", &make_band, nb::arg("x").noconvert(), nb::arg("preset") = "ci-neb",
                   "Band presets stay on feat/band-methods-zoom and raise ValueError.")
       .def(

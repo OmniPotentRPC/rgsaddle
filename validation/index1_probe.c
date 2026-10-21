@@ -1,7 +1,8 @@
-/* Exercise the public index-one ABI for trace and timing comparisons. */
+/* Exercise the public index-one ABI.
+   validation/check_index1.py compares the trace and the bench
+   checksums with validation/golden/index1_abi.json. */
 #define _POSIX_C_SOURCE 200809L
 #include "rgsaddle.h"
-#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -61,12 +62,18 @@ static void run_case(int64_t n, int mode, int update, int weighted,
   double *position = calloc((size_t)n, sizeof(double));
   double *hessian = calloc((size_t)(n * n), sizeof(double));
   require(x && h && initial && mass && position && hessian, "allocation failed");
+  /* Rational data. Sine and cosine of these ordinates need libm
+     argument reduction, so a pinned trace would follow the host libm
+     rather than this crate. */
   for (int64_t i = 0; i < n; ++i) {
-    x[i] = 0.1 + 0.06 * sin((double)(i + 1));
+    x[i] = 0.1 + 0.01 * (double)((i % 9) - 4);
     mass[i] = weighted ? 1.0 + (double)(i % 5) : 1.0;
     for (int64_t j = 0; j < n; ++j) {
-      h[i * n + j] = (i == j ? (i == 0 && mode ? -2.0 : 2.0 + (double)i / (double)n) : 0.0)
-                    + 0.02 * cos((double)(i + j)) / (1.0 + (double)llabs(i - j));
+      double diag = 0.0;
+      if (i == j) diag = (i == 0 && mode) ? -2.0 : 2.0 + (double)i / (double)n;
+      double couple =
+          0.02 * (double)(((i + j) % 5) - 2) / (1.0 + (double)llabs(i - j));
+      h[i * n + j] = diag + couple;
       initial[i * n + j] = h[i * n + j];
     }
     initial[i * n + i] += 0.24 * x[i] * x[i];

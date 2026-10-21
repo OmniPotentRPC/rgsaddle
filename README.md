@@ -53,11 +53,13 @@ default.
 with the host's gradient), `estimate_mode` refreshes the lowest mode
 without translating. The dimer rotates by the modified Newton step
 with an extrapolated gradient (one evaluation per rotation) and keeps
-its rotational conjugate-gradient history across translations. Lanczos
-translations stop at a 0.05 relative Ritz-value change; standalone mode
-estimates stop on the Ritz residual. `FiniteDifference::Central` is available
+its Polak-Ribiere rotational history across translations. Lanczos
+stops on the Ritz residual; `FiniteDifference::Central` is available
 for the actions, and `rotation_angle_tol` stops a dimer rotation whose
-optimal angle falls under it. Both sessions refuse line-searched methods: the
+optimal angle falls under it (five degrees by default; zero disables
+the test). A non-negative curvature takes one full per-atom `max_move`
+along the mode, and a mode turn inside 45 degrees keeps the translator
+memory. Both sessions refuse line-searched methods: the
 oracle value beside a projected or inverted force is not its
 potential. `validation/` holds the sympy and sollya
 checks of the rotation formulas, the Lanczos residual bound, and the

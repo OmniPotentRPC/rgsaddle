@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 18u
+#define RGSADDLE_ABI_MINOR 21u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -60,6 +60,19 @@ extern "C" {
  * and force 0.5.
  */
 #define RGSADDLE_BAND_CI_AFTER (1ull << 2)
+
+/**
+ * Band config flags bit 3, ABI minor 21. No min-mode refinement of the
+ * climbing image: the plain CI-NEB of minor 20 and earlier. Without
+ * the bit a climbing band hands its climbing image to the OCI-NEB
+ * refinement (Goswami, Gunde, and Jonsson, Front. Chem. 14, 1807063
+ * (2026)) once that image has held for three steps with its largest
+ * per-atom force under half the first evaluation's. That image then
+ * climbs alone by P-RFO on a TS-BFGS model while the other images
+ * stay, and the band resumes if the climb leaves the band's mode.
+ * rgsaddle_ocineb_create does not read the bit.
+ */
+#define RGSADDLE_BAND_NO_MIN_MODE (1ull << 3)
 
 /** Request flags bit 0. positions and gradients are one image. */
 #define RGSADDLE_REQ_ONE_IMAGE (1ull << 0)
@@ -166,6 +179,11 @@ typedef struct RgsaddleMinMode RgsaddleMinMode;
  * evaluation), positions and gradients are 3 * n_atoms, energies is
  * one value, and n_images is the length of the band.
  *
+ * While the min-mode refinement runs (ABI minor 21, see
+ * RGSADDLE_BAND_NO_MIN_MODE) each request carries the climbing image
+ * alone: with RGSADDLE_REQ_ONE_IMAGE as above, and batched as one
+ * geometry with n_images = 1 and image -1.
+ *
  * Return RGSADDLE_OK or another rgsaddle_status_t; a non-OK return
  * fails the step with the band unchanged.
  */
@@ -219,7 +237,10 @@ typedef struct {
   /** Armed climbing image, or -1. */
   int64_t ci_index;
   int64_t iteration;
-  /** Min-mode only: curvature along the lowest mode. */
+  /**
+   * Curvature along the lowest mode: the min-mode session, and a band
+   * step of the min-mode refinement (ABI minor 21); 0 on a band step.
+   */
   double curvature;
   int64_t rotations;
 } rgsaddle_report_t;
@@ -395,8 +416,10 @@ typedef struct {
   double max_move;
   /**
    * Minor 5: the dimer also stops rotating when an iteration's optimal
-   * angle falls under this (radians); 0 disables the test. Ignored
-   * when version.minor < 5.
+   * angle falls under this (radians). The Rust default is five degrees
+   * (Kästner and Sherwood, J. Chem. Phys. 128, 014106 (2008); eOn
+   * converged_angle). Zero disables the angle test. A C caller stores
+   * the value it writes; ignored when version.minor < 5.
    */
   double rotation_angle_tol;
   /** Minor 5: rgsaddle_difference_t for the Hessian actions. */
@@ -418,15 +441,21 @@ rgsaddle_status_t rgsaddle_minmode_step(RgsaddleMinMode *session,
                                         rgsaddle_report_t *out);
 
 /**
- * Refresh the lowest mode at the current point without translating
- * (a host that climbs with its own optimizer). The report carries
+ * Refresh the lowest mode without translating.
+ * A dimer runs its rotation to the tolerance. Lanczos advances one
+ * Hessian action and keeps the Krylov basis until set_position,
+ * set_mode, or reset; repeat the call until the mode meets the host's
+ * test. That basis grows to the free dimension. After k actions the
+ * mode also takes its component on the residual direction, the
+ * (k+1)-th Lanczos vector, from the Lanczos polynomials at an
+ * extrapolated lowest eigenvalue; no surface call is added, and the
+ * reported curvature stays the Ritz value of the k vectors. The report carries
  * curvature, rotations, and evaluations (surface calls, the centre
  * included when it was neither cached nor supplied); max_force is NaN.
- * Keep the session across a saddle search: the refreshed mode seeds
- * the next estimate. Standalone Lanczos estimates use the Ritz-residual
- * stop; translations use the stock relative Ritz-value stop. A repeated
- * dimer estimate at one geometry restarts rotational CG history. A failed
- * surface callback leaves retained dimer rotation history unchanged.
+ * The refreshed mode seeds the next estimate, so a mode that still
+ * holds costs one evaluation. A repeated dimer estimate at one
+ * geometry restarts rotational CG history. A failed surface callback
+ * leaves retained dimer rotation history unchanged.
  */
 rgsaddle_status_t rgsaddle_minmode_estimate(RgsaddleMinMode *session,
                                             rgsaddle_surface_fn surface,
@@ -917,6 +946,104 @@ rgsaddle_status_t rgsaddle_samd_position(const RgsaddleSamd *session, double *ou
 void rgsaddle_samd_free(RgsaddleSamd *session);
 
 
+
+/**
+ * Image dependent pair potential initial path.
+ *
+ * Goswami, MethodsX (2026), doi:10.1016/j.mex.2026.103899.
+ * Smidstrup, Pedersen, Stokbro, and Jonsson, J. Chem. Phys. 140,
+ * 214106 (2014).
+ *
+ * `reactant` and `product` each hold `3 * n_atoms` doubles. `n_images`
+ * counts the endpoints. `out` holds `n_images * 3 * n_atoms` doubles,
+ * image-major: row 0 is the reactant and the last row is the product.
+ * `cell` is a row-major 3x3 lattice, or NULL in free space. Interior
+ * images are relaxed toward interpolated minimum-image pair distances.
+ * `max_iterations`, `grad_tol` (L2 norm of the IDPP gradient), and
+ * `max_move` (per-atom cap) are the per-image L-BFGS stop. The
+ * defaults are 5000, 1e-3, and 0.1. ABI minor 19.
+ */
+rgsaddle_status_t rgsaddle_idpp_path(int64_t n_images, int64_t n_atoms,
+                                     const double *reactant,
+                                     const double *product, const double *cell,
+                                     int64_t max_iterations, double grad_tol,
+                                     double max_move, double *out);
+
+typedef struct RgsaddleOcineb RgsaddleOcineb;
+
+/** Phase of one OCI-NEB host step. ABI minor 20. */
+typedef enum {
+  RGSADDLE_OCINEB_BAND = 0,
+  RGSADDLE_OCINEB_ALIGN = 1,
+  RGSADDLE_OCINEB_MINMODE = 2
+} rgsaddle_ocineb_phase_t;
+
+/**
+ * Hand-off parameters. The band and minimum-mode configs are separate
+ * arguments of rgsaddle_ocineb_create. trigger_factor 0.31 and
+ * angle_tol 0.85 are the published values. angle_tol must be at least
+ * 1/sqrt(2). stability_count 5 requires the counter to exceed 5.
+ * max_mmf_steps 1000. restore_unhelpful 0 restores only on positive
+ * curvature. From ABI minor 21 the hand-off is the band's min-mode
+ * refinement (see RGSADDLE_BAND_NO_MIN_MODE) with these controls:
+ * the trigger is on the climbing image's largest per-atom force, the
+ * minimum-mode config supplies only the mode estimate (kind, dr,
+ * difference, rotation_tol, max_rotations, krylov_dim), and the climb
+ * is P-RFO, so its method, force_tol and max_move are not read.
+ */
+typedef struct {
+  rgsaddle_version_t version;
+  uint64_t flags;
+  double trigger_factor;
+  double trigger_force;
+  double angle_tol;
+  int64_t stability_count;
+  int64_t max_mmf_steps;
+  int32_t restore_unhelpful;
+  int32_t reserved;
+} rgsaddle_ocineb_config_t;
+
+/** One OCI-NEB step. The session stamps version and flags. */
+typedef struct {
+  rgsaddle_version_t version;
+  uint64_t flags;
+  int32_t status; /**< rgsaddle_run_status_t */
+  int32_t phase;  /**< rgsaddle_ocineb_phase_t */
+  int32_t fell_back;
+  int32_t evaluations;
+  double max_force;
+  double curvature;
+  double alignment;
+  double threshold;
+  int64_t ci_index;
+  int64_t iteration;
+  int64_t rotations;
+} rgsaddle_ocineb_report_t;
+
+/**
+ * Climbing-image band that hands the climbing image to a min-mode
+ * climb. Goswami, Gunde, and Jónsson, Front. Chem. 14 (2026),
+ * doi:10.3389/fchem.2026.1807063. Positions are n_images x (3 * n_atoms),
+ * copied in. Returns NULL on an unknown major, a bad shape, or an
+ * alignment tolerance under 1/sqrt(2).
+ */
+RgsaddleOcineb *rgsaddle_ocineb_create(const rgsaddle_band_config_t *band,
+                                       const rgsaddle_minmode_config_t *minmode,
+                                       const rgsaddle_ocineb_config_t *config,
+                                       int64_t n_images, int64_t n_atoms,
+                                       const double *positions);
+
+/** One band step, one alignment, or one P-RFO climb step. */
+rgsaddle_status_t rgsaddle_ocineb_step(RgsaddleOcineb *session,
+                                       rgsaddle_surface_fn surface, void *user,
+                                       rgsaddle_ocineb_report_t *out);
+
+/** Copy the current band out (n_images * 3 * n_atoms doubles). */
+rgsaddle_status_t rgsaddle_ocineb_positions(const RgsaddleOcineb *session,
+                                            double *out);
+
+rgsaddle_status_t rgsaddle_ocineb_reset(RgsaddleOcineb *session);
+void rgsaddle_ocineb_free(RgsaddleOcineb *session);
 
 /** Select the optional HiGHS feasible-set step. enabled is 0 or 1.
  * No-op in a library built without the highs Cargo feature. */

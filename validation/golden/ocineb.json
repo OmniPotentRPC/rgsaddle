@@ -1,0 +1,12 @@
+{
+  "P_of_1": 1,
+  "affine_iff": "S = 1 or B = 1",
+  "affine_member": "1/2 + alpha/2",
+  "T_fail_range": [
+    "F0 * lambda_rel / 2",
+    "F0 * lambda_rel"
+  ],
+  "T_success_le_F_new_iff": "F_new <= (5/4) F_CI",
+  "hermite_interpolates": true,
+  "citation": "doi:10.3389/fchem.2026.1807063"
+}

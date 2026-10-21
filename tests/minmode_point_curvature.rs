@@ -52,12 +52,12 @@ fn translated_stationary_point(
     };
     let mut session =
         MinModeSession::new(config, array![-1.0, 0.0, 0.0], array![1.0, 0.0, 0.0]).unwrap();
+    // The initial inverse Hessian is the identity, so one unscaled step
+    // is minus the gradient and lands on the stationary point at +1.
+    // The NEB empty-memory scale would shrink that step.
+    session.set_lbfgs_neb_guards(false);
     let report = session.step(&surface).unwrap();
     let points = surface.points.lock().unwrap();
-    eprintln!(
-        "{kind:?}: x={:?}, report={report:?}, points={points:?}",
-        session.position()
-    );
     assert_eq!(session.position(), array![1.0, 0.0, 0.0].view());
     assert_eq!(report.max_force, 0.0);
     assert_eq!(report.status, expected_status);
@@ -113,6 +113,7 @@ fn failed_confirmation_preserves_position(kind: MinModeKind) {
     };
     let start = array![-1.0, 0.0, 0.0];
     let mut session = MinModeSession::new(config, start.clone(), array![1.0, 0.0, 0.0]).unwrap();
+    session.set_lbfgs_neb_guards(false);
     let error = session.step(&surface).unwrap_err();
     assert!(
         matches!(error, SaddleError::Surface(ref message)

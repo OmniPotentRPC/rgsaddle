@@ -1,0 +1,209 @@
+name: verify
+
+on:
+  push:
+    branches:
+      - "verify/**"
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  formal:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install elan
+        run: |
+          curl -sSfL https://github.com/leanprover/elan/releases/download/v4.2.4/elan-x86_64-unknown-linux-gnu.tar.gz | tar xz
+          ./elan-init -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+      - uses: actions/cache@v4
+        with:
+          path: formal/.lake
+          key: lake-${{ hashFiles('formal/lake-manifest.json') }}
+      - name: Check the contracts
+        working-directory: formal
+        run: ./check.sh
+      - name: Export the mirror
+        working-directory: formal
+        run: lake exe mirror
+      - name: Check exported floors
+        run: python3 scripts/export_constants.py --check
+
+  validation:
+    runs-on: ubuntu-latest
+    # Symbolic scripts finish in about a minute. The ABI probe used to
+    # stay in this job for about an hour and a half with no timeout,
+    # so a repeat of that run would hold the job until the runner
+    # limit. Twenty minutes still covers a cold build.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Sollya and a C toolchain
+        run: sudo apt-get update && sudo apt-get install -y sollya build-essential pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install uv 0.13.0
+        run: curl -LsSf https://astral.sh/uv/0.13.0/install.sh | sh
+      - name: Symbolic scripts
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.local/bin:$PATH"
+          shopt -s globstar nullglob
+          for script in validation/**/*.py tests/symbolic/*.py; do
+            if [[ "$(basename "$script")" == "check_index1.py" ]]; then
+              continue
+            fi
+            echo "== $script"
+            uv run --no-project --with sympy --with mpmath --with numpy --with scipy --with z3-solver python "$script"
+          done
+      - name: Sollya scripts
+        run: |
+          set -euo pipefail
+          shopt -s globstar nullglob
+          for script in validation/**/*.sollya tests/symbolic/*.sollya; do
+            echo "== $script"
+            sollya "$script"
+          done
+      - name: Index-1 ABI probe
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.local/bin:$PATH"
+          # sym_eigh is a cyclic Jacobi, O(n^3) per sweep, and the dev
+          # profile does not optimize this crate. One dimension-300
+          # bench call then takes about three minutes. The previous
+          # step copied the binary and timed that call sixteen times.
+          # The printed ratio was not asserted. Optimize this package
+          # only. validation/golden/index1_abi.json is the check.
+          cargo build --features capi --config 'profile.dev.package.rgsaddle.opt-level=3'
+          gcc -I include validation/index1_probe.c -L target/debug -lrgsaddle -lm -Wl,-rpath,"$PWD/target/debug" -o /tmp/index1_probe
+          mkdir -p /tmp/index1_out
+          uv run --no-project python validation/check_index1.py /tmp/index1_probe /tmp/index1_out
+
+  kani:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: create
+            harnesses: band_create_null_and_short band_create_solid_null_and_short minmode_create_null_and_short index1_create_null_and_short irc_create_null_and_short irc_create_from_surface_null_and_short constraints_create_null_and_short
+          - shard: step
+            harnesses: nichols_step_null_and_short prfo_step_null_and_short hessian_powell_null_and_short hessian_bofill_null_and_short cap_max_abs_null cap_max_abs_short
+          - shard: sella-min
+            harnesses: sella_min_create_null_and_short sella_min_create_on_null_and_short sella_min_create_internal_null_and_short sella_min_create_cell_null_and_short sella_min_create_cell_internal_null_and_short
+          - shard: sella-saddle
+            harnesses: sella_saddle_create_null_and_short sella_saddle_create_on_null_and_short sella_saddle_create_internal_null_and_short sella_saddle_create_cell_null_and_short sella_saddle_create_cell_internal_null_and_short
+          - shard: pes
+            harnesses: samd_create_null_and_short pes_create_null_and_short internal_pes_create_null_and_short internal_pes_create_dummies_null_and_short internal_pes_create_from_find_null_and_short place_perp_dummy_null_and_short
+    steps:
+      - uses: actions/checkout@v4
+      # Install Kani only. The action's default command is `cargo-kani`
+      # with no arguments, which enables the default `faer` feature and
+      # compiles `pulp`. Kani 0.68 rejects pulp's global assembly, so
+      # that step failed every shard (create, step, sella-min,
+      # sella-saddle, and pes) and the prove step never ran. The sella
+      # harnesses do not enable a feature or a dependency the other
+      # shards lack. `echo` is a successful no-op.
+      - uses: model-checking/kani-github-action@v1.1
+        with:
+          kani-version: "0.68.0"
+          command: echo
+          args: "Kani installed. This shard is proved in the next step."
+      - name: Prove ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          args=()
+          for name in ${{ matrix.harnesses }}; do
+            args+=(--harness "kani_proofs::abi_guards::$name")
+          done
+          # One shard is a few seconds of CBMC after codegen.
+          # Ten minutes is a hang detector. A timeout fails the shard
+          # and is not a proof. See validation/kani_unsupported.md.
+          # This is the only `cargo kani` invocation. `--no-default-features`
+          # leaves faer off, so pulp is not compiled. pulp's only path
+          # into this crate is faer (faer, faer-traits, gemm-common, qd),
+          # and its global assembly is not supported. Sella's dense
+          # spectrum is cyclic Jacobi through dimension 128. A larger
+          # block uses faer inside exact_eigh when the feature is on,
+          # and panics if that call is reached with the feature off.
+          # The harnesses return on a null pointer or a non-positive
+          # length before `from_raw_parts`, so they do not reach a Sella
+          # session or the connect and SQNM spectra.
+          # `--ignore-global-asm` is not used.
+          timeout 600 cargo kani --no-default-features --features capi --output-format terse "${args[@]}"
+
+  libm:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            packages: ""
+          - target: x86_64-unknown-linux-musl
+            packages: musl-tools
+          - target: aarch64-unknown-linux-gnu
+            packages: gcc-aarch64-linux-gnu qemu-user
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cross packages
+        if: matrix.packages != ''
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.packages }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: aarch64 runner
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          mkdir -p .cargo
+          cat >> .cargo/config.toml << 'EOF'
+          [target.aarch64-unknown-linux-gnu]
+          linker = "aarch64-linux-gnu-gcc"
+          runner = "qemu-aarch64 -L /usr/aarch64-linux-gnu"
+          EOF
+      - name: Print transcendental bits
+        run: |
+          cargo test --test libm_report --target ${{ matrix.target }} -- --nocapture --exact print_transcendental_bits \
+            | awk '/^[0-9]+ [0-9a-f]{16} /' > libm-bits.txt
+          test "$(wc -l < libm-bits.txt)" -eq 1000
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libm-${{ matrix.target }}
+          path: libm-bits.txt
+
+  libm-diff:
+    runs-on: ubuntu-latest
+    needs: libm
+    steps:
+      - uses: actions/download-artifact@v4
+      - name: Diff the three targets
+        run: |
+          set +e
+          echo "glibc versus musl"
+          diff -u libm-x86_64-unknown-linux-gnu/libm-bits.txt libm-x86_64-unknown-linux-musl/libm-bits.txt
+          echo "glibc versus aarch64"
+          diff -u libm-x86_64-unknown-linux-gnu/libm-bits.txt libm-aarch64-unknown-linux-gnu/libm-bits.txt
+          echo "libm diff is report-only"
+          exit 0
+
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build tools for the bundled MPFR
+        run: sudo apt-get update && sudo apt-get install -y m4 make
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Format
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --features capi,verify --all-targets -- -D warnings
+      - name: Build the C ABI library
+        run: cargo build --features capi,verify
+      - name: Test
+        run: cargo test --features capi,verify

@@ -27,7 +27,7 @@ use crate::spring::SpringKind;
 use crate::tangent::TangentKind;
 
 pub const RGSADDLE_ABI_MAJOR: u32 = 1;
-pub const RGSADDLE_ABI_MINOR: u32 = 18;
+pub const RGSADDLE_ABI_MINOR: u32 = 21;
 
 /// Band config bit 0. The C step calls the surface once per image
 /// carried by the evaluation: every image on the first evaluation
@@ -42,6 +42,9 @@ pub const RGSADDLE_BAND_KEEP_TRANSLATION: u64 = 2;
 /// be 0. Without the bit, climbing is on only when `ci_trigger_factor`
 /// is positive.
 pub const RGSADDLE_BAND_CI_AFTER: u64 = 4;
+/// Band config bit 3 (ABI minor 21). No min-mode refinement of the
+/// climbing image: the plain CI-NEB of minor 20 and earlier.
+pub const RGSADDLE_BAND_NO_MIN_MODE: u64 = 8;
 
 pub const RGSADDLE_OK: i32 = 0;
 pub const RGSADDLE_NULL_SESSION: i32 = -1;
@@ -110,8 +113,9 @@ pub struct RgsaddleMinModeConfig {
     pub krylov_dim: i64,
     pub force_tol: f64,
     pub max_move: f64,
-    /// ABI minor 5: dimer rotation angle tolerance in radians (zero
-    /// disables it). Read only when the config's minor is 5 or more.
+    /// ABI minor 5: dimer rotation angle tolerance in radians. The Rust
+    /// default is five degrees; zero disables the test. A C config
+    /// stores the caller's value. Read only when the minor is 5 or more.
     pub rotation_angle_tol: f64,
     /// ABI minor 5: 0 forward difference, 1 central.
     pub difference: i32,
@@ -227,6 +231,22 @@ impl BandSurface for CSurface {
             }
         }
         Ok(())
+    }
+
+    fn eval_image(
+        &self,
+        image: usize,
+        position: ndarray::ArrayView1<f64>,
+    ) -> Result<(f64, Array1<f64>), SaddleError> {
+        let flat: Vec<f64> = position.iter().copied().collect();
+        let mut e = [0.0];
+        let mut g = vec![0.0; flat.len()];
+        if self.per_image {
+            self.call(self.n_images, image as i64, &flat, &mut e, &mut g)?;
+        } else {
+            self.call(1, -1, &flat, &mut e, &mut g)?;
+        }
+        Ok((e[0], Array1::from(g)))
     }
 }
 
@@ -374,6 +394,84 @@ pub unsafe extern "C" fn rgsaddle_band_create_solid(
     }
 }
 
+pub(super) struct ParsedBand {
+    pub config: BandConfig,
+    pub per_image: bool,
+    pub method: i32,
+}
+
+/// # Safety
+/// `spring_ks` and `cell`, when non-null, must point at the lengths
+/// the band config documents.
+pub(super) unsafe fn parse_band_config(
+    cfg: &RgsaddleBandConfig,
+    n_images: i64,
+    dof: usize,
+    solid: Option<SolidState>,
+) -> Option<ParsedBand> {
+    if cfg.version.major != RGSADDLE_ABI_MAJOR || n_images < 3 || dof == 0 {
+        return None;
+    }
+    let spring = match cfg.spring {
+        1 => {
+            if cfg.spring_ks.is_null() {
+                return None;
+            }
+            let ks = unsafe { slice::from_raw_parts(cfg.spring_ks, (n_images - 1) as usize) };
+            SpringKind::Weighted { ks: ks.to_vec() }
+        }
+        2 => SpringKind::OnsagerMachlup {
+            k: cfg.spring_k,
+            l_vecs: vec![Array1::zeros(dof); n_images as usize],
+        },
+        _ => SpringKind::Uniform { k: cfg.spring_k },
+    };
+    let cell = if cfg.cell.is_null() {
+        None
+    } else {
+        let c = unsafe { slice::from_raw_parts(cfg.cell, 9) };
+        Some(Cell([
+            [c[0], c[1], c[2]],
+            [c[3], c[4], c[5]],
+            [c[6], c[7], c[8]],
+        ]))
+    };
+    Some(ParsedBand {
+        config: BandConfig {
+            tangent: if cfg.tangent == 0 {
+                TangentKind::Simple
+            } else {
+                TangentKind::Improved
+            },
+            spring,
+            projection: match cfg.projection {
+                0 => ProjectionKind::PlainElasticBand,
+                2 => ProjectionKind::DoublyNudged,
+                _ => ProjectionKind::Neb,
+            },
+            climbing: (cfg.ci_trigger_factor > 0.0 || cfg.flags & RGSADDLE_BAND_CI_AFTER != 0)
+                .then_some(CiConfig {
+                    trigger_factor: cfg.ci_trigger_factor,
+                    trigger_force: cfg.ci_trigger_force,
+                }),
+            cell,
+            force_tol: cfg.force_tol,
+            max_move: cfg.max_move,
+            remove_translation: cfg.flags & RGSADDLE_BAND_KEEP_TRANSLATION == 0,
+            method: method_of(cfg.method, cfg.memory),
+            solid,
+            quickmin: cfg.method == 3,
+            quickmin_options: rgmin::QuickMinOptions::rgmin(),
+            time_step: 1.0,
+            autoneb: None,
+            min_mode: (cfg.flags & RGSADDLE_BAND_NO_MIN_MODE == 0)
+                .then(crate::band::MinModeRefine::default),
+        },
+        per_image: cfg.flags & RGSADDLE_BAND_PER_IMAGE != 0,
+        method: cfg.method,
+    })
+}
+
 unsafe fn band_from_parts(
     config: *const RgsaddleBandConfig,
     n_images: i64,
@@ -395,62 +493,14 @@ unsafe fn band_from_parts(
         Ok(a) => a,
         Err(_) => return std::ptr::null_mut(),
     };
-
-    let spring = match cfg.spring {
-        1 => {
-            if cfg.spring_ks.is_null() {
-                return std::ptr::null_mut();
-            }
-            let ks = unsafe { slice::from_raw_parts(cfg.spring_ks, (n_images - 1) as usize) };
-            SpringKind::Weighted { ks: ks.to_vec() }
-        }
-        2 => SpringKind::OnsagerMachlup {
-            k: cfg.spring_k,
-            l_vecs: vec![Array1::zeros(dof); n_images as usize],
-        },
-        _ => SpringKind::Uniform { k: cfg.spring_k },
+    let Some(parsed) = (unsafe { parse_band_config(cfg, n_images, dof, solid) }) else {
+        return std::ptr::null_mut();
     };
-    let cell = if cfg.cell.is_null() {
-        None
-    } else {
-        let c = unsafe { slice::from_raw_parts(cfg.cell, 9) };
-        Some(Cell([
-            [c[0], c[1], c[2]],
-            [c[3], c[4], c[5]],
-            [c[6], c[7], c[8]],
-        ]))
-    };
-    let band_config = BandConfig {
-        tangent: if cfg.tangent == 0 {
-            TangentKind::Simple
-        } else {
-            TangentKind::Improved
-        },
-        spring,
-        projection: match cfg.projection {
-            0 => ProjectionKind::PlainElasticBand,
-            2 => ProjectionKind::DoublyNudged,
-            _ => ProjectionKind::Neb,
-        },
-        climbing: (cfg.ci_trigger_factor > 0.0 || cfg.flags & RGSADDLE_BAND_CI_AFTER != 0)
-            .then_some(CiConfig {
-                trigger_factor: cfg.ci_trigger_factor,
-                trigger_force: cfg.ci_trigger_force,
-            }),
-        cell,
-        force_tol: cfg.force_tol,
-        max_move: cfg.max_move,
-        remove_translation: cfg.flags & RGSADDLE_BAND_KEEP_TRANSLATION == 0,
-        method: method_of(cfg.method, cfg.memory),
-        solid,
-        quickmin: cfg.method == 3,
-        quickmin_options: rgmin::QuickMinOptions::rgmin(),
-        time_step: 1.0,
-        autoneb: None,
-    };
-    match BandSession::new(band_config, initial) {
+    let per_image = parsed.per_image;
+    let method = parsed.method;
+    match BandSession::new(parsed.config, initial) {
         Ok(mut session) => {
-            if cfg.method == 2
+            if method == 2
                 && session
                     .set_rtr(Some(crate::rtr::RtrConfig {
                         radius_max: cfg.max_move * ((n_images - 2) as f64).sqrt(),
@@ -464,7 +514,7 @@ unsafe fn band_from_parts(
                 session,
                 n_images,
                 n_atoms,
-                per_image: cfg.flags & RGSADDLE_BAND_PER_IMAGE != 0,
+                per_image,
             }))
         }
         Err(_) => std::ptr::null_mut(),
@@ -511,7 +561,7 @@ pub unsafe extern "C" fn rgsaddle_band_step(
             out.max_force = report.max_force;
             out.ci_index = report.ci_index.map(|i| i as i64).unwrap_or(-1);
             out.iteration = report.iteration as i64;
-            out.curvature = 0.0;
+            out.curvature = report.curvature.unwrap_or(0.0);
             out.rotations = 0;
             RGSADDLE_OK
         }
@@ -782,7 +832,7 @@ pub unsafe extern "C" fn rgsaddle_minmode_estimate(
         per_image: false,
         rows: Default::default(),
     };
-    match session.session.estimate_mode(&cs) {
+    match session.session.push_estimate(&cs) {
         Ok(est) => {
             let out = unsafe { &mut *out };
             stamp_report(out);
@@ -1332,6 +1382,7 @@ pub unsafe extern "C" fn rgsaddle_index1_free(session: *mut RgsaddleIndex1) {
     }
 }
 
+mod ocineb;
 #[repr(C)]
 pub struct RgsaddleConnectConfig {
     pub version: RgsaddleVersion,
@@ -1438,6 +1489,79 @@ pub unsafe extern "C" fn rgsaddle_connect(
                     hessian_index: found.hessian_index,
                     evaluations: i32::try_from(found.evaluations).unwrap_or(i32::MAX),
                 };
+            }
+            RGSADDLE_OK
+        }
+        Err(err) => status_of(&err),
+    }
+}
+
+/// # Safety
+/// `reactant` and `product` each hold `3 * n_atoms` doubles. `out`
+/// holds `n_images * 3 * n_atoms` doubles. `cell` is 9 row-major
+/// lattice entries or NULL.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_idpp_path(
+    n_images: i64,
+    n_atoms: i64,
+    reactant: *const f64,
+    product: *const f64,
+    cell: *const f64,
+    max_iterations: i64,
+    grad_tol: f64,
+    max_move: f64,
+    out: *mut f64,
+) -> i32 {
+    if reactant.is_null() || product.is_null() || out.is_null() {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    if n_images < 3 || n_atoms < 1 {
+        return RGSADDLE_SHAPE;
+    }
+    let dof = (3 * n_atoms) as usize;
+    let images = n_images as usize;
+    let reactant = unsafe { slice::from_raw_parts(reactant, dof) };
+    let product = unsafe { slice::from_raw_parts(product, dof) };
+    let total = dof * images;
+    let out = unsafe { slice::from_raw_parts_mut(out, total) };
+    let parsed = if cell.is_null() {
+        None
+    } else {
+        let raw = unsafe { slice::from_raw_parts(cell, 9) };
+        match crate::mic::Cell::from_vectors(
+            [raw[0], raw[1], raw[2]],
+            [raw[3], raw[4], raw[5]],
+            [raw[6], raw[7], raw[8]],
+            [0.0, 0.0, 0.0],
+        ) {
+            Ok(cell) => Some(cell),
+            Err(_) => return RGSADDLE_INVALID_PARAMETER,
+        }
+    };
+    let config = crate::idpp::IdppConfig {
+        max_iterations: usize::try_from(max_iterations).unwrap_or(0),
+        grad_tol,
+        max_move,
+        ..crate::idpp::IdppConfig::default()
+    };
+    let reactant = match Array1::from_shape_vec(dof, reactant.to_vec()) {
+        Ok(v) => v,
+        Err(_) => return RGSADDLE_SHAPE,
+    };
+    let product = match Array1::from_shape_vec(dof, product.to_vec()) {
+        Ok(v) => v,
+        Err(_) => return RGSADDLE_SHAPE,
+    };
+    match crate::idpp_path(
+        reactant.view(),
+        product.view(),
+        images,
+        parsed.as_ref(),
+        &config,
+    ) {
+        Ok(path) => {
+            for (i, v) in path.iter().enumerate() {
+                out[i] = *v;
             }
             RGSADDLE_OK
         }
