@@ -127,30 +127,41 @@ pub fn exact_eigh(a: ArrayView2<f64>) -> Result<(Array1<f64>, Array2<f64>), Sadd
 
 /// Self-adjoint spectrum from faer. `a` is already symmetric.
 /// Eigenvalues are nondecreasing. Columns are the eigenvectors.
+/// The Kani build leaves the `faer` feature off, as connect and SQNM do.
 fn faer_eigh(a: &Array2<f64>) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
-    let n = a.nrows();
-    let mat = faer::Mat::from_fn(n, n, |i, j| a[(i, j)]);
-    let evd = mat
-        .self_adjoint_eigen(faer::Side::Lower)
-        .map_err(|_| SaddleError::Solver("self-adjoint eigen did not converge".into()))?;
-    let values_ref = evd.S();
-    let vectors_ref = evd.U();
-    let mut values = Array1::zeros(n);
-    let mut vectors = Array2::zeros((n, n));
-    for column in 0..n {
-        values[column] = values_ref[column];
-        for row in 0..n {
-            vectors[(row, column)] = vectors_ref[(row, column)];
-        }
+    #[cfg(not(feature = "faer"))]
+    {
+        let _ = a;
+        return Err(SaddleError::Solver(
+            "self-adjoint eigen requires the faer feature".into(),
+        ));
     }
-    for column in 0..n {
-        if nrm2(vectors.column(column)) < 1e-18 {
-            return Err(SaddleError::Solver(
-                "self-adjoint eigen produced a zero eigenvector".into(),
-            ));
+    #[cfg(feature = "faer")]
+    {
+        let n = a.nrows();
+        let mat = faer::Mat::from_fn(n, n, |i, j| a[(i, j)]);
+        let evd = mat
+            .self_adjoint_eigen(faer::Side::Lower)
+            .map_err(|_| SaddleError::Solver("self-adjoint eigen did not converge".into()))?;
+        let values_ref = evd.S();
+        let vectors_ref = evd.U();
+        let mut values = Array1::zeros(n);
+        let mut vectors = Array2::zeros((n, n));
+        for column in 0..n {
+            values[column] = values_ref[column];
+            for row in 0..n {
+                vectors[(row, column)] = vectors_ref[(row, column)];
+            }
         }
+        for column in 0..n {
+            if nrm2(vectors.column(column)) < 1e-18 {
+                return Err(SaddleError::Solver(
+                    "self-adjoint eigen produced a zero eigenvector".into(),
+                ));
+            }
+        }
+        Ok((values, vectors))
     }
-    Ok((values, vectors))
 }
 
 /// Ritz eigenvalues, basis vectors, and the operator applied to those vectors.

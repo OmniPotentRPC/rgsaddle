@@ -1,0 +1,15 @@
+{
+  "statement": [
+    "equal side energies at a strict maximum give (R+ - R-) / |R+ - R-|",
+    "R+/- = R0 +/- delta N gives N",
+    "V+ > V0 > V- gives (R+ - R0) / |R+ - R0|",
+    "the two weighted formulas agree when V+ = V-"
+  ],
+  "citation": "doi:10.3389/fchem.2026.1807063",
+  "branches": {
+    "forward": "energy_next > energy and energy > energy_prev",
+    "backward": "energy > energy_next and energy_prev > energy",
+    "weighted_prev_steeper": "energy_diff_prev > energy_diff_next",
+    "weighted_next_steeper": "otherwise"
+  }
+}

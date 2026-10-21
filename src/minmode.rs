@@ -111,7 +111,12 @@ pub struct MinModeConfig {
     /// Forward (default) or central difference for the actions.
     pub difference: FiniteDifference,
     /// Rotation stops when the rotational force `|H v - (v.H v) v|`
-    /// falls under this. For Lanczos it is the Ritz residual bound.
+    /// falls under this. The default is 1e-4. At that value and any
+    /// looser one, the dimer also stops after one rotation once the
+    /// rotational force is under 1. A tighter value keeps driving the
+    /// residual, and the torque window stays out of that loop. Lanczos
+    /// uses the same number as the Ritz residual. With no host relative
+    /// tolerance it is also the relative change of the lowest Ritz value.
     pub rotation_tol: f64,
     /// Dimer rotation also stops when the optimal rotation angle of an
     /// iteration falls under this many radians. The default is eOn's
@@ -127,6 +132,9 @@ pub struct MinModeConfig {
     /// Translation stops when max|F| falls under this and the
     /// curvature along the lowest mode is negative.
     pub force_tol: f64,
+    /// Largest per-atom translation, 0.2 by default. While the curvature
+    /// along the mode is not negative, dimer and Lanczos (L-BFGS and
+    /// FIRE) take one step of this length along the mode.
     pub max_move: f64,
     pub method: Method,
 }
@@ -567,6 +575,20 @@ fn ritz_value_agreed(new: f64, old: f64, tol: f64) -> bool {
     (new - old).abs() / denom <= tol
 }
 
+/// Stop controls for one Lanczos estimate.
+///
+/// `previous` is the curvature retained from the last geometry. When
+/// `early` is set and that curvature is finite, the first product
+/// returns immediately if its Rayleigh quotient agrees with `previous`
+/// to `rotation_tol` (eOn `quit_early`). `early` stays false when the
+/// previous solve stopped on the Krylov cap. `rel_tol` is the connect
+/// climb's fraction of `|λ|`; `None` keeps the stock residual test.
+struct LanczosStop {
+    rel_tol: Option<f64>,
+    previous: f64,
+    early: bool,
+}
+
 /// Lanczos lowest mode.
 ///
 /// Olsen, Kroes, Henkelman, Arnaldsson, and Jónsson, J. Chem. Phys.
@@ -574,22 +596,13 @@ fn ritz_value_agreed(new: f64, old: f64, tol: f64) -> bool {
 /// when the relative change in the lowest Ritz value falls under
 /// `rotation_tol`, or when the residual `beta |s|` does. A seed that
 /// is already the mode closes the Krylov on the first product.
-///
-/// `previous` is the curvature retained from the last geometry. When
-/// `early` is set and that curvature is finite, the first product
-/// returns immediately if its Rayleigh quotient agrees with
-/// `previous` to `rotation_tol` (eOn `quit_early`). That is one
-/// Hessian action for a mode that has not moved. `early` stays false
-/// when the previous solve stopped on the Krylov cap, so a second
-/// estimate at the same point can keep improving the vector.
 fn lanczos_mode<S: PointSurface>(
     surface: &Counted<'_, S>,
     x: ArrayView1<f64>,
     g0: ArrayView1<f64>,
     seed: Array1<f64>,
     config: &MinModeConfig,
-    previous: f64,
-    early: bool,
+    stop: LanczosStop,
 ) -> Result<(Array1<f64>, f64, usize, bool), SaddleError> {
     let n = seed.len();
     let m = config.krylov_dim.min(n).max(1);
@@ -606,6 +619,15 @@ fn lanczos_mode<S: PointSurface>(
         actions += 1;
         let a = crate::stencil::curvature_along(hv.view(), q[j].view());
         alpha.push(a);
+        // eOn quit_early: the curvature along the incoming mode is
+        // already within tolerance of the previous estimate, so the
+        // direction is kept. One Hessian action, then the translation.
+        // A host relative tolerance (the connect climb) uses that
+        // tolerance. The stock estimate uses `rotation_tol`, and only
+        // after a solve that met its test (`early`).
+        if j == 0 && lanczos_quit_early(&stop, a, config.rotation_tol) {
+            return Ok((q[0].clone(), a, actions, true));
+        }
         let mut w = &hv - &(&q[j] * a);
         if j > 0 {
             w = &w - &(&q[j - 1] * beta[j - 1]);
@@ -617,17 +639,15 @@ fn lanczos_mode<S: PointSurface>(
             w = &w - &(qi * overlap);
         }
         let b = w.dot(&w).sqrt();
-        if j == 0 && early && ritz_value_agreed(a, previous, config.rotation_tol) {
-            return Ok((q[0].clone(), a, actions, true));
-        }
         let (theta, s) = lowest_ritz(&alpha, &beta);
         let residual = b * s[j].abs();
         // Olsen, Kroes, Henkelman, Arnaldsson, and Jónsson, J. Chem.
         // Phys. 121, 9776 (2004), doi:10.1063/1.1814098: stop on the
         // relative change of the lowest Ritz value as well as on the
         // residual. A one-digit residual in `|theta|` accepts a high
-        // mode on the first product, so it is not a stop here.
-        let agreed = ew_old.is_some_and(|old| ritz_value_agreed(theta, old, config.rotation_tol));
+        // mode on the first product, so it is not a stop here. A set
+        // `rel_tol` replaces `rotation_tol` for that relative test.
+        let agreed = lanczos_ritz_agreed(stop.rel_tol, config.rotation_tol, theta, ew_old);
         let residual_ok = residual <= config.rotation_tol;
         let capped = alpha.len() == m;
         if residual_ok || agreed || capped || b <= 1e-12 {
@@ -642,6 +662,43 @@ fn lanczos_mode<S: PointSurface>(
         beta.push(b);
         q.push(w / b);
     }
+}
+
+/// First-product return. `rel_tol` is the connect climb's fraction of
+/// `|λ|` (denominator 1 when `λ` is 0). Without it, the stock estimate
+/// returns only when the previous solve converged and the Rayleigh
+/// quotient still agrees with `rotation_tol`.
+fn lanczos_quit_early(stop: &LanczosStop, rayleigh: f64, rotation_tol: f64) -> bool {
+    if let Some(tol) = stop.rel_tol {
+        if !stop.previous.is_finite() {
+            return false;
+        }
+        let scale = if stop.previous.abs() > 0.0 {
+            stop.previous.abs()
+        } else {
+            1.0
+        };
+        return (rayleigh - stop.previous).abs() <= tol * scale;
+    }
+    stop.early && ritz_value_agreed(rayleigh, stop.previous, rotation_tol)
+}
+
+/// Relative change of successive lowest Ritz values. `rel_tol` uses the
+/// connect denominator; otherwise the stock guarded comparison.
+fn lanczos_ritz_agreed(
+    rel_tol: Option<f64>,
+    rotation_tol: f64,
+    theta: f64,
+    previous: Option<f64>,
+) -> bool {
+    let Some(old) = previous else {
+        return false;
+    };
+    if let Some(tol) = rel_tol {
+        let scale = if old.abs() > 0.0 { old.abs() } else { 1.0 };
+        return (theta - old).abs() <= tol * scale;
+    }
+    ritz_value_agreed(theta, old, rotation_tol)
 }
 
 /// Lowest eigenpair of the symmetric tridiagonal (alpha, beta), with
@@ -770,6 +827,10 @@ pub struct MinModeSession {
     curvature: f64,
     solver: Solver,
     iteration: usize,
+    /// Improved Lanczos: stop when the lowest Ritz value changes by
+    /// less than this fraction of `|λ|`, or of 1 when `λ` is 0.
+    /// `None` keeps the residual test alone.
+    lanczos_rel_tol: Option<f64>,
     /// Gradient at `x`, when known: from the last translation's
     /// accepted point or from the host.
     centre: Option<PointEval>,
@@ -848,6 +909,7 @@ impl MinModeSession {
             curvature: f64::NAN,
             solver,
             iteration: 0,
+            lanczos_rel_tol: None,
             centre: None,
             surface_error: Mutex::new(None),
             mode_fresh: false,
@@ -855,6 +917,22 @@ impl MinModeSession {
             lanczos_ready: false,
             lanczos_carry: None,
         })
+    }
+
+    /// Stop a Lanczos estimate when the lowest Ritz value's relative
+    /// change falls under `tol`. The improved Lanczos search uses this
+    /// so a translation does not wait for a tight residual. `None`
+    /// restores the residual test.
+    pub fn set_lanczos_rel_tol(&mut self, tol: Option<f64>) -> Result<(), SaddleError> {
+        if let Some(tol) = tol
+            && !(tol.is_finite() && tol > 0.0)
+        {
+            return Err(SaddleError::Invalid(
+                "Lanczos relative tolerance must be positive and finite".into(),
+            ));
+        }
+        self.lanczos_rel_tol = tol;
+        Ok(())
     }
 
     /// Select the optional HiGHS feasible-set step; requires the `highs` feature.
@@ -1031,8 +1109,11 @@ impl MinModeSession {
                 gradient,
                 seed,
                 &self.config,
-                previous,
-                early,
+                LanczosStop {
+                    rel_tol: self.lanczos_rel_tol,
+                    previous,
+                    early,
+                },
             ),
         };
         if excluded.nrows() == 0 {

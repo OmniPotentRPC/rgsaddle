@@ -3,7 +3,11 @@
 //! The band and the minimum-mode search take one [`rgmin::Solver`]
 //! step on a force this crate assembled. The host owns the loop.
 //! [`band::BandSession::run`] and [`minmode::MinModeSession::run`]
-//! are convenience loops over `step`. [`autoneb::AutoNeb`] inserts
+//! are convenience loops over `step`.
+//! [`ocineb::OcinebSession`] hands the climbing image to a minimum-mode
+//! search once that image is stable: Goswami, Gunde, and Jónsson,
+//! Front. Chem. 14 (2026), doi:10.3389/fchem.2026.1807063.
+//! [`autoneb::AutoNeb`] inserts
 //! images where the energy gap or the segment length is worst,
 //! relaxes that window, and climbs. The full band runs only when
 //! requested.
@@ -36,9 +40,12 @@ pub mod autoneb;
 pub mod band;
 #[cfg(feature = "capi")]
 pub mod capi;
+pub mod connect;
 pub mod error;
+pub mod idpp;
 pub mod minmode;
 pub mod nichols;
+pub mod ocineb;
 pub mod prfo;
 pub mod projection;
 pub mod solid_state;
@@ -46,12 +53,25 @@ pub mod spring;
 pub mod stencil;
 pub mod tangent;
 
+// `translated_gradient` is crate-private, so the golden-bit test lives in
+// this module under `cfg(test)`. The Kani harnesses are the same module
+// under `cfg(kani)`, which `cargo test` does not set, so the default
+// build does not name the Kani crate.
+#[cfg(any(test, kani))]
+mod kani_proofs;
+
+#[cfg(all(test, feature = "verify"))]
+mod differential;
+
+mod sqnm;
 pub use autoneb::{AutoNeb, AutoNebReport, AutoNebTuning};
 pub use band::{
     BandConfig, BandEvaluation, BandReport, BandSession, BandStatus, BandSurface, Cell, CiConfig,
     SolidState,
 };
+pub use connect::{ConnectConfig, ConnectProfile, ConnectReport, connect};
 pub use error::SaddleError;
+pub use idpp::{IdppConfig, idpp_path, linear_path};
 pub use minmode::{
     FiniteDifference, MinModeConfig, MinModeKind, MinModeReport, MinModeSession, MinModeStatus,
     ModeEstimate, PointSurface,
@@ -59,6 +79,11 @@ pub use minmode::{
 pub use nichols::{
     HessianUpdate, Index1Config, Index1Report, Index1Session, Index1Status, NicholsMode,
     bofill_update, cap_max_abs, nichols_displacement, nichols_step, powell_update,
+};
+pub use ocineb::{
+    MIN_ALIGNMENT, OcinebConfig, OcinebPhase, OcinebReport, OcinebSession, OcinebStatus,
+    backoff_threshold, initial_threshold, mode_alignment, should_trigger, success_threshold,
+    walk_helped,
 };
 pub use prfo::{PrfoKind, partitioned_rfo_eigen, restricted_prfo_displacement};
 pub use projection::ProjectionKind;

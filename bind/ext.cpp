@@ -15,7 +15,8 @@
  * noconvert on the way in and capsule copies on the way out.
  * raise_status maps rgsaddle_status_t. The schedule text does not
  * depend on the worker count. Stencil is the point-search handle.
- * The link exports PyInit__core.
+ * connect runs the double-ended search and releases the GIL around
+ * rgsaddle_connect. The link exports PyInit__core.
  *
  * SurfaceAdapter does not own threads. The caller passes C ABI
  * request rows and the adapter evaluates them on that thread. The
@@ -36,6 +37,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <exception>
@@ -65,6 +67,7 @@ template <> struct status_traits<rgsaddle_status_t> {
     case RGSADDLE_NULL_SURFACE:
     case RGSADDLE_NULL_REPORT:
     case RGSADDLE_SOLVER:
+    case RGSADDLE_STALLED:
     case RGSADDLE_ABI_MISMATCH:
     case RGSADDLE_ALLOC:
     case RGSADDLE_NO_EVALUATION:
@@ -708,6 +711,93 @@ rgsaddle::StencilReport step_python(PyStencil &self, nb::callable fn, std::size_
   return report;
 }
 
+struct ConnectCallback {
+  nb::callable *fn;
+  rgbind::CallContext *ctx;
+};
+
+extern "C" rgsaddle_status_t connect_python_surface(void *user, rgsaddle_surface_request_t *req) {
+  auto *state = static_cast<ConnectCallback *>(user);
+  if (state == nullptr || req == nullptr || req->positions == nullptr || req->energies == nullptr ||
+      req->gradients == nullptr || req->n_images <= 0 || req->n_atoms <= 0) {
+    return RGSADDLE_INVALID_PARAMETER;
+  }
+  const std::size_t rows = static_cast<std::size_t>(req->n_images);
+  const std::size_t dof = static_cast<std::size_t>(req->n_atoms) * 3;
+  try {
+    nb::gil_scoped_acquire gil;
+    if (!gil.is_valid()) {
+      return RGSADDLE_SURFACE_FAILED;
+    }
+    call_python_surface(*state->fn, rows, dof, req->positions, req->energies, req->gradients);
+    if (PyErr_CheckSignals() < 0) {
+      nb::python_error err;
+      state->ctx->capture(err);
+      return RGSADDLE_SURFACE_FAILED;
+    }
+    return RGSADDLE_OK;
+  } catch (nb::python_error &err) {
+    state->ctx->capture(err);
+    return RGSADDLE_SURFACE_FAILED;
+  } catch (const std::exception &err) {
+    rgsaddle_py_set_last_error(err.what());
+    return RGSADDLE_SURFACE_FAILED;
+  }
+}
+
+struct ConnectReportPy {
+  std::vector<double> position;
+  double energy;
+  double force_norm;
+  std::string kind;
+  int hessian_index;
+  int evaluations;
+};
+
+ConnectReportPy connect_python(nb::callable fn, nb::ndarray<const double, nb::ndim<1>, nb::c_contig> left,
+                               nb::ndarray<const double, nb::ndim<1>, nb::c_contig> right, double force_tol,
+                               std::int64_t max_calls, bool quench_nodes) {
+  if (left.shape(0) <= 0 || left.shape(0) % 3 != 0 || left.shape(0) != right.shape(0)) {
+    throw nb::value_error("connect endpoints must be the same positive multiple of three");
+  }
+  if (!(force_tol > 0.0) || !std::isfinite(force_tol) || max_calls <= 0) {
+    throw nb::value_error("connect force_tol and max_calls must be positive");
+  }
+  const std::size_t dof = static_cast<std::size_t>(left.shape(0));
+  rgsaddle_connect_config_t config{};
+  config.version.major = RGSADDLE_ABI_MAJOR;
+  config.version.minor = RGSADDLE_ABI_MINOR;
+  config.flags = 0;
+  config.force_tol = force_tol;
+  config.max_calls = max_calls;
+  config.quench_nodes = quench_nodes ? 1 : 0;
+  std::vector<double> position(dof, 0.0);
+  rgsaddle_connect_report_t report{};
+  rgbind::CallContext ctx;
+  ConnectCallback state{&fn, &ctx};
+  rgsaddle_status_t status = RGSADDLE_OK;
+  {
+    nb::gil_scoped_release release;
+    status = rgsaddle_connect(&config, static_cast<std::int64_t>(dof / 3), left.data(), right.data(),
+                              connect_python_surface, &state, position.data(), &report);
+  }
+  if (ctx.has_error()) {
+    ctx.rethrow_if_set();
+  }
+  if (status != RGSADDLE_OK) {
+    std::string last = rgsaddle_py_last_error();
+    rgsaddle_py_set_last_error("");
+    if (last.empty()) {
+      const char *name = rgsaddle_status_name(status);
+      last = name == nullptr || name[0] == '\0' ? "connect failed" : name;
+    }
+    throw nb::value_error(last.c_str());
+  }
+  std::string kind(1, static_cast<char>(report.kind));
+  return ConnectReportPy{std::move(position), report.energy, report.force_norm, std::move(kind),
+                         report.hessian_index, report.evaluations};
+}
+
 nb::ndarray<nb::numpy, double> copy_vector(const std::vector<double> &values) {
   const std::size_t n = values.empty() ? 1 : values.size();
   auto *raw = new double[n];
@@ -790,7 +880,12 @@ NB_MODULE(_core, m) {
           nb::arg("max_move") = 0.2, nb::arg("rotation_tol") = 1e-4, nb::arg("max_rotations") = 20,
           nb::arg("krylov_dim") = 12, nb::arg("threads") = 1, nb::arg("art_threshold") = 0.0,
           nb::arg("art_push") = 20,
-          "Point search. dimer and lanczos follow MinModeSession. Band preset names raise ValueError.")
+          "Point search. dimer and lanczos follow MinModeSession. "
+          "rotation_tol 1e-4 also stops the dimer after one rotation once the "
+          "rotational force is under 1. rotation_angle_tol is the Rust default "
+          "of five degrees (0 would disable that angle test) and is not a "
+          "Python argument. A curvature that is not negative steps by max_move "
+          "along the mode. Band preset names raise ValueError.")
       .def_static("band", &make_band, nb::arg("x").noconvert(), nb::arg("preset") = "ci-neb",
                   "Band presets stay on feat/band-methods-zoom and raise ValueError.")
       .def(
@@ -822,6 +917,30 @@ NB_MODULE(_core, m) {
           "Copy of the mode, or None for a minimiser.")
       .def("curvature", [](PyStencil &self) { return self.inner.curvature(); },
            "Curvature along the mode.");
+
+  nb::class_<ConnectReportPy>(m, "ConnectReport")
+      .def_prop_ro("position", [](const ConnectReportPy &report) { return copy_vector(report.position); },
+                   nb::rv_policy::move, "Copy of the returned geometry.")
+      .def_prop_ro("energy", [](const ConnectReportPy &report) { return report.energy; },
+                   "Energy at that geometry.")
+      .def_prop_ro("force_norm", [](const ConnectReportPy &report) { return report.force_norm; },
+                   "Euclidean norm of the Cartesian gradient.")
+      .def_prop_ro("kind", [](const ConnectReportPy &report) { return report.kind; },
+                   "s for an accepted saddle, u for an upper bound, f when a segment could not be split.")
+      .def_prop_ro("hessian_index", [](const ConnectReportPy &report) { return report.hessian_index; },
+                   "Negative eigenvalues of the rigid-projected Hessian, or -1 when it was not computed.")
+      .def_prop_ro("evaluations", [](const ConnectReportPy &report) { return report.evaluations; },
+                   "Surface evaluations, including a Hessian that decided acceptance.");
+
+  m.def(
+      "connect", &connect_python, nb::arg("surface"), nb::arg("left").noconvert(), nb::arg("right").noconvert(),
+      nb::arg("force_tol") = 1e-3, nb::arg("max_calls") = static_cast<std::int64_t>(250000),
+      nb::arg("quench_nodes") = true,
+      nb::sig("def connect(surface: collections.abc.Callable[..., tuple[numpy.typing.NDArray[numpy.float64], "
+              "numpy.typing.NDArray[numpy.float64]]], left: numpy.typing.NDArray[numpy.float64], right: "
+              "numpy.typing.NDArray[numpy.float64], force_tol: float = 0.001, max_calls: int = 250000, "
+              "quench_nodes: bool = True) -> ConnectReport"),
+      "Double-ended connect. surface(x) returns (energy, gradient) for one image shaped (1, 3N).");
 
   m.def("raise_status", &raise_status, nb::arg("code"),
         "Map an rgsaddle_status_t value. The message is the stored text, or the "

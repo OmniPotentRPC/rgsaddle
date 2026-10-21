@@ -13,11 +13,14 @@ A host that climbs with its own optimizer keeps one session for the whole search
 
 Lanczos through ~rgsaddle_minmode_estimate~ advances one Hessian action and keeps the Krylov basis until ~set_position~, ~set_mode~, or ~reset~. Repeat the call until the host's own test on the mode passes. The basis grows to the free dimension rather than stopping at ~krylov_dim~. ~MinModeSession::estimate_mode~ and ~step~ still finish the residual test before a translation (Olsen, Kroes, Henkelman, Arnaldsson, and Jónsson, J. Chem. Phys. 121, 9776 (2004), doi:10.1063/1.1814098). A dimer estimate is the full rotation.
 
-Two ~MinModeConfig~ fields set the cost of an estimate:
+These ~MinModeConfig~ fields set the cost of an estimate and of the translation:
 
 | Field | Effect | Default |
 |---+---+---|
 | ~difference~ | ~Forward~: one gradient per Hessian action, error O(dr). ~Central~: two, error O(dr^2) | ~Forward~ |
 | ~rotation_angle_tol~ | The dimer stops rotating when an iteration's optimal angle falls under this many radians; 0 turns the test off | five degrees |
+| ~rotation_tol~ | Rotational-force residual. At 1e-4 and any looser value the dimer also stops after one rotation once that force is under 1. A tighter value keeps iterating. Lanczos uses it as the Ritz residual and, with no host relative tolerance, as the relative change of the lowest Ritz value | 1e-4 |
+| ~max_rotations~ | Rotation cap for one dimer estimate | 20 |
+| ~max_move~ | Largest per-atom translation. A curvature that is not negative takes one step of this length along the mode. The L-BFGS pairs and the FIRE velocity are kept while the mode turns by at most 45 degrees, and dropped past that cone | 0.2 |
 
-From C both fields sit in ~rgsaddle_minmode_config_t~ and are read only when the config's ~version.minor~ is 5 or more.
+From C, ~difference~ and ~rotation_angle_tol~ sit in ~rgsaddle_minmode_config_t~ and are read only when the config's ~version.minor~ is 5 or more. A zeroed C struct leaves ~rotation_angle_tol~ at 0, so the angle test stays off. The C++ helper ~minmode_config~ does that, and sets ~rotation_tol~ to 1e-3, which is loose enough for the torque window. The Python point stencil does not take ~rotation_angle_tol~; it uses the Rust default of five degrees. ~rotation_tol~ on that stencil defaults to 1e-4.

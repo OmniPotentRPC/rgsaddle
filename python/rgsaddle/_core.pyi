@@ -70,7 +70,7 @@ class Stencil:
     @staticmethod
     def point(x: Annotated[NDArray[numpy.float64], dict(shape=(None,), order='C', writable=False)], preset: str = 'dimer', mode: object | None = None, dr: float = 0.001, force_tol: float = 0.001, max_move: float = 0.2, rotation_tol: float = 0.0001, max_rotations: int = 20, krylov_dim: int = 12, threads: int = 1, art_threshold: float = 0.0, art_push: int = 20) -> Stencil:
         """
-        Point search. dimer and lanczos follow MinModeSession. Band preset names raise ValueError.
+        Point search. dimer and lanczos follow MinModeSession. rotation_tol 1e-4 also stops the dimer after one rotation once the rotational force is under 1. rotation_angle_tol is the Rust default of five degrees (0 would disable that angle test) and is not a Python argument. A curvature that is not negative steps by max_move along the mode. Band preset names raise ValueError.
         """
 
     @staticmethod
@@ -93,6 +93,40 @@ class Stencil:
 
     def curvature(self) -> float:
         """Curvature along the mode."""
+
+class ConnectReport:
+    @property
+    def position(self) -> NDArray[numpy.float64]:
+        """Copy of the returned geometry."""
+
+    @property
+    def energy(self) -> float:
+        """Energy at that geometry."""
+
+    @property
+    def force_norm(self) -> float:
+        """Euclidean norm of the Cartesian gradient."""
+
+    @property
+    def kind(self) -> str:
+        """
+        s for an accepted saddle, u for an upper bound, f when a segment could not be split.
+        """
+
+    @property
+    def hessian_index(self) -> int:
+        """
+        Negative eigenvalues of the rigid-projected Hessian, or -1 when it was not computed.
+        """
+
+    @property
+    def evaluations(self) -> int:
+        """Surface evaluations, including a Hessian that decided acceptance."""
+
+def connect(surface: Callable[..., tuple[numpy.typing.NDArray[numpy.float64], numpy.typing.NDArray[numpy.float64]]], left: numpy.typing.NDArray[numpy.float64], right: numpy.typing.NDArray[numpy.float64], force_tol: float = 0.001, max_calls: int = 250000, quench_nodes: bool = True) -> ConnectReport:
+    """
+    Double-ended connect. surface(x) returns (energy, gradient) for one image shaped (1, 3N).
+    """
 
 def raise_status(code: int) -> bool:
     """
