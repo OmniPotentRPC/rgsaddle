@@ -445,7 +445,11 @@ rgsaddle_status_t rgsaddle_minmode_step(RgsaddleMinMode *session,
  * A dimer runs its rotation to the tolerance. Lanczos advances one
  * Hessian action and keeps the Krylov basis until set_position,
  * set_mode, or reset; repeat the call until the mode meets the host's
- * test. That basis grows to the free dimension. The report carries
+ * test. That basis grows to the free dimension. After k actions the
+ * mode also takes its component on the residual direction, the
+ * (k+1)-th Lanczos vector, from the Lanczos polynomials at an
+ * extrapolated lowest eigenvalue; no surface call is added, and the
+ * reported curvature stays the Ritz value of the k vectors. The report carries
  * curvature, rotations, and evaluations (surface calls, the centre
  * included when it was neither cached nor supplied); max_force is NaN.
  * The refreshed mode seeds the next estimate, so a mode that still

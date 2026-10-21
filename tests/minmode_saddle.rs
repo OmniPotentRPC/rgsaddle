@@ -438,8 +438,13 @@ fn lanczos_push_follows_the_lowest_mode_one_action_at_a_time() {
     }
     assert!(actions > 1, "krylov cap of 1 must not end the push");
     assert!(session.mode()[0].abs() >= 0.99, "mode {:?}", session.mode());
+    // The mode takes its component on the residual direction, so four
+    // actions reach the overlap where the Ritz vector of the basis needs
+    // five. The curvature is the Ritz value of the four vectors, an
+    // upper bound on -1.
+    assert_eq!(actions, 4);
     assert!(
-        session.curvature() < -0.9,
+        (-1.0 - 1e-9..-0.8).contains(&session.curvature()),
         "curvature {}",
         session.curvature()
     );
