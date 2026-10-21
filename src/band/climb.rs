@@ -104,7 +104,7 @@ impl ModelClimb {
     ) {
         impose(&mut self.b, block);
         self.spectrum = None;
-        self.follow = mode.clone();
+        self.follow = self.free(mode);
         self.followed_curvature = curvature;
         self.overlap = 1.0;
         self.reference = curvature.min(-1e-3);
@@ -120,6 +120,19 @@ impl ModelClimb {
     pub(super) fn set_rigid(&mut self, rigid: Option<Array2<f64>>) {
         self.rigid = rigid;
         self.spectrum = None;
+        self.follow = self.free(&self.follow);
+    }
+
+    /// `v` off the rigid motions, normalized; `v` itself when it is
+    /// rigid or there are none, since the model then has no free
+    /// direction closer to it.
+    fn free(&self, v: &Array1<f64>) -> Array1<f64> {
+        let Some(q) = &self.rigid else {
+            return v.clone();
+        };
+        let p = project(v, q);
+        let norm = p.dot(&p).sqrt();
+        if norm > 1e-12 { p / norm } else { v.clone() }
     }
 
     /// TS-BFGS on the last step and the trust update from the ratio of
