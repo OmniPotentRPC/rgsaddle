@@ -93,7 +93,18 @@ impl ApplyHessian for DenseApply<'_> {
     }
 }
 
+/// Cyclic Jacobi stays the dense solver through this dimension.
+///
+/// The LJ38 free block is 108, so that search keeps the Jacobi
+/// spectrum. A larger block, including a Pt island free block of 525,
+/// uses [`faer_eigh`].
+const DENSE_JACOBI_LIMIT: usize = 128;
+
 /// Sella `exact`: dense symmetric eigen of `a`.
+///
+/// Eigenvalues come back in nondecreasing order. Dimension
+/// [`DENSE_JACOBI_LIMIT`] and below uses cyclic Jacobi. A larger
+/// matrix uses faer's self-adjoint eigensolver.
 pub fn exact_eigh(a: ArrayView2<f64>) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
     if a.nrows() != a.ncols() {
         return Err(SaddleError::Shape("eigh needs a square matrix".into()));
@@ -107,7 +118,39 @@ pub fn exact_eigh(a: ArrayView2<f64>) -> Result<(Array1<f64>, Array2<f64>), Sadd
             work[(j, i)] = s;
         }
     }
-    jacobi_eigh(&mut work)
+    if n > DENSE_JACOBI_LIMIT {
+        faer_eigh(&work)
+    } else {
+        jacobi_eigh(&mut work)
+    }
+}
+
+/// Self-adjoint spectrum from faer. `a` is already symmetric.
+/// Eigenvalues are nondecreasing. Columns are the eigenvectors.
+fn faer_eigh(a: &Array2<f64>) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
+    let n = a.nrows();
+    let mat = faer::Mat::from_fn(n, n, |i, j| a[(i, j)]);
+    let evd = mat
+        .self_adjoint_eigen(faer::Side::Lower)
+        .map_err(|_| SaddleError::Solver("self-adjoint eigen did not converge".into()))?;
+    let values_ref = evd.S();
+    let vectors_ref = evd.U();
+    let mut values = Array1::zeros(n);
+    let mut vectors = Array2::zeros((n, n));
+    for column in 0..n {
+        values[column] = values_ref[column];
+        for row in 0..n {
+            vectors[(row, column)] = vectors_ref[(row, column)];
+        }
+    }
+    for column in 0..n {
+        if nrm2(vectors.column(column)) < 1e-18 {
+            return Err(SaddleError::Solver(
+                "self-adjoint eigen produced a zero eigenvector".into(),
+            ));
+        }
+    }
+    Ok((values, vectors))
 }
 
 /// Ritz eigenvalues, basis vectors, and the operator applied to those vectors.
@@ -144,7 +187,7 @@ pub fn rayleigh_ritz(
     Ok((lams, v_rot, av_rot))
 }
 
-/// Dense eigen on `device`. Full spectrum is Host Jacobi.
+/// Dense eigen on `device`. The host arm is [`exact_eigh`].
 /// [`EigenDevice::Dlpk`] is the lowest-mode arm through rgmin.
 pub fn eigh_on(
     device: EigenDevice,
@@ -458,6 +501,177 @@ pub fn rayleigh_ritz_iter(
     }
 }
 
+/// Sella `rayleigh_ritz` on a matrix-free operator.
+///
+/// `apply` is one Hessian-vector product in the free coordinates.
+/// `preconditioner` is Sella's projected model `P`. The loop grows an
+/// orthonormal subspace until every negative Ritz residual is below
+/// `gamma |theta|`, or the subspace fills the free dimension. Roots
+/// past the first `strict_negative` may stop at `gamma` when `|theta|`
+/// is below one: that relative test is finer than a one-sided
+/// finite-difference product can support. `gamma <= 0` is not accepted
+/// here; the caller keeps the model spectrum.
+pub(crate) fn rayleigh_ritz_apply<F>(
+    n: usize,
+    mut apply: F,
+    v0: ArrayView2<f64>,
+    preconditioner: ArrayView2<f64>,
+    gamma: f64,
+    method: ExpandKind,
+    strict_negative: usize,
+) -> Result<RitzDecomposition, SaddleError>
+where
+    F: FnMut(ArrayView1<f64>) -> Result<Array1<f64>, SaddleError>,
+{
+    if n == 0 || gamma <= 0.0 || preconditioner.nrows() != n || preconditioner.ncols() != n {
+        return Err(SaddleError::Shape(
+            "matrix-free Rayleigh-Ritz needs a positive free dimension, gamma, and P".into(),
+        ));
+    }
+    let mut v = if v0.nrows() == n && v0.ncols() > 0 {
+        modified_gram_schmidt(v0, None, 1e-12)
+    } else {
+        Array2::zeros((n, 0))
+    };
+    if v.ncols() == 0 {
+        let (lams, vecs) = exact_eigh(preconditioner)?;
+        let nneg = lams.iter().filter(|lam| **lam < 0.0).count().max(1).min(n);
+        v = modified_gram_schmidt(vecs.slice(s![.., ..nneg]), None, 1e-12);
+    }
+    if v.ncols() == 0 {
+        return Err(SaddleError::Solver("empty Ritz subspace".into()));
+    }
+    let mut av = apply_columns(&mut apply, v.view())?;
+    let max_columns = n;
+    loop {
+        let a_tilde = symmetrize_vt_av(v.view(), av.view());
+        let (lams, vecs) = exact_eigh(a_tilde.view())?;
+        av = matmul(av.view(), vecs.view());
+        v = matmul(v.view(), vecs.view());
+        let k = v.ncols();
+        if k >= max_columns {
+            return Ok((lams, v, av));
+        }
+        let nneg = lams.iter().filter(|lam| **lam < 0.0).count().max(1).min(k);
+        let y = if k > 1 {
+            crate::qn::symmetrize_y(v.view(), av.view(), Some(2))
+        } else {
+            av.clone()
+        };
+        let mut rnorm = Array1::zeros(nneg);
+        let mut rcols: Vec<Array1<f64>> = Vec::with_capacity(nneg);
+        for j in 0..nneg {
+            let mut ri = y.column(j).to_owned();
+            axpy(-lams[j], v.column(j), &mut ri);
+            rnorm[j] = nrm2(ri.view());
+            rcols.push(ri);
+        }
+        let mut seeking = 0;
+        let mut found = false;
+        for j in 0..nneg {
+            // The uphill roots keep Sella's relative residual. A softer
+            // negative root, below the identity curvature, is accepted
+            // once its residual is under `gamma`: the relative test then
+            // sits under the one-sided finite-difference floor and the
+            // subspace would otherwise grow through the free dimension.
+            let scale = if j < strict_negative {
+                lams[j].abs()
+            } else {
+                lams[j].abs().max(1.0)
+            };
+            if rnorm[j] > gamma * scale {
+                seeking = j;
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return Ok((lams, v, av));
+        }
+        let eye = Array2::eye(k);
+        let expanded = expand(
+            v.view(),
+            y.view(),
+            preconditioner,
+            None,
+            lams.view(),
+            eye.view(),
+            lams[seeking],
+            method,
+            seeking,
+        );
+        let mut t = match expanded {
+            Ok(direction) => direction,
+            Err(_) => rcols[seeking].clone(),
+        };
+        let tn = nrm2(t.view());
+        if tn < 1e-18 {
+            return Ok((lams, v, av));
+        }
+        t.mapv_inplace(|value| value / tn);
+        let mut tproj = Array1::zeros(n);
+        for j in 0..k {
+            axpy(dot(v.column(j), t.view()), v.column(j), &mut tproj);
+        }
+        let mut tperp = t.clone();
+        axpy(-1.0, tproj.view(), &mut tperp);
+        if nrm2(tperp.view()) < 1e-2 {
+            let rn = nrm2(rcols[seeking].view());
+            if rn >= 1e-18 {
+                t = rcols[seeking].clone();
+                t.mapv_inplace(|value| value / rn);
+            }
+        }
+        let mut tcol = Array2::zeros((n, 1));
+        tcol.column_mut(0).assign(&t);
+        let mut tnew = modified_gram_schmidt(tcol.view(), Some(v.view()), 1e-8);
+        if tnew.ncols() == 0 {
+            for ri in &rcols {
+                let mut col = Array2::zeros((n, 1));
+                col.column_mut(0).assign(ri);
+                tnew = modified_gram_schmidt(col.view(), Some(v.view()), 1e-8);
+                if tnew.ncols() == 1 {
+                    break;
+                }
+            }
+            if tnew.ncols() == 0 {
+                return Ok((lams, v, av));
+            }
+        }
+        let at = apply_columns(&mut apply, tnew.view())?;
+        let mut vnext = Array2::zeros((n, k + tnew.ncols()));
+        let mut avnext = Array2::zeros((n, k + tnew.ncols()));
+        for j in 0..k {
+            vnext.column_mut(j).assign(&v.column(j));
+            avnext.column_mut(j).assign(&av.column(j));
+        }
+        for j in 0..tnew.ncols() {
+            vnext.column_mut(k + j).assign(&tnew.column(j));
+            avnext.column_mut(k + j).assign(&at.column(j));
+        }
+        v = vnext;
+        av = avnext;
+    }
+}
+
+fn apply_columns<F>(apply: &mut F, v: ArrayView2<f64>) -> Result<Array2<f64>, SaddleError>
+where
+    F: FnMut(ArrayView1<f64>) -> Result<Array1<f64>, SaddleError>,
+{
+    let n = v.nrows();
+    let mut av = Array2::zeros((n, v.ncols()));
+    for j in 0..v.ncols() {
+        let column = apply(v.column(j))?;
+        if column.len() != n || !column.iter().all(|value| value.is_finite()) {
+            return Err(SaddleError::Shape(
+                "Hessian action must be a finite free vector".into(),
+            ));
+        }
+        av.column_mut(j).assign(&column);
+    }
+    Ok(av)
+}
+
 pub(crate) fn solve_dense(
     a: ArrayView2<f64>,
     b: ArrayView1<f64>,
@@ -612,6 +826,69 @@ mod tests {
     use ndarray::{Array2, array};
     use rgmin::Manifold;
     use rgmin::ManifoldKind;
+
+    #[test]
+    fn small_exact_eigh_matches_jacobi_and_faer() {
+        let n = 40;
+        let mut original = Array2::<f64>::zeros((n, n));
+        for i in 0..n {
+            original[(i, i)] = 0.1 + 0.5 * i as f64;
+            if i + 1 < n {
+                original[(i, i + 1)] = 0.25;
+                original[(i + 1, i)] = 0.25;
+            }
+        }
+        let (lams, _) = exact_eigh(original.view()).unwrap();
+        let (wide, _) = faer_eigh(&original).unwrap();
+        let (jacobi, _) = jacobi_eigh(&mut original).unwrap();
+        for j in 0..n {
+            assert!(
+                (lams[j] - jacobi[j]).abs() < 1e-10,
+                "jacobi {j} {} vs {}",
+                lams[j],
+                jacobi[j]
+            );
+            assert!(
+                (wide[j] - jacobi[j]).abs() < 1e-8,
+                "faer {j} {} vs {}",
+                wide[j],
+                jacobi[j]
+            );
+        }
+    }
+
+    #[test]
+    fn large_exact_eigh_matches_the_laplacian_spectrum() {
+        let n = 160;
+        assert!(n > DENSE_JACOBI_LIMIT);
+        let mut a = Array2::<f64>::zeros((n, n));
+        for i in 0..n {
+            a[(i, i)] = 2.0;
+            if i + 1 < n {
+                a[(i, i + 1)] = -1.0;
+                a[(i + 1, i)] = -1.0;
+            }
+        }
+        let (lams, vecs) = exact_eigh(a.view()).unwrap();
+        for j in 0..n {
+            let expect = 2.0 - 2.0 * (std::f64::consts::PI * (j + 1) as f64 / (n + 1) as f64).cos();
+            assert!(
+                (lams[j] - expect).abs() < 1e-8,
+                "j={j} {} vs {expect}",
+                lams[j]
+            );
+        }
+        let mut residual = 0.0;
+        for i in 0..n {
+            let mut av = 0.0;
+            for k in 0..n {
+                av += a[(i, k)] * vecs[(k, 0)];
+            }
+            let diff = av - lams[0] * vecs[(i, 0)];
+            residual += diff * diff;
+        }
+        assert!(residual.sqrt() < 1e-8, "residual {}", residual.sqrt());
+    }
 
     #[test]
     fn exact_eigh_recovers_a_known_spectrum() {

@@ -7,6 +7,8 @@
 
 ~TrustRegion~ limits the Euclidean step norm. ~RestrictedAtomicStep~ limits the largest atom displacement and uses that same quantity when updating its radius. ~MaxInternalStep~ limits weighted internal coordinates. The restricted atomic step (RAS) refuses an internal-coordinate packing.
 
+An order-1 Cartesian search that diagonalizes the Hessian and whose Euclidean radius is above one distance unit takes that atomic step at ~max(delta, 0.1)~. The alpha search follows the derivative of the partitioned RFO step, so the uphill and downhill blocks are not a uniform scale of the full step. Rho grows and shrinks the atomic ceiling. The stored Euclidean radius stays where ~delta * n_free~ put it. The first finite-difference diagonalization may accept a negative root past the uphill mode once its residual is under ~gamma~ and its curvature is below one. A later diagonalization keeps the relative residual. A free block larger than 128 is diagonalized with faer's self-adjoint eigensolver. A block of 128 or fewer stays on cyclic Jacobi.
+
 ~update_h_ms~ applies a simultaneous multi-secant Hessian update. ~update_hessian_cols~ applies individual updates in column order. ~HessUpdate::TsBfgs~ supports an indefinite Hessian. The retained Sella trajectories are checked by ~tests/sella_gold.rs~.
 
 ~SamdSession::new~ uses Euclidean dynamics. ~on~ and ~with_chart~ retain a geometry for every step; ~step_on~ selects a geometry for one step. The velocity-Verlet displacement, transported velocity and stochastic rescaling remain in its tangent space.

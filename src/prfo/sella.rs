@@ -239,6 +239,301 @@ pub fn prfo_stepper(name: &str, order: usize) -> Option<PartitionedRationalFunct
     PartitionedRationalFunctionOptimization::from_name(name, order)
 }
 
+/// P-RFO displacement and its derivative with respect to alpha.
+///
+/// Sella's order-1 stepper is Newton-safe: both partitions follow one
+/// extremal root of a diagonal augmented matrix. A partition of 50 or
+/// more solves that root from the arrowhead secular equation. A smaller
+/// partition uses the same Jacobi augmented eigenproblem as
+/// [`rgmin::rfo_get_s`]. The derivative is the differentiated secular
+/// equation, `dmu/dalpha = -2 alpha mu / (alpha^2 + s·s)`.
+pub(crate) fn prfo_step_and_derivative(
+    evals: &Array1<f64>,
+    evecs: &Array2<f64>,
+    g: &Array1<f64>,
+    order: usize,
+    alpha: f64,
+) -> (Array1<f64>, Array1<f64>) {
+    let n = g.len();
+    if n == 0 || evals.len() != n || evecs.nrows() != n || evecs.ncols() != n {
+        return (Array1::zeros(n), Array1::zeros(n));
+    }
+    let order = order.min(n);
+    let mut s = Array1::zeros(n);
+    let mut dsda = Array1::zeros(n);
+    if order > 0 {
+        let (gmax, lmax) = partition(evals, evecs, g, 0, order);
+        let (smax, dsmax) = extremal_diagonal_rfo(&lmax, &gmax, true, alpha);
+        accumulate(evecs, 0, &smax, &mut s);
+        accumulate(evecs, 0, &dsmax, &mut dsda);
+    }
+    if order < n {
+        let (gmin, lmin) = partition(evals, evecs, g, order, n - order);
+        let (smin, dsmin) = extremal_diagonal_rfo(&lmin, &gmin, false, alpha);
+        accumulate(evecs, order, &smin, &mut s);
+        accumulate(evecs, order, &dsmin, &mut dsda);
+    }
+    (s, dsda)
+}
+
+fn partition(
+    evals: &Array1<f64>,
+    evecs: &Array2<f64>,
+    g: &Array1<f64>,
+    start: usize,
+    width: usize,
+) -> (Array1<f64>, Array1<f64>) {
+    let mut g_block = Array1::zeros(width);
+    let mut lam = Array1::zeros(width);
+    for i in 0..width {
+        lam[i] = evals[start + i];
+        g_block[i] = dot(evecs.column(start + i), g.view());
+    }
+    (g_block, lam)
+}
+
+fn accumulate(evecs: &Array2<f64>, start: usize, block: &Array1<f64>, out: &mut Array1<f64>) {
+    for (i, value) in block.iter().enumerate() {
+        axpy(*value, evecs.column(start + i), out);
+    }
+}
+
+/// One extremal root of a diagonal RFO partition, plus `ds/dalpha`.
+fn extremal_diagonal_rfo(
+    evals: &Array1<f64>,
+    g: &Array1<f64>,
+    upper: bool,
+    alpha: f64,
+) -> (Array1<f64>, Array1<f64>) {
+    let n = g.len();
+    if n == 0 || alpha == 0.0 || evals.len() != n {
+        return (Array1::zeros(n), Array1::zeros(n));
+    }
+    let step = if n >= 50 {
+        secular_rfo_step(evals, g, upper, alpha)
+            .unwrap_or_else(|| jacobi_rfo_step(evals, g, upper, alpha))
+    } else {
+        jacobi_rfo_step(evals, g, upper, alpha)
+    };
+    let deriv = rfo_alpha_derivative(alpha, &step, g);
+    (step, deriv)
+}
+
+fn jacobi_rfo_step(evals: &Array1<f64>, g: &Array1<f64>, upper: bool, alpha: f64) -> Array1<f64> {
+    let n = g.len();
+    let mut h = Array2::<f64>::zeros((n, n));
+    for i in 0..n {
+        h[(i, i)] = evals[i];
+    }
+    let order = if upper { n } else { 0 };
+    rfo_get_s(&h, g, order, alpha)
+}
+
+/// Arrowhead secular root for a diagonal RFO block of dimension >= 50.
+fn secular_rfo_step(
+    evals: &Array1<f64>,
+    g: &Array1<f64>,
+    upper: bool,
+    alpha: f64,
+) -> Option<Array1<f64>> {
+    let n = g.len();
+    let alpha2 = alpha * alpha;
+    let mut diagonal = vec![0.0; n];
+    let mut coupling2 = vec![0.0; n];
+    let mut abs_diag = 0.0_f64;
+    let mut g_l1 = 0.0_f64;
+    for i in 0..n {
+        diagonal[i] = alpha2 * evals[i];
+        coupling2[i] = alpha2 * g[i] * g[i];
+        abs_diag = abs_diag.max(diagonal[i].abs());
+        g_l1 += (alpha * g[i]).abs();
+    }
+    let scale = 1.0_f64.max(abs_diag).max(g_l1);
+    let theta = secular_root(&diagonal, &coupling2, upper, scale)?;
+    let root_scale = theta.abs().max(abs_diag).max(1.0);
+    let mut step = Array1::zeros(n);
+    for i in 0..n {
+        let gap = theta - diagonal[i];
+        if gap.abs() < 1e-6 * root_scale {
+            return None;
+        }
+        step[i] = alpha2 * g[i] / gap;
+    }
+    Some(step)
+}
+
+fn secular_root(diagonal: &[f64], coupling2: &[f64], upper: bool, scale: f64) -> Option<f64> {
+    let mut pole: f64 = 0.0;
+    if upper {
+        for &value in diagonal {
+            pole = pole.max(value);
+        }
+        pole = pole.max(0.0);
+    } else {
+        pole = diagonal.first().copied().unwrap_or(0.0);
+        for &value in diagonal {
+            pole = pole.min(value);
+        }
+        pole = pole.min(0.0);
+    }
+    let secular = |theta: f64| -> f64 {
+        let mut sum = -theta;
+        for i in 0..diagonal.len() {
+            sum += coupling2[i] / (theta - diagonal[i]);
+        }
+        sum
+    };
+    let gap = 1e-12 * scale.max(1.0);
+    let inside = if upper { pole + gap } else { pole - gap };
+    let f_inside = secular(inside);
+    let inside_ok = if upper {
+        f_inside > 0.0
+    } else {
+        f_inside < 0.0
+    };
+    if !inside_ok || !f_inside.is_finite() {
+        return None;
+    }
+    let mut span = scale.max(1.0);
+    let mut outside = if upper { pole + span } else { pole - span };
+    let mut f_outside = secular(outside);
+    for _ in 0..60 {
+        let outside_ok = if upper {
+            f_outside < 0.0
+        } else {
+            f_outside > 0.0
+        };
+        if outside_ok && f_outside.is_finite() {
+            break;
+        }
+        span *= 2.0;
+        outside = if upper { pole + span } else { pole - span };
+        f_outside = secular(outside);
+        if !f_outside.is_finite() {
+            return None;
+        }
+    }
+    let outside_ok = if upper {
+        f_outside < 0.0
+    } else {
+        f_outside > 0.0
+    };
+    if !outside_ok {
+        return None;
+    }
+    brentq(secular, inside, outside)
+}
+
+/// SciPy `brentq` on a sign-changing bracket. `xtol` matches Sella's secular solve.
+fn brentq<F: Fn(f64) -> f64>(f: F, mut a: f64, mut b: f64) -> Option<f64> {
+    let mut fa = f(a);
+    let mut fb = f(b);
+    if !fa.is_finite() || !fb.is_finite() || fa * fb > 0.0 {
+        return None;
+    }
+    let mut c = a;
+    let mut fc = fa;
+    let mut d = b - a;
+    let mut e = d;
+    let xtol = 5e-15;
+    for _ in 0..80 {
+        if fb * fc > 0.0 {
+            c = a;
+            fc = fa;
+            d = b - a;
+            e = d;
+        }
+        if fc.abs() < fb.abs() {
+            let (b0, fb0) = (b, fb);
+            a = b0;
+            b = c;
+            c = b0;
+            fa = fb0;
+            fb = fc;
+            fc = fb0;
+        }
+        let tol = 4.0 * f64::EPSILON * b.abs() + xtol;
+        let m = 0.5 * (c - b);
+        if m.abs() <= tol || fb == 0.0 {
+            return Some(b);
+        }
+        if e.abs() >= tol && fa.abs() > fb.abs() {
+            let s = fb / fa;
+            let (p, mut q) = if a == c {
+                (2.0 * m * s, 1.0 - s)
+            } else {
+                let q_ratio = fa / fc;
+                let r = fb / fc;
+                (
+                    s * (2.0 * m * q_ratio * (q_ratio - r) - (b - a) * (r - 1.0)),
+                    (q_ratio - 1.0) * (r - 1.0) * (s - 1.0),
+                )
+            };
+            let mut p = p;
+            if p > 0.0 {
+                q = -q;
+            } else {
+                p = -p;
+            }
+            if 2.0 * p < (3.0 * m * q - (tol * q).abs()).min((e * q).abs()) {
+                e = d;
+                d = p / q;
+            } else {
+                d = m;
+                e = m;
+            }
+        } else {
+            d = m;
+            e = m;
+        }
+        a = b;
+        fa = fb;
+        if d.abs() > tol {
+            b += d;
+        } else if m > 0.0 {
+            b += tol;
+        } else {
+            b -= tol;
+        }
+        fb = f(b);
+        if !fb.is_finite() {
+            return None;
+        }
+    }
+    Some(b)
+}
+
+/// `ds/dalpha` from `(H - mu I) s = -g` with `mu = g·s / alpha^2`.
+fn rfo_alpha_derivative(alpha: f64, step: &Array1<f64>, g: &Array1<f64>) -> Array1<f64> {
+    let n = step.len().min(g.len());
+    let mut deriv = Array1::zeros(n);
+    if alpha == 0.0 {
+        return deriv;
+    }
+    let mut projection = 0.0;
+    let mut length_sq = 0.0;
+    for i in 0..n {
+        projection += g[i] * step[i];
+        length_sq += step[i] * step[i];
+    }
+    let alpha2 = alpha * alpha;
+    let denom = alpha2 + length_sq;
+    if !denom.is_finite() || denom.abs() < 1e-30 || alpha2 < 1e-30 {
+        return deriv;
+    }
+    let mu = projection / alpha2;
+    let dmu = -2.0 * alpha * mu / denom;
+    if !dmu.is_finite() {
+        return deriv;
+    }
+    for i in 0..n {
+        if g[i] != 0.0 {
+            deriv[i] = -step[i] * step[i] * dmu / g[i];
+        }
+    }
+    deriv
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -443,5 +738,47 @@ mod tests {
         assert!(nrm2((&step - &expected).view()) < 1e-12);
         assert!(step[0] > 0.0);
         assert!(step[1] < 0.0);
+    }
+
+    #[test]
+    fn alpha_derivative_matches_a_finite_difference() {
+        let evals = array![-1.0, 4.0, 9.0];
+        let evecs = Array2::<f64>::eye(3);
+        let g = array![0.5, -0.2, 0.7];
+        let alpha = 0.4;
+        let (step, deriv) = prfo_step_and_derivative(&evals, &evecs, &g, 1, alpha);
+        let (ahead, _) = prfo_step_and_derivative(&evals, &evecs, &g, 1, alpha + 1e-6);
+        let (behind, _) = prfo_step_and_derivative(&evals, &evecs, &g, 1, alpha - 1e-6);
+        let numeric = (&ahead - &behind) / 2e-6;
+        let err = nrm2((&deriv - &numeric).view()) / nrm2(numeric.view()).max(1.0);
+        assert!(
+            err < 1e-5,
+            "derivative mismatch {err}: {deriv:?} vs {numeric:?}"
+        );
+        assert!(nrm2((&step - &prfo_get_s(&evals, &evecs, &g, 1, alpha)).view()) < 1e-10);
+    }
+
+    #[test]
+    fn secular_root_matches_jacobi_on_a_wide_diagonal() {
+        let n = 60;
+        let mut evals = Array1::zeros(n);
+        let mut g = Array1::zeros(n);
+        for i in 0..n {
+            evals[i] = 0.2 + 0.15 * i as f64;
+            g[i] = ((i * 17) % 11) as f64 * 0.05 - 0.2;
+        }
+        evals[0] = -1.4;
+        g[0] = 0.35;
+        let evecs = Array2::<f64>::eye(n);
+        let (secular, _) = prfo_step_and_derivative(&evals, &evecs, &g, 1, 0.7);
+        let jacobi = prfo_get_s(&evals, &evecs, &g, 1, 0.7);
+        let err = nrm2((&secular - &jacobi).view());
+        assert!(err < 1e-8, "secular left Jacobi by {err}");
+    }
+
+    #[test]
+    fn brentq_finds_the_square_root_of_two() {
+        let root = brentq(|x| x * x - 2.0, 0.0, 2.0).unwrap();
+        assert!((root - 2.0_f64.sqrt()).abs() < 1e-12, "root {root}");
     }
 }

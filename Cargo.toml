@@ -38,11 +38,11 @@ eindir-core = { version = "0.6.0", features = ["capi"] }
 ndarray = "0.17"
 rayon = "1.12"
 thiserror = "2"
+faer = { version = "0.24.4", default-features = false, features = ["std", "linalg"] }
 linkcell = { version = "0.3.3", git = "https://github.com/d-SEAMS/linkcell", rev = "f6cf5700ca9c90e1877c84b66fb68386de5ceffe", default-features = false }
 
 [dev-dependencies]
 approx = "0.5"
-faer = { version = "0.24.4", default-features = false, features = ["std", "linalg"] }
 sha2 = "0.10"
 
 [profile.dev.package.faer]

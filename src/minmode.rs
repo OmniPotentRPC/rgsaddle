@@ -441,18 +441,45 @@ fn rotate_dimer<S: PointSurface>(
     Ok((n, curvature, rotations))
 }
 
-/// Lanczos: build a Krylov basis of finite-difference Hessian actions
-/// and take the lowest Ritz vector. Stops once the Ritz residual
-/// `beta_j |s_j|` (the norm of `H y - theta y` for the lowest Ritz
-/// pair `(theta, y)` in exact arithmetic, Paige 1971) meets
-/// `rotation_tol`, so a seed that already is the mode costs one action.
+/// Relative change of a Ritz value. A vanishing previous value only
+/// counts as agreement when the new value is inside the tolerance too,
+/// matching eOn's guarded division (a zero denominator does not report
+/// agreement).
+fn ritz_value_agreed(new: f64, old: f64, tol: f64) -> bool {
+    if !(new.is_finite() && old.is_finite() && tol.is_finite() && tol >= 0.0) {
+        return false;
+    }
+    let denom = old.abs();
+    if denom <= 1e-14 {
+        return new.abs() <= tol;
+    }
+    (new - old).abs() / denom <= tol
+}
+
+/// Lanczos lowest mode.
+///
+/// Olsen, Kroes, Henkelman, Arnaldsson, and Jónsson, J. Chem. Phys.
+/// 121, 9776 (2004), doi:10.1063/1.1814098, as eOn implements it: stop
+/// when the relative change in the lowest Ritz value falls under
+/// `rotation_tol`, or when the residual `beta |s|` does. A seed that
+/// is already the mode closes the Krylov on the first product.
+///
+/// `previous` is the curvature retained from the last geometry. When
+/// `early` is set and that curvature is finite, the first product
+/// returns immediately if its Rayleigh quotient agrees with
+/// `previous` to `rotation_tol` (eOn `quit_early`). That is one
+/// Hessian action for a mode that has not moved. `early` stays false
+/// when the previous solve stopped on the Krylov cap, so a second
+/// estimate at the same point can keep improving the vector.
 fn lanczos_mode<S: PointSurface>(
     surface: &Counted<'_, S>,
     x: ArrayView1<f64>,
     g0: ArrayView1<f64>,
     seed: Array1<f64>,
     config: &MinModeConfig,
-) -> Result<(Array1<f64>, f64, usize), SaddleError> {
+    previous: f64,
+    early: bool,
+) -> Result<(Array1<f64>, f64, usize, bool), SaddleError> {
     let n = seed.len();
     let m = config.krylov_dim.min(n).max(1);
     let mut q: Vec<Array1<f64>> = Vec::with_capacity(m);
@@ -461,6 +488,7 @@ fn lanczos_mode<S: PointSurface>(
     q.push(normalize(seed));
 
     let mut actions = 0;
+    let mut ew_old: Option<f64> = None;
     loop {
         let j = alpha.len();
         let hv = surface.action(x, g0, q[j].view(), config)?;
@@ -478,15 +506,28 @@ fn lanczos_mode<S: PointSurface>(
             w = &w - &(qi * overlap);
         }
         let b = w.dot(&w).sqrt();
+        if j == 0 && early && ritz_value_agreed(a, previous, config.rotation_tol) {
+            return Ok((q[0].clone(), a, actions, true));
+        }
         let (theta, s) = lowest_ritz(&alpha, &beta);
         let residual = b * s[j].abs();
-        if residual <= config.rotation_tol || alpha.len() == m || b <= 1e-12 {
+        // Olsen, Kroes, Henkelman, Arnaldsson, and Jónsson, J. Chem.
+        // Phys. 121, 9776 (2004), doi:10.1063/1.1814098: stop on the
+        // relative change of the lowest Ritz value as well as on the
+        // residual. A one-digit residual in `|theta|` accepts a high
+        // mode on the first product, so it is not a stop here.
+        let agreed = ew_old.is_some_and(|old| ritz_value_agreed(theta, old, config.rotation_tol));
+        let residual_ok = residual <= config.rotation_tol;
+        let capped = alpha.len() == m;
+        if residual_ok || agreed || capped || b <= 1e-12 {
             let mut mode = Array1::zeros(n);
             for (qi, si) in q.iter().zip(s.iter()) {
                 mode = &mode + &(qi * *si);
             }
-            return Ok((normalize(mode), theta, actions));
+            let converged = residual_ok || agreed || b <= 1e-12;
+            return Ok((normalize(mode), theta, actions, converged));
         }
+        ew_old = Some(theta);
         beta.push(b);
         q.push(w / b);
     }
@@ -598,6 +639,16 @@ pub(crate) fn translated_gradient(
     }
 }
 
+/// Lanczos basis for [`MinModeSession::push_estimate`]. One geometry,
+/// one centre gradient, orthonormal columns in the free space.
+struct LanczosCarry {
+    x: Array1<f64>,
+    g0: Array1<f64>,
+    q: Vec<Array1<f64>>,
+    alpha: Vec<f64>,
+    beta: Vec<f64>,
+}
+
 /// Stepping minimum-mode saddle search.
 pub struct MinModeSession {
     config: MinModeConfig,
@@ -611,6 +662,21 @@ pub struct MinModeSession {
     /// Gradient at `x`, when known: from the last translation's
     /// accepted point or from the host.
     centre: Option<PointEval>,
+    /// `estimate_mode` has already refreshed the mode at `x`. The next
+    /// `step` translates that mode instead of estimating it again.
+    mode_fresh: bool,
+    /// Angle between the mode the solver last used and the mode
+    /// `estimate_mode` just stored. Applied once, on the next step.
+    pending_turn: f64,
+    /// The last Lanczos solve met its residual or relative Ritz test.
+    /// A Krylov that only hit its dimension cap does not, so the next
+    /// estimate at this point keeps iterating instead of returning
+    /// the truncated vector after one product.
+    lanczos_ready: bool,
+    /// Krylov basis kept across [`MinModeSession::push_estimate`]
+    /// calls at one geometry. [`MinModeSession::estimate_mode`] and
+    /// [`MinModeSession::step`] do not read it.
+    lanczos_carry: Option<LanczosCarry>,
     /// The first surface error raised inside the translation oracle
     /// during the current step; the rgmin oracle signature has no
     /// error channel of its own.
@@ -654,6 +720,13 @@ impl MinModeSession {
         // direction with one oracle call (rgmin Accept::Step).
         if matches!(config.method, Method::Lbfgs { .. }) {
             solver.set_accept(Accept::Step);
+            // The reflected force is not a potential gradient
+            // (Goswami, Gunde, and Jónsson, Front. Chem. (2026),
+            // doi:10.3389/fchem.2026.1807063, Eq. 9). Arm the same
+            // guards as the band: an empty memory scales the step by
+            // 0.01, and a two-loop step that reaches the per-atom cap
+            // or faces away from the force drops its pairs.
+            solver.set_lbfgs_neb_guards(true);
         }
         Ok(Self {
             config,
@@ -666,6 +739,10 @@ impl MinModeSession {
             iteration: 0,
             centre: None,
             surface_error: Mutex::new(None),
+            mode_fresh: false,
+            pending_turn: 0.0,
+            lanczos_ready: false,
+            lanczos_carry: None,
         })
     }
 
@@ -678,6 +755,13 @@ impl MinModeSession {
     /// Select the convergence norm; the default is maximum absolute component.
     pub fn set_force_gate(&mut self, gate: ForceGate) {
         self.force_gate = gate;
+    }
+
+    /// L-BFGS NEB guards (empty-memory scale 0.01, cap and angle resets).
+    /// On by default for an L-BFGS min-mode session, because the reflected
+    /// force is not a potential gradient. `false` restores scale one.
+    pub fn set_lbfgs_neb_guards(&mut self, enabled: bool) {
+        self.solver.set_lbfgs_neb_guards(enabled);
     }
 
     /// Select the basin constraint without changing the rotation or translation method.
@@ -716,6 +800,9 @@ impl MinModeSession {
     pub fn reset(&mut self) {
         self.solver.forget();
         self.centre = None;
+        self.mode_fresh = false;
+        self.pending_turn = 0.0;
+        self.lanczos_carry = None;
     }
 
     /// Move to `x` and keep the session: the mode stays as the next
@@ -754,6 +841,9 @@ impl MinModeSession {
             None => None,
         };
         self.x = x;
+        self.mode_fresh = false;
+        self.pending_turn = 0.0;
+        self.lanczos_carry = None;
         Ok(())
     }
 
@@ -772,6 +862,10 @@ impl MinModeSession {
             self.solver.forget_evaluation();
         }
         self.mode = mode;
+        self.mode_fresh = false;
+        self.pending_turn = 0.0;
+        self.lanczos_ready = false;
+        self.lanczos_carry = None;
         Ok(())
     }
 
@@ -798,16 +892,30 @@ impl MinModeSession {
         surface: &Counted<'_, S>,
         position: ArrayView1<f64>,
         gradient: ArrayView1<f64>,
-    ) -> Result<(Array1<f64>, f64, usize), SaddleError> {
+    ) -> Result<(Array1<f64>, f64, usize, bool), SaddleError> {
         let excluded = surface.surface.excluded_modes(position)?;
         if excluded.ncols() != position.len() || !excluded.iter().all(|v| v.is_finite()) {
             return Err(SaddleError::Shape(
                 "minimum-mode excluded directions".into(),
             ));
         }
+        let previous = self.curvature;
+        let early = self.lanczos_ready;
         let estimate = |surface: &Counted<'_, S>, seed| match self.config.kind {
-            MinModeKind::Dimer => rotate_dimer(surface, position, gradient, seed, &self.config),
-            MinModeKind::Lanczos => lanczos_mode(surface, position, gradient, seed, &self.config),
+            MinModeKind::Dimer => {
+                let (mode, curvature, rotations) =
+                    rotate_dimer(surface, position, gradient, seed, &self.config)?;
+                Ok((mode, curvature, rotations, true))
+            }
+            MinModeKind::Lanczos => lanczos_mode(
+                surface,
+                position,
+                gradient,
+                seed,
+                &self.config,
+                previous,
+                early,
+            ),
         };
         if excluded.nrows() == 0 {
             return estimate(surface, self.mode.clone());
@@ -830,8 +938,8 @@ impl MinModeSession {
             calls: surface.calls,
             space: Some(&space),
         };
-        let (mode, curvature, rotations) = estimate(&reduced, checked_mode(seed)?)?;
-        Ok((space.lift(mode.view()), curvature, rotations))
+        let (mode, curvature, rotations, ready) = estimate(&reduced, checked_mode(seed)?)?;
+        Ok((space.lift(mode.view()), curvature, rotations, ready))
     }
 
     fn refresh_mode<S: PointSurface>(
@@ -839,9 +947,10 @@ impl MinModeSession {
         surface: &Counted<'_, S>,
         g0: ArrayView1<f64>,
     ) -> Result<(f64, usize), SaddleError> {
-        let (mode, curvature, rotations) = self.mode_at(surface, self.x.view(), g0)?;
+        let (mode, curvature, rotations, ready) = self.mode_at(surface, self.x.view(), g0)?;
         self.mode = mode;
         self.curvature = curvature;
+        self.lanczos_ready = ready;
         Ok((curvature, rotations))
     }
 
@@ -852,6 +961,8 @@ impl MinModeSession {
         &mut self,
         surface: &S,
     ) -> Result<ModeEstimate, SaddleError> {
+        // A finished solve must not resume a partial basis afterwards.
+        self.lanczos_carry = None;
         let calls = AtomicUsize::new(0);
         let counted = Counted {
             surface,
@@ -866,11 +977,165 @@ impl MinModeSession {
         } else {
             self.centre_gradient(&counted)?
         };
+        let old = self.mode.clone();
         let (curvature, rotations) = self.refresh_mode(&counted, g0.view())?;
+        self.pending_turn = old.dot(&self.mode).abs().min(1.0).acos();
+        self.mode_fresh = true;
         Ok(ModeEstimate {
             mode: self.mode.clone(),
             curvature,
             rotations,
+            evaluations: calls.load(Ordering::Relaxed),
+        })
+    }
+
+    /// Advance a Lanczos estimate by one Hessian action.
+    ///
+    /// [`MinModeSession::estimate_mode`] runs the residual test to
+    /// completion. A host that judges the mode itself (an overlap with
+    /// a vector it does not hand to the session) repeats this call.
+    /// The Krylov basis stays until the geometry or the seed changes,
+    /// and it grows to the free dimension rather than stopping at
+    /// `krylov_dim`. Returning the same vector after the residual test
+    /// would end that host's loop while the basis still had a direction
+    /// left. Dimer sessions take the full rotation, matching
+    /// [`MinModeSession::estimate_mode`].
+    pub fn push_estimate<S: PointSurface>(
+        &mut self,
+        surface: &S,
+    ) -> Result<ModeEstimate, SaddleError> {
+        if self.config.kind != MinModeKind::Lanczos {
+            return self.estimate_mode(surface);
+        }
+        let calls = AtomicUsize::new(0);
+        let counted = Counted {
+            surface,
+            calls: &calls,
+            space: None,
+        };
+        let centre_known = self.centre.as_ref().is_some_and(|c| c.x == self.x);
+        let g0 = if self.config.difference == FiniteDifference::Central && !centre_known {
+            Array1::zeros(self.x.len())
+        } else {
+            self.centre_gradient(&counted)?
+        };
+        let excluded = surface.excluded_modes(self.x.view())?;
+        if excluded.ncols() != self.x.len() || !excluded.iter().all(|v| v.is_finite()) {
+            return Err(SaddleError::Shape(
+                "minimum-mode excluded directions".into(),
+            ));
+        }
+        let mut space = Complement::new(self.x.len());
+        if excluded.nrows() > 0 {
+            for direction in excluded.rows() {
+                space.exclude(direction);
+            }
+            if space.dimension() == 0 {
+                return Err(SaddleError::Shape("minimum-mode space is empty".into()));
+            }
+        }
+        let dim = if excluded.nrows() == 0 {
+            self.x.len()
+        } else {
+            space.dimension()
+        };
+        let restart = self.lanczos_carry.as_ref().is_none_or(|carry| {
+            carry.x != self.x || carry.q.first().is_none_or(|q| q.len() != dim)
+        });
+        if restart {
+            let seed = if excluded.nrows() == 0 {
+                self.mode.clone()
+            } else {
+                let mut seed = space.reduce(self.mode.view());
+                if seed.dot(&seed).sqrt() <= 64.0 * f64::EPSILON {
+                    seed = Array1::from_iter(
+                        (0..dim).map(|i| ((i + 1) as f64 * 1.618033988749895).sin()),
+                    );
+                }
+                checked_mode(seed)?
+            };
+            self.lanczos_carry = Some(LanczosCarry {
+                x: self.x.clone(),
+                g0,
+                q: vec![normalize(seed)],
+                alpha: Vec::new(),
+                beta: Vec::new(),
+            });
+        }
+        let Some(mut carry) = self.lanczos_carry.take() else {
+            return Err(SaddleError::Invalid("lanczos basis was not stored".into()));
+        };
+        let g0 = carry.g0.clone();
+        let j = carry.alpha.len();
+        if j >= carry.q.len() || j >= dim {
+            let mode = self.mode.clone();
+            let curvature = self.curvature;
+            self.lanczos_carry = Some(carry);
+            return Ok(ModeEstimate {
+                mode,
+                curvature,
+                rotations: 0,
+                evaluations: calls.load(Ordering::Relaxed),
+            });
+        }
+        let counted = Counted {
+            surface,
+            calls: &calls,
+            space: if excluded.nrows() == 0 {
+                None
+            } else {
+                Some(&space)
+            },
+        };
+        let hv = match counted.action(self.x.view(), g0.view(), carry.q[j].view(), &self.config) {
+            Ok(hv) => hv,
+            Err(err) => {
+                self.lanczos_carry = Some(carry);
+                return Err(err);
+            }
+        };
+        let a = crate::stencil::curvature_along(hv.view(), carry.q[j].view());
+        carry.alpha.push(a);
+        let mut w = &hv - &(&carry.q[j] * a);
+        if j > 0 {
+            w = &w - &(&carry.q[j - 1] * carry.beta[j - 1]);
+        }
+        for qi in &carry.q {
+            let overlap = w.dot(qi);
+            w = &w - &(qi * overlap);
+        }
+        let b = w.dot(&w).sqrt();
+        let (theta, s) = lowest_ritz(&carry.alpha, &carry.beta);
+        let mut mode = Array1::zeros(dim);
+        for (qi, si) in carry.q.iter().zip(s.iter()) {
+            mode = &mode + &(qi * *si);
+        }
+        mode = normalize(mode);
+        let capped = carry.alpha.len() == dim;
+        if !capped && b > 1e-12 {
+            carry.beta.push(b);
+            carry.q.push(w / b);
+        }
+        let mut mode = if excluded.nrows() == 0 {
+            mode
+        } else {
+            normalize(space.lift(mode.view()))
+        };
+        if mode.dot(&self.mode) < 0.0 {
+            mode *= -1.0;
+        }
+        self.mode = mode;
+        self.curvature = theta;
+        // The basis is partial. A translation must finish the mode
+        // on its own, and must not treat this curvature as a finished
+        // Ritz value.
+        self.mode_fresh = false;
+        self.lanczos_ready = false;
+        self.lanczos_carry = Some(carry);
+        Ok(ModeEstimate {
+            mode: self.mode.clone(),
+            curvature: theta,
+            rotations: 1,
             evaluations: calls.load(Ordering::Relaxed),
         })
     }
@@ -883,6 +1148,9 @@ impl MinModeSession {
     /// evaluation; a host that recovers the surface and steps again
     /// may call [`MinModeSession::reset`] first to drop it.
     pub fn step<S: PointSurface>(&mut self, surface: &S) -> Result<MinModeReport, SaddleError> {
+        // The translation finishes the mode itself. A partial basis
+        // from push_estimate belongs to the pre-step seed.
+        self.lanczos_carry = None;
         let calls = AtomicUsize::new(0);
         let counted = Counted {
             surface,
@@ -890,17 +1158,32 @@ impl MinModeSession {
             space: None,
         };
         let g0 = self.centre_gradient(&counted)?;
-        let previous_mode = self.mode.clone();
-        let (mut curvature, mut rotations) = self.refresh_mode(&counted, g0.view())?;
-        // The solver cached the inverted force at this point under the
-        // previous mode; the step must see the current one. The mode's
-        // sign is arbitrary, so the angle reads |cos|.
-        let turned = previous_mode.dot(&self.mode).abs().min(1.0).acos();
-        if turned > MODE_RESET_ANGLE {
-            self.solver.forget();
+        // A host that just called `estimate_mode` already paid for this
+        // mode. Translating it again would repeat those Hessian actions.
+        let (mut curvature, mut rotations) = if self.mode_fresh {
+            self.mode_fresh = false;
+            let turned = self.pending_turn;
+            self.pending_turn = 0.0;
+            if turned > MODE_RESET_ANGLE {
+                self.solver.forget();
+            } else {
+                self.solver.forget_evaluation();
+            }
+            (self.curvature, 0)
         } else {
-            self.solver.forget_evaluation();
-        }
+            let previous_mode = self.mode.clone();
+            let refreshed = self.refresh_mode(&counted, g0.view())?;
+            // The solver cached the inverted force at this point under the
+            // previous mode; the step must see the latest one. The mode's
+            // sign is arbitrary, so the angle reads |cos|.
+            let turned = previous_mode.dot(&self.mode).abs().min(1.0).acos();
+            if turned > MODE_RESET_ANGLE {
+                self.solver.forget();
+            } else {
+                self.solver.forget_evaluation();
+            }
+            refreshed
+        };
 
         let max_force = self.force_gate.value(g0.view());
         if converged(max_force, curvature, self.config.force_tol) {
@@ -1016,7 +1299,7 @@ impl MinModeSession {
             // Force and curvature in a convergence decision describe the
             // same point. The accepted gradient supplies the centre, so
             // confirmation pays only for the required Hessian actions.
-            let (mode, accepted_curvature, accepted_rotations) =
+            let (mode, accepted_curvature, accepted_rotations, ready) =
                 self.mode_at(&counted, x.view(), centre.gradient.view())?;
             let turned = self.mode.dot(&mode).abs().min(1.0).acos();
             if turned > MODE_RESET_ANGLE {
@@ -1026,6 +1309,7 @@ impl MinModeSession {
             }
             self.mode = mode;
             self.curvature = accepted_curvature;
+            self.lanczos_ready = ready;
             curvature = accepted_curvature;
             rotations += accepted_rotations;
         }

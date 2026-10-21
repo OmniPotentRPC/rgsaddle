@@ -407,6 +407,71 @@ fn construction_rejects_modes_without_a_finite_nonzero_norm() {
 }
 
 #[test]
+fn lanczos_push_follows_the_lowest_mode_one_action_at_a_time() {
+    let config = MinModeConfig {
+        kind: MinModeKind::Lanczos,
+        rotation_tol: 1e-6,
+        // The pushed basis must keep going past this cap. A full
+        // solve with dimension 1 cannot leave the seed.
+        krylov_dim: 1,
+        ..MinModeConfig::default()
+    };
+    let x = Array1::from(vec![0.1, -0.2, 0.05, 0.3, -0.1, 0.02]);
+    let seed = Array1::from(vec![0.3, 0.5, 0.4, 0.4, 0.4, 0.4]);
+    let mut session = MinModeSession::new(config, x, seed).unwrap();
+    let surface = CountingPoint {
+        inner: &Anisotropic,
+        calls: AtomicUsize::new(0),
+    };
+    let mut actions = 0usize;
+    for _ in 0..12 {
+        let before = surface.calls.load(Ordering::Relaxed);
+        let est = session.push_estimate(&surface).unwrap();
+        let used = surface.calls.load(Ordering::Relaxed) - before;
+        assert_eq!(est.evaluations, used);
+        if before == 0 {
+            assert_eq!(used, 2, "centre plus one action");
+        } else {
+            assert_eq!(used, 1, "one action on a warm centre");
+        }
+        actions += 1;
+        if session.mode()[0].abs() >= 0.99 {
+            break;
+        }
+    }
+    assert!(actions > 1, "krylov cap of 1 must not end the push");
+    assert!(session.mode()[0].abs() >= 0.99, "mode {:?}", session.mode());
+    assert!(
+        session.curvature() < -0.9,
+        "curvature {}",
+        session.curvature()
+    );
+    // A translation after a partial basis still finishes the mode.
+    let report = session.step(&surface).unwrap();
+    assert!(report.evaluations >= 1);
+    assert!(session.mode()[0].abs() > 0.99);
+}
+
+#[test]
+fn dimer_push_runs_the_full_rotation() {
+    let (curvature, _rotations, _evaluations, mode) = {
+        let config = MinModeConfig {
+            kind: MinModeKind::Dimer,
+            rotation_tol: 1e-6,
+            max_rotations: 50,
+            ..MinModeConfig::default()
+        };
+        let x = Array1::from(vec![0.1, -0.2, 0.05, 0.3, -0.1, 0.02]);
+        let seed = Array1::from(vec![0.3, 0.5, 0.4, 0.4, 0.4, 0.4]);
+        let mut session = MinModeSession::new(config, x, seed).unwrap();
+        let est = session.push_estimate(&Anisotropic).unwrap();
+        (est.curvature, est.rotations, est.evaluations, est.mode)
+    };
+    assert!((curvature + 1.0).abs() < 1e-8, "curvature {curvature}");
+    assert!(mode[0].abs() > 1.0 - 1e-9, "mode {mode:?}");
+}
+
+#[test]
 fn construction_and_replacement_use_the_same_unit_mode() {
     let seed = array![2.0, -3.0, 6.0];
     let mut session = MinModeSession::new(

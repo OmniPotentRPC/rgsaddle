@@ -418,12 +418,15 @@ rgsaddle_status_t rgsaddle_minmode_step(RgsaddleMinMode *session,
                                         rgsaddle_report_t *out);
 
 /**
- * Refresh the lowest mode at the current point without translating
- * (a host that climbs with its own optimizer). The report carries
+ * Refresh the lowest mode without translating.
+ * A dimer runs its rotation to the tolerance. Lanczos advances one
+ * Hessian action and keeps the Krylov basis until set_position,
+ * set_mode, or reset; repeat the call until the mode meets the host's
+ * test. That basis grows to the free dimension. The report carries
  * curvature, rotations, and evaluations (surface calls, the centre
  * included when it was neither cached nor supplied); max_force is NaN.
- * Keep the session across a saddle search: the refreshed mode seeds
- * the next estimate, so a mode that still holds costs one evaluation.
+ * The refreshed mode seeds the next estimate, so a mode that still
+ * holds costs one evaluation.
  */
 rgsaddle_status_t rgsaddle_minmode_estimate(RgsaddleMinMode *session,
                                             rgsaddle_surface_fn surface,
