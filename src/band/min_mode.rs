@@ -14,11 +14,14 @@
 //! the image to where the refinement began unless an aligned point was
 //! visited. An alignment failure, a positive curvature after such a
 //! point, or the step budget leaves the image at the visited aligned
-//! point of lowest force. The trigger thresholds are
+//! point of lowest force. A positive curvature of the model is measured
+//! again before it ends the climb. The trigger thresholds are
 //! [`crate::ocineb::initial_threshold`], and a refinement re-arms at
 //! [`crate::ocineb::success_threshold`] (eq. 15) when it lowered the
 //! force and at [`crate::ocineb::backoff_threshold`] (eqs. 13-14)
-//! otherwise.
+//! otherwise. Those re-armed values belong to the image that climbed:
+//! when the band's climbing image changes index the threshold returns
+//! to its initial value.
 //!
 //! The lowest mode is Lanczos with the improved relative stop of
 //! Olsen, Kroes, Henkelman, Arnaldsson, and Jónsson, J. Chem. Phys.
@@ -297,6 +300,9 @@ impl BandSession {
         } else {
             refine.stable = 0;
             refine.cached_mode = None;
+            if refine.prev_ci.is_some() {
+                refine.threshold = None;
+            }
         }
         refine.prev_ci = ci;
         let Some(config) = self.config.min_mode else {
@@ -378,9 +384,24 @@ impl BandSession {
                 measured = Some(estimate.curvature);
             }
         }
+        let (mut mode, mut curvature) = run.climb.as_mut().expect("climb model").lowest()?;
+        if let Some(c) = measured {
+            curvature = c;
+        } else if curvature > 0.0 {
+            // Near convergence the TS-BFGS update on short steps can lift
+            // the model's lowest eigenvalue over zero while the surface
+            // curvature is still negative, so only a measured one ends
+            // the climb.
+            let estimate = run.estimate(&image_surface)?;
+            let climb = run.climb.as_mut().expect("climb model");
+            climb.set_mode(&estimate.mode, estimate.curvature)?;
+            run.refresh_gate = gate;
+            run.since_refresh = 0;
+            rotations = estimate.rotations;
+            curvature = estimate.curvature;
+            mode = climb.lowest()?.0;
+        }
         let climb = run.climb.as_mut().expect("climb model");
-        let (mode, model_curvature) = climb.lowest()?;
-        let curvature = measured.unwrap_or(model_curvature);
         run.alignment = mode_alignment(mode.view(), run.tangent.view());
         run.last_mode = Some(mode.clone());
         let alignment = run.alignment;
