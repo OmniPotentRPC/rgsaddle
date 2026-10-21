@@ -17,6 +17,6 @@
   },
   "tangent_norm_floor": {
     "literal": "norm > 1e-10",
-    "path": "src/tangent.rs"
+    "path": "src/stencil/triad.rs"
   }
 }

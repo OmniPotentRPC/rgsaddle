@@ -35,7 +35,7 @@ with [elan](https://github.com/leanprover/elan).
 | `reflect_parallel`, `reflect_perp`, `reflect_reflect`, `norm_reflect` | `src/projection.rs::climbing_image_force` | A unit tangent. `F - 2 (F.t) t` reverses the parallel part, keeps the perpendicular part, is an involution, and keeps the norm. |
 | `climb_dneb_parallel` | `src/projection.rs::climbing_image_force` | A DNEB term orthogonal to `t`, which `dneb_orth_tangent` supplies. The climbing image still reverses the parallel part. |
 | `dneb_orth_tangent`, `dneb_orth_force`, `dneb_force_parallel` | `src/projection.rs::dneb_component` | A unit tangent, and a nonzero perpendicular force (the code requires a norm above `1e-10`). The DNEB term is then orthogonal to `t` and to `F_perp`, and leaves the parallel part `c`. |
-| `perp_not_orth_of_short` | `src/tangent.rs::normalize_tangent` | Shows the unit hypothesis matters. A tangent of norm `1/2` leaves a parallel residue of `3/8`. `normalize_tangent` returns a unit vector or an error. |
+| `perp_not_orth_of_short` | `src/stencil/triad.rs::normalize_tangent` | Shows the unit hypothesis matters. A tangent of norm `1/2` leaves a parallel residue of `3/8`. `normalize_tangent` returns a unit vector or an error. `src/tangent.rs::compute_tangent` calls it. |
 | `normalized_mode_unit`, `normalized_mode_reflect_norm` | `src/minmode.rs::checked_mode`, called by `new` and `set_mode` | A nonzero mode. Division by its norm yields a unit direction whose reflected force preserves the norm. |
 | `quad_eq_sum`, `rayleigh_bounds`, `rayleigh_between_extremes`, `rayleigh_at_eigenvector` | `src/minmode.rs::rotate_dimer` and `lanczos_mode` (the curvature `h.n` of a unit mode) | A unit mode and a symmetric Hessian. The reported curvature then lies between the extreme eigenvalues and reaches each one at its eigenvector. |
 | `rotational_force_zero_iff` | `src/minmode.rs::rotate_dimer` | None. The rotational force vanishes exactly at an eigenvector. |
@@ -89,10 +89,12 @@ The golden rows check this formula, not the spring method.
 
 ## Preconditions and how the Rust code meets them
 
-* `normalize_tangent` falls back from the tangent to the forward and
-  then the backward difference, and returns `SaddleError::Invalid`
-  when the image coincides with both neighbours, so every projection
-  receives a unit tangent (`perp_not_orth_of_short`).
+* `src/stencil/triad.rs::normalize_tangent` falls back from the tangent to
+  the forward and then the backward difference, and returns
+  `SaddleError::Invalid` when the image coincides with both neighbours,
+  so every projection receives a unit tangent (`perp_not_orth_of_short`).
+  `src/tangent.rs::compute_tangent` calls that function. The floor is
+  `norm > 1e-10` (`scripts/constants.json`).
 * `MinModeSession::step` hands the solver the true energy beside the
   inverted gradient; they disagree by `2 a^2 |lam|` on the model
   (`minmode_energy_mismatch`). `MinModeSession::new` and

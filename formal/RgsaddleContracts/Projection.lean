@@ -7,8 +7,9 @@ Contracts for `src/projection.rs` (`force_perp`, `climbing_image_force`,
 `src/spring.rs::SpringKind::compute`.
 
 Every statement about orthogonality needs a **unit** tangent `t`.
-`src/tangent.rs::normalize_tangent` tries the tangent, forward difference,
+`src/stencil/triad.rs::normalize_tangent` tries the tangent, forward difference,
 and backward difference in order. It returns a unit direction or an error.
+`src/tangent.rs::compute_tangent` calls it.
 `perp_not_orth_of_short` shows why returning a short direction would leave
 a tangent component in the perpendicular projection.
 -/

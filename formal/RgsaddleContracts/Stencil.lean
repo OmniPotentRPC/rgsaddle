@@ -86,7 +86,8 @@ theorem dimer_translation_eq_climbing {N F : E} {curvature : ℝ}
 /-! ## Improved tangent
 
 `compute_tangent` for `TangentKind::Improved`, including the normalisation
-fallback and the error when every candidate is zero. The floating-point floor
+fallback and the error when every candidate is zero. The arithmetic is
+`src/stencil/triad.rs::unit_tangent`. The floating-point floor
 `1e-10` in `normalize_tangent` is the Rust stand-in for this zero test.
 -/
 
@@ -107,7 +108,7 @@ def normalizeTangent (tang next prev : E) : TangentOut E :=
   else .ok (‖tang‖⁻¹ • tang)
 
 /-- Raw improved tangent, before normalisation. Branch order matches
-`src/tangent.rs::compute_tangent`. -/
+`src/stencil/triad.rs::unit_tangent`, which `src/tangent.rs::compute_tangent` calls. -/
 def improvedRaw (next prev : E) (energy energyPrev energyNext : ℝ) : E :=
   if energyNext > energy ∧ energy > energyPrev then next
   else if energy > energyNext ∧ energyPrev > energy then prev

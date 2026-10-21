@@ -11,7 +11,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 NEEDLES = {
-    "tangent_norm_floor": ("src/tangent.rs", "norm > 1e-10"),
+    "tangent_norm_floor": ("src/stencil/triad.rs", "norm > 1e-10"),
     "dneb_norm_floor": ("src/projection.rs", "spring_perp_norm > 1e-10"),
     "mode_norm_floor": ("src/minmode.rs", "norm > 1e-14"),
     "default_dr": ("src/minmode.rs", "dr: 1e-3"),
