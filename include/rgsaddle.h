@@ -416,8 +416,10 @@ typedef struct {
   double max_move;
   /**
    * Minor 5: the dimer also stops rotating when an iteration's optimal
-   * angle falls under this (radians); 0 disables the test. Ignored
-   * when version.minor < 5.
+   * angle falls under this (radians). The Rust default is five degrees
+   * (Kästner and Sherwood, J. Chem. Phys. 128, 014106 (2008); eOn
+   * converged_angle). Zero disables the angle test. A C caller stores
+   * the value it writes; ignored when version.minor < 5.
    */
   double rotation_angle_tol;
   /** Minor 5: rgsaddle_difference_t for the Hessian actions. */

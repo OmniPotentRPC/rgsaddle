@@ -91,10 +91,15 @@ inline rgsaddle_minmode_config_t minmode_config() {
     c.kind = RGSADDLE_MINMODE_DIMER;
     c.method = RGSADDLE_METHOD_LBFGS;
     c.dr = 1e-3;
+    // Looser than the Rust stock 1e-4, so the dimer torque window is on:
+    // after one rotation a rotational force under 1 is finished.
     c.rotation_tol = 1e-3;
     c.max_rotations = 20;
     c.force_tol = 1e-3;
     c.max_move = 0.1;
+    // Left at 0 by the zero-initialized struct. The angle test is off.
+    // The Rust MinModeConfig default is five degrees; a C config stores
+    // the value written here.
     return c;
 }
 

@@ -113,8 +113,9 @@ pub struct RgsaddleMinModeConfig {
     pub krylov_dim: i64,
     pub force_tol: f64,
     pub max_move: f64,
-    /// ABI minor 5: dimer rotation angle tolerance in radians (zero
-    /// disables it). Read only when the config's minor is 5 or more.
+    /// ABI minor 5: dimer rotation angle tolerance in radians. The Rust
+    /// default is five degrees; zero disables the test. A C config
+    /// stores the caller's value. Read only when the minor is 5 or more.
     pub rotation_angle_tol: f64,
     /// ABI minor 5: 0 forward difference, 1 central.
     pub difference: i32,

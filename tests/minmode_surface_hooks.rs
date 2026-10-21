@@ -52,6 +52,7 @@ fn excluded_direction_is_absent_from_measured_actions_and_the_lowest_mode() {
             let config = MinModeConfig {
                 kind,
                 rotation_tol: 1e-10,
+                rotation_angle_tol: 0.0,
                 ..Default::default()
             };
             let mut session =

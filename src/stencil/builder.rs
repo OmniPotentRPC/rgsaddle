@@ -18,7 +18,7 @@ use crate::error::SaddleError;
 use crate::force::ForceGate;
 use crate::minmode::{
     FiniteDifference, MinModeConfig, MinModeKind, MinModeSession, MinModeStatus,
-    translated_gradient,
+    convex_displacement, translated_gradient,
 };
 use crate::stencil::{ascend, curvature_along};
 
@@ -179,6 +179,7 @@ struct EigenEngine {
     curvature: f64,
     dr: f64,
     force_tol: f64,
+    max_move: f64,
     solver: Solver,
     iteration: usize,
     max_force: f64,
@@ -243,7 +244,7 @@ impl Stencil {
             mode: None,
             dr: 1e-3,
             rotation_tol: 1e-4,
-            rotation_angle_tol: 0.0,
+            rotation_angle_tol: crate::minmode::DEFAULT_ROTATION_ANGLE_TOL,
             max_rotations: 20,
             krylov_dim: 12,
             force_tol: 1e-3,
@@ -462,6 +463,7 @@ impl PointBuilder {
                 curvature: f64::NAN,
                 dr: self.dr,
                 force_tol: self.force_tol,
+                max_move: self.max_move,
                 solver: force_solver(Method::Lbfgs { memory: 20 }, dof, self.max_move)?,
                 iteration: 0,
                 max_force: f64::NAN,
@@ -778,6 +780,26 @@ fn eigen_step<S: crate::minmode::PointSurface>(
         engine.solver.forget_evaluation();
     }
     let tau = engine.mode.clone();
+    if curvature >= 0.0 && engine.max_move.is_finite() && engine.max_move > 0.0 {
+        let climbed = convex_displacement(
+            engine.x.view(),
+            gradient.view(),
+            tau.view(),
+            engine.max_move,
+        );
+        let (_energy, _gradient) = surface.eval(climbed.view())?;
+        calls.fetch_add(1, Ordering::Relaxed);
+        engine.solver.forget_evaluation();
+        engine.x = climbed;
+        engine.iteration += 1;
+        return Ok(StencilReport {
+            status: StencilStatus::Running,
+            max_force,
+            curvature,
+            iteration: engine.iteration,
+            evaluations: calls.load(Ordering::Relaxed),
+        });
+    }
     let start = engine.x.clone();
     let slot: Mutex<Option<SaddleError>> = Mutex::new(None);
     let oracle = Oracle::unbounded(engine.x.len(), |xv: ArrayView1<f64>| {

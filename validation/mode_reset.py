@@ -9,8 +9,10 @@ it, tau' = tau cos(theta) + u sin(theta), and
     R' - R = 2 (tau tau' - tau' tau'')   has spectral norm 2 sin(theta),
 
 so the effective Hessian R H R moves by at most 4 sin(theta) |H|. This
-is the basis of MODE_RESET_ANGLE in src/minmode.rs: at eOn's converged
-angle, 5 degrees, the bound is 0.349 |H|.
+is the basis of MODE_RESET_ANGLE in src/minmode.rs. Goswami, Gunde, and
+Jónsson, Front. Chem. (2026), doi:10.3389/fchem.2026.1807063, keep the
+reflector inside a 45 degree cone (|tau . tau'| > 1/sqrt(2)). At that
+angle the bound is 2.828 |H|.
 """
 
 if not __debug__:
@@ -28,6 +30,6 @@ eig = [sp.simplify(e) for e in (D.T * D).eigenvals()]
 assert all(sp.simplify(e - 4 * sp.sin(th) ** 2) == 0 for e in eig), eig
 # Orthogonal complement of the plane is untouched, so the 2x2 block is the norm.
 print("|R' - R|_2 = 2 |sin(theta)|: ok")
-bound = 4 * sp.sin(sp.pi * 5 / 180)
-print(f"4 sin(5 deg) = {float(bound):.4f}")
-assert abs(float(bound) - 0.3486) < 1e-3
+bound = 4 * sp.sin(sp.pi / 4)
+print(f"4 sin(45 deg) = {float(bound):.4f}")
+assert abs(float(bound) - 2.8284) < 1e-3
