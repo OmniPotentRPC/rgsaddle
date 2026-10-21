@@ -94,7 +94,7 @@ impl ModelClimb {
         climb
     }
 
-    /// Make the model reproduce every measured pair of `block` and
+    /// Make the model match every measured pair of `block` and
     /// follow `mode`, measured at `curvature`, from here.
     pub(super) fn refresh(
         &mut self,

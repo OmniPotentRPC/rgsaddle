@@ -13,7 +13,7 @@
 //! motion across a bond as much as along it.
 //!
 //! The Krylov vectors of a Lanczos estimate carry measured Hessian
-//! actions; [`impose`] makes the model reproduce them exactly.
+//! actions; [`impose`] makes the model match them exactly.
 
 use ndarray::{Array1, Array2};
 use rgmin::precon::ExpParams;
@@ -67,7 +67,7 @@ pub(super) fn pair_hessian(x: &Array1<f64>, cell: Option<&Cell>) -> Array2<f64> 
     p
 }
 
-/// Make `b` reproduce every measured pair `(v, Hv)` of `block`: with
+/// Make `b` match every measured pair `(v, Hv)` of `block`: with
 /// `V` the orthonormalised vectors and `R = HV - BV`,
 /// `B <- B + R V' + V R' - V (V'R) V'`. Directions orthogonal to the
 /// block keep their model curvature.
@@ -227,7 +227,7 @@ mod tests {
     }
 
     #[test]
-    fn the_imposed_model_reproduces_its_block() {
+    fn the_imposed_model_matches_its_block() {
         let n = 6;
         let mut b = Array2::eye(n);
         let h = Array2::from_shape_fn((n, n), |(i, j)| {
