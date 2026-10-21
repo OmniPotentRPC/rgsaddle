@@ -27,7 +27,7 @@ use crate::spring::SpringKind;
 use crate::tangent::TangentKind;
 
 pub const RGSADDLE_ABI_MAJOR: u32 = 1;
-pub const RGSADDLE_ABI_MINOR: u32 = 19;
+pub const RGSADDLE_ABI_MINOR: u32 = 20;
 
 /// Band config bit 0. The C step calls the surface once per image
 /// carried by the evaluation: every image on the first evaluation
@@ -1467,6 +1467,79 @@ pub unsafe extern "C" fn rgsaddle_connect(
                     hessian_index: found.hessian_index,
                     evaluations: i32::try_from(found.evaluations).unwrap_or(i32::MAX),
                 };
+            }
+            RGSADDLE_OK
+        }
+        Err(err) => status_of(&err),
+    }
+}
+
+/// # Safety
+/// `reactant` and `product` each hold `3 * n_atoms` doubles. `out`
+/// holds `n_images * 3 * n_atoms` doubles. `cell` is 9 row-major
+/// lattice entries or NULL.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_idpp_path(
+    n_images: i64,
+    n_atoms: i64,
+    reactant: *const f64,
+    product: *const f64,
+    cell: *const f64,
+    max_iterations: i64,
+    grad_tol: f64,
+    max_move: f64,
+    out: *mut f64,
+) -> i32 {
+    if reactant.is_null() || product.is_null() || out.is_null() {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    if n_images < 3 || n_atoms < 1 {
+        return RGSADDLE_SHAPE;
+    }
+    let dof = (3 * n_atoms) as usize;
+    let images = n_images as usize;
+    let reactant = unsafe { slice::from_raw_parts(reactant, dof) };
+    let product = unsafe { slice::from_raw_parts(product, dof) };
+    let total = dof * images;
+    let out = unsafe { slice::from_raw_parts_mut(out, total) };
+    let parsed = if cell.is_null() {
+        None
+    } else {
+        let raw = unsafe { slice::from_raw_parts(cell, 9) };
+        match crate::mic::Cell::from_vectors(
+            [raw[0], raw[1], raw[2]],
+            [raw[3], raw[4], raw[5]],
+            [raw[6], raw[7], raw[8]],
+            [0.0, 0.0, 0.0],
+        ) {
+            Ok(cell) => Some(cell),
+            Err(_) => return RGSADDLE_INVALID_PARAMETER,
+        }
+    };
+    let config = crate::idpp::IdppConfig {
+        max_iterations: usize::try_from(max_iterations).unwrap_or(0),
+        grad_tol,
+        max_move,
+        ..crate::idpp::IdppConfig::default()
+    };
+    let reactant = match Array1::from_shape_vec(dof, reactant.to_vec()) {
+        Ok(v) => v,
+        Err(_) => return RGSADDLE_SHAPE,
+    };
+    let product = match Array1::from_shape_vec(dof, product.to_vec()) {
+        Ok(v) => v,
+        Err(_) => return RGSADDLE_SHAPE,
+    };
+    match crate::idpp_path(
+        reactant.view(),
+        product.view(),
+        images,
+        parsed.as_ref(),
+        &config,
+    ) {
+        Ok(path) => {
+            for (i, v) in path.iter().enumerate() {
+                out[i] = *v;
             }
             RGSADDLE_OK
         }

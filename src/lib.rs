@@ -42,6 +42,7 @@ pub mod band;
 pub mod capi;
 pub mod connect;
 pub mod error;
+pub mod idpp;
 pub mod minmode;
 pub mod nichols;
 pub mod ocineb;
@@ -60,6 +61,7 @@ pub use band::{
 };
 pub use connect::{ConnectConfig, ConnectProfile, ConnectReport, connect};
 pub use error::SaddleError;
+pub use idpp::{IdppConfig, idpp_path, linear_path};
 pub use minmode::{
     FiniteDifference, MinModeConfig, MinModeKind, MinModeReport, MinModeSession, MinModeStatus,
     ModeEstimate, PointSurface,

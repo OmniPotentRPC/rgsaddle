@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 19u
+#define RGSADDLE_ABI_MINOR 20u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -911,9 +911,31 @@ void rgsaddle_samd_free(RgsaddleSamd *session);
 
 
 
+/**
+ * Image dependent pair potential initial path.
+ *
+ * Goswami, MethodsX (2026), doi:10.1016/j.mex.2026.103899.
+ * Smidstrup, Pedersen, Stokbro, and Jonsson, J. Chem. Phys. 140,
+ * 214106 (2014).
+ *
+ * `reactant` and `product` each hold `3 * n_atoms` doubles. `n_images`
+ * counts the endpoints. `out` holds `n_images * 3 * n_atoms` doubles,
+ * image-major: row 0 is the reactant and the last row is the product.
+ * `cell` is a row-major 3x3 lattice, or NULL in free space. Interior
+ * images are relaxed toward interpolated minimum-image pair distances.
+ * `max_iterations`, `grad_tol` (L2 norm of the IDPP gradient), and
+ * `max_move` (per-atom cap) are the per-image L-BFGS stop. The
+ * defaults are 5000, 1e-3, and 0.1. ABI minor 19.
+ */
+rgsaddle_status_t rgsaddle_idpp_path(int64_t n_images, int64_t n_atoms,
+                                     const double *reactant,
+                                     const double *product, const double *cell,
+                                     int64_t max_iterations, double grad_tol,
+                                     double max_move, double *out);
+
 typedef struct RgsaddleOcineb RgsaddleOcineb;
 
-/** Phase of one OCI-NEB host step. ABI minor 19. */
+/** Phase of one OCI-NEB host step. ABI minor 20. */
 typedef enum {
   RGSADDLE_OCINEB_BAND = 0,
   RGSADDLE_OCINEB_ALIGN = 1,
