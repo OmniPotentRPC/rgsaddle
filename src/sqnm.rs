@@ -12,6 +12,7 @@
 //! Sommer-Jörgensen and Goedecker, J. Chem. Phys. 160, 064110 (2024).
 //! Schaefer, Ghasemi, Roy, and Goedecker, J. Chem. Phys. 142, 034112 (2015).
 
+#[cfg(feature = "faer")]
 use faer::Mat;
 
 #[derive(Clone)]
@@ -490,23 +491,33 @@ fn solve_spd(gram: &[Vec<f64>], rhs: &[f64]) -> Vec<f64> {
 }
 
 fn eigh(matrix: &[Vec<f64>]) -> (Vec<f64>, Vec<Vec<f64>>) {
-    let n = matrix.len();
-    let mut m = Mat::<f64>::zeros(n, n);
-    for i in 0..n {
-        for j in 0..n {
-            m[(i, j)] = matrix[i][j];
-        }
+    // The Kani build turns faer off. Those harnesses return before SQNM.
+    // A call that reaches this panic fails the proof.
+    #[cfg(not(feature = "faer"))]
+    {
+        let _ = matrix;
+        panic!("self-adjoint spectrum requires the faer feature");
     }
-    let eig = m.self_adjoint_eigen(faer::Side::Lower).unwrap();
-    let mut evals = vec![0.0; n];
-    let mut evecs = vec![vec![0.0; n]; n];
-    for k in 0..n {
-        evals[k] = eig.S()[k];
+    #[cfg(feature = "faer")]
+    {
+        let n = matrix.len();
+        let mut m = Mat::<f64>::zeros(n, n);
         for i in 0..n {
-            evecs[i][k] = eig.U()[(i, k)];
+            for j in 0..n {
+                m[(i, j)] = matrix[i][j];
+            }
         }
+        let eig = m.self_adjoint_eigen(faer::Side::Lower).unwrap();
+        let mut evals = vec![0.0; n];
+        let mut evecs = vec![vec![0.0; n]; n];
+        for k in 0..n {
+            evals[k] = eig.S()[k];
+            for i in 0..n {
+                evecs[i][k] = eig.U()[(i, k)];
+            }
+        }
+        (evals, evecs)
     }
-    (evals, evecs)
 }
 
 #[cfg(test)]

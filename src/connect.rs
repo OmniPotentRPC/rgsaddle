@@ -51,6 +51,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 
+#[cfg(feature = "faer")]
 use faer::Mat;
 use ndarray::{Array1, Array2, ArrayView1};
 use rgmin::Method;
@@ -1855,6 +1856,8 @@ struct Mat3 {
 }
 
 impl Mat3 {
+    // The Kani build leaves faer off, so the quaternion caller is not compiled.
+    #[cfg_attr(not(feature = "faer"), allow(dead_code))]
     fn zero() -> Self {
         Self { v: [0.0; 9] }
     }
@@ -1884,42 +1887,52 @@ fn quaternion_rotation(
     r21: f64,
     r32: f64,
 ) -> Mat3 {
-    let f = [
-        [r11 + r22 + r33, r23 - r32, r31 - r13, r12 - r21],
-        [r23 - r32, r11 - r22 - r33, r12 + r21, r13 + r31],
-        [r31 - r13, r12 + r21, -r11 + r22 - r33, r23 + r32],
-        [r12 - r21, r13 + r31, r23 + r32, -r11 - r22 + r33],
-    ];
-    let mut m = faer::Mat::<f64>::zeros(4, 4);
-    for i in 0..4 {
-        for j in 0..4 {
-            m[(i, j)] = f[i][j];
-        }
+    // The Kani build turns faer off. Those harnesses return before connect.
+    // A call that reaches this panic fails the proof.
+    #[cfg(not(feature = "faer"))]
+    {
+        let _ = (r11, r22, r33, r12, r23, r31, r13, r21, r32);
+        panic!("quaternion spectrum requires the faer feature");
     }
-    let eig = m
-        .self_adjoint_eigen(faer::Side::Lower)
-        .expect("quaternion eigh");
-    let mut best = 0;
-    for k in 1..4 {
-        if eig.S()[k] > eig.S()[best] {
-            best = k;
+    #[cfg(feature = "faer")]
+    {
+        let f = [
+            [r11 + r22 + r33, r23 - r32, r31 - r13, r12 - r21],
+            [r23 - r32, r11 - r22 - r33, r12 + r21, r13 + r31],
+            [r31 - r13, r12 + r21, -r11 + r22 - r33, r23 + r32],
+            [r12 - r21, r13 + r31, r23 + r32, -r11 - r22 + r33],
+        ];
+        let mut m = faer::Mat::<f64>::zeros(4, 4);
+        for i in 0..4 {
+            for j in 0..4 {
+                m[(i, j)] = f[i][j];
+            }
         }
+        let eig = m
+            .self_adjoint_eigen(faer::Side::Lower)
+            .expect("quaternion eigh");
+        let mut best = 0;
+        for k in 1..4 {
+            if eig.S()[k] > eig.S()[best] {
+                best = k;
+            }
+        }
+        let q0 = eig.U()[(0, best)];
+        let q1 = eig.U()[(1, best)];
+        let q2 = eig.U()[(2, best)];
+        let q3 = eig.U()[(3, best)];
+        let mut rot = Mat3::zero();
+        rot[(0, 0)] = q0 * q0 + q1 * q1 - q2 * q2 - q3 * q3;
+        rot[(0, 1)] = 2.0 * (q1 * q2 - q0 * q3);
+        rot[(0, 2)] = 2.0 * (q1 * q3 + q0 * q2);
+        rot[(1, 0)] = 2.0 * (q1 * q2 + q0 * q3);
+        rot[(1, 1)] = q0 * q0 - q1 * q1 + q2 * q2 - q3 * q3;
+        rot[(1, 2)] = 2.0 * (q2 * q3 - q0 * q1);
+        rot[(2, 0)] = 2.0 * (q1 * q3 - q0 * q2);
+        rot[(2, 1)] = 2.0 * (q2 * q3 + q0 * q1);
+        rot[(2, 2)] = q0 * q0 - q1 * q1 - q2 * q2 + q3 * q3;
+        rot
     }
-    let q0 = eig.U()[(0, best)];
-    let q1 = eig.U()[(1, best)];
-    let q2 = eig.U()[(2, best)];
-    let q3 = eig.U()[(3, best)];
-    let mut rot = Mat3::zero();
-    rot[(0, 0)] = q0 * q0 + q1 * q1 - q2 * q2 - q3 * q3;
-    rot[(0, 1)] = 2.0 * (q1 * q2 - q0 * q3);
-    rot[(0, 2)] = 2.0 * (q1 * q3 + q0 * q2);
-    rot[(1, 0)] = 2.0 * (q1 * q2 + q0 * q3);
-    rot[(1, 1)] = q0 * q0 - q1 * q1 + q2 * q2 - q3 * q3;
-    rot[(1, 2)] = 2.0 * (q2 * q3 - q0 * q1);
-    rot[(2, 0)] = 2.0 * (q1 * q3 - q0 * q2);
-    rot[(2, 1)] = 2.0 * (q2 * q3 + q0 * q1);
-    rot[(2, 2)] = q0 * q0 - q1 * q1 - q2 * q2 + q3 * q3;
-    rot
 }
 
 fn midpoint(a: &[f64], b: &[f64]) -> Vec<f64> {
@@ -2211,25 +2224,34 @@ fn rigid_basis(pos: &[f64]) -> Vec<Vec<f64>> {
 }
 
 fn eigh_dense(matrix: &[Vec<f64>]) -> (Vec<f64>, Vec<Vec<f64>>) {
-    let n = matrix.len();
-    let mut m = Mat::<f64>::zeros(n, n);
-    for i in 0..n {
-        for j in 0..n {
-            m[(i, j)] = matrix[i][j];
-        }
+    // Same faer gate as `quaternion_rotation`.
+    #[cfg(not(feature = "faer"))]
+    {
+        let _ = matrix;
+        panic!("self-adjoint spectrum requires the faer feature");
     }
-    let eig = m.self_adjoint_eigen(faer::Side::Lower).unwrap();
-    let mut evals = vec![0.0; n];
-    let mut evecs = vec![vec![0.0; n]; n];
-    for k in 0..n {
-        evals[k] = eig.S()[k];
-        let mut col = vec![0.0; n];
+    #[cfg(feature = "faer")]
+    {
+        let n = matrix.len();
+        let mut m = Mat::<f64>::zeros(n, n);
         for i in 0..n {
-            col[i] = eig.U()[(i, k)];
+            for j in 0..n {
+                m[(i, j)] = matrix[i][j];
+            }
         }
-        evecs[k] = col;
+        let eig = m.self_adjoint_eigen(faer::Side::Lower).unwrap();
+        let mut evals = vec![0.0; n];
+        let mut evecs = vec![vec![0.0; n]; n];
+        for k in 0..n {
+            evals[k] = eig.S()[k];
+            let mut col = vec![0.0; n];
+            for i in 0..n {
+                col[i] = eig.U()[(i, k)];
+            }
+            evecs[k] = col;
+        }
+        (evals, evecs)
     }
-    (evals, evecs)
 }
 
 #[cfg(test)]
