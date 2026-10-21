@@ -183,6 +183,7 @@ pub unsafe extern "C" fn rgsaddle_ocineb_step(
         n_atoms: session.n_atoms,
         n_images: session.n_images,
         per_image: session.per_image,
+        climbing_request: false,
         rows: Default::default(),
     };
     match session.session.step(&cs) {
