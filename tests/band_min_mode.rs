@@ -115,7 +115,7 @@ fn an_invalid_refinement_is_refused() {
     refine.alignment_tol = 1.5;
     assert!(BandSession::new(config(Some(refine)), initial_band(7)).is_err());
     let mut refine = MinModeRefine::default();
-    refine.refresh_factor = 0.5;
+    refine.curvature_retained = 1.5;
     assert!(BandSession::new(config(Some(refine)), initial_band(7)).is_err());
 }
 
