@@ -425,7 +425,8 @@ rgsaddle_status_t rgsaddle_minmode_step(RgsaddleMinMode *session,
  * Keep the session across a saddle search: the refreshed mode seeds
  * the next estimate. Standalone Lanczos estimates use the Ritz-residual
  * stop; translations use the stock relative Ritz-value stop. A repeated
- * dimer estimate at one geometry restarts rotational CG history.
+ * dimer estimate at one geometry restarts rotational CG history. A failed
+ * surface callback leaves retained dimer rotation history unchanged.
  */
 rgsaddle_status_t rgsaddle_minmode_estimate(RgsaddleMinMode *session,
                                             rgsaddle_surface_fn surface,

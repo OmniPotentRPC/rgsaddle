@@ -939,14 +939,19 @@ impl MinModeSession {
         let carried = self.curvature.is_finite().then_some(self.curvature);
         if excluded.nrows() == 0 {
             return match self.config.kind {
-                MinModeKind::Dimer => rotate_dimer(
-                    surface,
-                    position,
-                    gradient,
-                    self.mode.clone(),
-                    &self.config,
-                    &mut self.dimer_rotation,
-                ),
+                MinModeKind::Dimer => {
+                    let mut history = self.dimer_rotation.clone();
+                    let answer = rotate_dimer(
+                        surface,
+                        position,
+                        gradient,
+                        self.mode.clone(),
+                        &self.config,
+                        &mut history,
+                    )?;
+                    self.dimer_rotation = history;
+                    Ok(answer)
+                }
                 MinModeKind::Lanczos => lanczos_mode(
                     surface,
                     position,
@@ -1044,6 +1049,8 @@ impl MinModeSession {
     /// Refresh the lowest mode at the current point without moving.
     /// The centre gradient comes from the cache, from
     /// [`MinModeSession::set_position`], or from one evaluation.
+    /// A failed surface evaluation leaves retained dimer rotation
+    /// history unchanged.
     pub fn estimate_mode<S: PointSurface>(
         &mut self,
         surface: &S,
@@ -1274,6 +1281,14 @@ mod tests {
         }
     }
 
+    struct FailingSurface;
+
+    impl PointSurface for FailingSurface {
+        fn eval(&self, _x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), crate::SaddleError> {
+            Err(crate::SaddleError::Shape("deliberate failure".into()))
+        }
+    }
+
     struct AnisotropicQuadratic;
 
     impl PointSurface for AnisotropicQuadratic {
@@ -1348,6 +1363,30 @@ mod tests {
         assert!(session.dimer_rotation.force.is_none());
         assert!(session.dimer_rotation.direction.is_none());
         assert!(session.curvature().is_nan());
+    }
+
+    #[test]
+    fn failed_dimer_action_preserves_rotation_history() {
+        let config = MinModeConfig {
+            rotation_tol: 1e-12,
+            rotation_angle_tol: std::f64::consts::PI,
+            ..MinModeConfig::default()
+        };
+        let mut session = MinModeSession::new(config, array![0.3, 0.2], array![0.8, 0.6]).unwrap();
+        session.estimate_mode(&RotatingQuadratic).unwrap();
+        assert!(session.dimer_rotation.force.is_some());
+        assert!(session.dimer_rotation.direction.is_some());
+        let force = session.dimer_rotation.force.clone();
+        let direction = session.dimer_rotation.direction.clone();
+        let centre = session.dimer_rotation.centre.clone();
+
+        session
+            .set_position(array![0.31, 0.19], Some(array![-0.62, 0.76]))
+            .unwrap();
+        assert!(session.estimate_mode(&FailingSurface).is_err());
+        assert_eq!(session.dimer_rotation.force, force);
+        assert_eq!(session.dimer_rotation.direction, direction);
+        assert_eq!(session.dimer_rotation.centre, centre);
     }
 
     #[test]
