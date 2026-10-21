@@ -101,7 +101,7 @@ impl Default for MinModeRefine {
         Self {
             trigger_factor: 0.5,
             trigger_force: 0.0,
-            alignment_tol: 0.5,
+            alignment_tol: 0.3,
             stable_steps: 3,
             max_steps: 1000,
             restore_unhelpful: false,
