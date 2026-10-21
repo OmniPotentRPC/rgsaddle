@@ -97,14 +97,16 @@ impl ApplyHessian for DenseApply<'_> {
 ///
 /// The LJ38 free block is 108, so that search keeps the Jacobi
 /// spectrum. A larger block, including a Pt island free block of 525,
-/// uses [`faer_eigh`].
+/// uses [`faer_eigh`] when the `faer` feature is on.
 const DENSE_JACOBI_LIMIT: usize = 128;
 
 /// Sella `exact`: dense symmetric eigen of `a`.
 ///
 /// Eigenvalues come back in nondecreasing order. Dimension
 /// [`DENSE_JACOBI_LIMIT`] and below uses cyclic Jacobi. A larger
-/// matrix uses faer's self-adjoint eigensolver.
+/// matrix uses faer's self-adjoint eigensolver. The Kani build leaves
+/// that feature off and panics if a block above the Jacobi limit is
+/// reached; those harnesses return before a Sella session.
 pub fn exact_eigh(a: ArrayView2<f64>) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
     if a.nrows() != a.ncols() {
         return Err(SaddleError::Shape("eigh needs a square matrix".into()));
@@ -127,14 +129,15 @@ pub fn exact_eigh(a: ArrayView2<f64>) -> Result<(Array1<f64>, Array2<f64>), Sadd
 
 /// Self-adjoint spectrum from faer. `a` is already symmetric.
 /// Eigenvalues are nondecreasing. Columns are the eigenvectors.
-/// The Kani build leaves the `faer` feature off, as connect and SQNM do.
+///
+/// The `faer` feature is on by default. A build without it still
+/// compiles, and this function panics if a caller reaches it. Connect
+/// and SQNM use the same gate.
 fn faer_eigh(a: &Array2<f64>) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
     #[cfg(not(feature = "faer"))]
     {
         let _ = a;
-        return Err(SaddleError::Solver(
-            "self-adjoint eigen requires the faer feature".into(),
-        ));
+        panic!("self-adjoint spectrum requires the faer feature");
     }
     #[cfg(feature = "faer")]
     {

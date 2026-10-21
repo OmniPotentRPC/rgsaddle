@@ -827,9 +827,11 @@ pub struct MinModeSession {
     curvature: f64,
     solver: Solver,
     iteration: usize,
-    /// Improved Lanczos: stop when the lowest Ritz value changes by
-    /// less than this fraction of `|λ|`, or of 1 when `λ` is 0.
-    /// `None` keeps the residual test alone.
+    /// Connect's improved Lanczos. When set, the first product returns
+    /// if the Rayleigh quotient agrees with the carried curvature to
+    /// this fraction, and later products stop on the relative change of
+    /// the lowest Ritz value. `None` keeps the stock test: the residual
+    /// and the relative Ritz change, both at `rotation_tol`.
     lanczos_rel_tol: Option<f64>,
     /// Gradient at `x`, when known: from the last translation's
     /// accepted point or from the host.
@@ -922,7 +924,8 @@ impl MinModeSession {
     /// Stop a Lanczos estimate when the lowest Ritz value's relative
     /// change falls under `tol`. The improved Lanczos search uses this
     /// so a translation does not wait for a tight residual. `None`
-    /// restores the residual test.
+    /// restores the stock residual and the relative Ritz change, both
+    /// at `rotation_tol`.
     pub fn set_lanczos_rel_tol(&mut self, tol: Option<f64>) -> Result<(), SaddleError> {
         if let Some(tol) = tol
             && !(tol.is_finite() && tol > 0.0)

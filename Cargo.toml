@@ -26,7 +26,8 @@ chemfiles = ["readcon", "readcon-core/chemfiles"]
 # GMP and MPFR stay off the default build. `cargo test --features capi`
 # does not compile this feature.
 verify = ["dep:proptest", "dep:rug"]
-# Dense self-adjoint spectra in connect and SQNM. On by default.
+# Dense self-adjoint spectra in connect, SQNM, and exact_eigh above
+# dimension 128. On by default.
 # The Kani prove step passes `--no-default-features` so this stays off:
 # faer pulls pulp, and pulp's global assembly does not compile under Kani.
 # The kani-github-action default command is a bare `cargo-kani`, which
