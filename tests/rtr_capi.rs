@@ -38,7 +38,7 @@ fn rtr_selector_converges_and_reports_every_physical_row() {
             major: RGSADDLE_ABI_MAJOR,
             minor: RGSADDLE_ABI_MINOR,
         },
-        flags: 0,
+        flags: RGSADDLE_BAND_NO_MIN_MODE,
         tangent: 1,
         spring: 0,
         projection: 1,

@@ -27,7 +27,7 @@ use crate::spring::SpringKind;
 use crate::tangent::TangentKind;
 
 pub const RGSADDLE_ABI_MAJOR: u32 = 1;
-pub const RGSADDLE_ABI_MINOR: u32 = 20;
+pub const RGSADDLE_ABI_MINOR: u32 = 21;
 
 /// Band config bit 0. The C step calls the surface once per image
 /// carried by the evaluation: every image on the first evaluation
@@ -42,6 +42,9 @@ pub const RGSADDLE_BAND_KEEP_TRANSLATION: u64 = 2;
 /// be 0. Without the bit, climbing is on only when `ci_trigger_factor`
 /// is positive.
 pub const RGSADDLE_BAND_CI_AFTER: u64 = 4;
+/// Band config bit 3 (ABI minor 21). No min-mode refinement of the
+/// climbing image: the plain CI-NEB of minor 20 and earlier.
+pub const RGSADDLE_BAND_NO_MIN_MODE: u64 = 8;
 
 pub const RGSADDLE_OK: i32 = 0;
 pub const RGSADDLE_NULL_SESSION: i32 = -1;
@@ -228,6 +231,22 @@ impl BandSurface for CSurface {
             }
         }
         Ok(())
+    }
+
+    fn eval_image(
+        &self,
+        image: usize,
+        position: ndarray::ArrayView1<f64>,
+    ) -> Result<(f64, Array1<f64>), SaddleError> {
+        let flat: Vec<f64> = position.iter().copied().collect();
+        let mut e = [0.0];
+        let mut g = vec![0.0; flat.len()];
+        if self.per_image {
+            self.call(self.n_images, image as i64, &flat, &mut e, &mut g)?;
+        } else {
+            self.call(1, -1, &flat, &mut e, &mut g)?;
+        }
+        Ok((e[0], Array1::from(g)))
     }
 }
 
@@ -445,6 +464,8 @@ pub(super) unsafe fn parse_band_config(
             quickmin_options: rgmin::QuickMinOptions::rgmin(),
             time_step: 1.0,
             autoneb: None,
+            min_mode: (cfg.flags & RGSADDLE_BAND_NO_MIN_MODE == 0)
+                .then(crate::band::MinModeRefine::default),
         },
         per_image: cfg.flags & RGSADDLE_BAND_PER_IMAGE != 0,
         method: cfg.method,
@@ -540,7 +561,7 @@ pub unsafe extern "C" fn rgsaddle_band_step(
             out.max_force = report.max_force;
             out.ci_index = report.ci_index.map(|i| i as i64).unwrap_or(-1);
             out.iteration = report.iteration as i64;
-            out.curvature = 0.0;
+            out.curvature = report.curvature.unwrap_or(0.0);
             out.rotations = 0;
             RGSADDLE_OK
         }

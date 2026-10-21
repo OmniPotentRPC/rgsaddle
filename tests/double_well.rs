@@ -171,7 +171,11 @@ impl BandSurface for Counting {
 fn endpoints_are_evaluated_once_and_each_step_costs_one_interior_eval() {
     let n_images = 7;
     let interior = n_images - 2;
-    let mut session = BandSession::new(BandConfig::default(), initial_band(n_images)).unwrap();
+    let config = BandConfig {
+        min_mode: None,
+        ..BandConfig::default()
+    };
+    let mut session = BandSession::new(config, initial_band(n_images)).unwrap();
     let surface = Counting::new();
 
     // First step: exactly one whole-band evaluation (the endpoint
@@ -311,6 +315,7 @@ fn lbfgs_band_steps_once_per_evaluation_and_converges() {
         force_tol: 1e-3,
         max_move: 0.1,
         method: rgmin::Method::Lbfgs { memory: 10 },
+        min_mode: None,
         ..BandConfig::default()
     };
     let mut session = BandSession::new(config, initial_band(n_images)).unwrap();
