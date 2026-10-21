@@ -253,6 +253,7 @@ pub(crate) fn restricted_prfo_with_lowest(
 }
 
 mod sella;
+pub(crate) use sella::prfo_step_and_derivative;
 pub use sella::{
     PartitionedRationalFunctionOptimization, SYNONYMS, prfo_get_s, prfo_stepper, prfo_trust_region,
 };

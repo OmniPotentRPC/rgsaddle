@@ -21,9 +21,11 @@ The prove step is the only `cargo kani` invocation. It passes
 stays off, so `pulp` is not compiled. `pulp` contains global assembly,
 which Kani 0.68 rejects. Its only path into this crate is faer
 (`faer`, `faer-traits`, `gemm-common`, and `qd`; `cargo tree -i pulp`
-on a default build). Sella's dense spectrum is the Jacobi
-`exact_eigh`, not faer. The sella harnesses do not enable a feature
-or a dependency the other shards lack.
+on a default build). Sella's dense spectrum is cyclic Jacobi through
+dimension 128. A larger block uses faer inside `exact_eigh` when the
+feature is on, and panics if that call is reached with the feature
+off. The sella harnesses do not enable a feature or a dependency the
+other shards lack.
 
 `model-checking/kani-github-action` defaults to `cargo-kani` with no
 arguments. That command enables `faer` and compiles `pulp` before this

@@ -1,18 +1,17 @@
-//! Cartesian PES wrapper: position, gradient, Cartesian BFGS Hessian, kick.
+//! Cartesian PES wrapper: position, gradient, Cartesian Hessian, kick.
 //!
-//! Sella `peswrapper.PES` without internals. The Hessian lives in
-//! rgmin [`BfgsModel`] and is updated in Cartesian `(s, y)`, matching
-//! Sella `_update_H`. [`Self::with_proj`] hangs Sella `proj_trans` /
+//! Sella `peswrapper.PES` without internals. The Hessian is a dense
+//! Cartesian matrix updated in `(s, y)`, matching Sella `_update_H`.
+//! [`Self::with_proj`] hangs Sella `proj_trans` /
 //! `proj_rot` (`fix_translation` / `fix_rotation`) so
 //! [`Self::project`] / [`Self::retract`] / [`Self::transport`] stay
 //! on that set. [`Self::new`] is the unconstrained Hessian store
 //! [`crate::InternalPes`] wraps. IRC keeps a separate MW model on
 //! [`crate::irc::IrcSession`].
 
-use ndarray::{Array1, ArrayView1};
-use rgmin::BfgsModel;
+use ndarray::{Array1, Array2, ArrayView1};
 use rgmin::Manifold;
-use rgmin::vecops::axpy;
+use rgmin::vecops::{axpy, dot};
 
 use crate::constraints::Constraints;
 use crate::error::SaddleError;
@@ -20,11 +19,82 @@ use crate::minmode::PointSurface;
 
 pub use crate::qn::HessUpdate;
 
-/// Cartesian geometry plus a persistent MW Hessian.
+/// Dense Cartesian Hessian. Starts as the identity, like Sella's
+/// uninitialized model before the first secant.
+///
+/// Pair updates are the BFGS and TS-BFGS maps in rgmin. [`Self::install`]
+/// replaces the matrix after a multi-secant update the pair maps cannot
+/// express.
+#[derive(Clone, Debug)]
+pub struct CartesianHessian {
+    b: Array2<f64>,
+}
+
+impl CartesianHessian {
+    fn identity(n: usize) -> Self {
+        Self { b: Array2::eye(n) }
+    }
+
+    /// Stored Cartesian Hessian.
+    pub fn hessian(&self) -> &Array2<f64> {
+        &self.b
+    }
+
+    fn forget(&mut self) {
+        let n = self.b.nrows();
+        self.b = Array2::eye(n);
+    }
+
+    /// Rank-1 seed `B = I + (lambda - 1) u u^T` for a unit mode.
+    fn seed_mode(&mut self, u: &Array1<f64>, lam: f64) {
+        let n = self.b.nrows().min(u.len());
+        let mut nrm = 0.0;
+        for i in 0..n {
+            nrm += u[i] * u[i];
+        }
+        nrm = nrm.sqrt();
+        if nrm <= 1e-16 {
+            return;
+        }
+        let scale = (lam - 1.0) / (nrm * nrm);
+        for i in 0..n {
+            for j in 0..n {
+                self.b[(i, j)] += scale * u[i] * u[j];
+            }
+        }
+    }
+
+    fn update(&mut self, s: &Array1<f64>, y: &Array1<f64>) {
+        if dot(y.view(), s.view()) <= 1e-12 {
+            return;
+        }
+        rgmin::bfgs_hessian_update(&mut self.b, s, y);
+    }
+
+    fn update_ts(&mut self, s: &Array1<f64>, y: &Array1<f64>) {
+        rgmin::ts_bfgs_update(&mut self.b, s, y);
+    }
+
+    /// Replace the matrix. The shape must match the living frame.
+    pub fn install(&mut self, b: Array2<f64>) -> Result<(), SaddleError> {
+        if b.nrows() != self.b.nrows() || b.ncols() != self.b.ncols() {
+            return Err(SaddleError::Shape(
+                "installed Hessian must match the Cartesian frame".into(),
+            ));
+        }
+        if !b.iter().all(|v| v.is_finite()) {
+            return Err(SaddleError::NonFinite("installed Hessian"));
+        }
+        self.b = b;
+        Ok(())
+    }
+}
+
+/// Cartesian geometry plus a persistent Cartesian Hessian.
 pub struct CartesianPes {
     x: Array1<f64>,
     masses: Array1<f64>,
-    hess: BfgsModel,
+    hess: CartesianHessian,
     update: HessUpdate,
     /// Sella `PES.cons` when `proj_trans` / `proj_rot` hang
     /// translation / rotation equalities. Absent on [`Self::new`].
@@ -50,7 +120,7 @@ impl CartesianPes {
         Ok(Self {
             x,
             masses,
-            hess: BfgsModel::identity(n),
+            hess: CartesianHessian::identity(n),
             update: HessUpdate::Bfgs,
             cons: None,
             proj_trans: false,
@@ -146,6 +216,10 @@ impl CartesianPes {
         self.update = update;
     }
 
+    pub fn update_kind(&self) -> HessUpdate {
+        self.update
+    }
+
     pub fn position(&self) -> ArrayView1<'_, f64> {
         self.x.view()
     }
@@ -155,8 +229,13 @@ impl CartesianPes {
         self.masses.view()
     }
 
-    pub fn hessian(&self) -> &BfgsModel {
+    pub fn hessian(&self) -> &CartesianHessian {
         &self.hess
+    }
+
+    /// Replace the Cartesian Hessian after a multi-secant update.
+    pub fn install_hessian(&mut self, b: Array2<f64>) -> Result<(), SaddleError> {
+        self.hess.install(b)
     }
 
     /// Seed one Cartesian Hessian mode before a quasi-Newton session.
@@ -192,10 +271,9 @@ impl CartesianPes {
         Ok(())
     }
 
-    /// Sella `PES.kick`: displace, eval, store a Cartesian BFGS pair.
+    /// Sella `PES.kick`: displace, eval, store a Cartesian secant pair.
     ///
-    /// Sella `_update_H(dx, dg)` is Cartesian. IRC keeps its own MW
-    /// [`BfgsModel`] on [`crate::irc::IrcSession`].
+    /// Sella `_update_H(dx, dg)` is Cartesian. IRC keeps its own model.
     pub fn kick<S: PointSurface>(
         &mut self,
         surface: &S,
