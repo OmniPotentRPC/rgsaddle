@@ -19,6 +19,10 @@ use crate::spring::SpringKind;
 use crate::tangent::TangentKind;
 use crate::tangent::compute_tangent;
 
+mod climb;
+mod min_mode;
+pub use min_mode::MinModeRefine;
+
 /// Row-major 3x3 simulation cell: row `i` is lattice vector `a_i`.
 /// Band mechanics need nothing more from periodicity; neighbor lists
 /// (when a surface wants them) are vesin's job, not this crate's.
@@ -240,6 +244,11 @@ pub struct BandConfig {
     pub time_step: f64,
     /// `Some` selects AutoNEB on this configuration. `None` is a fixed band.
     pub autoneb: Option<crate::autoneb::AutoNebTuning>,
+    /// OCI-NEB min-mode refinement of the armed climbing image
+    /// (Goswami, Gunde, and Jónsson, Front. Chem. 14, 1807063 (2026)).
+    /// On by default; it needs `climbing` and runs on the atomic band
+    /// with the default stepper. `None` keeps the plain CI-NEB.
+    pub min_mode: Option<MinModeRefine>,
 }
 
 impl Default for BandConfig {
@@ -261,6 +270,7 @@ impl Default for BandConfig {
             quickmin_options: rgmin::QuickMinOptions::rgmin(),
             time_step: 1.0,
             autoneb: None,
+            min_mode: Some(MinModeRefine::default()),
         }
     }
 }
@@ -284,6 +294,9 @@ pub struct BandReport {
     /// [`BandSession::new`] or [`BandSession::reset`] adds the two
     /// endpoints.
     pub surface_rows: usize,
+    /// Curvature along the climbing image's lowest mode on a step of
+    /// the min-mode refinement; `None` on a band step.
+    pub curvature: Option<f64>,
 }
 
 /// The caller's surface: fused energies and gradients for a run of
@@ -327,6 +340,19 @@ pub trait BandSurface: Sync {
             "solid-state band requires BandSurface::eval_cells".into(),
         ))
     }
+
+    /// Energy and Cartesian gradient of band image `image` alone. The
+    /// min-mode refinement calls this for the climbing image; the
+    /// default is a one-row [`BandSurface::eval`], so a host that keys
+    /// per-image state on the row count overrides it.
+    fn eval_image(
+        &self,
+        image: usize,
+        position: ArrayView1<f64>,
+    ) -> Result<(f64, Array1<f64>), SaddleError> {
+        let _ = image;
+        min_mode::one_row(self, position)
+    }
 }
 
 /// Oriented cells and the Jacobian fixed at session build.
@@ -368,6 +394,8 @@ struct BandEval {
 struct BandState {
     force_gate: ForceGate,
     baseline: Mutex<Option<f64>>,
+    /// Largest per-atom force of the first assembly, the OCI-NEB `F_0`.
+    atom_baseline: Mutex<Option<f64>>,
     /// Climbing armed: from then on the climbing image is the highest
     /// interior image of every evaluation (eOn's rule).
     armed: AtomicBool,
@@ -396,6 +424,7 @@ impl BandState {
         Self {
             force_gate: ForceGate::LinfNorm,
             baseline: Mutex::new(None),
+            atom_baseline: Mutex::new(None),
             armed: AtomicBool::new(false),
             ci_index: AtomicI64::new(-1),
             surface_error: Mutex::new(None),
@@ -410,6 +439,9 @@ impl BandState {
             ForceGate::LinfNorm => max_abs(force),
             gate => gate.value(force.view()),
         }
+    }
+    fn atom_baseline(&self) -> Option<f64> {
+        *self.atom_baseline.lock().unwrap_or_else(|e| e.into_inner())
     }
     fn ci(&self) -> Option<usize> {
         let i = self.ci_index.load(Ordering::Relaxed);
@@ -434,6 +466,7 @@ impl BandState {
     /// relaxation; the surface caches stay.
     fn restart(&self) {
         *self.baseline.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self.atom_baseline.lock().unwrap_or_else(|e| e.into_inner()) = None;
         self.armed.store(false, Ordering::Relaxed);
         self.ci_index.store(-1, Ordering::Relaxed);
     }
@@ -1060,6 +1093,11 @@ fn assemble_band(
         let mut b = state.baseline.lock().unwrap_or_else(|e| e.into_inner());
         *b.get_or_insert(max_component)
     };
+    state
+        .atom_baseline
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_or_insert_with(|| min_mode::max_atom(projected.view()));
     if let Some(ci) = &config.climbing
         && !armed
         && (max_component < baseline * ci.trigger_factor || max_component < ci.trigger_force)
@@ -1228,6 +1266,7 @@ pub struct BandSession {
     iteration: usize,
     rtr: Option<crate::rtr::BandRtr>,
     solid: Option<SolidRun>,
+    refine: min_mode::RefineState,
 }
 
 impl BandSession {
@@ -1264,6 +1303,9 @@ impl BandSession {
             config.method.clone()
         };
         check_force_driven(&method)?;
+        if let Some(refine) = &config.min_mode {
+            refine.validate()?;
+        }
         if !(config.time_step.is_finite() && config.time_step > 0.0) {
             return Err(SaddleError::Invalid(
                 "band time step must be positive and finite".into(),
@@ -1281,6 +1323,7 @@ impl BandSession {
             iteration: 0,
             rtr: None,
             solid,
+            refine: min_mode::RefineState::default(),
         })
     }
 
@@ -1344,6 +1387,7 @@ impl BandSession {
         let interior_dof = (self.positions.nrows() - 2) * segment;
         self.solver = build_solver(&self.config, &method, interior_dof);
         self.state.restart();
+        self.refine = min_mode::RefineState::default();
         Ok(())
     }
 
@@ -1411,6 +1455,7 @@ impl BandSession {
         }
         if moved {
             self.state.drop_last();
+            self.refine = min_mode::RefineState::default();
         }
         Ok(())
     }
@@ -1442,6 +1487,7 @@ impl BandSession {
     pub(crate) fn set_climbing(&mut self, climbing: Option<CiConfig>) {
         self.config.climbing = climbing;
         self.state.restart();
+        self.refine = min_mode::RefineState::default();
         self.solver.forget_evaluation();
     }
 
@@ -1468,6 +1514,7 @@ impl BandSession {
     pub fn restart(&mut self) {
         self.solver.forget();
         self.state.restart();
+        self.refine = min_mode::RefineState::default();
         if let Some(rtr) = &mut self.rtr {
             *rtr = crate::rtr::BandRtr::new(rtr.config, false);
             rtr.set_force_gate(self.state.force_gate);
@@ -1554,6 +1601,11 @@ impl BandSession {
         if self.rtr.is_some() {
             return self.step_rtr(surface);
         }
+        if self.config.climbing.is_some()
+            && let Some(report) = self.refine_step(surface)?
+        {
+            return Ok(report);
+        }
         let n_images = self.positions.nrows();
         let dof = self.positions.ncols();
         let interior_dof = (n_images - 2) * dof;
@@ -1626,12 +1678,14 @@ impl BandSession {
         } else {
             BandStatus::Running
         };
+        self.refine_latch();
         Ok(BandReport {
             status,
             max_force,
             ci_index: self.state.ci(),
             iteration: self.iteration,
             surface_rows: self.state.rows.load(Ordering::Relaxed),
+            curvature: None,
         })
     }
 
@@ -1760,6 +1814,7 @@ impl BandSession {
             ci_index: self.state.ci(),
             iteration: self.iteration,
             surface_rows: self.state.rows.load(Ordering::Relaxed),
+            curvature: None,
         })
     }
 
@@ -1812,6 +1867,7 @@ impl BandSession {
             ci_index: self.state.ci(),
             iteration: self.iteration,
             surface_rows: self.state.rows.load(Ordering::Relaxed),
+            curvature: None,
         })
     }
 
