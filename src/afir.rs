@@ -89,8 +89,8 @@ fn centroid(positions: &[[f64; 3]], indices: &[usize]) -> [f64; 3] {
     let mut sum = [0.0; 3];
     let n = indices.len() as f64;
     for &index in indices {
-        for component in 0..3 {
-            sum[component] += positions[index][component] / n;
+        for (total, coordinate) in sum.iter_mut().zip(positions[index]) {
+            *total += coordinate / n;
         }
     }
     sum
