@@ -107,7 +107,11 @@ fn handed_off_image_converges_on_the_saddle_one_evaluation_per_step() {
 
     let pos = session.positions();
     for i in (0..n_images).filter(|&i| i != ci) {
-        assert_eq!(pos.row(i), frozen.row(i), "image {i} moved after the hand-off");
+        assert_eq!(
+            pos.row(i),
+            frozen.row(i),
+            "image {i} moved after the hand-off"
+        );
     }
     assert_eq!(pos.row(0), band.row(0));
     assert_eq!(pos.row(n_images - 1), band.row(n_images - 1));

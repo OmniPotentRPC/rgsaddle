@@ -192,7 +192,11 @@ impl Climber {
             ));
         }
         tau /= norm;
-        let trust = if max_move > 0.0 { max_move } else { f64::INFINITY };
+        let trust = if max_move > 0.0 {
+            max_move
+        } else {
+            f64::INFINITY
+        };
         Ok(Self {
             stage: Stage::Krylov {
                 first: true,
@@ -468,7 +472,10 @@ impl Climber {
             d[k] = -gk / (lam - up);
         }
         let rest: Vec<usize> = (0..n).filter(|&i| i != k).collect();
-        let down = rfo_lowest(&rest.iter().map(|&i| w[i]).collect::<Vec<_>>(), &rest.iter().map(|&i| gt[i]).collect::<Vec<_>>());
+        let down = rfo_lowest(
+            &rest.iter().map(|&i| w[i]).collect::<Vec<_>>(),
+            &rest.iter().map(|&i| gt[i]).collect::<Vec<_>>(),
+        );
         for &i in &rest {
             let den = w[i] - down;
             if den.abs() > 1e-14 {
@@ -492,7 +499,13 @@ fn rfo_lowest(w: &[f64], g: &[f64]) -> f64 {
     }
     let w_min = w.iter().copied().fold(f64::INFINITY, f64::min);
     let g_norm = g.iter().map(|v| v * v).sum::<f64>().sqrt();
-    let f = |l: f64| l + w.iter().zip(g).map(|(wi, gi)| gi * gi / (wi - l)).sum::<f64>();
+    let f = |l: f64| {
+        l + w
+            .iter()
+            .zip(g)
+            .map(|(wi, gi)| gi * gi / (wi - l))
+            .sum::<f64>()
+    };
     let mut lo = w_min.min(0.0) - g_norm - 1e-12 * (1.0 + w_min.abs());
     let mut hi = w_min;
     let gap = 1e-14 * (1.0 + w_min.abs());
@@ -806,7 +819,9 @@ mod tests {
         assert!(diff.dot(&diff).sqrt() < 1e-12);
     }
 
-    fn quadratic(h: &Array2<f64>) -> impl Fn(ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+    fn quadratic(
+        h: &Array2<f64>,
+    ) -> impl Fn(ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
         let h = h.clone();
         move |x| {
             let g = h.dot(&x);
@@ -831,8 +846,18 @@ mod tests {
         let x0 = Array1::from(vec![0.3, 0.1, -0.1, 0.05, 0.02, -0.04]);
         let (e0, g0) = f(x0.view()).unwrap();
         let tangent = Array1::from(vec![1.0, 0.2, 0.0, 0.0, 0.0, 0.0]);
-        let mut climber =
-            Climber::new(ClimbRefine::default(), 1, x0, e0, g0, tangent, None, false, 0.2).unwrap();
+        let mut climber = Climber::new(
+            ClimbRefine::default(),
+            1,
+            x0,
+            e0,
+            g0,
+            tangent,
+            None,
+            false,
+            0.2,
+        )
+        .unwrap();
         let mut moved = 0;
         while climber.gradient().dot(&climber.gradient()).sqrt() > 1e-8 {
             let outcome = climber.step(&f).unwrap();
@@ -840,7 +865,11 @@ mod tests {
             if outcome == ClimbOutcome::Moved {
                 moved += 1;
             }
-            assert!(moved < 50, "|g| {}", climber.gradient().dot(&climber.gradient()));
+            assert!(
+                moved < 50,
+                "|g| {}",
+                climber.gradient().dot(&climber.gradient())
+            );
         }
         assert!(climber.position().iter().all(|v| v.abs() < 1e-6));
         assert!(climber.curvature().unwrap() < 0.0);
@@ -853,9 +882,18 @@ mod tests {
         let x0 = Array1::from(vec![0.3, 0.1, -0.1, 0.05, 0.02, -0.04]);
         let (e0, g0) = f(x0.view()).unwrap();
         let tangent = Array1::from(vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
-        let mut climber =
-            Climber::new(ClimbRefine::default(), 1, x0.clone(), e0, g0, tangent, None, false, 0.2)
-                .unwrap();
+        let mut climber = Climber::new(
+            ClimbRefine::default(),
+            1,
+            x0.clone(),
+            e0,
+            g0,
+            tangent,
+            None,
+            false,
+            0.2,
+        )
+        .unwrap();
         let outcome = loop {
             match climber.step(&f).unwrap() {
                 ClimbOutcome::Probed => continue,
