@@ -592,7 +592,7 @@ struct LanczosStop {
 /// Lanczos lowest mode.
 ///
 /// Olsen, Kroes, Henkelman, Arnaldsson, and Jónsson, J. Chem. Phys.
-/// 121, 9776 (2004), doi:10.1063/1.1814098, as eOn implements it: stop
+/// 121, 9776 (2004), doi:10.1063/1.1809574, as eOn implements it: stop
 /// when the relative change in the lowest Ritz value falls under
 /// `rotation_tol`, or when the residual `beta |s|` does. A seed that
 /// is already the mode closes the Krylov on the first product.
@@ -642,7 +642,7 @@ fn lanczos_mode<S: PointSurface>(
         let (theta, s) = lowest_ritz(&alpha, &beta);
         let residual = b * s[j].abs();
         // Olsen, Kroes, Henkelman, Arnaldsson, and Jónsson, J. Chem.
-        // Phys. 121, 9776 (2004), doi:10.1063/1.1814098: stop on the
+        // Phys. 121, 9776 (2004), doi:10.1063/1.1809574: stop on the
         // relative change of the lowest Ritz value as well as on the
         // residual. A one-digit residual in `|theta|` accepts a high
         // mode on the first product, so it is not a stop here. A set
