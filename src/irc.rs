@@ -144,6 +144,7 @@ impl IrcSession {
             istep: 1.0,
             maxmove: Some(config.max_move),
             ftol_rel: None,
+            noise_floor: None,
         };
         let mut solver = Solver::new(config.method.clone(), control, n3);
         solver.set_highs(true);
@@ -190,6 +191,7 @@ impl IrcSession {
             istep: 1.0,
             maxmove: Some(config.max_move),
             ftol_rel: None,
+            noise_floor: None,
         };
         let mut solver = Solver::new(config.method.clone(), control, dimension);
         solver.set_highs(true);

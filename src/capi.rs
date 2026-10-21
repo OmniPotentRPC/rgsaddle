@@ -12,6 +12,7 @@ use ndarray::{Array1, Array2, ArrayView2};
 use rgmin::{FireKind, Method};
 
 use crate::band::{BandConfig, BandSession, BandStatus, BandSurface, Cell, CiConfig, SolidState};
+use crate::connect::{ConnectConfig, connect};
 use crate::error::SaddleError;
 use crate::minmode::{
     FiniteDifference, MinModeConfig, MinModeKind, MinModeSession, MinModeStatus, PointSurface,
@@ -26,7 +27,7 @@ use crate::spring::SpringKind;
 use crate::tangent::TangentKind;
 
 pub const RGSADDLE_ABI_MAJOR: u32 = 1;
-pub const RGSADDLE_ABI_MINOR: u32 = 17;
+pub const RGSADDLE_ABI_MINOR: u32 = 19;
 
 /// Band config bit 0. The C step calls the surface once per image
 /// carried by the evaluation: every image on the first evaluation
@@ -35,6 +36,12 @@ pub const RGSADDLE_BAND_PER_IMAGE: u64 = 1;
 /// Band config bit 1. The projected force keeps its mean Cartesian
 /// part; a host with fixed atoms sets it, as eOn does.
 pub const RGSADDLE_BAND_KEEP_TRANSLATION: u64 = 2;
+/// Band config bit 2 (ABI minor 17). Climbing is on with the arming
+/// rule as given: it arms once the force is under `ci_trigger_force` or
+/// under `ci_trigger_factor` times the first force, either of which may
+/// be 0. Without the bit, climbing is on only when `ci_trigger_factor`
+/// is positive.
+pub const RGSADDLE_BAND_CI_AFTER: u64 = 4;
 
 pub const RGSADDLE_OK: i32 = 0;
 pub const RGSADDLE_NULL_SESSION: i32 = -1;
@@ -49,6 +56,7 @@ pub const RGSADDLE_ABI_MISMATCH: i32 = -9;
 pub const RGSADDLE_ALLOC: i32 = -10;
 pub const RGSADDLE_INVALID_PARAMETER: i32 = -11;
 pub const RGSADDLE_NO_EVALUATION: i32 = -12;
+pub const RGSADDLE_STALLED: i32 = -13;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -136,12 +144,7 @@ struct CSurface {
     n_images: i64,
     per_image: bool,
     rows: std::sync::atomic::AtomicUsize,
-    stress: Option<RgsaddleStressFn>,
-    stress_user: *mut c_void,
 }
-
-pub type RgsaddleStressFn =
-    extern "C" fn(*mut c_void, i64, i64, i64, *const f64, *const f64, *mut f64) -> i32;
 
 // The C host is responsible for its own thread safety; the sessions
 // call the surface only from the thread that called step.
@@ -185,54 +188,6 @@ impl CSurface {
 }
 
 impl BandSurface for CSurface {
-    fn eval_cells(
-        &self,
-        positions: ArrayView2<f64>,
-        cells: &[Cell],
-        energies: &mut Array1<f64>,
-        gradients: &mut Array2<f64>,
-        stresses: &mut Array2<f64>,
-    ) -> Result<(), SaddleError> {
-        BandSurface::eval(self, positions, energies, gradients)?;
-        let Some(stress) = self.stress else {
-            return Err(SaddleError::Invalid(
-                "solid-state band requires a stress callback".into(),
-            ));
-        };
-        let n = positions.nrows();
-        if cells.len() != n {
-            return Err(SaddleError::Shape(
-                "solid-state stress call has a cell per image".into(),
-            ));
-        }
-        let pos: Vec<f64> = positions.iter().copied().collect();
-        let mut cell_flat = Vec::with_capacity(n * 9);
-        for cell in cells {
-            for row in cell.0 {
-                cell_flat.extend(row);
-            }
-        }
-        let mut out = vec![0.0; n * 9];
-        let rc = stress(
-            self.stress_user,
-            n as i64,
-            self.n_atoms,
-            -1,
-            pos.as_ptr(),
-            cell_flat.as_ptr(),
-            out.as_mut_ptr(),
-        );
-        if rc != 0 {
-            return Err(SaddleError::Surface(format!("stress callback rc={rc}")));
-        }
-        for row in 0..n {
-            for col in 0..9 {
-                stresses[(row, col)] = out[row * 9 + col];
-            }
-        }
-        Ok(())
-    }
-
     fn eval(
         &self,
         positions: ArrayView2<f64>,
@@ -290,8 +245,6 @@ pub struct RgsaddleBand {
     n_images: i64,
     n_atoms: i64,
     per_image: bool,
-    stress: Option<RgsaddleStressFn>,
-    stress_user: *mut c_void,
 }
 
 pub struct RgsaddleMinMode {
@@ -323,6 +276,7 @@ fn status_of(err: &SaddleError) -> i32 {
         SaddleError::NonFinite(_) => RGSADDLE_NON_FINITE,
         SaddleError::Solver(_) => RGSADDLE_SOLVER,
         SaddleError::Invalid(_) => RGSADDLE_INVALID_PARAMETER,
+        SaddleError::Stalled(_) => RGSADDLE_STALLED,
     }
 }
 
@@ -361,6 +315,7 @@ pub extern "C" fn rgsaddle_status_name(status: i32) -> *const c_char {
         RGSADDLE_ALLOC => "ALLOC\0",
         RGSADDLE_INVALID_PARAMETER => "INVALID_PARAMETER\0",
         RGSADDLE_NO_EVALUATION => "NO_EVALUATION\0",
+        RGSADDLE_STALLED => "STALLED\0",
         _ => "UNKNOWN\0",
     };
     s.as_ptr() as *const c_char
@@ -477,10 +432,11 @@ unsafe fn band_from_parts(
             2 => ProjectionKind::DoublyNudged,
             _ => ProjectionKind::Neb,
         },
-        climbing: (cfg.ci_trigger_factor > 0.0).then_some(CiConfig {
-            trigger_factor: cfg.ci_trigger_factor,
-            trigger_force: cfg.ci_trigger_force,
-        }),
+        climbing: (cfg.ci_trigger_factor > 0.0 || cfg.flags & RGSADDLE_BAND_CI_AFTER != 0)
+            .then_some(CiConfig {
+                trigger_factor: cfg.ci_trigger_factor,
+                trigger_force: cfg.ci_trigger_force,
+            }),
         cell,
         force_tol: cfg.force_tol,
         max_move: cfg.max_move,
@@ -488,6 +444,9 @@ unsafe fn band_from_parts(
         method: method_of(cfg.method, cfg.memory),
         solid,
         quickmin: cfg.method == 3,
+        quickmin_options: rgmin::QuickMinOptions::rgmin(),
+        time_step: 1.0,
+        autoneb: None,
     };
     match BandSession::new(band_config, initial) {
         Ok(mut session) => {
@@ -506,29 +465,10 @@ unsafe fn band_from_parts(
                 n_images,
                 n_atoms,
                 per_image: cfg.flags & RGSADDLE_BAND_PER_IMAGE != 0,
-                stress: None,
-                stress_user: std::ptr::null_mut(),
             }))
         }
         Err(_) => std::ptr::null_mut(),
     }
-}
-
-/// # Safety
-/// `band` comes from a create call. `stress` may be null to clear it.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rgsaddle_band_set_stress(
-    band: *mut RgsaddleBand,
-    stress: Option<RgsaddleStressFn>,
-    user: *mut c_void,
-) -> i32 {
-    if band.is_null() {
-        return RGSADDLE_NULL_BAND;
-    }
-    let band = unsafe { &mut *band };
-    band.stress = stress;
-    band.stress_user = user;
-    RGSADDLE_OK
 }
 
 /// # Safety
@@ -557,8 +497,6 @@ pub unsafe extern "C" fn rgsaddle_band_step(
         n_images: band.n_images,
         per_image: band.per_image,
         rows: Default::default(),
-        stress: band.stress,
-        stress_user: band.stress_user,
     };
     match band.session.step(&cs) {
         Ok(report) => {
@@ -795,8 +733,6 @@ pub unsafe extern "C" fn rgsaddle_minmode_step(
         n_images: 1,
         per_image: false,
         rows: Default::default(),
-        stress: None,
-        stress_user: std::ptr::null_mut(),
     };
     match session.session.step(&cs) {
         Ok(report) => {
@@ -845,8 +781,6 @@ pub unsafe extern "C" fn rgsaddle_minmode_estimate(
         n_images: 1,
         per_image: false,
         rows: Default::default(),
-        stress: None,
-        stress_user: std::ptr::null_mut(),
     };
     match session.session.estimate_mode(&cs) {
         Ok(est) => {
@@ -1274,6 +1208,7 @@ pub unsafe extern "C" fn rgsaddle_index1_create(
         trust_radius: cfg.trust_radius,
         force_tol: cfg.force_tol,
         fd_dr: cfg.fd_dr,
+        sparse_pattern: None,
     };
     match Index1Session::new(session_config, x, hess, mass) {
         Ok(session) => Box::into_raw(Box::new(RgsaddleIndex1 { session, n_atoms })),
@@ -1307,8 +1242,6 @@ pub unsafe extern "C" fn rgsaddle_index1_step(
         n_images: 1,
         per_image: false,
         rows: Default::default(),
-        stress: None,
-        stress_user: std::ptr::null_mut(),
     };
     match session.session.step(&cs) {
         Ok(report) => {
@@ -1399,6 +1332,119 @@ pub unsafe extern "C" fn rgsaddle_index1_free(session: *mut RgsaddleIndex1) {
     }
 }
 
+#[repr(C)]
+pub struct RgsaddleConnectConfig {
+    pub version: RgsaddleVersion,
+    pub flags: u64,
+    pub force_tol: f64,
+    pub max_calls: i64,
+    pub quench_nodes: i32,
+}
+
+#[repr(C)]
+pub struct RgsaddleConnectReport {
+    pub version: RgsaddleVersion,
+    pub flags: u64,
+    pub energy: f64,
+    pub force_norm: f64,
+    pub kind: i32,
+    pub hessian_index: i32,
+    pub evaluations: i32,
+}
+
+/// # Safety
+/// `left` and `right` each hold `3 * n_atoms` positions. `position`
+/// has room for the same number. `surface` is called with one image
+/// and must write the energy and the Cartesian gradient.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_connect(
+    config: *const RgsaddleConnectConfig,
+    n_atoms: i64,
+    left: *const f64,
+    right: *const f64,
+    surface: Option<RgsaddleSurfaceFn>,
+    user: *mut c_void,
+    position: *mut f64,
+    report: *mut RgsaddleConnectReport,
+) -> i32 {
+    if config.is_null() || report.is_null() {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    if left.is_null() || right.is_null() || position.is_null() {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let Some(surface) = surface else {
+        return RGSADDLE_NULL_SURFACE;
+    };
+    if n_atoms <= 0 {
+        return RGSADDLE_SHAPE;
+    }
+    let cfg = unsafe { &*config };
+    if cfg.version.major != RGSADDLE_ABI_MAJOR {
+        return RGSADDLE_ABI_MISMATCH;
+    }
+    if cfg.max_calls <= 0 || !(cfg.force_tol.is_finite() && cfg.force_tol > 0.0) {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let dof = (n_atoms as usize).saturating_mul(3);
+    let left = unsafe { slice::from_raw_parts(left, dof) };
+    let right = unsafe { slice::from_raw_parts(right, dof) };
+    let mut settings = ConnectConfig::optbench(cfg.max_calls as usize);
+    settings.forcetol = cfg.force_tol;
+    settings.quench_nodes = cfg.quench_nodes != 0;
+    let result = connect(
+        |x| {
+            let mut energy = 0.0;
+            let mut gradient = vec![0.0; x.len()];
+            let mut request = RgsaddleSurfaceRequest {
+                version: RgsaddleVersion {
+                    major: RGSADDLE_ABI_MAJOR,
+                    minor: RGSADDLE_ABI_MINOR,
+                },
+                flags: 0,
+                n_images: 1,
+                n_atoms,
+                positions: x.as_ptr(),
+                energies: &mut energy,
+                gradients: gradient.as_mut_ptr(),
+                image: 0,
+            };
+            let status = surface(user, &mut request);
+            if status != RGSADDLE_OK {
+                return Err(SaddleError::Surface(format!(
+                    "connect surface status {status}"
+                )));
+            }
+            Ok((energy, gradient))
+        },
+        left,
+        right,
+        &settings,
+    );
+    match result {
+        Ok(found) => {
+            let dst = unsafe { slice::from_raw_parts_mut(position, dof) };
+            dst.copy_from_slice(&found.position);
+            unsafe {
+                *report = RgsaddleConnectReport {
+                    version: RgsaddleVersion {
+                        major: RGSADDLE_ABI_MAJOR,
+                        minor: RGSADDLE_ABI_MINOR,
+                    },
+                    flags: 0,
+                    energy: found.energy,
+                    force_norm: found.force_norm,
+                    kind: found.kind as i32,
+                    hessian_index: found.hessian_index,
+                    evaluations: i32::try_from(found.evaluations).unwrap_or(i32::MAX),
+                };
+            }
+            RGSADDLE_OK
+        }
+        Err(err) => status_of(&err),
+    }
+}
+
 /// # Safety
 /// `reactant` and `product` each hold `3 * n_atoms` doubles. `out`
 /// holds `n_images * 3 * n_atoms` doubles. `cell` is 9 row-major
@@ -1431,12 +1477,12 @@ pub unsafe extern "C" fn rgsaddle_idpp_path(
         None
     } else {
         let raw = unsafe { slice::from_raw_parts(cell, 9) };
-        let rows = [
+        match crate::mic::Cell::from_vectors(
             [raw[0], raw[1], raw[2]],
             [raw[3], raw[4], raw[5]],
             [raw[6], raw[7], raw[8]],
-        ];
-        match crate::mic::Cell::from_ase(rows) {
+            [0.0, 0.0, 0.0],
+        ) {
             Ok(cell) => Some(cell),
             Err(_) => return RGSADDLE_INVALID_PARAMETER,
         }
@@ -1474,3 +1520,9 @@ pub unsafe extern "C" fn rgsaddle_idpp_path(
 
 mod sessions;
 pub use sessions::*;
+mod quickmin;
+pub use quickmin::*;
+mod solid;
+pub use solid::*;
+mod stencil;
+pub use stencil::*;

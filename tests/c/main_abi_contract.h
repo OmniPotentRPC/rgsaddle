@@ -5,7 +5,7 @@
 #include <stddef.h>
 
 _Static_assert(RGSADDLE_ABI_MAJOR == 1u, "main ABI major");
-_Static_assert(RGSADDLE_ABI_MINOR == 17u, "ABI minor");
+_Static_assert(RGSADDLE_ABI_MINOR == 19u, "ABI minor");
 
 typedef struct {
   uint32_t major;
@@ -287,10 +287,16 @@ _Static_assert(_Generic(&rgsaddle_index1_reset, abi15_signature_rgsaddle_index1_
 typedef void (*abi15_signature_rgsaddle_index1_free)(RgsaddleIndex1 *session);
 _Static_assert(_Generic(&rgsaddle_index1_free, abi15_signature_rgsaddle_index1_free: 1, default: 0), "rgsaddle_index1_free signature");
 
-typedef rgsaddle_status_t (*abi15_signature_rgsaddle_idpp_path)(int64_t n_images, int64_t n_atoms,
+typedef rgsaddle_status_t (*abi18_signature_rgsaddle_connect)(
+    const rgsaddle_connect_config_t *config, int64_t n_atoms, const double *left,
+    const double *right, rgsaddle_surface_fn surface, void *user, double *position,
+    rgsaddle_connect_report_t *report);
+_Static_assert(_Generic(&rgsaddle_connect, abi18_signature_rgsaddle_connect: 1, default: 0), "rgsaddle_connect signature");
+
+typedef rgsaddle_status_t (*abi19_signature_rgsaddle_idpp_path)(int64_t n_images, int64_t n_atoms,
                                      const double *reactant, const double *product,
                                      const double *cell, int64_t max_iterations,
                                      double grad_tol, double max_move, double *out);
-_Static_assert(_Generic(&rgsaddle_idpp_path, abi15_signature_rgsaddle_idpp_path: 1, default: 0), "rgsaddle_idpp_path signature");
+_Static_assert(_Generic(&rgsaddle_idpp_path, abi19_signature_rgsaddle_idpp_path: 1, default: 0), "rgsaddle_idpp_path signature");
 
 #endif

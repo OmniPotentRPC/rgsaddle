@@ -518,6 +518,8 @@ mod tests {
     }
 
     #[test]
+    // The compile-time check is the contract: NEWTON_SAFE must stay true.
+    #[allow(clippy::assertions_on_constants)]
     fn contract_bounds_match_sella() {
         assert_eq!(ALPHA0, 0.0);
         assert_eq!(ALPHA_MIN, 0.0);
@@ -748,6 +750,8 @@ mod retained_column_tests {
     }
 
     #[test]
+    // The compile-time check is the contract: NEWTON_SAFE must stay true.
+    #[allow(clippy::assertions_on_constants)]
     fn contract_bounds_match_sella() {
         assert_eq!(ALPHA0, 0.0);
         assert_eq!(ALPHA_MIN, 0.0);

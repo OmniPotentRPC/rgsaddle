@@ -3,7 +3,12 @@
 //! The band and the minimum-mode search take one [`rgmin::Solver`]
 //! step on a force this crate assembled. The host owns the loop.
 //! [`band::BandSession::run`] and [`minmode::MinModeSession::run`]
-//! are convenience loops over `step`.
+//! are convenience loops over `step`. [`autoneb::AutoNeb`] inserts
+//! images where the energy gap or the segment length is worst,
+//! relaxes that window, and climbs. The full band runs only when
+//! requested.
+//! Image blocks are stored by image index after every rank finishes,
+//! so the band does not depend on which block finished first.
 //!
 //! [`nichols::Index1Session`] is the index-1 search on a dense
 //! Hessian: Baker's restricted-step partitioned RFO (maximize the
@@ -21,10 +26,17 @@
 //!
 //! Positions are unwrapped Cartesian; a periodic host applies its
 //! minimum-image convention before handing differences in.
+//!
+//! [`sparse_hessian::sparse_hessian`] recovers a cutoff Hessian by a
+//! direct Curtis-Powell-Reid partition: a smallest-last distance-2
+//! colouring and one batched gradient difference per colour and
+//! Cartesian axis.
 
+pub mod autoneb;
 pub mod band;
 #[cfg(feature = "capi")]
 pub mod capi;
+pub mod connect;
 pub mod error;
 pub mod idpp;
 pub mod minmode;
@@ -33,12 +45,16 @@ pub mod prfo;
 pub mod projection;
 pub mod solid_state;
 pub mod spring;
+pub mod stencil;
 pub mod tangent;
 
+mod sqnm;
+pub use autoneb::{AutoNeb, AutoNebReport, AutoNebTuning};
 pub use band::{
     BandConfig, BandEvaluation, BandReport, BandSession, BandStatus, BandSurface, Cell, CiConfig,
     SolidState,
 };
+pub use connect::{ConnectConfig, ConnectProfile, ConnectReport, connect};
 pub use error::SaddleError;
 pub use idpp::{IdppConfig, idpp_path, linear_path};
 pub use minmode::{
@@ -52,6 +68,10 @@ pub use nichols::{
 pub use prfo::{PrfoKind, partitioned_rfo_eigen, restricted_prfo_displacement};
 pub use projection::ProjectionKind;
 pub use spring::SpringKind;
+pub use stencil::{
+    BAND_PRESET_SEAM, BandBuilder, Chain, Climb, EvalPool, Mesh, MeshEvent, PointBuilder, Preset,
+    Role, Stencil, StencilReport, StencilStatus,
+};
 pub use tangent::TangentKind;
 
 pub mod cell_log;
@@ -91,6 +111,12 @@ pub use force_match::{covalent_pairs, force_match_hessian};
 pub use geom::{SellaGeom, TrustSchedule};
 
 pub use internal::{CartAxis, Displacement, InternalSlot, Rotation, Translation};
+
+pub mod sparse_hessian;
+pub use sparse_hessian::{
+    Colouring, LowestEigenpairs, SparseHessian, SparseHessianOpts, SparsityPattern,
+    distance2_colouring, eval_displacements, one_atom_hessian, prefactor_hessian, sparse_hessian,
+};
 
 pub use linalg::{
     NumericalHessian, modified_gram_schmidt, numerical_hvp, numerical_hvp_on, numerical_hvp_proj,
@@ -148,10 +174,13 @@ pub use rtr::{
 
 #[cfg(feature = "readcon")]
 pub mod io;
-#[cfg(feature = "python")]
-mod python;
+#[cfg(feature = "readcon-db")]
+pub use io::store_band;
 #[cfg(feature = "readcon")]
-pub use io::{MolecularFrame, frame_from_con};
+pub use io::{
+    ConImage, ConSpecies, MolecularFrame, frame_from_con, frame_from_con_nth, frames_from_con,
+    write_band, write_restart,
+};
 
 pub mod gpu;
 pub use gpu::{

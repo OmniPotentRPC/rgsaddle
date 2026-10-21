@@ -17,32 +17,11 @@ pub enum TangentKind {
     Improved,
 }
 
-/// Normalize with the eOn fallback: a near-zero tangent falls back to
-/// the forward difference, then to the backward one. Every projection
-/// needs a unit tangent, so an image that coincides with both
-/// neighbours (all three vectors under `1e-10`) is an error, not an
-/// unnormalized vector.
-fn normalize_tangent(
-    tang: Array1<f64>,
-    pos_diff_next: ArrayView1<f64>,
-    pos_diff_prev: ArrayView1<f64>,
-) -> Result<Array1<f64>, SaddleError> {
-    for mut v in [tang, pos_diff_next.to_owned(), pos_diff_prev.to_owned()] {
-        let norm = v.dot(&v).sqrt();
-        if norm > 1e-10 && norm.is_finite() {
-            v /= norm;
-            return Ok(v);
-        }
-    }
-    Err(SaddleError::Invalid(
-        "band image coincides with both neighbours; no tangent".into(),
-    ))
-}
-
 /// Unit tangent at one interior image. `pos_diff_next` is
 /// `R[i+1] - R[i]`, `pos_diff_prev` is `R[i] - R[i-1]` (the host
 /// minimum-images both when periodic). The result has unit norm; an
 /// image on top of both neighbours returns [`SaddleError::Invalid`].
+/// The arithmetic lives on [`crate::stencil::unit_tangent`].
 pub fn compute_tangent(
     kind: TangentKind,
     pos_diff_next: ArrayView1<f64>,
@@ -51,28 +30,18 @@ pub fn compute_tangent(
     energy_prev: f64,
     energy_next: f64,
 ) -> Result<Array1<f64>, SaddleError> {
-    let tang = match kind {
-        TangentKind::Simple => pos_diff_next.to_owned(),
-        TangentKind::Improved => {
-            if energy_next > energy && energy > energy_prev {
-                pos_diff_next.to_owned()
-            } else if energy > energy_next && energy_prev > energy {
-                pos_diff_prev.to_owned()
-            } else {
-                // Extremum: energy-weighted combination.
-                let energy_diff_prev = energy_prev - energy;
-                let energy_diff_next = energy_next - energy;
-                let min_diff = energy_diff_prev.abs().min(energy_diff_next.abs());
-                let max_diff = energy_diff_prev.abs().max(energy_diff_next.abs());
-                if energy_diff_prev > energy_diff_next {
-                    &pos_diff_next * min_diff + &pos_diff_prev * max_diff
-                } else {
-                    &pos_diff_next * max_diff + &pos_diff_prev * min_diff
-                }
-            }
-        }
+    let rule = match kind {
+        TangentKind::Simple => crate::stencil::TangentRule::Simple,
+        TangentKind::Improved => crate::stencil::TangentRule::Improved,
     };
-    normalize_tangent(tang, pos_diff_next, pos_diff_prev)
+    crate::stencil::unit_tangent(
+        rule,
+        pos_diff_next,
+        pos_diff_prev,
+        energy,
+        energy_prev,
+        energy_next,
+    )
 }
 
 #[cfg(test)]

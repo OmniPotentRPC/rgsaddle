@@ -25,6 +25,13 @@ improved), springs (uniform, energy-weighted, Onsager-Machlup),
 projections (plain elastic band, NEB, doubly nudged), and the
 climbing-image force with the eOn trigger rule.
 
+`AutoNeb` grows a short band. It inserts an image where the energy
+gap or the segment length is worst, relaxes a local window, and
+climbs. Image evaluation keeps one thread pool; each block is stored
+at its image index after every block has finished. The tuning sits on
+`BandConfig::autoneb`. A weighted spring supplied by the host
+is refused until zoom-NEB recomputes it.
+
 Positions are unwrapped Cartesian. A `Cell` (rows are lattice
 vectors, triclinic allowed) supplies minimum-image differences for the
 band mechanics; neighbor lists, when a surface wants them, are
@@ -55,3 +62,24 @@ checks of the rotation formulas, the Lanczos residual bound, and the
 finite-difference curvature error terms
 (`uv run --with sympy python validation/<script>.py`,
 `sollya validation/fd_curvature.sollya`).
+`validation/bain_lj_reference.py` scans the relaxed Bain path (bcc to
+fcc) of a switched Lennard-Jones crystal, the reference for
+`tests/c/solid_bain_lj.c`, which runs the solid-state band on it
+through `rgsaddle_band_create_solid`.
+
+## Python
+
+The package is a nanobind extension. `import rgsaddle` does not import
+ASE.
+
+```
+pip install .
+pip install 'rgsaddle[ase]'
+```
+
+`ForceGate`, `HessUpdate`, `IrcKind`, `MinModeKind`, `EigenDevice`,
+`ExpandKind`, `CellChart` and `RestrictedKind` are `IntEnum` controls
+with the same names and values as before. `NumericalError`,
+`last_error` and `raise_status` map `rgsaddle_status_t`.
+`rgsaddle.ase.SurfaceAdapter` evaluates a list of ASE `Atoms` as
+request rows `(ids, x)`.

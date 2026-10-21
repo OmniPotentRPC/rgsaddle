@@ -1,27 +1,89 @@
 [build-system]
-requires = ["maturin>=1.5,<2.0"]
-build-backend = "maturin"
+requires = ["scikit-build-core>=1.1", "nanobind>=3.1"]
+build-backend = "scikit_build_core.build"
 
 [project]
 name = "rgsaddle"
 version = "0.2.2"
-description = "Typed controls for band, IRC, and Sella sessions."
+description = "ASE image surface and the rgsaddle status map."
+readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.10"
 license = "MIT"
-readme = "README.md"
+authors = [{ name = "Rohit Goswami", email = "rgoswami@ieee.org" }]
 keywords = ["neb", "saddle", "transition-state", "optimization"]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: Science/Research",
   "Topic :: Scientific/Engineering :: Chemistry",
-  "Programming Language :: Rust",
   "Programming Language :: Python :: Implementation :: CPython",
+  "Programming Language :: Python :: Free Threading :: 3 - Stable",
+]
+dependencies = ["numpy>=1.24"]
+
+[project.optional-dependencies]
+ase = ["ase>=3.23"]
+test = [
+  "pytest>=7",
+  "pytest-timeout>=2",
+  "pytest-run-parallel>=0.4",
+  "hypothesis>=6",
+  "numpy>=1.24",
+  "ase>=3.23",
 ]
 
 [project.urls]
 Homepage = "https://github.com/OmniPotentRPC/rgsaddle"
 Repository = "https://github.com/OmniPotentRPC/rgsaddle"
 
-[tool.maturin]
-features = ["python", "pyo3/extension-module"]
-module-name = "rgsaddle"
+[tool.scikit-build]
+minimum-version = "0.10"
+cmake.version = ">=3.15"
+# GIL builds: cp312-abi3 covers CPython 3.12 through 3.15.
+# Free-threaded interpreters ignore that tag and emit cp314t or cp315t.
+wheel.py-api = "cp312"
+wheel.packages = ["python/rgsaddle"]
+
+[tool.cibuildwheel]
+build = "cp310-* cp311-* cp312-* cp314t-* cp315t-*"
+skip = ["pp*", "*-musllinux*", "*_i686", "*-win32"]
+manylinux-x86_64-image = "manylinux_2_28"
+manylinux-aarch64-image = "manylinux_2_28"
+test-requires = ["pytest", "pytest-timeout", "numpy", "hypothesis", "ase>=3.23"]
+test-command = "python -m pytest -q tests/python --timeout=180 -o faulthandler_timeout=120"
+test-sources = ["tests/python"]
+
+[tool.cibuildwheel.linux]
+before-all = """
+yum install -y git || dnf install -y git
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+ln -sfn "$HOME/.cargo/bin/cargo" /usr/local/bin/cargo
+ln -sfn "$HOME/.cargo/bin/rustc" /usr/local/bin/rustc
+ln -sfn "$HOME/.cargo/bin/rustup" /usr/local/bin/rustup
+"""
+environment = { PATH = "/root/.cargo/bin:$PATH" }
+
+[tool.cibuildwheel.macos]
+archs = ["arm64"]
+environment = { MACOSX_DEPLOYMENT_TARGET = "14.0", PATH = "$HOME/.cargo/bin:$PATH" }
+before-all = "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal"
+
+[tool.cibuildwheel.windows]
+before-all = "curl -sSf -o %TEMP%\\rustup-init.exe https://win.rustup.rs/x86_64 && %TEMP%\\rustup-init.exe -y --default-toolchain stable --profile minimal"
+environment = { PATH = "$USERPROFILE\\.cargo\\bin;$PATH" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests/python"]
+timeout = 120
+faulthandler_timeout = 60
+
+[tool.mypy]
+mypy_path = "python"
+strict = true
+python_version = "3.10"
+
+[tool.pyright]
+include = ["python/rgsaddle", "examples"]
+extraPaths = ["python"]
+typeCheckingMode = "standard"
+pythonVersion = "3.10"
+reportMissingModuleSource = "none"

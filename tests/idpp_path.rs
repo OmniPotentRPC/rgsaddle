@@ -81,7 +81,13 @@ fn linear_interpolation_overlaps_and_idpp_separates() {
 
 #[test]
 fn triclinic_path_uses_the_minimum_image_and_matches_eon() {
-    let cell = Cell::from_ase([[6.0, 0.0, 0.0], [1.2, 5.0, 0.0], [0.3, 0.4, 7.0]]).unwrap();
+    let cell = Cell::from_vectors(
+        [6.0, 0.0, 0.0],
+        [1.2, 5.0, 0.0],
+        [0.3, 0.4, 7.0],
+        [0.0, 0.0, 0.0],
+    )
+    .unwrap();
     let reactant = array![0.4, 0.5, 0.5, 5.5, 0.8, 0.6, 3.0, 2.5, 3.5];
     let product = array![5.6, 0.7, 0.8, 0.5, 0.6, 0.4, 3.0, 2.5, 3.5];
     let linear = linear_path(reactant.view(), product.view(), 4, Some(&cell)).unwrap();
@@ -370,4 +376,59 @@ fn c_abi_idpp_path_copies_the_endpoints() {
         )
     };
     assert_eq!(bad, RGSADDLE_SHAPE);
+    let singular = [0.0; 9];
+    let rejected = unsafe {
+        rgsaddle_idpp_path(
+            3,
+            2,
+            reactant.as_ptr(),
+            product.as_ptr(),
+            singular.as_ptr(),
+            10,
+            1e-3,
+            0.1,
+            out.as_mut_ptr(),
+        )
+    };
+    assert_eq!(rejected, rgsaddle::capi::RGSADDLE_INVALID_PARAMETER);
+}
+
+#[test]
+fn rejects_a_short_path_and_a_bad_stop() {
+    let reactant = array![0.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+    let product = array![0.0, 1.0, 0.0, 1.0, 1.0, 0.0];
+    let short = linear_path(reactant.view(), product.view(), 2, None).unwrap_err();
+    assert!(matches!(short, SaddleError::Shape(_)), "{short}");
+    let empty = idpp_path(
+        reactant.view(),
+        product.view(),
+        3,
+        None,
+        &IdppConfig {
+            max_iterations: 0,
+            ..IdppConfig::default()
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(empty, SaddleError::Invalid(_)), "{empty}");
+    let tol = idpp_path(
+        reactant.view(),
+        product.view(),
+        3,
+        None,
+        &IdppConfig {
+            grad_tol: f64::NAN,
+            ..IdppConfig::default()
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(tol, SaddleError::Invalid(_)), "{tol}");
+    let mut bad = reactant.clone();
+    bad[0] = f64::INFINITY;
+    let non_finite =
+        idpp_path(bad.view(), product.view(), 3, None, &IdppConfig::default()).unwrap_err();
+    assert!(
+        matches!(non_finite, SaddleError::NonFinite(_)),
+        "{non_finite}"
+    );
 }

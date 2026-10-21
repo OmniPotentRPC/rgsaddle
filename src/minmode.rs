@@ -293,7 +293,7 @@ impl<S: PointSurface> Counted<'_, S> {
 
 /// Component of `h` perpendicular to the unit vector `n`.
 fn perpendicular(h: &Array1<f64>, n: &Array1<f64>) -> Array1<f64> {
-    h - &(n * h.dot(n))
+    crate::stencil::perp(h.view(), n.view())
 }
 
 /// Dimer rotation by the modified Newton step.
@@ -313,6 +313,17 @@ fn perpendicular(h: &Array1<f64>, n: &Array1<f64>) -> Array1<f64> {
 /// the next iteration starts without a gradient call. Rotation
 /// directions are Polak-Ribiere conjugate on the rotational force,
 /// with the previous direction carried along the rotation.
+/// Floor of the dimer's trial angle, radians. The Kastner-Sherwood
+/// guess `phi1 = atan(|b1| / |C|) / 2` falls under it once the
+/// rotational force is under `2e-4 |C|`.
+const MIN_TRIAL_ANGLE: f64 = 1e-4;
+
+/// Largest weight `|sin(phi1 - phi)| / sin(phi1)` or
+/// `|sin(phi)| / sin(phi1)` with which `rotate_dimer` extrapolates the
+/// measured actions from a trial angle on its floor. Past it the rotated
+/// dimer is measured (`validation/dimer_extrapolation.py`).
+const MAX_EXTRAPOLATION: f64 = 8.0;
+
 fn rotate_dimer<S: PointSurface>(
     surface: &Counted<'_, S>,
     x: ArrayView1<f64>,
@@ -322,7 +333,7 @@ fn rotate_dimer<S: PointSurface>(
 ) -> Result<(Array1<f64>, f64, usize), SaddleError> {
     let mut n = normalize(mode);
     let mut h = surface.action(x, g0, n.view(), config)?;
-    let mut curvature = h.dot(&n);
+    let mut curvature = crate::stencil::curvature_along(h.view(), n.view());
     let mut rotations = 0;
     // Rotational force (descent direction of the curvature on the
     // sphere) and the conjugate direction of the previous iteration.
@@ -351,10 +362,11 @@ fn rotate_dimer<S: PointSurface>(
         // direction). The trial angle is the Kastner-Sherwood guess
         // from a harmonic model, kept inside (1e-4, pi/4].
         let b1 = h.dot(&theta);
-        let phi1 = (0.5 * (b1.abs() / (curvature.abs() + 1e-300)).atan()).clamp(1e-4, 0.25 * PI);
+        let phi1 = (0.5 * (b1.abs() / (curvature.abs() + 1e-300)).atan())
+            .clamp(MIN_TRIAL_ANGLE, 0.25 * PI);
         let n1 = normalize(&(&n * phi1.cos()) + &(&theta * phi1.sin()));
         let h1 = surface.action(x, g0, n1.view(), config)?;
-        let c1 = h1.dot(&n1);
+        let c1 = crate::stencil::curvature_along(h1.view(), n1.view());
         rotations += 1;
         // Fourier fit through C(0), C'(0) = 2 b1, and C(phi1).
         let a1 = (curvature - c1 + b1 * (2.0 * phi1).sin()) / (1.0 - (2.0 * phi1).cos());
@@ -389,10 +401,37 @@ fn rotate_dimer<S: PointSurface>(
         let s1 = phi1.sin();
         let w_old = (phi1 - phi).sin() / s1;
         let w_trial = s / s1;
-        h = &(&h * w_old) + &(&h1 * w_trial);
         let theta_rotated = &(&theta * c) - &(&n * s);
-        n = normalize(&(&n * c) + &(&theta * s));
-        curvature = h.dot(&n);
+        let n_new = normalize(&(&n * c) + &(&theta * s));
+        if phi1 <= MIN_TRIAL_ANGLE && w_old.abs().max(w_trial.abs()) > MAX_EXTRAPOLATION {
+            // A forward-difference action is not the exact H v: its
+            // Rayleigh quotient carries dr/2 T[v,v,v], so C'(0) differs
+            // from 2 h.theta by dr/2 T[n,n,theta] and the fitted a1 by
+            // that over phi1. On the floor of the trial angle that
+            // ratio is largest, and a step far past it, with the gradient
+            // extrapolated there, inherits the error multiplied by
+            // sin(phi1 - phi) / sin(phi1). Measure the
+            // rotated dimer instead; when it contradicts the model the
+            // model is below its resolution here and the better
+            // measured dimer is the estimate.
+            let h_new = surface.action(x, g0, n_new.view(), config)?;
+            let c_new = crate::stencil::curvature_along(h_new.view(), n_new.view());
+            rotations += 1;
+            if c_new.is_nan() || c_new > c1.min(curvature) + slack {
+                if c1 < curvature {
+                    n = n1;
+                    curvature = c1;
+                }
+                break;
+            }
+            h = h_new;
+            n = n_new;
+            curvature = c_new;
+        } else {
+            h = &(&h * w_old) + &(&h1 * w_trial);
+            n = n_new;
+            curvature = crate::stencil::curvature_along(h.view(), n.view());
+        }
         force_prev = Some(force);
         dir_prev = Some(theta_rotated * dir_norm);
         if config.rotation_angle_tol > 0.0 && phi.abs() < config.rotation_angle_tol {
@@ -413,6 +452,8 @@ fn lanczos_mode<S: PointSurface>(
     g0: ArrayView1<f64>,
     seed: Array1<f64>,
     config: &MinModeConfig,
+    rel_tol: Option<f64>,
+    carried: Option<f64>,
 ) -> Result<(Array1<f64>, f64, usize), SaddleError> {
     let n = seed.len();
     let m = config.krylov_dim.min(n).max(1);
@@ -422,12 +463,28 @@ fn lanczos_mode<S: PointSurface>(
     q.push(normalize(seed));
 
     let mut actions = 0;
+    let mut previous_ritz: Option<f64> = None;
     loop {
         let j = alpha.len();
         let hv = surface.action(x, g0, q[j].view(), config)?;
         actions += 1;
-        let a = hv.dot(&q[j]);
+        let a = crate::stencil::curvature_along(hv.view(), q[j].view());
         alpha.push(a);
+        // eOn quit_early: the curvature along the incoming mode is
+        // already within tolerance of the previous estimate, so the
+        // direction is kept. One Hessian action, then the translation.
+        if j == 0
+            && let (Some(tol), Some(previous)) = (rel_tol, carried)
+        {
+            let scale = if previous.abs() > 0.0 {
+                previous.abs()
+            } else {
+                1.0
+            };
+            if (a - previous).abs() <= tol * scale {
+                return Ok((q[0].clone(), a, actions));
+            }
+        }
         let mut w = &hv - &(&q[j] * a);
         if j > 0 {
             w = &w - &(&q[j - 1] * beta[j - 1]);
@@ -441,7 +498,23 @@ fn lanczos_mode<S: PointSurface>(
         let b = w.dot(&w).sqrt();
         let (theta, s) = lowest_ritz(&alpha, &beta);
         let residual = b * s[j].abs();
-        if residual <= config.rotation_tol || alpha.len() == m || b <= 1e-12 {
+        // eOn's tolerance is the relative change of the lowest Ritz
+        // value, not the residual. The first value is the curvature
+        // along the seed; later values are the growing Krylov estimate.
+        let rel_stop = match (rel_tol, previous_ritz) {
+            (Some(tol), Some(previous)) => {
+                // eOn: |λ - λ_prev| / |λ_prev|, with denominator 1 at 0.
+                let scale = if previous.abs() > 0.0 {
+                    previous.abs()
+                } else {
+                    1.0
+                };
+                (theta - previous).abs() <= tol * scale
+            }
+            _ => false,
+        };
+        previous_ritz = Some(theta);
+        if rel_stop || residual <= config.rotation_tol || alpha.len() == m || b <= 1e-12 {
             let mut mode = Array1::zeros(n);
             for (qi, si) in q.iter().zip(s.iter()) {
                 mode = &mode + &(qi * *si);
@@ -552,11 +625,10 @@ pub(crate) fn translated_gradient(
     mode: &Array1<f64>,
     curvature: f64,
 ) -> Array1<f64> {
-    let parallel = gradient.dot(mode);
     if curvature < 0.0 {
-        gradient - &(mode * (2.0 * parallel))
+        crate::stencil::reflect(gradient.view(), mode.view())
     } else {
-        mode * (-parallel)
+        crate::stencil::ascend(gradient.view(), mode.view())
     }
 }
 
@@ -570,6 +642,10 @@ pub struct MinModeSession {
     curvature: f64,
     solver: Solver,
     iteration: usize,
+    /// Improved Lanczos: stop when the lowest Ritz value changes by
+    /// less than this fraction of `|λ|`, or of 1 when `λ` is 0.
+    /// `None` keeps the residual test alone.
+    lanczos_rel_tol: Option<f64>,
     /// Gradient at `x`, when known: from the last translation's
     /// accepted point or from the host.
     centre: Option<PointEval>,
@@ -603,6 +679,7 @@ impl MinModeSession {
             istep: 1.0,
             maxmove: None,
             ftol_rel: None,
+            noise_floor: None,
         };
         let mut solver = Solver::new(config.method.clone(), control, x.len());
         // Per-atom cap over consecutive xyz triples (eOn
@@ -625,9 +702,26 @@ impl MinModeSession {
             curvature: f64::NAN,
             solver,
             iteration: 0,
+            lanczos_rel_tol: None,
             centre: None,
             surface_error: Mutex::new(None),
         })
+    }
+
+    /// Stop a Lanczos estimate when the lowest Ritz value's relative
+    /// change falls under `tol`. The improved Lanczos search uses this
+    /// so a translation does not wait for a tight residual. `None`
+    /// restores the residual test.
+    pub fn set_lanczos_rel_tol(&mut self, tol: Option<f64>) -> Result<(), SaddleError> {
+        if let Some(tol) = tol
+            && !(tol.is_finite() && tol > 0.0)
+        {
+            return Err(SaddleError::Invalid(
+                "Lanczos relative tolerance must be positive and finite".into(),
+            ));
+        }
+        self.lanczos_rel_tol = tol;
+        Ok(())
     }
 
     /// Select the optional HiGHS feasible-set step; requires the `highs` feature.
@@ -768,7 +862,15 @@ impl MinModeSession {
         }
         let estimate = |surface: &Counted<'_, S>, seed| match self.config.kind {
             MinModeKind::Dimer => rotate_dimer(surface, position, gradient, seed, &self.config),
-            MinModeKind::Lanczos => lanczos_mode(surface, position, gradient, seed, &self.config),
+            MinModeKind::Lanczos => lanczos_mode(
+                surface,
+                position,
+                gradient,
+                seed,
+                &self.config,
+                self.lanczos_rel_tol,
+                self.curvature.is_finite().then_some(self.curvature),
+            ),
         };
         if excluded.nrows() == 0 {
             return estimate(surface, self.mode.clone());
