@@ -111,11 +111,20 @@ pub struct MinModeConfig {
     /// Forward (default) or central difference for the actions.
     pub difference: FiniteDifference,
     /// Rotation stops when the rotational force `|H v - (v.H v) v|`
-    /// falls under this. For Lanczos it is the Ritz residual bound.
+    /// falls under this. The default is 1e-4. At that value and any
+    /// looser one, the dimer also stops after one rotation once the
+    /// rotational force is under 1. A tighter value keeps driving the
+    /// residual, and the torque window stays out of that loop. Lanczos
+    /// uses the same number as the Ritz residual. With no host relative
+    /// tolerance it is also the relative change of the lowest Ritz value.
     pub rotation_tol: f64,
     /// Dimer rotation also stops when the optimal rotation angle of an
-    /// iteration falls under this many radians (eOn
-    /// `converged_angle`). Zero disables the angle test.
+    /// iteration falls under this many radians. The default is eOn's
+    /// `converged_angle`, five degrees
+    /// ([`DEFAULT_ROTATION_ANGLE_TOL`]; Kästner and Sherwood, J. Chem.
+    /// Phys. 128, 014106 (2008), doi:10.1063/1.2815812). Zero disables
+    /// the angle test. The classic torque window still applies at the
+    /// stock residual; see [`rotation_finished`].
     pub rotation_angle_tol: f64,
     pub max_rotations: usize,
     /// Krylov dimension for [`MinModeKind::Lanczos`].
@@ -123,6 +132,9 @@ pub struct MinModeConfig {
     /// Translation stops when max|F| falls under this and the
     /// curvature along the lowest mode is negative.
     pub force_tol: f64,
+    /// Largest per-atom translation, 0.2 by default. While the curvature
+    /// along the mode is not negative, dimer and Lanczos (L-BFGS and
+    /// FIRE) take one step of this length along the mode.
     pub max_move: f64,
     pub method: Method,
 }
@@ -133,8 +145,8 @@ impl Default for MinModeConfig {
             kind: MinModeKind::Dimer,
             dr: 1e-3,
             difference: FiniteDifference::Forward,
-            rotation_tol: 1e-4,
-            rotation_angle_tol: 0.0,
+            rotation_tol: STOCK_ROTATION_TOL,
+            rotation_angle_tol: DEFAULT_ROTATION_ANGLE_TOL,
             max_rotations: 20,
             krylov_dim: 12,
             force_tol: 1e-3,
@@ -177,15 +189,39 @@ pub struct ModeEstimate {
 }
 
 /// Rotation of the mode between two steps past which the translation
-/// optimizer's memory is dropped. The effective gradient is `R g` with
-/// `R = I - 2 tau tau'`; when `tau` turns by `theta`,
-/// `|R' - R|_2 = 2 sin(theta)` (`validation/mode_reset.py`), so the
-/// effective Hessian `R H R` that the stored pairs describe moves by up
-/// to `4 sin(theta) |H|`. Under eOn's converged angle (5 degrees) that
-/// is at most `0.35 |H|` and the dimer counts the mode as unchanged: the
-/// pairs and the FIRE velocity stay and only the cached evaluation
-/// goes. Past it the mode is a different one and the memory is reset.
-pub const MODE_RESET_ANGLE: f64 = 5.0 * PI / 180.0;
+/// optimizer's memory is dropped.
+///
+/// The effective gradient is `R g` with `R = I - 2 τ τ'`. Goswami, Gunde,
+/// and Jónsson, Front. Chem. (2026), doi:10.3389/fchem.2026.1807063, show
+/// that this reflector drives toward the same saddle while the mode stays
+/// inside a 45 degree cone (`|τ · τ'| > 1/√2`). Kästner and Sherwood,
+/// J. Chem. Phys. 128, 014106 (2008), doi:10.1063/1.2815812, keep the
+/// L-BFGS pairs across that continuous turn: the superlinear step is the
+/// history. A few degrees of the same eigenvector (the lowest mode turns
+/// by about 6–10 degrees per step while a search is still leaving a
+/// minimum) is not a new mode. Dropping the pairs there, and zeroing the
+/// FIRE velocity, restarts the step on every iteration.
+///
+/// Past 45 degrees the inverted force can point away from the saddle the
+/// pairs were built for, so the memory goes. Only the cached evaluation
+/// is dropped inside the cone (`validation/mode_reset.py`:
+/// `|R' - R|_2 = 2 |sin θ|`).
+pub const MODE_RESET_ANGLE: f64 = 0.25 * PI;
+
+/// Improved-dimer angle stop, eOn `converged_angle` of five degrees.
+/// Kästner and Sherwood, J. Chem. Phys. 128, 014106 (2008),
+/// doi:10.1063/1.2815812. Heyden, Bell, and Keil, J. Chem. Phys. 123,
+/// 224101 (2005), doi:10.1063/1.2104507.
+pub const DEFAULT_ROTATION_ANGLE_TOL: f64 = 5.0 * PI / 180.0;
+
+/// Stock rotational-force residual. At this value and looser, the dimer
+/// uses eOn's classic torque window. A stricter residual keeps iterating.
+const STOCK_ROTATION_TOL: f64 = 1e-4;
+
+/// eOn `dimer_torque_max`. After one rotation, a rotational force under
+/// this is finished (classic dimer, `torque_min` .. `torque_max`,
+/// `rotations_min` = 1).
+const TORQUE_MAX: f64 = 1.0;
 
 /// A first-order saddle has a vanishing force and one negative
 /// curvature. A vanishing force alone also describes a minimum, which
@@ -342,7 +378,7 @@ fn rotate_dimer<S: PointSurface>(
     loop {
         let force = -perpendicular(&h, &n);
         let force_norm = force.dot(&force).sqrt();
-        if force_norm <= config.rotation_tol || rotations >= config.max_rotations {
+        if rotation_finished(config, force_norm, rotations) {
             break;
         }
         let mut dir = force.clone();
@@ -441,6 +477,89 @@ fn rotate_dimer<S: PointSurface>(
     Ok((n, curvature, rotations))
 }
 
+/// Classic dimer torque window plus the residual and the rotation cap.
+///
+/// eOn stops when the torque is under `torque_min`, or after
+/// `rotations_min` (one) once the torque has fallen under `torque_max`
+/// (1 eV/Å²). [`STOCK_ROTATION_TOL`] plays the role of a loose
+/// `torque_min`: the window is on. A tighter `rotation_tol` is a request
+/// to drive the rotational force down, and the window stays out of that
+/// loop. The angle test in [`rotate_dimer`] is separate.
+fn rotation_finished(config: &MinModeConfig, force_norm: f64, rotations: usize) -> bool {
+    if !force_norm.is_finite()
+        || force_norm <= config.rotation_tol
+        || rotations >= config.max_rotations
+    {
+        return true;
+    }
+    config.rotation_tol + 1e-12 >= STOCK_ROTATION_TOL && rotations >= 1 && force_norm < TORQUE_MAX
+}
+
+/// Climb along `mode` by one full per-atom `max_move`.
+///
+/// Henkelman and Jónsson, J. Chem. Phys. 111, 7010 (1999),
+/// doi:10.1063/1.480097: while the curvature is not negative the search
+/// moves on the mode alone. eOn's L-BFGS takes that as a full
+/// `max_move` step when the secant curvature is negative
+/// (`maxAtomMotionApplied` of `1000 * f`, client/LBFGS.cpp): the largest
+/// atom moves by `max_move`, not by a fraction of the force. The sign is
+/// the energy gradient's, so the step increases the energy along the
+/// mode. A vanishing parallel part still leaves along `mode`: a
+/// stationary point with non-negative curvature is a minimum, not a
+/// saddle.
+pub(crate) fn convex_displacement(
+    position: ArrayView1<f64>,
+    gradient: ArrayView1<f64>,
+    mode: ArrayView1<f64>,
+    max_move: f64,
+) -> Array1<f64> {
+    let sign = if gradient.dot(&mode) < 0.0 { -1.0 } else { 1.0 };
+    let mut trial = position.to_owned();
+    for (slot, component) in trial.iter_mut().zip(mode.iter()) {
+        *slot += sign * component;
+    }
+    scale_to_atom_cap(position, &mut trial, max_move);
+    trial
+}
+
+/// Rescale the displacement so its largest per-atom (xyz triple) length
+/// equals `cap`. A trailing partial triple counts as one more atom,
+/// matching rgmin `scale_step_atom` and eOn `maxAtomMotionApplied`. The
+/// direction is unchanged; a step shorter than the cap is lengthened.
+fn scale_to_atom_cap(origin: ArrayView1<f64>, trial: &mut Array1<f64>, cap: f64) {
+    if !(cap.is_finite() && cap > 0.0) {
+        return;
+    }
+    let n = trial.len();
+    let mut max_atom = 0.0;
+    let mut i = 0;
+    while i + 3 <= n {
+        let dx = trial[i] - origin[i];
+        let dy = trial[i + 1] - origin[i + 1];
+        let dz = trial[i + 2] - origin[i + 2];
+        let r = (dx * dx + dy * dy + dz * dz).sqrt();
+        if r > max_atom {
+            max_atom = r;
+        }
+        i += 3;
+    }
+    if i < n {
+        let mut r2 = 0.0;
+        while i < n {
+            let d = trial[i] - origin[i];
+            r2 += d * d;
+            i += 1;
+        }
+        max_atom = max_atom.max(r2.sqrt());
+    }
+    if max_atom > 0.0 {
+        let scale = cap / max_atom;
+        for k in 0..n {
+            trial[k] = origin[k] + scale * (trial[k] - origin[k]);
+        }
+    }
+}
+
 /// Relative change of a Ritz value. A vanishing previous value only
 /// counts as agreement when the new value is inside the tolerance too,
 /// matching eOn's guarded division (a zero denominator does not report
@@ -456,81 +575,27 @@ fn ritz_value_agreed(new: f64, old: f64, tol: f64) -> bool {
     (new - old).abs() / denom <= tol
 }
 
-/// First-product quit.
+/// Stop controls for one Lanczos estimate.
 ///
-/// `rel_tol` is connect's improved Lanczos. A finite carried curvature
-/// is enough, including after a Krylov that stopped on its cap (eOn
-/// `quit_early`: `|λ - λ_prev| / |λ_prev|`, with denominator 1 at 0).
-/// Without it, the stock search returns only when the previous solve
-/// met its test (`early`) and the Rayleigh quotient agrees with
-/// `previous` under [`ritz_value_agreed`].
-fn rayleigh_kept(
-    rayleigh: f64,
-    previous: f64,
-    rotation_tol: f64,
-    early: bool,
-    rel_tol: Option<f64>,
-) -> bool {
-    if let Some(tol) = rel_tol {
-        if !previous.is_finite() {
-            return false;
-        }
-        let scale = if previous.abs() > 0.0 {
-            previous.abs()
-        } else {
-            1.0
-        };
-        return (rayleigh - previous).abs() <= tol * scale;
-    }
-    early && ritz_value_agreed(rayleigh, previous, rotation_tol)
-}
-
-/// Relative stop between successive lowest Ritz values.
-///
-/// `rel_tol` uses eOn's scale. The stock search uses
-/// [`ritz_value_agreed`] at `rotation_tol`. A missing previous value
-/// never stops: the first product is only the curvature along the seed.
-fn ritz_change_met(
-    theta: f64,
-    previous: Option<f64>,
-    rotation_tol: f64,
-    rel_tol: Option<f64>,
-) -> bool {
-    let Some(old) = previous else {
-        return false;
-    };
-    if let Some(tol) = rel_tol {
-        let scale = if old.abs() > 0.0 { old.abs() } else { 1.0 };
-        return (theta - old).abs() <= tol * scale;
-    }
-    ritz_value_agreed(theta, old, rotation_tol)
-}
-
-/// Curvature carried into one Lanczos solve, and which tolerance stops it.
+/// `previous` is the curvature retained from the last geometry. When
+/// `early` is set and that curvature is finite, the first product
+/// returns immediately if its Rayleigh quotient agrees with `previous`
+/// to `rotation_tol` (eOn `quit_early`). `early` stays false when the
+/// previous solve stopped on the Krylov cap. `rel_tol` is the connect
+/// climb's fraction of `|λ|`; `None` keeps the stock residual test.
 struct LanczosStop {
-    /// Curvature retained from the last geometry. NaN when there is none.
-    previous: f64,
-    /// The previous solve met its test. A Krylov that only hit its cap
-    /// leaves this false, so the stock search keeps iterating.
-    early: bool,
-    /// Connect's improved-Lanczos tolerance. `None` keeps the stock
-    /// `rotation_tol` test.
     rel_tol: Option<f64>,
+    previous: f64,
+    early: bool,
 }
 
 /// Lanczos lowest mode.
 ///
 /// Olsen, Kroes, Henkelman, Arnaldsson, and Jónsson, J. Chem. Phys.
 /// 121, 9776 (2004), doi:10.1063/1.1814098, as eOn implements it: stop
-/// when the relative change in the lowest Ritz value falls under the
-/// tolerance, or when the residual `beta |s|` does. A seed that is
-/// already the mode closes the Krylov on the first product. The fourth
-/// result is false when the solve stopped only because the Krylov
-/// reached `krylov_dim`.
-///
-/// [`LanczosStop::rel_tol`] selects connect's improved-Lanczos
-/// tolerance. `None` keeps the stock `rotation_tol` test. See
-/// [`rayleigh_kept`] and [`ritz_change_met`].
+/// when the relative change in the lowest Ritz value falls under
+/// `rotation_tol`, or when the residual `beta |s|` does. A seed that
+/// is already the mode closes the Krylov on the first product.
 fn lanczos_mode<S: PointSurface>(
     surface: &Counted<'_, S>,
     x: ArrayView1<f64>,
@@ -547,24 +612,20 @@ fn lanczos_mode<S: PointSurface>(
     q.push(normalize(seed));
 
     let mut actions = 0;
-    let mut previous_ritz: Option<f64> = None;
+    let mut ew_old: Option<f64> = None;
     loop {
         let j = alpha.len();
         let hv = surface.action(x, g0, q[j].view(), config)?;
         actions += 1;
         let a = crate::stencil::curvature_along(hv.view(), q[j].view());
         alpha.push(a);
-        // One Hessian action, then the caller translates. The kept
-        // direction is the incoming seed.
-        if j == 0
-            && rayleigh_kept(
-                a,
-                stop.previous,
-                config.rotation_tol,
-                stop.early,
-                stop.rel_tol,
-            )
-        {
+        // eOn quit_early: the curvature along the incoming mode is
+        // already within tolerance of the previous estimate, so the
+        // direction is kept. One Hessian action, then the translation.
+        // A host relative tolerance (the connect climb) uses that
+        // tolerance. The stock estimate uses `rotation_tol`, and only
+        // after a solve that met its test (`early`).
+        if j == 0 && lanczos_quit_early(&stop, a, config.rotation_tol) {
             return Ok((q[0].clone(), a, actions, true));
         }
         let mut w = &hv - &(&q[j] * a);
@@ -580,10 +641,13 @@ fn lanczos_mode<S: PointSurface>(
         let b = w.dot(&w).sqrt();
         let (theta, s) = lowest_ritz(&alpha, &beta);
         let residual = b * s[j].abs();
-        // A one-digit residual in `|theta|` accepts a high mode on the
-        // first product, so the relative test compares Ritz values and
-        // is not that residual.
-        let agreed = ritz_change_met(theta, previous_ritz, config.rotation_tol, stop.rel_tol);
+        // Olsen, Kroes, Henkelman, Arnaldsson, and Jónsson, J. Chem.
+        // Phys. 121, 9776 (2004), doi:10.1063/1.1814098: stop on the
+        // relative change of the lowest Ritz value as well as on the
+        // residual. A one-digit residual in `|theta|` accepts a high
+        // mode on the first product, so it is not a stop here. A set
+        // `rel_tol` replaces `rotation_tol` for that relative test.
+        let agreed = lanczos_ritz_agreed(stop.rel_tol, config.rotation_tol, theta, ew_old);
         let residual_ok = residual <= config.rotation_tol;
         let capped = alpha.len() == m;
         if residual_ok || agreed || capped || b <= 1e-12 {
@@ -594,10 +658,47 @@ fn lanczos_mode<S: PointSurface>(
             let converged = residual_ok || agreed || b <= 1e-12;
             return Ok((normalize(mode), theta, actions, converged));
         }
-        previous_ritz = Some(theta);
+        ew_old = Some(theta);
         beta.push(b);
         q.push(w / b);
     }
+}
+
+/// First-product return. `rel_tol` is the connect climb's fraction of
+/// `|λ|` (denominator 1 when `λ` is 0). Without it, the stock estimate
+/// returns only when the previous solve converged and the Rayleigh
+/// quotient still agrees with `rotation_tol`.
+fn lanczos_quit_early(stop: &LanczosStop, rayleigh: f64, rotation_tol: f64) -> bool {
+    if let Some(tol) = stop.rel_tol {
+        if !stop.previous.is_finite() {
+            return false;
+        }
+        let scale = if stop.previous.abs() > 0.0 {
+            stop.previous.abs()
+        } else {
+            1.0
+        };
+        return (rayleigh - stop.previous).abs() <= tol * scale;
+    }
+    stop.early && ritz_value_agreed(rayleigh, stop.previous, rotation_tol)
+}
+
+/// Relative change of successive lowest Ritz values. `rel_tol` uses the
+/// connect denominator; otherwise the stock guarded comparison.
+fn lanczos_ritz_agreed(
+    rel_tol: Option<f64>,
+    rotation_tol: f64,
+    theta: f64,
+    previous: Option<f64>,
+) -> bool {
+    let Some(old) = previous else {
+        return false;
+    };
+    if let Some(tol) = rel_tol {
+        let scale = if old.abs() > 0.0 { old.abs() } else { 1.0 };
+        return (theta - old).abs() <= tol * scale;
+    }
+    ritz_value_agreed(theta, old, rotation_tol)
 }
 
 /// Lowest eigenpair of the symmetric tridiagonal (alpha, beta), with
@@ -823,7 +924,8 @@ impl MinModeSession {
     /// Stop a Lanczos estimate when the lowest Ritz value's relative
     /// change falls under `tol`. The improved Lanczos search uses this
     /// so a translation does not wait for a tight residual. `None`
-    /// restores the residual test.
+    /// restores the stock residual and the relative Ritz change, both
+    /// at `rotation_tol`.
     pub fn set_lanczos_rel_tol(&mut self, tol: Option<f64>) -> Result<(), SaddleError> {
         if let Some(tol) = tol
             && !(tol.is_finite() && tol > 0.0)
@@ -944,19 +1046,26 @@ impl MinModeSession {
         }
         let mode = checked_mode(mode)?;
         // The solver's cached force at this point was inverted along the
-        // old mode; a large turn also retires the stored pairs.
+        // old mode; a turn past the Householder cone also retires the pairs.
         let turned = self.mode.dot(&mode).abs().min(1.0).acos();
-        if turned > MODE_RESET_ANGLE {
-            self.solver.forget();
-        } else {
-            self.solver.forget_evaluation();
-        }
+        self.retire_translation_memory(turned);
         self.mode = mode;
         self.mode_fresh = false;
         self.pending_turn = 0.0;
         self.lanczos_ready = false;
         self.lanczos_carry = None;
         Ok(())
+    }
+
+    /// Drop the cached inverted force. A turn past [`MODE_RESET_ANGLE`]
+    /// also drops the L-BFGS pairs and the FIRE velocity. Inside the
+    /// cone the history stays: it is the same mode, turned.
+    fn retire_translation_memory(&mut self, turned: f64) {
+        if turned > MODE_RESET_ANGLE {
+            self.solver.forget();
+        } else {
+            self.solver.forget_evaluation();
+        }
     }
 
     fn centre_gradient<S: PointSurface>(
@@ -1004,9 +1113,9 @@ impl MinModeSession {
                 seed,
                 &self.config,
                 LanczosStop {
+                    rel_tol: self.lanczos_rel_tol,
                     previous,
                     early,
-                    rel_tol: self.lanczos_rel_tol,
                 },
             ),
         };
@@ -1233,69 +1342,20 @@ impl MinModeSession {
         })
     }
 
-    /// One min-mode step: refresh the lowest mode, invert the force
-    /// along it, take one solver step.
+    /// One reflected-force step of the configured translator.
     ///
-    /// A surface error inside the step returns `Err` with the position
-    /// unchanged. The solver's internal state has seen the failed
-    /// evaluation; a host that recovers the surface and steps again
-    /// may call [`MinModeSession::reset`] first to drop it.
-    pub fn step<S: PointSurface>(&mut self, surface: &S) -> Result<MinModeReport, SaddleError> {
-        // The translation finishes the mode itself. A partial basis
-        // from push_estimate belongs to the pre-step seed.
-        self.lanczos_carry = None;
-        let calls = AtomicUsize::new(0);
-        let counted = Counted {
-            surface,
-            calls: &calls,
-            space: None,
-        };
-        let g0 = self.centre_gradient(&counted)?;
-        // A host that just called `estimate_mode` already paid for this
-        // mode. Translating it again would repeat those Hessian actions.
-        let (mut curvature, mut rotations) = if self.mode_fresh {
-            self.mode_fresh = false;
-            let turned = self.pending_turn;
-            self.pending_turn = 0.0;
-            if turned > MODE_RESET_ANGLE {
-                self.solver.forget();
-            } else {
-                self.solver.forget_evaluation();
-            }
-            (self.curvature, 0)
-        } else {
-            let previous_mode = self.mode.clone();
-            let refreshed = self.refresh_mode(&counted, g0.view())?;
-            // The solver cached the inverted force at this point under the
-            // previous mode; the step must see the latest one. The mode's
-            // sign is arbitrary, so the angle reads |cos|.
-            let turned = previous_mode.dot(&self.mode).abs().min(1.0).acos();
-            if turned > MODE_RESET_ANGLE {
-                self.solver.forget();
-            } else {
-                self.solver.forget_evaluation();
-            }
-            refreshed
-        };
-
-        let max_force = self.force_gate.value(g0.view());
-        if converged(max_force, curvature, self.config.force_tol) {
-            return Ok(MinModeReport {
-                status: MinModeStatus::Converged,
-                max_force,
-                curvature,
-                rotations,
-                iteration: self.iteration,
-                evaluations: calls.load(Ordering::Relaxed),
-            });
-        }
-
-        // Henkelman and Jonsson 1999: climb the mode alone while its
-        // curvature is not negative, and reflect the parallel part
-        // once the curvature is negative. The mode estimate for this
-        // step is the one just refreshed; Lanczos and the dimer share it.
-        let tau = self.mode.clone();
-        let translation_curvature = curvature;
+    /// The returned point is the solver's accepted geometry. The
+    /// evaluation, when the oracle recorded it, is that point's energy
+    /// and the true gradient (the force the solver saw was the
+    /// translated one).
+    fn translate_with_solver<S: PointSurface>(
+        &mut self,
+        surface: &S,
+        counted: &Counted<'_, S>,
+        g0: &Array1<f64>,
+        tau: &Array1<f64>,
+        translation_curvature: f64,
+    ) -> Result<(Array1<f64>, Option<PointEval>), SaddleError> {
         let kappa = self.kappa.as_ref();
         let config = &self.config;
         let error_slot = &self.surface_error;
@@ -1336,7 +1396,7 @@ impl MinModeSession {
                     )?;
                     -out.force
                 } else {
-                    translated_gradient(&g, &tau, translation_curvature)
+                    translated_gradient(&g, tau, translation_curvature)
                 };
                 Ok((e, g, eff))
             });
@@ -1372,10 +1432,89 @@ impl MinModeSession {
             return Err(err);
         }
         stepped.map_err(|e| SaddleError::Solver(e.to_string()))?;
-        // The oracle's last evaluation is the accepted point for every
-        // stepper that ends on its trial (FIRE, Accept::Step); it is
-        // this report's force and the next step's centre.
         let at_new = last.into_inner().ok().flatten().filter(|p| p.x == x);
+        Ok((x, at_new))
+    }
+
+    /// One min-mode step: refresh the lowest mode, invert the force
+    /// along it, take one solver step.
+    ///
+    /// A surface error inside the step returns `Err` with the position
+    /// unchanged. The solver's internal state has seen the failed
+    /// evaluation; a host that recovers the surface and steps again
+    /// may call [`MinModeSession::reset`] first to drop it.
+    pub fn step<S: PointSurface>(&mut self, surface: &S) -> Result<MinModeReport, SaddleError> {
+        // The translation finishes the mode itself. A partial basis
+        // from push_estimate belongs to the pre-step seed.
+        self.lanczos_carry = None;
+        let calls = AtomicUsize::new(0);
+        let counted = Counted {
+            surface,
+            calls: &calls,
+            space: None,
+        };
+        let g0 = self.centre_gradient(&counted)?;
+        // A host that just called `estimate_mode` already paid for this
+        // mode. Translating it again would repeat those Hessian actions.
+        let (mut curvature, mut rotations) = if self.mode_fresh {
+            self.mode_fresh = false;
+            let turned = self.pending_turn;
+            self.pending_turn = 0.0;
+            self.retire_translation_memory(turned);
+            (self.curvature, 0)
+        } else {
+            let previous_mode = self.mode.clone();
+            let refreshed = self.refresh_mode(&counted, g0.view())?;
+            // The solver cached the inverted force at this point under the
+            // previous mode; the step must see the latest one. The mode's
+            // sign is arbitrary, so the angle reads |cos|.
+            let turned = previous_mode.dot(&self.mode).abs().min(1.0).acos();
+            self.retire_translation_memory(turned);
+            refreshed
+        };
+
+        let max_force = self.force_gate.value(g0.view());
+        if converged(max_force, curvature, self.config.force_tol) {
+            return Ok(MinModeReport {
+                status: MinModeStatus::Converged,
+                max_force,
+                curvature,
+                rotations,
+                iteration: self.iteration,
+                evaluations: calls.load(Ordering::Relaxed),
+            });
+        }
+
+        // Henkelman and Jonsson 1999: climb the mode alone while its
+        // curvature is not negative, and reflect the parallel part
+        // once the curvature is negative. The mode estimate for this
+        // step is the one just refreshed; Lanczos and the dimer share it,
+        // and so do L-BFGS and FIRE. A non-negative curvature takes one
+        // full per-atom max_move along the mode, the step eOn's L-BFGS
+        // takes when the secant curvature is negative. The basin
+        // constraint keeps the solver: its force is not that pure climb.
+        let tau = self.mode.clone();
+        let translation_curvature = curvature;
+        let full_climb = translation_curvature >= 0.0
+            && self.kappa.is_none()
+            && self.config.max_move.is_finite()
+            && self.config.max_move > 0.0;
+        let (x, at_new) = if full_climb {
+            let climbed =
+                convex_displacement(self.x.view(), g0.view(), tau.view(), self.config.max_move);
+            let (energy, gradient) = counted.eval(climbed.view())?;
+            // The cached inverted force belongs to the old centre. The
+            // pairs and the FIRE velocity stay for the concave region.
+            self.solver.forget_evaluation();
+            let point = PointEval {
+                x: climbed.clone(),
+                energy: Some(energy),
+                gradient,
+            };
+            (climbed, Some(point))
+        } else {
+            self.translate_with_solver(surface, &counted, &g0, &tau, translation_curvature)?
+        };
         let centre = match at_new {
             Some(p) => p,
             None => {
@@ -1395,11 +1534,7 @@ impl MinModeSession {
             let (mode, accepted_curvature, accepted_rotations, ready) =
                 self.mode_at(&counted, x.view(), centre.gradient.view())?;
             let turned = self.mode.dot(&mode).abs().min(1.0).acos();
-            if turned > MODE_RESET_ANGLE {
-                self.solver.forget();
-            } else {
-                self.solver.forget_evaluation();
-            }
+            self.retire_translation_memory(turned);
             self.mode = mode;
             self.curvature = accepted_curvature;
             self.lanczos_ready = ready;
@@ -1440,9 +1575,11 @@ impl MinModeSession {
 
 #[cfg(test)]
 mod tests {
-    use super::translated_gradient;
+    use super::{MinModeConfig, MinModeSession, PointSurface, translated_gradient};
+    use crate::error::SaddleError;
     use approx::assert_abs_diff_eq;
-    use ndarray::array;
+    use ndarray::{Array1, ArrayView1, array};
+    use rgmin::Method;
 
     #[test]
     fn positive_curvature_keeps_only_the_reversed_mode() {
@@ -1464,5 +1601,66 @@ mod tests {
         assert_abs_diff_eq!(eff[0], -1.0, epsilon = 1e-12);
         assert_abs_diff_eq!(eff[1], -4.0, epsilon = 1e-12);
         assert_abs_diff_eq!(eff[2], 0.5, epsilon = 1e-12);
+    }
+
+    /// V = -x^2 + y^2 + z^2. One reflected L-BFGS step stores a pair.
+    struct QuadraticSaddle;
+
+    impl PointSurface for QuadraticSaddle {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            let e = -x[0] * x[0] + x[1] * x[1] + x[2] * x[2];
+            Ok((e, array![-2.0 * x[0], 2.0 * x[1], 2.0 * x[2]]))
+        }
+    }
+
+    fn rotate_in_plane(mode: &Array1<f64>, theta: f64) -> Array1<f64> {
+        let mut axis = array![0.0, 1.0, 0.0];
+        if mode.dot(&axis).abs() > 0.9 {
+            axis = array![0.0, 0.0, 1.0];
+        }
+        let parallel = mode.dot(&axis);
+        let mut ortho = &axis - &(mode * parallel);
+        let norm = ortho.dot(&ortho).sqrt();
+        ortho /= norm;
+        let (s, c) = theta.sin_cos();
+        &(mode * c) + &(&ortho * s)
+    }
+
+    /// A turn inside the Householder cone keeps the L-BFGS pairs. A
+    /// genuine swap past [`super::MODE_RESET_ANGLE`] drops them. Goswami,
+    /// Gunde, and Jónsson, Front. Chem. (2026),
+    /// doi:10.3389/fchem.2026.1807063; Kästner and Sherwood, J. Chem.
+    /// Phys. 128, 014106 (2008), doi:10.1063/1.2815812.
+    #[test]
+    fn lbfgs_pairs_survive_a_turn_inside_the_cone() {
+        let config = MinModeConfig {
+            method: Method::Lbfgs { memory: 10 },
+            force_tol: 1e-8,
+            max_move: 0.05,
+            rotation_angle_tol: 0.0,
+            ..MinModeConfig::default()
+        };
+        let mut session =
+            MinModeSession::new(config, array![0.4, 0.15, -0.1], array![1.0, 0.2, 0.0]).unwrap();
+        session.step(&QuadraticSaddle).unwrap();
+        let kept = session.solver.pair_count();
+        assert!(kept > 0, "a reflected step stores an L-BFGS pair");
+        let inside = rotate_in_plane(
+            &session.mode().to_owned(),
+            10.0 * std::f64::consts::PI / 180.0,
+        );
+        session.set_mode(inside).unwrap();
+        assert_eq!(
+            session.solver.pair_count(),
+            kept,
+            "ten degrees is the same mode"
+        );
+        let swapped = rotate_in_plane(&session.mode().to_owned(), 0.5 * std::f64::consts::PI);
+        session.set_mode(swapped).unwrap();
+        assert_eq!(
+            session.solver.pair_count(),
+            0,
+            "ninety degrees clears the pairs"
+        );
     }
 }

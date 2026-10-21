@@ -86,27 +86,22 @@ fn minimum_is_not_converged(kind: MinModeKind) {
     };
     let start = array![1.0, 0.0, 0.0];
     let seed = array![1.0, 0.0, 0.0];
-    let mut session = MinModeSession::new(config, start, seed).unwrap();
-    for step in 0..50 {
-        let report = session.step(&DoubleWell).unwrap();
-        assert!(
-            report.max_force <= 1e-3,
-            "{kind:?} step {step}: max_force={} at a stationary point",
-            report.max_force
-        );
-        assert!(
-            report.curvature > 0.0,
-            "{kind:?} step {step}: curvature={} at a minimum",
-            report.curvature
-        );
-        assert_eq!(
-            report.status,
-            MinModeStatus::Running,
-            "{kind:?} step {step}: max_force={} curvature={}",
-            report.max_force,
-            report.curvature
-        );
-    }
+    let mut session = MinModeSession::new(config, start.clone(), seed).unwrap();
+    let report = session.step(&DoubleWell).unwrap();
+    // A vanishing force at a minimum is not a saddle. The convex escape
+    // leaves along the mode by max_move instead of reporting convergence.
+    assert_eq!(report.status, MinModeStatus::Running, "{kind:?}");
+    assert!(
+        report.curvature > 0.0,
+        "{kind:?} curvature={}",
+        report.curvature
+    );
+    let moved = &session.position() - &start;
+    let travel = moved.dot(&moved).sqrt();
+    assert!(
+        (travel - 0.1).abs() < 1e-9,
+        "{kind:?} left by {travel}, expected max_move"
+    );
 }
 
 /// The quadratic saddle, failing at any point farther than `radius`
@@ -196,6 +191,7 @@ fn estimate_from_bad_seed(kind: MinModeKind) -> (f64, usize, usize, Array1<f64>)
     let config = MinModeConfig {
         kind,
         rotation_tol: 1e-6,
+        rotation_angle_tol: 0.0,
         max_rotations: 50,
         krylov_dim: 6,
         ..MinModeConfig::default()
@@ -240,6 +236,7 @@ fn warm_session_costs_one_evaluation(kind: MinModeKind) {
     let config = MinModeConfig {
         kind,
         rotation_tol: 1e-6,
+        rotation_angle_tol: 0.0,
         ..MinModeConfig::default()
     };
     let x = Array1::from(vec![0.1, -0.2, 0.05, 0.3, -0.1, 0.02]);
@@ -458,6 +455,7 @@ fn dimer_push_runs_the_full_rotation() {
         let config = MinModeConfig {
             kind: MinModeKind::Dimer,
             rotation_tol: 1e-6,
+            rotation_angle_tol: 0.0,
             max_rotations: 50,
             ..MinModeConfig::default()
         };
