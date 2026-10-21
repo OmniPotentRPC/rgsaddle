@@ -1,30 +1,36 @@
 //! Min-mode refinement of the climbing image (OCI-NEB).
 //!
 //! Goswami, Gunde, and Jónsson, Front. Chem. 14, 1807063 (2026),
-//! doi:10.3389/fchem.2026.1807063, Algorithm 1. Once the climbing
-//! image has been the highest image for `stable_steps` band steps and
-//! its largest per-atom force is under the trigger, that image alone
-//! climbs its lowest mode while the other images stay where they are.
-//! The mode is seeded with the band tangent (or the mode cached by the
-//! last successful refinement) and a refinement continues while
-//! `|v · τ| >= alignment_tol`. A positive curvature restores the image
-//! to where the refinement began unless an aligned point was visited.
-//! An alignment failure, a positive curvature after such a point, or
-//! the step budget leaves the image at the visited aligned point of
-//! lowest force. A refinement that lowered the force re-arms at
-//! `F_new (1/2 + 2/5 F_new / F_CI)` (eq. 15), and any other outcome at
-//! `λ F_0 (1/2 + α/2)` (eqs. 13-14).
+//! doi:10.3389/fchem.2026.1807063, Algorithm 1. This is the one
+//! implementation: [`crate::ocineb::OcinebSession`] runs it with the
+//! published controls. Once the climbing image has kept its index for
+//! `stable_steps` band steps and its largest per-atom force is under
+//! the trigger, that image alone climbs its lowest mode while the
+//! other images stay where they are. The first refinement step only
+//! estimates the mode, seeded with the band tangent (or the mode cached
+//! by the last successful refinement), and the climb starts when the
+//! curvature is negative and `|v · τ| >= alignment_tol`. A climb
+//! continues while that overlap holds. A positive curvature restores
+//! the image to where the refinement began unless an aligned point was
+//! visited. An alignment failure, a positive curvature after such a
+//! point, or the step budget leaves the image at the visited aligned
+//! point of lowest force. The trigger thresholds are
+//! [`crate::ocineb::initial_threshold`], and a refinement re-arms at
+//! [`crate::ocineb::success_threshold`] (eq. 15) when it lowered the
+//! force and at [`crate::ocineb::backoff_threshold`] (eqs. 13-14)
+//! otherwise.
 //!
 //! The lowest mode is Lanczos with the improved relative stop of
 //! Olsen, Kroes, Henkelman, Arnaldsson, and Jónsson, J. Chem. Phys.
-//! 121, 9776 (2004), doi:10.1063/1.1809574. The climb is the order-1
-//! P-RFO step on a dense TS-BFGS model (`climb`). The model starts at
-//! `h_0 I`, `h_0` the finite-difference curvature along the force
-//! perpendicular to the mode, and carries the Lanczos curvature on the
-//! mode with every other direction a minimum. Lanczos runs again, and
-//! the model takes its curvature, when the force grows past
-//! `refresh_factor` times its lowest value since the last estimate or
-//! when the model's lowest mode turns away from the previous one.
+//! 121, 9776 (2004), doi:10.1063/1.1809574, or the dimer. The climb is
+//! the order-1 P-RFO step on a dense TS-BFGS model (`climb`). The model
+//! starts at `h_0 I`, `h_0` the finite-difference curvature along the
+//! force perpendicular to the mode, and carries the estimated curvature
+//! on the mode with every other direction a minimum. The mode is
+//! estimated again, and the model takes its curvature, when the force
+//! grows past `refresh_factor` times its lowest value since the last
+//! estimate or when the model's lowest mode turns away from the
+//! previous one.
 
 use ndarray::{Array1, ArrayView1, Axis, s};
 
@@ -32,7 +38,12 @@ use super::climb::ModelClimb;
 use super::{BandReport, BandSession, BandStatus, BandSurface};
 use crate::error::SaddleError;
 use crate::minmode::{
-    MinModeConfig, MinModeKind, MinModeSession, ModeEstimate, PointSurface, translated_gradient,
+    FiniteDifference, MinModeConfig, MinModeKind, MinModeSession, ModeEstimate, PointSurface,
+    translated_gradient,
+};
+use crate::ocineb::{
+    backoff_threshold, initial_threshold, mode_alignment, should_trigger, success_threshold,
+    walk_helped,
 };
 use crate::tangent::compute_tangent;
 
@@ -51,17 +62,23 @@ const MODE_TURN: f64 = 0.7;
 #[derive(Clone, Copy, Debug)]
 #[non_exhaustive]
 pub struct MinModeRefine {
-    /// `λ_rel`: the first refinement waits until the climbing image's
-    /// largest per-atom force is under this fraction of the largest
-    /// per-atom band force of the first evaluation.
+    /// `λ_rel`: a refinement waits until the climbing image's largest
+    /// per-atom force is under this fraction of the largest per-atom
+    /// band force of the first evaluation.
     pub trigger_factor: f64,
-    /// `α_tol`: the refinement continues while the lowest mode keeps
-    /// `|v · τ|` at or above this.
+    /// Absolute trigger on the largest per-atom force, read only when
+    /// `trigger_factor` is 0.
+    pub trigger_force: f64,
+    /// `α_tol`: the climb starts and continues while the lowest mode
+    /// keeps `|v · τ|` at or above this.
     pub alignment_tol: f64,
-    /// `κ`: band steps the same image must stay highest.
+    /// `κ`: band steps the same image must keep its index.
     pub stable_steps: usize,
-    /// Steps of one refinement before the band resumes.
+    /// Climb steps of one refinement before the band resumes.
     pub max_steps: usize,
+    /// Put the image back where the refinement began when the
+    /// refinement did not lower its force.
+    pub restore_unhelpful: bool,
     pub kind: MinModeKind,
     pub krylov_dim: usize,
     /// Relative change of the lowest Ritz value that ends a Lanczos
@@ -70,6 +87,10 @@ pub struct MinModeRefine {
     /// Finite-difference displacement of the Hessian actions and of the
     /// `h_0` probe.
     pub dr: f64,
+    pub difference: FiniteDifference,
+    /// Dimer rotation stop and budget.
+    pub rotation_tol: f64,
+    pub max_rotations: usize,
     /// Growth of the force over its lowest value since the last mode
     /// estimate that triggers a new one.
     pub refresh_factor: f64,
@@ -79,13 +100,18 @@ impl Default for MinModeRefine {
     fn default() -> Self {
         Self {
             trigger_factor: 0.5,
+            trigger_force: 0.0,
             alignment_tol: 0.5,
             stable_steps: 3,
             max_steps: 1000,
+            restore_unhelpful: false,
             kind: MinModeKind::Lanczos,
             krylov_dim: 8,
             lanczos_rel_tol: 0.05,
             dr: 1e-3,
+            difference: FiniteDifference::Forward,
+            rotation_tol: 1e-4,
+            max_rotations: 20,
             refresh_factor: 1.5,
         }
     }
@@ -94,25 +120,48 @@ impl Default for MinModeRefine {
 impl MinModeRefine {
     pub(super) fn validate(&self) -> Result<(), SaddleError> {
         let positive = |v: f64| v.is_finite() && v > 0.0;
-        if !(positive(self.trigger_factor)
+        let non_negative = |v: f64| v.is_finite() && v >= 0.0;
+        if !(non_negative(self.trigger_factor)
+            && non_negative(self.trigger_force)
             && positive(self.dr)
             && positive(self.lanczos_rel_tol)
+            && non_negative(self.rotation_tol)
             && self.refresh_factor.is_finite()
             && self.refresh_factor >= 1.0
             && self.alignment_tol.is_finite()
             && (0.0..=1.0).contains(&self.alignment_tol)
             && self.max_steps > 0
+            && self.max_rotations > 0
             && self.krylov_dim > 0)
         {
             return Err(SaddleError::Invalid(
-                "min-mode refinement needs a positive trigger, step, tolerance, \
-                 budget and Krylov size, a refresh factor of at least 1, and an \
-                 alignment in [0, 1]"
+                "min-mode refinement needs a non-negative trigger, a positive step, \
+                 tolerance, budget and Krylov size, a refresh factor of at least 1, \
+                 and an alignment in [0, 1]"
                     .into(),
             ));
         }
         Ok(())
     }
+}
+
+/// What the next band step does while the refinement is on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RefinePhase {
+    Band,
+    Align,
+    Climb,
+}
+
+/// The last refinement step, for hosts that report phases.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RefineStep {
+    pub align: bool,
+    pub alignment: f64,
+    pub rotations: usize,
+    /// The refinement ended on a positive curvature or a mode that left
+    /// the tangent cone.
+    pub fell_back: bool,
 }
 
 #[derive(Clone)]
@@ -148,16 +197,18 @@ impl Run {
         self.session.estimate_mode(surface)
     }
 
-    /// The first mode estimate, the `h_0` probe, and the model.
+    /// The `h_0` probe along the force perpendicular to `mode`, and the
+    /// model that carries `curvature` on `mode`.
     fn start_climb<P: PointSurface>(
         &mut self,
         surface: &P,
+        mode: &Array1<f64>,
+        curvature: f64,
         dr: f64,
         max_move: f64,
-    ) -> Result<f64, SaddleError> {
-        let estimate = self.estimate(surface)?;
+    ) -> Result<(), SaddleError> {
         let g = &self.current.gradient;
-        let mut d = g - &(&estimate.mode * estimate.mode.dot(g));
+        let mut d = g - &(mode * mode.dot(g));
         let norm = d.dot(&d).sqrt();
         let mut h0 = 1.0;
         if norm > 0.0 {
@@ -167,9 +218,9 @@ impl Run {
             h0 = ((&gp - g).dot(&d) / dr).abs().max(1e-3);
         }
         let mut climb = ModelClimb::new(g.len(), h0, max_move);
-        climb.set_mode(&estimate.mode, estimate.curvature)?;
+        climb.set_mode(mode, curvature)?;
         self.climb = Some(climb);
-        Ok(estimate.curvature)
+        Ok(())
     }
 }
 
@@ -182,6 +233,7 @@ pub(super) struct RefineState {
     cached_mode: Option<Array1<f64>>,
     run: Option<Run>,
     converged: bool,
+    last: Option<RefineStep>,
 }
 
 /// One band image as a point surface.
@@ -208,13 +260,36 @@ impl<S: BandSurface + ?Sized> PointSurface for ImageSurface<'_, S> {
 }
 
 enum Outcome {
+    /// Back to where the refinement began, after a positive curvature.
     Restore,
+    /// The best aligned point, or the current one.
     Leave,
 }
 
 impl BandSession {
-    /// After a band step: count the steps the climbing image held.
-    pub(super) fn refine_latch(&mut self) {
+    pub(crate) fn refine_phase(&self) -> RefinePhase {
+        match &self.refine.run {
+            None => RefinePhase::Band,
+            Some(run) if run.climb.is_none() => RefinePhase::Align,
+            Some(_) => RefinePhase::Climb,
+        }
+    }
+
+    pub(crate) fn refine_threshold(&self) -> Option<f64> {
+        self.refine.threshold
+    }
+
+    pub(crate) fn refine_stability(&self) -> usize {
+        self.refine.stable
+    }
+
+    pub(crate) fn refine_last(&self) -> Option<RefineStep> {
+        self.refine.last
+    }
+
+    /// After a band step: count the steps the climbing image held and
+    /// start a refinement when the latch and the trigger allow one.
+    pub(super) fn refine_latch(&mut self, status: BandStatus) -> Result<(), SaddleError> {
         let ci = self.state.ci();
         let refine = &mut self.refine;
         if ci.is_some() && ci == refine.prev_ci {
@@ -224,6 +299,26 @@ impl BandSession {
             refine.cached_mode = None;
         }
         refine.prev_ci = ci;
+        let Some(config) = self.config.min_mode else {
+            return Ok(());
+        };
+        if self.config.climbing.is_none() {
+            return Ok(());
+        }
+        if self.refine.threshold.is_none()
+            && let Some(f0) = self.state.atom_baseline()
+        {
+            self.refine.threshold = Some(initial_threshold(
+                f0,
+                config.trigger_factor,
+                config.trigger_force,
+                self.config.force_tol,
+            ));
+        }
+        if status == BandStatus::Running && self.refine.run.is_none() {
+            self.refine_begin(&config)?;
+        }
+        Ok(())
     }
 
     /// One refinement step, or `None` when the band steps instead.
@@ -231,16 +326,20 @@ impl BandSession {
         &mut self,
         surface: &S,
     ) -> Result<Option<BandReport>, SaddleError> {
+        self.refine.last = None;
         let Some(config) = self.config.min_mode else {
             return Ok(None);
         };
         if self.refine.converged {
             return Ok(Some(self.refine_report(BandStatus::Converged, None)));
         }
-        if self.refine.run.is_none() && !self.refine_begin(&config)? {
+        let Some(run) = self.refine.run.as_ref() else {
             return Ok(None);
-        }
+        };
         self.state.rows.store(0, Ordering::Relaxed);
+        if run.climb.is_none() {
+            return self.refine_align(&config, surface).map(Some);
+        }
         let max_move = self.config.max_move;
         let force_gate = self.state.force_gate;
         let run = self.refine.run.as_mut().expect("refinement run");
@@ -251,22 +350,17 @@ impl BandSession {
         };
         let gate = force_gate.value(run.current.gradient.view());
         let mut measured = None;
-        if run.climb.is_none() {
-            measured = Some(run.start_climb(&image_surface, config.dr, max_move)?);
-            run.refresh_gate = gate;
-            run.since_refresh = 0;
-        } else {
-            if let Some((x, g)) = run.previous.take() {
-                let climb = run.climb.as_mut().expect("climb model");
-                climb.update(
-                    &(&run.current.x - &x),
-                    &(&run.current.gradient - &g),
-                    run.current.energy,
-                );
-            }
+        let mut rotations = 0;
+        if let Some((x, g)) = run.previous.take() {
+            let climb = run.climb.as_mut().expect("climb model");
+            climb.update(
+                &(&run.current.x - &x),
+                &(&run.current.gradient - &g),
+                run.current.energy,
+            );
             run.refresh_gate = run.refresh_gate.min(gate);
             run.since_refresh += 1;
-            let (lowest, _) = run.climb.as_mut().expect("climb model").lowest()?;
+            let (lowest, _) = climb.lowest()?;
             let turned = run
                 .last_mode
                 .as_ref()
@@ -280,14 +374,22 @@ impl BandSession {
                     .set_mode(&estimate.mode, estimate.curvature)?;
                 run.refresh_gate = gate;
                 run.since_refresh = 0;
+                rotations = estimate.rotations;
                 measured = Some(estimate.curvature);
             }
         }
         let climb = run.climb.as_mut().expect("climb model");
         let (mode, model_curvature) = climb.lowest()?;
         let curvature = measured.unwrap_or(model_curvature);
+        run.alignment = mode_alignment(mode.view(), run.tangent.view());
         run.last_mode = Some(mode.clone());
-        run.alignment = mode.dot(&run.tangent).abs();
+        let alignment = run.alignment;
+        let step = RefineStep {
+            align: false,
+            alignment,
+            rotations,
+            fell_back: false,
+        };
         self.iteration += 1;
         if curvature > 0.0 {
             let outcome = if run.best.is_some() {
@@ -296,29 +398,38 @@ impl BandSession {
                 Outcome::Restore
             };
             self.refine_finish(&config, outcome);
-            return Ok(Some(
-                self.refine_report(BandStatus::Running, Some(curvature)),
-            ));
+            return Ok(Some(self.refine_stop(
+                RefineStep {
+                    fell_back: true,
+                    ..step
+                },
+                BandStatus::Running,
+                curvature,
+            )));
         }
-        if run.alignment >= config.alignment_tol
-            && run.best.as_ref().is_none_or(|(f, _, _)| gate < *f)
+        if alignment >= config.alignment_tol && run.best.as_ref().is_none_or(|(f, _, _)| gate < *f)
         {
             run.best = Some((gate, run.current.clone(), mode.clone()));
         }
         if gate <= self.config.force_tol {
             self.refine.converged = true;
-            return Ok(Some(
-                self.refine_report(BandStatus::Converged, Some(curvature)),
-            ));
+            return Ok(Some(self.refine_stop(
+                step,
+                BandStatus::Converged,
+                curvature,
+            )));
         }
-        if run.alignment < config.alignment_tol || run.steps >= config.max_steps {
+        if alignment < config.alignment_tol || run.steps >= config.max_steps {
+            let fell_back = alignment < config.alignment_tol;
             self.refine_finish(&config, Outcome::Leave);
-            return Ok(Some(
-                self.refine_report(BandStatus::Running, Some(curvature)),
-            ));
+            return Ok(Some(self.refine_stop(
+                RefineStep { fell_back, ..step },
+                BandStatus::Running,
+                curvature,
+            )));
         }
-        let step = climb.step(&run.current.gradient, run.current.energy, max_move)?;
-        let next = &run.current.x + &step;
+        let delta = climb.step(&run.current.gradient, run.current.energy, max_move)?;
+        let next = &run.current.x + &delta;
         let (energy, gradient) = image_surface.eval(next.view())?;
         run.steps += 1;
         run.previous = Some((
@@ -330,37 +441,93 @@ impl BandSession {
         let point = run.current.clone();
         let projected = -translated_gradient(&point.gradient, &mode, curvature);
         self.put_image(image, &point, projected.view());
-        Ok(Some(
-            self.refine_report(BandStatus::Running, Some(curvature)),
-        ))
+        Ok(Some(self.refine_stop(step, BandStatus::Running, curvature)))
+    }
+
+    /// The first refinement step: estimate the mode at the climbing
+    /// image and start the climb when it is a negative, aligned mode.
+    /// The image does not move.
+    fn refine_align<S: BandSurface>(
+        &mut self,
+        config: &MinModeRefine,
+        surface: &S,
+    ) -> Result<BandReport, SaddleError> {
+        let max_move = self.config.max_move;
+        let force_tol = self.config.force_tol;
+        let gate_of = self.state.force_gate;
+        let run = self.refine.run.as_mut().expect("refinement run");
+        let image_surface = ImageSurface {
+            surface,
+            image: run.image,
+            rows: &self.state.rows,
+        };
+        let estimate = run.estimate(&image_surface)?;
+        let alignment = mode_alignment(estimate.mode.view(), run.tangent.view());
+        run.alignment = alignment;
+        let gate = gate_of.value(run.current.gradient.view());
+        let step = RefineStep {
+            align: true,
+            alignment,
+            rotations: estimate.rotations,
+            fell_back: true,
+        };
+        self.iteration += 1;
+        if estimate.curvature > 0.0 {
+            self.refine_finish(config, Outcome::Restore);
+            return Ok(self.refine_stop(step, BandStatus::Running, estimate.curvature));
+        }
+        if alignment < config.alignment_tol {
+            self.refine_finish(config, Outcome::Leave);
+            return Ok(self.refine_stop(step, BandStatus::Running, estimate.curvature));
+        }
+        let step = RefineStep {
+            fell_back: false,
+            ..step
+        };
+        run.best = Some((gate, run.current.clone(), estimate.mode.clone()));
+        if gate <= force_tol {
+            self.refine.converged = true;
+            return Ok(self.refine_stop(step, BandStatus::Converged, estimate.curvature));
+        }
+        run.start_climb(
+            &image_surface,
+            &estimate.mode,
+            estimate.curvature,
+            config.dr,
+            max_move,
+        )?;
+        run.refresh_gate = gate;
+        run.since_refresh = 0;
+        Ok(self.refine_stop(step, BandStatus::Running, estimate.curvature))
     }
 
     /// Start a refinement when the latch and the trigger allow one.
-    fn refine_begin(&mut self, config: &MinModeRefine) -> Result<bool, SaddleError> {
-        if self.refine.stable < config.stable_steps {
-            return Ok(false);
-        }
+    fn refine_begin(&mut self, config: &MinModeRefine) -> Result<(), SaddleError> {
         let Some(image) = self.state.ci() else {
-            return Ok(false);
+            return Ok(());
         };
-        let Some(f0) = self.state.atom_baseline() else {
-            return Ok(false);
+        let Some(threshold) = self.refine.threshold else {
+            return Ok(());
         };
         let x = self.interior_flat();
         let (energies, gradient) = {
             let slot = self.state.last.lock().unwrap_or_else(|e| e.into_inner());
             let Some(last) = slot.as_ref().filter(|l| l.x == x) else {
-                return Ok(false);
+                return Ok(());
             };
             (last.energies.clone(), last.gradients.row(image).to_owned())
         };
         let entry_force = max_atom(gradient.view());
-        let threshold = *self
-            .refine
-            .threshold
-            .get_or_insert(config.trigger_factor * f0);
-        if entry_force >= threshold {
-            return Ok(false);
+        if !should_trigger(
+            true,
+            Some(image),
+            self.positions.nrows() - 2,
+            self.refine.stable as i64,
+            config.stable_steps as i64 - 1,
+            entry_force,
+            threshold,
+        ) {
+            return Ok(());
         }
         let tangent = self.image_tangent(image, &energies)?;
         let seed = self
@@ -372,6 +539,9 @@ impl BandSession {
         let mode_config = MinModeConfig {
             kind: config.kind,
             dr: config.dr,
+            difference: config.difference,
+            rotation_tol: config.rotation_tol,
+            max_rotations: config.max_rotations,
             krylov_dim: config.krylov_dim,
             force_tol: self.config.force_tol,
             max_move: self.config.max_move,
@@ -403,7 +573,7 @@ impl BandSession {
             refresh_gate: f64::INFINITY,
             since_refresh: 0,
         });
-        Ok(true)
+        Ok(())
     }
 
     /// End the refinement, place the image, re-arm the trigger, and
@@ -413,32 +583,51 @@ impl BandSession {
             return;
         };
         let f0 = self.state.atom_baseline().unwrap_or(run.entry_force);
-        let penalty = config.trigger_factor * f0 * (0.5 + 0.5 * run.alignment);
+        let force_tol = self.config.force_tol;
+        let backoff = |alpha: f64| backoff_threshold(alpha, f0, config.trigger_factor, force_tol);
         match outcome {
             Outcome::Restore => {
-                let projected = -&run.saved.gradient;
-                self.put_image(run.image, &run.saved, projected.view());
+                self.restore_image(&run);
                 self.refine.cached_mode = None;
-                self.refine.threshold = Some(penalty);
+                self.refine.threshold = Some(backoff(0.0));
             }
             Outcome::Leave => {
                 let (point, mode) = match run.best {
-                    Some((_, point, mode)) => (point, Some(mode)),
-                    None => (run.current, None),
+                    Some((_, ref point, ref mode)) => (point.clone(), Some(mode.clone())),
+                    None => (run.current.clone(), None),
                 };
-                let projected = -&point.gradient;
-                self.put_image(run.image, &point, projected.view());
                 let f_new = max_atom(point.gradient.view());
-                if f_new < run.entry_force {
-                    self.refine.threshold = Some(f_new * (0.5 + 0.4 * f_new / run.entry_force));
+                let helped = walk_helped(f_new, run.entry_force, false);
+                if helped {
+                    let projected = -&point.gradient;
+                    self.put_image(run.image, &point, projected.view());
+                    self.refine.threshold = Some(success_threshold(
+                        run.entry_force,
+                        f_new,
+                        f0,
+                        config.trigger_factor,
+                        force_tol,
+                    ));
                     self.refine.cached_mode = mode;
                 } else {
-                    self.refine.threshold = Some(penalty);
+                    if config.restore_unhelpful {
+                        self.restore_image(&run);
+                        self.refine.cached_mode = None;
+                    } else {
+                        let projected = -&point.gradient;
+                        self.put_image(run.image, &point, projected.view());
+                    }
+                    self.refine.threshold = Some(backoff(run.alignment));
                 }
             }
         }
         self.refine.stable = 0;
-        self.solver.forget();
+        self.forget_optimizer();
+    }
+
+    fn restore_image(&mut self, run: &Run) {
+        let projected = -&run.saved.gradient;
+        self.put_image(run.image, &run.saved, projected.view());
     }
 
     /// Write one image and its surface answer into the band and its
@@ -481,6 +670,11 @@ impl BandSession {
             energies[image + 1],
         )
         .map_err(|e| SaddleError::Invalid(format!("image {image}: {e}")))
+    }
+
+    fn refine_stop(&mut self, step: RefineStep, status: BandStatus, curvature: f64) -> BandReport {
+        self.refine.last = Some(step);
+        self.refine_report(status, Some(curvature))
     }
 
     fn refine_report(&self, status: BandStatus, curvature: Option<f64>) -> BandReport {

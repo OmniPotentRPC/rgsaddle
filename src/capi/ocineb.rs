@@ -10,7 +10,6 @@ use super::{
     RGSADDLE_NULL_REPORT, RGSADDLE_NULL_SESSION, RGSADDLE_NULL_SURFACE, RGSADDLE_OK,
     RgsaddleBandConfig, RgsaddleMinModeConfig, RgsaddleVersion, parse_band_config, status_of,
 };
-use crate::band::BandConfig;
 use crate::minmode::{FiniteDifference, MinModeConfig, MinModeKind};
 use crate::ocineb::{OcinebConfig, OcinebPhase, OcinebSession, OcinebStatus};
 
@@ -129,10 +128,7 @@ pub unsafe extern "C" fn rgsaddle_ocineb_create(
     let method = parsed.method;
     let max_move = parsed.config.max_move;
     let ocineb = OcinebConfig {
-        band: BandConfig {
-            min_mode: None,
-            ..parsed.config
-        },
+        band: parsed.config,
         minmode: minmode_config,
         trigger_factor: config.trigger_factor,
         trigger_force: config.trigger_force,

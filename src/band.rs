@@ -22,6 +22,7 @@ use crate::tangent::compute_tangent;
 mod climb;
 mod min_mode;
 pub use min_mode::MinModeRefine;
+pub(crate) use min_mode::RefinePhase;
 
 /// Row-major 3x3 simulation cell: row `i` is lattice vector `a_i`.
 /// Band mechanics need nothing more from periodicity; neighbor lists
@@ -246,8 +247,8 @@ pub struct BandConfig {
     pub autoneb: Option<crate::autoneb::AutoNebTuning>,
     /// OCI-NEB min-mode refinement of the armed climbing image
     /// (Goswami, Gunde, and Jónsson, Front. Chem. 14, 1807063 (2026)).
-    /// On by default; it needs `climbing` and runs on the atomic band
-    /// with the default stepper. `None` keeps the plain CI-NEB.
+    /// On by default; it needs `climbing` and runs on the atomic band,
+    /// not on the solid-state block. `None` keeps the plain CI-NEB.
     pub min_mode: Option<MinModeRefine>,
 }
 
@@ -1413,18 +1414,6 @@ impl BandSession {
         self.state.ci()
     }
 
-    /// Convergence force of the first assembly. The climbing trigger
-    /// and the off-path hand-off both scale their thresholds from it.
-    /// `None` before the first successful step and after
-    /// [`BandSession::restart`] or [`BandSession::reset`].
-    pub(crate) fn force_baseline(&self) -> Option<f64> {
-        *self
-            .state
-            .baseline
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-    }
-
     /// Drop optimizer history and keep the climbing image, its
     /// baseline, and the cached surface values. A hand-off that moved
     /// an image outside the solver uses this so the next band step
@@ -1623,13 +1612,13 @@ impl BandSession {
             }
             return self.step_solid(surface);
         }
-        if self.rtr.is_some() {
-            return self.step_rtr(surface);
-        }
         if self.config.climbing.is_some()
             && let Some(report) = self.refine_step(surface)?
         {
             return Ok(report);
+        }
+        if self.rtr.is_some() {
+            return self.step_rtr(surface);
         }
         let n_images = self.positions.nrows();
         let dof = self.positions.ncols();
@@ -1703,7 +1692,7 @@ impl BandSession {
         } else {
             BandStatus::Running
         };
-        self.refine_latch();
+        self.refine_latch(status)?;
         Ok(BandReport {
             status,
             max_force,
@@ -1882,12 +1871,14 @@ impl BandSession {
         self.positions.assign(&trial);
         self.iteration += 1;
         let max_force = self.state.last_max_force();
+        let status = if max_force <= self.config.force_tol {
+            BandStatus::Converged
+        } else {
+            BandStatus::Running
+        };
+        self.refine_latch(status)?;
         Ok(BandReport {
-            status: if max_force <= self.config.force_tol {
-                BandStatus::Converged
-            } else {
-                BandStatus::Running
-            },
+            status,
             max_force,
             ci_index: self.state.ci(),
             iteration: self.iteration,

@@ -121,6 +121,7 @@ fn band_session_steps_by_rtr_when_configured() {
     let band = initial_band(n);
     let config = BandConfig {
         force_tol: 1e-5,
+        min_mode: None,
         ..BandConfig::default()
     };
     let mut session = BandSession::new(config, band).expect("session");
@@ -149,4 +150,41 @@ fn band_session_steps_by_rtr_when_configured() {
         "climbing image not at the saddle: {}",
         pos[(ci, 0)]
     );
+}
+
+#[test]
+fn refined_rtr_band_converges_on_the_saddle() {
+    let n = 7;
+    let config = BandConfig {
+        force_tol: 1e-5,
+        ..BandConfig::default()
+    };
+    let mut session = BandSession::new(config, initial_band(n)).expect("session");
+    session
+        .set_rtr(Some(RtrConfig {
+            radius_max: 0.5,
+            ..RtrConfig::default()
+        }))
+        .expect("RTR configuration");
+    let mut last = None;
+    let mut refined = false;
+    for _ in 0..400 {
+        let report = session.step(&DoubleWell).expect("step");
+        refined |= report.curvature.is_some();
+        let done = report.status == BandStatus::Converged;
+        last = Some(report);
+        if done {
+            break;
+        }
+    }
+    let last = last.expect("a step");
+    assert_eq!(
+        last.status,
+        BandStatus::Converged,
+        "session did not converge"
+    );
+    assert!(refined, "the climbing image was not refined");
+    let ci = session.climbing_image().expect("climbing image armed");
+    let pos = session.positions();
+    assert!(pos[(ci, 0)].abs() < 1e-5 && pos[(ci, 1)].abs() < 1e-5);
 }
