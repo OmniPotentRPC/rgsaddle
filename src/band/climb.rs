@@ -324,6 +324,71 @@ mod tests {
     }
 
     #[test]
+    fn the_climb_follows_its_mode_past_a_lower_one() {
+        let x = triangle();
+        let mode = unit(9, 1);
+        let deeper = unit(9, 8);
+        let block = vec![
+            (mode.clone(), &mode * -1.0),
+            (deeper.clone(), &deeper * -3.0),
+        ];
+        let mut climb = ModelClimb::fitted(&x, None, None, &block, &mode, -1.0, 1.0);
+        let (followed, curvature) = climb.lowest().unwrap();
+        assert!((curvature + 1.0).abs() < 1e-10, "{curvature}");
+        assert!((followed.dot(&mode) - 1.0).abs() < 1e-10);
+        let mut g = Array1::zeros(9);
+        g[1] = 0.1;
+        g[8] = 0.1;
+        let s = climb.step(&g, 0.0, 1.0).unwrap();
+        assert!(s[1] > 0.0, "uphill along the followed mode: {s}");
+        assert!(s[8] < 0.0, "downhill along the deeper one: {s}");
+    }
+
+    #[test]
+    fn the_trust_radius_follows_the_energy_ratio() {
+        let x = Array1::from(vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+        let mode = unit(6, 1);
+        let block = vec![(mode.clone(), &mode * -1.0)];
+        let mut climb = ModelClimb::fitted(&x, None, None, &block, &mode, -1.0, 0.1);
+        let g = Array1::from(vec![0.0, 0.5, 0.0, 0.5, 0.0, 0.0]);
+        let take = |climb: &mut ModelClimb, ratio: f64| {
+            let s = climb.step(&g, 0.0, 0.1).unwrap();
+            let (_, predicted, size) = climb.pending.unwrap();
+            let y = climb.b.dot(&s);
+            climb.update(&s, &y, ratio * predicted);
+            size
+        };
+        let size = take(&mut climb, 10.0);
+        assert!((climb.trust - 0.5 * size).abs() < 1e-15, "{}", climb.trust);
+        let before = climb.trust;
+        take(&mut climb, 2.0);
+        assert_eq!(climb.trust, before, "a ratio of 2 keeps the radius");
+        take(&mut climb, 1.0);
+        assert_eq!(
+            climb.trust,
+            2.0 * before,
+            "a good step at the radius doubles it"
+        );
+        for _ in 0..40 {
+            take(&mut climb, -1.0);
+        }
+        assert_eq!(climb.trust, TRUST_MIN);
+    }
+
+    #[test]
+    fn a_mode_goes_stale_on_lost_curvature_or_a_turn() {
+        let x = triangle();
+        let mode = unit(9, 1);
+        let mut climb = ModelClimb::fitted(&x, None, None, &[], &mode, -2.0, 0.1);
+        assert!(!climb.stale(0.3, 0.8));
+        climb.followed_curvature = -0.5;
+        assert!(climb.stale(0.3, 0.8));
+        climb.followed_curvature = -2.0;
+        climb.overlap = 0.7;
+        assert!(climb.stale(0.3, 0.8));
+    }
+
+    #[test]
     fn the_step_respects_the_per_atom_cap() {
         let x = Array1::from(vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
         let mut climb = ModelClimb::fitted(&x, None, None, &[], &unit(6, 0), -1.0, 1.0);
