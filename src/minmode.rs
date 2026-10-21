@@ -723,6 +723,59 @@ fn lowest_ritz(alpha: &[f64], beta: &[f64]) -> (f64, Vec<f64>) {
     (evals[lowest], evecs.iter().map(|row| row[lowest]).collect())
 }
 
+/// Components of an eigenvector with eigenvalue `lambda` on the Lanczos
+/// vectors `q_1 .. q_{k+1}`, from `k` diagonals and `k` off-diagonals.
+///
+/// `H q_j = beta_{j-1} q_{j-1} + alpha_j q_j + beta_j q_{j+1}`, so
+/// `<q_j, u>` for an eigenpair `(lambda, u)` obeys the three-term
+/// recurrence of the Lanczos polynomials, `<q_{j+1}, u> = p_j(lambda)
+/// <q_1, u>` (Parlett, The Symmetric Eigenvalue Problem, SIAM (1998),
+/// doi:10.1137/1.9781611971163, Ch. 7). Only rows `1 .. k` of the
+/// tridiagonal enter, so `q_{k+1}` takes its component without the
+/// action that would give `alpha_{k+1}`. At the exact eigenvalue this is
+/// the projection of `u` on the `k + 1` vectors; at the Ritz value the
+/// last component vanishes and it is the Ritz vector. `None` when the
+/// recurrence leaves the floating-point range.
+fn lanczos_components(alpha: &[f64], beta: &[f64], lambda: f64) -> Option<Vec<f64>> {
+    let k = alpha.len();
+    let mut p = Vec::with_capacity(k + 1);
+    p.push(1.0);
+    for j in 1..=k {
+        let back = if j >= 2 { beta[j - 2] * p[j - 2] } else { 0.0 };
+        let next = ((lambda - alpha[j - 1]) * p[j - 1] - back) / beta[j - 1];
+        p.push(next);
+        if next.abs() > 1e150 {
+            for v in p.iter_mut() {
+                *v *= 1e-150;
+            }
+        }
+    }
+    p.iter().all(|v| v.is_finite()).then_some(p)
+}
+
+/// Estimate of the lowest eigenvalue below the current Ritz value
+/// `theta`. Ritz values of the lowest eigenvalue fall monotonically onto
+/// it (Cauchy interlacing). The next one is predicted from `T_{k+1}`
+/// with `alpha_{k+1} = alpha_k`, the Lanczos diagonal settling on the
+/// centre of the spectrum. Aitken's delta-squared (Aitken, Proc. R. Soc.
+/// Edinburgh 46, 289 (1927), doi:10.1017/S0370164600022070) then
+/// extrapolates `previous`, `theta`, and that prediction when the steps
+/// fall and shrink. Otherwise the prediction is the estimate.
+fn extrapolated_eigenvalue(alpha: &[f64], beta: &[f64], previous: Option<f64>, theta: f64) -> f64 {
+    let mut ahead = alpha.to_vec();
+    ahead.push(alpha[alpha.len() - 1]);
+    let (next, _) = lowest_ritz(&ahead, beta);
+    let Some(previous) = previous else {
+        return next;
+    };
+    let (d1, d2) = (theta - previous, next - theta);
+    if d1 < 0.0 && d2 < 0.0 && d2 > d1 {
+        next - d2 * d2 / (d2 - d1)
+    } else {
+        next
+    }
+}
+
 /// Cyclic Jacobi for a small symmetric matrix. Returns eigenvalues
 /// and the column-major eigenvector table `v[row][col]`.
 // The rotation sweeps touch two columns of one row at a time, so an
@@ -815,6 +868,8 @@ struct LanczosCarry {
     q: Vec<Array1<f64>>,
     alpha: Vec<f64>,
     beta: Vec<f64>,
+    /// Lowest Ritz value after the previous action.
+    theta: Option<f64>,
 }
 
 /// Stepping minimum-mode saddle search.
@@ -1202,6 +1257,13 @@ impl MinModeSession {
     /// would end that host's loop while the basis still had a direction
     /// left. Dimer sessions take the full rotation, matching
     /// [`MinModeSession::estimate_mode`].
+    ///
+    /// After `k` actions the mode lies in the `k + 1` Lanczos vectors:
+    /// the last one is the residual direction the action already
+    /// produced. Its components are the Lanczos polynomials at an
+    /// extrapolated lowest eigenvalue (`lanczos_components`,
+    /// `extrapolated_eigenvalue`), so no surface call is added. The
+    /// reported curvature is the Ritz value of the `k` vectors.
     pub fn push_estimate<S: PointSurface>(
         &mut self,
         surface: &S,
@@ -1262,6 +1324,7 @@ impl MinModeSession {
                 q: vec![normalize(seed)],
                 alpha: Vec::new(),
                 beta: Vec::new(),
+                theta: None,
             });
         }
         let Some(mut carry) = self.lanczos_carry.take() else {
@@ -1308,16 +1371,21 @@ impl MinModeSession {
         }
         let b = w.dot(&w).sqrt();
         let (theta, s) = lowest_ritz(&carry.alpha, &carry.beta);
-        let mut mode = Array1::zeros(dim);
-        for (qi, si) in carry.q.iter().zip(s.iter()) {
-            mode = &mode + &(qi * *si);
-        }
-        mode = normalize(mode);
         let capped = carry.alpha.len() == dim;
-        if !capped && b > 1e-12 {
+        let coefficients = if !capped && b > 1e-12 {
             carry.beta.push(b);
             carry.q.push(w / b);
+            let target = extrapolated_eigenvalue(&carry.alpha, &carry.beta, carry.theta, theta);
+            lanczos_components(&carry.alpha, &carry.beta, target).unwrap_or(s)
+        } else {
+            s
+        };
+        carry.theta = Some(theta);
+        let mut mode = Array1::zeros(dim);
+        for (qi, ci) in carry.q.iter().zip(coefficients.iter()) {
+            mode = &mode + &(qi * *ci);
         }
+        mode = normalize(mode);
         let mut mode = if excluded.nrows() == 0 {
             mode
         } else {
@@ -1662,5 +1730,50 @@ mod tests {
             0,
             "ninety degrees clears the pairs"
         );
+    }
+
+    #[test]
+    fn lanczos_components_at_a_ritz_value_are_the_ritz_vector() {
+        let alpha = [2.0, -1.0, 3.0];
+        let beta = [0.7, 0.4, 0.5];
+        let (theta, s) = super::lowest_ritz(&alpha, &beta[..2]);
+        let p = super::lanczos_components(&alpha, &beta, theta).unwrap();
+        assert_abs_diff_eq!(p[3], 0.0, epsilon = 1e-10);
+        let scale = s[0] / p[0];
+        for (pj, sj) in p.iter().zip(s.iter()) {
+            assert_abs_diff_eq!(pj * scale, *sj, epsilon = 1e-10);
+        }
+    }
+
+    /// At the exact eigenvalue the components are the eigenvector's
+    /// overlaps with the Lanczos vectors, the last one included.
+    #[test]
+    fn lanczos_components_at_the_eigenvalue_project_the_eigenvector() {
+        let d = [-1.0, 0.5, 1.0, 2.0, 4.0, 8.0];
+        let apply = |v: &Array1<f64>| Array1::from_iter(v.iter().zip(d.iter()).map(|(a, b)| a * b));
+        let seed = array![0.3, 0.5, 0.4, 0.4, 0.4, 0.4];
+        let mut q = vec![super::normalize(seed)];
+        let (mut alpha, mut beta) = (Vec::new(), Vec::new());
+        for j in 0..3 {
+            let hv = apply(&q[j]);
+            let a = hv.dot(&q[j]);
+            let mut w = &hv - &(&q[j] * a);
+            if j > 0 {
+                w = &w - &(&q[j - 1] * beta[j - 1]);
+            }
+            for qi in q.iter() {
+                let overlap = w.dot(qi);
+                w = &w - &(qi * overlap);
+            }
+            let b = w.dot(&w).sqrt();
+            alpha.push(a);
+            beta.push(b);
+            q.push(w / b);
+        }
+        let p = super::lanczos_components(&alpha, &beta, -1.0).unwrap();
+        assert_eq!(p.len(), 4);
+        for (pj, qj) in p.iter().zip(q.iter()) {
+            assert_abs_diff_eq!(pj * q[0][0], qj[0], epsilon = 1e-12);
+        }
     }
 }
