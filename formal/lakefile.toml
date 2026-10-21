@@ -11,3 +11,7 @@ name = "RgsaddleContracts"
 
 [[lean_lib]]
 name = "RgsaddleRuntimeContracts"
+
+[[lean_exe]]
+name = "mirror"
+root = "Mirror"

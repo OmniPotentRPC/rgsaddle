@@ -3,3 +3,4 @@ import RgsaddleContracts.MinMode
 import RgsaddleContracts.FiniteDiff
 import RgsaddleContracts.AcceptedPoint
 import RgsaddleContracts.TrustRadius
+import RgsaddleContracts.Stencil
