@@ -16,12 +16,20 @@ stubbed: the session body is not reached, and replacing it would drop
 the real function from the proof. No harness is deferred to a schedule.
 A shard that does not report success fails the workflow.
 
+The harness build passes `--no-default-features`. The default `faer`
+feature stays off, so `pulp` is not compiled. `pulp` contains global
+assembly, which Kani rejects, and it arrives through faer
+(`cargo tree -i pulp`). Connect and SQNM call faer for a dense
+self-adjoint spectrum. These guards return before that call. With the
+feature off those functions still compile, and they panic if reached,
+so a harness that entered them would fail.
+
 `cap_max_abs` is two harnesses, null and short. The other 27 entry
 points keep both obligations in one harness. That is 29 proofs of 28
 functions.
 
 Kani 0.68.0, CBMC 6.11.0, on this machine. The command was
-`cargo kani --features capi --harness kani_proofs::abi_guards::<name> --output-format terse`.
+`cargo kani --no-default-features --features capi --harness kani_proofs::abi_guards::<name> --output-format terse`.
 The time column is CBMC's `Verification Time`.
 
 | Harness | C function | Result | Time (s) |

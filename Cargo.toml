@@ -14,7 +14,7 @@ categories = ["science"]
 crate-type = ["lib", "cdylib", "staticlib"]
 
 [features]
-default = []
+default = ["faer"]
 capi = []
 par = ["rgmin/par"]
 highs = ["rgmin/highs"]
@@ -26,6 +26,10 @@ chemfiles = ["readcon", "readcon-core/chemfiles"]
 # GMP and MPFR stay off the default build. `cargo test --features capi`
 # does not compile this feature.
 verify = ["dep:proptest", "dep:rug"]
+# Dense self-adjoint spectra in connect and SQNM. On by default.
+# `cargo kani` passes `--no-default-features` so this stays off:
+# faer pulls pulp, and pulp's global assembly does not compile under Kani.
+faer = ["dep:faer"]
 
 [dependencies]
 dlpk = { version = "0.1.5", features = ["ndarray"] }
@@ -39,7 +43,7 @@ readcon-db = { version = "0.2", optional = true }
 rgmin = { git = "https://github.com/OmniPotentRPC/rgmin", rev = "d76539dbe40695c0032e0d96a56e7932f2cc49ab" }
 eindir-core = { version = "0.6.0", features = ["capi"] }
 ndarray = "0.17"
-faer = { version = "0.24.4", default-features = false, features = ["std", "linalg"] }
+faer = { version = "0.24.4", optional = true, default-features = false, features = ["std", "linalg"] }
 rayon = "1.12"
 thiserror = "2"
 linkcell = { version = "0.3.3", git = "https://github.com/d-SEAMS/linkcell", rev = "f6cf5700ca9c90e1877c84b66fb68386de5ceffe", default-features = false }

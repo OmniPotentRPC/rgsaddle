@@ -104,7 +104,11 @@ jobs:
           # One shard is a few seconds of CBMC after codegen.
           # Ten minutes is a hang detector. A timeout fails the shard
           # and is not a proof. See validation/kani_unsupported.md.
-          timeout 600 cargo kani --features capi --output-format terse "${args[@]}"
+          # `--no-default-features` leaves faer, and the pulp crate it
+          # pulls in, out of this build. pulp contains global assembly,
+          # which Kani rejects. The harnesses return before the connect
+          # and SQNM spectra that call faer.
+          timeout 600 cargo kani --no-default-features --features capi --output-format terse "${args[@]}"
 
   libm:
     runs-on: ubuntu-latest
