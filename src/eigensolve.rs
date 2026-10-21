@@ -133,7 +133,7 @@ pub fn exact_eigh(a: ArrayView2<f64>) -> Result<(Array1<f64>, Array2<f64>), Sadd
 /// The `faer` feature is on by default. A build without it still
 /// compiles, and this function panics if a caller reaches it. Connect
 /// and SQNM use the same gate.
-fn faer_eigh(a: &Array2<f64>) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
+pub(crate) fn faer_eigh(a: &Array2<f64>) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
     #[cfg(not(feature = "faer"))]
     {
         let _ = a;

@@ -19,6 +19,11 @@ use crate::spring::SpringKind;
 use crate::tangent::TangentKind;
 use crate::tangent::compute_tangent;
 
+mod climb;
+mod min_mode;
+pub use min_mode::MinModeRefine;
+pub(crate) use min_mode::RefinePhase;
+
 /// Row-major 3x3 simulation cell: row `i` is lattice vector `a_i`.
 /// Band mechanics need nothing more from periodicity; neighbor lists
 /// (when a surface wants them) are vesin's job, not this crate's.
@@ -240,6 +245,11 @@ pub struct BandConfig {
     pub time_step: f64,
     /// `Some` selects AutoNEB on this configuration. `None` is a fixed band.
     pub autoneb: Option<crate::autoneb::AutoNebTuning>,
+    /// OCI-NEB min-mode refinement of the armed climbing image
+    /// (Goswami, Gunde, and Jónsson, Front. Chem. 14, 1807063 (2026)).
+    /// On by default; it needs `climbing` and runs on the atomic band,
+    /// not on the solid-state block. `None` keeps the plain CI-NEB.
+    pub min_mode: Option<MinModeRefine>,
 }
 
 impl Default for BandConfig {
@@ -261,6 +271,7 @@ impl Default for BandConfig {
             quickmin_options: rgmin::QuickMinOptions::rgmin(),
             time_step: 1.0,
             autoneb: None,
+            min_mode: Some(MinModeRefine::default()),
         }
     }
 }
@@ -284,6 +295,9 @@ pub struct BandReport {
     /// [`BandSession::new`] or [`BandSession::reset`] adds the two
     /// endpoints.
     pub surface_rows: usize,
+    /// Curvature along the climbing image's lowest mode on a step of
+    /// the min-mode refinement; `None` on a band step.
+    pub curvature: Option<f64>,
 }
 
 /// The caller's surface: fused energies and gradients for a run of
@@ -327,6 +341,19 @@ pub trait BandSurface: Sync {
             "solid-state band requires BandSurface::eval_cells".into(),
         ))
     }
+
+    /// Energy and Cartesian gradient of band image `image` alone. The
+    /// min-mode refinement calls this for the climbing image; the
+    /// default is a one-row [`BandSurface::eval`], so a host that keys
+    /// per-image state on the row count overrides it.
+    fn eval_image(
+        &self,
+        image: usize,
+        position: ArrayView1<f64>,
+    ) -> Result<(f64, Array1<f64>), SaddleError> {
+        let _ = image;
+        min_mode::one_row(self, position)
+    }
 }
 
 /// Oriented cells and the Jacobian fixed at session build.
@@ -368,6 +395,8 @@ struct BandEval {
 struct BandState {
     force_gate: ForceGate,
     baseline: Mutex<Option<f64>>,
+    /// Largest per-atom force of the first assembly, the OCI-NEB `F_0`.
+    atom_baseline: Mutex<Option<f64>>,
     /// Climbing armed: from then on the climbing image is the highest
     /// interior image of every evaluation (eOn's rule).
     armed: AtomicBool,
@@ -396,6 +425,7 @@ impl BandState {
         Self {
             force_gate: ForceGate::LinfNorm,
             baseline: Mutex::new(None),
+            atom_baseline: Mutex::new(None),
             armed: AtomicBool::new(false),
             ci_index: AtomicI64::new(-1),
             surface_error: Mutex::new(None),
@@ -410,6 +440,9 @@ impl BandState {
             ForceGate::LinfNorm => max_abs(force),
             gate => gate.value(force.view()),
         }
+    }
+    fn atom_baseline(&self) -> Option<f64> {
+        *self.atom_baseline.lock().unwrap_or_else(|e| e.into_inner())
     }
     fn ci(&self) -> Option<usize> {
         let i = self.ci_index.load(Ordering::Relaxed);
@@ -434,6 +467,7 @@ impl BandState {
     /// relaxation; the surface caches stay.
     fn restart(&self) {
         *self.baseline.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self.atom_baseline.lock().unwrap_or_else(|e| e.into_inner()) = None;
         self.armed.store(false, Ordering::Relaxed);
         self.ci_index.store(-1, Ordering::Relaxed);
     }
@@ -854,16 +888,12 @@ fn assemble_solid(
             max_i = i;
         }
     }
-    let endpoint_ceiling = enthalpy[0].max(enthalpy[n_images - 1]);
-    let climb_target = (enthalpy[max_i] > endpoint_ceiling).then_some(max_i);
     let climbing = config.climbing.is_some();
     let armed = climbing && state.armed.load(Ordering::Relaxed);
     if armed {
-        state
-            .ci_index
-            .store(climb_target.map_or(-1, |i| i as i64), Ordering::Relaxed);
+        state.ci_index.store(max_i as i64, Ordering::Relaxed);
     }
-    let ci_at = if armed { climb_target } else { None };
+    let ci_at = armed.then_some(max_i);
     let mut joint = Array1::zeros(x.len());
     let mut cartesian = Array1::zeros(x.len());
     for i in 1..n_images - 1 {
@@ -893,17 +923,15 @@ fn assemble_solid(
         && (max_component < baseline * ci.trigger_factor || max_component < ci.trigger_force)
     {
         state.armed.store(true, Ordering::Relaxed);
-        if let Some(ci_i) = climb_target {
-            state.ci_index.store(ci_i as i64, Ordering::Relaxed);
-            let (projected, step) = solid_image(
-                config, ci_i, true, &positions, &cells, &enthalpy, &gradients, &stresses, jacobian,
-                pressure,
-            )?;
-            let start = (ci_i - 1) * seg;
-            joint.slice_mut(s![start..start + seg]).assign(&projected);
-            cartesian.slice_mut(s![start..start + seg]).assign(&step);
-            max_component = state.convergence_force(&joint);
-        }
+        state.ci_index.store(max_i as i64, Ordering::Relaxed);
+        let (projected, step) = solid_image(
+            config, max_i, true, &positions, &cells, &enthalpy, &gradients, &stresses, jacobian,
+            pressure,
+        )?;
+        let start = (max_i - 1) * seg;
+        joint.slice_mut(s![start..start + seg]).assign(&projected);
+        cartesian.slice_mut(s![start..start + seg]).assign(&step);
+        max_component = state.convergence_force(&joint);
     }
     // A force whose squared norm overflows defeats every solver's
     // dot products long before a component turns non-finite.
@@ -1005,10 +1033,10 @@ fn max_abs(v: &Array1<f64>) -> f64 {
 ///
 /// The climbing image is decided on this evaluation's energies, so
 /// the force returned already carries the climb: once armed, the
-/// highest interior image climbs while it lies above both fixed
-/// endpoints (eOn's rule; a monotonic band keeps the spring on every
-/// image); on the evaluation that arms it, the climbing image's force
-/// is reassembled before returning.
+/// highest interior image climbs, also when an endpoint is higher
+/// (two minima bound a peak, and the saddle then lies between that
+/// image and the endpoint); on the evaluation that arms it, the
+/// climbing image's force is reassembled before returning.
 fn assemble_band(
     config: &BandConfig,
     state: &BandState,
@@ -1027,16 +1055,12 @@ fn assemble_band(
             max_i = i;
         }
     }
-    let endpoint_ceiling = energies[0].max(energies[n_images - 1]);
-    let climb_target = (energies[max_i] > endpoint_ceiling).then_some(max_i);
     let climbing = config.climbing.is_some();
     let armed = climbing && state.armed.load(Ordering::Relaxed);
     if armed {
-        state
-            .ci_index
-            .store(climb_target.map_or(-1, |i| i as i64), Ordering::Relaxed);
+        state.ci_index.store(max_i as i64, Ordering::Relaxed);
     }
-    let ci_at = if armed { climb_target } else { None };
+    let ci_at = armed.then_some(max_i);
 
     let mut projected = Array1::zeros((n_images - 2) * dof);
     for i in 1..n_images - 1 {
@@ -1060,28 +1084,31 @@ fn assemble_band(
         let mut b = state.baseline.lock().unwrap_or_else(|e| e.into_inner());
         *b.get_or_insert(max_component)
     };
+    state
+        .atom_baseline
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_or_insert_with(|| min_mode::max_atom(projected.view()));
     if let Some(ci) = &config.climbing
         && !armed
         && (max_component < baseline * ci.trigger_factor || max_component < ci.trigger_force)
     {
         state.armed.store(true, Ordering::Relaxed);
-        if let Some(ci_i) = climb_target {
-            state.ci_index.store(ci_i as i64, Ordering::Relaxed);
-            let f = image_force(
-                config,
-                ci_i,
-                true,
-                endpoint_first,
-                endpoint_last,
-                x,
-                &energies,
-                &gradients,
-            )?;
-            projected
-                .slice_mut(s![(ci_i - 1) * dof..ci_i * dof])
-                .assign(&f);
-            max_component = state.convergence_force(&projected);
-        }
+        state.ci_index.store(max_i as i64, Ordering::Relaxed);
+        let f = image_force(
+            config,
+            max_i,
+            true,
+            endpoint_first,
+            endpoint_last,
+            x,
+            &energies,
+            &gradients,
+        )?;
+        projected
+            .slice_mut(s![(max_i - 1) * dof..max_i * dof])
+            .assign(&f);
+        max_component = state.convergence_force(&projected);
     }
 
     // A force whose squared norm overflows defeats every solver's
@@ -1228,6 +1255,7 @@ pub struct BandSession {
     iteration: usize,
     rtr: Option<crate::rtr::BandRtr>,
     solid: Option<SolidRun>,
+    refine: min_mode::RefineState,
 }
 
 impl BandSession {
@@ -1264,6 +1292,9 @@ impl BandSession {
             config.method.clone()
         };
         check_force_driven(&method)?;
+        if let Some(refine) = &config.min_mode {
+            refine.validate()?;
+        }
         if !(config.time_step.is_finite() && config.time_step > 0.0) {
             return Err(SaddleError::Invalid(
                 "band time step must be positive and finite".into(),
@@ -1281,6 +1312,7 @@ impl BandSession {
             iteration: 0,
             rtr: None,
             solid,
+            refine: min_mode::RefineState::default(),
         })
     }
 
@@ -1344,6 +1376,7 @@ impl BandSession {
         let interior_dof = (self.positions.nrows() - 2) * segment;
         self.solver = build_solver(&self.config, &method, interior_dof);
         self.state.restart();
+        self.refine = min_mode::RefineState::default();
         Ok(())
     }
 
@@ -1367,18 +1400,6 @@ impl BandSession {
 
     pub fn climbing_image(&self) -> Option<usize> {
         self.state.ci()
-    }
-
-    /// Convergence force of the first assembly. The climbing trigger
-    /// and the off-path hand-off both scale their thresholds from it.
-    /// `None` before the first successful step and after
-    /// [`BandSession::restart`] or [`BandSession::reset`].
-    pub(crate) fn force_baseline(&self) -> Option<f64> {
-        *self
-            .state
-            .baseline
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
     }
 
     /// Drop optimizer history and keep the climbing image, its
@@ -1436,6 +1457,7 @@ impl BandSession {
         }
         if moved {
             self.state.drop_last();
+            self.refine = min_mode::RefineState::default();
         }
         Ok(())
     }
@@ -1467,6 +1489,7 @@ impl BandSession {
     pub(crate) fn set_climbing(&mut self, climbing: Option<CiConfig>) {
         self.config.climbing = climbing;
         self.state.restart();
+        self.refine = min_mode::RefineState::default();
         self.solver.forget_evaluation();
     }
 
@@ -1493,6 +1516,7 @@ impl BandSession {
     pub fn restart(&mut self) {
         self.solver.forget();
         self.state.restart();
+        self.refine = min_mode::RefineState::default();
         if let Some(rtr) = &mut self.rtr {
             *rtr = crate::rtr::BandRtr::new(rtr.config, false);
             rtr.set_force_gate(self.state.force_gate);
@@ -1576,6 +1600,11 @@ impl BandSession {
             }
             return self.step_solid(surface);
         }
+        if self.config.climbing.is_some()
+            && let Some(report) = self.refine_step(surface)?
+        {
+            return Ok(report);
+        }
         if self.rtr.is_some() {
             return self.step_rtr(surface);
         }
@@ -1651,12 +1680,14 @@ impl BandSession {
         } else {
             BandStatus::Running
         };
+        self.refine_latch(status)?;
         Ok(BandReport {
             status,
             max_force,
             ci_index: self.state.ci(),
             iteration: self.iteration,
             surface_rows: self.state.rows.load(Ordering::Relaxed),
+            curvature: None,
         })
     }
 
@@ -1785,6 +1816,7 @@ impl BandSession {
             ci_index: self.state.ci(),
             iteration: self.iteration,
             surface_rows: self.state.rows.load(Ordering::Relaxed),
+            curvature: None,
         })
     }
 
@@ -1827,16 +1859,19 @@ impl BandSession {
         self.positions.assign(&trial);
         self.iteration += 1;
         let max_force = self.state.last_max_force();
+        let status = if max_force <= self.config.force_tol {
+            BandStatus::Converged
+        } else {
+            BandStatus::Running
+        };
+        self.refine_latch(status)?;
         Ok(BandReport {
-            status: if max_force <= self.config.force_tol {
-                BandStatus::Converged
-            } else {
-                BandStatus::Running
-            },
+            status,
             max_force,
             ci_index: self.state.ci(),
             iteration: self.iteration,
             surface_rows: self.state.rows.load(Ordering::Relaxed),
+            curvature: None,
         })
     }
 
@@ -2038,12 +2073,14 @@ mod tests {
     }
 
     #[test]
-    fn monotonic_band_keeps_the_spring_on_every_image() {
+    fn image_below_an_endpoint_still_climbs() {
         let (positions, gradient) = two_atom_band();
         let (projected, state) =
             assemble(&infinite_climb(), vec![0.0, 1.0, 5.0], &positions, gradient);
-        assert_force(&projected, &[-2.5, 1.0, 0.0, 2.5, -1.0, 0.0]);
-        assert_eq!(state.ci(), None);
+        // The tangent points at the higher endpoint, so the climb
+        // inverts the parallel 2 as on an interior peak.
+        assert_force(&projected, &[-3.5, 1.0, 0.0, 3.5, -1.0, 0.0]);
+        assert_eq!(state.ci(), Some(1));
     }
 
     #[test]

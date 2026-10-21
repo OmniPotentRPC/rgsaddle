@@ -143,10 +143,12 @@ fn mid_run_con_restart_matches_an_uninterrupted_run() {
     let stacked = Array2::from_shape_vec((IMAGES, 3), flat).unwrap();
     resumed.set_positions(stacked).unwrap();
 
+    let mut refined = false;
     for _ in 0..AFTER {
-        straight.step(&surface).unwrap();
+        refined |= straight.step(&surface).unwrap().curvature.is_some();
         resumed.step(&surface).unwrap();
     }
+    assert!(refined, "the climbing image was not refined");
     let straight_final = straight.positions().to_owned();
     let resumed_final = resumed.positions().to_owned();
     assert_eq!(straight_final.len(), 21);

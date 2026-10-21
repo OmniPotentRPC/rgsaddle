@@ -237,6 +237,7 @@ fn run_band(well: &Well, n_images: usize, y_amp: f64, force_tol: f64) -> usize {
     let config = BandConfig {
         force_tol,
         max_move: 0.1,
+        min_mode: None,
         ..BandConfig::default()
     };
     let mut session = BandSession::new(config, initial_band(n_images, y_amp)).unwrap();
@@ -375,6 +376,7 @@ fn handoff_finds_the_same_saddle_as_plain_ci_neb() {
     let config = BandConfig {
         force_tol: tol,
         max_move: 0.1,
+        min_mode: None,
         ..BandConfig::default()
     };
     let mut plain = BandSession::new(config, initial_band(n_images, 0.3)).unwrap();

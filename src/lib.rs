@@ -4,9 +4,10 @@
 //! step on a force this crate assembled. The host owns the loop.
 //! [`band::BandSession::run`] and [`minmode::MinModeSession::run`]
 //! are convenience loops over `step`.
-//! [`ocineb::OcinebSession`] hands the climbing image to a minimum-mode
-//! search once that image is stable: Goswami, Gunde, and Jónsson,
-//! Front. Chem. 14 (2026), doi:10.3389/fchem.2026.1807063.
+//! A climbing band refines its climbing image by the lowest mode once
+//! that image is stable (OCI-NEB: Goswami, Gunde, and Jónsson, Front.
+//! Chem. 14 (2026), doi:10.3389/fchem.2026.1807063);
+//! [`ocineb::OcinebSession`] is that band with the published controls.
 //! [`autoneb::AutoNeb`] inserts
 //! images where the energy gap or the segment length is worst,
 //! relaxes that window, and climbs. The full band runs only when
@@ -67,7 +68,7 @@ mod sqnm;
 pub use autoneb::{AutoNeb, AutoNebReport, AutoNebTuning};
 pub use band::{
     BandConfig, BandEvaluation, BandReport, BandSession, BandStatus, BandSurface, Cell, CiConfig,
-    SolidState,
+    MinModeRefine, SolidState,
 };
 pub use connect::{ConnectConfig, ConnectProfile, ConnectReport, connect};
 pub use error::SaddleError;
