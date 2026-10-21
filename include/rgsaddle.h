@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 19u
+#define RGSADDLE_ABI_MINOR 20u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -930,6 +930,99 @@ rgsaddle_status_t rgsaddle_samd_position(const RgsaddleSamd *session, double *ou
 void rgsaddle_samd_free(RgsaddleSamd *session);
 
 
+
+/**
+ * Image dependent pair potential initial path.
+ *
+ * Goswami, MethodsX (2026), doi:10.1016/j.mex.2026.103899.
+ * Smidstrup, Pedersen, Stokbro, and Jonsson, J. Chem. Phys. 140,
+ * 214106 (2014).
+ *
+ * `reactant` and `product` each hold `3 * n_atoms` doubles. `n_images`
+ * counts the endpoints. `out` holds `n_images * 3 * n_atoms` doubles,
+ * image-major: row 0 is the reactant and the last row is the product.
+ * `cell` is a row-major 3x3 lattice, or NULL in free space. Interior
+ * images are relaxed toward interpolated minimum-image pair distances.
+ * `max_iterations`, `grad_tol` (L2 norm of the IDPP gradient), and
+ * `max_move` (per-atom cap) are the per-image L-BFGS stop. The
+ * defaults are 5000, 1e-3, and 0.1. ABI minor 19.
+ */
+rgsaddle_status_t rgsaddle_idpp_path(int64_t n_images, int64_t n_atoms,
+                                     const double *reactant,
+                                     const double *product, const double *cell,
+                                     int64_t max_iterations, double grad_tol,
+                                     double max_move, double *out);
+
+typedef struct RgsaddleOcineb RgsaddleOcineb;
+
+/** Phase of one OCI-NEB host step. ABI minor 20. */
+typedef enum {
+  RGSADDLE_OCINEB_BAND = 0,
+  RGSADDLE_OCINEB_ALIGN = 1,
+  RGSADDLE_OCINEB_MINMODE = 2
+} rgsaddle_ocineb_phase_t;
+
+/**
+ * Hand-off parameters. The band and minimum-mode configs are separate
+ * arguments of rgsaddle_ocineb_create. trigger_factor 0.31 and
+ * angle_tol 0.85 are the published values. angle_tol must be at least
+ * 1/sqrt(2). stability_count 5 requires the counter to exceed 5.
+ * max_mmf_steps 1000. restore_unhelpful 0 restores only on positive
+ * curvature.
+ */
+typedef struct {
+  rgsaddle_version_t version;
+  uint64_t flags;
+  double trigger_factor;
+  double trigger_force;
+  double angle_tol;
+  int64_t stability_count;
+  int64_t max_mmf_steps;
+  int32_t restore_unhelpful;
+  int32_t reserved;
+} rgsaddle_ocineb_config_t;
+
+/** One OCI-NEB step. The session stamps version and flags. */
+typedef struct {
+  rgsaddle_version_t version;
+  uint64_t flags;
+  int32_t status; /**< rgsaddle_run_status_t */
+  int32_t phase;  /**< rgsaddle_ocineb_phase_t */
+  int32_t fell_back;
+  int32_t evaluations;
+  double max_force;
+  double curvature;
+  double alignment;
+  double threshold;
+  int64_t ci_index;
+  int64_t iteration;
+  int64_t rotations;
+} rgsaddle_ocineb_report_t;
+
+/**
+ * Climbing-image band that hands the climbing image to a minimum-mode
+ * search. Goswami, Gunde, and Jónsson, Front. Chem. 14 (2026),
+ * doi:10.3389/fchem.2026.1807063. Positions are n_images x (3 * n_atoms),
+ * copied in. Returns NULL on an unknown major, a bad shape, or an
+ * alignment tolerance under 1/sqrt(2).
+ */
+RgsaddleOcineb *rgsaddle_ocineb_create(const rgsaddle_band_config_t *band,
+                                       const rgsaddle_minmode_config_t *minmode,
+                                       const rgsaddle_ocineb_config_t *config,
+                                       int64_t n_images, int64_t n_atoms,
+                                       const double *positions);
+
+/** One band step, one alignment, or one minimum-mode step. */
+rgsaddle_status_t rgsaddle_ocineb_step(RgsaddleOcineb *session,
+                                       rgsaddle_surface_fn surface, void *user,
+                                       rgsaddle_ocineb_report_t *out);
+
+/** Copy the current band out (n_images * 3 * n_atoms doubles). */
+rgsaddle_status_t rgsaddle_ocineb_positions(const RgsaddleOcineb *session,
+                                            double *out);
+
+rgsaddle_status_t rgsaddle_ocineb_reset(RgsaddleOcineb *session);
+void rgsaddle_ocineb_free(RgsaddleOcineb *session);
 
 /** Select the optional HiGHS feasible-set step. enabled is 0 or 1.
  * No-op in a library built without the highs Cargo feature. */
