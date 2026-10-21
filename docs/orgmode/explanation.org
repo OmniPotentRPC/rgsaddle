@@ -15,6 +15,19 @@ Tangents, springs, projections, and the climbing-image force follow eOn's =NEBTa
 * Periodicity
 Positions stay unwrapped Cartesian. =Cell= wraps per-atom differences for the band mechanics through fractional coordinates (rows are lattice vectors; a zero row is a non-periodic axis). Neighbor lists, when a surface wants them, are vesin's job.
 
+* The solid-state reference cell
+The solid-state band is checked against an answer computed without a band. The case is the Bain path from bcc to fcc of LJ (epsilon 1 eV, sigma 1 A), switched to zero over [2.0, 2.2] A. Both atoms of the body-centred tetragonal cell diag(a, a, c) sit on inversion centres, so the atomic force is zero at any cell. The relaxed energy at fixed c/a is then a one-dimensional minimum over the volume. =validation/bain_lj_reference.py= scans it on a 2.5e-4 grid. bcc and fcc are minima, and the saddle sits at c/a 1.09331985, 0.0590356373 eV/atom above bcc. Over the six cell strains that saddle has one negative eigenvalue.
+
+The saddle is not stable against atomic motion. The phonon at k = (1/2, 0, 1/2) of the conventional cell has the eigenvalue -51.5 eV/A^2 there, and it shuffles alternate planes. The two-atom cell carries no wave vector but k = 0, so in that cell the scan's saddle is the band's saddle. A supercell does carry the shuffle. A 5x5x4 supercell (200 atoms) has k = (2/5, 0, 1/2), with eigenvalue -38.4 eV/A^2. Its band, run with the settings of the two-atom test and a tolerance of 1e-3, shows the instability:
+
+| iteration | largest force component | climbing image                      |
+|-----------+-------------------------+-------------------------------------|
+|       150 | 4.6e-3                  | c/a 1.0933, the scan saddle         |
+|       200 | 3.19                    | cells shear, a and b part           |
+|       947 | 8.9e-4 (converged)      | c/a 1.0523, 0.0266 eV/atom above bcc |
+
+At convergence the cells carry a shear of 0.233 A, a and b differ by 0.065 A, and the atoms sit up to 0.031 (fractional) off their sites. Rounding seeds the shuffle. The band then follows it to a lower path, as an NEB should, and the scan is no reference for that cell. =tests/c/solid_bain_lj.c= therefore checks the two-atom cell. There the climbing image reaches c/a 1.09331984 and 0.0590356373 eV/atom. Run with arguments =5 5 4 7 1e-3 5000 0.1 0.5=, it reproduces the supercell run and fails its tetragonal-path check by design.
+
 * Evaluations per step
 A warm band step costs =n_images - 2= image evaluations. The endpoint energies are evaluated once. The session keeps its last evaluation, keyed on the interior positions, so a step that starts where the previous one ended is assembled from it: a host resync through =set_positions= (rows equal up to the minimum image keep the session's own copy), an optimizer =restart=, or a solver that dropped its own cache costs nothing. =BandReport.surface_rows= counts what the surface evaluated. The climbing image is chosen on the energies of the evaluation it climbs on, so the step that arms it already climbs.
 

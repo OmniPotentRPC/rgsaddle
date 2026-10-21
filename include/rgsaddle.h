@@ -5,7 +5,7 @@
  * The stepping contract in C. The host owns the loop: create a
  * session, call step until it reports converged (or until the host's
  * own policy says otherwise), reset at a surface-epoch boundary,
- * free. There is no run-to-completion entry point.
+ * free. `rgsaddle_connect` is the run-to-completion double-ended search.
  *
  * Layout discipline follows dlpack.h, the same as the rest of the
  * stack: every wire struct opens with an rgsaddle_version_t and a
@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 16u
+#define RGSADDLE_ABI_MINOR 18u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -48,6 +48,18 @@ extern "C" {
  * fixed.
  */
 #define RGSADDLE_BAND_KEEP_TRANSLATION (1ull << 1)
+
+/**
+ * Band config flags bit 2, ABI minor 17. Climbing is on and arms once
+ * the band's largest force component is under ci_trigger_force (eOn
+ * ci_after) or under ci_trigger_factor times the first evaluation's
+ * (eOn ci_after_rel); either may be 0. ci_trigger_force = INFINITY
+ * climbs from the first evaluation. Without the bit, climbing is on
+ * only for a positive ci_trigger_factor, as before minor 17. A host
+ * that wants the Rust default (arm under 0.5) sets the bit, factor 0
+ * and force 0.5.
+ */
+#define RGSADDLE_BAND_CI_AFTER (1ull << 2)
 
 /** Request flags bit 0. positions and gradients are one image. */
 #define RGSADDLE_REQ_ONE_IMAGE (1ull << 0)
@@ -75,7 +87,12 @@ typedef enum {
   RGSADDLE_ALLOC = -10,
   RGSADDLE_INVALID_PARAMETER = -11,
   /** rgsaddle_band_evaluation: no evaluation at the current band. */
-  RGSADDLE_NO_EVALUATION = -12
+  RGSADDLE_NO_EVALUATION = -12,
+  /**
+   * A band step left the band unchanged while its largest force
+   * component is above force_tol; the band is unchanged. ABI minor 17.
+   */
+  RGSADDLE_STALLED = -13
 } rgsaddle_status_t;
 
 typedef enum {
@@ -177,7 +194,7 @@ typedef struct {
   double spring_k;
   /** Weighted springs: n_images - 1 constants, else NULL. */
   const double *spring_ks;
-  /** Climbing image off when trigger_factor <= 0. */
+  /** Climbing image off when trigger_factor <= 0, unless RGSADDLE_BAND_CI_AFTER. */
   double ci_trigger_factor;
   double ci_trigger_force;
   /** Row-major 3x3 cell for minimum-image differences; NULL for none. */
@@ -234,20 +251,78 @@ RgsaddleBand *rgsaddle_band_create_solid(const rgsaddle_band_config_t *config,
                                          double weight);
 
 /**
- * Cauchy stress for a solid-state step. `n_images` is the row count of
- * this call, `cells` and `stresses` are that many row-major 3x3
- * matrices, and `image` is -1. Return RGSADDLE_OK or another status.
+ * Surface request of a solid-state band, ABI minor 16. The rows follow
+ * rgsaddle_surface_request_t (batched with image -1, or one image with
+ * RGSADDLE_REQ_ONE_IMAGE). Per row the host reads 3 * n_atoms
+ * positions and a row-major lower-triangular 3x3 cell, and writes the
+ * energy, the 3 * n_atoms gradient and the row-major Cauchy stress
+ * sigma = (1/V) dE/deps for the right strain h <- h (I + eps) at fixed
+ * fractional coordinates (energy per length cubed, the rgpot and eOn
+ * convention). One call answers all three, so a potential that
+ * returns its stress with its force costs one evaluation per image.
  */
-typedef rgsaddle_status_t (*rgsaddle_stress_fn)(void *user, int64_t n_images,
-                                                int64_t n_atoms, int64_t image,
-                                                const double *positions,
-                                                const double *cells,
-                                                double *stresses);
+typedef struct {
+  rgsaddle_version_t version;
+  uint64_t flags;
+  int64_t n_images;
+  int64_t n_atoms;
+  const double *positions;
+  const double *cells;
+  double *energies;
+  double *gradients;
+  double *stresses;
+  int64_t image;
+} rgsaddle_solid_surface_request_t;
 
-/** Register the stress callback. A null function clears it. ABI minor 16. */
-rgsaddle_status_t rgsaddle_band_set_stress(RgsaddleBand *band,
-                                           rgsaddle_stress_fn stress,
-                                           void *user);
+typedef rgsaddle_status_t (*rgsaddle_solid_surface_fn)(
+    void *user, rgsaddle_solid_surface_request_t *req);
+
+/**
+ * One optimizer step of a band from rgsaddle_band_create_solid: atoms
+ * and interior cells move together, endpoint cells stay. A solid-state
+ * band refuses rgsaddle_band_step with RGSADDLE_INVALID_PARAMETER, and
+ * a fixed-cell band refuses this call the same way. ABI minor 16.
+ */
+rgsaddle_status_t rgsaddle_band_step_solid(RgsaddleBand *band,
+                                           rgsaddle_solid_surface_fn surface,
+                                           void *user, rgsaddle_report_t *out);
+
+/** Quick-min variants (rgmin QuickMinOptions). ABI minor 16. */
+typedef enum {
+  /** FIRE time-step control, one projection over the band (default). */
+  RGSADDLE_QUICKMIN_RGMIN = 0,
+  /** eOn's quick-min: fixed time step, the velocity kept at the cap. */
+  RGSADDLE_QUICKMIN_EON = 1,
+  /** RGSADDLE_QUICKMIN_RGMIN with a projection per atom. */
+  RGSADDLE_QUICKMIN_PER_ATOM = 2
+} rgsaddle_quickmin_t;
+
+/**
+ * Select the quick-min variant of a band made with
+ * RGSADDLE_METHOD_QUICKMIN; the velocity and time step restart. Any
+ * other band returns RGSADDLE_INVALID_PARAMETER. ABI minor 16.
+ */
+rgsaddle_status_t rgsaddle_band_set_quickmin_variant(RgsaddleBand *band,
+                                                     int32_t variant);
+
+/**
+ * Initial time step of FIRE and quick-min (rgmin Control::istep, 1 at
+ * create); RGSADDLE_QUICKMIN_EON keeps it fixed. The band's optimizer is
+ * rebuilt, so its history and the HiGHS selection go. A non-positive or
+ * non-finite step returns RGSADDLE_INVALID_PARAMETER. ABI minor 16.
+ */
+rgsaddle_status_t rgsaddle_band_set_time_step(RgsaddleBand *band,
+                                              double time_step);
+
+/** Copy the band's cells out (n_images * 9 doubles). ABI minor 16. */
+rgsaddle_status_t rgsaddle_band_cells(const RgsaddleBand *band, double *out);
+
+/**
+ * The fixed Jacobian J = (V/N)^(1/3) sqrt(N) weight, V the mean
+ * endpoint volume: the length unit of the cell block. ABI minor 16.
+ */
+rgsaddle_status_t rgsaddle_band_solid_jacobian(const RgsaddleBand *band,
+                                               double *out);
 
 /** One optimizer step over the assembled band force. */
 rgsaddle_status_t rgsaddle_band_step(RgsaddleBand *band,
@@ -924,6 +999,46 @@ rgsaddle_status_t rgsaddle_stencil_positions(const rgsaddle_stencil_t *stencil, 
 rgsaddle_status_t rgsaddle_stencil_query(const rgsaddle_stencil_t *stencil, int32_t key,
                                          double *out, size_t n);
 void rgsaddle_stencil_free(rgsaddle_stencil_t *stencil);
+
+/**
+ * Double-ended connect, ABI minor 18. The caller stamps version.
+ * max_calls is the COMPASS iteration cap and must be positive.
+ * force_tol is the Euclidean force stop. quench_nodes nonzero
+ * minimizes nodes created by a split before the next segment.
+ * Unspecified COMPASS constants stay at the optbench values
+ * (alpha0 0.001, history 10, trust radius 0.05).
+ */
+typedef struct {
+  rgsaddle_version_t version;
+  uint64_t flags;
+  double force_tol;
+  int64_t max_calls;
+  int32_t quench_nodes;
+} rgsaddle_connect_config_t;
+
+/** kind is 's', 'u', or 'f'. evaluations counts every surface call. */
+typedef struct {
+  rgsaddle_version_t version;
+  uint64_t flags;
+  double energy;
+  double force_norm;
+  int32_t kind;
+  int32_t hessian_index;
+  int32_t evaluations;
+} rgsaddle_connect_report_t;
+
+/**
+ * Run the connect search. left and right each hold 3 * n_atoms
+ * positions. position receives the returned geometry. The surface is
+ * called with one image and writes the energy and the Cartesian
+ * gradient. A non-OK surface status fails the search.
+ */
+rgsaddle_status_t rgsaddle_connect(const rgsaddle_connect_config_t *config,
+                                   int64_t n_atoms, const double *left,
+                                   const double *right,
+                                   rgsaddle_surface_fn surface, void *user,
+                                   double *position,
+                                   rgsaddle_connect_report_t *report);
 
 #ifdef __cplusplus
 }

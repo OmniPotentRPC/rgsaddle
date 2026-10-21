@@ -36,6 +36,7 @@ pub mod autoneb;
 pub mod band;
 #[cfg(feature = "capi")]
 pub mod capi;
+pub mod connect;
 pub mod error;
 pub mod minmode;
 pub mod nichols;
@@ -56,11 +57,13 @@ mod kani_proofs;
 #[cfg(all(test, feature = "verify"))]
 mod differential;
 
+mod sqnm;
 pub use autoneb::{AutoNeb, AutoNebReport, AutoNebTuning};
 pub use band::{
     BandConfig, BandEvaluation, BandReport, BandSession, BandStatus, BandSurface, Cell, CiConfig,
     SolidState,
 };
+pub use connect::{ConnectConfig, ConnectProfile, ConnectReport, connect};
 pub use error::SaddleError;
 pub use minmode::{
     FiniteDifference, MinModeConfig, MinModeKind, MinModeReport, MinModeSession, MinModeStatus,
@@ -179,8 +182,13 @@ pub use rtr::{
 
 #[cfg(feature = "readcon")]
 pub mod io;
+#[cfg(feature = "readcon-db")]
+pub use io::store_band;
 #[cfg(feature = "readcon")]
-pub use io::{MolecularFrame, frame_from_con};
+pub use io::{
+    ConImage, ConSpecies, MolecularFrame, frame_from_con, frame_from_con_nth, frames_from_con,
+    write_band, write_restart,
+};
 
 pub mod gpu;
 pub use gpu::{

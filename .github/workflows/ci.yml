@@ -42,3 +42,17 @@ jobs:
         env:
           RGSADDLE_REQUIRE_ASE: "1"
         run: cargo test --test autoneb --verbose
+
+  readcon:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test
+        run: cargo test --features readcon --verbose
+      - name: Clippy
+        run: cargo clippy --features readcon -- -D warnings
+      - name: Test with the corpus
+        run: cargo test --features readcon-db --verbose
+      - name: Clippy with the corpus
+        run: cargo clippy --features readcon-db -- -D warnings
