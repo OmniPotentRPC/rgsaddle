@@ -26,11 +26,11 @@
 //! The lowest mode is Lanczos with the improved relative stop of
 //! Olsen, Kroes, Henkelman, Arnaldsson, and Jónsson, J. Chem. Phys.
 //! 121, 9776 (2004), doi:10.1063/1.1809574, or the dimer. The climb is
-//! the order-1 P-RFO step on a dense TS-BFGS model (`climb`). The model
-//! starts at `h_0 I`, `h_0` the finite-difference curvature along the
-//! force perpendicular to the mode, and carries the estimated curvature
-//! on the mode with every other direction a minimum. The mode is
-//! estimated again, and the model takes its curvature, when the force
+//! the order-1 P-RFO step on a dense TS-BFGS model (`climb`): the
+//! identity, scaled under the measured curvatures, made to match the
+//! estimate's Krylov block, or a dimer mode joined by one action along
+//! the force perpendicular to it. The mode is estimated again, and its
+//! block imposed, when the force
 //! grows past `refresh_factor` times its lowest value since the last
 //! estimate or when the model's lowest mode turns away from the
 //! previous one.
@@ -87,8 +87,8 @@ pub struct MinModeRefine {
     /// Relative change of the lowest Ritz value that ends a Lanczos
     /// estimate.
     pub lanczos_rel_tol: f64,
-    /// Finite-difference displacement of the Hessian actions and of the
-    /// `h_0` probe.
+    /// Finite-difference displacement of the Hessian actions, and of the
+    /// probe that joins a dimer mode in the climb model.
     pub dr: f64,
     pub difference: FiniteDifference,
     /// Dimer rotation stop and budget.
@@ -200,29 +200,41 @@ impl Run {
         self.session.estimate_mode(surface)
     }
 
-    /// The `h_0` probe along the force perpendicular to `mode`, and the
-    /// model that carries `curvature` on `mode`.
+    /// The Krylov block of the last estimate, or the estimated mode
+    /// with its curvature when the estimate kept none.
+    fn block(&self, estimate: &ModeEstimate) -> Vec<(Array1<f64>, Array1<f64>)> {
+        let block = self.session.krylov_block();
+        if block.is_empty() {
+            vec![(estimate.mode.clone(), &estimate.mode * estimate.curvature)]
+        } else {
+            block.to_vec()
+        }
+    }
+
+    /// The climb model fit to the estimate's block. Without a Krylov
+    /// block (a dimer estimate) one Hessian action along the force
+    /// perpendicular to the mode joins the mode.
     fn start_climb<P: PointSurface>(
         &mut self,
         surface: &P,
-        mode: &Array1<f64>,
-        curvature: f64,
+        estimate: &ModeEstimate,
         dr: f64,
         max_move: f64,
     ) -> Result<(), SaddleError> {
-        let g = &self.current.gradient;
-        let mut d = g - &(mode * mode.dot(g));
-        let norm = d.dot(&d).sqrt();
-        let mut h0 = 1.0;
-        if norm > 0.0 {
-            d /= norm;
-            let probe = &self.current.x + &(&d * dr);
-            let (_, gp) = surface.eval(probe.view())?;
-            h0 = ((&gp - g).dot(&d) / dr).abs().max(1e-3);
+        let mut block = self.block(estimate);
+        if self.session.krylov_block().is_empty() {
+            let g = &self.current.gradient;
+            let mode = &estimate.mode;
+            let mut d = g - &(mode * mode.dot(g));
+            let norm = d.dot(&d).sqrt();
+            if norm > 0.0 {
+                d /= norm;
+                let probe = &self.current.x + &(&d * dr);
+                let (_, gp) = surface.eval(probe.view())?;
+                block.push((d, (&gp - g) / dr));
+            }
         }
-        let mut climb = ModelClimb::new(g.len(), h0, max_move);
-        climb.set_mode(mode, curvature)?;
-        self.climb = Some(climb);
+        self.climb = Some(ModelClimb::fitted(self.current.x.len(), &block, max_move));
         Ok(())
     }
 }
@@ -374,10 +386,8 @@ impl BandSession {
             let grew = gate > config.refresh_factor * run.refresh_gate && run.since_refresh >= 2;
             if turned || grew {
                 let estimate = run.estimate(&image_surface)?;
-                run.climb
-                    .as_mut()
-                    .expect("climb model")
-                    .set_mode(&estimate.mode, estimate.curvature)?;
+                let block = run.block(&estimate);
+                run.climb.as_mut().expect("climb model").impose(&block);
                 run.refresh_gate = gate;
                 run.since_refresh = 0;
                 rotations = estimate.rotations;
@@ -393,8 +403,9 @@ impl BandSession {
             // curvature is still negative, so only a measured one ends
             // the climb.
             let estimate = run.estimate(&image_surface)?;
+            let block = run.block(&estimate);
             let climb = run.climb.as_mut().expect("climb model");
-            climb.set_mode(&estimate.mode, estimate.curvature)?;
+            climb.impose(&block);
             run.refresh_gate = gate;
             run.since_refresh = 0;
             rotations = estimate.rotations;
@@ -510,13 +521,7 @@ impl BandSession {
             self.refine.converged = true;
             return Ok(self.refine_stop(step, BandStatus::Converged, estimate.curvature));
         }
-        run.start_climb(
-            &image_surface,
-            &estimate.mode,
-            estimate.curvature,
-            config.dr,
-            max_move,
-        )?;
+        run.start_climb(&image_surface, &estimate, config.dr, max_move)?;
         run.refresh_gate = gate;
         run.since_refresh = 0;
         Ok(self.refine_stop(step, BandStatus::Running, estimate.curvature))
