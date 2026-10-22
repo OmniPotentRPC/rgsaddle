@@ -120,6 +120,78 @@ fn an_invalid_refinement_is_refused() {
     let mut refine = MinModeRefine::default();
     refine.min_overlap = -0.1;
     assert!(BandSession::new(config(Some(refine)), initial_band(7)).is_err());
+    let mut refine = MinModeRefine::default();
+    refine.retry_factor = Some(0.0);
+    assert!(BandSession::new(config(Some(refine)), initial_band(7)).is_err());
+}
+
+#[test]
+fn an_infinite_trigger_needs_a_retry_factor() {
+    let mut refine = MinModeRefine::default();
+    assert!(refine.trigger_factor.is_infinite());
+    refine.retry_factor = None;
+    assert!(BandSession::new(config(Some(refine)), initial_band(7)).is_err());
+    refine.trigger_factor = 0.5;
+    assert!(BandSession::new(config(Some(refine)), initial_band(7)).is_ok());
+}
+
+#[test]
+fn the_alignment_exit_still_lands_on_the_saddle() {
+    let mut refine = MinModeRefine::default();
+    refine.climb_alignment = true;
+    let (session, reports) = run(config(Some(refine)));
+    let last = reports.last().unwrap();
+    assert_eq!(last.status, BandStatus::Converged);
+    let ci = last.ci_index.expect("climbing image");
+    assert!(session.positions()[(ci, 0)].abs() < 1e-5);
+}
+
+/// The double well, recording the band index of every one-image call.
+struct Indexed(std::sync::Mutex<Vec<usize>>);
+
+impl BandSurface for Indexed {
+    fn eval(
+        &self,
+        positions: ArrayView2<f64>,
+        energies: &mut Array1<f64>,
+        gradients: &mut Array2<f64>,
+    ) -> Result<(), SaddleError> {
+        DoubleWell.eval(positions, energies, gradients)
+    }
+
+    fn eval_image(
+        &self,
+        image: usize,
+        position: ndarray::ArrayView1<f64>,
+    ) -> Result<(f64, Array1<f64>), SaddleError> {
+        self.0.lock().unwrap().push(image);
+        let mut e = Array1::zeros(1);
+        let mut g = Array2::zeros((1, position.len()));
+        DoubleWell.eval(position.insert_axis(ndarray::Axis(0)), &mut e, &mut g)?;
+        Ok((e[0], g.row(0).to_owned()))
+    }
+}
+
+#[test]
+fn the_refinement_evaluates_the_climbing_image_by_index() {
+    let surface = Indexed(std::sync::Mutex::new(Vec::new()));
+    let mut session =
+        BandSession::new(config(Some(MinModeRefine::default())), initial_band(7)).unwrap();
+    let mut last = None;
+    for _ in 0..2000 {
+        let report = session.step(&surface).unwrap();
+        let done = report.status == BandStatus::Converged;
+        last = Some(report);
+        if done {
+            break;
+        }
+    }
+    let last = last.unwrap();
+    assert_eq!(last.status, BandStatus::Converged);
+    let ci = last.ci_index.expect("climbing image");
+    let images = surface.0.into_inner().unwrap();
+    assert!(!images.is_empty(), "the refinement never ran");
+    assert!(images.iter().all(|&i| i == ci), "{images:?}, ci {ci}");
 }
 
 #[cfg(feature = "capi")]

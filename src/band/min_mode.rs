@@ -9,19 +9,22 @@
 //! other images stay where they are. The first refinement step only
 //! estimates the mode, seeded with the band tangent (or the mode cached
 //! by the last successful refinement), and the climb starts when the
-//! curvature is negative and `|v · τ| >= alignment_tol`. A climb
-//! continues while that overlap holds. A positive curvature restores
-//! the image to where the refinement began unless an aligned point was
-//! visited. An alignment failure, a positive curvature after such a
-//! point, or the step budget leaves the image at the visited aligned
-//! point of lowest force. A positive curvature of the model is measured
-//! again before it ends the climb. The trigger thresholds are
-//! [`crate::ocineb::initial_threshold`], and a refinement re-arms at
-//! [`crate::ocineb::success_threshold`] (eq. 15) when it lowered the
-//! force and at [`crate::ocineb::backoff_threshold`] (eqs. 13-14)
-//! otherwise. Those re-armed values belong to the image that climbed:
-//! when the band's climbing image changes index the threshold returns
-//! to its initial value.
+//! curvature is negative and `|v · τ| >= alignment_tol`. With
+//! `climb_alignment` a climb continues only while that overlap holds.
+//! A positive curvature restores the image to where the refinement
+//! began unless an aligned point was visited. An alignment failure, a
+//! positive curvature after such a point, or the step budget leaves the
+//! image at the visited aligned point of lowest force. A positive
+//! curvature of the model is measured again before it ends the climb.
+//! The trigger thresholds are [`crate::ocineb::initial_threshold`], and
+//! a refinement re-arms at [`crate::ocineb::success_threshold`]
+//! (eq. 15) when it lowered the force and at
+//! [`crate::ocineb::backoff_threshold`] (eqs. 13-14) otherwise, capped
+//! by `retry_factor` times the force it started from. Those re-armed
+//! values belong to the image that climbed: when the band's climbing
+//! image changes index the threshold returns to its initial value. A
+//! refinement that leaves the image where it began keeps the band
+//! optimizer's history.
 //!
 //! The lowest mode is Lanczos with the improved relative stop of
 //! Olsen, Kroes, Henkelman, Arnaldsson, and Jónsson, J. Chem. Phys.
@@ -52,25 +55,38 @@ use crate::tangent::compute_tangent;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// OCI-NEB controls. The trigger, stability count and alignment are
-/// looser than the published `λ_rel = 0.31`, `κ = 5`, `α_tol = 0.85`:
-/// the P-RFO climb follows its own model mode, so it starts from a
-/// rougher band and keeps going while the mode turns. The budget is
-/// 1000 steps per refinement. The Lanczos estimate keeps eight actions
-/// and stops when the lowest Ritz value changes by under 5%.
+/// OCI-NEB controls, read only when `BandConfig::min_mode` holds them;
+/// a CI-NEB band leaves it `None`. The defaults hand the climbing image
+/// off as soon as it has kept its index for one band step, at any
+/// force, where the published controls wait for `λ_rel = 0.31` and
+/// `κ = 5`; the start keeps the published `α_tol = 0.85`. The P-RFO
+/// climb follows its own mode by overlap, so it does not end when that
+/// mode leaves the band tangent, and a refinement that did not lower
+/// the force re-arms only under half the force it started from. The
+/// budget is 1000 steps per refinement. The Lanczos estimate keeps up
+/// to twenty actions, which fit the climb model, and stops when the
+/// lowest Ritz value changes by under 5%.
 #[derive(Clone, Copy, Debug)]
 #[non_exhaustive]
 pub struct MinModeRefine {
     /// `λ_rel`: a refinement waits until the climbing image's largest
     /// per-atom force is under this fraction of the largest per-atom
-    /// band force of the first evaluation.
+    /// band force of the first evaluation. Infinite hands the image off
+    /// at any force; that needs `retry_factor`.
     pub trigger_factor: f64,
     /// Absolute trigger on the largest per-atom force, read only when
     /// `trigger_factor` is 0.
     pub trigger_force: f64,
-    /// `α_tol`: the climb starts and continues while the lowest mode
-    /// keeps `|v · τ|` at or above this.
+    /// `α_tol`: the climb starts when the lowest mode has `|v · τ|` at
+    /// or above this.
     pub alignment_tol: f64,
+    /// The climb also ends once the followed mode's `|v · τ|` falls
+    /// under `alignment_tol`.
+    pub climb_alignment: bool,
+    /// A refinement that did not lower the force also re-arms under this
+    /// fraction of the force it started from. `None` keeps the
+    /// published back-off alone.
+    pub retry_factor: Option<f64>,
     /// `κ`: band steps the same image must keep its index.
     pub stable_steps: usize,
     /// Climb steps of one refinement before the band resumes.
@@ -103,14 +119,16 @@ pub struct MinModeRefine {
 impl Default for MinModeRefine {
     fn default() -> Self {
         Self {
-            trigger_factor: 0.5,
+            trigger_factor: f64::INFINITY,
             trigger_force: 0.0,
-            alignment_tol: 0.3,
-            stable_steps: 3,
+            alignment_tol: 0.85,
+            climb_alignment: false,
+            retry_factor: Some(0.5),
+            stable_steps: 1,
             max_steps: 1000,
             restore_unhelpful: false,
             kind: MinModeKind::Lanczos,
-            krylov_dim: 8,
+            krylov_dim: 20,
             lanczos_rel_tol: 0.05,
             dr: 1e-3,
             difference: FiniteDifference::Forward,
@@ -128,8 +146,13 @@ impl MinModeRefine {
         let positive = |v: f64| v.is_finite() && v > 0.0;
         let non_negative = |v: f64| v.is_finite() && v >= 0.0;
         let fraction = |v: f64| (0.0..=1.0).contains(&v);
-        if !(non_negative(self.trigger_factor)
+        let retry = match self.retry_factor {
+            Some(f) => positive(f),
+            None => self.trigger_factor.is_finite(),
+        };
+        if !(self.trigger_factor >= 0.0
             && non_negative(self.trigger_force)
+            && retry
             && positive(self.dr)
             && positive(self.lanczos_rel_tol)
             && non_negative(self.rotation_tol)
@@ -142,8 +165,9 @@ impl MinModeRefine {
         {
             return Err(SaddleError::Invalid(
                 "min-mode refinement needs a non-negative trigger, a positive step, \
-                 tolerance, budget and Krylov size, and the alignment, retained \
-                 curvature and overlap in [0, 1]"
+                 tolerance, budget and Krylov size, a positive retry factor with an \
+                 infinite trigger, and the alignment, retained curvature and overlap \
+                 in [0, 1]"
                     .into(),
             ));
         }
@@ -482,8 +506,9 @@ impl BandSession {
                 curvature,
             )));
         }
-        if alignment < config.alignment_tol || run.steps >= config.max_steps {
-            let fell_back = alignment < config.alignment_tol;
+        let turned = config.climb_alignment && alignment < config.alignment_tol;
+        if turned || run.steps >= config.max_steps {
+            let fell_back = turned;
             self.refine_finish(&config, Outcome::Leave);
             return Ok(Some(self.refine_stop(
                 RefineStep { fell_back, ..step },
@@ -646,7 +671,11 @@ impl BandSession {
         };
         let f0 = self.state.atom_baseline().unwrap_or(run.entry_force);
         let force_tol = self.config.force_tol;
-        let backoff = |alpha: f64| backoff_threshold(alpha, f0, config.trigger_factor, force_tol);
+        let retry = config.retry_factor.map_or(f64::INFINITY, |f| {
+            (f * run.entry_force).max(2.0 * force_tol)
+        });
+        let backoff =
+            |alpha: f64| backoff_threshold(alpha, f0, config.trigger_factor, force_tol).min(retry);
         match outcome {
             Outcome::Restore => {
                 self.restore_image(&run);
@@ -684,7 +713,11 @@ impl BandSession {
             }
         }
         self.refine.stable = 0;
-        self.forget_optimizer();
+        // An image left where the refinement began leaves the band as the
+        // optimizer last saw it.
+        if self.positions.row(run.image) != run.saved.x {
+            self.forget_optimizer();
+        }
     }
 
     fn restore_image(&mut self, run: &Run) {

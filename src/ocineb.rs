@@ -213,6 +213,8 @@ impl OcinebConfig {
             trigger_factor: self.trigger_factor,
             trigger_force: self.trigger_force,
             alignment_tol: self.angle_tol,
+            climb_alignment: true,
+            retry_factor: None,
             stable_steps: usize::try_from(self.stability_count).unwrap_or(0) + 1,
             max_steps: self.max_mmf_steps,
             restore_unhelpful: self.restore_unhelpful,
