@@ -584,8 +584,8 @@ fn asinc_deriv(x: f64) -> f64 {
 fn eigvec_jvp(f: &[[f64; 4]; 4], lam: f64, q: &[f64; 4], df: &[[f64; 4]; 4]) -> [f64; 4] {
     let mut dfq = [0.0; 4];
     for i in 0..4 {
-        for j in 0..4 {
-            dfq[i] += df[i][j] * q[j];
+        for (dfij, qj) in df[i].iter().zip(q) {
+            dfq[i] += dfij * qj;
         }
     }
     let mut ldot = 0.0;
@@ -643,8 +643,8 @@ fn solve4(mut a: [[f64; 4]; 4], mut b: [f64; 4]) -> [f64; 4] {
     let mut x = [0.0; 4];
     for i in (0..4).rev() {
         let mut acc = b[i];
-        for j in (i + 1)..4 {
-            acc -= a[i][j] * x[j];
+        for (aij, xj) in a[i].iter().zip(x.iter()).skip(i + 1) {
+            acc -= aij * xj;
         }
         x[i] = if a[i][i].abs() < 1e-16 {
             0.0
