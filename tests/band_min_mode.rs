@@ -211,8 +211,8 @@ mod capi {
     }
 
     #[test]
-    fn the_c_band_refines_unless_the_flag_is_set() {
-        assert!(curvatures(0).iter().any(|&c| c < 0.0));
+    fn the_c_band_is_ci_neb_with_or_without_the_flag() {
+        assert!(curvatures(0).iter().all(|&c| c == 0.0));
         assert!(
             curvatures(RGSADDLE_BAND_NO_MIN_MODE)
                 .iter()

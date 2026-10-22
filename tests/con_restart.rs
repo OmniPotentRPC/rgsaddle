@@ -10,8 +10,8 @@
 
 use ndarray::{Array1, Array2, ArrayView2};
 use rgsaddle::{
-    BandConfig, BandSession, BandSurface, ConImage, ConSpecies, SaddleError, frames_from_con,
-    write_band,
+    BandConfig, BandSession, BandSurface, ConImage, ConSpecies, MinModeRefine, SaddleError,
+    frames_from_con, write_band,
 };
 
 const IMAGES: usize = 7;
@@ -56,6 +56,7 @@ fn session() -> BandSession {
     let config = BandConfig {
         force_tol: 1e-12,
         max_move: 0.05,
+        min_mode: Some(MinModeRefine::default()),
         ..BandConfig::default()
     };
     BandSession::new(config, initial_band(IMAGES)).unwrap()

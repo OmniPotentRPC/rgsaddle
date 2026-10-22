@@ -5,7 +5,8 @@
 
 use ndarray::{Array1, Array2, ArrayView2};
 use rgsaddle::{
-    BandConfig, BandRtr, BandSession, BandStatus, BandSurface, RtrConfig, SaddleError, band_forces,
+    BandConfig, BandRtr, BandSession, BandStatus, BandSurface, MinModeRefine, RtrConfig,
+    SaddleError, band_forces,
 };
 
 /// V = (x^2 - 1)^2 + 2 y^2 + 2 z^2: minima at (+-1, 0, 0), saddle at
@@ -157,6 +158,7 @@ fn refined_rtr_band_converges_on_the_saddle() {
     let n = 7;
     let config = BandConfig {
         force_tol: 1e-5,
+        min_mode: Some(MinModeRefine::default()),
         ..BandConfig::default()
     };
     let mut session = BandSession::new(config, initial_band(n)).expect("session");

@@ -62,15 +62,13 @@ extern "C" {
 #define RGSADDLE_BAND_CI_AFTER (1ull << 2)
 
 /**
- * Band config flags bit 3, ABI minor 21. No min-mode refinement of the
- * climbing image: the plain CI-NEB of minor 20 and earlier. Without
- * the bit a climbing band hands its climbing image to the OCI-NEB
- * refinement (Goswami, Gunde, and Jonsson, Front. Chem. 14, 1807063
- * (2026)) once that image has held for three steps with its largest
- * per-atom force under half the first evaluation's. That image then
- * climbs alone by P-RFO on a TS-BFGS model while the other images
- * stay, and the band resumes if the climb leaves the band's mode.
- * rgsaddle_ocineb_create does not read the bit.
+ * Band config flags bit 3, ABI minor 21. Accepted and not read. A
+ * band from rgsaddle_band_create is CI-NEB with or without it: the
+ * whole band relaxes, the climbing image climbs inside the band, and
+ * convergence is on the whole band. The min-mode refinement of the
+ * climbing image is OCI-NEB (Goswami, Gunde, and Jonsson, Front. Chem.
+ * 14, 1807063 (2026), doi:10.3389/fchem.2026.1807063), a separate
+ * method: rgsaddle_ocineb_create.
  */
 #define RGSADDLE_BAND_NO_MIN_MODE (1ull << 3)
 
@@ -186,10 +184,10 @@ typedef struct RgsaddleMinMode RgsaddleMinMode;
  * evaluation), positions and gradients are 3 * n_atoms, energies is
  * one value, and n_images is the length of the band.
  *
- * While the min-mode refinement runs (ABI minor 21, see
- * RGSADDLE_BAND_NO_MIN_MODE) each request carries the climbing image
- * alone: with RGSADDLE_REQ_ONE_IMAGE as above, and batched as one
- * geometry with n_images = 1 and image -1.
+ * While an rgsaddle_ocineb_step refines its climbing image (OCI-NEB),
+ * each request carries the climbing image alone: with
+ * RGSADDLE_REQ_ONE_IMAGE as above, and batched as one geometry with
+ * n_images = 1 and image -1.
  *
  * Return RGSADDLE_OK or another rgsaddle_status_t; a non-OK return
  * fails the step with the band unchanged.
@@ -245,8 +243,8 @@ typedef struct {
   int64_t ci_index;
   int64_t iteration;
   /**
-   * Curvature along the lowest mode: the min-mode session, and a band
-   * step of the min-mode refinement (ABI minor 21); 0 on a band step.
+   * Curvature along the lowest mode from the min-mode session; 0 on a
+   * band step.
    */
   double curvature;
   int64_t rotations;
@@ -991,8 +989,8 @@ typedef enum {
  * angle_tol 0.85 are the published values. angle_tol must be at least
  * 1/sqrt(2). stability_count 5 requires the counter to exceed 5.
  * max_mmf_steps 1000. restore_unhelpful 0 restores only on positive
- * curvature. From ABI minor 21 the hand-off is the band's min-mode
- * refinement (see RGSADDLE_BAND_NO_MIN_MODE) with these controls:
+ * curvature. The hand-off is the min-mode refinement of the climbing
+ * image with these controls:
  * the trigger is on the climbing image's largest per-atom force, the
  * minimum-mode config supplies only the mode estimate (kind, dr,
  * difference, rotation_tol, max_rotations, krylov_dim), and the climb

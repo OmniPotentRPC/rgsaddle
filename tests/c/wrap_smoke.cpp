@@ -66,8 +66,8 @@ int main() {
         std::fprintf(stderr, "band did not converge\n");
         return 1;
     }
-    if (!(last.curvature < 0.0)) {
-        std::fprintf(stderr, "refined band curvature %g\n", last.curvature);
+    if (last.curvature != 0.0) {
+        std::fprintf(stderr, "band curvature %g\n", last.curvature);
         return 1;
     }
     auto out = band.positions();

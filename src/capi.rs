@@ -42,8 +42,9 @@ pub const RGSADDLE_BAND_KEEP_TRANSLATION: u64 = 2;
 /// be 0. Without the bit, climbing is on only when `ci_trigger_factor`
 /// is positive.
 pub const RGSADDLE_BAND_CI_AFTER: u64 = 4;
-/// Band config bit 3 (ABI minor 21). No min-mode refinement of the
-/// climbing image: the plain CI-NEB of minor 20 and earlier.
+/// Band config bit 3 (ABI minor 21). Accepted and not read: a C band is
+/// CI-NEB with or without it, and the min-mode refinement of the
+/// climbing image is OCI-NEB, `rgsaddle_ocineb_create`.
 pub const RGSADDLE_BAND_NO_MIN_MODE: u64 = 8;
 
 pub const RGSADDLE_OK: i32 = 0;
@@ -465,8 +466,7 @@ pub(super) unsafe fn parse_band_config(
             quickmin_options: rgmin::QuickMinOptions::rgmin(),
             time_step: 1.0,
             autoneb: None,
-            min_mode: (cfg.flags & RGSADDLE_BAND_NO_MIN_MODE == 0)
-                .then(crate::band::MinModeRefine::default),
+            min_mode: None,
             // Installed after creation through rgsaddle_band_set_exp_precon.
             exp_precon: None,
         },

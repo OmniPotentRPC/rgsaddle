@@ -246,9 +246,12 @@ pub struct BandConfig {
     /// `Some` selects AutoNEB on this configuration. `None` is a fixed band.
     pub autoneb: Option<crate::autoneb::AutoNebTuning>,
     /// OCI-NEB min-mode refinement of the armed climbing image
-    /// (Goswami, Gunde, and Jónsson, Front. Chem. 14, 1807063 (2026)).
-    /// On by default; it needs `climbing` and runs on the atomic band,
-    /// not on the solid-state block. `None` keeps the plain CI-NEB.
+    /// (Goswami, Gunde, and Jónsson, Front. Chem. 14, 1807063 (2026),
+    /// doi:10.3389/fchem.2026.1807063), which [`crate::OcinebSession`]
+    /// sets. `None`, the default, is CI-NEB: the whole band relaxes and
+    /// converges, its climbing image climbing inside it. `Some` needs
+    /// `climbing` and runs on the atomic band, not on the solid-state
+    /// block.
     pub min_mode: Option<MinModeRefine>,
     /// Per-image exponential metric on the band solver. `None` runs
     /// the stepper in the Euclidean metric. Refused on a solid-state
@@ -275,7 +278,7 @@ impl Default for BandConfig {
             quickmin_options: rgmin::QuickMinOptions::rgmin(),
             time_step: 1.0,
             autoneb: None,
-            min_mode: Some(MinModeRefine::default()),
+            min_mode: None,
             exp_precon: None,
         }
     }
