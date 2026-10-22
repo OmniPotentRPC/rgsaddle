@@ -4,11 +4,15 @@
 //! for the partitioned step, which maximizes along the followed mode
 //! and minimizes along the rest. The mode is followed by overlap: each
 //! step maximizes along the model eigenvector closest to the last
-//! followed one, not along the lowest. The TS-BFGS update and the
-//! trust schedule are Sella's (Hermes, Sarsfield, and Zádor, J. Chem.
-//! Theory Comput. 18, 6974 (2022), doi:10.1021/acs.jctc.2c00395). The
+//! followed one, not along the lowest. The TS-BFGS update is Bofill's
+//! (Int. J. Quantum Chem. 94, 324 (2003), doi:10.1002/qua.10709). The
 //! trust radius bounds the largest per-atom move and never exceeds the
-//! band's `max_move`.
+//! band's `max_move`: a ratio of actual to predicted energy change
+//! outside `[1/4, 4]` halves the step just taken, and a ratio inside
+//! `(3/4, 4/3)` from a step that reached the radius doubles it, the
+//! rule of Nocedal and Wright (Numerical Optimization, 2nd ed.,
+//! Algorithm 4.1) made symmetric under `rho -> 1/rho` because a saddle
+//! step may raise or lower the energy.
 //!
 //! The model starts from the pair-stretch Hessian of the image
 //! ([`super::pair_model`]), scaled by the smallest ratio of measured to
@@ -23,7 +27,6 @@ use ndarray::{Array1, Array2};
 use super::Cell;
 use super::pair_model::{impose, pair_hessian, project, project_both};
 use crate::error::SaddleError;
-use crate::geom::{TrustSchedule, update_trust};
 use crate::prfo::PartitionedRationalFunctionOptimization;
 use crate::restricted::ras_cons;
 
@@ -43,6 +46,9 @@ pub(super) struct ModelClimb {
     /// Curvature of the last measured mode, at most `-1e-3`.
     reference: f64,
 }
+
+/// Smallest trust radius the ratio test shrinks to.
+const TRUST_MIN: f64 = 1e-3;
 
 impl ModelClimb {
     /// `mu P` at `x`, `P` the pair-stretch model and `mu` the smallest
@@ -129,14 +135,18 @@ impl ModelClimb {
         if norm > 1e-12 { p / norm } else { v.clone() }
     }
 
-    /// TS-BFGS on the last step and the Sella trust update from the
-    /// ratio of the actual to the predicted energy change.
+    /// TS-BFGS on the last step and the trust update from the ratio of
+    /// the actual to the predicted energy change.
     pub(super) fn update(&mut self, s: &Array1<f64>, y: &Array1<f64>, energy: f64) {
         if let Some((e0, predicted, size)) = self.pending.take()
             && predicted.abs() >= 1e-14
         {
             let rho = (energy - e0) / predicted;
-            self.trust = update_trust(self.trust, rho, size, &TrustSchedule::saddle());
+            if !(0.25..=4.0).contains(&rho) {
+                self.trust = (0.5 * size).max(TRUST_MIN);
+            } else if rho > 0.75 && rho < 4.0 / 3.0 && size > 0.9 * self.trust {
+                self.trust *= 2.0;
+            }
         }
         match &self.rigid {
             Some(q) => rgmin::ts_bfgs_update(&mut self.b, &project(s, q), &project(y, q)),
@@ -332,6 +342,37 @@ mod tests {
         let s = climb.step(&g, 0.0, 1.0).unwrap();
         assert!(s[1] > 0.0, "uphill along the followed mode: {s}");
         assert!(s[8] < 0.0, "downhill along the deeper one: {s}");
+    }
+
+    #[test]
+    fn the_trust_radius_follows_the_energy_ratio() {
+        let x = Array1::from(vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+        let mode = unit(6, 1);
+        let block = vec![(mode.clone(), &mode * -1.0)];
+        let mut climb = ModelClimb::fitted(&x, None, None, &block, &mode, -1.0, 0.1);
+        let g = Array1::from(vec![0.0, 0.5, 0.0, 0.5, 0.0, 0.0]);
+        let take = |climb: &mut ModelClimb, ratio: f64| {
+            let s = climb.step(&g, 0.0, 0.1).unwrap();
+            let (_, predicted, size) = climb.pending.unwrap();
+            let y = climb.b.dot(&s);
+            climb.update(&s, &y, ratio * predicted);
+            size
+        };
+        let size = take(&mut climb, 10.0);
+        assert!((climb.trust - 0.5 * size).abs() < 1e-15, "{}", climb.trust);
+        let before = climb.trust;
+        take(&mut climb, 2.0);
+        assert_eq!(climb.trust, before, "a ratio of 2 keeps the radius");
+        take(&mut climb, 1.0);
+        assert_eq!(
+            climb.trust,
+            2.0 * before,
+            "a good step at the radius doubles it"
+        );
+        for _ in 0..40 {
+            take(&mut climb, -1.0);
+        }
+        assert_eq!(climb.trust, TRUST_MIN);
     }
 
     #[test]
