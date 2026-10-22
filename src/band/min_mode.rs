@@ -27,10 +27,10 @@
 //! Olsen, Kroes, Henkelman, Arnaldsson, and Jónsson, J. Chem. Phys.
 //! 121, 9776 (2004), doi:10.1063/1.1809574, or the dimer. The climb is
 //! the order-1 P-RFO step on a dense TS-BFGS model (`climb`): the
-//! identity, scaled under the measured curvatures, made to match the
-//! estimate's Krylov block, or a dimer mode joined by one action along
-//! the force perpendicular to it. The mode is estimated again, and its
-//! block imposed, when the force
+//! pair-stretch Hessian, scaled under the measured curvatures, made to
+//! match the estimate's Krylov block, or a dimer mode joined by one
+//! action along the force perpendicular to it. The mode is estimated
+//! again, and its block imposed, when the force
 //! grows past `refresh_factor` times its lowest value since the last
 //! estimate or when the model's lowest mode turns away from the
 //! previous one.
@@ -38,7 +38,7 @@
 use ndarray::{Array1, ArrayView1, Axis, s};
 
 use super::climb::ModelClimb;
-use super::{BandReport, BandSession, BandStatus, BandSurface};
+use super::{BandReport, BandSession, BandStatus, BandSurface, Cell};
 use crate::error::SaddleError;
 use crate::minmode::{
     FiniteDifference, MinModeConfig, MinModeKind, MinModeSession, ModeEstimate, PointSurface,
@@ -220,6 +220,7 @@ impl Run {
         estimate: &ModeEstimate,
         dr: f64,
         max_move: f64,
+        cell: Option<&Cell>,
     ) -> Result<(), SaddleError> {
         let mut block = self.block(estimate);
         if self.session.krylov_block().is_empty() {
@@ -234,7 +235,7 @@ impl Run {
                 block.push((d, (&gp - g) / dr));
             }
         }
-        self.climb = Some(ModelClimb::fitted(self.current.x.len(), &block, max_move));
+        self.climb = Some(ModelClimb::fitted(&self.current.x, cell, &block, max_move));
         Ok(())
     }
 }
@@ -487,6 +488,7 @@ impl BandSession {
         let max_move = self.config.max_move;
         let force_tol = self.config.force_tol;
         let gate_of = self.state.force_gate;
+        let cell = self.config.cell;
         let run = self.refine.run.as_mut().expect("refinement run");
         let image_surface = ImageSurface {
             surface,
@@ -521,7 +523,13 @@ impl BandSession {
             self.refine.converged = true;
             return Ok(self.refine_stop(step, BandStatus::Converged, estimate.curvature));
         }
-        run.start_climb(&image_surface, &estimate, config.dr, max_move)?;
+        run.start_climb(
+            &image_surface,
+            &estimate,
+            config.dr,
+            max_move,
+            cell.as_ref(),
+        )?;
         run.refresh_gate = gate;
         run.since_refresh = 0;
         Ok(self.refine_stop(step, BandStatus::Running, estimate.curvature))

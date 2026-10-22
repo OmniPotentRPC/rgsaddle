@@ -7,14 +7,16 @@
 //! bounds the largest per-atom move and never exceeds the band's
 //! `max_move`.
 //!
-//! The model starts from the identity scaled by the smallest positive
-//! curvature measured over the Lanczos block, so it is not stiffer
-//! than the surface along any sampled direction, and the block is then
-//! imposed exactly ([`super::pair_model::impose`]).
+//! The model starts from the pair-stretch Hessian of the image
+//! ([`super::pair_model`]), scaled by the smallest ratio of measured to
+//! model curvature over the positive directions of the Lanczos block,
+//! so it is not stiffer than the surface along any sampled direction,
+//! and the block is then imposed exactly.
 
 use ndarray::{Array1, Array2};
 
-use super::pair_model::impose;
+use super::Cell;
+use super::pair_model::{impose, pair_hessian};
 use crate::error::SaddleError;
 use crate::geom::{TrustSchedule, update_trust};
 use crate::prfo::PartitionedRationalFunctionOptimization;
@@ -29,11 +31,17 @@ pub(super) struct ModelClimb {
 }
 
 impl ModelClimb {
-    /// `mu I` on `n` coordinates, `mu` the smallest `v.Hv / v.v` over
-    /// the pairs of `block` with positive curvature (1 when there is
-    /// none), then `block` imposed. Trust radius `max_move`.
-    pub(super) fn fitted(n: usize, block: &[(Array1<f64>, Array1<f64>)], max_move: f64) -> Self {
-        let p = Array2::<f64>::eye(n);
+    /// `mu P` at `x`, `P` the pair-stretch model and `mu` the smallest
+    /// `v.Hv / v.Pv` over the pairs of `block` with positive curvature
+    /// (1 when there is none), then `block` imposed. Trust radius
+    /// `max_move`.
+    pub(super) fn fitted(
+        x: &Array1<f64>,
+        cell: Option<&Cell>,
+        block: &[(Array1<f64>, Array1<f64>)],
+        max_move: f64,
+    ) -> Self {
+        let p = pair_hessian(x, cell);
         let mut mu = f64::INFINITY;
         for (v, hv) in block {
             let measured = v.dot(hv);
@@ -145,7 +153,7 @@ mod tests {
         mode[1] = 0.6;
         mode[4] = -0.8;
         let block = vec![(mode.clone(), &mode * -2.0)];
-        let mut climb = ModelClimb::fitted(x.len(), &block, 0.1);
+        let mut climb = ModelClimb::fitted(&x, None, &block, 0.1);
         let (lowest, curvature) = climb.lowest().unwrap();
         assert!((curvature + 2.0).abs() < 1e-10, "{curvature}");
         assert!((lowest.dot(&mode).abs() - 1.0).abs() < 1e-10);
@@ -153,12 +161,16 @@ mod tests {
 
     #[test]
     fn the_scale_keeps_the_model_under_the_measured_curvature() {
+        let x = triangle();
+        let p = pair_hessian(&x, None);
         let stretch = &unit(9, 3) - &unit(9, 0);
-        let block = vec![(stretch.clone(), &stretch * 0.25)];
-        let climb = ModelClimb::fitted(9, &block, 0.1);
+        let along = stretch.dot(&p.dot(&stretch));
+        let block = vec![(stretch.clone(), p.dot(&stretch) * 0.25)];
+        let climb = ModelClimb::fitted(&x, None, &block, 0.1);
         let other = unit(9, 8);
-        assert!((other.dot(&climb.b.dot(&other)) - 0.25).abs() < 1e-12);
-        assert!((stretch.dot(&climb.b.dot(&stretch)) - 0.5).abs() < 1e-12);
+        let scaled = other.dot(&climb.b.dot(&other));
+        assert!((scaled - 0.25 * p[(8, 8)]).abs() < 1e-12, "{scaled}");
+        assert!((stretch.dot(&climb.b.dot(&stretch)) - 0.25 * along).abs() < 1e-12);
     }
 
     #[test]
@@ -166,7 +178,7 @@ mod tests {
         let x = Array1::from(vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
         let mode = unit(6, 1);
         let block = vec![(mode.clone(), &mode * -1.0)];
-        let mut climb = ModelClimb::fitted(x.len(), &block, 1.0);
+        let mut climb = ModelClimb::fitted(&x, None, &block, 1.0);
         let g = Array1::from(vec![0.0, 0.1, 0.0, 0.1, 0.0, 0.0]);
         let s = climb.step(&g, 0.0, 1.0).unwrap();
         assert!(s[1] > 0.0, "uphill along the mode: {s:?}");
@@ -176,7 +188,7 @@ mod tests {
     #[test]
     fn the_step_respects_the_per_atom_cap() {
         let x = Array1::from(vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
-        let mut climb = ModelClimb::fitted(x.len(), &[], 1.0);
+        let mut climb = ModelClimb::fitted(&x, None, &[], 1.0);
         let g = Array1::from(vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
         let s = climb.step(&g, 0.0, 0.05).unwrap();
         assert!(ras_cons(&s) <= 0.05 + 1e-12, "{s:?}");
