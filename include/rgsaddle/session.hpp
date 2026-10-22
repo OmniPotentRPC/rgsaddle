@@ -437,6 +437,10 @@ public:
 
     void reset() { check(rgsaddle_ocineb_reset(handle_)); }
 
+    void set_force_gate(rgsaddle_force_gate_t gate) {
+        check(rgsaddle_ocineb_set_force_gate(handle_, gate));
+    }
+
     [[nodiscard]] std::vector<double> positions() const {
         std::vector<double> out(static_cast<std::size_t>(n_images_ * 3 * n_atoms_));
         check(rgsaddle_ocineb_positions(handle_, out.data()));

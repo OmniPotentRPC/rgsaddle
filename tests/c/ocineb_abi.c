@@ -91,6 +91,19 @@ int main(void) {
   if (!session) {
     return fail(RGSADDLE_ALLOC, "create");
   }
+  if (rgsaddle_ocineb_set_force_gate(NULL, RGSADDLE_FORCE_L2) != RGSADDLE_NULL_SESSION) {
+    rgsaddle_ocineb_free(session);
+    return fail(RGSADDLE_NULL_SESSION, "null gate");
+  }
+  if (rgsaddle_ocineb_set_force_gate(session, (rgsaddle_force_gate_t)99) !=
+      RGSADDLE_INVALID_PARAMETER) {
+    rgsaddle_ocineb_free(session);
+    return fail(RGSADDLE_INVALID_PARAMETER, "unknown gate");
+  }
+  if (rgsaddle_ocineb_set_force_gate(session, RGSADDLE_FORCE_L2) != RGSADDLE_OK) {
+    rgsaddle_ocineb_free(session);
+    return fail(RGSADDLE_INVALID_PARAMETER, "L2 gate");
+  }
 
   int saw_align = 0, saw_minmode = 0, saw_fallback = 0;
   rgsaddle_ocineb_report_t report;
@@ -149,6 +162,13 @@ int main(void) {
   const double *ci = out + report.ci_index * 3;
   if (fabs(ci[0]) > 0.05 || fabs(ci[1]) > 0.05 || fabs(ci[2]) > 0.05) {
     fprintf(stderr, "saddle %g %g %g\n", ci[0], ci[1], ci[2]);
+    rgsaddle_ocineb_free(session);
+    return 1;
+  }
+  const double gx = 4.0 * ci[0] * (ci[0] * ci[0] - 1.0), gy = 4.0 * ci[1], gz = 4.0 * ci[2];
+  if (sqrt(gx * gx + gy * gy + gz * gz) > band.force_tol) {
+    fprintf(stderr, "climbing image L2 force %g over %g\n", sqrt(gx * gx + gy * gy + gz * gz),
+            band.force_tol);
     rgsaddle_ocineb_free(session);
     return 1;
   }

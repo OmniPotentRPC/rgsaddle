@@ -5,7 +5,7 @@
 #include <stddef.h>
 
 _Static_assert(RGSADDLE_ABI_MAJOR == 1u, "main ABI major");
-_Static_assert(RGSADDLE_ABI_MINOR == 22u, "ABI minor");
+_Static_assert(RGSADDLE_ABI_MINOR == 23u, "ABI minor");
 _Static_assert(RGSADDLE_BAND_NO_MIN_MODE == (1ull << 3), "band flag bit 3");
 
 typedef struct {
@@ -320,5 +320,9 @@ _Static_assert(_Generic(&rgsaddle_ocineb_reset, abi20_signature_rgsaddle_ocineb_
 
 typedef void (*abi20_signature_rgsaddle_ocineb_free)(RgsaddleOcineb *session);
 _Static_assert(_Generic(&rgsaddle_ocineb_free, abi20_signature_rgsaddle_ocineb_free: 1, default: 0), "rgsaddle_ocineb_free signature");
+
+typedef rgsaddle_status_t (*abi23_signature_rgsaddle_ocineb_set_force_gate)(
+    RgsaddleOcineb *session, rgsaddle_force_gate_t gate);
+_Static_assert(_Generic(&rgsaddle_ocineb_set_force_gate, abi23_signature_rgsaddle_ocineb_set_force_gate: 1, default: 0), "rgsaddle_ocineb_set_force_gate signature");
 
 #endif

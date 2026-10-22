@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 22u
+#define RGSADDLE_ABI_MINOR 23u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -1046,6 +1046,14 @@ rgsaddle_status_t rgsaddle_ocineb_step(RgsaddleOcineb *session,
 /** Copy the current band out (n_images * 3 * n_atoms doubles). */
 rgsaddle_status_t rgsaddle_ocineb_positions(const RgsaddleOcineb *session,
                                             double *out);
+
+/**
+ * The convergence and climbing-trigger norm of the band and its climb
+ * (ABI minor 23), as rgsaddle_band_set_force_gate. The default is
+ * RGSADDLE_FORCE_LINF. A new gate restarts the band and the hand-off.
+ */
+rgsaddle_status_t rgsaddle_ocineb_set_force_gate(RgsaddleOcineb *session,
+                                                 rgsaddle_force_gate_t gate);
 
 rgsaddle_status_t rgsaddle_ocineb_reset(RgsaddleOcineb *session);
 void rgsaddle_ocineb_free(RgsaddleOcineb *session);

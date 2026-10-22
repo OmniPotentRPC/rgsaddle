@@ -240,6 +240,23 @@ pub unsafe extern "C" fn rgsaddle_ocineb_positions(
 /// # Safety
 /// `session` must be a live session pointer or NULL.
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_ocineb_set_force_gate(
+    session: *mut RgsaddleOcineb,
+    gate: i32,
+) -> i32 {
+    if session.is_null() {
+        return RGSADDLE_NULL_SESSION;
+    }
+    let Some(gate) = crate::ForceGate::try_from_abi(gate) else {
+        return RGSADDLE_INVALID_PARAMETER;
+    };
+    unsafe { (*session).session.set_force_gate(gate) };
+    RGSADDLE_OK
+}
+
+/// # Safety
+/// `session` must be a live session pointer or NULL.
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rgsaddle_ocineb_reset(session: *mut RgsaddleOcineb) -> i32 {
     if session.is_null() {
         return RGSADDLE_NULL_SESSION;
