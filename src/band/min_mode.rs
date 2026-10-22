@@ -26,14 +26,13 @@
 //! The lowest mode is Lanczos with the improved relative stop of
 //! Olsen, Kroes, Henkelman, Arnaldsson, and Jónsson, J. Chem. Phys.
 //! 121, 9776 (2004), doi:10.1063/1.1809574, or the dimer. The climb is
-//! the order-1 P-RFO step on a dense TS-BFGS model (`climb`): the
-//! pair-stretch Hessian, scaled under the measured curvatures, made to
-//! match the estimate's Krylov block, or a dimer mode joined by one
-//! action along the force perpendicular to it. The mode is estimated
-//! again, and its block imposed, when the force
-//! grows past `refresh_factor` times its lowest value since the last
-//! estimate or when the model's lowest mode turns away from the
-//! previous one.
+//! the order-1 P-RFO step on a dense TS-BFGS model (`climb`) fit to the
+//! pair-stretch Hessian and the estimate's Krylov block, following the
+//! estimated mode by overlap. The mode is estimated again, its block
+//! imposed and its direction followed, once the followed curvature has
+//! kept under `curvature_retained` of the last measured value or
+//! the followed mode turned under `min_overlap`, at most every
+//! `refresh_interval` climb steps.
 
 use ndarray::{Array1, ArrayView1, Axis, s};
 
@@ -52,10 +51,6 @@ use crate::ocineb::{
 use crate::tangent::compute_tangent;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-
-/// Overlap with the previous model mode under which the model's lowest
-/// mode counts as a different direction.
-const MODE_TURN: f64 = 0.7;
 
 /// OCI-NEB controls. The trigger, stability count and alignment are
 /// looser than the published `λ_rel = 0.31`, `κ = 5`, `α_tol = 0.85`:
@@ -95,9 +90,14 @@ pub struct MinModeRefine {
     /// Dimer rotation stop and budget.
     pub rotation_tol: f64,
     pub max_rotations: usize,
-    /// Growth of the force over its lowest value since the last mode
-    /// estimate that triggers a new one.
-    pub refresh_factor: f64,
+    /// The mode is estimated again once the followed model curvature
+    /// is above this fraction of the curvature last measured.
+    pub curvature_retained: f64,
+    /// The mode is estimated again once the followed mode's overlap with
+    /// the one followed a step before is under this.
+    pub min_overlap: f64,
+    /// Climb steps after an estimate before the next one.
+    pub refresh_interval: usize,
 }
 
 impl Default for MinModeRefine {
@@ -116,7 +116,9 @@ impl Default for MinModeRefine {
             difference: FiniteDifference::Forward,
             rotation_tol: 1e-4,
             max_rotations: 20,
-            refresh_factor: 1.5,
+            curvature_retained: 0.3,
+            min_overlap: 0.8,
+            refresh_interval: 4,
         }
     }
 }
@@ -125,23 +127,23 @@ impl MinModeRefine {
     pub(super) fn validate(&self) -> Result<(), SaddleError> {
         let positive = |v: f64| v.is_finite() && v > 0.0;
         let non_negative = |v: f64| v.is_finite() && v >= 0.0;
+        let fraction = |v: f64| (0.0..=1.0).contains(&v);
         if !(non_negative(self.trigger_factor)
             && non_negative(self.trigger_force)
             && positive(self.dr)
             && positive(self.lanczos_rel_tol)
             && non_negative(self.rotation_tol)
-            && self.refresh_factor.is_finite()
-            && self.refresh_factor >= 1.0
-            && self.alignment_tol.is_finite()
-            && (0.0..=1.0).contains(&self.alignment_tol)
+            && fraction(self.alignment_tol)
+            && fraction(self.curvature_retained)
+            && fraction(self.min_overlap)
             && self.max_steps > 0
             && self.max_rotations > 0
             && self.krylov_dim > 0)
         {
             return Err(SaddleError::Invalid(
                 "min-mode refinement needs a non-negative trigger, a positive step, \
-                 tolerance, budget and Krylov size, a refresh factor of at least 1, \
-                 and an alignment in [0, 1]"
+                 tolerance, budget and Krylov size, and the alignment, retained \
+                 curvature and overlap in [0, 1]"
                     .into(),
             ));
         }
@@ -188,9 +190,7 @@ struct Run {
     best: Option<(f64, Point, Array1<f64>)>,
     alignment: f64,
     steps: usize,
-    last_mode: Option<Array1<f64>>,
-    /// Lowest force since the last mode estimate.
-    refresh_gate: f64,
+    /// Climb steps since the last mode estimate.
     since_refresh: usize,
 }
 
@@ -243,9 +243,23 @@ impl Run {
             cell,
             rigid,
             &block,
+            &estimate.mode,
+            estimate.curvature,
             max_move,
         ));
+        self.since_refresh = 0;
         Ok(())
+    }
+
+    /// Impose the estimate's block on the climb model and follow its mode.
+    fn refresh(&mut self, estimate: &ModeEstimate) {
+        let block = self.block(estimate);
+        self.climb.as_mut().expect("climb model").refresh(
+            &block,
+            &estimate.mode,
+            estimate.curvature,
+        );
+        self.since_refresh = 0;
     }
 }
 
@@ -405,20 +419,13 @@ impl BandSession {
                 cell.as_ref(),
                 remove_translation,
             ));
-            run.refresh_gate = run.refresh_gate.min(gate);
             run.since_refresh += 1;
-            let (lowest, _) = climb.lowest()?;
-            let turned = run
-                .last_mode
-                .as_ref()
-                .is_some_and(|m| m.dot(&lowest).abs() < MODE_TURN);
-            let grew = gate > config.refresh_factor * run.refresh_gate && run.since_refresh >= 2;
-            if turned || grew {
+            climb.lowest()?;
+            if run.since_refresh >= config.refresh_interval
+                && climb.stale(config.curvature_retained, config.min_overlap)
+            {
                 let estimate = run.estimate(&image_surface)?;
-                let block = run.block(&estimate);
-                run.climb.as_mut().expect("climb model").impose(&block);
-                run.refresh_gate = gate;
-                run.since_refresh = 0;
+                run.refresh(&estimate);
                 rotations = estimate.rotations;
                 measured = Some(estimate.curvature);
             }
@@ -432,18 +439,13 @@ impl BandSession {
             // curvature is still negative, so only a measured one ends
             // the climb.
             let estimate = run.estimate(&image_surface)?;
-            let block = run.block(&estimate);
-            let climb = run.climb.as_mut().expect("climb model");
-            climb.impose(&block);
-            run.refresh_gate = gate;
-            run.since_refresh = 0;
+            run.refresh(&estimate);
             rotations = estimate.rotations;
             curvature = estimate.curvature;
-            mode = climb.lowest()?.0;
+            mode = run.climb.as_mut().expect("climb model").lowest()?.0;
         }
         let climb = run.climb.as_mut().expect("climb model");
         run.alignment = mode_alignment(mode.view(), run.tangent.view());
-        run.last_mode = Some(mode.clone());
         let alignment = run.alignment;
         let step = RefineStep {
             align: false,
@@ -560,8 +562,6 @@ impl BandSession {
             cell.as_ref(),
             remove_translation,
         )?;
-        run.refresh_gate = gate;
-        run.since_refresh = 0;
         Ok(self.refine_stop(step, BandStatus::Running, estimate.curvature))
     }
 
@@ -633,8 +633,6 @@ impl BandSession {
             best: None,
             alignment: 1.0,
             steps: 0,
-            last_mode: None,
-            refresh_gate: f64::INFINITY,
             since_refresh: 0,
         });
         Ok(())
