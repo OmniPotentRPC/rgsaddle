@@ -11,12 +11,14 @@
 //! ([`super::pair_model`]), scaled by the smallest ratio of measured to
 //! model curvature over the positive directions of the Lanczos block,
 //! so it is not stiffer than the surface along any sampled direction,
-//! and the block is then imposed exactly.
+//! and the block is then imposed exactly. With `rigid` set the model,
+//! the steps and the secant pairs live in the complement of the rigid
+//! motions, which take no step.
 
 use ndarray::{Array1, Array2};
 
 use super::Cell;
-use super::pair_model::{impose, pair_hessian};
+use super::pair_model::{impose, pair_hessian, project, project_both};
 use crate::error::SaddleError;
 use crate::geom::{TrustSchedule, update_trust};
 use crate::prfo::PartitionedRationalFunctionOptimization;
@@ -24,6 +26,8 @@ use crate::restricted::ras_cons;
 
 pub(super) struct ModelClimb {
     b: Array2<f64>,
+    /// Orthonormal rigid motions removed from the model, or `None`.
+    rigid: Option<Array2<f64>>,
     spectrum: Option<(Array1<f64>, Array2<f64>)>,
     trust: f64,
     /// Energy, predicted change and per-atom size of the last step.
@@ -38,10 +42,14 @@ impl ModelClimb {
     pub(super) fn fitted(
         x: &Array1<f64>,
         cell: Option<&Cell>,
+        rigid: Option<Array2<f64>>,
         block: &[(Array1<f64>, Array1<f64>)],
         max_move: f64,
     ) -> Self {
-        let p = pair_hessian(x, cell);
+        let mut p = pair_hessian(x, cell);
+        if let Some(q) = &rigid {
+            p = project_both(&p, q);
+        }
         let mut mu = f64::INFINITY;
         for (v, hv) in block {
             let measured = v.dot(hv);
@@ -55,6 +63,7 @@ impl ModelClimb {
         }
         let mut climb = Self {
             b: p * mu,
+            rigid,
             spectrum: None,
             trust: max_move,
             pending: None,
@@ -69,6 +78,12 @@ impl ModelClimb {
         self.spectrum = None;
     }
 
+    /// The rigid motions at the image's new position.
+    pub(super) fn set_rigid(&mut self, rigid: Option<Array2<f64>>) {
+        self.rigid = rigid;
+        self.spectrum = None;
+    }
+
     /// TS-BFGS on the last step and the Sella trust update from the
     /// ratio of the actual to the predicted energy change.
     pub(super) fn update(&mut self, s: &Array1<f64>, y: &Array1<f64>, energy: f64) {
@@ -78,13 +93,30 @@ impl ModelClimb {
             let rho = (energy - e0) / predicted;
             self.trust = update_trust(self.trust, rho, size, &TrustSchedule::saddle());
         }
-        rgmin::ts_bfgs_update(&mut self.b, s, y);
+        match &self.rigid {
+            Some(q) => rgmin::ts_bfgs_update(&mut self.b, &project(s, q), &project(y, q)),
+            None => rgmin::ts_bfgs_update(&mut self.b, s, y),
+        }
         self.spectrum = None;
+    }
+
+    /// The model the step reads: the rigid motions carry a curvature a
+    /// thousand times the model's largest entry, so they take no step.
+    fn model(&self) -> Array2<f64> {
+        match &self.rigid {
+            Some(q) => {
+                let mut m = project_both(&self.b, q);
+                let scale = m.iter().fold(1.0_f64, |a, v| a.max(v.abs()));
+                m += &(q.dot(&q.t()) * (1e3 * scale));
+                m
+            }
+            None => self.b.clone(),
+        }
     }
 
     fn spectrum(&mut self) -> Result<&(Array1<f64>, Array2<f64>), SaddleError> {
         if self.spectrum.is_none() {
-            self.spectrum = Some(eigh(&self.b)?);
+            self.spectrum = Some(eigh(&self.model())?);
         }
         Ok(self.spectrum.as_ref().expect("spectrum"))
     }
@@ -105,15 +137,19 @@ impl ModelClimb {
     ) -> Result<Array1<f64>, SaddleError> {
         self.trust = self.trust.min(max_move);
         let trust = self.trust;
+        let g = match &self.rigid {
+            Some(q) => project(gradient, q),
+            None => gradient.clone(),
+        };
         let (vals, vecs) = self.spectrum()?;
         let s = PartitionedRationalFunctionOptimization::new(1).get_s(
             vals,
             vecs,
-            gradient,
+            &g,
             PartitionedRationalFunctionOptimization::ALPHA0,
         );
         let s = rgmin::ras_clip(&s, trust);
-        let predicted = gradient.dot(&s) + 0.5 * s.dot(&self.b.dot(&s));
+        let predicted = g.dot(&s) + 0.5 * s.dot(&self.b.dot(&s));
         self.pending = Some((energy, predicted, ras_cons(&s)));
         Ok(s)
     }
@@ -133,6 +169,7 @@ fn eigh(matrix: &Array2<f64>) -> Result<(Array1<f64>, Array2<f64>), SaddleError>
 
 #[cfg(test)]
 mod tests {
+    use super::super::pair_model::rigid_basis;
     use super::*;
 
     fn unit(n: usize, i: usize) -> Array1<f64> {
@@ -153,7 +190,7 @@ mod tests {
         mode[1] = 0.6;
         mode[4] = -0.8;
         let block = vec![(mode.clone(), &mode * -2.0)];
-        let mut climb = ModelClimb::fitted(&x, None, &block, 0.1);
+        let mut climb = ModelClimb::fitted(&x, None, None, &block, 0.1);
         let (lowest, curvature) = climb.lowest().unwrap();
         assert!((curvature + 2.0).abs() < 1e-10, "{curvature}");
         assert!((lowest.dot(&mode).abs() - 1.0).abs() < 1e-10);
@@ -166,7 +203,7 @@ mod tests {
         let stretch = &unit(9, 3) - &unit(9, 0);
         let along = stretch.dot(&p.dot(&stretch));
         let block = vec![(stretch.clone(), p.dot(&stretch) * 0.25)];
-        let climb = ModelClimb::fitted(&x, None, &block, 0.1);
+        let climb = ModelClimb::fitted(&x, None, None, &block, 0.1);
         let other = unit(9, 8);
         let scaled = other.dot(&climb.b.dot(&other));
         assert!((scaled - 0.25 * p[(8, 8)]).abs() < 1e-12, "{scaled}");
@@ -174,11 +211,23 @@ mod tests {
     }
 
     #[test]
+    fn rigid_motions_take_no_step() {
+        let x = triangle();
+        let q = rigid_basis(&x, true);
+        let mut climb = ModelClimb::fitted(&x, None, q.clone(), &[], 1.0);
+        let mut g = Array1::from_elem(9, 0.1);
+        g[2] = -0.3;
+        let s = climb.step(&g, 0.0, 1.0).unwrap();
+        let q = q.unwrap();
+        assert!(q.t().dot(&s).iter().all(|v| v.abs() < 1e-8), "{s}");
+    }
+
+    #[test]
     fn the_step_climbs_the_mode_and_descends_the_rest() {
         let x = Array1::from(vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
         let mode = unit(6, 1);
         let block = vec![(mode.clone(), &mode * -1.0)];
-        let mut climb = ModelClimb::fitted(&x, None, &block, 1.0);
+        let mut climb = ModelClimb::fitted(&x, None, None, &block, 1.0);
         let g = Array1::from(vec![0.0, 0.1, 0.0, 0.1, 0.0, 0.0]);
         let s = climb.step(&g, 0.0, 1.0).unwrap();
         assert!(s[1] > 0.0, "uphill along the mode: {s:?}");
@@ -188,7 +237,7 @@ mod tests {
     #[test]
     fn the_step_respects_the_per_atom_cap() {
         let x = Array1::from(vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
-        let mut climb = ModelClimb::fitted(&x, None, &[], 1.0);
+        let mut climb = ModelClimb::fitted(&x, None, None, &[], 1.0);
         let g = Array1::from(vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
         let s = climb.step(&g, 0.0, 0.05).unwrap();
         assert!(ras_cons(&s) <= 0.05 + 1e-12, "{s:?}");

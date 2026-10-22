@@ -38,6 +38,7 @@
 use ndarray::{Array1, ArrayView1, Axis, s};
 
 use super::climb::ModelClimb;
+use super::pair_model::rigid_basis;
 use super::{BandReport, BandSession, BandStatus, BandSurface, Cell};
 use crate::error::SaddleError;
 use crate::minmode::{
@@ -221,6 +222,7 @@ impl Run {
         dr: f64,
         max_move: f64,
         cell: Option<&Cell>,
+        remove_translation: bool,
     ) -> Result<(), SaddleError> {
         let mut block = self.block(estimate);
         if self.session.krylov_block().is_empty() {
@@ -235,9 +237,28 @@ impl Run {
                 block.push((d, (&gp - g) / dr));
             }
         }
-        self.climb = Some(ModelClimb::fitted(&self.current.x, cell, &block, max_move));
+        let rigid = rigid_motions(&self.current.x, cell, remove_translation);
+        self.climb = Some(ModelClimb::fitted(
+            &self.current.x,
+            cell,
+            rigid,
+            &block,
+            max_move,
+        ));
         Ok(())
     }
+}
+
+/// The rigid motions a band without its mean force removes: the
+/// translations, and the rotations too when there is no cell.
+fn rigid_motions(
+    x: &Array1<f64>,
+    cell: Option<&Cell>,
+    remove_translation: bool,
+) -> Option<ndarray::Array2<f64>> {
+    remove_translation
+        .then(|| rigid_basis(x, cell.is_none()))
+        .flatten()
 }
 
 /// Trigger, stability latch, cached mode and the running refinement.
@@ -361,6 +382,8 @@ impl BandSession {
         }
         let max_move = self.config.max_move;
         let force_gate = self.state.force_gate;
+        let cell = self.config.cell;
+        let remove_translation = self.config.remove_translation;
         let run = self.refine.run.as_mut().expect("refinement run");
         let image_surface = ImageSurface {
             surface,
@@ -377,6 +400,11 @@ impl BandSession {
                 &(&run.current.gradient - &g),
                 run.current.energy,
             );
+            climb.set_rigid(rigid_motions(
+                &run.current.x,
+                cell.as_ref(),
+                remove_translation,
+            ));
             run.refresh_gate = run.refresh_gate.min(gate);
             run.since_refresh += 1;
             let (lowest, _) = climb.lowest()?;
@@ -489,6 +517,7 @@ impl BandSession {
         let force_tol = self.config.force_tol;
         let gate_of = self.state.force_gate;
         let cell = self.config.cell;
+        let remove_translation = self.config.remove_translation;
         let run = self.refine.run.as_mut().expect("refinement run");
         let image_surface = ImageSurface {
             surface,
@@ -529,6 +558,7 @@ impl BandSession {
             config.dr,
             max_move,
             cell.as_ref(),
+            remove_translation,
         )?;
         run.refresh_gate = gate;
         run.since_refresh = 0;

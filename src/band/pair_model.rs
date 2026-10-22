@@ -104,6 +104,73 @@ pub(super) fn impose(b: &mut Array2<f64>, block: &[(Array1<f64>, Array1<f64>)]) 
     *b = (&next + &next.t()) * 0.5;
 }
 
+/// Orthonormal columns spanning the rigid translations of the image
+/// and, with `rotation`, its rigid rotations about the centroid.
+/// `None` below two atoms.
+pub(super) fn rigid_basis(x: &Array1<f64>, rotation: bool) -> Option<Array2<f64>> {
+    let atoms = x.len() / 3;
+    if atoms < 2 {
+        return None;
+    }
+    let rotation = rotation && atoms >= 3;
+    let mut centre = [0.0; 3];
+    for a in 0..atoms {
+        for (c, slot) in centre.iter_mut().enumerate() {
+            *slot += x[3 * a + c] / atoms as f64;
+        }
+    }
+    let mut seeds: Vec<Array1<f64>> = Vec::new();
+    for axis in 0..3 {
+        let mut t = Array1::zeros(x.len());
+        for a in 0..atoms {
+            t[3 * a + axis] = 1.0;
+        }
+        seeds.push(t);
+        if rotation {
+            let mut r = Array1::zeros(x.len());
+            for a in 0..atoms {
+                let p: [f64; 3] = std::array::from_fn(|c| x[3 * a + c] - centre[c]);
+                let mut e = [0.0; 3];
+                e[axis] = 1.0;
+                r[3 * a] = p[1] * e[2] - p[2] * e[1];
+                r[3 * a + 1] = p[2] * e[0] - p[0] * e[2];
+                r[3 * a + 2] = p[0] * e[1] - p[1] * e[0];
+            }
+            seeds.push(r);
+        }
+    }
+    let mut kept: Vec<Array1<f64>> = Vec::new();
+    for mut v in seeds {
+        let scale = v.dot(&v).sqrt();
+        for q in &kept {
+            let c = q.dot(&v);
+            v -= &(q * c);
+        }
+        let norm = v.dot(&v).sqrt();
+        if norm > 1e-8 * scale.max(1.0) {
+            kept.push(v / norm);
+        }
+    }
+    let mut q = Array2::zeros((x.len(), kept.len()));
+    for (j, v) in kept.iter().enumerate() {
+        q.column_mut(j).assign(v);
+    }
+    Some(q)
+}
+
+/// `v` with its component in the span of the orthonormal `q` removed.
+pub(super) fn project(v: &Array1<f64>, q: &Array2<f64>) -> Array1<f64> {
+    v - &q.dot(&q.t().dot(v))
+}
+
+/// `P A P` with `P = I - Q Q'`.
+pub(super) fn project_both(a: &Array2<f64>, q: &Array2<f64>) -> Array2<f64> {
+    let aq = a.dot(q);
+    let qt_a = q.t().dot(a);
+    let qt_aq = q.t().dot(&aq);
+    a - &aq.dot(&q.t()) - &q.dot(&qt_a) + &q.dot(&qt_aq).dot(&q.t())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,5 +249,36 @@ mod tests {
         let mut off = Array1::zeros(n);
         off[3] = 1.0;
         assert!((off.dot(&b.dot(&off)) - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn the_rigid_basis_spans_translations_and_rotations() {
+        let x = triangle();
+        let q = rigid_basis(&x, true).expect("three atoms");
+        assert_eq!(q.ncols(), 6);
+        let gram = q.t().dot(&q);
+        assert!(
+            (&gram - &Array2::<f64>::eye(6))
+                .iter()
+                .all(|v| v.abs() < 1e-12)
+        );
+        let mut t = Array1::zeros(9);
+        for a in 0..3 {
+            t[3 * a + 2] = 1.0;
+        }
+        assert!(project(&t, &q).iter().all(|v| v.abs() < 1e-12));
+        let spin = Array1::from_iter((0..3).flat_map(|a| [-x[3 * a + 1], x[3 * a], 0.0]));
+        assert!(project(&spin, &q).iter().all(|v| v.abs() < 1e-12));
+        let translations = rigid_basis(&x, false).expect("three atoms");
+        assert_eq!(translations.ncols(), 3);
+        assert!(rigid_basis(&Array1::zeros(3), true).is_none());
+    }
+
+    #[test]
+    fn the_double_projection_removes_the_rigid_space() {
+        let x = triangle();
+        let q = rigid_basis(&x, true).expect("three atoms");
+        let p = project_both(&pair_hessian(&x, None), &q);
+        assert!(p.dot(&q).iter().all(|v| v.abs() < 1e-12));
     }
 }
