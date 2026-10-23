@@ -68,7 +68,7 @@ mod sqnm;
 pub use autoneb::{AutoNeb, AutoNebReport, AutoNebTuning};
 pub use band::{
     BandConfig, BandEvaluation, BandReport, BandSession, BandStatus, BandSurface, Cell, CiConfig,
-    MinModeRefine, SolidState,
+    ExpBandPrecon, MinModeRefine, SolidState,
 };
 pub use connect::{ConnectConfig, ConnectProfile, ConnectReport, connect};
 pub use error::SaddleError;

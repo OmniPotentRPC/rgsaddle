@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 21u
+#define RGSADDLE_ABI_MINOR 22u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -130,7 +130,14 @@ typedef enum {
   RGSADDLE_METHOD_LBFGS = 1,
   RGSADDLE_METHOD_RTR = 2, /**< Band trust-region stepper. */
   /** Quick-min band step. Min-mode create returns null for this code. */
-  RGSADDLE_METHOD_QUICKMIN = 3
+  RGSADDLE_METHOD_QUICKMIN = 3,
+  /**
+   * ODE12r band step (Makri, Ortner, Kermode 2019): adaptive Euler on
+   * the projected force, one band evaluation per trial, accepted or
+   * not. With rgsaddle_band_set_exp_precon it is ODE12r-Exp. Min-mode
+   * create returns null for this code. ABI minor 22.
+   */
+  RGSADDLE_METHOD_ODE12R = 4
 } rgsaddle_method_t;
 
 typedef enum {
@@ -1049,6 +1056,22 @@ void rgsaddle_ocineb_free(RgsaddleOcineb *session);
  * No-op in a library built without the highs Cargo feature. */
 rgsaddle_status_t rgsaddle_band_set_highs(RgsaddleBand *band, int32_t enabled);
 rgsaddle_status_t rgsaddle_minmode_set_highs(RgsaddleMinMode *session, int32_t enabled);
+
+/**
+ * Per-image exponential metric (Packwood et al. 2016) on the band
+ * solver: ODE12r-Exp with RGSADDLE_METHOD_ODE12R, the FIRE metric or
+ * the L-BFGS H0 otherwise. Pairs within r_cut_factor * r_nn of one
+ * another in the same image enter the matrix, with r_nn the largest
+ * per-atom nearest-neighbour distance over the interior images, and
+ * the matrix is rebuilt when an atom has moved r_nn / 2 since the
+ * last build. mu <= 0 estimates the energy scale on the first step,
+ * which costs band evaluations; a, c_stab and r_cut_factor at or
+ * below zero take 3, 0.1 and 2. Refused on a solid-state band and on
+ * single-atom images. ABI minor 22.
+ */
+rgsaddle_status_t rgsaddle_band_set_exp_precon(RgsaddleBand *band, double a,
+                                               double c_stab, double mu,
+                                               double r_cut_factor);
 
 /**
  * Point stencil. Opaque config, typed keys, one callback.

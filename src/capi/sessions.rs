@@ -2957,6 +2957,43 @@ pub unsafe extern "C" fn rgsaddle_band_set_highs(band: *mut RgsaddleBand, enable
     RGSADDLE_OK
 }
 
+/// Install the per-image exponential metric on the band solver
+/// (Packwood 2016; ODE12r-Exp of Makri 2019 with method 4). `mu <= 0`
+/// asks rgmin to estimate the energy scale on the first step. `a`,
+/// `c_stab` and `r_cut_factor` at or below zero take the defaults 3,
+/// 0.1 and 2. Refused on a solid-state band and on single-atom images.
+///
+/// # Safety
+/// `band` is a live session or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_band_set_exp_precon(
+    band: *mut RgsaddleBand,
+    a: f64,
+    c_stab: f64,
+    mu: f64,
+    r_cut_factor: f64,
+) -> i32 {
+    if band.is_null() {
+        return RGSADDLE_NULL_BAND;
+    }
+    let defaults = crate::ExpBandPrecon::default();
+    let pick = |v: f64, d: f64| if v > 0.0 && v.is_finite() { v } else { d };
+    let precon = crate::ExpBandPrecon {
+        a: pick(a, defaults.a),
+        c_stab: pick(c_stab, defaults.c_stab),
+        mu: if mu > 0.0 && mu.is_finite() {
+            Some(mu)
+        } else {
+            None
+        },
+        r_cut_factor: pick(r_cut_factor, defaults.r_cut_factor),
+    };
+    match unsafe { (*band).session.set_exp_precon(precon) } {
+        Ok(()) => RGSADDLE_OK,
+        Err(e) => status_of(&e),
+    }
+}
+
 /// # Safety
 /// `session` is a live session or null. `enabled` is 0 or 1.
 #[unsafe(no_mangle)]

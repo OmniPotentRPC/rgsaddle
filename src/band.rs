@@ -5,7 +5,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
-use rgmin::{Accept, Control, Method, Oracle, Solver};
+use rgmin::{Accept, Control, ExpParams, Method, Neighbours, Oracle, Solver};
 
 use crate::cell_log::{M3, m3_det};
 use crate::error::SaddleError;
@@ -250,6 +250,10 @@ pub struct BandConfig {
     /// On by default; it needs `climbing` and runs on the atomic band,
     /// not on the solid-state block. `None` keeps the plain CI-NEB.
     pub min_mode: Option<MinModeRefine>,
+    /// Per-image exponential metric on the band solver. `None` runs
+    /// the stepper in the Euclidean metric. Refused on a solid-state
+    /// band, whose cell block has no pair geometry.
+    pub exp_precon: Option<ExpBandPrecon>,
 }
 
 impl Default for BandConfig {
@@ -272,8 +276,53 @@ impl Default for BandConfig {
             time_step: 1.0,
             autoneb: None,
             min_mode: Some(MinModeRefine::default()),
+            exp_precon: None,
         }
     }
+}
+
+/// Exponential metric of Packwood, Kermode, Mones, Bernstein, Woolley,
+/// Gould, Ortner and Csányi, J. Chem. Phys. 144, 164109 (2016), built
+/// per interior image and installed on the band solver as rgmin's
+/// geometry preconditioner. Makri, Ortner and Kermode, J. Chem. Phys.
+/// 150, 094109 (2019), pair it with [`Method::Ode12r`] (ODE12r-Exp);
+/// FIRE reads it as its metric and L-BFGS as `H0`.
+///
+/// Pairs within `r_cut_factor * r_nn` of one another in the same image
+/// enter the matrix, `r_nn` being the largest per-atom nearest-neighbour
+/// distance over the interior images; a cell wraps the distances. The
+/// matrix is rebuilt when any atom has moved more than `r_nn / 2` since
+/// the last build.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ExpBandPrecon {
+    /// Exponent `A` of `exp(-A (r / r_nn - 1))`.
+    pub a: f64,
+    /// Diagonal stabilization `C_stab`.
+    pub c_stab: f64,
+    /// Energy scale `mu`. `None` lets rgmin estimate it from the band
+    /// force on the first step, which costs band evaluations.
+    pub mu: Option<f64>,
+    /// Cutoff as a multiple of `r_nn`.
+    pub r_cut_factor: f64,
+}
+
+impl Default for ExpBandPrecon {
+    fn default() -> Self {
+        Self {
+            a: 3.0,
+            c_stab: 0.1,
+            mu: None,
+            r_cut_factor: 2.0,
+        }
+    }
+}
+
+/// Where the band metric was last built.
+#[derive(Clone, Debug)]
+struct ExpBandState {
+    precon: ExpBandPrecon,
+    built_at: Array1<f64>,
+    r_nn: f64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -416,6 +465,10 @@ struct BandState {
     /// that hands the band back unchanged (or a solver that dropped
     /// its own cache) costs no evaluation.
     last: Mutex<Option<BandEval>>,
+    /// The surface answer `last` replaced. A stepper that rejects its
+    /// trial and stays at the start (ODE12r) finds the start here, so
+    /// the rejection costs one evaluation, not two.
+    previous: Mutex<Option<BandEval>>,
     /// Rows evaluated by the surface during the current step.
     rows: AtomicUsize,
 }
@@ -432,6 +485,7 @@ impl BandState {
             last_max_force: Mutex::new(f64::INFINITY),
             endpoints: Mutex::new(None),
             last: Mutex::new(None),
+            previous: Mutex::new(None),
             rows: AtomicUsize::new(0),
         }
     }
@@ -462,6 +516,31 @@ impl BandState {
     }
     fn drop_last(&self) {
         *self.last.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self.previous.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    /// Make the start of a step the cached answer again when the
+    /// stepper left the band there: the trial went into `last`, the
+    /// start sits in `previous`. Returns whether `last` now holds `x`.
+    fn restore_at(&self, x: &Array1<f64>) -> bool {
+        let mut last = self.last.lock().unwrap_or_else(|e| e.into_inner());
+        if last.as_ref().is_some_and(|l| l.x == *x) {
+            return true;
+        }
+        let mut previous = self.previous.lock().unwrap_or_else(|e| e.into_inner());
+        if previous.as_ref().is_some_and(|p| p.x == *x) {
+            let start = previous.take();
+            *previous = last.take();
+            *last = start;
+            if let Some(eval) = last.as_ref() {
+                *self
+                    .last_max_force
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = self.convergence_force(&eval.projected);
+            }
+            return true;
+        }
+        false
     }
     /// The climbing baseline and the armed image belong to one
     /// relaxation; the surface caches stay.
@@ -549,6 +628,9 @@ fn evaluate_band(
     }
     if state.endpoints().is_none() {
         state.set_endpoints(Some([energies[0], energies[n_images - 1]]));
+    }
+    if let Some(old) = slot.take() {
+        *state.previous.lock().unwrap_or_else(|e| e.into_inner()) = Some(old);
     }
     *slot = Some(BandEval {
         x: x.to_owned(),
@@ -745,6 +827,9 @@ fn evaluate_solid(
     }
     if state.endpoints().is_none() {
         state.set_endpoints(Some([energies[0], energies[n_images - 1]]));
+    }
+    if let Some(old) = slot.take() {
+        *state.previous.lock().unwrap_or_else(|e| e.into_inner()) = Some(old);
     }
     *slot = Some(BandEval {
         x: x.to_owned(),
@@ -1162,10 +1247,14 @@ fn check_moved(
 /// step on the force alone.
 pub(crate) fn check_force_driven(method: &Method) -> Result<(), SaddleError> {
     match method {
-        Method::Fire { .. } | Method::Lbfgs { .. } | Method::Bb | Method::QuickMin => Ok(()),
+        Method::Fire { .. }
+        | Method::Lbfgs { .. }
+        | Method::Bb
+        | Method::QuickMin
+        | Method::Ode12r => Ok(()),
         other => Err(SaddleError::Invalid(format!(
             "{other:?} tests the oracle value, which is not the potential of a \
-             projected or inverted force; use FIRE, L-BFGS, BB, or quick-min"
+             projected or inverted force; use FIRE, L-BFGS, BB, quick-min, or ODE12r"
         ))),
     }
 }
@@ -1256,6 +1345,9 @@ pub struct BandSession {
     rtr: Option<crate::rtr::BandRtr>,
     solid: Option<SolidRun>,
     refine: min_mode::RefineState,
+    exp: Option<ExpBandState>,
+    /// Consecutive ODE12r steps that rejected their trial.
+    unmoved: usize,
 }
 
 impl BandSession {
@@ -1304,7 +1396,7 @@ impl BandSession {
         let segment = if solid.is_some() { dof + 9 } else { dof };
         let interior_dof = (n_images - 2) * segment;
         let solver = build_solver(&config, &method, interior_dof);
-        Ok(Self {
+        let mut session = Self {
             config,
             positions,
             solver,
@@ -1313,7 +1405,140 @@ impl BandSession {
             rtr: None,
             solid,
             refine: min_mode::RefineState::default(),
-        })
+            exp: None,
+            unmoved: 0,
+        };
+        if let Some(precon) = session.config.exp_precon {
+            session.set_exp_precon(precon)?;
+        }
+        Ok(session)
+    }
+
+    /// Install the per-image exponential metric on the band solver, or
+    /// rebuild it at the current positions. See [`ExpBandPrecon`].
+    pub fn set_exp_precon(&mut self, precon: ExpBandPrecon) -> Result<(), SaddleError> {
+        if self.solid.is_some() {
+            return Err(SaddleError::Invalid(
+                "the exponential metric has no pair geometry for a solid-state cell block".into(),
+            ));
+        }
+        if !(precon.a.is_finite() && precon.a > 0.0)
+            || !(precon.c_stab.is_finite() && precon.c_stab > 0.0)
+            || !(precon.r_cut_factor.is_finite() && precon.r_cut_factor > 1.0)
+            || precon.mu.is_some_and(|mu| !(mu.is_finite() && mu > 0.0))
+        {
+            return Err(SaddleError::Invalid(
+                "exponential metric needs A > 0, C_stab > 0, r_cut_factor > 1 and mu > 0".into(),
+            ));
+        }
+        if self.positions.ncols() < 6 {
+            return Err(SaddleError::Invalid(
+                "the exponential metric needs at least two atoms per image".into(),
+            ));
+        }
+        self.config.exp_precon = Some(precon);
+        self.install_exp(precon.mu)
+    }
+
+    /// The installed band metric, if any.
+    #[must_use]
+    pub fn exp_precon(&self) -> Option<ExpBandPrecon> {
+        self.config.exp_precon
+    }
+
+    /// Pair list over the interior images: atoms of image `k` are the
+    /// block `[(k - 1) n, k n)` of the flat interior vector, and no
+    /// pair crosses an image. Distances are wrapped by the cell.
+    fn band_neighbours(&self, r_cut_factor: f64) -> (Neighbours, f64) {
+        let n_images = self.positions.nrows();
+        let n_atoms = self.positions.ncols() / 3;
+        let mut pairs: Vec<(usize, usize, f64)> = Vec::new();
+        let mut nearest = vec![f64::INFINITY; (n_images - 2) * n_atoms];
+        for img in 1..n_images - 1 {
+            let row = self.positions.row(img);
+            let base = (img - 1) * n_atoms;
+            for a in 0..n_atoms {
+                for b in a + 1..n_atoms {
+                    let mut d = Array1::from(vec![
+                        row[3 * b] - row[3 * a],
+                        row[3 * b + 1] - row[3 * a + 1],
+                        row[3 * b + 2] - row[3 * a + 2],
+                    ]);
+                    if let Some(cell) = &self.config.cell {
+                        cell.minimum_image(&mut d);
+                    }
+                    let r = d.dot(&d).sqrt();
+                    nearest[base + a] = nearest[base + a].min(r);
+                    nearest[base + b] = nearest[base + b].min(r);
+                    pairs.push((base + a, base + b, r));
+                }
+            }
+        }
+        let r_nn = nearest
+            .iter()
+            .copied()
+            .filter(|r| r.is_finite())
+            .fold(0.0_f64, f64::max);
+        let r_cut = r_cut_factor * r_nn;
+        let mut neigh = Neighbours::default();
+        for (i, j, r) in pairs {
+            if r < r_cut {
+                neigh.i.push(i);
+                neigh.j.push(j);
+                neigh.r.push(r);
+            }
+        }
+        (neigh, r_nn)
+    }
+
+    fn install_exp(&mut self, mu: Option<f64>) -> Result<(), SaddleError> {
+        let precon = self
+            .config
+            .exp_precon
+            .ok_or_else(|| SaddleError::Invalid("no exponential metric configured".into()))?;
+        let (neigh, r_nn) = self.band_neighbours(precon.r_cut_factor);
+        if !(r_nn.is_finite() && r_nn > 0.0) {
+            return Err(SaddleError::Invalid(
+                "exponential metric: no finite nearest-neighbour distance on the band".into(),
+            ));
+        }
+        let params = ExpParams {
+            a: precon.a,
+            c_stab: precon.c_stab,
+            mu,
+            r_nn: Some(r_nn),
+            r_cut: None,
+            recalc_mu: false,
+            ..ExpParams::default()
+        };
+        let flat = self.interior_flat();
+        self.solver
+            .set_exp(flat.view(), &neigh, &params)
+            .map_err(|e| SaddleError::Solver(e.to_string()))?;
+        self.exp = Some(ExpBandState {
+            precon,
+            built_at: flat,
+            r_nn,
+        });
+        Ok(())
+    }
+
+    /// Rebuild the band metric when an atom has moved more than
+    /// `r_nn / 2` since the last build. The energy scale found on the
+    /// first build is kept, so a rebuild costs no band evaluation.
+    fn refresh_exp(&mut self) -> Result<(), SaddleError> {
+        let Some(exp) = &self.exp else {
+            return Ok(());
+        };
+        let flat = self.interior_flat();
+        if !rgmin::needs_rebuild(
+            rgmin::max_atom_displacement(exp.built_at.view(), flat.view()),
+            exp.r_nn,
+        ) {
+            return Ok(());
+        }
+        let mu = self.solver.precon_scale().or(exp.precon.mu);
+        self.install_exp(mu)
     }
 
     /// Select the optional HiGHS feasible-set step; requires the `highs` feature.
@@ -1611,6 +1836,7 @@ impl BandSession {
         let n_images = self.positions.nrows();
         let dof = self.positions.ncols();
         let interior_dof = (n_images - 2) * dof;
+        self.refresh_exp()?;
 
         let endpoint_first = self.positions.row(0).to_owned();
         let endpoint_last = self.positions.row(n_images - 1).to_owned();
@@ -1650,20 +1876,32 @@ impl BandSession {
             return Err(err);
         }
         stepped.map_err(|e| SaddleError::Solver(e.to_string()))?;
-        check_moved(&self.state, &before, &x, self.config.force_tol)?;
+        // ODE12r keeps the band where it was when it rejects a trial and
+        // retries with a shorter step, so an unchanged band is a stall
+        // only once the step has shrunk past any use (64 rejections at
+        // a quarter each).
+        if x == before && matches!(self.config.method, Method::Ode12r) && self.unmoved < 64 {
+            self.unmoved += 1;
+        } else {
+            self.unmoved = 0;
+            check_moved(&self.state, &before, &x, self.config.force_tol)?;
+        }
         self.scatter_interior(x.view());
         self.iteration += 1;
 
         // A solver that ends on a point it did not evaluate last (a
         // line search that backtracked) is assembled once more; the
-        // cache answers when the accepted point was the last one.
-        let at_last = self
-            .state
-            .last
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-            .is_some_and(|l| l.x == x && l.projected.len() == interior_dof);
+        // cache answers when the accepted point was the last one, and
+        // the start of the step comes back from the previous slot when
+        // the stepper rejected its trial and stayed there.
+        let at_last = self.state.restore_at(&x)
+            && self
+                .state
+                .last
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .is_some_and(|l| l.projected.len() == interior_dof);
         if !at_last {
             assemble_band(
                 &self.config,

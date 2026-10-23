@@ -27,7 +27,7 @@ use crate::spring::SpringKind;
 use crate::tangent::TangentKind;
 
 pub const RGSADDLE_ABI_MAJOR: u32 = 1;
-pub const RGSADDLE_ABI_MINOR: u32 = 21;
+pub const RGSADDLE_ABI_MINOR: u32 = 22;
 
 /// Band config bit 0. The C step calls the surface once per image
 /// carried by the evaluation: every image on the first evaluation
@@ -277,6 +277,7 @@ fn method_of(v: i32, memory: i64) -> Method {
         1 => Method::Lbfgs {
             memory: if memory > 0 { memory as usize } else { 20 },
         },
+        4 => Method::Ode12r,
         _ => Method::Fire { kind: FireKind::V2 },
     }
 }
@@ -466,6 +467,8 @@ pub(super) unsafe fn parse_band_config(
             autoneb: None,
             min_mode: (cfg.flags & RGSADDLE_BAND_NO_MIN_MODE == 0)
                 .then(crate::band::MinModeRefine::default),
+            // Installed after creation through rgsaddle_band_set_exp_precon.
+            exp_precon: None,
         },
         per_image: cfg.flags & RGSADDLE_BAND_PER_IMAGE != 0,
         method: cfg.method,
@@ -724,7 +727,7 @@ pub unsafe extern "C" fn rgsaddle_minmode_create(
     let dof = (3 * n_atoms) as usize;
     let x = Array1::from(unsafe { slice::from_raw_parts(position, dof) }.to_vec());
     let m = Array1::from(unsafe { slice::from_raw_parts(mode, dof) }.to_vec());
-    if cfg.method == 3 {
+    if cfg.method == 3 || cfg.method == 4 {
         return std::ptr::null_mut();
     }
     let mm_config = MinModeConfig {
