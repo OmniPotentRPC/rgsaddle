@@ -967,12 +967,7 @@ fn assemble_solid(
     for i in 0..n_images {
         enthalpy[i] = solid_state_enthalpy(energies[i], cells[i].0, reference, pressure)?;
     }
-    let mut max_i = 1;
-    for i in 2..n_images - 1 {
-        if enthalpy[i] > enthalpy[max_i] {
-            max_i = i;
-        }
-    }
+    let max_i = climber(&enthalpy, state.ci());
     let climbing = config.climbing.is_some();
     let armed = climbing && state.armed.load(Ordering::Relaxed);
     if armed {
@@ -1113,15 +1108,37 @@ fn max_abs(v: &Array1<f64>) -> f64 {
     v.iter().fold(0.0_f64, |m, c| m.max(c.abs()))
 }
 
+/// The interior image that climbs on `energies`: `current` while it is
+/// a strict local maximum, the highest interior image otherwise. A
+/// climber re-picked on every evaluation moves between near-equal
+/// peaks, and the solver's pairs and velocity then mix two forces.
+fn climber(energies: &Array1<f64>, current: Option<usize>) -> usize {
+    let n_images = energies.len();
+    if let Some(c) = current
+        && (1..n_images - 1).contains(&c)
+        && energies[c] > energies[c - 1]
+        && energies[c] > energies[c + 1]
+    {
+        return c;
+    }
+    let mut highest = 1;
+    for i in 2..n_images - 1 {
+        if energies[i] > energies[highest] {
+            highest = i;
+        }
+    }
+    highest
+}
+
 /// Assemble the projected band force at interior `x`. Returns
 /// (pseudo-energy, projected interior forces, max abs component).
 ///
 /// The climbing image is decided on this evaluation's energies, so
 /// the force returned already carries the climb: once armed, the
-/// highest interior image climbs, also when an endpoint is higher
-/// (two minima bound a peak, and the saddle then lies between that
-/// image and the endpoint); on the evaluation that arms it, the
-/// climbing image's force is reassembled before returning.
+/// [`climber`] climbs, also when an endpoint is higher (two minima
+/// bound a peak, and the saddle then lies between that image and the
+/// endpoint); on the evaluation that arms it, the climbing image's
+/// force is reassembled before returning.
 fn assemble_band(
     config: &BandConfig,
     state: &BandState,
@@ -1134,12 +1151,7 @@ fn assemble_band(
     let n_images = energies.len();
     let dof = endpoint_first.len();
 
-    let mut max_i = 1;
-    for i in 2..n_images - 1 {
-        if energies[i] > energies[max_i] {
-            max_i = i;
-        }
-    }
+    let max_i = climber(&energies, state.ci());
     let climbing = config.climbing.is_some();
     let armed = climbing && state.armed.load(Ordering::Relaxed);
     if armed {
@@ -2329,5 +2341,51 @@ mod tests {
         // Climbing force (-2, 3, 0, 5, 1, 0) minus its mean (1.5, 2, 0).
         assert_force(&projected, &[-3.5, 1.0, 0.0, 3.5, -1.0, 0.0]);
         assert_eq!(state.ci(), Some(1));
+    }
+
+    /// Whole-band energies; an interior-only call reads the interior.
+    struct Staged(Vec<f64>);
+
+    impl BandSurface for Staged {
+        fn eval(
+            &self,
+            positions: ArrayView2<f64>,
+            energies: &mut Array1<f64>,
+            gradients: &mut Array2<f64>,
+        ) -> Result<(), SaddleError> {
+            let skip = (self.0.len() - positions.nrows()) / 2;
+            for (i, energy) in energies.iter_mut().enumerate() {
+                *energy = self.0[i + skip];
+            }
+            gradients.fill(0.0);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn climber_stays_while_it_is_a_local_maximum() {
+        let positions = Array2::from_shape_fn((6, 3), |(i, k)| if k == 0 { i as f64 } else { 0.0 });
+        let state = BandState::new();
+        let mut call = 0.0;
+        let mut climb = |energy: Vec<f64>| {
+            call += 1.0;
+            let mut band = positions.clone();
+            band[[1, 1]] = 1e-3 * call;
+            let x: Array1<f64> = band.slice(s![1..5, ..]).iter().copied().collect();
+            assemble_band(
+                &infinite_climb(),
+                &state,
+                &Staged(energy),
+                band.row(0),
+                band.row(5),
+                x.view(),
+            )
+            .unwrap();
+            state.ci()
+        };
+        assert_eq!(climb(vec![0.0, 2.0, 3.0, 2.0, 2.5, 0.0]), Some(2));
+        // Image 4 is now higher, and image 2 is still a peak.
+        assert_eq!(climb(vec![0.0, 2.0, 3.0, 2.0, 3.5, 0.0]), Some(2));
+        assert_eq!(climb(vec![0.0, 2.0, 3.0, 3.2, 3.5, 0.0]), Some(4));
     }
 }
