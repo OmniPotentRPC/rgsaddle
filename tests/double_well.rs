@@ -45,6 +45,7 @@ fn band_converges_to_the_double_well_saddle() {
     let config = BandConfig {
         force_tol: 1e-3,
         max_move: 0.1,
+        min_mode: None,
         ..BandConfig::default()
     };
     let mut session = BandSession::new(config, initial_band(n_images)).unwrap();
@@ -246,6 +247,7 @@ fn wrapped_resync_keeps_the_cached_band() {
             [0.0, 3.0, 0.0],
             [0.0, 0.0, 3.0],
         ])),
+        min_mode: None,
         ..BandConfig::default()
     };
     let mut session = BandSession::new(config, initial_band(n_images)).unwrap();

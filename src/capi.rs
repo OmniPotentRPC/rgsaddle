@@ -46,6 +46,14 @@ pub const RGSADDLE_BAND_CI_AFTER: u64 = 4;
 /// climbing image: the plain CI-NEB of minor 20 and earlier.
 pub const RGSADDLE_BAND_NO_MIN_MODE: u64 = 8;
 
+/// Request bit 0. Positions and gradients are one image.
+pub const RGSADDLE_REQ_ONE_IMAGE: u64 = 1;
+/// Request bit 1 (ABI minor 22). The request carries the band's
+/// climbing image alone, for the min-mode refinement, and `image` is
+/// its band index in the batched mode too. Set only for a band whose
+/// config minor is 22 or newer.
+pub const RGSADDLE_REQ_CLIMBING_IMAGE: u64 = 2;
+
 pub const RGSADDLE_OK: i32 = 0;
 pub const RGSADDLE_NULL_SESSION: i32 = -1;
 pub const RGSADDLE_NULL_BAND: i32 = -2;
@@ -147,6 +155,8 @@ struct CSurface {
     /// an interior-only evaluation back to band image indices.
     n_images: i64,
     per_image: bool,
+    /// Mark the refinement's requests with `RGSADDLE_REQ_CLIMBING_IMAGE`.
+    climbing_request: bool,
     rows: std::sync::atomic::AtomicUsize,
 }
 
@@ -168,12 +178,29 @@ impl CSurface {
         energies: &mut [f64],
         gradients: &mut [f64],
     ) -> Result<(), SaddleError> {
+        let flags = if image >= 0 {
+            RGSADDLE_REQ_ONE_IMAGE
+        } else {
+            0
+        };
+        self.request(flags, n_images, image, positions, energies, gradients)
+    }
+
+    fn request(
+        &self,
+        flags: u64,
+        n_images: i64,
+        image: i64,
+        positions: &[f64],
+        energies: &mut [f64],
+        gradients: &mut [f64],
+    ) -> Result<(), SaddleError> {
         let mut req = RgsaddleSurfaceRequest {
             version: RgsaddleVersion {
                 major: RGSADDLE_ABI_MAJOR,
                 minor: RGSADDLE_ABI_MINOR,
             },
-            flags: if image >= 0 { 1 } else { 0 },
+            flags,
             n_images,
             n_atoms: self.n_atoms,
             positions: positions.as_ptr(),
@@ -241,10 +268,21 @@ impl BandSurface for CSurface {
         let flat: Vec<f64> = position.iter().copied().collect();
         let mut e = [0.0];
         let mut g = vec![0.0; flat.len()];
-        if self.per_image {
-            self.call(self.n_images, image as i64, &flat, &mut e, &mut g)?;
-        } else {
-            self.call(1, -1, &flat, &mut e, &mut g)?;
+        let image = image as i64;
+        match (self.per_image, self.climbing_request) {
+            (true, false) => self.call(self.n_images, image, &flat, &mut e, &mut g)?,
+            (false, false) => self.call(1, -1, &flat, &mut e, &mut g)?,
+            (true, true) => self.request(
+                RGSADDLE_REQ_ONE_IMAGE | RGSADDLE_REQ_CLIMBING_IMAGE,
+                self.n_images,
+                image,
+                &flat,
+                &mut e,
+                &mut g,
+            )?,
+            (false, true) => {
+                self.request(RGSADDLE_REQ_CLIMBING_IMAGE, 1, image, &flat, &mut e, &mut g)?
+            }
         }
         Ok((e[0], Array1::from(g)))
     }
@@ -265,6 +303,7 @@ pub struct RgsaddleBand {
     n_images: i64,
     n_atoms: i64,
     per_image: bool,
+    climbing_request: bool,
 }
 
 pub struct RgsaddleMinMode {
@@ -500,6 +539,7 @@ unsafe fn band_from_parts(
         return std::ptr::null_mut();
     };
     let per_image = parsed.per_image;
+    let climbing_request = cfg.version.minor >= 22;
     let method = parsed.method;
     match BandSession::new(parsed.config, initial) {
         Ok(mut session) => {
@@ -518,6 +558,7 @@ unsafe fn band_from_parts(
                 n_images,
                 n_atoms,
                 per_image,
+                climbing_request,
             }))
         }
         Err(_) => std::ptr::null_mut(),
@@ -549,6 +590,7 @@ pub unsafe extern "C" fn rgsaddle_band_step(
         n_atoms: band.n_atoms,
         n_images: band.n_images,
         per_image: band.per_image,
+        climbing_request: band.climbing_request,
         rows: Default::default(),
     };
     match band.session.step(&cs) {
@@ -785,6 +827,7 @@ pub unsafe extern "C" fn rgsaddle_minmode_step(
         n_atoms: session.n_atoms,
         n_images: 1,
         per_image: false,
+        climbing_request: false,
         rows: Default::default(),
     };
     match session.session.step(&cs) {
@@ -833,6 +876,7 @@ pub unsafe extern "C" fn rgsaddle_minmode_estimate(
         n_atoms: session.n_atoms,
         n_images: 1,
         per_image: false,
+        climbing_request: false,
         rows: Default::default(),
     };
     match session.session.push_estimate(&cs) {
@@ -1294,6 +1338,7 @@ pub unsafe extern "C" fn rgsaddle_index1_step(
         n_atoms: session.n_atoms,
         n_images: 1,
         per_image: false,
+        climbing_request: false,
         rows: Default::default(),
     };
     match session.session.step(&cs) {

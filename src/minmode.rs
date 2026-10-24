@@ -702,6 +702,9 @@ struct LanczosStop {
     early: bool,
 }
 
+/// Krylov vectors of one Lanczos estimate with their Hessian actions.
+pub type KrylovBlock = Vec<(Array1<f64>, Array1<f64>)>;
+
 /// Lanczos lowest mode.
 ///
 /// Olsen, Kroes, Henkelman, Arnaldsson, and Jónsson, J. Chem. Phys.
@@ -716,6 +719,7 @@ fn lanczos_mode<S: PointSurface>(
     seed: Array1<f64>,
     config: &MinModeConfig,
     stop: LanczosStop,
+    mut block: Option<&mut KrylovBlock>,
 ) -> Result<(Array1<f64>, f64, usize, bool), SaddleError> {
     let n = seed.len();
     let m = config.krylov_dim.min(n).max(1);
@@ -730,6 +734,9 @@ fn lanczos_mode<S: PointSurface>(
         let j = alpha.len();
         let hv = surface.action(x, g0, q[j].view(), config)?;
         actions += 1;
+        if let Some(block) = block.as_deref_mut() {
+            block.push((q[j].clone(), hv.clone()));
+        }
         let a = crate::stencil::curvature_along(hv.view(), q[j].view());
         alpha.push(a);
         // eOn quit_early: the curvature along the incoming mode is
@@ -1039,6 +1046,9 @@ pub struct MinModeSession {
     /// during the current step; the rgmin oracle signature has no
     /// error channel of its own.
     surface_error: Mutex<Option<SaddleError>>,
+    /// The Krylov vectors and actions of the last Lanczos estimate in
+    /// the full space; empty after a dimer or with excluded modes.
+    krylov: KrylovBlock,
 }
 
 impl MinModeSession {
@@ -1099,6 +1109,7 @@ impl MinModeSession {
             dimer_rotation: DimerRotationHistory::default(),
             centre: None,
             surface_error: Mutex::new(None),
+            krylov: Vec::new(),
             mode_fresh: false,
             pending_turn: 0.0,
             lanczos_ready: false,
@@ -1122,6 +1133,13 @@ impl MinModeSession {
         }
         self.lanczos_rel_tol = tol;
         Ok(())
+    }
+
+    /// The Krylov vectors and Hessian actions of the last Lanczos
+    /// estimate, empty after a dimer rotation or when the surface
+    /// excludes directions.
+    pub fn krylov_block(&self) -> &[(Array1<f64>, Array1<f64>)] {
+        &self.krylov
     }
 
     /// Select the optional HiGHS feasible-set step; requires the `highs` feature.
@@ -1280,12 +1298,16 @@ impl MinModeSession {
         Ok(gradient)
     }
 
+    /// The lowest mode at `position`. A Lanczos estimate in the full
+    /// space leaves its Krylov vectors and actions in `block`.
     fn mode_at<S: PointSurface>(
         &mut self,
         surface: &Counted<'_, S>,
         position: ArrayView1<f64>,
         gradient: ArrayView1<f64>,
+        block: &mut KrylovBlock,
     ) -> Result<(Array1<f64>, f64, usize, bool), SaddleError> {
+        block.clear();
         let excluded = surface.surface.excluded_modes(position)?;
         if excluded.ncols() != position.len() || !excluded.iter().all(|v| v.is_finite()) {
             return Err(SaddleError::Shape(
@@ -1293,7 +1315,7 @@ impl MinModeSession {
             ));
         }
         if excluded.nrows() == 0 {
-            return self.estimate_free(surface, position, gradient);
+            return self.estimate_free(surface, position, gradient, Some(block));
         }
         let mut space = Complement::new(position.len());
         for direction in excluded.rows() {
@@ -1314,6 +1336,8 @@ impl MinModeSession {
             calls: surface.calls,
             space: Some(&space),
         };
+        // The quotient's Lanczos vectors are not kept: the climb model
+        // reads the full-space block only.
         let (mode, curvature, rotations, ready) = self.estimate_reduced(
             &reduced,
             position,
@@ -1321,6 +1345,7 @@ impl MinModeSession {
             checked_mode(seed)?,
             replaced_seed,
             &space,
+            None,
         )?;
         Ok((space.lift(mode.view()), curvature, rotations, ready))
     }
@@ -1332,6 +1357,7 @@ impl MinModeSession {
         surface: &Counted<'_, S>,
         position: ArrayView1<f64>,
         gradient: ArrayView1<f64>,
+        block: Option<&mut KrylovBlock>,
     ) -> Result<(Array1<f64>, f64, usize, bool), SaddleError> {
         match self.config.kind {
             MinModeKind::Dimer => {
@@ -1348,7 +1374,7 @@ impl MinModeSession {
                 Ok((mode, curvature, rotations, true))
             }
             MinModeKind::Lanczos => {
-                self.lanczos_at(surface, position, gradient, self.mode.clone(), false)
+                self.lanczos_at(surface, position, gradient, self.mode.clone(), false, block)
             }
         }
     }
@@ -1356,7 +1382,9 @@ impl MinModeSession {
     /// Estimate in an excluded-mode quotient. `space` lifts a dimer
     /// history that was rotated in the reduced coordinates. A replaced
     /// seed drops the old curvature and the old rotational pair only
-    /// after the surface call succeeds.
+    /// after the surface call succeeds. `block` is the Krylov capture
+    /// of the full-space path and is `None` here.
+    #[allow(clippy::too_many_arguments)]
     fn estimate_reduced<S: PointSurface>(
         &mut self,
         surface: &Counted<'_, S>,
@@ -1365,6 +1393,7 @@ impl MinModeSession {
         seed: Array1<f64>,
         replaced_seed: bool,
         space: &Complement,
+        block: Option<&mut KrylovBlock>,
     ) -> Result<(Array1<f64>, f64, usize, bool), SaddleError> {
         match self.config.kind {
             MinModeKind::Dimer => {
@@ -1404,7 +1433,8 @@ impl MinModeSession {
                 Ok((mode, curvature, rotations, true))
             }
             MinModeKind::Lanczos => {
-                let answer = self.lanczos_at(surface, position, gradient, seed, replaced_seed)?;
+                let answer =
+                    self.lanczos_at(surface, position, gradient, seed, replaced_seed, block)?;
                 if replaced_seed {
                     self.dimer_rotation.clear();
                 }
@@ -1413,6 +1443,8 @@ impl MinModeSession {
         }
     }
 
+    /// Lanczos from `seed`. `block` receives the Krylov vectors and
+    /// their actions when the caller keeps them for the climb model.
     fn lanczos_at<S: PointSurface>(
         &self,
         surface: &Counted<'_, S>,
@@ -1420,6 +1452,7 @@ impl MinModeSession {
         gradient: ArrayView1<f64>,
         seed: Array1<f64>,
         replaced_seed: bool,
+        block: Option<&mut KrylovBlock>,
     ) -> Result<(Array1<f64>, f64, usize, bool), SaddleError> {
         // A seed invented because the old mode was eliminated does not
         // carry that mode's curvature into quit-early.
@@ -1440,6 +1473,7 @@ impl MinModeSession {
                 previous,
                 early,
             },
+            block,
         )
     }
 
@@ -1449,7 +1483,10 @@ impl MinModeSession {
         g0: ArrayView1<f64>,
     ) -> Result<(f64, usize), SaddleError> {
         let position = self.x.clone();
-        let (mode, curvature, rotations, ready) = self.mode_at(surface, position.view(), g0)?;
+        let mut block = Vec::new();
+        let (mode, curvature, rotations, ready) =
+            self.mode_at(surface, position.view(), g0, &mut block)?;
+        self.krylov = block;
         self.mode = mode;
         self.curvature = curvature;
         self.lanczos_ready = ready;
@@ -1893,8 +1930,10 @@ impl MinModeSession {
             // Force and curvature in a convergence decision describe the
             // same point. The accepted gradient supplies the centre, so
             // confirmation pays only for the required Hessian actions.
+            let mut block = Vec::new();
             let (mode, accepted_curvature, accepted_rotations, ready) =
-                self.mode_at(&counted, x.view(), centre.gradient.view())?;
+                self.mode_at(&counted, x.view(), centre.gradient.view(), &mut block)?;
+            self.krylov = block;
             let turned = self.mode.dot(&mode).abs().min(1.0).acos();
             self.retire_translation_memory(turned);
             self.mode = mode;

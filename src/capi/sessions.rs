@@ -255,6 +255,7 @@ pub unsafe extern "C" fn rgsaddle_irc_create_from_surface(
         n_atoms,
         n_images: 1,
         per_image: false,
+        climbing_request: false,
         rows: Default::default(),
     };
     match IrcSession::from_surface(irc_cfg, x, m, sd, dir, &cs) {
@@ -288,6 +289,7 @@ pub unsafe extern "C" fn rgsaddle_irc_step(
         n_atoms: session.n_atoms,
         n_images: 1,
         per_image: false,
+        climbing_request: false,
         rows: Default::default(),
     };
     match session.session.step(&cs) {
@@ -1014,6 +1016,7 @@ pub unsafe extern "C" fn rgsaddle_sella_min_step(
         n_atoms: session.n_atoms,
         n_images: 1,
         per_image: false,
+        climbing_request: false,
         rows: Default::default(),
     };
     match session.session.step(&cs) {
@@ -1425,6 +1428,7 @@ pub unsafe extern "C" fn rgsaddle_sella_saddle_step(
         n_atoms: session.n_atoms,
         n_images: 1,
         per_image: false,
+        climbing_request: false,
         rows: Default::default(),
     };
     match session.session.step(&cs) {
@@ -1799,6 +1803,7 @@ pub unsafe extern "C" fn rgsaddle_samd_create(
         n_atoms,
         n_images: 1,
         per_image: false,
+        climbing_request: false,
         rows: Default::default(),
     };
     match SamdSession::new(samd, pos, vel, &cs) {
@@ -1838,6 +1843,7 @@ pub unsafe extern "C" fn rgsaddle_samd_step(
         n_atoms: session.n_atoms,
         n_images: 1,
         per_image: false,
+        climbing_request: false,
         rows: Default::default(),
     };
     match session.session.step(&cs, draw.view()) {
@@ -1957,6 +1963,7 @@ pub unsafe extern "C" fn rgsaddle_pes_kick(
         n_atoms: pes.n_atoms,
         n_images: 1,
         per_image: false,
+        climbing_request: false,
         rows: Default::default(),
     };
     match pes.pes.kick(&cs, dx.view()) {
@@ -2319,6 +2326,7 @@ pub unsafe extern "C" fn rgsaddle_internal_pes_kick(
         n_atoms: pes.n_atoms,
         n_images: 1,
         per_image: false,
+        climbing_request: false,
         rows: Default::default(),
     };
     match pes.pes.kick(&cs, q.view()) {
