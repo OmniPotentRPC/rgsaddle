@@ -5,7 +5,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
-use rgmin::{Accept, Control, ExpParams, Method, Neighbours, Oracle, Solver};
+use rgmin::{Accept, Control, Exp, ExpParams, Method, Neighbours, Oracle, Solver};
 
 use crate::cell_log::{M3, m3_det};
 use crate::error::SaddleError;
@@ -283,16 +283,30 @@ impl Default for BandConfig {
 
 /// Exponential metric of Packwood, Kermode, Mones, Bernstein, Woolley,
 /// Gould, Ortner and Csányi, J. Chem. Phys. 144, 164109 (2016), built
-/// per interior image and installed on the band solver as rgmin's
-/// geometry preconditioner. Makri, Ortner and Kermode, J. Chem. Phys.
-/// 150, 094109 (2019), pair it with [`Method::Ode12r`] (ODE12r-Exp);
-/// FIRE reads it as its metric and L-BFGS as `H0`.
+/// per interior image and applied inside the band projection as Makri,
+/// Ortner and Kermode, J. Chem. Phys. 150, 094109 (2019), Eq. (9) and
+/// (10), write it: the image's driving force is `-(P^{-1} g - t_P (t_P
+/// . g)) + k ((d_next - d_prev) . P t_P) t_P` with `t_P` the tangent
+/// normalised in the `P`-norm. The band solver then integrates that
+/// force in the Euclidean metric, so [`Method::Ode12r`] is ODE12r-Exp
+/// and FIRE or L-BFGS step on the same preconditioned force. The band
+/// relaxes to the minimum energy path of the metric's geometry, where
+/// the gradient lies along `P t_P`; the band force that convergence and
+/// the report measure is the paper's residual, Eq. (11), `-(g - P t_P
+/// (t_P . g))` per image, which vanishes on that path where the
+/// Euclidean perpendicular force does not.
 ///
 /// Pairs within `r_cut_factor * r_nn` of one another in the same image
 /// enter the matrix, `r_nn` being the largest per-atom nearest-neighbour
 /// distance over the interior images; a cell wraps the distances. The
-/// matrix is rebuilt when any atom has moved more than `r_nn / 2` since
-/// the last build.
+/// matrices are rebuilt when any atom has moved more than `r_nn / 2`
+/// since the last build; an energy scale that is not given is estimated
+/// once by rgmin's sine probe on the first interior image, which costs
+/// one surface row. Only a uniform spring is supported with the metric;
+/// its constant `k` enters as the paper's dimensionless `kappa = k /
+/// mu`. An armed climbing image reflects the preconditioned gradient in
+/// the P-metric, `-(P^{-1} g - 2 t_P (t_P . g))`, whose fixed point is
+/// the saddle.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ExpBandPrecon {
     /// Exponent `A` of `exp(-A (r / r_nn - 1))`.
@@ -317,12 +331,16 @@ impl Default for ExpBandPrecon {
     }
 }
 
-/// Where the band metric was last built.
+/// The band metric: one matrix per interior image and where they were built.
 #[derive(Clone, Debug)]
 struct ExpBandState {
     precon: ExpBandPrecon,
     built_at: Array1<f64>,
     r_nn: f64,
+    /// Energy scale in force; `None` until estimated on the first step.
+    mu: Option<f64>,
+    /// One matrix per interior image, empty until the first step.
+    metrics: Vec<Exp>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1040,7 +1058,8 @@ fn assemble_solid(
     Ok((pseudo_energy, cartesian, max_component))
 }
 
-/// Projected force on interior image `i`, climbing when `climb`.
+/// Projected force on interior image `i`, climbing when `climb`, and
+/// with a metric the paper's preconditioned driving force beside it.
 #[allow(clippy::too_many_arguments)]
 fn image_force(
     config: &BandConfig,
@@ -1051,7 +1070,8 @@ fn image_force(
     x: ArrayView1<f64>,
     energies: &Array1<f64>,
     gradients: &Array2<f64>,
-) -> Result<Array1<f64>, SaddleError> {
+    metric: Option<&Exp>,
+) -> Result<(Array1<f64>, Option<Array1<f64>>), SaddleError> {
     let dof = endpoint_first.len();
     let n_images = energies.len();
     let row = |k: usize| -> ArrayView1<f64> {
@@ -1106,7 +1126,62 @@ fn image_force(
     if config.remove_translation {
         remove_net_translation(&mut projected);
     }
-    Ok(projected)
+    let driving = match metric {
+        Some(p) => {
+            // Makri, Ortner and Kermode, Eq. (9) and (10): the gradient
+            // through P^{-1}, the tangent normalised in the P-norm, and
+            // the spring along that tangent with the P inner product.
+            let gradient = gradients.row(i);
+            let s = p.solve(gradient).ok_or(SaddleError::Invalid(
+                "exponential metric: the linear solve failed".into(),
+            ))?;
+            let pt = p.apply(tangent.view());
+            let norm_p = tangent.dot(&pt).sqrt();
+            if !(norm_p.is_finite() && norm_p > 0.0) {
+                return Err(SaddleError::NonFinite("P-norm of the tangent"));
+            }
+            let t_p = &tangent / norm_p;
+            let pt_p = &pt / norm_p;
+            let along = t_p.dot(&gradient);
+            let mut driving;
+            if climb {
+                // The climbing image reflects the preconditioned gradient
+                // in the P-metric, -(P^{-1} g - 2 t_P (t_P . g)), whose
+                // fixed point is g = 0; its residual is the P-image of
+                // that force, -(g - 2 P t_P (t_P . g)).
+                driving = -&s + &(&t_p * (2.0 * along));
+                projected = -&gradient + &(&pt_p * (2.0 * along));
+            } else {
+                driving = -(&s - &(&t_p * along));
+                if let SpringKind::Uniform { k } = config.spring {
+                    // The paper's spring constant is dimensionless, the
+                    // stiffness relative to the metric; `k` in
+                    // force-constant units keeps its meaning through the
+                    // metric's energy scale, kappa = k / mu.
+                    let curvature = &pos_diff_next - &pos_diff_prev;
+                    driving += &(&t_p * (k / p.mu() * curvature.dot(&pt_p)));
+                }
+                // The fixed point of the preconditioned projection is the
+                // path with the gradient along P t_P, the minimum energy
+                // path of the metric's geometry, where the Euclidean
+                // perpendicular force does not vanish. The band force that
+                // convergence and the report measure is the residual of
+                // Eq. (11), -P grad_perp V_P = -(g - P t_P (t_P . g)),
+                // zero on that path.
+                projected = -&gradient + &(&pt_p * along);
+            }
+            if config.remove_translation {
+                remove_net_translation(&mut driving);
+                remove_net_translation(&mut projected);
+            }
+            if !driving.dot(&driving).is_finite() {
+                return Err(SaddleError::NonFinite("preconditioned band force norm"));
+            }
+            Some(driving)
+        }
+        None => None,
+    };
+    Ok((projected, driving))
 }
 
 fn max_abs(v: &Array1<f64>) -> f64 {
@@ -1130,6 +1205,30 @@ fn assemble_band(
     endpoint_last: ArrayView1<f64>,
     x: ArrayView1<f64>,
 ) -> Result<(f64, Array1<f64>, f64), SaddleError> {
+    let (energy, projected, max_component, _) = assemble_band_with(
+        config,
+        state,
+        surface,
+        endpoint_first,
+        endpoint_last,
+        x,
+        None,
+    )?;
+    Ok((energy, projected, max_component))
+}
+
+/// The band assembly, and with `metrics` also the preconditioned driving
+/// force the solver integrates in place of the projected one.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn assemble_band_with(
+    config: &BandConfig,
+    state: &BandState,
+    surface: &dyn BandSurface,
+    endpoint_first: ArrayView1<f64>,
+    endpoint_last: ArrayView1<f64>,
+    x: ArrayView1<f64>,
+    metrics: Option<&[Exp]>,
+) -> Result<(f64, Array1<f64>, f64, Option<Array1<f64>>), SaddleError> {
     let (energies, gradients) = evaluate_band(state, surface, endpoint_first, endpoint_last, x)?;
     let n_images = energies.len();
     let dof = endpoint_first.len();
@@ -1147,9 +1246,13 @@ fn assemble_band(
     }
     let ci_at = armed.then_some(max_i);
 
+    let metric_of = |i: usize| metrics.and_then(|m| m.get(i - 1));
+    // An armed climbing image under the metric climbs in the P-metric,
+    // so a metric slice carries every image.
     let mut projected = Array1::zeros((n_images - 2) * dof);
+    let mut driving = metrics.map(|_| Array1::zeros((n_images - 2) * dof));
     for i in 1..n_images - 1 {
-        let f = image_force(
+        let (f, d) = image_force(
             config,
             i,
             ci_at == Some(i),
@@ -1158,8 +1261,14 @@ fn assemble_band(
             x,
             &energies,
             &gradients,
+            metric_of(i),
         )?;
         projected.slice_mut(s![(i - 1) * dof..i * dof]).assign(&f);
+        if let Some(driving) = driving.as_mut() {
+            driving
+                .slice_mut(s![(i - 1) * dof..i * dof])
+                .assign(d.as_ref().unwrap_or(&f));
+        }
     }
     let mut max_component = state.convergence_force(&projected);
 
@@ -1180,7 +1289,7 @@ fn assemble_band(
     {
         state.armed.store(true, Ordering::Relaxed);
         state.ci_index.store(max_i as i64, Ordering::Relaxed);
-        let f = image_force(
+        let (f, d) = image_force(
             config,
             max_i,
             true,
@@ -1189,10 +1298,16 @@ fn assemble_band(
             x,
             &energies,
             &gradients,
+            metric_of(max_i),
         )?;
         projected
             .slice_mut(s![(max_i - 1) * dof..max_i * dof])
             .assign(&f);
+        if let Some(driving) = driving.as_mut() {
+            driving
+                .slice_mut(s![(max_i - 1) * dof..max_i * dof])
+                .assign(d.as_ref().unwrap_or(&f));
+        }
         max_component = state.convergence_force(&projected);
     }
 
@@ -1215,7 +1330,7 @@ fn assemble_band(
         .lock()
         .unwrap_or_else(|e| e.into_inner()) = max_component;
     let pseudo_energy: f64 = energies.slice(s![1..n_images - 1]).sum();
-    Ok((pseudo_energy, projected, max_component))
+    Ok((pseudo_energy, projected, max_component, driving))
 }
 
 /// A solver step must leave finite coordinates, and must move the band
@@ -1436,8 +1551,22 @@ impl BandSession {
                 "the exponential metric needs at least two atoms per image".into(),
             ));
         }
+        if !matches!(self.config.spring, SpringKind::Uniform { .. }) {
+            return Err(SaddleError::Invalid(
+                "the exponential metric needs a uniform spring".into(),
+            ));
+        }
         self.config.exp_precon = Some(precon);
-        self.install_exp(precon.mu)
+        // The matrices need the surface for the energy scale, so they
+        // are built on the first step.
+        self.exp = Some(ExpBandState {
+            precon,
+            built_at: Array1::zeros(0),
+            r_nn: 0.0,
+            mu: precon.mu,
+            metrics: Vec::new(),
+        });
+        Ok(())
     }
 
     /// The installed band metric, if any.
@@ -1446,17 +1575,26 @@ impl BandSession {
         self.config.exp_precon
     }
 
-    /// Pair list over the interior images: atoms of image `k` are the
-    /// block `[(k - 1) n, k n)` of the flat interior vector, and no
-    /// pair crosses an image. Distances are wrapped by the cell.
-    fn band_neighbours(&self, r_cut_factor: f64) -> (Neighbours, f64) {
+    /// Energy scale `mu` of the installed band metric: the configured
+    /// value, or the one estimated on the first step; `None` before the
+    /// first step when none was configured, and without a metric.
+    #[must_use]
+    pub fn exp_scale(&self) -> Option<f64> {
+        self.exp.as_ref().and_then(|e| e.mu)
+    }
+
+    /// Pair lists of the interior images, one per image with the atom
+    /// indices of that image, and the largest per-atom nearest-neighbour
+    /// distance over all of them. Distances are wrapped by the cell.
+    fn band_neighbours(&self, r_cut_factor: f64) -> (Vec<Neighbours>, f64) {
         let n_images = self.positions.nrows();
         let n_atoms = self.positions.ncols() / 3;
-        let mut pairs: Vec<(usize, usize, f64)> = Vec::new();
-        let mut nearest = vec![f64::INFINITY; (n_images - 2) * n_atoms];
+        let mut per_image: Vec<Vec<(usize, usize, f64)>> = Vec::new();
+        let mut r_nn = 0.0_f64;
         for img in 1..n_images - 1 {
             let row = self.positions.row(img);
-            let base = (img - 1) * n_atoms;
+            let mut pairs = Vec::new();
+            let mut nearest = vec![f64::INFINITY; n_atoms];
             for a in 0..n_atoms {
                 for b in a + 1..n_atoms {
                     let mut d = Array1::from(vec![
@@ -1468,35 +1606,45 @@ impl BandSession {
                         cell.minimum_image(&mut d);
                     }
                     let r = d.dot(&d).sqrt();
-                    nearest[base + a] = nearest[base + a].min(r);
-                    nearest[base + b] = nearest[base + b].min(r);
-                    pairs.push((base + a, base + b, r));
+                    nearest[a] = nearest[a].min(r);
+                    nearest[b] = nearest[b].min(r);
+                    pairs.push((a, b, r));
                 }
             }
+            r_nn = nearest
+                .iter()
+                .copied()
+                .filter(|r| r.is_finite())
+                .fold(r_nn, f64::max);
+            per_image.push(pairs);
         }
-        let r_nn = nearest
-            .iter()
-            .copied()
-            .filter(|r| r.is_finite())
-            .fold(0.0_f64, f64::max);
         let r_cut = r_cut_factor * r_nn;
-        let mut neigh = Neighbours::default();
-        for (i, j, r) in pairs {
-            if r < r_cut {
-                neigh.i.push(i);
-                neigh.j.push(j);
-                neigh.r.push(r);
-            }
-        }
-        (neigh, r_nn)
+        let lists = per_image
+            .into_iter()
+            .map(|pairs| {
+                let mut neigh = Neighbours::default();
+                for (i, j, r) in pairs {
+                    if r < r_cut {
+                        neigh.i.push(i);
+                        neigh.j.push(j);
+                        neigh.r.push(r);
+                    }
+                }
+                neigh
+            })
+            .collect();
+        (lists, r_nn)
     }
 
-    fn install_exp(&mut self, mu: Option<f64>) -> Result<(), SaddleError> {
-        let precon = self
-            .config
-            .exp_precon
-            .ok_or_else(|| SaddleError::Invalid("no exponential metric configured".into()))?;
-        let (neigh, r_nn) = self.band_neighbours(precon.r_cut_factor);
+    /// Build the per-image metrics at the current positions, estimating
+    /// the energy scale on the first interior image when none is held.
+    fn build_metrics<S: BandSurface>(&mut self, surface: &S) -> Result<(), SaddleError> {
+        let Some(exp) = self.exp.as_ref() else {
+            return Ok(());
+        };
+        let precon = exp.precon;
+        let held_mu = exp.mu;
+        let (lists, r_nn) = self.band_neighbours(precon.r_cut_factor);
         if !(r_nn.is_finite() && r_nn > 0.0) {
             return Err(SaddleError::Invalid(
                 "exponential metric: no finite nearest-neighbour distance on the band".into(),
@@ -1505,40 +1653,66 @@ impl BandSession {
         let params = ExpParams {
             a: precon.a,
             c_stab: precon.c_stab,
-            mu,
+            mu: held_mu,
             r_nn: Some(r_nn),
             r_cut: None,
             recalc_mu: false,
             ..ExpParams::default()
         };
+        let dof = self.positions.ncols();
+        let first = self.positions.row(1).to_owned();
+        let mu = match held_mu {
+            Some(mu) => mu,
+            None => {
+                let rows = &self.state.rows;
+                let grad = |p: ArrayView1<f64>| -> Array1<f64> {
+                    let geometry = p.to_shape((1, dof)).expect("one image").to_owned();
+                    let mut energies = Array1::zeros(1);
+                    let mut gradients = Array2::zeros((1, dof));
+                    rows.fetch_add(1, Ordering::Relaxed);
+                    match surface.eval(geometry.view(), &mut energies, &mut gradients) {
+                        Ok(()) => gradients.row(0).to_owned(),
+                        Err(_) => Array1::from_elem(dof, f64::NAN),
+                    }
+                };
+                rgmin::estimate_mu(first.view(), &lists[0], &params, grad)
+                    .map_err(|e| SaddleError::Solver(format!("exponential metric: {e}")))?
+            }
+        };
+        let mut metrics = Vec::with_capacity(lists.len());
+        for (k, neigh) in lists.iter().enumerate() {
+            let row = self.positions.row(k + 1);
+            let metric = Exp::assemble(row, neigh, &params, mu, r_nn)
+                .map_err(|e| SaddleError::Solver(format!("exponential metric: {e}")))?;
+            metrics.push(metric);
+        }
         let flat = self.interior_flat();
-        self.solver
-            .set_exp(flat.view(), &neigh, &params)
-            .map_err(|e| SaddleError::Solver(e.to_string()))?;
-        self.exp = Some(ExpBandState {
-            precon,
-            built_at: flat,
-            r_nn,
-        });
+        if let Some(exp) = self.exp.as_mut() {
+            exp.built_at = flat;
+            exp.r_nn = r_nn;
+            exp.mu = Some(mu);
+            exp.metrics = metrics;
+        }
         Ok(())
     }
 
-    /// Rebuild the band metric when an atom has moved more than
-    /// `r_nn / 2` since the last build. The energy scale found on the
-    /// first build is kept, so a rebuild costs no band evaluation.
-    fn refresh_exp(&mut self) -> Result<(), SaddleError> {
+    /// Build the band metrics on the first step and rebuild them when an
+    /// atom has moved more than `r_nn / 2` since the last build. The
+    /// energy scale found on the first build is kept.
+    fn refresh_exp<S: BandSurface>(&mut self, surface: &S) -> Result<(), SaddleError> {
         let Some(exp) = &self.exp else {
             return Ok(());
         };
         let flat = self.interior_flat();
-        if !rgmin::needs_rebuild(
-            rgmin::max_atom_displacement(exp.built_at.view(), flat.view()),
-            exp.r_nn,
-        ) {
-            return Ok(());
+        let stale = exp.metrics.is_empty()
+            || rgmin::needs_rebuild(
+                rgmin::max_atom_displacement(exp.built_at.view(), flat.view()),
+                exp.r_nn,
+            );
+        if stale {
+            self.build_metrics(surface)?;
         }
-        let mu = self.solver.precon_scale().or(exp.precon.mu);
-        self.install_exp(mu)
+        Ok(())
     }
 
     /// Select the optional HiGHS feasible-set step; requires the `highs` feature.
@@ -1836,30 +2010,32 @@ impl BandSession {
         let n_images = self.positions.nrows();
         let dof = self.positions.ncols();
         let interior_dof = (n_images - 2) * dof;
-        self.refresh_exp()?;
+        // The metric probe's rows count in this step.
+        self.state.take_error();
+        self.state.rows.store(0, Ordering::Relaxed);
+        self.refresh_exp(surface)?;
 
         let endpoint_first = self.positions.row(0).to_owned();
         let endpoint_last = self.positions.row(n_images - 1).to_owned();
         let config = &self.config;
         let state = &self.state;
-        state.take_error();
-        state.rows.store(0, Ordering::Relaxed);
-        let oracle = Oracle::unbounded(interior_dof, |x: ArrayView1<f64>| {
-            match assemble_band(
+        let metrics = self.exp.as_ref().map(|e| e.metrics.as_slice());
+        let oracle =
+            Oracle::unbounded(interior_dof, |x: ArrayView1<f64>| match assemble_band_with(
                 config,
                 state,
                 surface,
                 endpoint_first.view(),
                 endpoint_last.view(),
                 x,
+                metrics,
             ) {
-                Ok((e, f, _)) => (e, -f),
+                Ok((e, f, _, driving)) => (e, -driving.unwrap_or(f)),
                 Err(err) => {
                     state.record_error(err);
                     (f64::INFINITY, Array1::zeros(interior_dof))
                 }
-            }
-        });
+            });
 
         let mut x = self.interior_flat();
         let before = x.clone();

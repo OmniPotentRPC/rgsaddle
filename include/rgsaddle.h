@@ -1058,16 +1058,28 @@ rgsaddle_status_t rgsaddle_band_set_highs(RgsaddleBand *band, int32_t enabled);
 rgsaddle_status_t rgsaddle_minmode_set_highs(RgsaddleMinMode *session, int32_t enabled);
 
 /**
- * Per-image exponential metric (Packwood et al. 2016) on the band
- * solver: ODE12r-Exp with RGSADDLE_METHOD_ODE12R, the FIRE metric or
- * the L-BFGS H0 otherwise. Pairs within r_cut_factor * r_nn of one
- * another in the same image enter the matrix, with r_nn the largest
- * per-atom nearest-neighbour distance over the interior images, and
- * the matrix is rebuilt when an atom has moved r_nn / 2 since the
- * last build. mu <= 0 estimates the energy scale on the first step,
- * which costs band evaluations; a, c_stab and r_cut_factor at or
- * below zero take 3, 0.1 and 2. Refused on a solid-state band and on
- * single-atom images. ABI minor 22.
+ * Per-image exponential metric (Packwood et al. 2016) inside the band
+ * projection, as Makri, Ortner and Kermode 2019, Eq. (9) and (10),
+ * write it: each image is driven by -(P^-1 g - t_P (t_P . g)) plus the
+ * spring along the P-normalised tangent t_P, and the stepper
+ * integrates that force. ODE12r-Exp with RGSADDLE_METHOD_ODE12R; FIRE
+ * and L-BFGS step on the same preconditioned force. The band relaxes
+ * to the minimum energy path of the metric's geometry (gradient along
+ * P t_P), and the band force that convergence and the report measure
+ * is the paper's residual -(g - P t_P (t_P . g)) per image, zero on
+ * that path where the Euclidean perpendicular force is not. The spring
+ * constant enters as the paper's dimensionless kappa = k / mu, and an
+ * armed climbing image reflects the preconditioned gradient in the
+ * P-metric, -(P^-1 g - 2 t_P (t_P . g)), whose fixed point is the
+ * saddle.
+ * Pairs within r_cut_factor * r_nn of one another in the same image
+ * enter the matrix, with r_nn the largest per-atom nearest-neighbour
+ * distance over the interior images, and the matrices are rebuilt
+ * when an atom has moved r_nn / 2 since the last build. mu <= 0
+ * estimates the energy scale on the first step from one row of the
+ * first interior image; a, c_stab and r_cut_factor at or below zero
+ * take 3, 0.1 and 2. Refused on a solid-state band, on single-atom
+ * images and with a non-uniform spring. ABI minor 22.
  */
 rgsaddle_status_t rgsaddle_band_set_exp_precon(RgsaddleBand *band, double a,
                                                double c_stab, double mu,
