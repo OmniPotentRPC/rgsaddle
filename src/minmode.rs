@@ -1690,8 +1690,7 @@ mod tests {
             max_move: 0.2,
             ..MinModeConfig::default()
         };
-        let mut session =
-            MinModeSession::new(config, array![0.2, 0.0], array![1.0, 0.0]).unwrap();
+        let mut session = MinModeSession::new(config, array![0.2, 0.0], array![1.0, 0.0]).unwrap();
         let first = session.step(&Seam).unwrap();
         assert_eq!(first.rotations, 0, "the seed is already the lowest mode");
         assert!(
@@ -1700,9 +1699,7 @@ mod tests {
             session.curvature()
         );
         assert!(session.mode()[0].abs() > 0.9);
-        session
-            .set_position(array![-0.2, 0.0], None)
-            .unwrap();
+        session.set_position(array![-0.2, 0.0], None).unwrap();
         let second = session.step(&Seam).unwrap();
         assert!(
             second.rotations >= 1,
