@@ -1654,6 +1654,75 @@ mod tests {
         &(mode * c) + &(&ortho * s)
     }
 
+    /// A rotation that finishes in zero steps has converged at that
+    /// centre only. Moving the centre and stepping again re-estimates
+    /// the mode and replaces the curvature. The old mode is the seed,
+    /// not the mode of the new centre. On the negative side the lowest
+    /// mode is `[0.6, 0.8]` with curvature -4, so the carried x-axis
+    /// seed is not an eigenvector and the rotation has to turn.
+    struct Seam;
+
+    impl PointSurface for Seam {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            if x[0] >= 0.0 {
+                let energy = -0.5 * x[0] * x[0] + 2.0 * x[1] * x[1];
+                Ok((energy, array![-x[0], 4.0 * x[1]]))
+            } else {
+                let u0 = 0.6;
+                let u1 = 0.8;
+                let v0 = -0.8;
+                let v1 = 0.6;
+                let su = u0 * x[0] + u1 * x[1];
+                let sv = v0 * x[0] + v1 * x[1];
+                let energy = -2.0 * su * su + 2.0 * sv * sv;
+                let g0 = -4.0 * su * u0 + 4.0 * sv * v0;
+                let g1 = -4.0 * su * u1 + 4.0 * sv * v1;
+                Ok((energy, array![g0, g1]))
+            }
+        }
+    }
+
+    #[test]
+    fn zero_rotation_does_not_keep_the_mode_across_a_move() {
+        let config = MinModeConfig {
+            method: Method::Lbfgs { memory: 10 },
+            force_tol: 1e-8,
+            max_move: 0.2,
+            ..MinModeConfig::default()
+        };
+        let mut session =
+            MinModeSession::new(config, array![0.2, 0.0], array![1.0, 0.0]).unwrap();
+        let first = session.step(&Seam).unwrap();
+        assert_eq!(first.rotations, 0, "the seed is already the lowest mode");
+        assert!(
+            session.curvature() > -1.5 && session.curvature() < -0.5,
+            "curvature along x is -1, got {}",
+            session.curvature()
+        );
+        assert!(session.mode()[0].abs() > 0.9);
+        session
+            .set_position(array![-0.2, 0.0], None)
+            .unwrap();
+        let second = session.step(&Seam).unwrap();
+        assert!(
+            second.rotations >= 1,
+            "the new centre is not a zero-rotation of the old mode"
+        );
+        let mode = session.mode();
+        let along = (0.6 * mode[0] + 0.8 * mode[1]).abs();
+        assert!(
+            along > 0.9,
+            "mode stayed on the previous centre: {:?}",
+            mode
+        );
+        assert!(
+            session.curvature() < -2.0,
+            "curvature stayed at the previous centre: {}",
+            session.curvature()
+        );
+        assert!(second.iteration < 5);
+    }
+
     /// A turn inside the Householder cone keeps the L-BFGS pairs. A
     /// genuine swap past [`super::MODE_RESET_ANGLE`] drops them. Goswami,
     /// Gunde, and Jónsson, Front. Chem. (2026),
