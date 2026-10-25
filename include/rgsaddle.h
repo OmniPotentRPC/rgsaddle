@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 22u
+#define RGSADDLE_ABI_MINOR 23u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -66,16 +66,32 @@ extern "C" {
  * climbing image: the plain CI-NEB of minor 20 and earlier. Without
  * the bit a climbing band hands its climbing image to the OCI-NEB
  * refinement (Goswami, Gunde, and Jonsson, Front. Chem. 14, 1807063
- * (2026)) once that image has held for three steps with its largest
- * per-atom force under half the first evaluation's. That image then
- * climbs alone by P-RFO on a TS-BFGS model while the other images
- * stay, and the band resumes if the climb leaves the band's mode.
- * rgsaddle_ocineb_create does not read the bit.
+ * (2026)) once that image has held its index for one band step. A
+ * Lanczos estimate of the lowest mode must be negative with
+ * |mode . tangent| >= 0.85, and then that image climbs alone by P-RFO
+ * on a TS-BFGS model fit to a pair-stretch Hessian and the Lanczos
+ * vectors, following that mode, while the other images stay. The band
+ * resumes when the measured curvature turns positive; a refinement
+ * that did not lower the force waits for half the force it started
+ * from. rgsaddle_ocineb_create does not read the bit.
  */
 #define RGSADDLE_BAND_NO_MIN_MODE (1ull << 3)
 
 /** Request flags bit 0. positions and gradients are one image. */
 #define RGSADDLE_REQ_ONE_IMAGE (1ull << 0)
+
+/**
+ * Request flags bit 1, ABI minor 23. The request carries the band's
+ * climbing image alone, for the min-mode refinement (see
+ * RGSADDLE_BAND_NO_MIN_MODE), and image is its band index. Set only on
+ * a band whose config version minor is 23 or newer, with
+ * RGSADDLE_REQ_ONE_IMAGE for a per-image band and alone (n_images = 1)
+ * for a batched one. A host that keys per-image state on the band
+ * index reads it here, and an MPI host can give that one image every
+ * rank. rgsaddle_ocineb_step sends its climbing image to the point
+ * surface as a plain one-geometry request and does not set the bit.
+ */
+#define RGSADDLE_REQ_CLIMBING_IMAGE (1ull << 1)
 
 /** Version head carried by every wire struct. */
 typedef struct {
@@ -189,7 +205,9 @@ typedef struct RgsaddleMinMode RgsaddleMinMode;
  * While the min-mode refinement runs (ABI minor 21, see
  * RGSADDLE_BAND_NO_MIN_MODE) each request carries the climbing image
  * alone: with RGSADDLE_REQ_ONE_IMAGE as above, and batched as one
- * geometry with n_images = 1 and image -1.
+ * geometry with n_images = 1 and image -1. From a config at minor 23
+ * those requests also set RGSADDLE_REQ_CLIMBING_IMAGE, and a batched
+ * one then has image set to the climbing image's band index.
  *
  * Return RGSADDLE_OK or another rgsaddle_status_t; a non-OK return
  * fails the step with the band unchanged.
