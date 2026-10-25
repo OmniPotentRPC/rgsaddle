@@ -3,6 +3,10 @@
 
 * Unreleased
 
+* 0.3.1 (2026-10-25)
+
+- The climbing-image hand-off series: the band refinement fits its climb model to a pair-stretch Hessian and the Lanczos block, follows the mode, and hands the climbing image to the minimum-mode refinement once it has kept one index for one band step; ~RGSADDLE_REQ_CLIMBING_IMAGE~ marks those requests at ABI minor 23, and a host whose config minor is 22 keeps the unflagged requests. The entries below under 0.3.0 that describe the climb model, the hand-off and the kept Krylov block belong to this release.
+
 * 0.3.0 (2026-10-25)
 
 - ~Method::Ode12r~ (~RGSADDLE_METHOD_ODE12R~ = 4, ABI minor 22) steps the band with rgmin's ODE12r, the adaptive forward Euler of Makri, Ortner and Kermode, J. Chem. Phys. 150, 094109 (2019), doi:10.1063/1.5064465: one band evaluation per trial, accepted or not, a rejected trial leaving the band where it was, and the stalled-step guard allowing 64 consecutive rejections.
