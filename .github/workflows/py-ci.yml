@@ -17,7 +17,7 @@ permissions:
 
 jobs:
   wheels:
-    uses: OmniPotentRPC/rgpot/.github/workflows/py-wheels.yml@bb82209d778dbe7fe55855abee5f783708bad893
+    uses: OmniPotentRPC/rgpot/.github/workflows/py-wheels.yml@25e869fbee670bbee11a8eb6a2c8d2d911904a91
     with:
       package-dir: .
       import-names: rgsaddle._core
@@ -25,7 +25,7 @@ jobs:
       extras: test
 
   freethreading:
-    uses: OmniPotentRPC/rgpot/.github/workflows/py-freethreading.yml@bb82209d778dbe7fe55855abee5f783708bad893
+    uses: OmniPotentRPC/rgpot/.github/workflows/py-freethreading.yml@25e869fbee670bbee11a8eb6a2c8d2d911904a91
     with:
       package-dir: .
       import-names: rgsaddle._core
@@ -35,7 +35,7 @@ jobs:
       rust-crate-dir: .
 
   tsan:
-    uses: OmniPotentRPC/rgpot/.github/workflows/py-tsan.yml@bb82209d778dbe7fe55855abee5f783708bad893
+    uses: OmniPotentRPC/rgpot/.github/workflows/py-tsan.yml@25e869fbee670bbee11a8eb6a2c8d2d911904a91
     with:
       package-dir: .
       import-names: rgsaddle._core
@@ -46,7 +46,7 @@ jobs:
       tsan-cmake-args: -DRGSADDLE_TSAN=ON
 
   typing:
-    uses: OmniPotentRPC/rgpot/.github/workflows/py-typing.yml@bb82209d778dbe7fe55855abee5f783708bad893
+    uses: OmniPotentRPC/rgpot/.github/workflows/py-typing.yml@25e869fbee670bbee11a8eb6a2c8d2d911904a91
     with:
       package-dir: .
       import-names: rgsaddle._core
@@ -56,7 +56,7 @@ jobs:
       rust-crate-dir: .
 
   rgbind-sync:
-    uses: OmniPotentRPC/rgpot/.github/workflows/py-rgbind-sync.yml@bb82209d778dbe7fe55855abee5f783708bad893
+    uses: OmniPotentRPC/rgpot/.github/workflows/py-rgbind-sync.yml@25e869fbee670bbee11a8eb6a2c8d2d911904a91
     with:
       vendored-path: include/rgbind/rgbind.hpp
-      rgpot-ref: bb82209d778dbe7fe55855abee5f783708bad893
+      rgpot-ref: 25e869fbee670bbee11a8eb6a2c8d2d911904a91
