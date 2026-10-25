@@ -9,36 +9,39 @@
 //! other images stay where they are. The first refinement step only
 //! estimates the mode, seeded with the band tangent (or the mode cached
 //! by the last successful refinement), and the climb starts when the
-//! curvature is negative and `|v · τ| >= alignment_tol`. A climb
-//! continues while that overlap holds. A positive curvature restores
-//! the image to where the refinement began unless an aligned point was
-//! visited. An alignment failure, a positive curvature after such a
-//! point, or the step budget leaves the image at the visited aligned
-//! point of lowest force. A positive curvature of the model is measured
-//! again before it ends the climb. The trigger thresholds are
-//! [`crate::ocineb::initial_threshold`], and a refinement re-arms at
-//! [`crate::ocineb::success_threshold`] (eq. 15) when it lowered the
-//! force and at [`crate::ocineb::backoff_threshold`] (eqs. 13-14)
-//! otherwise. Those re-armed values belong to the image that climbed:
-//! when the band's climbing image changes index the threshold returns
-//! to its initial value.
+//! curvature is negative and `|v · τ| >= alignment_tol`. With
+//! `climb_alignment` a climb continues only while that overlap holds.
+//! A positive curvature restores the image to where the refinement
+//! began unless an aligned point was visited. An alignment failure, a
+//! positive curvature after such a point, or the step budget leaves the
+//! image at the visited aligned point of lowest force. A positive
+//! curvature of the model is measured again before it ends the climb.
+//! The trigger thresholds are [`crate::ocineb::initial_threshold`], and
+//! a refinement re-arms at [`crate::ocineb::success_threshold`]
+//! (eq. 15) when it lowered the force and at
+//! [`crate::ocineb::backoff_threshold`] (eqs. 13-14) otherwise, capped
+//! by `retry_factor` times the force it started from. Those re-armed
+//! values belong to the image that climbed: when the band's climbing
+//! image changes index the threshold returns to its initial value. A
+//! refinement that leaves the image where it began keeps the band
+//! optimizer's history.
 //!
 //! The lowest mode is Lanczos with the improved relative stop of
 //! Olsen, Kroes, Henkelman, Arnaldsson, and Jónsson, J. Chem. Phys.
 //! 121, 9776 (2004), doi:10.1063/1.1809574, or the dimer. The climb is
-//! the order-1 P-RFO step on a dense TS-BFGS model (`climb`). The model
-//! starts at `h_0 I`, `h_0` the finite-difference curvature along the
-//! force perpendicular to the mode, and carries the estimated curvature
-//! on the mode with every other direction a minimum. The mode is
-//! estimated again, and the model takes its curvature, when the force
-//! grows past `refresh_factor` times its lowest value since the last
-//! estimate or when the model's lowest mode turns away from the
-//! previous one.
+//! the order-1 P-RFO step on a dense TS-BFGS model (`climb`) fit to the
+//! pair-stretch Hessian and the estimate's Krylov block, following the
+//! estimated mode by overlap. The mode is estimated again, its block
+//! imposed and its direction followed, once the followed curvature has
+//! kept under `curvature_retained` of the last measured value or
+//! the followed mode turned under `min_overlap`, at most every
+//! `refresh_interval` climb steps.
 
 use ndarray::{Array1, ArrayView1, Axis, s};
 
 use super::climb::ModelClimb;
-use super::{BandReport, BandSession, BandStatus, BandSurface};
+use super::pair_model::rigid_basis;
+use super::{BandReport, BandSession, BandStatus, BandSurface, Cell};
 use crate::error::SaddleError;
 use crate::minmode::{
     FiniteDifference, MinModeConfig, MinModeKind, MinModeSession, ModeEstimate, PointSurface,
@@ -52,29 +55,37 @@ use crate::tangent::compute_tangent;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// Overlap with the previous model mode under which the model's lowest
-/// mode counts as a different direction.
-const MODE_TURN: f64 = 0.7;
-
-/// OCI-NEB controls. The trigger, stability count and alignment are
-/// looser than the published `λ_rel = 0.31`, `κ = 5`, `α_tol = 0.85`:
-/// the P-RFO climb follows its own model mode, so it starts from a
-/// rougher band and keeps going while the mode turns. The budget is
-/// 1000 steps per refinement. The Lanczos estimate keeps eight actions
-/// and stops when the lowest Ritz value changes by under 5%.
+/// OCI-NEB controls. The defaults hand the climbing image off as soon
+/// as it has kept its index for one band step, at any force, where the
+/// published controls wait for `λ_rel = 0.31` and `κ = 5`; the start
+/// keeps the published `α_tol = 0.85`. The P-RFO climb follows its own
+/// mode by overlap, so it does not end when that mode leaves the band
+/// tangent, and a refinement that did not lower the force re-arms only
+/// under half the force it started from. The budget is 1000 steps per
+/// refinement. The Lanczos estimate keeps up to twenty actions, which
+/// fit the climb model, and stops when the lowest Ritz value changes by
+/// under 5%.
 #[derive(Clone, Copy, Debug)]
 #[non_exhaustive]
 pub struct MinModeRefine {
     /// `λ_rel`: a refinement waits until the climbing image's largest
     /// per-atom force is under this fraction of the largest per-atom
-    /// band force of the first evaluation.
+    /// band force of the first evaluation. Infinite hands the image off
+    /// at any force; that needs `retry_factor`.
     pub trigger_factor: f64,
     /// Absolute trigger on the largest per-atom force, read only when
     /// `trigger_factor` is 0.
     pub trigger_force: f64,
-    /// `α_tol`: the climb starts and continues while the lowest mode
-    /// keeps `|v · τ|` at or above this.
+    /// `α_tol`: the climb starts when the lowest mode has `|v · τ|` at
+    /// or above this.
     pub alignment_tol: f64,
+    /// The climb also ends once the followed mode's `|v · τ|` falls
+    /// under `alignment_tol`.
+    pub climb_alignment: bool,
+    /// A refinement that did not lower the force also re-arms under this
+    /// fraction of the force it started from. `None` keeps the
+    /// published back-off alone.
+    pub retry_factor: Option<f64>,
     /// `κ`: band steps the same image must keep its index.
     pub stable_steps: usize,
     /// Climb steps of one refinement before the band resumes.
@@ -87,35 +98,44 @@ pub struct MinModeRefine {
     /// Relative change of the lowest Ritz value that ends a Lanczos
     /// estimate.
     pub lanczos_rel_tol: f64,
-    /// Finite-difference displacement of the Hessian actions and of the
-    /// `h_0` probe.
+    /// Finite-difference displacement of the Hessian actions, and of the
+    /// probe that joins a dimer mode in the climb model.
     pub dr: f64,
     pub difference: FiniteDifference,
     /// Dimer rotation stop and budget.
     pub rotation_tol: f64,
     pub max_rotations: usize,
-    /// Growth of the force over its lowest value since the last mode
-    /// estimate that triggers a new one.
-    pub refresh_factor: f64,
+    /// The mode is estimated again once the followed model curvature
+    /// is above this fraction of the curvature last measured.
+    pub curvature_retained: f64,
+    /// The mode is estimated again once the followed mode's overlap with
+    /// the one followed a step before is under this.
+    pub min_overlap: f64,
+    /// Climb steps after an estimate before the next one.
+    pub refresh_interval: usize,
 }
 
 impl Default for MinModeRefine {
     fn default() -> Self {
         Self {
-            trigger_factor: 0.5,
+            trigger_factor: f64::INFINITY,
             trigger_force: 0.0,
-            alignment_tol: 0.3,
-            stable_steps: 3,
+            alignment_tol: 0.85,
+            climb_alignment: false,
+            retry_factor: Some(0.5),
+            stable_steps: 1,
             max_steps: 1000,
             restore_unhelpful: false,
             kind: MinModeKind::Lanczos,
-            krylov_dim: 8,
+            krylov_dim: 20,
             lanczos_rel_tol: 0.05,
             dr: 1e-3,
             difference: FiniteDifference::Forward,
             rotation_tol: 1e-4,
             max_rotations: 20,
-            refresh_factor: 1.5,
+            curvature_retained: 0.3,
+            min_overlap: 0.8,
+            refresh_interval: 4,
         }
     }
 }
@@ -124,23 +144,29 @@ impl MinModeRefine {
     pub(super) fn validate(&self) -> Result<(), SaddleError> {
         let positive = |v: f64| v.is_finite() && v > 0.0;
         let non_negative = |v: f64| v.is_finite() && v >= 0.0;
-        if !(non_negative(self.trigger_factor)
+        let fraction = |v: f64| (0.0..=1.0).contains(&v);
+        let retry = match self.retry_factor {
+            Some(f) => positive(f),
+            None => self.trigger_factor.is_finite(),
+        };
+        if !(self.trigger_factor >= 0.0
             && non_negative(self.trigger_force)
+            && retry
             && positive(self.dr)
             && positive(self.lanczos_rel_tol)
             && non_negative(self.rotation_tol)
-            && self.refresh_factor.is_finite()
-            && self.refresh_factor >= 1.0
-            && self.alignment_tol.is_finite()
-            && (0.0..=1.0).contains(&self.alignment_tol)
+            && fraction(self.alignment_tol)
+            && fraction(self.curvature_retained)
+            && fraction(self.min_overlap)
             && self.max_steps > 0
             && self.max_rotations > 0
             && self.krylov_dim > 0)
         {
             return Err(SaddleError::Invalid(
                 "min-mode refinement needs a non-negative trigger, a positive step, \
-                 tolerance, budget and Krylov size, a refresh factor of at least 1, \
-                 and an alignment in [0, 1]"
+                 tolerance, budget and Krylov size, a positive retry factor with an \
+                 infinite trigger, and the alignment, retained curvature and overlap \
+                 in [0, 1]"
                     .into(),
             ));
         }
@@ -187,9 +213,7 @@ struct Run {
     best: Option<(f64, Point, Array1<f64>)>,
     alignment: f64,
     steps: usize,
-    last_mode: Option<Array1<f64>>,
-    /// Lowest force since the last mode estimate.
-    refresh_gate: f64,
+    /// Climb steps since the last mode estimate.
     since_refresh: usize,
 }
 
@@ -200,31 +224,78 @@ impl Run {
         self.session.estimate_mode(surface)
     }
 
-    /// The `h_0` probe along the force perpendicular to `mode`, and the
-    /// model that carries `curvature` on `mode`.
+    /// The Krylov block of the last estimate, or the estimated mode
+    /// with its curvature when the estimate kept none.
+    fn block(&self, estimate: &ModeEstimate) -> Vec<(Array1<f64>, Array1<f64>)> {
+        let block = self.session.krylov_block();
+        if block.is_empty() {
+            vec![(estimate.mode.clone(), &estimate.mode * estimate.curvature)]
+        } else {
+            block.to_vec()
+        }
+    }
+
+    /// The climb model fit to the estimate's block. Without a Krylov
+    /// block (a dimer estimate) one Hessian action along the force
+    /// perpendicular to the mode joins the mode.
     fn start_climb<P: PointSurface>(
         &mut self,
         surface: &P,
-        mode: &Array1<f64>,
-        curvature: f64,
+        estimate: &ModeEstimate,
         dr: f64,
         max_move: f64,
+        cell: Option<&Cell>,
+        remove_translation: bool,
     ) -> Result<(), SaddleError> {
-        let g = &self.current.gradient;
-        let mut d = g - &(mode * mode.dot(g));
-        let norm = d.dot(&d).sqrt();
-        let mut h0 = 1.0;
-        if norm > 0.0 {
-            d /= norm;
-            let probe = &self.current.x + &(&d * dr);
-            let (_, gp) = surface.eval(probe.view())?;
-            h0 = ((&gp - g).dot(&d) / dr).abs().max(1e-3);
+        let mut block = self.block(estimate);
+        if self.session.krylov_block().is_empty() {
+            let g = &self.current.gradient;
+            let mode = &estimate.mode;
+            let mut d = g - &(mode * mode.dot(g));
+            let norm = d.dot(&d).sqrt();
+            if norm > 0.0 {
+                d /= norm;
+                let probe = &self.current.x + &(&d * dr);
+                let (_, gp) = surface.eval(probe.view())?;
+                block.push((d, (&gp - g) / dr));
+            }
         }
-        let mut climb = ModelClimb::new(g.len(), h0, max_move);
-        climb.set_mode(mode, curvature)?;
-        self.climb = Some(climb);
+        let rigid = rigid_motions(&self.current.x, cell, remove_translation);
+        self.climb = Some(ModelClimb::fitted(
+            &self.current.x,
+            cell,
+            rigid,
+            &block,
+            &estimate.mode,
+            estimate.curvature,
+            max_move,
+        ));
+        self.since_refresh = 0;
         Ok(())
     }
+
+    /// Impose the estimate's block on the climb model and follow its mode.
+    fn refresh(&mut self, estimate: &ModeEstimate) {
+        let block = self.block(estimate);
+        self.climb.as_mut().expect("climb model").refresh(
+            &block,
+            &estimate.mode,
+            estimate.curvature,
+        );
+        self.since_refresh = 0;
+    }
+}
+
+/// The rigid motions a band without its mean force removes: the
+/// translations, and the rotations too when there is no cell.
+fn rigid_motions(
+    x: &Array1<f64>,
+    cell: Option<&Cell>,
+    remove_translation: bool,
+) -> Option<ndarray::Array2<f64>> {
+    remove_translation
+        .then(|| rigid_basis(x, cell.is_none()))
+        .flatten()
 }
 
 /// Trigger, stability latch, cached mode and the running refinement.
@@ -348,6 +419,8 @@ impl BandSession {
         }
         let max_move = self.config.max_move;
         let force_gate = self.state.force_gate;
+        let cell = self.config.cell;
+        let remove_translation = self.config.remove_translation;
         let run = self.refine.run.as_mut().expect("refinement run");
         let image_surface = ImageSurface {
             surface,
@@ -364,22 +437,18 @@ impl BandSession {
                 &(&run.current.gradient - &g),
                 run.current.energy,
             );
-            run.refresh_gate = run.refresh_gate.min(gate);
+            climb.set_rigid(rigid_motions(
+                &run.current.x,
+                cell.as_ref(),
+                remove_translation,
+            ));
             run.since_refresh += 1;
-            let (lowest, _) = climb.lowest()?;
-            let turned = run
-                .last_mode
-                .as_ref()
-                .is_some_and(|m| m.dot(&lowest).abs() < MODE_TURN);
-            let grew = gate > config.refresh_factor * run.refresh_gate && run.since_refresh >= 2;
-            if turned || grew {
+            climb.lowest()?;
+            if run.since_refresh >= config.refresh_interval
+                && climb.stale(config.curvature_retained, config.min_overlap)
+            {
                 let estimate = run.estimate(&image_surface)?;
-                run.climb
-                    .as_mut()
-                    .expect("climb model")
-                    .set_mode(&estimate.mode, estimate.curvature)?;
-                run.refresh_gate = gate;
-                run.since_refresh = 0;
+                run.refresh(&estimate);
                 rotations = estimate.rotations;
                 measured = Some(estimate.curvature);
             }
@@ -393,17 +462,13 @@ impl BandSession {
             // curvature is still negative, so only a measured one ends
             // the climb.
             let estimate = run.estimate(&image_surface)?;
-            let climb = run.climb.as_mut().expect("climb model");
-            climb.set_mode(&estimate.mode, estimate.curvature)?;
-            run.refresh_gate = gate;
-            run.since_refresh = 0;
+            run.refresh(&estimate);
             rotations = estimate.rotations;
             curvature = estimate.curvature;
-            mode = climb.lowest()?.0;
+            mode = run.climb.as_mut().expect("climb model").lowest()?.0;
         }
         let climb = run.climb.as_mut().expect("climb model");
         run.alignment = mode_alignment(mode.view(), run.tangent.view());
-        run.last_mode = Some(mode.clone());
         let alignment = run.alignment;
         let step = RefineStep {
             align: false,
@@ -440,8 +505,9 @@ impl BandSession {
                 curvature,
             )));
         }
-        if alignment < config.alignment_tol || run.steps >= config.max_steps {
-            let fell_back = alignment < config.alignment_tol;
+        let turned = config.climb_alignment && alignment < config.alignment_tol;
+        if turned || run.steps >= config.max_steps {
+            let fell_back = turned;
             self.refine_finish(&config, Outcome::Leave);
             return Ok(Some(self.refine_stop(
                 RefineStep { fell_back, ..step },
@@ -476,6 +542,8 @@ impl BandSession {
         let max_move = self.config.max_move;
         let force_tol = self.config.force_tol;
         let gate_of = self.state.force_gate;
+        let cell = self.config.cell;
+        let remove_translation = self.config.remove_translation;
         let run = self.refine.run.as_mut().expect("refinement run");
         let image_surface = ImageSurface {
             surface,
@@ -512,13 +580,12 @@ impl BandSession {
         }
         run.start_climb(
             &image_surface,
-            &estimate.mode,
-            estimate.curvature,
+            &estimate,
             config.dr,
             max_move,
+            cell.as_ref(),
+            remove_translation,
         )?;
-        run.refresh_gate = gate;
-        run.since_refresh = 0;
         Ok(self.refine_stop(step, BandStatus::Running, estimate.curvature))
     }
 
@@ -590,8 +657,6 @@ impl BandSession {
             best: None,
             alignment: 1.0,
             steps: 0,
-            last_mode: None,
-            refresh_gate: f64::INFINITY,
             since_refresh: 0,
         });
         Ok(())
@@ -605,7 +670,11 @@ impl BandSession {
         };
         let f0 = self.state.atom_baseline().unwrap_or(run.entry_force);
         let force_tol = self.config.force_tol;
-        let backoff = |alpha: f64| backoff_threshold(alpha, f0, config.trigger_factor, force_tol);
+        let retry = config.retry_factor.map_or(f64::INFINITY, |f| {
+            (f * run.entry_force).max(2.0 * force_tol)
+        });
+        let backoff =
+            |alpha: f64| backoff_threshold(alpha, f0, config.trigger_factor, force_tol).min(retry);
         match outcome {
             Outcome::Restore => {
                 self.restore_image(&run);
@@ -643,7 +712,11 @@ impl BandSession {
             }
         }
         self.refine.stable = 0;
-        self.forget_optimizer();
+        // An image left where the refinement began leaves the band as the
+        // optimizer last saw it.
+        if self.positions.row(run.image) != run.saved.x {
+            self.forget_optimizer();
+        }
     }
 
     fn restore_image(&mut self, run: &Run) {

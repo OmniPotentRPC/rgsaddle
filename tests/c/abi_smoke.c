@@ -135,12 +135,30 @@ static rgsaddle_status_t minmode_reuse(void) {
   return RGSADDLE_OK;
 }
 
+/* Climbing-image requests the batched surface saw. A band configured
+ * below minor 22 must not set the flag. */
+typedef struct {
+  int flag_allowed;
+  int calls;
+  long image;
+} climbing_seen_t;
+
 static rgsaddle_status_t surface(void *user, rgsaddle_surface_request_t *req) {
-  (void)user;
+  climbing_seen_t *climbing = user;
   if (req->version.major != RGSADDLE_ABI_MAJOR) {
     return RGSADDLE_ABI_MISMATCH;
   }
-  if (req->image != -1 || (req->flags & RGSADDLE_REQ_ONE_IMAGE) != 0) {
+  if ((req->flags & RGSADDLE_REQ_ONE_IMAGE) != 0 ||
+      (req->flags & ~(RGSADDLE_REQ_ONE_IMAGE | RGSADDLE_REQ_CLIMBING_IMAGE)) != 0) {
+    return RGSADDLE_SHAPE;
+  }
+  if ((req->flags & RGSADDLE_REQ_CLIMBING_IMAGE) != 0) {
+    if (!climbing->flag_allowed || req->n_images != 1 || req->image < 1) {
+      return RGSADDLE_SHAPE;
+    }
+    climbing->calls += 1;
+    climbing->image = (long)req->image;
+  } else if (req->image != -1) {
     return RGSADDLE_SHAPE;
   }
   const long dof = 3 * (long)req->n_atoms;
@@ -214,9 +232,10 @@ int main(void) {
 
   rgsaddle_report_t rep;
   memset(&rep, 0, sizeof rep);
+  climbing_seen_t climbing = {1, 0, -1};
   int steps = 0;
   do {
-    st = rgsaddle_band_step(band, surface, NULL, &rep);
+    st = rgsaddle_band_step(band, surface, &climbing, &rep);
     if (st != RGSADDLE_OK) {
       return fail(st, "step");
     }
@@ -233,6 +252,36 @@ int main(void) {
   if (rep.ci_index < 1 || rep.ci_index > n_images - 2) {
     fprintf(stderr, "climbing image not armed: %lld\n", (long long)rep.ci_index);
     return fail(RGSADDLE_SHAPE, "climbing image not armed");
+  }
+  if (climbing.calls < 1 || climbing.image != (long)rep.ci_index) {
+    fprintf(stderr, "climbing requests=%d image=%ld ci=%lld\n", climbing.calls,
+            climbing.image, (long long)rep.ci_index);
+    return fail(RGSADDLE_SHAPE, "refinement requests must carry the climbing image");
+  }
+
+  /* A minor 21 config gets the refinement unmarked, with image -1. */
+  {
+    rgsaddle_band_config_t old = cfg;
+    old.version.minor = 21;
+    RgsaddleBand *b21 = rgsaddle_band_create(&old, n_images, n_atoms, pos);
+    if (!b21) {
+      return fail(RGSADDLE_SHAPE, "minor 21 band create failed");
+    }
+    climbing_seen_t unmarked = {0, 0, -1};
+    rgsaddle_report_t r21;
+    memset(&r21, 0, sizeof r21);
+    int k = 0;
+    do {
+      st = rgsaddle_band_step(b21, surface, &unmarked, &r21);
+      if (st != RGSADDLE_OK) {
+        return fail(st, "minor 21 step");
+      }
+      ++k;
+    } while (r21.status == RGSADDLE_STATUS_RUNNING && k < 3000);
+    if (r21.status != RGSADDLE_STATUS_CONVERGED) {
+      return fail(RGSADDLE_SOLVER, "minor 21 band did not converge");
+    }
+    rgsaddle_band_free(b21);
   }
 
   double out[9 * 3];
