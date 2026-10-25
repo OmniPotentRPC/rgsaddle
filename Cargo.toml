@@ -1,6 +1,6 @@
 [package]
 name = "rgsaddle"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
@@ -44,7 +44,7 @@ readcon-db = { version = "0.2", optional = true }
 # quick-min with its options, and ODE12r. A git dependency cannot be
 # published: an rgmin release that carries them must come out, and this
 # line return to a version, before rgsaddle is released.
-rgmin = { git = "https://github.com/OmniPotentRPC/rgmin", rev = "a5ca8e6d967cfb6566c04b0cae6e6990670941d4" }
+rgmin = { version = "0.5.0", git = "https://github.com/OmniPotentRPC/rgmin", tag = "v0.5.0" }
 eindir-core = { version = "0.6.0", features = ["capi"] }
 ndarray = "0.17"
 faer = { version = "0.24.4", optional = true, default-features = false, features = ["std", "linalg"] }

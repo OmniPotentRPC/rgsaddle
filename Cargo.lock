@@ -1762,8 +1762,8 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "rgmin"
-version = "0.4.0"
-source = "git+https://github.com/OmniPotentRPC/rgmin?rev=a5ca8e6d967cfb6566c04b0cae6e6990670941d4#a5ca8e6d967cfb6566c04b0cae6e6990670941d4"
+version = "0.5.0"
+source = "git+https://github.com/OmniPotentRPC/rgmin?tag=v0.5.0#90cf5acbc4333a056a5a2ef2eae7d0f267b933c7"
 dependencies = [
  "cbindgen",
  "dlpk",
@@ -1780,7 +1780,7 @@ dependencies = [
 
 [[package]]
 name = "rgsaddle"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "approx",
  "dlpk",
@@ -2047,7 +2047,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys",
