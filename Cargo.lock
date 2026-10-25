@@ -1763,7 +1763,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 [[package]]
 name = "rgmin"
 version = "0.4.0"
-source = "git+https://github.com/OmniPotentRPC/rgmin?rev=10e24630370583da11a140ccb722f0a967702131#10e24630370583da11a140ccb722f0a967702131"
+source = "git+https://github.com/OmniPotentRPC/rgmin?rev=a5ca8e6d967cfb6566c04b0cae6e6990670941d4#a5ca8e6d967cfb6566c04b0cae6e6990670941d4"
 dependencies = [
  "cbindgen",
  "dlpk",
