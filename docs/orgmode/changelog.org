@@ -3,6 +3,10 @@
 
 * Unreleased
 
+* 0.3.2 (2026-10-25)
+
+- Builds on rgmin 0.5.1, whose control accepts a negative ~maxmove~ as a request for no step cap; the band and minimum-mode sessions over atoms keep rgmin 0.5.0 behaviour.
+
 * 0.3.1 (2026-10-25)
 
 - The climbing-image hand-off series: the band refinement fits its climb model to a pair-stretch Hessian and the Lanczos block, follows the mode, and hands the climbing image to the minimum-mode refinement once it has kept one index for one band step; ~RGSADDLE_REQ_CLIMBING_IMAGE~ marks those requests at ABI minor 23, and a host whose config minor is 22 keeps the unflagged requests. The entries below under 0.3.0 that describe the climb model, the hand-off and the kept Krylov block belong to this release.

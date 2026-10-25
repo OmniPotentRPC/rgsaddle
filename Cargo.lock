@@ -1762,8 +1762,8 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "rgmin"
-version = "0.5.0"
-source = "git+https://github.com/OmniPotentRPC/rgmin?tag=v0.5.0#90cf5acbc4333a056a5a2ef2eae7d0f267b933c7"
+version = "0.5.1"
+source = "git+https://github.com/OmniPotentRPC/rgmin?tag=v0.5.1#a6e1e0e79715deed41f0f3cda4caaf52f3c348b9"
 dependencies = [
  "cbindgen",
  "dlpk",
@@ -1780,7 +1780,7 @@ dependencies = [
 
 [[package]]
 name = "rgsaddle"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "approx",
  "dlpk",
