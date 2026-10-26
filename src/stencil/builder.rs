@@ -592,8 +592,7 @@ fn force_solver(method: Method, n: usize, max_move: f64) -> Result<Solver, Saddl
         gtol: 0.0,
         istep: 1.0,
         maxmove: None,
-        ftol_rel: None,
-        noise_floor: None,
+        ..Control::default()
     };
     let lbfgs = matches!(method, Method::Lbfgs { .. });
     let mut solver = Solver::new(method, control, n);

@@ -257,8 +257,7 @@ fn relax_image(
             gtol: config.grad_tol,
             istep: 1.0,
             maxmove: None,
-            ftol_rel: None,
-            noise_floor: None,
+            ..Control::default()
         },
         dim,
     );

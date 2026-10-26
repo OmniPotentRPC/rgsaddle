@@ -1762,8 +1762,9 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "rgmin"
-version = "0.5.1"
-source = "git+https://github.com/OmniPotentRPC/rgmin?tag=v0.5.1#a6e1e0e79715deed41f0f3cda4caaf52f3c348b9"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2f5fec1e2ba0832a2209321e8cf69332455d80bc9fed88038c2de0232ef1f30b"
 dependencies = [
  "cbindgen",
  "dlpk",
