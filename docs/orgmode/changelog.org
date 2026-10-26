@@ -3,6 +3,8 @@
 
 * Unreleased
 
+- Builds on rgmin 0.5.2 from crates.io. ~Control~ carries ~ftol_rel~ and ~noise_floor~; the band, minimum-mode, stencil, IDPP, and IRC solvers fill those fields from ~Control::default()~, which is the 0.5.1 behaviour (no relative energy slack, no noise-floor stop). The golden stencil and band hashes are unchanged.
+
 * 0.3.2 (2026-10-25)
 
 - Builds on rgmin 0.5.1, whose control accepts a negative ~maxmove~ as a request for no step cap; the band and minimum-mode sessions over atoms keep rgmin 0.5.0 behaviour.

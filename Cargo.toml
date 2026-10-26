@@ -40,11 +40,9 @@ dlpk = { version = "0.1.5", features = ["ndarray"] }
 # ConFrameWriter::new is RoundTrip and canonical stays off.
 readcon-core = { version = "=0.17.1", optional = true }
 readcon-db = { version = "0.2", optional = true }
-# The pinned revision supplies retained evaluations, manifold steps,
-# quick-min with its options, and ODE12r. A git dependency cannot be
-# published: an rgmin release that carries them must come out, and this
-# line return to a version, before rgsaddle is released.
-rgmin = { version = "0.5.1", git = "https://github.com/OmniPotentRPC/rgmin", tag = "v0.5.1" }
+# crates.io 0.5.2. Control::default leaves ftol_rel and noise_floor
+# unset, the 0.5.1 behaviour the sessions rely on.
+rgmin = "0.5.2"
 eindir-core = { version = "0.6.0", features = ["capi"] }
 ndarray = "0.17"
 faer = { version = "0.24.4", optional = true, default-features = false, features = ["std", "linalg"] }

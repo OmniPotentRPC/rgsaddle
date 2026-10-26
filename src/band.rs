@@ -1422,8 +1422,7 @@ fn build_solver(config: &BandConfig, method: &Method, interior_dof: usize) -> So
         gtol: 0.0,
         istep: config.time_step,
         maxmove: None,
-        ftol_rel: None,
-        noise_floor: None,
+        ..Control::default()
     };
     let mut solver = Solver::new(method.clone(), control, interior_dof);
     // The flat band vector is consecutive xyz triples, so the cap
