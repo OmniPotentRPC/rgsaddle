@@ -3,6 +3,7 @@
 
 * Unreleased
 
+- A P-RFO partition wider than 32 solves one eigenpair of the Banerjee augmented Hessian with faer's self-adjoint eigensolver instead of cyclic Jacobi. The block is diagonal, so the augmented matrix is an arrowhead; faer reduces it to symmetric tridiagonal form and returns the lowest eigenpair of a minimization block and the highest of a maximization block (Banerjee, Adams, Simons, and Shepard, J. Phys. Chem. 89, 52 (1985), doi:10.1021/j100247a015; Baker, J. Comput. Chem. 7, 385 (1986), doi:10.1002/jcc.540070402). The displacement is ~α v_i / v_last~, with the same 1e-12 floor on ~v_last~ as rgmin. Partitions of dimension 32 and below stay on cyclic Jacobi, which keeps the small P-RFO fixtures on the step they took before; the secular-root test now compares against faer's 59-wide downhill step. The wide tests count the faer solves, so a fallback to Jacobi fails them. A 35-wide minimization block and a 40-wide maximization block agree with Jacobi to 1e-10, and the maximization step matches an analytic eigenpair built from the secular equation to 1e-10.
 - Builds on rgmin 0.5.2 from crates.io. ~Control~ carries ~ftol_rel~ and ~noise_floor~; the band, minimum-mode, stencil, IDPP, and IRC solvers fill those fields from ~Control::default()~, which is the 0.5.1 behaviour (no relative energy slack, no noise-floor stop). The golden stencil and band hashes are unchanged.
 
 * 0.3.2 (2026-10-25)
