@@ -594,16 +594,23 @@ impl BandRow {
 
 const BAND_CAP: usize = 250_000;
 
-fn run_band(pair_index: usize, weighted: bool) -> BandRow {
-    let template = if weighted {
-        "ew-ci-neb-lbfgs"
-    } else {
-        "ci-neb-lbfgs"
+#[derive(Clone, Copy)]
+enum Springs {
+    Uniform,
+    Frozen,
+    Live,
+}
+
+fn run_band(pair_index: usize, springs: Springs) -> BandRow {
+    let template = match springs {
+        Springs::Uniform => "ci-neb-lbfgs",
+        Springs::Frozen => "ew-ci-neb-lbfgs",
+        Springs::Live => "ew-live-ci-neb-lbfgs",
     };
     let (left, right) = pair(pair_index);
     let images = linear_images(&left, &right, 7);
     let surface = CountedLj::new(BAND_CAP);
-    let spring = if weighted {
+    let spring = if let Springs::Frozen = springs {
         let mut energies = Vec::with_capacity(images.nrows());
         for row in images.outer_iter() {
             match surface.evaluate(&row.to_vec()) {
@@ -615,6 +622,11 @@ fn run_band(pair_index: usize, weighted: bool) -> BandRow {
         }
         SpringKind::Weighted {
             ks: energy_weighted(&energies, 0.97, 9.7),
+        }
+    } else if let Springs::Live = springs {
+        SpringKind::EnergyWeighted {
+            k_min: 0.97,
+            k_max: 9.7,
         }
     } else {
         SpringKind::Uniform { k: 5.0 }
@@ -749,7 +761,7 @@ fn emit(line: String) {
     let _ = std::io::stdout().flush();
 }
 
-fn sample_template(weighted: bool) -> Vec<BandRow> {
+fn sample_template(springs: Springs) -> Vec<BandRow> {
     let threads = std::thread::available_parallelism()
         .map(|count| count.get())
         .unwrap_or(1)
@@ -765,7 +777,7 @@ fn sample_template(weighted: bool) -> Vec<BandRow> {
                         break;
                     }
                     let started = std::time::Instant::now();
-                    let row = run_band(index, weighted);
+                    let row = run_band(index, springs);
                     emit(format!(
                         "{} pair_{:02} calls {} energy {:.12} |g| {:.6e} index {} failure {} ms {}",
                         row.template,
@@ -828,15 +840,16 @@ fn summarize(rows: &[BandRow]) {
 
 /// Optbench CI-NEB templates on pairs 0..19. Five interior images,
 /// linear path, L-BFGS memory 100, L2 gate, max move 0.05, climbing
-/// armed at half the first force. The weighted template freezes
-/// Henkelman springs from the linear images. A call at the cap is a
+/// armed at half the first force. The ew template freezes Henkelman
+/// springs from the linear images, and the ew-live template sets them
+/// from the band energies at every evaluation. A call at the cap is a
 /// failure. The verification Hessian is not counted.
 /// Release: `cargo test --release --features capi --test connect_driver lj38_band_templates_twenty -- --ignored --nocapture`.
 #[test]
 #[ignore]
 fn lj38_band_templates_twenty() {
-    for weighted in [false, true] {
-        let rows = sample_template(weighted);
+    for springs in [Springs::Uniform, Springs::Frozen, Springs::Live] {
+        let rows = sample_template(springs);
         assert_eq!(rows.len(), 20);
         summarize(&rows);
     }
