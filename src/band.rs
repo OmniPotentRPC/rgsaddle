@@ -866,6 +866,7 @@ fn evaluate_solid(
 #[allow(clippy::too_many_arguments)]
 fn solid_image(
     config: &BandConfig,
+    spring: &SpringKind,
     i: usize,
     climb: bool,
     positions: &Array2<f64>,
@@ -912,7 +913,7 @@ fn solid_image(
     let volume = m3_det(cells[i].0).abs();
     let cell_force = cell_neb_force(cauchy, volume, jacobian, pressure)?;
     let force = pack_joint(atomic_force.view(), cell_force);
-    let spring = config.spring.compute(
+    let spring = spring.compute(
         i,
         tangent.view(),
         dist_next,
@@ -998,11 +999,13 @@ fn assemble_solid(
         state.ci_index.store(max_i as i64, Ordering::Relaxed);
     }
     let ci_at = armed.then_some(max_i);
+    let spring = config.spring.at_energies(enthalpy.view());
     let mut joint = Array1::zeros(x.len());
     let mut cartesian = Array1::zeros(x.len());
     for i in 1..n_images - 1 {
         let (projected, step) = solid_image(
             config,
+            &spring,
             i,
             ci_at == Some(i),
             &positions,
@@ -1029,8 +1032,8 @@ fn assemble_solid(
         state.armed.store(true, Ordering::Relaxed);
         state.ci_index.store(max_i as i64, Ordering::Relaxed);
         let (projected, step) = solid_image(
-            config, max_i, true, &positions, &cells, &enthalpy, &gradients, &stresses, jacobian,
-            pressure,
+            config, &spring, max_i, true, &positions, &cells, &enthalpy, &gradients, &stresses,
+            jacobian, pressure,
         )?;
         let start = (max_i - 1) * seg;
         joint.slice_mut(s![start..start + seg]).assign(&projected);
@@ -1064,6 +1067,7 @@ fn assemble_solid(
 #[allow(clippy::too_many_arguments)]
 fn image_force(
     config: &BandConfig,
+    spring_kind: &SpringKind,
     i: usize,
     climb: bool,
     endpoint_first: ArrayView1<f64>,
@@ -1103,7 +1107,7 @@ fn image_force(
     )
     .map_err(|e| SaddleError::Invalid(format!("image {i}: {e}")))?;
     let force = -&gradients.row(i);
-    let spring = config.spring.compute(
+    let spring = spring_kind.compute(
         i,
         tangent.view(),
         dist_next,
@@ -1246,6 +1250,7 @@ fn assemble_band_with(
         state.ci_index.store(max_i as i64, Ordering::Relaxed);
     }
     let ci_at = armed.then_some(max_i);
+    let spring = config.spring.at_energies(energies.view());
 
     let metric_of = |i: usize| metrics.and_then(|m| m.get(i - 1));
     // An armed climbing image under the metric climbs in the P-metric,
@@ -1255,6 +1260,7 @@ fn assemble_band_with(
     for i in 1..n_images - 1 {
         let (f, d) = image_force(
             config,
+            &spring,
             i,
             ci_at == Some(i),
             endpoint_first,
@@ -1292,6 +1298,7 @@ fn assemble_band_with(
         state.ci_index.store(max_i as i64, Ordering::Relaxed);
         let (f, d) = image_force(
             config,
+            &spring,
             max_i,
             true,
             endpoint_first,
@@ -1488,6 +1495,13 @@ impl BandSession {
         {
             return Err(SaddleError::Shape(format!(
                 "Onsager-Machlup springs need {n_images} displacements of length {dof}"
+            )));
+        }
+        if let SpringKind::EnergyWeighted { k_min, k_max } = config.spring
+            && !(k_min.is_finite() && k_max.is_finite() && 0.0 < k_min && k_min <= k_max)
+        {
+            return Err(SaddleError::Invalid(format!(
+                "energy-weighted springs need 0 < k_min <= k_max; got {k_min} and {k_max}"
             )));
         }
         if !initial.iter().all(|v| v.is_finite()) {

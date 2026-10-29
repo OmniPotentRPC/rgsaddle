@@ -1,5 +1,7 @@
 //! Spring forces, ported from eOn NEBSpringForce.cpp.
 
+use std::borrow::Cow;
+
 use ndarray::{Array1, ArrayView1};
 
 /// Per-image spring result: the tangent-parallel component consumed
@@ -22,9 +24,58 @@ pub enum SpringKind {
     /// holds one force-scaled displacement per image (zero at the
     /// endpoints).
     OnsagerMachlup { k: f64, l_vecs: Vec<Array1<f64>> },
+    /// Energy-weighted springs of Ásgeirsson et al., J. Chem. Theory
+    /// Comput. 17, 4929 (2021), doi:10.1021/acs.jctc.1c00462, set again
+    /// from the band energies at every evaluation as eOn's
+    /// `buildSpringStrategy` does. [`energy_weighted_constants`] is the
+    /// rule. Before the band resolves them, [`SpringKind::compute`]
+    /// reads `k_min` on every segment.
+    EnergyWeighted { k_min: f64, k_max: f64 },
+}
+
+/// Segment constants of the energy-weighted rule. `energies` holds
+/// every image, endpoints included, and `ks[i]` couples images `i` and
+/// `i + 1`. With `E_ref` the higher endpoint, `E_max` the highest
+/// interior image, and `E_i` the higher image of segment `i`, a segment
+/// above `E_ref` gets `k_max - (k_max - k_min) (E_max - E_i) /
+/// (E_max - E_ref)` and every other segment gets `k_min`. A band whose
+/// highest interior image is not above `E_ref` keeps `k_min` throughout.
+pub fn energy_weighted_constants(energies: ArrayView1<f64>, k_min: f64, k_max: f64) -> Vec<f64> {
+    let n = energies.len();
+    let mut ks = vec![k_min; n.saturating_sub(1)];
+    if n < 3 {
+        return ks;
+    }
+    let reference = energies[0].max(energies[n - 1]);
+    let highest = energies
+        .slice(ndarray::s![1..n - 1])
+        .fold(f64::NEG_INFINITY, |m, &e| m.max(e));
+    let span = highest - reference;
+    if span.is_nan() || span < 1e-10 {
+        return ks;
+    }
+    for (i, k) in ks.iter_mut().enumerate() {
+        let e = energies[i].max(energies[i + 1]);
+        if e > reference {
+            let alpha = ((highest - e) / span).clamp(0.0, 1.0);
+            *k = (1.0 - alpha) * k_max + alpha * k_min;
+        }
+    }
+    ks
 }
 
 impl SpringKind {
+    /// The springs at these image energies: per-segment constants for
+    /// [`SpringKind::EnergyWeighted`], and `self` for every other kind.
+    pub fn at_energies(&self, energies: ArrayView1<f64>) -> Cow<'_, SpringKind> {
+        match self {
+            SpringKind::EnergyWeighted { k_min, k_max } => Cow::Owned(SpringKind::Weighted {
+                ks: energy_weighted_constants(energies, *k_min, *k_max),
+            }),
+            _ => Cow::Borrowed(self),
+        }
+    }
+
     /// Spring forces at interior image `i` (image indexing over the
     /// whole band, endpoints included). `pos_diff_next` is
     /// `R[i+1] - R[i]` and `pos_diff_prev` is `R[i] - R[i-1]`, both
@@ -49,6 +100,9 @@ impl SpringKind {
                 l_next: l_vecs[i + 1].view(),
                 l_here: l_vecs[i].view(),
             },
+            SpringKind::EnergyWeighted { k_min, .. } => {
+                crate::stencil::Coupling::Uniform { k: *k_min }
+            }
         };
         let forces = crate::stencil::coupling_forces(
             &coupling,
@@ -121,5 +175,52 @@ mod tests {
         assert_abs_diff_eq!(f.full[0], 2.0 * 0.5 - 0.5, epsilon = 1e-12);
         assert_abs_diff_eq!(f.full[1], 2.0 * 0.1 + 0.1, epsilon = 1e-12);
         assert_abs_diff_eq!(f.parallel[0], 2.0 * 0.5 - 0.5, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn energy_weighted_constants_follow_the_segment_rule() {
+        // E_ref = 1, E_max = 5. Segment 0 tops at 2, so alpha = 3/4.
+        let ks = energy_weighted_constants(array![0.0, 2.0, 5.0, 1.0].view(), 0.97, 9.7);
+        assert_eq!(ks.len(), 3);
+        assert_abs_diff_eq!(ks[0], 0.25 * 9.7 + 0.75 * 0.97, epsilon = 1e-12);
+        assert_abs_diff_eq!(ks[1], 9.7, epsilon = 1e-12);
+        assert_abs_diff_eq!(ks[2], 9.7, epsilon = 1e-12);
+        // A segment no higher than the higher endpoint stays soft.
+        let ks = energy_weighted_constants(array![3.0, 1.0, 4.0, 0.5, 3.0].view(), 1.0, 10.0);
+        assert_abs_diff_eq!(ks[0], 1.0, epsilon = 1e-12);
+        assert_abs_diff_eq!(ks[1], 10.0, epsilon = 1e-12);
+        assert_abs_diff_eq!(ks[2], 10.0, epsilon = 1e-12);
+        assert_abs_diff_eq!(ks[3], 1.0, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn energy_weighted_constants_stay_soft_without_an_interior_peak() {
+        let monotonic = energy_weighted_constants(array![0.0, 1.0, 2.0, 3.0].view(), 0.5, 5.0);
+        assert_eq!(monotonic, vec![0.5; 3]);
+        let flat = energy_weighted_constants(array![1.0, 1.0, 1.0].view(), 0.5, 5.0);
+        assert_eq!(flat, vec![0.5; 2]);
+        let nan = energy_weighted_constants(array![0.0, f64::NAN, 0.0].view(), 0.5, 5.0);
+        assert_eq!(nan, vec![0.5; 2]);
+    }
+
+    #[test]
+    fn energy_weighted_springs_resolve_at_each_energy_set() {
+        let s = SpringKind::EnergyWeighted {
+            k_min: 1.0,
+            k_max: 9.0,
+        };
+        let low = s.at_energies(array![0.0, 4.0, 2.0, 0.0].view());
+        let high = s.at_energies(array![0.0, 2.0, 4.0, 0.0].view());
+        let (SpringKind::Weighted { ks: a }, SpringKind::Weighted { ks: b }) = (&*low, &*high)
+        else {
+            panic!("energy-weighted springs resolve to segment constants");
+        };
+        assert_eq!(a, &vec![9.0, 9.0, 5.0]);
+        assert_eq!(b, &vec![5.0, 9.0, 9.0]);
+        let uniform = SpringKind::Uniform { k: 2.0 };
+        assert!(matches!(
+            uniform.at_energies(array![0.0, 1.0, 0.0].view()),
+            Cow::Borrowed(SpringKind::Uniform { .. })
+        ));
     }
 }
