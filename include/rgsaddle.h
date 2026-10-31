@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 23u
+#define RGSADDLE_ABI_MINOR 31u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -1102,6 +1102,34 @@ rgsaddle_status_t rgsaddle_minmode_set_highs(RgsaddleMinMode *session, int32_t e
 rgsaddle_status_t rgsaddle_band_set_exp_precon(RgsaddleBand *band, double a,
                                                double c_stab, double mu,
                                                double r_cut_factor);
+
+/**
+ * Zoom-NEB, eOn's zoom_* keys. Once the climbing image has kept its
+ * index for `stability` band steps and the largest per-image force is
+ * under `after`, the images are placed at equal arc length on a window
+ * around it. Each image force is reduced by the band's force gate, as
+ * eOn reduces it; `after` 0 takes twice force_tol.
+ *
+ * The window takes the contiguous images above the lower endpoint
+ * plus `alpha` of the barrier; `alpha` 0, or a window of the climber
+ * alone, takes `offset` images on each side. Unlike eOn, the window
+ * then always reaches both neighbours of the climbing image. Its end
+ * images become the fixed endpoints, with their energies kept, and
+ * climbing stays armed. `cubic` 1 places along cubic Hermite segments,
+ * 0 linearly. The band zooms once. Until the climbing image has kept
+ * its index for `stability` steps, the min-mode refinement does not
+ * start. `enabled` 0 clears the zoom and ignores the rest.
+ *
+ * Recommended when enabled: alpha 0.5, offset 1, after 0, stability 5,
+ * cubic 1. Returns RGSADDLE_NULL_BAND for a null band. Returns
+ * RGSADDLE_INVALID_PARAMETER for alpha outside [0, 1), offset or
+ * stability under 1, a negative or non-finite after, cubic other than
+ * 0 or 1, a solid-state band or a non-uniform spring. ABI minor 31.
+ */
+rgsaddle_status_t rgsaddle_band_set_zoom(RgsaddleBand *band, int32_t enabled,
+                                         double alpha, int64_t offset,
+                                         double after, int64_t stability,
+                                         int32_t cubic);
 
 /**
  * Point stencil. Opaque config, typed keys, one callback.
