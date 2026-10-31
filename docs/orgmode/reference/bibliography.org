@@ -1,6 +1,15 @@
 #+TITLE: Bibliography
 #+OPTIONS: toc:nil num:nil
 
+* Citing rgsaddle
+If you use rgsaddle in published work, cite the method paper and give the rgsaddle version you used:
+
+Rohit Goswami, Miha Gunde, and Hannes Jónsson, "Enhanced climbing image nudged elastic band method with Hessian eigenmode alignment", Frontiers in Chemistry 14 (2026), https://doi.org/10.3389/fchem.2026.1807063.
+
+~CITATION.cff~ at the repository root holds the same record.
+It also lists two related papers by the same first author: the nudged elastic band workflow in MethodsX 16, 103899 (2026), https://doi.org/10.1016/j.mex.2026.103899, and the Gaussian process accelerated dimer search in eOn, J. Chem. Theory Comput. 21, 7935 (2025), https://doi.org/10.1021/acs.jctc.5c00866.
+
+* Method references
 The method references are stored in ~docs/source/references.bib~.
 
 #+begin_export rst

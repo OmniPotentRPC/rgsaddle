@@ -1,0 +1,76 @@
+cff-version: 1.2.0
+message: >-
+  If you use rgsaddle, please cite the paper in preferred-citation
+  and the software version you used.
+type: software
+title: rgsaddle
+abstract: Band, minimum-mode, and index-1 Newton saddle mechanics.
+authors:
+  - family-names: Goswami
+    given-names: Rohit
+    email: rgoswami@ieee.org
+    orcid: "https://orcid.org/0000-0002-2393-8056"
+version: 0.3.2
+date-released: "2026-10-25"
+license: MIT
+repository-code: "https://github.com/OmniPotentRPC/rgsaddle"
+url: "https://omnipotentrpc.github.io/rgsaddle/"
+keywords:
+  - nudged elastic band
+  - saddle point
+  - transition state
+  - optimization
+preferred-citation:
+  type: article
+  title: >-
+    Enhanced climbing image nudged elastic band method with Hessian
+    eigenmode alignment
+  authors:
+    - family-names: Goswami
+      given-names: Rohit
+      orcid: "https://orcid.org/0000-0002-2393-8056"
+    - family-names: Gunde
+      given-names: Miha
+    - family-names: Jónsson
+      given-names: Hannes
+  journal: Frontiers in Chemistry
+  volume: 14
+  year: 2026
+  doi: 10.3389/fchem.2026.1807063
+references:
+  - type: article
+    title: >-
+      Reproducible orchestration of best practices for reaction path
+      optimization with the nudged elastic band
+    authors:
+      - family-names: Goswami
+        given-names: Rohit
+        orcid: "https://orcid.org/0000-0002-2393-8056"
+    journal: MethodsX
+    volume: 16
+    start: 103899
+    year: 2026
+    doi: 10.1016/j.mex.2026.103899
+  - type: article
+    title: >-
+      Efficient implementation of Gaussian process regression accelerated
+      saddle point searches with application to molecular reactions
+    authors:
+      - family-names: Goswami
+        given-names: Rohit
+        orcid: "https://orcid.org/0000-0002-2393-8056"
+      - family-names: Masterov
+        given-names: Maxim
+      - family-names: Kamath
+        given-names: Satish
+      - family-names: Peña-Torres
+        given-names: Alejandro
+      - family-names: Jónsson
+        given-names: Hannes
+    journal: Journal of Chemical Theory and Computation
+    volume: 21
+    issue: 16
+    start: 7935
+    end: 7943
+    year: 2025
+    doi: 10.1021/acs.jctc.5c00866

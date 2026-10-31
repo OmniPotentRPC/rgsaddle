@@ -88,6 +88,11 @@ with the same names and values as before. `NumericalError`,
 `rgsaddle.ase.SurfaceAdapter` evaluates a list of ASE `Atoms` as
 request rows `(ids, x)`.
 
+## Citing
+
+If you use rgsaddle in published work, cite Goswami, Gunde, and Jónsson, "Enhanced climbing image nudged elastic band method with Hessian eigenmode alignment", Frontiers in Chemistry 14 (2026), https://doi.org/10.3389/fchem.2026.1807063, and give the rgsaddle version you used.
+`CITATION.cff` holds the same record in a form that GitHub and reference managers read, together with two related papers.
+
 ## License
 
 rgsaddle is released under the MIT License.
