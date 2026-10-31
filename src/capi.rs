@@ -27,7 +27,7 @@ use crate::spring::SpringKind;
 use crate::tangent::TangentKind;
 
 pub const RGSADDLE_ABI_MAJOR: u32 = 1;
-pub const RGSADDLE_ABI_MINOR: u32 = 23;
+pub const RGSADDLE_ABI_MINOR: u32 = 31;
 
 /// Band config bit 0. The C step calls the surface once per image
 /// carried by the evaluation: every image on the first evaluation
@@ -508,6 +508,7 @@ pub(super) unsafe fn parse_band_config(
                 .then(crate::band::MinModeRefine::default),
             // Installed after creation through rgsaddle_band_set_exp_precon.
             exp_precon: None,
+            zoom: None,
         },
         per_image: cfg.flags & RGSADDLE_BAND_PER_IMAGE != 0,
         method: cfg.method,

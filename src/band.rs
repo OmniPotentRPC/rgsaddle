@@ -22,8 +22,10 @@ use crate::tangent::compute_tangent;
 mod climb;
 mod min_mode;
 mod pair_model;
+mod zoom;
 pub use min_mode::MinModeRefine;
 pub(crate) use min_mode::RefinePhase;
+pub use zoom::ZoomConfig;
 
 /// Row-major 3x3 simulation cell: row `i` is lattice vector `a_i`.
 /// Band mechanics need nothing more from periodicity; neighbor lists
@@ -255,6 +257,9 @@ pub struct BandConfig {
     /// the stepper in the Euclidean metric. Refused on a solid-state
     /// band, whose cell block has no pair geometry.
     pub exp_precon: Option<ExpBandPrecon>,
+    /// Zoom-NEB: once the climbing image is stable, place the band on
+    /// a window around it. `None`, the default, keeps the band whole.
+    pub zoom: Option<ZoomConfig>,
 }
 
 impl Default for BandConfig {
@@ -278,6 +283,7 @@ impl Default for BandConfig {
             autoneb: None,
             min_mode: Some(MinModeRefine::default()),
             exp_precon: None,
+            zoom: None,
         }
     }
 }
@@ -1463,6 +1469,7 @@ pub struct BandSession {
     exp: Option<ExpBandState>,
     /// Consecutive ODE12r steps that rejected their trial.
     unmoved: usize,
+    zoom: zoom::ZoomState,
 }
 
 impl BandSession {
@@ -1502,6 +1509,9 @@ impl BandSession {
         if let Some(refine) = &config.min_mode {
             refine.validate()?;
         }
+        if let Some(zoom) = &config.zoom {
+            zoom::check_zoom(&config, zoom)?;
+        }
         if !(config.time_step.is_finite() && config.time_step > 0.0) {
             return Err(SaddleError::Invalid(
                 "band time step must be positive and finite".into(),
@@ -1522,6 +1532,7 @@ impl BandSession {
             refine: min_mode::RefineState::default(),
             exp: None,
             unmoved: 0,
+            zoom: zoom::ZoomState::default(),
         };
         if let Some(precon) = session.config.exp_precon {
             session.set_exp_precon(precon)?;
@@ -2094,7 +2105,9 @@ impl BandSession {
         } else {
             BandStatus::Running
         };
-        self.refine_latch(status)?;
+        if !self.zoom_latch(status) {
+            self.refine_latch(status)?;
+        }
         Ok(BandReport {
             status,
             max_force,
@@ -2278,7 +2291,9 @@ impl BandSession {
         } else {
             BandStatus::Running
         };
-        self.refine_latch(status)?;
+        if !self.zoom_latch(status) {
+            self.refine_latch(status)?;
+        }
         Ok(BandReport {
             status,
             max_force,

@@ -3002,6 +3002,41 @@ pub unsafe extern "C" fn rgsaddle_band_set_exp_precon(
     }
 }
 
+/// Zoom-NEB on the band (ABI minor 31); `enabled` 0 clears it.
+///
+/// # Safety
+/// `band` is a live session or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_band_set_zoom(
+    band: *mut RgsaddleBand,
+    enabled: i32,
+    alpha: f64,
+    offset: i64,
+    after: f64,
+    stability: i64,
+    cubic: i32,
+) -> i32 {
+    if band.is_null() {
+        return RGSADDLE_NULL_BAND;
+    }
+    let (offset, stability) = (usize::try_from(offset), usize::try_from(stability));
+    let zoom = match (enabled, cubic, offset, stability) {
+        (0, ..) => None,
+        (1, 0 | 1, Ok(offset), Ok(stability)) => Some(crate::ZoomConfig {
+            alpha,
+            offset,
+            after,
+            stability,
+            cubic: cubic == 1,
+        }),
+        _ => return RGSADDLE_INVALID_PARAMETER,
+    };
+    match unsafe { (*band).session.set_zoom(zoom) } {
+        Ok(()) => RGSADDLE_OK,
+        Err(e) => status_of(&e),
+    }
+}
+
 /// # Safety
 /// `session` is a live session or null. `enabled` is 0 or 1.
 #[unsafe(no_mangle)]
