@@ -87,3 +87,8 @@ with the same names and values as before. `NumericalError`,
 `last_error` and `raise_status` map `rgsaddle_status_t`.
 `rgsaddle.ase.SurfaceAdapter` evaluates a list of ASE `Atoms` as
 request rows `(ids, x)`.
+
+## License
+
+rgsaddle is released under the MIT License.
+The full text is in `LICENSE`.
