@@ -1091,6 +1091,7 @@ impl AutoNeb {
             band.climbing = climbing;
             band.autoneb = None;
             band.min_mode = None;
+            band.zoom = None;
             band.spring = SpringKind::Weighted { ks };
             let mut session = BandSession::new(band, sub)?;
             let last = *window.last().expect("window");

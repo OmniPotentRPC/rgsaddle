@@ -508,6 +508,7 @@ pub(super) unsafe fn parse_band_config(
                 .then(crate::band::MinModeRefine::default),
             // Installed after creation through rgsaddle_band_set_exp_precon.
             exp_precon: None,
+            zoom: None,
         },
         per_image: cfg.flags & RGSADDLE_BAND_PER_IMAGE != 0,
         method: cfg.method,

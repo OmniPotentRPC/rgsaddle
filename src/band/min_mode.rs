@@ -392,7 +392,7 @@ impl BandSession {
                 self.config.force_tol,
             ));
         }
-        if status == BandStatus::Running && self.refine.run.is_none() {
+        if status == BandStatus::Running && self.refine.run.is_none() && !self.zoom_pending() {
             self.refine_begin(&config)?;
         }
         Ok(())
