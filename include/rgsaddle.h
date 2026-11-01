@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 24u
+#define RGSADDLE_ABI_MINOR 25u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -828,6 +828,17 @@ rgsaddle_status_t rgsaddle_sella_saddle_set_expand(RgsaddleSellaSaddle *session,
  * RGSADDLE_INVALID_PARAMETER.
  */
 rgsaddle_status_t rgsaddle_sella_saddle_set_symmetrized_ritz(
+    RgsaddleSellaSaddle *session, int32_t enabled);
+/**
+ * ABI minor 25. `enabled` 1 bounds only the largest atom move of a
+ * Cartesian Sella saddle session, from the first step, when its
+ * Euclidean radius delta * n_free starts at 1 or less (ten free
+ * coordinates or fewer at the default delta), as Sella's restricted
+ * atomic step does; 0 keeps the Euclidean radius alone there. Larger
+ * searches cap the atom move either way. Other values return
+ * RGSADDLE_INVALID_PARAMETER.
+ */
+rgsaddle_status_t rgsaddle_sella_saddle_set_small_system_atom_ceiling(
     RgsaddleSellaSaddle *session, int32_t enabled);
 void rgsaddle_sella_saddle_free(RgsaddleSellaSaddle *session);
 

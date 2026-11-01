@@ -111,6 +111,14 @@ let mut session = SellaSaddleSession::new(config, x, masses)?;
 session.set_small_system_atom_ceiling(true);
 #+end_src
 
+Through the C ABI, from minor 25:
+
+#+begin_src c
+if (rgsaddle_sella_saddle_set_small_system_atom_ceiling(session, 1) != RGSADDLE_OK) {
+  /* NULL session, or a value other than 0 and 1 */
+}
+#+end_src
+
 The ceiling is Sella's convention.
 It follows Hermes, Sargsyan, Najm and Zador, J. Chem. Theory Comput. 18, 6974 (2022), and the Sella 2.6.0 source above.
 It costs steps where large steps would have been safe.

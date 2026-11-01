@@ -17,6 +17,8 @@
   It can also end in ~..SellaSaddleConfig::default()~ instead.
 - C application binary interface (ABI) minor 24 adds ~rgsaddle_sella_saddle_set_symmetrized_ritz~.
   It takes 0 or 1 and refuses any other value with ~RGSADDLE_INVALID_PARAMETER~.
+- C ABI minor 25 adds ~rgsaddle_sella_saddle_set_small_system_atom_ceiling~.
+  It takes 0 or 1 and refuses any other value with ~RGSADDLE_INVALID_PARAMETER~.
 - An endpoint at or above the highest interior image blocks the climbing image when its force toward the next image exceeds ~force_tol~.
   The band then keeps the spring on every image and reports no climbing image, eOn's rule for a monotonic band.
   An endpoint at a minimum has no such force, so the highest interior image below it still climbs.
