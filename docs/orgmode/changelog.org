@@ -3,6 +3,7 @@
 
 * Unreleased
 
+- linkcell is pinned to the v0.3.5 tag (49f94dd2) in place of f6cf5700, a commit that no upstream branch or tag contains. v0.3.5 asks for minimage ^0.1.2, so a direct exact ~minimage = "=0.1.2"~ dependency takes 0.1.2 from crates.io instead of git revision 624d4395 and holds it through ~cargo update~ and in dependent builds; the ~Cell~ arithmetic, the test counts, and the golden stencil and band hashes do not change. linkcell 0.3.6 to 0.3.9 require minimage 0.1.3 and 0.3.10 and 0.3.11 require 0.1.4. From 0.1.3, ~Cell::displacement~ on an orthorhombic cell returns another lattice image when the coordinate difference along an axis is 1.5 box lengths or more, so ~SparsityPattern::from_positions~ finds a different pair set for atoms outside the box. 0.1.4 also alters the rounding in ~Cell::fractional~, which moves ~mic::wrap_difference~ on some lower-triangular lattices. Taking 0.1.3 is left to a separate change.
 - Builds on rgmin 0.5.2 from crates.io. ~Control~ carries ~ftol_rel~ and ~noise_floor~; the band, minimum-mode, stencil, IDPP, and IRC solvers fill those fields from ~Control::default()~, which is the 0.5.1 behaviour (no relative energy slack, no noise-floor stop). The golden stencil and band hashes are unchanged.
 
 * 0.3.2 (2026-10-25)

@@ -48,7 +48,11 @@ ndarray = "0.17"
 faer = { version = "0.24.4", optional = true, default-features = false, features = ["std", "linalg"] }
 rayon = "1.12"
 thiserror = "2"
-linkcell = { version = "0.3.3", git = "https://github.com/d-SEAMS/linkcell", rev = "f6cf5700ca9c90e1877c84b66fb68386de5ceffe", default-features = false }
+# Tag v0.3.5 is commit 49f94dd2. Its own minimage requirement is the
+# caret ^0.1.2, so the exact pin below is what holds 0.1.2.
+linkcell = { version = "0.3.5", git = "https://github.com/d-SEAMS/linkcell", tag = "v0.3.5", default-features = false }
+# Matches the Cell that linkcell v0.3.5 re-exports; 0.1.3's displacement fix lands in a separate change.
+minimage = "=0.1.2"
 proptest = { version = "1.6", optional = true }
 rug = { version = "1.27", optional = true }
 
