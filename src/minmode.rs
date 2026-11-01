@@ -115,7 +115,9 @@ pub struct MinModeConfig {
     /// falls under this. The default is 1e-4. At that value and any
     /// looser one, the dimer also stops after one rotation once the
     /// rotational force is under 1. A tighter value keeps driving the
-    /// residual, and the torque window stays out of that loop. Lanczos
+    /// residual, and the torque window stays out of that loop.
+    /// [`MinModeSession::set_torque_window`] turns the window on or off
+    /// whatever this value is. Lanczos
     /// uses the same number as the Ritz residual. With no host relative
     /// tolerance it is also the relative change of the lowest Ritz value.
     pub rotation_tol: f64,
@@ -420,6 +422,7 @@ fn rotate_dimer<S: PointSurface>(
     g0: ArrayView1<f64>,
     mode: Array1<f64>,
     config: &MinModeConfig,
+    torque_window: Option<bool>,
     history: &mut DimerRotationHistory,
 ) -> Result<(Array1<f64>, f64, usize), SaddleError> {
     let mut n = normalize(mode);
@@ -441,7 +444,7 @@ fn rotate_dimer<S: PointSurface>(
     loop {
         let force = -perpendicular(&h, &n);
         let force_norm = force.dot(&force).sqrt();
-        if rotation_finished(config, force_norm, rotations) {
+        if rotation_finished(config, torque_window, force_norm, rotations) {
             // A finished rotation keeps its force for the next centre.
             // The cap leaves the previous iteration's pair: that
             // rotation did not meet the residual.
@@ -562,15 +565,22 @@ fn rotate_dimer<S: PointSurface>(
 /// (1 eV/Å²). [`STOCK_ROTATION_TOL`] plays the role of a loose
 /// `torque_min`: the window is on. A tighter `rotation_tol` is a request
 /// to drive the rotational force down, and the window stays out of that
-/// loop. The angle test in [`rotate_dimer`] is separate.
-fn rotation_finished(config: &MinModeConfig, force_norm: f64, rotations: usize) -> bool {
+/// loop. `torque_window` overrides that inference when it is `Some`.
+/// The angle test in [`rotate_dimer`] is separate.
+fn rotation_finished(
+    config: &MinModeConfig,
+    torque_window: Option<bool>,
+    force_norm: f64,
+    rotations: usize,
+) -> bool {
     if !force_norm.is_finite()
         || force_norm <= config.rotation_tol
         || rotations >= config.max_rotations
     {
         return true;
     }
-    config.rotation_tol + 1e-12 >= STOCK_ROTATION_TOL && rotations >= 1 && force_norm < TORQUE_MAX
+    let window = torque_window.unwrap_or(config.rotation_tol + 1e-12 >= STOCK_ROTATION_TOL);
+    window && rotations >= 1 && force_norm < TORQUE_MAX
 }
 
 /// Climb along `mode` by one full per-atom `max_move`.
@@ -1049,6 +1059,9 @@ pub struct MinModeSession {
     /// the lowest Ritz value. `None` keeps the stock test: the residual
     /// and the relative Ritz change, both at `rotation_tol`.
     lanczos_rel_tol: Option<f64>,
+    /// Classic dimer torque window. `None` turns it on when
+    /// `rotation_tol` is at least the stock 1e-4.
+    torque_window: Option<bool>,
     /// Dimer rotational CG state retained across translations.
     dimer_rotation: DimerRotationHistory,
     /// Gradient at `x`, when known: from the last translation's
@@ -1137,6 +1150,7 @@ impl MinModeSession {
             solver,
             iteration: 0,
             lanczos_rel_tol: None,
+            torque_window: None,
             dimer_rotation: DimerRotationHistory::default(),
             centre: None,
             surface_error: Mutex::new(None),
@@ -1171,6 +1185,17 @@ impl MinModeSession {
     /// excludes directions.
     pub fn krylov_block(&self) -> &[(Array1<f64>, Array1<f64>)] {
         &self.krylov
+    }
+
+    /// Turn the classic dimer torque window on or off apart from
+    /// `rotation_tol`. With the window on, a rotation also stops after
+    /// one iteration once the rotational force is under 1 (eOn
+    /// `torque_max`). `None`, the default, keeps the window on exactly
+    /// when `rotation_tol` is at least the stock 1e-4. eOn's improved
+    /// dimer stops on `torque_min` (0.1) with no window, which is
+    /// `rotation_tol` 0.1 and `Some(false)`. Lanczos does not read it.
+    pub fn set_torque_window(&mut self, window: Option<bool>) {
+        self.torque_window = window;
     }
 
     /// Select the optional HiGHS feasible-set step; requires the `highs` feature.
@@ -1399,6 +1424,7 @@ impl MinModeSession {
                     gradient,
                     self.mode.clone(),
                     &self.config,
+                    self.torque_window,
                     &mut history,
                 )?;
                 self.dimer_rotation = history;
@@ -1451,6 +1477,7 @@ impl MinModeSession {
                     gradient,
                     seed,
                     &self.config,
+                    self.torque_window,
                     &mut history,
                 )?;
                 self.dimer_rotation = DimerRotationHistory {
@@ -2181,6 +2208,90 @@ mod tests {
         fn excluded_modes(&self, _x: ArrayView1<f64>) -> Result<ndarray::Array2<f64>, SaddleError> {
             Ok(array![[1.0, 0.0, 0.0, 0.0]])
         }
+    }
+
+    #[test]
+    fn torque_window_follows_rotation_tol_until_it_is_set() {
+        let stock = MinModeConfig::default();
+        let eon = MinModeConfig {
+            rotation_tol: 0.1,
+            ..MinModeConfig::default()
+        };
+        let tight = MinModeConfig {
+            rotation_tol: 1e-6,
+            ..MinModeConfig::default()
+        };
+        // A rotational force of 0.5 after one rotation is inside the window.
+        assert!(super::rotation_finished(&stock, None, 0.5, 1));
+        assert!(super::rotation_finished(&eon, None, 0.5, 1));
+        assert!(!super::rotation_finished(&tight, None, 0.5, 1));
+        assert!(!super::rotation_finished(&eon, Some(false), 0.5, 1));
+        assert!(super::rotation_finished(&tight, Some(true), 0.5, 1));
+        // The window needs one rotation and a force under 1.
+        assert!(!super::rotation_finished(&eon, Some(true), 0.5, 0));
+        assert!(!super::rotation_finished(&eon, Some(true), 1.5, 1));
+        // The residual and the cap stop the rotation with the window off.
+        assert!(super::rotation_finished(&eon, Some(false), 0.05, 1));
+        assert!(super::rotation_finished(
+            &eon,
+            Some(false),
+            0.5,
+            eon.max_rotations
+        ));
+    }
+
+    fn dimer_rotations(rotation_tol: f64, window: Option<bool>) -> (usize, Array1<f64>) {
+        let config = MinModeConfig {
+            rotation_tol,
+            rotation_angle_tol: 0.0,
+            ..MinModeConfig::default()
+        };
+        let mut session = MinModeSession::new(
+            config,
+            array![0.3, 0.2, 0.1, 0.4],
+            array![0.5, 0.5, 0.5, 0.5],
+        )
+        .unwrap();
+        if let Some(window) = window {
+            session.set_torque_window(Some(window));
+        }
+        let estimate = session.estimate_mode(&AnisotropicQuadratic).unwrap();
+        (estimate.rotations, estimate.mode)
+    }
+
+    #[test]
+    fn unset_torque_window_keeps_the_inferred_rotation() {
+        for tol in [1e-4, 0.1, 1e-6] {
+            let inferred = tol + 1e-12 >= super::STOCK_ROTATION_TOL;
+            assert_eq!(
+                dimer_rotations(tol, None),
+                dimer_rotations(tol, Some(inferred))
+            );
+        }
+    }
+
+    fn torque(mode: &Array1<f64>) -> f64 {
+        let h = array![-2.0 * mode[0], mode[1], 4.0 * mode[2], 8.0 * mode[3]];
+        let force = &h - &(mode * mode.dot(&h));
+        force.dot(&force).sqrt()
+    }
+
+    #[test]
+    fn torque_window_off_rotates_to_the_residual() {
+        let (window, early) = dimer_rotations(0.1, None);
+        let (residual, mode) = dimer_rotations(0.1, Some(false));
+        assert!(residual > window);
+        assert!(torque(&early) > 0.1 && torque(&early) < 1.0);
+        assert!(torque(&mode) <= 0.1);
+    }
+
+    #[test]
+    fn torque_window_on_stops_a_tight_residual_early() {
+        let (residual, _) = dimer_rotations(1e-6, None);
+        let (window, early) = dimer_rotations(1e-6, Some(true));
+        assert!(residual > window);
+        assert!(torque(&early) < 1.0);
+        assert_eq!((window, early), dimer_rotations(0.1, None));
     }
 
     #[test]

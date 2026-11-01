@@ -24,3 +24,9 @@ These ~MinModeConfig~ fields set the cost of an estimate and of the translation:
 | ~max_move~ | Largest per-atom translation. A curvature that is not negative takes one step of this length along the mode. The L-BFGS pairs and the FIRE velocity are kept while the mode turns by at most 45 degrees, and dropped past that cone | 0.2 |
 
 From C, ~difference~ and ~rotation_angle_tol~ sit in ~rgsaddle_minmode_config_t~ and are read only when the config's ~version.minor~ is 5 or more. A zeroed C struct leaves ~rotation_angle_tol~ at 0, so the angle test stays off. The C++ helper ~minmode_config~ does that, and sets ~rotation_tol~ to 1e-3, which is loose enough for the torque window. The Python point stencil does not take ~rotation_angle_tol~; it uses the Rust default of five degrees. ~rotation_tol~ on that stencil defaults to 1e-4.
+
+~set_torque_window~ sets the torque window apart from ~rotation_tol~.
+~Some(false)~ keeps a loose residual without the window.
+eOn's improved dimer does that with its ~torque_min~ of 0.1.
+~Some(true)~ adds the window to a tighter residual.
+~None~, the default, infers the window from ~rotation_tol~.
