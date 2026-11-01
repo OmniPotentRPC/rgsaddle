@@ -8,6 +8,13 @@
   The option is off by default, and the default steps as before, bit for bit.
   A struct literal that lists every field of ~SellaSaddleConfig~ now lists this one too.
   It can also end in ~..SellaSaddleConfig::default()~ instead.
+- ~SellaSaddleConfig::small_system_atom_ceiling~ and ~SellaSaddleSession::set_small_system_atom_ceiling~ bound only the largest atom move.
+  They apply to a Cartesian saddle search whose Euclidean radius ~delta * n_free~ starts at one distance unit or less.
+  The bound starts at the first step, as in Sella's restricted atomic step.
+  The ceiling is ~max(delta, 0.1)~, never more than that starting radius, and moves with the trust ratio.
+  The option is off by default.
+  A struct literal that lists every field of ~SellaSaddleConfig~ now lists this one too.
+  It can also end in ~..SellaSaddleConfig::default()~ instead.
 - C application binary interface (ABI) minor 24 adds ~rgsaddle_sella_saddle_set_symmetrized_ritz~.
   It takes 0 or 1 and refuses any other value with ~RGSADDLE_INVALID_PARAMETER~.
 - An endpoint at or above the highest interior image blocks the climbing image when its force toward the next image exceeds ~force_tol~.

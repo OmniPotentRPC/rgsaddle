@@ -38,6 +38,10 @@ The table below lists the main types.
 Each finite-difference diagonalization runs =symm=2= products in its residual test.
 With =symmetrized_ritz= on, it takes its Ritz pairs from those products.
 The option is off by default, and =SellaSaddleSession::set_symmetrized_ritz= sets it on a live session.
+=small_system_atom_ceiling= bounds only the largest atom move, by Sella's =delta0= ceiling.
+That bound applies from the first step of a Cartesian trust-region search with iterative diagonalization.
+The search's radius =delta * n_free= must start at 1 or less.
+The ceiling is off by default, and =SellaSaddleSession::set_small_system_atom_ceiling= sets it on a live session.
 
 * C ABI (feature =capi=)
 This section lists the entry points, codes and flags of =include/rgsaddle.h=.
@@ -124,6 +128,10 @@ The importable package is =rgsaddle=. =rgsaddle._core= is the nanobind extension
 - =tests/sella_symmetrized_ritz.rs=: the Sella saddle walk on a linear gradient field with an antisymmetric Jacobian part.
   The default keeps its evaluation counts and positions bit for bit.
   =symmetrized_ritz= stops the first finite-difference diagonalization two evaluations sooner.
+- =tests/sella_atom_ceiling.rs=: a six-coordinate Cartesian saddle search with =small_system_atom_ceiling= on.
+  No atom moves past the ceiling from the first step, and the ceiling never passes its starting Euclidean radius.
+  The search still reaches the saddle.
+  A twelve-coordinate search and a search without iterative diagonalization step the same with the option on or off.
 - =tests/c_abi.rs= — header and symbols with =capi=
 - =tests/solid_bain_lj.rs= — =tests/c/solid_bain_lj.c= runs the solid-state band from bcc to fcc for switched LJ on the two-atom tetragonal cell through =rgsaddle_band_create_solid=; the climbing image matches the relaxed scan of =validation/bain_lj_reference.py= in c/a within 2.5e-4 and in barrier within 1.2e-6 eV/atom, and every image keeps a diagonal tetragonal cell and its fractional coordinates
 - =validation/= — sympy and sollya checks of the dimer rotation, the Lanczos residual bound, and the finite-difference curvature; =bain_lj_reference.py= (numpy, scipy) scans the relaxed Bain path that =tests/c/solid_bain_lj.c= checks against, and =ssneb_bain_cell.py= (sympy) checks its strain parametrisation and Jacobian

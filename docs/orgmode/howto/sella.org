@@ -69,8 +69,54 @@ The runs below take tblite GFN2-xTB gradients in Cartesian coordinates.
 GFN2-xTB is version 2 of the geometry, frequency, noncovalent, extended tight binding method.
 Each search stops at a Euclidean gradient norm of 0.05 eV/Å and has a cap of 400 evaluations.
 The default reached a saddle of index one from 19 starts in 1450 evaluations in all.
-The index is the count of imaginary frequencies that xtb 6.6.1 reports at the final geometry.
+The index is the count of significant imaginary frequencies that xtb 6.6.1 reports at the final geometry.
+A frequency is significant past 5 cm-1.
 With the option on, the session reached such a saddle from 21 starts in 907 evaluations.
 Sella 2.6.0 in Cartesian coordinates did so from 22 starts in 770 evaluations.
 The option adds the starts ~07_bicyclobutane~ and ~22_hconhoh~.
 One start got slower: ~09_parentdieslalder~ took 225 evaluations in place of 146.
+
+* Cap each atom move in a small Cartesian search
+
+Sella defaults to the restricted atomic step in a Cartesian search.
+The step bounds the largest move of any one atom by ~delta0~, 0.1 Angstrom, whatever the size of the system.
+That is ~RestrictedAtomicStep~ in ~sella/optimize/restricted_step.py~ of Sella 2.6.0.
+~sella/optimize/optimize.py~ sets its radius to ~delta0~ without the free-dimension factor that its Euclidean trust region takes.
+~SellaSaddleSession~ starts a Euclidean trust radius at ~delta * n_free~ instead.
+Above one distance unit an atom ceiling already sits under that radius, as the start of this page says.
+At ten free coordinates or fewer, with the default ~delta~ of 0.1, the radius is the only bound.
+One atom can take most of it.
+The Baker set has a formyl chloride (HCOCl) start, ~15_hocl~, with four atoms and six free coordinates.
+There the radius starts at 0.6 Angstrom and the first two steps move one atom 0.45 Angstrom and 0.44 Angstrom.
+The tblite self-consistent field (SCF) then fails to converge.
+
+~small_system_atom_ceiling~ makes such a search take Sella's restricted atomic step from its first step.
+The step is the partitioned rational function optimization (P-RFO) step at unit alpha when no atom moves past the ceiling.
+Otherwise it is the step at the alpha whose largest atom move equals the ceiling.
+The ceiling starts at ~max(delta, 0.1)~ and never passes the starting Euclidean radius.
+So a host ~delta~ small enough to keep ~delta * n_free~ under 0.1 is not loosened.
+On the saddle schedule the trust ratio grows and shrinks the ceiling.
+Sella does the same with its atomic radius.
+~SellaSaddleReport::delta~ reports the ceiling.
+The option changes nothing with ~eig: false~ or under another ~RestrictedKind~.
+It also changes nothing in internal or cell coordinates, or above ten free coordinates at the default ~delta~.
+
+#+begin_src rust
+let config = SellaSaddleConfig {
+    small_system_atom_ceiling: true,
+    ..SellaSaddleConfig::default()
+};
+let mut session = SellaSaddleSession::new(config, x, masses)?;
+// or, on a session that already exists, from its next step
+session.set_small_system_atom_ceiling(true);
+#+end_src
+
+The ceiling is Sella's convention.
+It follows Hermes, Sargsyan, Najm and Zador, J. Chem. Theory Comput. 18, 6974 (2022), and the Sella 2.6.0 source above.
+It costs steps where large steps would have been safe.
+The test below starts four atoms on an exact quadratic far from its saddle.
+There the search takes 15 steps with the ceiling and 9 without it.
+The ceiling grows by at most a factor of 1.15 a step.
+~tests/sella_atom_ceiling.rs~ checks that every atom move stays under the ceiling from the first step.
+It checks that the ceiling never passes the starting radius and that the search still reaches that saddle.
+It also checks that a twelve-coordinate search and a search with ~eig: false~ step the same with the option on or off.
