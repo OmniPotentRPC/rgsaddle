@@ -1451,6 +1451,54 @@ fn build_solver(config: &BandConfig, method: &Method, interior_dof: usize) -> So
 
 /// Stepping band relaxation over an rgmin solver. Endpoints (rows 0
 /// and `n_images - 1`) never move.
+///
+/// # Examples
+///
+/// A nudged elastic band on the double well
+/// V = (x² − 1)² + 2y² + 2z², one atom with minima at (±1, 0, 0) and
+/// the saddle at the origin. Nine images start on a path bowed off the
+/// axis, and the host steps the band until it converges.
+///
+/// ```
+/// use ndarray::{Array1, Array2, ArrayView2};
+/// use rgsaddle::{BandConfig, BandSession, BandStatus, BandSurface, SaddleError};
+///
+/// struct DoubleWell;
+///
+/// impl BandSurface for DoubleWell {
+///     fn eval(
+///         &self,
+///         positions: ArrayView2<f64>,
+///         energies: &mut Array1<f64>,
+///         gradients: &mut Array2<f64>,
+///     ) -> Result<(), SaddleError> {
+///         for (i, r) in positions.outer_iter().enumerate() {
+///             let (x, y, z) = (r[0], r[1], r[2]);
+///             energies[i] = (x * x - 1.0).powi(2) + 2.0 * y * y + 2.0 * z * z;
+///             gradients[(i, 0)] = 4.0 * x * (x * x - 1.0);
+///             gradients[(i, 1)] = 4.0 * y;
+///             gradients[(i, 2)] = 4.0 * z;
+///         }
+///         Ok(())
+///     }
+/// }
+///
+/// let initial = Array2::from_shape_fn((9, 3), |(i, k)| {
+///     let t = i as f64 / 8.0;
+///     [2.0 * t - 1.0, 0.3 * (std::f64::consts::PI * t).sin(), 0.0][k]
+/// });
+/// let config = BandConfig { force_tol: 1e-3, max_move: 0.1, ..BandConfig::default() };
+/// let mut session = BandSession::new(config, initial)?;
+/// let mut report = session.step(&DoubleWell)?;
+/// while report.status == BandStatus::Running {
+///     report = session.step(&DoubleWell)?;
+/// }
+///
+/// assert_eq!(report.status, BandStatus::Converged);
+/// let saddle = session.positions().row(report.ci_index.unwrap()).to_owned();
+/// assert!(saddle.iter().all(|c| c.abs() < 1e-2));
+/// # Ok::<(), SaddleError>(())
+/// ```
 pub struct BandSession {
     config: BandConfig,
     positions: Array2<f64>,
