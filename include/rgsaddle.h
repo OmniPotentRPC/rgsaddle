@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 31u
+#define RGSADDLE_ABI_MINOR 32u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -1094,6 +1094,18 @@ void rgsaddle_ocineb_free(RgsaddleOcineb *session);
  * No-op in a library built without the highs Cargo feature. */
 rgsaddle_status_t rgsaddle_band_set_highs(RgsaddleBand *band, int32_t enabled);
 rgsaddle_status_t rgsaddle_minmode_set_highs(RgsaddleMinMode *session, int32_t enabled);
+/**
+ * ABI minor 32. Classic dimer torque window, apart from rotation_tol.
+ * With the window on, a rotation also stops after one iteration once
+ * the rotational force is under 1 (eOn torque_max). `window` 1 turns it
+ * on, 0 turns it off, and -1, the state of a new session, turns it on
+ * exactly when rotation_tol is at least 1e-4. eOn's improved dimer is
+ * rotation_tol = torque_min with 0. Lanczos does not read it. Other
+ * values return RGSADDLE_INVALID_PARAMETER and leave the session
+ * unchanged.
+ */
+rgsaddle_status_t rgsaddle_minmode_set_torque_window(RgsaddleMinMode *session,
+                                                     int32_t window);
 
 /**
  * Per-image exponential metric (Packwood et al. 2016) inside the band

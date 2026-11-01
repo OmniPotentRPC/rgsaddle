@@ -32,4 +32,12 @@ The value 0 keeps that radius alone.
 Any other value returns ~RGSADDLE_INVALID_PARAMETER~ and leaves the session unchanged.
 A library below minor 25 does not export the symbol; the Sella how-to describes the ceiling.
 
+~rgsaddle_minmode_set_torque_window~ (ABI minor 32) takes -1, 0 or 1.
+The value 1 turns on the classic dimer torque window.
+A rotation then also stops after one iteration once the rotational force is under 1.
+The value 0 turns that window off, so the rotation runs to ~rotation_tol~, the angle test or ~max_rotations~.
+The value -1 is the state of a new session, with the window on exactly when ~rotation_tol~ is at least 1e-4.
+Any other value returns ~RGSADDLE_INVALID_PARAMETER~ and leaves the session unchanged.
+A library below minor 32 does not export the symbol.
+
 ~include/rgsaddle/session.hpp~ provides the C++ owning wrappers. ~Band~, ~MinMode~ and ~Irc~ release their opaque handles automatically and translate failing statuses into exceptions. ~tests/c/main_abi_contract.h~ checks the retained main layouts and signatures; the C and C++ smoke executables exercise the official header and library together.
