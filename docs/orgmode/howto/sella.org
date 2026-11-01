@@ -40,6 +40,14 @@ let mut session = SellaSaddleSession::new(config, x, masses)?;
 session.set_symmetrized_ritz(true);
 #+end_src
 
+From minor 24, a C host sets the option through the application binary interface (ABI).
+
+#+begin_src c
+if (rgsaddle_sella_saddle_set_symmetrized_ritz(session, 1) != RGSADDLE_OK) {
+  /* NULL session, or a value other than 0 and 1 */
+}
+#+end_src
+
 With exact symmetric products the two choices agree up to rounding.
 The default is off and steps as before, bit for bit.
 ~tests/sella_symmetrized_ritz.rs~ pins that walk and the shorter first diagonalization with the option on.
@@ -53,3 +61,16 @@ This session takes the partitioned rational function optimization (P-RFO) step o
 That paper is J. Comput. Chem. 7, 385 (1986), doi:10.1002/jcc.540070402.
 Hermes, Sargsyan, Najm and Zádor describe Sella's iterative diagonalization and its ~symm=2~ products.
 Their paper is J. Chem. Theory Comput. 18, 6974 (2022), doi:10.1021/acs.jctc.2c00395.
+
+The option helps most where gradients are noisy.
+The Baker transition-state set is the 25 starts of Baker and Chan.
+Their paper is J. Comput. Chem. 17, 888 (1996), ~doi:10.1002/(SICI)1096-987X(199605)17:7<888::AID-JCC12>3.0.CO;2-7~.
+The runs below take tblite GFN2-xTB gradients in Cartesian coordinates.
+GFN2-xTB is version 2 of the geometry, frequency, noncovalent, extended tight binding method.
+Each search stops at a Euclidean gradient norm of 0.05 eV/Å and has a cap of 400 evaluations.
+The default reached a saddle of index one from 19 starts in 1450 evaluations in all.
+The index is the count of imaginary frequencies that xtb 6.6.1 reports at the final geometry.
+With the option on, the session reached such a saddle from 21 starts in 907 evaluations.
+Sella 2.6.0 in Cartesian coordinates did so from 22 starts in 770 evaluations.
+The option adds the starts ~07_bicyclobutane~ and ~22_hconhoh~.
+One start got slower: ~09_parentdieslalder~ took 225 evaluations in place of 146.

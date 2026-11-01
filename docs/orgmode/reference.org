@@ -40,7 +40,62 @@ With =symmetrized_ritz= on, it takes its Ritz pairs from those products.
 The option is off by default, and =SellaSaddleSession::set_symmetrized_ritz= sets it on a live session.
 
 * C ABI (feature =capi=)
-=include/rgsaddle.h=. =RGSADDLE_ABI_MAJOR= is 1. Status codes include =RGSADDLE_OK=, =RGSADDLE_SHAPE=, =RGSADDLE_SURFACE_FAILED=, =RGSADDLE_ABI_MISMATCH=. Methods on the wire: FIRE, L-BFGS, quick-min, and ODE12r (=RGSADDLE_METHOD_ODE12R=, minor 22); =rgsaddle_band_set_exp_precon= (minor 22) installs the per-image exponential metric on the band solver, ODE12r-Exp with that method. Min-mode kinds: dimer and Lanczos. Index-1 entries: =rgsaddle_nichols_step=, =rgsaddle_prfo_step=, =rgsaddle_hessian_powell=, =rgsaddle_hessian_bofill=, =rgsaddle_cap_max_abs=, and =rgsaddle_index1_step=. Band cache entries: =rgsaddle_band_restart=, =rgsaddle_band_evaluation= (=RGSADDLE_NO_EVALUATION= when nothing is cached at the band's positions). Min-mode reuse: =rgsaddle_minmode_set_position=, =rgsaddle_minmode_set_mode=, =rgsaddle_minmode_estimate=. A Lanczos estimate advances one Hessian action and keeps the Krylov basis until =set_position=, =set_mode=, or =reset=; the basis grows to the free dimension, the mode after k actions lies in the k + 1 Lanczos vectors (its curvature is the Ritz value of the k), and a dimer estimate is the full rotation. Dimer Polak-Ribiere history survives =set_position= and is cleared by =set_mode= and =reset=; a failed callback leaves it unchanged. =rgsaddle_minmode_config_t.difference= picks =RGSADDLE_DIFFERENCE_FORWARD= or =_CENTRAL=, and =rotation_angle_tol= stops a dimer rotation whose optimal angle falls under it (radians; the Rust default is five degrees, 0 off, and a C config stores the value it is given). Both fields are read only from a config whose version minor is 5 or newer. =RGSADDLE_ABI_MINOR= is 23. Request flags: =RGSADDLE_REQ_ONE_IMAGE= (bit 0) and, from a band config at minor 22, =RGSADDLE_REQ_CLIMBING_IMAGE= (bit 1) on the refinement's one-image requests, with =image= the climbing image's band index. =rgsaddle_idpp_path= writes the image-dependent pair potential initial path, endpoints included, and takes a row-major cell or NULL. =rgsaddle_ocineb_step= reports the hand-off phase (band, tangent alignment, or minimum-mode translation). =rgsaddle_connect= runs that search to completion: the host passes two endpoint arrays and a surface that writes energy and the Cartesian gradient for one image; =rgsaddle_connect_report_t= returns energy, the Euclidean gradient norm, kind (=s=, =u=, or =f=), the Hessian index, and the evaluation count. Finite differences that decide a step or an index are included; the Lanczos acceptance does not build a dense Hessian. =RGSADDLE_BAND_CI_AFTER= (band flag bit 2) arms the climbing image under =ci_trigger_force= or =ci_trigger_factor= times the first force, either of which may be 0; =RGSADDLE_BAND_NO_MIN_MODE= (band flag bit 3, minor 21) turns off the min-mode refinement of the climbing image, which is otherwise on and reports its curvature in =rgsaddle_report_t.curvature=; =RGSADDLE_STALLED= reports a band step that left the band unchanged above =force_tol=. =RGSADDLE_METHOD_QUICKMIN= runs quick-min on the band. =rgsaddle_band_set_quickmin_variant= selects =RGSADDLE_QUICKMIN_RGMIN=, =_EON= or =_PER_ATOM=. A min-mode session returns null for that code. =rgsaddle_band_create_solid= builds a solid-state band; =rgsaddle_band_step_solid= steps it on an =rgsaddle_solid_surface_fn= whose =rgsaddle_solid_surface_request_t= carries cells in and Cauchy stresses out; =rgsaddle_band_cells= and =rgsaddle_band_solid_jacobian= read it back. The report's =evaluations= field took the place of =reserved= at minor 5. =cargo cinstall= installs =include/rgsaddle.h= as written.
+This section lists the entry points, codes and flags of =include/rgsaddle.h=.
+A C host reaches them through the application binary interface (ABI).
+=RGSADDLE_ABI_MAJOR= is 1.
+Status codes include =RGSADDLE_OK=, =RGSADDLE_SHAPE=, =RGSADDLE_SURFACE_FAILED=, =RGSADDLE_ABI_MISMATCH=.
+The methods on the wire are the fast inertial relaxation engine (FIRE) and quick-min.
+Limited-memory Broyden-Fletcher-Goldfarb-Shanno (L-BFGS) is also on the wire.
+From minor 22 so is ODE12r (=RGSADDLE_METHOD_ODE12R=), the adaptive ordinary differential equation (ODE) step.
+From minor 22, =rgsaddle_band_set_exp_precon= installs the per-image exponential metric on the band solver.
+With ODE12r that gives ODE12r-Exp.
+Min-mode sessions estimate the mode by the dimer or by Lanczos.
+For index-1 steps the header has =rgsaddle_nichols_step=, =rgsaddle_prfo_step= and =rgsaddle_index1_step=.
+It also has =rgsaddle_hessian_powell=, =rgsaddle_hessian_bofill= and =rgsaddle_cap_max_abs= for those steps.
+=rgsaddle_band_restart= and =rgsaddle_band_evaluation= use the band cache.
+=rgsaddle_band_evaluation= returns =RGSADDLE_NO_EVALUATION= when nothing is cached at the band's positions.
+A min-mode session is reused through three entry points.
+They are =rgsaddle_minmode_set_position=, =rgsaddle_minmode_set_mode= and =rgsaddle_minmode_estimate=.
+A Lanczos estimate advances one Hessian action and keeps the Krylov basis until =set_position=, =set_mode=, or =reset=.
+That basis grows to the free dimension.
+After k actions the mode lies in the k + 1 Lanczos vectors, with the Ritz value of the k as its curvature.
+Each dimer estimate is the full rotation.
+Dimer Polak-Ribiere history survives =set_position= and is cleared by =set_mode= and =reset=.
+A failed callback leaves it unchanged.
+=rgsaddle_minmode_config_t.difference= picks =RGSADDLE_DIFFERENCE_FORWARD= or =_CENTRAL=.
+Its =rotation_angle_tol= field stops a dimer rotation once the optimal angle falls under this tolerance in radians.
+The Rust default is five degrees, 0 turns the stop off, and a C config stores the value it is given.
+Both fields are read only from a config whose version minor is 5 or newer.
+=RGSADDLE_ABI_MINOR= is 24.
+From minor 24, =rgsaddle_sella_saddle_set_symmetrized_ritz= sets =SellaSaddleConfig::symmetrized_ritz= from 0 or 1.
+It returns =RGSADDLE_INVALID_PARAMETER= for any other value.
+The request flags are =RGSADDLE_REQ_ONE_IMAGE= (bit 0) and =RGSADDLE_REQ_CLIMBING_IMAGE= (bit 1).
+From a band config at minor 22, the refinement's one-image requests also set bit 1.
+Their =image= is then the climbing image's band index.
+=rgsaddle_idpp_path= writes the image-dependent pair potential initial path with its endpoints.
+It takes a row-major cell or NULL.
+=rgsaddle_ocineb_step= reports the hand-off phase (band, tangent alignment, or minimum-mode translation).
+=rgsaddle_connect= runs the double-ended search of =connect= to completion on two endpoint arrays and a host surface.
+The surface writes energy and the Cartesian gradient for one image.
+=rgsaddle_connect_report_t= carries the energy and the Euclidean gradient norm of the search.
+It also carries the kind (=s=, =u=, or =f=), the Hessian index and the evaluation count.
+That count includes the finite differences that decide a step or an index.
+The Lanczos acceptance does not build a dense Hessian.
+Band flag bit 2 is =RGSADDLE_BAND_CI_AFTER=.
+It arms the climbing image under =ci_trigger_force= or =ci_trigger_factor= times the first force.
+Either of the two may be 0.
+From minor 21, band flag bit 3 is =RGSADDLE_BAND_NO_MIN_MODE=.
+It turns off the min-mode refinement of the climbing image.
+Otherwise the refinement runs and reports its curvature in =rgsaddle_report_t.curvature=.
+=RGSADDLE_STALLED= reports a band step that left the band unchanged above =force_tol=.
+On the band, =RGSADDLE_METHOD_QUICKMIN= runs quick-min, and a min-mode session returns null for that code.
+=rgsaddle_band_set_quickmin_variant= selects =RGSADDLE_QUICKMIN_RGMIN=, =_EON= or =_PER_ATOM=.
+=rgsaddle_band_create_solid= builds a solid-state band.
+=rgsaddle_band_step_solid= steps it on an =rgsaddle_solid_surface_fn=.
+Cells go in and Cauchy stresses come out through =rgsaddle_solid_surface_request_t=.
+=rgsaddle_band_cells= and =rgsaddle_band_solid_jacobian= read the solid-state band back.
+The report's =evaluations= field took the place of =reserved= at minor 5.
+=cargo cinstall= installs =include/rgsaddle.h= as written.
 
 * Python package
 The importable package is =rgsaddle=. =rgsaddle._core= is the nanobind extension. =import rgsaddle= does not import ASE.

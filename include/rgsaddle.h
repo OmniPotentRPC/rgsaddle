@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 23u
+#define RGSADDLE_ABI_MINOR 24u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -820,6 +820,15 @@ rgsaddle_status_t rgsaddle_sella_saddle_maybe_niggli(RgsaddleSellaSaddle *sessio
 /** `expand` is ExpandKind: 0 lanczos, 1 gd, 2 jd0, 3 jd0_alt, 4 mjd0, 5 mjd0_alt. */
 rgsaddle_status_t rgsaddle_sella_saddle_set_expand(RgsaddleSellaSaddle *session,
                                      int32_t expand);
+/**
+ * ABI minor 24. `enabled` 1 takes the Ritz pairs of each
+ * finite-difference diagonalization from the symmetrized products its
+ * residual test reads, as Sella does; 0, the default, keeps the mean of
+ * V^T AV and its transpose. Other values return
+ * RGSADDLE_INVALID_PARAMETER.
+ */
+rgsaddle_status_t rgsaddle_sella_saddle_set_symmetrized_ritz(
+    RgsaddleSellaSaddle *session, int32_t enabled);
 void rgsaddle_sella_saddle_free(RgsaddleSellaSaddle *session);
 
 /** Empty Constraints chart. The caller stamps version and zeroes flags. */

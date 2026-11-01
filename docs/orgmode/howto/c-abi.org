@@ -17,4 +17,11 @@ Band and minimum-mode force norms are selected by ~rgsaddle_band_set_force_gate~
 
 From ABI minor 21 a climbing band refines its climbing image by the lowest mode (see the band how-to). While that runs, each surface request carries the climbing image alone: a per-image host gets ~RGSADDLE_REQ_ONE_IMAGE~ with that image's band index, and a batched host gets one geometry with ~n_images = 1~ and ~image = -1~. From a band config at minor 22 those requests also set ~RGSADDLE_REQ_CLIMBING_IMAGE~ (request flags bit 1), and a batched one then carries the climbing image's band index in ~image~, so a host that keeps per-image state, or that gives the one image every MPI rank, knows which image it is. A config below minor 22 gets the minor 21 request. The step report carries the curvature along the mode in ~curvature~ and 0 on a band step. Set ~RGSADDLE_BAND_NO_MIN_MODE~ (band config flag bit 3) for the plain CI-NEB of minor 20.
 
+From ABI minor 24, ~rgsaddle_sella_saddle_set_symmetrized_ritz~ takes 0 for the default or 1.
+The value 1 makes a Sella saddle session take the Ritz pairs of its finite-difference diagonalizations from Sella's symmetrized products.
+Any other value returns ~RGSADDLE_INVALID_PARAMETER~ and leaves the session unchanged.
+A library below minor 24 does not export the symbol.
+When the host loads the library at run time, check ~rgsaddle_abi_version()~ first.
+The Sella how-to says when the option helps.
+
 ~include/rgsaddle/session.hpp~ provides the C++ owning wrappers. ~Band~, ~MinMode~ and ~Irc~ release their opaque handles automatically and translate failing statuses into exceptions. ~tests/c/main_abi_contract.h~ checks the retained main layouts and signatures; the C and C++ smoke executables exercise the official header and library together.
