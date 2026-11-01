@@ -99,6 +99,9 @@ pub struct IrcReport {
     pub max_force: f64,
     pub arc: f64,
     pub inner_steps: usize,
+    /// On a GS2 step: past the kick, the force at or below `force_tol`, and
+    /// positive curvature along the launch mode at this point. The sphere
+    /// radius does not enter.
     pub at_minimum: bool,
 }
 
@@ -344,6 +347,33 @@ impl IrcSession {
         qn_irc_restricted(&self.trust(), &evals, &evecs, g, allow_interior)
     }
 
+    /// A GS2 minimum: past the kick, the force at or below `force_tol`, and
+    /// positive curvature along the saddle mode on the surface itself.
+    /// Beside the saddle that curvature is still the negative eigenvalue,
+    /// even where the force is small and the quasi-Newton model is positive
+    /// definite, and a rejected trial halves `dx` there. The curvature
+    /// costs one surface call, made only once the force is at or below
+    /// `force_tol`.
+    fn gs2_minimum<S: PointSurface>(
+        &self,
+        surface: &S,
+        kicked: bool,
+        max_force: f64,
+        g: &Array1<f64>,
+    ) -> Result<bool, SaddleError> {
+        if kicked || max_force > self.config.force_tol {
+            return Ok(false);
+        }
+        let hv = hessian_action(
+            surface,
+            self.x.view(),
+            g.view(),
+            self.mode.view(),
+            self.config.dr,
+        )?;
+        Ok(dot(self.mode.view(), hv.view()) > 0.0)
+    }
+
     /// One outer IRC move. [`IrcKind::Gs2`] is Sella / GS2;
     /// [`IrcKind::Morokuma`] is the IRCDriver predictor-corrector.
     pub fn step<S: PointSurface>(&mut self, surface: &S) -> Result<IrcReport, SaddleError> {
@@ -371,7 +401,6 @@ impl IrcSession {
         let mut energy = energy0;
         let mut g = g0;
         let mut max_force = max_force0;
-        let mut last_interior = false;
         for _ in 0..self.config.max_inner {
             inner_steps += 1;
             let s = self.restricted_increment(&g);
@@ -387,8 +416,8 @@ impl IrcSession {
                 // reverse on a molecular surface far from a basin.
                 if self.hess.is_posdef()
                     && self.arc > 8.0 * self.config.dx
-                    && max_force <= self.config.force_tol
                     && dot(prev.view(), s.view()) < 0.0
+                    && self.gs2_minimum(surface, kicked, max_force, &g)?
                 {
                     self.d1.fill(0.0);
                     self.last_step = None;
@@ -403,11 +432,10 @@ impl IrcSession {
                 }
             }
             if let Some(prev) = &self.last_step
-                && !kicked
                 && self.hess.is_posdef()
                 && self.arc > 8.0 * self.config.dx
-                && max_force <= self.config.force_tol
                 && dot(prev.view(), s.view()) < 0.0
+                && self.gs2_minimum(surface, kicked, max_force, &g)?
             {
                 self.d1.fill(0.0);
                 self.last_step = None;
@@ -421,7 +449,6 @@ impl IrcSession {
                 });
             }
             self.last_step = Some(s.clone());
-            last_interior = interior;
             axpy(1.0, s.view(), &mut self.d1);
             axpy(1.0, s.view(), &mut self.x);
             let ev = surface.eval(self.x.view())?;
@@ -431,7 +458,6 @@ impl IrcSession {
                 axpy(-1.0, s.view(), &mut self.d1);
                 self.config.dx = (self.config.dx * 0.5).max(1.0e-4);
                 self.last_step = None;
-                last_interior = false;
                 break;
             }
             energy = ev.0;
@@ -456,17 +482,17 @@ impl IrcSession {
         self.last_step = None;
         self.arc += self.config.dx;
         self.solver.forget();
+        // Sella skips the test while the session still sits on the saddle.
+        // This also refuses the kick step itself, even where |F| is already
+        // at or below fmax beside the saddle. A step whose last trial was
+        // rejected still ends on an accepted point with this force.
+        let at_minimum = self.gs2_minimum(surface, kicked, max_force, &g)?;
         Ok(IrcReport {
             energy,
             max_force,
             arc: self.arc,
             inner_steps,
-            // Sella: the kick outer step is never a minimum, even when
-            // |F| is already under fmax (a TS neighborhood).
-            at_minimum: !kicked
-                && max_force <= self.config.force_tol
-                && last_interior
-                && self.arc > 8.0 * self.config.dx,
+            at_minimum,
         })
     }
 
