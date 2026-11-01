@@ -15,7 +15,7 @@ A preset chooses the sides, the tangent, the coupling, the climb, and the mesh. 
 | ART | seed, then Ritz | ascend until the curvature drops, then reflect | Lanczos |
 | eigen following | lowest eigenvector | as the dimer | dense central-difference =exact_eigh= |
 
-rgmin started as Rohit Goswami's xtsci-optimize (2023-2024), which composed minimisers from small strategy objects. The stencil core extends that to saddle and band methods. eOn v2.9.0.1 is doi:10.5281/zenodo.18529495. Goswami (2025), arXiv:2510.21368, doi:10.48550/arXiv.2510.21368.
+rgmin started as Rohit Goswami's xtsci-optimize (2023-2024), which composed minimisers from small strategy objects. The stencil core extends that to saddle and band methods. eOn v2.9.0.1 is doi:10.5281/zenodo.18529496. Goswami (2025), arXiv:2510.21368, doi:10.48550/arXiv.2510.21368.
 
 =Chain::evaluate= owns one block per image. The block size is fixed at one image and does not depend on the thread count. Each block is written back by index after the surface call. Remesh, insert, and window do not call the surface. Image ids survive an insert.
 

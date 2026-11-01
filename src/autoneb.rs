@@ -6,7 +6,7 @@
 //! The band and this climb stage follow that step, then Chill et al.,
 //! Modelling Simul. Mater. Sci. Eng. 22, 055002 (2014),
 //! doi:10.1088/0965-0393/22/5/055002, with eOn v2.9.0.1,
-//! doi:10.5281/zenodo.18529495, then Kolsbjerg, Groves, and Hammer,
+//! doi:10.5281/zenodo.18529496, then Kolsbjerg, Groves, and Hammer,
 //! J. Chem. Phys. 145, 094107 (2016), doi:10.1063/1.4961868.
 //!
 //! The caller supplies the endpoints and any intermediate guesses.
