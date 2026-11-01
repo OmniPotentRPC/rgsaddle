@@ -1585,9 +1585,12 @@ impl BandSession {
                 "the exponential metric has no pair geometry for a solid-state cell block".into(),
             ));
         }
-        if !(precon.a.is_finite() && precon.a > 0.0)
-            || !(precon.c_stab.is_finite() && precon.c_stab > 0.0)
-            || !(precon.r_cut_factor.is_finite() && precon.r_cut_factor > 1.0)
+        if !(precon.a.is_finite()
+            && precon.a > 0.0
+            && precon.c_stab.is_finite()
+            && precon.c_stab > 0.0
+            && precon.r_cut_factor.is_finite()
+            && precon.r_cut_factor > 1.0)
             || precon.mu.is_some_and(|mu| !(mu.is_finite() && mu > 0.0))
         {
             return Err(SaddleError::Invalid(
