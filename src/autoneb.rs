@@ -21,12 +21,12 @@
 //! its L-BFGS pairs survive a climb that starts on the same images.
 //! A new index set starts with empty memory.
 //!
-//! [`ImageInterpolation`] places every new image. The initial fill
+//! `ImageInterpolation` places every new image. The initial fill
 //! inserts one midpoint of the longest segment at a time. ASE's
 //! AutoNEB, given only the two endpoints, places `n_simul` images in
 //! one equal-spaced interpolate. Those two fills meet on a unit
 //! segment when `n_simul` is 1 or 3, and they differ for 2.
-//! [`LinearInterpolation`] is the straight minimum-image segment. An
+//! `LinearInterpolation` is the straight minimum-image segment. An
 //! IDPP path implements the same trait; this crate does not ship one.
 //! Buildup leaves climbing off. The host spring is uniform. The search
 //! keeps a private per-segment list: the fill from two endpoints sets
@@ -43,7 +43,7 @@
 //! place. [`AutoNeb::run`] starts once.
 //!
 //! [`AutoNebTuning::threads`] splits each evaluation into that many
-//! contiguous image blocks. Block `r` of `n` is [`image_block`]. Each
+//! contiguous image blocks. Block `r` of `n` is `image_block`. Each
 //! block is evaluated on its own thread, and the energy and gradient
 //! are stored at the image index after every block has finished.
 //! [`worst_segment`] then reads that array from low index to high, so
@@ -455,7 +455,7 @@ pub struct AutoNebTuning {
     /// off by default.
     pub full_band: bool,
     /// Threads that evaluate images. `1` evaluates the batch on the
-    /// calling thread. A larger value uses [`image_block`] and stores
+    /// calling thread. A larger value uses `image_block` and stores
     /// each result by image index. The surface sees one block per call.
     pub threads: usize,
     /// Store every evaluated row.

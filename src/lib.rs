@@ -36,6 +36,10 @@
 //! direct Curtis-Powell-Reid partition: a smallest-last distance-2
 //! colouring and one batched gradient difference per colour and
 //! Cartesian axis.
+//!
+//! [`BandSession`] and [`MinModeSession`] each open with a runnable
+//! example. The guides and tutorials are at
+//! <https://omnipotentrpc.github.io/rgsaddle/>.
 
 pub mod autoneb;
 pub mod band;

@@ -2,10 +2,11 @@
 //!
 //! Sella `peswrapper.PES` without internals. The Hessian is a dense
 //! Cartesian matrix updated in `(s, y)`, matching Sella `_update_H`.
-//! [`Self::with_proj`] hangs Sella `proj_trans` /
+//! [`CartesianPes::with_proj`] hangs Sella `proj_trans` /
 //! `proj_rot` (`fix_translation` / `fix_rotation`) so
-//! [`Self::project`] / [`Self::retract`] / [`Self::transport`] stay
-//! on that set. [`Self::new`] is the unconstrained Hessian store
+//! [`CartesianPes::project`] / [`CartesianPes::retract`] /
+//! [`CartesianPes::transport`] stay on that set.
+//! [`CartesianPes::new`] is the unconstrained Hessian store
 //! [`crate::InternalPes`] wraps. IRC keeps a separate MW model on
 //! [`crate::irc::IrcSession`].
 

@@ -2,6 +2,10 @@
 #+options: toc:nil num:nil
 
 * Public Rust types
+The API documentation for every public item is on [[https://docs.rs/rgsaddle][docs.rs/rgsaddle]].
+=cargo doc --open= builds the same pages from a checkout, with runnable examples on =BandSession= and =MinModeSession=.
+The table below lists the main types.
+
 | Type                           | Role                                                                                                               |
 |--------------------------------+--------------------------------------------------------------------------------------------------------------------|
 | =BandSession=                  | Outer seam. =new=, =step=, =run=, =restart=, =reset=, =set_positions=, =positions=, =evaluation=                   |

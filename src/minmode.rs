@@ -125,7 +125,7 @@ pub struct MinModeConfig {
     /// ([`DEFAULT_ROTATION_ANGLE_TOL`]; Kästner and Sherwood, J. Chem.
     /// Phys. 128, 014106 (2008), doi:10.1063/1.2815812). Zero disables
     /// the angle test. The classic torque window still applies at the
-    /// stock residual; see [`rotation_finished`].
+    /// stock residual; see `rotation_finished`.
     pub rotation_angle_tol: f64,
     pub max_rotations: usize,
     /// Krylov dimension for [`MinModeKind::Lanczos`].
@@ -1002,6 +1002,38 @@ struct CappedFireStep {
 }
 
 /// Stepping minimum-mode saddle search.
+///
+/// # Examples
+///
+/// A dimer search on the double well V = (x² − 1)² + 2y² + 2z². The
+/// start lies off the saddle at the origin, with a guess for the mode
+/// that is not the true lowest mode along x.
+///
+/// ```
+/// use ndarray::{Array1, ArrayView1, array};
+/// use rgsaddle::{MinModeConfig, MinModeSession, MinModeStatus, PointSurface, SaddleError};
+///
+/// struct DoubleWell;
+///
+/// impl PointSurface for DoubleWell {
+///     fn eval(&self, r: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+///         let (x, y, z) = (r[0], r[1], r[2]);
+///         let energy = (x * x - 1.0).powi(2) + 2.0 * y * y + 2.0 * z * z;
+///         Ok((energy, array![4.0 * x * (x * x - 1.0), 4.0 * y, 4.0 * z]))
+///     }
+/// }
+///
+/// let start = array![0.3, 0.1, 0.0];
+/// let guess = array![1.0, 0.5, 0.0];
+/// let mut session = MinModeSession::new(MinModeConfig::default(), start, guess)?;
+/// let report = session.run(&DoubleWell, 200)?;
+///
+/// assert_eq!(report.status, MinModeStatus::Converged);
+/// assert!(report.curvature < 0.0);
+/// assert!(session.position().iter().all(|c| c.abs() < 1e-3));
+/// assert!(session.mode()[0].abs() > 0.99);
+/// # Ok::<(), SaddleError>(())
+/// ```
 pub struct MinModeSession {
     config: MinModeConfig,
     force_gate: ForceGate,

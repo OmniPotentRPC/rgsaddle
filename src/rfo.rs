@@ -62,7 +62,7 @@ impl RationalFunctionOptimization {
         rfo_get_s(h, g, self.order, alpha)
     }
 
-    /// Trust-region companion: \(\|s\|\le\delta\), alpha bisected in \([0,1]\).
+    /// Trust-region companion: \(\|s\|\le\delta\), alpha bisected in \(\[0,1\]\).
     pub fn restricted(&self, h: &Array2<f64>, g: &Array1<f64>, delta: f64) -> Array1<f64> {
         rfo_restricted(h, g, self.order, delta)
     }

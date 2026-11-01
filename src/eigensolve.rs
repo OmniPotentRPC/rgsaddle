@@ -103,7 +103,7 @@ const DENSE_JACOBI_LIMIT: usize = 128;
 /// Sella `exact`: dense symmetric eigen of `a`.
 ///
 /// Eigenvalues come back in nondecreasing order. Dimension
-/// [`DENSE_JACOBI_LIMIT`] and below uses cyclic Jacobi. A larger
+/// `DENSE_JACOBI_LIMIT` (128) and below uses cyclic Jacobi. A larger
 /// matrix uses faer's self-adjoint eigensolver. The Kani build leaves
 /// that feature off and panics if a block above the Jacobi limit is
 /// reached; those harnesses return before a Sella session.

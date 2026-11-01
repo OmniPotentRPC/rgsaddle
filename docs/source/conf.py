@@ -43,6 +43,7 @@ html_theme_options = {
         {"title": "How-to", "url": "howto"},
         {"title": "Reference", "url": "reference"},
         {"title": "Explanation", "url": "explanation"},
+        {"title": "API", "url": "https://docs.rs/rgsaddle", "external": True},
         {"title": "Search", "url": "search"},
     ],
 }

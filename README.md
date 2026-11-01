@@ -1,7 +1,17 @@
 # rgsaddle
 
-Band and minimum-mode saddle mechanics over
-[rgmin](https://github.com/OmniPotentRPC/rgmin) steppers.
+rgsaddle finds saddle points on a potential energy surface, the transition states between two minima.
+It is a Rust library with a C interface and a Python package, and its main searches are:
+
+- a nudged elastic band (NEB) between two endpoints, with a climbing image;
+- a minimum-mode search from one point, by the dimer method or by Lanczos iteration;
+- an index-1 search on a dense Hessian by restricted-step partitioned rational function optimization (RFO).
+
+By default the band also refines its climbing image along the lowest curvature mode.
+That is the off-path climbing image NEB (OCI-NEB) of [Goswami, Gunde, and Jónsson (2026)](https://doi.org/10.3389/fchem.2026.1807063).
+Each session takes one step of an [rgmin](https://github.com/OmniPotentRPC/rgmin) optimizer and reports.
+The optimizer is the fast inertial relaxation engine (FIRE) by default, or limited-memory Broyden-Fletcher-Goldfarb-Shanno (L-BFGS).
+The host program owns the loop.
 
 Docs: <https://omnipotentrpc.github.io/rgsaddle/>
 
@@ -10,6 +20,82 @@ The [contributing page][contributing] lists prerequisites, contact and acknowled
 
 [contributing]: https://omnipotentrpc.github.io/rgsaddle/contributing/index.html
 
+
+## Install
+
+```sh
+cargo add rgsaddle
+```
+
+The [Python](#python) section below installs the Python package.
+The [C interface guide](https://omnipotentrpc.github.io/rgsaddle/howto/c-abi.html) covers the C library.
+
+## Example
+
+This program relaxes a band of nine images on the double well V = (x² − 1)² + 2y² + 2z².
+The surface has minima at (±1, 0, 0) and its saddle at the origin.
+It needs `cargo add rgsaddle ndarray@0.17`.
+
+```rust
+use ndarray::{Array1, Array2, ArrayView2};
+use rgsaddle::{BandConfig, BandSession, BandStatus, BandSurface, SaddleError};
+
+/// V = (x² − 1)² + 2y² + 2z²: minima at (±1, 0, 0), saddle at the origin.
+struct DoubleWell;
+
+impl BandSurface for DoubleWell {
+    fn eval(
+        &self,
+        positions: ArrayView2<f64>,
+        energies: &mut Array1<f64>,
+        gradients: &mut Array2<f64>,
+    ) -> Result<(), SaddleError> {
+        for (i, r) in positions.outer_iter().enumerate() {
+            let (x, y, z) = (r[0], r[1], r[2]);
+            energies[i] = (x * x - 1.0).powi(2) + 2.0 * y * y + 2.0 * z * z;
+            gradients[(i, 0)] = 4.0 * x * (x * x - 1.0);
+            gradients[(i, 1)] = 4.0 * y;
+            gradients[(i, 2)] = 4.0 * z;
+        }
+        Ok(())
+    }
+}
+
+fn main() -> Result<(), SaddleError> {
+    // Nine images from (-1, 0, 0) to (1, 0, 0), bowed off the axis in y.
+    let initial = Array2::from_shape_fn((9, 3), |(i, k)| {
+        let t = i as f64 / 8.0;
+        [2.0 * t - 1.0, 0.3 * (std::f64::consts::PI * t).sin(), 0.0][k]
+    });
+    let config = BandConfig { force_tol: 1e-3, max_move: 0.1, ..BandConfig::default() };
+    let mut session = BandSession::new(config, initial)?;
+    let mut report = session.step(&DoubleWell)?;
+    while report.status == BandStatus::Running {
+        report = session.step(&DoubleWell)?;
+    }
+    let ci = report.ci_index.expect("a climbing image");
+    let saddle = session.positions().row(ci).to_owned();
+    println!("{:?} after {} steps, max force {:.1e}", report.status, report.iteration, report.max_force);
+    println!("climbing image {ci} at ({:.4}, {:.4}, {:.4})", saddle[0], saddle[1], saddle[2]);
+    Ok(())
+}
+```
+
+With rgsaddle 0.3.2 from crates.io, `cargo run` prints:
+
+```text
+Converged after 8 steps, max force 2.8e-4
+climbing image 4 at (0.0000, 0.0001, 0.0000)
+```
+
+## Learn more
+
+- [Getting started](https://omnipotentrpc.github.io/rgsaddle/getting-started.html) builds a band and steps it from a host loop.
+- [The tutorial](https://omnipotentrpc.github.io/rgsaddle/tutorials/quickstart.html) follows the intrinsic reaction coordinate (IRC) down from a first-order saddle.
+- [How-to guides](https://omnipotentrpc.github.io/rgsaddle/howto.html) cover AutoNEB, the minimum-mode search, the C interface and Python.
+- [The API documentation](https://docs.rs/rgsaddle) on docs.rs lists every public item.
+
+## Design notes
 
 The band and the minimum-mode search take one `rgmin` `Solver` step
 on a force this crate assembled. `BandSession::step` assembles the
@@ -66,7 +152,11 @@ the test). A non-negative curvature takes one full per-atom `max_move`
 along the mode, and a mode turn inside 45 degrees keeps the translator
 memory. Both sessions refuse line-searched methods: the
 oracle value beside a projected or inverted force is not its
-potential. `validation/` holds the sympy and sollya
+potential.
+
+## Validation
+
+`validation/` has the sympy and sollya
 checks of the rotation formulas, the Lanczos residual bound, and the
 finite-difference curvature error terms
 (`uv run --no-project --with sympy python validation/<script>.py`,
@@ -79,7 +169,7 @@ through `rgsaddle_band_create_solid`.
 ## Python
 
 The package is a nanobind extension. `import rgsaddle` does not import
-ASE.
+the Atomic Simulation Environment (ASE).
 
 ```
 pip install .
