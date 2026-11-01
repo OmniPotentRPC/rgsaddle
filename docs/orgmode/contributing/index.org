@@ -1,15 +1,71 @@
 #+TITLE: Contributing
 #+OPTIONS: toc:nil num:nil
 
-Build and test a pinned checkout with its Cargo lockfile. The C and C++ smoke tests require the C ABI library as well as the test executables.
+* System prerequisites
+- Rust 1.88 or newer (the ~rust-version~ in ~Cargo.toml~) with clippy and rustfmt.
+- A C compiler, and a C++ compiler with C++17 support and its standard library headers.
+  The C and C++ smoke tests call ~cc~ and ~c++~, or the compilers named by ~CC~ and ~CXX~.
+  The CMake builds below use the same compilers.
+  If Clang cannot find ~cstddef~, set ~CXX=g++~.
+  Or install the libstdc++ development package for the GNU Compiler Collection (GCC) version that Clang selects.
+- GNU m4, which the GNU Multiple Precision Arithmetic Library (GMP) build behind the ~verify~ feature needs.
+  On Debian and Ubuntu install the ~m4~ package.
+- CMake, which the ~chemfiles~ and ~highs~ features use to build native libraries.
+  CMake 4 needs ~CMAKE_POLICY_VERSION_MINIMUM=3.5~ for the chemfiles build.
+  @@rst::doc:`Read a molecular frame </howto/io>`@@ uses the same setting.
+
+* Build and test
+Build and test a pinned checkout with its Cargo lockfile.
+The C and C++ smoke tests require the C ABI library as well as the test executables.
 
 #+begin_src sh
 cargo build --locked --features capi
 cargo test --locked --features capi
-cargo clippy --locked --all-targets --all-features -- -D warnings
+CMAKE_POLICY_VERSION_MINIMUM=3.5 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo fmt --check
 #+end_src
 
-Optional features are checked with their dependencies enabled. The ~faer~ feature is part of the default set. It is the dense self-adjoint spectrum used by connect and SQNM. The Kani workflow's prove step builds with ~--no-default-features --features capi~ so that job does not compile ~pulp~. The ~kani-github-action~ default command is a bare ~cargo-kani~, which would enable ~faer~; the workflow overrides that command and does not pass ~--ignore-global-asm~. Build the Python package with scikit-build-core (=pip install .=) and run ~tests/python~ against the installed package. The algebra and interval checks live in ~validation~ and ~tests/symbolic~; the Lean libraries live in ~formal~.
+Optional features are checked with their dependencies enabled.
+The ~faer~ feature is part of the default set.
+It is the dense self-adjoint spectrum used by connect and SQNM.
+The Kani workflow's prove step builds with ~--no-default-features --features capi~ so that job does not compile ~pulp~.
+The ~kani-github-action~ default command is a bare ~cargo-kani~, which would enable ~faer~.
+The workflow overrides that command and does not pass ~--ignore-global-asm~.
+Build the Python package with scikit-build-core (=pip install .=) and run ~tests/python~ against the installed package.
+The algebra and interval checks live in ~validation~ and ~tests/symbolic~; the Lean libraries live in ~formal~.
 
-Narrative additions use the Org sources under ~docs/orgmode~ and matching reStructuredText files under ~docs/source~. ~docs/export.el~ exports the nested guides and changelog. Sphinx reads the generated tree. Retain numerical assertions and record the source, dependency and library revisions with performance results.
+* Documentation
+Narrative pages are the Org sources under ~docs/orgmode~.
+~docs/export.el~ writes a reStructuredText file under ~docs/source~ for each of them.
+Git ignores those files, so edit the Org source and do not add the generated files.
+Build the site as the docs workflow does:
+
+#+begin_src sh
+emacs --batch -l docs/export.el
+python -m pip install -r docs/requirements.txt
+sphinx-build -b html -n docs/source docs/build
+#+end_src
+
+Retain numerical assertions and record the source, dependency and library revisions with performance results.
+
+* Contact
+Report bugs, ask questions and propose changes on the issue tracker at https://github.com/OmniPotentRPC/rgsaddle/issues.
+The maintainer is Rohit Goswami (rgoswami@ieee.org), the author listed in ~Cargo.toml~ and ~pyproject.toml~.
+
+* Acknowledgments
+The nudged elastic band (NEB) force assembly is ported from eOn @@rst::cite:`eon2901`@@.
+The tangents, springs, projections and climbing-image force keep eOn's branch structure.
+They come from eOn's ~NEBTangent~, ~NEBSpringForce~ and ~NEBForceProjection~.
+
+Other parts follow existing codes.
+AutoNEB follows the window and spring rescaling of the AutoNEB in the Atomic Simulation Environment (ASE).
+The Sella sessions follow the optimizer, constraints and eigensolvers of Sella.
+~nichols_step~ and the Powell update follow i-PI under the MIT option of its licence.
+
+The crate builds on rgmin for its steppers and on linkcell for cutoff neighbour walks.
+ndarray, faer and rayon supply arrays, dense linear algebra and threads.
+The optional features read structure files with readcon-core and chemfiles.
+readcon-db stores traces and restarts.
+The ~verify~ checks use rug, which binds GMP and the GNU Multiple Precision Floating-Point Reliable (MPFR) library.
+The Python package is built with nanobind, scikit-build-core and Corrosion.
+Its ~rgsaddle.ase~ module uses ASE.
