@@ -772,6 +772,12 @@ mod irc_abi_tests {
         };
         let session = unsafe { rgsaddle_sella_saddle_create(&cfg, 2, x.as_ptr(), masses.as_ptr()) };
         assert!(!session.is_null());
+        // The saddle is about 0.22 (sqrt 0.05) from the start, past the 0.1
+        // atom ceiling, and one step has to reach it.
+        assert_eq!(
+            unsafe { rgsaddle_sella_saddle_set_small_system_atom_ceiling(session, 0) },
+            RGSADDLE_OK
+        );
         assert_eq!(
             unsafe { rgsaddle_sella_saddle_seed_mode(session, mode.as_ptr(), -1.0) },
             RGSADDLE_OK

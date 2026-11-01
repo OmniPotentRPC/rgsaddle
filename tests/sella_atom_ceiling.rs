@@ -148,3 +148,13 @@ fn without_iterative_diagonalization_the_ceiling_changes_nothing() {
     let on = walk(config(), 4, Some(true), 6);
     assert_eq!(on.bits, off.bits);
 }
+
+#[test]
+fn default_small_search_takes_the_ceiling() {
+    assert!(SellaSaddleConfig::default().small_system_atom_ceiling);
+    let default = walk(SellaSaddleConfig::default(), 4, None, 8);
+    let on = walk(SellaSaddleConfig::default(), 4, Some(true), 8);
+    let off = walk(SellaSaddleConfig::default(), 4, Some(false), 8);
+    assert_eq!(default.bits, on.bits);
+    assert_ne!(default.bits, off.bits);
+}

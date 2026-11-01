@@ -12,7 +12,9 @@
   They apply to a Cartesian saddle search whose Euclidean radius ~delta * n_free~ starts at one distance unit or less.
   The bound starts at the first step, as in Sella's restricted atomic step.
   The ceiling is ~max(delta, 0.1)~, never more than that starting radius, and moves with the trust ratio.
-  The option is off by default.
+  The option is on by default, so such a search steps differently from 0.3.2 through Rust or C.
+  Set it false, or call ~rgsaddle_sella_saddle_set_small_system_atom_ceiling~ with 0, for the previous step.
+  On the 25 Baker transition-state starts it adds ~15_hocl~ and makes no converged start take more evaluations.
   A struct literal that lists every field of ~SellaSaddleConfig~ now lists this one too.
   It can also end in ~..SellaSaddleConfig::default()~ instead.
 - C application binary interface (ABI) minor 24 adds ~rgsaddle_sella_saddle_set_symmetrized_ritz~.

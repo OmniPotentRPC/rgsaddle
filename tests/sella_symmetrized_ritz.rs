@@ -54,7 +54,10 @@ fn start() -> Array1<f64> {
 fn walk(symmetrized: Option<bool>) -> (Vec<usize>, Array1<f64>) {
     let surface = Skewed::new();
     let mut session = SellaSaddleSession::new(
-        SellaSaddleConfig::default(),
+        SellaSaddleConfig {
+            small_system_atom_ceiling: false,
+            ..SellaSaddleConfig::default()
+        },
         start(),
         Array1::from_elem(N_ATOMS, 1.0),
     )
@@ -71,8 +74,8 @@ fn walk(symmetrized: Option<bool>) -> (Vec<usize>, Array1<f64>) {
     (per_step, session.position().to_owned())
 }
 
-/// Bits of the four-step walk with the default config, recorded before
-/// the option existed.
+/// Bits of the four-step walk with the default config and the atom
+/// ceiling off, recorded before either option existed.
 const DEFAULT_BITS: [u64; 12] = [
     0xbfff7a56b3b9309e,
     0xbfec29aa047b94bb,
@@ -89,7 +92,7 @@ const DEFAULT_BITS: [u64; 12] = [
 ];
 
 #[test]
-fn default_walk_is_unchanged() {
+fn walk_without_either_option_is_unchanged() {
     assert!(!SellaSaddleConfig::default().symmetrized_ritz);
     for symmetrized in [None, Some(false)] {
         let (per_step, x) = walk(symmetrized);

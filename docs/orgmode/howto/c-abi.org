@@ -28,6 +28,7 @@ The Sella how-to says when the option helps.
 The value 1 makes a Cartesian Sella saddle session bound only its largest atom move from the first step.
 That applies when its Euclidean radius ~delta * n_free~ starts at 1 or less.
 The value 0 keeps that radius alone.
+1 is the default.
 Any other value returns ~RGSADDLE_INVALID_PARAMETER~ and leaves the session unchanged.
 A library below minor 25 does not export the symbol; the Sella how-to describes the ceiling.
 

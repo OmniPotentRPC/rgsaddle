@@ -834,9 +834,9 @@ rgsaddle_status_t rgsaddle_sella_saddle_set_symmetrized_ritz(
  * Cartesian Sella saddle session, from the first step, when its
  * Euclidean radius delta * n_free starts at 1 or less (ten free
  * coordinates or fewer at the default delta), as Sella's restricted
- * atomic step does; 0 keeps the Euclidean radius alone there. Larger
- * searches cap the atom move either way. Other values return
- * RGSADDLE_INVALID_PARAMETER.
+ * atomic step does, and is the default; 0 keeps the Euclidean radius
+ * alone there. Larger searches cap the atom move either way. Other
+ * values return RGSADDLE_INVALID_PARAMETER.
  */
 rgsaddle_status_t rgsaddle_sella_saddle_set_small_system_atom_ceiling(
     RgsaddleSellaSaddle *session, int32_t enabled);

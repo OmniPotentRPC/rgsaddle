@@ -53,7 +53,8 @@ pub struct SellaSaddleConfig {
     /// is `delta0` and is not scaled by the free dimension. The ceiling
     /// is `max(delta, 0.1)`, never above that Euclidean radius, and
     /// moves with rho. Larger searches cap the atom move either way.
-    /// Applies to Cartesian `TrustRegion` sessions with `eig`.
+    /// Applies to Cartesian `TrustRegion` sessions with `eig`. On by
+    /// default; off keeps the Euclidean radius alone for these searches.
     pub small_system_atom_ceiling: bool,
 }
 
@@ -89,7 +90,7 @@ impl Default for SellaSaddleConfig {
             expand: crate::ExpandKind::Jd0,
             restricted: crate::RestrictedKind::TrustRegion,
             symmetrized_ritz: false,
-            small_system_atom_ceiling: false,
+            small_system_atom_ceiling: true,
         }
     }
 }
