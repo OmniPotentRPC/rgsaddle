@@ -125,7 +125,7 @@ pub struct MinModeConfig {
     /// ([`DEFAULT_ROTATION_ANGLE_TOL`]; Kästner and Sherwood, J. Chem.
     /// Phys. 128, 014106 (2008), doi:10.1063/1.2815812). Zero disables
     /// the angle test. The classic torque window still applies at the
-    /// stock residual; see [`rotation_finished`].
+    /// stock residual; see `rotation_finished`.
     pub rotation_angle_tol: f64,
     pub max_rotations: usize,
     /// Krylov dimension for [`MinModeKind::Lanczos`].

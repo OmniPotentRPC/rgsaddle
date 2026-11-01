@@ -1,6 +1,6 @@
 //! Sella `_gpu.py`: optional GPU eigh / QR / project.
 //!
-//! The device waist is an rgmin [`vecops::Vector`] tagged with a
+//! The device waist is an rgmin [`rgmin::vecops::Vector`] tagged with a
 //! dlpk CUDA device. This crate does not grow a second GPU stack
 //! (no torch). A CUDA tag without a kernel backend is refused and
 //! the host Jacobi / Gram-Schmidt path runs, matching `_gpu.py`

@@ -34,7 +34,7 @@ pub const SLOPE: f64 = -1.0;
 /// Sella `newton_safe`. QN is Newton-safe on \(\|s(\alpha)\|\).
 pub const NEWTON_SAFE: bool = true;
 
-/// Names [`matches`] accepts. Sella `QuasiNewton.synonyms`.
+/// Names [`matches()`] accepts. Sella `QuasiNewton.synonyms`.
 pub const SYNONYMS: &[&str] = &[
     "qn",
     "quasi-newton",
