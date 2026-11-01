@@ -98,7 +98,7 @@ impl ApplyHessian for DenseApply<'_> {
 /// The LJ38 free block is 108, so that search keeps the Jacobi
 /// spectrum. A larger block, including a Pt island free block of 525,
 /// uses [`faer_eigh`] when the `faer` feature is on.
-const DENSE_JACOBI_LIMIT: usize = 128;
+pub(crate) const DENSE_JACOBI_LIMIT: usize = 128;
 
 /// Sella `exact`: dense symmetric eigen of `a`.
 ///

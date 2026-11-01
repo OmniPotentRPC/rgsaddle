@@ -6,6 +6,8 @@
 ~new~ accepts a molecular Cartesian packing and atom masses. ~new_euclidean~ accepts an arbitrary nonzero dimension with unit coordinate weights. ~from_surface~ estimates the launch mode through Hessian actions; a host with a measured mode can pass it to ~new~.
 
 ~set_direction~ restores the saddle and reverses the launch. ~reset~ clears the approximation at a surface change. The GS2 step rejects an energy increase above its specified numerical threshold and reduces the radius.
+Each later step without a rejection doubles the radius back up to the requested one.
+~set_direction~ starts each branch at the requested radius.
 
 Step until the report sets ~at_minimum~.
 A GS2 report sets it once the step is past the kick and the largest force is at or below ~force_tol~.
@@ -29,7 +31,7 @@ test pt_adatom_point_beside_the_saddle_is_not_a_minimum ... ok
 test lj13_reverse_branch_under_the_force_threshold_reports_a_minimum ... ok
 test lj13_branches_under_the_force_threshold_report_a_minimum ... ok
 
-test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.54s
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.72s
 #+end_example
 
 Select ~L2Norm~ or ~LinfNorm~ for a generic vector packing. ~MaxForceOnAtom~ groups Cartesian triples. The C interface exposes construction, stepping, position access, direction changes, reset and destruction; ~tests/c/irc_abi.c~ exercises both directions and both IRC methods.
