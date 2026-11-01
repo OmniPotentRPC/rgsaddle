@@ -1,6 +1,6 @@
 """Rotation counts of three dimer rotation schemes on an exact quadratic.
 
-Run: uv run --with numpy python validation/dimer_rotation_rate.py
+Run: uv run --no-project --with numpy python validation/dimer_rotation_rate.py
 
 H = diag(-1, 0.5, 1, 2, 4, 8), so the Hessian action is exact and only
 the rotation scheme differs. Each rotation costs one gradient in every

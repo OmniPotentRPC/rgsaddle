@@ -1,6 +1,6 @@
 """Error terms of the finite-difference curvature in src/minmode.rs.
 
-Run: uv run --with sympy python validation/fd_curvature.py
+Run: uv run --no-project --with sympy python validation/fd_curvature.py
 
 The dimer and the Lanczos actions estimate H v from gradients. With
 g(x + d v) = g + d H v + d^2/2 T[v,v] + d^3/6 Q[v,v,v] + O(d^4):

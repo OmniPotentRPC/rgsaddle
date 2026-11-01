@@ -1,6 +1,6 @@
 """The switched min-mode force on a quadratic model.
 
-Run: uv run --with sympy python validation/minmode_switch.py
+Run: uv run --no-project --with sympy python validation/minmode_switch.py
 
 `translated_gradient` in src/minmode.rs hands the translation solver
 

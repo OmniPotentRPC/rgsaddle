@@ -1,6 +1,6 @@
 """Exact normalization and reflection identities for host mode seeds.
 
-Run: uv run --with sympy python validation/mode_normalization.py
+Run: uv run --no-project --with sympy python validation/mode_normalization.py
 The square norm is positive. Floating-point bounds have their own check
 in mode_normalization.sollya; Rust and C tests exercise the entry points.
 """

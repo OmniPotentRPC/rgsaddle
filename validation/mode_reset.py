@@ -1,6 +1,6 @@
 """How far the inverted-force operator moves when the mode turns.
 
-Run: uv run --with sympy python validation/mode_reset.py
+Run: uv run --no-project --with sympy python validation/mode_reset.py
 
 The min-mode translation steps on R g with R = I - 2 tau tau'. When the
 mode turns by theta inside the plane of tau and a unit u orthogonal to

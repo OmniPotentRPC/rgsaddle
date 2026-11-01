@@ -15,7 +15,7 @@ $ cargo test --features capi --test formal_mirror
 The MPFR comparison is a separate feature so a default build does not link GMP.
 
 #+begin_src console
-$ cargo test --features capi,verify --test differential
+$ cargo test --features capi,verify --lib differential -- --nocapture
 #+end_src
 
 That test asserts only the dot-product bound in Higham, Accuracy and Stability of Numerical Algorithms, 2nd ed., SIAM, 2002, doi:10.1137/1.9780898718027, Section 3.1. It prints the largest ULP it saw.

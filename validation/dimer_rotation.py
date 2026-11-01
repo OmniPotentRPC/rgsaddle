@@ -1,6 +1,6 @@
 """Symbolic checks for the modified Newton dimer rotation in src/minmode.rs.
 
-Run: uv run --with sympy python validation/dimer_rotation.py
+Run: uv run --no-project --with sympy python validation/dimer_rotation.py
 
 On a quadratic surface g(x) = g0 + H (x - x0), the dimer gradient at
 x0 + dr n(phi), n(phi) = n cos(phi) + theta sin(phi), and the curvature

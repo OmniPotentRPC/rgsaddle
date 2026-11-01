@@ -1,6 +1,6 @@
 """The Ritz residual bound behind the Lanczos exit in src/minmode.rs.
 
-Run: uv run --with sympy python validation/lanczos_residual.py
+Run: uv run --no-project --with sympy python validation/lanczos_residual.py
 
 After j + 1 Lanczos steps, A Q_j = Q_j T_j + beta_j q_{j+1} e_j^T. For a
 Ritz pair (theta, s) of T_j and y = Q_j s,

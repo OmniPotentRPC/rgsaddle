@@ -23,7 +23,7 @@
 | =restricted_prfo_displacement= | Baker restricted-step partitioned RFO from =H= and =g=                                                             |
 | =Cell=                         | 3×3 lattice (rows are vectors), fractional minimum-image wrap                                                      |
 | =SaddleError=                  | Shape, surface, non-finite, solver, ABI                                                                            |
-| =Stencil=                      | Point builder. Dimer and Lanczos wrap =MinModeSession=. Band presets return the zoom seam. See [[file:explanation/one-stencil.org][one stencil]] |
+| =Stencil=                      | Point builder. Dimer and Lanczos wrap =MinModeSession=. Band presets return the zoom seam. See @@rst::doc:`one stencil <explanation/one-stencil>`@@ |
 | =Chain=                        | Positions, ids, and roles. =evaluate= uses a fixed block of one image. =Mesh= remeshes, inserts, or windows with no force call |
 | =Preset=                       | =Min=, =Dimer=, =Lanczos=, =Art=, =EigenFollow=, and the named band presets                                         |
 | =ConnectConfig=                | IDPP Lanczos climb and the COMPASS fallback. =optbench= sets the LJ38 force tolerance, eight Lanczos actions, relative tolerance 0.05, and quenched split nodes |
