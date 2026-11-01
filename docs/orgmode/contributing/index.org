@@ -47,3 +47,25 @@ sphinx-build -b html -n docs/source docs/build
 #+end_src
 
 Retain numerical assertions and record the source, dependency and library revisions with performance results.
+
+* Contact
+Report bugs, ask questions and propose changes on the issue tracker at https://github.com/OmniPotentRPC/rgsaddle/issues.
+The maintainer is Rohit Goswami (rgoswami@ieee.org), the author listed in ~Cargo.toml~ and ~pyproject.toml~.
+
+* Acknowledgments
+The nudged elastic band (NEB) force assembly is ported from eOn @@rst::cite:`eon2901`@@.
+The tangents, springs, projections and climbing-image force keep eOn's branch structure.
+They come from eOn's ~NEBTangent~, ~NEBSpringForce~ and ~NEBForceProjection~.
+
+Other parts follow existing codes.
+AutoNEB follows the window and spring rescaling of the AutoNEB in the Atomic Simulation Environment (ASE).
+The Sella sessions follow the optimizer, constraints and eigensolvers of Sella.
+~nichols_step~ and the Powell update follow i-PI under the MIT option of its licence.
+
+The crate builds on rgmin for its steppers and on linkcell for cutoff neighbour walks.
+ndarray, faer and rayon supply arrays, dense linear algebra and threads.
+The optional features read structure files with readcon-core and chemfiles.
+readcon-db stores traces and restarts.
+The ~verify~ checks use rug, which binds GMP and the GNU Multiple Precision Floating-Point Reliable (MPFR) library.
+The Python package is built with nanobind, scikit-build-core and Corrosion.
+Its ~rgsaddle.ase~ module uses ASE.

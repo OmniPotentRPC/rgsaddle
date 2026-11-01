@@ -5,6 +5,11 @@ Band and minimum-mode saddle mechanics over
 
 Docs: <https://omnipotentrpc.github.io/rgsaddle/>
 
+Issues and questions: <https://github.com/OmniPotentRPC/rgsaddle/issues>.
+The [contributing page][contributing] lists prerequisites, contact and acknowledgments.
+
+[contributing]: https://omnipotentrpc.github.io/rgsaddle/contributing/index.html
+
 
 The band and the minimum-mode search take one `rgmin` `Solver` step
 on a force this crate assembled. `BandSession::step` assembles the
