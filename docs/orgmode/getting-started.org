@@ -1,5 +1,5 @@
 #+title: Getting started
-#+options: toc:nil num:nil
+#+options: toc:nil num:nil author:nil
 
 A host builds a band, steps until the projected force is under =force_tol=, and never lets this crate own the loop.
 
@@ -12,41 +12,42 @@ ndarray = "0.17"
 #+end_src
 
 * 2. Implement =BandSurface=
-One eval fills energies and gradients for the rows it receives: the whole band on the first call, the interior images afterwards (the endpoints never move, so their energies are cached). The double-well test surface is the shortest honest example:
+One eval fills energies and gradients for the rows it receives: the whole band on the first call, the interior images afterwards (the endpoints never move, so their energies are cached).
+The double well \(V = (x^2 - 1)^2 + 2y^2 + 2z^2\) has minima at \((\pm 1, 0, 0)\) and a saddle at the origin with energy 1:
 
-#+begin_src rust
-impl BandSurface for DoubleWell {
-    fn eval(
-        &self,
-        positions: ArrayView2<f64>,
-        energies: &mut Array1<f64>,
-        gradients: &mut Array2<f64>,
-    ) -> Result<(), SaddleError> {
-        // V = (x² − 1)² + 2y² + 2z²
-        Ok(())
-    }
-}
-#+end_src
+#+INCLUDE: "../../examples/double_well.rs" src rust :lines "12-37"
 
 * 3. Step
-#+begin_src rust
-let config = BandConfig {
-    force_tol: 1e-3,
-    max_move: 0.1,
-    ..BandConfig::default()
-};
-let mut session = BandSession::new(config, initial)?;
-loop {
-    let report = session.step(&surface)?;
-    if report.status == BandStatus::Converged {
-        break;
-    }
-}
+Nine images run from one minimum to the other, bowed off the path so the band has work to do.
+The host calls =step= until the band reports =Converged=:
+
+#+INCLUDE: "../../examples/double_well.rs" src rust :lines "39-61"
+
+Default stepper is FIRE, as in eOn's velocity NEB stepper.
+L-BFGS runs under rgmin's =Accept::Step=: the projected band force is not conservative, so a step is taken without an energy test.
+
+* 4. Run it
+The code above is =examples/double_well.rs=.
+From the repository root:
+
+#+begin_src console
+$ cargo run --example double_well
 #+end_src
 
-Default stepper is FIRE, as in eOn's velocity NEB stepper. L-BFGS runs under rgmin's =Accept::Step=: the projected band force is not conservative, so a step is taken without an energy test.
+#+begin_example
+Converged after 8 steps, max force 2.8e-4
+climbing image 4 at (0.0000, 0.0001, 0.0000), energy 1.000000
+#+end_example
 
-* 4. Reset when the surface changes
-=BandSession::reset= is the model-update boundary. Quasi-Newton history taken on one surface epoch must not survive onto the next.
+The climbing image is image 4, the middle of the nine.
+It sits on the saddle at the origin, and its energy is the barrier.
 
-See =tests/double_well.rs= for the numbers the crate actually converges.
+* 5. Reset when the surface changes
+=BandSession::reset= is the model-update boundary.
+Quasi-Newton history taken on one surface epoch must not survive onto the next.
+
+* Next
+#+begin_export rst
+:doc:`tutorials/band` runs the band on the Müller-Brown surface, where the path bends and the saddle is not known in advance, and shows the path and the force calls in figures.
+``tests/double_well.rs`` holds the numbers the crate converges in its tests.
+#+end_export

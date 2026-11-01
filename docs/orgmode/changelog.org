@@ -3,6 +3,9 @@
 
 * Unreleased
 
+- A tutorial, ~tutorials/band~, finds the Müller-Brown saddle between minima A and B with CI-NEB and with the default OCI-NEB refinement. ~examples/muller_brown_band.rs~ is the run and ~docs/source/figures/band-tutorial/plot.py~ draws its figures. Library behaviour is unchanged.
+- Getting started includes ~examples/double_well.rs~, a band on the double well that runs and prints its saddle, and links to the band tutorial.
+  Its surface was a comment before.
 - Builds on rgmin 0.5.2 from crates.io. ~Control~ carries ~ftol_rel~ and ~noise_floor~; the band, minimum-mode, stencil, IDPP, and IRC solvers fill those fields from ~Control::default()~, which is the 0.5.1 behaviour (no relative energy slack, no noise-floor stop). The golden stencil and band hashes are unchanged.
 
 * 0.3.2 (2026-10-25)

@@ -62,6 +62,7 @@ while report.status != BandStatus::Converged {
    :maxdepth: 1
    :caption: Session guides
 
+   tutorials/band
    tutorials/quickstart
    howto/band
    howto/autoneb
