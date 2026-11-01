@@ -42,6 +42,10 @@ pub struct SellaSaddleConfig {
     /// Restricted step: TrustRegion, RestrictedAtomicStep (Cartesian),
     /// MaxInternalStep (internals). RAS refuses internals.
     pub restricted: crate::RestrictedKind,
+    /// Take the Ritz pairs of each finite-difference diagonalization
+    /// from the symmetrized products its residual test reads, as Sella
+    /// does. Off by default: the mean of `V^T AV` and its transpose.
+    pub symmetrized_ritz: bool,
 }
 
 impl SellaSaddleConfig {
@@ -75,6 +79,7 @@ impl Default for SellaSaddleConfig {
             eigen_device: crate::EigenDevice::Host,
             expand: crate::ExpandKind::Jd0,
             restricted: crate::RestrictedKind::TrustRegion,
+            symmetrized_ritz: false,
         }
     }
 }
@@ -316,6 +321,11 @@ impl SellaSaddleSession {
         self.config.expand = expand;
     }
 
+    /// See [`SellaSaddleConfig::symmetrized_ritz`].
+    pub fn set_symmetrized_ritz(&mut self, on: bool) {
+        self.config.symmetrized_ritz = on;
+    }
+
     /// Restricted increment. RAS clips per-atom Cartesian steps.
     /// MaxInternalStep clips internals. TrustRegion is `||s||`.
     pub fn set_restricted(&mut self, kind: crate::RestrictedKind) {
@@ -471,6 +481,7 @@ impl SellaSaddleSession {
             } else {
                 self.config.order.max(1)
             },
+            self.config.symmetrized_ritz,
         )?;
         if vecs.ncols() == 0 {
             self.hvp_started = true;
