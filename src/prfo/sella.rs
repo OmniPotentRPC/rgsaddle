@@ -18,7 +18,24 @@ use ndarray::{Array1, Array2};
 use rgmin::vecops::{axpy, dot, nrm2};
 use rgmin::{Manifold, prfo_restricted, rfo_get_s};
 
+/// Widest partition that stays on cyclic Jacobi.
+///
+/// At this width and below the step is the [`rgmin::rfo_get_s`] call it
+/// was before, so the small P-RFO fixtures and an index-1 uphill block
+/// keep Jacobi. Any wider partition takes faer, in a test as in a climb:
+/// the LJ38 and Pt-island downhill blocks, and the 59-wide downhill block
+/// behind `secular_root_matches_the_augmented_step_on_a_wide_diagonal`.
+const AUGMENTED_JACOBI_LIMIT: usize = 32;
+
+/// Floor on the last augmented coordinate, matching rgmin `rfo_get_s`.
+const AUGMENTED_DENOM_FLOOR: f64 = 1e-12;
+
 const TRUST_ITERS: usize = 64;
+
+#[cfg(test)]
+thread_local! {
+    static FAER_STEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 /// Sella `TrustRegion` + P-RFO: one alpha search on \(\|s\|\le\delta\).
 ///
@@ -118,7 +135,10 @@ impl PartitionedRationalFunctionOptimization {
     ///
     /// `evals` / `evecs` are the symmetric Hessian spectrum. The first
     /// `order` columns are the uphill block (Sella `Vmax`); the rest
-    /// are the downhill complement (`Vmin`).
+    /// are the downhill complement (`Vmin`). Each block is diagonal, so
+    /// the Banerjee augmented matrix is an arrowhead. A block wider
+    /// than [`AUGMENTED_JACOBI_LIMIT`] asks faer for that one eigenpair.
+    /// A narrower block keeps [`rgmin::rfo_get_s`].
     pub fn get_s(
         &self,
         evals: &Array1<f64>,
@@ -134,12 +154,13 @@ impl PartitionedRationalFunctionOptimization {
         let mut s = Array1::zeros(n);
         if order > 0 {
             let mut gmax = Array1::zeros(order);
-            let mut hmax = Array2::<f64>::zeros((order, order));
+            let mut lam = Array1::zeros(order);
             for i in 0..order {
-                hmax[(i, i)] = evals[i];
+                lam[i] = evals[i];
                 gmax[i] = dot(evecs.column(i), g.view());
             }
-            let smax = rfo_get_s(&hmax, &gmax, order, alpha);
+            // The whole uphill block is maximized: the highest augmented mode.
+            let smax = diagonal_rfo_step(&lam, &gmax, order, alpha);
             for i in 0..order {
                 axpy(smax[i], evecs.column(i), &mut s);
             }
@@ -147,12 +168,12 @@ impl PartitionedRationalFunctionOptimization {
         let nmin = n - order;
         if nmin > 0 {
             let mut gmin = Array1::zeros(nmin);
-            let mut hmin = Array2::<f64>::zeros((nmin, nmin));
+            let mut lam = Array1::zeros(nmin);
             for i in 0..nmin {
-                hmin[(i, i)] = evals[order + i];
+                lam[i] = evals[order + i];
                 gmin[i] = dot(evecs.column(order + i), g.view());
             }
-            let smin = rfo_get_s(&hmin, &gmin, 0, alpha);
+            let smin = diagonal_rfo_step(&lam, &gmin, 0, alpha);
             for i in 0..nmin {
                 axpy(smin[i], evecs.column(order + i), &mut s);
             }
@@ -218,6 +239,96 @@ impl PartitionedRationalFunctionOptimization {
         let v = man.project(x, &s);
         man.transport(x, x_to, &v)
     }
+}
+
+/// One RFO step on a diagonal Hessian block.
+///
+/// Banerjee, Adams, Simons, and Shepard, J. Phys. Chem. 89, 52 (1985),
+/// doi:10.1021/j100247a015, take the displacement from one eigenvector
+/// of the augmented matrix `α [α H, g; gᵀ, 0]`. Baker, J. Comput. Chem.
+/// 7, 385 (1986), doi:10.1002/jcc.540070402, runs that problem once on
+/// the uphill modes and once on the complement. `mode` is the index in
+/// the ascending augmented spectrum: `0` minimizes, and `diag.len()`
+/// maximizes. A wide block is an arrowhead. faer reduces it to
+/// symmetric tridiagonal form and returns that eigenpair. The step is
+/// `α v_i / v_last`, with the same floor on `v_last` as rgmin.
+fn diagonal_rfo_step(diag: &Array1<f64>, g: &Array1<f64>, mode: usize, alpha: f64) -> Array1<f64> {
+    let n = g.len();
+    if n == 0 || diag.len() != n {
+        return Array1::zeros(n);
+    }
+    #[cfg(feature = "faer")]
+    if n > AUGMENTED_JACOBI_LIMIT
+        && let Some(step) = faer_arrowhead_rfo(diag, g, mode, alpha)
+    {
+        #[cfg(test)]
+        FAER_STEPS.with(|count| count.set(count.get() + 1));
+        return step;
+    }
+    let mut h = Array2::<f64>::zeros((n, n));
+    for i in 0..n {
+        h[(i, i)] = diag[i];
+    }
+    rfo_get_s(&h, g, mode, alpha)
+}
+
+/// Lowest or highest eigenpair of a diagonal augmented Hessian.
+///
+/// faer's self-adjoint solver tridiagonalizes the arrowhead and calls
+/// its symmetric tridiagonal eigensolver. `None` if that solve fails,
+/// in which case the caller keeps cyclic Jacobi.
+#[cfg(feature = "faer")]
+fn faer_arrowhead_rfo(
+    diag: &Array1<f64>,
+    g: &Array1<f64>,
+    mode: usize,
+    alpha: f64,
+) -> Option<Array1<f64>> {
+    let n = g.len();
+    let m = n + 1;
+    let alpha = alpha.max(0.0);
+    let mut aug = faer::Mat::<f64>::zeros(m, m);
+    let scale = alpha * alpha;
+    for i in 0..n {
+        aug[(i, i)] = diag[i] * scale;
+        let border = g[i] * alpha;
+        aug[(i, n)] = border;
+        aug[(n, i)] = border;
+    }
+    let par = faer::Par::Seq;
+    let params = faer::Spec::<faer::linalg::evd::SelfAdjointEvdParams, f64>::default();
+    let mut values = faer::diag::Diag::<f64>::zeros(m);
+    let mut vectors = faer::Mat::<f64>::zeros(m, m);
+    let mut buf =
+        faer::dyn_stack::MemBuffer::new(faer::linalg::evd::self_adjoint_evd_scratch::<f64>(
+            m,
+            faer::linalg::evd::ComputeEigenvectors::Yes,
+            par,
+            params,
+        ));
+    faer::linalg::evd::self_adjoint_evd(
+        aug.as_ref(),
+        values.as_mut(),
+        Some(vectors.as_mut()),
+        par,
+        faer::dyn_stack::MemStack::new(&mut buf),
+        params,
+    )
+    .ok()?;
+    let col = mode.min(n);
+    let mut denom = vectors[(n, col)];
+    if denom.abs() < AUGMENTED_DENOM_FLOOR {
+        denom = if denom == 0.0 {
+            AUGMENTED_DENOM_FLOOR
+        } else {
+            denom.signum() * AUGMENTED_DENOM_FLOOR
+        };
+    }
+    let mut step = Array1::zeros(n);
+    for i in 0..n {
+        step[i] = vectors[(i, col)] * alpha / denom;
+    }
+    step.iter().all(|v| v.is_finite()).then_some(step)
 }
 
 /// Sella partitioned rational-function step in an orthonormal eigenbasis.
@@ -758,8 +869,127 @@ mod tests {
         assert!(nrm2((&step - &prfo_get_s(&evals, &evecs, &g, 1, alpha)).view()) < 1e-10);
     }
 
+    /// `f` and the number of augmented blocks it solved with faer.
+    fn count_faer_steps<T>(f: impl FnOnce() -> T) -> (T, usize) {
+        FAER_STEPS.with(|count| count.set(0));
+        let out = f();
+        (out, FAER_STEPS.with(|count| count.get()))
+    }
+
+    /// A non-trivial orthonormal frame, so the partition gradient is not
+    /// the ambient gradient.
+    #[cfg(feature = "faer")]
+    fn rotated_frame(n: usize) -> Array2<f64> {
+        let mut evecs = Array2::<f64>::eye(n);
+        let (c, s) = (0.6, 0.8);
+        for row in 0..n {
+            let a = evecs[(row, 2)];
+            let b = evecs[(row, 5)];
+            evecs[(row, 2)] = c * a - s * b;
+            evecs[(row, 5)] = s * a + c * b;
+        }
+        evecs
+    }
+
+    /// The 35-wide downhill block takes faer, the 1-wide uphill block Jacobi.
+    #[cfg(feature = "faer")]
     #[test]
-    fn secular_root_matches_jacobi_on_a_wide_diagonal() {
+    fn wide_diagonal_partition_matches_jacobi() {
+        let n = 36;
+        let mut evals = Array1::zeros(n);
+        let mut g = Array1::zeros(n);
+        for i in 0..n {
+            evals[i] = -1.2 + 0.17 * i as f64;
+            g[i] = ((i * 13) % 9) as f64 * 0.04 - 0.15;
+        }
+        let evecs = rotated_frame(n);
+        let alpha = 0.6;
+        let (got, faer_steps) = count_faer_steps(|| {
+            PartitionedRationalFunctionOptimization::new(1).get_s(&evals, &evecs, &g, alpha)
+        });
+        assert_eq!(faer_steps, 1, "the downhill block fell back to Jacobi");
+        let mut gmax = Array1::zeros(1);
+        gmax[0] = dot(evecs.column(0), g.view());
+        let mut hmax = Array2::<f64>::zeros((1, 1));
+        hmax[(0, 0)] = evals[0];
+        let smax = rfo_get_s(&hmax, &gmax, 1, alpha);
+        let nmin = n - 1;
+        let mut gmin = Array1::zeros(nmin);
+        let mut hmin = Array2::<f64>::zeros((nmin, nmin));
+        for i in 0..nmin {
+            hmin[(i, i)] = evals[i + 1];
+            gmin[i] = dot(evecs.column(i + 1), g.view());
+        }
+        let smin = rfo_get_s(&hmin, &gmin, 0, alpha);
+        let mut expect = Array1::zeros(n);
+        axpy(smax[0], evecs.column(0), &mut expect);
+        for i in 0..nmin {
+            axpy(smin[i], evecs.column(i + 1), &mut expect);
+        }
+        let err = nrm2((&got - &expect).view());
+        assert!(err < 1e-10, "faer left Jacobi by {err}");
+    }
+
+    /// The whole 40-wide space is the uphill block, so faer returns the
+    /// highest augmented eigenpair.
+    ///
+    /// The step `s_i = α v_i / v_last` of an eigenvalue `α² λ` of
+    /// `[α² D, α g; α gᵀ, 0]` is `g_i / (λ - d_i)`, and `λ` solves
+    /// `Σ g_i² / (λ - d_i) = α² λ`. Choosing `g_i² = c w_i (λ - d_i)`
+    /// with `c = α² λ / Σ w` makes a chosen `λ` above every `d_i` the
+    /// root. The secular function decreases on `(max d, ∞)`, so it is the
+    /// only root there and the highest eigenvalue.
+    #[cfg(feature = "faer")]
+    #[test]
+    fn wide_uphill_partition_takes_the_highest_eigenpair() {
+        let n = 40;
+        let alpha = 0.6;
+        let lambda = 3.5;
+        let mut evals = Array1::zeros(n);
+        let mut weights = Array1::zeros(n);
+        for i in 0..n {
+            evals[i] = -1.6 + 0.07 * i as f64;
+            weights[i] = 1.0 + ((i * 7) % 5) as f64;
+        }
+        let c = alpha * alpha * lambda / weights.sum();
+        let mut gblock = Array1::zeros(n);
+        for i in 0..n {
+            let sign = if i % 3 == 0 { -1.0 } else { 1.0 };
+            gblock[i] = sign * (c * weights[i] * (lambda - evals[i])).sqrt();
+        }
+        let evecs = rotated_frame(n);
+        let mut g = Array1::zeros(n);
+        for i in 0..n {
+            axpy(gblock[i], evecs.column(i), &mut g);
+        }
+        let (got, faer_steps) = count_faer_steps(|| {
+            PartitionedRationalFunctionOptimization::new(n).get_s(&evals, &evecs, &g, alpha)
+        });
+        assert_eq!(faer_steps, 1, "the uphill block fell back to Jacobi");
+        let mut gmax = Array1::zeros(n);
+        let mut hmax = Array2::<f64>::zeros((n, n));
+        for i in 0..n {
+            hmax[(i, i)] = evals[i];
+            gmax[i] = dot(evecs.column(i), g.view());
+        }
+        let smax = rfo_get_s(&hmax, &gmax, n, alpha);
+        let mut jacobi = Array1::zeros(n);
+        let mut analytic = Array1::zeros(n);
+        for i in 0..n {
+            axpy(smax[i], evecs.column(i), &mut jacobi);
+            let step = gblock[i] / (lambda - evals[i]);
+            axpy(step, evecs.column(i), &mut analytic);
+        }
+        let err = nrm2((&got - &jacobi).view());
+        assert!(err < 1e-10, "faer left Jacobi by {err}");
+        let err = nrm2((&got - &analytic).view());
+        assert!(err < 1e-10, "faer left the analytic eigenpair by {err}");
+    }
+
+    /// With faer, the reference's 59-wide downhill block is faer's solve.
+    /// Without it, that block is Jacobi.
+    #[test]
+    fn secular_root_matches_the_augmented_step_on_a_wide_diagonal() {
         let n = 60;
         let mut evals = Array1::zeros(n);
         let mut g = Array1::zeros(n);
@@ -771,9 +1001,10 @@ mod tests {
         g[0] = 0.35;
         let evecs = Array2::<f64>::eye(n);
         let (secular, _) = prfo_step_and_derivative(&evals, &evecs, &g, 1, 0.7);
-        let jacobi = prfo_get_s(&evals, &evecs, &g, 1, 0.7);
-        let err = nrm2((&secular - &jacobi).view());
-        assert!(err < 1e-8, "secular left Jacobi by {err}");
+        let (augmented, faer_steps) = count_faer_steps(|| prfo_get_s(&evals, &evecs, &g, 1, 0.7));
+        assert_eq!(faer_steps, usize::from(cfg!(feature = "faer")));
+        let err = nrm2((&secular - &augmented).view());
+        assert!(err < 1e-8, "secular left the augmented step by {err}");
     }
 
     #[test]
