@@ -17,6 +17,40 @@
   ~tests/climbing_endpoint.rs~ is that case on an analytic valley.
   Before this change its image 3 climbs and the band is still running after 200 steps.
 - Builds on rgmin 0.5.2 from crates.io. ~Control~ carries ~ftol_rel~ and ~noise_floor~; the band, minimum-mode, stencil, IDPP, and IRC solvers fill those fields from ~Control::default()~, which is the 0.5.1 behaviour (no relative energy slack, no noise-floor stop). The golden stencil and band hashes are unchanged.
+- A branch of the intrinsic reaction coordinate (IRC) under the second-order step of Gonzalez and Schlegel (GS2) now stops on its force and its curvature.
+  The curvature is along the launch mode, and the sphere radius no longer enters.
+  An energy rise halves the radius down to 1e-4.
+  The old report also asked for an interior last trial and an arc past eight radii.
+  So a branch already at or below ~force_tol~ could run on, and a halved radius let a point beside the saddle pass.
+  ~at_minimum~ now needs a step past the kick and the force at or below ~force_tol~.
+  It also needs positive curvature along the launch mode, from one finite-difference Hessian action at that point.
+  The reversal test inside the step uses the same check.
+  ~tests/irc_termination.rs~ follows both branches from two saddles as eOn refines them.
+  These are the 13-atom Lennard-Jones cluster (LJ13) of eOn's ~neb_lj13~ data and the Morse Pt adatom of eOn's systems tutorial.
+  On the Pt adatom at radius 0.1 and ~force_tol~ 0.05, the forward branch stopped after 6 steps and 11 surface calls.
+  That point was 1.0717 step lengths from the saddle, at force 0.011286 and lowest curvature -1.0123.
+  It now runs 849 steps and 1751 calls to force 0.04875 and curvature 1.7755.
+  The LJ13 reverse branch at ~force_tol~ 0.005 ran 1000 steps without a minimum, last force 0.0026281.
+  It now stops after 113 steps and 261 calls.
+  Of the 12 branches that reached a basin both before and after, 10 now stop 1 to 8 steps earlier.
+  The other 2 stop at the same step with one call more.
+  LJ13 forward at 0.05 takes 504 steps either way, and 1030 calls before against 1031 now.
+  No new C field.
+- The second-order step of Gonzalez and Schlegel (GS2) now computes one spectrum of its quasi-Newton model per inner trial.
+  ~BfgsModel::is_posdef~ had repeated the dense cyclic Jacobi eigendecomposition up to four more times on the same model.
+  Above order 128 the trial uses faer, as ~eigensolve::exact_eigh~ already does.
+  A build without the default ~faer~ feature keeps the Jacobi eigendecomposition at every size.
+  On eOn's Pt island, with 175 free atoms, that eigendecomposition took 99.1% of the profile samples.
+- A rejected GS2 trial still halves the sphere radius.
+  Each later outer step without one now doubles it back up to the requested radius.
+  ~set_direction~ also starts each branch at the requested radius.
+  Before, the radius stayed halved for the rest of the branch.
+  A session reused for the second branch also launched it at the halved radius.
+  On the Pt adatom at radius 0.1 and ~force_tol~ 0.05, the forward branch now stops after 112 steps and 239 calls.
+  It took 849 steps and 1751 calls before.
+  The 13-atom Lennard-Jones cluster (LJ13) forward branch at 0.05 takes 67 steps and 263 calls, against 504 and 1031.
+  With one session for both LJ13 branches, the reverse branch at 0.05 ran 1000 steps without a minimum.
+  It now stops after 34 steps, as in a fresh session.
 
 * 0.3.2 (2026-10-25)
 

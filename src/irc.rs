@@ -13,7 +13,7 @@
 //! `rgmin::vecops`. The host owns the loop. `run` is a convenience
 //! over `step`.
 
-use ndarray::{Array1, ArrayView1};
+use ndarray::{Array1, Array2, ArrayView1};
 use rgmin::vecops::{Vector, axpy, dot, nrm2, nrminf};
 use rgmin::{
     ApplyHessian, BfgsModel, Control, EigenParams, EigensolverKind, IrcTrust, ManifoldKind, Method,
@@ -22,9 +22,13 @@ use rgmin::{
 
 use std::cell::RefCell;
 
+use crate::eigensolve::{DENSE_JACOBI_LIMIT, faer_eigh};
 use crate::error::SaddleError;
 use crate::kappa::Complement;
 use crate::minmode::PointSurface;
+
+/// rgmin `BfgsModel::update` keeps a pair only when `y.s` exceeds this.
+const BFGS_CURVATURE: f64 = 1e-12;
 
 /// Which side of the imaginary mode to follow.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -99,7 +103,18 @@ pub struct IrcReport {
     pub max_force: f64,
     pub arc: f64,
     pub inner_steps: usize,
+    /// On a GS2 step: past the kick, the force at or below `force_tol`, and
+    /// positive curvature along the launch mode at this point. The sphere
+    /// radius does not enter.
     pub at_minimum: bool,
+}
+
+/// Spectrum of the quasi-Newton model between two pair updates.
+struct ModelSpectrum {
+    evals: Array1<f64>,
+    evecs: Array2<f64>,
+    /// rgmin `BfgsModel::is_posdef` on these eigenvalues.
+    posdef: bool,
 }
 
 /// Forward or reverse roll-down over an rgmin `Solver`.
@@ -112,6 +127,12 @@ pub struct IrcSession {
     mode: Array1<f64>,
     solver: Solver,
     hess: BfgsModel,
+    /// Pairs that `hess` kept since its last reset.
+    hess_pairs: usize,
+    /// The requested sphere radius. A rejected trial halves
+    /// `config.dx`; each later outer step without one doubles it back
+    /// up to this value.
+    dx_target: f64,
     first: bool,
     arc: f64,
     last_step: Option<Array1<f64>>,
@@ -218,6 +239,7 @@ impl IrcSession {
             ));
         }
         let mut session = Self {
+            dx_target: config.dx,
             config,
             x: saddle.clone(),
             x_saddle: saddle,
@@ -226,6 +248,7 @@ impl IrcSession {
             mode,
             solver,
             hess: BfgsModel::identity(dimension),
+            hess_pairs: 0,
             first: true,
             arc: 0.0,
             last_step: None,
@@ -281,11 +304,13 @@ impl IrcSession {
     pub fn reset(&mut self) {
         self.solver.forget();
         self.hess.forget();
+        self.hess_pairs = 0;
         self.seed_ts_mode();
     }
 
     /// Restore the saddle and flip the kick sign.
     pub fn set_direction(&mut self, direction: IrcDirection) {
+        self.config.dx = self.dx_target;
         self.x = self.x_saddle.clone();
         self.d1 = self.kick_vector(direction);
         self.first = true;
@@ -294,6 +319,7 @@ impl IrcSession {
         self.last_outer = None;
         self.solver.forget();
         self.hess.forget();
+        self.hess_pairs = 0;
         self.seed_ts_mode();
     }
 
@@ -335,13 +361,73 @@ impl IrcSession {
         path_projected_force(g, &self.d1, &self.sqrtm)
     }
 
+    /// One eigendecomposition of the mass-weighted quasi-Newton model,
+    /// shared by every test of an inner trial. Above `DENSE_JACOBI_LIMIT`
+    /// it is faer's, as for [`crate::eigensolve::exact_eigh`], since
+    /// cyclic Jacobi there costs far more than a surface call. A build
+    /// without the `faer` feature keeps rgmin's Jacobi at every size, so a
+    /// large session runs slowly there instead of panicking.
+    fn model_spectrum(&self) -> Result<ModelSpectrum, SaddleError> {
+        let b = self.hess.hessian();
+        let (evals, evecs) = if cfg!(feature = "faer") && b.nrows() > DENSE_JACOBI_LIMIT {
+            faer_eigh(b)?
+        } else {
+            self.hess.eigh()
+        };
+        let posdef = self.hess_pairs > 0 && evals.iter().all(|&e| e > 1e-8);
+        Ok(ModelSpectrum {
+            evals,
+            evecs,
+            posdef,
+        })
+    }
+
+    fn update_model(&mut self, s_mw: &Array1<f64>, y_mw: &Array1<f64>) {
+        if dot(y_mw.view(), s_mw.view()) > BFGS_CURVATURE {
+            self.hess_pairs += 1;
+        }
+        self.hess.update(s_mw, y_mw);
+    }
+
     /// Sella `QuasiNewtonIRC` plus `IRCTrustRegion` on the current
     /// MW sphere. The BFGS model is identity until the first accepted
     /// inner pair; GS2 equality is `IrcTrust`.
-    fn restricted_increment(&self, g: &Array1<f64>) -> Array1<f64> {
-        let (evals, evecs) = self.hess.eigh();
-        let allow_interior = self.hess.is_posdef() && self.arc > 8.0 * self.config.dx;
-        qn_irc_restricted(&self.trust(), &evals, &evecs, g, allow_interior)
+    fn restricted_increment(&self, g: &Array1<f64>, spectrum: &ModelSpectrum) -> Array1<f64> {
+        let allow_interior = spectrum.posdef && self.arc > 8.0 * self.config.dx;
+        qn_irc_restricted(
+            &self.trust(),
+            &spectrum.evals,
+            &spectrum.evecs,
+            g,
+            allow_interior,
+        )
+    }
+
+    /// A GS2 minimum: past the kick, the force at or below `force_tol`, and
+    /// positive curvature along the saddle mode on the surface itself.
+    /// Beside the saddle that curvature is still the negative eigenvalue,
+    /// even where the force is small and the quasi-Newton model is positive
+    /// definite, and a rejected trial halves `dx` there. The curvature
+    /// costs one surface call, made only once the force is at or below
+    /// `force_tol`.
+    fn gs2_minimum<S: PointSurface>(
+        &self,
+        surface: &S,
+        kicked: bool,
+        max_force: f64,
+        g: &Array1<f64>,
+    ) -> Result<bool, SaddleError> {
+        if kicked || max_force > self.config.force_tol {
+            return Ok(false);
+        }
+        let hv = hessian_action(
+            surface,
+            self.x.view(),
+            g.view(),
+            self.mode.view(),
+            self.config.dr,
+        )?;
+        Ok(dot(self.mode.view(), hv.view()) > 0.0)
     }
 
     /// One outer IRC move. [`IrcKind::Gs2`] is Sella / GS2;
@@ -371,11 +457,12 @@ impl IrcSession {
         let mut energy = energy0;
         let mut g = g0;
         let mut max_force = max_force0;
-        let mut last_interior = false;
+        let mut rejected = false;
         for _ in 0..self.config.max_inner {
             inner_steps += 1;
-            let s = self.restricted_increment(&g);
-            let interior = self.hess.is_posdef()
+            let spectrum = self.model_spectrum()?;
+            let s = self.restricted_increment(&g, &spectrum);
+            let interior = spectrum.posdef
                 && self.arc > 8.0 * self.config.dx
                 && self.trust().cons(&s) + 1e-8 < self.config.dx;
             if inner_steps == 1
@@ -385,10 +472,10 @@ impl IrcSession {
                 // is a well overshoot only when the force is already
                 // under the host tolerance. A stale BFGS pair can
                 // reverse on a molecular surface far from a basin.
-                if self.hess.is_posdef()
+                if spectrum.posdef
                     && self.arc > 8.0 * self.config.dx
-                    && max_force <= self.config.force_tol
                     && dot(prev.view(), s.view()) < 0.0
+                    && self.gs2_minimum(surface, kicked, max_force, &g)?
                 {
                     self.d1.fill(0.0);
                     self.last_step = None;
@@ -403,11 +490,10 @@ impl IrcSession {
                 }
             }
             if let Some(prev) = &self.last_step
-                && !kicked
-                && self.hess.is_posdef()
+                && spectrum.posdef
                 && self.arc > 8.0 * self.config.dx
-                && max_force <= self.config.force_tol
                 && dot(prev.view(), s.view()) < 0.0
+                && self.gs2_minimum(surface, kicked, max_force, &g)?
             {
                 self.d1.fill(0.0);
                 self.last_step = None;
@@ -421,7 +507,6 @@ impl IrcSession {
                 });
             }
             self.last_step = Some(s.clone());
-            last_interior = interior;
             axpy(1.0, s.view(), &mut self.d1);
             axpy(1.0, s.view(), &mut self.x);
             let ev = surface.eval(self.x.view())?;
@@ -431,13 +516,13 @@ impl IrcSession {
                 axpy(-1.0, s.view(), &mut self.d1);
                 self.config.dx = (self.config.dx * 0.5).max(1.0e-4);
                 self.last_step = None;
-                last_interior = false;
+                rejected = true;
                 break;
             }
             energy = ev.0;
             let y = &ev.1 - &g;
             let (s_mw, y_mw) = mw_pair(&s, &y, &self.sqrtm);
-            self.hess.update(&s_mw, &y_mw);
+            self.update_model(&s_mw, &y_mw);
             g = ev.1;
             max_force = self.config.force_gate.value(g.view());
             let g_path = self.path_force(&g);
@@ -455,18 +540,21 @@ impl IrcSession {
         self.d1.fill(0.0);
         self.last_step = None;
         self.arc += self.config.dx;
+        if !rejected {
+            self.config.dx = (2.0 * self.config.dx).min(self.dx_target);
+        }
         self.solver.forget();
+        // Sella skips the test while the session still sits on the saddle.
+        // This also refuses the kick step itself, even where |F| is already
+        // at or below fmax beside the saddle. A step whose last trial was
+        // rejected still ends on an accepted point with this force.
+        let at_minimum = self.gs2_minimum(surface, kicked, max_force, &g)?;
         Ok(IrcReport {
             energy,
             max_force,
             arc: self.arc,
             inner_steps,
-            // Sella: the kick outer step is never a minimum, even when
-            // |F| is already under fmax (a TS neighborhood).
-            at_minimum: !kicked
-                && max_force <= self.config.force_tol
-                && last_interior
-                && self.arc > 8.0 * self.config.dx,
+            at_minimum,
         })
     }
 
@@ -921,5 +1009,81 @@ mod tests {
             (r - dx).abs() < 1e-8,
             "inner step left the MW sphere: cons={r} dx={dx}"
         );
+    }
+
+    fn sorted(v: &Array1<f64>) -> Vec<f64> {
+        let mut out = v.to_vec();
+        out.sort_by(f64::total_cmp);
+        out
+    }
+
+    fn assert_spectrum_matches_rgmin(irc: &IrcSession) {
+        let spectrum = irc.model_spectrum().unwrap();
+        assert_eq!(spectrum.posdef, irc.hess.is_posdef());
+        let ours = sorted(&spectrum.evals);
+        let rgmin = sorted(&irc.hess.eigh().0);
+        for (a, b) in ours.iter().zip(&rgmin) {
+            assert!((a - b).abs() <= 1e-9 * (1.0 + b.abs()), "{a} against {b}");
+        }
+    }
+
+    #[test]
+    fn model_spectrum_above_the_jacobi_limit_matches_rgmin() {
+        let n = DENSE_JACOBI_LIMIT + 22;
+        let mut mode = Array1::zeros(n);
+        mode[0] = 1.0;
+        let mut irc = IrcSession::new_euclidean(
+            IrcConfig::default(),
+            Array1::zeros(n),
+            mode.clone(),
+            IrcDirection::Forward,
+        )
+        .unwrap();
+        assert_spectrum_matches_rgmin(&irc);
+        assert!(!irc.model_spectrum().unwrap().posdef);
+
+        let flat = Array1::from_iter((0..n).map(|i| ((i + 1) as f64 * 0.37).sin()));
+        irc.update_model(&flat, &(-&flat));
+        assert_eq!(irc.hess_pairs, 0);
+        assert_spectrum_matches_rgmin(&irc);
+
+        irc.update_model(&mode, &(&mode * 2.0));
+        assert_eq!(irc.hess_pairs, 1);
+        assert_spectrum_matches_rgmin(&irc);
+        assert!(irc.model_spectrum().unwrap().posdef);
+
+        let s = Array1::from_iter((0..n).map(|i| ((i + 1) as f64 * 1.3).cos()));
+        let y = Array1::from_iter((0..n).map(|i| s[i] * (1.0 + 0.01 * i as f64)));
+        irc.update_model(&s, &y);
+        assert_eq!(irc.hess_pairs, 2);
+        assert_spectrum_matches_rgmin(&irc);
+    }
+
+    #[test]
+    fn dx_doubles_back_to_the_requested_radius() {
+        let dx = 0.15;
+        let masses = Array1::from(vec![1.0, 1.0]);
+        let mut irc = session(dx, masses, Array1::zeros(6));
+        let _ = irc.step(&Well).unwrap();
+        irc.config.dx = dx / 8.0;
+        for expected in [dx / 4.0, dx / 2.0, dx, dx] {
+            let report = irc.step(&Well).unwrap();
+            assert!(!report.at_minimum);
+            assert_eq!(irc.config.dx, expected);
+        }
+    }
+
+    #[test]
+    fn each_branch_starts_at_the_requested_radius() {
+        let dx = 0.15;
+        let masses = Array1::from(vec![1.0, 1.0]);
+        let saddle = Array1::zeros(6);
+        let mut irc = session(dx, masses.clone(), saddle.clone());
+        irc.config.dx = dx / 16.0;
+        irc.set_direction(IrcDirection::Reverse);
+        assert_eq!(irc.config.dx, dx);
+        let _ = irc.step(&Well).unwrap();
+        let r = mw_radius(&irc.position().to_owned(), &saddle, &masses);
+        assert!((r - dx).abs() < 1e-10, "cons={r} dx={dx}");
     }
 }

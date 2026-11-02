@@ -6,5 +6,32 @@
 ~new~ accepts a molecular Cartesian packing and atom masses. ~new_euclidean~ accepts an arbitrary nonzero dimension with unit coordinate weights. ~from_surface~ estimates the launch mode through Hessian actions; a host with a measured mode can pass it to ~new~.
 
 ~set_direction~ restores the saddle and reverses the launch. ~reset~ clears the approximation at a surface change. The GS2 step rejects an energy increase above its specified numerical threshold and reduces the radius.
+Each later step without a rejection doubles the radius back up to the requested one.
+~set_direction~ starts each branch at the requested radius.
+
+Step until the report sets ~at_minimum~.
+A GS2 report sets it once the step is past the kick and the largest force is at or below ~force_tol~.
+One Hessian action at that point must also give positive curvature along the launch mode.
+That action is the only extra surface call, and it is made only once the force is at or below ~force_tol~.
+The sphere radius does not enter, so a branch whose radius was halved still stops on its force.
+A point beside the saddle, where the curvature along the mode is still negative, does not stop.
+Through the C interface, ~rgsaddle_irc_step~ writes ~RGSADDLE_STATUS_CONVERGED~ to the report's ~status~ on that step.
+
+~tests/irc_termination.rs~ checks that stop on both branches from two saddles that eOn hands over.
+These are the 13-atom Lennard-Jones cluster (LJ13) and the Morse Pt adatom.
+The default run checks the LJ13 reverse branch at ~force_tol~ 0.005 and eight Pt adatom branches.
+The full LJ13 set, both branches at 0.05, 0.01 and 0.005, is ignored in a debug build:
+
+#+begin_src sh
+cargo test --release --test irc_termination -- --include-ignored
+#+end_src
+
+#+begin_example
+test pt_adatom_point_beside_the_saddle_is_not_a_minimum ... ok
+test lj13_reverse_branch_under_the_force_threshold_reports_a_minimum ... ok
+test lj13_branches_under_the_force_threshold_report_a_minimum ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.72s
+#+end_example
 
 Select ~L2Norm~ or ~LinfNorm~ for a generic vector packing. ~MaxForceOnAtom~ groups Cartesian triples. The C interface exposes construction, stepping, position access, direction changes, reset and destruction; ~tests/c/irc_abi.c~ exercises both directions and both IRC methods.
