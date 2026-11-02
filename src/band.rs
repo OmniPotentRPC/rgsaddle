@@ -608,7 +608,7 @@ fn evaluate_band(
         .to_shape((n_images - 2, dof))
         .map_err(|e| SaddleError::Shape(e.to_string()))?;
     let mut energies = Array1::zeros(n_images);
-    // Endpoint gradient rows are never read; keep the last ones known.
+    // Endpoint gradient rows are evaluated once; keep the last ones known.
     let mut gradients = match slot.as_ref() {
         Some(prev) => prev.gradients.clone(),
         None => Array2::zeros((n_images, dof)),
@@ -1189,15 +1189,56 @@ fn max_abs(v: &Array1<f64>) -> f64 {
     v.iter().fold(0.0_f64, |m, c| m.max(c.abs()))
 }
 
+/// The interior image that climbs once the band is armed: the highest
+/// one, unless an endpoint at or above it slopes down into the band.
+///
+/// Two minima bound a peak, so the saddle lies between a highest
+/// interior image and a higher endpoint that is a minimum. An endpoint
+/// that is not one can sit at the top of a slope the band rises along,
+/// with no saddle in between; climbing there only drives the image up
+/// the slope. Such an endpoint blocks the climb when its force along
+/// the band, toward the next image, exceeds `force_tol`. An endpoint
+/// whose gradient was never evaluated has a zero row and blocks nothing.
+#[allow(clippy::too_many_arguments)]
+fn climb_target(
+    config: &BandConfig,
+    max_i: usize,
+    endpoint_first: ArrayView1<f64>,
+    endpoint_last: ArrayView1<f64>,
+    x: ArrayView1<f64>,
+    energies: &Array1<f64>,
+    gradients: &Array2<f64>,
+) -> Option<usize> {
+    let dof = endpoint_first.len();
+    let last = energies.len() - 1;
+    let slopes_into_band = |end: usize| {
+        let (pos, next) = if end == 0 {
+            (endpoint_first, x.slice(s![..dof]))
+        } else {
+            (endpoint_last, x.slice(s![x.len() - dof..]))
+        };
+        let mut along = &next - &pos;
+        if let Some(cell) = &config.cell {
+            cell.minimum_image(&mut along);
+        }
+        let length = along.dot(&along).sqrt();
+        length > 0.0 && -gradients.row(end).dot(&along) / length > config.force_tol
+    };
+    let blocked = [0, last]
+        .into_iter()
+        .any(|end| energies[end] >= energies[max_i] && slopes_into_band(end));
+    (!blocked).then_some(max_i)
+}
+
 /// Assemble the projected band force at interior `x`. Returns
 /// (pseudo-energy, projected interior forces, max abs component).
 ///
 /// The climbing image is decided on this evaluation's energies, so
 /// the force returned already carries the climb: once armed, the
-/// highest interior image climbs, also when an endpoint is higher
-/// (two minima bound a peak, and the saddle then lies between that
-/// image and the endpoint); on the evaluation that arms it, the
-/// climbing image's force is reassembled before returning.
+/// highest interior image climbs, also when an endpoint is higher,
+/// unless that endpoint slopes down into the band ([`climb_target`]);
+/// on the evaluation that arms it, the climbing image's force is
+/// reassembled before returning.
 fn assemble_band(
     config: &BandConfig,
     state: &BandState,
@@ -1240,12 +1281,23 @@ fn assemble_band_with(
             max_i = i;
         }
     }
+    let climb_target = climb_target(
+        config,
+        max_i,
+        endpoint_first,
+        endpoint_last,
+        x,
+        &energies,
+        &gradients,
+    );
     let climbing = config.climbing.is_some();
     let armed = climbing && state.armed.load(Ordering::Relaxed);
     if armed {
-        state.ci_index.store(max_i as i64, Ordering::Relaxed);
+        state
+            .ci_index
+            .store(climb_target.map_or(-1, |i| i as i64), Ordering::Relaxed);
     }
-    let ci_at = armed.then_some(max_i);
+    let ci_at = if armed { climb_target } else { None };
 
     let metric_of = |i: usize| metrics.and_then(|m| m.get(i - 1));
     // An armed climbing image under the metric climbs in the P-metric,
@@ -1289,27 +1341,31 @@ fn assemble_band_with(
         && (max_component < baseline * ci.trigger_factor || max_component < ci.trigger_force)
     {
         state.armed.store(true, Ordering::Relaxed);
-        state.ci_index.store(max_i as i64, Ordering::Relaxed);
-        let (f, d) = image_force(
-            config,
-            max_i,
-            true,
-            endpoint_first,
-            endpoint_last,
-            x,
-            &energies,
-            &gradients,
-            metric_of(max_i),
-        )?;
-        projected
-            .slice_mut(s![(max_i - 1) * dof..max_i * dof])
-            .assign(&f);
-        if let Some(driving) = driving.as_mut() {
-            driving
-                .slice_mut(s![(max_i - 1) * dof..max_i * dof])
-                .assign(d.as_ref().unwrap_or(&f));
+        state
+            .ci_index
+            .store(climb_target.map_or(-1, |i| i as i64), Ordering::Relaxed);
+        if let Some(ci_i) = climb_target {
+            let (f, d) = image_force(
+                config,
+                ci_i,
+                true,
+                endpoint_first,
+                endpoint_last,
+                x,
+                &energies,
+                &gradients,
+                metric_of(ci_i),
+            )?;
+            projected
+                .slice_mut(s![(ci_i - 1) * dof..ci_i * dof])
+                .assign(&f);
+            if let Some(driving) = driving.as_mut() {
+                driving
+                    .slice_mut(s![(ci_i - 1) * dof..ci_i * dof])
+                    .assign(d.as_ref().unwrap_or(&f));
+            }
+            max_component = state.convergence_force(&projected);
         }
-        max_component = state.convergence_force(&projected);
     }
 
     // A force whose squared norm overflows defeats every solver's
@@ -1585,9 +1641,12 @@ impl BandSession {
                 "the exponential metric has no pair geometry for a solid-state cell block".into(),
             ));
         }
-        if !(precon.a.is_finite() && precon.a > 0.0)
-            || !(precon.c_stab.is_finite() && precon.c_stab > 0.0)
-            || !(precon.r_cut_factor.is_finite() && precon.r_cut_factor > 1.0)
+        if !(precon.a.is_finite()
+            && precon.a > 0.0
+            && precon.c_stab.is_finite()
+            && precon.c_stab > 0.0
+            && precon.r_cut_factor.is_finite()
+            && precon.r_cut_factor > 1.0)
             || precon.mu.is_some_and(|mu| !(mu.is_finite() && mu > 0.0))
         {
             return Err(SaddleError::Invalid(
@@ -1942,8 +2001,9 @@ impl BandSession {
 
     /// Record endpoint energies the host already holds.
     ///
-    /// The next evaluation asks only for the interior images. Endpoint
-    /// gradients are never read. Call this before the first step when
+    /// The next evaluation asks only for the interior images, so the
+    /// endpoint gradients stay unknown and never block the climbing
+    /// image ([`climb_target`]). Call this before the first step when
     /// those two images were evaluated already, so a new window does
     /// not repeat them.
     pub(crate) fn seed_endpoint_energies(&mut self, energies: [f64; 2]) -> Result<(), SaddleError> {
@@ -2541,6 +2601,28 @@ mod tests {
             assemble(&infinite_climb(), vec![0.0, 1.0, 5.0], &positions, gradient);
         // The tangent points at the higher endpoint, so the climb
         // inverts the parallel 2 as on an interior peak.
+        assert_force(&projected, &[-3.5, 1.0, 0.0, 3.5, -1.0, 0.0]);
+        assert_eq!(state.ci(), Some(1));
+    }
+
+    #[test]
+    fn image_below_an_endpoint_that_slopes_into_the_band_keeps_the_spring() {
+        // The higher endpoint pushes its first atom back along the band
+        // with a force of 4: the band rises to it with no saddle between.
+        let (positions, mut gradient) = two_atom_band();
+        gradient[(2, 0)] = 4.0;
+        let (projected, state) =
+            assemble(&infinite_climb(), vec![0.0, 1.0, 5.0], &positions, gradient);
+        assert_force(&projected, &[-2.5, 1.0, 0.0, 2.5, -1.0, 0.0]);
+        assert_eq!(state.ci(), None);
+    }
+
+    #[test]
+    fn endpoint_force_across_the_band_leaves_the_climb() {
+        let (positions, mut gradient) = two_atom_band();
+        gradient[(2, 1)] = 4.0;
+        let (projected, state) =
+            assemble(&infinite_climb(), vec![0.0, 1.0, 5.0], &positions, gradient);
         assert_force(&projected, &[-3.5, 1.0, 0.0, 3.5, -1.0, 0.0]);
         assert_eq!(state.ci(), Some(1));
     }

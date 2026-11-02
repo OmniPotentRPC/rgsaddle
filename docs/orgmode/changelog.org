@@ -3,6 +3,19 @@
 
 * Unreleased
 
+- An endpoint at or above the highest interior image blocks the climbing image when its force toward the next image exceeds ~force_tol~.
+  The band then keeps the spring on every image and reports no climbing image, eOn's rule for a monotonic band.
+  An endpoint at a minimum has no such force, so the highest interior image below it still climbs.
+  That is the climb of Henkelman, Uberuaga, and Jónsson, J. Chem. Phys. 113, 9901 (2000), doi:10.1063/1.1329672.
+  Since 0.3.0 an endpoint that is not a minimum drew the climbing image up the slope into itself.
+  eOn develop 7afface8 has such a band in a ~test_jobs~ case on Lennard-Jones (LJ) atoms.
+  That case compares a nudged elastic band (NEB) with an old Subversion (SVN) result.
+  Its name is "NEB LJ matches SVN reference".
+  Its product endpoint lies at 631.805887 eV with a force of 16337.670163 eV/Å.
+  There image 3 climbed and the band stopped at its 600-call limit.
+  With this change it converges again in 234 band force calls and ends on the band of rgsaddle 0.2.2.
+  ~tests/climbing_endpoint.rs~ is that case on an analytic valley.
+  Before this change its image 3 climbs and the band is still running after 200 steps.
 - Builds on rgmin 0.5.2 from crates.io. ~Control~ carries ~ftol_rel~ and ~noise_floor~; the band, minimum-mode, stencil, IDPP, and IRC solvers fill those fields from ~Control::default()~, which is the 0.5.1 behaviour (no relative energy slack, no noise-floor stop). The golden stencil and band hashes are unchanged.
 
 * 0.3.2 (2026-10-25)

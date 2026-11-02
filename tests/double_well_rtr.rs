@@ -69,7 +69,7 @@ fn rtr_band_relaxes_onto_the_path_and_climbs_to_the_saddle() {
             break;
         }
     }
-    assert!(converged, "band did not converge: {:?}", band);
+    assert!(converged, "band did not converge: {band:?}");
     assert!(accepted > 0);
     assert_eq!(band.row(0), first.view());
     assert_eq!(band.row(n - 1), last.view());

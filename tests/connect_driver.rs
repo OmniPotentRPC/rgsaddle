@@ -518,7 +518,7 @@ fn verification_index(pos: &[f64]) -> i32 {
             column[i] = (gp[j] - gm[j]) / (2.0 * step);
         }
     }
-    #[expect(
+    #[allow(
         clippy::needless_range_loop,
         reason = "both triangles of the finite-difference Hessian share one index pair"
     )]
