@@ -1,10 +1,9 @@
 //! Bit comparison of the Rust stencil against `formal/golden/stencil.json`.
 //!
 //! `translated_gradient` is `pub(crate)`, so its rows are checked from
-//! `src/kani_proofs.rs`. `SpringKind::Weighted` stores precomputed
-//! constants and does not evaluate the energy-weighted law, so those
-//! rows are checked against the formula itself. The formula returns
-//! `k_min` when `E_max == E_ref` and does not divide.
+//! `src/kani_proofs.rs`. The energy-weighted rows are checked against
+//! the formula itself and against `spring::energy_weighted_constants`.
+//! The formula returns `k_min` when `E_max == E_ref` and does not divide.
 
 use ndarray::Array1;
 use rgsaddle::projection::climbing_image_force;
@@ -133,6 +132,25 @@ fn energy_weighted_rows_match_the_guarded_formula() {
         assert_eq!(nums.len(), 6, "{line}");
         let got = energy_weighted_k(nums[0], nums[1], nums[2], nums[3], nums[4]);
         bits_eq(got, nums[5], line);
+        saw += 1;
+    }
+    assert!(saw >= 5);
+}
+
+/// The library rule on a six-image band whose segment 2 tops at `E_i`,
+/// whose highest interior image is `E_max`, and whose endpoints sit at
+/// `E_ref`.
+#[test]
+fn energy_weighted_constants_match_the_golden_rows() {
+    let text = golden();
+    let mut saw = 0;
+    for line in section_lines(&text, "energy_weighted") {
+        let nums = slash_numbers(line);
+        let (e_i, e_max, e_ref) = (nums[0], nums[1], nums[2]);
+        let low = e_i.min(e_ref) - 1.0;
+        let energies = Array1::from(vec![e_ref, e_max, low, e_i, low, e_ref]);
+        let ks = rgsaddle::spring::energy_weighted_constants(energies.view(), nums[3], nums[4]);
+        bits_eq(ks[2], nums[5], line);
         saw += 1;
     }
     assert!(saw >= 5);
