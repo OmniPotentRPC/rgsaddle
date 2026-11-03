@@ -537,7 +537,9 @@ impl AutoNebTuning {
             }
             // Temporary. Zoom-NEB recomputes springs when an image is
             // inserted, which removes this refusal.
-            SpringKind::Weighted { .. } | SpringKind::OnsagerMachlup { .. } => {
+            SpringKind::Weighted { .. }
+            | SpringKind::OnsagerMachlup { .. }
+            | SpringKind::EnergyWeighted { .. } => {
                 return Err(SaddleError::Invalid(
                     "AutoNEB temporarily needs a uniform spring; weighted springs will be recomputed on insertion with zoom-NEB"
                         .into(),
