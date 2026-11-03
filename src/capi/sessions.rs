@@ -634,6 +634,34 @@ mod irc_abi_tests {
         unsafe { rgsaddle_sella_saddle_free(sess) };
     }
     #[test]
+    fn sella_saddle_symmetrized_ritz_abi_takes_zero_or_one() {
+        let cfg = RgsaddleSellaSaddleConfig {
+            version: RgsaddleVersion {
+                major: RGSADDLE_ABI_MAJOR,
+                minor: RGSADDLE_ABI_MINOR,
+            },
+            flags: 0,
+            delta: 0.1,
+            force_tol: 0.05,
+            force_gate: crate::ForceGate::MaxForceOnAtom.to_abi(),
+            order: 1,
+        };
+        let x = [0.2, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let masses = [1.0, 1.0];
+        let sess = unsafe { rgsaddle_sella_saddle_create(&cfg, 2, x.as_ptr(), masses.as_ptr()) };
+        assert!(!sess.is_null());
+        let set = |v| unsafe { rgsaddle_sella_saddle_set_symmetrized_ritz(sess, v) };
+        assert_eq!(set(1), RGSADDLE_OK);
+        assert_eq!(set(0), RGSADDLE_OK);
+        assert_eq!(set(2), RGSADDLE_INVALID_PARAMETER);
+        assert_eq!(set(-1), RGSADDLE_INVALID_PARAMETER);
+        assert_eq!(
+            unsafe { rgsaddle_sella_saddle_set_symmetrized_ritz(std::ptr::null_mut(), 1) },
+            RGSADDLE_NULL_SESSION
+        );
+        unsafe { rgsaddle_sella_saddle_free(sess) };
+    }
+    #[test]
     fn sella_saddle_seed_abi_refuses_invalid_modes() {
         let cfg = RgsaddleSellaSaddleConfig {
             version: RgsaddleVersion {
@@ -1538,6 +1566,23 @@ pub unsafe extern "C" fn rgsaddle_sella_saddle_set_expand(
         return RGSADDLE_INVALID_PARAMETER;
     };
     unsafe { (*session).session.set_expand(kind) };
+    RGSADDLE_OK
+}
+
+/// # Safety
+/// `session` is a live session or null. `enabled` is 0 or 1.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_sella_saddle_set_symmetrized_ritz(
+    session: *mut RgsaddleSellaSaddle,
+    enabled: i32,
+) -> i32 {
+    if session.is_null() {
+        return RGSADDLE_NULL_SESSION;
+    }
+    if enabled != 0 && enabled != 1 {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    unsafe { (*session).session.set_symmetrized_ritz(enabled == 1) };
     RGSADDLE_OK
 }
 

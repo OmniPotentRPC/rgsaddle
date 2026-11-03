@@ -5,7 +5,7 @@
 #include <stddef.h>
 
 _Static_assert(RGSADDLE_ABI_MAJOR == 1u, "main ABI major");
-_Static_assert(RGSADDLE_ABI_MINOR == 23u, "ABI minor");
+_Static_assert(RGSADDLE_ABI_MINOR == 24u, "ABI minor");
 _Static_assert(RGSADDLE_BAND_NO_MIN_MODE == (1ull << 3), "band flag bit 3");
 _Static_assert(RGSADDLE_REQ_ONE_IMAGE == (1ull << 0), "request flag bit 0");
 _Static_assert(RGSADDLE_REQ_CLIMBING_IMAGE == (1ull << 1), "request flag bit 1");
@@ -322,5 +322,9 @@ _Static_assert(_Generic(&rgsaddle_ocineb_reset, abi20_signature_rgsaddle_ocineb_
 
 typedef void (*abi20_signature_rgsaddle_ocineb_free)(RgsaddleOcineb *session);
 _Static_assert(_Generic(&rgsaddle_ocineb_free, abi20_signature_rgsaddle_ocineb_free: 1, default: 0), "rgsaddle_ocineb_free signature");
+
+typedef rgsaddle_status_t (*abi24_signature_rgsaddle_sella_saddle_set_symmetrized_ritz)(
+    RgsaddleSellaSaddle *session, int32_t enabled);
+_Static_assert(_Generic(&rgsaddle_sella_saddle_set_symmetrized_ritz, abi24_signature_rgsaddle_sella_saddle_set_symmetrized_ritz: 1, default: 0), "rgsaddle_sella_saddle_set_symmetrized_ritz signature");
 
 #endif

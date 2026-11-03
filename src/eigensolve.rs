@@ -525,6 +525,13 @@ pub fn rayleigh_ritz_iter(
 /// is below one: that relative test is finer than a one-sided
 /// finite-difference product can support. `gamma <= 0` is not accepted
 /// here; the caller keeps the model spectrum.
+///
+/// The residual test reads the `symm=2` products `Y`. With
+/// `symmetrized` the Ritz pairs come from `V^T Y` as well, which is
+/// Sella's `Atilde`; without it they come from the mean of `V^T AV`
+/// and its transpose. Finite-difference products are not symmetric,
+/// and the mean then leaves part of each residual inside `V`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn rayleigh_ritz_apply<F>(
     n: usize,
     mut apply: F,
@@ -533,6 +540,7 @@ pub(crate) fn rayleigh_ritz_apply<F>(
     gamma: f64,
     method: ExpandKind,
     strict_negative: usize,
+    symmetrized: bool,
 ) -> Result<RitzDecomposition, SaddleError>
 where
     F: FnMut(ArrayView1<f64>) -> Result<Array1<f64>, SaddleError>,
@@ -558,7 +566,12 @@ where
     let mut av = apply_columns(&mut apply, v.view())?;
     let max_columns = n;
     loop {
-        let a_tilde = symmetrize_vt_av(v.view(), av.view());
+        let a_tilde = if symmetrized {
+            let y = crate::qn::symmetrize_y(v.view(), av.view(), Some(2));
+            matmul(v.t(), y.view())
+        } else {
+            symmetrize_vt_av(v.view(), av.view())
+        };
         let (lams, vecs) = exact_eigh(a_tilde.view())?;
         av = matmul(av.view(), vecs.view());
         v = matmul(v.view(), vecs.view());
