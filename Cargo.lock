@@ -1104,8 +1104,8 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "linkcell"
-version = "0.3.3"
-source = "git+https://github.com/d-SEAMS/linkcell?rev=f6cf5700ca9c90e1877c84b66fb68386de5ceffe#f6cf5700ca9c90e1877c84b66fb68386de5ceffe"
+version = "0.3.11"
+source = "git+https://github.com/d-SEAMS/linkcell?rev=74a513cc41c2730815bcd9110a96286f53ccf353#74a513cc41c2730815bcd9110a96286f53ccf353"
 dependencies = [
  "minimage",
 ]
@@ -1166,8 +1166,8 @@ dependencies = [
 
 [[package]]
 name = "minimage"
-version = "0.1.1"
-source = "git+https://github.com/lode-org/minimage.git?rev=624d4395beae609281bb951e66299658bf313fc1#624d4395beae609281bb951e66299658bf313fc1"
+version = "0.2.0"
+source = "git+https://github.com/lode-org/minimage.git?rev=3abded515f2e3d0af40d8816a533a2941b1a36cf#3abded515f2e3d0af40d8816a533a2941b1a36cf"
 
 [[package]]
 name = "minimal-lexical"
@@ -1693,9 +1693,9 @@ dependencies = [
 
 [[package]]
 name = "readcon-core"
-version = "0.17.1"
+version = "0.17.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c8c9ec4a34748765fc3ef137aef2c4eb007b0ae395dd2ac165071471e6fcaf0c"
+checksum = "8aef54a62236d969f4b328cc9846b5fcab31979547f39c21ad8628fff6b348ec"
 dependencies = [
  "chemfiles",
  "dlpk",
@@ -1713,8 +1713,7 @@ dependencies = [
 [[package]]
 name = "readcon-db"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef3b4bb175d280c0bf21951a051ec456db3de55df1ff6d631f5d41b87c420123"
+source = "git+https://github.com/lode-org/readcon-db?rev=1e0eb2bc6034c259fe2a789edfae3481de22a944#1e0eb2bc6034c259fe2a789edfae3481de22a944"
 dependencies = [
  "heed",
  "readcon-core",

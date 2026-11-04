@@ -19,8 +19,7 @@ capi = []
 par = ["rgmin/par"]
 highs = ["rgmin/highs"]
 readcon = ["dep:readcon-core"]
-# readcon-db 0.2 pins readcon-core = "=0.17.1", the same release as
-# below, so the corpus and the CON writer share one readcon-core.
+# The corpus and CON writer share one readcon-core release.
 readcon-db = ["readcon", "dep:readcon-db"]
 chemfiles = ["readcon", "readcon-core/chemfiles"]
 # GMP and MPFR stay off the default build. `cargo test --features capi`
@@ -38,8 +37,8 @@ faer = ["dep:faer"]
 [dependencies]
 dlpk = { version = "0.1.5", features = ["ndarray"] }
 # ConFrameWriter::new is RoundTrip and canonical stays off.
-readcon-core = { version = "=0.17.1", optional = true }
-readcon-db = { version = "0.2", optional = true }
+readcon-core = { version = "=0.17.3", optional = true }
+readcon-db = { version = "0.2.0", git = "https://github.com/lode-org/readcon-db", rev = "1e0eb2bc6034c259fe2a789edfae3481de22a944", optional = true }
 # crates.io 0.5.2. Control::default leaves ftol_rel and noise_floor
 # unset, the 0.5.1 behaviour the sessions rely on.
 rgmin = "0.5.2"
@@ -48,7 +47,7 @@ ndarray = "0.17"
 faer = { version = "0.24.4", optional = true, default-features = false, features = ["std", "linalg"] }
 rayon = "1.12"
 thiserror = "2"
-linkcell = { version = "0.3.3", git = "https://github.com/d-SEAMS/linkcell", rev = "f6cf5700ca9c90e1877c84b66fb68386de5ceffe", default-features = false }
+linkcell = { version = "0.3.11", git = "https://github.com/d-SEAMS/linkcell", rev = "74a513cc41c2730815bcd9110a96286f53ccf353", default-features = false }
 proptest = { version = "1.6", optional = true }
 rug = { version = "1.27", optional = true }
 
