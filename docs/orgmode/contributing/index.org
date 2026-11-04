@@ -48,6 +48,19 @@ sphinx-build -b html -n docs/source docs/build
 
 Retain numerical assertions and record the source, dependency and library revisions with performance results.
 
+* Changelog
+Each change adds a fragment under ~docs/newsfragments~ and leaves ~docs/orgmode/changelog.org~ as it is.
+Name the fragment ~+<slug>.<type>.org~, or ~<issue>.<type>.org~ for a change with an issue number.
+The types are the sections of ~towncrier.toml~: ~breaking~, ~security~, ~removed~, ~deprecated~, ~added~, ~dev~, ~changed~, ~fixed~ and ~misc~.
+Write Org markup with one sentence per line.
+A release collects the fragments under a new heading, and ~--draft~ prints that heading without writing it:
+
+#+begin_src sh
+python -m pip install towncrier
+towncrier build --draft --version <version>
+towncrier build --version <version>
+#+end_src
+
 * Contact
 Report bugs, ask questions and propose changes on the issue tracker at https://github.com/OmniPotentRPC/rgsaddle/issues.
 The maintainer is Rohit Goswami (rgoswami@ieee.org), the author listed in ~Cargo.toml~ and ~pyproject.toml~.

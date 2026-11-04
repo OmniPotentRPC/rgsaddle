@@ -1,6 +1,8 @@
 #+TITLE: Changelog
 #+OPTIONS: toc:nil num:nil
 
+# towncrier release notes start
+
 * Unreleased
 
 - A stalled FIRE translation on a stiff negative mode takes a short directional step and then stays on that step while the curvature remains steep. FIRE 2.0 keeps its opening timestep through the initial delay, so from rest the move is the reflected force (Guénolé, Nöhring, Vaid, Houllé, Xie, Prakash, and Bitzek, Comput. Mater. Sci. 175, 109584 (2020), doi:10.1016/j.commatsci.2020.109584; Goswami, Gunde, and Jónsson, Front. Chem. 14, 1807063 (2026), doi:10.3389/fchem.2026.1807063, Eq. 3). On the 255-atom vacancy that force sits on a curvature near -40 to -100, the harmonic length is well under the 0.2 cap, and the next update rebuilds the same step. The probe waits until neither the force nor the energy has dropped for 2000 steps and ~|λ|~ is past 25, then steps by ~|F|/slope~ along the reflected force, at most 0.05, and only when the energy does not rise by more than 1e-3. ~set_fire_curvature(false)~ is the previous integrator. It is on by default. No C field was added. ~RGSADDLE_ABI_MINOR~ is 34 so a host can tell the default apart; the layout and the symbols are unchanged.
