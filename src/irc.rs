@@ -6,7 +6,8 @@
 //! [`IrcSession::new`] selects mass-weighted `ManifoldKind::MwRigid`
 //! for atomistic Cartesian coordinates; [`IrcSession::new_euclidean`]
 //! selects unit weights for a generic-dimensional surface. The default
-//! increment is rgmin `qn_irc_restricted` (Sella QuasiNewtonIRC).
+//! increment is Sella's QuasiNewtonIRC step, rgmin `qn_irc_get_s` at the
+//! level shift that puts it on the sphere.
 //! [`IrcKind::Morokuma`] is the
 //! Ishida--Morokuma--Komornicki predictor-corrector from
 //! `gpr_optim` `IRCDriver`. Ambient algebra goes through
@@ -17,7 +18,7 @@ use ndarray::{Array1, Array2, ArrayView1};
 use rgmin::vecops::{Vector, axpy, dot, nrm2, nrminf};
 use rgmin::{
     ApplyHessian, BfgsModel, Control, EigenParams, EigensolverKind, IrcTrust, ManifoldKind, Method,
-    Solver, mw_pair, qn_irc_restricted, sqrt_masses_3n, to_mw,
+    Solver, mw_pair, qn_irc_get_s, sqrt_masses_3n, to_mw,
 };
 
 use std::cell::RefCell;
@@ -394,13 +395,7 @@ impl IrcSession {
     /// inner pair; GS2 equality is `IrcTrust`.
     fn restricted_increment(&self, g: &Array1<f64>, spectrum: &ModelSpectrum) -> Array1<f64> {
         let allow_interior = spectrum.posdef && self.arc > 8.0 * self.config.dx;
-        qn_irc_restricted(
-            &self.trust(),
-            &spectrum.evals,
-            &spectrum.evecs,
-            g,
-            allow_interior,
-        )
+        sphere_increment(&self.trust(), spectrum, g, allow_interior)
     }
 
     /// A GS2 minimum: past the kick, the force at or below `force_tol`, and
@@ -696,6 +691,61 @@ impl IrcSession {
         }
         Ok(report)
     }
+}
+
+/// rgmin `qn_irc_restricted` with the level shift found by bisection.
+///
+/// In MW coordinates `s(alpha) + d1 = V w / (|L| + alpha)` with
+/// `w = |L| V^T d1 - V^T g`, so its norm falls monotonically in `alpha` and
+/// the root lies in `[|w| / dx - max |L|, |w| / dx]`. rgmin's Newton search
+/// starts at `alpha = 0`, a pole where a model eigenvalue is zero to
+/// round-off (its denominator floor is 1e-16). Each of its 64 iterations at
+/// most doubles `alpha + 1e-16`, so its last trial lies below `2^63 1e-16`,
+/// about 922: a larger root (a small `dx`) is out of reach, and the radial
+/// projection of that step is not the minimum of the model on the sphere.
+fn sphere_increment(
+    trust: &IrcTrust,
+    spectrum: &ModelSpectrum,
+    g: &Array1<f64>,
+    allow_interior: bool,
+) -> Array1<f64> {
+    let g_mw = to_mw(g, &trust.sqrtm, true);
+    let d1_mw = to_mw(&trust.d1, &trust.sqrtm, false);
+    let step_at = |alpha: f64| {
+        let (s_mw, _) = qn_irc_get_s(&spectrum.evals, &spectrum.evecs, &g_mw, &d1_mw, alpha);
+        to_mw(&s_mw, &trust.sqrtm, true)
+    };
+    let s0 = step_at(0.0);
+    if trust.cons(&s0) <= trust.dx + 1e-14 {
+        return if allow_interior {
+            s0
+        } else {
+            trust.project(&s0)
+        };
+    }
+    let curvature = spectrum.evals.mapv(f64::abs);
+    let w = &curvature * &spectrum.evecs.t().dot(&d1_mw) - spectrum.evecs.t().dot(&g_mw);
+    let radius = |alpha: f64| {
+        w.iter()
+            .zip(&curvature)
+            .map(|(wi, li)| (wi / (li + alpha)).powi(2))
+            .sum::<f64>()
+            .sqrt()
+    };
+    let mut hi = nrm2(w.view()) / trust.dx;
+    let mut lo = (hi - curvature.fold(0.0, |a: f64, &b| a.max(b))).max(0.0);
+    loop {
+        let mid = 0.5 * (lo + hi);
+        if mid <= lo || mid >= hi {
+            break;
+        }
+        if radius(mid) > trust.dx {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    step_at(hi)
 }
 
 /// Mass-weighted path-orthogonal force. Algebra is `rgmin::vecops`.
