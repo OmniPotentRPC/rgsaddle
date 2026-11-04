@@ -59,12 +59,12 @@ def barrier(x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 class SaddleSearch:
     """Wall time of one dimer step and one double-ended connect.
 
-    Each call builds its own coordinates, mode, and endpoints. There is
-    no setup object to retain. ``warmup_time`` repeats those calls and
-    drops them before sampling, so the cold call is not a sample. A
-    recorded sample is the mean of ``number`` fresh calls from the same
-    numeric start, divided back to one call. Nothing in the warm calls
-    is passed into the timed calls.
+    Each call builds its own coordinates, mode, and endpoints. Setup
+    records the loaded extension before those calls. ``warmup_time``
+    repeats those calls and drops them before sampling, so the cold
+    call is not a sample. A recorded sample is the mean of ``number``
+    fresh calls from the same numeric start, divided back to one call.
+    Nothing in the warm calls is passed into the timed calls.
     """
 
     rounds = 10
@@ -74,15 +74,16 @@ class SaddleSearch:
     min_run_count = 1
     timeout = 300
 
-    def time_dimer_step(self) -> None:
+    def setup(self) -> None:
         _record()
+
+    def time_dimer_step(self) -> None:
         x = np.array([0.4, 0.3], dtype=np.float64)
         mode = np.array([1.0, 0.0], dtype=np.float64)
         search = Stencil.point(x, preset="dimer", mode=mode, max_rotations=4)
         search.step(bowl)
 
     def time_connect(self) -> None:
-        _record()
         left = np.array([-2.0, 0.0, 0.0], dtype=np.float64)
         right = np.array([2.0, 0.0, 0.0], dtype=np.float64)
         connect(barrier, left, right, force_tol=1e-3, max_calls=2000, quench_nodes=True)
@@ -96,15 +97,16 @@ class SaddleMemory:
     repeat = 1
     timeout = 300
 
-    def ray_dimer_step(self) -> None:
+    def setup(self) -> None:
         _record()
+
+    def ray_dimer_step(self) -> None:
         x = np.array([0.4, 0.3], dtype=np.float64)
         mode = np.array([1.0, 0.0], dtype=np.float64)
         search = Stencil.point(x, preset="dimer", mode=mode, max_rotations=4)
         search.step(bowl)
 
     def ray_connect(self) -> None:
-        _record()
         left = np.array([-2.0, 0.0, 0.0], dtype=np.float64)
         right = np.array([2.0, 0.0, 0.0], dtype=np.float64)
         connect(barrier, left, right, force_tol=1e-3, max_calls=2000, quench_nodes=True)

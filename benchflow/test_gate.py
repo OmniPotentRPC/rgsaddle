@@ -463,6 +463,11 @@ class TestSnakefile(unittest.TestCase):
         self.assertIn("benchflow/out/results/pr", text)
         self.assertIn(". benchflow/env.sh", text)
         self.assertIn("bench-runner", (ROOT / "benchflow" / "config.yaml").read_text())
+        saddle = (ROOT / "benchmarks" / "saddle.py").read_text()
+        self.assertLess(saddle.index("def setup"), saddle.index("def time_dimer_step"))
+        self.assertLess(saddle.index("def setup", saddle.index("class SaddleMemory")), saddle.index("def ray_dimer_step"))
+        timed = saddle.split("def time_dimer_step", 1)[1].split("class SaddleMemory", 1)[0]
+        self.assertNotIn("_record()", timed)
         node = platform.node()
         if node and len(node) >= 3:
             for relative in (
