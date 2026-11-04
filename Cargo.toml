@@ -37,10 +37,10 @@ faer = ["dep:faer"]
 [dependencies]
 dlpk = { version = "0.1.5", features = ["ndarray"] }
 # ConFrameWriter::new is RoundTrip and canonical stays off.
-readcon-core = { version = "=0.17.3", optional = true }
-readcon-db = { version = "0.2.0", git = "https://github.com/lode-org/readcon-db", rev = "1e0eb2bc6034c259fe2a789edfae3481de22a944", optional = true }
+readcon-core = { version = "=0.17.3", git = "https://github.com/lode-org/readcon-core", rev = "1465d5344f2dfa2dc64e60d063739e33f58c3745", optional = true }
+readcon-db = { version = "0.2.0", git = "https://github.com/lode-org/readcon-db", rev = "4199499cc796056047361959eb8ec83cf2188932", optional = true }
 # Share the finite-oracle solver revision with downstream hosts.
-rgmin = { version = "0.5.2", git = "https://github.com/OmniPotentRPC/rgmin", rev = "d721485c7973167d3d0b65473103c21ec5a62396" }
+rgmin = { version = "0.5.2", git = "https://github.com/OmniPotentRPC/rgmin", rev = "fb3a852cace852dfc7f60be4b573cff28e96d68f" }
 eindir-core = { version = "0.6.0", features = ["capi"] }
 ndarray = "0.17"
 faer = { version = "0.24.4", optional = true, default-features = false, features = ["std", "linalg"] }

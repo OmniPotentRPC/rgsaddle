@@ -1694,8 +1694,7 @@ dependencies = [
 [[package]]
 name = "readcon-core"
 version = "0.17.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8aef54a62236d969f4b328cc9846b5fcab31979547f39c21ad8628fff6b348ec"
+source = "git+https://github.com/lode-org/readcon-core?rev=1465d5344f2dfa2dc64e60d063739e33f58c3745#1465d5344f2dfa2dc64e60d063739e33f58c3745"
 dependencies = [
  "chemfiles",
  "dlpk",
@@ -1713,7 +1712,7 @@ dependencies = [
 [[package]]
 name = "readcon-db"
 version = "0.2.0"
-source = "git+https://github.com/lode-org/readcon-db?rev=1e0eb2bc6034c259fe2a789edfae3481de22a944#1e0eb2bc6034c259fe2a789edfae3481de22a944"
+source = "git+https://github.com/lode-org/readcon-db?rev=4199499cc796056047361959eb8ec83cf2188932#4199499cc796056047361959eb8ec83cf2188932"
 dependencies = [
  "heed",
  "readcon-core",
@@ -1762,7 +1761,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 [[package]]
 name = "rgmin"
 version = "0.5.2"
-source = "git+https://github.com/OmniPotentRPC/rgmin?rev=d721485c7973167d3d0b65473103c21ec5a62396#d721485c7973167d3d0b65473103c21ec5a62396"
+source = "git+https://github.com/OmniPotentRPC/rgmin?rev=fb3a852cace852dfc7f60be4b573cff28e96d68f#fb3a852cace852dfc7f60be4b573cff28e96d68f"
 dependencies = [
  "cbindgen",
  "dlpk",
