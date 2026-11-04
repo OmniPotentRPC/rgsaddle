@@ -686,7 +686,7 @@ typedef struct {
   double dx;
   double force_tol;
   rgsaddle_force_gate_t force_gate;
-  double max_move;
+  double max_move;   /**< Not read. Kept for the struct layout. */
   int64_t max_inner;
   int32_t kind;      /**< rgsaddle_irc_kind_t */
   int32_t direction; /**< rgsaddle_irc_dir_t */

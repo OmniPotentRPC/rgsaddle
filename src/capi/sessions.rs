@@ -182,7 +182,6 @@ pub unsafe extern "C" fn rgsaddle_irc_create(
         dx: cfg.dx,
         force_tol: cfg.force_tol,
         force_gate,
-        max_move: cfg.max_move,
         max_inner: cfg.max_inner.max(1) as usize,
         kind: if cfg.kind == 1 {
             IrcKind::Morokuma
@@ -235,7 +234,6 @@ pub unsafe extern "C" fn rgsaddle_irc_create_from_surface(
         dx: cfg.dx,
         force_tol: cfg.force_tol,
         force_gate,
-        max_move: cfg.max_move,
         max_inner: cfg.max_inner.max(1) as usize,
         kind: if cfg.kind == 1 {
             IrcKind::Morokuma
@@ -450,6 +448,65 @@ mod irc_abi_tests {
         );
         assert!(out[0].abs() > 1e-8, "kick must leave the saddle");
         unsafe { rgsaddle_irc_free(sess) };
+    }
+
+    fn irc_abi_points(max_move: f64) -> Vec<[f64; 6]> {
+        let saddle = [0.0; 6];
+        let masses = [1.0, 1.0];
+        let mut mode = [0.0; 6];
+        mode[0] = 1.0;
+        let cfg = RgsaddleIrcConfig {
+            version: RgsaddleVersion {
+                major: RGSADDLE_ABI_MAJOR,
+                minor: RGSADDLE_ABI_MINOR,
+            },
+            flags: 0,
+            dx: 0.15,
+            force_tol: 0.05,
+            force_gate: crate::ForceGate::MaxForceOnAtom.to_abi(),
+            max_move,
+            max_inner: 10,
+            kind: 0,
+            direction: 0,
+        };
+        let sess = unsafe {
+            rgsaddle_irc_create(&cfg, 2, saddle.as_ptr(), masses.as_ptr(), mode.as_ptr())
+        };
+        assert!(!sess.is_null());
+        let mut report = RgsaddleReport {
+            version: RgsaddleVersion { major: 0, minor: 0 },
+            flags: 0,
+            status: 0,
+            evaluations: 0,
+            max_force: 0.0,
+            ci_index: 0,
+            iteration: 0,
+            curvature: 0.0,
+            rotations: 0,
+        };
+        let mut points = Vec::new();
+        for _ in 0..5 {
+            let rc = unsafe {
+                rgsaddle_irc_step(sess, Some(well_cb), std::ptr::null_mut(), &mut report)
+            };
+            assert_eq!(rc, RGSADDLE_OK);
+            let mut out = [0.0; 6];
+            assert_eq!(
+                unsafe { rgsaddle_irc_position(sess, out.as_mut_ptr()) },
+                RGSADDLE_OK
+            );
+            points.push(out);
+        }
+        unsafe { rgsaddle_irc_free(sess) };
+        points
+    }
+
+    /// A clamp of 1e-3 per atom would shorten the first step of radius 0.15.
+    #[test]
+    fn irc_abi_does_not_read_max_move() {
+        let clamped = irc_abi_points(1e-3);
+        assert!(clamped[0][0].abs() > 1e-3, "{clamped:?}");
+        assert_eq!(clamped, irc_abi_points(10.0));
     }
 
     #[test]
