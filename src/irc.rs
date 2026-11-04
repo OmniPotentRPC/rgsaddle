@@ -1,13 +1,15 @@
 //! Intrinsic reaction coordinate session: roll from a first-order
 //! saddle to a minimum, one branch at a time.
 //!
-//! Inner geometry is rgmin `IrcTrust` (Sella IRCTrustRegion /
-//! Gonzalez--Schlegel sphere) in the selected coordinate metric.
-//! [`IrcSession::new`] weights atomistic Cartesian coordinates by the
-//! atom masses; [`IrcSession::new_euclidean`] selects unit weights for a
-//! generic-dimensional surface. The default increment is Sella's
-//! QuasiNewtonIRC step, rgmin `qn_irc_get_s` at the level shift that puts
-//! it on the sphere.
+//! The two sphere kinds keep each inner step on an rgmin `IrcTrust`
+//! sphere in the selected coordinate metric: [`IrcKind::SellaSphere`]
+//! about the last accepted point (Sella IRCTrustRegion), and
+//! [`IrcKind::Gs2`] about the Gonzalez and Schlegel pivot half a step
+//! ahead. [`IrcSession::new`] weights atomistic Cartesian coordinates by
+//! the atom masses; [`IrcSession::new_euclidean`] selects unit weights
+//! for a generic-dimensional surface. Each sphere increment is Sella's
+//! QuasiNewtonIRC step, rgmin `qn_irc_get_s` at the level shift that
+//! puts it on the sphere.
 //! [`IrcKind::Morokuma`] is the
 //! Ishida--Morokuma--Komornicki predictor-corrector from
 //! `gpr_optim` `IRCDriver`. Ambient algebra goes through
@@ -41,12 +43,24 @@ pub enum IrcDirection {
 /// How an outer IRC increment is formed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum IrcKind {
-    /// Gonzalez--Schlegel / Sella sphere in the session metric. Default.
-    #[default]
+    /// Gonzalez and Schlegel, J. Chem. Phys. 90, 2154 (1989),
+    /// doi:10.1063/1.456010. The next point is the energy minimum on the
+    /// sphere of radius `dx / 2` about the pivot `x_k - (dx / 2) g / |g|`,
+    /// with the gradient and the step in the session metric. The first
+    /// pivot is `dx / 2` from the saddle along the launch mode. The arc of
+    /// a circle tangent to the gradient at both ends joins the two points,
+    /// so the path error is second order in `dx`.
     Gs2,
     /// Ishida--Morokuma--Komornicki predictor-corrector
-    /// (`gpr_optim` `IRCDriver` Morokuma). Not GS2.
+    /// (`gpr_optim` `IRCDriver` Morokuma).
     Morokuma,
+    /// Sella `IRCTrustRegion` (Hermes, Sargsyan, Najm, and Zador, J. Chem.
+    /// Theory Comput. 18, 6974 (2022), doi:10.1021/acs.jctc.2c00395). The
+    /// next point is the energy minimum on the sphere of radius `dx` about
+    /// the last accepted point, the first about the saddle. The path error
+    /// is first order in `dx`. Default.
+    #[default]
+    SellaSphere,
 }
 
 impl IrcKind {
@@ -55,6 +69,7 @@ impl IrcKind {
         match self {
             Self::Gs2 => 0,
             Self::Morokuma => 1,
+            Self::SellaSphere => 2,
         }
     }
 }
@@ -74,7 +89,7 @@ pub struct IrcConfig {
     pub krylov_dim: usize,
     /// Closed lowest-mode backend. Unlinked kinds fail closed.
     pub eigen_kind: EigensolverKind,
-    /// GS2 is the default; Morokuma is the ORCA / IRCDriver arm.
+    /// [`IrcKind::SellaSphere`] is the default.
     pub kind: IrcKind,
 }
 
@@ -88,7 +103,7 @@ impl Default for IrcConfig {
             dr: 1e-3,
             krylov_dim: 12,
             eigen_kind: EigensolverKind::Lanczos,
-            kind: IrcKind::Gs2,
+            kind: IrcKind::SellaSphere,
         }
     }
 }
@@ -100,9 +115,9 @@ pub struct IrcReport {
     pub max_force: f64,
     pub arc: f64,
     pub inner_steps: usize,
-    /// On a GS2 step: past the kick, the force at or below `force_tol`, and
-    /// positive curvature along the launch mode at this point. The sphere
-    /// radius does not enter.
+    /// On a sphere step: past the kick, the force at or below `force_tol`,
+    /// and positive curvature along the launch mode at this point. The
+    /// sphere radius does not enter.
     pub at_minimum: bool,
 }
 
@@ -112,6 +127,17 @@ struct ModelSpectrum {
     evecs: Array2<f64>,
     /// rgmin `BfgsModel::is_posdef` on these eigenvalues.
     posdef: bool,
+}
+
+/// What [`sphere_increment`] makes of a model minimum inside the sphere.
+#[derive(Clone, Copy)]
+enum Inside {
+    /// The minimum itself.
+    Keep,
+    /// Its radial projection from the centre, as Sella.
+    Radial,
+    /// The point where the line of the step leaves the sphere.
+    Chord,
 }
 
 /// Forward or reverse roll-down from a first-order saddle.
@@ -316,12 +342,31 @@ impl IrcSession {
         }
     }
 
+    /// Radius of the inner sphere, `dx / 2` about the [`IrcKind::Gs2`] pivot.
+    fn radius(&self) -> f64 {
+        match self.config.kind {
+            IrcKind::Gs2 => 0.5 * self.config.dx,
+            _ => self.config.dx,
+        }
+    }
+
     fn trust(&self) -> IrcTrust {
         IrcTrust {
             d1: self.d1.clone(),
             sqrtm: self.sqrtm.clone(),
-            dx: self.config.dx,
+            dx: self.radius(),
         }
+    }
+
+    /// `x_k` less the [`IrcKind::Gs2`] pivot, `(dx / 2) g / |g|` in the
+    /// session metric, as a coordinate displacement.
+    fn pivot_offset(&self, g: &Array1<f64>) -> Array1<f64> {
+        let g_mw = to_mw(g, &self.sqrtm, true);
+        let norm = nrm2(g_mw.view());
+        if norm <= 1e-16 {
+            return Array1::zeros(g.len());
+        }
+        to_mw(&(g_mw * (self.radius() / norm)), &self.sqrtm, true)
     }
 
     /// Sella: project `g` orthogonal to the path in the MW metric.
@@ -359,20 +404,30 @@ impl IrcSession {
 
     /// Sella `QuasiNewtonIRC` plus `IRCTrustRegion` on the current
     /// MW sphere. The BFGS model is identity until the first accepted
-    /// inner pair; GS2 equality is `IrcTrust`.
+    /// inner pair; the sphere is `IrcTrust`.
+    /// A [`IrcKind::Gs2`] point starts on its sphere uphill of the pivot,
+    /// where the radial projection of a model minimum between the two is
+    /// that point itself, so an interior Gs2 step runs on along its line.
     fn restricted_increment(&self, g: &Array1<f64>, spectrum: &ModelSpectrum) -> Array1<f64> {
-        let allow_interior = spectrum.posdef && self.arc > 8.0 * self.config.dx;
-        sphere_increment(&self.trust(), spectrum, g, allow_interior)
+        let inside = if spectrum.posdef && self.arc > 8.0 * self.config.dx {
+            Inside::Keep
+        } else if self.config.kind == IrcKind::Gs2 {
+            Inside::Chord
+        } else {
+            Inside::Radial
+        };
+        sphere_increment(&self.trust(), spectrum, g, inside)
     }
 
-    /// A GS2 minimum: past the kick, the force at or below `force_tol`, and
-    /// positive curvature along the saddle mode on the surface itself.
+    /// A minimum on a sphere branch: past the kick, the force at or below
+    /// `force_tol`, and positive curvature along the saddle mode on the
+    /// surface itself.
     /// Beside the saddle that curvature is still the negative eigenvalue,
     /// even where the force is small and the quasi-Newton model is positive
     /// definite, and a rejected trial halves `dx` there. The curvature
     /// costs one surface call, made only once the force is at or below
     /// `force_tol`.
-    fn gs2_minimum<S: PointSurface>(
+    fn sphere_minimum<S: PointSurface>(
         &self,
         surface: &S,
         kicked: bool,
@@ -392,19 +447,24 @@ impl IrcSession {
         Ok(dot(self.mode.view(), hv.view()) > 0.0)
     }
 
-    /// One outer IRC move. [`IrcKind::Gs2`] is Sella / GS2;
-    /// [`IrcKind::Morokuma`] is the IRCDriver predictor-corrector.
+    /// One outer IRC move. [`IrcKind::SellaSphere`] and [`IrcKind::Gs2`]
+    /// minimize on a sphere; [`IrcKind::Morokuma`] is the IRCDriver
+    /// predictor-corrector.
     pub fn step<S: PointSurface>(&mut self, surface: &S) -> Result<IrcReport, SaddleError> {
         if self.config.kind == IrcKind::Morokuma {
             return self.step_morokuma(surface);
         }
-        self.step_gs2(surface)
+        self.step_sphere(surface)
     }
 
-    fn step_gs2<S: PointSurface>(&mut self, surface: &S) -> Result<IrcReport, SaddleError> {
+    fn step_sphere<S: PointSurface>(&mut self, surface: &S) -> Result<IrcReport, SaddleError> {
         let kicked = self.first;
+        let x_from = self.x.clone();
         if self.first {
             axpy(1.0, self.d1.view(), &mut self.x);
+            if self.config.kind == IrcKind::Gs2 {
+                self.d1.mapv_inplace(|c| 0.5 * c);
+            }
             self.first = false;
         }
         let x_start = self.x.clone();
@@ -412,6 +472,9 @@ impl IrcSession {
         let (energy0, g0) = surface.eval(self.x.view())?;
         if !g0.iter().all(|v| v.is_finite()) {
             return Err(SaddleError::NonFinite("irc gradient"));
+        }
+        if !kicked && self.config.kind == IrcKind::Gs2 {
+            self.d1 = self.pivot_offset(&g0);
         }
         let max_force0 = self.config.force_gate.value(g0.view());
         let fmax_inner = self.config.force_tol.min(0.01);
@@ -426,7 +489,7 @@ impl IrcSession {
             let s = self.restricted_increment(&g, &spectrum);
             let interior = spectrum.posdef
                 && self.arc > 8.0 * self.config.dx
-                && self.trust().cons(&s) + 1e-8 < self.config.dx;
+                && self.trust().cons(&s) + 1e-8 < self.radius();
             if inner_steps == 1
                 && let Some(prev) = &self.last_outer
             {
@@ -437,7 +500,7 @@ impl IrcSession {
                 if spectrum.posdef
                     && self.arc > 8.0 * self.config.dx
                     && dot(prev.view(), s.view()) < 0.0
-                    && self.gs2_minimum(surface, kicked, max_force, &g)?
+                    && self.sphere_minimum(surface, kicked, max_force, &g)?
                 {
                     self.d1.fill(0.0);
                     self.last_step = None;
@@ -454,7 +517,7 @@ impl IrcSession {
                 && spectrum.posdef
                 && self.arc > 8.0 * self.config.dx
                 && dot(prev.view(), s.view()) < 0.0
-                && self.gs2_minimum(surface, kicked, max_force, &g)?
+                && self.sphere_minimum(surface, kicked, max_force, &g)?
             {
                 self.d1.fill(0.0);
                 self.last_step = None;
@@ -499,7 +562,10 @@ impl IrcSession {
         self.last_outer = Some(outer);
         self.d1.fill(0.0);
         self.last_step = None;
-        self.arc += self.config.dx;
+        self.arc += match self.config.kind {
+            IrcKind::Gs2 => nrm2(to_mw(&(&self.x - &x_from), &self.sqrtm, false).view()),
+            _ => self.config.dx,
+        };
         if !rejected {
             self.config.dx = (2.0 * self.config.dx).min(self.dx_target);
         }
@@ -507,7 +573,7 @@ impl IrcSession {
         // This also refuses the kick step itself, even where |F| is already
         // at or below fmax beside the saddle. A step whose last trial was
         // rejected still ends on an accepted point with this force.
-        let at_minimum = self.gs2_minimum(surface, kicked, max_force, &g)?;
+        let at_minimum = self.sphere_minimum(surface, kicked, max_force, &g)?;
         Ok(IrcReport {
             energy,
             max_force,
@@ -671,7 +737,7 @@ fn sphere_increment(
     trust: &IrcTrust,
     spectrum: &ModelSpectrum,
     g: &Array1<f64>,
-    allow_interior: bool,
+    inside: Inside,
 ) -> Array1<f64> {
     let g_mw = to_mw(g, &trust.sqrtm, true);
     let d1_mw = to_mw(&trust.d1, &trust.sqrtm, false);
@@ -681,10 +747,10 @@ fn sphere_increment(
     };
     let s0 = step_at(0.0);
     if trust.cons(&s0) <= trust.dx + 1e-14 {
-        return if allow_interior {
-            s0
-        } else {
-            trust.project(&s0)
+        return match inside {
+            Inside::Keep => s0,
+            Inside::Radial => trust.project(&s0),
+            Inside::Chord => chord_exit(&d1_mw, &s0, trust),
         };
     }
     let curvature = spectrum.evals.mapv(f64::abs);
@@ -710,6 +776,21 @@ fn sphere_increment(
         }
     }
     step_at(hi)
+}
+
+/// `s` scaled to `tau s / |s|` in MW coordinates, the root `tau >= 0` of
+/// `|d1 + tau s / |s|| = dx`: past a model minimum inside the sphere to the
+/// far side.
+fn chord_exit(d1_mw: &Array1<f64>, s: &Array1<f64>, trust: &IrcTrust) -> Array1<f64> {
+    let s_mw = to_mw(s, &trust.sqrtm, false);
+    let len = nrm2(s_mw.view());
+    if len <= 1e-16 {
+        return trust.project(s);
+    }
+    let b = dot(d1_mw.view(), s_mw.view()) / len;
+    let c = dot(d1_mw.view(), d1_mw.view()) - trust.dx * trust.dx;
+    let tau = -b + (b * b - c).max(0.0).sqrt();
+    s.mapv(|v| v * tau / len)
 }
 
 /// Mass-weighted path-orthogonal force. Algebra is `rgmin::vecops`.
@@ -874,8 +955,8 @@ mod tests {
     }
 
     #[test]
-    fn default_kind_is_gs2() {
-        assert_eq!(IrcConfig::default().kind, IrcKind::Gs2);
+    fn default_kind_is_the_sella_sphere() {
+        assert_eq!(IrcConfig::default().kind, IrcKind::SellaSphere);
     }
 
     #[test]
@@ -1017,7 +1098,7 @@ mod tests {
     }
 
     #[test]
-    fn inner_gs2_step_stays_on_the_mw_sphere() {
+    fn inner_sella_step_stays_on_the_mw_sphere() {
         let dx = 0.15;
         let masses = Array1::from(vec![1.0, 4.0]);
         let saddle = Array1::from(vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
@@ -1030,6 +1111,65 @@ mod tests {
             (r - dx).abs() < 1e-8,
             "inner step left the MW sphere: cons={r} dx={dx}"
         );
+    }
+
+    #[test]
+    fn gs2_arc_adds_the_mw_chord_of_each_step() {
+        let masses = Array1::from(vec![1.0, 4.0]);
+        let sqrtm = sqrt_masses_3n(masses.as_slice().unwrap());
+        let saddle = Array1::from(vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+        let mut mode = Array1::zeros(6);
+        mode[0] = 1.0;
+        mode[3] = 1.0;
+        let mut irc = IrcSession::new(
+            IrcConfig {
+                dx: 0.15,
+                force_tol: 1e-3,
+                kind: IrcKind::Gs2,
+                ..IrcConfig::default()
+            },
+            saddle.clone(),
+            masses,
+            mode,
+            IrcDirection::Forward,
+        )
+        .unwrap();
+        let mut last = saddle;
+        let mut arc = 0.0;
+        for _ in 0..4 {
+            let report = irc.step(&Well).unwrap();
+            let x = irc.position().to_owned();
+            arc += nrm2(to_mw(&(&x - &last), &sqrtm, false).view());
+            assert_eq!(report.arc, arc);
+            last = x;
+        }
+    }
+
+    #[test]
+    fn interior_gs2_step_runs_on_where_the_radial_one_stays() {
+        let dx = 0.2;
+        let sqrtm = sqrt_masses_3n(&[1.0, 4.0]);
+        let mut d1_mw = Array1::zeros(6);
+        d1_mw[3] = dx;
+        let trust = IrcTrust {
+            d1: to_mw(&d1_mw, &sqrtm, true),
+            sqrtm: sqrtm.clone(),
+            dx,
+        };
+        let toward_centre = to_mw(&(&d1_mw * -0.3), &sqrtm, true);
+        let radial = to_mw(&trust.project(&toward_centre), &sqrtm, false);
+        assert!(nrm2(radial.view()) < 1e-12, "{radial}");
+        let chord = to_mw(&chord_exit(&d1_mw, &toward_centre, &trust), &sqrtm, false);
+        assert!(nrm2((&chord + &d1_mw * 2.0).view()) < 1e-12, "{chord}");
+
+        let mut oblique_mw = &d1_mw * -0.3;
+        oblique_mw[0] = 0.05;
+        let s = chord_exit(&d1_mw, &to_mw(&oblique_mw, &sqrtm, true), &trust);
+        assert!((trust.cons(&s) - dx).abs() < 1e-12);
+        let s_mw = to_mw(&s, &sqrtm, false);
+        let cos =
+            dot(s_mw.view(), oblique_mw.view()) / (nrm2(s_mw.view()) * nrm2(oblique_mw.view()));
+        assert!((cos - 1.0).abs() < 1e-12, "cos {cos}");
     }
 
     fn sorted(v: &Array1<f64>) -> Vec<f64> {

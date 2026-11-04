@@ -1,0 +1,8 @@
+The new kind ~IrcKind::SellaSphere~ takes the energy minimum on the mass-weighted sphere of radius ~dx~ about the last point, the first about the saddle.
+Sella's ~IRCTrustRegion~ takes the same step (Hermes, Sargsyan, Najm, and Zador, J. Chem. Theory Comput. 18, 6974 (2022), doi:10.1021/acs.jctc.2c00395).
+It is the default kind of ~IrcConfig~ and takes the step that ~IrcKind::Gs2~ took before.
+C ABI minor 34 adds ~RGSADDLE_IRC_SELLA_SPHERE~ = 2, and the C++ helper ~irc_config~ selects it.
+Minor 33 already names the live Onsager-Machlup spring, and its IRC kind 0 stays the sphere about the last point.
+A config whose version minor is 33 or older runs it for every kind but ~RGSADDLE_IRC_MOROKUMA~, as those versions did, so kind 0 there keeps its old path.
+From minor 34, kind 0 is the new ~Gs2~ step, and create returns NULL on a kind other than 0, 1 and 2.
+The Python ~IrcKind~ gains ~SELLA_SPHERE~ = 2.

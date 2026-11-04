@@ -15,6 +15,7 @@ fn to_abi_matches_the_python_and_c_table() {
 
     assert_eq!(IrcKind::Gs2.to_abi(), 0);
     assert_eq!(IrcKind::Morokuma.to_abi(), 1);
+    assert_eq!(IrcKind::SellaSphere.to_abi(), 2);
 
     assert_eq!(MinModeKind::Dimer.to_abi(), 0);
     assert_eq!(MinModeKind::Lanczos.to_abi(), 1);

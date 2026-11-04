@@ -5,7 +5,7 @@
 #include <stddef.h>
 
 _Static_assert(RGSADDLE_ABI_MAJOR == 1u, "main ABI major");
-_Static_assert(RGSADDLE_ABI_MINOR == 33u, "ABI minor");
+_Static_assert(RGSADDLE_ABI_MINOR == 34u, "ABI minor");
 _Static_assert(RGSADDLE_BAND_NO_MIN_MODE == (1ull << 3), "band flag bit 3");
 _Static_assert(RGSADDLE_REQ_ONE_IMAGE == (1ull << 0), "request flag bit 0");
 _Static_assert(RGSADDLE_REQ_CLIMBING_IMAGE == (1ull << 1), "request flag bit 1");
@@ -330,6 +330,9 @@ _Static_assert(_Generic(&rgsaddle_sella_saddle_set_symmetrized_ritz, abi24_signa
 typedef rgsaddle_status_t (*abi25_signature_rgsaddle_sella_saddle_set_small_system_atom_ceiling)(
     RgsaddleSellaSaddle *session, int32_t enabled);
 _Static_assert(_Generic(&rgsaddle_sella_saddle_set_small_system_atom_ceiling, abi25_signature_rgsaddle_sella_saddle_set_small_system_atom_ceiling: 1, default: 0), "rgsaddle_sella_saddle_set_small_system_atom_ceiling signature");
+_Static_assert(RGSADDLE_IRC_GS2 == 0, "rgsaddle_irc_kind_t GS2");
+_Static_assert(RGSADDLE_IRC_MOROKUMA == 1, "rgsaddle_irc_kind_t MOROKUMA");
+_Static_assert(RGSADDLE_IRC_SELLA_SPHERE == 2, "rgsaddle_irc_kind_t SELLA_SPHERE (minor 34)");
 
 typedef rgsaddle_status_t (*abi32_signature_rgsaddle_minmode_set_torque_window)(
     RgsaddleMinMode *session, int32_t window);
