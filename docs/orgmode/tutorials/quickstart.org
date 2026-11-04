@@ -59,9 +59,10 @@ let x_rev = session.position()[0];
 assert!(x_fwd * x_rev < 0.0);
 #+end_src
 
-~from_surface~ estimates the imaginary mode with matrix-free
-Lanczos (finite-difference ~H v~). It does not form a dense
-Hessian or invoke a dense eigensolver.
+~from_surface~ estimates the lowest mode of the mass-weighted
+Hessian ~M^{-1/2} H M^{-1/2}~ with matrix-free Lanczos
+(finite-difference ~H v~). It does not form a dense Hessian or
+invoke a dense eigensolver.
 
 ** The resulting path
 

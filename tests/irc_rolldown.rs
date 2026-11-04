@@ -74,6 +74,73 @@ fn kick_mode_comes_from_matrix_free_lanczos_not_a_full_heev() {
     assert!(x0.abs() > 1e-8, "Lanczos kick must leave the saddle");
 }
 
+/// `E = x^T H x / 2` on two atoms. `COUPLED` couples x of atom 0 with x of
+/// atom 1, and every other coordinate has curvature `UNCOUPLED`.
+struct CoupledSaddle;
+
+const COUPLED: [[f64; 2]; 2] = [[-1.0, 2.0], [2.0, 3.0]];
+const UNCOUPLED: f64 = 5.0;
+
+impl PointSurface for CoupledSaddle {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        let mut g = &x * UNCOUPLED;
+        g[0] = COUPLED[0][0] * x[0] + COUPLED[0][1] * x[3];
+        g[3] = COUPLED[1][0] * x[0] + COUPLED[1][1] * x[3];
+        Ok((0.5 * x.dot(&g), g))
+    }
+}
+
+/// The IRC leaves the saddle along the lowest eigenvector `u` of
+/// `M^{-1/2} H M^{-1/2}`, so the kick is `dx M^{-1/2} u`. With masses 1
+/// and 16 the lowest Cartesian eigenvector of `H` is a different direction.
+/// rgmin's Lanczos stops once its residual is at most `1e-8 (1 + |theta|)`
+/// (`EigenParams::tol` unset), and by Davis and Kahan the sine of the angle
+/// to `u` is at most that residual over the gap to the next eigenvalue.
+#[test]
+fn from_surface_launches_along_the_mass_weighted_mode() {
+    let masses = Array1::from(vec![1.0, 16.0]);
+    let a = COUPLED[0][0] / masses[0];
+    let b = COUPLED[0][1] / (masses[0] * masses[1]).sqrt();
+    let d = COUPLED[1][1] / masses[1];
+    let half_split = (0.25 * (a - d).powi(2) + b * b).sqrt();
+    let lowest = 0.5 * (a + d) - half_split;
+    let next = (0.5 * (a + d) + half_split)
+        .min(UNCOUPLED / masses[0])
+        .min(UNCOUPLED / masses[1]);
+    let bound = 1e-8 * (1.0 + lowest.abs()) / (next - lowest);
+    let mut u = Array1::zeros(6);
+    u[0] = b;
+    u[3] = lowest - a;
+    u /= u.dot(&u).sqrt();
+
+    let dx = 0.1;
+    let seed = Array1::from(vec![1.0, 0.2, -0.1, 0.3, 0.05, 0.1]);
+    let mut session = IrcSession::from_surface(
+        IrcConfig {
+            dx,
+            max_inner: 0,
+            ..IrcConfig::default()
+        },
+        Array1::zeros(6),
+        masses.clone(),
+        seed,
+        IrcDirection::Forward,
+        &CoupledSaddle,
+    )
+    .unwrap();
+    let _ = session.step(&CoupledSaddle).unwrap();
+    let kick = session.position().to_owned();
+    let mut q = Array1::from_iter((0..6).map(|i| kick[i] * masses[i / 3].sqrt()));
+    q /= q.dot(&q).sqrt();
+    let rejection = &q - &u * q.dot(&u);
+    let across = rejection.dot(&rejection).sqrt();
+    assert!(
+        across <= bound,
+        "kick {kick:?} is {} degrees from the mass-weighted mode {u:?}, bound {bound:e}",
+        across.asin().to_degrees()
+    );
+}
+
 #[test]
 fn morokuma_forward_and_reverse_leave_opposite_ways() {
     let saddle = Array1::zeros(6);

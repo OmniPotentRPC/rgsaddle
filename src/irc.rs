@@ -269,9 +269,10 @@ impl IrcSession {
         self.hess.seed_mode(&u, -1.0);
     }
 
-    /// Estimate the imaginary mode with matrix-free Lanczos (FD Hessian
-    /// actions). This is the ChASE / PRIMME / Sella lesson: IRC needs
-    /// one extremal pair, not a full ELPA / SLATE heev of H.
+    /// Launch along the lowest eigenvector of the mass-weighted Hessian
+    /// `M^{-1/2} H M^{-1/2}`, the direction in which Fukui's IRC leaves the
+    /// saddle, from matrix-free Lanczos on finite-difference Hessian
+    /// actions. `seed` and the surface's excluded modes are Cartesian.
     pub fn from_surface<S: crate::minmode::PointSurface>(
         config: IrcConfig,
         saddle: Array1<f64>,
@@ -280,6 +281,12 @@ impl IrcSession {
         direction: IrcDirection,
         surface: &S,
     ) -> Result<Self, SaddleError> {
+        let n3 = saddle.len();
+        if n3 == 0 || masses.len() * 3 != n3 || seed.len() != n3 {
+            return Err(SaddleError::Shape(
+                "masses (N) and seed (3N) must match a nonzero saddle".into(),
+            ));
+        }
         let (_, g0) = surface.eval(saddle.view())?;
         let params = EigenParams {
             kind: config.eigen_kind,
@@ -290,10 +297,10 @@ impl IrcSession {
             surface,
             saddle.view(),
             g0.view(),
+            &sqrt_masses_3n(masses.as_slice().unwrap_or(&[])),
             seed,
             config.dr,
             params,
-            "IRC lowest mode",
         )?;
         Self::new(config, saddle, masses, mode, direction)
     }
@@ -791,9 +798,11 @@ fn hessian_action<S: PointSurface>(
     Ok((&g1 - &g0) * (magnitude / dr))
 }
 
+/// `M^{-1/2} H M^{-1/2}` on the complement of the excluded directions.
 struct FdHvp<'a, S: PointSurface> {
     surface: &'a S,
     g0: Array1<f64>,
+    sqrtm: &'a Array1<f64>,
     dr: f64,
     fail: RefCell<Option<SaddleError>>,
     space: Complement,
@@ -801,9 +810,9 @@ struct FdHvp<'a, S: PointSurface> {
 
 impl<S: PointSurface> ApplyHessian for FdHvp<'_, S> {
     fn apply_hessian(&self, x: ArrayView1<f64>, v: ArrayView1<f64>) -> Array1<f64> {
-        let cartesian = self.space.lift(v);
+        let cartesian = self.space.lift(v) / self.sqrtm;
         match hessian_action(self.surface, x, self.g0.view(), cartesian.view(), self.dr) {
-            Ok(hv) => self.space.reduce(hv.view()),
+            Ok(hv) => self.space.reduce((hv / self.sqrtm).view()),
             Err(e) => {
                 self.fail.replace(Some(e));
                 Array1::zeros(v.len())
@@ -812,14 +821,17 @@ impl<S: PointSurface> ApplyHessian for FdHvp<'_, S> {
     }
 }
 
+/// Lowest eigenpair of the mass-weighted Hessian at `x`, with the mode
+/// returned as a Cartesian displacement `M^{-1/2} u`. A Cartesian excluded
+/// direction `e` is the mass-weighted direction `M^{1/2} e`.
 fn lowest_via_fd<S: PointSurface>(
     surface: &S,
     x: ArrayView1<f64>,
     g0: ArrayView1<f64>,
+    sqrtm: &Array1<f64>,
     seed: Array1<f64>,
     dr: f64,
     params: EigenParams,
-    what: &str,
 ) -> Result<(Array1<f64>, f64, usize), SaddleError> {
     let excluded = surface.excluded_modes(x)?;
     if excluded.ncols() != x.len() || !excluded.iter().all(|v| v.is_finite()) {
@@ -829,12 +841,12 @@ fn lowest_via_fd<S: PointSurface>(
     }
     let mut space = Complement::new(x.len());
     for direction in excluded.rows() {
-        space.exclude(direction);
+        space.exclude((&direction * sqrtm).view());
     }
     if space.dimension() == 0 {
         return Err(SaddleError::Shape("minimum-mode space is empty".into()));
     }
-    let mut reduced_seed = space.reduce(seed.view());
+    let mut reduced_seed = space.reduce((seed * sqrtm).view());
     if reduced_seed.dot(&reduced_seed).sqrt() <= 64.0 * f64::EPSILON {
         reduced_seed = Array1::from_iter(
             (0..space.dimension()).map(|i| ((i + 1) as f64 * 1.618033988749895).sin()),
@@ -843,6 +855,7 @@ fn lowest_via_fd<S: PointSurface>(
     let h = FdHvp {
         surface,
         g0: g0.to_owned(),
+        sqrtm,
         dr,
         fail: RefCell::new(None),
         space,
@@ -853,7 +866,7 @@ fn lowest_via_fd<S: PointSurface>(
             if let Some(surf) = h.fail.into_inner() {
                 return Err(surf);
             }
-            return Err(SaddleError::Solver(format!("{what}: {e}")));
+            return Err(SaddleError::Solver(format!("IRC lowest mode: {e}")));
         }
     };
     if let Some(surf) = h.fail.into_inner() {
@@ -862,7 +875,8 @@ fn lowest_via_fd<S: PointSurface>(
     if !out.vector.iter().all(|v| v.is_finite()) || !out.value.is_finite() {
         return Err(SaddleError::NonFinite("lowest-mode eigenpair"));
     }
-    Ok((h.space.lift(out.vector.view()), out.value, out.actions))
+    let mode = h.space.lift(out.vector.view()) / sqrtm;
+    Ok((mode, out.value, out.actions))
 }
 
 #[cfg(test)]

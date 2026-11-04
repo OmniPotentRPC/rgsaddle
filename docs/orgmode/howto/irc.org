@@ -3,7 +3,7 @@
 
 ~IrcSession~ traces the intrinsic reaction coordinate (IRC) on either side of a supplied saddle. ~IrcKind::Gs2~ uses the moving mass-weighted constraint; ~IrcKind::Morokuma~ selects the predictor-corrector path. Each call to ~step~ performs one outer IRC move.
 
-~new~ accepts a molecular Cartesian packing and atom masses. ~new_euclidean~ accepts an arbitrary nonzero dimension with unit coordinate weights. ~from_surface~ estimates the launch mode through Hessian actions; a host with a measured mode can pass it to ~new~.
+~new~ accepts a molecular Cartesian packing and atom masses. ~new_euclidean~ accepts an arbitrary nonzero dimension with unit coordinate weights. ~from_surface~ estimates the launch mode through Hessian actions as the lowest eigenvector of the mass-weighted Hessian. A host can instead pass a measured mode to ~new~.
 
 ~set_direction~ restores the saddle and reverses the launch. ~reset~ clears the approximation at a surface change. The GS2 step rejects an energy increase above its specified numerical threshold and reduces the radius.
 Each later step without a rejection doubles the radius back up to the requested one.
