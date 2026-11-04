@@ -251,6 +251,32 @@ fn gs2_path_error_is_second_order_in_the_radius() {
     }
 }
 
+/// Every `Gs2` step at the finest fitted radius, with the inner stop of the
+/// order fits, reaches that stop before its last allowed trial.
+#[test]
+fn gs2_steps_at_the_finest_radius_stop_before_the_last_trial() {
+    let dx = COARSEST / 2f64.powi(HALVINGS);
+    let (saddle, mode) = saddle_and_mode();
+    for direction in [IrcDirection::Forward, IrcDirection::Reverse] {
+        let config = IrcConfig {
+            dx,
+            force_tol: 1e-4,
+            kind: IrcKind::Gs2,
+            ..IrcConfig::default()
+        };
+        let max_inner = config.max_inner;
+        let mut session =
+            IrcSession::new_euclidean(config, saddle.clone(), mode.clone(), direction).unwrap();
+        for step in 1..=(ORDER_ARC / dx).round() as usize {
+            let report = session.step(&MuellerBrown).unwrap();
+            assert!(
+                report.inner_steps < max_inner,
+                "{direction:?} step {step} used all {max_inner} trials"
+            );
+        }
+    }
+}
+
 /// The minimum on the sphere about the last point leaves along the right
 /// tangent with the wrong curvature (Gonzalez and Schlegel 1989, of the
 /// Mueller and Brown step), so the path error falls as the radius.
