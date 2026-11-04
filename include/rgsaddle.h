@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 34u
+#define RGSADDLE_ABI_MINOR 35u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -668,9 +668,20 @@ rgsaddle_status_t rgsaddle_kappa_dimer_force(const rgsaddle_kappa_config_t *conf
 
 
 
+/**
+ * RGSADDLE_IRC_GS2 is the Gonzalez and Schlegel step: the energy minimum
+ * on the mass-weighted sphere of radius dx/2 about a pivot dx/2 down
+ * the gradient. RGSADDLE_IRC_SELLA_SPHERE (ABI minor 35) is Sella's
+ * step, the minimum on the sphere of radius dx about the last point.
+ * A config whose version minor is 34 or older runs the Sella sphere for
+ * every kind but RGSADDLE_IRC_MOROKUMA, as those versions did. Minor 34
+ * is the curvature probe and leaves IRC kinds unchanged. From minor 35
+ * create returns NULL on an unknown kind.
+ */
 typedef enum {
   RGSADDLE_IRC_GS2 = 0,
-  RGSADDLE_IRC_MOROKUMA = 1
+  RGSADDLE_IRC_MOROKUMA = 1,
+  RGSADDLE_IRC_SELLA_SPHERE = 2
 } rgsaddle_irc_kind_t;
 
 typedef enum {

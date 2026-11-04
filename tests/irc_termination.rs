@@ -1,5 +1,6 @@
-//! How a GS2 branch of the intrinsic reaction coordinate (IRC) ends on two
-//! saddles that eOn hands to rgsaddle.
+//! How a branch of the intrinsic reaction coordinate (IRC) under the
+//! default step, `IrcKind::SellaSphere`, ends on two saddles that eOn hands
+//! to rgsaddle.
 //!
 //! The fixtures carry a saddle and its lowest mode as eOn's minimum-mode
 //! search refines them, one atom per line: fixed flag, mass, position,
