@@ -41,3 +41,12 @@ docs/source/explanation.rst
 docs/source/howto.rst
 docs/source/reference.rst
 docs/source/seat.rst
+
+# asv results and the local machine file
+.asv/
+benchflow/out/
+.asv-run-*.conf.json
+
+.snakemake/
+__pycache__/
+*.pyc
