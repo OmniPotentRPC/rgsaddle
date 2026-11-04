@@ -83,6 +83,7 @@ fn band_forces_with_gate<S: BandSurface + ?Sized>(
     if !energies.iter().all(|e| e.is_finite()) {
         return Err(SaddleError::NonFinite("band energies"));
     }
+    let springs = config.spring.at_energies(energies.view());
     let mut tangents = Array2::zeros((n_images - 2, dof));
     let mut force = Array1::zeros((n_images - 2) * dof);
     for i in 1..n_images - 1 {
@@ -103,7 +104,7 @@ fn band_forces_with_gate<S: BandSurface + ?Sized>(
             energies[i + 1],
         )?;
         let true_force = -&gradients.row(i);
-        let spring = config.spring.compute(
+        let spring = springs.compute(
             i,
             tangent.view(),
             dist_next,
