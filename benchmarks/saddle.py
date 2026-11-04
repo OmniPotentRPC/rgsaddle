@@ -2,9 +2,39 @@
 
 from __future__ import annotations
 
+import hashlib
+import os
+from pathlib import Path
+
 import numpy as np
 
 from rgsaddle import Stencil, connect
+
+_RECORDED = False
+
+
+def _record() -> None:
+    """Write the loaded extension checksum once per process.
+
+    Each round is its own process. The extension contains the Rust
+    static library the search calls, so its checksum is that commit's
+    code.
+    """
+    global _RECORDED
+    if _RECORDED:
+        return
+    _RECORDED = True
+    env = os.environ.get("ASV_ENV_DIR")
+    if not env:
+        return
+    import rgsaddle._core as core
+
+    path = Path(core.__file__).resolve()
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    commit = os.environ.get("ASV_COMMIT", "")
+    line = f"{commit}\t{path}\t{digest}\n"
+    with (Path(env) / "lib-load.log").open("a", encoding="utf-8") as handle:
+        handle.write(line)
 
 
 def bowl(x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -45,12 +75,14 @@ class SaddleSearch:
     timeout = 300
 
     def time_dimer_step(self) -> None:
+        _record()
         x = np.array([0.4, 0.3], dtype=np.float64)
         mode = np.array([1.0, 0.0], dtype=np.float64)
         search = Stencil.point(x, preset="dimer", mode=mode, max_rotations=4)
         search.step(bowl)
 
     def time_connect(self) -> None:
+        _record()
         left = np.array([-2.0, 0.0, 0.0], dtype=np.float64)
         right = np.array([2.0, 0.0, 0.0], dtype=np.float64)
         connect(barrier, left, right, force_tol=1e-3, max_calls=2000, quench_nodes=True)
@@ -65,12 +97,14 @@ class SaddleMemory:
     timeout = 300
 
     def ray_dimer_step(self) -> None:
+        _record()
         x = np.array([0.4, 0.3], dtype=np.float64)
         mode = np.array([1.0, 0.0], dtype=np.float64)
         search = Stencil.point(x, preset="dimer", mode=mode, max_rotations=4)
         search.step(bowl)
 
     def ray_connect(self) -> None:
+        _record()
         left = np.array([-2.0, 0.0, 0.0], dtype=np.float64)
         right = np.array([2.0, 0.0, 0.0], dtype=np.float64)
         connect(barrier, left, right, force_tol=1e-3, max_calls=2000, quench_nodes=True)

@@ -435,6 +435,8 @@ class TestPins(unittest.TestCase):
             wheel_text = wheel.read_text()
             self.assertNotIn(">=", wheel_text)
             self.assertIn('"-Dbuildtype=release"', wheel_text)
+        self.assertIn("cmake.build-type=Release", build_text)
+        self.assertIn("record_options.py", build_text)
 
     def test_derive_conf_points_at_the_requested_results_directory(self):
         with tempfile.TemporaryDirectory() as tmp:

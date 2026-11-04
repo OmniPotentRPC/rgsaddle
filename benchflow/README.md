@@ -25,6 +25,12 @@ so the gate is at least as wide as every calibration ratio.
 `factor` is `1 + relative_threshold`.
 Each benchmark keeps its own factor.
 
+The wheel is built with ``cmake.build-type=Release``.
+That is already the scikit-build-core default, but the build command sets it anyway.
+It then reads ``CMAKE_BUILD_TYPE`` from the CMake cache and stops when that value is not Release.
+Cargo follows the same build type.
+Each round records the path and checksum of the loaded extension.
+
 Each run writes asv results under `benchflow/out/results/<run>`.
 From those results, the exporter takes the one result for the run's commit, machine, and environment.
 It fails when no result or more than one result matches.
