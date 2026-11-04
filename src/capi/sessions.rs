@@ -662,6 +662,34 @@ mod irc_abi_tests {
         unsafe { rgsaddle_sella_saddle_free(sess) };
     }
     #[test]
+    fn sella_saddle_small_system_atom_ceiling_abi_takes_zero_or_one() {
+        let cfg = RgsaddleSellaSaddleConfig {
+            version: RgsaddleVersion {
+                major: RGSADDLE_ABI_MAJOR,
+                minor: RGSADDLE_ABI_MINOR,
+            },
+            flags: 0,
+            delta: 0.1,
+            force_tol: 0.05,
+            force_gate: crate::ForceGate::MaxForceOnAtom.to_abi(),
+            order: 1,
+        };
+        let x = [0.2, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let masses = [1.0, 1.0];
+        let sess = unsafe { rgsaddle_sella_saddle_create(&cfg, 2, x.as_ptr(), masses.as_ptr()) };
+        assert!(!sess.is_null());
+        let set = |v| unsafe { rgsaddle_sella_saddle_set_small_system_atom_ceiling(sess, v) };
+        assert_eq!(set(1), RGSADDLE_OK);
+        assert_eq!(set(0), RGSADDLE_OK);
+        assert_eq!(set(2), RGSADDLE_INVALID_PARAMETER);
+        assert_eq!(set(-1), RGSADDLE_INVALID_PARAMETER);
+        assert_eq!(
+            unsafe { rgsaddle_sella_saddle_set_small_system_atom_ceiling(std::ptr::null_mut(), 1) },
+            RGSADDLE_NULL_SESSION
+        );
+        unsafe { rgsaddle_sella_saddle_free(sess) };
+    }
+    #[test]
     fn sella_saddle_seed_abi_refuses_invalid_modes() {
         let cfg = RgsaddleSellaSaddleConfig {
             version: RgsaddleVersion {
@@ -744,6 +772,12 @@ mod irc_abi_tests {
         };
         let session = unsafe { rgsaddle_sella_saddle_create(&cfg, 2, x.as_ptr(), masses.as_ptr()) };
         assert!(!session.is_null());
+        // The saddle is about 0.22 (sqrt 0.05) from the start, past the 0.1
+        // atom ceiling, and one step has to reach it.
+        assert_eq!(
+            unsafe { rgsaddle_sella_saddle_set_small_system_atom_ceiling(session, 0) },
+            RGSADDLE_OK
+        );
         assert_eq!(
             unsafe { rgsaddle_sella_saddle_seed_mode(session, mode.as_ptr(), -1.0) },
             RGSADDLE_OK
@@ -1583,6 +1617,27 @@ pub unsafe extern "C" fn rgsaddle_sella_saddle_set_symmetrized_ritz(
         return RGSADDLE_INVALID_PARAMETER;
     }
     unsafe { (*session).session.set_symmetrized_ritz(enabled == 1) };
+    RGSADDLE_OK
+}
+
+/// # Safety
+/// `session` is a live session or null. `enabled` is 0 or 1.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_sella_saddle_set_small_system_atom_ceiling(
+    session: *mut RgsaddleSellaSaddle,
+    enabled: i32,
+) -> i32 {
+    if session.is_null() {
+        return RGSADDLE_NULL_SESSION;
+    }
+    if enabled != 0 && enabled != 1 {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    unsafe {
+        (*session)
+            .session
+            .set_small_system_atom_ceiling(enabled == 1)
+    };
     RGSADDLE_OK
 }
 

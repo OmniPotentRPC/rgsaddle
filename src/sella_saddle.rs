@@ -46,6 +46,16 @@ pub struct SellaSaddleConfig {
     /// from the symmetrized products its residual test reads, as Sella
     /// does. Off by default: the mean of `V^T AV` and its transpose.
     pub symmetrized_ritz: bool,
+    /// Bound only the largest atom move, from the first step, when the
+    /// Euclidean radius `delta * n_free` starts at one distance unit or
+    /// less: ten free coordinates or fewer at the default `delta`.
+    /// This is Sella's Cartesian restricted atomic step, whose radius
+    /// is `delta0` and is not scaled by the free dimension. The ceiling
+    /// is `max(delta, 0.1)`, never above that Euclidean radius, and
+    /// moves with rho. Larger searches cap the atom move either way.
+    /// Applies to Cartesian `TrustRegion` sessions with `eig`. On by
+    /// default; off keeps the Euclidean radius alone for these searches.
+    pub small_system_atom_ceiling: bool,
 }
 
 impl SellaSaddleConfig {
@@ -80,8 +90,20 @@ impl Default for SellaSaddleConfig {
             expand: crate::ExpandKind::Jd0,
             restricted: crate::RestrictedKind::TrustRegion,
             symmetrized_ritz: false,
+            small_system_atom_ceiling: true,
         }
     }
+}
+
+/// Which per-atom bound a Cartesian step carries.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AtomCeiling {
+    /// The Euclidean trust radius alone.
+    Off,
+    /// The Euclidean radius, then the atom ceiling when one atom passes it.
+    OverEuclidean,
+    /// Sella's restricted atomic step: the atom ceiling alone.
+    Alone,
 }
 
 pub struct SellaSaddleReport {
@@ -107,9 +129,9 @@ pub struct SellaSaddleSession {
     /// before it looks at the curvature sign again.
     hvp_since: i32,
     /// Largest atomic displacement allowed when the Euclidean radius
-    /// was scaled by `n_free` past one distance unit. Grows and
-    /// shrinks with the rho schedule. Unused while [`Self::atom_cap_active`]
-    /// is false.
+    /// was scaled by `n_free` past one distance unit, or in its place
+    /// for a small search. Grows and shrinks with the rho schedule.
+    /// Unused while [`Self::atom_ceiling`] is off.
     atom_delta: f64,
 }
 
@@ -324,6 +346,12 @@ impl SellaSaddleSession {
     /// See [`SellaSaddleConfig::symmetrized_ritz`].
     pub fn set_symmetrized_ritz(&mut self, on: bool) {
         self.config.symmetrized_ritz = on;
+    }
+
+    /// See [`SellaSaddleConfig::small_system_atom_ceiling`]. Takes
+    /// effect from the next step.
+    pub fn set_small_system_atom_ceiling(&mut self, on: bool) {
+        self.config.small_system_atom_ceiling = on;
     }
 
     /// Restricted increment. RAS clips per-atom Cartesian steps.
@@ -634,48 +662,60 @@ impl SellaSaddleSession {
         };
         let vg = Vector::from_host(g_r.clone());
         let (evals, evecs) = crate::eigensolve::exact_eigh(h_free.view())?;
-        let cap_active = self.atom_cap_active();
-        let atom_delta = self.atom_delta;
+        let ceiling = self.atom_ceiling();
+        let cap_active = ceiling != AtomCeiling::Off;
+        let atom_delta = match ceiling {
+            AtomCeiling::Alone => self.atom_delta.min(self.delta),
+            AtomCeiling::Off | AtomCeiling::OverEuclidean => self.atom_delta,
+        };
         let pes = match &mut self.pes {
             SellaPes::Cartesian(p) => p,
             SellaPes::Internal(_) | SellaPes::Cell(_) | SellaPes::CellInternal(_) => unreachable!(),
         };
         let order = self.config.order.max(1);
-        let s_free = if self.config.restricted.wants_unrestricted_ambient() {
-            crate::prfo::PartitionedRationalFunctionOptimization::new(order).get_s(
-                &evals,
-                &evecs,
-                &g_free,
-                crate::prfo::PartitionedRationalFunctionOptimization::ALPHA0,
-            )
-        } else {
-            prfo_trust_region(&evals, &evecs, &g_free, order, self.delta)
+        let basis = CartesianPrfo {
+            evals: &evals,
+            evecs: &evecs,
+            g_free: &g_free,
+            order,
+            u: &u,
+            x: &x,
+            geom: &self.geom,
         };
-        let mut s = crate::geom::u_vec(&u, &s_free);
-        s = self.geom.project(&x, &s);
-        s = self.config.restricted.clip_cartesian(&s, self.delta)?;
-        if cap_active && crate::restricted::ras_cons(&s) > atom_delta {
-            // A uniform scale of the full P-RFO step keeps a bad ratio of
-            // uphill to downhill components. Sella's restricted atomic step
-            // solves for the alpha whose largest atom move is the ceiling.
-            let searched = atomic_prfo_step(
-                &CartesianPrfo {
-                    evals: &evals,
-                    evecs: &evecs,
-                    g_free: &g_free,
-                    order,
-                    u: &u,
-                    x: &x,
-                    geom: &self.geom,
-                },
-                atom_delta,
-            );
-            if crate::restricted::ras_cons(&searched) <= atom_delta * (1.0 + 1e-6) {
-                s = searched;
+        let s = if ceiling == AtomCeiling::Alone {
+            let searched = atomic_prfo_step(&basis, atom_delta);
+            if within_ceiling(&searched, atom_delta) {
+                searched
             } else {
-                s = rgmin::ras_clip(&s, atom_delta);
+                rgmin::ras_clip(&searched, atom_delta)
             }
-        }
+        } else {
+            let s_free = if self.config.restricted.wants_unrestricted_ambient() {
+                crate::prfo::PartitionedRationalFunctionOptimization::new(order).get_s(
+                    &evals,
+                    &evecs,
+                    &g_free,
+                    crate::prfo::PartitionedRationalFunctionOptimization::ALPHA0,
+                )
+            } else {
+                prfo_trust_region(&evals, &evecs, &g_free, order, self.delta)
+            };
+            let mut s = crate::geom::u_vec(&u, &s_free);
+            s = self.geom.project(&x, &s);
+            s = self.config.restricted.clip_cartesian(&s, self.delta)?;
+            if cap_active && crate::restricted::ras_cons(&s) > atom_delta {
+                // A uniform scale of the full P-RFO step keeps a bad ratio of
+                // uphill to downhill components. Sella's restricted atomic step
+                // solves for the alpha whose largest atom move is the ceiling.
+                let searched = atomic_prfo_step(&basis, atom_delta);
+                if within_ceiling(&searched, atom_delta) {
+                    s = searched;
+                } else {
+                    s = rgmin::ras_clip(&s, atom_delta);
+                }
+            }
+            s
+        };
         let vs = Vector::from_host(s.clone());
         let x1 = self.geom.retract(&x, &s);
         let s1 = self.geom.transport(&x, &x1, &s);
@@ -695,11 +735,14 @@ impl SellaSaddleSession {
             self.rho = (energy - e0) / pred;
             if cap_active {
                 self.atom_delta = update_trust(
-                    self.atom_delta,
+                    atom_delta,
                     self.rho,
                     crate::restricted::ras_cons(&s),
                     &self.config.schedule(),
                 );
+                if ceiling == AtomCeiling::Alone {
+                    self.atom_delta = self.atom_delta.min(self.delta);
+                }
             } else {
                 self.delta = update_trust(
                     self.delta,
@@ -724,21 +767,33 @@ impl SellaSaddleSession {
         })
     }
 
-    /// True when a Cartesian trust region was scaled by `n_free` past
-    /// one distance unit while iterative diagonalization is on.
+    /// The per-atom bound of a Cartesian trust-region step with
+    /// iterative diagonalization.
     ///
     /// Sella's Cartesian default is a restricted atomic step at
     /// `delta0`, not `delta0 * n_free`. The scaled radius lets one
-    /// atom absorb the whole step and leave the basin. The ceiling
-    /// stays off for `eig: false` (those trajectories are recorded
-    /// against the Euclidean radius) and when that radius is already
-    /// at most one distance unit, including a host `delta` small
-    /// enough that `delta * n_free` never reaches it.
-    fn atom_cap_active(&self) -> bool {
-        self.config.eig
+    /// atom absorb the whole step and leave the basin. Past one
+    /// distance unit the ceiling sits under that radius. At or below
+    /// it, [`SellaSaddleConfig::small_system_atom_ceiling`] replaces
+    /// the radius with the ceiling; without it the radius is alone,
+    /// including a host `delta` small enough that `delta * n_free`
+    /// never passes one. `eig: false` keeps the radius alone (those
+    /// trajectories are recorded against it). The Euclidean radius
+    /// does not move while a ceiling is on, so the choice stays the
+    /// same for the whole search.
+    fn atom_ceiling(&self) -> AtomCeiling {
+        let applies = self.config.eig
             && self.config.restricted == crate::RestrictedKind::TrustRegion
-            && matches!(self.pes, SellaPes::Cartesian(_))
-            && self.delta > 1.0
+            && matches!(self.pes, SellaPes::Cartesian(_));
+        if !applies {
+            AtomCeiling::Off
+        } else if self.delta > 1.0 {
+            AtomCeiling::OverEuclidean
+        } else if self.config.small_system_atom_ceiling {
+            AtomCeiling::Alone
+        } else {
+            AtomCeiling::Off
+        }
     }
 
     fn step_internal<S: PointSurface>(
@@ -1067,6 +1122,11 @@ fn atomic_prfo_step(basis: &CartesianPrfo<'_>, delta: f64) -> Array1<f64> {
         err = value - delta;
     }
     step
+}
+
+/// Whether an alpha search met its ceiling, up to its tolerance.
+fn within_ceiling(step: &Array1<f64>, delta: f64) -> bool {
+    crate::restricted::ras_cons(step) <= delta * (1.0 + 1e-6)
 }
 
 fn cartesian_prfo_atom(basis: &CartesianPrfo<'_>, alpha: f64) -> (Array1<f64>, f64, f64) {

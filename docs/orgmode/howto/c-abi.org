@@ -24,4 +24,12 @@ A library below minor 24 does not export the symbol.
 When the host loads the library at run time, check ~rgsaddle_abi_version()~ first.
 The Sella how-to says when the option helps.
 
+~rgsaddle_sella_saddle_set_small_system_atom_ceiling~ (ABI minor 25) takes 1 or 0.
+The value 1 makes a Cartesian Sella saddle session bound only its largest atom move from the first step.
+That applies when its Euclidean radius ~delta * n_free~ starts at 1 or less.
+The value 0 keeps that radius alone.
+1 is the default.
+Any other value returns ~RGSADDLE_INVALID_PARAMETER~ and leaves the session unchanged.
+A library below minor 25 does not export the symbol; the Sella how-to describes the ceiling.
+
 ~include/rgsaddle/session.hpp~ provides the C++ owning wrappers. ~Band~, ~MinMode~ and ~Irc~ release their opaque handles automatically and translate failing statuses into exceptions. ~tests/c/main_abi_contract.h~ checks the retained main layouts and signatures; the C and C++ smoke executables exercise the official header and library together.
