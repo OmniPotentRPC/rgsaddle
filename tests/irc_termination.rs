@@ -232,20 +232,19 @@ impl PointSurface for Fixture {
                 if j == i || (is_free[j] && j < i) {
                     continue;
                 }
-                let mut d = [0.0; 3];
-                for k in 0..3 {
-                    d[k] = r[i][k] - r[j][k];
-                    d[k] -= self.cell[k] * (d[k] / self.cell[k]).round();
-                }
+                let d: [f64; 3] = std::array::from_fn(|k| {
+                    let dk = r[i][k] - r[j][k];
+                    dk - self.cell[k] * (dk / self.cell[k]).round()
+                });
                 let r2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
                 if r2 >= rc * rc {
                     continue;
                 }
                 let (u, fscale) = self.pair.term(r2);
                 energy += u - shift;
-                for k in 0..3 {
-                    force[i][k] += fscale * d[k];
-                    force[j][k] -= fscale * d[k];
+                for (k, dk) in d.iter().enumerate() {
+                    force[i][k] += fscale * dk;
+                    force[j][k] -= fscale * dk;
                 }
             }
         }
