@@ -37,6 +37,10 @@ int main() {
         std::fprintf(stderr, "null feasible-step control\n");
         return 1;
     }
+    if (rgsaddle_minmode_set_torque_window(nullptr, 0) != RGSADDLE_NULL_SESSION) {
+        std::fprintf(stderr, "null torque window control\n");
+        return 1;
+    }
 
     const long n_images = 9, n_atoms = 1;
     std::vector<double> pos(static_cast<std::size_t>(n_images * 3));

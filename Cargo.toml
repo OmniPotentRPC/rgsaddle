@@ -39,9 +39,8 @@ dlpk = { version = "0.1.5", features = ["ndarray"] }
 # ConFrameWriter::new is RoundTrip and canonical stays off.
 readcon-core = { version = "=0.17.3", optional = true }
 readcon-db = { version = "0.2.0", git = "https://github.com/lode-org/readcon-db", rev = "1e0eb2bc6034c259fe2a789edfae3481de22a944", optional = true }
-# crates.io 0.5.2. Control::default leaves ftol_rel and noise_floor
-# unset, the 0.5.1 behaviour the sessions rely on.
-rgmin = "0.5.2"
+# Share the finite-oracle solver revision with downstream hosts.
+rgmin = { version = "0.5.2", git = "https://github.com/OmniPotentRPC/rgmin", rev = "5ff48fb9dabcf17f4516884efb95b8a39dad99af" }
 eindir-core = { version = "0.6.0", features = ["capi"] }
 ndarray = "0.17"
 faer = { version = "0.24.4", optional = true, default-features = false, features = ["std", "linalg"] }

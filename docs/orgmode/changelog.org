@@ -21,6 +21,15 @@
   It takes 0 or 1 and refuses any other value with ~RGSADDLE_INVALID_PARAMETER~.
 - C ABI minor 25 adds ~rgsaddle_sella_saddle_set_small_system_atom_ceiling~.
   It takes 0 or 1 and refuses any other value with ~RGSADDLE_INVALID_PARAMETER~.
+- ~MinModeSession::set_torque_window~ turns the classic dimer torque window on or off apart from ~rotation_tol~.
+  Once the rotational force is under 1, the window also stops a dimer rotation after one iteration.
+  ~None~, the default, keeps the window on exactly when ~rotation_tol~ is at least 1e-4, as before.
+  eOn's improved dimer stops on its ~torque_min~ of 0.1 with no window.
+  That is ~Some(false)~ with a ~rotation_tol~ of 0.1.
+  Lanczos does not read the setting.
+- C ABI minor 26 adds ~rgsaddle_minmode_set_torque_window~, and the C++ ~MinMode~ wrapper adds ~set_torque_window~.
+  It takes -1 for the default, 0 for off or 1 for on.
+  It refuses any other value with ~RGSADDLE_INVALID_PARAMETER~.
 - An endpoint at or above the highest interior image blocks the climbing image when its force toward the next image exceeds ~force_tol~.
   The band then keeps the spring on every image and reports no climbing image, eOn's rule for a monotonic band.
   An endpoint at a minimum has no such force, so the highest interior image below it still climbs.
