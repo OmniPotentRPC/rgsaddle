@@ -700,7 +700,8 @@ RgsaddleIrc *rgsaddle_irc_create(const rgsaddle_irc_config_t *config,
                                  int64_t n_atoms, const double *saddle,
                                  const double *masses, const double *mode);
 /**
- * Same, but the imaginary mode is dest Lanczos on the host surface.
+ * Same, but the launch mode is the lowest eigenvector of the
+ * mass-weighted Hessian, from Lanczos on the host surface.
  * `seed` is 3N.
  */
 RgsaddleIrc *rgsaddle_irc_create_from_surface(
