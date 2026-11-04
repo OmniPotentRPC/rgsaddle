@@ -3,11 +3,11 @@
 //!
 //! Inner geometry is rgmin `IrcTrust` (Sella IRCTrustRegion /
 //! Gonzalez--Schlegel sphere) in the selected coordinate metric.
-//! [`IrcSession::new`] selects mass-weighted `ManifoldKind::MwRigid`
-//! for atomistic Cartesian coordinates; [`IrcSession::new_euclidean`]
-//! selects unit weights for a generic-dimensional surface. The default
-//! increment is Sella's QuasiNewtonIRC step, rgmin `qn_irc_get_s` at the
-//! level shift that puts it on the sphere.
+//! [`IrcSession::new`] weights atomistic Cartesian coordinates by the
+//! atom masses; [`IrcSession::new_euclidean`] selects unit weights for a
+//! generic-dimensional surface. The default increment is Sella's
+//! QuasiNewtonIRC step, rgmin `qn_irc_get_s` at the level shift that puts
+//! it on the sphere.
 //! [`IrcKind::Morokuma`] is the
 //! Ishida--Morokuma--Komornicki predictor-corrector from
 //! `gpr_optim` `IRCDriver`. Ambient algebra goes through
@@ -17,8 +17,8 @@
 use ndarray::{Array1, Array2, ArrayView1};
 use rgmin::vecops::{Vector, axpy, dot, nrm2, nrminf};
 use rgmin::{
-    ApplyHessian, BfgsModel, Control, EigenParams, EigensolverKind, IrcTrust, ManifoldKind, Method,
-    Solver, mw_pair, qn_irc_get_s, sqrt_masses_3n, to_mw,
+    ApplyHessian, BfgsModel, EigenParams, EigensolverKind, IrcTrust, mw_pair, qn_irc_get_s,
+    sqrt_masses_3n, to_mw,
 };
 
 use std::cell::RefCell;
@@ -67,8 +67,6 @@ pub struct IrcConfig {
     pub force_tol: f64,
     /// eOn / gpr_optim `ConvergenceForceNorm`.
     pub force_gate: crate::ForceGate,
-    pub max_move: f64,
-    pub method: Method,
     pub max_inner: usize,
     /// Finite-difference Hessian action length for the matrix-free kick.
     pub dr: f64,
@@ -86,8 +84,6 @@ impl Default for IrcConfig {
             dx: 0.1,
             force_tol: 0.05,
             force_gate: crate::ForceGate::MaxForceOnAtom,
-            max_move: 0.2,
-            method: Method::Steepest,
             max_inner: 10,
             dr: 1e-3,
             krylov_dim: 12,
@@ -118,7 +114,7 @@ struct ModelSpectrum {
     posdef: bool,
 }
 
-/// Forward or reverse roll-down over an rgmin `Solver`.
+/// Forward or reverse roll-down from a first-order saddle.
 pub struct IrcSession {
     config: IrcConfig,
     x: Array1<f64>,
@@ -126,7 +122,6 @@ pub struct IrcSession {
     sqrtm: Array1<f64>,
     d1: Array1<f64>,
     mode: Array1<f64>,
-    solver: Solver,
     hess: BfgsModel,
     /// Pairs that `hess` kept since its last reset.
     hess_pairs: usize,
@@ -160,27 +155,12 @@ impl IrcSession {
                 "masses (N) and mode (3N) must match the saddle".into(),
             ));
         }
-        let control = Control {
-            maxiter: usize::MAX,
-            gtol: 0.0,
-            istep: 1.0,
-            maxmove: Some(config.max_move),
-            ..Control::default()
-        };
-        let mut solver = Solver::new(config.method.clone(), control, n3);
-        solver.set_highs(true);
-        // SE(3) quotient needs leftover internal modes: N >= 3.
-        if masses.len() >= 3 {
-            solver.set_manifold(ManifoldKind::MwRigid);
-            solver.set_masses(masses.clone());
-        }
         Self::with_coordinate_metric(
             config,
             saddle,
             sqrt_masses_3n(masses.as_slice().unwrap_or(&[])),
             mode,
             direction,
-            solver,
         )
     }
 
@@ -188,7 +168,7 @@ impl IrcSession {
     ///
     /// The native coordinates are the path metric, so every coordinate has
     /// unit mass weight. Use [`Self::new`] for atomistic Cartesian positions,
-    /// where atomic masses and the rigid-body quotient define the metric.
+    /// where atomic masses define the metric.
     pub fn new_euclidean(
         config: IrcConfig,
         saddle: Array1<f64>,
@@ -206,23 +186,7 @@ impl IrcSession {
                 "mode must match the saddle dimension".into(),
             ));
         }
-        let control = Control {
-            maxiter: usize::MAX,
-            gtol: 0.0,
-            istep: 1.0,
-            maxmove: Some(config.max_move),
-            ..Control::default()
-        };
-        let mut solver = Solver::new(config.method.clone(), control, dimension);
-        solver.set_highs(true);
-        Self::with_coordinate_metric(
-            config,
-            saddle,
-            Array1::ones(dimension),
-            mode,
-            direction,
-            solver,
-        )
+        Self::with_coordinate_metric(config, saddle, Array1::ones(dimension), mode, direction)
     }
 
     fn with_coordinate_metric(
@@ -231,7 +195,6 @@ impl IrcSession {
         sqrtm: Array1<f64>,
         mode: Array1<f64>,
         direction: IrcDirection,
-        solver: Solver,
     ) -> Result<Self, SaddleError> {
         let dimension = saddle.len();
         if sqrtm.len() != dimension || mode.len() != dimension {
@@ -247,7 +210,6 @@ impl IrcSession {
             sqrtm,
             d1: Array1::zeros(dimension),
             mode,
-            solver,
             hess: BfgsModel::identity(dimension),
             hess_pairs: 0,
             first: true,
@@ -310,7 +272,6 @@ impl IrcSession {
     }
 
     pub fn reset(&mut self) {
-        self.solver.forget();
         self.hess.forget();
         self.hess_pairs = 0;
         self.seed_ts_mode();
@@ -325,7 +286,6 @@ impl IrcSession {
         self.arc = 0.0;
         self.last_step = None;
         self.last_outer = None;
-        self.solver.forget();
         self.hess.forget();
         self.hess_pairs = 0;
         self.seed_ts_mode();
@@ -481,7 +441,6 @@ impl IrcSession {
                 {
                     self.d1.fill(0.0);
                     self.last_step = None;
-                    self.solver.forget();
                     return Ok(IrcReport {
                         energy,
                         max_force,
@@ -499,7 +458,6 @@ impl IrcSession {
             {
                 self.d1.fill(0.0);
                 self.last_step = None;
-                self.solver.forget();
                 return Ok(IrcReport {
                     energy,
                     max_force,
@@ -545,7 +503,6 @@ impl IrcSession {
         if !rejected {
             self.config.dx = (2.0 * self.config.dx).min(self.dx_target);
         }
-        self.solver.forget();
         // Sella skips the test while the session still sits on the saddle.
         // This also refuses the kick step itself, even where |F| is already
         // at or below fmax beside the saddle. A step whose last trial was
