@@ -1,0 +1,2 @@
+The Sella entry of ~docs/source/references.bib~ gives volume 18 and first page 6974 (J. Chem. Theory Comput. 18, 6974 (2022), doi:10.1021/acs.jctc.2c00395).
+It had given no volume or page.
