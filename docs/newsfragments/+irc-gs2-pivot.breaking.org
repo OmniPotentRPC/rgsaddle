@@ -1,10 +1,10 @@
 ~IrcKind::Gs2~ is the step of Gonzalez and Schlegel, J. Chem. Phys. 90, 2154 (1989), doi:10.1063/1.456010.
 Its next point is the energy minimum on the mass-weighted sphere of radius ~dx / 2~ about a pivot ~dx / 2~ down the gradient, and the first pivot lies ~dx / 2~ from the saddle along the launch mode.
 Before, the kind took the minimum on the radius-~dx~ sphere centred on the last point, the step of Mueller and Brown, Theor. Chim. Acta 53, 75 (1979), doi:10.1007/BF00547608, as Sella takes it.
-That step is now ~IrcKind::SellaSphere~, the default, so a session on the default config follows the same path as before.
+That step is now ~IrcKind::SellaSphere~, the default, so a session on the default config keeps the step it took.
 A session that names ~IrcKind::Gs2~ follows the new step.
 ~tests/irc_mueller_brown.rs~ fits the path error over 0.4 of arc at radii 0.05 to 0.00625 on Mueller-Brown.
-The slopes are 1.8415 forward and 1.9850 reverse for ~Gs2~, and 0.9735 and 0.9739 for ~SellaSphere~.
+The slopes are 2.0046 forward and 1.9850 reverse for ~Gs2~, and 0.9735 and 0.9739 for ~SellaSphere~.
 Until the model is positive definite and the arc exceeds eight radii, a ~Gs2~ trial whose model minimum lies inside the sphere runs on along its line to the far side, since its radial projection would return the last point unmoved.
 The report's ~arc~ under ~Gs2~ adds the mass-weighted chord of each step.
 A ~match~ on ~IrcKind~ without a wildcard arm needs an arm for ~SellaSphere~.

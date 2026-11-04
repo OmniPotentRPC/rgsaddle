@@ -30,7 +30,9 @@ use crate::error::SaddleError;
 use crate::kappa::Complement;
 use crate::minmode::PointSurface;
 
-/// rgmin `BfgsModel::update` keeps a pair only when `y.s` exceeds this.
+/// rgmin `BfgsModel::update` keeps a pair only when `y.s` and `|s.B s|`
+/// exceed this. [`IrcSession::update_model`] passes each pair at unit
+/// length, so the floor is on the curvature along the step.
 const BFGS_CURVATURE: f64 = 1e-12;
 
 /// Which side of the imaginary mode to follow.
@@ -395,11 +397,20 @@ impl IrcSession {
         })
     }
 
+    /// The BFGS update is unchanged when `s` and `y` scale together, while
+    /// `y.s` and `s.B s` fall as the square of the trial length. The pair
+    /// goes to rgmin at unit length, so its floors bound a curvature.
     fn update_model(&mut self, s_mw: &Array1<f64>, y_mw: &Array1<f64>) {
-        if dot(y_mw.view(), s_mw.view()) > BFGS_CURVATURE {
+        let len = nrm2(s_mw.view());
+        if len == 0.0 {
+            return;
+        }
+        let s = s_mw / len;
+        let y = y_mw / len;
+        if dot(y.view(), s.view()) > BFGS_CURVATURE {
             self.hess_pairs += 1;
         }
-        self.hess.update(s_mw, y_mw);
+        self.hess.update(&s, &y);
     }
 
     /// Sella `QuasiNewtonIRC` plus `IRCTrustRegion` on the current
@@ -1218,6 +1229,30 @@ mod tests {
         irc.update_model(&s, &y);
         assert_eq!(irc.hess_pairs, 2);
         assert_spectrum_matches_rgmin(&irc);
+    }
+
+    #[test]
+    fn a_pair_updates_the_model_alike_at_any_length() {
+        let session = || {
+            IrcSession::new_euclidean(
+                IrcConfig::default(),
+                Array1::zeros(2),
+                Array1::from(vec![1.0, 0.0]),
+                IrcDirection::Forward,
+            )
+            .unwrap()
+        };
+        let s = Array1::from(vec![0.6, 0.8]);
+        let y = Array1::from(vec![0.6 * 1282.0, 0.8 * 3.0]);
+        let mut unit = session();
+        unit.update_model(&s, &y);
+        assert_eq!(unit.hess_pairs, 1);
+        // A power of two scales the pair without rounding.
+        let short = 2f64.powi(-27);
+        let mut scaled = session();
+        scaled.update_model(&(&s * short), &(&y * short));
+        assert_eq!(scaled.hess_pairs, 1);
+        assert_eq!(scaled.hess.hessian(), unit.hess.hessian());
     }
 
     #[test]
