@@ -40,4 +40,13 @@ The value -1 is the state of a new session, with the window on exactly when ~rot
 Any other value returns ~RGSADDLE_INVALID_PARAMETER~ and leaves the session unchanged.
 A library below minor 32 does not export the symbol.
 
+From ABI minor 33 a band config with ~RGSADDLE_SPRING_ONSAGER_MACHLUP~ (spring 2) builds the Onsager-Machlup springs of Mandelli and Parrinello.
+At every evaluation each interior image gets the displacement ~F / (2 spring_k)~ of its current force, as eOn's ~buildSpringStrategy~ does.
+The endpoints get zero.
+Below minor 33 every displacement was zero.
+The spring then kept only the second difference of the path.
+A non-finite ~spring_k~ makes ~rgsaddle_band_create~ return NULL.
+No layout or symbol changes.
+When the host loads the library at run time, check ~rgsaddle_abi_version()~ for at least minor 33 before relying on the displacements.
+
 ~include/rgsaddle/session.hpp~ provides the C++ owning wrappers. ~Band~, ~MinMode~ and ~Irc~ release their opaque handles automatically and translate failing statuses into exceptions. ~tests/c/main_abi_contract.h~ checks the retained main layouts and signatures; the C and C++ smoke executables exercise the official header and library together.
