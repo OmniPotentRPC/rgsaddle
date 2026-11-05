@@ -69,7 +69,7 @@ mod kani_proofs;
 mod differential;
 
 mod sqnm;
-pub use autoneb::{AutoNeb, AutoNebReport, AutoNebTuning};
+pub use autoneb::{AutoNeb, AutoNebInterpolant, AutoNebReport, AutoNebTuning};
 pub use band::{
     BandConfig, BandEvaluation, BandReport, BandSession, BandStatus, BandSurface, Cell, CiConfig,
     ExpBandPrecon, MinModeRefine, SolidState, ZoomConfig,

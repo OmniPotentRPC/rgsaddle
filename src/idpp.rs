@@ -102,7 +102,27 @@ pub fn idpp_path(
     Ok(path)
 }
 
-fn check_config(config: &IdppConfig) -> Result<(), SaddleError> {
+/// One IDPP image between `left` and `right`, relaxed from `start`.
+///
+/// The target pair distances are the mean of the two ends, the
+/// `xi = 1/2` row of [`idpp_path`]. With `start` at the minimum-image
+/// midpoint this is the interior row of a three-image `idpp_path`.
+pub(crate) fn idpp_midpoint(
+    left: ArrayView1<f64>,
+    right: ArrayView1<f64>,
+    start: Array1<f64>,
+    cell: Option<&Cell>,
+    config: &IdppConfig,
+) -> Result<Array1<f64>, SaddleError> {
+    check_config(config)?;
+    let xi = 0.5;
+    let target = &distance_matrix(left, cell)? * (1.0 - xi) + &distance_matrix(right, cell)? * xi;
+    let mut image = start;
+    relax_image(&mut image, target.view(), cell, config)?;
+    Ok(image)
+}
+
+pub(crate) fn check_config(config: &IdppConfig) -> Result<(), SaddleError> {
     if config.max_iterations == 0 {
         return Err(SaddleError::Invalid(
             "IDPP needs at least one iteration".into(),
