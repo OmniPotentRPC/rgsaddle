@@ -98,3 +98,76 @@ fn the_displacements_follow_the_forces_across_iterations() {
     }
 }
 
+#[cfg(feature = "capi")]
+mod capi {
+    use super::*;
+    use rgsaddle::capi::*;
+    use std::ffi::c_void;
+
+    extern "C" fn surface(_: *mut c_void, request: *mut RgsaddleSurfaceRequest) -> i32 {
+        let r = unsafe { &mut *request };
+        let n = r.n_images as usize;
+        let x = unsafe { std::slice::from_raw_parts(r.positions, 3 * n) };
+        let e = unsafe { std::slice::from_raw_parts_mut(r.energies, n) };
+        let g = unsafe { std::slice::from_raw_parts_mut(r.gradients, 3 * n) };
+        for i in 0..n {
+            let (energy, gradient) = double_well_at(&x[3 * i..3 * i + 3]);
+            e[i] = energy;
+            g[3 * i..3 * i + 3].copy_from_slice(&gradient);
+        }
+        RGSADDLE_OK
+    }
+
+    fn create(spring_k: f64) -> *mut RgsaddleBand {
+        let config = RgsaddleBandConfig {
+            version: RgsaddleVersion {
+                major: RGSADDLE_ABI_MAJOR,
+                minor: RGSADDLE_ABI_MINOR,
+            },
+            flags: RGSADDLE_BAND_NO_MIN_MODE,
+            tangent: 1,
+            spring: 2,
+            projection: 1,
+            method: 1,
+            spring_k,
+            spring_ks: std::ptr::null(),
+            ci_trigger_factor: 0.0,
+            ci_trigger_force: 0.0,
+            cell: std::ptr::null(),
+            force_tol: 1e-5,
+            max_move: 0.1,
+            memory: 10,
+        };
+        let x: Vec<f64> = bowed_band().into_iter().collect();
+        unsafe { rgsaddle_band_create(&config, N as i64, 1, x.as_ptr()) }
+    }
+
+    #[test]
+    fn ordinal_two_carries_the_displacements_of_the_forces() {
+        assert!(create(f64::NAN).is_null());
+        let band = create(K);
+        assert!(!band.is_null());
+        let mut live = BandSession::new(config(LIVE), bowed_band()).unwrap();
+        let zero = frozen(vec![Array1::zeros(3); N]);
+        let mut zero = BandSession::new(config(zero), bowed_band()).unwrap();
+        let mut out: RgsaddleReport = unsafe { std::mem::zeroed() };
+        let mut x = vec![0.0; 3 * N];
+        let mut parted = false;
+        for _ in 0..12 {
+            let rc =
+                unsafe { rgsaddle_band_step(band, Some(surface), std::ptr::null_mut(), &mut out) };
+            assert_eq!(rc, RGSADDLE_OK);
+            live.step(&DoubleWell).unwrap();
+            zero.step(&DoubleWell).unwrap();
+            assert_eq!(
+                unsafe { rgsaddle_band_positions(band, x.as_mut_ptr()) },
+                RGSADDLE_OK
+            );
+            let c_band = Array2::from_shape_vec((N, 3), x.clone()).unwrap();
+            assert_eq!(c_band, live.positions());
+            parted |= c_band != zero.positions();
+        }
+        assert!(parted, "ordinal 2 stepped like zero displacements");
+        unsafe { rgsaddle_band_free(band) };
+    }
+}

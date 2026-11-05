@@ -27,7 +27,7 @@ use crate::spring::SpringKind;
 use crate::tangent::TangentKind;
 
 pub const RGSADDLE_ABI_MAJOR: u32 = 1;
-pub const RGSADDLE_ABI_MINOR: u32 = 32;
+pub const RGSADDLE_ABI_MINOR: u32 = 33;
 
 /// Band config bit 0. The C step calls the surface once per image
 /// carried by the evaluation: every image on the first evaluation
@@ -460,10 +460,7 @@ pub(super) unsafe fn parse_band_config(
             let ks = unsafe { slice::from_raw_parts(cfg.spring_ks, (n_images - 1) as usize) };
             SpringKind::Weighted { ks: ks.to_vec() }
         }
-        2 => SpringKind::OnsagerMachlup {
-            k: cfg.spring_k,
-            l_vecs: vec![Array1::zeros(dof); n_images as usize],
-        },
+        2 => SpringKind::OnsagerMachlupLive { k: cfg.spring_k },
         _ => SpringKind::Uniform { k: cfg.spring_k },
     };
     let cell = if cfg.cell.is_null() {
