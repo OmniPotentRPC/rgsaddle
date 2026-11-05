@@ -604,6 +604,7 @@ impl AutoNebTuning {
             // inserted, which removes this refusal.
             SpringKind::Weighted { .. }
             | SpringKind::OnsagerMachlup { .. }
+            | SpringKind::OnsagerMachlupLive { .. }
             | SpringKind::EnergyWeighted { .. } => {
                 return Err(SaddleError::Invalid(
                     "AutoNEB temporarily needs a uniform spring; weighted springs will be recomputed on insertion with zoom-NEB"

@@ -2,7 +2,11 @@
 
 use std::borrow::Cow;
 
-use ndarray::{Array1, ArrayView1};
+use ndarray::{Array1, ArrayView1, ArrayView2};
+
+/// Below this `|2 k|` the Onsager-Machlup displacements are zero, the
+/// epsilon of eOn's `safemath::safe_recip`.
+pub const OM_RECIP_EPS: f64 = 1e-300;
 
 /// Per-image spring result: the tangent-parallel component consumed
 /// by the NEB and DNEB projections, and the full spring vector
@@ -24,6 +28,13 @@ pub enum SpringKind {
     /// holds one force-scaled displacement per image (zero at the
     /// endpoints).
     OnsagerMachlup { k: f64, l_vecs: Vec<Array1<f64>> },
+    /// Onsager-Machlup springs whose displacements follow the band:
+    /// [`SpringKind::at_band`] sets them from the forces of each
+    /// evaluation with [`onsager_machlup_displacements`], as eOn's
+    /// `buildSpringStrategy` does on every `updateForces`. Before the
+    /// band resolves them, [`SpringKind::compute`] reads zero
+    /// displacements.
+    OnsagerMachlupLive { k: f64 },
     /// Energy-weighted springs of Asgeirsson et al., J. Chem. Theory
     /// Comput. 17, 4929 (2021), doi:10.1021/acs.jctc.1c00462, set again
     /// from the band energies at every evaluation as eOn's
@@ -64,7 +75,47 @@ pub fn energy_weighted_constants(energies: ArrayView1<f64>, k_min: f64, k_max: f
     ks
 }
 
+/// Displacements of the Onsager-Machlup spring, eOn's `L_vecs`.
+/// `gradients` has one row per image, endpoints included. Interior
+/// image `j` gets `F_j / (2 k)` with `F_j = -g_j`, and both endpoints
+/// get zero. A `|2 k|` below [`OM_RECIP_EPS`] gives zero throughout.
+pub fn onsager_machlup_displacements(gradients: ArrayView2<f64>, k: f64) -> Vec<Array1<f64>> {
+    let n = gradients.nrows();
+    let two_k = 2.0 * k;
+    let alpha = if two_k.abs() < OM_RECIP_EPS {
+        0.0
+    } else {
+        1.0 / two_k
+    };
+    (0..n)
+        .map(|j| {
+            if j == 0 || j + 1 == n {
+                Array1::zeros(gradients.ncols())
+            } else {
+                gradients.row(j).mapv(|g| alpha * -g)
+            }
+        })
+        .collect()
+}
+
 impl SpringKind {
+    /// The springs at one band evaluation. [`SpringKind::OnsagerMachlupLive`]
+    /// takes the displacements of these gradients; every other kind is
+    /// [`SpringKind::at_energies`].
+    pub fn at_band(
+        &self,
+        energies: ArrayView1<f64>,
+        gradients: ArrayView2<f64>,
+    ) -> Cow<'_, SpringKind> {
+        match self {
+            SpringKind::OnsagerMachlupLive { k } => Cow::Owned(SpringKind::OnsagerMachlup {
+                k: *k,
+                l_vecs: onsager_machlup_displacements(gradients, *k),
+            }),
+            _ => self.at_energies(energies),
+        }
+    }
+
     /// The springs at these image energies: per-segment constants for
     /// [`SpringKind::EnergyWeighted`], and `self` for every other kind.
     pub fn at_energies(&self, energies: ArrayView1<f64>) -> Cow<'_, SpringKind> {
@@ -89,6 +140,7 @@ impl SpringKind {
         pos_diff_next: ArrayView1<f64>,
         pos_diff_prev: ArrayView1<f64>,
     ) -> SpringForces {
+        let zero: Array1<f64>;
         let coupling = match self {
             SpringKind::Uniform { k } => crate::stencil::Coupling::Uniform { k: *k },
             SpringKind::Weighted { ks } => crate::stencil::Coupling::Weighted {
@@ -100,6 +152,14 @@ impl SpringKind {
                 l_next: l_vecs[i + 1].view(),
                 l_here: l_vecs[i].view(),
             },
+            SpringKind::OnsagerMachlupLive { k } => {
+                zero = Array1::zeros(tangent.len());
+                crate::stencil::Coupling::Onsager {
+                    k: *k,
+                    l_next: zero.view(),
+                    l_here: zero.view(),
+                }
+            }
             SpringKind::EnergyWeighted { k_min, .. } => {
                 crate::stencil::Coupling::Uniform { k: *k_min }
             }
@@ -222,5 +282,23 @@ mod tests {
             uniform.at_energies(array![0.0, 1.0, 0.0].view()),
             Cow::Borrowed(SpringKind::Uniform { .. })
         ));
+    }
+
+    #[test]
+    fn live_onsager_machlup_takes_half_the_force_over_k() {
+        let e = array![0.0, 1.0, 0.0];
+        let g = array![[1.0, 2.0], [4.0, -6.0], [-2.0, 8.0]];
+        let live = SpringKind::OnsagerMachlupLive { k: 2.0 };
+        let Cow::Owned(SpringKind::OnsagerMachlup { l_vecs, .. }) =
+            live.at_band(e.view(), g.view())
+        else {
+            panic!("live Onsager-Machlup springs resolve to displacements");
+        };
+        let want = vec![array![0.0, 0.0], array![-1.0, 1.5], array![0.0, 0.0]];
+        assert_eq!(l_vecs, want);
+        let soft = onsager_machlup_displacements(g.view(), 0.0);
+        assert!(soft.iter().flatten().all(|&v| v == 0.0));
+        let held = SpringKind::OnsagerMachlup { k: 2.0, l_vecs };
+        assert!(matches!(held.at_band(e.view(), g.view()), Cow::Borrowed(_)));
     }
 }
