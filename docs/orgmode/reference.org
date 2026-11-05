@@ -33,6 +33,7 @@ The table below lists the main types.
 | =Chain=                        | Positions, ids, and roles. =evaluate= uses a fixed block of one image. =Mesh= remeshes, inserts, or windows with no force call |
 | =Preset=                       | =Min=, =Dimer=, =Lanczos=, =Art=, =EigenFollow=, and the named band presets                                         |
 | =ConnectConfig=                | IDPP Lanczos climb and the COMPASS fallback. =optbench= sets the LJ38 force tolerance, eight Lanczos actions, relative tolerance 0.05, and quenched split nodes |
+| =sidpp_path=                   | Sequential IDPP (S-IDPP) initial path. =SidppConfig= holds the spring, the two force stops, and the quick-min step. =idpp_path= is the per-image IDPP start |
 | =connect=                      | Double-ended search. The callback returns energy and the Cartesian gradient. =evaluations= counts finite differences that decide a step or an index. The Lanczos acceptance does not build a dense Hessian |
 
 =SellaSaddleConfig= has options that follow Sella.
