@@ -9,8 +9,13 @@
 //! every interior image toward the linearly interpolated pair distances
 //! before any surface call. Distances and the endpoint step use the
 //! minimum image.
+//!
+//! [`sidpp_path`] is the sequential start of Schmerwitz, Asgeirsson,
+//! and Jonsson, J. Chem. Theory Comput. 20, 155 (2024),
+//! doi:10.1021/acs.jctc.3c01111. It grows the band from both endpoints
+//! on the same objective instead of starting from the straight line.
 
-use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
 
 use crate::error::SaddleError;
 use crate::mic::{self, Cell};
@@ -120,6 +125,274 @@ pub(crate) fn idpp_midpoint(
     let mut image = start;
     relax_image(&mut image, target.view(), cell, config)?;
     Ok(image)
+}
+
+/// Spring, stop, and step settings for [`sidpp_path`].
+///
+/// `spring = 1`, `force_tol = 0.01` and `rms_tol = 0.005` are the
+/// settings of Schmerwitz, Asgeirsson, and Jonsson, Sec. 2.3.
+/// `max_move` and `max_iterations` are the [`IdppConfig`] defaults,
+/// spent once per growth stage. `time_step` is the fixed quick-min step.
+#[derive(Clone, Debug)]
+pub struct SidppConfig {
+    /// Base spring constant `k` of Eqs. 5 and 10.
+    pub spring: f64,
+    /// Largest NEB force component that ends a stage.
+    pub force_tol: f64,
+    /// Root mean square NEB force that, with `force_tol`, ends the
+    /// final stage.
+    pub rms_tol: f64,
+    pub time_step: f64,
+    pub max_move: f64,
+    pub max_iterations: usize,
+}
+
+impl Default for SidppConfig {
+    fn default() -> Self {
+        let idpp = IdppConfig::default();
+        Self {
+            spring: 1.0,
+            force_tol: 0.01,
+            rms_tol: 0.005,
+            time_step: 0.1,
+            max_move: idpp.max_move,
+            max_iterations: idpp.max_iterations,
+        }
+    }
+}
+
+/// Sequential IDPP path (S-IDPP). Same arguments as [`linear_path`].
+///
+/// Image `l` keeps the target of Eq. 1 for its final slot. The first
+/// stage places images 1 and `n_images - 2` on the straight line, a
+/// distance `d_id` (Eq. 11) from their endpoints. Each stage relaxes
+/// the placed images under the NEB force of Eqs. 3 to 9, where the
+/// segment across the gap between the two parts has the spring of
+/// Eq. 10 and every other segment has `spring`. Once the frontier
+/// image on one side is under `force_tol`, a new image goes on that
+/// side, `d_id` from it along the Eq. 7 tangent, and `d_id` is
+/// recomputed from the current path length. When both frontiers are
+/// under `force_tol`, the side with fewer images grows, the reactant
+/// side on a tie. The step never passes the middle of the gap. When
+/// every slot is filled, the band relaxes with equal springs until
+/// `force_tol` and `rms_tol` both hold. The minimizer is velocity
+/// projection (quick-min). A stage that hits the iteration cap is
+/// kept, and the side whose frontier force is smaller grows.
+pub fn sidpp_path(
+    reactant: ArrayView1<f64>,
+    product: ArrayView1<f64>,
+    n_images: usize,
+    cell: Option<&Cell>,
+    config: &SidppConfig,
+) -> Result<Array2<f64>, SaddleError> {
+    check_sidpp(config)?;
+    let line = linear_path(reactant, product, n_images, cell)?;
+    let d_init = distance_matrix(reactant, cell)?;
+    let d_final = distance_matrix(product, cell)?;
+    let last = n_images - 1;
+    let target = |slot: usize| {
+        let xi = slot as f64 / last as f64;
+        &d_init * (1.0 - xi) + &d_final * xi
+    };
+    let dof = reactant.len();
+    let seg = |a: &Array1<f64>, b: &Array1<f64>| norm(&mic_diff(a.view(), b.view(), cell));
+    let mut images = vec![reactant.to_owned(), line.row(1).to_owned()];
+    if n_images > 3 {
+        images.push(line.row(last - 1).to_owned());
+    }
+    images.push(product.to_owned());
+    let mut n_left = 1;
+    let mut d_id = norm(&mic_diff(product, reactant, cell)) / last as f64;
+    loop {
+        let len = images.len();
+        let full = len == n_images;
+        let slot = |k: usize| if k <= n_left { k } else { last + k + 1 - len };
+        let mut springs = vec![config.spring; len - 1];
+        if !full {
+            springs[n_left] = config.spring * d_id / seg(&images[n_left + 1], &images[n_left]);
+        }
+        let band = GrowBand {
+            first: reactant.to_owned(),
+            last: product.to_owned(),
+            targets: (0..len).map(|k| target(slot(k))).collect(),
+            springs,
+            cell: cell.copied(),
+        };
+        let mut x = Array1::from_iter(images[1..len - 1].iter().flatten().copied());
+        let image_max = |f: &Array1<f64>, i: usize| max_abs(f.slice(s![i * dof..(i + 1) * dof]));
+        let front = [n_left - 1, n_left];
+        let (values, force) = relax(&band, &mut x, config, |f| {
+            if full {
+                max_abs(f.view()) < config.force_tol
+                    && (f.dot(f) / f.len() as f64).sqrt() < config.rms_tol
+            } else {
+                front.iter().any(|&i| image_max(f, i) < config.force_tol)
+            }
+        })?;
+        images = band.images(x.view());
+        if full {
+            return Ok(Array2::from_shape_fn((n_images, dof), |(i, j)| {
+                images[i][j]
+            }));
+        }
+        d_id = images.windows(2).map(|w| seg(&w[1], &w[0])).sum::<f64>() / last as f64;
+        let (f_left, f_right) = (image_max(&force, front[0]), image_max(&force, front[1]));
+        let grow_left = if f_left < config.force_tol && f_right < config.force_tol {
+            2 * n_left <= len - 2
+        } else {
+            f_left <= f_right
+        };
+        let b = if grow_left { n_left } else { n_left + 1 };
+        let plus = mic_diff(images[b + 1].view(), images[b].view(), cell);
+        let minus = mic_diff(images[b].view(), images[b - 1].view(), cell);
+        let tau = tangent(&plus, &minus, &values[b - 1..b + 2], true);
+        let step = d_id.min(0.5 * seg(&images[n_left + 1], &images[n_left]));
+        let new = &images[b] + &(tau * if grow_left { step } else { -step });
+        images.insert(n_left + 1, new);
+        n_left += usize::from(grow_left);
+    }
+}
+
+/// Partial S-IDPP band: the endpoints, one Eq. 1 target per image, and
+/// one spring constant per segment.
+#[derive(Clone)]
+struct GrowBand {
+    first: Array1<f64>,
+    last: Array1<f64>,
+    targets: Vec<Array2<f64>>,
+    springs: Vec<f64>,
+    cell: Option<Cell>,
+}
+
+impl GrowBand {
+    fn images(&self, x: ArrayView1<f64>) -> Vec<Array1<f64>> {
+        let dof = self.first.len();
+        let mut images = vec![self.first.clone()];
+        images.extend(x.exact_chunks(dof).into_iter().map(|c| c.to_owned()));
+        images.push(self.last.clone());
+        images
+    }
+
+    /// Objective of every image and the NEB force of Eqs. 3 to 9 on the
+    /// moving images, flattened.
+    fn force(&self, x: ArrayView1<f64>) -> Result<(Vec<f64>, Array1<f64>), SaddleError> {
+        let dof = self.first.len();
+        let images = self.images(x);
+        let mut values = Vec::with_capacity(images.len());
+        let mut grads = Vec::with_capacity(images.len());
+        // Eq. 2 carries no 1/2, so the objective is twice the one that
+        // idpp_value_grad minimizes.
+        for (image, target) in images.iter().zip(&self.targets) {
+            let (value, grad) = idpp_value_grad(image.view(), target.view(), self.cell.as_ref())?;
+            values.push(2.0 * value);
+            grads.push(grad * 2.0);
+        }
+        let mut force = Array1::zeros(x.len());
+        for l in 1..images.len() - 1 {
+            let plus = mic_diff(images[l + 1].view(), images[l].view(), self.cell.as_ref());
+            let minus = mic_diff(images[l].view(), images[l - 1].view(), self.cell.as_ref());
+            let tau = tangent(&plus, &minus, &values[l - 1..l + 2], false);
+            let spring = self.springs[l] * norm(&plus) - self.springs[l - 1] * norm(&minus);
+            let f = &tau * (grads[l].dot(&tau) + spring) - &grads[l];
+            force.slice_mut(s![(l - 1) * dof..l * dof]).assign(&f);
+        }
+        Ok((values, force))
+    }
+}
+
+/// Eq. 6 on a monotone triple of objective values, otherwise Eq. 7 on
+/// the unit segment vectors. `weighted` always takes Eq. 7. A flat
+/// triple weighs both segments equally.
+fn tangent(plus: &Array1<f64>, minus: &Array1<f64>, s: &[f64], weighted: bool) -> Array1<f64> {
+    let (prev, here, next) = (s[0], s[1], s[2]);
+    let tau = if !weighted && next > here && here > prev {
+        plus.clone()
+    } else if !weighted && next < here && here < prev {
+        minus.clone()
+    } else {
+        let (up, down) = ((next - here).abs(), (prev - here).abs());
+        let (hi, lo) = (up.max(down), up.min(down));
+        let (p, m) = (unit(plus), unit(minus));
+        if hi == 0.0 {
+            p + m
+        } else if next > prev {
+            p * hi + m * lo
+        } else {
+            p * lo + m * hi
+        }
+    };
+    unit(&tau)
+}
+
+fn relax(
+    band: &GrowBand,
+    x: &mut Array1<f64>,
+    config: &SidppConfig,
+    done: impl Fn(&Array1<f64>) -> bool,
+) -> Result<(Vec<f64>, Array1<f64>), SaddleError> {
+    use rgmin::{Control, Method, Oracle, QuickMinOptions, Solver};
+
+    let surface = band.clone();
+    let oracle = Oracle::unbounded(x.len(), move |y: ArrayView1<f64>| match surface.force(y) {
+        Ok((values, force)) => (values.iter().sum(), -force),
+        Err(_) => (f64::NAN, Array1::from_elem(y.len(), f64::NAN)),
+    });
+    let control = Control {
+        maxiter: usize::MAX,
+        gtol: 0.0,
+        istep: config.time_step,
+        maxmove: None,
+        ..Control::default()
+    };
+    let mut solver = Solver::new(Method::QuickMin, control, x.len());
+    solver.set_atom_maxmove(config.max_move);
+    solver.set_quickmin_options(QuickMinOptions::eon());
+    let mut state = band.force(x.view())?;
+    for _ in 0..config.max_iterations {
+        if done(&state.1) {
+            break;
+        }
+        solver
+            .step(&oracle, x)
+            .map_err(|err| SaddleError::Solver(err.to_string()))?;
+        if !x.iter().all(|v| v.is_finite()) {
+            return Err(SaddleError::NonFinite("S-IDPP image"));
+        }
+        state = band.force(x.view())?;
+    }
+    Ok(state)
+}
+
+fn mic_diff(a: ArrayView1<f64>, b: ArrayView1<f64>, cell: Option<&Cell>) -> Array1<f64> {
+    let mut d = &a - &b;
+    if let Some(cell) = cell {
+        mic::wrap_difference(cell, &mut d);
+    }
+    d
+}
+
+fn norm(v: &Array1<f64>) -> f64 {
+    v.dot(v).sqrt()
+}
+
+fn unit(v: &Array1<f64>) -> Array1<f64> {
+    let n = norm(v);
+    if n > 0.0 { v / n } else { v.clone() }
+}
+
+fn max_abs(v: ArrayView1<f64>) -> f64 {
+    v.iter().fold(0.0, |m, x| m.max(x.abs()))
+}
+
+fn check_sidpp(config: &SidppConfig) -> Result<(), SaddleError> {
+    let c = config;
+    let positive = [c.spring, c.force_tol, c.rms_tol, c.time_step, c.max_move];
+    if c.max_iterations == 0 || !positive.iter().all(|v| *v > 0.0 && v.is_finite()) {
+        return Err(SaddleError::Invalid(
+            "S-IDPP needs an iteration and finite positive settings".into(),
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn check_config(config: &IdppConfig) -> Result<(), SaddleError> {

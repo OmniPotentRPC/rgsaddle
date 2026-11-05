@@ -1,11 +1,11 @@
-//! IDPP initial path: collision, triclinic minimum image, eOn parity,
-//! and CI-NEB force calls from the two starts.
+//! IDPP and S-IDPP initial paths: collision, triclinic minimum image,
+//! eOn parity, a turning group, and NEB force calls from the starts.
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, array};
 use rgsaddle::mic::{self, Cell};
 use rgsaddle::{
-    BandConfig, BandSession, BandStatus, BandSurface, IdppConfig, SaddleError, SpringKind,
-    TangentKind, idpp_path, linear_path,
+    BandConfig, BandSession, BandStatus, BandSurface, IdppConfig, SaddleError, SidppConfig,
+    SpringKind, TangentKind, idpp_path, linear_path, sidpp_path,
 };
 
 fn pair_distance(pos: ArrayView1<f64>, i: usize, j: usize, cell: Option<&Cell>) -> f64 {
@@ -145,6 +145,91 @@ fn triclinic_path_uses_the_minimum_image_and_matches_eon() {
     for (row, expect) in reference.iter().enumerate() {
         let err = max_mic(Some(&cell), idpp.row(row + 1), expect);
         assert!(err < 2e-4, "image {}: {err}", row + 1);
+    }
+    let start = sidpp_start(&reactant, &product, 4, Some(&cell));
+    assert_eq!(start.row(0), reactant.view());
+    assert_eq!(start.row(3), product.view());
+    assert!(min_pair(start.row(1), Some(&cell)) > 0.9);
+    assert!(min_pair(start.row(2), Some(&cell)) > 0.9);
+}
+
+fn sidpp_start(r: &Array1<f64>, p: &Array1<f64>, n: usize, cell: Option<&Cell>) -> Array2<f64> {
+    sidpp_path(r.view(), p.view(), n, cell, &SidppConfig::default()).unwrap()
+}
+
+/// An anchor pair on z and a three-atom group on the second atom,
+/// turned 170 degrees about z, so every distance is the same at both
+/// ends. The straight line takes the group through the axis.
+fn rotor_endpoints() -> (Array1<f64>, Array1<f64>) {
+    let group = [[1.0, 0.0, 2.0], [-0.5, 0.9, 2.0], [-0.45, -0.8, 2.1]];
+    let (sin, cos) = 170.0_f64.to_radians().sin_cos();
+    let mut reactant = vec![0.0, 0.0, 0.0, 0.0, 0.0, 1.5];
+    let mut product = reactant.clone();
+    for [x, y, z] in group {
+        reactant.extend([x, y, z]);
+        product.extend([cos * x - sin * y, sin * x + cos * y, z]);
+    }
+    (Array1::from(reactant), Array1::from(product))
+}
+
+fn interior_gap(path: &Array2<f64>) -> f64 {
+    let n = path.nrows();
+    (1..n - 1)
+        .map(|i| min_pair(path.row(i), None))
+        .fold(f64::MAX, f64::min)
+}
+
+/// Longest segment over the mean segment.
+fn spacing_ratio(path: &Array2<f64>) -> f64 {
+    let seg: Vec<f64> = (1..path.nrows())
+        .map(|l| {
+            (&path.row(l) - &path.row(l - 1))
+                .mapv(|v| v * v)
+                .sum()
+                .sqrt()
+        })
+        .collect();
+    seg.iter().copied().fold(0.0, f64::max) * seg.len() as f64 / seg.iter().sum::<f64>()
+}
+
+/// Largest miss of the interpolated distance over the rotor's bonds.
+/// The cut 1.6 lies between the anchor bond, 1.5, and the closest
+/// pair inside the group, 1.66.
+fn bond_error(path: &Array2<f64>) -> f64 {
+    let (last, n) = (path.nrows() - 1, path.ncols() / 3);
+    let mut worst = 0.0_f64;
+    for l in 1..last {
+        let xi = l as f64 / last as f64;
+        for (i, j) in (0..n).flat_map(|i| ((i + 1)..n).map(move |j| (i, j))) {
+            let a = pair_distance(path.row(0), i, j, None);
+            let b = pair_distance(path.row(last), i, j, None);
+            if a < 1.6 && b < 1.6 {
+                let miss = pair_distance(path.row(l), i, j, None) - (1.0 - xi) * a - xi * b;
+                worst = worst.max(miss.abs());
+            }
+        }
+    }
+    worst
+}
+
+#[test]
+fn sidpp_turns_a_group_without_a_clash_and_spaces_the_images() {
+    let (r, p) = rotor_endpoints();
+    let linear = linear_path(r.view(), p.view(), 9, None).unwrap();
+    let idpp = idpp_path(r.view(), p.view(), 9, None, &IdppConfig::default()).unwrap();
+    let start = sidpp_start(&r, &p, 9, None);
+    assert_eq!(start.row(0), r.view());
+    assert_eq!(start.row(8), p.view());
+    assert!(interior_gap(&linear) < 0.16 && bond_error(&linear) > 0.6);
+    // IDPP relaxes each image alone, so nothing spaces them.
+    assert!(spacing_ratio(&idpp) > 3.0);
+    let got = [
+        interior_gap(&start),
+        spacing_ratio(&start),
+        bond_error(&start),
+    ];
+    for (value, golden) in got.iter().zip(GOLDEN_ROTOR) {
+        assert!((value - golden).abs() < 1e-4, "{got:?}");
     }
 }
 
@@ -338,6 +423,18 @@ fn idpp_start_reaches_a_converged_band_in_fewer_force_calls() {
 }
 
 #[test]
+fn sidpp_start_reaches_a_converged_band_in_fewer_force_calls_than_idpp() {
+    let (r, p) = exchange_endpoints();
+    let idpp = idpp_path(r.view(), p.view(), 6, None, &IdppConfig::default()).unwrap();
+    let (idpp_report, _) = neb(idpp);
+    let (report, _) = neb(sidpp_start(&r, &p, 6, None));
+    assert_eq!(idpp_report.status, BandStatus::Converged);
+    assert_eq!(report.status, BandStatus::Converged);
+    assert_eq!(report.surface_rows, GOLDEN_EXCHANGE_ROWS);
+    assert!(report.surface_rows < idpp_report.surface_rows);
+}
+
+#[test]
 #[cfg(feature = "capi")]
 fn c_abi_idpp_path_copies_the_endpoints() {
     use rgsaddle::capi::{RGSADDLE_OK, RGSADDLE_SHAPE, rgsaddle_idpp_path};
@@ -432,4 +529,20 @@ fn rejects_a_short_path_and_a_bad_stop() {
         matches!(non_finite, SaddleError::NonFinite(_)),
         "{non_finite}"
     );
+    for (time_step, max_iterations) in [(0.0, 10), (0.1, 0)] {
+        let config = SidppConfig {
+            time_step,
+            max_iterations,
+            ..SidppConfig::default()
+        };
+        let err = sidpp_path(reactant.view(), product.view(), 3, None, &config).unwrap_err();
+        assert!(matches!(err, SaddleError::Invalid(_)), "{err}");
+    }
 }
+
+/// Measured with `SidppConfig::default()`: the rotor's closest interior
+/// pair, spacing ratio, and bond miss, and the exchange band's force
+/// rows. The straight rotor line gives 0.152 and 0.637, IDPP a spacing
+/// ratio of 3.284, and the IDPP exchange start 178 rows.
+const GOLDEN_ROTOR: [f64; 3] = [1.096481, 1.003693, 0.008818];
+const GOLDEN_EXCHANGE_ROWS: usize = 158;

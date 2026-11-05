@@ -3,6 +3,13 @@
 
 * Unreleased
 
+- ~sidpp_path~ builds an initial band by the sequential image-dependent pair potential (S-IDPP) method of Schmerwitz, Asgeirsson, and Jonsson, J. Chem. Theory Comput. 20, 155 (2024), doi:10.1021/acs.jctc.3c01111.
+  The band grows from both endpoints one image at a time, with the spring of their Eq. 10 across the gap, and then relaxes with equal springs.
+  ~SidppConfig~ defaults to their spring constant of 1 and their stops of 0.01 on the largest force component and 0.005 on the root mean square force.
+  ~idpp_path~ is unchanged, and the C ABI has no new entry point.
+  On a three-atom group turned 170 degrees, the longest S-IDPP segment is 1.004 times the mean segment, where the IDPP one is 3.28 times.
+  From the four-atom Lennard-Jones exchange of ~tests/idpp_path.rs~ with six images, the band converges in 158 force rows from S-IDPP and in 178 from IDPP.
+  With eight images on the same exchange it takes 368 rows from S-IDPP and 320 from IDPP.
 - ~AutoNebTuning::interpolant~ chooses how AutoNEB places each new image, the initial fill included.
   ~AutoNebInterpolant::Linear~, the default, is the minimum-image midpoint, so the default band moves as before, bit for bit.
   ~AutoNebInterpolant::Idpp~ relaxes that midpoint on the image-dependent pair potential toward the mean pair distances of the two segment ends.
