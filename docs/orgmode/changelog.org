@@ -3,6 +3,10 @@
 
 * Unreleased
 
+- ~benchmarks/saddle.py~ is an airspeed velocity (asv) suite that times one dimer step and one connect call through the Python binding.
+  Its ~ray_*~ methods record the memory peak of the same calls with memray.
+  ~snakemake -c 1~ calibrates an upper bound for each benchmark from repeated runs of ~main~.
+  ~snakemake -c 1 pr_gate~ exits non-zero when a benchmark is slower than that bound, and ~benchflow/README.md~ describes the workflow.
 - ~SellaSaddleConfig::symmetrized_ritz~ and ~SellaSaddleSession::set_symmetrized_ritz~ take Ritz pairs as Sella's ~rayleigh_ritz~ does.
   Each finite-difference diagonalization then takes them from the ~symm=2~ products that its residual test reads.
   The option is off by default, and the default steps as before, bit for bit.
