@@ -40,6 +40,7 @@ The knobs are the fields of =BandConfig::autoneb=.
 | ~full_band~          | off     |                      | Also relax the full band after the climbing window. ASE stops without this stage.       |
 | ~threads~            | 1       |                      | Image-evaluation threads. ASE's world size is the nearest name, and it is not this knob. |
 | ~record_samples~     | off     |                      | Store one ~f64~ per degree of freedom per force call. Off stores nothing and takes no lock. |
+| ~interpolant~        | linear  | ~interpolate_method~ | Placement of new images. ~Idpp~ relaxes each on the image-dependent pair potential (IDPP).  |
 
 Construction fills the band to ~n_simul + 2~ by cutting the longest segment, one image at a time. Each image is the minimum-image midpoint. ASE's AutoNEB, given only the two endpoints, places ~n_simul~ images in one equal-spaced interpolate. The two fills meet on a unit segment when ~n_simul~ is 1 or 3, and they differ for 2.
 
@@ -51,6 +52,8 @@ Climbing uses ~BandConfig::climbing~. The default trigger factor is 0.5 and the 
 
 * How it differs from ASE
 The inserted image is the minimum-image midpoint. The fill from two endpoints cuts one midpoint at a time, while ASE places ~n_simul~ images in one interpolate. The Müller-Brown comparison uses FIRE 1.0, ASE's original FIRE, with this crate's step cap of 2.5 times the starting step. Both codes then insert at index 2 and then at index 1.
+
+~AutoNebInterpolant::Linear~, the default, places that midpoint. ASE's AutoNEB defaults to ~interpolate_method='idpp'~ and interpolates the three images ~[left, copy, right]~ of the cut segment. ~AutoNebInterpolant::Idpp~ does the same for every new image, the fill included: the target pair distances are the mean of the two segment ends, as in Smidstrup, Pedersen, Stokbro, and Jonsson, J. Chem. Phys. 140, 214106 (2014), doi:10.1063/1.4878664. The relaxation is this crate's L-BFGS with ~IdppConfig~, not ASE's MDMin, and pair distances use the minimum image when ~BandConfig::cell~ is set. That cell must have three non-zero, independent rows. With two endpoints and one free image the fill is the interior row of ~idpp_path~ with three images. A single atom has no pairs, so both interpolants place the same image.
 
 * One session per unchanged window
 An unchanged window keeps its ~BandSession~, so the L-BFGS pairs survive the moment climbing is armed on those same images. A new index set starts with empty memory. The optional full band is a new session when it is not the same index set as the local window.

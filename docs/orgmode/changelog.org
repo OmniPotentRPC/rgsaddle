@@ -3,6 +3,13 @@
 
 * Unreleased
 
+- ~AutoNebTuning::interpolant~ chooses how AutoNEB places each new image, the initial fill included.
+  ~AutoNebInterpolant::Linear~, the default, is the minimum-image midpoint, so the default band moves as before, bit for bit.
+  ~AutoNebInterpolant::Idpp~ relaxes that midpoint on the image-dependent pair potential toward the mean pair distances of the two segment ends.
+  That is the default of ASE's AutoNEB and follows Smidstrup, Pedersen, Stokbro, and Jonsson, J. Chem. Phys. 140, 214106 (2014), doi:10.1063/1.4878664.
+  Under ~Idpp~ a ~BandConfig::cell~ with a zero or dependent row is refused.
+  A struct literal that lists every field of ~AutoNebTuning~ now lists this one too.
+  It can also end in ~..AutoNebTuning::default()~ instead.
 - ~benchmarks/saddle.py~ is an airspeed velocity (asv) suite that times one dimer step and one connect call through the Python binding.
   Its ~ray_*~ methods record the memory peak of the same calls with memray.
   ~snakemake -c 1~ calibrates an upper bound for each benchmark from repeated runs of ~main~.
