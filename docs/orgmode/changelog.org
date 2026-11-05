@@ -3,6 +3,18 @@
 
 * Unreleased
 
+- ~SpringKind::OnsagerMachlupLive { k }~ rebuilds the Onsager-Machlup displacements from the band forces at every evaluation.
+  Each interior image gets ~L = F / (2 k)~ and each endpoint zero, as eOn's ~buildSpringStrategy~ in ~NEBSpringForce.cpp~ does on every ~updateForces~.
+  ~spring::onsager_machlup_displacements~ is that rule and ~SpringKind::at_band~ applies it.
+  The kind is opt-in: ~SpringKind::OnsagerMachlup~ keeps the displacements a host froze, and the default band is unchanged.
+  A non-finite ~k~ is refused with ~SaddleError::Invalid~.
+  AutoNEB and the solid-state block refuse the new kind, as they refuse ~OnsagerMachlup~.
+  Breaking for an exhaustive ~match~ on ~SpringKind~.
+- C spring ordinal 2, ~RGSADDLE_SPRING_ONSAGER_MACHLUP~, now builds ~SpringKind::OnsagerMachlupLive~ from ~spring_k~.
+  It used to hold every displacement at zero, so the spring kept only the second difference of the path and ignored the forces.
+  A band with ordinal 2 therefore steps differently from 0.3.2, and a non-finite ~spring_k~ makes ~rgsaddle_band_create~ return NULL.
+  ~RGSADDLE_ABI_MINOR~ is 33 so that a host can tell the two apart; no layout or symbol changes.
+  ~tests/onsager_machlup_live.rs~ steps ordinal 2 bit for bit with the live Rust spring and apart from zero displacements.
 - ~sidpp_path~ builds an initial band by the sequential image-dependent pair potential (S-IDPP) method of Schmerwitz, Asgeirsson, and Jonsson, J. Chem. Theory Comput. 20, 155 (2024), doi:10.1021/acs.jctc.3c01111.
   The band grows from both endpoints one image at a time, with the spring of their Eq. 10 across the gap, and then relaxes with equal springs.
   ~SidppConfig~ defaults to their spring constant of 1 and their stops of 0.01 on the largest force component and 0.005 on the root mean square force.

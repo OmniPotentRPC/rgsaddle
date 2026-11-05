@@ -700,7 +700,10 @@ fn prepare_solid(
     let Some(spec) = &config.solid else {
         return Ok((positions, None));
     };
-    if matches!(config.spring, SpringKind::OnsagerMachlup { .. }) {
+    if matches!(
+        config.spring,
+        SpringKind::OnsagerMachlup { .. } | SpringKind::OnsagerMachlupLive { .. }
+    ) {
         return Err(SaddleError::Invalid(
             "solid-state band does not use Onsager-Machlup springs".into(),
         ));
@@ -1308,7 +1311,7 @@ fn assemble_band_with(
             .store(climb_target.map_or(-1, |i| i as i64), Ordering::Relaxed);
     }
     let ci_at = if armed { climb_target } else { None };
-    let spring = config.spring.at_energies(energies.view());
+    let spring = config.spring.at_band(energies.view(), gradients.view());
 
     let metric_of = |i: usize| metrics.and_then(|m| m.get(i - 1));
     // An armed climbing image under the metric climbs in the P-metric,
@@ -1606,6 +1609,13 @@ impl BandSession {
         {
             return Err(SaddleError::Shape(format!(
                 "Onsager-Machlup springs need {n_images} displacements of length {dof}"
+            )));
+        }
+        if let SpringKind::OnsagerMachlupLive { k } = config.spring
+            && !k.is_finite()
+        {
+            return Err(SaddleError::Invalid(format!(
+                "Onsager-Machlup spring constant must be finite; got {k}"
             )));
         }
         if let SpringKind::EnergyWeighted { k_min, k_max } = config.spring

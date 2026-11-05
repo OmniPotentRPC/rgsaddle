@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 32u
+#define RGSADDLE_ABI_MINOR 33u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -132,6 +132,12 @@ typedef enum {
 typedef enum {
   RGSADDLE_SPRING_UNIFORM = 0,
   RGSADDLE_SPRING_WEIGHTED = 1,
+  /**
+   * Mandelli and Parrinello springs of constant spring_k. From minor
+   * 33 the displacements are F / (2 spring_k) at each interior image,
+   * rebuilt from the forces of every evaluation; below minor 33 they
+   * were zero. A non-finite spring_k fails band creation.
+   */
   RGSADDLE_SPRING_ONSAGER_MACHLUP = 2
 } rgsaddle_spring_t;
 
