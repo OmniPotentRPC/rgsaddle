@@ -12,8 +12,9 @@ The table below lists the main types.
 | =OcinebSession=                | The band's refinement with the published controls (=OcinebConfig::refine=). =step= reports =Band=, =Align=, or =MinMode= |
 | =AutoNeb=                      | Insert on the worst gap, relax a local window, and climb. The full band runs only when =full_band= is set. =run= is one shot |
 | =AutoNebTuning=                | =n_simul=, =n_max=, local tolerance and step caps, =space_energy_ratio=, =climb=, =full_band=, =threads=, =record_samples=. Stored on =BandConfig= |
-| =BandConfig=                   | Tangent, spring, projection, climbing, cell, tolerances, method, optional AutoNEB tuning, =min_mode= refinement     |
+| =BandConfig=                   | Tangent, spring, projection, climbing, cell, tolerances, method, optional AutoNEB tuning, =min_mode= refinement, =zoom= |
 | =MinModeRefine=                | OCI-NEB refinement of the climbing image. Non-exhaustive. Trigger at any force, stability 1, start alignment 0.85, no alignment exit, retry under 0.5 of the starting force, refresh at 0.3 of the measured curvature or overlap 0.8 every 4 steps at most, budget 1000, Lanczos with twenty actions and relative tolerance 0.05 |
+| =ZoomConfig=                   | The nudged elastic band (NEB) zoom, Zoom-NEB, on =BandConfig::zoom=. Non-exhaustive, off unless set. Recommended settings for a band that opts in are the defaults: =alpha= 0.5, =offset= 1, =stability= 5, cubic placement, and =after= 0. An =after= of 0 zooms once the largest per-image force, measured by the session's convergence norm, is below twice =force_tol=. The window always reaches both neighbours of the climbing image. The min-mode refinement waits for the zoom decision. Plain climbing image NEB (CI-NEB) on the 51 benchmark pairs of the 38-atom Lennard-Jones cluster (LJ38) converged 20 pairs with the zoom on and 21 without it. It used more force calls on 10 of the 17 pairs that converged both ways. With the default min-mode refinement on, one LJ38 pair ran to the 250000 call cap. On Müller-Brown at 13 images with FIRE and =max_move= 0.05, plain CI-NEB took 30593 force calls with the zoom and 31308 without it. With L-BFGS of memory 100 and climbing from half the first force, the zoom does not help on Müller-Brown: the band took 6503 force calls with it and 3280 without it. The zoom is an opt-in, not a general default. |
 | =BandSurface=                  | Host potential on a band (energies + gradients per image)                                                          |
 | =BandReport=                   | =status=, =max_force=, =ci_index=, =iteration=, =surface_rows=, =curvature= (refinement steps only)                |
 | =MinModeSession=               | Dimer or Lanczos lowest-mode search, same stepping contract; =set_position=, =set_mode=, =estimate_mode= for reuse; =set_torque_window= sets the dimer torque window apart from =rotation_tol= |
@@ -70,7 +71,7 @@ A failed callback leaves it unchanged.
 Its =rotation_angle_tol= field stops a dimer rotation once the optimal angle falls under this tolerance in radians.
 The Rust default is five degrees, 0 turns the stop off, and a C config stores the value it is given.
 Both fields are read only from a config whose version minor is 5 or newer.
-=RGSADDLE_ABI_MINOR= is 26.
+=RGSADDLE_ABI_MINOR= is 31.
 From minor 24, =rgsaddle_sella_saddle_set_symmetrized_ritz= sets =SellaSaddleConfig::symmetrized_ritz= from 0 or 1.
 It returns =RGSADDLE_INVALID_PARAMETER= for any other value.
 =rgsaddle_sella_saddle_set_small_system_atom_ceiling= (minor 25) sets =SellaSaddleConfig::small_system_atom_ceiling= from 0 or 1.
@@ -78,6 +79,9 @@ It returns =RGSADDLE_INVALID_PARAMETER= for any other value.
 =rgsaddle_minmode_set_torque_window= (minor 26) calls =MinModeSession::set_torque_window= with -1, 0 or 1.
 The value -1 infers the window from =rotation_tol= as a new session does, 0 turns it off and 1 turns it on.
 It returns =RGSADDLE_INVALID_PARAMETER= for any other value.
+=rgsaddle_band_set_zoom= (minor 31) sets or clears Zoom-NEB on a band.
+Recommended when enabled: =alpha= 0.5, =offset= 1, =after= 0 (twice =force_tol= on the largest per-image force), =stability= 5 and =cubic= 1.
+Its window always reaches both neighbours of the climbing image, and the min-mode refinement waits for the zoom decision.
 The request flags are =RGSADDLE_REQ_ONE_IMAGE= (bit 0) and =RGSADDLE_REQ_CLIMBING_IMAGE= (bit 1).
 From a band config at minor 22, the refinement's one-image requests also set bit 1.
 Their =image= is then the climbing image's band index.

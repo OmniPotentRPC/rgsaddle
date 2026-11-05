@@ -58,6 +58,20 @@
   On the double well of ~tests/double_well.rs~, from its 9-image start bowed by 0.3 in y, with the same L-BFGS and climbing image but ~max_move~ 0.2, the band takes 41, 50 and 42 calls refined and 86, 88 and 86 unrefined.
   These Mueller-Brown and double-well runs stop when the band reports ~Converged~ at ~force_tol~ 1e-3.
 
+- The nudged elastic band (NEB) zoom of eOn, Zoom-NEB, off by default.
+  ~BandConfig::zoom~ and ~BandSession::set_zoom~ take a ~ZoomConfig~ with eOn's ~zoom_*~ keys, and C application binary interface (ABI) minor 31 adds ~rgsaddle_band_set_zoom~.
+  Once the climbing image has kept its index for five steps and the largest per-image force is under twice ~force_tol~, the band is placed at equal arc length on a window around it.
+  The window's end images become the endpoints.
+  The window follows eOn ~NEBZoom.cpp~ and then always reaches both neighbours of the climbing image.
+  The min-mode refinement does not start before the zoom has decided.
+  ~ZoomConfig::default()~ gives the recommended settings for a band that opts in.
+  With the zoom on, plain climbing image NEB (CI-NEB) on the 51 benchmark pairs of the 38-atom Lennard-Jones cluster (LJ38) converged 20 pairs, where it converged 21 without the zoom.
+  It used more force calls on 10 of the 17 pairs that converged both ways.
+  With the default min-mode refinement on, one LJ38 pair ran to the 250000 call cap.
+  On Mueller-Brown at 13 images with FIRE and ~max_move~ 0.05, plain CI-NEB took 30593 force calls with the zoom and 31308 without it.
+  With L-BFGS of memory 100 and climbing from half the first force, the zoom does not help on Mueller-Brown: the band took 6503 force calls with it and 3280 without it.
+  The zoom is an opt-in, not a general default.
+  The adaptive NEB is Maragakis, Andreev, Brumer, Reichman, and Kaxiras, J. Chem. Phys. 117, 4651 (2002), doi:10.1063/1.1495401.
 - Builds on rgmin 0.5.2 from crates.io. ~Control~ carries ~ftol_rel~ and ~noise_floor~; the band, minimum-mode, stencil, IDPP, and IRC solvers fill those fields from ~Control::default()~, which is the 0.5.1 behaviour (no relative energy slack, no noise-floor stop). The golden stencil and band hashes are unchanged.
 - A branch of the intrinsic reaction coordinate (IRC) under the second-order step of Gonzalez and Schlegel (GS2) now stops on its force and its curvature.
   The curvature is along the launch mode, and the sphere radius no longer enters.

@@ -496,6 +496,68 @@ int main(void) {
     }
   }
 
+  /* Zoom-NEB: the band is placed on a window inside the old one, the
+   * window ends keep their energies and the climbing image stays armed. */
+  {
+    rgsaddle_band_config_t zc = cfg;
+    zc.flags = RGSADDLE_BAND_NO_MIN_MODE;
+    RgsaddleBand *zb = rgsaddle_band_create(&zc, n_images, n_atoms, pos);
+    if (!zb) {
+      return fail(RGSADDLE_SHAPE, "zoom band create failed");
+    }
+    if (rgsaddle_band_set_zoom(NULL, 1, 0.5, 1, 0.0, 5, 1) != RGSADDLE_NULL_BAND ||
+        rgsaddle_band_set_zoom(zb, 1, 1.0, 1, 0.0, 5, 1) != RGSADDLE_INVALID_PARAMETER ||
+        rgsaddle_band_set_zoom(zb, 1, 0.5, 0, 0.0, 5, 1) != RGSADDLE_INVALID_PARAMETER ||
+        rgsaddle_band_set_zoom(zb, 1, 0.5, 1, 0.0, 5, 2) != RGSADDLE_INVALID_PARAMETER ||
+        rgsaddle_band_set_zoom(zb, 0, 0.0, 0, 0.0, 0, 0) != RGSADDLE_OK ||
+        rgsaddle_band_set_zoom(zb, 1, 0.5, 1, 10.0, 2, 1) != RGSADDLE_OK) {
+      return fail(RGSADDLE_INVALID_PARAMETER, "zoom setter");
+    }
+    climbing_seen_t zseen = {1, 0, -1};
+    rgsaddle_report_t zr;
+    memset(&zr, 0, sizeof zr);
+    double zp[9 * 3];
+    int k = 0;
+    do {
+      st = rgsaddle_band_step(zb, surface, &zseen, &zr);
+      if (st != RGSADDLE_OK || rgsaddle_band_positions(zb, zp) != RGSADDLE_OK) {
+        return fail(st, "zoom step");
+      }
+    } while (zp[0] == -1.0 && ++k < 500);
+    const double lo = zp[0], hi = zp[(n_images - 1) * 3];
+    if (!(lo > -1.0 && hi < 1.0) || fabs(zp[(n_images / 2) * 3]) > 1e-9 ||
+        zr.ci_index != n_images / 2) {
+      fprintf(stderr, "zoom window %g to %g, middle %g, ci %lld\n", lo, hi,
+              zp[(n_images / 2) * 3], (long long)zr.ci_index);
+      return fail(RGSADDLE_SHAPE, "zoom placement");
+    }
+    for (long i = 1; i < n_images; ++i) {
+      if (!(zp[i * 3] > zp[(i - 1) * 3])) {
+        return fail(RGSADDLE_SHAPE, "zoomed images out of order");
+      }
+    }
+    st = rgsaddle_band_step(zb, surface, &zseen, &zr);
+    if (st != RGSADDLE_OK || zr.evaluations != 2 * (n_images - 2) || zr.ci_index < 1 ||
+        zr.ci_index > n_images - 2) {
+      fprintf(stderr, "after zoom: evaluations %d, ci %lld\n", zr.evaluations,
+              (long long)zr.ci_index);
+      return fail(RGSADDLE_SHAPE, "step after the zoom");
+    }
+    k = 0;
+    while (zr.status == RGSADDLE_STATUS_RUNNING && ++k < 3000) {
+      st = rgsaddle_band_step(zb, surface, &zseen, &zr);
+      if (st != RGSADDLE_OK) {
+        return fail(st, "zoomed band step");
+      }
+    }
+    if (zr.status != RGSADDLE_STATUS_CONVERGED ||
+        rgsaddle_band_positions(zb, zp) != RGSADDLE_OK || zp[0] != lo ||
+        fabs(zp[zr.ci_index * 3]) > 1e-2) {
+      return fail(RGSADDLE_SOLVER, "zoomed band did not reach the saddle");
+    }
+    rgsaddle_band_free(zb);
+  }
+
   st = minmode_reuse();
   if (st != RGSADDLE_OK) {
     return st;
