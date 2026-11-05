@@ -3153,3 +3153,125 @@ pub unsafe extern "C" fn rgsaddle_minmode_set_highs(
     unsafe { (*session).session.set_highs(enabled == 1) };
     RGSADDLE_OK
 }
+
+/// # Safety
+/// `session` is a live session or null. `window` is -1, 0 or 1.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_minmode_set_torque_window(
+    session: *mut RgsaddleMinMode,
+    window: i32,
+) -> i32 {
+    if session.is_null() {
+        return RGSADDLE_NULL_SESSION;
+    }
+    let window = match window {
+        -1 => None,
+        0 => Some(false),
+        1 => Some(true),
+        _ => return RGSADDLE_INVALID_PARAMETER,
+    };
+    unsafe { (*session).session.set_torque_window(window) };
+    RGSADDLE_OK
+}
+
+#[cfg(test)]
+mod torque_window_abi_tests {
+    use super::*;
+
+    const CURVATURES: [f64; 6] = [-2.0, 1.0, 4.0, 8.0, 2.0, 3.0];
+
+    extern "C" fn quadratic_cb(_user: *mut c_void, req: *mut RgsaddleSurfaceRequest) -> i32 {
+        unsafe {
+            let req = &mut *req;
+            let n = (req.n_atoms * 3) as usize;
+            let pos = slice::from_raw_parts(req.positions, n);
+            let gout = slice::from_raw_parts_mut(req.gradients, n);
+            let mut energy = 0.0;
+            for ((g, &x), &c) in gout.iter_mut().zip(pos).zip(CURVATURES.iter()) {
+                energy += 0.5 * c * x * x;
+                *g = c * x;
+            }
+            *req.energies = energy;
+        }
+        RGSADDLE_OK
+    }
+
+    fn session(rotation_tol: f64) -> *mut RgsaddleMinMode {
+        let cfg = RgsaddleMinModeConfig {
+            version: RgsaddleVersion {
+                major: RGSADDLE_ABI_MAJOR,
+                minor: RGSADDLE_ABI_MINOR,
+            },
+            flags: 0,
+            kind: 0,
+            method: 0,
+            dr: 1e-3,
+            rotation_tol,
+            max_rotations: 20,
+            krylov_dim: 12,
+            force_tol: 1e-3,
+            max_move: 0.2,
+            rotation_angle_tol: 0.0,
+            difference: 0,
+            reserved: 0,
+        };
+        let x = [0.3, 0.2, 0.1, 0.4, 0.1, 0.2];
+        let mode = [0.5, 0.5, 0.5, 0.5, 0.0, 0.0];
+        let sess = unsafe { rgsaddle_minmode_create(&cfg, 2, x.as_ptr(), mode.as_ptr()) };
+        assert!(!sess.is_null());
+        sess
+    }
+
+    fn rotations(rotation_tol: f64, window: Option<i32>) -> i64 {
+        let sess = session(rotation_tol);
+        if let Some(window) = window {
+            assert_eq!(
+                unsafe { rgsaddle_minmode_set_torque_window(sess, window) },
+                RGSADDLE_OK
+            );
+        }
+        let mut report = std::mem::MaybeUninit::<RgsaddleReport>::zeroed();
+        let status = unsafe {
+            rgsaddle_minmode_estimate(
+                sess,
+                Some(quadratic_cb),
+                std::ptr::null_mut(),
+                report.as_mut_ptr(),
+            )
+        };
+        assert_eq!(status, RGSADDLE_OK);
+        unsafe { rgsaddle_minmode_free(sess) };
+        unsafe { report.assume_init() }.rotations
+    }
+
+    #[test]
+    fn minmode_torque_window_abi_takes_minus_one_zero_or_one() {
+        let sess = session(0.1);
+        let set = |v| unsafe { rgsaddle_minmode_set_torque_window(sess, v) };
+        assert_eq!(set(-1), RGSADDLE_OK);
+        assert_eq!(set(0), RGSADDLE_OK);
+        assert_eq!(set(1), RGSADDLE_OK);
+        assert_eq!(set(2), RGSADDLE_INVALID_PARAMETER);
+        assert_eq!(set(-2), RGSADDLE_INVALID_PARAMETER);
+        assert_eq!(
+            unsafe { rgsaddle_minmode_set_torque_window(std::ptr::null_mut(), 0) },
+            RGSADDLE_NULL_SESSION
+        );
+        unsafe { rgsaddle_minmode_free(sess) };
+    }
+
+    #[test]
+    fn unset_minmode_torque_window_abi_infers_from_rotation_tol() {
+        assert_eq!(rotations(0.1, None), rotations(0.1, Some(-1)));
+        assert_eq!(rotations(0.1, None), rotations(0.1, Some(1)));
+        assert_eq!(rotations(1e-6, None), rotations(1e-6, Some(-1)));
+        assert_eq!(rotations(1e-6, None), rotations(1e-6, Some(0)));
+    }
+
+    #[test]
+    fn set_minmode_torque_window_abi_overrides_rotation_tol() {
+        assert!(rotations(0.1, Some(0)) > rotations(0.1, None));
+        assert!(rotations(1e-6, Some(1)) < rotations(1e-6, None));
+        assert_eq!(rotations(1e-6, Some(1)), rotations(0.1, None));
+    }
+}

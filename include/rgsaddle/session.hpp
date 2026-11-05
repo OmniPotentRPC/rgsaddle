@@ -248,6 +248,10 @@ public:
     void set_highs(bool enabled) {
         check(rgsaddle_minmode_set_highs(handle_, enabled ? 1 : 0));
     }
+    // -1 infers the window from rotation_tol, 0 turns it off, 1 on.
+    void set_torque_window(int window) {
+        check(rgsaddle_minmode_set_torque_window(handle_, window));
+    }
     void set_position(double const* position, double const* gradient = nullptr) {
         check(rgsaddle_minmode_set_position(handle_, position, gradient));
     }
