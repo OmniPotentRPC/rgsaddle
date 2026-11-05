@@ -12,7 +12,8 @@ use std::time::Instant;
 use ndarray::{Array1, Array2, ArrayView2};
 use rgsaddle::autoneb::AutoNebStage;
 use rgsaddle::{
-    AutoNeb, AutoNebTuning, BandConfig, BandSession, BandStatus, BandSurface, CiConfig, SaddleError,
+    AutoNeb, AutoNebInterpolant, AutoNebTuning, BandConfig, BandSession, BandStatus, BandSurface,
+    CiConfig, SaddleError,
 };
 use sha2::{Digest, Sha256};
 
@@ -183,6 +184,7 @@ fn config(force_tol: f64, full_band: bool) -> BandConfig {
             full_band,
             threads: 1,
             record_samples: false,
+            interpolant: AutoNebInterpolant::Linear,
         }),
         ..BandConfig::default()
     }

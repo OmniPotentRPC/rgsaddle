@@ -26,8 +26,12 @@
 //! AutoNEB, given only the two endpoints, places `n_simul` images in
 //! one equal-spaced interpolate. Those two fills meet on a unit
 //! segment when `n_simul` is 1 or 3, and they differ for 2.
-//! `LinearInterpolation` is the straight minimum-image segment. An
-//! IDPP path implements the same trait; this crate does not ship one.
+//! `LinearInterpolation` is the straight minimum-image segment and the
+//! default. [`AutoNebInterpolant::Idpp`] relaxes that midpoint on the
+//! image-dependent pair potential of Smidstrup, Pedersen, Stokbro, and
+//! Jonsson, J. Chem. Phys. 140, 214106 (2014), doi:10.1063/1.4878664,
+//! toward the mean pair distances of the two segment ends, as ASE's
+//! AutoNEB interpolates its three-image segment.
 //! Buildup leaves climbing off. The host spring is uniform. The search
 //! keeps a private per-segment list: the fill from two endpoints sets
 //! every segment to `k * (n_simul + 1)`, and each later insertion
@@ -59,6 +63,7 @@ use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 
 use crate::band::{BandConfig, BandSession, BandStatus, BandSurface, Cell, CiConfig};
 use crate::error::SaddleError;
+use crate::idpp::IdppConfig;
 use crate::spring::SpringKind;
 
 /// Where one new image is placed.
@@ -114,6 +119,62 @@ impl ImageInterpolation for LinearInterpolation {
         }
         Ok(&left + &step * 0.5)
     }
+}
+
+/// Linear midpoint relaxed on the IDPP objective of its segment.
+struct IdppInterpolation {
+    linear: LinearInterpolation,
+    cell: Option<crate::mic::Cell>,
+    config: IdppConfig,
+}
+
+impl IdppInterpolation {
+    fn new(cell: Option<Cell>, config: IdppConfig) -> Result<Self, SaddleError> {
+        crate::idpp::check_config(&config)?;
+        let pair_cell = match cell {
+            Some(Cell([a, b, c])) => Some(
+                crate::mic::Cell::from_vectors(a, b, c, [0.0; 3]).map_err(|err| {
+                    SaddleError::Invalid(format!("AutoNEB IDPP insertion cell: {err}"))
+                })?,
+            ),
+            None => None,
+        };
+        Ok(Self {
+            linear: LinearInterpolation::new(cell),
+            cell: pair_cell,
+            config,
+        })
+    }
+}
+
+impl ImageInterpolation for IdppInterpolation {
+    fn insert(
+        &self,
+        chain: ArrayView2<f64>,
+        energies: &[Option<f64>],
+        after: usize,
+    ) -> Result<Array1<f64>, SaddleError> {
+        let start = self.linear.insert(chain, energies, after)?;
+        crate::idpp::idpp_midpoint(
+            chain.row(after),
+            chain.row(after + 1),
+            start,
+            self.cell.as_ref(),
+            &self.config,
+        )
+    }
+}
+
+/// Placement of each new image, the initial fill included.
+#[derive(Clone, Debug, Default)]
+pub enum AutoNebInterpolant {
+    /// Minimum-image midpoint of the cut segment.
+    #[default]
+    Linear,
+    /// That midpoint relaxed on the image-dependent pair potential,
+    /// with target pair distances the mean of the segment ends. ASE's
+    /// AutoNEB default. A cell must be non-singular in every row.
+    Idpp(IdppConfig),
 }
 
 /// Index of the segment where the next image goes.
@@ -463,6 +524,9 @@ pub struct AutoNebTuning {
     /// Off by default, which stores nothing and takes no sample lock.
     /// On, each force call stores one `f64` per degree of freedom.
     pub record_samples: bool,
+    /// Placement of each new image. Default
+    /// [`AutoNebInterpolant::Linear`].
+    pub interpolant: AutoNebInterpolant,
 }
 
 impl Default for AutoNebTuning {
@@ -478,6 +542,7 @@ impl Default for AutoNebTuning {
             full_band: false,
             threads: 1,
             record_samples: false,
+            interpolant: AutoNebInterpolant::Linear,
         }
     }
 }
@@ -632,8 +697,7 @@ struct OpenWindow {
 
 /// Growing band.
 ///
-/// The interpolant is internal. [`AutoNeb::new`] places each image at
-/// the minimum-image midpoint.
+/// [`AutoNebTuning::interpolant`] places each image.
 pub struct AutoNeb {
     band: BandConfig,
     tuning: AutoNebTuning,
@@ -670,13 +734,27 @@ pub struct AutoNebCut {
 }
 
 impl AutoNeb {
-    /// Fill `initial` up to the first window and keep linear insertion
-    /// for the rest. `initial` has at least the two endpoints.
+    /// Fill `initial` up to the first window with
+    /// [`AutoNebTuning::interpolant`], which also places every later
+    /// image. `initial` has at least the two endpoints.
     /// [`BandConfig::autoneb`] supplies the tuning; `None` uses
     /// [`AutoNebTuning::default`].
     pub fn new(config: BandConfig, initial: Array2<f64>) -> Result<Self, SaddleError> {
-        let interpolation = LinearInterpolation::new(config.cell);
-        Self::with_interpolation(config, initial, interpolation)
+        let interpolant = config
+            .autoneb
+            .as_ref()
+            .map(|tuning| tuning.interpolant.clone())
+            .unwrap_or_default();
+        match interpolant {
+            AutoNebInterpolant::Linear => {
+                let interpolation = LinearInterpolation::new(config.cell);
+                Self::with_interpolation(config, initial, interpolation)
+            }
+            AutoNebInterpolant::Idpp(idpp) => {
+                let interpolation = IdppInterpolation::new(config.cell, idpp)?;
+                Self::with_interpolation(config, initial, interpolation)
+            }
+        }
     }
 
     /// Same as [`AutoNeb::new`] with a caller-supplied interpolant.

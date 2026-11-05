@@ -4,7 +4,8 @@ use std::process::Command;
 
 use ndarray::{Array1, Array2, ArrayView2, array};
 use rgsaddle::{
-    AutoNeb, AutoNebTuning, BandConfig, BandStatus, BandSurface, CiConfig, SaddleError,
+    AutoNeb, AutoNebInterpolant, AutoNebTuning, BandConfig, BandStatus, BandSurface, CiConfig,
+    SaddleError,
 };
 
 const MB_A: [f64; 4] = [-200.0, -100.0, -170.0, 15.0];
@@ -186,6 +187,7 @@ fn muller_brown_matches_an_ase_autoneb_run() {
             full_band: false,
             threads: 1,
             record_samples: false,
+            interpolant: AutoNebInterpolant::Linear,
         }),
         ..BandConfig::default()
     };

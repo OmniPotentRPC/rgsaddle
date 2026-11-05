@@ -15,9 +15,9 @@ use std::path::PathBuf;
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use rayon::ThreadPoolBuilder;
 use rgsaddle::{
-    AutoNeb, AutoNebTuning, BandConfig, BandSession, BandSurface, CiConfig, FiniteDifference,
-    MinModeConfig, MinModeKind, MinModeSession, PointSurface, Preset, ProjectionKind, SaddleError,
-    SpringKind, Stencil, TangentKind,
+    AutoNeb, AutoNebInterpolant, AutoNebTuning, BandConfig, BandSession, BandSurface, CiConfig,
+    FiniteDifference, MinModeConfig, MinModeKind, MinModeSession, PointSurface, Preset,
+    ProjectionKind, SaddleError, SpringKind, Stencil, TangentKind,
 };
 use sha2::{Digest, Sha256};
 
@@ -414,6 +414,7 @@ fn run_autoneb(fixture: &str, threads: usize) -> (Array2<f64>, Vec<f64>) {
             full_band: false,
             threads,
             record_samples: false,
+            interpolant: AutoNebInterpolant::Linear,
         }),
         ..BandConfig::default()
     };
