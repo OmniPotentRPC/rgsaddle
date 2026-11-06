@@ -3,6 +3,8 @@
 
 * Unreleased
 
+- Getting started includes ~examples/double_well.rs~, a band on the double well that runs and prints its saddle, and links to the band tutorial.
+  Its surface was a comment before.
 - A tutorial, ~tutorials/band~, finds the Mueller-Brown saddle between minima A and B with CI-NEB and with the default OCI-NEB refinement. ~examples/muller_brown_band.rs~ is the run and ~docs/source/figures/band-tutorial/plot.py~ draws its figures. Library behaviour is unchanged.
 - ~SpringKind::OnsagerMachlupLive { k }~ rebuilds the Onsager-Machlup displacements from the band forces at every evaluation.
   Each interior image gets ~L = F / (2 k)~ and each endpoint zero, as eOn's ~buildSpringStrategy~ in ~NEBSpringForce.cpp~ does on every ~updateForces~.
