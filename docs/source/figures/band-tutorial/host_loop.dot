@@ -1,0 +1,24 @@
+// One BandSession::step, and the host loop around it.
+// Render: dot -Tpng -Gdpi=150 host_loop.dot -o host_loop.png
+digraph host_loop {
+  node [shape=box, style="rounded,filled", fillcolor="#f4f1e8", fontname="Helvetica", fontsize=11];
+  edge [fontname="Helvetica", fontsize=10];
+
+  loop [label="host loop\ncalls step until the report says Converged,\nor until its own policy stops", fillcolor="#dde8f0"];
+  assemble [label="BandSession::step assembles the NEB force:\ntangent, spring, projection, climbing image"];
+  surface [label="BandSurface::eval (host code)\nenergies and gradients of the given images", fillcolor="#dde8f0"];
+  solver [label="one rgmin Solver step on that force\n(FIRE by default)"];
+  refine [label="min_mode set and climbing image stable:\nLanczos lowest mode, then climb that image alone\n(OCI-NEB)"];
+  report [label="BandReport\nstatus, max_force, ci_index, surface_rows", shape=note];
+
+  loop -> assemble [label=" step(&surface)"];
+  assemble -> surface [label=" interior images", dir=both];
+  assemble -> solver;
+  assemble -> refine [style=dashed];
+  refine -> surface [style=dashed, label=" one image", dir=both];
+  solver -> report;
+  refine -> report [style=dashed];
+  loop -> report [dir=back, label=" next step"];
+  {rank=same; assemble; surface;}
+  {rank=same; solver; refine;}
+}
