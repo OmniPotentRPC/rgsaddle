@@ -149,8 +149,8 @@ impl ModelClimb {
             }
         }
         match &self.rigid {
-            Some(q) => rgmin::ts_bfgs_update(&mut self.b, &project(s, q), &project(y, q)),
-            None => rgmin::ts_bfgs_update(&mut self.b, s, y),
+            Some(q) => ts_bfgs_model(&mut self.b, &project(s, q), &project(y, q)),
+            None => ts_bfgs_model(&mut self.b, s, y),
         }
         self.spectrum = None;
     }
@@ -241,6 +241,126 @@ impl ModelClimb {
         self.pending = Some((energy, predicted, ras_cons(&s)));
         Ok(s)
     }
+}
+
+/// Widest model that stays on cyclic Jacobi for the TS-BFGS spectrum.
+///
+/// At this width and below the update is the [`rgmin::ts_bfgs_update`]
+/// call it was before, so the 9-dof triangle fixtures of the climb tests
+/// keep Jacobi. LJ38, a Pt-island image, and the 40-wide
+/// `wide_ts_bfgs_matches_jacobi` model take faer.
+const TS_BFGS_JACOBI_LIMIT: usize = 32;
+
+#[cfg(all(test, feature = "faer"))]
+thread_local! {
+    static FAER_UPDATES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Sella MS-TS-BFGS (`hessian_update._MS_TS_BFGS`).
+///
+/// `|B| s` is the action of the model with every eigenvalue replaced
+/// by its absolute value, so a negative mode is not forced positive.
+/// A model wider than [`TS_BFGS_JACOBI_LIMIT`] takes that spectrum from
+/// faer's symmetric tridiagonal eigensolver. A narrower model, and a
+/// faer failure, keep [`rgmin::ts_bfgs_update`]. The rank-2 update is
+/// the one rgmin applies.
+fn ts_bfgs_model(b: &mut Array2<f64>, s: &Array1<f64>, y: &Array1<f64>) {
+    #[cfg(feature = "faer")]
+    if s.len() > TS_BFGS_JACOBI_LIMIT && ts_bfgs_faer(b, s, y) {
+        return;
+    }
+    rgmin::ts_bfgs_update(b, s, y);
+}
+
+/// `|B|` from faer's self-adjoint spectrum, then the MS-TS-BFGS update.
+///
+/// `false` if the solve fails. The caller then uses cyclic Jacobi. A
+/// short step or a vanishing denominator leaves `b` unchanged, as
+/// rgmin does.
+#[cfg(feature = "faer")]
+fn ts_bfgs_faer(b: &mut Array2<f64>, s: &Array1<f64>, y: &Array1<f64>) -> bool {
+    let n = s.len();
+    if n == 0 || y.len() != n || b.nrows() != n || b.ncols() != n {
+        return true;
+    }
+    if rgmin::vecops::nrm2(s.view()) < 1e-8 {
+        return true;
+    }
+    let par = faer::Par::Seq;
+    let params = faer::Spec::<faer::linalg::evd::SelfAdjointEvdParams, f64>::default();
+    let mut mat = faer::Mat::<f64>::zeros(n, n);
+    for i in 0..n {
+        for j in 0..=i {
+            let v = 0.5 * (b[(i, j)] + b[(j, i)]);
+            mat[(i, j)] = v;
+        }
+    }
+    let mut values = faer::diag::Diag::<f64>::zeros(n);
+    let mut vectors = faer::Mat::<f64>::zeros(n, n);
+    let mut buf =
+        faer::dyn_stack::MemBuffer::new(faer::linalg::evd::self_adjoint_evd_scratch::<f64>(
+            n,
+            faer::linalg::evd::ComputeEigenvectors::Yes,
+            par,
+            params,
+        ));
+    if faer::linalg::evd::self_adjoint_evd(
+        mat.as_ref(),
+        values.as_mut(),
+        Some(vectors.as_mut()),
+        par,
+        faer::dyn_stack::MemStack::new(&mut buf),
+        params,
+    )
+    .is_err()
+    {
+        return false;
+    }
+    #[cfg(test)]
+    FAER_UPDATES.with(|count| count.set(count.get() + 1));
+    let lams = values.column_vector();
+    let bs = b.dot(s);
+    let j = y - &bs;
+    let mut vts = vec![0.0; n];
+    for i in 0..n {
+        let mut acc = 0.0;
+        for k in 0..n {
+            acc += vectors[(k, i)] * s[k];
+        }
+        vts[i] = lams[i].abs() * acc;
+    }
+    let mut absbs = Array1::zeros(n);
+    for i in 0..n {
+        let mut acc = 0.0;
+        for k in 0..n {
+            acc += vectors[(i, k)] * vts[k];
+        }
+        absbs[i] = acc;
+    }
+    let sy = rgmin::vecops::dot(s.view(), y.view());
+    let sa = rgmin::vecops::dot(s.view(), absbs.view());
+    let denom = sy * sy + sa * sa;
+    if denom.abs() < 1e-16 {
+        return true;
+    }
+    let mut u = Array1::zeros(n);
+    for i in 0..n {
+        u[i] = (sy * y[i] + sa * absbs[i]) / denom;
+    }
+    let js = rgmin::vecops::dot(j.view(), s.view());
+    for i in 0..n {
+        for k in 0..n {
+            b[(i, k)] += u[i] * j[k] + j[i] * u[k] - js * u[i] * u[k];
+        }
+    }
+    for i in 0..n {
+        for k in i + 1..n {
+            let v = 0.5 * (b[(i, k)] + b[(k, i)]);
+            b[(i, k)] = v;
+            b[(k, i)] = v;
+        }
+    }
+    true
 }
 
 /// Ascending eigenpairs of a symmetric matrix, eigenvectors as columns.
@@ -386,6 +506,41 @@ mod tests {
         climb.followed_curvature = -2.0;
         climb.overlap = 0.7;
         assert!(climb.stale(0.3, 0.8));
+    }
+
+    #[cfg(feature = "faer")]
+    #[test]
+    fn wide_ts_bfgs_matches_jacobi() {
+        let n = 40;
+        let mut b = Array2::<f64>::zeros((n, n));
+        for i in 0..n {
+            b[(i, i)] = -2.0 + 0.3 * i as f64;
+            if i + 1 < n {
+                let v = 0.05 * ((i % 5) as f64 - 2.0);
+                b[(i, i + 1)] = v;
+                b[(i + 1, i)] = v;
+            }
+        }
+        let mut s = Array1::zeros(n);
+        let mut y = Array1::zeros(n);
+        for i in 0..n {
+            s[i] = 0.01 * ((i * 3) % 7) as f64 - 0.02;
+            y[i] = 0.02 * ((i * 5) % 9) as f64 - 0.03;
+        }
+        let mut fast = b.clone();
+        let mut jacobi = b.clone();
+        FAER_UPDATES.with(|count| count.set(0));
+        ts_bfgs_model(&mut fast, &s, &y);
+        let faer_updates = FAER_UPDATES.with(|count| count.get());
+        assert_eq!(faer_updates, 1, "the update fell back to Jacobi");
+        rgmin::ts_bfgs_update(&mut jacobi, &s, &y);
+        let mut err = 0.0_f64;
+        for i in 0..n {
+            for k in 0..n {
+                err = err.max((fast[(i, k)] - jacobi[(i, k)]).abs());
+            }
+        }
+        assert!(err < 1e-10, "TS-BFGS left Jacobi by {err}");
     }
 
     #[test]
