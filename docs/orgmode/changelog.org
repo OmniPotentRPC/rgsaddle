@@ -3,6 +3,7 @@
 
 * Unreleased
 
+- A tutorial, ~tutorials/band~, finds the Mueller-Brown saddle between minima A and B with CI-NEB and with the default OCI-NEB refinement. ~examples/muller_brown_band.rs~ is the run and ~docs/source/figures/band-tutorial/plot.py~ draws its figures. Library behaviour is unchanged.
 - ~SpringKind::OnsagerMachlupLive { k }~ rebuilds the Onsager-Machlup displacements from the band forces at every evaluation.
   Each interior image gets ~L = F / (2 k)~ and each endpoint zero, as eOn's ~buildSpringStrategy~ in ~NEBSpringForce.cpp~ does on every ~updateForces~.
   ~spring::onsager_machlup_displacements~ is that rule and ~SpringKind::at_band~ applies it.
