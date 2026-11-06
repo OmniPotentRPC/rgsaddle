@@ -838,6 +838,7 @@ NB_MODULE(_core, m) {
   m.attr("RGSADDLE_MINMODE_LANCZOS") = static_cast<int>(RGSADDLE_MINMODE_LANCZOS);
   m.attr("RGSADDLE_IRC_GS2") = static_cast<int>(RGSADDLE_IRC_GS2);
   m.attr("RGSADDLE_IRC_MOROKUMA") = static_cast<int>(RGSADDLE_IRC_MOROKUMA);
+  m.attr("RGSADDLE_IRC_SELLA_SPHERE") = static_cast<int>(RGSADDLE_IRC_SELLA_SPHERE);
   rgbind::install_policy(m);
 
   nb::class_<ClaimSlot>(m, "ClaimSlot")

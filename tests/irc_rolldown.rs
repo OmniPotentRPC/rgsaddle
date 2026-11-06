@@ -1,9 +1,10 @@
 //! Two-atom double well: saddle at the origin, minima at x = ±1.
 //! Rolling forward and reverse must leave the saddle in opposite ways.
 //!
-//! Gonzalez--Schlegel / Sella: every accepted point sits on the
-//! mass-weighted sphere of radius `dx` about the previous accepted
-//! point. That set is rgmin `IrcTrust`, not `ManifoldKind::Sphere`.
+//! Each accepted point of a sphere kind sits on a mass-weighted sphere:
+//! radius `dx` about the previous accepted point for the Sella step, and
+//! radius `dx / 2` about the Gonzalez and Schlegel pivot for GS2. Both sets
+//! are rgmin `IrcTrust`, not `ManifoldKind::Sphere`.
 
 use ndarray::{Array1, ArrayView1};
 use rgmin::IrcTrust;
@@ -74,6 +75,73 @@ fn kick_mode_comes_from_matrix_free_lanczos_not_a_full_heev() {
     assert!(x0.abs() > 1e-8, "Lanczos kick must leave the saddle");
 }
 
+/// `E = x^T H x / 2` on two atoms. `COUPLED` couples x of atom 0 with x of
+/// atom 1, and every other coordinate has curvature `UNCOUPLED`.
+struct CoupledSaddle;
+
+const COUPLED: [[f64; 2]; 2] = [[-1.0, 2.0], [2.0, 3.0]];
+const UNCOUPLED: f64 = 5.0;
+
+impl PointSurface for CoupledSaddle {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        let mut g = &x * UNCOUPLED;
+        g[0] = COUPLED[0][0] * x[0] + COUPLED[0][1] * x[3];
+        g[3] = COUPLED[1][0] * x[0] + COUPLED[1][1] * x[3];
+        Ok((0.5 * x.dot(&g), g))
+    }
+}
+
+/// The IRC leaves the saddle along the lowest eigenvector `u` of
+/// `M^{-1/2} H M^{-1/2}`, so the kick is `dx M^{-1/2} u`. With masses 1
+/// and 16 the lowest Cartesian eigenvector of `H` is a different direction.
+/// rgmin's Lanczos stops once its residual is at most `1e-8 (1 + |theta|)`
+/// (`EigenParams::tol` unset), and by Davis and Kahan the sine of the angle
+/// to `u` is at most that residual over the gap to the next eigenvalue.
+#[test]
+fn from_surface_launches_along_the_mass_weighted_mode() {
+    let masses = Array1::from(vec![1.0, 16.0]);
+    let a = COUPLED[0][0] / masses[0];
+    let b = COUPLED[0][1] / (masses[0] * masses[1]).sqrt();
+    let d = COUPLED[1][1] / masses[1];
+    let half_split = (0.25 * (a - d).powi(2) + b * b).sqrt();
+    let lowest = 0.5 * (a + d) - half_split;
+    let next = (0.5 * (a + d) + half_split)
+        .min(UNCOUPLED / masses[0])
+        .min(UNCOUPLED / masses[1]);
+    let bound = 1e-8 * (1.0 + lowest.abs()) / (next - lowest);
+    let mut u = Array1::zeros(6);
+    u[0] = b;
+    u[3] = lowest - a;
+    u /= u.dot(&u).sqrt();
+
+    let dx = 0.1;
+    let seed = Array1::from(vec![1.0, 0.2, -0.1, 0.3, 0.05, 0.1]);
+    let mut session = IrcSession::from_surface(
+        IrcConfig {
+            dx,
+            max_inner: 0,
+            ..IrcConfig::default()
+        },
+        Array1::zeros(6),
+        masses.clone(),
+        seed,
+        IrcDirection::Forward,
+        &CoupledSaddle,
+    )
+    .unwrap();
+    let _ = session.step(&CoupledSaddle).unwrap();
+    let kick = session.position().to_owned();
+    let mut q = Array1::from_iter((0..6).map(|i| kick[i] * masses[i / 3].sqrt()));
+    q /= q.dot(&q).sqrt();
+    let rejection = &q - &u * q.dot(&u);
+    let across = rejection.dot(&rejection).sqrt();
+    assert!(
+        across <= bound,
+        "kick {kick:?} is {} degrees from the mass-weighted mode {u:?}, bound {bound:e}",
+        across.asin().to_degrees()
+    );
+}
+
 #[test]
 fn morokuma_forward_and_reverse_leave_opposite_ways() {
     let saddle = Array1::zeros(6);
@@ -133,34 +201,37 @@ fn morokuma_run_reaches_a_well() {
 
 #[test]
 fn run_reaches_a_well() {
-    let saddle = Array1::zeros(6);
-    let masses = Array1::from(vec![1.0, 1.0]);
-    let seed = Array1::from(vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
-    let mut session = IrcSession::from_surface(
-        IrcConfig {
-            dx: 0.15,
-            force_tol: 0.05,
-            ..IrcConfig::default()
-        },
-        saddle,
-        masses,
-        seed,
-        IrcDirection::Forward,
-        &DoubleWell,
-    )
-    .unwrap();
-    let report = session.run(&DoubleWell, 40).unwrap();
-    assert!(
-        report.at_minimum,
-        "force {} arc {}",
-        report.max_force, report.arc
-    );
-    assert!(
-        (session.position()[0].abs() - 1.0).abs() < 0.25,
-        "x={}",
-        session.position()[0]
-    );
-    assert!(report.energy < 0.1, "energy {}", report.energy);
+    for kind in [IrcKind::SellaSphere, IrcKind::Gs2] {
+        let saddle = Array1::zeros(6);
+        let masses = Array1::from(vec![1.0, 1.0]);
+        let seed = Array1::from(vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let mut session = IrcSession::from_surface(
+            IrcConfig {
+                dx: 0.15,
+                force_tol: 0.05,
+                kind,
+                ..IrcConfig::default()
+            },
+            saddle,
+            masses,
+            seed,
+            IrcDirection::Forward,
+            &DoubleWell,
+        )
+        .unwrap();
+        let report = session.run(&DoubleWell, 40).unwrap();
+        assert!(
+            report.at_minimum,
+            "{kind:?} force {} arc {}",
+            report.max_force, report.arc
+        );
+        assert!(
+            (session.position()[0].abs() - 1.0).abs() < 0.25,
+            "{kind:?} x={}",
+            session.position()[0]
+        );
+        assert!(report.energy < 0.1, "{kind:?} energy {}", report.energy);
+    }
 }
 
 /// Müller–Brown embedded in 6-D: the 2-D PES on (x, y) of atom 0,
@@ -231,7 +302,7 @@ fn fd_lowest_curvature(surface: &MullerBrown, x: ArrayView1<f64>, dr: f64) -> f6
     rgmin::lowest_eigenpair(&Dense(h), x, seed.view(), 6).value
 }
 
-fn roll_branch(direction: IrcDirection) -> (Array1<f64>, f64, f64, f64, bool) {
+fn roll_branch(kind: IrcKind, direction: IrcDirection) -> (Array1<f64>, f64, f64, f64, bool) {
     let mut saddle = Array1::zeros(6);
     saddle[0] = -0.822;
     saddle[1] = 0.624;
@@ -242,6 +313,7 @@ fn roll_branch(direction: IrcDirection) -> (Array1<f64>, f64, f64, f64, bool) {
             dx: 0.1,
             force_tol: 0.05,
             max_inner: 10,
+            kind,
             ..IrcConfig::default()
         },
         saddle,
@@ -259,12 +331,18 @@ fn roll_branch(direction: IrcDirection) -> (Array1<f64>, f64, f64, f64, bool) {
 
 #[test]
 fn muller_brown_both_ways_ends_at_minima_with_positive_curvature() {
-    let (xf, ef, cf, af, minf) = roll_branch(IrcDirection::Forward);
-    let (xr, er, cr, ar, minr) = roll_branch(IrcDirection::Reverse);
+    for kind in [IrcKind::SellaSphere, IrcKind::Gs2] {
+        muller_brown_both_ways(kind);
+    }
+}
+
+fn muller_brown_both_ways(kind: IrcKind) {
+    let (xf, ef, cf, af, minf) = roll_branch(kind, IrcDirection::Forward);
+    let (xr, er, cr, ar, minr) = roll_branch(kind, IrcDirection::Reverse);
     let sep = ((xf[0] - xr[0]) * (xf[0] - xr[0]) + (xf[1] - xr[1]) * (xf[1] - xr[1])).sqrt();
     assert!(
         sep > 0.5,
-        "forward ({}, {}) E={ef} arc={af} min={minf} and reverse ({}, {}) E={er} arc={ar} min={minr} must be distinct wells (sep={sep})",
+        "{kind:?} forward ({}, {}) E={ef} arc={af} min={minf} and reverse ({}, {}) E={er} arc={ar} min={minr} must be distinct wells (sep={sep})",
         xf[0],
         xf[1],
         xr[0],
@@ -274,13 +352,13 @@ fn muller_brown_both_ways_ends_at_minima_with_positive_curvature() {
     {
         assert!(
             curv > 0.0,
-            "{label} ended at ({}, {}) E={energy} arc={arc} lambda_min={curv}",
+            "{kind:?} {label} ended at ({}, {}) E={energy} arc={arc} lambda_min={curv}",
             x[0],
             x[1]
         );
         assert!(
             energy < -70.0,
-            "{label} energy {energy} at ({}, {}) arc={arc} is not a Müller–Brown well",
+            "{kind:?} {label} energy {energy} at ({}, {}) arc={arc} is not a Muller-Brown well",
             x[0],
             x[1]
         );
@@ -293,7 +371,7 @@ fn mw_step_on_sphere(masses: &Array1<f64>, dx: f64, from: &Array1<f64>, to: &Arr
     tr.on_bound(&s, 1e-8)
 }
 
-/// The GS2 / Sella set: `||sqrt(m) (x_k - x_{k-1})|| = dx`.
+/// The Sella set: `||sqrt(m) (x_k - x_{k-1})|| = dx`.
 /// The mode lives on both atoms so unequal masses make the Euclidean
 /// sphere of radius `dx` a different set.
 #[test]
@@ -307,6 +385,7 @@ fn accepted_points_sit_on_the_mw_sphere() {
     let cfg = IrcConfig {
         dx,
         force_tol: 1e-3,
+        kind: IrcKind::SellaSphere,
         ..IrcConfig::default()
     };
     let mut session = IrcSession::new(
@@ -331,5 +410,62 @@ fn accepted_points_sit_on_the_mw_sphere() {
     assert!(
         mw_step_on_sphere(&masses, dx, &x1, &x2),
         "inner step left the MW-sphere about the last accepted point: from={x1:?} to={x2:?}"
+    );
+}
+
+/// The Gonzalez and Schlegel set, J. Chem. Phys. 90, 2154 (1989), Eq. 3:
+/// with `q = sqrt(m) x`, the pivot `q_k - (dx / 2) g_q / |g_q|` and
+/// `||q_{k+1} - pivot|| = dx / 2`, where `g_q = g / sqrt(m)`. The first pivot
+/// is `dx / 2` from the saddle along the mass-weighted mode `u`, so the
+/// first point is the minimum on the sphere through the saddle and the
+/// kick `dx u`. That point leaves the radius-`dx` sphere about the saddle,
+/// the Sella set. The tolerance is the session's own on-sphere test.
+#[test]
+fn gs2_points_sit_on_the_mw_sphere_about_the_pivot() {
+    let saddle = Array1::zeros(6);
+    let masses: Array1<f64> = Array1::from(vec![1.0, 16.0]);
+    let sqrtm = Array1::from_iter((0..6).map(|i| masses[i / 3].sqrt()));
+    let mut mode = Array1::zeros(6);
+    mode[0] = 1.0;
+    mode[3] = 1.0;
+    let dx = 0.2;
+    let mut session = IrcSession::new(
+        IrcConfig {
+            dx,
+            force_tol: 1e-3,
+            kind: IrcKind::Gs2,
+            ..IrcConfig::default()
+        },
+        saddle.clone(),
+        masses.clone(),
+        mode.clone(),
+        IrcDirection::Forward,
+    )
+    .unwrap();
+    let mw_norm = |v: &Array1<f64>| (v * &sqrtm).dot(&(v * &sqrtm)).sqrt();
+
+    let u = &mode * &sqrtm / mw_norm(&mode);
+    let first_pivot = &saddle + &(&u * (0.5 * dx) / &sqrtm);
+    let _ = session.step(&DoubleWell).unwrap();
+    let x1 = session.position().to_owned();
+    let r1 = mw_norm(&(&x1 - &first_pivot));
+    assert!(
+        (r1 - 0.5 * dx).abs() <= 1e-8,
+        "first point {x1:?} is {r1} from the first pivot {first_pivot:?}"
+    );
+    assert!(
+        !mw_step_on_sphere(&masses, dx, &saddle, &x1),
+        "first point {x1:?} sits on the radius-dx sphere about the saddle"
+    );
+
+    let (_, g1) = DoubleWell.eval(x1.view()).unwrap();
+    let g_q = &g1 / &sqrtm;
+    let pivot = &x1 - &(&g_q * (0.5 * dx / g_q.dot(&g_q).sqrt()) / &sqrtm);
+    let _ = session.step(&DoubleWell).unwrap();
+    let x2 = session.position().to_owned();
+    let r2 = mw_norm(&(&x2 - &pivot));
+    assert!(
+        (r2 - 0.5 * dx).abs() <= 1e-8,
+        "second point {x2:?} is {r2} from the pivot {pivot:?}"
     );
 }

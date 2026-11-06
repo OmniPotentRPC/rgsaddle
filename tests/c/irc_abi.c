@@ -1,6 +1,6 @@
 /* Drives the IrcSession C ABI on the analytic well: create, step
- * forward and reverse, create_from_surface (Morokuma). Built by
- * tests/c_abi.rs against the cdylib. */
+ * forward and reverse for both sphere kinds, create_from_surface
+ * (Morokuma). Built by tests/irc_abi.rs against the cdylib. */
 #include "rgsaddle.h"
 #include <math.h>
 #include <stdio.h>
@@ -37,7 +37,7 @@ int main(void) {
   cfg.force_gate = RGSADDLE_FORCE_LINF;
   cfg.max_move = 0.2;
   cfg.max_inner = 10;
-  cfg.kind = RGSADDLE_IRC_GS2;
+  cfg.kind = RGSADDLE_IRC_SELLA_SPHERE;
   cfg.direction = RGSADDLE_IRC_FORWARD;
 
   rgsaddle_irc_config_t bad = cfg;
@@ -46,40 +46,50 @@ int main(void) {
     fprintf(stderr, "unknown major must be refused\n");
     return 1;
   }
-
-  RgsaddleIrc *irc = rgsaddle_irc_create(&cfg, n_atoms, saddle, masses, mode);
-  if (!irc) {
-    fprintf(stderr, "irc create failed\n");
-    return 1;
-  }
-  if (rgsaddle_irc_step(irc, NULL, NULL, NULL) != RGSADDLE_NULL_REPORT) {
-    fprintf(stderr, "NULL report must fail closed\n");
+  bad = cfg;
+  bad.kind = 7;
+  if (rgsaddle_irc_create(&bad, n_atoms, saddle, masses, mode) != NULL) {
+    fprintf(stderr, "unknown kind must be refused\n");
     return 1;
   }
 
   rgsaddle_report_t rep;
   memset(&rep, 0, sizeof rep);
-  if (rgsaddle_irc_step(irc, surface, NULL, &rep) != RGSADDLE_OK) {
-    fprintf(stderr, "irc step failed\n");
-    return 1;
-  }
   double xf[3];
-  if (rgsaddle_irc_position(irc, xf) != RGSADDLE_OK || fabs(xf[0]) < 1e-8) {
-    fprintf(stderr, "irc kick stayed at the saddle\n");
-    return 1;
-  }
-  if (rgsaddle_irc_set_direction(irc, RGSADDLE_IRC_REVERSE) != RGSADDLE_OK) {
-    fprintf(stderr, "set_direction failed\n");
-    return 1;
-  }
-  if (rgsaddle_irc_step(irc, surface, NULL, &rep) != RGSADDLE_OK) {
-    fprintf(stderr, "reverse step failed\n");
-    return 1;
-  }
   double xr[3];
-  if (rgsaddle_irc_position(irc, xr) != RGSADDLE_OK || xf[0] * xr[0] >= 0.0) {
-    fprintf(stderr, "F/R must leave opposite ways: %g %g\n", xf[0], xr[0]);
-    return 1;
+  const int32_t sphere_kinds[2] = {RGSADDLE_IRC_SELLA_SPHERE, RGSADDLE_IRC_GS2};
+  for (int k = 0; k < 2; ++k) {
+    cfg.kind = sphere_kinds[k];
+    RgsaddleIrc *irc = rgsaddle_irc_create(&cfg, n_atoms, saddle, masses, mode);
+    if (!irc) {
+      fprintf(stderr, "irc create failed for kind %d\n", (int)cfg.kind);
+      return 1;
+    }
+    if (rgsaddle_irc_step(irc, NULL, NULL, NULL) != RGSADDLE_NULL_REPORT) {
+      fprintf(stderr, "NULL report must fail closed\n");
+      return 1;
+    }
+    if (rgsaddle_irc_step(irc, surface, NULL, &rep) != RGSADDLE_OK) {
+      fprintf(stderr, "irc step failed\n");
+      return 1;
+    }
+    if (rgsaddle_irc_position(irc, xf) != RGSADDLE_OK || fabs(xf[0]) < 1e-8) {
+      fprintf(stderr, "irc kick stayed at the saddle\n");
+      return 1;
+    }
+    if (rgsaddle_irc_set_direction(irc, RGSADDLE_IRC_REVERSE) != RGSADDLE_OK) {
+      fprintf(stderr, "set_direction failed\n");
+      return 1;
+    }
+    if (rgsaddle_irc_step(irc, surface, NULL, &rep) != RGSADDLE_OK) {
+      fprintf(stderr, "reverse step failed\n");
+      return 1;
+    }
+    if (rgsaddle_irc_position(irc, xr) != RGSADDLE_OK || xf[0] * xr[0] >= 0.0) {
+      fprintf(stderr, "F/R must leave opposite ways: %g %g\n", xf[0], xr[0]);
+      return 1;
+    }
+    rgsaddle_irc_free(irc);
   }
 
   cfg.kind = RGSADDLE_IRC_MOROKUMA;
@@ -104,7 +114,6 @@ int main(void) {
     return 1;
   }
   rgsaddle_irc_free(mor);
-  rgsaddle_irc_free(irc);
   rgsaddle_irc_free(NULL);
   printf("RGSADDLE_IRC_ABI_OK xf=%g xr=%g xm=%g\n", xf[0], xr[0], xm[0]);
   return 0;
