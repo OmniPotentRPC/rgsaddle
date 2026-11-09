@@ -351,60 +351,22 @@ impl IrcSession {
         qn_irc_restricted(&self.trust(), &evals, &evecs, g, allow_interior)
     }
 
-    /// A GS2 minimum is past the kick, at or below `force_tol`, and the
-    /// current lowest curvature is not negative. Curvature of the launch
-    /// mode is the wrong test: that mode can already be positive while a
-    /// different imaginary mode remains, and status 1 would then stop on
-    /// a non-minimum.
+    /// A GS2 minimum is past the kick and inside `force_tol`, and the
+    /// lowest mass-weighted vibrational curvature is at least `-1e-8`.
+    /// The value is the lowest eigenvalue of the central-difference
+    /// Hessian on the complement of the mass-weighted rigid motions.
     fn gs2_minimum<S: PointSurface>(
         &self,
         surface: &S,
         kicked: bool,
         max_force: f64,
-        g: &Array1<f64>,
+        _g: &Array1<f64>,
     ) -> Result<bool, SaddleError> {
         if kicked || max_force > self.config.force_tol {
             return Ok(false);
         }
-        let n = self.x.len();
-        let params = EigenParams {
-            kind: self.config.eigen_kind,
-            // A short Krylov stops on the first converged Ritz vector.
-            // That vector can be a stiff positive mode while a soft
-            // imaginary mode has not entered the subspace. The full
-            // space is the lowest curvature.
-            krylov: n.max(1),
-            max_iter: n.max(1),
-            ..EigenParams::default()
-        };
-        // Seed the complement of the launch mode. Seeding Lanczos with
-        // that mode itself stops on its own curvature, which can already
-        // be positive while a different mode is still imaginary.
-        let mut seed = Array1::from_iter((0..n).map(|i| ((i + 1) as f64).sin()));
-        let mnorm = dot(self.mode.view(), self.mode.view());
-        if mnorm > 1.0e-16 {
-            let proj = dot(seed.view(), self.mode.view()) / mnorm;
-            axpy(-proj, self.mode.view(), &mut seed);
-        }
-        if dot(seed.view(), seed.view()) <= 1.0e-16 {
-            seed = Array1::from_iter((0..n).map(|i| ((i + 1) as f64).sin()));
-        }
-        // Translations are near-zero eigenvectors. Lanczos seeded on one
-        // of them stops immediately and reports a non-negative curvature
-        // while a vibrational mode is still imaginary. Drop the rigid
-        // motions before the search when the molecule has them.
-        let rigid = rigid_rows(&self.x);
-        let guarded = RigidGuard { inner: surface, rigid };
-        let (_mode, curv, _actions) = lowest_via_fd(
-            &guarded,
-            self.x.view(),
-            g.view(),
-            seed,
-            self.config.dr,
-            params,
-            "IRC minimum",
-        )?;
-        // A numerical zero from a flat coordinate is not imaginary.
+        let (curv, _rank) =
+            vibrational_lowest(surface, &self.x, &self.sqrtm, self.config.dr)?;
         Ok(curv > -1.0e-8)
     }
 
@@ -729,94 +691,151 @@ fn path_projected_force(g: &Array1<f64>, d1: &Array1<f64>, sqrtm: &Array1<f64>) 
     force
 }
 
-/// Rigid translations and rotations about the centroid, one direction
-/// per row. Empty below three atoms, where a rotation is not defined
-/// and the tests live in a single-atom coordinate.
-fn rigid_rows(x: &Array1<f64>) -> Array2<f64> {
-    let atoms = x.len() / 3;
-    if atoms < 3 || x.len() != atoms * 3 {
-        return Array2::zeros((0, x.len()));
+/// Lowest mass-weighted vibrational curvature and the rigid rank.
+///
+/// The Hessian is the central difference of the Cartesian gradient.
+/// Columns of the rigid basis match the published
+/// `massWeightedRigidMotions`: `sqrt(m)` times a translation or a
+/// rotation about the mass-weighted centre. Singular values at or
+/// below `1e-8` are dropped. A single atom keeps the full coordinate
+/// space. Two or more atoms drop the rigid columns that survive.
+fn vibrational_lowest<S: PointSurface>(
+    surface: &S,
+    x: &Array1<f64>,
+    sqrtm: &Array1<f64>,
+    dr: f64,
+) -> Result<(f64, usize), SaddleError> {
+    let n = x.len();
+    if n == 0 || sqrtm.len() != n || dr <= 0.0 {
+        return Err(SaddleError::Shape(
+            "vibrational Hessian needs a step and matching weights".into(),
+        ));
     }
+    let mut hessian = Array2::zeros((n, n));
+    for col in 0..n {
+        let mut plus = x.clone();
+        let mut minus = x.clone();
+        plus[col] += dr;
+        minus[col] -= dr;
+        let (_, gp) = surface.eval(plus.view())?;
+        let (_, gm) = surface.eval(minus.view())?;
+        if gp.len() != n || gm.len() != n {
+            return Err(SaddleError::Shape(
+                "vibrational gradient length".into(),
+            ));
+        }
+        for row in 0..n {
+            hessian[(row, col)] = (gp[row] - gm[row]) / (2.0 * dr);
+        }
+    }
+    for i in 0..n {
+        for j in 0..n {
+            let scale = sqrtm[i].max(1e-16) * sqrtm[j].max(1e-16);
+            hessian[(i, j)] /= scale;
+        }
+    }
+    let atoms = n / 3;
+    let (basis, rank) = if atoms >= 2 && n == atoms * 3 {
+        vibrational_basis(x, sqrtm)?
+    } else {
+        (Array2::<f64>::eye(n), 0)
+    };
+    if basis.ncols() == 0 {
+        return Ok((0.0, rank));
+    }
+    let projected = basis.t().dot(&hessian).dot(&basis);
+    let (values, _) = crate::eigensolve::exact_eigh(projected.view())?;
+    let lowest = values.iter().copied().fold(f64::INFINITY, f64::min);
+    if !lowest.is_finite() {
+        return Err(SaddleError::NonFinite("vibrational curvature"));
+    }
+    Ok((lowest, rank))
+}
+
+fn vibrational_basis(
+    x: &Array1<f64>,
+    sqrtm: &Array1<f64>,
+) -> Result<(Array2<f64>, usize), SaddleError> {
+    let n = x.len();
+    let atoms = n / 3;
+    let mut mass_sum = 0.0;
     let mut centre = [0.0; 3];
-    for a in 0..atoms {
-        for (c, slot) in centre.iter_mut().enumerate() {
-            *slot += x[3 * a + c] / atoms as f64;
+    for atom in 0..atoms {
+        let mass = sqrtm[3 * atom].max(0.0).powi(2);
+        mass_sum += mass;
+        for k in 0..3 {
+            centre[k] += mass * x[3 * atom + k];
         }
     }
-    let mut seeds: Vec<Array1<f64>> = Vec::new();
-    for axis in 0..3 {
-        let mut t = Array1::zeros(x.len());
-        for a in 0..atoms {
-            t[3 * a + axis] = 1.0;
-        }
-        seeds.push(t);
-        let mut r = Array1::zeros(x.len());
-        for a in 0..atoms {
-            let p = [
-                x[3 * a] - centre[0],
-                x[3 * a + 1] - centre[1],
-                x[3 * a + 2] - centre[2],
+    if mass_sum <= 0.0 {
+        return Err(SaddleError::Shape(
+            "vibrational basis needs positive masses".into(),
+        ));
+    }
+    for slot in &mut centre {
+        *slot /= mass_sum;
+    }
+    let mut rigid = Array2::zeros((n, 6));
+    for atom in 0..atoms {
+        let root = sqrtm[3 * atom].max(0.0);
+        let rel = [
+            x[3 * atom] - centre[0],
+            x[3 * atom + 1] - centre[1],
+            x[3 * atom + 2] - centre[2],
+        ];
+        for k in 0..3 {
+            rigid[(3 * atom + k, k)] = root;
+            let mut axis = [0.0; 3];
+            axis[k] = 1.0;
+            let cross = [
+                rel[1] * axis[2] - rel[2] * axis[1],
+                rel[2] * axis[0] - rel[0] * axis[2],
+                rel[0] * axis[1] - rel[1] * axis[0],
             ];
-            let mut e = [0.0; 3];
-            e[axis] = 1.0;
-            r[3 * a] = p[1] * e[2] - p[2] * e[1];
-            r[3 * a + 1] = p[2] * e[0] - p[0] * e[2];
-            r[3 * a + 2] = p[0] * e[1] - p[1] * e[0];
+            for row in 0..3 {
+                rigid[(3 * atom + row, 3 + k)] = root * cross[row];
+            }
         }
-        seeds.push(r);
     }
+    let gram = rigid.t().dot(&rigid);
+    let (evals, evecs) = crate::eigensolve::exact_eigh(gram.view())?;
     let mut kept: Vec<Array1<f64>> = Vec::new();
-    for mut v in seeds {
-        let scale = v.dot(&v).sqrt();
-        for q in &kept {
-            let c = q.dot(&v);
-            v = &v - &(q * c);
+    for col in 0..evals.len() {
+        let sigma = evals[col].max(0.0).sqrt();
+        if sigma <= 1.0e-8 {
+            continue;
+        }
+        let mut direction = Array1::zeros(n);
+        for row in 0..n {
+            let mut acc = 0.0;
+            for k in 0..6 {
+                acc += rigid[(row, k)] * evecs[(k, col)];
+            }
+            direction[row] = acc / sigma;
+        }
+        kept.push(direction);
+    }
+    let rank = kept.len();
+    let mut complement: Vec<Array1<f64>> = Vec::new();
+    for axis in 0..n {
+        let mut v = Array1::zeros(n);
+        v[axis] = 1.0;
+        for _ in 0..2 {
+            for direction in kept.iter().chain(complement.iter()) {
+                let proj = direction.dot(&v);
+                v = &v - &(direction * proj);
+            }
         }
         let norm = v.dot(&v).sqrt();
-        if norm > 1e-8 * scale.max(1.0) {
-            kept.push(&v / norm);
+        if norm > 1.0e-8 {
+            complement.push(&v / norm);
         }
     }
-    let mut rows = Array2::zeros((kept.len(), x.len()));
-    for (i, v) in kept.iter().enumerate() {
-        rows.row_mut(i).assign(v);
+    let mut basis = Array2::zeros((n, complement.len()));
+    for (col, direction) in complement.iter().enumerate() {
+        basis.column_mut(col).assign(direction);
     }
-    rows
-}
-
-/// Surface view that also excludes rigid motion from the lowest-mode search.
-struct RigidGuard<'a, S: PointSurface> {
-    inner: &'a S,
-    rigid: Array2<f64>,
-}
-
-impl<S: PointSurface> PointSurface for RigidGuard<'_, S> {
-    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
-        self.inner.eval(x)
-    }
-
-    fn hessian_vector(
-        &self,
-        x: ArrayView1<f64>,
-        v: ArrayView1<f64>,
-    ) -> Result<Option<Array1<f64>>, SaddleError> {
-        self.inner.hessian_vector(x, v)
-    }
-
-    fn excluded_modes(&self, x: ArrayView1<f64>) -> Result<Array2<f64>, SaddleError> {
-        let base = self.inner.excluded_modes(x)?;
-        if self.rigid.nrows() == 0 || self.rigid.ncols() != x.len() {
-            return Ok(base);
-        }
-        let mut out = Array2::zeros((base.nrows() + self.rigid.nrows(), x.len()));
-        for i in 0..base.nrows() {
-            out.row_mut(i).assign(&base.row(i));
-        }
-        for i in 0..self.rigid.nrows() {
-            out.row_mut(base.nrows() + i).assign(&self.rigid.row(i));
-        }
-        Ok(out)
-    }
+    Ok((basis, rank))
 }
 
 /// Finite-difference Hessian action `H v` at `x` with the forward
@@ -1218,5 +1237,128 @@ mod tests {
             (r - dx).abs() < 1e-8,
             "inner step left the MW sphere: cons={r} dx={dx}"
         );
+    }
+
+    struct BondCurvature {
+        sign: f64,
+    }
+
+    impl PointSurface for BondCurvature {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            let bond = x[3] - x[0];
+            let gap = bond - 1.0;
+            let mut g = Array1::zeros(x.len());
+            g[0] = -self.sign * gap;
+            g[3] = self.sign * gap;
+            Ok((0.5 * self.sign * gap * gap, g))
+        }
+    }
+
+    #[test]
+    fn a_diatomic_keeps_its_stretch_and_drops_one_rotation() {
+        let x = Array1::from(vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+        let sqrtm = Array1::from(vec![1.0, 1.0, 1.0, 12.0_f64.sqrt(), 12.0_f64.sqrt(), 12.0_f64.sqrt()]);
+        let (curv, rank) = vibrational_lowest(&BondCurvature { sign: -1.0 }, &x, &sqrtm, 1.0e-3).unwrap();
+        assert!(curv < -1.0e-3, "stretch curvature {curv}");
+        assert_eq!(rank, 5, "a linear pair has five rigid motions");
+    }
+
+    struct MiddleBend;
+
+    impl PointSurface for MiddleBend {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            let y = x[4];
+            let mut g = Array1::zeros(x.len());
+            g[4] = -y;
+            Ok((-0.5 * y * y, g))
+        }
+    }
+
+    #[test]
+    fn a_linear_triatomic_keeps_the_bend() {
+        let x = Array1::from(vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 2.0, 0.0, 0.0]);
+        let sqrtm = Array1::from(vec![1.0; 9]);
+        let (curv, rank) = vibrational_lowest(&MiddleBend, &x, &sqrtm, 1.0e-3).unwrap();
+        assert!(curv < -1.0e-3, "bend curvature {curv}");
+        assert_eq!(rank, 5, "a linear trio has five rigid motions");
+    }
+
+    struct LightRelative;
+
+    impl PointSurface for LightRelative {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            let gap = x[1] - x[4];
+            let mut g = Array1::zeros(x.len());
+            g[1] = -gap;
+            g[4] = gap;
+            Ok((-0.5 * gap * gap, g))
+        }
+    }
+
+    #[test]
+    fn unequal_masses_keep_a_light_atom_mode() {
+        let mut sqrtm = Array1::ones(9);
+        for slot in 3..6 {
+            sqrtm[slot] = 12.0_f64.sqrt();
+        }
+        for slot in 6..9 {
+            sqrtm[slot] = 16.0_f64.sqrt();
+        }
+        let x = Array1::from(vec![0.0, 0.0, 0.0, 1.2, 0.4, 0.0, 0.2, 1.1, 0.3]);
+        let (curv, rank) = vibrational_lowest(&LightRelative, &x, &sqrtm, 1.0e-3).unwrap();
+        assert!(curv < -1.0e-4, "light-atom curvature {curv}");
+        assert_eq!(rank, 6);
+    }
+
+    /// A soft mode on the last atom. The certificate builds the full
+    /// projected Hessian, so no Lanczos seed or early residual stop can
+    /// skip the mode.
+    struct SoftTail;
+
+    impl PointSurface for SoftTail {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            let y = x[7];
+            let mut g = Array1::zeros(x.len());
+            g[7] = -1.0e-4 * y;
+            g[0] = 10.0 * x[0];
+            Ok((-0.5e-4 * y * y + 5.0 * x[0] * x[0], g))
+        }
+    }
+
+    #[test]
+    fn from_surface_builds_a_session_and_run_reaches_the_well() {
+        let config = IrcConfig {
+            dx: 0.1,
+            force_tol: 0.05,
+            max_inner: 8,
+            ..IrcConfig::default()
+        };
+        let saddle = Array1::from(vec![0.05, 0.0, 0.0]);
+        let masses = Array1::from(vec![1.0]);
+        let seed = Array1::from(vec![1.0, 0.0, 0.0]);
+        let mut irc = IrcSession::from_surface(
+            config,
+            saddle,
+            masses,
+            seed,
+            IrcDirection::Forward,
+            &Well,
+        )
+        .unwrap();
+        let report = irc.run(&Well, 30).unwrap();
+        assert!(report.at_minimum, "run status {}", report.max_force);
+        assert!(irc.position()[0] > 0.5);
+    }
+
+    #[test]
+    fn complete_space_finds_a_soft_mode_without_a_seed() {
+        let mut x = Array1::zeros(9);
+        x[3] = 1.1;
+        x[6] = 0.2;
+        x[7] = 0.9;
+        let sqrtm = Array1::ones(9);
+        let (curv, rank) = vibrational_lowest(&SoftTail, &x, &sqrtm, 1.0e-3).unwrap();
+        assert!(curv < -1.0e-6, "soft curvature {curv}");
+        assert_eq!(rank, 6);
     }
 }
