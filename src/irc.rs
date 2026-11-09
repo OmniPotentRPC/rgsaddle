@@ -351,11 +351,11 @@ impl IrcSession {
         qn_irc_restricted(&self.trust(), &evals, &evecs, g, allow_interior)
     }
 
-    /// A GS2 minimum is past the kick, at or below `force_tol`, with
-    /// positive curvature along the launch mode. Beside the saddle that
-    /// curvature is still negative even when the force is small and the
-    /// quasi-Newton model is positive definite, and a rejected trial halves
-    /// `dx` there without ever setting `at_minimum`.
+    /// A GS2 minimum is past the kick, at or below `force_tol`, and the
+    /// current lowest curvature is not negative. Curvature of the launch
+    /// mode is the wrong test: that mode can already be positive while a
+    /// different imaginary mode remains, and status 1 would then stop on
+    /// a non-minimum.
     fn gs2_minimum<S: PointSurface>(
         &self,
         surface: &S,
@@ -366,14 +366,44 @@ impl IrcSession {
         if kicked || max_force > self.config.force_tol {
             return Ok(false);
         }
-        let hv = hessian_action(
+        let params = EigenParams {
+            kind: self.config.eigen_kind,
+            krylov: self.config.krylov_dim,
+            ..EigenParams::default()
+        };
+        // Seed the complement of the launch mode. Seeding Lanczos with
+        // that mode itself stops on its own curvature, which can already
+        // be positive while a different mode is still imaginary.
+        let n = self.x.len();
+        let mut seed = Array1::from_iter((0..n).map(|i| ((i + 1) as f64).sin()));
+        let mnorm = dot(self.mode.view(), self.mode.view());
+        if mnorm > 1.0e-16 {
+            let proj = dot(seed.view(), self.mode.view()) / mnorm;
+            axpy(-proj, self.mode.view(), &mut seed);
+        }
+        if dot(seed.view(), seed.view()) <= 1.0e-16 {
+            seed = Array1::from_iter((0..n).map(|i| ((i + 1) as f64).sin()));
+        }
+        let (_mode, curv, _actions) = lowest_via_fd(
             surface,
             self.x.view(),
             g.view(),
-            self.mode.view(),
+            seed,
             self.config.dr,
+            params,
+            "IRC minimum",
         )?;
-        Ok(dot(self.mode.view(), hv.view()) > 0.0)
+        // A numerical zero from a flat coordinate is not imaginary.
+        Ok(curv > -1.0e-8)
+    }
+
+    /// Steepest step on the current mass-weighted sphere. The quasi-Newton
+    /// step can point uphill after the model is stale; the projected
+    /// gradient does not, once the radius is inside the basin.
+    fn descent_on_sphere(&self, g: &Array1<f64>) -> Array1<f64> {
+        let mut downhill = g.clone();
+        downhill.mapv_inplace(|v| -v);
+        self.trust().project(&downhill)
     }
 
     /// One outer IRC move. [`IrcKind::Gs2`] is Sella / GS2;
@@ -454,25 +484,46 @@ impl IrcSession {
             self.last_step = Some(s.clone());
             axpy(1.0, s.view(), &mut self.d1);
             axpy(1.0, s.view(), &mut self.x);
-            let ev = surface.eval(self.x.view())?;
-            // A quasi-Newton displacement cannot raise the IRC energy beyond the tolerance.
+            let mut ev = surface.eval(self.x.view())?;
+            let mut accepted = s.clone();
+            // A quasi-Newton displacement that raises the energy is
+            // rejected. Halving the radius and leaving the geometry
+            // frozen sticks the sphere near 1e-4 for the rest of the
+            // branch. A steepest step on that sphere is still downhill
+            // when the force is nonzero.
             if ev.0 > energy + 1.0e-8 {
                 axpy(-1.0, s.view(), &mut self.x);
                 axpy(-1.0, s.view(), &mut self.d1);
-                self.config.dx = (self.config.dx * 0.5).max(1.0e-4);
-                self.last_step = None;
-                rejected = true;
-                break;
+                let sd = self.descent_on_sphere(&g);
+                axpy(1.0, sd.view(), &mut self.d1);
+                axpy(1.0, sd.view(), &mut self.x);
+                ev = surface.eval(self.x.view())?;
+                if ev.0 > energy + 1.0e-8 {
+                    axpy(-1.0, sd.view(), &mut self.x);
+                    axpy(-1.0, sd.view(), &mut self.d1);
+                    let next = (self.config.dx * 0.5).max(1.0e-4);
+                    let stuck = self.config.dx <= 1.0e-4 + 1.0e-15;
+                    self.config.dx = next;
+                    self.last_step = None;
+                    rejected = true;
+                    if stuck {
+                        break;
+                    }
+                    continue;
+                }
+                accepted = sd;
             }
+            rejected = false;
+            self.last_step = Some(accepted.clone());
             energy = ev.0;
             let y = &ev.1 - &g;
-            let (s_mw, y_mw) = mw_pair(&s, &y, &self.sqrtm);
+            let (s_mw, y_mw) = mw_pair(&accepted, &y, &self.sqrtm);
             self.hess.update(&s_mw, &y_mw);
             g = ev.1;
             max_force = self.config.force_gate.value(g.view());
             let g_path = self.path_force(&g);
             let fmax_path = nrminf(g_path.view());
-            let bound = self.trust().on_bound(&Array1::zeros(s.len()), 1e-8);
+            let bound = self.trust().on_bound(&Array1::zeros(accepted.len()), 1e-8);
             if (bound && fmax_path <= fmax_inner)
                 || (max_force <= self.config.force_tol && interior)
             {
@@ -481,10 +532,15 @@ impl IrcSession {
         }
         let mut outer = self.x.clone();
         axpy(-1.0, x_start.view(), &mut outer);
+        let moved = nrm2(outer.view()) > 1.0e-12;
         self.last_outer = Some(outer);
         self.d1.fill(0.0);
         self.last_step = None;
-        self.arc += self.config.dx;
+        // A rejected trial that did not move must not advance the arc.
+        // Otherwise the 8-dx window opens while the geometry is frozen.
+        if moved {
+            self.arc += self.config.dx;
+        }
         if !rejected {
             self.config.dx = (2.0 * self.config.dx).min(self.dx_target);
         }
@@ -495,9 +551,8 @@ impl IrcSession {
             arc: self.arc,
             inner_steps,
             // The kick is never a minimum. A later point is a minimum only
-            // when the force is inside tolerance and the launch mode has
-            // positive curvature on the surface, not merely a positive
-            // definite quasi-Newton model.
+            // when the force is inside tolerance and the lowest curvature
+            // is not negative. A positive launch mode is not enough.
             at_minimum: self.gs2_minimum(surface, kicked, max_force, &g)?,
         })
     }
@@ -956,6 +1011,48 @@ mod tests {
         }
         let t = stopped.expect("GS2 should reach a minimum of the double well");
         assert!(t > 0.5, "stopped beside the saddle at {t}");
+    }
+
+    /// Launch-mode curvature is positive at x=1, but y is still imaginary.
+    /// Status 1 must not fire.
+    struct Ridge;
+
+    impl PointSurface for Ridge {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            let t = x[0];
+            let y = x[1];
+            let mut g = Array1::zeros(x.len());
+            g[0] = t - 1.0;
+            g[1] = -y;
+            Ok((0.5 * (t - 1.0) * (t - 1.0) - 0.5 * y * y, g))
+        }
+    }
+
+    #[test]
+    fn gs2_does_not_stop_while_another_mode_is_imaginary() {
+        let mut mode = Array1::zeros(3);
+        mode[0] = 1.0;
+        let mut irc = IrcSession::new(
+            IrcConfig {
+                dx: 0.05,
+                force_tol: 1.0,
+                max_inner: 4,
+                ..IrcConfig::default()
+            },
+            Array1::from(vec![1.0, 0.0, 0.0]),
+            Array1::from(vec![1.0]),
+            mode,
+            IrcDirection::Forward,
+        )
+        .unwrap();
+        for _ in 0..6 {
+            let report = irc.step(&Ridge).unwrap();
+            assert!(
+                !report.at_minimum,
+                "stopped with a leftover imaginary mode at {:?}",
+                irc.position()
+            );
+        }
     }
 
     #[test]
