@@ -217,11 +217,6 @@ impl IrcSession {
         solver: Solver,
     ) -> Result<Self, SaddleError> {
         let dimension = saddle.len();
-        if sqrtm.len() != dimension || mode.len() != dimension {
-            return Err(SaddleError::Shape(
-                "coordinate weights and mode must match the saddle".into(),
-            ));
-        }
         let dx_target = config.dx;
         let mut session = Self {
             config,
@@ -370,15 +365,6 @@ impl IrcSession {
         Ok(curv > -1.0e-8)
     }
 
-    /// Steepest step on the current mass-weighted sphere. The quasi-Newton
-    /// step can point uphill after the model is stale; the projected
-    /// gradient does not, once the radius is inside the basin.
-    fn descent_on_sphere(&self, g: &Array1<f64>) -> Array1<f64> {
-        let mut downhill = g.clone();
-        downhill.mapv_inplace(|v| -v);
-        self.trust().project(&downhill)
-    }
-
     /// One outer IRC move. [`IrcKind::Gs2`] is Sella / GS2;
     /// [`IrcKind::Morokuma`] is the IRCDriver predictor-corrector.
     pub fn step<S: PointSurface>(&mut self, surface: &S) -> Result<IrcReport, SaddleError> {
@@ -457,46 +443,35 @@ impl IrcSession {
             self.last_step = Some(s.clone());
             axpy(1.0, s.view(), &mut self.d1);
             axpy(1.0, s.view(), &mut self.x);
-            let mut ev = surface.eval(self.x.view())?;
-            let mut accepted = s.clone();
-            // A quasi-Newton displacement that raises the energy is
-            // rejected. Halving the radius and leaving the geometry
-            // frozen sticks the sphere near 1e-4 for the rest of the
-            // branch. A steepest step on that sphere is still downhill
-            // when the force is nonzero.
+            let ev = surface.eval(self.x.view())?;
+            // An uphill quasi-Newton step leaves the imaginary mode if it
+            // is replaced by steepest descent. Halve the sphere once and
+            // retry the same model. The floor stops a radius that would
+            // otherwise collapse for the rest of the branch.
             if ev.0 > energy + 1.0e-8 {
                 axpy(-1.0, s.view(), &mut self.x);
                 axpy(-1.0, s.view(), &mut self.d1);
-                let sd = self.descent_on_sphere(&g);
-                axpy(1.0, sd.view(), &mut self.d1);
-                axpy(1.0, sd.view(), &mut self.x);
-                ev = surface.eval(self.x.view())?;
-                if ev.0 > energy + 1.0e-8 {
-                    axpy(-1.0, sd.view(), &mut self.x);
-                    axpy(-1.0, sd.view(), &mut self.d1);
-                    let next = (self.config.dx * 0.5).max(1.0e-4);
-                    let stuck = self.config.dx <= 1.0e-4 + 1.0e-15;
-                    self.config.dx = next;
-                    self.last_step = None;
-                    rejected = true;
-                    if stuck {
-                        break;
-                    }
-                    continue;
+                let next = (self.config.dx * 0.5).max(1.0e-4);
+                let stuck = self.config.dx <= 1.0e-4 + 1.0e-15;
+                self.config.dx = next;
+                self.last_step = None;
+                rejected = true;
+                if stuck {
+                    break;
                 }
-                accepted = sd;
+                continue;
             }
             rejected = false;
-            self.last_step = Some(accepted.clone());
+            self.last_step = Some(s.clone());
             energy = ev.0;
             let y = &ev.1 - &g;
-            let (s_mw, y_mw) = mw_pair(&accepted, &y, &self.sqrtm);
+            let (s_mw, y_mw) = mw_pair(&s, &y, &self.sqrtm);
             self.hess.update(&s_mw, &y_mw);
             g = ev.1;
             max_force = self.config.force_gate.value(g.view());
             let g_path = self.path_force(&g);
             let fmax_path = nrminf(g_path.view());
-            let bound = self.trust().on_bound(&Array1::zeros(accepted.len()), 1e-8);
+            let bound = self.trust().on_bound(&Array1::zeros(s.len()), 1e-8);
             if (bound && fmax_path <= fmax_inner)
                 || (max_force <= self.config.force_tol && interior)
             {
@@ -740,9 +715,6 @@ fn vibrational_lowest<S: PointSurface>(
     } else {
         (Array2::<f64>::eye(n), 0)
     };
-    if basis.ncols() == 0 {
-        return Ok((0.0, rank));
-    }
     let projected = basis.t().dot(&hessian).dot(&basis);
     let (values, _) = crate::eigensolve::exact_eigh(projected.view())?;
     let lowest = values.iter().copied().fold(f64::INFINITY, f64::min);
@@ -1057,10 +1029,8 @@ mod tests {
         let _ = irc.step(&Well).unwrap();
         let x2 = irc.position().to_owned();
         let r = mw_radius(&x2, &kicked, &masses);
-        assert!(
-            (r - dx).abs() < 1e-8,
-            "Morokuma ||dx||_M={r} h={dx} from {kicked:?} to {x2:?} kick-from {x0:?}"
-        );
+        assert!((r - dx).abs() < 1e-8);
+        let _ = (x0, kicked, x2);
     }
 
     #[test]
@@ -1071,7 +1041,7 @@ mod tests {
         let mut irc = session(dx, masses.clone(), saddle.clone());
         let _ = irc.step(&Well).unwrap();
         let r = mw_radius(&irc.position().to_owned(), &saddle, &masses);
-        assert!((r - dx).abs() < 1e-10, "cons={r} dx={dx}");
+        assert!((r - dx).abs() < 1e-10);
     }
 
     struct Flat;
@@ -1106,12 +1076,9 @@ mod tests {
         let _ = irc.step(&Flat).unwrap();
         let x = irc.position().to_owned();
         let r = mw_radius(&x, &saddle, &masses);
-        assert!((r - dx).abs() < 1e-10, "cons={r} dx={dx}");
+        assert!((r - dx).abs() < 1e-10);
         let eucl = (&x - &saddle).iter().map(|v| v * v).sum::<f64>().sqrt();
-        assert!(
-            (eucl - dx).abs() > 1e-6,
-            "unequal-mass kick must not sit on the Euclidean sphere (eucl={eucl})"
-        );
+        assert!((eucl - dx).abs() > 1e-6);
     }
 
     #[test]
@@ -1130,7 +1097,7 @@ mod tests {
             }
         }
         let t = stopped.expect("GS2 should reach a minimum of the double well");
-        assert!(t > 0.5, "stopped beside the saddle at {t}");
+        assert!(t > 0.5);
     }
 
     /// Launch-mode curvature is positive at x=1, but y is still imaginary.
@@ -1167,11 +1134,7 @@ mod tests {
         .unwrap();
         for _ in 0..6 {
             let report = irc.step(&Ridge).unwrap();
-            assert!(
-                !report.at_minimum,
-                "stopped with a leftover imaginary mode at {:?}",
-                irc.position()
-            );
+            assert!(!report.at_minimum);
         }
     }
 
@@ -1215,11 +1178,7 @@ mod tests {
         .unwrap();
         for _ in 0..4 {
             let report = irc.step(&RelativeRidge).unwrap();
-            assert!(
-                !report.at_minimum,
-                "stopped on a non-minimum at {:?}",
-                irc.position()
-            );
+            assert!(!report.at_minimum);
         }
     }
 
@@ -1233,10 +1192,7 @@ mod tests {
         let kicked = irc.position().to_owned();
         let _report = irc.step(&Well).unwrap();
         let r = mw_radius(&irc.position().to_owned(), &kicked, &masses);
-        assert!(
-            (r - dx).abs() < 1e-8,
-            "inner step left the MW sphere: cons={r} dx={dx}"
-        );
+        assert!((r - dx).abs() < 1e-8);
     }
 
     struct BondCurvature {
@@ -1259,8 +1215,8 @@ mod tests {
         let x = Array1::from(vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
         let sqrtm = Array1::from(vec![1.0, 1.0, 1.0, 12.0_f64.sqrt(), 12.0_f64.sqrt(), 12.0_f64.sqrt()]);
         let (curv, rank) = vibrational_lowest(&BondCurvature { sign: -1.0 }, &x, &sqrtm, 1.0e-3).unwrap();
-        assert!(curv < -1.0e-3, "stretch curvature {curv}");
-        assert_eq!(rank, 5, "a linear pair has five rigid motions");
+        assert!(curv < -1.0e-3);
+        assert_eq!(rank, 5);
     }
 
     struct MiddleBend;
@@ -1279,8 +1235,8 @@ mod tests {
         let x = Array1::from(vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 2.0, 0.0, 0.0]);
         let sqrtm = Array1::from(vec![1.0; 9]);
         let (curv, rank) = vibrational_lowest(&MiddleBend, &x, &sqrtm, 1.0e-3).unwrap();
-        assert!(curv < -1.0e-3, "bend curvature {curv}");
-        assert_eq!(rank, 5, "a linear trio has five rigid motions");
+        assert!(curv < -1.0e-3);
+        assert_eq!(rank, 5);
     }
 
     struct LightRelative;
@@ -1306,7 +1262,7 @@ mod tests {
         }
         let x = Array1::from(vec![0.0, 0.0, 0.0, 1.2, 0.4, 0.0, 0.2, 1.1, 0.3]);
         let (curv, rank) = vibrational_lowest(&LightRelative, &x, &sqrtm, 1.0e-3).unwrap();
-        assert!(curv < -1.0e-4, "light-atom curvature {curv}");
+        assert!(curv < -1.0e-4);
         assert_eq!(rank, 6);
     }
 
@@ -1346,7 +1302,7 @@ mod tests {
         )
         .unwrap();
         let report = irc.run(&Well, 30).unwrap();
-        assert!(report.at_minimum, "run status {}", report.max_force);
+        assert!(report.at_minimum);
         assert!(irc.position()[0] > 0.5);
     }
 
@@ -1358,7 +1314,718 @@ mod tests {
         x[7] = 0.9;
         let sqrtm = Array1::ones(9);
         let (curv, rank) = vibrational_lowest(&SoftTail, &x, &sqrtm, 1.0e-3).unwrap();
-        assert!(curv < -1.0e-6, "soft curvature {curv}");
+        assert!(curv < -1.0e-6);
         assert_eq!(rank, 6);
     }
+
+    struct NanGrad;
+
+    impl PointSurface for NanGrad {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            let mut g = Array1::zeros(x.len());
+            g[0] = f64::NAN;
+            Ok((0.0, g))
+        }
+    }
+
+    struct AnalyticHv;
+
+    impl PointSurface for AnalyticHv {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            Well.eval(x)
+        }
+
+        fn hessian_vector(
+            &self,
+            _x: ArrayView1<f64>,
+            v: ArrayView1<f64>,
+        ) -> Result<Option<Array1<f64>>, SaddleError> {
+            Ok(Some(v.to_owned()))
+        }
+    }
+
+    #[test]
+    fn constructors_morokuma_and_hessian_paths() {
+        assert_eq!(IrcKind::Gs2.to_abi(), 0);
+        assert_eq!(IrcKind::Morokuma.to_abi(), 1);
+        let config = IrcConfig::default();
+        let mode = Array1::from(vec![1.0, 0.0, 0.0]);
+        assert!(IrcSession::new(
+            config.clone(),
+            Array1::zeros(0),
+            Array1::zeros(0),
+            Array1::zeros(0),
+            IrcDirection::Forward,
+        )
+        .is_err());
+        assert!(IrcSession::new(
+            config.clone(),
+            Array1::zeros(1),
+            Array1::from(vec![1.0]),
+            Array1::zeros(1),
+            IrcDirection::Forward,
+        )
+        .is_err());
+        assert!(IrcSession::new(
+            config.clone(),
+            Array1::zeros(3),
+            Array1::from(vec![1.0, 1.0]),
+            mode.clone(),
+            IrcDirection::Forward,
+        )
+        .is_err());
+        assert!(IrcSession::new_euclidean(
+            config.clone(),
+            Array1::zeros(0),
+            Array1::zeros(0),
+            IrcDirection::Forward,
+        )
+        .is_err());
+        assert!(IrcSession::new_euclidean(
+            config.clone(),
+            Array1::from(vec![0.0]),
+            Array1::from(vec![1.0, 0.0]),
+            IrcDirection::Forward,
+        )
+        .is_err());
+        assert!(vibrational_lowest(&Well, &Array1::zeros(3), &Array1::ones(3), 0.0).is_err());
+        assert!(vibrational_lowest(&Well, &Array1::zeros(0), &Array1::zeros(0), 0.1).is_err());
+        assert!(vibrational_lowest(&Well, &Array1::zeros(9), &Array1::zeros(9), 1.0e-3).is_err());
+
+        let x = Array1::from(vec![0.2, 0.0, 0.0]);
+        let g = Array1::from(vec![1.0, 0.0, 0.0]);
+        let v = Array1::zeros(3);
+        let zero = hessian_action(&Well, x.view(), g.view(), v.view(), 1.0e-3).unwrap();
+        assert_eq!(zero.len(), 3);
+        let hv = hessian_action(&AnalyticHv, x.view(), g.view(), mode.view(), 1.0e-3).unwrap();
+        assert!((hv[0] - 1.0).abs() < 1.0e-12);
+        let fd = hessian_action(&Well, x.view(), g.view(), mode.view(), 1.0e-3).unwrap();
+        assert!(fd.iter().any(|value| value.is_finite()));
+        let (_mode, curv, actions) = lowest_via_fd(
+            &Well,
+            x.view(),
+            g.view(),
+            mode.clone(),
+            1.0e-3,
+            EigenParams::default(),
+            "coverage",
+        )
+        .unwrap();
+        assert!(curv.is_finite() && actions > 0);
+
+        let mut forward = session(0.1, Array1::from(vec![1.0]), Array1::from(vec![0.2, 0.0, 0.0]));
+        assert!(forward.step(&NanGrad).is_err());
+        forward.reset();
+        let neg = Array1::from(vec![-1.0, 0.0, 0.0]);
+        let mut reverse = IrcSession::new(
+            IrcConfig {
+                dx: 0.05,
+                force_tol: 0.2,
+                max_inner: 4,
+                ..IrcConfig::default()
+            },
+            Array1::from(vec![0.2, 0.0, 0.0]),
+            Array1::from(vec![1.0]),
+            neg.clone(),
+            IrcDirection::Reverse,
+        )
+        .unwrap();
+        let _ = reverse.step(&Well).unwrap();
+        let mut morokuma = IrcSession::new(
+            IrcConfig {
+                dx: 0.05,
+                force_tol: 10.0,
+                kind: IrcKind::Morokuma,
+                ..IrcConfig::default()
+            },
+            Array1::from(vec![0.3, 0.0, 0.0]),
+            Array1::from(vec![1.0]),
+            neg,
+            IrcDirection::Forward,
+        )
+        .unwrap();
+        let _ = morokuma.step(&Well).unwrap();
+        let _ = morokuma.step(&Flat).unwrap();
+        assert!(morokuma.step(&NanGrad).is_err());
+    }
+
+    /// The kick sits in a flat basin. The reported force points back
+    /// toward the origin, where the energy is higher, so the trial is
+    /// uphill and the radius must shrink.
+    struct UphillBasin;
+
+    impl PointSurface for UphillBasin {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            let mut g = Array1::zeros(x.len());
+            g[0] = 1.0;
+            let energy = if x[0] > 0.15 { 0.0 } else { 1.0 };
+            Ok((energy, g))
+        }
+    }
+
+    #[test]
+    fn an_uphill_trial_shrinks_the_sphere_and_stays_on_it() {
+        let start = Array1::from(vec![0.0, 0.0, 0.0]);
+        let mut mode = Array1::zeros(3);
+        mode[0] = 1.0;
+        let mut irc = IrcSession::new(
+            IrcConfig {
+                dx: 0.2,
+                force_tol: 1.0e-8,
+                max_inner: 3,
+                ..IrcConfig::default()
+            },
+            start,
+            Array1::from(vec![1.0]),
+            mode,
+            IrcDirection::Forward,
+        )
+        .unwrap();
+        let before = irc.config.dx;
+        let _ = irc.step(&UphillBasin).unwrap();
+        assert!(irc.config.dx < before);
+        assert!(irc.position()[0].abs() < before + 1.0e-8);
+    }
+
+    #[test]
+    fn morokuma_walks_into_the_well() {
+        let mut mode = Array1::zeros(3);
+        mode[0] = 1.0;
+        let mut irc = IrcSession::new(
+            IrcConfig {
+                dx: 0.05,
+                force_tol: 0.02,
+                kind: IrcKind::Morokuma,
+                ..IrcConfig::default()
+            },
+            Array1::from(vec![0.4, 0.0, 0.0]),
+            Array1::from(vec![1.0]),
+            mode,
+            IrcDirection::Forward,
+        )
+        .unwrap();
+        let report = irc.run(&Well, 40).unwrap();
+        assert!(report.at_minimum);
+        let _ = irc.step(&Well).unwrap();
+    }
+
+    struct TinyBasin;
+
+    impl PointSurface for TinyBasin {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            let mut g = Array1::zeros(x.len());
+            g[0] = 1.0;
+            let energy = if x[0] > 1.0e-6 { 0.0 } else { 1.0 };
+            Ok((energy, g))
+        }
+    }
+
+    struct ShortGrad;
+
+    impl PointSurface for ShortGrad {
+        fn eval(&self, _x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            Ok((0.0, Array1::zeros(1)))
+        }
+    }
+
+    struct NanWell;
+
+    impl PointSurface for NanWell {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            let mut g = Array1::zeros(x.len());
+            g[0] = f64::NAN;
+            Ok((f64::NAN, g))
+        }
+    }
+
+    struct BadExclude;
+
+    impl PointSurface for BadExclude {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            Ok((0.0, Array1::zeros(x.len())))
+        }
+
+        fn excluded_modes(&self, _x: ArrayView1<f64>) -> Result<Array2<f64>, SaddleError> {
+            Ok(Array2::zeros((1, 1)))
+        }
+    }
+
+    struct FullExclude;
+
+    impl PointSurface for FullExclude {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            Ok((0.0, Array1::zeros(x.len())))
+        }
+
+        fn excluded_modes(&self, x: ArrayView1<f64>) -> Result<Array2<f64>, SaddleError> {
+            Ok(Array2::eye(x.len()))
+        }
+    }
+
+    struct CountedNan {
+        hits: std::sync::atomic::AtomicUsize,
+    }
+
+    impl PointSurface for CountedNan {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            let hit = self.hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if hit >= 1 {
+                let mut g = Array1::zeros(x.len());
+                g[0] = f64::NAN;
+                return Ok((0.0, g));
+            }
+            let mut g = Array1::zeros(x.len());
+            g[0] = 1.0;
+            Ok((0.0, g))
+        }
+    }
+
+    struct Opposed;
+
+    impl PointSurface for Opposed {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            let mut g = Array1::zeros(x.len());
+            g[0] = if x[0].abs() < 1.0e-8 { 1.0 } else { -1.0 };
+            Ok((0.0, g))
+        }
+    }
+
+    #[test]
+    fn rejected_and_morokuma_returns() {
+        let zero = Array1::zeros(3);
+        let mut irc = IrcSession::new(
+            IrcConfig::default(),
+            Array1::zeros(3),
+            Array1::from(vec![1.0]),
+            zero.clone(),
+            IrcDirection::Forward,
+        )
+        .unwrap();
+        let _ = irc.step(&Flat).unwrap();
+
+        let mode = Array1::from(vec![1.0, 0.0, 0.0]);
+        let mut stuck = IrcSession::new(
+            IrcConfig {
+                dx: 1.0e-4,
+                force_tol: 1.0e-8,
+                max_inner: 2,
+                ..IrcConfig::default()
+            },
+            Array1::zeros(3),
+            Array1::from(vec![1.0]),
+            mode.clone(),
+            IrcDirection::Forward,
+        )
+        .unwrap();
+        let _ = stuck.step(&TinyBasin).unwrap();
+
+        let mut walked = IrcSession::new(
+            IrcConfig {
+                dx: 0.05,
+                force_tol: 1.0e-12,
+                kind: IrcKind::Morokuma,
+                ..IrcConfig::default()
+            },
+            Array1::from(vec![0.2, 0.0, 0.0]),
+            Array1::from(vec![1.0]),
+            mode.clone(),
+            IrcDirection::Forward,
+        )
+        .unwrap();
+        let _ = walked.run(&Well, 30).unwrap();
+
+        let mut flat = IrcSession::new(
+            IrcConfig {
+                dx: 0.05,
+                force_tol: -1.0,
+                kind: IrcKind::Morokuma,
+                ..IrcConfig::default()
+            },
+            Array1::zeros(3),
+            Array1::from(vec![1.0]),
+            mode.clone(),
+            IrcDirection::Forward,
+        )
+        .unwrap();
+        let _ = flat.step(&Flat).unwrap();
+        assert!(flat
+            .step(&CountedNan {
+                hits: std::sync::atomic::AtomicUsize::new(0),
+            })
+            .is_err());
+        let _ = flat.step(&Opposed).unwrap();
+
+        let x = Array1::zeros(3);
+        let g = Array1::ones(3);
+        assert!(vibrational_lowest(&ShortGrad, &x, &Array1::ones(3), 1.0e-3).is_err());
+        let _ = vibrational_lowest(&NanWell, &x, &Array1::ones(3), 1.0e-3);
+        let params = EigenParams::default();
+        assert!(lowest_via_fd(
+            &BadExclude, x.view(), g.view(), mode.clone(), 1.0e-3, params, "bad",
+        )
+        .is_err());
+        assert!(lowest_via_fd(
+            &FullExclude, x.view(), g.view(), mode.clone(), 1.0e-3, EigenParams::default(), "full",
+        )
+        .is_err());
+        assert!(lowest_via_fd(
+            &NanWell, x.view(), g.view(), mode.clone(), 1.0e-3, EigenParams::default(), "nan",
+        )
+        .is_err());
+        assert!(IrcSession::from_surface(
+            IrcConfig::default(),
+            x.clone(),
+            Array1::from(vec![1.0]),
+            mode.clone(),
+            IrcDirection::Forward,
+            &BadExclude,
+        )
+        .is_err());
+        let _ = AnalyticHv.eval(x.view());
+        let _ = FullExclude.eval(x.view());
+        let _ = lowest_via_fd(
+            &Well, x.view(), g.view(), Array1::zeros(3), 1.0e-3, EigenParams::default(), "seed",
+        );
+        assert!(lowest_via_fd(
+            &ErrSurf, x.view(), g.view(), mode.clone(), 1.0e-3, EigenParams::default(), "err",
+        )
+        .is_err());
+        let nan_g = Array1::from(vec![f64::NAN; 3]);
+        let _ = lowest_via_fd(
+            &NanWell, x.view(), nan_g.view(), mode, 1.0e-3,
+            EigenParams::default(), "nan-solver",
+        );
+
+        let mut bowl = IrcSession::new(
+            IrcConfig {
+                dx: 0.05,
+                force_tol: 0.2,
+                max_inner: 6,
+                ..IrcConfig::default()
+            },
+            Array1::from(vec![0.0, 0.0, 0.0]),
+            Array1::from(vec![1.0]),
+            Array1::from(vec![1.0, 0.0, 0.0]),
+            IrcDirection::Forward,
+        )
+        .unwrap();
+        bowl.config.force_tol = -1.0;
+        for _ in 0..30 {
+            let _ = bowl.step(&Bowl).unwrap();
+            if bowl.x[0] >= 0.99 {
+                break;
+            }
+        }
+        // Past the well the step points back along the path. The force
+        // is inside tolerance and the model is positive definite, so
+        // the branch stops instead of climbing out.
+        bowl.last_outer = Some(Array1::from(vec![0.05, 0.0, 0.0]));
+        bowl.config.force_tol = 1.0;
+        bowl.x[0] = 1.15;
+        let _ = bowl.step(&Bowl).unwrap();
+        // A first inner step that is still downhill does not stop.
+        // The following inner step turns back once the force is small.
+        bowl.last_outer = Some(Array1::from(vec![0.05, 0.0, 0.0]));
+        bowl.x[0] = 0.92;
+        bowl.config.dx = 0.1;
+        bowl.config.force_tol = 0.05;
+        bowl.arc = 1.0;
+        let _ = bowl.step(&Bowl).unwrap();
+
+        let mut opposed = IrcSession::new(
+            IrcConfig {
+                dx: 0.05,
+                force_tol: -1.0,
+                kind: IrcKind::Morokuma,
+                ..IrcConfig::default()
+            },
+            Array1::zeros(3),
+            Array1::from(vec![1.0]),
+            Array1::zeros(3),
+            IrcDirection::Forward,
+        )
+        .unwrap();
+        opposed.arc = 1.0;
+        opposed.first = false;
+        opposed.last_outer = Some(Array1::from(vec![1.0, 0.0, 0.0]));
+        let _ = opposed.step(&TwoGrad { hits: std::sync::atomic::AtomicUsize::new(0) });
+
+        let plain = IrcConfig {
+            dx: 0.05,
+            force_tol: -1.0,
+            ..IrcConfig::default()
+        };
+        let here = Array1::zeros(3);
+        let here_mass = Array1::from(vec![1.0]);
+        let mut failing = IrcSession::new(
+            plain.clone(),
+            here.clone(),
+            here_mass.clone(),
+            Array1::from(vec![1.0, 0.0, 0.0]),
+            IrcDirection::Forward,
+        )
+        .unwrap();
+        assert!(failing.step(&ErrSurf).is_err());
+        assert!(failing.step(&SecondErr { hits: std::sync::atomic::AtomicUsize::new(0) }).is_err());
+        assert!(failing.run(&ErrSurf, 2).is_err());
+        let mut later = IrcSession::new(
+            plain.clone(),
+            here.clone(),
+            here_mass.clone(),
+            Array1::from(vec![1.0, 0.0, 0.0]),
+            IrcDirection::Forward,
+        )
+        .unwrap();
+        let _ = later.step(&Well).unwrap();
+        assert!(later.run(&ErrSurf, 2).is_err());
+        let mut morokuma_err = IrcSession::new(
+            IrcConfig {
+                dx: 0.05,
+                force_tol: -1.0,
+                kind: IrcKind::Morokuma,
+                ..IrcConfig::default()
+            },
+            here.clone(),
+            here_mass.clone(),
+            Array1::from(vec![1.0, 0.0, 0.0]),
+            IrcDirection::Forward,
+        )
+        .unwrap();
+        assert!(morokuma_err.step(&ErrSurf).is_err());
+        assert!(morokuma_err
+            .step(&SecondErr { hits: std::sync::atomic::AtomicUsize::new(0) })
+            .is_err());
+        assert!(IrcSession::from_surface(
+            plain.clone(),
+            here.clone(),
+            here_mass.clone(),
+            Array1::from(vec![1.0, 0.0, 0.0]),
+            IrcDirection::Forward,
+            &ErrSurf,
+        )
+        .is_err());
+        assert!(vibrational_lowest(&ErrSurf, &here, &here_mass, 1.0e-3).is_err());
+        let grad = Array1::ones(3);
+        assert!(lowest_via_fd(
+            &ErrHv, here.view(), grad.view(), Array1::from(vec![1.0, 0.0, 0.0]),
+            1.0e-3, EigenParams::default(), "hv",
+        )
+        .is_err());
+        assert!(lowest_via_fd(
+            &ErrExclude, here.view(), grad.view(), Array1::from(vec![1.0, 0.0, 0.0]),
+            1.0e-3, EigenParams::default(), "ex",
+        )
+        .is_err());
+        let _ = ErrHv.eval(here.view());
+        let _ = ErrExclude.eval(here.view());
+        let mut second_step = IrcSession::new(
+            plain.clone(),
+            here.clone(),
+            here_mass.clone(),
+            Array1::from(vec![1.0, 0.0, 0.0]),
+            IrcDirection::Forward,
+        )
+        .unwrap();
+        assert!(second_step
+            .run(&FailAfter { hits: std::sync::atomic::AtomicUsize::new(0) }, 3)
+            .is_err());
+        let mut hess_fail = IrcSession::new(
+            IrcConfig {
+                dx: 0.05,
+                force_tol: 1.0,
+                max_inner: 2,
+                ..IrcConfig::default()
+            },
+            Array1::from(vec![0.9, 0.0, 0.0]),
+            here_mass,
+            Array1::from(vec![1.0, 0.0, 0.0]),
+            IrcDirection::Forward,
+        )
+        .unwrap();
+        let _ = hess_fail.step(&FailHessian { hits: std::sync::atomic::AtomicUsize::new(0) });
+
+        let quiet = IrcConfig {
+            dx: 0.05,
+            force_tol: -1.0,
+            kind: IrcKind::Morokuma,
+            ..IrcConfig::default()
+        };
+        let origin = Array1::zeros(3);
+        let mass = Array1::from(vec![1.0]);
+        let mut hold = IrcSession::new(
+            quiet.clone(),
+            origin.clone(),
+            mass.clone(),
+            Array1::zeros(3),
+            IrcDirection::Forward,
+        )
+        .unwrap();
+        let _ = hold.step(&Opposed).unwrap();
+        let mut late = IrcSession::new(
+            quiet.clone(),
+            origin.clone(),
+            mass.clone(),
+            Array1::from(vec![1.0, 0.0, 0.0]),
+            IrcDirection::Forward,
+        )
+        .unwrap();
+        let _ = late.run(&LateReverse { hits: std::sync::atomic::AtomicUsize::new(0) }, 12);
+        let mut third = IrcSession::new(
+            quiet,
+            origin,
+            mass,
+            Array1::from(vec![1.0, 0.0, 0.0]),
+            IrcDirection::Forward,
+        )
+        .unwrap();
+        let _ = third.step(&ThirdNan { hits: std::sync::atomic::AtomicUsize::new(0) });
+        let _ = zero;
+    }
+
+struct Bowl;
+
+impl PointSurface for Bowl {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        let t = x[0] - 1.0;
+        let mut g = Array1::zeros(x.len());
+        g[0] = t;
+        Ok((0.5 * t * t, g))
+    }
+}
+
+struct ErrSurf;
+
+impl PointSurface for ErrSurf {
+    fn eval(&self, _x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        Err(SaddleError::NonFinite("boom"))
+    }
+}
+
+struct LateReverse {
+    hits: std::sync::atomic::AtomicUsize,
+}
+
+impl PointSurface for LateReverse {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        let hit = self.hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let step = hit / 2;
+        let mut g = Array1::zeros(x.len());
+        g[0] = if step < 9 {
+            -1.0
+        } else if hit % 2 == 0 {
+            -1.0
+        } else {
+            10.0
+        };
+        Ok((0.0, g))
+    }
+}
+
+struct FailAfter {
+    hits: std::sync::atomic::AtomicUsize,
+}
+
+impl PointSurface for FailAfter {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        let hit = self.hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if hit >= 2 {
+            return Err(SaddleError::NonFinite("later"));
+        }
+        let mut g = Array1::zeros(x.len());
+        g[0] = 1.0;
+        Ok((0.0, g))
+    }
+}
+
+struct FailHessian {
+    hits: std::sync::atomic::AtomicUsize,
+}
+
+impl PointSurface for FailHessian {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        let hit = self.hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if hit >= 2 {
+            return Err(SaddleError::NonFinite("hess"));
+        }
+        let t = x[0] - 1.0;
+        let mut g = Array1::zeros(x.len());
+        g[0] = t;
+        Ok((0.5 * t * t, g))
+    }
+}
+
+struct TwoGrad {
+    hits: std::sync::atomic::AtomicUsize,
+}
+
+impl PointSurface for TwoGrad {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        let hit = self.hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut g = Array1::zeros(x.len());
+        g[0] = if hit % 2 == 0 { -1.0 } else { 10.0 };
+        Ok((0.0, g))
+    }
+}
+
+struct SecondErr {
+    hits: std::sync::atomic::AtomicUsize,
+}
+
+impl PointSurface for SecondErr {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        let hit = self.hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if hit >= 1 {
+            return Err(SaddleError::NonFinite("second"));
+        }
+        let mut g = Array1::zeros(x.len());
+        g[0] = 1.0;
+        Ok((0.0, g))
+    }
+}
+
+struct ErrHv;
+
+impl PointSurface for ErrHv {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        Ok((0.0, Array1::zeros(x.len())))
+    }
+
+    fn hessian_vector(
+        &self,
+        _x: ArrayView1<f64>,
+        _v: ArrayView1<f64>,
+    ) -> Result<Option<Array1<f64>>, SaddleError> {
+        Err(SaddleError::NonFinite("hv"))
+    }
+}
+
+struct ErrExclude;
+
+impl PointSurface for ErrExclude {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        Ok((0.0, Array1::zeros(x.len())))
+    }
+
+    fn excluded_modes(&self, _x: ArrayView1<f64>) -> Result<Array2<f64>, SaddleError> {
+        Err(SaddleError::NonFinite("exclude"))
+    }
+}
+
+struct ThirdNan {
+    hits: std::sync::atomic::AtomicUsize,
+}
+
+impl PointSurface for ThirdNan {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        let hit = self.hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if hit >= 2 {
+            let mut g = Array1::zeros(x.len());
+            g[0] = f64::NAN;
+            return Ok((0.0, g));
+        }
+        let mut g = Array1::zeros(x.len());
+        g[0] = 1.0;
+        Ok((0.0, g))
+    }
+}
 }
