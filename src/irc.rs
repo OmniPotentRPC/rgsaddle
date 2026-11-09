@@ -366,15 +366,20 @@ impl IrcSession {
         if kicked || max_force > self.config.force_tol {
             return Ok(false);
         }
+        let n = self.x.len();
         let params = EigenParams {
             kind: self.config.eigen_kind,
-            krylov: self.config.krylov_dim,
+            // A short Krylov stops on the first converged Ritz vector.
+            // That vector can be a stiff positive mode while a soft
+            // imaginary mode has not entered the subspace. The full
+            // space is the lowest curvature.
+            krylov: n.max(1),
+            max_iter: n.max(1),
             ..EigenParams::default()
         };
         // Seed the complement of the launch mode. Seeding Lanczos with
         // that mode itself stops on its own curvature, which can already
         // be positive while a different mode is still imaginary.
-        let n = self.x.len();
         let mut seed = Array1::from_iter((0..n).map(|i| ((i + 1) as f64).sin()));
         let mnorm = dot(self.mode.view(), self.mode.view());
         if mnorm > 1.0e-16 {
