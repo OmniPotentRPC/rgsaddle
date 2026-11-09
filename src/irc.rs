@@ -13,7 +13,7 @@
 //! `rgmin::vecops`. The host owns the loop. `run` is a convenience
 //! over `step`.
 
-use ndarray::{Array1, ArrayView1};
+use ndarray::{Array1, Array2, ArrayView1};
 use rgmin::vecops::{Vector, axpy, dot, nrm2, nrminf};
 use rgmin::{
     ApplyHessian, BfgsModel, Control, EigenParams, EigensolverKind, IrcTrust, ManifoldKind, Method,
@@ -384,8 +384,14 @@ impl IrcSession {
         if dot(seed.view(), seed.view()) <= 1.0e-16 {
             seed = Array1::from_iter((0..n).map(|i| ((i + 1) as f64).sin()));
         }
+        // Translations are near-zero eigenvectors. Lanczos seeded on one
+        // of them stops immediately and reports a non-negative curvature
+        // while a vibrational mode is still imaginary. Drop the rigid
+        // motions before the search when the molecule has them.
+        let rigid = rigid_rows(&self.x);
+        let guarded = RigidGuard { inner: surface, rigid };
         let (_mode, curv, _actions) = lowest_via_fd(
-            surface,
+            &guarded,
             self.x.view(),
             g.view(),
             seed,
@@ -716,6 +722,96 @@ fn path_projected_force(g: &Array1<f64>, d1: &Array1<f64>, sqrtm: &Array1<f64>) 
         force[i] = -gm[i] * sqrtm[i];
     }
     force
+}
+
+/// Rigid translations and rotations about the centroid, one direction
+/// per row. Empty below three atoms, where a rotation is not defined
+/// and the tests live in a single-atom coordinate.
+fn rigid_rows(x: &Array1<f64>) -> Array2<f64> {
+    let atoms = x.len() / 3;
+    if atoms < 3 || x.len() != atoms * 3 {
+        return Array2::zeros((0, x.len()));
+    }
+    let mut centre = [0.0; 3];
+    for a in 0..atoms {
+        for (c, slot) in centre.iter_mut().enumerate() {
+            *slot += x[3 * a + c] / atoms as f64;
+        }
+    }
+    let mut seeds: Vec<Array1<f64>> = Vec::new();
+    for axis in 0..3 {
+        let mut t = Array1::zeros(x.len());
+        for a in 0..atoms {
+            t[3 * a + axis] = 1.0;
+        }
+        seeds.push(t);
+        let mut r = Array1::zeros(x.len());
+        for a in 0..atoms {
+            let p = [
+                x[3 * a] - centre[0],
+                x[3 * a + 1] - centre[1],
+                x[3 * a + 2] - centre[2],
+            ];
+            let mut e = [0.0; 3];
+            e[axis] = 1.0;
+            r[3 * a] = p[1] * e[2] - p[2] * e[1];
+            r[3 * a + 1] = p[2] * e[0] - p[0] * e[2];
+            r[3 * a + 2] = p[0] * e[1] - p[1] * e[0];
+        }
+        seeds.push(r);
+    }
+    let mut kept: Vec<Array1<f64>> = Vec::new();
+    for mut v in seeds {
+        let scale = v.dot(&v).sqrt();
+        for q in &kept {
+            let c = q.dot(&v);
+            v = &v - &(q * c);
+        }
+        let norm = v.dot(&v).sqrt();
+        if norm > 1e-8 * scale.max(1.0) {
+            kept.push(&v / norm);
+        }
+    }
+    let mut rows = Array2::zeros((kept.len(), x.len()));
+    for (i, v) in kept.iter().enumerate() {
+        rows.row_mut(i).assign(v);
+    }
+    rows
+}
+
+/// Surface view that also excludes rigid motion from the lowest-mode search.
+struct RigidGuard<'a, S: PointSurface> {
+    inner: &'a S,
+    rigid: Array2<f64>,
+}
+
+impl<S: PointSurface> PointSurface for RigidGuard<'_, S> {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        self.inner.eval(x)
+    }
+
+    fn hessian_vector(
+        &self,
+        x: ArrayView1<f64>,
+        v: ArrayView1<f64>,
+    ) -> Result<Option<Array1<f64>>, SaddleError> {
+        self.inner.hessian_vector(x, v)
+    }
+
+    fn excluded_modes(&self, x: ArrayView1<f64>) -> Result<Array2<f64>, SaddleError> {
+        let base = self.inner.excluded_modes(x)?;
+        if self.rigid.nrows() == 0 || self.rigid.ncols() != x.len() {
+            return Ok(base);
+        }
+        let mut out = Array2::zeros((base.nrows() + self.rigid.nrows(), x.len()));
+        for i in 0..base.nrows() {
+            out.row_mut(i).assign(&base.row(i));
+        }
+        for i in 0..self.rigid.nrows() {
+            out.row_mut(base.nrows() + i).assign(&self.rigid.row(i));
+        }
+        Ok(out)
+    }
 }
 
 /// Finite-difference Hessian action `H v` at `x` with the forward
@@ -1050,6 +1146,54 @@ mod tests {
             assert!(
                 !report.at_minimum,
                 "stopped with a leftover imaginary mode at {:?}",
+                irc.position()
+            );
+        }
+    }
+
+    /// Three atoms. The bond is at its minimum, a relative coordinate is
+    /// imaginary, and translations are exact zeros. Status 1 must not
+    /// fire on a translation.
+    struct RelativeRidge;
+
+    impl PointSurface for RelativeRidge {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            let bond = x[0] - x[3] - 1.0;
+            let q = x[1] - x[4];
+            let mut g = Array1::zeros(x.len());
+            g[0] = bond;
+            g[3] = -bond;
+            g[1] = -q;
+            g[4] = q;
+            Ok((0.5 * bond * bond - 0.5 * q * q, g))
+        }
+    }
+
+    #[test]
+    fn gs2_does_not_stop_on_a_translation_while_a_mode_is_imaginary() {
+        let mut pos = Array1::zeros(9);
+        pos[0] = 1.0;
+        let mut mode = Array1::zeros(9);
+        mode[0] = 1.0;
+        mode[3] = -1.0;
+        let mut irc = IrcSession::new(
+            IrcConfig {
+                dx: 0.05,
+                force_tol: 1.0,
+                max_inner: 4,
+                ..IrcConfig::default()
+            },
+            pos,
+            Array1::ones(3),
+            mode,
+            IrcDirection::Forward,
+        )
+        .unwrap();
+        for _ in 0..4 {
+            let report = irc.step(&RelativeRidge).unwrap();
+            assert!(
+                !report.at_minimum,
+                "stopped on a non-minimum at {:?}",
                 irc.position()
             );
         }
