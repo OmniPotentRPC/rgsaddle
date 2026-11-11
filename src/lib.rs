@@ -76,6 +76,7 @@ pub use band::{
 };
 pub use connect::{ConnectConfig, ConnectProfile, ConnectReport, connect};
 pub use error::SaddleError;
+pub use growing::{GrowingString, GrowingStringReport, grow_string};
 pub use idpp::{
     IdppConfig, InitialPath, SidppConfig, idpp_path, interpolated_path, linear_path, sidpp_path,
 };
@@ -107,6 +108,7 @@ pub mod eigensolve;
 pub mod force;
 pub mod force_match;
 pub mod geom;
+pub mod growing;
 pub mod internal;
 pub mod kappa;
 pub mod linalg;
