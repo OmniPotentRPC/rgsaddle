@@ -593,6 +593,22 @@ impl BandState {
         }
         false
     }
+    /// Make `start` the cached answer again when it was taken at `x`
+    /// and neither cache slot holds `x`.
+    fn reinstate(&self, start: Option<BandEval>, x: &Array1<f64>) {
+        let Some(start) = start.filter(|s| s.x == *x) else {
+            return;
+        };
+        let mut last = self.last.lock().unwrap_or_else(|e| e.into_inner());
+        let mut previous = self.previous.lock().unwrap_or_else(|e| e.into_inner());
+        let held = |slot: &Option<BandEval>| slot.as_ref().is_some_and(|e| e.x == *x);
+        if held(&last) || held(&previous) {
+            return;
+        }
+        *previous = last.take();
+        *last = Some(start);
+    }
+
     /// The climbing baseline and the armed image belong to one
     /// relaxation; the surface caches stay.
     fn restart(&self) {
@@ -736,8 +752,10 @@ fn fit2(buffer: &mut Array2<f64>, dim: (usize, usize)) {
 }
 
 /// Make `state.last` the surface's answer at interior `x` and return
-/// it locked: kept when `x` matches it bitwise, else one surface call
-/// (interior rows only once the endpoint energies are cached). The
+/// it locked: kept when `x` matches it bitwise, swapped back from
+/// `state.previous` when `x` matches that (a stepper that went back to
+/// the point before its trial), else one surface call (interior rows
+/// only once the endpoint energies are cached). The
 /// surface receives zeroed energies and interior gradients, and on a
 /// whole-band call the gradients of the evaluation it replaces, as
 /// freshly built arrays would hold. The evaluation the cache drops
@@ -755,6 +773,13 @@ fn evaluate_band<'s>(
     let mut slot = state.last.lock().unwrap_or_else(|e| e.into_inner());
     if slot.as_ref().is_some_and(|prev| prev.x == x) {
         return Ok(slot);
+    }
+    {
+        let mut previous = state.previous.lock().unwrap_or_else(|e| e.into_inner());
+        if previous.as_ref().is_some_and(|prev| prev.x == x) {
+            std::mem::swap(&mut *slot, &mut *previous);
+            return Ok(slot);
+        }
     }
     let interior = x
         .to_shape((n_images - 2, dof))
@@ -2859,6 +2884,14 @@ impl BandSession {
             last.view(),
             initial.view(),
         )?;
+        // The products and the trial push the start out of the cache;
+        // a rejected step ends on it again.
+        let start = self
+            .state
+            .last
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let mut trial = self.positions.clone();
         let cached = CachedBandSurface {
             state: &self.state,
@@ -2873,6 +2906,7 @@ impl BandSession {
             .iter()
             .copied()
             .collect();
+        self.state.reinstate(start, &interior);
         assemble_band(
             &self.config,
             &self.state,

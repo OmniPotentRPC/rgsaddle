@@ -287,6 +287,50 @@ pub struct BandRtr {
     pub climb: bool,
     pub iteration: usize,
     force_gate: ForceGate,
+    memo: HvpMemo,
+}
+
+/// Band forces of the Hessian-vector products around one base band
+/// and climbing image. A rejected step leaves the base, the gradient
+/// and so the truncated-CG directions as they were; the next step
+/// reads their forces here instead of evaluating the same bands again.
+/// The products of the step's displacement change with the radius, so
+/// only the latest pair is kept. Keyed by the bits of the displaced
+/// band.
+#[derive(Clone, Debug, Default)]
+struct HvpMemo {
+    base: Option<(Array2<f64>, Option<usize>)>,
+    products: Vec<(Array2<f64>, Array1<f64>)>,
+    displacement: Vec<(Array2<f64>, Array1<f64>)>,
+}
+
+fn same_bits(a: &Array2<f64>, b: &Array2<f64>) -> bool {
+    let rows_equal = |r: usize| {
+        a.row(r)
+            .iter()
+            .zip(b.row(r))
+            .all(|(x, y)| x.to_bits() == y.to_bits())
+    };
+    // Every key around one base shares its endpoint rows, so the
+    // interior rows, where keys differ, are compared first.
+    let n = a.nrows();
+    a.dim() == b.dim() && (1..n.saturating_sub(1)).chain([0, n - 1]).all(rows_equal)
+}
+
+impl HvpMemo {
+    /// Keep the entries when `base` and `ci` are those they were
+    /// taken around, else drop them.
+    fn around(&mut self, base: &Array2<f64>, ci: Option<usize>) {
+        let kept = self
+            .base
+            .as_ref()
+            .is_some_and(|(b, c)| *c == ci && same_bits(b, base));
+        if !kept {
+            self.products.clear();
+            self.displacement.clear();
+            self.base = Some((base.clone(), ci));
+        }
+    }
 }
 
 impl BandRtr {
@@ -297,11 +341,15 @@ impl BandRtr {
             climb,
             iteration: 0,
             force_gate: ForceGate::LinfNorm,
+            memo: HvpMemo::default(),
         }
     }
 
     /// Select the convergence norm without changing the trust model.
     pub fn set_force_gate(&mut self, gate: ForceGate) {
+        if self.force_gate != gate {
+            self.memo = HvpMemo::default();
+        }
         self.force_gate = gate;
     }
 
@@ -357,6 +405,34 @@ impl BandRtr {
         };
         let h = self.config.fd_step;
         let base = positions.clone();
+        self.memo.around(&base, ci);
+        // Two bands per product, at most `max_cg` products per step.
+        let products_capacity = 2 * self.config.max_cg;
+        let memo = std::cell::RefCell::new(std::mem::take(&mut self.memo));
+        // Set while the products of the step's displacement are taken,
+        // which go to `fresh` and replace the previous step's pair.
+        let displacing = std::cell::Cell::new(false);
+        let fresh = std::cell::RefCell::new(Vec::new());
+        let gate = self.force_gate;
+        let force_at = |x: Array2<f64>| -> Result<Array1<f64>, SaddleError> {
+            {
+                let memo = memo.borrow();
+                let mut held = memo.products.iter().chain(&memo.displacement);
+                if let Some((_, force)) = held.find(|(key, _)| same_bits(key, &x)) {
+                    return Ok(force.clone());
+                }
+            }
+            let force = band_forces_with_gate(band, surface, x.view(), ci, gate)?.force;
+            if displacing.get() {
+                fresh.borrow_mut().push((x, force.clone()));
+            } else {
+                let mut memo = memo.borrow_mut();
+                if memo.products.len() < products_capacity {
+                    memo.products.push((x, force.clone()));
+                }
+            }
+            Ok(force)
+        };
         let hvp_error = std::cell::RefCell::new(None);
         let hvp = |v: &Array1<f64>| -> Array1<f64> {
             let vn = nrm2(v.view());
@@ -372,12 +448,10 @@ impl BandRtr {
                 }
                 x
             };
-            let plus =
-                band_forces_with_gate(band, surface, scatter(1.0).view(), ci, self.force_gate);
-            let minus =
-                band_forces_with_gate(band, surface, scatter(-1.0).view(), ci, self.force_gate);
+            let plus = force_at(scatter(1.0));
+            let minus = force_at(scatter(-1.0));
             match (plus, minus) {
-                (Ok(p), Ok(m)) => (&m.force - &p.force) * (vn / (2.0 * h)),
+                (Ok(p), Ok(m)) => (&m - &p) * (vn / (2.0 * h)),
                 (Err(error), _) | (_, Err(error)) => {
                     if hvp_error.borrow().is_none() {
                         *hvp_error.borrow_mut() = Some(error);
@@ -400,6 +474,7 @@ impl BandRtr {
         }
         self.iteration += 1;
         if tcg.stop == TcgStop::ZeroGradient {
+            self.memo = memo.take();
             return Ok(RtrReport {
                 accepted: false,
                 rho: f64::NAN,
@@ -437,13 +512,25 @@ impl BandRtr {
             let row = &base.row(i) + &displacement.slice(s![(i - 1) * dof..i * dof]);
             trial.row_mut(i).assign(&row);
         }
+        displacing.set(true);
         let h_displacement = hvp(&displacement);
         if let Some(error) = hvp_error.borrow_mut().take() {
             return Err(error);
         }
+        self.memo = memo.take();
+        let fresh = fresh.take();
+        if !fresh.is_empty() {
+            self.memo.displacement = fresh;
+        }
         let model_decrease = -dot(grad.view(), displacement.view())
             - 0.5 * dot(displacement.view(), h_displacement.view());
-        let there = band_forces_with_gate(band, surface, trial.view(), ci, self.force_gate)?;
+        // A displacement under the spacing of the coordinates leaves
+        // the trial on the base.
+        let there = if same_bits(&trial, &base) {
+            here.clone()
+        } else {
+            band_forces_with_gate(band, surface, trial.view(), ci, self.force_gate)?
+        };
         let grad_there = -&there.force;
         let actual_decrease = -0.5 * dot((&grad + &grad_there).view(), displacement.view());
         let eta_norm = nrm2(displacement.view());
@@ -457,6 +544,7 @@ impl BandRtr {
             .update(actual_decrease, model_decrease, eta_norm);
         if accepted {
             positions.assign(&trial);
+            self.memo = HvpMemo::default();
         }
         Ok(RtrReport {
             accepted,
