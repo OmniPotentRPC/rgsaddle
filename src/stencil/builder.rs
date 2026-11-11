@@ -566,6 +566,7 @@ fn mode_session(builder: &PointBuilder, mode: Array1<f64>) -> Result<MinModeSess
         force_tol: builder.force_tol,
         max_move: builder.max_move,
         method: Method::Fire { kind: FireKind::V2 },
+        trust: false,
     };
     MinModeSession::new(config, builder.x.clone(), mode)
 }
@@ -582,6 +583,7 @@ fn art_mode_config(engine: &ArtEngine) -> MinModeConfig {
         force_tol: engine.force_tol,
         max_move: engine.max_move,
         method: Method::Fire { kind: FireKind::V2 },
+        trust: false,
     }
 }
 

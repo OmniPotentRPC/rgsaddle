@@ -498,3 +498,111 @@ fn construction_and_replacement_use_the_same_unit_mode() {
         assert_eq!(session.mode(), initial.view());
     }
 }
+
+fn near_saddle(trust: bool) -> MinModeSession {
+    let config = MinModeConfig {
+        trust,
+        max_move: 0.2,
+        force_tol: 1e-6,
+        ..MinModeConfig::default()
+    };
+    MinModeSession::new(config, array![0.05, 0.02, -0.01], array![1.0, 0.0, 0.0]).unwrap()
+}
+
+/// Inside the per-atom cap the curvature model is the Newton step and
+/// lands on this quadratic saddle. The stock FIRE step is a quarter of
+/// the reflected force, so the same start is still away from the origin.
+#[test]
+fn trust_takes_the_newton_step_inside_the_cap() {
+    let mut plain = near_saddle(false);
+    plain.step(&QuadraticSaddle).unwrap();
+    let left = plain.position().mapv(f64::abs).sum();
+    assert!(left > 1e-3, "stock translation arrived at {left}");
+
+    let mut trusted = near_saddle(true);
+    let report = trusted.step(&QuadraticSaddle).unwrap();
+    assert_eq!(report.status, MinModeStatus::Converged);
+    let arrived = trusted.position().mapv(f64::abs).sum();
+    assert!(arrived < 1e-8, "trust translation stopped at {arrived}");
+    assert!(trusted.trust_radius() <= 0.2);
+}
+
+/// V = -x^2 + 50 y^2. The mode curvature is -2, so the isotropic Newton
+/// step overshoots y, whose curvature is 100. The radius must shrink
+/// and the accepted move must not be that full step.
+#[test]
+fn trust_shrinks_when_one_curvature_does_not_fit_every_direction() {
+    struct Stiff;
+
+    impl PointSurface for Stiff {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            let (a, b) = (x[0], x[1]);
+            Ok((-a * a + 50.0 * b * b, array![-2.0 * a, 100.0 * b]))
+        }
+    }
+
+    let config = MinModeConfig {
+        trust: true,
+        max_move: 1.0,
+        force_tol: 1e-12,
+        ..MinModeConfig::default()
+    };
+    let start = array![0.02, 0.01];
+    let mut session = MinModeSession::new(config, start.clone(), array![1.0, 0.0]).unwrap();
+    let surface = CountingPoint {
+        inner: &Stiff,
+        calls: AtomicUsize::new(0),
+    };
+    session.step(&surface).unwrap();
+    assert!(
+        session.trust_radius() < 1.0,
+        "radius {}",
+        session.trust_radius()
+    );
+    let y = session.position()[1];
+    assert!(y.abs() < 0.05, "y moved to {y}");
+    assert!(session.position()[0].abs() <= 0.02 + 1e-12);
+    // Centre, one dimer action, the rejected trial, and the accepted one.
+    assert!(
+        surface.calls.load(Ordering::Relaxed) >= 4,
+        "calls {}",
+        surface.calls.load(Ordering::Relaxed)
+    );
+}
+
+#[test]
+fn a_failed_trust_trial_keeps_the_position_and_the_radius() {
+    let config = MinModeConfig {
+        trust: true,
+        max_move: 0.2,
+        ..MinModeConfig::default()
+    };
+    let start = array![0.05, 0.02, -0.01];
+    let mut session = MinModeSession::new(config, start.clone(), array![1.0, 0.0, 0.0]).unwrap();
+    let radius = session.trust_radius();
+    let surface = FailingBeyond {
+        center: start.clone(),
+        radius: 0.01,
+        calls: AtomicUsize::new(0),
+    };
+    let err = session.step(&surface).unwrap_err();
+    assert!(matches!(err, SaddleError::Surface(_)), "{err}");
+    assert_eq!(session.position(), start.view());
+    assert_eq!(session.trust_radius(), radius);
+}
+
+#[test]
+fn trust_still_converges_from_a_displaced_quadratic_start() {
+    let config = MinModeConfig {
+        trust: true,
+        force_tol: 1e-4,
+        max_move: 0.1,
+        ..MinModeConfig::default()
+    };
+    let mut session =
+        MinModeSession::new(config, array![0.35, 0.4, -0.3], array![0.8, 0.5, 0.1]).unwrap();
+    let report = session.run(&QuadraticSaddle, 400).unwrap();
+    assert_eq!(report.status, MinModeStatus::Converged, "{report:?}");
+    assert!(session.position().iter().all(|c| c.abs() < 1e-3));
+    assert!(session.mode()[0].abs() > 0.99);
+}

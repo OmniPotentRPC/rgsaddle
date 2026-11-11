@@ -347,6 +347,7 @@ fn mode_config(preset: &str) -> MinModeConfig {
         method: rgmin::Method::Fire {
             kind: rgmin::FireKind::V2,
         },
+        trust: false,
     }
 }
 
