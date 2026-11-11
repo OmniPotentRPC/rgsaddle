@@ -6,8 +6,8 @@
 //! client/LBFGS.cpp). The tangent, spring and projection are this crate's
 //! port of those eOn routines. Endpoints are evaluated once. FIRE does not
 //! rescale its velocity when the per-atom cap shortens the step, and L-BFGS
-//! accepts a trial when the summed interior energy does not rise, which is
-//! eOn's default `accept = energy`.
+//! takes the step with no energy line search, which is eOn's default
+//! `lbfgs_accept = none`. A negative curvature takes a max-move step.
 //!
 //! rgsaddle is `BandSession` with the same images, spring, per-atom cap,
 //! tolerance and optimizer. FIRE uses the native velocity-Verlet step
@@ -148,6 +148,9 @@ fn main() {
     }
     if let Err(err) = pt_adatom(&mut csv) {
         eprintln!("pt adatom failed: {err}");
+    }
+    if let Err(err) = pt_step(&mut csv) {
+        eprintln!("pt step failed: {err}");
     }
     if let Err(err) = large_vacancy(&mut csv) {
         eprintln!("large vacancy failed: {err}");
@@ -513,8 +516,9 @@ pub(crate) fn pt_adatom(csv: &mut Vec<String>) -> Result<(), SaddleError> {
         pot,
     };
     println!(
-        "setup pt111-adatom: {} slab atoms, path {}",
+        "setup pt111-adatom: {} slab atoms, images {}, spring {K_SPRING}, tol {TOL}, norm per-image, path {}",
         slab.len(),
+        case.positions.nrows(),
         case.path_kind
     );
     for optim in [Optim::Fire, Optim::Lbfgs] {
@@ -562,5 +566,121 @@ pub(crate) fn pt_adatom(csv: &mut Vec<String>) -> Result<(), SaddleError> {
         }
     }
     survey(&mut case, csv);
+    Ok(())
+}
+
+/// Adatom hop from the lower terrace, across the step edge, onto the
+/// upper terrace. Eleven images, the same spring, tolerance and
+/// per-image norm as the flat terrace, from [`interpolated_path`].
+pub(crate) fn pt_step(csv: &mut Vec<String>) -> Result<(), SaddleError> {
+    let nn = 2.897;
+    let a1 = [nn, 0.0, 0.0];
+    let a2 = [nn / 2.0, nn * 3.0_f64.sqrt() / 2.0, 0.0];
+    let h = nn * (2.0_f64 / 3.0).sqrt();
+    let mut slab = Vec::new();
+    for layer in 0..3 {
+        for i in 0..10 {
+            for j in 0..10 {
+                slab.push([
+                    i as f64 * a1[0] + j as f64 * a2[0],
+                    i as f64 * a1[1] + j as f64 * a2[1],
+                    layer as f64 * h,
+                ]);
+            }
+        }
+    }
+    // Partial fourth layer: the upper terrace, five rows, leaving the
+    // other half as the lower terrace.
+    for i in 0..10 {
+        for j in 0..5 {
+            slab.push([
+                i as f64 * a1[0] + j as f64 * a2[0],
+                i as f64 * a1[1] + j as f64 * a2[1],
+                3.0 * h,
+            ]);
+        }
+    }
+    let site = |i: f64, j: f64, z: f64| {
+        let shift = 1.0 / 3.0;
+        [
+            (i + shift) * a1[0] + (j + shift) * a2[0],
+            (i + shift) * a1[1] + (j + shift) * a2[1],
+            z,
+        ]
+    };
+    let pot = Pot::MorseSlab { slab: slab.clone() };
+    // Lower terrace, one row past the edge, and the upper terrace
+    // just onto the island. The straight path crosses the step edge.
+    let mut reactant = Array1::from_vec(site(4.0, 6.0, 3.0 * h).to_vec());
+    let mut product = Array1::from_vec(site(4.0, 3.0, 4.0 * h).to_vec());
+    minimize(&mut reactant, &pot, None)?;
+    minimize(&mut product, &pot, None)?;
+    let n_images = 11;
+    let built = interpolated_path(
+        reactant.view(),
+        product.view(),
+        n_images,
+        None,
+        &IdppConfig::default(),
+    )?;
+    let case = Problem {
+        name: "pt111-step",
+        path_kind: if built.idpp { "idpp-fb" } else { "linear" },
+        held_out: false,
+        positions: built.positions,
+        cell: None,
+        translate: false,
+        pot,
+    };
+    println!(
+        "setup pt111-step: {} slab atoms, images {n_images}, spring {K_SPRING}, tol {TOL}, norm per-image, path {}",
+        slab.len(),
+        case.path_kind
+    );
+    for optim in [Optim::Fire, Optim::Lbfgs] {
+        let eon = run_eon(&case, optim);
+        let rgs = run_rgsaddle(&case, optim, false);
+        match (&eon, &rgs) {
+            (Ok(eon), Ok(rgs)) => {
+                println!(
+                    "{:<16} {:<8} {:<8} {:>10} {:>10.3} {:>10} {:>10.3} {:>8} {:>8}",
+                    case.name,
+                    optim.label(),
+                    case.path_kind,
+                    eon.calls,
+                    eon.seconds,
+                    rgs.calls,
+                    rgs.seconds,
+                    eon.ci.map(|i| i.to_string()).unwrap_or_else(|| "-".into()),
+                    rgs.ci.map(|i| i.to_string()).unwrap_or_else(|| "-".into()),
+                );
+                push_csv(
+                    csv,
+                    &case,
+                    &format!("eon-{}", optim.label()),
+                    eon.calls,
+                    eon.seconds,
+                    eon.converged,
+                    eon.ci,
+                );
+                push_csv(
+                    csv,
+                    &case,
+                    &format!("ci-{}", optim.label()),
+                    rgs.calls,
+                    rgs.seconds,
+                    rgs.converged,
+                    rgs.ci,
+                );
+            }
+            (Err(err), _) => println!("{:<16} {:<8} eon failed: {err}", case.name, optim.label()),
+            (Ok(_), Err(err)) => println!(
+                "{:<16} {:<8} rgsaddle failed: {err}",
+                case.name,
+                optim.label()
+            ),
+        }
+    }
+    survey(&case, csv);
     Ok(())
 }

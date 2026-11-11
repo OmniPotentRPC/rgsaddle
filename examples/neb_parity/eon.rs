@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use ndarray::{Array1, Array2, s};
+use ndarray::{Array1, Array2};
 use rgsaddle::rtr::band_forces;
 use rgsaddle::{SaddleError, SpringKind};
 
@@ -74,7 +74,22 @@ pub(crate) fn eon_ci(energies: &Array1<f64>, prev: Option<usize>) -> Option<usiz
     Some(max_i)
 }
 
+fn under_tol(force: &Array1<f64>, dof: usize, ci: Option<usize>, atom: bool) -> bool {
+    if atom {
+        max_atom(force) < TOL
+    } else {
+        convergence(force, dof, ci) < TOL
+    }
+}
+
 pub(crate) fn run_eon(case: &Problem, optim: Optim) -> Result<Row, SaddleError> {
+    run_eon_metric(case, optim, false)
+}
+
+/// `atom` stops on the largest per-atom projected force. The 499-atom
+/// vacancy uses that norm, because the image Euclidean norm grows as
+/// sqrt(N).
+pub(crate) fn run_eon_metric(case: &Problem, optim: Optim, atom: bool) -> Result<Row, SaddleError> {
     let started = Instant::now();
     let mut calls = 0usize;
     let (force, energies, ci) = assemble_eon(case, &case.positions, None, &mut calls)?;
@@ -84,7 +99,7 @@ pub(crate) fn run_eon(case: &Problem, optim: Optim) -> Result<Row, SaddleError> 
     let mut ci = ci;
     let dof = positions.ncols();
     let n_int = positions.nrows() - 2;
-    if convergence(&force, dof, ci) < TOL {
+    if under_tol(&force, dof, ci, atom) {
         return Ok(Row {
             calls,
             seconds: started.elapsed().as_secs_f64(),
@@ -102,6 +117,7 @@ pub(crate) fn run_eon(case: &Problem, optim: Optim) -> Result<Row, SaddleError> 
             &mut calls,
             n_int,
             dof,
+            atom,
         )?,
         Optim::Lbfgs => eon_lbfgs(
             case,
@@ -112,6 +128,7 @@ pub(crate) fn run_eon(case: &Problem, optim: Optim) -> Result<Row, SaddleError> 
             &mut calls,
             n_int,
             dof,
+            atom,
         )?,
     }
     Ok(Row {
@@ -131,6 +148,7 @@ pub(crate) fn eon_fire(
     calls: &mut usize,
     _n_int: usize,
     dof: usize,
+    atom: bool,
 ) -> Result<(), SaddleError> {
     let mut vel = Array1::zeros(force.len());
     let mut dt = DT;
@@ -170,16 +188,37 @@ pub(crate) fn eon_fire(
             alpha = 0.1;
             n_pos = 0;
         }
-        if convergence(force, dof, *ci) < TOL {
+        if under_tol(force, dof, *ci, atom) {
             return Ok(());
         }
     }
     Err(SaddleError::Stalled(format!(
         "fire not under {TOL}, calls={calls}, last {:.4e}, ci={ci:?}",
-        convergence(force, dof, *ci)
+        if atom {
+            max_atom(force)
+        } else {
+            convergence(force, dof, *ci)
+        }
     )))
 }
 
+fn step_angle_deg(step: &Array1<f64>, force: &Array1<f64>) -> f64 {
+    let sn = step.dot(step).sqrt();
+    let fnorm = force.dot(force).sqrt();
+    if sn < 1e-30 || fnorm < 1e-30 {
+        return 0.0;
+    }
+    let mut c = step.dot(force) / (sn * fnorm);
+    c = c.clamp(-1.0, 1.0);
+    c.acos() * (180.0 / std::f64::consts::PI)
+}
+
+/// eOn `LBFGS::step` with the catalog defaults: `accept = none` (no line
+/// search), `auto_scale` with `h0 = sy/yy`, `curvature = reset`, and
+/// distance and angle resets. A negative curvature takes
+/// `maxAtomMotion(1000 F)`. The previous transcription always
+/// backtracked on the energy and, on a negative curvature, stepped by
+/// the raw force, so the Pt(111) terrace took 21052 calls.
 pub(crate) fn eon_lbfgs(
     case: &Problem,
     positions: &mut Array2<f64>,
@@ -189,93 +228,74 @@ pub(crate) fn eon_lbfgs(
     calls: &mut usize,
     _n_int: usize,
     dof: usize,
+    atom: bool,
 ) -> Result<(), SaddleError> {
     let mut s_mem: Vec<Array1<f64>> = Vec::new();
     let mut y_mem: Vec<Array1<f64>> = Vec::new();
     let mut x_prev = gather(positions);
     let mut f_prev = force.clone();
+    let mut iteration = 0usize;
     for _ in 0..MAX_ITER {
         let x = gather(positions);
-        let mut negative = false;
-        if x != x_prev {
+        let mut h0 = 0.01;
+        let mut direction = if iteration > 0 {
             let s = &x - &x_prev;
             let y = &f_prev - &*force;
             let sy = s.dot(&y);
-            if sy < 0.0 || sy.abs() < 1e-30 {
-                // eOn curvature = reset: drop the memory and step along
-                // the force, capped at the per-atom maximum.
+            let yy = y.dot(&y);
+            if sy < 0.0 {
                 s_mem.clear();
                 y_mem.clear();
-                negative = sy < 0.0;
+                let mut d = &*force * 1000.0;
+                cap_atoms(&mut d, MAX_MOVE);
+                d
             } else {
-                s_mem.push(s);
-                y_mem.push(y);
-                if s_mem.len() > LBFGS_MEMORY {
-                    s_mem.remove(0);
-                    y_mem.remove(0);
+                if yy > 0.0 {
+                    h0 = sy / yy;
                 }
+                if sy.abs() < 1e-30 {
+                    s_mem.clear();
+                    y_mem.clear();
+                } else {
+                    s_mem.push(s);
+                    y_mem.push(y);
+                    if s_mem.len() > LBFGS_MEMORY {
+                        s_mem.remove(0);
+                        y_mem.remove(0);
+                    }
+                }
+                let grad = -&*force;
+                let mut d = lbfgs_direction(&grad, &s_mem, &y_mem, h0);
+                if !d.iter().all(|v| v.is_finite())
+                    || max_atom(&d) >= MAX_MOVE
+                    || step_angle_deg(&d, force) > 90.0
+                {
+                    s_mem.clear();
+                    y_mem.clear();
+                    d = &*force * h0;
+                }
+                cap_atoms(&mut d, MAX_MOVE);
+                d
             }
-        }
-        let grad = -&*force;
-        let mut direction = if negative {
-            let mut d = force.clone();
+        } else {
+            let mut d = &*force * 0.01;
             cap_atoms(&mut d, MAX_MOVE);
             d
-        } else {
-            let mut d = lbfgs_direction(&grad, &s_mem, &y_mem, 0.01);
-            let too_far = max_atom(&d) >= MAX_MOVE;
-            let uphill = d.dot(&grad) >= 0.0;
-            if too_far || uphill || d.iter().any(|v| !v.is_finite()) {
-                s_mem.clear();
-                y_mem.clear();
-                d = &*force * 0.01;
-                cap_atoms(&mut d, MAX_MOVE);
-            }
-            d
         };
-        if s_mem.is_empty() && max_atom(&direction) > MAX_MOVE {
+        if !direction.iter().all(|v| v.is_finite()) {
+            direction = &*force * 0.01;
             cap_atoms(&mut direction, MAX_MOVE);
         }
-        let e0: f64 = energies.slice(s![1..energies.len() - 1]).sum();
-        let mut alpha = 1.0;
-        let mut accepted = false;
-        let saved = positions.clone();
-        let saved_f = force.clone();
-        let saved_e = energies.clone();
-        let saved_ci = *ci;
-        for _ in 0..10 {
-            let trial = &x + &direction * alpha;
-            scatter(positions, &trial);
-            let (f, e, next) = assemble_eon(case, positions, *ci, calls)?;
-            let e_acc: f64 = e.slice(s![1..e.len() - 1]).sum();
-            if e_acc - e0 <= 1e-8 {
-                *force = f;
-                *energies = e;
-                *ci = next;
-                accepted = true;
-                break;
-            }
-            alpha *= 0.5;
-        }
-        if !accepted {
-            *positions = saved;
-            *force = saved_f;
-            *energies = saved_e;
-            *ci = saved_ci;
-            s_mem.clear();
-            y_mem.clear();
-            let mut fallback = &*force * 0.1;
-            cap_atoms(&mut fallback, MAX_MOVE);
-            let trial = &x + &fallback;
-            scatter(positions, &trial);
-            let (f, e, next) = assemble_eon(case, positions, *ci, calls)?;
-            *force = f;
-            *energies = e;
-            *ci = next;
-        }
+        let trial = &x + &direction;
+        scatter(positions, &trial);
+        let (f, e, next) = assemble_eon(case, positions, *ci, calls)?;
         x_prev = x;
         f_prev = force.clone();
-        if convergence(force, dof, *ci) < TOL {
+        *force = f;
+        *energies = e;
+        *ci = next;
+        iteration += 1;
+        if under_tol(force, dof, *ci, atom) {
             return Ok(());
         }
     }
