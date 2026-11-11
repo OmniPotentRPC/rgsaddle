@@ -1471,6 +1471,27 @@ impl MinModeSession {
         Ok(())
     }
 
+    /// Translate on the next [`MinModeSession::step`] with this mode and
+    /// curvature, instead of estimating them again. A GP dimer uses it
+    /// so the reflection sign is the true curvature while the trial
+    /// points are the surrogate's.
+    pub fn install_mode(&mut self, mode: Array1<f64>, curvature: f64) -> Result<(), SaddleError> {
+        if mode.len() != self.x.len() {
+            return Err(SaddleError::Shape("mode must match the position".into()));
+        }
+        if !curvature.is_finite() {
+            return Err(SaddleError::Invalid(
+                "installed curvature must be finite".into(),
+            ));
+        }
+        let mode = checked_mode(mode)?;
+        self.mode = mode;
+        self.curvature = curvature;
+        self.mode_fresh = true;
+        self.pending_turn = 0.0;
+        Ok(())
+    }
+
     /// Replace the mode seed with a host-chosen direction.
     pub fn set_mode(&mut self, mode: Array1<f64>) -> Result<(), SaddleError> {
         if mode.len() != self.x.len() {

@@ -47,6 +47,8 @@ pub mod band;
 pub mod capi;
 pub mod connect;
 pub mod error;
+pub mod gpdimer;
+pub mod gpr;
 pub mod idpp;
 pub mod minmode;
 pub mod nichols;
@@ -76,6 +78,11 @@ pub use band::{
 };
 pub use connect::{ConnectConfig, ConnectProfile, ConnectReport, connect};
 pub use error::SaddleError;
+pub use gpdimer::{GpDimerConfig, GpDimerReport, GpDimerSession, GpDimerStatus};
+pub use gpr::{
+    FitOptions, GaussianProcess, KernelKind, Observation, fitting_evidence, max_log_pair_distance,
+    observation_covariance,
+};
 pub use idpp::{IdppConfig, SidppConfig, idpp_path, linear_path, sidpp_path};
 pub use minmode::{
     FiniteDifference, MinModeConfig, MinModeKind, MinModeReport, MinModeSession, MinModeStatus,
