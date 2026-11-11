@@ -260,6 +260,17 @@ pub struct BandConfig {
     /// Zoom-NEB: once the climbing image is stable, place the band on
     /// a window around it. `None`, the default, keeps the band whole.
     pub zoom: Option<ZoomConfig>,
+    /// Per-image FIRE cap, with one shared time step.
+    ///
+    /// Off by default: one optimizer moves the whole band, as eOn does
+    /// after Sheppard, Terrell and Henkelman, J. Chem. Phys. 128, 134106
+    /// (2008), doi:10.1063/1.2841941. `true` still uses that paper's
+    /// local cap (one image at `max_move` does not scale the others)
+    /// but the time step, mixing weight and velocity reset are the
+    /// band's, not each image's. Independent time steps on the Morse
+    /// adatom took 322 force calls against 267 for the shared step.
+    /// L-BFGS ignores the flag.
+    pub per_image_fire: bool,
 }
 
 impl Default for BandConfig {
@@ -284,6 +295,7 @@ impl Default for BandConfig {
             min_mode: Some(MinModeRefine::default()),
             exp_precon: None,
             zoom: None,
+            per_image_fire: false,
         }
     }
 }
@@ -496,6 +508,16 @@ struct BandState {
     previous: Mutex<Option<BandEval>>,
     /// Rows evaluated by the surface during the current step.
     rows: AtomicUsize,
+    /// Interior buffers reused across evaluations. A fresh matrix every
+    /// step was an O(N) allocation on the 499-atom vacancy; the shapes
+    /// do not change during a run.
+    scratch: Mutex<EvalScratch>,
+}
+
+struct EvalScratch {
+    interior_e: Array1<f64>,
+    interior_g: Array2<f64>,
+    full: Array2<f64>,
 }
 
 impl BandState {
@@ -512,6 +534,11 @@ impl BandState {
             last: Mutex::new(None),
             previous: Mutex::new(None),
             rows: AtomicUsize::new(0),
+            scratch: Mutex::new(EvalScratch {
+                interior_e: Array1::zeros(0),
+                interior_g: Array2::zeros((0, 0)),
+                full: Array2::zeros((0, 0)),
+            }),
         }
     }
     fn convergence_force(&self, force: &Array1<f64>) -> f64 {
@@ -621,23 +648,42 @@ fn evaluate_band(
     };
     match state.endpoints() {
         Some([e_first, e_last]) => {
-            let mut interior_e = Array1::zeros(n_images - 2);
-            let mut interior_g = Array2::zeros((n_images - 2, dof));
-            surface.eval(interior.view(), &mut interior_e, &mut interior_g)?;
-            state.rows.fetch_add(n_images - 2, Ordering::Relaxed);
-            energies[0] = e_first;
-            energies[n_images - 1] = e_last;
-            energies.slice_mut(s![1..n_images - 1]).assign(&interior_e);
-            gradients
-                .slice_mut(s![1..n_images - 1, ..])
-                .assign(&interior_g);
+            let mut scratch = state.scratch.lock().unwrap_or_else(|e| e.into_inner());
+            let n_int = n_images - 2;
+            if scratch.interior_e.len() != n_int {
+                scratch.interior_e = Array1::zeros(n_int);
+            }
+            if scratch.interior_g.dim() != (n_int, dof) {
+                scratch.interior_g = Array2::zeros((n_int, dof));
+            }
+            {
+                let EvalScratch {
+                    interior_e,
+                    interior_g,
+                    ..
+                } = &mut *scratch;
+                surface.eval(interior.view(), interior_e, interior_g)?;
+                state.rows.fetch_add(n_int, Ordering::Relaxed);
+                energies[0] = e_first;
+                energies[n_images - 1] = e_last;
+                energies.slice_mut(s![1..n_images - 1]).assign(interior_e);
+                gradients
+                    .slice_mut(s![1..n_images - 1, ..])
+                    .assign(interior_g);
+            }
         }
         None => {
-            let mut full = Array2::zeros((n_images, dof));
-            full.row_mut(0).assign(&endpoint_first);
-            full.row_mut(n_images - 1).assign(&endpoint_last);
-            full.slice_mut(s![1..n_images - 1, ..]).assign(&interior);
-            surface.eval(full.view(), &mut energies, &mut gradients)?;
+            let mut scratch = state.scratch.lock().unwrap_or_else(|e| e.into_inner());
+            if scratch.full.dim() != (n_images, dof) {
+                scratch.full = Array2::zeros((n_images, dof));
+            }
+            scratch.full.row_mut(0).assign(&endpoint_first);
+            scratch.full.row_mut(n_images - 1).assign(&endpoint_last);
+            scratch
+                .full
+                .slice_mut(s![1..n_images - 1, ..])
+                .assign(&interior);
+            surface.eval(scratch.full.view(), &mut energies, &mut gradients)?;
             state.rows.fetch_add(n_images, Ordering::Relaxed);
         }
     }
@@ -1002,12 +1048,19 @@ fn assemble_solid(
             max_i = i;
         }
     }
+    let previous = state.ci();
     let climbing = config.climbing.is_some();
     let armed = climbing && state.armed.load(Ordering::Relaxed);
+    let ci_at = if armed {
+        latched_climber(&enthalpy, previous, Some(max_i))
+    } else {
+        None
+    };
     if armed {
-        state.ci_index.store(max_i as i64, Ordering::Relaxed);
+        state
+            .ci_index
+            .store(ci_at.map_or(-1, |i| i as i64), Ordering::Relaxed);
     }
-    let ci_at = armed.then_some(max_i);
     let spring = config.spring.at_energies(enthalpy.view());
     let mut joint = Array1::zeros(x.len());
     let mut cartesian = Array1::zeros(x.len());
@@ -1039,15 +1092,20 @@ fn assemble_solid(
         && (max_component < baseline * ci.trigger_factor || max_component < ci.trigger_force)
     {
         state.armed.store(true, Ordering::Relaxed);
-        state.ci_index.store(max_i as i64, Ordering::Relaxed);
-        let (projected, step) = solid_image(
-            config, &spring, max_i, true, &positions, &cells, &enthalpy, &gradients, &stresses,
-            jacobian, pressure,
-        )?;
-        let start = (max_i - 1) * seg;
-        joint.slice_mut(s![start..start + seg]).assign(&projected);
-        cartesian.slice_mut(s![start..start + seg]).assign(&step);
-        max_component = state.convergence_force(&joint);
+        let armed_at = latched_climber(&enthalpy, previous, Some(max_i));
+        state
+            .ci_index
+            .store(armed_at.map_or(-1, |i| i as i64), Ordering::Relaxed);
+        if let Some(ci_i) = armed_at {
+            let (projected, step) = solid_image(
+                config, &spring, ci_i, true, &positions, &cells, &enthalpy, &gradients, &stresses,
+                jacobian, pressure,
+            )?;
+            let start = (ci_i - 1) * seg;
+            joint.slice_mut(s![start..start + seg]).assign(&projected);
+            cartesian.slice_mut(s![start..start + seg]).assign(&step);
+            max_component = state.convergence_force(&joint);
+        }
     }
     // A force whose squared norm overflows defeats every solver's
     // dot products long before a component turns non-finite.
@@ -1243,12 +1301,108 @@ fn climb_target(
     (!blocked).then_some(max_i)
 }
 
+/// Keep the previous climbing image while it is a strict local maximum.
+///
+/// Re-picking the highest interior image on every evaluation hops the
+/// climber onto a shoulder. eOn's `updateForces` leaves the current
+/// image in place while its energy is above both neighbours, and moves
+/// to the highest interior image when that test fails.
+fn band_power(fires: &[LocalFire], forces: &[Array1<f64>]) -> f64 {
+    fires
+        .iter()
+        .zip(forces)
+        .map(|(fire, force)| force.dot(&fire.vel))
+        .sum()
+}
+
+/// One mix for the concatenated band, the same convex combination the
+/// global FIRE step uses. Each image still keeps its own velocity.
+fn mix_band(fires: &mut [LocalFire], forces: &[Array1<f64>]) {
+    if fires.is_empty() {
+        return;
+    }
+    let mut vnorm2 = 0.0;
+    let mut fnorm2 = 0.0;
+    for (fire, force) in fires.iter().zip(forces) {
+        vnorm2 += fire.vel.dot(&fire.vel);
+        fnorm2 += force.dot(force);
+    }
+    let vnorm = vnorm2.sqrt();
+    let fnorm = fnorm2.sqrt();
+    if !(fnorm.is_finite() && fnorm > 0.0 && vnorm.is_finite()) {
+        return;
+    }
+    let alpha = if fires[0].alpha.is_nan() {
+        0.0
+    } else {
+        fires[0].alpha.clamp(0.0, 1.0)
+    };
+    let scale = alpha * vnorm / fnorm;
+    for (fire, force) in fires.iter_mut().zip(forces) {
+        fire.vel = &fire.vel * (1.0 - alpha) + force * scale;
+    }
+}
+
+/// Advance the single band time step. A negative power clears every
+/// image velocity, which is what keeps a smooth path from splitting.
+fn adapt_shared(fires: &mut [LocalFire], power: f64, time_step: f64) {
+    let Some(lead) = fires.first_mut() else {
+        return;
+    };
+    let dt_max = (time_step * 2.5).max(time_step);
+    if power > 0.0 {
+        lead.n_pos += 1;
+        if lead.n_pos > 5 {
+            lead.dt = (lead.dt * 1.1).min(dt_max);
+            lead.alpha *= 0.99;
+        }
+    } else {
+        lead.dt = (lead.dt * 0.5).max(1e-12);
+        lead.alpha = 0.1;
+        lead.n_pos = 0;
+        for fire in fires.iter_mut() {
+            fire.vel.fill(0.0);
+        }
+    }
+}
+
+fn cap_local(step: &mut Array1<f64>, max_move: f64) {
+    let mut max = 0.0_f64;
+    let n = step.len() / 3;
+    for i in 0..n {
+        let nrm = (step[3 * i].powi(2) + step[3 * i + 1].powi(2) + step[3 * i + 2].powi(2)).sqrt();
+        max = max.max(nrm);
+    }
+    if max > max_move && max.is_finite() {
+        *step *= max_move / max;
+    }
+}
+
+fn latched_climber(
+    values: &Array1<f64>,
+    previous: Option<usize>,
+    candidate: Option<usize>,
+) -> Option<usize> {
+    let candidate = candidate?;
+    let n = values.len();
+    if let Some(prev) = previous
+        && (1..n - 1).contains(&prev)
+        && values[prev] > values[prev - 1]
+        && values[prev] > values[prev + 1]
+    {
+        return Some(prev);
+    }
+    Some(candidate)
+}
+
 /// Assemble the projected band force at interior `x`. Returns
 /// (pseudo-energy, projected interior forces, max abs component).
 ///
 /// The climbing image is decided on this evaluation's energies, so
 /// the force returned already carries the climb: once armed, the
-/// highest interior image climbs, also when an endpoint is higher,
+/// previous image keeps climbing while it is a strict local maximum
+/// and otherwise the highest interior image climbs, also when an
+/// endpoint is higher,
 /// unless that endpoint slopes down into the band ([`climb_target`]);
 /// on the evaluation that arms it, the climbing image's force is
 /// reassembled before returning.
@@ -1294,7 +1448,8 @@ fn assemble_band_with(
             max_i = i;
         }
     }
-    let climb_target = climb_target(
+    let previous = state.ci();
+    let candidate = climb_target(
         config,
         max_i,
         endpoint_first,
@@ -1305,12 +1460,16 @@ fn assemble_band_with(
     );
     let climbing = config.climbing.is_some();
     let armed = climbing && state.armed.load(Ordering::Relaxed);
+    let ci_at = if armed {
+        latched_climber(&energies, previous, candidate)
+    } else {
+        None
+    };
     if armed {
         state
             .ci_index
-            .store(climb_target.map_or(-1, |i| i as i64), Ordering::Relaxed);
+            .store(ci_at.map_or(-1, |i| i as i64), Ordering::Relaxed);
     }
-    let ci_at = if armed { climb_target } else { None };
     let spring = config.spring.at_band(energies.view(), gradients.view());
 
     let metric_of = |i: usize| metrics.and_then(|m| m.get(i - 1));
@@ -1356,10 +1515,11 @@ fn assemble_band_with(
         && (max_component < baseline * ci.trigger_factor || max_component < ci.trigger_force)
     {
         state.armed.store(true, Ordering::Relaxed);
+        let armed_at = latched_climber(&energies, previous, candidate);
         state
             .ci_index
-            .store(climb_target.map_or(-1, |i| i as i64), Ordering::Relaxed);
-        if let Some(ci_i) = climb_target {
+            .store(armed_at.map_or(-1, |i| i as i64), Ordering::Relaxed);
+        if let Some(ci_i) = armed_at {
             let (f, d) = image_force(
                 config,
                 &spring,
@@ -1584,6 +1744,17 @@ pub struct BandSession {
     /// Consecutive ODE12r steps that rejected their trial.
     unmoved: usize,
     zoom: zoom::ZoomState,
+    local_fire: Vec<LocalFire>,
+}
+
+/// Per-image FIRE state. The schedule matches rgmin's FIRE 1 and FIRE 2
+/// parameters: `N_min = 5`, `f_inc = 1.1`, `f_dec = 0.5`, `f_alpha = 0.99`,
+/// `dt_max = 2.5 dt`.
+struct LocalFire {
+    vel: Array1<f64>,
+    dt: f64,
+    alpha: f64,
+    n_pos: usize,
 }
 
 impl BandSession {
@@ -1661,6 +1832,7 @@ impl BandSession {
             exp: None,
             unmoved: 0,
             zoom: zoom::ZoomState::default(),
+            local_fire: Vec::new(),
         };
         if let Some(precon) = session.config.exp_precon {
             session.set_exp_precon(precon)?;
@@ -2058,6 +2230,7 @@ impl BandSession {
     pub fn restart(&mut self) {
         self.solver.forget();
         self.state.restart();
+        self.local_fire.clear();
         self.refine = min_mode::RefineState::default();
         if let Some(rtr) = &mut self.rtr {
             *rtr = crate::rtr::BandRtr::new(rtr.config, false);
@@ -2125,6 +2298,122 @@ impl BandSession {
         }
     }
 
+    /// One FIRE step. Velocities are per image so the per-atom cap does
+    /// not scale the whole band, but the time step is shared: an image
+    /// with its own clock walks off a smooth path (the Morse adatom).
+    /// Sheppard, Terrell and Henkelman, J. Chem. Phys. 128, 134106
+    /// (2008), doi:10.1063/1.2841941.
+    fn step_per_image<S: BandSurface>(&mut self, surface: &S) -> Result<BandReport, SaddleError> {
+        let n_images = self.positions.nrows();
+        let dof = self.positions.ncols();
+        let n_int = n_images - 2;
+        let v2 = matches!(
+            self.config.method,
+            Method::Fire {
+                kind: rgmin::FireKind::V2
+            }
+        );
+        if self.local_fire.len() != n_int {
+            self.local_fire = (0..n_int)
+                .map(|_| LocalFire {
+                    vel: Array1::zeros(dof),
+                    dt: self.config.time_step,
+                    alpha: 0.1,
+                    n_pos: 0,
+                })
+                .collect();
+        }
+        self.state.take_error();
+        self.state.rows.store(0, Ordering::Relaxed);
+        let endpoint_first = self.positions.row(0).to_owned();
+        let endpoint_last = self.positions.row(n_images - 1).to_owned();
+        let before = self.interior_flat();
+        let (_, force, _, _) = assemble_band_with(
+            &self.config,
+            &self.state,
+            surface,
+            endpoint_first.view(),
+            endpoint_last.view(),
+            before.view(),
+            None,
+        )?;
+        let mut forces: Vec<Array1<f64>> = (0..n_int)
+            .map(|i| force.slice(s![i * dof..(i + 1) * dof]).to_owned())
+            .collect();
+        if v2 {
+            let power = band_power(&self.local_fire, &forces);
+            if power > 0.0 {
+                mix_band(&mut self.local_fire, &forces);
+            }
+            adapt_shared(&mut self.local_fire, power, self.config.time_step);
+        }
+        let dt = self
+            .local_fire
+            .first()
+            .map(|fire| fire.dt)
+            .unwrap_or(self.config.time_step);
+        let mut flat = before.clone();
+        let mut proposed = Vec::with_capacity(n_int);
+        let mut taken = Vec::with_capacity(n_int);
+        for i in 0..n_int {
+            let fire = &mut self.local_fire[i];
+            fire.vel = &fire.vel + &forces[i] * dt;
+            let dx = &fire.vel * dt;
+            let mut step = dx.clone();
+            if self.config.max_move > 0.0 {
+                cap_local(&mut step, self.config.max_move);
+            }
+            let start = flat.slice(s![i * dof..(i + 1) * dof]).to_owned();
+            flat.slice_mut(s![i * dof..(i + 1) * dof])
+                .assign(&(&start + &step));
+            proposed.push(dx);
+            taken.push(step);
+        }
+        for i in 0..n_int {
+            let proposed_norm = proposed[i].dot(&proposed[i]).sqrt();
+            let taken_norm = taken[i].dot(&taken[i]).sqrt();
+            if proposed_norm > 0.0 && taken_norm < proposed_norm {
+                self.local_fire[i].vel *= taken_norm / proposed_norm;
+            }
+        }
+        check_moved(&self.state, &before, &flat, self.config.force_tol)?;
+        self.scatter_interior(flat.view());
+        let (_, force_new, max_force, _) = assemble_band_with(
+            &self.config,
+            &self.state,
+            surface,
+            endpoint_first.view(),
+            endpoint_last.view(),
+            flat.view(),
+            None,
+        )?;
+        if !v2 {
+            for (i, force_i) in forces.iter_mut().enumerate() {
+                force_i.assign(&force_new.slice(s![i * dof..(i + 1) * dof]));
+            }
+            let power = band_power(&self.local_fire, &forces);
+            mix_band(&mut self.local_fire, &forces);
+            adapt_shared(&mut self.local_fire, power, self.config.time_step);
+        }
+        self.iteration += 1;
+        let status = if max_force <= self.config.force_tol {
+            BandStatus::Converged
+        } else {
+            BandStatus::Running
+        };
+        if !self.zoom_latch(status) {
+            self.refine_latch(status)?;
+        }
+        Ok(BandReport {
+            status,
+            max_force,
+            ci_index: self.state.ci(),
+            iteration: self.iteration,
+            surface_rows: self.state.rows.load(Ordering::Relaxed),
+            curvature: None,
+        })
+    }
+
     /// One solver step over the assembled band force. The host
     /// interleaves its policy between calls.
     ///
@@ -2149,6 +2438,12 @@ impl BandSession {
         }
         if self.rtr.is_some() {
             return self.step_rtr(surface);
+        }
+        if self.config.per_image_fire
+            && !self.config.quickmin
+            && matches!(self.config.method, Method::Fire { .. })
+        {
+            return self.step_per_image(surface);
         }
         let n_images = self.positions.nrows();
         let dof = self.positions.ncols();
