@@ -22,7 +22,7 @@ These ~MinModeConfig~ fields set the cost of an estimate and of the translation:
 | ~rotation_tol~ | Rotational-force residual. At 1e-4 and any looser value the dimer also stops after one rotation once that force is under 1. A tighter value keeps iterating. Lanczos uses it as the Ritz residual and, with no host relative tolerance, as the relative change of the lowest Ritz value | 1e-4 |
 | ~max_rotations~ | Rotation cap for one dimer estimate | 20 |
 | ~max_move~ | Largest per-atom translation. A curvature that is not negative takes one step of this length along the mode. The L-BFGS pairs and the FIRE velocity are kept while the mode turns by at most 45 degrees, and dropped past that cone | 0.2 |
-| ~trust~ | A negative curvature translates by the Newton step of an isotropic model whose curvature is the absolute value of the mode curvature, inside a trust radius that opens at ~max_move~. ~set_trust~ sets the same switch on a live session | off |
+| ~seed_curvature~ | The first empty L-BFGS step uses ~H0 = 1/|λ|~, and the first FIRE displacement uses that scale, when the step fits in ~max_move~. Later steps are the stepper's own. ~set_seed_curvature~ sets the same switch on a live session | off |
 
 From C, ~difference~ and ~rotation_angle_tol~ sit in ~rgsaddle_minmode_config_t~ and are read only when the config's ~version.minor~ is 5 or more. A zeroed C struct leaves ~rotation_angle_tol~ at 0, so the angle test stays off. The C++ helper ~minmode_config~ does that, and sets ~rotation_tol~ to 1e-3, which is loose enough for the torque window. The Python point stencil does not take ~rotation_angle_tol~; it uses the Rust default of five degrees. ~rotation_tol~ on that stencil defaults to 1e-4.
 
@@ -33,23 +33,25 @@ eOn's improved dimer does that with its ~torque_min~ of 0.1.
 ~Some(true)~ adds the window to a tighter residual.
 ~None~, the default, infers the window from ~rotation_tol~.
 
-** Trust the translation
+** Seed the first translation from the mode curvature
 
-~MinModeConfig::trust~ is off unless a host sets it, and ~MinModeSession::set_trust~ does the same on a session that already exists. The C configuration and the point stencil leave it off, so those searches step as before. While the curvature along the mode is negative and no basin constraint is set, the translation is the Newton step ~-g / |λ|~ of the reflected force, shortened so the largest atom move stays inside the trust radius. The radius opens at ~max_move~. A ratio of the trapezoidal decrease of that force to the decrease the isotropic model predicted follows Nocedal and Wright, Numerical Optimization, 2nd ed., Algorithm 4.1, doi:10.1007/978-0-387-40065-5: below 1/4 the trial is dropped and the radius shrinks by 1/4, and above 3/4 a step on the boundary grows the radius by 2, up to ~max_move~. The ratio uses the reflected force because that force is not a potential gradient (Goswami, Gunde, and Jónsson, Front. Chem. (2026), doi:10.3389/fchem.2026.1807063, Eq. 9). The unconstrained step is the scale eOn's L-BFGS takes from a known curvature, ~1/|λ|~, when ~auto_scale~ is on (eOn v2.9.0.1, doi:10.5281/zenodo.18529496). The floor under the radius is the saddle trust floor already used by ~TrustSchedule::saddle~. ~reset~ restores the opening radius. A positive curvature still takes one full per-atom ~max_move~ along the mode.
+~MinModeConfig::seed_curvature~ is off unless a host sets it, and ~MinModeSession::set_seed_curvature~ does the same on a session that already exists. The C configuration and the point stencil leave it off, so those searches step as before. While the curvature ~λ~ along the mode is negative, no basin constraint is set, and the displacement ~F/|λ|~ fits in ~max_move~, one translation uses that scale. L-BFGS does it when its memory is still empty, and stores the secant of that step. FIRE does it on its first move. Every later step is the stepper's own update, still capped by ~max_move~. A step that would only hit the cap is left to the stepper: that capped move does not depend on ~|λ|~. ~reset~ arms the seed again.
 
-The comparison below is the median of seven serial release runs after one warmup, the measurement in Goswami, AIP Adv. (2025), doi:10.1063/5.0283639. ~examples/minmode_trust.rs~ is the run. Both columns use the dimer. Calls count every gradient, the centre and the rotations included. The step cap is 400 on the quadratic, 800 on the double well and the 12-dimensional diagonals, and 1500 on Müller-Brown.
+eOn 3.6.0 is the source of the L-BFGS half. ~MinModeObjectiveFunction::knownCurvature~ returns ~-λ~ once the mode curvature is negative, and ~LBFGS::getStep~ sets ~H0 = 1/known~ on the optimizer's first iteration (https://github.com/TheochemUI/eOn/blob/v3.6.0/client/MinModeSaddleSearch.cpp and ~client/LBFGS.cpp~). The record doi:10.5281/zenodo.18529496 is TheochemUI/eOn v2.9.0.1. In that release, and at tag v2.17.0, the opening scale is still a finite difference along the force, so that record is not this seed. After the first step the scale is ~s·y / y·y~ (Liu and Nocedal, Math. Program. 45, 503 (1989), doi:10.1007/BF01589116). The reflected force those steps follow is Equation 3 of Goswami, Gunde, and Jónsson, Front. Chem. 14, 1807063 (2026), doi:10.3389/fchem.2026.1807063. FIRE's later steps are its own integrator (Bitzek, Koskinen, Gähler, Moseler, and Gumbsch, Phys. Rev. Lett. 97, 170201 (2006), doi:10.1103/PhysRevLett.97.170201).
+
+The comparison below is the median of seven serial release runs after one warmup. Force calls are the cost counted by Goswami, AIP Advances 15, 085210 (2025), doi:10.1063/5.0283639. ~examples/minmode_trust.rs~ is the run. Both columns use the dimer. Calls count every gradient, the centre and the rotations included. The step cap is 400 on the quadratic, 800 on the double well and the 12-dimensional diagonals, and 1500 on Müller-Brown. Every search converged.
 
 | System | Translator | Calls off | ms off | Calls on | ms on |
 |---+----+----+----+----+----|
-| quadratic | FIRE | 35 | 0.022 | 11 | 0.005 |
-| quadratic | L-BFGS | 11 | 0.006 | 11 | 0.004 |
-| double well | FIRE | 42 | 0.025 | 14 | 0.006 |
-| double well | L-BFGS | 18 | 0.010 | 14 | 0.005 |
-| Müller-Brown | FIRE | 543 | 0.318 | 2140 | 0.809 |
-| Müller-Brown | L-BFGS | 46 | 0.034 | 2140 | 0.774 |
-| 12-D, curvature 2 | FIRE | 27 | 0.017 | 7 | 0.003 |
-| 12-D, curvature 2 | L-BFGS | 9 | 0.006 | 7 | 0.003 |
-| 12-D, curvature 40 | FIRE | 131 | 0.084 | 1617 | 0.629 |
-| 12-D, curvature 40 | L-BFGS | 11 | 0.007 | 1617 | 0.632 |
+| quadratic | FIRE | 35 | 0.023 | 35 | 0.023 |
+| quadratic | L-BFGS | 11 | 0.006 | 11 | 0.006 |
+| double well | FIRE | 42 | 0.027 | 42 | 0.028 |
+| double well | L-BFGS | 18 | 0.010 | 18 | 0.010 |
+| Müller-Brown | FIRE | 543 | 0.322 | 491 | 0.290 |
+| Müller-Brown | L-BFGS | 46 | 0.032 | 84 | 0.058 |
+| 12-D, curvature 2 | FIRE | 27 | 0.017 | 27 | 0.018 |
+| 12-D, curvature 2 | L-BFGS | 9 | 0.005 | 9 | 0.006 |
+| 12-D, curvature 40 | FIRE | 131 | 0.082 | 131 | 0.088 |
+| 12-D, curvature 40 | L-BFGS | 11 | 0.007 | 11 | 0.007 |
 
-Every row except the curvature-40 searches converged both ways. Those two trust runs are still going at the 800-step cap. The isotropic model is the right length when ~|λ|~ is typical of the other directions, which is the quadratic, the double well, and the mild 12-dimensional diagonal. On Müller-Brown, and when the other curvatures are 40, the same model rejects steps the L-BFGS translator accepts, and the search spends the extra gradients. The switch stays off.
+Müller-Brown with FIRE is the row that improves. Müller-Brown with L-BFGS takes 84 calls instead of 46, because that one secant is a poor scale for the rest of the surface. The curvature-40 searches take the same number of calls either way. The switch stays off.
