@@ -77,6 +77,7 @@ fn minmode_config_from(cfg: &RgsaddleMinModeConfig) -> Option<MinModeConfig> {
         force_tol: cfg.force_tol,
         max_move: cfg.max_move,
         method: super::method_of(cfg.method, 0),
+        seed_curvature: false,
     })
 }
 

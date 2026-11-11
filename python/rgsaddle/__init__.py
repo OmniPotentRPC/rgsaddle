@@ -46,6 +46,7 @@ class IrcKind(IntEnum):
 
     GS2 = 0
     MOROKUMA = 1
+    SELLA_SPHERE = 2
 
 
 class MinModeKind(IntEnum):

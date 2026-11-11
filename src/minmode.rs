@@ -8,6 +8,7 @@
 //! [`MinModeSession::estimate_mode`] refreshes the mode without a
 //! translation, for a host that climbs with its own optimizer.
 
+use std::collections::VecDeque;
 use std::f64::consts::PI;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -140,6 +141,16 @@ pub struct MinModeConfig {
     /// FIRE) take one step of this length along the mode.
     pub max_move: f64,
     pub method: Method,
+    /// Seed an empty translation from the mode curvature.
+    ///
+    /// Off by default, and the configured stepper is unchanged. On, the
+    /// first empty L-BFGS step uses `H0 = 1/|λ|` and the first FIRE
+    /// displacement uses that same scale. Later steps are the stepper's
+    /// own updates, still capped by `max_move`. eOn 3.6.0 does the L-BFGS
+    /// half in `LBFGS::getStep` from `MinModeObjectiveFunction::knownCurvature`,
+    /// which returns `-λ` once the mode is negative
+    /// (`https://github.com/TheochemUI/eOn/blob/v3.6.0/client/MinModeSaddleSearch.cpp`).
+    pub seed_curvature: bool,
 }
 
 impl Default for MinModeConfig {
@@ -157,6 +168,7 @@ impl Default for MinModeConfig {
             method: Method::Fire {
                 kind: rgmin::FireKind::V2,
             },
+            seed_curvature: false,
         }
     }
 }
@@ -683,6 +695,36 @@ fn shorten_to_atom_cap(origin: ArrayView1<f64>, trial: &mut Array1<f64>, cap: f6
     }
 }
 
+/// The L-BFGS pair test in rgmin: `s'y` must clear `1e-8 |s| |y|`.
+fn pair_curvature_ok(s: &Array1<f64>, y: &Array1<f64>) -> bool {
+    let sy = s.dot(y);
+    let sn = s.dot(s).sqrt();
+    let yn = y.dot(y).sqrt();
+    sy.is_finite() && sy > 1e-8 * sn * yn
+}
+
+/// `1/|λ|` when `λ` is a finite negative curvature. That is the L-BFGS
+/// scale `H0` and the factor on the first FIRE displacement.
+fn curvature_scale(curvature: f64) -> Option<f64> {
+    if !(curvature.is_finite() && curvature < 0.0) {
+        return None;
+    }
+    let scale = 1.0 / -curvature;
+    (scale.is_finite() && scale > 0.0).then_some(scale)
+}
+
+/// Stiffness past which FIRE's opening timestep of 1 is unstable.
+/// Symplectic Euler wants `dt < 2/sqrt(|λ|)`, so `|λ| > 4` is already
+/// past that timestep.
+const FIRE_CURVATURE_FLOOR: f64 = 25.0;
+/// Force evaluations with no real drop before a probe is allowed.
+/// A short plateau still belongs to FIRE. The vacancy cycle does not
+/// leave, so two thousand flat steps is the signal.
+const FIRE_STALL_STEPS: u32 = 2000;
+/// A drop smaller than this fraction of the best force is still a stall.
+/// Slow progress (a fraction of a percent per step) must not latch.
+const FIRE_STALL_DROP: f64 = 1e-4;
+
 /// Relative change of a Ritz value. A vanishing previous value only
 /// counts as agreement when the new value is inside the tolerance too,
 /// matching eOn's guarded division (a zero denominator does not report
@@ -1087,6 +1129,33 @@ pub struct MinModeSession {
     /// still negative. An arrival with non-negative curvature left the
     /// neighborhood; the step is replaced from [`CappedFireStep::origin`].
     capped_fire: Option<CappedFireStep>,
+    /// The translator has already taken a step, so a later FIRE move
+    /// is the integrator's own.
+    solver_stepped: bool,
+    /// FIRE may take the curvature step `|F|/|λ|` when that move fits
+    /// under the atom cap. Off, the integrator's own step is used.
+    fire_curvature: bool,
+    /// Smallest force and energy seen since they last fell. Counts
+    /// steps that improved neither, so a stiff FIRE limit cycle can
+    /// be left without treating a slow descent as a stall.
+    fire_stall_force: f64,
+    fire_stall_energy: f64,
+    fire_stall_count: u32,
+    /// The empty L-BFGS memory has already been seeded from `|λ|`.
+    /// A later guard that drops the pairs uses the stepper's own scale.
+    lbfgs_seeded: bool,
+    /// Polak-Ribiere steps in the plane perpendicular to the mode, with
+    /// a Newton step along it. Off, the configured stepper translates.
+    cg_translate: bool,
+    cg_prev_perp: Option<Array1<f64>>,
+    cg_dir: Option<Array1<f64>>,
+    /// Barzilai-Borwein length from the previous perpendicular step.
+    cg_alpha: Option<f64>,
+    /// Rebuild L-BFGS pairs in the plane perpendicular to the mode
+    /// after each turn inside [`MODE_RESET_ANGLE`].
+    lbfgs_project: bool,
+    /// `(s, y)` the solver accepted, before projection onto the mode.
+    lbfgs_shadow: VecDeque<(Array1<f64>, Array1<f64>)>,
     /// The first surface error raised inside the translation oracle
     /// during the current step; the rgmin oracle signature has no
     /// error channel of its own.
@@ -1094,6 +1163,42 @@ pub struct MinModeSession {
     /// The Krylov vectors and actions of the last Lanczos estimate in
     /// the full space; empty after a dimer or with excluded modes.
     krylov: KrylovBlock,
+}
+
+/// Solver used by the min-mode translation. `istep` is FIRE's opening
+/// timestep and is unused by L-BFGS. An empty L-BFGS memory with the
+/// NEB guards on still scales by 0.01; the curvature seed bypasses that
+/// one step instead of changing the guard.
+fn build_solver(
+    method: &Method,
+    n: usize,
+    max_move: f64,
+    istep: f64,
+    highs: bool,
+    lbfgs_guards: bool,
+) -> Solver {
+    let control = Control {
+        maxiter: usize::MAX,
+        gtol: 0.0,
+        istep,
+        maxmove: None,
+        ..Control::default()
+    };
+    let mut solver = Solver::new(method.clone(), control, n);
+    // Per-atom cap over consecutive xyz triples (eOn maxAtomMotionApplied).
+    // A non-positive max_move leaves the step uncapped.
+    solver.set_atom_maxmove(max_move);
+    // The reflected force is the Householder translation of Goswami, Gunde,
+    // and Jónsson, Front. Chem. 14, 1807063 (2026),
+    // doi:10.3389/fchem.2026.1807063, Equation 3. It is not the gradient of
+    // the energy the oracle reports, so L-BFGS takes its two-loop direction
+    // with one call (rgmin Accept::Step) and the band's cap and angle guards.
+    if matches!(method, Method::Lbfgs { .. }) {
+        solver.set_accept(Accept::Step);
+        solver.set_lbfgs_neb_guards(lbfgs_guards);
+    }
+    solver.set_highs(highs);
+    solver
 }
 
 impl MinModeSession {
@@ -1114,32 +1219,15 @@ impl MinModeSession {
         }
         let mode = checked_mode(mode)?;
         crate::band::check_force_driven(&config.method)?;
-        let control = Control {
-            maxiter: usize::MAX,
-            gtol: 0.0,
-            istep: 1.0,
-            maxmove: None,
-            ..Control::default()
-        };
-        let mut solver = Solver::new(config.method.clone(), control, x.len());
-        // Per-atom cap over consecutive xyz triples (eOn
-        // maxAtomMotionApplied). A non-positive max_move leaves the
-        // step uncapped.
-        solver.set_atom_maxmove(config.max_move);
-        // The inverted force is not the gradient of the energy the
-        // oracle reports, so a line search on that energy refuses good
-        // steps and burns evaluations: L-BFGS takes its two-loop
-        // direction with one oracle call (rgmin Accept::Step).
-        if matches!(config.method, Method::Lbfgs { .. }) {
-            solver.set_accept(Accept::Step);
-            // The reflected force is not a potential gradient
-            // (Goswami, Gunde, and Jónsson, Front. Chem. (2026),
-            // doi:10.3389/fchem.2026.1807063, Eq. 9). Arm the same
-            // guards as the band: an empty memory scales the step by
-            // 0.01, and a two-loop step that reaches the per-atom cap
-            // or faces away from the force drops its pairs.
-            solver.set_lbfgs_neb_guards(true);
-        }
+        let lbfgs_guards = true;
+        let solver = build_solver(
+            &config.method,
+            x.len(),
+            config.max_move,
+            1.0,
+            false,
+            lbfgs_guards,
+        );
         Ok(Self {
             config,
             force_gate: ForceGate::LinfNorm,
@@ -1160,7 +1248,82 @@ impl MinModeSession {
             lanczos_ready: false,
             lanczos_carry: None,
             capped_fire: None,
+            solver_stepped: false,
+            lbfgs_seeded: false,
+            fire_curvature: true,
+            fire_stall_force: f64::NAN,
+            fire_stall_energy: f64::NAN,
+            fire_stall_count: 0,
+            cg_translate: false,
+            cg_prev_perp: None,
+            cg_dir: None,
+            cg_alpha: None,
+            lbfgs_project: false,
+            lbfgs_shadow: VecDeque::new(),
         })
+    }
+
+    /// Translate by Polak-Ribiere conjugate gradients perpendicular to
+    /// the mode and a Newton step along it. Off, the default, the
+    /// configured stepper takes the step.
+    pub fn set_cg_translate(&mut self, enabled: bool) {
+        self.cg_translate = enabled;
+        if !enabled {
+            self.clear_cg();
+        }
+    }
+
+    /// Project stored L-BFGS pairs onto the plane perpendicular to the
+    /// mode after each turn inside the Householder cone. Off, the
+    /// default, a turn inside that cone keeps the pairs as the solver
+    /// stored them.
+    pub fn set_lbfgs_project(&mut self, enabled: bool) {
+        self.lbfgs_project = enabled;
+        if !enabled {
+            self.lbfgs_shadow.clear();
+        }
+    }
+
+    /// Seed the empty translation from `|λ|`. Off, the default, leaves
+    /// the stepper's own opening scale.
+    pub fn set_seed_curvature(&mut self, enabled: bool) {
+        self.config.seed_curvature = enabled;
+    }
+
+    /// Replace a stalled FIRE step on a stiff negative mode with a
+    /// short directional probe. On by default. Off, FIRE keeps the
+    /// timestep it was built with.
+    pub fn set_fire_curvature(&mut self, enabled: bool) {
+        self.fire_curvature = enabled;
+    }
+
+    fn note_fire_progress(&mut self, force: f64, energy: f64) {
+        if !force.is_finite() {
+            return;
+        }
+        // Once neither the force nor the energy has moved for
+        // [`FIRE_STALL_STEPS`], keep probing. A probe that lowers the
+        // force must not hand the next step back to FIRE's opening
+        // timestep, which rebuilds the cycle. A search that is still
+        // descending is left alone.
+        if self.fire_stall_count >= FIRE_STALL_STEPS {
+            return;
+        }
+        let force_drop = !self.fire_stall_force.is_finite()
+            || force < self.fire_stall_force * (1.0 - FIRE_STALL_DROP);
+        let energy_drop = energy.is_finite()
+            && (!self.fire_stall_energy.is_finite() || energy < self.fire_stall_energy - 1e-8);
+        if force_drop || energy_drop {
+            if force_drop {
+                self.fire_stall_force = force;
+            }
+            if energy_drop {
+                self.fire_stall_energy = energy;
+            }
+            self.fire_stall_count = 0;
+        } else {
+            self.fire_stall_count = self.fire_stall_count.saturating_add(1);
+        }
     }
 
     /// Stop a Lanczos estimate when the lowest Ritz value's relative
@@ -1253,8 +1416,12 @@ impl MinModeSession {
     pub fn reset(&mut self) {
         self.solver.forget();
         self.dimer_rotation.clear();
+        self.clear_cg();
+        self.lbfgs_shadow.clear();
         self.curvature = f64::NAN;
         self.capped_fire = None;
+        self.solver_stepped = false;
+        self.lbfgs_seeded = false;
         self.centre = None;
         self.mode_fresh = false;
         self.pending_turn = 0.0;
@@ -1331,8 +1498,68 @@ impl MinModeSession {
     fn retire_translation_memory(&mut self, turned: f64) {
         if turned > MODE_RESET_ANGLE {
             self.solver.forget();
+            self.lbfgs_shadow.clear();
+            self.clear_cg();
+            return;
+        }
+        if self.lbfgs_project && matches!(self.config.method, Method::Lbfgs { .. }) {
+            self.reload_projected_pairs();
         } else {
             self.solver.forget_evaluation();
+        }
+    }
+
+    fn clear_cg(&mut self) {
+        self.cg_prev_perp = None;
+        self.cg_dir = None;
+        self.cg_alpha = None;
+    }
+
+    /// Drop the solver's pairs and restore them projected off the mode.
+    ///
+    /// The effective Hessian the translator minimises is the
+    /// Householder reflection of the true one (Goswami, Gunde, and
+    /// Jónsson, Front. Chem. 14, 1807063 (2026),
+    /// doi:10.3389/fchem.2026.1807063, Eq. 3). Kästner and Sherwood,
+    /// J. Chem. Phys. 128, 014106 (2008), doi:10.1063/1.2815812, keep
+    /// the quasi-Newton history across a continuous turn and build it
+    /// in the plane perpendicular to the mode. A pair's component
+    /// along the mode belongs to the reflected curvature, not to that
+    /// plane, so it is removed and a pair that then has no curvature
+    /// is dropped. Past [`MODE_RESET_ANGLE`] the history is cleared
+    /// instead.
+    fn reload_projected_pairs(&mut self) {
+        let mode = self.mode.clone();
+        let memory = match self.config.method {
+            Method::Lbfgs { memory } => memory.max(1),
+            _ => 1,
+        };
+        let stored = std::mem::take(&mut self.lbfgs_shadow);
+        for (s, y) in stored {
+            let s = perpendicular(&s, &mode);
+            let y = perpendicular(&y, &mode);
+            self.note_lbfgs_pair(&s, &y);
+        }
+        while self.lbfgs_shadow.len() > memory {
+            self.lbfgs_shadow.pop_front();
+        }
+        self.solver.forget();
+        for (s, y) in &self.lbfgs_shadow {
+            let _ = self.solver.push_pair(s.view(), y.view());
+        }
+    }
+
+    fn note_lbfgs_pair(&mut self, s: &Array1<f64>, y: &Array1<f64>) {
+        if !self.lbfgs_project || !pair_curvature_ok(s, y) {
+            return;
+        }
+        let memory = match self.config.method {
+            Method::Lbfgs { memory } => memory.max(1),
+            _ => 1,
+        };
+        self.lbfgs_shadow.push_back((s.clone(), y.clone()));
+        while self.lbfgs_shadow.len() > memory {
+            self.lbfgs_shadow.pop_front();
         }
     }
 
@@ -1752,6 +1979,245 @@ impl MinModeSession {
         })
     }
 
+    fn seed_applies(&self, curvature: f64) -> bool {
+        self.config.seed_curvature && self.kappa.is_none() && curvature_scale(curvature).is_some()
+    }
+
+    /// The `F/|λ|` displacement fits in `max_move`. A longer one is the
+    /// capped steepest step any positive scale takes, so the seed waits
+    /// until the curvature scale is the step itself.
+    fn seed_fits(&self, gradient: &Array1<f64>, mode: &Array1<f64>, curvature: f64) -> bool {
+        let Some(scale) = curvature_scale(curvature) else {
+            return false;
+        };
+        let cap = self.config.max_move;
+        if !(cap.is_finite() && cap > 0.0) {
+            return true;
+        }
+        let effective = translated_gradient(gradient, mode, curvature);
+        let mut trial = self.x.clone();
+        for (slot, component) in trial.iter_mut().zip(effective.iter()) {
+            *slot -= scale * *component;
+        }
+        largest_atom_move(self.x.view(), trial.view()) <= cap
+    }
+
+    /// One displacement `F/|λ|`, shortened to `max_move`.
+    ///
+    /// L-BFGS stores the secant so the next step is the two-loop update
+    /// of Liu and Nocedal, Math. Program. 45, 503 (1989),
+    /// doi:10.1007/BF01589116. FIRE does not: its next step is the
+    /// ordinary integrator, still at its opening timestep (Bitzek,
+    /// Koskinen, Gähler, Moseler, and Gumbsch, Phys. Rev. Lett. 97,
+    /// 170201 (2006), doi:10.1103/PhysRevLett.97.170201).
+    fn translate_curvature_seed<S: PointSurface>(
+        &mut self,
+        counted: &Counted<'_, S>,
+        gradient: &Array1<f64>,
+        mode: &Array1<f64>,
+        curvature: f64,
+        store_pair: bool,
+    ) -> Result<(Array1<f64>, Option<PointEval>), SaddleError> {
+        let Some(scale) = curvature_scale(curvature) else {
+            return Ok((self.x.clone(), self.centre.clone()));
+        };
+        let effective = translated_gradient(gradient, mode, curvature);
+        let mut trial = self.x.clone();
+        for (slot, component) in trial.iter_mut().zip(effective.iter()) {
+            *slot -= scale * *component;
+        }
+        shorten_to_atom_cap(self.x.view(), &mut trial, self.config.max_move);
+        if largest_atom_move(self.x.view(), trial.view()) == 0.0 {
+            return Ok((self.x.clone(), self.centre.clone()));
+        }
+        let (energy, arrived) = counted.eval(trial.view())?;
+        if store_pair {
+            let effective_new = translated_gradient(&arrived, mode, curvature);
+            let step = &trial - &self.x;
+            let secant = &effective_new - &effective;
+            let _ = self.solver.push_pair(step.view(), secant.view());
+            self.solver.forget_evaluation();
+        }
+        Ok((
+            trial.clone(),
+            Some(PointEval {
+                x: trial,
+                energy: Some(energy),
+                gradient: arrived,
+            }),
+        ))
+    }
+
+    /// A short probe step out of a stiff FIRE limit cycle.
+    ///
+    /// FIRE 2.0 keeps timestep 1 through its initial delay (Guénolé,
+    /// Nöhring, Vaid, Houllé, Xie, Prakash, and Bitzek, Comput. Mater.
+    /// Sci. 175, 109584 (2020), doi:10.1016/j.commatsci.2020.109584).
+    /// The reflected force is Equation 3 of Goswami, Gunde, and
+    /// Jónsson, Front. Chem. 14, 1807063 (2026),
+    /// doi:10.3389/fchem.2026.1807063. On the vacancy the mode force is
+    /// already small and the perpendicular force is not, so a cap of
+    /// 0.2 steps across that well and the force stalls near 1. The
+    /// probe is used only after a long stretch with no drop in force
+    /// or energy, only when `|λ|` is past [`FIRE_CURVATURE_FLOOR`],
+    /// and only for a step no longer than 0.05 that does not raise
+    /// the energy. After that stall the probe stays in place while
+    /// the curvature remains steep, so the opening timestep cannot
+    /// rebuild the cycle. A search that is still descending never
+    /// takes it. `Ok(None)` leaves the point to FIRE.
+    fn translate_stalled_fire<S: PointSurface>(
+        &mut self,
+        counted: &Counted<'_, S>,
+        gradient: &Array1<f64>,
+        mode: &Array1<f64>,
+        curvature: f64,
+    ) -> Result<Option<(Array1<f64>, PointEval)>, SaddleError> {
+        if !(curvature.is_finite() && curvature < -FIRE_CURVATURE_FLOOR) {
+            if self.fire_stall_count >= FIRE_STALL_STEPS {
+                self.fire_stall_count = 0;
+                self.fire_stall_force = f64::NAN;
+                self.fire_stall_energy = f64::NAN;
+            }
+            return Ok(None);
+        }
+        if self.fire_stall_count < FIRE_STALL_STEPS {
+            return Ok(None);
+        }
+        let max_move = self.config.max_move;
+        if !(max_move.is_finite() && max_move > 0.0) {
+            return Ok(None);
+        }
+        let eff = translated_gradient(gradient, mode, curvature);
+        let enorm = eff.dot(&eff).sqrt();
+        if !(enorm.is_finite() && enorm > 1e-12) {
+            return Ok(None);
+        }
+        let descent = &eff / -enorm;
+        let delta = self.config.dr.max(1e-4);
+        let probe = &self.x + &(&descent * delta);
+        let (_, probed) = counted.eval(probe.view())?;
+        let eff_probe = translated_gradient(&probed, mode, curvature);
+        let slope = (&eff_probe - &eff).dot(&descent) / delta;
+        // A negative slope is uphill in the effective force. A small
+        // positive slope is a soft direction: the length below is then
+        // the cap, not a long Newton step.
+        if !(slope.is_finite() && slope > 0.0) {
+            return Ok(None);
+        }
+        let mut length = (enorm / slope).min(0.05).min(max_move);
+        if !(length.is_finite() && length > 1e-6) {
+            return Ok(None);
+        }
+        let current = self.centre.as_ref().and_then(|point| point.energy);
+        let mut accepted: Option<(Array1<f64>, f64, Array1<f64>)> = None;
+        for _ in 0..4 {
+            let mut trial = &self.x + &(&descent * length);
+            shorten_to_atom_cap(self.x.view(), &mut trial, max_move);
+            if largest_atom_move(self.x.view(), trial.view()) <= 0.0 {
+                break;
+            }
+            let (energy, arrived) = counted.eval(trial.view())?;
+            let raised = current.is_some_and(|have| energy > have + 1e-3);
+            if !raised {
+                accepted = Some((trial, energy, arrived));
+                break;
+            }
+            length *= 0.5;
+        }
+        let Some((trial, energy, arrived)) = accepted else {
+            return Ok(None);
+        };
+        self.solver.forget();
+        Ok(Some((
+            trial.clone(),
+            PointEval {
+                x: trial,
+                energy: Some(energy),
+                gradient: arrived,
+            },
+        )))
+    }
+
+    /// One conjugate-gradient translation.
+    ///
+    /// The parallel part is the Newton step `-g_parallel / λ` of hybrid
+    /// eigenvector following (Wales; Baker, J. Comput. Chem. 7, 385
+    /// (1986), doi:10.1002/jcc.540070402). The perpendicular part is
+    /// Polak-Ribiere, the same conjugacy Kästner and Sherwood, J. Chem.
+    /// Phys. 128, 014106 (2008), doi:10.1063/1.2815812, use for the
+    /// dimer rotation, with the Barzilai-Borwein length when the last
+    /// perpendicular secant is positive and `1/|λ|` otherwise. The atom
+    /// cap is the trust radius. A step that raises the energy is halved,
+    /// up to four times.
+    fn translate_cg<S: PointSurface>(
+        &mut self,
+        counted: &Counted<'_, S>,
+        gradient: &Array1<f64>,
+        mode: &Array1<f64>,
+        curvature: f64,
+    ) -> Result<(Array1<f64>, Option<PointEval>), SaddleError> {
+        let scale = curvature_scale(curvature).unwrap_or(0.0);
+        let parallel = gradient.dot(mode);
+        let g_perp = perpendicular(gradient, mode);
+        let mut direction = -&g_perp;
+        if let (Some(prev), Some(dir)) = (&self.cg_prev_perp, &self.cg_dir) {
+            let delta = &g_perp - prev;
+            let denom = prev.dot(prev);
+            if denom > 1e-24 {
+                let beta = (g_perp.dot(&delta) / denom).max(0.0);
+                direction = &direction + &(dir * beta);
+            }
+        }
+        direction = perpendicular(&direction, mode);
+        let alpha = self
+            .cg_alpha
+            .filter(|alpha| alpha.is_finite() && *alpha > 0.0)
+            .unwrap_or(scale);
+        let mut delta = &direction * alpha;
+        // `-g_parallel / λ` is `g_parallel / |λ|` while λ is negative.
+        if scale > 0.0 {
+            delta = &delta + &(mode * (parallel * scale));
+        }
+        let origin = self.x.clone();
+        let current = self.centre.as_ref().and_then(|point| point.energy);
+        let mut length = 1.0;
+        let mut chosen: Option<(Array1<f64>, f64, Array1<f64>)> = None;
+        for _ in 0..5 {
+            let mut trial = &origin + &(&delta * length);
+            shorten_to_atom_cap(origin.view(), &mut trial, self.config.max_move);
+            if largest_atom_move(origin.view(), trial.view()) <= 1e-12 {
+                break;
+            }
+            let (energy, arrived) = counted.eval(trial.view())?;
+            let raised = current.is_some_and(|have| energy > have + 1e-4);
+            chosen = Some((trial, energy, arrived));
+            if !raised {
+                break;
+            }
+            length *= 0.5;
+        }
+        let Some((trial, energy, arrived)) = chosen else {
+            return Ok((origin, self.centre.clone()));
+        };
+        let step = &trial - &origin;
+        let step_perp = perpendicular(&step, mode);
+        let g_new = perpendicular(&arrived, mode);
+        let secant = &g_new - &g_perp;
+        let sy = step_perp.dot(&secant);
+        let ss = step_perp.dot(&step_perp);
+        self.cg_alpha = (sy > 1e-12 && ss > 0.0).then_some(ss / sy);
+        self.cg_prev_perp = Some(g_new);
+        self.cg_dir = Some(direction);
+        Ok((
+            trial.clone(),
+            Some(PointEval {
+                x: trial,
+                energy: Some(energy),
+                gradient: arrived,
+            }),
+        ))
+    }
+
     /// One reflected-force step of the configured translator.
     ///
     /// The returned point is the solver's accepted geometry. The
@@ -1939,6 +2405,12 @@ impl MinModeSession {
             && self.kappa.is_none()
             && self.config.max_move.is_finite()
             && self.config.max_move > 0.0;
+        let lbfgs = matches!(self.config.method, Method::Lbfgs { .. });
+        let fire = matches!(self.config.method, Method::Fire { .. });
+        let curvature_seed = self.seed_applies(translation_curvature)
+            && self.seed_fits(&g0, &tau, translation_curvature)
+            && ((lbfgs && !self.lbfgs_seeded && self.solver.pair_count() == 0)
+                || (fire && !self.solver_stepped));
         let (x, at_new) = if full_climb {
             let climbed =
                 convex_displacement(self.x.view(), g0.view(), tau.view(), self.config.max_move);
@@ -1952,15 +2424,45 @@ impl MinModeSession {
                 gradient,
             };
             (climbed, Some(point))
+        } else if curvature_seed {
+            let seeded =
+                self.translate_curvature_seed(&counted, &g0, &tau, translation_curvature, lbfgs)?;
+            if lbfgs {
+                self.lbfgs_seeded = true;
+            }
+            self.solver_stepped = true;
+            seeded
+        } else if self.cg_translate && self.kappa.is_none() && translation_curvature < 0.0 {
+            self.solver_stepped = true;
+            self.translate_cg(&counted, &g0, &tau, translation_curvature)?
+        } else if fire
+            && self.fire_curvature
+            && self.kappa.is_none()
+            && let Some((trial, point)) =
+                self.translate_stalled_fire(&counted, &g0, &tau, translation_curvature)?
+        {
+            self.solver_stepped = true;
+            (trial, Some(point))
         } else {
+            self.solver_stepped = true;
             self.translate_with_solver(surface, &counted, &g0, &tau, translation_curvature)?
         };
+        if self.lbfgs_project
+            && lbfgs
+            && let Some(point) = &at_new
+        {
+            let step = &x - &self.x;
+            let old_eff = translated_gradient(&g0, &tau, translation_curvature);
+            let new_eff = translated_gradient(&point.gradient, &tau, translation_curvature);
+            self.note_lbfgs_pair(&step, &(&new_eff - &old_eff));
+        }
         let hit_cap = self.config.max_move.is_finite()
             && self.config.max_move > 0.0
             && largest_atom_move(self.x.view(), x.view()) + 1e-8 >= self.config.max_move;
         self.capped_fire = if hit_cap
             && translation_curvature < 0.0
             && !full_climb
+            && !curvature_seed
             && self.kappa.is_none()
             && matches!(self.config.method, Method::Fire { .. })
         {
@@ -2003,6 +2505,10 @@ impl MinModeSession {
         self.x = x;
         self.iteration += 1;
         self.centre = Some(centre);
+        if fire {
+            let energy = self.centre.as_ref().and_then(|point| point.energy);
+            self.note_fire_progress(max_force, energy.unwrap_or(f64::NAN));
+        }
         let status = if converged(max_force, curvature, self.config.force_tol) {
             MinModeStatus::Converged
         } else {
@@ -2060,6 +2566,33 @@ mod tests {
         assert_abs_diff_eq!(eff[0], -1.0, epsilon = 1e-12);
         assert_abs_diff_eq!(eff[1], -4.0, epsilon = 1e-12);
         assert_abs_diff_eq!(eff[2], 0.5, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn negative_curvature_seeds_the_inverse_scale() {
+        assert_abs_diff_eq!(super::curvature_scale(-2.0).unwrap(), 0.5, epsilon = 1e-15);
+        assert!(super::curvature_scale(0.0).is_none());
+        assert!(super::curvature_scale(1.5).is_none());
+        assert!(super::curvature_scale(f64::NAN).is_none());
+    }
+
+    #[test]
+    fn seeded_lbfgs_step_leaves_a_secant_pair() {
+        let config = MinModeConfig {
+            seed_curvature: true,
+            method: Method::Lbfgs { memory: 10 },
+            force_tol: 1e-12,
+            max_move: 0.2,
+            ..MinModeConfig::default()
+        };
+        // The Newton step 0.15 fits in max_move 0.2, so the seed is taken
+        // and the secant is what the next two-loop step would read.
+        let mut session =
+            MinModeSession::new(config, array![0.15, 0.0, 0.0], array![1.0, 0.0, 0.0]).unwrap();
+        let report = session.step(&QuadraticSaddle).unwrap();
+        assert_eq!(report.status, super::MinModeStatus::Converged);
+        assert!(session.solver.pair_count() > 0);
+        assert!(session.position()[0].abs() < 1e-9);
     }
 
     /// V = -x^2 + y^2 + z^2. One reflected L-BFGS step stores a pair.
@@ -2378,5 +2911,78 @@ mod tests {
         );
         assert!(session.dimer_rotation.force.is_none());
         assert!(session.dimer_rotation.direction.is_none());
+    }
+
+    /// V = -50 x^2 + 40 y^2 + z^2. The force along x is small and the
+    /// force along y is not. Curvature along x is -100.
+    struct StiffWell;
+
+    impl PointSurface for StiffWell {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            let (a, b, c) = (x[0], x[1], x[2]);
+            Ok((
+                -50.0 * a * a + 40.0 * b * b + c * c,
+                array![-100.0 * a, 80.0 * b, 2.0 * c],
+            ))
+        }
+    }
+
+    #[test]
+    fn fire_on_a_stiff_negative_curvature_steps_inside_the_cap() {
+        let config = MinModeConfig {
+            force_tol: 1e-3,
+            max_move: 0.2,
+            rotation_angle_tol: 0.0,
+            ..MinModeConfig::default()
+        };
+        let start = array![0.002, 0.15, 0.0];
+        let mode = array![1.0, 0.0, 0.0];
+        let mut plain = MinModeSession::new(config.clone(), start.clone(), mode.clone()).unwrap();
+        plain.set_fire_curvature(false);
+        let stalled = plain.run(&StiffWell, 25).unwrap();
+        assert!(
+            plain.position()[1].abs() > 1e-2 || stalled.status != super::MinModeStatus::Converged,
+            "stock FIRE finished at {}",
+            plain.position()
+        );
+
+        let mut stable = MinModeSession::new(config, start, mode).unwrap();
+        let report = stable.run(&StiffWell, 260).unwrap();
+        assert_eq!(report.status, super::MinModeStatus::Converged, "{report:?}");
+        assert!(stable.position()[1].abs() < 1e-2, "{}", stable.position());
+    }
+
+    #[test]
+    fn cg_translate_on_a_stiff_well_converges() {
+        let config = MinModeConfig {
+            force_tol: 1e-3,
+            max_move: 0.2,
+            rotation_angle_tol: 0.0,
+            ..MinModeConfig::default()
+        };
+        let mut session =
+            MinModeSession::new(config, array![0.002, 0.15, 0.0], array![1.0, 0.0, 0.0]).unwrap();
+        session.set_cg_translate(true);
+        let report = session.run(&StiffWell, 30).unwrap();
+        assert_eq!(report.status, super::MinModeStatus::Converged, "{report:?}");
+        assert!(session.position()[0].abs() < 1e-2, "{}", session.position());
+        assert!(session.position()[1].abs() < 1e-2, "{}", session.position());
+    }
+
+    #[test]
+    fn projected_lbfgs_on_a_stiff_well_converges() {
+        let config = MinModeConfig {
+            force_tol: 1e-3,
+            max_move: 0.2,
+            method: Method::Lbfgs { memory: 10 },
+            rotation_angle_tol: 0.0,
+            ..MinModeConfig::default()
+        };
+        let mut session =
+            MinModeSession::new(config, array![0.002, 0.15, 0.0], array![1.0, 0.0, 0.0]).unwrap();
+        session.set_lbfgs_project(true);
+        let report = session.run(&StiffWell, 40).unwrap();
+        assert_eq!(report.status, super::MinModeStatus::Converged, "{report:?}");
+        assert!(session.position()[1].abs() < 1e-2, "{}", session.position());
     }
 }

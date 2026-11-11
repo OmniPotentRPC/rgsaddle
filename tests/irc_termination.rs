@@ -1,5 +1,6 @@
-//! How a GS2 branch of the intrinsic reaction coordinate (IRC) ends on two
-//! saddles that eOn hands to rgsaddle.
+//! How a branch of the intrinsic reaction coordinate (IRC) under the
+//! default step, `IrcKind::SellaSphere`, ends on two saddles that eOn hands
+//! to rgsaddle.
 //!
 //! The fixtures carry a saddle and its lowest mode as eOn's minimum-mode
 //! search refines them, one atom per line: fixed flag, mass, position,
@@ -233,9 +234,9 @@ impl PointSurface for Fixture {
                     continue;
                 }
                 let mut d = [0.0; 3];
-                for k in 0..3 {
-                    d[k] = r[i][k] - r[j][k];
-                    d[k] -= self.cell[k] * (d[k] / self.cell[k]).round();
+                for (k, slot) in d.iter_mut().enumerate() {
+                    *slot = r[i][k] - r[j][k];
+                    *slot -= self.cell[k] * (*slot / self.cell[k]).round();
                 }
                 let r2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
                 if r2 >= rc * rc {
@@ -243,9 +244,9 @@ impl PointSurface for Fixture {
                 }
                 let (u, fscale) = self.pair.term(r2);
                 energy += u - shift;
-                for k in 0..3 {
-                    force[i][k] += fscale * d[k];
-                    force[j][k] -= fscale * d[k];
+                for (k, component) in d.iter().enumerate() {
+                    force[i][k] += fscale * component;
+                    force[j][k] -= fscale * component;
                 }
             }
         }

@@ -24,7 +24,7 @@ from rgsaddle import (
 TABLE: dict[type[enum.IntEnum], list[tuple[str, int]]] = {
     ForceGate: [("L2_NORM", 0), ("LINF_NORM", 1), ("MAX_FORCE_ON_ATOM", 2)],
     HessUpdate: [("BFGS", 0), ("TS_BFGS", 1)],
-    IrcKind: [("GS2", 0), ("MOROKUMA", 1)],
+    IrcKind: [("GS2", 0), ("MOROKUMA", 1), ("SELLA_SPHERE", 2)],
     MinModeKind: [("DIMER", 0), ("LANCZOS", 1)],
     EigenDevice: [("HOST", 0), ("DLPK", 1)],
     ExpandKind: [
@@ -59,6 +59,7 @@ def test_header_constants_match_the_int_enums() -> None:
     assert int(MinModeKind.LANCZOS) == _core.RGSADDLE_MINMODE_LANCZOS
     assert int(IrcKind.GS2) == _core.RGSADDLE_IRC_GS2
     assert int(IrcKind.MOROKUMA) == _core.RGSADDLE_IRC_MOROKUMA
+    assert int(IrcKind.SELLA_SPHERE) == _core.RGSADDLE_IRC_SELLA_SPHERE
 
 
 def test_names_and_values() -> None:

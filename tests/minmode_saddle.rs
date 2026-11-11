@@ -498,3 +498,102 @@ fn construction_and_replacement_use_the_same_unit_mode() {
         assert_eq!(session.mode(), initial.view());
     }
 }
+
+fn near_saddle(seed_curvature: bool, method: rgmin::Method) -> MinModeSession {
+    let config = MinModeConfig {
+        seed_curvature,
+        method,
+        max_move: 0.2,
+        force_tol: 1e-6,
+        ..MinModeConfig::default()
+    };
+    MinModeSession::new(config, array![0.05, 0.02, -0.01], array![1.0, 0.0, 0.0]).unwrap()
+}
+
+/// Inside the cap the seeded first FIRE step is `F/|λ|` and lands on
+/// this quadratic saddle. The stock step is a quarter of the reflected
+/// force, so the same start is still away from the origin.
+#[test]
+fn seeded_fire_takes_the_newton_step_inside_the_cap() {
+    let mut plain = near_saddle(
+        false,
+        rgmin::Method::Fire {
+            kind: rgmin::FireKind::V2,
+        },
+    );
+    plain.step(&QuadraticSaddle).unwrap();
+    let left = plain.position().mapv(f64::abs).sum();
+    assert!(left > 1e-3, "stock translation arrived at {left}");
+
+    let mut seeded = near_saddle(
+        true,
+        rgmin::Method::Fire {
+            kind: rgmin::FireKind::V2,
+        },
+    );
+    let report = seeded.step(&QuadraticSaddle).unwrap();
+    assert_eq!(report.status, MinModeStatus::Converged);
+    let arrived = seeded.position().mapv(f64::abs).sum();
+    assert!(arrived < 1e-8, "seeded FIRE stopped at {arrived}");
+}
+
+/// V = -x^2 + 50 y^2. The first empty step uses `|λ| = 2`, which is the
+/// wrong scale for y. The secant pair then has to finish the search.
+#[test]
+fn seeded_lbfgs_finishes_a_stiff_direction() {
+    struct Stiff;
+
+    impl PointSurface for Stiff {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            let (a, b) = (x[0], x[1]);
+            Ok((-a * a + 50.0 * b * b, array![-2.0 * a, 100.0 * b]))
+        }
+    }
+
+    let config = MinModeConfig {
+        seed_curvature: true,
+        method: rgmin::Method::Lbfgs { memory: 10 },
+        max_move: 0.2,
+        force_tol: 1e-6,
+        ..MinModeConfig::default()
+    };
+    let mut session = MinModeSession::new(config, array![0.02, 0.01], array![1.0, 0.0]).unwrap();
+    let report = session.run(&Stiff, 80).unwrap();
+    assert_eq!(report.status, MinModeStatus::Converged, "{report:?}");
+    assert!(session.position().mapv(f64::abs).sum() < 1e-3);
+}
+
+#[test]
+fn a_failed_seeded_step_keeps_the_position() {
+    let config = MinModeConfig {
+        seed_curvature: true,
+        max_move: 0.2,
+        ..MinModeConfig::default()
+    };
+    let start = array![0.05, 0.02, -0.01];
+    let mut session = MinModeSession::new(config, start.clone(), array![1.0, 0.0, 0.0]).unwrap();
+    let surface = FailingBeyond {
+        center: start.clone(),
+        radius: 0.01,
+        calls: AtomicUsize::new(0),
+    };
+    let err = session.step(&surface).unwrap_err();
+    assert!(matches!(err, SaddleError::Surface(_)), "{err}");
+    assert_eq!(session.position(), start.view());
+}
+
+#[test]
+fn seeded_search_still_converges_from_a_displaced_quadratic_start() {
+    let config = MinModeConfig {
+        seed_curvature: true,
+        force_tol: 1e-4,
+        max_move: 0.1,
+        ..MinModeConfig::default()
+    };
+    let mut session =
+        MinModeSession::new(config, array![0.35, 0.4, -0.3], array![0.8, 0.5, 0.1]).unwrap();
+    let report = session.run(&QuadraticSaddle, 400).unwrap();
+    assert_eq!(report.status, MinModeStatus::Converged, "{report:?}");
+    assert!(session.position().iter().all(|c| c.abs() < 1e-3));
+    assert!(session.mode()[0].abs() > 0.99);
+}

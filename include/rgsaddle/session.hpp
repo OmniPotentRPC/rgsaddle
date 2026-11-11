@@ -110,9 +110,8 @@ inline rgsaddle_irc_config_t irc_config() {
     c.dx = 0.01;
     c.force_tol = 1e-3;
     c.force_gate = RGSADDLE_FORCE_LINF;
-    c.max_move = 0.1;
     c.max_inner = 20;
-    c.kind = RGSADDLE_IRC_GS2;
+    c.kind = RGSADDLE_IRC_SELLA_SPHERE;
     c.direction = RGSADDLE_IRC_FORWARD;
     return c;
 }
