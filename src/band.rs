@@ -505,6 +505,8 @@ struct BandState {
     rows: AtomicUsize,
     /// Buffers of the evaluation and assembly. Locked before `last`.
     work: Mutex<BandWork>,
+    /// Image threads ([`BandSession::set_image_threads`]).
+    pool: Option<crate::autoneb::ImageEvalPool>,
 }
 
 impl BandState {
@@ -522,6 +524,20 @@ impl BandState {
             previous: Mutex::new(None),
             rows: AtomicUsize::new(0),
             work: Mutex::new(BandWork::default()),
+            pool: None,
+        }
+    }
+    /// One surface call, split into image blocks on the image threads.
+    fn eval_rows(
+        &self,
+        surface: &dyn BandSurface,
+        positions: ArrayView2<f64>,
+        energies: &mut Array1<f64>,
+        gradients: &mut Array2<f64>,
+    ) -> Result<(), SaddleError> {
+        match &self.pool {
+            Some(pool) => pool.eval(surface, positions, energies, gradients),
+            None => surface.eval(positions, energies, gradients),
         }
     }
     fn convergence_force(&self, force: &Array1<f64>) -> f64 {
@@ -795,7 +811,12 @@ fn fill_band(
         Some([e_first, e_last]) => {
             fit1(&mut work.interior_e, n_images - 2);
             fit2(&mut work.interior_g, (n_images - 2, dof));
-            surface.eval(interior, &mut work.interior_e, &mut work.interior_g)?;
+            state.eval_rows(
+                surface,
+                interior,
+                &mut work.interior_e,
+                &mut work.interior_g,
+            )?;
             state.rows.fetch_add(n_images - 2, Ordering::Relaxed);
             next.energies[0] = e_first;
             next.energies[last] = e_last;
@@ -821,7 +842,12 @@ fn fill_band(
                 Some(prev) => next.gradients.assign(&prev.gradients),
                 None => next.gradients.fill(0.0),
             }
-            surface.eval(work.whole.view(), &mut next.energies, &mut next.gradients)?;
+            state.eval_rows(
+                surface,
+                work.whole.view(),
+                &mut next.energies,
+                &mut next.gradients,
+            )?;
             state.rows.fetch_add(n_images, Ordering::Relaxed);
         }
     }
@@ -2296,6 +2322,34 @@ impl BandSession {
         self.rtr = config.map(|config| crate::rtr::BandRtr::new(config, false));
         self.restart();
         Ok(())
+    }
+
+    /// Evaluate the band on `threads` worker threads, kept for the
+    /// session. One (the default) keeps the surface on the calling
+    /// thread; zero is an error. The force assembly stays on the
+    /// calling thread.
+    ///
+    /// Each surface call is split into `min(threads, rows)` contiguous
+    /// image blocks, one [`BandSurface::eval`] per block, and the
+    /// answers are stored at their image indices once every block has
+    /// finished. When the surface's answer for a row
+    /// depends on that row alone, the band, its forces and its
+    /// trajectory are bitwise those of one thread, and the first
+    /// failing image is the one reported. A surface that tells the
+    /// whole-band evaluation from an interior one by the row count
+    /// should stay at one thread, as
+    /// [`crate::autoneb::AutoNebTuning::threads`] says.
+    pub fn set_image_threads(&mut self, threads: usize) -> Result<(), SaddleError> {
+        self.state.pool = match threads {
+            1 => None,
+            _ => Some(crate::autoneb::ImageEvalPool::new(threads)?),
+        };
+        Ok(())
+    }
+
+    /// The image thread count of [`BandSession::set_image_threads`].
+    pub fn image_threads(&self) -> usize {
+        self.state.pool.as_ref().map_or(1, |pool| pool.threads())
     }
 
     pub fn positions(&self) -> ArrayView2<'_, f64> {
