@@ -140,18 +140,16 @@ pub struct MinModeConfig {
     /// FIRE) take one step of this length along the mode.
     pub max_move: f64,
     pub method: Method,
-    /// Curvature trust region on a negative-curvature translation.
+    /// Seed an empty translation from the mode curvature.
     ///
     /// Off by default, and the configured stepper is unchanged. On, the
-    /// step minimises the reflected force inside the session trust radius
-    /// under the isotropic model whose curvature is `|λ|`, the curvature
-    /// the mode estimate just measured. eOn's L-BFGS takes that scale as
-    /// `1/knownCurvature` on the first step (`auto_scale`). The radius
-    /// then follows Nocedal and Wright, Algorithm 4.1. The ratio compares
-    /// the effective force, not the energy: the reflected force is not a
-    /// potential gradient (Goswami, Gunde, and Jónsson, Front. Chem.
-    /// (2026), doi:10.3389/fchem.2026.1807063, Eq. 9).
-    pub trust: bool,
+    /// first empty L-BFGS step uses `H0 = 1/|λ|` and the first FIRE
+    /// displacement uses that same scale. Later steps are the stepper's
+    /// own updates, still capped by `max_move`. eOn 3.6.0 does the L-BFGS
+    /// half in `LBFGS::getStep` from `MinModeObjectiveFunction::knownCurvature`,
+    /// which returns `-λ` once the mode is negative
+    /// (`https://github.com/TheochemUI/eOn/blob/v3.6.0/client/MinModeSaddleSearch.cpp`).
+    pub seed_curvature: bool,
 }
 
 impl Default for MinModeConfig {
@@ -169,7 +167,7 @@ impl Default for MinModeConfig {
             method: Method::Fire {
                 kind: rgmin::FireKind::V2,
             },
-            trust: false,
+            seed_curvature: false,
         }
     }
 }
@@ -255,15 +253,6 @@ const TORQUE_MAX: f64 = 1.0;
 /// stays negative is kept, so a basin wider than `max_move` follows the
 /// integrator.
 const FIRE_EMPTY_SCALE: f64 = 0.01;
-
-/// Nocedal and Wright, Numerical Optimization, 2nd ed., Algorithm 4.1,
-/// doi:10.1007/978-0-387-40065-5. A ratio below this rejects the step
-/// and shrinks the radius. A ratio above [`TRUST_RHO_GROW`] grows it
-/// when the step sits on the boundary.
-const TRUST_RHO_SHRINK: f64 = 0.25;
-const TRUST_RHO_GROW: f64 = 0.75;
-const TRUST_RADIUS_SHRINK: f64 = 0.25;
-const TRUST_RADIUS_GROW: f64 = 2.0;
 
 /// A first-order saddle has a vanishing force and one negative
 /// curvature. A vanishing force alone also describes a minimum, which
@@ -705,68 +694,14 @@ fn shorten_to_atom_cap(origin: ArrayView1<f64>, trial: &mut Array1<f64>, cap: f6
     }
 }
 
-/// Opening per-atom trust radius: the translation cap when it is a
-/// positive length, otherwise no cap.
-fn opening_trust_radius(max_move: f64) -> f64 {
-    if max_move.is_finite() && max_move > 0.0 {
-        max_move
-    } else {
-        f64::INFINITY
+/// `1/|λ|` when `λ` is a finite negative curvature. That is the L-BFGS
+/// scale `H0` and the factor on the first FIRE displacement.
+fn curvature_scale(curvature: f64) -> Option<f64> {
+    if !(curvature.is_finite() && curvature < 0.0) {
+        return None;
     }
-}
-
-/// Newton step `-g / κ` of the isotropic model, shortened so the largest
-/// per-atom move is at most `radius`. A non-finite radius is not a cap.
-fn trust_displacement(gradient: &Array1<f64>, kappa: f64, radius: f64) -> Array1<f64> {
-    let mut step = if kappa.is_finite() && kappa > 0.0 {
-        gradient.mapv(|component| -component / kappa)
-    } else {
-        let scale = gradient.dot(gradient).sqrt();
-        if scale > 0.0 {
-            gradient.mapv(|component| -component / scale)
-        } else {
-            Array1::zeros(gradient.len())
-        }
-    };
-    if !step.iter().all(|component| component.is_finite()) {
-        let scale = gradient.dot(gradient).sqrt();
-        step = if scale > 0.0 {
-            gradient.mapv(|component| -component / scale)
-        } else {
-            Array1::zeros(gradient.len())
-        };
-    }
-    if radius.is_finite() && radius > 0.0 {
-        let origin = Array1::zeros(step.len());
-        shorten_to_atom_cap(origin.view(), &mut step, radius);
-    }
-    step
-}
-
-/// Ratio of the trapezoidal decrease of the effective force to the
-/// decrease the isotropic model `κ I` predicted. Negative when the
-/// model predicted an increase, or the numbers are not finite.
-fn trust_ratio(
-    gradient: &Array1<f64>,
-    gradient_new: &Array1<f64>,
-    step: &Array1<f64>,
-    kappa: f64,
-) -> f64 {
-    let predicted = -gradient.dot(step) - 0.5 * kappa * step.dot(step);
-    let actual = -0.5 * (gradient + gradient_new).dot(step);
-    if predicted > 0.0 && predicted.is_finite() && actual.is_finite() {
-        actual / predicted
-    } else {
-        f64::NEG_INFINITY
-    }
-}
-
-fn on_trust_boundary(step: &Array1<f64>, radius: f64) -> bool {
-    if !(radius.is_finite() && radius > 0.0) {
-        return false;
-    }
-    let origin = Array1::zeros(step.len());
-    largest_atom_move(origin.view(), step.view()) + 1e-8 >= radius
+    let scale = 1.0 / -curvature;
+    (scale.is_finite() && scale > 0.0).then_some(scale)
 }
 
 /// Relative change of a Ritz value. A vanishing previous value only
@@ -1173,9 +1108,12 @@ pub struct MinModeSession {
     /// still negative. An arrival with non-negative curvature left the
     /// neighborhood; the step is replaced from [`CappedFireStep::origin`].
     capped_fire: Option<CappedFireStep>,
-    /// Per-atom radius of [`MinModeConfig::trust`]. [`MinModeSession::reset`]
-    /// restores the opening value, `max_move` when that cap is positive.
-    trust_radius: f64,
+    /// The translator has already taken a step, so a later FIRE move
+    /// is the integrator's own.
+    solver_stepped: bool,
+    /// The empty L-BFGS memory has already been seeded from `|λ|`.
+    /// A later guard that drops the pairs uses the stepper's own scale.
+    lbfgs_seeded: bool,
     /// The first surface error raised inside the translation oracle
     /// during the current step; the rgmin oracle signature has no
     /// error channel of its own.
@@ -1183,6 +1121,42 @@ pub struct MinModeSession {
     /// The Krylov vectors and actions of the last Lanczos estimate in
     /// the full space; empty after a dimer or with excluded modes.
     krylov: KrylovBlock,
+}
+
+/// Solver used by the min-mode translation. `istep` is FIRE's opening
+/// timestep and is unused by L-BFGS. An empty L-BFGS memory with the
+/// NEB guards on still scales by 0.01; the curvature seed bypasses that
+/// one step instead of changing the guard.
+fn build_solver(
+    method: &Method,
+    n: usize,
+    max_move: f64,
+    istep: f64,
+    highs: bool,
+    lbfgs_guards: bool,
+) -> Solver {
+    let control = Control {
+        maxiter: usize::MAX,
+        gtol: 0.0,
+        istep,
+        maxmove: None,
+        ..Control::default()
+    };
+    let mut solver = Solver::new(method.clone(), control, n);
+    // Per-atom cap over consecutive xyz triples (eOn maxAtomMotionApplied).
+    // A non-positive max_move leaves the step uncapped.
+    solver.set_atom_maxmove(max_move);
+    // The reflected force is the Householder translation of Goswami, Gunde,
+    // and Jónsson, Front. Chem. 14, 1807063 (2026),
+    // doi:10.3389/fchem.2026.1807063, Equation 3. It is not the gradient of
+    // the energy the oracle reports, so L-BFGS takes its two-loop direction
+    // with one call (rgmin Accept::Step) and the band's cap and angle guards.
+    if matches!(method, Method::Lbfgs { .. }) {
+        solver.set_accept(Accept::Step);
+        solver.set_lbfgs_neb_guards(lbfgs_guards);
+    }
+    solver.set_highs(highs);
+    solver
 }
 
 impl MinModeSession {
@@ -1203,33 +1177,15 @@ impl MinModeSession {
         }
         let mode = checked_mode(mode)?;
         crate::band::check_force_driven(&config.method)?;
-        let trust_radius = opening_trust_radius(config.max_move);
-        let control = Control {
-            maxiter: usize::MAX,
-            gtol: 0.0,
-            istep: 1.0,
-            maxmove: None,
-            ..Control::default()
-        };
-        let mut solver = Solver::new(config.method.clone(), control, x.len());
-        // Per-atom cap over consecutive xyz triples (eOn
-        // maxAtomMotionApplied). A non-positive max_move leaves the
-        // step uncapped.
-        solver.set_atom_maxmove(config.max_move);
-        // The inverted force is not the gradient of the energy the
-        // oracle reports, so a line search on that energy refuses good
-        // steps and burns evaluations: L-BFGS takes its two-loop
-        // direction with one oracle call (rgmin Accept::Step).
-        if matches!(config.method, Method::Lbfgs { .. }) {
-            solver.set_accept(Accept::Step);
-            // The reflected force is not a potential gradient
-            // (Goswami, Gunde, and Jónsson, Front. Chem. (2026),
-            // doi:10.3389/fchem.2026.1807063, Eq. 9). Arm the same
-            // guards as the band: an empty memory scales the step by
-            // 0.01, and a two-loop step that reaches the per-atom cap
-            // or faces away from the force drops its pairs.
-            solver.set_lbfgs_neb_guards(true);
-        }
+        let lbfgs_guards = true;
+        let solver = build_solver(
+            &config.method,
+            x.len(),
+            config.max_move,
+            1.0,
+            false,
+            lbfgs_guards,
+        );
         Ok(Self {
             config,
             force_gate: ForceGate::LinfNorm,
@@ -1250,21 +1206,15 @@ impl MinModeSession {
             lanczos_ready: false,
             lanczos_carry: None,
             capped_fire: None,
-            trust_radius,
+            solver_stepped: false,
+            lbfgs_seeded: false,
         })
     }
 
-    /// Turn the curvature trust region on or off. Off, the default, the
-    /// configured stepper translates. On, a negative curvature takes the
-    /// Newton step of `|λ|` inside [`MinModeSession::trust_radius`].
-    pub fn set_trust(&mut self, enabled: bool) {
-        self.config.trust = enabled;
-    }
-
-    /// Per-atom trust radius. The opening value is `max_move` when that
-    /// cap is positive.
-    pub fn trust_radius(&self) -> f64 {
-        self.trust_radius
+    /// Seed the empty translation from `|λ|`. Off, the default, leaves
+    /// the stepper's own opening scale.
+    pub fn set_seed_curvature(&mut self, enabled: bool) {
+        self.config.seed_curvature = enabled;
     }
 
     /// Stop a Lanczos estimate when the lowest Ritz value's relative
@@ -1359,7 +1309,8 @@ impl MinModeSession {
         self.dimer_rotation.clear();
         self.curvature = f64::NAN;
         self.capped_fire = None;
-        self.trust_radius = opening_trust_radius(self.config.max_move);
+        self.solver_stepped = false;
+        self.lbfgs_seeded = false;
         self.centre = None;
         self.mode_fresh = false;
         self.pending_turn = 0.0;
@@ -1857,89 +1808,73 @@ impl MinModeSession {
         })
     }
 
-    fn trust_translation(&self, curvature: f64) -> bool {
-        self.config.trust && self.kappa.is_none() && curvature.is_finite() && curvature < 0.0
+    fn seed_applies(&self, curvature: f64) -> bool {
+        self.config.seed_curvature && self.kappa.is_none() && curvature_scale(curvature).is_some()
     }
 
-    /// One curvature-scaled translation inside the trust radius.
+    /// The `F/|λ|` displacement fits in `max_move`. A longer one is the
+    /// capped steepest step any positive scale takes, so the seed waits
+    /// until the curvature scale is the step itself.
+    fn seed_fits(&self, gradient: &Array1<f64>, mode: &Array1<f64>, curvature: f64) -> bool {
+        let Some(scale) = curvature_scale(curvature) else {
+            return false;
+        };
+        let cap = self.config.max_move;
+        if !(cap.is_finite() && cap > 0.0) {
+            return true;
+        }
+        let effective = translated_gradient(gradient, mode, curvature);
+        let mut trial = self.x.clone();
+        for (slot, component) in trial.iter_mut().zip(effective.iter()) {
+            *slot -= scale * *component;
+        }
+        largest_atom_move(self.x.view(), trial.view()) <= cap
+    }
+
+    /// One displacement `F/|λ|`, shortened to `max_move`.
     ///
-    /// The model is `κ I` with `κ = -λ`. Its Newton step is the eOn
-    /// first L-BFGS step `F / |λ|`. A trial whose decrease ratio falls
-    /// under [`TRUST_RHO_SHRINK`] is dropped and the radius shrinks by
-    /// [`TRUST_RADIUS_SHRINK`]; the mode is not estimated again. The
-    /// floor is the saddle trust floor, so a step that the isotropic
-    /// model cannot represent still moves. A failed evaluation restores
-    /// the radius and leaves the position where it was.
-    fn translate_with_trust<S: PointSurface>(
+    /// L-BFGS stores the secant so the next step is the two-loop update
+    /// of Liu and Nocedal, Math. Program. 45, 503 (1989),
+    /// doi:10.1007/BF01589116. FIRE does not: its next step is the
+    /// ordinary integrator, still at its opening timestep (Bitzek,
+    /// Koskinen, Gähler, Moseler, and Gumbsch, Phys. Rev. Lett. 97,
+    /// 170201 (2006), doi:10.1103/PhysRevLett.97.170201).
+    fn translate_curvature_seed<S: PointSurface>(
         &mut self,
         counted: &Counted<'_, S>,
         gradient: &Array1<f64>,
         mode: &Array1<f64>,
         curvature: f64,
+        store_pair: bool,
     ) -> Result<(Array1<f64>, Option<PointEval>), SaddleError> {
-        let saved = self.trust_radius;
-        let effective = translated_gradient(gradient, mode, curvature);
-        let kappa = -curvature;
-        let floor = crate::geom::TrustSchedule::saddle().delta_min;
-        let cap = opening_trust_radius(self.config.max_move);
-        let moved = loop {
-            let radius = self.trust_radius.min(cap);
-            let step = trust_displacement(&effective, kappa, radius);
-            let origin = Array1::zeros(step.len());
-            let length = largest_atom_move(origin.view(), step.view());
-            if length == 0.0 {
-                break None;
-            }
-            let trial = &self.x + &step;
-            let evaluated = match counted.eval(trial.view()) {
-                Ok(point) => point,
-                Err(err) => {
-                    self.trust_radius = saved;
-                    return Err(err);
-                }
-            };
-            let effective_new = translated_gradient(&evaluated.1, mode, curvature);
-            let ratio = trust_ratio(&effective, &effective_new, &step, kappa);
-            let at_floor = radius <= floor;
-            if ratio >= TRUST_RHO_SHRINK || at_floor {
-                if ratio > TRUST_RHO_GROW && on_trust_boundary(&step, radius) {
-                    let grown = radius * TRUST_RADIUS_GROW;
-                    self.trust_radius = if cap.is_finite() {
-                        grown.min(cap)
-                    } else {
-                        grown
-                    };
-                } else {
-                    self.trust_radius = radius;
-                }
-                let point = PointEval {
-                    x: trial.clone(),
-                    energy: Some(evaluated.0),
-                    gradient: evaluated.1,
-                };
-                break Some((trial, point));
-            }
-            let mut shrunk = radius * TRUST_RADIUS_SHRINK;
-            if !shrunk.is_finite() {
-                shrunk = length * TRUST_RADIUS_SHRINK;
-            }
-            shrunk = shrunk.max(floor);
-            if shrunk.partial_cmp(&radius) != Some(std::cmp::Ordering::Less) {
-                self.trust_radius = radius.max(floor);
-                let point = PointEval {
-                    x: trial.clone(),
-                    energy: Some(evaluated.0),
-                    gradient: evaluated.1,
-                };
-                break Some((trial, point));
-            }
-            self.trust_radius = shrunk;
+        let Some(scale) = curvature_scale(curvature) else {
+            return Ok((self.x.clone(), self.centre.clone()));
         };
-        self.solver.forget_evaluation();
-        match moved {
-            Some((position, point)) => Ok((position, Some(point))),
-            None => Ok((self.x.clone(), self.centre.clone())),
+        let effective = translated_gradient(gradient, mode, curvature);
+        let mut trial = self.x.clone();
+        for (slot, component) in trial.iter_mut().zip(effective.iter()) {
+            *slot -= scale * *component;
         }
+        shorten_to_atom_cap(self.x.view(), &mut trial, self.config.max_move);
+        if largest_atom_move(self.x.view(), trial.view()) == 0.0 {
+            return Ok((self.x.clone(), self.centre.clone()));
+        }
+        let (energy, arrived) = counted.eval(trial.view())?;
+        if store_pair {
+            let effective_new = translated_gradient(&arrived, mode, curvature);
+            let step = &trial - &self.x;
+            let secant = &effective_new - &effective;
+            let _ = self.solver.push_pair(step.view(), secant.view());
+            self.solver.forget_evaluation();
+        }
+        Ok((
+            trial.clone(),
+            Some(PointEval {
+                x: trial,
+                energy: Some(energy),
+                gradient: arrived,
+            }),
+        ))
     }
 
     /// One reflected-force step of the configured translator.
@@ -2129,7 +2064,12 @@ impl MinModeSession {
             && self.kappa.is_none()
             && self.config.max_move.is_finite()
             && self.config.max_move > 0.0;
-        let trusted = self.trust_translation(translation_curvature);
+        let lbfgs = matches!(self.config.method, Method::Lbfgs { .. });
+        let fire = matches!(self.config.method, Method::Fire { .. });
+        let curvature_seed = self.seed_applies(translation_curvature)
+            && self.seed_fits(&g0, &tau, translation_curvature)
+            && ((lbfgs && !self.lbfgs_seeded && self.solver.pair_count() == 0)
+                || (fire && !self.solver_stepped));
         let (x, at_new) = if full_climb {
             let climbed =
                 convex_displacement(self.x.view(), g0.view(), tau.view(), self.config.max_move);
@@ -2143,9 +2083,16 @@ impl MinModeSession {
                 gradient,
             };
             (climbed, Some(point))
-        } else if trusted {
-            self.translate_with_trust(&counted, &g0, &tau, translation_curvature)?
+        } else if curvature_seed {
+            let seeded =
+                self.translate_curvature_seed(&counted, &g0, &tau, translation_curvature, lbfgs)?;
+            if lbfgs {
+                self.lbfgs_seeded = true;
+            }
+            self.solver_stepped = true;
+            seeded
         } else {
+            self.solver_stepped = true;
             self.translate_with_solver(surface, &counted, &g0, &tau, translation_curvature)?
         };
         let hit_cap = self.config.max_move.is_finite()
@@ -2154,7 +2101,7 @@ impl MinModeSession {
         self.capped_fire = if hit_cap
             && translation_curvature < 0.0
             && !full_climb
-            && !trusted
+            && !curvature_seed
             && self.kappa.is_none()
             && matches!(self.config.method, Method::Fire { .. })
         {
@@ -2257,25 +2204,30 @@ mod tests {
     }
 
     #[test]
-    fn isotropic_trust_ratio_is_one_for_the_newton_step() {
-        let gradient = array![0.2, -0.4, 0.1];
-        let kappa = 2.0;
-        let step = gradient.mapv(|component| -component / kappa);
-        let arrived = &gradient + &(&step * kappa);
-        let ratio = super::trust_ratio(&gradient, &arrived, &step, kappa);
-        assert_abs_diff_eq!(ratio, 1.0, epsilon = 1e-12);
+    fn negative_curvature_seeds_the_inverse_scale() {
+        assert_abs_diff_eq!(super::curvature_scale(-2.0).unwrap(), 0.5, epsilon = 1e-15);
+        assert!(super::curvature_scale(0.0).is_none());
+        assert!(super::curvature_scale(1.5).is_none());
+        assert!(super::curvature_scale(f64::NAN).is_none());
     }
 
     #[test]
-    fn a_stiff_direction_makes_the_isotropic_ratio_negative() {
-        // g = (0.04, 1), κ = 2, step = -g/κ overshoots a curvature of 100
-        // on the second coordinate. The trapezoid then increases.
-        let gradient = array![0.04, 1.0];
-        let kappa = 2.0;
-        let step = gradient.mapv(|component| -component / kappa);
-        let arrived = array![0.0, -49.0];
-        let ratio = super::trust_ratio(&gradient, &arrived, &step, kappa);
-        assert!(ratio < 0.0, "ratio {ratio}");
+    fn seeded_lbfgs_step_leaves_a_secant_pair() {
+        let config = MinModeConfig {
+            seed_curvature: true,
+            method: Method::Lbfgs { memory: 10 },
+            force_tol: 1e-12,
+            max_move: 0.2,
+            ..MinModeConfig::default()
+        };
+        // The Newton step 0.15 fits in max_move 0.2, so the seed is taken
+        // and the secant is what the next two-loop step would read.
+        let mut session =
+            MinModeSession::new(config, array![0.15, 0.0, 0.0], array![1.0, 0.0, 0.0]).unwrap();
+        let report = session.step(&QuadraticSaddle).unwrap();
+        assert_eq!(report.status, super::MinModeStatus::Converged);
+        assert!(session.solver.pair_count() > 0);
+        assert!(session.position()[0].abs() < 1e-9);
     }
 
     /// V = -x^2 + y^2 + z^2. One reflected L-BFGS step stores a pair.

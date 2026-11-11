@@ -1,9 +1,9 @@
 // Copyright (c) rgsaddle developers
 //!
 //! Gradient calls and wall time of one min-mode search with the curvature
-//! trust region off and on. Off is the stepper `MinModeConfig::default`
-//! uses. Each case is warmed once, then run seven times in series. The
-//! printed calls and milliseconds are the medians of those seven.
+//! seed off and on. Off is the stepper `MinModeConfig::default` uses.
+//! Each case is warmed once, then run seven times in series. The printed
+//! calls and milliseconds are the medians of those seven.
 //!
 //! ```text
 //! cargo run --release --example minmode_trust
@@ -102,15 +102,15 @@ fn main() {
             steps: 800,
         },
     ];
-    println!("case\tmethod\ttrust\tconverged\tcalls\tms");
+    println!("case\tmethod\tseed\tconverged\tcalls\tms");
     for job in &jobs {
-        for trust in [false, true] {
-            let _ = job.run(trust);
+        for seed in [false, true] {
+            let _ = job.run(seed);
             let mut calls = Vec::with_capacity(REPEATS);
             let mut millis = Vec::with_capacity(REPEATS);
             let mut converged = true;
             for _ in 0..REPEATS {
-                let sample = job.run(trust);
+                let sample = job.run(seed);
                 calls.push(sample.calls);
                 millis.push(sample.millis);
                 converged &= sample.converged;
@@ -121,7 +121,7 @@ fn main() {
                 "{}\t{}\t{}\t{}\t{}\t{:.3}",
                 job.name,
                 job.method.label(),
-                trust,
+                seed,
                 converged,
                 calls[REPEATS / 2],
                 millis[REPEATS / 2],
@@ -146,10 +146,10 @@ struct Sample {
 }
 
 impl Job {
-    fn run(&self, trust: bool) -> Sample {
+    fn run(&self, seed_curvature: bool) -> Sample {
         let config = MinModeConfig {
             kind: MinModeKind::Dimer,
-            trust,
+            seed_curvature,
             force_tol: 1e-3,
             max_move: 0.2,
             method: self.method.method(),

@@ -793,7 +793,7 @@ pub unsafe extern "C" fn rgsaddle_minmode_create(
         force_tol: cfg.force_tol,
         max_move: cfg.max_move,
         method: method_of(cfg.method, 0),
-        trust: false,
+        seed_curvature: false,
     };
     match MinModeSession::new(mm_config, x, m) {
         Ok(session) => Box::into_raw(Box::new(RgsaddleMinMode { session, n_atoms })),

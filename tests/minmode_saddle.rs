@@ -499,9 +499,10 @@ fn construction_and_replacement_use_the_same_unit_mode() {
     }
 }
 
-fn near_saddle(trust: bool) -> MinModeSession {
+fn near_saddle(seed_curvature: bool, method: rgmin::Method) -> MinModeSession {
     let config = MinModeConfig {
-        trust,
+        seed_curvature,
+        method,
         max_move: 0.2,
         force_tol: 1e-6,
         ..MinModeConfig::default()
@@ -509,29 +510,37 @@ fn near_saddle(trust: bool) -> MinModeSession {
     MinModeSession::new(config, array![0.05, 0.02, -0.01], array![1.0, 0.0, 0.0]).unwrap()
 }
 
-/// Inside the per-atom cap the curvature model is the Newton step and
-/// lands on this quadratic saddle. The stock FIRE step is a quarter of
-/// the reflected force, so the same start is still away from the origin.
+/// Inside the cap the seeded first FIRE step is `F/|λ|` and lands on
+/// this quadratic saddle. The stock step is a quarter of the reflected
+/// force, so the same start is still away from the origin.
 #[test]
-fn trust_takes_the_newton_step_inside_the_cap() {
-    let mut plain = near_saddle(false);
+fn seeded_fire_takes_the_newton_step_inside_the_cap() {
+    let mut plain = near_saddle(
+        false,
+        rgmin::Method::Fire {
+            kind: rgmin::FireKind::V2,
+        },
+    );
     plain.step(&QuadraticSaddle).unwrap();
     let left = plain.position().mapv(f64::abs).sum();
     assert!(left > 1e-3, "stock translation arrived at {left}");
 
-    let mut trusted = near_saddle(true);
-    let report = trusted.step(&QuadraticSaddle).unwrap();
+    let mut seeded = near_saddle(
+        true,
+        rgmin::Method::Fire {
+            kind: rgmin::FireKind::V2,
+        },
+    );
+    let report = seeded.step(&QuadraticSaddle).unwrap();
     assert_eq!(report.status, MinModeStatus::Converged);
-    let arrived = trusted.position().mapv(f64::abs).sum();
-    assert!(arrived < 1e-8, "trust translation stopped at {arrived}");
-    assert!(trusted.trust_radius() <= 0.2);
+    let arrived = seeded.position().mapv(f64::abs).sum();
+    assert!(arrived < 1e-8, "seeded FIRE stopped at {arrived}");
 }
 
-/// V = -x^2 + 50 y^2. The mode curvature is -2, so the isotropic Newton
-/// step overshoots y, whose curvature is 100. The radius must shrink
-/// and the accepted move must not be that full step.
+/// V = -x^2 + 50 y^2. The first empty step uses `|λ| = 2`, which is the
+/// wrong scale for y. The secant pair then has to finish the search.
 #[test]
-fn trust_shrinks_when_one_curvature_does_not_fit_every_direction() {
+fn seeded_lbfgs_finishes_a_stiff_direction() {
     struct Stiff;
 
     impl PointSurface for Stiff {
@@ -542,44 +551,27 @@ fn trust_shrinks_when_one_curvature_does_not_fit_every_direction() {
     }
 
     let config = MinModeConfig {
-        trust: true,
-        max_move: 1.0,
-        force_tol: 1e-12,
+        seed_curvature: true,
+        method: rgmin::Method::Lbfgs { memory: 10 },
+        max_move: 0.2,
+        force_tol: 1e-6,
         ..MinModeConfig::default()
     };
-    let start = array![0.02, 0.01];
-    let mut session = MinModeSession::new(config, start.clone(), array![1.0, 0.0]).unwrap();
-    let surface = CountingPoint {
-        inner: &Stiff,
-        calls: AtomicUsize::new(0),
-    };
-    session.step(&surface).unwrap();
-    assert!(
-        session.trust_radius() < 1.0,
-        "radius {}",
-        session.trust_radius()
-    );
-    let y = session.position()[1];
-    assert!(y.abs() < 0.05, "y moved to {y}");
-    assert!(session.position()[0].abs() <= 0.02 + 1e-12);
-    // Centre, one dimer action, the rejected trial, and the accepted one.
-    assert!(
-        surface.calls.load(Ordering::Relaxed) >= 4,
-        "calls {}",
-        surface.calls.load(Ordering::Relaxed)
-    );
+    let mut session = MinModeSession::new(config, array![0.02, 0.01], array![1.0, 0.0]).unwrap();
+    let report = session.run(&Stiff, 80).unwrap();
+    assert_eq!(report.status, MinModeStatus::Converged, "{report:?}");
+    assert!(session.position().mapv(f64::abs).sum() < 1e-3);
 }
 
 #[test]
-fn a_failed_trust_trial_keeps_the_position_and_the_radius() {
+fn a_failed_seeded_step_keeps_the_position() {
     let config = MinModeConfig {
-        trust: true,
+        seed_curvature: true,
         max_move: 0.2,
         ..MinModeConfig::default()
     };
     let start = array![0.05, 0.02, -0.01];
     let mut session = MinModeSession::new(config, start.clone(), array![1.0, 0.0, 0.0]).unwrap();
-    let radius = session.trust_radius();
     let surface = FailingBeyond {
         center: start.clone(),
         radius: 0.01,
@@ -588,13 +580,12 @@ fn a_failed_trust_trial_keeps_the_position_and_the_radius() {
     let err = session.step(&surface).unwrap_err();
     assert!(matches!(err, SaddleError::Surface(_)), "{err}");
     assert_eq!(session.position(), start.view());
-    assert_eq!(session.trust_radius(), radius);
 }
 
 #[test]
-fn trust_still_converges_from_a_displaced_quadratic_start() {
+fn seeded_search_still_converges_from_a_displaced_quadratic_start() {
     let config = MinModeConfig {
-        trust: true,
+        seed_curvature: true,
         force_tol: 1e-4,
         max_move: 0.1,
         ..MinModeConfig::default()
