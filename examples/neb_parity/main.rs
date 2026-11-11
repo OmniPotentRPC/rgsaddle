@@ -32,7 +32,7 @@ use rgsaddle::{
     SaddleError, SpringKind, grow_string, interpolated_path,
 };
 
-use eon::run_eon;
+use eon::{run_eon, run_eon_metric};
 use geom::{build_cases, minimize};
 use model::{
     Counted, DT, K_SPRING, MAX_MOVE, Optim, Problem, TOL, band_config, run_rgsaddle, run_tuned,
@@ -402,6 +402,31 @@ pub(crate) fn large_vacancy(csv: &mut Vec<String>) -> Result<(), SaddleError> {
         max_atom < TOL,
         ci = ci.map(|i| i.to_string()).unwrap_or_default(),
     ));
+    // Same six-image band and spring. The stop is the largest per-atom
+    // projected force, shared with the rgsaddle row above.
+    for optim in [Optim::Fire, Optim::Lbfgs] {
+        match run_eon_metric(&case, optim, true) {
+            Ok(row) => {
+                println!(
+                    "lj-vacancy-499  eon-{:<5} calls={} s={:.3} converged={} ci={}",
+                    optim.label(),
+                    row.calls,
+                    row.seconds,
+                    row.converged,
+                    row.ci.map(|i| i.to_string()).unwrap_or_else(|| "-".into()),
+                );
+                csv.push(format!(
+                    "lj-vacancy-499,eon-{},{},{:.6},{},{},0",
+                    optim.label(),
+                    row.calls,
+                    row.seconds,
+                    row.converged,
+                    row.ci.map(|i| i.to_string()).unwrap_or_default(),
+                ));
+            }
+            Err(err) => println!("lj-vacancy-499 eon-{} failed: {err}", optim.label()),
+        }
+    }
     Ok(())
 }
 
