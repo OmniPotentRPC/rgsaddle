@@ -55,3 +55,32 @@ The comparison below is the median of seven serial release runs after one warmup
 | 12-D, curvature 40 | L-BFGS | 11 | 0.007 | 11 | 0.007 |
 
 Müller-Brown with FIRE is the row that improves. Müller-Brown with L-BFGS takes 84 calls instead of 46, because that one secant is a poor scale for the rest of the surface. The curvature-40 searches take the same number of calls either way. The switch stays off.
+
+** A stalled FIRE step on a stiff mode
+
+FIRE 2.0 keeps timestep 1 through its initial delay (Guénolé, Nöhring, Vaid, Houllé, Xie, Prakash, and Bitzek, Comput. Mater. Sci. 175, 109584 (2020), doi:10.1016/j.commatsci.2020.109584). From rest the displacement is the reflected force, Equation 3 of Goswami, Gunde, and Jónsson, Front. Chem. 14, 1807063 (2026), doi:10.3389/fchem.2026.1807063. On the 255-atom vacancy the curvature along the mode is near -40 to -100, so the harmonic length ~|F|/|λ|~ is far under the atom cap of 0.2. The cap shortens the step, the next update adds the force again at timestep 1, and the search limit-cycles. ~set_fire_curvature~, on by default, waits until neither the force nor the energy has dropped for 2000 steps and ~|λ|~ is past 25, then takes one step of length ~|F|/slope~ along the reflected force, at most 0.05, provided the energy does not rise by more than 1e-3. A shorter trial is tried when that step would. The probe then stays in place while the curvature remains that steep, so timestep 1 cannot rebuild the cycle. A search that is still descending is unchanged. ~set_fire_curvature(false)~ is the previous integrator. L-BFGS does not read the switch. No C field was added. ~RGSADDLE_ABI_MINOR~ is 34.
+
+~set_cg_translate~ replaces the translator with a Polak-Ribiere step perpendicular to the mode and a Newton step along it (Kästner and Sherwood, J. Chem. Phys. 128, 014106 (2008), doi:10.1063/1.2815812; Baker, J. Comput. Chem. 7, 385 (1986), doi:10.1002/jcc.540070402). ~set_lbfgs_project~ drops the component of each stored L-BFGS pair along the mode after a turn inside the 45 degree cone. Both are off.
+
+The table is twelve seeds from base 20261111, release, cap 0.2, from ~examples/minmode_calls.rs~. Force calls are counted as in Goswami, AIP Advances 15, 085210 (2025), doi:10.1063/5.0283639, without the energy read after the search. A pair is the same saddle when both searches converge, the energies agree to 1e-6, and the aligned root-mean-square distance is under 1e-3. The calls and the milliseconds are the median of the matched pairs, and the bracket is the interquartile range. ~validation/minmode_translator.csv~ is every seed.
+
+| System | Kind | Method | Matched | Calls off | Calls on |
+|---+----+----+----+----+----|
+| LJ13 | dimer | FIRE | 12/12 | 409 [365, 458] | 409 [365, 458] |
+| LJ13 | dimer | L-BFGS | 12/12 | 94 [93, 96] | 94 [93, 96] |
+| LJ13 | Lanczos | FIRE | 12/12 | 726 [677, 764] | 726 [677, 764] |
+| LJ13 | Lanczos | L-BFGS | 12/12 | 454 [411, 485] | 454 [411, 485] |
+| LJ38 | dimer | FIRE | 12/12 | 2038 [1746, 2449] | 2038 [1746, 2449] |
+| LJ38 | dimer | L-BFGS | 12/12 | 408 [374, 784] | 408 [374, 784] |
+| LJ38 | Lanczos | FIRE | 12/12 | 1070 [1062, 1086] | 1070 [1062, 1086] |
+| LJ38 | Lanczos | L-BFGS | 12/12 | 628 [607, 680] | 628 [607, 680] |
+| vacancy-255 | dimer | FIRE | 11/12 | 3319 [1536, 5447] | 3319 [1536, 5447] |
+| vacancy-255 | dimer | L-BFGS | 12/12 | 98 [94, 104] | 98 [94, 104] |
+| vacancy-255 | Lanczos | FIRE | 0/12 | - | - |
+| vacancy-255 | Lanczos | L-BFGS | 12/12 | 238 [129, 385] | 238 [129, 385] |
+| Müller-Brown | dimer | FIRE | 12/12 | 860 [662, 921] | 860 [662, 921] |
+| Müller-Brown | dimer | L-BFGS | 12/12 | 59 [49, 64] | 59 [49, 64] |
+| Müller-Brown | Lanczos | FIRE | 12/12 | 342 [315, 346] | 342 [315, 346] |
+| Müller-Brown | Lanczos | L-BFGS | 12/12 | 42 [39, 43] | 42 [39, 43] |
+
+Vacancy Lanczos FIRE with the probe off converges on 0 of 12 seeds. With the probe on it converges on 12 of 12, so the matched column is empty. Those twelve searches take 25820 [25310, 27241] calls and 9396.760 [8944.507, 9878.244] ms. The unmatched vacancy dimer seed, 10372713005381289396, converges on neither side. LJ38 dimer L-BFGS uses 408 calls where FIRE uses 2038, but on LJ13 dimer only 4 of 12 L-BFGS searches land on the FIRE saddle. Conjugate gradients match 0/12 there, projected L-BFGS 4/12, Barzilai-Borwein 2/12, and quick-min 1/12. The default translator stays FIRE. The Gaussian-process surrogate in Goswami, Masterov, Kamath, Peña-Torres, and Jónsson, J. Chem. Theory Comput. 21, 7935 (2025), doi:10.1021/acs.jctc.5c00866, is a different method and is not used here.
