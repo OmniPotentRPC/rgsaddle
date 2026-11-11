@@ -73,6 +73,86 @@ pub fn linear_path(
     Ok(path)
 }
 
+/// Fraction of the shorter endpoint nearest-neighbour distance.
+/// An interior image closer than this has atoms on top of each other
+/// and [`interpolated_path`] builds that image with IDPP instead.
+pub const OVERLAP_FACTOR: f64 = 0.5;
+
+/// A path between two endpoints, and whether IDPP replaced the line.
+#[derive(Clone, Debug)]
+pub struct InitialPath {
+    pub positions: Array2<f64>,
+    /// `true` when a linear image overlapped and the coordinates are IDPP.
+    pub idpp: bool,
+}
+
+/// Linear path, or IDPP when an interpolated image overlaps.
+///
+/// Cartesian interpolation of a rearranged cluster draws atoms through
+/// one another. FIRE then chatters on the repulsive wall and does not
+/// reach a climbing image. An interior pair closer than
+/// [`OVERLAP_FACTOR`] times the shorter endpoint nearest-neighbour
+/// distance is that clash. The replacement is [`idpp_path`]: Goswami,
+/// MethodsX (2026), doi:10.1016/j.mex.2026.103899, following Smidstrup,
+/// Pedersen, Stokbro, and Jonsson, J. Chem. Phys. 140, 214106 (2014),
+/// doi:10.1063/1.4878664. A path whose images stay apart is the line.
+pub fn interpolated_path(
+    reactant: ArrayView1<f64>,
+    product: ArrayView1<f64>,
+    n_images: usize,
+    cell: Option<&Cell>,
+    config: &IdppConfig,
+) -> Result<InitialPath, SaddleError> {
+    let linear = linear_path(reactant, product, n_images, cell)?;
+    if !path_overlaps(linear.view(), cell, OVERLAP_FACTOR)? {
+        return Ok(InitialPath {
+            positions: linear,
+            idpp: false,
+        });
+    }
+    Ok(InitialPath {
+        positions: idpp_path(reactant, product, n_images, cell, config)?,
+        idpp: true,
+    })
+}
+
+fn nearest_pair(pos: ArrayView1<f64>, cell: Option<&Cell>) -> Result<f64, SaddleError> {
+    let n = pos.len() / 3;
+    if n < 2 {
+        return Ok(f64::INFINITY);
+    }
+    let mut diff = Array1::zeros(3);
+    let mut best = f64::INFINITY;
+    for i in 0..n {
+        for j in (i + 1)..n {
+            best = best.min(pair_distance(pos, i, j, cell, &mut diff)?);
+        }
+    }
+    Ok(best)
+}
+
+fn path_overlaps(
+    path: ArrayView2<f64>,
+    cell: Option<&Cell>,
+    factor: f64,
+) -> Result<bool, SaddleError> {
+    let n = path.nrows();
+    if n < 3 || !(factor.is_finite() && factor > 0.0) {
+        return Ok(false);
+    }
+    let nn = nearest_pair(path.row(0), cell)?.min(nearest_pair(path.row(n - 1), cell)?);
+    if !nn.is_finite() {
+        return Ok(false);
+    }
+    let limit = factor * nn;
+    for i in 1..n - 1 {
+        if nearest_pair(path.row(i), cell)? < limit {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// IDPP path. Same arguments as [`linear_path`].
 ///
 /// Interior image `i` (fraction `xi = i / (n_images - 1)`) is minimized
@@ -575,6 +655,33 @@ mod tests {
     use super::*;
     use approx::assert_abs_diff_eq;
     use ndarray::array;
+
+    #[test]
+    fn a_crossing_uses_idpp_and_a_rigid_shift_stays_on_the_line() {
+        let reactant = array![0.0, 0.0, 0.0, 2.0, 0.02, 0.0];
+        let product = array![2.0, 1.0, 0.0, 0.0, 1.02, 0.0];
+        let built = interpolated_path(
+            reactant.view(),
+            product.view(),
+            3,
+            None,
+            &IdppConfig::default(),
+        )
+        .unwrap();
+        assert!(built.idpp);
+        assert!(nearest_pair(built.positions.row(1), None).unwrap() > 1.9);
+        let shift = array![0.0, 1.0, 0.0, 2.0, 1.02, 0.0];
+        let plain = interpolated_path(
+            reactant.view(),
+            shift.view(),
+            3,
+            None,
+            &IdppConfig::default(),
+        )
+        .unwrap();
+        assert!(!plain.idpp);
+        assert_abs_diff_eq!(plain.positions[(1, 1)], 0.5, epsilon = 1e-12);
+    }
 
     #[test]
     fn gradient_matches_a_central_difference() {
