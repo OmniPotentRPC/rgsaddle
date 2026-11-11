@@ -2,7 +2,7 @@
 //! NEBProjection.cpp.
 
 use crate::spring::SpringForces;
-use ndarray::{Array1, ArrayView1};
+use ndarray::{Array1, ArrayView1, ArrayViewMut1, Zip};
 
 /// Which band projection assembles the relaxed force.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -41,21 +41,43 @@ pub fn dneb_component(
     tangent: ArrayView1<f64>,
     f_perp: ArrayView1<f64>,
 ) -> Array1<f64> {
-    let spring_par = force_spring.dot(&tangent);
-    let spring_perp = &force_spring - &(tangent.to_owned() * spring_par);
+    let mut dneb = Array1::zeros(tangent.len());
+    let mut scratch = Array1::zeros(tangent.len());
+    dneb_component_into(
+        force_spring,
+        tangent,
+        f_perp,
+        dneb.view_mut(),
+        scratch.view_mut(),
+    );
+    dneb
+}
 
-    let spring_perp_norm = spring_perp.dot(&spring_perp).sqrt();
+/// [`dneb_component`] written into `dneb`; `scratch` holds the unit
+/// perpendicular force on the way.
+pub(crate) fn dneb_component_into(
+    force_spring: ArrayView1<f64>,
+    tangent: ArrayView1<f64>,
+    f_perp: ArrayView1<f64>,
+    mut dneb: ArrayViewMut1<f64>,
+    mut scratch: ArrayViewMut1<f64>,
+) {
+    crate::stencil::perp_into(force_spring, tangent, dneb.view_mut());
+    let spring_perp_norm = dneb.dot(&dneb).sqrt();
     let force_perp_norm = f_perp.dot(&f_perp).sqrt();
     if spring_perp_norm > 1e-10 && force_perp_norm > 1e-10 {
-        let force_perp_hat = f_perp.to_owned() / force_perp_norm;
-        let overlap = spring_perp.dot(&force_perp_hat);
-        let mut dneb = &spring_perp - &(force_perp_hat * overlap);
+        Zip::from(scratch.view_mut())
+            .and(f_perp)
+            .for_each(|h, &f| *h = f / force_perp_norm);
+        let overlap = dneb.dot(&scratch);
         let switching = 2.0 / std::f64::consts::PI
             * ((force_perp_norm * force_perp_norm) / (spring_perp_norm * spring_perp_norm)).atan();
-        dneb *= switching;
-        return dneb;
+        Zip::from(dneb)
+            .and(scratch.view())
+            .for_each(|d, &h| *d = (*d - h * overlap) * switching);
+        return;
     }
-    Array1::zeros(tangent.len())
+    dneb.fill(0.0);
 }
 
 impl ProjectionKind {

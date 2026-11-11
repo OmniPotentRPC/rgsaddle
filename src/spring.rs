@@ -52,10 +52,24 @@ pub enum SpringKind {
 /// (E_max - E_ref)` and every other segment gets `k_min`. A band whose
 /// highest interior image is not above `E_ref` keeps `k_min` throughout.
 pub fn energy_weighted_constants(energies: ArrayView1<f64>, k_min: f64, k_max: f64) -> Vec<f64> {
+    let mut ks = Vec::new();
+    energy_weighted_constants_into(energies, k_min, k_max, &mut ks);
+    ks
+}
+
+/// [`energy_weighted_constants`] written into `ks`, which keeps its
+/// allocation from one band evaluation to the next.
+pub(crate) fn energy_weighted_constants_into(
+    energies: ArrayView1<f64>,
+    k_min: f64,
+    k_max: f64,
+    ks: &mut Vec<f64>,
+) {
     let n = energies.len();
-    let mut ks = vec![k_min; n.saturating_sub(1)];
+    ks.clear();
+    ks.resize(n.saturating_sub(1), k_min);
     if n < 3 {
-        return ks;
+        return;
     }
     let reference = energies[0].max(energies[n - 1]);
     let highest = energies
@@ -63,7 +77,7 @@ pub fn energy_weighted_constants(energies: ArrayView1<f64>, k_min: f64, k_max: f
         .fold(f64::NEG_INFINITY, |m, &e| m.max(e));
     let span = highest - reference;
     if span.is_nan() || span < 1e-10 {
-        return ks;
+        return;
     }
     for (i, k) in ks.iter_mut().enumerate() {
         let e = energies[i].max(energies[i + 1]);
@@ -72,7 +86,17 @@ pub fn energy_weighted_constants(energies: ArrayView1<f64>, k_min: f64, k_max: f
             *k = (1.0 - alpha) * k_max + alpha * k_min;
         }
     }
-    ks
+}
+
+/// `1 / (2 k)`, or zero when `|2 k|` is under [`OM_RECIP_EPS`]: the
+/// scale from a gradient to an Onsager-Machlup displacement.
+pub(crate) fn onsager_machlup_scale(k: f64) -> f64 {
+    let two_k = 2.0 * k;
+    if two_k.abs() < OM_RECIP_EPS {
+        0.0
+    } else {
+        1.0 / two_k
+    }
 }
 
 /// Displacements of the Onsager-Machlup spring, eOn's `L_vecs`.
@@ -81,12 +105,7 @@ pub fn energy_weighted_constants(energies: ArrayView1<f64>, k_min: f64, k_max: f
 /// get zero. A `|2 k|` below [`OM_RECIP_EPS`] gives zero throughout.
 pub fn onsager_machlup_displacements(gradients: ArrayView2<f64>, k: f64) -> Vec<Array1<f64>> {
     let n = gradients.nrows();
-    let two_k = 2.0 * k;
-    let alpha = if two_k.abs() < OM_RECIP_EPS {
-        0.0
-    } else {
-        1.0 / two_k
-    };
+    let alpha = onsager_machlup_scale(k);
     (0..n)
         .map(|j| {
             if j == 0 || j + 1 == n {

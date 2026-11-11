@@ -6,7 +6,7 @@
 //! Curvature is the rigid-pair coupling, Eq. 2, with the forward
 //! difference using the half-separation δ = ΔR/2.
 
-use ndarray::{Array1, ArrayView1};
+use ndarray::{Array1, ArrayView1, ArrayViewMut1, Zip};
 
 use crate::error::SaddleError;
 
@@ -104,14 +104,34 @@ impl<'a, M: Metric> Triad<'a, M> {
 /// The subtraction is the band climbing-image expression, so a caller
 /// that already used that spelling keeps its bits.
 pub fn reflect(force: ArrayView1<f64>, axis: ArrayView1<f64>) -> Array1<f64> {
-    let parallel = force.dot(&axis);
-    &force - (axis.to_owned() * (2.0 * parallel))
+    let mut out = Array1::zeros(force.len());
+    reflect_into(force, axis, out.view_mut());
+    out
+}
+
+/// [`reflect`] written into `out`, element for element the same bits.
+pub fn reflect_into(force: ArrayView1<f64>, axis: ArrayView1<f64>, out: ArrayViewMut1<f64>) {
+    let twice = 2.0 * force.dot(&axis);
+    Zip::from(out)
+        .and(force)
+        .and(axis)
+        .for_each(|o, &f, &a| *o = f - a * twice);
 }
 
 /// Perpendicular part `f - (f · v) v`.
 pub fn perp(force: ArrayView1<f64>, axis: ArrayView1<f64>) -> Array1<f64> {
+    let mut out = Array1::zeros(force.len());
+    perp_into(force, axis, out.view_mut());
+    out
+}
+
+/// [`perp`] written into `out`.
+pub fn perp_into(force: ArrayView1<f64>, axis: ArrayView1<f64>, out: ArrayViewMut1<f64>) {
     let parallel = force.dot(&axis);
-    &force - (axis.to_owned() * parallel)
+    Zip::from(out)
+        .and(force)
+        .and(axis)
+        .for_each(|o, &f, &a| *o = f - a * parallel);
 }
 
 /// Climb along the axis while the curvature is not negative: `-(f · v) v`.
@@ -132,21 +152,14 @@ pub enum TangentRule {
     Improved,
 }
 
-fn normalize_tangent(
-    tang: Array1<f64>,
-    pos_diff_next: ArrayView1<f64>,
-    pos_diff_prev: ArrayView1<f64>,
-) -> Result<Array1<f64>, SaddleError> {
-    for mut v in [tang, pos_diff_next.to_owned(), pos_diff_prev.to_owned()] {
-        let norm = v.dot(&v).sqrt();
-        if norm > 1e-10 && norm.is_finite() {
-            v /= norm;
-            return Ok(v);
-        }
+/// Scale `v` to unit length when its norm is above `1e-10` and finite.
+fn unit_in_place(mut v: ArrayViewMut1<f64>) -> bool {
+    let norm = v.dot(&v).sqrt();
+    if norm > 1e-10 && norm.is_finite() {
+        v /= norm;
+        return true;
     }
-    Err(SaddleError::Invalid(
-        "band image coincides with both neighbours; no tangent".into(),
-    ))
+    false
 }
 
 /// Unit tangent from the two minimum-imaged segments and the three energies.
@@ -158,27 +171,81 @@ pub fn unit_tangent(
     energy_prev: f64,
     energy_next: f64,
 ) -> Result<Array1<f64>, SaddleError> {
-    let tang = match kind {
-        TangentRule::Simple => pos_diff_next.to_owned(),
+    let mut out = Array1::zeros(pos_diff_next.len());
+    unit_tangent_into(
+        kind,
+        pos_diff_next,
+        pos_diff_prev,
+        energy,
+        energy_prev,
+        energy_next,
+        out.view_mut(),
+    )?;
+    Ok(out)
+}
+
+/// [`unit_tangent`] written into `out`. When the weighted tangent
+/// vanishes, the forward and then the backward segment take its place.
+pub fn unit_tangent_into(
+    kind: TangentRule,
+    pos_diff_next: ArrayView1<f64>,
+    pos_diff_prev: ArrayView1<f64>,
+    energy: f64,
+    energy_prev: f64,
+    energy_next: f64,
+    mut out: ArrayViewMut1<f64>,
+) -> Result<(), SaddleError> {
+    enum Pick {
+        Next,
+        Prev,
+        Mix { next: f64, prev: f64 },
+    }
+    let pick = match kind {
+        TangentRule::Simple => Pick::Next,
         TangentRule::Improved => {
             if energy_next > energy && energy > energy_prev {
-                pos_diff_next.to_owned()
+                Pick::Next
             } else if energy > energy_next && energy_prev > energy {
-                pos_diff_prev.to_owned()
+                Pick::Prev
             } else {
                 let energy_diff_prev = energy_prev - energy;
                 let energy_diff_next = energy_next - energy;
                 let min_diff = energy_diff_prev.abs().min(energy_diff_next.abs());
                 let max_diff = energy_diff_prev.abs().max(energy_diff_next.abs());
                 if energy_diff_prev > energy_diff_next {
-                    &pos_diff_next * min_diff + &pos_diff_prev * max_diff
+                    Pick::Mix {
+                        next: min_diff,
+                        prev: max_diff,
+                    }
                 } else {
-                    &pos_diff_next * max_diff + &pos_diff_prev * min_diff
+                    Pick::Mix {
+                        next: max_diff,
+                        prev: min_diff,
+                    }
                 }
             }
         }
     };
-    normalize_tangent(tang, pos_diff_next, pos_diff_prev)
+    match pick {
+        Pick::Next => out.assign(&pos_diff_next),
+        Pick::Prev => out.assign(&pos_diff_prev),
+        Pick::Mix { next, prev } => Zip::from(out.view_mut())
+            .and(pos_diff_next)
+            .and(pos_diff_prev)
+            .for_each(|t, &n, &p| *t = n * next + p * prev),
+    }
+    if unit_in_place(out.view_mut()) {
+        return Ok(());
+    }
+    for side in [pos_diff_next, pos_diff_prev] {
+        out.assign(&side);
+        if unit_in_place(out.view_mut()) {
+            return Ok(());
+        }
+    }
+    Err(SaddleError::Invalid(
+        "band image coincides with both neighbours; no tangent".into(),
+    ))
 }
 
 /// Parallel and full spring, the two pieces a projection consumes.
@@ -214,30 +281,72 @@ pub fn coupling_forces(
     pos_diff_next: ArrayView1<f64>,
     pos_diff_prev: ArrayView1<f64>,
 ) -> CouplingForces {
+    let mut parallel = Array1::zeros(tangent.len());
+    let mut full = Array1::zeros(tangent.len());
+    coupling_forces_into(
+        coupling,
+        tangent,
+        dist_next,
+        dist_prev,
+        pos_diff_next,
+        pos_diff_prev,
+        parallel.view_mut(),
+        full.view_mut(),
+    );
+    CouplingForces { parallel, full }
+}
+
+/// [`coupling_forces`] written into `parallel` and `full`. The
+/// Onsager-Machlup arm uses `full` as scratch before zeroing it.
+#[allow(clippy::too_many_arguments)]
+pub fn coupling_forces_into(
+    coupling: &Coupling<'_>,
+    tangent: ArrayView1<f64>,
+    dist_next: f64,
+    dist_prev: f64,
+    pos_diff_next: ArrayView1<f64>,
+    pos_diff_prev: ArrayView1<f64>,
+    mut parallel: ArrayViewMut1<f64>,
+    mut full: ArrayViewMut1<f64>,
+) {
     match coupling {
-        Coupling::Uniform { k } => CouplingForces {
-            parallel: tangent.to_owned() * (k * (dist_next - dist_prev)),
-            full: (&pos_diff_next - &pos_diff_prev) * *k,
-        },
-        Coupling::Weighted { k_next, k_prev } => CouplingForces {
-            parallel: tangent.to_owned() * (k_next * dist_next - k_prev * dist_prev),
-            full: &pos_diff_next * *k_next - &pos_diff_prev * *k_prev,
-        },
-        Coupling::Onsager { k, l_next, l_here } => {
-            let l_next = l_next.to_owned();
-            let l_here = l_here.to_owned();
-            let diff = &pos_diff_next - &pos_diff_prev + &l_next - &l_here;
-            let f_om = diff * *k;
-            let par = f_om.dot(&tangent);
-            CouplingForces {
-                parallel: tangent.to_owned() * par,
-                full: Array1::zeros(tangent.len()),
-            }
+        Coupling::Uniform { k } => {
+            let along = k * (dist_next - dist_prev);
+            Zip::from(parallel)
+                .and(tangent)
+                .for_each(|s, &t| *s = t * along);
+            Zip::from(full)
+                .and(pos_diff_next)
+                .and(pos_diff_prev)
+                .for_each(|s, &n, &p| *s = (n - p) * *k);
         }
-        Coupling::Rigid => CouplingForces {
-            parallel: Array1::zeros(tangent.len()),
-            full: Array1::zeros(tangent.len()),
-        },
+        Coupling::Weighted { k_next, k_prev } => {
+            let along = k_next * dist_next - k_prev * dist_prev;
+            Zip::from(parallel)
+                .and(tangent)
+                .for_each(|s, &t| *s = t * along);
+            Zip::from(full)
+                .and(pos_diff_next)
+                .and(pos_diff_prev)
+                .for_each(|s, &n, &p| *s = n * *k_next - p * *k_prev);
+        }
+        Coupling::Onsager { k, l_next, l_here } => {
+            Zip::from(full.view_mut())
+                .and(pos_diff_next)
+                .and(pos_diff_prev)
+                .and(l_next)
+                .and(l_here)
+                .for_each(|s, &n, &p, &ln, &lh| *s = (n - p + ln - lh) * *k);
+            let par = full.dot(&tangent);
+            Zip::from(parallel)
+                .and(tangent)
+                .for_each(|s, &t| *s = t * par);
+            full.fill(0.0);
+        }
+        Coupling::Rigid => {
+            parallel.fill(0.0);
+            full.fill(0.0);
+        }
     }
 }
 
