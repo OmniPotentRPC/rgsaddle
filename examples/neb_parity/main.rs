@@ -12,7 +12,9 @@
 //! rgsaddle is `BandSession` with the same images, spring, per-atom cap,
 //! tolerance and optimizer. FIRE uses the native velocity-Verlet step
 //! (`FireKind::V1`) and the eOn time step `1/10.1805055`, whose cap is
-//! `2.5` times that step. The stop, for both, is eOn's: the largest
+//! `2.5` times that step. The comparison turns velocity rescaling off:
+//! eOn leaves the velocity alone when the cap shortens the move, and
+//! the library default still scales it. The stop, for both, is eOn's: the largest
 //! per-image Euclidean norm of the projected force, or only the climbing
 //! image's norm when every image is within ten times the tolerance.
 //!
@@ -35,7 +37,8 @@ use rgsaddle::{
 use eon::{run_eon, run_eon_metric};
 use geom::{build_cases, minimize};
 use model::{
-    Counted, DT, K_SPRING, MAX_MOVE, Optim, Problem, TOL, band_config, run_rgsaddle, run_tuned,
+    Counted, DT, K_SPRING, MAX_ITER, MAX_MOVE, Optim, Problem, TOL, band_config, run_rgsaddle,
+    run_tuned,
 };
 use pot::Pot;
 
@@ -402,8 +405,55 @@ pub(crate) fn large_vacancy(csv: &mut Vec<String>) -> Result<(), SaddleError> {
         max_atom < TOL,
         ci = ci.map(|i| i.to_string()).unwrap_or_default(),
     ));
+    let mut lbfgs = band_config(&case, SpringKind::Uniform { k: K_SPRING });
+    lbfgs.method = rgmin::Method::Lbfgs {
+        memory: model::LBFGS_MEMORY,
+    };
+    let lbfgs_surface = Counted {
+        pot: case.pot.clone(),
+        cell: case.cell,
+        calls: AtomicUsize::new(0),
+    };
+    let mut lbfgs_session = BandSession::new(lbfgs, case.positions.clone())?;
+    let lbfgs_started = Instant::now();
+    let mut lbfgs_ci = None;
+    let mut lbfgs_atom = f64::INFINITY;
+    for _ in 0..MAX_ITER {
+        let report = lbfgs_session.step(&lbfgs_surface)?;
+        lbfgs_ci = report.ci_index;
+        let Some(ev) = lbfgs_session.evaluation() else {
+            break;
+        };
+        lbfgs_atom = 0.0;
+        for row in ev.projected.outer_iter() {
+            let n = row.len() / 3;
+            for atom in 0..n {
+                let nrm =
+                    (row[3 * atom].powi(2) + row[3 * atom + 1].powi(2) + row[3 * atom + 2].powi(2))
+                        .sqrt();
+                lbfgs_atom = lbfgs_atom.max(nrm);
+            }
+        }
+        if lbfgs_atom < TOL {
+            break;
+        }
+    }
+    let lbfgs_calls = lbfgs_surface.calls.load(Ordering::Relaxed);
+    let lbfgs_seconds = lbfgs_started.elapsed().as_secs_f64();
+    println!(
+        "lj-vacancy-499  ci-lbfgs calls={lbfgs_calls} s={lbfgs_seconds:.3} converged={} ci={}",
+        lbfgs_atom < TOL,
+        lbfgs_ci
+            .map(|i| i.to_string())
+            .unwrap_or_else(|| "-".into()),
+    );
+    csv.push(format!(
+        "lj-vacancy-499,ci-lbfgs,{lbfgs_calls},{lbfgs_seconds:.6},{},{},0",
+        lbfgs_atom < TOL,
+        lbfgs_ci.map(|i| i.to_string()).unwrap_or_default(),
+    ));
     // Same six-image band and spring. The stop is the largest per-atom
-    // projected force, shared with the rgsaddle row above.
+    // projected force, shared with the rgsaddle rows above.
     for optim in [Optim::Fire, Optim::Lbfgs] {
         match run_eon_metric(&case, optim, true) {
             Ok(row) => {
