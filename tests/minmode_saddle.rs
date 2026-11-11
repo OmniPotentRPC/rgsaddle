@@ -582,6 +582,151 @@ fn a_failed_seeded_step_keeps_the_position() {
     assert_eq!(session.position(), start.view());
 }
 
+/// V = 10 (x² − 1/4)² + 8 y² + 30 x y² + z². The lowest mode turns as
+/// the search steps, so the reflected force at the arrival is not the
+/// reflection through the mode that left.
+struct TurningWell;
+
+impl PointSurface for TurningWell {
+    fn eval(&self, r: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        let (x, y, z) = (r[0], r[1], r[2]);
+        let energy = 10.0 * (x * x - 0.25).powi(2) + 8.0 * y * y + 30.0 * x * y * y + z * z;
+        let gradient = array![
+            40.0 * x * (x * x - 0.25) + 30.0 * y * y,
+            16.0 * y + 60.0 * x * y,
+            2.0 * z,
+        ];
+        Ok((energy, gradient))
+    }
+}
+
+fn effective_gradient(gradient: &Array1<f64>, mode: &Array1<f64>, curvature: f64) -> Array1<f64> {
+    let parallel = gradient.dot(mode);
+    if curvature < 0.0 {
+        gradient - &(mode * (2.0 * parallel))
+    } else {
+        mode * (-parallel)
+    }
+}
+
+fn largest_atom(step: &Array1<f64>) -> f64 {
+    let mut max_atom = 0.0_f64;
+    let mut i = 0;
+    let n = step.len();
+    while i + 3 <= n {
+        let r = (step[i] * step[i] + step[i + 1] * step[i + 1] + step[i + 2] * step[i + 2]).sqrt();
+        max_atom = max_atom.max(r);
+        i += 3;
+    }
+    max_atom
+}
+
+/// One-pair L-BFGS step with the NEB guards: a negative secant leaps
+/// `1000 F` and is then capped; a step past the cap or uphill on the
+/// effective gradient drops the pair and steps with `|s·y| / y·y`.
+fn guarded_one_pair_step(
+    gradient: &Array1<f64>,
+    step: &Array1<f64>,
+    secant: &Array1<f64>,
+    cap: f64,
+) -> Array1<f64> {
+    let sy = step.dot(secant);
+    let yy = secant.dot(secant);
+    let scale = if yy > 0.0 && sy.is_finite() {
+        (sy / yy).abs()
+    } else {
+        0.01
+    };
+    let direction = if sy < 0.0 {
+        gradient.mapv(|value| -1000.0 * value)
+    } else {
+        let rho = 1.0 / sy;
+        let mut q = gradient.clone();
+        let alpha = rho * step.dot(&q);
+        q = &q - &(secant * alpha);
+        q *= sy / yy;
+        let beta = rho * secant.dot(&q);
+        q = &q + &(step * (alpha - beta));
+        let mut direction = q.mapv(|value| -value);
+        let too_far = cap > 0.0 && largest_atom(&direction) >= cap;
+        let slope = direction.dot(gradient);
+        if too_far || !slope.is_finite() || slope >= 0.0 {
+            direction = gradient.mapv(|value| -scale * value);
+        }
+        direction
+    };
+    let motion = largest_atom(&direction);
+    if cap > 0.0 && motion > cap {
+        &direction * (cap / motion)
+    } else {
+        direction
+    }
+}
+
+/// The L-BFGS pair is the secant of the effective force inverted with
+/// the mode at each end. The trial inside one solver step still sees
+/// the departure mode; that frozen secant is not the pair the next
+/// step may use. On this well the two secants disagree, and the second
+/// step follows the arrival mode.
+#[test]
+fn lbfgs_secant_follows_the_arrival_mode() {
+    let cap = 2.0;
+    let config = MinModeConfig {
+        method: rgmin::Method::Lbfgs { memory: 8 },
+        force_tol: 1e-14,
+        max_move: cap,
+        ..MinModeConfig::default()
+    };
+    let start = array![-0.3, 0.1, 0.1];
+    let mut session = MinModeSession::new(config, start, array![1.0, 0.0, 0.0]).unwrap();
+    let estimate = session.estimate_mode(&TurningWell).unwrap();
+    assert!(
+        estimate.curvature < 0.0,
+        "the start is past the inflection, curvature {}",
+        estimate.curvature
+    );
+    let mode0 = estimate.mode.clone();
+    let (_, g0) = TurningWell.eval(session.position()).unwrap();
+    let eff0 = effective_gradient(&g0, &mode0, estimate.curvature);
+    let x0 = session.position().to_owned();
+    session.step(&TurningWell).unwrap();
+    let x1 = session.position().to_owned();
+    session.step(&TurningWell).unwrap();
+    let mode1 = session.mode().to_owned();
+    let curvature1 = session.curvature();
+    let turn = mode0.dot(&mode1).abs().min(1.0).acos();
+    assert!(
+        turn < 0.25 * std::f64::consts::PI,
+        "the arrival stays inside the history cone, turn {turn}"
+    );
+    let (_, g1) = TurningWell.eval(x1.view()).unwrap();
+    let displacement = &x1 - &x0;
+    let eff1 = effective_gradient(&g1, &mode1, curvature1);
+    let y_arrival = &eff1 - &eff0;
+    let y_frozen = &effective_gradient(&g1, &mode0, estimate.curvature) - &eff0;
+    let arrival_step = guarded_one_pair_step(&eff1, &displacement, &y_arrival, cap);
+    let frozen_step = guarded_one_pair_step(&eff1, &displacement, &y_frozen, cap);
+    let gap = (&arrival_step - &frozen_step)
+        .iter()
+        .map(|v| v * v)
+        .sum::<f64>()
+        .sqrt();
+    assert!(
+        gap > 1e-3,
+        "the frozen secant and the arrival secant must disagree, gap {gap}"
+    );
+    let got = &session.position().to_owned() - &x1;
+    let err = (&got - &arrival_step)
+        .iter()
+        .map(|v| v * v)
+        .sum::<f64>()
+        .sqrt();
+    assert!(
+        err < 1e-6,
+        "second step followed the frozen mode: error {err}, arrival gap {gap}"
+    );
+}
+
 #[test]
 fn seeded_search_still_converges_from_a_displaced_quadratic_start() {
     let config = MinModeConfig {

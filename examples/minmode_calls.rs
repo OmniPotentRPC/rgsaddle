@@ -56,7 +56,7 @@ fn main() {
         "system,kind,method,seed,off_converged,on_converged,off_calls,on_calls,off_ms,on_ms,off_energy,on_energy,off_force,on_force,off_curvature,on_curvature,rmsd,matched"
             .to_string(),
     ];
-    println!("seeds {seeds} base {BASE_SEED}");
+    println!("seeds {seeds} base {}", bench_base());
     println!("system\tkind\tmethod\tmatched\tcalls off\tcalls on\tms off\tms on\tdiverged");
     for system in &systems {
         if only.as_ref().is_some_and(|name| name != system.name) {
@@ -483,6 +483,15 @@ fn compare_translator(system: &System, kind: MinModeKind, name: &str, seeds: usi
             && on.converged
             && (off.energy - on.energy).abs() <= ENERGY_TOL
             && rmsd <= RMSD_TOL;
+        println!(
+            "seed {seed} fire {oc}/{oe:.6}/{ocalls} cand {nc}/{ne:.6}/{ncalls} rmsd {rmsd:.6} same {same}",
+            oc = off.converged,
+            oe = off.energy,
+            ocalls = off.calls,
+            nc = on.converged,
+            ne = on.energy,
+            ncalls = on.calls,
+        );
         if same {
             matched_calls_off.push(off.calls as f64);
             matched_calls_on.push(on.calls as f64);
@@ -755,8 +764,15 @@ fn offset_start(
     (position, mode)
 }
 
+fn bench_base() -> u64 {
+    std::env::var("RGSADDLE_BENCH_BASE")
+        .ok()
+        .and_then(|text| text.parse().ok())
+        .unwrap_or(BASE_SEED)
+}
+
 fn mix_seed(index: usize) -> u64 {
-    BASE_SEED.wrapping_add((index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15))
+    bench_base().wrapping_add((index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15))
 }
 
 fn mix(n: usize, mut seed: u64) -> Vec<f64> {

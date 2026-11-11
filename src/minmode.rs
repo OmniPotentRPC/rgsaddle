@@ -652,6 +652,11 @@ fn largest_atom_move(origin: ArrayView1<f64>, trial: ArrayView1<f64>) -> f64 {
     max_atom
 }
 
+fn largest_atom_move_of(step: &Array1<f64>) -> f64 {
+    let origin = Array1::zeros(step.len());
+    largest_atom_move(origin.view(), (&origin + step).view())
+}
+
 fn scale_to_atom_cap(origin: ArrayView1<f64>, trial: &mut Array1<f64>, cap: f64) {
     if !(cap.is_finite() && cap > 0.0) {
         return;
@@ -1156,6 +1161,18 @@ pub struct MinModeSession {
     lbfgs_project: bool,
     /// `(s, y)` the solver accepted, before projection onto the mode.
     lbfgs_shadow: VecDeque<(Array1<f64>, Array1<f64>)>,
+    /// Secants whose `y` is the change in the effective gradient
+    /// inverted at each end's own mode. The solver also stores the
+    /// trial pair from the departure mode; that pair is replaced from
+    /// this list before the next direction.
+    lbfgs_good: VecDeque<(Array1<f64>, Array1<f64>)>,
+    /// Point and effective gradient a translation left from. The next
+    /// step, after the mode there is known, turns the displacement
+    /// into one secant.
+    lbfgs_anchor: Option<(Array1<f64>, Array1<f64>)>,
+    /// Empty-memory scale 0.01 and the cap, angle, and negative-secant
+    /// resets. Mirrors [`Solver::set_lbfgs_neb_guards`].
+    lbfgs_guards: bool,
     /// The first surface error raised inside the translation oracle
     /// during the current step; the rgmin oracle signature has no
     /// error channel of its own.
@@ -1260,6 +1277,9 @@ impl MinModeSession {
             cg_alpha: None,
             lbfgs_project: false,
             lbfgs_shadow: VecDeque::new(),
+            lbfgs_good: VecDeque::new(),
+            lbfgs_anchor: None,
+            lbfgs_guards: lbfgs_guards,
         })
     }
 
@@ -1376,6 +1396,11 @@ impl MinModeSession {
     /// On by default for an L-BFGS min-mode session, because the reflected
     /// force is not a potential gradient. `false` restores scale one.
     pub fn set_lbfgs_neb_guards(&mut self, enabled: bool) {
+        if self.lbfgs_guards != enabled {
+            self.lbfgs_good.clear();
+            self.lbfgs_anchor = None;
+        }
+        self.lbfgs_guards = enabled;
         self.solver.set_lbfgs_neb_guards(enabled);
     }
 
@@ -1418,6 +1443,8 @@ impl MinModeSession {
         self.dimer_rotation.clear();
         self.clear_cg();
         self.lbfgs_shadow.clear();
+        self.lbfgs_good.clear();
+        self.lbfgs_anchor = None;
         self.curvature = f64::NAN;
         self.capped_fire = None;
         self.solver_stepped = false;
@@ -1465,6 +1492,10 @@ impl MinModeSession {
         };
         self.x = x;
         self.capped_fire = None;
+        self.lbfgs_anchor = None;
+        if matches!(self.config.method, Method::Lbfgs { .. }) && !self.lbfgs_good.is_empty() {
+            self.reload_lbfgs_good();
+        }
         self.mode_fresh = false;
         self.pending_turn = 0.0;
         self.lanczos_carry = None;
@@ -1499,6 +1530,8 @@ impl MinModeSession {
         if turned > MODE_RESET_ANGLE {
             self.solver.forget();
             self.lbfgs_shadow.clear();
+            self.lbfgs_good.clear();
+            self.lbfgs_anchor = None;
             self.clear_cg();
             return;
         }
@@ -1547,6 +1580,141 @@ impl MinModeSession {
         for (s, y) in &self.lbfgs_shadow {
             let _ = self.solver.push_pair(s.view(), y.view());
         }
+    }
+
+    fn uses_lbfgs_secant(&self) -> bool {
+        matches!(self.config.method, Method::Lbfgs { .. }) && self.kappa.is_none()
+    }
+
+    fn lbfgs_memory(&self) -> usize {
+        match self.config.method {
+            Method::Lbfgs { memory } => memory.max(1),
+            _ => 1,
+        }
+    }
+
+    fn note_good_pair(&mut self, s: Array1<f64>, y: Array1<f64>) {
+        let memory = self.lbfgs_memory();
+        self.lbfgs_good.push_back((s, y));
+        while self.lbfgs_good.len() > memory {
+            self.lbfgs_good.pop_front();
+        }
+    }
+
+    fn reload_lbfgs_good(&mut self) {
+        self.solver.forget();
+        for (s, y) in &self.lbfgs_good {
+            let _ = self.solver.push_pair(s.view(), y.view());
+        }
+    }
+
+    /// Replace the trial pair with the secant of the effective gradient
+    /// at each end.
+    ///
+    /// One solver step evaluates the arrival under the mode it left
+    /// with, and stores that change. eOn's `MinModeObjectiveFunction::getGradient`
+    /// (client/MinModeSaddleSearch.cpp) inverts the force with the mode
+    /// computed at the point it is called for, and `LBFGS::update`
+    /// (client/LBFGS.cpp) stores the secant on the next iteration. The
+    /// curvature sign is part of that inversion: a negative mode
+    /// reflects the parallel part, and any other sign climbs the mode
+    /// alone. A pair that keeps the departure sign stays positive on
+    /// these climbs, so the `1000 F` negative-secant step never sees
+    /// the arrival. The secant kept here is `g_eff(x+, τ+, λ+) −
+    /// g_eff(x, τ, λ)`, and a negative value is handed to the solver
+    /// only long enough for that leap, which then drops the memory.
+    fn reconcile_lbfgs_secant(
+        &mut self,
+        gradient: &Array1<f64>,
+        mode: &Array1<f64>,
+        curvature: f64,
+    ) {
+        if !self.uses_lbfgs_secant() {
+            return;
+        }
+        let mut reload = false;
+        let mut leap = None;
+        if let Some((origin, eff_old)) = self.lbfgs_anchor.take() {
+            reload = true;
+            let s = &self.x - &origin;
+            let ss = s.dot(&s);
+            if ss > 0.0 && ss.is_finite() {
+                let eff = translated_gradient(gradient, mode, curvature);
+                let y = &eff - &eff_old;
+                let sy = s.dot(&y);
+                if !sy.is_finite() || sy.abs() < 1e-30 {
+                    if self.lbfgs_guards {
+                        self.lbfgs_good.clear();
+                    }
+                } else if sy > 0.0 {
+                    self.note_good_pair(s, y);
+                } else if self.lbfgs_guards {
+                    self.lbfgs_good.clear();
+                    leap = Some((s, y));
+                }
+            }
+        }
+        if !reload && self.lbfgs_good.is_empty() {
+            return;
+        }
+        self.reload_lbfgs_good();
+        if let Some((s, y)) = &leap {
+            let _ = self.solver.push_pair(s.view(), y.view());
+        }
+    }
+
+    /// The NEB guard would drop the pairs for this effective gradient:
+    /// the newest secant is negative, or the two-loop step reaches the
+    /// per-atom cap or faces away from the force.
+    fn lbfgs_guard_resets(&self, gradient: &Array1<f64>) -> bool {
+        if !self.lbfgs_guards {
+            return false;
+        }
+        if self.lbfgs_good.back().is_some_and(|(s, y)| s.dot(y) < 0.0) {
+            return true;
+        }
+        let direction = self.lbfgs_two_loop(gradient);
+        if direction.iter().any(|value| !value.is_finite()) {
+            return true;
+        }
+        let cap = self.config.max_move;
+        let too_far = cap.is_finite() && cap > 0.0 && largest_atom_move_of(&direction) >= cap;
+        let slope = direction.dot(gradient);
+        too_far || !slope.is_finite() || slope >= 0.0
+    }
+
+    /// Two-loop direction, empty memory included. `H0` is `s·y / y·y`
+    /// of the newest pair, or the empty-memory scale.
+    fn lbfgs_two_loop(&self, gradient: &Array1<f64>) -> Array1<f64> {
+        let pairs = &self.lbfgs_good;
+        let mut q = gradient.clone();
+        let m = pairs.len();
+        let mut alpha = vec![0.0; m];
+        for k in (0..m).rev() {
+            let (s, y) = &pairs[k];
+            let sy = s.dot(y);
+            let rho = 1.0 / sy;
+            let a = rho * s.dot(&q);
+            alpha[k] = a;
+            q = &q - &(y * a);
+        }
+        if let Some((s, y)) = pairs.back() {
+            let yy = y.dot(y);
+            if yy > 0.0 {
+                q *= s.dot(y) / yy;
+            }
+        } else {
+            let scale = if self.lbfgs_guards { 0.01 } else { 1.0 };
+            q *= scale;
+        }
+        for k in 0..m {
+            let (s, y) = &pairs[k];
+            let sy = s.dot(y);
+            let rho = 1.0 / sy;
+            let b = rho * y.dot(&q);
+            q = &q + &(s * (alpha[k] - b));
+        }
+        q.mapv(|value| -value)
     }
 
     fn note_lbfgs_pair(&mut self, s: &Array1<f64>, y: &Array1<f64>) {
@@ -2401,16 +2569,20 @@ impl MinModeSession {
         // constraint keeps the solver: its force is not that pure climb.
         let tau = self.mode.clone();
         let translation_curvature = curvature;
+        self.reconcile_lbfgs_secant(&g0, &tau, translation_curvature);
+        let step_origin = self.x.clone();
+        let eff_then = translated_gradient(&g0, &tau, translation_curvature);
         let full_climb = translation_curvature >= 0.0
             && self.kappa.is_none()
             && self.config.max_move.is_finite()
             && self.config.max_move > 0.0;
         let lbfgs = matches!(self.config.method, Method::Lbfgs { .. });
         let fire = matches!(self.config.method, Method::Fire { .. });
+        let empty_lbfgs = lbfgs && !self.lbfgs_seeded && self.solver.pair_count() == 0;
+        let newton_fits = self.seed_fits(&g0, &tau, translation_curvature);
         let curvature_seed = self.seed_applies(translation_curvature)
-            && self.seed_fits(&g0, &tau, translation_curvature)
-            && ((lbfgs && !self.lbfgs_seeded && self.solver.pair_count() == 0)
-                || (fire && !self.solver_stepped));
+            && newton_fits
+            && (empty_lbfgs || (fire && !self.solver_stepped));
         let (x, at_new) = if full_climb {
             let climbed =
                 convex_displacement(self.x.view(), g0.view(), tau.view(), self.config.max_move);
@@ -2445,8 +2617,20 @@ impl MinModeSession {
             (trial, Some(point))
         } else {
             self.solver_stepped = true;
-            self.translate_with_solver(surface, &counted, &g0, &tau, translation_curvature)?
+            let translated =
+                self.translate_with_solver(surface, &counted, &g0, &tau, translation_curvature)?;
+            if self.uses_lbfgs_secant() && self.lbfgs_guard_resets(&eff_then) {
+                self.lbfgs_good.clear();
+            }
+            translated
         };
+        if self.uses_lbfgs_secant() {
+            self.lbfgs_anchor = if x != step_origin {
+                Some((step_origin, eff_then))
+            } else {
+                None
+            };
+        }
         if self.lbfgs_project
             && lbfgs
             && let Some(point) = &at_new
