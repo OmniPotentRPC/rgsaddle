@@ -1745,6 +1745,13 @@ pub struct BandSession {
     unmoved: usize,
     zoom: zoom::ZoomState,
     local_fire: Vec<LocalFire>,
+    /// When false, FIRE 1 keeps the velocity that the per-atom cap
+    /// shortened, which is eOn `FIRE::step`. The default rescales it.
+    fire_clamp_rescale: bool,
+    eon_vel: Array1<f64>,
+    eon_dt: f64,
+    eon_alpha: f64,
+    eon_n_pos: usize,
 }
 
 /// Per-image FIRE state. The schedule matches rgmin's FIRE 1 and FIRE 2
@@ -1820,6 +1827,7 @@ impl BandSession {
         let segment = if solid.is_some() { dof + 9 } else { dof };
         let interior_dof = (n_images - 2) * segment;
         let solver = build_solver(&config, &method, interior_dof);
+        let time_step = config.time_step;
         let mut session = Self {
             config,
             positions,
@@ -1833,6 +1841,11 @@ impl BandSession {
             unmoved: 0,
             zoom: zoom::ZoomState::default(),
             local_fire: Vec::new(),
+            fire_clamp_rescale: true,
+            eon_vel: Array1::zeros(0),
+            eon_dt: time_step,
+            eon_alpha: 0.1,
+            eon_n_pos: 0,
         };
         if let Some(precon) = session.config.exp_precon {
             session.set_exp_precon(precon)?;
@@ -2231,6 +2244,10 @@ impl BandSession {
         self.solver.forget();
         self.state.restart();
         self.local_fire.clear();
+        self.eon_vel = Array1::zeros(0);
+        self.eon_dt = self.config.time_step;
+        self.eon_alpha = 0.1;
+        self.eon_n_pos = 0;
         self.refine = min_mode::RefineState::default();
         if let Some(rtr) = &mut self.rtr {
             *rtr = crate::rtr::BandRtr::new(rtr.config, false);
@@ -2288,6 +2305,15 @@ impl BandSession {
             .collect()
     }
 
+    /// Keep the FIRE velocity across a per-atom cap.
+    ///
+    /// eOn `FIRE::step` shortens the displacement and leaves the
+    /// velocity alone. The default integrator scales the velocity down
+    /// with the displacement. L-BFGS ignores this.
+    pub fn set_fire_clamp_rescale(&mut self, enabled: bool) {
+        self.fire_clamp_rescale = enabled;
+    }
+
     fn scatter_interior(&mut self, flat: ArrayView1<f64>) {
         let n_images = self.positions.nrows();
         let dof = self.positions.ncols();
@@ -2296,6 +2322,98 @@ impl BandSession {
                 .row_mut(i)
                 .assign(&flat.slice(s![(i - 1) * dof..i * dof]));
         }
+    }
+
+    /// FIRE 1 as eOn `FIRE::step`: one velocity for the interior, no
+    /// rescale when the per-atom cap shortens the move, and a
+    /// non-negative power counts as a successful step.
+    fn step_eon_fire<S: BandSurface>(&mut self, surface: &S) -> Result<BandReport, SaddleError> {
+        let n_images = self.positions.nrows();
+        let dof = self.positions.ncols();
+        let n_int = n_images - 2;
+        let interior = n_int * dof;
+        if self.eon_vel.len() != interior {
+            self.eon_vel = Array1::zeros(interior);
+            self.eon_dt = self.config.time_step;
+            self.eon_alpha = 0.1;
+            self.eon_n_pos = 0;
+        }
+        if self.eon_dt < 1e-6 {
+            return Err(SaddleError::Stalled(format!(
+                "fire dt {:e} collapsed",
+                self.eon_dt
+            )));
+        }
+        self.state.take_error();
+        self.state.rows.store(0, Ordering::Relaxed);
+        let endpoint_first = self.positions.row(0).to_owned();
+        let endpoint_last = self.positions.row(n_images - 1).to_owned();
+        let before = self.interior_flat();
+        let (_, force, _, driving) = assemble_band_with(
+            &self.config,
+            &self.state,
+            surface,
+            endpoint_first.view(),
+            endpoint_last.view(),
+            before.view(),
+            None,
+        )?;
+        let force = driving.unwrap_or(force);
+        self.eon_vel = &self.eon_vel + &force * self.eon_dt;
+        let mut dx = &self.eon_vel * self.eon_dt;
+        if self.config.max_move > 0.0 {
+            cap_local(&mut dx, self.config.max_move);
+        }
+        let flat = &before + &dx;
+        check_moved(&self.state, &before, &flat, self.config.force_tol)?;
+        self.scatter_interior(flat.view());
+        let (_, force_new, max_force, driving_new) = assemble_band_with(
+            &self.config,
+            &self.state,
+            surface,
+            endpoint_first.view(),
+            endpoint_last.view(),
+            flat.view(),
+            None,
+        )?;
+        let force_new = driving_new.unwrap_or(force_new);
+        let fnorm = force_new.dot(&force_new).sqrt();
+        let power = force_new.dot(&self.eon_vel);
+        if fnorm > 0.0 {
+            let vnorm = self.eon_vel.dot(&self.eon_vel).sqrt();
+            let alpha = self.eon_alpha.clamp(0.0, 1.0);
+            self.eon_vel = &self.eon_vel * (1.0 - alpha) + &force_new * (alpha * vnorm / fnorm);
+        }
+        let dt_max = (self.config.time_step * 2.5).max(self.config.time_step);
+        if power >= 0.0 {
+            self.eon_n_pos += 1;
+            if self.eon_n_pos > 5 {
+                self.eon_dt = (self.eon_dt * 1.1).min(dt_max);
+                self.eon_alpha *= 0.99;
+            }
+        } else {
+            self.eon_dt *= 0.5;
+            self.eon_vel.fill(0.0);
+            self.eon_alpha = 0.1;
+            self.eon_n_pos = 0;
+        }
+        self.iteration += 1;
+        let status = if max_force <= self.config.force_tol {
+            BandStatus::Converged
+        } else {
+            BandStatus::Running
+        };
+        if !self.zoom_latch(status) {
+            self.refine_latch(status)?;
+        }
+        Ok(BandReport {
+            status,
+            max_force,
+            ci_index: self.state.ci(),
+            iteration: self.iteration,
+            surface_rows: self.state.rows.load(Ordering::Relaxed),
+            curvature: None,
+        })
     }
 
     /// One FIRE step. Velocities are per image so the per-atom cap does
@@ -2444,6 +2562,17 @@ impl BandSession {
             && matches!(self.config.method, Method::Fire { .. })
         {
             return self.step_per_image(surface);
+        }
+        if !self.fire_clamp_rescale
+            && !self.config.quickmin
+            && matches!(
+                self.config.method,
+                Method::Fire {
+                    kind: rgmin::FireKind::V1
+                }
+            )
+        {
+            return self.step_eon_fire(surface);
         }
         let n_images = self.positions.nrows();
         let dof = self.positions.ncols();

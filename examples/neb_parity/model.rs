@@ -225,6 +225,10 @@ pub(crate) fn run_with(case: &Problem, config: BandConfig) -> Result<Row, Saddle
         calls: AtomicUsize::new(0),
     };
     let mut session = BandSession::new(config, case.positions.clone())?;
+    // eOn FIRE::step does not rescale the velocity when the per-atom
+    // cap shortens the move. rgmin does, and the paths split once a
+    // step is capped (LJ7 at step 4, the Pt step hop).
+    session.set_fire_clamp_rescale(false);
     let started = Instant::now();
     let mut ci = None;
     let mut converged = false;
