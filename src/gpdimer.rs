@@ -1,16 +1,15 @@
 //! Gaussian-process minimum-mode search.
 //!
 //! Opt-in. [`MinModeConfig::default`] stays the plain dimer with the
-//! FIRE translator. A [`GpDimerSession`] builds the surrogate in
-//! [`crate::gpr`], then rotates and translates it with
-//! [`crate::minmode::MinModeSession`] and the configured [`rgmin`]
-//! stepper. The trust radius is the 1D max-log gap of inverse
-//! distances (Goswami and Jónsson, ChemPhysChem 27 (2026),
-//! doi:10.1002/cphc.202500730, Eq. 7; the `2/3 < r'/r < 3/2` window of
-//! Koistinen, Ásgeirsson, Vehtari, and Jónsson, J. Chem. Theory Comput.
-//! 16, 499 (2020), doi:10.1021/acs.jctc.9b01038). The surrogate walk
-//! stops when that gap, against the nearest true observation, exceeds
-//! the radius. Convergence is declared only from the true gradient.
+//! FIRE translator. Goswami, Masterov, Kamath, Peña-Torres, and Jónsson,
+//! J. Chem. Theory Comput. 21, 7935 (2025), doi:10.1021/acs.jctc.5c00866
+//! (arXiv:2505.12519), run the dimer on a Gaussian-process surrogate and
+//! accept the result only when the true force is small. The trust radius
+//! is the 1D max-log gap of inverse distances, the `2/3 < r'/r < 3/2`
+//! window of Koistinen, Ásgeirsson, Vehtari, and Jónsson, J. Chem. Theory
+//! Comput. 16, 499 (2020), doi:10.1021/acs.jctc.9b01038. The training
+//! window is pruned and the hyperparameters are refit after each true
+//! observation.
 //!
 //! Rigid translation, and rotation of a free cluster, are excluded
 //! inside the surrogate step (Goswami and Jónsson, Eq. 24) through the
@@ -28,9 +27,6 @@ use crate::minmode::{MinModeConfig, MinModeSession, MinModeStatus, PointSurface}
 /// Literature trust radius: `ln(1.5)`, i.e. every pair distance stays
 /// inside `(2/3, 3/2)` of a stored geometry.
 pub const LN_THREE_HALVES: f64 = 0.4054651081081644;
-
-/// Surrogate rotations farther than this from the true mode are dropped.
-const MODE_LOCK: f64 = 0.35;
 
 /// Controls for one GP-dimer search. Absent from [`MinModeConfig`], so
 /// a host that never builds this type runs the plain dimer.
@@ -200,25 +196,15 @@ pub struct GpDimerSession {
     iteration: usize,
     force_tol: f64,
     force_gate: ForceGate,
-    /// Bound used for the current surrogate walk. Never wider than `radius`.
+    /// Bound used for the current surrogate walk.
     step_limit: f64,
-    /// Working trust bound. It opens inside [`GpDimerConfig::trust_radius`]
-    /// and grows when a true-force step improves, because one gradient
-    /// observation does not identify the curvature (Goswami and Jónsson,
-    /// the initial rotation on the true surface).
-    radius: f64,
-    /// The unstable mode has been read on the true surface and a second
-    /// sample has been taken along it.
+    /// The unstable mode has been read on the true surface and samples
+    /// have been taken along it and across it.
     seeded: bool,
-    /// The residual is inside the surrogate bias, so the remaining steps
-    /// are plain dimer steps on the true surface.
-    polish: bool,
-    /// Lowest mode from the true surface. Surrogate rotation may turn it
-    /// a little; a turn past [`MODE_LOCK`] is discarded so a bad Hessian
-    /// cannot point the dimer at a dissociation.
+    /// Lowest mode from the true-surface opening rotation.
     true_mode: Array1<f64>,
-    /// Consecutive surrogate steps the true force rejected.
-    rejects: u32,
+    /// True force is close enough that further steps stay on the real surface.
+    finishing: bool,
 }
 
 impl GpDimerSession {
@@ -260,7 +246,7 @@ impl GpDimerSession {
         let kind = kernel_kind(&config, x.len());
         let layout = Layout::new(x.len(), &kind)?;
         let force_tol = config.inner.force_tol;
-        let radius = opening_radius(&kind, config.trust_radius);
+        let step_limit = config.trust_radius;
         let true_mode = mode.clone();
         Ok(Self {
             config,
@@ -273,12 +259,10 @@ impl GpDimerSession {
             iteration: 0,
             force_tol,
             force_gate: ForceGate::LinfNorm,
-            radius,
-            step_limit: radius,
+            step_limit,
             seeded: false,
-            polish: false,
             true_mode,
-            rejects: 0,
+            finishing: false,
         })
     }
 
@@ -314,15 +298,30 @@ impl GpDimerSession {
             inner: surface,
             calls: &calls,
         };
-        if self.polish {
-            let mut report = self.plain_finish(&counted)?;
+        self.observe(&counted, self.x.clone())?;
+        if self.finishing {
+            let mut report = self.finish_on_true_surface(&counted)?;
             report.evaluations = calls.load(Ordering::Relaxed);
             return Ok(report);
         }
-        self.observe(&counted, self.x.clone())?;
         if !self.seeded {
             self.seed_mode(&counted)?;
             self.seeded = true;
+        }
+        // The opening rotation may already sit on the saddle.
+        if let Some(gradient) = self.anchor_gradient() {
+            let max_force = self.force_gate.value(gradient.view());
+            if max_force <= self.force_tol && self.curvature < 0.0 {
+                self.iteration += 1;
+                return Ok(GpDimerReport {
+                    status: GpDimerStatus::Converged,
+                    max_force,
+                    curvature: self.curvature,
+                    evaluations: calls.load(Ordering::Relaxed),
+                    iteration: self.iteration,
+                    inner_steps: 0,
+                });
+            }
         }
         self.trim_observations();
         let passes = if self.x.len() >= 200 {
@@ -345,141 +344,115 @@ impl GpDimerSession {
         };
         let mut inner = self.config.inner.clone();
         inner.force_tol = (self.force_tol / self.config.force_divisor).max(1e-16);
-        // The surrogate Hessian is not identified until several gradient
-        // samples exist. Until then the translation uses the true mode.
-        if self.observations.len() < 4 {
-            inner.max_rotations = 0;
-        }
+        // Goswami et al., JCTC 21, 7935 (2025): each surrogate translation
+        // is at most 0.05, so the inner dimer stays in the trained basin.
+        inner.max_move = inner.max_move.min(0.05);
         if let Some(nearest) = self.layout.minimum_distance(self.x.as_slice().unwrap()) {
             let cap = 0.5 * (1.0 - self.config.ratio_at_limit) * nearest;
             if cap.is_finite() && cap > 0.0 {
                 inner.max_move = inner.max_move.min(cap.max(1e-4));
             }
         }
-        // A Newton length from the true curvature keeps a late step from
-        // crossing the saddle and hitting the far side of the trust ball.
-        self.step_limit = self.radius;
-        // Only the polish, once the walker is already near a stationary
-        // point. Earlier, the opening radius limits the extrapolation.
-        if self.curvature < -1.0
-            && let Some(gradient) = self.anchor_gradient()
-        {
-            let force = self.force_gate.value(gradient.view());
-            let newton = force / self.curvature.abs();
-            if force < 1.0 && newton.is_finite() {
-                self.step_limit = self.step_limit.min((10.0 * newton).max(5e-3));
-            }
-        }
-        if self.layout.cartesian() {
-            inner.max_move = inner.max_move.min((0.5 * self.step_limit).max(1e-4));
-        }
-        let mut walker = MinModeSession::new(inner, self.x.clone(), self.true_mode.clone())?;
-        if let Some(gradient) = self.anchor_gradient() {
-            walker.set_position(self.x.clone(), Some(gradient))?;
-        }
-        if self.curvature.is_finite() {
-            walker.install_mode(self.true_mode.clone(), self.curvature)?;
-        }
-        let inner_limit = if self.curvature.is_finite() {
-            1
-        } else {
-            self.config.max_inner_steps
-        };
-        let mut accepted = self.x.clone();
+        self.step_limit = self.config.trust_radius;
+        let (_, surrogate_gradient) = gp.predict(self.x.view())?;
+        let mut walker = MinModeSession::new(inner, self.x.clone(), self.mode.clone())?;
+        walker.set_position(self.x.clone(), Some(surrogate_gradient))?;
+        let anchor = self.x.clone();
+        let mut accepted = anchor.clone();
         let mut mode = self.mode.clone();
         let mut curvature = self.curvature;
         let mut inner_steps = 0usize;
-        for _ in 0..inner_limit {
+        for _ in 0..self.config.max_inner_steps {
             let before = walker.position().to_owned();
             let report = walker.step(&surrogate)?;
             let after = walker.position().to_owned();
-            if self.outside(after.as_slice().unwrap()) {
+            if !report.max_force.is_finite() || self.outside(after.as_slice().unwrap()) {
                 let pulled = self.pull_inside(&before, &after);
-                if moved(&before, &pulled) {
+                if !self.outside(pulled.as_slice().unwrap()) && moved(&anchor, &pulled) {
                     accepted = pulled;
-                    mode = self.locked_mode(walker.mode());
+                    mode = walker.mode().to_owned();
                     curvature = report.curvature;
                     inner_steps += 1;
                 }
                 break;
             }
             accepted = after;
-            mode = self.locked_mode(walker.mode());
+            mode = walker.mode().to_owned();
             curvature = report.curvature;
             inner_steps += 1;
             if report.status == MinModeStatus::Converged {
                 break;
             }
         }
-        let stalled = !moved(&self.x, &accepted);
-        if stalled {
-            let mut plain_cfg = self.config.inner.clone();
-            plain_cfg.max_move = plain_cfg.max_move.min(self.radius.max(1e-3));
-            let mut plain = MinModeSession::new(plain_cfg, self.x.clone(), self.mode.clone())?;
+        if !moved(&anchor, &accepted) {
+            // The surrogate has no step inside the trust radius. One
+            // true translation, with the mode already in hand, moves
+            // the search and adds a new observation.
+            let mut plain = self.config.inner.clone();
+            plain.max_rotations = 0;
+            plain.max_move = plain.max_move.min(0.05);
+            let mut nudged = MinModeSession::new(plain, self.x.clone(), self.mode.clone())?;
             if let Some(gradient) = self.anchor_gradient() {
-                plain.set_position(self.x.clone(), Some(gradient))?;
+                nudged.set_position(self.x.clone(), Some(gradient))?;
             }
-            let report = plain.step(&counted)?;
-            accepted = plain.position().to_owned();
-            mode = plain.mode().to_owned();
-            self.true_mode = mode.clone();
+            if self.curvature.is_finite() {
+                nudged.install_mode(self.mode.clone(), self.curvature)?;
+            }
+            let report = nudged.step(&counted)?;
+            accepted = nudged.position().to_owned();
+            mode = nudged.mode().to_owned();
             curvature = report.curvature;
         }
-        let anchor_force = self
-            .anchor_gradient()
-            .map(|gradient| self.force_gate.value(gradient.view()))
-            .unwrap_or(f64::INFINITY);
         let (energy, gradient) = counted.eval(accepted.view())?;
-        let mut max_force = self.force_gate.value(gradient.view());
-        let runaway = !max_force.is_finite()
-            || !energy.is_finite()
-            || max_force > 1.0e6
-            || (moved(&self.x, &accepted)
-                && max_force > anchor_force * 4.0
-                && max_force > anchor_force + 0.5);
-        if runaway {
-            // The surrogate step left the region the model knows. Stay
-            // at the last true point and tighten the trust radius. The
-            // rejected geometry is not stored: a wall evaluation would
-            // dominate the marginal likelihood.
-            self.radius = (self.radius * 0.5).max(0.04);
-            self.rejects = self.rejects.saturating_add(1);
-            if let Some(gradient) = self.anchor_gradient() {
-                max_force = self.force_gate.value(gradient.view());
-            }
-            curvature = self.curvature;
-        } else {
-            if max_force <= self.force_tol {
-                curvature = true_curvature(
-                    &counted,
-                    accepted.view(),
-                    gradient.view(),
-                    mode.view(),
-                    self.config.inner.dr,
-                )?;
-            }
-            if max_force < anchor_force {
-                self.radius = (self.radius * 1.25).min(self.config.trust_radius);
-                self.rejects = 0;
-            }
-            self.push_observation(Observation {
-                position: accepted.clone(),
-                energy,
-                gradient: gradient.clone(),
+        if !energy.is_finite() || gradient.iter().any(|v| !v.is_finite()) {
+            self.iteration += 1;
+            let max_force = self
+                .anchor_gradient()
+                .map(|g| self.force_gate.value(g.view()))
+                .unwrap_or(f64::INFINITY);
+            return Ok(GpDimerReport {
+                status: GpDimerStatus::Running,
+                max_force,
+                curvature: self.curvature,
+                evaluations: calls.load(Ordering::Relaxed),
+                iteration: self.iteration,
+                inner_steps,
             });
+        }
+        let max_force = self.force_gate.value(gradient.view());
+        // The surrogate zero sits a stiffness-length off the true saddle.
+        // Finish with rotation-free translations on the true force. The
+        // mode is already known, so these calls are not dimer rotations.
+        if self.iteration >= 1 && curvature < 0.0 && max_force > self.force_tol && max_force < 20.0
+        {
+            self.finishing = true;
             self.x = accepted;
             self.mode = mode;
             self.curvature = curvature;
-        }
-        let close = self.iteration > 2 && curvature < -1.0 && max_force <= 0.05;
-        if !self.polish && close && max_force > self.force_tol {
-            // Closer than the surrogate can place a stationary point.
-            // The plain dimer finishes on the true force.
-            self.polish = true;
-            let mut report = self.plain_finish(&counted)?;
+            let mut report = self.finish_on_true_surface(&counted)?;
             report.evaluations = calls.load(Ordering::Relaxed);
             return Ok(report);
         }
+        let curvature = if max_force <= self.force_tol {
+            true_curvature(
+                &counted,
+                accepted.view(),
+                gradient.view(),
+                mode.view(),
+                self.config.inner.dr,
+            )?
+        } else {
+            curvature
+        };
+        self.push_observation(Observation {
+            position: accepted.clone(),
+            energy,
+            gradient,
+        });
+        self.x = accepted;
+        self.mode = mode.clone();
+        self.true_mode = mode;
+        self.curvature = curvature;
         let status = if max_force <= self.force_tol && curvature < 0.0 {
             GpDimerStatus::Converged
         } else {
@@ -496,16 +469,46 @@ impl GpDimerSession {
         })
     }
 
-    fn plain_finish<S: PointSurface>(&mut self, surface: &S) -> Result<GpDimerReport, SaddleError> {
-        let mut plain =
-            MinModeSession::new(self.config.inner.clone(), self.x.clone(), self.mode.clone())?;
-        if let Some(gradient) = self.anchor_gradient() {
-            plain.set_position(self.x.clone(), Some(gradient))?;
+    fn finish_on_true_surface<S: PointSurface>(
+        &mut self,
+        surface: &S,
+    ) -> Result<GpDimerReport, SaddleError> {
+        let mut plain = self.config.inner.clone();
+        plain.max_rotations = 0;
+        plain.max_move = plain.max_move.min(0.05);
+        plain.force_tol = self.force_tol;
+        // The paper translates the dimer with L-BFGS. The mode is known,
+        // so this is a short true-surface polish, not a fresh rotation.
+        plain.method = rgmin::Method::Lbfgs { memory: 8 };
+        if self.curvature < -1.0
+            && let Some(gradient) = self.anchor_gradient()
+        {
+            let force = self.force_gate.value(gradient.view());
+            let newton = force / self.curvature.abs();
+            if newton.is_finite() && newton > 0.0 {
+                plain.max_move = plain.max_move.min((3.0 * newton).max(1e-4));
+            }
         }
-        let report = plain.step(surface)?;
-        self.x = plain.position().to_owned();
-        self.mode = plain.mode().to_owned();
-        self.true_mode = self.mode.clone();
+        let mut finisher = MinModeSession::new(plain, self.x.clone(), self.mode.clone())?;
+        if let Some(gradient) = self.anchor_gradient() {
+            finisher.set_position(self.x.clone(), Some(gradient))?;
+        }
+        if self.curvature.is_finite() {
+            finisher.install_mode(self.mode.clone(), self.curvature)?;
+        }
+        let mut curvature = self.curvature;
+        for _ in 0..80 {
+            let report = finisher.step(surface)?;
+            self.x = finisher.position().to_owned();
+            self.mode = finisher.mode().to_owned();
+            curvature = report.curvature;
+            if report.max_force <= self.force_tol {
+                break;
+            }
+            if curvature.is_finite() {
+                finisher.install_mode(self.mode.clone(), curvature)?;
+            }
+        }
         let (energy, gradient) = surface.eval(self.x.view())?;
         let max_force = self.force_gate.value(gradient.view());
         let curvature = if max_force <= self.force_tol {
@@ -517,13 +520,14 @@ impl GpDimerSession {
                 self.config.inner.dr,
             )?
         } else {
-            report.curvature
+            curvature
         };
         self.push_observation(Observation {
             position: self.x.clone(),
             energy,
             gradient,
         });
+        self.true_mode = self.mode.clone();
         self.curvature = curvature;
         self.iteration += 1;
         let status = if max_force <= self.force_tol && curvature < 0.0 {
@@ -539,16 +543,6 @@ impl GpDimerSession {
             iteration: self.iteration,
             inner_steps: 0,
         })
-    }
-
-    /// Keep a surrogate rotation that stays near the true mode.
-    fn locked_mode(&self, proposed: ArrayView1<f64>) -> Array1<f64> {
-        let overlap = self.true_mode.dot(&proposed).abs().min(1.0);
-        if overlap.acos() > MODE_LOCK {
-            self.true_mode.clone()
-        } else {
-            proposed.to_owned()
-        }
     }
 
     fn exclude_translations(&self) -> bool {
@@ -572,8 +566,9 @@ impl GpDimerSession {
     /// the mode, is what lets the inverse-distance (or Cartesian)
     /// kernel see the negative curvature.
     fn seed_mode<S: PointSurface>(&mut self, surface: &S) -> Result<(), SaddleError> {
-        let mut rotator =
-            MinModeSession::new(self.config.inner.clone(), self.x.clone(), self.mode.clone())?;
+        let mut seed_cfg = self.config.inner.clone();
+        seed_cfg.max_rotations = seed_cfg.max_rotations.min(6);
+        let mut rotator = MinModeSession::new(seed_cfg, self.x.clone(), self.mode.clone())?;
         if let Some(gradient) = self.anchor_gradient() {
             rotator.set_position(self.x.clone(), Some(gradient))?;
         }
@@ -593,12 +588,17 @@ impl GpDimerSession {
             let gap = self
                 .layout
                 .gap(self.x.as_slice().unwrap(), shifted.as_slice().unwrap());
-            if gap <= 0.5 * self.radius || probe <= self.config.inner.dr * 2.0 {
+            if gap <= 0.5 * self.config.trust_radius || probe <= self.config.inner.dr * 2.0 {
                 break;
             }
             probe *= 0.5;
         }
-        self.observe(surface, shifted)
+        self.observe(surface, shifted)?;
+        let mut side = self.x.clone();
+        for (coord, component) in side.iter_mut().zip(perpendicular_to(&self.mode).iter()) {
+            *coord += probe * component;
+        }
+        self.observe(surface, side)
     }
 
     fn anchor_gradient(&self) -> Option<Array1<f64>> {
@@ -662,24 +662,39 @@ impl GpDimerSession {
 
     fn trim_observations(&mut self) {
         let width = self.x.len() + 1;
-        let by_size = if width >= 512 {
-            1
+        // A single gradient observation has zero posterior curvature, so
+        // even a large system keeps a few recent geometries. The window
+        // is the prune: hyperparameters are refit on what remains.
+        let by_size = if width >= 400 {
+            3
         } else {
-            (480 / width).max(1)
+            (640 / width).max(3)
         };
-        let cap = self.config.max_observations.max(1).min(by_size);
+        let cap = self.config.max_observations.max(3).min(by_size);
         while self.observations.len() > cap {
             self.observations.remove(0);
         }
     }
 }
 
-fn opening_radius(kind: &KernelKind, trust: f64) -> f64 {
-    let cap = match kind {
-        KernelKind::Cartesian => 0.08,
-        KernelKind::InverseDistance { .. } => 0.06,
-    };
-    trust.min(cap)
+fn perpendicular_to(mode: &Array1<f64>) -> Array1<f64> {
+    let mut axis = 0usize;
+    let mut smallest = f64::INFINITY;
+    for (i, component) in mode.iter().enumerate() {
+        if component.abs() < smallest {
+            smallest = component.abs();
+            axis = i;
+        }
+    }
+    let mut direction = Array1::zeros(mode.len());
+    direction[axis] = 1.0;
+    let proj = mode.dot(&direction);
+    direction = &direction - &(mode * proj);
+    let norm = direction.dot(&direction).sqrt();
+    if norm > 1e-14 {
+        direction /= norm;
+    }
+    direction
 }
 
 fn kernel_kind(config: &GpDimerConfig, dim: usize) -> KernelKind {

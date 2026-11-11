@@ -1,20 +1,15 @@
 //! Gaussian process with derivative observations for a saddle search.
 //!
-//! The surrogate is the one the GP dimer in eOn evaluates instead of the
-//! electronic-structure surface. Goswami and Jónsson, ChemPhysChem 27, 4
-//! (2026), doi:10.1002/cphc.202500730, and the eOn `AtomicGPDimer` /
-//! `gpr_optim` / `gpridge` stack, build that surrogate from an
-//! inverse-distance kernel, fit its hyperparameters by the marginal
-//! likelihood, and stop the dimer when a configuration leaves a trust
-//! radius measured on the distances. The kernel and the derivative
-//! blocks are those of Koistinen, Ásgeirsson, Vehtari, and Jónsson,
-//! J. Chem. Theory Comput. 16, 499 (2020), doi:10.1021/acs.jctc.9b01038
-//! (the minimum-mode GP dimer), and of Koistinen, Dagbjartsdóttir,
+//! Goswami, Masterov, Kamath, Peña-Torres, and Jónsson, J. Chem. Theory
+//! Comput. 21, 7935 (2025), doi:10.1021/acs.jctc.5c00866 (arXiv:2505.12519),
+//! and the C++ `gpridge` dimer, build this surrogate and run the minimum-mode
+//! search on it. The kernel and the derivative blocks follow Koistinen,
+//! Ásgeirsson, Vehtari, and Jónsson, J. Chem. Theory Comput. 16, 499
+//! (2020), doi:10.1021/acs.jctc.9b01038, and Koistinen, Dagbjartsdóttir,
 //! Ásgeirsson, Vehtari, and Jónsson, J. Chem. Phys. 147, 152720 (2017),
-//! doi:10.1063/1.4986787. Denzel and Kästner, J. Chem. Theory Comput. 14,
-//! 5777 (2018), doi:10.1021/acs.jctc.8b00708, is the same derivative-
-//! enhanced marginal likelihood on a squared-exponential kernel; that is
-//! the model-surface case here, where there are no interatomic distances.
+//! doi:10.1063/1.4986787. A model surface with no pair distances uses the
+//! squared exponential on the coordinates (Denzel and Kästner, J. Chem.
+//! Theory Comput. 14, 5777 (2018), doi:10.1021/acs.jctc.8b00708).
 //!
 //! A geometry of `N` free atoms is compared through
 //! `φ_p = 1 / r_p`. The covariance is
@@ -32,8 +27,10 @@ use crate::error::SaddleError;
 
 const PRIOR_NU: f64 = 28.0;
 const PRIOR_S2: f64 = 1.0;
-/// `λ_max = log 2` in Goswami and Jónsson, Eq. 16: `σ_f² < 2`.
-const SIGNAL_LOG_CEILING: f64 = 2.0_f64; // natural log applied at use
+/// Upper bound on the signal variance in standardized units. The 2026
+/// barrier used 2; that ceiling flattened the surrogate on these
+/// surfaces, so the marginal likelihood may use a wider range.
+const SIGNAL_VARIANCE_CEILING: f64 = 1.0e4;
 const NOISE: f64 = 1e-8;
 
 /// One electronic-structure evaluation: energy and its Cartesian gradient.
@@ -580,7 +577,7 @@ fn penalty(amplitude2: f64, n_obs: usize) -> f64 {
     }
     let log_s = amplitude2.ln();
     let prior = -(PRIOR_NU / 2.0 + 1.0) * log_s - PRIOR_NU * PRIOR_S2 / (2.0 * amplitude2);
-    let gap = SIGNAL_LOG_CEILING.ln() - log_s;
+    let gap = SIGNAL_VARIANCE_CEILING.ln() - log_s;
     if gap <= 1e-8 {
         return f64::NEG_INFINITY;
     }

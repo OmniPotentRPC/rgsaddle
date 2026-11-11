@@ -366,3 +366,69 @@ fn convergence_is_decided_on_the_true_force() {
     let calls = surface.calls.load(Ordering::Relaxed);
     assert!(calls < 80, "true evaluations {calls}");
 }
+
+/// Müller-Brown saddle between the upper minima. The plain dimer stops
+/// here; the GP dimer must as well, on the true force.
+struct MullerBrown;
+
+impl PointSurface for MullerBrown {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        const PREFACTOR: [f64; 4] = [-200.0, -100.0, -170.0, 15.0];
+        const XX: [f64; 4] = [-1.0, -1.0, -6.5, 0.7];
+        const XY: [f64; 4] = [0.0, 0.0, 11.0, 0.6];
+        const YY: [f64; 4] = [-10.0, -10.0, -6.5, 0.7];
+        const X0: [f64; 4] = [1.0, 0.0, -0.5, -1.0];
+        const Y0: [f64; 4] = [0.0, 0.5, 1.5, 1.0];
+        let (mut energy, mut gx, mut gy) = (0.0, 0.0, 0.0);
+        for i in 0..4 {
+            let (dx, dy) = (x[0] - X0[i], x[1] - Y0[i]);
+            let term = PREFACTOR[i] * (XX[i] * dx * dx + XY[i] * dx * dy + YY[i] * dy * dy).exp();
+            energy += term;
+            gx += term * (2.0 * XX[i] * dx + XY[i] * dy);
+            gy += term * (XY[i] * dx + 2.0 * YY[i] * dy);
+        }
+        energy += 2.0 * x[2] * x[2];
+        Ok((energy, array![gx, gy, 4.0 * x[2]]))
+    }
+}
+
+#[test]
+fn gp_dimer_converges_on_muller_brown() {
+    let config = GpDimerConfig {
+        inner: MinModeConfig {
+            force_tol: 1e-3,
+            max_move: 0.2,
+            ..MinModeConfig::default()
+        },
+        max_inner_steps: 25,
+        ..GpDimerConfig::default()
+    };
+    let start = array![-0.6, 0.8, 0.0];
+    let surface = Counting {
+        inner: MullerBrown,
+        calls: AtomicUsize::new(0),
+    };
+    let mut session = GpDimerSession::new(config, start, array![-0.8, -0.5, 0.02]).unwrap();
+    let report = session.run(&surface, 40).unwrap();
+    assert_eq!(
+        report.status,
+        GpDimerStatus::Converged,
+        "force {} curvature {}",
+        report.max_force,
+        report.curvature
+    );
+    let x = session.position();
+    assert!(
+        (x[0] + 0.822).abs() < 2e-2 && (x[1] - 0.624).abs() < 2e-2 && x[2].abs() < 2e-2,
+        "landed at {x}"
+    );
+    let (energy, gradient) = MullerBrown.eval(x).unwrap();
+    let true_force = gradient.iter().copied().map(f64::abs).fold(0.0, f64::max);
+    assert!(true_force <= 1e-3, "true force {true_force}");
+    assert!((energy + 40.664843).abs() < 1e-3, "energy {energy}");
+    let calls = surface.calls.load(Ordering::Relaxed);
+    assert!(
+        calls < 80,
+        "true evaluations {calls} are not below the plain dimer"
+    );
+}
