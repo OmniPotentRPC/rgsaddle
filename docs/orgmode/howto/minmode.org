@@ -84,3 +84,33 @@ The table is twelve seeds from base 20261111, release, cap 0.2, from ~examples/m
 | Müller-Brown | Lanczos | L-BFGS | 12/12 | 42 [39, 43] | 42 [39, 43] |
 
 Vacancy Lanczos FIRE with the probe off converges on 0 of 12 seeds. With the probe on it converges on 12 of 12, so the matched column is empty. Those twelve searches take 25820 [25310, 27241] calls and 9396.760 [8944.507, 9878.244] ms. The unmatched vacancy dimer seed, 10372713005381289396, converges on neither side. LJ38 dimer L-BFGS uses 408 calls where FIRE uses 2038, but on LJ13 dimer only 4 of 12 L-BFGS searches land on the FIRE saddle. Conjugate gradients match 0/12 there, projected L-BFGS 4/12, Barzilai-Borwein 2/12, and quick-min 1/12. The default translator stays FIRE. The Gaussian-process surrogate in Goswami, Masterov, Kamath, Peña-Torres, and Jónsson, J. Chem. Theory Comput. 21, 7935 (2025), doi:10.1021/acs.jctc.5c00866, is a different method and is not used here.
+
+** Buffers
+A dimer estimate keeps one set of buffers for all its rotations: the
+rotational force, its conjugate direction, and the trial and rotated
+dimers.
+Lanczos keeps its Krylov vectors, residual, coefficients and the tables
+of its Ritz solve in the session, and moves each Hessian action into the
+Krylov block it hands back.
+A finite-difference action shifts the point in a buffer of its call and
+forms the difference in the gradient the surface returned.
+Outside the surface, a longer rotation or a larger Krylov space
+allocates nothing more, and every estimate and step is bitwise what it
+was.
+The dimer is the reflection of Goswami, Gunde and Jonsson,
+Front. Chem. 14 (2026), doi:10.3389/fchem.2026.1807063, Eq. 9,
+and Goswami (2026), arXiv:2603.10992, Eqs. 2.14-2.16, on the rotation
+of Henkelman and Jonsson, J. Chem. Phys. 111, 7010 (1999),
+doi:10.1063/1.480097.
+The Lanczos estimate is that of Olsen, Kroes, Henkelman, Arnaldsson
+and Jonsson, J. Chem. Phys. 121, 9776 (2004), doi:10.1063/1.1809574.
+
+~examples/band_scaling.rs~ runs up to 300 steps of each search from
+the midpoint of its adatom hop, seeded with the hop direction, in the
+paired runs of =howto/band=.
+The time saved per surface call is fixed, so it shows only where the
+surface is cheap: Lanczos runs 1.11 (1.07-1.13) times as fast as the
+parent at 38 atoms, 1.04 (1.03-1.04) at 128 and 1.01 (1.00-1.02) at 256,
+and the dimer 1.03, 1.02 and 1.02, with 8 to 11 of 12 pairs won.
+At 256 atoms both searches converge at step 108, as they do on the
+parent.

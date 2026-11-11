@@ -1,0 +1,15 @@
+{#- Copyright (c) rgsaddle developers -#}
+{#- Org entries in the style of the handwritten changelog:
+one "- " item per fragment,
+towncrier indents its further lines under the item. -#}
+{%- set newline = "\n" -%}
+{%- for section, _ in sections.items() %}
+{%- for category, val in definitions.items() if category in sections[section] %}
+{{- "** " ~ definitions[category]['name'] ~ newline ~ newline }}
+{%- for text, values in sections[section][category].items() %}
+{%- set issues = values | join(", ") %}
+{{- "- " ~ text ~ ((" (" ~ issues ~ ")") if issues else "") ~ newline }}
+{%- endfor %}
+{{- newline }}
+{%- endfor %}
+{%- endfor %}

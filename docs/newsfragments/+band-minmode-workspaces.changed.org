@@ -1,0 +1,9 @@
+The band session keeps the buffers of its force assembly between
+evaluations, and a warm step allocates as often at 13 images as at 5.
+A band the session already holds no longer goes to the surface again,
+and the trust-region band method keeps the Hessian-vector products
+around its base, which removes 46% of the surface rows of 100 steps on a
+128-atom cluster.
+The dimer rotation and Lanczos reuse their buffers, so a longer rotation
+or a larger Krylov space allocates nothing more outside the surface.
+Trajectories, estimates and steps are bitwise as before.

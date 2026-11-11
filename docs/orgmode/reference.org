@@ -133,6 +133,20 @@ The importable package is =rgsaddle=. =rgsaddle._core= is the nanobind extension
 - =tests/double_well.rs= — band finds the origin saddle, endpoints pinned
 - =tests/autoneb.rs= — ASE AutoNEB decisions and the Müller-Brown insertion sequence. =tests/autoneb_gate.rs= hashes the insertion list and the trajectory at 1, 2, 3 and 8 threads, and an ignored release run compares AutoNEB with CI-NEB at one force-call budget. Strong scaling of a full AutoNEB run is an ignored test in the crate.
 - =tests/minmode_saddle.rs= — dimer / Lanczos
+- =tests/band_workspace.rs=: a warm band step allocates as often at 13
+  images as at 5, for five spring, projection and optimizer settings,
+  and the trajectories keep the hashes of the allocating code.
+- =tests/band_image_threads.rs=: trajectories and surface rows at 2, 3,
+  8 and 16 image threads are bitwise those of one thread, each call is
+  split into contiguous blocks, the first failing image is reported, and
+  zero threads is refused.
+- =tests/band_repeat_evaluations.rs=: no band reaches the surface twice
+  under the trust-region stepper on coupled double wells or under ODE12r
+  on LJ38 through its stall.
+- =tests/minmode_workspace.rs=: outside the surface,
+  a dimer estimate allocates as often at eight rotations as at two,
+  and Lanczos as often at eight Krylov products as at two,
+  and five searches keep the hashes of the allocating code.
 - =tests/nichols_saddle.rs= — Nichols step against i-PI on the same Hessian and gradient, Muller-Brown saddles, quadratic saddle
 - =tests/prfo_saddle.rs= — partitioned RFO against the augmented Hessian, trust sphere changes the mode ratio
 - =tests/sella_symmetrized_ritz.rs=: the Sella saddle walk on a linear gradient field with an antisymmetric Jacobian part.

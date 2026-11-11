@@ -1,0 +1,10 @@
+~BandSession::set_image_threads(threads)~ splits each band evaluation
+into contiguous image blocks on a pool the session keeps.
+One thread stays the default; zero threads is refused.
+On a surface whose rows are independent the trajectory is bitwise that
+of one thread.
+With 16 interior images of 512 Lennard-Jones atoms, 8 threads run a band
+step 4.36 times as fast as the parent; =howto/band= gives the strong and
+weak scaling and what limits it.
+~examples/band_scaling.rs~ and ~docs/source/figures/band-scaling~ time
+the runs and draw the figures.
