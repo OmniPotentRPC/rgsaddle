@@ -8,11 +8,7 @@ fn cxx_stencil_wrapper_steps_a_dimer() {
     let compiler = std::env::var("CXX").unwrap_or_else(|_| "c++".into());
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let out = std::env::temp_dir().join(format!("rgsaddle_stencil_cxx_{}", std::process::id()));
-    let mut libdir = std::env::current_exe().unwrap();
-    libdir.pop();
-    if libdir.ends_with("deps") {
-        libdir.pop();
-    }
+    let libdir = cdylib_dir();
     assert!(
         libdir.join("librgsaddle.so").exists(),
         "build the C ABI library before testing"
@@ -50,3 +46,8 @@ fn cxx_stencil_wrapper_steps_a_dimer() {
     assert!(String::from_utf8_lossy(&run.stdout).contains("RGSADDLE_STENCIL_CXX_OK"));
     std::fs::remove_file(out).expect("remove temporary smoke executable");
 }
+
+include!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/common/cdylib_dir.rs"
+));

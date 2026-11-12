@@ -8,11 +8,7 @@ fn c_abi_solid_state_band() {
     let compiler = std::env::var("CC").unwrap_or_else(|_| "cc".into());
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let out = std::env::temp_dir().join(format!("rgsaddle_solid_abi_{}", std::process::id()));
-    let mut libdir = std::env::current_exe().unwrap();
-    libdir.pop();
-    if libdir.ends_with("deps") {
-        libdir.pop();
-    }
+    let libdir = cdylib_dir();
     assert!(
         libdir.join("librgsaddle.so").exists(),
         "build the C ABI library before testing"
@@ -51,3 +47,8 @@ fn c_abi_solid_state_band() {
     assert!(stdout.contains("RGSADDLE_SOLID_ABI_OK"), "stdout: {stdout}");
     std::fs::remove_file(out).expect("remove temporary solid-state executable");
 }
+
+include!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/common/cdylib_dir.rs"
+));
