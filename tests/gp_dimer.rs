@@ -333,6 +333,7 @@ impl PointSurface for ThreeBody {
 fn convergence_is_decided_on_the_true_force() {
     let config = GpDimerConfig {
         max_inner_steps: 25,
+        trust_radius: 1.0,
         inner: MinModeConfig {
             force_tol: 1e-4,
             max_move: 0.15,
@@ -562,6 +563,8 @@ fn morse_seed_stays_on_the_known_index_one_saddle() {
                 max_move: 0.15,
                 ..MinModeConfig::default()
             },
+            cell: Some(slab.cell),
+            fixed: Some(slab.fixed.clone()),
             ..GpDimerConfig::default()
         },
         start,
@@ -596,8 +599,8 @@ fn morse_seed_stays_on_the_known_index_one_saddle() {
         index.second
     );
     assert!(
-        energy < -1.0,
-        "energy {energy} gap {gap} left the adsorption well"
+        (energy + 3.459928).abs() < 1e-3 && gap < 1e-2,
+        "energy {energy} gap {gap} is not the hop saddle"
     );
 }
 

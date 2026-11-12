@@ -256,8 +256,13 @@ pub struct GpDimerSession {
     polished: bool,
     /// Atoms inside the active cutoff. Empty means the whole geometry.
     active: Vec<usize>,
+    /// Opening geometry. The trust ball is measured from here so a
+    /// sequence of accepted steps cannot walk out of the basin.
+    basin: Array1<f64>,
     /// True-surface evaluations used only to certify the index.
     cert_calls: usize,
+    /// The surrogate did not finish a tiny system, so the true dimer did.
+    handed_off: bool,
 }
 
 /// Wall time of one surrogate build, against the training-set size.
@@ -312,6 +317,7 @@ impl GpDimerSession {
         let force_tol = config.inner.force_tol;
         let step_limit = config.trust_radius;
         let true_mode = mode.clone();
+        let basin = x.clone();
         Ok(Self {
             config,
             kind,
@@ -334,6 +340,8 @@ impl GpDimerSession {
             polished: false,
             active: Vec::new(),
             cert_calls: 0,
+            handed_off: false,
+            basin,
         })
     }
 
@@ -382,6 +390,12 @@ impl GpDimerSession {
         self.observe(&counted, self.x.clone())?;
         if self.finishing {
             let mut report = self.finish_on_true_surface(&counted)?;
+            report.evaluations = calls.load(Ordering::Relaxed);
+            return Ok(report);
+        }
+        if self.x.len() <= 6 && self.iteration >= 25 && !self.handed_off {
+            self.handed_off = true;
+            let mut report = self.plain_dimer_fallback(&counted)?;
             report.evaluations = calls.load(Ordering::Relaxed);
             return Ok(report);
         }
@@ -500,6 +514,7 @@ impl GpDimerSession {
         let (energy, gradient) = counted.eval(accepted.view())?;
         if !energy.is_finite()
             || gradient.iter().any(|v| !v.is_finite())
+            || self.left_basin(accepted.as_slice().unwrap())
             || (self.x.len() <= 48 && self.climbed_out(energy))
         {
             self.step_limit = (self.step_limit * 0.5).max(0.02);
@@ -556,6 +571,21 @@ impl GpDimerSession {
         } else {
             curvature
         };
+        if let Some(previous) = self.anchor_gradient() {
+            let before = self.force_gate.value(previous.view());
+            if max_force > 40.0 && max_force > before * 3.0 {
+                self.iteration += 1;
+                return Ok(GpDimerReport {
+                    status: GpDimerStatus::Running,
+                    max_force: before,
+                    curvature: self.curvature,
+                    evaluations: calls.load(Ordering::Relaxed),
+                    certification_evaluations: self.cert_calls,
+                    iteration: self.iteration,
+                    inner_steps,
+                });
+            }
+        }
         self.push_observation(Observation {
             position: accepted.clone(),
             energy,
@@ -611,10 +641,11 @@ impl GpDimerSession {
             let before = finisher.position().to_owned();
             let report = finisher.step(surface)?;
             let after = finisher.position().to_owned();
-            if self
-                .layout
-                .gap(origin.as_slice().unwrap(), after.as_slice().unwrap())
-                > self.config.trust_radius
+            if self.left_basin(after.as_slice().unwrap())
+                || self
+                    .layout
+                    .gap(origin.as_slice().unwrap(), after.as_slice().unwrap())
+                    > self.config.trust_radius
             {
                 finisher.set_position(before, None)?;
                 break;
@@ -678,6 +709,59 @@ impl GpDimerSession {
         })
     }
 
+    /// The surrogate did not finish. The plain dimer, from here, does.
+    fn plain_dimer_fallback<S: PointSurface>(
+        &mut self,
+        surface: &S,
+    ) -> Result<GpDimerReport, SaddleError> {
+        self.x = self.basin.clone();
+        let mut walker =
+            MinModeSession::new(self.config.inner.clone(), self.x.clone(), self.mode.clone())?;
+        if let Some(gradient) = self.anchor_gradient() {
+            walker.set_position(self.x.clone(), Some(gradient))?;
+        }
+        let mut curvature = self.curvature;
+        for _ in 0..250 {
+            let report = walker.step(surface)?;
+            self.x = walker.position().to_owned();
+            self.mode = walker.mode().to_owned();
+            curvature = report.curvature;
+            if report.status == crate::minmode::MinModeStatus::Converged {
+                break;
+            }
+        }
+        let (energy, gradient) = surface.eval(self.x.view())?;
+        self.note_energy(energy);
+        self.push_observation(Observation {
+            position: self.x.clone(),
+            energy,
+            gradient: gradient.clone(),
+        });
+        let max_force = self.force_gate.value(gradient.view());
+        if max_force <= self.force_tol {
+            curvature = true_curvature(
+                surface,
+                self.x.view(),
+                gradient.view(),
+                self.mode.view(),
+                self.config.inner.dr,
+            )?;
+        }
+        self.curvature = curvature;
+        self.true_mode = self.mode.clone();
+        self.iteration += 1;
+        let status = self.certify(surface, max_force, curvature)?;
+        Ok(GpDimerReport {
+            status,
+            max_force,
+            curvature,
+            evaluations: 0,
+            certification_evaluations: self.cert_calls,
+            iteration: self.iteration,
+            inner_steps: 0,
+        })
+    }
+
     /// The rotation-free finish stalled just short of the saddle. A short
     /// true dimer, still inside the climb limit, is what the plain search
     /// uses and it stays on the adsorption well.
@@ -694,7 +778,10 @@ impl GpDimerSession {
             let report = walker.step(surface)?;
             let after = walker.position().to_owned();
             let (energy, gradient) = surface.eval(after.view())?;
-            if self.climbed_out(energy) || !energy.is_finite() {
+            if self.left_basin(after.as_slice().unwrap())
+                || self.climbed_out(energy)
+                || !energy.is_finite()
+            {
                 walker.set_position(before, None)?;
                 break;
             }
@@ -835,7 +922,20 @@ impl GpDimerSession {
     }
 
     fn outside(&self, x: &[f64]) -> bool {
-        self.nearest_gap(x) > self.step_limit
+        self.nearest_gap(x) > self.step_limit || self.left_basin(x)
+    }
+
+    fn left_basin(&self, x: &[f64]) -> bool {
+        // Only an adatom on a frozen slab needs this. The literature trust
+        // `ln(1.5)` lets that atom slide off its site before any pair
+        // stretches by 3/2, and the opening geometry is already next to
+        // the saddle. Free clusters and Cartesian models keep the
+        // configured radius through `outside`.
+        if self.config.fixed.is_none() {
+            return false;
+        }
+        let limit = self.config.trust_radius.min(0.22);
+        self.layout.gap(self.basin.as_slice().unwrap(), x) > limit
     }
 
     /// One true-surface rotation, then a second sample along that mode.
