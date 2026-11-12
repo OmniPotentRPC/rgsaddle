@@ -39,7 +39,7 @@ faer = ["dep:faer"]
 dlpk = { version = "0.1.5", features = ["ndarray"] }
 # ConFrameWriter::new is RoundTrip and canonical stays off.
 readcon-core = { version = "=0.17.1", optional = true }
-readcon-db = { version = "0.2", optional = true }
+readcon-db = { version = "=0.2.0", optional = true }
 # crates.io 0.5.2. Control::default leaves ftol_rel and noise_floor
 # unset, the 0.5.1 behaviour the sessions rely on.
 rgmin = "0.5.2"
