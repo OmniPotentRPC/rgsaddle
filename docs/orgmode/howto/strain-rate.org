@@ -1,0 +1,50 @@
+#+TITLE: Strain-rate table
+#+OPTIONS: toc:nil num:nil
+
+=StrainRateTable= is a fixed grid of harmonic rates for one defect migration, read back by a later AKMC step. The three barriers stay in separate columns. A lookup never copies one into another.
+
+The dipole is the interaction tensor of Varvenne and Clouet, Phys. Rev. B 96, 224103 (2017), doi:10.1103/PhysRevB.96.224103. Their Eq. (5) is the interaction energy =-P : ε=. Their Eq. (8) is =P = -V σ= on a fixed cell. The paragraph after Eq. (8) subtracts a nonzero homogeneous stress of the perfect cell. =elastic_dipole= applies that correction and then symmetrizes, because the defect has no net torque (their Eq. (1)). =σ = (1/V) ∂E/∂ε= for a right strain at fixed fractional coordinates, so the virial =V σ= returned by =SolidDimer::elastic_dipole= is the opposite of this dipole when the bulk stress vanishes.
+
+The barrier at an imposed strain is
+
+: ΔE(ε) = ΔE0 - (P_saddle - P_minimum) : ε.
+
+The bulk stress cancels in the difference. Dederichs and Schroeder, Phys. Rev. B 17, 2524 (1978), doi:10.1103/PhysRevB.17.2524, show that a homogeneous strain changes the jump rate through the dipole of the saddle relative to the equilibrium site. The activation volume here is the stress derivative of the activation Gibbs energy, =Ω = ∂ΔG/∂τ=. =τ= is the applied tension, positive when it expands the cell, and it is minus the external stress of the joint chart. With =ε = S τ=,
+
+: Ω = -W^{-1} S^{T} W (P_saddle - P_minimum),
+
+and =W = diag(1, 1, 1, 2, 2, 2)= so that the Voigt product matches the nine-entry sum =P_ij ε_ij=.
+
+The fixed-cell column is the Helmholtz barrier, the potential-energy difference at the imposed strain. The variable-cell column is the enthalpy =E + V0 σ_ext : ε=, with =σ_ext= equal to minus the stress of the relaxed minimum, the same load as the copper dimer. The linear column is the dipole formula above. It is marked failed when its absolute error against the fixed-cell barrier exceeds 0.01 eV, or when the fixed-cell search finds no barrier. Past that point the rate is the explicit search.
+
+=lookup(strain, T, ensemble)= returns =k = ν exp(-ΔE / kT)=. =ν= is the harmonic Vineyard prefactor from the Cartesian Hessians at the minimum and the saddle, with rigid translations projected out and the saddle's negative eigenvalue left out of the product. =ν_i = ω_i / 2π= and =ω_i = sqrt(λ_i / m)=. On the copper table every atom has mass 63.546 u. Helmholtz and Gibbs interpolate the barrier linearly and the prefactor geometrically along a recorded ray. They do not extrapolate, and they refuse a query whose bracketing rows cross a saddle annihilation. A recorded row with no positive barrier returns =no barrier=. The dipole line uses the zero-strain fixed-cell prefactor. It returns =linear model failed= once the recorded error is past the fold, and it does not substitute the explicit barrier.
+
+=to_csv= / =from_csv= and =to_json= / =from_json= round-trip the same table. =open= and =save= pick the format from the =.csv= or =.json= suffix. The copper rows are =benchmarks/strain_rate_table_cu.csv= and =benchmarks/strain_rate_table_cu.json=. =examples/strain_rate.rs= reads the JSON and prints =k(ε, T)=.
+
+** Copper dumbbell
+
+The grid is the 109-atom Mishin EAM1 cell of =howto/solid-dimer=. The path is the <100> dumbbell to the shear-aligned <110>, and to the opposite <110> when the aligned search does not return a switched index-1 saddle. A dimer that does return one is the barrier. Otherwise a seven-image climbing band is the explicit search. A band whose enthalpy does not rise by 0.001 eV, or whose highest image is not index 1, is =no barrier=.
+
+The shear ray is =ε_yx= from 0 to 5 percent, the same simple shear as =benchmarks/solid_dimer_cu.csv=. The other imposed strains are =ε_zx = 0.02=, uniaxial =ε_xx = 0.01=, and a hydrostatic extension of 0.01. The numbers below are the output of =tests/strain_rate_driver.rs= in a release build. They are not copied from the earlier dimer table. The fixed-cell barriers at 0, 2, 3, 4 and 5 percent nevertheless match that table: the search is the same dimer.
+
+At zero strain the Varvenne dipoles, in eV, are
+
+| | xx | yy | zz | xy |
+| minimum | 19.1339219775939 | 19.432240466906126 | 19.432240466906144 | 0 |
+| saddle | 20.993278221197325 | 20.991117960164097 | 19.796387738795715 | 12.850385197341652 |
+
+The saddle =xy= entry is =-V σ_xy= of the fixed cell. The earlier dimer row stored the virial =V σ_xy = -12.850385197341554=. The activation volume at that reference state, in Å³, is =-2.5147707110936626= (=xx=), =-1.496727049560212= (=yy=), =2.5511050440932515= (=zz=) and =-13.510705676972174= (=xy=).
+
+| direction | strain | linear (eV) | status | Helmholtz (eV) | Gibbs (eV) | linear error (eV) |
+| reference | 0 | 0.473916239370908 | holds | 0.473916239370908 | 0.34702642693292773 | 0 |
+| shear_yx | 0.005 | 0.4096643133841999 | holds | 0.4113674721013467 | 0.2967100291922975 | 0.0017031587171468243 |
+| shear_yx | 0.01 | 0.3454123873974918 | holds | 0.352192817709863 | 0.2495851151548436 | 0.006780430312371188 |
+| shear_yx | 0.02 | 0.21690853542407557 | failed | 0.24356279471709286 | 0.1630119173183857 | 0.02665425929301729 |
+| shear_yx | 0.03 | 0.08840468345065944 | failed | 0.14826689300639373 | 0.08761266284551539 | 0.05986220955573429 |
+| shear_yx | 0.04 | -0.040099168522756856 | failed | 0.06784288866265342 | 0.0274332017463621 | 0.10794205718541028 |
+| shear_yx | 0.05 | -0.16860302049617304 | failed | 0.00776114637324099 | no barrier | 0.17636416686941403 |
+| shear_xz | 0.02 | 0.47391623042082465 | failed | 0.24356191755691725 | 0.16301980840830765 | 0.2303543128639074 |
+| uniaxial_x | 0.01 | 0.4553226769348737 | holds | 0.45472744854419034 | 0.3350882582183772 | 0.0005952283906833777 |
+| hydrostatic | 0.01 | 0.4360924292833983 | holds | 0.4371651229433269 | 0.32168405605392536 | 0.0010726936599285697 |
+
+On the copper shear ray the absolute error is 0.006780430312371188 eV at 1 percent and 0.02665425929301729 eV at 2 percent. Every recorded shear at or above 2 percent is past 0.01 eV. At 5 percent the variable-cell band does not rise, so the Gibbs column is no barrier, while the fixed cell still has a 0.00776114637324099 eV index-1 barrier. A 2 percent =ε_zx= shear is also past the fold. The reference saddle dipole is the =xy= <110>, and its =xz= component is 0.00000044750421789650947 eV. The dipole line stays at 0.47391623042082465 eV while the explicit barrier falls to 0.24356191755691725 eV. Uniaxial and hydrostatic strain of 1 percent stay inside 0.01 eV.

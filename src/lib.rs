@@ -58,6 +58,7 @@ pub mod solid_state;
 pub mod spring;
 pub mod ssneb;
 pub mod stencil;
+pub mod strain_rate;
 pub mod tangent;
 
 // `translated_gradient` is crate-private, so the golden-bit test lives in
@@ -103,6 +104,13 @@ pub use ssneb::{SolidImage, SolidNeb, joint_coordinate};
 pub use stencil::{
     BAND_PRESET_SEAM, BandBuilder, Chain, Climb, EvalPool, Mesh, MeshEvent, PointBuilder, Preset,
     Role, Stencil, StencilReport, StencilStatus,
+};
+pub use strain_rate::{
+    BOLTZMANN_EV_PER_K, DipoleModel, Ensemble, ExplicitSide, HarmonicRate, LINEAR_FOLD_EV,
+    LinearStatus, NEGATIVE_CURVATURE, Rate, StrainPoint, StrainRateTable, TranslationalSplit,
+    activation_volume, angular_scale_rad_s, compliance_from_stiffness, double_dot, elastic_dipole,
+    hydrostatic, judge_linear, shear_xz, shear_yx, split_translational_modes, symmetrize,
+    uniaxial_x, vineyard_prefactor,
 };
 pub use tangent::TangentKind;
 
