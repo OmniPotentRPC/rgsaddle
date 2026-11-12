@@ -1306,6 +1306,23 @@ impl MinModeSession {
         self.config.seed_curvature = enabled;
     }
 
+    /// Translation stops when the largest force component falls under
+    /// `tol` and the curvature is negative.
+    pub fn set_force_tol(&mut self, tol: f64) -> Result<(), SaddleError> {
+        if !(tol.is_finite() && tol > 0.0) {
+            return Err(SaddleError::Invalid(
+                "force tolerance must be positive and finite".into(),
+            ));
+        }
+        self.config.force_tol = tol;
+        Ok(())
+    }
+
+    /// The tolerance [`Self::set_force_tol`] last stored.
+    pub fn force_tol(&self) -> f64 {
+        self.config.force_tol
+    }
+
     /// Replace a stalled FIRE step on a stiff negative mode with a
     /// short directional probe. On by default. Off, FIRE keeps the
     /// timestep it was built with.

@@ -95,8 +95,8 @@ pub use ocineb::{
 pub use prfo::{PrfoKind, partitioned_rfo_eigen, restricted_prfo_displacement};
 pub use projection::ProjectionKind;
 pub use solid_dimer::{
-    CellMask, JointChart, STRAIN_VOIGT, SolidDimer, SolidDimerConfig, SolidDimerReport,
-    finite_difference_cauchy_stress, virial,
+    CellMask, IndexCheck, IndexReport, JointChart, STRAIN_VOIGT, SolidDimer, SolidDimerConfig,
+    SolidDimerReport, finite_difference_cauchy_stress, index_at, virial,
 };
 pub use spring::SpringKind;
 pub use ssneb::{SolidImage, SolidNeb, joint_coordinate};

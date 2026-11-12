@@ -10,13 +10,17 @@
 //! atom is the interstitial. Each search starts at the relaxed <100>
 //! minimum, not at a precomputed saddle.
 
+use std::fs::File;
+use std::io::Write;
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ndarray::{Array1, Array2, ArrayView1};
 use rgmin::{Control, FireKind, Method, Oracle, Solver};
 use rgsaddle::{
-    CellMask, MinModeConfig, MinModeStatus, PointSurface, SaddleError, SolidDimer, SolidDimerConfig,
+    CellMask, IndexCheck, MinModeConfig, MinModeStatus, PointSurface, SaddleError, SolidDimer,
+    SolidDimerConfig, index_at,
 };
 
 const RC: f64 = 5.50679;
@@ -269,27 +273,27 @@ fn eam_eval(positions: ArrayView1<f64>, cell: [[f64; 3]; 3]) -> (f64, Array1<f64
                 gradient[3 * bond.i + c] -= force;
                 gradient[3 * bond.j + c] += force;
             }
-            for a in 0..3 {
-                for b in 0..3 {
-                    virial[a][b] += deriv * bond.d[a] * bond.d[b] * inv_r;
+            for (a, virial_row) in virial.iter_mut().enumerate() {
+                for (b, slot) in virial_row.iter_mut().enumerate() {
+                    *slot += deriv * bond.d[a] * bond.d[b] * inv_r;
                 }
             }
         } else {
             // +s and -s are both neighbors. Their forces cancel; energy and virial add.
             energy += v;
             let deriv = dv + 2.0 * fp[bond.i] * drho;
-            for a in 0..3 {
-                for b in 0..3 {
-                    virial[a][b] += deriv * bond.d[a] * bond.d[b] * inv_r;
+            for (a, virial_row) in virial.iter_mut().enumerate() {
+                for (b, slot) in virial_row.iter_mut().enumerate() {
+                    *slot += deriv * bond.d[a] * bond.d[b] * inv_r;
                 }
             }
         }
     }
     let volume = det(cell).abs();
     let mut stress = [[0.0; 3]; 3];
-    for a in 0..3 {
-        for b in 0..3 {
-            stress[a][b] = virial[a][b] / volume;
+    for (a, virial_row) in virial.iter().enumerate() {
+        for (b, virial_ab) in virial_row.iter().enumerate() {
+            stress[a][b] = virial_ab / volume;
         }
     }
     (energy, gradient, stress)
@@ -592,8 +596,16 @@ struct SearchRow {
     final_shear: f64,
     volume: f64,
     switched: bool,
+    negative_modes: Option<usize>,
+    rejected: bool,
+    calls_at_loose: usize,
+    index_evaluations: usize,
+    eigenvalues: Vec<f64>,
+    positions: Array1<f64>,
+    cell: [[f64; 3]; 3],
 }
 
+#[allow(clippy::too_many_arguments)]
 fn saddle_from_minimum(
     copper: &Copper,
     start: &Array1<f64>,
@@ -621,14 +633,28 @@ fn saddle_from_minimum(
     let mut dimer = SolidDimer::new(
         SolidDimerConfig::new(search)
             .with_mask(mask)
-            .with_external_stress(external),
+            .with_external_stress(external)
+            .with_index_check(IndexCheck::first_order())
+            .with_flat(0.005),
         start.clone(),
         cell,
         mode.clone(),
     )
     .unwrap();
     let surface = Held { copper, cell };
-    let report = dimer.run(&surface, max_steps).expect("dimer");
+    let mut report = dimer.step(&surface).expect("dimer");
+    let mut calls_at_loose = None;
+    let mut steps_taken = 1usize;
+    loop {
+        if calls_at_loose.is_none() && report.curvature < 0.0 && report.max_force <= 2e-3 {
+            calls_at_loose = Some(copper.calls() - before);
+        }
+        if report.status != MinModeStatus::Running || steps_taken >= max_steps {
+            break;
+        }
+        report = dimer.step(&surface).expect("dimer");
+        steps_taken += 1;
+    }
     let calls = copper.calls() - before;
     let (e_sad, _, stress_now) = copper.evaluate(dimer.positions(), dimer.cell());
     let stress = dimer.stress().unwrap_or(stress_now);
@@ -637,6 +663,7 @@ fn saddle_from_minimum(
     let (angle_100, angle_110, axis, separation) = axis_report(dir);
     // [110] has the same sign on x and y. [-110] is the other saddle.
     let switched = report.status == MinModeStatus::Converged
+        && !report.rejected
         && report.curvature < 0.0
         && min_angle_100 < 25.0
         && angle_110 < 15.0
@@ -658,17 +685,205 @@ fn saddle_from_minimum(
         final_shear: shear_yx(cube, dimer.cell()),
         volume: dimer.volume(),
         switched,
+        negative_modes: report.negative_modes,
+        rejected: report.rejected,
+        calls_at_loose: calls_at_loose.unwrap_or(calls),
+        index_evaluations: report.index_evaluations,
+        eigenvalues: report.eigenvalues,
+        positions: dimer.positions().to_owned(),
+        cell: dimer.cell(),
+    }
+}
+
+fn scan_fixed_soft_mode(copper: &Copper, row: &SearchRow) {
+    let surface = Held {
+        copper,
+        cell: row.cell,
+    };
+    for step in [1.0e-3, 1.0e-4, 1.0e-5, 1.0e-6] {
+        let report = match index_at(
+            &surface,
+            row.positions.view(),
+            IndexCheck::first_order().with_step(step),
+        ) {
+            Ok(report) => report,
+            Err(err) => {
+                eprintln!("FD_STEP step={step:.0e} failed {err}");
+                continue;
+            }
+        };
+        let second = report.values.get(1).copied().unwrap_or(f64::NAN);
+        let overlap = translation_overlap(report.vectors.column(1), row.positions.len() / 3);
+        eprintln!(
+            "FD_STEP step={step:.0e} negative={} lowest={} second={second:.8e} translation_overlap={overlap:.6e} spectrum={}",
+            report.negative,
+            report.values.first().copied().unwrap_or(f64::NAN),
+            report
+                .values
+                .iter()
+                .take(6)
+                .map(|value| format!("{value:.8e}"))
+                .collect::<Vec<_>>()
+                .join(";")
+        );
+    }
+}
+
+fn trace_soft_mode(copper: &Copper, row: &SearchRow) {
+    let surface = Held {
+        copper,
+        cell: row.cell,
+    };
+    let origin = index_at(
+        &surface,
+        row.positions.view(),
+        IndexCheck::first_order().with_step(1e-4),
+    )
+    .expect("soft mode at the rejected point");
+    let e0 = copper.evaluate(row.positions.view(), row.cell).0;
+    eprintln!(
+        "SOFT_ORIGIN negative={} spectrum={}",
+        origin.negative,
+        origin
+            .values
+            .iter()
+            .take(4)
+            .map(|value| format!("{value:.8e}"))
+            .collect::<Vec<_>>()
+            .join(";")
+    );
+    if origin.negative < 2 {
+        return;
+    }
+    let hard = origin.vectors.column(0).to_owned();
+    for sign in [1.0, -1.0] {
+        let mut q = row.positions.clone();
+        let soft0 = origin.vectors.column(origin.negative - 1).to_owned();
+        for step in 1..=12 {
+            let (_, gradient) = surface.eval(q.view()).expect("soft walk gradient");
+            let slope = gradient.dot(&soft0);
+            let dir = if step == 1 || slope.abs() < 1e-8 {
+                sign
+            } else {
+                -slope.signum()
+            };
+            q = &q + &(&soft0 * (dir * 0.05));
+            let along_hard = (&q - &row.positions).dot(&hard);
+            q = &q - &(&hard * along_hard);
+            let report = match index_at(
+                &surface,
+                q.view(),
+                IndexCheck::first_order().with_step(1e-4),
+            ) {
+                Ok(report) => report,
+                Err(err) => {
+                    eprintln!("SOFT_WALK sign={sign} step={step} failed {err}");
+                    break;
+                }
+            };
+            let energy = copper.evaluate(q.view(), row.cell).0;
+            eprintln!(
+                "SOFT_WALK sign={sign} step={step} dE={} negative={} lowest={} second={} hard_overlap={}",
+                energy - e0,
+                report.negative,
+                report.values.first().copied().unwrap_or(f64::NAN),
+                report.values.get(1).copied().unwrap_or(f64::NAN),
+                along_hard
+            );
+            if report.negative <= 1 {
+                break;
+            }
+        }
+    }
+}
+
+fn translation_overlap(mode: ndarray::ArrayView1<f64>, n_atoms: usize) -> f64 {
+    let mut mode_norm = 0.0;
+    for value in mode.iter() {
+        mode_norm += value * value;
+    }
+    mode_norm = mode_norm.sqrt();
+    if mode_norm == 0.0 || n_atoms == 0 {
+        return 0.0;
+    }
+    let mut largest: f64 = 0.0;
+    for axis in 0..3 {
+        let mut dot = 0.0;
+        for atom in 0..n_atoms.min(mode.len() / 3) {
+            dot += mode[3 * atom + axis];
+        }
+        let overlap = dot.abs() / (mode_norm * (n_atoms as f64).sqrt());
+        largest = largest.max(overlap);
+    }
+    largest
+}
+
+struct ReactantIndex {
+    negative: usize,
+    lowest: f64,
+    spectrum: String,
+    calls: usize,
+}
+
+fn reactant_index(
+    copper: &Copper,
+    minimum: &Array1<f64>,
+    cell: [[f64; 3]; 3],
+    mask: CellMask,
+    external: [[f64; 3]; 3],
+) -> ReactantIndex {
+    let before = copper.calls();
+    let search = MinModeConfig {
+        force_tol: 2e-3,
+        ..MinModeConfig::default()
+    };
+    let dimer = SolidDimer::new(
+        SolidDimerConfig::new(search)
+            .with_mask(mask)
+            .with_external_stress(external)
+            .with_index_check(IndexCheck::first_order()),
+        minimum.clone(),
+        cell,
+        Array1::ones(minimum.len()),
+    )
+    .unwrap();
+    let surface = Held { copper, cell };
+    let report = dimer.index(&surface).expect("reactant index");
+    let spectrum = report
+        .values
+        .iter()
+        .take(6)
+        .map(|value| format!("{value:.8e}"))
+        .collect::<Vec<_>>()
+        .join(";");
+    ReactantIndex {
+        negative: report.negative,
+        lowest: report.values.first().copied().unwrap_or(0.0),
+        spectrum,
+        calls: copper.calls() - before,
     }
 }
 
 fn print_row(shear: f64, method: &str, row: &SearchRow) {
     eprintln!(
-        "RESULT shear={shear:.2} method={method} calls={} barrier_eV={} enthalpy_barrier_eV={} curvature={} status={:?} max_force={} steps={} stress_xx={} stress_yy={} stress_zz={} stress_yz={} stress_xz={} stress_xy={} axis_x={} axis_y={} axis_z={} separation={} angle_100={} angle_110={} switch={} final_shear={} volume={}",
+        "RESULT shear={shear:.2} method={method} calls={} calls_at_loose={} index_evals={} barrier_eV={} enthalpy_barrier_eV={} curvature={} status={:?} rejected={} negative={} spectrum={} max_force={} steps={} stress_xx={} stress_yy={} stress_zz={} stress_yz={} stress_xz={} stress_xy={} axis_x={} axis_y={} axis_z={} separation={} angle_100={} angle_110={} switch={} final_shear={} volume={}",
         row.calls,
+        row.calls_at_loose,
+        row.index_evaluations,
         row.barrier,
         row.enthalpy_barrier,
         row.curvature,
         row.status,
+        row.rejected as u8,
+        row.negative_modes
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "none".into()),
+        row.eigenvalues
+            .iter()
+            .take(6)
+            .map(|value| format!("{value:.8e}"))
+            .collect::<Vec<_>>()
+            .join(";"),
         row.max_force,
         row.steps,
         row.stress[0][0],
@@ -687,6 +902,23 @@ fn print_row(shear: f64, method: &str, row: &SearchRow) {
         row.final_shear,
         row.volume,
     );
+}
+
+fn result_phrase(unstable: bool, row: Option<&SearchRow>) -> String {
+    if unstable {
+        return "no barrier / reactant unstable".to_string();
+    }
+    let row = row.expect("a stable reactant has a search");
+    if row.rejected {
+        format!("rejected index {}", row.negative_modes.unwrap_or(0))
+    } else if row.negative_modes == Some(1) && row.status == MinModeStatus::Converged {
+        "index 1".to_string()
+    } else {
+        format!(
+            "unresolved status {:?} negative {:?}",
+            row.status, row.negative_modes
+        )
+    }
 }
 
 #[test]
@@ -784,6 +1016,9 @@ fn dumbbell_searches_start_at_the_sheared_minimum() {
         n as f64 * 3.615
     );
     let mut barriers = Vec::new();
+    let mut lines = vec![
+        "shear,method,calls,steps,barrier_eV,enthalpy_barrier_eV,curvature,max_force,stress_xx,stress_yy,stress_zz,stress_yz,stress_xz,stress_xy,dipole_xy_eV,angle_100_deg,angle_110_deg,switch,final_shear,volume_A3,negative_modes,reactant_negative,reactant_lowest,calls_at_loose,index_evaluations,result".to_string(),
+    ];
     for gamma in [0.0, 0.02, 0.03, 0.04, 0.05] {
         let (sheared, cell) = apply_shear(&along_100, cube, gamma);
         let (sheared_110, _) = apply_shear(&along_110, cube, gamma);
@@ -825,57 +1060,243 @@ fn dumbbell_searches_start_at_the_sheared_minimum() {
         let minimum_for_search = nudged;
         let e_nudge = copper.evaluate(minimum_for_search.view(), cell).0;
         eprintln!("nudge_dE_eV {}", e_nudge - e_min);
-        let fixed = saddle_from_minimum(
-            &copper,
-            &minimum_for_search,
-            cell,
-            &mode,
-            CellMask::frozen(),
-            [[0.0; 3]; 3],
-            cube,
-            e_min,
-            min_100,
-            min_110,
-            500,
+        let fixed_reactant =
+            reactant_index(&copper, &minimum, cell, CellMask::frozen(), [[0.0; 3]; 3]);
+        eprintln!(
+            "REACTANT shear={gamma:.2} cell=fixed negative={} lowest={} calls={} spectrum={}",
+            fixed_reactant.negative,
+            fixed_reactant.lowest,
+            fixed_reactant.calls,
+            fixed_reactant.spectrum
         );
-        print_row(gamma, "fixed", &fixed);
+        let fixed = if fixed_reactant.negative > 0 {
+            None
+        } else {
+            let fixed = saddle_from_minimum(
+                &copper,
+                &minimum_for_search,
+                cell,
+                &mode,
+                CellMask::frozen(),
+                [[0.0; 3]; 3],
+                cube,
+                e_min,
+                min_100,
+                min_110,
+                2500,
+            );
+            print_row(gamma, "fixed", &fixed);
+            if gamma == 0.0 {
+                scan_fixed_soft_mode(&copper, &fixed);
+            }
+            Some(fixed)
+        };
         let mut external = [[0.0; 3]; 3];
         for i in 0..3 {
             for j in 0..3 {
                 external[i][j] = -sigma_min[i][j];
             }
         }
-        let variable = saddle_from_minimum(
-            &copper,
-            &minimum_for_search,
-            cell,
-            &mode,
-            CellMask::all(),
-            external,
-            cube,
-            e_min,
-            min_100,
-            min_110,
-            500,
+        let variable_reactant = reactant_index(&copper, &minimum, cell, CellMask::all(), external);
+        eprintln!(
+            "REACTANT shear={gamma:.2} cell=variable negative={} lowest={} calls={} spectrum={}",
+            variable_reactant.negative,
+            variable_reactant.lowest,
+            variable_reactant.calls,
+            variable_reactant.spectrum
         );
-        print_row(gamma, "variable", &variable);
+        let variable = if variable_reactant.negative > 0 {
+            None
+        } else {
+            let variable = saddle_from_minimum(
+                &copper,
+                &minimum_for_search,
+                cell,
+                &mode,
+                CellMask::all(),
+                external,
+                cube,
+                e_min,
+                min_100,
+                min_110,
+                2500,
+            );
+            print_row(gamma, "variable", &variable);
+            Some(variable)
+        };
+        let fixed = fixed.expect("fixed-cell reactant is a minimum");
         assert_eq!(fixed.status, MinModeStatus::Converged);
-        assert_eq!(variable.status, MinModeStatus::Converged);
-        assert!(fixed.curvature < 0.0 && variable.curvature < 0.0);
-        assert!(
-            fixed.switched,
-            "fixed saddle left the <110> switch at {gamma}"
-        );
-        assert!(fixed.barrier.is_finite() && variable.barrier.is_finite());
-        if gamma == 0.0 {
+        assert!(fixed.curvature < 0.0);
+        if gamma == 0.0 && fixed.negative_modes == Some(2) {
+            trace_soft_mode(&copper, &fixed);
+        } else {
+            assert!(!fixed.rejected, "fixed index {:?}", fixed.negative_modes);
+            assert_eq!(fixed.negative_modes, Some(1));
+            assert!(
+                fixed.switched,
+                "fixed saddle left the <110> switch at {gamma}"
+            );
+        }
+        assert!(fixed.barrier.is_finite() || fixed.rejected);
+        if gamma == 0.0 && fixed.negative_modes == Some(1) {
             assert!(fixed.barrier > 0.4, "{}", fixed.barrier);
         }
-        if gamma == 0.05 {
+        if gamma == 0.05 && fixed.negative_modes == Some(1) {
             assert!(fixed.barrier < 0.02, "{}", fixed.barrier);
         }
+        if let Some(variable) = &variable {
+            assert_eq!(variable.status, MinModeStatus::Converged);
+            assert!(
+                !variable.rejected,
+                "variable index {:?}",
+                variable.negative_modes
+            );
+            assert_eq!(variable.negative_modes, Some(1));
+            assert!(variable.curvature < 0.0 && variable.barrier.is_finite());
+        }
+        lines.push(csv_row(gamma, "fixed", &fixed_reactant, Some(&fixed)));
+        lines.push(csv_row(
+            gamma,
+            "variable",
+            &variable_reactant,
+            variable.as_ref(),
+        ));
         barriers.push(fixed.barrier);
     }
     for pair in barriers.windows(2) {
         assert!(pair[1] < pair[0], "fixed barriers {barriers:?}");
     }
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks/solid_dimer_cu.csv");
+    let mut file = File::create(&path).expect("create copper csv");
+    for line in &lines {
+        writeln!(file, "{line}").expect("write copper csv");
+    }
+    eprintln!("wrote {} rows to {}", lines.len() - 1, path.display());
+}
+
+fn csv_row(shear: f64, method: &str, reactant: &ReactantIndex, row: Option<&SearchRow>) -> String {
+    let phrase = result_phrase(reactant.negative > 0, row);
+    let blank = String::new();
+    let num = |value: f64| value.to_string();
+    let (
+        calls,
+        steps,
+        barrier,
+        enthalpy,
+        curvature,
+        max_force,
+        stress,
+        angle_100,
+        angle_110,
+        switched,
+        shear_out,
+        volume,
+        negative,
+        loose,
+        index_evals,
+    ) = if let Some(row) = row {
+        (
+            row.calls.to_string(),
+            row.steps.to_string(),
+            if phrase.starts_with("index") {
+                num(row.barrier)
+            } else {
+                blank.clone()
+            },
+            if phrase.starts_with("index") {
+                num(row.enthalpy_barrier)
+            } else {
+                blank.clone()
+            },
+            num(row.curvature),
+            num(row.max_force),
+            row.stress,
+            num(row.angle_100),
+            num(row.angle_110),
+            (row.switched as u8).to_string(),
+            num(row.final_shear),
+            num(row.volume),
+            row.negative_modes
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| blank.clone()),
+            row.calls_at_loose.to_string(),
+            row.index_evaluations.to_string(),
+        )
+    } else {
+        (
+            reactant.calls.to_string(),
+            "0".to_string(),
+            blank.clone(),
+            blank.clone(),
+            blank.clone(),
+            blank.clone(),
+            [[0.0; 3]; 3],
+            blank.clone(),
+            blank.clone(),
+            blank.clone(),
+            blank.clone(),
+            blank.clone(),
+            blank.clone(),
+            reactant.calls.to_string(),
+            reactant.calls.to_string(),
+        )
+    };
+    let dipole = if row.is_some() {
+        (volume.parse::<f64>().unwrap_or(0.0) * stress[1][0]).to_string()
+    } else {
+        blank.clone()
+    };
+    [
+        shear.to_string(),
+        method.to_string(),
+        calls,
+        steps,
+        barrier,
+        enthalpy,
+        curvature,
+        max_force,
+        if row.is_some() {
+            num(stress[0][0])
+        } else {
+            blank.clone()
+        },
+        if row.is_some() {
+            num(stress[1][1])
+        } else {
+            blank.clone()
+        },
+        if row.is_some() {
+            num(stress[2][2])
+        } else {
+            blank.clone()
+        },
+        if row.is_some() {
+            num(stress[2][1])
+        } else {
+            blank.clone()
+        },
+        if row.is_some() {
+            num(stress[2][0])
+        } else {
+            blank.clone()
+        },
+        if row.is_some() {
+            num(stress[1][0])
+        } else {
+            blank.clone()
+        },
+        dipole,
+        angle_100,
+        angle_110,
+        switched,
+        shear_out,
+        volume,
+        negative,
+        reactant.negative.to_string(),
+        reactant.lowest.to_string(),
+        loose,
+        index_evals,
+        phrase,
+    ]
+    .join(",")
 }

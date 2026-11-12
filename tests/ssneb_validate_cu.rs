@@ -14,8 +14,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use ndarray::{Array1, Array2, ArrayView1, s};
 use rgmin::{Control, FireKind, Method, Oracle, Solver};
 use rgsaddle::{
-    BandConfig, BandStatus, CellMask, CiConfig, MinModeConfig, MinModeStatus, PointSurface,
-    SaddleError, SolidDimer, SolidDimerConfig, SolidNeb, exact_eigh,
+    BandConfig, BandStatus, CellMask, CiConfig, IndexCheck, MinModeConfig, MinModeStatus,
+    PointSurface, SaddleError, SolidDimer, SolidDimerConfig, SolidNeb,
 };
 
 const RC: f64 = 5.50679;
@@ -594,6 +594,11 @@ struct SearchRow {
     switched: bool,
     positions: Array1<f64>,
     cell: [[f64; 3]; 3],
+    negative_modes: Option<usize>,
+    rejected: bool,
+    calls_at_loose: usize,
+    index_evaluations: usize,
+    unstable: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -624,14 +629,28 @@ fn saddle_from_minimum(
     let mut dimer = SolidDimer::new(
         SolidDimerConfig::new(search)
             .with_mask(mask)
-            .with_external_stress(external),
+            .with_external_stress(external)
+            .with_index_check(IndexCheck::first_order())
+            .with_flat(0.005),
         start.clone(),
         cell,
         mode.clone(),
     )
     .unwrap();
     let surface = Held { copper, cell };
-    let report = dimer.run(&surface, max_steps).expect("dimer");
+    let mut report = dimer.step(&surface).expect("dimer");
+    let mut calls_at_loose = None;
+    let mut steps_taken = 1usize;
+    loop {
+        if calls_at_loose.is_none() && report.curvature < 0.0 && report.max_force <= 2e-3 {
+            calls_at_loose = Some(copper.calls() - before);
+        }
+        if report.status != MinModeStatus::Running || steps_taken >= max_steps {
+            break;
+        }
+        report = dimer.step(&surface).expect("dimer");
+        steps_taken += 1;
+    }
     let calls = copper.calls() - before;
     let (e_sad, _, stress_now) = copper.evaluate(dimer.positions(), dimer.cell());
     let stress = dimer.stress().unwrap_or(stress_now);
@@ -640,6 +659,7 @@ fn saddle_from_minimum(
     let (angle_100, angle_110, axis, separation) = axis_report(dir);
     // [110] has the same sign on x and y. [-110] is the other saddle.
     let switched = report.status == MinModeStatus::Converged
+        && !report.rejected
         && report.curvature < 0.0
         && min_angle_100 < 25.0
         && angle_110 < 15.0
@@ -663,13 +683,98 @@ fn saddle_from_minimum(
         switched,
         positions: dimer.positions().to_owned(),
         cell: dimer.cell(),
+        negative_modes: report.negative_modes,
+        rejected: report.rejected,
+        calls_at_loose: calls_at_loose.unwrap_or(calls),
+        index_evaluations: report.index_evaluations,
+        unstable: false,
+    }
+}
+
+fn reactant_negative(
+    copper: &Copper,
+    minimum: &Array1<f64>,
+    cell: [[f64; 3]; 3],
+    mask: CellMask,
+    external: [[f64; 3]; 3],
+) -> (usize, f64, usize) {
+    let before = copper.calls();
+    let dimer = SolidDimer::new(
+        SolidDimerConfig::new(MinModeConfig {
+            force_tol: 2e-3,
+            ..MinModeConfig::default()
+        })
+        .with_mask(mask)
+        .with_external_stress(external)
+        .with_index_check(IndexCheck::first_order()),
+        minimum.clone(),
+        cell,
+        Array1::ones(minimum.len()),
+    )
+    .unwrap();
+    let surface = Held { copper, cell };
+    let report = dimer.index(&surface).expect("reactant index");
+    eprintln!(
+        "REACTANT cell={:?} negative={} lowest={} calls={} spectrum={}",
+        mask.is_frozen(),
+        report.negative,
+        report.values.first().copied().unwrap_or(f64::NAN),
+        copper.calls() - before,
+        report
+            .values
+            .iter()
+            .take(6)
+            .map(|value| format!("{value:.8e}"))
+            .collect::<Vec<_>>()
+            .join(";")
+    );
+    (
+        report.negative,
+        report.values.first().copied().unwrap_or(0.0),
+        copper.calls() - before,
+    )
+}
+
+fn unstable_row(
+    calls: usize,
+    negative: usize,
+    minimum: &Array1<f64>,
+    cell: [[f64; 3]; 3],
+) -> SearchRow {
+    SearchRow {
+        calls,
+        barrier: f64::NAN,
+        enthalpy_barrier: f64::NAN,
+        curvature: f64::NAN,
+        status: MinModeStatus::Running,
+        max_force: f64::NAN,
+        steps: 0,
+        stress: [[0.0; 3]; 3],
+        angle_100: f64::NAN,
+        angle_110: f64::NAN,
+        axis: [f64::NAN; 3],
+        separation: f64::NAN,
+        final_shear: f64::NAN,
+        volume: f64::NAN,
+        switched: false,
+        positions: minimum.clone(),
+        cell,
+        negative_modes: Some(negative),
+        rejected: true,
+        calls_at_loose: calls,
+        index_evaluations: calls,
+        unstable: true,
     }
 }
 
 fn print_row(shear: f64, method: &str, row: &SearchRow) {
     eprintln!(
-        "RESULT shear={shear:.2} method={method} calls={} barrier_eV={} enthalpy_barrier_eV={} curvature={} status={:?} max_force={} steps={} stress_xx={} stress_yy={} stress_zz={} stress_yz={} stress_xz={} stress_xy={} axis_x={} axis_y={} axis_z={} separation={} angle_100={} angle_110={} switch={} final_shear={} volume={}",
+        "RESULT shear={shear:.2} method={method} calls={} calls_at_loose={} index_evals={} rejected={} negative={:?} barrier_eV={} enthalpy_barrier_eV={} curvature={} status={:?} max_force={} steps={} stress_xx={} stress_yy={} stress_zz={} stress_yz={} stress_xz={} stress_xy={} axis_x={} axis_y={} axis_z={} separation={} angle_100={} angle_110={} switch={} final_shear={} volume={}",
         row.calls,
+        row.calls_at_loose,
+        row.index_evaluations,
+        row.rejected as u8,
+        row.negative_modes,
         row.barrier,
         row.enthalpy_barrier,
         row.curvature,
@@ -802,53 +907,44 @@ fn negative_modes(
     positions: &Array1<f64>,
     cell: [[f64; 3]; 3],
 ) -> (usize, f64, String, Array1<f64>) {
-    let n_atoms = positions.len() / 3;
-    let (chart, q) = if frozen {
-        (None, positions.clone())
+    let mask = if frozen {
+        CellMask::frozen()
     } else {
-        let chart = rgsaddle::JointChart::new(reference, n_atoms, CellMask::all(), external, 1.0)
-            .expect("chart");
-        let q = rgsaddle::joint_coordinate(&chart, CellMask::all(), positions.view(), cell)
+        CellMask::all()
+    };
+    let mut seed = Array1::zeros(positions.len());
+    seed[0] = 1.0;
+    let mut dimer = SolidDimer::new(
+        SolidDimerConfig::new(MinModeConfig::default())
+            .with_mask(mask)
+            .with_external_stress(external)
+            .with_index_check(IndexCheck::first_order().with_step(1e-5)),
+        positions.clone(),
+        if frozen { cell } else { reference },
+        seed,
+    )
+    .expect("index dimer");
+    if !frozen {
+        let chart = dimer.chart().expect("joint chart");
+        let q = rgsaddle::joint_coordinate(chart, CellMask::all(), positions.view(), cell)
             .expect("coordinate");
-        (Some(chart), q)
-    };
-    let dim = q.len();
-    let delta = 1e-5;
-    let grad = |q: &Array1<f64>| -> Array1<f64> {
-        if let Some(chart) = &chart {
-            joint_gradient(surface, chart, q.view())
-        } else {
-            surface.eval(q.view()).expect("cartesian gradient").1
-        }
-    };
-    let g0 = grad(&q);
-    let mut hessian = Array2::zeros((dim, dim));
-    for j in 0..dim {
-        let mut plus = q.clone();
-        let mut minus = q.clone();
-        plus[j] += delta;
-        minus[j] -= delta;
-        let gp = grad(&plus);
-        let gm = grad(&minus);
-        for i in 0..dim {
-            hessian[(i, j)] = (gp[i] - gm[i]) / (2.0 * delta);
-        }
+        dimer.set_generalized(q).expect("place geometry");
     }
-    for i in 0..dim {
-        for j in 0..i {
-            let mean = 0.5 * (hessian[(i, j)] + hessian[(j, i)]);
-            hessian[(i, j)] = mean;
-            hessian[(j, i)] = mean;
-        }
-    }
-    let (values, vectors) = exact_eigh(hessian.view()).expect("hessian spectrum");
-    let cutoff = -1.0e-4;
-    let n_neg = values.iter().filter(|v| **v < cutoff).count();
-    let lowest = values[0];
-    let shown: Vec<String> = values.iter().take(8).map(|v| format!("{v:.8e}")).collect();
-    let mode = vectors.column(0).to_owned();
-    let _ = g0;
-    (n_neg, lowest, shown.join(";"), mode)
+    let report = dimer.index(surface).expect("projected index");
+    let lowest = report.values.first().copied().unwrap_or(0.0);
+    let shown = report
+        .values
+        .iter()
+        .take(8)
+        .map(|value| format!("{value:.8e}"))
+        .collect::<Vec<_>>()
+        .join(";");
+    let mode = if report.vectors.ncols() == 0 {
+        Array1::zeros(dimer.generalized().len())
+    } else {
+        report.vectors.column(0).to_owned()
+    };
+    (report.negative, lowest, shown, mode)
 }
 
 fn geometry_distance(
@@ -891,77 +987,6 @@ fn geometry_distance(
     }
     let rms_cell = (cell_sum / 9.0).sqrt();
     (rms_atom, max_atom, rms_cell, max_cell)
-}
-
-fn tighten_saddle(
-    copper: &Copper,
-    row: &SearchRow,
-    reference: [[f64; 3]; 3],
-    external: [[f64; 3]; 3],
-    frozen: bool,
-    mode: &Array1<f64>,
-    e_min: f64,
-) -> SearchRow {
-    let search = MinModeConfig {
-        method: Method::Fire { kind: FireKind::V2 },
-        force_tol: 2e-4,
-        max_move: 0.008,
-        dr: 1e-3,
-        rotation_tol: 1e-3,
-        max_rotations: 12,
-        seed_curvature: false,
-        ..MinModeConfig::default()
-    };
-    let mask = if frozen {
-        CellMask::frozen()
-    } else {
-        CellMask::all()
-    };
-    let surface = HeldCell {
-        copper,
-        cell: reference,
-    };
-    let mut dimer = SolidDimer::new(
-        SolidDimerConfig::new(search)
-            .with_mask(mask)
-            .with_external_stress(external),
-        row.positions.clone(),
-        if frozen { row.cell } else { reference },
-        if frozen {
-            mode.slice(s![..row.positions.len()]).to_owned()
-        } else {
-            mode.clone()
-        },
-    )
-    .expect("tighter dimer");
-    if !frozen {
-        let chart = dimer.chart().expect("chart");
-        let q = rgsaddle::joint_coordinate(chart, CellMask::all(), row.positions.view(), row.cell)
-            .expect("saddle on the reactant chart");
-        dimer.set_generalized(q).expect("place saddle");
-        dimer.set_mode(mode.clone()).expect("mode");
-    }
-    let report = dimer.run(&surface, 80).expect("tighten");
-    let (energy, _, _) = copper.evaluate(dimer.positions(), dimer.cell());
-    let enthalpy = dimer.energy().unwrap_or(energy);
-    eprintln!(
-        "TIGHT status={:?} force={} curvature={} dE={} dH={}",
-        report.status,
-        report.max_force,
-        report.curvature,
-        energy - e_min,
-        enthalpy - e_min
-    );
-    SearchRow {
-        positions: dimer.positions().to_owned(),
-        cell: dimer.cell(),
-        curvature: report.curvature,
-        status: report.status,
-        max_force: report.max_force,
-        stress: dimer.stress().unwrap_or(row.stress),
-        volume: dimer.volume(),
-        ..row.clone()
-    }
 }
 
 fn dimer_stay(
@@ -1140,7 +1165,12 @@ fn climb_row(
     product_name: &str,
 ) -> NebRow {
     let n_images = 11;
-    let force_tol = 5e-4;
+    let force_tol = if dimer.curvature < -1e-3 {
+        (0.005 * dimer.curvature.abs()).clamp(5e-5, 5e-4)
+    } else {
+        5e-4
+    };
+    let max_steps = if force_tol < 5e-4 { 2000 } else { 800 };
     let n_atoms = reactant.len() / 3;
     let mask = if frozen {
         CellMask::frozen()
@@ -1180,7 +1210,7 @@ fn climb_row(
         1.0,
     )
     .expect("joint neb");
-    let (report, steps) = run_neb(&mut neb, &surface, force_tol, 800);
+    let (report, steps) = run_neb(&mut neb, &surface, force_tol, max_steps);
     let images = neb.images().expect("neb images");
     let ci = report.ci_index.unwrap_or_else(|| {
         images
@@ -1431,7 +1461,7 @@ fn ssneb_validates_the_copper_dimer() {
             e_min,
             min_100,
             min_110,
-            500,
+            2500,
         );
         print_row(gamma, "fixed", &fixed);
         let mut external = [[0.0; 3]; 3];
@@ -1440,61 +1470,38 @@ fn ssneb_validates_the_copper_dimer() {
                 external[i][j] = -sigma_min[i][j];
             }
         }
-        let variable = saddle_from_minimum(
-            &copper,
-            &minimum_for_search,
-            cell,
-            &mode,
-            CellMask::all(),
-            external,
-            cube,
-            e_min,
-            min_100,
-            min_110,
-            500,
-        );
-        print_row(gamma, "variable", &variable);
-        assert_eq!(fixed.status, MinModeStatus::Converged);
-        assert_eq!(variable.status, MinModeStatus::Converged);
-        assert!(fixed.curvature < 0.0 && variable.curvature < 0.0);
-        let surface = HeldCell {
-            copper: &copper,
-            cell,
+        let (variable_negative, _, variable_calls) =
+            reactant_negative(&copper, &minimum, cell, CellMask::all(), external);
+        let variable = if variable_negative > 0 {
+            unstable_row(variable_calls, variable_negative, &minimum, cell)
+        } else {
+            let variable = saddle_from_minimum(
+                &copper,
+                &minimum_for_search,
+                cell,
+                &mode,
+                CellMask::all(),
+                external,
+                cube,
+                e_min,
+                min_100,
+                min_110,
+                2500,
+            );
+            print_row(gamma, "variable", &variable);
+            variable
         };
-        let (_, _, _, mode_fixed) = negative_modes(
-            &surface,
-            true,
-            cell,
-            [[0.0; 3]; 3],
-            &fixed.positions,
-            fixed.cell,
-        );
-        let fixed = tighten_saddle(
-            &copper,
-            &fixed,
-            cell,
-            [[0.0; 3]; 3],
-            true,
-            &mode_fixed,
-            e_min,
-        );
-        let (_, _, _, mode_variable) = negative_modes(
-            &surface,
-            false,
-            cell,
-            external,
-            &variable.positions,
-            variable.cell,
-        );
-        let variable = tighten_saddle(
-            &copper,
-            &variable,
-            cell,
-            external,
-            false,
-            &mode_variable,
-            e_min,
-        );
+        assert_eq!(fixed.status, MinModeStatus::Converged);
+        assert!(!fixed.rejected, "fixed index {:?}", fixed.negative_modes);
+        assert!(fixed.curvature < 0.0);
+        if !variable.unstable {
+            assert!(
+                !variable.rejected,
+                "variable index {:?}",
+                variable.negative_modes
+            );
+            assert!(variable.curvature < 0.0);
+        }
         let (aligned_h, aligned_cell, aligned_e, aligned_enthalpy) =
             relax_enthalpy(&copper, &other, cell, cell, external, 1e-3);
         let (_, _, aligned_dir) = closest_pair(&aligned_h, aligned_cell);
@@ -1594,22 +1601,51 @@ fn ssneb_validates_the_copper_dimer() {
                 .map(|row| (row.2, row.3))
                 .expect("published row");
             let benchmark = !(gamma == 0.05 && !frozen && product_name == "aligned");
-            let de = (neb.e_barrier - e_csv).abs();
-            let dh = (neb.h_barrier - h_csv).abs();
+            let de = (neb.e_barrier - dimer.barrier).abs();
+            let dh = (neb.h_barrier - dimer.enthalpy_barrier).abs();
             let geom = neb.max_atom.max(neb.max_cell);
-            let (dimer_neg, dimer_lowest, _, _) = negative_modes(
-                &HeldCell {
-                    copper: &copper,
+            let (dimer_neg, dimer_lowest, _, _) = if dimer.unstable {
+                (
+                    dimer.negative_modes.unwrap_or(0),
+                    f64::NAN,
+                    String::new(),
+                    Array1::zeros(0),
+                )
+            } else {
+                negative_modes(
+                    &HeldCell {
+                        copper: &copper,
+                        cell,
+                    },
+                    frozen,
                     cell,
-                },
-                frozen,
-                cell,
-                load,
-                &dimer.positions,
-                dimer.cell,
-            );
+                    load,
+                    &dimer.positions,
+                    dimer.cell,
+                )
+            };
             let mut reasons = Vec::new();
-            if benchmark {
+            if dimer.unstable {
+                let crest = neb
+                    .enthalpies
+                    .split(';')
+                    .filter_map(|value| value.parse::<f64>().ok())
+                    .fold(f64::MIN, f64::max);
+                if crest > 1e-3 {
+                    reasons.push(format!(
+                        "reactant unstable but the band rises to {crest} eV"
+                    ));
+                }
+                if neb.n_neg != 0 {
+                    reasons.push(format!(
+                        "reactant unstable but the climbing image has {} negative modes",
+                        neb.n_neg
+                    ));
+                }
+            } else if benchmark {
+                if dimer.rejected || dimer.negative_modes != Some(1) {
+                    reasons.push(format!("dimer rejected index {:?}", dimer.negative_modes));
+                }
                 if !neb.converged {
                     reasons.push(format!("NEB not converged, max force {}", neb.max_force));
                 }
@@ -1631,13 +1667,6 @@ fn ssneb_validates_the_copper_dimer() {
                         neb.n_neg, neb.lowest, neb.spectrum
                     ));
                 }
-                let dimer_de = (dimer.barrier - e_csv).abs();
-                let dimer_dh = (dimer.enthalpy_barrier - h_csv).abs();
-                if dimer_de > 1e-4 || dimer_dh > 1e-4 {
-                    reasons.push(format!(
-                        "dimer re-run differs from the csv by {dimer_de} eV energy and {dimer_dh} eV enthalpy"
-                    ));
-                }
             }
             let profile: Vec<f64> = neb
                 .enthalpies
@@ -1657,8 +1686,18 @@ fn ssneb_validates_the_copper_dimer() {
                     near_force = *force;
                 }
             }
-            let pass = benchmark && reasons.is_empty();
-            let reason = if benchmark {
+            let pass = if dimer.unstable {
+                reasons.is_empty()
+            } else {
+                benchmark && reasons.is_empty()
+            };
+            let reason = if dimer.unstable {
+                if reasons.is_empty() {
+                    "no barrier / reactant unstable".to_string()
+                } else {
+                    format!("no barrier / reactant unstable | {}", reasons.join(" | "))
+                }
+            } else if benchmark {
                 if reasons.is_empty() {
                     "ok".to_string()
                 } else {

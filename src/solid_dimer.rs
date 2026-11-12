@@ -23,6 +23,15 @@
 //! stress, and the chain rule carries the same pairing out to a finite
 //! right strain. A frozen cell drops the strain block and calls
 //! [`PointSurface::eval`], so the step is the fixed-cell dimer.
+//!
+//! [`IndexCheck`] is optional. When it is set, a point that meets the
+//! force tolerance is accepted only if the projected Hessian has one
+//! negative eigenvalue. The three rigid translations, and any other
+//! directions [`PointSurface::excluded_modes`] names, are removed
+//! before that count. A higher index is left along its softest negative
+//! mode, or the step is marked [`SolidDimerReport::rejected`] once the
+//! escape budget is spent. A minimum of the enthalpy is not reported as
+//! a barrier.
 
 use std::sync::Mutex;
 
@@ -107,6 +116,15 @@ pub struct SolidDimerConfig {
     pub external_stress: M3,
     /// Positive scale on the Jacobian. 1 is the 2012 value.
     pub weight: f64,
+    /// Projected Hessian at a converged point. `None` accepts the
+    /// minimum-mode test alone: negative curvature and a small force.
+    pub index: Option<IndexCheck>,
+    /// A negative curvature `λ` is converged only when the largest
+    /// force component is at most `flat * |λ|`, and still at most the
+    /// search tolerance. Zero leaves that tolerance unchanged. The
+    /// harmonic residual along the mode is then about `flat` when the
+    /// force sits on the mode.
+    pub flat: f64,
 }
 
 impl SolidDimerConfig {
@@ -117,6 +135,8 @@ impl SolidDimerConfig {
             mask: CellMask::all(),
             external_stress: [[0.0; 3]; 3],
             weight: 1.0,
+            index: None,
+            flat: 0.0,
         }
     }
 
@@ -150,6 +170,135 @@ impl SolidDimerConfig {
         self.weight = weight;
         self
     }
+
+    /// Require one negative projected eigenvalue at convergence.
+    pub fn with_index_check(mut self, index: IndexCheck) -> Self {
+        self.index = Some(index);
+        self
+    }
+
+    /// Tighten a flat negative mode to a harmonic residual of `flat`.
+    ///
+    /// Zero restores the search tolerance. A non-positive value other
+    /// than zero is refused by [`SolidDimer::new`].
+    pub fn with_flat(mut self, flat: f64) -> Self {
+        self.flat = flat;
+        self
+    }
+}
+
+/// How a converged solid-state dimer checks that it is index 1.
+///
+/// The lowest eigenvalues are a Lanczos decomposition of central
+/// Hessian actions. Directions from [`PointSurface::excluded_modes`]
+/// are projected out of every action, so a rigid translation is not a
+/// negative mode. Build with [`IndexCheck::first_order`].
+#[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
+pub struct IndexCheck {
+    /// How many lowest eigenvalues to resolve.
+    pub lowest: usize,
+    /// An eigenvalue below this is negative.
+    pub negative: f64,
+    /// Central-difference step of one Hessian action.
+    pub step: f64,
+    /// How many times a higher-index point may be left.
+    pub escapes: usize,
+    /// Generalized step along the softest extra negative mode.
+    pub escape: f64,
+}
+
+impl IndexCheck {
+    /// One negative eigenvalue below -1e-4, eight lowest modes,
+    /// central step 1e-4, six escapes of length 0.02.
+    pub const fn first_order() -> Self {
+        Self {
+            lowest: 8,
+            negative: -1.0e-4,
+            step: 1.0e-4,
+            escapes: 6,
+            escape: 0.02,
+        }
+    }
+
+    /// Central-difference step.
+    pub const fn with_step(mut self, step: f64) -> Self {
+        self.step = step;
+        self
+    }
+
+    /// How many higher-index points may be left. Zero rejects at once.
+    pub const fn with_escapes(mut self, escapes: usize) -> Self {
+        self.escapes = escapes;
+        self
+    }
+
+    /// Displacement along the softest extra negative mode.
+    pub const fn with_escape(mut self, escape: f64) -> Self {
+        self.escape = escape;
+        self
+    }
+}
+
+/// Projected spectrum at one geometry.
+///
+/// Eigenvalues ascend. Eigenvectors are columns of `vectors`.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct IndexReport {
+    /// Eigenvalues strictly below [`IndexCheck::negative`].
+    pub negative: usize,
+    pub values: Vec<f64>,
+    pub vectors: Array2<f64>,
+    /// Generalized surface evaluations spent on the Hessian actions.
+    pub evaluations: usize,
+}
+
+impl IndexReport {
+    /// Exactly one projected eigenvalue is below the cutoff.
+    pub fn is_first_order(&self) -> bool {
+        self.negative == 1
+    }
+}
+
+/// Lowest projected eigenvalues of `surface` at `x`.
+///
+/// `x` is the coordinate [`PointSurface::eval`] reads: Cartesian for a
+/// frozen cell, the generalized vector for a joint chart. The count
+/// ignores directions [`PointSurface::excluded_modes`] returns.
+pub fn index_at<S: PointSurface>(
+    surface: &S,
+    x: ArrayView1<f64>,
+    check: IndexCheck,
+) -> Result<IndexReport, SaddleError> {
+    if x.is_empty() || !x.iter().all(|v| v.is_finite()) {
+        return Err(SaddleError::Invalid(
+            "index check needs a finite coordinate".into(),
+        ));
+    }
+    if check.lowest == 0 || !(check.step.is_finite() && check.step > 0.0) {
+        return Err(SaddleError::Invalid(
+            "index check needs a positive difference step and at least one eigenvalue".into(),
+        ));
+    }
+    if !check.negative.is_finite() || !(check.escape.is_finite() && check.escape >= 0.0) {
+        return Err(SaddleError::Invalid(
+            "index check cutoff and escape step must be finite".into(),
+        ));
+    }
+    let modes = orthonormal_excluded(surface, x)?;
+    let calls = std::cell::Cell::new(0usize);
+    let (values, vectors) = ritz_lowest(surface, x, &modes, check, &calls)?;
+    let negative = values
+        .iter()
+        .filter(|value| **value < check.negative)
+        .count();
+    Ok(IndexReport {
+        negative,
+        values,
+        vectors,
+        evaluations: calls.get(),
+    })
 }
 
 impl Default for SolidDimerConfig {
@@ -175,6 +324,20 @@ pub struct SolidDimerReport {
     pub stress: Option<M3>,
     /// Cell volume at the accepted point.
     pub volume: f64,
+    /// Negative projected eigenvalues when this step tested the index.
+    /// Empty when the check is off, or when a higher-index point was
+    /// left and the search is still running.
+    pub negative_modes: Option<usize>,
+    /// The force tolerance was met and the projected Hessian is not
+    /// index 1. [`Self::status`] stays [`MinModeStatus::Converged`]
+    /// because the force test passed; this flag is the rejection.
+    pub rejected: bool,
+    /// Generalized evaluations spent on index checks so far, this step
+    /// included.
+    pub index_evaluations: usize,
+    /// Projected eigenvalues at a point the index check accepted or
+    /// rejected. Empty while the search is still leaving a higher-index point.
+    pub eigenvalues: Vec<f64>,
 }
 
 /// Right-strain chart `h = h0 (I + ε)`, `r = r0 (I + ε)`.
@@ -435,6 +598,12 @@ pub struct SolidDimer {
     stress: Option<M3>,
     volume: f64,
     energy: Option<f64>,
+    index: Option<IndexCheck>,
+    flat: f64,
+    escapes_left: usize,
+    escape_step: f64,
+    rejected_at: Vec<Array1<f64>>,
+    index_calls: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -478,6 +647,28 @@ impl SolidDimer {
         {
             return Err(SaddleError::NonFinite("solid-state dimer geometry"));
         }
+        if let Some(index) = config.index {
+            if index.lowest == 0 || !(index.step.is_finite() && index.step > 0.0) {
+                return Err(SaddleError::Invalid(
+                    "index check needs a positive difference step and at least one eigenvalue"
+                        .into(),
+                ));
+            }
+            if !(index.escape.is_finite() && index.escape >= 0.0) || !index.negative.is_finite() {
+                return Err(SaddleError::Invalid(
+                    "index check cutoff and escape step must be finite".into(),
+                ));
+            }
+        }
+        if !(config.flat.is_finite() && config.flat >= 0.0) {
+            return Err(SaddleError::Invalid(
+                "flat-saddle length must be finite and non-negative".into(),
+            ));
+        }
+        let index = config.index;
+        let flat = config.flat;
+        let escapes_left = index.map(|check| check.escapes).unwrap_or(0);
+        let escape_step = index.map(|check| check.escape).unwrap_or(0.0);
         let volume = m3_det(cell).abs();
         if not_above(volume, 1e-18) {
             return Err(SaddleError::Invalid(
@@ -502,6 +693,12 @@ impl SolidDimer {
                 stress: None,
                 volume,
                 energy: None,
+                index,
+                flat,
+                escapes_left,
+                escape_step,
+                rejected_at: Vec::new(),
+                index_calls: 0,
             });
         }
         let mode_slice = mode.as_slice_mut().expect("mode buffer");
@@ -538,6 +735,12 @@ impl SolidDimer {
             stress: None,
             volume,
             energy: None,
+            index,
+            flat,
+            escapes_left,
+            escape_step,
+            rejected_at: Vec::new(),
+            index_calls: 0,
         })
     }
 
@@ -609,7 +812,7 @@ impl SolidDimer {
             self.positions = self.inner.position().to_owned();
             self.stress = None;
             self.energy = None;
-            return Ok(map_report(report, None, self.volume));
+            return self.adjudicate(surface, report);
         }
         let chart = self.chart.clone().expect("joint chart");
         let snapshot = std::mem::take(&mut self.snapshot);
@@ -644,7 +847,28 @@ impl SolidDimer {
             self.stress = Some(sigma);
             self.energy = Some(chart.enthalpy(energy, q.view())?);
         }
-        result.map(|report| map_report(report, self.stress, self.volume))
+        let report = result?;
+        self.adjudicate_joint(surface, report)
+    }
+
+    /// Projected index at the current generalized coordinate.
+    ///
+    /// Uses the same chart and the same excluded directions as
+    /// [`Self::step`]. The search is not moved.
+    pub fn index<S: PointSurface>(&self, surface: &S) -> Result<IndexReport, SaddleError> {
+        let check = self.index.unwrap_or_else(IndexCheck::first_order);
+        let q = self.inner.position().to_owned();
+        if let Some(chart) = &self.chart {
+            let snapshot = Mutex::new(Snapshot::default());
+            let adapter = JointSurface {
+                surface,
+                chart,
+                snapshot: &snapshot,
+            };
+            index_at(&adapter, q.view(), check)
+        } else {
+            index_at(surface, q.view(), check)
+        }
     }
 
     /// Loop [`Self::step`] until convergence or `max_steps`.
@@ -717,7 +941,15 @@ impl SolidDimer {
     }
 }
 
-fn map_report(report: MinModeReport, stress: Option<M3>, volume: f64) -> SolidDimerReport {
+fn map_report(
+    report: MinModeReport,
+    stress: Option<M3>,
+    volume: f64,
+    negative_modes: Option<usize>,
+    rejected: bool,
+    index_evaluations: usize,
+    eigenvalues: Vec<f64>,
+) -> SolidDimerReport {
     SolidDimerReport {
         status: report.status,
         max_force: report.max_force,
@@ -727,7 +959,427 @@ fn map_report(report: MinModeReport, stress: Option<M3>, volume: f64) -> SolidDi
         evaluations: report.evaluations,
         stress,
         volume,
+        negative_modes,
+        rejected,
+        index_evaluations,
+        eigenvalues,
     }
+}
+
+impl SolidDimer {
+    fn adjudicate_joint<S: PointSurface>(
+        &mut self,
+        surface: &S,
+        report: MinModeReport,
+    ) -> Result<SolidDimerReport, SaddleError> {
+        let chart = self.chart.clone().expect("joint chart");
+        let snapshot = Mutex::new(Snapshot::default());
+        let adapter = JointSurface {
+            surface,
+            chart: &chart,
+            snapshot: &snapshot,
+        };
+        self.adjudicate(&adapter, report)
+    }
+
+    /// A converged force is not a saddle until the projected index is 1.
+    /// A flat mode stays running until the harmonic residual fits in
+    /// [`SolidDimerConfig::flat`].
+    fn adjudicate<S: PointSurface>(
+        &mut self,
+        surface: &S,
+        mut report: MinModeReport,
+    ) -> Result<SolidDimerReport, SaddleError> {
+        let mut negative_modes = None;
+        let mut rejected = false;
+        let mut eigenvalues = Vec::new();
+        if report.status == MinModeStatus::Converged && self.flat > 0.0 && report.curvature < -1e-3
+        {
+            let limit = (self.flat * report.curvature.abs()).max(1e-5);
+            if report.max_force > limit && self.inner.force_tol() > limit * (1.0 + 1e-9) {
+                self.inner.set_force_tol(limit)?;
+                report.status = MinModeStatus::Running;
+            }
+        }
+        if report.status == MinModeStatus::Converged
+            && let Some(check) = self.index
+        {
+            let verdict = index_at(surface, self.inner.position(), check)?;
+            report.evaluations += verdict.evaluations;
+            self.index_calls += verdict.evaluations;
+            if verdict.negative == 1 {
+                negative_modes = Some(1);
+                eigenvalues = verdict.values;
+            } else if verdict.negative > 1
+                && self.escapes_left > 0
+                && self.leave(surface, &verdict)?
+            {
+                self.escapes_left -= 1;
+                report.status = MinModeStatus::Running;
+            } else {
+                negative_modes = Some(verdict.negative);
+                eigenvalues = verdict.values;
+                rejected = true;
+            }
+        }
+        Ok(map_report(
+            report,
+            self.stress,
+            self.volume,
+            negative_modes,
+            rejected,
+            self.index_calls,
+            eigenvalues,
+        ))
+    }
+
+    /// Step off a higher-index point along its softest negative mode.
+    ///
+    /// The lowest mode stays the seed, so the next translation still
+    /// climbs that direction and minimises the rest. Returns false when
+    /// neither sign lowers the enthalpy.
+    fn leave<S: PointSurface>(
+        &mut self,
+        surface: &S,
+        verdict: &IndexReport,
+    ) -> Result<bool, SaddleError> {
+        let q = self.inner.position().to_owned();
+        self.rejected_at.push(q.clone());
+        let soft = verdict.vectors.column(verdict.negative - 1).to_owned();
+        let hard = verdict.vectors.column(0).to_owned();
+        let (reference, _) = surface.eval(q.view())?;
+        let mut sign = 0.0;
+        let mut lowest = reference;
+        for candidate in [1.0, -1.0] {
+            let trial = &q + &(&soft * (candidate * 0.05));
+            if !trial.iter().all(|value| value.is_finite()) {
+                continue;
+            }
+            let (energy, _) = surface.eval(trial.view())?;
+            if energy < lowest {
+                lowest = energy;
+                sign = candidate;
+            }
+        }
+        if sign == 0.0 {
+            return Ok(false);
+        }
+        let relaxed =
+            walk_soft_positive(surface, &q, &soft, &hard, sign, self.escape_step.max(0.01))?;
+        if rms_to_nearest(&relaxed, &self.rejected_at) <= 1e-4 {
+            return Ok(false);
+        }
+        self.inner.reset();
+        self.inner.set_position(relaxed, None)?;
+        self.inner.set_mode(hard)?;
+        self.pull_geometry()?;
+        Ok(true)
+    }
+
+    fn pull_geometry(&mut self) -> Result<(), SaddleError> {
+        if let Some(chart) = &self.chart {
+            let q = self.inner.position().to_owned();
+            let (positions, cell) = chart.geometry(q.view())?;
+            self.positions = positions;
+            self.cell = cell;
+            self.volume = m3_det(cell).abs();
+        } else {
+            self.positions = self.inner.position().to_owned();
+        }
+        self.stress = None;
+        self.energy = None;
+        *self
+            .snapshot
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Snapshot::default();
+        Ok(())
+    }
+}
+
+fn rms_to_nearest(point: &Array1<f64>, previous: &[Array1<f64>]) -> f64 {
+    let mut nearest = f64::MAX;
+    for earlier in previous {
+        let mut sum = 0.0;
+        for (left, right) in point.iter().zip(earlier.iter()) {
+            let delta = left - right;
+            sum += delta * delta;
+        }
+        let rms = (sum / point.len() as f64).sqrt();
+        nearest = nearest.min(rms);
+    }
+    nearest
+}
+
+/// Lanczos with full reorthogonalisation. The Rayleigh-Ritz projection
+/// of the actions is diagonalised directly, so the reorthogonalisation
+/// coefficients are not dropped. The lowest values are returned once
+/// they stop moving, or at a Krylov cap of 64.
+fn ritz_lowest<S: PointSurface>(
+    surface: &S,
+    x: ArrayView1<f64>,
+    modes: &[Array1<f64>],
+    check: IndexCheck,
+    calls: &std::cell::Cell<usize>,
+) -> Result<(Vec<f64>, Array2<f64>), SaddleError> {
+    let n = x.len();
+    let k = check.lowest.min(n);
+    let mut seed = Array1::zeros(n);
+    for i in 0..n {
+        seed[i] = ((i + 1) as f64 * 0.618_033_988_749_895).sin();
+    }
+    seed = remove_directions(&seed, modes);
+    let norm = seed.dot(&seed).sqrt();
+    if norm < 1e-14 {
+        return Ok((vec![0.0; k], Array2::zeros((n, k))));
+    }
+    seed /= norm;
+    let mut basis = vec![seed];
+    let mut actions: Vec<Array1<f64>> = Vec::new();
+    let cap = n.min(64.max(k.saturating_mul(4)));
+    let mut previous: Option<Vec<f64>> = None;
+    let mut kept: Option<(Vec<f64>, Array2<f64>)> = None;
+    let mut confirmed = false;
+    while basis.len() <= cap {
+        let j = basis.len() - 1;
+        let hq = projected_action(surface, x, basis[j].view(), modes, check.step, calls)?;
+        if hq.len() != n {
+            return Err(SaddleError::Shape(
+                "index-check Hessian action length changed".into(),
+            ));
+        }
+        let mut w = hq.clone();
+        for _ in 0..2 {
+            for q in &basis {
+                let coeff = w.dot(q);
+                w = &w - &(q * coeff);
+            }
+        }
+        actions.push(hq);
+        let off = w.dot(&w).sqrt();
+        let m = actions.len();
+        let chain_done = off < 1e-8 || m == n;
+        let ready = chain_done || (m >= k && m.is_multiple_of(4));
+        if ready {
+            let (values, vectors) = ritz_from_actions(&basis[..m], &actions)?;
+            let stable = previous.as_ref().is_some_and(|earlier| {
+                values
+                    .iter()
+                    .zip(earlier.iter())
+                    .take(k)
+                    .all(|(now, then)| {
+                        (now - then).abs() <= 1e-5 * (1.0 + now.abs().max(then.abs()))
+                    })
+            });
+            previous = Some(values.iter().take(k).copied().collect());
+            kept = Some((values, vectors));
+            // One chain misses a repeated eigenvalue. A fresh direction
+            // orthogonal to the basis picks up that copy.
+            if m < n
+                && (chain_done || (stable && !confirmed))
+                && let Some(next) = fresh_direction(&basis[..m], modes, n)
+            {
+                confirmed = stable;
+                basis.truncate(m);
+                basis.push(next);
+                continue;
+            }
+            if stable || chain_done || m == n {
+                break;
+            }
+        }
+        if m == n {
+            break;
+        }
+        w /= off;
+        basis.truncate(m);
+        basis.push(w);
+    }
+    let Some((values, vectors)) = kept else {
+        return Err(SaddleError::Solver(
+            "index check did not build a Ritz pair".into(),
+        ));
+    };
+    let take = k.min(values.len());
+    Ok((
+        values.into_iter().take(take).collect(),
+        vectors.slice(ndarray::s![.., ..take]).to_owned(),
+    ))
+}
+
+fn fresh_direction(basis: &[Array1<f64>], modes: &[Array1<f64>], n: usize) -> Option<Array1<f64>> {
+    for seed in 0..n {
+        let mut w = Array1::zeros(n);
+        w[seed] = 1.0;
+        w = remove_directions(&w, modes);
+        for q in basis {
+            let coeff = w.dot(q);
+            w = &w - &(q * coeff);
+        }
+        let norm = w.dot(&w).sqrt();
+        if norm > 1e-8 {
+            return Some(w / norm);
+        }
+    }
+    None
+}
+
+fn ritz_from_actions(
+    basis: &[Array1<f64>],
+    actions: &[Array1<f64>],
+) -> Result<(Vec<f64>, Array2<f64>), SaddleError> {
+    let m = actions.len().min(basis.len());
+    let mut projected = Array2::zeros((m, m));
+    for j in 0..m {
+        for i in 0..m {
+            projected[(i, j)] = basis[i].dot(&actions[j]);
+        }
+    }
+    for i in 0..m {
+        for j in (i + 1)..m {
+            let mean = 0.5 * (projected[(i, j)] + projected[(j, i)]);
+            projected[(i, j)] = mean;
+            projected[(j, i)] = mean;
+        }
+    }
+    let (vals, vecs) = crate::eigensolve::exact_eigh(projected.view())?;
+    let n = basis.first().map(|column| column.len()).unwrap_or(0);
+    let mut vectors = Array2::zeros((n, m));
+    for column in 0..m {
+        for (row_basis, q) in basis.iter().take(m).enumerate() {
+            let weight = vecs[(row_basis, column)];
+            for (i, value) in q.iter().enumerate() {
+                vectors[(i, column)] += weight * value;
+            }
+        }
+        let mut norm = 0.0_f64;
+        for row in vectors.column(column) {
+            norm += row * row;
+        }
+        norm = norm.sqrt();
+        if norm > 0.0 {
+            for row in vectors.column_mut(column) {
+                *row /= norm;
+            }
+        }
+    }
+    Ok((vals.to_vec(), vectors))
+}
+
+/// Step along `soft` until its Rayleigh quotient is no longer negative.
+///
+/// The probe that chose `sign` is the downhill side. The hard mode is
+/// held fixed so the walk stays on that ridge. A 0.02 Å step is past
+/// the cubic scale of the copper soft mode, where one side of a 0.05 Å
+/// probe rises.
+fn walk_soft_positive<S: PointSurface>(
+    surface: &S,
+    start: &Array1<f64>,
+    soft: &Array1<f64>,
+    hard: &Array1<f64>,
+    sign: f64,
+    step: f64,
+) -> Result<Array1<f64>, SaddleError> {
+    let mut q = start.clone();
+    for _ in 0..12 {
+        q = &q + &(soft * (sign * step));
+        let drift = (&q - start).dot(hard);
+        q = &q - &(hard * drift);
+        if rayleigh(surface, &q, soft)? >= -1e-4 {
+            break;
+        }
+    }
+    Ok(q)
+}
+
+fn rayleigh<S: PointSurface>(
+    surface: &S,
+    q: &Array1<f64>,
+    direction: &Array1<f64>,
+) -> Result<f64, SaddleError> {
+    let step = 1e-4;
+    let plus = q + &(direction * step);
+    let minus = q - &(direction * step);
+    let (_, g_plus) = surface.eval(plus.view())?;
+    let (_, g_minus) = surface.eval(minus.view())?;
+    if g_plus.len() != q.len() || g_minus.len() != q.len() {
+        return Err(SaddleError::Shape(
+            "index-check Rayleigh gradient length changed".into(),
+        ));
+    }
+    let mut slope = 0.0;
+    for i in 0..q.len() {
+        slope += direction[i] * (g_plus[i] - g_minus[i]);
+    }
+    Ok(slope / (2.0 * step))
+}
+
+fn orthonormal_excluded<S: PointSurface>(
+    surface: &S,
+    x: ArrayView1<f64>,
+) -> Result<Vec<Array1<f64>>, SaddleError> {
+    let modes = surface.excluded_modes(x)?;
+    if modes.ncols() != x.len() || !modes.iter().all(|value| value.is_finite()) {
+        return Err(SaddleError::Shape("index-check excluded directions".into()));
+    }
+    let mut basis = Vec::new();
+    for row in modes.rows() {
+        let mut direction = row.to_owned();
+        for earlier in &basis {
+            let scale = direction.dot(earlier);
+            direction = direction - earlier * scale;
+        }
+        let norm = direction.dot(&direction).sqrt();
+        if norm > 1e-10 {
+            direction /= norm;
+            basis.push(direction);
+        }
+    }
+    Ok(basis)
+}
+
+fn projected_action<S: PointSurface>(
+    surface: &S,
+    x: ArrayView1<f64>,
+    direction: ArrayView1<f64>,
+    modes: &[Array1<f64>],
+    step: f64,
+    calls: &std::cell::Cell<usize>,
+) -> Result<Array1<f64>, SaddleError> {
+    let direction = remove_directions(&direction.to_owned(), modes);
+    let norm = direction.dot(&direction).sqrt();
+    if norm < 1e-14 {
+        return Ok(Array1::zeros(x.len()));
+    }
+    let unit = &direction / norm;
+    let plus = x.to_owned() + &(&unit * step);
+    let minus = x.to_owned() - &(&unit * step);
+    let (_, g_plus) = surface.eval(plus.view())?;
+    let (_, g_minus) = surface.eval(minus.view())?;
+    calls.set(calls.get() + 2);
+    if g_plus.len() != x.len() || g_minus.len() != x.len() {
+        return Err(SaddleError::Shape(
+            "index-check gradient length changed".into(),
+        ));
+    }
+    if !g_plus.iter().all(|value| value.is_finite())
+        || !g_minus.iter().all(|value| value.is_finite())
+    {
+        return Err(SaddleError::NonFinite("index-check gradient"));
+    }
+    let mut action = (g_plus - g_minus) * (norm / (2.0 * step));
+    action = remove_directions(&action, modes);
+    Ok(action)
+}
+
+fn remove_directions(vector: &Array1<f64>, modes: &[Array1<f64>]) -> Array1<f64> {
+    let mut out = vector.clone();
+    for _ in 0..2 {
+        for mode in modes {
+            let scale = out.dot(mode);
+            out = out - mode * scale;
+        }
+    }
+    out
 }
 
 struct JointSurface<'a, S> {
@@ -1313,5 +1965,170 @@ mod tests {
         assert!(cell[0][1].abs() < 1e-12);
         let before = array![0.2, 0.5, -0.1, -0.4, 0.3, 0.8];
         assert_abs_diff_eq!(mode.dot(&mode), before.dot(&before), epsilon = 1e-12);
+    }
+
+    /// `E = -x² - y² + z²` is index 2 at the origin. `E = -x² + y² + z²` is index 1.
+    struct IndexSurface {
+        double: bool,
+    }
+
+    impl PointSurface for IndexSurface {
+        fn eval(&self, r: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            let (x, y, z) = (r[0], r[1], r[2]);
+            let y_sign = if self.double { -1.0 } else { 1.0 };
+            let energy = -x * x + y_sign * y * y + z * z;
+            Ok((energy, array![-2.0 * x, 2.0 * y_sign * y, 2.0 * z]))
+        }
+    }
+
+    fn placed(escapes: usize) -> SolidDimer {
+        let search = MinModeConfig {
+            force_tol: 1e-8,
+            dr: 1e-4,
+            rotation_tol: 1e-8,
+            max_rotations: 8,
+            max_move: 0.05,
+            ..MinModeConfig::default()
+        };
+        SolidDimer::new(
+            SolidDimerConfig::frozen(search).with_index_check(
+                IndexCheck::first_order()
+                    .with_escapes(escapes)
+                    .with_escape(0.05),
+            ),
+            array![0.0, 0.0, 0.0],
+            diagonal(5.0, 5.0, 5.0),
+            array![1.0, 0.2, 0.0],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn index_check_rejects_a_double_index_point_and_accepts_a_saddle() {
+        let double = IndexSurface { double: true };
+        let saddle = IndexSurface { double: false };
+        let origin = array![0.0, 0.0, 0.0];
+        let rejected = index_at(&double, origin.view(), IndexCheck::first_order()).unwrap();
+        let accepted = index_at(&saddle, origin.view(), IndexCheck::first_order()).unwrap();
+        assert_eq!(rejected.negative, 2, "{:?}", rejected.values);
+        assert!(!rejected.is_first_order());
+        assert_eq!(accepted.negative, 1, "{:?}", accepted.values);
+        assert!(accepted.is_first_order());
+        assert!(rejected.values[0] < -1.5 && rejected.values[1] < -1.5);
+        assert!(accepted.values[0] < -1.5 && accepted.values[1] > 1.5);
+
+        let mut stayed = placed(0);
+        let report = stayed.step(&double).unwrap();
+        assert_eq!(report.status, MinModeStatus::Converged);
+        assert!(report.rejected);
+        assert_eq!(report.negative_modes, Some(2));
+        assert!(stayed.positions().iter().all(|value| value.abs() < 1e-8));
+
+        let mut moved = placed(4);
+        let left = moved.step(&double).unwrap();
+        assert_eq!(left.status, MinModeStatus::Running);
+        assert!(!left.rejected);
+        assert!(moved.positions().dot(&moved.positions()) > 1e-6);
+
+        let mut kept = placed(0);
+        let ok = kept.run(&saddle, 4).unwrap();
+        assert_eq!(ok.status, MinModeStatus::Converged);
+        assert!(!ok.rejected);
+        assert_eq!(ok.negative_modes, Some(1));
+    }
+
+    /// A negative eigenvalue along a rigid translation is not an index.
+    struct Translated {
+        negative_relative: bool,
+    }
+
+    impl PointSurface for Translated {
+        fn eval(&self, r: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            let s2 = std::f64::consts::SQRT_2;
+            let cx = (r[0] + r[3]) / s2;
+            let ux = (r[0] - r[3]) / s2;
+            let uy = (r[1] - r[4]) / s2;
+            let sign = if self.negative_relative { -1.0 } else { 1.0 };
+            let energy = sign * 0.5 * ux * ux - 0.5 * cx * cx + 0.5 * uy * uy;
+            let d_cx = -cx;
+            let d_ux = sign * ux;
+            let d_uy = uy;
+            let mut g = Array1::zeros(6);
+            g[0] = (d_cx + d_ux) / s2;
+            g[3] = (d_cx - d_ux) / s2;
+            g[1] = d_uy / s2;
+            g[4] = -d_uy / s2;
+            Ok((energy, g))
+        }
+
+        fn excluded_modes(&self, x: ArrayView1<f64>) -> Result<Array2<f64>, SaddleError> {
+            let mut modes = Array2::zeros((3, x.len()));
+            for atom in 0..2 {
+                for axis in 0..3 {
+                    modes[(axis, 3 * atom + axis)] = 1.0;
+                }
+            }
+            Ok(modes)
+        }
+    }
+
+    #[test]
+    fn index_check_does_not_count_a_rigid_translation() {
+        let origin = Array1::zeros(6);
+        let raw = Translated {
+            negative_relative: false,
+        };
+        let projected = index_at(&raw, origin.view(), IndexCheck::first_order()).unwrap();
+        assert_eq!(
+            projected.negative, 0,
+            "translation removed: {:?}",
+            projected.values
+        );
+        struct Unprojected;
+        impl PointSurface for Unprojected {
+            fn eval(&self, r: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+                Translated {
+                    negative_relative: false,
+                }
+                .eval(r)
+            }
+        }
+        let bare = index_at(&Unprojected, origin.view(), IndexCheck::first_order()).unwrap();
+        assert_eq!(bare.negative, 1, "raw translation: {:?}", bare.values);
+
+        let saddle = Translated {
+            negative_relative: true,
+        };
+        let one = index_at(&saddle, origin.view(), IndexCheck::first_order()).unwrap();
+        assert_eq!(one.negative, 1, "{:?}", one.values);
+        assert!(one.is_first_order());
+    }
+
+    #[test]
+    fn index_check_accepts_the_quadratic_cell_saddle() {
+        let search = MinModeConfig {
+            method: Method::Lbfgs { memory: 8 },
+            force_tol: 1e-9,
+            max_move: 0.2,
+            dr: 1e-5,
+            rotation_tol: 1e-8,
+            max_rotations: 12,
+            ..MinModeConfig::default()
+        };
+        let mut dimer = SolidDimer::new(
+            SolidDimerConfig::new(search).with_index_check(IndexCheck::first_order()),
+            array![0.25, 0.04, -0.03],
+            diagonal(4.0, 4.0, 4.0),
+            array![1.0, 0.2, 0.0],
+        )
+        .unwrap();
+        let report = dimer.run(&QuadraticCell, 40).unwrap();
+        assert_eq!(report.status, MinModeStatus::Converged);
+        assert!(!report.rejected, "{:?}", report.negative_modes);
+        assert_eq!(report.negative_modes, Some(1));
+        assert!(report.curvature < 0.0);
+        for value in dimer.positions().iter() {
+            assert!(value.abs() < 1e-6, "position {value}");
+        }
     }
 }
