@@ -45,6 +45,7 @@ pub mod autoneb;
 pub mod band;
 #[cfg(feature = "capi")]
 pub mod capi;
+pub mod confine;
 pub mod connect;
 pub mod error;
 pub mod idpp;
@@ -74,6 +75,7 @@ pub use band::{
     BandConfig, BandEvaluation, BandReport, BandSession, BandStatus, BandSurface, Cell, CiConfig,
     ExpBandPrecon, MinModeRefine, SolidState, ZoomConfig,
 };
+pub use confine::{ClimbFrame, ClimbWeights, Confine, DavInput, DimerMode, ModeSource, SigmoidMap};
 pub use connect::{ConnectConfig, ConnectProfile, ConnectReport, connect};
 pub use error::SaddleError;
 pub use idpp::{IdppConfig, SidppConfig, idpp_path, linear_path, sidpp_path};

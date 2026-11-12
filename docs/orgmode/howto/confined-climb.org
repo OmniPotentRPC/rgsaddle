@@ -1,0 +1,69 @@
+#+TITLE: Weight the convex climb
+#+OPTIONS: toc:nil num:nil
+
+A minimum-mode search spends its convex stage walking uphill along the lowest mode, one full per-atom ~max_move~ at a time. In a large cell that mode is often spread over atoms that never take part in the hop, so the cap is spent on them and the defect crawls. ~MinModeSession::set_confine~ multiplies that one step by a per-atom weight and renorms it. The rotation, the mode, the curvature, and the rotation memory never see the weight, so a change of weight does not clear them. A negative curvature lifts the weight. The concave step is the ordinary reflected force on the whole system. ~set_relatch~, off by default, puts the weight back if the curvature turns positive again.
+
+The surface is the whole system. There is no active-volume shell and no list of atoms that grows. Frozen atoms, passed to ~set_frozen~, stay put. A solid-state chart that appends the cell with ~set_cell_tail~ keeps weight one on those coordinates, so the strain is not masked. Excluded directions are removed from a weighted direction, which keeps a translation the surface already dropped from re-entering through the mask.
+
+* When to turn it on
+
+Leave it off when the cell is small, the mode is already local, or the host needs the search to be the stock dimer. Turn it on when a point defect sits in a cell of hundreds or thousands of atoms and a random initial mode, or a kick inside a few angstroms of the defect, keeps spending the convex steps on spectators. The weight is a search bias. It can change which saddle is found. The copper benchmark below is why the default stays off.
+
+* eOn's confine_positive
+
+eOn, on a positive curvature, can replace the force by a masked copy of its parallel part. TheochemUI/eOn ~develop~, ~client/MinModeSaddleSearch.cpp~ lines 199–262. ~Confine::top_force(n)~ is the ~bowl_breakout~ branch, lines 204–233: the ~n~ free atoms with the largest force, earlier index on a tie, and ~n = 0~ leaves a zero step. The shipped eOn count is 20 (~bowl_active_atoms~). ~Confine::eon_threshold~ is the other branch, lines 234–262, with the shipped values min force 0.5, scale 0.9, 30 components, boost 10. A component below the cutoff is dropped. The cutoff is multiplied by the scale until enough components remain or ~max(3 N, min_active)~ passes have run. A positive boost is a common scale and does not change the unit direction. A negative boost reverses it.
+
+* Dynamic active volume
+
+Liang and Xu, Comput. Mater. Sci. 228, 112354 (2023), doi:10.1016/j.commatsci.2023.112354, rescale the dimer orientation during the elevation stage and lift that rescale once the curvature is negative. The sigmoid is ~generate_sigmoid_scale~ in SEAKMC/SEAKMC_py_parallel ~seakmc_p/spsearch/SPSearch.py~ lines 180–208. The logit zero sits at ~min + r0 (max - min)~, and a sample whose span is below ~min_span~ stays at one. ~Confine::log_n~ reads the log of the per-atom mode length, ~compute_xRescale_logdisps~ lines 621–632, at the shipped moving-average period of one, so the average is the current value. ~Confine::log_n_ras(centre)~ also ranks every atom by distance to ~centre~ (~compute_RescaleRAS~, lines 634–648, with the centre fixed by the host rather than recomputed from the displacement) and keeps the smaller of the two sigmoids. The shipped maps are LOGN xrange 20, r0 0.2, min span 4, and RAS xrange 40, r0 0.3, min span 40. The iron-vacancy figure in the paper uses r0 0.5 for RAS, which puts the zero at the median rank. ~SigmoidMap::r0~ is that knob. The weights multiply the climb step, not the mode.
+
+* Participation, for a later surrogate
+
+~Confine::participation~ reads a unit vector from a ~ModeSource~. The weight of atom ~i~ is ~max(floor, (|v_i| / max_j |v_j|)^power)~, the participation of that atom in the vector. ~Confine::own_mode~ passes the dimer's own mode, which is what a test can check today. A Gaussian-process dimer will pass the surrogate's projected lowest Hessian mode (gpridge ~gpr/AtomicDimer.cpp~ lines 5497 and 5519) and return ~None~ until that model is trained. ~None~ uses the LOGN sigmoid, the DAV fallback. No surrogate is linked here.
+
+~ClimbWeights::step_lengths~ is the other hook. It returns a per-atom length of the trial step, and the cap makes the largest length equal ~max_move~. ~None~, the default, keeps the Euclidean length. A force-variance length, as in the uncertainty-aware dimer (gpridge ~AtomicDimer.h~ line 1789), plugs in there without another change to the climb.
+
+* Copper benchmark
+
+The potential is the Mishin copper EAM, Phys. Rev. B 63, 224106 (2001), doi:10.1103/PhysRevB.63.224106, in the NIST setfl table. A perfect 4×4×4 cell sits at −3.54 eV/atom. The relaxed vacancy in the 8×8×8 cell (2047 atoms) and the relaxed <100> dumbbell (2049 atoms, and the 109-atom cell) are the three starts. Four seeds, base 20261112. Odd seeds are held out. A seed is either a random mode on every atom or a displacement of the atoms inside 3.8 Å of the defect, which is eOn's ~displace_radius~ kick, used both as the initial geometry and as the mode. The dimer runs at most 180 steps, force tolerance 0.01 eV/Å, per-atom cap 0.2 Å. Force calls count every gradient, rotations included. A connected saddle is one whose two quenches along the mode, scaled so the largest atom moves 0.8 Å, land on opposite sides of the reactant test (root-mean-square distance 0.03 Å). The raw rows are ~benchmarks/confined_climb.csv~.
+
+The measured table is the median over all four seeds. Calls and milliseconds include searches that hit the step cap. The lowest barrier is among connected saddles only. Participation is ~own_mode(0, 1)~. Top-force uses 20 atoms. Threshold and LOGN+RAS use the shipped settings above.
+
+| System | Init | Confine | Converged | Connected | Distinct | Calls | ms | Lowest |
+|---|---|---|---|---|---|---|---|---|
+| vacancy-2047 | random | none | 0/4 | 0 | 0 | 560 | 14681.1 | |
+| vacancy-2047 | random | top-force | 3/4 | 1 | 2 | 310 | 7983.5 | 4.2609 |
+| vacancy-2047 | random | threshold | 3/4 | 2 | 3 | 550 | 14196.7 | 0.6885 |
+| vacancy-2047 | random | sigmoid | 2/4 | 0 | 2 | 621 | 16303.6 | |
+| vacancy-2047 | random | participation | 2/4 | 1 | 1 | 591 | 15827.8 | 0.6884 |
+| vacancy-2047 | local | none | 4/4 | 4 | 1 | 196 | 5068.5 | 0.6881 |
+| vacancy-2047 | local | top-force | 3/4 | 3 | 1 | 215 | 5539.8 | 0.6885 |
+| vacancy-2047 | local | threshold | 4/4 | 3 | 1 | 196 | 5081.6 | 0.6885 |
+| vacancy-2047 | local | sigmoid | 4/4 | 4 | 1 | 196 | 5207.6 | 0.6885 |
+| vacancy-2047 | local | participation | 3/4 | 3 | 1 | 196 | 5128.1 | 0.6885 |
+| sia-2049 | random | none | 0/4 | 0 | 0 | 572 | 14997.6 | |
+| sia-2049 | random | top-force | 3/4 | 1 | 1 | 333 | 8606.4 | 0.2250 |
+| sia-2049 | random | threshold | 3/4 | 1 | 1 | 284 | 7361.9 | 0.2243 |
+| sia-2049 | random | sigmoid | 0/4 | 0 | 0 | 625 | 16061.1 | |
+| sia-2049 | random | participation | 3/4 | 1 | 2 | 534 | 13679.7 | 0.0921 |
+| sia-2049 | local | none | 1/4 | 1 | 1 | 623 | 16287.4 | 0.2241 |
+| sia-2049 | local | top-force | 1/4 | 1 | 1 | 623 | 16190.8 | 0.2241 |
+| sia-2049 | local | threshold | 1/4 | 1 | 1 | 623 | 16259.0 | 0.2241 |
+| sia-2049 | local | sigmoid | 1/4 | 1 | 1 | 623 | 16212.8 | 0.2241 |
+| sia-2049 | local | participation | 1/4 | 1 | 1 | 623 | 16457.1 | 0.2241 |
+| sia-109 | random | none | 4/4 | 3 | 2 | 223 | 103.6 | 0.0975 |
+| sia-109 | random | top-force | 4/4 | 4 | 1 | 212 | 98.6 | 0.0976 |
+| sia-109 | random | threshold | 4/4 | 2 | 3 | 382 | 177.7 | 0.0976 |
+| sia-109 | random | sigmoid | 3/4 | 2 | 2 | 483 | 226.1 | 0.0981 |
+| sia-109 | random | participation | 4/4 | 4 | 1 | 211 | 99.1 | 0.0976 |
+| sia-109 | local | none | 3/4 | 1 | 3 | 506 | 238.7 | 0.4749 |
+| sia-109 | local | top-force | 3/4 | 1 | 3 | 506 | 240.7 | 0.4749 |
+| sia-109 | local | threshold | 3/4 | 1 | 3 | 506 | 242.1 | 0.4749 |
+| sia-109 | local | sigmoid | 3/4 | 1 | 3 | 506 | 242.3 | 0.4749 |
+| sia-109 | local | participation | 3/4 | 1 | 3 | 506 | 242.4 | 0.4749 |
+
+Mann-Whitney U on the connected barriers, two-sided normal approximation, against none. Vacancy local: participation U 6.0 p 1, sigmoid U 8.0 p 1, threshold U 6.0 p 1, top-force U 6.0 p 1. SIA-2049 local and SIA-109 local: U 0.5 p 1 for every confinement. SIA-109 random: participation U 1.0 p 0.1116, top-force U 1.0 p 0.1116, threshold U 1.0 p 0.3865, sigmoid U 0.0 p 0.1489. Where none has no connected saddle the test is empty.
+
+Odd seeds are the held-out half. On the localized vacancy they match none: 2/2 connected, median 196 calls, lowest barrier 0.689 eV, for every confinement except that the barriers agree to 0.003 eV. On the localized 2049-atom dumbbell every confinement, none included, converges 0/2. On the random 2049-atom dumbbell, threshold and top-force each connect 1/2 at 0.224 eV and 0.225 eV, and none connects 0/2. On the random vacancy, top-force connects 1/2 at 4.261 eV. That is not the 0.689 eV hop. The 109-atom cell is the bias check. No p-value there is below 0.05, and the localized 109-atom searches are the same trajectory for every confinement. Sigmoid on the random 109-atom cell uses 483 calls against 223 and, on the held-out half, its connected barrier is 0.473 eV against 0.098 eV.
+
+The default stays ~Confine::None~. A localized kick already puts the mode on the defect, and the held-out half does not get cheaper. A random mode is where top-force, threshold, and participation sometimes converge and none does, but the saddle is not always the low hop, and four seeds with two held out are not a reason to change every search.

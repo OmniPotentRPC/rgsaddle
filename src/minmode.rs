@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use ndarray::{Array1, Array2, ArrayView1};
 use rgmin::{Accept, Control, Method, Oracle, Solver};
 
+use crate::confine::{self, ClimbFrame, ClimbWeights, Confine};
 use crate::error::SaddleError;
 use crate::force::ForceGate;
 use crate::kappa::{Complement, KappaDimerConfig, kappa_dimer_force};
@@ -614,12 +615,80 @@ pub(crate) fn convex_displacement(
     max_move: f64,
 ) -> Array1<f64> {
     let sign = if gradient.dot(&mode) < 0.0 { -1.0 } else { 1.0 };
+    climb_along(position, mode, sign, max_move)
+}
+
+/// `position + sign * direction`, then the per-atom cap.
+///
+/// [`convex_displacement`] is this with `direction` equal to `mode` and
+/// `sign` taken from `gradient · mode`. A confined climb passes the
+/// weighted direction and the sign of the unweighted mode, so the cap
+/// and the arithmetic stay the ones the unweighted step uses.
+fn climb_along(
+    position: ArrayView1<f64>,
+    direction: ArrayView1<f64>,
+    sign: f64,
+    max_move: f64,
+) -> Array1<f64> {
     let mut trial = position.to_owned();
-    for (slot, component) in trial.iter_mut().zip(mode.iter()) {
+    for (slot, component) in trial.iter_mut().zip(direction.iter()) {
         *slot += sign * component;
     }
     scale_to_atom_cap(position, &mut trial, max_move);
     trial
+}
+
+/// Drop excluded directions from a weighted climb, then renorm.
+///
+/// An empty exclusion returns `direction` unchanged. The unweighted
+/// climb does not call this: its mode is already in that quotient.
+fn project_climb<S: PointSurface>(
+    surface: &S,
+    position: ArrayView1<f64>,
+    direction: Array1<f64>,
+) -> Result<Array1<f64>, SaddleError> {
+    let excluded = surface.excluded_modes(position)?;
+    if excluded.ncols() != position.len() || !excluded.iter().all(|v| v.is_finite()) {
+        return Err(SaddleError::Shape(
+            "minimum-mode excluded directions".into(),
+        ));
+    }
+    if excluded.nrows() == 0 {
+        return Ok(direction);
+    }
+    let mut space = Complement::new(direction.len());
+    for row in excluded.rows() {
+        space.exclude(row);
+    }
+    let mut direction = space.lift(space.reduce(direction.view()).view());
+    let norm = direction.dot(&direction).sqrt();
+    if norm > 0.0 && norm.is_finite() {
+        direction /= norm;
+    } else {
+        direction.fill(0.0);
+    }
+    Ok(direction)
+}
+
+/// Rescale a displacement so the largest reported per-atom length equals `cap`.
+///
+/// The lengths are a norm of the displacement already stored in `trial`.
+fn rescale_to_lengths(
+    origin: ArrayView1<f64>,
+    trial: &Array1<f64>,
+    lengths: &[f64],
+    cap: f64,
+) -> Array1<f64> {
+    let max_len = lengths.iter().copied().fold(0.0, f64::max);
+    if !(max_len.is_finite() && max_len > 0.0 && cap.is_finite() && cap > 0.0) {
+        return trial.clone();
+    }
+    let scale = cap / max_len;
+    let mut out = origin.to_owned();
+    for (slot, (&start, &end)) in out.iter_mut().zip(origin.iter().zip(trial.iter())) {
+        *slot = start + scale * (end - start);
+    }
+    out
 }
 
 /// Rescale the displacement so its largest per-atom (xyz triple) length
@@ -1163,6 +1232,18 @@ pub struct MinModeSession {
     /// The Krylov vectors and actions of the last Lanczos estimate in
     /// the full space; empty after a dimer or with excluded modes.
     krylov: KrylovBlock,
+    /// Convex-climb weights. `None` is the unweighted step.
+    confine: Option<Box<dyn ClimbWeights + Send>>,
+    /// Recompute weights after the curvature has already been negative.
+    relatch: bool,
+    /// The curvature has been negative on an earlier step.
+    left_bowl: bool,
+    /// Geometry the session was given. Custom weights may read it.
+    climb_origin: Array1<f64>,
+    /// Trailing coordinates that belong to the solid-state cell chart.
+    cell_tail: usize,
+    /// Atoms that stay put during a confined climb.
+    frozen: Vec<usize>,
 }
 
 /// Solver used by the min-mode translation. `istep` is FIRE's opening
@@ -1228,6 +1309,7 @@ impl MinModeSession {
             false,
             lbfgs_guards,
         );
+        let climb_origin = x.clone();
         Ok(Self {
             config,
             force_gate: ForceGate::LinfNorm,
@@ -1260,7 +1342,80 @@ impl MinModeSession {
             cg_alpha: None,
             lbfgs_project: false,
             lbfgs_shadow: VecDeque::new(),
+            confine: None,
+            relatch: false,
+            left_bowl: false,
+            climb_origin,
+            cell_tail: 0,
+            frozen: Vec::new(),
         })
+    }
+
+    /// Weight the convex climb. [`Confine::None`] restores the stock step.
+    ///
+    /// The mode, its curvature, and the rotation memory are not weighted.
+    /// A negative curvature lifts the weight. [`MinModeSession::set_relatch`]
+    /// puts it back if the curvature turns positive again.
+    pub fn set_confine(&mut self, confine: Confine) -> Result<(), SaddleError> {
+        confine.check()?;
+        self.left_bowl = false;
+        self.confine = match confine {
+            Confine::None => None,
+            other => Some(Box::new(other)),
+        };
+        Ok(())
+    }
+
+    /// Replace the convex-climb weights with a host source.
+    ///
+    /// A Gaussian-process dimer uses this for participation in its own
+    /// mode and, through [`ClimbWeights::step_lengths`], for a
+    /// force-variance cap. The stock per-atom cap stays when
+    /// `step_lengths` returns `None`.
+    pub fn set_climb_weights<W>(&mut self, weights: W)
+    where
+        W: ClimbWeights + Send + 'static,
+    {
+        self.left_bowl = false;
+        self.confine = Some(Box::new(weights));
+    }
+
+    /// Weight a later convex episode after the curvature has been negative.
+    /// Off by default: the weight applies only before the first negative curvature.
+    pub fn set_relatch(&mut self, enabled: bool) {
+        self.relatch = enabled;
+    }
+
+    /// Atoms that a confined climb does not move. Out of range is refused.
+    pub fn set_frozen(&mut self, atoms: &[usize]) -> Result<(), SaddleError> {
+        let n_atoms = self.atom_count();
+        if atoms.iter().any(|&atom| atom >= n_atoms) {
+            return Err(SaddleError::Invalid(
+                "frozen atom is outside the climb chart".into(),
+            ));
+        }
+        self.frozen = atoms.to_vec();
+        Ok(())
+    }
+
+    /// Trailing coordinates of a solid-state chart. They keep weight one.
+    ///
+    /// `n_cell` is nine for the lattice block. The leading
+    /// `len - n_cell` entries are Cartesian atoms, three per atom.
+    pub fn set_cell_tail(&mut self, n_cell: usize) -> Result<(), SaddleError> {
+        if n_cell > self.x.len() || (self.x.len() - n_cell) % 3 != 0 {
+            return Err(SaddleError::Shape(
+                "cell tail must leave a whole number of atoms".into(),
+            ));
+        }
+        self.cell_tail = n_cell;
+        let n_atoms = self.atom_count();
+        self.frozen.retain(|&atom| atom < n_atoms);
+        Ok(())
+    }
+
+    fn atom_count(&self) -> usize {
+        self.x.len().saturating_sub(self.cell_tail) / 3
     }
 
     /// Translate by Polak-Ribiere conjugate gradients perpendicular to
@@ -1426,6 +1581,7 @@ impl MinModeSession {
         self.mode_fresh = false;
         self.pending_turn = 0.0;
         self.lanczos_carry = None;
+        self.left_bowl = false;
     }
 
     /// Move to `x` and keep the session: the mode stays as the next
@@ -1463,6 +1619,7 @@ impl MinModeSession {
             }
             None => None,
         };
+        self.climb_origin = x.clone();
         self.x = x;
         self.capped_fire = None;
         self.mode_fresh = false;
@@ -1489,6 +1646,7 @@ impl MinModeSession {
         self.pending_turn = 0.0;
         self.lanczos_ready = false;
         self.lanczos_carry = None;
+        self.left_bowl = false;
         Ok(())
     }
 
@@ -2312,6 +2470,90 @@ impl MinModeSession {
         Ok((x, at_new))
     }
 
+    /// The convex step, with weights applied only to the direction.
+    ///
+    /// All-ones weights and a Euclidean cap call [`convex_displacement`]
+    /// on the unweighted mode, so that step is the stock one. Any other
+    /// weight builds `unit(w * mode)`, drops excluded directions, and
+    /// hands that direction to the same cap. [`ClimbWeights::step_lengths`]
+    /// replaces the Euclidean length when it returns a per-atom norm.
+    fn confined_climb<S: PointSurface>(
+        &mut self,
+        surface: &S,
+        gradient: ArrayView1<f64>,
+        mode: ArrayView1<f64>,
+    ) -> Result<Array1<f64>, SaddleError> {
+        let n_atoms = self.atom_count();
+        let position = self.x.clone();
+        let origin = self.climb_origin.clone();
+        let frozen = self.frozen.clone();
+        let max_move = self.config.max_move;
+        let mut weights = {
+            let Some(engine) = self.confine.as_mut() else {
+                return Ok(convex_displacement(
+                    position.view(),
+                    gradient,
+                    mode,
+                    max_move,
+                ));
+            };
+            let frame = ClimbFrame {
+                position: position.view(),
+                origin: origin.view(),
+                mode,
+                gradient,
+                n_atoms,
+                frozen: &frozen,
+            };
+            engine.weights(&frame)
+        };
+        if weights.len() != position.len() || !weights.iter().all(|w| w.is_finite()) {
+            return Err(SaddleError::Shape(
+                "climb weights must be finite and match the position".into(),
+            ));
+        }
+        confine::apply_chart(&mut weights, n_atoms, &frozen);
+        let plain = weights.iter().all(|weight| *weight == 1.0);
+        let trial = if plain {
+            convex_displacement(position.view(), gradient, mode, max_move)
+        } else {
+            let mut direction = confine::weighted_mode(mode, weights.view());
+            direction = project_climb(surface, position.view(), direction)?;
+            if direction.dot(&direction) == 0.0 {
+                position.clone()
+            } else {
+                let sign = if gradient.dot(&mode) < 0.0 { -1.0 } else { 1.0 };
+                // The sign is the unweighted mode's. `climb_along` is the
+                // body of `convex_displacement` with that direction.
+                climb_along(position.view(), direction.view(), sign, max_move)
+            }
+        };
+        let lengths = self
+            .confine
+            .as_mut()
+            .and_then(|engine| engine.step_lengths(position.view(), trial.view()));
+        if let Some(lengths) = lengths {
+            if lengths.len() != n_atoms || !lengths.iter().all(|value| value.is_finite()) {
+                return Err(SaddleError::Shape(
+                    "climb step lengths must be finite and one per atom".into(),
+                ));
+            }
+            if lengths.iter().any(|value| *value < 0.0) {
+                return Err(SaddleError::Invalid(
+                    "climb step lengths must be non-negative".into(),
+                ));
+            }
+            let owned = lengths.to_vec();
+            return Ok(rescale_to_lengths(
+                position.view(),
+                &trial,
+                &owned,
+                max_move,
+            ));
+        }
+        Ok(trial)
+    }
+
     /// One min-mode step: refresh the lowest mode, invert the force
     /// along it, take one solver step.
     ///
@@ -2405,6 +2647,11 @@ impl MinModeSession {
             && self.kappa.is_none()
             && self.config.max_move.is_finite()
             && self.config.max_move > 0.0;
+        let weight_climb =
+            full_climb && self.confine.is_some() && (self.relatch || !self.left_bowl);
+        if translation_curvature < 0.0 {
+            self.left_bowl = true;
+        }
         let lbfgs = matches!(self.config.method, Method::Lbfgs { .. });
         let fire = matches!(self.config.method, Method::Fire { .. });
         let curvature_seed = self.seed_applies(translation_curvature)
@@ -2412,8 +2659,11 @@ impl MinModeSession {
             && ((lbfgs && !self.lbfgs_seeded && self.solver.pair_count() == 0)
                 || (fire && !self.solver_stepped));
         let (x, at_new) = if full_climb {
-            let climbed =
-                convex_displacement(self.x.view(), g0.view(), tau.view(), self.config.max_move);
+            let climbed = if weight_climb {
+                self.confined_climb(surface, g0.view(), tau.view())?
+            } else {
+                convex_displacement(self.x.view(), g0.view(), tau.view(), self.config.max_move)
+            };
             let (energy, gradient) = counted.eval(climbed.view())?;
             // The cached inverted force belongs to the old centre. The
             // pairs and the FIRE velocity stay for the concave region.
