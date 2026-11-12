@@ -6,6 +6,7 @@
 use ndarray::{Array1, ArrayView1};
 use rgsaddle::{
     ArcPath, PafiConfig, PointSurface, SaddleError, average_hyperplane, pafi_profile,
+    zero_temperature_barrier,
 };
 
 struct AlongX;
@@ -64,6 +65,8 @@ fn one_dimensional_barrier_is_the_potential() {
         seed: 3,
         fix_com: false,
         retain: 1,
+        target_error: None,
+        max_rounds: 1,
     };
     let geometry = path.geometry(0.5).expect("mid");
     // x = -0.5 sits halfway in arc length on this uniform line.
@@ -110,6 +113,8 @@ fn transverse_width_shifts_the_free_energy() {
         seed: 11,
         fix_com: false,
         retain: 2,
+        target_error: None,
+        max_rounds: 1,
     };
     let (profile, _) = pafi_profile(&Widening, &path, &path.arcs(), &config).expect("profile");
     let miss = (profile.barrier - truth).abs();
@@ -119,5 +124,25 @@ fn transverse_width_shifts_the_free_energy() {
         profile.barrier,
         profile.barrier_error
     );
+}
+
+#[test]
+fn zero_temperature_integral_recovers_the_barrier() {
+    let frames: Vec<Array1<f64>> = (0..41)
+        .map(|i| {
+            let x = -1.0 + 2.0 * i as f64 / 40.0;
+            Array1::from_vec(vec![x])
+        })
+        .collect();
+    let path = ArcPath::from_positions(&frames).expect("path");
+    let profile = zero_temperature_barrier(&AlongX, &path, &path.arcs()).expect("integral");
+    let end = profile.free_energy.last().copied().unwrap_or(f64::NAN);
+    assert!(
+        (profile.barrier - 1.0).abs() < 3.0e-3 && end.abs() < 2.0e-2,
+        "barrier {} end {end} dividing {}",
+        profile.barrier,
+        profile.dividing
+    );
+    assert!(profile.dividing > 0 && profile.dividing < profile.arc.len() - 1);
 }
 

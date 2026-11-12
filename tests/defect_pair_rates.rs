@@ -220,6 +220,10 @@ fn the_catalogue_round_trips() {
         kappa_error: Some(0.05),
         harmonic_rate: Some(1.0e7),
         rate: Some(2.0e7),
+        zero_t: Some(0.3),
+        band_force: 0.004,
+        pafi_samples: 80,
+        pafi_evaluations: 400,
         saddle_stress: [[0.1, 0.0, 0.0], [0.0, 0.2, 0.0], [0.0, 0.0, 0.3]],
         saddle_dipole: [[-1.0, 0.0, 0.0], [0.0, -2.0, 0.0], [0.0, 0.0, -3.0]],
         negative_eigenvalue: Some(-0.4),
@@ -240,6 +244,10 @@ fn the_catalogue_round_trips() {
     assert!((back.d_f_error.unwrap() - 0.01).abs() < 1e-12);
     assert!((back.kappa.unwrap() - 0.8).abs() < 1e-12);
     assert!((back.rate.unwrap() - 2.0e7).abs() < 1.0);
+    assert!((back.zero_t.unwrap() - 0.3).abs() < 1e-12);
+    assert!((back.band_force - 0.004).abs() < 1e-12);
+    assert_eq!(back.pafi_samples, 80);
+    assert_eq!(back.pafi_evaluations, 400);
     assert!((back.saddle_dipole[1][1] + 2.0).abs() < 1e-12);
     assert!((back.negative_eigenvalue.unwrap() + 0.4).abs() < 1e-12);
 }

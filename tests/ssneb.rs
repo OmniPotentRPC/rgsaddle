@@ -291,3 +291,125 @@ fn variable_cell_double_well_barrier_is_one() {
     assert!((barrier - 1.0).abs() < 1e-3, "barrier {barrier}");
     assert!((enthalpy - energy).abs() < 1e-12, "no external stress");
 }
+
+/// A narrow repulsive wall on top of the double well. The wall stands in
+/// for two atoms that the initial path drives through each other.
+struct SteepWall;
+
+fn steep(row: ArrayView1<f64>) -> (f64, Array1<f64>) {
+    let (x, y, z) = (row[0], row[1], row[2]);
+    let well = (x * x - 1.0).powi(2) + 2.0 * y * y + 2.0 * z * z;
+    let dx = x - 0.35;
+    let denom = dx * dx + 1.0e-3;
+    let bump = 0.08 / denom;
+    let d_bump = -0.16 * dx / (denom * denom);
+    let energy = well + bump;
+    let gradient = array![4.0 * x * (x * x - 1.0) + d_bump, 4.0 * y, 4.0 * z];
+    (energy, gradient)
+}
+
+impl PointSurface for SteepWall {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        Ok(steep(x))
+    }
+}
+
+impl BandSurface for SteepWall {
+    fn eval(
+        &self,
+        positions: ArrayView2<f64>,
+        energies: &mut Array1<f64>,
+        gradients: &mut Array2<f64>,
+    ) -> Result<(), SaddleError> {
+        for (i, row) in positions.outer_iter().enumerate() {
+            let (energy, gradient) = steep(row);
+            energies[i] = energy;
+            gradients.row_mut(i).assign(&gradient);
+        }
+        Ok(())
+    }
+}
+
+/// L-BFGS on a smooth climbing band converges: the two-loop update is not
+/// the defect. Immediate climbing follows the highest image, so a path
+/// that still contains a collision climbs that collision. The band's
+/// L-BFGS guards drop a step that faces away from the force or hits the
+/// cap; they do not move the collision off the band. FIRE with climbing
+/// off does.
+#[test]
+fn lbfgs_diverges_when_it_climbs_a_collision_image() {
+    let mut smooth = BandConfig {
+        force_tol: 1.0e-3,
+        ..ci_config()
+    };
+    smooth.min_mode = None;
+    let mut band = BandSession::new(smooth, bowed(7)).unwrap();
+    let mut report = band.step(&DoubleWell).unwrap();
+    for _ in 0..80 {
+        if report.status == BandStatus::Converged {
+            break;
+        }
+        report = band.step(&DoubleWell).unwrap();
+    }
+    assert!(
+        report.max_force < 1.0e-2,
+        "a smooth climbing band stays with L-BFGS, force {}",
+        report.max_force
+    );
+
+    let mut spiked = bowed(7);
+    spiked[(3, 0)] = 0.35;
+    spiked[(3, 1)] = 0.0;
+    let climb_now = BandConfig {
+        force_tol: 1.0e-2,
+        max_move: 0.2,
+        time_step: 0.1,
+        climbing: Some(CiConfig::always()),
+        method: Method::Lbfgs { memory: 12 },
+        min_mode: None,
+        ..BandConfig::default()
+    };
+    let mut climb = BandSession::new(climb_now, spiked.clone()).unwrap();
+    let mut force = climb.step(&SteepWall).unwrap().max_force;
+    let mut energy = 0.0;
+    for _ in 0..25 {
+        let step = climb.step(&SteepWall).unwrap();
+        force = step.max_force;
+        let row = climb.positions().row(3).to_owned();
+        energy = steep(row.view()).0;
+        if !force.is_finite() || force > 50.0 {
+            break;
+        }
+    }
+    assert!(
+        !force.is_finite() || force > 5.0 || energy > 10.0,
+        "immediate climbing should stay on the collision or blow up, force {force} energy {energy}"
+    );
+
+    let plain = BandConfig {
+        force_tol: 1.0e-2,
+        max_move: 0.15,
+        time_step: 0.1,
+        climbing: None,
+        method: Method::Fire {
+            kind: rgmin::FireKind::V2,
+        },
+        min_mode: None,
+        ..BandConfig::default()
+    };
+    let mut relax = BandSession::new(plain, spiked).unwrap();
+    let mut force = f64::MAX;
+    for _ in 0..200 {
+        let step = relax.step(&SteepWall).unwrap();
+        force = step.max_force;
+        if force < 0.5 {
+            break;
+        }
+    }
+    let row = relax.positions().row(3).to_owned();
+    let energy = steep(row.view()).0;
+    assert!(
+        energy < 3.0,
+        "FIRE without climbing leaves the collision, force {force} energy {energy}"
+    );
+}

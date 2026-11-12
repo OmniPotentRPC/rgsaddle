@@ -119,7 +119,7 @@ pub use defect_pair::{
 };
 pub use pafi::{
     ArcPath, FreeEnergyProfile, HyperplaneAverage, PafiConfig, PathFrame, PathGeometry,
-    average_hyperplane, integrate_profile, pafi_profile,
+    average_hyperplane, integrate_profile, pafi_profile, zero_temperature_barrier,
 };
 pub use strain_rate::{
     BOLTZMANN_EV_PER_K, CurvatureBound, ElasticDipole, Estimate, HopVariant, LINEAR_FOLD_EV,

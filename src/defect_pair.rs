@@ -11,7 +11,8 @@
 //! 3. requires one negative projected eigenvalue from [`crate::index_at`],
 //! 4. pushes off both sides of the unstable mode, minimizes, and keeps the
 //!    hop only when those minima are the reactant and the product,
-//! 5. builds a fixed climbing-image solid-state NEB through that saddle,
+//! 5. builds a climbing-image solid-state NEB through that saddle, in two
+//!    phases: a plain relaxation, then the climb,
 //! 6. integrates the projected average force along that path
 //!    ([`crate::pafi`]) and shoots the Bennett–Chandler factor
 //!    ([`crate::bennett`]) from the free-energy maximum.
@@ -39,6 +40,7 @@
 //! `(shell, direction, hop, temperature, cell_repeats)`.
 
 use ndarray::{Array1, Array2, ArrayView1, s};
+use rgmin::{FireKind, Method};
 
 use crate::band::{BandConfig, BandStatus, CiConfig};
 use crate::bennett::{self, ShootingConfig, Transmission};
@@ -190,6 +192,9 @@ pub struct DefectPairConfig {
     pub harmonic_atoms: Option<Vec<usize>>,
     /// Hyperplanes, including the ends. Zero uses every NEB image.
     pub planes: usize,
+    /// A converged path whose zero-temperature PAFI integral misses `dE0`
+    /// by more than this does not receive a finite-temperature rate.
+    pub zero_t_tol: f64,
 }
 
 impl Default for DefectPairConfig {
@@ -227,6 +232,7 @@ impl Default for DefectPairConfig {
             harmonic_step: 1.0e-3,
             harmonic_atoms: None,
             planes: 0,
+            zero_t_tol: 0.02,
         }
     }
 }
@@ -294,6 +300,15 @@ pub struct RateEntry {
     pub kappa_error: Option<f64>,
     pub harmonic_rate: Option<f64>,
     pub rate: Option<f64>,
+    /// `∫ (∇E · n) ds` with the system held on the path. On a minimum-energy
+    /// path this is `dE0`.
+    pub zero_t: Option<f64>,
+    /// Max band force, in energy per length, after the climbing phase.
+    pub band_force: f64,
+    /// Recorded PAFI samples, summed over planes.
+    pub pafi_samples: usize,
+    /// Force evaluations spent on the PAFI sampling.
+    pub pafi_evaluations: usize,
     pub saddle_stress: M3,
     pub saddle_dipole: M3,
     pub negative_eigenvalue: Option<f64>,
@@ -361,6 +376,15 @@ impl RateCatalogue {
             push_kv(&mut out, "kappa_error", &opt_num(entry.kappa_error), true);
             push_kv(&mut out, "harmonic_rate", &opt_num(entry.harmonic_rate), true);
             push_kv(&mut out, "rate_Hz", &opt_num(entry.rate), true);
+            push_kv(&mut out, "zero_T", &opt_num(entry.zero_t), true);
+            push_kv(&mut out, "band_force", &num(entry.band_force), true);
+            push_kv(&mut out, "pafi_samples", &entry.pafi_samples.to_string(), true);
+            push_kv(
+                &mut out,
+                "pafi_evaluations",
+                &entry.pafi_evaluations.to_string(),
+                true,
+            );
             push_kv(&mut out, "saddle_stress", &matrix_json(entry.saddle_stress), true);
             push_kv(&mut out, "saddle_dipole", &matrix_json(entry.saddle_dipole), true);
             push_kv(
@@ -425,6 +449,10 @@ impl RateCatalogue {
                 kappa_error: optional_f64(item, "kappa_error")?,
                 harmonic_rate: optional_f64(item, "harmonic_rate")?,
                 rate: optional_f64(item, "rate_Hz")?,
+                zero_t: optional_f64(item, "zero_T")?,
+                band_force: optional_f64(item, "band_force")?.unwrap_or(0.0),
+                pafi_samples: optional_f64(item, "pafi_samples")?.unwrap_or(0.0) as usize,
+                pafi_evaluations: optional_f64(item, "pafi_evaluations")?.unwrap_or(0.0) as usize,
                 saddle_stress: required_matrix(item, "saddle_stress")?,
                 saddle_dipole: required_matrix(item, "saddle_dipole")?,
                 negative_eigenvalue: optional_f64(item, "negative_eigenvalue")?,
@@ -435,7 +463,7 @@ impl RateCatalogue {
 }
 
 /// Find every hop's saddle and its finite-temperature rates.
-pub fn defect_pair_rates<S: PointSurface>(
+pub fn defect_pair_rates<S: PointSurface + Sync>(
     surface: &S,
     setup: &PairSetup,
     config: &DefectPairConfig,
@@ -499,6 +527,7 @@ struct Searched {
     path: Option<ArcPath>,
     reactant: Array1<f64>,
     reactant_energy: f64,
+    band_force: f64,
 }
 
 fn search_hop<S: PointSurface>(
@@ -527,6 +556,7 @@ fn search_hop<S: PointSurface>(
             path: None,
             reactant: reactant.clone(),
             reactant_energy,
+            band_force: 0.0,
         }
     };
     let seed = mix(reactant, product, config.seed_fraction, setup.cell)?;
@@ -581,9 +611,10 @@ fn search_hop<S: PointSurface>(
             path: None,
             reactant: reactant.clone(),
             reactant_energy,
+            band_force: 0.0,
         });
     }
-    let (path, band_converged) = climb_path(
+    let (path, band_converged, band_force) = climb_path(
         surface,
         config,
         reactant,
@@ -607,10 +638,11 @@ fn search_hop<S: PointSurface>(
         path: Some(path),
         reactant: reactant.clone(),
         reactant_energy,
+        band_force,
     })
 }
 
-fn fill_entry<S: PointSurface>(
+fn fill_entry<S: PointSurface + Sync>(
     surface: &S,
     config: &DefectPairConfig,
     searched: &Searched,
@@ -621,6 +653,7 @@ fn fill_entry<S: PointSurface>(
     entry.connected = searched.connected;
     entry.index1 = searched.index1;
     entry.band_converged = searched.band_converged;
+    entry.band_force = searched.band_force;
     entry.saddle_energy = searched.saddle_energy;
     entry.d_e0 = searched.d_e0;
     entry.saddle_stress = searched.stress;
@@ -654,11 +687,21 @@ fn fill_entry<S: PointSurface>(
     entry.d_f_harmonic = harmonic.d_f_harmonic;
     entry.harmonic_rate = harmonic.rate;
     let arcs = plane_arcs(path, config.planes);
+    let zero = pafi::zero_temperature_barrier(surface, path, &arcs)?;
+    entry.zero_t = Some(zero.barrier);
+    if (zero.barrier - searched.d_e0).abs() > config.zero_t_tol {
+        entry.outcome = HopOutcome::NotConverged;
+        entry.d_f = Some(zero.barrier);
+        entry.d_f_error = Some((zero.barrier - searched.d_e0).abs());
+        return Ok(());
+    }
     let mut pafi_config = config.pafi.clone();
     pafi_config.thermal = thermal;
     let (profile, planes) = pafi::pafi_profile(surface, path, &arcs, &pafi_config)?;
     entry.d_f = Some(profile.barrier);
     entry.d_f_error = Some(profile.barrier_error);
+    entry.pafi_samples = profile.samples;
+    entry.pafi_evaluations = planes.iter().map(|plane| plane.evaluations).sum();
     let transmission = shoot(surface, config, path, &profile, &planes, thermal)?;
     entry.kappa = Some(transmission.kappa);
     entry.kappa_error = Some(transmission.error);
@@ -768,7 +811,7 @@ fn climb_path<S: PointSurface>(
     product: &Array1<f64>,
     cell: M3,
     saddle_cell: M3,
-) -> Result<(ArcPath, bool), SaddleError> {
+) -> Result<(ArcPath, bool, f64), SaddleError> {
     let images = config.images.max(3);
     let mid = images / 2;
     let idpp = crate::idpp::IdppConfig {
@@ -801,58 +844,159 @@ fn climb_path<S: PointSurface>(
     for i in 1..(images - mid) {
         band.row_mut(mid + i).assign(&right.row(i));
     }
-    let mut band_config = config.band.clone();
-    band_config.min_mode = None;
-    band_config.autoneb = None;
-    band_config.zoom = None;
-    band_config.solid = None;
-    band_config.exp_precon = None;
-    band_config.cell = None;
-    if band_config.climbing.is_none() {
-        band_config.climbing = Some(CiConfig::always());
-    }
-    let mut neb = match config.cell_mode {
-        CellMode::Frozen => SolidNeb::frozen(band_config, band)?,
-        CellMode::Variable => {
-            let cells = vec![cell; images];
-            let _ = saddle_cell;
-            SolidNeb::joint(
-                band_config,
-                cell,
-                band,
-                &cells,
-                CellMask::all(),
-                config.external_stress,
-                1.0,
-            )?
+    let _ = saddle_cell;
+    // L-BFGS with climbing armed on the first step follows the highest
+    // image. An IDPP guess can put that image on a collision, several eV
+    // above the dimer saddle, and the two-loop step then runs up the
+    // wall. The guards in the band reset a capped step; they do not make
+    // that image the saddle. Relax with climbing off, then climb. If the
+    // quasi-Newton climb still runs away, repeat it with FIRE, or with
+    // ODE12r when the caller was already on FIRE.
+    let mut plain = bare_band(&config.band);
+    plain.climbing = None;
+    let start_cells = vec![cell; images];
+    let (mut relaxed, mut relaxed_cells, mut relaxed_force) = run_band(
+        surface,
+        config,
+        plain,
+        band.clone(),
+        cell,
+        Some(start_cells.clone()),
+        false,
+    )?;
+    if relaxed_force > config.band.force_tol * 5.0
+        && !matches!(config.band.method, Method::Fire { .. })
+    {
+        let mut fire = bare_band(&config.band);
+        fire.climbing = None;
+        fire.method = Method::Fire { kind: FireKind::V2 };
+        fire.time_step = config.band.time_step.min(0.1);
+        let (pos, cells, force) = run_band(
+            surface,
+            config,
+            fire,
+            band,
+            cell,
+            Some(start_cells),
+            false,
+        )?;
+        if force < relaxed_force {
+            relaxed = pos;
+            relaxed_cells = cells;
+            relaxed_force = force;
         }
+    }
+    let mut climbing = bare_band(&config.band);
+    climbing.climbing = Some(CiConfig::always());
+    let (climbed, _, climbed_force) = run_band(
+        surface,
+        config,
+        climbing.clone(),
+        relaxed.clone(),
+        cell,
+        Some(relaxed_cells.clone()),
+        true,
+    )?;
+    let (cartesian, force) =
+        if climbed_force <= config.band.force_tol || climbed_force <= relaxed_force {
+            (climbed, climbed_force)
+        } else {
+            let mut retry = climbing;
+            retry.method = if matches!(config.band.method, Method::Fire { .. }) {
+                Method::Ode12r
+            } else {
+                Method::Fire { kind: FireKind::V2 }
+            };
+            retry.time_step = config.band.time_step.min(0.1);
+            let (again, _, again_force) = run_band(
+                surface,
+                config,
+                retry,
+                relaxed,
+                cell,
+                Some(relaxed_cells),
+                true,
+            )?;
+            if again_force < climbed_force {
+                (again, again_force)
+            } else {
+                (climbed, climbed_force)
+            }
+        };
+    let (saddle_energy, _) = surface.eval(saddle.view())?;
+    let mut highest = f64::NEG_INFINITY;
+    for row in cartesian.rows() {
+        let (energy, _) = surface.eval(row)?;
+        highest = highest.max(energy);
+    }
+    let mut frames = Vec::with_capacity(cartesian.nrows());
+    for row in cartesian.rows() {
+        frames.push(row.to_owned());
+    }
+    let tol = config.band.force_tol;
+    let converged = force <= tol && highest <= saddle_energy + config.zero_t_tol.max(0.05);
+    Ok((ArcPath::from_positions(&frames)?, converged, force))
+}
+
+fn bare_band(config: &BandConfig) -> BandConfig {
+    let mut band = config.clone();
+    band.min_mode = None;
+    band.autoneb = None;
+    band.zoom = None;
+    band.solid = None;
+    band.exp_precon = None;
+    band.cell = None;
+    band
+}
+
+fn run_band<S: PointSurface>(
+    surface: &S,
+    config: &DefectPairConfig,
+    band_config: BandConfig,
+    positions: Array2<f64>,
+    reference: M3,
+    cells: Option<Vec<M3>>,
+    abort_on_spike: bool,
+) -> Result<(Array2<f64>, Vec<M3>, f64), SaddleError> {
+    let tol = band_config.force_tol;
+    let n_images = positions.nrows();
+    let image_cells = cells.unwrap_or_else(|| vec![reference; n_images]);
+    let mut neb = match config.cell_mode {
+        CellMode::Frozen => SolidNeb::frozen(band_config, positions)?,
+        CellMode::Variable => SolidNeb::joint(
+            band_config,
+            reference,
+            positions,
+            &image_cells,
+            CellMask::all(),
+            config.external_stress,
+            1.0,
+        )?,
     };
     let mut steps = 0usize;
     let mut report = neb.step(surface)?;
     steps += 1;
     let mut best_force = report.max_force;
     let mut best = neb.cartesian()?;
+    let mut best_cells = neb.cells()?.unwrap_or_default();
     while report.status == BandStatus::Running && steps < config.max_band_steps {
         report = neb.step(surface)?;
         steps += 1;
         if report.max_force < best_force {
             best_force = report.max_force;
             best = neb.cartesian()?;
-        } else if best_force < 0.3 && report.max_force > best_force * 5.0 {
+            best_cells = neb.cells()?.unwrap_or_default();
+        } else if abort_on_spike && best_force < tol.max(0.05) && report.max_force > best_force * 8.0
+        {
             break;
         }
     }
-    let cartesian = if report.max_force <= best_force {
-        neb.cartesian()?
+    let (cartesian, found_cells, force) = if report.max_force <= best_force {
+        (neb.cartesian()?, neb.cells()?.unwrap_or_default(), report.max_force)
     } else {
-        best
+        (best, best_cells, best_force)
     };
-    let mut frames = Vec::with_capacity(cartesian.nrows());
-    for row in cartesian.rows() {
-        frames.push(row.to_owned());
-    }
-    let converged = report.status == BandStatus::Converged || best_force <= config.band.force_tol;
-    Ok((ArcPath::from_positions(&frames)?, converged))
+    Ok((cartesian, found_cells, force))
 }
 
 fn cartesian_push(dimer: &SolidDimer, push: f64) -> Result<Array1<f64>, SaddleError> {
@@ -874,13 +1018,29 @@ fn cartesian_push(dimer: &SolidDimer, push: f64) -> Result<Array1<f64>, SaddleEr
         let length = mode.len().min(n);
         step.slice_mut(s![..length]).assign(&mode.slice(s![..length]));
     }
-    let scale = norm1(&step);
+    let scale = max_atomic(&step);
     if scale == 0.0 {
         return Err(SaddleError::Invalid(
             "the unstable mode has no atomic component".into(),
         ));
     }
     Ok(step * (push / scale))
+}
+
+/// Largest per-atom length. `push` is this length, not the 3N Euclidean norm,
+/// so a localized mode on a large cell still leaves the saddle.
+fn max_atomic(step: &Array1<f64>) -> f64 {
+    let mut scale = 0.0_f64;
+    let n = step.len() / 3;
+    for atom in 0..n {
+        let mut acc = 0.0;
+        for c in 0..3 {
+            let value = step[3 * atom + c];
+            acc += value * value;
+        }
+        scale = scale.max(acc.sqrt());
+    }
+    scale
 }
 
 fn deform_of(eps: M3) -> M3 {
@@ -1250,6 +1410,10 @@ fn blank_entry(
         kappa_error: None,
         harmonic_rate: None,
         rate: None,
+        zero_t: None,
+        band_force: 0.0,
+        pafi_samples: 0,
+        pafi_evaluations: 0,
         saddle_stress: [[0.0; 3]; 3],
         saddle_dipole: [[0.0; 3]; 3],
         negative_eigenvalue: None,
@@ -1322,6 +1486,11 @@ fn check_config(config: &DefectPairConfig) -> Result<(), SaddleError> {
     if !(config.push.is_finite() && config.push > 0.0 && config.connect_rmsd > 0.0) {
         return Err(SaddleError::Invalid(
             "the push and the connectivity tolerance must be positive".into(),
+        ));
+    }
+    if !(config.zero_t_tol.is_finite() && config.zero_t_tol > 0.0) {
+        return Err(SaddleError::Invalid(
+            "the zero-temperature tolerance must be positive".into(),
         ));
     }
     Ok(())

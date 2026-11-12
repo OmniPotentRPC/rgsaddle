@@ -15,9 +15,12 @@
 //! restored after every step. A center-of-mass projection is optional and
 //! is the `com yes` choice of that fix. The integral of `dF/ds` from the
 //! reactant is the potential of mean force. Block averages of the recorded
-//! samples supply the standard error.
+//! samples supply the standard error. The block length is at least twice
+//! the integrated autocorrelation time, so a correlated series is not
+//! treated as independent.
 
 use ndarray::{Array1, ArrayView1};
+use rayon::prelude::*;
 
 use crate::error::SaddleError;
 use crate::minmode::PointSurface;
@@ -45,6 +48,11 @@ pub struct PafiConfig {
     pub fix_com: bool,
     /// How many recorded configurations to keep, evenly spaced.
     pub retain: usize,
+    /// Stop early when the integrated barrier error is at or below this.
+    /// `None` runs one pass.
+    pub target_error: Option<f64>,
+    /// Extra sampling passes used to reach [`Self::target_error`].
+    pub max_rounds: usize,
 }
 
 impl Default for PafiConfig {
@@ -60,6 +68,8 @@ impl Default for PafiConfig {
             seed: 1,
             fix_com: true,
             retain: 16,
+            target_error: None,
+            max_rounds: 4,
         }
     }
 }
@@ -269,6 +279,12 @@ pub struct HyperplaneAverage {
     /// Mean of `ψ = (x - X) · dn/ds`.
     pub psi: f64,
     pub samples: usize,
+    /// Integrated autocorrelation time of the recorded series, in samples.
+    pub tau: f64,
+    /// `samples / (2 τ)`.
+    pub n_eff: f64,
+    /// Force evaluations spent on this plane, summed over rounds.
+    pub evaluations: usize,
     /// Configurations kept from the production run, on the plane.
     pub retained: Vec<Array1<f64>>,
 }
@@ -286,6 +302,8 @@ pub struct FreeEnergyProfile {
     pub barrier_error: f64,
     /// Index of that maximum.
     pub dividing: usize,
+    /// Recorded samples, summed over planes and rounds.
+    pub samples: usize,
 }
 
 /// Sample one hyperplane and return the PAFI gradient.
@@ -368,20 +386,22 @@ pub fn average_hyperplane<S: PointSurface>(
             "PAFI did not record the requested samples".into(),
         ));
     }
-    let (gradient, error) = block_mean(&observations, config.blocks);
+    let (gradient, error, tau, n_eff) = block_mean(&observations, config.blocks);
     Ok(HyperplaneAverage {
         gradient,
         error,
         psi: psi_sum / config.samples as f64,
         samples: config.samples,
+        tau,
+        n_eff,
+        evaluations: total,
         retained,
     })
 }
 
 /// Integrate plane gradients with the trapezoid rule.
 ///
-/// The dividing surface is the interior maximum of the potential of mean
-/// force. With only two planes the maximum of the two is used.
+/// The dividing surface is the maximum of the potential of mean force.
 pub fn integrate_profile(
     arcs: &[f64],
     gradients: &[f64],
@@ -416,11 +436,16 @@ pub fn integrate_profile(
         gradient_error: errors.to_vec(),
         free_energy: free,
         free_energy_error: free_error,
+        samples: 0,
     })
 }
 
 /// Sample every requested arc and integrate.
-pub fn pafi_profile<S: PointSurface>(
+///
+/// When [`PafiConfig::target_error`] is set, planes are resampled until the
+/// barrier error is at or below that target or [`PafiConfig::max_rounds`]
+/// is spent. Later rounds are inverse-variance combined with the first.
+pub fn pafi_profile<S: PointSurface + Sync>(
     surface: &S,
     path: &ArcPath,
     arcs: &[f64],
@@ -431,17 +456,118 @@ pub fn pafi_profile<S: PointSurface>(
             "PAFI needs at least two hyperplanes".into(),
         ));
     }
-    let mut planes = Vec::with_capacity(arcs.len());
-    for (index, arc) in arcs.iter().enumerate() {
-        let geometry = path.geometry(*arc)?;
-        let mut local = config.clone();
-        local.seed = config.seed.wrapping_add(index as u64).wrapping_add(1);
-        planes.push(average_hyperplane(surface, &geometry, &local)?);
+    let mut planes = sample_planes(surface, path, arcs, config, 0)?;
+    let mut profile = profile_of(arcs, &planes)?;
+    let rounds = config.max_rounds.max(1);
+    let mut round = 1usize;
+    while let Some(target) = config.target_error {
+        if profile.barrier_error <= target || round >= rounds {
+            break;
+        }
+        if profile.barrier_error <= 0.0 {
+            break;
+        }
+        let factor = (profile.barrier_error / target).powi(2).clamp(2.0, 8.0);
+        let mut extra = config.clone();
+        extra.samples = ((config.samples as f64) * factor).ceil() as usize;
+        extra.samples = extra.samples.max(config.blocks * 2);
+        extra.thermalize = config.thermalize / 2;
+        extra.target_error = None;
+        let more = sample_planes(surface, path, arcs, &extra, round as u64 * 10_000)?;
+        for (plane, added) in planes.iter_mut().zip(more) {
+            let (gradient, error) = combine(plane.gradient, plane.error, added.gradient, added.error);
+            plane.gradient = gradient;
+            plane.error = error;
+            plane.samples += added.samples;
+            plane.evaluations += added.evaluations;
+            plane.tau = plane.tau.max(added.tau);
+            plane.n_eff += added.n_eff;
+            if plane.retained.len() < config.retain {
+                plane.retained.extend(added.retained);
+            }
+        }
+        profile = profile_of(arcs, &planes)?;
+        round += 1;
     }
+    profile.samples = planes.iter().map(|plane| plane.samples).sum();
+    Ok((profile, planes))
+}
+
+fn sample_planes<S: PointSurface + Sync>(
+    surface: &S,
+    path: &ArcPath,
+    arcs: &[f64],
+    config: &PafiConfig,
+    salt: u64,
+) -> Result<Vec<HyperplaneAverage>, SaddleError> {
+    arcs.par_iter()
+        .enumerate()
+        .map(|(index, arc)| {
+            let geometry = path.geometry(*arc)?;
+            let mut local = config.clone();
+            local.seed = config
+                .seed
+                .wrapping_add(salt)
+                .wrapping_add(index as u64)
+                .wrapping_add(1);
+            average_hyperplane(surface, &geometry, &local)
+        })
+        .collect()
+}
+
+fn profile_of(arcs: &[f64], planes: &[HyperplaneAverage]) -> Result<FreeEnergyProfile, SaddleError> {
     let gradients: Vec<f64> = planes.iter().map(|plane| plane.gradient).collect();
     let errors: Vec<f64> = planes.iter().map(|plane| plane.error).collect();
-    let profile = integrate_profile(arcs, &gradients, &errors)?;
-    Ok((profile, planes))
+    integrate_profile(arcs, &gradients, &errors)
+}
+
+fn combine(mean_a: f64, error_a: f64, mean_b: f64, error_b: f64) -> (f64, f64) {
+    let va = error_a * error_a;
+    let vb = error_b * error_b;
+    if va == 0.0 && vb == 0.0 {
+        return (0.5 * (mean_a + mean_b), 0.0);
+    }
+    if va == 0.0 {
+        return (mean_a, 0.0);
+    }
+    if vb == 0.0 {
+        return (mean_b, 0.0);
+    }
+    let weight_a = 1.0 / va;
+    let weight_b = 1.0 / vb;
+    let mean = (weight_a * mean_a + weight_b * mean_b) / (weight_a + weight_b);
+    let error = (1.0 / (weight_a + weight_b)).sqrt();
+    (mean, error)
+}
+
+/// Integral of `∇E · dX/ds` with the system held on the path.
+///
+/// This is the zero-temperature limit of the PAFI integral: `ψ = 0` and
+/// there is no thermal average. On a converged minimum-energy path it
+/// reproduces the potential barrier.
+pub fn zero_temperature_barrier<S: PointSurface>(
+    surface: &S,
+    path: &ArcPath,
+    arcs: &[f64],
+) -> Result<FreeEnergyProfile, SaddleError> {
+    if arcs.len() < 2 {
+        return Err(SaddleError::Invalid(
+            "the zero-temperature integral needs at least two points".into(),
+        ));
+    }
+    let mut gradients = Vec::with_capacity(arcs.len());
+    let errors = vec![0.0; arcs.len()];
+    for arc in arcs {
+        let geometry = path.geometry(*arc)?;
+        let (_energy, gradient) = surface.eval(geometry.positions.view())?;
+        if gradient.len() != geometry.tangent.len() {
+            return Err(SaddleError::Shape(
+                "zero-temperature gradient must match the path".into(),
+            ));
+        }
+        gradients.push(gradient.dot(&geometry.tangent));
+    }
+    integrate_profile(arcs, &gradients, &errors)
 }
 
 fn prefix_errors(arcs: &[f64], errors: &[f64]) -> Result<Vec<f64>, SaddleError> {
@@ -540,21 +666,65 @@ fn norm(vector: &Array1<f64>) -> f64 {
     vector.dot(vector).sqrt()
 }
 
-fn block_mean(values: &[f64], blocks: usize) -> (f64, f64) {
-    let width = values.len() / blocks;
-    let mut means = Vec::with_capacity(blocks);
-    for block in 0..blocks {
+fn block_mean(values: &[f64], blocks: usize) -> (f64, f64, f64, f64) {
+    let tau = autocorr_time(values);
+    let correlated = (2.0 * tau).ceil() as usize;
+    let width = (values.len() / blocks).max(correlated).max(1);
+    let n_blocks = (values.len() / width).max(2).min(values.len());
+    let width = values.len() / n_blocks;
+    let mut means = Vec::with_capacity(n_blocks);
+    for block in 0..n_blocks {
         let slice = &values[block * width..(block + 1) * width];
         let mean = slice.iter().sum::<f64>() / slice.len() as f64;
         means.push(mean);
     }
-    let mean = means.iter().sum::<f64>() / blocks as f64;
-    let variance = means
-        .iter()
-        .map(|value| (value - mean) * (value - mean))
-        .sum::<f64>()
-        / (blocks - 1) as f64;
-    (mean, (variance / blocks as f64).sqrt())
+    let mean = means.iter().sum::<f64>() / n_blocks as f64;
+    let variance = if n_blocks < 2 {
+        0.0
+    } else {
+        means
+            .iter()
+            .map(|value| (value - mean) * (value - mean))
+            .sum::<f64>()
+            / (n_blocks - 1) as f64
+    };
+    let n_eff = values.len() as f64 / (2.0 * tau).max(1.0);
+    (mean, (variance / n_blocks as f64).sqrt(), tau, n_eff)
+}
+
+/// Sokal's integrated autocorrelation time, in samples. The sum stops at
+/// the first non-positive autocorrelation.
+fn autocorr_time(values: &[f64]) -> f64 {
+    let n = values.len();
+    if n < 4 {
+        return 0.5;
+    }
+    let mean = values.iter().sum::<f64>() / n as f64;
+    let mut variance = 0.0;
+    for value in values {
+        let d = value - mean;
+        variance += d * d;
+    }
+    variance /= n as f64;
+    if variance < 1e-30 {
+        return 0.5;
+    }
+    let mut tau = 0.5;
+    let mut lag = 1usize;
+    while lag < n / 4 {
+        let mut cov = 0.0;
+        for i in 0..(n - lag) {
+            cov += (values[i] - mean) * (values[i + lag] - mean);
+        }
+        cov /= (n - lag) as f64;
+        let rho = cov / variance;
+        if rho <= 0.0 {
+            break;
+        }
+        tau += rho;
+        lag += 1;
+    }
+    tau.max(0.5)
 }
 
 /// xoshiro256++. The stream is deterministic for a seed.
