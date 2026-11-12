@@ -70,6 +70,7 @@ while report.status != BandStatus::Converged {
    howto/solid-dimer
    howto/ssneb
    howto/strain-rate
+   howto/defect-pair-rates
    howto/sparse-hessian
    howto/sella
    howto/irc

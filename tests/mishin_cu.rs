@@ -2272,3 +2272,679 @@ fn write_point(
         linear: trust == "linear" || trust == "explicit_reference",
     });
 }
+
+fn eam_eval_fast(
+    positions: ArrayView1<f64>,
+    cell: [[f64; 3]; 3],
+) -> (f64, Array1<f64>, [[f64; 3]; 3]) {
+    if cell[0][1].abs() + cell[0][2].abs() + cell[1][0].abs() + cell[1][2].abs() + cell[2][0].abs()
+        + cell[2][1].abs()
+        > 1.0e-8
+    {
+        return eam_eval(positions, cell);
+    }
+    let n = positions.len() / 3;
+    let lengths = [cell[0][0].abs(), cell[1][1].abs(), cell[2][2].abs()];
+    let nimg = ((RC / lengths.into_iter().fold(f64::MAX, f64::min)).ceil() as i32).max(1);
+    let nside = lengths.map(|length| ((length / RC).floor() as i32).max(1));
+    let bins_n = (nside[0] * nside[1] * nside[2]) as usize;
+    let mut bins = vec![Vec::new(); bins_n];
+    let inv = invert(cell);
+    let mut frac = vec![[0.0; 3]; n];
+    for i in 0..n {
+        let r = [positions[3 * i], positions[3 * i + 1], positions[3 * i + 2]];
+        frac[i] = [
+            r[0] * inv[0][0] + r[1] * inv[1][0] + r[2] * inv[2][0],
+            r[0] * inv[0][1] + r[1] * inv[1][1] + r[2] * inv[2][1],
+            r[0] * inv[0][2] + r[1] * inv[1][2] + r[2] * inv[2][2],
+        ];
+        bins[frac_bin(frac[i], nside)].push(i);
+    }
+    let cutoff2 = RC * RC;
+    let mut pairs = Vec::new();
+    for i in 0..n {
+        for sx in -nimg..=nimg {
+            for sy in -nimg..=nimg {
+                for sz in -nimg..=nimg {
+                    let target = [
+                        (frac[i][0] - sx as f64).rem_euclid(1.0),
+                        (frac[i][1] - sy as f64).rem_euclid(1.0),
+                        (frac[i][2] - sz as f64).rem_euclid(1.0),
+                    ];
+                    let origin = frac_bin_ijk(target, nside);
+                    let mut slots = Vec::with_capacity(8);
+                    for dx in -1..=1 {
+                        for dy in -1..=1 {
+                            for dz in -1..=1 {
+                                let ix = (origin[0] + dx).rem_euclid(nside[0]);
+                                let iy = (origin[1] + dy).rem_euclid(nside[1]);
+                                let iz = (origin[2] + dz).rem_euclid(nside[2]);
+                                let slot = ((ix * nside[1] + iy) * nside[2] + iz) as usize;
+                                if !slots.contains(&slot) {
+                                    slots.push(slot);
+                                }
+                            }
+                        }
+                    }
+                    for slot in slots {
+                        for &j in &bins[slot] {
+                            if j < i || (j == i && !positive_image(sx, sy, sz)) {
+                                continue;
+                            }
+                            let shift = [
+                                sx as f64 * cell[0][0],
+                                sy as f64 * cell[1][1],
+                                sz as f64 * cell[2][2],
+                            ];
+                            let d = [
+                                positions[3 * j] + shift[0] - positions[3 * i],
+                                positions[3 * j + 1] + shift[1] - positions[3 * i + 1],
+                                positions[3 * j + 2] + shift[2] - positions[3 * i + 2],
+                            ];
+                            let r2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+                            if r2 > 1e-16 && r2 < cutoff2 {
+                                pairs.push(Pair { i, j, d, r: r2.sqrt() });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    accumulate_eam(n, positions.len(), &pairs, det(cell).abs())
+}
+
+fn frac_bin(s: [f64; 3], nside: [i32; 3]) -> usize {
+    let ijk = frac_bin_ijk(s, nside);
+    ((ijk[0] * nside[1] + ijk[1]) * nside[2] + ijk[2]) as usize
+}
+
+fn frac_bin_ijk(s: [f64; 3], nside: [i32; 3]) -> [i32; 3] {
+    [0, 1, 2].map(|c| {
+        let scaled = s[c].rem_euclid(1.0) * nside[c] as f64;
+        let mut bin = scaled.floor() as i32;
+        if bin >= nside[c] {
+            bin = nside[c] - 1;
+        }
+        if bin < 0 {
+            bin = 0;
+        }
+        bin
+    })
+}
+
+fn accumulate_eam(
+    n: usize,
+    n_coord: usize,
+    pairs: &[Pair],
+    volume: f64,
+) -> (f64, Array1<f64>, [[f64; 3]; 3]) {
+    let mut rho = vec![0.0; n];
+    for bond in pairs {
+        let weight = density(bond.r).0;
+        rho[bond.i] += weight;
+        if bond.i != bond.j {
+            rho[bond.j] += weight;
+        } else {
+            rho[bond.i] += weight;
+        }
+    }
+    let mut energy = 0.0;
+    let mut fp = vec![0.0; n];
+    for i in 0..n {
+        let (value, slope) = embed(rho[i]);
+        energy += value;
+        fp[i] = slope;
+    }
+    let mut gradient = Array1::zeros(n_coord);
+    let mut virial = [[0.0; 3]; 3];
+    for bond in pairs {
+        let (v, dv) = pair(bond.r);
+        let (_, drho) = density(bond.r);
+        let inv_r = 1.0 / bond.r;
+        if bond.i != bond.j {
+            energy += v;
+            let deriv = dv + (fp[bond.i] + fp[bond.j]) * drho;
+            for c in 0..3 {
+                let force = deriv * bond.d[c] * inv_r;
+                gradient[3 * bond.i + c] -= force;
+                gradient[3 * bond.j + c] += force;
+            }
+            for (a, virial_row) in virial.iter_mut().enumerate() {
+                for (b, slot) in virial_row.iter_mut().enumerate() {
+                    *slot += deriv * bond.d[a] * bond.d[b] * inv_r;
+                }
+            }
+        } else {
+            energy += v;
+            let deriv = dv + 2.0 * fp[bond.i] * drho;
+            for (a, virial_row) in virial.iter_mut().enumerate() {
+                for (b, slot) in virial_row.iter_mut().enumerate() {
+                    *slot += deriv * bond.d[a] * bond.d[b] * inv_r;
+                }
+            }
+        }
+    }
+    let mut stress = [[0.0; 3]; 3];
+    for (a, virial_row) in virial.iter().enumerate() {
+        for (b, virial_ab) in virial_row.iter().enumerate() {
+            stress[a][b] = virial_ab / volume;
+        }
+    }
+    (energy, gradient, stress)
+}
+
+#[test]
+fn fast_mishin_matches_the_direct_pair_sum() {
+    let (perfect, cell) = fcc(3, 3.615);
+    let (energy, gradient, stress) = eam_eval(perfect.view(), cell);
+    let (fast_e, fast_g, fast_s) = eam_eval_fast(perfect.view(), cell);
+    assert!((energy - fast_e).abs() < 1e-8, "{energy} {fast_e}");
+    for (left, right) in gradient.iter().zip(fast_g.iter()) {
+        assert!((left - right).abs() < 1e-7, "{left} {right}");
+    }
+    for a in 0..3 {
+        for b in 0..3 {
+            assert!((stress[a][b] - fast_s[a][b]).abs() < 1e-8);
+        }
+    }
+    let defect = dumbbell(&perfect, [1.0, 0.0, 0.0], 2.05);
+    let (energy, gradient, stress) = eam_eval(defect.view(), cell);
+    let (fast_e, fast_g, fast_s) = eam_eval_fast(defect.view(), cell);
+    assert!((energy - fast_e).abs() < 1e-6, "{energy} {fast_e}");
+    for (left, right) in gradient.iter().zip(fast_g.iter()) {
+        assert!((left - right).abs() < 1e-6, "{left} {right}");
+    }
+    for a in 0..3 {
+        for b in 0..3 {
+            assert!((stress[a][b] - fast_s[a][b]).abs() < 1e-6);
+        }
+    }
+}
+
+struct FastCopper {
+    calls: AtomicUsize,
+}
+
+impl FastCopper {
+    fn new() -> Self {
+        Self { calls: AtomicUsize::new(0) }
+    }
+
+    fn evaluate(&self, positions: ArrayView1<f64>, cell: [[f64; 3]; 3]) -> (f64, Array1<f64>, [[f64; 3]; 3]) {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        eam_eval_fast(positions, cell)
+    }
+}
+
+struct FastHeld<'a> {
+    copper: &'a FastCopper,
+    cell: [[f64; 3]; 3],
+}
+
+impl PointSurface for FastHeld<'_> {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        let (energy, gradient, _) = self.copper.evaluate(x, self.cell);
+        Ok((energy, gradient))
+    }
+
+    fn eval_in_cell(&self, x: ArrayView1<f64>, cell: &[f64; 9]) -> Result<(f64, Array1<f64>), SaddleError> {
+        let (energy, gradient, _) = self.copper.evaluate(x, unflat(cell));
+        Ok((energy, gradient))
+    }
+
+    fn cauchy_stress(&self, x: ArrayView1<f64>, cell: &[f64; 9]) -> Result<Option<[f64; 9]>, SaddleError> {
+        let (_, _, stress) = self.copper.evaluate(x, unflat(cell));
+        Ok(Some(flat(stress)))
+    }
+
+    fn excluded_modes(&self, x: ArrayView1<f64>) -> Result<Array2<f64>, SaddleError> {
+        let n = x.len() / 3;
+        let mut modes = Array2::zeros((3, x.len()));
+        for atom in 0..n {
+            for c in 0..3 {
+                modes[(c, 3 * atom + c)] = 1.0;
+            }
+        }
+        Ok(modes)
+    }
+}
+
+fn relax_fast(copper: &FastCopper, positions: &mut Array1<f64>, cell: [[f64; 3]; 3], tol: f64, max_steps: usize) {
+    let mut solver = Solver::new(
+        Method::Fire { kind: FireKind::V2 },
+        Control { maxiter: usize::MAX, gtol: 0.0, istep: 0.08, ..Control::default() },
+        positions.len(),
+    );
+    solver.set_atom_maxmove(0.08);
+    for _ in 0..max_steps {
+        let oracle = Oracle::unbounded(positions.len(), |x: ArrayView1<f64>| {
+            let (energy, gradient, _) = copper.evaluate(x, cell);
+            (energy, gradient)
+        });
+        solver.step(&oracle, positions).expect("relax");
+        let (_, gradient, _) = copper.evaluate(positions.view(), cell);
+        if max_abs(&gradient) < tol {
+            break;
+        }
+    }
+}
+
+fn shell_vectors(a: f64, repeats: usize) -> Vec<(f64, [f64; 3])> {
+    let max_r = 10.8_f64.min(repeats as f64 * a * 0.48);
+    let limit = ((2.0 * max_r / a).ceil() as i32) + 1;
+    let mut found: Vec<(f64, [f64; 3])> = Vec::new();
+    for i in -limit..=limit {
+        for j in -limit..=limit {
+            for k in -limit..=limit {
+                if (i + j + k) % 2 != 0 || (i == 0 && j == 0 && k == 0) {
+                    continue;
+                }
+                let cart = [i as f64 * 0.5 * a, j as f64 * 0.5 * a, k as f64 * 0.5 * a];
+                let r = (cart[0] * cart[0] + cart[1] * cart[1] + cart[2] * cart[2]).sqrt();
+                if r < 0.7 * a || r > max_r {
+                    continue;
+                }
+                if found.iter().any(|(prior, _)| (prior - r).abs() < 1e-3) {
+                    continue;
+                }
+                found.push((r, cart));
+            }
+        }
+    }
+    found.sort_by(|left, right| left.0.partial_cmp(&right.0).unwrap());
+    found
+}
+
+fn nearest(points: &[[f64; 3]], target: [f64; 3], skip: Option<usize>) -> usize {
+    let mut best = 0usize;
+    let mut best_r = f64::MAX;
+    for (index, point) in points.iter().enumerate() {
+        if skip == Some(index) {
+            continue;
+        }
+        let d = [
+            point[0] - target[0],
+            point[1] - target[1],
+            point[2] - target[2],
+        ];
+        let r2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+        if r2 < best_r {
+            best_r = r2;
+            best = index;
+        }
+    }
+    best
+}
+
+struct BuiltPair {
+    positions: Array1<f64>,
+    vacancy: [f64; 3],
+    dumbbell: [usize; 2],
+}
+
+fn build_pair(repeats: usize, a: f64, shell: [f64; 3], vacancy: bool) -> BuiltPair {
+    let (flat, cell) = fcc(repeats, a);
+    let mut points = Vec::new();
+    for atom in 0..flat.len() / 3 {
+        points.push([flat[3 * atom], flat[3 * atom + 1], flat[3 * atom + 2]]);
+    }
+    let center = [cell[0][0] * 0.5, cell[1][1] * 0.5, cell[2][2] * 0.5];
+    let vac = nearest(&points, center, None);
+    let sia_guess = [
+        points[vac][0] + shell[0],
+        points[vac][1] + shell[1],
+        points[vac][2] + shell[2],
+    ];
+    let sia = nearest(&points, sia_guess, Some(vac));
+    let vac_pos = points[vac];
+    let sia_pos = points[sia];
+    let mut keep = Vec::new();
+    for (index, point) in points.iter().enumerate() {
+        if index == sia || (vacancy && index == vac) {
+            continue;
+        }
+        keep.push(*point);
+    }
+    let offset = 1.025;
+    keep.push([sia_pos[0] - offset, sia_pos[1], sia_pos[2]]);
+    keep.push([sia_pos[0] + offset, sia_pos[1], sia_pos[2]]);
+    let n = keep.len();
+    let mut values = Vec::with_capacity(n * 3);
+    for point in keep {
+        values.extend(point);
+    }
+    BuiltPair {
+        positions: Array1::from(values),
+        vacancy: vac_pos,
+        dumbbell: [n - 2, n - 1],
+    }
+}
+
+fn centroid(positions: &Array1<f64>, atoms: [usize; 2]) -> [f64; 3] {
+    let mut c = [0.0; 3];
+    for atom in atoms {
+        for k in 0..3 {
+            c[k] += positions[3 * atom + k];
+        }
+    }
+    [c[0] * 0.5, c[1] * 0.5, c[2] * 0.5]
+}
+
+fn dist(a: [f64; 3], b: [f64; 3]) -> f64 {
+    let d = [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+    (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
+}
+
+fn johnson_product(positions: &Array1<f64>, dumbbell: [usize; 2], target: usize, axis: [f64; 3]) -> Array1<f64> {
+    let mut out = positions.clone();
+    let old = centroid(positions, dumbbell);
+    let new_center = [positions[3 * target], positions[3 * target + 1], positions[3 * target + 2]];
+    let offset = 1.025;
+    for (which, sign) in dumbbell.into_iter().zip([-1.0, 1.0]) {
+        for k in 0..3 {
+            out[3 * which + k] = new_center[k] + sign * offset * axis[k];
+        }
+    }
+    for k in 0..3 {
+        out[3 * target + k] = old[k];
+    }
+    out
+}
+
+fn env_csv(key: &str, default: &str) -> Vec<String> {
+    std::env::var(key).unwrap_or_else(|_| default.to_string())
+        .split(',')
+        .filter(|item| !item.is_empty())
+        .map(|item| item.trim().to_string())
+        .collect()
+}
+
+/// Mishin EAM1 vacancy plus <100> dumbbell. Lattice parameters are Table 1 of
+/// Mwungeli, Liu, and Demkowicz, Phys. Rev. Materials 9, 023601 (2025).
+#[test]
+#[ignore = "release Mishin Cu defect-pair catalogue; writes benchmarks/defect_pair_cu.csv"]
+fn defect_pair_cu_catalogue() {
+    let repeats: Vec<usize> = env_csv("RGSADDLE_REPEATS", "6")
+        .iter()
+        .map(|item| item.parse().expect("repeats"))
+        .collect();
+    let temperatures: Vec<f64> = env_csv("RGSADDLE_TEMPS", "300,400,500,600,700")
+        .iter()
+        .map(|item| item.parse().expect("temperature"))
+        .collect();
+    let max_shells: usize = std::env::var("RGSADDLE_MAX_SHELLS").ok().and_then(|text| text.parse().ok()).unwrap_or(3);
+    let samples: usize = std::env::var("RGSADDLE_SAMPLES").ok().and_then(|text| text.parse().ok()).unwrap_or(48);
+    let lattice = |temperature: f64| match temperature as i32 {
+        300 => 3.631,
+        400 => 3.637,
+        500 => 3.643,
+        600 => 3.649,
+        700 => 3.655,
+        _ => panic!("temperature {temperature} is not in Table 1"),
+    };
+    // One static lattice for the whole temperature series: the 500 K value,
+    // unless a single temperature is requested, in which case that row's a(T) is used.
+    let a_fixed = if temperatures.len() == 1 { lattice(temperatures[0]) } else { 3.643 };
+    let copper = FastCopper::new();
+    let mut catalogue = rgsaddle::RateCatalogue { entries: Vec::new() };
+    let mut notes = Vec::new();
+    for &nrepeat in &repeats {
+        let surface_cell = {
+            let length = nrepeat as f64 * a_fixed;
+            [[length, 0.0, 0.0], [0.0, length, 0.0], [0.0, 0.0, length]]
+        };
+        let (perfect, _) = fcc(nrepeat, a_fixed);
+        let (_, _, bulk_stress) = copper.evaluate(perfect.view(), surface_cell);
+        let shells = shell_vectors(a_fixed, nrepeat);
+        let mut stable = 0usize;
+        for (radius, vector) in shells {
+            if stable >= max_shells {
+                break;
+            }
+            let built = build_pair(nrepeat, a_fixed, vector, true);
+            let mut positions = built.positions.clone();
+            relax_fast(&copper, &mut positions, surface_cell, 1e-3, 80);
+            let gap = dist(
+                [positions[3 * built.dumbbell[0]], positions[3 * built.dumbbell[0] + 1], positions[3 * built.dumbbell[0] + 2]],
+                [positions[3 * built.dumbbell[1]], positions[3 * built.dumbbell[1] + 1], positions[3 * built.dumbbell[1] + 2]],
+            );
+            let center = centroid(&positions, built.dumbbell);
+            let separation = dist(center, built.vacancy);
+            if !(1.2..2.5).contains(&gap) || separation < 1.5 {
+                notes.push(format!("repeats {nrepeat} shell {radius:.3} recombined gap {gap:.3} separation {separation:.3}"));
+                continue;
+            }
+            stable += 1;
+            let shell = format!("{radius:.3}");
+            let mut neighbors = Vec::new();
+            let n_atoms = positions.len() / 3;
+            for atom in 0..n_atoms {
+                if atom == built.dumbbell[0] || atom == built.dumbbell[1] {
+                    continue;
+                }
+                let point = [positions[3 * atom], positions[3 * atom + 1], positions[3 * atom + 2]];
+                let range = dist(point, center);
+                if (2.0..3.2).contains(&range) {
+                    let new_sep = dist(point, built.vacancy);
+                    neighbors.push((new_sep - separation, atom, point));
+                }
+            }
+            neighbors.sort_by(|left, right| left.0.partial_cmp(&right.0).unwrap());
+            if neighbors.is_empty() {
+                notes.push(format!("repeats {nrepeat} shell {shell} has no Johnson neighbor"));
+                continue;
+            }
+            let toward = neighbors[0];
+            let away = *neighbors.last().unwrap();
+            let tangential = neighbors.iter().min_by(|left, right| left.0.abs().partial_cmp(&right.0.abs()).unwrap()).copied().unwrap();
+            let mut hops = Vec::new();
+            for (label, (_delta, atom, _point)) in [("toward", toward), ("away", away), ("tangential", tangential)] {
+                let axis = if label == "tangential" { [0.0, 1.0, 0.0] } else { [0.0, 0.0, 1.0] };
+                hops.push(rgsaddle::HopTemplate {
+                    name: format!("johnson-{label}"),
+                    product: johnson_product(&positions, built.dumbbell, atom, axis),
+                });
+            }
+            let mut rotated = positions.clone();
+            let axis = [0.0, 1.0, 0.0];
+            for (which, sign) in built.dumbbell.into_iter().zip([-1.0, 1.0]) {
+                for k in 0..3 {
+                    rotated[3 * which + k] = center[k] + sign * 1.025 * axis[k];
+                }
+            }
+            hops.push(rgsaddle::HopTemplate { name: "rotate-100-010".into(), product: rotated });
+            let mut harmonic = Vec::new();
+            for atom in 0..n_atoms {
+                let point = [positions[3 * atom], positions[3 * atom + 1], positions[3 * atom + 2]];
+                if dist(point, center) < 5.2 {
+                    harmonic.push(atom);
+                }
+            }
+            let held = FastHeld { copper: &copper, cell: surface_cell };
+            let setup = rgsaddle::PairSetup {
+                positions: positions.clone(),
+                cell: surface_cell,
+                fixed: built.vacancy,
+                mobile: vec![built.dumbbell[0], built.dumbbell[1]],
+                shell: shell.clone(),
+                cell_repeats: nrepeat as u32,
+                hops,
+            };
+            let config = cu_config(&temperatures, samples, bulk_stress, harmonic);
+            eprintln!("shell {shell} A repeats {nrepeat} atoms {} calls {}", positions.len() / 3, copper.calls.load(Ordering::Relaxed));
+            match rgsaddle::defect_pair_rates(&held, &setup, &config) {
+                Ok(found) => catalogue.entries.extend(found.entries),
+                Err(error) => notes.push(format!("shell {shell} repeats {nrepeat} failed: {error}")),
+            }
+        }
+        if std::env::var("RGSADDLE_SKIP_ISOLATED").is_err() {
+            let built = build_pair(nrepeat, a_fixed, [a_fixed, 0.0, 0.0], false);
+            let mut positions = built.positions.clone();
+            relax_fast(&copper, &mut positions, surface_cell, 1e-3, 80);
+            let center = centroid(&positions, built.dumbbell);
+            let label = [center[0] + 4.0, center[1], center[2]];
+            let n_atoms = positions.len() / 3;
+            let mut plus = None;
+            let mut minus = None;
+            for atom in 0..n_atoms {
+                if atom == built.dumbbell[0] || atom == built.dumbbell[1] {
+                    continue;
+                }
+                let point = [positions[3 * atom], positions[3 * atom + 1], positions[3 * atom + 2]];
+                let range = dist(point, center);
+                if !(2.0..3.2).contains(&range) {
+                    continue;
+                }
+                let dx = point[0] - center[0];
+                if plus.is_none() && dx > 1.0 {
+                    plus = Some(atom);
+                }
+                if minus.is_none() && dx < -1.0 {
+                    minus = Some(atom);
+                }
+            }
+            if let (Some(plus), Some(minus)) = (plus, minus) {
+                let hops = vec![
+                    rgsaddle::HopTemplate { name: "johnson-plus".into(), product: johnson_product(&positions, built.dumbbell, plus, [0.0, 0.0, 1.0]) },
+                    rgsaddle::HopTemplate { name: "johnson-minus".into(), product: johnson_product(&positions, built.dumbbell, minus, [0.0, 0.0, 1.0]) },
+                ];
+                let mut harmonic = Vec::new();
+                for atom in 0..n_atoms {
+                    let point = [positions[3 * atom], positions[3 * atom + 1], positions[3 * atom + 2]];
+                    if dist(point, center) < 5.2 {
+                        harmonic.push(atom);
+                    }
+                }
+                let held = FastHeld { copper: &copper, cell: surface_cell };
+                let setup = rgsaddle::PairSetup {
+                    positions,
+                    cell: surface_cell,
+                    fixed: label,
+                    mobile: vec![built.dumbbell[0], built.dumbbell[1]],
+                    shell: "isolated".into(),
+                    cell_repeats: nrepeat as u32,
+                    hops,
+                };
+                match rgsaddle::defect_pair_rates(&held, &setup, &cu_config(&temperatures, samples, bulk_stress, harmonic)) {
+                    Ok(found) => catalogue.entries.extend(found.entries),
+                    Err(error) => notes.push(format!("isolated repeats {nrepeat} failed: {error}")),
+                }
+            }
+        }
+    }
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks");
+    let mut csv = File::create(root.join("defect_pair_cu.csv")).expect("csv");
+    writeln!(csv, "shell,direction,hop,temperature_K,cell_repeats,n_atoms,separation_before_A,separation_after_A,outcome,connected,index1,band_converged,dE0_eV,dF_eV,dF_error_eV,dF_harmonic_eV,nu_Hz,vineyard_Hz,kappa,kappa_error,harmonic_rate_Hz,rate_Hz").unwrap();
+    for entry in &catalogue.entries {
+        writeln!(
+            csv,
+            "{},{},{},{},{},{},{:.6},{:.6},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            entry.shell,
+            entry.direction.as_str(),
+            entry.hop,
+            entry.temperature,
+            entry.cell_repeats,
+            entry.n_atoms,
+            entry.separation_before,
+            entry.separation_after,
+            entry.outcome.as_str(),
+            entry.connected as u8,
+            entry.index1 as u8,
+            entry.band_converged as u8,
+            num_or(&Some(entry.d_e0)),
+            num_or(&entry.d_f),
+            num_or(&entry.d_f_error),
+            num_or(&entry.d_f_harmonic),
+            num_or(&entry.nu),
+            num_or(&entry.vineyard),
+            num_or(&entry.kappa),
+            num_or(&entry.kappa_error),
+            num_or(&entry.harmonic_rate),
+            num_or(&entry.rate),
+        ).unwrap();
+    }
+    std::fs::write(root.join("defect_pair_cu.json"), catalogue.to_json()).unwrap();
+    std::fs::write(root.join("defect_pair_cu_notes.txt"), notes.join("\n")).unwrap();
+    eprintln!("entries {} notes {}", catalogue.entries.len(), notes.len());
+    for note in &notes {
+        eprintln!("{note}");
+    }
+}
+
+fn num_or(value: &Option<f64>) -> String {
+    match value {
+        Some(value) if value.is_finite() => format!("{value:.8e}"),
+        _ => String::new(),
+    }
+}
+
+fn cu_config(temperatures: &[f64], samples: usize, bulk: [[f64; 3]; 3], harmonic: Vec<usize>) -> rgsaddle::DefectPairConfig {
+    let search = MinModeConfig {
+        force_tol: 1e-2,
+        max_move: 0.12,
+        dr: 1e-3,
+        max_rotations: 10,
+        ..MinModeConfig::default()
+    };
+    rgsaddle::DefectPairConfig {
+        dimer: SolidDimerConfig::frozen(search).with_index_check(IndexCheck::first_order().with_step(1e-3)),
+        band: rgsaddle::BandConfig {
+            force_tol: 0.3,
+            max_move: 0.08,
+            time_step: 0.05,
+            method: Method::Lbfgs { memory: 20 },
+            spring: rgsaddle::SpringKind::Uniform { k: 1.0 },
+            quickmin: false,
+            climbing: Some(rgsaddle::CiConfig::after(0.08)),
+            min_mode: None,
+            autoneb: None,
+            zoom: None,
+            ..rgsaddle::BandConfig::default()
+        },
+        images: 5,
+        max_dimer_steps: 200,
+        max_band_steps: 250,
+        max_relax_steps: 40,
+        relax_tol: 2e-3,
+        relax_step: 0.08,
+        max_move: 0.08,
+        seed_fraction: 0.45,
+        push: 0.25,
+        connect_rmsd: 1.2,
+        direction_tol: 0.08,
+        pafi: rgsaddle::PafiConfig {
+            thermalize: 80,
+            stride: 5,
+            samples,
+            blocks: 4,
+            time_step: 0.008,
+            mobility: 0.15,
+            seed: 17,
+            fix_com: true,
+            retain: 8,
+            ..rgsaddle::PafiConfig::default()
+        },
+        shooting: rgsaddle::ShootingConfig {
+            friction: 2.0,
+            time_step: 0.04,
+            steps: 60,
+            record_every: 15,
+            shots: 20,
+            blocks: 4,
+            seed: 23,
+            plateau_record: 2,
+            mass: 63.546,
+            ..rgsaddle::ShootingConfig::default()
+        },
+        temperatures: temperatures.to_vec(),
+        boltzmann: rgsaddle::BOLTZMANN_EV_PER_K,
+        mass: 63.546,
+        angular_scale: rgsaddle::angular_scale_rad_s(),
+        harmonic_step: 1e-3,
+        harmonic_atoms: Some(harmonic),
+        planes: 9,
+        bulk_stress: bulk,
+        ..rgsaddle::DefectPairConfig::default()
+    }
+}

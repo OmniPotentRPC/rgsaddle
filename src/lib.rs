@@ -58,6 +58,9 @@ pub mod solid_state;
 pub mod spring;
 pub mod ssneb;
 pub mod stencil;
+pub mod bennett;
+pub mod defect_pair;
+pub mod pafi;
 pub mod strain_rate;
 pub mod tangent;
 
@@ -108,6 +111,15 @@ pub use ssneb::{SolidImage, SolidNeb, joint_coordinate};
 pub use stencil::{
     BAND_PRESET_SEAM, BandBuilder, Chain, Climb, EvalPool, Mesh, MeshEvent, PointBuilder, Preset,
     Role, Stencil, StencilReport, StencilStatus,
+};
+pub use bennett::{ShootingConfig, Transmission, bennett_chandler};
+pub use defect_pair::{
+    CellMode, DefectPairConfig, DirectionClass, HopOutcome, HopTemplate, PairSetup, RateCatalogue,
+    RateEntry, attempt_frequency, classify_separation, defect_pair_rates, pair_separation,
+};
+pub use pafi::{
+    ArcPath, FreeEnergyProfile, HyperplaneAverage, PafiConfig, PathFrame, PathGeometry,
+    average_hyperplane, integrate_profile, pafi_profile,
 };
 pub use strain_rate::{
     BOLTZMANN_EV_PER_K, CurvatureBound, ElasticDipole, Estimate, HopVariant, LINEAR_FOLD_EV,

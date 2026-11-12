@@ -1,0 +1,2 @@
+repeats 4 shell 2.576 recombined gap 2.576 separation 1.298
+repeats 4 shell 3.643 recombined gap 2.842 separation 2.197

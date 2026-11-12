@@ -1520,7 +1520,7 @@ fn policy_from_json(obj: &[(String, Json)]) -> Result<TrustPolicy, SaddleError> 
 }
 
 #[derive(Clone, Debug)]
-enum Json {
+pub(crate) enum Json {
     Null,
     Num(f64),
     Str(String),
@@ -1529,35 +1529,35 @@ enum Json {
 }
 
 impl Json {
-    fn as_object(&self) -> Option<&[(String, Json)]> {
+    pub(crate) fn as_object(&self) -> Option<&[(String, Json)]> {
         match self {
             Self::Obj(pairs) => Some(pairs),
             _ => None,
         }
     }
 
-    fn as_array(&self) -> Option<&[Json]> {
+    pub(crate) fn as_array(&self) -> Option<&[Json]> {
         match self {
             Self::Arr(items) => Some(items),
             _ => None,
         }
     }
 
-    fn as_f64(&self) -> Option<f64> {
+    pub(crate) fn as_f64(&self) -> Option<f64> {
         match self {
             Self::Num(value) => Some(*value),
             _ => None,
         }
     }
 
-    fn as_str(&self) -> Option<&str> {
+    pub(crate) fn as_str(&self) -> Option<&str> {
         match self {
             Self::Str(text) => Some(text),
             _ => None,
         }
     }
 
-    fn as_matrix(&self) -> Option<M3> {
+    pub(crate) fn as_matrix(&self) -> Option<M3> {
         let rows = self.as_array()?;
         if rows.len() != 3 {
             return None;
@@ -1600,25 +1600,25 @@ impl Json {
     }
 }
 
-fn obj_get<'a>(obj: &'a [(String, Json)], key: &str) -> Option<&'a Json> {
+pub(crate) fn obj_get<'a>(obj: &'a [(String, Json)], key: &str) -> Option<&'a Json> {
     obj.iter()
         .find(|(name, _)| name == key)
         .map(|(_, value)| value)
 }
 
-fn required_f64(obj: &[(String, Json)], key: &str) -> Result<f64, SaddleError> {
+pub(crate) fn required_f64(obj: &[(String, Json)], key: &str) -> Result<f64, SaddleError> {
     obj_get(obj, key)
         .and_then(Json::as_f64)
         .ok_or_else(|| SaddleError::Invalid(format!("json is missing the number {key}")))
 }
 
-fn required_str<'a>(obj: &'a [(String, Json)], key: &str) -> Result<&'a str, SaddleError> {
+pub(crate) fn required_str<'a>(obj: &'a [(String, Json)], key: &str) -> Result<&'a str, SaddleError> {
     obj_get(obj, key)
         .and_then(Json::as_str)
         .ok_or_else(|| SaddleError::Invalid(format!("json is missing the string {key}")))
 }
 
-fn required_matrix(obj: &[(String, Json)], key: &str) -> Result<M3, SaddleError> {
+pub(crate) fn required_matrix(obj: &[(String, Json)], key: &str) -> Result<M3, SaddleError> {
     obj_get(obj, key)
         .and_then(Json::as_matrix)
         .ok_or_else(|| SaddleError::Invalid(format!("json is missing the matrix {key}")))
@@ -1629,7 +1629,7 @@ struct Parser<'a> {
     index: usize,
 }
 
-fn parse_json(text: &str) -> Result<Json, SaddleError> {
+pub(crate) fn parse_json(text: &str) -> Result<Json, SaddleError> {
     let mut parser = Parser {
         bytes: text.as_bytes(),
         index: 0,

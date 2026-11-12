@@ -1,0 +1,98 @@
+#+title: Defect-pair hop rates
+#+options: toc:nil num:nil
+
+* What is computed
+=defect_pair_rates= takes any =PointSurface=, a periodic cell, one relaxed defect geometry, and a catalogue of hops. A hop is a product geometry with a name. The library does not know what a vacancy or a dumbbell is. The caller names the fixed point, the atoms whose centroid is the mobile defect, and a shell label.
+
+For each hop the search
+
+1. minimizes the reactant and the product,
+2. climbs from the reactant side of the hop with =SolidDimer=, on a frozen cell or on the joint chart,
+3. keeps the saddle only when =IndexCheck= reports exactly one negative projected eigenvalue,
+4. pushes off both sides of the unstable mode, minimizes, and accepts the hop when the two clouds of atoms match the reactant and the product (Hausdorff distance, so a permutation of identical atoms still matches),
+5. builds an image-dependent-pair-potential path through that saddle and relaxes it with a fixed climbing-image solid-state NEB,
+6. integrates the projected average force along that path and shoots the Bennett–Chandler factor from the free-energy maximum.
+
+AutoNEB, zoom, and image freezing are not used. The band has a fixed number of images.
+
+A hop is =toward= when the mobile centroid moves closer to the fixed defect by more than the tolerance, =away= when it moves farther, and =tangential= otherwise. =classify_separation= is that test.
+
+* The rate
+The finite-temperature rate is
+
+: k(T) = κ ν exp(-ΔF / kT)
+
+=ΔF= is the potential of mean force from the reactant hyperplane to the dividing surface, the maximum of the PAFI profile. =ν= is the reactant attempt frequency along the path tangent only,
+
+: ν = (1 / 2π) sqrt( (τ · H τ) / m )
+
+with =τ= the unit tangent at the reactant and =H= the Cartesian Hessian. =κ= is the Bennett–Chandler transmission coefficient. In the harmonic limit =ΔF= holds the transverse vibrational entropy, and this expression agrees with Vineyard's rate when =κ = 1=. Vineyard, J. Phys. Chem. Solids 3, 121 (1957), doi:10.1016/0022-3697(57)90059-8.
+
+The comparison rate is the full Vineyard prefactor,
+
+: k_h(T) = ν_h exp(-ΔE0 / kT),    ν_h = (∏ ν_min) / (∏ ν_sad),
+
+translations removed when the Hessian is the whole cell, the unstable eigenvalue left out of the saddle product. =ΔE0= is the potential difference, or the enthalpy difference when an external stress is set. The harmonic free-energy barrier implied by the same split is
+
+: ΔF_h = ΔE0 - kT ln(ν_h / ν).
+
+=ΔF - ΔF_h= is the anharmonic excess. At equal mass, energy in eV and length in Å, =angular_scale_rad_s= turns =sqrt(λ / m)= into rad/s and the rates are in Hz. A caller in another unit system sets =boltzmann=, =mass= and =angular_scale=.
+
+* PAFI
+Swinburne and Marinica, Phys. Rev. Lett. 120, 135503 (2018), doi:10.1103/PhysRevLett.120.135503, give the free-energy gradient along a path without a collective variable. The estimator implemented here is the one averaged by LAMMPS =fix pafi= (Swinburne's implementation of that paper). With =n = dX/ds= and =ψ = (x - X) · dn/ds=,
+
+: dF/ds = ⟨ (∇E · n) (1 - ψ) ⟩.
+
+The average is over the hyperplane =(x - X) · n = 0=. Sampling is overdamped Langevin (Brownian) dynamics in that plane: the parallel piece of the drift and of the noise is removed, the plane is restored after every step, and the center of mass can be held. The integral is the trapezoid rule. The standard error is the block standard error of the recorded samples, propagated through the trapezoid weights. The dividing surface is the plane of maximum =ΔF=.
+
+On a straight path =ψ= is zero and the estimator is the mean force. A one-dimensional barrier =(1 - x²)²= integrates to 1. A two-dimensional well =(1 - x²)² + ½ k(x) y²= with =k = 1.5 + 0.5 x= has the exact classical shift =(kT / 2) ln(k(0) / k(-1))=. =tests/pafi_analytic.rs= checks both.
+
+* Bennett–Chandler
+Bennett, in Algorithms for Chemical Computations, ACS Symposium Series 46, 63 (1977), doi:10.1021/bk-1977-0046.ch004, and Chandler, J. Chem. Phys. 68, 2959 (1978), doi:10.1063/1.436049, write the recrossing factor as the plateau of the flux correlation. Configurations are the PAFI samples on the dividing surface. Velocities are Maxwell–Boltzmann. The trajectories are inertial Langevin (BAOAB); zero friction is Newtonian.
+
+: κ(t) = ⟨ v_τ(0) θ(s(t)) ⟩ / ⟨ v_τ(0) θ(v_τ(0)) ⟩
+
+=s(t) = (x(t) - x_surface) · τ= and =θ(s)= is 1 on the product side of the surface. The numerator keeps the sign of the initial velocity. The reported =κ= is =κ(t)= at the requested plateau record, with a block standard error. A rate is formed only when =κ= lies in =[0, 1]=.
+
+On the quartic =V = (x² - 1)²= the barrier curvature gives =ω_b = 2= at unit mass. Newtonian trajectories that start at the top with =v > 0= are still on the product side a short time later, so =κ = 1=. With friction =γ = 2=, Kramers, Physica 7, 284 (1940), doi:10.1016/S0031-8914(40)90098-2, gives
+
+: κ = sqrt(1 + α²) - α,    α = γ / (2 ω_b) = 1/2,
+
+which is =sqrt(5)/2 - 1/2 ≈ 0.618=. =tests/bennett_kramers.rs= compares the plateau of =κ(t)= with that value.
+
+* The catalogue
+=RateCatalogue::to_json= writes =rgsaddle.defect_pair_rates= version 1. =from_json= reads it back. Each entry is one exit channel. The key is =(shell, direction, hop, temperature, cell_repeats)=. =rate_Hz= is =k(T)= in the caller's frequency unit (Hz when the angular scale is =angular_scale_rad_s=).
+
+amsel is the absorbing-Markov selector for superbasin exit distributions. It does not parse this file itself. A loader groups entries that share a shell, a cell and a temperature, and passes =rate_Hz= to the FPTA or MRM kernel as the first-order exit rate of that channel. =hop= and =direction= are the channel name. =dE0=, =dF=, =dF_error=, =dF_harmonic=, =nu=, =vineyard=, =kappa=, the saddle Cauchy stress and the elastic dipole =P = -V (σ - σ_bulk)= are stored beside the rate so a later run can see what entered =k(T)=.
+
+* Assumptions
+The dividing surface is a hyperplane normal to the path, not a variationally optimized surface. The harmonic prefactor uses a caller-chosen block of atoms when the whole-cell Hessian is too large; modes below =10⁻⁴= in the surface's curvature unit are left out of the product. Overdamped sampling assumes the constrained ensemble has been reached after =thermalize= steps. The Bennett–Chandler plateau is whatever record the caller names; a negative =κ= means that record is not a transmission coefficient and no rate is stored. The cell of a frozen search is the cell bound into the surface.
+
+* Copper
+The Mishin EAM1 numbers are a validation, not part of the library. The potential is the analytic form already in =tests/mishin_cu.rs= (Mishin, Mehl, Papaconstantopoulos, Voter, and Kress, Phys. Rev. B 63, 224106 (2001), doi:10.1103/PhysRevB.63.224106, Table I). The question is the one posed by Mwungeli, Liu, and Demkowicz, Phys. Rev. Materials 9, 023601 (2025), doi:10.1103/PhysRevMaterials.9.023601: whether the vacancy / self-interstitial recombination volume in Cu falls from about 290 Ω at 300 K to about 160 Ω at 500 K and above because the hop rates toward, away from, and tangential to the vacancy are anharmonic. Crossref records the paper as published 11 February 2025, Phys. Rev. Materials 9, 023601. Their Table 1 gives the zero-pressure lattice parameters 3.631, 3.637, 3.643, 3.649 and 3.655 Å at 300, 400, 500, 600 and 700 K, and cells of 10, 11, 12, 13 and 16 cubic repeats (4000, 5324, 6912, 8788 and 16384 atoms).
+
+The release run behind =benchmarks/defect_pair_cu.csv= is one 4×4×4 cell, 256 atoms, at the 500 K lattice parameter 3.643 Å, sampled at 300 K and 700 K. Cells of 6, 8, 10, 12, 14 and 16 repeats were not run. The mass is 63.546 u. The band was accepted when its largest force fell to 0.3 eV/Å; below that the L-BFGS step became unstable, so this is not a converged minimum-energy path. Shells at 2.576 Å and 3.643 Å recombined on relaxation (dumbbell gap 2.576 Å and 2.842 Å). The first stable shell is 4.462 Å.
+
+Static barriers from the index-1 dimer, in eV:
+
+| hop | direction | connected | ΔE0 |
+|-----+-----------+-----------+--------|
+| johnson-toward | toward | yes | 0.190719146 |
+| johnson-away | away | no | 0.0618534887 |
+| johnson-tangential | tangential | no | 0.18963847 |
+| rotate-100-010 | tangential | no | 0.00585073175 |
+
+Away sits lower than toward and tangential. That is a static asymmetry. It did not become a free-energy asymmetry: the away, tangential and rotation saddles did not connect under the Hausdorff test, so they have no PAFI rate.
+
+The hops that did connect:
+
+| system | direction | T / K | ΔE0 / eV | ΔF / eV | error / eV | κ | k / Hz |
+|--------+-----------+-------+----------+---------+------------+---+--------|
+| vacancy, 4.462 Å | toward | 300 | 0.190719146 | 1.62033252 | 0.296084395 | 0.370582086 | 8.34660609e-16 |
+| vacancy, 4.462 Å | toward | 700 | 0.190719146 | 2.45623248 | 0.454001109 | 0.370582086 | 2.86947708e-06 |
+| isolated | toward | 300 | 0.278661324 | 0.758068384 | 0.424937094 | 0.104780939 | 0.0742509092 |
+| isolated | toward | 700 | 0.278661324 | 1.3435834 | 0.570865921 | 0.104780939 | 85.5687848 |
+| isolated | away | 300 | 0.278635624 | 0.676871673 | 0.493710625 | 0.251805363 | 4.23143777 |
+| isolated | away | 700 | 0.278635624 | 0.989243625 | 0.656995921 | 0.114135593 | 34005.3376 |
+
+The isolated control has equal static barriers (0.278661324 and 0.278635624 eV). Its free energies at 300 K differ by 0.081 eV, inside error bars of 0.42 and 0.49 eV. No direction asymmetry appears there. The vacancy toward-hop free energy lies 1.4 eV above its static barrier at 300 K, and the error bar does not reach ΔE0. That integral is the force along a band whose residual is still about 0.25 eV/Å. It is not a measurement of the anharmonic correction. κ did not change between 300 K and 700 K on the vacancy hop (both 0.370582086) because the deterministic drift from that residual dominated the thermal velocity, so the same dividing-surface samples committed the same way. The anharmonic direction asymmetry was not observed.

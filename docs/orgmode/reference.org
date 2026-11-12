@@ -20,6 +20,7 @@ The table below lists the main types.
 | =MinModeSession=               | Dimer or Lanczos lowest-mode search, same stepping contract; =set_position=, =set_mode=, =estimate_mode= for reuse; =set_torque_window= sets the dimer torque window apart from =rotation_tol= |
 | =SolidDimer=                   | That search on atoms plus Jacobian-scaled cell strain. =CellMask::frozen= is the fixed-cell dimer. =stress= and =elastic_dipole= are =σ= and =V σ= |
 | =StrainResponse=               | One hop. =barrier(ε)= is the lowest symmetry image of =ΔE0 - (P_saddle - P_minimum):ε=, or =NeedsSearch= past the validity bound. =ElasticDipole::from_stress= is =-V (σ_defect - σ_bulk)=. =refine= caches an index-1 solid dimer. =to_json= is the event record |
+| =defect_pair_rates=            | One relaxed geometry and a hop catalogue. Solid dimer, index check, connectivity, fixed CI-NEB, PAFI =ΔF=, Bennett–Chandler =κ=. =k = κ ν exp(-ΔF/kT)=. =RateCatalogue= is =rgsaddle.defect_pair_rates= |
 | =Index1Session=                | Restricted-step partitioned RFO, Powell or Bofill update. =Index1Config= is non-exhaustive. =with_sparse_pattern= selects a CPR seed |
 | =SparsityPattern=              | Atom-level symmetric CSR from a linkcell cutoff walk. Diagonal blocks are implied and not stored as loops          |
 | =Colouring=                    | Smallest-last distance-2 colouring and the max-degree lower bound                                                  |
@@ -150,5 +151,8 @@ The importable package is =rgsaddle=. =rgsaddle._core= is the nanobind extension
 - =tests/solid_dimer_barrier.rs= — the variable-cell dimer and the solid-state band meet on the shear-coupled double well; a frozen cell reproduces the one-dimensional barrier
 - =tests/ssneb.rs= — a frozen =SolidNeb= matches the ordinary band and CI-NEB; the variable-cell double well barrier is 1
 - =tests/ssneb_validate_cu.rs= — release CI-SS-NEB on the 109-atom Mishin cell against =benchmarks/solid_dimer_cu.csv=
-- =tests/mishin_cu.rs= — Mishin copper, four-atom cohesive energy and virial, and the <100> to <110> dumbbell saddle under shear
+- =tests/mishin_cu.rs= — Mishin copper, four-atom cohesive energy and virial, the <100> to <110> dumbbell saddle under shear, and the ignored vacancy/SIA catalogue
+- =tests/pafi_analytic.rs= — PAFI on a 1D barrier and on a 2D well with a known transverse free-energy shift
+- =tests/bennett_kramers.rs= — Bennett–Chandler =κ = 1= for a short Newtonian crossing, and the Kramers value at =γ = 2=
+- =tests/defect_pair_rates.rs= — direction labels, equal toward/away rates on a flat control, and the catalogue round trip
 - =validation/= — sympy and sollya checks of the dimer rotation, the Lanczos residual bound, and the finite-difference curvature; =bain_lj_reference.py= (numpy, scipy) scans the relaxed Bain path that =tests/c/solid_bain_lj.c= checks against, and =ssneb_bain_cell.py= (sympy) checks its strain parametrisation and Jacobian
