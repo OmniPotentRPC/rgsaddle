@@ -93,3 +93,6 @@ name = "rgsaddle"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
+
+[patch.crates-io]
+rgmin = { path = "../rgmin" }

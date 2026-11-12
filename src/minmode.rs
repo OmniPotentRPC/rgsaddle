@@ -1144,6 +1144,9 @@ pub struct MinModeSession {
     /// The empty L-BFGS memory has already been seeded from `|λ|`.
     /// A later guard that drops the pairs uses the stepper's own scale.
     lbfgs_seeded: bool,
+    /// L-BFGS NEB guards. On, the negative-curvature translation is the
+    /// curvature-scaled Newton step plus the projected complement.
+    lbfgs_guards: bool,
     /// Polak-Ribiere steps in the plane perpendicular to the mode, with
     /// a Newton step along it. Off, the configured stepper translates.
     cg_translate: bool,
@@ -1250,6 +1253,7 @@ impl MinModeSession {
             capped_fire: None,
             solver_stepped: false,
             lbfgs_seeded: false,
+            lbfgs_guards: true,
             fire_curvature: true,
             fire_stall_force: f64::NAN,
             fire_stall_energy: f64::NAN,
@@ -1376,6 +1380,7 @@ impl MinModeSession {
     /// On by default for an L-BFGS min-mode session, because the reflected
     /// force is not a potential gradient. `false` restores scale one.
     pub fn set_lbfgs_neb_guards(&mut self, enabled: bool) {
+        self.lbfgs_guards = enabled;
         self.solver.set_lbfgs_neb_guards(enabled);
     }
 
@@ -2002,6 +2007,53 @@ impl MinModeSession {
         largest_atom_move(self.x.view(), trial.view()) <= cap
     }
 
+    /// Newton step on the negative mode and an L-BFGS step on its complement.
+    ///
+    /// The parallel displacement is `(g · τ) / |λ|`, the curvature-scaled
+    /// uphill step (Yin, Zhang, and Zhang, arXiv:2607.03030). The
+    /// complement is rgmin's projected two-loop (Yin, Zhang, and Zhang,
+    /// arXiv:2611.07692). One gradient is read at the trial point, the
+    /// same evaluation the ordinary translator spends, and the step is
+    /// shortened to `max_move`.
+    fn translate_newton_lbfgs<S: PointSurface>(
+        &mut self,
+        counted: &Counted<'_, S>,
+        gradient: &Array1<f64>,
+        mode: &Array1<f64>,
+        curvature: f64,
+    ) -> Result<(Array1<f64>, Option<PointEval>), SaddleError> {
+        let _ = self.solver.set_complement_mode(Some(mode.clone()));
+        let g_perp = perpendicular(gradient, mode);
+        let mut descent = self
+            .solver
+            .complement_direction(self.x.view(), g_perp.view())
+            .map_err(|err| SaddleError::Solver(err.to_string()))?;
+        if self.solver.pair_count() == 0 {
+            descent *= FIRE_EMPTY_SCALE;
+        }
+        let scale = 1.0 / curvature.abs().max(1e-8);
+        let delta = &descent + &(mode * (gradient.dot(mode) * scale));
+        let origin = self.x.clone();
+        let mut trial = &origin + &delta;
+        shorten_to_atom_cap(origin.view(), &mut trial, self.config.max_move);
+        if largest_atom_move(origin.view(), trial.view()) <= 1e-15 {
+            return Ok((origin, self.centre.clone()));
+        }
+        let (energy, arrived) = counted.eval(trial.view())?;
+        let step = &trial - &origin;
+        let secant = &arrived - gradient;
+        let _ = self.solver.push_pair(step.view(), secant.view());
+        self.solver.forget_evaluation();
+        Ok((
+            trial.clone(),
+            Some(PointEval {
+                x: trial,
+                energy: Some(energy),
+                gradient: arrived,
+            }),
+        ))
+    }
+
     /// One displacement `F/|λ|`, shortened to `max_move`.
     ///
     /// L-BFGS stores the secant so the next step is the two-loop update
@@ -2424,6 +2476,13 @@ impl MinModeSession {
                 gradient,
             };
             (climbed, Some(point))
+        } else if lbfgs && self.lbfgs_guards && self.kappa.is_none() && translation_curvature < 0.0
+        {
+            // Newton on the negative mode, L-BFGS on its complement.
+            // The curvature is the one this step already measured.
+            self.solver_stepped = true;
+            self.lbfgs_seeded = true;
+            self.translate_newton_lbfgs(&counted, &g0, &tau, translation_curvature)?
         } else if curvature_seed {
             let seeded =
                 self.translate_curvature_seed(&counted, &g0, &tau, translation_curvature, lbfgs)?;
@@ -2585,14 +2644,22 @@ mod tests {
             max_move: 0.2,
             ..MinModeConfig::default()
         };
-        // The Newton step 0.15 fits in max_move 0.2, so the seed is taken
-        // and the secant is what the next two-loop step would read.
-        let mut session =
-            MinModeSession::new(config, array![0.15, 0.0, 0.0], array![1.0, 0.0, 0.0]).unwrap();
-        let report = session.step(&QuadraticSaddle).unwrap();
+        // The mode step is Newton and is not a complement secant. A
+        // perpendicular displacement is the pair the next two-loop reads.
+        let mut along = MinModeSession::new(
+            config.clone(),
+            array![0.15, 0.0, 0.0],
+            array![1.0, 0.0, 0.0],
+        )
+        .unwrap();
+        let report = along.step(&QuadraticSaddle).unwrap();
         assert_eq!(report.status, super::MinModeStatus::Converged);
-        assert!(session.solver.pair_count() > 0);
-        assert!(session.position()[0].abs() < 1e-9);
+        assert_eq!(along.solver.pair_count(), 0);
+        assert!(along.position()[0].abs() < 1e-9);
+        let mut mixed =
+            MinModeSession::new(config, array![0.15, 0.05, 0.0], array![1.0, 0.0, 0.0]).unwrap();
+        mixed.step(&QuadraticSaddle).unwrap();
+        assert!(mixed.solver.pair_count() > 0);
     }
 
     /// V = -x^2 + y^2 + z^2. One reflected L-BFGS step stores a pair.
