@@ -53,6 +53,7 @@ pub mod nichols;
 pub mod ocineb;
 pub mod prfo;
 pub mod projection;
+pub mod solid_dimer;
 pub mod solid_state;
 pub mod spring;
 pub mod stencil;
@@ -92,6 +93,10 @@ pub use ocineb::{
 };
 pub use prfo::{PrfoKind, partitioned_rfo_eigen, restricted_prfo_displacement};
 pub use projection::ProjectionKind;
+pub use solid_dimer::{
+    CellMask, JointChart, STRAIN_VOIGT, SolidDimer, SolidDimerConfig, SolidDimerReport,
+    finite_difference_cauchy_stress, virial,
+};
 pub use spring::SpringKind;
 pub use stencil::{
     BAND_PRESET_SEAM, BandBuilder, Chain, Climb, EvalPool, Mesh, MeshEvent, PointBuilder, Preset,

@@ -67,6 +67,7 @@ while report.status != BandStatus::Converged {
    howto/band
    howto/autoneb
    howto/minmode
+   howto/solid-dimer
    howto/sparse-hessian
    howto/sella
    howto/irc

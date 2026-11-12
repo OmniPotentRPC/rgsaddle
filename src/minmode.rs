@@ -61,6 +61,22 @@ pub trait PointSurface: Sync {
         let _ = (x, cell);
         Ok(None)
     }
+
+    /// Cauchy stress, row-major 3×3.
+    ///
+    /// `σ = (1/V) ∂E/∂ε` for the right strain `h ← h (I + ε)` at fixed
+    /// fractional coordinates. The virial is `V σ`. `None` asks the
+    /// solid-state dimer to finite-difference [`Self::eval_in_cell`].
+    /// A frozen cell never calls this: that search is
+    /// [`crate::MinModeSession`] on [`Self::eval`].
+    fn cauchy_stress(
+        &self,
+        x: ArrayView1<f64>,
+        cell: &[f64; 9],
+    ) -> Result<Option<[f64; 9]>, SaddleError> {
+        let _ = (x, cell);
+        Ok(None)
+    }
 }
 
 /// Finite difference behind every Hessian action.

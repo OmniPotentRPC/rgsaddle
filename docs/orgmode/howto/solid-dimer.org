@@ -1,0 +1,40 @@
+#+TITLE: Solid-state dimer
+#+OPTIONS: toc:nil num:nil
+
+=SolidDimer= is a minimum-mode saddle search on the joint space of atom positions and cell strain. The translation is the dimer or Lanczos step of =MinModeSession=: estimate the lowest mode, invert the force along it, and take one rgmin step. That reflected force is Equation 3 of Goswami, Gunde, and Jónsson, Front. Chem. 14, 1807063 (2026), doi:10.3389/fchem.2026.1807063. The same dimer, in eOn, is the search of Goswami, Masterov, Kamath, Peña-Torres, and Jónsson, J. Chem. Theory Comput. 21, 7935 (2025), doi:10.1021/acs.jctc.5c00866. Force calls are counted as in Goswami, AIP Advances 15, 085210 (2025), doi:10.1063/5.0283639.
+
+The coordinate those steppers see is the solid-state dimer of Xiao, Sheppard, Rogal, and Henkelman, J. Chem. Phys. 140, 174104 (2014), doi:10.1063/1.4873437. Strain sits next to the atomic displacement with the Jacobian of the generalized solid-state nudged elastic band, Sheppard, Xiao, Chemelewski, Johnson, and Henkelman, J. Chem. Phys. 136, 074103 (2012), doi:10.1063/1.3684549,
+
+\[ J = V^{1/3} N^{1/6}. \]
+
+=J= is fixed from the cell at the start. The chart is the right strain =h = h_0 (I + ε)= with the atoms =r = r_0 (I + ε)=, so a pure strain keeps fractional coordinates fixed and =r_0= is the non-affine displacement. The free strains are the lower triangle, Voigt order xx, yy, zz, yz, xz, xy, stored as =J ε=. The upper triangle is the rotation and stays zero, as on the solid-state band. The cell block of the gradient is =M^{-T} (V σ) / J= plus the external load, with =M = I + ε=. At zero strain and zero load that block is =(V / J) σ=. =σ= is the Cauchy stress, =(1/V) ∂E/∂ε= for an infinitesimal right strain at fixed fractional coordinates.
+
+=CellMask::frozen= drops the strain block. =step= then calls =PointSurface::eval= on the atomic coordinates, and the position, mode, curvature, and evaluation count match =MinModeSession= bit for bit. Any free strain calls =eval_in_cell= and =cauchy_stress=. A surface that returns =None= from =cauchy_stress= is finite-differenced by =finite_difference_cauchy_stress=. The virial is =V σ=. =elastic_dipole= is that product, the saddle dipole =P^{sad}=.
+
+=SolidDimerConfig= is non-exhaustive. Build it with =new= or =frozen=, then =with_mask=, =with_external_stress=, =with_pressure=, and =with_weight=. A positive pressure is =P I= added to the stress before the cell force, the sign of =SolidState::pressure=. External stress is folded onto the lower triangle. =weight= scales =J=; 1 is the 2012 value.
+
+No C field was added. A host that already drives =MinModeSession= keeps that path for a frozen cell and constructs =SolidDimer= when the cell is free.
+
+** A barrier that moves with the cell
+
+=tests/solid_dimer_barrier.rs= couples a double well to the shear. The model is =(u^2 - 1)^2 + 6 (γ - 0.2 u)^2= plus penalties that are zero on the path. At the saddle =u = 0= and =γ = 0=, so the energy is exactly 1. Both minima sit at energy 0, and the barrier is exactly 1. The variable-cell dimer takes 88 generalized evaluations and stops at energy 1. The solid-state band on the same surface takes 92 rows and its climbing image is at energy 1. Freezing the cell at zero shear leaves the one-dimensional barrier at 0.7744, and that dimer takes 42 evaluations. An imposed shear of 0.1 moves the frozen barrier off 0.7744 by the amount of the one-dimensional scan.
+
+** Copper under shear
+
+Zhang, Wheatley, Chen, Qian, and Demkowicz, Phys. Rev. Materials 6, 053605 (2022), doi:10.1103/PhysRevMaterials.6.053605, find that a few percent of shear switches a copper <100> dumbbell toward <110> and drops the barrier to about a millielectronvolt. =tests/mishin_cu.rs= builds EAM1 from the functional form and Table I of Mishin, Mehl, Papaconstantopoulos, Voter, and Kress, Phys. Rev. B 63, 224106 (2001), doi:10.1103/PhysRevB.63.224106. A four-atom cube at 3.615 Å has energy -3.5402183104868774 eV per atom. The published parameters are rounded, so that is 0.0002183104868774 eV below -3.54. The virial matches a right-strain finite difference.
+
+The defect is the split interstitial on one lattice site of a 3×3×3 cell (109 atoms). That site is vacant and the extra atom makes the dumbbell. Each search starts at the <100> minimum relaxed at that shear. The lowest mode is two-sided, so the start is moved 0.02 Å toward the relaxed <110> orientation; the energy of that nudge is under 0.001 eV. The fixed cell holds the shear. The variable cell frees every lower-triangular strain and sets the external stress to minus the stress of the minimum, so the start is a stationary point of the enthalpy. The barrier is the saddle energy minus the minimum. For the variable cell the enthalpy barrier is that difference of =E + V0 σ_ext : ε=. A switch means the converged saddle is the shear-aligned <110> dumbbell. Release build. The rows are =benchmarks/solid_dimer_cu.csv=.
+
+| shear | cell | calls | barrier (eV) | enthalpy barrier (eV) | curvature | stress xy (eV/Å³) | switch |
+| 0 | fixed | 447 | 0.47417449726344785 | 0.47417449726344785 | -0.9848065087722431 | -0.010075163217064614 | yes |
+| 0 | variable | 430 | 0.33256689535636497 | 0.34702642693292773 | -0.5634587470581357 | -0.000026985138229324603 | yes |
+| 0.02 | fixed | 418 | 0.24356279471709286 | 0.24356279471709286 | -0.5649426084052475 | 0.00013620397484241032 | yes |
+| 0.02 | variable | 451 | 0.31264445363120785 | 0.16298514462960156 | -0.27512808088493973 | 0.008119971858019295 | yes |
+| 0.03 | fixed | 334 | 0.14826689300639373 | 0.14826689300639373 | -0.37542945789090804 | 0.005229389477086391 | yes |
+| 0.03 | variable | 516 | 0.2866943305565428 | 0.0875839431751615 | -0.14360158784263374 | 0.012163680801472008 | yes |
+| 0.04 | fixed | 415 | 0.0678422080142127 | 0.0678422080142127 | -0.19868370914311173 | 0.010332419254179838 | yes |
+| 0.04 | variable | 690 | 0.237131193588084 | 0.02701564574050508 | -0.03294896763060662 | 0.01600411834165226 | yes |
+| 0.05 | fixed | 700 | 0.007348460091009201 | 0.007348460091009201 | -0.031054689709467388 | 0.015512646242303113 | yes |
+| 0.05 | variable | 808 | 0.15654904833360206 | 0.9465294342165294 | -1.3540780183361494 | 0.018974748223906747 | no |
+
+The fixed barrier falls from 0.47417449726344785 eV at zero shear to 0.007348460091009201 eV at 5%. On this 109-atom cell the collapse sits near 5%, later than the 3–4% of the larger cell in that paper. At 5% the variable-cell search leaves the soft side and converges on the opposite <110> saddle. Its final shear is 0.017707661589553194.

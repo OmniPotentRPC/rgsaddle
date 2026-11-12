@@ -18,6 +18,7 @@ The table below lists the main types.
 | =BandSurface=                  | Host potential on a band (energies + gradients per image)                                                          |
 | =BandReport=                   | =status=, =max_force=, =ci_index=, =iteration=, =surface_rows=, =curvature= (refinement steps only)                |
 | =MinModeSession=               | Dimer or Lanczos lowest-mode search, same stepping contract; =set_position=, =set_mode=, =estimate_mode= for reuse; =set_torque_window= sets the dimer torque window apart from =rotation_tol= |
+| =SolidDimer=                   | That search on atoms plus Jacobian-scaled cell strain. =CellMask::frozen= is the fixed-cell dimer. =stress= and =elastic_dipole= are =σ= and =V σ= |
 | =Index1Session=                | Restricted-step partitioned RFO, Powell or Bofill update. =Index1Config= is non-exhaustive. =with_sparse_pattern= selects a CPR seed |
 | =SparsityPattern=              | Atom-level symmetric CSR from a linkcell cutoff walk. Diagonal blocks are implied and not stored as loops          |
 | =Colouring=                    | Smallest-last distance-2 colouring and the max-degree lower bound                                                  |
@@ -145,4 +146,6 @@ The importable package is =rgsaddle=. =rgsaddle._core= is the nanobind extension
   The default takes the ceiling.
 - =tests/c_abi.rs= — header and symbols with =capi=
 - =tests/solid_bain_lj.rs= — =tests/c/solid_bain_lj.c= runs the solid-state band from bcc to fcc for switched LJ on the two-atom tetragonal cell through =rgsaddle_band_create_solid=; the climbing image matches the relaxed scan of =validation/bain_lj_reference.py= in c/a within 2.5e-4 and in barrier within 1.2e-6 eV/atom, and every image keeps a diagonal tetragonal cell and its fractional coordinates
+- =tests/solid_dimer_barrier.rs= — the variable-cell dimer and the solid-state band meet on the shear-coupled double well; a frozen cell reproduces the one-dimensional barrier
+- =tests/mishin_cu.rs= — Mishin copper, four-atom cohesive energy and virial, and the <100> to <110> dumbbell saddle under shear
 - =validation/= — sympy and sollya checks of the dimer rotation, the Lanczos residual bound, and the finite-difference curvature; =bain_lj_reference.py= (numpy, scipy) scans the relaxed Bain path that =tests/c/solid_bain_lj.c= checks against, and =ssneb_bain_cell.py= (sympy) checks its strain parametrisation and Jacobian
