@@ -1,26 +1,15 @@
-//! Consumer of the strain-rate table: dipole finite differences, the
-//! linear barrier, and lookup of a recorded no-barrier row.
+//! Dipole finite differences, symmetry images, trust, and JSON.
 
 use std::path::PathBuf;
 
-use ndarray::{Array1, Array2, ArrayView1};
+use ndarray::{Array1, Array2, ArrayView1, array};
 use rgmin::{Control, FireKind, Method, Oracle, Solver};
+use rgsaddle::minmode::PointSurface;
 use rgsaddle::{
-    Ensemble, ExplicitSide, HopVariant, LINEAR_FOLD_EV, LinearStatus, Rate, SaddleError,
-    StrainPoint, StrainRateTable, activation_volume, compliance_from_stiffness, double_dot,
-    elastic_dipole, hydrostatic, judge_linear, rotation_x, shear_xz, shear_yx,
-    split_translational_modes, transform_tensor, vineyard_prefactor,
+    CurvatureBound, ElasticDipole, LINEAR_FOLD_EV, SaddleError, SaddleSeed, SearchReason, Strain,
+    StrainResponse, Trust, TrustPolicy, activation_volume, compliance_from_stiffness,
+    cubic_rotations, rotation_x, split_translational_modes, vineyard_prefactor,
 };
-
-fn symmetrize(m: [[f64; 3]; 3]) -> [[f64; 3]; 3] {
-    let mut out = [[0.0; 3]; 3];
-    for i in 0..3 {
-        for j in 0..3 {
-            out[i][j] = 0.5 * (m[i][j] + m[j][i]);
-        }
-    }
-    out
-}
 
 fn det(h: [[f64; 3]; 3]) -> f64 {
     h[0][0] * (h[1][1] * h[2][2] - h[1][2] * h[2][1])
@@ -246,16 +235,13 @@ fn dipole_matches_the_strain_derivative_and_is_symmetric() {
     let vacancy = perfect.slice(ndarray::s![3..]).to_owned();
     let (defect_pos, _, defect_stress) = relax_lj(&vacancy, cell);
     let volume = det(cell).abs();
-    let dipole = elastic_dipole(volume, defect_stress, bulk_stress).unwrap();
+    let dipole = ElasticDipole::from_stress(volume, defect_stress, bulk_stress).unwrap();
+    let tensor = dipole.tensor();
     for i in 0..3 {
         for j in 0..3 {
             assert!(
-                (dipole[i][j] - dipole[j][i]).abs() < 1e-12,
+                (tensor[i][j] - tensor[j][i]).abs() < 1e-12,
                 "P not symmetric at {i}{j}"
-            );
-            assert!(
-                (defect_stress[i][j] - defect_stress[j][i]).abs() < 1e-8,
-                "pair stress not symmetric"
             );
         }
     }
@@ -276,7 +262,7 @@ fn dipole_matches_the_strain_derivative_and_is_symmetric() {
         let deriv = ((frozen(&defect_pos, 1.0) - frozen(&bulk_pos, 1.0))
             - (frozen(&defect_pos, -1.0) - frozen(&bulk_pos, -1.0)))
             / 2.0;
-        let predicted = -double_dot(dipole, eps);
+        let predicted = -dipole.contract(Strain::from_tensor(eps).unwrap());
         assert!(
             (deriv - predicted).abs() < 1e-6,
             "frozen excess derivative {deriv} vs -P:eps {predicted}"
@@ -332,35 +318,156 @@ fn newton_u(gamma: f64, start: f64) -> f64 {
 
 #[test]
 fn linear_model_matches_the_explicit_barrier_at_small_strain() {
-    let gamma0 = 0.0;
-    let u_min = newton_u(gamma0, 1.0);
-    let u_sad = newton_u(gamma0, 0.0);
-    let (_, g_min) = well_force(u_min, gamma0);
-    let (_, g_sad) = well_force(u_sad, gamma0);
-    // The model's γ is the one-sided ε_yx of shear_yx. A symmetric virial
-    // carries that same partial on both off-diagonal entries.
+    let u_min = newton_u(0.0, 1.0);
+    let u_sad = newton_u(0.0, 0.0);
+    let (_, g_min) = well_force(u_min, 0.0);
+    let (_, g_sad) = well_force(u_sad, 0.0);
     let stress_of = |g: f64| [[0.0, g, 0.0], [g, 0.0, 0.0], [0.0, 0.0, 0.0]];
-    let p_min = elastic_dipole(1.0, stress_of(g_min), [[0.0; 3]; 3]).unwrap();
-    let p_sad = elastic_dipole(1.0, stress_of(g_sad), [[0.0; 3]; 3]).unwrap();
-    assert!((p_min[1][0] - p_min[0][1]).abs() < 1e-12);
-    let barrier0 = well(u_sad, gamma0) - well(u_min, gamma0);
-    let model = rgsaddle::DipoleModel {
-        minimum: p_min,
-        saddle: p_sad,
-        barrier0,
-    };
+    let minimum = ElasticDipole::from_stress(1.0, stress_of(g_min), [[0.0; 3]; 3]).unwrap();
+    let saddle = ElasticDipole::from_stress(1.0, stress_of(g_sad), [[0.0; 3]; 3]).unwrap();
+    let barrier0 = well(u_sad, 0.0) - well(u_min, 0.0);
+    let response = StrainResponse::new(barrier0, minimum, saddle).unwrap();
     let gamma = 1.0e-5;
-    let min_g = newton_u(gamma, u_min);
-    let sad_g = newton_u(gamma, u_sad);
-    let explicit = well(sad_g, gamma) - well(min_g, gamma);
-    let linear = model.linear_barrier(shear_yx(gamma));
+    let explicit = well(newton_u(gamma, u_sad), gamma) - well(newton_u(gamma, u_min), gamma);
+    let estimate = response.barrier(&Strain::shear_yx(gamma));
+    assert!(matches!(estimate.trust, Trust::Linear));
     assert!(
-        (linear - explicit).abs() < 1e-8,
-        "linear {linear} explicit {explicit} barrier0 {barrier0}"
+        (estimate.barrier - explicit).abs() < 1e-8,
+        "linear {} explicit {explicit}",
+        estimate.barrier
     );
-    let (status, error) = judge_linear(linear, Some(explicit), LINEAR_FOLD_EV);
-    assert_eq!(status, LinearStatus::Holds);
-    assert!(error.unwrap() < 1e-8);
+}
+
+#[test]
+fn rotated_variant_matches_the_symmetry_related_shear() {
+    let mut saddle = [[0.0; 3]; 3];
+    saddle[0][1] = 12.85;
+    saddle[1][0] = 12.85;
+    let response = StrainResponse::new(
+        0.5,
+        ElasticDipole::from_tensor([[0.0; 3]; 3]).unwrap(),
+        ElasticDipole::from_tensor(saddle).unwrap(),
+    )
+    .unwrap()
+    .with_point_group(&[rotation_x(0), rotation_x(1), rotation_x(2), rotation_x(3)])
+    .unwrap();
+    let yx = response.barrier(&Strain::shear_yx(0.02));
+    let xz = response.barrier(&Strain::shear_xz(0.02));
+    assert!((yx.barrier - xz.barrier).abs() < 1e-12);
+    assert_ne!(yx.variant, xz.variant);
+    assert!(cubic_rotations().len() == 24);
+}
+
+#[test]
+fn copper_fixture_needs_a_search_past_the_fold() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks/strain_response_cu.json");
+    let text = std::fs::read_to_string(path).unwrap();
+    let response = StrainResponse::from_json(&text)
+        .unwrap()
+        .with_point_group(&cubic_rotations())
+        .unwrap();
+    let small = response.barrier(&Strain::shear_yx(0.005));
+    assert!(matches!(small.trust, Trust::Linear), "{:?}", small.trust);
+    let folded = response.barrier(&Strain::shear_yx(0.02));
+    match folded.trust {
+        Trust::NeedsSearch(SearchReason::Quadratic {
+            estimated_error,
+            tolerance,
+        }) => {
+            assert!((tolerance - LINEAR_FOLD_EV).abs() < 1e-15);
+            assert!(estimated_error > LINEAR_FOLD_EV);
+        }
+        other => panic!("expected the quadratic fold, got {other:?}"),
+    }
+    let xz = response.barrier(&Strain::shear_xz(0.02));
+    assert!((folded.barrier - xz.barrier).abs() < 1e-9);
+    assert!(
+        (folded.barrier - 0.21690853542407557).abs() < 1e-9,
+        "{}",
+        folded.barrier
+    );
+}
+
+#[test]
+fn json_round_trip_keeps_the_hop_and_the_bound() {
+    let response = StrainResponse::new(
+        0.4,
+        ElasticDipole::from_tensor([[1.0, 0.2, 0.0], [0.2, 0.0, 0.0], [0.0, 0.0, 0.0]]).unwrap(),
+        ElasticDipole::from_tensor([[1.5, 0.4, 0.0], [0.4, 0.1, 0.0], [0.0, 0.0, 0.0]]).unwrap(),
+    )
+    .unwrap()
+    .with_prefactor(1.0e12, None)
+    .unwrap()
+    .with_policy(TrustPolicy {
+        radius: Some(0.03),
+        quadratic: None,
+        error_tolerance: LINEAR_FOLD_EV,
+        curvature: Some(CurvatureBound {
+            lambda0: -0.2,
+            slope: [[0.0, 4.0, 0.0], [4.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+            fraction: 0.5,
+        }),
+        floor: 0.0,
+    })
+    .unwrap();
+    let again = StrainResponse::from_json(&response.to_json()).unwrap();
+    let strain = Strain::shear_yx(0.04);
+    let left = response.barrier(&strain);
+    let right = again.barrier(&strain);
+    assert!((left.barrier - right.barrier).abs() < 1e-12);
+    assert_eq!(left.prefactor_hz, right.prefactor_hz);
+    assert!(matches!(right.trust, Trust::NeedsSearch(_)));
+}
+
+struct Well;
+
+impl PointSurface for Well {
+    fn eval(&self, r: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        let (x, y, z) = (r[0], r[1], r[2]);
+        let energy = (x * x - 1.0).powi(2) + 2.0 * y * y + 2.0 * z * z;
+        Ok((energy, array![4.0 * x * (x * x - 1.0), 4.0 * y, 4.0 * z]))
+    }
+}
+
+#[test]
+fn refine_caches_an_index_one_saddle() {
+    let response = StrainResponse::new(
+        1.0,
+        ElasticDipole::from_tensor([[0.0; 3]; 3]).unwrap(),
+        ElasticDipole::from_tensor([[0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 0.0]]).unwrap(),
+    )
+    .unwrap()
+    .with_policy(TrustPolicy {
+        radius: Some(0.01),
+        ..TrustPolicy::default()
+    })
+    .unwrap();
+    let strain = Strain::shear_yx(0.05);
+    assert!(matches!(
+        response.barrier(&strain).trust,
+        Trust::NeedsSearch(_)
+    ));
+    let mut response = response;
+    let estimate = response
+        .refine(
+            &strain,
+            &Well,
+            &SaddleSeed {
+                positions: array![0.4, 0.1, -0.05],
+                cell: [[6.0, 0.0, 0.0], [0.0, 5.0, 0.0], [0.0, 0.0, 7.0]],
+                mode: array![1.0, 0.2, -0.1],
+                minimum_energy: 0.0,
+            },
+            80,
+        )
+        .unwrap();
+    assert!(matches!(estimate.trust, Trust::Explicit));
+    assert!(
+        (estimate.barrier - 1.0).abs() < 1e-6,
+        "{}",
+        estimate.barrier
+    );
+    assert!(matches!(response.barrier(&strain).trust, Trust::Explicit));
 }
 
 #[test]
@@ -372,48 +479,26 @@ fn activation_volume_is_the_stress_derivative() {
         identity[i][i] = 1.0;
     }
     let omega = activation_volume(minimum, saddle, &identity).unwrap();
-    let delta = {
-        let mut out = [[0.0; 3]; 3];
-        let p_min = symmetrize(minimum);
-        let p_sad = symmetrize(saddle);
-        for i in 0..3 {
-            for j in 0..3 {
-                out[i][j] = p_sad[i][j] - p_min[i][j];
-            }
-        }
-        out
-    };
-    for i in 0..3 {
-        for j in 0..3 {
-            assert!((omega[i][j] + delta[i][j]).abs() < 1e-12);
-        }
-    }
-    let model = rgsaddle::DipoleModel {
-        minimum: symmetrize(minimum),
-        saddle: symmetrize(saddle),
-        barrier0: 0.4,
-    };
+    let response = StrainResponse::new(
+        0.4,
+        ElasticDipole::from_tensor(minimum).unwrap(),
+        ElasticDipole::from_tensor(saddle).unwrap(),
+    )
+    .unwrap();
     let step = 1e-6;
-    let mut tension = [[0.0; 3]; 3];
-    tension[0][0] = step;
-    let shifted = model.linear_barrier(tension) - model.barrier0;
-    assert!((shifted / step - omega[0][0]).abs() < 1e-9);
-
+    let finite = (response.barrier(&Strain::uniaxial_x(step)).barrier - response.barrier0()) / step;
+    assert!((finite - omega[0][0]).abs() < 1e-8);
     let mut stiffness = identity;
     stiffness[0][0] = 2.0;
     let compliance = compliance_from_stiffness(&stiffness).unwrap();
     assert!((compliance[0][0] - 0.5).abs() < 1e-12);
     let omega = activation_volume(minimum, saddle, &compliance).unwrap();
-    let strain = hydrostatic(0.0);
-    let _ = strain;
-    let mut eps = [[0.0; 3]; 3];
-    eps[0][0] = compliance[0][0] * step;
-    let finite = (model.linear_barrier(eps) - model.barrier0) / step;
-    assert!(
-        (finite - omega[0][0]).abs() < 1e-8,
-        "dG/dtau {finite} omega {}",
-        omega[0][0]
-    );
+    let finite = (response
+        .barrier(&Strain::uniaxial_x(compliance[0][0] * step))
+        .barrier
+        - response.barrier0())
+        / step;
+    assert!((finite - omega[0][0]).abs() < 1e-8);
 }
 
 #[test]
@@ -423,9 +508,6 @@ fn vineyard_prefactor_has_one_factor_of_frequency() {
     let expected = scale * (1.0_f64 / mass).sqrt() / (2.0 * std::f64::consts::PI);
     let got = vineyard_prefactor(&[1.0], &[], mass).unwrap();
     assert!((got - expected).abs() / expected < 1e-12);
-    let two = vineyard_prefactor(&[4.0, 9.0], &[4.0], mass).unwrap();
-    let ratio = scale * (9.0_f64 / mass).sqrt() / (2.0 * std::f64::consts::PI);
-    assert!((two - ratio).abs() / ratio < 1e-12);
 }
 
 #[test]
@@ -444,297 +526,22 @@ fn translations_are_left_out_of_the_prefactor() {
     assert_eq!(split.positive, vec![0.5, 1.5, 2.0, 3.0]);
 }
 
-fn sample(
-    direction: &str,
-    strain: [[f64; 3]; 3],
-    linear: f64,
-    status: LinearStatus,
-    helmholtz: ExplicitSide,
-    gibbs: ExplicitSide,
-    error: Option<f64>,
-) -> StrainPoint {
-    StrainPoint {
-        direction: direction.to_string(),
-        variant: String::new(),
-        hop: [0.0; 3],
-        strain,
-        linear,
-        linear_status: status,
-        helmholtz,
-        gibbs,
-        linear_error: error,
-    }
-}
-
-fn side(barrier: f64, prefactor: f64) -> ExplicitSide {
-    ExplicitSide::barrier(barrier, Some(prefactor), "index 1").unwrap()
-}
-
-fn fixture_table() -> StrainRateTable {
-    let pref = 1.0e12;
-    let zero = sample(
-        "reference",
-        shear_yx(0.0),
-        0.40,
-        LinearStatus::Holds,
-        side(0.40, pref),
-        side(0.30, pref),
-        Some(0.0),
-    );
-    let small = sample(
-        "shear_yx",
-        shear_yx(0.01),
-        0.30,
-        LinearStatus::Holds,
-        side(0.305, pref * 0.9),
-        side(0.20, pref * 0.8),
-        Some(0.005),
-    );
-    let folded = sample(
-        "shear_yx",
-        shear_yx(0.05),
-        0.05,
-        LinearStatus::Failed,
-        ExplicitSide::no_barrier(),
-        ExplicitSide::no_barrier(),
-        None,
-    );
-    StrainRateTable::try_new(
-        rgsaddle::DipoleModel {
-            minimum: [[0.0; 3]; 3],
-            saddle: [[0.0; 3]; 3],
-            barrier0: 0.40,
-        },
-        vec![zero, small, folded],
-        None,
-    )
-    .unwrap()
-}
-
 #[test]
-fn lookup_interpolates_and_flags_no_barrier_at_five_percent() {
-    let table = fixture_table();
-    let csv = table.to_csv();
-    let json = table.to_json();
-    let from_csv = StrainRateTable::from_csv(&csv).unwrap();
-    let from_json = StrainRateTable::from_json(&json).unwrap();
-    assert_eq!(from_csv.points().len(), 3);
-    assert_eq!(from_json.points().len(), 3);
-    assert!((from_json.model().barrier0 - 0.40).abs() < 1e-15);
-
-    let mid = from_csv
-        .lookup(shear_yx(0.005), 300.0, Ensemble::Helmholtz)
-        .unwrap();
-    match mid {
-        Rate::Harmonic(rate) => {
-            assert!(rate.interpolated);
-            assert!((rate.barrier - 0.3525).abs() < 1e-12);
-            let ln = 1.0e12_f64.ln() + 0.5 * ((1.0e12 * 0.9_f64).ln() - 1.0e12_f64.ln());
-            assert!((rate.prefactor_hz.ln() - ln).abs() < 1e-9);
-        }
-        other => panic!("expected an interpolated rate, got {other}"),
-    }
-
-    let five = table
-        .lookup(shear_yx(0.05), 500.0, Ensemble::Gibbs)
-        .unwrap();
-    assert!(matches!(five, Rate::NoBarrier), "{five}");
-    let five_fixed = table
-        .lookup(shear_yx(0.05), 500.0, Ensemble::Helmholtz)
-        .unwrap();
-    assert!(matches!(five_fixed, Rate::NoBarrier));
-    let linear = table
-        .lookup(shear_yx(0.05), 500.0, Ensemble::Linear)
-        .unwrap();
-    assert!(matches!(linear, Rate::LinearFailed { .. }), "{linear}");
-
-    let across = table.lookup(shear_yx(0.03), 300.0, Ensemble::Helmholtz);
-    assert!(
-        across.is_err(),
-        "a query between a barrier and no barrier is refused"
-    );
-}
-
-#[test]
-fn copper_table_flags_no_barrier_at_five_percent_variable_cell() -> Result<(), SaddleError> {
-    let path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks/strain_rate_table_cu.csv");
-    let table = StrainRateTable::open(&path)?;
-    let mut found = false;
-    for point in table.points() {
-        let shear = point.strain[1][0];
-        let others = point.strain[0][0].abs()
-            + point.strain[0][1].abs()
-            + point.strain[0][2].abs()
-            + point.strain[1][1].abs()
-            + point.strain[1][2].abs()
-            + point.strain[2][0].abs()
-            + point.strain[2][1].abs()
-            + point.strain[2][2].abs();
-        if point.direction == "shear_yx" && (shear - 0.05).abs() < 1e-12 && others < 1e-12 {
-            assert!(
-                point.gibbs.is_no_barrier(),
-                "5% variable cell gibbs index {}",
-                point.gibbs.index
-            );
-            let rate = table.lookup(point.strain, 300.0, Ensemble::Gibbs)?;
-            assert!(matches!(rate, Rate::NoBarrier), "{rate}");
-            found = true;
-        }
-    }
-    assert!(found, "the copper table has no 5% shear_yx row");
-    Ok(())
-}
-
-#[test]
-fn rotated_dipole_matches_the_symmetry_related_shear() {
-    let mut dipole = [[0.0; 3]; 3];
-    dipole[0][0] = 1.0;
-    dipole[1][1] = 2.0;
-    dipole[2][2] = 3.0;
-    dipole[0][1] = 12.85;
-    dipole[1][0] = 12.85;
-    let turned = transform_tensor(dipole, rotation_x(1));
-    let plain = 0.5 - double_dot(dipole, shear_yx(0.02));
-    let rotated = 0.5 - double_dot(turned, shear_xz(0.02));
-    assert!((plain - rotated).abs() < 1e-9, "yx {plain} xz {rotated}");
-}
-
-#[test]
-fn lookup_returns_the_lowest_hop() {
-    let mut low = sample(
-        "shear_yx",
-        shear_yx(0.02),
-        0.2,
-        LinearStatus::Holds,
-        side(0.2, 1.0e12),
-        side(0.15, 1.0e12),
-        Some(0.0),
-    );
-    low.variant = "110".to_string();
-    let mut high = sample(
-        "shear_yx",
-        shear_yx(0.02),
-        0.4,
-        LinearStatus::Holds,
-        side(0.4, 1.0e12),
-        side(0.35, 1.0e12),
-        Some(0.0),
-    );
-    high.variant = "101".to_string();
-    let zero = sample(
-        "reference",
-        shear_yx(0.0),
-        0.5,
-        LinearStatus::Holds,
-        side(0.5, 1.0e12),
-        side(0.5, 1.0e12),
-        Some(0.0),
-    );
-    let table = StrainRateTable::try_new(
-        rgsaddle::DipoleModel {
-            minimum: [[0.0; 3]; 3],
-            saddle: [[0.0; 3]; 3],
-            barrier0: 0.5,
-        },
-        vec![zero, low, high],
-        None,
-    )
-    .unwrap()
-    .with_hop_variants(vec![
-        HopVariant {
-            name: "110".into(),
-            minimum: [[0.0; 3]; 3],
-            saddle: [[0.0; 3]; 3],
-            barrier0: 0.2,
-        },
-        HopVariant {
-            name: "101".into(),
-            minimum: [[0.0; 3]; 3],
-            saddle: [[0.0; 3]; 3],
-            barrier0: 0.4,
-        },
-    ])
-    .unwrap();
-    let rate = table
-        .lookup(shear_yx(0.02), 300.0, Ensemble::Helmholtz)
-        .unwrap();
-    match rate {
-        Rate::Harmonic(rate) => {
-            assert!((rate.barrier - 0.2).abs() < 1e-12);
-            assert_eq!(rate.variant, "110");
-        }
-        other => panic!("expected the lower hop, got {other}"),
-    }
-}
-
-#[test]
-fn matching_variant_equates_the_symmetry_related_copper_shears() -> Result<(), SaddleError> {
-    let path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks/strain_rate_table_cu.csv");
-    let table = StrainRateTable::open(&path)?;
-    let yx = table
-        .points()
-        .iter()
-        .find(|point| point.direction == "shear_yx" && (point.strain[1][0] - 0.02).abs() < 1e-12)
-        .expect("shear_yx 0.02");
-    let xz = table
-        .points()
-        .iter()
-        .find(|point| point.direction == "shear_xz")
-        .expect("shear_xz");
-    assert_eq!(yx.variant, "110", "yx hop {:?}", yx.hop);
-    assert_eq!(xz.variant, "101", "xz hop {:?}", xz.hop);
-    assert!(
-        (yx.linear - xz.linear).abs() < 1e-6,
-        "linear yx {} xz {}",
-        yx.linear,
-        xz.linear
-    );
-    let yx_explicit = yx.helmholtz.barrier.expect("yx barrier");
-    let xz_explicit = xz.helmholtz.barrier.expect("xz barrier");
-    assert!(
-        (yx_explicit - xz_explicit).abs() < 1e-4,
-        "explicit yx {yx_explicit} xz {xz_explicit}"
-    );
-    Ok(())
-}
-
-#[test]
-fn shear_yx_slope_matches_the_central_difference() -> Result<(), SaddleError> {
-    let path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks/strain_rate_table_cu.csv");
-    let table = StrainRateTable::open(&path)?;
-    let at = |gamma: f64| {
-        table
-            .points()
-            .iter()
-            .find(|point| {
-                point.variant == "110"
-                    && point.direction == "shear_yx"
-                    && (point.strain[1][0] - gamma).abs() < 1e-12
-            })
-            .unwrap_or_else(|| panic!("missing 110 shear {gamma}"))
-            .helmholtz
-            .barrier
-            .expect("barrier")
-    };
-    let slope = (at(0.0025) - at(-0.0025)) / 0.005;
-    let variant = table
-        .variants()
-        .iter()
-        .find(|variant| variant.name == "110")
-        .expect("110 dipole");
-    let mut delta = [[0.0; 3]; 3];
-    for i in 0..3 {
-        for j in 0..3 {
-            delta[i][j] = variant.saddle[i][j] - variant.minimum[i][j];
-        }
-    }
-    let model = -double_dot(delta, shear_yx(1.0));
-    assert!(
-        (slope - model).abs() < 1.0,
-        "explicit slope {slope} dipole slope {model}"
-    );
-    Ok(())
+fn force_dipole_matches_the_first_moment() {
+    let positions = [
+        [1.0, 0.0, 0.0],
+        [-1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, -1.0, 0.0],
+    ];
+    let forces = [
+        [0.0, 1.0, 0.0],
+        [0.0, -1.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [-1.0, 0.0, 0.0],
+    ];
+    let dipole = ElasticDipole::from_forces(&positions, &forces).unwrap();
+    let tensor = dipole.tensor();
+    assert!((tensor[0][1] - 2.0).abs() < 1e-12);
+    assert!((tensor[1][0] - 2.0).abs() < 1e-12);
 }

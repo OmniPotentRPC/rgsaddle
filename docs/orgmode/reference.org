@@ -19,7 +19,7 @@ The table below lists the main types.
 | =BandReport=                   | =status=, =max_force=, =ci_index=, =iteration=, =surface_rows=, =curvature= (refinement steps only)                |
 | =MinModeSession=               | Dimer or Lanczos lowest-mode search, same stepping contract; =set_position=, =set_mode=, =estimate_mode= for reuse; =set_torque_window= sets the dimer torque window apart from =rotation_tol= |
 | =SolidDimer=                   | That search on atoms plus Jacobian-scaled cell strain. =CellMask::frozen= is the fixed-cell dimer. =stress= and =elastic_dipole= are =σ= and =V σ= |
-| =StrainRateTable=              | Fixed-cell, variable-cell and dipole barriers as separate columns. =lookup= returns =k(ε, T)= or =no barrier=. =elastic_dipole= is the Varvenne dipole =-V (σ_defect - σ_bulk)= |
+| =StrainResponse=               | One hop. =barrier(ε)= is the lowest symmetry image of =ΔE0 - (P_saddle - P_minimum):ε=, or =NeedsSearch= past the validity bound. =ElasticDipole::from_stress= is =-V (σ_defect - σ_bulk)=. =refine= caches an index-1 solid dimer. =to_json= is the event record |
 | =Index1Session=                | Restricted-step partitioned RFO, Powell or Bofill update. =Index1Config= is non-exhaustive. =with_sparse_pattern= selects a CPR seed |
 | =SparsityPattern=              | Atom-level symmetric CSR from a linkcell cutoff walk. Diagonal blocks are implied and not stored as loops          |
 | =Colouring=                    | Smallest-last distance-2 colouring and the max-degree lower bound                                                  |

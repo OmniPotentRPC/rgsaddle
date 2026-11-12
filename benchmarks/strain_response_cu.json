@@ -1,0 +1,19 @@
+{
+  "format": "rgsaddle.strain_response",
+  "version": 1,
+  "barrier0_eV": 0.473916239370908,
+  "prefactor_Hz": 299817787141173.06,
+  "prefactor_slope": null,
+  "p_minimum": [[19.1339219775939,3.129445783192887e-14,5.118724427810491e-14],[3.129445783192887e-14,19.432240466906126,-8.8515349563889e-15],[5.118724427810491e-14,-8.8515349563889e-15,19.432240466906144]],
+  "p_saddle": [[20.993278221197325,12.850385197341652,4.4750421789650947e-7],[12.850385197341652,20.991117960164097,4.5884824961925823e-7],[4.4750421789650947e-7,4.5884824961925823e-7,19.796387738795715]],
+  "policy": {"radius": null, "quadratic": 68.12634868587297, "error_tolerance_eV": 0.01, "floor_eV": 0, "curvature": null},
+  "variants": [],
+  "cache": [],
+  "validation": {
+    "note": "Mishin Cu 109-atom [100] dumbbell, [110] saddle. The quadratic coefficient is the fixed-cell barrier error at shear 0.005 divided by (0.005)^2.",
+    "shear_yx_0.005_explicit_eV": 0.4113674721013467,
+    "shear_yx_0.005_linear_error_eV": 0.0017031587171468243,
+    "shear_yx_0.02_explicit_eV": 0.24356279471709286,
+    "shear_yx_0.02_linear_error_eV": 0.02665425929301729
+  }
+}

@@ -106,11 +106,11 @@ pub use stencil::{
     Role, Stencil, StencilReport, StencilStatus,
 };
 pub use strain_rate::{
-    BOLTZMANN_EV_PER_K, DipoleModel, Ensemble, ExplicitSide, HarmonicRate, HopVariant,
-    LINEAR_FOLD_EV, LinearStatus, NEGATIVE_CURVATURE, Rate, StrainPoint, StrainRateTable,
-    TranslationalSplit, activation_volume, angular_scale_rad_s, compliance_from_stiffness,
-    double_dot, elastic_dipole, hydrostatic, judge_linear, rotation_x, shear_xz, shear_yx,
-    split_translational_modes, symmetrize, transform_tensor, uniaxial_x, vineyard_prefactor,
+    BOLTZMANN_EV_PER_K, CurvatureBound, ElasticDipole, Estimate, HopVariant, LINEAR_FOLD_EV,
+    NEGATIVE_CURVATURE, SaddleSeed, SearchReason, Strain, StrainResponse, TranslationalSplit,
+    Trust, TrustPolicy, activation_volume, angular_scale_rad_s, arrhenius,
+    compliance_from_stiffness, cubic_rotations, double_dot, elastic_dipole, rotation_x,
+    split_translational_modes, symmetrize, transform_tensor, vineyard_prefactor,
 };
 pub use tangent::TangentKind;
 

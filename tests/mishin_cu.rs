@@ -10,9 +10,6 @@
 //! atom is the interstitial. Each search starts at the relaxed <100>
 //! minimum, not at a precomputed saddle.
 
-#[path = "mishin/strain_rate_driver.rs"]
-mod strain_rate_driver;
-
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;

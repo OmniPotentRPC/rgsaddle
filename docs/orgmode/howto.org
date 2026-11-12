@@ -35,8 +35,8 @@ Defaults: improved tangent, uniform spring =k = 5=, NEB projection, climbing ima
 * Solid-state NEB on the dimer chart
 =howto/ssneb= is the climbing-image band on that same chart. A frozen cell is the ordinary band. A free cell uses =E + V0 σ_ext : ε=.
 
-* Strain-rate table
-=howto/strain-rate= builds =StrainRateTable= from the elastic dipoles of the minimum and the saddle. =lookup= returns =k(ε, T)= for the fixed cell, the variable cell, or the dipole line, and it returns =no barrier= when the explicit search found none.
+* Strain response of a hop
+=howto/strain-rate= is =StrainResponse=: the elastic dipoles of one minimum and one saddle, the symmetry images of that hop, and =barrier(ε)=. The line is trusted inside a radius, a quadratic error bound, or a curvature-softening bound. Past that bound =refine= runs a fixed-cell solid dimer and caches the explicit barrier.
 
 * Minimum-mode instead of a band
 =MinModeSession= refreshes the lowest curvature mode (dimer rotation or Lanczos on finite-difference Hessian actions), inverts the force along it, and takes one solver step. Same host loop. =PointSurface= evals a single geometry.
