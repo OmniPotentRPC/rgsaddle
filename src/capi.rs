@@ -13,6 +13,7 @@ use rgmin::{FireKind, Method};
 
 use crate::band::{BandConfig, BandSession, BandStatus, BandSurface, Cell, CiConfig, SolidState};
 use crate::connect::{ConnectConfig, connect};
+use crate::dimer_armijo::{ArmijoDimer, DimerState};
 use crate::error::SaddleError;
 use crate::minmode::{
     FiniteDifference, MinModeConfig, MinModeKind, MinModeSession, MinModeStatus, PointSurface,
@@ -27,7 +28,7 @@ use crate::spring::SpringKind;
 use crate::tangent::TangentKind;
 
 pub const RGSADDLE_ABI_MAJOR: u32 = 1;
-pub const RGSADDLE_ABI_MINOR: u32 = 35;
+pub const RGSADDLE_ABI_MINOR: u32 = 36;
 
 /// Band config bit 0. The C step calls the surface once per image
 /// carried by the evaluation: every image on the first evaluation
@@ -1019,6 +1020,158 @@ pub unsafe extern "C" fn rgsaddle_minmode_free(session: *mut RgsaddleMinMode) {
     if !session.is_null() {
         drop(unsafe { Box::from_raw(session) });
     }
+}
+
+#[repr(C)]
+pub struct RgsaddleArmijoConfig {
+    pub version: RgsaddleVersion,
+    pub theta: f64,
+    pub psi: f64,
+    pub tol_v: f64,
+    pub alpha_max: f64,
+    pub beta_max: f64,
+    pub force_tol: f64,
+    pub length_floor: f64,
+    pub max_rotations: i32,
+    pub max_shrinks: i32,
+}
+
+#[repr(C)]
+pub struct RgsaddleArmijoReport {
+    pub version: RgsaddleVersion,
+    pub force: f64,
+    pub curvature: f64,
+    pub rotation_residual: f64,
+    pub rotation_tolerance: f64,
+    pub alpha: f64,
+    pub length: f64,
+    pub status: i32,
+    pub rotations: i32,
+}
+
+fn positive_or(value: f64, default: f64) -> f64 {
+    if value.is_finite() && value > 0.0 {
+        value
+    } else {
+        default
+    }
+}
+
+/// # Safety
+/// `position` and `mode` hold `3 * n_atoms` doubles and are writable.
+/// `length` is writable. `alpha_prev` and `beta_prev` are NULL or one
+/// writable double each. `surface` is called with `user`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_armijo_step(
+    config: *const RgsaddleArmijoConfig,
+    n_atoms: i64,
+    position: *mut f64,
+    mode: *mut f64,
+    length: *mut f64,
+    alpha_prev: *mut f64,
+    beta_prev: *mut f64,
+    surface: Option<RgsaddleSurfaceFn>,
+    user: *mut c_void,
+    out: *mut RgsaddleArmijoReport,
+) -> i32 {
+    if out.is_null() {
+        return RGSADDLE_NULL_REPORT;
+    }
+    if position.is_null() || mode.is_null() || length.is_null() || n_atoms < 1 {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let Some(f) = surface else {
+        return RGSADDLE_NULL_SURFACE;
+    };
+    if !config.is_null() {
+        let major = unsafe { (*config).version.major };
+        if major != 0 && major != RGSADDLE_ABI_MAJOR {
+            return RGSADDLE_ABI_MISMATCH;
+        }
+    }
+    let dof = (3 * n_atoms) as usize;
+    let mut dimer = ArmijoDimer::gould();
+    if !config.is_null() {
+        let cfg = unsafe { &*config };
+        dimer.theta = positive_or(cfg.theta, dimer.theta);
+        dimer.psi = positive_or(cfg.psi, dimer.psi);
+        if cfg.tol_v.is_finite() && cfg.tol_v >= 0.0 {
+            dimer.tol_v = cfg.tol_v;
+        }
+        dimer.alpha_max = positive_or(cfg.alpha_max, dimer.alpha_max);
+        dimer.beta_max = positive_or(cfg.beta_max, dimer.beta_max);
+        dimer.force_tol = positive_or(cfg.force_tol, dimer.force_tol);
+        if cfg.length_floor.is_finite() && cfg.length_floor >= 0.0 {
+            dimer.length_floor = cfg.length_floor;
+        }
+        if cfg.max_rotations > 0 {
+            dimer.max_rotations = cfg.max_rotations as usize;
+        }
+        if cfg.max_shrinks > 0 {
+            dimer.max_shrinks = cfg.max_shrinks as usize;
+        }
+    }
+    let alpha0 = if alpha_prev.is_null() {
+        0.0
+    } else {
+        unsafe { *alpha_prev }
+    };
+    let beta0 = if beta_prev.is_null() {
+        0.0
+    } else {
+        unsafe { *beta_prev }
+    };
+    dimer.seed_steps(alpha0, beta0);
+    let h = unsafe { *length };
+    if !(h.is_finite() && h > 0.0) {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let mut state = DimerState {
+        position: Array1::from(unsafe { slice::from_raw_parts(position, dof) }.to_vec()),
+        mode: Array1::from(unsafe { slice::from_raw_parts(mode, dof) }.to_vec()),
+        length: h,
+    };
+    let cs = CSurface {
+        f,
+        user,
+        n_atoms,
+        n_images: 1,
+        per_image: false,
+        climbing_request: false,
+        rows: Default::default(),
+    };
+    let report = match dimer.step(&cs, &mut state) {
+        Ok(report) => report,
+        Err(err) => return status_of(&err),
+    };
+    unsafe {
+        std::ptr::copy_nonoverlapping(state.position.as_ptr(), position, dof);
+        std::ptr::copy_nonoverlapping(state.mode.as_ptr(), mode, dof);
+        *length = state.length;
+        if !alpha_prev.is_null() || !beta_prev.is_null() {
+            let (alpha, beta) = dimer.taken_steps();
+            if !alpha_prev.is_null() {
+                *alpha_prev = alpha;
+            }
+            if !beta_prev.is_null() {
+                *beta_prev = beta;
+            }
+        }
+        let out = &mut *out;
+        out.version = RgsaddleVersion {
+            major: RGSADDLE_ABI_MAJOR,
+            minor: RGSADDLE_ABI_MINOR,
+        };
+        out.force = report.force;
+        out.curvature = report.curvature;
+        out.rotation_residual = report.rotation_residual;
+        out.rotation_tolerance = report.rotation_tolerance;
+        out.alpha = report.alpha;
+        out.length = report.length;
+        out.status = if report.converged { 1 } else { 0 };
+        out.rotations = i32::try_from(report.rotations).unwrap_or(i32::MAX);
+    }
+    RGSADDLE_OK
 }
 
 #[repr(C)]

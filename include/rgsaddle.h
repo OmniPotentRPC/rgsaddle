@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 35u
+#define RGSADDLE_ABI_MINOR 36u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -521,6 +521,53 @@ rgsaddle_status_t rgsaddle_minmode_mode(const RgsaddleMinMode *session,
 /** Clear optimizer/rotation history, carried curvature, and the centre cache. */
 rgsaddle_status_t rgsaddle_minmode_reset(RgsaddleMinMode *session);
 void rgsaddle_minmode_free(RgsaddleMinMode *session);
+
+/**
+ * One Gould-Ortner-Packwood dimer translation (ABI minor 36).
+ * Zero or non-positive controls take the published defaults
+ * (theta = sqrt(0.1), psi = 100, tol_v = 0.1, alpha_max = beta_max = 1,
+ * force_tol = 1e-5, length_floor = 1e-8, 20 rotations, 40 shrinks).
+ * tol_v of 0 is kept: the rotation tolerance is then the force residual.
+ */
+typedef struct {
+  rgsaddle_version_t version;
+  double theta;
+  double psi;
+  double tol_v;
+  double alpha_max;
+  double beta_max;
+  double force_tol;
+  double length_floor;
+  int32_t max_rotations;
+  int32_t max_shrinks;
+} rgsaddle_armijo_config_t;
+
+/** status is rgsaddle_run_status_t. length is the dimer length after the step. */
+typedef struct {
+  rgsaddle_version_t version;
+  double force;
+  double curvature;
+  double rotation_residual;
+  double rotation_tolerance;
+  double alpha;
+  double length;
+  int32_t status;
+  int32_t rotations;
+} rgsaddle_armijo_report_t;
+
+/**
+ * One dimer step at `position` (3 * n_atoms), orientation `mode`, and
+ * centre-to-endpoint `length`. All three are updated in place. `alpha_prev`
+ * and `beta_prev` are the previous translation and rotation lengths, or
+ * NULL; a positive value is read and the accepted length is written back.
+ * The surface is the same one-geometry callback as a min-mode step.
+ */
+rgsaddle_status_t rgsaddle_armijo_step(const rgsaddle_armijo_config_t *config,
+                                       int64_t n_atoms, double *position,
+                                       double *mode, double *length,
+                                       double *alpha_prev, double *beta_prev,
+                                       rgsaddle_surface_fn surface, void *user,
+                                       rgsaddle_armijo_report_t *out);
 
 typedef enum {
   RGSADDLE_HESS_POWELL = 0,

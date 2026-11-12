@@ -182,6 +182,19 @@ impl ArmijoDimer {
         }
     }
 
+    pub(crate) fn seed_steps(&mut self, translation_alpha: f64, rotation_beta: f64) {
+        if translation_alpha.is_finite() && translation_alpha > 0.0 {
+            self.translation.alpha = translation_alpha;
+        }
+        if rotation_beta.is_finite() && rotation_beta > 0.0 {
+            self.rotation.alpha = rotation_beta;
+        }
+    }
+
+    pub(crate) fn taken_steps(&self) -> (f64, f64) {
+        (self.translation.alpha, self.rotation.alpha)
+    }
+
     fn controls(&mut self) {
         self.translation.c = self.theta;
         self.translation.shrink = 0.5;

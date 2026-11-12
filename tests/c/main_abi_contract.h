@@ -5,7 +5,7 @@
 #include <stddef.h>
 
 _Static_assert(RGSADDLE_ABI_MAJOR == 1u, "main ABI major");
-_Static_assert(RGSADDLE_ABI_MINOR == 35u, "ABI minor");
+_Static_assert(RGSADDLE_ABI_MINOR == 36u, "ABI minor");
 _Static_assert(RGSADDLE_BAND_NO_MIN_MODE == (1ull << 3), "band flag bit 3");
 _Static_assert(RGSADDLE_REQ_ONE_IMAGE == (1ull << 0), "request flag bit 0");
 _Static_assert(RGSADDLE_REQ_CLIMBING_IMAGE == (1ull << 1), "request flag bit 1");
@@ -337,5 +337,11 @@ _Static_assert(RGSADDLE_IRC_SELLA_SPHERE == 2, "rgsaddle_irc_kind_t SELLA_SPHERE
 typedef rgsaddle_status_t (*abi32_signature_rgsaddle_minmode_set_torque_window)(
     RgsaddleMinMode *session, int32_t window);
 _Static_assert(_Generic(&rgsaddle_minmode_set_torque_window, abi32_signature_rgsaddle_minmode_set_torque_window: 1, default: 0), "rgsaddle_minmode_set_torque_window signature");
+
+typedef rgsaddle_status_t (*abi36_signature_rgsaddle_armijo_step)(
+    const rgsaddle_armijo_config_t *config, int64_t n_atoms, double *position,
+    double *mode, double *length, double *alpha_prev, double *beta_prev,
+    rgsaddle_surface_fn surface, void *user, rgsaddle_armijo_report_t *out);
+_Static_assert(_Generic(&rgsaddle_armijo_step, abi36_signature_rgsaddle_armijo_step: 1, default: 0), "rgsaddle_armijo_step signature");
 
 #endif
