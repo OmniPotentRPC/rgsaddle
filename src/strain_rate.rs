@@ -1,3 +1,7 @@
+// The tensor loops index both sides of a product. `is_multiple_of` is the
+// same test as `% 3` on a length the rest of this file already writes that way.
+#![allow(clippy::needless_range_loop, clippy::manual_is_multiple_of)]
+
 //! Strain response of one migration event, for any potential and cell.
 //!
 //! The elastic dipole is the rank-2 force moment of a point defect.
@@ -27,7 +31,9 @@
 //! with a trust flag. Past the validity bound, or when the predicted
 //! barrier falls through the floor, the flag is [`Trust::NeedsSearch`]
 //! and [`StrainResponse::refine`] runs a fixed-cell solid dimer from the
-//! strained saddle.
+//! strained saddle. The step is short of the minimum-escape length, and a
+//! point that has left the predicted geometry or does not connect to the
+//! reactant is not cached.
 //!
 //! The activation volume is the stress derivative of the activation
 //! Gibbs energy, `Ω = ∂ΔG/∂τ`. With `ε = S τ`,
@@ -368,9 +374,10 @@ pub struct Estimate {
 
 /// Reference geometry for [`StrainResponse::refine`].
 ///
-/// `minimum_energy` is the energy of the reactant at the strained cell.
-/// The surface is evaluated in Cartesian coordinates; bind it to that cell
-/// before calling refine.
+/// `positions` is the saddle and `mode` is its unstable direction, both
+/// in the reference cell. `minimum_energy` is the reactant energy in the
+/// cell the search will use. The surface is evaluated in Cartesian
+/// coordinates; bind it to that cell before calling refine.
 pub struct SaddleSeed {
     pub positions: Array1<f64>,
     pub cell: M3,
@@ -378,12 +385,35 @@ pub struct SaddleSeed {
     pub minimum_energy: f64,
 }
 
+/// Per-atom cap for a search that starts on a predicted saddle.
+///
+/// [`MinModeConfig::max_move`] defaults to 0.2 Å, and while the lowest
+/// curvature is not negative the translation steps that far along the
+/// mode. That length is how a search leaves a minimum. On a predicted
+/// saddle it crosses a soft barrier: the point can sit a tenth of an
+/// angstrom away, on the side where the curvature is still positive, and
+/// one step of 0.2 Å ends on a different index-1 saddle. 0.02 Å is short
+/// of that crossing. A cap of 0.05 Å still had not met the force gate on
+/// the softest barrier of the copper table after 400 steps.
+const REFINE_MAX_MOVE: f64 = 0.02;
+
+/// Smallest neighborhood kept around the predicted saddle, in Å.
+///
+/// The supplied mode may be shorter than the relaxation of a soft
+/// saddle. A refinement that moves an atom farther than the hop, and
+/// farther than this, has left the prediction.
+const REFINE_TRUST_FLOOR: f64 = 0.4;
+
 #[derive(Clone, Debug, PartialEq)]
 struct CachedBarrier {
     strain: M3,
     variant: String,
     barrier: f64,
     prefactor_hz: Option<f64>,
+    /// Cartesian saddle and its unstable mode. Empty after a JSON
+    /// round trip: the document stores the barrier, not the geometry.
+    positions: Array1<f64>,
+    mode: Array1<f64>,
 }
 
 /// One migration event: the zero-strain barrier, the two dipoles, and
@@ -602,8 +632,16 @@ impl StrainResponse {
         Ok(arrhenius(prefactor, estimate.barrier, temperature_k))
     }
 
-    /// Affine-strain `seed`, run a fixed-cell solid dimer, require an
-    /// index-1 saddle, and cache that barrier for the winning image.
+    /// Affine-strain `seed` and refine that prediction with a fixed-cell
+    /// solid dimer.
+    ///
+    /// The translation cap is [`REFINE_MAX_MOVE`], not the 0.2 Å
+    /// minimum-escape step, and the force gate is the default of
+    /// [`MinModeConfig`]. A result is cached only when it is an index-1
+    /// saddle, it is still in the neighborhood of the predicted
+    /// geometry, and quenching along the unstable mode reaches the
+    /// reactant energy on one side. Anything else is an error and is
+    /// not cached.
     pub fn refine<S: PointSurface>(
         &mut self,
         eps: &Strain,
@@ -620,32 +658,33 @@ impl StrainResponse {
         let mode = deform_vectors(&seed.mode, eps.tensor())?;
         let cell = deform_cell(seed.cell, eps.tensor());
         let search = MinModeConfig {
-            force_tol: 1e-6,
-            max_move: 0.2,
+            force_tol: MinModeConfig::default().force_tol,
+            max_move: REFINE_MAX_MOVE,
             ..MinModeConfig::default()
         };
-        let mut dimer = SolidDimer::new(
-            SolidDimerConfig::frozen(search).with_index_check(IndexCheck::first_order()),
-            positions,
+        let found = run_frozen_dimer(
+            surface,
+            &search,
+            &positions,
             cell,
-            mode,
+            &mode,
+            seed.minimum_energy,
+            max_steps,
         )?;
-        let mut report = dimer.step(surface)?;
-        let mut steps = 1usize;
-        while report.status == MinModeStatus::Running && steps < max_steps {
-            report = dimer.step(surface)?;
-            steps += 1;
-        }
-        if report.status != MinModeStatus::Converged || report.rejected {
+        let moved = largest_atom_shift(&positions, &found.positions);
+        let trust = largest_atom_length(&mode).max(REFINE_TRUST_FLOOR);
+        if moved > trust {
             return Err(SaddleError::Invalid(format!(
-                "the strained saddle search did not stop on an index-1 saddle (status {:?}, rejected {}, curvature {}, steps {steps})",
-                report.status, report.rejected, report.curvature
+                "the refined saddle left the predicted geometry (an atom moved {moved:.4} A; the neighborhood is {trust:.4} A)"
             )));
         }
-        let (energy, _) = surface.eval(dimer.positions())?;
-        let barrier = energy - seed.minimum_energy;
-        if !barrier.is_finite() {
-            return Err(SaddleError::NonFinite("explicit barrier"));
+        let (gap_plus, gap_minus) =
+            reactant_gaps(surface, &found.positions, &found.mode, seed.minimum_energy)?;
+        if gap_plus.abs().min(gap_minus.abs()) > 1.0e-2 {
+            return Err(SaddleError::Invalid(format!(
+                "the refined saddle does not connect to the reactant (barrier {:.6} eV, quench gaps {gap_plus:.6} and {gap_minus:.6} eV)",
+                found.barrier
+            )));
         }
         let variant = self.lowest(&LocalField::homogeneous(*eps)).0.name.clone();
         self.cache.retain(|row| {
@@ -654,10 +693,28 @@ impl StrainResponse {
         self.cache.push(CachedBarrier {
             strain: eps.tensor(),
             variant,
-            barrier,
+            barrier: found.barrier,
             prefactor_hz: self.prefactor_hz,
+            positions: found.positions,
+            mode: found.mode,
         });
         Ok(self.barrier(eps))
+    }
+
+    /// Saddle geometry cached by [`Self::refine`] for the winning image
+    /// at `eps`. `None` when that strain has not been refined in this
+    /// process. A JSON round trip keeps the barrier and drops the
+    /// coordinates.
+    pub fn refined_saddle(&self, eps: &Strain) -> Option<(Array1<f64>, Array1<f64>)> {
+        let variant = self.lowest(&LocalField::homogeneous(*eps)).0;
+        self.cache
+            .iter()
+            .find(|row| {
+                row.variant == variant.name
+                    && strain_distance(row.strain, eps.tensor()) < 1e-8
+                    && !row.positions.is_empty()
+            })
+            .map(|row| (row.positions.clone(), row.mode.clone()))
     }
 
     /// Reference dipoles, before the point-group images.
@@ -800,6 +857,8 @@ impl StrainResponse {
                     variant: required_str(row, "variant")?.to_string(),
                     barrier: required_f64(row, "barrier_eV")?,
                     prefactor_hz: obj_get(row, "prefactor_Hz").and_then(Json::as_f64),
+                    positions: Array1::zeros(0),
+                    mode: Array1::zeros(0),
                 });
             }
         }
@@ -1005,6 +1064,133 @@ fn deform_vectors(values: &Array1<f64>, eps: M3) -> Result<Array1<f64>, SaddleEr
         }
     }
     Ok(out)
+}
+
+struct FrozenSaddle {
+    positions: Array1<f64>,
+    mode: Array1<f64>,
+    barrier: f64,
+}
+
+fn run_frozen_dimer<S: PointSurface>(
+    surface: &S,
+    search: &MinModeConfig,
+    positions: &Array1<f64>,
+    cell: M3,
+    mode: &Array1<f64>,
+    minimum_energy: f64,
+    max_steps: usize,
+) -> Result<FrozenSaddle, SaddleError> {
+    let mut dimer = SolidDimer::new(
+        SolidDimerConfig::frozen(search.clone()).with_index_check(IndexCheck::first_order()),
+        positions.clone(),
+        cell,
+        mode.clone(),
+    )?;
+    let mut report = dimer.step(surface)?;
+    let mut steps = 1usize;
+    while report.status == MinModeStatus::Running && steps < max_steps {
+        report = dimer.step(surface)?;
+        steps += 1;
+    }
+    if report.status != MinModeStatus::Converged || report.rejected {
+        return Err(SaddleError::Invalid(format!(
+            "the strained saddle search did not stop on an index-1 saddle (status {:?}, rejected {}, curvature {}, steps {steps})",
+            report.status, report.rejected, report.curvature
+        )));
+    }
+    let (energy, _) = surface.eval(dimer.positions())?;
+    let barrier = energy - minimum_energy;
+    if !barrier.is_finite() {
+        return Err(SaddleError::NonFinite("explicit barrier"));
+    }
+    Ok(FrozenSaddle {
+        positions: dimer.positions().to_owned(),
+        mode: dimer.mode().to_owned(),
+        barrier,
+    })
+}
+
+/// Energy of each quenched side of the unstable mode, minus the reactant.
+fn reactant_gaps<S: PointSurface>(
+    surface: &S,
+    saddle: &Array1<f64>,
+    mode: &Array1<f64>,
+    minimum_energy: f64,
+) -> Result<(f64, f64), SaddleError> {
+    let norm = mode.dot(mode).sqrt();
+    if !(norm.is_finite() && norm > 1e-14) {
+        return Err(SaddleError::Invalid(
+            "the refined saddle has no unstable mode".into(),
+        ));
+    }
+    let unit = mode / norm;
+    let mut gaps = [0.0; 2];
+    for (slot, sign) in [1.0, -1.0].into_iter().enumerate() {
+        let mut trial = saddle + &(&unit * (sign * 0.25));
+        let energy = quench(surface, &mut trial, 1.0e-3, 200)?;
+        gaps[slot] = energy - minimum_energy;
+    }
+    Ok((gaps[0], gaps[1]))
+}
+
+fn quench<S: PointSurface>(
+    surface: &S,
+    position: &mut Array1<f64>,
+    force_tol: f64,
+    max_steps: usize,
+) -> Result<f64, SaddleError> {
+    let mut solver = rgmin::Solver::new(
+        rgmin::Method::Fire {
+            kind: rgmin::FireKind::V2,
+        },
+        rgmin::Control {
+            maxiter: usize::MAX,
+            gtol: 0.0,
+            ..rgmin::Control::default()
+        },
+        position.len(),
+    );
+    solver.set_atom_maxmove(0.05);
+    let mut energy = 0.0;
+    for _ in 0..max_steps {
+        let oracle = rgmin::Oracle::unbounded(position.len(), |x: ArrayView1<f64>| {
+            surface
+                .eval(x)
+                .unwrap_or_else(|_| (f64::INFINITY, Array1::zeros(x.len())))
+        });
+        solver
+            .step(&oracle, position)
+            .map_err(|err| SaddleError::Solver(err.to_string()))?;
+        let (value, gradient) = surface.eval(position.view())?;
+        energy = value;
+        let max_component = gradient.iter().map(|value| value.abs()).fold(0.0, f64::max);
+        if max_component < force_tol {
+            break;
+        }
+    }
+    if !energy.is_finite() {
+        return Err(SaddleError::NonFinite("reactant quench"));
+    }
+    Ok(energy)
+}
+
+fn largest_atom_length(values: &Array1<f64>) -> f64 {
+    let mut max_atom = 0.0_f64;
+    let mut index = 0;
+    while index + 3 <= values.len() {
+        let r = (values[index] * values[index]
+            + values[index + 1] * values[index + 1]
+            + values[index + 2] * values[index + 2])
+            .sqrt();
+        max_atom = max_atom.max(r);
+        index += 3;
+    }
+    max_atom
+}
+
+fn largest_atom_shift(origin: &Array1<f64>, trial: &Array1<f64>) -> f64 {
+    largest_atom_length(&(trial - origin))
 }
 
 fn deform_cell(cell: M3, eps: M3) -> M3 {

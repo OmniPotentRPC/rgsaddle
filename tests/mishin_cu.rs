@@ -1539,6 +1539,126 @@ struct Tally {
     linear: bool,
 }
 
+fn rms_shift(a: &Array1<f64>, b: &Array1<f64>, cell: [[f64; 3]; 3]) -> f64 {
+    let d = minimum_image_difference(a, b, cell);
+    let n = d.len() / 3;
+    let mut sum = 0.0;
+    for atom in 0..n {
+        sum += d[3 * atom].powi(2) + d[3 * atom + 1].powi(2) + d[3 * atom + 2].powi(2);
+    }
+    (sum / n as f64).sqrt()
+}
+
+#[test]
+fn refine_matches_the_explicit_dumbbell_at_large_strain() {
+    let copper = Copper::new();
+    let (perfect, cube) = fcc(3, 3.615);
+    let along_100 = dumbbell(&perfect, [1.0, 0.0, 0.0], 2.05);
+    let along_110 = dumbbell(
+        &perfect,
+        [
+            std::f64::consts::FRAC_1_SQRT_2,
+            std::f64::consts::FRAC_1_SQRT_2,
+            0.0,
+        ],
+        2.05,
+    );
+    let mut bulk = perfect.clone();
+    relax(&copper, &mut bulk, cube, 1e-3, 200);
+    let (_, _, sigma_bulk) = copper.evaluate(bulk.view(), cube);
+    let zero = explicit_barrier(
+        &copper,
+        cube,
+        &along_100,
+        &along_110,
+        identity(),
+        Strain::zero().tensor(),
+        false,
+        true,
+    );
+    assert!(zero.accepted, "zero-strain saddle {}", zero.status);
+    let volume = det(zero.cell).abs();
+    let p_min = ElasticDipole::from_stress(volume, zero.sigma_min, sigma_bulk).unwrap();
+    let p_sad = ElasticDipole::from_stress(volume, zero.sigma_sad, sigma_bulk).unwrap();
+    let mut response = StrainResponse::new(zero.barrier, p_min, p_sad)
+        .unwrap()
+        .with_point_group(&cubic_rotations())
+        .unwrap();
+    for (path, value) in [("xy", 0.05), ("hydrostatic", 0.04)] {
+        let strain = strain_of(path, value);
+        let guess = response.barrier(&strain);
+        let rotation = variant_rotation(&response, &guess.variant);
+        let found = explicit_barrier(
+            &copper,
+            cube,
+            &along_100,
+            &along_110,
+            rotation,
+            strain.tensor(),
+            false,
+            path == "xy",
+        );
+        assert!(
+            found.accepted,
+            "{path} {value} explicit saddle {} angle {}",
+            found.status, found.angle_110
+        );
+        let surface = Held {
+            copper: &copper,
+            cell: found.cell,
+        };
+        let refined = response
+            .refine(
+                &strain,
+                &surface,
+                &SaddleSeed {
+                    positions: rotate_positions(&zero.saddle, rotation),
+                    cell: cube,
+                    mode: rotate_positions(&zero.mode, rotation),
+                    minimum_energy: found.e_min,
+                },
+                2500,
+            )
+            .unwrap_or_else(|err| panic!("{path} {value}: {err}"));
+        let error = (refined.barrier - found.barrier).abs();
+        assert!(
+            error < 1e-3,
+            "{path} {value} refined {} explicit {} error {error}",
+            refined.barrier,
+            found.barrier
+        );
+        let (positions, mode) = response.refined_saddle(&strain).expect("refined geometry");
+        let index = index_at(&surface, positions.view(), IndexCheck::first_order()).unwrap();
+        assert_eq!(
+            index.negative,
+            1,
+            "{path} {value} negative modes, lowest {:?}",
+            index.values.first()
+        );
+        let mut plus = &positions + &(&mode * 0.2);
+        let mut minus = &positions - &(&mode * 0.2);
+        relax(&copper, &mut plus, found.cell, 1e-3, 160);
+        relax(&copper, &mut minus, found.cell, 1e-3, 160);
+        let plus_gap = copper.evaluate(plus.view(), found.cell).0 - found.e_min;
+        let minus_gap = copper.evaluate(minus.view(), found.cell).0 - found.e_min;
+        let plus_shift = rms_shift(&plus, &found.minimum, found.cell);
+        let minus_shift = rms_shift(&minus, &found.minimum, found.cell);
+        assert!(
+            plus_gap.abs().min(minus_gap.abs()) < 1e-2,
+            "{path} {value} quench energies {plus_gap} {minus_gap}"
+        );
+        assert!(
+            plus_shift.min(minus_shift) < 0.15,
+            "{path} {value} quench missed the reactant, rms {plus_shift} {minus_shift}"
+        );
+        let apart = rms_shift(&plus, &minus, found.cell);
+        assert!(
+            apart > 0.02,
+            "{path} {value} both quenches fell into one basin, separation {apart}"
+        );
+    }
+}
+
 #[test]
 #[ignore = "release copper dimer head-to-head; writes benchmarks/strain_response_head_to_head.csv"]
 fn strain_response_head_to_head() {

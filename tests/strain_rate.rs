@@ -6,9 +6,10 @@ use ndarray::{Array1, Array2, ArrayView1, array};
 use rgmin::{Control, FireKind, Method, Oracle, Solver};
 use rgsaddle::minmode::PointSurface;
 use rgsaddle::{
-    CurvatureBound, ElasticDipole, LINEAR_FOLD_EV, SaddleError, SaddleSeed, SearchReason, Strain,
-    StrainResponse, Trust, TrustPolicy, activation_volume, compliance_from_stiffness,
-    cubic_rotations, rotation_x, split_translational_modes, vineyard_prefactor,
+    CurvatureBound, ElasticDipole, IndexCheck, LINEAR_FOLD_EV, SaddleError, SaddleSeed,
+    SearchReason, Strain, StrainResponse, Trust, TrustPolicy, activation_volume,
+    compliance_from_stiffness, cubic_rotations, index_at, rotation_x, split_translational_modes,
+    vineyard_prefactor,
 };
 
 fn det(h: [[f64; 3]; 3]) -> f64 {
@@ -524,6 +525,117 @@ fn translations_are_left_out_of_the_prefactor() {
     assert_eq!(split.translations, 1);
     assert_eq!(split.negative, vec![-0.2]);
     assert_eq!(split.positive, vec![0.5, 1.5, 2.0, 3.0]);
+}
+
+/// Soft barrier of height 0.008 between minima at x = ±0.12, plus a
+/// second well that switches on past x = 0.4. A start 0.05 Å off the
+/// soft saddle is where a 0.2 Å climb does not settle.
+struct NarrowBarrier;
+
+impl PointSurface for NarrowBarrier {
+    fn eval(&self, r: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        let (x, y, z) = (r[0], r[1], r[2]);
+        let w: f64 = 0.12;
+        let a = 0.008 / w.powi(4);
+        let u = x * x - w * w;
+        let near = a * u * u;
+        let dnear = a * 4.0 * x * u;
+        let t = ((x - 0.4) / 0.25).clamp(0.0, 1.0);
+        let gate = t * t * (3.0 - 2.0 * t);
+        let dgate = if (0.0..1.0).contains(&t) {
+            6.0 * t * (1.0 - t) / 0.25
+        } else {
+            0.0
+        };
+        let center = 1.05;
+        let width: f64 = 0.22;
+        let shifted = (x - center) * (x - center) - width * width;
+        let far = shifted * shifted / width.powi(4);
+        let dfar = 4.0 * (x - center) * shifted / width.powi(4);
+        let energy = near + gate * far + 8.0 * (y * y + z * z);
+        Ok((
+            energy,
+            array![dnear + dgate * far + gate * dfar, 16.0 * y, 16.0 * z],
+        ))
+    }
+}
+
+fn quench_endpoint(surface: &NarrowBarrier, start: Array1<f64>) -> (f64, Array1<f64>) {
+    let mut position = start;
+    let mut solver = Solver::new(
+        Method::Fire { kind: FireKind::V2 },
+        Control {
+            maxiter: usize::MAX,
+            gtol: 0.0,
+            ..Control::default()
+        },
+        position.len(),
+    );
+    solver.set_atom_maxmove(0.05);
+    for _ in 0..120 {
+        let oracle = Oracle::unbounded(position.len(), |x: ArrayView1<f64>| {
+            surface.eval(x).expect("narrow barrier")
+        });
+        solver.step(&oracle, &mut position).expect("quench");
+        let (_, gradient) = surface.eval(position.view()).expect("narrow barrier");
+        if gradient.iter().map(|v| v.abs()).fold(0.0_f64, f64::max) < 1e-3 {
+            break;
+        }
+    }
+    let energy = surface.eval(position.view()).expect("narrow barrier").0;
+    (energy, position)
+}
+
+#[test]
+fn refine_stays_on_a_narrow_barrier() {
+    let mut response = StrainResponse::new(
+        0.008,
+        ElasticDipole::from_tensor([[0.0; 3]; 3]).unwrap(),
+        ElasticDipole::from_tensor([[0.0; 3]; 3]).unwrap(),
+    )
+    .unwrap()
+    .with_policy(TrustPolicy {
+        radius: Some(0.001),
+        ..TrustPolicy::default()
+    })
+    .unwrap();
+    let strain = Strain::shear_yx(0.02);
+    let surface = NarrowBarrier;
+    let estimate = response
+        .refine(
+            &strain,
+            &surface,
+            &SaddleSeed {
+                positions: array![-0.05, 0.02, -0.01],
+                cell: [[4.0, 0.0, 0.0], [0.0, 4.0, 0.0], [0.0, 0.0, 4.0]],
+                mode: array![1.0, 0.0, 0.0],
+                minimum_energy: 0.0,
+            },
+            80,
+        )
+        .expect("narrow barrier refines");
+    assert!(
+        (estimate.barrier - 0.008).abs() < 1e-3,
+        "barrier {}",
+        estimate.barrier
+    );
+    assert!(matches!(estimate.trust, Trust::Explicit));
+    let (positions, mode) = response.refined_saddle(&strain).expect("geometry");
+    let index = index_at(&surface, positions.view(), IndexCheck::first_order()).unwrap();
+    assert_eq!(index.negative, 1, "spectrum {:?}", index.values);
+    let (plus_energy, plus) = quench_endpoint(&surface, &positions + &(&mode * 0.15));
+    let (minus_energy, minus) = quench_endpoint(&surface, &positions - &(&mode * 0.15));
+    let plus_gap = plus_energy.abs();
+    let minus_gap = minus_energy.abs();
+    assert!(
+        plus_gap.min(minus_gap) < 1e-2,
+        "neither side reached the reactant: {plus_energy} {minus_energy}"
+    );
+    let apart = (&plus - &minus).dot(&(&plus - &minus)).sqrt();
+    assert!(
+        apart > 0.05,
+        "the two quenches fell into one basin, separation {apart}"
+    );
 }
 
 #[test]
