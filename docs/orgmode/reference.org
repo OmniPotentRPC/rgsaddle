@@ -147,5 +147,7 @@ The importable package is =rgsaddle=. =rgsaddle._core= is the nanobind extension
 - =tests/c_abi.rs= — header and symbols with =capi=
 - =tests/solid_bain_lj.rs= — =tests/c/solid_bain_lj.c= runs the solid-state band from bcc to fcc for switched LJ on the two-atom tetragonal cell through =rgsaddle_band_create_solid=; the climbing image matches the relaxed scan of =validation/bain_lj_reference.py= in c/a within 2.5e-4 and in barrier within 1.2e-6 eV/atom, and every image keeps a diagonal tetragonal cell and its fractional coordinates
 - =tests/solid_dimer_barrier.rs= — the variable-cell dimer and the solid-state band meet on the shear-coupled double well; a frozen cell reproduces the one-dimensional barrier
+- =tests/ssneb.rs= — a frozen =SolidNeb= matches the ordinary band and CI-NEB; the variable-cell double well barrier is 1
+- =tests/ssneb_validate_cu.rs= — release CI-SS-NEB on the 109-atom Mishin cell against =benchmarks/solid_dimer_cu.csv=
 - =tests/mishin_cu.rs= — Mishin copper, four-atom cohesive energy and virial, and the <100> to <110> dumbbell saddle under shear
 - =validation/= — sympy and sollya checks of the dimer rotation, the Lanczos residual bound, and the finite-difference curvature; =bain_lj_reference.py= (numpy, scipy) scans the relaxed Bain path that =tests/c/solid_bain_lj.c= checks against, and =ssneb_bain_cell.py= (sympy) checks its strain parametrisation and Jacobian

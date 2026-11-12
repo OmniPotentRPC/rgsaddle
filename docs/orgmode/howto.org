@@ -32,6 +32,9 @@ Defaults: improved tangent, uniform spring =k = 5=, NEB projection, climbing ima
 * Solid-state dimer
 =howto/solid-dimer= is the minimum-mode search on atoms plus cell strain, the dimer analogue of the generalized solid-state band. A frozen cell is the fixed-cell dimer. The saddle stress is =V σ=, the elastic dipole.
 
+* Solid-state NEB on the dimer chart
+=howto/ssneb= is the climbing-image band on that same chart. A frozen cell is the ordinary band. A free cell uses =E + V0 σ_ext : ε=.
+
 * Minimum-mode instead of a band
 =MinModeSession= refreshes the lowest curvature mode (dimer rotation or Lanczos on finite-difference Hessian actions), inverts the force along it, and takes one solver step. Same host loop. =PointSurface= evals a single geometry.
 
