@@ -29,7 +29,7 @@ The check against =benchmarks/solid_dimer_cu.csv= is =tests/ssneb_validate_cu.rs
 | 0.04 | fixed | aligned | 0.06784221 | 0.06785657 | 0.06784221 | 0.06785657 | 0.001323 | 1 | pass |
 | 0.04 | variable | aligned | 0.23713119 | 0.24277024 | 0.02701565 | 0.02743541 | 0.075077 | 1 | fail |
 | 0.05 | fixed | aligned | 0.00734846 | 0.00776324 | 0.00734846 | 0.00776324 | 0.058761 | 1 | fail |
-| 0.05 | variable | aligned | 0.15654905 | -0.00000581 | 0.94652943 | 0.00000014 | 1.172786 | 0 | |
+| 0.05 | variable | aligned | 0.15654905 | -0.00000581 | 0.94652943 | 0.00000014 | 1.172786 | 0 | resolution |
 | 0.05 | variable | opposite | 0.15654905 | 0.00040338 | 0.94652943 | -0.00000848 | 1.173655 | 0 | fail |
 
 Six of the ten published rows pass. A dimer started at each passing climbing image does not move.
