@@ -34,6 +34,10 @@ pub const LN_THREE_HALVES: f64 = 0.4054651081081644;
 /// desorbed adatom is several energy units higher.
 const CLIMB_LIMIT: f64 = 1.5;
 
+/// A converged mode must be at least this negative. A desorbed atom
+/// has a curvature of about zero and is not a saddle.
+const MODE_FLOOR: f64 = -1e-2;
+
 /// Controls for one GP-dimer search. Absent from [`MinModeConfig`], so
 /// a host that never builds this type runs the plain dimer.
 #[derive(Clone, Debug)]
@@ -52,6 +56,14 @@ pub struct GpDimerConfig {
     pub force_divisor: f64,
     pub fixed: Option<Array1<f64>>,
     pub cell: Option<[f64; 3]>,
+    /// Inverse-distance cutoff for the active region. Atoms farther
+    /// than this from a moving atom are left out of the kernel. Zero
+    /// keeps every atom. Clusters of at most 20 atoms are never cut.
+    pub active_cutoff: f64,
+    /// Opt-in full finite-difference Hessian. The default certificate
+    /// is the true-surface mode curvature plus a few deflated Rayleigh
+    /// quotients, and those evaluations are not search calls.
+    pub full_hessian: bool,
 }
 
 impl Default for GpDimerConfig {
@@ -66,6 +78,8 @@ impl Default for GpDimerConfig {
             force_divisor: 10.0,
             fixed: None,
             cell: None,
+            active_cutoff: 2.4,
+            full_hessian: false,
         }
     }
 }
@@ -82,14 +96,18 @@ pub struct GpDimerReport {
     /// Maximum absolute component of the true gradient.
     pub max_force: f64,
     pub curvature: f64,
-    /// True surface evaluations during this call.
+    /// True surface evaluations during this call, search and certificate.
     pub evaluations: usize,
+    /// Evaluations spent on the index certificate, not the search.
+    pub certification_evaluations: usize,
     pub iteration: usize,
     pub inner_steps: usize,
 }
 
 struct Surrogate<'a> {
     gp: &'a GaussianProcess,
+    /// Atom indices the kernel is trained on. Empty means the full geometry.
+    active: &'a [usize],
     /// Free cluster: drop rigid motion. Periodic: drop translations.
     rotations: bool,
     translations: bool,
@@ -97,7 +115,23 @@ struct Surrogate<'a> {
 
 impl PointSurface for Surrogate<'_> {
     fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
-        self.gp.predict(x)
+        if self.active.is_empty() {
+            return self.gp.predict(x);
+        }
+        let mut reduced = Array1::zeros(self.active.len() * 3);
+        for (slot, atom) in self.active.iter().enumerate() {
+            for axis in 0..3 {
+                reduced[3 * slot + axis] = x[3 * atom + axis];
+            }
+        }
+        let (energy, gradient) = self.gp.predict(reduced.view())?;
+        let mut full = Array1::zeros(x.len());
+        for (slot, atom) in self.active.iter().enumerate() {
+            for axis in 0..3 {
+                full[3 * atom + axis] = gradient[3 * slot + axis];
+            }
+        }
+        Ok((energy, full))
     }
 
     fn excluded_modes(&self, x: ArrayView1<f64>) -> Result<Array2<f64>, SaddleError> {
@@ -220,6 +254,10 @@ pub struct GpDimerSession {
     timings: Vec<GpStepTiming>,
     /// One bounded true-surface dimer polish has already been spent.
     polished: bool,
+    /// Atoms inside the active cutoff. Empty means the whole geometry.
+    active: Vec<usize>,
+    /// True-surface evaluations used only to certify the index.
+    cert_calls: usize,
 }
 
 /// Wall time of one surrogate build, against the training-set size.
@@ -294,6 +332,8 @@ impl GpDimerSession {
             extends_since_fit: 0,
             timings: Vec::new(),
             polished: false,
+            active: Vec::new(),
+            cert_calls: 0,
         })
     }
 
@@ -312,6 +352,11 @@ impl GpDimerSession {
     /// Surrogate build time at each outer step, in training-set order.
     pub fn step_timings(&self) -> &[GpStepTiming] {
         &self.timings
+    }
+
+    /// True-surface calls spent certifying the index, excluded from the search.
+    pub fn certification_calls(&self) -> usize {
+        self.cert_calls
     }
 
     pub fn run<S: PointSurface>(
@@ -347,24 +392,37 @@ impl GpDimerSession {
         // The opening rotation may already sit on the saddle.
         if let Some(gradient) = self.anchor_gradient() {
             let max_force = self.force_gate.value(gradient.view());
-            if max_force <= self.force_tol && self.curvature < 0.0 {
-                self.iteration += 1;
-                return Ok(GpDimerReport {
-                    status: GpDimerStatus::Converged,
-                    max_force,
-                    curvature: self.curvature,
-                    evaluations: calls.load(Ordering::Relaxed),
-                    iteration: self.iteration,
-                    inner_steps: 0,
-                });
+            if max_force <= self.force_tol && self.curvature < MODE_FLOOR {
+                let status = self.certify(&counted, max_force, self.curvature)?;
+                if status == GpDimerStatus::Converged {
+                    self.iteration += 1;
+                    return Ok(GpDimerReport {
+                        status,
+                        max_force,
+                        curvature: self.curvature,
+                        evaluations: calls.load(Ordering::Relaxed),
+                        certification_evaluations: self.cert_calls,
+                        iteration: self.iteration,
+                        inner_steps: 0,
+                    });
+                }
             }
         }
         self.trim_observations();
         let started = Instant::now();
         let rank_one = self.refresh_model()?;
         let fit_nanos = started.elapsed().as_nanos() as u64;
-        let observations = self.observations.len();
-        let width = observations * (self.x.len() + 1);
+        let observations = self
+            .model
+            .as_ref()
+            .map(GaussianProcess::training_size)
+            .unwrap_or(self.observations.len());
+        let active_dim = self
+            .model
+            .as_ref()
+            .map(GaussianProcess::input_dimension)
+            .unwrap_or(self.x.len());
+        let width = observations * (active_dim + 1);
         self.timings.push(GpStepTiming {
             observations,
             width,
@@ -374,6 +432,7 @@ impl GpDimerSession {
         let gp = self.model.clone().expect("the surrogate was just fit");
         let surrogate = Surrogate {
             gp: &gp,
+            active: &self.active,
             rotations: self.exclude_rotations(),
             translations: self.exclude_translations(),
         };
@@ -389,7 +448,7 @@ impl GpDimerSession {
             }
         }
         self.step_limit = self.config.trust_radius;
-        let (_, surrogate_gradient) = gp.predict(self.x.view())?;
+        let (_, surrogate_gradient) = surrogate.eval(self.x.view())?;
         let mut walker = MinModeSession::new(inner, self.x.clone(), self.mode.clone())?;
         walker.set_position(self.x.clone(), Some(surrogate_gradient))?;
         let anchor = self.x.clone();
@@ -467,6 +526,7 @@ impl GpDimerSession {
                 max_force,
                 curvature: self.curvature,
                 evaluations: calls.load(Ordering::Relaxed),
+                certification_evaluations: self.cert_calls,
                 iteration: self.iteration,
                 inner_steps,
             });
@@ -505,13 +565,14 @@ impl GpDimerSession {
         self.mode = mode.clone();
         self.true_mode = mode;
         self.curvature = curvature;
-        let status = self.convergence(&counted, max_force, curvature)?;
+        let status = self.certify(&counted, max_force, curvature)?;
         self.iteration += 1;
         Ok(GpDimerReport {
             status,
             max_force,
             curvature,
             evaluations: calls.load(Ordering::Relaxed),
+            certification_evaluations: self.cert_calls,
             iteration: self.iteration,
             inner_steps,
         })
@@ -605,12 +666,13 @@ impl GpDimerSession {
             }
         }
         self.iteration += 1;
-        let status = self.convergence(surface, max_force, curvature)?;
+        let status = self.certify(surface, max_force, curvature)?;
         Ok(GpDimerReport {
             status,
             max_force,
             curvature,
             evaluations: 0,
+            certification_evaluations: self.cert_calls,
             iteration: self.iteration,
             inner_steps: 0,
         })
@@ -666,22 +728,24 @@ impl GpDimerSession {
         self.curvature = curvature;
         self.true_mode = self.mode.clone();
         self.iteration += 1;
-        let status = self.convergence(surface, max_force, curvature)?;
+        let status = self.certify(surface, max_force, curvature)?;
         Ok(GpDimerReport {
             status,
             max_force,
             curvature,
             evaluations: 0,
+            certification_evaluations: self.cert_calls,
             iteration: self.iteration,
             inner_steps: 0,
         })
     }
 
-    /// Force tolerance and a negative mode are not enough: the true
-    /// Hessian must have exactly one negative eigenvalue. Above 48
-    /// coordinates the full difference is left to the caller, because
-    /// it costs two force evaluations per coordinate.
-    fn convergence<S: PointSurface>(
+    /// The search stops only when the true force is small and the last
+    /// true-surface rotation found a real negative mode. A second
+    /// negative direction is a few deflated Rayleigh quotients, counted
+    /// as certification rather than search. The dense finite-difference
+    /// Hessian is opt-in.
+    fn certify<S: PointSurface>(
         &mut self,
         surface: &S,
         max_force: f64,
@@ -690,22 +754,76 @@ impl GpDimerSession {
         if !(max_force <= self.force_tol && curvature < 0.0) {
             return Ok(GpDimerStatus::Running);
         }
-        if self.x.len() > 48 {
+        if self.config.full_hessian {
+            let index = crate::hessian_index::finite_difference_index(
+                surface,
+                self.x.view(),
+                self.project_rigid(),
+            )?;
+            self.cert_calls += index.evaluations;
+            if index.negative == 1 {
+                return Ok(GpDimerStatus::Converged);
+            }
+            self.finishing = false;
+            self.mode = index.mode;
+            self.true_mode = self.mode.clone();
+            self.curvature = index.lowest;
+            return Ok(GpDimerStatus::Running);
+        }
+        let Some(gradient) = self.anchor_gradient() else {
+            return Ok(GpDimerStatus::Converged);
+        };
+        for direction in self.perp_directions(4) {
+            self.cert_calls += 1;
+            let transverse = true_curvature(
+                surface,
+                self.x.view(),
+                gradient.view(),
+                direction.view(),
+                self.config.inner.dr,
+            )?;
+            if transverse < curvature {
+                self.finishing = false;
+                self.mode = direction;
+                self.true_mode = self.mode.clone();
+                self.curvature = transverse;
+                return Ok(GpDimerStatus::Running);
+            }
+        }
+        if curvature < MODE_FLOOR {
             return Ok(GpDimerStatus::Converged);
         }
-        let index = crate::hessian_index::finite_difference_index(
-            surface,
-            self.x.view(),
-            self.project_rigid(),
-        )?;
-        if index.negative == 1 {
-            return Ok(GpDimerStatus::Converged);
-        }
+        // Force is small but every true curvature is nearly zero: a
+        // desorbed or flat point, not a saddle.
         self.finishing = false;
-        self.mode = index.mode;
-        self.true_mode = self.mode.clone();
-        self.curvature = index.lowest;
         Ok(GpDimerStatus::Running)
+    }
+
+    /// Coordinate directions with the mode, and each other, removed.
+    fn perp_directions(&self, count: usize) -> Vec<Array1<f64>> {
+        let mut directions = Vec::new();
+        let mut kept: Vec<Array1<f64>> = vec![self.mode.clone()];
+        let mut order: Vec<usize> = (0..self.x.len()).collect();
+        order.sort_by(|&left, &right| self.mode[left].abs().total_cmp(&self.mode[right].abs()));
+        for axis in order {
+            if directions.len() == count {
+                break;
+            }
+            let mut direction = Array1::zeros(self.x.len());
+            direction[axis] = 1.0;
+            for previous in &kept {
+                let coeff = previous.dot(&direction);
+                direction = &direction - previous * coeff;
+            }
+            let norm = direction.dot(&direction).sqrt();
+            if norm < 0.2 {
+                continue;
+            }
+            direction /= norm;
+            kept.push(direction.clone());
+            directions.push(direction);
+        }
+        directions
     }
 
     fn exclude_translations(&self) -> bool {
@@ -842,31 +960,28 @@ impl GpDimerSession {
     }
 
     fn trim_observations(&mut self) {
-        let width = self.x.len() + 1;
+        self.lock_active();
+        let width = self.model_dimension() + 1;
         // A few gradient samples are required for a nonzero curvature.
         // Past that, gpridge drops the training point farthest from the
         // current geometry, and anything outside a few trust radii.
-        let by_size = if width >= 400 {
+        // Keep enough geometries that a new observation is a rank-one
+        // append. Pruning starts only after that window is full.
+        // A wide active region stays on a few geometries: growing the
+        // factor past that costs more than one refactor of the small set.
+        // Narrow kernels keep a longer window and extend it in place.
+        let cap = if width >= 200 {
             3
         } else {
-            (640 / width).max(3)
+            self.config
+                .max_observations
+                .max(4)
+                .min((1_600 / width).max(4))
         };
-        let cap = self.config.max_observations.max(3).min(by_size);
-        if width >= 400 {
-            while self.observations.len() > cap {
-                self.observations.remove(0);
-            }
-            return;
-        }
-        let horizon = 4.0 * self.config.trust_radius;
-        while self.observations.len() > 3 {
-            let Some((farthest, gap)) = self.farthest_training_point() else {
+        while self.observations.len() > cap {
+            let Some((farthest, _)) = self.farthest_training_point() else {
                 break;
             };
-            let over_cap = self.observations.len() > cap;
-            if !over_cap && gap <= horizon {
-                break;
-            }
             self.observations.remove(farthest);
         }
     }
@@ -893,32 +1008,132 @@ impl GpDimerSession {
     /// Otherwise one factorization at frozen hyperparameters, and a
     /// marginal-likelihood search on the first fit and every fourth
     /// small-system update.
-    fn refresh_model(&mut self) -> Result<bool, SaddleError> {
-        let noise = 1e-6;
-        let large = self.x.len() >= 200;
-        if large {
-            let fitted = GaussianProcess::fit(
-                &self.observations,
-                &self.kind,
-                &crate::gpr::FitOptions {
-                    passes: self.config.fit_passes.min(1),
-                    noise,
-                },
-            )?;
-            self.model = Some(fitted);
-            self.extends_since_fit = 0;
-            return Ok(false);
+    /// Moving atoms and every atom inside [`GpDimerConfig::active_cutoff`].
+    /// Far atoms are not features and get no surrogate force. The set is
+    /// fixed after the opening mode so later observations extend one factor.
+    fn lock_active(&mut self) {
+        if !self.active.is_empty() || self.layout.cartesian() || self.config.active_cutoff <= 0.0 {
+            return;
         }
+        let atoms = self.x.len() / 3;
+        if atoms <= 20 || !self.x.len().is_multiple_of(3) {
+            return;
+        }
+        let mut seeds = Vec::new();
+        for atom in 0..atoms {
+            let mut weight = 0.0;
+            for axis in 0..3 {
+                let component = self.mode[3 * atom + axis];
+                weight += component * component;
+            }
+            if weight.sqrt() > 0.05 {
+                seeds.push(atom);
+            }
+        }
+        if seeds.is_empty() {
+            let mut best = 0usize;
+            let mut weight = 0.0;
+            for atom in 0..atoms {
+                let mut local = 0.0;
+                for axis in 0..3 {
+                    let component = self.mode[3 * atom + axis];
+                    local += component * component;
+                }
+                if local > weight {
+                    weight = local;
+                    best = atom;
+                }
+            }
+            seeds.push(best);
+        }
+        let cutoff = self.config.active_cutoff;
+        let mut active = Vec::new();
+        for atom in 0..atoms {
+            let inside = seeds
+                .iter()
+                .any(|&seed| seed == atom || self.pair_distance(seed, atom) <= cutoff);
+            if inside {
+                active.push(atom);
+            }
+        }
+        if active.len() < atoms {
+            self.active = active;
+            self.model = None;
+        }
+    }
+
+    fn pair_distance(&self, left: usize, right: usize) -> f64 {
+        let mut square = 0.0;
+        for axis in 0..3 {
+            let mut delta = self.x[3 * left + axis] - self.x[3 * right + axis];
+            if let Some(cell) = self.config.cell {
+                delta -= cell[axis] * (delta / cell[axis]).round();
+            }
+            square += delta * delta;
+        }
+        square.sqrt()
+    }
+
+    fn model_dimension(&self) -> usize {
+        if self.active.is_empty() {
+            self.x.len()
+        } else {
+            self.active.len() * 3
+        }
+    }
+
+    fn model_kind(&self) -> KernelKind {
+        if self.active.is_empty() {
+            self.kind.clone()
+        } else {
+            KernelKind::InverseDistance {
+                cell: self.config.cell,
+                fixed: None,
+            }
+        }
+    }
+
+    fn training_set(&self) -> Vec<Observation> {
+        if self.active.is_empty() {
+            return self.observations.clone();
+        }
+        self.observations
+            .iter()
+            .map(|observation| self.slice_observation(observation))
+            .collect()
+    }
+
+    fn slice_observation(&self, observation: &Observation) -> Observation {
+        let mut position = Array1::zeros(self.active.len() * 3);
+        let mut gradient = Array1::zeros(self.active.len() * 3);
+        for (slot, atom) in self.active.iter().enumerate() {
+            for axis in 0..3 {
+                position[3 * slot + axis] = observation.position[3 * atom + axis];
+                gradient[3 * slot + axis] = observation.gradient[3 * atom + axis];
+            }
+        }
+        Observation {
+            position,
+            energy: observation.energy,
+            gradient,
+        }
+    }
+
+    fn refresh_model(&mut self) -> Result<bool, SaddleError> {
+        self.lock_active();
+        let noise = 1e-6;
+        let training = self.training_set();
+        let kind = self.model_kind();
         if let Some(model) = &self.model
-            && model.same_as(&self.observations)
+            && model.same_as(&training)
         {
             return Ok(false);
         }
         if let Some(model) = &self.model
-            && model.is_prefix_of(&self.observations)
+            && model.is_prefix_of(&training)
             && self.extends_since_fit < 4
         {
-            let observation = self.observations.last().unwrap().clone();
+            let observation = training.last().unwrap().clone();
             if let Ok(grown) = model.extend(&observation) {
                 self.model = Some(grown);
                 self.extends_since_fit += 1;
@@ -927,21 +1142,19 @@ impl GpDimerSession {
         }
         if let Some(model) = &self.model
             && self.extends_since_fit < 4
-            && let Ok(rebuilt) = model.rebuild_frozen(&self.observations, noise)
+            && let Ok(rebuilt) = model.rebuild_frozen(&training, noise)
         {
             self.model = Some(rebuilt);
             self.extends_since_fit += 1;
             return Ok(false);
         }
-        let passes = if large {
-            self.config.fit_passes.min(1)
-        } else {
-            self.config.fit_passes
-        };
         let fitted = GaussianProcess::fit(
-            &self.observations,
-            &self.kind,
-            &crate::gpr::FitOptions { passes, noise },
+            &training,
+            &kind,
+            &crate::gpr::FitOptions {
+                passes: self.config.fit_passes,
+                noise,
+            },
         )?;
         self.model = Some(fitted);
         self.extends_since_fit = 0;

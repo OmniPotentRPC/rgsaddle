@@ -1034,6 +1034,10 @@ impl GaussianProcess {
         self.feats.len()
     }
 
+    pub fn input_dimension(&self) -> usize {
+        self.layout.dim
+    }
+
     pub fn same_as(&self, data: &[Observation]) -> bool {
         self.positions.len() == data.len()
             && self
@@ -1063,23 +1067,12 @@ impl GaussianProcess {
         let dim = prepared.dim;
         let w = dim + 1;
         let n = prepared.feats.len() * w;
-        // A second factorization of a vacancy-sized matrix dominates the
-        // step. The rank-one path is for the small-system searches; a
-        // large system refits and does not append.
-        let chol = if n > 1500 {
-            Chol {
-                lower: Vec::new(),
-                n: 0,
-            }
-        } else {
-            let matrix =
-                assemble(&prepared, amplitude2, length, solved.jitter).ok_or_else(|| {
-                    SaddleError::Solver("Gaussian-process covariance could not be assembled".into())
-                })?;
-            Chol::factor(&matrix, n).ok_or_else(|| {
-                SaddleError::Solver("Gaussian-process covariance was not positive definite".into())
-            })?
-        };
+        let matrix = assemble(&prepared, amplitude2, length, solved.jitter).ok_or_else(|| {
+            SaddleError::Solver("Gaussian-process covariance could not be assembled".into())
+        })?;
+        let chol = Chol::factor(&matrix, n).ok_or_else(|| {
+            SaddleError::Solver("Gaussian-process covariance was not positive definite".into())
+        })?;
         let mut model = Self {
             layout: prepared.layout,
             feats: prepared.feats,

@@ -35,13 +35,16 @@ fn main() {
         .and_then(|text| text.parse().ok())
         .unwrap_or(SEEDS);
     let only = std::env::var("RGSADDLE_BENCH_SYSTEM").ok();
-    println!("seed\tsystem\tmethod\tcalls\tmillis\tconverged\tenergy\tmax_force\tcurvature");
+    println!(
+        "seed\tsystem\tmethod\tsearch_calls\tcert_calls\tmillis\tconverged\tenergy\tmax_force\tcurvature"
+    );
     for system in systems() {
         if only.as_ref().is_some_and(|name| name != system.name) {
             continue;
         }
         let mut plain_calls = Vec::new();
         let mut gp_calls = Vec::new();
+        let mut gp_cert = Vec::new();
         let mut plain_ms = Vec::new();
         let mut gp_ms = Vec::new();
         let mut matched_plain = Vec::new();
@@ -98,6 +101,7 @@ fn main() {
             if gp.converged {
                 gp_calls.push(gp.calls as f64);
                 gp_ms.push(gp.millis);
+                gp_cert.push(gp.cert_calls as f64);
             }
             if plain.converged && gp.converged {
                 both += 1;
@@ -128,10 +132,11 @@ fn main() {
             }
         }
         println!(
-            "summary\t{name}\tseeds {seeds}\tboth {both}\tsame {same}\tdimer_calls {dc}\tgp_calls {gc}\tdimer_ms {dm}\tgp_ms {gm}\tmatched_dimer_calls {mdc}\tmatched_gp_calls {mgc}\tmatched_dimer_ms {mdm}\tmatched_gp_ms {mgm}",
+            "summary\t{name}\tseeds {seeds}\tboth {both}\tsame {same}\tdimer_calls {dc}\tgp_search {gc}\tgp_cert {gcert}\tdimer_ms {dm}\tgp_ms {gm}\tmatched_dimer_calls {mdc}\tmatched_gp_calls {mgc}\tmatched_dimer_ms {mdm}\tmatched_gp_ms {mgm}",
             name = system.name,
             dc = band(&mut plain_calls),
             gc = band(&mut gp_calls),
+            gcert = band(&mut gp_cert),
             dm = band(&mut plain_ms),
             gm = band(&mut gp_ms),
             mdc = band(&mut matched_plain),
@@ -144,8 +149,9 @@ fn main() {
 
 fn print_row(system: &str, seed: u64, method: &str, outcome: &Outcome) {
     println!(
-        "{seed}\t{system}\t{method}\t{calls}\t{millis:.3}\t{converged}\t{energy:.8}\t{force:.6e}\t{curvature:.6}",
+        "{seed}\t{system}\t{method}\t{calls}\t{cert}\t{millis:.3}\t{converged}\t{energy:.8}\t{force:.6e}\t{curvature:.6}",
         calls = outcome.calls,
+        cert = outcome.cert_calls,
         millis = outcome.millis,
         converged = outcome.converged,
         energy = outcome.energy,
@@ -168,6 +174,7 @@ fn band(values: &mut [f64]) -> String {
 
 struct Outcome {
     calls: usize,
+    cert_calls: usize,
     millis: f64,
     converged: bool,
     energy: f64,
@@ -380,7 +387,7 @@ fn search_gp(system: &System, seed: u64) -> (Outcome, Vec<GpStepTiming>) {
             }
         }
     }
-    let outcome = finish(
+    let mut outcome = finish(
         &surface,
         session.position().to_owned(),
         started,
@@ -388,6 +395,8 @@ fn search_gp(system: &System, seed: u64) -> (Outcome, Vec<GpStepTiming>) {
         max_force,
         curvature,
     );
+    outcome.cert_calls = session.certification_calls();
+    outcome.calls = outcome.calls.saturating_sub(outcome.cert_calls);
     (outcome, session.step_timings().to_vec())
 }
 
@@ -419,6 +428,7 @@ fn finish(
     let calls = surface.calls.load(Ordering::Relaxed).saturating_sub(1);
     Outcome {
         calls,
+        cert_calls: 0,
         millis,
         converged,
         energy,
