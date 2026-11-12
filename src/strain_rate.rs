@@ -43,6 +43,7 @@ use std::fmt;
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 
 use crate::cell_log::M3;
+use crate::elastic::{LocalField, Quadrupole, quadrupole_energy};
 use crate::error::SaddleError;
 use crate::minmode::{MinModeConfig, MinModeStatus, PointSurface};
 use crate::solid_dimer::{IndexCheck, SolidDimer, SolidDimerConfig};
@@ -394,6 +395,8 @@ pub struct StrainResponse {
     saddle: ElasticDipole,
     prefactor_hz: Option<f64>,
     prefactor_slope: Option<M3>,
+    quadrupole_minimum: Option<Quadrupole>,
+    quadrupole_saddle: Option<Quadrupole>,
     variants: Vec<HopVariant>,
     policy: TrustPolicy,
     cache: Vec<CachedBarrier>,
@@ -415,6 +418,8 @@ impl StrainResponse {
             saddle,
             prefactor_hz: None,
             prefactor_slope: None,
+            quadrupole_minimum: None,
+            quadrupole_saddle: None,
             variants: vec![HopVariant {
                 name: "reference".to_string(),
                 rotation: identity(),
@@ -530,9 +535,34 @@ impl StrainResponse {
         Ok(self)
     }
 
-    /// Lowest barrier among the symmetry images at `eps`.
+    /// Attach higher force moments. The dipole already stored is replaced
+    /// by the dipole of each multipole, and existing images are rotated again.
+    pub fn with_multipoles(
+        mut self,
+        minimum: crate::elastic::ElasticMultipole,
+        saddle: crate::elastic::ElasticMultipole,
+    ) -> Self {
+        self.minimum = minimum.dipole();
+        self.saddle = saddle.dipole();
+        self.quadrupole_minimum = minimum.quadrupole();
+        self.quadrupole_saddle = saddle.quadrupole();
+        for variant in &mut self.variants {
+            variant.minimum = self.minimum.transform(variant.rotation);
+            variant.saddle = self.saddle.transform(variant.rotation);
+        }
+        self
+    }
+
+    /// Lowest barrier among the symmetry images at a homogeneous strain.
     pub fn barrier(&self, eps: &Strain) -> Estimate {
-        let (variant, barrier) = self.lowest(eps);
+        self.barrier_in(&LocalField::homogeneous(*eps))
+    }
+
+    /// Dipole line plus `-(1/2) (Q_saddle - Q_minimum) : ∇ε` when a
+    /// quadrupole and a strain gradient are both present.
+    pub fn barrier_in(&self, field: &LocalField) -> Estimate {
+        let (variant, barrier) = self.lowest(field);
+        let eps = &field.strain;
         if let Some(cached) = self.cached(eps, &variant.name) {
             return Estimate {
                 barrier: cached.barrier,
@@ -617,7 +647,7 @@ impl StrainResponse {
         if !barrier.is_finite() {
             return Err(SaddleError::NonFinite("explicit barrier"));
         }
-        let variant = self.lowest(eps).0.name.clone();
+        let variant = self.lowest(&LocalField::homogeneous(*eps)).0.name.clone();
         self.cache.retain(|row| {
             !(row.variant == variant && strain_distance(row.strain, eps.tensor()) < 1e-8)
         });
@@ -673,6 +703,10 @@ impl StrainResponse {
         push_matrix(&mut out, self.minimum.tensor());
         out.push_str(",\n  \"p_saddle\": ");
         push_matrix(&mut out, self.saddle.tensor());
+        out.push_str(",\n  \"q_minimum\": ");
+        push_optional_moment(&mut out, self.quadrupole_minimum);
+        out.push_str(",\n  \"q_saddle\": ");
+        push_optional_moment(&mut out, self.quadrupole_saddle);
         out.push_str(",\n  \"policy\": ");
         push_policy(&mut out, &self.policy);
         out.push_str(",\n  \"variants\": [\n");
@@ -734,6 +768,8 @@ impl StrainResponse {
             };
             response = response.with_prefactor(hz, slope)?;
         }
+        response.quadrupole_minimum = optional_moment(obj, "q_minimum")?;
+        response.quadrupole_saddle = optional_moment(obj, "q_saddle")?;
         if let Some(policy) = obj_get(obj, "policy").and_then(Json::as_object) {
             response = response.with_policy(policy_from_json(policy)?)?;
         }
@@ -770,17 +806,39 @@ impl StrainResponse {
         Ok(response)
     }
 
-    fn lowest(&self, eps: &Strain) -> (&HopVariant, f64) {
+    fn lowest(&self, field: &LocalField) -> (&HopVariant, f64) {
         let mut best = &self.variants[0];
-        let mut barrier = best.linear_barrier(self.barrier0, *eps);
+        let mut barrier = self.image_barrier(best, field);
         for variant in self.variants.iter().skip(1) {
-            let value = variant.linear_barrier(self.barrier0, *eps);
+            let value = self.image_barrier(variant, field);
             if value < barrier {
                 barrier = value;
                 best = variant;
             }
         }
         (best, barrier)
+    }
+
+    fn image_barrier(&self, variant: &HopVariant, field: &LocalField) -> f64 {
+        let mut barrier = variant.linear_barrier(self.barrier0, field.strain);
+        if let (Some(gradient), Some(minimum), Some(saddle)) = (
+            field.gradient,
+            self.quadrupole_minimum,
+            self.quadrupole_saddle,
+        ) {
+            let minimum = rotate_moment(minimum, variant.rotation);
+            let saddle = rotate_moment(saddle, variant.rotation);
+            let mut delta = minimum;
+            for i in 0..3 {
+                for j in 0..3 {
+                    for k in 0..3 {
+                        delta[i][j][k] = saddle[i][j][k] - minimum[i][j][k];
+                    }
+                }
+            }
+            barrier -= quadrupole_energy(delta, gradient);
+        }
+        barrier
     }
 
     fn cached(&self, eps: &Strain, variant: &str) -> Option<&CachedBarrier> {
@@ -901,6 +959,27 @@ pub fn rotation_x(quarter_turns: i32) -> M3 {
         2 => [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]],
         _ => [[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, -1.0, 0.0]],
     }
+}
+
+fn rotate_moment(moment: Quadrupole, rotation: M3) -> Quadrupole {
+    let mut out = [[[0.0; 3]; 3]; 3];
+    for i in 0..3 {
+        for j in 0..3 {
+            for k in 0..3 {
+                let mut sum = 0.0;
+                for a in 0..3 {
+                    for b in 0..3 {
+                        for c in 0..3 {
+                            sum +=
+                                rotation[i][a] * rotation[j][b] * rotation[k][c] * moment[a][b][c];
+                        }
+                    }
+                }
+                out[i][j][k] = sum;
+            }
+        }
+    }
+    out
 }
 
 fn identity() -> M3 {
@@ -1328,6 +1407,46 @@ fn push_string(out: &mut String, text: &str) {
     out.push('"');
 }
 
+fn push_optional_moment(out: &mut String, moment: Option<Quadrupole>) {
+    match moment {
+        None => out.push_str("null"),
+        Some(moment) => {
+            out.push('[');
+            for i in 0..3 {
+                if i > 0 {
+                    out.push(',');
+                }
+                out.push('[');
+                for j in 0..3 {
+                    if j > 0 {
+                        out.push(',');
+                    }
+                    out.push('[');
+                    for k in 0..3 {
+                        if k > 0 {
+                            out.push(',');
+                        }
+                        out.push_str(&num(moment[i][j][k]));
+                    }
+                    out.push(']');
+                }
+                out.push(']');
+            }
+            out.push(']');
+        }
+    }
+}
+
+fn optional_moment(obj: &[(String, Json)], key: &str) -> Result<Option<Quadrupole>, SaddleError> {
+    match obj_get(obj, key) {
+        None | Some(Json::Null) => Ok(None),
+        Some(value) => value
+            .as_moment()
+            .map(Some)
+            .ok_or_else(|| SaddleError::Invalid(format!("json moment {key} must be 3x3x3"))),
+    }
+}
+
 fn push_matrix(out: &mut String, m: M3) {
     out.push('[');
     for i in 0..3 {
@@ -1451,6 +1570,30 @@ impl Json {
             }
             for (j, value) in cols.iter().enumerate() {
                 out[i][j] = value.as_f64()?;
+            }
+        }
+        Some(out)
+    }
+
+    fn as_moment(&self) -> Option<Quadrupole> {
+        let rows = self.as_array()?;
+        if rows.len() != 3 {
+            return None;
+        }
+        let mut out = [[[0.0; 3]; 3]; 3];
+        for (i, row) in rows.iter().enumerate() {
+            let mid = row.as_array()?;
+            if mid.len() != 3 {
+                return None;
+            }
+            for (j, layer) in mid.iter().enumerate() {
+                let cols = layer.as_array()?;
+                if cols.len() != 3 {
+                    return None;
+                }
+                for (k, value) in cols.iter().enumerate() {
+                    out[i][j][k] = value.as_f64()?;
+                }
             }
         }
         Some(out)

@@ -78,6 +78,9 @@ pub use band::{
     ExpBandPrecon, MinModeRefine, SolidState, ZoomConfig,
 };
 pub use connect::{ConnectConfig, ConnectProfile, ConnectReport, connect};
+pub use elastic::{
+    ElasticMultipole, LocalField, Octupole, Quadrupole, StrainGradient, quadrupole_energy,
+};
 pub use error::SaddleError;
 pub use idpp::{IdppConfig, SidppConfig, idpp_path, linear_path, sidpp_path};
 pub use minmode::{
@@ -117,6 +120,7 @@ pub use tangent::TangentKind;
 pub mod cell_log;
 pub mod constraints;
 pub mod eigensolve;
+pub mod elastic;
 pub mod force;
 pub mod force_match;
 pub mod geom;

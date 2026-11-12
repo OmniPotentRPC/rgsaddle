@@ -17,6 +17,9 @@ The barrier of one hop is the difference of the two interaction energies:
 
 Dederichs and Schroeder, Phys. Rev. B 17, 2524 (1978), doi:10.1103/PhysRevB.17.2524, show that a homogeneous strain changes the jump rate through the saddle dipole relative to the equilibrium site. The activation volume =Ω = ∂ΔG/∂τ= is =activation_volume=.
 
+* Higher moments
+=ElasticMultipole::about= expands the atomic forces about one centre, the same single-centre idea as Wikfeldt, Batista, Vila, and Jónsson, Phys. Chem. Chem. Phys. 15, 16542 (2013), doi:10.1039/C3CP52097H. The dipole is the first moment. The quadrupole is =Q_ijk = Σ F_i X_j X_k= and the octupole is the next moment. =barrier_in= adds =-(1/2) (Q_saddle - Q_minimum)_ijk ∂_k ε_ij= when the caller supplies a strain gradient. A homogeneous =barrier= leaves that term out.
+
 * Symmetry images
 =with_point_group= rotates both dipoles by each supplied matrix, =P' = R P R^T=, and drops images that repeat a dipole. =cubic_rotations= is the 24 proper rotations of the cube. A caller that already knows the distinct hops can pass them to =with_variants= instead. =barrier= returns the image with the lowest barrier, and names it in =Estimate::variant=.
 
