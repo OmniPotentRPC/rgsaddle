@@ -16,6 +16,7 @@
 //! quotient [`MinModeSession`] already uses.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
 
 use ndarray::{Array1, Array2, ArrayView1};
 
@@ -27,6 +28,11 @@ use crate::minmode::{MinModeConfig, MinModeSession, MinModeStatus, PointSurface}
 /// Literature trust radius: `ln(1.5)`, i.e. every pair distance stays
 /// inside `(2/3, 3/2)` of a stored geometry.
 pub const LN_THREE_HALVES: f64 = 0.4054651081081644;
+
+/// A true step may climb this far above the lowest energy seen. The
+/// Morse hop saddle sits a few hundredths above a nearby point; the
+/// desorbed adatom is several energy units higher.
+const CLIMB_LIMIT: f64 = 1.5;
 
 /// Controls for one GP-dimer search. Absent from [`MinModeConfig`], so
 /// a host that never builds this type runs the plain dimer.
@@ -205,6 +211,26 @@ pub struct GpDimerSession {
     true_mode: Array1<f64>,
     /// True force is close enough that further steps stay on the real surface.
     finishing: bool,
+    /// Lowest true energy seen. A step that climbs far above it has left
+    /// the saddle basin (a desorbed atom, a wall).
+    lowest_energy: f64,
+    model: Option<GaussianProcess>,
+    /// Rank-one updates since the last marginal-likelihood fit.
+    extends_since_fit: usize,
+    timings: Vec<GpStepTiming>,
+    /// One bounded true-surface dimer polish has already been spent.
+    polished: bool,
+}
+
+/// Wall time of one surrogate build, against the training-set size.
+#[derive(Clone, Copy, Debug)]
+pub struct GpStepTiming {
+    pub observations: usize,
+    /// Rows of the joint energy-gradient covariance.
+    pub width: usize,
+    pub fit_nanos: u64,
+    /// The factor grew by rank-one updates instead of a refactorization.
+    pub rank_one: bool,
 }
 
 impl GpDimerSession {
@@ -263,6 +289,11 @@ impl GpDimerSession {
             seeded: false,
             true_mode,
             finishing: false,
+            lowest_energy: f64::INFINITY,
+            model: None,
+            extends_since_fit: 0,
+            timings: Vec::new(),
+            polished: false,
         })
     }
 
@@ -276,6 +307,11 @@ impl GpDimerSession {
 
     pub fn curvature(&self) -> f64 {
         self.curvature
+    }
+
+    /// Surrogate build time at each outer step, in training-set order.
+    pub fn step_timings(&self) -> &[GpStepTiming] {
+        &self.timings
     }
 
     pub fn run<S: PointSurface>(
@@ -324,19 +360,18 @@ impl GpDimerSession {
             }
         }
         self.trim_observations();
-        let passes = if self.x.len() >= 200 {
-            self.config.fit_passes.min(2)
-        } else {
-            self.config.fit_passes
-        };
-        let gp = GaussianProcess::fit(
-            &self.observations,
-            &self.kind,
-            &crate::gpr::FitOptions {
-                passes,
-                noise: 1e-6,
-            },
-        )?;
+        let started = Instant::now();
+        let rank_one = self.refresh_model()?;
+        let fit_nanos = started.elapsed().as_nanos() as u64;
+        let observations = self.observations.len();
+        let width = observations * (self.x.len() + 1);
+        self.timings.push(GpStepTiming {
+            observations,
+            width,
+            fit_nanos,
+            rank_one,
+        });
+        let gp = self.model.clone().expect("the surrogate was just fit");
         let surrogate = Surrogate {
             gp: &gp,
             rotations: self.exclude_rotations(),
@@ -404,7 +439,24 @@ impl GpDimerSession {
             curvature = report.curvature;
         }
         let (energy, gradient) = counted.eval(accepted.view())?;
-        if !energy.is_finite() || gradient.iter().any(|v| !v.is_finite()) {
+        if !energy.is_finite()
+            || gradient.iter().any(|v| !v.is_finite())
+            || (self.x.len() <= 48 && self.climbed_out(energy))
+        {
+            self.step_limit = (self.step_limit * 0.5).max(0.02);
+            self.finishing = false;
+            if !self.polished
+                && self.x.len() <= 48
+                && self.curvature < -0.05
+                && self
+                    .anchor_gradient()
+                    .is_some_and(|gradient| self.force_gate.value(gradient.view()) < 5.0)
+            {
+                self.polished = true;
+                let mut report = self.dimer_polish(&counted)?;
+                report.evaluations = calls.load(Ordering::Relaxed);
+                return Ok(report);
+            }
             self.iteration += 1;
             let max_force = self
                 .anchor_gradient()
@@ -453,11 +505,7 @@ impl GpDimerSession {
         self.mode = mode.clone();
         self.true_mode = mode;
         self.curvature = curvature;
-        let status = if max_force <= self.force_tol && curvature < 0.0 {
-            GpDimerStatus::Converged
-        } else {
-            GpDimerStatus::Running
-        };
+        let status = self.convergence(&counted, max_force, curvature)?;
         self.iteration += 1;
         Ok(GpDimerReport {
             status,
@@ -497,11 +545,29 @@ impl GpDimerSession {
             finisher.install_mode(self.mode.clone(), self.curvature)?;
         }
         let mut curvature = self.curvature;
+        let origin = self.x.clone();
         for _ in 0..80 {
+            let before = finisher.position().to_owned();
             let report = finisher.step(surface)?;
-            self.x = finisher.position().to_owned();
+            let after = finisher.position().to_owned();
+            if self
+                .layout
+                .gap(origin.as_slice().unwrap(), after.as_slice().unwrap())
+                > self.config.trust_radius
+            {
+                finisher.set_position(before, None)?;
+                break;
+            }
+            let (energy, _) = surface.eval(after.view())?;
+            if self.x.len() <= 48 && self.climbed_out(energy) {
+                finisher.set_position(before, None)?;
+                self.finishing = false;
+                break;
+            }
+            self.x = after;
             self.mode = finisher.mode().to_owned();
             curvature = report.curvature;
+            self.note_energy(energy);
             if report.max_force <= self.force_tol {
                 break;
             }
@@ -529,12 +595,17 @@ impl GpDimerSession {
         });
         self.true_mode = self.mode.clone();
         self.curvature = curvature;
+        if max_force > self.force_tol {
+            // Another finish from the same point does not move. The next
+            // outer step goes back to the surrogate.
+            self.finishing = false;
+            if !self.polished && self.x.len() <= 48 && max_force < 5.0 && curvature < -0.05 {
+                self.polished = true;
+                return self.dimer_polish(surface);
+            }
+        }
         self.iteration += 1;
-        let status = if max_force <= self.force_tol && curvature < 0.0 {
-            GpDimerStatus::Converged
-        } else {
-            GpDimerStatus::Running
-        };
+        let status = self.convergence(surface, max_force, curvature)?;
         Ok(GpDimerReport {
             status,
             max_force,
@@ -543,6 +614,98 @@ impl GpDimerSession {
             iteration: self.iteration,
             inner_steps: 0,
         })
+    }
+
+    /// The rotation-free finish stalled just short of the saddle. A short
+    /// true dimer, still inside the climb limit, is what the plain search
+    /// uses and it stays on the adsorption well.
+    fn dimer_polish<S: PointSurface>(&mut self, surface: &S) -> Result<GpDimerReport, SaddleError> {
+        let mut cfg = self.config.inner.clone();
+        cfg.max_move = cfg.max_move.min(0.05);
+        cfg.force_tol = self.force_tol;
+        let mut walker = MinModeSession::new(cfg, self.x.clone(), self.mode.clone())?;
+        if let Some(gradient) = self.anchor_gradient() {
+            walker.set_position(self.x.clone(), Some(gradient))?;
+        }
+        for _ in 0..25 {
+            let before = walker.position().to_owned();
+            let report = walker.step(surface)?;
+            let after = walker.position().to_owned();
+            let (energy, gradient) = surface.eval(after.view())?;
+            if self.climbed_out(energy) || !energy.is_finite() {
+                walker.set_position(before, None)?;
+                break;
+            }
+            self.x = after;
+            self.mode = walker.mode().to_owned();
+            self.curvature = report.curvature;
+            self.note_energy(energy);
+            self.push_observation(Observation {
+                position: self.x.clone(),
+                energy,
+                gradient,
+            });
+            if report.max_force <= self.force_tol {
+                break;
+            }
+        }
+        let (energy, gradient) = surface.eval(self.x.view())?;
+        self.note_energy(energy);
+        let max_force = self.force_gate.value(gradient.view());
+        let curvature = if max_force <= self.force_tol {
+            true_curvature(
+                surface,
+                self.x.view(),
+                gradient.view(),
+                self.mode.view(),
+                self.config.inner.dr,
+            )?
+        } else {
+            self.curvature
+        };
+        self.curvature = curvature;
+        self.true_mode = self.mode.clone();
+        self.iteration += 1;
+        let status = self.convergence(surface, max_force, curvature)?;
+        Ok(GpDimerReport {
+            status,
+            max_force,
+            curvature,
+            evaluations: 0,
+            iteration: self.iteration,
+            inner_steps: 0,
+        })
+    }
+
+    /// Force tolerance and a negative mode are not enough: the true
+    /// Hessian must have exactly one negative eigenvalue. Above 48
+    /// coordinates the full difference is left to the caller, because
+    /// it costs two force evaluations per coordinate.
+    fn convergence<S: PointSurface>(
+        &mut self,
+        surface: &S,
+        max_force: f64,
+        curvature: f64,
+    ) -> Result<GpDimerStatus, SaddleError> {
+        if !(max_force <= self.force_tol && curvature < 0.0) {
+            return Ok(GpDimerStatus::Running);
+        }
+        if self.x.len() > 48 {
+            return Ok(GpDimerStatus::Converged);
+        }
+        let index = crate::hessian_index::finite_difference_index(
+            surface,
+            self.x.view(),
+            self.project_rigid(),
+        )?;
+        if index.negative == 1 {
+            return Ok(GpDimerStatus::Converged);
+        }
+        self.finishing = false;
+        self.mode = index.mode;
+        self.true_mode = self.mode.clone();
+        self.curvature = index.lowest;
+        Ok(GpDimerStatus::Running)
     }
 
     fn exclude_translations(&self) -> bool {
@@ -649,6 +812,7 @@ impl GpDimerSession {
     }
 
     fn push_observation(&mut self, observation: Observation) {
+        self.note_energy(observation.energy);
         if let Some(slot) = self
             .observations
             .iter_mut()
@@ -660,20 +824,128 @@ impl GpDimerSession {
         self.observations.push(observation);
     }
 
+    fn note_energy(&mut self, energy: f64) {
+        if energy < self.lowest_energy {
+            self.lowest_energy = energy;
+        }
+    }
+
+    fn climbed_out(&self, energy: f64) -> bool {
+        self.lowest_energy.is_finite() && energy > self.lowest_energy + CLIMB_LIMIT
+    }
+
+    fn project_rigid(&self) -> bool {
+        self.x.len() >= 6
+            && self.x.len().is_multiple_of(3)
+            && self.config.cell.is_none()
+            && self.config.fixed.is_none()
+    }
+
     fn trim_observations(&mut self) {
         let width = self.x.len() + 1;
-        // A single gradient observation has zero posterior curvature, so
-        // even a large system keeps a few recent geometries. The window
-        // is the prune: hyperparameters are refit on what remains.
+        // A few gradient samples are required for a nonzero curvature.
+        // Past that, gpridge drops the training point farthest from the
+        // current geometry, and anything outside a few trust radii.
         let by_size = if width >= 400 {
             3
         } else {
             (640 / width).max(3)
         };
         let cap = self.config.max_observations.max(3).min(by_size);
-        while self.observations.len() > cap {
-            self.observations.remove(0);
+        if width >= 400 {
+            while self.observations.len() > cap {
+                self.observations.remove(0);
+            }
+            return;
         }
+        let horizon = 4.0 * self.config.trust_radius;
+        while self.observations.len() > 3 {
+            let Some((farthest, gap)) = self.farthest_training_point() else {
+                break;
+            };
+            let over_cap = self.observations.len() > cap;
+            if !over_cap && gap <= horizon {
+                break;
+            }
+            self.observations.remove(farthest);
+        }
+    }
+
+    /// Farthest stored geometry from the current point, ignoring the
+    /// newest observation so the point just evaluated stays in the fit.
+    fn farthest_training_point(&self) -> Option<(usize, f64)> {
+        let current = self.x.as_slice().unwrap();
+        let last = self.observations.len().saturating_sub(1);
+        let mut best: Option<(usize, f64)> = None;
+        for (i, obs) in self.observations.iter().enumerate() {
+            if i == last {
+                continue;
+            }
+            let gap = self.layout.gap(obs.position.as_slice().unwrap(), current);
+            if best.is_none_or(|(_, so_far)| gap > so_far) {
+                best = Some((i, gap));
+            }
+        }
+        best
+    }
+
+    /// Rank-one append when the training set grew by one point.
+    /// Otherwise one factorization at frozen hyperparameters, and a
+    /// marginal-likelihood search on the first fit and every fourth
+    /// small-system update.
+    fn refresh_model(&mut self) -> Result<bool, SaddleError> {
+        let noise = 1e-6;
+        let large = self.x.len() >= 200;
+        if large {
+            let fitted = GaussianProcess::fit(
+                &self.observations,
+                &self.kind,
+                &crate::gpr::FitOptions {
+                    passes: self.config.fit_passes.min(1),
+                    noise,
+                },
+            )?;
+            self.model = Some(fitted);
+            self.extends_since_fit = 0;
+            return Ok(false);
+        }
+        if let Some(model) = &self.model
+            && model.same_as(&self.observations)
+        {
+            return Ok(false);
+        }
+        if let Some(model) = &self.model
+            && model.is_prefix_of(&self.observations)
+            && self.extends_since_fit < 4
+        {
+            let observation = self.observations.last().unwrap().clone();
+            if let Ok(grown) = model.extend(&observation) {
+                self.model = Some(grown);
+                self.extends_since_fit += 1;
+                return Ok(true);
+            }
+        }
+        if let Some(model) = &self.model
+            && self.extends_since_fit < 4
+            && let Ok(rebuilt) = model.rebuild_frozen(&self.observations, noise)
+        {
+            self.model = Some(rebuilt);
+            self.extends_since_fit += 1;
+            return Ok(false);
+        }
+        let passes = if large {
+            self.config.fit_passes.min(1)
+        } else {
+            self.config.fit_passes
+        };
+        let fitted = GaussianProcess::fit(
+            &self.observations,
+            &self.kind,
+            &crate::gpr::FitOptions { passes, noise },
+        )?;
+        self.model = Some(fitted);
+        self.extends_since_fit = 0;
+        Ok(false)
     }
 }
 

@@ -9,8 +9,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use ndarray::{Array1, ArrayView1, array};
 use rgsaddle::{
     FitOptions, GaussianProcess, GpDimerConfig, GpDimerSession, GpDimerStatus, KernelKind,
-    MinModeConfig, MinModeKind, Observation, PointSurface, SaddleError, fitting_evidence,
-    max_log_pair_distance, observation_covariance,
+    MinModeConfig, MinModeKind, Observation, PointSurface, SaddleError, finite_difference_index,
+    fitting_evidence, max_log_pair_distance, observation_covariance,
 };
 
 struct QuadraticSaddle;
@@ -431,4 +431,208 @@ fn gp_dimer_converges_on_muller_brown() {
         calls < 80,
         "true evaluations {calls} are not below the plain dimer"
     );
+}
+
+/// Seed that used to stop on a desorbed, nearly flat point. That point
+/// is not the Morse hop saddle.
+struct MorseAdatom {
+    cell: [f64; 3],
+    rest: Vec<[f64; 3]>,
+    free_index: usize,
+    fixed: Array1<f64>,
+    saddle: Array1<f64>,
+}
+
+impl MorseAdatom {
+    fn load() -> Self {
+        let text = std::fs::read_to_string(format!(
+            "{}/tests/fixtures/irc/pt_saddle.txt",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+        let mut lines = text.lines();
+        let head: Vec<f64> = lines
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .map(|v| v.parse().unwrap())
+            .collect();
+        let mut rest = Vec::new();
+        let mut free_index = 0usize;
+        let mut saddle = Vec::new();
+        let mut fixed = Vec::new();
+        for line in lines {
+            let v: Vec<f64> = line
+                .split_whitespace()
+                .map(|value| value.parse().unwrap())
+                .collect();
+            let xyz = [v[2], v[3], v[4]];
+            if v[0] == 0.0 {
+                free_index = rest.len();
+                saddle.extend_from_slice(&xyz);
+            } else {
+                fixed.extend_from_slice(&xyz);
+            }
+            rest.push(xyz);
+        }
+        Self {
+            cell: [head[2], head[3], head[4]],
+            rest,
+            free_index,
+            fixed: Array1::from(fixed),
+            saddle: Array1::from(saddle),
+        }
+    }
+}
+
+impl PointSurface for MorseAdatom {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        let mut atoms = self.rest.clone();
+        atoms[self.free_index] = [x[0], x[1], x[2]];
+        let rc = 9.5;
+        let (de, alpha, re) = (0.7102_f64, 1.6047_f64, 2.897_f64);
+        let shift = {
+            let r = rc;
+            let d = 1.0 - (-alpha * (r - re)).exp();
+            de * d * d - de
+        };
+        let mut energy = 0.0;
+        let mut gradient = [0.0; 3];
+        let i = self.free_index;
+        for (j, other) in atoms.iter().enumerate() {
+            if j == i {
+                continue;
+            }
+            let mut d = [0.0; 3];
+            for k in 0..3 {
+                d[k] = atoms[i][k] - other[k];
+                d[k] -= self.cell[k] * (d[k] / self.cell[k]).round();
+            }
+            let r2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+            if r2 >= rc * rc {
+                continue;
+            }
+            let r = r2.sqrt();
+            let delta = 1.0 - (-alpha * (r - re)).exp();
+            energy += de * delta * delta - de - shift;
+            let fscale = 2.0 * de * alpha * delta * (delta - 1.0) / r;
+            for k in 0..3 {
+                gradient[k] += -fscale * d[k];
+            }
+        }
+        Ok((energy, Array1::from_vec(gradient.to_vec())))
+    }
+}
+
+#[test]
+fn morse_seed_stays_on_the_known_index_one_saddle() {
+    let slab = MorseAdatom::load();
+    let text = std::fs::read_to_string(format!(
+        "{}/tests/fixtures/irc/pt_saddle.txt",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap();
+    let mut mode = Vec::new();
+    for line in text.lines().skip(1) {
+        let v: Vec<f64> = line
+            .split_whitespace()
+            .map(|value| value.parse().unwrap())
+            .collect();
+        if v[0] == 0.0 {
+            mode.extend_from_slice(&v[5..8]);
+        }
+    }
+    let mode = Array1::from(mode);
+    let unit = &mode / mode.dot(&mode).sqrt();
+    let mut seed = 20261111_u64;
+    let mut kick = Vec::with_capacity(3);
+    for _ in 0..3 {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let unit_draw = ((seed >> 33) as u32) as f64 / u32::MAX as f64;
+        kick.push(unit_draw - 0.5);
+    }
+    let mut perp = Array1::from(kick);
+    perp = &perp - &unit * unit.dot(&perp);
+    perp /= perp.dot(&perp).sqrt();
+    let start = &slab.saddle + &unit * 0.2 + &perp * 0.05;
+    let mut session = GpDimerSession::new(
+        GpDimerConfig {
+            inner: MinModeConfig {
+                force_tol: 1e-3,
+                max_move: 0.15,
+                ..MinModeConfig::default()
+            },
+            ..GpDimerConfig::default()
+        },
+        start,
+        unit,
+    )
+    .unwrap();
+    let report = session.run(&slab, 40).unwrap();
+    assert_eq!(
+        report.status,
+        GpDimerStatus::Converged,
+        "force {} energy check pending",
+        report.max_force
+    );
+    let (energy, _) = slab.eval(session.position()).unwrap();
+    let index = finite_difference_index(&slab, session.position(), false).unwrap();
+    let gap = max_log_pair_distance(
+        session.position(),
+        slab.saddle.view(),
+        Some(slab.cell),
+        Some(slab.fixed.view()),
+    )
+    .unwrap();
+    assert_eq!(
+        index.negative, 1,
+        "lowest {} second {}",
+        index.lowest, index.second
+    );
+    assert!(
+        index.lowest < -0.1 && index.second > 0.0,
+        "lowest {} second {} is not a first-order saddle",
+        index.lowest,
+        index.second
+    );
+    assert!(
+        energy < -1.0,
+        "energy {energy} gap {gap} left the adsorption well"
+    );
+}
+
+#[test]
+fn rank_one_update_matches_a_frozen_refactor() {
+    let kind = KernelKind::Cartesian;
+    let sample = |x: f64, y: f64| Observation {
+        position: array![x, y],
+        energy: 0.5 * x * x - 0.25 * y * y,
+        gradient: array![x, -0.5 * y],
+    };
+    let data = vec![sample(0.0, 0.0), sample(0.4, -0.2)];
+    let fitted = GaussianProcess::fit(
+        &data,
+        &kind,
+        &FitOptions {
+            passes: 2,
+            noise: 1e-8,
+        },
+    )
+    .unwrap();
+    let extra = sample(-0.3, 0.5);
+    let grown = fitted.extend(&extra).unwrap();
+    let mut all = data;
+    all.push(extra);
+    let frozen = fitted.rebuild_frozen(&all, 1e-8).unwrap();
+    let query = array![0.15, -0.1];
+    let (energy, gradient) = grown.predict(query.view()).unwrap();
+    let (other, other_gradient) = frozen.predict(query.view()).unwrap();
+    assert!((energy - other).abs() < 1e-6, "{energy} vs {other}");
+    let gap: f64 = gradient
+        .iter()
+        .zip(other_gradient.iter())
+        .map(|(a, b)| (a - b).abs())
+        .sum();
+    assert!(gap < 1e-5, "gradient gap {gap}");
+    assert_eq!(grown.training_size(), 3);
 }

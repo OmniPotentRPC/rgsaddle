@@ -21,6 +21,8 @@
 //! and Jónsson) and the logarithmic barrier that keeps `σ_f²` below 2
 //! in standardized units.
 
+use std::sync::Mutex;
+
 use ndarray::{Array1, Array2, ArrayView1};
 
 use crate::error::SaddleError;
@@ -80,7 +82,7 @@ struct Features {
     jac_val: Vec<f64>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct Layout {
     dim: usize,
     n_free: usize,
@@ -88,6 +90,27 @@ pub(crate) struct Layout {
     cell: Option<[f64; 3]>,
     pairs: Vec<(usize, usize)>,
     cartesian: bool,
+    /// Inverse-distance features for geometries this search has already seen.
+    cache: Mutex<Vec<(Vec<f64>, Features)>>,
+}
+
+impl Clone for Layout {
+    fn clone(&self) -> Self {
+        let cached = self
+            .cache
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone();
+        Self {
+            dim: self.dim,
+            n_free: self.n_free,
+            fixed: self.fixed.clone(),
+            cell: self.cell,
+            pairs: self.pairs.clone(),
+            cartesian: self.cartesian,
+            cache: Mutex::new(cached),
+        }
+    }
 }
 
 impl Layout {
@@ -105,6 +128,7 @@ impl Layout {
                 cell: None,
                 pairs: Vec::new(),
                 cartesian: true,
+                cache: Mutex::new(Vec::new()),
             }),
             KernelKind::InverseDistance { cell, fixed } => {
                 if !dim.is_multiple_of(3) {
@@ -151,6 +175,7 @@ impl Layout {
                     cell: *cell,
                     pairs,
                     cartesian: false,
+                    cache: Mutex::new(Vec::new()),
                 })
             }
         }
@@ -234,6 +259,28 @@ impl Layout {
     }
 
     fn features(&self, free: &[f64]) -> Features {
+        if let Some((_, cached)) = self
+            .cache
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .iter()
+            .find(|(position, _)| position == free)
+        {
+            return cached.clone();
+        }
+        let built = self.features_uncached(free);
+        let mut cache = self
+            .cache
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if cache.len() == 64 {
+            cache.remove(0);
+        }
+        cache.push((free.to_vec(), built.clone()));
+        built
+    }
+
+    fn features_uncached(&self, free: &[f64]) -> Features {
         if self.cartesian || self.pairs.is_empty() {
             let n = free.len();
             let mut jac_ptr = Vec::with_capacity(n + 1);
@@ -449,6 +496,7 @@ struct Solved {
     alpha: Vec<f64>,
     constant: f64,
     evidence: f64,
+    jitter: f64,
 }
 
 fn assemble(prepared: &Prepared, amplitude2: f64, length: f64, jitter: f64) -> Option<Vec<f64>> {
@@ -641,6 +689,7 @@ fn solve_posterior(prepared: &Prepared, amplitude2: f64, length: f64) -> Option<
             alpha,
             constant,
             evidence,
+            jitter,
         });
     }
     None
@@ -668,13 +717,180 @@ fn initial_length(feats: &[Features]) -> f64 {
     rms.max(0.2)
 }
 
+#[derive(Clone, Debug)]
+struct Chol {
+    /// Row-major lower triangle, stride `n`.
+    lower: Vec<f64>,
+    n: usize,
+}
+
+#[allow(clippy::needless_range_loop)]
+impl Chol {
+    fn factor(matrix: &[f64], n: usize) -> Option<Self> {
+        let lower = cholesky_lower(matrix, n)?;
+        Some(Self { lower, n })
+    }
+
+    fn solve(&self, rhs: &[f64]) -> Vec<f64> {
+        let n = self.n;
+        let mut z = vec![0.0; n];
+        for i in 0..n {
+            let mut sum = rhs[i];
+            for k in 0..i {
+                sum -= self.lower[i * n + k] * z[k];
+            }
+            z[i] = sum / self.lower[i * n + i];
+        }
+        let mut x = vec![0.0; n];
+        for i in (0..n).rev() {
+            let mut sum = z[i];
+            for k in (i + 1)..n {
+                sum -= self.lower[k * n + i] * x[k];
+            }
+            x[i] = sum / self.lower[i * n + i];
+        }
+        x
+    }
+
+    /// Rank-one growth: append one row and column of `K`.
+    fn append(&mut self, k_row: &[f64]) -> Option<()> {
+        let n = self.n;
+        if k_row.len() != n + 1 {
+            return None;
+        }
+        let mut z = vec![0.0; n];
+        for i in 0..n {
+            let mut sum = k_row[i];
+            for k in 0..i {
+                sum -= self.lower[i * n + k] * z[k];
+            }
+            let diag = self.lower[i * n + i];
+            if !(diag.is_finite() && diag > 0.0) {
+                return None;
+            }
+            z[i] = sum / diag;
+        }
+        let mut pivot = k_row[n];
+        for value in &z {
+            pivot -= value * value;
+        }
+        if !(pivot.is_finite() && pivot > 0.0) {
+            return None;
+        }
+        let pivot = pivot.sqrt();
+        let n2 = n + 1;
+        let mut next = vec![0.0; n2 * n2];
+        for i in 0..n {
+            for k in 0..=i {
+                next[i * n2 + k] = self.lower[i * n + k];
+            }
+        }
+        for k in 0..n {
+            next[n * n2 + k] = z[k];
+        }
+        next[n * n2 + n] = pivot;
+        self.lower = next;
+        self.n = n2;
+        Some(())
+    }
+}
+
+fn cholesky_lower(matrix: &[f64], n: usize) -> Option<Vec<f64>> {
+    #[cfg(feature = "faer")]
+    {
+        let mut mat = faer::Mat::<f64>::zeros(n, n);
+        for i in 0..n {
+            for j in 0..=i {
+                mat[(i, j)] = matrix[i * n + j];
+                mat[(j, i)] = matrix[i * n + j];
+            }
+        }
+        let chol = mat.llt(faer::Side::Lower).ok()?;
+        let l = chol.L();
+        let mut lower = vec![0.0; n * n];
+        for i in 0..n {
+            for k in 0..=i {
+                let value = l[(i, k)];
+                if !value.is_finite() {
+                    return None;
+                }
+                lower[i * n + k] = value;
+            }
+            if lower[i * n + i] <= 0.0 || !lower[i * n + i].is_finite() {
+                return None;
+            }
+        }
+        Some(lower)
+    }
+    #[cfg(not(feature = "faer"))]
+    {
+        let mut lower = matrix.to_vec();
+        for i in 0..n {
+            for j in 0..=i {
+                let mut sum = lower[i * n + j];
+                for k in 0..j {
+                    sum -= lower[i * n + k] * lower[j * n + k];
+                }
+                if j == i {
+                    if !(sum.is_finite() && sum > 0.0) {
+                        return None;
+                    }
+                    lower[i * n + i] = sum.sqrt();
+                } else {
+                    lower[i * n + j] = sum / lower[j * n + j];
+                }
+            }
+            for j in (i + 1)..n {
+                lower[i * n + j] = 0.0;
+            }
+        }
+        Some(lower)
+    }
+}
+
+fn profile_alpha(chol: &Chol, y: &[f64], w: usize) -> Result<(Vec<f64>, f64), SaddleError> {
+    let n = chol.n;
+    if y.len() != n || w == 0 || !n.is_multiple_of(w) {
+        return Err(SaddleError::Shape(
+            "the profiled mean needs one residual per covariance row".into(),
+        ));
+    }
+    let n_obs = n / w;
+    let mut one = vec![0.0; n];
+    for i in 0..n_obs {
+        one[i * w] = 1.0;
+    }
+    let alpha0 = chol.solve(y);
+    let z = chol.solve(&one);
+    let mut num = 0.0;
+    let mut den = 0.0;
+    for i in 0..n_obs {
+        num += alpha0[i * w];
+        den += z[i * w];
+    }
+    let constant = if den.abs() > 1e-18 { num / den } else { 0.0 };
+    if !constant.is_finite() {
+        return Err(SaddleError::NonFinite("profiled Gaussian-process mean"));
+    }
+    let mut alpha = alpha0;
+    for i in 0..n {
+        alpha[i] -= constant * z[i];
+    }
+    Ok((alpha, constant))
+}
+
 /// Fitted inverse-distance (or Cartesian) process.
 #[derive(Clone, Debug)]
 pub struct GaussianProcess {
     layout: Layout,
     feats: Vec<Features>,
+    positions: Vec<Array1<f64>>,
     beta: Vec<Vec<f64>>,
     alpha_e: Vec<f64>,
+    y_std: Vec<f64>,
+    chol: Chol,
+    jitter: f64,
+    kind: KernelKind,
     mean: f64,
     scale: f64,
     constant: f64,
@@ -731,38 +947,177 @@ impl GaussianProcess {
         let solved = solve_posterior(&prepared, amplitude2, length).ok_or_else(|| {
             SaddleError::Solver("Gaussian-process covariance was not positive definite".into())
         })?;
-        Ok(Self::from_solved(prepared, solved, amplitude2, length))
+        Self::from_solved(prepared, solved, amplitude2, length, data, kind)
     }
 
-    fn from_solved(prepared: Prepared, solved: Solved, amplitude2: f64, length: f64) -> Self {
+    /// One factorization at the hyperparameters already chosen.
+    ///
+    /// Distance pruning drops a training row, so the factor cannot be
+    /// updated by a rank-one append. The marginal likelihood is not
+    /// searched again.
+    pub fn rebuild_frozen(&self, data: &[Observation], noise: f64) -> Result<Self, SaddleError> {
+        let prepared = prepare(data, &self.kind, noise)?;
+        let solved = solve_posterior(&prepared, self.amplitude2, self.length).ok_or_else(|| {
+            SaddleError::Solver(
+                "frozen Gaussian-process covariance was not positive definite".into(),
+            )
+        })?;
+        Self::from_solved(
+            prepared,
+            solved,
+            self.amplitude2,
+            self.length,
+            data,
+            &self.kind,
+        )
+    }
+
+    /// Append one observation with a rank-one Cholesky update.
+    ///
+    /// Hyperparameters, the profiled mean, and the force scale stay as
+    /// they were. A non-positive pivot asks the caller to refactor.
+    pub fn extend(&self, observation: &Observation) -> Result<Self, SaddleError> {
+        if observation.position.len() != self.layout.dim {
+            return Err(SaddleError::Shape(
+                "an extended observation must match the training dimension".into(),
+            ));
+        }
+        let feat = self
+            .layout
+            .features(observation.position.as_slice().unwrap());
+        let dim = self.layout.dim;
+        let w = dim + 1;
+        let mut y_new = vec![0.0; w];
+        y_new[0] = (observation.energy - self.mean) / self.scale;
+        for a in 0..dim {
+            y_new[a + 1] = observation.gradient[a] / self.scale;
+        }
+        let mut chol = self.chol.clone();
+        let old = self.feats.len();
+        for row in 0..w {
+            let mut k_row = vec![0.0; old * w + row + 1];
+            for (j, cached) in self.feats.iter().enumerate() {
+                let block = cov_block(&feat, cached, self.amplitude2, self.length, dim);
+                for col in 0..w {
+                    k_row[j * w + col] = block[row * w + col];
+                }
+            }
+            let self_block = cov_block(&feat, &feat, self.amplitude2, self.length, dim);
+            for col in 0..=row {
+                k_row[old * w + col] = self_block[row * w + col];
+            }
+            k_row[old * w + row] += self.jitter;
+            if chol.append(&k_row).is_none() {
+                return Err(SaddleError::Solver(
+                    "rank-one Cholesky update lost positive definiteness".into(),
+                ));
+            }
+        }
+        let mut y_std = self.y_std.clone();
+        y_std.extend_from_slice(&y_new);
+        let mut feats = self.feats.clone();
+        feats.push(feat);
+        let mut positions = self.positions.clone();
+        positions.push(observation.position.clone());
+        let (alpha, constant) = profile_alpha(&chol, &y_std, w)?;
+        let mut gp = self.clone();
+        gp.feats = feats;
+        gp.positions = positions;
+        gp.y_std = y_std;
+        gp.chol = chol;
+        gp.constant = constant;
+        gp.install_weights(&alpha);
+        Ok(gp)
+    }
+
+    pub fn training_size(&self) -> usize {
+        self.feats.len()
+    }
+
+    pub fn same_as(&self, data: &[Observation]) -> bool {
+        self.positions.len() == data.len()
+            && self
+                .positions
+                .iter()
+                .zip(data)
+                .all(|(trained, obs)| trained.as_slice() == obs.position.as_slice())
+    }
+
+    pub fn is_prefix_of(&self, data: &[Observation]) -> bool {
+        self.positions.len() + 1 == data.len()
+            && self
+                .positions
+                .iter()
+                .zip(data)
+                .all(|(trained, obs)| trained.as_slice() == obs.position.as_slice())
+    }
+
+    fn from_solved(
+        prepared: Prepared,
+        solved: Solved,
+        amplitude2: f64,
+        length: f64,
+        data: &[Observation],
+        kind: &KernelKind,
+    ) -> Result<Self, SaddleError> {
         let dim = prepared.dim;
         let w = dim + 1;
-        let mut alpha_e = Vec::with_capacity(prepared.feats.len());
-        let mut beta = Vec::with_capacity(prepared.feats.len());
-        for (i, feat) in prepared.feats.iter().enumerate() {
-            alpha_e.push(solved.alpha[i * w]);
-            let mut weights = vec![0.0; feat.phi.len()];
-            for (p, weight) in weights.iter_mut().enumerate() {
-                let mut acc = 0.0;
-                for t in feat.jac_ptr[p]..feat.jac_ptr[p + 1] {
-                    let component = solved.alpha[i * w + 1 + feat.jac_col[t]];
-                    acc += feat.jac_val[t] * component;
-                }
-                *weight = acc;
+        let n = prepared.feats.len() * w;
+        // A second factorization of a vacancy-sized matrix dominates the
+        // step. The rank-one path is for the small-system searches; a
+        // large system refits and does not append.
+        let chol = if n > 1500 {
+            Chol {
+                lower: Vec::new(),
+                n: 0,
             }
-            beta.push(weights);
-        }
-        Self {
+        } else {
+            let matrix =
+                assemble(&prepared, amplitude2, length, solved.jitter).ok_or_else(|| {
+                    SaddleError::Solver("Gaussian-process covariance could not be assembled".into())
+                })?;
+            Chol::factor(&matrix, n).ok_or_else(|| {
+                SaddleError::Solver("Gaussian-process covariance was not positive definite".into())
+            })?
+        };
+        let mut model = Self {
             layout: prepared.layout,
             feats: prepared.feats,
-            beta,
-            alpha_e,
+            positions: data.iter().map(|obs| obs.position.clone()).collect(),
+            beta: Vec::new(),
+            alpha_e: Vec::new(),
+            y_std: prepared.y,
+            chol,
+            jitter: solved.jitter,
+            kind: kind.clone(),
             mean: prepared.mean,
             scale: prepared.scale,
             constant: solved.constant,
             amplitude2,
             length,
             evidence: solved.evidence,
+        };
+        model.install_weights(&solved.alpha);
+        Ok(model)
+    }
+
+    fn install_weights(&mut self, alpha: &[f64]) {
+        let dim = self.layout.dim;
+        let w = dim + 1;
+        self.alpha_e.clear();
+        self.beta.clear();
+        for (i, feat) in self.feats.iter().enumerate() {
+            self.alpha_e.push(alpha[i * w]);
+            let mut weights = vec![0.0; feat.phi.len()];
+            for (p, weight) in weights.iter_mut().enumerate() {
+                let mut acc = 0.0;
+                for t in feat.jac_ptr[p]..feat.jac_ptr[p + 1] {
+                    let component = alpha[i * w + 1 + feat.jac_col[t]];
+                    acc += feat.jac_val[t] * component;
+                }
+                *weight = acc;
+            }
+            self.beta.push(weights);
         }
     }
 

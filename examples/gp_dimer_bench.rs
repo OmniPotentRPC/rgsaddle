@@ -19,8 +19,9 @@ use std::time::Instant;
 
 use ndarray::{Array1, ArrayView1};
 use rgsaddle::{
-    GpDimerConfig, GpDimerSession, GpDimerStatus, MinModeConfig, MinModeKind, MinModeSession,
-    MinModeStatus, PointSurface, SaddleError, max_log_pair_distance,
+    GpDimerConfig, GpDimerSession, GpDimerStatus, GpStepTiming, MinModeConfig, MinModeKind,
+    MinModeSession, MinModeStatus, PointSurface, SaddleError, finite_difference_index,
+    max_log_pair_distance,
 };
 
 const SEEDS: usize = 10;
@@ -52,9 +53,44 @@ fn main() {
         for index in 0..seeds {
             let seed = mix_seed(index);
             let plain = search_plain(&system, seed);
-            let gp = search_gp(&system, seed);
+            let (gp, timings) = search_gp(&system, seed);
             print_row(system.name, seed, "dimer", &plain);
             print_row(system.name, seed, "gp-dimer", &gp);
+            if let Some(certificate) = certify(&system, &gp) {
+                println!(
+                    "certificate\t{name}\t{seed}\tgp-dimer\tindex {index}\tknown {known}\tlowest {lowest:.6}\tgap {gap:.6e}",
+                    name = system.name,
+                    index = certificate.0,
+                    known = certificate.1,
+                    lowest = certificate.2,
+                    gap = certificate.3,
+                );
+            }
+            let mut sizes: Vec<usize> = timings.iter().map(|timing| timing.observations).collect();
+            sizes.sort_unstable();
+            sizes.dedup();
+            for n in sizes {
+                let samples: Vec<f64> = timings
+                    .iter()
+                    .filter(|timing| timing.observations == n)
+                    .map(|timing| timing.fit_nanos as f64 / 1.0e3)
+                    .collect();
+                let rank_one = timings
+                    .iter()
+                    .filter(|timing| timing.observations == n && timing.rank_one)
+                    .count();
+                let width = timings
+                    .iter()
+                    .find(|timing| timing.observations == n)
+                    .map(|timing| timing.width)
+                    .unwrap_or(0);
+                let count = samples.len();
+                println!(
+                    "timing\t{name}\tseed {seed}\tn {n}\twidth {width}\tfit_us {}\trank_one {rank_one}/{count}",
+                    band_owned(samples),
+                    name = system.name,
+                );
+            }
             if plain.converged {
                 plain_calls.push(plain.calls as f64);
                 plain_ms.push(plain.millis);
@@ -245,7 +281,62 @@ fn search_plain(system: &System, seed: u64) -> Outcome {
     )
 }
 
-fn search_gp(system: &System, seed: u64) -> Outcome {
+fn band_owned(mut values: Vec<f64>) -> String {
+    band(&mut values)
+}
+
+fn certify(system: &System, outcome: &Outcome) -> Option<(usize, bool, f64, f64)> {
+    if !outcome.converged {
+        return None;
+    }
+    let project = system.name == "lj13";
+    let surface = RawSurface { kind: &system.kind };
+    let index = finite_difference_index(&surface, outcome.position.view(), project).ok()?;
+    let reference = reference_geometry(system);
+    let known = matches_known(system, &outcome.position, outcome.energy, &reference);
+    let gap = geometry_gap(system, &outcome.position, &reference);
+    Some((index.negative, known, index.lowest, gap))
+}
+
+fn matches_known(
+    system: &System,
+    position: &Array1<f64>,
+    energy: f64,
+    reference: &Array1<f64>,
+) -> bool {
+    let Ok((reference_energy, _)) = RawSurface { kind: &system.kind }.eval(reference.view()) else {
+        return false;
+    };
+    if (energy - reference_energy).abs() > ENERGY_TOL {
+        return false;
+    }
+    geometry_gap(system, position, reference) <= GAP_TOL
+}
+
+fn reference_geometry(system: &System) -> Array1<f64> {
+    match &system.kind {
+        BenchSurface::Muller => ndarray::array![-0.8220015587, 0.6243128025, 0.0],
+        BenchSurface::Morse(slab) => slab.saddle.clone(),
+        BenchSurface::LennardJones { cell: None, .. } => lj13_reference(),
+        BenchSurface::LennardJones { cell: Some(_), .. } => vacancy_reference(),
+    }
+}
+
+struct RawSurface<'a> {
+    kind: &'a BenchSurface,
+}
+
+impl PointSurface for RawSurface<'_> {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        Ok(match self.kind {
+            BenchSurface::LennardJones { cutoff, cell } => lj_energy_gradient(x, *cutoff, *cell),
+            BenchSurface::Muller => muller_energy_gradient(x),
+            BenchSurface::Morse(slab) => slab.energy_gradient(x),
+        })
+    }
+}
+
+fn search_gp(system: &System, seed: u64) -> (Outcome, Vec<GpStepTiming>) {
     let (start, mode) = initial(system, seed);
     let (cell, fixed) = match &system.kind {
         BenchSurface::LennardJones { cell, .. } => {
@@ -289,14 +380,15 @@ fn search_gp(system: &System, seed: u64) -> Outcome {
             }
         }
     }
-    finish(
+    let outcome = finish(
         &surface,
         session.position().to_owned(),
         started,
         converged,
         max_force,
         curvature,
-    )
+    );
+    (outcome, session.step_timings().to_vec())
 }
 
 fn initial(system: &System, seed: u64) -> (Array1<f64>, Array1<f64>) {
@@ -530,6 +622,30 @@ fn muller_energy_gradient(x: ArrayView1<f64>) -> (f64, Array1<f64>) {
     (energy, Array1::from_vec(vec![gx, gy, 4.0 * x[2]]))
 }
 
+fn lj13_reference() -> Array1<f64> {
+    let path = format!(
+        "{}/tests/fixtures/irc/lj13_saddle.txt",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let text = std::fs::read_to_string(path).expect("lj13 saddle");
+    let mut position = Vec::new();
+    for line in text.lines().skip(1) {
+        let v: Vec<f64> = line
+            .split_whitespace()
+            .map(|value| value.parse().unwrap())
+            .collect();
+        if v[0] == 0.0 {
+            position.extend_from_slice(&v[2..5]);
+        }
+    }
+    Array1::from(position)
+}
+
+fn vacancy_reference() -> Array1<f64> {
+    let (position, _) = vacancy_geometry();
+    Array1::from(position)
+}
+
 fn lj13_start(seed: u64) -> (Array1<f64>, Array1<f64>) {
     let path = format!(
         "{}/tests/fixtures/irc/lj13_saddle.txt",
@@ -564,7 +680,7 @@ fn vacancy_cell() -> f64 {
     n * spacing
 }
 
-fn vacancy_start(seed: u64) -> (Array1<f64>, Array1<f64>) {
+fn vacancy_geometry() -> (Vec<f64>, Vec<f64>) {
     let n = 4usize;
     let spacing = 2.0_f64.powf(1.0 / 6.0) * 2.0_f64.sqrt();
     let basis = [
@@ -600,6 +716,11 @@ fn vacancy_start(seed: u64) -> (Array1<f64>, Array1<f64>) {
             mode.extend_from_slice(&[0.0, 0.0, 0.0]);
         }
     }
+    (position, mode)
+}
+
+fn vacancy_start(seed: u64) -> (Array1<f64>, Array1<f64>) {
+    let (position, mode) = vacancy_geometry();
     let (position, mode) = offset_start(&position, &mode, 0.0, 0.008, seed);
     (Array1::from(position), Array1::from(mode))
 }
