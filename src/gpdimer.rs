@@ -1248,14 +1248,18 @@ impl GpDimerSession {
             self.extends_since_fit += 1;
             return Ok(false);
         }
-        let fitted = GaussianProcess::fit(
-            &training,
-            &kind,
-            &crate::gpr::FitOptions {
-                passes: self.config.fit_passes,
-                noise,
-            },
-        )?;
+        let fitted = if self.model_dimension() >= 120 {
+            GaussianProcess::fit_warm(&training, &kind, noise)?
+        } else {
+            GaussianProcess::fit(
+                &training,
+                &kind,
+                &crate::gpr::FitOptions {
+                    passes: self.config.fit_passes,
+                    noise,
+                },
+            )?
+        };
         self.model = Some(fitted);
         self.extends_since_fit = 0;
         Ok(false)

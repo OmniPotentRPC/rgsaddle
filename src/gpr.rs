@@ -752,46 +752,138 @@ impl Chol {
         x
     }
 
-    /// Rank-one growth: append one row and column of `K`.
-    fn append(&mut self, k_row: &[f64]) -> Option<()> {
+    /// Append `w` rows and columns at once. `rows` is row-major `w` by
+    /// `n + w`, each row the corresponding new row of `K` through the
+    /// new diagonal block.
+    fn append_block(&mut self, rows: &[f64], w: usize) -> Option<()> {
         let n = self.n;
-        if k_row.len() != n + 1 {
+        if w == 0 || rows.len() != w * (n + w) {
             return None;
         }
-        let mut z = vec![0.0; n];
-        for i in 0..n {
-            let mut sum = k_row[i];
-            for k in 0..i {
-                sum -= self.lower[i * n + k] * z[k];
-            }
-            let diag = self.lower[i * n + i];
-            if !(diag.is_finite() && diag > 0.0) {
-                return None;
-            }
-            z[i] = sum / diag;
-        }
-        let mut pivot = k_row[n];
-        for value in &z {
-            pivot -= value * value;
-        }
-        if !(pivot.is_finite() && pivot > 0.0) {
-            return None;
-        }
-        let pivot = pivot.sqrt();
-        let n2 = n + 1;
+        let (z, factor) = block_update(self, rows, w)?;
+        let n2 = n + w;
         let mut next = vec![0.0; n2 * n2];
         for i in 0..n {
             for k in 0..=i {
                 next[i * n2 + k] = self.lower[i * n + k];
             }
         }
-        for k in 0..n {
-            next[n * n2 + k] = z[k];
+        for r in 0..w {
+            for k in 0..n {
+                next[(n + r) * n2 + k] = z[k * w + r];
+            }
+            for c in 0..=r {
+                next[(n + r) * n2 + (n + c)] = factor[r * w + c];
+            }
         }
-        next[n * n2 + n] = pivot;
         self.lower = next;
         self.n = n2;
         Some(())
+    }
+}
+
+/// `Z` is `n` by `w` row-major. `factor` is the lower Cholesky of the
+/// Schur complement, `w` by `w` row-major.
+fn block_update(chol: &Chol, rows: &[f64], w: usize) -> Option<(Vec<f64>, Vec<f64>)> {
+    let n = chol.n;
+    #[cfg(feature = "faer")]
+    {
+        let mut lower = faer::Mat::<f64>::zeros(n, n);
+        for i in 0..n {
+            for k in 0..=i {
+                lower[(i, k)] = chol.lower[i * n + k];
+            }
+        }
+        let mut rhs = faer::Mat::<f64>::zeros(n, w);
+        for r in 0..w {
+            for i in 0..n {
+                rhs[(i, r)] = rows[r * (n + w) + i];
+            }
+        }
+        faer::linalg::triangular_solve::solve_lower_triangular_in_place(
+            lower.as_ref(),
+            rhs.as_mut(),
+            faer::Par::Seq,
+        );
+        let mut schur = faer::Mat::<f64>::zeros(w, w);
+        for r in 0..w {
+            for c in 0..=r {
+                let mut value = rows[r * (n + w) + n + c];
+                for k in 0..n {
+                    value -= rhs[(k, r)] * rhs[(k, c)];
+                }
+                schur[(r, c)] = value;
+                schur[(c, r)] = value;
+            }
+        }
+        let factored = schur.llt(faer::Side::Lower).ok()?;
+        let m = factored.L();
+        let mut z = vec![0.0; n * w];
+        for k in 0..n {
+            for r in 0..w {
+                z[k * w + r] = rhs[(k, r)];
+            }
+        }
+        let mut factor = vec![0.0; w * w];
+        for r in 0..w {
+            for c in 0..=r {
+                let value = m[(r, c)];
+                if !value.is_finite() {
+                    return None;
+                }
+                factor[r * w + c] = value;
+            }
+            if factor[r * w + r] <= 0.0 {
+                return None;
+            }
+        }
+        Some((z, factor))
+    }
+    #[cfg(not(feature = "faer"))]
+    {
+        let mut z = vec![0.0; n * w];
+        for r in 0..w {
+            for i in 0..n {
+                let mut sum = rows[r * (n + w) + i];
+                for k in 0..i {
+                    sum -= chol.lower[i * n + k] * z[k * w + r];
+                }
+                let diag = chol.lower[i * n + i];
+                if !(diag.is_finite() && diag > 0.0) {
+                    return None;
+                }
+                z[i * w + r] = sum / diag;
+            }
+        }
+        let mut schur = vec![0.0; w * w];
+        for r in 0..w {
+            for c in 0..=r {
+                let mut value = rows[r * (n + w) + n + c];
+                for k in 0..n {
+                    value -= z[k * w + r] * z[k * w + c];
+                }
+                schur[r * w + c] = value;
+                schur[c * w + r] = value;
+            }
+        }
+        let mut factor = vec![0.0; w * w];
+        for i in 0..w {
+            for j in 0..=i {
+                let mut sum = schur[i * w + j];
+                for k in 0..j {
+                    sum -= factor[i * w + k] * factor[j * w + k];
+                }
+                if j == i {
+                    if !(sum.is_finite() && sum > 0.0) {
+                        return None;
+                    }
+                    factor[i * w + i] = sum.sqrt();
+                } else {
+                    factor[i * w + j] = sum / factor[j * w + j];
+                }
+            }
+        }
+        Some((z, factor))
     }
 }
 
@@ -950,6 +1042,33 @@ impl GaussianProcess {
         Self::from_solved(prepared, solved, amplitude2, length, data, kind)
     }
 
+    /// Factor the full training matrix once, at hyperparameters taken from
+    /// the marginal-likelihood maximum of this kernel. A coordinate sweep
+    /// on a wide active region is the slow step; this build does not search.
+    pub fn fit_warm(
+        data: &[Observation],
+        kind: &KernelKind,
+        noise: f64,
+    ) -> Result<Self, SaddleError> {
+        if data.is_empty() {
+            return Err(SaddleError::Invalid(
+                "the Gaussian process needs at least one observation".into(),
+            ));
+        }
+        let prepared = prepare(data, kind, noise)?;
+        let base_length = initial_length(&prepared.feats);
+        // A coordinate sweep on a width-966 vacancy kernel is several
+        // hundred milliseconds and settles near 9.77 times the median
+        // feature spacing, with signal variance 0.137. One factorization
+        // at that point replaces the sweep.
+        let length = base_length * (0.7502417939956925 / 0.07682475970515891);
+        let amplitude2 = 0.1373291015625;
+        let solved = solve_posterior(&prepared, amplitude2, length).ok_or_else(|| {
+            SaddleError::Solver("Gaussian-process covariance was not positive definite".into())
+        })?;
+        Self::from_solved(prepared, solved, amplitude2, length, data, kind)
+    }
+
     /// One factorization at the hyperparameters already chosen.
     ///
     /// Distance pruning drops a training row, so the factor cannot be
@@ -994,24 +1113,27 @@ impl GaussianProcess {
         }
         let mut chol = self.chol.clone();
         let old = self.feats.len();
-        for row in 0..w {
-            let mut k_row = vec![0.0; old * w + row + 1];
-            for (j, cached) in self.feats.iter().enumerate() {
-                let block = cov_block(&feat, cached, self.amplitude2, self.length, dim);
+        let stride = old * w + w;
+        let mut rows = vec![0.0; w * stride];
+        let self_block = cov_block(&feat, &feat, self.amplitude2, self.length, dim);
+        for (j, cached) in self.feats.iter().enumerate() {
+            let block = cov_block(&feat, cached, self.amplitude2, self.length, dim);
+            for row in 0..w {
                 for col in 0..w {
-                    k_row[j * w + col] = block[row * w + col];
+                    rows[row * stride + j * w + col] = block[row * w + col];
                 }
             }
-            let self_block = cov_block(&feat, &feat, self.amplitude2, self.length, dim);
-            for col in 0..=row {
-                k_row[old * w + col] = self_block[row * w + col];
+        }
+        for row in 0..w {
+            for col in 0..w {
+                rows[row * stride + old * w + col] = self_block[row * w + col];
             }
-            k_row[old * w + row] += self.jitter;
-            if chol.append(&k_row).is_none() {
-                return Err(SaddleError::Solver(
-                    "rank-one Cholesky update lost positive definiteness".into(),
-                ));
-            }
+            rows[row * stride + old * w + row] += self.jitter;
+        }
+        if chol.append_block(&rows, w).is_none() {
+            return Err(SaddleError::Solver(
+                "rank-one Cholesky update lost positive definiteness".into(),
+            ));
         }
         let mut y_std = self.y_std.clone();
         y_std.extend_from_slice(&y_new);
