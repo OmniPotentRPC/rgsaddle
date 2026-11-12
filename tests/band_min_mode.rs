@@ -2,7 +2,10 @@
 //! double well, through the Rust session and the C band step.
 
 use ndarray::{Array1, Array2, ArrayView2};
-use rgsaddle::{BandConfig, BandSession, BandStatus, BandSurface, MinModeRefine, SaddleError};
+use rgsaddle::{
+    BandConfig, BandSession, BandStatus, BandSurface, MinModeRefine, OcinebConfig, OcinebPhase,
+    OcinebSession, PointSurface, SaddleError,
+};
 
 /// V = (x^2 - 1)^2 + 2 y^2 + 2 z^2: minima at (+-1, 0, 0), saddle at
 /// the origin with curvature -4 along x.
@@ -115,6 +118,23 @@ fn an_invalid_refinement_is_refused() {
     refine.alignment_tol = 1.5;
     assert!(BandSession::new(config(Some(refine)), initial_band(7)).is_err());
     let mut refine = MinModeRefine::default();
+    refine.alignment_tol = f64::NAN;
+    assert!(BandSession::new(config(Some(refine)), initial_band(7)).is_err());
+    let mut refine = MinModeRefine::default();
+    refine.alignment_tol = -0.1;
+    assert!(BandSession::new(config(Some(refine)), initial_band(7)).is_err());
+    for bad in [f64::NAN, -0.2, 1.1, f64::INFINITY] {
+        let mut refine = MinModeRefine::default();
+        refine.direction_alignment_tol = Some(bad);
+        match BandSession::new(config(Some(refine)), initial_band(7)) {
+            Err(SaddleError::Invalid(msg)) => {
+                assert!(msg.contains("direction alignment"), "{msg}");
+            }
+            Err(err) => panic!("expected a refused direction alignment, got {err}"),
+            Ok(_) => panic!("expected a refused direction alignment"),
+        }
+    }
+    let mut refine = MinModeRefine::default();
     refine.curvature_retained = 1.5;
     assert!(BandSession::new(config(Some(refine)), initial_band(7)).is_err());
     let mut refine = MinModeRefine::default();
@@ -192,6 +212,125 @@ fn the_refinement_evaluates_the_climbing_image_by_index() {
     let images = surface.0.into_inner().unwrap();
     assert!(!images.is_empty(), "the refinement never ran");
     assert!(images.iter().all(|&i| i == ci), "{images:?}, ci {ci}");
+}
+
+/// Double well on the band. One-image evaluations are a quadratic whose
+/// lowest mode is rotated by `0` radians in the xy plane.
+struct Angled(f64);
+
+impl BandSurface for Angled {
+    fn eval(
+        &self,
+        positions: ArrayView2<f64>,
+        energies: &mut Array1<f64>,
+        gradients: &mut Array2<f64>,
+    ) -> Result<(), SaddleError> {
+        DoubleWell.eval(positions, energies, gradients)
+    }
+}
+
+impl PointSurface for Angled {
+    fn eval(&self, x: ndarray::ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        let theta = self.0;
+        let (c, s) = (theta.cos(), theta.sin());
+        let (px, py, pz) = (x[0], x[1], x[2]);
+        let u = c * px + s * py;
+        let v = -s * px + c * py;
+        let energy = -2.0 * u * u + 4.0 * v * v + pz * pz;
+        let (lu, lv) = (-4.0, 8.0);
+        Ok((
+            energy,
+            Array1::from(vec![
+                lu * u * c - lv * v * s,
+                lu * u * s + lv * v * c,
+                2.0 * pz,
+            ]),
+        ))
+    }
+}
+
+fn first_align(angle_tol: f64) -> (usize, f64, bool) {
+    let mut config = OcinebConfig::default();
+    config.trigger_factor = 10.0;
+    config.stability_count = 1;
+    config.angle_tol = angle_tol;
+    let theta = 50.0 * std::f64::consts::PI / 180.0;
+    let mut session = OcinebSession::new(config, initial_band(7)).unwrap();
+    for _ in 0..80 {
+        let report = session.step(&Angled(theta)).unwrap();
+        if report.phase == OcinebPhase::Align {
+            return (report.iteration, report.alignment, report.fell_back);
+        }
+    }
+    panic!("the alignment step did not run");
+}
+
+/// The bowed double well hands the climbing image to a mode 50° off x.
+/// That overlap is about 0.767: the default 0.85 rejects it, and
+/// 1/sqrt(2) accepts it on the same step.
+#[test]
+fn a_looser_alignment_tolerance_accepts_the_tilted_mode_earlier() {
+    let (strict_at, strict_align, strict_back) = first_align(0.85);
+    let (loose_at, loose_align, loose_back) = first_align(std::f64::consts::FRAC_1_SQRT_2);
+    assert!(
+        (strict_align - loose_align).abs() < 1e-12,
+        "the tolerance must not change the measured overlap"
+    );
+    assert!(strict_align < 0.85, "alignment {strict_align}");
+    assert!(
+        strict_align > std::f64::consts::FRAC_1_SQRT_2,
+        "alignment {strict_align}"
+    );
+    assert!(strict_back, "0.85 rejects the tilted mode");
+    assert!(!loose_back, "1/sqrt(2) accepts the tilted mode");
+    assert_eq!(loose_at, strict_at);
+    let mut config = OcinebConfig::default();
+    config.trigger_factor = 10.0;
+    config.stability_count = 1;
+    let theta = 50.0 * std::f64::consts::PI / 180.0;
+    let mut session = OcinebSession::new(config, initial_band(7)).unwrap();
+    for _ in 0..40 {
+        let report = session.step(&Angled(theta)).unwrap();
+        assert!(
+            !(report.phase == OcinebPhase::Align && !report.fell_back),
+            "the default tolerance accepted at iteration {}",
+            report.iteration
+        );
+    }
+}
+
+fn trace(refine: MinModeRefine) -> (usize, usize, [f64; 3]) {
+    let (session, reports) = run(config(Some(refine)));
+    let calls = reports.iter().map(|r| r.surface_rows).sum();
+    let last = reports.last().unwrap();
+    assert_eq!(last.status, BandStatus::Converged);
+    let ci = last.ci_index.expect("climbing image");
+    let pos = session.positions();
+    (
+        last.iteration,
+        calls,
+        [pos[(ci, 0)], pos[(ci, 1)], pos[(ci, 2)]],
+    )
+}
+
+#[test]
+fn the_default_refinement_path_is_unchanged() {
+    let plain = trace(MinModeRefine::default());
+    let mut explicit = MinModeRefine::default();
+    explicit.direction_alignment_tol = None;
+    assert_eq!(trace(explicit), plain);
+    let mut floor = MinModeRefine::default();
+    // A zero floor never rejects a direction: every overlap is at least 0.
+    floor.direction_alignment_tol = Some(0.0);
+    assert_eq!(
+        trace(floor),
+        plain,
+        "an unset tolerance and a zero floor take the same steps"
+    );
+    assert_eq!(
+        plain,
+        (8, 31, [9.801765807995996e-9, -1.8867025394525994e-9, 0.0,],)
+    );
 }
 
 #[cfg(feature = "capi")]

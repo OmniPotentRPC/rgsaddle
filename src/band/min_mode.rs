@@ -35,7 +35,11 @@
 //! imposed and its direction followed, once the followed curvature has
 //! kept under `curvature_retained` of the last measured value or
 //! the followed mode turned under `min_overlap`, at most every
-//! `refresh_interval` climb steps.
+//! `refresh_interval` climb steps. With `direction_alignment_tol` set,
+//! the closest eigenvector is the search direction only when its overlap
+//! with the previous direction clears that tolerance; otherwise the step
+//! climbs the model's lowest mode. Unset, the closest eigenvector is the
+//! direction at any overlap.
 
 use ndarray::{Array1, ArrayView1, Axis, s};
 
@@ -111,6 +115,15 @@ pub struct MinModeRefine {
     /// The mode is estimated again once the followed mode's overlap with
     /// the one followed a step before is under this.
     pub min_overlap: f64,
+    /// Opt-in floor on the overlap between the P-RFO search direction
+    /// and the mode followed on the previous step. `None`, the default,
+    /// keeps the closest model eigenvector at any overlap, which is the
+    /// step the climb took before this option. `Some(tol)` accepts that
+    /// eigenvector only when the absolute overlap is at least `tol`, and
+    /// otherwise climbs the model's lowest mode. A smaller `tol` accepts
+    /// the alignment at a weaker overlap. `tol` must be finite and in
+    /// `[0, 1]`.
+    pub direction_alignment_tol: Option<f64>,
     /// Climb steps after an estimate before the next one.
     pub refresh_interval: usize,
 }
@@ -135,6 +148,7 @@ impl Default for MinModeRefine {
             max_rotations: 20,
             curvature_retained: 0.3,
             min_overlap: 0.8,
+            direction_alignment_tol: None,
             refresh_interval: 4,
         }
     }
@@ -149,6 +163,13 @@ impl MinModeRefine {
             Some(f) => positive(f),
             None => self.trigger_factor.is_finite(),
         };
+        if let Some(tol) = self.direction_alignment_tol
+            && !(tol.is_finite() && (0.0..=1.0).contains(&tol))
+        {
+            return Err(SaddleError::Invalid(
+                "direction alignment tolerance must be finite and lie in [0, 1]".into(),
+            ));
+        }
         if !(self.trigger_factor >= 0.0
             && non_negative(self.trigger_force)
             && retry
@@ -586,6 +607,12 @@ impl BandSession {
             cell.as_ref(),
             remove_translation,
         )?;
+        if let Some(tol) = config.direction_alignment_tol {
+            run.climb
+                .as_mut()
+                .expect("climb model")
+                .set_direction_alignment(Some(tol));
+        }
         Ok(self.refine_stop(step, BandStatus::Running, estimate.curvature))
     }
 

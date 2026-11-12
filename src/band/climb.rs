@@ -43,6 +43,12 @@ pub(super) struct ModelClimb {
     follow: Array1<f64>,
     followed_curvature: f64,
     overlap: f64,
+    /// `None` keeps the closest eigenvector, which is the step the climb
+    /// took before this tolerance existed. `Some(tol)` accepts that
+    /// eigenvector as the search direction only when its absolute overlap
+    /// with the previous direction is at least `tol`; otherwise the step
+    /// climbs the model's lowest mode.
+    align_tol: Option<f64>,
     /// Curvature of the last measured mode, at most `-1e-3`.
     reference: f64,
 }
@@ -89,6 +95,7 @@ impl ModelClimb {
             followed_curvature: curvature,
             overlap: 1.0,
             reference: curvature.min(-1e-3),
+            align_tol: None,
         };
         climb.refresh(block, mode, curvature);
         climb
@@ -114,6 +121,13 @@ impl ModelClimb {
     /// measured, or turned under `min_overlap` from the one before.
     pub(super) fn stale(&self, retained: f64, min_overlap: f64) -> bool {
         self.followed_curvature > retained * self.reference || self.overlap < min_overlap
+    }
+
+    /// Floor on `|v · d|` before a non-lowest eigenvector is the search
+    /// direction. `None` is the historical choice: the closest eigenvector
+    /// wins at any overlap.
+    pub(super) fn set_direction_alignment(&mut self, tol: Option<f64>) {
+        self.align_tol = tol;
     }
 
     /// The rigid motions at the image's new position.
@@ -186,6 +200,14 @@ impl ModelClimb {
             if overlaps[i].abs() > overlaps[k].abs() {
                 k = i;
             }
+        }
+        // Index 0 is the lowest eigenvalue. A set tolerance accepts the
+        // closest eigenvector only when it is aligned with the previous
+        // direction; a weaker overlap climbs the lowest mode instead.
+        if let Some(tol) = self.align_tol
+            && overlaps[k].abs() < tol
+        {
+            return Ok(0);
         }
         Ok(k)
     }
@@ -462,6 +484,70 @@ mod tests {
         let s = climb.step(&g, 0.0, 1.0).unwrap();
         assert!(s[1] > 0.0, "uphill along the followed mode: {s}");
         assert!(s[8] < 0.0, "downhill along the deeper one: {s}");
+    }
+
+    /// A unit direction in the plane of the higher mode and the lowest.
+    /// `along` is `|mixed · higher|` and lies in (0, 1).
+    fn mixed_follow(along: f64) -> (Array1<f64>, Array1<f64>, Array1<f64>) {
+        let mode = unit(9, 1);
+        let deeper = unit(9, 8);
+        let deep = (1.0 - along * along).sqrt();
+        let mixed = &mode * along + &deeper * deep;
+        (mode, deeper, mixed)
+    }
+
+    fn climb_following(
+        mode: &Array1<f64>,
+        deeper: &Array1<f64>,
+        follow: &Array1<f64>,
+        tol: Option<f64>,
+    ) -> ModelClimb {
+        let x = triangle();
+        let block = vec![(mode.clone(), mode * -1.0), (deeper.clone(), deeper * -3.0)];
+        let mut climb = ModelClimb::fitted(&x, None, None, &block, follow, -1.0, 1.0);
+        climb.set_direction_alignment(tol);
+        climb
+    }
+
+    /// The search direction is the eigenvector closest to the previous
+    /// one. A tolerance accepts that alignment only at or above the
+    /// floor; a looser floor accepts it at a weaker overlap, which a
+    /// rotating mode reaches first. `None` is the old rule.
+    #[test]
+    fn a_looser_direction_alignment_accepts_the_followed_mode_earlier() {
+        // 0.75 is the closer component, so the higher mode is the closest
+        // eigenvector, and it sits between the two tolerances. 0.95 clears
+        // both. The looser tolerance therefore accepts the alignment at the
+        // weaker overlap, which a rotating direction reaches first.
+        let (mode, deeper, weak) = mixed_follow(0.75);
+        let weak_overlap = weak.dot(&mode).abs();
+        assert!(
+            (weak_overlap - 0.75).abs() < 1e-12,
+            "weak overlap {weak_overlap}"
+        );
+        let (_, _, strong) = mixed_follow(0.95);
+        let strong_overlap = strong.dot(&mode).abs();
+        assert!(
+            (strong_overlap - 0.95).abs() < 1e-12,
+            "strong overlap {strong_overlap}"
+        );
+
+        let accepts = |follow: &Array1<f64>, tol: Option<f64>| {
+            let mut climb = climb_following(&mode, &deeper, follow, tol);
+            let (direction, curvature) = climb.lowest().unwrap();
+            direction.dot(&mode).abs() > 0.9 && (curvature + 1.0).abs() < 1e-8
+        };
+        assert!(
+            !accepts(&weak, Some(0.9)),
+            "0.9 must wait for a closer direction"
+        );
+        assert!(accepts(&weak, Some(0.6)), "0.6 accepts the weaker overlap");
+        assert!(accepts(&strong, Some(0.9)));
+        assert!(accepts(&strong, Some(0.6)));
+        assert!(
+            accepts(&weak, None),
+            "without a tolerance the closest eigenvector is the direction"
+        );
     }
 
     #[test]
