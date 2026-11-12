@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 34u
+#define RGSADDLE_ABI_MINOR 35u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -1140,6 +1140,51 @@ rgsaddle_status_t rgsaddle_minmode_set_torque_window(RgsaddleMinMode *session,
 rgsaddle_status_t rgsaddle_band_set_exp_precon(RgsaddleBand *band, double a,
                                                double c_stab, double mu,
                                                double r_cut_factor);
+
+/**
+ * Absolute pair cutoff of the exponential metric, in the length unit of
+ * the positions, beside r_cut_factor. r_cut > 0 installs it. r_cut <= 0
+ * clears it and the factor applies again: pairs within
+ * r_cut_factor * r_nn. A cutoff below r_nn is raised to 1.1 r_nn, as
+ * ASE's Exp does. A non-finite r_cut returns RGSADDLE_INVALID_PARAMETER
+ * and leaves the metric unchanged. Refused when the metric is not
+ * installed. Calling rgsaddle_band_set_exp_precon again keeps this
+ * cutoff. ABI minor 35.
+ */
+rgsaddle_status_t rgsaddle_band_set_exp_r_cut(RgsaddleBand *band, double r_cut);
+
+/**
+ * Per-atom hold for a band. mask[i] nonzero holds atom i fixed in every
+ * image. n is the atom count. A null mask clears the hold.
+ *
+ * ASE's Exp preconditioner with FixAtoms drops every pair that touches
+ * a fixed atom (ase/optimize/precon/precon.py, the mask on the pair
+ * coefficient). The same pairs are left out of P here. The band force
+ * on a held atom is zero, so FIRE, L-BFGS, quick-min, the trust-region
+ * step, the solid-state step and ODE12r leave it where it stands.
+ * A host that fixes atoms should also set RGSADDLE_BAND_KEEP_TRANSLATION,
+ * as eOn does. A length other than the atom count returns
+ * RGSADDLE_INVALID_PARAMETER or RGSADDLE_SHAPE and leaves the band
+ * unchanged. ABI minor 35.
+ */
+rgsaddle_status_t rgsaddle_band_set_fixed_mask(RgsaddleBand *band,
+                                               const int32_t *mask, int64_t n);
+
+/**
+ * ODE12r acceptance (Makri, Ortner and Kermode, J. Chem. Phys. 150,
+ * 094109 (2019); ASE ase/optimize/ode.py). A trial of length h with
+ * residual R and local error E = (h/2) ||s - s'||_inf is accepted when
+ * R' <= R (1 - c1 h), or when R' <= c2 R and E <= atol + rtol.
+ * A non-positive finite argument takes today's built-in value:
+ * rtol 0.1, atol 0, c1 0.01, c2 2. atol 0 leaves the error test at
+ * E <= rtol. A non-finite argument returns RGSADDLE_INVALID_PARAMETER
+ * and leaves the band unchanged. Refused unless the band method is
+ * RGSADDLE_METHOD_ODE12R. The defaults are rgmin's integrator, so a
+ * band that never calls this steps as before. ABI minor 35.
+ */
+rgsaddle_status_t rgsaddle_band_set_ode12r_tolerances(RgsaddleBand *band,
+                                                      double rtol, double atol,
+                                                      double c1, double c2);
 
 /**
  * Zoom-NEB, eOn's zoom_* keys. Once the climbing image has kept its

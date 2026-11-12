@@ -325,6 +325,7 @@ fn ode12r_reproduces_the_cu_vacancy_counts_of_table_ii() {
         c_stab: 0.1,
         mu: None,
         r_cut_factor: 2.2,
+        r_cut: None,
     };
     let plain = evaluations(Method::Ode12r, None, 1.0, &band);
     let precon = evaluations(Method::Ode12r, Some(exp), 1.0, &band);

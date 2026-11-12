@@ -727,7 +727,18 @@ impl BandSession {
     /// Write one image and its surface answer into the band and its
     /// last evaluation. The other rows keep their cached values.
     fn put_image(&mut self, image: usize, point: &Point, projected: ArrayView1<f64>) {
-        self.positions.row_mut(image).assign(&point.x);
+        let mut x = point.x.clone();
+        if let Some(mask) = self.state.fixed.as_deref() {
+            let held = self.positions.row(image).to_owned();
+            for (atom, fixed) in mask.iter().copied().enumerate() {
+                if fixed {
+                    for axis in 0..3 {
+                        x[3 * atom + axis] = held[3 * atom + axis];
+                    }
+                }
+            }
+        }
+        self.positions.row_mut(image).assign(&x);
         let x = self.interior_flat();
         let dof = self.positions.ncols();
         let mut slot = self.state.last.lock().unwrap_or_else(|e| e.into_inner());
@@ -736,9 +747,22 @@ impl BandSession {
             last.energies[image] = point.energy;
             last.gradients.row_mut(image).assign(&point.gradient);
             if last.projected.len() == (self.positions.nrows() - 2) * dof {
+                let mut stored = projected.to_owned();
+                if let Some(mask) = self.state.fixed.as_deref() {
+                    for (atom, held) in mask.iter().copied().enumerate() {
+                        if held {
+                            for axis in 0..3 {
+                                let col = 3 * atom + axis;
+                                if col < stored.len() {
+                                    stored[col] = 0.0;
+                                }
+                            }
+                        }
+                    }
+                }
                 last.projected
                     .slice_mut(s![(image - 1) * dof..image * dof])
-                    .assign(&projected);
+                    .assign(&stored);
             }
         }
     }

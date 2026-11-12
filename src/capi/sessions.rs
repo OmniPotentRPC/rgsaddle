@@ -3095,8 +3095,100 @@ pub unsafe extern "C" fn rgsaddle_band_set_exp_precon(
             None
         },
         r_cut_factor: pick(r_cut_factor, defaults.r_cut_factor),
+        r_cut: unsafe { (*band).session.exp_precon().and_then(|precon| precon.r_cut) },
     };
     match unsafe { (*band).session.set_exp_precon(precon) } {
+        Ok(()) => RGSADDLE_OK,
+        Err(e) => status_of(&e),
+    }
+}
+
+/// Absolute pair cutoff for the exponential metric. `r_cut > 0` sets it.
+/// `r_cut <= 0` clears it and `r_cut_factor` applies again. A non-finite
+/// value is refused. ASE raises a cutoff below `r_nn` to `1.1 r_nn`.
+///
+/// # Safety
+/// `band` is a live session or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_band_set_exp_r_cut(band: *mut RgsaddleBand, r_cut: f64) -> i32 {
+    if band.is_null() {
+        return RGSADDLE_NULL_BAND;
+    }
+    if !r_cut.is_finite() {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let cut = if r_cut > 0.0 { Some(r_cut) } else { None };
+    match unsafe { (*band).session.set_exp_r_cut(cut) } {
+        Ok(()) => RGSADDLE_OK,
+        Err(e) => status_of(&e),
+    }
+}
+
+/// Per-atom hold. A nonzero `mask[i]` holds atom `i`. `n` is the atom
+/// count. A null `mask` clears the hold. The exponential metric omits
+/// pairs that touch a held atom, and every band stepper, including
+/// ODE12r, leaves that atom where it stands.
+///
+/// # Safety
+/// `band` is a live session or null. `mask`, when non-null, has `n` ints.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_band_set_fixed_mask(
+    band: *mut RgsaddleBand,
+    mask: *const i32,
+    n: i64,
+) -> i32 {
+    if band.is_null() {
+        return RGSADDLE_NULL_BAND;
+    }
+    if mask.is_null() {
+        return match unsafe { (*band).session.set_fixed_mask(None) } {
+            Ok(()) => RGSADDLE_OK,
+            Err(e) => status_of(&e),
+        };
+    }
+    if n < 0 {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let raw = unsafe { std::slice::from_raw_parts(mask, n as usize) };
+    let held: Vec<bool> = raw.iter().map(|flag| *flag != 0).collect();
+    match unsafe { (*band).session.set_fixed_mask(Some(&held)) } {
+        Ok(()) => RGSADDLE_OK,
+        Err(e) => status_of(&e),
+    }
+}
+
+/// ODE12r tolerances. A non-positive finite value takes the built-in
+/// default: `rtol` 0.1, `atol` 0, `c1` 0.01, `c2` 2. The local-error
+/// test is `E <= atol + rtol`. A non-finite value is refused and the
+/// band is left unchanged. Refused when the band is not ODE12r.
+///
+/// # Safety
+/// `band` is a live session or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_band_set_ode12r_tolerances(
+    band: *mut RgsaddleBand,
+    rtol: f64,
+    atol: f64,
+    c1: f64,
+    c2: f64,
+) -> i32 {
+    if band.is_null() {
+        return RGSADDLE_NULL_BAND;
+    }
+    if ![rtol, atol, c1, c2].iter().all(|v| v.is_finite()) {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let defaults = crate::Ode12rTolerances::default();
+    let pick = |v: f64, d: f64| if v > 0.0 { v } else { d };
+    // atol 0 is the default. A negative atol also means "use 0".
+    let atol = if atol > 0.0 { atol } else { defaults.atol };
+    let tol = crate::Ode12rTolerances {
+        rtol: pick(rtol, defaults.rtol),
+        atol,
+        c1: pick(c1, defaults.c1),
+        c2: pick(c2, defaults.c2),
+    };
+    match unsafe { (*band).session.set_ode12r_tolerances(tol) } {
         Ok(()) => RGSADDLE_OK,
         Err(e) => status_of(&e),
     }

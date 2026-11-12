@@ -304,8 +304,12 @@ impl Default for BandConfig {
 /// Euclidean perpendicular force does not.
 ///
 /// Pairs within `r_cut_factor * r_nn` of one another in the same image
-/// enter the matrix, `r_nn` being the largest per-atom nearest-neighbour
-/// distance over the interior images; a cell wraps the distances. The
+/// enter the matrix, or within an absolute [`ExpBandPrecon::r_cut`] when
+/// one is set, `r_nn` being the largest per-atom nearest-neighbour
+/// distance over the interior images; a cell wraps the distances. An atom
+/// held by [`BandSession::set_fixed_mask`] is left out of every pair, as
+/// ASE's Exp preconditioner drops a pair that touches a `FixAtoms` atom,
+/// and the band force on that atom is zero so the stepper holds it. The
 /// matrices are rebuilt when any atom has moved more than `r_nn / 2`
 /// since the last build; an energy scale that is not given is estimated
 /// once by rgmin's sine probe on the first interior image, which costs
@@ -323,8 +327,12 @@ pub struct ExpBandPrecon {
     /// Energy scale `mu`. `None` lets rgmin estimate it from the band
     /// force on the first step, which costs band evaluations.
     pub mu: Option<f64>,
-    /// Cutoff as a multiple of `r_nn`.
+    /// Cutoff as a multiple of `r_nn`. Used when [`Self::r_cut`] is `None`.
     pub r_cut_factor: f64,
+    /// Absolute pair cutoff in the length unit of the positions. `None`,
+    /// the default, keeps `r_cut_factor * r_nn`. ASE's Exp raises a cutoff
+    /// below `r_nn` to `1.1 r_nn`.
+    pub r_cut: Option<f64>,
 }
 
 impl Default for ExpBandPrecon {
@@ -334,7 +342,65 @@ impl Default for ExpBandPrecon {
             c_stab: 0.1,
             mu: None,
             r_cut_factor: 2.0,
+            r_cut: None,
         }
+    }
+}
+
+/// ODE12r acceptance constants. The integrator built into the band uses
+/// `rtol = 0.1`, `c1 = 0.01`, `c2 = 2` and no extra absolute tolerance,
+/// the values in Makri, Ortner and Kermode, J. Chem. Phys. 150, 094109
+/// (2019), and in ASE's `ode12r` (`ase/optimize/ode.py`: `rtol=1e-1`,
+/// `C1=1e-2`, `C2=2`). The local error is `E = (h/2) ||s - s'||_inf`.
+/// A trial is accepted when the residual contracts,
+/// `R' <= R (1 - c1 h)`, or when `R' <= c2 R` and `E <= atol + rtol`.
+/// With `atol = 0` the error test is the paper's `E <= rtol`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Ode12rTolerances {
+    /// Local-error scale. `0.1` in the built-in integrator.
+    pub rtol: f64,
+    /// Added to `rtol` in the local-error test. `0` leaves the test unchanged.
+    pub atol: f64,
+    /// Residual contraction coefficient. `0.01` in the built-in integrator.
+    pub c1: f64,
+    /// Residual growth bound. `2` in the built-in integrator.
+    pub c2: f64,
+}
+
+impl Default for Ode12rTolerances {
+    fn default() -> Self {
+        Self {
+            rtol: 0.1,
+            atol: 0.0,
+            c1: 0.01,
+            c2: 2.0,
+        }
+    }
+}
+
+impl Ode12rTolerances {
+    fn valid(self) -> Result<(), SaddleError> {
+        if !(self.rtol.is_finite() && self.rtol > 0.0) {
+            return Err(SaddleError::Invalid(
+                "ODE12r rtol must be finite and positive".into(),
+            ));
+        }
+        if !(self.atol.is_finite() && self.atol >= 0.0) {
+            return Err(SaddleError::Invalid(
+                "ODE12r atol must be finite and non-negative".into(),
+            ));
+        }
+        if !(self.c1.is_finite() && self.c1 > 0.0) {
+            return Err(SaddleError::Invalid(
+                "ODE12r c1 must be finite and positive".into(),
+            ));
+        }
+        if !(self.c2.is_finite() && self.c2 > 0.0) {
+            return Err(SaddleError::Invalid(
+                "ODE12r c2 must be finite and positive".into(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -496,6 +562,9 @@ struct BandState {
     previous: Mutex<Option<BandEval>>,
     /// Rows evaluated by the surface during the current step.
     rows: AtomicUsize,
+    /// Per-atom hold. `None` is every atom free. A true entry does not
+    /// move and is left out of the exponential metric.
+    fixed: Option<Vec<bool>>,
 }
 
 impl BandState {
@@ -512,6 +581,7 @@ impl BandState {
             last: Mutex::new(None),
             previous: Mutex::new(None),
             rows: AtomicUsize::new(0),
+            fixed: None,
         }
     }
     fn convergence_force(&self, force: &Array1<f64>) -> f64 {
@@ -885,22 +955,27 @@ fn solid_image(
     stresses: &Array2<f64>,
     jacobian: f64,
     pressure: f64,
+    fixed: Option<&[bool]>,
 ) -> Result<(Array1<f64>, Array1<f64>), SaddleError> {
     let dof = positions.ncols();
-    let (next_atomic, next_cell) = joint_displacement(
+    let (mut next_atomic, next_cell) = joint_displacement(
         cells[i].0,
         positions.row(i),
         cells[i + 1].0,
         positions.row(i + 1),
         jacobian,
     )?;
-    let (prev_atomic, prev_cell) = joint_displacement(
+    let (mut prev_atomic, prev_cell) = joint_displacement(
         cells[i - 1].0,
         positions.row(i - 1),
         cells[i].0,
         positions.row(i),
         jacobian,
     )?;
+    if let Some(mask) = fixed {
+        zero_fixed(mask, &mut next_atomic);
+        zero_fixed(mask, &mut prev_atomic);
+    }
     let diff_next = pack_joint(next_atomic.view(), next_cell);
     let diff_prev = pack_joint(prev_atomic.view(), prev_cell);
     let dist_next = diff_next.dot(&diff_next).sqrt();
@@ -948,12 +1023,15 @@ fn solid_image(
         remove_net_translation(&mut atomic);
         projected.slice_mut(s![..dof]).assign(&atomic);
     }
+    if let Some(mask) = fixed {
+        zero_fixed(mask, &mut projected);
+    }
     let mut raw = [0.0; 9];
     for k in 0..9 {
         raw[k] = projected[dof + k];
     }
     let cleared = unpack_cell(&raw);
-    let (delta_r, delta_h) = cartesian_step(
+    let (mut delta_r, delta_h) = cartesian_step(
         positions.row(i),
         cells[i].0,
         projected.slice(s![..dof]),
@@ -962,6 +1040,9 @@ fn solid_image(
     )?;
     for k in 0..9 {
         projected[dof + k] = cleared[k / 3][k % 3];
+    }
+    if let Some(mask) = fixed {
+        zero_fixed(mask, &mut delta_r);
     }
     Ok((projected, pack_joint(delta_r.view(), delta_h)))
 }
@@ -1024,6 +1105,7 @@ fn assemble_solid(
             &stresses,
             jacobian,
             pressure,
+            state.fixed.as_deref(),
         )?;
         let start = (i - 1) * seg;
         joint.slice_mut(s![start..start + seg]).assign(&projected);
@@ -1041,8 +1123,18 @@ fn assemble_solid(
         state.armed.store(true, Ordering::Relaxed);
         state.ci_index.store(max_i as i64, Ordering::Relaxed);
         let (projected, step) = solid_image(
-            config, &spring, max_i, true, &positions, &cells, &enthalpy, &gradients, &stresses,
-            jacobian, pressure,
+            config,
+            &spring,
+            max_i,
+            true,
+            &positions,
+            &cells,
+            &enthalpy,
+            &gradients,
+            &stresses,
+            jacobian,
+            pressure,
+            state.fixed.as_deref(),
         )?;
         let start = (max_i - 1) * seg;
         joint.slice_mut(s![start..start + seg]).assign(&projected);
@@ -1071,6 +1163,96 @@ fn assemble_solid(
     Ok((pseudo_energy, cartesian, max_component))
 }
 
+/// Zero the Cartesian components of atoms `mask` holds. A `None` mask
+/// is not passed here: the caller skips the call, so an unmasked force
+/// vector is not written.
+fn zero_fixed(mask: &[bool], force: &mut Array1<f64>) {
+    for (atom, held) in mask.iter().copied().enumerate() {
+        if !held {
+            continue;
+        }
+        let base = 3 * atom;
+        if base + 2 < force.len() {
+            force[base] = 0.0;
+            force[base + 1] = 0.0;
+            force[base + 2] = 0.0;
+        }
+    }
+}
+
+/// Copy held atoms from `reference` into `x`. Both are flat interiors
+/// of `dof` per image.
+fn pin_fixed(mask: &[bool], reference: &[f64], x: &mut [f64], dof: usize) {
+    if dof == 0 || mask.is_empty() {
+        return;
+    }
+    let images = x.len() / dof;
+    for image in 0..images {
+        for (atom, held) in mask.iter().copied().enumerate() {
+            if !held {
+                continue;
+            }
+            let base = image * dof + 3 * atom;
+            if base + 2 < x.len() && base + 2 < reference.len() {
+                x[base] = reference[base];
+                x[base + 1] = reference[base + 1];
+                x[base + 2] = reference[base + 2];
+            }
+        }
+    }
+}
+
+/// eOn `maxAtomMotionAppliedV`, the same cap rgmin's band step uses:
+/// scale the whole step so the largest per-atom displacement is at
+/// most `cap`.
+fn scale_atom_step(origin: &Array1<f64>, trial: &mut Array1<f64>, cap: f64) {
+    if !(cap > 0.0 && cap.is_finite()) {
+        return;
+    }
+    let n = trial.len();
+    let mut max_atom = 0.0;
+    let mut i = 0;
+    while i + 3 <= n {
+        let dx = trial[i] - origin[i];
+        let dy = trial[i + 1] - origin[i + 1];
+        let dz = trial[i + 2] - origin[i + 2];
+        let r = (dx * dx + dy * dy + dz * dz).sqrt();
+        if r > max_atom {
+            max_atom = r;
+        }
+        i += 3;
+    }
+    if max_atom > cap && max_atom > 0.0 {
+        let scale = cap / max_atom;
+        for k in 0..n {
+            trial[k] = origin[k] + scale * (trial[k] - origin[k]);
+        }
+    }
+}
+
+/// Copy held atoms inside a solid-state packing (atomic `dof`, then 9
+/// cell numbers, per interior image).
+fn pin_fixed_packed(mask: &[bool], reference: &[f64], x: &mut [f64], dof: usize) {
+    let seg = dof + 9;
+    if seg == 0 {
+        return;
+    }
+    let images = x.len() / seg;
+    for image in 0..images {
+        for (atom, held) in mask.iter().copied().enumerate() {
+            if !held {
+                continue;
+            }
+            let base = image * seg + 3 * atom;
+            if base + 2 < x.len() && base + 2 < reference.len() {
+                x[base] = reference[base];
+                x[base + 1] = reference[base + 1];
+                x[base + 2] = reference[base + 2];
+            }
+        }
+    }
+}
+
 /// Projected force on interior image `i`, climbing when `climb`, and
 /// with a metric the paper's preconditioned driving force beside it.
 #[allow(clippy::too_many_arguments)]
@@ -1085,6 +1267,7 @@ fn image_force(
     energies: &Array1<f64>,
     gradients: &Array2<f64>,
     metric: Option<&Exp>,
+    fixed: Option<&[bool]>,
 ) -> Result<(Array1<f64>, Option<Array1<f64>>), SaddleError> {
     let dof = endpoint_first.len();
     let n_images = energies.len();
@@ -1103,6 +1286,12 @@ fn image_force(
     if let Some(cell) = &config.cell {
         cell.minimum_image(&mut pos_diff_next);
         cell.minimum_image(&mut pos_diff_prev);
+    }
+    if let Some(mask) = fixed {
+        // A held atom is not a band coordinate. ASE's FixAtoms leaves
+        // it out of the tangent the same way.
+        zero_fixed(mask, &mut pos_diff_next);
+        zero_fixed(mask, &mut pos_diff_prev);
     }
     let dist_next = pos_diff_next.dot(&pos_diff_next).sqrt();
     let dist_prev = pos_diff_prev.dot(&pos_diff_prev).sqrt();
@@ -1195,6 +1384,13 @@ fn image_force(
         }
         None => None,
     };
+    let mut driving = driving;
+    if let Some(mask) = fixed {
+        zero_fixed(mask, &mut projected);
+        if let Some(driving) = driving.as_mut() {
+            zero_fixed(mask, driving);
+        }
+    }
     Ok((projected, driving))
 }
 
@@ -1314,6 +1510,7 @@ fn assemble_band_with(
     let spring = config.spring.at_band(energies.view(), gradients.view());
 
     let metric_of = |i: usize| metrics.and_then(|m| m.get(i - 1));
+    let fixed = state.fixed.as_deref();
     // An armed climbing image under the metric climbs in the P-metric,
     // so a metric slice carries every image.
     let mut projected = Array1::zeros((n_images - 2) * dof);
@@ -1330,6 +1527,7 @@ fn assemble_band_with(
             &energies,
             &gradients,
             metric_of(i),
+            fixed,
         )?;
         projected.slice_mut(s![(i - 1) * dof..i * dof]).assign(&f);
         if let Some(driving) = driving.as_mut() {
@@ -1371,6 +1569,7 @@ fn assemble_band_with(
                 &energies,
                 &gradients,
                 metric_of(ci_i),
+                fixed,
             )?;
             projected
                 .slice_mut(s![(ci_i - 1) * dof..ci_i * dof])
@@ -1584,6 +1783,13 @@ pub struct BandSession {
     /// Consecutive ODE12r steps that rejected their trial.
     unmoved: usize,
     zoom: zoom::ZoomState,
+    /// Requested ODE12r tolerances. The built-in integrator is used
+    /// while these are [`Ode12rTolerances::default`].
+    ode_tol: Ode12rTolerances,
+    /// Integrator memory for a non-default ODE12r tolerance. `None`
+    /// leaves the step on rgmin's integrator, whose constants are the
+    /// defaults above.
+    ode_state: Option<rgmin::Ode12rState>,
 }
 
 impl BandSession {
@@ -1661,6 +1867,8 @@ impl BandSession {
             exp: None,
             unmoved: 0,
             zoom: zoom::ZoomState::default(),
+            ode_tol: Ode12rTolerances::default(),
+            ode_state: None,
         };
         if let Some(precon) = session.config.exp_precon {
             session.set_exp_precon(precon)?;
@@ -1683,9 +1891,13 @@ impl BandSession {
             && precon.r_cut_factor.is_finite()
             && precon.r_cut_factor > 1.0)
             || precon.mu.is_some_and(|mu| !(mu.is_finite() && mu > 0.0))
+            || precon
+                .r_cut
+                .is_some_and(|cut| !(cut.is_finite() && cut > 0.0))
         {
             return Err(SaddleError::Invalid(
-                "exponential metric needs A > 0, C_stab > 0, r_cut_factor > 1 and mu > 0".into(),
+                "exponential metric needs A > 0, C_stab > 0, r_cut_factor > 1, r_cut > 0 and mu > 0"
+                    .into(),
             ));
         }
         if self.positions.ncols() < 6 {
@@ -1725,10 +1937,188 @@ impl BandSession {
         self.exp.as_ref().and_then(|e| e.mu)
     }
 
+    /// Absolute pair cutoff of the installed exponential metric. `None`
+    /// clears it and the factor `r_cut_factor * r_nn` applies again.
+    /// ASE raises a positive cutoff below `r_nn` to `1.1 r_nn` when the
+    /// matrix is built. Refused when the metric is not installed.
+    pub fn set_exp_r_cut(&mut self, r_cut: Option<f64>) -> Result<(), SaddleError> {
+        if let Some(cut) = r_cut
+            && !(cut.is_finite() && cut > 0.0)
+        {
+            return Err(SaddleError::Invalid(
+                "absolute r_cut must be finite and positive".into(),
+            ));
+        }
+        let Some(precon) = self.config.exp_precon.as_mut() else {
+            return Err(SaddleError::Invalid(
+                "absolute r_cut needs the exponential metric installed first".into(),
+            ));
+        };
+        precon.r_cut = r_cut;
+        if let Some(exp) = self.exp.as_mut() {
+            exp.precon.r_cut = r_cut;
+            exp.metrics.clear();
+            exp.built_at = Array1::zeros(0);
+        }
+        Ok(())
+    }
+
+    /// Atoms the band holds fixed, or `None` when every atom is free.
+    #[must_use]
+    pub fn fixed_mask(&self) -> Option<&[bool]> {
+        self.state.fixed.as_deref()
+    }
+
+    /// Hold atoms whose mask entry is true. `None`, or a mask of all
+    /// false, clears the hold. The length is the atom count.
+    ///
+    /// A held atom is omitted from the exponential metric (ASE Exp with
+    /// `FixAtoms` drops every pair that touches one) and its band force
+    /// is zero, so FIRE, L-BFGS, quick-min, the trust region, the
+    /// solid-state step and ODE12r leave it where it stands. Setting
+    /// the same mask again changes nothing. A new mask drops the
+    /// optimizer history and the cached force, because both were built
+    /// in the old coordinates.
+    pub fn set_fixed_mask(&mut self, mask: Option<&[bool]>) -> Result<(), SaddleError> {
+        let n_atoms = self.positions.ncols() / 3;
+        let next = match mask {
+            None => None,
+            Some(mask) if mask.len() != n_atoms => {
+                return Err(SaddleError::Shape(format!(
+                    "fixed mask length {} is not the atom count {n_atoms}",
+                    mask.len()
+                )));
+            }
+            Some(mask) if mask.iter().all(|held| !held) => None,
+            Some(mask) => Some(mask.to_vec()),
+        };
+        if self.state.fixed == next {
+            return Ok(());
+        }
+        self.state.fixed = next;
+        self.solver.forget();
+        self.solver.forget_evaluation();
+        self.state.drop_last();
+        if let Some(exp) = self.exp.as_mut() {
+            exp.metrics.clear();
+            exp.built_at = Array1::zeros(0);
+        }
+        Ok(())
+    }
+
+    /// ODE12r tolerances in force. The defaults are rgmin's built-in
+    /// integrator (`rtol` 0.1, `atol` 0, `c1` 0.01, `c2` 2) and leave
+    /// that integrator in place, so a band that never sets them steps
+    /// exactly as before. Any other value integrates with those
+    /// constants: the local-error test is `E <= atol + rtol`. Refused
+    /// unless the band's method is ODE12r.
+    pub fn set_ode12r_tolerances(&mut self, tol: Ode12rTolerances) -> Result<(), SaddleError> {
+        if self.config.quickmin || !matches!(self.config.method, Method::Ode12r) {
+            return Err(SaddleError::Invalid(
+                "ODE12r tolerances apply only to an ODE12r band".into(),
+            ));
+        }
+        tol.valid()?;
+        if tol == Ode12rTolerances::default() {
+            self.ode_tol = tol;
+            if self.ode_state.take().is_some() {
+                self.solver.forget();
+                self.solver.forget_evaluation();
+            }
+            return Ok(());
+        }
+        let mut state = rgmin::Ode12rState::new(self.config.time_step);
+        state.rtol = tol.rtol + tol.atol;
+        state.c1 = tol.c1;
+        state.c2 = tol.c2;
+        self.ode_tol = tol;
+        self.ode_state = Some(state);
+        self.solver.forget();
+        self.solver.forget_evaluation();
+        Ok(())
+    }
+
+    /// Tolerances the next ODE12r step will use. The default is the
+    /// built-in integrator.
+    #[must_use]
+    pub fn ode12r_tolerances(&self) -> Ode12rTolerances {
+        self.ode_tol
+    }
+
+    /// Dense exponential metric of one interior image, after a step has
+    /// built it. `None` before that, or without a metric.
+    #[cfg(test)]
+    fn exp_dense(&self, interior: usize) -> Option<Array2<f64>> {
+        self.exp.as_ref()?.metrics.get(interior).map(Exp::to_dense)
+    }
+
+    /// Driving force ODE12r integrates: the preconditioned force when
+    /// the metric is installed, otherwise the projected band force.
+    fn band_drive<S: BandSurface>(
+        &self,
+        surface: &S,
+        endpoint_first: ArrayView1<f64>,
+        endpoint_last: ArrayView1<f64>,
+        x: ArrayView1<f64>,
+        metrics: Option<&[Exp]>,
+    ) -> Result<Array1<f64>, SaddleError> {
+        let (_, projected, _, driving) = assemble_band_with(
+            &self.config,
+            &self.state,
+            surface,
+            endpoint_first,
+            endpoint_last,
+            x,
+            metrics,
+        )?;
+        Ok(driving.unwrap_or(projected))
+    }
+
+    /// One ODE12r trial with the session's non-default tolerances.
+    /// A rejection leaves `x` where it was. The acceptance test and the
+    /// step-length update are ASE's `ode12r` / rgmin's `Ode12rState`,
+    /// with the local-error bound `atol + rtol`.
+    fn ode12r_trial<S: BandSurface>(
+        &mut self,
+        surface: &S,
+        endpoint_first: ArrayView1<f64>,
+        endpoint_last: ArrayView1<f64>,
+        metrics: Option<&[Exp]>,
+        x: &mut Array1<f64>,
+    ) -> Result<(), SaddleError> {
+        let force = self.band_drive(surface, endpoint_first, endpoint_last, x.view(), metrics)?;
+        let h = self.ode_state.as_mut().expect("ode tolerances").open();
+        let dx = force.mapv(|component| h * component);
+        let mut trial = &*x + &dx;
+        if self.config.max_move > 0.0 && self.config.max_move.is_finite() {
+            scale_atom_step(x, &mut trial, self.config.max_move);
+        }
+        let h_taken = rgmin::ode12r_taken_step(h, &dx, &(&trial - &*x));
+        let force_new = self.band_drive(
+            surface,
+            endpoint_first,
+            endpoint_last,
+            trial.view(),
+            metrics,
+        )?;
+        let ode = self.ode_state.as_mut().expect("ode tolerances");
+        let verdict = ode.judge(&force, &force, &force_new, &force_new, h_taken);
+        if verdict.accepted && h_taken < h {
+            ode.h = ode.h.max(h_taken);
+        }
+        if verdict.accepted {
+            x.assign(&trial);
+        }
+        Ok(())
+    }
+
     /// Pair lists of the interior images, one per image with the atom
     /// indices of that image, and the largest per-atom nearest-neighbour
     /// distance over all of them. Distances are wrapped by the cell.
-    fn band_neighbours(&self, r_cut_factor: f64) -> (Vec<Neighbours>, f64) {
+    /// An absolute cutoff replaces `r_cut_factor * r_nn`, and ASE's Exp
+    /// raises a cutoff below `r_nn` to `1.1 r_nn`. Pairs that touch a
+    /// held atom are omitted.
+    fn band_neighbours(&self, precon: &ExpBandPrecon) -> (Vec<Neighbours>, f64) {
         let n_images = self.positions.nrows();
         let n_atoms = self.positions.ncols() / 3;
         let mut per_image: Vec<Vec<(usize, usize, f64)>> = Vec::new();
@@ -1760,13 +2150,19 @@ impl BandSession {
                 .fold(r_nn, f64::max);
             per_image.push(pairs);
         }
-        let r_cut = r_cut_factor * r_nn;
+        let r_cut = match precon.r_cut {
+            Some(cut) if cut < r_nn => 1.1 * r_nn,
+            Some(cut) => cut,
+            None => precon.r_cut_factor * r_nn,
+        };
+        let fixed = self.state.fixed.as_deref();
         let lists = per_image
             .into_iter()
             .map(|pairs| {
                 let mut neigh = Neighbours::default();
                 for (i, j, r) in pairs {
-                    if r < r_cut {
+                    let free = fixed.is_none_or(|mask| !mask[i] && !mask[j]);
+                    if r < r_cut && free {
                         neigh.i.push(i);
                         neigh.j.push(j);
                         neigh.r.push(r);
@@ -1786,7 +2182,7 @@ impl BandSession {
         };
         let precon = exp.precon;
         let held_mu = exp.mu;
-        let (lists, r_nn) = self.band_neighbours(precon.r_cut_factor);
+        let (lists, r_nn) = self.band_neighbours(&precon);
         if !(r_nn.is_finite() && r_nn > 0.0) {
             return Err(SaddleError::Invalid(
                 "exponential metric: no finite nearest-neighbour distance on the band".into(),
@@ -1918,6 +2314,13 @@ impl BandSession {
         self.solver = build_solver(&self.config, &method, interior_dof);
         self.state.restart();
         self.refine = min_mode::RefineState::default();
+        if let Some(ode) = &mut self.ode_state {
+            let (rtol, c1, c2) = (ode.rtol, ode.c1, ode.c2);
+            *ode = rgmin::Ode12rState::new(time_step);
+            ode.rtol = rtol;
+            ode.c1 = c1;
+            ode.c2 = c2;
+        }
         Ok(())
     }
 
@@ -2059,6 +2462,9 @@ impl BandSession {
         self.solver.forget();
         self.state.restart();
         self.refine = min_mode::RefineState::default();
+        if let Some(ode) = &mut self.ode_state {
+            ode.reset();
+        }
         if let Some(rtr) = &mut self.rtr {
             *rtr = crate::rtr::BandRtr::new(rtr.config, false);
             rtr.set_force_gate(self.state.force_gate);
@@ -2160,41 +2566,56 @@ impl BandSession {
 
         let endpoint_first = self.positions.row(0).to_owned();
         let endpoint_last = self.positions.row(n_images - 1).to_owned();
-        let config = &self.config;
-        let state = &self.state;
-        let metrics = self.exp.as_ref().map(|e| e.metrics.as_slice());
-        let oracle =
-            Oracle::unbounded(interior_dof, |x: ArrayView1<f64>| match assemble_band_with(
-                config,
-                state,
+        let mut x = self.interior_flat();
+        let before = x.clone();
+        if self.ode_state.is_some() && matches!(self.config.method, Method::Ode12r) {
+            let metrics = self.exp.as_ref().map(|exp| exp.metrics.clone());
+            self.ode12r_trial(
                 surface,
                 endpoint_first.view(),
                 endpoint_last.view(),
-                x,
-                metrics,
-            ) {
-                Ok((e, f, _, driving)) => (e, -driving.unwrap_or(f)),
-                Err(err) => {
-                    state.record_error(err);
-                    (f64::INFINITY, Array1::zeros(interior_dof))
-                }
-            });
-
-        let mut x = self.interior_flat();
-        let before = x.clone();
-        let stepped = self.solver.step(&oracle, &mut x);
-        drop(oracle);
-        // The surface error is the root cause of whatever the solver
-        // did with an infinite energy and a zero gradient, so it
-        // outranks a solver error. `x` is a local copy; the session's
-        // positions stay where they were.
-        if let Some(err) = self.state.take_error() {
-            // The solver cached the failed point's infinite energy and
-            // zero force; the next step must evaluate the band again.
-            self.solver.forget_evaluation();
-            return Err(err);
+                metrics.as_deref(),
+                &mut x,
+            )?;
+        } else {
+            let config = &self.config;
+            let state = &self.state;
+            let metrics = self.exp.as_ref().map(|e| e.metrics.as_slice());
+            let oracle =
+                Oracle::unbounded(interior_dof, |x: ArrayView1<f64>| match assemble_band_with(
+                    config,
+                    state,
+                    surface,
+                    endpoint_first.view(),
+                    endpoint_last.view(),
+                    x,
+                    metrics,
+                ) {
+                    Ok((e, f, _, driving)) => (e, -driving.unwrap_or(f)),
+                    Err(err) => {
+                        state.record_error(err);
+                        (f64::INFINITY, Array1::zeros(interior_dof))
+                    }
+                });
+            let stepped = self.solver.step(&oracle, &mut x);
+            drop(oracle);
+            // The surface error is the root cause of whatever the solver
+            // did with an infinite energy and a zero gradient, so it
+            // outranks a solver error. `x` is a local copy; the session's
+            // positions stay where they were.
+            if let Some(err) = self.state.take_error() {
+                // The solver cached the failed point's infinite energy and
+                // zero force; the next step must evaluate the band again.
+                self.solver.forget_evaluation();
+                return Err(err);
+            }
+            stepped.map_err(|e| SaddleError::Solver(e.to_string()))?;
         }
-        stepped.map_err(|e| SaddleError::Solver(e.to_string()))?;
+        if let Some(mask) = self.state.fixed.as_deref()
+            && let (Some(reference), Some(current)) = (before.as_slice(), x.as_slice_mut())
+        {
+            pin_fixed(mask, reference, current, dof);
+        }
         // ODE12r keeps the band where it was when it rejects a trial and
         // retries with a shorter step, so an unchanged band is a stall
         // only once the step has shrunk past any use (64 rejections at
@@ -2338,6 +2759,11 @@ impl BandSession {
             return Err(err);
         }
         stepped.map_err(|e| SaddleError::Solver(e.to_string()))?;
+        if let Some(mask) = self.state.fixed.as_deref()
+            && let (Some(reference), Some(current)) = (before.as_slice(), x.as_slice_mut())
+        {
+            pin_fixed_packed(mask, reference, current, dof);
+        }
         check_moved(&self.state, &before, &x, self.config.force_tol)?;
         self.scatter_packed(x.view());
         self.iteration += 1;
@@ -2402,6 +2828,20 @@ impl BandSession {
         rtr.climb = self.state.ci().is_some();
         rtr.set_force_gate(self.state.force_gate);
         rtr.step(&self.config, &cached, &mut trial)?;
+        if let Some(mask) = self.state.fixed.as_deref() {
+            let rows = trial.nrows();
+            for image in 1..rows - 1 {
+                for (atom, held) in mask.iter().copied().enumerate() {
+                    if !held {
+                        continue;
+                    }
+                    for axis in 0..3 {
+                        let col = 3 * atom + axis;
+                        trial[(image, col)] = self.positions[(image, col)];
+                    }
+                }
+            }
+        }
         let interior: Array1<f64> = trial
             .slice(s![1..trial.nrows() - 1, ..])
             .iter()
@@ -2674,5 +3114,85 @@ mod tests {
         // Climbing force (-2, 3, 0, 5, 1, 0) minus its mean (1.5, 2, 0).
         assert_force(&projected, &[-3.5, 1.0, 0.0, 3.5, -1.0, 0.0]);
         assert_eq!(state.ci(), Some(1));
+    }
+
+    struct Flat;
+
+    impl BandSurface for Flat {
+        fn eval(
+            &self,
+            positions: ArrayView2<f64>,
+            energies: &mut Array1<f64>,
+            gradients: &mut Array2<f64>,
+        ) -> Result<(), SaddleError> {
+            energies.fill(0.0);
+            gradients.fill(0.0);
+            let _ = positions;
+            Ok(())
+        }
+    }
+
+    fn three_atom_line() -> Array2<f64> {
+        let mut positions = Array2::zeros((3, 9));
+        for image in 0..3 {
+            let shift = 0.1 * image as f64;
+            positions[(image, 0)] = shift;
+            positions[(image, 3)] = 1.0;
+            positions[(image, 6)] = 1.2 + shift;
+        }
+        positions
+    }
+
+    fn exp_session(positions: Array2<f64>) -> BandSession {
+        let config = BandConfig {
+            method: rgmin::Method::Ode12r,
+            min_mode: None,
+            climbing: None,
+            exp_precon: Some(ExpBandPrecon {
+                mu: Some(2.0),
+                c_stab: 0.1,
+                ..ExpBandPrecon::default()
+            }),
+            ..BandConfig::default()
+        };
+        BandSession::new(config, positions).unwrap()
+    }
+
+    #[test]
+    fn a_fixed_atom_is_left_out_of_the_exp_matrix() {
+        let mut session = exp_session(three_atom_line());
+        session.set_fixed_mask(Some(&[false, true, false])).unwrap();
+        session.step(&Flat).unwrap();
+        let p = session.exp_dense(0).expect("metric");
+        for row in 3..6 {
+            for col in 0..9 {
+                let expect = if col == row { 0.2 } else { 0.0 };
+                assert!(
+                    (p[(row, col)] - expect).abs() < 1e-8,
+                    "P[{row}, {col}] = {}",
+                    p[(row, col)]
+                );
+            }
+        }
+        let coupled = (0..3).any(|i| (6..9).any(|j| p[(i, j)].abs() > 1e-8));
+        assert!(coupled, "free pair dropped from the metric");
+    }
+
+    #[test]
+    fn an_absolute_cutoff_below_r_nn_is_raised_the_ase_way() {
+        let mut session = exp_session(three_atom_line());
+        session.set_exp_r_cut(Some(0.5)).unwrap();
+        session.step(&Flat).unwrap();
+        let p = session.exp_dense(0).expect("metric");
+        // The requested cutoff 0.5 is below r_nn, so ASE raises it to
+        // 1.1 r_nn. The nearest pair stays in; the pair at 1.2 does not.
+        assert!(
+            p[(0, 3)].abs() > 1e-8,
+            "nearest pair dropped, cutoff was not raised"
+        );
+        assert!(
+            p[(0, 6)].abs() < 1e-8,
+            "pair at 1.2 r_nn entered a 1.1 r_nn cutoff"
+        );
     }
 }

@@ -271,12 +271,26 @@ impl BandSession {
             return false;
         }
         let (lo, hi) = select_window(&energies, ci, &zoom);
+        let anchor = self.positions.row(0).to_owned();
+        let mask = self.state.fixed.clone();
         self.positions = resample(
             self.positions.slice(s![lo..=hi, ..]),
             n,
             zoom.cubic,
             self.config.cell.as_ref(),
         );
+        if let Some(mask) = mask {
+            let rows = self.positions.nrows();
+            for image in 1..rows - 1 {
+                for (atom, held) in mask.iter().copied().enumerate() {
+                    if held {
+                        for axis in 0..3 {
+                            self.positions[(image, 3 * atom + axis)] = anchor[3 * atom + axis];
+                        }
+                    }
+                }
+            }
+        }
         self.state.set_endpoints(Some([energies[lo], energies[hi]]));
         self.state.drop_last();
         self.forget_optimizer();
