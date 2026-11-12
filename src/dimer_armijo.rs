@@ -9,7 +9,10 @@
 //! Appl. Math. (2023), doi:10.4208/csiam-am.so-2022-0010, equation
 //! (13) and Remark 3.2, with the step-matched dimer error used by
 //! Luo, Zheng, Cheng, and Zhang, SIAM J. Numer. Anal. (2022),
-//! doi:10.1137/22m1487965.
+//! doi:10.1137/22m1487965. That shrink assumes an exact gradient. A
+//! finite-difference curvature whose error, from the force precision,
+//! would exceed the curvature is held at the length where the two
+//! meet, and a rotation that does not reduce its residual stops.
 
 use ndarray::{Array1, ArrayView1};
 
@@ -18,6 +21,7 @@ use crate::minmode::PointSurface;
 use rgmin::linesearch::conditions::armijo;
 
 /// Centre-to-endpoint sample of a dimer of length `h`.
+#[derive(Clone)]
 struct DimerSample {
     /// `E_h = (E(x+hv) + E(x-hv)) / 2`.
     energy: f64,
@@ -27,6 +31,10 @@ struct DimerSample {
     curvature: f64,
     /// `(I - v v^T)` applied to that action.
     rotation: Array1<f64>,
+    /// `(E(x+hv) - E(x-hv)) / (2h)`. Compared with `v · ∇_x E_h` this is
+    /// the force error along the mode: an exact gradient makes the two
+    /// agree up to the `O(h²)` truncation.
+    energy_slope: f64,
 }
 
 /// Where the dimer is, and how long it is.
@@ -152,6 +160,11 @@ pub struct ArmijoDimer {
     pub max_rotations: usize,
     /// Shrinks of one linesearch, counting the opening trial.
     pub max_shrinks: usize,
+    /// Test hook. The published step keeps a noise-aware length.
+    /// The legacy hook is the pure `min(l exp(-α), √α)` shrink, which
+    /// is what a noisy force turns into a stalled finite difference.
+    #[cfg(test)]
+    legacy_length: bool,
     translation: MeritSearch,
     rotation: MeritSearch,
 }
@@ -177,6 +190,8 @@ impl ArmijoDimer {
             length_floor: 1e-8,
             max_rotations: 20,
             max_shrinks: 40,
+            #[cfg(test)]
+            legacy_length: false,
             translation: MeritSearch::gould(1.0),
             rotation: MeritSearch::gould(1.0),
         }
@@ -229,6 +244,42 @@ impl ArmijoDimer {
             self.max_rotations,
         )?;
         state.mode = mode;
+        #[cfg(test)]
+        let legacy = self.legacy_length;
+        #[cfg(not(test))]
+        let legacy = false;
+        if !legacy {
+            let noise_floor = resolve_dimer_length(
+                surface,
+                state.position.view(),
+                state.mode.view(),
+                state.length,
+                self.length_floor,
+                &sample,
+            )?;
+            let saved_floor = self.length_floor;
+            if noise_floor > saved_floor {
+                self.length_floor = noise_floor;
+            }
+            let moved = if noise_floor > state.length {
+                state.length = noise_floor;
+                let (mode, sample, rotations) = align(
+                    &mut self.rotation,
+                    surface,
+                    state.position.view(),
+                    state.mode.clone(),
+                    state.length,
+                    self.tol_v,
+                    self.max_rotations,
+                )?;
+                state.mode = mode;
+                translate(self, surface, state, &sample, rotations)
+            } else {
+                translate(self, surface, state, &sample, rotations)
+            };
+            self.length_floor = saved_floor;
+            return moved;
+        }
         let moved = translate(self, surface, state, &sample, rotations)?;
         Ok(moved)
     }
@@ -287,6 +338,80 @@ pub fn shrink_dimer_length(length: f64, step: f64, floor: f64) -> f64 {
     }
 }
 
+/// Force scale read off an aligned dimer.
+///
+/// The rotational residual is `(I - vv) H_h v`. Times the dimer length
+/// that is a force difference. Once rotation has stopped, the part that
+/// remains is what this length cannot tell from error in the forces.
+pub fn force_precision(rotation_residual: f64, length: f64) -> f64 {
+    if rotation_residual.is_finite()
+        && rotation_residual >= 0.0
+        && length.is_finite()
+        && length > 0.0
+    {
+        rotation_residual * length
+    } else {
+        0.0
+    }
+}
+
+/// Shortest dimer whose central-difference curvature error stays at most
+/// the curvature.
+///
+/// The action `(∇E(x+hv) - ∇E(x-hv)) / (2h)` moves by about
+/// `precision / h` when each force is uncertain by `precision`. Asking
+/// that error to stay under `|curvature|` means `h ≥ precision / |curvature|`.
+pub fn noise_limited_length(precision: f64, curvature: f64) -> f64 {
+    if !(precision.is_finite() && precision > 0.0) {
+        return 0.0;
+    }
+    let scale = curvature.abs();
+    if !(scale.is_finite() && scale > 0.0) {
+        return 0.0;
+    }
+    let floor = precision / scale;
+    if floor.is_finite() && floor > 0.0 {
+        floor
+    } else {
+        0.0
+    }
+}
+
+/// Dimer length after one accepted step, kept long enough for the forces.
+///
+/// The Gould–Zhang shrink still runs. It is not allowed below `floor`,
+/// and it is not allowed below [`noise_limited_length`]. A length that
+/// is already too short is raised, at most to the larger of the step
+/// and `floor`, so a previous `1e-8` shrink can recover.
+pub fn robust_dimer_length(
+    length: f64,
+    step: f64,
+    floor: f64,
+    force_precision: f64,
+    curvature: f64,
+) -> f64 {
+    let limited = noise_limited_length(force_precision, curvature);
+    let absolute = if floor.is_finite() && floor > 0.0 {
+        floor
+    } else {
+        0.0
+    };
+    let guard = absolute.max(limited);
+    let shrunk = shrink_dimer_length(length, step, 0.0);
+    let held = if guard > 0.0 {
+        shrunk.max(guard)
+    } else {
+        shrunk
+    };
+    let cap = step.abs().max(length).max(absolute);
+    let cap = if cap.is_finite() && cap > 0.0 {
+        cap
+    } else {
+        length
+    };
+    if held > cap { cap.max(shrunk) } else { held }
+}
+
 fn unit_mode(mode: Array1<f64>) -> Result<Array1<f64>, SaddleError> {
     let norm = mode.dot(&mode).sqrt();
     if !(norm.is_finite() && norm > 1e-14) {
@@ -321,7 +446,11 @@ fn dimer_probe<S: PointSurface>(
     let gradient = (&grad_plus + &grad_minus) * 0.5;
     let action = (&grad_plus - &grad_minus) / (2.0 * length);
     let curvature = mode.dot(&action);
-    if !curvature.is_finite() || action.iter().any(|value| !value.is_finite()) {
+    let energy_slope = (energy_plus - energy_minus) / (2.0 * length);
+    if !curvature.is_finite()
+        || !energy_slope.is_finite()
+        || action.iter().any(|value| !value.is_finite())
+    {
         return Err(SaddleError::NonFinite("dimer curvature"));
     }
     let rotation = &action - &(&mode.to_owned() * curvature);
@@ -330,7 +459,92 @@ fn dimer_probe<S: PointSurface>(
         gradient,
         curvature,
         rotation,
+        energy_slope,
     })
+}
+
+/// `|v · ∇_x E_h - (E(x+hv) - E(x-hv)) / (2h)|`.
+///
+/// This is a force. It does not shrink with the dimer length, so it is
+/// the precision the finite-difference curvature is divided by.
+fn directional_force_error(sample: &DimerSample, mode: ArrayView1<f64>) -> f64 {
+    let from_force = sample.gradient.dot(&mode);
+    let gap = (from_force - sample.energy_slope).abs();
+    if gap.is_finite() && gap > 0.0 {
+        gap
+    } else {
+        0.0
+    }
+}
+
+fn curvatures_agree(left: f64, right: f64) -> bool {
+    let scale = left.abs().max(right.abs());
+    scale.is_finite() && scale > 0.0 && (left - right).abs() <= 0.25 * scale
+}
+
+/// Floor under the Gould shrink, raised when this length cannot support it.
+///
+/// An aligned dimer whose curvature clears the force-precision error
+/// keeps `precision / |curvature|`. A rotation that missed its
+/// tolerance, or a curvature smaller than that error, is not a
+/// curvature yet: the length grows until two dimer widths report the
+/// same curvature. The caller translates at the raised length and does
+/// not shrink back under the floor.
+fn resolve_dimer_length<S: PointSurface>(
+    surface: &S,
+    position: ArrayView1<f64>,
+    mode: ArrayView1<f64>,
+    length: f64,
+    floor: f64,
+    sample: &DimerSample,
+) -> Result<f64, SaddleError> {
+    let host = if floor.is_finite() && floor > 0.0 {
+        floor
+    } else {
+        0.0
+    };
+    let precision = directional_force_error(sample, mode);
+    // A single sample can meet the rotation tolerance with a curvature
+    // that is the force error divided by the length. Trust that
+    // curvature only when a wider dimer reports the same value.
+    // Otherwise the length grows to the width where the two agree.
+    // Growing without a ceiling ratchets: each step's cap is a multiple
+    // of the length the previous step just adopted. 0.1 is the widest
+    // centre-to-endpoint distance the search will introduce on its own.
+    // A host floor above that is already a configured dimer length.
+    let ceiling = 0.1_f64.max(host);
+    let cap = if length < ceiling { ceiling } else { length };
+    let mut trial = length;
+    let mut previous = sample.curvature;
+    for _ in 0..8 {
+        if !(cap > trial * (1.0 + 1e-6)) {
+            break;
+        }
+        let next = (trial * 4.0).min(cap);
+        if !(next > trial * (1.0 + 1e-6)) {
+            break;
+        }
+        let probed = dimer_probe(surface, position, mode, next)?;
+        if curvatures_agree(previous, probed.curvature) {
+            let prec = directional_force_error(&probed, mode).max(precision);
+            let scale = previous.abs().max(probed.curvature.abs());
+            // Agreement is not enough when the force error is still
+            // larger than the curvature: both widths are then noise.
+            let resolved = scale > 0.0 && prec <= scale * trial;
+            if resolved && trial <= length * (1.0 + 1e-9) {
+                let limited = noise_limited_length(prec, probed.curvature);
+                return Ok(host.max(limited.min(length)));
+            }
+            if resolved {
+                return Ok(host.max(trial));
+            }
+        }
+        previous = probed.curvature;
+        trial = next;
+    }
+    // No width up to the ceiling resolved the curvature. Translate
+    // there instead of at a length whose finite difference is noise.
+    Ok(host.max(cap))
 }
 
 fn translation_direction(gradient: &Array1<f64>, mode: &Array1<f64>) -> Array1<f64> {
@@ -397,9 +611,21 @@ fn align<S: PointSurface>(
         };
         let angle = accepted * scale;
         let (sin_angle, cos_angle) = angle.sin_cos();
+        let previous_mode = mode.clone();
+        let previous_sample = sample.clone();
         mode = unit_mode(&(&mode * cos_angle) + &(&(&descent / scale) * sin_angle))?;
         sample = dimer_probe(surface, position, mode.view(), length)?;
         rotations += 1;
+        let updated = sample.rotation.dot(&sample.rotation).sqrt();
+        // The tolerance is a floor on a residual that an exact gradient
+        // can drive down. Additive force noise leaves a residual that
+        // no angle reduces, and the loop would otherwise run out its
+        // rotation budget on every translation.
+        if !(updated.is_finite() && updated < residual) {
+            mode = previous_mode;
+            sample = previous_sample;
+            return Ok((mode, sample, rotations));
+        }
     }
 }
 
@@ -565,7 +791,8 @@ fn euler_step<S: PointSurface>(
 #[cfg(test)]
 mod tests {
     use super::{
-        ArmijoDimer, DimerState, euler_step, local_merit, rotation_tolerance, shrink_dimer_length,
+        ArmijoDimer, DimerState, euler_step, force_precision, local_merit, noise_limited_length,
+        robust_dimer_length, rotation_tolerance, shrink_dimer_length,
     };
     use crate::error::SaddleError;
     use crate::minmode::PointSurface;
@@ -674,5 +901,114 @@ mod tests {
             state.length
         );
         assert!(report.curvature < 0.0);
+    }
+
+    #[test]
+    fn noise_floor_keeps_the_curvature_error_under_the_curvature() {
+        assert_abs_diff_eq!(force_precision(0.25, 4e-3), 1e-3, epsilon = 1e-15);
+        assert_abs_diff_eq!(noise_limited_length(1e-3, -4.0), 2.5e-4, epsilon = 1e-15);
+        let held = robust_dimer_length(1e-3, 0.5, 1e-8, 1e-4, -4.0);
+        assert!(
+            held < 1e-3,
+            "exact-sized noise must still allow a shrink: {held}"
+        );
+        assert!(
+            held + 1e-15 >= 2.5e-5,
+            "held {held} is below the noise length"
+        );
+        // A length the old rule already drove under the noise floor comes back
+        // up, and it does not come back further than the step that was taken.
+        let raised = robust_dimer_length(1e-8, 0.2, 1e-8, 1e-3, -2.0);
+        assert!(
+            raised >= 4e-4,
+            "tiny dimer was not raised to the noise length: {raised}"
+        );
+        assert!(
+            raised <= 0.2 + 1e-15,
+            "raised length {raised} exceeds the step"
+        );
+    }
+
+    /// Gould well with a force error that changes at every distinct point.
+    /// The energy stays exact, so the merit still has the saddle. The
+    /// finite-difference curvature does not, once the dimer is shorter
+    /// than the force error over the curvature.
+    struct NoisyGould {
+        sigma: f64,
+    }
+
+    fn force_error(x: f64, y: f64, salt: u64) -> f64 {
+        let mixed = x.to_bits().wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            ^ y.to_bits().wrapping_mul(0xBF58_476D_1CE4_E5B9)
+            ^ salt;
+        let mixed = mixed ^ (mixed >> 30);
+        let unit = (mixed >> 11) as f64 / ((1u64 << 53) as f64);
+        unit * 2.0 - 1.0
+    }
+
+    impl PointSurface for NoisyGould {
+        fn eval(&self, r: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            let (x, y) = (r[0], r[1]);
+            let energy = (x * x - 1.0).powi(2) + y * y;
+            let gx = 4.0 * x * (x * x - 1.0) + self.sigma * force_error(x, y, 0xA11C);
+            let gy = 2.0 * y + self.sigma * force_error(x, y, 0xB0B5);
+            Ok((energy, array![gx, gy]))
+        }
+    }
+
+    fn run_noisy(legacy: bool) -> DimerState {
+        // Force error 1e-4. At a dimer length of 1e-6 the curvature
+        // error is about 100, and the old shrink keeps going down to
+        // the 1e-8 floor. The same forces at a few 1e-3 are a small
+        // fraction of the curvature of this well.
+        let surface = NoisyGould { sigma: 1e-4 };
+        let mut dimer = ArmijoDimer::gould();
+        dimer.legacy_length = legacy;
+        let mut state = start();
+        state.length = 1e-6;
+        for _ in 0..40 {
+            let report = dimer.step(&surface, &mut state).expect("noisy step");
+            if !state.position.iter().all(|value| value.is_finite()) || report.converged {
+                break;
+            }
+        }
+        state
+    }
+
+    #[test]
+    fn additive_force_noise_stalls_the_old_shrink_and_the_floor_converges() {
+        let legacy = run_noisy(true);
+        let legacy_radius = if legacy.position.iter().all(|value| value.is_finite()) {
+            legacy.position.dot(&legacy.position).sqrt()
+        } else {
+            f64::INFINITY
+        };
+        assert!(
+            legacy.length < 1e-7,
+            "old shrink stayed long: {}",
+            legacy.length
+        );
+        assert!(
+            legacy_radius > 0.2,
+            "old shrink reached the saddle at radius {legacy_radius}"
+        );
+
+        let robust = run_noisy(false);
+        assert!(
+            robust.position.iter().all(|value| value.is_finite()),
+            "noise-aware step left the finite plane: {:?}",
+            robust.position
+        );
+        let radius = robust.position.dot(&robust.position).sqrt();
+        assert!(
+            robust.length > 1e-5,
+            "noise-aware length collapsed: {} at radius {radius}",
+            robust.length
+        );
+        assert!(
+            radius < 5e-2,
+            "noise-aware step stalled at radius {radius}, length {}",
+            robust.length
+        );
     }
 }

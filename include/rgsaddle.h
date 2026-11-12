@@ -528,6 +528,10 @@ void rgsaddle_minmode_free(RgsaddleMinMode *session);
  * (theta = sqrt(0.1), psi = 100, tol_v = 0.1, alpha_max = beta_max = 1,
  * force_tol = 1e-5, length_floor = 1e-8, 20 rotations, 40 shrinks).
  * tol_v of 0 is kept: the rotation tolerance is then the force residual.
+ * The shrink still stops at length_floor. A length whose curvature
+ * disagrees with a wider dimer, or whose force error exceeds that
+ * curvature, is raised to a width where the two agree. A rotation
+ * that does not reduce its residual stops.
  */
 typedef struct {
   rgsaddle_version_t version;
