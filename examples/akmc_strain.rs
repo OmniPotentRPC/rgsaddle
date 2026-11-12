@@ -12,7 +12,8 @@
 use ndarray::{ArrayView1, array};
 use rgsaddle::minmode::PointSurface;
 use rgsaddle::{
-    ElasticDipole, SaddleError, SaddleSeed, Strain, StrainResponse, Trust, TrustPolicy, arrhenius,
+    DefectSource, ElasticDipole, FieldSolver, FmmSolver, Kelvin, SaddleError, SaddleSeed, Strain,
+    StrainResponse, Trust, TrustPolicy, arrhenius,
 };
 
 struct Well;
@@ -49,10 +50,26 @@ fn main() -> Result<(), SaddleError> {
     let temperature = 600.0;
     let surface = Well;
     let mut events: Vec<_> = (0..4).map(|_| event()).collect();
+    let mut sources = Vec::new();
+    for (site, event) in events.iter().enumerate() {
+        sources.push(DefectSource {
+            position: [site as f64 * 6.0, 0.0, 0.0],
+            dipole: event.saddle(),
+        });
+    }
+    let fields = FmmSolver::new(Kelvin::new(40.0, 0.3).unwrap())
+        .fields(&sources)
+        .unwrap();
     let mut chosen = None;
     for (site, event) in events.iter_mut().enumerate() {
-        let shear = 0.015 * site as f64;
-        let strain = Strain::shear_yx(shear);
+        let applied = Strain::shear_yx(0.01);
+        let mut tensor = applied.tensor();
+        for i in 0..3 {
+            for j in 0..3 {
+                tensor[i][j] += fields[site].strain.tensor()[i][j];
+            }
+        }
+        let strain = Strain::from_tensor(tensor).unwrap();
         let mut estimate = event.barrier(&strain);
         if matches!(estimate.trust, Trust::NeedsSearch(_)) {
             estimate = event.refine(
@@ -73,8 +90,10 @@ fn main() -> Result<(), SaddleError> {
             temperature,
         );
         println!(
-            "site {site} shear {shear:.3} variant {} barrier {:.6} eV rate {rate:.6e} Hz",
-            estimate.variant, estimate.barrier
+            "site {site} strain {:.6} variant {} barrier {:.6} eV rate {rate:.6e} Hz",
+            strain.tensor()[1][0],
+            estimate.variant,
+            estimate.barrier
         );
         let replace = match &chosen {
             None => true,

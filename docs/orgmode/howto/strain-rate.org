@@ -39,6 +39,9 @@ Dederichs and Schroeder, Phys. Rev. B 17, 2524 (1978), doi:10.1103/PhysRevB.17.2
 * Serialization
 =to_json= / =from_json= round-trip the event, including the policy, the images, and the explicit cache. The document name is =rgsaddle.strain_response=. An AKMC store can keep one document per event.
 
+* The field of the other defects
+The strain in =barrier= is the applied strain plus the strain produced by every other defect. =Kelvin= is the isotropic Green's function. =DirectSolver= sums it. =FmmSolver= walks an octree: neighboring leaves are direct, and a well-separated cell is translated into a local expansion, the multipole-to-local step of Greengard and Rokhlin, J. Comput. Phys. 73, 325 (1987), doi:10.1016/0021-9991(87)90140-9. =examples/elastic_field_bench.rs= times both on 100 to 100000 defects and writes =benchmarks/elastic_field_scaling.csv=.
+
 * A sweep
 =examples/akmc_strain.rs= places four copies of one hop along a shear that grows with the site coordinate, takes the trusted Arrhenius rate, and refines the sites past the radius.
 
