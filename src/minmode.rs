@@ -1702,9 +1702,9 @@ impl MinModeSession {
             _ => 1,
         };
         let stored = std::mem::take(&mut self.lbfgs_shadow);
-        for (s, y) in stored {
-            let s = perpendicular(&s, &mode);
-            let y = perpendicular(&y, &mode);
+        for (mut s, mut y) in stored {
+            perp_in_place(&mut s, &mode);
+            perp_in_place(&mut y, &mode);
             self.note_lbfgs_pair(&s, &y);
         }
         while self.lbfgs_shadow.len() > memory {
@@ -2352,7 +2352,8 @@ impl MinModeSession {
     ) -> Result<(Array1<f64>, Option<PointEval>), SaddleError> {
         let scale = curvature_scale(curvature).unwrap_or(0.0);
         let parallel = gradient.dot(mode);
-        let g_perp = perpendicular(gradient, mode);
+        let mut g_perp = gradient.clone();
+        perp_in_place(&mut g_perp, mode);
         let mut direction = -&g_perp;
         if let (Some(prev), Some(dir)) = (&self.cg_prev_perp, &self.cg_dir) {
             let delta = &g_perp - prev;
@@ -2362,7 +2363,7 @@ impl MinModeSession {
                 direction = &direction + &(dir * beta);
             }
         }
-        direction = perpendicular(&direction, mode);
+        perp_in_place(&mut direction, mode);
         let alpha = self
             .cg_alpha
             .filter(|alpha| alpha.is_finite() && *alpha > 0.0)
@@ -2393,9 +2394,10 @@ impl MinModeSession {
         let Some((trial, energy, arrived)) = chosen else {
             return Ok((origin, self.centre.clone()));
         };
-        let step = &trial - &origin;
-        let step_perp = perpendicular(&step, mode);
-        let g_new = perpendicular(&arrived, mode);
+        let mut step_perp = &trial - &origin;
+        perp_in_place(&mut step_perp, mode);
+        let mut g_new = arrived.clone();
+        perp_in_place(&mut g_new, mode);
         let secant = &g_new - &g_perp;
         let sy = step_perp.dot(&secant);
         let ss = step_perp.dot(&step_perp);
