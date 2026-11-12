@@ -185,10 +185,30 @@ impl DipoleModel {
     }
 }
 
-/// One strain, with the three barriers kept in separate fields.
+/// One hop, with its own dipoles. Symmetry copies share `barrier0`.
+#[derive(Clone, Debug)]
+pub struct HopVariant {
+    pub name: String,
+    pub minimum: M3,
+    pub saddle: M3,
+    pub barrier0: f64,
+}
+
+impl HopVariant {
+    /// `ΔE0 - (P_saddle - P_minimum) : ε` for this hop.
+    pub fn linear_barrier(&self, strain: M3) -> f64 {
+        self.barrier0 - double_dot(sub(self.saddle, self.minimum), strain)
+    }
+}
+
+/// One strain and one hop. The three barriers belong to that hop.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StrainPoint {
     pub direction: String,
+    /// `<110>` hop label, for example `110` or `101`. Empty when the table has one hop.
+    pub variant: String,
+    /// Dumbbell axis of the explicit saddle, Cartesian, not necessarily unit length.
+    pub hop: [f64; 3],
     pub strain: M3,
     pub linear: f64,
     pub linear_status: LinearStatus,
@@ -199,7 +219,7 @@ pub struct StrainPoint {
 }
 
 /// Harmonic transition-state rate.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct HarmonicRate {
     pub k_hz: f64,
     pub barrier: f64,
@@ -208,10 +228,12 @@ pub struct HarmonicRate {
     pub interpolated: bool,
     /// The dipole line has been compared with an explicit barrier on this ray.
     pub validated: bool,
+    /// Hop that produced this rate. Empty when the table has one hop.
+    pub variant: String,
 }
 
 /// Result of [`StrainRateTable::lookup`].
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Rate {
     Harmonic(HarmonicRate),
     /// The explicit search found no barrier on this ensemble.
@@ -262,6 +284,7 @@ pub struct TranslationalSplit {
 #[derive(Clone, Debug)]
 pub struct StrainRateTable {
     model: DipoleModel,
+    variants: Vec<HopVariant>,
     fold: f64,
     activation_volume: Option<M3>,
     points: Vec<StrainPoint>,
@@ -308,19 +331,81 @@ impl StrainRateTable {
                 ));
             }
             for other in points.iter().take(i) {
-                if strain_distance(point.strain, other.strain) < 1e-10 {
+                if strain_distance(point.strain, other.strain) < 1e-10
+                    && point.variant == other.variant
+                {
                     return Err(SaddleError::Invalid(
-                        "two strain-table rows have the same strain".into(),
+                        "two strain-table rows have the same strain and hop".into(),
                     ));
                 }
             }
         }
+        let variants = vec![HopVariant {
+            name: "reference".to_string(),
+            minimum: model.minimum,
+            saddle: model.saddle,
+            barrier0: model.barrier0,
+        }];
         Ok(Self {
             model,
+            variants,
             fold: LINEAR_FOLD_EV,
             activation_volume: activation_volume.map(symmetrize),
             points,
         })
+    }
+
+    /// Replace the single reference hop with one dipole per variant.
+    ///
+    /// `lookup` then returns the lowest barrier among them. A hop whose
+    /// explicit search found no barrier makes the result [`Rate::NoBarrier`].
+    pub fn with_hop_variants(mut self, variants: Vec<HopVariant>) -> Result<Self, SaddleError> {
+        if variants.is_empty() {
+            return Err(SaddleError::Invalid(
+                "a strain table needs at least one hop".into(),
+            ));
+        }
+        for variant in &variants {
+            if variant.name.is_empty() || variant.name.contains([',', '"', '\n']) {
+                return Err(SaddleError::Invalid(
+                    "hop name must be a non-empty token without commas".into(),
+                ));
+            }
+            if !variant.barrier0.is_finite()
+                || !finite_m3(variant.minimum)
+                || !finite_m3(variant.saddle)
+            {
+                return Err(SaddleError::NonFinite("hop variant"));
+            }
+        }
+        self.variants = variants
+            .into_iter()
+            .map(|mut variant| {
+                variant.minimum = symmetrize(variant.minimum);
+                variant.saddle = symmetrize(variant.saddle);
+                variant
+            })
+            .collect();
+        Ok(self)
+    }
+
+    /// Hops the linear model can choose among.
+    pub fn variants(&self) -> &[HopVariant] {
+        &self.variants
+    }
+
+    /// Lowest dipole barrier at `strain`, and the hop that produces it.
+    pub fn minimum_linear(&self, strain: M3) -> (String, f64) {
+        let mut best_name = self.variants[0].name.clone();
+        let mut best = f64::INFINITY;
+        for variant in &self.variants {
+            let barrier = variant.linear_barrier(strain);
+            if barrier < best {
+                best = barrier;
+                best_name = variant.name.clone();
+            }
+        }
+        (best_name, best)
     }
 
     /// Reference dipoles and the zero-strain barrier.
@@ -368,6 +453,10 @@ impl StrainRateTable {
         if ensemble == Ensemble::Linear {
             return self.lookup_linear(strain, temperature_k);
         }
+        let exact = self.exact_points(strain);
+        if !exact.is_empty() {
+            return self.rate_from_exact(&exact, ensemble, temperature_k);
+        }
         let hit = self.locate(strain)?;
         let side = match ensemble {
             Ensemble::Helmholtz => &hit.side_helmholtz,
@@ -385,27 +474,107 @@ impl StrainRateTable {
                 "Vineyard prefactor was not measured at this explicit strain".into(),
             )
         })?;
-        Ok(Rate::Harmonic(HarmonicRate {
+        Ok(self.harmonic(
+            prefactor,
+            barrier,
+            hit.interpolated,
+            true,
+            &hit.variant,
+            temperature_k,
+        ))
+    }
+
+    fn rate_from_exact(
+        &self,
+        points: &[&StrainPoint],
+        ensemble: Ensemble,
+        temperature_k: f64,
+    ) -> Result<Rate, SaddleError> {
+        if points
+            .iter()
+            .any(|point| explicit_side(point, ensemble).is_no_barrier())
+        {
+            return Ok(Rate::NoBarrier);
+        }
+        let mut best: Option<&StrainPoint> = None;
+        for point in points {
+            let Some(barrier) = explicit_side(point, ensemble).barrier else {
+                continue;
+            };
+            if best.is_none_or(|current| {
+                barrier
+                    < explicit_side(current, ensemble)
+                        .barrier
+                        .unwrap_or(f64::INFINITY)
+            }) {
+                best = Some(*point);
+            }
+        }
+        let point = best.ok_or_else(|| {
+            SaddleError::Invalid("explicit barrier is missing on a barrier row".into())
+        })?;
+        let barrier = explicit_side(point, ensemble)
+            .barrier
+            .expect("barrier was selected");
+        let prefactor = explicit_side(point, ensemble).prefactor_hz.ok_or_else(|| {
+            SaddleError::Invalid(
+                "Vineyard prefactor was not measured at this explicit strain".into(),
+            )
+        })?;
+        Ok(self.harmonic(
+            prefactor,
+            barrier,
+            false,
+            true,
+            &point.variant,
+            temperature_k,
+        ))
+    }
+
+    fn harmonic(
+        &self,
+        prefactor: f64,
+        barrier: f64,
+        interpolated: bool,
+        validated: bool,
+        variant: &str,
+        temperature_k: f64,
+    ) -> Rate {
+        Rate::Harmonic(HarmonicRate {
             k_hz: arrhenius(prefactor, barrier, temperature_k),
             barrier,
             prefactor_hz: prefactor,
-            interpolated: hit.interpolated,
-            validated: true,
-        }))
+            interpolated,
+            validated,
+            variant: variant.to_string(),
+        })
+    }
+
+    fn exact_points(&self, strain: M3) -> Vec<&StrainPoint> {
+        self.points
+            .iter()
+            .filter(|point| strain_distance(point.strain, strain) < 1e-8)
+            .collect()
     }
 
     /// CSV that round-trips through [`Self::from_csv`].
     pub fn to_csv(&self) -> String {
         let mut lines = vec![
-            "record,direction,e00,e01,e02,e10,e11,e12,e20,e21,e22,linear_barrier_eV,linear_status,helmholtz_barrier_eV,gibbs_barrier_eV,vineyard_helmholtz_Hz,vineyard_gibbs_Hz,index_helmholtz,index_gibbs,linear_error_eV,p_xx,p_yy,p_zz,p_yz,p_xz,p_xy,barrier0_eV,omega_xx,omega_yy,omega_zz,omega_yz,omega_xz,omega_xy"
+            "record,direction,e00,e01,e02,e10,e11,e12,e20,e21,e22,linear_barrier_eV,linear_status,helmholtz_barrier_eV,gibbs_barrier_eV,vineyard_helmholtz_Hz,vineyard_gibbs_Hz,index_helmholtz,index_gibbs,linear_error_eV,p_xx,p_yy,p_zz,p_yz,p_xz,p_xy,barrier0_eV,omega_xx,omega_yy,omega_zz,omega_yz,omega_xz,omega_xy,variant,hop_x,hop_y,hop_z"
                 .to_string(),
         ];
-        lines.push(voigt_record(
-            "dipole_minimum",
-            20,
-            voigt(self.model.minimum),
-        ));
-        lines.push(voigt_record("dipole_saddle", 20, voigt(self.model.saddle)));
+        for variant in &self.variants {
+            lines.push(dipole_variant_row(
+                "dipole_minimum",
+                variant.name.as_str(),
+                variant.minimum,
+            ));
+            lines.push(dipole_variant_row(
+                "dipole_saddle",
+                variant.name.as_str(),
+                variant.saddle,
+            ));
+        }
         lines.push(scalar_record("barrier0", 26, self.model.barrier0));
         if let Some(omega) = self.activation_volume {
             lines.push(voigt_record("activation_volume", 27, voigt(omega)));
@@ -468,8 +637,12 @@ impl StrainRateTable {
             col("omega_xz")?,
             col("omega_xy")?,
         ];
-        let mut minimum = None;
-        let mut saddle = None;
+        let variant_col = columns.iter().position(|item| *item == "variant");
+        let hop_x = columns.iter().position(|item| *item == "hop_x");
+        let hop_y = columns.iter().position(|item| *item == "hop_y");
+        let hop_z = columns.iter().position(|item| *item == "hop_z");
+        let mut minima = Vec::new();
+        let mut saddles = Vec::new();
         let mut barrier0 = None;
         let mut activation = None;
         let mut points = Vec::new();
@@ -480,9 +653,18 @@ impl StrainRateTable {
                     SaddleError::Invalid(format!("csv row {} is short", line_no + 2))
                 })
             };
+            let variant_name = variant_col
+                .and_then(|index| fields.get(index).copied())
+                .filter(|text| !text.is_empty())
+                .unwrap_or("reference")
+                .to_string();
             match take(record)? {
-                "dipole_minimum" => minimum = Some(from_voigt(read_voigt(&fields, p_cols)?)),
-                "dipole_saddle" => saddle = Some(from_voigt(read_voigt(&fields, p_cols)?)),
+                "dipole_minimum" => {
+                    minima.push((variant_name, from_voigt(read_voigt(&fields, p_cols)?)));
+                }
+                "dipole_saddle" => {
+                    saddles.push((variant_name, from_voigt(read_voigt(&fields, p_cols)?)));
+                }
                 "barrier0" => barrier0 = Some(parse_f64(take(barrier0_col)?, "barrier0")?),
                 "activation_volume" => {
                     activation = Some(from_voigt(read_voigt(&fields, o_cols)?));
@@ -494,8 +676,19 @@ impl StrainRateTable {
                     }
                     let helmholtz_text = take(helmholtz)?;
                     let gibbs_text = take(gibbs)?;
+                    let hop = [
+                        optional_col(&fields, hop_x)?,
+                        optional_col(&fields, hop_y)?,
+                        optional_col(&fields, hop_z)?,
+                    ];
                     points.push(StrainPoint {
                         direction: take(direction)?.to_string(),
+                        variant: if variant_name == "reference" && variant_col.is_none() {
+                            String::new()
+                        } else {
+                            variant_name
+                        },
+                        hop,
                         strain,
                         linear: parse_f64(take(linear)?, "linear barrier")?,
                         linear_status: LinearStatus::parse(take(linear_status)?)?,
@@ -509,15 +702,37 @@ impl StrainRateTable {
                 }
             }
         }
+        let barrier0 =
+            barrier0.ok_or_else(|| SaddleError::Invalid("csv is missing barrier0".into()))?;
+        if minima.is_empty() || saddles.is_empty() {
+            return Err(SaddleError::Invalid("csv is missing a dipole pair".into()));
+        }
         let model = DipoleModel {
-            minimum: minimum
-                .ok_or_else(|| SaddleError::Invalid("csv is missing dipole_minimum".into()))?,
-            saddle: saddle
-                .ok_or_else(|| SaddleError::Invalid("csv is missing dipole_saddle".into()))?,
-            barrier0: barrier0
-                .ok_or_else(|| SaddleError::Invalid("csv is missing barrier0".into()))?,
+            minimum: minima[0].1,
+            saddle: saddles[0].1,
+            barrier0,
         };
-        Self::try_new(model, points, activation)
+        let mut table = Self::try_new(model, points, activation)?;
+        if minima.len() > 1 || saddles.len() > 1 {
+            let mut hops = Vec::new();
+            for (name, minimum) in &minima {
+                let saddle = saddles
+                    .iter()
+                    .find(|(saddle_name, _)| saddle_name == name)
+                    .map(|(_, tensor)| *tensor)
+                    .ok_or_else(|| {
+                        SaddleError::Invalid(format!("csv is missing dipole_saddle for {name}"))
+                    })?;
+                hops.push(HopVariant {
+                    name: name.clone(),
+                    minimum: *minimum,
+                    saddle,
+                    barrier0,
+                });
+            }
+            table = table.with_hop_variants(hops)?;
+        }
+        Ok(table)
     }
 
     /// JSON that round-trips through [`Self::from_json`].
@@ -546,10 +761,35 @@ impl StrainRateTable {
             Some(omega) => push_matrix(&mut out, omega),
             None => out.push_str("null"),
         }
-        out.push_str(",\n  \"points\": [\n");
+        out.push_str(",\n  \"variants\": [\n");
+        for (i, variant) in self.variants.iter().enumerate() {
+            out.push_str("    {\n");
+            out.push_str(&format!("      \"name\": \"{}\",\n", variant.name));
+            out.push_str(&format!(
+                "      \"barrier0_eV\": {},\n",
+                num(variant.barrier0)
+            ));
+            out.push_str("      \"p_minimum\": ");
+            push_matrix(&mut out, variant.minimum);
+            out.push_str(",\n      \"p_saddle\": ");
+            push_matrix(&mut out, variant.saddle);
+            out.push_str("\n    }");
+            if i + 1 != self.variants.len() {
+                out.push(',');
+            }
+            out.push('\n');
+        }
+        out.push_str("  ],\n  \"points\": [\n");
         for (i, point) in self.points.iter().enumerate() {
             out.push_str("    {\n");
             out.push_str(&format!("      \"direction\": \"{}\",\n", point.direction));
+            out.push_str(&format!("      \"variant\": \"{}\",\n", point.variant));
+            out.push_str(&format!(
+                "      \"hop\": [{}, {}, {}],\n",
+                num(point.hop[0]),
+                num(point.hop[1]),
+                num(point.hop[2])
+            ));
             out.push_str("      \"strain\": ");
             push_matrix(&mut out, point.strain);
             out.push_str(",\n");
@@ -619,6 +859,11 @@ impl StrainRateTable {
                 .ok_or_else(|| SaddleError::Invalid("a strain point must be an object".into()))?;
             points.push(StrainPoint {
                 direction: required_str(point, "direction")?.to_string(),
+                variant: obj_get(point, "variant")
+                    .and_then(Json::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                hop: hop_from_json(point)?,
                 strain: required_matrix(point, "strain")?,
                 linear: required_f64(point, "linear_barrier_eV")?,
                 linear_status: LinearStatus::parse(required_str(point, "linear_status")?)?,
@@ -632,7 +877,27 @@ impl StrainRateTable {
                 },
             });
         }
-        Self::try_new(model, points, activation)
+        let mut table = Self::try_new(model, points, activation)?;
+        if let Some(variants) = obj_get(obj, "variants").and_then(Json::as_array) {
+            let mut hops = Vec::new();
+            for item in variants {
+                let variant = item.as_object().ok_or_else(|| {
+                    SaddleError::Invalid("a hop variant must be an object".into())
+                })?;
+                hops.push(HopVariant {
+                    name: required_str(variant, "name")?.to_string(),
+                    minimum: required_matrix(variant, "p_minimum")?,
+                    saddle: required_matrix(variant, "p_saddle")?,
+                    barrier0: obj_get(variant, "barrier0_eV")
+                        .and_then(Json::as_f64)
+                        .unwrap_or(table.model.barrier0),
+                });
+            }
+            if !hops.is_empty() {
+                table = table.with_hop_variants(hops)?;
+            }
+        }
+        Ok(table)
     }
 
     /// Read `.json` or `.csv`.
@@ -666,30 +931,25 @@ impl StrainRateTable {
     }
 
     fn lookup_linear(&self, strain: M3, temperature_k: f64) -> Result<Rate, SaddleError> {
-        let predicted = self.model.linear_barrier(strain);
+        let (variant, predicted) = self.minimum_linear(strain);
         if !predicted.is_finite() {
             return Err(SaddleError::NonFinite("linear barrier"));
         }
         let prefactor = self.reference_prefactor()?;
         if strain_norm(strain) < 1e-12 {
-            return Ok(Rate::Harmonic(HarmonicRate {
-                k_hz: arrhenius(prefactor, predicted, temperature_k),
-                barrier: predicted,
-                prefactor_hz: prefactor,
-                interpolated: false,
-                validated: true,
-            }));
+            return Ok(self.harmonic(prefactor, predicted, false, true, &variant, temperature_k));
         }
         let located = match self.ray(strain) {
             Ok(ray) => ray,
             Err(_) => {
-                return Ok(Rate::Harmonic(HarmonicRate {
-                    k_hz: arrhenius(prefactor, predicted, temperature_k),
-                    barrier: predicted,
-                    prefactor_hz: prefactor,
-                    interpolated: false,
-                    validated: false,
-                }));
+                return Ok(self.harmonic(
+                    prefactor,
+                    predicted,
+                    false,
+                    false,
+                    &variant,
+                    temperature_k,
+                ));
             }
         };
         let validated = match self.fold_of(&located) {
@@ -699,13 +959,14 @@ impl StrainRateTable {
             Fold::Holds => true,
             Fold::Unchecked => false,
         };
-        Ok(Rate::Harmonic(HarmonicRate {
-            k_hz: arrhenius(prefactor, predicted, temperature_k),
-            barrier: predicted,
-            prefactor_hz: prefactor,
-            interpolated: false,
+        Ok(self.harmonic(
+            prefactor,
+            predicted,
+            false,
             validated,
-        }))
+            &variant,
+            temperature_k,
+        ))
     }
 
     fn reference_prefactor(&self) -> Result<f64, SaddleError> {
@@ -785,13 +1046,18 @@ impl StrainRateTable {
             side_helmholtz: helmholtz,
             side_gibbs: gibbs,
             interpolated: true,
+            variant: self.minimum_linear(strain).0,
         })
     }
 
     fn ray(&self, strain: M3) -> Result<Ray, SaddleError> {
+        let winner = self.minimum_linear(strain).0;
         let mut best: Option<(f64, String, M3)> = None;
         for point in &self.points {
             if strain_norm(point.strain) < 1e-12 {
+                continue;
+            }
+            if self.variants.len() > 1 && !point.variant.is_empty() && point.variant != winner {
                 continue;
             }
             let scale = parallel_scale(strain, point.strain);
@@ -823,6 +1089,9 @@ impl StrainRateTable {
             if point.direction != direction {
                 continue;
             }
+            if self.variants.len() > 1 && !point.variant.is_empty() && point.variant != winner {
+                continue;
+            }
             if let Some(scale) = parallel_scale(point.strain, basis) {
                 samples.push((scale, point));
             }
@@ -849,6 +1118,7 @@ struct Located {
     side_helmholtz: SideSample,
     side_gibbs: SideSample,
     interpolated: bool,
+    variant: String,
 }
 
 impl Located {
@@ -857,6 +1127,7 @@ impl Located {
             side_helmholtz: side_sample(&point.helmholtz),
             side_gibbs: side_sample(&point.gibbs),
             interpolated: false,
+            variant: point.variant.clone(),
         }
     }
 }
@@ -864,6 +1135,14 @@ impl Located {
 struct Ray<'a> {
     query_scale: f64,
     samples: Vec<(f64, &'a StrainPoint)>,
+}
+
+fn explicit_side(point: &StrainPoint, ensemble: Ensemble) -> &ExplicitSide {
+    match ensemble {
+        Ensemble::Helmholtz => &point.helmholtz,
+        Ensemble::Gibbs => &point.gibbs,
+        Ensemble::Linear => unreachable!("linear rows are not an explicit side"),
+    }
 }
 
 fn side_sample(side: &ExplicitSide) -> SideSample {
@@ -1030,6 +1309,33 @@ pub fn from_voigt(v: [f64; 6]) -> M3 {
         out[*j][*i] = v[slot];
     }
     out
+}
+
+/// `P' = R P R^T` for a rotation `R` that sends column vectors to `R v`.
+pub fn transform_tensor(tensor: M3, rotation: M3) -> M3 {
+    let mut rotated = [[0.0; 3]; 3];
+    for i in 0..3 {
+        for j in 0..3 {
+            let mut sum = 0.0;
+            for k in 0..3 {
+                for l in 0..3 {
+                    sum += rotation[i][k] * tensor[k][l] * rotation[j][l];
+                }
+            }
+            rotated[i][j] = sum;
+        }
+    }
+    symmetrize(rotated)
+}
+
+/// Quarter turns about x. `1` sends `[110]` to `[101]`.
+pub fn rotation_x(quarter_turns: i32) -> M3 {
+    match quarter_turns.rem_euclid(4) {
+        0 => [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        1 => [[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]],
+        2 => [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]],
+        _ => [[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, -1.0, 0.0]],
+    }
 }
 
 /// Varvenne dipole `P = -V (σ_defect - σ_bulk)`, symmetrized.
@@ -1324,7 +1630,17 @@ fn num(value: f64) -> String {
     format!("{value}")
 }
 
-const CSV_COLUMNS: usize = 33;
+const CSV_COLUMNS: usize = 37;
+
+fn dipole_variant_row(record: &str, variant: &str, dipole: M3) -> String {
+    let mut fields = blank_record(record);
+    let values = voigt(dipole);
+    for (offset, value) in values.iter().enumerate() {
+        fields[20 + offset] = num(*value);
+    }
+    fields[33] = variant.to_string();
+    fields.join(",")
+}
 
 fn blank_record(record: &str) -> Vec<String> {
     let mut fields = vec![String::new(); CSV_COLUMNS];
@@ -1364,6 +1680,13 @@ fn point_row(point: &StrainPoint) -> String {
     fields.push(point.helmholtz.index.clone());
     fields.push(point.gibbs.index.clone());
     fields.push(optional_num(point.linear_error));
+    while fields.len() < 33 {
+        fields.push(String::new());
+    }
+    fields.push(point.variant.clone());
+    fields.push(num(point.hop[0]));
+    fields.push(num(point.hop[1]));
+    fields.push(num(point.hop[2]));
     fields.join(",")
 }
 
@@ -1371,6 +1694,18 @@ fn barrier_cell(side: &ExplicitSide) -> String {
     match side.barrier {
         Some(value) => num(value),
         None => "no barrier".to_string(),
+    }
+}
+
+fn optional_col(fields: &[&str], index: Option<usize>) -> Result<f64, SaddleError> {
+    let Some(index) = index else {
+        return Ok(0.0);
+    };
+    let text = fields.get(index).copied().unwrap_or("");
+    if text.is_empty() {
+        Ok(0.0)
+    } else {
+        parse_f64(text, "hop")
     }
 }
 
@@ -1566,6 +1901,27 @@ impl Json {
             }
         }
         Some(out)
+    }
+}
+
+fn hop_from_json(obj: &[(String, Json)]) -> Result<[f64; 3], SaddleError> {
+    match obj_get(obj, "hop") {
+        None | Some(Json::Null) => Ok([0.0; 3]),
+        Some(value) => {
+            let items = value
+                .as_array()
+                .ok_or_else(|| SaddleError::Invalid("hop must be three numbers".into()))?;
+            if items.len() != 3 {
+                return Err(SaddleError::Invalid("hop must be three numbers".into()));
+            }
+            let mut hop = [0.0; 3];
+            for (slot, item) in items.iter().enumerate() {
+                hop[slot] = item
+                    .as_f64()
+                    .ok_or_else(|| SaddleError::Invalid("hop must be three numbers".into()))?;
+            }
+            Ok(hop)
+        }
     }
 }
 

@@ -12,12 +12,12 @@ use ndarray::{Array1, Array2, ArrayView1};
 use rgmin::{Control, Method, Oracle, Solver};
 use rgsaddle::mic::Cell as LinkCell;
 use rgsaddle::{
-    BandConfig, BandStatus, CellMask, CiConfig, ExplicitSide, FiniteDifference, IndexCheck,
-    JointChart, LINEAR_FOLD_EV, MinModeStatus, PointSurface, SaddleError, SolidNeb,
+    BandConfig, BandStatus, CellMask, CiConfig, ExplicitSide, FiniteDifference, HopVariant,
+    IndexCheck, JointChart, LINEAR_FOLD_EV, MinModeStatus, PointSurface, SaddleError, SolidNeb,
     SparseHessianOpts, SparsityPattern, SpringKind, StrainPoint, StrainRateTable,
     activation_volume, compliance_from_stiffness, elastic_dipole, exact_eigh, hydrostatic,
-    joint_coordinate, judge_linear, prefactor_hessian, shear_xz, shear_yx,
-    split_translational_modes, uniaxial_x, vineyard_prefactor,
+    joint_coordinate, judge_linear, prefactor_hessian, rotation_x, shear_xz, shear_yx,
+    split_translational_modes, transform_tensor, uniaxial_x, vineyard_prefactor,
 };
 
 use super::{Copper, Held, SearchRow, axis_report, closest_pair, det, dumbbell, fcc, max_abs};
@@ -511,7 +511,7 @@ fn strained_stress(
 
 fn samples() -> Vec<(&'static str, [[f64; 3]; 3])> {
     let mut rows = vec![("reference", shear_yx(0.0))];
-    for gamma in [0.005, 0.01, 0.02, 0.03, 0.04, 0.05] {
+    for gamma in [-0.0025, 0.0025, 0.005, 0.01, 0.02, 0.03, 0.04, 0.05] {
         rows.push(("shear_yx", shear_yx(gamma)));
     }
     rows.push(("shear_xz", shear_xz(0.02)));
@@ -544,16 +544,20 @@ fn cu_strain_rate_table() -> Result<(), SaddleError> {
         let prepared = prepare(&copper, &along_100, &along_110, &along_opposite, cube, eps);
         let (fixed, variable) = search_pair(&copper, &prepared, cube);
         log(&format!(
-            "  dimer fixed barrier={} switched={} angle110={} shift={} index={} variable enthalpy={} switched={} angle110={} shift={} index={}",
+            "  dimer fixed barrier={} hop={} {} {} switched={} angle110={} index={} variable enthalpy={} hop={} {} {} switched={} angle110={} index={}",
             fixed.barrier,
+            fixed.axis[0],
+            fixed.axis[1],
+            fixed.axis[2],
             fixed.switched as u8,
             fixed.angle_110,
-            cell_shift(&fixed, prepared.minimum.cell),
             index_phrase(&fixed),
             variable.enthalpy_barrier,
+            variable.axis[0],
+            variable.axis[1],
+            variable.axis[2],
             variable.switched as u8,
             variable.angle_110,
-            cell_shift(&variable, prepared.minimum.cell),
             index_phrase(&variable)
         ));
         let mut external = [[0.0; 3]; 3];
@@ -621,7 +625,7 @@ fn cu_strain_rate_table() -> Result<(), SaddleError> {
             positive_lambdas(&copper, &prepared.minimum.positions, prepared.minimum.cell)?;
         let mut helmholtz = helmholtz;
         if let Some(barrier) = helmholtz.barrier
-            && let Some(geometry) = helmholtz_geom
+            && let Some(ref geometry) = helmholtz_geom
         {
             let sad_spec = positive_lambdas(&copper, &geometry.positions, geometry.cell)?;
             if let Some(hz) = prefactor_hz(&min_spec, &sad_spec) {
@@ -650,10 +654,13 @@ fn cu_strain_rate_table() -> Result<(), SaddleError> {
             reference_checked = connecting(&fixed, prepared.minimum.cell);
         }
 
+        let hop = hop_axis(&helmholtz_geom, &fixed);
         let linear = 0.0;
         let (status, error) = judge_linear(linear, helmholtz.barrier, LINEAR_FOLD_EV);
         points.push(StrainPoint {
             direction: direction.to_string(),
+            variant: String::new(),
+            hop,
             strain: eps,
             linear,
             linear_status: status,
@@ -676,16 +683,71 @@ fn cu_strain_rate_table() -> Result<(), SaddleError> {
         saddle,
         barrier0,
     };
+    let names = ["110", "101", "1-10", "10-1"];
+    let variants: Vec<HopVariant> = (0..4)
+        .map(|turn| {
+            let rotation = rotation_x(turn);
+            HopVariant {
+                name: names[turn as usize].to_string(),
+                minimum: transform_tensor(minimum, rotation),
+                saddle: transform_tensor(saddle, rotation),
+                barrier0,
+            }
+        })
+        .collect();
     for point in &mut points {
-        let linear = model.linear_barrier(point.strain);
+        let name = hop_label(point.hop);
+        let variant = variants
+            .iter()
+            .find(|variant| variant.name == name)
+            .unwrap_or(&variants[0]);
+        point.variant = variant.name.clone();
+        let linear = variant.linear_barrier(point.strain);
         let (status, error) = judge_linear(linear, point.helmholtz.barrier, LINEAR_FOLD_EV);
         point.linear = linear;
         point.linear_status = status;
         point.linear_error = error;
+        log(&format!(
+            "ROW {} variant {} hop {} {} {} strain {} linear {} helmholtz {:?} gibbs {:?}",
+            point.direction,
+            point.variant,
+            point.hop[0],
+            point.hop[1],
+            point.hop[2],
+            strain_label(point.strain),
+            point.linear,
+            point.helmholtz.barrier,
+            point.gibbs.barrier
+        ));
     }
+    log(&format!(
+        "P_MIN {} {} {} / {} {} {} / {} {} {}",
+        minimum[0][0],
+        minimum[0][1],
+        minimum[0][2],
+        minimum[1][0],
+        minimum[1][1],
+        minimum[1][2],
+        minimum[2][0],
+        minimum[2][1],
+        minimum[2][2]
+    ));
+    log(&format!(
+        "P_SAD {} {} {} / {} {} {} / {} {} {}",
+        saddle[0][0],
+        saddle[0][1],
+        saddle[0][2],
+        saddle[1][0],
+        saddle[1][1],
+        saddle[1][2],
+        saddle[2][0],
+        saddle[2][1],
+        saddle[2][2]
+    ));
     let compliance = compliance_from_stiffness(&stiffness(&copper)?)?;
     let omega = activation_volume(minimum, saddle, &compliance)?;
-    let table = StrainRateTable::try_new(model, points, Some(omega))?;
+    let table =
+        StrainRateTable::try_new(model, points, Some(omega))?.with_hop_variants(variants)?;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     table.save(root.join("benchmarks/strain_rate_table_cu.csv"))?;
     table.save(root.join("benchmarks/strain_rate_table_cu.json"))?;
@@ -699,6 +761,44 @@ fn cu_strain_rate_table() -> Result<(), SaddleError> {
         }
     }
     Ok(())
+}
+
+fn hop_axis(geometry: &Option<Geometry>, row: &SearchRow) -> [f64; 3] {
+    if let Some(geometry) = geometry {
+        let (_, _, direction) = closest_pair(&geometry.positions, geometry.cell);
+        let (_, _, axis, _) = axis_report(direction);
+        axis
+    } else {
+        row.axis
+    }
+}
+
+fn hop_label(axis: [f64; 3]) -> String {
+    let _x = axis[0].abs();
+    let y = axis[1].abs();
+    let z = axis[2].abs();
+    if y >= 0.4 && z < 0.4 {
+        if axis[0] * axis[1] >= 0.0 {
+            "110"
+        } else {
+            "1-10"
+        }
+    } else if z >= 0.4 && y < 0.4 {
+        if axis[0] * axis[2] >= 0.0 {
+            "101"
+        } else {
+            "10-1"
+        }
+    } else if y >= 0.4 && z >= 0.4 {
+        if axis[1] * axis[2] >= 0.0 {
+            "011"
+        } else {
+            "01-1"
+        }
+    } else {
+        "110"
+    }
+    .to_string()
 }
 
 fn strain_label(eps: [[f64; 3]; 3]) -> String {

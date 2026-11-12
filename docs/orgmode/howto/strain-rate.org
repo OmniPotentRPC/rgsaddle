@@ -35,16 +35,22 @@ At zero strain the Varvenne dipoles, in eV, are
 
 The saddle =xy= entry is =-V σ_xy= of the fixed cell. The earlier dimer row stored the virial =V σ_xy = -12.850385197341554=. The activation volume at that reference state, in Å³, is =-2.5147707110936626= (=xx=), =-1.496727049560212= (=yy=), =2.5511050440932515= (=zz=) and =-13.510705676972174= (=xy=).
 
-| direction | strain | linear (eV) | status | Helmholtz (eV) | Gibbs (eV) | linear error (eV) |
-| reference | 0 | 0.473916239370908 | holds | 0.473916239370908 | 0.34702642693292773 | 0 |
-| shear_yx | 0.005 | 0.4096643133841999 | holds | 0.4113674721013467 | 0.2967100291922975 | 0.0017031587171468243 |
-| shear_yx | 0.01 | 0.3454123873974918 | holds | 0.352192817709863 | 0.2495851151548436 | 0.006780430312371188 |
-| shear_yx | 0.02 | 0.21690853542407557 | failed | 0.24356279471709286 | 0.1630119173183857 | 0.02665425929301729 |
-| shear_yx | 0.03 | 0.08840468345065944 | failed | 0.14826689300639373 | 0.08761266284551539 | 0.05986220955573429 |
-| shear_yx | 0.04 | -0.040099168522756856 | failed | 0.06784288866265342 | 0.0274332017463621 | 0.10794205718541028 |
-| shear_yx | 0.05 | -0.16860302049617304 | failed | 0.00776114637324099 | no barrier | 0.17636416686941403 |
-| shear_xz | 0.02 | 0.47391623042082465 | failed | 0.24356191755691725 | 0.16301980840830765 | 0.2303543128639074 |
-| uniaxial_x | 0.01 | 0.4553226769348737 | holds | 0.45472744854419034 | 0.3350882582183772 | 0.0005952283906833777 |
-| hydrostatic | 0.01 | 0.4360924292833983 | holds | 0.4371651229433269 | 0.32168405605392536 | 0.0010726936599285697 |
+The reference saddle is the =[110]= hop. Its dipole has =P_xy = 12.850385197341652= eV and =P_xz = 0.00000044750421789650947= eV, so an =ε_zx= strain does not move that hop's barrier. A search at =ε_zx = 0.02= instead finishes on the =[101]= hop, axis (0.7138727207722225, -0.0007780116738385849, 0.7002750411339103). That hop is the image of =[110]= under a quarter turn about x, and it carries =P_xz = 12.850385197341652= eV. =lookup= takes the lowest hop. Each row below is that hop, and its linear column uses that hop's dipole.
 
-On the copper shear ray the absolute error is 0.006780430312371188 eV at 1 percent and 0.02665425929301729 eV at 2 percent. Every recorded shear at or above 2 percent is past 0.01 eV. At 5 percent the variable-cell band does not rise, so the Gibbs column is no barrier, while the fixed cell still has a 0.00776114637324099 eV index-1 barrier. A 2 percent =ε_zx= shear is also past the fold. The reference saddle dipole is the =xy= <110>, and its =xz= component is 0.00000044750421789650947 eV. The dipole line stays at 0.47391623042082465 eV while the explicit barrier falls to 0.24356191755691725 eV. Uniaxial and hydrostatic strain of 1 percent stay inside 0.01 eV.
+| direction | hop | strain | linear (eV) | status | Helmholtz (eV) | Gibbs (eV) | linear error (eV) |
+| reference | 110 | 0 | 0.473916239370908 | holds | 0.473916239370908 | 0.34702642693292773 | 0 |
+| shear_yx | 110 | -0.0025 | 0.506042202364262 | holds | 0.5064022546132492 | 0.37329135826945503 | 0.0003600522489871638 |
+| shear_yx | 110 | 0.0025 | 0.4417902763775539 | holds | 0.44222396191491953 | 0.32141000219661464 | 0.00043368553736561344 |
+| shear_yx | 110 | 0.005 | 0.4096643133841999 | holds | 0.4113674721013467 | 0.2967100291922975 | 0.0017031587171468243 |
+| shear_yx | 110 | 0.01 | 0.3454123873974918 | holds | 0.352192817709863 | 0.2495851151548436 | 0.006780430312371188 |
+| shear_yx | 110 | 0.02 | 0.21690853542407557 | failed | 0.24356279471709286 | 0.1630119173183857 | 0.02665425929301729 |
+| shear_yx | 110 | 0.03 | 0.08840468345065944 | failed | 0.14826689300639373 | 0.08761266284551539 | 0.05986220955573429 |
+| shear_yx | 110 | 0.04 | -0.040099168522756856 | failed | 0.06784288866265342 | 0.0274332017463621 | 0.10794205718541028 |
+| shear_yx | 110 | 0.05 | -0.16860302049617304 | failed | 0.00776114637324099 | no barrier | 0.17636416686941403 |
+| shear_xz | 101 | 0.02 | 0.21690853542407557 | failed | 0.24356191755691725 | 0.16301980840830765 | 0.026653382132841685 |
+| uniaxial_x | 110 | 0.01 | 0.4553226769348737 | holds | 0.45472744854419034 | 0.3350882582183772 | 0.0005952283906833777 |
+| hydrostatic | 110 | 0.01 | 0.4360924292833983 | holds | 0.4371651229433269 | 0.32168405605392536 | 0.0010726936599285697 |
+
+The =[110]= and =[101]= rows at 2 percent have the same linear barrier, 0.21690853542407557 eV. Their explicit barriers differ by 8.771601756052405e-7 eV. On the =[110]= ray the absolute error is 0.006780430312371188 eV at 1 percent and 0.02665425929301729 eV at 2 percent. Every recorded =ε_yx= at or above 2 percent is past 0.01 eV, and so is the matching =[101]= hop at =ε_zx = 0.02=. At 5 percent the variable-cell band does not rise, so the Gibbs column is no barrier, while the fixed cell still has a 0.00776114637324099 eV index-1 barrier. Uniaxial and hydrostatic strain of 1 percent stay inside 0.01 eV.
+
+The central difference of the =[110]= explicit barrier at ±0.25 percent is (0.44222396191491953 - 0.5064022546132492) / 0.005 = -12.835658539665928 eV. The dipole slope =-(P_saddle - P_minimum):ε_yx= is -12.85038519734162 eV.

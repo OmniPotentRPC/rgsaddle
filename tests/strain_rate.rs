@@ -6,9 +6,10 @@ use std::path::PathBuf;
 use ndarray::{Array1, Array2, ArrayView1};
 use rgmin::{Control, FireKind, Method, Oracle, Solver};
 use rgsaddle::{
-    Ensemble, ExplicitSide, LINEAR_FOLD_EV, LinearStatus, Rate, SaddleError, StrainPoint,
-    StrainRateTable, activation_volume, compliance_from_stiffness, double_dot, elastic_dipole,
-    hydrostatic, judge_linear, shear_yx, split_translational_modes, vineyard_prefactor,
+    Ensemble, ExplicitSide, HopVariant, LINEAR_FOLD_EV, LinearStatus, Rate, SaddleError,
+    StrainPoint, StrainRateTable, activation_volume, compliance_from_stiffness, double_dot,
+    elastic_dipole, hydrostatic, judge_linear, rotation_x, shear_xz, shear_yx,
+    split_translational_modes, transform_tensor, vineyard_prefactor,
 };
 
 fn symmetrize(m: [[f64; 3]; 3]) -> [[f64; 3]; 3] {
@@ -454,6 +455,8 @@ fn sample(
 ) -> StrainPoint {
     StrainPoint {
         direction: direction.to_string(),
+        variant: String::new(),
+        hop: [0.0; 3],
         strain,
         linear,
         linear_status: status,
@@ -580,5 +583,158 @@ fn copper_table_flags_no_barrier_at_five_percent_variable_cell() -> Result<(), S
         }
     }
     assert!(found, "the copper table has no 5% shear_yx row");
+    Ok(())
+}
+
+#[test]
+fn rotated_dipole_matches_the_symmetry_related_shear() {
+    let mut dipole = [[0.0; 3]; 3];
+    dipole[0][0] = 1.0;
+    dipole[1][1] = 2.0;
+    dipole[2][2] = 3.0;
+    dipole[0][1] = 12.85;
+    dipole[1][0] = 12.85;
+    let turned = transform_tensor(dipole, rotation_x(1));
+    let plain = 0.5 - double_dot(dipole, shear_yx(0.02));
+    let rotated = 0.5 - double_dot(turned, shear_xz(0.02));
+    assert!((plain - rotated).abs() < 1e-9, "yx {plain} xz {rotated}");
+}
+
+#[test]
+fn lookup_returns_the_lowest_hop() {
+    let mut low = sample(
+        "shear_yx",
+        shear_yx(0.02),
+        0.2,
+        LinearStatus::Holds,
+        side(0.2, 1.0e12),
+        side(0.15, 1.0e12),
+        Some(0.0),
+    );
+    low.variant = "110".to_string();
+    let mut high = sample(
+        "shear_yx",
+        shear_yx(0.02),
+        0.4,
+        LinearStatus::Holds,
+        side(0.4, 1.0e12),
+        side(0.35, 1.0e12),
+        Some(0.0),
+    );
+    high.variant = "101".to_string();
+    let zero = sample(
+        "reference",
+        shear_yx(0.0),
+        0.5,
+        LinearStatus::Holds,
+        side(0.5, 1.0e12),
+        side(0.5, 1.0e12),
+        Some(0.0),
+    );
+    let table = StrainRateTable::try_new(
+        rgsaddle::DipoleModel {
+            minimum: [[0.0; 3]; 3],
+            saddle: [[0.0; 3]; 3],
+            barrier0: 0.5,
+        },
+        vec![zero, low, high],
+        None,
+    )
+    .unwrap()
+    .with_hop_variants(vec![
+        HopVariant {
+            name: "110".into(),
+            minimum: [[0.0; 3]; 3],
+            saddle: [[0.0; 3]; 3],
+            barrier0: 0.2,
+        },
+        HopVariant {
+            name: "101".into(),
+            minimum: [[0.0; 3]; 3],
+            saddle: [[0.0; 3]; 3],
+            barrier0: 0.4,
+        },
+    ])
+    .unwrap();
+    let rate = table
+        .lookup(shear_yx(0.02), 300.0, Ensemble::Helmholtz)
+        .unwrap();
+    match rate {
+        Rate::Harmonic(rate) => {
+            assert!((rate.barrier - 0.2).abs() < 1e-12);
+            assert_eq!(rate.variant, "110");
+        }
+        other => panic!("expected the lower hop, got {other}"),
+    }
+}
+
+#[test]
+fn matching_variant_equates_the_symmetry_related_copper_shears() -> Result<(), SaddleError> {
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks/strain_rate_table_cu.csv");
+    let table = StrainRateTable::open(&path)?;
+    let yx = table
+        .points()
+        .iter()
+        .find(|point| point.direction == "shear_yx" && (point.strain[1][0] - 0.02).abs() < 1e-12)
+        .expect("shear_yx 0.02");
+    let xz = table
+        .points()
+        .iter()
+        .find(|point| point.direction == "shear_xz")
+        .expect("shear_xz");
+    assert_eq!(yx.variant, "110", "yx hop {:?}", yx.hop);
+    assert_eq!(xz.variant, "101", "xz hop {:?}", xz.hop);
+    assert!(
+        (yx.linear - xz.linear).abs() < 1e-6,
+        "linear yx {} xz {}",
+        yx.linear,
+        xz.linear
+    );
+    let yx_explicit = yx.helmholtz.barrier.expect("yx barrier");
+    let xz_explicit = xz.helmholtz.barrier.expect("xz barrier");
+    assert!(
+        (yx_explicit - xz_explicit).abs() < 1e-4,
+        "explicit yx {yx_explicit} xz {xz_explicit}"
+    );
+    Ok(())
+}
+
+#[test]
+fn shear_yx_slope_matches_the_central_difference() -> Result<(), SaddleError> {
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks/strain_rate_table_cu.csv");
+    let table = StrainRateTable::open(&path)?;
+    let at = |gamma: f64| {
+        table
+            .points()
+            .iter()
+            .find(|point| {
+                point.variant == "110"
+                    && point.direction == "shear_yx"
+                    && (point.strain[1][0] - gamma).abs() < 1e-12
+            })
+            .unwrap_or_else(|| panic!("missing 110 shear {gamma}"))
+            .helmholtz
+            .barrier
+            .expect("barrier")
+    };
+    let slope = (at(0.0025) - at(-0.0025)) / 0.005;
+    let variant = table
+        .variants()
+        .iter()
+        .find(|variant| variant.name == "110")
+        .expect("110 dipole");
+    let mut delta = [[0.0; 3]; 3];
+    for i in 0..3 {
+        for j in 0..3 {
+            delta[i][j] = variant.saddle[i][j] - variant.minimum[i][j];
+        }
+    }
+    let model = -double_dot(delta, shear_yx(1.0));
+    assert!(
+        (slope - model).abs() < 1.0,
+        "explicit slope {slope} dipole slope {model}"
+    );
     Ok(())
 }
