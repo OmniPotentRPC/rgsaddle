@@ -53,7 +53,11 @@ fn main() {
         let mut matched_gp_ms = Vec::new();
         let mut same = 0usize;
         let mut both = 0usize;
-        for index in 0..seeds {
+        let skip = std::env::var("RGSADDLE_BENCH_SKIP")
+            .ok()
+            .and_then(|text| text.parse().ok())
+            .unwrap_or(0usize);
+        for index in skip..seeds {
             let seed = mix_seed(index);
             let plain = search_plain(&system, seed);
             let (gp, timings) = search_gp(&system, seed);
@@ -88,8 +92,9 @@ fn main() {
                     .map(|timing| timing.width)
                     .unwrap_or(0);
                 let count = samples.len();
+                let max_us = samples.iter().copied().fold(0.0_f64, f64::max);
                 println!(
-                    "timing\t{name}\tseed {seed}\tn {n}\twidth {width}\tfit_us {}\trank_one {rank_one}/{count}",
+                    "timing\t{name}\tseed {seed}\tn {n}\twidth {width}\tfit_us {}\tmax_us {max_us:.1}\trank_one {rank_one}/{count}",
                     band_owned(samples),
                     name = system.name,
                 );
@@ -189,6 +194,8 @@ struct System {
     max_move: f64,
     start: fn(u64) -> (Array1<f64>, Array1<f64>),
     kind: BenchSurface,
+    /// Added to every true-surface call. Zero for the cheap potentials.
+    delay: std::time::Duration,
 }
 
 enum BenchSurface {
@@ -217,6 +224,7 @@ fn systems() -> Vec<System> {
                 cutoff: 15.0,
                 cell: None,
             },
+            delay: std::time::Duration::ZERO,
         },
         System {
             name: "muller-brown",
@@ -224,6 +232,7 @@ fn systems() -> Vec<System> {
             max_move: 0.2,
             start: muller_start,
             kind: BenchSurface::Muller,
+            delay: std::time::Duration::ZERO,
         },
         System {
             name: "morse-adatom",
@@ -231,6 +240,15 @@ fn systems() -> Vec<System> {
             max_move: 0.15,
             start: muller_start,
             kind: BenchSurface::Morse(morse),
+            delay: std::time::Duration::ZERO,
+        },
+        System {
+            name: "morse-adatom-5ms",
+            steps: step_budget(400),
+            max_move: 0.15,
+            start: muller_start,
+            kind: BenchSurface::Morse(MorseSlab::load()),
+            delay: std::time::Duration::from_millis(5),
         },
         System {
             name: "vacancy-hop",
@@ -241,6 +259,7 @@ fn systems() -> Vec<System> {
                 cutoff: 2.5,
                 cell: Some(vacancy),
             },
+            delay: std::time::Duration::ZERO,
         },
     ]
 }
@@ -257,6 +276,7 @@ fn search_plain(system: &System, seed: u64) -> Outcome {
     let surface = Counting {
         kind: &system.kind,
         calls: AtomicUsize::new(0),
+        delay: system.delay,
     };
     let started = Instant::now();
     let mut converged = false;
@@ -366,6 +386,7 @@ fn search_gp(system: &System, seed: u64) -> (Outcome, Vec<GpStepTiming>) {
     let surface = Counting {
         kind: &system.kind,
         calls: AtomicUsize::new(0),
+        delay: system.delay,
     };
     let started = Instant::now();
     let mut converged = false;
@@ -450,6 +471,7 @@ fn geometry_gap(system: &System, a: &Array1<f64>, b: &Array1<f64>) -> f64 {
 struct Counting<'a> {
     kind: &'a BenchSurface,
     calls: AtomicUsize,
+    delay: std::time::Duration,
 }
 
 impl Counting<'_> {
@@ -461,6 +483,9 @@ impl Counting<'_> {
 impl PointSurface for Counting<'_> {
     fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
         self.calls.fetch_add(1, Ordering::Relaxed);
+        if !self.delay.is_zero() {
+            std::thread::sleep(self.delay);
+        }
         Ok(match self.kind {
             BenchSurface::LennardJones { cutoff, cell } => lj_energy_gradient(x, *cutoff, *cell),
             BenchSurface::Muller => muller_energy_gradient(x),
