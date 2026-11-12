@@ -15,12 +15,15 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
 
 use ndarray::{Array1, Array2, ArrayView1};
 use rgmin::{Control, FireKind, Method, Oracle, Solver};
 use rgsaddle::{
-    CellMask, IndexCheck, MinModeConfig, MinModeStatus, PointSurface, SaddleError, SolidDimer,
-    SolidDimerConfig, index_at,
+    BOLTZMANN_EV_PER_K, CellMask, DefectSource, ElasticDipole, ElasticMultipole, FieldSolver,
+    FmmSolver, IndexCheck, Kelvin, LINEAR_FOLD_EV, MinModeConfig, MinModeStatus, PointSurface,
+    SaddleError, SaddleSeed, SolidDimer, SolidDimerConfig, Strain, StrainResponse, Trust,
+    TrustPolicy, cubic_rotations, index_at,
 };
 
 const RC: f64 = 5.50679;
@@ -1299,4 +1302,973 @@ fn csv_row(shear: f64, method: &str, reactant: &ReactantIndex, row: Option<&Sear
         phrase,
     ]
     .join(",")
+}
+
+fn identity() -> [[f64; 3]; 3] {
+    [
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+    ]
+}
+
+fn rotate_positions(positions: &Array1<f64>, rotation: [[f64; 3]; 3]) -> Array1<f64> {
+    let mut out = Array1::zeros(positions.len());
+    for atom in 0..positions.len() / 3 {
+        let v = [
+            positions[3 * atom],
+            positions[3 * atom + 1],
+            positions[3 * atom + 2],
+        ];
+        for i in 0..3 {
+            out[3 * atom + i] =
+                rotation[i][0] * v[0] + rotation[i][1] * v[1] + rotation[i][2] * v[2];
+        }
+    }
+    out
+}
+
+fn deform(
+    positions: &Array1<f64>,
+    cell: [[f64; 3]; 3],
+    eps: [[f64; 3]; 3],
+) -> (Array1<f64>, [[f64; 3]; 3]) {
+    let mut grad = eps;
+    for i in 0..3 {
+        grad[i][i] += 1.0;
+    }
+    let mut h = [[0.0; 3]; 3];
+    for i in 0..3 {
+        for j in 0..3 {
+            h[i][j] = cell[i][0] * grad[0][j] + cell[i][1] * grad[1][j] + cell[i][2] * grad[2][j];
+        }
+    }
+    let mut out = Array1::zeros(positions.len());
+    for atom in 0..positions.len() / 3 {
+        let row = [
+            positions[3 * atom],
+            positions[3 * atom + 1],
+            positions[3 * atom + 2],
+        ];
+        for c in 0..3 {
+            out[3 * atom + c] = row[0] * grad[0][c] + row[1] * grad[1][c] + row[2] * grad[2][c];
+        }
+    }
+    (out, h)
+}
+
+fn csv_num(value: f64) -> String {
+    if value.is_finite() {
+        format!("{value:.16}")
+    } else {
+        String::new()
+    }
+}
+
+fn csv_opt(value: Option<f64>) -> String {
+    value.map(csv_num).unwrap_or_default()
+}
+
+fn rel_rate(method_barrier: f64, explicit_barrier: f64, temperature: f64) -> f64 {
+    let delta = method_barrier - explicit_barrier;
+    (-delta / (BOLTZMANN_EV_PER_K * temperature)).exp() - 1.0
+}
+
+fn eon_barrier(strain: f64, variable: bool) -> Option<f64> {
+    let key = (strain * 1000.0).round() as i32;
+    if variable {
+        return match key {
+            0 => Some(0.34700693547728179),
+            20 => Some(0.16255571725275786),
+            30 => Some(0.088051942122888249),
+            40 => Some(0.027924583692424676),
+            _ => None,
+        };
+    }
+    match key {
+        0 => Some(0.4738130973207717),
+        20 => Some(0.2435460895545134),
+        30 => Some(0.14829201811522807),
+        40 => Some(0.067862165555311549),
+        50 => Some(0.0077937374149428251),
+        _ => None,
+    }
+}
+
+struct ExplicitOut {
+    calls: usize,
+    relax_min_calls: usize,
+    relax_110_calls: usize,
+    reactant_index_calls: usize,
+    search_calls: usize,
+    barrier: f64,
+    enthalpy: f64,
+    accepted: bool,
+    xy_switch: bool,
+    n_neg: Option<usize>,
+    reactant_negative: usize,
+    reactant_lowest: f64,
+    angle_110: f64,
+    axis: [f64; 3],
+    e_min: f64,
+    min_force: f64,
+    status: String,
+    curvature: f64,
+    saddle: Array1<f64>,
+    minimum: Array1<f64>,
+    cell: [[f64; 3]; 3],
+    sigma_min: [[f64; 3]; 3],
+    sigma_sad: [[f64; 3]; 3],
+    mode: Array1<f64>,
+    min_gradient: Array1<f64>,
+    sad_gradient: Array1<f64>,
+}
+
+fn explicit_barrier(
+    copper: &Copper,
+    cube: [[f64; 3]; 3],
+    along_100: &Array1<f64>,
+    along_110: &Array1<f64>,
+    rotation: [[f64; 3]; 3],
+    eps: [[f64; 3]; 3],
+    variable: bool,
+    xy_path: bool,
+) -> ExplicitOut {
+    let spun_100 = rotate_positions(along_100, rotation);
+    let spun_110 = rotate_positions(along_110, rotation);
+    let (placed_100, cell) = deform(&spun_100, cube, eps);
+    let (placed_110, _) = deform(&spun_110, cube, eps);
+    let mut other = placed_110;
+    let before_110 = copper.calls();
+    relax(copper, &mut other, cell, 1e-3, 200);
+    let relax_110_calls = copper.calls() - before_110;
+    let mut minimum = placed_100;
+    let before_min = copper.calls();
+    relax(copper, &mut minimum, cell, 1e-3, 200);
+    let relax_min_calls = copper.calls() - before_min;
+    let (e_min, g_min, sigma_min) = copper.evaluate(minimum.view(), cell);
+    let min_gradient = g_min.clone();
+    let min_force = max_abs(&g_min);
+    let (_, _, dir) = closest_pair(&minimum, cell);
+    let (min_100, _, _, _) = axis_report(dir);
+    let connect = minimum_image_difference(&other, &minimum, cell);
+    let norm = connect.dot(&connect).sqrt();
+    let mut nudged = minimum.clone();
+    if norm > 0.0 {
+        for (slot, component) in nudged.iter_mut().zip(connect.iter()) {
+            *slot += 0.02 * component / norm;
+        }
+    }
+    let mut external = [[0.0; 3]; 3];
+    let mask = if variable {
+        for i in 0..3 {
+            for j in 0..3 {
+                external[i][j] = -sigma_min[i][j];
+            }
+        }
+        CellMask::all()
+    } else {
+        CellMask::frozen()
+    };
+    let before_index = copper.calls();
+    let reactant = reactant_index(copper, &minimum, cell, mask, external);
+    let reactant_index_calls = copper.calls() - before_index;
+    let before_search = copper.calls();
+    let row = saddle_from_minimum(
+        copper,
+        &nudged,
+        cell,
+        &connect,
+        mask,
+        external,
+        cube,
+        e_min,
+        min_100,
+        0.0,
+        2500,
+    );
+    let search_calls = copper.calls() - before_search;
+    let (_, sad_gradient, sigma_sad) = copper.evaluate(row.positions.view(), row.cell);
+    let mode = minimum_image_difference(&row.positions, &minimum, cell);
+    let index1 = row.status == MinModeStatus::Converged
+        && !row.rejected
+        && row.negative_modes == Some(1)
+        && row.curvature < 0.0
+        && row.angle_110 < 15.0;
+    let accepted = if xy_path { index1 && row.switched } else { index1 };
+    ExplicitOut {
+        calls: relax_min_calls + relax_110_calls + reactant_index_calls + search_calls,
+        relax_min_calls,
+        relax_110_calls,
+        reactant_index_calls,
+        search_calls,
+        barrier: row.barrier,
+        enthalpy: row.enthalpy_barrier,
+        accepted,
+        xy_switch: row.switched,
+        n_neg: row.negative_modes,
+        reactant_negative: reactant.negative,
+        reactant_lowest: reactant.lowest,
+        angle_110: row.angle_110,
+        axis: row.axis,
+        e_min,
+        min_force,
+        status: format!("{:?}", row.status),
+        curvature: row.curvature,
+        saddle: row.positions.clone(),
+        minimum: minimum.clone(),
+        cell,
+        sigma_min,
+        sigma_sad,
+        mode,
+        min_gradient,
+        sad_gradient,
+    }
+}
+
+struct Tally {
+    fixed: bool,
+    calibration: bool,
+    batch: bool,
+    explicit_calls: usize,
+    method_calls: usize,
+    barrier_error: Option<f64>,
+    rate_300: Option<f64>,
+    rate_600: Option<f64>,
+    refined: bool,
+    linear: bool,
+}
+
+#[test]
+#[ignore = "release copper dimer head-to-head; writes benchmarks/strain_response_head_to_head.csv"]
+fn strain_response_head_to_head() {
+    let copper = Copper::new();
+    let (perfect, cube) = fcc(3, 3.615);
+    let along_100 = dumbbell(&perfect, [1.0, 0.0, 0.0], 2.05);
+    let along_110 = dumbbell(
+        &perfect,
+        [
+            std::f64::consts::FRAC_1_SQRT_2,
+            std::f64::consts::FRAC_1_SQRT_2,
+            0.0,
+        ],
+        2.05,
+    );
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("benchmarks/strain_response_head_to_head.csv");
+    let mut file = File::create(&path).expect("create head-to-head csv");
+    writeln!(
+        file,
+        "kind,path,strain,cell,variant,events,calibration,explicit_barrier_eV,explicit_enthalpy_eV,explicit_is_barrier,xy_switch,explicit_n_neg,reactant_negative,reactant_lowest,explicit_angle_110_deg,explicit_axis_x,explicit_axis_y,explicit_axis_z,explicit_calls,relax_min_calls,relax_110_calls,reactant_index_calls,search_calls,linear_barrier_eV,method_barrier_eV,method_trust,method_refine_calls,method_refine_ok,barrier_error_eV,rate_rel_error_300K,rate_rel_error_600K,eon_eV,explicit_minus_eon_eV,wall_s,note"
+    )
+    .unwrap();
+    file.flush().unwrap();
+    let mut tallies = Vec::new();
+
+    let before_bulk = copper.calls();
+    let mut bulk = perfect.clone();
+    relax(&copper, &mut bulk, cube, 1e-3, 200);
+    let (_, _, sigma_bulk) = copper.evaluate(bulk.view(), cube);
+    let bulk_calls = copper.calls() - before_bulk;
+
+    let started = Instant::now();
+    let zero = explicit_barrier(
+        &copper,
+        cube,
+        &along_100,
+        &along_110,
+        identity(),
+        Strain::zero().tensor(),
+        false,
+        true,
+    );
+    let zero_wall = started.elapsed().as_secs_f64();
+    assert!(
+        zero.accepted,
+        "zero-strain saddle was not the index-1 <110> switch: status {} n_neg {:?} angle {} axis {:?}",
+        zero.status, zero.n_neg, zero.angle_110, zero.axis
+    );
+    let volume = det(zero.cell).abs();
+    let p_min = ElasticDipole::from_stress(volume, zero.sigma_min, sigma_bulk).unwrap();
+    let p_sad = ElasticDipole::from_stress(volume, zero.sigma_sad, sigma_bulk).unwrap();
+    let multipole = match force_multipole(&zero.minimum, &zero.min_gradient)
+        .and_then(|_| force_multipole(&zero.saddle, &zero.sad_gradient))
+    {
+        Ok(()) => "relaxed residual forces accepted".to_string(),
+        Err(err) => format!("relaxed residual forces refused: {err}"),
+    };
+    let captured = Reference {
+        barrier0: zero.barrier,
+        p_min,
+        p_sad,
+        p_sad_xy: p_sad.tensor()[0][1],
+        saddle: zero.saddle.clone(),
+        mode: zero.mode.clone(),
+        multipole,
+    };
+    let calls_after_zero = copper.calls();
+    eprintln!(
+        "ZERO fixed barrier {} calls {} Psd_xy {} multipole {} wall {:.1}s",
+        zero.barrier,
+        zero.calls,
+        captured.p_sad_xy,
+        captured.multipole,
+        zero_wall
+    );
+
+    let mut response = StrainResponse::new(captured.barrier0, captured.p_min, captured.p_sad)
+        .unwrap()
+        .with_prefactor(1.0, None)
+        .unwrap()
+        .with_point_group(&cubic_rotations())
+        .unwrap();
+
+    let calib_strain = Strain::shear_yx(0.005);
+    let calib_started = Instant::now();
+    let calib_estimate = response.barrier(&calib_strain);
+    let calib = explicit_barrier(
+        &copper,
+        cube,
+        &along_100,
+        &along_110,
+        variant_rotation(&response, &calib_estimate.variant),
+        calib_strain.tensor(),
+        false,
+        true,
+    );
+    assert!(
+        calib.accepted,
+        "0.5% xy calibration search was not the shear-aligned switch: {}",
+        calib.status
+    );
+    let residual = (calib.barrier - calib_estimate.barrier).abs();
+    let coeff = residual / calib_strain.norm().powi(2);
+    response = response
+        .with_policy(TrustPolicy {
+            quadratic: Some(coeff),
+            error_tolerance: LINEAR_FOLD_EV,
+            floor: 0.0,
+            ..TrustPolicy::default()
+        })
+        .unwrap();
+    let build_calls = copper.calls();
+    let build_note = format!(
+        "one-time dipole build. barrier0_eV={} bulk_calls={bulk_calls} calls_after_zero={calls_after_zero} zero_explicit_calls={} calib_explicit_calls={} build_calls={build_calls} quadratic_eV={coeff:.16} residual_at_0.5pct_eV={residual:.16} tolerance_eV={LINEAR_FOLD_EV} prefactor_Hz=1 relative rate error does not depend on the shared prefactor multipole={} variant={}",
+        csv_num(zero.barrier),
+        zero.calls,
+        calib.calls,
+        captured.multipole.replace(',', ";"),
+        calib_estimate.variant
+    );
+    write_sparse(
+        &mut file,
+        "build",
+        "xy",
+        "0",
+        "fixed",
+        "1",
+        &build_calls.to_string(),
+        &build_calls.to_string(),
+        "",
+        "",
+        "",
+        started.elapsed().as_secs_f64(),
+        &build_note,
+    );
+    write_point(
+        &mut file,
+        &mut tallies,
+        "grid",
+        "xy",
+        0.0,
+        false,
+        &calib_estimate.variant,
+        1,
+        false,
+        &zero,
+        Some(captured.barrier0),
+        Some(captured.barrier0),
+        "explicit_reference",
+        0,
+        false,
+        zero_wall,
+        "zero-strain fixed saddle; method barrier is barrier0; these calls also sit inside the build",
+    );
+    let variable_zero_started = Instant::now();
+    let variable_zero = explicit_barrier(
+        &copper,
+        cube,
+        &along_100,
+        &along_110,
+        identity(),
+        Strain::zero().tensor(),
+        true,
+        true,
+    );
+    eprintln!(
+        "ZERO variable enthalpy {} accepted {} calls {}",
+        variable_zero.enthalpy, variable_zero.accepted, variable_zero.calls
+    );
+    write_point(
+        &mut file,
+        &mut tallies,
+        "grid",
+        "xy",
+        0.0,
+        true,
+        &calib_estimate.variant,
+        1,
+        false,
+        &variable_zero,
+        Some(captured.barrier0),
+        None,
+        "",
+        0,
+        false,
+        variable_zero_started.elapsed().as_secs_f64(),
+        "unstrained cell, then free; dipole line is not this enthalpy",
+    );
+    write_point(
+        &mut file,
+        &mut tallies,
+        "grid",
+        "xy",
+        0.005,
+        false,
+        &calib_estimate.variant,
+        1,
+        true,
+        &calib,
+        Some(calib_estimate.barrier),
+        Some(calib_estimate.barrier),
+        "linear",
+        0,
+        false,
+        calib_started.elapsed().as_secs_f64(),
+        "calibration point for the quadratic coefficient; the method answer is the dipole line",
+    );
+    file.flush().unwrap();
+
+    let paths = ["xy", "xz", "uniaxial_x", "hydrostatic"];
+    let strains = [0.005, 0.01, 0.02, 0.03, 0.04, 0.05];
+    for path_name in paths {
+        for strain_value in strains {
+            for variable in [false, true] {
+                if path_name == "xy" && !variable && (strain_value - 0.005_f64).abs() < 1e-15 {
+                    continue;
+                }
+                if variable && (path_name == "uniaxial_x" || path_name == "hydrostatic") {
+                    continue;
+                }
+                let strain = strain_of(path_name, strain_value);
+                let point_started = Instant::now();
+                let estimate = response.barrier(&strain);
+                let rotation = variant_rotation(&response, &estimate.variant);
+                let found = explicit_barrier(
+                    &copper,
+                    cube,
+                    &along_100,
+                    &along_110,
+                    rotation,
+                    strain.tensor(),
+                    variable,
+                    path_name == "xy",
+                );
+                let (method_barrier, trust, refine_calls, refine_ok, note) = if variable {
+                    (
+                        None,
+                        String::new(),
+                        0,
+                        false,
+                        "variable-cell enthalpy is a different ensemble from the dipole line".to_string(),
+                    )
+                } else if matches!(estimate.trust, Trust::Linear | Trust::Explicit) {
+                    (
+                        Some(estimate.barrier),
+                        trust_label(&estimate.trust),
+                        0,
+                        false,
+                        "dipole line trusted; no refine".to_string(),
+                    )
+                } else {
+                    let before_refine = copper.calls();
+                    let surface = Held {
+                        copper: &copper,
+                        cell: deform(&along_100, cube, strain.tensor()).1,
+                    };
+                    let seed = SaddleSeed {
+                        positions: rotate_positions(&captured.saddle, rotation),
+                        cell: cube,
+                        mode: rotate_positions(&captured.mode, rotation),
+                        minimum_energy: found.e_min,
+                    };
+                    match response.refine(&strain, &surface, &seed, 2500) {
+                        Ok(refined) => {
+                            let calls = copper.calls() - before_refine + found.relax_min_calls;
+                            (
+                                Some(refined.barrier),
+                                trust_label(&refined.trust),
+                                calls,
+                                true,
+                                format!(
+                                    "refined from the affine-strained zero-strain saddle; dimer_calls={}",
+                                    copper.calls() - before_refine
+                                ),
+                            )
+                        }
+                        Err(err) => (
+                            Some(estimate.barrier),
+                            trust_label(&estimate.trust),
+                            copper.calls() - before_refine + found.relax_min_calls,
+                            false,
+                            format!("refine failed: {}", err.to_string().replace(',', ";")),
+                        ),
+                    }
+                };
+                eprintln!(
+                    "{path_name} {strain_value} variable={variable} explicit={} accepted={} method={} calls={} refine_calls={refine_calls} {:.1}s",
+                    found.barrier,
+                    found.accepted,
+                    method_barrier.unwrap_or(f64::NAN),
+                    found.calls,
+                    point_started.elapsed().as_secs_f64()
+                );
+                write_point(
+                    &mut file,
+                    &mut tallies,
+                    "grid",
+                    path_name,
+                    strain_value,
+                    variable,
+                    &estimate.variant,
+                    1,
+                    false,
+                    &found,
+                    Some(estimate.barrier),
+                    method_barrier,
+                    &trust,
+                    refine_calls,
+                    refine_ok,
+                    point_started.elapsed().as_secs_f64(),
+                    &note,
+                );
+                file.flush().unwrap();
+            }
+        }
+    }
+
+    let mut batch_explicit_once = Vec::new();
+    let mut batch_seen = Vec::<(i64, usize)>::new();
+    let sources: Vec<_> = (0..4)
+        .map(|site| {
+            let mut saddle = [[0.0; 3]; 3];
+            saddle[0][1] = 8.0;
+            saddle[1][0] = 8.0;
+            DefectSource {
+                position: [site as f64 * 6.0, 0.0, 0.0],
+                dipole: ElasticDipole::from_tensor(saddle).unwrap(),
+            }
+        })
+        .collect();
+    let fields = FmmSolver::new(Kelvin::new(40.0, 0.3).unwrap())
+        .fields(&sources)
+        .unwrap();
+    for site in 0..4 {
+        let applied = Strain::shear_yx(0.01).tensor();
+        let mut tensor = applied;
+        for i in 0..3 {
+            for j in 0..3 {
+                tensor[i][j] += fields[site].strain.tensor()[i][j];
+            }
+        }
+        let strain = Strain::from_tensor(tensor).unwrap();
+        let point_started = Instant::now();
+        let before = copper.calls();
+        let estimate = response.barrier(&strain);
+        let query_calls = copper.calls() - before;
+        let rotation = variant_rotation(&response, &estimate.variant);
+        let found = explicit_barrier(
+            &copper,
+            cube,
+            &along_100,
+            &along_110,
+            rotation,
+            strain.tensor(),
+            false,
+            true,
+        );
+        let (method_barrier, trust, refine_calls, refine_ok, note) =
+            if matches!(estimate.trust, Trust::Linear | Trust::Explicit) {
+                (
+                    Some(estimate.barrier),
+                    trust_label(&estimate.trust),
+                    query_calls,
+                    false,
+                    format!(
+                        "example field site {site}; events=50; one search measured, batch multiplies it"
+                    ),
+                )
+            } else {
+                let before_refine = copper.calls();
+                let surface = Held {
+                    copper: &copper,
+                    cell: deform(&along_100, cube, strain.tensor()).1,
+                };
+                let seed = SaddleSeed {
+                    positions: rotate_positions(&captured.saddle, rotation),
+                    cell: cube,
+                    mode: rotate_positions(&captured.mode, rotation),
+                    minimum_energy: found.e_min,
+                };
+                match response.refine(&strain, &surface, &seed, 2500) {
+                    Ok(refined) => (
+                        Some(refined.barrier),
+                        trust_label(&refined.trust),
+                        query_calls + copper.calls() - before_refine + found.relax_min_calls,
+                        true,
+                        format!("example field site {site}; refined"),
+                    ),
+                    Err(err) => (
+                        Some(estimate.barrier),
+                        trust_label(&estimate.trust),
+                        query_calls + copper.calls() - before_refine + found.relax_min_calls,
+                        false,
+                        format!(
+                            "example field site {site}; refine failed: {}",
+                            err.to_string().replace(',', ";")
+                        ),
+                    ),
+                }
+            };
+        batch_explicit_once.push(found.calls);
+        let strain_key = (strain.tensor()[1][0] * 1.0e12).round() as i64;
+        if !batch_seen.iter().any(|(key, _)| *key == strain_key) {
+            batch_seen.push((strain_key, found.calls));
+        }
+        write_point(
+            &mut file,
+            &mut tallies,
+            "batch",
+            "akmc_strain",
+            strain.tensor()[1][0],
+            false,
+            &estimate.variant,
+            50,
+            false,
+            &found,
+            Some(estimate.barrier),
+            method_barrier,
+            &trust,
+            refine_calls,
+            refine_ok,
+            point_started.elapsed().as_secs_f64(),
+            &format!("{note} norm={}", csv_num(strain.norm())),
+        );
+        file.flush().unwrap();
+    }
+
+    let fixed: Vec<_> = tallies.iter().filter(|row| row.fixed && !row.batch).collect();
+    let variable: Vec<_> = tallies.iter().filter(|row| !row.fixed && !row.batch).collect();
+    let explicit_fixed: usize = fixed.iter().map(|row| row.explicit_calls).sum::<usize>();
+    let method_fixed: usize =
+        build_calls + fixed.iter().map(|row| row.method_calls).sum::<usize>();
+    let explicit_variable: usize = variable.iter().map(|row| row.explicit_calls).sum::<usize>();
+    let batch_explicit: usize = batch_explicit_once.iter().map(|calls| calls * 50).sum::<usize>();
+    let batch_method: usize = tallies
+        .iter()
+        .filter(|row| row.batch)
+        .map(|row| row.method_calls)
+        .sum::<usize>();
+    let max_barrier = csv_opt(largest_abs(
+        fixed
+            .iter()
+            .filter(|row| !row.calibration)
+            .filter_map(|row| row.barrier_error),
+    ));
+    let max_linear_barrier = csv_opt(largest_abs(
+        fixed
+            .iter()
+            .filter(|row| row.linear && !row.calibration)
+            .filter_map(|row| row.barrier_error),
+    ));
+    let max_linear_300 = csv_opt(largest_abs(
+        fixed
+            .iter()
+            .filter(|row| row.linear && !row.calibration)
+            .filter_map(|row| row.rate_300),
+    ));
+    let max_linear_600 = csv_opt(largest_abs(
+        fixed
+            .iter()
+            .filter(|row| row.linear && !row.calibration)
+            .filter_map(|row| row.rate_600),
+    ));
+    let max_refined = csv_opt(largest_abs(
+        fixed
+            .iter()
+            .filter(|row| row.refined)
+            .filter_map(|row| row.barrier_error),
+    ));
+    let fixed_note = format!(
+        "rows={} explicit_calls sums the fixed grid searches; method_refine_calls column is build_calls={build_calls} plus fixed refine attributions; barrier_error is max abs error excluding the 0.5% calibration; rate columns are max abs relative rate error on trusted linear points excluding calibration; max_abs_barrier_linear={max_linear_barrier} max_abs_barrier_refined={max_refined}",
+        fixed.len()
+    );
+    write_sparse(
+        &mut file,
+        "total",
+        "fixed_grid",
+        "",
+        "fixed",
+        &fixed.len().to_string(),
+        &explicit_fixed.to_string(),
+        &method_fixed.to_string(),
+        &max_barrier,
+        &max_linear_300,
+        &max_linear_600,
+        started.elapsed().as_secs_f64(),
+        &fixed_note,
+    );
+    write_sparse(
+        &mut file,
+        "total",
+        "variable_grid",
+        "",
+        "variable",
+        &variable.len().to_string(),
+        &explicit_variable.to_string(),
+        "",
+        "",
+        "",
+        "",
+        started.elapsed().as_secs_f64(),
+        "explicit_calls sums the variable-cell searches. The dipole line is the imposed-strain barrier and does not replace these enthalpies.",
+    );
+    let batch_method_with_build = batch_method + build_calls;
+    let batch_barrier = csv_opt(largest_abs(
+        tallies
+            .iter()
+            .filter(|row| row.batch)
+            .filter_map(|row| row.barrier_error),
+    ));
+    let batch_300 = csv_opt(largest_abs(
+        tallies
+            .iter()
+            .filter(|row| row.batch)
+            .filter_map(|row| row.rate_300),
+    ));
+    let batch_600 = csv_opt(largest_abs(
+        tallies
+            .iter()
+            .filter(|row| row.batch)
+            .filter_map(|row| row.rate_600),
+    ));
+    let unique_explicit: usize = batch_seen.iter().map(|(_, calls)| calls).sum::<usize>();
+    let batch_note = format!(
+        "200 events = 50 at each of 4 examples/akmc_strain.rs sites. explicit_calls multiplies each measured search by 50. unique strains={}; one search at each sums to {unique_explicit}. method_refine_calls includes the one-time build ({build_calls}) plus one query or refine per site (marginal {batch_method}). max_abs_rate_600={batch_600}",
+        batch_seen.len()
+    );
+    write_sparse(
+        &mut file,
+        "total",
+        "akmc_batch",
+        "",
+        "fixed",
+        "200",
+        &batch_explicit.to_string(),
+        &batch_method_with_build.to_string(),
+        &batch_barrier,
+        &batch_300,
+        &batch_600,
+        started.elapsed().as_secs_f64(),
+        &batch_note,
+    );
+    file.flush().unwrap();
+}
+
+struct Reference {
+    barrier0: f64,
+    p_min: ElasticDipole,
+    p_sad: ElasticDipole,
+    p_sad_xy: f64,
+    saddle: Array1<f64>,
+    mode: Array1<f64>,
+    multipole: String,
+}
+
+fn write_sparse(
+    file: &mut File,
+    kind: &str,
+    path: &str,
+    strain: &str,
+    cell: &str,
+    events: &str,
+    explicit_calls: &str,
+    method_calls: &str,
+    barrier_error: &str,
+    rate_300: &str,
+    rate_600: &str,
+    wall_s: f64,
+    note: &str,
+) {
+    let mut fields = vec![String::new(); 35];
+    fields[0] = kind.to_string();
+    fields[1] = path.to_string();
+    fields[2] = strain.to_string();
+    fields[3] = cell.to_string();
+    fields[5] = events.to_string();
+    fields[18] = explicit_calls.to_string();
+    fields[26] = method_calls.to_string();
+    fields[28] = barrier_error.to_string();
+    fields[29] = rate_300.to_string();
+    fields[30] = rate_600.to_string();
+    fields[33] = format!("{wall_s:.3}");
+    fields[34] = format!("\"{}\"", note.replace('"', "'"));
+    writeln!(file, "{}", fields.join(",")).unwrap();
+}
+
+fn force_multipole(positions: &Array1<f64>, gradient: &Array1<f64>) -> Result<(), SaddleError> {
+    let n = positions.len() / 3;
+    let mut pos = Vec::with_capacity(n);
+    let mut force = Vec::with_capacity(n);
+    for i in 0..n {
+        pos.push([
+            positions[3 * i],
+            positions[3 * i + 1],
+            positions[3 * i + 2],
+        ]);
+        force.push([
+            -gradient[3 * i],
+            -gradient[3 * i + 1],
+            -gradient[3 * i + 2],
+        ]);
+    }
+    ElasticMultipole::about([0.0, 0.0, 0.0], &pos, &force, 3).map(|_| ())
+}
+
+fn strain_of(path: &str, value: f64) -> Strain {
+    match path {
+        "xy" => Strain::shear_yx(value),
+        "xz" => Strain::shear_xz(value),
+        "uniaxial_x" => Strain::uniaxial_x(value),
+        "hydrostatic" => Strain::hydrostatic(value),
+        _ => unreachable!("{path}"),
+    }
+}
+
+fn variant_rotation(response: &StrainResponse, name: &str) -> [[f64; 3]; 3] {
+    response
+        .variants()
+        .iter()
+        .find(|variant| variant.name == name)
+        .unwrap_or_else(|| panic!("missing variant {name}"))
+        .rotation
+}
+
+fn trust_label(trust: &Trust) -> String {
+    match trust {
+        Trust::Linear => "linear".to_string(),
+        Trust::Explicit => "explicit".to_string(),
+        Trust::NeedsSearch(reason) => reason.to_string(),
+    }
+}
+
+fn largest_abs(values: impl Iterator<Item = f64>) -> Option<f64> {
+    let mut best = None;
+    for value in values {
+        if !value.is_finite() {
+            continue;
+        }
+        best = Some(best.map_or(value.abs(), |prior: f64| prior.max(value.abs())));
+    }
+    best
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_point(
+    file: &mut File,
+    tallies: &mut Vec<Tally>,
+    kind: &str,
+    path: &str,
+    strain: f64,
+    variable: bool,
+    variant: &str,
+    events: usize,
+    calibration: bool,
+    found: &ExplicitOut,
+    linear: Option<f64>,
+    method_barrier: Option<f64>,
+    trust: &str,
+    refine_calls: usize,
+    refine_ok: bool,
+    wall_s: f64,
+    note: &str,
+) {
+    let compare = found.accepted && !variable;
+    let error = match (compare, method_barrier) {
+        (true, Some(method)) => Some(method - found.barrier),
+        _ => None,
+    };
+    let rate_300 = error.map(|_| rel_rate(method_barrier.unwrap(), found.barrier, 300.0));
+    let rate_600 = error.map(|_| rel_rate(method_barrier.unwrap(), found.barrier, 600.0));
+    let eon = if path == "xy" {
+        eon_barrier(strain, variable)
+    } else {
+        None
+    };
+    let versus_eon = match (eon, variable) {
+        (Some(reference), false) if found.accepted => Some(found.barrier - reference),
+        (Some(reference), true) if found.accepted => Some(found.enthalpy - reference),
+        _ => None,
+    };
+    writeln!(
+        file,
+        "{kind},{path},{strain},{},{variant},{events},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},\"{trust}\",{refine_calls},{},{},{},{},{},{},{:.3},\"{}\"",
+        if variable { "variable" } else { "fixed" },
+        calibration as u8,
+        csv_num(found.barrier),
+        csv_num(found.enthalpy),
+        found.accepted as u8,
+        found.xy_switch as u8,
+        found.n_neg.map(|n| n.to_string()).unwrap_or_default(),
+        found.reactant_negative,
+        csv_num(found.reactant_lowest),
+        csv_num(found.angle_110),
+        csv_num(found.axis[0]),
+        csv_num(found.axis[1]),
+        csv_num(found.axis[2]),
+        found.calls,
+        found.relax_min_calls,
+        found.relax_110_calls,
+        found.reactant_index_calls,
+        found.search_calls,
+        csv_opt(linear),
+        csv_opt(method_barrier),
+        refine_ok as u8,
+        csv_opt(error),
+        csv_opt(rate_300),
+        csv_opt(rate_600),
+        csv_opt(eon),
+        csv_opt(versus_eon),
+        wall_s,
+        format!(
+            "{} status={} curvature={} min_force={}",
+            note.replace('"', "'"),
+            found.status,
+            csv_num(found.curvature),
+            csv_num(found.min_force)
+        )
+    )
+    .unwrap();
+    tallies.push(Tally {
+        fixed: !variable,
+        calibration,
+        batch: kind == "batch",
+        explicit_calls: found.calls,
+        method_calls: refine_calls,
+        barrier_error: error,
+        rate_300,
+        rate_600,
+        refined: refine_ok && trust == "explicit",
+        linear: trust == "linear" || trust == "explicit_reference",
+    });
 }
