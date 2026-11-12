@@ -22,9 +22,11 @@ use rgmin::{Manifold, prfo_restricted, rfo_get_s};
 ///
 /// At this width and below the step is the [`rgmin::rfo_get_s`] call it
 /// was before, so the small P-RFO fixtures and an index-1 uphill block
-/// keep Jacobi. Any wider partition takes faer, in a test as in a climb:
-/// the LJ38 and Pt-island downhill blocks, and the 59-wide downhill block
-/// behind `secular_root_matches_the_augmented_step_on_a_wide_diagonal`.
+/// keep Jacobi. Any wider partition solves the arrowhead secular equation.
+/// faer is the fallback when that root is not isolated. The LJ38 and
+/// Pt-island downhill blocks, and the 59-wide block behind
+/// `secular_root_matches_the_augmented_step_on_a_wide_diagonal`, take
+/// the secular root.
 const AUGMENTED_JACOBI_LIMIT: usize = 32;
 
 /// Floor on the last augmented coordinate, matching rgmin `rfo_get_s`.
@@ -137,8 +139,9 @@ impl PartitionedRationalFunctionOptimization {
     /// `order` columns are the uphill block (Sella `Vmax`); the rest
     /// are the downhill complement (`Vmin`). Each block is diagonal, so
     /// the Banerjee augmented matrix is an arrowhead. A block wider
-    /// than [`AUGMENTED_JACOBI_LIMIT`] asks faer for that one eigenpair.
-    /// A narrower block keeps [`rgmin::rfo_get_s`].
+    /// than [`AUGMENTED_JACOBI_LIMIT`] solves that arrowhead by its
+    /// secular equation and applies the coefficients along contiguous
+    /// rows of `evecs`. A narrower block keeps [`rgmin::rfo_get_s`].
     pub fn get_s(
         &self,
         evals: &Array1<f64>,
@@ -153,30 +156,12 @@ impl PartitionedRationalFunctionOptimization {
         let order = self.order.min(n);
         let mut s = Array1::zeros(n);
         if order > 0 {
-            let mut gmax = Array1::zeros(order);
-            let mut lam = Array1::zeros(order);
-            for i in 0..order {
-                lam[i] = evals[i];
-                gmax[i] = dot(evecs.column(i), g.view());
-            }
             // The whole uphill block is maximized: the highest augmented mode.
-            let smax = diagonal_rfo_step(&lam, &gmax, order, alpha);
-            for i in 0..order {
-                axpy(smax[i], evecs.column(i), &mut s);
-            }
+            apply_partition(evecs, evals, g, 0, order, order, alpha, &mut s);
         }
         let nmin = n - order;
         if nmin > 0 {
-            let mut gmin = Array1::zeros(nmin);
-            let mut lam = Array1::zeros(nmin);
-            for i in 0..nmin {
-                lam[i] = evals[order + i];
-                gmin[i] = dot(evecs.column(order + i), g.view());
-            }
-            let smin = diagonal_rfo_step(&lam, &gmin, 0, alpha);
-            for i in 0..nmin {
-                axpy(smin[i], evecs.column(order + i), &mut s);
-            }
+            apply_partition(evecs, evals, g, order, nmin, 0, alpha, &mut s);
         }
         s
     }
@@ -249,13 +234,21 @@ impl PartitionedRationalFunctionOptimization {
 /// 7, 385 (1986), doi:10.1002/jcc.540070402, runs that problem once on
 /// the uphill modes and once on the complement. `mode` is the index in
 /// the ascending augmented spectrum: `0` minimizes, and `diag.len()`
-/// maximizes. A wide block is an arrowhead. faer reduces it to
-/// symmetric tridiagonal form and returns that eigenpair. The step is
-/// `alpha v_i / v_last`, with the same floor on `v_last` as rgmin.
+/// maximizes. A wide extremal block is the arrowhead secular root,
+/// `s_i = alpha^2 g_i / (theta - alpha^2 d_i)`. faer is the fallback
+/// when that root is not isolated, and a narrow block keeps cyclic
+/// Jacobi. The step is `alpha v_i / v_last`, with the same floor on
+/// `v_last` as rgmin.
 fn diagonal_rfo_step(diag: &Array1<f64>, g: &Array1<f64>, mode: usize, alpha: f64) -> Array1<f64> {
     let n = g.len();
     if n == 0 || diag.len() != n {
         return Array1::zeros(n);
+    }
+    if n > AUGMENTED_JACOBI_LIMIT && (mode == 0 || mode >= n) {
+        let upper = mode >= n;
+        if let Some(step) = secular_rfo_step(diag, g, upper, alpha) {
+            return step;
+        }
     }
     #[cfg(feature = "faer")]
     if n > AUGMENTED_JACOBI_LIMIT
@@ -270,6 +263,100 @@ fn diagonal_rfo_step(diag: &Array1<f64>, g: &Array1<f64>, mode: usize, alpha: f6
         h[(i, i)] = diag[i];
     }
     rfo_get_s(&h, g, mode, alpha)
+}
+
+/// Project `g` onto columns `start..start+width` and add that block's
+/// RFO step into `s`.
+///
+/// A wide block reads the columns along contiguous rows. The multiply-add
+/// into each entry of `s` runs down the coefficient list, which is the
+/// same sequence a column-wise axpy would apply. A narrow block keeps
+/// the strided dot and axpy, so the small fixtures stay on that arithmetic.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one eigenblock, its place in the spectrum, and the step it writes"
+)]
+fn apply_partition(
+    evecs: &Array2<f64>,
+    evals: &Array1<f64>,
+    g: &Array1<f64>,
+    start: usize,
+    width: usize,
+    mode: usize,
+    alpha: f64,
+    s: &mut Array1<f64>,
+) {
+    if width > AUGMENTED_JACOBI_LIMIT {
+        let (grad, lam) = project_columns(evecs, g, evals, start, width);
+        let step = diagonal_rfo_step(&lam, &grad, mode, alpha);
+        accumulate_columns(evecs, start, &step, s);
+        return;
+    }
+    let mut grad = Array1::zeros(width);
+    let mut lam = Array1::zeros(width);
+    for i in 0..width {
+        lam[i] = evals[start + i];
+        grad[i] = dot(evecs.column(start + i), g.view());
+    }
+    let step = diagonal_rfo_step(&lam, &grad, mode, alpha);
+    for i in 0..width {
+        axpy(step[i], evecs.column(start + i), s);
+    }
+}
+
+/// `out_g[j] = column(start + j) · g`, summed down the column.
+fn project_columns(
+    evecs: &Array2<f64>,
+    g: &Array1<f64>,
+    evals: &Array1<f64>,
+    start: usize,
+    width: usize,
+) -> (Array1<f64>, Array1<f64>) {
+    let mut grad = vec![0.0; width];
+    let mut lam = Array1::zeros(width);
+    for i in 0..width {
+        lam[i] = evals[start + i];
+    }
+    if let (Some(matrix), Some(gv)) = (evecs.as_slice(), g.as_slice()) {
+        let stride = evecs.ncols();
+        for (row, &gi) in gv.iter().enumerate() {
+            let line = &matrix[row * stride + start..row * stride + start + width];
+            for (slot, value) in grad.iter_mut().zip(line) {
+                *slot += gi * *value;
+            }
+        }
+    } else {
+        for (i, slot) in grad.iter_mut().enumerate() {
+            *slot = dot(evecs.column(start + i), g.view());
+        }
+    }
+    (Array1::from(grad), lam)
+}
+
+/// `s += evecs[:, start..start+width] * coeff`.
+///
+/// Each entry is a chain of multiply-adds over the coefficients, matching
+/// a column-wise axpy. Contiguous rows keep that chain in cache: a column
+/// view of a row-major eigenbasis strides across the matrix once per mode.
+fn accumulate_columns(evecs: &Array2<f64>, start: usize, coeff: &Array1<f64>, s: &mut Array1<f64>) {
+    let width = coeff.len();
+    if let (Some(matrix), Some(step), Some(weights)) =
+        (evecs.as_slice(), s.as_slice_mut(), coeff.as_slice())
+    {
+        let stride = evecs.ncols();
+        for (row, slot) in step.iter_mut().enumerate() {
+            let line = &matrix[row * stride + start..row * stride + start + width];
+            let mut acc = *slot;
+            for (value, weight) in line.iter().zip(weights) {
+                acc = weight.mul_add(*value, acc);
+            }
+            *slot = acc;
+        }
+        return;
+    }
+    for (i, weight) in coeff.iter().enumerate() {
+        axpy(*weight, evecs.column(start + i), s);
+    }
 }
 
 /// Lowest or highest eigenpair of a diagonal augmented Hessian.
@@ -891,7 +978,7 @@ mod tests {
         evecs
     }
 
-    /// The 35-wide downhill block takes faer, the 1-wide uphill block Jacobi.
+    /// The 35-wide downhill block takes the secular root, the 1-wide uphill block Jacobi.
     #[cfg(feature = "faer")]
     #[test]
     fn wide_diagonal_partition_matches_jacobi() {
@@ -907,7 +994,10 @@ mod tests {
         let (got, faer_steps) = count_faer_steps(|| {
             PartitionedRationalFunctionOptimization::new(1).get_s(&evals, &evecs, &g, alpha)
         });
-        assert_eq!(faer_steps, 1, "the downhill block fell back to Jacobi");
+        assert_eq!(
+            faer_steps, 0,
+            "the downhill block rebuilt the augmented matrix"
+        );
         let mut gmax = Array1::zeros(1);
         gmax[0] = dot(evecs.column(0), g.view());
         let mut hmax = Array2::<f64>::zeros((1, 1));
@@ -927,11 +1017,11 @@ mod tests {
             axpy(smin[i], evecs.column(i + 1), &mut expect);
         }
         let err = nrm2((&got - &expect).view());
-        assert!(err < 1e-10, "faer left Jacobi by {err}");
+        assert!(err < 1e-10, "secular left Jacobi by {err}");
     }
 
-    /// The whole 40-wide space is the uphill block, so faer returns the
-    /// highest augmented eigenpair.
+    /// The whole 40-wide space is the uphill block, so the secular root is
+    /// the highest augmented eigenpair.
     ///
     /// The step `s_i = alpha v_i / v_last` of an eigenvalue `alpha^2 lambda` of
     /// `[alpha^2 D, alpha g; alpha g^T, 0]` is `g_i / (lambda - d_i)`, and `lambda` solves
@@ -965,7 +1055,10 @@ mod tests {
         let (got, faer_steps) = count_faer_steps(|| {
             PartitionedRationalFunctionOptimization::new(n).get_s(&evals, &evecs, &g, alpha)
         });
-        assert_eq!(faer_steps, 1, "the uphill block fell back to Jacobi");
+        assert_eq!(
+            faer_steps, 0,
+            "the uphill block rebuilt the augmented matrix"
+        );
         let mut gmax = Array1::zeros(n);
         let mut hmax = Array2::<f64>::zeros((n, n));
         for i in 0..n {
@@ -981,13 +1074,14 @@ mod tests {
             axpy(step, evecs.column(i), &mut analytic);
         }
         let err = nrm2((&got - &jacobi).view());
-        assert!(err < 1e-10, "faer left Jacobi by {err}");
+        assert!(err < 1e-10, "secular left Jacobi by {err}");
         let err = nrm2((&got - &analytic).view());
-        assert!(err < 1e-10, "faer left the analytic eigenpair by {err}");
+        assert!(err < 1e-10, "secular left the analytic eigenpair by {err}");
     }
 
-    /// With faer, the reference's 59-wide downhill block is faer's solve.
-    /// Without it, that block is Jacobi.
+    /// The 59-wide downhill block is the secular root of the augmented
+    /// arrowhead. That root matches cyclic Jacobi on the same diagonal,
+    /// and it does not assemble the dense augmented matrix.
     #[test]
     fn secular_root_matches_the_augmented_step_on_a_wide_diagonal() {
         let n = 60;
@@ -1001,10 +1095,30 @@ mod tests {
         g[0] = 0.35;
         let evecs = Array2::<f64>::eye(n);
         let (secular, _) = prfo_step_and_derivative(&evals, &evecs, &g, 1, 0.7);
-        let (augmented, faer_steps) = count_faer_steps(|| prfo_get_s(&evals, &evecs, &g, 1, 0.7));
-        assert_eq!(faer_steps, usize::from(cfg!(feature = "faer")));
-        let err = nrm2((&secular - &augmented).view());
-        assert!(err < 1e-8, "secular left the augmented step by {err}");
+        let (got, faer_steps) = count_faer_steps(|| prfo_get_s(&evals, &evecs, &g, 1, 0.7));
+        assert_eq!(
+            faer_steps, 0,
+            "the downhill block rebuilt the augmented matrix"
+        );
+        let mut hmin = Array2::<f64>::zeros((n - 1, n - 1));
+        let mut gmin = Array1::zeros(n - 1);
+        for i in 0..n - 1 {
+            hmin[(i, i)] = evals[i + 1];
+            gmin[i] = g[i + 1];
+        }
+        let hmax = Array2::from_elem((1, 1), evals[0]);
+        let gmax = array![g[0]];
+        let smax = rfo_get_s(&hmax, &gmax, 1, 0.7);
+        let smin = rfo_get_s(&hmin, &gmin, 0, 0.7);
+        let mut jacobi = Array1::zeros(n);
+        jacobi[0] = smax[0];
+        for i in 0..n - 1 {
+            jacobi[i + 1] = smin[i];
+        }
+        let err = nrm2((&got - &jacobi).view());
+        assert!(err < 1e-10, "secular left Jacobi by {err}");
+        let err = nrm2((&secular - &got).view());
+        assert!(err < 1e-8, "derivative secular left the step by {err}");
     }
 
     #[test]
