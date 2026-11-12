@@ -46,6 +46,7 @@ pub mod band;
 #[cfg(feature = "capi")]
 pub mod capi;
 pub mod connect;
+pub mod dimer_armijo;
 pub mod error;
 pub mod idpp;
 pub mod minmode;
@@ -75,6 +76,9 @@ pub use band::{
     ExpBandPrecon, MinModeRefine, SolidState, ZoomConfig,
 };
 pub use connect::{ConnectConfig, ConnectProfile, ConnectReport, connect};
+pub use dimer_armijo::{
+    ArmijoDimer, DimerState, DimerStep, local_merit, rotation_tolerance, shrink_dimer_length,
+};
 pub use error::SaddleError;
 pub use idpp::{IdppConfig, SidppConfig, idpp_path, linear_path, sidpp_path};
 pub use minmode::{

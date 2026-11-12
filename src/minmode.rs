@@ -1,6 +1,10 @@
 //! Minimum-mode saddle search: find the lowest curvature direction,
 //! invert the force along it, take one step. Stepping, like the band.
 //!
+//! [`crate::ArmijoDimer`] is the linesearch translation of that step:
+//! an Armijo merit, a rotation tolerance tied to the force residual,
+//! and a dimer length that shrinks with the accepted step.
+//!
 //! A session is long-lived: [`MinModeSession::set_position`] moves it
 //! to a new point (with the host's gradient there, when the host has
 //! one) and keeps the mode and the dimer's Polak-Ribiere rotation
@@ -18,6 +22,10 @@ use rgmin::{Accept, Control, Method, Oracle, Solver};
 
 use crate::error::SaddleError;
 use crate::force::ForceGate;
+
+pub use crate::dimer_armijo::{
+    ArmijoDimer, DimerState, DimerStep, local_merit, rotation_tolerance, shrink_dimer_length,
+};
 use crate::kappa::{Complement, KappaDimerConfig, kappa_dimer_force};
 
 /// The caller's surface for a single geometry.
