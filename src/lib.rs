@@ -81,7 +81,7 @@ pub use error::SaddleError;
 pub use idpp::{IdppConfig, SidppConfig, idpp_path, linear_path, sidpp_path};
 pub use minmode::{
     FiniteDifference, MinModeConfig, MinModeKind, MinModeReport, MinModeSession, MinModeStatus,
-    ModeEstimate, PointSurface,
+    ModeEstimate, PointSurface, RaisedStep, halve_raised_energy,
 };
 pub use nichols::{
     HessianUpdate, Index1Config, Index1Report, Index1Session, Index1Status, NicholsMode,
@@ -135,7 +135,7 @@ pub use force::ForceGate;
 
 pub use force_match::{covalent_pairs, force_match_hessian};
 
-pub use geom::{SellaGeom, TrustSchedule};
+pub use geom::{SellaGeom, TrustSchedule, trust_update, update_trust};
 
 pub use internal::{CartAxis, Displacement, InternalSlot, Rotation, Translation};
 

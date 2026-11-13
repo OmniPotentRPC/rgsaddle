@@ -270,6 +270,47 @@ const TORQUE_MAX: f64 = 1.0;
 /// integrator.
 const FIRE_EMPTY_SCALE: f64 = 0.01;
 
+/// Whether a trial energy rose, and the step length to try next.
+///
+/// `raised` is the conjugate-gradient translator's decision. `step` is
+/// the length of the next trial, in the host's length unit.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RaisedStep {
+    /// True when the trial energy is more than `1e-4` above the previous energy.
+    pub raised: bool,
+    /// Half the trial length when `raised` is true, otherwise that length.
+    pub step: f64,
+}
+
+/// Half the step when the trial energy rises.
+///
+/// `previous` is the energy before the step and `trial` the energy at
+/// the trial point, both in the host's energy unit. `step` is that
+/// trial's length in the host's length unit. The conjugate-gradient
+/// translator treats a trial more than `1e-4` above `previous` as a
+/// rise and tries half the length. This is that comparison and that
+/// new length. A missing previous energy is a non-finite `previous`,
+/// which is not a rise.
+///
+/// Nothing here evaluates a surface.
+///
+/// ```
+/// use rgsaddle::halve_raised_energy;
+/// let kept = halve_raised_energy(1.0, 1.0, 0.4);
+/// assert!(!kept.raised);
+/// assert_eq!(kept.step.to_bits(), 0.4_f64.to_bits());
+/// let halved = halve_raised_energy(1.0, 1.0002, 0.4);
+/// assert!(halved.raised);
+/// assert_eq!(halved.step.to_bits(), (0.4_f64 * 0.5).to_bits());
+/// ```
+pub fn halve_raised_energy(previous: f64, trial: f64, step: f64) -> RaisedStep {
+    let raised = trial > previous + 1e-4;
+    RaisedStep {
+        raised,
+        step: if raised { step * 0.5 } else { step },
+    }
+}
+
 /// A first-order saddle has a vanishing force and one negative
 /// curvature. A vanishing force alone also describes a minimum, which
 /// the inverted-force step then leaves; the gate therefore requires
@@ -2432,12 +2473,12 @@ impl MinModeSession {
                 break;
             }
             let (energy, arrived) = counted.eval(trial.view())?;
-            let raised = current.is_some_and(|have| energy > have + 1e-4);
+            let decision = halve_raised_energy(current.unwrap_or(f64::NAN), energy, length);
             chosen = Some((trial, energy, arrived));
-            if !raised {
+            if !decision.raised {
                 break;
             }
-            length *= 0.5;
+            length = decision.step;
         }
         let Some((trial, energy, arrived)) = chosen else {
             return Ok((origin, self.centre.clone()));

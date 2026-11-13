@@ -15,7 +15,7 @@ use rgmin::vecops::{Vector, axpy, dot, vdot, vnrm2};
 
 use crate::constraints::Constraints;
 use crate::error::SaddleError;
-use crate::geom::{SellaGeom, TrustSchedule, update_trust};
+use crate::geom::{SellaGeom, TrustSchedule, trust_update};
 use crate::minmode::PointSurface;
 use crate::pes::CartesianPes;
 use crate::pes_internal::{CellCartesianPes, CellInternalPes, InternalPes, SellaPes};
@@ -763,9 +763,10 @@ impl SellaSaddleSession {
         if pred.abs() >= 1e-14 {
             self.rho = (energy - e0) / pred;
             if cap_active {
-                self.atom_delta = update_trust(
+                self.atom_delta = trust_update(
                     atom_delta,
-                    self.rho,
+                    pred,
+                    energy - e0,
                     crate::restricted::ras_cons(&s),
                     &self.config.schedule(),
                 );
@@ -773,9 +774,10 @@ impl SellaSaddleSession {
                     self.atom_delta = self.atom_delta.min(self.delta);
                 }
             } else {
-                self.delta = update_trust(
+                self.delta = trust_update(
                     self.delta,
-                    self.rho,
+                    pred,
+                    energy - e0,
                     self.config.restricted.step_magnitude(&s),
                     &self.config.schedule(),
                 );
@@ -887,9 +889,10 @@ impl SellaSaddleSession {
         let max_force = self.config.force_gate.value(g1.view());
         if pred.abs() >= 1e-14 {
             self.rho = (energy - e0) / pred;
-            self.delta = update_trust(
+            self.delta = trust_update(
                 self.delta,
-                self.rho,
+                pred,
+                energy - e0,
                 self.config.restricted.step_magnitude(&s),
                 &self.config.schedule(),
             );
@@ -975,9 +978,10 @@ impl SellaSaddleSession {
         let max_force = self.config.force_gate.value(g1_cart.view());
         if pred.abs() >= 1e-14 {
             self.rho = (energy - e0) / pred;
-            self.delta = update_trust(
+            self.delta = trust_update(
                 self.delta,
-                self.rho,
+                pred,
+                energy - e0,
                 self.config.restricted.step_magnitude(&s),
                 &self.config.schedule(),
             );
@@ -1059,9 +1063,10 @@ impl SellaSaddleSession {
         let max_force = self.config.force_gate.value(g1.view());
         if pred.abs() >= 1e-14 {
             self.rho = (energy - e0) / pred;
-            self.delta = update_trust(
+            self.delta = trust_update(
                 self.delta,
-                self.rho,
+                pred,
+                energy - e0,
                 self.config.restricted.step_magnitude(&s),
                 &self.config.schedule(),
             );

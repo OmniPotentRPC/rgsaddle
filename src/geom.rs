@@ -219,6 +219,44 @@ pub fn update_trust(delta: f64, rho: f64, smag: f64, sch: &TrustSchedule) -> f64
     }
 }
 
+/// Trust radius after a predicted energy change and the change that occurred.
+///
+/// `predicted` and `actual` are energy changes in the host's energy unit.
+/// `actual` is the trial energy minus the energy before the step.
+/// `step_norm` is the length the schedule compares with the radius, in the
+/// same length unit as `radius`. A prediction whose absolute value is below
+/// `1e-14` leaves `radius` as it was: that is the branch the Sella sessions
+/// take. Otherwise the ratio `actual / predicted` is [`update_trust`].
+///
+/// Nothing here evaluates a surface.
+///
+/// ```
+/// use rgsaddle::{TrustSchedule, trust_update, update_trust};
+/// let sch = TrustSchedule::minimum();
+/// let radius = trust_update(0.2, -1.0, 0.0, 0.2, &sch);
+/// assert_eq!(
+///     radius.to_bits(),
+///     update_trust(0.2, 0.0, 0.2, &sch).to_bits()
+/// );
+/// assert_eq!(
+///     trust_update(0.2, 1e-16, 1.0, 0.2, &sch).to_bits(),
+///     0.2_f64.to_bits()
+/// );
+/// ```
+pub fn trust_update(
+    radius: f64,
+    predicted: f64,
+    actual: f64,
+    step_norm: f64,
+    sch: &TrustSchedule,
+) -> f64 {
+    if predicted.abs() >= 1e-14 {
+        update_trust(radius, actual / predicted, step_norm, sch)
+    } else {
+        radius
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,5 +307,20 @@ mod tests {
         assert!((shrunk - 0.2 * sch.sigma_dec).abs() < 1e-14);
         let grown = update_trust(0.2, 1.0, 0.2, &sch);
         assert!((grown - sch.sigma_inc * 0.2).abs() < 1e-14);
+    }
+
+    #[test]
+    fn trust_update_matches_the_ratio_the_sessions_use() {
+        let sch = TrustSchedule::saddle();
+        let predicted = -0.4;
+        let actual = -0.05;
+        let rho = actual / predicted;
+        let via_ratio = update_trust(0.2, rho, 0.2, &sch);
+        let via_change = trust_update(0.2, predicted, actual, 0.2, &sch);
+        assert_eq!(via_change.to_bits(), via_ratio.to_bits());
+        assert_eq!(
+            trust_update(0.2, 1e-15, 3.0, 0.2, &sch).to_bits(),
+            0.2_f64.to_bits()
+        );
     }
 }
