@@ -83,3 +83,20 @@ channel,6.807,100,translate,500,0.098557,9.867682e-4,1.500000e-3,true,translatio
 channel,6.807,100,translate,500,0.089842,1.388446e-3,1.500000e-3,true,translation,seed translate landed on translation; direction away
 channel,6.807,100,translate,500,0.096134,1.101827e-3,1.500000e-3,true,translation,seed translate landed on translation; direction away
 channel,6.807,100,translate,500,0.092501,1.184399e-3,1.500000e-3,true,translation,seed translate landed on translation; direction away
+channel,7.277,010,translate,500,0.088729,1.337095e-3,1.500000e-3,true,translation,seed translate landed on translation; direction away
+channel,7.277,010,translate,500,0.093792,1.275471e-3,1.500000e-3,true,translation,seed translate landed on translation; direction tangential
+channel,7.277,010,translate,500,0.089363,1.365074e-3,1.500000e-3,true,translation,seed translate landed on translation; direction tangential
+channel,7.277,010,translate,500,0.089363,1.365074e-3,1.500000e-3,true,translation,seed translate landed on translation; direction tangential
+channel,7.277,100,translate,500,0.085863,1.418055e-3,1.500000e-3,true,translation,seed translate landed on translation; direction away
+channel,7.277,100,translate,500,0.085863,1.418055e-3,1.500000e-3,true,translation,seed translate landed on translation; direction away
+channel,7.277,100,translate,500,0.085863,1.418055e-3,1.500000e-3,true,translation,seed translate landed on translation; direction away
+channel,7.277,100,translate,500,0.085863,1.418055e-3,1.500000e-3,true,translation,seed translate landed on translation; direction away
+channel,7.719,001,translate,500,0.087309,1.303754e-3,1.500000e-3,true,translation,seed translate landed on translation; direction tangential
+channel,7.719,001,translate,500,0.086575,1.244361e-3,1.500000e-3,true,translation,seed translate landed on translation; direction tangential
+channel,7.719,001,translate,500,0.087309,1.303754e-3,1.500000e-3,true,translation,seed translate landed on translation; direction tangential
+channel,7.719,001,translate,500,0.086575,1.244361e-3,1.500000e-3,true,translation,seed translate landed on translation; direction tangential
+channel,7.719,100,none,500,,,,,false,spontaneous,quench recombines
+channel,8.136,001,translate,500,0.085721,1.243239e-3,1.500000e-3,true,translation,seed translate landed on translation; direction tangential
+channel,8.136,001,translate,500,0.092501,1.209455e-3,1.500000e-3,true,translation,seed translate landed on translation; direction tangential
+channel,8.136,001,translate,500,0.091985,1.420349e-3,1.500000e-3,true,translation,seed translate landed on translation; direction tangential
+channel,8.136,001,translate,500,0.087960,1.347710e-3,1.500000e-3,true,translation,seed translate landed on translation; direction tangential
