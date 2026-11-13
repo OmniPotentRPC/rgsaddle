@@ -1,0 +1,137 @@
+kind,orientation,separation_A,sense,direct_eV,dipole_eV,absolute_error_eV,status
+translation,001,2.5562,toward,,0.091759,,left the hop (endpoint is the vacancy)
+translation,001,2.5562,away,,0.123426,,left the hop (minimum) barrier=-0.000027 angle_100=0.29 angle_110=44.80 status=Converged
+rotation,001,2.5562,axis-along-r,,0.198572,,left the hop (minimum) barrier=-0.000028 angle_100=0.31 angle_110=44.78 status=Converged
+rotation,001,2.5562,axis-along-r,,0.198572,,left the hop (minimum) barrier=-0.000028 angle_100=0.31 angle_110=44.78 status=Converged
+translation,010,3.6150,toward,,0.099493,,left the hop (minimum) barrier=0.000127 angle_100=25.34 angle_110=31.35 status=Converged
+translation,010,3.6150,away,,0.098794,,left the hop (minimum) barrier=0.000125 angle_100=25.34 angle_110=31.35 status=Converged
+rotation,010,3.6150,axis-along-r,,0.238004,,did not converge Running barrier=0.620102 angle_100=44.22 angle_110=0.78
+rotation,010,3.6150,axis-across-r,0.545343,0.238389,0.306954,converged
+translation,001,4.4275,toward,,0.082651,,left the hop (other) barrier=0.241687 angle_100=0.29 angle_110=44.80 status=Converged
+translation,001,4.4275,away,,0.093959,,left the hop (minimum) barrier=0.001958 angle_100=4.93 angle_110=40.45 status=Converged
+rotation,001,4.4275,axis-across-r,,0.218927,,left the hop (minimum) barrier=0.001965 angle_100=4.90 angle_110=40.50 status=Converged
+rotation,001,4.4275,axis-across-r,,0.218927,,left the hop (minimum) barrier=0.001965 angle_100=4.90 angle_110=40.50 status=Converged
+translation,001,5.1124,toward,0.071547,0.097268,0.025721,converged
+translation,001,5.1124,away,0.101686,0.099351,0.002335,converged
+rotation,001,5.1124,axis-along-r,,0.231369,,left the hop (other) barrier=0.202303 angle_100=33.14 angle_110=12.39 status=Converged
+rotation,001,5.1124,axis-along-r,,0.231369,,left the hop (other) barrier=0.202302 angle_100=33.14 angle_110=12.39 status=Converged
+translation,100,5.7158,toward,0.093823,0.096321,0.002498,converged
+translation,100,5.7158,away,0.093828,0.096265,0.002437,converged
+rotation,100,5.7158,axis-across-r,,0.245151,,did not converge Running barrier=0.227998 angle_100=44.96 angle_110=0.04
+rotation,100,5.7158,axis-across-r,,0.237786,,did not converge Running barrier=0.225798 angle_100=41.94 angle_110=3.19
+translation,010,5.7158,toward,0.105324,0.099481,0.005843,converged
+translation,010,5.7158,away,0.105372,0.099375,0.005997,converged
+rotation,010,5.7158,axis-along-r,,0.229735,,did not converge Converged barrier=0.218078 angle_100=44.99 angle_110=0.01
+rotation,010,5.7158,axis-across-r,,0.234080,,did not converge Running barrier=0.203854 angle_100=44.32 angle_110=1.14
+translation,001,5.7158,toward,0.098354,0.098275,0.000079,converged
+translation,001,5.7158,away,0.095301,0.097800,0.002499,converged
+rotation,001,5.7158,axis-along-r,,0.238446,,did not converge Running barrier=0.250048 angle_100=41.95 angle_110=3.18
+rotation,001,5.7158,axis-across-r,,0.233981,,did not converge Running barrier=0.236351 angle_100=44.33 angle_110=1.13
+translation,100,6.2614,toward,0.081622,0.086258,0.004636,converged
+translation,100,6.2614,away,0.094374,0.105292,0.010918,converged
+rotation,100,6.2614,axis-across-r,,0.197253,,did not converge Running barrier=0.203010 angle_100=45.05 angle_110=2.45
+rotation,100,6.2614,axis-across-r,0.245386,0.273226,0.027840,converged
+translation,100,6.7630,toward,0.047711,0.093047,0.045336,converged
+translation,100,6.7630,away,0.106237,0.097739,0.008498,converged
+rotation,100,6.7630,axis-across-r,,0.232154,,left the hop (other) barrier=0.205113 angle_100=33.43 angle_110=12.06 status=Converged
+rotation,100,6.7630,axis-across-r,0.257448,0.249461,0.007987,converged
+translation,010,6.7630,toward,0.101415,0.096994,0.004421,converged
+translation,010,6.7630,away,0.103574,0.096486,0.007088,converged
+rotation,010,6.7630,axis-along-r,0.251388,0.246094,0.005294,converged
+rotation,010,6.7630,axis-across-r,0.238524,0.232097,0.006427,converged
+translation,001,6.7630,toward,0.096225,0.101202,0.004977,converged
+translation,001,6.7630,away,0.092836,0.098998,0.006162,converged
+rotation,001,6.7630,axis-along-r,,0.229157,,left the hop (translation) barrier=0.067579 angle_100=17.01 angle_110=28.00 status=Converged
+rotation,001,6.7630,axis-across-r,0.235357,0.232070,0.003287,converged
+translation,100,7.2300,toward,0.107050,0.099247,0.007803,converged
+translation,100,7.2300,away,0.107050,0.099280,0.007770,converged
+rotation,100,7.2300,axis-across-r,0.233891,0.236269,0.002378,converged
+rotation,100,7.2300,axis-across-r,0.233891,0.236124,0.002233,converged
+translation,010,7.2300,toward,0.097404,0.098250,0.000846,converged
+translation,010,7.2300,away,0.097416,0.098237,0.000821,converged
+rotation,010,7.2300,axis-along-r,0.235429,0.236094,0.000665,converged
+rotation,010,7.2300,axis-across-r,,0.236456,,did not converge Converged barrier=0.232891 angle_100=44.94 angle_110=0.11
+translation,001,7.6686,toward,0.094932,0.097875,0.002943,converged
+translation,001,7.6686,away,0.094222,0.098268,0.004046,converged
+rotation,001,7.6686,axis-along-r,0.220522,0.234682,0.014160,converged
+rotation,001,7.6686,axis-along-r,0.220522,0.234682,0.014160,converged
+translation,100,8.0834,toward,0.094525,0.097977,0.003452,converged
+translation,100,8.0834,away,0.094530,0.097918,0.003388,converged
+rotation,100,8.0834,axis-across-r,,0.238364,,did not converge Running barrier=0.232201 angle_100=44.97 angle_110=0.03
+rotation,100,8.0834,axis-across-r,0.231950,0.237233,0.005283,converged
+translation,010,8.0834,toward,0.098187,0.098804,0.000617,converged
+translation,010,8.0834,away,0.098224,0.098821,0.000597,converged
+rotation,010,8.0834,axis-along-r,0.233462,0.235313,0.001851,converged
+rotation,010,8.0834,axis-across-r,0.226803,0.234109,0.007306,converged
+translation,001,8.0834,toward,0.100469,0.098095,0.002374,converged
+translation,001,8.0834,away,0.095739,0.097644,0.001905,converged
+rotation,001,8.0834,axis-along-r,0.243570,0.237800,0.005770,converged
+rotation,001,8.0834,axis-across-r,0.236249,0.234009,0.002240,converged
+translation,100,8.4779,toward,0.097900,0.094853,0.003047,converged
+translation,100,8.4779,away,0.097717,0.099080,0.001363,converged
+rotation,100,8.4779,axis-across-r,,0.220958,,did not converge Running barrier=0.217354 angle_100=45.00 angle_110=0.12
+rotation,100,8.4779,axis-across-r,0.241146,0.243338,0.002192,converged
+translation,001,8.4779,toward,0.096930,0.095838,0.001092,converged
+translation,001,8.4779,away,0.096841,0.100045,0.003204,converged
+rotation,001,8.4779,axis-across-r,0.228847,0.225824,0.003023,converged
+rotation,001,8.4779,axis-across-r,0.228847,0.225824,0.003023,converged
+translation,100,8.8549,toward,0.093798,0.096651,0.002853,converged
+translation,100,8.8549,away,0.100501,0.098185,0.002316,converged
+rotation,100,8.8549,axis-across-r,,0.233628,,left the hop (other) barrier=0.197686 angle_100=33.41 angle_110=12.08 status=Converged
+rotation,100,8.8549,axis-across-r,0.246160,0.240582,0.005578,converged
+translation,010,8.8549,toward,0.097608,0.096963,0.000645,converged
+translation,010,8.8549,away,0.098272,0.097421,0.000851,converged
+rotation,010,8.8549,axis-along-r,0.242909,0.241209,0.001700,converged
+rotation,010,8.8549,axis-across-r,0.236061,0.235318,0.000743,converged
+translation,100,9.2165,toward,0.096825,0.097852,0.001027,converged
+translation,100,9.2165,away,0.096825,0.097820,0.000995,converged
+rotation,100,9.2165,axis-across-r,0.235858,0.237333,0.001475,converged
+rotation,100,9.2165,axis-across-r,0.236048,0.236081,0.000033,converged
+translation,010,9.2165,toward,0.098109,0.098216,0.000107,converged
+translation,010,9.2165,away,0.098103,0.098228,0.000125,converged
+rotation,010,9.2165,axis-along-r,0.236540,0.234896,0.001644,converged
+rotation,010,9.2165,axis-across-r,0.235284,0.236144,0.000860,converged
+translation,001,9.2165,toward,0.098096,0.098159,0.000063,converged
+translation,001,9.2165,away,0.097641,0.098111,0.000470,converged
+rotation,001,9.2165,axis-along-r,0.236319,0.236232,0.000087,converged
+rotation,001,9.2165,axis-across-r,0.234535,0.236138,0.001603,converged
+translation,100,9.9001,toward,0.098365,0.098497,0.000132,converged
+translation,100,9.9001,away,0.095115,0.097917,0.002802,converged
+rotation,100,9.9001,axis-across-r,0.236861,0.236653,0.000208,converged
+rotation,100,9.9001,axis-across-r,0.234809,0.235439,0.000630,converged
+translation,010,9.9001,toward,0.097478,0.097707,0.000229,converged
+translation,010,9.9001,away,0.095746,0.098154,0.002408,converged
+rotation,010,9.9001,axis-along-r,0.237440,0.236452,0.000988,converged
+rotation,010,9.9001,axis-across-r,0.235116,0.236550,0.001434,converged
+translation,001,9.9001,toward,0.099152,0.098611,0.000541,converged
+translation,001,9.9001,away,0.098648,0.097968,0.000680,converged
+rotation,001,9.9001,axis-along-r,0.240000,0.237331,0.002669,converged
+rotation,001,9.9001,axis-across-r,0.234361,0.236575,0.002214,converged
+translation,100,10.2248,toward,0.103572,0.098137,0.005435,converged
+translation,100,10.2248,away,0.103563,0.098085,0.005478,converged
+rotation,100,10.2248,axis-along-r,,0.229580,,left the hop (translation) barrier=0.068689 angle_100=15.96 angle_110=29.04 status=Converged
+rotation,100,10.2248,axis-across-r,0.241521,0.235113,0.006408,converged
+translation,001,10.2248,toward,0.096728,0.097999,0.001271,converged
+translation,001,10.2248,away,0.096853,0.098103,0.001250,converged
+rotation,001,10.2248,axis-along-r,0.231252,0.235498,0.004246,converged
+rotation,001,10.2248,axis-along-r,0.231252,0.235498,0.004246,converged
+translation,100,10.5394,toward,0.097074,0.098209,0.001135,converged
+translation,100,10.5394,away,0.097075,0.098157,0.001082,converged
+rotation,100,10.5394,axis-across-r,,0.235660,,did not converge Running barrier=0.236428 angle_100=44.99 angle_110=0.01
+rotation,100,10.5394,axis-across-r,0.234709,0.236641,0.001932,converged
+translation,010,10.5394,toward,0.098213,0.098393,0.000180,converged
+translation,010,10.5394,away,0.098202,0.098434,0.000232,converged
+rotation,010,10.5394,axis-along-r,0.235673,0.237237,0.001564,converged
+rotation,010,10.5394,axis-across-r,0.232082,0.234844,0.002762,converged
+translation,001,10.5394,toward,0.099529,0.098054,0.001475,converged
+translation,001,10.5394,away,0.096884,0.097786,0.000902,converged
+rotation,001,10.5394,axis-along-r,0.238667,0.237039,0.001628,converged
+rotation,001,10.5394,axis-across-r,0.235927,0.234786,0.001141,converged
+translation,100,10.8450,toward,0.098328,0.098277,0.000051,converged
+translation,100,10.8450,away,0.098328,0.098310,0.000018,converged
+rotation,100,10.8450,axis-across-r,0.235810,0.236063,0.000253,converged
+rotation,100,10.8450,axis-across-r,0.235810,0.235918,0.000108,converged
+translation,010,10.8450,toward,0.098014,0.098123,0.000109,converged
+translation,010,10.8450,away,0.098007,0.098148,0.000141,converged
+rotation,010,10.8450,axis-along-r,0.236119,0.235873,0.000246,converged
+rotation,010,10.8450,axis-across-r,0.235713,0.236344,0.000631,converged

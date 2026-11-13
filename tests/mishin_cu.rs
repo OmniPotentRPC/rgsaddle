@@ -22,7 +22,8 @@ use rgmin::{Control, FireKind, Method, Oracle, Solver};
 use rgsaddle::{
     BOLTZMANN_EV_PER_K, CellMask, CubicElasticity,
     DefectSource, ElasticDipole, ElasticMultipole, FieldSolver, FmmSolver, IndexCheck, Kelvin,
-    LINEAR_FOLD_EV, MinModeConfig, MinModeStatus, PointSurface, SaddleError, SaddleSeed,
+    LINEAR_FOLD_EV, MinModeConfig, MinModeStatus, PairOptions, PairOutcome, PointSurface,
+    SaddleError, SaddleSeed, isolated_saddle, pair_saddle_search,
     SolidDimer, SolidDimerConfig, Strain, StrainResponse, Trust, TrustPolicy, cubic_rotations,
     index_at,
 };
@@ -3161,6 +3162,7 @@ struct HopRun {
     sigma_sad: [[f64; 3]; 3],
     minimum: Array1<f64>,
     saddle: Array1<f64>,
+    final_min: Array1<f64>,
     saddle_offset: [f64; 3],
 }
 
@@ -3172,100 +3174,37 @@ fn dimer_endpoints(
     tail: usize,
     _origin: [f64; 3],
 ) -> HopRun {
-    relax(copper, &mut initial, cell, 1e-3, 400);
-    relax(copper, &mut final_pos, cell, 1e-3, 400);
-    align_tail(&initial, &mut final_pos, cell, tail);
-    let (e_min, _, sigma_min) = copper.evaluate(initial.view(), cell);
-    let minimum = initial.clone();
-    let (_, axis0) = pair_distance(&initial, cell);
-    let (to_100, _, _, _) = axis_report(axis0);
-    let connect = minimum_image_difference(&final_pos, &initial, cell);
-    let norm = connect.dot(&connect).sqrt();
-    let mut nudged = minimum.clone();
-    if norm > 0.0 {
-        for (slot, component) in nudged.iter_mut().zip(connect.iter()) {
-            *slot += 0.02 * component / norm;
-        }
-    }
-    let row = saddle_from_minimum(
-        copper,
-        &nudged,
-        cell,
-        &connect,
-        CellMask::frozen(),
-        [[0.0; 3]; 3],
-        cell,
-        e_min,
-        to_100,
-        0.0,
-        800,
-        &published_dimer(),
-    );
-    let converged = row.status == MinModeStatus::Converged
-        && !row.rejected
-        && row.curvature < 0.0
-        && row.negative_modes == Some(1);
-    let saddle = row.positions;
+    let mut options = PairOptions::published();
+    options.tail = tail;
+    let found = isolated_saddle(&Held { copper, cell }, cell, initial, final_pos, &options)
+        .expect("isolated saddle");
+    let (_, _, sigma_min) = copper.evaluate(found.minimum.view(), cell);
+    let (_, _, sigma_sad) = copper.evaluate(found.saddle.view(), cell);
+    let (_, axis_sad) = pair_distance(&found.saddle, cell);
+    let (angle_100, angle_110, _, _) = axis_report(axis_sad);
+    let minimum = found.minimum.clone();
+    let saddle = found.saddle.clone();
     HopRun {
-        barrier: row.barrier,
-        converged,
-        angle_100: row.angle_100,
-        angle_110: row.angle_110,
-        status: format!("{:?}", row.status),
+        barrier: found.barrier,
+        converged: found.converged,
+        angle_100,
+        angle_110,
+        status: if found.converged {
+            "Converged".to_string()
+        } else {
+            "did not converge".to_string()
+        },
         sigma_min,
-        sigma_sad: row.stress,
+        sigma_sad,
         saddle_offset: tail_offset(&minimum, &saddle, cell, tail),
         minimum,
         saddle,
+        final_min: found.final_min,
     }
 }
 
-fn rigid_place(
-    positions: &Array1<f64>,
-    rotation: [[f64; 3]; 3],
-    shift: [f64; 3],
-    length: f64,
-) -> Array1<f64> {
-    let rotated = rotate_about(positions, [0.0, 0.0, 0.0], rotation);
-    let mut out = rotated;
-    for atom in 0..out.len() / 3 {
-        let wrapped = wrap_cell(
-            [
-                out[3 * atom] + shift[0],
-                out[3 * atom + 1] + shift[1],
-                out[3 * atom + 2] + shift[2],
-            ],
-            length,
-        );
-        out[3 * atom] = wrapped[0];
-        out[3 * atom + 1] = wrapped[1];
-        out[3 * atom + 2] = wrapped[2];
-    }
-    out
-}
-
-fn pbc_nearest(positions: &Array1<f64>, point: [f64; 3], cell: [[f64; 3]; 3]) -> usize {
-    let mut best = 0usize;
-    let mut best_d = f64::MAX;
-    for atom in 0..positions.len() / 3 {
-        let here = [
-            positions[3 * atom],
-            positions[3 * atom + 1],
-            positions[3 * atom + 2],
-        ];
-        let distance = min_image_length(here, point, cell);
-        if distance < best_d {
-            best_d = distance;
-            best = atom;
-        }
-    }
-    best
-}
-
-/// The isolated saddle, rotated onto this dumbbell and with the vacancy
-/// deleted. The dimer starts there. A result counts only when it stays
-/// on the same hop: a <100> tilt for the translation, a <110> split for
-/// the rotation.
+/// The isolated saddle placed on this pair. The climb and the two quenches
+/// are [`pair_saddle_search`]. A recombination or a capture is not a barrier.
 fn direct_on_hop(
     copper: &Copper,
     hop: &HopRun,
@@ -3275,128 +3214,58 @@ fn direct_on_hop(
     cell: [[f64; 3]; 3],
     kind: &str,
 ) -> (Option<f64>, String) {
-    let moved_min = rigid_place(&hop.minimum, rotation, shift, length);
-    let moved_sad = rigid_place(&hop.saddle, rotation, shift, length);
-    let vacancy = pbc_nearest(&moved_min, [0.0, 0.0, 0.0], cell);
-    let vacancy_here = [
-        moved_min[3 * vacancy],
-        moved_min[3 * vacancy + 1],
-        moved_min[3 * vacancy + 2],
-    ];
-    let vacancy_distance = min_image_length(vacancy_here, [0.0, 0.0, 0.0], cell);
-    if vacancy_distance > 0.8 {
-        return (
-            None,
-            format!("did not converge vacancy atom {vacancy_distance:.3} A from the origin"),
-        );
-    }
-    let min_placed = drop_atoms(&moved_min, &[vacancy]);
-    let sad_placed = drop_atoms(&moved_sad, &[vacancy]);
-    let mode = minimum_image_difference(&sad_placed, &min_placed, cell);
-    let mut minimum = min_placed;
-    relax(copper, &mut minimum, cell, 1e-3, 200);
-    let (e_min, gradient, _) = copper.evaluate(minimum.view(), cell);
-    let (split, axis) = pair_distance(&minimum, cell);
-    let (to_100, _, _, _) = axis_report(axis);
-    let force = max_abs(&gradient);
-    if !(1.8..2.45).contains(&split) || to_100 > 35.0 || force > 5.0e-2 {
-        return (
-            None,
-            format!(
-                "did not converge reactant split={split:.3} angle_100={to_100:.1} force={force:.3e}"
-            ),
-        );
-    }
-    let tune = published_dimer();
-    let search = MinModeConfig {
-        method: Method::Fire { kind: FireKind::V2 },
-        force_tol: tune.force_tol,
-        max_move: tune.max_move,
-        dr: 1e-3,
-        rotation_tol: tune.rotation_tol,
-        max_rotations: tune.max_rotations,
-        seed_curvature: tune.seed_curvature,
-        ..MinModeConfig::default()
-    };
-    let mut dimer = match SolidDimer::new(
-        SolidDimerConfig::new(search)
-            .with_mask(CellMask::frozen())
-            .with_external_stress([[0.0; 3]; 3])
-            .with_index_check(IndexCheck::first_order())
-            .with_flat(tune.flat),
-        sad_placed,
+    let geometry = rgsaddle::HopGeometry {
+        barrier: hop.barrier,
         cell,
-        mode,
-    ) {
-        Ok(dimer) => dimer,
+        minimum: hop.minimum.clone(),
+        saddle: hop.saddle.clone(),
+        final_min: hop.final_min.clone(),
+        mode: hop.saddle.clone(),
+        negative_modes: None,
+        force_calls: 0,
+        converged: hop.converged,
+    };
+    let placed = match geometry.place(rotation, shift, cell, length, [0.0, 0.0, 0.0], 0.8) {
+        Ok(placed) => placed,
         Err(err) => return (None, format!("did not converge {err}")),
     };
-    let surface = Held { copper, cell };
-    let mut report = match dimer.step(&surface) {
-        Ok(report) => report,
+    let mut options = PairOptions::published();
+    options.max_steps = 500;
+    options.relax_steps = 200;
+    let found = match pair_saddle_search(&Held { copper, cell }, cell, &placed, &options) {
+        Ok(found) => found,
         Err(err) => return (None, format!("did not converge {err}")),
     };
-    let mut steps = 1usize;
-    let mut dissolved = false;
-    loop {
-        if steps % 8 == 0 {
-            let (split_now, _) = pair_distance(&dimer.positions().to_owned(), cell);
-            if split_now > 2.7 {
-                dissolved = true;
-                break;
-            }
-        }
-        if report.status != MinModeStatus::Running || steps >= 500 {
-            break;
-        }
-        report = match dimer.step(&surface) {
-            Ok(report) => report,
-            Err(err) => return (None, format!("did not converge {err}")),
-        };
-        steps += 1;
-    }
-    let (e_sad, _, _) = copper.evaluate(dimer.positions(), cell);
-    let (split_sad, dir) = pair_distance(&dimer.positions().to_owned(), cell);
-    let (angle_100, angle_110, _, _) = axis_report(dir);
-    let barrier = e_sad - e_min;
-    // A climb that returns to the reactant is not a saddle of either hop.
-    // The translation saddle sits about 14 degrees off <100>; the reactant
-    // is the aligned dumbbell.
-    let back_at_minimum = barrier.abs() < 0.02 && (angle_100 - to_100).abs() < 6.0;
-    let family = if dissolved || !(1.8..2.6).contains(&split_sad) {
-        "recombined"
-    } else if back_at_minimum {
-        "minimum"
-    } else if angle_110 < 8.0 && angle_100 > 30.0 {
+    let (_, axis_sad) = pair_distance(&found.saddle_geometry, cell);
+    let (angle_100, angle_110, _, _) = axis_report(axis_sad);
+    let family = if angle_110 < 8.0 && angle_100 > 30.0 {
         "rotation"
     } else if (5.0..32.0).contains(&angle_100) {
         "translation"
     } else {
         "other"
     };
-    let converged = report.status == MinModeStatus::Converged
-        && !report.rejected
-        && report.curvature < 0.0
-        && report.negative_modes == Some(1);
-    if converged && family == kind {
+    let outcome = match found.outcome {
+        PairOutcome::Hop if family == kind => "hop",
+        PairOutcome::Hop => "other hop",
+        PairOutcome::Recombined => "recombined",
+        PairOutcome::Captured => "captured",
+        PairOutcome::ReturnedToMinimum => "minimum",
+        PairOutcome::NotIndexOne => "not index 1",
+        PairOutcome::DidNotConverge => "did not converge",
+        PairOutcome::OffPathway => "off pathway",
+    };
+    if found.outcome == PairOutcome::Hop && family == kind {
         (
-            Some(barrier),
+            Some(found.barrier),
             format!("converged angle_100={angle_100:.2} angle_110={angle_110:.2}"),
-        )
-    } else if family != kind {
-        (
-            None,
-            format!(
-                "left the hop ({family}) barrier={barrier:.6} angle_100={angle_100:.2} angle_110={angle_110:.2} status={:?}",
-                report.status
-            ),
         )
     } else {
         (
             None,
             format!(
-                "did not converge {:?} barrier={barrier:.6} angle_100={angle_100:.2} angle_110={angle_110:.2}",
-                report.status
+                "{outcome} barrier={:.6} angle_100={angle_100:.2} angle_110={angle_110:.2} index={:?}",
+                found.barrier, found.index
             ),
         )
     }
@@ -4244,6 +4113,94 @@ fn report_field(lines: &[String]) {
                 toward.r, toward.axis, toward.status, away.status
             ),
         }
+    }
+}
+
+/// Library saddles for the two Mishin hops, and a document a consumer can load.
+#[test]
+#[ignore = "8x8x8 Mishin translation and rotation via isolated_saddle; run in release"]
+fn exported_dumbbell_saddles_match_the_8x8x8_barriers() {
+    let a = 3.615;
+    let (perfect, cell) = fcc(8, a);
+    let origin = nearest_atom(&perfect, [0.0, 0.0, 0.0]);
+    let neighbor = nearest_atom(&perfect, [0.0, 0.5 * a, 0.5 * a]);
+    let copper = Copper::new();
+    let (trans_i, trans_f) = matched_dumbbells(
+        &perfect,
+        origin,
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        neighbor,
+        [0.0, 0.5 * a, 0.5 * a],
+        [0.0, 1.0, 0.0],
+        &[],
+    );
+    let (rot_i, rot_f) = matched_dumbbells(
+        &perfect,
+        origin,
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        origin,
+        [0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        &[],
+    );
+    let (translation, rotation) = std::thread::scope(|scope| {
+        let translation = scope.spawn(|| {
+            let mut options = PairOptions::published();
+            options.tail = 3;
+            isolated_saddle(
+                &Held {
+                    copper: &Copper::new(),
+                    cell,
+                },
+                cell,
+                trans_i,
+                trans_f,
+                &options,
+            )
+            .expect("translation")
+        });
+        let rotation = scope.spawn(|| {
+            let mut options = PairOptions::published();
+            options.tail = 2;
+            isolated_saddle(
+                &Held {
+                    copper: &Copper::new(),
+                    cell,
+                },
+                cell,
+                rot_i,
+                rot_f,
+                &options,
+            )
+            .expect("rotation")
+        });
+        (
+            translation.join().expect("translation"),
+            rotation.join().expect("rotation"),
+        )
+    });
+    let _ = copper;
+    eprintln!(
+        "EXPORT translation={:.6} calls={} rotation={:.6} calls={}",
+        translation.barrier, translation.force_calls, rotation.barrier, rotation.force_calls
+    );
+    assert!(
+        translation.converged && (translation.barrier - 0.097989).abs() < 5.0e-4,
+        "translation {}",
+        translation.barrier
+    );
+    assert!(
+        rotation.converged && (rotation.barrier - 0.235887).abs() < 5.0e-4,
+        "rotation {}",
+        rotation.barrier
+    );
+    for geometry in [&translation, &rotation] {
+        let loaded = rgsaddle::HopGeometry::from_json(&geometry.to_json()).expect("json");
+        assert!((loaded.barrier - geometry.barrier).abs() < 1.0e-12);
+        assert_eq!(loaded.minimum.len(), geometry.minimum.len());
+        assert!(loaded.converged);
     }
 }
 

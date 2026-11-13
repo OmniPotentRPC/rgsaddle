@@ -51,6 +51,7 @@ pub mod idpp;
 pub mod minmode;
 pub mod nichols;
 pub mod ocineb;
+pub mod pair;
 pub mod prfo;
 pub mod projection;
 pub mod solid_dimer;
@@ -97,6 +98,10 @@ pub use ocineb::{
     backoff_threshold, initial_threshold, mode_alignment, should_trigger, success_threshold,
     walk_helped,
 };
+pub use pair::{
+    HopGeometry, PairEnd, PairOptions, PairOutcome, PairSaddle, PlacedPair, align_tail,
+    isolated_saddle, pair_saddle_search,
+};
 pub use prfo::{PrfoKind, partitioned_rfo_eigen, restricted_prfo_displacement};
 pub use projection::ProjectionKind;
 pub use solid_dimer::{
@@ -110,11 +115,12 @@ pub use stencil::{
     Role, Stencil, StencilReport, StencilStatus,
 };
 pub use strain_rate::{
-    BOLTZMANN_EV_PER_K, CurvatureBound, DirectCutoff, ElasticDipole, Estimate, HopInField,
-    HopVariant, LINEAR_FOLD_EV, NEGATIVE_CURVATURE, SaddleSeed, SearchReason, Strain,
-    StrainResponse, TranslationalSplit, Trust, TrustPolicy, activation_volume, angular_scale_rad_s,
-    arrhenius, compliance_from_stiffness, cubic_rotations, double_dot, elastic_dipole, rotation_x,
-    split_translational_modes, symmetrize, transform_tensor, vineyard_prefactor,
+    BOLTZMANN_EV_PER_K, CurvatureBound, DirectCutoff, ElasticDipole, Estimate, HopCutoff,
+    HopErrorSample, HopInField, HopVariant, LINEAR_FOLD_EV, NEGATIVE_CURVATURE, SaddleSeed,
+    SearchReason, Strain, StrainResponse, TranslationalSplit, Trust, TrustPolicy,
+    activation_volume, angular_scale_rad_s, arrhenius, compliance_from_stiffness, cubic_rotations,
+    cutoffs_by_hop, double_dot, elastic_dipole, rotation_x, split_translational_modes, symmetrize,
+    transform_tensor, vineyard_prefactor,
 };
 pub use tangent::TangentKind;
 

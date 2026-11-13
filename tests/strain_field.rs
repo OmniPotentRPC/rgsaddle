@@ -1,7 +1,8 @@
 //! Dipole field of a cubic crystal, and the hop barriers it produces.
 
 use rgsaddle::{
-    CubicElasticity, DirectCutoff, ElasticDipole, Kelvin, Strain, StrainResponse, Trust,
+    CubicElasticity, DirectCutoff, ElasticDipole, HopErrorSample, Kelvin, Strain, StrainResponse,
+    Trust, cutoffs_by_hop,
 };
 
 fn shear_dipole() -> ElasticDipole {
@@ -205,4 +206,62 @@ fn mishin_direct_cutoff_is_the_10_5394_shell() {
     assert!(cutoff.search_directly(10.2248));
     assert!(cutoff.use_dipole(10.5394));
     assert!(cutoff.use_dipole(10.8450));
+}
+
+/// Per-hop cutoffs from the 8×8×8 survey. A shell is safe only when every
+/// later measured shell of that hop stays inside 5 meV. 7.2300 Å is one
+/// rotation shell, not that tail: 7.6686 Å is 0.014160 eV out, 8.0834 Å is
+/// 0.007306 eV out, and the [100] translation at 10.2248 Å is 0.005478 eV out.
+#[test]
+fn per_hop_cutoff_follows_the_measured_tail() {
+    let mut samples = Vec::new();
+    let mut rotations = Vec::new();
+    for line in include_str!("../benchmarks/dipole_cutoff_cu.csv")
+        .lines()
+        .skip(1)
+    {
+        let mut cols = line.split(',');
+        let kind = cols.next().unwrap();
+        let orientation = cols.next().unwrap();
+        let separation: f64 = cols.next().unwrap().parse().unwrap();
+        let _sense = cols.next().unwrap();
+        let _direct = cols.next().unwrap();
+        let _dipole = cols.next().unwrap();
+        let error = cols.next().unwrap();
+        let status = cols.next().unwrap();
+        if status != "converged" || error.is_empty() {
+            continue;
+        }
+        let sample = HopErrorSample {
+            kind: kind.to_string(),
+            orientation: orientation.to_string(),
+            separation,
+            absolute_error: error.parse().unwrap(),
+        };
+        if kind == "rotation" {
+            rotations.push(HopErrorSample {
+                orientation: "all".to_string(),
+                ..sample.clone()
+            });
+        }
+        samples.push(sample);
+    }
+    samples.extend(rotations);
+    let cuts = cutoffs_by_hop(&samples, 0.005).unwrap();
+    let radius = |kind: &str, orientation: &str| {
+        cuts.iter()
+            .find(|cut| cut.kind == kind && cut.orientation == orientation)
+            .and_then(|cut| cut.radius)
+    };
+    assert!((radius("translation", "100").unwrap() - 10.5394).abs() < 1.0e-6);
+    assert!((radius("translation", "010").unwrap() - 7.2300).abs() < 1.0e-6);
+    assert!((radius("translation", "001").unwrap() - 7.6686).abs() < 1.0e-6);
+    assert!((radius("rotation", "all").unwrap() - 10.5394).abs() < 1.0e-6);
+    let at_eight = samples.iter().any(|sample| {
+        sample.kind == "rotation"
+            && sample.orientation == "all"
+            && (sample.separation - 8.0834).abs() < 1.0e-6
+            && sample.absolute_error > 0.005
+    });
+    assert!(at_eight);
 }

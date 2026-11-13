@@ -407,6 +407,90 @@ impl DirectCutoff {
     }
 }
 
+/// One measured dipole error, labelled by hop.
+///
+/// `orientation` is the caller's label for the dumbbell axis or the
+/// sense of the hop. Samples that share a kind and an orientation get
+/// one cutoff.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HopErrorSample {
+    pub kind: String,
+    pub orientation: String,
+    pub separation: f64,
+    pub absolute_error: f64,
+}
+
+/// Where one hop may use the dipole line.
+///
+/// `radius` is `None` when no measured tail of this hop stays inside
+/// the tolerance. That is a hop with no safe cutoff in the cells that
+/// were searched.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HopCutoff {
+    pub kind: String,
+    pub orientation: String,
+    pub radius: Option<f64>,
+}
+
+/// One cutoff per `(kind, orientation)`.
+///
+/// The radius is the smallest sampled separation at and beyond which
+/// every sample of that hop is within `tolerance`.
+pub fn cutoffs_by_hop(
+    samples: &[HopErrorSample],
+    tolerance: f64,
+) -> Result<Vec<HopCutoff>, SaddleError> {
+    if !(tolerance.is_finite() && tolerance >= 0.0) {
+        return Err(SaddleError::Invalid(
+            "the direct-cutoff tolerance must be finite and non-negative".into(),
+        ));
+    }
+    if samples.is_empty() {
+        return Err(SaddleError::Invalid(
+            "a per-hop cutoff needs at least one measured separation".into(),
+        ));
+    }
+    let mut order = Vec::new();
+    for sample in samples {
+        if sample.kind.is_empty() || sample.orientation.is_empty() {
+            return Err(SaddleError::Invalid(
+                "a hop error needs a kind and an orientation".into(),
+            ));
+        }
+        if !(sample.separation.is_finite() && sample.separation >= 0.0) {
+            return Err(SaddleError::Invalid(
+                "a hop separation must be finite and non-negative".into(),
+            ));
+        }
+        if !(sample.absolute_error.is_finite() && sample.absolute_error >= 0.0) {
+            return Err(SaddleError::Invalid(
+                "a hop error must be finite and non-negative".into(),
+            ));
+        }
+        let key = (sample.kind.clone(), sample.orientation.clone());
+        if !order.contains(&key) {
+            order.push(key);
+        }
+    }
+    let mut out = Vec::new();
+    for (kind, orientation) in order {
+        let group: Vec<(f64, f64)> = samples
+            .iter()
+            .filter(|sample| sample.kind == kind && sample.orientation == orientation)
+            .map(|sample| (sample.separation, sample.absolute_error))
+            .collect();
+        let radius = DirectCutoff::from_errors(&group, tolerance)
+            .ok()
+            .map(|cutoff| cutoff.radius());
+        out.push(HopCutoff {
+            kind,
+            orientation,
+            radius,
+        });
+    }
+    Ok(out)
+}
+
 /// Second-order bound from the softening of the unstable mode.
 ///
 /// `λ(ε) = λ0 + slope : ε`. `λ0` is negative. The line is trusted while
