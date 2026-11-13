@@ -38,6 +38,8 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =rgsaddle_prfo_step=. Purpose: Restricted-step partitioned RFO. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_hessian_powell=. Purpose: Powell symmetric Broyden update of a Cartesian energy Hessian. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_hessian_bofill=. Purpose: Bofill mix of the Powell update and the symmetric rank-one term. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_halve_raised_energy=. Purpose: Step length after comparing a trial energy with the energy before the step. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_trust_update=. Purpose: Trust radius after a predicted energy change and the change that occurred. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_cap_max_abs=. Purpose: Scale `step` so its largest absolute entry equals `trust_radius`. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_index1_create=. Purpose: Index-1 session over one geometry of `3 * n_atoms` coordinates. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_index1_step=. Purpose: One Nichols step, trust cap, and Hessian update. Parameters: the declaration. Units: the caller's.

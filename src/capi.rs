@@ -14,8 +14,10 @@ use rgmin::{FireKind, Method};
 use crate::band::{BandConfig, BandSession, BandStatus, BandSurface, Cell, CiConfig, SolidState};
 use crate::connect::{ConnectConfig, connect};
 use crate::error::SaddleError;
+use crate::geom::{TrustSchedule, trust_update};
 use crate::minmode::{
     FiniteDifference, MinModeConfig, MinModeKind, MinModeSession, MinModeStatus, PointSurface,
+    halve_raised_energy,
 };
 use crate::nichols::{
     HessianUpdate, Index1Config, Index1Session, Index1Status, NicholsMode, bofill_update,
@@ -29,7 +31,7 @@ use crate::tangent::TangentKind;
 /// The RGSADDLE ABI MAJOR.
 pub const RGSADDLE_ABI_MAJOR: u32 = 1;
 /// The RGSADDLE ABI MINOR.
-pub const RGSADDLE_ABI_MINOR: u32 = 35;
+pub const RGSADDLE_ABI_MINOR: u32 = 36;
 
 /// Band config bit 0. The C step calls the surface once per image
 /// carried by the evaluation: every image on the first evaluation
@@ -1408,6 +1410,59 @@ fn hessian_update(
         }
         Err(e) => status_of(&e),
     }
+}
+
+/// # Safety
+/// `raised` and `new_step` are writable. Neither pointer is read as a surface.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_halve_raised_energy(
+    previous: f64,
+    trial: f64,
+    step: f64,
+    raised: *mut i32,
+    new_step: *mut f64,
+) -> i32 {
+    if raised.is_null() || new_step.is_null() {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let decision = halve_raised_energy(previous, trial, step);
+    unsafe {
+        *raised = i32::from(decision.raised);
+        *new_step = decision.step;
+    }
+    RGSADDLE_OK
+}
+
+/// # Safety
+/// `radius_out` is writable. The call does not evaluate a surface.
+#[allow(clippy::too_many_arguments)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_trust_update(
+    radius: f64,
+    predicted: f64,
+    actual: f64,
+    step_norm: f64,
+    sigma_inc: f64,
+    sigma_dec: f64,
+    rho_inc: f64,
+    rho_dec: f64,
+    delta_min: f64,
+    radius_out: *mut f64,
+) -> i32 {
+    if radius_out.is_null() {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let schedule = TrustSchedule {
+        sigma_inc,
+        sigma_dec,
+        rho_inc,
+        rho_dec,
+        delta_min,
+    };
+    unsafe {
+        *radius_out = trust_update(radius, predicted, actual, step_norm, &schedule);
+    }
+    RGSADDLE_OK
 }
 
 /// # Safety

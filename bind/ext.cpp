@@ -977,6 +977,29 @@ nb::tuple project_band(Matrix positions, Vector energies, Matrix gradients, doub
   return nb::make_tuple(copy_vector(forces), ci);
 }
 
+nb::tuple halve_raised_energy_py(double previous, double trial, double step) {
+  int32_t raised = 0;
+  double next = 0.0;
+  const auto status = rgsaddle_halve_raised_energy(previous, trial, step, &raised, &next);
+  if (status != RGSADDLE_OK) {
+    status_error(status);
+  }
+  return nb::make_tuple(raised != 0, next);
+}
+
+double trust_update_py(double radius, double predicted, double actual, double step_norm,
+                       double sigma_inc, double sigma_dec, double rho_inc, double rho_dec,
+                       double delta_min) {
+  double out = 0.0;
+  const auto status =
+      rgsaddle_trust_update(radius, predicted, actual, step_norm, sigma_inc, sigma_dec, rho_inc,
+                            rho_dec, delta_min, &out);
+  if (status != RGSADDLE_OK) {
+    status_error(status);
+  }
+  return out;
+}
+
 PyMinMode make_minmode(Vector x, Vector mode, const std::string &kind, double dr, double force_tol,
                        double max_move, double rotation_tol, std::int64_t max_rotations,
                        std::int64_t krylov_dim) {
@@ -1183,6 +1206,24 @@ NB_MODULE(_core, m) {
       "climb selects the interior image by the endpoint-slope rule on this call; "
       "a higher endpoint that slopes into the band does not climb. Units are the "
       "caller's. k is energy per length squared.");
+
+  m.def(
+      "halve_raised_energy", &halve_raised_energy_py, nb::arg("previous"), nb::arg("trial"),
+      nb::arg("step"),
+      nb::sig("def halve_raised_energy(previous: float, trial: float, step: float) -> tuple[bool, float]"),
+      "Compare a trial energy with the energy before the step. Returns (raised, new_step). "
+      "A trial more than 1e-4 above previous halves step. No surface is evaluated.");
+
+  m.def(
+      "trust_update", &trust_update_py, nb::arg("radius"), nb::arg("predicted"), nb::arg("actual"),
+      nb::arg("step_norm"), nb::arg("sigma_inc"), nb::arg("sigma_dec"), nb::arg("rho_inc"),
+      nb::arg("rho_dec"), nb::arg("delta_min"),
+      nb::sig("def trust_update(radius: float, predicted: float, actual: float, step_norm: float, "
+              "sigma_inc: float, sigma_dec: float, rho_inc: float, rho_dec: float, delta_min: float) -> float"),
+      "Trust radius from a predicted energy change and the change that occurred. "
+      "actual is the trial energy minus the energy before the step. A prediction below "
+      "1e-14 in absolute value returns radius. The remaining arguments are the Sella schedule. "
+      "No surface is evaluated.");
 
   nb::class_<PyMinMode>(m, "MinMode")
       .def(

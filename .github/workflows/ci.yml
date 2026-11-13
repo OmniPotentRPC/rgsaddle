@@ -59,8 +59,10 @@ jobs:
           cargo run --release --example band_scaling -- band 7 1 1 1 fire
           cargo run --release --example band_scaling -- minmode 7 dimer 1
           cargo run --release --example minmode_calls
+          cargo run --release --example step_controls
           python3 -m pip install -e . --no-build-isolation
           python3 examples/usage.py
+          python3 examples/step_controls.py
 
   ase-parity:
     runs-on: ubuntu-latest

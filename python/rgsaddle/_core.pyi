@@ -137,6 +137,26 @@ class SessionReport:
     ci_index: int
     rotations: int
 
+def halve_raised_energy(previous: float, trial: float, step: float) -> tuple[bool, float]:
+    """
+    Compare a trial energy with the energy before the step. A trial more than 1e-4 above previous halves step.
+    """
+
+def trust_update(
+    radius: float,
+    predicted: float,
+    actual: float,
+    step_norm: float,
+    sigma_inc: float,
+    sigma_dec: float,
+    rho_inc: float,
+    rho_dec: float,
+    delta_min: float,
+) -> float:
+    """
+    Trust radius from a predicted energy change and the change that occurred. A prediction below 1e-14 in absolute value returns radius.
+    """
+
 def project_band(
     positions: NDArray[numpy.float64],
     energies: NDArray[numpy.float64],

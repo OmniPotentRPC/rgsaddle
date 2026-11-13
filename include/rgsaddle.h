@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 35u
+#define RGSADDLE_ABI_MINOR 36u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -597,6 +597,29 @@ rgsaddle_status_t rgsaddle_hessian_powell(int64_t n, const double *step,
 /** Bofill mix of the Powell update and the symmetric rank-one term. */
 rgsaddle_status_t rgsaddle_hessian_bofill(int64_t n, const double *step,
                                           const double *dgradient, double *hessian);
+
+/**
+ * Step length after comparing a trial energy with the energy before the
+ * step. A trial more than 1e-4 above `previous` is a rise: `*raised` is 1
+ * and `*new_step` is half of `step`. Otherwise `*raised` is 0 and
+ * `*new_step` is `step`. A non-finite `previous` is not a rise. No surface
+ * is evaluated. ABI minor 36.
+ */
+rgsaddle_status_t rgsaddle_halve_raised_energy(double previous, double trial, double step,
+                                              int32_t *raised, double *new_step);
+
+/**
+ * Trust radius after a predicted energy change and the change that
+ * occurred. `actual` is the trial energy minus the energy before the step.
+ * A prediction whose absolute value is below 1e-14 leaves `*radius_out`
+ * equal to `radius`. Otherwise the ratio of `actual` to `predicted` is the
+ * Sella schedule named by `sigma_inc`, `sigma_dec`, `rho_inc`, `rho_dec`,
+ * and `delta_min`. No surface is evaluated. ABI minor 36.
+ */
+rgsaddle_status_t rgsaddle_trust_update(double radius, double predicted, double actual,
+                                        double step_norm, double sigma_inc, double sigma_dec,
+                                        double rho_inc, double rho_dec, double delta_min,
+                                        double *radius_out);
 
 /** Scale `step` so its largest absolute entry equals `trust_radius`. */
 rgsaddle_status_t rgsaddle_cap_max_abs(int64_t n, double *step, double trust_radius);

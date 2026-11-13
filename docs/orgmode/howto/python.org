@@ -41,6 +41,8 @@ A calculator exception, including =KeyboardInterrupt=, propagates out of =__call
 
 =rgsaddle.ase.NEB=, =MinModeAtoms=, and =Sella= are the ASE-shaped calls. The migration page says where they follow ASE and where the endpoint-slope climb does not. IRC and AutoNEB stay on the Rust and C sessions.
 
+=_core.halve_raised_energy(previous, trial, step)= returns =(raised, new_step)=. A trial more than 1e-4 above =previous= halves =step=. =_core.trust_update(radius, predicted, actual, step_norm, sigma_inc, sigma_dec, rho_inc, rho_dec, delta_min)= is the Sella radius after those energy changes. A prediction below 1e-14 in absolute value returns =radius=. Neither call evaluates a surface.
+
 =_core.project_band= projects an evaluated band. =_core.MinMode= and =_core.SellaSaddle= are the sessions those classes drive. A surface callback receives one image shaped =(1, 3N)= and returns =(energy, gradient)=.
 
 * Thread safety

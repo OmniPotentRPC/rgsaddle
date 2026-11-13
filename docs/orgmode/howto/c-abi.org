@@ -1,9 +1,11 @@
 #+TITLE: Use the C and C++ interfaces
 #+OPTIONS: toc:nil num:nil
 
-~include/rgsaddle.h~ declares the C application binary interface (ABI), major 1, minor 35. It preserves the main band, minimum-mode and index-1 layouts and adds intrinsic reaction coordinate (IRC), Sella, constraint and geometry controls. Include this header rather than duplicating its structures. Check ~rgsaddle_abi_stamp~ before constructing a session.
+~include/rgsaddle.h~ declares the C application binary interface (ABI), major 1, minor 36. It preserves the main band, minimum-mode and index-1 layouts and adds intrinsic reaction coordinate (IRC), Sella, constraint and geometry controls. Include this header rather than duplicating its structures. Check ~rgsaddle_abi_stamp~ before constructing a session.
 
 A surface callback returns ~rgsaddle_status_t~ and receives one ~rgsaddle_surface_request_t~. Positions and gradients are image-major Cartesian triples. The host supplies the energy and gradient arrays for every requested image; the library performs no Message Passing Interface (MPI) communication.
+
+~rgsaddle_halve_raised_energy~ and ~rgsaddle_trust_update~ (ABI minor 36) are the two decisions a host can take from energies it already holds. The first compares a trial energy with the energy before the step and returns the step length, halved when the trial is more than 1e-4 higher. The second updates a trust radius from a predicted energy change and the change that occurred, using the Sella schedule; a prediction below 1e-14 in absolute value leaves the radius as it was. Neither call evaluates a surface.
 
 ~rgsaddle_band_project~ (ABI minor 35) projects a band the host has already evaluated. It does not take an optimizer step and it does not wait for the climbing image to arm. When the config asks for a climb, the endpoint-slope rule selects the image on that call. ~forces~ uses the force convention, and the endpoint rows are zero. The function index lists every declared name; this page is the session loop.
 
