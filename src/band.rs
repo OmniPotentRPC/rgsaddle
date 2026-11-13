@@ -1150,7 +1150,7 @@ fn solid_image(
         dist_prev,
         diff_next.view(),
         diff_prev.view(),
-    );
+    )?;
     let mut projected = if climb {
         let dneb = if config.projection == ProjectionKind::DoublyNudged {
             let perpendicular = force_perp(force.view(), tangent.view());
@@ -1344,7 +1344,7 @@ fn image_force(
         dist_prev,
         pos_diff_next.view(),
         pos_diff_prev.view(),
-    );
+    )?;
     let mut projected = if climb {
         let dneb = if config.projection == ProjectionKind::DoublyNudged {
             let fp = force_perp(force.view(), tangent.view());
@@ -1657,14 +1657,63 @@ fn max_abs(v: &Array1<f64>) -> f64 {
 /// the band, toward the next image, exceeds `force_tol`. An endpoint
 /// whose gradient was never evaluated has a zero row and blocks nothing.
 #[allow(clippy::too_many_arguments)]
+/// Interior image that climbs on this evaluation, or `None` when an
+/// endpoint at or above that image slopes down into the band.
+///
+/// `positions`, `energies` and `gradients` cover the whole band,
+/// endpoints included. A caller that always climbs the highest
+/// interior image, the way ASE's `climb=True` does on every force
+/// call, drives that image up a slope that has no saddle between it
+/// and the higher endpoint. This selection is the one
+/// [`BandSession`] uses once climbing is armed.
+pub fn climbing_image(
+    config: &BandConfig,
+    positions: ArrayView2<f64>,
+    energies: ArrayView1<f64>,
+    gradients: ArrayView2<f64>,
+) -> Result<Option<usize>, SaddleError> {
+    let n_images = positions.nrows();
+    let dof = positions.ncols();
+    if n_images < 3 || dof == 0 || !dof.is_multiple_of(3) {
+        return Err(SaddleError::Shape(format!(
+            "a band needs at least 3 images of 3N coordinates; got {n_images} x {dof}"
+        )));
+    }
+    if energies.len() != n_images || gradients.dim() != (n_images, dof) {
+        return Err(SaddleError::Shape(
+            "energies and gradients must match the band".into(),
+        ));
+    }
+    let mut max_i = 1usize;
+    for i in 2..n_images - 1 {
+        if energies[i] > energies[max_i] {
+            max_i = i;
+        }
+    }
+    let mut flat = Array1::zeros((n_images - 2) * dof);
+    for i in 1..n_images - 1 {
+        flat.slice_mut(s![(i - 1) * dof..i * dof])
+            .assign(&positions.row(i));
+    }
+    Ok(climb_target(
+        config,
+        max_i,
+        positions.row(0),
+        positions.row(n_images - 1),
+        flat.view(),
+        energies.view(),
+        gradients.view(),
+    ))
+}
+
 fn climb_target(
     config: &BandConfig,
     max_i: usize,
     endpoint_first: ArrayView1<f64>,
     endpoint_last: ArrayView1<f64>,
     x: ArrayView1<f64>,
-    energies: &Array1<f64>,
-    gradients: &Array2<f64>,
+    energies: ArrayView1<f64>,
+    gradients: ArrayView2<f64>,
 ) -> Option<usize> {
     let dof = endpoint_first.len();
     let last = energies.len() - 1;
@@ -1747,8 +1796,8 @@ fn assemble_band_with(
         endpoint_first,
         endpoint_last,
         x,
-        energies,
-        gradients,
+        energies.view(),
+        gradients.view(),
     );
     let climbing = config.climbing.is_some();
     let armed = climbing && state.armed.load(Ordering::Relaxed);
@@ -2080,6 +2129,26 @@ impl BandSession {
             return Err(SaddleError::Invalid(format!(
                 "Onsager-Machlup spring constant must be finite; got {k}"
             )));
+        }
+        if config.solid.is_some() && matches!(config.spring, SpringKind::OnsagerMachlupLive { .. })
+        {
+            return Err(SaddleError::Invalid(
+                "a solid-state band has a cell block, so live Onsager-Machlup displacements \
+                 (atomic force over 2k) do not apply; use a uniform, weighted, or energy-weighted spring"
+                    .into(),
+            ));
+        }
+        if !(config.force_tol.is_finite() && config.force_tol >= 0.0) {
+            return Err(SaddleError::Invalid(
+                "band force tolerance must be finite and non-negative".into(),
+            ));
+        }
+        if let SpringKind::Uniform { k } = config.spring
+            && !k.is_finite()
+        {
+            return Err(SaddleError::Invalid(
+                "uniform spring constant must be finite".into(),
+            ));
         }
         if let SpringKind::EnergyWeighted { k_min, k_max } = config.spring
             && !(k_min.is_finite() && k_max.is_finite() && 0.0 < k_min && k_min <= k_max)

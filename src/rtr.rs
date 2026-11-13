@@ -70,9 +70,9 @@ fn band_forces_with_gate<S: BandSurface + ?Sized>(
     let n_images = positions.nrows();
     let dof = positions.ncols();
     if n_images < 3 || dof == 0 || !dof.is_multiple_of(3) {
-        return Err(SaddleError::Solver(
-            "a band needs at least one interior image".into(),
-        ));
+        return Err(SaddleError::Shape(format!(
+            "a band needs at least 3 images of 3N coordinates; got {n_images} x {dof}"
+        )));
     }
     let mut energies = Array1::zeros(n_images);
     let mut gradients = Array2::zeros((n_images, dof));
@@ -111,7 +111,7 @@ fn band_forces_with_gate<S: BandSurface + ?Sized>(
             dist_prev,
             pos_diff_next.view(),
             pos_diff_prev.view(),
-        );
+        )?;
         let mut image_force = if ci == Some(i) {
             let dneb = if config.projection == ProjectionKind::DoublyNudged {
                 let fp = force_perp(true_force.view(), tangent.view());

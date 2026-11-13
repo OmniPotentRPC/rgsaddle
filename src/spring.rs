@@ -4,6 +4,8 @@ use std::borrow::Cow;
 
 use ndarray::{Array1, ArrayView1, ArrayView2};
 
+use crate::error::SaddleError;
+
 /// Below this `|2 k|` the Onsager-Machlup displacements are zero, the
 /// epsilon of eOn's `safemath::safe_recip`.
 pub const OM_RECIP_EPS: f64 = 1e-300;
@@ -11,6 +13,7 @@ pub const OM_RECIP_EPS: f64 = 1e-300;
 /// Per-image spring result: the tangent-parallel component consumed
 /// by the NEB and DNEB projections, and the full spring vector
 /// consumed by the plain elastic band and the DNEB correction.
+#[derive(Clone, Debug)]
 pub struct SpringForces {
     pub parallel: Array1<f64>,
     pub full: Array1<f64>,
@@ -31,16 +34,18 @@ pub enum SpringKind {
     /// Onsager-Machlup springs whose displacements follow the band:
     /// [`SpringKind::at_band`] sets them from the forces of each
     /// evaluation with [`onsager_machlup_displacements`], as eOn's
-    /// `buildSpringStrategy` does on every `updateForces`. Before the
-    /// band resolves them, [`SpringKind::compute`] reads zero
-    /// displacements.
+    /// `buildSpringStrategy` does on every `updateForces`.
+    /// [`SpringKind::compute`] refuses this variant: resolve it with
+    /// [`SpringKind::at_band`] first. A solid-state band has no
+    /// atomic-only displacement and rejects the variant at construction.
     OnsagerMachlupLive { k: f64 },
     /// Energy-weighted springs of Asgeirsson et al., J. Chem. Theory
     /// Comput. 17, 4929 (2021), doi:10.1021/acs.jctc.1c00462, set again
     /// from the band energies at every evaluation as eOn's
     /// `buildSpringStrategy` does. [`energy_weighted_constants`] is the
-    /// rule. Before the band resolves them, [`SpringKind::compute`]
-    /// reads `k_min` on every segment.
+    /// rule. [`SpringKind::compute`] refuses this variant: resolve it
+    /// with [`SpringKind::at_energies`] or [`SpringKind::at_band`]
+    /// first, so a peaked segment is not silently given `k_min`.
     EnergyWeighted { k_min: f64, k_max: f64 },
 }
 
@@ -150,6 +155,14 @@ impl SpringKind {
     /// whole band, endpoints included). `pos_diff_next` is
     /// `R[i+1] - R[i]` and `pos_diff_prev` is `R[i] - R[i-1]`, both
     /// minimum-imaged by a periodic host.
+    ///
+    /// [`SpringKind::EnergyWeighted`] and [`SpringKind::OnsagerMachlupLive`]
+    /// have no segment data until [`SpringKind::at_energies`] or
+    /// [`SpringKind::at_band`] resolves them, and this returns
+    /// [`SaddleError::Invalid`] instead of a spring built from `k_min`
+    /// or from zero displacements. A weighted list or an
+    /// Onsager-Machlup displacement whose length does not match the
+    /// tangent returns [`SaddleError::Shape`].
     pub fn compute(
         &self,
         i: usize,
@@ -158,29 +171,55 @@ impl SpringKind {
         dist_prev: f64,
         pos_diff_next: ArrayView1<f64>,
         pos_diff_prev: ArrayView1<f64>,
-    ) -> SpringForces {
-        let zero: Array1<f64>;
+    ) -> Result<SpringForces, SaddleError> {
+        if i == 0 {
+            return Err(SaddleError::Invalid("spring image 0 is an endpoint".into()));
+        }
         let coupling = match self {
             SpringKind::Uniform { k } => crate::stencil::Coupling::Uniform { k: *k },
-            SpringKind::Weighted { ks } => crate::stencil::Coupling::Weighted {
-                k_next: ks[i],
-                k_prev: ks[i - 1],
-            },
-            SpringKind::OnsagerMachlup { k, l_vecs } => crate::stencil::Coupling::Onsager {
-                k: *k,
-                l_next: l_vecs[i + 1].view(),
-                l_here: l_vecs[i].view(),
-            },
-            SpringKind::OnsagerMachlupLive { k } => {
-                zero = Array1::zeros(tangent.len());
-                crate::stencil::Coupling::Onsager {
-                    k: *k,
-                    l_next: zero.view(),
-                    l_here: zero.view(),
+            SpringKind::Weighted { ks } => {
+                if i >= ks.len() {
+                    return Err(SaddleError::Shape(format!(
+                        "weighted springs need an entry for segment {i}; got {}",
+                        ks.len()
+                    )));
+                }
+                crate::stencil::Coupling::Weighted {
+                    k_next: ks[i],
+                    k_prev: ks[i - 1],
                 }
             }
-            SpringKind::EnergyWeighted { k_min, .. } => {
-                crate::stencil::Coupling::Uniform { k: *k_min }
+            SpringKind::OnsagerMachlup { k, l_vecs } => {
+                if i + 1 >= l_vecs.len() {
+                    return Err(SaddleError::Shape(format!(
+                        "Onsager-Machlup springs need a displacement for image {}; got {}",
+                        i + 1,
+                        l_vecs.len()
+                    )));
+                }
+                let here = l_vecs[i].view();
+                let next = l_vecs[i + 1].view();
+                if here.len() != tangent.len() || next.len() != tangent.len() {
+                    return Err(SaddleError::Shape(
+                        "Onsager-Machlup displacement length must match the tangent".into(),
+                    ));
+                }
+                crate::stencil::Coupling::Onsager {
+                    k: *k,
+                    l_next: next,
+                    l_here: here,
+                }
+            }
+            SpringKind::OnsagerMachlupLive { .. } => {
+                return Err(SaddleError::Invalid(
+                    "resolve live Onsager-Machlup springs with at_band before compute".into(),
+                ));
+            }
+            SpringKind::EnergyWeighted { .. } => {
+                return Err(SaddleError::Invalid(
+                    "resolve energy-weighted springs with at_energies or at_band before compute"
+                        .into(),
+                ));
             }
         };
         let forces = crate::stencil::coupling_forces(
@@ -191,10 +230,10 @@ impl SpringKind {
             pos_diff_next,
             pos_diff_prev,
         );
-        SpringForces {
+        Ok(SpringForces {
             parallel: forces.parallel,
             full: forces.full,
-        }
+        })
     }
 }
 
@@ -210,7 +249,9 @@ mod tests {
         let pdn = array![0.5, 0.0];
         let pdp = array![0.5, 0.0];
         let s = SpringKind::Uniform { k: 2.0 };
-        let f = s.compute(1, t.view(), 0.5, 0.5, pdn.view(), pdp.view());
+        let f = s
+            .compute(1, t.view(), 0.5, 0.5, pdn.view(), pdp.view())
+            .unwrap();
         assert_abs_diff_eq!(f.parallel[0], 0.0, epsilon = 1e-12);
         assert_abs_diff_eq!(f.full[0], 0.0, epsilon = 1e-12);
     }
@@ -221,7 +262,9 @@ mod tests {
         let pdn = array![0.7, 0.0];
         let pdp = array![0.3, 0.0];
         let s = SpringKind::Uniform { k: 2.0 };
-        let f = s.compute(1, t.view(), 0.7, 0.3, pdn.view(), pdp.view());
+        let f = s
+            .compute(1, t.view(), 0.7, 0.3, pdn.view(), pdp.view())
+            .unwrap();
         assert_abs_diff_eq!(f.parallel[0], 2.0 * 0.4, epsilon = 1e-12);
         assert_abs_diff_eq!(f.full[0], 2.0 * 0.4, epsilon = 1e-12);
     }
@@ -236,7 +279,9 @@ mod tests {
         let pdp = array![0.4, 0.0];
         let l = vec![array![0.0, 0.0]; 3];
         let s = SpringKind::OnsagerMachlup { k: 3.0, l_vecs: l };
-        let f = s.compute(1, t.view(), 0.6, 0.4, pdn.view(), pdp.view());
+        let f = s
+            .compute(1, t.view(), 0.6, 0.4, pdn.view(), pdp.view())
+            .unwrap();
         assert_abs_diff_eq!(f.parallel[0], 3.0 * 0.2, epsilon = 1e-12);
         assert_abs_diff_eq!(f.parallel[1], 0.0, epsilon = 1e-12);
     }
@@ -249,7 +294,9 @@ mod tests {
         let s = SpringKind::Weighted {
             ks: vec![1.0, 2.0, 4.0],
         };
-        let f = s.compute(1, t.view(), 0.5, 0.5, pdn.view(), pdp.view());
+        let f = s
+            .compute(1, t.view(), 0.5, 0.5, pdn.view(), pdp.view())
+            .unwrap();
         // k_next = ks[1] = 2, k_prev = ks[0] = 1.
         assert_abs_diff_eq!(f.full[0], 2.0 * 0.5 - 0.5, epsilon = 1e-12);
         assert_abs_diff_eq!(f.full[1], 2.0 * 0.1 + 0.1, epsilon = 1e-12);
@@ -319,5 +366,36 @@ mod tests {
         assert!(soft.iter().flatten().all(|&v| v == 0.0));
         let held = SpringKind::OnsagerMachlup { k: 2.0, l_vecs };
         assert!(matches!(held.at_band(e.view(), g.view()), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn unresolved_springs_do_not_invent_a_constant() {
+        let tangent = array![1.0, 0.0];
+        let next = array![0.7, 0.0];
+        let prev = array![0.3, 0.0];
+        let weighted = SpringKind::EnergyWeighted {
+            k_min: 1.0,
+            k_max: 9.0,
+        };
+        let err = weighted
+            .compute(1, tangent.view(), 0.7, 0.3, next.view(), prev.view())
+            .unwrap_err();
+        assert!(matches!(err, SaddleError::Invalid(_)), "{err}");
+        let resolved = weighted.at_energies(array![0.0, 5.0, 0.0].view());
+        let force = resolved
+            .compute(1, tangent.view(), 0.7, 0.3, next.view(), prev.view())
+            .unwrap();
+        // The interior image is the peak, so both segments use k_max.
+        assert_abs_diff_eq!(force.parallel[0], 9.0 * 0.4, epsilon = 1e-12);
+        let live = SpringKind::OnsagerMachlupLive { k: 2.0 };
+        assert!(matches!(
+            live.compute(1, tangent.view(), 0.7, 0.3, next.view(), prev.view()),
+            Err(SaddleError::Invalid(_))
+        ));
+        let short = SpringKind::Weighted { ks: vec![1.0] };
+        assert!(matches!(
+            short.compute(1, tangent.view(), 0.5, 0.5, next.view(), prev.view()),
+            Err(SaddleError::Shape(_))
+        ));
     }
 }

@@ -1378,9 +1378,39 @@ impl MinModeSession {
                 "position and mode must share a nonzero length".into(),
             ));
         }
+        if !x.iter().all(|v| v.is_finite()) {
+            return Err(SaddleError::NonFinite("position"));
+        }
         if !(config.dr.is_finite() && config.dr > 0.0) {
             return Err(SaddleError::Invalid(
                 "finite-difference step must be positive and finite".into(),
+            ));
+        }
+        if !(config.force_tol.is_finite() && config.force_tol >= 0.0) {
+            return Err(SaddleError::Invalid(
+                "force tolerance must be finite and non-negative".into(),
+            ));
+        }
+        if !(config.rotation_tol.is_finite() && config.rotation_tol >= 0.0)
+            || !(config.rotation_angle_tol.is_finite() && config.rotation_angle_tol >= 0.0)
+        {
+            return Err(SaddleError::Invalid(
+                "rotation tolerances must be finite and non-negative".into(),
+            ));
+        }
+        if config.max_rotations == 0 {
+            return Err(SaddleError::Invalid(
+                "max_rotations must be at least 1".into(),
+            ));
+        }
+        if config.krylov_dim == 0 {
+            return Err(SaddleError::Invalid(
+                "Lanczos krylov dimension must be at least 1".into(),
+            ));
+        }
+        if !config.max_move.is_finite() {
+            return Err(SaddleError::Invalid(
+                "max_move must be finite; a non-positive value leaves the step uncapped".into(),
             ));
         }
         let mode = checked_mode(mode)?;
