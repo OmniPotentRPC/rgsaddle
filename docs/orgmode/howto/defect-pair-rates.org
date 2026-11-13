@@ -85,9 +85,20 @@ The slope matches Table 1. The offset is about 0.004 Å.
 
 Climbing L-BFGS follows the highest image. On the copper band that image was a collision left by the initial path, and the step ran up the wall; the NEB guards drop such a step and do not make it the saddle. The band used here relaxes with FIRE and climbing off, then climbs. A path is kept only when the force is at most 0.01 eV/Å and the zero-temperature integral of the path force reproduces ΔE0.
 
-The isolated dumbbell, 8×8×8 (2049 atoms) at 500 K, has a translation the dimer found from the relaxed minimum. The band force is 0.00655 eV/Å. ΔE0 is 0.090905 eV. The zero-temperature integral is 0.086776 eV, 4 meV below ΔE0. PAFI gives ΔF = 0.081976 ± 0.004669 eV from 61644 force evaluations. κ is 0.329 ± 0.130, and the rate is 1.022×10^11 Hz against a Vineyard rate of 1.724×10^11 Hz. A rotation of the same dumbbell has ΔE0 = 0.231981 eV and a band force of 0.00903 eV/Å, but the zero-temperature integral is 0.217953 eV, 14 meV low, so no finite-temperature rate was stored. There is one translation, not a toward/away pair, so the isolated control does not by itself show a direction asymmetry. The number that is resolved is the anharmonic shift of that one barrier, about −9 meV, roughly twice the 4.7 meV error.
+The path integral is the line integral of ∇E along the polyline through the images. A cubic spline between those images cut the corner off a curved saddle, and the rotation integral came out 14 meV low. On the polyline, 122 rated translation hops on the 8×8×8 cell have |ΔE0 − zero-temperature integral| at most 0.0053 eV. The free dumbbell's rotation was not found by the seeds used here, so its ΔF is still not stored.
 
-At the vacancy, the same search does not find a hop that preserves the pair. On an 8×8×8 cell at 500 K the 2.573 Å shell (12 sites) recombines on relaxation. The next shell, 3.639 Å (6 sites), stays a dumbbell. Dimer searches from that minimum — 0.2 Å random kicks of the dumbbell, and translations aimed at a neighbor — converge either to a saddle of index 2 or 3, or to a recombination saddle. The recombination saddle sits 1.26–1.45 eV above the pair, and one of its basins is 2.85–2.90 eV below the pair, which is the pair's formation energy. No toward, away, or tangential hop with both ends at a bound pair was connected. Without that pair of rates the toward/away asymmetry is not measured, and a kinetic recombination volume is not computed. A 1.3 eV recombination barrier is negligible next to the 0.09 eV migration barrier at 300–700 K, so those saddles do not supply the 160–290 Ω of Table 1.
+The free dumbbell translation, seeded on the same 8×8×8 cell, has ΔE0 = 0.0891 eV. That displacement and its unstable mode were mapped onto every bound shell out to 3a, for each symmetry-distinct ⟨100⟩ dumbbell orientation. Only index-1 saddles that connect to the expected minima are rated. The rows are =benchmarks/defect_pair_hops_static.csv=. PAFI at 300 K and 500 K was started for the rated close-shell hops and did not finish, so those ΔF values are not reported.
+
+| shell / Å | orientation | direction | n | ΔE0 / eV | zero-T integral |
+|-----------+-------------+-----------+---+----------+-----------------|
+| 3.639 | 010 | away | 1 | 0.1352 | 0.1353 |
+| 3.639 | 010 | toward | 1 | not connected | |
+| 4.456 | 100 | away | 4 | 0.0861 and 0.0979 | within 0.004 |
+| 5.146 | 001 | away | 2 | 0.0959 | 0.0947 |
+| 5.146 | 001 | toward | 2 | not connected | |
+| beyond 6 | several | away | | 0.087 to 0.095 | within 0.005 |
+
+The free barrier is 0.0891 eV. Away from the vacancy at 3.639 Å costs 0.1352 eV. Toward that vacancy, the image of the free translation does not connect to a bound final minimum. There is no toward/away pair of rates at that shell, so no asymmetry ratio is computed. The same is true at 5.146 Å. At 4.456 Å the away barriers sit on the free barrier and no toward hop was in the rated set. This catalogue does not reproduce Table 1. A preserving toward channel is missing where the vacancy is close, and the anharmonic ΔF was not obtained.
 
 Table 1 of the accepted manuscript, volumes in Ω, α-method then β-bar method. The prose of that manuscript says 5312 and 6924 atoms where the table says 5324 and 6912; 4n³ is 5324 and 6912.
 

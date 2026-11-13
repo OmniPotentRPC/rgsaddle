@@ -129,6 +129,14 @@ pub fn pair_separation(
 pub struct HopTemplate {
     pub name: String,
     pub product: Array1<f64>,
+    /// Start the dimer here when the caller already has a saddle guess.
+    pub saddle: Option<Array1<f64>>,
+    /// Initial unstable direction. Used with [`Self::saddle`].
+    pub mode: Option<Array1<f64>>,
+    /// Caller label for the mobile-defect orientation. Empty if it has none.
+    pub orientation: String,
+    /// Caller label for the product basin.
+    pub final_state: String,
 }
 
 /// The relaxed pair and the hops to search.
@@ -192,6 +200,9 @@ pub struct DefectPairConfig {
     pub harmonic_atoms: Option<Vec<usize>>,
     /// Hyperplanes, including the ends. Zero uses every NEB image.
     pub planes: usize,
+    /// When false, the search still reports ΔE0, the band and the
+    /// zero-temperature integral, and does not sample a thermal profile.
+    pub finite_temperature: bool,
     /// A converged path whose zero-temperature PAFI integral misses `dE0`
     /// by more than this does not receive a finite-temperature rate.
     pub zero_t_tol: f64,
@@ -232,6 +243,7 @@ impl Default for DefectPairConfig {
             harmonic_step: 1.0e-3,
             harmonic_atoms: None,
             planes: 0,
+            finite_temperature: true,
             zero_t_tol: 0.02,
         }
     }
@@ -312,6 +324,10 @@ pub struct RateEntry {
     pub saddle_stress: M3,
     pub saddle_dipole: M3,
     pub negative_eigenvalue: Option<f64>,
+    /// Mobile-defect orientation, as supplied on the hop.
+    pub orientation: String,
+    /// Product basin, as supplied on the hop.
+    pub final_state: String,
 }
 
 /// The document written by [`defect_pair_rates`].
@@ -391,8 +407,10 @@ impl RateCatalogue {
                 &mut out,
                 "negative_eigenvalue",
                 &opt_num(entry.negative_eigenvalue),
-                false,
+                true,
             );
+            push_kv(&mut out, "orientation", &json_string(&entry.orientation), true);
+            push_kv(&mut out, "final_state", &json_string(&entry.final_state), false);
             out.push_str("    }");
             if i + 1 != self.entries.len() {
                 out.push(',');
@@ -456,6 +474,8 @@ impl RateCatalogue {
                 saddle_stress: required_matrix(item, "saddle_stress")?,
                 saddle_dipole: required_matrix(item, "saddle_dipole")?,
                 negative_eigenvalue: optional_f64(item, "negative_eigenvalue")?,
+                orientation: optional_str(item, "orientation").unwrap_or("").to_string(),
+                final_state: optional_str(item, "final_state").unwrap_or("").to_string(),
             });
         }
         Ok(Self { entries })
@@ -487,16 +507,16 @@ pub fn defect_pair_rates<S: PointSurface + Sync>(
             surface,
             setup,
             config,
+            hop,
             &reactant,
             reactant_energy,
             &product,
             product_energy,
-            &hop.name,
         )?;
         for &temperature in &config.temperatures {
             let mut entry = blank_entry(
                 setup,
-                &hop.name,
+                hop,
                 direction,
                 temperature,
                 n_atoms,
@@ -534,11 +554,11 @@ fn search_hop<S: PointSurface>(
     surface: &S,
     setup: &PairSetup,
     config: &DefectPairConfig,
+    hop: &HopTemplate,
     reactant: &Array1<f64>,
     reactant_energy: f64,
     product: &Array1<f64>,
     _product_energy: f64,
-    _name: &str,
 ) -> Result<Searched, SaddleError> {
     let failed = |outcome: HopOutcome| -> Searched {
         Searched {
@@ -559,9 +579,19 @@ fn search_hop<S: PointSurface>(
             band_force: 0.0,
         }
     };
-    let seed = mix(reactant, product, config.seed_fraction, setup.cell)?;
-    let mode = mic_positions(product, reactant, setup.cell)?;
-    if norm1(&mode) < 1.0e-8 {
+    let product_mode = mic_positions(product, reactant, setup.cell)?;
+    if norm1(&product_mode) < 1.0e-8 && hop.mode.is_none() {
+        return Ok(failed(HopOutcome::NotConverged));
+    }
+    let mut seeds = Vec::new();
+    if let Some(hint) = &hop.saddle {
+        let mode = hop.mode.clone().unwrap_or_else(|| product_mode.clone());
+        seeds.push((hint.clone(), mode));
+    }
+    if let Ok(mixed) = mix(reactant, product, config.seed_fraction, setup.cell) {
+        seeds.push((mixed, product_mode));
+    }
+    if seeds.is_empty() {
         return Ok(failed(HopOutcome::NotConverged));
     }
     let mut dimer_config = config.dimer.clone();
@@ -570,20 +600,47 @@ fn search_hop<S: PointSurface>(
         CellMode::Variable => CellMask::all(),
     };
     dimer_config.external_stress = config.external_stress;
-    let mut dimer = SolidDimer::new(dimer_config, seed, setup.cell, mode)?;
-    let report = dimer.run(surface, config.max_dimer_steps)?;
-    if report.status != MinModeStatus::Converged {
+    let mut found_saddle = None;
+    let mut last_negative = None;
+    let mut saw_index = false;
+    let mut disconnected = false;
+    for (seed, mode) in seeds {
+        if norm1(&mode) < 1.0e-8 {
+            continue;
+        }
+        let mut dimer = SolidDimer::new(dimer_config.clone(), seed, setup.cell, mode)?;
+        let report = dimer.run(surface, config.max_dimer_steps)?;
+        if report.status != MinModeStatus::Converged {
+            continue;
+        }
+        let index1 = !report.rejected && report.negative_modes == Some(1);
+        if !index1 {
+            saw_index = true;
+            last_negative = report.eigenvalues.first().copied();
+            continue;
+        }
+        let saddle = dimer.positions().to_owned();
+        let saddle_cell = dimer.cell();
+        let push = cartesian_push(&dimer, config.push)?;
+        let (plus, _) = relax(surface, &saddle + &push, saddle_cell, config)?;
+        let (minus, _) = relax(surface, &saddle - &push, saddle_cell, config)?;
+        if links(&plus, &minus, reactant, product, setup.cell, config.connect_rmsd)? {
+            found_saddle = Some((dimer, saddle, saddle_cell, report));
+            break;
+        }
+        disconnected = true;
+    }
+    let Some((dimer, saddle, _found_cell, report)) = found_saddle else {
+        if disconnected {
+            return Ok(failed(HopOutcome::Disconnected));
+        }
+        if saw_index {
+            let mut row = failed(HopOutcome::NotIndex1);
+            row.negative = last_negative;
+            return Ok(row);
+        }
         return Ok(failed(HopOutcome::NotConverged));
-    }
-    let index1 = !report.rejected && report.negative_modes == Some(1);
-    if !index1 {
-        let mut row = failed(HopOutcome::NotIndex1);
-        row.saddle = dimer.positions().to_owned();
-        row.saddle_cell = dimer.cell();
-        row.negative = report.eigenvalues.first().copied();
-        return Ok(row);
-    }
-    let saddle = dimer.positions().to_owned();
+    };
     let saddle_cell = dimer.cell();
     let push = cartesian_push(&dimer, config.push)?;
     let (plus, _) = relax(surface, &saddle + &push, saddle_cell, config)?;
@@ -693,6 +750,9 @@ fn fill_entry<S: PointSurface + Sync>(
         entry.outcome = HopOutcome::NotConverged;
         entry.d_f = Some(zero.barrier);
         entry.d_f_error = Some((zero.barrier - searched.d_e0).abs());
+        return Ok(());
+    }
+    if !config.finite_temperature {
         return Ok(());
     }
     let mut pafi_config = config.pafi.clone();
@@ -1375,7 +1435,7 @@ fn plane_arcs(path: &ArcPath, planes: usize) -> Vec<f64> {
 
 fn blank_entry(
     setup: &PairSetup,
-    hop: &str,
+    hop: &HopTemplate,
     direction: DirectionClass,
     temperature: f64,
     n_atoms: usize,
@@ -1387,7 +1447,7 @@ fn blank_entry(
     RateEntry {
         shell: setup.shell.clone(),
         direction,
-        hop: hop.to_string(),
+        hop: hop.name.clone(),
         temperature,
         cell_repeats: setup.cell_repeats,
         n_atoms,
@@ -1417,6 +1477,8 @@ fn blank_entry(
         saddle_stress: [[0.0; 3]; 3],
         saddle_dipole: [[0.0; 3]; 3],
         negative_eigenvalue: None,
+        orientation: hop.orientation.clone(),
+        final_state: hop.final_state.clone(),
     }
 }
 
@@ -1611,6 +1673,10 @@ fn unflat(cell: &[f64; 9]) -> M3 {
 fn flag(obj: &[(String, Json)], key: &str) -> Result<bool, SaddleError> {
     let value = required_f64(obj, key)?;
     Ok(value > 0.5)
+}
+
+fn optional_str<'a>(obj: &'a [(String, Json)], key: &str) -> Option<&'a str> {
+    obj_get(obj, key).and_then(Json::as_str)
 }
 
 fn optional_f64(obj: &[(String, Json)], key: &str) -> Result<Option<f64>, SaddleError> {

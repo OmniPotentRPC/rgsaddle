@@ -146,3 +146,36 @@ fn zero_temperature_integral_recovers_the_barrier() {
     assert!(profile.dividing > 0 && profile.dividing < profile.arc.len() - 1);
 }
 
+/// A corner between images. The integral is along the chords, so it
+/// recovers the energy of the corner instead of cutting it.
+#[test]
+fn zero_temperature_integral_keeps_a_corner() {
+    let frames = vec![
+        Array1::from_vec(vec![-1.0, 0.0]),
+        Array1::from_vec(vec![0.0, 0.4]),
+        Array1::from_vec(vec![1.0, 0.0]),
+    ];
+    let path = ArcPath::from_positions(&frames).expect("path");
+    let profile = zero_temperature_barrier(&Corner, &path, &path.arcs()).expect("integral");
+    let expected = 1.0 + 4.0 * 0.16;
+    assert!(
+        (profile.barrier - expected).abs() < 2.0e-3,
+        "barrier {} expected {expected}",
+        profile.barrier
+    );
+}
+
+struct Corner;
+
+impl PointSurface for Corner {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        let (x0, y) = (x[0], x[1]);
+        let well = (1.0 - x0 * x0).powi(2);
+        let energy = well + 4.0 * y * y;
+        let mut gradient = Array1::zeros(x.len());
+        gradient[0] = -4.0 * x0 * (1.0 - x0 * x0);
+        gradient[1] = 8.0 * y;
+        Ok((energy, gradient))
+    }
+}
+

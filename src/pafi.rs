@@ -112,6 +112,11 @@ pub struct PathFrame {
 #[derive(Clone, Debug)]
 pub struct ArcPath {
     frames: Vec<PathFrame>,
+    /// Endpoint derivatives kept so a caller can rebuild the Hermite data.
+    /// The geometry used for the integral is the polyline through the frames:
+    /// a cubic spline between NEB images cuts the corner off a curved saddle
+    /// and the zero-temperature integral then falls short of the barrier.
+    #[allow(dead_code)]
     tangents: Vec<Array1<f64>>,
 }
 
@@ -226,7 +231,7 @@ impl ArcPath {
         self.frames.iter().map(|frame| frame.arc).collect()
     }
 
-    /// Hermite geometry at `arc`, clamped to the path.
+    /// Polyline geometry at `arc`. The tangent is the chord of the segment.
     pub fn geometry(&self, arc: f64) -> Result<PathGeometry, SaddleError> {
         if !arc.is_finite() {
             return Err(SaddleError::NonFinite("PAFI arc"));
@@ -244,26 +249,20 @@ impl ArcPath {
         let s1 = self.frames[seg + 1].arc;
         let dt = s1 - s0;
         let t = ((arc - s0) / dt).clamp(0.0, 1.0);
-        let (h00, h10, h01, h11, d00, d10, d01, d11, c00, c10, c01, c11) = hermite(t);
         let x0 = &self.frames[seg].positions;
         let x1 = &self.frames[seg + 1].positions;
-        let m0 = &self.tangents[seg];
-        let m1 = &self.tangents[seg + 1];
         let n = x0.len();
         let mut position = Array1::zeros(n);
         let mut tangent = Array1::zeros(n);
-        let mut curvature = Array1::zeros(n);
         for i in 0..n {
-            position[i] = h00 * x0[i] + h10 * dt * m0[i] + h01 * x1[i] + h11 * dt * m1[i];
-            let d_dt = d00 * x0[i] + d10 * dt * m0[i] + d01 * x1[i] + d11 * dt * m1[i];
-            let d2_dt = c00 * x0[i] + c10 * dt * m0[i] + c01 * x1[i] + c11 * dt * m1[i];
-            tangent[i] = d_dt / dt;
-            curvature[i] = d2_dt / (dt * dt);
+            let step = x1[i] - x0[i];
+            position[i] = x0[i] + t * step;
+            tangent[i] = step / dt;
         }
         Ok(PathGeometry {
             positions: position,
             tangent,
-            curvature,
+            curvature: Array1::zeros(n),
             arc,
         })
     }
@@ -555,9 +554,10 @@ pub fn zero_temperature_barrier<S: PointSurface>(
             "the zero-temperature integral needs at least two points".into(),
         ));
     }
+    let arcs = dense_arcs(arcs, 24);
     let mut gradients = Vec::with_capacity(arcs.len());
     let errors = vec![0.0; arcs.len()];
-    for arc in arcs {
+    for arc in &arcs {
         let geometry = path.geometry(*arc)?;
         let (_energy, gradient) = surface.eval(geometry.positions.view())?;
         if gradient.len() != geometry.tangent.len() {
@@ -567,7 +567,24 @@ pub fn zero_temperature_barrier<S: PointSurface>(
         }
         gradients.push(gradient.dot(&geometry.tangent));
     }
-    integrate_profile(arcs, &gradients, &errors)
+    integrate_profile(&arcs, &gradients, &errors)
+}
+
+/// Eight samples on every span. One trapezoid per image is not enough
+/// when the directional derivative curves, and the integral then sits
+/// below the barrier.
+fn dense_arcs(arcs: &[f64], parts: usize) -> Vec<f64> {
+    let parts = parts.max(1);
+    let mut dense = Vec::with_capacity(arcs.len().saturating_mul(parts));
+    for window in arcs.windows(2) {
+        for k in 0..parts {
+            dense.push(window[0] + (window[1] - window[0]) * (k as f64) / parts as f64);
+        }
+    }
+    if let Some(last) = arcs.last() {
+        dense.push(*last);
+    }
+    dense
 }
 
 fn prefix_errors(arcs: &[f64], errors: &[f64]) -> Result<Vec<f64>, SaddleError> {
@@ -612,24 +629,6 @@ fn projected_gradient(gradient: &Array1<f64>, x: &Array1<f64>, geometry: &PathGe
 
 fn difference(end: &Array1<f64>, start: &Array1<f64>, ds: f64) -> Array1<f64> {
     (end - start) / ds
-}
-
-fn hermite(t: f64) -> (f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64) {
-    let t2 = t * t;
-    let t3 = t2 * t;
-    let h00 = 2.0 * t3 - 3.0 * t2 + 1.0;
-    let h10 = t3 - 2.0 * t2 + t;
-    let h01 = -2.0 * t3 + 3.0 * t2;
-    let h11 = t3 - t2;
-    let d00 = 6.0 * t2 - 6.0 * t;
-    let d10 = 3.0 * t2 - 4.0 * t + 1.0;
-    let d01 = -6.0 * t2 + 6.0 * t;
-    let d11 = 3.0 * t2 - 2.0 * t;
-    let c00 = 12.0 * t - 6.0;
-    let c10 = 6.0 * t - 4.0;
-    let c01 = -12.0 * t + 6.0;
-    let c11 = 6.0 * t - 2.0;
-    (h00, h10, h01, h11, d00, d10, d01, d11, c00, c10, c01, c11)
 }
 
 fn project_out(vector: &mut Array1<f64>, tangent: ArrayView1<f64>) {

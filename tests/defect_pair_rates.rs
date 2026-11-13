@@ -151,10 +151,18 @@ fn a_symmetric_control_has_equal_toward_and_away_rates() {
             HopTemplate {
                 name: "translate".into(),
                 product: Array1::from_vec(vec![4.0, 0.0, 0.0]),
+                saddle: None,
+                mode: None,
+                orientation: String::new(),
+                final_state: String::new(),
             },
             HopTemplate {
                 name: "translate".into(),
                 product: Array1::from_vec(vec![6.0, 0.0, 0.0]),
+                saddle: None,
+                mode: None,
+                orientation: String::new(),
+                final_state: String::new(),
             },
         ],
     };
@@ -227,6 +235,8 @@ fn the_catalogue_round_trips() {
         saddle_stress: [[0.1, 0.0, 0.0], [0.0, 0.2, 0.0], [0.0, 0.0, 0.3]],
         saddle_dipole: [[-1.0, 0.0, 0.0], [0.0, -2.0, 0.0], [0.0, 0.0, -3.0]],
         negative_eigenvalue: Some(-0.4),
+        orientation: "100".into(),
+        final_state: "010-at-neighbor".into(),
     };
     let catalogue = RateCatalogue {
         entries: vec![entry],
@@ -248,6 +258,8 @@ fn the_catalogue_round_trips() {
     assert!((back.band_force - 0.004).abs() < 1e-12);
     assert_eq!(back.pafi_samples, 80);
     assert_eq!(back.pafi_evaluations, 400);
+    assert_eq!(back.orientation, "100");
+    assert_eq!(back.final_state, "010-at-neighbor");
     assert!((back.saddle_dipole[1][1] + 2.0).abs() < 1e-12);
     assert!((back.negative_eigenvalue.unwrap() + 0.4).abs() < 1e-12);
 }
