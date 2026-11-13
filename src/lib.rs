@@ -82,7 +82,7 @@ pub use elastic::{
     ElasticMultipole, LocalField, Octupole, Quadrupole, StrainGradient, quadrupole_energy,
 };
 pub use error::SaddleError;
-pub use field::{DefectSource, DirectSolver, FieldSolver, FmmSolver, Kelvin};
+pub use field::{CubicElasticity, DefectSource, DirectSolver, FieldSolver, FmmSolver, Kelvin};
 pub use idpp::{IdppConfig, SidppConfig, idpp_path, linear_path, sidpp_path};
 pub use minmode::{
     FiniteDifference, MinModeConfig, MinModeKind, MinModeReport, MinModeSession, MinModeStatus,
@@ -110,9 +110,9 @@ pub use stencil::{
     Role, Stencil, StencilReport, StencilStatus,
 };
 pub use strain_rate::{
-    BOLTZMANN_EV_PER_K, CurvatureBound, ElasticDipole, Estimate, HopVariant, LINEAR_FOLD_EV,
-    NEGATIVE_CURVATURE, SaddleSeed, SearchReason, Strain, StrainResponse, TranslationalSplit,
-    Trust, TrustPolicy, activation_volume, angular_scale_rad_s, arrhenius,
+    BOLTZMANN_EV_PER_K, CurvatureBound, ElasticDipole, Estimate, HopInField, HopVariant,
+    LINEAR_FOLD_EV, NEGATIVE_CURVATURE, SaddleSeed, SearchReason, Strain, StrainResponse,
+    TranslationalSplit, Trust, TrustPolicy, activation_volume, angular_scale_rad_s, arrhenius,
     compliance_from_stiffness, cubic_rotations, double_dot, elastic_dipole, rotation_x,
     split_translational_modes, symmetrize, transform_tensor, vineyard_prefactor,
 };

@@ -20,10 +20,10 @@ use std::time::Instant;
 use ndarray::{Array1, Array2, ArrayView1};
 use rgmin::{Control, FireKind, Method, Oracle, Solver};
 use rgsaddle::{
-    BOLTZMANN_EV_PER_K, CellMask, DefectSource, ElasticDipole, ElasticMultipole, FieldSolver,
-    FmmSolver, IndexCheck, Kelvin, LINEAR_FOLD_EV, MinModeConfig, MinModeStatus, PointSurface,
-    SaddleError, SaddleSeed, SolidDimer, SolidDimerConfig, Strain, StrainResponse, Trust,
-    TrustPolicy, cubic_rotations, index_at,
+    BOLTZMANN_EV_PER_K, CellMask, CubicElasticity, DefectSource, ElasticDipole, ElasticMultipole,
+    FieldSolver, FmmSolver, IndexCheck, Kelvin, LINEAR_FOLD_EV, MinModeConfig, MinModeStatus,
+    PointSurface, SaddleError, SaddleSeed, SolidDimer, SolidDimerConfig, Strain, StrainResponse,
+    Trust, TrustPolicy, cubic_rotations, index_at,
 };
 
 const RC: f64 = 5.50679;
@@ -2645,4 +2645,423 @@ fn write_point(
         refined: refine_ok && trust == "explicit",
         linear: trust == "linear" || trust == "explicit_reference",
     });
+}
+
+fn nearest_atom(positions: &Array1<f64>, point: [f64; 3]) -> usize {
+    let mut best = 0;
+    let mut best_d = f64::MAX;
+    for atom in 0..positions.len() / 3 {
+        let d = (0..3)
+            .map(|c| positions[3 * atom + c] - point[c])
+            .map(|v| v * v)
+            .sum::<f64>();
+        if d < best_d {
+            best_d = d;
+            best = atom;
+        }
+    }
+    best
+}
+
+fn drop_atoms(positions: &Array1<f64>, drop: &[usize]) -> Array1<f64> {
+    let mut which = drop.to_vec();
+    which.sort_unstable();
+    let mut kept = Vec::new();
+    for atom in 0..positions.len() / 3 {
+        if which.binary_search(&atom).is_ok() {
+            continue;
+        }
+        for c in 0..3 {
+            kept.push(positions[3 * atom + c]);
+        }
+    }
+    Array1::from(kept)
+}
+
+fn with_dumbbell(
+    base: &Array1<f64>,
+    center: [f64; 3],
+    direction: [f64; 3],
+    separation: f64,
+) -> Array1<f64> {
+    let norm = (direction[0] * direction[0] + direction[1] * direction[1] + direction[2] * direction[2]).sqrt();
+    let mut values = base.to_vec();
+    for sign in [-0.5, 0.5] {
+        for c in 0..3 {
+            values.push(center[c] + sign * separation * direction[c] / norm);
+        }
+    }
+    Array1::from(values)
+}
+
+fn pair_distance(positions: &Array1<f64>, cell: [[f64; 3]; 3]) -> (f64, [f64; 3]) {
+    let (_, _, dir) = closest_pair(positions, cell);
+    let distance = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
+    (distance, dir)
+}
+
+/// Vacancy dipole and <100> dumbbell hops in an 8×8×8 Mishin cell.
+///
+/// The dipole is the fixed-cell residual stress. Shells run from the
+/// second neighbour out to 3a. The direct dimer is the [100] hop at one
+/// far shell, in the cell that still contains the vacancy.
+#[test]
+#[ignore = "8x8x8 Mishin vacancy field and one far-shell dumbbell hop; run in release"]
+fn vacancy_field_and_one_far_dumbbell_hop() {
+    let copper = Copper::new();
+    let a = 3.615;
+    let (moduli_cell_positions, moduli_cell) = fcc(4, a);
+    let g = 1.0e-4;
+    let base = copper
+        .evaluate(moduli_cell_positions.view(), moduli_cell)
+        .2;
+    let (stretched, stretched_cell) = deform(
+        &moduli_cell_positions,
+        moduli_cell,
+        [[g, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+    );
+    let uniaxial = copper.evaluate(stretched.view(), stretched_cell).2;
+    let c11 = (uniaxial[0][0] - base[0][0]) / g;
+    let c12 = (uniaxial[1][1] - base[1][1]) / g;
+    let (sheared, sheared_cell) = deform(
+        &moduli_cell_positions,
+        moduli_cell,
+        [[0.0, g, 0.0], [g, 0.0, 0.0], [0.0, 0.0, 0.0]],
+    );
+    let shear = copper.evaluate(sheared.view(), sheared_cell).2;
+    let c44 = (shear[0][1] - base[0][1]) / (2.0 * g);
+    eprintln!("C11 {c11:.6} C12 {c12:.6} C44 {c44:.6} eV/A^3");
+    let solid = CubicElasticity::new(c11, c12, c44).expect("measured cubic stiffness");
+
+    let (small, small_cell) = fcc(3, a);
+    let mut bulk_small = small.clone();
+    relax(&copper, &mut bulk_small, small_cell, 1e-3, 200);
+    let (_, _, sigma_bulk_small) = copper.evaluate(bulk_small.view(), small_cell);
+    let along_100 = dumbbell(&small, [1.0, 0.0, 0.0], 2.05);
+    let along_110 = dumbbell(
+        &small,
+        [
+            std::f64::consts::FRAC_1_SQRT_2,
+            std::f64::consts::FRAC_1_SQRT_2,
+            0.0,
+        ],
+        2.05,
+    );
+    let hop = explicit_barrier(
+        &copper,
+        small_cell,
+        &along_100,
+        &along_110,
+        identity(),
+        Strain::zero().tensor(),
+        false,
+        true,
+    );
+    assert!(hop.accepted, "isolated hop {}", hop.status);
+    let small_volume = det(small_cell).abs();
+    let p_min = ElasticDipole::from_residual_stress(small_volume, hop.sigma_min, sigma_bulk_small)
+        .unwrap();
+    let p_sad = ElasticDipole::from_residual_stress(small_volume, hop.sigma_sad, sigma_bulk_small)
+        .unwrap();
+    let mut response = StrainResponse::new(hop.barrier, p_min, p_sad)
+        .unwrap()
+        .with_point_group(&cubic_rotations())
+        .unwrap();
+    eprintln!(
+        "isolated barrier {:.6} eV images {}",
+        hop.barrier,
+        response.variants().len()
+    );
+
+    let (big, big_cell) = fcc(8, a);
+    let mut bulk_big = big.clone();
+    relax(&copper, &mut bulk_big, big_cell, 1e-3, 400);
+    let (_, _, sigma_bulk) = copper.evaluate(bulk_big.view(), big_cell);
+    let vacancy_site = nearest_atom(&big, [0.0, 0.0, 0.0]);
+    let mut vacancy = drop_atoms(&big, &[vacancy_site]);
+    relax(&copper, &mut vacancy, big_cell, 1e-3, 400);
+    let (_, g_vac, sigma_vac) = copper.evaluate(vacancy.view(), big_cell);
+    assert!(
+        max_abs(&g_vac) < 2.0e-3,
+        "vacancy residual force {}",
+        max_abs(&g_vac)
+    );
+    let big_volume = det(big_cell).abs();
+    let p_vacancy = ElasticDipole::from_residual_stress(big_volume, sigma_vac, sigma_bulk).unwrap();
+    eprintln!(
+        "vacancy Pxx {:.6} Pyy {:.6} Pzz {:.6} eV",
+        p_vacancy.tensor()[0][0],
+        p_vacancy.tensor()[1][1],
+        p_vacancy.tensor()[2][2]
+    );
+
+    let mut shells = Vec::new();
+    for ix in -3..=3 {
+        for iy in -3..=3 {
+            for iz in -3..=3 {
+                for basis in [
+                    [0.0, 0.0, 0.0],
+                    [0.5, 0.5, 0.0],
+                    [0.5, 0.0, 0.5],
+                    [0.0, 0.5, 0.5],
+                ] {
+                    let r = [
+                        (ix as f64 + basis[0]) * a,
+                        (iy as f64 + basis[1]) * a,
+                        (iz as f64 + basis[2]) * a,
+                    ];
+                    let distance = (r[0] * r[0] + r[1] * r[1] + r[2] * r[2]).sqrt();
+                    if distance < 3.2 || distance > 3.0 * a + 0.05 {
+                        continue;
+                    }
+                    let key = (distance * 1.0e6).round() as i64;
+                    if shells.iter().any(|(have, _, _)| *have == key) {
+                        continue;
+                    }
+                    shells.push((key, distance, r));
+                }
+            }
+        }
+    }
+    shells.sort_by(|left, right| left.1.total_cmp(&right.1));
+    let mut far = None;
+    for (_, distance, r) in &shells {
+        let hops = response
+            .hops_from_periodic_dipole(&solid, *r, big_cell, p_vacancy, 1)
+            .unwrap();
+        let infinite = response
+            .hops_from_dipole(&solid, *r, p_vacancy)
+            .unwrap();
+        let lowest = hops.iter().map(|hop| hop.barrier).fold(f64::MAX, f64::min);
+        let reference = hops.iter().find(|hop| hop.name == "v0").expect("identity image");
+        let reference_infinite = infinite
+            .iter()
+            .find(|hop| hop.name == "v0")
+            .expect("identity image");
+        eprintln!(
+            "shell r={distance:.4} A v0={:.6} lowest={:.6} infinite_v0={:.6} |eps|={:.6} images={}",
+            reference.barrier,
+            lowest,
+            reference_infinite.barrier,
+            reference.strain.norm(),
+            hops.len()
+        );
+        let aligned = r[0].abs().max(r[1].abs()).max(r[2].abs()) > 0.99 * *distance;
+        if (distance - 3.0 * a).abs() < 0.05 && aligned {
+            far = Some((*r, reference.barrier, reference.strain));
+        }
+    }
+    let (_far_r, predicted, far_strain) = far.expect("a shell at 3a");
+
+    for (label, target) in [("second", a), ("third", a * 1.5_f64.sqrt()), ("far", 3.0 * a)] {
+        let (_, _, r) = shells
+            .iter()
+            .min_by(|left, right| {
+                (left.1 - target)
+                    .abs()
+                    .total_cmp(&(right.1 - target).abs())
+            })
+            .unwrap();
+        let strain = solid
+            .periodic_strain(*r, big_cell, p_vacancy, 1)
+            .unwrap();
+        let (deformed_min, deformed_cell) = deform(&hop.minimum, small_cell, strain.tensor());
+        let mut reactant = deformed_min;
+        relax(&copper, &mut reactant, deformed_cell, 1e-3, 200);
+        let (e_min, _, _) = copper.evaluate(reactant.view(), deformed_cell);
+        let surface = Held {
+            copper: &copper,
+            cell: deformed_cell,
+        };
+        match response.refine(
+            &strain,
+            &surface,
+            &SaddleSeed {
+                positions: hop.saddle.clone(),
+                cell: small_cell,
+                mode: hop.mode.clone(),
+                minimum_energy: e_min,
+            },
+            800,
+        ) {
+            Ok(refined) => eprintln!(
+                "refine {label} r={:.4} predicted_v0={:.6} refined={:.6}",
+                length3(*r),
+                response
+                    .hops_at(&strain)
+                    .iter()
+                    .find(|hop| hop.name == "v0")
+                    .unwrap()
+                    .barrier,
+                refined.barrier
+            ),
+            Err(err) => eprintln!("refine {label} r={:.4} did not converge: {err}", length3(*r)),
+        }
+    }
+
+    let length = 8.0 * a;
+    let (e_bulk, _, _) = copper.evaluate(bulk_big.view(), big_cell);
+    let isolated = direct_dumbbell_hop(
+        &copper,
+        &big,
+        big_cell,
+        None,
+        [4.0 * a, 4.0 * a, 4.0 * a],
+        e_bulk,
+    );
+    let isolated = isolated.expect("isolated dumbbell hop in the 8x8x8 cell");
+    eprintln!("isolated 8x8x8 barrier={:.6}", isolated.barrier);
+    let p_min_big =
+        ElasticDipole::from_residual_stress(big_volume, isolated.sigma_min, sigma_bulk).unwrap();
+    let p_sad_big =
+        ElasticDipole::from_residual_stress(big_volume, isolated.sigma_sad, sigma_bulk).unwrap();
+    let response_big = StrainResponse::new(isolated.barrier, p_min_big, p_sad_big)
+        .unwrap()
+        .with_point_group(&cubic_rotations())
+        .unwrap();
+    for (label, target) in [("second", a), ("third", a * 1.5_f64.sqrt()), ("far", 3.0 * a)] {
+        let (_, distance, r) = shells
+            .iter()
+            .filter(|(_, distance, r)| {
+                r[0].abs().max(r[1].abs()).max(r[2].abs()) > 0.99 * *distance
+                    || (label == "third" && (*distance - target).abs() < 0.05)
+            })
+            .min_by(|left, right| (left.1 - target).abs().total_cmp(&(right.1 - target).abs()))
+            .unwrap();
+        let center = [
+            r[0] - length * (r[0] / length).floor(),
+            r[1] - length * (r[1] / length).floor(),
+            r[2] - length * (r[2] / length).floor(),
+        ];
+        let predicted_v0 = response_big
+            .hops_from_periodic_dipole(&solid, *r, big_cell, p_vacancy, 1)
+            .unwrap()
+            .iter()
+            .find(|hop| hop.name == "v0")
+            .unwrap()
+            .barrier;
+        match direct_dumbbell_hop(
+            &copper,
+            &big,
+            big_cell,
+            Some(vacancy_site),
+            center,
+            e_bulk,
+        ) {
+            Some(found) => {
+                let shift_direct = found.barrier - isolated.barrier;
+                let shift_predicted = predicted_v0 - isolated.barrier;
+                eprintln!(
+                    "direct {label} r={distance:.4} barrier={:.6} predicted_v0={predicted_v0:.6} shift_direct={shift_direct:.6} shift_predicted={shift_predicted:.6}",
+                    found.barrier
+                );
+                if label == "far" {
+                    assert!(
+                        (shift_direct - shift_predicted).abs() < 2.0e-3,
+                        "far-shell strain shift direct {shift_direct} predicted {shift_predicted}"
+                    );
+                }
+            }
+            None => {
+                eprintln!(
+                    "direct {label} r={distance:.4} did not converge or left the <100> dumbbell"
+                );
+                assert!(label != "far", "the far shell left the <100> dumbbell");
+            }
+        }
+    }
+    let _ = (predicted, far_strain);
+}
+
+fn length3(r: [f64; 3]) -> f64 {
+    (r[0] * r[0] + r[1] * r[1] + r[2] * r[2]).sqrt()
+}
+
+struct DirectHop {
+    barrier: f64,
+    sigma_min: [[f64; 3]; 3],
+    sigma_sad: [[f64; 3]; 3],
+}
+
+fn direct_dumbbell_hop(
+    copper: &Copper,
+    perfect: &Array1<f64>,
+    cell: [[f64; 3]; 3],
+    vacancy: Option<usize>,
+    center: [f64; 3],
+    bulk_energy: f64,
+) -> Option<DirectHop> {
+    let site = nearest_atom(perfect, center);
+    if vacancy == Some(site) {
+        eprintln!("direct site coincides with the vacancy at {center:?}");
+        return None;
+    }
+    let mut drop = vec![site];
+    if let Some(vacancy) = vacancy {
+        drop.push(vacancy);
+    }
+    let body = drop_atoms(perfect, &drop);
+    let mut minimum = with_dumbbell(&body, center, [1.0, 0.0, 0.0], 2.05);
+    relax(copper, &mut minimum, cell, 1e-3, 500);
+    let (e_min, gradient, sigma_min) = copper.evaluate(minimum.view(), cell);
+    let (split, axis) = pair_distance(&minimum, cell);
+    let (to_100, _, _, _) = axis_report(axis);
+    eprintln!(
+        "  minimum split={split:.4} angle_100={to_100:.2} force={:.3e} above_bulk={:.6}",
+        max_abs(&gradient),
+        e_min - bulk_energy
+    );
+    if !(1.5..2.6).contains(&split) || to_100 > 20.0 {
+        return None;
+    }
+    let mut other = with_dumbbell(
+        &body,
+        center,
+        [
+            std::f64::consts::FRAC_1_SQRT_2,
+            std::f64::consts::FRAC_1_SQRT_2,
+            0.0,
+        ],
+        2.05,
+    );
+    relax(copper, &mut other, cell, 1e-3, 400);
+    let connect = minimum_image_difference(&other, &minimum, cell);
+    let norm = connect.dot(&connect).sqrt();
+    let mut nudged = minimum.clone();
+    if norm > 0.0 {
+        for (slot, component) in nudged.iter_mut().zip(connect.iter()) {
+            *slot += 0.02 * component / norm;
+        }
+    }
+    let row = saddle_from_minimum(
+        copper,
+        &nudged,
+        cell,
+        &connect,
+        CellMask::frozen(),
+        [[0.0; 3]; 3],
+        cell,
+        e_min,
+        to_100,
+        0.0,
+        1200,
+        &published_dimer(),
+    );
+    let converged = row.status == MinModeStatus::Converged
+        && !row.rejected
+        && row.negative_modes == Some(1)
+        && row.curvature < 0.0;
+    if !converged {
+        eprintln!(
+            "  dimer status={:?} rejected={} neg={:?} curvature={}",
+            row.status, row.rejected, row.negative_modes, row.curvature
+        );
+        return None;
+    }
+    eprintln!("  saddle angle_110={:.2}", row.angle_110);
+    Some(DirectHop {
+        barrier: row.barrier,
+        sigma_min,
+        sigma_sad: row.stress,
+    })
 }

@@ -165,11 +165,36 @@ impl ElasticDipole {
     /// `volume` is the cell volume. `defect` and `bulk` are Cauchy stresses
     /// of the defective cell and the perfect cell at the same homogeneous
     /// strain. The bulk subtraction is the homogeneous-stress correction
-    /// after Eq. (8) of Varvenne and Clouet.
+    /// after Eq. (8) of Varvenne and Clouet. [`Self::from_residual_stress`]
+    /// is this identification under periodic boundaries.
     pub fn from_stress(volume: f64, defect: M3, bulk: M3) -> Result<Self, SaddleError> {
         Ok(Self {
             tensor: elastic_dipole(volume, defect, bulk)?,
         })
+    }
+
+    /// Dipole of one defect from the residual stress of a fixed periodic cell.
+    ///
+    /// The cell vectors stay at the perfect crystal, the atoms relax, and a
+    /// residual stress remains because the average strain is held at zero.
+    /// Varvenne and Clouet, Phys. Rev. B 96, 224103 (2017),
+    /// doi:10.1103/PhysRevB.96.224103, Eq. (8), give `P = -V σ` for that
+    /// stress. The perfect-cell stress is removed as in the paragraph
+    /// after their Eq. (8).
+    ///
+    /// Pasianot, Philos. Mag. Lett. 96, 447 (2016),
+    /// doi:10.1080/09500839.2016.1250965, shows that this P is the dipole
+    /// of one defect, not of the periodic array: the images contribute a
+    /// strain of zero cell average, and holding the cell fixed removes
+    /// that homogeneous image strain from the measurement. No further
+    /// term is added to P. The same P is what Varvenne, Bruneval,
+    /// Marinica, and Clouet, Phys. Rev. B 88, 134102 (2013),
+    /// doi:10.1103/PhysRevB.88.134102, insert into the image-interaction
+    /// correction of the formation energy. A naive pile of infinite-medium
+    /// fields is not the strain inside the cell; the periodic field is
+    /// [`crate::CubicElasticity::periodic_strain`].
+    pub fn from_residual_stress(volume: f64, defect: M3, bulk: M3) -> Result<Self, SaddleError> {
+        Self::from_stress(volume, defect, bulk)
     }
 
     /// First moment of a force distribution, symmetrized.
@@ -266,6 +291,16 @@ impl HopVariant {
         }
         barrier0 - double_dot(delta, strain.tensor())
     }
+}
+
+/// One symmetry image of a hop, evaluated in one local strain.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HopInField {
+    pub name: String,
+    pub barrier: f64,
+    pub prefactor_hz: Option<f64>,
+    pub trust: Trust,
+    pub strain: Strain,
 }
 
 /// How far the dipole line is trusted.
@@ -601,6 +636,28 @@ impl StrainResponse {
     /// Lowest barrier among the symmetry images at a homogeneous strain.
     pub fn barrier(&self, eps: &Strain) -> Estimate {
         self.barrier_in(&LocalField::homogeneous(*eps))
+    }
+
+    /// Barrier of every symmetry image at one homogeneous strain.
+    ///
+    /// The images are the hops of the mobile defect. A strain that breaks
+    /// the point group, such as the field of a neighbouring defect, splits
+    /// them. [`Self::barrier`] keeps only the lowest.
+    pub fn hops_at(&self, strain: &Strain) -> Vec<HopInField> {
+        let field = LocalField::homogeneous(*strain);
+        self.variants
+            .iter()
+            .map(|variant| {
+                let barrier = self.image_barrier(variant, &field);
+                HopInField {
+                    name: variant.name.clone(),
+                    barrier,
+                    prefactor_hz: self.prefactor_at(strain, variant),
+                    trust: self.trust_of(strain, variant, barrier),
+                    strain: *strain,
+                }
+            })
+            .collect()
     }
 
     /// Dipole line plus `-(1/2) (Q_saddle - Q_minimum) : ∇ε` when a
