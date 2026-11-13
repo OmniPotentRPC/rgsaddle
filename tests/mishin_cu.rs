@@ -7173,6 +7173,46 @@ fn catalogue_text() -> String {
     text
 }
 
+fn pafi_kappa_unresolved(text: &str, temperature: f64) -> bool {
+    text.lines().any(|line| {
+        let fields: Vec<&str> = line.split(',').collect();
+        if fields.len() < 13 || fields[0] != "pafi" || fields[1] != "isolated" || fields[3] != "translate" {
+            return false;
+        }
+        let Ok(temp) = fields[5].parse::<f64>() else { return false };
+        if (temp - temperature).abs() > 1.0 {
+            return false;
+        }
+        fields.iter().any(|field| {
+            field.split_whitespace().collect::<Vec<_>>().windows(2).any(|pair| {
+                pair[0] == "error" && pair[1].trim_end_matches(|c: char| !c.is_ascii_digit() && c != '.').parse::<f64>().ok().is_some_and(|error| error > 0.1)
+            })
+        })
+    })
+}
+
+fn md_channel_rate(temperature: f64) -> Option<f64> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks/defect_pair_diffusivity.csv");
+    let text = std::fs::read_to_string(path).ok()?;
+    for line in text.lines().skip(1) {
+        let fields: Vec<&str> = line.split(',').collect();
+        if fields.len() < 7 {
+            continue;
+        }
+        let Ok(temp) = fields[0].parse::<f64>() else { continue };
+        if (temp - temperature).abs() > 1.0 {
+            continue;
+        }
+        let jumps = fields[5].parse::<f64>().ok()?;
+        if jumps < 20.0 {
+            return None;
+        }
+        let rate = fields[6].parse::<f64>().ok()?;
+        return (rate.is_finite() && rate > 0.0).then_some(rate);
+    }
+    None
+}
+
 fn migration_rate(text: &str, temperature: f64) -> Option<f64> {
     let mut best = None;
     for line in text.lines() {
@@ -8332,9 +8372,10 @@ fn channel_volumes(
     let a_ours = measured_lattice(temperature);
     let layer = return_sites as f64 / 3.0;
     let probability = rgsaddle::spherical_return_probability(max_r, jump).unwrap_or(0.0);
-    let solve = |glide: bool, rotation: bool, drift: bool| -> (f64, f64, f64, f64, f64, Vec<(usize, f64, f64)>, Vec<rgsaddle::VolumeSite>) {
+    let solve = |glide: bool, rotation: bool, drift: bool| -> (f64, f64, f64, f64, f64, Vec<(usize, f64, f64)>, Vec<rgsaddle::VolumeSite>, f64) {
         let mut sites = Vec::new();
         let mut capture_index = Vec::new();
+        let mut landings = Vec::new();
         for orientation in ["100", "010", "001"] {
             for (index, (radius, _, count)) in kept.iter().enumerate() {
                 let id = format!("{radius:.3}-{orientation}");
@@ -8346,8 +8387,6 @@ fn channel_volumes(
                 let mut capture_neighbors = 0.0_f64;
                 let mut edges = Vec::new();
                 let mut rotation_capture = 0.0_f64;
-                let mut escape_along = 0.0_f64;
-                let mut escape_oblique = 0.0_f64;
                 let mut translations: std::collections::BTreeMap<(usize, &'static str), (f64, rgsaddle::DirectionClass)> = std::collections::BTreeMap::new();
                 let axis = axis_from_label(orientation);
                 if let Some(group) = members.get(index) {
@@ -8372,18 +8411,24 @@ fn channel_volumes(
                             if let Some(other) = kept.iter().position(|(value, _, _)| (value - next_r).abs() < 1.0e-3) {
                                 let entry = translations.entry((other, landed)).or_insert((0.0, class));
                                 entry.0 += 1.0;
-                            } else if class == rgsaddle::DirectionClass::Tangential {
-                                escape_oblique += 1.0;
+                            } else if next_r <= max_r + 1.0e-6
+                                && let Some(other) = kept.iter().position(|(value, _, _)| (value - next_r).abs() < 0.05)
+                            {
+                                let entry = translations.entry((other, landed)).or_insert((0.0, class));
+                                entry.0 += 1.0;
                             } else {
-                                escape_along += 1.0;
+                                landings.push(rgsaddle::SphereLanding {
+                                    source: id.clone(),
+                                    boundary: format!("{max_r:.3}-{landed}"),
+                                    rate: k_mig / group.len() as f64,
+                                    distance: next_r,
+                                });
                             }
                         }
                     }
                     if !group.is_empty() {
                         let norm = group.len() as f64;
                         capture_neighbors /= norm;
-                        escape_along /= norm;
-                        escape_oblique /= norm;
                         for value in translations.values_mut() {
                             value.0 /= norm;
                         }
@@ -8420,10 +8465,6 @@ fn channel_volumes(
                         }
                     }
                 }
-                let escape = escape_along + if glide { escape_oblique } else { 0.0 };
-                if escape > 0.0 {
-                    edges.push(("escaped".into(), escape * k_mig));
-                }
                 let radius_ours = radius * a_ours / a;
                 let capture = capture_rate_row(rates, radius_ours, orientation, temperature);
                 if capture_neighbors > 0.0 {
@@ -8444,14 +8485,28 @@ fn channel_volumes(
                 sites.push(rgsaddle::VolumeSite { id, count: share, outcome: rgsaddle::SiteOutcome::Kinetic, rates: edges });
             }
         }
-        for orientation in ["100", "010", "001"] {
-            let boundary = format!("{max_r:.3}-{orientation}");
-            let outward = sites.iter().find(|site| site.id == boundary).and_then(|site| site.rates.iter().find(|(destination, _)| destination == "escaped").map(|(_, rate)| *rate)).unwrap_or(0.0);
-            sites = attach_return(sites, &boundary, outward, probability, layer, &format!("free-{orientation}"));
+        sites = rgsaddle::embed_sphere_return(&sites, max_r, &landings).unwrap_or(sites);
+        let solved = rgsaddle::kinetic_recombination_volume(&sites, omega).ok();
+        let (total, spont, kinetic) = match &solved {
+            Some(volume) => (volume.total_sites, volume.spontaneous_sites, volume.kinetic_sites),
+            None => (f64::NAN, f64::NAN, f64::NAN),
+        };
+        let mut estimates = Vec::new();
+        if let Some(volume) = &solved {
+            for place in &volume.placements {
+                let Some((radius_text, _)) = place.id.rsplit_once('-') else { continue };
+                let Ok(radius) = radius_text.parse::<f64>() else { continue };
+                if radius < 8.0 || radius < 0.55 * max_r {
+                    continue;
+                }
+                estimates.push(place.probability * radius);
+            }
         }
-        let (total, spont, kinetic) = match rgsaddle::kinetic_recombination_volume(&sites, omega) {
-            Ok(volume) => (volume.total_sites, volume.spontaneous_sites, volume.kinetic_sites),
-            Err(_) => (f64::NAN, f64::NAN, f64::NAN),
+        estimates.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+        let r_eff = if estimates.is_empty() {
+            f64::NAN
+        } else {
+            estimates[estimates.len() / 2]
         };
         let time = rgsaddle::mean_absorption_time(&sites).unwrap_or(f64::NAN);
         let mut sealed = sites.clone();
@@ -8468,12 +8523,12 @@ fn channel_volumes(
             }
         }
         let tau_capture = rgsaddle::mean_absorption_time(&sealed).unwrap_or(f64::NAN);
-        (total, spont, kinetic, time, tau_capture, capture_index, sites)
+        (total, spont, kinetic, time, tau_capture, capture_index, sites, r_eff)
     };
-    let (radial, _, _, _, _, _, _) = solve(false, false, false);
-    let (glide, _, _, _, _, _, _) = solve(true, false, false);
-    let (rotated, spont, kinetic, time, tau_capture, capture_index, embedded) = solve(true, true, false);
-    let (drifted, _, _, _, _, _, _) = solve(true, true, true);
+    let (radial, _, _, _, _, _, _, _) = solve(false, false, false);
+    let (glide, _, _, _, _, _, _, _) = solve(true, false, false);
+    let (rotated, spont, kinetic, time, tau_capture, capture_index, embedded, r_eff) = solve(true, true, false);
+    let (drifted, _, _, _, _, _, _, _) = solve(true, true, true);
     let mut samples = vec![0.0; 16];
     for sample in 0..samples.len() {
         let mut varied = embedded.clone();
@@ -8493,22 +8548,7 @@ fn channel_volumes(
     let sample_mean = samples.iter().sum::<f64>() / samples.len() as f64;
     let sigma = (samples.iter().map(|value| (value - sample_mean) * (value - sample_mean)).sum::<f64>() / samples.len() as f64).sqrt();
     let weight = embedded.iter().map(|site| site.count).sum::<f64>();
-    let layer_probability = rgsaddle::kinetic_recombination_volume(&embedded, omega)
-        .ok()
-        .and_then(|volume| {
-            let layers: Vec<_> = volume
-                .placements
-                .iter()
-                .filter(|site| site.id.starts_with("free-"))
-                .collect();
-            if layers.is_empty() {
-                None
-            } else {
-                Some(layers.iter().map(|site| site.probability).sum::<f64>() / layers.len() as f64)
-            }
-        })
-        .unwrap_or(f64::NAN);
-    (rotated, sigma, spont, kinetic, weight, time * weight, radial, glide, rotated, drifted, tau_capture, layer_probability)
+    (rotated, sigma, spont, kinetic, weight, time * weight, radial, glide, rotated, drifted, tau_capture, r_eff)
 }
 
 fn text_spontaneous_at_8(text: &str, radius_ours: f64, orientation: &str, temperature: f64) -> bool {
@@ -8541,7 +8581,12 @@ fn assemble_run13() {
     writeln!(out, "temperature_K,cutoff_A,volume_over_Omega,sigma,spontaneous_sites,kinetic_sites,demkowicz_8788,note").unwrap();
     for temperature in [300.0_f64, 500.0, 700.0] {
         let a = demkowicz_lattice(temperature);
-        let k_mig = migration_rate(&rates, temperature).unwrap_or(f64::NAN);
+        let mut k_mig = migration_rate(&rates, temperature).unwrap_or(f64::NAN);
+        if pafi_kappa_unresolved(&rates, temperature) {
+            if let Some(measured) = md_channel_rate(temperature) {
+                k_mig = measured;
+            }
+        }
         let omega = a * a * a / 4.0;
         let mut previous = None;
         for cutoff in [10.8_f64, 12.0, 13.0, 14.0, 15.0, 16.0, 18.0, 20.0, 22.0] {
@@ -8587,7 +8632,7 @@ fn assemble_run13() {
             let max_r = shells.last().map(|(radius, _, _)| *radius).unwrap_or(0.0);
             let jump = a / 2.0_f64.sqrt();
             let return_sites = return_layer_count(a, &shells, max_r);
-            let (total, sigma, spont_sites, kinetic_sites, _, _, _, _, _, _, tau_capture, layer_probability) = channel_volumes(
+            let (total, sigma, spont_sites, kinetic_sites, _, _, _, _, _, _, tau_capture, r_eff) = channel_volumes(
                 &shells, &spontaneous, &rates, temperature, k_mig, a, omega, max_r, jump, return_sites, cutoff + 0.05, true,
             );
             let (k_rot, _) = rotation_channel(&rates, temperature);
@@ -8597,8 +8642,6 @@ fn assemble_run13() {
             let n_atoms = 4.0 * (13usize * 13 * 13) as f64;
             let tau_cell = cell_averaged_time(13, a, k_mig, max_r, tau_capture);
             let mean_volume = if tau_cell.is_finite() && tau_cell > 0.0 && nu.is_finite() && nu > 0.0 { n_atoms / (tau_cell * nu) } else { f64::NAN };
-            let distance = max_r + jump;
-            let r_eff = if layer_probability.is_finite() { layer_probability * distance } else { f64::NAN };
             let capture_rate = rgsaddle::smoluchowski_rate(d_graph, r_eff).unwrap_or(f64::NAN);
             let sphere_volume = rgsaddle::volume_from_frequency(capture_rate, nu).unwrap_or(f64::NAN);
             let sphere = sphere_volume / omega;
@@ -8777,6 +8820,321 @@ fn run14_rotation_pafi_700(copper: &FastCopper) {
     }
     relax_fast(copper, &mut product, job.cell, 2.0e-4, 80);
     record_pafi(copper, &checkpoint, bulk, "isolated", "100", "rotate", "tangential", temperature, &reactant, reactant_energy, &hit.positions, &hit.mode, &product, job.cell, true);
+}
+
+#[test]
+#[ignore = "NVE diffusivity of one <100> dumbbell on the 13^3 Table 1 cell"]
+fn defect_pair_diffusivity() {
+    let started = Instant::now();
+    let a = 3.655_f64;
+    let repeats = 13usize;
+    let (perfect, cell) = fcc(repeats, a);
+    let length = repeats as f64 * a;
+    let copper = FastCopper::new();
+    let mut positions = dumbbell(&perfect, [1.0, 0.0, 0.0], 2.05);
+    relax_fast(&copper, &mut positions, cell, 1.0e-2, 40);
+    let lattice = perfect.clone();
+    let steps: usize = std::env::var("MD_STEPS").ok().and_then(|text| text.parse().ok()).unwrap_or(10000);
+    let dt: f64 = std::env::var("MD_DT").ok().and_then(|text| text.parse().ok()).unwrap_or(2.0);
+    let mass = 63.546_f64;
+    let scale = 0.009648533212_f64;
+    let mut rng = 0x5deece66d_u64;
+    let mut normal = |rng: &mut u64| {
+        let u1 = {
+            *rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+            ((*rng >> 33) as f64 + 0.5) / 2147483648.0
+        };
+        let u2 = {
+            *rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+            ((*rng >> 33) as f64 + 0.5) / 2147483648.0
+        };
+        (-2.0 * u1.max(1.0e-12).ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
+    };
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks/defect_pair_diffusivity.csv");
+    let mut out = File::create(&root).expect("diffusivity");
+    writeln!(out, "temperature_K,time_ps,msd_A2,diffusivity_A2_per_ps,error_A2_per_ps,jumps,channel_rate_Hz,rate_implied_D,correlation,table_D").unwrap();
+    for temperature in [300.0_f64, 500.0, 700.0] {
+        let mut x = positions.clone();
+        let n = x.len() / 3;
+        let k_t = 8.617333262145e-5 * temperature;
+        let sigma = (k_t * scale / mass).sqrt();
+        let mut v = Array1::zeros(x.len());
+        for value in v.iter_mut() {
+            *value = sigma * normal(&mut rng);
+        }
+        let mut com = [0.0; 3];
+        for atom in 0..n {
+            for c in 0..3 {
+                com[c] += v[3 * atom + c];
+            }
+        }
+        for atom in 0..n {
+            for c in 0..3 {
+                v[3 * atom + c] -= com[c] / n as f64;
+            }
+        }
+        let (_, reference_grad, _) = copper.evaluate(x.view(), cell);
+        let mut force = eam_force(&x, length);
+        let mut mismatch = 0.0_f64;
+        for i in 0..force.len() {
+            mismatch = mismatch.max((force[i] + reference_grad[i]).abs());
+        }
+        eprintln!("md force mismatch {mismatch:.3e} eV/A");
+        let equil = 2000usize;
+        let mut samples = Vec::new();
+        let mut jumps = 0usize;
+        let mut temperature_sum = 0.0_f64;
+        let mut temperature_n = 0.0_f64;
+        let mut previous_site = defect_site(&x, &lattice, a, length);
+        let mut previous_center = defect_center(&x, &lattice, a, length);
+        let mut unwrapped = previous_center;
+        let mut origin = previous_center;
+        let blocks = 4usize;
+        let mut block_msd = vec![0.0; blocks];
+        let mut block_origin = vec![unwrapped; blocks];
+        let block_steps = steps.saturating_sub(equil) / blocks;
+        let probe = Instant::now();
+        for step in 0..steps {
+            for i in 0..x.len() {
+                v[i] += 0.5 * dt * force[i] * scale / mass;
+                x[i] += dt * v[i];
+            }
+            force = eam_force(&x, length);
+            if step == 0 {
+                eprintln!("md force {} ms", probe.elapsed().as_secs_f64() * 1.0e3);
+            }
+            for i in 0..x.len() {
+                v[i] += 0.5 * dt * force[i] * scale / mass;
+            }
+            let tau = if step < equil { 200.0 } else { 5000.0 };
+            let retain = (-dt / tau).exp();
+            let kick = (k_t * scale / mass * (1.0 - retain * retain)).sqrt();
+            for value in v.iter_mut() {
+                *value = retain * *value + kick * normal(&mut rng);
+            }
+            let mut com = [0.0; 3];
+            for atom in 0..n {
+                for c in 0..3 {
+                    com[c] += v[3 * atom + c];
+                }
+            }
+            for atom in 0..n {
+                for c in 0..3 {
+                    v[3 * atom + c] -= com[c] / n as f64;
+                }
+            }
+            if step == equil {
+                previous_center = defect_center(&x, &lattice, a, length);
+                previous_site = defect_site(&x, &lattice, a, length);
+                unwrapped = previous_center;
+                origin = previous_center;
+                block_origin = vec![unwrapped; blocks];
+            }
+            if step < equil {
+                continue;
+            }
+            if (step + 1) % 50 == 0 {
+                let mut kinetic = 0.0;
+                for value in v.iter() {
+                    kinetic += value * value;
+                }
+                kinetic *= 0.5 * mass / scale;
+                temperature_sum += kinetic / (1.5 * n as f64 * 8.617333262145e-5);
+                temperature_n += 1.0;
+            }
+            if (step + 1) % 20 == 0 {
+                let center = defect_center(&x, &lattice, a, length);
+                let delta = min_image(center, previous_center, length);
+                unwrapped = [unwrapped[0] + delta[0], unwrapped[1] + delta[1], unwrapped[2] + delta[2]];
+                let site = defect_site(&x, &lattice, a, length);
+                if site != previous_site {
+                    let hop2 = delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2];
+                    if hop2 > 1.44 {
+                        jumps += 1;
+                    }
+                    previous_site = site;
+                }
+                previous_center = center;
+                let msd = {
+                    let d = [unwrapped[0] - origin[0], unwrapped[1] - origin[1], unwrapped[2] - origin[2]];
+                    d[0] * d[0] + d[1] * d[1] + d[2] * d[2]
+                };
+                samples.push(msd);
+                let produced = step.saturating_sub(equil);
+                let block = produced / block_steps.max(1);
+                if block < blocks {
+                    if samples.len() == 1 || block != produced.saturating_sub(20) / block_steps.max(1) {
+                        block_origin[block] = unwrapped;
+                    }
+                    let d = [unwrapped[0] - block_origin[block][0], unwrapped[1] - block_origin[block][1], unwrapped[2] - block_origin[block][2]];
+                    block_msd[block] = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+                }
+            }
+        }
+        let time_ps = steps.saturating_sub(equil) as f64 * dt * 1.0e-3;
+        let msd = *samples.last().unwrap_or(&0.0);
+        let diffusivity = msd / (6.0 * time_ps);
+        let block_time = time_ps / blocks as f64;
+        let block_d: Vec<f64> = block_msd.iter().map(|value| value / (6.0 * block_time)).collect();
+        let mean = block_d.iter().sum::<f64>() / blocks as f64;
+        let error = (block_d.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / (blocks as f64 * (blocks - 1) as f64)).sqrt();
+        let channel = jumps as f64 / time_ps * 1.0e12 / 8.0;
+        let implied = (2.0 / 3.0) * (channel / 1.0e12) * a * a;
+        let correlation = if implied > 0.0 { diffusivity / implied } else { f64::NAN };
+        let table = match temperature as i32 { 300 => 0.143, 500 => 0.526, 700 => 0.910, _ => f64::NAN };
+        let measured_t = if temperature_n > 0.0 { temperature_sum / temperature_n } else { f64::NAN };
+        writeln!(out, "{temperature},{time_ps:.3},{msd:.4},{diffusivity:.4},{error:.4},{jumps},{channel:.6e},{implied:.4},{correlation:.3},{table},measured_T {measured_t:.1}; blocks {block_d:?}").unwrap();
+        eprintln!("md {temperature} K measured {measured_t:.1} K D {diffusivity:.4} ± {error:.4} jumps {jumps} channel {channel:.3e} implied {implied:.4} f {correlation:.3} blocks {block_d:?} table {table} in {:.1}s", started.elapsed().as_secs_f64());
+    }
+}
+
+fn eam_force(positions: &Array1<f64>, length: f64) -> Array1<f64> {
+    let n = positions.len() / 3;
+    let nside = ((length / RC).floor() as i32).max(3);
+    let bins_n = (nside as usize).pow(3);
+    let mut bins = vec![Vec::new(); bins_n];
+    let mut which = vec![[0i32; 3]; n];
+    for i in 0..n {
+        let mut ijk = [0i32; 3];
+        for c in 0..3 {
+            let mut bin = (positions[3 * i + c].rem_euclid(length) / length * nside as f64).floor() as i32;
+            if bin >= nside {
+                bin = nside - 1;
+            }
+            if bin < 0 {
+                bin = 0;
+            }
+            ijk[c] = bin;
+        }
+        which[i] = ijk;
+        let slot = ((ijk[0] * nside + ijk[1]) * nside + ijk[2]) as usize;
+        bins[slot].push(i);
+    }
+    let cutoff2 = RC * RC;
+    let mut rho = vec![0.0; n];
+    let mut pairs: Vec<(usize, usize, [f64; 3], f64)> = Vec::with_capacity(n * 48);
+    for i in 0..n {
+        let origin = which[i];
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                for dz in -1..=1 {
+                    let ix = (origin[0] + dx).rem_euclid(nside);
+                    let iy = (origin[1] + dy).rem_euclid(nside);
+                    let iz = (origin[2] + dz).rem_euclid(nside);
+                    let slot = ((ix * nside + iy) * nside + iz) as usize;
+                    for &j in &bins[slot] {
+                        if j <= i {
+                            continue;
+                        }
+                        let mut d = [0.0; 3];
+                        let mut r2 = 0.0;
+                        for c in 0..3 {
+                            let mut delta = positions[3 * j + c] - positions[3 * i + c];
+                            delta -= length * (delta / length).round();
+                            d[c] = delta;
+                            r2 += delta * delta;
+                        }
+                        if r2 < cutoff2 && r2 > 1.0e-16 {
+                            let r = r2.sqrt();
+                            let weight = density(r).0;
+                            rho[i] += weight;
+                            rho[j] += weight;
+                            pairs.push((i, j, d, r));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut fp = vec![0.0; n];
+    for i in 0..n {
+        fp[i] = embed(rho[i]).1;
+    }
+    let mut gradient = vec![0.0; positions.len()];
+    for (i, j, d, r) in &pairs {
+        let (_, dv) = pair(*r);
+        let (_, drho) = density(*r);
+        let deriv = dv + (fp[*i] + fp[*j]) * drho;
+        let inv_r = 1.0 / r;
+        for c in 0..3 {
+            let force = deriv * d[c] * inv_r;
+            gradient[3 * i + c] -= force;
+            gradient[3 * j + c] += force;
+        }
+    }
+    Array1::from(gradient).mapv(|value| -value)
+}
+
+fn defect_site(positions: &Array1<f64>, _lattice: &Array1<f64>, a: f64, length: f64) -> (i32, i32, i32) {
+    let mut occupied: std::collections::HashMap<(i32, i32, i32), u16> = std::collections::HashMap::new();
+    for atom in 0..positions.len() / 3 {
+        let point = [positions[3 * atom], positions[3 * atom + 1], positions[3 * atom + 2]];
+        let key = site_key(point, a, length);
+        *occupied.entry(key).or_insert(0) += 1;
+    }
+    occupied
+        .into_iter()
+        .max_by_key(|(_, count)| *count)
+        .map(|(key, _)| key)
+        .unwrap_or((0, 0, 0))
+}
+
+fn defect_center(positions: &Array1<f64>, _lattice: &Array1<f64>, a: f64, length: f64) -> [f64; 3] {
+    let mut best = [(0.0_f64, [0.0; 3]); 2];
+    let half = 0.5 * a;
+    for atom in 0..positions.len() / 3 {
+        let point = [positions[3 * atom], positions[3 * atom + 1], positions[3 * atom + 2]];
+        let key = site_key(point, a, length);
+        let site = [key.0 as f64 * half, key.1 as f64 * half, key.2 as f64 * half];
+        let image = min_image(point, site, length);
+        let dist2 = image[0] * image[0] + image[1] * image[1] + image[2] * image[2];
+        let place = [site[0] + image[0], site[1] + image[1], site[2] + image[2]];
+        if dist2 > best[0].0 {
+            best[1] = best[0];
+            best[0] = (dist2, place);
+        } else if dist2 > best[1].0 {
+            best[1] = (dist2, place);
+        }
+    }
+    let second = min_image(best[1].1, best[0].1, length);
+    [
+        best[0].1[0] + 0.5 * second[0],
+        best[0].1[1] + 0.5 * second[1],
+        best[0].1[2] + 0.5 * second[2],
+    ]
+}
+
+fn site_key(point: [f64; 3], a: f64, length: f64) -> (i32, i32, i32) {
+    let half = 0.5 * a;
+    let period = (length / half).round() as i32;
+    let mut key = [0i32; 3];
+    for c in 0..3 {
+        key[c] = (point[c].rem_euclid(length) / half).round() as i32;
+        key[c] = key[c].rem_euclid(period);
+    }
+    if (key[0] + key[1] + key[2]) % 2 != 0 {
+        let mut worst = 0;
+        let mut worst_err = -1.0;
+        for c in 0..3 {
+            let err = (point[c].rem_euclid(length) / half - key[c] as f64).abs();
+            if err > worst_err {
+                worst_err = err;
+                worst = c;
+            }
+        }
+        key[worst] = (key[worst] + 1).rem_euclid(period);
+    }
+    (key[0], key[1], key[2])
+}
+
+fn min_image(point: [f64; 3], origin: [f64; 3], length: f64) -> [f64; 3] {
+    let mut out = [0.0; 3];
+    for c in 0..3 {
+        let mut delta = point[c] - origin[c];
+        delta -= length * (delta / length).round();
+        out[c] = delta;
+    }
+    out
 }
 
 fn neighbor_translation_barrier(temperature: f64) -> Option<f64> {

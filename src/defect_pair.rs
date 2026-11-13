@@ -1538,12 +1538,136 @@ pub const FREE_CRYSTAL: &str = "free-crystal";
 /// probability of reaching `radius` from `radius + jump` is
 /// `radius / (radius + jump)`.
 pub fn spherical_return_probability(radius: f64, jump: f64) -> Result<f64, SaddleError> {
-    if !(radius.is_finite() && radius > 0.0 && jump.is_finite() && jump > 0.0) {
+    if !(jump.is_finite() && jump > 0.0) {
         return Err(SaddleError::Invalid(
-            "the return radius and the jump length must be finite and positive".into(),
+            "the jump length must be finite and positive".into(),
         ));
     }
-    Ok(radius / (radius + jump))
+    sphere_hit_probability(radius, radius + jump)
+}
+
+/// Probability of hitting a sphere of `radius` before infinity, starting at `distance`.
+///
+/// Inside or on the sphere the probability is 1. Outside it is `radius / distance`.
+pub fn sphere_hit_probability(radius: f64, distance: f64) -> Result<f64, SaddleError> {
+    if !(radius.is_finite() && radius > 0.0 && distance.is_finite() && distance > 0.0) {
+        return Err(SaddleError::Invalid(
+            "the sphere radius and the starting distance must be finite and positive".into(),
+        ));
+    }
+    if distance <= radius {
+        Ok(1.0)
+    } else {
+        Ok(radius / distance)
+    }
+}
+
+/// One hop that leaves the discrete region and lands at `distance` from the origin.
+///
+/// `source` is the shell the hop leaves. `boundary` is the shell a trajectory
+/// re-enters when it hits the sphere again. `rate` is the hop rate.
+#[derive(Clone, Debug)]
+pub struct SphereLanding {
+    pub source: String,
+    pub boundary: String,
+    pub rate: f64,
+    pub distance: f64,
+}
+
+/// Send every outward hop into one return layer.
+///
+/// An `"escaped"` edge is not a loss. Each landing in `landings` is a hop
+/// into the layer, and the layer comes back to that landing's boundary with
+/// probability [`sphere_hit_probability`] or else escapes to infinity. Hops
+/// from shells inside the cutoff are the same kind of hop: absorbing them
+/// makes the effective radius fall as the cutoff grows.
+pub fn embed_sphere_return(
+    sites: &[VolumeSite],
+    radius: f64,
+    landings: &[SphereLanding],
+) -> Result<Vec<VolumeSite>, SaddleError> {
+    if !(radius.is_finite() && radius > 0.0) {
+        return Err(SaddleError::Invalid(
+            "the sphere radius must be finite and positive".into(),
+        ));
+    }
+    if landings.is_empty() {
+        return Err(SaddleError::Invalid(
+            "sphere return needs at least one outward landing".into(),
+        ));
+    }
+    let mut out: Vec<VolumeSite> = sites
+        .iter()
+        .map(|site| {
+            let mut site = site.clone();
+            site.rates.retain(|(destination, _)| destination != "escaped");
+            site
+        })
+        .collect();
+    if out.iter().any(|site| site.id == FREE_CRYSTAL) {
+        return Err(SaddleError::Invalid(
+            "the shell list already has a return layer".into(),
+        ));
+    }
+    let mut back: std::collections::BTreeMap<String, f64> = std::collections::BTreeMap::new();
+    let mut leave = 0.0;
+    for landing in landings {
+        if !(landing.rate.is_finite() && landing.rate > 0.0) {
+            return Err(SaddleError::Invalid(
+                "an outward landing rate must be finite and positive".into(),
+            ));
+        }
+        if !out.iter().any(|site| site.id == landing.source) {
+            return Err(SaddleError::Invalid(format!(
+                "landing source {} is not in the shell list",
+                landing.source
+            )));
+        }
+        if !out.iter().any(|site| site.id == landing.boundary) {
+            return Err(SaddleError::Invalid(format!(
+                "landing boundary {} is not in the shell list",
+                landing.boundary
+            )));
+        }
+        let source = out
+            .iter_mut()
+            .find(|site| site.id == landing.source)
+            .expect("source was checked");
+        if source.outcome != SiteOutcome::Kinetic {
+            return Err(SaddleError::Invalid(format!(
+                "landing source {} is not a kinetic shell",
+                landing.source
+            )));
+        }
+        if let Some(edge) = source
+            .rates
+            .iter_mut()
+            .find(|(destination, _)| destination == FREE_CRYSTAL)
+        {
+            edge.1 += landing.rate;
+        } else {
+            source.rates.push((FREE_CRYSTAL.to_string(), landing.rate));
+        }
+        let hit = sphere_hit_probability(radius, landing.distance)?;
+        *back.entry(landing.boundary.clone()).or_insert(0.0) += landing.rate * hit;
+        leave += landing.rate * (1.0 - hit);
+    }
+    let mut rates: Vec<(String, f64)> = back.into_iter().filter(|(_, rate)| *rate > 0.0).collect();
+    if leave > 0.0 {
+        rates.push(("escaped".to_string(), leave));
+    }
+    if rates.is_empty() {
+        return Err(SaddleError::Invalid(
+            "the return layer has no outgoing rate".into(),
+        ));
+    }
+    out.push(VolumeSite {
+        id: FREE_CRYSTAL.to_string(),
+        count: 1.0,
+        outcome: SiteOutcome::Kinetic,
+        rates,
+    });
+    Ok(out)
 }
 
 /// Unit path tangent at `arc`, pointing from the reactant toward the product.

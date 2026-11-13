@@ -751,6 +751,71 @@ fn the_smoluchowski_radius_does_not_grow_when_the_return_layer_does() {
     assert!((per_atom - closed).abs() / closed < 1.0e-4, "{per_atom} {closed}");
 }
 
+#[test]
+fn pure_diffusion_onto_an_absorbing_sphere_returns_that_radius() {
+    let absorber = 4.0_f64;
+    for outer in [8.0_f64, 12.0, 16.0] {
+        let (sites, landings) = absorbing_sphere(absorber, outer);
+        let embedded = rgsaddle::embed_sphere_return(&sites, outer, &landings).expect("embed");
+        let volume = rgsaddle::kinetic_recombination_volume(&embedded, 1.0).expect("volume");
+        let boundary = probability(&volume, &format!("{outer:.0}"));
+        let radius = rgsaddle::effective_capture_radius(boundary, outer).expect("radius");
+        assert!(
+            (radius - absorber).abs() < 1.0e-8,
+            "outer {outer}: {radius} != {absorber}"
+        );
+        // The same outward hops, absorbed instead of returned, shrink the radius,
+        // and the shrinkage gets worse as the cutoff moves out.
+        let leaked = rgsaddle::kinetic_recombination_volume(&sites, 1.0).expect("leaked");
+        let leaked_radius =
+            rgsaddle::effective_capture_radius(probability(&leaked, &format!("{outer:.0}")), outer)
+                .expect("leaked radius");
+        assert!(
+            leaked_radius < absorber * 0.5,
+            "outer {outer}: leak {leaked_radius}"
+        );
+    }
+}
+
+fn absorbing_sphere(
+    absorber: f64,
+    outer: f64,
+) -> (Vec<rgsaddle::VolumeSite>, Vec<rgsaddle::SphereLanding>) {
+    let mut sites = vec![rgsaddle::VolumeSite {
+        id: format!("{absorber:.0}"),
+        count: 1.0,
+        outcome: rgsaddle::SiteOutcome::Spontaneous,
+        rates: Vec::new(),
+    }];
+    let mut landings = Vec::new();
+    let first = absorber as i32 + 1;
+    let last = outer as i32;
+    for n in first..=last {
+        let inward = (n - 1) as f64;
+        let outward = (n + 1) as f64;
+        let mut rates = vec![(format!("{}", n - 1), inward)];
+        if n == last {
+            // Leaving the sphere is an absorbing loss until the return layer is added.
+            rates.push(("escaped".into(), outward));
+            landings.push(rgsaddle::SphereLanding {
+                source: format!("{n}"),
+                boundary: format!("{n}"),
+                rate: outward,
+                distance: (n + 1) as f64,
+            });
+        } else {
+            rates.push((format!("{}", n + 1), outward));
+        }
+        sites.push(rgsaddle::VolumeSite {
+            id: format!("{n}"),
+            count: 1.0,
+            outcome: rgsaddle::SiteOutcome::Kinetic,
+            rates,
+        });
+    }
+    (sites, landings)
+}
+
 fn spontaneous_share(rows: &[(f64, bool)]) -> f64 {
     rows.iter()
         .map(|(count, spontaneous)| if *spontaneous { count / 3.0 } else { 0.0 })

@@ -119,9 +119,10 @@ pub use defect_pair::{
     VolumePlacement, VolumeSite, attempt_frequency, capture_is_spontaneous,
     capture_is_spontaneous_within, classify_separation, defect_pair_rates, descend_limited,
     dumbbell_diffusivity, dumbbell_translation_axis, effective_capture_radius,
-    embed_free_migration, kinetic_recombination_volume, mean_absorption_time, pair_separation,
-    product_tangent, shell_pair_factor, smoluchowski_rate, spherical_return_probability,
-    volume_from_frequency, FreeMigration,
+    embed_free_migration, embed_sphere_return, kinetic_recombination_volume,
+    mean_absorption_time, pair_separation, product_tangent, shell_pair_factor, smoluchowski_rate,
+    sphere_hit_probability, spherical_return_probability, volume_from_frequency, FreeMigration,
+    SphereLanding,
     FREE_CRYSTAL,
     seeded_saddles, segment_band,
 };
