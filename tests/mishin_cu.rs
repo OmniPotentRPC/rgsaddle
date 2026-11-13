@@ -6090,7 +6090,7 @@ fn neb_config(
         force_tol: tol,
         max_move: 0.06,
         time_step: 0.08,
-        method: Method::Fire { kind: FireKind::V2 },
+        method: Method::Lbfgs { memory: 10 },
         min_mode: None,
         autoneb: None,
         zoom: None,
@@ -6147,7 +6147,7 @@ fn drive_band(
     spring: SpringKind,
 ) -> Result<BandEnd, String> {
     let surface = EamBand { copper, fixed };
-    let climb_limit = env_usize("RGSADDLE_SSNEB_CLIMB", 180);
+    let climb_limit = env_usize("RGSADDLE_SSNEB_CLIMB", 500);
     let mut positions = start;
     let mut cells = start_cells;
     let mut steps = 0usize;
@@ -7184,30 +7184,159 @@ fn size_pair(copper: &FastCopper, job: &CrossJob) -> (BandStat, BandStat) {
     } else {
         job.product.clone()
     };
-    let tight = tighten_dimer(copper, job.cell, &job.saddle, &job.mode);
+    let tight = if job.kind == "shell" {
+        None
+    } else {
+        Some(tighten_dimer(copper, job.cell, &job.saddle, &job.mode))
+    };
     let spring = if job.energy_weighted {
         SpringKind::EnergyWeighted { k_min: 0.1, k_max: 5.0 }
     } else {
         SpringKind::Uniform { k: 1.0 }
     };
+    let saddle_guess = tight
+        .as_ref()
+        .map(|row| row.positions.clone())
+        .unwrap_or_else(|| blend_positions(&reactant, job.cell, &product, job.cell, job.cell, 0.5));
     let (fixed_positions, fixed_cells) =
-        band_images(&reactant, job.cell, &tight.positions, job.cell, &product, job.cell);
+        band_images(&reactant, job.cell, &saddle_guess, job.cell, &product, job.cell);
     let fixed = band_stat(copper, fixed_positions, fixed_cells, Some(job.cell), spring.clone());
     let (free_reactant, free_cell, free_product, free_product_cell) =
         match (relax_joint(copper, &reactant, job.cell), relax_joint(copper, &product, job.cell)) {
             (Ok(left), Ok(right)) => (left.0, left.1, right.0, right.1),
             _ => (reactant, job.cell, product, job.cell),
         };
+    let free_mid = blend_positions(
+        &free_reactant,
+        free_cell,
+        &free_product,
+        free_product_cell,
+        blend_cell(free_cell, free_product_cell, 0.5),
+        0.5,
+    );
     let (free_positions, free_cells) = band_images(
         &free_reactant,
         free_cell,
-        &tight.positions,
+        if job.kind == "shell" { &free_mid } else { &saddle_guess },
         job.cell,
         &free_product,
         free_product_cell,
     );
     let free = band_stat(copper, free_positions, free_cells, None, spring);
     (fixed, free)
+}
+
+fn quench_ends(
+    copper: &FastCopper,
+    saddle: &Array1<f64>,
+    mode: &Array1<f64>,
+    cell: [[f64; 3]; 3],
+) -> Option<(Array1<f64>, Array1<f64>)> {
+    let mut peak = 0.0_f64;
+    for atom in 0..saddle.len() / 3 {
+        let mut acc = 0.0;
+        for c in 0..3 {
+            acc += mode[3 * atom + c] * mode[3 * atom + c];
+        }
+        peak = peak.max(acc.sqrt());
+    }
+    if peak < 1.0e-8 {
+        return None;
+    }
+    let step = mode * (0.45 / peak);
+    let mut plus = saddle + &step;
+    let mut minus = saddle - &step;
+    relax_fast(copper, &mut plus, cell, 1.5e-3, 80);
+    relax_fast(copper, &mut minus, cell, 1.5e-3, 80);
+    Some((plus, minus))
+}
+
+struct QuenchedAway {
+    product: Array1<f64>,
+    saddle: Array1<f64>,
+    mode: Array1<f64>,
+    separation: f64,
+    reaction: f64,
+}
+
+fn away_shells(
+    copper: &FastCopper,
+    repeats: usize,
+    lattice: f64,
+    note: &str,
+    mechanisms: &[Mechanism],
+) -> Vec<CrossJob> {
+    let mut jobs = Vec::new();
+    for (r_over_a, orientation, shell) in [(1.00009_f64, "010", "3.639"), (1.2246, "100", "4.456")] {
+        let vector = shell_vector(lattice, repeats, r_over_a);
+        let (reactant, vacancy, dumbbell, cell, _, _, recombined) =
+            relax_pair_axis(copper, repeats, lattice, vector, axis_from_label(orientation), true);
+        if recombined {
+            eprintln!("shell {shell} {repeats} {lattice:.4} recombined");
+            continue;
+        }
+        let center = centroid(&reactant, dumbbell);
+        let hops = mapped_hops(&reactant, cell, center, axis_from_label(orientation), mechanisms);
+        let mobile = [dumbbell[0], dumbbell[1]];
+        let before = rgsaddle::pair_separation(reactant.view(), cell, vacancy, &mobile).unwrap_or(0.0);
+        let reactant_energy = copper.evaluate(reactant.view(), cell).0;
+        let mut found: Vec<QuenchedAway> = Vec::new();
+        for hop in hops {
+            let Some(saddle) = hop.saddle.clone() else { continue };
+            let Some(mode) = hop.mode.clone() else { continue };
+            let Some((plus, minus)) = quench_ends(copper, &saddle, &mode, cell) else { continue };
+            for (product, other) in [(&plus, &minus), (&minus, &plus)] {
+                let after = rgsaddle::pair_separation(product.view(), cell, vacancy, &mobile).unwrap_or(before);
+                let back = rgsaddle::pair_separation(other.view(), cell, vacancy, &mobile).unwrap_or(before);
+                let Ok(kind) = rgsaddle::classify_separation(before, after, 0.08) else { continue };
+                let back_home = (back - before).abs() < 0.30 || hausdorff(other, &reactant, cell) < 2.0;
+                if kind.as_str() != "away" || !back_home {
+                    continue;
+                }
+                if found.iter().any(|kept| (kept.separation - after).abs() < 0.15) {
+                    continue;
+                }
+                let reaction = copper.evaluate(product.view(), cell).0 - reactant_energy;
+                eprintln!(
+                    "away candidate {shell} {orientation} repeats {repeats} a {lattice:.4} sep {before:.3}->{after:.3} back {back:.3} reaction {reaction:.4}"
+                );
+                found.push(QuenchedAway {
+                    product: product.clone(),
+                    saddle,
+                    mode,
+                    separation: after,
+                    reaction,
+                });
+                break;
+            }
+        }
+        if found.is_empty() {
+            eprintln!("shell {shell} {repeats} {lattice:.4} no quench-matched away hop");
+            continue;
+        }
+        for item in found {
+            jobs.push(CrossJob {
+                kind: "shell",
+                shell: shell.into(),
+                orientation: orientation.into(),
+                direction: format!("away;sep={:.3};dE={:.4}", item.separation, item.reaction),
+                lattice,
+                lattice_note: format!(
+                    "{note};vac={:.5},{:.5},{:.5};db={},{}",
+                    vacancy[0], vacancy[1], vacancy[2], dumbbell[0], dumbbell[1]
+                ),
+                reactant: reactant.clone(),
+                product: item.product,
+                saddle: item.saddle,
+                mode: item.mode,
+                cell,
+                csv: Vec::new(),
+                relax_product: false,
+                energy_weighted: false,
+            });
+        }
+    }
+    jobs
 }
 
 fn shell_vector(a: f64, repeats: usize, r_over_a: f64) -> [f64; 3] {
@@ -7272,47 +7401,7 @@ fn size_jobs(copper: &FastCopper, repeats: usize, lattice: f64, temperature: f64
             push_isolated(&mut jobs, channel, lattice, &note);
         }
     }
-    for (r_over_a, orientation, direction) in [(1.00009_f64, "010", "away"), (1.2246, "100", "away")] {
-        let vector = shell_vector(lattice, repeats, r_over_a);
-        let (reactant, vacancy, dumbbell, cell, _, _, recombined) =
-            relax_pair_axis(copper, repeats, lattice, vector, axis_from_label(orientation), true);
-        let shell = if (r_over_a - 1.0).abs() < 0.05 { "3.639" } else { "4.456" };
-        if recombined {
-            continue;
-        }
-        let center = centroid(&reactant, dumbbell);
-        let hops = mapped_hops(&reactant, cell, center, axis_from_label(orientation), &mechanisms);
-        let mobile = [dumbbell[0], dumbbell[1]];
-        let before = rgsaddle::pair_separation(reactant.view(), cell, vacancy, &mobile).unwrap_or(0.0);
-        for hop in hops {
-            let after = rgsaddle::pair_separation(hop.product.view(), cell, vacancy, &mobile).unwrap_or(before);
-            let Ok(kind) = rgsaddle::classify_separation(before, after, 0.08) else {
-                continue;
-            };
-            if kind.as_str() != direction {
-                continue;
-            }
-            let Some(saddle) = hop.saddle.clone() else { continue };
-            let Some(mode) = hop.mode.clone() else { continue };
-            jobs.push(CrossJob {
-                kind: "shell",
-                shell: shell.into(),
-                orientation: orientation.into(),
-                direction: direction.into(),
-                lattice,
-                lattice_note: note.clone(),
-                reactant: reactant.clone(),
-                product: hop.product,
-                saddle,
-                mode,
-                cell,
-                csv: Vec::new(),
-                relax_product: true,
-                energy_weighted: false,
-            });
-            break;
-        }
-    }
+    jobs.extend(away_shells(copper, repeats, lattice, &note, &mechanisms));
     let vector = shell_vector(lattice, repeats, 1.4142);
     let (reactant, vacancy, dumbbell, cell, _, _, recombined) =
         relax_pair_axis(copper, repeats, lattice, vector, axis_from_label("001"), true);
@@ -7379,6 +7468,43 @@ fn size_jobs(copper: &FastCopper, repeats: usize, lattice: f64, temperature: f64
     jobs
 }
 
+fn split_away(direction: &str) -> (&str, String, String) {
+    let mut parts = direction.split(';');
+    let head = parts.next().unwrap_or(direction);
+    let mut separation = String::new();
+    let mut reaction = String::new();
+    for part in parts {
+        if let Some(value) = part.strip_prefix("sep=") {
+            separation = value.to_string();
+        }
+        if let Some(value) = part.strip_prefix("dE=") {
+            reaction = value.to_string();
+        }
+    }
+    (head, separation, reaction)
+}
+
+fn shell_bundle(copper: &FastCopper, repeats: usize, lattice: f64, temperature: f64) -> Vec<CrossJob> {
+    let note = format!("{temperature:.0} K NPT lattice");
+    let channels = isolate_channels(copper, repeats, lattice);
+    let mechanisms: Vec<Mechanism> = channels
+        .iter()
+        .map(|channel| {
+            capture_mechanism(
+                copper,
+                &channel.reactant,
+                channel.cell,
+                channel.dumbbell,
+                &channel.saddle,
+                &channel.product,
+                &channel.mode,
+                channel.barrier,
+            )
+        })
+        .collect();
+    away_shells(copper, repeats, lattice, &note, &mechanisms)
+}
+
 fn write_size_row(
     file: &Mutex<File>,
     repeats: usize,
@@ -7387,8 +7513,9 @@ fn write_size_row(
     mode: &str,
     stat: &BandStat,
 ) {
+    let (direction, separation, reaction) = split_away(&job.direction);
     let line = format!(
-        "{repeats},{},{temperature:.0},{kind},{shell},{orientation},{direction},{mode},{},{:.6},{:.6e},{},{},{}",
+        "{repeats},{},{temperature:.0},{kind},{shell},{orientation},{direction},{mode},{},{:.6},{:.6e},{},{},{},{separation},{reaction}",
         job.lattice,
         job.reactant.len() / 3,
         stat.barrier,
@@ -7399,7 +7526,6 @@ fn write_size_row(
         kind = job.kind,
         shell = job.shell,
         orientation = job.orientation,
-        direction = job.direction,
     );
     eprintln!("{line}");
     let mut handle = file.lock().unwrap_or_else(|poison| poison.into_inner());
@@ -7415,7 +7541,7 @@ fn ssneb_size_cu() {
     let mut file = File::create(&path).expect("size csv");
     writeln!(
         file,
-        "repeats,lattice_A,temperature_K,kind,shell,orientation,direction,cell,n_atoms,barrier_eV,max_force,force_calls,steps,converged"
+        "repeats,lattice_A,temperature_K,kind,shell,orientation,direction,cell,n_atoms,barrier_eV,max_force,force_calls,steps,converged,product_sep_A,reaction_eV"
     )
     .unwrap();
     let sink = Mutex::new(file);
@@ -7466,4 +7592,202 @@ fn ssneb_size_small_is_reproducible() {
     assert!((first.barrier - 0.05).abs() < 0.15, "barrier {}", first.barrier);
     assert_eq!(first.steps, second.steps);
     assert_eq!(first.calls, second.calls);
+}
+
+#[test]
+#[ignore = "quench-matched 3.639 and 4.456 shells at 8, 10 and 12; writes benchmarks/ssneb_shell_repair.csv"]
+fn ssneb_shell_repair() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks/ssneb_shell_repair.csv");
+    let mut file = File::create(&path).expect("shell repair csv");
+    writeln!(
+        file,
+        "repeats,lattice_A,temperature_K,kind,shell,orientation,direction,cell,n_atoms,barrier_eV,max_force,force_calls,steps,converged,product_sep_A,reaction_eV"
+    )
+    .unwrap();
+    let sink = Mutex::new(file);
+    let specs = [
+        (8usize, 3.628311_f64, 300.0_f64),
+        (8, 3.638666, 500.0),
+        (10, 3.628311, 300.0),
+        (10, 3.638666, 500.0),
+        (12, 3.628311, 300.0),
+        (12, 3.638666, 500.0),
+    ];
+    let work: Vec<_> = specs
+        .par_iter()
+        .map(|(repeats, lattice, temperature)| {
+            eprintln!("shells {repeats} at {lattice}");
+            let copper = FastCopper::new();
+            (*repeats, *temperature, shell_bundle(&copper, *repeats, *lattice, *temperature))
+        })
+        .collect();
+    let rows: Vec<_> = work
+        .par_iter()
+        .flat_map(|(repeats, temperature, jobs)| {
+            jobs.par_iter()
+                .map(|job| {
+                    let local = FastCopper::new();
+                    let (fixed, free) = size_pair(&local, job);
+                    (*repeats, *temperature, job, fixed, free)
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let mut missed = Vec::new();
+    for (repeats, temperature, job, fixed, free) in &rows {
+        write_size_row(&sink, *repeats, *temperature, job, "fixed", fixed);
+        write_size_row(&sink, *repeats, *temperature, job, "free", free);
+        if !fixed.converged {
+            missed.push(format!("{repeats} {temperature} {} fixed force {}", job.shell, fixed.force));
+        }
+        if !free.converged {
+            missed.push(format!("{repeats} {temperature} {} free force {}", job.shell, free.force));
+        }
+    }
+    assert!(missed.is_empty(), "force tolerance missed: {missed:?}");
+}
+
+fn note_frame(note: &str) -> Option<([f64; 3], [usize; 2])> {
+    let mut vacancy = None;
+    let mut dumbbell = None;
+    for part in note.split(';') {
+        if let Some(text) = part.strip_prefix("vac=") {
+            let mut values = text.split(',');
+            let x = values.next()?.parse().ok()?;
+            let y = values.next()?.parse().ok()?;
+            let z = values.next()?.parse().ok()?;
+            vacancy = Some([x, y, z]);
+        }
+        if let Some(text) = part.strip_prefix("db=") {
+            let mut values = text.split(',');
+            let a = values.next()?.parse().ok()?;
+            let b = values.next()?.parse().ok()?;
+            dumbbell = Some([a, b]);
+        }
+    }
+    Some((vacancy?, dumbbell?))
+}
+
+fn mic_delta(a: [f64; 3], b: [f64; 3], cell: [[f64; 3]; 3]) -> [f64; 3] {
+    let mut out = [0.0; 3];
+    for c in 0..3 {
+        let length = cell[c][c];
+        let mut delta = a[c] - b[c];
+        delta -= length * (delta / length).round();
+        out[c] = delta;
+    }
+    out
+}
+
+fn transplant_product(
+    donor: &CrossJob,
+    acceptor: &Array1<f64>,
+    acceptor_center: [f64; 3],
+    acceptor_cell: [[f64; 3]; 3],
+) -> Option<Array1<f64>> {
+    let (_, dumbbell) = note_frame(&donor.lattice_note)?;
+    let donor_center = centroid(&donor.reactant, dumbbell);
+    let mut image = acceptor.clone();
+    let n_donor = donor.reactant.len() / 3;
+    let n = acceptor.len() / 3;
+    for atom in 0..n {
+        let offset = mic_delta(point_of(acceptor, atom), acceptor_center, acceptor_cell);
+        let radius = (offset[0] * offset[0] + offset[1] * offset[1] + offset[2] * offset[2]).sqrt();
+        if radius > 6.5 {
+            continue;
+        }
+        let mut best = None;
+        let mut best_d = 0.45_f64;
+        for other in 0..n_donor {
+            let there = mic_delta(point_of(&donor.reactant, other), donor_center, donor.cell);
+            let mut acc = 0.0;
+            for c in 0..3 {
+                let d = offset[c] - there[c];
+                acc += d * d;
+            }
+            let distance = acc.sqrt();
+            if distance < best_d {
+                best_d = distance;
+                best = Some(other);
+            }
+        }
+        let Some(other) = best else { continue };
+        let delta = mic_delta(point_of(&donor.product, other), point_of(&donor.reactant, other), donor.cell);
+        for c in 0..3 {
+            image[3 * atom + c] += delta[c];
+        }
+    }
+    Some(image)
+}
+
+#[test]
+#[ignore = "transplant the 12^3 500 K 4.456 ends onto 8^3 and 10^3"]
+fn ssneb_4456_fill() {
+    let lattice = 3.638666_f64;
+    let copper = FastCopper::new();
+    eprintln!("donor 12 at {lattice}");
+    let donor = shell_bundle(&copper, 12, lattice, 500.0);
+    let donors: Vec<_> = donor.into_iter().filter(|job| job.shell == "4.456").collect();
+    assert!(!donors.is_empty(), "12^3 500 K produced no 4.456 end");
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks/ssneb_4456_fill.csv");
+    let mut file = File::create(&path).expect("fill csv");
+    writeln!(
+        file,
+        "repeats,lattice_A,temperature_K,kind,shell,orientation,direction,cell,n_atoms,barrier_eV,max_force,force_calls,steps,converged,product_sep_A,reaction_eV"
+    )
+    .unwrap();
+    let sink = Mutex::new(file);
+    let mut jobs = Vec::new();
+    for repeats in [8usize, 10] {
+        let vector = shell_vector(lattice, repeats, 1.2246);
+        let (reactant, vacancy, dumbbell, cell, _, _, recombined) =
+            relax_pair_axis(&copper, repeats, lattice, vector, axis_from_label("100"), true);
+        assert!(!recombined, "{repeats} 4.456 recombined");
+        let center = centroid(&reactant, dumbbell);
+        let mobile = [dumbbell[0], dumbbell[1]];
+        let before = rgsaddle::pair_separation(reactant.view(), cell, vacancy, &mobile).unwrap_or(0.0);
+        for donor_job in &donors {
+            let Some(mut product) = transplant_product(donor_job, &reactant, center, cell) else { continue };
+            relax_fast(&copper, &mut product, cell, 1.0e-3, 80);
+            let after = rgsaddle::pair_separation(product.view(), cell, vacancy, &mobile).unwrap_or(0.0);
+            let (_, sep_text, _) = split_away(&donor_job.direction);
+            let wanted: f64 = sep_text.parse().unwrap_or(0.0);
+            eprintln!("transplant {repeats} donor sep {wanted:.3} got {before:.3}->{after:.3}");
+            if (after - wanted).abs() > 0.08 {
+                continue;
+            }
+            let reaction = copper.evaluate(product.view(), cell).0 - copper.evaluate(reactant.view(), cell).0;
+            jobs.push((
+                repeats,
+                CrossJob {
+                    kind: "shell",
+                    shell: "4.456".into(),
+                    orientation: "100".into(),
+                    direction: format!("away;sep={after:.3};dE={reaction:.4}"),
+                    lattice,
+                    lattice_note: format!("500 K NPT lattice; transplanted from 12^3"),
+                    reactant: reactant.clone(),
+                    product,
+                    saddle: reactant.clone(),
+                    mode: Array1::zeros(reactant.len()),
+                    cell,
+                    csv: Vec::new(),
+                    relax_product: false,
+                    energy_weighted: false,
+                },
+            ));
+        }
+    }
+    assert!(
+        jobs.iter().any(|(repeats, _)| *repeats == 10),
+        "10^3 500 K 4.456 transplant did not match an end"
+    );
+    for (repeats, job) in &jobs {
+        let local = FastCopper::new();
+        let (fixed, free) = size_pair(&local, job);
+        write_size_row(&sink, *repeats, 500.0, job, "fixed", &fixed);
+        write_size_row(&sink, *repeats, 500.0, job, "free", &free);
+        assert!(fixed.converged, "fixed force {}", fixed.force);
+        assert!(free.converged, "free force {}", free.force);
+    }
 }

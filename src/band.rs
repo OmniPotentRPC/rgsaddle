@@ -227,7 +227,10 @@ pub struct BandConfig {
     /// the pseudo-energy. It also arms rgmin's NEB guards: a two-loop
     /// step that reaches the per-atom cap or faces away from the force
     /// drops its pairs and steps along the force, and an empty memory
-    /// scales that step by 0.01.
+    /// scales that step by 0.01. On a solid-state band the memory is
+    /// raised to at least 20: with the 2012 Jacobian a memory of 10
+    /// loses the cell mode under that scale and the path leaves the
+    /// saddle.
     pub method: Method,
     /// Joint atomic and cell block. `None` is the atomic band.
     pub solid: Option<SolidState>,
@@ -1587,7 +1590,7 @@ pub struct BandSession {
 }
 
 impl BandSession {
-    pub fn new(config: BandConfig, initial: Array2<f64>) -> Result<Self, SaddleError> {
+    pub fn new(mut config: BandConfig, initial: Array2<f64>) -> Result<Self, SaddleError> {
         let n_images = initial.nrows();
         let dof = initial.ncols();
         if n_images < 3 || dof == 0 || !dof.is_multiple_of(3) {
@@ -1627,6 +1630,12 @@ impl BandSession {
         }
         if !initial.iter().all(|v| v.is_finite()) {
             return Err(SaddleError::NonFinite("band positions"));
+        }
+        if config.solid.is_some()
+            && let Method::Lbfgs { memory } = &mut config.method
+            && *memory < 20
+        {
+            *memory = 20;
         }
         let method = if config.quickmin {
             Method::QuickMin
@@ -2455,6 +2464,39 @@ mod tests {
     use super::*;
     use approx::assert_abs_diff_eq;
     use ndarray::array;
+
+    #[test]
+    fn solid_band_raises_a_short_lbfgs_memory_to_twenty() {
+        let cell = Cell([[4.0, 0.0, 0.0], [0.0, 4.0, 0.0], [0.0, 0.0, 4.0]]);
+        let config = BandConfig {
+            method: Method::Lbfgs { memory: 8 },
+            solid: Some(SolidState::new(vec![cell; 5])),
+            min_mode: None,
+            climbing: None,
+            ..BandConfig::default()
+        };
+        let session = BandSession::new(config, Array2::zeros((5, 6))).expect("solid band");
+        match session.config.method {
+            Method::Lbfgs { memory } => assert_eq!(memory, 20),
+            other => panic!("expected L-BFGS, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn frozen_band_keeps_a_short_lbfgs_memory() {
+        let config = BandConfig {
+            method: Method::Lbfgs { memory: 8 },
+            solid: None,
+            min_mode: None,
+            climbing: None,
+            ..BandConfig::default()
+        };
+        let session = BandSession::new(config, Array2::zeros((5, 6))).expect("atomic band");
+        match session.config.method {
+            Method::Lbfgs { memory } => assert_eq!(memory, 8),
+            other => panic!("expected L-BFGS, got {other:?}"),
+        }
+    }
 
     #[test]
     fn orthorhombic_cell_wraps_each_axis() {
