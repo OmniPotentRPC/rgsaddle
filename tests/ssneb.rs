@@ -114,6 +114,17 @@ fn frozen_cell_matches_the_ordinary_band_and_its_climbing_image() {
     let pos = ordinary.positions();
     assert!(pos[(ci, 0)].abs() < 1e-5, "saddle x {}", pos[(ci, 0)]);
     assert!(pos[(ci, 1)].abs() < 1e-5, "saddle y {}", pos[(ci, 1)]);
+    let (energy_ordinary, _) = PointSurface::eval(&DoubleWell, ordinary.positions().row(ci)).unwrap();
+    let frozen_row = frozen.cartesian().unwrap();
+    let (energy_frozen, _) = PointSurface::eval(&DoubleWell, frozen_row.row(ci)).unwrap();
+    assert!(
+        (energy_ordinary - energy_frozen).abs() < 1e-8,
+        "fixed-cell SS-NEB energy {energy_frozen} vs CI-NEB {energy_ordinary}"
+    );
+    assert!(
+        (energy_ordinary - 1.0).abs() < 1e-8,
+        "analytic saddle energy {energy_ordinary}"
+    );
     // The point-surface entry is the same band.
     let mut via_point = SolidNeb::frozen(ci_config(), bowed(9)).unwrap();
     let mut via_surface = BandSession::new(ci_config(), bowed(9)).unwrap();
@@ -290,6 +301,16 @@ fn variable_cell_double_well_barrier_is_one() {
     );
     assert!((barrier - 1.0).abs() < 1e-3, "barrier {barrier}");
     assert!((enthalpy - energy).abs() < 1e-12, "no external stress");
+    let saddle_r = images[ci].positions.as_slice().unwrap();
+    let saddle_h = images[ci].cell;
+    let fractional = mul_row([saddle_r[0], saddle_r[1], saddle_r[2]], invert(saddle_h));
+    let u = fractional[0] / 0.25;
+    let gamma = saddle_h[1][0] / L;
+    assert!(u.abs() < 2.0e-2, "analytic saddle has u = 0, found {u}");
+    assert!(
+        gamma.abs() < 2.0e-2,
+        "analytic saddle has gamma = 0, found {gamma}"
+    );
 }
 
 /// A narrow repulsive wall on top of the double well. The wall stands in

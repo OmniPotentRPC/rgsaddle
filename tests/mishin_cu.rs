@@ -17,14 +17,15 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use ndarray::{Array1, Array2, ArrayView1};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use rayon::prelude::*;
 use rgmin::{Control, FireKind, Method, Oracle, Solver};
 use rgsaddle::{
-    BOLTZMANN_EV_PER_K, CellMask, DefectSource, ElasticDipole, ElasticMultipole, FieldSolver,
-    FmmSolver, IndexCheck, Kelvin, LINEAR_FOLD_EV, MinModeConfig, MinModeStatus, PointSurface,
-    SaddleError, SaddleSeed, SolidDimer, SolidDimerConfig, Strain, StrainResponse, Trust,
-    TrustPolicy, cubic_rotations, index_at,
+    BOLTZMANN_EV_PER_K, BandConfig, BandSession, BandStatus, BandSurface, Cell, CellMask, CiConfig,
+    DefectSource, ElasticDipole, ElasticMultipole, FieldSolver, FmmSolver, IndexCheck, JointChart,
+    Kelvin, LINEAR_FOLD_EV, MinModeConfig, MinModeStatus, PointSurface, SaddleError, SaddleSeed,
+    SolidDimer, SolidDimerConfig, SolidState, SpringKind, Strain, StrainResponse, Trust,
+    TrustPolicy, cubic_rotations, index_at, joint_coordinate,
 };
 
 const RC: f64 = 5.50679;
@@ -5852,4 +5853,1283 @@ fn defect_pair_local_capture() {
         }
     }
     eprintln!("local capture {:.1} min", started.elapsed().as_secs_f64() / 60.0);
+}
+
+/// Sheppard, Xiao, Chemelewski, Johnson, and Henkelman, J. Chem. Phys.
+/// 136, 074103 (2012), eqs. (12)–(20): the band coordinate between images
+/// is {J ε̄, ΔR} with J = V̄^{1/3} N^{1/6} fixed from the mean endpoint
+/// volume, ε̄ the symmetrized right strain, and ΔR the minimum-image
+/// displacement in the average cell. The cell force is −(V/J)(σ + P I).
+/// `BandConfig::solid` is that band. P = 0 leaves the enthalpy as the
+/// energy. A frozen cell is the ordinary CI-NEB (`solid` unset).
+struct CrossJob {
+    kind: &'static str,
+    shell: String,
+    orientation: String,
+    direction: String,
+    lattice: f64,
+    lattice_note: String,
+    reactant: Array1<f64>,
+    product: Array1<f64>,
+    saddle: Array1<f64>,
+    mode: Array1<f64>,
+    cell: [[f64; 3]; 3],
+    csv: Vec<f64>,
+    relax_product: bool,
+    energy_weighted: bool,
+}
+
+struct EamBand<'a> {
+    copper: &'a FastCopper,
+    fixed: Option<[[f64; 3]; 3]>,
+}
+
+impl BandSurface for EamBand<'_> {
+    fn eval(
+        &self,
+        positions: ArrayView2<f64>,
+        energies: &mut Array1<f64>,
+        gradients: &mut Array2<f64>,
+    ) -> Result<(), SaddleError> {
+        let cell = self.fixed.ok_or_else(|| {
+            SaddleError::Invalid("fixed-cell band has no cell".into())
+        })?;
+        let rows: Vec<Array1<f64>> = positions.outer_iter().map(|row| row.to_owned()).collect();
+        let evals: Vec<_> = rows
+            .par_iter()
+            .map(|row| self.copper.evaluate(row.view(), cell))
+            .collect();
+        for (i, (energy, gradient, _)) in evals.into_iter().enumerate() {
+            energies[i] = energy;
+            gradients.row_mut(i).assign(&gradient);
+        }
+        Ok(())
+    }
+
+    fn eval_cells(
+        &self,
+        positions: ArrayView2<f64>,
+        cells: &[Cell],
+        energies: &mut Array1<f64>,
+        gradients: &mut Array2<f64>,
+        stresses: &mut Array2<f64>,
+    ) -> Result<(), SaddleError> {
+        let rows: Vec<Array1<f64>> = positions.outer_iter().map(|row| row.to_owned()).collect();
+        let held: Vec<[[f64; 3]; 3]> = cells.iter().map(|cell| cell.0).collect();
+        let evals: Vec<_> = rows
+            .par_iter()
+            .zip(held.par_iter())
+            .map(|(row, cell)| self.copper.evaluate(row.view(), *cell))
+            .collect();
+        for (i, (energy, gradient, stress)) in evals.into_iter().enumerate() {
+            energies[i] = energy;
+            gradients.row_mut(i).assign(&gradient);
+            for a in 0..3 {
+                for b in 0..3 {
+                    stresses[(i, 3 * a + b)] = stress[a][b];
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn cross_num(value: f64, digits: usize) -> String {
+    if value.is_finite() {
+        format!("{:.*}", digits, value)
+    } else {
+        String::new()
+    }
+}
+
+fn csv_quote(text: &str) -> String {
+    if text.contains(',') || text.contains('"') {
+        format!("\"{}\"", text.replace('"', "'"))
+    } else {
+        text.to_string()
+    }
+}
+
+fn det3(m: [[f64; 3]; 3]) -> f64 {
+    m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+        - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+        + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+}
+
+fn inv3(m: [[f64; 3]; 3]) -> Option<[[f64; 3]; 3]> {
+    let d = det3(m);
+    if d.abs() < 1e-18 {
+        return None;
+    }
+    let mut c = [[0.0; 3]; 3];
+    c[0][0] = (m[1][1] * m[2][2] - m[1][2] * m[2][1]) / d;
+    c[0][1] = (m[0][2] * m[2][1] - m[0][1] * m[2][2]) / d;
+    c[0][2] = (m[0][1] * m[1][2] - m[0][2] * m[1][1]) / d;
+    c[1][0] = (m[1][2] * m[2][0] - m[1][0] * m[2][2]) / d;
+    c[1][1] = (m[0][0] * m[2][2] - m[0][2] * m[2][0]) / d;
+    c[1][2] = (m[0][2] * m[1][0] - m[0][0] * m[1][2]) / d;
+    c[2][0] = (m[1][0] * m[2][1] - m[1][1] * m[2][0]) / d;
+    c[2][1] = (m[0][1] * m[2][0] - m[0][0] * m[2][1]) / d;
+    c[2][2] = (m[0][0] * m[1][1] - m[0][1] * m[1][0]) / d;
+    Some(c)
+}
+
+fn frac_of(point: [f64; 3], inv: [[f64; 3]; 3]) -> [f64; 3] {
+    let mut s = [0.0; 3];
+    for c in 0..3 {
+        s[c] = point[0] * inv[0][c] + point[1] * inv[1][c] + point[2] * inv[2][c];
+    }
+    s
+}
+
+fn cart_from_frac(frac: [f64; 3], cell: [[f64; 3]; 3]) -> [f64; 3] {
+    let mut r = [0.0; 3];
+    for c in 0..3 {
+        r[c] = frac[0] * cell[0][c] + frac[1] * cell[1][c] + frac[2] * cell[2][c];
+    }
+    r
+}
+
+fn blend_cell(left: [[f64; 3]; 3], right: [[f64; 3]; 3], t: f64) -> [[f64; 3]; 3] {
+    let mut cell = [[0.0; 3]; 3];
+    for i in 0..3 {
+        for j in 0..3 {
+            cell[i][j] = (1.0 - t) * left[i][j] + t * right[i][j];
+        }
+    }
+    cell
+}
+
+fn blend_positions(
+    left: &Array1<f64>,
+    left_cell: [[f64; 3]; 3],
+    right: &Array1<f64>,
+    right_cell: [[f64; 3]; 3],
+    cell: [[f64; 3]; 3],
+    t: f64,
+) -> Array1<f64> {
+    let inv_left = inv3(left_cell).unwrap_or([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]);
+    let inv_right = inv3(right_cell).unwrap_or(inv_left);
+    let n = left.len() / 3;
+    let mut out = Array1::zeros(left.len());
+    for atom in 0..n {
+        let s = frac_of(point_of(left, atom), inv_left);
+        let u = frac_of(point_of(right, atom), inv_right);
+        let mut frac = [0.0; 3];
+        for c in 0..3 {
+            let mut delta = u[c] - s[c];
+            delta -= delta.round();
+            frac[c] = s[c] + t * delta;
+        }
+        let r = cart_from_frac(frac, cell);
+        for c in 0..3 {
+            out[3 * atom + c] = r[c];
+        }
+    }
+    out
+}
+
+fn into_cell(positions: &Array1<f64>, from: [[f64; 3]; 3], into: [[f64; 3]; 3]) -> Array1<f64> {
+    blend_positions(positions, from, positions, from, into, 0.0)
+}
+
+fn geometry_gap(reference: &Array1<f64>, other: &Array1<f64>, cell: [[f64; 3]; 3]) -> (f64, f64) {
+    let n = reference.len() / 3;
+    let mut mean = [0.0; 3];
+    let mut delta = vec![[0.0; 3]; n];
+    for atom in 0..n {
+        for c in 0..3 {
+            let length = cell[c][c].abs().max(1.0);
+            let mut d = other[3 * atom + c] - reference[3 * atom + c];
+            d -= length * (d / length).round();
+            delta[atom][c] = d;
+            mean[c] += d;
+        }
+    }
+    for c in 0..3 {
+        mean[c] /= n.max(1) as f64;
+    }
+    let mut acc = 0.0_f64;
+    let mut max = 0.0_f64;
+    for atom in 0..n {
+        let mut norm = 0.0;
+        for c in 0..3 {
+            let d = delta[atom][c] - mean[c];
+            norm += d * d;
+        }
+        acc += norm;
+        max = max.max(norm.sqrt());
+    }
+    (((acc / n.max(1) as f64).sqrt()), max)
+}
+
+fn cell_rms(left: [[f64; 3]; 3], right: [[f64; 3]; 3]) -> f64 {
+    let mut acc = 0.0;
+    for i in 0..3 {
+        for j in 0..3 {
+            let d = left[i][j] - right[i][j];
+            acc += d * d;
+        }
+    }
+    (acc / 9.0).sqrt()
+}
+
+fn cube_a(cell: [[f64; 3]; 3]) -> f64 {
+    det3(cell).abs().cbrt() / 8.0
+}
+
+fn neb_config(
+    spring: SpringKind,
+    climbing: Option<CiConfig>,
+    tol: f64,
+    solid: Option<SolidState>,
+) -> BandConfig {
+    BandConfig {
+        spring,
+        climbing,
+        force_tol: tol,
+        max_move: 0.06,
+        time_step: 0.08,
+        method: Method::Fire { kind: FireKind::V2 },
+        min_mode: None,
+        autoneb: None,
+        zoom: None,
+        quickmin: false,
+        remove_translation: true,
+        solid,
+        ..BandConfig::default()
+    }
+}
+
+fn band_images(
+    reactant: &Array1<f64>,
+    reactant_cell: [[f64; 3]; 3],
+    saddle: &Array1<f64>,
+    saddle_cell: [[f64; 3]; 3],
+    product: &Array1<f64>,
+    product_cell: [[f64; 3]; 3],
+) -> (Array2<f64>, Vec<Cell>) {
+    let n = 7usize;
+    let mid = 3usize;
+    let mut positions = Array2::zeros((n, reactant.len()));
+    let mut cells = Vec::with_capacity(n);
+    for i in 0..n {
+        let (row, cell) = if i <= mid {
+            let t = i as f64 / mid as f64;
+            let cell = blend_cell(reactant_cell, saddle_cell, t);
+            let row = blend_positions(reactant, reactant_cell, saddle, saddle_cell, cell, t);
+            (row, cell)
+        } else {
+            let t = (i - mid) as f64 / (n - 1 - mid) as f64;
+            let cell = blend_cell(saddle_cell, product_cell, t);
+            let row = blend_positions(saddle, saddle_cell, product, product_cell, cell, t);
+            (row, cell)
+        };
+        positions.row_mut(i).assign(&row);
+        cells.push(Cell(cell));
+    }
+    (positions, cells)
+}
+
+struct BandEnd {
+    positions: Array2<f64>,
+    cells: Vec<[[f64; 3]; 3]>,
+    force: f64,
+    steps: usize,
+    converged: bool,
+}
+
+fn drive_band(
+    copper: &FastCopper,
+    start: Array2<f64>,
+    start_cells: Vec<Cell>,
+    fixed: Option<[[f64; 3]; 3]>,
+    spring: SpringKind,
+) -> Result<BandEnd, String> {
+    let surface = EamBand { copper, fixed };
+    let climb_limit = env_usize("RGSADDLE_SSNEB_CLIMB", 180);
+    let mut positions = start;
+    let mut cells = start_cells;
+    let mut steps = 0usize;
+    let mut best_force = f64::MAX;
+    let mut best_positions = positions.clone();
+    let mut best_cells: Vec<[[f64; 3]; 3]> = cells.iter().map(|cell| cell.0).collect();
+    for (phase, (climbing, tol, limit)) in [
+        (0u8, (None, 0.2_f64, 40usize)),
+        (1, (Some(CiConfig::after(0.1)), 1.5e-3, climb_limit)),
+    ] {
+        let solid = if fixed.is_none() {
+            Some(SolidState::new(cells.clone()).with_pressure(0.0))
+        } else {
+            None
+        };
+        let mut session = BandSession::new(neb_config(spring.clone(), climbing, tol, solid), positions.clone())
+            .map_err(|error| error.to_string())?;
+        for _ in 0..limit {
+            let report = session.step(&surface).map_err(|error| error.to_string())?;
+            steps += 1;
+            let improved = phase == 1 && report.max_force < best_force;
+            if improved || phase == 0 {
+                positions = session.positions().to_owned();
+                let fallback = fixed.unwrap_or_else(|| cells.first().map(|cell| cell.0).unwrap_or([[0.0; 3]; 3]));
+                let n_images = positions.nrows();
+                cells = session
+                    .image_cells()
+                    .map(|image| image.to_vec())
+                    .unwrap_or_else(|| vec![Cell(fallback); n_images]);
+            }
+            if improved {
+                best_force = report.max_force;
+                best_positions = positions.clone();
+                best_cells = cells.iter().map(|cell| cell.0).collect();
+            }
+            if report.status != BandStatus::Running || report.max_force < tol {
+                if phase == 1 && report.max_force < best_force {
+                    best_force = report.max_force;
+                    best_positions = session.positions().to_owned();
+                    best_cells = session
+                        .image_cells()
+                        .map(|image| image.iter().map(|cell| cell.0).collect())
+                        .unwrap_or_else(|| best_cells.clone());
+                }
+                break;
+            }
+        }
+    }
+    if !best_force.is_finite() {
+        return Err("band force was not finite".into());
+    }
+    Ok(BandEnd {
+        positions: best_positions,
+        cells: best_cells,
+        force: best_force,
+        steps,
+        converged: best_force < 1.5e-3,
+    })
+}
+
+fn energies_of(copper: &FastCopper, positions: &Array2<f64>, cells: &[[[f64; 3]; 3]]) -> Array1<f64> {
+    let mut energies = Array1::zeros(positions.nrows());
+    for (i, cell) in cells.iter().enumerate() {
+        energies[i] = copper.evaluate(positions.row(i), *cell).0;
+    }
+    energies
+}
+
+fn highest_interior(energies: &Array1<f64>) -> usize {
+    let mut best = 1usize;
+    for i in 2..energies.len().saturating_sub(1) {
+        if energies[i] > energies[best] {
+            best = i;
+        }
+    }
+    best
+}
+
+fn unit_mode(mode: &Array1<f64>, n: usize) -> Array1<f64> {
+    let mut out = if mode.len() == n {
+        mode.clone()
+    } else {
+        Array1::zeros(n)
+    };
+    let norm = out.dot(&out).sqrt();
+    if norm < 1e-8 {
+        out = Array1::zeros(n);
+        out[0] = 1.0;
+    } else {
+        out /= norm;
+    }
+    out
+}
+
+struct TightSaddle {
+    positions: Array1<f64>,
+    mode: Array1<f64>,
+    energy: f64,
+    force: f64,
+    index: i64,
+    eigenvalue: f64,
+    converged: bool,
+    note: String,
+}
+
+fn tighten_dimer(
+    copper: &FastCopper,
+    cell: [[f64; 3]; 3],
+    guess: &Array1<f64>,
+    mode: &Array1<f64>,
+) -> TightSaddle {
+    let search = MinModeConfig {
+        force_tol: 2.0e-3,
+        max_move: 0.08,
+        dr: 1.0e-3,
+        max_rotations: 8,
+        ..MinModeConfig::default()
+    };
+    let config = SolidDimerConfig::frozen(search)
+        .with_index_check(IndexCheck::first_order().with_step(1.0e-3).with_escapes(1));
+    let mode = unit_mode(mode, guess.len());
+    let held = FastHeld { copper, cell };
+    let built = SolidDimer::new(config, guess.clone(), cell, mode);
+    let Ok(mut dimer) = built else {
+        let (energy, _) = held.eval(guess.view()).unwrap_or((f64::NAN, Array1::zeros(1)));
+        return TightSaddle {
+            positions: guess.clone(),
+            mode: unit_mode(&Array1::zeros(0), guess.len()),
+            energy,
+            force: f64::NAN,
+            index: -1,
+            eigenvalue: f64::NAN,
+            converged: false,
+            note: "dimer setup failed".into(),
+        };
+    };
+    let report = dimer.run(&held, env_usize("RGSADDLE_SSNEB_DIMER", 100));
+    let positions = dimer.positions().to_owned();
+    let mode = dimer.mode().to_owned();
+    let (energy, gradient) = held.eval(positions.view()).unwrap_or((f64::NAN, Array1::zeros(1)));
+    match report {
+        Ok(report) => {
+            let index = report.negative_modes.map(|count| count as i64).unwrap_or(-1);
+            let eigenvalue = report.eigenvalues.first().copied().unwrap_or(report.curvature);
+            let converged = report.status == MinModeStatus::Converged && !report.rejected && index == 1;
+            let note = if converged {
+                String::new()
+            } else {
+                format!("dimer {:?} rejected {} index {index}", report.status, report.rejected)
+            };
+            TightSaddle {
+                positions,
+                mode,
+                energy,
+                force: report.max_force.min(max_abs(&gradient)),
+                index,
+                eigenvalue,
+                converged,
+                note,
+            }
+        }
+        Err(error) => TightSaddle {
+            positions,
+            mode,
+            energy,
+            force: max_abs(&gradient),
+            index: -1,
+            eigenvalue: f64::NAN,
+            converged: false,
+            note: format!("dimer {error}"),
+        },
+    }
+}
+
+fn projected_index(
+    copper: &FastCopper,
+    positions: &Array1<f64>,
+    cell: [[f64; 3]; 3],
+    variable: bool,
+) -> (i64, f64) {
+    let search = MinModeConfig {
+        force_tol: 1.0e-2,
+        max_move: 0.1,
+        dr: 1.0e-3,
+        max_rotations: 4,
+        ..MinModeConfig::default()
+    };
+    let check = IndexCheck::first_order().with_step(1.0e-3).with_escapes(0);
+    let config = if variable {
+        SolidDimerConfig::new(search).with_index_check(check)
+    } else {
+        SolidDimerConfig::frozen(search).with_index_check(check)
+    };
+    let mode = unit_mode(&Array1::zeros(0), positions.len());
+    let held = FastHeld { copper, cell };
+    let Ok(dimer) = SolidDimer::new(config, positions.clone(), cell, mode) else {
+        return (-1, f64::NAN);
+    };
+    match dimer.index(&held) {
+        Ok(report) => (report.negative as i64, report.values.first().copied().unwrap_or(f64::NAN)),
+        Err(_) => (-1, f64::NAN),
+    }
+}
+
+fn joint_value(chart: &JointChart, copper: &FastCopper, q: ArrayView1<f64>) -> (f64, Array1<f64>) {
+    let Ok((positions, cell)) = chart.geometry(q) else {
+        return (1.0e6, Array1::zeros(q.len()));
+    };
+    let (energy, gradient, stress) = copper.evaluate(positions.view(), cell);
+    match chart.gradient(q, gradient.view(), stress) {
+        Ok(joint) => (chart.enthalpy(energy, q).unwrap_or(energy), joint),
+        Err(_) => (1.0e6, Array1::zeros(q.len())),
+    }
+}
+
+fn relax_joint(
+    copper: &FastCopper,
+    positions: &Array1<f64>,
+    cell: [[f64; 3]; 3],
+) -> Result<(Array1<f64>, [[f64; 3]; 3], f64, f64), String> {
+    let n = positions.len() / 3;
+    let chart = JointChart::new(cell, n, CellMask::all(), [[0.0; 3]; 3], 1.0)
+        .map_err(|error| error.to_string())?;
+    let mut q = joint_coordinate(&chart, CellMask::all(), positions.view(), cell)
+        .map_err(|error| error.to_string())?;
+    let mut solver = Solver::new(
+        Method::Fire { kind: FireKind::V2 },
+        Control {
+            maxiter: usize::MAX,
+            gtol: 0.0,
+            istep: 0.08,
+            ..Control::default()
+        },
+        q.len(),
+    );
+    solver.set_atom_maxmove(0.08);
+    let mut force = f64::MAX;
+    for _ in 0..80 {
+        let oracle = Oracle::unbounded(q.len(), |x: ArrayView1<f64>| joint_value(&chart, copper, x));
+        solver.step(&oracle, &mut q).map_err(|error| error.to_string())?;
+        force = max_abs(&joint_value(&chart, copper, q.view()).1);
+        if force < 2.0e-3 {
+            break;
+        }
+    }
+    let (relaxed, relaxed_cell) = chart.geometry(q.view()).map_err(|error| error.to_string())?;
+    let energy = copper.evaluate(relaxed.view(), relaxed_cell).0;
+    Ok((relaxed, relaxed_cell, energy, force))
+}
+
+fn judge(converged: bool, index: i64, rmsd: f64, delta: f64) -> String {
+    let mut reasons = Vec::new();
+    if !converged {
+        reasons.push("not converged");
+    }
+    if index != 1 {
+        reasons.push("not index 1");
+    }
+    if !rmsd.is_finite() || rmsd > 0.05 {
+        reasons.push("geometry");
+    }
+    if !delta.is_finite() || delta.abs() > 0.002 {
+        reasons.push("barrier");
+    }
+    if reasons.is_empty() {
+        "recovered".into()
+    } else {
+        reasons.join("; ")
+    }
+}
+
+fn nearest_csv(barriers: &[f64], value: f64) -> f64 {
+    barriers
+        .iter()
+        .copied()
+        .filter(|barrier| barrier.is_finite())
+        .min_by(|left, right| {
+            (left - value)
+                .abs()
+                .partial_cmp(&(right - value).abs())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .unwrap_or(f64::NAN)
+}
+
+fn cross_row(copper: &FastCopper, job: &CrossJob) -> String {
+    let mut notes = Vec::new();
+    if job.direction == "recombined" {
+        notes.push("pair recombines on relaxation; no saddle to cross-check".into());
+        return format!(
+            "shell,{shell},{orientation},recombined,{lattice:.6},{note},{n},,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,{tail}",
+            shell = job.shell,
+            orientation = job.orientation,
+            lattice = job.lattice,
+            note = csv_quote(&job.lattice_note),
+            n = job.reactant.len() / 3,
+            tail = csv_quote(&notes.join(" | ")),
+        );
+    }
+    let reactant = {
+        let mut positions = job.reactant.clone();
+        let force = max_abs(&copper.evaluate(positions.view(), job.cell).1);
+        if force > 2.0e-3 {
+            relax_fast(copper, &mut positions, job.cell, 1.0e-3, 80);
+        }
+        positions
+    };
+    let reactant_energy = copper.evaluate(reactant.view(), job.cell).0;
+    let product = if job.relax_product {
+        let mut positions = job.product.clone();
+        relax_fast(copper, &mut positions, job.cell, 1.0e-3, 80);
+        positions
+    } else {
+        job.product.clone()
+    };
+    let tight = tighten_dimer(copper, job.cell, &job.saddle, &job.mode);
+    if !tight.note.is_empty() {
+        notes.push(tight.note.clone());
+    }
+    let dimer_barrier = tight.energy - reactant_energy;
+    let csv = nearest_csv(&job.csv, dimer_barrier);
+    let (fixed_positions, fixed_cells) =
+        band_images(&reactant, job.cell, &tight.positions, job.cell, &product, job.cell);
+    let spring = if job.energy_weighted {
+        SpringKind::EnergyWeighted { k_min: 0.1, k_max: 5.0 }
+    } else {
+        SpringKind::Uniform { k: 1.0 }
+    };
+    let fixed = drive_band(copper, fixed_positions, fixed_cells, Some(job.cell), spring.clone());
+    let (free_reactant, free_reactant_cell, free_reactant_energy, free_product, free_product_cell) =
+        match (
+            relax_joint(copper, &reactant, job.cell),
+            relax_joint(copper, &product, job.cell),
+        ) {
+            (Ok(left), Ok(right)) => {
+                if left.3 > 0.05 || right.3 > 0.05 {
+                    notes.push(format!(
+                        "cell relax force reactant {:.3} product {:.3}",
+                        left.3, right.3
+                    ));
+                }
+                (left.0, left.1, left.2, right.0, right.1)
+            }
+            (left, right) => {
+                notes.push(format!(
+                    "cell relax failed: {} / {}",
+                    left.as_ref().err().map(|e| e.as_str()).unwrap_or("ok"),
+                    right.as_ref().err().map(|e| e.as_str()).unwrap_or("ok")
+                ));
+                (reactant.clone(), job.cell, reactant_energy, product.clone(), job.cell)
+            }
+        };
+    let (free_positions, free_cells) = band_images(
+        &free_reactant,
+        free_reactant_cell,
+        &tight.positions,
+        job.cell,
+        &free_product,
+        free_product_cell,
+    );
+    let free = drive_band(copper, free_positions, free_cells, None, spring);
+    let mut fixed_barrier = f64::NAN;
+    let mut fixed_force = f64::NAN;
+    let mut fixed_steps = 0usize;
+    let mut fixed_converged = false;
+    let mut fixed_index = -1i64;
+    let mut fixed_eigen = f64::NAN;
+    let mut fixed_rmsd = f64::NAN;
+    let mut fixed_max = f64::NAN;
+    if let Ok(end) = &fixed {
+        let energies = energies_of(copper, &end.positions, &end.cells);
+        let ci = highest_interior(&energies);
+        fixed_barrier = energies[ci] - energies[0];
+        fixed_force = end.force;
+        fixed_steps = end.steps;
+        fixed_converged = end.converged;
+        let (index, eigen) = projected_index(copper, &end.positions.row(ci).to_owned(), end.cells[ci], false);
+        fixed_index = index;
+        fixed_eigen = eigen;
+        let (rmsd, max) = geometry_gap(&tight.positions, &end.positions.row(ci).to_owned(), job.cell);
+        fixed_rmsd = rmsd;
+        fixed_max = max;
+    } else if let Err(error) = &fixed {
+        notes.push(format!("fixed band {error}"));
+    }
+    let mut free_barrier = f64::NAN;
+    let mut free_force = f64::NAN;
+    let mut free_steps = 0usize;
+    let mut free_converged = false;
+    let mut free_index = -1i64;
+    let mut free_eigen = f64::NAN;
+    let mut free_rmsd = f64::NAN;
+    let mut free_max = f64::NAN;
+    let mut free_cell = f64::NAN;
+    let mut free_a = f64::NAN;
+    if let Ok(end) = &free {
+        let energies = energies_of(copper, &end.positions, &end.cells);
+        let ci = highest_interior(&energies);
+        free_barrier = energies[ci] - energies[0];
+        free_force = end.force;
+        free_steps = end.steps;
+        free_converged = end.converged;
+        let mapped = into_cell(&end.positions.row(ci).to_owned(), end.cells[ci], job.cell);
+        let (rmsd, max) = geometry_gap(&tight.positions, &mapped, job.cell);
+        free_rmsd = rmsd;
+        free_max = max;
+        free_cell = cell_rms(end.cells[ci], job.cell);
+        free_a = cube_a(end.cells[ci]);
+        let (index, eigen) = projected_index(copper, &end.positions.row(ci).to_owned(), end.cells[ci], true);
+        free_index = index;
+        free_eigen = eigen;
+    } else if let Err(error) = &free {
+        notes.push(format!("free band {error}"));
+    }
+    let fixed_delta = fixed_barrier - dimer_barrier;
+    let free_delta = free_barrier - dimer_barrier;
+    let fixed_result = judge(fixed_converged, fixed_index, fixed_rmsd, fixed_delta);
+    let free_result = judge(free_converged, free_index, free_rmsd, free_delta);
+    if (cube_a(free_reactant_cell) - job.lattice).abs() > 0.002 {
+        notes.push(format!(
+            "zero-stress reactant lattice {:.5} A",
+            cube_a(free_reactant_cell)
+        ));
+    }
+    let _ = free_reactant_energy;
+    format!(
+        "{kind},{shell},{orientation},{direction},{lattice:.6},{note},{n},\
+{dimer:.6},{dimer_force:.6e},{dimer_index},{dimer_eigen:.6e},{dimer_ok},\
+{csv},{dimer_csv:.6},\
+{fixed_b:.6},{fixed_force:.6e},{fixed_steps},{fixed_ok},{fixed_index},{fixed_eigen:.6e},{fixed_rmsd:.6},{fixed_max:.6},{fixed_delta:.6},{fixed_result},\
+{free_b:.6},{free_force:.6e},{free_steps},{free_ok},{free_index},{free_eigen:.6e},{free_rmsd:.6},{free_max:.6},{free_cell:.6},{free_a:.6},{free_delta:.6},{free_fixed:.6},{free_result},\
+{relax:.6},{tail}",
+        kind = job.kind,
+        shell = job.shell,
+        orientation = job.orientation,
+        direction = job.direction,
+        lattice = job.lattice,
+        note = csv_quote(&job.lattice_note),
+        n = reactant.len() / 3,
+        dimer = dimer_barrier,
+        dimer_force = tight.force,
+        dimer_index = tight.index,
+        dimer_eigen = tight.eigenvalue,
+        dimer_ok = tight.converged as u8,
+        csv = cross_num(csv, 6),
+        dimer_csv = if csv.is_finite() { dimer_barrier - csv } else { f64::NAN },
+        fixed_b = fixed_barrier,
+        fixed_ok = fixed_converged as u8,
+        fixed_result = csv_quote(&fixed_result),
+        free_b = free_barrier,
+        free_ok = free_converged as u8,
+        free_fixed = free_barrier - fixed_barrier,
+        free_result = csv_quote(&free_result),
+        relax = reactant_energy - free_reactant_energy,
+        tail = csv_quote(&notes.join(" | ")),
+    )
+}
+
+fn wanted(kind: &str) -> bool {
+    match std::env::var("RGSADDLE_SSNEB_ONLY") {
+        Ok(value) if !value.is_empty() && value != "all" => {
+            value.split(',').any(|item| item.trim() == kind)
+        }
+        _ => true,
+    }
+}
+
+fn shell_wanted(shell: &str) -> bool {
+    match std::env::var("RGSADDLE_SSNEB_SHELLS") {
+        Ok(value) if !value.is_empty() && value != "all" => {
+            value.split(',').any(|item| (item.trim().parse::<f64>().ok().unwrap_or(-1.0) - shell.parse::<f64>().unwrap_or(-2.0)).abs() < 0.02)
+        }
+        _ => true,
+    }
+}
+
+struct Channel {
+    kind: String,
+    reactant: Array1<f64>,
+    saddle: Array1<f64>,
+    product: Array1<f64>,
+    mode: Array1<f64>,
+    cell: [[f64; 3]; 3],
+    barrier: f64,
+    dumbbell: [usize; 2],
+}
+
+fn isolate_channels(copper: &FastCopper, repeats: usize, a: f64) -> Vec<Channel> {
+    let built = build_oriented(repeats, a, [a, 0.0, 0.0], [1.0, 0.0, 0.0], false);
+    let length = repeats as f64 * a;
+    let cell = [[length, 0.0, 0.0], [0.0, length, 0.0], [0.0, 0.0, length]];
+    let mut reactant = built.positions;
+    relax_fast(copper, &mut reactant, cell, 1.0e-3, 80);
+    let center = centroid(&reactant, built.dumbbell);
+    let held = FastHeld { copper, cell };
+    let (reactant_energy, _) = held.eval(reactant.view()).unwrap_or((0.0, Array1::zeros(1)));
+    let mut kicks = Vec::new();
+    let mut perp = Array1::zeros(reactant.len());
+    for (atom, sign) in built.dumbbell.into_iter().zip([-1.0, 1.0]) {
+        perp[3 * atom + 1] = sign * 0.5;
+    }
+    kicks.push(perp);
+    let mut gentle = Array1::zeros(reactant.len());
+    for (atom, sign) in built.dumbbell.into_iter().zip([-1.0, 1.0]) {
+        gentle[3 * atom + 1] = sign * 0.3;
+    }
+    kicks.push(gentle);
+    let n = reactant.len() / 3;
+    for atom in 0..n {
+        if atom == built.dumbbell[0] || atom == built.dumbbell[1] {
+            continue;
+        }
+        let place = point_of(&reactant, atom);
+        if !(2.2..3.4).contains(&mic_distance(place, center, cell)) {
+            continue;
+        }
+        let mut dir = [0.0; 3];
+        for c in 0..3 {
+            let mut delta = place[c] - center[c];
+            delta -= length * (delta / length).round();
+            dir[c] = delta;
+        }
+        let dir = unit3(dir);
+        let mut kick = Array1::zeros(reactant.len());
+        for site in built.dumbbell {
+            for c in 0..3 {
+                kick[3 * site + c] = 0.55 * dir[c];
+            }
+        }
+        kicks.push(kick);
+        if kicks.len() > 8 {
+            break;
+        }
+    }
+    let axis = axis_of(&reactant, built.dumbbell);
+    let half = dist(point_of(&reactant, built.dumbbell[0]), center).max(0.8);
+    for plane in [[0.0, 1.0, 0.0], [0.0, 0.0, 1.0]] {
+        let target = unit3([
+            axis[0] + plane[0],
+            axis[1] + plane[1],
+            axis[2] + plane[2],
+        ]);
+        let mut turned = Array1::zeros(reactant.len());
+        for (atom, sign) in built.dumbbell.into_iter().zip([-1.0, 1.0]) {
+            let here = point_of(&reactant, atom);
+            for c in 0..3 {
+                turned[3 * atom + c] = center[c] + sign * half * target[c] - here[c];
+            }
+        }
+        kicks.push(turned);
+    }
+    let mut found = Vec::new();
+    for kick in kicks {
+        let mode_norm = kick.dot(&kick).sqrt();
+        if mode_norm < 1.0e-6 {
+            continue;
+        }
+        let mode = kick.clone() / mode_norm;
+        let rotation_seed = mode_norm > 0.9;
+        let search = MinModeConfig {
+            force_tol: if rotation_seed { 5.0e-3 } else { 0.04 },
+            max_move: 0.1,
+            dr: 1.0e-3,
+            max_rotations: 8,
+            ..MinModeConfig::default()
+        };
+        let config = SolidDimerConfig::frozen(search).with_index_check(
+            IndexCheck::first_order()
+                .with_step(1.0e-3)
+                .with_escapes(if rotation_seed { 4 } else { 1 }),
+        );
+        let Ok(mut dimer) = SolidDimer::new(config, &reactant + &kick, cell, mode) else {
+            continue;
+        };
+        let Ok(report) = dimer.run(&held, if rotation_seed { 250 } else { 80 }) else {
+            continue;
+        };
+        if report.status != MinModeStatus::Converged || report.rejected || report.negative_modes != Some(1) {
+            continue;
+        }
+        let saddle = dimer.positions().to_owned();
+        let unstable = dimer.mode().to_owned();
+        let mut peak = 0.0_f64;
+        for atom in 0..n {
+            let mut acc = 0.0;
+            for c in 0..3 {
+                acc += unstable[3 * atom + c] * unstable[3 * atom + c];
+            }
+            peak = peak.max(acc.sqrt());
+        }
+        if peak < 1.0e-8 {
+            continue;
+        }
+        let step = &unstable * (0.45 / peak);
+        let mut plus = &saddle + &step;
+        let mut minus = &saddle - &step;
+        relax_fast(copper, &mut plus, cell, 1.5e-3, 50);
+        relax_fast(copper, &mut minus, cell, 1.5e-3, 50);
+        let gap_plus = hausdorff(&plus, &reactant, cell);
+        let gap_minus = hausdorff(&minus, &reactant, cell);
+        let (product, back, back_pos) = if gap_plus < gap_minus {
+            (minus, gap_plus, plus)
+        } else {
+            (plus, gap_minus, minus)
+        };
+        let Ok((back_energy, _)) = held.eval(back_pos.view()) else {
+            continue;
+        };
+        let Ok((product_energy, _)) = held.eval(product.view()) else {
+            continue;
+        };
+        let Ok((saddle_energy, _)) = held.eval(saddle.view()) else {
+            continue;
+        };
+        if back > 1.0 || (back_energy - reactant_energy).abs() > 0.08 || product_energy < reactant_energy - 0.5 {
+            continue;
+        }
+        let shift = dist(centroid(&product, built.dumbbell), center);
+        let product_axis = axis_of(&product, built.dumbbell);
+        let overlap = (product_axis[0] * axis[0] + product_axis[1] * axis[1] + product_axis[2] * axis[2]).abs();
+        let kind = if shift > 0.6 {
+            "translate"
+        } else if overlap < 0.7 {
+            "rotate"
+        } else {
+            continue;
+        };
+        found.push(Channel {
+            kind: kind.into(),
+            reactant: reactant.clone(),
+            saddle,
+            product,
+            mode: unstable,
+            cell,
+            barrier: saddle_energy - reactant_energy,
+            dumbbell: built.dumbbell,
+        });
+    }
+    let mut kept = Vec::new();
+    for kind in ["translate", "rotate"] {
+        if let Some(best) = found
+            .iter()
+            .filter(|item| item.kind == kind)
+            .min_by(|left, right| left.barrier.partial_cmp(&right.barrier).unwrap())
+        {
+            kept.push(Channel {
+                kind: best.kind.clone(),
+                reactant: best.reactant.clone(),
+                saddle: best.saddle.clone(),
+                product: best.product.clone(),
+                mode: best.mode.clone(),
+                cell: best.cell,
+                barrier: best.barrier,
+                dumbbell: best.dumbbell,
+            });
+        }
+    }
+    kept
+}
+
+fn load_rated_hops() -> Vec<(String, String, String, f64)> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks/defect_pair_hops_static.csv");
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let mut rows = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        if index == 0 || line.is_empty() {
+            continue;
+        }
+        let columns: Vec<&str> = line.split(',').collect();
+        if columns.len() < 9 || columns[6] != "rated" {
+            continue;
+        }
+        if let Ok(barrier) = columns[8].parse::<f64>() {
+            rows.push((
+                columns[0].to_string(),
+                columns[1].to_string(),
+                columns[3].to_string(),
+                barrier,
+            ));
+        }
+    }
+    rows
+}
+
+fn cross_header() -> &'static str {
+    "kind,shell,orientation,direction,lattice_A,lattice_note,n_atoms,\
+dimer_barrier_eV,dimer_force,dimer_index,dimer_eigenvalue,dimer_converged,\
+csv_barrier_eV,dimer_minus_csv_eV,\
+fixed_barrier_eV,fixed_force,fixed_steps,fixed_converged,fixed_index,fixed_eigenvalue,fixed_rmsd_A,fixed_max_A,fixed_minus_dimer_eV,fixed_result,\
+free_barrier_eV,free_force,free_steps,free_converged,free_index,free_eigenvalue,free_rmsd_A,free_max_A,free_cell_rms_A,free_a_A,free_minus_dimer_eV,free_minus_fixed_eV,free_result,\
+reactant_cell_relax_eV,note"
+}
+
+#[test]
+#[ignore = "8x8x8 Mishin SS-NEB cross-check; writes benchmarks/ssneb_crosscheck.csv"]
+fn ssneb_crosscheck_cu() {
+    let started = Instant::now();
+    let copper = FastCopper::new();
+    let repeats = 8usize;
+    let (sample, sample_cell) = fcc(repeats, 3.615);
+    let eval_started = Instant::now();
+    let _ = copper.evaluate(sample.view(), sample_cell);
+    eprintln!(
+        "one 8x8x8 eval {:.3} s",
+        eval_started.elapsed().as_secs_f64()
+    );
+    let mut jobs = Vec::new();
+    let mut channels_500: Vec<Channel> = Vec::new();
+    if wanted("isolated") {
+        let specs = [
+            (3.615_f64, "Mishin 0 K lattice", f64::NAN, f64::NAN),
+            (3.628311, "300 K NPT lattice", 0.094614, 0.236061),
+            (3.638666, "500 K NPT lattice", 0.090966, 0.233710),
+        ];
+        let only_a = std::env::var("RGSADDLE_SSNEB_A").ok().and_then(|text| text.parse::<f64>().ok());
+        let specs: Vec<_> = specs
+            .into_iter()
+            .filter(|spec| only_a.map(|a| (spec.0 - a).abs() < 1.0e-4).unwrap_or(true))
+            .collect();
+        let channels: Vec<_> = specs
+            .par_iter()
+            .map(|(lattice, note, translate, rotate)| {
+                let found = isolate_channels(&copper, repeats, *lattice);
+                (*lattice, *note, *translate, *rotate, found)
+            })
+            .collect();
+        for (lattice, note, translate_csv, rotate_csv, found) in channels {
+            if (lattice - 3.638666).abs() < 1.0e-5 {
+                channels_500 = found
+                    .iter()
+                    .map(|channel| Channel {
+                        kind: channel.kind.clone(),
+                        reactant: channel.reactant.clone(),
+                        saddle: channel.saddle.clone(),
+                        product: channel.product.clone(),
+                        mode: channel.mode.clone(),
+                        cell: channel.cell,
+                        barrier: channel.barrier,
+                        dumbbell: channel.dumbbell,
+                    })
+                    .collect();
+            }
+            for channel in found {
+                let (direction, csv) = if channel.kind == "translate" {
+                    ("toward", translate_csv)
+                } else {
+                    ("tangential", rotate_csv)
+                };
+                eprintln!(
+                    "isolated {} {lattice:.4} loose barrier {:.4} eV",
+                    channel.kind, channel.barrier
+                );
+                jobs.push(CrossJob {
+                    kind: "isolated",
+                    shell: "isolated".into(),
+                    orientation: "100".into(),
+                    direction: direction.into(),
+                    lattice,
+                    lattice_note: note.into(),
+                    reactant: channel.reactant,
+                    product: channel.product,
+                    saddle: channel.saddle,
+                    mode: channel.mode,
+                    cell: channel.cell,
+                    csv: if csv.is_finite() { vec![csv] } else { Vec::new() },
+                    relax_product: true,
+                    energy_weighted: false,
+                });
+            }
+        }
+    }
+    if wanted("shell") || wanted("capture") {
+        let a500 = 3.638666_f64;
+        let channels = if channels_500.is_empty() {
+            isolate_channels(&copper, repeats, a500)
+        } else {
+            channels_500
+        };
+        assert!(!channels.is_empty(), "the 500 K dumbbell produced no channel");
+        let mechanisms: Vec<Mechanism> = channels
+            .iter()
+            .map(|channel| {
+                capture_mechanism(
+                    &copper,
+                    &channel.reactant,
+                    channel.cell,
+                    channel.dumbbell,
+                    &channel.saddle,
+                    &channel.product,
+                    &channel.mode,
+                    channel.barrier,
+                )
+            })
+            .collect();
+        if wanted("shell") {
+            let rated = load_rated_hops();
+            let mut keys = Vec::new();
+            for (shell, orientation, _, _) in &rated {
+                let key = (shell.clone(), orientation.clone());
+                if !keys.contains(&key) && shell_wanted(shell) {
+                    keys.push(key);
+                }
+            }
+            let built: Vec<_> = keys
+                .par_iter()
+                .filter_map(|(shell, orientation)| {
+                    let radius: f64 = shell.parse().ok()?;
+                    let vector = shell_table(a500, repeats)
+                        .into_iter()
+                        .find(|(value, _, _)| (*value - radius).abs() < 0.05)
+                        .map(|(_, vector, _)| vector)?;
+                    let (reactant, vacancy, dumbbell, cell, _, _, recombined) = relax_pair_axis(
+                        &copper,
+                        repeats,
+                        a500,
+                        vector,
+                        axis_from_label(orientation),
+                        true,
+                    );
+                    Some((shell.clone(), orientation.clone(), reactant, vacancy, dumbbell, cell, recombined))
+                })
+                .collect();
+            for (shell, orientation, reactant, vacancy, dumbbell, cell, recombined) in built {
+                if recombined {
+                    jobs.push(CrossJob {
+                        kind: "shell",
+                        shell,
+                        orientation,
+                        direction: "recombined".into(),
+                        lattice: a500,
+                        lattice_note: "500 K NPT lattice; pair recombines on relaxation".into(),
+                        reactant: reactant.clone(),
+                        product: reactant.clone(),
+                        saddle: reactant,
+                        mode: Array1::zeros(0),
+                        cell,
+                        csv: Vec::new(),
+                        relax_product: false,
+                        energy_weighted: false,
+                    });
+                    continue;
+                }
+                let center = centroid(&reactant, dumbbell);
+                let axis = axis_from_label(&orientation);
+                let hops = mapped_hops(&reactant, cell, center, axis, &mechanisms);
+                let mobile = [dumbbell[0], dumbbell[1]];
+                let before = rgsaddle::pair_separation(reactant.view(), cell, vacancy, &mobile).unwrap_or(0.0);
+                for hop in hops {
+                    let after = rgsaddle::pair_separation(hop.product.view(), cell, vacancy, &mobile).unwrap_or(before);
+                    let Ok(direction) = rgsaddle::classify_separation(before, after, 0.08) else {
+                        continue;
+                    };
+                    let csv: Vec<f64> = rated
+                        .iter()
+                        .filter(|(s, o, d, _)| s == &shell && o == &orientation && d == direction.as_str())
+                        .map(|(_, _, _, barrier)| *barrier)
+                        .collect();
+                    if csv.is_empty() {
+                        continue;
+                    }
+                    let Some(saddle) = hop.saddle.clone() else { continue };
+                    let Some(mode) = hop.mode.clone() else { continue };
+                    jobs.push(CrossJob {
+                        kind: "shell",
+                        shell: shell.clone(),
+                        orientation: orientation.clone(),
+                        direction: direction.as_str().into(),
+                        lattice: a500,
+                        lattice_note: "500 K NPT lattice; static barrier from defect_pair_hops_static.csv".into(),
+                        reactant: reactant.clone(),
+                        product: hop.product,
+                        saddle,
+                        mode,
+                        cell,
+                        csv,
+                        relax_product: true,
+                        energy_weighted: false,
+                    });
+                }
+            }
+        }
+        if wanted("capture") {
+            let radius = 5.146_f64;
+            let vector = shell_table(a500, repeats)
+                .into_iter()
+                .find(|(value, _, _)| (*value - radius).abs() < 0.05)
+                .map(|(_, vector, _)| vector)
+                .expect("5.146 shell");
+            let (reactant, vacancy, dumbbell, cell, _, _, recombined) =
+                relax_pair_axis(&copper, repeats, a500, vector, axis_from_label("001"), true);
+            assert!(!recombined, "5.146 001 recombined on relaxation");
+            let held = FastHeld { copper: &copper, cell };
+            let (reactant_energy, _) = held.eval(reactant.view()).expect("capture reactant");
+            let config = survey_config(cell);
+            let seeds = local_seeds(&reactant, cell, dumbbell, vacancy);
+            let found = rgsaddle::seeded_saddles(&held, &config, cell, &seeds);
+            let mut kept = Vec::new();
+            for saddle in &found {
+                let plus_re = reaches_recombination(
+                    &reactant, reactant_energy, vacancy, cell, &saddle.plus, saddle.plus_energy,
+                );
+                let minus_re = reaches_recombination(
+                    &reactant, reactant_energy, vacancy, cell, &saddle.minus, saddle.minus_energy,
+                );
+                let plus_back = hausdorff(&saddle.plus, &reactant, cell) < 1.0
+                    || (saddle.plus_energy - reactant_energy).abs() < 0.2;
+                let minus_back = hausdorff(&saddle.minus, &reactant, cell) < 1.0
+                    || (saddle.minus_energy - reactant_energy).abs() < 0.2;
+                if (plus_back && minus_re) || (minus_back && plus_re) {
+                    kept.push(saddle);
+                }
+            }
+            kept.sort_by(|left, right| {
+                (left.saddle_energy - reactant_energy - 0.071269)
+                    .abs()
+                    .partial_cmp(&(right.saddle_energy - reactant_energy - 0.071269).abs())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            if let Some(best) = kept.first() {
+                let sign = if best.plus_energy < best.minus_energy { 1.0 } else { -1.0 };
+                let mut peak = 0.0_f64;
+                for atom in 0..best.mode.len() / 3 {
+                    let mut acc = 0.0;
+                    for c in 0..3 {
+                        acc += best.mode[3 * atom + c] * best.mode[3 * atom + c];
+                    }
+                    peak = peak.max(acc.sqrt());
+                }
+                let mut start = best.saddle.clone();
+                if peak > 1.0e-8 {
+                    start = &best.saddle + &(&best.mode * (sign * 0.04 / peak));
+                }
+                let floor = best.saddle_energy - 0.6;
+                let (downhill, _) = rgsaddle::descend_limited(&held, start, cell, &config, floor)
+                    .unwrap_or((best.saddle.clone(), best.saddle_energy));
+                jobs.push(CrossJob {
+                    kind: "capture",
+                    shell: "5.146".into(),
+                    orientation: "001".into(),
+                    direction: "toward".into(),
+                    lattice: a500,
+                    lattice_note: "500 K NPT lattice; defect_pair_local.csv capture 0.071269 eV".into(),
+                    reactant,
+                    product: downhill,
+                    saddle: best.saddle.clone(),
+                    mode: best.mode.clone(),
+                    cell,
+                    csv: vec![0.071269],
+                    relax_product: false,
+                    energy_weighted: true,
+                });
+            }
+        }
+    }
+    let max_jobs = env_usize("RGSADDLE_SSNEB_MAX", usize::MAX);
+    if jobs.len() > max_jobs {
+        jobs.truncate(max_jobs);
+    }
+    assert!(!jobs.is_empty(), "no SS-NEB cross-check jobs");
+    eprintln!("{} jobs after {:.1} s", jobs.len(), started.elapsed().as_secs_f64());
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks/ssneb_crosscheck.csv");
+    let mut file = File::create(&path).expect("cross-check csv");
+    writeln!(file, "{}", cross_header()).unwrap();
+    file.flush().unwrap();
+    let sink = Mutex::new(file);
+    jobs.par_iter().for_each(|job| {
+        let row = cross_row(&copper, job);
+        eprintln!("{row}");
+        let mut handle = sink.lock().unwrap_or_else(|poison| poison.into_inner());
+        writeln!(handle, "{row}").unwrap();
+        handle.flush().unwrap();
+    });
+    let text = std::fs::read_to_string(&path).unwrap();
+    if wanted("isolated") {
+        assert!(text.lines().any(|line| line.starts_with("isolated,isolated,100,toward")), "missing free translation");
+        assert!(text.lines().any(|line| line.starts_with("isolated,isolated,100,tangential")), "missing rotation");
+    }
+    if wanted("capture") {
+        assert!(text.lines().any(|line| line.starts_with("capture,5.146,001")), "missing capture");
+    }
+    if wanted("shell") {
+        assert!(text.lines().any(|line| line.starts_with("shell,")), "missing shell hops");
+    }
+    eprintln!("cross-check {:.1} min", started.elapsed().as_secs_f64() / 60.0);
 }
