@@ -553,3 +553,145 @@ fn mean_absorption_time_of_one_hop_is_the_inverse_rate() {
     let time = rgsaddle::mean_absorption_time(&sites).expect("time");
     assert!((time - 0.5).abs() < 1.0e-9, "{time}");
 }
+
+fn fcc_neighbors(a: f64) -> Vec<[f64; 3]> {
+    let mut hops = Vec::new();
+    for sx in [0.5, -0.5] {
+        for sy in [0.5, -0.5] {
+            hops.push([sx * a, sy * a, 0.0]);
+            hops.push([sx * a, 0.0, sy * a]);
+            hops.push([0.0, sx * a, sy * a]);
+        }
+    }
+    hops
+}
+
+fn axis_name(axis: [f64; 3]) -> &'static str {
+    if axis[0].abs() > 0.5 {
+        "100"
+    } else if axis[1].abs() > 0.5 {
+        "010"
+    } else {
+        "001"
+    }
+}
+
+#[test]
+fn a_100_dumbbell_translates_on_eight_channels_and_rotates() {
+    let hops = fcc_neighbors(1.0);
+    let axis = [0.0, 0.0, 1.0];
+    let mut targets = Vec::new();
+    for hop in &hops {
+        if let Some(next) = rgsaddle::dumbbell_translation_axis(axis, *hop) {
+            let back = rgsaddle::dumbbell_translation_axis(next, [-hop[0], -hop[1], -hop[2]])
+                .expect("the reverse hop is a translation");
+            assert_eq!(axis_name(back), "001", "{hop:?} -> {next:?} -> {back:?}");
+            assert_ne!(axis_name(next), "001");
+            targets.push(axis_name(next));
+        }
+    }
+    assert_eq!(targets.len(), 8, "{targets:?}");
+    assert_eq!(targets.iter().filter(|label| **label == "100").count(), 4);
+    assert_eq!(targets.iter().filter(|label| **label == "010").count(), 4);
+    // The four hops in the plane normal to the axis are not this saddle.
+    assert_eq!(hops.len() - targets.len(), 4);
+}
+
+#[test]
+fn along_line_and_oblique_hops_are_disjoint_and_balance() {
+    // Two FCC sites, one nearest-neighbor step apart. Each direction is
+    // either along the vacancy line or oblique, never both, and the raw
+    // hop counts satisfy n_i w_ij = n_j w_ji.
+    let a = 2.0_f64;
+    let origin = [0.0, 0.0, 0.0];
+    let neighbor = [a * 0.5, 0.0, a * 0.5];
+    let hop = [
+        neighbor[0] - origin[0],
+        neighbor[1] - origin[1],
+        neighbor[2] - origin[2],
+    ];
+    let back = [-hop[0], -hop[1], -hop[2]];
+    let axis = [0.0, 0.0, 1.0];
+    let forward = rgsaddle::dumbbell_translation_axis(axis, hop).expect("forward");
+    let reverse_axis = rgsaddle::dumbbell_translation_axis(forward, back).expect("reverse");
+    assert_eq!(axis_name(reverse_axis), "001");
+    let r0 = 0.0;
+    let r1 = (neighbor[0] * neighbor[0] + neighbor[2] * neighbor[2]).sqrt();
+    let hop_len = (hop[0] * hop[0] + hop[2] * hop[2]).sqrt();
+    let radial = (r1 - r0).abs() >= 0.5 * hop_len;
+    let oblique = (r1 - r0).abs() < 0.5 * hop_len;
+    assert!(radial ^ oblique);
+    // Equal multiplicities, one hop each way, common rate 3.
+    // The away barrier is four times the free rate; both directions take it.
+    let factor = rgsaddle::shell_pair_factor(rgsaddle::DirectionClass::Away, 4.0, 1.0);
+    let reverse = rgsaddle::shell_pair_factor(rgsaddle::DirectionClass::Toward, 1.0, 4.0);
+    assert!((factor - 4.0).abs() < 1.0e-12);
+    assert!((reverse - factor).abs() < 1.0e-12, "{reverse}");
+    let count = 2.0;
+    assert!((count * factor - count * reverse).abs() < 1.0e-12);
+    // Link rate 4 both ways, capture 1 on the near site, escape 4 on the far
+    // site. u_near = (4/5) u_far + 1/5, u_far = (4/8) u_near, so u = (1/3, 1/6).
+    let sites = vec![
+        rgsaddle::VolumeSite {
+            id: "near-001".into(),
+            count,
+            outcome: rgsaddle::SiteOutcome::Kinetic,
+            rates: vec![("far-100".into(), 4.0), ("recombined".into(), 1.0)],
+        },
+        rgsaddle::VolumeSite {
+            id: "far-100".into(),
+            count,
+            outcome: rgsaddle::SiteOutcome::Kinetic,
+            rates: vec![("near-001".into(), 4.0), ("escaped".into(), 4.0)],
+        },
+    ];
+    let volume = rgsaddle::kinetic_recombination_volume(&sites, 1.0).expect("volume");
+    // u_n = 4/5 u_f + 1/5, u_f = 4/8 u_n. => u_n = 1/3, u_f = 1/6.
+    let near = probability(&volume, "near-001");
+    let far = probability(&volume, "far-100");
+    assert!((near - 1.0 / 3.0).abs() < 1.0e-12, "{near}");
+    assert!((far - 1.0 / 6.0).abs() < 1.0e-12, "{far}");
+    assert!((volume.kinetic_sites - count * (near + far)).abs() < 1.0e-12);
+}
+
+#[test]
+fn rotation_is_two_saddles_between_orientation_states() {
+    // One shell, two axes, multiplicity 1 each. Two <110> saddles into the
+    // other axis, each of rate 1, so the edge is 2. Capture and escape are 2.
+    // u_x = (2/4) u_y + 2/4, u_y = (2/4) u_x => u_x = 2/3, u_y = 1/3.
+    let sites = vec![
+        rgsaddle::VolumeSite {
+            id: "shell-100".into(),
+            count: 1.0,
+            outcome: rgsaddle::SiteOutcome::Kinetic,
+            rates: vec![("shell-010".into(), 2.0), ("recombined".into(), 2.0)],
+        },
+        rgsaddle::VolumeSite {
+            id: "shell-010".into(),
+            count: 1.0,
+            outcome: rgsaddle::SiteOutcome::Kinetic,
+            rates: vec![("shell-100".into(), 2.0), ("escaped".into(), 2.0)],
+        },
+    ];
+    let volume = rgsaddle::kinetic_recombination_volume(&sites, 1.0).expect("volume");
+    assert!((probability(&volume, "shell-100") - 2.0 / 3.0).abs() < 1.0e-12);
+    assert!((probability(&volume, "shell-010") - 1.0 / 3.0).abs() < 1.0e-12);
+    assert!((volume.kinetic_sites - 1.0).abs() < 1.0e-12);
+}
+
+#[test]
+fn the_spontaneous_count_follows_the_census() {
+    // A hard-coded 34 would give the same total on both lattices. The share
+    // is the shell multiplicity of each orientation the census marks.
+    let hot = spontaneous_share(&[(12.0, true), (12.0, false), (6.0, true)]);
+    let cold = spontaneous_share(&[(12.0, true), (12.0, true), (6.0, false)]);
+    assert!((hot - 6.0).abs() < 1.0e-12, "{hot}");
+    assert!((cold - 8.0).abs() < 1.0e-12, "{cold}");
+    assert!((hot - cold).abs() > 1.0);
+}
+
+fn spontaneous_share(rows: &[(f64, bool)]) -> f64 {
+    rows.iter()
+        .map(|(count, spontaneous)| if *spontaneous { count / 3.0 } else { 0.0 })
+        .sum()
+}

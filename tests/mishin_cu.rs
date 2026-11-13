@@ -8204,72 +8204,41 @@ fn channel_volumes(
             }
         }
     }
-    let n = kept.len();
-    let mut toward = vec![vec![0.0_f64; n]; n];
-    let mut away = vec![vec![0.0_f64; n]; n];
-    let mut tangential = vec![vec![0.0_f64; n]; n];
-    let mut escape_radial = vec![0.0_f64; n];
-    let mut escape_tangential = vec![0.0_f64; n];
-    let mut vacancy = vec![0.0_f64; n];
+    let hop = a / 2.0_f64.sqrt();
+    // Diagnostic for one axis. A <100> dumbbell translates on eight neighbor
+    // directions, and the hop rotates the axis. Summing the twelve FCC
+    // neighbors, shells weighted equally, gave along-line 78 and oblique
+    // 74.83; that count includes the four in-plane directions and keeps the
+    // axis. The sums below are the eight translation channels of axis 001.
+    let mut along_sum = 0.0_f64;
+    let mut oblique_sum = 0.0_f64;
     for (index, group) in members.iter().enumerate() {
         if group.is_empty() { continue; }
-        let radius = kept[index].0;
+        let mut along = 0.0_f64;
+        let mut oblique = 0.0_f64;
         for site in group {
             for step in nn_vecs {
-                let next = [site[0] + step[0] * a, site[1] + step[1] * a, site[2] + step[2] * a];
-                let next_r = (next[0] * next[0] + next[1] * next[1] + next[2] * next[2]).sqrt();
-                if next_r <= 0.5 * a {
-                    vacancy[index] += 1.0;
+                let step_a = [step[0] * a, step[1] * a, step[2] * a];
+                if rgsaddle::dumbbell_translation_axis([0.0, 0.0, 1.0], step_a).is_none() {
                     continue;
                 }
-                let Ok(class) = rgsaddle::classify_separation(radius, next_r, 0.08) else { continue };
-                let hop = a / 2.0_f64.sqrt();
-                // A nearest-neighbor step changes the separation by ~hop²/2R even
-                // when it is perpendicular to the vacancy line, so the 0.08 Å
-                // tangential test never joins two shells. A hop is non-radial
-                // when less than half of it lies along the line to the vacancy.
-                let oblique = (next_r - radius).abs() < 0.5 * hop;
-                if let Some(other) = kept.iter().position(|(value, _, _)| (value - next_r).abs() < 1.0e-3) {
-                    if oblique || class == rgsaddle::DirectionClass::Tangential {
-                        tangential[index][other] += 1.0;
-                    } else {
-                        match class {
-                            rgsaddle::DirectionClass::Toward => toward[index][other] += 1.0,
-                            rgsaddle::DirectionClass::Away => away[index][other] += 1.0,
-                            rgsaddle::DirectionClass::Tangential => tangential[index][other] += 1.0,
-                        }
-                    }
-                } else if oblique || class == rgsaddle::DirectionClass::Tangential {
-                    escape_tangential[index] += 1.0;
+                let next = [site[0] + step_a[0], site[1] + step_a[1], site[2] + step_a[2]];
+                let next_r = (next[0] * next[0] + next[1] * next[1] + next[2] * next[2]).sqrt();
+                if next_r <= 0.5 * a { continue; }
+                let Some(other) = kept.iter().position(|(value, _, _)| (value - next_r).abs() < 1.0e-3) else { continue };
+                if other == index { continue; }
+                if (next_r - kept[index].0).abs() < 0.5 * hop {
+                    oblique += 1.0;
                 } else {
-                    escape_radial[index] += 1.0;
+                    along += 1.0;
                 }
             }
         }
         let norm = group.len() as f64;
-        vacancy[index] /= norm;
-        escape_radial[index] /= norm;
-        escape_tangential[index] /= norm;
-        for other in 0..n {
-            toward[index][other] /= norm;
-            away[index][other] /= norm;
-            tangential[index][other] /= norm;
-        }
+        along_sum += along / norm;
+        oblique_sum += oblique / norm;
     }
-    let mut tang_between = 0.0_f64;
-    let mut radial_between = 0.0_f64;
-    let mut strict_tangential = 0.0_f64;
-    for index in 0..n {
-        for other in 0..n {
-            if other == index { continue; }
-            tang_between += tangential[index][other];
-            radial_between += toward[index][other] + away[index][other];
-            if (kept[index].0 - kept[other].0).abs() < 0.08 {
-                strict_tangential += tangential[index][other];
-            }
-        }
-    }
-    eprintln!("13^3 {temperature} K neighbor weights: along-line {radial_between:.2} oblique {tang_between:.2} within-0.08A {strict_tangential:.2}");
+    eprintln!("13^3 {temperature} K <100> translation weights, axis 001: along-line {along_sum:.2} oblique {oblique_sum:.2}");
     let (k_rot, rotation_note) = rotation_channel(rates, temperature);
     eprintln!("13^3 {temperature} K rotation {k_rot:.6e} Hz; {rotation_note}");
     let translation_text = std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks/defect_pair_translation.csv")).unwrap_or_default();
@@ -8296,20 +8265,63 @@ fn channel_volumes(
                     sites.push(rgsaddle::VolumeSite { id, count: share, outcome: rgsaddle::SiteOutcome::Spontaneous, rates: Vec::new() });
                     continue;
                 }
-                let mut capture_neighbors = vacancy[index];
+                let mut capture_neighbors = 0.0_f64;
                 let mut edges = Vec::new();
                 let mut rotation_capture = 0.0_f64;
-                let away_factor = if drift { strain_away_factor(rates, temperature, radius * a_ours / a, free_barrier) } else { 1.0 };
-                for other in 0..n {
-                    for (weight, factor, use_edge) in [(toward[index][other], 1.0, true), (away[index][other], away_factor, true), (tangential[index][other], 1.0, glide)] {
-                        if !use_edge || weight <= 0.0 { continue; }
-                        let other_radius = kept[other].0;
-                        let other_id = format!("{other_radius:.3}-{orientation}");
-                        if spontaneous.contains(&other_id) {
-                            capture_neighbors += weight;
-                        } else if other != index {
-                            edges.push((other_id, weight * k_mig * factor));
+                let mut escape_along = 0.0_f64;
+                let mut escape_oblique = 0.0_f64;
+                let mut translations: std::collections::BTreeMap<(usize, &'static str), (f64, rgsaddle::DirectionClass)> = std::collections::BTreeMap::new();
+                let axis = axis_from_label(orientation);
+                if let Some(group) = members.get(index) {
+                    for site in group {
+                        for step in nn_vecs {
+                            let step_a = [step[0] * a, step[1] * a, step[2] * a];
+                            let Some(new_axis) = rgsaddle::dumbbell_translation_axis(axis, step_a) else { continue };
+                            let landed = if new_axis[0] > 0.5 { "100" } else if new_axis[1] > 0.5 { "010" } else { "001" };
+                            let next = [site[0] + step_a[0], site[1] + step_a[1], site[2] + step_a[2]];
+                            let next_r = (next[0] * next[0] + next[1] * next[1] + next[2] * next[2]).sqrt();
+                            if next_r <= 0.5 * a {
+                                capture_neighbors += 1.0;
+                                continue;
+                            }
+                            let class = if (next_r - radius).abs() < 0.5 * hop {
+                                rgsaddle::DirectionClass::Tangential
+                            } else if next_r < *radius {
+                                rgsaddle::DirectionClass::Toward
+                            } else {
+                                rgsaddle::DirectionClass::Away
+                            };
+                            if let Some(other) = kept.iter().position(|(value, _, _)| (value - next_r).abs() < 1.0e-3) {
+                                let entry = translations.entry((other, landed)).or_insert((0.0, class));
+                                entry.0 += 1.0;
+                            } else if class == rgsaddle::DirectionClass::Tangential {
+                                escape_oblique += 1.0;
+                            } else {
+                                escape_along += 1.0;
+                            }
                         }
+                    }
+                    if !group.is_empty() {
+                        let norm = group.len() as f64;
+                        capture_neighbors /= norm;
+                        escape_along /= norm;
+                        escape_oblique /= norm;
+                        for value in translations.values_mut() {
+                            value.0 /= norm;
+                        }
+                    }
+                }
+                for ((other, landed), (weight, class)) in translations {
+                    let use_edge = class != rgsaddle::DirectionClass::Tangential || glide;
+                    if !use_edge || weight <= 0.0 { continue; }
+                    let source_factor = if drift { strain_away_factor(rates, temperature, radius * a_ours / a, free_barrier) } else { 1.0 };
+                    let destination_factor = if drift { strain_away_factor(rates, temperature, kept[other].0 * a_ours / a, free_barrier) } else { 1.0 };
+                    let factor = rgsaddle::shell_pair_factor(class, source_factor, destination_factor);
+                    let other_id = format!("{:.3}-{landed}", kept[other].0);
+                    if spontaneous.contains(&other_id) {
+                        capture_neighbors += weight;
+                    } else {
+                        edges.push((other_id, weight * k_mig * factor));
                     }
                 }
                 if rotation {
@@ -8324,7 +8336,7 @@ fn channel_volumes(
                         }
                     }
                 }
-                let escape = escape_radial[index] + if glide { escape_tangential[index] } else { 0.0 };
+                let escape = escape_along + if glide { escape_oblique } else { 0.0 };
                 if escape > 0.0 {
                     edges.push(("escaped".into(), escape * k_mig));
                 }
