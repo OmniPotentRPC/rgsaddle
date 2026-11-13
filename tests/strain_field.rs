@@ -1,6 +1,8 @@
 //! Dipole field of a cubic crystal, and the hop barriers it produces.
 
-use rgsaddle::{CubicElasticity, ElasticDipole, Kelvin, Strain, StrainResponse, Trust};
+use rgsaddle::{
+    CubicElasticity, DirectCutoff, ElasticDipole, Kelvin, Strain, StrainResponse, Trust,
+};
 
 fn shear_dipole() -> ElasticDipole {
     ElasticDipole::from_tensor([[0.0, 1.5, 0.2], [1.5, 0.0, -0.4], [0.2, -0.4, 0.3]]).unwrap()
@@ -161,4 +163,46 @@ fn residual_stress_dipole_matches_the_fixed_cell_formula() {
     let from_stress = ElasticDipole::from_stress(volume, defect, bulk).unwrap();
     assert_eq!(from_route.tensor(), from_stress.tensor());
     assert!((from_route.tensor()[0][0] + volume * 0.009).abs() < 1.0e-12);
+}
+
+#[test]
+fn direct_cutoff_starts_at_the_first_clean_tail() {
+    let samples = [(1.0, 0.02), (2.0, 0.004), (2.0, 0.006), (3.0, 0.001)];
+    let cutoff = DirectCutoff::from_errors(&samples, 0.005).unwrap();
+    assert!((cutoff.radius() - 3.0).abs() < 1.0e-12);
+    assert!(cutoff.search_directly(2.0));
+    assert!(cutoff.use_dipole(3.0));
+    assert!(DirectCutoff::from_errors(&[(1.0, 0.02)], 0.005).is_err());
+    let whole = DirectCutoff::from_errors(&[(4.0, 0.001), (5.0, 0.0)], 0.005).unwrap();
+    assert!((whole.radius() - 4.0).abs() < 1.0e-12);
+    assert!(whole.search_directly(3.9));
+}
+
+/// Largest |direct − dipole| at each shell of the 8×8×8 Mishin vacancy
+/// survey, translation and rotation together. The tail inside 5 meV
+/// starts at 10.5394 Å.
+#[test]
+fn mishin_direct_cutoff_is_the_10_5394_shell() {
+    let samples = [
+        (3.6150, 0.306954),
+        (5.1124, 0.025721),
+        (5.7158, 0.005997),
+        (6.2614, 0.027840),
+        (6.7630, 0.045336),
+        (7.2300, 0.007803),
+        (7.6686, 0.014160),
+        (8.0834, 0.007306),
+        (8.4779, 0.003204),
+        (8.8549, 0.005578),
+        (9.2165, 0.001644),
+        (9.9001, 0.002802),
+        (10.2248, 0.006408),
+        (10.5394, 0.002762),
+        (10.8450, 0.000631),
+    ];
+    let cutoff = DirectCutoff::from_errors(&samples, 0.005).unwrap();
+    assert!((cutoff.radius() - 10.5394).abs() < 1.0e-9);
+    assert!(cutoff.search_directly(10.2248));
+    assert!(cutoff.use_dipole(10.5394));
+    assert!(cutoff.use_dipole(10.8450));
 }

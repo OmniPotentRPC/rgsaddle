@@ -338,6 +338,75 @@ impl Default for TrustPolicy {
     }
 }
 
+/// Separation inside which a direct saddle replaces the dipole line.
+///
+/// `samples` are `(separation, absolute error)` of the dipole line against
+/// a direct saddle. The radius is the smallest sampled separation at and
+/// beyond which every sample is within `tolerance`. A nearer defect is
+/// searched directly. At and beyond the radius the dipole barrier is used.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DirectCutoff {
+    radius: f64,
+}
+
+impl DirectCutoff {
+    /// Radius, in the same length unit as the samples.
+    pub fn radius(self) -> f64 {
+        self.radius
+    }
+
+    /// The measured errors stay within `tolerance` from `radius` outward.
+    pub fn from_errors(samples: &[(f64, f64)], tolerance: f64) -> Result<Self, SaddleError> {
+        if !(tolerance.is_finite() && tolerance >= 0.0) {
+            return Err(SaddleError::Invalid(
+                "the direct-cutoff tolerance must be finite and non-negative".into(),
+            ));
+        }
+        if samples.is_empty() {
+            return Err(SaddleError::Invalid(
+                "a direct cutoff needs at least one measured separation".into(),
+            ));
+        }
+        for (separation, error) in samples {
+            if !(separation.is_finite() && *separation >= 0.0) {
+                return Err(SaddleError::Invalid(
+                    "a direct-cutoff separation must be finite and non-negative".into(),
+                ));
+            }
+            if !(error.is_finite() && *error >= 0.0) {
+                return Err(SaddleError::Invalid(
+                    "a direct-cutoff error must be finite and non-negative".into(),
+                ));
+            }
+        }
+        let mut radii: Vec<f64> = samples.iter().map(|(separation, _)| *separation).collect();
+        radii.sort_by(f64::total_cmp);
+        radii.dedup();
+        for radius in radii {
+            let inside = samples
+                .iter()
+                .filter(|(separation, _)| *separation + 1.0e-9 >= radius)
+                .all(|(_, error)| *error <= tolerance);
+            if inside {
+                return Ok(Self { radius });
+            }
+        }
+        Err(SaddleError::Invalid(
+            "the dipole line is not inside the tolerance at any measured separation".into(),
+        ))
+    }
+
+    /// True when `separation` is inside the radius and needs a direct saddle.
+    pub fn search_directly(self, separation: f64) -> bool {
+        separation < self.radius
+    }
+
+    /// True when the dipole barrier is the value used at `separation`.
+    pub fn use_dipole(self, separation: f64) -> bool {
+        separation >= self.radius
+    }
+}
+
 /// Second-order bound from the softening of the unstable mode.
 ///
 /// `λ(ε) = λ0 + slope : ε`. `λ0` is negative. The line is trusted while

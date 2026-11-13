@@ -4246,3 +4246,634 @@ fn report_field(lines: &[String]) {
         }
     }
 }
+
+fn near_shell(kind: &str, distance: f64, a: f64, axis: [f64; 3], sense: &str) -> bool {
+    let reduced = distance / a;
+    let close = |target: f64| (reduced - target).abs() < 0.03;
+    if kind == "translation" {
+        return (close(2.0_f64.sqrt()) && axis == [0.0, 0.0, 1.0])
+            || (close(3.5_f64.sqrt()) && axis == [1.0, 0.0, 0.0]);
+    }
+    if reduced >= 7.5 / 3.615 {
+        return false;
+    }
+    if close(1.0) {
+        return axis == [0.0, 1.0, 0.0] && sense == "axis-across-r";
+    }
+    if close(3.0_f64.sqrt()) {
+        return axis == [1.0, 0.0, 0.0] && sense == "axis-across-r";
+    }
+    if close(3.5_f64.sqrt()) {
+        return (axis == [1.0, 0.0, 0.0] && sense == "axis-across-r")
+            || (axis == [0.0, 1.0, 0.0] && (sense == "axis-along-r" || sense == "axis-across-r"))
+            || (axis == [0.0, 0.0, 1.0] && sense == "axis-across-r");
+    }
+    if close(2.0) {
+        return (axis == [1.0, 0.0, 0.0] && sense == "axis-across-r")
+            || (axis == [0.0, 1.0, 0.0] && sense == "axis-along-r");
+    }
+    false
+}
+
+struct NearHop {
+    n: usize,
+    a: f64,
+    kind: &'static str,
+    distance: f64,
+    axis: [f64; 3],
+    sense: &'static str,
+    target: [f64; 3],
+    direct: Option<f64>,
+    periodic: Option<f64>,
+    infinite: Option<f64>,
+    status: String,
+}
+
+fn fmt_opt(value: Option<f64>) -> String {
+    value
+        .map(|value| format!("{value:.6}"))
+        .unwrap_or_else(|| "did not converge".to_string())
+}
+
+fn line_fit(xs: &[f64], ys: &[f64]) -> Option<(f64, f64)> {
+    if xs.len() < 2 || xs.len() != ys.len() {
+        return None;
+    }
+    let n = xs.len() as f64;
+    let mut sx = 0.0;
+    let mut sy = 0.0;
+    let mut sxx = 0.0;
+    let mut sxy = 0.0;
+    for (x, y) in xs.iter().zip(ys) {
+        sx += x;
+        sy += y;
+        sxx += x * x;
+        sxy += x * y;
+    }
+    let denom = n * sxx - sx * sx;
+    if denom.abs() < 1.0e-30 {
+        return None;
+    }
+    let slope = (n * sxy - sx * sy) / denom;
+    let intercept = (sy - slope * sx) / n;
+    Some((intercept, slope))
+}
+
+fn study_cell(n: usize, a: f64) -> Vec<NearHop> {
+    let _ = std::io::stderr().flush();
+    let (moduli_pos, moduli_cell) = fcc(4, a);
+    let g = 1.0e-4;
+    let copper = Copper::new();
+    let base = copper.evaluate(moduli_pos.view(), moduli_cell).2;
+    let (stretched, stretched_cell) = deform(
+        &moduli_pos,
+        moduli_cell,
+        [[g, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+    );
+    let uniaxial = copper.evaluate(stretched.view(), stretched_cell).2;
+    let c11 = (uniaxial[0][0] - base[0][0]) / g;
+    let c12 = (uniaxial[1][1] - base[1][1]) / g;
+    let (sheared, sheared_cell) = deform(
+        &moduli_pos,
+        moduli_cell,
+        [[0.0, g, 0.0], [g, 0.0, 0.0], [0.0, 0.0, 0.0]],
+    );
+    let shear = copper.evaluate(sheared.view(), sheared_cell).2;
+    let c44 = (shear[0][1] - base[0][1]) / (2.0 * g);
+    let solid = CubicElasticity::new(c11, c12, c44).unwrap();
+
+    let (perfect, cell) = fcc(n, a);
+    let perfect = &perfect;
+    let length = n as f64 * a;
+    let mut bulk = perfect.clone();
+    relax(&copper, &mut bulk, cell, 1e-3, 300);
+    let (e_bulk, _, sigma_bulk) = copper.evaluate(bulk.view(), cell);
+    let volume = det(cell).abs();
+    let vacancy_site = nearest_atom(perfect, [0.0, 0.0, 0.0]);
+    let mut vacancy = drop_atoms(perfect, &[vacancy_site]);
+    relax(&copper, &mut vacancy, cell, 1e-3, 300);
+    let (_, _, sigma_vac) = copper.evaluate(vacancy.view(), cell);
+    let p_vacancy = ElasticDipole::from_residual_stress(volume, sigma_vac, sigma_bulk).unwrap();
+
+    let neighbor = nearest_atom(perfect, [0.0, 0.5 * a, 0.5 * a]);
+    let (trans_i, trans_f) = matched_dumbbells(
+        perfect,
+        vacancy_site,
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        neighbor,
+        [0.0, 0.5 * a, 0.5 * a],
+        [0.0, 1.0, 0.0],
+        &[],
+    );
+    let (rot_i, rot_f) = matched_dumbbells(
+        perfect,
+        vacancy_site,
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        vacancy_site,
+        [0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        &[],
+    );
+    let (translation, rotation) = std::thread::scope(|scope| {
+        let translation = scope.spawn(|| {
+            dimer_endpoints(&Copper::new(), cell, trans_i, trans_f, 3, [0.0, 0.0, 0.0])
+        });
+        let rotation = scope.spawn(|| {
+            dimer_endpoints(&Copper::new(), cell, rot_i, rot_f, 2, [0.0, 0.0, 0.0])
+        });
+        (
+            translation.join().expect("translation"),
+            rotation.join().expect("rotation"),
+        )
+    });
+    eprintln!(
+        "CELL n={n} a={a:.5} C11={c11:.6} C12={c12:.6} C44={c44:.6} Pxx={:.6} translation0={} rotation0={}",
+        p_vacancy.tensor()[0][0],
+        if translation.converged {
+            format!("{:.6}", translation.barrier)
+        } else {
+            format!("did not converge {}", translation.status)
+        },
+        if rotation.converged {
+            format!("{:.6}", rotation.barrier)
+        } else {
+            format!("did not converge {}", rotation.status)
+        }
+    );
+    let _ = std::io::stderr().flush();
+    if !translation.converged || !rotation.converged {
+        return Vec::new();
+    }
+    let p_trans_min =
+        ElasticDipole::from_residual_stress(volume, translation.sigma_min, sigma_bulk).unwrap();
+    let p_rot_min =
+        ElasticDipole::from_residual_stress(volume, rotation.sigma_min, sigma_bulk).unwrap();
+    let p_trans =
+        ElasticDipole::from_residual_stress(volume, translation.sigma_sad, sigma_bulk).unwrap();
+    let p_rot = ElasticDipole::from_residual_stress(volume, rotation.sigma_sad, sigma_bulk).unwrap();
+    let trans_response = StrainResponse::new(translation.barrier, p_trans_min, p_trans).unwrap();
+    let rot_response = StrainResponse::new(rotation.barrier, p_rot_min, p_rot).unwrap();
+
+    let fractions = [
+        [-1.0, 0.0, 0.0],
+        [-1.0, -1.0, 0.0],
+        [-1.0, -1.0, -1.0],
+        [-1.5, -0.5, -1.0],
+        [-2.0, 0.0, 0.0],
+    ];
+    let axes = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    #[derive(Clone)]
+    struct Placement {
+        distance: f64,
+        r: [f64; 3],
+        center: [f64; 3],
+        axis: [f64; 3],
+    }
+    let mut specs = Vec::new();
+    for fraction in fractions {
+        let r = [fraction[0] * a, fraction[1] * a, fraction[2] * a];
+        let center = wrap_cell(r, length);
+        let site = nearest_atom(perfect, center);
+        if site == vacancy_site {
+            continue;
+        }
+        for axis in axes {
+            specs.push((r, center, axis));
+        }
+    }
+    let mut placed = Vec::new();
+    for chunk in specs.chunks(8) {
+        let found = std::thread::scope(|scope| {
+            let mut joins = Vec::new();
+            for (r, center, axis) in chunk {
+                joins.push(scope.spawn(move || {
+                    let local = Copper::new();
+                    let site = nearest_atom(perfect, *center);
+                    let body = drop_atoms(perfect, &[vacancy_site, site]);
+                    let mut minimum = with_dumbbell(&body, *center, *axis, 2.05);
+                    relax(&local, &mut minimum, cell, 1e-3, 250);
+                    let (energy, _, _) = local.evaluate(minimum.view(), cell);
+                    let (split, dir) = pair_distance(&minimum, cell);
+                    let (to_100, _, _, _) = axis_report(dir);
+                    let above = energy - e_bulk;
+                    let dumbbell = (1.8..2.45).contains(&split) && to_100 < 35.0 && above > 1.0;
+                    eprintln!(
+                        "relax n={n} a={a:.5} r={:.4} axis={axis:?} split={split:.4} angle_100={to_100:.2} above_bulk={above:.6} kept={dumbbell}",
+                        length3(*r)
+                    );
+                    dumbbell.then_some(Placement {
+                        distance: length3(*r),
+                        r: *r,
+                        center: *center,
+                        axis: *axis,
+                    })
+                }));
+            }
+            joins
+                .into_iter()
+                .map(|join| join.join().expect("relax"))
+                .collect::<Vec<_>>()
+        });
+        for place in found.into_iter().flatten() {
+            placed.push(place);
+        }
+    }
+    let _ = std::io::stderr().flush();
+
+    #[derive(Clone)]
+    struct Task {
+        kind: &'static str,
+        distance: f64,
+        r: [f64; 3],
+        center: [f64; 3],
+        axis: [f64; 3],
+        jump: [f64; 3],
+        rotation: [[f64; 3]; 3],
+        sense: &'static str,
+    }
+    let rotations = cubic_rotations();
+    let a0 = [1.0, 0.0, 0.0];
+    let d0 = [0.0, 0.5 * a, 0.5 * a];
+    let mut tasks = Vec::new();
+    for place in &placed {
+        let jumps = nn_jumps(a, place.axis);
+        let mut scored: Vec<(f64, [f64; 3])> = jumps
+            .into_iter()
+            .map(|jump| {
+                let end = mic_delta(
+                    [
+                        place.r[0] + jump[0],
+                        place.r[1] + jump[1],
+                        place.r[2] + jump[2],
+                    ],
+                    [0.0, 0.0, 0.0],
+                    cell,
+                );
+                (length3(end), jump)
+            })
+            .collect();
+        scored.sort_by(|left, right| left.0.total_cmp(&right.0));
+        for (sense, end) in [("toward", scored.first()), ("away", scored.last())] {
+            let Some((_, jump)) = end else { continue };
+            if !near_shell("translation", place.distance, a, place.axis, sense) {
+                continue;
+            }
+            let Some(rotation) = rotations.iter().copied().find(|q| {
+                same_axis(mat_vec(*q, a0), place.axis) && same_dir(mat_vec(*q, d0), *jump)
+            }) else {
+                eprintln!(
+                    "no translation image n={n} r={:.4} axis={:?} jump={jump:?}",
+                    place.distance, place.axis
+                );
+                continue;
+            };
+            tasks.push(Task {
+                kind: "translation",
+                distance: place.distance,
+                r: place.r,
+                center: place.center,
+                axis: place.axis,
+                jump: *jump,
+                rotation,
+                sense,
+            });
+        }
+        for target in axes {
+            if same_axis(target, place.axis) {
+                continue;
+            }
+            let align = (unit(target)[0] * unit(place.r)[0]
+                + unit(target)[1] * unit(place.r)[1]
+                + unit(target)[2] * unit(place.r)[2])
+            .abs();
+            let sense = if align > 0.7 {
+                "axis-along-r"
+            } else {
+                "axis-across-r"
+            };
+            if !near_shell("rotation", place.distance, a, place.axis, sense) {
+                continue;
+            }
+            let Some(rotation) = rotations.iter().copied().find(|q| {
+                same_axis(mat_vec(*q, a0), place.axis)
+                    && same_axis(mat_vec(*q, [0.0, 1.0, 0.0]), target)
+            }) else {
+                continue;
+            };
+            tasks.push(Task {
+                kind: "rotation",
+                distance: place.distance,
+                r: place.r,
+                center: place.center,
+                axis: place.axis,
+                jump: target,
+                rotation,
+                sense,
+            });
+        }
+    }
+    eprintln!("hop tasks n={n} a={a:.5} {}", tasks.len());
+    let _ = std::io::stderr().flush();
+
+    let translation = &translation;
+    let rotation = &rotation;
+    let trans_response = &trans_response;
+    let rot_response = &rot_response;
+    let mut hops = Vec::new();
+    for chunk in tasks.chunks(8) {
+        let found = std::thread::scope(|scope| {
+            let mut joins = Vec::new();
+            for task in chunk {
+                joins.push(scope.spawn(move || {
+                    let local = Copper::new();
+                    let response: &StrainResponse = if task.kind == "translation" {
+                        trans_response
+                    } else {
+                        rot_response
+                    };
+                    let hop: &HopRun = if task.kind == "translation" {
+                        translation
+                    } else {
+                        rotation
+                    };
+                    let oriented = StrainResponse::new(
+                        response.barrier0(),
+                        response.minimum().transform(task.rotation),
+                        response.saddle().transform(task.rotation),
+                    )
+                    .expect("oriented hop");
+                    let offset = mat_vec(task.rotation, hop.saddle_offset);
+                    let saddle_r = [
+                        task.r[0] + offset[0],
+                        task.r[1] + offset[1],
+                        task.r[2] + offset[2],
+                    ];
+                    let periodic = oriented
+                        .hops_from_periodic_ends(&solid, task.r, saddle_r, cell, p_vacancy, 1)
+                        .ok()
+                        .and_then(|rows| rows.first().map(|row| row.barrier));
+                    let infinite = oriented
+                        .hops_from_dipole_ends(&solid, task.r, saddle_r, p_vacancy)
+                        .ok()
+                        .and_then(|rows| rows.first().map(|row| row.barrier));
+                    let site_i = nearest_atom(perfect, task.center);
+                    let site_f = if task.kind == "translation" {
+                        nearest_atom(
+                            perfect,
+                            wrap_cell(
+                                [
+                                    task.center[0] + task.jump[0],
+                                    task.center[1] + task.jump[1],
+                                    task.center[2] + task.jump[2],
+                                ],
+                                length,
+                            ),
+                        )
+                    } else {
+                        site_i
+                    };
+                    let (direct, status) = if task.kind == "translation"
+                        && (site_f == vacancy_site || site_f == site_i)
+                    {
+                        (None, "left the hop (endpoint is the vacancy)".to_string())
+                    } else {
+                        direct_on_hop(
+                            &local,
+                            hop,
+                            task.rotation,
+                            task.center,
+                            length,
+                            cell,
+                            task.kind,
+                        )
+                    };
+                    let row = NearHop {
+                        n,
+                        a,
+                        kind: task.kind,
+                        distance: task.distance,
+                        axis: task.axis,
+                        sense: task.sense,
+                        target: task.jump,
+                        direct,
+                        periodic,
+                        infinite,
+                        status,
+                    };
+                    eprintln!(
+                        "NEAR n={n} a={a:.5} kind={} r={:.4} sense={} axis={:.0},{:.0},{:.0} target={:.0},{:.0},{:.0} direct={} periodic={} infinite={} status={}",
+                        row.kind,
+                        row.distance,
+                        row.sense,
+                        row.axis[0],
+                        row.axis[1],
+                        row.axis[2],
+                        row.target[0],
+                        row.target[1],
+                        row.target[2],
+                        fmt_opt(row.direct),
+                        fmt_opt(row.periodic),
+                        fmt_opt(row.infinite),
+                        row.status
+                    );
+                    let _ = std::io::stderr().flush();
+                    row
+                }));
+            }
+            joins
+                .into_iter()
+                .map(|join| join.join().expect("hop"))
+                .collect::<Vec<_>>()
+        });
+        hops.extend(found);
+    }
+    hops
+}
+
+/// Direct near-shell barriers against cell size and thermal expansion.
+///
+/// The translations are the 5.112 Å [001] and 6.763 Å [100] toward/away
+/// pairs. The rotations are the ones that converged inside 7.5 Å. The
+/// lattice parameters 3.62831, 3.63867 and 3.64979 Å are the 300, 500 and
+/// 700 K NPT values.
+#[test]
+#[ignore = "10x10x10, 12x12x12 and the expanded 8x8x8 lattices; run in release"]
+fn near_shell_gaps_versus_cell_and_lattice() {
+    let study = std::env::var("STUDY").unwrap_or_else(|_| "all".to_string());
+    let mut jobs = Vec::new();
+    if study == "all" || study == "size" {
+        jobs.extend([(8usize, 3.615), (10, 3.615), (12, 3.615)]);
+    }
+    if study == "all" || study == "lattice" {
+        jobs.extend([(8, 3.62831), (8, 3.63867), (8, 3.64979)]);
+    }
+    let mut hops = Vec::new();
+    for (n, a) in jobs {
+        hops.extend(study_cell(n, a));
+    }
+    report_near(&hops);
+}
+
+fn report_near(hops: &[NearHop]) {
+    let mut shells = Vec::new();
+    for hop in hops.iter().filter(|hop| hop.kind == "translation") {
+        let key = (
+            hop.n,
+            (hop.a * 1.0e5).round() as i64,
+            (hop.distance / hop.a * 1.0e4).round() as i64,
+            hop.axis,
+        );
+        if shells.iter().any(|prior| *prior == key) {
+            continue;
+        }
+        shells.push(key);
+        let toward = hops.iter().find(|other| {
+            other.n == hop.n
+                && other.a == hop.a
+                && other.kind == "translation"
+                && (other.distance - hop.distance).abs() < 1.0e-3
+                && other.axis == hop.axis
+                && other.sense == "toward"
+        });
+        let away = hops.iter().find(|other| {
+            other.n == hop.n
+                && other.a == hop.a
+                && other.kind == "translation"
+                && (other.distance - hop.distance).abs() < 1.0e-3
+                && other.axis == hop.axis
+                && other.sense == "away"
+        });
+        let Some(toward) = toward else { continue };
+        let Some(away) = away else { continue };
+        let gap = match (toward.direct, away.direct) {
+            (Some(toward_b), Some(away_b)) => Some(away_b - toward_b),
+            _ => None,
+        };
+        let periodic = match (toward.periodic, away.periodic) {
+            (Some(toward_b), Some(away_b)) => Some(away_b - toward_b),
+            _ => None,
+        };
+        let infinite = match (toward.infinite, away.infinite) {
+            (Some(toward_b), Some(away_b)) => Some(away_b - toward_b),
+            _ => None,
+        };
+        let corrected = match (gap, periodic, infinite) {
+            (Some(gap), Some(periodic), Some(infinite)) => Some(gap - periodic + infinite),
+            _ => None,
+        };
+        eprintln!(
+            "GAP n={} a={:.5} r={:.4} axis={:.0},{:.0},{:.0} toward={} away={} gap={} periodic_gap={} infinite_gap={} corrected_gap={}",
+            hop.n,
+            hop.a,
+            hop.distance,
+            hop.axis[0],
+            hop.axis[1],
+            hop.axis[2],
+            fmt_opt(toward.direct),
+            fmt_opt(away.direct),
+            fmt_opt(gap),
+            fmt_opt(periodic),
+            fmt_opt(infinite),
+            fmt_opt(corrected)
+        );
+    }
+    let mut groups = Vec::new();
+    for hop in hops.iter().filter(|hop| {
+        hop.kind == "translation" && (hop.a - 3.615).abs() < 1.0e-8
+    }) {
+        let key = ((hop.distance / hop.a * 1.0e4).round() as i64, hop.axis);
+        if groups.iter().any(|prior| *prior == key) {
+            continue;
+        }
+        groups.push(key);
+        let mut xs = Vec::new();
+        let mut raw = Vec::new();
+        let mut corrected = Vec::new();
+        for n in [8usize, 10, 12] {
+            let toward = hops.iter().find(|other| {
+                other.n == n
+                    && (other.a - 3.615).abs() < 1.0e-8
+                    && other.kind == "translation"
+                    && (other.distance / other.a * 1.0e4).round() as i64 == key.0
+                    && other.axis == hop.axis
+                    && other.sense == "toward"
+            });
+            let away = hops.iter().find(|other| {
+                other.n == n
+                    && (other.a - 3.615).abs() < 1.0e-8
+                    && other.kind == "translation"
+                    && (other.distance / other.a * 1.0e4).round() as i64 == key.0
+                    && other.axis == hop.axis
+                    && other.sense == "away"
+            });
+            let (Some(toward), Some(away)) = (toward, away) else {
+                eprintln!(
+                    "FIT r_over_a={:.4} axis={:?} n={n} did not converge",
+                    hop.distance / hop.a,
+                    hop.axis
+                );
+                continue;
+            };
+            let Some(gap) = toward.direct.zip(away.direct).map(|(t, a)| a - t) else {
+                eprintln!(
+                    "FIT r_over_a={:.4} axis={:?} n={n} direct did not converge toward={} away={}",
+                    hop.distance / hop.a,
+                    hop.axis,
+                    toward.status,
+                    away.status
+                );
+                continue;
+            };
+            let Some(image) = toward
+                .periodic
+                .zip(away.periodic)
+                .zip(toward.infinite.zip(away.infinite))
+                .map(|((tp, ap), (ti, ai))| (ap - tp) - (ai - ti))
+            else {
+                eprintln!(
+                    "FIT r_over_a={:.4} axis={:?} n={n} image correction did not converge",
+                    hop.distance / hop.a,
+                    hop.axis
+                );
+                continue;
+            };
+            let volume = (n as f64 * 3.615).powi(3);
+            xs.push(1.0 / volume);
+            raw.push(gap);
+            corrected.push(gap - image);
+            eprintln!(
+                "FITPOINT r_over_a={:.4} axis={:.0},{:.0},{:.0} n={n} raw_gap={gap:.6} image={image:.6} corrected_gap={:.6} inv_L3={:.6e}",
+                hop.distance / hop.a,
+                hop.axis[0],
+                hop.axis[1],
+                hop.axis[2],
+                gap - image,
+                1.0 / volume
+            );
+        }
+        if let Some((intercept, slope)) = line_fit(&xs, &corrected) {
+            let spread = corrected.iter().copied().fold(f64::MIN, f64::max)
+                - corrected.iter().copied().fold(f64::MAX, f64::min);
+            eprintln!(
+                "FIT r_over_a={:.4} axis={:.0},{:.0},{:.0} points={} corrected_intercept={intercept:.6} slope_per_inv_L3={slope:.6} corrected_spread={spread:.6}",
+                hop.distance / hop.a,
+                hop.axis[0],
+                hop.axis[1],
+                hop.axis[2],
+                xs.len()
+            );
+        }
+        if let Some((intercept, slope)) = line_fit(&xs, &raw) {
+            eprintln!(
+                "FITRAW r_over_a={:.4} axis={:.0},{:.0},{:.0} points={} raw_intercept={intercept:.6} slope_per_inv_L3={slope:.6}",
+                hop.distance / hop.a,
+                hop.axis[0],
+                hop.axis[1],
+                hop.axis[2],
+                xs.len()
+            );
+        }
+    }
+}
