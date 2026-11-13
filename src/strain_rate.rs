@@ -404,6 +404,12 @@ const REFINE_MAX_MOVE: f64 = 0.02;
 /// farther than this, has left the prediction.
 const REFINE_TRUST_FLOOR: f64 = 0.4;
 
+/// RMS displacement from the predicted saddle below which the reactant
+/// quench is skipped. A different index-1 point on this hop sits several
+/// tenths of an angstrom away; the prediction itself is already within
+/// a few hundredths of the explicit saddle when the image is the right one.
+const REFINE_SKIP_RMS: f64 = 0.08;
+
 #[derive(Clone, Debug, PartialEq)]
 struct CachedBarrier {
     strain: M3,
@@ -639,9 +645,11 @@ impl StrainResponse {
     /// minimum-escape step, and the force gate is the default of
     /// [`MinModeConfig`]. A result is cached only when it is an index-1
     /// saddle, it is still in the neighborhood of the predicted
-    /// geometry, and quenching along the unstable mode reaches the
-    /// reactant energy on one side. Anything else is an error and is
-    /// not cached.
+    /// geometry. A point that stays within [`REFINE_SKIP_RMS`] of the
+    /// prediction, with negative curvature, is accepted without a
+    /// quench. Anything farther, but still inside the neighborhood, is
+    /// checked with one downhill quench. A point that has left the
+    /// neighborhood, or that does not reach the reactant, is not cached.
     pub fn refine<S: PointSurface>(
         &mut self,
         eps: &Strain,
@@ -678,13 +686,9 @@ impl StrainResponse {
                 "the refined saddle left the predicted geometry (an atom moved {moved:.4} A; the neighborhood is {trust:.4} A)"
             )));
         }
-        let (gap_plus, gap_minus) =
-            reactant_gaps(surface, &found.positions, &found.mode, seed.minimum_energy)?;
-        if gap_plus.abs().min(gap_minus.abs()) > 1.0e-2 {
-            return Err(SaddleError::Invalid(format!(
-                "the refined saddle does not connect to the reactant (barrier {:.6} eV, quench gaps {gap_plus:.6} and {gap_minus:.6} eV)",
-                found.barrier
-            )));
+        let rms = rms_shift(&positions, &found.positions);
+        if !(found.curvature < 0.0 && rms <= REFINE_SKIP_RMS) {
+            confirm_reactant(surface, &found, seed.minimum_energy)?;
         }
         let variant = self.lowest(&LocalField::homogeneous(*eps)).0.name.clone();
         self.cache.retain(|row| {
@@ -1070,6 +1074,7 @@ struct FrozenSaddle {
     positions: Array1<f64>,
     mode: Array1<f64>,
     barrier: f64,
+    curvature: f64,
 }
 
 fn run_frozen_dimer<S: PointSurface>(
@@ -1108,30 +1113,45 @@ fn run_frozen_dimer<S: PointSurface>(
         positions: dimer.positions().to_owned(),
         mode: dimer.mode().to_owned(),
         barrier,
+        curvature: report.curvature,
     })
 }
 
-/// Energy of each quenched side of the unstable mode, minus the reactant.
-fn reactant_gaps<S: PointSurface>(
+/// One downhill quench. Used only when the refined point has moved
+/// farther than [`REFINE_SKIP_RMS`] from the prediction. The side that
+/// drops the energy is minimized to a loose force gate.
+fn confirm_reactant<S: PointSurface>(
     surface: &S,
-    saddle: &Array1<f64>,
-    mode: &Array1<f64>,
+    found: &FrozenSaddle,
     minimum_energy: f64,
-) -> Result<(f64, f64), SaddleError> {
-    let norm = mode.dot(mode).sqrt();
+) -> Result<(), SaddleError> {
+    let norm = found.mode.dot(&found.mode).sqrt();
     if !(norm.is_finite() && norm > 1e-14) {
         return Err(SaddleError::Invalid(
             "the refined saddle has no unstable mode".into(),
         ));
     }
-    let unit = mode / norm;
-    let mut gaps = [0.0; 2];
-    for (slot, sign) in [1.0, -1.0].into_iter().enumerate() {
-        let mut trial = saddle + &(&unit * (sign * 0.25));
-        let energy = quench(surface, &mut trial, 1.0e-3, 200)?;
-        gaps[slot] = energy - minimum_energy;
+    let unit = &found.mode / norm;
+    let mut best_sign = 1.0;
+    let mut best_energy = f64::INFINITY;
+    for sign in [1.0, -1.0] {
+        let trial = &found.positions + &(&unit * (sign * 0.2));
+        let (energy, _) = surface.eval(trial.view())?;
+        if energy < best_energy {
+            best_energy = energy;
+            best_sign = sign;
+        }
     }
-    Ok((gaps[0], gaps[1]))
+    let mut trial = &found.positions + &(&unit * (best_sign * 0.25));
+    let energy = quench(surface, &mut trial, 1.0e-2, 40)?;
+    let gap = energy - minimum_energy;
+    if gap.abs() > 5.0e-2 {
+        return Err(SaddleError::Invalid(format!(
+            "the refined saddle does not connect to the reactant (barrier {:.6} eV, quench gap {gap:.6} eV)",
+            found.barrier
+        )));
+    }
+    Ok(())
 }
 
 fn quench<S: PointSurface>(
@@ -1191,6 +1211,15 @@ fn largest_atom_length(values: &Array1<f64>) -> f64 {
 
 fn largest_atom_shift(origin: &Array1<f64>, trial: &Array1<f64>) -> f64 {
     largest_atom_length(&(trial - origin))
+}
+
+fn rms_shift(origin: &Array1<f64>, trial: &Array1<f64>) -> f64 {
+    let delta = trial - origin;
+    let atoms = delta.len() / 3;
+    if atoms == 0 {
+        return 0.0;
+    }
+    (delta.dot(&delta) / atoms as f64).sqrt()
 }
 
 fn deform_cell(cell: M3, eps: M3) -> M3 {
