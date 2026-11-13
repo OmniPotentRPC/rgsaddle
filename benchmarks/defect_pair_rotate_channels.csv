@@ -1,0 +1,11 @@
+kind,shell,orientation,seed,temperature_K,dE0_eV,max_force_eV_A,force_tol_eV_A,index1,assignment,note
+channel,3.639,010,rotate,500,0.247466,3.977449e-4,1.500000e-3,true,rotation,<110> rotation seed; center shift 0.135 A; saddle sits tangential of the vacancy; this seed did not reach the stored 0.135 eV saddle
+channel,3.639,010,translate-away,500,0.005628,1.478112e-3,1.500000e-3,false,translation,away translation guess; did not reach the stored 0.135 eV saddle
+channel,3.639,100,rotate,500,,,,,false,spontaneous,quench recombines
+channel,4.456,100,rotate,500,0.003964,7.012274e-4,1.500000e-3,true,translation,<110> rotation seed; center shift 0.042 A; saddle sits tangential of the vacancy
+channel,5.146,001,rotate,500,0.202398,5.550788e-3,1.500000e-3,false,rotation,<110> rotation seed; center shift 0.112 A; saddle sits tangential of the vacancy
+channel,6.807,001,rotate,500,0.228511,1.493180e-3,1.500000e-3,true,rotation,<110> rotation seed; center shift 0.035 A; saddle sits tangential of the vacancy
+channel,7.277,010,rotate,500,0.224814,1.039485e-3,1.500000e-3,true,rotation,<110> rotation seed; center shift 0.008 A; saddle sits tangential of the vacancy
+channel,7.719,100,rotate,500,,,,,false,spontaneous,quench recombines
+channel,7.719,001,rotate,500,0.212056,1.247152e-3,1.500000e-3,true,rotation,<110> rotation seed; center shift 0.013 A; saddle sits tangential of the vacancy
+channel,8.136,001,rotate,500,0.232121,1.172685e-3,1.500000e-3,true,rotation,<110> rotation seed; center shift 0.008 A; saddle sits tangential of the vacancy

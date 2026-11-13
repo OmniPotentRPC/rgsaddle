@@ -1,0 +1,4 @@
+kind,shell,orientation,seed,temperature_K,dE0_eV,max_force_eV_A,force_tol_eV_A,index1,assignment,note
+translation,isolated,100,neighbor,300,0.093402,1.093427e-3,1.500000e-3,true,translation,neighbor mechanism on lattice a=3.628311; stored 0.094614 differs by 0.001212 eV
+translation,isolated,100,neighbor,500,0.089786,1.374555e-3,1.500000e-3,true,translation,neighbor mechanism on lattice a=3.638666; stored 0.090966 differs by 0.001180 eV
+translation,isolated,100,neighbor,700,0.085962,1.267309e-3,1.500000e-3,true,translation,neighbor mechanism on lattice a=3.649788

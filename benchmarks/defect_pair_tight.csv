@@ -1,0 +1,85 @@
+kind,shell,orientation,seed,temperature_K,dE0_eV,max_force_eV_A,force_tol_eV_A,index1,assignment,note
+rotation,isolated,100,rotate,300,0.229987,8.314823e-4,1.500000e-3,true,rotation,own lattice a=3.628311; dimer force tolerance
+translation,isolated,100,translate,300,0.169126,8.929219e-4,1.500000e-3,false,translation,own lattice a=3.628311; dimer force tolerance
+rotation,isolated,100,rotate,500,0.225502,8.927472e-4,1.500000e-3,true,rotation,own lattice a=3.638666; dimer force tolerance
+translation,isolated,100,translate,500,0.164580,8.812112e-4,1.500000e-3,false,translation,own lattice a=3.638666; dimer force tolerance
+rotation,isolated,100,rotate,700,0.220765,1.375248e-3,1.500000e-3,true,rotation,own lattice a=3.649788; dimer force tolerance
+translation,isolated,100,translate,700,0.159854,1.392694e-3,1.500000e-3,false,translation,own lattice a=3.649788; dimer force tolerance
+capture,5.146,001,capture,500,0.067288,1.449552e-3,1.500000e-3,true,translation,loose 0.04 eV/A barrier 0.066376; polished at 1.5e-3
+capture,4.456,100,capture,500,0.004049,1.491999e-3,1.500000e-3,true,translation,loose 0.04 eV/A barrier 0.007957; polished at 1.5e-3
+capture,6.302,100,capture,500,0.075288,1.469502e-3,1.500000e-3,true,translation,loose 0.04 eV/A barrier 0.088170; polished at 1.5e-3
+capture,6.807,100,capture,500,0.045856,1.237371e-3,1.500000e-3,true,translation,loose 0.04 eV/A barrier 0.051256; polished at 1.5e-3
+capture,5.753,100,capture,500,0.071456,1.406034e-3,1.500000e-3,true,translation,loose 0.04 eV/A barrier 0.106333; polished at 1.5e-3
+capture,8.136,100,capture,500,,,,,false,,no connecting saddle in 2 index-1 of 24 seeds at 0.04 eV/A before the 1.5e-3 polish
+capture,5.131,001,capture,300,,,,,false,,no connecting saddle in 0 index-1 of 24 seeds at 0.04 eV/A before the 1.5e-3 polish
+capture,4.443,100,capture,300,0.002997,1.460277e-3,1.500000e-3,true,translation,loose 0.04 eV/A barrier 0.006044; polished at 1.5e-3
+capture,6.284,100,capture,300,0.078096,1.275166e-3,1.500000e-3,true,translation,loose 0.04 eV/A barrier 0.098901; polished at 1.5e-3
+capture,6.788,100,capture,300,0.046691,1.265456e-3,1.500000e-3,true,translation,loose 0.04 eV/A barrier 0.045101; polished at 1.5e-3
+capture,5.737,100,capture,300,0.057415,8.607484e-4,1.500000e-3,true,translation,loose 0.04 eV/A barrier 0.079549; polished at 1.5e-3
+capture,8.113,100,capture,300,,,,,false,,no connecting saddle in 5 index-1 of 24 seeds at 0.04 eV/A before the 1.5e-3 polish
+capture,5.162,001,capture,700,0.065252,1.436885e-3,1.500000e-3,true,translation,loose 0.04 eV/A barrier 0.072268; polished at 1.5e-3
+capture,4.470,100,capture,700,0.005330,1.184044e-3,1.500000e-3,true,translation,loose 0.04 eV/A barrier 0.007528; polished at 1.5e-3
+capture,6.321,100,capture,700,,,,,false,,no connecting saddle in 2 index-1 of 24 seeds at 0.04 eV/A before the 1.5e-3 polish
+capture,6.828,100,capture,700,0.044954,9.336104e-4,1.500000e-3,true,translation,loose 0.04 eV/A barrier 0.047467; polished at 1.5e-3
+capture,5.771,100,capture,700,,,,,false,,no connecting saddle in 2 index-1 of 24 seeds at 0.04 eV/A before the 1.5e-3 polish
+capture,8.161,100,capture,700,,,,,false,,no connecting saddle in 3 index-1 of 24 seeds at 0.04 eV/A before the 1.5e-3 polish
+channel,10.292,001,translate,500,0.088827,1.360261e-3,1.500000e-3,true,translation,seed translate landed on translation; direction tangential
+channel,10.292,001,translate,500,0.088888,1.354886e-3,1.500000e-3,true,translation,seed translate landed on translation; direction tangential
+channel,10.292,001,translate,500,0.088827,1.360261e-3,1.500000e-3,true,translation,seed translate landed on translation; direction tangential
+channel,10.292,001,translate,500,0.088888,1.354886e-3,1.500000e-3,true,translation,seed translate landed on translation; direction tangential
+channel,10.292,100,translate,500,0.098262,1.102197e-3,1.500000e-3,true,translation,seed translate landed on translation; direction away
+channel,10.292,100,translate,500,0.090156,1.429789e-3,1.500000e-3,true,translation,seed translate landed on translation; direction away
+channel,10.292,100,translate,500,0.094686,1.208596e-3,1.500000e-3,true,translation,seed translate landed on translation; direction away
+channel,10.292,100,translate,500,0.094686,1.208596e-3,1.500000e-3,true,translation,seed translate landed on translation; direction away
+channel,10.608,001,translate,500,0.088361,1.155670e-3,1.500000e-3,true,translation,seed translate landed on translation; direction tangential
+channel,10.608,001,translate,500,0.091121,1.411233e-3,1.500000e-3,true,translation,seed translate landed on translation; direction tangential
+channel,10.608,001,translate,500,0.091058,1.400122e-3,1.500000e-3,true,translation,seed translate landed on translation; direction tangential
+channel,10.608,001,translate,500,0.088940,1.348406e-3,1.500000e-3,true,translation,seed translate landed on translation; direction tangential
+channel,10.608,010,translate,500,0.089032,1.176840e-3,1.500000e-3,true,translation,seed translate landed on translation; direction away
+channel,10.608,010,translate,500,0.086008,1.088589e-3,1.500000e-3,true,translation,seed translate landed on translation; direction tangential
+channel,10.608,010,translate,500,0.087544,1.297820e-3,1.500000e-3,true,translation,seed translate landed on translation; direction away
+channel,10.608,010,translate,500,0.087544,1.297820e-3,1.500000e-3,true,translation,seed translate landed on translation; direction away
+channel,10.608,100,translate,500,0.089100,1.327371e-3,1.500000e-3,true,translation,seed translate landed on translation; direction away
+channel,10.608,100,translate,500,0.089128,1.357425e-3,1.500000e-3,true,translation,seed translate landed on translation; direction away
+channel,10.608,100,translate,500,0.088886,1.330071e-3,1.500000e-3,true,translation,seed translate landed on translation; direction away
+channel,10.608,100,translate,500,0.088886,1.330071e-3,1.500000e-3,true,translation,seed translate landed on translation; direction away
+channel,3.639,010,translate,500,0.141181,1.173340e-3,1.500000e-3,true,translation,seed translate landed on translation; direction away
+channel,3.639,010,translate,500,0.005843,1.438653e-3,1.500000e-3,true,translation,seed translate landed on translation; direction tangential
+channel,3.639,010,translate,500,0.005826,1.102048e-3,1.500000e-3,true,translation,seed translate landed on translation; direction tangential
+channel,3.639,010,translate,500,0.005826,1.102048e-3,1.500000e-3,true,translation,seed translate landed on translation; direction tangential
+channel,4.456,100,translate,500,0.097329,7.773474e-4,1.500000e-3,true,translation,seed translate landed on translation; direction away
+channel,4.456,100,translate,500,0.082252,1.476623e-3,1.500000e-3,true,translation,seed translate landed on translation; direction away
+channel,4.456,100,translate,500,0.097329,7.773474e-4,1.500000e-3,true,translation,seed translate landed on translation; direction away
+channel,4.456,100,translate,500,0.082252,1.481448e-3,1.500000e-3,true,translation,seed translate landed on translation; direction away
+channel,5.146,001,translate,500,0.067284,1.137361e-3,1.500000e-3,true,translation,seed translate landed on translation; direction tangential
+channel,5.146,001,translate,500,0.094089,1.235834e-3,1.500000e-3,true,translation,seed translate landed on translation; direction tangential
+channel,5.146,001,translate,500,0.067284,1.137361e-3,1.500000e-3,true,translation,seed translate landed on translation; direction tangential
+channel,5.146,001,translate,500,0.094089,1.235834e-3,1.500000e-3,true,translation,seed translate landed on translation; direction tangential
+channel,5.753,001,translate,500,0.078376,5.573019e-4,1.500000e-3,true,translation,seed translate landed on translation; direction tangential
+channel,5.753,001,translate,500,0.096743,1.177323e-3,1.500000e-3,true,translation,seed translate landed on translation; direction away
+channel,5.753,001,translate,500,0.090268,1.397770e-3,1.500000e-3,true,translation,seed translate landed on translation; direction tangential
+channel,5.753,001,translate,500,0.087554,8.536812e-4,1.500000e-3,true,translation,seed translate landed on translation; direction tangential
+channel,5.753,010,translate,500,0.084526,4.111639e-4,1.500000e-3,true,translation,seed translate landed on translation; direction away
+channel,5.753,010,translate,500,0.045431,1.285625e-3,1.500000e-3,true,translation,seed translate landed on translation; direction tangential
+channel,5.753,010,translate,500,0.057827,1.321156e-1,1.500000e-3,false,translation,seed translate landed on translation; direction tangential
+channel,5.753,010,translate,500,0.057727,1.324284e-1,1.500000e-3,false,translation,seed translate landed on translation; direction tangential
+channel,5.753,100,translate,500,0.085885,1.350967e-3,1.500000e-3,true,translation,seed translate landed on translation; direction away
+channel,5.753,100,translate,500,0.089719,1.453645e-3,1.500000e-3,true,translation,seed translate landed on translation; direction away
+channel,5.753,100,translate,500,0.086975,1.317190e-3,1.500000e-3,true,translation,seed translate landed on translation; direction away
+channel,5.753,100,translate,500,0.086975,1.317190e-3,1.500000e-3,true,translation,seed translate landed on translation; direction away
+channel,6.302,100,translate,500,0.093147,5.579013e-4,1.500000e-3,true,translation,seed translate landed on translation; direction away
+channel,6.302,100,translate,500,0.087702,1.291476e-3,1.500000e-3,true,translation,seed translate landed on translation; direction away
+channel,6.302,100,translate,500,0.093147,5.579013e-4,1.500000e-3,true,translation,seed translate landed on translation; direction away
+channel,6.302,100,translate,500,0.087702,1.291476e-3,1.500000e-3,true,translation,seed translate landed on translation; direction away
+channel,6.807,001,translate,500,0.097605,1.280655e-3,1.500000e-3,true,translation,seed translate landed on translation; direction tangential
+channel,6.807,001,translate,500,0.089901,1.185212e-3,1.500000e-3,true,translation,seed translate landed on translation; direction away
+channel,6.807,001,translate,500,0.092911,1.264538e-3,1.500000e-3,true,translation,seed translate landed on translation; direction tangential
+channel,6.807,001,translate,500,0.094531,1.240946e-3,1.500000e-3,true,translation,seed translate landed on translation; direction away
+channel,6.807,010,translate,500,0.087961,1.109864e-3,1.500000e-3,true,translation,seed translate landed on translation; direction away
+channel,6.807,010,translate,500,0.098325,8.200576e-4,1.500000e-3,true,translation,seed translate landed on translation; direction tangential
+channel,6.807,010,translate,500,0.095159,1.480835e-3,1.500000e-3,true,translation,seed translate landed on translation; direction away
+channel,6.807,010,translate,500,0.093228,1.460665e-3,1.500000e-3,true,translation,seed translate landed on translation; direction away
+channel,6.807,100,translate,500,0.098557,9.867682e-4,1.500000e-3,true,translation,seed translate landed on translation; direction away
+channel,6.807,100,translate,500,0.089842,1.388446e-3,1.500000e-3,true,translation,seed translate landed on translation; direction away
+channel,6.807,100,translate,500,0.096134,1.101827e-3,1.500000e-3,true,translation,seed translate landed on translation; direction away
+channel,6.807,100,translate,500,0.092501,1.184399e-3,1.500000e-3,true,translation,seed translate landed on translation; direction away

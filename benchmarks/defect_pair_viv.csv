@@ -9,3 +9,49 @@ cell_repeats,temperature_K,spontaneous_sites,table_1_Omega
 10,500,24,4000: 309±18 and 287±34; 8788: 185±23 and 161±15
 10,600,24,4000: 218±13 and 238±22; 8788: 186±14 and 191±18
 10,700,30,8788: 203±10 and 210±21
+ref,2.573,001,capture,toward,500,0.006367,,,,,index1,0,n=2 lowest_relative -0.0028 reference -7242.1206
+capture,2.573,001,capture,toward,500,0.006367,0.000000,,,,,not_converged,0.00789,downhill_rel -0.602
+ref,3.639,010,capture,toward,500,,,,,,not_converged,0,no recombination saddle in 6 index-1 of 32 seeds; reference -7242.3470
+ref,3.639,100,capture,toward,500,0.000000,,,,,barrierless,0,quench fell into recombination
+ref,3.639,001,capture,toward,500,,,,,,not_converged,0,no recombination saddle in 8 index-1 of 48 seeds; reference -7242.3470
+ref,4.456,100,capture,toward,500,0.007957,,,,,index1,0,n=6 lowest_relative 0.0080 reference -7242.3153
+capture,4.456,100,capture,toward,500,0.007957,0.003933,,,,,index1,0.00175,downhill_rel -0.614
+pafi,4.456,100,capture,toward,500,0.007957,0.003933,0.000000,0.000000,7.36021340e11,2.32765120e11,rated,0.00175,kappa 0.316248
+pafi,4.456,100,capture,toward,300,0.007957,0.003933,0.000000,0.000000,7.36021340e11,2.32765120e11,rated,0.00175,kappa 0.316248
+ref,4.456,010,capture,toward,500,0.000000,,,,,barrierless,0,quench fell into recombination
+ref,5.146,001,capture,toward,500,0.066376,,,,,index1,0,n=3 lowest_relative 0.0664 reference -7242.3020
+capture,5.146,001,capture,toward,500,0.066376,0.000162,,,,,not_converged,0.00308,downhill_rel 0.000
+ref,6.302,100,capture,toward,500,0.088170,,,,,index1,0,n=1 lowest_relative 0.0882 reference -7242.2956
+capture,6.302,100,capture,toward,500,0.088170,0.075221,,,,,index1,0.00098,downhill_rel -0.555
+pafi,6.302,100,capture,toward,500,0.088170,0.075221,0.066179,0.006688,1.35417611e12,1.75025347e11,rated,0.00098,kappa 0.600449
+pafi,6.302,100,capture,toward,300,0.088170,0.075221,0.068348,0.006789,1.35417611e12,5.78031585e10,rated,0.00098,kappa 0.600449
+ref,6.302,010,capture,toward,500,0.083339,,,,,index1,0,n=1 lowest_relative 0.0833 reference -7242.2956
+capture,6.302,010,capture,toward,500,0.083339,0.075226,,,,,index1,0.00194,downhill_rel -0.536
+pafi,6.302,010,capture,toward,500,0.083339,0.075226,0.101179,0.006478,1.35397978e12,5.16482252e10,rated,0.00194,kappa 0.399281
+pafi,6.302,010,capture,toward,300,0.083339,0.075226,0.087884,0.006901,1.35397978e12,1.80514148e10,rated,0.00194,kappa 0.399281
+ref,6.807,100,capture,toward,500,0.051256,,,,,index1,0,n=3 lowest_relative 0.0513 reference -7242.3028
+capture,6.807,100,capture,toward,500,0.051256,0.045834,,,,,index1,0.00169,downhill_rel -0.598
+pafi,6.807,100,capture,toward,500,0.051256,0.045834,0.023612,0.007154,1.19626629e12,2.56512939e11,rated,0.00169,kappa 0.370921
+pafi,6.807,100,capture,toward,300,0.051256,0.045834,0.029458,0.004296,1.19626629e12,1.41985515e11,rated,0.00169,kappa 0.370921
+ref,7.277,100,capture,toward,500,,,,,,not_converged,0,no recombination saddle in 2 index-1 of 32 seeds; reference -7242.2840
+ref,7.719,100,capture,toward,500,0.000000,,,,,barrierless,0,quench fell into recombination
+ref,2.566,001,capture,toward,300,0.000338,,,,,index1,0,n=5 lowest_relative -0.0112 reference -7244.7150
+ref,3.629,010,capture,toward,300,,,,,,not_converged,0,no recombination saddle in 14 index-1 of 32 seeds; reference -7245.2261
+ref,3.629,100,capture,toward,300,0.000000,,,,,barrierless,0,quench fell into recombination
+ref,3.629,001,capture,toward,300,,,,,,not_converged,0,no recombination saddle in 25 index-1 of 48 seeds; reference -7245.2261
+ref,4.443,100,capture,toward,300,0.006044,,,,,index1,0,n=8 lowest_relative 0.0060 reference -7244.9301
+capture,4.443,100,capture,toward,300,0.006044,0.002942,,,,,index1,0.00155,downhill_rel -0.621
+pafi,4.443,100,capture,toward,300,0.006044,0.002942,0.000000,0.000000,6.90612331e11,3.00506105e11,rated,0.00155,kappa 0.435130
+ref,4.443,010,capture,toward,300,0.000000,,,,,barrierless,0,quench fell into recombination
+ref,5.131,001,capture,toward,300,0.076365,,,,,index1,0,n=1 lowest_relative 0.0764 reference -7244.9153
+capture,5.131,001,capture,toward,300,0.076365,0.069119,,,,,index1,0.00114,downhill_rel -0.578
+pafi,5.131,001,capture,toward,300,0.076365,0.069119,0.071264,0.006951,1.36109145e12,,rated,0.00114,kappa -0.192075
+ref,2.581,001,capture,toward,700,0.000376,,,,,index1,0,n=9 lowest_relative -0.0096 reference -7237.6472
+ref,3.650,010,capture,toward,700,,,,,,not_converged,0,no recombination saddle in 11 index-1 of 32 seeds; reference -7237.8438
+ref,3.650,100,capture,toward,700,0.000000,,,,,barrierless,0,recombines before the quench
+ref,3.650,001,capture,toward,700,,,,,,not_converged,0,no recombination saddle in 8 index-1 of 48 seeds; reference -7237.8438
+ref,4.470,100,capture,toward,700,0.005894,,,,,index1,0,n=10 lowest_relative 0.0059 reference -7237.8204
+capture,4.470,100,capture,toward,700,0.005894,0.005255,,,,,index1,0.00186,downhill_rel -0.637
+ref,4.470,010,capture,toward,700,0.000000,,,,,barrierless,0,quench fell into recombination
+ref,5.162,001,capture,toward,700,0.072268,,,,,index1,0,n=2 lowest_relative 0.0723 reference -7237.8086
+capture,5.162,001,capture,toward,700,0.072268,0.065213,,,,,index1,0.00112,downhill_rel -0.597

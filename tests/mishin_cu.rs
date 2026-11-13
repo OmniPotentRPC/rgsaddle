@@ -6435,7 +6435,7 @@ fn survey_shell(
 fn write_viv_summary(copper: &FastCopper) {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks");
     let mut text = String::new();
-    for name in ["defect_pair_viv.csv", "defect_pair_local.csv", "defect_pair_run9.csv"] {
+    for name in ["defect_pair_viv.csv", "defect_pair_local.csv", "defect_pair_run9.csv", "defect_pair_tight.csv"] {
         if let Ok(extra) = std::fs::read_to_string(root.join(name)) {
             text.push_str(&extra);
             text.push('\n');
@@ -6498,7 +6498,13 @@ fn write_viv_summary(copper: &FastCopper) {
             match volume {
                 Ok(value) => {
                     let pending = unresolved.join(" ");
-                    writeln!(out, "{temperature},{threshold_meV},{:.6},{},{},,{pending}", value.volume / omega, value.spontaneous_sites, value.kinetic_sites).unwrap();
+                    let demkowicz = match temperature as i32 {
+                        300 => "8788 atoms, Table 1: 254 ± 21 and 286 ± 28",
+                        500 => "8788 atoms, Table 1: 185 ± 23 and 161 ± 15",
+                        700 => "8788 atoms, Table 1: 203 ± 10 and 210 ± 21",
+                        _ => "",
+                    };
+                    writeln!(out, "{temperature},{threshold_meV},{:.6},{},{},{demkowicz},{pending}", value.volume / omega, value.spontaneous_sites, value.kinetic_sites).unwrap();
                     eprintln!("V/Omega {temperature} K threshold {threshold_meV} meV = {:.4} spontaneous {} kinetic {} unresolved {}", value.volume / omega, value.spontaneous_sites, value.kinetic_sites, unresolved.len());
                 }
                 Err(error) => {
@@ -6531,31 +6537,47 @@ fn orientation_with_data(text: &str, radius: f64, vector: [f64; 3], orientation:
         ((axis[0] * hat[0] + axis[1] * hat[1] + axis[2] * hat[2]).abs() * 1000.0).round() as i32
     };
     let want = class(orientation);
-    let mut ordered = vec![orientation];
+    let mut best: Option<&'static str> = None;
+    let mut best_force = f64::INFINITY;
+    let mut any: Option<&'static str> = None;
     for label in ["100", "010", "001"] {
-        if label != orientation && class(label) == want {
-            ordered.push(label);
+        if class(label) != want {
+            continue;
         }
-    }
-    for label in ordered {
-        let found = text.lines().any(|line| {
+        let mut has_ref = false;
+        let mut force = None;
+        for line in text.lines() {
             let fields: Vec<&str> = line.split(',').collect();
-            if fields.len() < 6 || (fields[0] != "ref" && fields[0] != "survey") {
-                return false;
+            if fields.len() < 6 {
+                continue;
             }
-            let Ok(shell) = fields[1].parse::<f64>() else { return false };
-            let Ok(temp) = fields[5].parse::<f64>() else { return false };
-            (shell - radius).abs() < 0.05 && fields[2] == label && (temp - temperature).abs() < 1.0
-        });
-        if found {
-            return Some(match label {
-                "100" => "100",
-                "010" => "010",
-                _ => "001",
-            });
+            let Ok(shell) = fields[1].parse::<f64>() else { continue };
+            let Ok(temp) = fields[5].parse::<f64>() else { continue };
+            if (shell - radius).abs() > 0.05 || fields[2] != label || (temp - temperature).abs() > 1.0 {
+                continue;
+            }
+            if fields[0] == "ref" || fields[0] == "survey" {
+                has_ref = true;
+            }
+            if fields[0] == "pafi" && fields.len() > 13 && fields[12] == "rated" {
+                if let Ok(value) = fields[13].parse::<f64>() {
+                    if value.is_finite() {
+                        force = Some(force.map_or(value, |prior: f64| prior.min(value)));
+                    }
+                }
+            }
+        }
+        if has_ref {
+            any = Some(label);
+        }
+        if let Some(value) = force {
+            if value < best_force {
+                best_force = value;
+                best = Some(label);
+            }
         }
     }
-    None
+    best.or(any)
 }
 
 fn lowest_barrier(text: &str, radius: f64, orientation: &str, temperature: f64) -> Option<f64> {
@@ -6598,7 +6620,38 @@ fn isolated_translation_rate(temperature: f64) -> Option<f64> {
     None
 }
 
+fn descended(text: &str, radius: f64, orientation: &str, temperature: f64) -> bool {
+    let mut saw = false;
+    let mut dropped = false;
+    for line in text.lines() {
+        if !line.starts_with("capture,") {
+            continue;
+        }
+        let fields: Vec<&str> = line.split(',').collect();
+        if fields.len() < 6 {
+            continue;
+        }
+        let Ok(shell) = fields[1].parse::<f64>() else { continue };
+        let Ok(temp) = fields[5].parse::<f64>() else { continue };
+        if (shell - radius).abs() > 0.05 || fields[2] != orientation || (temp - temperature).abs() > 1.0 {
+            continue;
+        }
+        saw = true;
+        if let Some(pos) = line.find("downhill_rel ") {
+            if let Ok(value) = line[pos + "downhill_rel ".len()..].split(|c: char| c == ',' || c == ';' || c.is_whitespace()).next().unwrap_or("").parse::<f64>() {
+                if value < -0.02 {
+                    dropped = true;
+                }
+            }
+        }
+    }
+    !saw || dropped
+}
+
 fn pafi_rate(text: &str, radius: f64, orientation: &str, temperature: f64) -> Option<f64> {
+    if !descended(text, radius, orientation, temperature) {
+        return None;
+    }
     for line in text.lines() {
         if !line.starts_with("pafi,") { continue; }
         let fields: Vec<&str> = line.split(',').collect();
@@ -6617,4 +6670,469 @@ fn pafi_rate(text: &str, radius: f64, orientation: &str, temperature: f64) -> Op
         }
     }
     None
+}
+
+const TIGHT_FORCE_EV_PER_A: f64 = 1.5e-3;
+
+struct TightPoint {
+    energy: f64,
+    force: f64,
+    index1: bool,
+    positions: Array1<f64>,
+    mode: Array1<f64>,
+}
+
+fn tight_dimer(
+    copper: &FastCopper,
+    cell: [[f64; 3]; 3],
+    seed: Array1<f64>,
+    mode: Array1<f64>,
+) -> Option<TightPoint> {
+    let norm = mode.dot(&mode).sqrt();
+    if norm < 1.0e-8 {
+        return None;
+    }
+    let search = MinModeConfig {
+        force_tol: TIGHT_FORCE_EV_PER_A,
+        max_move: 0.08,
+        dr: 1.0e-3,
+        max_rotations: 12,
+        ..MinModeConfig::default()
+    };
+    let dimer_config = SolidDimerConfig::frozen(search)
+        .with_index_check(IndexCheck::first_order().with_step(1.0e-3).with_escapes(0));
+    let held = FastHeld { copper, cell };
+    let mut dimer = SolidDimer::new(dimer_config, seed, cell, &mode / norm).ok()?;
+    let report = dimer.run(&held, 200).ok()?;
+    let positions = dimer.positions().to_owned();
+    let (energy, _) = held.eval(positions.view()).ok()?;
+    let index1 = report.status == MinModeStatus::Converged
+        && !report.rejected
+        && report.negative_modes == Some(1)
+        && report.max_force <= TIGHT_FORCE_EV_PER_A * 1.01;
+    Some(TightPoint {
+        energy,
+        force: report.max_force,
+        index1,
+        positions,
+        mode: dimer.mode().to_owned(),
+    })
+}
+
+fn saddle_assignment(reactant: &Array1<f64>, saddle: &Array1<f64>, dumbbell: [usize; 2]) -> &'static str {
+    if axis_dot(axis_of(reactant, dumbbell), axis_of(saddle, dumbbell)) < 0.85 {
+        "rotation"
+    } else {
+        "translation"
+    }
+}
+
+fn write_tight(file: &Mutex<File>, line: &str) {
+    eprintln!("{line}");
+    let _ = std::io::stderr().flush();
+    append_checkpoint(file, &line);
+}
+
+#[test]
+#[ignore = "1.5e-3 eV/A rotation, capture, and channel assignment on each lattice"]
+fn defect_pair_tight() {
+    let started = Instant::now();
+    let copper = FastCopper::new();
+    let repeats = 8usize;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks");
+    let path = root.join("defect_pair_tight.csv");
+    if !path.exists() {
+        let mut header = File::create(&path).expect("tight");
+        writeln!(header, "kind,shell,orientation,seed,temperature_K,dE0_eV,max_force_eV_A,force_tol_eV_A,index1,assignment,note").unwrap();
+    }
+    let checkpoint = Mutex::new(File::options().append(true).open(&path).expect("append"));
+    let mut isolated: Vec<(f64, f64, f64)> = Vec::new();
+    for temperature in [300.0_f64, 500.0, 700.0] {
+        let a = measured_lattice(temperature);
+        let length = repeats as f64 * a;
+        let cell_box = [[length, 0.0, 0.0], [0.0, length, 0.0], [0.0, 0.0, length]];
+        let (perfect, _) = fcc(repeats, a);
+        let (_, _, _bulk) = copper.evaluate(perfect.view(), cell_box);
+        let job = rotation_job(&copper, repeats, a);
+        let dumbbell = [job.mobile[0], job.mobile[1]];
+        let mut reactant = job.positions.clone();
+        relax_fast(&copper, &mut reactant, job.cell, 2.0e-4, 100);
+        let held = FastHeld { copper: &copper, cell: job.cell };
+        let (reactant_energy, _) = held.eval(reactant.view()).unwrap_or((f64::NAN, Array1::zeros(1)));
+        let gap = dist(point_of(&reactant, dumbbell[0]), point_of(&reactant, dumbbell[1]));
+        if !(1.2..2.5).contains(&gap) || !reactant_energy.is_finite() {
+            write_tight(&checkpoint, &format!("rotation,isolated,100,rotate,{temperature},,,,,false,,dumbbell gap {gap:.3} is not bound"));
+            continue;
+        }
+        let center = centroid(&reactant, dumbbell);
+        let half = dist(point_of(&reactant, dumbbell[0]), center).max(0.9);
+        let diagonal = unit3([1.0, 1.0, 0.0]);
+        let mut hint = reactant.clone();
+        let mut mode = Array1::zeros(reactant.len());
+        for (atom, sign) in dumbbell.into_iter().zip([-1.0, 1.0]) {
+            for axis in 0..3 {
+                hint[3 * atom + axis] = center[axis] + sign * half * diagonal[axis];
+                mode[3 * atom + axis] = sign * ([0.0, 1.0, 0.0][axis] - [1.0, 0.0, 0.0][axis]);
+            }
+        }
+        let prior = std::fs::read_to_string(&path).unwrap_or_default();
+        if !checkpoint_has(&prior, &format!("rotation,isolated,100,rotate,{temperature},")) {
+            if let Some(hit) = tight_dimer(&copper, job.cell, hint, mode) {
+                    let barrier = hit.energy - reactant_energy;
+                    let assignment = saddle_assignment(&reactant, &hit.positions, [job.mobile[0], job.mobile[1]]);
+                    write_tight(&checkpoint, &format!(
+                        "rotation,isolated,100,rotate,{temperature},{barrier:.6},{:.6e},{TIGHT_FORCE_EV_PER_A:.6e},{},{assignment},own lattice a={a:.6}; dimer force tolerance",
+                        hit.force, hit.index1
+                    ));
+                    if hit.index1 {
+                        isolated.push((temperature, barrier, f64::NAN));
+                    }
+            }
+        }
+        if !checkpoint_has(&prior, &format!("translation,isolated,100,translate,{temperature},")) {
+            let mut kick = Array1::zeros(reactant.len());
+            for atom in [job.mobile[0], job.mobile[1]] {
+                kick[3 * atom] = 0.45;
+            }
+            if let Some(hit) = tight_dimer(&copper, job.cell, &reactant + &kick, kick) {
+                let barrier = hit.energy - reactant_energy;
+                let assignment = saddle_assignment(&reactant, &hit.positions, [job.mobile[0], job.mobile[1]]);
+                write_tight(&checkpoint, &format!(
+                    "translation,isolated,100,translate,{temperature},{barrier:.6},{:.6e},{TIGHT_FORCE_EV_PER_A:.6e},{},{assignment},own lattice a={a:.6}; dimer force tolerance",
+                    hit.force, hit.index1
+                ));
+                if let Some(row) = isolated.iter_mut().find(|row| (row.0 - temperature).abs() < 1.0) {
+                    row.2 = barrier;
+                }
+            }
+        }
+        let _ = reactant;
+    }
+    for temperature in [300.0_f64, 500.0, 700.0] {
+        let prior = std::fs::read_to_string(&path).unwrap_or_default();
+        let key = format!("translation,isolated,100,neighbor,{temperature},");
+        if checkpoint_has(&prior, &key) {
+            continue;
+        }
+        let a = measured_lattice(temperature);
+        let mechanisms = find_mechanisms(&copper, repeats, a);
+        let Some(translate) = mechanisms.iter().find(|item| item.kind == "translate") else {
+            write_tight(&checkpoint, &format!("translation,isolated,100,neighbor,{temperature},,,,,false,,no translation mechanism at 0.04 eV/A"));
+            continue;
+        };
+        let job = rotation_job(&copper, repeats, a);
+        let dumbbell = [job.mobile[0], job.mobile[1]];
+        let mut reactant = job.positions.clone();
+        relax_fast(&copper, &mut reactant, job.cell, 2.0e-4, 100);
+        let held = FastHeld { copper: &copper, cell: job.cell };
+        let (reactant_energy, _) = held.eval(reactant.view()).unwrap_or((f64::NAN, Array1::zeros(1)));
+        let center = centroid(&reactant, dumbbell);
+        let Some(hop) = mapped_hops(&reactant, job.cell, center, axis_of(&reactant, dumbbell), std::slice::from_ref(translate)).into_iter().next() else {
+            write_tight(&checkpoint, &format!("translation,isolated,100,neighbor,{temperature},,,,,false,,translation mechanism did not map"));
+            continue;
+        };
+        let (Some(hint), Some(mode)) = (hop.saddle, hop.mode) else { continue };
+        if let Some(hit) = tight_dimer(&copper, job.cell, hint, mode) {
+            let barrier = hit.energy - reactant_energy;
+            let assignment = saddle_assignment(&reactant, &hit.positions, dumbbell);
+            write_tight(&checkpoint, &format!(
+                "translation,isolated,100,neighbor,{temperature},{barrier:.6},{:.6e},{TIGHT_FORCE_EV_PER_A:.6e},{},{assignment},neighbor kick polished from 0.04 eV/A; own lattice a={a:.6}",
+                hit.force, hit.index1
+            ));
+        }
+    }
+    let captures = [
+        (5.146_f64, "001"),
+        (4.456, "100"),
+        (6.302, "100"),
+        (6.807, "100"),
+        (5.753, "100"),
+        (8.136, "100"),
+    ];
+    for temperature in [500.0_f64, 300.0, 700.0] {
+        let a = measured_lattice(temperature);
+        let length = repeats as f64 * a;
+        let (perfect, _) = fcc(repeats, a);
+        let (_, _, bulk) = copper.evaluate(perfect.view(), [[length, 0.0, 0.0], [0.0, length, 0.0], [0.0, 0.0, length]]);
+        for (radius_500, orientation) in captures {
+            let radius = radius_500 * a / measured_lattice(500.0);
+            let prior = std::fs::read_to_string(&path).unwrap_or_default();
+            let key = format!("capture,{radius:.3},{orientation},capture,{temperature},");
+            if checkpoint_has(&prior, &key) {
+                continue;
+            }
+            let Some(vector) = shell_table(a, repeats).into_iter().find(|(value, _, _)| (*value - radius).abs() < 0.05).map(|(_, vector, _)| vector) else {
+                continue;
+            };
+            let (positions, vacancy, dumbbell, cell, _, _, recombined) =
+                relax_pair_axis(&copper, repeats, a, vector, axis_from_label(orientation), true);
+            if recombined {
+                write_tight(&checkpoint, &format!("capture,{radius:.3},{orientation},capture,{temperature},0.000000,0,{TIGHT_FORCE_EV_PER_A:.6e},false,spontaneous,recombines on relaxation"));
+                continue;
+            }
+            let (reactant, reactant_energy, bound) = quench_bound(&copper, positions, cell, vacancy, dumbbell);
+            if !bound {
+                write_tight(&checkpoint, &format!("capture,{radius:.3},{orientation},capture,{temperature},0.000000,0,{TIGHT_FORCE_EV_PER_A:.6e},false,spontaneous,quench recombines"));
+                continue;
+            }
+            let held = FastHeld { copper: &copper, cell };
+            let seeds = local_seeds(&reactant, cell, dumbbell, vacancy, temperature as u64, 24);
+            eprintln!("tight capture {radius:.3} {orientation} {temperature} at {:.0}s", started.elapsed().as_secs_f64());
+            let found = rgsaddle::seeded_saddles(&held, &survey_config(bulk), cell, &seeds);
+            let mut kept: Vec<&rgsaddle::BasinSaddle> = found.iter().filter(|saddle| {
+                let plus_back = hausdorff(&saddle.plus, &reactant, cell) < 1.0;
+                let minus_back = hausdorff(&saddle.minus, &reactant, cell) < 1.0;
+                let plus_re = reaches_recombination(&reactant, reactant_energy, vacancy, cell, &saddle.plus, saddle.plus_energy);
+                let minus_re = reaches_recombination(&reactant, reactant_energy, vacancy, cell, &saddle.minus, saddle.minus_energy);
+                (plus_back && minus_re) || (minus_back && plus_re)
+            }).collect();
+            kept.sort_by(|left, right| (left.saddle_energy - reactant_energy).partial_cmp(&(right.saddle_energy - reactant_energy)).unwrap_or(std::cmp::Ordering::Equal));
+            let Some(best) = kept.iter().find(|saddle| saddle.saddle_energy >= reactant_energy - 1.0e-4).or(kept.first()) else {
+                write_tight(&checkpoint, &format!("capture,{radius:.3},{orientation},capture,{temperature},,,,,false,,no connecting saddle in {} index-1 of {} seeds at 0.04 eV/A before the 1.5e-3 polish", found.len(), seeds.len()));
+                continue;
+            };
+            let loose = best.saddle_energy - reactant_energy;
+            let Some(hit) = tight_dimer(&copper, cell, best.saddle.clone(), best.mode.clone()) else {
+                write_tight(&checkpoint, &format!("capture,{radius:.3},{orientation},capture,{temperature},{loose:.6},,,{TIGHT_FORCE_EV_PER_A:.6e},false,,polish failed; loose barrier {loose:.6} at 0.04 eV/A"));
+                continue;
+            };
+            let barrier = hit.energy - reactant_energy;
+            let assignment = saddle_assignment(&reactant, &hit.positions, dumbbell);
+            write_tight(&checkpoint, &format!(
+                "capture,{radius:.3},{orientation},capture,{temperature},{barrier:.6},{:.6e},{TIGHT_FORCE_EV_PER_A:.6e},{},{assignment},loose 0.04 eV/A barrier {loose:.6}; polished at 1.5e-3",
+                hit.force, hit.index1
+            ));
+        }
+    }
+    let a500 = measured_lattice(500.0);
+    let mechanisms = find_mechanisms(&copper, repeats, a500);
+    eprintln!("tight mechanisms {} at {:.0}s", mechanisms.len(), started.elapsed().as_secs_f64());
+    let length = repeats as f64 * a500;
+    let (perfect, _) = fcc(repeats, a500);
+    let (_, _, _bulk) = copper.evaluate(perfect.view(), [[length, 0.0, 0.0], [0.0, length, 0.0], [0.0, 0.0, length]]);
+    for (radius, orientation) in bound_orientations() {
+        let prior = std::fs::read_to_string(&path).unwrap_or_default();
+        if checkpoint_has(&prior, &format!("channel,{radius:.3},{orientation},")) {
+            continue;
+        }
+        let Some(vector) = shell_table(a500, repeats).into_iter().find(|(value, _, _)| (*value - radius).abs() < 0.05).map(|(_, vector, _)| vector) else {
+            continue;
+        };
+        let (positions, vacancy, dumbbell, cell, _, _, recombined) =
+            relax_pair_axis(&copper, repeats, a500, vector, axis_from_label(&orientation), true);
+        if recombined {
+            write_tight(&checkpoint, &format!("channel,{radius:.3},{orientation},none,500,,,,,false,spontaneous,recombines on relaxation"));
+            continue;
+        }
+        let (reactant, reactant_energy, bound) = quench_bound(&copper, positions, cell, vacancy, dumbbell);
+        if !bound {
+            write_tight(&checkpoint, &format!("channel,{radius:.3},{orientation},none,500,,,,,false,spontaneous,quench recombines"));
+            continue;
+        }
+        let center = centroid(&reactant, dumbbell);
+        let axis = axis_of(&reactant, dumbbell);
+        let hops = mapped_hops(&reactant, cell, center, axis, &mechanisms);
+        if hops.is_empty() {
+            write_tight(&checkpoint, &format!("channel,{radius:.3},{orientation},none,500,,,,,false,,no mapped seed"));
+            continue;
+        }
+        for hop in hops {
+            let Some(hint) = hop.saddle.clone() else { continue };
+            let Some(mode) = hop.mode.clone() else { continue };
+            let before = dist(centroid(&reactant, dumbbell), vacancy);
+            let after = dist(centroid(&hop.product, dumbbell), vacancy);
+            let direction = if after + 0.3 < before {
+                "toward"
+            } else if after > before + 0.3 {
+                "away"
+            } else {
+                "tangential"
+            };
+            let Some(hit) = tight_dimer(&copper, cell, hint, mode) else { continue };
+            let barrier = hit.energy - reactant_energy;
+            let assignment = saddle_assignment(&reactant, &hit.positions, dumbbell);
+            let mut note = format!("seed {} landed on {assignment}; direction {direction}", hop.name);
+            if (radius - 3.639).abs() < 0.05 && orientation == "010" && direction == "away" && (barrier - 0.135).abs() > 0.01 {
+                note.push_str("; did not reach the stored 0.135 eV saddle");
+            }
+            if assignment == "rotation" && hop.name == "translate" {
+                note.push_str("; tangential or away guess is the rotation saddle");
+            }
+            write_tight(&checkpoint, &format!(
+                "channel,{radius:.3},{orientation},{},500,{barrier:.6},{:.6e},{TIGHT_FORCE_EV_PER_A:.6e},{},{assignment},{note}",
+                hop.name, hit.force, hit.index1
+            ));
+        }
+    }
+    eprintln!("tight {:.1} min", started.elapsed().as_secs_f64() / 60.0);
+}
+
+fn cubic_perp(axis: [f64; 3]) -> [f64; 3] {
+    let ax = axis[0].abs();
+    let ay = axis[1].abs();
+    let az = axis[2].abs();
+    if ax <= ay && ax <= az {
+        [1.0, 0.0, 0.0]
+    } else if ay <= az {
+        [0.0, 1.0, 0.0]
+    } else {
+        [0.0, 0.0, 1.0]
+    }
+}
+
+fn rotation_hint(reactant: &Array1<f64>, dumbbell: [usize; 2]) -> (Array1<f64>, Array1<f64>) {
+    let center = centroid(reactant, dumbbell);
+    let axis = axis_of(reactant, dumbbell);
+    let perp = cubic_perp(axis);
+    let diagonal = unit3([axis[0] + perp[0], axis[1] + perp[1], axis[2] + perp[2]]);
+    let half = dist(point_of(reactant, dumbbell[0]), center).max(0.9);
+    let mut hint = reactant.clone();
+    let mut mode = Array1::zeros(reactant.len());
+    for (atom, sign) in dumbbell.into_iter().zip([-1.0, 1.0]) {
+        for c in 0..3 {
+            hint[3 * atom + c] = center[c] + sign * half * diagonal[c];
+            mode[3 * atom + c] = sign * (perp[c] - axis[c]);
+        }
+    }
+    (hint, mode)
+}
+
+#[test]
+#[ignore = "rotation-seeded channels at 1.5e-3 eV/A"]
+fn defect_pair_rotate_channels() {
+    let copper = FastCopper::new();
+    let repeats = 8usize;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks");
+    let path = root.join("defect_pair_rotate_channels.csv");
+    if !path.exists() {
+        let mut header = File::create(&path).expect("rotate channels");
+        writeln!(header, "kind,shell,orientation,seed,temperature_K,dE0_eV,max_force_eV_A,force_tol_eV_A,index1,assignment,note").unwrap();
+    }
+    let checkpoint = Mutex::new(File::options().append(true).open(&path).expect("append"));
+    let a = measured_lattice(500.0);
+    let shells = [
+        (3.639_f64, "010"),
+        (3.639, "100"),
+        (4.456, "100"),
+        (5.146, "001"),
+        (6.807, "001"),
+        (7.277, "010"),
+        (7.719, "100"),
+        (7.719, "001"),
+        (8.136, "001"),
+    ];
+    for (radius, orientation) in shells {
+        let prior = std::fs::read_to_string(&path).unwrap_or_default();
+        if checkpoint_has(&prior, &format!("channel,{radius:.3},{orientation},rotate,500,")) {
+            continue;
+        }
+        let Some(vector) = shell_table(a, repeats).into_iter().find(|(value, _, _)| (*value - radius).abs() < 0.05).map(|(_, vector, _)| vector) else {
+            continue;
+        };
+        let (positions, vacancy, dumbbell, cell, _, _, recombined) =
+            relax_pair_axis(&copper, repeats, a, vector, axis_from_label(orientation), true);
+        if recombined {
+            write_tight(&checkpoint, &format!("channel,{radius:.3},{orientation},rotate,500,,,,,false,spontaneous,recombines on relaxation"));
+            continue;
+        }
+        let (reactant, reactant_energy, bound) = quench_bound(&copper, positions, cell, vacancy, dumbbell);
+        if !bound {
+            write_tight(&checkpoint, &format!("channel,{radius:.3},{orientation},rotate,500,,,,,false,spontaneous,quench recombines"));
+            continue;
+        }
+        let (hint, mode) = rotation_hint(&reactant, dumbbell);
+        let Some(hit) = tight_dimer(&copper, cell, hint, mode) else { continue };
+        let barrier = hit.energy - reactant_energy;
+        let assignment = saddle_assignment(&reactant, &hit.positions, dumbbell);
+        let center = centroid(&reactant, dumbbell);
+        let saddle_center = centroid(&hit.positions, dumbbell);
+        let shift = dist(saddle_center, center);
+        let away = {
+            let before = dist(center, vacancy);
+            let after = dist(saddle_center, vacancy);
+            if after > before + 0.15 {
+                "away"
+            } else if after + 0.15 < before {
+                "toward"
+            } else {
+                "tangential"
+            }
+        };
+        let mut note = format!("<110> rotation seed; center shift {shift:.3} A; saddle sits {away} of the vacancy");
+        if (radius - 3.639).abs() < 0.05 && orientation == "010" && (barrier - 0.135).abs() > 0.01 {
+            note.push_str("; this seed did not reach the stored 0.135 eV saddle");
+        }
+        write_tight(&checkpoint, &format!(
+            "channel,{radius:.3},{orientation},rotate,500,{barrier:.6},{:.6e},{TIGHT_FORCE_EV_PER_A:.6e},{},{assignment},{note}",
+            hit.force, hit.index1
+        ));
+        if (radius - 3.639).abs() < 0.05 && orientation == "010" {
+            let from_vac = {
+                let raw = [center[0] - vacancy[0], center[1] - vacancy[1], center[2] - vacancy[2]];
+                unit3(raw)
+            };
+            let mut kick = Array1::zeros(reactant.len());
+            for atom in dumbbell {
+                for c in 0..3 {
+                    kick[3 * atom + c] = 0.45 * from_vac[c];
+                }
+            }
+            if let Some(hit) = tight_dimer(&copper, cell, &reactant + &kick, kick.clone()) {
+                let barrier = hit.energy - reactant_energy;
+                let assignment = saddle_assignment(&reactant, &hit.positions, dumbbell);
+                let mut note = "away translation guess".to_string();
+                if (barrier - 0.135).abs() > 0.01 {
+                    note.push_str("; did not reach the stored 0.135 eV saddle");
+                } else {
+                    note.push_str("; reached the stored 0.135 eV saddle");
+                }
+                write_tight(&checkpoint, &format!(
+                    "channel,{radius:.3},{orientation},translate-away,500,{barrier:.6},{:.6e},{TIGHT_FORCE_EV_PER_A:.6e},{},{assignment},{note}",
+                    hit.force, hit.index1
+                ));
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "polish the isolated translation from the neighbor mechanism at 1.5e-3 eV/A"]
+fn defect_pair_translation() {
+    let copper = FastCopper::new();
+    let repeats = 8usize;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks");
+    let path = root.join("defect_pair_translation.csv");
+    if !path.exists() {
+        let mut header = File::create(&path).expect("translation");
+        writeln!(header, "kind,shell,orientation,seed,temperature_K,dE0_eV,max_force_eV_A,force_tol_eV_A,index1,assignment,note").unwrap();
+    }
+    let checkpoint = Mutex::new(File::options().append(true).open(&path).expect("append"));
+    for temperature in [300.0_f64, 500.0, 700.0] {
+        let a = measured_lattice(temperature);
+        let mechanisms = find_mechanisms(&copper, repeats, a);
+        let Some(translate) = mechanisms.iter().find(|item| item.kind == "translate") else {
+            write_tight(&checkpoint, &format!("translation,isolated,100,neighbor,{temperature},,,,,false,,no translation mechanism"));
+            continue;
+        };
+        let job = rotation_job(&copper, repeats, a);
+        let dumbbell = [job.mobile[0], job.mobile[1]];
+        let mut reactant = job.positions.clone();
+        relax_fast(&copper, &mut reactant, job.cell, 2.0e-4, 100);
+        let held = FastHeld { copper: &copper, cell: job.cell };
+        let (reactant_energy, _) = held.eval(reactant.view()).unwrap_or((f64::NAN, Array1::zeros(1)));
+        let center = centroid(&reactant, dumbbell);
+        let Some(hop) = mapped_hops(&reactant, job.cell, center, axis_of(&reactant, dumbbell), std::slice::from_ref(translate)).into_iter().next() else {
+            continue;
+        };
+        let (Some(hint), Some(mode)) = (hop.saddle, hop.mode) else { continue };
+        let Some(hit) = tight_dimer(&copper, job.cell, hint, mode) else { continue };
+        let barrier = hit.energy - reactant_energy;
+        let assignment = saddle_assignment(&reactant, &hit.positions, dumbbell);
+        let stored = if (temperature - 300.0).abs() < 1.0 { 0.094614 } else if (temperature - 500.0).abs() < 1.0 { 0.090966 } else { f64::NAN };
+        let delta = if stored.is_finite() { format!("; stored {:.6} differs by {:.6} eV", stored, (barrier - stored).abs()) } else { String::new() };
+        write_tight(&checkpoint, &format!(
+            "translation,isolated,100,neighbor,{temperature},{barrier:.6},{:.6e},{TIGHT_FORCE_EV_PER_A:.6e},{},{assignment},neighbor mechanism on lattice a={a:.6}{delta}",
+            hit.force, hit.index1
+        ));
+    }
 }
