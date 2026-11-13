@@ -1,0 +1,21 @@
+system,stage,optimizer,jacobian_weight,time_step,max_move,steps,force_calls,barrier_eV,c_over_a,converged,note
+bain,before,fire2,1,1,0.1,446,3131,0.0590356373,1.0933198411,true,default FIRE 2.0 on the 2012 Jacobian
+bain,before,fire2,1,0.1,0.1,234,1647,0.0590356373,1.0933198442,true,shorter FIRE step
+bain,before,fire2,1,0.25,0.1,259,1822,0.0590356373,1.0933198411,true,
+bain,before,fire2,1,1,0.2,718,5035,0.0590356373,1.0933198411,true,looser atom cap
+bain,before,fire2,0.5,1,0.1,4000,28009,6234404575.5364360809,0.0003485001,false,half Jacobian diverges
+bain,before,fire2,2,1,0.1,464,3257,0.0590356373,1.0933198411,true,
+bain,before,fire2,4,1,0.1,374,2627,0.0590356373,1.0933198412,true,
+bain,before,lbfgs-memory-10,1,1,0.1,4000,28009,0.0933438028,1.5899049414,false,short memory leaves the saddle
+bain,before,lbfgs-memory-10,1,1,0.2,321,2256,0.0590356373,1.0933196762,true,
+bain,before,lbfgs-memory-10,0.5,1,0.1,143,1010,0.0590356373,1.0933198379,true,not the 2012 Jacobian
+bain,before,lbfgs-memory-10,2,1,0.1,174,1227,0.0590356373,1.0933201057,true,
+bain,after,lbfgs-memory-20,1,1,0.1,94,667,0.0590356373,1.0933200135,true,2012 Jacobian; memory kept at 20
+bain,before,barzilai-borwein,1,1,0.1,252,1773,0.0590356373,1.0933198199,true,
+bain,before,quickmin,1,0.1,0.1,946,6631,0.0590356373,1.0933198411,true,
+bain,before,quickmin,1,0.25,0.1,1402,9823,0.0590356373,1.0933198411,true,
+bain,before,quickmin,1,1,0.1,1562,10943,0.0590356373,1.0933198411,true,
+cu-mishin-100-110,before,fire2-fixed,1,1,0.08,800,4007,0.464028,,false,3x3x3 cell; endpoint gap 0.474189 eV; force tol 1e-3 not met
+cu-mishin-100-110,before,fire2-free,1,1,0.08,800,4007,0.474189,,false,same cell free to relax; not converged
+cu-mishin-100-110,after,lbfgs20-fixed,1,1,0.08,800,4007,0.066261,,false,memory raised to 20; did not reach the hop saddle
+cu-mishin-100-110,after,lbfgs20-free,1,1,0.08,800,4007,24.390402,,false,free cell left the hop

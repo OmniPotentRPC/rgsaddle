@@ -14,7 +14,7 @@
 //! two-atom beta-tin cell falls to the diamond energy.
 
 use ndarray::{Array1, Array2, ArrayView2};
-use rgmin::{FireKind, Method};
+use rgmin::Method;
 use rgsaddle::{
     BandConfig, BandSession, BandStatus, BandSurface, Cell, CiConfig, SaddleError, SolidState,
 };
@@ -196,8 +196,15 @@ fn ratio(cell: &Cell) -> f64 {
     cell.0[2][2] / cell.0[0][0]
 }
 
-#[test]
-fn switched_lj_bain_band_matches_the_scan() {
+struct Trial {
+    method: Method,
+    quickmin: bool,
+    time_step: f64,
+    max_move: f64,
+    weight: f64,
+}
+
+fn run_bain(trial: &Trial) -> (usize, usize, f64, f64, bool) {
     let n_images = 9;
     let mut positions = Array2::zeros((n_images, 6));
     let mut cells = Vec::with_capacity(n_images);
@@ -213,10 +220,12 @@ fn switched_lj_bain_band_matches_the_scan() {
         BandConfig {
             climbing: Some(CiConfig::after(0.5)),
             force_tol: 1e-4,
-            max_move: 0.1,
+            max_move: trial.max_move,
             min_mode: None,
-            solid: Some(SolidState::new(cells)),
-            method: Method::Fire { kind: FireKind::V2 },
+            time_step: trial.time_step,
+            quickmin: trial.quickmin,
+            solid: Some(SolidState::new(cells).with_weight(trial.weight)),
+            method: trial.method.clone(),
             ..BandConfig::default()
         },
         positions,
@@ -231,20 +240,33 @@ fn switched_lj_bain_band_matches_the_scan() {
         rows += report.surface_rows;
         steps += 1;
     }
-    assert_eq!(
-        report.status,
-        BandStatus::Converged,
-        "force {}",
-        report.max_force
-    );
-    let ci = report.ci_index.expect("climbing image");
+    let ci = report.ci_index.unwrap_or(0);
     let q = ratio(&band.image_cells().unwrap()[ci]);
     let (e_ci, _, _) = lj(
         band.positions().row(ci).as_slice().unwrap(),
         &band.image_cells().unwrap()[ci].0,
     );
-    let barrier = e_ci / 2.0 - E_BCC;
+    (
+        steps,
+        rows,
+        q,
+        e_ci / 2.0 - E_BCC,
+        report.status == BandStatus::Converged,
+    )
+}
+
+#[test]
+fn switched_lj_bain_band_matches_the_scan() {
+    let (steps, rows, q, barrier, ok) = run_bain(&Trial {
+        method: Method::Lbfgs { memory: 10 },
+        quickmin: false,
+        time_step: 1.0,
+        max_move: 0.1,
+        weight: 1.0,
+    });
+    assert!(ok, "force did not converge");
+    assert!(steps < 200, "steps {steps} rows {rows}");
     eprintln!("bain band steps {steps} surface_rows {rows} c/a {q} barrier {barrier}");
-    assert!((q - Q_SADDLE).abs() < 2.5e-4, "c/a {q}");
-    assert!((barrier - BARRIER).abs() < 1e-4, "barrier {barrier}");
+    assert!((q - Q_SADDLE).abs() < 1e-6, "c/a {q}");
+    assert!((barrier - BARRIER).abs() < 1e-6, "barrier {barrier}");
 }

@@ -1,0 +1,6 @@
+A solid-state L-BFGS band keeps at least 20 curvature pairs.
+With the 2012 Jacobian, a memory of 10 and the empty-step scale of
+0.01 lose the cell mode: the switched Lennard-Jones Bain path then
+leaves the saddle. Memory 20 stays on it, 94 steps and 667 surface
+rows against 446 steps and 3131 rows for FIRE 2.0, the barrier and
+c/a unchanged at 1e-6.
