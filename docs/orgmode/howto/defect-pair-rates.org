@@ -87,18 +87,22 @@ Climbing L-BFGS follows the highest image. On the copper band that image was a c
 
 The path integral is the line integral of ∇E along the polyline through the images. A cubic spline between those images cut the corner off a curved saddle, and the rotation integral came out 14 meV low. On the polyline, 122 rated translation hops on the 8×8×8 cell have |ΔE0 − zero-temperature integral| at most 0.0053 eV. The free dumbbell's rotation was not found by the seeds used here, so its ΔF is still not stored.
 
-The free dumbbell translation, seeded on the same 8×8×8 cell, has ΔE0 = 0.0891 eV. That displacement and its unstable mode were mapped onto every bound shell out to 3a, for each symmetry-distinct ⟨100⟩ dumbbell orientation. Only index-1 saddles that connect to the expected minima are rated. The rows are =benchmarks/defect_pair_hops_static.csv=. PAFI at 300 K and 500 K was started for the rated close-shell hops and did not finish, so those ΔF values are not reported.
+The free dumbbell translation on the 8×8×8 cell has ΔE0 = 0.090966 eV at the 500 K lattice and 0.094614 eV at the 300 K lattice. The zero-temperature integrals are 0.089934 eV and 0.093511 eV. PAFI gives ΔF(500 K) = 0.094013 ± 0.009186 eV, rate 1.442×10^11 Hz, and ΔF(300 K) = 0.092507 ± 0.005543 eV, rate 3.383×10^10 Hz. The rotation seeded from the ⟨110⟩ guess has ΔE0 = 0.233710 eV at 500 K (integral 0.226944 eV, 6.8 meV low, inside the gate) and ΔE0 = 0.236061 eV at 300 K (integral 0.231614 eV). ΔF(300 K) = 0.201437 ± 0.008689 eV, rate 4.597×10^8 Hz. ΔF(500 K) = 0.164418 ± 0.016586 eV; that error is above 0.01 eV, so the 500 K rotation rate is not within the requested tolerance.
 
-| shell / Å | orientation | direction | n | ΔE0 / eV | zero-T integral |
-|-----------+-------------+-----------+---+----------+-----------------|
-| 3.639 | 010 | away | 1 | 0.1352 | 0.1353 |
-| 3.639 | 010 | toward | 1 | not connected | |
-| 4.456 | 100 | away | 4 | 0.0861 and 0.0979 | within 0.004 |
-| 5.146 | 001 | away | 2 | 0.0959 | 0.0947 |
-| 5.146 | 001 | toward | 2 | not connected | |
-| beyond 6 | several | away | | 0.087 to 0.095 | within 0.005 |
+Away from the vacancy, same cell:
 
-The free barrier is 0.0891 eV. Away from the vacancy at 3.639 Å costs 0.1352 eV. Toward that vacancy, the image of the free translation does not connect to a bound final minimum. There is no toward/away pair of rates at that shell, so no asymmetry ratio is computed. The same is true at 5.146 Å. At 4.456 Å the away barriers sit on the free barrier and no toward hop was in the rated set. This catalogue does not reproduce Table 1. A preserving toward channel is missing where the vacancy is close, and the anharmonic ΔF was not obtained.
+| shell / Å | orientation | T / K | ΔE0 / eV | zero-T / eV | ΔF / eV | rate / Hz |
+|-----------+-------------+-------+----------+-------------+---------+-----------|
+| 3.639 | 010 | 500 | 0.135159 | 0.135251 | 0.167277 ± 0.008010 | 1.257×10^10 |
+| 3.639 | 010 | 300 | 0.152723 | band 0.022 eV/Å | not converged | |
+| 4.456 | 100 | 500 | 0.097864 | 0.097406 | 0.103069 ± 0.006027 | not stored |
+| 4.456 | 100 | 300 | 0.102482 | 0.101183 | 0.096599 ± 0.004190 | not stored |
+| 5.146 | 001 | 500 | 0.095942 | 0.094687 | 0.100562 ± 0.007883 | 9.066×10^10 |
+| 5.146 | 001 | 300 | 0.099501 | 0.098056 | 0.098318 ± 0.004404 | 1.405×10^10 |
+
+The 4.456 Å attempt frequency is stored (2.132×10^12 Hz at 500 K, 2.150×10^12 Hz at 300 K). The transmission coefficient was not accepted, so =rate_Hz= is empty. A second away channel at 4.456 Å, ΔE0 = 0.0861 eV, was not sampled.
+
+The toward image at 3.639 Å, orientation 010, relaxes to the crystal: the pair energy drops by 3.985 eV. The dimer seeded on that channel sits 0.007 eV below the pair, and the band does not converge (force 0.355 eV/Å, integral 0.493 eV). The capture barrier is not resolved, so there is no ratio against the 0.167 eV away barrier and no recombination volume. On the other bound shells the mapped translation has no toward image, or the product stays bound (energy change under 0.03 eV). Those rows are =not_converged= in =benchmarks/defect_pair_capture.csv=. The orientation scan was not run.
 
 Table 1 of the accepted manuscript, volumes in Ω, α-method then β-bar method. The prose of that manuscript says 5312 and 6924 atoms where the table says 5324 and 6912; 4n³ is 5324 and 6912.
 

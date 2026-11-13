@@ -4177,11 +4177,12 @@ fn run_science_job(
     let (_, _, bulk) = copper.evaluate(perfect.view(), job.cell);
     let center = centroid(&job.positions, [job.mobile[0], job.mobile[1]]);
     let harmonic = local_atoms(&job.positions, center, job.cell);
-    let mut config = cu_config(temperatures, 32, 0.005, bulk, harmonic, 41);
+    let mut config = cu_config(temperatures, 16, 0.01, bulk, harmonic, 41);
     config.finite_temperature = finite;
     config.zero_t_tol = 0.01;
-    config.pafi.max_rounds = 2;
-    config.pafi.samples = 24;
+    config.pafi.max_rounds = 3;
+    config.pafi.samples = 16;
+    config.pafi.thermalize = 20;
     config.max_dimer_steps = 60;
     config.max_band_steps = 80;
     config.images = 7;
@@ -4460,4 +4461,549 @@ fn relax_pair_axis(
             || !(1.2..2.5).contains(&gap)
             || separation < 1.6);
     (positions, built.vacancy, built.dumbbell, cell, gap, separation, recombined)
+}
+
+fn wrap_delta(from: [f64; 3], to: [f64; 3], length: f64) -> [f64; 3] {
+    let mut delta = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
+    for item in &mut delta {
+        *item -= length * (*item / length).round();
+    }
+    delta
+}
+
+fn crystal_image(reactant: &Array1<f64>, repeats: usize, a: f64) -> Array1<f64> {
+    let (perfect, _) = fcc(repeats, a);
+    let length = repeats as f64 * a;
+    let cell = [[length, 0.0, 0.0], [0.0, length, 0.0], [0.0, 0.0, length]];
+    let n = reactant.len() / 3;
+    let mut sites = Vec::with_capacity(perfect.len() / 3);
+    for atom in 0..perfect.len() / 3 {
+        sites.push(point_of(&perfect, atom));
+    }
+    let mut pairs = Vec::with_capacity(n * sites.len());
+    for atom in 0..n {
+        let here = point_of(reactant, atom);
+        for (index, site) in sites.iter().enumerate() {
+            pairs.push((mic_distance(here, *site, cell), atom, index));
+        }
+    }
+    pairs.sort_by(|left, right| left.0.partial_cmp(&right.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut atom_used = vec![false; n];
+    let mut site_used = vec![false; sites.len()];
+    let mut product = reactant.clone();
+    let mut assigned = 0usize;
+    for (distance, atom, site) in pairs {
+        if atom_used[atom] || site_used[site] {
+            continue;
+        }
+        atom_used[atom] = true;
+        site_used[site] = true;
+        let here = point_of(reactant, atom);
+        let delta = wrap_delta(here, sites[site], length);
+        for axis in 0..3 {
+            product[3 * atom + axis] = here[axis] + delta[axis];
+        }
+        assigned += 1;
+        if assigned == n {
+            break;
+        }
+    }
+    product
+}
+
+fn capture_band(climbing: bool) -> rgsaddle::BandConfig {
+    rgsaddle::BandConfig {
+        force_tol: 0.02,
+        max_move: 0.08,
+        time_step: 0.08,
+        method: Method::Fire { kind: FireKind::V2 },
+        spring: rgsaddle::SpringKind::Uniform { k: 1.0 },
+        climbing: climbing.then(rgsaddle::CiConfig::always),
+        min_mode: None,
+        autoneb: None,
+        zoom: None,
+        quickmin: false,
+        ..rgsaddle::BandConfig::default()
+    }
+}
+
+fn relax_neb(
+    copper: &FastCopper,
+    reactant: &Array1<f64>,
+    product: &Array1<f64>,
+    cell: [[f64; 3]; 3],
+) -> Result<(Array2<f64>, f64), String> {
+    let wrapped = rgsaddle::mic::Cell::from_ase(cell).map_err(|error| error.to_string())?;
+    let guess = rgsaddle::linear_path(reactant.view(), product.view(), 9, Some(&wrapped))
+        .map_err(|error| error.to_string())?;
+    let held = FastHeld { copper, cell };
+    let mut neb = rgsaddle::SolidNeb::frozen(capture_band(false), guess).map_err(|error| error.to_string())?;
+    let mut force = f64::MAX;
+    for _ in 0..50 {
+        let report = neb.step(&held).map_err(|error| error.to_string())?;
+        force = report.max_force;
+        if force < 0.05 {
+            break;
+        }
+    }
+    let relaxed = neb.cartesian().map_err(|error| error.to_string())?;
+    let mut neb = rgsaddle::SolidNeb::frozen(capture_band(true), relaxed).map_err(|error| error.to_string())?;
+    for _ in 0..40 {
+        let report = neb.step(&held).map_err(|error| error.to_string())?;
+        force = report.max_force;
+        if force < 0.02 {
+            break;
+        }
+    }
+    Ok((neb.cartesian().map_err(|error| error.to_string())?, force))
+}
+
+fn polish_index(
+    copper: &FastCopper,
+    saddle: &Array1<f64>,
+    mode: &Array1<f64>,
+    cell: [[f64; 3]; 3],
+) -> Option<(f64, bool)> {
+    let scale = mode.dot(mode).sqrt();
+    if scale < 1.0e-8 {
+        return None;
+    }
+    let search = MinModeConfig {
+        force_tol: 0.03,
+        max_move: 0.08,
+        dr: 1.0e-3,
+        max_rotations: 6,
+        ..MinModeConfig::default()
+    };
+    let config = SolidDimerConfig::frozen(search)
+        .with_index_check(IndexCheck::first_order().with_step(1.0e-3).with_escapes(1));
+    let mut dimer = SolidDimer::new(config, saddle.clone(), cell, mode / scale).ok()?;
+    let held = FastHeld { copper, cell };
+    let report = dimer.run(&held, 40).ok()?;
+    if report.status != MinModeStatus::Converged {
+        return None;
+    }
+    let (energy, _) = held.eval(dimer.positions()).ok()?;
+    let index1 = !report.rejected && report.negative_modes == Some(1);
+    if hausdorff(&dimer.positions().to_owned(), saddle, cell) > 1.2 {
+        return None;
+    }
+    Some((energy, index1))
+}
+
+#[derive(Clone)]
+struct CaptureRow {
+    shell: String,
+    orientation: String,
+    d_e0: f64,
+    zero_t: f64,
+    band_force: f64,
+    index1: bool,
+    note: String,
+    saddle: Array1<f64>,
+    product: Array1<f64>,
+    reactant: Array1<f64>,
+    cell: [[f64; 3]; 3],
+    fixed: [f64; 3],
+    mobile: Vec<usize>,
+}
+
+fn capture_one(
+    copper: &FastCopper,
+    repeats: usize,
+    a: f64,
+    radius: f64,
+    axis: [f64; 3],
+    mechanisms: &[Mechanism],
+) -> Result<CaptureRow, String> {
+    let vector = shell_table(a, repeats)
+        .into_iter()
+        .find(|(value, _, _)| (*value - radius).abs() < 0.03)
+        .map(|(_, vector, _)| vector)
+        .ok_or_else(|| format!("no shell at {radius}"))?;
+    let (reactant, vacancy, dumbbell, cell, _gap, _separation, recombined) =
+        relax_pair_axis(copper, repeats, a, vector, axis, true);
+    if recombined {
+        return Err("reactant recombined".into());
+    }
+    let center = centroid(&reactant, dumbbell);
+    let hops = mapped_hops(&reactant, cell, center, axis, mechanisms);
+    let held = FastHeld { copper, cell };
+    let (reactant_energy, _) = held.eval(reactant.view()).map_err(|error| error.to_string())?;
+    let mobile = [dumbbell[0], dumbbell[1]];
+    let before = rgsaddle::pair_separation(reactant.view(), cell, vacancy, &mobile).unwrap_or(0.0);
+    let mut note = String::from("no toward channel");
+    let mut chosen: Option<CaptureRow> = None;
+    for hop in hops {
+        let after = rgsaddle::pair_separation(hop.product.view(), cell, vacancy, &mobile).unwrap_or(before);
+        if after > before - 0.05 {
+            continue;
+        }
+        let mut product = hop.product.clone();
+        relax_fast(copper, &mut product, cell, 1.0e-3, 40);
+        let (product_energy, _) = held.eval(product.view()).map_err(|error| error.to_string())?;
+        let drop = reactant_energy - product_energy;
+        let Some(hint) = hop.saddle.clone() else { continue };
+        let Some(mode) = hop.mode.clone() else { continue };
+        let Some((saddle_energy, index1)) = polish_index(copper, &hint, &mode, cell) else {
+            note = format!("toward drop {drop:.3} eV; dimer did not stay on the seed");
+            continue;
+        };
+        if !index1 {
+            note = format!("toward drop {drop:.3} eV; saddle is not index-1");
+            continue;
+        }
+        let d_e0 = saddle_energy - reactant_energy;
+        let (band, band_force) = relax_neb(copper, &reactant, &hint, cell).unwrap_or((Array2::zeros((0, 0)), f64::MAX));
+        let zero_t = if band.nrows() >= 2 {
+            let mut frames = Vec::new();
+            for row in band.rows() {
+                frames.push(row.to_owned());
+            }
+            rgsaddle::ArcPath::from_positions(&frames)
+                .and_then(|path| rgsaddle::zero_temperature_barrier(&held, &path, &path.arcs()))
+                .map(|profile| profile.barrier)
+                .unwrap_or(f64::NAN)
+        } else {
+            f64::NAN
+        };
+        let barrierless = d_e0 < BOLTZMANN_EV_PER_K * 500.0;
+        let row = CaptureRow {
+            shell: format!("{radius:.3}"),
+            orientation: axis_label(axis),
+            d_e0,
+            zero_t,
+            band_force,
+            index1: true,
+            note: format!(
+                "drop {drop:.3} eV; {}",
+                if drop < 2.0 {
+                    "product stayed bound"
+                } else if barrierless {
+                    "effectively barrierless (below kT at 500 K)"
+                } else {
+                    "index-1 capture saddle"
+                }
+            ),
+            saddle: hint,
+            product,
+            reactant: reactant.clone(),
+            cell,
+            fixed: vacancy,
+            mobile: vec![dumbbell[0], dumbbell[1]],
+        };
+        let replace = chosen.as_ref().is_none_or(|prior| row.d_e0 < prior.d_e0);
+        if replace && drop >= 2.0 {
+            chosen = Some(row);
+        } else if chosen.is_none() {
+            note = row.note.clone();
+        }
+    }
+    chosen.ok_or(note)
+}
+
+fn bound_orientations() -> Vec<(f64, String)> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks/defect_pair_hops_static.csv");
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for line in text.lines().skip(1) {
+        let fields: Vec<&str> = line.split(',').collect();
+        if fields.len() < 7 || fields[6] != "rated" {
+            continue;
+        }
+        let Ok(radius) = fields[0].parse::<f64>() else { continue };
+        let key = format!("{radius:.3}");
+        if pairs.iter().any(|(shell, orientation)| shell == &key && orientation == fields[1]) {
+            continue;
+        }
+        pairs.push((key, fields[1].to_string()));
+    }
+    pairs.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+    pairs
+        .into_iter()
+        .filter_map(|(shell, orientation)| shell.parse::<f64>().ok().map(|radius| (radius, orientation)))
+        .collect()
+}
+
+fn axis_from_label(label: &str) -> [f64; 3] {
+    match label {
+        "010" => [0.0, 1.0, 0.0],
+        "001" => [0.0, 0.0, 1.0],
+        _ => [1.0, 0.0, 0.0],
+    }
+}
+
+fn checkpoint_has(text: &str, key: &str) -> bool {
+    text.lines().any(|line| line.starts_with(key))
+}
+
+fn append_checkpoint(file: &Mutex<File>, line: &str) {
+    let mut handle = file.lock().unwrap_or_else(|poison| poison.into_inner());
+    writeln!(handle, "{line}").unwrap();
+    let _ = handle.flush();
+}
+
+fn pafi_stored(text: &str, shell: &str, orientation: &str, hop: &str, temperature: f64) -> bool {
+    text.lines().any(|line| {
+        let fields: Vec<&str> = line.split(',').collect();
+        if fields.len() < 13 || fields[0] != "pafi" {
+            return false;
+        }
+        fields[1] == shell
+            && fields[2] == orientation
+            && fields[3] == hop
+            && fields[5].parse::<f64>().ok() == Some(temperature)
+            && fields[12] == "rated"
+            && fields[9].parse::<f64>().ok().is_some_and(|error| error <= 0.01)
+    })
+}
+
+fn rotation_job(copper: &FastCopper, repeats: usize, a: f64) -> SciJob {
+    let (positions, vacancy, dumbbell, cell, _, _, _) =
+        relax_pair_axis(copper, repeats, a, [a, 0.0, 0.0], [1.0, 0.0, 0.0], false);
+    let center = centroid(&positions, dumbbell);
+    let half = dist(point_of(&positions, dumbbell[0]), center).max(0.9);
+    let mut product = positions.clone();
+    let mut saddle = positions.clone();
+    let mut mode = Array1::zeros(positions.len());
+    let diagonal = unit3([1.0, 1.0, 0.0]);
+    for (atom, sign) in dumbbell.into_iter().zip([-1.0, 1.0]) {
+        for axis in 0..3 {
+            let along_y = [0.0, 1.0, 0.0][axis];
+            product[3 * atom + axis] = center[axis] + sign * half * along_y;
+            saddle[3 * atom + axis] = center[axis] + sign * half * diagonal[axis];
+            mode[3 * atom + axis] = product[3 * atom + axis] - positions[3 * atom + axis];
+        }
+    }
+    SciJob {
+        repeats,
+        shell: "isolated".into(),
+        radius: 0.0,
+        orientation: "100".into(),
+        positions,
+        cell,
+        fixed: vacancy,
+        mobile: vec![dumbbell[0], dumbbell[1]],
+        hop: rgsaddle::HopTemplate {
+            name: "rotate".into(),
+            product,
+            saddle: Some(saddle),
+            mode: Some(mode),
+            orientation: "100".into(),
+            final_state: "010".into(),
+        },
+        a,
+    }
+}
+
+fn record_entries(file: &Mutex<File>, kind: &str, entries: &[rgsaddle::RateEntry]) {
+    for entry in entries {
+        let line = format!(
+            "{kind},{},{},{},{},{},{:.6},{},{},{},{},{},{},{:.5},{}",
+            entry.shell,
+            entry.orientation,
+            entry.hop,
+            entry.direction.as_str(),
+            entry.temperature,
+            entry.d_e0,
+            num_or(&entry.zero_t),
+            num_or(&entry.d_f),
+            num_or(&entry.d_f_error),
+            num_or(&entry.nu),
+            num_or(&entry.rate),
+            entry.outcome.as_str(),
+            entry.band_force,
+            entry.final_state.replace(',', ";")
+        );
+        eprintln!("{line}");
+        let _ = std::io::stderr().flush();
+        append_checkpoint(file, &line);
+    }
+}
+
+#[test]
+#[ignore = "capture saddles and PAFI for the Cu vacancy-dumbbell pair"]
+fn defect_pair_capture() {
+    let started = Instant::now();
+    let copper = FastCopper::new();
+    let a500 = measured_lattice(500.0);
+    let repeats = 8usize;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks");
+    let path = root.join("defect_pair_capture.csv");
+    if !path.exists() {
+        let mut header = File::create(&path).expect("checkpoint");
+        writeln!(header, "kind,shell,orientation,hop,direction,temperature_K,dE0_eV,zero_T_eV,dF_eV,dF_error_eV,nu_Hz,rate_Hz,outcome,band_force,note").unwrap();
+    }
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let checkpoint = Mutex::new(File::options().append(true).open(&path).expect("append"));
+    let mechanisms = find_mechanisms(&copper, repeats, a500);
+    eprintln!("mechanisms {} in {:.0}s", mechanisms.len(), started.elapsed().as_secs_f64());
+    let pairs = bound_orientations();
+    eprintln!("{} bound shell/orientation pairs", pairs.len());
+    let rows: Vec<CaptureRow> = pairs
+        .par_iter()
+        .filter_map(|(radius, orientation)| {
+            let key = format!("capture,{radius:.3},{orientation},");
+            if checkpoint_has(&existing, &key) {
+                eprintln!("skip capture {radius:.3} {orientation}");
+                return None;
+            }
+            match capture_one(&copper, repeats, a500, *radius, axis_from_label(orientation), &mechanisms) {
+                Ok(row) => {
+                    let line = format!(
+                        "capture,{},{},capture,toward,500,{:.6},{:.6},,,,,{},{:.5},{}",
+                        row.shell,
+                        row.orientation,
+                        row.d_e0,
+                        row.zero_t,
+                        if row.band_force > 0.05 {
+                            "not_converged"
+                        } else if row.index1 {
+                            "index1"
+                        } else {
+                            "neb"
+                        },
+                        row.band_force,
+                        row.note.replace(',', ";")
+                    );
+                    eprintln!("{line}");
+                    let _ = std::io::stderr().flush();
+                    append_checkpoint(&checkpoint, &line);
+                    Some(row)
+                }
+                Err(error) => {
+                    let line = format!(
+                        "capture,{radius:.3},{orientation},capture,toward,500,,,,,,not_converged,0,{error}"
+                    );
+                    eprintln!("{line}");
+                    append_checkpoint(&checkpoint, &line);
+                    None
+                }
+            }
+        })
+        .collect();
+    let mut jobs = Vec::new();
+    if mechanisms.iter().any(|item| item.kind == "translate") {
+        let translate: Vec<Mechanism> = mechanisms.iter().filter(|item| item.kind == "translate").cloned().collect();
+        let (positions, vacancy, dumbbell, cell, _, _, _) =
+            relax_pair_axis(&copper, repeats, a500, [a500, 0.0, 0.0], [1.0, 0.0, 0.0], false);
+        let center = centroid(&positions, dumbbell);
+        if let Some(hop) = mapped_hops(&positions, cell, center, [1.0, 0.0, 0.0], &translate).into_iter().next() {
+            jobs.push(SciJob {
+                repeats,
+                shell: "isolated".into(),
+                radius: 0.0,
+                orientation: "100".into(),
+                positions,
+                cell,
+                fixed: vacancy,
+                mobile: vec![dumbbell[0], dumbbell[1]],
+                hop,
+                a: a500,
+            });
+        }
+    }
+    jobs.push(rotation_job(&copper, repeats, a500));
+    for radius in [3.639_f64, 4.456, 5.146] {
+        for (have, orientation) in &pairs {
+            if (*have - radius).abs() > 0.03 {
+                continue;
+            }
+            let Some((_, vector, _)) = shell_table(a500, repeats)
+                .into_iter()
+                .find(|(value, _, _)| (*value - radius).abs() < 0.03)
+            else {
+                continue;
+            };
+            let axis = axis_from_label(orientation);
+            let (positions, vacancy, dumbbell, cell, _, _, recombined) =
+                relax_pair_axis(&copper, repeats, a500, vector, axis, true);
+            if recombined {
+                continue;
+            }
+            let center = centroid(&positions, dumbbell);
+            for hop in mapped_hops(&positions, cell, center, axis, &mechanisms) {
+                let mobile = [dumbbell[0], dumbbell[1]];
+                let before = rgsaddle::pair_separation(positions.view(), cell, vacancy, &mobile).unwrap_or(0.0);
+                let after = rgsaddle::pair_separation(hop.product.view(), cell, vacancy, &mobile).unwrap_or(0.0);
+                if after <= before + 0.08 {
+                    continue;
+                }
+                jobs.push(SciJob {
+                    repeats,
+                    shell: format!("{radius:.3}"),
+                    radius,
+                    orientation: orientation.clone(),
+                    positions: positions.clone(),
+                    cell,
+                    fixed: vacancy,
+                    mobile: vec![dumbbell[0], dumbbell[1]],
+                    hop,
+                    a: a500,
+                });
+            }
+            let saved = rows.iter().find(|row| {
+                (row.shell.parse::<f64>().unwrap_or(0.0) - radius).abs() < 0.03 && row.orientation == *orientation
+            });
+            let prior = existing
+                .lines()
+                .find(|line| line.starts_with(&format!("capture,{radius:.3},{orientation},")));
+            let recomputed = if saved.is_none() && !prior.is_some_and(|line| line.contains("barrierless")) {
+                capture_one(&copper, repeats, a500, radius, axis, &mechanisms).ok()
+            } else {
+                None
+            };
+            let barrier = saved.map(|row| row.d_e0).or(recomputed.as_ref().map(|row| row.d_e0));
+            if saved.or(recomputed.as_ref()).is_some_and(|row| {
+                row.d_e0 >= BOLTZMANN_EV_PER_K * 500.0 && row.band_force <= 0.05
+            }) {
+                let source = saved.cloned().or(recomputed);
+                let Some(found) = source else { continue };
+                jobs.push(SciJob {
+                    repeats,
+                    shell: found.shell.clone(),
+                    radius,
+                    orientation: orientation.clone(),
+                    positions: found.reactant.clone(),
+                    cell: found.cell,
+                    fixed: found.fixed,
+                    mobile: found.mobile.clone(),
+                    hop: rgsaddle::HopTemplate {
+                        name: "capture".into(),
+                        product: found.product.clone(),
+                        saddle: Some(found.saddle.clone()),
+                        mode: None,
+                        orientation: orientation.clone(),
+                        final_state: "crystal".into(),
+                    },
+                    a: a500,
+                });
+            }
+        }
+    }
+    eprintln!("{} pafi jobs in {:.0}s", jobs.len(), started.elapsed().as_secs_f64());
+    for temperature in [500.0, 300.0] {
+        let a = measured_lattice(temperature);
+        for job in &jobs {
+            let scaled = scale_job(job, a);
+            let fresh = std::fs::read_to_string(&path).unwrap_or_default();
+            if pafi_stored(&fresh, &scaled.shell, &scaled.orientation, &scaled.hop.name, temperature) {
+                eprintln!("skip pafi {} {} {} {temperature}", scaled.shell, scaled.orientation, scaled.hop.name);
+                continue;
+            }
+            let entries = run_science_job(&copper, &scaled, &[temperature], true).unwrap_or_default();
+            if entries.is_empty() {
+                append_checkpoint(
+                    &checkpoint,
+                    &format!(
+                        "pafi,{},{},{},unknown,{temperature},,,,,,,not_converged,0,search failed",
+                        scaled.shell, scaled.orientation, scaled.hop.name
+                    ),
+                );
+                continue;
+            }
+            record_entries(&checkpoint, "pafi", &entries);
+        }
+    }
+    eprintln!("capture run finished in {:.1} min", started.elapsed().as_secs_f64() / 60.0);
 }

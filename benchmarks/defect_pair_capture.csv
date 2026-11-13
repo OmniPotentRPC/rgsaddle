@@ -1,0 +1,45 @@
+kind,shell,orientation,hop,direction,temperature_K,dE0_eV,zero_T_eV,dF_eV,dF_error_eV,nu_Hz,rate_Hz,outcome,band_force,note
+capture,6.807,001,capture,toward,500,,,,,,,not_converged,0,no toward channel
+capture,8.533,010,capture,toward,500,,,,,,,not_converged,0,no toward channel
+capture,7.277,100,capture,toward,500,,,,,,,not_converged,0,no toward channel
+capture,8.913,010,capture,toward,500,,,,,,,not_converged,0,no toward channel
+capture,8.533,100,capture,toward,500,,,,,,,not_converged,0,no toward channel
+capture,8.136,010,capture,toward,500,,,,,,,not_converged,0,no toward channel
+capture,8.136,100,capture,toward,500,,,,,,,not_converged,0,no toward channel
+capture,6.807,010,capture,toward,500,,,,,,,not_converged,0,no toward channel
+capture,6.807,100,capture,toward,500,,,,,,,not_converged,0,no toward channel
+capture,8.913,100,capture,toward,500,,,,,,,not_converged,0,no toward channel
+capture,10.608,100,capture,toward,500,,,,,,,not_converged,0,no toward channel
+capture,5.753,100,capture,toward,500,,,,,,,not_converged,0,no toward channel
+capture,6.302,100,capture,toward,500,,,,,,,not_converged,0,no toward channel
+capture,7.719,100,capture,toward,500,,,,,,,not_converged,0,no toward channel
+capture,5.753,001,capture,toward,500,,,,,,,not_converged,0,drop 0.002 eV; product stayed bound
+capture,5.753,010,capture,toward,500,,,,,,,not_converged,0,no toward channel
+capture,9.277,001,capture,toward,500,,,,,,,not_converged,0,drop -0.023 eV; product stayed bound
+capture,7.277,010,capture,toward,500,,,,,,,not_converged,0,drop -0.028 eV; product stayed bound
+capture,9.277,100,capture,toward,500,,,,,,,not_converged,0,no toward channel
+capture,10.292,100,capture,toward,500,,,,,,,not_converged,0,no toward channel
+capture,4.456,100,capture,toward,500,,,,,,,not_converged,0,no toward channel
+capture,3.639,010,capture,toward,500,-0.007035,0.492603,,,,,not_converged,0.35504,drop 3.985 eV; dimer -0.007 eV; band did not converge so the barrier is not resolved
+capture,9.965,010,capture,toward,500,,,,,,,not_converged,0,no toward channel
+capture,9.965,100,capture,toward,500,,,,,,,not_converged,0,no toward channel
+capture,10.292,001,capture,toward,500,,,,,,,not_converged,0,drop -0.018 eV; product stayed bound
+capture,10.608,010,capture,toward,500,,,,,,,not_converged,0,no toward channel
+capture,7.719,001,capture,toward,500,,,,,,,not_converged,0,drop -0.015 eV; product stayed bound
+capture,9.277,010,capture,toward,500,,,,,,,not_converged,0,drop -0.026 eV; product stayed bound
+capture,10.608,001,capture,toward,500,,,,,,,not_converged,0,drop -0.022 eV; product stayed bound
+capture,9.965,001,capture,toward,500,,,,,,,not_converged,0,drop -0.013 eV; product stayed bound
+capture,8.136,001,capture,toward,500,,,,,,,not_converged,0,drop -0.024 eV; product stayed bound
+capture,5.146,001,capture,toward,500,,,,,,,not_converged,0,drop 0.066 eV; product stayed bound
+pafi,isolated,100,translate,toward,500,0.090966,8.99343806e-2,9.40129576e-2,9.18618532e-3,2.06957126e12,1.44195166e11,rated,0.00999,
+pafi,isolated,100,rotate,tangential,500,0.233710,2.26944107e-1,1.64418194e-1,1.65863605e-2,2.23417287e12,2.42047796e10,rated,0.00901,010
+pafi,3.639,010,translate,away,500,0.135159,1.35250926e-1,1.67276857e-1,8.00967067e-3,1.37675826e12,1.25737815e10,rated,0.00986,
+pafi,4.456,100,translate,away,500,0.097864,9.74060892e-2,1.03069040e-1,6.02659287e-3,2.13166156e12,,rated,0.00943,
+pafi,5.146,001,translate,away,500,0.095942,9.46869259e-2,1.00562421e-1,7.88251261e-3,2.08507044e12,9.06574709e10,rated,0.00988,
+pafi,isolated,100,translate,toward,300,0.094614,9.35114433e-2,9.25066826e-2,5.54328920e-3,2.10892441e12,3.38319375e10,rated,0.00962,
+pafi,isolated,100,rotate,tangential,300,0.236061,2.31613691e-1,2.01437179e-1,8.68911367e-3,2.26143443e12,4.59681818e8,rated,0.00757,010
+pafi,3.639,010,translate,away,300,0.152723,,,,,,not_converged,0.02188,
+pafi,3.639,010,translate,tangential,300,0.000000,,,,,,disconnected,0.00000,
+pafi,3.639,010,translate,tangential,300,0.000000,,,,,,disconnected,0.00000,
+pafi,4.456,100,translate,away,300,0.102482,1.01182951e-1,9.65988411e-2,4.18999926e-3,2.15045315e12,,rated,0.00998,
+pafi,5.146,001,translate,away,300,0.099501,9.80564618e-2,9.83176678e-2,4.40365428e-3,2.12045776e12,1.40475723e10,rated,0.01000,
