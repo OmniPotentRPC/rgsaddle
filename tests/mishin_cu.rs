@@ -2532,7 +2532,11 @@ fn relax_fast(copper: &FastCopper, positions: &mut Array1<f64>, cell: [[f64; 3];
 }
 
 fn shell_table(a: f64, repeats: usize) -> Vec<(f64, [f64; 3], usize)> {
-    let max_r = 10.8_f64.min(repeats as f64 * a * 0.48);
+    shell_table_within(a, repeats, 10.8)
+}
+
+fn shell_table_within(a: f64, repeats: usize, max_r: f64) -> Vec<(f64, [f64; 3], usize)> {
+    let max_r = max_r.min(repeats as f64 * a * 0.48);
     let limit = ((2.0 * max_r / a).ceil() as i32) + 1;
     let mut raw = Vec::new();
     for i in -limit..=limit {
@@ -7980,7 +7984,7 @@ fn assemble_run12() {
         let max_r = shells.iter().filter(|(radius, _, _)| *radius <= 11.0).map(|(radius, _, _)| *radius).fold(0.0, f64::max);
         let jump = a / 2.0_f64.sqrt();
         let return_sites = return_layer_count(a, &shells, max_r);
-        let (total, sigma, spont_sites, kinetic_sites, weight, mean_graph, radial, glide, rotated, drifted) = channel_volumes(&shells, &spontaneous, &rates, temperature, k_mig, a, omega, max_r, jump, return_sites);
+        let (total, sigma, spont_sites, kinetic_sites, weight, mean_graph, radial, glide, rotated, drifted) = channel_volumes(&shells, &spontaneous, &rates, temperature, k_mig, a, omega, max_r, jump, return_sites, 11.0, false);
         let demkowicz = match temperature as i32 { 300 => "254-286", 500 => "161-185", 700 => "203-210", _ => "" };
         let changed_note = if changed.is_empty() { "no shell changed versus 8^3".to_string() } else { changed.join(" ") };
         writeln!(out, "{temperature},first-passage,{total:.4},{sigma:.4},{spont_sites:.4},{kinetic_sites:.4},{demkowicz},13x13x13=8788; a={a}; return layer {return_sites} sites; radial+glide+rotation; shells changed: {changed_note}").unwrap();
@@ -8172,6 +8176,78 @@ fn attach_return(mut sites: Vec<rgsaddle::VolumeSite>, boundary: &str, outward: 
     sites
 }
 
+fn isolated_attempt_frequency(text: &str, temperature: f64) -> Option<f64> {
+    for line in text.lines() {
+        let fields: Vec<&str> = line.split(',').collect();
+        if fields.len() < 13 || fields[0] != "pafi" || fields[1] != "isolated" || fields[3] != "translate" || fields[12] != "rated" {
+            continue;
+        }
+        let Ok(temp) = fields[5].parse::<f64>() else { continue };
+        let Ok(nu) = fields[10].parse::<f64>() else { continue };
+        if (temp - temperature).abs() < 1.0 && nu.is_finite() && nu > 0.0 {
+            return Some(nu);
+        }
+    }
+    None
+}
+
+/// Away barriers from the cell-size study, as 1/L^3 intercepts.
+///
+/// The 4.456 Å shell has two <100> away minima. The nearer geometric
+/// landing carries the minimum whose separation is 4.98-4.99 Å. The
+/// farther landing carries the minimum at 5.15-5.17 Å. The 3.639 Å away
+/// hop is the converged intercept, one barrier for every away landing.
+fn sized_away_rate(text: &str, temperature: f64, source: f64, dest: f64, a: f64) -> Option<f64> {
+    let source_n = source / a;
+    let dest_n = dest / a;
+    let barrier = if (source_n - 1.0).abs() < 0.04 && dest_n > source_n + 0.05 {
+        match temperature as i32 {
+            300 => Some(0.4052),
+            500 => Some(0.1343),
+            _ => None,
+        }
+    } else if (source_n - 1.5_f64.sqrt()).abs() < 0.04 && dest_n > source_n + 0.05 {
+        let nearer = dest_n < 1.72;
+        match (temperature as i32, nearer) {
+            (300, true) => Some(0.1006),
+            (300, false) => Some(0.0840),
+            (500, true) => Some(0.0968),
+            (500, false) => Some(0.0817),
+            _ => None,
+        }
+    } else {
+        None
+    }?;
+    let nu = isolated_attempt_frequency(text, temperature)?;
+    let thermal = temperature * rgsaddle::BOLTZMANN_EV_PER_K;
+    let rate = nu * (-barrier / thermal).exp();
+    rate.is_finite().then_some(rate)
+}
+
+fn shell_rotation_rate(text: &str, radius: f64, orientation: &str, temperature: f64) -> Option<f64> {
+    let mut best: Option<(f64, f64)> = None;
+    for line in text.lines() {
+        let fields: Vec<&str> = line.split(',').collect();
+        if fields.len() < 13 || fields[0] != "pafi" || fields[3] != "rotate" || fields[12] != "rated" {
+            continue;
+        }
+        let Ok(shell) = fields[1].parse::<f64>() else { continue };
+        let Ok(temp) = fields[5].parse::<f64>() else { continue };
+        let Ok(rate) = fields[11].parse::<f64>() else { continue };
+        if (temp - temperature).abs() > 1.0 || fields[2] != orientation || !rate.is_finite() || rate <= 0.0 {
+            continue;
+        }
+        let gap = (shell - radius).abs();
+        if gap > 0.08 {
+            continue;
+        }
+        if best.is_none_or(|(prior, _)| gap < prior) {
+            best = Some((gap, rate));
+        }
+    }
+    best.map(|(_, rate)| rate)
+}
+
 fn channel_volumes(
     shells: &[(f64, [f64; 3], usize)],
     spontaneous: &std::collections::HashSet<String>,
@@ -8183,15 +8259,17 @@ fn channel_volumes(
     max_r: f64,
     jump: f64,
     return_sites: usize,
+    cutoff: f64,
+    size_barriers: bool,
 ) -> (f64, f64, f64, f64, f64, f64, f64, f64, f64, f64) {
-    let kept: Vec<_> = shells.iter().filter(|(radius, _, _)| *radius <= 11.0).cloned().collect();
+    let kept: Vec<_> = shells.iter().filter(|(radius, _, _)| *radius <= cutoff).cloned().collect();
     let nn_vecs = [
         [0.5, 0.5, 0.0], [0.5, -0.5, 0.0], [-0.5, 0.5, 0.0], [-0.5, -0.5, 0.0],
         [0.5, 0.0, 0.5], [0.5, 0.0, -0.5], [-0.5, 0.0, 0.5], [-0.5, 0.0, -0.5],
         [0.0, 0.5, 0.5], [0.0, 0.5, -0.5], [0.0, -0.5, 0.5], [0.0, -0.5, -0.5],
     ];
     let mut members: Vec<Vec<[f64; 3]>> = kept.iter().map(|_| Vec::new()).collect();
-    let limit = ((2.0 * 11.2 / a).ceil() as i32) + 1;
+    let limit = ((2.0 * (cutoff + 0.4) / a).ceil() as i32) + 1;
     for i in -limit..=limit {
         for j in -limit..=limit {
             for k in -limit..=limit {
@@ -8321,14 +8399,20 @@ fn channel_volumes(
                     if spontaneous.contains(&other_id) {
                         capture_neighbors += weight;
                     } else {
-                        edges.push((other_id, weight * k_mig * factor));
+                        let hop_rate = if size_barriers && class == rgsaddle::DirectionClass::Away {
+                            sized_away_rate(rates, temperature, *radius, kept[other].0, a).unwrap_or(k_mig)
+                        } else {
+                            k_mig
+                        };
+                        edges.push((other_id, weight * hop_rate * factor));
                     }
                 }
                 if rotation {
                     for other_orient in ["100", "010", "001"] {
                         if other_orient == orientation { continue; }
                         let dest = format!("{radius:.3}-{other_orient}");
-                        let rate = 2.0 * k_rot;
+                        let per_saddle = shell_rotation_rate(rates, *radius, orientation, temperature).unwrap_or(k_rot);
+                        let rate = 2.0 * per_saddle;
                         if spontaneous.contains(&dest) {
                             rotation_capture += rate;
                         } else if rate > 0.0 {
@@ -8414,4 +8498,219 @@ fn text_spontaneous_at_8(text: &str, radius_ours: f64, orientation: &str, temper
 #[ignore = "assemble the 8788-atom volume from the size census"]
 fn defect_pair_run12_volume() {
     assemble_run12();
+}
+
+fn assemble_run13() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks");
+    let mut census = std::fs::read_to_string(root.join("defect_pair_run12.csv")).unwrap_or_default();
+    census.push('\n');
+    census.push_str(&std::fs::read_to_string(root.join("defect_pair_run13.csv")).unwrap_or_default());
+    let mut rates = catalogue_text();
+    rates.push('\n');
+    rates.push_str(&census);
+    let mut out = File::create(root.join("defect_pair_run13_volume.csv")).expect("volume");
+    writeln!(out, "temperature_K,cutoff_A,volume_over_Omega,sigma,spontaneous_sites,kinetic_sites,demkowicz_8788,note").unwrap();
+    for temperature in [300.0_f64, 500.0, 700.0] {
+        let a = demkowicz_lattice(temperature);
+        let k_mig = migration_rate(&rates, temperature).unwrap_or(f64::NAN);
+        let omega = a * a * a / 4.0;
+        let mut previous = None;
+        for cutoff in [10.8_f64, 12.0, 13.0, 14.0, 15.0, 16.0, 18.0, 20.0, 22.0] {
+            let shells = shell_table_within(a, 13, cutoff);
+            let mut spontaneous = std::collections::HashSet::new();
+            for (radius, vector, _) in &shells {
+                for orientation in ["100", "010", "001"] {
+                    let hat = unit3(*vector);
+                    let class_of = |label: &str| {
+                        let axis = axis_from_label(label);
+                        ((axis[0] * hat[0] + axis[1] * hat[1] + axis[2] * hat[2]).abs() * 1000.0).round() as i32
+                    };
+                    let want = class_of(orientation);
+                    let matches = |kind: &str, label: &str, line: &str| {
+                        let fields: Vec<&str> = line.split(',').collect();
+                        fields.len() > 7
+                            && fields[0] == kind
+                            && fields[1] == "13"
+                            && fields[2].parse::<f64>().ok().is_some_and(|t| (t - temperature).abs() < 1.0)
+                            && fields[4].parse::<f64>().ok().is_some_and(|r| (r - radius).abs() < 0.02)
+                            && fields[5] == label
+                    };
+                    let mut line = None;
+                    for kind in ["quench", "census"] {
+                        if let Some(row) = census.lines().find(|row| matches(kind, orientation, row)) {
+                            line = Some(row);
+                            break;
+                        }
+                        if let Some(row) = census.lines().find(|row| {
+                            let fields: Vec<&str> = row.split(',').collect();
+                            fields.len() > 5 && class_of(fields[5]) == want && matches(kind, fields[5], row)
+                        }) {
+                            line = Some(row);
+                            break;
+                        }
+                    }
+                    if line.is_some_and(|row| row.split(',').nth(6) == Some("spontaneous")) {
+                        spontaneous.insert(format!("{radius:.3}-{orientation}"));
+                    }
+                }
+            }
+            let table = match temperature as i32 { 300 => "254-286", 500 => "161-185", 700 => "203-210", _ => "" };
+            let max_r = shells.last().map(|(radius, _, _)| *radius).unwrap_or(0.0);
+            let jump = a / 2.0_f64.sqrt();
+            let return_sites = return_layer_count(a, &shells, max_r);
+            let (total, sigma, spont_sites, kinetic_sites, _, _, _, _, _, _) = channel_volumes(
+                &shells, &spontaneous, &rates, temperature, k_mig, a, omega, max_r, jump, return_sites, cutoff + 0.05, false,
+            );
+            let (sized, sized_sigma, _, _, _, _, _, _, _, _) = channel_volumes(
+                &shells, &spontaneous, &rates, temperature, k_mig, a, omega, max_r, jump, return_sites, cutoff + 0.05, true,
+            );
+            if (cutoff - 10.8).abs() < 0.05 {
+                writeln!(out, "{temperature},10.8-size,{sized:.4},{sized_sigma:.4},{spont_sites:.4},,{table},eight channels plus the size-study away barriers; delta {:.4}", sized - total).unwrap();
+                eprintln!("run13 {temperature} K size-study barriers V {sized:.2} ± {sized_sigma:.2} delta {:.2}", sized - total);
+            }
+            let delta = previous.map(|prior: f64| total - prior).unwrap_or(f64::NAN);
+            writeln!(out, "{temperature},{cutoff:.1},{total:.4},{sigma:.4},{spont_sites:.4},{kinetic_sites:.4},{table},return {return_sites}; delta {delta:.4}; eight translation channels").unwrap();
+            eprintln!("run13 {temperature} K cutoff {cutoff:.1} V {total:.2} ± {sigma:.2} spont {spont_sites:.1} return {return_sites} delta {delta:.2}");
+            if delta.is_finite() && delta.abs() < 1.0 && cutoff > 10.8 {
+                break;
+            }
+            previous = Some(total);
+        }
+    }
+}
+
+fn transplanted_rotation(
+    copper: &FastCopper,
+    checkpoint: &Mutex<File>,
+    isolated: &Array1<f64>,
+    isolated_dumbbell: [usize; 2],
+    temperature: f64,
+    a: f64,
+    radius: f64,
+    vector: [f64; 3],
+    orientation: &str,
+    translation: f64,
+) {
+    let repeats = 8usize;
+    let (positions, vacancy, dumbbell, cell, _, _, recombined) = relax_pair_axis(copper, repeats, a, vector, axis_from_label(orientation), true);
+    if recombined {
+        write_tight(checkpoint, &format!("switch,8,{temperature},{a:.3},{radius:.3},{orientation},spontaneous,,,,,relax recombines"));
+        return;
+    }
+    let (reactant, reactant_energy, bound) = quench_bound(copper, positions, cell, vacancy, dumbbell);
+    if !bound {
+        write_tight(checkpoint, &format!("switch,8,{temperature},{a:.3},{radius:.3},{orientation},spontaneous,,,,,quench recombines"));
+        return;
+    }
+    let iso_center = centroid(isolated, isolated_dumbbell);
+    let pair_center = centroid(&reactant, dumbbell);
+    let mut hint = reactant.clone();
+    let mut mode = Array1::zeros(reactant.len());
+    for (iso, pair) in isolated_dumbbell.into_iter().zip(dumbbell) {
+        for c in 0..3 {
+            let offset = isolated[3 * iso + c] - iso_center[c];
+            hint[3 * pair + c] = pair_center[c] + offset;
+            mode[3 * pair + c] = offset;
+        }
+    }
+    let Some(hit) = tight_dimer(copper, cell, hint, mode) else {
+        write_tight(checkpoint, &format!("switch,8,{temperature},{a:.3},{radius:.3},{orientation},not_converged,,,,,transplanted saddle"));
+        return;
+    };
+    let barrier = hit.energy - reactant_energy;
+    let assignment = saddle_assignment(&reactant, &hit.positions, dumbbell);
+    write_tight(checkpoint, &format!(
+        "switch,8,{temperature},{a:.3},{radius:.3},{orientation},{assignment},{barrier:.6},{:.6e},,,transplanted <110> saddle; translation {translation:.6}; index1 {}",
+        hit.force, hit.index1
+    ));
+    if hit.index1 && assignment == "rotation" && barrier <= translation {
+        let (perfect, _) = fcc(repeats, a);
+        let (_, _, bulk) = copper.evaluate(perfect.view(), cell);
+        let mut product = hit.positions.clone();
+        let norm = hit.mode.dot(&hit.mode).sqrt().max(1.0e-8);
+        for i in 0..product.len() {
+            product[i] += 0.35 * hit.mode[i] / norm;
+        }
+        relax_fast(copper, &mut product, cell, 2.0e-4, 80);
+        record_pafi(
+            copper, checkpoint, bulk, &format!("{radius:.3}"), orientation, "rotate", "tangential", temperature,
+            &reactant, reactant_energy, &hit.positions, &hit.mode, &product, cell, false,
+        );
+    }
+}
+
+#[test]
+#[ignore = "outer cutoff and the strain-mapped <100> to <110> saddle"]
+fn defect_pair_run13() {
+    let started = Instant::now();
+    let job = std::env::var("RUN13").unwrap_or_else(|_| "all".into());
+    let copper = FastCopper::new();
+    if job == "all" || job == "switch" {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks/defect_pair_run13.csv");
+        let checkpoint = Mutex::new(File::options().append(true).open(&path).expect("append"));
+        let temperature = 300.0_f64;
+        let a = demkowicz_lattice(temperature);
+        let translation = neighbor_translation_barrier(temperature).unwrap_or(f64::NAN);
+        let job_iso = rotation_job(&copper, 8, a);
+        let dumbbell = [job_iso.mobile[0], job_iso.mobile[1]];
+        let mut reactant = job_iso.positions.clone();
+        relax_fast(&copper, &mut reactant, job_iso.cell, 2.0e-4, 100);
+        let (hint, mode) = rotation_hint(&reactant, dumbbell);
+        if let Some(hit) = tight_dimer(&copper, job_iso.cell, hint, mode) {
+            for (radius, vector, _) in shell_table(a, 8) {
+                if radius > 4.0 {
+                    continue;
+                }
+                for orientation in distinct_orientations(vector) {
+                    let prior = std::fs::read_to_string(&path).unwrap_or_default();
+                    if checkpoint_has(&prior, &format!("switch,8,{temperature},{a:.3},{radius:.3},{orientation},")) {
+                        continue;
+                    }
+                    transplanted_rotation(&copper, &checkpoint, &hit.positions, dumbbell, temperature, a, radius, vector, orientation, translation);
+                }
+            }
+        }
+    }
+    if job == "all" || job == "outer" {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks/defect_pair_run13.csv");
+        let checkpoint = Mutex::new(File::options().append(true).open(&path).expect("append"));
+        let temperature = 300.0_f64;
+        let a = demkowicz_lattice(temperature);
+        for (radius, vector, count) in shell_table_within(a, 13, 12.5) {
+            if radius <= 10.8 {
+                continue;
+            }
+            for orientation in distinct_orientations(vector) {
+                let prior = std::fs::read_to_string(&path).unwrap_or_default();
+                let key = format!("census,13,{temperature},{a:.3},{radius:.3},{orientation},");
+                if checkpoint_has(&prior, &key) {
+                    continue;
+                }
+                let (positions, vacancy, dumbbell, cell, gap, separation, recombined) =
+                    relax_pair_axis(&copper, 13, a, vector, axis_from_label(orientation), true);
+                let spontaneous = recombined || pair_recombined(&positions, vacancy, cell, dumbbell);
+                let outcome = if spontaneous { "spontaneous" } else { "bound" };
+                write_tight(&checkpoint, &format!(
+                    "census,13,{temperature},{a:.3},{radius:.3},{orientation},{outcome},{gap:.3},{separation:.3},,,sites {count}; relax only past 10.8 A"
+                ));
+            }
+        }
+    }
+    if job == "all" || job == "assemble" {
+        assemble_run13();
+    }
+    eprintln!("run13 {job} {:.1} min", started.elapsed().as_secs_f64() / 60.0);
+}
+
+fn neighbor_translation_barrier(temperature: f64) -> Option<f64> {
+    let text = std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks/defect_pair_translation.csv")).ok()?;
+    text.lines().find_map(|line| {
+        let fields: Vec<&str> = line.split(',').collect();
+        if fields.len() < 6 || fields[0] != "translation" || fields[1] != "isolated" || fields[3] != "neighbor" {
+            return None;
+        }
+        let temp = fields[4].parse::<f64>().ok()?;
+        let barrier = fields[5].parse::<f64>().ok()?;
+        ((temp - temperature).abs() < 1.0 && barrier > 0.0).then_some(barrier)
+    })
 }

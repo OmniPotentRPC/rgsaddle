@@ -1,0 +1,67 @@
+kind,repeats,temperature_K,a_A,radius_A,orientation,outcome,gap_A,separation_A,barrier_eV,force_eV_A,note
+quench,13,300,3.631,2.568,100,spontaneous,2.568,1.290,,,sites 12; full quench of the first neighbor
+rotation,8,300,3.631,isolated,100,rotation,0.228800,1.061719e-3,,,index1 true; dipole map reference
+estimate,8,300,3.631,2.568,100,map,-0.005683,0.223117,,,free 0.228800; translation 0.093402
+estimate,8,300,3.631,2.568,010,map,-0.087115,0.141685,,,free 0.228800; translation 0.093402
+estimate,8,300,3.631,2.568,001,map,-0.003622,0.225178,,,free 0.228800; translation 0.093402
+estimate,8,300,3.631,3.631,100,map,0.002561,0.231362,,,free 0.228800; translation 0.093402
+estimate,8,300,3.631,3.631,010,map,0.004019,0.232819,,,free 0.228800; translation 0.093402
+estimate,8,300,3.631,3.631,001,map,-0.006580,0.222220,,,free 0.228800; translation 0.093402
+estimate,8,300,3.631,4.447,100,map,-0.011674,0.217127,,,free 0.228800; translation 0.093402
+estimate,8,300,3.631,4.447,010,map,-0.011277,0.217523,,,free 0.228800; translation 0.093402
+estimate,8,300,3.631,4.447,001,map,-0.007976,0.220824,,,free 0.228800; translation 0.093402
+estimate,8,300,3.631,5.135,100,map,-0.000710,0.228090,,,free 0.228800; translation 0.093402
+estimate,8,300,3.631,5.135,010,map,-0.010889,0.217911,,,free 0.228800; translation 0.093402
+estimate,8,300,3.631,5.135,001,map,-0.000453,0.228348,,,free 0.228800; translation 0.093402
+estimate,8,300,3.631,5.741,100,map,0.000417,0.229217,,,free 0.228800; translation 0.093402
+estimate,8,300,3.631,5.741,010,map,-0.004195,0.224606,,,free 0.228800; translation 0.093402
+estimate,8,300,3.631,5.741,001,map,-0.001397,0.227404,,,free 0.228800; translation 0.093402
+estimate,8,300,3.631,6.289,100,map,-0.004374,0.224427,,,free 0.228800; translation 0.093402
+estimate,8,300,3.631,6.289,010,map,-0.004374,0.224427,,,free 0.228800; translation 0.093402
+estimate,8,300,3.631,6.289,001,map,-0.004374,0.224427,,,free 0.228800; translation 0.093402
+estimate,8,300,3.631,6.793,100,map,-0.002223,0.226577,,,free 0.228800; translation 0.093402
+estimate,8,300,3.631,6.793,010,map,-0.004028,0.224772,,,free 0.228800; translation 0.093402
+estimate,8,300,3.631,6.793,001,map,-0.001930,0.226870,,,free 0.228800; translation 0.093402
+estimate,8,300,3.631,7.262,100,map,0.000320,0.229121,,,free 0.228800; translation 0.093402
+estimate,8,300,3.631,7.262,010,map,0.000502,0.229303,,,free 0.228800; translation 0.093402
+estimate,8,300,3.631,7.262,001,map,-0.000823,0.227978,,,free 0.228800; translation 0.093402
+estimate,8,300,3.631,7.703,100,map,-0.001364,0.227437,,,free 0.228800; translation 0.093402
+estimate,8,300,3.631,7.703,010,map,-0.001236,0.227564,,,free 0.228800; translation 0.093402
+estimate,8,300,3.631,7.703,001,map,-0.000971,0.227829,,,free 0.228800; translation 0.093402
+estimate,8,300,3.631,8.119,100,map,0.000066,0.228866,,,free 0.228800; translation 0.093402
+estimate,8,300,3.631,8.119,010,map,-0.002106,0.226695,,,free 0.228800; translation 0.093402
+estimate,8,300,3.631,8.119,001,map,-0.000399,0.228402,,,free 0.228800; translation 0.093402
+estimate,8,300,3.631,8.515,100,map,-0.001512,0.227288,,,free 0.228800; translation 0.093402
+estimate,8,300,3.631,8.515,010,map,-0.002046,0.226754,,,free 0.228800; translation 0.093402
+estimate,8,300,3.631,8.515,001,map,-0.001487,0.227314,,,free 0.228800; translation 0.093402
+estimate,8,300,3.631,8.894,100,map,-0.001459,0.227341,,,free 0.228800; translation 0.093402
+estimate,8,300,3.631,8.894,010,map,-0.001410,0.227391,,,free 0.228800; translation 0.093402
+estimate,8,300,3.631,8.894,001,map,-0.000997,0.227803,,,free 0.228800; translation 0.093402
+estimate,8,300,3.631,9.257,100,map,0.000133,0.228934,,,free 0.228800; translation 0.093402
+estimate,8,300,3.631,9.257,010,map,-0.000552,0.228248,,,free 0.228800; translation 0.093402
+estimate,8,300,3.631,9.257,001,map,-0.000372,0.228428,,,free 0.228800; translation 0.093402
+estimate,8,300,3.631,9.944,100,map,-0.000486,0.228315,,,free 0.228800; translation 0.093402
+estimate,8,300,3.631,9.944,010,map,-0.000937,0.227863,,,free 0.228800; translation 0.093402
+estimate,8,300,3.631,9.944,001,map,-0.000458,0.228342,,,free 0.228800; translation 0.093402
+estimate,8,300,3.631,10.270,100,map,-0.000089,0.228712,,,free 0.228800; translation 0.093402
+estimate,8,300,3.631,10.270,010,map,-0.001361,0.227439,,,free 0.228800; translation 0.093402
+estimate,8,300,3.631,10.270,001,map,-0.000057,0.228744,,,free 0.228800; translation 0.093402
+estimate,8,300,3.631,10.586,100,map,0.000006,0.228806,,,free 0.228800; translation 0.093402
+estimate,8,300,3.631,10.586,010,map,-0.001067,0.227733,,,free 0.228800; translation 0.093402
+estimate,8,300,3.631,10.586,001,map,-0.000152,0.228648,,,free 0.228800; translation 0.093402
+rotation,8,700,3.655,isolated,100,rotation,0.218606,1.156238e-3,,,index1 true; Table 1 lattice
+rotation,8,300,3.631,2.568,010,spontaneous,,,,,estimate 0.1417; relax recombines
+quench,13,300,3.631,2.568,001,bound,2.174,2.579,,,sites 12; full quench of the first neighbor
+rotation,8,300,3.631,3.631,001,rotation,0.509350,8.437160e-4,,,estimate 0.2222; translation 0.093402; index1 true
+quench,13,500,3.643,2.576,100,spontaneous,2.576,1.295,,,sites 12; full quench of the first neighbor
+rotation,8,300,3.631,2.568,100,spontaneous,,,,,estimate 0.2231; relax recombines
+rotation,8,300,3.631,2.568,001,translation,-0.000130,1.438612e-3,,,estimate 0.2252; translation 0.093402; index1 true
+rotation,8,300,3.631,3.631,100,spontaneous,,,,,estimate 0.2314; quench recombines
+quench,13,500,3.643,2.576,001,bound,2.183,2.588,,,sites 12; full quench of the first neighbor
+rotation,8,300,3.631,3.631,010,rotation,0.509346,1.499204e-3,,,estimate 0.2328; translation 0.093402; index1 true
+quench,13,700,3.655,2.584,100,spontaneous,2.584,1.300,,,sites 12; full quench of the first neighbor
+quench,13,700,3.655,2.584,001,bound,2.193,2.596,,,sites 12; full quench of the first neighbor
+switch,8,300,3.631,2.568,100,spontaneous,,,,,relax recombines
+switch,8,300,3.631,2.568,001,translation,-0.000159,1.498178e-3,,,transplanted <110> saddle; translation 0.093402; index1 true
+switch,8,300,3.631,3.631,100,spontaneous,,,,,quench recombines
+switch,8,300,3.631,3.631,010,rotation,0.599173,4.746080e-2,,,transplanted <110> saddle; translation 0.093402; index1 false

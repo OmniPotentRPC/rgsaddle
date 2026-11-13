@@ -1,0 +1,31 @@
+temperature_K,cutoff_A,volume_over_Omega,sigma,spontaneous_sites,kinetic_sites,demkowicz_8788,note
+300,10.8-size,202.1754,5.0924,34.0000,,254-286,eight channels plus the size-study away barriers; delta -0.2575
+300,10.8,202.4328,5.1390,34.0000,168.4328,254-286,return 272; delta NaN; eight translation channels
+300,12.0,221.0104,5.3653,34.0000,187.0104,254-286,return 204; delta 18.5776; eight translation channels
+300,13.0,267.3927,6.4942,34.0000,233.3927,254-286,return 378; delta 46.3823; eight translation channels
+300,14.0,258.5910,6.1041,34.0000,224.5910,254-286,return 144; delta -8.8017; eight translation channels
+300,15.0,301.7718,7.1054,34.0000,267.7718,254-286,return 312; delta 43.1808; eight translation channels
+300,16.0,319.2440,7.4349,34.0000,285.2440,254-286,return 168; delta 17.4723; eight translation channels
+300,18.0,419.4289,9.6694,34.0000,385.4289,254-286,return 564; delta 100.1849; eight translation channels
+300,20.0,464.3765,10.5738,34.0000,430.3765,254-286,return 288; delta 44.9476; eight translation channels
+300,22.0,587.9934,13.2694,34.0000,553.9934,254-286,return 996; delta 123.6169; eight translation channels
+500,10.8-size,185.2399,4.7517,34.0000,,161-185,eight channels plus the size-study away barriers; delta -2.3802
+500,10.8,187.6200,4.6448,34.0000,153.6200,161-185,return 272; delta NaN; eight translation channels
+500,12.0,205.4170,4.8964,34.0000,171.4170,161-185,return 204; delta 17.7970; eight translation channels
+500,13.0,248.8821,6.0063,34.0000,214.8821,161-185,return 378; delta 43.4651; eight translation channels
+500,14.0,241.1519,5.6661,34.0000,207.1519,161-185,return 144; delta -7.7302; eight translation channels
+500,15.0,296.8671,7.0670,34.0000,262.8671,161-185,return 480; delta 55.7152; eight translation channels
+500,16.0,298.3175,6.9890,34.0000,264.3175,161-185,return 168; delta 1.4504; eight translation channels
+500,18.0,354.7207,8.2709,34.0000,320.7207,161-185,return 168; delta 56.4033; eight translation channels
+500,20.0,435.1726,10.0985,34.0000,401.1726,161-185,return 288; delta 80.4518; eight translation channels
+500,22.0,498.6656,11.5099,34.0000,464.6656,161-185,return 216; delta 63.4930; eight translation channels
+700,10.8-size,204.5416,3.6445,34.0000,,203-210,eight channels plus the size-study away barriers; delta 0.0000
+700,10.8,204.5416,3.6445,34.0000,170.5416,203-210,return 272; delta NaN; eight translation channels
+700,12.0,223.0978,3.8048,34.0000,189.0978,203-210,return 204; delta 18.5562; eight translation channels
+700,13.0,269.9210,4.5966,34.0000,235.9210,203-210,return 378; delta 46.8232; eight translation channels
+700,14.0,260.9508,4.3202,34.0000,226.9508,203-210,return 144; delta -8.9702; eight translation channels
+700,15.0,320.9601,5.3281,34.0000,286.9601,203-210,return 480; delta 60.0093; eight translation channels
+700,16.0,322.1038,5.2531,34.0000,288.1038,203-210,return 168; delta 1.1437; eight translation channels
+700,18.0,382.3888,6.1585,34.0000,348.3888,203-210,return 168; delta 60.2849; eight translation channels
+700,20.0,470.5882,7.4992,34.0000,436.5882,203-210,return 408; delta 88.1995; eight translation channels
+700,22.0,536.2205,8.4545,34.0000,502.2205,203-210,return 216; delta 65.6322; eight translation channels
