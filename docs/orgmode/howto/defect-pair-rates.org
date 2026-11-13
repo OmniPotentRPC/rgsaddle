@@ -9,8 +9,8 @@ For each hop the search
 1. minimizes the reactant and the product,
 2. climbs from the reactant side of the hop with =SolidDimer=, on a frozen cell or on the joint chart,
 3. keeps the saddle only when =IndexCheck= reports exactly one negative projected eigenvalue,
-4. pushes off both sides of the unstable mode, minimizes, and accepts the hop when the two clouds of atoms match the reactant and the product (Hausdorff distance, so a permutation of identical atoms still matches),
-5. builds an image-dependent-pair-potential path through that saddle and relaxes it with a fixed climbing-image solid-state NEB,
+4. pushes off both sides of the unstable mode by a largest-atomic displacement of =push=, minimizes, and accepts the hop when the two clouds of atoms match the reactant and the product (Hausdorff distance, so a permutation of identical atoms still matches),
+5. builds an image-dependent-pair-potential path through that saddle, relaxes it with climbing off, then climbs. The climb uses the caller's band method. If that climb runs away, it is repeated with FIRE, or with ODE12r when the caller was already on FIRE,
 6. integrates the projected average force along that path and shoots the Bennett–Chandler factor from the free-energy maximum.
 
 AutoNEB, zoom, and image freezing are not used. The band has a fixed number of images.
@@ -43,7 +43,7 @@ Swinburne and Marinica, Phys. Rev. Lett. 120, 135503 (2018), doi:10.1103/PhysRev
 
 : dF/ds = ⟨ (∇E · n) (1 - ψ) ⟩.
 
-The average is over the hyperplane =(x - X) · n = 0=. Sampling is overdamped Langevin (Brownian) dynamics in that plane: the parallel piece of the drift and of the noise is removed, the plane is restored after every step, and the center of mass can be held. The integral is the trapezoid rule. The standard error is the block standard error of the recorded samples, propagated through the trapezoid weights. The dividing surface is the plane of maximum =ΔF=.
+The average is over the hyperplane =(x - X) · n = 0=. Sampling is overdamped Langevin (Brownian) dynamics in that plane: the parallel piece of the drift and of the noise is removed, the plane is restored after every step, and the center of mass can be held. The integral is the trapezoid rule. The standard error comes from block means whose block is at least twice the integrated autocorrelation time of the recorded series, propagated through the trapezoid weights. When =target_error= is set, planes are resampled and inverse-variance combined until the barrier error is at or below that target or =max_rounds= is spent. The dividing surface is the plane of maximum =ΔF=. Sitting on the path with =ψ = 0= is the zero-temperature limit of the same integral. A finite-temperature rate is stored only when that limit reproduces =ΔE0= within =zero_t_tol= and the band force is under tolerance.
 
 On a straight path =ψ= is zero and the estimator is the mean force. A one-dimensional barrier =(1 - x²)²= integrates to 1. A two-dimensional well =(1 - x²)² + ½ k(x) y²= with =k = 1.5 + 0.5 x= has the exact classical shift =(kT / 2) ln(k(0) / k(-1))=. =tests/pafi_analytic.rs= checks both.
 
@@ -71,28 +71,40 @@ The dividing surface is a hyperplane normal to the path, not a variationally opt
 * Copper
 The Mishin EAM1 numbers are a validation, not part of the library. The potential is the analytic form already in =tests/mishin_cu.rs= (Mishin, Mehl, Papaconstantopoulos, Voter, and Kress, Phys. Rev. B 63, 224106 (2001), doi:10.1103/PhysRevB.63.224106, Table I). The question is the one posed by Mwungeli, Liu, and Demkowicz, Phys. Rev. Materials 9, 023601 (2025), doi:10.1103/PhysRevMaterials.9.023601: whether the vacancy / self-interstitial recombination volume in Cu falls from about 290 Ω at 300 K to about 160 Ω at 500 K and above because the hop rates toward, away from, and tangential to the vacancy are anharmonic. Crossref records the paper as published 11 February 2025, Phys. Rev. Materials 9, 023601. Their Table 1 gives the zero-pressure lattice parameters 3.631, 3.637, 3.643, 3.649 and 3.655 Å at 300, 400, 500, 600 and 700 K, and cells of 10, 11, 12, 13 and 16 cubic repeats (4000, 5324, 6912, 8788 and 16384 atoms).
 
-The release run behind =benchmarks/defect_pair_cu.csv= is one 4×4×4 cell, 256 atoms, at the 500 K lattice parameter 3.643 Å, sampled at 300 K and 700 K. Cells of 6, 8, 10, 12, 14 and 16 repeats were not run. The mass is 63.546 u. The band was accepted when its largest force fell to 0.3 eV/Å; below that the L-BFGS step became unstable, so this is not a converged minimum-energy path. Shells at 2.576 Å and 3.643 Å recombined on relaxation (dumbbell gap 2.576 Å and 2.842 Å). The first stable shell is 4.462 Å.
+The lattice parameter is from a zero-pressure Langevin run with a Berendsen barostat on a 6×6×6 cell of this potential, 2 fs steps, the average of the second 4 ps of an 8 ps trajectory. It is not taken from Table 1.
 
-Static barriers from the index-1 dimer, in eV:
+| T / K | a / Å, this work | a / Å, Table 1 |
+|-------+------------------+----------------|
+| 300 | 3.62831 | 3.631 |
+| 400 | 3.63371 | 3.637 |
+| 500 | 3.63867 | 3.643 |
+| 600 | 3.64416 | 3.649 |
+| 700 | 3.64979 | 3.655 |
 
-| hop | direction | connected | ΔE0 |
-|-----+-----------+-----------+--------|
-| johnson-toward | toward | yes | 0.190719146 |
-| johnson-away | away | no | 0.0618534887 |
-| johnson-tangential | tangential | no | 0.18963847 |
-| rotate-100-010 | tangential | no | 0.00585073175 |
+The slope matches Table 1. The offset is about 0.004 Å.
 
-Away sits lower than toward and tangential. That is a static asymmetry. It did not become a free-energy asymmetry: the away, tangential and rotation saddles did not connect under the Hausdorff test, so they have no PAFI rate.
+Climbing L-BFGS follows the highest image. On the copper band that image was a collision left by the initial path, and the step ran up the wall; the NEB guards drop such a step and do not make it the saddle. The band used here relaxes with FIRE and climbing off, then climbs. A path is kept only when the force is at most 0.01 eV/Å and the zero-temperature integral of the path force reproduces ΔE0.
 
-The hops that did connect:
+The isolated dumbbell, 8×8×8 (2049 atoms) at 500 K, has a translation the dimer found from the relaxed minimum. The band force is 0.00655 eV/Å. ΔE0 is 0.090905 eV. The zero-temperature integral is 0.086776 eV, 4 meV below ΔE0. PAFI gives ΔF = 0.081976 ± 0.004669 eV from 61644 force evaluations. κ is 0.329 ± 0.130, and the rate is 1.022×10^11 Hz against a Vineyard rate of 1.724×10^11 Hz. A rotation of the same dumbbell has ΔE0 = 0.231981 eV and a band force of 0.00903 eV/Å, but the zero-temperature integral is 0.217953 eV, 14 meV low, so no finite-temperature rate was stored. There is one translation, not a toward/away pair, so the isolated control does not by itself show a direction asymmetry. The number that is resolved is the anharmonic shift of that one barrier, about −9 meV, roughly twice the 4.7 meV error.
 
-| system | direction | T / K | ΔE0 / eV | ΔF / eV | error / eV | κ | k / Hz |
-|--------+-----------+-------+----------+---------+------------+---+--------|
-| vacancy, 4.462 Å | toward | 300 | 0.190719146 | 1.62033252 | 0.296084395 | 0.370582086 | 8.34660609e-16 |
-| vacancy, 4.462 Å | toward | 700 | 0.190719146 | 2.45623248 | 0.454001109 | 0.370582086 | 2.86947708e-06 |
-| isolated | toward | 300 | 0.278661324 | 0.758068384 | 0.424937094 | 0.104780939 | 0.0742509092 |
-| isolated | toward | 700 | 0.278661324 | 1.3435834 | 0.570865921 | 0.104780939 | 85.5687848 |
-| isolated | away | 300 | 0.278635624 | 0.676871673 | 0.493710625 | 0.251805363 | 4.23143777 |
-| isolated | away | 700 | 0.278635624 | 0.989243625 | 0.656995921 | 0.114135593 | 34005.3376 |
+At the vacancy, the same search does not find a hop that preserves the pair. On an 8×8×8 cell at 500 K the 2.573 Å shell (12 sites) recombines on relaxation. The next shell, 3.639 Å (6 sites), stays a dumbbell. Dimer searches from that minimum — 0.2 Å random kicks of the dumbbell, and translations aimed at a neighbor — converge either to a saddle of index 2 or 3, or to a recombination saddle. The recombination saddle sits 1.26–1.45 eV above the pair, and one of its basins is 2.85–2.90 eV below the pair, which is the pair's formation energy. No toward, away, or tangential hop with both ends at a bound pair was connected. Without that pair of rates the toward/away asymmetry is not measured, and a kinetic recombination volume is not computed. A 1.3 eV recombination barrier is negligible next to the 0.09 eV migration barrier at 300–700 K, so those saddles do not supply the 160–290 Ω of Table 1.
 
-The isolated control has equal static barriers (0.278661324 and 0.278635624 eV). Its free energies at 300 K differ by 0.081 eV, inside error bars of 0.42 and 0.49 eV. No direction asymmetry appears there. The vacancy toward-hop free energy lies 1.4 eV above its static barrier at 300 K, and the error bar does not reach ΔE0. That integral is the force along a band whose residual is still about 0.25 eV/Å. It is not a measurement of the anharmonic correction. κ did not change between 300 K and 700 K on the vacancy hop (both 0.370582086) because the deterministic drift from that residual dominated the thermal velocity, so the same dividing-surface samples committed the same way. The anharmonic direction asymmetry was not observed.
+Table 1 of the accepted manuscript, volumes in Ω, α-method then β-bar method. The prose of that manuscript says 5312 and 6924 atoms where the table says 5324 and 6912; 4n³ is 5324 and 6912.
+
+| T / K | cell | α | β-bar |
+|-------+------+---+-------|
+| 300 | 8788 | 254±21 | 286±28 |
+| 400 | 8788 | 212±12 | 210±20 |
+| 500 | 4000 | 309±18 | 287±34 |
+| 500 | 5324 | 169±17 | 180±20 |
+| 500 | 6912 | 188±11 | 191±19 |
+| 500 | 8788 | 185±23 | 161±15 |
+| 500 | 16384 | 202±13 | 206±22 |
+| 600 | 4000 | 218±13 | 238±22 |
+| 600 | 5324 | 170±8 | 177±15 |
+| 600 | 6912 | 198±10 | 203±20 |
+| 600 | 8788 | 186±14 | 191±18 |
+| 600 | 16384 | 183±9 | 194±18 |
+| 700 | 8788 | 203±10 | 210±21 |
+
+Spontaneous recombination was scanned for every shell out to 10.6 Å on 8×8×8 (2048 sites) and 10×10×10 (4000 sites), at each of the five lattice parameters. The two cells agree at every temperature. At 300–600 K the recombining shells are the 12-site first neighbor and the 12-site shell near 5.14 Å, 24 sites. At 700 K the 6-site shell near 3.65 Å recombines as well, 30 sites. The shells near 3.64 Å and 4.46 Å do not recombine at 300–600 K, so for this dumbbell orientation the radius is not one sphere. 12×12×12 and 14×14×14 were not run. 24 or 30 sites is the orientation-resolved spontaneous count. It is not Table 1. The rows are =benchmarks/defect_pair_shells.csv=. The isolated rates are =benchmarks/defect_pair_cu.csv=.

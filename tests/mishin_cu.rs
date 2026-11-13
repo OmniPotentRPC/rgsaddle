@@ -2855,20 +2855,15 @@ fn enumerate_escapes(
 ) -> Vec<Escape> {
     let held = FastHeld { copper, cell };
     let before = rgsaddle::pair_separation(reactant.view(), cell, fixed, &dumbbell).unwrap_or(0.0);
-    let center = centroid(reactant, dumbbell);
     let axis = axis_of(reactant, dumbbell);
-    let n_atoms = reactant.len() / 3;
     let found: Vec<Option<Escape>> = (0..tries)
         .into_par_iter()
         .map(|trial| {
             let mut rng = SplitRng::new(seed.wrapping_add(trial as u64).wrapping_mul(0x9E37));
             let mut kick = Array1::zeros(reactant.len());
-            for atom in 0..n_atoms {
-                if mic_distance(point_of(reactant, atom), center, cell) > 3.2 {
-                    continue;
-                }
+            for atom in dumbbell {
                 for c in 0..3 {
-                    kick[3 * atom + c] = rng.normal() * 0.3;
+                    kick[3 * atom + c] = rng.normal() * 0.2;
                 }
             }
             zero_mean(&mut kick);
@@ -2879,20 +2874,25 @@ fn enumerate_escapes(
             let mode = &kick / norm;
             let seed_pos = reactant + &kick;
             let search = MinModeConfig {
-                force_tol: 0.03,
+                force_tol: 0.04,
                 max_move: 0.1,
                 dr: 1.0e-3,
-                max_rotations: 6,
+                max_rotations: 8,
                 ..MinModeConfig::default()
             };
             let dimer_config = SolidDimerConfig::frozen(search)
                 .with_index_check(IndexCheck::first_order().with_step(1.0e-3).with_escapes(1));
             let mut dimer = SolidDimer::new(dimer_config, seed_pos, cell, mode).ok()?;
-            let report = dimer.run(&held, 55).ok()?;
+            let report = dimer.run(&held, 80).ok()?;
             if report.status != MinModeStatus::Converged
                 || report.rejected
                 || report.negative_modes != Some(1)
             {
+                eprintln!(
+                    "trial {trial} status {:?} force {:.3} steps {} negative {:?} rejected {}",
+                    report.status, report.max_force, report.iteration, report.negative_modes, report.rejected
+                );
+                let _ = std::io::stderr().flush();
                 return None;
             }
             let saddle = dimer.positions().to_owned();
@@ -2916,26 +2916,38 @@ fn enumerate_escapes(
             let step = &mode * (0.5 / peak);
             let mut plus = &saddle + &step;
             let mut minus = &saddle - &step;
-            relax_fast(copper, &mut plus, cell, 2.0e-3, 40);
-            relax_fast(copper, &mut minus, cell, 2.0e-3, 40);
+            relax_fast(copper, &mut plus, cell, 1.5e-3, 70);
+            relax_fast(copper, &mut minus, cell, 1.5e-3, 70);
             let gap_plus = hausdorff(&plus, reactant, cell);
             let gap_minus = hausdorff(&minus, reactant, cell);
-            let (product, back) = if gap_plus < gap_minus {
-                (minus, gap_plus)
+            let (reactant_energy, _) = held.eval(reactant.view()).ok()?;
+            let (energy_plus, _) = held.eval(plus.view()).ok()?;
+            let (energy_minus, _) = held.eval(minus.view()).ok()?;
+            let (product, back, back_energy, product_energy) = if gap_plus < gap_minus {
+                (minus, gap_plus, energy_plus, energy_minus)
             } else {
-                (plus, gap_minus)
+                (plus, gap_minus, energy_minus, energy_plus)
             };
             let turned = axis_dot(axis, axis_of(&product, dumbbell));
-            if back > 0.9 {
-                return None;
-            }
-            if hausdorff(&product, reactant, cell) < 0.45 {
+            let other = hausdorff(&product, reactant, cell);
+            let (saddle_now, _) = held.eval(saddle.view()).unwrap_or((f64::NAN, Array1::zeros(0)));
+            eprintln!(
+                "trial {trial} back {back:.3} dE {:.3} product {other:.3} dE {:.3} saddle {:.3}",
+                back_energy - reactant_energy,
+                product_energy - reactant_energy,
+                saddle_now - reactant_energy
+            );
+            let _ = std::io::stderr().flush();
+            if back > 1.6
+                || (back_energy - reactant_energy).abs() > 0.08
+                || product_energy < reactant_energy - 1.0
+                || other < 0.45
+            {
                 return None;
             }
             let after = rgsaddle::pair_separation(product.view(), cell, fixed, &dumbbell).ok()?;
             let direction = rgsaddle::classify_separation(before, after, 0.08).ok()?;
             let (saddle_energy, _) = held.eval(saddle.view()).ok()?;
-            let (reactant_energy, _) = held.eval(reactant.view()).ok()?;
             if !saddle_energy.is_finite() || !reactant_energy.is_finite() {
                 return None;
             }
@@ -3081,8 +3093,8 @@ fn cu_config(
             quickmin: false,
             ..rgsaddle::BandConfig::default()
         },
-        images: 7,
-        max_dimer_steps: 60,
+        images: 9,
+        max_dimer_steps: 100,
         max_band_steps: 120,
         max_relax_steps: 50,
         relax_tol: 1.0e-3,
@@ -3090,7 +3102,7 @@ fn cu_config(
         max_move: 0.08,
         seed_fraction: 0.45,
         push: 0.3,
-        connect_rmsd: 0.85,
+        connect_rmsd: 1.5,
         direction_tol: 0.08,
         pafi: rgsaddle::PafiConfig {
             thermalize: 40,
@@ -3125,7 +3137,7 @@ fn cu_config(
         harmonic_step: 1.0e-3,
         harmonic_atoms: Some(harmonic),
         planes: 11,
-        zero_t_tol: 0.01,
+        zero_t_tol: 0.02,
         bulk_stress: bulk,
         ..rgsaddle::DefectPairConfig::default()
     }
@@ -3483,7 +3495,7 @@ fn defect_pair_cu_catalogue() {
         shells: Vec::new(),
         lattice: lattice.clone(),
         notes: vec![format!(
-            "NPT a(T) on a 6x6x6 cell, Berendsen zero pressure, second half of 8 ps. Reference lattice for hop discovery is {:.5} A at {} K. Band force tolerance 0.01 eV/A, FIRE, climbing armed only after a plain relaxation. Finite-T PAFI runs only when the zero-temperature integral matches dE0 within 0.01 eV. Target sampling error {target:.4} eV.",
+            "NPT a(T) on a 6x6x6 cell, Berendsen zero pressure, second half of 8 ps. Reference lattice for hop discovery is {:.5} A at {} K. Band force tolerance 0.01 eV/A, FIRE, climbing armed only after a plain relaxation. Finite-T PAFI runs only when the zero-temperature integral matches dE0 within 0.02 eV. Target sampling error {target:.4} eV.",
             reference.1, reference.0
         )],
     };
@@ -3493,7 +3505,7 @@ fn defect_pair_cu_catalogue() {
         sizes.extend([12, 14]);
     }
     for &repeats in &sizes {
-        let rate_this = rate_sizes.contains(&repeats);
+        let rate_this = rate_sizes.contains(&repeats) && std::env::var("RGSADDLE_SCAN_ONLY").is_err();
         let shell_cap = if !rate_this {
             0
         } else if max_shells > 0 {

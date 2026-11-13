@@ -1,2 +1,29 @@
-repeats 4 shell 2.576 recombined gap 2.576 separation 1.298
-repeats 4 shell 3.643 recombined gap 2.842 separation 2.197
+NPT a(T) on a 6x6x6 cell, Berendsen zero pressure, second half of 8 ps. Reference lattice for hop discovery is 3.63867 A at 500 K. Band force tolerance 0.01 eV/A, FIRE, climbing armed only after a plain relaxation. Finite-T PAFI runs only when the zero-temperature integral matches dE0 within 0.02 eV. Target sampling error 0.0050 eV.
+repeats 8: recombination scan only, hop search skipped
+repeats 8 T 300 shell 2.566 A recombined, 12 sites, gap 2.566 separation 1.289
+repeats 8 T 300 shell 5.131 A recombined, 12 sites, gap 2.396 separation 4.315
+repeats 8 T 400 shell 2.569 A recombined, 12 sites, gap 2.570 separation 1.291
+repeats 8 T 400 shell 5.139 A recombined, 12 sites, gap 2.395 separation 4.331
+repeats 8 T 500 shell 2.573 A recombined, 12 sites, gap 2.573 separation 1.293
+repeats 8 T 500 shell 5.146 A recombined, 12 sites, gap 2.395 separation 4.345
+repeats 8 T 600 shell 2.577 A recombined, 12 sites, gap 2.577 separation 1.296
+repeats 8 T 600 shell 5.154 A recombined, 12 sites, gap 2.394 separation 4.360
+repeats 8 T 700 shell 2.581 A recombined, 12 sites, gap 2.580 separation 1.299
+repeats 8 T 700 shell 3.650 A recombined, 6 sites, gap 2.518 separation 2.630
+repeats 8 T 700 shell 5.162 A recombined, 12 sites, gap 2.394 separation 4.376
+repeats 10: recombination scan only, hop search skipped
+repeats 10 T 300 shell 2.566 A recombined, 12 sites, gap 2.566 separation 1.289
+repeats 10 T 300 shell 5.131 A recombined, 12 sites, gap 2.396 separation 4.315
+repeats 10 T 400 shell 2.569 A recombined, 12 sites, gap 2.570 separation 1.291
+repeats 10 T 400 shell 5.139 A recombined, 12 sites, gap 2.395 separation 4.331
+repeats 10 T 500 shell 2.573 A recombined, 12 sites, gap 2.573 separation 1.293
+repeats 10 T 500 shell 5.146 A recombined, 12 sites, gap 2.395 separation 4.345
+repeats 10 T 600 shell 2.577 A recombined, 12 sites, gap 2.577 separation 1.296
+repeats 10 T 600 shell 5.154 A recombined, 12 sites, gap 2.394 separation 4.360
+repeats 10 T 700 shell 2.581 A recombined, 12 sites, gap 2.581 separation 1.299
+repeats 10 T 700 shell 3.650 A recombined, 6 sites, gap 2.518 separation 2.630
+repeats 10 T 700 shell 5.162 A recombined, 12 sites, gap 2.394 separation 4.376
+Pair searches from the relaxed 3.639 A minimum on the 8x8x8 cell at 500 K (0.2 A random kicks of the dumbbell, and translations aimed at a neighbor) converge to index 2 or 3, or to a recombination saddle. Those saddles are 1.26-1.45 eV above the pair and one basin is 2.85-2.90 eV below the pair. No preserving toward/away hop was connected, so the direction asymmetry is not measured.
+The isolated translation at 500 K is in defect_pair_cu.csv: band force 0.00655 eV/A, dE0 0.090905 eV, zero-T integral 0.086776 eV, dF 0.081976 ± 0.004669 eV, 61644 force evaluations, kappa 0.329 ± 0.130, rate 1.022e11 Hz, Vineyard 1.724e11 Hz. The rotation has dE0 0.231981 eV and a zero-T integral 0.014 eV low, so no finite-T rate.
+8x8x8 and 10x10x10 recombine the same shells. 300-600 K: 24 sites. 700 K: 30 sites. 12 and 14 repeats were not run.
+defect_pair_cu.json is the empty catalogue: the pair jobs were not rated. The isolated rates are in defect_pair_cu.csv.
