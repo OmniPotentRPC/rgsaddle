@@ -1,0 +1,13 @@
+system,method,code,converged,force_calls,curvature,barrier,slab_shift,saddle_ok,eon_commit,config,notes
+lj-far,dimer,rgsaddle-pivoted,true,3,-0.22196853,0.96887587,0,true,,validation/rigid_rank_bench.csv,
+lj-far,dimer,eon,false,3,0,0.96887692,0,false,cc271af0d9b9c4eac6cd985a6496ec7d2c384c7e,validation/eon_parity/lj_far_saddle.ini,Dimer lost mode; eigenvalue 0; geometry unchanged
+lj-far,lanczos,rgsaddle-pivoted,true,3,-0.22190825,0.96887587,0,true,,validation/rigid_rank_bench.csv,
+lj-far,lanczos,eon,true,3,0,0.96887692,0,true,cc271af0d9b9c4eac6cd985a6496ec7d2c384c7e,validation/eon_parity/lj_far_saddle.ini,min_mode_method=lanczos; final_eigenvalue 0
+lj-far,ci-neb,rgsaddle-pivoted,true,215,,0.96887587,0,true,,validation/rigid_rank_bench.csv,
+lj-far,ci-neb,eon,true,578,,0.968869,0,true,cc271af0d9b9c4eac6cd985a6496ec7d2c384c7e,validation/eon_parity/lj_far_neb.ini,climbing image relative energy
+frozen-slab,dimer,rgsaddle-pivoted,true,109,-3.99999300,0.97999992,0,true,,validation/rigid_rank_bench.csv,
+frozen-slab,dimer,eon,true,230,-3.999981,0.980000,0,true,cc271af0d9b9c4eac6cd985a6496ec7d2c384c7e,validation/eon_parity/frozen_slab_saddle.ini,frozen atoms unmoved
+frozen-slab,lanczos,rgsaddle-pivoted,true,109,-3.99999300,0.97999992,0,true,,validation/rigid_rank_bench.csv,
+frozen-slab,lanczos,eon,true,153,-3.999981,0.980000,0,true,cc271af0d9b9c4eac6cd985a6496ec7d2c384c7e,validation/eon_parity/frozen_slab_saddle.ini,min_mode_method=lanczos; frozen atoms unmoved
+frozen-slab,ci-neb,rgsaddle-pivoted,true,44,,0.98000000,0,true,,validation/rigid_rank_bench.csv,
+frozen-slab,ci-neb,eon,true,74,,0.980000,0,true,cc271af0d9b9c4eac6cd985a6496ec7d2c384c7e,validation/eon_parity/frozen_slab_neb.ini,con x shifted by +10 and slab_extpot SHIFT=(10 0 0); frozen atoms unmoved

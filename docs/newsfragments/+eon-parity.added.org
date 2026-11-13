@@ -1,0 +1,2 @@
+eOn dimer, Lanczos and NEB force calls for the far Lennard-Jones
+trimer and the frozen slab are in validation/eon_parity.csv.
