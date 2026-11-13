@@ -1244,8 +1244,17 @@ pub const SPONTANEOUS_BARRIER_EV: f64 = 0.001;
 /// True when the placement is not a bound minimum, or the barrier measured
 /// from the lowest bound state is at most [`SPONTANEOUS_BARRIER_EV`].
 pub fn capture_is_spontaneous(recombines_on_relaxation: bool, barrier_ev: Option<f64>) -> bool {
+    capture_is_spontaneous_within(recombines_on_relaxation, barrier_ev, SPONTANEOUS_BARRIER_EV)
+}
+
+/// Same test with an explicit threshold, in eV, for the sensitivity of V_iv.
+pub fn capture_is_spontaneous_within(
+    recombines_on_relaxation: bool,
+    barrier_ev: Option<f64>,
+    threshold_ev: f64,
+) -> bool {
     recombines_on_relaxation
-        || barrier_ev.is_some_and(|value| value.is_finite() && value <= SPONTANEOUS_BARRIER_EV)
+        || barrier_ev.is_some_and(|value| value.is_finite() && value <= threshold_ev)
 }
 
 /// One shell in a kinetic recombination-volume sum.

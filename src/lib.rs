@@ -116,7 +116,8 @@ pub use bennett::{ShootingConfig, Transmission, bennett_chandler};
 pub use defect_pair::{
     BasinSaddle, CellMode, DefectPairConfig, DimerSeed, DirectionClass, HopOutcome, HopTemplate,
     PairSetup, RateCatalogue, RateEntry, RecombinationVolume, SiteOutcome, SPONTANEOUS_BARRIER_EV,
-    VolumePlacement, VolumeSite, attempt_frequency, capture_is_spontaneous, classify_separation,
+    VolumePlacement, VolumeSite, attempt_frequency, capture_is_spontaneous,
+    capture_is_spontaneous_within, classify_separation,
     defect_pair_rates, descend_limited, kinetic_recombination_volume, pair_separation,
     seeded_saddles, segment_band,
 };
