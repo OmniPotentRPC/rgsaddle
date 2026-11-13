@@ -169,6 +169,7 @@ using IdArray = nb::ndarray<const std::int64_t, nb::ndim<1>, nb::c_contig, nb::d
 using OwnerArray = nb::ndarray<const std::uint64_t, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
 using FlagArray = nb::ndarray<const std::uint8_t, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
 using Matrix = nb::ndarray<const double, nb::ndim<2>, nb::c_contig, nb::device::cpu>;
+using Vector = nb::ndarray<const double, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
 using Loose = nb::ndarray<nb::numpy, nb::device::cpu>;
 
 [[noreturn]] void shape_error(const char *name, const std::string &expected, const std::string &got) {
@@ -825,6 +826,225 @@ bool raise_status(int code) {
   return rgbind::apply_status(mapped, nullptr);
 }
 
+[[noreturn]] void status_error(rgsaddle_status_t status) {
+  const char *name = rgsaddle_status_name(status);
+  throw nb::value_error(name == nullptr || name[0] == '\0' ? "rgsaddle call failed" : name);
+}
+
+struct SessionReport {
+  int status = 0;
+  double max_force = 0.0;
+  double curvature = 0.0;
+  std::int64_t iteration = 0;
+  int evaluations = 0;
+  std::int64_t ci_index = -1;
+  std::int64_t rotations = 0;
+};
+
+SessionReport report_from(const rgsaddle_report_t &report) {
+  return SessionReport{report.status, report.max_force, report.curvature, report.iteration,
+                       report.evaluations, report.ci_index, report.rotations};
+}
+
+template <typename Call>
+SessionReport run_surface(nb::callable &fn, Call &&call) {
+  rgbind::CallContext ctx;
+  ConnectCallback state{&fn, &ctx};
+  rgsaddle_report_t report{};
+  rgsaddle_status_t status = RGSADDLE_OK;
+  {
+    nb::gil_scoped_release release;
+    status = call(connect_python_surface, static_cast<void *>(&state), &report);
+  }
+  if (ctx.has_error()) {
+    ctx.rethrow_if_set();
+  }
+  if (status != RGSADDLE_OK) {
+    status_error(status);
+  }
+  return report_from(report);
+}
+
+struct PyMinMode {
+  RgsaddleMinMode *handle = nullptr;
+  std::int64_t n_atoms = 0;
+
+  PyMinMode() = default;
+  PyMinMode(const PyMinMode &) = delete;
+  PyMinMode &operator=(const PyMinMode &) = delete;
+  PyMinMode(PyMinMode &&other) noexcept : handle(other.handle), n_atoms(other.n_atoms) {
+    other.handle = nullptr;
+  }
+  PyMinMode &operator=(PyMinMode &&other) noexcept {
+    if (this != &other) {
+      if (handle != nullptr) {
+        rgsaddle_minmode_free(handle);
+      }
+      handle = other.handle;
+      n_atoms = other.n_atoms;
+      other.handle = nullptr;
+    }
+    return *this;
+  }
+  ~PyMinMode() {
+    if (handle != nullptr) {
+      rgsaddle_minmode_free(handle);
+    }
+  }
+};
+
+struct PySella {
+  RgsaddleSellaSaddle *handle = nullptr;
+  std::int64_t n_atoms = 0;
+
+  PySella() = default;
+  PySella(const PySella &) = delete;
+  PySella &operator=(const PySella &) = delete;
+  PySella(PySella &&other) noexcept : handle(other.handle), n_atoms(other.n_atoms) {
+    other.handle = nullptr;
+  }
+  PySella &operator=(PySella &&other) noexcept {
+    if (this != &other) {
+      if (handle != nullptr) {
+        rgsaddle_sella_saddle_free(handle);
+      }
+      handle = other.handle;
+      n_atoms = other.n_atoms;
+      other.handle = nullptr;
+    }
+    return *this;
+  }
+  ~PySella() {
+    if (handle != nullptr) {
+      rgsaddle_sella_saddle_free(handle);
+    }
+  }
+};
+
+int32_t projection_code(const std::string &name) {
+  if (name == "neb" || name == "improvedtangent" || name == "aseneb") {
+    return 1;
+  }
+  if (name == "eb") {
+    return 0;
+  }
+  if (name == "dneb") {
+    return 2;
+  }
+  throw nb::value_error("projection must be neb, improvedtangent, aseneb, eb, or dneb");
+}
+
+nb::tuple project_band(Matrix positions, Vector energies, Matrix gradients, double k, bool climb,
+                       const std::string &projection, const std::string &tangent,
+                       bool remove_translation, double force_tol) {
+  if (positions.shape(0) < 3 || positions.shape(1) <= 0 || positions.shape(1) % 3 != 0) {
+    throw nb::value_error("positions must be (images >= 3, 3N)");
+  }
+  const auto rows = static_cast<std::int64_t>(positions.shape(0));
+  const auto dof = static_cast<std::int64_t>(positions.shape(1));
+  if (energies.shape(0) != positions.shape(0) || gradients.shape(0) != positions.shape(0) ||
+      gradients.shape(1) != positions.shape(1)) {
+    throw nb::value_error("energies and gradients must match positions");
+  }
+  if (!(k == k) || !(force_tol >= 0.0) || !(force_tol == force_tol)) {
+    throw nb::value_error("spring constant must be finite and force_tol non-negative");
+  }
+  rgsaddle_band_config_t config{};
+  config.version.major = RGSADDLE_ABI_MAJOR;
+  config.version.minor = RGSADDLE_ABI_MINOR;
+  config.flags = RGSADDLE_BAND_NO_MIN_MODE;
+  if (!remove_translation) {
+    config.flags |= RGSADDLE_BAND_KEEP_TRANSLATION;
+  }
+  config.tangent = tangent == "simple" ? 0 : 1;
+  if (tangent != "simple" && tangent != "improved" && tangent != "improvedtangent") {
+    throw nb::value_error("tangent must be improved, improvedtangent, or simple");
+  }
+  config.spring = 0;
+  config.projection = projection_code(projection);
+  config.method = RGSADDLE_METHOD_FIRE;
+  config.spring_k = k;
+  config.ci_trigger_factor = climb ? 1.0 : 0.0;
+  config.force_tol = force_tol;
+  config.max_move = 0.2;
+  std::vector<double> forces(static_cast<std::size_t>(rows * dof), 0.0);
+  std::int64_t ci = -1;
+  const auto status = rgsaddle_band_project(&config, rows, dof / 3, positions.data(), energies.data(),
+                                            gradients.data(), forces.data(), &ci);
+  if (status != RGSADDLE_OK) {
+    status_error(status);
+  }
+  return nb::make_tuple(copy_vector(forces), ci);
+}
+
+PyMinMode make_minmode(Vector x, Vector mode, const std::string &kind, double dr, double force_tol,
+                       double max_move, double rotation_tol, std::int64_t max_rotations,
+                       std::int64_t krylov_dim) {
+  if (x.shape(0) <= 0 || x.shape(0) % 3 != 0 || x.shape(0) != mode.shape(0)) {
+    throw nb::value_error("position and mode must share a positive multiple of three");
+  }
+  rgsaddle_minmode_config_t config{};
+  config.version.major = RGSADDLE_ABI_MAJOR;
+  config.version.minor = RGSADDLE_ABI_MINOR;
+  config.kind = kind == "lanczos" ? RGSADDLE_MINMODE_LANCZOS : RGSADDLE_MINMODE_DIMER;
+  if (kind != "dimer" && kind != "lanczos") {
+    throw nb::value_error("kind must be dimer or lanczos");
+  }
+  config.method = RGSADDLE_METHOD_LBFGS;
+  config.dr = dr;
+  config.rotation_tol = rotation_tol;
+  config.max_rotations = max_rotations;
+  config.krylov_dim = krylov_dim;
+  config.force_tol = force_tol;
+  config.max_move = max_move;
+  config.rotation_angle_tol = 5.0 * 3.14159265358979323846 / 180.0;
+  PyMinMode out;
+  out.n_atoms = static_cast<std::int64_t>(x.shape(0) / 3);
+  out.handle = rgsaddle_minmode_create(&config, out.n_atoms, x.data(), mode.data());
+  if (out.handle == nullptr) {
+    throw nb::value_error("minimum-mode configuration was refused");
+  }
+  return out;
+}
+
+void minmode_set_position(PyMinMode &self, Vector x, nb::handle gradient) {
+  if (self.handle == nullptr || x.shape(0) != self.n_atoms * 3) {
+    throw nb::value_error("position length must stay 3N");
+  }
+  const double *grad = nullptr;
+  if (!gradient.is_none()) {
+    auto values = nb::cast<Vector>(gradient);
+    if (values.shape(0) != x.shape(0)) {
+      throw nb::value_error("gradient length must match the position");
+    }
+    grad = values.data();
+  }
+  const auto status = rgsaddle_minmode_set_position(self.handle, x.data(), grad);
+  if (status != RGSADDLE_OK) {
+    status_error(status);
+  }
+}
+
+PySella make_sella(Vector x, Vector masses, std::int64_t order, double delta, double force_tol) {
+  if (x.shape(0) <= 0 || x.shape(0) % 3 != 0 || masses.shape(0) * 3 != x.shape(0)) {
+    throw nb::value_error("position is 3N and masses has one entry per atom");
+  }
+  rgsaddle_sella_saddle_config_t config{};
+  config.version.major = RGSADDLE_ABI_MAJOR;
+  config.version.minor = RGSADDLE_ABI_MINOR;
+  config.delta = delta;
+  config.force_tol = force_tol;
+  config.force_gate = RGSADDLE_FORCE_MAX_ATOM;
+  config.order = order;
+  PySella out;
+  out.n_atoms = static_cast<std::int64_t>(masses.shape(0));
+  out.handle = rgsaddle_sella_saddle_create(&config, out.n_atoms, x.data(), masses.data());
+  if (out.handle == nullptr) {
+    throw nb::value_error("Sella saddle configuration was refused");
+  }
+  return out;
+}
+
 } // namespace
 
 NB_MODULE(_core, m) {
@@ -943,6 +1163,110 @@ NB_MODULE(_core, m) {
               "numpy.typing.NDArray[numpy.float64], force_tol: float = 0.001, max_calls: int = 250000, "
               "quench_nodes: bool = True) -> ConnectReport"),
       "Double-ended connect. surface(x) returns (energy, gradient) for one image shaped (1, 3N).");
+
+  nb::class_<SessionReport>(m, "SessionReport")
+      .def_ro("status", &SessionReport::status, "0 while running, 1 when converged.")
+      .def_ro("max_force", &SessionReport::max_force, "Largest force component, or NaN for an estimate.")
+      .def_ro("curvature", &SessionReport::curvature, "Curvature along the mode. 0 for a band projection.")
+      .def_ro("iteration", &SessionReport::iteration, "Steps taken.")
+      .def_ro("evaluations", &SessionReport::evaluations, "Surface evaluations in this call.")
+      .def_ro("ci_index", &SessionReport::ci_index, "Climbing image, or -1.")
+      .def_ro("rotations", &SessionReport::rotations, "Dimer rotations or Lanczos actions.");
+
+  m.def(
+      "project_band", &project_band, nb::arg("positions").noconvert(), nb::arg("energies").noconvert(),
+      nb::arg("gradients").noconvert(), nb::arg("k") = 0.1, nb::arg("climb") = false,
+      nb::arg("projection") = "neb", nb::arg("tangent") = "improved",
+      nb::arg("remove_translation") = false, nb::arg("force_tol") = 1e-3,
+      "Project an evaluated band. Returns (forces, ci_index). forces is flat, "
+      "one row per image including zero endpoints, in the ASE force convention. "
+      "climb selects the interior image by the endpoint-slope rule on this call; "
+      "a higher endpoint that slopes into the band does not climb. Units are the "
+      "caller's. k is energy per length squared.");
+
+  nb::class_<PyMinMode>(m, "MinMode")
+      .def(
+          "__init__",
+          [](PyMinMode *self, Vector x, Vector mode, const std::string &kind, double dr, double force_tol,
+             double max_move, double rotation_tol, std::int64_t max_rotations, std::int64_t krylov_dim) {
+            new (self) PyMinMode(make_minmode(x, mode, kind, dr, force_tol, max_move, rotation_tol,
+                                              max_rotations, krylov_dim));
+          },
+          nb::arg("x").noconvert(), nb::arg("mode").noconvert(), nb::arg("kind") = "dimer",
+          nb::arg("dr") = 1e-3, nb::arg("force_tol") = 1e-3, nb::arg("max_move") = 0.2,
+          nb::arg("rotation_tol") = 1e-4, nb::arg("max_rotations") = 20, nb::arg("krylov_dim") = 12,
+          "Dimer or Lanczos minimum-mode session. Lengths are the caller's.")
+      .def(
+          "estimate",
+          [](PyMinMode &self, nb::callable fn) {
+            return run_surface(fn, [&](rgsaddle_surface_fn surface, void *user, rgsaddle_report_t *out) {
+              return rgsaddle_minmode_estimate(self.handle, surface, user, out);
+            });
+          },
+          nb::arg("surface"), "Refresh the lowest mode. surface(x) is one image shaped (1, 3N).")
+      .def(
+          "step",
+          [](PyMinMode &self, nb::callable fn) {
+            return run_surface(fn, [&](rgsaddle_surface_fn surface, void *user, rgsaddle_report_t *out) {
+              return rgsaddle_minmode_step(self.handle, surface, user, out);
+            });
+          },
+          nb::arg("surface"), "Estimate the mode, invert the force, and take one translation.")
+      .def(
+          "set_position", &minmode_set_position, nb::arg("x").noconvert(), nb::arg("gradient") = nb::none(),
+          "Move to a new point. gradient, when given, skips the next centre evaluation.")
+      .def(
+          "position",
+          [](const PyMinMode &self) {
+            std::vector<double> out(static_cast<std::size_t>(self.n_atoms * 3));
+            const auto status = rgsaddle_minmode_position(self.handle, out.data());
+            if (status != RGSADDLE_OK) {
+              status_error(status);
+            }
+            return copy_vector(out);
+          },
+          "Copy of the current position.")
+      .def(
+          "mode",
+          [](const PyMinMode &self) {
+            std::vector<double> out(static_cast<std::size_t>(self.n_atoms * 3));
+            const auto status = rgsaddle_minmode_mode(self.handle, out.data());
+            if (status != RGSADDLE_OK) {
+              status_error(status);
+            }
+            return copy_vector(out);
+          },
+          "Copy of the current mode.");
+
+  nb::class_<PySella>(m, "SellaSaddle")
+      .def(
+          "__init__",
+          [](PySella *self, Vector x, Vector masses, std::int64_t order, double delta, double force_tol) {
+            new (self) PySella(make_sella(x, masses, order, delta, force_tol));
+          },
+          nb::arg("x").noconvert(), nb::arg("masses").noconvert(), nb::arg("order") = 1,
+          nb::arg("delta") = 0.1, nb::arg("force_tol") = 1e-3,
+          "Order-1 Sella saddle search. masses has one entry per atom, in the caller's mass unit. "
+          "delta is the initial trust radius per free coordinate.")
+      .def(
+          "step",
+          [](PySella &self, nb::callable fn) {
+            return run_surface(fn, [&](rgsaddle_surface_fn surface, void *user, rgsaddle_report_t *out) {
+              return rgsaddle_sella_saddle_step(self.handle, surface, user, out);
+            });
+          },
+          nb::arg("surface"), "One partitioned-RFO trust step. surface(x) is one image shaped (1, 3N).")
+      .def(
+          "position",
+          [](const PySella &self) {
+            std::vector<double> out(static_cast<std::size_t>(self.n_atoms * 3));
+            const auto status = rgsaddle_sella_saddle_position(self.handle, out.data());
+            if (status != RGSADDLE_OK) {
+              status_error(status);
+            }
+            return copy_vector(out);
+          },
+          "Copy of the current Cartesian position.");
 
   m.def("raise_status", &raise_status, nb::arg("code"),
         "Map an rgsaddle_status_t value. The message is the stored text, or the "

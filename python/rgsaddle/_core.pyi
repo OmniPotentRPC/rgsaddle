@@ -128,6 +128,61 @@ def connect(surface: Callable[..., tuple[numpy.typing.NDArray[numpy.float64], nu
     Double-ended connect. surface(x) returns (energy, gradient) for one image shaped (1, 3N).
     """
 
+class SessionReport:
+    status: int
+    max_force: float
+    curvature: float
+    iteration: int
+    evaluations: int
+    ci_index: int
+    rotations: int
+
+def project_band(
+    positions: NDArray[numpy.float64],
+    energies: NDArray[numpy.float64],
+    gradients: NDArray[numpy.float64],
+    k: float = 0.1,
+    climb: bool = False,
+    projection: str = "neb",
+    tangent: str = "improved",
+    remove_translation: bool = False,
+    force_tol: float = 0.001,
+) -> tuple[NDArray[numpy.float64], int]:
+    """
+    Project an evaluated band. forces is flat, one row per image, endpoints zero. ci_index is -1 when no image climbs.
+    """
+
+class MinMode:
+    def __init__(
+        self,
+        x: NDArray[numpy.float64],
+        mode: NDArray[numpy.float64],
+        kind: str = "dimer",
+        dr: float = 0.001,
+        force_tol: float = 0.001,
+        max_move: float = 0.2,
+        rotation_tol: float = 0.0001,
+        max_rotations: int = 20,
+        krylov_dim: int = 12,
+    ) -> None: ...
+    def estimate(self, surface: Callable[..., tuple[NDArray[numpy.float64], NDArray[numpy.float64]]]) -> SessionReport: ...
+    def step(self, surface: Callable[..., tuple[NDArray[numpy.float64], NDArray[numpy.float64]]]) -> SessionReport: ...
+    def set_position(self, x: NDArray[numpy.float64], gradient: object | None = None) -> None: ...
+    def position(self) -> NDArray[numpy.float64]: ...
+    def mode(self) -> NDArray[numpy.float64]: ...
+
+class SellaSaddle:
+    def __init__(
+        self,
+        x: NDArray[numpy.float64],
+        masses: NDArray[numpy.float64],
+        order: int = 1,
+        delta: float = 0.1,
+        force_tol: float = 0.001,
+    ) -> None: ...
+    def step(self, surface: Callable[..., tuple[NDArray[numpy.float64], NDArray[numpy.float64]]]) -> SessionReport: ...
+    def position(self) -> NDArray[numpy.float64]: ...
+
 def raise_status(code: int) -> bool:
     """
     Map an rgsaddle_status_t value. The message is the stored text, or the status name when that text is empty. The stored text is cleared. True on OK. False is not used: convergence is not a status code.
