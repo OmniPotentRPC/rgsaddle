@@ -172,6 +172,8 @@ pub fn langevin_until<P, F, S>(
     positions: &mut [f64],
     cell: [[f64; 3]; 3],
     thermostat: Langevin,
+    equil: Langevin,
+    equil_ps: f64,
     window_ps: f64,
     sample_ps: f64,
     dt_fs: f64,
@@ -205,10 +207,16 @@ where
     }
     let sample_steps = ((sample_ps / (dt_fs * 1.0e-3)).round() as usize).max(1);
     let total_steps = ((window_ps / (dt_fs * 1.0e-3)).round() as usize).max(sample_steps);
+    let equil_steps = ((equil_ps / (dt_fs * 1.0e-3)).round() as usize).min(total_steps);
     let mut captured = false;
     let mut when = total_steps;
     for step in 1..=total_steps {
-        thermostat.step(
+        let phase = if step <= equil_steps {
+            equil
+        } else {
+            thermostat
+        };
+        phase.step(
             potential,
             positions,
             &mut velocities,
@@ -397,6 +405,8 @@ struct MishinCu {
     offsets: Vec<u32>,
     order: Vec<u32>,
     packed: Vec<[f64; 3]>,
+    neigh: Vec<(u32, u32)>,
+    anchor: Vec<f64>,
 }
 
 impl MishinCu {
@@ -419,6 +429,8 @@ impl MishinCu {
             offsets: Vec::new(),
             order: Vec::new(),
             packed: Vec::new(),
+            neigh: Vec::new(),
+            anchor: Vec::new(),
         }
     }
 
@@ -528,11 +540,28 @@ impl EnergyGradient for MishinCu {
             + cell[2][0].abs()
             + cell[2][1].abs()
             < 1.0e-8;
-        self.pairs.clear();
-        if orthogonal && lengths.iter().all(|length| *length > 2.0 * RC) {
-            self.pairs_cell(positions, lengths);
+        let skin = 1.0;
+        if orthogonal && lengths.iter().all(|length| *length > 2.0 * (RC + skin)) {
+            if self.list_stale(positions, lengths, skin) {
+                self.pairs.clear();
+                self.pairs_cell(positions, lengths, RC + skin);
+                self.neigh.clear();
+                self.neigh
+                    .extend(self.pairs.iter().map(|bond| (bond.i, bond.j)));
+                self.anchor.clear();
+                self.anchor.extend_from_slice(positions);
+                self.pairs.clear();
+            }
+            self.pairs_from_list(positions, lengths);
         } else {
-            self.pairs_images(positions, cell);
+            self.pairs.clear();
+            self.anchor.clear();
+            self.neigh.clear();
+            if orthogonal {
+                self.pairs_cell(positions, lengths, RC);
+            } else {
+                self.pairs_images(positions, cell);
+            }
         }
         self.accumulate(n, gradient)
     }
@@ -590,9 +619,47 @@ impl MishinCu {
         }
     }
 
-    fn pairs_cell(&mut self, positions: &[f64], lengths: [f64; 3]) {
+    fn list_stale(&self, positions: &[f64], lengths: [f64; 3], skin: f64) -> bool {
+        if self.anchor.len() != positions.len() || self.neigh.is_empty() {
+            return true;
+        }
+        let limit = 0.25 * skin * skin;
+        for atom in 0..positions.len() / 3 {
+            let mut distance = 0.0;
+            for axis in 0..3 {
+                let mut delta = positions[3 * atom + axis] - self.anchor[3 * atom + axis];
+                delta -= lengths[axis] * (delta / lengths[axis]).round();
+                distance += delta * delta;
+            }
+            if distance > limit {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn pairs_from_list(&mut self, positions: &[f64], lengths: [f64; 3]) {
+        self.pairs.clear();
+        let cutoff2 = RC * RC;
+        let neigh = self.neigh.clone();
+        for &(left, right) in &neigh {
+            let i = left as usize;
+            let j = right as usize;
+            let mut d = [0.0; 3];
+            for axis in 0..3 {
+                d[axis] = positions[3 * j + axis] - positions[3 * i + axis];
+                d[axis] -= lengths[axis] * (d[axis] / lengths[axis]).round();
+            }
+            let r2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+            if r2 > 1.0e-16 && r2 < cutoff2 {
+                self.push_pair(i, j, d, r2.sqrt());
+            }
+        }
+    }
+
+    fn pairs_cell(&mut self, positions: &[f64], lengths: [f64; 3], cutoff: f64) {
         let n = positions.len() / 3;
-        let nside = lengths.map(|length| ((length / RC).floor() as i32).max(1));
+        let nside = lengths.map(|length| ((length / cutoff).floor() as i32).max(1));
         let bins_n = (nside[0] * nside[1] * nside[2]) as usize;
         self.counts.clear();
         self.counts.resize(bins_n, 0);
@@ -626,7 +693,7 @@ impl MishinCu {
             self.packed[slot] = [positions[3 * i], positions[3 * i + 1], positions[3 * i + 2]];
             cursor[bin] += 1;
         }
-        let cutoff2 = RC * RC;
+        let cutoff2 = cutoff * cutoff;
         for slot_i in 0..n {
             let i = self.order[slot_i] as usize;
             let ri = self.packed[slot_i];
@@ -1038,7 +1105,7 @@ fn output_path() -> PathBuf {
 }
 
 fn note_path(csv: &std::path::Path) -> PathBuf {
-    csv.with_file_name("direct_md_viv.md")
+    csv.with_extension("md")
 }
 
 const HEADER: &str = "temperature_K,lattice_A,repeats,n_atoms,shell_A,shell_x,shell_y,shell_z,orientation,shell_sites,seed,dt_fs,gamma_per_ps,window_ps,captured,time_ps,steps,initial_non12,final_non12";
@@ -1083,11 +1150,14 @@ fn run_job(potential: &mut MishinCu, spec: &RunSpec, job: &Job) -> (usize, Traje
     let n_atoms = positions.len() / 3;
     let thermostat =
         Langevin::from_physical(spec.dt_fs, spec.gamma_per_ps, job.temperature, CU_MASS_AMU);
+    let equil = Langevin::from_physical(spec.dt_fs, 1.0, job.temperature, CU_MASS_AMU);
     let outcome = langevin_until(
         potential,
         &mut positions,
         cell,
         thermostat,
+        equil,
+        2.0,
         spec.window_ps,
         SAMPLE_PS,
         spec.dt_fs,
@@ -1130,6 +1200,240 @@ struct Group {
     sites: f64,
     captured: f64,
     trials: f64,
+}
+
+const DUMBBELL_ALPHA: f64 = 2.0 / 3.0;
+
+fn first_method_report(csv: &std::path::Path) -> String {
+    #[derive(Clone)]
+    struct Trial {
+        temperature: f64,
+        lattice: f64,
+        repeats: f64,
+        shell: f64,
+        orientation: String,
+        sites: f64,
+        window: f64,
+        captured: bool,
+        time_ps: f64,
+    }
+    let Ok(file) = File::open(csv) else {
+        return String::new();
+    };
+    let mut trials = Vec::new();
+    for line in BufReader::new(file).lines().map_while(Result::ok) {
+        let fields: Vec<&str> = line.split(',').collect();
+        if fields.len() < 19 {
+            continue;
+        }
+        let Ok(temperature) = fields[0].parse::<f64>() else {
+            continue;
+        };
+        let Ok(lattice) = fields[1].parse::<f64>() else {
+            continue;
+        };
+        let Ok(repeats) = fields[2].parse::<f64>() else {
+            continue;
+        };
+        let Ok(shell) = fields[4].parse::<f64>() else {
+            continue;
+        };
+        let Ok(sites) = fields[9].parse::<f64>() else {
+            continue;
+        };
+        let Ok(window) = fields[13].parse::<f64>() else {
+            continue;
+        };
+        let Ok(captured) = fields[14].parse::<u8>() else {
+            continue;
+        };
+        let Ok(time_ps) = fields[15].parse::<f64>() else {
+            continue;
+        };
+        trials.push(Trial {
+            temperature,
+            lattice,
+            repeats,
+            shell,
+            orientation: fields[8].to_string(),
+            sites,
+            window,
+            captured: captured == 1,
+            time_ps,
+        });
+    }
+    if trials.is_empty() {
+        return String::new();
+    }
+    let mut text = String::new();
+    text.push_str("## Capture fraction against time\n\n");
+    text.push_str("The fraction is the number of trajectories of that shell and orientation that had recombined by that time, divided by the number of trajectories. `V_shell` is the shell sum, sites/3 times the fraction, over every shell that has all three orientations. Sites outside 10.8 Å are not in `V_shell`.\n\n");
+    let mut temperatures: BTreeMap<u64, f64> = BTreeMap::new();
+    for trial in &trials {
+        temperatures.insert(trial.temperature.to_bits(), trial.temperature);
+    }
+    let marks = [
+        0.25_f64, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 150.0, 200.0, 300.0,
+    ];
+    for temperature in temperatures.values() {
+        let members: Vec<&Trial> = trials
+            .iter()
+            .filter(|trial| trial.temperature == *temperature)
+            .collect();
+        let window = members[0].window;
+        let lattice = members[0].lattice;
+        let repeats = members[0].repeats;
+        text.push_str(&format!("### {temperature:.0} K\n\n"));
+        text.push_str("| shell (Å) | orientation |");
+        for mark in marks.iter().filter(|mark| **mark <= window + 1.0e-9) {
+            text.push_str(&format!(" {mark:.0} ps |"));
+        }
+        text.push_str(" last new capture (ps) |\n|---:|:---:|");
+        for _ in marks.iter().filter(|mark| **mark <= window + 1.0e-9) {
+            text.push_str("---:|");
+        }
+        text.push_str("---:|\n");
+        let mut groups: BTreeMap<(u64, String), Vec<&Trial>> = BTreeMap::new();
+        for trial in &members {
+            groups
+                .entry((trial.shell.to_bits(), trial.orientation.clone()))
+                .or_default()
+                .push(trial);
+        }
+        for ((_, _), group) in &groups {
+            let trial = group[0];
+            text.push_str(&format!(
+                "| {shell:.4} | {orient} |",
+                shell = trial.shell,
+                orient = trial.orientation
+            ));
+            for mark in marks.iter().filter(|mark| **mark <= window + 1.0e-9) {
+                let hit = group
+                    .iter()
+                    .filter(|item| item.captured && item.time_ps <= *mark)
+                    .count();
+                text.push_str(&format!(" {:.3} |", hit as f64 / group.len() as f64));
+            }
+            let last = group
+                .iter()
+                .filter(|item| item.captured)
+                .map(|item| item.time_ps)
+                .fold(0.0, f64::max);
+            text.push_str(&format!(" {last:.2} |\n"));
+        }
+        text.push_str("\n| time (ps) | V_shell/Ω |\n|---:|---:|\n");
+        let mut shells: BTreeMap<u64, Vec<&Trial>> = BTreeMap::new();
+        for trial in &members {
+            shells.entry(trial.shell.to_bits()).or_default().push(trial);
+        }
+        for mark in marks.iter().filter(|mark| **mark <= window + 1.0e-9) {
+            let mut volume = 0.0;
+            for group in shells.values() {
+                let mut orients: BTreeMap<&str, Vec<&Trial>> = BTreeMap::new();
+                for trial in group {
+                    orients
+                        .entry(trial.orientation.as_str())
+                        .or_default()
+                        .push(trial);
+                }
+                if orients.len() < 3 {
+                    continue;
+                }
+                for orient in orients.values() {
+                    let hit = orient
+                        .iter()
+                        .filter(|item| item.captured && item.time_ps <= *mark)
+                        .count();
+                    volume += orient[0].sites / 3.0 * hit as f64 / orient.len() as f64;
+                }
+            }
+            text.push_str(&format!("| {mark:.2} | {volume:.2} |\n"));
+        }
+        text.push('\n');
+        let diffusivity = table_diffusivity(*temperature);
+        let total_sites = repeats * repeats * repeats * 4.0;
+        let model_volume = (repeats * lattice).powi(3);
+        let mut fit_times = Vec::new();
+        for mark in marks
+            .iter()
+            .filter(|mark| **mark <= window + 1.0e-9 && **mark > 0.0)
+        {
+            let mut captured_sites = 0.0;
+            for group in shells.values() {
+                let mut orients: BTreeMap<&str, Vec<&Trial>> = BTreeMap::new();
+                for trial in group {
+                    orients
+                        .entry(trial.orientation.as_str())
+                        .or_default()
+                        .push(trial);
+                }
+                if orients.len() < 3 {
+                    continue;
+                }
+                for orient in orients.values() {
+                    let hit = orient
+                        .iter()
+                        .filter(|item| item.captured && item.time_ps <= *mark)
+                        .count();
+                    captured_sites += orient[0].sites / 3.0 * hit as f64 / orient.len() as f64;
+                }
+            }
+            let survival = (1.0 - captured_sites / total_sites).max(1.0e-12);
+            fit_times.push((*mark, survival.ln()));
+        }
+        text.push_str("The first method of Mwungeli, Liu, and Demkowicz fits ln(n(t)/N) against time through the origin. The slope is -k/V_model, with V_model the 13³ cell volume. n(t)/N here counts every lattice site: a simulated shell contributes its capture fraction, and a site outside 10.8 Å is counted as not yet recombined. The recombination volume is k a² / (α D_i) with α = 2/3, divided by Ω = a³/4.\n\n");
+        if fit_times.is_empty() {
+            continue;
+        }
+        let denominator: f64 = fit_times.iter().map(|(time, _)| time * time).sum();
+        let slope = fit_times
+            .iter()
+            .map(|(time, log_s)| time * log_s)
+            .sum::<f64>()
+            / denominator;
+        let residual = fit_times
+            .iter()
+            .map(|(time, log_s)| {
+                let miss = log_s - slope * time;
+                miss * miss
+            })
+            .sum::<f64>();
+        let dof = (fit_times.len() as f64 - 1.0).max(1.0);
+        let slope_sigma = (residual / dof / denominator).sqrt();
+        let rate = -slope * model_volume;
+        let rate_sigma = slope_sigma * model_volume;
+        text.push_str(&format!(
+            "Fit on {} samples up to {window:.0} ps: slope {slope:.6e} ± {slope_sigma:.6e} /ps, k {rate:.6e} ± {rate_sigma:.6e} Å³/ps.\n\n",
+            fit_times.len()
+        ));
+        match diffusivity {
+            Some((d_i, d_sigma)) if d_i > 0.0 => {
+                let volume = rate * lattice * lattice / (DUMBBELL_ALPHA * d_i);
+                let per_atom = volume / (lattice.powi(3) / 4.0);
+                let rel = ((rate_sigma / rate).powi(2) + (d_sigma / d_i).powi(2)).sqrt();
+                text.push_str(&format!(
+                    "Table 1 quotes the Ref. [12] SIA diffusivity as {d_i:.3} ± {d_sigma:.3} Å²/ps at this temperature. First-method V_iv = {per_atom:.2} ± {:.2} Ω.\n\n",
+                    per_atom * rel
+                ));
+            }
+            _ => {
+                text.push_str("No Table 1 diffusivity is recorded for this temperature, so k is not converted to a volume.\n\n");
+            }
+        }
+    }
+    text
+}
+
+fn table_diffusivity(temperature: f64) -> Option<(f64, f64)> {
+    // Å²/ps from Table 1 of Mwungeli, Liu, and Demkowicz, quoted there from Ref. [12].
+    match temperature as i32 {
+        300 => Some((0.143, 0.006)),
+        400 => Some((0.327, 0.005)),
+        500 => Some((0.526, 0.006)),
+        600 => Some((0.728, 0.010)),
+        700 => Some((0.910, 0.012)),
+        _ => None,
+    }
 }
 
 fn summarize(csv: &std::path::Path) -> String {
@@ -1182,9 +1486,9 @@ fn summarize(csv: &std::path::Path) -> String {
     }
     let mut text = String::new();
     text.push_str("# Direct-MD vacancy-SIA volume, Mishin Cu\n\n");
-    text.push_str("Independent NVT trajectories of one vacancy and one <100> dumbbell on the Mishin EAM1 evaluated by `tests/mishin_cu.rs`. The driver is `examples/langevin_nvt.rs`. The cell is 13×13×13 conventional cells (8788 atoms) at the branch's NPT lattice constant. Capture is the paper's 12-fold test: coordination cutoff 3.1 Å, sampled every 0.25 ps (Mwungeli, Liu, and Demkowicz, Phys. Rev. Materials 9, 023601 (2025), first method). The volume is not their survival-curve slope. It is the shell sum used by `kinetic_recombination_volume`: each orientation owns one third of the shell, and a shell enters only when all three <100> orientations were run.\n\n");
+    text.push_str("Independent NVT trajectories of one vacancy and one <100> dumbbell on the Mishin EAM1 evaluated by `tests/mishin_cu.rs`. The driver is `examples/langevin_nvt.rs`. The cell is 13×13×13 conventional cells (8788 atoms) at the branch's NPT lattice constant. Capture is the paper's 12-fold test: coordination cutoff 3.1 Å, sampled every 0.25 ps (Mwungeli, Liu, and Demkowicz, Phys. Rev. Materials 9, 023601 (2025)). The shell sum counts recombined sites, with each orientation owning one third of its shell. The survival-curve volume defined in section 2 of that paper is computed from the same trajectories.\n\n");
     text.push_str("The clock starts at the ideal dumbbell (offset 1.025 Å) with Maxwellian velocities. There is no separate NPH equilibration. The thermostat is the Langevin velocity Verlet in `npt_lattice`, without the barostat. Friction and timestep are the columns `gamma_per_ps` and `dt_fs`.\n\n");
-    text.push_str("A 3 ps control at 500 K, 2 fs, and the same friction, sampled every 0.25 ps, fixes what a zero in the 12-fold count means. The perfect 13³ crystal started at 0 atoms off 12-fold coordination and then fluctuated: minimum 0, mean 6.2, maximum 14, with 4 of 12 samples exactly 0. The nearest shell, a <100> dumbbell, started at 13 and fell into that same cloud (minimum 0, mean 5.7, maximum 16, 2 of 12 samples exactly 0). The outermost shell inside 10.8 Å started at 20 and stayed separated (minimum 22, mean 32.0, maximum 47, 0 of 12 samples exactly 0). Capture in the table is the first sample whose off-12 count is 0.\n\n");
+    text.push_str("A 3 ps control at 500 K, 2 fs, and gamma = 1/ps, sampled every 0.25 ps, fixes what a zero in the 12-fold count means. The perfect 13³ crystal started at 0 atoms off 12-fold coordination and then fluctuated: minimum 0, mean 6.2, maximum 14, with 4 of 12 samples exactly 0. The nearest shell, a <100> dumbbell, started at 13 and fell into that same cloud (minimum 0, mean 5.7, maximum 16, 2 of 12 samples exactly 0). The outermost shell inside 10.8 Å started at 20 and stayed separated (minimum 22, mean 32.0, maximum 47, 0 of 12 samples exactly 0). Capture in the table is the first sample whose off-12 count is 0.\n\n");
     text.push_str("Binomial standard error of a capture probability is sqrt(p (1-p) / N). The volume error adds the orientation contributions in quadrature. A shell whose trajectories all agree has a binomial error of zero.\n\n");
     if groups.is_empty() {
         text.push_str("No trajectory rows were found.\n");
@@ -1240,7 +1544,7 @@ fn summarize(csv: &std::path::Path) -> String {
             }
         }
         text.push_str(&format!(
-            "V_iv = {volume:.2} ± {sigma:.2} Ω over {used} shells with all three orientations.\n\n",
+            "Shell sum = {volume:.2} ± {sigma:.2} Ω over {used} shells with all three orientations. This counts sites that recombined inside the window. It is not the survival-curve volume.\n\n",
             sigma = variance.sqrt(),
         ));
         if !skipped.is_empty() {
@@ -1251,7 +1555,7 @@ fn summarize(csv: &std::path::Path) -> String {
             text.push_str(".\n\n");
         }
         if (temperature - 500.0).abs() < 1.0 {
-            text.push_str("Commit c7688cf3 on feat/defect-pair-rates counts capture once, treats a nearest-neighbor hop onto the vacancy as capture, and builds the return layer from the sites one nearest-neighbor hop past the outer shell. Its first-passage volumes on the 8³ cell (2048 atoms), from benchmarks/defect_pair_passage.csv, are 185.4028 ± 5.0671 Ω at 300 K, 271.6158 ± 2.8552 Ω at 500 K, and 185.7878 ± 3.9133 Ω at 700 K. Table 1 of Mwungeli, Liu and Demkowicz, 8788 atoms at 500 K, is 185 ± 23 Ω (k-method) and 161 ± 15 Ω (mean-time method). Those volumes are long-time recombination volumes. This table counts captures inside the window above, on the 8788-atom cell.\n\n");
+            text.push_str("Commit 0a5b8661 counts eight translation channels of a <100> dumbbell and turns the axis on a hop. benchmarks/defect_pair_run12_volume.csv gives the 13³ first-passage volume as 202.4328 ± 5.1390 Ω at 300 K, 187.6200 ± 4.6448 Ω at 500 K, and 204.5416 ± 3.6445 Ω at 700 K. Table 1 of Mwungeli, Liu and Demkowicz, 8788 atoms at 500 K, is 185 ± 23 Ω (k-method) and 161 ± 15 Ω (mean-time method).\n\n");
         }
         if (temperature - 300.0).abs() < 1.0 {
             text.push_str("Table 1 at 300 K, 8788 atoms, is 254 ± 21 Ω (k-method) and 286 ± 28 Ω (mean-time method).\n\n");
@@ -1260,8 +1564,118 @@ fn summarize(csv: &std::path::Path) -> String {
             text.push_str("Table 1 at 700 K, 8788 atoms, is 203 ± 10 Ω (k-method) and 210 ± 21 Ω (mean-time method).\n\n");
         }
     }
-    text.push_str("Raw per-trajectory outcomes are `validation/direct_md_viv.csv`.\n");
+    text.push_str(&first_method_report(csv));
+    text.push_str("Raw per-trajectory outcomes are the CSV this note was written from.\n");
     text
+}
+
+fn defect_centroid(
+    positions: &[f64],
+    lengths: [f64; 3],
+    previous: Option<[f64; 3]>,
+) -> Option<[f64; 3]> {
+    let n = positions.len() / 3;
+    let mut best_gap = f64::MAX;
+    let mut best_follow = f64::MAX;
+    let mut pair = [0.0; 3];
+    let cutoff = 2.20;
+    let cutoff2 = cutoff * cutoff;
+    let nside = lengths.map(|length| ((length / cutoff).floor() as i32).max(1));
+    let bins_n = (nside[0] * nside[1] * nside[2]) as usize;
+    let mut members = vec![Vec::new(); bins_n];
+    for i in 0..n {
+        let bin = bin_of(
+            [
+                positions[3 * i] / lengths[0],
+                positions[3 * i + 1] / lengths[1],
+                positions[3 * i + 2] / lengths[2],
+            ],
+            nside,
+        );
+        members[bin].push(i);
+    }
+    for i in 0..n {
+        let ri = [positions[3 * i], positions[3 * i + 1], positions[3 * i + 2]];
+        let home = [
+            (ri[0] / lengths[0]).rem_euclid(1.0) * nside[0] as f64,
+            (ri[1] / lengths[1]).rem_euclid(1.0) * nside[1] as f64,
+            (ri[2] / lengths[2]).rem_euclid(1.0) * nside[2] as f64,
+        ];
+        let (bins, count) = neighbor_bins(home, nside);
+        for bin in bins.into_iter().take(count) {
+            for &j in &members[bin] {
+                if j <= i {
+                    continue;
+                }
+                let mut d = [
+                    positions[3 * j] - ri[0],
+                    positions[3 * j + 1] - ri[1],
+                    positions[3 * j + 2] - ri[2],
+                ];
+                for axis in 0..3 {
+                    d[axis] -= lengths[axis] * (d[axis] / lengths[axis]).round();
+                }
+                let r2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+                if r2 >= cutoff2 {
+                    continue;
+                }
+                let center = [ri[0] + 0.5 * d[0], ri[1] + 0.5 * d[1], ri[2] + 0.5 * d[2]];
+                let follow = if let Some(previous) = previous {
+                    let mut distance = 0.0;
+                    for axis in 0..3 {
+                        let mut delta = center[axis] - previous[axis];
+                        delta -= lengths[axis] * (delta / lengths[axis]).round();
+                        distance += delta * delta;
+                    }
+                    distance
+                } else {
+                    r2
+                };
+                let better = if previous.is_some() {
+                    follow < best_follow
+                } else {
+                    r2 < best_gap
+                };
+                if better {
+                    best_gap = r2;
+                    best_follow = follow;
+                    pair = center;
+                }
+            }
+        }
+    }
+    (best_gap < f64::MAX).then_some(pair)
+}
+
+fn centroid_of(positions: &[f64], atoms: [usize; 2]) -> [f64; 3] {
+    let mut center = [0.0; 3];
+    for atom in atoms {
+        for axis in 0..3 {
+            center[axis] += positions[3 * atom + axis];
+        }
+    }
+    [center[0] * 0.5, center[1] * 0.5, center[2] * 0.5]
+}
+
+fn isolated_dumbbell(repeats: usize, a: f64) -> (Vec<f64>, [[f64; 3]; 3]) {
+    let (flat, cell) = fcc(repeats, a);
+    let n = flat.len() / 3;
+    let mut points = Vec::with_capacity(n);
+    for atom in 0..n {
+        points.push([flat[3 * atom], flat[3 * atom + 1], flat[3 * atom + 2]]);
+    }
+    let center = [cell[0][0] * 0.5, cell[1][1] * 0.5, cell[2][2] * 0.5];
+    let host = nearest(&points, center, None);
+    let host_pos = points[host];
+    let mut values = Vec::with_capacity((n + 1) * 3);
+    for (index, point) in points.iter().enumerate() {
+        if index != host {
+            values.extend(point);
+        }
+    }
+    values.extend([host_pos[0] - DUMBBELL_OFFSET_A, host_pos[1], host_pos[2]]);
+    values.extend([host_pos[0] + DUMBBELL_OFFSET_A, host_pos[1], host_pos[2]]);
+    (values, cell)
 }
 
 fn main() {
@@ -1304,7 +1718,8 @@ fn main() {
             pot.energy_gradient(&positions, cell, &mut gradient);
             let initial = coordination_deficit(&positions, cell);
             let sample = ((SAMPLE_PS / (spec.dt_fs * 1.0e-3)).round() as usize).max(1);
-            let steps = ((3.0 / (spec.dt_fs * 1.0e-3)).round() as usize).max(1);
+            let steps =
+                ((spec.window_ps.min(20.0) / (spec.dt_fs * 1.0e-3)).round() as usize).max(1);
             let mut min_non12 = usize::MAX;
             let mut max_non12 = 0usize;
             let mut sum_non12 = 0.0;
@@ -1328,8 +1743,11 @@ fn main() {
                     samples += 1;
                 }
             }
+            let kinetic =
+                velocities.iter().map(|value| value * value).sum::<f64>() * 0.5 * CU_MASS_AMU;
+            let target = 1.5 * (positions.len() / 3) as f64 * BOLTZMANN_EV_PER_K * spec.temps[0];
             println!(
-                "coord {label} initial {initial} min {min_non12} mean {:.1} max {max_non12} zeros {zeros}/{samples}",
+                "coord {label} initial {initial} min {min_non12} mean {:.1} max {max_non12} zeros {zeros}/{samples} kinetic {kinetic:.1} target {target:.1}",
                 sum_non12 / samples as f64
             );
         }
@@ -1354,6 +1772,106 @@ fn main() {
             big.len() / 3,
             check.pairs.len()
         );
+        return;
+    }
+
+    if env::var("MD_MSD").ok().as_deref() == Some("1") {
+        let spec = run_spec();
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("validation/direct_md_sia_d.csv");
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("validation dir");
+        }
+        let mut out = File::create(&path).expect("diffusivity");
+        writeln!(out, "temperature_K,D_A2_per_ps,seed,window_ps").unwrap();
+        for &temperature in &spec.temps {
+            let lattice = measured_lattice(temperature);
+            for seed in 0..4u64 {
+                let (mut positions, cell) = isolated_dumbbell(spec.repeats, lattice);
+                let mut potential = MishinCu::new();
+                let production = Langevin::from_physical(
+                    spec.dt_fs,
+                    spec.gamma_per_ps,
+                    temperature,
+                    CU_MASS_AMU,
+                );
+                let equil = Langevin::from_physical(spec.dt_fs, 1.0, temperature, CU_MASS_AMU);
+                let mut velocities = vec![0.0; positions.len()];
+                let mut rng = SplitRng::new(
+                    seed.wrapping_mul(0xD1FF)
+                        .wrapping_add(temperature.to_bits()),
+                );
+                let sigma = (production.thermal / production.mass).sqrt();
+                for velocity in &mut velocities {
+                    *velocity = rng.normal() * sigma;
+                }
+                zero_com(&mut velocities);
+                let mut gradient = vec![0.0; positions.len()];
+                potential.energy_gradient(&positions, cell, &mut gradient);
+                let lengths = [cell[0][0], cell[1][1], cell[2][2]];
+                let mut origin = defect_centroid(&positions, lengths, None).unwrap_or([0.0; 3]);
+                let mut cursor = origin;
+                let mut unwrapped = origin;
+                let window_ps = 40.0;
+                let steps = ((window_ps / (spec.dt_fs * 1.0e-3)).round() as usize).max(1);
+                let equil_steps = ((2.0 / (spec.dt_fs * 1.0e-3)).round() as usize);
+                let sample_steps = ((0.25 / (spec.dt_fs * 1.0e-3)).round() as usize).max(1);
+                let mut start = unwrapped;
+                let mut started = false;
+                let mut rejected = 0usize;
+                for step in 1..=steps {
+                    let phase = if step <= equil_steps {
+                        equil
+                    } else {
+                        production
+                    };
+                    phase.step(
+                        &mut potential,
+                        &mut positions,
+                        &mut velocities,
+                        &mut gradient,
+                        cell,
+                        &mut rng,
+                    );
+                    if step % sample_steps != 0 && step != equil_steps {
+                        continue;
+                    }
+                    let Some(here) = defect_centroid(&positions, lengths, Some(cursor)) else {
+                        continue;
+                    };
+                    let mut jump = 0.0;
+                    for axis in 0..3 {
+                        let mut delta = here[axis] - cursor[axis];
+                        delta -= lengths[axis] * (delta / lengths[axis]).round();
+                        jump += delta * delta;
+                    }
+                    if jump.sqrt() > 3.6 {
+                        rejected += 1;
+                        continue;
+                    }
+                    for axis in 0..3 {
+                        let mut delta = here[axis] - cursor[axis];
+                        delta -= lengths[axis] * (delta / lengths[axis]).round();
+                        unwrapped[axis] += delta;
+                    }
+                    cursor = here;
+                    if step == equil_steps {
+                        start = unwrapped;
+                        origin = unwrapped;
+                        started = true;
+                    }
+                }
+                let elapsed = if started { window_ps - 2.0 } else { window_ps };
+                let shift = [
+                    unwrapped[0] - start[0],
+                    unwrapped[1] - start[1],
+                    unwrapped[2] - start[2],
+                ];
+                let msd = shift[0] * shift[0] + shift[1] * shift[1] + shift[2] * shift[2];
+                let d_i = msd / (6.0 * elapsed);
+                writeln!(out, "{temperature:.0},{d_i:.8e},{seed},{elapsed:.2}").unwrap();
+                println!("msd T {temperature:.0} seed {seed} D {d_i:.6e} rejected {rejected}");
+            }
+        }
         return;
     }
 
