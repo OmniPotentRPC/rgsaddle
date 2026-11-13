@@ -27,6 +27,40 @@ jobs:
         run: cargo clippy --features capi -- -D warnings
       - name: Format
         run: cargo fmt --check
+      - name: Public items are documented
+        run: cargo rustdoc --features capi -- -D missing_docs
+      - name: C index and machine-local paths
+        run: |
+          python3 docs/check_c_symbols.py
+          python3 docs/check_paths.py
+
+  examples:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run every example
+        env:
+          RGSADDLE_BENCH_SYSTEM: muller-brown
+          RGSADDLE_BENCH_KIND: dimer
+          RGSADDLE_BENCH_METHOD: lbfgs
+          RGSADDLE_BENCH_SEEDS: "1"
+          RGSADDLE_BENCH_SKIP_OFF: "1"
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-dev
+          python3 -m pip install 'scikit-build-core>=1.1' 'nanobind>=3.1' 'numpy'
+          cargo run --release --example double_well
+          cargo run --release --example muller_brown_band -- "$RUNNER_TEMP/muller"
+          cargo run --release --example minmode_trust
+          cargo run --release --example band_scaling -- band 7 1 1 1 fire
+          cargo run --release --example band_scaling -- minmode 7 dimer 1
+          cargo run --release --example minmode_calls
+          python3 -m pip install -e . --no-build-isolation
+          python3 examples/usage.py
 
   ase-parity:
     runs-on: ubuntu-latest
