@@ -196,6 +196,18 @@ pub unsafe extern "C" fn rgsaddle_minmode_set_kappa(
     }
 }
 
+/// `rgsaddle_irc_kind_t`. Before ABI minor 35 every kind but Morokuma ran
+/// the sphere about the last point, now `RGSADDLE_IRC_SELLA_SPHERE`.
+/// Minor 34 is the curvature probe and does not change this.
+fn irc_kind_of(cfg: &RgsaddleIrcConfig) -> Option<IrcKind> {
+    match (cfg.kind, cfg.version.minor >= 35) {
+        (1, _) => Some(IrcKind::Morokuma),
+        (_, false) | (2, true) => Some(IrcKind::SellaSphere),
+        (0, true) => Some(IrcKind::Gs2),
+        _ => None,
+    }
+}
+
 /// # Safety
 /// `saddle` and `mode` are 3N, `masses` is N.
 #[unsafe(no_mangle)]
@@ -220,17 +232,15 @@ pub unsafe extern "C" fn rgsaddle_irc_create(
     let Some(force_gate) = force_gate_of(cfg.force_gate) else {
         return std::ptr::null_mut();
     };
+    let Some(kind) = irc_kind_of(cfg) else {
+        return std::ptr::null_mut();
+    };
     let irc_cfg = IrcConfig {
         dx: cfg.dx,
         force_tol: cfg.force_tol,
         force_gate,
-        max_move: cfg.max_move,
         max_inner: cfg.max_inner.max(1) as usize,
-        kind: if cfg.kind == 1 {
-            IrcKind::Morokuma
-        } else {
-            IrcKind::Gs2
-        },
+        kind,
         ..IrcConfig::default()
     };
     let dir = if cfg.direction == 1 {
@@ -273,17 +283,15 @@ pub unsafe extern "C" fn rgsaddle_irc_create_from_surface(
     let Some(force_gate) = force_gate_of(cfg.force_gate) else {
         return std::ptr::null_mut();
     };
+    let Some(kind) = irc_kind_of(cfg) else {
+        return std::ptr::null_mut();
+    };
     let irc_cfg = IrcConfig {
         dx: cfg.dx,
         force_tol: cfg.force_tol,
         force_gate,
-        max_move: cfg.max_move,
         max_inner: cfg.max_inner.max(1) as usize,
-        kind: if cfg.kind == 1 {
-            IrcKind::Morokuma
-        } else {
-            IrcKind::Gs2
-        },
+        kind,
         ..IrcConfig::default()
     };
     let dir = if cfg.direction == 1 {
@@ -492,6 +500,205 @@ mod irc_abi_tests {
         );
         assert!(out[0].abs() > 1e-8, "kick must leave the saddle");
         unsafe { rgsaddle_irc_free(sess) };
+    }
+
+    fn irc_abi_points(max_move: f64) -> Vec<[f64; 6]> {
+        let saddle = [0.0; 6];
+        let masses = [1.0, 1.0];
+        let mut mode = [0.0; 6];
+        mode[0] = 1.0;
+        let cfg = RgsaddleIrcConfig {
+            version: RgsaddleVersion {
+                major: RGSADDLE_ABI_MAJOR,
+                minor: RGSADDLE_ABI_MINOR,
+            },
+            flags: 0,
+            dx: 0.15,
+            force_tol: 0.05,
+            force_gate: crate::ForceGate::MaxForceOnAtom.to_abi(),
+            max_move,
+            max_inner: 10,
+            kind: 0,
+            direction: 0,
+        };
+        let sess = unsafe {
+            rgsaddle_irc_create(&cfg, 2, saddle.as_ptr(), masses.as_ptr(), mode.as_ptr())
+        };
+        assert!(!sess.is_null());
+        let mut report = RgsaddleReport {
+            version: RgsaddleVersion { major: 0, minor: 0 },
+            flags: 0,
+            status: 0,
+            evaluations: 0,
+            max_force: 0.0,
+            ci_index: 0,
+            iteration: 0,
+            curvature: 0.0,
+            rotations: 0,
+        };
+        let mut points = Vec::new();
+        for _ in 0..5 {
+            let rc = unsafe {
+                rgsaddle_irc_step(sess, Some(well_cb), std::ptr::null_mut(), &mut report)
+            };
+            assert_eq!(rc, RGSADDLE_OK);
+            let mut out = [0.0; 6];
+            assert_eq!(
+                unsafe { rgsaddle_irc_position(sess, out.as_mut_ptr()) },
+                RGSADDLE_OK
+            );
+            points.push(out);
+        }
+        unsafe { rgsaddle_irc_free(sess) };
+        points
+    }
+
+    /// A clamp of 1e-3 per atom would shorten the first step of radius 0.15.
+    #[test]
+    fn irc_abi_does_not_read_max_move() {
+        let clamped = irc_abi_points(1e-3);
+        assert!(clamped[0][0].abs() > 1e-3, "{clamped:?}");
+        assert_eq!(clamped, irc_abi_points(10.0));
+    }
+
+    const SPLIT_MASSES: [f64; 2] = [1.0, 16.0];
+    const SPLIT_MODE: [f64; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+
+    fn irc_abi_first_point(minor: u32, kind: i32) -> Option<[f64; 6]> {
+        let cfg = RgsaddleIrcConfig {
+            version: RgsaddleVersion {
+                major: RGSADDLE_ABI_MAJOR,
+                minor,
+            },
+            flags: 0,
+            dx: 0.15,
+            force_tol: 0.05,
+            force_gate: crate::ForceGate::MaxForceOnAtom.to_abi(),
+            max_move: 0.0,
+            max_inner: 10,
+            kind,
+            direction: 0,
+        };
+        let saddle = [0.0; 6];
+        let sess = unsafe {
+            rgsaddle_irc_create(
+                &cfg,
+                2,
+                saddle.as_ptr(),
+                SPLIT_MASSES.as_ptr(),
+                SPLIT_MODE.as_ptr(),
+            )
+        };
+        if sess.is_null() {
+            return None;
+        }
+        let mut report = RgsaddleReport {
+            version: RgsaddleVersion { major: 0, minor: 0 },
+            flags: 0,
+            status: 0,
+            evaluations: 0,
+            max_force: 0.0,
+            ci_index: 0,
+            iteration: 0,
+            curvature: 0.0,
+            rotations: 0,
+        };
+        let rc =
+            unsafe { rgsaddle_irc_step(sess, Some(well_cb), std::ptr::null_mut(), &mut report) };
+        assert_eq!(rc, RGSADDLE_OK);
+        let mut out = [0.0; 6];
+        assert_eq!(
+            unsafe { rgsaddle_irc_position(sess, out.as_mut_ptr()) },
+            RGSADDLE_OK
+        );
+        unsafe { rgsaddle_irc_free(sess) };
+        Some(out)
+    }
+
+    fn rust_first_point(kind: IrcKind) -> [f64; 6] {
+        let mut session = IrcSession::new(
+            IrcConfig {
+                dx: 0.15,
+                force_tol: 0.05,
+                force_gate: crate::ForceGate::MaxForceOnAtom,
+                max_inner: 10,
+                kind,
+                ..IrcConfig::default()
+            },
+            Array1::zeros(6),
+            Array1::from(SPLIT_MASSES.to_vec()),
+            Array1::from(SPLIT_MODE.to_vec()),
+            IrcDirection::Forward,
+        )
+        .unwrap();
+        session.step(&Well).unwrap();
+        let mut out = [0.0; 6];
+        for (o, x) in out.iter_mut().zip(session.position()) {
+            *o = *x;
+        }
+        out
+    }
+
+    /// Masses 1 and 16 with the mode on both atoms put the first points of
+    /// the two spheres apart. Through minor 34 every kind but Morokuma is
+    /// the sphere about the last point. Minor 34 is the curvature probe.
+    /// From minor 35 kind 0 is the Gonzalez and Schlegel pivot and an
+    /// unknown kind is refused.
+    #[test]
+    fn irc_abi_kind_follows_the_config_minor() {
+        let sella = rust_first_point(IrcKind::SellaSphere);
+        let gs2 = rust_first_point(IrcKind::Gs2);
+        assert_ne!(sella, gs2);
+        for minor in [33u32, 34] {
+            for kind in [0, 2, 7] {
+                assert_eq!(
+                    irc_abi_first_point(minor, kind),
+                    Some(sella),
+                    "minor {minor} kind {kind}"
+                );
+            }
+        }
+        assert_eq!(irc_abi_first_point(35, 0), Some(gs2));
+        assert_eq!(irc_abi_first_point(35, 2), Some(sella));
+        assert_eq!(irc_abi_first_point(35, 7), None);
+    }
+
+    #[test]
+    fn irc_abi_from_surface_refuses_an_unknown_kind() {
+        let create = |minor: u32| {
+            let cfg = RgsaddleIrcConfig {
+                version: RgsaddleVersion {
+                    major: RGSADDLE_ABI_MAJOR,
+                    minor,
+                },
+                flags: 0,
+                dx: 0.15,
+                force_tol: 0.05,
+                force_gate: crate::ForceGate::MaxForceOnAtom.to_abi(),
+                max_move: 0.0,
+                max_inner: 10,
+                kind: 7,
+                direction: 0,
+            };
+            let saddle = [0.0; 6];
+            unsafe {
+                rgsaddle_irc_create_from_surface(
+                    &cfg,
+                    2,
+                    saddle.as_ptr(),
+                    SPLIT_MASSES.as_ptr(),
+                    SPLIT_MODE.as_ptr(),
+                    Some(well_cb),
+                    std::ptr::null_mut(),
+                )
+            }
+        };
+        assert!(create(35).is_null());
+        for minor in [33u32, 34] {
+            let old = create(minor);
+            assert!(!old.is_null(), "minor {minor}");
+            unsafe { rgsaddle_irc_free(old) };
+        }
     }
 
     #[test]

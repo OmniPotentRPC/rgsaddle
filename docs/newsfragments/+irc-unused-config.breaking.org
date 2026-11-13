@@ -1,0 +1,6 @@
+~IrcConfig~ loses ~max_move~ and ~method~.
+They configured an rgmin ~Solver~ that the session of the intrinsic reaction coordinate (IRC) built and never stepped, so no IRC step read them.
+The mass-weighted rigid-body projection set on that solver never applied either.
+A struct literal that names either field drops it.
+~rgsaddle_irc_config_t~ keeps its ~max_move~ field for the layout, create does not read it, and the C++ helper ~irc_config~ no longer sets it.
+In ~src/capi/sessions.rs~, one branch run with ~max_move~ 1e-3 and with 10 gives the same points.

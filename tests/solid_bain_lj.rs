@@ -7,6 +7,11 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+include!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/common/cdylib.rs"
+));
+
 #[test]
 fn c_abi_solid_state_band_climbs_the_bain_path() {
     let compiler = std::env::var("CC").unwrap_or_else(|_| "cc".into());
@@ -53,8 +58,3 @@ fn c_abi_solid_state_band_climbs_the_bain_path() {
     assert!(stdout.contains("RGSADDLE_BAIN_LJ_OK"), "stdout: {stdout}");
     std::fs::remove_file(out).expect("remove temporary Bain-path executable");
 }
-
-include!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/tests/common/cdylib_dir.rs"
-));

@@ -3,6 +3,11 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+include!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/common/cdylib.rs"
+));
+
 #[test]
 fn c_abi_irc_analytic_well() {
     let compiler = std::env::var("CC").unwrap_or_else(|_| "cc".into());
@@ -47,8 +52,3 @@ fn c_abi_irc_analytic_well() {
     assert!(stdout.contains("RGSADDLE_IRC_ABI_OK"), "stdout: {stdout}");
     std::fs::remove_file(out).expect("remove temporary IRC executable");
 }
-
-include!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/tests/common/cdylib_dir.rs"
-));

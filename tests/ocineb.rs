@@ -228,7 +228,12 @@ fn run_ocineb(well: &Well, n_images: usize, y_amp: f64, force_tol: f64) -> (Ocin
     (session, surface.geometries())
 }
 
-fn run_band(well: &Well, n_images: usize, y_amp: f64, force_tol: f64) -> usize {
+fn run_band(
+    well: &Well,
+    n_images: usize,
+    y_amp: f64,
+    force_tol: f64,
+) -> (BandSession, BandStatus, usize) {
     let surface = Counted::new(Well {
         y_k: well.y_k,
         z_k: well.z_k,
@@ -241,13 +246,20 @@ fn run_band(well: &Well, n_images: usize, y_amp: f64, force_tol: f64) -> usize {
         ..BandConfig::default()
     };
     let mut session = BandSession::new(config, initial_band(n_images, y_amp)).unwrap();
+    let mut status = BandStatus::Running;
     for _ in 0..4000 {
-        let report = session.step(&surface).unwrap();
-        if report.status == BandStatus::Converged {
-            return surface.geometries();
+        status = session.step(&surface).unwrap().status;
+        if status == BandStatus::Converged {
+            break;
         }
     }
-    panic!("plain CI-NEB did not converge");
+    (session, status, surface.geometries())
+}
+
+/// Position and energy of the climbing image.
+fn climbing_point(well: &Well, positions: ArrayView2<f64>, ci: usize) -> ([f64; 3], f64) {
+    let x = [positions[(ci, 0)], positions[(ci, 1)], positions[(ci, 2)]];
+    (x, well.energy_grad(x[0], x[1], x[2]).0)
 }
 
 #[test]
@@ -394,9 +406,27 @@ fn handoff_finds_the_same_saddle_as_plain_ci_neb() {
     assert_abs_diff_eq!(pos[(ci, 1)], plain_pos[(plain_ci, 1)], epsilon = 0.05);
 }
 
+/// OCI-NEB (Goswami, Gunde, and Jónsson, "Enhanced climbing image
+/// nudged elastic band method with Hessian eigenmode alignment",
+/// Front. Chem. 14 (2026), doi:10.3389/fchem.2026.1807063) against
+/// plain CI-NEB on three wells.
+///
+/// Every well is separable with its saddle at the origin, energy 1, and
+/// no Hessian eigenvalue there smaller than 4 in magnitude. A climbing
+/// image whose largest force component is under `tol` is then, to first
+/// order, within `tol / 4` of the saddle in each coordinate and within
+/// `3 tol^2 / 8` of its energy, so two converged climbing images agree
+/// to `tol` in position and `tol^2` in energy.
+///
+/// The OCI/CI force-call ratios are 0.170, 0.167 and 0.201 on these
+/// starts and at most 0.332 over initial bows of 0.2 to 0.5, so the
+/// bound is half the CI-NEB count.
 #[test]
 fn benchmark_force_calls_against_plain_ci_neb() {
     let tol = 1e-3;
+    let position_tol = tol;
+    let energy_tol = tol * tol;
+    let max_ratio = 0.5;
     let systems = [
         ("smooth double well", Well::smooth(), 9usize, 0.3f64),
         ("stiff perpendicular", Well::stiff(), 9, 0.4),
@@ -405,10 +435,28 @@ fn benchmark_force_calls_against_plain_ci_neb() {
     eprintln!("| system | CI-NEB calls | OCI-NEB calls | OCI/CI |");
     eprintln!("| --- | ---: | ---: | ---: |");
     for (name, well, n_images, y_amp) in systems {
-        let plain = run_band(&well, n_images, y_amp, tol);
-        let (_session, hybrid) = run_ocineb(&well, n_images, y_amp, tol);
+        let (band, status, plain) = run_band(&well, n_images, y_amp, tol);
+        assert_eq!(status, BandStatus::Converged, "{name}: CI-NEB");
+        let (session, hybrid) = run_ocineb(&well, n_images, y_amp, tol);
         let ratio = hybrid as f64 / plain as f64;
         eprintln!("| {name} | {plain} | {hybrid} | {ratio:.3} |");
-        assert!(plain > 0 && hybrid > 0);
+
+        let band_ci = band.climbing_image().expect("CI-NEB climbing image");
+        let oci_ci = session.climbing_image().expect("OCI-NEB climbing image");
+        let (band_x, band_e) = climbing_point(&well, band.positions(), band_ci);
+        let (oci_x, oci_e) = climbing_point(&well, session.positions(), oci_ci);
+        for k in 0..3 {
+            assert_abs_diff_eq!(band_x[k], oci_x[k], epsilon = position_tol);
+            assert_abs_diff_eq!(band_x[k], 0.0, epsilon = position_tol);
+            assert_abs_diff_eq!(oci_x[k], 0.0, epsilon = position_tol);
+        }
+        assert_abs_diff_eq!(band_e, oci_e, epsilon = energy_tol);
+        assert_abs_diff_eq!(band_e, 1.0, epsilon = energy_tol);
+        assert_abs_diff_eq!(oci_e, 1.0, epsilon = energy_tol);
+
+        assert!(
+            ratio <= max_ratio,
+            "{name}: OCI-NEB {hybrid} calls, CI-NEB {plain}, ratio {ratio:.3} > {max_ratio}"
+        );
     }
 }

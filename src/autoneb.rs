@@ -2016,6 +2016,84 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_threaded_search_matches_the_serial_search_bit_for_bit() {
+        let cases = [
+            (
+                "double_well",
+                array![[-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+                Pot::Well,
+            ),
+            (
+                "muller_bc",
+                array![
+                    [-0.050010822738, 0.466694104872, 0.0],
+                    [0.623499404931, 0.028037758529, 0.0]
+                ],
+                Pot::Muller,
+            ),
+        ];
+        for (name, initial, pot) in cases {
+            let run = |threads: usize| {
+                let config = BandConfig {
+                    method: rgmin::Method::Lbfgs { memory: 10 },
+                    max_move: 0.1,
+                    autoneb: Some(AutoNebTuning {
+                        n_simul: 3,
+                        n_max: 7,
+                        threads,
+                        ..AutoNebTuning::default()
+                    }),
+                    ..BandConfig::default()
+                };
+                let mut search = AutoNeb::new(config, initial.clone()).unwrap();
+                let report = search.run(&pot).unwrap();
+                (search, report)
+            };
+            let (serial, serial_report) = run(1);
+            assert_eq!(serial_report.status, BandStatus::Converged, "{name}");
+            let serial_energies: Vec<Option<u64>> = serial
+                .energies()
+                .iter()
+                .map(|e| e.map(f64::to_bits))
+                .collect();
+            for threads in [2, 3, 4] {
+                let (search, report) = run(threads);
+                assert_eq!(report.status, serial_report.status, "{name} {threads}");
+                assert_eq!(report.ci_index, serial_report.ci_index, "{name} {threads}");
+                assert_eq!(report.n_images, serial_report.n_images, "{name} {threads}");
+                assert_eq!(
+                    report.iteration, serial_report.iteration,
+                    "{name} {threads}"
+                );
+                assert_eq!(
+                    report.surface_rows, serial_report.surface_rows,
+                    "{name} {threads}"
+                );
+                assert_eq!(
+                    report.max_force.to_bits(),
+                    serial_report.max_force.to_bits(),
+                    "{name} {threads}"
+                );
+                assert_eq!(search.insertions(), serial.insertions(), "{name} {threads}");
+                assert!(
+                    search
+                        .positions()
+                        .iter()
+                        .zip(serial.positions().iter())
+                        .all(|(a, b)| a.to_bits() == b.to_bits()),
+                    "{name} {threads}"
+                );
+                let energies: Vec<Option<u64>> = search
+                    .energies()
+                    .iter()
+                    .map(|e| e.map(f64::to_bits))
+                    .collect();
+                assert_eq!(energies, serial_energies, "{name} {threads}");
+            }
+        }
+    }
+
     /// Converged AutoNEB at the default caps, then the pool microbenchmark.
     ///
     /// The pool limiter is the measured block time of the widest run.

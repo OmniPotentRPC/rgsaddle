@@ -84,6 +84,9 @@ Its window always reaches both neighbours of the climbing image, and the min-mod
 =rgsaddle_minmode_set_torque_window= (minor 32) calls =MinModeSession::set_torque_window= with -1, 0 or 1.
 The value -1 infers the window from =rotation_tol= as a new session does, 0 turns it off and 1 turns it on.
 It returns =RGSADDLE_INVALID_PARAMETER= for any other value.
+From minor 35, =rgsaddle_irc_config_t= =kind= 0 (=RGSADDLE_IRC_GS2=) is the Gonzalez and Schlegel pivot step, 2 (=RGSADDLE_IRC_SELLA_SPHERE=) is the sphere about the last point, and create returns NULL on a kind other than 0, 1 and 2.
+A config at minor 34 or older runs the sphere about the last point for every kind but Morokuma.
+Minor 34 is the curvature probe and leaves IRC kinds unchanged.
 The request flags are =RGSADDLE_REQ_ONE_IMAGE= (bit 0) and =RGSADDLE_REQ_CLIMBING_IMAGE= (bit 1).
 From a band config at minor 22, the refinement's one-image requests also set bit 1.
 Their =image= is then the climbing image's band index.

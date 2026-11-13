@@ -58,7 +58,6 @@ The types are the sections of ~towncrier.toml~: ~breaking~, ~security~,
 Write Org markup with one sentence per line.
 A release collects the fragments under a new heading, and ~--draft~
 prints that heading without writing it:
-
 #+begin_src sh
 python -m pip install towncrier
 towncrier build --draft --version <version>

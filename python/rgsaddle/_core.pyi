@@ -25,6 +25,8 @@ RGSADDLE_IRC_GS2: int = 0
 
 RGSADDLE_IRC_MOROKUMA: int = 1
 
+RGSADDLE_IRC_SELLA_SPHERE: int = 2
+
 class NumericalError(ArithmeticError):
     pass
 

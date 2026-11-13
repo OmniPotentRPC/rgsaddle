@@ -4,6 +4,11 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+include!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/common/cdylib.rs"
+));
+
 fn cc() -> Option<String> {
     [
         std::env::var("CC").ok(),
@@ -54,8 +59,3 @@ fn c_abi_smoke() {
     assert!(stdout.contains("RGSADDLE_C_ABI_OK"), "stdout: {stdout}");
     let _ = std::fs::remove_file(&out);
 }
-
-include!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/tests/common/cdylib_dir.rs"
-));

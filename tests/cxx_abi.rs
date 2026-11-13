@@ -3,6 +3,11 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+include!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/common/cdylib.rs"
+));
+
 #[test]
 fn cxx_session_wrapper_uses_the_official_abi() {
     let compiler = std::env::var("CXX").unwrap_or_else(|_| "c++".into());
@@ -45,8 +50,3 @@ fn cxx_session_wrapper_uses_the_official_abi() {
     assert!(String::from_utf8_lossy(&run.stdout).contains("RGSADDLE_CXX_WRAP_OK"));
     std::fs::remove_file(out).expect("remove temporary smoke executable");
 }
-
-include!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/tests/common/cdylib_dir.rs"
-));
