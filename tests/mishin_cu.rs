@@ -23,7 +23,7 @@ use rgsaddle::{
     BOLTZMANN_EV_PER_K, CellMask, CubicElasticity,
     DefectSource, ElasticDipole, ElasticMultipole, FieldSolver, FmmSolver, IndexCheck, Kelvin,
     LINEAR_FOLD_EV, MinModeConfig, MinModeStatus, PairOptions, PairOutcome, PointSurface,
-    SaddleError, SaddleSeed, isolated_saddle, pair_saddle_search,
+    SaddleError, SaddleSeed, classify_saddle, isolated_saddle, pair_saddle_search,
     SolidDimer, SolidDimerConfig, Strain, StrainResponse, Trust, TrustPolicy, cubic_rotations,
     index_at,
 };
@@ -3490,6 +3490,28 @@ fn rotate_about(positions: &Array1<f64>, center: [f64; 3], q: [[f64; 3]; 3]) -> 
     out
 }
 
+/// Nearest-neighbour jumps that carry a component along the dumbbell axis.
+/// These are the Johnson translations. The four equatorial jumps are a
+/// different hop and are not this list.
+fn johnson_jumps(a: f64, axis: [f64; 3]) -> Vec<[f64; 3]> {
+    let h = 0.5 * a;
+    let mut jumps = Vec::new();
+    for i in 0..3 {
+        for s in [-1.0, 1.0] {
+            for t in [-1.0, 1.0] {
+                let mut d = [0.0; 3];
+                d[i] = s * h;
+                d[(i + 1) % 3] = t * h;
+                let along = d[0] * axis[0] + d[1] * axis[1] + d[2] * axis[2];
+                if along.abs() > 1.0e-8 {
+                    jumps.push(d);
+                }
+            }
+        }
+    }
+    jumps
+}
+
 fn nn_jumps(a: f64, axis: [f64; 3]) -> Vec<[f64; 3]> {
     let h = 0.5 * a;
     let mut jumps = Vec::new();
@@ -3511,9 +3533,10 @@ fn nn_jumps(a: f64, axis: [f64; 3]) -> Vec<[f64; 3]> {
 
 /// Translation and rotation of the <100> dumbbell in the vacancy field.
 ///
-/// The translation is the Johnson hop onto a nearest neighbour: the saddle
-/// stays near <100>, about 14 degrees off the axis. The rotation stays on
-/// one site and turns the axis through a <110> saddle. Every symmetry-distinct
+/// The translation is the Johnson hop onto a nearest neighbour that has a
+/// component along the dumbbell axis: [100] at the origin to [001] at
+/// (a/2, 0, a/2). The saddle is about 14 degrees from that product axis.
+/// The rotation stays on one site and turns through a <110> saddle. Every symmetry-distinct
 /// <100> orientation is relaxed. A placement is kept only when it is still a
 /// dumbbell. The direct saddle is a fixed-cell dimer started at the isolated
 /// saddle of that hop; a search that recombines or changes hop is not a barrier
@@ -3563,15 +3586,15 @@ fn dumbbell_translation_and_rotation_in_the_vacancy_field() {
     );
 
     let origin_site = vacancy_site;
-    let neighbor = nearest_atom(perfect, [0.0, 0.5 * a, 0.5 * a]);
+    let neighbor = nearest_atom(perfect, [0.5 * a, 0.0, 0.5 * a]);
     let (trans_i, trans_f) = matched_dumbbells(
         perfect,
         origin_site,
         [0.0, 0.0, 0.0],
         [1.0, 0.0, 0.0],
         neighbor,
-        [0.0, 0.5 * a, 0.5 * a],
-        [0.0, 1.0, 0.0],
+        [0.5 * a, 0.0, 0.5 * a],
+        [0.0, 0.0, 1.0],
         &[],
     );
     let (rot_i, rot_f) = matched_dumbbells(
@@ -3642,7 +3665,7 @@ fn dumbbell_translation_and_rotation_in_the_vacancy_field() {
     let rot_response = StrainResponse::new(rotation.barrier, p_rot_min, p_rot).unwrap();
     let rotations = cubic_rotations();
     let a0 = [1.0, 0.0, 0.0];
-    let d0 = [0.0, 0.5 * a, 0.5 * a];
+    let d0 = [0.5 * a, 0.0, 0.5 * a];
     let length = 8.0 * a;
 
     let mut shells = Vec::new();
@@ -3785,7 +3808,7 @@ fn dumbbell_translation_and_rotation_in_the_vacancy_field() {
     }
     let mut tasks = Vec::new();
     for place in &unique {
-        let jumps = nn_jumps(a, place.axis);
+        let jumps = johnson_jumps(a, place.axis);
         let mut scored: Vec<(f64, [f64; 3])> = jumps
             .into_iter()
             .map(|jump| {
@@ -4123,7 +4146,7 @@ fn exported_dumbbell_saddles_match_the_8x8x8_barriers() {
     let a = 3.615;
     let (perfect, cell) = fcc(8, a);
     let origin = nearest_atom(&perfect, [0.0, 0.0, 0.0]);
-    let neighbor = nearest_atom(&perfect, [0.0, 0.5 * a, 0.5 * a]);
+    let neighbor = nearest_atom(&perfect, [0.5 * a, 0.0, 0.5 * a]);
     let copper = Copper::new();
     let (trans_i, trans_f) = matched_dumbbells(
         &perfect,
@@ -4131,8 +4154,8 @@ fn exported_dumbbell_saddles_match_the_8x8x8_barriers() {
         [0.0, 0.0, 0.0],
         [1.0, 0.0, 0.0],
         neighbor,
-        [0.0, 0.5 * a, 0.5 * a],
-        [0.0, 1.0, 0.0],
+        [0.5 * a, 0.0, 0.5 * a],
+        [0.0, 0.0, 1.0],
         &[],
     );
     let (rot_i, rot_f) = matched_dumbbells(
@@ -4201,6 +4224,1479 @@ fn exported_dumbbell_saddles_match_the_8x8x8_barriers() {
         assert!((loaded.barrier - geometry.barrier).abs() < 1.0e-12);
         assert_eq!(loaded.minimum.len(), geometry.minimum.len());
         assert!(loaded.converged);
+    }
+}
+
+fn trace_translation_branch(n: usize, a: f64) {
+    let (perfect, cell) = fcc(n, a);
+    let origin = nearest_atom(&perfect, [0.0, 0.0, 0.0]);
+    let neighbor = nearest_atom(&perfect, [0.0, 0.5 * a, 0.5 * a]);
+    let (initial, final_pos) = matched_dumbbells(
+        &perfect,
+        origin,
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        neighbor,
+        [0.0, 0.5 * a, 0.5 * a],
+        [0.0, 1.0, 0.0],
+        &[],
+    );
+    let mut options = PairOptions::published();
+    options.tail = 3;
+    let copper = Copper::new();
+    let mut geometry = isolated_saddle(
+        &Held {
+            copper: &copper,
+            cell,
+        },
+        cell,
+        initial,
+        final_pos,
+        &options,
+    )
+    .expect("isolated translation");
+    let sign = geometry.canonicalize_branch([1.0, 0.0, 0.0], [0.0, 0.5 * a, 0.5 * a]);
+    let offset = tail_offset(&geometry.minimum, &geometry.saddle, cell, 3);
+    eprintln!(
+        "BRANCH n={n} a={a:.5} barrier={:.6} mirror={sign} offset={offset:?} index={:?} converged={}",
+        geometry.barrier, geometry.negative_modes, geometry.converged
+    );
+    let _ = std::io::stderr().flush();
+    let fraction = [-1.5, -0.5, -1.0];
+    let r = [fraction[0] * a, fraction[1] * a, fraction[2] * a];
+    let length = n as f64 * a;
+    let center = wrap_cell(r, length);
+    let axis = [1.0, 0.0, 0.0];
+    let jumps = nn_jumps(a, axis);
+    let mut scored: Vec<(f64, [f64; 3])> = jumps
+        .into_iter()
+        .map(|jump| {
+            let end = mic_delta(
+                [r[0] + jump[0], r[1] + jump[1], r[2] + jump[2]],
+                [0.0, 0.0, 0.0],
+                cell,
+            );
+            (length3(end), jump)
+        })
+        .collect();
+    scored.sort_by(|left, right| left.0.total_cmp(&right.0));
+    let rotations = cubic_rotations();
+    let a0 = [1.0, 0.0, 0.0];
+    let d0 = [0.0, 0.5 * a, 0.5 * a];
+    let mut options = PairOptions::published();
+    options.max_steps = 800;
+    options.relax_steps = 200;
+    for (sense, end) in [("toward", scored.first()), ("away", scored.last())] {
+        let Some((_, jump)) = end else { continue };
+        let Some(rotation) = rotations.iter().copied().find(|q| {
+            same_axis(mat_vec(*q, a0), axis) && same_dir(mat_vec(*q, d0), *jump)
+        }) else {
+            eprintln!("BRANCH no image n={n} sense={sense}");
+            continue;
+        };
+        let placed = geometry
+            .place(rotation, center, cell, length, [0.0, 0.0, 0.0], 0.8)
+            .expect("place");
+        let found = pair_saddle_search(
+            &Held {
+                copper: &Copper::new(),
+                cell,
+            },
+            cell,
+            &placed,
+            &options,
+        )
+        .expect("pair");
+        eprintln!(
+            "END n={n} a={a:.5} sense={sense} barrier={:.6} outcome={:?} forward={:?} backward={:?} f_i={:.3} f_f={:.3} b_i={:.3} b_f={:.3} index={:?} converged={}",
+            found.barrier,
+            found.outcome,
+            found.end_forward,
+            found.end_backward,
+            found.forward_atom_initial,
+            found.forward_atom_final,
+            found.backward_atom_initial,
+            found.backward_atom_final,
+            found.index,
+            found.converged
+        );
+        let _ = std::io::stderr().flush();
+    }
+}
+
+fn connect_placed_minima(n: usize, a: f64) {
+    let (perfect, cell) = fcc(n, a);
+    let origin = nearest_atom(&perfect, [0.0, 0.0, 0.0]);
+    let neighbor = nearest_atom(&perfect, [0.0, 0.5 * a, 0.5 * a]);
+    let (initial, final_pos) = matched_dumbbells(
+        &perfect,
+        origin,
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        neighbor,
+        [0.0, 0.5 * a, 0.5 * a],
+        [0.0, 1.0, 0.0],
+        &[],
+    );
+    let mut options = PairOptions::published();
+    options.tail = 3;
+    let mut geometry = isolated_saddle(
+        &Held {
+            copper: &Copper::new(),
+            cell,
+        },
+        cell,
+        initial,
+        final_pos,
+        &options,
+    )
+    .expect("isolated");
+    let _ = geometry.canonicalize_branch([1.0, 0.0, 0.0], [0.0, 0.5 * a, 0.5 * a]);
+    let length = n as f64 * a;
+    let r = [-1.5 * a, -0.5 * a, -1.0 * a];
+    let center = wrap_cell(r, length);
+    let axis = [1.0, 0.0, 0.0];
+    let mut scored: Vec<(f64, [f64; 3])> = nn_jumps(a, axis)
+        .into_iter()
+        .map(|jump| {
+            let end = mic_delta(
+                [r[0] + jump[0], r[1] + jump[1], r[2] + jump[2]],
+                [0.0, 0.0, 0.0],
+                cell,
+            );
+            (length3(end), jump)
+        })
+        .collect();
+    scored.sort_by(|left, right| left.0.total_cmp(&right.0));
+    let rotations = cubic_rotations();
+    for (sense, end) in [("toward", scored.first()), ("away", scored.last())] {
+        let Some((_, jump)) = end else { continue };
+        let Some(rotation) = rotations.iter().copied().find(|q| {
+            same_axis(mat_vec(*q, axis), axis) && same_dir(mat_vec(*q, [0.0, 0.5 * a, 0.5 * a]), *jump)
+        }) else {
+            continue;
+        };
+        let placed = geometry
+            .place(rotation, center, cell, length, [0.0, 0.0, 0.0], 0.8)
+            .expect("place");
+        let mut connect = PairOptions::published();
+        connect.tail = 3;
+        connect.relax_steps = 80;
+        let saddle = isolated_saddle(
+            &Held {
+                copper: &Copper::new(),
+                cell,
+            },
+            cell,
+            placed.initial.clone(),
+            placed.final_min.clone(),
+            &connect,
+        )
+        .expect("connect");
+        let ends = classify_saddle(
+            &Held {
+                copper: &Copper::new(),
+                cell,
+            },
+            cell,
+            &saddle.saddle,
+            &saddle.mode,
+            &saddle.minimum,
+            &saddle.final_min,
+            &connect,
+        )
+        .expect("ends");
+        eprintln!(
+            "CONNECT n={n} sense={sense} barrier={:.6} converged={} index={:?} forward={:?} backward={:?} f_i={:.3} f_f={:.3} b_i={:.3} b_f={:.3} fwd_center={:?} fwd_axis={:?} fwd_split={:.3} back_center={:?} back_axis={:?} back_split={:.3}",
+            saddle.barrier,
+            saddle.converged,
+            saddle.negative_modes,
+            ends.forward,
+            ends.backward,
+            ends.forward_initial,
+            ends.forward_final,
+            ends.backward_initial,
+            ends.backward_final,
+            ends.forward_frame.0,
+            ends.forward_frame.1,
+            ends.forward_frame.2,
+            ends.backward_frame.0,
+            ends.backward_frame.1,
+            ends.backward_frame.2
+        );
+        let _ = std::io::stderr().flush();
+    }
+}
+
+/// The saddle between the two dumbbell minima, not the seeded climb.
+#[test]
+#[ignore = "connect the 6.763 minima directly; run in release"]
+fn connect_the_6763_minima() {
+    connect_placed_minima(8, 3.615);
+}
+
+fn seeded_with_locked_mode(n: usize, a: f64, max_rotations: usize) {
+    let (perfect, cell) = fcc(n, a);
+    let origin = nearest_atom(&perfect, [0.0, 0.0, 0.0]);
+    let neighbor = nearest_atom(&perfect, [0.0, 0.5 * a, 0.5 * a]);
+    let (initial, final_pos) = matched_dumbbells(
+        &perfect,
+        origin,
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        neighbor,
+        [0.0, 0.5 * a, 0.5 * a],
+        [0.0, 1.0, 0.0],
+        &[],
+    );
+    let mut options = PairOptions::published();
+    options.tail = 3;
+    let mut geometry = isolated_saddle(
+        &Held {
+            copper: &Copper::new(),
+            cell,
+        },
+        cell,
+        initial,
+        final_pos,
+        &options,
+    )
+    .expect("isolated");
+    let sign = geometry.canonicalize_branch([1.0, 0.0, 0.0], [0.0, 0.5 * a, 0.5 * a]);
+    let iso = classify_saddle(
+        &Held {
+            copper: &Copper::new(),
+            cell,
+        },
+        cell,
+        &geometry.saddle,
+        &geometry.mode,
+        &geometry.minimum,
+        &geometry.final_min,
+        &options,
+    )
+    .expect("isolated ends");
+    let (_, axis_min) = pair_distance(&geometry.minimum, cell);
+    let (_, axis_sad) = pair_distance(&geometry.saddle, cell);
+    let (_, axis_fin) = pair_distance(&geometry.final_min, cell);
+    eprintln!(
+        "LOCK n={n} mirror={sign} barrier0={:.6} iso_forward={:?} iso_backward={:?} fwd_center={:?} fwd_axis={:?} fwd_split={:.3} back_center={:?} back_axis={:?} back_split={:.3} f_i={:.3} f_f={:.3} b_i={:.3} b_f={:.3} min_axis={axis_min:?} sad_axis={axis_sad:?} fin_axis={axis_fin:?}",
+        geometry.barrier,
+        iso.forward,
+        iso.backward,
+        iso.forward_frame.0,
+        iso.forward_frame.1,
+        iso.forward_frame.2,
+        iso.backward_frame.0,
+        iso.backward_frame.1,
+        iso.backward_frame.2,
+        iso.forward_initial,
+        iso.forward_final,
+        iso.backward_initial,
+        iso.backward_final
+    );
+    if std::env::var("STOP_AFTER_ISO").is_ok() {
+        return;
+    }
+    let length = n as f64 * a;
+    let r = [-1.5 * a, -0.5 * a, -1.0 * a];
+    let center = wrap_cell(r, length);
+    let axis = [1.0, 0.0, 0.0];
+    let mut scored: Vec<(f64, [f64; 3])> = nn_jumps(a, axis)
+        .into_iter()
+        .map(|jump| {
+            (
+                length3(mic_delta(
+                    [r[0] + jump[0], r[1] + jump[1], r[2] + jump[2]],
+                    [0.0, 0.0, 0.0],
+                    cell,
+                )),
+                jump,
+            )
+        })
+        .collect();
+    scored.sort_by(|left, right| left.0.total_cmp(&right.0));
+    let rotations = cubic_rotations();
+    let mut search = PairOptions::published();
+    search.max_rotations = max_rotations;
+    search.max_steps = 800;
+    search.relax_steps = 200;
+    for (sense, end) in [("toward", scored.first()), ("away", scored.last())] {
+        let Some((_, jump)) = end else { continue };
+        let images: Vec<_> = rotations
+            .iter()
+            .copied()
+            .filter(|q| {
+                same_axis(mat_vec(*q, axis), axis)
+                    && same_dir(mat_vec(*q, [0.0, 0.5 * a, 0.5 * a]), *jump)
+            })
+            .collect();
+        if images.is_empty() {
+            continue;
+        }
+        for rotation in images {
+        let final_axis = mat_vec(rotation, [0.0, 1.0, 0.0]);
+        let placed = geometry
+            .place(rotation, center, cell, length, [0.0, 0.0, 0.0], 0.8)
+            .expect("place");
+        let found = pair_saddle_search(
+            &Held {
+                copper: &Copper::new(),
+                cell,
+            },
+            cell,
+            &placed,
+            &search,
+        )
+        .expect("pair");
+        let ends = classify_saddle(
+            &Held {
+                copper: &Copper::new(),
+                cell,
+            },
+            cell,
+            &found.saddle_geometry,
+            &found.lowest_mode,
+            &found.initial_min,
+            &found.final_min,
+            &search,
+        )
+        .expect("frames");
+        eprintln!(
+            "LOCK n={n} rot={max_rotations} sense={sense} final_axis={final_axis:?} barrier={:.6} outcome={:?} index={:?} forward={:?} backward={:?} fwd_split={:.3} fwd_axis={:?} back_split={:.3} back_axis={:?}",
+            found.barrier,
+            found.outcome,
+            found.index,
+            ends.forward,
+            ends.backward,
+            ends.forward_frame.2,
+            ends.forward_frame.1,
+            ends.backward_frame.2,
+            ends.backward_frame.1
+        );
+        let _ = std::io::stderr().flush();
+        }
+    }
+}
+
+#[test]
+fn rotations_that_map_the_6763_jumps() {
+    let a = 3.615;
+    let r = [-1.5 * a, -0.5 * a, -1.0 * a];
+    let axis = [1.0, 0.0, 0.0];
+    let mut scored: Vec<(f64, [f64; 3])> = nn_jumps(a, axis)
+        .into_iter()
+        .map(|jump| (length3([r[0] + jump[0], r[1] + jump[1], r[2] + jump[2]]), jump))
+        .collect();
+    scored.sort_by(|left, right| left.0.total_cmp(&right.0));
+    let d0 = [0.0, 0.5 * a, 0.5 * a];
+    for (sense, end) in [("toward", scored.first()), ("away", scored.last())] {
+        let jump = end.unwrap().1;
+        eprintln!("JUMP {sense} {jump:?} end_distance={:.4}", end.unwrap().0);
+        for (index, rotation) in cubic_rotations().iter().enumerate() {
+            if same_axis(mat_vec(*rotation, axis), axis)
+                && same_dir(mat_vec(*rotation, d0), jump)
+            {
+                eprintln!(
+                    "  image {index} final_axis={:?}",
+                    mat_vec(*rotation, [0.0, 1.0, 0.0])
+                );
+            }
+        }
+    }
+}
+
+/// Keep the migration mode from rotating into recombination.
+#[test]
+#[ignore = "locked-mode 6.763 translation; run in release"]
+fn locked_mode_6763_translation() {
+    let rotations: usize = std::env::var("LOCK_ROT")
+        .ok()
+        .and_then(|text| text.parse().ok())
+        .unwrap_or(2);
+    seeded_with_locked_mode(8, 3.615, rotations);
+}
+
+/// Which minimum each end of the 6.763 Å [100] hop falls into.
+#[test]
+#[ignore = "branch identity of the 6.763 translation across cell size; run in release"]
+fn branch_identity_of_the_6763_gap() {
+    let cells = std::env::var("BRANCH_N").unwrap_or_else(|_| "8,10,12".to_string());
+    for piece in cells.split(',') {
+        let n: usize = piece.trim().parse().expect("BRANCH_N");
+        trace_translation_branch(n, 3.615);
+    }
+}
+
+fn pair_center(positions: &Array1<f64>, cell: [[f64; 3]; 3]) -> [f64; 3] {
+    let (i, _, dir) = closest_pair(positions, cell);
+    [
+        positions[3 * i] + 0.5 * dir[0],
+        positions[3 * i + 1] + 0.5 * dir[1],
+        positions[3 * i + 2] + 0.5 * dir[2],
+    ]
+}
+
+fn johnson_ends(
+    perfect: &Array1<f64>,
+    a: f64,
+) -> (Array1<f64>, Array1<f64>, [f64; 3]) {
+    let origin = nearest_atom(perfect, [0.0, 0.0, 0.0]);
+    let jump = [0.5 * a, 0.0, 0.5 * a];
+    let neighbor = nearest_atom(perfect, jump);
+    let (initial, final_pos) = matched_dumbbells(
+        perfect,
+        origin,
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        neighbor,
+        jump,
+        [0.0, 0.0, 1.0],
+        &[],
+    );
+    (initial, final_pos, jump)
+}
+
+fn moduli_of(a: f64) -> (f64, f64, f64) {
+    let copper = Copper::new();
+    let (positions, cell) = fcc(4, a);
+    let g = 1.0e-4;
+    let base = copper.evaluate(positions.view(), cell).2;
+    let (stretched, stretched_cell) = deform(
+        &positions,
+        cell,
+        [[g, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+    );
+    let uniaxial = copper.evaluate(stretched.view(), stretched_cell).2;
+    let c11 = (uniaxial[0][0] - base[0][0]) / g;
+    let c12 = (uniaxial[1][1] - base[1][1]) / g;
+    let (sheared, sheared_cell) = deform(
+        &positions,
+        cell,
+        [[0.0, g, 0.0], [g, 0.0, 0.0], [0.0, 0.0, 0.0]],
+    );
+    let shear = copper.evaluate(sheared.view(), sheared_cell).2;
+    let c44 = (shear[0][1] - base[0][1]) / (2.0 * g);
+    (c11, c12, c44)
+}
+
+fn vacancy_dipole(
+    perfect: &Array1<f64>,
+    cell: [[f64; 3]; 3],
+) -> ElasticDipole {
+    let copper = Copper::new();
+    let mut bulk = perfect.clone();
+    relax(&copper, &mut bulk, cell, 1e-3, 300);
+    let sigma_bulk = copper.evaluate(bulk.view(), cell).2;
+    let site = nearest_atom(perfect, [0.0, 0.0, 0.0]);
+    let mut vacancy = drop_atoms(perfect, &[site]);
+    relax(&copper, &mut vacancy, cell, 1e-3, 300);
+    let sigma_vac = copper.evaluate(vacancy.view(), cell).2;
+    ElasticDipole::from_residual_stress(det(cell).abs(), sigma_vac, sigma_bulk).expect("vacancy")
+}
+
+/// The 0.098 eV saddle built from [100] to [010] at (0, a/2, a/2) quenches
+/// to a [001] dumbbell at (a/2, 0, a/2). This builds that product and places
+/// the same jump toward and away from the vacancy.
+#[test]
+#[ignore = "quench-matched Johnson hop across cell size; run in release"]
+fn same_hop_6763() {
+    let a: f64 = std::env::var("GAP_A")
+        .ok()
+        .and_then(|text| text.parse().ok())
+        .unwrap_or(3.615);
+    let cells = std::env::var("GAP_N").unwrap_or_default();
+    let place = !cells.is_empty();
+    let ns: Vec<usize> = if place {
+        cells
+            .split(',')
+            .map(|piece| piece.trim().parse().expect("GAP_N"))
+            .collect()
+    } else {
+        vec![8]
+    };
+    let (c11, c12, c44) = moduli_of(a);
+    let solid = CubicElasticity::new(c11, c12, c44).expect("moduli");
+    eprintln!("MODULI a={a:.5} C11={c11:.6} C12={c12:.6} C44={c44:.6}");
+    let mut gaps = Vec::new();
+    for n in ns {
+        let (perfect, cell) = fcc(n, a);
+        let (initial, final_pos, jump) = johnson_ends(&perfect, a);
+        let mut options = PairOptions::published();
+        options.tail = 3;
+        let geometry = isolated_saddle(
+            &Held {
+                copper: &Copper::new(),
+                cell,
+            },
+            cell,
+            initial,
+            final_pos,
+            &options,
+        )
+        .expect("johnson");
+        let ends = classify_saddle(
+            &Held {
+                copper: &Copper::new(),
+                cell,
+            },
+            cell,
+            &geometry.saddle,
+            &geometry.mode,
+            &geometry.minimum,
+            &geometry.final_min,
+            &options,
+        )
+        .expect("johnson ends");
+        eprintln!(
+            "JOHNSON n={n} a={a:.5} barrier={:.6} converged={} index={:?} forward={:?} backward={:?} fwd_center={:?} fwd_axis={:?} fwd_split={:.3} back_center={:?} back_axis={:?} back_split={:.3} f_i={:.3} f_f={:.3}",
+            geometry.barrier,
+            geometry.converged,
+            geometry.negative_modes,
+            ends.forward,
+            ends.backward,
+            ends.forward_frame.0,
+            ends.forward_frame.1,
+            ends.forward_frame.2,
+            ends.backward_frame.0,
+            ends.backward_frame.1,
+            ends.backward_frame.2,
+            ends.forward_initial,
+            ends.forward_final
+        );
+        let _ = std::io::stderr().flush();
+        if !place {
+            assert!(
+                geometry.converged,
+                "the [001] product at (a/2, 0, a/2) is not the quench of this saddle"
+            );
+            return;
+        }
+        if !geometry.converged {
+            eprintln!("GAP skip n={n} isolated saddle is not this hop");
+            continue;
+        }
+        let length = n as f64 * a;
+        let fraction = [-1.5, -0.5, -1.0];
+        let r = [fraction[0] * a, fraction[1] * a, fraction[2] * a];
+        let center = wrap_cell(r, length);
+        let axis = [1.0, 0.0, 0.0];
+        let product = [0.0, 0.0, 1.0];
+        let mut images = Vec::new();
+        for rotation in cubic_rotations() {
+            if !same_axis(mat_vec(rotation, axis), axis) {
+                continue;
+            }
+            let image_jump = mat_vec(rotation, jump);
+            let end = [
+                r[0] + image_jump[0],
+                r[1] + image_jump[1],
+                r[2] + image_jump[2],
+            ];
+            let distance = length3(mic_delta(end, [0.0, 0.0, 0.0], cell));
+            images.push((distance, image_jump, mat_vec(rotation, product), rotation));
+        }
+        images.sort_by(|left, right| left.0.total_cmp(&right.0));
+        let Some(toward_distance) = images.first().map(|image| image.0) else {
+            continue;
+        };
+        let Some(away_distance) = images.last().map(|image| image.0) else {
+            continue;
+        };
+        let toward: Vec<_> = images
+            .iter()
+            .copied()
+            .filter(|image| (image.0 - toward_distance).abs() < 1.0e-3)
+            .collect();
+        let away: Vec<_> = images
+            .iter()
+            .copied()
+            .filter(|image| (image.0 - away_distance).abs() < 1.0e-3)
+            .collect();
+        let p_vacancy = vacancy_dipole(&perfect, cell);
+        let copper = Copper::new();
+        let sigma_min = copper.evaluate(geometry.minimum.view(), cell).2;
+        let sigma_sad = copper.evaluate(geometry.saddle.view(), cell).2;
+        let volume = det(cell).abs();
+        let mut bulk = perfect.clone();
+        relax(&copper, &mut bulk, cell, 1e-3, 200);
+        let sigma_bulk = copper.evaluate(bulk.view(), cell).2;
+        let p_min =
+            ElasticDipole::from_residual_stress(volume, sigma_min, sigma_bulk).expect("min");
+        let p_sad =
+            ElasticDipole::from_residual_stress(volume, sigma_sad, sigma_bulk).expect("sad");
+        let response = StrainResponse::new(geometry.barrier, p_min, p_sad).expect("response");
+        let min_center = pair_center(&geometry.minimum, cell);
+        let sad_center = pair_center(&geometry.saddle, cell);
+        let offset = mic_delta(sad_center, min_center, cell);
+        let geometry = std::sync::Arc::new(geometry);
+        let mut predicted = Vec::new();
+        for (sense, candidates) in [("toward", &toward), ("away", &away)] {
+            let (_, _, _, rotation) = candidates[0];
+            let offset_lab = mat_vec(rotation, offset);
+            let saddle_r = [
+                r[0] + offset_lab[0],
+                r[1] + offset_lab[1],
+                r[2] + offset_lab[2],
+            ];
+            let oriented = StrainResponse::new(
+                response.barrier0(),
+                response.minimum().transform(rotation),
+                response.saddle().transform(rotation),
+            )
+            .expect("oriented");
+            let periodic = oriented
+                .hops_from_periodic_ends(&solid, r, saddle_r, cell, p_vacancy, 1)
+                .ok()
+                .and_then(|rows| rows.first().map(|row| row.barrier));
+            let infinite = oriented
+                .hops_from_dipole_ends(&solid, r, saddle_r, p_vacancy)
+                .ok()
+                .and_then(|rows| rows.first().map(|row| row.barrier));
+            predicted.push((sense, periodic, infinite));
+        }
+        let rows = std::thread::scope(|scope| {
+            let mut joins = Vec::new();
+            for (sense, candidates) in [("toward", toward.clone()), ("away", away.clone())] {
+                let geometry = std::sync::Arc::clone(&geometry);
+                let (periodic, infinite) = predicted
+                    .iter()
+                    .find(|row| row.0 == sense)
+                    .map(|row| (row.1, row.2))
+                    .unwrap_or((None, None));
+                joins.push(scope.spawn(move || {
+                    let mut search = PairOptions::published();
+                    search.max_steps = 800;
+                    search.relax_steps = 200;
+                    let mut chosen = None;
+                    for (end_distance, image_jump, image_axis, rotation) in candidates {
+                        let placed = geometry
+                            .place(rotation, center, cell, length, [0.0, 0.0, 0.0], 0.8)
+                            .expect("place");
+                        let saddle = pair_saddle_search(
+                            &Held {
+                                copper: &Copper::new(),
+                                cell,
+                            },
+                            cell,
+                            &placed,
+                            &search,
+                        )
+                        .expect("pair");
+                        let frames = classify_saddle(
+                            &Held {
+                                copper: &Copper::new(),
+                                cell,
+                            },
+                            cell,
+                            &saddle.saddle_geometry,
+                            &saddle.lowest_mode,
+                            &saddle.initial_min,
+                            &saddle.final_min,
+                            &search,
+                        )
+                        .expect("frames");
+                        eprintln!(
+                            "GAP n={n} a={a:.5} sense={sense} end={end_distance:.4} jump={image_jump:?} product={image_axis:?} barrier={:.6} outcome={:?} index={:?} forward={:?} backward={:?} fwd_axis={:?} fwd_split={:.3} back_axis={:?} back_split={:.3} periodic={} infinite={}",
+                            saddle.barrier,
+                            saddle.outcome,
+                            saddle.index,
+                            frames.forward,
+                            frames.backward,
+                            frames.forward_frame.1,
+                            frames.forward_frame.2,
+                            frames.backward_frame.1,
+                            frames.backward_frame.2,
+                            periodic
+                                .map(|value| format!("{value:.6}"))
+                                .unwrap_or_else(|| "none".into()),
+                            infinite
+                                .map(|value| format!("{value:.6}"))
+                                .unwrap_or_else(|| "none".into())
+                        );
+                        let _ = std::io::stderr().flush();
+                        let dumbbell = |axis: [f64; 3], split: f64| {
+                            (1.8..2.45).contains(&split)
+                                && axis_report(axis).0 < 35.0
+                        };
+                        let hop = saddle.outcome == PairOutcome::Hop
+                            && dumbbell(frames.forward_frame.1, frames.forward_frame.2)
+                            && dumbbell(frames.backward_frame.1, frames.backward_frame.2);
+                        let outcome = if hop {
+                            saddle.outcome
+                        } else if saddle.outcome == PairOutcome::Hop {
+                            PairOutcome::Recombined
+                        } else {
+                            saddle.outcome
+                        };
+                        chosen = Some((sense, outcome, saddle.barrier, periodic, infinite));
+                        if hop {
+                            break;
+                        }
+                    }
+                    chosen.expect("candidate")
+                }));
+            }
+            joins
+                .into_iter()
+                .map(|join| join.join().expect("sense"))
+                .collect::<Vec<_>>()
+        });
+        let toward_row = rows.iter().find(|row| row.0 == "toward");
+        let away_row = rows.iter().find(|row| row.0 == "away");
+        if let (Some(toward_row), Some(away_row)) = (toward_row, away_row) {
+            let hop = toward_row.1 == PairOutcome::Hop && away_row.1 == PairOutcome::Hop;
+            if hop {
+                let gap = away_row.2 - toward_row.2;
+                let periodic = match (toward_row.3, away_row.3) {
+                    (Some(left), Some(right)) => Some(right - left),
+                    _ => None,
+                };
+                let infinite = match (toward_row.4, away_row.4) {
+                    (Some(left), Some(right)) => Some(right - left),
+                    _ => None,
+                };
+                eprintln!(
+                    "GAPDIFF n={n} a={a:.5} direct={gap:.6} periodic={} infinite={}",
+                    periodic
+                        .map(|value| format!("{value:.6}"))
+                        .unwrap_or_else(|| "none".into()),
+                    infinite
+                        .map(|value| format!("{value:.6}"))
+                        .unwrap_or_else(|| "none".into())
+                );
+                gaps.push((length, gap));
+            } else {
+                eprintln!(
+                    "GAPDIFF n={n} a={a:.5} direct=not the same hop toward={:?} away={:?}",
+                    toward_row.1, away_row.1
+                );
+            }
+        }
+    }
+    if gaps.len() >= 2 {
+        let xs: Vec<f64> = gaps.iter().map(|(length, _)| 1.0 / length.powi(3)).collect();
+        let ys: Vec<f64> = gaps.iter().map(|(_, gap)| *gap).collect();
+        if let Some((intercept, slope)) = line_fit(&xs, &ys) {
+            let spread = ys
+                .iter()
+                .map(|gap| (gap - intercept).abs())
+                .fold(0.0_f64, f64::max);
+            eprintln!(
+                "GAPFIT n={} intercept={intercept:.6} slope_per_inv_L3={slope:.6} spread={spread:.6}",
+                gaps.len()
+            );
+        }
+    }
+}
+
+fn parse_vec3(text: &str) -> [f64; 3] {
+    let mut values = text.split(',').map(|piece| piece.trim().parse().expect("vec3"));
+    [
+        values.next().expect("x"),
+        values.next().expect("y"),
+        values.next().expect("z"),
+    ]
+}
+
+fn climb_rotation(n: usize, a: f64, fraction: [f64; 3], axis: [f64; 3], target: [f64; 3], steps: usize) {
+    let (perfect, cell) = fcc(n, a);
+    let origin = nearest_atom(&perfect, [0.0, 0.0, 0.0]);
+    let (initial, final_pos) = matched_dumbbells(
+        &perfect,
+        origin,
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        origin,
+        [0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        &[],
+    );
+    let mut built = PairOptions::published();
+    built.tail = 2;
+    let geometry = isolated_saddle(
+        &Held {
+            copper: &Copper::new(),
+            cell,
+        },
+        cell,
+        initial,
+        final_pos,
+        &built,
+    )
+    .expect("rotation");
+    eprintln!(
+        "ROT0 n={n} barrier={:.6} converged={} index={:?}",
+        geometry.barrier, geometry.converged, geometry.negative_modes
+    );
+    let length = n as f64 * a;
+    let r = [fraction[0] * a, fraction[1] * a, fraction[2] * a];
+    let center = wrap_cell(r, length);
+    let rotation = cubic_rotations()
+        .into_iter()
+        .find(|q| {
+            same_axis(mat_vec(*q, [1.0, 0.0, 0.0]), axis)
+                && same_axis(mat_vec(*q, [0.0, 1.0, 0.0]), target)
+        })
+        .expect("rotation image");
+    let placed = geometry
+        .place(rotation, center, cell, length, [0.0, 0.0, 0.0], 0.8)
+        .expect("place");
+    let mut search = PairOptions::published();
+    search.max_steps = steps;
+    search.relax_steps = 200;
+    if std::env::var("ROT_METHOD").unwrap_or_else(|_| "lbfgs".into()) == "lbfgs" {
+        search.method = Method::Lbfgs { memory: 8 };
+    }
+    let found = pair_saddle_search(
+        &Held {
+            copper: &Copper::new(),
+            cell,
+        },
+        cell,
+        &placed,
+        &search,
+    )
+    .expect("rotation pair");
+    let frames = classify_saddle(
+        &Held {
+            copper: &Copper::new(),
+            cell,
+        },
+        cell,
+        &found.saddle_geometry,
+        &found.lowest_mode,
+        &found.initial_min,
+        &found.final_min,
+        &search,
+    )
+    .expect("rotation frames");
+    let (_, axis_sad) = pair_distance(&found.saddle_geometry, cell);
+    let (angle_100, angle_110, _, _) = axis_report(axis_sad);
+    eprintln!(
+        "ROT n={n} a={a:.5} r={:.4} axis={axis:?} target={target:?} steps={steps} barrier={:.6} outcome={:?} index={:?} converged={} angle_100={angle_100:.2} angle_110={angle_110:.2} fwd_split={:.3} fwd_axis={:?} back_split={:.3} back_axis={:?} calls={}",
+        length3(r),
+        found.barrier,
+        found.outcome,
+        found.index,
+        found.converged,
+        frames.forward_frame.2,
+        frames.forward_frame.1,
+        frames.backward_frame.2,
+        frames.backward_frame.1,
+        found.force_calls
+    );
+}
+
+/// Finish the rotations that were still running at the step cap.
+#[test]
+#[ignore = "step-capped rotations with a longer climb; run in release"]
+fn converge_capped_rotation() {
+    let steps: usize = std::env::var("ROT_STEPS")
+        .ok()
+        .and_then(|text| text.parse().ok())
+        .unwrap_or(800);
+    let capped = [
+        (8usize, 3.615, [-1.0, -1.0, -1.0], [0.0, 1.0, 0.0]),
+        (10, 3.615, [-1.0, -1.0, -1.0], [0.0, 1.0, 0.0]),
+        (12, 3.615, [-1.0, -1.0, -1.0], [0.0, 0.0, 1.0]),
+        (8, 3.62831, [-1.0, -1.0, -1.0], [0.0, 1.0, 0.0]),
+        (8, 3.63867, [-1.0, -1.0, -1.0], [0.0, 1.0, 0.0]),
+        (8, 3.64979, [-1.0, -1.0, -1.0], [0.0, 0.0, 1.0]),
+        (8, 3.615, [-1.5, -0.5, -1.0], [0.0, 1.0, 0.0]),
+        (10, 3.615, [-1.5, -0.5, -1.0], [0.0, 1.0, 0.0]),
+        (12, 3.615, [-1.5, -0.5, -1.0], [0.0, 0.0, 1.0]),
+        (8, 3.62831, [-1.5, -0.5, -1.0], [0.0, 1.0, 0.0]),
+        (8, 3.63867, [-1.5, -0.5, -1.0], [0.0, 1.0, 0.0]),
+        (8, 3.64979, [-1.5, -0.5, -1.0], [0.0, 0.0, 1.0]),
+    ];
+    if let Some(which) = std::env::var("ROT_CASES").ok() {
+        let only_n: Option<usize> = std::env::var("ROT_ONLY_N")
+            .ok()
+            .and_then(|text| text.parse().ok());
+        for (n, a, fraction, target) in capped {
+            if which == "step" && (fraction[0] + 1.5_f64).abs() < 0.1 {
+                continue;
+            }
+            if only_n.is_some_and(|keep| n != keep) {
+                continue;
+            }
+            if which == "capped" || which == "step" {
+                climb_rotation(n, a, fraction, [1.0, 0.0, 0.0], target, steps);
+            }
+        }
+        return;
+    }
+    let n: usize = std::env::var("ROT_N")
+        .ok()
+        .and_then(|text| text.parse().ok())
+        .unwrap_or(8);
+    let a: f64 = std::env::var("ROT_A")
+        .ok()
+        .and_then(|text| text.parse().ok())
+        .unwrap_or(3.615);
+    let fraction = parse_vec3(&std::env::var("ROT_FRAC").unwrap_or_else(|_| "-1,-1,-1".into()));
+    let axis = parse_vec3(&std::env::var("ROT_AXIS").unwrap_or_else(|_| "1,0,0".into()));
+    let target = parse_vec3(&std::env::var("ROT_TARGET").unwrap_or_else(|_| "0,1,0".into()));
+    climb_rotation(n, a, fraction, axis, target, steps);
+}
+
+/// Catalogue a vacancy–dumbbell pair the way an AKMC consumer would.
+///
+/// Inside the cutoff the saddle is [`pair_saddle_search`]. Outside it the
+/// barrier and the rate come from the dipole line. One shell on each side
+/// is searched directly so the barrier is continuous across the cutoff.
+#[test]
+#[ignore = "AKMC catalogue across the dipole cutoff; run in release"]
+fn akmc_catalogue_across_the_cutoff() {
+    let a = 3.615;
+    let n = 8usize;
+    let (perfect, cell) = fcc(n, a);
+    let (initial, final_pos, jump0) = johnson_ends(&perfect, a);
+    let origin = nearest_atom(&perfect, [0.0, 0.0, 0.0]);
+    let (rot_i, rot_f) = matched_dumbbells(
+        &perfect,
+        origin,
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        origin,
+        [0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        &[],
+    );
+    let (translation, rotation) = std::thread::scope(|scope| {
+        let translation = scope.spawn(|| {
+            let mut options = PairOptions::published();
+            options.tail = 3;
+            isolated_saddle(
+                &Held {
+                    copper: &Copper::new(),
+                    cell,
+                },
+                cell,
+                initial,
+                final_pos,
+                &options,
+            )
+            .expect("translation")
+        });
+        let rotation = scope.spawn(|| {
+            let mut options = PairOptions::published();
+            options.tail = 2;
+            isolated_saddle(
+                &Held {
+                    copper: &Copper::new(),
+                    cell,
+                },
+                cell,
+                rot_i,
+                rot_f,
+                &options,
+            )
+            .expect("rotation")
+        });
+        (
+            translation.join().expect("translation"),
+            rotation.join().expect("rotation"),
+        )
+    });
+    assert!(
+        translation.converged && translation.negative_modes == Some(1),
+        "translation {}",
+        translation.barrier
+    );
+    assert!(
+        rotation.converged && rotation.negative_modes == Some(1),
+        "rotation {}",
+        rotation.barrier
+    );
+    let (c11, c12, c44) = moduli_of(a);
+    let solid = CubicElasticity::new(c11, c12, c44).expect("moduli");
+    let p_vacancy = vacancy_dipole(&perfect, cell);
+    let length = n as f64 * a;
+    let axis = [1.0, 0.0, 0.0];
+    let shells = [
+        ("inside", [-1.5, -0.5, -1.0]),
+        ("outside", [-3.0, 0.0, 0.0]),
+    ];
+    #[derive(Clone)]
+    struct Row {
+        side: &'static str,
+        kind: &'static str,
+        distance: f64,
+        outcome: PairOutcome,
+        direct: Option<f64>,
+        dipole: f64,
+        rate: Option<f64>,
+    }
+    let mut specs = Vec::new();
+    for (side, fraction) in shells {
+        let r = [fraction[0] * a, fraction[1] * a, fraction[2] * a];
+        let mut scored: Vec<(f64, [f64; 3])> = johnson_jumps(a, axis)
+            .into_iter()
+            .map(|jump| {
+                let end = [
+                    r[0] + jump[0],
+                    r[1] + jump[1],
+                    r[2] + jump[2],
+                ];
+                (length3(end), jump)
+            })
+            .collect();
+        scored.sort_by(|left, right| left.0.total_cmp(&right.0));
+        for (sense, end) in [("toward", scored.first()), ("away", scored.last())] {
+            let Some((_, jump)) = end else { continue };
+            specs.push((side, "translation", r, *jump, sense));
+        }
+        specs.push((side, "rotation", r, [0.0, 1.0, 0.0], "to-010"));
+    }
+    let translation = std::sync::Arc::new(translation);
+    let rotation = std::sync::Arc::new(rotation);
+    let rows = std::thread::scope(|scope| {
+        let mut joins = Vec::new();
+        for (side, kind, r, jump, sense) in specs {
+            let translation = std::sync::Arc::clone(&translation);
+            let rotation = std::sync::Arc::clone(&rotation);
+            let bulk_seed = perfect.clone();
+            joins.push(scope.spawn(move || {
+                let geometry: &rgsaddle::HopGeometry = if kind == "translation" {
+                    &translation
+                } else {
+                    &rotation
+                };
+                let reference_jump = if kind == "translation" {
+                    jump0
+                } else {
+                    [0.0, 1.0, 0.0]
+                };
+                let rotation_q = cubic_rotations()
+                    .into_iter()
+                    .find(|q| {
+                        same_axis(mat_vec(*q, axis), axis)
+                            && same_dir(mat_vec(*q, reference_jump), jump)
+                    })
+                    .expect("image");
+                let center = wrap_cell(r, length);
+                let placed = geometry
+                    .place(rotation_q, center, cell, length, [0.0, 0.0, 0.0], 0.8)
+                    .expect("place");
+                let mut search = PairOptions::published();
+                search.max_steps = 800;
+                search.relax_steps = 200;
+                let found = pair_saddle_search(
+                    &Held {
+                        copper: &Copper::new(),
+                        cell,
+                    },
+                    cell,
+                    &placed,
+                    &search,
+                )
+                .expect("search");
+                let copper = Copper::new();
+                let volume = det(cell).abs();
+                let mut bulk = bulk_seed;
+                relax(&copper, &mut bulk, cell, 1e-3, 80);
+                let sigma_bulk = copper.evaluate(bulk.view(), cell).2;
+                let sigma_min = copper.evaluate(geometry.minimum.view(), cell).2;
+                let sigma_sad = copper.evaluate(geometry.saddle.view(), cell).2;
+                let p_min = ElasticDipole::from_residual_stress(volume, sigma_min, sigma_bulk)
+                    .expect("min");
+                let p_sad = ElasticDipole::from_residual_stress(volume, sigma_sad, sigma_bulk)
+                    .expect("sad");
+                let response = StrainResponse::new(geometry.barrier, p_min, p_sad)
+                    .expect("response")
+                    .with_prefactor(1.0e13, None)
+                    .expect("prefactor");
+                let oriented = StrainResponse::new(
+                    response.barrier0(),
+                    response.minimum().transform(rotation_q),
+                    response.saddle().transform(rotation_q),
+                )
+                .expect("oriented")
+                .with_prefactor(1.0e13, None)
+                .expect("prefactor");
+                let min_center = pair_center(&geometry.minimum, cell);
+                let sad_center = pair_center(&geometry.saddle, cell);
+                let offset = mat_vec(rotation_q, mic_delta(sad_center, min_center, cell));
+                let saddle_r = [r[0] + offset[0], r[1] + offset[1], r[2] + offset[2]];
+                let dipole = oriented
+                    .hops_from_dipole_ends(&solid, r, saddle_r, p_vacancy)
+                    .expect("dipole")[0]
+                    .barrier;
+                let strain = solid.strain_of_dipole(r, p_vacancy).expect("strain");
+                let rate = oriented.rate_hz(&strain, 500.0).ok();
+                let frames = classify_saddle(
+                    &Held {
+                        copper: &Copper::new(),
+                        cell,
+                    },
+                    cell,
+                    &found.saddle_geometry,
+                    &found.lowest_mode,
+                    &found.initial_min,
+                    &found.final_min,
+                    &search,
+                )
+                .expect("frames");
+                let dumbbell = |axis: [f64; 3], split: f64| {
+                    (1.8..2.45).contains(&split) && axis_report(axis).0 < 35.0
+                };
+                let migration = found.outcome == PairOutcome::Hop
+                    && dumbbell(frames.forward_frame.1, frames.forward_frame.2)
+                    && dumbbell(frames.backward_frame.1, frames.backward_frame.2);
+                let direct = migration.then_some(found.barrier);
+                eprintln!(
+                    "CATALOGUE side={side} kind={kind} sense={sense} r={:.4} outcome={:?} migration={migration} index={:?} fwd_split={:.3} back_split={:.3} direct={} dipole={dipole:.6} rate={}",
+                    length3(r),
+                    found.outcome,
+                    found.index,
+                    frames.forward_frame.2,
+                    frames.backward_frame.2,
+                    direct
+                        .map(|value| format!("{value:.6}"))
+                        .unwrap_or_else(|| "none".into()),
+                    rate.map(|value| format!("{value:.6e}"))
+                        .unwrap_or_else(|| "untrusted".into())
+                );
+                let _ = std::io::stderr().flush();
+                assert!(
+                    matches!(
+                        found.outcome,
+                        PairOutcome::Hop
+                            | PairOutcome::Recombined
+                            | PairOutcome::Captured
+                            | PairOutcome::ReturnedToMinimum
+                            | PairOutcome::OffPathway
+                            | PairOutcome::DidNotConverge
+                            | PairOutcome::NotIndexOne
+                    ),
+                    "{:?}",
+                    found.outcome
+                );
+                assert_eq!(found.converged, found.outcome == PairOutcome::Hop);
+                if found.outcome == PairOutcome::Hop {
+                    assert_eq!(found.index, Some(1));
+                }
+                Row {
+                    side,
+                    kind,
+                    distance: length3(r),
+                    outcome: found.outcome,
+                    direct,
+                    dipole,
+                    rate,
+                }
+            }));
+        }
+        joins
+            .into_iter()
+            .map(|join| join.join().expect("catalogue"))
+            .collect::<Vec<_>>()
+    });
+    for kind in ["translation", "rotation"] {
+        let worst = |side: &str| {
+            rows.iter()
+                .filter(|row| row.kind == kind && row.side == side)
+                .filter_map(|row| row.direct.map(|direct| (direct - row.dipole).abs()))
+                .fold(None, |best: Option<f64>, error| {
+                    Some(best.map_or(error, |prior| prior.max(error)))
+                })
+        };
+        let (Some(inside_err), Some(outside_err)) = (worst("inside"), worst("outside")) else {
+            eprintln!("CONTINUITY {kind} missing a hop on one side of the cutoff");
+            continue;
+        };
+        eprintln!("CONTINUITY {kind} inside_err={inside_err:.6} outside_err={outside_err:.6}");
+        assert!(
+            outside_err <= inside_err + 1.0e-4,
+            "{kind} outside {outside_err:.6} inside {inside_err:.6}"
+        );
+    }
+    let outside_rates = rows.iter().filter(|row| row.side == "outside" && row.rate.is_some());
+    assert!(outside_rates.count() > 0, "the dipole rate was not used outside the cutoff");
+    let _ = rows;
+}
+
+fn shell_vector(a: f64, target: f64) -> Option<[f64; 3]> {
+    for ix in -3..=3 {
+        for iy in -3..=3 {
+            for iz in -3..=3 {
+                for basis in [
+                    [0.0, 0.0, 0.0],
+                    [0.5, 0.5, 0.0],
+                    [0.5, 0.0, 0.5],
+                    [0.0, 0.5, 0.5],
+                ] {
+                    let r = [
+                        (ix as f64 + basis[0]) * a,
+                        (iy as f64 + basis[1]) * a,
+                        (iz as f64 + basis[2]) * a,
+                    ];
+                    if (length3(r) - target).abs() < 0.03 {
+                        return Some(r);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn orient_label(axis: [f64; 3]) -> &'static str {
+    let axis = unit(axis);
+    if axis[0].abs() > 0.9 {
+        "100"
+    } else if axis[1].abs() > 0.9 {
+        "010"
+    } else {
+        "001"
+    }
+}
+
+/// Direct versus dipole on the shells that decide the 5 meV tail.
+#[test]
+#[ignore = "cutoff shells on one cell; run in release"]
+fn cutoff_shells_on_one_cell() {
+    let n: usize = std::env::var("CUT_N")
+        .ok()
+        .and_then(|text| text.parse().ok())
+        .unwrap_or(8);
+    let a: f64 = std::env::var("CUT_A")
+        .ok()
+        .and_then(|text| text.parse().ok())
+        .unwrap_or(3.615);
+    let scale = a / 3.615;
+    let targets = [10.2248 * scale, 10.5394 * scale, 10.8450 * scale];
+    let (perfect, cell) = fcc(n, a);
+    let (trans_i, trans_f, jump0) = johnson_ends(&perfect, a);
+    let origin = nearest_atom(&perfect, [0.0, 0.0, 0.0]);
+    let (rot_i, rot_f) = matched_dumbbells(
+        &perfect,
+        origin,
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        origin,
+        [0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        &[],
+    );
+    let (translation, rotation) = std::thread::scope(|scope| {
+        let translation = scope.spawn(|| {
+            let mut options = PairOptions::published();
+            options.tail = 3;
+            isolated_saddle(
+                &Held {
+                    copper: &Copper::new(),
+                    cell,
+                },
+                cell,
+                trans_i,
+                trans_f,
+                &options,
+            )
+            .expect("translation")
+        });
+        let rotation = scope.spawn(|| {
+            let mut options = PairOptions::published();
+            options.tail = 2;
+            isolated_saddle(
+                &Held {
+                    copper: &Copper::new(),
+                    cell,
+                },
+                cell,
+                rot_i,
+                rot_f,
+                &options,
+            )
+            .expect("rotation")
+        });
+        (
+            translation.join().expect("translation"),
+            rotation.join().expect("rotation"),
+        )
+    });
+    let (c11, c12, c44) = moduli_of(a);
+    let solid = CubicElasticity::new(c11, c12, c44).expect("moduli");
+    let p_vacancy = vacancy_dipole(&perfect, cell);
+    let copper = Copper::new();
+    let volume = det(cell).abs();
+    let mut bulk = perfect.clone();
+    relax(&copper, &mut bulk, cell, 1e-3, 200);
+    let sigma_bulk = copper.evaluate(bulk.view(), cell).2;
+    let dipole_of = |geometry: &rgsaddle::HopGeometry| {
+        let sigma_min = copper.evaluate(geometry.minimum.view(), cell).2;
+        let sigma_sad = copper.evaluate(geometry.saddle.view(), cell).2;
+        let p_min =
+            ElasticDipole::from_residual_stress(volume, sigma_min, sigma_bulk).expect("min");
+        let p_sad =
+            ElasticDipole::from_residual_stress(volume, sigma_sad, sigma_bulk).expect("sad");
+        StrainResponse::new(geometry.barrier, p_min, p_sad).expect("response")
+    };
+    let trans_response = dipole_of(&translation);
+    let rot_response = dipole_of(&rotation);
+    let length = n as f64 * a;
+    let axes = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    let mut jobs = Vec::new();
+    for target in targets {
+        let Some(r) = shell_vector(a, target) else {
+            eprintln!("CUT missing shell {target:.4}");
+            continue;
+        };
+        let center = wrap_cell(r, length);
+        for axis in axes {
+            let mut scored: Vec<(f64, [f64; 3])> = johnson_jumps(a, axis)
+                .into_iter()
+                .map(|jump| {
+                    (
+                        length3([r[0] + jump[0], r[1] + jump[1], r[2] + jump[2]]),
+                        jump,
+                    )
+                })
+                .collect();
+            scored.sort_by(|left, right| left.0.total_cmp(&right.0));
+            for (sense, end) in [("toward", scored.first()), ("away", scored.last())] {
+                let Some((_, jump)) = end else { continue };
+                jobs.push(("translation", r, center, axis, *jump, sense));
+            }
+            for target_axis in axes {
+                if same_axis(target_axis, axis) {
+                    continue;
+                }
+                jobs.push(("rotation", r, center, axis, target_axis, "axis-across-r"));
+            }
+        }
+    }
+    let translation = std::sync::Arc::new(translation);
+    let rotation = std::sync::Arc::new(rotation);
+    for chunk in jobs.chunks(4) {
+        std::thread::scope(|scope| {
+            let mut joins = Vec::new();
+            for (kind, r, center, axis, jump, sense) in chunk {
+                let translation = std::sync::Arc::clone(&translation);
+                let rotation = std::sync::Arc::clone(&rotation);
+                let response = if *kind == "translation" {
+                    &trans_response
+                } else {
+                    &rot_response
+                };
+                joins.push(scope.spawn(move || {
+                    let geometry: &rgsaddle::HopGeometry = if *kind == "translation" {
+                        &translation
+                    } else {
+                        &rotation
+                    };
+                    let reference = if *kind == "translation" {
+                        jump0
+                    } else {
+                        [0.0, 1.0, 0.0]
+                    };
+                    let Some(rotation_q) = cubic_rotations().into_iter().find(|q| {
+                        same_axis(mat_vec(*q, [1.0, 0.0, 0.0]), *axis)
+                            && if *kind == "translation" {
+                                same_dir(mat_vec(*q, reference), *jump)
+                            } else {
+                                same_axis(mat_vec(*q, reference), *jump)
+                            }
+                    }) else {
+                        return format!(
+                            "CUT n={n} a={a:.5} kind={kind} orient={} r={:.4} sense={sense} direct= dipole= err= status=no image",
+                            orient_label(*axis),
+                            length3(*r)
+                        );
+                    };
+                    let placed = match geometry.place(rotation_q, *center, cell, length, [0.0, 0.0, 0.0], 0.8)
+                    {
+                        Ok(placed) => placed,
+                        Err(err) => {
+                            return format!(
+                                "CUT n={n} a={a:.5} kind={kind} orient={} r={:.4} sense={sense} direct= dipole= err= status=place {err}",
+                                orient_label(*axis),
+                                length3(*r)
+                            );
+                        }
+                    };
+                    let mut search = PairOptions::published();
+                    search.max_steps = 800;
+                    search.relax_steps = 200;
+                    let found = pair_saddle_search(
+                        &Held {
+                            copper: &Copper::new(),
+                            cell,
+                        },
+                        cell,
+                        &placed,
+                        &search,
+                    )
+                    .expect("cutoff search");
+                    let frames = classify_saddle(
+                        &Held {
+                            copper: &Copper::new(),
+                            cell,
+                        },
+                        cell,
+                        &found.saddle_geometry,
+                        &found.lowest_mode,
+                        &found.initial_min,
+                        &found.final_min,
+                        &search,
+                    )
+                    .expect("frames");
+                    let dumbbell = |dir: [f64; 3], split: f64| {
+                        (1.8..2.45).contains(&split) && axis_report(dir).0 < 35.0
+                    };
+                    let migration = found.outcome == PairOutcome::Hop
+                        && found.index == Some(1)
+                        && dumbbell(frames.forward_frame.1, frames.forward_frame.2)
+                        && dumbbell(frames.backward_frame.1, frames.backward_frame.2);
+                    let min_center = pair_center(&geometry.minimum, cell);
+                    let sad_center = pair_center(&geometry.saddle, cell);
+                    let offset = mat_vec(rotation_q, mic_delta(sad_center, min_center, cell));
+                    let saddle_r = [r[0] + offset[0], r[1] + offset[1], r[2] + offset[2]];
+                    let oriented = StrainResponse::new(
+                        response.barrier0(),
+                        response.minimum().transform(rotation_q),
+                        response.saddle().transform(rotation_q),
+                    )
+                    .expect("oriented");
+                    let dipole = oriented
+                        .hops_from_periodic_ends(&solid, *r, saddle_r, cell, p_vacancy, 1)
+                        .ok()
+                        .and_then(|rows| rows.first().map(|row| row.barrier));
+                    let (direct, err, status) = if migration {
+                        let direct = found.barrier;
+                        let err = dipole.map(|value| (direct - value).abs());
+                        (Some(direct), err, "converged".to_string())
+                    } else if found.outcome == PairOutcome::Hop {
+                        (None, None, "recombined".to_string())
+                    } else {
+                        (
+                            None,
+                            None,
+                            format!("{:?}", found.outcome).replace(',', ";"),
+                        )
+                    };
+                    format!(
+                        "CUT n={n} a={a:.5} kind={kind} orient={} r={:.4} sense={sense} direct={} dipole={} err={} status={status} index={:?}",
+                        orient_label(*axis),
+                        length3(*r),
+                        direct
+                            .map(|value| format!("{value:.6}"))
+                            .unwrap_or_default(),
+                        dipole
+                            .map(|value| format!("{value:.6}"))
+                            .unwrap_or_default(),
+                        err.map(|value| format!("{value:.6}")).unwrap_or_default(),
+                        found.index
+                    )
+                }));
+            }
+            for join in joins {
+                eprintln!("{}", join.join().expect("cutoff"));
+                let _ = std::io::stderr().flush();
+            }
+        });
     }
 }
 

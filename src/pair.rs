@@ -34,8 +34,11 @@ pub struct PairOptions {
     pub tail: usize,
     /// Minimum-image RMS below which a quench is that minimum.
     pub match_rms: f64,
+    /// Largest per-atom minimum-image move still counted as the same minimum.
+    pub match_atom: f64,
     /// A quench this far below both minima, matching neither, has recombined.
     pub recombine_drop: f64,
+    pub method: Method,
 }
 
 impl Default for PairOptions {
@@ -52,7 +55,9 @@ impl Default for PairOptions {
             relax_steps: 400,
             tail: 0,
             match_rms: 0.2,
+            match_atom: 0.8,
             recombine_drop: 0.5,
+            method: Method::Fire { kind: FireKind::V2 },
         }
     }
 }
@@ -65,6 +70,9 @@ impl PairOptions {
 }
 
 /// Isolated hop: the two minima and the index-1 saddle between them.
+///
+/// `converged` is true only when the saddle is index 1 and the two
+/// quenches of its unstable mode are these two minima.
 #[derive(Clone, Debug, PartialEq)]
 pub struct HopGeometry {
     pub barrier: f64,
@@ -131,6 +139,11 @@ pub struct PairSaddle {
     pub outcome: PairOutcome,
     pub end_forward: PairEnd,
     pub end_backward: PairEnd,
+    /// Largest per-atom minimum-image distance of each quench from each minimum.
+    pub forward_atom_initial: f64,
+    pub forward_atom_final: f64,
+    pub backward_atom_initial: f64,
+    pub backward_atom_final: f64,
 }
 
 struct Counted<'a, S> {
@@ -204,6 +217,21 @@ pub fn isolated_saddle<S: PointSurface>(
         }
     }
     let found = climb(&counted, cell, start, connect, e_min, options)?;
+    let ends = classify_saddle(
+        &counted,
+        cell,
+        &found.positions,
+        &found.mode,
+        &initial,
+        &final_pos,
+        options,
+    )?;
+    let connected = found.index_one
+        && matches!(
+            (ends.forward, ends.backward),
+            (PairEnd::InitialMinimum, PairEnd::FinalMinimum)
+                | (PairEnd::FinalMinimum, PairEnd::InitialMinimum)
+        );
     let calls = counted.calls.load(Ordering::Relaxed);
     Ok(HopGeometry {
         barrier: found.barrier,
@@ -214,7 +242,7 @@ pub fn isolated_saddle<S: PointSurface>(
         mode: found.mode,
         negative_modes: found.negative_modes,
         force_calls: calls,
-        converged: found.index_one,
+        converged: connected,
     })
 }
 
@@ -289,6 +317,36 @@ impl HopGeometry {
         })
     }
 
+    /// Reflect the hop so the saddle axis points to the same side of
+    /// `axis × jump`. A negative return means the geometry was mirrored.
+    /// A zero jump, as in an on-site rotation, is left alone.
+    pub fn canonicalize_branch(&mut self, axis: [f64; 3], jump: [f64; 3]) -> i32 {
+        let axis = unit3(axis);
+        let jump_u = unit3(jump);
+        let normal = cross(axis, jump_u);
+        let normal_len = length3(normal);
+        if normal_len < 1.0e-8 {
+            return 0;
+        }
+        let normal = [
+            normal[0] / normal_len,
+            normal[1] / normal_len,
+            normal[2] / normal_len,
+        ];
+        let mut sad = closest_axis(&self.saddle, self.cell);
+        if dot3(sad, axis) < 0.0 {
+            sad = [-sad[0], -sad[1], -sad[2]];
+        }
+        if dot3(sad, normal) >= 0.0 {
+            return 1;
+        }
+        reflect_positions(&mut self.minimum, normal, self.cell);
+        reflect_positions(&mut self.saddle, normal, self.cell);
+        reflect_positions(&mut self.final_min, normal, self.cell);
+        self.mode = mic_difference(&self.saddle, &self.minimum, self.cell);
+        -1
+    }
+
     /// Rotate about the origin, translate, and delete the atom nearest `drop_near`.
     pub fn place(
         &self,
@@ -322,6 +380,68 @@ impl HopGeometry {
             dropped_distance,
         })
     }
+}
+
+/// Quench both sides of an existing saddle and name the minima.
+pub fn classify_saddle<S: PointSurface>(
+    surface: &S,
+    cell: M3,
+    saddle: &Array1<f64>,
+    mode: &Array1<f64>,
+    initial: &Array1<f64>,
+    final_min: &Array1<f64>,
+    options: &PairOptions,
+) -> Result<EndClassification, SaddleError> {
+    let counted = Counted {
+        inner: surface,
+        calls: AtomicUsize::new(0),
+    };
+    let (e_min, _) = counted.eval(initial.view())?;
+    let (e_final, _) = counted.eval(final_min.view())?;
+    let (forward_pos, forward_energy) = quench_side(&counted, saddle, mode, 1.0)?;
+    let (backward_pos, backward_energy) = quench_side(&counted, saddle, mode, -1.0)?;
+    let forward_initial = mic_max_atom(&forward_pos, initial, cell);
+    let forward_final = mic_max_atom(&forward_pos, final_min, cell);
+    let backward_initial = mic_max_atom(&backward_pos, initial, cell);
+    let backward_final = mic_max_atom(&backward_pos, final_min, cell);
+    Ok(EndClassification {
+        forward: classify_end(
+            forward_initial,
+            forward_final,
+            forward_energy,
+            e_min,
+            e_final,
+            options,
+        ),
+        backward: classify_end(
+            backward_initial,
+            backward_final,
+            backward_energy,
+            e_min,
+            e_final,
+            options,
+        ),
+        forward_initial,
+        forward_final,
+        backward_initial,
+        backward_final,
+        forward_frame: closest_frame(&forward_pos, cell),
+        backward_frame: closest_frame(&backward_pos, cell),
+    })
+}
+
+/// Which minimum each side of a saddle fell into.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EndClassification {
+    pub forward: PairEnd,
+    pub backward: PairEnd,
+    pub forward_initial: f64,
+    pub forward_final: f64,
+    pub backward_initial: f64,
+    pub backward_final: f64,
+    /// Closest-pair centre, axis and split of each quench.
+    pub forward_frame: ([f64; 3], [f64; 3], f64),
+    pub backward_frame: ([f64; 3], [f64; 3], f64),
 }
 
 /// Climb from `placed.saddle` and quench both sides of the mode.
@@ -364,24 +484,24 @@ pub fn pair_saddle_search<S: PointSurface>(
     let (forward_pos, forward_energy) = quench_side(&counted, &found.positions, &found.mode, 1.0)?;
     let (backward_pos, backward_energy) =
         quench_side(&counted, &found.positions, &found.mode, -1.0)?;
+    let forward_atom_initial = mic_max_atom(&forward_pos, &initial, cell);
+    let forward_atom_final = mic_max_atom(&forward_pos, &final_min, cell);
+    let backward_atom_initial = mic_max_atom(&backward_pos, &initial, cell);
+    let backward_atom_final = mic_max_atom(&backward_pos, &final_min, cell);
     let end_forward = classify_end(
-        &forward_pos,
+        forward_atom_initial,
+        forward_atom_final,
         forward_energy,
-        &initial,
         e_min,
-        &final_min,
         e_final,
-        cell,
         options,
     );
     let end_backward = classify_end(
-        &backward_pos,
+        backward_atom_initial,
+        backward_atom_final,
         backward_energy,
-        &initial,
         e_min,
-        &final_min,
         e_final,
-        cell,
         options,
     );
     let outcome = outcome_of(
@@ -407,6 +527,10 @@ pub fn pair_saddle_search<S: PointSurface>(
         outcome,
         end_forward,
         end_backward,
+        forward_atom_initial,
+        forward_atom_final,
+        backward_atom_initial,
+        backward_atom_final,
     })
 }
 
@@ -428,7 +552,7 @@ fn climb<S: PointSurface>(
     options: &PairOptions,
 ) -> Result<Climbed, SaddleError> {
     let search = MinModeConfig {
-        method: Method::Fire { kind: FireKind::V2 },
+        method: options.method.clone(),
         force_tol: options.force_tol,
         max_move: options.max_move,
         dr: 1.0e-3,
@@ -522,30 +646,27 @@ fn quench_side<S: PointSurface>(
     Ok((trial, energy))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn classify_end(
-    quenched: &Array1<f64>,
+    to_initial: f64,
+    to_final: f64,
     energy: f64,
-    initial: &Array1<f64>,
     e_initial: f64,
-    final_min: &Array1<f64>,
     e_final: f64,
-    cell: M3,
     options: &PairOptions,
 ) -> PairEnd {
-    let to_initial = mic_rms(quenched, initial, cell);
-    let to_final = mic_rms(quenched, final_min, cell);
-    if to_initial < options.match_rms && (energy - e_initial).abs() < 0.05 {
+    let initial_hit = to_initial <= to_final && to_initial < options.match_atom;
+    let final_hit = to_final < to_initial && to_final < options.match_atom;
+    if initial_hit && (energy - e_initial).abs() < 0.05 {
         return PairEnd::InitialMinimum;
     }
-    if to_final < options.match_rms && (energy - e_final).abs() < 0.05 {
+    if final_hit && (energy - e_final).abs() < 0.05 {
         return PairEnd::FinalMinimum;
     }
     let floor = e_initial.min(e_final);
     if energy < floor - options.recombine_drop {
         return PairEnd::Recombined;
     }
-    if to_initial < options.match_rms || to_final < options.match_rms {
+    if initial_hit || final_hit {
         return PairEnd::Captured;
     }
     PairEnd::OffPathway
@@ -745,6 +866,22 @@ fn mic_difference(target: &Array1<f64>, origin: &Array1<f64>, cell: M3) -> Array
     mode
 }
 
+fn mic_max_atom(left: &Array1<f64>, right: &Array1<f64>, cell: M3) -> f64 {
+    let n = left.len() / 3;
+    if n == 0 || right.len() / 3 != n {
+        return f64::MAX;
+    }
+    let mut best = 0.0;
+    for atom in 0..n {
+        let d = mic_delta(atom_at(left, atom), atom_at(right, atom), cell);
+        let length = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        if length > best {
+            best = length;
+        }
+    }
+    best
+}
+
 fn mic_rms(left: &Array1<f64>, right: &Array1<f64>, cell: M3) -> f64 {
     let n = left.len() / 3;
     if n == 0 || right.len() / 3 != n {
@@ -761,6 +898,104 @@ fn mic_rms(left: &Array1<f64>, right: &Array1<f64>, cell: M3) -> f64 {
 fn mic_length(point: [f64; 3], origin: [f64; 3], cell: M3) -> f64 {
     let d = mic_delta(point, origin, cell);
     (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
+}
+
+fn closest_frame(positions: &Array1<f64>, cell: M3) -> ([f64; 3], [f64; 3], f64) {
+    let n = positions.len() / 3;
+    let mut best = f64::MAX;
+    let mut pair = (0usize, 1usize);
+    let mut delta = [1.0, 0.0, 0.0];
+    for i in 0..n {
+        for j in i + 1..n {
+            let step = mic_delta(atom_at(positions, j), atom_at(positions, i), cell);
+            let length = length3(step);
+            if length < best {
+                best = length;
+                pair = (i, j);
+                delta = step;
+            }
+        }
+    }
+    let origin = atom_at(positions, pair.0);
+    let center = [
+        origin[0] + 0.5 * delta[0],
+        origin[1] + 0.5 * delta[1],
+        origin[2] + 0.5 * delta[2],
+    ];
+    (center, unit3(delta), best)
+}
+
+fn closest_axis(positions: &Array1<f64>, cell: M3) -> [f64; 3] {
+    let n = positions.len() / 3;
+    let mut best = f64::MAX;
+    let mut axis = [1.0, 0.0, 0.0];
+    for i in 0..n {
+        for j in i + 1..n {
+            let delta = mic_delta(atom_at(positions, j), atom_at(positions, i), cell);
+            let length = length3(delta);
+            if length < best {
+                best = length;
+                axis = delta;
+            }
+        }
+    }
+    unit3(axis)
+}
+
+fn reflect_positions(positions: &mut Array1<f64>, normal: [f64; 3], cell: M3) {
+    for atom in 0..positions.len() / 3 {
+        let delta = mic_delta(atom_at(positions, atom), [0.0, 0.0, 0.0], cell);
+        let along = dot3(delta, normal);
+        let reflected = [
+            delta[0] - 2.0 * along * normal[0],
+            delta[1] - 2.0 * along * normal[1],
+            delta[2] - 2.0 * along * normal[2],
+        ];
+        let wrapped = wrap_into(reflected, cell);
+        for c in 0..3 {
+            positions[3 * atom + c] = wrapped[c];
+        }
+    }
+}
+
+fn wrap_into(point: [f64; 3], cell: M3) -> [f64; 3] {
+    let inv = invert(cell);
+    let s = [
+        point[0] * inv[0][0] + point[1] * inv[1][0] + point[2] * inv[2][0],
+        point[0] * inv[0][1] + point[1] * inv[1][1] + point[2] * inv[2][1],
+        point[0] * inv[0][2] + point[1] * inv[1][2] + point[2] * inv[2][2],
+    ];
+    let w = [
+        s[0] - s[0].floor(),
+        s[1] - s[1].floor(),
+        s[2] - s[2].floor(),
+    ];
+    [
+        w[0] * cell[0][0] + w[1] * cell[1][0] + w[2] * cell[2][0],
+        w[0] * cell[0][1] + w[1] * cell[1][1] + w[2] * cell[2][1],
+        w[0] * cell[0][2] + w[1] * cell[1][2] + w[2] * cell[2][2],
+    ]
+}
+
+fn unit3(v: [f64; 3]) -> [f64; 3] {
+    let n = length3(v).max(1.0e-30);
+    [v[0] / n, v[1] / n, v[2] / n]
+}
+
+fn length3(v: [f64; 3]) -> f64 {
+    (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt()
+}
+
+fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
 }
 
 fn mic_delta(point: [f64; 3], origin: [f64; 3], cell: M3) -> [f64; 3] {
