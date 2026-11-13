@@ -690,6 +690,67 @@ fn the_spontaneous_count_follows_the_census() {
     assert!((hot - cold).abs() > 1.0);
 }
 
+#[test]
+fn eight_channels_set_the_diffusivity_and_rotation_does_not() {
+    let lattice = 3.6_f64;
+    let channel = 2.0e10_f64;
+    let quiet = rgsaddle::dumbbell_diffusivity(lattice, channel, 0.0).expect("D");
+    let spinning = rgsaddle::dumbbell_diffusivity(lattice, channel, 5.0e12).expect("D");
+    let expected = (2.0 / 3.0) * channel * lattice * lattice;
+    assert!((quiet - expected).abs() / expected < 1.0e-12, "{quiet} {expected}");
+    assert!((spinning - quiet).abs() / quiet < 1.0e-12, "{spinning}");
+    // Twelve neighbor channels at the same jump length would be 3/2 of this.
+    let twelve = 1.5 * expected;
+    assert!((quiet - twelve).abs() / twelve > 0.2);
+}
+
+#[test]
+fn the_smoluchowski_radius_does_not_grow_when_the_return_layer_does() {
+    let radius = 5.0_f64;
+    let jump = 1.0_f64;
+    let distance = radius + jump;
+    let back = rgsaddle::spherical_return_probability(radius, jump).expect("return");
+    let core = vec![rgsaddle::VolumeSite {
+        id: "boundary".into(),
+        count: 20.0,
+        outcome: rgsaddle::SiteOutcome::Kinetic,
+        rates: vec![("recombined".into(), 1.0e6), ("escaped".into(), 1.0)],
+    }];
+    let mut volumes = Vec::new();
+    let mut radii = Vec::new();
+    for count in [1.0_f64, 80.0] {
+        let embedded = rgsaddle::embed_free_migration(
+            &core,
+            &rgsaddle::FreeMigration {
+                boundary: "boundary".into(),
+                outward_rate: 1.0,
+                return_probability: back,
+                return_count: count,
+            },
+        )
+        .expect("embed");
+        let volume = rgsaddle::kinetic_recombination_volume(&embedded, 1.0).expect("volume");
+        let layer = volume
+            .placements
+            .iter()
+            .find(|site| site.id == rgsaddle::FREE_CRYSTAL)
+            .expect("layer");
+        let r_eff = rgsaddle::effective_capture_radius(layer.probability, distance).expect("radius");
+        volumes.push(volume.total_sites);
+        radii.push(r_eff);
+    }
+    assert!((volumes[1] - volumes[0]).abs() > 1.0, "{volumes:?}");
+    assert!((radii[0] - radius).abs() < 1.0e-3, "{}", radii[0]);
+    assert!((radii[1] - radii[0]).abs() < 1.0e-9, "{radii:?}");
+    let rate = rgsaddle::smoluchowski_rate(1.5, radii[0]).expect("rate");
+    let migration = (2.0 / 3.0) * 1.5 / (4.0 * 4.0);
+    let volume = rgsaddle::volume_from_frequency(rate, migration).expect("volume");
+    let atomic = 4.0_f64.powi(3) / 4.0;
+    let per_atom = volume / atomic;
+    let closed = 16.0 * std::f64::consts::PI * radius / ((2.0 / 3.0) * 4.0);
+    assert!((per_atom - closed).abs() / closed < 1.0e-4, "{per_atom} {closed}");
+}
+
 fn spontaneous_share(rows: &[(f64, bool)]) -> f64 {
     rows.iter()
         .map(|(count, spontaneous)| if *spontaneous { count / 3.0 } else { 0.0 })

@@ -151,6 +151,70 @@ pub fn dumbbell_translation_axis(axis: [f64; 3], hop: [f64; 3]) -> Option<[f64; 
     Some(out)
 }
 
+/// Diffusivity of a `<100>` dumbbell on an FCC lattice.
+///
+/// `translation_rate` is the rate of one of the eight neighbor channels.
+/// Each of those hops moves the center by `lattice / sqrt(2)` and turns the
+/// axis by a right angle. The eight vectors from any axis sum to zero and
+/// are centrosymmetric, so the turn does not correlate successive jumps and
+/// `rotation_rate` (one `<110>` saddle; two of them reach each other axis)
+/// does not change the long-time diffusivity. With `λ² = lattice² / 2`,
+/// `D = (1/6) * 8 * translation_rate * λ² = (2/3) * translation_rate * lattice²`.
+pub fn dumbbell_diffusivity(
+    lattice: f64,
+    translation_rate: f64,
+    rotation_rate: f64,
+) -> Result<f64, SaddleError> {
+    if !(lattice.is_finite() && lattice > 0.0) {
+        return Err(SaddleError::Invalid(
+            "the lattice parameter must be finite and positive".into(),
+        ));
+    }
+    if !(translation_rate.is_finite() && translation_rate >= 0.0 && rotation_rate.is_finite() && rotation_rate >= 0.0)
+    {
+        return Err(SaddleError::Invalid(
+            "translation and rotation rates must be finite and non-negative".into(),
+        ));
+    }
+    let _ = rotation_rate;
+    Ok((2.0 / 3.0) * translation_rate * lattice * lattice)
+}
+
+/// `k = 4 π D R`, the Smoluchowski rate for hitting a sphere.
+pub fn smoluchowski_rate(diffusivity: f64, radius: f64) -> Result<f64, SaddleError> {
+    if !(diffusivity.is_finite() && diffusivity >= 0.0 && radius.is_finite() && radius >= 0.0) {
+        return Err(SaddleError::Invalid(
+            "diffusivity and radius must be finite and non-negative".into(),
+        ));
+    }
+    Ok(4.0 * std::f64::consts::PI * diffusivity * radius)
+}
+
+/// Continuum capture probability `R_eff / distance` inverted for the radius.
+pub fn effective_capture_radius(probability: f64, distance: f64) -> Result<f64, SaddleError> {
+    if !(probability.is_finite() && (0.0..=1.0).contains(&probability)) {
+        return Err(SaddleError::Invalid(
+            "the capture probability must lie in [0, 1]".into(),
+        ));
+    }
+    if !(distance.is_finite() && distance > 0.0) {
+        return Err(SaddleError::Invalid(
+            "the distance from the absorber must be finite and positive".into(),
+        ));
+    }
+    Ok(probability * distance)
+}
+
+/// Volume in `k = frequency * volume`, the relation used for a migration frequency.
+pub fn volume_from_frequency(rate: f64, frequency: f64) -> Result<f64, SaddleError> {
+    if !(rate.is_finite() && rate >= 0.0 && frequency.is_finite() && frequency > 0.0) {
+        return Err(SaddleError::Invalid(
+            "the rate must be non-negative and the frequency positive".into(),
+        ));
+    }
+    Ok(rate / frequency)
+}
+
 /// Factor on one direction of a shell pair after a saddle shift.
 ///
 /// `source_factor` is the Boltzmann factor of the away barrier measured on
