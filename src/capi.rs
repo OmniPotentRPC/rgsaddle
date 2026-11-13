@@ -26,7 +26,9 @@ use crate::projection::ProjectionKind;
 use crate::spring::SpringKind;
 use crate::tangent::TangentKind;
 
+/// The RGSADDLE ABI MAJOR.
 pub const RGSADDLE_ABI_MAJOR: u32 = 1;
+/// The RGSADDLE ABI MINOR.
 pub const RGSADDLE_ABI_MINOR: u32 = 35;
 
 /// Band config bit 0. The C step calls the surface once per image
@@ -54,72 +56,124 @@ pub const RGSADDLE_REQ_ONE_IMAGE: u64 = 1;
 /// config minor is 23 or newer.
 pub const RGSADDLE_REQ_CLIMBING_IMAGE: u64 = 2;
 
+/// The RGSADDLE OK.
 pub const RGSADDLE_OK: i32 = 0;
+/// The RGSADDLE NULL SESSION.
 pub const RGSADDLE_NULL_SESSION: i32 = -1;
+/// The RGSADDLE NULL BAND.
 pub const RGSADDLE_NULL_BAND: i32 = -2;
+/// The RGSADDLE NULL SURFACE.
 pub const RGSADDLE_NULL_SURFACE: i32 = -3;
+/// The RGSADDLE NULL REPORT.
 pub const RGSADDLE_NULL_REPORT: i32 = -4;
+/// The RGSADDLE SHAPE.
 pub const RGSADDLE_SHAPE: i32 = -5;
+/// The RGSADDLE SURFACE FAILED.
 pub const RGSADDLE_SURFACE_FAILED: i32 = -6;
+/// The RGSADDLE NON FINITE.
 pub const RGSADDLE_NON_FINITE: i32 = -7;
+/// The RGSADDLE SOLVER.
 pub const RGSADDLE_SOLVER: i32 = -8;
+/// The RGSADDLE ABI MISMATCH.
 pub const RGSADDLE_ABI_MISMATCH: i32 = -9;
+/// The RGSADDLE ALLOC.
 pub const RGSADDLE_ALLOC: i32 = -10;
+/// The RGSADDLE INVALID PARAMETER.
 pub const RGSADDLE_INVALID_PARAMETER: i32 = -11;
+/// The RGSADDLE NO EVALUATION.
 pub const RGSADDLE_NO_EVALUATION: i32 = -12;
+/// The RGSADDLE STALLED.
 pub const RGSADDLE_STALLED: i32 = -13;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+/// The RgsaddleVersion.
 pub struct RgsaddleVersion {
+    /// The major.
     pub major: u32,
+    /// The minor.
     pub minor: u32,
 }
 
 #[repr(C)]
+/// The RgsaddleSurfaceRequest.
 pub struct RgsaddleSurfaceRequest {
+    /// ABI version this value was built against.
     pub version: RgsaddleVersion,
+    /// Bit flags. The header names each bit.
     pub flags: u64,
+    /// Number of images, endpoints included.
     pub n_images: i64,
+    /// Number of atoms in one image.
     pub n_atoms: i64,
+    /// The f64.
     pub positions: *const f64,
+    /// The energies.
     pub energies: *mut f64,
+    /// Energy gradients, one row per image, in the same order as the positions.
     pub gradients: *mut f64,
     /// -1 for the whole band. Otherwise the image this call fills.
     pub image: i64,
 }
 
+/// The RgsaddleSurfaceFn.
 pub type RgsaddleSurfaceFn = extern "C" fn(*mut c_void, *mut RgsaddleSurfaceRequest) -> i32;
 
 #[repr(C)]
+/// The RgsaddleBandConfig.
 pub struct RgsaddleBandConfig {
+    /// ABI version this value was built against.
     pub version: RgsaddleVersion,
+    /// Bit flags. The header names each bit.
     pub flags: u64,
+    /// How the path direction at an interior image is chosen.
     pub tangent: i32,
+    /// How the springs between images are chosen.
     pub spring: i32,
+    /// How the true force and the spring are combined.
     pub projection: i32,
+    /// Which rgmin stepper advances the assembled force.
     pub method: i32,
+    /// The spring k.
     pub spring_k: f64,
+    /// The f64.
     pub spring_ks: *const f64,
+    /// The ci trigger factor.
     pub ci_trigger_factor: f64,
+    /// The ci trigger force.
     pub ci_trigger_force: f64,
+    /// The f64.
     pub cell: *const f64,
+    /// The search stops when the largest absolute force component falls under this value, in the host's force units.
     pub force_tol: f64,
+    /// Largest per-atom displacement, in the host's length unit.
     pub max_move: f64,
+    /// Number of vector pairs a limited-memory stepper stores.
     pub memory: i64,
 }
 
 #[repr(C)]
+/// The RgsaddleMinModeConfig.
 pub struct RgsaddleMinModeConfig {
+    /// ABI version this value was built against.
     pub version: RgsaddleVersion,
+    /// Bit flags. The header names each bit.
     pub flags: u64,
+    /// Which estimator produces the lowest mode.
     pub kind: i32,
+    /// Which rgmin stepper advances the assembled force.
     pub method: i32,
+    /// Finite-difference displacement, in the host's length unit.
     pub dr: f64,
+    /// The rotation stops when the rotational force falls under this value.
     pub rotation_tol: f64,
+    /// Most dimer rotations, or Lanczos actions, in one estimate.
     pub max_rotations: i64,
+    /// Largest Krylov subspace used for one Lanczos estimate.
     pub krylov_dim: i64,
+    /// The search stops when the largest absolute force component falls under this value, in the host's force units.
     pub force_tol: f64,
+    /// Largest per-atom displacement, in the host's length unit.
     pub max_move: f64,
     /// ABI minor 5: dimer rotation angle tolerance in radians. The Rust
     /// default is five degrees; zero disables the test. A C config
@@ -127,21 +181,31 @@ pub struct RgsaddleMinModeConfig {
     pub rotation_angle_tol: f64,
     /// ABI minor 5: 0 forward difference, 1 central.
     pub difference: i32,
+    /// The reserved.
     pub reserved: i32,
 }
 
 #[repr(C)]
+/// The RgsaddleReport.
 pub struct RgsaddleReport {
+    /// ABI version this value was built against.
     pub version: RgsaddleVersion,
+    /// Bit flags. The header names each bit.
     pub flags: u64,
+    /// Whether this step is still running or has converged.
     pub status: i32,
     /// Geometries the surface evaluated during the step (band image
     /// rows, or single points for the min-mode and index-1 sessions).
     pub evaluations: i32,
+    /// Largest absolute force component, in the host's force units.
     pub max_force: f64,
+    /// Index of the climbing image, or none when no image climbs.
     pub ci_index: i64,
+    /// Number of steps taken.
     pub iteration: i64,
+    /// Curvature along the mode, energy per length squared.
     pub curvature: f64,
+    /// The rotations.
     pub rotations: i64,
 }
 
@@ -298,6 +362,7 @@ impl PointSurface for CSurface {
     }
 }
 
+/// The RgsaddleBand.
 pub struct RgsaddleBand {
     session: BandSession,
     n_images: i64,
@@ -306,6 +371,7 @@ pub struct RgsaddleBand {
     climbing_request: bool,
 }
 
+/// The RgsaddleMinMode.
 pub struct RgsaddleMinMode {
     session: MinModeSession,
     n_atoms: i64,
@@ -341,6 +407,7 @@ fn status_of(err: &SaddleError) -> i32 {
 }
 
 #[unsafe(no_mangle)]
+/// Rgsaddle abi version.
 pub extern "C" fn rgsaddle_abi_version() -> i32 {
     ((RGSADDLE_ABI_MAJOR << 16) | RGSADDLE_ABI_MINOR) as i32
 }
@@ -360,6 +427,7 @@ pub unsafe extern "C" fn rgsaddle_abi_stamp(out: *mut RgsaddleVersion) -> i32 {
 }
 
 #[unsafe(no_mangle)]
+/// Rgsaddle status name.
 pub extern "C" fn rgsaddle_status_name(status: i32) -> *const c_char {
     let s: &'static str = match status {
         RGSADDLE_OK => "OK\0",
@@ -1124,16 +1192,25 @@ pub unsafe extern "C" fn rgsaddle_minmode_free(session: *mut RgsaddleMinMode) {
 }
 
 #[repr(C)]
+/// The RgsaddleIndex1Config.
 pub struct RgsaddleIndex1Config {
+    /// ABI version this value was built against.
     pub version: RgsaddleVersion,
+    /// Bit flags. The header names each bit.
     pub flags: u64,
+    /// The update.
     pub update: i32,
+    /// Estimated lowest-curvature direction. A stored mode is normalized.
     pub mode: i32,
+    /// The trust radius.
     pub trust_radius: f64,
+    /// The search stops when the largest absolute force component falls under this value, in the host's force units.
     pub force_tol: f64,
+    /// The fd dr.
     pub fd_dr: f64,
 }
 
+/// The RgsaddleIndex1.
 pub struct RgsaddleIndex1 {
     session: Index1Session,
     n_atoms: i64,
@@ -1533,22 +1610,36 @@ pub unsafe extern "C" fn rgsaddle_index1_free(session: *mut RgsaddleIndex1) {
 
 mod ocineb;
 #[repr(C)]
+/// The RgsaddleConnectConfig.
 pub struct RgsaddleConnectConfig {
+    /// ABI version this value was built against.
     pub version: RgsaddleVersion,
+    /// Bit flags. The header names each bit.
     pub flags: u64,
+    /// The search stops when the largest absolute force component falls under this value, in the host's force units.
     pub force_tol: f64,
+    /// The max calls.
     pub max_calls: i64,
+    /// The quench nodes.
     pub quench_nodes: i32,
 }
 
 #[repr(C)]
+/// The RgsaddleConnectReport.
 pub struct RgsaddleConnectReport {
+    /// ABI version this value was built against.
     pub version: RgsaddleVersion,
+    /// Bit flags. The header names each bit.
     pub flags: u64,
+    /// Potential energy in the host's energy unit.
     pub energy: f64,
+    /// The force norm.
     pub force_norm: f64,
+    /// Which estimator produces the lowest mode.
     pub kind: i32,
+    /// The hessian index.
     pub hessian_index: i32,
+    /// Surface evaluations performed by this call.
     pub evaluations: i32,
 }
 

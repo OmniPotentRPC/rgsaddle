@@ -72,22 +72,39 @@ type SurfaceFn<'a> = dyn FnMut(&[f64]) -> Result<(f64, Vec<f64>), SaddleError> +
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct ConnectConfig {
+    /// The alpha0.
     pub alpha0: f64,
+    /// The nhistx.
     pub nhistx: usize,
+    /// The trustradius.
     pub trustradius: f64,
+    /// The forcetol.
     pub forcetol: f64,
+    /// The forcetol per distance.
     pub forcetol_per_distance: f64,
+    /// The distance step max.
     pub distance_step_max: f64,
+    /// The distance step min.
     pub distance_step_min: f64,
+    /// The target distance saddle.
     pub target_distance_saddle: f64,
+    /// The target distance other.
     pub target_distance_other: f64,
+    /// The energy difference threshold.
     pub energy_difference_threshold: f64,
+    /// The trusted force difference.
     pub trusted_force_difference: f64,
+    /// The saddle cosp.
     pub saddle_cosp: f64,
+    /// The nsteps.
     pub nsteps: usize,
+    /// The minimize fmax.
     pub minimize_fmax: f64,
+    /// The minimize nsteps.
     pub minimize_nsteps: usize,
+    /// The minimize maxrise.
     pub minimize_maxrise: f64,
+    /// The n loops.
     pub n_loops: usize,
     /// Minimize chain nodes created by a split before the next search.
     pub quench_nodes: bool,
@@ -151,17 +168,29 @@ impl ConnectConfig {
 /// (`hessian_coordinates`). Lanczos actions sit in `minmode_calls`.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ConnectProfile {
+    /// The sqnm calls.
     pub sqnm_calls: usize,
+    /// The sqnm steps.
     pub sqnm_steps: usize,
+    /// The sqnm segments.
     pub sqnm_segments: usize,
+    /// The hessian calls.
     pub hessian_calls: usize,
+    /// The hessian checks.
     pub hessian_checks: usize,
+    /// The hessian coordinates.
     pub hessian_coordinates: usize,
+    /// The quench calls.
     pub quench_calls: usize,
+    /// The quenches.
     pub quenches: usize,
+    /// The searches.
     pub searches: usize,
+    /// The minmode calls.
     pub minmode_calls: usize,
+    /// The band calls.
     pub band_calls: usize,
+    /// The other calls.
     pub other_calls: usize,
 }
 
@@ -169,9 +198,13 @@ pub struct ConnectProfile {
 /// upper bound, and `f` when the highest segment could not be split.
 #[derive(Clone, Debug)]
 pub struct ConnectReport {
+    /// Cartesian coordinates, length 3N, in the host's length unit.
     pub position: Vec<f64>,
+    /// Potential energy in the host's energy unit.
     pub energy: f64,
+    /// The force norm.
     pub force_norm: f64,
+    /// Which estimator produces the lowest mode.
     pub kind: char,
     /// Surface evaluations. Finite differences that decide a step or an
     /// index are included. The Lanczos acceptance does not build a dense
@@ -181,6 +214,7 @@ pub struct ConnectReport {
     /// Lanczos index estimate when that estimate accepted the point,
     /// or `-1` when the search stopped before either check.
     pub hessian_index: i32,
+    /// The profile.
     pub profile: ConnectProfile,
 }
 

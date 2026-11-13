@@ -59,8 +59,11 @@ impl Default for ForceMatchOpts {
 /// Fitted seed Hessian plus linear / nonlinear coefficients.
 #[derive(Clone, Debug)]
 pub struct ForceMatchReport {
+    /// The hessian.
     pub hessian: Array2<f64>,
+    /// The linpars.
     pub linpars: Array1<f64>,
+    /// The nonlinpars.
     pub nonlinpars: Array1<f64>,
 }
 
@@ -171,6 +174,7 @@ pub fn bond_hessian(
 /// Fit bond `k` and return the seed Hessian in one call.
 pub type ForceMatchedHessian = (Array2<f64>, Array1<f64>, Vec<[usize; 2]>);
 
+/// Force match hessian.
 pub fn force_match_hessian(
     x: ArrayView1<f64>,
     g: ArrayView1<f64>,

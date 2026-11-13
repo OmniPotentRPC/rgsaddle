@@ -26,9 +26,13 @@ use crate::mic::{self, Cell};
 /// a per-atom step cap of `0.1`, and 20 L-BFGS pairs.
 #[derive(Clone, Debug)]
 pub struct IdppConfig {
+    /// The max iterations.
     pub max_iterations: usize,
+    /// The grad tol.
     pub grad_tol: f64,
+    /// Largest per-atom displacement, in the host's length unit.
     pub max_move: f64,
+    /// Number of vector pairs a limited-memory stepper stores.
     pub memory: usize,
 }
 
@@ -142,8 +146,11 @@ pub struct SidppConfig {
     /// Root mean square NEB force that, with `force_tol`, ends the
     /// final stage.
     pub rms_tol: f64,
+    /// Initial time step of FIRE and quick-min.
     pub time_step: f64,
+    /// Largest per-atom displacement, in the host's length unit.
     pub max_move: f64,
+    /// The max iterations.
     pub max_iterations: usize,
 }
 

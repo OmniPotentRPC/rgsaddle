@@ -24,20 +24,46 @@ pub const EVAL_BLOCK: usize = 1;
 /// What a mesh operation changed. No force was called.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MeshEvent {
+    /// The Unchanged.
     Unchanged,
+    /// The Remeshed.
     Remeshed,
-    Inserted { id: ImageId, index: usize },
-    Windowed { active: Range<usize> },
+    /// An image was inserted.
+    Inserted {
+        /// Identity of the new image.
+        id: ImageId,
+        /// Index of the new image in the chain.
+        index: usize,
+    },
+    /// The active window changed.
+    Windowed {
+        /// Images the next evaluation will move.
+        active: Range<usize>,
+    },
 }
 
 /// Band geometry operation. Applying one does not evaluate the surface.
 #[derive(Clone, Debug)]
 pub enum Mesh {
+    /// The RemeshLinear.
     RemeshLinear,
+    /// The RemeshHermite.
     RemeshHermite,
-    Insert { after: usize },
-    WindowAuto { alpha: f64 },
-    WindowOffset { n: usize },
+    /// Insert one image after an existing index.
+    Insert {
+        /// Insert after this image index.
+        after: usize,
+    },
+    /// Place a window where the resolution is worst.
+    WindowAuto {
+        /// Blend of the energy gap and the segment length. Zero uses length only.
+        alpha: f64,
+    },
+    /// Place a window a fixed number of images from the start.
+    WindowOffset {
+        /// Images kept on each side of the window's centre.
+        n: usize,
+    },
 }
 
 /// Positions, cached rows, and roles. Image ids survive insert and window.
@@ -85,30 +111,37 @@ impl Chain {
         })
     }
 
+    /// Cartesian coordinates. A band stores one row per image.
     pub fn positions(&self) -> ArrayView2<'_, f64> {
         self.x.view()
     }
 
+    /// Energies.
     pub fn energies(&self) -> &[f64] {
         &self.e
     }
 
+    /// Energy gradients, one row per image, in the same order as the positions.
     pub fn gradients(&self) -> ArrayView2<'_, f64> {
         self.g.view()
     }
 
+    /// Ids.
     pub fn ids(&self) -> &[ImageId] {
         &self.ids
     }
 
+    /// Roles.
     pub fn roles(&self) -> &[Role] {
         &self.roles
     }
 
+    /// Active.
     pub fn active(&self) -> Range<usize> {
         self.active.clone()
     }
 
+    /// Set role.
     pub fn set_role(&mut self, index: usize, role: Role) -> Result<(), SaddleError> {
         let Some(slot) = self.roles.get_mut(index) else {
             return Err(SaddleError::Shape("role index is outside the chain".into()));
@@ -277,6 +310,7 @@ fn eval_block<S: Surface + ?Sized>(
 }
 
 impl Mesh {
+    /// Apply.
     pub fn apply(&self, chain: &mut Chain) -> Result<MeshEvent, SaddleError> {
         match self {
             Mesh::RemeshLinear => {
@@ -481,6 +515,7 @@ pub struct EvalPool {
 }
 
 impl EvalPool {
+    /// New.
     pub fn new(threads: usize) -> Result<Self, SaddleError> {
         if threads == 0 {
             return Err(SaddleError::Invalid(
@@ -494,6 +529,7 @@ impl EvalPool {
         Ok(Self { threads, pool })
     }
 
+    /// How many images may be evaluated at once.
     pub fn threads(&self) -> usize {
         self.threads
     }

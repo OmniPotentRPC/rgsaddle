@@ -10,28 +10,45 @@ use std::{ffi::c_void, slice};
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+/// The RgsaddleKappaConfig.
 pub struct RgsaddleKappaConfig {
+    /// ABI version this value was built against.
     pub version: RgsaddleVersion,
+    /// The beta.
     pub beta: f64,
+    /// The tolerance.
     pub tolerance: f64,
+    /// The max iterations.
     pub max_iterations: i64,
+    /// The krylov dimension.
     pub krylov_dimension: i64,
+    /// The eigen kind.
     pub eigen_kind: i32,
 }
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+/// The RgsaddleKappaReport.
 pub struct RgsaddleKappaReport {
+    /// ABI version this value was built against.
     pub version: RgsaddleVersion,
+    /// The kappa.
     pub kappa: f64,
+    /// The tangent curvature.
     pub tangent_curvature: f64,
+    /// The gamma parallel.
     pub gamma_parallel: f64,
+    /// The gamma perpendicular.
     pub gamma_perpendicular: f64,
+    /// The residual.
     pub residual: f64,
+    /// The hessian actions.
     pub hessian_actions: i64,
+    /// The tangent dimension.
     pub tangent_dimension: i64,
 }
 
+/// The RgsaddleHessianFn.
 pub type RgsaddleHessianFn = extern "C" fn(*mut c_void, i64, *const f64, *mut f64) -> i32;
 
 /// # Safety

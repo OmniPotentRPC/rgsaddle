@@ -25,6 +25,7 @@ use crate::linalg::modified_gram_schmidt;
 
 /// Sella `SELLA_GPU_MIN_DIM` default.
 pub const GPU_MIN_DIM: usize = 200;
+/// The DEFAULT MIN DIM.
 pub const DEFAULT_MIN_DIM: usize = GPU_MIN_DIM;
 
 static OOM_FLOOR: Mutex<Option<usize>> = Mutex::new(None);
@@ -75,14 +76,17 @@ impl GpuPolicy {
         gpu_ok(&self, n)
     }
 
+    /// Eigh.
     pub fn eigh(mut self, a: ArrayView2<f64>) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
         gpu_eigh(a, &mut self)
     }
 
+    /// Qr.
     pub fn qr(mut self, a: ArrayView2<f64>) -> Result<(Array2<f64>, Array2<f64>), SaddleError> {
         gpu_qr(a, &mut self)
     }
 
+    /// Project.
     pub fn project(
         mut self,
         h: ArrayView2<f64>,
@@ -291,34 +295,41 @@ pub fn gpu_project(
     Ok(host_project(h, u))
 }
 
+/// Gpu ok env.
 pub fn gpu_ok_env(n: usize) -> bool {
     gpu_ok(&GpuPolicy::from_env(), n)
 }
 
+/// Gpu qr env.
 pub fn gpu_qr_env(a: ArrayView2<f64>) -> Result<(Array2<f64>, Array2<f64>), SaddleError> {
     gpu_qr(a, &mut GpuPolicy::from_env())
 }
 
+/// Gpu project env.
 pub fn gpu_project_env(h: ArrayView2<f64>, u: ArrayView2<f64>) -> Result<Array2<f64>, SaddleError> {
     gpu_project(h, u, &mut GpuPolicy::from_env())
 }
 
+/// To gpu view.
 pub fn to_gpu_view(data: ndarray::ArrayView1<f64>) -> Option<Vector> {
     to_gpu(data.to_owned())
 }
 
+/// Gpu eigh with.
 pub fn gpu_eigh_with(
     a: ArrayView2<f64>,
     policy: GpuPolicy,
 ) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
     policy.eigh(a)
 }
+/// Gpu qr with.
 pub fn gpu_qr_with(
     a: ArrayView2<f64>,
     policy: GpuPolicy,
 ) -> Result<(Array2<f64>, Array2<f64>), SaddleError> {
     policy.qr(a)
 }
+/// Gpu project with.
 pub fn gpu_project_with(
     h: ArrayView2<f64>,
     u: ArrayView2<f64>,

@@ -39,11 +39,13 @@ use rgmin::vecops::{dot, nrm2};
 /// the interior images and the NEB force on the interior, flattened.
 #[derive(Clone, Debug)]
 pub struct BandForces {
+    /// Potential energy of every image, endpoints included, in the host's energy unit.
     pub energies: Array1<f64>,
     /// Unit tangents of the interior images (rows `1..n-1`), `(n-2) x dof`.
     pub tangents: Array2<f64>,
     /// NEB force on the interior, `(n-2) * dof`.
     pub force: Array1<f64>,
+    /// Largest absolute force component, in the host's force units.
     pub max_force: f64,
 }
 
@@ -265,15 +267,23 @@ impl Default for RtrConfig {
 /// One accepted or rejected band step.
 #[derive(Clone, Debug)]
 pub struct RtrReport {
+    /// The accepted.
     pub accepted: bool,
+    /// Ratio of the actual energy change to the model's prediction.
     pub rho: f64,
+    /// The radius.
     pub radius: f64,
+    /// The stop.
     pub stop: TcgStop,
+    /// The cg iterations.
     pub cg_iterations: usize,
+    /// The model decrease.
     pub model_decrease: f64,
+    /// The actual decrease.
     pub actual_decrease: f64,
     /// Max NEB-force component after the step (before it, when rejected).
     pub max_force: f64,
+    /// The ci.
     pub ci: Option<usize>,
 }
 
@@ -282,9 +292,13 @@ pub struct RtrReport {
 /// `climb` is set, the plain band otherwise.
 #[derive(Clone, Debug)]
 pub struct BandRtr {
+    /// The config.
     pub config: RtrConfig,
+    /// The radius.
     pub radius: RtrRadius,
+    /// The climb.
     pub climb: bool,
+    /// Number of steps taken.
     pub iteration: usize,
     force_gate: ForceGate,
     memo: HvpMemo,
@@ -334,6 +348,7 @@ impl HvpMemo {
 }
 
 impl BandRtr {
+    /// New.
     pub fn new(config: RtrConfig, climb: bool) -> Self {
         Self {
             config,

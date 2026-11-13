@@ -57,7 +57,9 @@ pub enum HessianUpdate {
 #[non_exhaustive]
 #[derive(Clone, Debug)]
 pub struct Index1Config {
+    /// The update.
     pub update: HessianUpdate,
+    /// Estimated lowest-curvature direction. A stored mode is normalized.
     pub mode: NicholsMode,
     /// Euclidean bound on the Cartesian step.
     pub trust_radius: f64,
@@ -124,17 +126,24 @@ impl Default for Index1Config {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The Index1Status.
 pub enum Index1Status {
+    /// The Running.
     Running,
+    /// The Converged.
     Converged,
 }
 
 #[derive(Clone, Debug)]
+/// The Index1Report.
 pub struct Index1Report {
+    /// Whether this step is still running or has converged.
     pub status: Index1Status,
+    /// Largest absolute force component, in the host's force units.
     pub max_force: f64,
     /// Lowest eigenvalue of the Hessian that produced this step.
     pub curvature: f64,
+    /// Number of steps taken.
     pub iteration: usize,
     /// Euclidean length of the Cartesian step just taken. Zero when
     /// the gradient was already under `force_tol`.
@@ -670,10 +679,12 @@ impl Index1Session {
         })
     }
 
+    /// Cartesian coordinates, length 3N, in the host's length unit.
     pub fn position(&self) -> ArrayView1<'_, f64> {
         self.x.view()
     }
 
+    /// Hessian.
     pub fn hessian(&self) -> Option<ArrayView2<'_, f64>> {
         if self.have_hessian {
             Some(self.hessian.view())
@@ -682,6 +693,7 @@ impl Index1Session {
         }
     }
 
+    /// Set hessian.
     pub fn set_hessian(&mut self, hessian: Array2<f64>) -> Result<(), SaddleError> {
         if hessian.nrows() != self.x.len() || hessian.ncols() != self.x.len() {
             return Err(SaddleError::Shape("Hessian must match the position".into()));
@@ -694,6 +706,7 @@ impl Index1Session {
         Ok(())
     }
 
+    /// Set position.
     pub fn set_position(&mut self, x: Array1<f64>) -> Result<(), SaddleError> {
         if x.len() != self.x.len() {
             return Err(SaddleError::Shape("position length must stay fixed".into()));

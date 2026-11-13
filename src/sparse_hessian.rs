@@ -748,9 +748,13 @@ fn greedy_distance2(pattern: &SparsityPattern, order: &[usize]) -> Vec<usize> {
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug)]
 pub struct SparseHessianOpts {
+    /// Forward or central differences for Hessian actions.
     pub difference: FiniteDifference,
+    /// Index of the step inside its stage.
     pub step: f64,
+    /// The memory budget.
     pub memory_budget: usize,
+    /// The skin.
     pub skin: f64,
 }
 
@@ -1043,8 +1047,11 @@ impl ApplyHessian for SparseHessian {
 #[non_exhaustive]
 #[derive(Clone, Debug)]
 pub struct LowestEigenpairs {
+    /// The values.
     pub values: Array1<f64>,
+    /// The vectors.
     pub vectors: Array2<f64>,
+    /// The residuals.
     pub residuals: Array1<f64>,
 }
 

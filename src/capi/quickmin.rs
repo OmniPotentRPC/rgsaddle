@@ -4,7 +4,9 @@ use super::*;
 
 /// Quick-min variants for [`rgsaddle_band_set_quickmin_variant`].
 pub const RGSADDLE_QUICKMIN_RGMIN: i32 = 0;
+/// The RGSADDLE QUICKMIN EON.
 pub const RGSADDLE_QUICKMIN_EON: i32 = 1;
+/// The RGSADDLE QUICKMIN PER ATOM.
 pub const RGSADDLE_QUICKMIN_PER_ATOM: i32 = 2;
 
 /// # Safety

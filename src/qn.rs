@@ -177,7 +177,9 @@ pub fn qn_retract<M: Manifold>(
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum HessUpdate {
     #[default]
+    /// The Bfgs.
     Bfgs,
+    /// The TsBfgs.
     TsBfgs,
 }
 

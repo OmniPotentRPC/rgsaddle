@@ -17,6 +17,7 @@ pub type ImageId = u64;
 
 /// Batched rows. `eval` writes `e[row]` and `g.row(row)` for each id.
 pub trait Surface: Sync {
+    /// Eval.
     fn eval(
         &self,
         ids: &[ImageId],

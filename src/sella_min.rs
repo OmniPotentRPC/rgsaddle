@@ -26,11 +26,17 @@ use crate::pes_internal::{CellCartesianPes, CellInternalPes, InternalPes, SellaP
 pub struct SellaMinConfig {
     /// Sella `delta0`. The living trust radius starts here.
     pub delta: f64,
+    /// Factor by which a good step grows the trust radius.
     pub sigma_inc: f64,
+    /// Factor by which a poor step shrinks the trust radius.
     pub sigma_dec: f64,
+    /// A ratio above this grows the trust radius.
     pub rho_inc: f64,
+    /// A ratio below this shrinks the trust radius.
     pub rho_dec: f64,
+    /// Smallest trust radius the schedule will use.
     pub delta_min: f64,
+    /// The search stops when the largest absolute force component falls under this value, in the host's force units.
     pub force_tol: f64,
     /// eOn / gpr_optim `ConvergenceForceNorm`.
     pub force_gate: crate::ForceGate,
@@ -68,14 +74,21 @@ impl Default for SellaMinConfig {
     }
 }
 
+/// The SellaMinReport.
 pub struct SellaMinReport {
+    /// Potential energy in the host's energy unit.
     pub energy: f64,
+    /// Largest absolute force component, in the host's force units.
     pub max_force: f64,
+    /// The at minimum.
     pub at_minimum: bool,
+    /// Ratio of the actual energy change to the model's prediction.
     pub rho: f64,
+    /// Trust radius, in the host's length unit.
     pub delta: f64,
 }
 
+/// The SellaMinSession.
 pub struct SellaMinSession {
     pes: SellaPes,
     config: SellaMinConfig,
@@ -85,6 +98,7 @@ pub struct SellaMinSession {
 }
 
 impl SellaMinSession {
+    /// New.
     pub fn new(
         config: SellaMinConfig,
         x: Array1<f64>,
@@ -104,6 +118,7 @@ impl SellaMinSession {
         Self::on(config, x, masses, SellaGeom::Chart(chart))
     }
 
+    /// On.
     pub fn on(
         config: SellaMinConfig,
         x: Array1<f64>,
@@ -258,6 +273,7 @@ impl SellaMinSession {
         })
     }
 
+    /// Geom.
     pub fn geom(&self) -> &SellaGeom {
         &self.geom
     }
@@ -290,6 +306,7 @@ impl SellaMinSession {
         }
     }
 
+    /// Cartesian coordinates, length 3N, in the host's length unit.
     pub fn position(&self) -> ndarray::ArrayView1<'_, f64> {
         self.pes.position()
     }
@@ -329,6 +346,7 @@ impl SellaMinSession {
         self.rho
     }
 
+    /// Reset.
     pub fn reset(&mut self) {
         self.pes.reset();
         let n_free = match &self.pes {
@@ -341,6 +359,7 @@ impl SellaMinSession {
         self.rho = 1.0;
     }
 
+    /// Index of the step inside its stage.
     pub fn step<S: PointSurface>(&mut self, surface: &S) -> Result<SellaMinReport, SaddleError> {
         match &self.pes {
             SellaPes::Internal(_) => self.step_internal(surface),
@@ -617,6 +636,7 @@ impl SellaMinSession {
         })
     }
 
+    /// Run.
     pub fn run<S: PointSurface>(
         &mut self,
         surface: &S,

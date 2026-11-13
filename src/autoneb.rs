@@ -633,6 +633,7 @@ impl AutoNebTuning {
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct AutoNebReport {
+    /// Whether this step is still running or has converged.
     pub status: BandStatus,
     /// Max absolute projected-force component on the last window.
     pub max_force: f64,
@@ -642,6 +643,7 @@ pub struct AutoNebReport {
     pub ci_index: Option<usize>,
     /// Rows passed to [`BandSurface::eval`]. One row is one force call.
     pub surface_rows: usize,
+    /// Number of images, endpoints included.
     pub n_images: usize,
     /// Steps of the last stage's band session.
     pub iteration: usize,
@@ -665,9 +667,13 @@ pub enum AutoNebStage {
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct AutoNebSample {
+    /// Which AutoNEB stage produced this record.
     pub stage: AutoNebStage,
+    /// Index of the step inside its stage.
     pub step: u32,
+    /// Band image index. Endpoints are 0 and n_images - 1.
     pub image: usize,
+    /// Cartesian coordinates, length 3N, in the host's length unit.
     pub position: Vec<f64>,
 }
 
@@ -675,8 +681,11 @@ pub struct AutoNebSample {
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct AutoNebStep {
+    /// Number of steps taken.
     pub iteration: usize,
+    /// Index of the climbing image, or none when no image climbs.
     pub ci_index: Option<usize>,
+    /// Largest absolute force component, in the host's force units.
     pub max_force: f64,
 }
 
@@ -684,11 +693,15 @@ pub struct AutoNebStep {
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct AutoNebStageLog {
+    /// Which AutoNEB stage produced this record.
     pub stage: AutoNebStage,
+    /// Surface evaluations charged to this record.
     pub calls: usize,
+    /// Index of the climbing image, or none when no image climbs.
     pub ci_index: Option<usize>,
     /// A new [`BandSession`] was opened for this stage.
     pub opened_session: bool,
+    /// Steps recorded for this stage.
     pub steps: Vec<AutoNebStep>,
 }
 
@@ -737,8 +750,11 @@ pub struct AutoNeb {
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct AutoNebCut {
+    /// The index.
     pub index: usize,
+    /// The energies.
     pub energies: Vec<f64>,
+    /// The lengths.
     pub lengths: Vec<f64>,
 }
 
@@ -818,6 +834,7 @@ impl AutoNeb {
         Ok(search)
     }
 
+    /// Cartesian coordinates. A band stores one row per image.
     pub fn positions(&self) -> ArrayView2<'_, f64> {
         self.positions.view()
     }
@@ -828,10 +845,12 @@ impl AutoNeb {
         &self.energies
     }
 
+    /// Climbing image.
     pub fn climbing_image(&self) -> Option<usize> {
         self.ci_index
     }
 
+    /// Image rows the surface evaluated during this step.
     pub fn surface_rows(&self) -> usize {
         self.surface_rows
     }

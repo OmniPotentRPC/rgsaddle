@@ -32,23 +32,38 @@ pub const BAND_PRESET_SEAM: &str = "band presets stay on feat/band-methods-zoom"
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Preset {
+    /// The Min.
     Min,
+    /// The Dimer.
     Dimer,
+    /// The Lanczos.
     Lanczos,
+    /// The Art.
     Art,
+    /// The EigenFollow.
     EigenFollow,
+    /// The Neb.
     Neb,
+    /// The Dneb.
     Dneb,
+    /// The CiNeb.
     CiNeb,
+    /// The EnergyWeightedNeb.
     EnergyWeightedNeb,
+    /// The ZoomNeb.
     ZoomNeb,
+    /// The AutoNeb.
     AutoNeb,
+    /// The OciNeb.
     OciNeb,
+    /// The Idpp.
     Idpp,
+    /// The SIdpp.
     SIdpp,
 }
 
 impl Preset {
+    /// Name.
     pub fn name(self) -> &'static str {
         match self {
             Self::Min => "min",
@@ -68,6 +83,7 @@ impl Preset {
         }
     }
 
+    /// From name.
     pub fn from_name(name: &str) -> Option<Self> {
         Some(match name {
             "min" => Self::Min,
@@ -88,6 +104,7 @@ impl Preset {
         })
     }
 
+    /// To abi.
     pub fn to_abi(self) -> i32 {
         match self {
             Self::Min => 0,
@@ -107,6 +124,7 @@ impl Preset {
         }
     }
 
+    /// From abi.
     pub fn from_abi(value: i32) -> Option<Self> {
         Some(match value {
             0 => Self::Min,
@@ -127,6 +145,7 @@ impl Preset {
         })
     }
 
+    /// Is point.
     pub fn is_point(self) -> bool {
         matches!(
             self,
@@ -138,23 +157,35 @@ impl Preset {
 /// What happens to the true force along the tangent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Climb {
+    /// The Descend.
     Descend,
+    /// The Reflect.
     Reflect,
+    /// The Ascend.
     Ascend,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The StencilStatus.
 pub enum StencilStatus {
+    /// The Running.
     Running,
+    /// The Converged.
     Converged,
 }
 
 #[derive(Clone, Copy, Debug)]
+/// The StencilReport.
 pub struct StencilReport {
+    /// Whether this step is still running or has converged.
     pub status: StencilStatus,
+    /// Largest absolute force component, in the host's force units.
     pub max_force: f64,
+    /// Curvature along the mode, energy per length squared.
     pub curvature: f64,
+    /// Number of steps taken.
     pub iteration: usize,
+    /// Surface evaluations performed by this call.
     pub evaluations: usize,
 }
 
@@ -237,6 +268,7 @@ pub struct Stencil {
 }
 
 impl Stencil {
+    /// Point.
     pub fn point(x: Array1<f64>) -> PointBuilder {
         PointBuilder {
             x,
@@ -258,6 +290,7 @@ impl Stencil {
         }
     }
 
+    /// Band.
     pub fn band(x: Array2<f64>) -> BandBuilder {
         BandBuilder {
             rows: x.nrows(),
@@ -267,10 +300,12 @@ impl Stencil {
         }
     }
 
+    /// How many images may be evaluated at once.
     pub fn threads(&self) -> usize {
         self.threads
     }
 
+    /// Cartesian coordinates, length 3N, in the host's length unit.
     pub fn position(&self) -> ArrayView1<'_, f64> {
         match &self.engine {
             Engine::Mode(session) => session.position(),
@@ -280,6 +315,7 @@ impl Stencil {
         }
     }
 
+    /// Estimated lowest-curvature direction. A stored mode is normalized.
     pub fn mode(&self) -> Option<ArrayView1<'_, f64>> {
         match &self.engine {
             Engine::Mode(session) => Some(session.mode()),
@@ -289,6 +325,7 @@ impl Stencil {
         }
     }
 
+    /// Curvature along the mode, energy per length squared.
     pub fn curvature(&self) -> f64 {
         match &self.engine {
             Engine::Mode(session) => session.curvature(),
@@ -298,6 +335,7 @@ impl Stencil {
         }
     }
 
+    /// Index of the step inside its stage.
     pub fn step<S: crate::minmode::PointSurface>(
         &mut self,
         surface: &S,
@@ -310,6 +348,7 @@ impl Stencil {
         }
     }
 
+    /// Run.
     pub fn run<S: crate::minmode::PointSurface>(
         &mut self,
         surface: &S,
@@ -327,66 +366,79 @@ impl Stencil {
 }
 
 impl PointBuilder {
+    /// Preset.
     pub fn preset(mut self, preset: Preset) -> Self {
         self.preset = preset;
         self
     }
 
+    /// Estimated lowest-curvature direction. A stored mode is normalized.
     pub fn mode(mut self, mode: Array1<f64>) -> Self {
         self.mode = Some(mode);
         self
     }
 
+    /// Finite-difference displacement, in the host's length unit.
     pub fn dr(mut self, dr: f64) -> Self {
         self.dr = dr;
         self
     }
 
+    /// The rotation stops when the rotational force falls under this value.
     pub fn rotation_tol(mut self, rotation_tol: f64) -> Self {
         self.rotation_tol = rotation_tol;
         self
     }
 
+    /// The dimer also stops when one rotation's angle falls under this many radians. Zero disables that test.
     pub fn rotation_angle_tol(mut self, rotation_angle_tol: f64) -> Self {
         self.rotation_angle_tol = rotation_angle_tol;
         self
     }
 
+    /// Most dimer rotations, or Lanczos actions, in one estimate.
     pub fn max_rotations(mut self, max_rotations: usize) -> Self {
         self.max_rotations = max_rotations;
         self
     }
 
+    /// Largest Krylov subspace used for one Lanczos estimate.
     pub fn krylov_dim(mut self, krylov_dim: usize) -> Self {
         self.krylov_dim = krylov_dim;
         self
     }
 
+    /// The search stops when the largest absolute force component falls under this value, in the host's force units.
     pub fn force_tol(mut self, force_tol: f64) -> Self {
         self.force_tol = force_tol;
         self
     }
 
+    /// Largest per-atom displacement, in the host's length unit.
     pub fn max_move(mut self, max_move: f64) -> Self {
         self.max_move = max_move;
         self
     }
 
+    /// How many images may be evaluated at once.
     pub fn threads(mut self, threads: usize) -> Self {
         self.threads = threads;
         self
     }
 
+    /// Art threshold.
     pub fn art_threshold(mut self, art_threshold: f64) -> Self {
         self.art_threshold = art_threshold;
         self
     }
 
+    /// Art push steps.
     pub fn art_push_steps(mut self, art_push_steps: usize) -> Self {
         self.art_push_steps = art_push_steps;
         self
     }
 
+    /// Climb.
     pub fn climb(mut self, climb: Climb) -> Self {
         self.climb = Some(climb);
         self
@@ -404,6 +456,7 @@ impl PointBuilder {
         self
     }
 
+    /// Build.
     pub fn build(self) -> Result<Stencil, SaddleError> {
         validate_point(
             self.preset,
@@ -484,15 +537,18 @@ impl PointBuilder {
 }
 
 impl BandBuilder {
+    /// Preset.
     pub fn preset(self, _preset: Preset) -> Self {
         self
     }
 
+    /// How many images may be evaluated at once.
     pub fn threads(mut self, threads: usize) -> Self {
         self.threads = threads;
         self
     }
 
+    /// Build.
     pub fn build(self) -> Result<Stencil, SaddleError> {
         if self.rows == 0 || self.dof == 0 {
             return Err(SaddleError::Shape(

@@ -22,6 +22,7 @@ use crate::kappa::{Complement, KappaDimerConfig, kappa_dimer_force};
 
 /// The caller's surface for a single geometry.
 pub trait PointSurface: Sync {
+    /// Eval.
     fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError>;
 
     /// Optional analytic Cartesian Hessian action. None selects gradient differences.
@@ -102,7 +103,9 @@ impl MinModeKind {
 }
 
 #[derive(Clone, Debug)]
+/// The MinModeConfig.
 pub struct MinModeConfig {
+    /// Which estimator produces the lowest mode.
     pub kind: MinModeKind,
     /// Dimer separation / finite-difference displacement, Angstrom.
     /// The curvature is a forward difference against the centre
@@ -130,6 +133,7 @@ pub struct MinModeConfig {
     /// the angle test. The classic torque window still applies at the
     /// stock residual; see `rotation_finished`.
     pub rotation_angle_tol: f64,
+    /// Most dimer rotations, or Lanczos actions, in one estimate.
     pub max_rotations: usize,
     /// Krylov dimension for [`MinModeKind::Lanczos`].
     pub krylov_dim: usize,
@@ -140,6 +144,7 @@ pub struct MinModeConfig {
     /// along the mode is not negative, dimer and Lanczos (L-BFGS and
     /// FIRE) take one step of this length along the mode.
     pub max_move: f64,
+    /// Which rgmin stepper advances the assembled force.
     pub method: Method,
     /// Seed an empty translation from the mode curvature.
     ///
@@ -174,18 +179,26 @@ impl Default for MinModeConfig {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The MinModeStatus.
 pub enum MinModeStatus {
+    /// The Running.
     Running,
+    /// The Converged.
     Converged,
 }
 
 #[derive(Clone, Debug)]
+/// The MinModeReport.
 pub struct MinModeReport {
+    /// Whether this step is still running or has converged.
     pub status: MinModeStatus,
+    /// Largest absolute force component, in the host's force units.
     pub max_force: f64,
+    /// Curvature along the mode, energy per length squared.
     pub curvature: f64,
     /// Rotation iterations (dimer) or Hessian actions (Lanczos).
     pub rotations: usize,
+    /// Number of steps taken.
     pub iteration: usize,
     /// Surface evaluations during this call, centre included.
     pub evaluations: usize,
@@ -194,7 +207,9 @@ pub struct MinModeReport {
 /// A refreshed lowest mode at the current point.
 #[derive(Clone, Debug)]
 pub struct ModeEstimate {
+    /// Estimated lowest-curvature direction. A stored mode is normalized.
     pub mode: Array1<f64>,
+    /// Curvature along the mode, energy per length squared.
     pub curvature: f64,
     /// Rotation iterations (dimer) or Hessian actions (Lanczos).
     pub rotations: usize,
@@ -1368,6 +1383,7 @@ fn build_solver(
 }
 
 impl MinModeSession {
+    /// New.
     pub fn new(
         config: MinModeConfig,
         x: Array1<f64>,
@@ -1593,10 +1609,12 @@ impl MinModeSession {
         Ok(())
     }
 
+    /// Cartesian coordinates, length 3N, in the host's length unit.
     pub fn position(&self) -> ArrayView1<'_, f64> {
         self.x.view()
     }
 
+    /// Estimated lowest-curvature direction. A stored mode is normalized.
     pub fn mode(&self) -> ArrayView1<'_, f64> {
         self.mode.view()
     }

@@ -137,7 +137,7 @@ impl PartitionedRationalFunctionOptimization {
     /// `order` columns are the uphill block (Sella `Vmax`); the rest
     /// are the downhill complement (`Vmin`). Each block is diagonal, so
     /// the Banerjee augmented matrix is an arrowhead. A block wider
-    /// than [`AUGMENTED_JACOBI_LIMIT`] asks faer for that one eigenpair.
+    /// than the Jacobi width limit asks faer for that one eigenpair.
     /// A narrower block keeps [`rgmin::rfo_get_s`].
     pub fn get_s(
         &self,

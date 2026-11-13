@@ -21,6 +21,7 @@ pub enum CellChart {
 }
 
 impl CellChart {
+    /// Fn.
     pub const fn to_abi(self) -> i32 {
         match self {
             Self::Entries => 0,
@@ -28,6 +29,7 @@ impl CellChart {
         }
     }
 
+    /// Fn.
     pub const fn try_from_abi(v: i32) -> Option<Self> {
         match v {
             0 => Some(Self::Entries),
@@ -37,12 +39,15 @@ impl CellChart {
     }
 }
 
+/// The M3.
 pub type M3 = [[f64; 3]; 3];
 
+/// M3 from row9.
 pub fn m3_from_row9(c: [f64; 9]) -> M3 {
     [[c[0], c[1], c[2]], [c[3], c[4], c[5]], [c[6], c[7], c[8]]]
 }
 
+/// M3 to row9.
 pub fn m3_to_row9(a: M3) -> [f64; 9] {
     [
         a[0][0], a[0][1], a[0][2], a[1][0], a[1][1], a[1][2], a[2][0], a[2][1], a[2][2],
@@ -83,6 +88,7 @@ fn scale(s: f64, a: M3) -> M3 {
     c
 }
 
+/// M3 mul.
 pub fn m3_mul(a: M3, b: M3) -> M3 {
     let mut c = [[0.0; 3]; 3];
     for i in 0..3 {
@@ -103,12 +109,14 @@ fn frobenius(a: M3) -> f64 {
     s.sqrt()
 }
 
+/// M3 det.
 pub fn m3_det(a: M3) -> f64 {
     a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1])
         - a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0])
         + a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0])
 }
 
+/// M3 inv.
 pub fn m3_inv(a: M3) -> Result<M3, SaddleError> {
     let d = m3_det(a);
     if d.abs() < 1e-18 {
@@ -199,27 +207,33 @@ pub struct PackedHess {
 }
 
 impl PackedHess {
+    /// Identity.
     pub fn identity(n: usize) -> Self {
         Self { b: Array2::eye(n) }
     }
 
+    /// From matrix.
     pub fn from_matrix(b: Array2<f64>) -> Self {
         Self { b }
     }
 
+    /// Hessian.
     pub fn hessian(&self) -> &Array2<f64> {
         &self.b
     }
 
+    /// Forget.
     pub fn forget(&mut self) {
         let n = self.b.nrows();
         self.b = Array2::eye(n);
     }
 
+    /// Update.
     pub fn update(&mut self, s: &Array1<f64>, y: &Array1<f64>) {
         crate::qn::update_h(&mut self.b, s, y, crate::qn::HessUpdate::Bfgs);
     }
 
+    /// Update ts.
     pub fn update_ts(&mut self, s: &Array1<f64>, y: &Array1<f64>) {
         crate::qn::update_h(&mut self.b, s, y, crate::qn::HessUpdate::TsBfgs);
     }
@@ -235,6 +249,7 @@ pub struct CellState {
 }
 
 impl CellState {
+    /// New.
     pub fn new(cell: Cell, n_atoms: usize) -> Self {
         let orig = cell9_of(&cell);
         Self {
@@ -246,27 +261,33 @@ impl CellState {
         }
     }
 
+    /// Simulation cell. Row i is lattice vector a_i.
     pub fn cell(&self) -> &Cell {
         &self.cell
     }
 
+    /// Set cell.
     pub fn set_cell(&mut self, cell: Cell) {
         self.orig = cell9_of(&cell);
         self.cell = cell;
     }
 
+    /// Set mask.
     pub fn set_mask(&mut self, mask: [bool; 9]) {
         self.mask = mask;
     }
 
+    /// Mask.
     pub fn mask(&self) -> [bool; 9] {
         self.mask
     }
 
+    /// Which estimator produces the lowest mode.
     pub fn kind(&self) -> CellChart {
         self.kind
     }
 
+    /// Set kind.
     pub fn set_kind(&mut self, kind: CellChart) {
         self.kind = kind;
         if kind == CellChart::LogDeform {
@@ -274,24 +295,29 @@ impl CellState {
         }
     }
 
+    /// Set factor.
     pub fn set_factor(&mut self, factor: f64) {
         if factor > 0.0 {
             self.factor = factor;
         }
     }
 
+    /// Factor.
     pub fn factor(&self) -> f64 {
         self.factor
     }
 
+    /// N cell dof.
     pub fn n_cell_dof(&self) -> usize {
         self.mask.iter().filter(|b| **b).count()
     }
 
+    /// Cell9.
     pub fn cell9(&self) -> [f64; 9] {
         cell9_of(&self.cell)
     }
 
+    /// Lattice.
     pub fn lattice(&self) -> [[f64; 3]; 3] {
         lattice_of(&self.cell)
     }
@@ -301,6 +327,7 @@ impl CellState {
         Ok(())
     }
 
+    /// Params.
     pub fn params(&self) -> Result<Array1<f64>, SaddleError> {
         let raw = match self.kind {
             CellChart::Entries => self.cell9(),

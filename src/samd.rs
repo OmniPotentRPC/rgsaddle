@@ -50,7 +50,9 @@ impl Default for VelocitySofteningConfig {
 /// Softened unit direction and its exact force-evaluation cost.
 #[derive(Clone, Debug)]
 pub struct VelocitySofteningReport {
+    /// The direction.
     pub direction: Array1<f64>,
+    /// Surface evaluations performed by this call.
     pub evaluations: usize,
 }
 
@@ -147,12 +149,19 @@ pub fn t_exp(i: usize, t0: f64, tf: f64, n: usize) -> f64 {
     t0 * (tf / t0).powf((i as f64) / (n.max(1) as f64))
 }
 
+/// The SamdConfig.
 pub struct SamdConfig {
+    /// The dt.
     pub dt: f64,
+    /// The tau.
     pub tau: f64,
+    /// The t0.
     pub t0: f64,
+    /// The tf.
     pub tf: f64,
+    /// The ngen.
     pub ngen: usize,
+    /// The exponential.
     pub exponential: bool,
 }
 
@@ -169,12 +178,17 @@ impl Default for SamdConfig {
     }
 }
 
+/// The SamdReport.
 pub struct SamdReport {
+    /// Potential energy in the host's energy unit.
     pub energy: f64,
+    /// The kinetic.
     pub kinetic: f64,
+    /// The temperature.
     pub temperature: f64,
 }
 
+/// The SamdSession.
 pub struct SamdSession {
     x: Array1<f64>,
     v: Array1<f64>,
@@ -186,6 +200,7 @@ pub struct SamdSession {
 }
 
 impl SamdSession {
+    /// New.
     pub fn new(
         config: SamdConfig,
         x: Array1<f64>,
@@ -247,10 +262,12 @@ impl SamdSession {
         &self.geom
     }
 
+    /// Cartesian coordinates, length 3N, in the host's length unit.
     pub fn position(&self) -> ArrayView1<'_, f64> {
         self.x.view()
     }
 
+    /// Velocity.
     pub fn velocity(&self) -> ArrayView1<'_, f64> {
         self.v.view()
     }
@@ -349,6 +366,7 @@ impl SamdSession {
         })
     }
 
+    /// Run.
     pub fn run(
         &mut self,
         surface: &impl PointSurface,

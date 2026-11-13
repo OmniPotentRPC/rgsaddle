@@ -15,7 +15,9 @@ pub const OM_RECIP_EPS: f64 = 1e-300;
 /// consumed by the plain elastic band and the DNEB correction.
 #[derive(Clone, Debug)]
 pub struct SpringForces {
+    /// Spring force along the tangent.
     pub parallel: Array1<f64>,
+    /// Spring force before the tangent projection.
     pub full: Array1<f64>,
 }
 
@@ -23,14 +25,25 @@ pub struct SpringForces {
 #[derive(Clone, Debug)]
 pub enum SpringKind {
     /// One constant for every segment.
-    Uniform { k: f64 },
+    Uniform {
+        /// Spring constant, energy per length squared.
+        k: f64,
+    },
     /// Henkelman-style energy-weighted constants, one per segment
     /// (`ks[i]` couples images `i` and `i+1`; length `n_images - 1`).
-    Weighted { ks: Vec<f64> },
+    Weighted {
+        /// One constant per segment. `ks[i]` couples images `i` and `i + 1`.
+        ks: Vec<f64>,
+    },
     /// Mandelli & Parrinello (2021) Onsager–Machlup springs; `l_vecs`
     /// holds one force-scaled displacement per image (zero at the
     /// endpoints).
-    OnsagerMachlup { k: f64, l_vecs: Vec<Array1<f64>> },
+    OnsagerMachlup {
+        /// Spring constant, energy per length squared.
+        k: f64,
+        /// One displacement per image. The endpoints are zero.
+        l_vecs: Vec<Array1<f64>>,
+    },
     /// Onsager-Machlup springs whose displacements follow the band:
     /// [`SpringKind::at_band`] sets them from the forces of each
     /// evaluation with [`onsager_machlup_displacements`], as eOn's
@@ -38,7 +51,10 @@ pub enum SpringKind {
     /// [`SpringKind::compute`] refuses this variant: resolve it with
     /// [`SpringKind::at_band`] first. A solid-state band has no
     /// atomic-only displacement and rejects the variant at construction.
-    OnsagerMachlupLive { k: f64 },
+    OnsagerMachlupLive {
+        /// Spring constant, energy per length squared.
+        k: f64,
+    },
     /// Energy-weighted springs of Asgeirsson et al., J. Chem. Theory
     /// Comput. 17, 4929 (2021), doi:10.1021/acs.jctc.1c00462, set again
     /// from the band energies at every evaluation as eOn's
@@ -46,7 +62,12 @@ pub enum SpringKind {
     /// rule. [`SpringKind::compute`] refuses this variant: resolve it
     /// with [`SpringKind::at_energies`] or [`SpringKind::at_band`]
     /// first, so a peaked segment is not silently given `k_min`.
-    EnergyWeighted { k_min: f64, k_max: f64 },
+    EnergyWeighted {
+        /// Softest constant, energy per length squared.
+        k_min: f64,
+        /// Stiffest constant, energy per length squared.
+        k_max: f64,
+    },
 }
 
 /// Segment constants of the energy-weighted rule. `energies` has one

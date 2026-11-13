@@ -129,7 +129,9 @@ impl Cell {
 /// evaluation.
 #[derive(Clone, Copy, Debug)]
 pub struct CiConfig {
+    /// The trigger factor.
     pub trigger_factor: f64,
+    /// The trigger force.
     pub trigger_force: f64,
 }
 
@@ -215,12 +217,19 @@ impl SolidState {
 /// of the projected force over interior images.
 #[derive(Clone, Debug)]
 pub struct BandConfig {
+    /// How the path direction at an interior image is chosen.
     pub tangent: TangentKind,
+    /// How the springs between images are chosen.
     pub spring: SpringKind,
+    /// How the true force and the spring are combined.
     pub projection: ProjectionKind,
+    /// When set, a climbing image may arm. None keeps every image on the spring.
     pub climbing: Option<CiConfig>,
+    /// Simulation cell. Row i is lattice vector a_i.
     pub cell: Option<Cell>,
+    /// The search stops when the largest absolute force component falls under this value, in the host's force units.
     pub force_tol: f64,
+    /// Largest per-atom displacement, in the host's length unit.
     pub max_move: f64,
     /// Drop the mean Cartesian force of every image that has two or
     /// more atoms. eOn does this when every atom is free and leaves
@@ -358,17 +367,24 @@ struct ExpBandState {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The BandStatus.
 pub enum BandStatus {
+    /// The Running.
     Running,
+    /// The Converged.
     Converged,
 }
 
 /// One step's report.
 #[derive(Clone, Debug)]
 pub struct BandReport {
+    /// Whether this step is still running or has converged.
     pub status: BandStatus,
+    /// Largest absolute force component, in the host's force units.
     pub max_force: f64,
+    /// Index of the climbing image, or none when no image climbs.
     pub ci_index: Option<usize>,
+    /// Number of steps taken.
     pub iteration: usize,
     /// Image evaluations the surface performed during this step: the
     /// sum of the row counts over every [`BandSurface::eval`] call.
@@ -397,6 +413,7 @@ pub struct BandReport {
 /// state (orbitals, densities) on the image index tells the two apart
 /// by the row count.
 pub trait BandSurface: Sync {
+    /// Eval.
     fn eval(
         &self,
         positions: ArrayView2<f64>,
@@ -1962,7 +1979,9 @@ pub(crate) fn check_force_driven(method: &Method) -> Result<(), SaddleError> {
 /// projected interior force the solver stepped on.
 #[derive(Clone, Debug)]
 pub struct BandEvaluation {
+    /// The energies.
     pub energies: Array1<f64>,
+    /// Energy gradients, one row per image, in the same order as the positions.
     pub gradients: Array2<f64>,
     /// `(n_images - 2) x dof`, row `r` is image `r + 1`.
     pub projected: Array2<f64>,
@@ -2099,6 +2118,7 @@ pub struct BandSession {
 }
 
 impl BandSession {
+    /// New.
     pub fn new(config: BandConfig, initial: Array2<f64>) -> Result<Self, SaddleError> {
         let n_images = initial.nrows();
         let dof = initial.ncols();
@@ -2446,6 +2466,7 @@ impl BandSession {
         self.state.pool.as_ref().map_or(1, |pool| pool.threads())
     }
 
+    /// Cartesian coordinates. A band stores one row per image.
     pub fn positions(&self) -> ArrayView2<'_, f64> {
         self.positions.view()
     }
@@ -2495,10 +2516,12 @@ impl BandSession {
         }
     }
 
+    /// Solid jacobian.
     pub fn solid_jacobian(&self) -> Option<f64> {
         self.solid.as_ref().map(|solid| solid.jacobian)
     }
 
+    /// Climbing image.
     pub fn climbing_image(&self) -> Option<usize> {
         self.state.ci()
     }

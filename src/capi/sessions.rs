@@ -16,85 +16,127 @@ fn force_gate_of(v: i32) -> Option<crate::ForceGate> {
 }
 
 #[repr(C)]
+/// The RgsaddleIrcConfig.
 pub struct RgsaddleIrcConfig {
+    /// ABI version this value was built against.
     pub version: RgsaddleVersion,
+    /// Bit flags. The header names each bit.
     pub flags: u64,
+    /// The dx.
     pub dx: f64,
+    /// The search stops when the largest absolute force component falls under this value, in the host's force units.
     pub force_tol: f64,
+    /// Which norm of the force is compared with the tolerance.
     pub force_gate: i32,
+    /// Largest per-atom displacement, in the host's length unit.
     pub max_move: f64,
+    /// The max inner.
     pub max_inner: i64,
+    /// Which estimator produces the lowest mode.
     pub kind: i32,
+    /// The direction.
     pub direction: i32,
 }
 
 #[repr(C)]
+/// The RgsaddleSellaMinConfig.
 pub struct RgsaddleSellaMinConfig {
+    /// ABI version this value was built against.
     pub version: RgsaddleVersion,
+    /// Bit flags. The header names each bit.
     pub flags: u64,
+    /// Trust radius, in the host's length unit.
     pub delta: f64,
+    /// The search stops when the largest absolute force component falls under this value, in the host's force units.
     pub force_tol: f64,
+    /// Which norm of the force is compared with the tolerance.
     pub force_gate: i32,
 }
 
 #[repr(C)]
+/// The RgsaddleSellaSaddleConfig.
 pub struct RgsaddleSellaSaddleConfig {
+    /// ABI version this value was built against.
     pub version: RgsaddleVersion,
+    /// Bit flags. The header names each bit.
     pub flags: u64,
+    /// Trust radius, in the host's length unit.
     pub delta: f64,
+    /// The search stops when the largest absolute force component falls under this value, in the host's force units.
     pub force_tol: f64,
+    /// Which norm of the force is compared with the tolerance.
     pub force_gate: i32,
+    /// Number of modes the step maximizes. One is a first-order saddle.
     pub order: i64,
 }
 
 #[repr(C)]
+/// The RgsaddleConstraintsConfig.
 pub struct RgsaddleConstraintsConfig {
+    /// ABI version this value was built against.
     pub version: RgsaddleVersion,
+    /// Bit flags. The header names each bit.
     pub flags: u64,
 }
 
+/// The RgsaddleIrc.
 pub struct RgsaddleIrc {
     session: IrcSession,
     n_atoms: i64,
 }
 
+/// The RgsaddleSellaMin.
 pub struct RgsaddleSellaMin {
     session: SellaMinSession,
     n_atoms: i64,
 }
 
+/// The RgsaddleSellaSaddle.
 pub struct RgsaddleSellaSaddle {
     session: SellaSaddleSession,
     n_atoms: i64,
 }
 
+/// The RgsaddleConstraints.
 pub struct RgsaddleConstraints {
     cons: Constraints,
     n_atoms: i64,
 }
 
+/// The RgsaddleInternalPes.
 pub struct RgsaddleInternalPes {
     pes: InternalPes,
     n_atoms: i64,
 }
 
+/// The RgsaddlePes.
 pub struct RgsaddlePes {
     pes: CartesianPes,
     n_atoms: i64,
 }
 
 #[repr(C)]
+/// The RgsaddleSamdConfig.
 pub struct RgsaddleSamdConfig {
+    /// ABI version this value was built against.
     pub version: RgsaddleVersion,
+    /// Bit flags. The header names each bit.
     pub flags: u64,
+    /// The dt.
     pub dt: f64,
+    /// The tau.
     pub tau: f64,
+    /// The t0.
     pub t0: f64,
+    /// The tf.
     pub tf: f64,
+    /// The ngen.
     pub ngen: i64,
+    /// The exponential.
     pub exponential: i32,
 }
 
+/// The RgsaddleSamd.
 pub struct RgsaddleSamd {
     session: SamdSession,
     n_atoms: i64,

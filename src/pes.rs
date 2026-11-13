@@ -166,10 +166,12 @@ impl CartesianPes {
         Ok(())
     }
 
+    /// Proj trans.
     pub fn proj_trans(&self) -> bool {
         self.proj_trans
     }
 
+    /// Proj rot.
     pub fn proj_rot(&self) -> bool {
         self.proj_rot
     }
@@ -213,14 +215,17 @@ impl CartesianPes {
         }
     }
 
+    /// Set update.
     pub fn set_update(&mut self, update: HessUpdate) {
         self.update = update;
     }
 
+    /// Update kind.
     pub fn update_kind(&self) -> HessUpdate {
         self.update
     }
 
+    /// Cartesian coordinates, length 3N, in the host's length unit.
     pub fn position(&self) -> ArrayView1<'_, f64> {
         self.x.view()
     }
@@ -230,6 +235,7 @@ impl CartesianPes {
         self.masses.view()
     }
 
+    /// Hessian.
     pub fn hessian(&self) -> &CartesianHessian {
         &self.hess
     }
@@ -257,6 +263,7 @@ impl CartesianPes {
         Ok(())
     }
 
+    /// Reset.
     pub fn reset(&mut self) {
         self.hess.forget();
     }

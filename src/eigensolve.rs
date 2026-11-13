@@ -17,6 +17,7 @@ use crate::linalg::{modified_gram_schmidt, symmetrize_vt_av};
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum EigenDevice {
     #[default]
+    /// The Host.
     Host,
     /// rgmin `lowest_mode` (vecops / dlpk). Not a second GPU stack.
     Dlpk,
@@ -44,16 +45,23 @@ impl EigenDevice {
 /// Sella `eigensolvers.expand` method.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ExpandKind {
+    /// The Lanczos.
     Lanczos,
+    /// The Gd.
     Gd,
     #[default]
+    /// The Jd0.
     Jd0,
+    /// The Jd0Alt.
     Jd0Alt,
+    /// The Mjd0.
     Mjd0,
+    /// The Mjd0Alt.
     Mjd0Alt,
 }
 
 impl ExpandKind {
+    /// Fn.
     pub const fn to_abi(self) -> i32 {
         match self {
             Self::Lanczos => 0,
@@ -65,6 +73,7 @@ impl ExpandKind {
         }
     }
 
+    /// Fn.
     pub const fn try_from_abi(v: i32) -> Option<Self> {
         match v {
             0 => Some(Self::Lanczos),

@@ -12,8 +12,11 @@ use crate::constraints::Constraints;
 /// One vocn primitive. Dest stores the atom indices only.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Primitive {
+    /// The Bond.
     Bond([usize; 2]),
+    /// The Angle.
     Angle([usize; 3]),
+    /// The Dihedral.
     Dihedral([usize; 4]),
 }
 
@@ -59,6 +62,7 @@ impl Found {
         self.primitives.len()
     }
 
+    /// Is empty.
     pub fn is_empty(&self) -> bool {
         self.primitives.is_empty()
     }

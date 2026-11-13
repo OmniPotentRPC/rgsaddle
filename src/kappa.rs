@@ -5,9 +5,11 @@ use rgmin::{ApplyHessian, EigenParams, EigensolverKind};
 use std::cell::{Cell, RefCell};
 
 #[derive(Clone, Debug)]
+/// The KappaDimerConfig.
 pub struct KappaDimerConfig {
     /// Switching length in the position units; beta * kappa is dimensionless.
     pub beta: f64,
+    /// The eigen.
     pub eigen: EigenParams,
 }
 
@@ -26,15 +28,25 @@ impl Default for KappaDimerConfig {
 }
 
 #[derive(Clone, Debug)]
+/// The KappaDimerForce.
 pub struct KappaDimerForce {
+    /// Force in the ASE convention, the negative of the energy gradient.
     pub force: Array1<f64>,
+    /// The tangent mode.
     pub tangent_mode: Array1<f64>,
+    /// The tangent dimension.
     pub tangent_dimension: usize,
+    /// The tangent curvature.
     pub tangent_curvature: f64,
+    /// The kappa.
     pub kappa: f64,
+    /// The gamma parallel.
     pub gamma_parallel: f64,
+    /// The gamma perpendicular.
     pub gamma_perpendicular: f64,
+    /// The residual.
     pub residual: f64,
+    /// The actions.
     pub actions: usize,
 }
 

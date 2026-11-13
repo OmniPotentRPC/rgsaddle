@@ -93,7 +93,9 @@ pub struct MinModeRefine {
     /// Put the image back where the refinement began when the
     /// refinement did not lower its force.
     pub restore_unhelpful: bool,
+    /// Which estimator produces the lowest mode.
     pub kind: MinModeKind,
+    /// Largest Krylov subspace used for one Lanczos estimate.
     pub krylov_dim: usize,
     /// Relative change of the lowest Ritz value that ends a Lanczos
     /// estimate.
@@ -101,9 +103,11 @@ pub struct MinModeRefine {
     /// Finite-difference displacement of the Hessian actions, and of the
     /// probe that joins a dimer mode in the climb model.
     pub dr: f64,
+    /// Forward or central differences for Hessian actions.
     pub difference: FiniteDifference,
     /// Dimer rotation stop and budget.
     pub rotation_tol: f64,
+    /// Most dimer rotations, or Lanczos actions, in one estimate.
     pub max_rotations: usize,
     /// The mode is estimated again once the followed model curvature
     /// is above this fraction of the curvature last measured.

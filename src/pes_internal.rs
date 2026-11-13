@@ -110,6 +110,7 @@ impl InternalPes {
         self.dummies.len() / 3
     }
 
+    /// Dummy positions.
     pub fn dummy_positions(&self) -> ArrayView1<'_, f64> {
         self.dummies.view()
     }
@@ -164,6 +165,7 @@ impl InternalPes {
         }
     }
 
+    /// Set update.
     pub fn set_update(&mut self, update: HessUpdate) {
         self.update = update;
         self.cart.set_update(update);
@@ -179,14 +181,17 @@ impl InternalPes {
         self.chart.equalities().len()
     }
 
+    /// Cartesian coordinates, length 3N, in the host's length unit.
     pub fn position(&self) -> ArrayView1<'_, f64> {
         self.cart.position()
     }
 
+    /// Chart.
     pub fn chart(&self) -> &Constraints {
         &self.chart
     }
 
+    /// Cartesian.
     pub fn cartesian(&self) -> &CartesianPes {
         &self.cart
     }
@@ -264,6 +269,7 @@ impl InternalPes {
         Ok((e, g1))
     }
 
+    /// Reset.
     pub fn reset(&mut self) {
         self.cart.reset();
         self.guess_hessian();
@@ -308,13 +314,18 @@ pub fn place_perp_dummy(x: ArrayView1<f64>, i: usize, j: usize) -> Result<[f64; 
 
 /// Session PES: Cartesian BFGS, Sella InternalPES, or cell-packed Cartesian.
 pub enum SellaPes {
+    /// The Cartesian.
     Cartesian(CartesianPes),
+    /// The Internal.
     Internal(InternalPes),
+    /// The Cell.
     Cell(CellCartesianPes),
+    /// The CellInternal.
     CellInternal(CellInternalPes),
 }
 
 impl SellaPes {
+    /// Cartesian coordinates, length 3N, in the host's length unit.
     pub fn position(&self) -> ArrayView1<'_, f64> {
         match self {
             Self::Cartesian(p) => p.position(),
@@ -324,6 +335,7 @@ impl SellaPes {
         }
     }
 
+    /// Set update.
     pub fn set_update(&mut self, update: HessUpdate) {
         match self {
             Self::Cartesian(p) => p.set_update(update),
@@ -333,6 +345,7 @@ impl SellaPes {
         }
     }
 
+    /// Reset.
     pub fn reset(&mut self) {
         match self {
             Self::Cartesian(p) => p.reset(),
@@ -342,6 +355,7 @@ impl SellaPes {
         }
     }
 
+    /// Cartesian.
     pub fn cartesian(&self) -> Option<&CartesianPes> {
         match self {
             Self::Cartesian(p) => Some(p),
@@ -351,6 +365,7 @@ impl SellaPes {
         }
     }
 
+    /// Internal.
     pub fn internal(&self) -> Option<&InternalPes> {
         match self {
             Self::Internal(p) => Some(p),
@@ -359,6 +374,7 @@ impl SellaPes {
         }
     }
 
+    /// Internal mut.
     pub fn internal_mut(&mut self) -> Option<&mut InternalPes> {
         match self {
             Self::Internal(p) => Some(p),
@@ -367,6 +383,7 @@ impl SellaPes {
         }
     }
 
+    /// Simulation cell. Row i is lattice vector a_i.
     pub fn cell(&self) -> Option<&CellCartesianPes> {
         match self {
             Self::Cell(p) => Some(p),
@@ -374,6 +391,7 @@ impl SellaPes {
         }
     }
 
+    /// Cell internal.
     pub fn cell_internal(&self) -> Option<&CellInternalPes> {
         match self {
             Self::CellInternal(p) => Some(p),
@@ -392,6 +410,7 @@ pub struct CellCartesianPes {
 }
 
 impl CellCartesianPes {
+    /// New.
     pub fn new(x: Array1<f64>, masses: Array1<f64>, cell: Cell) -> Result<Self, SaddleError> {
         let cart = CartesianPes::new(x, masses)?;
         let n_atoms = cart.position().len() / 3;
@@ -405,24 +424,29 @@ impl CellCartesianPes {
         })
     }
 
+    /// Set update.
     pub fn set_update(&mut self, update: HessUpdate) {
         self.update = update;
         self.cart.set_update(update);
     }
 
+    /// Set chart.
     pub fn set_chart(&mut self, kind: CellChart) {
         self.state.set_kind(kind);
         self.hess = PackedHess::identity(self.packed_len());
     }
 
+    /// Chart.
     pub fn chart(&self) -> CellChart {
         self.state.kind()
     }
 
+    /// Hessian.
     pub fn hessian(&self) -> &PackedHess {
         &self.hess
     }
 
+    /// N cell dof.
     pub fn n_cell_dof(&self) -> usize {
         self.state.n_cell_dof()
     }
@@ -517,15 +541,18 @@ impl CellCartesianPes {
         Ok((e, g1p))
     }
 
+    /// Reset.
     pub fn reset(&mut self) {
         self.cart.reset();
         self.hess = PackedHess::identity(self.packed_len());
     }
 
+    /// Simulation cell. Row i is lattice vector a_i.
     pub fn cell(&self) -> &Cell {
         self.state.cell()
     }
 
+    /// Set cell.
     pub fn set_cell(&mut self, cell: Cell) {
         self.state.set_cell(cell);
     }
@@ -536,6 +563,7 @@ impl CellCartesianPes {
         self.hess = PackedHess::identity(self.packed_len());
     }
 
+    /// Mask.
     pub fn mask(&self) -> [bool; 9] {
         self.state.mask()
     }
@@ -585,14 +613,17 @@ impl CellCartesianPes {
         Ok(true)
     }
 
+    /// Cartesian.
     pub fn cartesian(&self) -> &CartesianPes {
         &self.cart
     }
 
+    /// Cartesian coordinates, length 3N, in the host's length unit.
     pub fn position(&self) -> ArrayView1<'_, f64> {
         self.cart.position()
     }
 
+    /// Kick.
     pub fn kick<S: PointSurface>(
         &mut self,
         surface: &S,
@@ -611,6 +642,7 @@ pub struct CellInternalPes {
 }
 
 impl CellInternalPes {
+    /// New.
     pub fn new(
         x: Array1<f64>,
         masses: Array1<f64>,
@@ -629,53 +661,65 @@ impl CellInternalPes {
         })
     }
 
+    /// Simulation cell. Row i is lattice vector a_i.
     pub fn cell(&self) -> &Cell {
         self.state.cell()
     }
 
+    /// Set cell.
     pub fn set_cell(&mut self, cell: Cell) {
         self.state.set_cell(cell);
     }
 
+    /// Set update.
     pub fn set_update(&mut self, update: HessUpdate) {
         self.update = update;
         self.inner.set_update(update);
     }
 
+    /// Set chart.
     pub fn set_chart(&mut self, kind: CellChart) {
         self.state.set_kind(kind);
         self.hess = PackedHess::identity(self.packed_len());
     }
 
+    /// Chart.
     pub fn chart(&self) -> CellChart {
         self.state.kind()
     }
 
+    /// Set mask.
     pub fn set_mask(&mut self, mask: [bool; 9]) {
         self.state.set_mask(mask);
         self.hess = PackedHess::identity(self.packed_len());
     }
 
+    /// Mask.
     pub fn mask(&self) -> [bool; 9] {
         self.state.mask()
     }
 
+    /// Hessian.
     pub fn hessian(&self) -> &PackedHess {
         &self.hess
     }
 
+    /// N cell dof.
     pub fn n_cell_dof(&self) -> usize {
         self.state.n_cell_dof()
     }
 
+    /// Packed len.
     pub fn packed_len(&self) -> usize {
         self.inner.n_int() + self.n_cell_dof()
     }
 
+    /// Cell9.
     pub fn cell9(&self) -> [f64; 9] {
         self.state.cell9()
     }
 
+    /// Cell params.
     pub fn cell_params(&self) -> Array1<f64> {
         self.state
             .params()
@@ -696,6 +740,7 @@ impl CellInternalPes {
         Ok(out)
     }
 
+    /// Packed grad.
     pub fn packed_grad<S: PointSurface>(
         &self,
         surface: &S,
@@ -780,23 +825,28 @@ impl CellInternalPes {
         Ok(true)
     }
 
+    /// Internals.
     pub fn internals(&self) -> &InternalPes {
         &self.inner
     }
 
+    /// Internals mut.
     pub fn internals_mut(&mut self) -> &mut InternalPes {
         &mut self.inner
     }
 
+    /// Cartesian coordinates, length 3N, in the host's length unit.
     pub fn position(&self) -> ArrayView1<'_, f64> {
         self.inner.position()
     }
 
+    /// Reset.
     pub fn reset(&mut self) {
         self.inner.reset();
         self.hess = PackedHess::identity(self.packed_len());
     }
 
+    /// Kick.
     pub fn kick<S: PointSurface>(
         &mut self,
         surface: &S,

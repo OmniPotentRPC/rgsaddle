@@ -8,9 +8,13 @@
 /// What an image is allowed to do. A walker is one centre.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Role {
+    /// The Pinned.
     Pinned,
+    /// The Image.
     Image,
+    /// The Climb.
     Climb,
+    /// The Walker.
     Walker,
 }
 
@@ -24,30 +28,41 @@ pub enum StencilStatus {
 /// The fields a controller may read. Positions stay on the chain.
 #[derive(Clone, Copy, Debug)]
 pub struct StencilView<'a> {
+    /// The roles.
     pub roles: &'a [Role],
+    /// Curvature along the mode, energy per length squared.
     pub curvature: f64,
+    /// Largest absolute force component, in the host's force units.
     pub max_force: f64,
 }
 
 /// Outcome of the previous step, as the controller sees it.
 #[derive(Clone, Copy, Debug)]
 pub struct Report {
+    /// Whether this step is still running or has converged.
     pub status: StencilStatus,
+    /// Largest absolute force component, in the host's force units.
     pub max_force: f64,
+    /// Curvature along the mode, energy per length squared.
     pub curvature: f64,
 }
 
 /// What the builder should do next.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
+    /// The Step.
     Step,
+    /// The Push.
     Push,
+    /// The Climb.
     Climb,
+    /// The Stop.
     Stop(StencilStatus),
 }
 
 /// One decision per step. The builder stores the spec, not a trait object.
 pub trait Controller {
+    /// Decide.
     fn decide(&mut self, view: &StencilView<'_>, last: &Report) -> Action;
 }
 
@@ -74,6 +89,7 @@ pub struct ArtControl {
 }
 
 impl ArtControl {
+    /// New.
     pub fn new(threshold: f64, push_steps: usize) -> Self {
         Self {
             threshold,
@@ -82,10 +98,12 @@ impl ArtControl {
         }
     }
 
+    /// When set, a climbing image may arm. None keeps every image on the spring.
     pub fn climbing(&self) -> bool {
         self.climbing
     }
 
+    /// Push left.
     pub fn push_left(&self) -> usize {
         self.push_left
     }

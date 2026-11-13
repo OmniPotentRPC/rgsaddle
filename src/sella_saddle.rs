@@ -20,15 +20,25 @@ use crate::minmode::PointSurface;
 use crate::pes::CartesianPes;
 use crate::pes_internal::{CellCartesianPes, CellInternalPes, InternalPes, SellaPes};
 
+/// The SellaSaddleConfig.
 pub struct SellaSaddleConfig {
+    /// Trust radius, in the host's length unit.
     pub delta: f64,
+    /// Factor by which a good step grows the trust radius.
     pub sigma_inc: f64,
+    /// Factor by which a poor step shrinks the trust radius.
     pub sigma_dec: f64,
+    /// A ratio above this grows the trust radius.
     pub rho_inc: f64,
+    /// A ratio below this shrinks the trust radius.
     pub rho_dec: f64,
+    /// Smallest trust radius the schedule will use.
     pub delta_min: f64,
+    /// The search stops when the largest absolute force component falls under this value, in the host's force units.
     pub force_tol: f64,
+    /// Which norm of the force is compared with the tolerance.
     pub force_gate: crate::ForceGate,
+    /// Number of modes the step maximizes. One is a first-order saddle.
     pub order: usize,
     /// Sella `eig=true`: periodic Rayleigh-Ritz on the free Hessian.
     pub eig: bool,
@@ -36,6 +46,7 @@ pub struct SellaSaddleConfig {
     pub nsteps_per_diag: usize,
     /// Sella `gamma` residual scale. `<= 0` is exact eigh.
     pub gamma: f64,
+    /// Where a dense symmetric eigenproblem is solved.
     pub eigen_device: crate::EigenDevice,
     /// Sella `rayleigh_ritz(..., method=)`.
     pub expand: crate::ExpandKind,
@@ -106,14 +117,21 @@ enum AtomCeiling {
     Alone,
 }
 
+/// The SellaSaddleReport.
 pub struct SellaSaddleReport {
+    /// Potential energy in the host's energy unit.
     pub energy: f64,
+    /// Largest absolute force component, in the host's force units.
     pub max_force: f64,
+    /// The at saddle.
     pub at_saddle: bool,
+    /// Ratio of the actual energy change to the model's prediction.
     pub rho: f64,
+    /// Trust radius, in the host's length unit.
     pub delta: f64,
 }
 
+/// The SellaSaddleSession.
 pub struct SellaSaddleSession {
     pes: SellaPes,
     config: SellaSaddleConfig,
@@ -136,6 +154,7 @@ pub struct SellaSaddleSession {
 }
 
 impl SellaSaddleSession {
+    /// New.
     pub fn new(
         config: SellaSaddleConfig,
         x: Array1<f64>,
@@ -155,6 +174,7 @@ impl SellaSaddleSession {
         Self::on(config, x, masses, SellaGeom::Chart(chart))
     }
 
+    /// On.
     pub fn on(
         config: SellaSaddleConfig,
         x: Array1<f64>,
@@ -290,18 +310,22 @@ impl SellaSaddleSession {
         })
     }
 
+    /// Cartesian coordinates, length 3N, in the host's length unit.
     pub fn position(&self) -> ndarray::ArrayView1<'_, f64> {
         self.pes.position()
     }
 
+    /// Trust radius, in the host's length unit.
     pub fn delta(&self) -> f64 {
         self.delta
     }
 
+    /// Ratio of the actual energy change to the model's prediction.
     pub fn rho(&self) -> f64 {
         self.rho
     }
 
+    /// Geom.
     pub fn geom(&self) -> &SellaGeom {
         &self.geom
     }
@@ -360,14 +384,17 @@ impl SellaSaddleSession {
         self.config.restricted = kind;
     }
 
+    /// Internal pes.
     pub fn internal_pes(&self) -> Option<&InternalPes> {
         self.pes.internal()
     }
 
+    /// Cell pes.
     pub fn cell_pes(&self) -> Option<&CellCartesianPes> {
         self.pes.cell()
     }
 
+    /// Cell internal pes.
     pub fn cell_internal_pes(&self) -> Option<&CellInternalPes> {
         self.pes.cell_internal()
     }
@@ -382,6 +409,7 @@ impl SellaSaddleSession {
         }
     }
 
+    /// Reset.
     pub fn reset(&mut self) {
         self.pes.reset();
         let n_free = match &self.pes {
@@ -399,6 +427,7 @@ impl SellaSaddleSession {
         self.atom_delta = atomic_ceiling(self.config.delta);
     }
 
+    /// Index of the step inside its stage.
     pub fn step<S: PointSurface>(&mut self, surface: &S) -> Result<SellaSaddleReport, SaddleError> {
         match &self.pes {
             SellaPes::Internal(_) => self.step_internal(surface),
@@ -1048,6 +1077,7 @@ impl SellaSaddleSession {
         })
     }
 
+    /// Run.
     pub fn run<S: PointSurface>(
         &mut self,
         surface: &S,

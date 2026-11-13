@@ -33,7 +33,9 @@ const BFGS_CURVATURE: f64 = 1e-12;
 /// Which side of the imaginary mode to follow.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IrcDirection {
+    /// The Forward.
     Forward,
+    /// The Reverse.
     Reverse,
 }
 
@@ -63,11 +65,15 @@ impl IrcKind {
 pub struct IrcConfig {
     /// Sphere radius in the session metric (Sella `dx`) and Morokuma `h`.
     pub dx: f64,
+    /// The search stops when the largest absolute force component falls under this value, in the host's force units.
     pub force_tol: f64,
     /// eOn / gpr_optim `ConvergenceForceNorm`.
     pub force_gate: crate::ForceGate,
+    /// Largest per-atom displacement, in the host's length unit.
     pub max_move: f64,
+    /// Which rgmin stepper advances the assembled force.
     pub method: Method,
+    /// The max inner.
     pub max_inner: usize,
     /// Finite-difference Hessian action length for the matrix-free kick.
     pub dr: f64,
@@ -99,9 +105,13 @@ impl Default for IrcConfig {
 /// One accepted IRC point.
 #[derive(Clone, Debug)]
 pub struct IrcReport {
+    /// Potential energy in the host's energy unit.
     pub energy: f64,
+    /// Largest absolute force component, in the host's force units.
     pub max_force: f64,
+    /// The arc.
     pub arc: f64,
+    /// The inner steps.
     pub inner_steps: usize,
     /// On a GS2 step: past the kick, the force at or below `force_tol`, and
     /// positive curvature along the launch mode at this point. The sphere
@@ -297,10 +307,12 @@ impl IrcSession {
         Self::new(config, saddle, masses, mode, direction)
     }
 
+    /// Cartesian coordinates, length 3N, in the host's length unit.
     pub fn position(&self) -> ArrayView1<'_, f64> {
         self.x.view()
     }
 
+    /// Reset.
     pub fn reset(&mut self) {
         self.solver.forget();
         self.hess.forget();

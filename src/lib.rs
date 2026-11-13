@@ -41,6 +41,8 @@
 //! example. The guides and tutorials are at
 //! <https://omnipotentrpc.github.io/rgsaddle/>.
 
+#![deny(missing_docs)]
+
 pub mod autoneb;
 pub mod band;
 #[cfg(feature = "capi")]

@@ -8,14 +8,21 @@ use super::*;
 /// and flags; the row rules are those of [`RgsaddleSurfaceRequest`].
 #[repr(C)]
 pub struct RgsaddleSolidSurfaceRequest {
+    /// ABI version this value was built against.
     pub version: RgsaddleVersion,
+    /// Bit flags. The header names each bit.
     pub flags: u64,
+    /// Number of images, endpoints included.
     pub n_images: i64,
+    /// Number of atoms in one image.
     pub n_atoms: i64,
+    /// The f64.
     pub positions: *const f64,
     /// Row-major 3x3 cell per image, lower triangular.
     pub cells: *const f64,
+    /// The energies.
     pub energies: *mut f64,
+    /// Energy gradients, one row per image, in the same order as the positions.
     pub gradients: *mut f64,
     /// Row-major Cauchy stress per image, `(1/V) dE/deps` for the right
     /// strain `h <- h (I + eps)` at fixed fractional coordinates.
@@ -24,6 +31,7 @@ pub struct RgsaddleSolidSurfaceRequest {
     pub image: i64,
 }
 
+/// The RgsaddleSolidSurfaceFn.
 pub type RgsaddleSolidSurfaceFn =
     extern "C" fn(*mut c_void, *mut RgsaddleSolidSurfaceRequest) -> i32;
 

@@ -19,19 +19,32 @@ use super::{
     RGSADDLE_OK, RGSADDLE_SHAPE, RGSADDLE_SOLVER, status_of,
 };
 
+/// The RGSADDLE STENCIL KEY DR.
 pub const RGSADDLE_STENCIL_KEY_DR: i32 = 1;
+/// The RGSADDLE STENCIL KEY FORCE TOL.
 pub const RGSADDLE_STENCIL_KEY_FORCE_TOL: i32 = 2;
+/// The RGSADDLE STENCIL KEY MAX MOVE.
 pub const RGSADDLE_STENCIL_KEY_MAX_MOVE: i32 = 3;
+/// The RGSADDLE STENCIL KEY ROTATION TOL.
 pub const RGSADDLE_STENCIL_KEY_ROTATION_TOL: i32 = 4;
+/// The RGSADDLE STENCIL KEY MAX ROTATIONS.
 pub const RGSADDLE_STENCIL_KEY_MAX_ROTATIONS: i32 = 5;
+/// The RGSADDLE STENCIL KEY KRYLOV DIM.
 pub const RGSADDLE_STENCIL_KEY_KRYLOV_DIM: i32 = 6;
+/// The RGSADDLE STENCIL KEY THREADS.
 pub const RGSADDLE_STENCIL_KEY_THREADS: i32 = 7;
+/// The RGSADDLE STENCIL KEY ART THRESHOLD.
 pub const RGSADDLE_STENCIL_KEY_ART_THRESHOLD: i32 = 8;
+/// The RGSADDLE STENCIL KEY ART PUSH.
 pub const RGSADDLE_STENCIL_KEY_ART_PUSH: i32 = 9;
+/// The RGSADDLE STENCIL KEY MODE.
 pub const RGSADDLE_STENCIL_KEY_MODE: i32 = 10;
 
+/// The RGSADDLE STENCIL QUERY POSITIONS.
 pub const RGSADDLE_STENCIL_QUERY_POSITIONS: i32 = 1;
+/// The RGSADDLE STENCIL QUERY MODE.
 pub const RGSADDLE_STENCIL_QUERY_MODE: i32 = 2;
+/// The RGSADDLE STENCIL QUERY CURVATURE.
 pub const RGSADDLE_STENCIL_QUERY_CURVATURE: i32 = 3;
 
 thread_local! {
@@ -56,13 +69,21 @@ fn clear_last_error() {
 }
 
 #[repr(C)]
+/// The RgsaddleStencilReport.
 pub struct RgsaddleStencilReport {
+    /// The struct size.
     pub struct_size: u64,
+    /// Whether this step is still running or has converged.
     pub status: i32,
+    /// The reserved.
     pub reserved: i32,
+    /// Largest absolute force component, in the host's force units.
     pub max_force: f64,
+    /// Curvature along the mode, energy per length squared.
     pub curvature: f64,
+    /// Number of steps taken.
     pub iteration: u64,
+    /// Surface evaluations performed by this call.
     pub evaluations: u64,
 }
 
@@ -103,6 +124,7 @@ struct Handle {
     dof: usize,
 }
 
+/// The StencilEvalFn.
 pub type StencilEvalFn = unsafe extern "C" fn(
     *mut c_void,
     usize,

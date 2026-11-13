@@ -56,8 +56,11 @@ pub enum OcinebPhase {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(i32)]
+/// The OcinebStatus.
 pub enum OcinebStatus {
+    /// The Running.
     Running = 0,
+    /// The Converged.
     Converged = 1,
 }
 
@@ -116,18 +119,28 @@ impl Default for OcinebConfig {
 /// One host step.
 #[derive(Clone, Debug)]
 pub struct OcinebReport {
+    /// The phase.
     pub phase: OcinebPhase,
+    /// Whether this step is still running or has converged.
     pub status: OcinebStatus,
+    /// Largest absolute force component, in the host's force units.
     pub max_force: f64,
+    /// Index of the climbing image, or none when no image climbs.
     pub ci_index: Option<usize>,
+    /// Number of steps taken.
     pub iteration: usize,
+    /// Surface evaluations performed by this call.
     pub evaluations: usize,
+    /// Curvature along the mode, energy per length squared.
     pub curvature: f64,
+    /// The alignment.
     pub alignment: f64,
+    /// The rotations.
     pub rotations: usize,
     /// The climb ended on a positive curvature or a mode that left the
     /// tangent cone, and the band has the next step.
     pub fell_back: bool,
+    /// The threshold.
     pub threshold: f64,
 }
 
@@ -258,6 +271,7 @@ pub struct OcinebSession {
 }
 
 impl OcinebSession {
+    /// New.
     pub fn new(config: OcinebConfig, initial: Array2<f64>) -> Result<Self, SaddleError> {
         validate(&config)?;
         if !(config.minmode.dr.is_finite() && config.minmode.dr > 0.0) {
@@ -284,18 +298,22 @@ impl OcinebSession {
         }
     }
 
+    /// Threshold.
     pub fn threshold(&self) -> Option<f64> {
         self.band.refine_threshold()
     }
 
+    /// Stability.
     pub fn stability(&self) -> i64 {
         self.band.refine_stability() as i64
     }
 
+    /// Cartesian coordinates. A band stores one row per image.
     pub fn positions(&self) -> ndarray::ArrayView2<'_, f64> {
         self.band.positions()
     }
 
+    /// Climbing image.
     pub fn climbing_image(&self) -> Option<usize> {
         self.band.climbing_image()
     }
@@ -310,6 +328,7 @@ impl OcinebSession {
         self.band.set_force_gate(gate);
     }
 
+    /// Set highs.
     pub fn set_highs(&mut self, enabled: bool) {
         self.band.set_highs(enabled);
     }
@@ -359,6 +378,7 @@ impl OcinebSession {
         })
     }
 
+    /// Run.
     pub fn run<S: BandSurface + PointSurface>(
         &mut self,
         surface: &S,

@@ -13,6 +13,7 @@ use crate::error::SaddleError;
 /// Inner product used by a stencil. The Euclidean product is
 /// `ndarray`'s dot, the same product the band and the dimer already use.
 pub trait Metric {
+    /// Inner.
     fn inner(&self, left: ArrayView1<f64>, right: ArrayView1<f64>) -> f64;
 }
 
@@ -29,8 +30,11 @@ impl Metric for Euclidean {
 /// One geometry on the stencil. The view borrows the caller's storage.
 #[derive(Clone, Copy)]
 pub struct Point<'a> {
+    /// The x.
     pub x: ArrayView1<'a, f64>,
+    /// The e.
     pub e: f64,
+    /// The g.
     pub g: ArrayView1<'a, f64>,
 }
 
@@ -40,29 +44,49 @@ pub struct Point<'a> {
 /// to pick that width; the session still stores the chosen δ.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Delta {
+    /// The Fixed.
     Fixed(f64),
-    FromNoise { eps_g: Option<f64> },
+    /// A step chosen from the gradient noise.
+    FromNoise {
+        /// Gradient noise. None asks the caller to supply it later.
+        eps_g: Option<f64>,
+    },
 }
 
 /// Where the two side points come from.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Sides {
+    /// The None.
     None,
+    /// The Neighbours.
     Neighbours,
-    Rigid { half: Delta },
-    Extrapolated { half: Delta },
+    /// Side points from a rigid displacement.
+    Rigid {
+        /// Half-separation of the two side points.
+        half: Delta,
+    },
+    /// Side points extrapolated from the neighbours.
+    Extrapolated {
+        /// Half-separation of the two side points.
+        half: Delta,
+    },
 }
 
 /// Centre and its two neighbours. The metric is a value, not a trait object.
 #[derive(Clone, Copy)]
 pub struct Triad<'a, M: Metric = Euclidean> {
+    /// The prev.
     pub prev: Option<Point<'a>>,
+    /// The centre.
     pub centre: Point<'a>,
+    /// The next.
     pub next: Option<Point<'a>>,
+    /// The metric.
     pub metric: M,
 }
 
 impl<'a, M: Metric> Triad<'a, M> {
+    /// New.
     pub fn new(centre: Point<'a>, metric: M) -> Self {
         Self {
             prev: None,
@@ -148,7 +172,9 @@ pub fn curvature_along(action: ArrayView1<f64>, axis: ArrayView1<f64>) -> f64 {
 /// Tangent rule. The same two branches as [`crate::tangent::TangentKind`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TangentRule {
+    /// The Simple.
     Simple,
+    /// The Improved.
     Improved,
 }
 
@@ -250,24 +276,36 @@ pub fn unit_tangent_into(
 
 /// Parallel and full spring, the two pieces a projection consumes.
 pub struct CouplingForces {
+    /// The parallel.
     pub parallel: Array1<f64>,
+    /// The full.
     pub full: Array1<f64>,
 }
 
 /// Coupling along the tangent. `Rigid` contributes no spring force.
 pub enum Coupling<'a> {
+    /// The Uniform.
     Uniform {
+        /// Spring constant, energy per length squared.
         k: f64,
     },
+    /// The Weighted.
     Weighted {
+        /// The k next.
         k_next: f64,
+        /// The k prev.
         k_prev: f64,
     },
+    /// The Onsager.
     Onsager {
+        /// Spring constant, energy per length squared.
         k: f64,
+        /// The l next.
         l_next: ArrayView1<'a, f64>,
+        /// The l here.
         l_here: ArrayView1<'a, f64>,
     },
+    /// The Rigid.
     Rigid,
 }
 

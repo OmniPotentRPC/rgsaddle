@@ -13,7 +13,9 @@ use crate::constraints::Constraints;
 /// Either a named rgmin packing or a live equality chart.
 #[derive(Clone, Debug)]
 pub enum SellaGeom {
+    /// The Kind.
     Kind(ManifoldKind),
+    /// The Chart.
     Chart(Constraints),
 }
 
@@ -36,6 +38,7 @@ impl SellaGeom {
         }
     }
 
+    /// Chart.
     pub fn chart(&self) -> Option<&Constraints> {
         match self {
             Self::Chart(c) => Some(c),
@@ -169,10 +172,15 @@ impl Manifold for SellaGeom {
 /// Sella `optimize.py` trust numbers (`delta0` lives on the session).
 #[derive(Clone, Copy, Debug)]
 pub struct TrustSchedule {
+    /// Factor by which a good step grows the trust radius.
     pub sigma_inc: f64,
+    /// Factor by which a poor step shrinks the trust radius.
     pub sigma_dec: f64,
+    /// A ratio above this grows the trust radius.
     pub rho_inc: f64,
+    /// A ratio below this shrinks the trust radius.
     pub rho_dec: f64,
+    /// Smallest trust radius the schedule will use.
     pub delta_min: f64,
 }
 

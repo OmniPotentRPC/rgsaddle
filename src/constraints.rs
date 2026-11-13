@@ -28,31 +28,46 @@ const RANK_TOL: f64 = 1e-10;
 /// One Sella equality: a coordinate plus its target.
 #[derive(Clone, Debug)]
 pub enum Equality {
+    /// The Translation.
     Translation {
+        /// The coord.
         coord: Translation,
+        /// The target.
         target: f64,
     },
+    /// The Rotation.
     Rotation {
+        /// The coord.
         coord: Rotation,
+        /// The target.
         target: f64,
     },
+    /// The Displacement.
     Displacement {
+        /// The coord.
         coord: Displacement,
+        /// The target.
         target: f64,
     },
     /// Host-supplied pair. Evaluation is the Wilson bond, not vocn.
     Bond {
+        /// The atoms.
         atoms: [usize; 2],
+        /// The target.
         target: f64,
     },
     /// Host-supplied triple, vertex in the middle.
     Angle {
+        /// The atoms.
         atoms: [usize; 3],
+        /// The target.
         target: f64,
     },
     /// Host-supplied quadruple. Residual is wrapped to `(-pi, pi]`.
     Dihedral {
+        /// The atoms.
         atoms: [usize; 4],
+        /// The target.
         target: f64,
     },
 }
@@ -115,11 +130,17 @@ impl Equality {
 /// Packed Sella internals counts for [`crate::restricted::MaxInternalStep`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct InternalCounts {
+    /// The ntrans.
     pub ntrans: usize,
+    /// The nbonds.
     pub nbonds: usize,
+    /// The nangles.
     pub nangles: usize,
+    /// The ndihedrals.
     pub ndihedrals: usize,
+    /// The nother.
     pub nother: usize,
+    /// The nrotations.
     pub nrotations: usize,
 }
 

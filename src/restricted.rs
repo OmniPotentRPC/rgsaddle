@@ -42,6 +42,7 @@ pub enum RestrictedKind {
 }
 
 impl RestrictedKind {
+    /// Fn.
     pub const fn to_abi(self) -> i32 {
         match self {
             Self::TrustRegion => 0,
@@ -50,6 +51,7 @@ impl RestrictedKind {
         }
     }
 
+    /// Fn.
     pub const fn try_from_abi(v: i32) -> Option<Self> {
         match v {
             0 => Some(Self::TrustRegion),
@@ -419,10 +421,15 @@ pub fn ras_cons(s: &Array1<f64>) -> f64 {
 /// `_get_weights`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct InternalWeights {
+    /// The translation.
     pub translation: f64,
+    /// The bond.
     pub bond: f64,
+    /// The angle.
     pub angle: f64,
+    /// The dihedral.
     pub dihedral: f64,
+    /// The other.
     pub other: f64,
 }
 

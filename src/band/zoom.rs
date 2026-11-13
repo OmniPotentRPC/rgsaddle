@@ -194,6 +194,7 @@ impl BandSession {
     }
 
     #[must_use]
+    /// When set, the band is redrawn around the climbing image once that image is stable.
     pub fn zoom(&self) -> Option<ZoomConfig> {
         self.config.zoom
     }
