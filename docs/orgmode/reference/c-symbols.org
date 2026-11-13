@@ -1,0 +1,144 @@
+#+TITLE: C function index
+#+OPTIONS: toc:nil num:nil
+
+Every function declared in =include/rgsaddle.h=.
+The sentence is the comment above the declaration.
+Parameters are that declaration.
+Units are the caller's unless the sentence names them.
+The narrative for a session is the C and C++ how-to, not this list.
+
+- =rgsaddle_abi_version=. Purpose: (major << 16) | minor. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_abi_stamp=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_status_name=. Purpose: Human-readable name for a status code. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_band_create=. Purpose: Create a band session over n_images x (3 * n_atoms) positions, copied in. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_band_create_solid=. Purpose: Band with one cell per image. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_band_step_solid=. Purpose: One optimizer step of a band from rgsaddle_band_create_solid: atoms and interior cells move together, endpoint cells stay. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_band_set_quickmin_variant=. Purpose: Select the quick-min variant of a band made with RGSADDLE_METHOD_QUICKMIN; the velocity and time step restart. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_band_set_time_step=. Purpose: Initial time step of FIRE and quick-min (rgmin Control::istep, 1 at create); RGSADDLE_QUICKMIN_EON keeps it fixed. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_band_cells=. Purpose: Copy the band's cells out (n_images * 9 doubles). Parameters: the declaration. Units: the caller's.
+- =rgsaddle_band_solid_jacobian=. Purpose: The fixed Jacobian J = (V/N)^(1/3) sqrt(N) weight, V the mean endpoint volume: the length unit of the cell block. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_band_step=. Purpose: One optimizer step over the assembled band force. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_band_positions=. Purpose: Copy the current band out (n_images * 3 * n_atoms doubles). Parameters: the declaration. Units: the caller's.
+- =rgsaddle_band_set_positions=. Purpose: Replace the band; the host may move images between steps. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_band_reset=. Purpose: Surface boundary: drop optimizer history, climbing state, the endpoint energies, and the last evaluation. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_band_restart=. Purpose: Optimizer restart on the same surface (after a reparameterization or a host policy reset): drop optimizer history and climbing state, keep the endpoint energies and the last evaluation. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_band_evaluation=. Purpose: The last evaluation, when it was taken at the current band (after a step, it is the accepted point). Parameters: the declaration. Units: the caller's.
+- =rgsaddle_band_free=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_band_project=. Purpose: Project an already evaluated band. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_minmode_create=. Purpose: Create a minimum-mode session at one geometry with an initial mode estimate; both are 3 * n_atoms doubles, copied in. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_minmode_step=. Purpose: Refresh the lowest mode, invert along it, take one step. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_minmode_estimate=. Purpose: Refresh the lowest mode without translating. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_minmode_set_position=. Purpose: Move the session to a new point (3 * n_atoms doubles). Parameters: the declaration. Units: the caller's.
+- =rgsaddle_minmode_set_mode=. Purpose: Replace the mode seed (3 * n_atoms doubles, normalized on entry) and clear dimer rotational history and carried Lanczos curvature. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_minmode_position=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_minmode_mode=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_minmode_reset=. Purpose: Clear optimizer/rotation history, carried curvature, and the centre cache. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_minmode_free=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_nichols_step=. Purpose: Nichols displacement from a spectrum of the mass-weighted energy Hessian. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_prfo_step=. Purpose: Restricted-step partitioned RFO. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_hessian_powell=. Purpose: Powell symmetric Broyden update of a Cartesian energy Hessian. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_hessian_bofill=. Purpose: Bofill mix of the Powell update and the symmetric rank-one term. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_cap_max_abs=. Purpose: Scale `step` so its largest absolute entry equals `trust_radius`. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_index1_create=. Purpose: Index-1 session over one geometry of `3 * n_atoms` coordinates. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_index1_step=. Purpose: One Nichols step, trust cap, and Hessian update. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_index1_position=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_index1_hessian=. Purpose: Copies the Cartesian Hessian. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_index1_reset=. Purpose: Drop the Hessian and the gradient cache at a surface boundary. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_index1_free=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_force_gate_name=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_band_set_force_gate=. Purpose: Defaults remain LINF. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_minmode_set_force_gate=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_kappa_config_default=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_minmode_set_kappa=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_kappa_dimer_force=. Purpose: Inputs and outputs do not overlap. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_irc_create=. Purpose: Create an IRC session. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_irc_create_from_surface=. Purpose: Same, but the imaginary mode is dest Lanczos on the host surface. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_irc_step=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_irc_position=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_irc_set_direction=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_irc_reset=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_irc_free=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_sella_min_create=. Purpose: Create a Sella minimum session. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_sella_min_create_on=. Purpose: Same, retracting on a live Constraints chart. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_sella_min_create_internal=. Purpose: Same, QN in the internals chart (Sella InternalPES). Parameters: the declaration. Units: the caller's.
+- =rgsaddle_sella_min_create_cell=. Purpose: QN in packed [x; cell_params]. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_sella_min_create_cell_internal=. Purpose: Packed [q_int; cell_params]. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_sella_min_step=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_sella_min_position=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_sella_min_reset=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_sella_min_set_hess_update=. Purpose: `update` is 0 = BFGS, 1 = TS-BFGS. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_sella_min_set_restricted=. Purpose: `restricted` is 0 = TrustRegion, 1 = MaxInternalStep, 2 = RestrictedAtomicStep. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_sella_min_set_cell_chart=. Purpose: `chart` is 0 = entries, 1 = log-deform. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_sella_min_maybe_niggli=. Purpose: Niggli-reduce a cell session. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_sella_min_free=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_sella_saddle_create=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_sella_saddle_create_on=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_sella_saddle_create_internal=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_sella_saddle_create_cell=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_sella_saddle_create_cell_internal=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_sella_saddle_step=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_sella_saddle_position=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_sella_saddle_reset=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_sella_saddle_seed_mode=. Purpose: Seed a Cartesian session's Hessian with a 3N mode and its curvature. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_sella_saddle_set_hess_update=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_sella_saddle_set_restricted=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_sella_saddle_maybe_niggli=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_sella_saddle_set_expand=. Purpose: `expand` is ExpandKind: 0 lanczos, 1 gd, 2 jd0, 3 jd0_alt, 4 mjd0, 5 mjd0_alt. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_sella_saddle_set_symmetrized_ritz=. Purpose: ABI minor 24. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_sella_saddle_set_small_system_atom_ceiling=. Purpose: ABI minor 25. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_sella_saddle_free=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_constraints_create=. Purpose: Create an empty Constraints chart on n_atoms. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_constraints_fix_com=. Purpose: Fix the fragment COM on every axis. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_constraints_fix_bond=. Purpose: Fix a bond between atoms `i` and `j`. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_constraints_residual_norm=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_constraints_project=. Purpose: Project `v` onto ker(J) at `x`. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_constraints_retract=. Purpose: Retract `x` along `v` and restore onto the level set. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_constraints_free=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_pes_create=. Purpose: Cartesian PES (Sella peswrapper.PES). Parameters: the declaration. Units: the caller's.
+- =rgsaddle_pes_position=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_pes_kick=. Purpose: `d` is 3N. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_pes_set_hess_update=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_pes_project=. Purpose: Project `v` onto ker(J) at the living position. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_pes_retract=. Purpose: Retract along `v` and restore onto the trans/rot set. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_pes_transport=. Purpose: Transport `v` from the living point to `x_to`. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_pes_free=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_internal_pes_create=. Purpose: InternalPES over a Constraints chart. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_internal_pes_create_dummies=. Purpose: Same, with `n_dummy` extra 3-vectors. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_internal_pes_create_from_find=. Purpose: InternalPES from a vocn auto-find primitive set. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_place_perp_dummy=. Purpose: Dummy 1 Å off the i-j bond. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_internal_pes_n_int=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_internal_pes_internals=. Purpose: `out` holds n_int doubles. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_internal_pes_position=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_internal_pes_kick=. Purpose: `dq` is n_int. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_internal_pes_set_hess_update=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_internal_pes_grad=. Purpose: `g_cart` and `out` are 3N and n_int. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_internal_pes_free=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_niggli_reduce=. Purpose: Niggli-reduce a row-major 3x3 cell in place when any angle is more than `angle_threshold` degrees from 90. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_samd_create=. Purpose: Create a SAMD session. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_samd_step=. Purpose: One BDP step. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_samd_position=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_samd_free=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_idpp_path=. Purpose: Image dependent pair potential initial path. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_ocineb_create=. Purpose: Climbing-image band that hands the climbing image to a min-mode climb. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_ocineb_step=. Purpose: One band step, one alignment, or one P-RFO climb step. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_ocineb_positions=. Purpose: Copy the current band out (n_images * 3 * n_atoms doubles). Parameters: the declaration. Units: the caller's.
+- =rgsaddle_ocineb_reset=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_ocineb_free=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_band_set_highs=. Purpose: Select the optional HiGHS feasible-set step. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_minmode_set_highs=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_minmode_set_torque_window=. Purpose: ABI minor 32. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_band_set_exp_precon=. Purpose: Per-image exponential metric (Packwood et al. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_band_set_zoom=. Purpose: Zoom-NEB, eOn's zoom_* keys. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_last_error=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_stencil_config_new=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_stencil_config_set_f64=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_stencil_config_set_i64=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_stencil_config_set_array=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_stencil_config_free=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_stencil_new=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_stencil_step=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_stencil_run=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_stencil_positions=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_stencil_query=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_stencil_free=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_connect=. Purpose: Run the connect search. Parameters: the declaration. Units: the caller's.

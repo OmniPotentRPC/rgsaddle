@@ -79,9 +79,9 @@ jobs:
           # The printed ratio was not asserted. Optimize this package
           # only. validation/golden/index1_abi.json is the check.
           cargo build --features capi --config 'profile.dev.package.rgsaddle.opt-level=3'
-          gcc -I include validation/index1_probe.c -L target/debug -lrgsaddle -lm -Wl,-rpath,"$PWD/target/debug" -o /tmp/index1_probe
-          mkdir -p /tmp/index1_out
-          uv run --no-project python validation/check_index1.py /tmp/index1_probe /tmp/index1_out
+          gcc -I include validation/index1_probe.c -L target/debug -lrgsaddle -lm -Wl,-rpath,"$PWD/target/debug" -o "$RUNNER_TEMP/index1_probe"
+          mkdir -p "$RUNNER_TEMP/index1_out"
+          uv run --no-project python validation/check_index1.py "$RUNNER_TEMP/index1_probe" "$RUNNER_TEMP/index1_out"
 
   kani:
     runs-on: ubuntu-latest

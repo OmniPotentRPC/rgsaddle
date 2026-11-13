@@ -39,7 +39,9 @@ A calculator exception, including =KeyboardInterrupt=, propagates out of =__call
 
 =connect(surface, left, right, force_tol=0.001, max_calls=250000, quench_nodes=True)= runs the double-ended search to completion. =surface(x)= receives one image with shape =(1, 3N)= and returns =(energy, gradient)=, energy shape =(1,)= and gradient shape =(1, 3N)=, the same callback as =Stencil.step=. =left= and =right= are length =3N=. The GIL is released for the search and taken again inside the callback. A calculator exception propagates. =ConnectReport= holds =position=, =energy=, =force_norm=, =kind= (=s=, =u=, or =f=), =hessian_index=, and =evaluations=. The evaluation count includes finite differences that decide a step or an index. The Lanczos acceptance estimates the next curvature with two actions and does not build a dense Hessian. The COMPASS fallback does, and that Hessian is counted.
 
-Band, minimum-mode, IRC, Sella and AutoNEB sessions have no Python names yet.
+=rgsaddle.ase.NEB=, =MinModeAtoms=, and =Sella= are the ASE-shaped calls. The migration page says where they follow ASE and where the endpoint-slope climb does not. IRC and AutoNEB stay on the Rust and C sessions.
+
+=_core.project_band= projects an evaluated band. =_core.MinMode= and =_core.SellaSaddle= are the sessions those classes drive. A surface callback receives one image shaped =(1, 3N)= and returns =(energy, gradient)=.
 
 * Thread safety
 Immutable values, such as the enum members, are shared freely. =SurfaceAdapter= is a mutable session. Each call claims an atomic flag for the whole call and drops it when the call returns, including when the calculator raises. =raw_forces= is assigned before that drop. Do not call the adapter again from inside its own calculator.

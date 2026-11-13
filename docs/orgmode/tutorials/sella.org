@@ -1,0 +1,17 @@
+#+TITLE: Optimize a saddle with Sella's step
+#+OPTIONS: toc:nil num:nil
+
+Sella's order-1 step is a partitioned rational-function optimization inside a trust radius: uphill along the lowest mode, downhill along the rest. It is not a dimer translation. The Rust type is ~SellaSaddleSession~. The Python call matches Sella's optimizer loop.
+
+#+begin_src python
+from rgsaddle.ase import Sella
+
+opt = Sella(atoms, order=1, delta=0.1)
+opt.run(fmax=0.05, steps=50)
+#+end_src
+
+~atoms~ is an ASE ~Atoms~ with a calculator. Masses are ~atoms.get_masses~. ~delta~ is the trust radius per free coordinate. ~run~ is ASE's loop: each step asks the calculator for the energy and the gradient, takes one trust step, and writes the accepted positions back. ~tests/python/test_ase_dropin.py~ runs two steps on a three-atom bowl and checks that the positions stay finite.
+
+The default geometry for three or more atoms is the rigid quotient, so a translation or a rotation of the whole molecule is not a step. A smaller system, or a host that already has internal coordinates, uses the Rust constructors ~SellaSaddleSession::on~ and ~on_internal~. Those are not on the Python class.
+
+Order 0, a minimization, is ~SellaMinSession~. It uses the quasi-Newton step rather than the partitioned one.
