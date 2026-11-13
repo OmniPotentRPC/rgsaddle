@@ -40,6 +40,7 @@
 //! `(shell, direction, hop, temperature, cell_repeats)`.
 
 use ndarray::{Array1, Array2, ArrayView1, s};
+use rayon::prelude::*;
 use rgmin::{FireKind, Method};
 
 use crate::band::{BandConfig, BandStatus, CiConfig};
@@ -121,6 +122,28 @@ pub fn pair_separation(
 ) -> Result<f64, SaddleError> {
     let center = mobile_center(positions, cell, mobile)?;
     Ok(norm3(mic(sub3(center, fixed), cell)?))
+}
+
+/// A dimer start. `mode` is the initial unstable direction, not a displacement
+/// that has to be normalized by the caller.
+#[derive(Clone, Debug)]
+pub struct DimerSeed {
+    pub positions: Array1<f64>,
+    pub mode: Array1<f64>,
+}
+
+/// An index-1 saddle and the two basins reached by pushing along its mode.
+#[derive(Clone, Debug)]
+pub struct BasinSaddle {
+    pub saddle: Array1<f64>,
+    pub saddle_energy: f64,
+    pub negative_eigenvalue: Option<f64>,
+    /// Unstable mode at the saddle. The lower basin lies along one sign of this.
+    pub mode: Array1<f64>,
+    pub plus: Array1<f64>,
+    pub minus: Array1<f64>,
+    pub plus_energy: f64,
+    pub minus_energy: f64,
 }
 
 /// One symmetry-distinct hop. `product` is a Cartesian geometry of the
@@ -1084,6 +1107,132 @@ fn run_band<S: PointSurface>(
         (best, best_cells, best_force)
     };
     Ok((cartesian, found_cells, force))
+}
+
+/// Run every seed. Index-1 saddles are returned with both pushed basins.
+/// A seed that does not converge, or that is not index 1, is omitted.
+pub fn seeded_saddles<S: PointSurface + Sync>(
+    surface: &S,
+    config: &DefectPairConfig,
+    cell: M3,
+    seeds: &[DimerSeed],
+) -> Vec<BasinSaddle> {
+    seeds
+        .par_iter()
+        .filter_map(|seed| one_seed(surface, config, cell, seed).ok())
+        .collect()
+}
+
+fn one_seed<S: PointSurface>(
+    surface: &S,
+    config: &DefectPairConfig,
+    cell: M3,
+    seed: &DimerSeed,
+) -> Result<BasinSaddle, SaddleError> {
+    if seed.mode.dot(&seed.mode) < 1.0e-16 {
+        return Err(SaddleError::Invalid("dimer seed mode vanishes".into()));
+    }
+    let mut dimer = SolidDimer::new(
+        config.dimer.clone(),
+        seed.positions.clone(),
+        cell,
+        seed.mode.clone(),
+    )?;
+    let report = dimer.run(surface, config.max_dimer_steps)?;
+    if report.status != MinModeStatus::Converged
+        || report.rejected
+        || report.negative_modes != Some(1)
+    {
+        return Err(SaddleError::Invalid("seed is not an index-1 saddle".into()));
+    }
+    let saddle = dimer.positions().to_owned();
+    let mode = dimer.mode().to_owned();
+    let push = cartesian_push(&dimer, config.push)?;
+    let (plus, plus_energy) = relax(surface, &saddle + &push, cell, config)?;
+    let (minus, minus_energy) = relax(surface, &saddle - &push, cell, config)?;
+    let (saddle_energy, _) = surface.eval(saddle.view())?;
+    Ok(BasinSaddle {
+        saddle,
+        saddle_energy,
+        negative_eigenvalue: report.eigenvalues.first().copied(),
+        mode,
+        plus,
+        minus,
+        plus_energy,
+        minus_energy,
+    })
+}
+
+/// Minimize until the force tolerance or until the energy is at or below `floor`.
+pub fn descend_limited<S: PointSurface>(
+    surface: &S,
+    mut positions: Array1<f64>,
+    cell: M3,
+    config: &DefectPairConfig,
+    floor: f64,
+) -> Result<(Array1<f64>, f64), SaddleError> {
+    let mut solver = rgmin::Solver::new(
+        rgmin::Method::Fire {
+            kind: rgmin::FireKind::V2,
+        },
+        rgmin::Control {
+            maxiter: usize::MAX,
+            gtol: 0.0,
+            istep: config.relax_step,
+            ..rgmin::Control::default()
+        },
+        positions.len(),
+    );
+    solver.set_atom_maxmove(config.max_move);
+    let flat = m3_to_row9(cell);
+    let mut energy = surface.eval_in_cell(positions.view(), &flat)?.0;
+    let mut kept = positions.clone();
+    let mut kept_energy = energy;
+    for _ in 0..config.max_relax_steps {
+        if energy <= floor {
+            break;
+        }
+        let oracle = rgmin::Oracle::unbounded(positions.len(), |x: ArrayView1<f64>| {
+            surface
+                .eval_in_cell(x, &flat)
+                .unwrap_or_else(|_| (f64::NAN, Array1::zeros(x.len())))
+        });
+        solver
+            .step(&oracle, &mut positions)
+            .map_err(|error| SaddleError::Solver(error.to_string()))?;
+        let (next, gradient) = surface.eval_in_cell(positions.view(), &flat)?;
+        // One FIRE step can fall through a collision. Keep the last sane point.
+        if !next.is_finite() || next < kept_energy - 2.0 {
+            positions = kept;
+            energy = kept_energy;
+            break;
+        }
+        kept = positions.clone();
+        kept_energy = next;
+        energy = next;
+        if max_abs(&gradient) < config.relax_tol {
+            break;
+        }
+    }
+    Ok((positions, energy))
+}
+
+/// Climbing band from the reactant through `saddle` to a nearby downhill
+/// geometry. Springs are energy-weighted so images stay near the barrier
+/// instead of falling into a deep product well.
+pub fn segment_band<S: PointSurface>(
+    surface: &S,
+    config: &DefectPairConfig,
+    reactant: &Array1<f64>,
+    saddle: &Array1<f64>,
+    downhill: &Array1<f64>,
+    cell: M3,
+    k_min: f64,
+    k_max: f64,
+) -> Result<(ArcPath, bool, f64), SaddleError> {
+    let mut config = config.clone();
+    config.band.spring = crate::spring::SpringKind::EnergyWeighted { k_min, k_max };
+    climb_path(surface, &config, reactant, saddle, downhill, cell, cell)
 }
 
 fn cartesian_push(dimer: &SolidDimer, push: f64) -> Result<Array1<f64>, SaddleError> {

@@ -1,0 +1,43 @@
+kind,shell,orientation,hop,direction,temperature_K,dE0_eV,zero_T_eV,dF_eV,dF_error_eV,nu_Hz,rate_Hz,outcome,band_force,note
+survey,2.573,100,capture,toward,500,0.000000,0.000000,,,,,barrierless,0,recombines on relaxation; gap 2.573 separation 1.293
+survey,2.573,010,capture,toward,500,0.000000,0.000000,,,,,barrierless,0,recombines on relaxation; gap 2.573 separation 1.293
+survey,2.573,001,capture-0,toward,500,-0.188340,,,,,index1,0,eigenvalue -0.37867533004437626
+survey,2.573,001,capture-1,toward,500,-0.015930,,,,,index1,0,eigenvalue -0.3339590144391075
+survey,2.573,001,capture-2,toward,500,0.001178,,,,,index1,0,eigenvalue -0.1038568843111996
+survey,2.573,001,capture-3,toward,500,0.008124,,,,,index1,0,eigenvalue -0.24648154081040966
+survey,2.573,001,capture-4,toward,500,0.008488,,,,,index1,0,eigenvalue -0.10996964789992963
+survey,2.573,001,capture-5,toward,500,0.013363,,,,,index1,0,eigenvalue -0.19863959047637364
+capture,2.573,001,capture,toward,500,0.001178,0.000000,,,,,index1,0.00193,downhill_rel -0.620; seeds 32 kept 6
+pafi,2.573,001,capture,toward,500,0.001178,0.000000,0.020074,0.006302,4.83010589e11,1.20174010e11,rated,0.00193,kappa 0.396457
+pafi,2.573,001,capture,toward,300,0.001178,0.000000,0.011323,0.003939,,,rated,0.00193,kappa 0.401545
+survey,3.639,010,capture-0,toward,500,0.124824,,,,,index1,0,eigenvalue -0.5049873953067102
+capture,3.639,010,capture,toward,500,0.124824,0.145100,,,,,not_converged,0.00857,downhill_rel -0.539; seeds 32 kept 1
+survey,3.639,100,capture,toward,500,,,,,,not_converged,0,no recombination saddle in 0 index-1 hits of 32 seeds
+survey,3.639,001,capture,toward,500,,,,,,not_converged,0,no recombination saddle in 5 index-1 hits of 32 seeds
+survey,4.456,100,capture-0,toward,500,0.004516,,,,,index1,0,eigenvalue -0.4086566192252212
+survey,4.456,100,capture-1,toward,500,0.007719,,,,,index1,0,eigenvalue -0.19666814990172932
+survey,4.456,100,capture-2,toward,500,0.007719,,,,,index1,0,eigenvalue -0.19666840049020945
+survey,4.456,100,capture-3,toward,500,0.016627,,,,,index1,0,eigenvalue -0.30131506099707944
+capture,4.456,100,capture,toward,500,0.004516,0.000041,,,,,not_converged,0.00809,downhill_rel -0.719; seeds 32 kept 4
+survey,4.456,010,capture,toward,500,,,,,,not_converged,0,no recombination saddle in 0 index-1 hits of 32 seeds
+survey,5.146,001,capture-0,toward,500,0.071269,,,,,index1,0,eigenvalue -0.46358569756518025
+survey,5.146,001,capture-1,toward,500,0.077210,,,,,index1,0,eigenvalue -0.4218916666100172
+survey,5.146,001,capture-2,toward,500,0.078001,,,,,index1,0,eigenvalue -0.3058515652657146
+capture,5.146,001,capture,toward,500,0.071269,0.064164,,,,,index1,0.00155,downhill_rel -0.620; seeds 32 kept 3
+pafi,5.146,001,capture,toward,500,0.071269,0.064164,0.053000,0.008588,2.18110799e12,2.80902760e11,rated,0.00155,kappa 0.440654
+pafi,5.146,001,capture,toward,300,0.071269,0.064164,0.054596,0.005527,2.22085873e12,1.18424697e11,rated,0.00155,kappa 0.440654
+survey,5.146,100,capture,toward,500,0.000000,0.000000,,,,,barrierless,0,recombines on relaxation; gap 2.395 separation 4.345
+pafi,3.639,010,translate-away,away,300,0.152015,,,,,,not_converged,0.02909,kappa 
+asymmetry,2.573,100,capture-vs-away,toward,500,0.000000,0.000000,,,,,barrierless,0,recombines on relaxation; no stored away rate
+asymmetry,2.573,010,capture-vs-away,toward,500,0.000000,0.000000,,,,,barrierless,0,recombines on relaxation; no stored away rate
+asymmetry,2.573,001,capture-vs-away,toward,500,0.001178,0.000000,0.020074,0.006302,4.83010589e11,1.20174010e11,index1,0.00193,capture rate 1.202e11; no stored away rate at this shell so no ratio
+asymmetry,2.573,001,capture-vs-away,toward,300,0.001178,0.000000,0.011323,0.003939,, ,rated,0.00193,kappa 0.402; attempt frequency not obtained so no rate and no ratio
+asymmetry,3.639,010,capture-vs-away,toward,500,0.124824,0.145100,,,,,not_converged,0.00857,band force 0.00857 eV/A above 0.002; away dF 0.162379+/-0.007398 rate 1.306e10; no capture rate
+asymmetry,3.639,010,capture-vs-away,away,300,0.152015,,,,,not_converged,0.02909,away band not converged; capture band not at 2e-3
+asymmetry,3.639,100,capture-vs-away,toward,500,,,,,,not_converged,0,no recombination saddle in 32 seeds
+asymmetry,3.639,001,capture-vs-away,toward,500,,,,,,not_converged,0,5 index-1 saddles and none reached recombination
+asymmetry,4.456,100,capture-vs-away,toward,500,0.004516,0.000041,,,,,not_converged,0.00809,dimer saddles 0.004516 0.007719 0.016627 eV; band force 0.00809 above 0.002; no capture rate
+asymmetry,4.456,010,capture-vs-away,toward,500,,,,,,not_converged,0,no index-1 saddle in 32 seeds
+asymmetry,5.146,001,capture-vs-away,toward,500,0.071269,0.064164,0.053000,0.008588,2.18110799e12,2.80902760e11,index1,0.00155,capture rate 2.809e11 / away rate 9.066e10 = 3.098
+asymmetry,5.146,001,capture-vs-away,toward,300,0.071269,0.064164,0.054596,0.005527,2.22085873e12,1.18424697e11,index1,0.00155,capture rate 1.184e11 / away rate 1.405e10 = 8.430
+asymmetry,5.146,100,capture-vs-away,toward,500,0.000000,0.000000,,,,,barrierless,0,recombines on relaxation

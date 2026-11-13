@@ -114,8 +114,9 @@ pub use stencil::{
 };
 pub use bennett::{ShootingConfig, Transmission, bennett_chandler};
 pub use defect_pair::{
-    CellMode, DefectPairConfig, DirectionClass, HopOutcome, HopTemplate, PairSetup, RateCatalogue,
-    RateEntry, attempt_frequency, classify_separation, defect_pair_rates, pair_separation,
+    BasinSaddle, CellMode, DefectPairConfig, DimerSeed, DirectionClass, HopOutcome, HopTemplate,
+    PairSetup, RateCatalogue, RateEntry, attempt_frequency, classify_separation,
+    defect_pair_rates, descend_limited, pair_separation, seeded_saddles, segment_band,
 };
 pub use pafi::{
     ArcPath, FreeEnergyProfile, HyperplaneAverage, PafiConfig, PathFrame, PathGeometry,

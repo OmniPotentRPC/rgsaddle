@@ -5199,7 +5199,8 @@ fn run_dense_job(
     config.pafi.samples = 24;
     config.pafi.thermalize = 20;
     config.max_dimer_steps = 70;
-    config.max_band_steps = 140;
+    config.max_band_steps = 220;
+    config.band.force_tol = 8.0e-3;
     config.images = 9;
     config.connect_rmsd = 1.0;
     let setup = rgsaddle::PairSetup {
@@ -5398,4 +5399,457 @@ fn defect_pair_finish() {
         }
     }
     eprintln!("finish run {:.1} min", started.elapsed().as_secs_f64() / 60.0);
+}
+
+struct TinyRng(u64);
+
+impl TinyRng {
+    fn unit(&mut self) -> f64 {
+        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1);
+        ((self.0 >> 11) as f64) / ((1u64 << 53) as f64)
+    }
+
+    fn gauss(&mut self) -> f64 {
+        let u = self.unit().clamp(1.0e-12, 1.0);
+        let v = self.unit();
+        (-2.0 * u.ln()).sqrt() * (std::f64::consts::TAU * v).cos()
+    }
+}
+
+fn local_seeds(
+    reactant: &Array1<f64>,
+    cell: [[f64; 3]; 3],
+    dumbbell: [usize; 2],
+    vacancy: [f64; 3],
+) -> Vec<rgsaddle::DimerSeed> {
+    let center = centroid(reactant, dumbbell);
+    let length = cell[0][0];
+    let mut rng = TinyRng(0x5eed);
+    let mut seeds = Vec::new();
+    let n = reactant.len() / 3;
+    let nearby: Vec<usize> = (0..n)
+        .filter(|atom| mic_distance(point_of(reactant, *atom), center, cell) < 4.2)
+        .collect();
+    let to_vac = wrap_delta(center, vacancy, length);
+    let to_vac = unit3(to_vac);
+    let axis = unit3(wrap_delta(
+        point_of(reactant, dumbbell[0]),
+        point_of(reactant, dumbbell[1]),
+        length,
+    ));
+    let mut push_atoms = |scale: f64, direction: [f64; 3], which: &[usize]| {
+        let mut kick = Array1::zeros(reactant.len());
+        for atom in which {
+            for c in 0..3 {
+                kick[3 * atom + c] = scale * direction[c];
+            }
+        }
+        seeds.push(rgsaddle::DimerSeed {
+            positions: reactant + &kick,
+            mode: kick,
+        });
+    };
+    push_atoms(0.40, to_vac, &dumbbell);
+    push_atoms(0.65, to_vac, &dumbbell);
+    let closer = if mic_distance(point_of(reactant, dumbbell[0]), vacancy, cell)
+        < mic_distance(point_of(reactant, dumbbell[1]), vacancy, cell)
+    {
+        dumbbell[0]
+    } else {
+        dumbbell[1]
+    };
+    push_atoms(0.50, to_vac, &[closer]);
+    push_atoms(0.80, to_vac, &[closer]);
+    let perp = unit3([
+        axis[1] * to_vac[2] - axis[2] * to_vac[1],
+        axis[2] * to_vac[0] - axis[0] * to_vac[2],
+        axis[0] * to_vac[1] - axis[1] * to_vac[0],
+    ]);
+    let mut rotations = Vec::new();
+    for angle in [0.35_f64, 0.7] {
+        let mut kick = Array1::zeros(reactant.len());
+        for (atom, sign) in dumbbell.into_iter().zip([-1.0, 1.0]) {
+            let offset = wrap_delta(center, point_of(reactant, atom), length);
+            let turned = [
+                offset[0] * angle.cos() + perp[0] * sign * offset_len(&offset) * angle.sin(),
+                offset[1] * angle.cos() + perp[1] * sign * offset_len(&offset) * angle.sin(),
+                offset[2] * angle.cos() + perp[2] * sign * offset_len(&offset) * angle.sin(),
+            ];
+            for c in 0..3 {
+                kick[3 * atom + c] = turned[c] - offset[c];
+            }
+        }
+        rotations.push(kick);
+    }
+    push_atoms(0.45, perp, &dumbbell);
+    push_atoms(-0.45, perp, &dumbbell);
+    drop(push_atoms);
+    for kick in rotations {
+        seeds.push(rgsaddle::DimerSeed {
+            positions: reactant + &kick,
+            mode: kick,
+        });
+    }
+    while seeds.len() < 32 {
+        let mut kick = Array1::zeros(reactant.len());
+        for atom in &nearby {
+            for c in 0..3 {
+                kick[3 * atom + c] = 0.35 * rng.gauss();
+            }
+        }
+        seeds.push(rgsaddle::DimerSeed {
+            positions: reactant + &kick,
+            mode: kick,
+        });
+    }
+    seeds
+}
+
+fn offset_len(offset: &[f64; 3]) -> f64 {
+    (offset[0] * offset[0] + offset[1] * offset[1] + offset[2] * offset[2]).sqrt().max(1.0e-8)
+}
+
+fn reaches_recombination(
+    reactant: &Array1<f64>,
+    reactant_energy: f64,
+    vacancy: [f64; 3],
+    cell: [[f64; 3]; 3],
+    basin: &Array1<f64>,
+    basin_energy: f64,
+) -> bool {
+    let drop = reactant_energy - basin_energy;
+    if drop > 1.5 {
+        return true;
+    }
+    let gap_gone = !basin_is_dumbbell(basin, vacancy, cell);
+    drop > 0.4 && gap_gone && occupied(basin, vacancy, cell)
+}
+
+fn basin_is_dumbbell(positions: &Array1<f64>, vacancy: [f64; 3], cell: [[f64; 3]; 3]) -> bool {
+    let n = positions.len() / 3;
+    let mut close = 0usize;
+    for atom in 0..n {
+        if mic_distance(point_of(positions, atom), vacancy, cell) < 2.2 {
+            close += 1;
+        }
+    }
+    close == 0
+}
+
+fn survey_config(bulk: [[f64; 3]; 3]) -> rgsaddle::DefectPairConfig {
+    let mut config = cu_config(&[500.0], 8, 0.01, bulk, Vec::new(), 7);
+    config.finite_temperature = false;
+    config.max_dimer_steps = 40;
+    config.max_relax_steps = 70;
+    config.relax_tol = 2.0e-3;
+    config.push = 0.35;
+    config.dimer = {
+        let search = MinModeConfig {
+            force_tol: 0.04,
+            max_move: 0.1,
+            dr: 1.0e-3,
+            max_rotations: 6,
+            ..MinModeConfig::default()
+        };
+        SolidDimerConfig::frozen(search)
+            .with_index_check(IndexCheck::first_order().with_step(1.0e-3).with_escapes(0))
+    };
+    config
+}
+
+fn curvature_along(held: &FastHeld, positions: &Array1<f64>, tangent: &Array1<f64>) -> f64 {
+    let scale = tangent.dot(tangent).sqrt().max(1.0e-12);
+    let step = tangent / scale * 1.0e-3;
+    let (e0, _) = held.eval(positions.view()).unwrap_or((0.0, Array1::zeros(1)));
+    let (ep, _) = held.eval((positions + &step).view()).unwrap_or((e0, Array1::zeros(1)));
+    let (em, _) = held.eval((positions - &step).view()).unwrap_or((e0, Array1::zeros(1)));
+    (ep + em - 2.0 * e0) / (1.0e-3 * 1.0e-3)
+}
+
+#[test]
+#[ignore = "local capture saddles from seeded dimers, then a short climbing band"]
+fn defect_pair_local_capture() {
+    let started = Instant::now();
+    let copper = FastCopper::new();
+    let a500 = measured_lattice(500.0);
+    let repeats = 8usize;
+    let length = repeats as f64 * a500;
+    let cell = [[length, 0.0, 0.0], [0.0, length, 0.0], [0.0, 0.0, length]];
+    let (perfect, _) = fcc(repeats, a500);
+    let (_, _, bulk) = copper.evaluate(perfect.view(), cell);
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks");
+    let path = root.join("defect_pair_local.csv");
+    if !path.exists() {
+        let mut header = File::create(&path).expect("local");
+        writeln!(header, "kind,shell,orientation,hop,direction,temperature_K,dE0_eV,zero_T_eV,dF_eV,dF_error_eV,nu_Hz,rate_Hz,outcome,band_force,note").unwrap();
+    }
+    let checkpoint = Mutex::new(File::options().append(true).open(&path).expect("append"));
+    let jobs = [
+        (2.573_f64, "100"),
+        (2.573, "010"),
+        (2.573, "001"),
+        (3.639, "010"),
+        (3.639, "100"),
+        (3.639, "001"),
+        (4.456, "100"),
+        (4.456, "010"),
+        (5.146, "001"),
+        (5.146, "100"),
+    ];
+    for (radius, orientation) in jobs {
+        let existing = std::fs::read_to_string(&path).unwrap_or_default();
+        if checkpoint_has(&existing, &format!("survey,{radius:.3},{orientation},")) {
+            eprintln!("skip survey {radius} {orientation}");
+            continue;
+        }
+        let vector = shell_table(a500, repeats)
+            .into_iter()
+            .find(|(value, _, _)| (*value - radius).abs() < 0.04)
+            .map(|(_, vector, _)| vector);
+        let Some(vector) = vector else {
+            append_checkpoint(&checkpoint, &format!("survey,{radius:.3},{orientation},capture,toward,500,,,,,,not_converged,0,no shell"));
+            continue;
+        };
+        let (reactant, vacancy, dumbbell, cell, gap, separation, recombined) =
+            relax_pair_axis(&copper, repeats, a500, vector, axis_from_label(orientation), true);
+        if recombined {
+            let line = format!(
+                "survey,{radius:.3},{orientation},capture,toward,500,0.000000,0.000000,,,,,barrierless,0,recombines on relaxation; gap {gap:.3} separation {separation:.3}"
+            );
+            eprintln!("{line}");
+            append_checkpoint(&checkpoint, &line);
+            continue;
+        }
+        let held = FastHeld { copper: &copper, cell };
+        let (reactant_energy, _) = held.eval(reactant.view()).expect("reactant");
+        let config = survey_config(bulk);
+        let seeds = local_seeds(&reactant, cell, dumbbell, vacancy);
+        eprintln!(
+            "survey {radius:.3} {orientation} seeds {} at {:.0}s",
+            seeds.len(),
+            started.elapsed().as_secs_f64()
+        );
+        let found = rgsaddle::seeded_saddles(&held, &config, cell, &seeds);
+        let mut kept = Vec::new();
+        for saddle in &found {
+            let plus_back = hausdorff(&saddle.plus, &reactant, cell) < 1.0
+                || (saddle.plus_energy - reactant_energy).abs() < 0.2;
+            let minus_back = hausdorff(&saddle.minus, &reactant, cell) < 1.0
+                || (saddle.minus_energy - reactant_energy).abs() < 0.2;
+            let plus_re = reaches_recombination(&reactant, reactant_energy, vacancy, cell, &saddle.plus, saddle.plus_energy);
+            let minus_re = reaches_recombination(&reactant, reactant_energy, vacancy, cell, &saddle.minus, saddle.minus_energy);
+            if (plus_back && minus_re) || (minus_back && plus_re) {
+                kept.push(saddle);
+            }
+        }
+        kept.sort_by(|left, right| {
+            (left.saddle_energy - reactant_energy)
+                .partial_cmp(&(right.saddle_energy - reactant_energy))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        if kept.is_empty() {
+            let line = format!(
+                "survey,{radius:.3},{orientation},capture,toward,500,,,,,,not_converged,0,no recombination saddle in {} index-1 hits of {} seeds",
+                found.len(),
+                seeds.len()
+            );
+            eprintln!("{line}");
+            append_checkpoint(&checkpoint, &line);
+            continue;
+        }
+        for (index, saddle) in kept.iter().enumerate() {
+            let d_e0 = saddle.saddle_energy - reactant_energy;
+            let line = format!(
+                "survey,{radius:.3},{orientation},capture-{index},toward,500,{d_e0:.6},,,,,index1,0,eigenvalue {}",
+                saddle.negative_eigenvalue.unwrap_or(f64::NAN)
+            );
+            eprintln!("{line}");
+            append_checkpoint(&checkpoint, &line);
+        }
+        let best = kept
+            .iter()
+            .find(|saddle| saddle.saddle_energy - reactant_energy > 0.001)
+            .unwrap_or(&kept[0]);
+        let d_e0 = best.saddle_energy - reactant_energy;
+        if d_e0 <= 0.001 {
+            let line = format!(
+                "capture,{radius:.3},{orientation},capture,toward,500,{d_e0:.6},{d_e0:.6},,,,,barrierless,0,lowest connecting index-1 is {d_e0:.4} eV; no positive barrier above 1 meV"
+            );
+            eprintln!("{line}");
+            append_checkpoint(&checkpoint, &line);
+            continue;
+        }
+        let sign = if best.plus_energy < best.minus_energy { 1.0 } else { -1.0 };
+        let mut peak = 0.0_f64;
+        for atom in 0..best.mode.len() / 3 {
+            let mut acc = 0.0;
+            for c in 0..3 {
+                acc += best.mode[3 * atom + c] * best.mode[3 * atom + c];
+            }
+            peak = peak.max(acc.sqrt());
+        }
+        let mut step = 0.04_f64;
+        let mut start = best.saddle.clone();
+        if peak > 1.0e-8 {
+            while step >= 0.01 {
+                let trial = &best.saddle + &(&best.mode * (sign * step / peak));
+                let trial_energy = held.eval(trial.view()).map(|(energy, _)| energy).unwrap_or(f64::NAN);
+                if trial_energy.is_finite() && trial_energy > best.saddle_energy - 0.3 {
+                    start = trial;
+                    break;
+                }
+                step *= 0.5;
+            }
+        }
+        let floor = best.saddle_energy - 0.6;
+        let (downhill, down_energy) = rgsaddle::descend_limited(&held, start, cell, &config, floor).expect("descend");
+        let mut band_config = config.clone();
+        band_config.band.force_tol = 2.0e-3;
+        band_config.max_band_steps = 180;
+        band_config.images = 13;
+        band_config.zero_t_tol = 0.02;
+        let (band, converged, force) = rgsaddle::segment_band(
+            &held,
+            &band_config,
+            &reactant,
+            &best.saddle,
+            &downhill,
+            cell,
+            0.1,
+            5.0,
+        )
+        .unwrap_or_else(|error| {
+            eprintln!("band {radius} {orientation}: {error}");
+            (rgsaddle::ArcPath::from_positions(&[reactant.clone(), best.saddle.clone()]).expect("path"), false, f64::MAX)
+        });
+        let zero = rgsaddle::zero_temperature_barrier(&held, &band, &band.arcs()).ok();
+        let zero_v = zero.as_ref().map(|profile| profile.barrier).unwrap_or(f64::NAN);
+        let integral_ok = zero.as_ref().is_some_and(|profile| (profile.barrier - d_e0).abs() < 0.05);
+        let outcome = if converged && force <= 2.0e-3 && integral_ok && down_energy > reactant_energy - 1.5 {
+            "index1"
+        } else {
+            "not_converged"
+        };
+        let line = format!(
+            "capture,{radius:.3},{orientation},capture,toward,500,{d_e0:.6},{zero_v:.6},,,,,{outcome},{force:.5},downhill_rel {:.3}; seeds {} kept {}",
+            down_energy - reactant_energy,
+            seeds.len(),
+            kept.len()
+        );
+        eprintln!("{line}");
+        let _ = std::io::stderr().flush();
+        append_checkpoint(&checkpoint, &line);
+        if outcome != "index1" {
+            continue;
+        }
+        for temperature in [500.0_f64, 300.0] {
+            let factor = measured_lattice(temperature) / a500;
+            let scaled_cell = [
+                [cell[0][0] * factor, 0.0, 0.0],
+                [0.0, cell[1][1] * factor, 0.0],
+                [0.0, 0.0, cell[2][2] * factor],
+            ];
+            let frames: Vec<Array1<f64>> = band
+                .arcs()
+                .iter()
+                .map(|arc| band.geometry(*arc).expect("frame").positions * factor)
+                .collect();
+            let scaled = rgsaddle::ArcPath::from_positions(&frames).expect("scaled path");
+            let held_t = FastHeld { copper: &copper, cell: scaled_cell };
+            let thermal = temperature * rgsaddle::BOLTZMANN_EV_PER_K;
+            let mut pafi = band_config.pafi.clone();
+            pafi.thermal = thermal;
+            pafi.samples = 20;
+            pafi.max_rounds = 4;
+            pafi.target_error = Some(0.01);
+            pafi.thermalize = 20;
+            let arcs = scaled.arcs();
+            let Ok((profile, planes)) = rgsaddle::pafi_profile(&held_t, &scaled, &arcs, &pafi) else {
+                append_checkpoint(&checkpoint, &format!("pafi,{radius:.3},{orientation},capture,toward,{temperature},,,,,,,not_converged,0,pafi failed"));
+                continue;
+            };
+            let dividing = profile.dividing;
+            let geometry = scaled.geometry(profile.arc[dividing]).expect("geometry");
+            let mut shooting = band_config.shooting.clone();
+            shooting.thermal = thermal;
+            shooting.mass = 63.546;
+            let starts = if planes[dividing].retained.is_empty() {
+                vec![geometry.positions.clone()]
+            } else {
+                planes[dividing].retained.clone()
+            };
+            let transmission = rgsaddle::bennett::bennett_chandler(
+                &held_t,
+                &starts,
+                geometry.positions.view(),
+                geometry.tangent.view(),
+                &shooting,
+            );
+            let kappa = transmission.as_ref().map(|value| value.kappa).unwrap_or(f64::NAN);
+            let reactant_t = &reactant * factor;
+            let lambda = curvature_along(&held_t, &reactant_t, &geometry.tangent);
+            let nu = rgsaddle::attempt_frequency(lambda, 63.546, rgsaddle::angular_scale_rad_s()).ok();
+            let rate = nu.and_then(|prefactor| {
+                if (0.0..=1.0).contains(&kappa) {
+                    Some(prefactor * kappa * (-profile.barrier / thermal).exp())
+                } else {
+                    None
+                }
+            });
+            let line = format!(
+                "pafi,{radius:.3},{orientation},capture,toward,{temperature},{d_e0:.6},{zero_v:.6},{:.6},{:.6},{},{},rated,{force:.5},kappa {kappa:.6}",
+                profile.barrier,
+                profile.barrier_error,
+                num_or(&nu),
+                num_or(&rate)
+            );
+            eprintln!("{line}");
+            append_checkpoint(&checkpoint, &line);
+        }
+    }
+    let mechanisms = find_mechanisms(&copper, repeats, a500);
+    let translate: Vec<Mechanism> = mechanisms.into_iter().filter(|item| item.kind == "translate").collect();
+    if !translate.is_empty() {
+        let vector = shell_table(a500, repeats)
+            .into_iter()
+            .find(|(value, _, _)| (*value - 3.639).abs() < 0.04)
+            .map(|(_, vector, _)| vector)
+            .expect("3.639");
+        let a300 = measured_lattice(300.0);
+        let factor = a300 / a500;
+        let vector = [vector[0] * factor, vector[1] * factor, vector[2] * factor];
+        let (positions, vacancy, dumbbell, cell300, _, _, _) =
+            relax_pair_axis(&copper, repeats, a300, vector, axis_from_label("010"), true);
+        let center = centroid(&positions, dumbbell);
+        let mobile = [dumbbell[0], dumbbell[1]];
+        let before = rgsaddle::pair_separation(positions.view(), cell300, vacancy, &mobile).unwrap_or(0.0);
+        for mut hop in mapped_hops(&positions, cell300, center, [0.0, 1.0, 0.0], &translate) {
+            let after = rgsaddle::pair_separation(hop.product.view(), cell300, vacancy, &mobile).unwrap_or(before);
+            if after <= before + 0.08 {
+                continue;
+            }
+            hop.name = "translate-away".into();
+            hop.orientation = "010".into();
+            let job = SciJob {
+                repeats,
+                shell: "3.639".into(),
+                radius: 3.639 * a300 / a500,
+                orientation: "010".into(),
+                positions: positions.clone(),
+                cell: cell300,
+                fixed: vacancy,
+                mobile: vec![dumbbell[0], dumbbell[1]],
+                hop,
+                a: a300,
+            };
+            let entries = run_dense_job(&copper, &job, 300.0).unwrap_or_default();
+            for entry in &entries {
+                let line = finish_line("pafi", entry);
+                eprintln!("{line}");
+                append_checkpoint(&checkpoint, &line);
+            }
+            break;
+        }
+    }
+    eprintln!("local capture {:.1} min", started.elapsed().as_secs_f64() / 60.0);
 }
