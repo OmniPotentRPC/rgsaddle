@@ -7984,7 +7984,7 @@ fn assemble_run12() {
         let max_r = shells.iter().filter(|(radius, _, _)| *radius <= 11.0).map(|(radius, _, _)| *radius).fold(0.0, f64::max);
         let jump = a / 2.0_f64.sqrt();
         let return_sites = return_layer_count(a, &shells, max_r);
-        let (total, sigma, spont_sites, kinetic_sites, weight, mean_graph, radial, glide, rotated, drifted) = channel_volumes(&shells, &spontaneous, &rates, temperature, k_mig, a, omega, max_r, jump, return_sites, 11.0, false);
+        let (total, sigma, spont_sites, kinetic_sites, weight, mean_graph, radial, glide, rotated, drifted, _) = channel_volumes(&shells, &spontaneous, &rates, temperature, k_mig, a, omega, max_r, jump, return_sites, 11.0, false);
         let demkowicz = match temperature as i32 { 300 => "254-286", 500 => "161-185", 700 => "203-210", _ => "" };
         let changed_note = if changed.is_empty() { "no shell changed versus 8^3".to_string() } else { changed.join(" ") };
         writeln!(out, "{temperature},first-passage,{total:.4},{sigma:.4},{spont_sites:.4},{kinetic_sites:.4},{demkowicz},13x13x13=8788; a={a}; return layer {return_sites} sites; radial+glide+rotation; shells changed: {changed_note}").unwrap();
@@ -8056,11 +8056,11 @@ fn cell_averaged_time(repeats: usize, a: f64, k_mig: f64, radius_cut: f64, tau_n
         }
     }
     let steps = [
-        [0.5, 0.5, 0.0], [0.5, -0.5, 0.0], [-0.5, 0.5, 0.0], [-0.5, -0.5, 0.0],
         [0.5, 0.0, 0.5], [0.5, 0.0, -0.5], [-0.5, 0.0, 0.5], [-0.5, 0.0, -0.5],
         [0.0, 0.5, 0.5], [0.0, 0.5, -0.5], [0.0, -0.5, 0.5], [0.0, -0.5, -0.5],
     ];
-    let hop_rate = 12.0 * k_mig;
+    // A <100> dumbbell has eight translation channels, not twelve.
+    let hop_rate = 8.0 * k_mig;
     let mut sample = 0.0;
     let mut seed = 0x1234_5678_u64;
     for start in &outside {
@@ -8069,7 +8069,7 @@ fn cell_averaged_time(repeats: usize, a: f64, k_mig: f64, radius_cut: f64, tau_n
         let mut hops = 0u32;
         loop {
             seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-            let step = steps[(seed >> 33) as usize % 12];
+            let step = steps[(seed >> 33) as usize % 8];
             for c in 0..3 {
                 place[c] += step[c] * a;
                 place[c] -= length * (place[c] / length).floor();
@@ -8261,7 +8261,7 @@ fn channel_volumes(
     return_sites: usize,
     cutoff: f64,
     size_barriers: bool,
-) -> (f64, f64, f64, f64, f64, f64, f64, f64, f64, f64) {
+) -> (f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64) {
     let kept: Vec<_> = shells.iter().filter(|(radius, _, _)| *radius <= cutoff).cloned().collect();
     let nn_vecs = [
         [0.5, 0.5, 0.0], [0.5, -0.5, 0.0], [-0.5, 0.5, 0.0], [-0.5, -0.5, 0.0],
@@ -8332,7 +8332,7 @@ fn channel_volumes(
     let a_ours = measured_lattice(temperature);
     let layer = return_sites as f64 / 3.0;
     let probability = rgsaddle::spherical_return_probability(max_r, jump).unwrap_or(0.0);
-    let solve = |glide: bool, rotation: bool, drift: bool| -> (f64, f64, f64, f64, Vec<(usize, f64, f64)>, Vec<rgsaddle::VolumeSite>) {
+    let solve = |glide: bool, rotation: bool, drift: bool| -> (f64, f64, f64, f64, f64, Vec<(usize, f64, f64)>, Vec<rgsaddle::VolumeSite>) {
         let mut sites = Vec::new();
         let mut capture_index = Vec::new();
         for orientation in ["100", "010", "001"] {
@@ -8454,12 +8454,26 @@ fn channel_volumes(
             Err(_) => (f64::NAN, f64::NAN, f64::NAN),
         };
         let time = rgsaddle::mean_absorption_time(&sites).unwrap_or(f64::NAN);
-        (total, spont, kinetic, time, capture_index, sites)
+        let mut sealed = sites.clone();
+        for site in &mut sealed {
+            if site.id.starts_with("free-") {
+                site.rates.retain(|(destination, _)| destination != "escaped");
+            } else if let Some(orient) = site.id.rsplit('-').next() {
+                let layer = format!("free-{orient}");
+                for edge in &mut site.rates {
+                    if edge.0 == "escaped" {
+                        edge.0 = layer.clone();
+                    }
+                }
+            }
+        }
+        let tau_capture = rgsaddle::mean_absorption_time(&sealed).unwrap_or(f64::NAN);
+        (total, spont, kinetic, time, tau_capture, capture_index, sites)
     };
-    let (radial, _, _, _, _, _) = solve(false, false, false);
-    let (glide, _, _, _, _, _) = solve(true, false, false);
-    let (rotated, spont, kinetic, time, capture_index, embedded) = solve(true, true, false);
-    let (drifted, _, _, _, _, _) = solve(true, true, true);
+    let (radial, _, _, _, _, _, _) = solve(false, false, false);
+    let (glide, _, _, _, _, _, _) = solve(true, false, false);
+    let (rotated, spont, kinetic, time, tau_capture, capture_index, embedded) = solve(true, true, false);
+    let (drifted, _, _, _, _, _, _) = solve(true, true, true);
     let mut samples = vec![0.0; 16];
     for sample in 0..samples.len() {
         let mut varied = embedded.clone();
@@ -8479,7 +8493,7 @@ fn channel_volumes(
     let sample_mean = samples.iter().sum::<f64>() / samples.len() as f64;
     let sigma = (samples.iter().map(|value| (value - sample_mean) * (value - sample_mean)).sum::<f64>() / samples.len() as f64).sqrt();
     let weight = embedded.iter().map(|site| site.count).sum::<f64>();
-    (rotated, sigma, spont, kinetic, weight, time * weight, radial, glide, rotated, drifted)
+    (rotated, sigma, spont, kinetic, weight, time * weight, radial, glide, rotated, drifted, tau_capture)
 }
 
 fn text_spontaneous_at_8(text: &str, radius_ours: f64, orientation: &str, temperature: f64) -> bool {
@@ -8558,22 +8572,19 @@ fn assemble_run13() {
             let max_r = shells.last().map(|(radius, _, _)| *radius).unwrap_or(0.0);
             let jump = a / 2.0_f64.sqrt();
             let return_sites = return_layer_count(a, &shells, max_r);
-            let (total, sigma, spont_sites, kinetic_sites, _, _, _, _, _, _) = channel_volumes(
-                &shells, &spontaneous, &rates, temperature, k_mig, a, omega, max_r, jump, return_sites, cutoff + 0.05, false,
-            );
-            let (sized, sized_sigma, _, _, _, _, _, _, _, _) = channel_volumes(
+            let (total, sigma, spont_sites, kinetic_sites, _, _, _, _, _, _, tau_capture) = channel_volumes(
                 &shells, &spontaneous, &rates, temperature, k_mig, a, omega, max_r, jump, return_sites, cutoff + 0.05, true,
             );
-            if (cutoff - 10.8).abs() < 0.05 {
-                writeln!(out, "{temperature},10.8-size,{sized:.4},{sized_sigma:.4},{spont_sites:.4},,{table},eight channels plus the size-study away barriers; delta {:.4}", sized - total).unwrap();
-                eprintln!("run13 {temperature} K size-study barriers V {sized:.2} ± {sized_sigma:.2} delta {:.2}", sized - total);
-            }
             let delta = previous.map(|prior: f64| total - prior).unwrap_or(f64::NAN);
+            let diffusivity = match temperature as i32 { 300 => 0.143e12, 500 => 0.526e12, 700 => 0.910e12, _ => f64::NAN };
+            let nu = (2.0 / 3.0) * diffusivity / (a * a);
+            let n_atoms = 4.0 * (13usize * 13 * 13) as f64;
+            let tau_cell = cell_averaged_time(13, a, k_mig, max_r, tau_capture);
+            let mean_volume = if tau_cell.is_finite() && tau_cell > 0.0 && nu.is_finite() && nu > 0.0 { n_atoms / (tau_cell * nu) } else { f64::NAN };
+            writeln!(out, "{temperature},mean-time,{mean_volume:.4},,{spont_sites:.4},,{table},cutoff {cutoff:.1}; tau {tau_cell:.6e} s; nu=(2/3)*D/a^2; D from Table 1").unwrap();
+            eprintln!("run14 {temperature} K cutoff {cutoff:.1} mean-time {mean_volume:.2} tau {tau_cell:.3e}");
             writeln!(out, "{temperature},{cutoff:.1},{total:.4},{sigma:.4},{spont_sites:.4},{kinetic_sites:.4},{table},return {return_sites}; delta {delta:.4}; eight translation channels").unwrap();
             eprintln!("run13 {temperature} K cutoff {cutoff:.1} V {total:.2} ± {sigma:.2} spont {spont_sites:.1} return {return_sites} delta {delta:.2}");
-            if delta.is_finite() && delta.abs() < 1.0 && cutoff > 10.8 {
-                break;
-            }
             previous = Some(total);
         }
     }
@@ -8696,10 +8707,54 @@ fn defect_pair_run13() {
             }
         }
     }
+    if job == "all" || job == "pafi" {
+        run14_rotation_pafi_700(&copper);
+    }
     if job == "all" || job == "assemble" {
         assemble_run13();
     }
     eprintln!("run13 {job} {:.1} min", started.elapsed().as_secs_f64() / 60.0);
+}
+
+fn run14_rotation_pafi_700(copper: &FastCopper) {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks/defect_pair_run14.csv");
+    if !path.exists() {
+        let mut header = File::create(&path).expect("run14");
+        writeln!(header, "kind,shell,orientation,hop,direction,temperature_K,dE0_eV,zero_T_eV,dF_eV,dF_error_eV,nu_Hz,rate_Hz,outcome,band_force,note").unwrap();
+    }
+    let prior = std::fs::read_to_string(&path).unwrap_or_default();
+    if prior.lines().any(|line| line.starts_with("pafi,isolated,100,rotate,tangential,700,") && line.split(',').nth(12) == Some("rated")) {
+        eprintln!("700 K rotation PAFI already rated");
+        return;
+    }
+    let checkpoint = Mutex::new(File::options().append(true).open(&path).expect("append"));
+    let temperature = 700.0_f64;
+    let a = demkowicz_lattice(temperature);
+    let repeats = 8usize;
+    let (perfect, cell) = fcc(repeats, a);
+    let (_, _, bulk) = copper.evaluate(perfect.view(), cell);
+    let job = rotation_job(copper, repeats, a);
+    let dumbbell = [job.mobile[0], job.mobile[1]];
+    let mut reactant = job.positions.clone();
+    relax_fast(copper, &mut reactant, job.cell, 2.0e-4, 100);
+    let held = FastHeld { copper, cell: job.cell };
+    let (reactant_energy, _) = held.eval(reactant.view()).unwrap_or((f64::NAN, Array1::zeros(1)));
+    let (hint, mode) = rotation_hint(&reactant, dumbbell);
+    let Some(hit) = tight_dimer(copper, job.cell, hint, mode) else {
+        write_tight(&checkpoint, "pafi,isolated,100,rotate,tangential,700,,,,,,,not_converged,,dimer failed");
+        return;
+    };
+    write_tight(&checkpoint, &format!(
+        "rotation,isolated,100,rotate,{temperature},{:.6},{:.6e},,,index1 {}; Table 1 lattice a={a:.3}",
+        hit.energy - reactant_energy, hit.force, hit.index1
+    ));
+    let mut product = hit.positions.clone();
+    let norm = hit.mode.dot(&hit.mode).sqrt().max(1.0e-8);
+    for i in 0..product.len() {
+        product[i] += 0.35 * hit.mode[i] / norm;
+    }
+    relax_fast(copper, &mut product, job.cell, 2.0e-4, 80);
+    record_pafi(copper, &checkpoint, bulk, "isolated", "100", "rotate", "tangential", temperature, &reactant, reactant_energy, &hit.positions, &hit.mode, &product, job.cell, true);
 }
 
 fn neighbor_translation_barrier(temperature: f64) -> Option<f64> {

@@ -1,0 +1,2 @@
+kind,shell,orientation,hop,direction,temperature_K,dE0_eV,zero_T_eV,dF_eV,dF_error_eV,nu_Hz,rate_Hz,outcome,band_force,note
+rotation,isolated,100,rotate,700,0.218606,1.156238e-3,,,index1 true; Table 1 lattice a=3.655

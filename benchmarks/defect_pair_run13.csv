@@ -65,3 +65,4 @@ switch,8,300,3.631,2.568,100,spontaneous,,,,,relax recombines
 switch,8,300,3.631,2.568,001,translation,-0.000159,1.498178e-3,,,transplanted <110> saddle; translation 0.093402; index1 true
 switch,8,300,3.631,3.631,100,spontaneous,,,,,quench recombines
 switch,8,300,3.631,3.631,010,rotation,0.599173,4.746080e-2,,,transplanted <110> saddle; translation 0.093402; index1 false
+pafi,isolated,100,rotate,tangential,700,0.218606,0.218434,0.114047,0.015356,1.39016835e12,5.71620143e10,rated,0.00170,kappa 0.272359 error 0.576551; normal from reactant to product; free-energy maximum

@@ -44,3 +44,4 @@ pafi,3.639,010,translate,tangential,300,0.000000,,,,,,disconnected,0.00000,
 pafi,4.456,100,translate,away,300,0.102482,1.01182951e-1,9.65988411e-2,4.18999926e-3,2.15045315e12,,rated,0.00998,
 pafi,5.146,001,translate,away,300,0.099501,9.80564618e-2,9.83176678e-2,4.40365428e-3,2.12045776e12,1.40475723e10,rated,0.01000,
 pafi,isolated,100,translate,toward,700,0.085962,0.085858,0.072887,0.009099,1.39822954e12,8.74318025e10,rated,0.00139,kappa 0.209340 error 0.389305; tangent; free-energy maximum
+pafi,isolated,100,rotate,tangential,700,0.218606,0.218434,0.114047,0.015356,1.39016835e12,5.71620143e10,rated,0.00170,kappa 0.272359 error 0.576551; normal from reactant to product; free-energy maximum
