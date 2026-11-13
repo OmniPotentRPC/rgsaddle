@@ -205,5 +205,8 @@ jobs:
         run: cargo clippy --features capi,verify --all-targets -- -D warnings
       - name: Build the C ABI library
         run: cargo build --features capi,verify
+      # The same C and C++ ABI smoke tests as the ci workflow run here.
       - name: Test
+        env:
+          RGSADDLE_REQUIRE_CAPI_SMOKE: "1"
         run: cargo test --features capi,verify

@@ -17,11 +17,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      # The C ABI smoke test links the cdylib from target/debug. cargo test
-      # builds the library for the test harness only, so build it first.
-      - name: Build the C ABI library
-        run: cargo build --features capi --verbose
+      # c_abi, cxx_abi, irc_abi, ocineb_abi, solid_abi, solid_bain_lj, and
+      # stencil_cxx compile the C and C++ smoke programs against the cdylib
+      # produced for this test build. They do not need a separate cargo build
+      # or a copy of librgsaddle.so. The variable below makes a missing
+      # compiler fail the job instead of skipping those tests.
       - name: Test
+        env:
+          RGSADDLE_REQUIRE_CAPI_SMOKE: "1"
         run: cargo test --features capi --verbose
       - name: Clippy
         run: cargo clippy --features capi -- -D warnings

@@ -58,6 +58,7 @@ rug = { version = "1.27", optional = true }
 
 [dev-dependencies]
 approx = "0.5"
+cc = "1"
 faer = { version = "0.24.4", default-features = false, features = ["std", "linalg"] }
 sha2 = "0.10"
 

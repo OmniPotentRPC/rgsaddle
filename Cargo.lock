@@ -1785,6 +1785,7 @@ name = "rgsaddle"
 version = "0.3.2"
 dependencies = [
  "approx",
+ "cc",
  "dlpk",
  "eindir-core",
  "faer",

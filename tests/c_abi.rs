@@ -1,67 +1,24 @@
 //! Compiles and runs tests/c/abi_smoke.c against the built cdylib.
-//! Skips when no C compiler is available.
+//! Skips when no C compiler is installed. A compiler that cannot
+//! compile fails the test. `RGSADDLE_REQUIRE_CAPI_SMOKE=1` turns the
+//! skip into a failure.
 
-use std::path::PathBuf;
-use std::process::Command;
+#[path = "common/abi_smoke.rs"]
+mod abi_smoke;
 
-fn cc() -> Option<String> {
-    [
-        std::env::var("CC").ok(),
-        Some("cc".into()),
-        Some("gcc".into()),
-    ]
-    .into_iter()
-    .flatten()
-    .find(|c| Command::new(c).arg("--version").output().is_ok())
-}
+use abi_smoke::Smoke;
 
 #[test]
 #[cfg_attr(not(feature = "capi"), ignore)]
 fn c_abi_smoke() {
-    let Some(cc) = cc() else {
-        eprintln!("no C compiler; skipping");
-        return;
-    };
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let out = std::env::temp_dir().join(format!("rgsaddle_abi_smoke_{}", std::process::id()));
-
-    // The cdylib lives beside the test binary.
-    let mut libdir = std::env::current_exe().unwrap();
-    libdir.pop();
-    if libdir.ends_with("deps") {
-        libdir.pop();
-    }
-    if !libdir.join("librgsaddle.so").exists() {
-        let deps = libdir.join("deps");
-        if deps.join("librgsaddle.so").exists() {
-            libdir = deps;
-        }
-    }
-
-    let status = Command::new(&cc)
-        .arg(root.join("tests/c/abi_smoke.c"))
-        .arg("-I")
-        .arg(root.join("include"))
-        .arg("-L")
-        .arg(&libdir)
-        .arg("-lrgsaddle")
-        .arg("-lm")
-        .arg("-o")
-        .arg(&out)
-        .status()
-        .expect("compile the C smoke test");
-    assert!(status.success(), "C smoke test failed to build");
-
-    let run = Command::new(&out)
-        .env("LD_LIBRARY_PATH", &libdir)
-        .output()
-        .expect("run the C smoke test");
-    let stdout = String::from_utf8_lossy(&run.stdout);
-    let stderr = String::from_utf8_lossy(&run.stderr);
-    assert!(
-        run.status.success(),
-        "C smoke test failed:\nstdout: {stdout}\nstderr: {stderr}"
-    );
-    assert!(stdout.contains("RGSADDLE_C_ABI_OK"), "stdout: {stdout}");
-    let _ = std::fs::remove_file(&out);
+    abi_smoke::run(&Smoke {
+        label: "C smoke test",
+        source: "tests/c/abi_smoke.c",
+        output_stem: "rgsaddle_abi_smoke",
+        cxx: false,
+        compile_args: &[],
+        link_libm: true,
+        token: "RGSADDLE_C_ABI_OK",
+        echo: false,
+    });
 }
