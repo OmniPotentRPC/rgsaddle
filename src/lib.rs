@@ -69,6 +69,7 @@ mod kani_proofs;
 mod differential;
 
 mod rigid_frame;
+pub use rigid_frame::{project_rigid_force, rigid_directions};
 mod sqnm;
 pub use autoneb::{AutoNeb, AutoNebInterpolant, AutoNebReport, AutoNebTuning};
 pub use band::{

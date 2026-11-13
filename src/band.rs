@@ -234,6 +234,11 @@ pub struct BandConfig {
     pub masses: Option<Vec<f64>>,
     /// `frozen[i]` pins atom `i`. Length N. `None` pins nothing.
     pub frozen: Option<Vec<bool>>,
+    /// Remove rotations as well as translations, with the column-pivoted
+    /// rank test. Off by default: a free image still drops only its mean
+    /// force. On, every interior image enters that rank test. A cell
+    /// leaves rotations off either way.
+    pub project_rotation: bool,
     /// Band stepper. FIRE by default (eOn's velocity NEB stepper).
     /// L-BFGS runs under rgmin's `Accept::Step`: the two-loop
     /// direction, capped per atom, one band evaluation per step and no
@@ -289,6 +294,7 @@ impl Default for BandConfig {
             remove_translation: true,
             masses: None,
             frozen: None,
+            project_rotation: false,
             method: Method::Fire {
                 kind: rgmin::FireKind::V2,
             },
@@ -925,21 +931,23 @@ pub(crate) fn remove_net_translation<S: DataMut<Elem = f64>>(force: &mut ArrayBa
 
 /// [`remove_net_translation`] at `pos`, with masses and a freeze mask.
 ///
-/// Without either, the mean of a free image is subtracted as before.
-/// With either, the force goes through the column-pivoted QR: rotations
-/// stay off, frozen components are zeroed first, and the centre of mass
-/// is mass-weighted.
+/// Without masses, a freeze mask, or `rotation`, the mean of a free
+/// image is subtracted as before. Otherwise the force goes through the
+/// column-pivoted QR. Frozen components are zeroed first and the centre
+/// of mass is mass-weighted.
 pub(crate) fn remove_net_translation_at<S: DataMut<Elem = f64>>(
     force: &mut ArrayBase<S, Ix1>,
     pos: Option<&[f64]>,
     masses: Option<&[f64]>,
     frozen: Option<&[bool]>,
+    rotation: bool,
 ) {
     let n = force.len() / 3;
     if n < 2 || force.len() != 3 * n {
         return;
     }
-    let weighed = masses.is_some() || frozen.is_some_and(|mask| mask.iter().any(|atom| *atom));
+    let weighed =
+        rotation || masses.is_some() || frozen.is_some_and(|mask| mask.iter().any(|atom| *atom));
     if !weighed {
         remove_net_translation(force);
         return;
@@ -956,7 +964,7 @@ pub(crate) fn remove_net_translation_at<S: DataMut<Elem = f64>>(
             fallback.as_slice()
         }
     };
-    crate::rigid_frame::RigidFrame::new().project(buf, at, masses, frozen, false);
+    crate::rigid_frame::RigidFrame::new().project(buf, at, masses, frozen, rotation);
     force.assign(&owned);
 }
 
@@ -1217,6 +1225,7 @@ fn solid_image(
             positions.row(i).as_slice(),
             config.masses.as_deref(),
             config.frozen.as_deref(),
+            config.project_rotation && config.cell.is_none(),
         );
         projected.slice_mut(s![..dof]).assign(&atomic);
     }
@@ -1415,6 +1424,7 @@ fn image_force(
             pos.as_slice(),
             config.masses.as_deref(),
             config.frozen.as_deref(),
+            config.project_rotation && config.cell.is_none(),
         );
     }
     let driving = match metric {
@@ -1467,12 +1477,14 @@ fn image_force(
                     pos.as_slice(),
                     config.masses.as_deref(),
                     config.frozen.as_deref(),
+                    config.project_rotation && config.cell.is_none(),
                 );
                 remove_net_translation_at(
                     &mut projected,
                     pos.as_slice(),
                     config.masses.as_deref(),
                     config.frozen.as_deref(),
+                    config.project_rotation && config.cell.is_none(),
                 );
             }
             if !driving.dot(&driving).is_finite() {
@@ -1708,6 +1720,7 @@ fn image_force_into(
             row(i).as_slice(),
             config.masses.as_deref(),
             config.frozen.as_deref(),
+            config.project_rotation && config.cell.is_none(),
         );
     }
     Ok(())

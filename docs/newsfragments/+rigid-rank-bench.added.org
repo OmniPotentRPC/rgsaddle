@@ -1,0 +1,3 @@
+Dimer, Lanczos and CI-NEB now have force-call rows on a far
+Lennard-Jones trimer, a near-linear trimer and a frozen slab.
+The raw counts are validation/rigid_rank_bench.csv.

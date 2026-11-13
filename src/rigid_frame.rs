@@ -29,6 +29,10 @@ impl RigidFrame {
         frozen: Option<&[bool]>,
         rotation: bool,
     ) {
+        if legacy_rank() {
+            project_legacy(force, pos, rotation);
+            return;
+        }
         let n = force.len();
         if n < 6 || n != pos.len() || n % 3 != 0 {
             return;
@@ -66,6 +70,9 @@ impl RigidFrame {
         frozen: Option<&[bool]>,
         rotation: bool,
     ) -> Option<Array2<f64>> {
+        if legacy_rank() {
+            return basis_legacy(pos, rotation);
+        }
         let n = pos.len();
         if n < 6 || n % 3 != 0 {
             return None;
@@ -86,6 +93,118 @@ impl RigidFrame {
         }
         Some(q)
     }
+}
+
+/// Develop's Gram–Schmidt, selected by `RGSADDLE_RIGID_LEGACY=1`.
+///
+/// Rotations are about the geometric centroid. The cutoff is
+/// `1e-8 * ||column||` before orthogonalisation, and frozen atoms are
+/// not removed before the rank test. That is the pair-model basis on
+/// `3c44bf9b`.
+fn legacy_rank() -> bool {
+    std::env::var_os("RGSADDLE_RIGID_LEGACY").is_some_and(|v| v == "1")
+}
+
+fn project_legacy(force: &mut [f64], pos: &[f64], rotation: bool) {
+    let Some(q) = basis_legacy(pos, rotation) else {
+        return;
+    };
+    for col in q.columns() {
+        let mut dot = 0.0;
+        for (f, c) in force.iter().zip(col.iter()) {
+            dot += f * c;
+        }
+        for (f, c) in force.iter_mut().zip(col.iter()) {
+            *f -= dot * c;
+        }
+    }
+}
+
+fn basis_legacy(pos: &[f64], rotation: bool) -> Option<Array2<f64>> {
+    let n = pos.len();
+    let atoms = n / 3;
+    if n < 6 || n != 3 * atoms {
+        return None;
+    }
+    let rotate = rotation && atoms >= 3;
+    let mut centre = [0.0; 3];
+    for atom in 0..atoms {
+        centre[0] += pos[3 * atom] / atoms as f64;
+        centre[1] += pos[3 * atom + 1] / atoms as f64;
+        centre[2] += pos[3 * atom + 2] / atoms as f64;
+    }
+    let mut seeds: Vec<Vec<f64>> = Vec::new();
+    for axis in 0..3 {
+        let mut t = vec![0.0; n];
+        for atom in 0..atoms {
+            t[3 * atom + axis] = 1.0;
+        }
+        seeds.push(t);
+        if rotate {
+            let mut r = vec![0.0; n];
+            for atom in 0..atoms {
+                let p = [
+                    pos[3 * atom] - centre[0],
+                    pos[3 * atom + 1] - centre[1],
+                    pos[3 * atom + 2] - centre[2],
+                ];
+                let mut e = [0.0; 3];
+                e[axis] = 1.0;
+                r[3 * atom] = p[1] * e[2] - p[2] * e[1];
+                r[3 * atom + 1] = p[2] * e[0] - p[0] * e[2];
+                r[3 * atom + 2] = p[0] * e[1] - p[1] * e[0];
+            }
+            seeds.push(r);
+        }
+    }
+    let mut kept: Vec<Vec<f64>> = Vec::new();
+    for mut v in seeds {
+        let scale = v.iter().map(|c| c * c).sum::<f64>().sqrt();
+        for q in &kept {
+            let c = v.iter().zip(q).map(|(a, b)| a * b).sum::<f64>();
+            for (a, b) in v.iter_mut().zip(q) {
+                *a -= c * b;
+            }
+        }
+        let norm = v.iter().map(|c| c * c).sum::<f64>().sqrt();
+        if norm > 1e-8 * scale.max(1.0) {
+            for c in &mut v {
+                *c /= norm;
+            }
+            kept.push(v);
+        }
+    }
+    let mut q = Array2::zeros((n, kept.len()));
+    for (j, v) in kept.iter().enumerate() {
+        for (i, c) in v.iter().enumerate() {
+            q[(i, j)] = *c;
+        }
+    }
+    Some(q)
+}
+
+/// Rows of the rigid basis. One row is one direction. Empty below two atoms.
+pub fn rigid_directions(
+    pos: &[f64],
+    masses: Option<&[f64]>,
+    frozen: Option<&[bool]>,
+    rotation: bool,
+) -> Array2<f64> {
+    match RigidFrame::new().basis(pos, masses, frozen, rotation) {
+        Some(q) => q.t().to_owned(),
+        None => Array2::zeros((0, pos.len())),
+    }
+}
+
+/// Project `force` onto the complement of the rigid basis.
+pub fn project_rigid_force(
+    force: &mut [f64],
+    pos: &[f64],
+    masses: Option<&[f64]>,
+    frozen: Option<&[bool]>,
+    rotation: bool,
+) {
+    RigidFrame::new().project(force, pos, masses, frozen, rotation);
 }
 
 fn modes(pos: &[f64], masses: Option<&[f64]>, frozen: Option<&[bool]>, rotation: bool) -> Vec<f64> {
@@ -579,6 +698,32 @@ mod tests {
             (kept[3] - 1.0).abs() < 1e-8,
             "radial push removed {}",
             kept[3]
+        );
+    }
+
+    #[test]
+    fn legacy_rank_drops_a_near_linear_rotation_and_ignores_a_frozen_slab() {
+        let delta = 1.0e-9;
+        let near = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, -1.0, delta, 0.0];
+        let new_near = RigidFrame::new().basis(&near, None, None, true).unwrap();
+        let old_near = basis_legacy(&near, true).unwrap();
+        assert!(
+            new_near.ncols() > old_near.ncols(),
+            "pivoted {} vs legacy {}",
+            new_near.ncols(),
+            old_near.ncols()
+        );
+        let slab = [0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.4, 0.6, 1.8];
+        let frozen = [true, true, true, false];
+        let new_slab = RigidFrame::new()
+            .basis(&slab, None, Some(&frozen), true)
+            .unwrap();
+        let old_slab = basis_legacy(&slab, true).unwrap();
+        assert_eq!(new_slab.ncols(), 0);
+        assert!(
+            old_slab.ncols() >= 5,
+            "legacy slab rank {}",
+            old_slab.ncols()
         );
     }
 

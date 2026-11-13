@@ -131,6 +131,7 @@ fn band_forces_with_gate<S: BandSurface + ?Sized>(
                 positions.row(i).as_slice(),
                 config.masses.as_deref(),
                 config.frozen.as_deref(),
+                config.project_rotation && config.cell.is_none(),
             );
         }
         force
