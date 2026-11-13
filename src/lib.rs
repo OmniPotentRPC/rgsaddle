@@ -50,6 +50,7 @@ pub mod capi;
 pub mod connect;
 pub mod error;
 pub mod idpp;
+pub mod indexk;
 pub mod minmode;
 pub mod nichols;
 pub mod ocineb;
@@ -79,6 +80,10 @@ pub use band::{
 pub use connect::{ConnectConfig, ConnectProfile, ConnectReport, connect};
 pub use error::SaddleError;
 pub use idpp::{IdppConfig, SidppConfig, idpp_path, linear_path, sidpp_path};
+pub use indexk::{
+    BlockEigenKind, HessianProduct, IndexKConfig, IndexKReport, IndexKSession, WithHessian,
+    indexk_step, reflect_force, translated_force,
+};
 pub use minmode::{
     FiniteDifference, MinModeConfig, MinModeKind, MinModeReport, MinModeSession, MinModeStatus,
     ModeEstimate, PointSurface, RaisedStep, halve_raised_energy,

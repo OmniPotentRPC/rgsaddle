@@ -18,6 +18,7 @@ The table below lists the main types.
 | =BandSurface=                  | Host potential on a band (energies + gradients per image)                                                          |
 | =BandReport=                   | =status=, =max_force=, =ci_index=, =iteration=, =surface_rows=, =curvature= (refinement steps only)                |
 | =MinModeSession=               | Dimer or Lanczos lowest-mode search, same stepping contract; =set_position=, =set_mode=, =estimate_mode= for reuse; =set_torque_window= sets the dimer torque window apart from =rotation_tol= |
+| =IndexKSession=                | Index-k minimum-mode step. =k = 1= is =MinModeSession=. =indexk_step= is one shot. =reflect_force= and =translated_force= are the subspace maps |
 | =Index1Session=                | Restricted-step partitioned RFO, Powell or Bofill update. =Index1Config= is non-exhaustive. =with_sparse_pattern= selects a CPR seed |
 | =SparsityPattern=              | Atom-level symmetric CSR from a linkcell cutoff walk. Diagonal blocks are implied and not stored as loops          |
 | =Colouring=                    | Smallest-last distance-2 colouring and the max-degree lower bound                                                  |
@@ -72,7 +73,7 @@ A failed callback leaves it unchanged.
 Its =rotation_angle_tol= field stops a dimer rotation once the optimal angle falls under this tolerance in radians.
 The Rust default is five degrees, 0 turns the stop off, and a C config stores the value it is given.
 Both fields are read only from a config whose version minor is 5 or newer.
-=RGSADDLE_ABI_MINOR= is 33.
+=RGSADDLE_ABI_MINOR= is 37.
 From minor 24, =rgsaddle_sella_saddle_set_symmetrized_ritz= sets =SellaSaddleConfig::symmetrized_ritz= from 0 or 1.
 It returns =RGSADDLE_INVALID_PARAMETER= for any other value.
 =rgsaddle_sella_saddle_set_small_system_atom_ceiling= (minor 25) sets =SellaSaddleConfig::small_system_atom_ceiling= from 0 or 1.

@@ -103,6 +103,22 @@ inline rgsaddle_minmode_config_t minmode_config() {
     return c;
 }
 
+inline rgsaddle_indexk_config_t indexk_config() {
+    rgsaddle_indexk_config_t c{};
+    c.version.major = RGSADDLE_ABI_MAJOR;
+    c.version.minor = RGSADDLE_ABI_MINOR;
+    c.index = 1;
+    c.method = RGSADDLE_MINMODE_DIMER;
+    c.dr = 1e-3;
+    c.rotation_tol = 1e-4;
+    c.max_rotations = 20;
+    c.force_tol = 1e-3;
+    c.max_move = 0.2;
+    c.residual_tol = 1e-4;
+    c.max_block_iterations = 30;
+    return c;
+}
+
 inline rgsaddle_irc_config_t irc_config() {
     rgsaddle_irc_config_t c{};
     c.version.major = RGSADDLE_ABI_MAJOR;
@@ -458,6 +474,80 @@ private:
     RgsaddleOcineb* handle_ = nullptr;
     std::int64_t n_images_ = 0;
     std::int64_t n_atoms_ = 0;
+};
+
+class IndexK {
+public:
+    IndexK(rgsaddle_indexk_config_t const& config, std::int64_t n_atoms,
+           double const* position, double const* modes)
+        : n_atoms_(n_atoms), k_(config.index) {
+        if (!abi_compatible()) {
+            throw std::runtime_error("rgsaddle ABI 1.15 or later is required");
+        }
+        handle_ = rgsaddle_indexk_create(&config, n_atoms, position, modes);
+        if (handle_ == nullptr) {
+            throw std::runtime_error("rgsaddle_indexk_create failed");
+        }
+    }
+
+    IndexK(IndexK const&) = delete;
+    IndexK& operator=(IndexK const&) = delete;
+
+    IndexK(IndexK&& other) noexcept
+        : handle_(other.handle_), n_atoms_(other.n_atoms_), k_(other.k_) {
+        other.handle_ = nullptr;
+    }
+
+    IndexK& operator=(IndexK&& other) noexcept {
+        if (this != &other) {
+            reset_handle();
+            handle_ = other.handle_;
+            n_atoms_ = other.n_atoms_;
+            k_ = other.k_;
+            other.handle_ = nullptr;
+        }
+        return *this;
+    }
+
+    ~IndexK() { reset_handle(); }
+
+    Report step(rgsaddle_surface_fn surface, rgsaddle_hessian_fn hessian, void* user) {
+        rgsaddle_report_t out{};
+        check(rgsaddle_indexk_step(handle_, surface, hessian, user, &out));
+        return Report::from_c(out);
+    }
+
+    void set_position(double const* position, double const* gradient = nullptr) {
+        check(rgsaddle_indexk_set_position(handle_, position, gradient));
+    }
+
+    void position(double* out) const { check(rgsaddle_indexk_position(handle_, out)); }
+
+    void modes(double* modes, double* curvatures) const {
+        check(rgsaddle_indexk_modes(handle_, modes, curvatures));
+    }
+
+    void translated(double* out) const { check(rgsaddle_indexk_translated(handle_, out)); }
+
+    [[nodiscard]] std::vector<double> position() const {
+        std::vector<double> out(static_cast<std::size_t>(3 * n_atoms_));
+        position(out.data());
+        return out;
+    }
+
+    [[nodiscard]] RgsaddleIndexK* native() const noexcept { return handle_; }
+
+private:
+    void reset_handle() {
+        if (handle_ != nullptr) {
+            rgsaddle_indexk_free(handle_);
+            handle_ = nullptr;
+        }
+    }
+
+    RgsaddleIndexK* handle_ = nullptr;
+    std::int64_t n_atoms_ = 0;
+    std::int32_t k_ = 1;
 };
 
 }  // namespace rgsaddle

@@ -1,7 +1,7 @@
 #+TITLE: Use the C and C++ interfaces
 #+OPTIONS: toc:nil num:nil
 
-~include/rgsaddle.h~ declares the C application binary interface (ABI), major 1, minor 36. It preserves the main band, minimum-mode and index-1 layouts and adds intrinsic reaction coordinate (IRC), Sella, constraint and geometry controls. Include this header rather than duplicating its structures. Check ~rgsaddle_abi_stamp~ before constructing a session.
+~include/rgsaddle.h~ declares the C application binary interface (ABI), major 1, minor 37. It preserves the main band, minimum-mode and index-1 layouts and adds intrinsic reaction coordinate (IRC), Sella, constraint and geometry controls. Include this header rather than duplicating its structures. Check ~rgsaddle_abi_stamp~ before constructing a session.
 
 A surface callback returns ~rgsaddle_status_t~ and receives one ~rgsaddle_surface_request_t~. Positions and gradients are image-major Cartesian triples. The host supplies the energy and gradient arrays for every requested image; the library performs no Message Passing Interface (MPI) communication.
 
@@ -35,6 +35,8 @@ The value 0 keeps that radius alone.
 1 is the default.
 Any other value returns ~RGSADDLE_INVALID_PARAMETER~ and leaves the session unchanged.
 A library below minor 25 does not export the symbol; the Sella how-to describes the ceiling.
+
+From ABI minor 37, ~rgsaddle_indexk_create~ opens an index-k minimum-mode session. ~rgsaddle_indexk_step~ takes the surface and an optional ~rgsaddle_hessian_fn~; a null Hessian estimates the action from the surface. ~rgsaddle_indexk_modes~ writes the n-by-k row-major block and the k curvatures. ~rgsaddle_indexk_translated~ writes the effective gradient of the last step. ~rgsaddle_reflect_force~ is the Householder product ~F - 2 V V^T F~; for k = 1 that is ~force - v * dot(force, v) * 2~, and the output must not alias the force. k = 1 follows the one-mode dimer or Lanczos step. ~RGSADDLE_MINMODE_LOBPCG~ at k = 1 uses Lanczos. A non-positive k makes create return NULL. ~include/rgsaddle/session.hpp~ wraps the session as ~IndexK~. A library below minor 37 does not export the symbols.
 
 ~rgsaddle_minmode_set_torque_window~ (ABI minor 32) takes -1, 0 or 1.
 The value 1 turns on the classic dimer torque window.

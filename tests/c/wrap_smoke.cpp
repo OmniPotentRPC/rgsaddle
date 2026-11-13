@@ -93,6 +93,31 @@ int main() {
             break;
         }
     }
+    auto ic = rgsaddle::indexk_config();
+    ic.force_tol = 1e-8;
+    ic.max_move = 0.1;
+    const double origin[3] = {0.4, 0.2, -0.1};
+    const double guess[3] = {1.0, 0.2, 0.0};
+    rgsaddle::IndexK search(ic, 1, origin, guess);
+    auto stepped = search.step(surface, nullptr, nullptr);
+    auto moved = search.position();
+    if (moved.size() != 3 || stepped.max_force < 0.0) {
+        std::fprintf(stderr, "index-k wrapper\n");
+        return 1;
+    }
+    ic.index = 0;
+    bool rejected = false;
+    try {
+        rgsaddle::IndexK bad(ic, 1, origin, guess);
+        (void)bad;
+    } catch (std::runtime_error const&) {
+        rejected = true;
+    }
+    if (!rejected) {
+        std::fprintf(stderr, "index 0 was accepted\n");
+        return 1;
+    }
+
     std::printf("RGSADDLE_CXX_WRAP_OK force=%.6g iter=%lld\n", last.max_force,
                 static_cast<long long>(last.iteration));
     return 0;

@@ -31,7 +31,7 @@ use crate::tangent::TangentKind;
 /// The RGSADDLE ABI MAJOR.
 pub const RGSADDLE_ABI_MAJOR: u32 = 1;
 /// The RGSADDLE ABI MINOR.
-pub const RGSADDLE_ABI_MINOR: u32 = 36;
+pub const RGSADDLE_ABI_MINOR: u32 = 37;
 
 /// Band config bit 0. The C step calls the surface once per image
 /// carried by the evaluation: every image on the first evaluation
@@ -1864,6 +1864,8 @@ pub unsafe extern "C" fn rgsaddle_idpp_path(
     }
 }
 
+mod indexk;
+pub use indexk::*;
 mod sessions;
 pub use sessions::*;
 mod quickmin;

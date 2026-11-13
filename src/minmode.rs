@@ -1376,6 +1376,10 @@ pub struct MinModeSession {
     lbfgs_project: bool,
     /// `(s, y)` the solver accepted, before projection onto the mode.
     lbfgs_shadow: VecDeque<(Array1<f64>, Array1<f64>)>,
+    /// Effective gradient of the last successful estimate: the reflected
+    /// force when the curvature is negative, and the reversed parallel
+    /// part when it is not. The index-k step reads this for `k = 1`.
+    last_translated: Option<Array1<f64>>,
     /// The first surface error raised inside the translation oracle
     /// during the current step; the rgmin oracle signature has no
     /// error channel of its own.
@@ -1391,7 +1395,7 @@ pub struct MinModeSession {
 /// timestep and is unused by L-BFGS. An empty L-BFGS memory with the
 /// NEB guards on still scales by 0.01; the curvature seed bypasses that
 /// one step instead of changing the guard.
-fn build_solver(
+pub(crate) fn build_solver(
     method: &Method,
     n: usize,
     max_move: f64,
@@ -1514,6 +1518,7 @@ impl MinModeSession {
             cg_alpha: None,
             lbfgs_project: false,
             lbfgs_shadow: VecDeque::new(),
+            last_translated: None,
         })
     }
 
@@ -1666,6 +1671,12 @@ impl MinModeSession {
         self.curvature
     }
 
+    /// Effective gradient of the last step, the vector the translation
+    /// followed. `None` before the first successful estimate.
+    pub fn translated_force(&self) -> Option<ArrayView1<'_, f64>> {
+        self.last_translated.as_ref().map(|force| force.view())
+    }
+
     /// Drop optimizer history, dimer rotation history, carried
     /// curvature, and the cached centre gradient at a surface-epoch
     /// boundary. The mode stays as the next seed.
@@ -1682,6 +1693,7 @@ impl MinModeSession {
         self.mode_fresh = false;
         self.pending_turn = 0.0;
         self.lanczos_carry = None;
+        self.last_translated = None;
     }
 
     /// Move to `x` and keep the session: the mode stays as the next
@@ -1724,6 +1736,7 @@ impl MinModeSession {
         self.mode_fresh = false;
         self.pending_turn = 0.0;
         self.lanczos_carry = None;
+        self.last_translated = None;
         Ok(())
     }
 
@@ -1745,6 +1758,7 @@ impl MinModeSession {
         self.pending_turn = 0.0;
         self.lanczos_ready = false;
         self.lanczos_carry = None;
+        self.last_translated = None;
         Ok(())
     }
 
@@ -2665,6 +2679,7 @@ impl MinModeSession {
             }
         }
 
+        self.last_translated = Some(translated_gradient(&g0, &self.mode, curvature));
         let max_force = self.force_gate.value(g0.view());
         if converged(max_force, curvature, self.config.force_tol) {
             return Ok(MinModeReport {

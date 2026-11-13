@@ -45,6 +45,8 @@ A calculator exception, including =KeyboardInterrupt=, propagates out of =__call
 
 =_core.project_band= projects an evaluated band. =_core.MinMode= and =_core.SellaSaddle= are the sessions those classes drive. A surface callback receives one image shaped =(1, 3N)= and returns =(energy, gradient)=.
 
+The index-k step has no Python session name. It is =rgsaddle_indexk_step= in the C ABI and =rgsaddle::IndexK= in the C++ header.
+
 * Thread safety
 Immutable values, such as the enum members, are shared freely. =SurfaceAdapter= is a mutable session. Each call claims an atomic flag for the whole call and drops it when the call returns, including when the calculator raises. =raw_forces= is assigned before that drop. Do not call the adapter again from inside its own calculator.
 

@@ -562,6 +562,68 @@ int main(void) {
   if (st != RGSADDLE_OK) {
     return st;
   }
+
+  /* Index-k: a bad k is rejected, one dimer step matches the one-mode
+   * translation's curvature sign, and the reflected force is the
+   * Householder product. */
+  {
+    rgsaddle_indexk_config_t cfg;
+    memset(&cfg, 0, sizeof cfg);
+    cfg.version.major = RGSADDLE_ABI_MAJOR;
+    cfg.version.minor = RGSADDLE_ABI_MINOR;
+    cfg.index = 0;
+    cfg.method = RGSADDLE_MINMODE_DIMER;
+    cfg.dr = 1e-3;
+    cfg.rotation_tol = 1e-4;
+    cfg.max_rotations = 10;
+    cfg.force_tol = 1e-6;
+    cfg.max_move = 0.1;
+    cfg.residual_tol = 1e-6;
+    cfg.max_block_iterations = 20;
+    const double x0[3] = {0.35, 0.2, -0.1};
+    const double mode[3] = {1.0, 0.3, 0.0};
+    if (rgsaddle_indexk_create(&cfg, 1, x0, mode) != NULL) {
+      return fail(RGSADDLE_INVALID_PARAMETER, "index 0 was accepted");
+    }
+    cfg.index = 1;
+    RgsaddleIndexK *session = rgsaddle_indexk_create(&cfg, 1, x0, mode);
+    if (!session) {
+      return fail(RGSADDLE_SHAPE, "indexk create");
+    }
+    rgsaddle_report_t irep;
+    memset(&irep, 0, sizeof irep);
+    st = rgsaddle_indexk_step(session, surface_quad, NULL, NULL, &irep);
+    if (st != RGSADDLE_OK) {
+      return fail(st, "indexk step");
+    }
+    double at[3];
+    double modes[3];
+    double curvatures[1];
+    double translated[3];
+    if (rgsaddle_indexk_position(session, at) != RGSADDLE_OK ||
+        rgsaddle_indexk_modes(session, modes, curvatures) != RGSADDLE_OK ||
+        rgsaddle_indexk_translated(session, translated) != RGSADDLE_OK) {
+      return fail(RGSADDLE_SHAPE, "indexk readback");
+    }
+    if (!(curvatures[0] < 0.0) || irep.curvature != curvatures[0]) {
+      fprintf(stderr, "indexk curvature %g report %g\n", curvatures[0], irep.curvature);
+      return fail(RGSADDLE_SOLVER, "indexk curvature");
+    }
+    const double force[3] = {1.0, -2.0, 0.5};
+    const double axis[3] = {1.0, 0.0, 0.0};
+    double reflected[3];
+    st = rgsaddle_reflect_force(3, 1, force, axis, reflected);
+    if (st != RGSADDLE_OK || reflected[0] != -1.0 || reflected[1] != -2.0 ||
+        reflected[2] != 0.5) {
+      return fail(st == RGSADDLE_OK ? RGSADDLE_SOLVER : st, "reflect force");
+    }
+    if (rgsaddle_reflect_force(3, 1, force, axis, (double *)force) !=
+        RGSADDLE_INVALID_PARAMETER) {
+      return fail(RGSADDLE_INVALID_PARAMETER, "aliased reflect was accepted");
+    }
+    rgsaddle_indexk_free(session);
+  }
+
   printf("RGSADDLE_C_ABI_OK steps=%d ci=%lld\n", steps, (long long)rep.ci_index);
   return RGSADDLE_OK;
 }

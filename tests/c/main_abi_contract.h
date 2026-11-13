@@ -5,7 +5,7 @@
 #include <stddef.h>
 
 _Static_assert(RGSADDLE_ABI_MAJOR == 1u, "main ABI major");
-_Static_assert(RGSADDLE_ABI_MINOR == 36u, "ABI minor");
+_Static_assert(RGSADDLE_ABI_MINOR == 37u, "ABI minor");
 _Static_assert(RGSADDLE_BAND_NO_MIN_MODE == (1ull << 3), "band flag bit 3");
 _Static_assert(RGSADDLE_REQ_ONE_IMAGE == (1ull << 0), "request flag bit 0");
 _Static_assert(RGSADDLE_REQ_CLIMBING_IMAGE == (1ull << 1), "request flag bit 1");
@@ -334,5 +334,38 @@ _Static_assert(_Generic(&rgsaddle_sella_saddle_set_small_system_atom_ceiling, ab
 typedef rgsaddle_status_t (*abi32_signature_rgsaddle_minmode_set_torque_window)(
     RgsaddleMinMode *session, int32_t window);
 _Static_assert(_Generic(&rgsaddle_minmode_set_torque_window, abi32_signature_rgsaddle_minmode_set_torque_window: 1, default: 0), "rgsaddle_minmode_set_torque_window signature");
+
+typedef RgsaddleIndexK *(*abi35_signature_rgsaddle_indexk_create)(
+    const rgsaddle_indexk_config_t *config, int64_t n_atoms, const double *position,
+    const double *modes);
+_Static_assert(_Generic(&rgsaddle_indexk_create, abi35_signature_rgsaddle_indexk_create: 1, default: 0), "rgsaddle_indexk_create signature");
+
+typedef rgsaddle_status_t (*abi35_signature_rgsaddle_indexk_step)(
+    RgsaddleIndexK *session, rgsaddle_surface_fn surface, rgsaddle_hessian_fn hessian, void *user,
+    rgsaddle_report_t *out);
+_Static_assert(_Generic(&rgsaddle_indexk_step, abi35_signature_rgsaddle_indexk_step: 1, default: 0), "rgsaddle_indexk_step signature");
+
+typedef rgsaddle_status_t (*abi35_signature_rgsaddle_indexk_position)(const RgsaddleIndexK *session,
+                                                                     double *out);
+_Static_assert(_Generic(&rgsaddle_indexk_position, abi35_signature_rgsaddle_indexk_position: 1, default: 0), "rgsaddle_indexk_position signature");
+
+typedef rgsaddle_status_t (*abi35_signature_rgsaddle_indexk_modes)(const RgsaddleIndexK *session,
+                                                                  double *modes, double *curvatures);
+_Static_assert(_Generic(&rgsaddle_indexk_modes, abi35_signature_rgsaddle_indexk_modes: 1, default: 0), "rgsaddle_indexk_modes signature");
+
+typedef rgsaddle_status_t (*abi35_signature_rgsaddle_indexk_translated)(const RgsaddleIndexK *session,
+                                                                       double *out);
+_Static_assert(_Generic(&rgsaddle_indexk_translated, abi35_signature_rgsaddle_indexk_translated: 1, default: 0), "rgsaddle_indexk_translated signature");
+
+typedef rgsaddle_status_t (*abi35_signature_rgsaddle_indexk_set_position)(
+    RgsaddleIndexK *session, const double *position, const double *gradient);
+_Static_assert(_Generic(&rgsaddle_indexk_set_position, abi35_signature_rgsaddle_indexk_set_position: 1, default: 0), "rgsaddle_indexk_set_position signature");
+
+typedef void (*abi35_signature_rgsaddle_indexk_free)(RgsaddleIndexK *session);
+_Static_assert(_Generic(&rgsaddle_indexk_free, abi35_signature_rgsaddle_indexk_free: 1, default: 0), "rgsaddle_indexk_free signature");
+
+typedef rgsaddle_status_t (*abi35_signature_rgsaddle_reflect_force)(
+    int64_t n, int64_t k, const double *force, const double *modes, double *out);
+_Static_assert(_Generic(&rgsaddle_reflect_force, abi35_signature_rgsaddle_reflect_force: 1, default: 0), "rgsaddle_reflect_force signature");
 
 #endif

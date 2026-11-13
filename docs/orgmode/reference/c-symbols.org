@@ -143,4 +143,12 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =rgsaddle_stencil_positions=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_stencil_query=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_stencil_free=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
-- =rgsaddle_connect=. Purpose: Run the connect search. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_indexk_create=. Purpose: Create an index-k session. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_indexk_step=. Purpose: One index-k step. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_indexk_position=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_indexk_modes=. Purpose: Writes n-by-k row-major modes and k curvatures. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_indexk_translated=. Purpose: The effective gradient of the last successful step, length 3 * n_atoms. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_indexk_set_position=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_indexk_free=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_reflect_force=. Purpose: Householder reflection of force through an orthonormal n-by-k block. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_connect=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.

@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 36u
+#define RGSADDLE_ABI_MINOR 37u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -164,7 +164,12 @@ typedef enum {
 
 typedef enum {
   RGSADDLE_MINMODE_DIMER = 0,
-  RGSADDLE_MINMODE_LANCZOS = 1
+  RGSADDLE_MINMODE_LANCZOS = 1,
+  /**
+   * Block LOBPCG. Valid as rgsaddle_indexk_config_t.method (ABI minor 37).
+   * A one-mode session still treats any value other than Lanczos as the dimer.
+   */
+  RGSADDLE_MINMODE_LOBPCG = 2
 } rgsaddle_minmode_t;
 
 /**
@@ -1327,6 +1332,74 @@ typedef struct {
  * called with one image and writes the energy and the Cartesian
  * gradient. A non-OK surface status fails the search.
  */
+typedef struct RgsaddleIndexK RgsaddleIndexK;
+
+/**
+ * Index-k minimum-mode configuration, ABI minor 37.
+ * method is rgsaddle_minmode_t: dimer, Lanczos, or RGSADDLE_MINMODE_LOBPCG.
+ * The translator is FIRE. k == 1 is the one-mode step of that estimator
+ * (LOBPCG at k == 1 uses Lanczos). The dimer angle stop is five degrees,
+ * the Rust default; this struct has no angle field.
+ */
+typedef struct {
+  rgsaddle_version_t version;
+  uint64_t flags;
+  int32_t index; /**< k >= 1 */
+  int32_t method;
+  double dr;
+  double rotation_tol;
+  int64_t max_rotations;
+  double force_tol;
+  double max_move;
+  double residual_tol;
+  int32_t max_block_iterations;
+} rgsaddle_indexk_config_t;
+
+/**
+ * Create an index-k session. position holds 3 * n_atoms doubles.
+ * modes is row-major (3 * n_atoms) by k, or NULL for the coordinate seed.
+ * Returns NULL on an unknown major, a non-positive k, or a bad shape.
+ */
+RgsaddleIndexK *rgsaddle_indexk_create(const rgsaddle_indexk_config_t *config,
+                                       int64_t n_atoms, const double *position,
+                                       const double *modes);
+
+/**
+ * One index-k step. hessian NULL estimates the action from surface, as
+ * rgsaddle_minmode_step does. The report's curvature is the lowest of
+ * the k curvatures. Modes and the translated force are read back with
+ * rgsaddle_indexk_modes and rgsaddle_indexk_translated.
+ */
+rgsaddle_status_t rgsaddle_indexk_step(RgsaddleIndexK *session,
+                                       rgsaddle_surface_fn surface,
+                                       rgsaddle_hessian_fn hessian, void *user,
+                                       rgsaddle_report_t *out);
+
+rgsaddle_status_t rgsaddle_indexk_position(const RgsaddleIndexK *session,
+                                           double *out);
+/** Writes n-by-k row-major modes and k curvatures. */
+rgsaddle_status_t rgsaddle_indexk_modes(const RgsaddleIndexK *session,
+                                        double *modes, double *curvatures);
+/**
+ * The effective gradient of the last successful step, length 3 * n_atoms.
+ * RGSADDLE_NO_EVALUATION before the first step.
+ */
+rgsaddle_status_t rgsaddle_indexk_translated(const RgsaddleIndexK *session,
+                                             double *out);
+rgsaddle_status_t rgsaddle_indexk_set_position(RgsaddleIndexK *session,
+                                               const double *position,
+                                               const double *gradient);
+void rgsaddle_indexk_free(RgsaddleIndexK *session);
+
+/**
+ * Householder reflection of force through an orthonormal n-by-k block.
+ * modes is row-major. out must not alias force. k == 1 is
+ * force - v * dot(force, v) * 2.
+ */
+rgsaddle_status_t rgsaddle_reflect_force(int64_t n, int64_t k,
+                                         const double *force,
+                                         const double *modes, double *out);
+
 rgsaddle_status_t rgsaddle_connect(const rgsaddle_connect_config_t *config,
                                    int64_t n_atoms, const double *left,
                                    const double *right,
