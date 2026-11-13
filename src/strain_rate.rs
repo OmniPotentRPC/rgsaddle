@@ -397,6 +397,15 @@ pub struct SaddleSeed {
 /// the softest barrier of the copper table after 400 steps.
 const REFINE_MAX_MOVE: f64 = 0.02;
 
+/// Force gate for a refinement that starts on the predicted saddle.
+///
+/// [`MinModeConfig::force_tol`] defaults to 1e-3. After the curvature
+/// has gone negative the force passes 2e-3 while the 0.02 Å cap is
+/// still several times `|F|/|λ|`. The next translation throws the
+/// force back up and FIRE repeats the cycle, for an energy under
+/// 1 meV. 2e-3 is the gate of the climb from the minimum.
+const REFINE_FORCE_TOL: f64 = 2.0e-3;
+
 /// Smallest neighborhood kept around the predicted saddle, in Å.
 ///
 /// The supplied mode may be shorter than the relaxation of a soft
@@ -642,14 +651,15 @@ impl StrainResponse {
     /// solid dimer.
     ///
     /// The translation cap is [`REFINE_MAX_MOVE`], not the 0.2 Å
-    /// minimum-escape step, and the force gate is the default of
-    /// [`MinModeConfig`]. A result is cached only when it is an index-1
-    /// saddle, it is still in the neighborhood of the predicted
-    /// geometry. A point that stays within [`REFINE_SKIP_RMS`] of the
-    /// prediction, with negative curvature, is accepted without a
-    /// quench. Anything farther, but still inside the neighborhood, is
-    /// checked with one downhill quench. A point that has left the
-    /// neighborhood, or that does not reach the reactant, is not cached.
+    /// minimum-escape step, and the force gate is [`REFINE_FORCE_TOL`],
+    /// not the 1e-3 default of [`MinModeConfig`]. A result is cached
+    /// only when it is an index-1 saddle and still in the neighborhood
+    /// of the predicted geometry. A point that stays within
+    /// [`REFINE_SKIP_RMS`] of the prediction, with negative curvature,
+    /// is accepted without a quench. Anything farther, but still inside
+    /// the neighborhood, is checked with one downhill quench. A point
+    /// that has left the neighborhood, or that does not reach the
+    /// reactant, is not cached.
     pub fn refine<S: PointSurface>(
         &mut self,
         eps: &Strain,
@@ -666,7 +676,7 @@ impl StrainResponse {
         let mode = deform_vectors(&seed.mode, eps.tensor())?;
         let cell = deform_cell(seed.cell, eps.tensor());
         let search = MinModeConfig {
-            force_tol: MinModeConfig::default().force_tol,
+            force_tol: REFINE_FORCE_TOL,
             max_move: REFINE_MAX_MOVE,
             ..MinModeConfig::default()
         };
