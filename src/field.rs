@@ -115,6 +115,20 @@ impl Kelvin {
         Ok(symmetrize(grad))
     }
 
+    /// Interaction `-P_target : ε_source` at `separation` from the source.
+    ///
+    /// `ε_source` is the Kelvin strain of `source`. The energy falls as
+    /// `1/r^3` and depends on the direction of `separation`.
+    pub fn dipole_interaction(
+        &self,
+        separation: [f64; 3],
+        source: ElasticDipole,
+        target: ElasticDipole,
+    ) -> Result<f64, SaddleError> {
+        let strain = self.strain_from_dipole(separation, source)?;
+        Ok(-crate::strain_rate::double_dot(target.tensor(), strain))
+    }
+
     /// `∂_n ε_ij` at `r` due to a dipole at the origin.
     pub fn strain_gradient_from_dipole(
         &self,

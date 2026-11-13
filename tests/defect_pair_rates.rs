@@ -777,6 +777,42 @@ fn pure_diffusion_onto_an_absorbing_sphere_returns_that_radius() {
     }
 }
 
+#[test]
+fn a_vanishing_interaction_is_the_free_diffusion_radius() {
+    let inner = 4.0_f64;
+    let thermal = 0.025_f64;
+    let zero = |_radius: f64| 0.0;
+    let radius = rgsaddle::debye_radius(inner, thermal, zero).expect("radius");
+    assert!((radius - inner).abs() < 1.0e-9, "{radius}");
+    for distance in [4.0, 6.0, 10.0, 25.0] {
+        let hit = rgsaddle::debye_hit_probability(inner, distance, thermal, zero).expect("hit");
+        let free = if distance <= inner { 1.0 } else { inner / distance };
+        assert!((hit - free).abs() < 1.0e-8, "{distance} {hit} {free}");
+    }
+    let matched = rgsaddle::debye_matched_radius(3.5, 9.0, thermal, zero).expect("matched");
+    assert!((matched - 3.5).abs() < 1.0e-8, "{matched}");
+}
+
+#[test]
+fn a_coulomb_interaction_matches_the_debye_closed_form() {
+    let inner = 2.0_f64;
+    let thermal = 0.5_f64;
+    let alpha = 2.0_f64;
+    let attractive = |radius: f64| -alpha / radius;
+    let radius = rgsaddle::debye_radius(inner, thermal, attractive).expect("radius");
+    let onsager = alpha / thermal;
+    let closed = onsager / (1.0 - (-onsager / inner).exp());
+    assert!((radius - closed).abs() / closed < 1.0e-6, "{radius} {closed}");
+    assert!(radius > inner);
+    let repulsive = rgsaddle::debye_radius(inner, thermal, |radius| alpha / radius).expect("repulsive");
+    let closed_repulsive = onsager / ((onsager / inner).exp() - 1.0);
+    assert!(
+        (repulsive - closed_repulsive).abs() / closed_repulsive < 1.0e-6,
+        "{repulsive} {closed_repulsive}"
+    );
+    assert!(repulsive < inner);
+}
+
 fn absorbing_sphere(
     absorber: f64,
     outer: f64,

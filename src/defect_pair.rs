@@ -215,6 +215,127 @@ pub fn volume_from_frequency(rate: f64, frequency: f64) -> Result<f64, SaddleErr
     Ok(rate / frequency)
 }
 
+fn boltzmann_factor(energy: f64, thermal: f64) -> f64 {
+    if !(thermal.is_finite() && thermal > 0.0) {
+        return 1.0;
+    }
+    let argument = energy / thermal;
+    if argument > 80.0 {
+        80.0_f64.exp()
+    } else if argument < -80.0 {
+        0.0
+    } else {
+        argument.exp()
+    }
+}
+
+/// `∫_inner^∞ exp(E(r)/kT) r^{-2} dr`, with `E(∞) = 0`.
+///
+/// The substitution `u = 1/r` turns the integrand into `exp(E(1/u)/kT)`.
+/// At `u = 0` the factor is 1. A vanishing interaction integrates to `1/inner`.
+pub fn debye_resistance<F>(inner: f64, thermal: f64, energy: F) -> Result<f64, SaddleError>
+where
+    F: Fn(f64) -> f64,
+{
+    if !(inner.is_finite() && inner > 0.0 && thermal.is_finite() && thermal > 0.0) {
+        return Err(SaddleError::Invalid(
+            "the Debye inner radius and kT must be finite and positive".into(),
+        ));
+    }
+    let panels = 512usize;
+    let step = (1.0 / inner) / panels as f64;
+    let mut sum = 0.0;
+    for i in 0..=panels {
+        let u = step * i as f64;
+        let factor = if i == 0 {
+            1.0
+        } else {
+            let value = energy(1.0 / u);
+            if !value.is_finite() {
+                return Err(SaddleError::NonFinite("Debye interaction"));
+            }
+            boltzmann_factor(value, thermal)
+        };
+        let weight = if i == 0 || i == panels {
+            1.0
+        } else if i % 2 == 0 {
+            2.0
+        } else {
+            4.0
+        };
+        sum += weight * factor;
+    }
+    let resistance = sum * step / 3.0;
+    if !(resistance.is_finite() && resistance > 0.0) {
+        return Err(SaddleError::NonFinite("Debye resistance"));
+    }
+    Ok(resistance)
+}
+
+/// Debye–Smoluchowski radius, the reciprocal of [`debye_resistance`].
+///
+/// A perfect absorber at `inner` with `E = 0` has this radius equal to `inner`.
+pub fn debye_radius<F>(inner: f64, thermal: f64, energy: F) -> Result<f64, SaddleError>
+where
+    F: Fn(f64) -> f64,
+{
+    Ok(1.0 / debye_resistance(inner, thermal, energy)?)
+}
+
+/// Capture probability at `distance` for a perfect absorber at `inner`.
+///
+/// `E = 0` gives `inner / distance`. An attractive interaction raises it.
+pub fn debye_hit_probability<F>(
+    inner: f64,
+    distance: f64,
+    thermal: f64,
+    energy: F,
+) -> Result<f64, SaddleError>
+where
+    F: Fn(f64) -> f64,
+{
+    if !(distance.is_finite() && distance > 0.0) {
+        return Err(SaddleError::Invalid(
+            "the starting distance must be finite and positive".into(),
+        ));
+    }
+    if distance <= inner {
+        return Ok(1.0);
+    }
+    let far = debye_resistance(distance, thermal, &energy)?;
+    let all = debye_resistance(inner, thermal, energy)?;
+    Ok((far / all).clamp(0.0, 1.0))
+}
+
+/// Replace the free exterior of a chain by a strained one.
+///
+/// `chain_radius` is the effective radius of the discrete problem with a
+/// free exterior beyond `cutoff`. The free piece `1/cutoff` is removed and
+/// the Debye integral is put in its place. `E = 0` returns `chain_radius`.
+pub fn debye_matched_radius<F>(
+    chain_radius: f64,
+    cutoff: f64,
+    thermal: f64,
+    energy: F,
+) -> Result<f64, SaddleError>
+where
+    F: Fn(f64) -> f64,
+{
+    if !(chain_radius.is_finite() && chain_radius > 0.0 && cutoff.is_finite() && cutoff > 0.0) {
+        return Err(SaddleError::Invalid(
+            "the chain radius and the cutoff must be finite and positive".into(),
+        ));
+    }
+    let exterior = debye_resistance(cutoff, thermal, energy)?;
+    let inverse = 1.0 / chain_radius - 1.0 / cutoff + exterior;
+    if !(inverse.is_finite() && inverse > 0.0) {
+        return Err(SaddleError::Invalid(
+            "the matched Debye radius is not positive".into(),
+        ));
+    }
+    Ok(1.0 / inverse)
+}
+
 /// Factor on one direction of a shell pair after a saddle shift.
 ///
 /// `source_factor` is the Boltzmann factor of the away barrier measured on
