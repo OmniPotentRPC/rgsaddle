@@ -13,6 +13,7 @@ use crate::cell_log::{M3, m3_det};
 use crate::error::SaddleError;
 use crate::force::ForceGate;
 use crate::projection::{ProjectionKind, climbing_image_force, dneb_component, force_perp};
+pub use crate::solid_state::CellMask;
 use crate::solid_state::{
     cartesian_step, cell_neb_force, joint_displacement, orient_lower_triangular, pack_joint,
     solid_state_enthalpy, solid_state_jacobian, unpack_cell,
@@ -181,19 +182,28 @@ impl Default for CiConfig {
 pub struct SolidState {
     /// One cell per image, endpoints included.
     pub cells: Vec<Cell>,
-    /// Hydrostatic pressure added to the Cauchy stress. A positive
-    /// value pushes the cell inward.
+    /// Hydrostatic pressure added on the diagonal of [`Self::stress`].
+    /// A positive value pushes the cell inward.
     pub pressure: f64,
+    /// Applied Cauchy stress, row-major, added to the crystal stress
+    /// before the mask. Zero by default. Hydrostatic pressure is the
+    /// extra diagonal `pressure * I`.
+    pub stress: [[f64; 3]; 3],
+    /// Strains the loaded stress is allowed to move.
+    pub mask: CellMask,
     /// Positive scale on the Jacobian. 1 is the 2012 value.
     pub weight: f64,
 }
 
 impl SolidState {
-    /// One cell per image, zero pressure, the 2012 Jacobian (weight 1).
+    /// One cell per image, no applied load, every strain free, the
+    /// 2012 Jacobian (weight 1).
     pub fn new(cells: Vec<Cell>) -> Self {
         Self {
             cells,
             pressure: 0.0,
+            stress: [[0.0; 3]; 3],
+            mask: CellMask::Full,
             weight: 1.0,
         }
     }
@@ -204,10 +214,32 @@ impl SolidState {
         self
     }
 
+    /// Applied Cauchy stress. A positive diagonal entry pushes the
+    /// cell inward, the same sign as [`Self::with_pressure`].
+    pub fn with_stress(mut self, stress: [[f64; 3]; 3]) -> Self {
+        self.stress = stress;
+        self
+    }
+
+    /// Hydrostatic or fixed-angle restriction of the loaded stress.
+    pub fn with_mask(mut self, mask: CellMask) -> Self {
+        self.mask = mask;
+        self
+    }
+
     /// Positive scale on the Jacobian.
     pub fn with_weight(mut self, weight: f64) -> Self {
         self.weight = weight;
         self
+    }
+
+    /// `stress + pressure * I`.
+    pub fn applied_stress(&self) -> [[f64; 3]; 3] {
+        let mut applied = self.stress;
+        for (i, row) in applied.iter_mut().enumerate() {
+            row[i] += self.pressure;
+        }
+        applied
     }
 }
 
@@ -440,9 +472,16 @@ pub trait BandSurface: Sync {
 /// Oriented cells and the Jacobian fixed at session build.
 struct SolidRun {
     cells: Vec<Cell>,
-    pressure: f64,
+    applied: M3,
+    mask: CellMask,
     jacobian: f64,
     reference: M3,
+}
+
+#[derive(Clone, Copy)]
+struct SolidLoad {
+    applied: M3,
+    mask: CellMask,
 }
 
 /// Rows within this distance (per Cartesian component, after the
@@ -937,8 +976,8 @@ fn prepare_solid(
             spec.cells.len()
         )));
     }
-    if !spec.pressure.is_finite() {
-        return Err(SaddleError::NonFinite("solid-state pressure"));
+    if !spec.pressure.is_finite() || !spec.stress.iter().flatten().all(|v| v.is_finite()) {
+        return Err(SaddleError::NonFinite("solid-state applied stress"));
     }
     let mut cells = Vec::with_capacity(n_images);
     for (i, cell) in spec.cells.iter().enumerate() {
@@ -958,7 +997,8 @@ fn prepare_solid(
         Some(SolidRun {
             reference: cells[0].0,
             cells,
-            pressure: spec.pressure,
+            applied: spec.applied_stress(),
+            mask: spec.mask,
             jacobian,
         }),
     ))
@@ -1105,7 +1145,7 @@ fn solid_image(
     gradients: &Array2<f64>,
     stresses: &Array2<f64>,
     jacobian: f64,
-    pressure: f64,
+    load: SolidLoad,
 ) -> Result<(Array1<f64>, Array1<f64>), SaddleError> {
     let dof = positions.ncols();
     let (next_atomic, next_cell) = joint_displacement(
@@ -1141,7 +1181,7 @@ fn solid_image(
         cauchy[k / 3][k % 3] = stresses[(i, k)];
     }
     let volume = m3_det(cells[i].0).abs();
-    let cell_force = cell_neb_force(cauchy, volume, jacobian, pressure)?;
+    let cell_force = cell_neb_force(cauchy, volume, jacobian, load.applied, load.mask)?;
     let force = pack_joint(atomic_force.view(), cell_force);
     let spring = spring.compute(
         i,
@@ -1198,7 +1238,7 @@ fn assemble_solid(
     cell_last: Cell,
     reference: M3,
     jacobian: f64,
-    pressure: f64,
+    load: SolidLoad,
     x: ArrayView1<f64>,
 ) -> Result<(f64, Array1<f64>, f64), SaddleError> {
     let (energies, gradients, stresses, positions, cells) = evaluate_solid(
@@ -1215,7 +1255,8 @@ fn assemble_solid(
     let seg = dof + 9;
     let mut enthalpy = Array1::zeros(n_images);
     for i in 0..n_images {
-        enthalpy[i] = solid_state_enthalpy(energies[i], cells[i].0, reference, pressure)?;
+        enthalpy[i] =
+            solid_state_enthalpy(energies[i], cells[i].0, reference, load.applied, load.mask)?;
     }
     let mut max_i = 1;
     for i in 2..n_images - 1 {
@@ -1244,7 +1285,7 @@ fn assemble_solid(
             &gradients,
             &stresses,
             jacobian,
-            pressure,
+            load,
         )?;
         let start = (i - 1) * seg;
         joint.slice_mut(s![start..start + seg]).assign(&projected);
@@ -1263,7 +1304,7 @@ fn assemble_solid(
         state.ci_index.store(max_i as i64, Ordering::Relaxed);
         let (projected, step) = solid_image(
             config, &spring, max_i, true, &positions, &cells, &enthalpy, &gradients, &stresses,
-            jacobian, pressure,
+            jacobian, load,
         )?;
         let start = (max_i - 1) * seg;
         joint.slice_mut(s![start..start + seg]).assign(&projected);
@@ -2783,14 +2824,17 @@ impl BandSession {
         let interior_dof = (n_images - 2) * (dof + 9);
         let endpoint_first = self.positions.row(0).to_owned();
         let endpoint_last = self.positions.row(n_images - 1).to_owned();
-        let (cell_first, cell_last, reference, jacobian, pressure) = {
+        let (cell_first, cell_last, reference, jacobian, load) = {
             let solid = self.solid.as_ref().expect("solid-state step");
             (
                 solid.cells[0],
                 solid.cells[n_images - 1],
                 solid.reference,
                 solid.jacobian,
-                solid.pressure,
+                SolidLoad {
+                    applied: solid.applied,
+                    mask: solid.mask,
+                },
             )
         };
         let config = &self.config;
@@ -2808,7 +2852,7 @@ impl BandSession {
                 cell_last,
                 reference,
                 jacobian,
-                pressure,
+                load,
                 x,
             ) {
                 Ok((energy, force, _)) => (energy, -force),
@@ -2850,7 +2894,7 @@ impl BandSession {
                 cell_last,
                 reference,
                 jacobian,
-                pressure,
+                load,
                 x.view(),
             )?;
         }

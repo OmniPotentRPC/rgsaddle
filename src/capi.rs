@@ -11,7 +11,9 @@ use std::slice;
 use ndarray::{Array1, Array2, ArrayView2};
 use rgmin::{FireKind, Method};
 
-use crate::band::{BandConfig, BandSession, BandStatus, BandSurface, Cell, CiConfig, SolidState};
+use crate::band::{
+    BandConfig, BandSession, BandStatus, BandSurface, Cell, CellMask, CiConfig, SolidState,
+};
 use crate::connect::{ConnectConfig, connect};
 use crate::error::SaddleError;
 use crate::minmode::{
@@ -428,6 +430,8 @@ pub unsafe extern "C" fn rgsaddle_band_create_solid(
             Some(SolidState {
                 cells: parsed,
                 pressure,
+                stress: [[0.0; 3]; 3],
+                mask: CellMask::Full,
                 weight,
             }),
         )

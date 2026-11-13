@@ -1,7 +1,9 @@
 //! The 2012 solid-state cell block on the band.
 
 use ndarray::{Array1, Array2, ArrayView2, array};
-use rgsaddle::{BandConfig, BandSession, BandStatus, BandSurface, Cell, SaddleError, SolidState};
+use rgsaddle::{
+    BandConfig, BandSession, BandStatus, BandSurface, Cell, CellMask, SaddleError, SolidState,
+};
 
 fn diagonal(length: f64) -> Cell {
     Cell([[length, 0.0, 0.0], [0.0, 4.0, 0.0], [0.0, 0.0, 4.0]])
@@ -152,4 +154,74 @@ fn a_longer_product_cell_pulls_the_middle_cell_out() {
     assert!(cells[1].0[0][0] > 4.0, "length {}", cells[1].0[0][0]);
     assert!((cells[0].0[0][0] - 4.0).abs() < 1e-12);
     assert!((cells[2].0[0][0] - 6.0).abs() < 1e-12);
+}
+
+#[test]
+fn a_shear_load_shears_the_middle_cell_unless_the_angles_are_fixed() {
+    let cells = vec![diagonal(5.0), diagonal(5.0), diagonal(5.0)];
+    let mut applied = [[0.0; 3]; 3];
+    applied[1][0] = 0.05;
+    let positions = array![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]];
+    let surface = Push {
+        gradient: [0.0, 0.0, 0.0],
+        stress_xx: 0.0,
+    };
+    let mut free = BandSession::new(
+        BandConfig {
+            climbing: None,
+            max_move: 0.05,
+            solid: Some(SolidState::new(cells.clone()).with_stress(applied)),
+            ..BandConfig::default()
+        },
+        positions.clone(),
+    )
+    .unwrap();
+    free.step(&surface).unwrap();
+    let sheared = free.image_cells().unwrap()[1].0[1][0];
+    assert!(sheared.abs() > 1e-6, "shear {sheared}");
+
+    let mut held = BandSession::new(
+        BandConfig {
+            climbing: None,
+            max_move: 0.05,
+            solid: Some(
+                SolidState::new(cells)
+                    .with_stress(applied)
+                    .with_mask(CellMask::FixedAngles),
+            ),
+            ..BandConfig::default()
+        },
+        positions,
+    )
+    .unwrap();
+    held.step(&surface).unwrap();
+    let frozen = held.image_cells().unwrap()[1].0[1][0];
+    assert!(frozen.abs() < 1e-12, "held shear {frozen}");
+}
+
+#[test]
+fn a_hydrostatic_mask_spreads_a_uniaxial_stress() {
+    let mut session = BandSession::new(
+        BandConfig {
+            climbing: None,
+            max_move: 0.05,
+            solid: Some(
+                SolidState::new(vec![diagonal(5.0), diagonal(5.0), diagonal(5.0)])
+                    .with_mask(CellMask::Hydrostatic),
+            ),
+            ..BandConfig::default()
+        },
+        array![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+    )
+    .unwrap();
+    session
+        .step(&Push {
+            gradient: [0.0, 0.0, 0.0],
+            stress_xx: 0.05,
+        })
+        .unwrap();
+    let cell = session.image_cells().unwrap()[1].0;
+    assert!(cell[0][0] < 5.0, "xx {}", cell[0][0]);
+    assert!(cell[1][1] < 4.0, "yy {}", cell[1][1]);
+    assert!(cell[2][2] < 4.0, "zz {}", cell[2][2]);
 }

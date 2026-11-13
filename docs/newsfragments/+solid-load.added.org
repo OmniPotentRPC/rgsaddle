@@ -1,0 +1,6 @@
+The solid-state band takes a general applied Cauchy stress, not only
+a hydrostatic pressure. A positive diagonal entry pushes the cell
+inward, and pressure remains the extra diagonal of that tensor.
+The loaded stress can be restricted to its hydrostatic part or to
+the diagonal, the same two masks as a Fréchet cell filter. The 2012
+Jacobian and the climbing-image cell block are unchanged.

@@ -214,46 +214,92 @@ pub fn joint_displacement(
     Ok((atomic, cell))
 }
 
-/// Cell part of the band force: `-(V / J) (σ + P I)`, upper triangle cleared.
+/// Which strains the loaded stress is allowed to move.
 ///
-/// `cauchy` is the Cauchy stress. `pressure` is hydrostatic and is added
-/// before the volume factor, so a positive pressure pushes the cell inward.
+/// The three cases are the cell masks of a Fréchet cell filter: every
+/// component, the hydrostatic part, or the diagonal. rgmin 0.5.2 does
+/// not export that filter, so the band carries the same three cases
+/// itself. Voigt order of the shear that [`CellMask::FixedAngles`]
+/// holds is `yz, xz, xy`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CellMask {
+    /// All six lower-triangular strains.
+    #[default]
+    Full,
+    /// Isotropic strain. The loaded stress is replaced by its trace.
+    Hydrostatic,
+    /// Diagonal strain. Shear is held.
+    FixedAngles,
+}
+
+/// Replace `loaded` by the part [`mask`] lets the cell move.
+pub fn apply_cell_mask(loaded: M3, mask: CellMask) -> M3 {
+    match mask {
+        CellMask::Full => loaded,
+        CellMask::Hydrostatic => {
+            let trace = (loaded[0][0] + loaded[1][1] + loaded[2][2]) / 3.0;
+            [[trace, 0.0, 0.0], [0.0, trace, 0.0], [0.0, 0.0, trace]]
+        }
+        CellMask::FixedAngles => [
+            [loaded[0][0], 0.0, 0.0],
+            [0.0, loaded[1][1], 0.0],
+            [0.0, 0.0, loaded[2][2]],
+        ],
+    }
+}
+
+/// Cell part of the band force: `-(V / J)` times the masked sum of the
+/// Cauchy stress and the applied stress. The upper triangle is cleared.
+///
+/// A positive applied stress pushes the cell inward. Hydrostatic
+/// pressure `P` is the applied stress `P I`.
 pub fn cell_neb_force(
     cauchy: M3,
     volume: f64,
     jacobian: f64,
-    pressure: f64,
+    applied: M3,
+    mask: CellMask,
 ) -> Result<M3, SaddleError> {
-    if not_above(volume, 0.0) || not_above(jacobian, 0.0) || !pressure.is_finite() {
+    if not_above(volume, 0.0) || not_above(jacobian, 0.0) {
         return Err(SaddleError::Invalid(
             "solid-state cell force needs a positive volume and Jacobian".into(),
         ));
     }
-    let mut stress = cauchy;
-    for (i, row) in stress.iter_mut().enumerate() {
-        row[i] += pressure;
+    if !applied.iter().flatten().all(|v| v.is_finite()) {
+        return Err(SaddleError::NonFinite("solid-state applied stress"));
     }
-    let mut force = m3_scale(-(volume / jacobian), stress);
+    let loaded = apply_cell_mask(m3_add(cauchy, applied), mask);
+    let mut force = m3_scale(-(volume / jacobian), loaded);
     zero_upper(&mut force);
     Ok(force)
 }
 
-/// `E + P Tr(h0^{-1} (h - h0)) V0`. A zero pressure returns `energy`.
+/// `E + V0 σ_ext : ε` with `ε = h0^{-1} (h - h0)`, after the mask
+/// keeps the part of `σ_ext` that does work. A zero applied stress
+/// returns `energy`.
 pub fn solid_state_enthalpy(
     energy: f64,
     cell: M3,
     reference: M3,
-    pressure: f64,
+    applied: M3,
+    mask: CellMask,
 ) -> Result<f64, SaddleError> {
-    if pressure == 0.0 {
+    if applied.iter().flatten().all(|v| *v == 0.0) {
         return Ok(energy);
     }
-    if !pressure.is_finite() || !energy.is_finite() {
+    if !energy.is_finite() || !applied.iter().flatten().all(|v| v.is_finite()) {
         return Err(SaddleError::NonFinite("solid-state enthalpy"));
     }
     let strain = m3_mul(m3_inv(reference)?, m3_sub(cell, reference));
+    let loaded = apply_cell_mask(applied, mask);
+    let mut work = 0.0;
+    for i in 0..3 {
+        for j in 0..3 {
+            work += loaded[i][j] * strain[i][j];
+        }
+    }
     let volume = m3_det(reference).abs();
-    Ok(energy + pressure * (strain[0][0] + strain[1][1] + strain[2][2]) * volume)
+    Ok(energy + work * volume)
 }
 
 /// One steepest step in Cartesian coordinates and the cell matrix.
@@ -334,8 +380,9 @@ mod tests {
         assert!(solid_state_jacobian(nan, 8, 1.0).is_err());
         assert!(solid_state_jacobian(64.0, 8, nan).is_err());
         let id = diag(1.0, 1.0, 1.0);
-        assert!(cell_neb_force(id, nan, 1.0, 0.0).is_err());
-        assert!(cell_neb_force(id, 1.0, nan, 0.0).is_err());
+        let zero = [[0.0; 3]; 3];
+        assert!(cell_neb_force(id, nan, 1.0, zero, CellMask::Full).is_err());
+        assert!(cell_neb_force(id, 1.0, nan, zero, CellMask::Full).is_err());
         let pos = array![0.0, 0.0, 0.0];
         assert!(cartesian_step(pos.view(), id, pos.view(), id, nan).is_err());
         assert!(joint_displacement(id, pos.view(), id, pos.view(), nan).is_err());
@@ -369,7 +416,7 @@ mod tests {
     #[test]
     fn cell_force_divides_the_stress_by_the_jacobian() {
         let cauchy = diag(1.0, 0.0, 0.0);
-        let force = cell_neb_force(cauchy, 8.0, 2.0, 0.5).unwrap();
+        let force = cell_neb_force(cauchy, 8.0, 2.0, diag(0.5, 0.5, 0.5), CellMask::Full).unwrap();
         // σ + P I = diag(1.5, 0.5, 0.5); -(V/J) = -4.
         assert_abs_diff_eq!(force[0][0], -6.0, epsilon = 1e-12);
         assert_abs_diff_eq!(force[1][1], -2.0, epsilon = 1e-12);
@@ -424,10 +471,42 @@ mod tests {
     fn positive_pressure_adds_only_the_trace_term() {
         let reference = diag(5.0, 4.0, 4.0);
         let cell = diag(6.0, 4.0, 4.0);
-        let plain = solid_state_enthalpy(1.5, cell, reference, 0.0).unwrap();
+        let zero = [[0.0; 3]; 3];
+        let plain = solid_state_enthalpy(1.5, cell, reference, zero, CellMask::Full).unwrap();
         assert_abs_diff_eq!(plain, 1.5, epsilon = 1e-15);
         // h0^{-1} (h - h0) = diag(0.2, 0, 0), Tr = 0.2, V0 = 80.
-        let enthalpy = solid_state_enthalpy(1.5, cell, reference, 0.02).unwrap();
+        let applied = diag(0.02, 0.02, 0.02);
+        let enthalpy = solid_state_enthalpy(1.5, cell, reference, applied, CellMask::Full).unwrap();
         assert_abs_diff_eq!(enthalpy, 1.5 + 0.02 * 0.2 * 80.0, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn hydrostatic_mask_replaces_the_loaded_stress_by_its_trace() {
+        let cauchy = diag(1.0, 0.0, 0.0);
+        let applied = diag(0.5, 0.5, 0.5);
+        let force = cell_neb_force(cauchy, 8.0, 2.0, applied, CellMask::Hydrostatic).unwrap();
+        // σ + P I = diag(1.5, 0.5, 0.5), trace/3 = 5/6, -(V/J) = -4.
+        let expected = -4.0 * (2.5 / 3.0);
+        assert_abs_diff_eq!(force[0][0], expected, epsilon = 1e-12);
+        assert_abs_diff_eq!(force[1][1], expected, epsilon = 1e-12);
+        assert_abs_diff_eq!(force[2][2], expected, epsilon = 1e-12);
+        assert_abs_diff_eq!(force[1][0], 0.0, epsilon = 1e-15);
+    }
+
+    #[test]
+    fn fixed_angles_drop_shear_and_a_shear_load_enters_the_full_mask() {
+        let mut cauchy = [[0.0; 3]; 3];
+        cauchy[1][0] = 0.2;
+        let held = cell_neb_force(cauchy, 8.0, 2.0, [[0.0; 3]; 3], CellMask::FixedAngles).unwrap();
+        for row in held {
+            for value in row {
+                assert_abs_diff_eq!(value, 0.0, epsilon = 1e-15);
+            }
+        }
+        let mut applied = [[0.0; 3]; 3];
+        applied[1][0] = 0.25;
+        let force = cell_neb_force([[0.0; 3]; 3], 8.0, 2.0, applied, CellMask::Full).unwrap();
+        assert_abs_diff_eq!(force[1][0], -1.0, epsilon = 1e-12);
+        assert_abs_diff_eq!(force[0][1], 0.0, epsilon = 1e-15);
     }
 }
