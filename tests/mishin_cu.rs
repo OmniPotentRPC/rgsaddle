@@ -5073,19 +5073,52 @@ fn climb_rotation(n: usize, a: f64, fraction: [f64; 3], axis: [f64; 3], target: 
     .expect("rotation frames");
     let (_, axis_sad) = pair_distance(&found.saddle_geometry, cell);
     let (angle_100, angle_110, _, _) = axis_report(axis_sad);
+    let (_, gradient, _) = Copper::new().evaluate(found.saddle_geometry.view(), cell);
+    let max_force = gradient.iter().copied().map(f64::abs).fold(0.0, f64::max);
     eprintln!(
-        "ROT n={n} a={a:.5} r={:.4} axis={axis:?} target={target:?} steps={steps} barrier={:.6} outcome={:?} index={:?} converged={} angle_100={angle_100:.2} angle_110={angle_110:.2} fwd_split={:.3} fwd_axis={:?} back_split={:.3} back_axis={:?} calls={}",
+        "ROT n={n} a={a:.5} r={:.4} axis={axis:?} target={target:?} steps={steps} barrier={:.6} outcome={:?} index={:?} converged={} angle_100={angle_100:.2} angle_110={angle_110:.2} fwd={:?} back={:?} fwd_split={:.3} fwd_axis={:?} back_split={:.3} back_axis={:?} max_force={max_force:.6} calls={}",
         length3(r),
         found.barrier,
         found.outcome,
         found.index,
         found.converged,
+        frames.forward,
+        frames.backward,
         frames.forward_frame.2,
         frames.forward_frame.1,
         frames.backward_frame.2,
         frames.backward_frame.1,
         found.force_calls
     );
+    if let Ok(path) = std::env::var("ROT_CSV") {
+        if !std::path::Path::new(&path).exists() {
+            std::fs::write(
+                &path,
+                "n,lattice_A,r_A,axis,target,barrier_eV,index,outcome,angle_100,angle_110,forward_end,backward_end,forward_split,backward_split,max_force,force_calls\n",
+            )
+            .expect("rotation csv");
+        }
+        let axis_label = orient_label(axis);
+        let target_label = orient_label(target);
+        let line = format!(
+            "{n},{a:.5},{:.4},{axis_label},{target_label},{:.6},{},{:?},{angle_100:.2},{angle_110:.2},{:?},{:?},{:.3},{:.3},{max_force:.6},{}\n",
+            length3(r),
+            found.barrier,
+            found.index.map(|value| value.to_string()).unwrap_or_default(),
+            found.outcome,
+            frames.forward,
+            frames.backward,
+            frames.forward_frame.2,
+            frames.backward_frame.2,
+            found.force_calls
+        );
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .expect("rotation csv");
+        file.write_all(line.as_bytes()).expect("rotation row");
+    }
 }
 
 /// Finish the rotations that were still running at the step cap.
@@ -5123,6 +5156,22 @@ fn converge_capped_rotation() {
             }
             if which == "capped" || which == "step" {
                 climb_rotation(n, a, fraction, [1.0, 0.0, 0.0], target, steps);
+            }
+        }
+        if which == "run10" {
+            let jobs = [
+                (12usize, 3.615, [-1.0, -1.0, -1.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]),
+                (8, 3.615, [-1.5, -0.5, -1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
+                (10, 3.615, [-1.5, -0.5, -1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
+                (12, 3.615, [-1.5, -0.5, -1.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]),
+                (12, 3.615, [-1.5, -0.5, -1.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]),
+                (8, 3.62831, [-1.5, -0.5, -1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
+                (8, 3.63867, [-1.5, -0.5, -1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
+                (8, 3.64979, [-1.5, -0.5, -1.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]),
+                (8, 3.64979, [-1.5, -0.5, -1.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]),
+            ];
+            for (n, a, fraction, axis, target) in jobs {
+                climb_rotation(n, a, fraction, axis, target, steps);
             }
         }
         return;
@@ -5458,16 +5507,64 @@ fn orient_label(axis: [f64; 3]) -> &'static str {
 #[test]
 #[ignore = "cutoff shells on one cell; run in release"]
 fn cutoff_shells_on_one_cell() {
-    let n: usize = std::env::var("CUT_N")
+    let shells: Vec<f64> = std::env::var("CUT_SHELLS")
         .ok()
-        .and_then(|text| text.parse().ok())
-        .unwrap_or(8);
-    let a: f64 = std::env::var("CUT_A")
+        .map(|text| {
+            text.split(',')
+                .filter_map(|piece| piece.trim().parse().ok())
+                .collect()
+        })
+        .filter(|shells: &Vec<f64>| !shells.is_empty())
+        .unwrap_or_else(|| {
+            vec![
+                7.6686, 8.0834, 8.8549, 10.2248, 10.5394, 10.8450,
+            ]
+        });
+    let grid: Vec<(usize, f64)> = std::env::var("CUT_GRID")
         .ok()
-        .and_then(|text| text.parse().ok())
-        .unwrap_or(3.615);
+        .map(|text| {
+            text.split(';')
+                .filter_map(|piece| {
+                    let mut parts = piece.split(',');
+                    let n = parts.next()?.trim().parse().ok()?;
+                    let a = parts.next()?.trim().parse().ok()?;
+                    Some((n, a))
+                })
+                .collect()
+        })
+        .filter(|grid: &Vec<(usize, f64)>| !grid.is_empty())
+        .unwrap_or_else(|| {
+            let n = std::env::var("CUT_N")
+                .ok()
+                .and_then(|text| text.parse().ok())
+                .unwrap_or(8);
+            let a = std::env::var("CUT_A")
+                .ok()
+                .and_then(|text| text.parse().ok())
+                .unwrap_or(3.615);
+            vec![(n, a)]
+        });
+    let csv_path = std::env::var("CUT_CSV").unwrap_or_else(|_| {
+        "benchmarks/dipole_cutoff_quench.csv".to_string()
+    });
+    if let Some(parent) = std::path::Path::new(&csv_path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if !std::path::Path::new(&csv_path).exists() {
+        std::fs::write(
+            &csv_path,
+            "n,lattice_A,kind,orientation,separation_A,sense,barrier_eV,index,forward_end,backward_end,forward_split,backward_split,max_force,force_calls,dipole_eV,absolute_error_eV,status\n",
+        )
+        .expect("csv header");
+    }
+    for (n, a) in grid {
+        cutoff_one_cell(n, a, &shells, &csv_path);
+    }
+}
+
+fn cutoff_one_cell(n: usize, a: f64, shells: &[f64], csv_path: &str) {
     let scale = a / 3.615;
-    let targets = [10.2248 * scale, 10.5394 * scale, 10.8450 * scale];
+    let targets: Vec<f64> = shells.iter().map(|shell| shell * scale).collect();
     let (perfect, cell) = fcc(n, a);
     let (trans_i, trans_f, jump0) = johnson_ends(&perfect, a);
     let origin = nearest_atom(&perfect, [0.0, 0.0, 0.0]);
@@ -5564,13 +5661,25 @@ fn cutoff_shells_on_one_cell() {
                 if same_axis(target_axis, axis) {
                     continue;
                 }
-                jobs.push(("rotation", r, center, axis, target_axis, "axis-across-r"));
+                let along = {
+                    let u = unit(target_axis);
+                    let radial = unit(r);
+                    (u[0] * radial[0] + u[1] * radial[1] + u[2] * radial[2]).abs()
+                };
+                let sense = if along > 0.7 {
+                    "axis-along-r"
+                } else {
+                    "axis-across-r"
+                };
+                jobs.push(("rotation", r, center, axis, target_axis, sense));
             }
         }
     }
     let translation = std::sync::Arc::new(translation);
     let rotation = std::sync::Arc::new(rotation);
-    for chunk in jobs.chunks(4) {
+    let wide = if n >= 12 { 2 } else { 4 };
+    let mut samples: Vec<(String, String, f64, f64)> = Vec::new();
+    for chunk in jobs.chunks(wide) {
         std::thread::scope(|scope| {
             let mut joins = Vec::new();
             for (kind, r, center, axis, jump, sense) in chunk {
@@ -5601,7 +5710,7 @@ fn cutoff_shells_on_one_cell() {
                             }
                     }) else {
                         return format!(
-                            "CUT n={n} a={a:.5} kind={kind} orient={} r={:.4} sense={sense} direct= dipole= err= status=no image",
+                            "{n},{a:.5},{kind},{},{:.4},{sense},,,,,,,,,,,no image",
                             orient_label(*axis),
                             length3(*r)
                         );
@@ -5611,7 +5720,7 @@ fn cutoff_shells_on_one_cell() {
                         Ok(placed) => placed,
                         Err(err) => {
                             return format!(
-                                "CUT n={n} a={a:.5} kind={kind} orient={} r={:.4} sense={sense} direct= dipole= err= status=place {err}",
+                                "{n},{a:.5},{kind},{},{:.4},{sense},,,,,,,,,,,place {err}",
                                 orient_label(*axis),
                                 length3(*r)
                             );
@@ -5677,27 +5786,109 @@ fn cutoff_shells_on_one_cell() {
                             format!("{:?}", found.outcome).replace(',', ";"),
                         )
                     };
+                    let (_, gradient, _) =
+                        Copper::new().evaluate(found.saddle_geometry.view(), cell);
+                    let max_force = gradient.iter().copied().map(f64::abs).fold(0.0, f64::max);
                     format!(
-                        "CUT n={n} a={a:.5} kind={kind} orient={} r={:.4} sense={sense} direct={} dipole={} err={} status={status} index={:?}",
+                        "{n},{a:.5},{kind},{},{:.4},{sense},{:.6},{},{:?},{:?},{:.3},{:.3},{max_force:.6},{},{},{},{status}",
                         orient_label(*axis),
                         length3(*r),
-                        direct
-                            .map(|value| format!("{value:.6}"))
-                            .unwrap_or_default(),
+                        found.barrier,
+                        found.index.map(|value| value.to_string()).unwrap_or_default(),
+                        frames.forward,
+                        frames.backward,
+                        frames.forward_frame.2,
+                        frames.backward_frame.2,
+                        found.force_calls,
                         dipole
                             .map(|value| format!("{value:.6}"))
                             .unwrap_or_default(),
-                        err.map(|value| format!("{value:.6}")).unwrap_or_default(),
-                        found.index
+                        err.map(|value| format!("{value:.6}")).unwrap_or_default()
                     )
                 }));
             }
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(csv_path)
+                .expect("csv");
             for join in joins {
-                eprintln!("{}", join.join().expect("cutoff"));
+                let line = join.join().expect("cutoff");
+                eprintln!("CUT {line}");
+                use std::io::Write;
+                writeln!(file, "{line}").expect("csv row");
                 let _ = std::io::stderr().flush();
+                let mut cols = line.split(',');
+                let _n = cols.next();
+                let _a = cols.next();
+                let kind = cols.next().unwrap_or("").to_string();
+                let orient = cols.next().unwrap_or("").to_string();
+                let separation: f64 = cols.next().unwrap_or("").parse().unwrap_or(f64::NAN);
+                let _sense = cols.next();
+                let _barrier = cols.next();
+                let _index = cols.next();
+                let _fwd = cols.next();
+                let _back = cols.next();
+                let _fs = cols.next();
+                let _bs = cols.next();
+                let _force = cols.next();
+                let _calls = cols.next();
+                let _dipole = cols.next();
+                let err: Option<f64> = cols.next().and_then(|text| text.parse().ok());
+                let status = cols.next().unwrap_or("");
+                if status == "converged"
+                    && let Some(err) = err
+                {
+                    samples.push((kind, orient, separation, err));
+                }
             }
         });
     }
+    let mut groups: Vec<(String, String, Vec<(f64, f64)>)> = Vec::new();
+    for (kind, orient, separation, err) in &samples {
+        if let Some(group) = groups
+            .iter_mut()
+            .find(|group| group.0 == *kind && group.1 == *orient)
+        {
+            group.2.push((*separation, *err));
+        } else {
+            groups.push((kind.clone(), orient.clone(), vec![(*separation, *err)]));
+        }
+    }
+    let mut rotation_all = Vec::new();
+    for (kind, _, separation, err) in &samples {
+        if kind == "rotation" {
+            rotation_all.push((*separation, *err));
+        }
+    }
+    if !rotation_all.is_empty() {
+        groups.push(("rotation".to_string(), "all".to_string(), rotation_all));
+    }
+    for (kind, orient, group) in groups {
+        let radius = cutoff_radius(&group, 0.005);
+        eprintln!(
+            "RADIUS n={n} a={a:.5} kind={kind} orient={orient} radius={} samples={}",
+            radius
+                .map(|value| format!("{value:.4}"))
+                .unwrap_or_else(|| "none".into()),
+            group.len()
+        );
+    }
+}
+
+fn cutoff_radius(samples: &[(f64, f64)], tolerance: f64) -> Option<f64> {
+    let mut radii: Vec<f64> = samples.iter().map(|(separation, _)| *separation).collect();
+    radii.sort_by(f64::total_cmp);
+    radii.dedup_by(|left, right| (*left - *right).abs() < 1.0e-3);
+    for radius in radii {
+        let clean = samples
+            .iter()
+            .filter(|(separation, _)| *separation + 1.0e-9 >= radius)
+            .all(|(_, error)| *error <= tolerance);
+        if clean {
+            return Some(radius);
+        }
+    }
+    None
 }
 
 fn near_shell(kind: &str, distance: f64, a: f64, axis: [f64; 3], sense: &str) -> bool {

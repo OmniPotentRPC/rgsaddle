@@ -1,0 +1,4 @@
+n,lattice_A,r_A,axis,target,barrier_eV,index,outcome,angle_100,angle_110,forward_end,backward_end,forward_split,backward_split,max_force,force_calls
+12,3.61500,6.2614,100,001,0.199010,1,Recombined,45.04,2.24,Recombined,Recombined,2.415,2.415,0.001058,2420
+8,3.61500,6.7630,100,010,0.205048,1,Recombined,33.25,12.26,Recombined,InitialMinimum,2.555,2.168,0.001674,1529
+10,3.61500,6.7630,100,010,0.203247,1,Recombined,32.97,12.57,Recombined,InitialMinimum,2.554,2.168,0.001093,1409
