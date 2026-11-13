@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 34u
+#define RGSADDLE_ABI_MINOR 35u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -432,6 +432,24 @@ rgsaddle_status_t rgsaddle_band_evaluation(const RgsaddleBand *band,
                                            double *projected);
 
 void rgsaddle_band_free(RgsaddleBand *band);
+
+/**
+ * Project an already evaluated band. One shot, with no optimizer and no
+ * arming delay: when the config asks for a climbing image, the image
+ * selected by the endpoint-slope rule climbs on this call.
+ *
+ * positions, energies and gradients cover every image, endpoints
+ * included. forces receives the same shape, in the force convention
+ * (minus the energy gradient); endpoint rows are zero. *ci_index is
+ * the climbing image, or -1. Lengths are energy per length for the
+ * spring and the host's force unit for the tolerance. ABI minor 35.
+ */
+rgsaddle_status_t rgsaddle_band_project(const rgsaddle_band_config_t *config,
+                                        int64_t n_images, int64_t n_atoms,
+                                        const double *positions,
+                                        const double *energies,
+                                        const double *gradients, double *forces,
+                                        int64_t *ci_index);
 
 /** Minimum-mode configuration. */
 typedef struct {

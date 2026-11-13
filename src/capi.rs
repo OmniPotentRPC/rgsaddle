@@ -27,7 +27,7 @@ use crate::spring::SpringKind;
 use crate::tangent::TangentKind;
 
 pub const RGSADDLE_ABI_MAJOR: u32 = 1;
-pub const RGSADDLE_ABI_MINOR: u32 = 34;
+pub const RGSADDLE_ABI_MINOR: u32 = 35;
 
 /// Band config bit 0. The C step calls the surface once per image
 /// carried by the evaluation: every image on the first evaluation
@@ -560,6 +560,108 @@ unsafe fn band_from_parts(
             }))
         }
         Err(_) => std::ptr::null_mut(),
+    }
+}
+
+struct GivenBand {
+    energies: Array1<f64>,
+    gradients: Array2<f64>,
+}
+
+impl BandSurface for GivenBand {
+    fn eval(
+        &self,
+        positions: ArrayView2<f64>,
+        energies: &mut Array1<f64>,
+        gradients: &mut Array2<f64>,
+    ) -> Result<(), SaddleError> {
+        if positions.nrows() != self.energies.len() || gradients.dim() != self.gradients.dim() {
+            return Err(SaddleError::Shape(
+                "projection storage does not match the band".into(),
+            ));
+        }
+        energies.assign(&self.energies);
+        gradients.assign(&self.gradients);
+        Ok(())
+    }
+}
+
+/// # Safety
+/// `config`, the input pointers and `forces` must address the lengths
+/// the header documents. `ci_index` may be null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_band_project(
+    config: *const RgsaddleBandConfig,
+    n_images: i64,
+    n_atoms: i64,
+    positions: *const f64,
+    energies: *const f64,
+    gradients: *const f64,
+    forces: *mut f64,
+    ci_index: *mut i64,
+) -> i32 {
+    if config.is_null()
+        || positions.is_null()
+        || energies.is_null()
+        || gradients.is_null()
+        || forces.is_null()
+        || n_images < 3
+        || n_atoms < 1
+    {
+        return RGSADDLE_SHAPE;
+    }
+    let cfg = unsafe { &*config };
+    let dof = (3 * n_atoms) as usize;
+    let rows = n_images as usize;
+    let total = dof * rows;
+    let Some(parsed) = (unsafe { parse_band_config(cfg, n_images, dof, None) }) else {
+        return RGSADDLE_INVALID_PARAMETER;
+    };
+    let pos = match Array2::from_shape_vec(
+        (rows, dof),
+        unsafe { slice::from_raw_parts(positions, total) }.to_vec(),
+    ) {
+        Ok(a) => a,
+        Err(_) => return RGSADDLE_SHAPE,
+    };
+    let energy = Array1::from(unsafe { slice::from_raw_parts(energies, rows) }.to_vec());
+    let gradient = match Array2::from_shape_vec(
+        (rows, dof),
+        unsafe { slice::from_raw_parts(gradients, total) }.to_vec(),
+    ) {
+        Ok(a) => a,
+        Err(_) => return RGSADDLE_SHAPE,
+    };
+    let ci = if parsed.config.climbing.is_some() {
+        match crate::climbing_image(&parsed.config, pos.view(), energy.view(), gradient.view()) {
+            Ok(index) => index,
+            Err(err) => return status_of(&err),
+        }
+    } else {
+        None
+    };
+    let given = GivenBand {
+        energies: energy,
+        gradients: gradient,
+    };
+    match crate::band_forces(&parsed.config, &given, pos.view(), ci) {
+        Ok(projected) => {
+            let out = unsafe { slice::from_raw_parts_mut(forces, total) };
+            out.fill(0.0);
+            for i in 1..rows - 1 {
+                let start = (i - 1) * dof;
+                for c in 0..dof {
+                    out[i * dof + c] = projected.force[start + c];
+                }
+            }
+            if !ci_index.is_null() {
+                unsafe {
+                    *ci_index = ci.map(|i| i as i64).unwrap_or(-1);
+                }
+            }
+            RGSADDLE_OK
+        }
+        Err(err) => status_of(&err),
     }
 }
 
