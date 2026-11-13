@@ -4,6 +4,11 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+include!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/common/cdylib.rs"
+));
+
 fn cc() -> Option<String> {
     [
         std::env::var("CC").ok(),
@@ -25,18 +30,7 @@ fn c_abi_smoke() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let out = std::env::temp_dir().join(format!("rgsaddle_abi_smoke_{}", std::process::id()));
 
-    // The cdylib lives beside the test binary.
-    let mut libdir = std::env::current_exe().unwrap();
-    libdir.pop();
-    if libdir.ends_with("deps") {
-        libdir.pop();
-    }
-    if !libdir.join("librgsaddle.so").exists() {
-        let deps = libdir.join("deps");
-        if deps.join("librgsaddle.so").exists() {
-            libdir = deps;
-        }
-    }
+    let libdir = cdylib_dir();
 
     let status = Command::new(&cc)
         .arg(root.join("tests/c/abi_smoke.c"))
