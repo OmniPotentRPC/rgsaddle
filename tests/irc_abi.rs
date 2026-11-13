@@ -3,20 +3,17 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+include!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/common/cdylib.rs"
+));
+
 #[test]
 fn c_abi_irc_analytic_well() {
     let compiler = std::env::var("CC").unwrap_or_else(|_| "cc".into());
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let out = std::env::temp_dir().join(format!("rgsaddle_irc_abi_{}", std::process::id()));
-    let mut libdir = std::env::current_exe().unwrap();
-    libdir.pop();
-    if libdir.ends_with("deps") {
-        libdir.pop();
-    }
-    assert!(
-        libdir.join("librgsaddle.so").exists(),
-        "build the C ABI library before testing"
-    );
+    let libdir = cdylib_dir();
     let build = Command::new(compiler)
         .arg("-std=c11")
         .arg("-Wall")
