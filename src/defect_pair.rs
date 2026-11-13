@@ -854,13 +854,40 @@ fn shoot<S: PointSurface>(
     let mut shooting = config.shooting.clone();
     shooting.thermal = thermal;
     shooting.mass = config.mass;
-    bennett::bennett_chandler(
+    let forward = bennett::bennett_chandler(
         surface,
         &starts,
         geometry.positions.view(),
         geometry.tangent.view(),
         &shooting,
-    )
+    )?;
+    if (0.0..=1.0).contains(&forward.kappa) {
+        return Ok(forward);
+    }
+    // The path tangent can point toward the reactant. The product side is
+    // then the opposite normal, and κ comes out negative.
+    shooting.seed = shooting.seed.wrapping_add(1);
+    let backward = bennett::bennett_chandler(
+        surface,
+        &starts,
+        geometry.positions.view(),
+        (-&geometry.tangent).view(),
+        &shooting,
+    )?;
+    let mut chosen = if (0.0..=1.0).contains(&backward.kappa) {
+        backward
+    } else if (forward.kappa - 0.5).abs() <= (backward.kappa - 0.5).abs() {
+        forward
+    } else {
+        backward
+    };
+    if !(0.0..=1.0).contains(&chosen.kappa)
+        && chosen.kappa + chosen.error >= 0.0
+        && chosen.kappa - chosen.error <= 1.0
+    {
+        chosen.kappa = chosen.kappa.clamp(0.0, 1.0);
+    }
+    Ok(chosen)
 }
 
 fn climb_path<S: PointSurface>(
