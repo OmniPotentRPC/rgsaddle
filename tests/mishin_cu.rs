@@ -6330,3 +6330,137 @@ fn report_near(hops: &[NearHop]) {
         }
     }
 }
+
+/// The away climb on the 8×8×8 cell. A whole-cell RMS of 0.2 Å calls a
+/// product the intended minimum when only a few atoms differ. The match
+/// is the largest per-atom move, so this climb must not come back as a hop.
+#[test]
+#[ignore = "tight away climb on 8x8x8 Mishin Cu; run in release"]
+fn tight_away_climb_is_not_the_hop() {
+    let a = 3.615;
+    let n = 8usize;
+    let length = n as f64 * a;
+    let (perfect, cell) = fcc(n, a);
+    let (initial, final_pos, jump) = johnson_ends(&perfect, a);
+    let mut built = PairOptions::published();
+    built.tail = 3;
+    let geometry = isolated_saddle(
+        &Held {
+            copper: &Copper::new(),
+            cell,
+        },
+        cell,
+        initial,
+        final_pos,
+        &built,
+    )
+    .expect("johnson saddle");
+    // First translation shell is a√2 = 5.112 Å. Keep the [001] image that
+    // is still a dumbbell after the pair relaxes, and hop away from the origin.
+    eprintln!(
+        "isolated barrier={:.6} converged={}",
+        geometry.barrier, geometry.converged
+    );
+    assert!(geometry.converged, "the Johnson saddle is not this hop");
+    let axis = [0.0, 0.0, 1.0];
+    let reference_axis = [1.0, 0.0, 0.0];
+    let reference_jump = jump;
+    let mut placed = None;
+    for r in [[a, 0.0, a], [a, a, 0.0], [0.0, a, a]] {
+        let center = wrap_cell(r, length);
+        let mut scored: Vec<(f64, [f64; 3])> = johnson_jumps(a, axis)
+            .into_iter()
+            .map(|hop_jump| {
+                let end = [
+                    r[0] + hop_jump[0],
+                    r[1] + hop_jump[1],
+                    r[2] + hop_jump[2],
+                ];
+                (length3(mic_delta(end, [0.0, 0.0, 0.0], cell)), hop_jump)
+            })
+            .collect();
+        scored.sort_by(|left, right| left.0.total_cmp(&right.0));
+        let (_, away_jump) = scored.last().copied().expect("away jump");
+        let Some(rotation) = cubic_rotations().into_iter().find(|q| {
+            same_axis(mat_vec(*q, reference_axis), axis)
+                && same_dir(mat_vec(*q, reference_jump), away_jump)
+        }) else {
+            continue;
+        };
+        let candidate = geometry
+            .place(rotation, center, cell, length, [0.0, 0.0, 0.0], 0.8)
+            .expect("place");
+        let mut probe = candidate.initial.clone();
+        relax(&Copper::new(), &mut probe, cell, 1.0e-3, 200);
+        let (split, dir) = pair_distance(&probe, cell);
+        let (angle_100, _, _, _) = axis_report(dir);
+        eprintln!(
+            "probe r={r:?} jump={away_jump:?} split={split:.3} angle_100={angle_100:.2} atoms={}",
+            candidate.initial.len() / 3
+        );
+        if (1.8..2.45).contains(&split) && angle_100 < 35.0 {
+            placed = Some(candidate);
+            break;
+        }
+    }
+    let placed = placed.expect("a dumbbell at the 5.112 A [001] shell");
+    eprintln!(
+        "away cell atoms {} dropped {:.3} A",
+        placed.initial.len() / 3,
+        placed.dropped_distance
+    );
+    let published = pair_saddle_search(
+        &Held {
+            copper: &Copper::new(),
+            cell,
+        },
+        cell,
+        &placed,
+        &PairOptions::published(),
+    )
+    .expect("published away climb");
+    eprintln!(
+        "PUBLISHED barrier={:.6} calls={} outcome={:?} ends={:?}/{:?} atom_i={:.4}/{:.4} atom_f={:.4}/{:.4} moved_rms_f={:.4}/{:.4}",
+        published.barrier,
+        published.force_calls,
+        published.outcome,
+        published.end_forward,
+        published.end_backward,
+        published.forward_atom_initial,
+        published.backward_atom_initial,
+        published.forward_atom_final,
+        published.backward_atom_final,
+        published.forward_moved_rms_final,
+        published.backward_moved_rms_final
+    );
+    let mut tight = PairOptions::published();
+    tight.force_tol = 2.0e-4;
+    tight.max_steps = 3000;
+    let found = pair_saddle_search(
+        &Held {
+            copper: &Copper::new(),
+            cell,
+        },
+        cell,
+        &placed,
+        &tight,
+    )
+    .expect("tight away climb");
+    eprintln!(
+        "TIGHT barrier={:.6} calls={} outcome={:?} ends={:?}/{:?} atom_f={:.4}/{:.4} moved_rms_f={:.4}/{:.4}",
+        found.barrier,
+        found.force_calls,
+        found.outcome,
+        found.end_forward,
+        found.end_backward,
+        found.forward_atom_final,
+        found.backward_atom_final,
+        found.forward_moved_rms_final,
+        found.backward_moved_rms_final
+    );
+    assert_ne!(
+        found.outcome,
+        PairOutcome::Hop,
+        "the away climb was classified as the hop"
+    );
+}

@@ -99,8 +99,9 @@ pub use ocineb::{
     walk_helped,
 };
 pub use pair::{
-    EndClassification, HopGeometry, PairEnd, PairOptions, PairOutcome, PairSaddle, PlacedPair,
-    align_tail, classify_saddle, isolated_saddle, pair_saddle_search,
+    EndClassification, GeometrySeparation, HopGeometry, PairEnd, PairOptions, PairOutcome,
+    PairSaddle, PlacedPair, align_tail, classify_saddle, geometry_separation, isolated_saddle,
+    pair_saddle_search,
 };
 pub use prfo::{PrfoKind, partitioned_rfo_eigen, restricted_prfo_displacement};
 pub use projection::ProjectionKind;

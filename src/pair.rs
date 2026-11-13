@@ -32,9 +32,11 @@ pub struct PairOptions {
     pub relax_steps: usize,
     /// Last atoms whose order is matched between the two minima.
     pub tail: usize,
-    /// Minimum-image RMS below which a quench is that minimum.
+    /// Old whole-cell RMS threshold. Classification does not read it.
+    /// A few atoms moving by an angstrom in a cell of thousands still
+    /// have a small RMS, so the match is [`Self::match_atom`].
     pub match_rms: f64,
-    /// Largest per-atom minimum-image move still counted as the same minimum.
+    /// Largest per-atom minimum-image move still counted as that minimum.
     pub match_atom: f64,
     /// A quench this far below both minima, matching neither, has recombined.
     pub recombine_drop: f64,
@@ -140,10 +142,17 @@ pub struct PairSaddle {
     pub end_forward: PairEnd,
     pub end_backward: PairEnd,
     /// Largest per-atom minimum-image distance of each quench from each minimum.
+    /// This, compared with [`PairOptions::match_atom`], is the match.
     pub forward_atom_initial: f64,
     pub forward_atom_final: f64,
     pub backward_atom_initial: f64,
     pub backward_atom_final: f64,
+    /// RMS of the minimum-image displacement over the atoms that moved,
+    /// for the same four comparisons. Not used to classify the end.
+    pub forward_moved_rms_initial: f64,
+    pub forward_moved_rms_final: f64,
+    pub backward_moved_rms_initial: f64,
+    pub backward_moved_rms_final: f64,
 }
 
 struct Counted<'a, S> {
@@ -175,6 +184,7 @@ pub fn isolated_saddle<S: PointSurface>(
     mut final_pos: Array1<f64>,
     options: &PairOptions,
 ) -> Result<HopGeometry, SaddleError> {
+    require_match_options(options)?;
     if initial.len() != final_pos.len() || !initial.len().is_multiple_of(3) {
         return Err(SaddleError::Shape(
             "the two minima need the same Cartesian length".into(),
@@ -392,6 +402,7 @@ pub fn classify_saddle<S: PointSurface>(
     final_min: &Array1<f64>,
     options: &PairOptions,
 ) -> Result<EndClassification, SaddleError> {
+    require_match_options(options)?;
     let counted = Counted {
         inner: surface,
         calls: AtomicUsize::new(0),
@@ -400,31 +411,35 @@ pub fn classify_saddle<S: PointSurface>(
     let (e_final, _) = counted.eval(final_min.view())?;
     let (forward_pos, forward_energy) = quench_side(&counted, saddle, mode, 1.0)?;
     let (backward_pos, backward_energy) = quench_side(&counted, saddle, mode, -1.0)?;
-    let forward_initial = mic_max_atom(&forward_pos, initial, cell);
-    let forward_final = mic_max_atom(&forward_pos, final_min, cell);
-    let backward_initial = mic_max_atom(&backward_pos, initial, cell);
-    let backward_final = mic_max_atom(&backward_pos, final_min, cell);
+    let forward_initial = geometry_separation(&forward_pos, initial, cell)?;
+    let forward_final = geometry_separation(&forward_pos, final_min, cell)?;
+    let backward_initial = geometry_separation(&backward_pos, initial, cell)?;
+    let backward_final = geometry_separation(&backward_pos, final_min, cell)?;
     Ok(EndClassification {
         forward: classify_end(
-            forward_initial,
-            forward_final,
+            forward_initial.max_atom,
+            forward_final.max_atom,
             forward_energy,
             e_min,
             e_final,
             options,
         ),
         backward: classify_end(
-            backward_initial,
-            backward_final,
+            backward_initial.max_atom,
+            backward_final.max_atom,
             backward_energy,
             e_min,
             e_final,
             options,
         ),
-        forward_initial,
-        forward_final,
-        backward_initial,
-        backward_final,
+        forward_initial: forward_initial.max_atom,
+        forward_final: forward_final.max_atom,
+        backward_initial: backward_initial.max_atom,
+        backward_final: backward_final.max_atom,
+        forward_moved_rms_initial: forward_initial.moved_rms,
+        forward_moved_rms_final: forward_final.moved_rms,
+        backward_moved_rms_initial: backward_initial.moved_rms,
+        backward_moved_rms_final: backward_final.moved_rms,
         forward_frame: closest_frame(&forward_pos, cell),
         backward_frame: closest_frame(&backward_pos, cell),
     })
@@ -439,6 +454,11 @@ pub struct EndClassification {
     pub forward_final: f64,
     pub backward_initial: f64,
     pub backward_final: f64,
+    /// RMS over the atoms that moved. Not the match.
+    pub forward_moved_rms_initial: f64,
+    pub forward_moved_rms_final: f64,
+    pub backward_moved_rms_initial: f64,
+    pub backward_moved_rms_final: f64,
     /// Closest-pair centre, axis and split of each quench.
     pub forward_frame: ([f64; 3], [f64; 3], f64),
     pub backward_frame: ([f64; 3], [f64; 3], f64),
@@ -451,6 +471,7 @@ pub fn pair_saddle_search<S: PointSurface>(
     placed: &PlacedPair,
     options: &PairOptions,
 ) -> Result<PairSaddle, SaddleError> {
+    require_match_options(options)?;
     let counted = Counted {
         inner: surface,
         calls: AtomicUsize::new(0),
@@ -484,21 +505,21 @@ pub fn pair_saddle_search<S: PointSurface>(
     let (forward_pos, forward_energy) = quench_side(&counted, &found.positions, &found.mode, 1.0)?;
     let (backward_pos, backward_energy) =
         quench_side(&counted, &found.positions, &found.mode, -1.0)?;
-    let forward_atom_initial = mic_max_atom(&forward_pos, &initial, cell);
-    let forward_atom_final = mic_max_atom(&forward_pos, &final_min, cell);
-    let backward_atom_initial = mic_max_atom(&backward_pos, &initial, cell);
-    let backward_atom_final = mic_max_atom(&backward_pos, &final_min, cell);
+    let forward_initial = geometry_separation(&forward_pos, &initial, cell)?;
+    let forward_final = geometry_separation(&forward_pos, &final_min, cell)?;
+    let backward_initial = geometry_separation(&backward_pos, &initial, cell)?;
+    let backward_final = geometry_separation(&backward_pos, &final_min, cell)?;
     let end_forward = classify_end(
-        forward_atom_initial,
-        forward_atom_final,
+        forward_initial.max_atom,
+        forward_final.max_atom,
         forward_energy,
         e_min,
         e_final,
         options,
     );
     let end_backward = classify_end(
-        backward_atom_initial,
-        backward_atom_final,
+        backward_initial.max_atom,
+        backward_final.max_atom,
         backward_energy,
         e_min,
         e_final,
@@ -527,10 +548,14 @@ pub fn pair_saddle_search<S: PointSurface>(
         outcome,
         end_forward,
         end_backward,
-        forward_atom_initial,
-        forward_atom_final,
-        backward_atom_initial,
-        backward_atom_final,
+        forward_atom_initial: forward_initial.max_atom,
+        forward_atom_final: forward_final.max_atom,
+        backward_atom_initial: backward_initial.max_atom,
+        backward_atom_final: backward_final.max_atom,
+        forward_moved_rms_initial: forward_initial.moved_rms,
+        forward_moved_rms_final: forward_final.moved_rms,
+        backward_moved_rms_initial: backward_initial.moved_rms,
+        backward_moved_rms_final: backward_final.moved_rms,
     })
 }
 
@@ -646,6 +671,20 @@ fn quench_side<S: PointSurface>(
     Ok((trial, energy))
 }
 
+fn require_match_options(options: &PairOptions) -> Result<(), SaddleError> {
+    if !(options.match_atom.is_finite() && options.match_atom > 0.0) {
+        return Err(SaddleError::Invalid(
+            "match_atom must be a positive length".into(),
+        ));
+    }
+    if !(options.match_rms.is_finite() && options.match_rms > 0.0) {
+        return Err(SaddleError::Invalid(
+            "match_rms must be a positive length; the match is match_atom".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn classify_end(
     to_initial: f64,
     to_final: f64,
@@ -702,7 +741,7 @@ fn outcome_of(
     if has_initial && has_final {
         return PairOutcome::Hop;
     }
-    if barrier.abs() < 0.02 && mic_rms(saddle, initial, cell) < options.match_rms {
+    if barrier.abs() < 0.02 && mic_max_atom(saddle, initial, cell) < options.match_atom {
         return PairOutcome::ReturnedToMinimum;
     }
     if has_initial || has_final {
@@ -866,6 +905,59 @@ fn mic_difference(target: &Array1<f64>, origin: &Array1<f64>, cell: M3) -> Array
     mode
 }
 
+/// An atom this far from its image, in angstroms, counts as moved for the
+/// diagnostic RMS. The match itself is the largest displacement.
+const MOVED_FLOOR_A: f64 = 1.0e-4;
+
+/// Per-atom minimum-image separation of two geometries in the same order.
+///
+/// `max_atom` is the match. `moved_rms` is the RMS over atoms that moved
+/// by more than [`MOVED_FLOOR_A`], so a handful of displaced atoms in a
+/// large cell are not diluted by the atoms that did not move.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GeometrySeparation {
+    pub max_atom: f64,
+    pub moved_rms: f64,
+    pub moved_atoms: usize,
+}
+
+pub fn geometry_separation(
+    left: &Array1<f64>,
+    right: &Array1<f64>,
+    cell: M3,
+) -> Result<GeometrySeparation, SaddleError> {
+    let n = left.len() / 3;
+    if n == 0 || right.len() / 3 != n {
+        return Err(SaddleError::Shape(
+            "the two geometries need the same number of atoms".into(),
+        ));
+    }
+    let mut max_atom = 0.0;
+    let mut sum = 0.0;
+    let mut moved_atoms = 0usize;
+    for atom in 0..n {
+        let delta = mic_delta(atom_at(left, atom), atom_at(right, atom), cell);
+        let length = (delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]).sqrt();
+        if length > max_atom {
+            max_atom = length;
+        }
+        if length > MOVED_FLOOR_A {
+            sum += length * length;
+            moved_atoms += 1;
+        }
+    }
+    let moved_rms = if moved_atoms == 0 {
+        0.0
+    } else {
+        (sum / moved_atoms as f64).sqrt()
+    };
+    Ok(GeometrySeparation {
+        max_atom,
+        moved_rms,
+        moved_atoms,
+    })
+}
+
 fn mic_max_atom(left: &Array1<f64>, right: &Array1<f64>, cell: M3) -> f64 {
     let n = left.len() / 3;
     if n == 0 || right.len() / 3 != n {
@@ -882,6 +974,7 @@ fn mic_max_atom(left: &Array1<f64>, right: &Array1<f64>, cell: M3) -> f64 {
     best
 }
 
+#[cfg(test)]
 fn mic_rms(left: &Array1<f64>, right: &Array1<f64>, cell: M3) -> f64 {
     let n = left.len() / 3;
     if n == 0 || right.len() / 3 != n {
@@ -1141,6 +1234,32 @@ mod tests {
         assert_eq!(loaded.negative_modes, Some(1));
         assert!(loaded.converged);
         assert!((loaded.saddle[0] - 0.1).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn a_few_moved_atoms_in_a_large_cell_do_not_match() {
+        let n = 2048usize;
+        let cell = [[40.0, 0.0, 0.0], [0.0, 40.0, 0.0], [0.0, 0.0, 40.0]];
+        let reference = Array1::zeros(n * 3);
+        let mut product = reference.clone();
+        for atom in 0..3 {
+            product[3 * atom] += 2.0;
+        }
+        let whole = mic_rms(&product, &reference, cell);
+        assert!(
+            whole < 0.2,
+            "whole-cell RMS {whole} would have been called the same minimum"
+        );
+        let separation = geometry_separation(&product, &reference, cell).unwrap();
+        assert_eq!(separation.moved_atoms, 3);
+        assert!((separation.max_atom - 2.0).abs() < 1.0e-12);
+        assert!((separation.moved_rms - 2.0).abs() < 1.0e-12);
+        let mut options = PairOptions::published();
+        options.match_atom = 0.2;
+        let end = classify_end(separation.max_atom, 10.0, 1.0, 1.0, 1.0, &options);
+        assert_ne!(end, PairEnd::FinalMinimum);
+        assert_ne!(end, PairEnd::InitialMinimum);
+        assert_eq!(end, PairEnd::OffPathway);
     }
 }
 
