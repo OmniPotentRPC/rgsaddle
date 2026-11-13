@@ -223,10 +223,17 @@ pub struct BandConfig {
     pub force_tol: f64,
     pub max_move: f64,
     /// Drop the mean Cartesian force of every image that has two or
-    /// more atoms. eOn does this when every atom is free and leaves
-    /// the mean in place when any atom is fixed, so a host with fixed
-    /// atoms clears this flag.
+    /// more atoms. With [`Self::frozen`] set, frozen atoms are zeroed
+    /// before that rank test and the step does not move them. eOn
+    /// clears the whole flag when any atom is fixed; leaving it on and
+    /// listing the fixed atoms keeps the rigid motions that do not
+    /// move those atoms.
     pub remove_translation: bool,
+    /// Per-atom masses, length N. `None` is unit mass. Rotations of a
+    /// min-mode climb are then about the mass-weighted centre of mass.
+    pub masses: Option<Vec<f64>>,
+    /// `frozen[i]` pins atom `i`. Length N. `None` pins nothing.
+    pub frozen: Option<Vec<bool>>,
     /// Band stepper. FIRE by default (eOn's velocity NEB stepper).
     /// L-BFGS runs under rgmin's `Accept::Step`: the two-loop
     /// direction, capped per atom, one band evaluation per step and no
@@ -280,6 +287,8 @@ impl Default for BandConfig {
             force_tol: 1e-3,
             max_move: 0.2,
             remove_translation: true,
+            masses: None,
+            frozen: None,
             method: Method::Fire {
                 kind: rgmin::FireKind::V2,
             },
@@ -914,6 +923,43 @@ pub(crate) fn remove_net_translation<S: DataMut<Elem = f64>>(force: &mut ArrayBa
     }
 }
 
+/// [`remove_net_translation`] at `pos`, with masses and a freeze mask.
+///
+/// Without either, the mean of a free image is subtracted as before.
+/// With either, the force goes through the column-pivoted QR: rotations
+/// stay off, frozen components are zeroed first, and the centre of mass
+/// is mass-weighted.
+pub(crate) fn remove_net_translation_at<S: DataMut<Elem = f64>>(
+    force: &mut ArrayBase<S, Ix1>,
+    pos: Option<&[f64]>,
+    masses: Option<&[f64]>,
+    frozen: Option<&[bool]>,
+) {
+    let n = force.len() / 3;
+    if n < 2 || force.len() != 3 * n {
+        return;
+    }
+    let weighed = masses.is_some() || frozen.is_some_and(|mask| mask.iter().any(|atom| *atom));
+    if !weighed {
+        remove_net_translation(force);
+        return;
+    }
+    let mut owned = force.to_owned();
+    let Some(buf) = owned.as_slice_mut() else {
+        return;
+    };
+    let fallback;
+    let at = match pos {
+        Some(p) if p.len() == buf.len() => p,
+        _ => {
+            fallback = vec![0.0; buf.len()];
+            fallback.as_slice()
+        }
+    };
+    crate::rigid_frame::RigidFrame::new().project(buf, at, masses, frozen, false);
+    force.assign(&owned);
+}
+
 fn prepare_solid(
     config: &BandConfig,
     mut positions: Array2<f64>,
@@ -1166,7 +1212,12 @@ fn solid_image(
     };
     if config.remove_translation {
         let mut atomic = projected.slice(s![..dof]).to_owned();
-        remove_net_translation(&mut atomic);
+        remove_net_translation_at(
+            &mut atomic,
+            positions.row(i).as_slice(),
+            config.masses.as_deref(),
+            config.frozen.as_deref(),
+        );
         projected.slice_mut(s![..dof]).assign(&atomic);
     }
     let mut raw = [0.0; 9];
@@ -1359,7 +1410,12 @@ fn image_force(
             .project(force.view(), tangent.view(), &spring)
     };
     if config.remove_translation {
-        remove_net_translation(&mut projected);
+        remove_net_translation_at(
+            &mut projected,
+            pos.as_slice(),
+            config.masses.as_deref(),
+            config.frozen.as_deref(),
+        );
     }
     let driving = match metric {
         Some(p) => {
@@ -1406,8 +1462,18 @@ fn image_force(
                 projected = -&gradient + &(&pt_p * along);
             }
             if config.remove_translation {
-                remove_net_translation(&mut driving);
-                remove_net_translation(&mut projected);
+                remove_net_translation_at(
+                    &mut driving,
+                    pos.as_slice(),
+                    config.masses.as_deref(),
+                    config.frozen.as_deref(),
+                );
+                remove_net_translation_at(
+                    &mut projected,
+                    pos.as_slice(),
+                    config.masses.as_deref(),
+                    config.frozen.as_deref(),
+                );
             }
             if !driving.dot(&driving).is_finite() {
                 return Err(SaddleError::NonFinite("preconditioned band force norm"));
@@ -1637,7 +1703,12 @@ fn image_force_into(
         }
     }
     if config.remove_translation {
-        remove_net_translation(&mut out);
+        remove_net_translation_at(
+            &mut out,
+            row(i).as_slice(),
+            config.masses.as_deref(),
+            config.frozen.as_deref(),
+        );
     }
     Ok(())
 }

@@ -2165,60 +2165,13 @@ fn project_out(v: &[f64], modes: &[Vec<f64>]) -> Vec<f64> {
 }
 
 fn rigid_basis(pos: &[f64]) -> Vec<Vec<f64>> {
-    let n = pos.len() / 3;
-    if n < 2 {
+    let Some(q) = crate::rigid_frame::RigidFrame::new().basis(pos, None, None, pos.len() >= 6)
+    else {
         return Vec::new();
-    }
-    let mut c = [0.0; 3];
-    for i in 0..n {
-        for k in 0..3 {
-            c[k] += pos[3 * i + k];
-        }
-    }
-    for k in 0..3 {
-        c[k] /= n as f64;
-    }
-    let mut seeds: Vec<Vec<f64>> = Vec::new();
-    for axis in 0..3 {
-        let mut translation = vec![0.0; pos.len()];
-        for i in 0..n {
-            translation[3 * i + axis] = 1.0;
-        }
-        seeds.push(translation);
-        let mut rotation = vec![0.0; pos.len()];
-        for i in 0..n {
-            let p = [
-                pos[3 * i] - c[0],
-                pos[3 * i + 1] - c[1],
-                pos[3 * i + 2] - c[2],
-            ];
-            let rot = match axis {
-                0 => [0.0, p[2], -p[1]],
-                1 => [-p[2], 0.0, p[0]],
-                _ => [p[1], -p[0], 0.0],
-            };
-            for k in 0..3 {
-                rotation[3 * i + k] = rot[k];
-            }
-        }
-        seeds.push(rotation);
-    }
-    let mut basis: Vec<Vec<f64>> = Vec::new();
-    for seed in seeds {
-        let mut mode = seed;
-        for kept in &basis {
-            let c = dot(kept, &mode);
-            for (m, k) in mode.iter_mut().zip(kept) {
-                *m -= c * *k;
-            }
-        }
-        let norm = norm(&mode);
-        if norm > 1e-8 {
-            for m in &mut mode {
-                *m /= norm;
-            }
-            basis.push(mode);
-        }
+    };
+    let mut basis = Vec::with_capacity(q.ncols());
+    for col in q.columns() {
+        basis.push(col.to_vec());
     }
     basis
 }

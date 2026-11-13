@@ -68,6 +68,7 @@ mod kani_proofs;
 #[cfg(all(test, feature = "verify"))]
 mod differential;
 
+mod rigid_frame;
 mod sqnm;
 pub use autoneb::{AutoNeb, AutoNebInterpolant, AutoNebReport, AutoNebTuning};
 pub use band::{

@@ -421,7 +421,7 @@ mod tests {
     #[test]
     fn rigid_motions_take_no_step() {
         let x = triangle();
-        let q = rigid_basis(&x, true);
+        let q = rigid_basis(&x, None, None, true);
         let mode = unit(9, 1);
         let mut climb = ModelClimb::fitted(&x, None, q.clone(), &[], &mode, -1.0, 1.0);
         let mut g = Array1::from_elem(9, 0.1);

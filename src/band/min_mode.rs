@@ -215,6 +215,8 @@ struct Run {
     steps: usize,
     /// Climb steps since the last mode estimate.
     since_refresh: usize,
+    masses: Option<Vec<f64>>,
+    frozen: Option<Vec<bool>>,
 }
 
 impl Run {
@@ -260,7 +262,13 @@ impl Run {
                 block.push((d, (&gp - g) / dr));
             }
         }
-        let rigid = rigid_motions(&self.current.x, cell, remove_translation);
+        let rigid = rigid_motions(
+            &self.current.x,
+            cell,
+            remove_translation,
+            self.masses.as_deref(),
+            self.frozen.as_deref(),
+        );
         self.climb = Some(ModelClimb::fitted(
             &self.current.x,
             cell,
@@ -292,9 +300,11 @@ fn rigid_motions(
     x: &Array1<f64>,
     cell: Option<&Cell>,
     remove_translation: bool,
+    masses: Option<&[f64]>,
+    frozen: Option<&[bool]>,
 ) -> Option<ndarray::Array2<f64>> {
     remove_translation
-        .then(|| rigid_basis(x, cell.is_none()))
+        .then(|| rigid_basis(x, masses, frozen, cell.is_none()))
         .flatten()
 }
 
@@ -441,6 +451,8 @@ impl BandSession {
                 &run.current.x,
                 cell.as_ref(),
                 remove_translation,
+                self.config.masses.as_deref(),
+                self.config.frozen.as_deref(),
             ));
             run.since_refresh += 1;
             climb.lowest()?;
@@ -658,6 +670,8 @@ impl BandSession {
             alignment: 1.0,
             steps: 0,
             since_refresh: 0,
+            masses: self.config.masses.clone(),
+            frozen: self.config.frozen.clone(),
         });
         Ok(())
     }

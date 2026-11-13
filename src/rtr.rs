@@ -126,7 +126,12 @@ fn band_forces_with_gate<S: BandSurface + ?Sized>(
                 .project(true_force.view(), tangent.view(), &spring)
         };
         if config.remove_translation {
-            crate::band::remove_net_translation(&mut image_force);
+            crate::band::remove_net_translation_at(
+                &mut image_force,
+                positions.row(i).as_slice(),
+                config.masses.as_deref(),
+                config.frozen.as_deref(),
+            );
         }
         force
             .slice_mut(s![(i - 1) * dof..i * dof])

@@ -1,0 +1,4 @@
+Rigid translations and rotations on the band, the min-mode climb,
+and the connect surface use rgmin's column-pivoted QR.
+Rotations are about the mass-weighted centre of mass, and frozen
+atoms are zeroed before the rank test.
