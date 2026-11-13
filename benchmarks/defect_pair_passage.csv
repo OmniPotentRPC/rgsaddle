@@ -1,0 +1,11 @@
+temperature_K,threshold_meV,volume_over_Omega,sigma,spontaneous_sites,kinetic_sites,demkowicz_8788,cell
+300,0.5,157.0310,3.9768,22.0000,135.0310,254-286,8x8x8=2048 atoms; Demkowicz size-converged at 8788
+300,1,157.0310,3.9768,22.0000,135.0310,254-286,8x8x8=2048 atoms; Demkowicz size-converged at 8788
+300,2,157.0310,3.9768,22.0000,135.0310,254-286,8x8x8=2048 atoms; Demkowicz size-converged at 8788
+500,0.5,226.9489,2.2233,66.0000,160.9489,161-185,8x8x8=2048 atoms; Demkowicz size-converged at 8788
+500,1,226.9489,2.2233,66.0000,160.9489,161-185,8x8x8=2048 atoms; Demkowicz size-converged at 8788
+500,2,226.9489,2.2233,66.0000,160.9489,161-185,8x8x8=2048 atoms; Demkowicz size-converged at 8788
+700,0.5,156.8730,3.0354,22.0000,134.8730,203-210,8x8x8=2048 atoms; Demkowicz size-converged at 8788
+700,1,156.8730,3.0354,22.0000,134.8730,203-210,8x8x8=2048 atoms; Demkowicz size-converged at 8788
+700,2,156.8730,3.0354,22.0000,134.8730,203-210,8x8x8=2048 atoms; Demkowicz size-converged at 8788
+note,The return layer is one nearest-neighbor hop past the outer shell. Its return probability is R/(R+lambda), the spherical first-passage value. Cell is 8x8x8 (2048 atoms); Table 1 of the accepted manuscript, Phys. Rev. Materials 9, 023601 (2025), doi:10.1103/PhysRevMaterials.9.023601, section 4, is size-independent only at 8788 atoms and above.

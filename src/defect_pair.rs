@@ -1399,6 +1399,90 @@ pub fn kinetic_recombination_volume(
     })
 }
 
+/// The free crystal beyond the last discrete shell.
+///
+/// [`Self::boundary`] hops outward at [`Self::outward_rate`] into a return
+/// layer of [`Self::return_count`] sites. A fraction
+/// [`Self::return_probability`] of the trajectories that reach that layer
+/// come back to the boundary; the rest escape to infinity. The outward hop
+/// is then a first-passage step, not an absorbing loss.
+#[derive(Clone, Debug)]
+pub struct FreeMigration {
+    pub boundary: String,
+    pub outward_rate: f64,
+    pub return_probability: f64,
+    pub return_count: f64,
+}
+
+/// Id of the return layer inserted by [`embed_free_migration`].
+pub const FREE_CRYSTAL: &str = "free-crystal";
+
+/// Embed `sites` in free migration.
+///
+/// The boundary's absorbing `"escaped"` edge is replaced by a hop into
+/// [`FREE_CRYSTAL`]. The inserted layer hops back to the boundary and onward
+/// to infinity. `kinetic_recombination_volume` on the result is the capture
+/// probability of that first-passage problem.
+pub fn embed_free_migration(
+    sites: &[VolumeSite],
+    migration: &FreeMigration,
+) -> Result<Vec<VolumeSite>, SaddleError> {
+    if !(migration.outward_rate.is_finite() && migration.outward_rate > 0.0) {
+        return Err(SaddleError::Invalid(
+            "the outward rate must be finite and positive".into(),
+        ));
+    }
+    if !(migration.return_probability.is_finite()
+        && (0.0..=1.0).contains(&migration.return_probability)
+        && migration.return_probability < 1.0)
+    {
+        return Err(SaddleError::Invalid(
+            "the return probability must lie in [0, 1)".into(),
+        ));
+    }
+    if !(migration.return_count.is_finite() && migration.return_count >= 0.0) {
+        return Err(SaddleError::Invalid(
+            "the return-layer multiplicity must be finite and non-negative".into(),
+        ));
+    }
+    let mut found = false;
+    let mut out = Vec::with_capacity(sites.len() + 1);
+    for site in sites {
+        let mut site = site.clone();
+        if site.id == migration.boundary {
+            if site.outcome != SiteOutcome::Kinetic {
+                return Err(SaddleError::Invalid(format!(
+                    "boundary {} is not a kinetic shell",
+                    migration.boundary
+                )));
+            }
+            found = true;
+            site.rates.retain(|(destination, _)| destination != "escaped");
+            site.rates
+                .push((FREE_CRYSTAL.to_string(), migration.outward_rate));
+        }
+        out.push(site);
+    }
+    if !found {
+        return Err(SaddleError::Invalid(format!(
+            "boundary {} is not in the shell list",
+            migration.boundary
+        )));
+    }
+    let back = migration.outward_rate * migration.return_probability;
+    let leave = migration.outward_rate * (1.0 - migration.return_probability);
+    out.push(VolumeSite {
+        id: FREE_CRYSTAL.to_string(),
+        count: migration.return_count,
+        outcome: SiteOutcome::Kinetic,
+        rates: vec![
+            (migration.boundary.clone(), back),
+            ("escaped".to_string(), leave),
+        ],
+    });
+    Ok(out)
+}
+
 fn solve_linear(mut matrix: Vec<Vec<f64>>, mut rhs: Vec<f64>) -> Result<Vec<f64>, SaddleError> {
     let n = rhs.len();
     for col in 0..n {

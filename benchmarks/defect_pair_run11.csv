@@ -1,0 +1,13 @@
+kind,shell,orientation,hop,direction,temperature_K,dE0_eV,zero_T_eV,dF_eV,dF_error_eV,nu_Hz,rate_Hz,outcome,band_force,note
+pafi,isolated,100,translate,toward,700,0.085962,0.085858,0.072887,0.009099,1.39822954e12,8.74318025e10,rated,0.00139,kappa 0.209340 error 0.389305; tangent; free-energy maximum
+pafi,4.470,100,capture,toward,700,0.005283,0.005255,0.026001,0.007998,7.71376801e11,2.95314973e11,rated,0.00122,kappa 0.589141 error 0.038069; tangent; free-energy maximum
+pafi,5.162,001,capture,toward,700,0.065247,0.065210,0.066122,0.008730,1.32832586e12,9.14322935e10,rated,0.00180,kappa 0.205994 error 0.114966; reversed tangent; the path normal pointed at the reactant; free-energy maximum
+pafi,6.807,001,capture,toward,500,0.024553,0.024502,0.013045,0.007933,1.10413735e12,1.40264482e11,rated,0.00173,kappa 0.171955 error 0.407004; tangent; free-energy maximum
+pafi,6.828,001,capture,toward,700,0.024642,0.024609,0.015525,0.009778,1.09412211e12,1.57310196e11,rated,0.00197,kappa 0.185981 error 0.407282; tangent; free-energy maximum
+pafi,5.131,001,capture,toward,300,0.069169,0.069116,0.073065,0.008414,1.36256324e12,1.97786726e10,rated,0.00119,kappa 0.245059 error 0.143503; reversed tangent; the path normal pointed at the reactant; free-energy maximum
+strain,8.913,100,translate,away,500,0.106808,1.023875e-3,1.500000e-3,false,translation,strain-mapped barrier 0.1068 eV vs free translation 0.0898 eV; force tolerance 1.5e-3
+strain,9.277,100,translate,away,500,0.088721,7.873488e-4,1.500000e-3,true,translation,strain-free translation barrier recovered; |0.0887 - 0.0898| < 0.005 eV; force tolerance 1.5e-3
+strain,9.965,100,translate,away,500,0.088994,9.375876e-4,1.500000e-3,true,translation,strain-free translation barrier recovered; |0.0890 - 0.0898| < 0.005 eV; force tolerance 1.5e-3
+strain,10.292,100,translate,away,500,0.090117,9.395820e-4,1.500000e-3,true,translation,strain-free translation barrier recovered; |0.0901 - 0.0898| < 0.005 eV; force tolerance 1.5e-3
+strain,10.608,100,translate,away,500,0.089124,8.412036e-4,1.500000e-3,true,translation,strain-free translation barrier recovered; |0.0891 - 0.0898| < 0.005 eV; force tolerance 1.5e-3
+strain,8.533,100,translate,away,500,0.089920,8.112184e-4,1.500000e-3,true,translation,strain-free translation barrier recovered; |0.0899 - 0.0898| < 0.005 eV; force tolerance 1.5e-3

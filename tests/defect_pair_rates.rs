@@ -306,3 +306,35 @@ fn kinetic_volume_counts_return_from_the_outer_shell() {
     assert!(rgsaddle::capture_is_spontaneous(false, Some(0.001)));
     assert!(!rgsaddle::capture_is_spontaneous(false, Some(0.0064)));
 }
+
+#[test]
+fn free_migration_return_raises_the_capture_probability() {
+    let bare = vec![rgsaddle::VolumeSite {
+        id: "boundary".into(),
+        count: 10.0,
+        outcome: rgsaddle::SiteOutcome::Kinetic,
+        rates: vec![("recombined".into(), 9.0), ("escaped".into(), 1.0)],
+    }];
+    let without = rgsaddle::kinetic_recombination_volume(&bare, 1.0).expect("bare");
+    assert!((without.total_sites - 9.0).abs() < 1.0e-9);
+    let embedded = rgsaddle::embed_free_migration(
+        &bare,
+        &rgsaddle::FreeMigration {
+            boundary: "boundary".into(),
+            outward_rate: 1.0,
+            return_probability: 0.5,
+            return_count: 4.0,
+        },
+    )
+    .expect("embed");
+    let with = rgsaddle::kinetic_recombination_volume(&embedded, 1.0).expect("embedded");
+    // P_b = 0.9 / 0.95, P_layer = 0.5 P_b, volume = 10 P_b + 4 P_layer.
+    let probability = 0.9 / 0.95;
+    let expected = 10.0 * probability + 4.0 * 0.5 * probability;
+    assert!(
+        (with.total_sites - expected).abs() < 1.0e-9,
+        "{}",
+        with.total_sites
+    );
+    assert!(with.total_sites > without.total_sites);
+}
