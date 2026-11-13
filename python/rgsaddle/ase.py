@@ -322,10 +322,12 @@ class NEB:
 
     The constructor matches ``ase.mep.NEB``: ``images`` carry the
     calculators, ``k`` is the spring constant, and ``climb`` turns the
-    climbing image on for every force call. ``get_positions`` and
+    climbing image on for every force call.     ``get_positions`` and
     ``get_forces`` are the interior images only, shape
     ``((n_images - 2) * n_atoms, 3)``, which is what ASE's optimizer
-    reads. ``get_potential_energy`` is the highest image energy.
+    reads. ``get_potential_energy`` is the highest interior energy,
+    the value ASE's NEB reports. A higher fixed endpoint does not
+    replace it.
 
     ``climb=True`` does not climb an interior image when a higher
     endpoint slopes down into the band. ASE's ``NEB`` climbs the
@@ -459,7 +461,8 @@ class NEB:
         natoms = len(self.images[0])
         forces = np.asarray(flat, dtype=np.float64).reshape(count, natoms, 3)
         self.energies = np.asarray(energies, dtype=np.float64).reshape(-1)
-        self.emax = float(np.max(self.energies))
+        interior = self.energies[1:-1]
+        self.emax = float(np.max(interior)) if interior.size else float("nan")
         self.ci = None if int(ci) < 0 else int(ci)
         return np.ascontiguousarray(forces[1:-1].reshape(-1, 3), dtype=np.float64)
 
