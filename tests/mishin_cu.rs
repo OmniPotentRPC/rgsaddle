@@ -20,10 +20,11 @@ use std::time::Instant;
 use ndarray::{Array1, Array2, ArrayView1};
 use rgmin::{Control, FireKind, Method, Oracle, Solver};
 use rgsaddle::{
-    BOLTZMANN_EV_PER_K, CellMask, CubicElasticity, DefectSource, ElasticDipole, ElasticMultipole,
-    FieldSolver, FmmSolver, IndexCheck, Kelvin, LINEAR_FOLD_EV, MinModeConfig, MinModeStatus,
-    PointSurface, SaddleError, SaddleSeed, SolidDimer, SolidDimerConfig, Strain, StrainResponse,
-    Trust, TrustPolicy, cubic_rotations, index_at,
+    BOLTZMANN_EV_PER_K, CellMask, CubicElasticity,
+    DefectSource, ElasticDipole, ElasticMultipole, FieldSolver, FmmSolver, IndexCheck, Kelvin,
+    LINEAR_FOLD_EV, MinModeConfig, MinModeStatus, PointSurface, SaddleError, SaddleSeed,
+    SolidDimer, SolidDimerConfig, Strain, StrainResponse, Trust, TrustPolicy, cubic_rotations,
+    index_at,
 };
 
 const RC: f64 = 5.50679;
@@ -2700,11 +2701,11 @@ fn pair_distance(positions: &Array1<f64>, cell: [[f64; 3]; 3]) -> (f64, [f64; 3]
     (distance, dir)
 }
 
-/// Vacancy dipole and <100> dumbbell hops in an 8×8×8 Mishin cell.
+/// Vacancy dipole and the on-site <100> to <110> rotation in an 8×8×8 cell.
 ///
-/// The dipole is the fixed-cell residual stress. Shells run from the
-/// second neighbour out to 3a. The direct dimer is the [100] hop at one
-/// far shell, in the cell that still contains the vacancy.
+/// The direct search here is that rotation, not the Johnson translation.
+/// `dumbbell_translation_and_rotation_in_the_vacancy_field` is the
+/// orientation-resolved sweep of both hops.
 #[test]
 #[ignore = "8x8x8 Mishin vacancy field and one far-shell dumbbell hop; run in release"]
 fn vacancy_field_and_one_far_dumbbell_hop() {
@@ -3064,4 +3065,1184 @@ fn direct_dumbbell_hop(
         sigma_min,
         sigma_sad: row.stress,
     })
+}
+
+fn min_image_length(a: [f64; 3], b: [f64; 3], cell: [[f64; 3]; 3]) -> f64 {
+    let inv = invert(cell);
+    let d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+    let s = [
+        d[0] * inv[0][0] + d[1] * inv[1][0] + d[2] * inv[2][0],
+        d[0] * inv[0][1] + d[1] * inv[1][1] + d[2] * inv[2][1],
+        d[0] * inv[0][2] + d[1] * inv[1][2] + d[2] * inv[2][2],
+    ];
+    let w = [
+        s[0] - s[0].round(),
+        s[1] - s[1].round(),
+        s[2] - s[2].round(),
+    ];
+    let cart = [
+        w[0] * cell[0][0] + w[1] * cell[1][0] + w[2] * cell[2][0],
+        w[0] * cell[0][1] + w[1] * cell[1][1] + w[2] * cell[2][1],
+        w[0] * cell[0][2] + w[1] * cell[1][2] + w[2] * cell[2][2],
+    ];
+    (cart[0] * cart[0] + cart[1] * cart[1] + cart[2] * cart[2]).sqrt()
+}
+
+fn align_tail(initial: &Array1<f64>, final_pos: &mut Array1<f64>, cell: [[f64; 3]; 3], tail: usize) {
+    let n = initial.len() / 3;
+    let start = n - tail;
+    let mut atoms = Vec::new();
+    for atom in start..n {
+        atoms.push([
+            final_pos[3 * atom],
+            final_pos[3 * atom + 1],
+            final_pos[3 * atom + 2],
+        ]);
+    }
+    let mut order: Vec<usize> = (0..tail).collect();
+    let mut best_order = order.clone();
+    let mut best = f64::MAX;
+    fn walk(
+        order: &mut Vec<usize>,
+        start: usize,
+        initial: &Array1<f64>,
+        atoms: &[[f64; 3]],
+        cell: [[f64; 3]; 3],
+        body: usize,
+        best: &mut f64,
+        best_order: &mut Vec<usize>,
+    ) {
+        if start == order.len() {
+            let mut cost = 0.0;
+            for (slot, index) in order.iter().enumerate() {
+                let from = [
+                    initial[3 * (body + slot)],
+                    initial[3 * (body + slot) + 1],
+                    initial[3 * (body + slot) + 2],
+                ];
+                cost += min_image_length(from, atoms[*index], cell);
+            }
+            if cost < *best {
+                *best = cost;
+                *best_order = order.clone();
+            }
+            return;
+        }
+        for i in start..order.len() {
+            order.swap(start, i);
+            walk(order, start + 1, initial, atoms, cell, body, best, best_order);
+            order.swap(start, i);
+        }
+    }
+    walk(
+        &mut order,
+        0,
+        initial,
+        &atoms,
+        cell,
+        start,
+        &mut best,
+        &mut best_order,
+    );
+    for (slot, index) in best_order.iter().enumerate() {
+        for c in 0..3 {
+            final_pos[3 * (start + slot) + c] = atoms[*index][c];
+        }
+    }
+}
+
+struct HopRun {
+    barrier: f64,
+    converged: bool,
+    angle_100: f64,
+    angle_110: f64,
+    status: String,
+    sigma_min: [[f64; 3]; 3],
+    sigma_sad: [[f64; 3]; 3],
+    minimum: Array1<f64>,
+    saddle: Array1<f64>,
+    saddle_offset: [f64; 3],
+}
+
+fn dimer_endpoints(
+    copper: &Copper,
+    cell: [[f64; 3]; 3],
+    mut initial: Array1<f64>,
+    mut final_pos: Array1<f64>,
+    tail: usize,
+    _origin: [f64; 3],
+) -> HopRun {
+    relax(copper, &mut initial, cell, 1e-3, 400);
+    relax(copper, &mut final_pos, cell, 1e-3, 400);
+    align_tail(&initial, &mut final_pos, cell, tail);
+    let (e_min, _, sigma_min) = copper.evaluate(initial.view(), cell);
+    let minimum = initial.clone();
+    let (_, axis0) = pair_distance(&initial, cell);
+    let (to_100, _, _, _) = axis_report(axis0);
+    let connect = minimum_image_difference(&final_pos, &initial, cell);
+    let norm = connect.dot(&connect).sqrt();
+    let mut nudged = minimum.clone();
+    if norm > 0.0 {
+        for (slot, component) in nudged.iter_mut().zip(connect.iter()) {
+            *slot += 0.02 * component / norm;
+        }
+    }
+    let row = saddle_from_minimum(
+        copper,
+        &nudged,
+        cell,
+        &connect,
+        CellMask::frozen(),
+        [[0.0; 3]; 3],
+        cell,
+        e_min,
+        to_100,
+        0.0,
+        800,
+        &published_dimer(),
+    );
+    let converged = row.status == MinModeStatus::Converged
+        && !row.rejected
+        && row.curvature < 0.0
+        && row.negative_modes == Some(1);
+    let saddle = row.positions;
+    HopRun {
+        barrier: row.barrier,
+        converged,
+        angle_100: row.angle_100,
+        angle_110: row.angle_110,
+        status: format!("{:?}", row.status),
+        sigma_min,
+        sigma_sad: row.stress,
+        saddle_offset: tail_offset(&minimum, &saddle, cell, tail),
+        minimum,
+        saddle,
+    }
+}
+
+fn rigid_place(
+    positions: &Array1<f64>,
+    rotation: [[f64; 3]; 3],
+    shift: [f64; 3],
+    length: f64,
+) -> Array1<f64> {
+    let rotated = rotate_about(positions, [0.0, 0.0, 0.0], rotation);
+    let mut out = rotated;
+    for atom in 0..out.len() / 3 {
+        let wrapped = wrap_cell(
+            [
+                out[3 * atom] + shift[0],
+                out[3 * atom + 1] + shift[1],
+                out[3 * atom + 2] + shift[2],
+            ],
+            length,
+        );
+        out[3 * atom] = wrapped[0];
+        out[3 * atom + 1] = wrapped[1];
+        out[3 * atom + 2] = wrapped[2];
+    }
+    out
+}
+
+fn pbc_nearest(positions: &Array1<f64>, point: [f64; 3], cell: [[f64; 3]; 3]) -> usize {
+    let mut best = 0usize;
+    let mut best_d = f64::MAX;
+    for atom in 0..positions.len() / 3 {
+        let here = [
+            positions[3 * atom],
+            positions[3 * atom + 1],
+            positions[3 * atom + 2],
+        ];
+        let distance = min_image_length(here, point, cell);
+        if distance < best_d {
+            best_d = distance;
+            best = atom;
+        }
+    }
+    best
+}
+
+/// The isolated saddle, rotated onto this dumbbell and with the vacancy
+/// deleted. The dimer starts there. A result counts only when it stays
+/// on the same hop: a <100> tilt for the translation, a <110> split for
+/// the rotation.
+fn direct_on_hop(
+    copper: &Copper,
+    hop: &HopRun,
+    rotation: [[f64; 3]; 3],
+    shift: [f64; 3],
+    length: f64,
+    cell: [[f64; 3]; 3],
+    kind: &str,
+) -> (Option<f64>, String) {
+    let moved_min = rigid_place(&hop.minimum, rotation, shift, length);
+    let moved_sad = rigid_place(&hop.saddle, rotation, shift, length);
+    let vacancy = pbc_nearest(&moved_min, [0.0, 0.0, 0.0], cell);
+    let vacancy_here = [
+        moved_min[3 * vacancy],
+        moved_min[3 * vacancy + 1],
+        moved_min[3 * vacancy + 2],
+    ];
+    let vacancy_distance = min_image_length(vacancy_here, [0.0, 0.0, 0.0], cell);
+    if vacancy_distance > 0.8 {
+        return (
+            None,
+            format!("did not converge vacancy atom {vacancy_distance:.3} A from the origin"),
+        );
+    }
+    let min_placed = drop_atoms(&moved_min, &[vacancy]);
+    let sad_placed = drop_atoms(&moved_sad, &[vacancy]);
+    let mode = minimum_image_difference(&sad_placed, &min_placed, cell);
+    let mut minimum = min_placed;
+    relax(copper, &mut minimum, cell, 1e-3, 200);
+    let (e_min, gradient, _) = copper.evaluate(minimum.view(), cell);
+    let (split, axis) = pair_distance(&minimum, cell);
+    let (to_100, _, _, _) = axis_report(axis);
+    let force = max_abs(&gradient);
+    if !(1.8..2.45).contains(&split) || to_100 > 35.0 || force > 5.0e-2 {
+        return (
+            None,
+            format!(
+                "did not converge reactant split={split:.3} angle_100={to_100:.1} force={force:.3e}"
+            ),
+        );
+    }
+    let tune = published_dimer();
+    let search = MinModeConfig {
+        method: Method::Fire { kind: FireKind::V2 },
+        force_tol: tune.force_tol,
+        max_move: tune.max_move,
+        dr: 1e-3,
+        rotation_tol: tune.rotation_tol,
+        max_rotations: tune.max_rotations,
+        seed_curvature: tune.seed_curvature,
+        ..MinModeConfig::default()
+    };
+    let mut dimer = match SolidDimer::new(
+        SolidDimerConfig::new(search)
+            .with_mask(CellMask::frozen())
+            .with_external_stress([[0.0; 3]; 3])
+            .with_index_check(IndexCheck::first_order())
+            .with_flat(tune.flat),
+        sad_placed,
+        cell,
+        mode,
+    ) {
+        Ok(dimer) => dimer,
+        Err(err) => return (None, format!("did not converge {err}")),
+    };
+    let surface = Held { copper, cell };
+    let mut report = match dimer.step(&surface) {
+        Ok(report) => report,
+        Err(err) => return (None, format!("did not converge {err}")),
+    };
+    let mut steps = 1usize;
+    let mut dissolved = false;
+    loop {
+        if steps % 8 == 0 {
+            let (split_now, _) = pair_distance(&dimer.positions().to_owned(), cell);
+            if split_now > 2.7 {
+                dissolved = true;
+                break;
+            }
+        }
+        if report.status != MinModeStatus::Running || steps >= 500 {
+            break;
+        }
+        report = match dimer.step(&surface) {
+            Ok(report) => report,
+            Err(err) => return (None, format!("did not converge {err}")),
+        };
+        steps += 1;
+    }
+    let (e_sad, _, _) = copper.evaluate(dimer.positions(), cell);
+    let (split_sad, dir) = pair_distance(&dimer.positions().to_owned(), cell);
+    let (angle_100, angle_110, _, _) = axis_report(dir);
+    let barrier = e_sad - e_min;
+    // A climb that returns to the reactant is not a saddle of either hop.
+    // The translation saddle sits about 14 degrees off <100>; the reactant
+    // is the aligned dumbbell.
+    let back_at_minimum = barrier.abs() < 0.02 && (angle_100 - to_100).abs() < 6.0;
+    let family = if dissolved || !(1.8..2.6).contains(&split_sad) {
+        "recombined"
+    } else if back_at_minimum {
+        "minimum"
+    } else if angle_110 < 8.0 && angle_100 > 30.0 {
+        "rotation"
+    } else if (5.0..32.0).contains(&angle_100) {
+        "translation"
+    } else {
+        "other"
+    };
+    let converged = report.status == MinModeStatus::Converged
+        && !report.rejected
+        && report.curvature < 0.0
+        && report.negative_modes == Some(1);
+    if converged && family == kind {
+        (
+            Some(barrier),
+            format!("converged angle_100={angle_100:.2} angle_110={angle_110:.2}"),
+        )
+    } else if family != kind {
+        (
+            None,
+            format!(
+                "left the hop ({family}) barrier={barrier:.6} angle_100={angle_100:.2} angle_110={angle_110:.2} status={:?}",
+                report.status
+            ),
+        )
+    } else {
+        (
+            None,
+            format!(
+                "did not converge {:?} barrier={barrier:.6} angle_100={angle_100:.2} angle_110={angle_110:.2}",
+                report.status
+            ),
+        )
+    }
+}
+
+fn tail_offset(
+    minimum: &Array1<f64>,
+    saddle: &Array1<f64>,
+    cell: [[f64; 3]; 3],
+    tail: usize,
+) -> [f64; 3] {
+    let n = minimum.len() / 3;
+    let mut acc = [0.0; 3];
+    for atom in (n - tail)..n {
+        let from = [
+            minimum[3 * atom],
+            minimum[3 * atom + 1],
+            minimum[3 * atom + 2],
+        ];
+        let to = [
+            saddle[3 * atom],
+            saddle[3 * atom + 1],
+            saddle[3 * atom + 2],
+        ];
+        let d = mic_delta(to, from, cell);
+        acc[0] += d[0];
+        acc[1] += d[1];
+        acc[2] += d[2];
+    }
+    let scale = tail as f64;
+    [acc[0] / scale, acc[1] / scale, acc[2] / scale]
+}
+
+fn mic_delta(point: [f64; 3], origin: [f64; 3], cell: [[f64; 3]; 3]) -> [f64; 3] {
+    let inv = invert(cell);
+    let d = [
+        point[0] - origin[0],
+        point[1] - origin[1],
+        point[2] - origin[2],
+    ];
+    let s = [
+        d[0] * inv[0][0] + d[1] * inv[1][0] + d[2] * inv[2][0],
+        d[0] * inv[0][1] + d[1] * inv[1][1] + d[2] * inv[2][1],
+        d[0] * inv[0][2] + d[1] * inv[1][2] + d[2] * inv[2][2],
+    ];
+    let w = [
+        s[0] - s[0].round(),
+        s[1] - s[1].round(),
+        s[2] - s[2].round(),
+    ];
+    [
+        w[0] * cell[0][0] + w[1] * cell[1][0] + w[2] * cell[2][0],
+        w[0] * cell[0][1] + w[1] * cell[1][1] + w[2] * cell[2][1],
+        w[0] * cell[0][2] + w[1] * cell[1][2] + w[2] * cell[2][2],
+    ]
+}
+
+/// Which endpoint is the 0.091 eV translation and which is the 0.23 eV rotation.
+#[test]
+#[ignore = "release identification of the Mishin dumbbell translation and rotation"]
+fn identify_dumbbell_translation_and_rotation() {
+    let a = 3.615;
+    let (perfect, cell) = fcc(8, a);
+    let origin = nearest_atom(&perfect, [0.0, 0.0, 0.0]);
+    let cases = [
+        (
+            "rotation-100-to-010",
+            origin,
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            origin,
+            [0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            2usize,
+        ),
+        (
+            "johnson-100-to-010-at-011",
+            origin,
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            nearest_atom(&perfect, [0.0, 0.5 * a, 0.5 * a]),
+            [0.0, 0.5 * a, 0.5 * a],
+            [0.0, 1.0, 0.0],
+            3,
+        ),
+        (
+            "johnson-100-to-001-at-011",
+            origin,
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            nearest_atom(&perfect, [0.0, 0.5 * a, 0.5 * a]),
+            [0.0, 0.5 * a, 0.5 * a],
+            [0.0, 0.0, 1.0],
+            3,
+        ),
+        (
+            "johnson-100-to-010-at-110",
+            origin,
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            nearest_atom(&perfect, [0.5 * a, 0.5 * a, 0.0]),
+            [0.5 * a, 0.5 * a, 0.0],
+            [0.0, 1.0, 0.0],
+            3,
+        ),
+    ];
+    let perfect = &perfect;
+    std::thread::scope(|scope| {
+        let mut joins = Vec::new();
+        for (name, site_i, center_i, axis_i, site_f, center_f, axis_f, tail) in cases {
+            joins.push(scope.spawn(move || {
+                let copper = Copper::new();
+                let (initial, final_pos) = matched_dumbbells(
+                    perfect, site_i, center_i, axis_i, site_f, center_f, axis_f, &[],
+                );
+                let found = dimer_endpoints(&copper, cell, initial, final_pos, tail, center_i);
+                eprintln!(
+                    "{name} barrier={:.6} converged={} angle_100={:.2} angle_110={:.2} offset={:?} status={}",
+                    found.barrier,
+                    found.converged,
+                    found.angle_100,
+                    found.angle_110,
+                    found.saddle_offset,
+                    found.status
+                );
+            }));
+        }
+        for join in joins {
+            join.join().expect("hop");
+        }
+    });
+}
+
+fn matched_dumbbells(
+    perfect: &Array1<f64>,
+    site_i: usize,
+    center_i: [f64; 3],
+    axis_i: [f64; 3],
+    site_f: usize,
+    center_f: [f64; 3],
+    axis_f: [f64; 3],
+    also_drop: &[usize],
+) -> (Array1<f64>, Array1<f64>) {
+    if site_i == site_f {
+        let mut drop = vec![site_i];
+        drop.extend_from_slice(also_drop);
+        let body = drop_atoms(perfect, &drop);
+        return (
+            with_dumbbell(&body, center_i, axis_i, 2.05),
+            with_dumbbell(&body, center_f, axis_f, 2.05),
+        );
+    }
+    let mut drop = vec![site_i, site_f];
+    drop.extend_from_slice(also_drop);
+    drop.sort_unstable();
+    let common = drop_atoms(perfect, &drop);
+    let mut initial_active = Vec::new();
+    for c in 0..3 {
+        initial_active.push(perfect[3 * site_f + c]);
+    }
+    let initial_dumbbell = with_dumbbell(&Array1::from(initial_active), center_i, axis_i, 2.05);
+    let mut initial = common.to_vec();
+    initial.extend_from_slice(initial_dumbbell.as_slice().unwrap());
+    let mut final_active = Vec::new();
+    for c in 0..3 {
+        final_active.push(perfect[3 * site_i + c]);
+    }
+    let final_dumbbell = with_dumbbell(&Array1::from(final_active), center_f, axis_f, 2.05);
+    let mut final_pos = common.to_vec();
+    final_pos.extend_from_slice(final_dumbbell.as_slice().unwrap());
+    (Array1::from(initial), Array1::from(final_pos))
+}
+
+fn mat_vec(q: [[f64; 3]; 3], v: [f64; 3]) -> [f64; 3] {
+    [
+        q[0][0] * v[0] + q[0][1] * v[1] + q[0][2] * v[2],
+        q[1][0] * v[0] + q[1][1] * v[1] + q[1][2] * v[2],
+        q[2][0] * v[0] + q[2][1] * v[1] + q[2][2] * v[2],
+    ]
+}
+
+fn unit(v: [f64; 3]) -> [f64; 3] {
+    let n = length3(v).max(1.0e-30);
+    [v[0] / n, v[1] / n, v[2] / n]
+}
+
+fn same_axis(a: [f64; 3], b: [f64; 3]) -> bool {
+    let a = unit(a);
+    let b = unit(b);
+    (a[0] * b[0] + a[1] * b[1] + a[2] * b[2]).abs() > 0.98
+}
+
+fn same_dir(a: [f64; 3], b: [f64; 3]) -> bool {
+    let a = unit(a);
+    let b = unit(b);
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2] > 0.98
+}
+
+fn wrap_cell(point: [f64; 3], length: f64) -> [f64; 3] {
+    point.map(|value| {
+        let mut wrapped = value % length;
+        if wrapped < 0.0 {
+            wrapped += length;
+        }
+        wrapped
+    })
+}
+
+fn rotate_about(positions: &Array1<f64>, center: [f64; 3], q: [[f64; 3]; 3]) -> Array1<f64> {
+    let mut out = positions.clone();
+    for atom in 0..positions.len() / 3 {
+        let v = [
+            positions[3 * atom] - center[0],
+            positions[3 * atom + 1] - center[1],
+            positions[3 * atom + 2] - center[2],
+        ];
+        let turned = mat_vec(q, v);
+        out[3 * atom] = center[0] + turned[0];
+        out[3 * atom + 1] = center[1] + turned[1];
+        out[3 * atom + 2] = center[2] + turned[2];
+    }
+    out
+}
+
+fn nn_jumps(a: f64, axis: [f64; 3]) -> Vec<[f64; 3]> {
+    let h = 0.5 * a;
+    let mut jumps = Vec::new();
+    for i in 0..3 {
+        for s in [-1.0, 1.0] {
+            for t in [-1.0, 1.0] {
+                let mut d = [0.0; 3];
+                d[(i + 1) % 3] = s * h;
+                d[(i + 2) % 3] = t * h;
+                let along = d[0] * axis[0] + d[1] * axis[1] + d[2] * axis[2];
+                if along.abs() < 1.0e-8 {
+                    jumps.push(d);
+                }
+            }
+        }
+    }
+    jumps
+}
+
+/// Translation and rotation of the <100> dumbbell in the vacancy field.
+///
+/// The translation is the Johnson hop onto a nearest neighbour: the saddle
+/// stays near <100>, about 14 degrees off the axis. The rotation stays on
+/// one site and turns the axis through a <110> saddle. Every symmetry-distinct
+/// <100> orientation is relaxed. A placement is kept only when it is still a
+/// dumbbell. The direct saddle is a fixed-cell dimer started at the isolated
+/// saddle of that hop; a search that recombines or changes hop is not a barrier
+/// of the hop it was asked for.
+#[test]
+#[ignore = "8x8x8 translation and rotation versus the vacancy dipole; run in release"]
+fn dumbbell_translation_and_rotation_in_the_vacancy_field() {
+    let copper = Copper::new();
+    let a = 3.615;
+    let (moduli_pos, moduli_cell) = fcc(4, a);
+    let g = 1.0e-4;
+    let base = copper.evaluate(moduli_pos.view(), moduli_cell).2;
+    let (stretched, stretched_cell) = deform(
+        &moduli_pos,
+        moduli_cell,
+        [[g, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+    );
+    let uniaxial = copper.evaluate(stretched.view(), stretched_cell).2;
+    let c11 = (uniaxial[0][0] - base[0][0]) / g;
+    let c12 = (uniaxial[1][1] - base[1][1]) / g;
+    let (sheared, sheared_cell) = deform(
+        &moduli_pos,
+        moduli_cell,
+        [[0.0, g, 0.0], [g, 0.0, 0.0], [0.0, 0.0, 0.0]],
+    );
+    let shear = copper.evaluate(sheared.view(), sheared_cell).2;
+    let c44 = (shear[0][1] - base[0][1]) / (2.0 * g);
+    let solid = CubicElasticity::new(c11, c12, c44).unwrap();
+    eprintln!("C11 {c11:.6} C12 {c12:.6} C44 {c44:.6}");
+
+    let (perfect, cell) = fcc(8, a);
+    let perfect = &perfect;
+    let mut bulk = perfect.clone();
+    relax(&copper, &mut bulk, cell, 1e-3, 300);
+    let (e_bulk, _, sigma_bulk) = copper.evaluate(bulk.view(), cell);
+    let volume = det(cell).abs();
+    let vacancy_site = nearest_atom(perfect, [0.0, 0.0, 0.0]);
+    let mut vacancy = drop_atoms(perfect, &[vacancy_site]);
+    relax(&copper, &mut vacancy, cell, 1e-3, 300);
+    let (_, _, sigma_vac) = copper.evaluate(vacancy.view(), cell);
+    let p_vacancy = ElasticDipole::from_residual_stress(volume, sigma_vac, sigma_bulk).unwrap();
+    eprintln!(
+        "vacancy Pxx {:.6} Pyy {:.6} Pzz {:.6}",
+        p_vacancy.tensor()[0][0],
+        p_vacancy.tensor()[1][1],
+        p_vacancy.tensor()[2][2]
+    );
+
+    let origin_site = vacancy_site;
+    let neighbor = nearest_atom(perfect, [0.0, 0.5 * a, 0.5 * a]);
+    let (trans_i, trans_f) = matched_dumbbells(
+        perfect,
+        origin_site,
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        neighbor,
+        [0.0, 0.5 * a, 0.5 * a],
+        [0.0, 1.0, 0.0],
+        &[],
+    );
+    let (rot_i, rot_f) = matched_dumbbells(
+        perfect,
+        origin_site,
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        origin_site,
+        [0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        &[],
+    );
+    let (translation, rotation) = std::thread::scope(|scope| {
+        let translation = scope.spawn(|| {
+            dimer_endpoints(
+                &Copper::new(),
+                cell,
+                trans_i,
+                trans_f,
+                3,
+                [0.0, 0.0, 0.0],
+            )
+        });
+        let rotation = scope.spawn(|| {
+            dimer_endpoints(&Copper::new(), cell, rot_i, rot_f, 2, [0.0, 0.0, 0.0])
+        });
+        (
+            translation.join().expect("translation"),
+            rotation.join().expect("rotation"),
+        )
+    });
+    eprintln!(
+        "TRANSLATION barrier={:.6} converged={} angle_100={:.2} angle_110={:.2} offset={:?} status={}",
+        translation.barrier,
+        translation.converged,
+        translation.angle_100,
+        translation.angle_110,
+        translation.saddle_offset,
+        translation.status
+    );
+    eprintln!(
+        "ROTATION barrier={:.6} converged={} angle_100={:.2} angle_110={:.2} offset={:?} status={}",
+        rotation.barrier,
+        rotation.converged,
+        rotation.angle_100,
+        rotation.angle_110,
+        rotation.saddle_offset,
+        rotation.status
+    );
+    assert!(
+        translation.converged && (0.085..0.110).contains(&translation.barrier),
+        "translation {}",
+        translation.barrier
+    );
+    assert!(
+        rotation.converged && (0.22..0.25).contains(&rotation.barrier),
+        "rotation {}",
+        rotation.barrier
+    );
+    let p_trans_min =
+        ElasticDipole::from_residual_stress(volume, translation.sigma_min, sigma_bulk).unwrap();
+    let p_rot_min =
+        ElasticDipole::from_residual_stress(volume, rotation.sigma_min, sigma_bulk).unwrap();
+    let p_trans =
+        ElasticDipole::from_residual_stress(volume, translation.sigma_sad, sigma_bulk).unwrap();
+    let p_rot = ElasticDipole::from_residual_stress(volume, rotation.sigma_sad, sigma_bulk).unwrap();
+    let trans_response = StrainResponse::new(translation.barrier, p_trans_min, p_trans).unwrap();
+    let rot_response = StrainResponse::new(rotation.barrier, p_rot_min, p_rot).unwrap();
+    let rotations = cubic_rotations();
+    let a0 = [1.0, 0.0, 0.0];
+    let d0 = [0.0, 0.5 * a, 0.5 * a];
+    let length = 8.0 * a;
+
+    let mut shells = Vec::new();
+    for ix in -3..=3 {
+        for iy in -3..=3 {
+            for iz in -3..=3 {
+                for basis in [
+                    [0.0, 0.0, 0.0],
+                    [0.5, 0.5, 0.0],
+                    [0.5, 0.0, 0.5],
+                    [0.0, 0.5, 0.5],
+                ] {
+                    let r = [
+                        (ix as f64 + basis[0]) * a,
+                        (iy as f64 + basis[1]) * a,
+                        (iz as f64 + basis[2]) * a,
+                    ];
+                    let distance = length3(r);
+                    let max_distance = std::env::var("SWEEP_MAX_R")
+                        .ok()
+                        .and_then(|text| text.parse::<f64>().ok())
+                        .unwrap_or(3.0 * a + 0.02);
+                    let min_distance = std::env::var("SWEEP_MIN_R")
+                        .ok()
+                        .and_then(|text| text.parse::<f64>().ok())
+                        .unwrap_or(2.0);
+                    if distance < min_distance || distance > max_distance {
+                        continue;
+                    }
+                    let key = (distance * 1.0e5).round() as i64;
+                    if shells.iter().any(|(have, _)| *have == key) {
+                        continue;
+                    }
+                    shells.push((key, r));
+                }
+            }
+        }
+    }
+    shells.sort_by(|left, right| length3(left.1).total_cmp(&length3(right.1)));
+
+    let axes = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    #[derive(Clone)]
+    struct Placement {
+        distance: f64,
+        r: [f64; 3],
+        center: [f64; 3],
+        axis: [f64; 3],
+    }
+    let mut specs = Vec::new();
+    for (_, r) in &shells {
+        let center = wrap_cell(*r, length);
+        if length3(center) < 1.0e-6 {
+            continue;
+        }
+        let site = nearest_atom(perfect, center);
+        if site == vacancy_site {
+            continue;
+        }
+        for axis in axes {
+            specs.push((*r, center, axis));
+        }
+    }
+    let mut placed = Vec::new();
+    for chunk in specs.chunks(8) {
+        let found = std::thread::scope(|scope| {
+            let mut joins = Vec::new();
+            for (r, center, axis) in chunk {
+                joins.push(scope.spawn(move || {
+                    let local = Copper::new();
+                    let site = nearest_atom(perfect, *center);
+                    let body = drop_atoms(perfect, &[vacancy_site, site]);
+                    let mut minimum = with_dumbbell(&body, *center, *axis, 2.05);
+                    relax(&local, &mut minimum, cell, 1e-3, 250);
+                    let (energy, gradient, _) = local.evaluate(minimum.view(), cell);
+                    let (split, dir) = pair_distance(&minimum, cell);
+                    let (to_100, _, _, _) = axis_report(dir);
+                    let above = energy - e_bulk;
+                    let dumbbell = (1.8..2.45).contains(&split) && to_100 < 35.0 && above > 1.0;
+                    let line = format!(
+                        "relax r={:.4} axis={axis:?} split={split:.4} angle_100={to_100:.2} above_bulk={above:.6} force={:.3e} kept={dumbbell}",
+                        length3(*r),
+                        max_abs(&gradient)
+                    );
+                    let place = dumbbell.then_some(Placement {
+                        distance: length3(*r),
+                        r: *r,
+                        center: *center,
+                        axis: *axis,
+                    });
+                    (line, place)
+                }));
+            }
+            joins
+                .into_iter()
+                .map(|join| join.join().expect("relax"))
+                .collect::<Vec<_>>()
+        });
+        for (line, place) in found {
+            eprintln!("{line}");
+            if let Some(place) = place {
+                placed.push(place);
+            }
+        }
+    }
+    let mut unique = Vec::<Placement>::new();
+    for place in placed {
+        let angle = {
+            let u = unit(place.axis);
+            let n = unit(place.r);
+            (u[0] * n[0] + u[1] * n[1] + u[2] * n[2]).abs().acos().to_degrees()
+        };
+        let duplicate = unique.iter().any(|prior| {
+            (prior.distance - place.distance).abs() < 1.0e-3
+                && {
+                    let u = unit(prior.axis);
+                    let n = unit(prior.r);
+                    let prior_angle = (u[0] * n[0] + u[1] * n[1] + u[2] * n[2])
+                        .abs()
+                        .acos()
+                        .to_degrees();
+                    (prior_angle - angle).abs() < 5.0
+                }
+        });
+        if !duplicate {
+            unique.push(place);
+        }
+    }
+    eprintln!("bound placements {}", unique.len());
+
+    #[derive(Clone)]
+    struct Task {
+        kind: &'static str,
+        distance: f64,
+        r: [f64; 3],
+        center: [f64; 3],
+        axis: [f64; 3],
+        jump: [f64; 3],
+        rotation: [[f64; 3]; 3],
+        sense: &'static str,
+    }
+    let mut tasks = Vec::new();
+    for place in &unique {
+        let jumps = nn_jumps(a, place.axis);
+        let mut scored: Vec<(f64, [f64; 3])> = jumps
+            .into_iter()
+            .map(|jump| {
+                let end = mic_delta(
+                    [
+                        place.r[0] + jump[0],
+                        place.r[1] + jump[1],
+                        place.r[2] + jump[2],
+                    ],
+                    [0.0, 0.0, 0.0],
+                    cell,
+                );
+                (length3(end), jump)
+            })
+            .collect();
+        scored.sort_by(|left, right| left.0.total_cmp(&right.0));
+        for (sense, end) in [("toward", scored.first()), ("away", scored.last())] {
+            let Some((_, jump)) = end else { continue };
+            let Some(rotation) = rotations.iter().copied().find(|q| {
+                same_axis(mat_vec(*q, a0), place.axis) && same_dir(mat_vec(*q, d0), *jump)
+            }) else {
+                eprintln!(
+                    "no translation image r={:.4} axis={:?} jump={jump:?}",
+                    place.distance, place.axis
+                );
+                continue;
+            };
+            tasks.push(Task {
+                kind: "translation",
+                distance: place.distance,
+                r: place.r,
+                center: place.center,
+                axis: place.axis,
+                jump: *jump,
+                rotation,
+                sense,
+            });
+        }
+        for target in axes {
+            if same_axis(target, place.axis) {
+                continue;
+            }
+            let Some(rotation) = rotations.iter().copied().find(|q| {
+                same_axis(mat_vec(*q, a0), place.axis) && same_axis(mat_vec(*q, [0.0, 1.0, 0.0]), target)
+            }) else {
+                continue;
+            };
+            let align = (unit(target)[0] * unit(place.r)[0]
+                + unit(target)[1] * unit(place.r)[1]
+                + unit(target)[2] * unit(place.r)[2])
+            .abs();
+            tasks.push(Task {
+                kind: "rotation",
+                distance: place.distance,
+                r: place.r,
+                center: place.center,
+                axis: place.axis,
+                jump: target,
+                rotation,
+                sense: if align > 0.7 { "axis-along-r" } else { "axis-across-r" },
+            });
+        }
+    }
+    if let Some(limit) = std::env::var("SWEEP_TASKS")
+        .ok()
+        .and_then(|text| text.parse::<usize>().ok())
+    {
+        tasks.truncate(limit);
+    }
+    eprintln!("hop tasks {}", tasks.len());
+
+    let translation = &translation;
+    let rotation = &rotation;
+    let trans_response = &trans_response;
+    let rot_response = &rot_response;
+    let cell_ref = cell;
+    let solid = &solid;
+    let mut lines = Vec::new();
+    for chunk in tasks.chunks(8) {
+        std::thread::scope(|scope| {
+            let mut joins = Vec::new();
+            for task in chunk {
+                joins.push(scope.spawn(move || {
+                    let local = Copper::new();
+                    let response: &StrainResponse = if task.kind == "translation" {
+                        trans_response
+                    } else {
+                        rot_response
+                    };
+                    let hop: &HopRun = if task.kind == "translation" {
+                        translation
+                    } else {
+                        rotation
+                    };
+                    let oriented = StrainResponse::new(
+                        response.barrier0(),
+                        response.minimum().transform(task.rotation),
+                        response.saddle().transform(task.rotation),
+                    )
+                    .expect("oriented hop");
+                    let offset = mat_vec(task.rotation, hop.saddle_offset);
+                    let saddle_r = [
+                        task.r[0] + offset[0],
+                        task.r[1] + offset[1],
+                        task.r[2] + offset[2],
+                    ];
+                    let predicted = oriented
+                        .hops_from_periodic_ends(solid, task.r, saddle_r, cell_ref, p_vacancy, 1)
+                        .ok()
+                        .and_then(|rows| rows.first().map(|row| row.barrier));
+                    let site_i = nearest_atom(perfect, task.center);
+                    let site_f = if task.kind == "translation" {
+                        nearest_atom(
+                            perfect,
+                            wrap_cell(
+                                [
+                                    task.center[0] + task.jump[0],
+                                    task.center[1] + task.jump[1],
+                                    task.center[2] + task.jump[2],
+                                ],
+                                length,
+                            ),
+                        )
+                    } else {
+                        site_i
+                    };
+                    let (direct, status) = if task.kind == "translation"
+                        && (site_f == vacancy_site || site_f == site_i)
+                    {
+                        (
+                            None,
+                            "left the hop (endpoint is the vacancy)".to_string(),
+                        )
+                    } else {
+                        direct_on_hop(
+                            &local,
+                            hop,
+                            task.rotation,
+                            task.center,
+                            length,
+                            cell_ref,
+                            task.kind,
+                        )
+                    };
+                    let strain = solid.periodic_strain(task.r, cell_ref, p_vacancy, 1).ok();
+                    let refined = if let Some(strain) = strain {
+                        let minimum_rot =
+                            rotate_about(&hop.minimum, [0.0, 0.0, 0.0], task.rotation);
+                        let saddle = rotate_about(&hop.saddle, [0.0, 0.0, 0.0], task.rotation);
+                        let (mut reactant, deformed_cell) =
+                            deform(&minimum_rot, cell_ref, strain.tensor());
+                        relax(&local, &mut reactant, deformed_cell, 1e-3, 200);
+                        let (e_min, _, _) = local.evaluate(reactant.view(), deformed_cell);
+                        let mode = minimum_image_difference(&saddle, &minimum_rot, cell_ref);
+                        let surface = Held {
+                            copper: &local,
+                            cell: deformed_cell,
+                        };
+                        let mut owned = oriented;
+                        owned
+                            .refine(
+                                &strain,
+                                &surface,
+                                &SaddleSeed {
+                                    positions: saddle,
+                                    cell: cell_ref,
+                                    mode,
+                                    minimum_energy: e_min,
+                                },
+                                800,
+                            )
+                            .ok()
+                            .map(|estimate| estimate.barrier)
+                    } else {
+                        None
+                    };
+                    format!(
+                        "RESULT kind={} r={:.4} sense={} axis={:.0},{:.0},{:.0} predicted={} refined={} direct={} status={status}",
+                        task.kind,
+                        task.distance,
+                        task.sense,
+                        task.axis[0],
+                        task.axis[1],
+                        task.axis[2],
+                        predicted
+                            .map(|value| format!("{value:.6}"))
+                            .unwrap_or_else(|| "none".into()),
+                        refined
+                            .map(|value| format!("{value:.6}"))
+                            .unwrap_or_else(|| "did not converge".into()),
+                        direct
+                            .map(|value| format!("{value:.6}"))
+                            .unwrap_or_else(|| "did not converge".into()),
+                    )
+                }));
+            }
+            for join in joins {
+                let line = join.join().expect("task");
+                eprintln!("{line}");
+                lines.push(line);
+            }
+        });
+    }
+    report_field(&lines);
+}
+
+fn report_field(lines: &[String]) {
+    struct Rec {
+        kind: String,
+        r: f64,
+        sense: String,
+        axis: String,
+        predicted: Option<f64>,
+        refined: Option<f64>,
+        direct: Option<f64>,
+        status: String,
+    }
+    fn field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+        line.split_whitespace()
+            .find_map(|part| part.strip_prefix(key))
+    }
+    fn number(text: Option<&str>) -> Option<f64> {
+        text.and_then(|text| text.parse().ok())
+    }
+    let mut rows = Vec::new();
+    for line in lines {
+        let Some((head, status)) = line.split_once(" status=") else {
+            continue;
+        };
+        rows.push(Rec {
+            kind: field(head, "kind=").unwrap_or("").to_string(),
+            r: number(field(head, "r=")).unwrap_or(f64::NAN),
+            sense: field(head, "sense=").unwrap_or("").to_string(),
+            axis: field(head, "axis=").unwrap_or("").to_string(),
+            predicted: number(field(head, "predicted=")),
+            refined: number(field(head, "refined=")),
+            direct: number(field(head, "direct=")),
+            status: status.to_string(),
+        });
+    }
+    for kind in ["translation", "rotation"] {
+        let mut converged = 0usize;
+        let mut left = 0usize;
+        let mut other = 0usize;
+        let mut within = Vec::new();
+        for row in rows.iter().filter(|row| row.kind == kind) {
+            if row.status.starts_with("converged") {
+                converged += 1;
+            } else if row.status.contains("left the hop") {
+                left += 1;
+            } else {
+                other += 1;
+            }
+            let Some(direct) = row.direct else { continue };
+            let prediction_error = row.predicted.map(|predicted| direct - predicted);
+            let refine_error = row.refined.map(|refined| direct - refined);
+            if prediction_error.is_some_and(|error| error.abs() < 0.005) {
+                within.push(row.r);
+            }
+            eprintln!(
+                "ERROR {kind} r={:.4} sense={} axis={} predicted={} refined={} direct={direct:.6} prediction_error={} refine_error={}",
+                row.r,
+                row.sense,
+                row.axis,
+                row.predicted
+                    .map(|value| format!("{value:.6}"))
+                    .unwrap_or_else(|| "none".into()),
+                row.refined
+                    .map(|value| format!("{value:.6}"))
+                    .unwrap_or_else(|| "did not converge".into()),
+                prediction_error
+                    .map(|value| format!("{value:.6}"))
+                    .unwrap_or_else(|| "none".into()),
+                refine_error
+                    .map(|value| format!("{value:.6}"))
+                    .unwrap_or_else(|| "did not converge".into()),
+            );
+        }
+        within.sort_by(f64::total_cmp);
+        match within.first() {
+            Some(r) => eprintln!(
+                "PREDICTION_WITHIN_5MEV {kind} r={r:.4} hops_within={} hops_converged={converged}",
+                within.len()
+            ),
+            None => eprintln!(
+                "PREDICTION_WITHIN_5MEV {kind} none hops_converged={converged}"
+            ),
+        }
+        eprintln!("COUNTED {kind} converged={converged} left={left} other={other}");
+    }
+    let mut seen = Vec::new();
+    for row in rows.iter().filter(|row| row.kind == "translation") {
+        let key = (format!("{:.4}", row.r), row.axis.clone());
+        if seen.contains(&key) {
+            continue;
+        }
+        seen.push(key);
+        let partner = rows.iter().find(|other| {
+            other.kind == "translation"
+                && (other.r - row.r).abs() < 1.0e-3
+                && other.axis == row.axis
+                && other.sense != row.sense
+        });
+        let Some(partner) = partner else { continue };
+        let (toward, away) = if row.sense == "toward" {
+            (row, partner)
+        } else if partner.sense == "toward" {
+            (partner, row)
+        } else {
+            continue;
+        };
+        match (toward.direct, away.direct) {
+            (Some(toward_b), Some(away_b)) => {
+                let predicted = match (toward.predicted, away.predicted) {
+                    (Some(toward_p), Some(away_p)) => format!("{:.6}", away_p - toward_p),
+                    _ => "none".to_string(),
+                };
+                eprintln!(
+                    "ASYMMETRY translation r={:.4} axis={} direct_away_minus_toward={:.6} predicted_away_minus_toward={predicted}",
+                    toward.r, toward.axis, away_b - toward_b
+                );
+            }
+            _ => eprintln!(
+                "ASYMMETRY translation r={:.4} axis={} direct_away_minus_toward=did not converge toward={} away={}",
+                toward.r, toward.axis, toward.status, away.status
+            ),
+        }
+    }
 }

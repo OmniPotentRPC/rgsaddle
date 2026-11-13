@@ -11,9 +11,12 @@ fn isotropic_cubic_strain_matches_kelvin() {
     let solid = CubicElasticity::isotropic(40.0, 0.30).unwrap();
     let kelvin = Kelvin::new(40.0, 0.30).unwrap();
     let dipole = shear_dipole();
-    for r in [[3.0, 0.0, 0.0], [1.2, -0.7, 0.4], [0.2, 2.5, -1.1], [
-        -0.8, -0.3, 1.7,
-    ]] {
+    for r in [
+        [3.0, 0.0, 0.0],
+        [1.2, -0.7, 0.4],
+        [0.2, 2.5, -1.1],
+        [-0.8, -0.3, 1.7],
+    ] {
         let from_cubic = solid.strain_of_dipole(r, dipole).unwrap().tensor();
         let from_kelvin = kelvin.strain_from_dipole(r, dipole).unwrap();
         for i in 0..3 {
@@ -90,11 +93,10 @@ fn every_hop_uses_the_strain_of_the_source_dipole() {
         ElasticDipole::from_tensor([[0.5, 0.4, 0.0], [0.4, 0.5, 0.0], [0.0, 0.0, -0.2]]).unwrap();
     let response = StrainResponse::new(0.47, minimum, saddle)
         .unwrap()
-        .with_point_group(&[[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], [
-            [0.0, 0.0, 1.0],
-            [1.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0],
-        ]])
+        .with_point_group(&[
+            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            [[0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+        ])
         .unwrap();
     let solid = CubicElasticity::isotropic(30.0, 0.28).unwrap();
     let source = shear_dipole();
@@ -131,10 +133,28 @@ fn every_hop_uses_the_strain_of_the_source_dipole() {
 }
 
 #[test]
+fn a_displaced_saddle_keeps_both_strains() {
+    let minimum =
+        ElasticDipole::from_tensor([[1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]).unwrap();
+    let saddle =
+        ElasticDipole::from_tensor([[0.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 0.0]]).unwrap();
+    let response = StrainResponse::new(0.1, minimum, saddle).unwrap();
+    let at_minimum = Strain::uniaxial_x(0.01);
+    let at_saddle =
+        Strain::from_tensor([[0.0, 0.0, 0.0], [0.0, 0.02, 0.0], [0.0, 0.0, 0.0]]).unwrap();
+    let hops = response.hops_at_ends(&at_minimum, &at_saddle);
+    assert!((hops[0].barrier - 0.07).abs() < 1.0e-12);
+    assert!((hops[0].strain.tensor()[0][0] - 0.01).abs() < 1.0e-15);
+    assert!((hops[0].strain_saddle.tensor()[1][1] - 0.02).abs() < 1.0e-15);
+}
+
+#[test]
 fn residual_stress_dipole_matches_the_fixed_cell_formula() {
-    let defect = [[0.01, 0.002, 0.0], [0.002, -0.004, 0.001], [
-        0.0, 0.001, 0.003,
-    ]];
+    let defect = [
+        [0.01, 0.002, 0.0],
+        [0.002, -0.004, 0.001],
+        [0.0, 0.001, 0.003],
+    ];
     let bulk = [[0.001, 0.0, 0.0], [0.0, 0.001, 0.0], [0.0, 0.0, 0.001]];
     let volume = 100.0;
     let from_route = ElasticDipole::from_residual_stress(volume, defect, bulk).unwrap();

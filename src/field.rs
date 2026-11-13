@@ -292,11 +292,14 @@ impl CubicElasticity {
         for i in 0..samples {
             for j in 0..samples {
                 for k in 0..samples {
-                    let point = cart_from_fractional(cell, [
-                        (i as f64 + 0.5) / samples as f64,
-                        (j as f64 + 0.5) / samples as f64,
-                        (k as f64 + 0.5) / samples as f64,
-                    ]);
+                    let point = cart_from_fractional(
+                        cell,
+                        [
+                            (i as f64 + 0.5) / samples as f64,
+                            (j as f64 + 0.5) / samples as f64,
+                            (k as f64 + 0.5) / samples as f64,
+                        ],
+                    );
                     let sample = self.image_sum(point, cell, dipole, nmax)?;
                     for a in 0..3 {
                         for b in 0..3 {
@@ -430,6 +433,37 @@ impl StrainResponse {
     ) -> Result<Vec<HopInField>, SaddleError> {
         let strain = elasticity.strain_of_dipole(separation, source)?;
         Ok(self.hops_at(&strain))
+    }
+
+    /// The same images when the minimum and the saddle sit at different points.
+    ///
+    /// `minimum_at` and `saddle_at` are positions relative to the source
+    /// dipole. The barrier is `ΔE0 - P_saddle : ε(saddle) + P_minimum : ε(minimum)`.
+    pub fn hops_from_dipole_ends(
+        &self,
+        elasticity: &CubicElasticity,
+        minimum_at: [f64; 3],
+        saddle_at: [f64; 3],
+        source: ElasticDipole,
+    ) -> Result<Vec<HopInField>, SaddleError> {
+        let strain_minimum = elasticity.strain_of_dipole(minimum_at, source)?;
+        let strain_saddle = elasticity.strain_of_dipole(saddle_at, source)?;
+        Ok(self.hops_at_ends(&strain_minimum, &strain_saddle))
+    }
+
+    /// [`Self::hops_from_dipole_ends`] with the fixed-cell image sum.
+    pub fn hops_from_periodic_ends(
+        &self,
+        elasticity: &CubicElasticity,
+        minimum_at: [f64; 3],
+        saddle_at: [f64; 3],
+        cell: M3,
+        source: ElasticDipole,
+        nmax: usize,
+    ) -> Result<Vec<HopInField>, SaddleError> {
+        let strain_minimum = elasticity.periodic_strain(minimum_at, cell, source, nmax)?;
+        let strain_saddle = elasticity.periodic_strain(saddle_at, cell, source, nmax)?;
+        Ok(self.hops_at_ends(&strain_minimum, &strain_saddle))
     }
 
     /// The same barriers in a fixed periodic cell. `cell` has its lattice

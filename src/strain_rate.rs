@@ -279,17 +279,18 @@ pub struct HopVariant {
 }
 
 impl HopVariant {
+    /// `ΔE0 - P_saddle : ε_saddle + P_minimum : ε_minimum`.
+    ///
+    /// The interaction energy of a dipole is `-P : ε`. When the minimum
+    /// and the saddle sit in different strains, the barrier keeps both.
+    /// [`Self::linear_barrier`] is the case where those strains are equal.
+    pub fn barrier_at(&self, barrier0: f64, strain_minimum: Strain, strain_saddle: Strain) -> f64 {
+        barrier0 - self.saddle.contract(strain_saddle) + self.minimum.contract(strain_minimum)
+    }
+
     /// `ΔE0 - (P_saddle - P_minimum) : ε`.
     pub fn linear_barrier(&self, barrier0: f64, strain: Strain) -> f64 {
-        let mut delta = [[0.0; 3]; 3];
-        let saddle = self.saddle.tensor();
-        let minimum = self.minimum.tensor();
-        for i in 0..3 {
-            for j in 0..3 {
-                delta[i][j] = saddle[i][j] - minimum[i][j];
-            }
-        }
-        barrier0 - double_dot(delta, strain.tensor())
+        self.barrier_at(barrier0, strain, strain)
     }
 }
 
@@ -300,7 +301,11 @@ pub struct HopInField {
     pub barrier: f64,
     pub prefactor_hz: Option<f64>,
     pub trust: Trust,
+    /// Strain at the minimum.
     pub strain: Strain,
+    /// Strain at the saddle. Equal to `strain` when the hop is evaluated
+    /// in one homogeneous field.
+    pub strain_saddle: Strain,
 }
 
 /// How far the dipole line is trusted.
@@ -655,6 +660,29 @@ impl StrainResponse {
                     prefactor_hz: self.prefactor_at(strain, variant),
                     trust: self.trust_of(strain, variant, barrier),
                     strain: *strain,
+                    strain_saddle: *strain,
+                }
+            })
+            .collect()
+    }
+
+    /// Every image when the minimum and the saddle sit in different strains.
+    ///
+    /// The barrier is [`HopVariant::barrier_at`]. A hop toward a neighbouring
+    /// defect and the hop away from it are the two images whose saddles lie
+    /// on opposite sides of the minimum.
+    pub fn hops_at_ends(&self, strain_minimum: &Strain, strain_saddle: &Strain) -> Vec<HopInField> {
+        self.variants
+            .iter()
+            .map(|variant| {
+                let barrier = variant.barrier_at(self.barrier0, *strain_minimum, *strain_saddle);
+                HopInField {
+                    name: variant.name.clone(),
+                    barrier,
+                    prefactor_hz: self.prefactor_at(strain_minimum, variant),
+                    trust: self.trust_of(strain_minimum, variant, barrier),
+                    strain: *strain_minimum,
+                    strain_saddle: *strain_saddle,
                 }
             })
             .collect()
