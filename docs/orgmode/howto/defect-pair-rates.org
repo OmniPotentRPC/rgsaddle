@@ -52,7 +52,7 @@ Bennett, in Algorithms for Chemical Computations, ACS Symposium Series 46, 63 (1
 
 : κ(t) = ⟨ v_τ(0) θ(s(t)) ⟩ / ⟨ v_τ(0) θ(v_τ(0)) ⟩
 
-=s(t) = (x(t) - x_surface) · τ= and =θ(s)= is 1 on the product side of the surface. The numerator keeps the sign of the initial velocity. The reported =κ= is =κ(t)= at the requested plateau record, with a block standard error. A rate is formed only when =κ= lies in =[0, 1]=.
+=s(t) = (x(t) - x_surface) · τ= and =θ(s)= is 1 on the product side of the surface. The numerator keeps the sign of the initial velocity. =τ= is the path tangent from the reactant toward the product, the direction of increasing arc length on a reactant-first path. A tangent that points the other way is reversed before the shot. The opposite normal is not tried, and a negative =κ= is not clamped into =[0, 1]=. The reported =κ= is =κ(t)= at the requested plateau record, with a block standard error. A rate is formed only when =κ= lies in =[0, 1]=.
 
 On the quartic =V = (x² - 1)²= the barrier curvature gives =ω_b = 2= at unit mass. Newtonian trajectories that start at the top with =v > 0= are still on the product side a short time later, so =κ = 1=. With friction =γ = 2=, Kramers, Physica 7, 284 (1940), doi:10.1016/S0031-8914(40)90098-2, gives
 

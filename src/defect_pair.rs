@@ -877,40 +877,17 @@ fn shoot<S: PointSurface>(
     let mut shooting = config.shooting.clone();
     shooting.thermal = thermal;
     shooting.mass = config.mass;
-    let forward = bennett::bennett_chandler(
+    // The product side is the side of increasing arc length. Trying the
+    // opposite normal and keeping whichever κ falls in [0, 1] would score
+    // a reactant-facing flux as transmission.
+    let normal = product_tangent(path, geometry.arc)?;
+    bennett::bennett_chandler(
         surface,
         &starts,
         geometry.positions.view(),
-        geometry.tangent.view(),
+        normal.view(),
         &shooting,
-    )?;
-    if (0.0..=1.0).contains(&forward.kappa) {
-        return Ok(forward);
-    }
-    // The path tangent can point toward the reactant. The product side is
-    // then the opposite normal, and κ comes out negative.
-    shooting.seed = shooting.seed.wrapping_add(1);
-    let backward = bennett::bennett_chandler(
-        surface,
-        &starts,
-        geometry.positions.view(),
-        (-&geometry.tangent).view(),
-        &shooting,
-    )?;
-    let mut chosen = if (0.0..=1.0).contains(&backward.kappa) {
-        backward
-    } else if (forward.kappa - 0.5).abs() <= (backward.kappa - 0.5).abs() {
-        forward
-    } else {
-        backward
-    };
-    if !(0.0..=1.0).contains(&chosen.kappa)
-        && chosen.kappa + chosen.error >= 0.0
-        && chosen.kappa - chosen.error <= 1.0
-    {
-        chosen.kappa = chosen.kappa.clamp(0.0, 1.0);
-    }
-    Ok(chosen)
+    )
 }
 
 fn climb_path<S: PointSurface>(
@@ -1261,7 +1238,8 @@ pub fn capture_is_spontaneous_within(
 ///
 /// `rates` are `(destination, rate)`. A destination equal to another site's
 /// `id` is a hop to that shell. Any other destination is absorbing.
-/// `"recombined"` is the capture absorber; every other unknown name is escape.
+/// `"recombined"` is the capture absorber, and so is the id of a
+/// [`SiteOutcome::Spontaneous`] shell. Every other unknown name is escape.
 /// [`SiteOutcome::Spontaneous`] is captured with probability 1 even when
 /// `rates` is empty. Those sites are counted, not dropped.
 #[derive(Clone, Debug)]
@@ -1309,9 +1287,19 @@ pub fn kinetic_recombination_volume(
             "atomic volume must be finite and positive".into(),
         ));
     }
+    let mut seen = std::collections::HashSet::new();
+    for site in sites {
+        if !seen.insert(site.id.as_str()) {
+            return Err(SaddleError::Invalid(format!(
+                "site id {} is repeated",
+                site.id
+            )));
+        }
+    }
     let mut spontaneous = 0.0;
     let mut placements = Vec::with_capacity(sites.len());
     let mut transient: Vec<&VolumeSite> = Vec::new();
+    let mut spontaneous_ids = std::collections::HashSet::new();
     for site in sites {
         if !(site.count.is_finite() && site.count >= 0.0) {
             return Err(SaddleError::Invalid(
@@ -1320,6 +1308,7 @@ pub fn kinetic_recombination_volume(
         }
         if site.outcome == SiteOutcome::Spontaneous {
             spontaneous += site.count;
+            spontaneous_ids.insert(site.id.as_str());
             placements.push(VolumePlacement {
                 id: site.id.clone(),
                 count: site.count,
@@ -1343,7 +1332,7 @@ pub fn kinetic_recombination_volume(
         let mut rhs = vec![0.0; n];
         for (i, site) in transient.iter().enumerate() {
             let mut total = 0.0;
-            for (destination, rate) in &site.rates {
+            for (_destination, rate) in &site.rates {
                 if !(rate.is_finite() && *rate >= 0.0) {
                     return Err(SaddleError::Invalid(
                         "a hop rate must be finite and non-negative".into(),
@@ -1360,7 +1349,10 @@ pub fn kinetic_recombination_volume(
             matrix[i][i] = 1.0;
             for (destination, rate) in &site.rates {
                 let probability = *rate / total;
-                if destination == "recombined" {
+                // A spontaneous shell is already captured. Naming it is the
+                // same absorber as "recombined"; it is not an escape.
+                if destination == "recombined" || spontaneous_ids.contains(destination.as_str())
+                {
                     rhs[i] += probability;
                 } else if let Some(&j) = index.get(destination.as_str()) {
                     matrix[i][j] -= probability;
@@ -1416,6 +1408,43 @@ pub struct FreeMigration {
 
 /// Id of the return layer inserted by [`embed_free_migration`].
 pub const FREE_CRYSTAL: &str = "free-crystal";
+
+/// Continuum probability of hitting a sphere of radius `radius` before
+/// infinity, starting one jump farther out.
+///
+/// For three-dimensional diffusion the potential is `1/r`, so the
+/// probability of reaching `radius` from `radius + jump` is
+/// `radius / (radius + jump)`.
+pub fn spherical_return_probability(radius: f64, jump: f64) -> Result<f64, SaddleError> {
+    if !(radius.is_finite() && radius > 0.0 && jump.is_finite() && jump > 0.0) {
+        return Err(SaddleError::Invalid(
+            "the return radius and the jump length must be finite and positive".into(),
+        ));
+    }
+    Ok(radius / (radius + jump))
+}
+
+/// Unit path tangent at `arc`, pointing from the reactant toward the product.
+///
+/// Frames are stored reactant-first, so increasing arc length is the product
+/// direction. A tangent that points the other way is reversed. The sign is
+/// the path's, not a choice made after looking at `κ`.
+pub fn product_tangent(path: &crate::pafi::ArcPath, arc: f64) -> Result<Array1<f64>, SaddleError> {
+    let geometry = path.geometry(arc)?;
+    let (start, end) = path.bounds();
+    let span = end - start;
+    let step = (span * 1.0e-4).max(1.0e-8);
+    let forward = if arc + step <= end {
+        path.geometry(arc + step)?.positions - &geometry.positions
+    } else {
+        &geometry.positions - &path.geometry((arc - step).max(start))?.positions
+    };
+    let mut tangent = geometry.tangent;
+    if tangent.dot(&forward) < 0.0 {
+        tangent.mapv_inplace(|value| -value);
+    }
+    unit(&tangent)
+}
 
 /// Embed `sites` in free migration.
 ///

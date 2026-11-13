@@ -338,3 +338,206 @@ fn free_migration_return_raises_the_capture_probability() {
     );
     assert!(with.total_sites > without.total_sites);
 }
+
+#[test]
+fn a_hop_into_a_spontaneous_shell_is_capture() {
+    // The neighbor shell recombines on relaxation. A hop onto it is capture,
+    // not an escape under an unknown name.
+    let sites = vec![
+        rgsaddle::VolumeSite {
+            id: "outer".into(),
+            count: 8.0,
+            outcome: rgsaddle::SiteOutcome::Kinetic,
+            rates: vec![("touch".into(), 2.0), ("escaped".into(), 2.0)],
+        },
+        rgsaddle::VolumeSite {
+            id: "touch".into(),
+            count: 6.0,
+            outcome: rgsaddle::SiteOutcome::Spontaneous,
+            rates: Vec::new(),
+        },
+    ];
+    let volume = rgsaddle::kinetic_recombination_volume(&sites, 2.0).expect("volume");
+    let outer = volume
+        .placements
+        .iter()
+        .find(|site| site.id == "outer")
+        .expect("outer");
+    assert!((outer.probability - 0.5).abs() < 1.0e-12, "{}", outer.probability);
+    assert!((volume.spontaneous_sites - 6.0).abs() < 1.0e-12);
+    assert!((volume.kinetic_sites - 4.0).abs() < 1.0e-12, "{}", volume.kinetic_sites);
+    assert!((volume.volume - 20.0).abs() < 1.0e-12, "{}", volume.volume);
+}
+
+/// Absorbing chain on three sites.
+///
+/// Site 1 hops to recombination at rate 3 and to site 2 at rate 1.
+/// Site 2 hops to site 1 and to site 3 at rate 1 each.
+/// Site 3 hops to site 2 at rate 1 and escapes at rate 2.
+///
+/// The capture probabilities `u` solve
+///
+/// `u1 = 3/4 + (1/4) u2`,
+/// `u2 = (1/2) u1 + (1/2) u3`,
+/// `u3 = (1/3) u2`,
+///
+/// so `u = (15/17, 9/17, 3/17)`.
+fn chain_sites() -> Vec<rgsaddle::VolumeSite> {
+    vec![
+        rgsaddle::VolumeSite {
+            id: "s1".into(),
+            count: 1.0,
+            outcome: rgsaddle::SiteOutcome::Kinetic,
+            rates: vec![("recombined".into(), 3.0), ("s2".into(), 1.0)],
+        },
+        rgsaddle::VolumeSite {
+            id: "s2".into(),
+            count: 1.0,
+            outcome: rgsaddle::SiteOutcome::Kinetic,
+            rates: vec![("s1".into(), 1.0), ("s3".into(), 1.0)],
+        },
+        rgsaddle::VolumeSite {
+            id: "s3".into(),
+            count: 1.0,
+            outcome: rgsaddle::SiteOutcome::Kinetic,
+            rates: vec![("s2".into(), 1.0), ("escaped".into(), 2.0)],
+        },
+    ]
+}
+
+fn probability(volume: &rgsaddle::RecombinationVolume, id: &str) -> f64 {
+    volume
+        .placements
+        .iter()
+        .find(|site| site.id == id)
+        .expect(id)
+        .probability
+}
+
+#[test]
+fn the_chain_matches_the_closed_form() {
+    let volume = rgsaddle::kinetic_recombination_volume(&chain_sites(), 1.0).expect("volume");
+    let exact = [15.0 / 17.0, 9.0 / 17.0, 3.0 / 17.0];
+    for (id, expected) in [("s1", exact[0]), ("s2", exact[1]), ("s3", exact[2])] {
+        let got = probability(&volume, id);
+        assert!((got - expected).abs() < 1.0e-12, "{id} {got} {expected}");
+    }
+    let sites = exact.iter().sum::<f64>();
+    assert!((volume.kinetic_sites - sites).abs() < 1.0e-12);
+    assert!((volume.total_sites - sites).abs() < 1.0e-12);
+}
+
+#[test]
+fn the_chain_matches_kinetic_monte_carlo() {
+    let sites = chain_sites();
+    let volume = rgsaddle::kinetic_recombination_volume(&sites, 1.0).expect("volume");
+    let mut rng = 0x5eed_u64;
+    let mut next = || {
+        rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+        (rng >> 11) as f64 * (1.0 / ((1u64 << 53) as f64))
+    };
+    let trajectories = 20_000usize;
+    for (start, id) in [(0usize, "s1"), (1, "s2"), (2, "s3")] {
+        let mut captured = 0usize;
+        for _ in 0..trajectories {
+            let mut state = start;
+            for _step in 0..10_000 {
+                let (rates, total) = match state {
+                    0 => ([(3.0, true, None), (1.0, false, Some(1))], 4.0),
+                    1 => ([(1.0, false, Some(0)), (1.0, false, Some(2))], 2.0),
+                    _ => ([(1.0, false, Some(1)), (2.0, false, None)], 3.0),
+                };
+                let draw = next() * total;
+                let mut cumulative = 0.0;
+                let mut done = None;
+                for (rate, capture, next_state) in rates {
+                    cumulative += rate;
+                    if draw <= cumulative {
+                        if capture {
+                            captured += 1;
+                            done = Some(true);
+                        } else if let Some(next_state) = next_state {
+                            state = next_state;
+                            done = Some(false);
+                        } else {
+                            done = Some(true);
+                        }
+                        break;
+                    }
+                }
+                if done == Some(true) {
+                    break;
+                }
+            }
+        }
+        let frequency = captured as f64 / trajectories as f64;
+        let exact = probability(&volume, id);
+        let sigma = (exact * (1.0 - exact) / trajectories as f64).sqrt();
+        assert!(
+            (frequency - exact).abs() < 4.0 * sigma.max(1.0e-3),
+            "{id} kmc {frequency} chain {exact} sigma {sigma}"
+        );
+    }
+}
+
+#[test]
+fn the_return_layer_matches_its_two_state_solution() {
+    let bare = vec![rgsaddle::VolumeSite {
+        id: "boundary".into(),
+        count: 1.0,
+        outcome: rgsaddle::SiteOutcome::Kinetic,
+        rates: vec![("recombined".into(), 1.0), ("escaped".into(), 1.0)],
+    }];
+    let rho = rgsaddle::spherical_return_probability(2.0, 2.0).expect("rho");
+    assert!((rho - 0.5).abs() < 1.0e-15);
+    let embedded = rgsaddle::embed_free_migration(
+        &bare,
+        &rgsaddle::FreeMigration {
+            boundary: "boundary".into(),
+            outward_rate: 1.0,
+            return_probability: rho,
+            return_count: 2.0,
+        },
+    )
+    .expect("embed");
+    let volume = rgsaddle::kinetic_recombination_volume(&embedded, 1.0).expect("volume");
+    // u_L = ρ u_B, u_B = 1/2 + (1/2) u_L, so u_B = 2/3 and u_L = 1/3.
+    assert!((probability(&volume, "boundary") - 2.0 / 3.0).abs() < 1.0e-12);
+    assert!((probability(&volume, rgsaddle::FREE_CRYSTAL) - 1.0 / 3.0).abs() < 1.0e-12);
+    assert!((volume.total_sites - (2.0 / 3.0 + 2.0 / 3.0)).abs() < 1.0e-12);
+}
+
+#[test]
+fn repeated_site_ids_are_rejected() {
+    let sites = vec![
+        rgsaddle::VolumeSite {
+            id: "same".into(),
+            count: 1.0,
+            outcome: rgsaddle::SiteOutcome::Kinetic,
+            rates: vec![("escaped".into(), 1.0)],
+        },
+        rgsaddle::VolumeSite {
+            id: "same".into(),
+            count: 1.0,
+            outcome: rgsaddle::SiteOutcome::Kinetic,
+            rates: vec![("escaped".into(), 1.0)],
+        },
+    ];
+    assert!(rgsaddle::kinetic_recombination_volume(&sites, 1.0).is_err());
+}
+
+#[test]
+fn the_product_normal_points_from_reactant_to_product() {
+    let frames = vec![
+        Array1::from_vec(vec![0.0, 0.0, 0.0]),
+        Array1::from_vec(vec![1.0, 0.0, 0.0]),
+        Array1::from_vec(vec![1.0, 1.0, 0.0]),
+    ];
+    let path = rgsaddle::ArcPath::from_positions(&frames).expect("path");
+    let normal = rgsaddle::product_tangent(&path, 0.5).expect("normal");
+    assert!(normal[0] > 0.9, "{normal:?}");
+    assert!(normal[1].abs() < 1.0e-9, "{normal:?}");
+    let end = path.bounds().1;
+    let last = rgsaddle::product_tangent(&path, end).expect("last");
+    assert!(last[1] > 0.9, "{last:?}");
+}

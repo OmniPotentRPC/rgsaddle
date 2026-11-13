@@ -7137,30 +7137,17 @@ fn defect_pair_translation() {
     }
 }
 
-fn shoot_both(
+fn shoot_product(
     held: &FastHeld,
     starts: &[Array1<f64>],
     positions: ArrayView1<f64>,
-    tangent: ArrayView1<f64>,
+    normal: ArrayView1<f64>,
     shooting: &rgsaddle::ShootingConfig,
 ) -> (f64, f64, &'static str) {
-    let forward = rgsaddle::bennett::bennett_chandler(held, starts, positions, tangent, shooting);
-    let forward_k = forward.as_ref().map(|value| value.kappa).unwrap_or(f64::NAN);
-    let forward_e = forward.as_ref().map(|value| value.error).unwrap_or(f64::NAN);
-    if (0.0..=1.0).contains(&forward_k) {
-        return (forward_k, forward_e, "tangent");
-    }
-    let backward = rgsaddle::bennett::bennett_chandler(held, starts, positions, (-&tangent.to_owned()).view(), shooting);
-    let backward_k = backward.as_ref().map(|value| value.kappa).unwrap_or(f64::NAN);
-    let backward_e = backward.as_ref().map(|value| value.error).unwrap_or(f64::NAN);
-    if (0.0..=1.0).contains(&backward_k) {
-        return (backward_k, backward_e, "reversed tangent; the path normal pointed at the reactant");
-    }
-    if forward_k.is_finite() {
-        (forward_k, forward_e, "both orientations outside [0,1]")
-    } else {
-        (backward_k, backward_e, "both orientations outside [0,1]")
-    }
+    let forward = rgsaddle::bennett::bennett_chandler(held, starts, positions, normal, shooting);
+    let kappa = forward.as_ref().map(|value| value.kappa).unwrap_or(f64::NAN);
+    let error = forward.as_ref().map(|value| value.error).unwrap_or(f64::NAN);
+    (kappa, error, "normal from reactant to product")
 }
 
 fn catalogue_text() -> String {
@@ -7420,7 +7407,8 @@ fn record_pafi(
     } else {
         vec![geometry.positions.clone()]
     };
-    let (kappa, kappa_error, kappa_note) = shoot_both(&held, &starts, geometry.positions.view(), geometry.tangent.view(), &shooting);
+    let normal = rgsaddle::product_tangent(&band, arc).unwrap_or_else(|_| geometry.tangent.clone());
+    let (kappa, kappa_error, kappa_note) = shoot_product(&held, &starts, geometry.positions.view(), normal.view(), &shooting);
     let reactant_tangent = band.geometry(band.bounds().0).map(|frame| frame.tangent).unwrap_or(geometry.tangent.clone());
     let nu = rgsaddle::attempt_frequency(curvature_along(&held, reactant, &reactant_tangent), 63.546, rgsaddle::angular_scale_rad_s()).ok();
     let rate = nu.filter(|_| (0.0..=1.0).contains(&kappa)).map(|prefactor| prefactor * kappa * (-profile.barrier / thermal).exp());
@@ -7616,10 +7604,29 @@ fn assemble_passage() {
                         sites.push(rgsaddle::VolumeSite { id, count: share, outcome: rgsaddle::SiteOutcome::Spontaneous, rates: Vec::new() });
                         continue;
                     }
+                    let capture = capture_rate_row(&text, *radius, source, temperature);
                     let mut rates = Vec::new();
-                    if let Some((rate, relative)) = capture_rate_row(&text, *radius, source, temperature) {
-                        capture_index.push((sites.len(), rate, relative));
-                        rates.push(("recombined".into(), rate));
+                    let mut capture_neighbors = 0.0_f64;
+                    let mut outside = 0.0_f64;
+                    if let Some(members) = sites_of.get(index) {
+                        for site in members {
+                            for step in nn_vecs {
+                                let next = [site[0] + step[0] * a, site[1] + step[1] * a, site[2] + step[2] * a];
+                                let next_r = (next[0] * next[0] + next[1] * next[1] + next[2] * next[2]).sqrt();
+                                // The vacancy sits at the origin. A nearest-neighbor
+                                // hop onto it is capture, including when this shell
+                                // is kinetic.
+                                if next_r <= 0.5 * a {
+                                    capture_neighbors += 1.0;
+                                } else if shells.iter().all(|(value, _, _)| (value - next_r).abs() > 1.0e-3) {
+                                    outside += 1.0;
+                                }
+                            }
+                        }
+                        if !members.is_empty() {
+                            capture_neighbors /= members.len() as f64;
+                            outside /= members.len() as f64;
+                        }
                     }
                     for other in 0..shells.len() {
                         let weight = fraction[index][other];
@@ -7635,27 +7642,23 @@ fn assemble_passage() {
                             let Ok(temp) = fields[5].parse::<f64>() else { return false };
                             (shell - other_radius).abs() < 0.05 && fields[2] == other_source && (temp - temperature).abs() < 1.0 && (fields[12] == "spontaneous" || fields[12] == "barrierless")
                         });
-                        let destination = if rgsaddle::capture_is_spontaneous_within(other_recombines, other_barrier, threshold_mev * 1.0e-3) {
-                            "recombined".to_string()
+                        if rgsaddle::capture_is_spontaneous_within(other_recombines, other_barrier, threshold_mev * 1.0e-3) {
+                            // `weight` is the mean number of neighbor hops into
+                            // that shell. Those hops are capture, counted once
+                            // at the measured per-hop rate.
+                            capture_neighbors += weight;
                         } else {
-                            other_id
-                        };
-                        rates.push((destination, weight * k_mig));
+                            rates.push((other_id, weight * k_mig));
+                        }
                     }
-                    let mut outside = 0.0_f64;
-                    if let Some(members) = sites_of.get(index) {
-                        for site in members {
-                            for step in nn_vecs {
-                                let next = [site[0] + step[0] * a, site[1] + step[1] * a, site[2] + step[2] * a];
-                                let next_r = (next[0] * next[0] + next[1] * next[1] + next[2] * next[2]).sqrt();
-                                if next_r > 0.5 * a && shells.iter().all(|(value, _, _)| (value - next_r).abs() > 1.0e-3) {
-                                    outside += 1.0;
-                                }
-                            }
-                        }
-                        if !members.is_empty() {
-                            outside /= members.len() as f64;
-                        }
+                    if capture_neighbors > 0.0 {
+                        let (per_hop, relative) = capture.unwrap_or((k_mig, 0.0));
+                        let total = capture_neighbors * per_hop;
+                        capture_index.push((sites.len(), total, relative));
+                        rates.push(("recombined".into(), total));
+                    } else if let Some((rate, relative)) = capture {
+                        capture_index.push((sites.len(), rate, relative));
+                        rates.push(("recombined".into(), rate));
                     }
                     if outside > 0.0 {
                         rates.push(("escaped".into(), outside * k_mig));
@@ -7668,8 +7671,31 @@ fn assemble_passage() {
                 let max_r = shells.last().map(|(radius, _, _)| *radius).unwrap_or(0.0);
                 let boundary = format!("{max_r:.3}-{orientation}");
                 let jump = a / 2.0_f64.sqrt();
-                let return_probability = max_r / (max_r + jump);
-                let return_count = shells.last().map(|(_, _, count)| *count as f64 / 3.0).unwrap_or(0.0);
+                let return_probability = rgsaddle::spherical_return_probability(max_r, jump).unwrap_or(0.0);
+                // Sites one nearest-neighbor hop past the outer shell. The
+                // outer shell's own multiplicity is the boundary, not this layer.
+                // Three orientations share the same sites, as with count/3.
+                let mut outward_sites = std::collections::BTreeSet::new();
+                if let Some(members) = sites_of.last() {
+                    for site in members {
+                        for step in nn_vecs {
+                            let next = [site[0] + step[0] * a, site[1] + step[1] * a, site[2] + step[2] * a];
+                            let next_r = (next[0] * next[0] + next[1] * next[1] + next[2] * next[2]).sqrt();
+                            if next_r <= 0.5 * a {
+                                continue;
+                            }
+                            if shells.iter().any(|(value, _, _)| (value - next_r).abs() <= 1.0e-3) {
+                                continue;
+                            }
+                            outward_sites.insert((
+                                (next[0] * 1.0e6).round() as i64,
+                                (next[1] * 1.0e6).round() as i64,
+                                (next[2] * 1.0e6).round() as i64,
+                            ));
+                        }
+                    }
+                }
+                let return_count = outward_sites.len() as f64 / 3.0;
                 let embedded = if let Some(boundary_site) = sites.iter().find(|site| site.id == boundary && site.outcome == rgsaddle::SiteOutcome::Kinetic) {
                     let outward_rate = boundary_site.rates.iter().find(|(destination, _)| destination == "escaped").map(|(_, rate)| *rate).unwrap_or(k_mig);
                     rgsaddle::embed_free_migration(&sites, &rgsaddle::FreeMigration {
