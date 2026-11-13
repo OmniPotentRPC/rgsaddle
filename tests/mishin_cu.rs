@@ -5199,8 +5199,9 @@ fn run_dense_job(
     config.pafi.samples = 24;
     config.pafi.thermalize = 20;
     config.max_dimer_steps = 70;
-    config.max_band_steps = 220;
+    config.max_band_steps = 300;
     config.band.force_tol = 8.0e-3;
+    config.band.time_step = 0.04;
     config.images = 9;
     config.connect_rmsd = 1.0;
     let setup = rgsaddle::PairSetup {
@@ -5421,10 +5422,12 @@ fn local_seeds(
     cell: [[f64; 3]; 3],
     dumbbell: [usize; 2],
     vacancy: [f64; 3],
+    salt: u64,
+    n_seeds: usize,
 ) -> Vec<rgsaddle::DimerSeed> {
     let center = centroid(reactant, dumbbell);
     let length = cell[0][0];
-    let mut rng = TinyRng(0x5eed);
+    let mut rng = TinyRng(salt);
     let mut seeds = Vec::new();
     let n = reactant.len() / 3;
     let nearby: Vec<usize> = (0..n)
@@ -5490,7 +5493,7 @@ fn local_seeds(
             mode: kick,
         });
     }
-    while seeds.len() < 32 {
+    while seeds.len() < n_seeds {
         let mut kick = Array1::zeros(reactant.len());
         for atom in &nearby {
             for c in 0..3 {
@@ -5623,7 +5626,7 @@ fn defect_pair_local_capture() {
         let held = FastHeld { copper: &copper, cell };
         let (reactant_energy, _) = held.eval(reactant.view()).expect("reactant");
         let config = survey_config(bulk);
-        let seeds = local_seeds(&reactant, cell, dumbbell, vacancy);
+        let seeds = local_seeds(&reactant, cell, dumbbell, vacancy, 0x5eed, 32);
         eprintln!(
             "survey {radius:.3} {orientation} seeds {} at {:.0}s",
             seeds.len(),
@@ -5705,7 +5708,8 @@ fn defect_pair_local_capture() {
         let (downhill, down_energy) = rgsaddle::descend_limited(&held, start, cell, &config, floor).expect("descend");
         let mut band_config = config.clone();
         band_config.band.force_tol = 2.0e-3;
-        band_config.max_band_steps = 180;
+        band_config.max_band_steps = 320;
+        band_config.band.time_step = 0.04;
         band_config.images = 13;
         band_config.zero_t_tol = 0.02;
         let (band, converged, force) = rgsaddle::segment_band(
@@ -5787,7 +5791,8 @@ fn defect_pair_local_capture() {
             );
             let kappa = transmission.as_ref().map(|value| value.kappa).unwrap_or(f64::NAN);
             let reactant_t = &reactant * factor;
-            let lambda = curvature_along(&held_t, &reactant_t, &geometry.tangent);
+            let reactant_tangent = scaled.geometry(scaled.bounds().0).expect("reactant tangent").tangent;
+            let lambda = curvature_along(&held_t, &reactant_t, &reactant_tangent);
             let nu = rgsaddle::attempt_frequency(lambda, 63.546, rgsaddle::angular_scale_rad_s()).ok();
             let rate = nu.and_then(|prefactor| {
                 if (0.0..=1.0).contains(&kappa) {
@@ -5852,4 +5857,225 @@ fn defect_pair_local_capture() {
         }
     }
     eprintln!("local capture {:.1} min", started.elapsed().as_secs_f64() / 60.0);
+}
+
+fn quench_bound(
+    copper: &FastCopper,
+    mut positions: Array1<f64>,
+    cell: [[f64; 3]; 3],
+    vacancy: [f64; 3],
+    dumbbell: [usize; 2],
+) -> (Array1<f64>, f64, bool) {
+    relax_fast(copper, &mut positions, cell, 2.0e-4, 120);
+    let held = FastHeld { copper, cell };
+    let (mut best_energy, _) = held.eval(positions.view()).unwrap_or((f64::INFINITY, Array1::zeros(1)));
+    let mut best = positions.clone();
+    let mut best_bound = !pair_recombined(&positions, vacancy, cell, dumbbell);
+    let center = centroid(&positions, dumbbell);
+    let length = cell[0][0];
+    let to_vac = unit3(wrap_delta(center, vacancy, length));
+    for (scale, direction) in [(0.15, to_vac), (-0.15, to_vac), (0.2, [to_vac[1], to_vac[2], to_vac[0]])] {
+        let mut trial = positions.clone();
+        for atom in dumbbell {
+            for c in 0..3 {
+                trial[3 * atom + c] += scale * direction[c];
+            }
+        }
+        relax_fast(copper, &mut trial, cell, 2.0e-4, 80);
+        let bound = !pair_recombined(&trial, vacancy, cell, dumbbell);
+        let (energy, _) = held.eval(trial.view()).unwrap_or((f64::INFINITY, Array1::zeros(1)));
+        if bound && energy < best_energy {
+            best_energy = energy;
+            best = trial;
+            best_bound = true;
+        }
+    }
+    (best, best_energy, best_bound)
+}
+
+fn pair_recombined(positions: &Array1<f64>, vacancy: [f64; 3], cell: [[f64; 3]; 3], dumbbell: [usize; 2]) -> bool {
+    let gap = dist(point_of(positions, dumbbell[0]), point_of(positions, dumbbell[1]));
+    let separation = dist(centroid(positions, dumbbell), vacancy);
+    occupied(positions, vacancy, cell) || !(1.2..2.5).contains(&gap) || separation < 1.6
+}
+
+#[test]
+#[ignore = "re-referenced capture barriers and the kinetic recombination volume"]
+fn defect_pair_viv() {
+    let started = Instant::now();
+    let copper = FastCopper::new();
+    let repeats = 8usize;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks");
+    let path = root.join("defect_pair_viv.csv");
+    if !path.exists() {
+        let mut header = File::create(&path).expect("viv");
+        writeln!(header, "kind,shell,orientation,hop,direction,temperature_K,dE0_eV,zero_T_eV,dF_eV,dF_error_eV,nu_Hz,rate_Hz,outcome,band_force,note").unwrap();
+    }
+    let checkpoint = Mutex::new(File::options().append(true).open(&path).expect("append"));
+    let mut jobs: Vec<(f64, &str, f64)> = Vec::new();
+    for temperature in [500.0_f64, 300.0, 700.0] {
+        let a = measured_lattice(temperature);
+        for (radius, orientation) in [
+            (2.573_f64, "001"),
+            (3.639, "010"),
+            (3.639, "100"),
+            (3.639, "001"),
+            (4.456, "100"),
+            (4.456, "010"),
+            (5.146, "001"),
+            (6.302, "100"),
+            (6.302, "010"),
+            (6.807, "100"),
+            (7.277, "100"),
+            (7.719, "100"),
+        ] {
+            if temperature != 500.0 && radius > 5.2 {
+                continue;
+            }
+            jobs.push((radius * a / measured_lattice(500.0), orientation, temperature));
+        }
+    }
+    let (perfect, _) = fcc(repeats, measured_lattice(500.0));
+    let length = repeats as f64 * measured_lattice(500.0);
+    let (_, _, bulk) = copper.evaluate(perfect.view(), [[length, 0.0, 0.0], [0.0, length, 0.0], [0.0, 0.0, length]]);
+    for (radius, orientation, temperature) in jobs {
+        let existing = std::fs::read_to_string(&path).unwrap_or_default();
+        let key = format!("ref,{radius:.3},{orientation},{temperature},");
+        if checkpoint_has(&existing, &key) {
+            continue;
+        }
+        let a = measured_lattice(temperature);
+        let vector = shell_table(a, repeats)
+            .into_iter()
+            .find(|(value, _, _)| (*value - radius).abs() < 0.05)
+            .map(|(_, vector, _)| vector);
+        let Some(vector) = vector else { continue };
+        let (positions, vacancy, dumbbell, cell, _, _, recombined) =
+            relax_pair_axis(&copper, repeats, a, vector, axis_from_label(orientation), true);
+        if recombined {
+            let line = format!("ref,{radius:.3},{orientation},capture,toward,{temperature},0.000000,,,,,spontaneous,0,recombines on relaxation; counted in V_iv");
+            eprintln!("{line}");
+            append_checkpoint(&checkpoint, &line);
+            continue;
+        }
+        let (reactant, reactant_energy, bound) = quench_bound(&copper, positions, cell, vacancy, dumbbell);
+        if !bound {
+            let line = format!("ref,{radius:.3},{orientation},capture,toward,{temperature},0.000000,,,,,spontaneous,0,quench recombines; counted in V_iv");
+            eprintln!("{line}");
+            append_checkpoint(&checkpoint, &line);
+            continue;
+        }
+        let held = FastHeld { copper: &copper, cell };
+        let n_seeds = if matches!((radius as i32, orientation), (3, "100") | (3, "001") | (4, "010")) { 48 } else { 32 };
+        let seeds = local_seeds(&reactant, cell, dumbbell, vacancy, temperature as u64, n_seeds);
+        eprintln!("ref {radius:.3} {orientation} {temperature} seeds {} E {reactant_energy:.3} at {:.0}s", seeds.len(), started.elapsed().as_secs_f64());
+        let config = survey_config(bulk);
+        let found = rgsaddle::seeded_saddles(&held, &config, cell, &seeds);
+        let mut kept: Vec<&rgsaddle::BasinSaddle> = found
+            .iter()
+            .filter(|saddle| {
+                let plus_back = hausdorff(&saddle.plus, &reactant, cell) < 1.0;
+                let minus_back = hausdorff(&saddle.minus, &reactant, cell) < 1.0;
+                let plus_re = reaches_recombination(&reactant, reactant_energy, vacancy, cell, &saddle.plus, saddle.plus_energy);
+                let minus_re = reaches_recombination(&reactant, reactant_energy, vacancy, cell, &saddle.minus, saddle.minus_energy);
+                (plus_back && minus_re) || (minus_back && plus_re)
+            })
+            .collect();
+        kept.sort_by(|left, right| {
+            (left.saddle_energy - reactant_energy)
+                .partial_cmp(&(right.saddle_energy - reactant_energy))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        if kept.is_empty() {
+            let line = format!("ref,{radius:.3},{orientation},capture,toward,{temperature},,,,,,not_converged,0,no recombination saddle in {} index-1 of {} seeds; reference {reactant_energy:.4}", found.len(), seeds.len());
+            eprintln!("{line}");
+            append_checkpoint(&checkpoint, &line);
+            continue;
+        }
+        let best = kept.iter().find(|saddle| saddle.saddle_energy >= reactant_energy - 1.0e-4).unwrap_or(&kept[0]);
+        let d_e0 = best.saddle_energy - reactant_energy;
+        let line = format!("ref,{radius:.3},{orientation},capture,toward,{temperature},{d_e0:.6},,,,,index1,0,n={} lowest_relative {:.4} reference {reactant_energy:.4}", kept.len(), kept[0].saddle_energy - reactant_energy);
+        eprintln!("{line}");
+        append_checkpoint(&checkpoint, &line);
+        if rgsaddle::capture_is_spontaneous(false, Some(d_e0)) {
+            let line = format!("ref,{radius:.3},{orientation},capture,toward,{temperature},{d_e0:.6},,,,,spontaneous,0,re-referenced barrier {d_e0:.4} eV is at most 1 meV; counted in V_iv");
+            eprintln!("{line}");
+            append_checkpoint(&checkpoint, &line);
+            continue;
+        }
+        let sign = if best.plus_energy < best.minus_energy { 1.0 } else { -1.0 };
+        let mut peak = 0.0_f64;
+        for atom in 0..best.mode.len() / 3 {
+            let mut acc = 0.0;
+            for c in 0..3 {
+                acc += best.mode[3 * atom + c] * best.mode[3 * atom + c];
+            }
+            peak = peak.max(acc.sqrt());
+        }
+        let mut step = 0.04_f64;
+        let mut start = best.saddle.clone();
+        if peak > 1.0e-8 {
+            while step >= 0.01 {
+                let trial = &best.saddle + &(&best.mode * (sign * step / peak));
+                let trial_energy = held.eval(trial.view()).map(|(energy, _)| energy).unwrap_or(f64::NAN);
+                if trial_energy.is_finite() && trial_energy > best.saddle_energy - 0.3 {
+                    start = trial;
+                    break;
+                }
+                step *= 0.5;
+            }
+        }
+        let (downhill, down_energy) = rgsaddle::descend_limited(&held, start.clone(), cell, &config, best.saddle_energy - 0.6).unwrap_or((start, reactant_energy));
+        let mut band_config = config.clone();
+        band_config.band.force_tol = 2.0e-3;
+        band_config.band.time_step = 0.04;
+        band_config.max_band_steps = 320;
+        band_config.images = 13;
+        let (band, converged, force) = match rgsaddle::segment_band(&held, &band_config, &reactant, &best.saddle, &downhill, cell, 0.1, 5.0) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("band {error}");
+                continue;
+            }
+        };
+        let zero = rgsaddle::zero_temperature_barrier(&held, &band, &band.arcs()).ok();
+        let zero_v = zero.as_ref().map(|profile| profile.barrier).unwrap_or(f64::NAN);
+        let ok = converged && force <= 2.0e-3 && (zero_v - d_e0).abs() < 0.05 && down_energy > reactant_energy - 1.5;
+        let outcome = if ok { "index1" } else { "not_converged" };
+        let line = format!("capture,{radius:.3},{orientation},capture,toward,{temperature},{d_e0:.6},{zero_v:.6},,,,,{outcome},{force:.5},downhill_rel {:.3}", down_energy - reactant_energy);
+        eprintln!("{line}");
+        let _ = std::io::stderr().flush();
+        append_checkpoint(&checkpoint, &line);
+        if !ok {
+            continue;
+        }
+        for thermal_t in [500.0_f64, 300.0] {
+            if (temperature - 500.0).abs() > 1.0 && (thermal_t - temperature).abs() > 1.0 {
+                continue;
+            }
+            let thermal = thermal_t * rgsaddle::BOLTZMANN_EV_PER_K;
+            let mut pafi = band_config.pafi.clone();
+            pafi.thermal = thermal;
+            pafi.samples = 20;
+            pafi.max_rounds = 4;
+            pafi.target_error = Some(0.01);
+            pafi.thermalize = 20;
+            let Ok((profile, planes)) = rgsaddle::pafi_profile(&held, &band, &band.arcs(), &pafi) else { continue };
+            let geometry = band.geometry(profile.arc[profile.dividing]).expect("dividing");
+            let reactant_tangent = band.geometry(band.bounds().0).expect("end").tangent;
+            let mut shooting = band_config.shooting.clone();
+            shooting.thermal = thermal;
+            shooting.mass = 63.546;
+            let starts = if planes[profile.dividing].retained.is_empty() { vec![geometry.positions.clone()] } else { planes[profile.dividing].retained.clone() };
+            let transmission = rgsaddle::bennett::bennett_chandler(&held, &starts, geometry.positions.view(), geometry.tangent.view(), &shooting);
+            let kappa = transmission.as_ref().map(|value| value.kappa).unwrap_or(f64::NAN);
+            let lambda = curvature_along(&held, &reactant, &reactant_tangent);
+            let nu = rgsaddle::attempt_frequency(lambda, 63.546, rgsaddle::angular_scale_rad_s()).ok();
+            let rate = nu.filter(|_| (0.0..=1.0).contains(&kappa)).map(|prefactor| prefactor * kappa * (-profile.barrier / thermal).exp());
+            let line = format!("pafi,{radius:.3},{orientation},capture,toward,{thermal_t},{d_e0:.6},{zero_v:.6},{:.6},{:.6},{},{},rated,{force:.5},kappa {kappa:.6}", profile.barrier, profile.barrier_error, num_or(&nu), num_or(&rate));
+            eprintln!("{line}");
+            append_checkpoint(&checkpoint, &line);
+        }
+    }
+    eprintln!("viv {:.1} min", started.elapsed().as_secs_f64() / 60.0);
 }

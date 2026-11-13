@@ -263,3 +263,46 @@ fn the_catalogue_round_trips() {
     assert!((back.saddle_dipole[1][1] + 2.0).abs() < 1e-12);
     assert!((back.negative_eigenvalue.unwrap() + 0.4).abs() < 1e-12);
 }
+
+#[test]
+fn kinetic_volume_counts_return_from_the_outer_shell() {
+    let sites = vec![
+        rgsaddle::VolumeSite {
+            id: "inner".into(),
+            count: 6.0,
+            outcome: rgsaddle::SiteOutcome::Kinetic,
+            rates: vec![("recombined".into(), 9.0), ("outer".into(), 1.0)],
+        },
+        rgsaddle::VolumeSite {
+            id: "outer".into(),
+            count: 12.0,
+            outcome: rgsaddle::SiteOutcome::Kinetic,
+            rates: vec![("inner".into(), 1.0), ("escaped".into(), 1.0)],
+        },
+        rgsaddle::VolumeSite {
+            id: "nearest".into(),
+            count: 12.0,
+            outcome: rgsaddle::SiteOutcome::Spontaneous,
+            rates: Vec::new(),
+        },
+    ];
+    let volume = rgsaddle::kinetic_recombination_volume(&sites, 1.0).expect("volume");
+    let inner = 0.9 / 0.95;
+    let outer = 0.45 / 0.95;
+    let expected = 12.0 + 6.0 * inner + 12.0 * outer;
+    assert!((volume.total_sites - expected).abs() < 1.0e-9, "{}", volume.total_sites);
+    assert!((volume.spontaneous_sites - 12.0).abs() < 1.0e-12);
+    assert!((volume.volume - expected).abs() < 1.0e-9);
+    let nearest = volume
+        .placements
+        .iter()
+        .find(|site| site.id == "nearest")
+        .expect("spontaneous site is kept");
+    assert_eq!(nearest.outcome, rgsaddle::SiteOutcome::Spontaneous);
+    assert!((nearest.probability - 1.0).abs() < 1.0e-12);
+    assert_eq!(nearest.outcome.as_str(), "spontaneous");
+    assert!(rgsaddle::capture_is_spontaneous(true, None));
+    assert!(rgsaddle::capture_is_spontaneous(false, Some(-0.0028)));
+    assert!(rgsaddle::capture_is_spontaneous(false, Some(0.001)));
+    assert!(!rgsaddle::capture_is_spontaneous(false, Some(0.0064)));
+}

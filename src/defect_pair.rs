@@ -1217,9 +1217,216 @@ pub fn descend_limited<S: PointSurface>(
     Ok((positions, energy))
 }
 
+/// How a placement enters the recombination volume.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SiteOutcome {
+    /// The placement recombines on relaxation, or its re-referenced capture
+    /// barrier is at most [`SPONTANEOUS_BARRIER_EV`]. It is a spontaneous
+    /// site: capture probability 1, and it is not a missing rate.
+    Spontaneous,
+    /// Capture competes with the other hops in [`VolumeSite::rates`].
+    Kinetic,
+}
+
+impl SiteOutcome {
+    /// `spontaneous` or `kinetic`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Spontaneous => "spontaneous",
+            Self::Kinetic => "kinetic",
+        }
+    }
+}
+
+/// A re-referenced barrier at or below this, in eV, is spontaneous capture.
+pub const SPONTANEOUS_BARRIER_EV: f64 = 0.001;
+
+/// True when the placement is not a bound minimum, or the barrier measured
+/// from the lowest bound state is at most [`SPONTANEOUS_BARRIER_EV`].
+pub fn capture_is_spontaneous(recombines_on_relaxation: bool, barrier_ev: Option<f64>) -> bool {
+    recombines_on_relaxation
+        || barrier_ev.is_some_and(|value| value.is_finite() && value <= SPONTANEOUS_BARRIER_EV)
+}
+
+/// One shell in a kinetic recombination-volume sum.
+///
+/// `rates` are `(destination, rate)`. A destination equal to another site's
+/// `id` is a hop to that shell. Any other destination is absorbing.
+/// `"recombined"` is the capture absorber; every other unknown name is escape.
+/// [`SiteOutcome::Spontaneous`] is captured with probability 1 even when
+/// `rates` is empty. Those sites are counted, not dropped.
+#[derive(Clone, Debug)]
+pub struct VolumeSite {
+    pub id: String,
+    pub count: f64,
+    pub outcome: SiteOutcome,
+    pub rates: Vec<(String, f64)>,
+}
+
+/// One placement's share of the recombination volume.
+#[derive(Clone, Debug)]
+pub struct VolumePlacement {
+    pub id: String,
+    pub count: f64,
+    pub outcome: SiteOutcome,
+    pub probability: f64,
+    pub sites: f64,
+}
+
+/// Kinetic recombination volume, in the same units as `atomic_volume`.
+///
+/// The transient shells form an absorbing Markov chain. `kinetic_sites` is
+/// the multiplicity-weighted probability of reaching recombination before
+/// escape. `spontaneous_sites` is the multiplicity of shells that are not
+/// minima. `total_sites` is their sum, and `volume` is that sum times
+/// `atomic_volume`.
+#[derive(Clone, Debug)]
+pub struct RecombinationVolume {
+    pub volume: f64,
+    pub spontaneous_sites: f64,
+    pub kinetic_sites: f64,
+    pub total_sites: f64,
+    /// Every input placement, spontaneous ones included.
+    pub placements: Vec<VolumePlacement>,
+}
+
+/// Absorbing-chain recombination volume.
+pub fn kinetic_recombination_volume(
+    sites: &[VolumeSite],
+    atomic_volume: f64,
+) -> Result<RecombinationVolume, SaddleError> {
+    if !(atomic_volume.is_finite() && atomic_volume > 0.0) {
+        return Err(SaddleError::Invalid(
+            "atomic volume must be finite and positive".into(),
+        ));
+    }
+    let mut spontaneous = 0.0;
+    let mut placements = Vec::with_capacity(sites.len());
+    let mut transient: Vec<&VolumeSite> = Vec::new();
+    for site in sites {
+        if !(site.count.is_finite() && site.count >= 0.0) {
+            return Err(SaddleError::Invalid(
+                "site multiplicity must be finite and non-negative".into(),
+            ));
+        }
+        if site.outcome == SiteOutcome::Spontaneous {
+            spontaneous += site.count;
+            placements.push(VolumePlacement {
+                id: site.id.clone(),
+                count: site.count,
+                outcome: SiteOutcome::Spontaneous,
+                probability: 1.0,
+                sites: site.count,
+            });
+        } else {
+            transient.push(site);
+        }
+    }
+    let n = transient.len();
+    let mut absorption = vec![0.0; n];
+    if n > 0 {
+        let index: std::collections::HashMap<&str, usize> = transient
+            .iter()
+            .enumerate()
+            .map(|(i, site)| (site.id.as_str(), i))
+            .collect();
+        let mut matrix = vec![vec![0.0; n]; n];
+        let mut rhs = vec![0.0; n];
+        for (i, site) in transient.iter().enumerate() {
+            let mut total = 0.0;
+            for (destination, rate) in &site.rates {
+                if !(rate.is_finite() && *rate >= 0.0) {
+                    return Err(SaddleError::Invalid(
+                        "a hop rate must be finite and non-negative".into(),
+                    ));
+                }
+                total += *rate;
+            }
+            if total <= 0.0 {
+                return Err(SaddleError::Invalid(format!(
+                    "site {} has no outgoing rate",
+                    site.id
+                )));
+            }
+            matrix[i][i] = 1.0;
+            for (destination, rate) in &site.rates {
+                let probability = *rate / total;
+                if destination == "recombined" {
+                    rhs[i] += probability;
+                } else if let Some(&j) = index.get(destination.as_str()) {
+                    matrix[i][j] -= probability;
+                }
+            }
+        }
+        absorption = solve_linear(matrix, rhs)?;
+    }
+    let mut kinetic = 0.0;
+    for (site, probability) in transient.iter().zip(&absorption) {
+        if !(probability.is_finite() && *probability >= -1.0e-8 && *probability <= 1.0 + 1.0e-8)
+        {
+            return Err(SaddleError::Invalid(format!(
+                "capture probability for {} is not in [0, 1]",
+                site.id
+            )));
+        }
+        let probability = probability.clamp(0.0, 1.0);
+        let sites = site.count * probability;
+        kinetic += sites;
+        placements.push(VolumePlacement {
+            id: site.id.clone(),
+            count: site.count,
+            outcome: SiteOutcome::Kinetic,
+            probability,
+            sites,
+        });
+    }
+    let total = spontaneous + kinetic;
+    Ok(RecombinationVolume {
+        volume: total * atomic_volume,
+        spontaneous_sites: spontaneous,
+        kinetic_sites: kinetic,
+        total_sites: total,
+        placements,
+    })
+}
+
+fn solve_linear(mut matrix: Vec<Vec<f64>>, mut rhs: Vec<f64>) -> Result<Vec<f64>, SaddleError> {
+    let n = rhs.len();
+    for col in 0..n {
+        let mut pivot = col;
+        for row in col + 1..n {
+            if matrix[row][col].abs() > matrix[pivot][col].abs() {
+                pivot = row;
+            }
+        }
+        if matrix[pivot][col].abs() < 1.0e-14 {
+            return Err(SaddleError::Invalid(
+                "the shell rate graph is singular".into(),
+            ));
+        }
+        matrix.swap(col, pivot);
+        rhs.swap(col, pivot);
+        let scale = matrix[col][col];
+        for value in &mut matrix[col] {
+            *value /= scale;
+        }
+        rhs[col] /= scale;
+        for row in 0..n {
+            if row == col {
+                continue;
+            }
+            let factor = matrix[row][col];
+            for col2 in col..n {
+                matrix[row][col2] -= factor * matrix[col][col2];
+            }
+            rhs[row] -= factor * rhs[col];
+        }
+    }
+    Ok(rhs)
+}
+
 /// Climbing band from the reactant through `saddle` to a nearby downhill
-/// geometry. Springs are energy-weighted so images stay near the barrier
-/// instead of falling into a deep product well.
+/// geometry. Springs are energy-weighted so images stay near the barrier.
 pub fn segment_band<S: PointSurface>(
     surface: &S,
     config: &DefectPairConfig,
