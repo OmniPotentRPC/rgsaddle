@@ -541,3 +541,15 @@ fn the_product_normal_points_from_reactant_to_product() {
     let last = rgsaddle::product_tangent(&path, end).expect("last");
     assert!(last[1] > 0.9, "{last:?}");
 }
+
+#[test]
+fn mean_absorption_time_of_one_hop_is_the_inverse_rate() {
+    let sites = vec![rgsaddle::VolumeSite {
+        id: "only".into(),
+        count: 4.0,
+        outcome: rgsaddle::SiteOutcome::Kinetic,
+        rates: vec![("recombined".into(), 2.0)],
+    }];
+    let time = rgsaddle::mean_absorption_time(&sites).expect("time");
+    assert!((time - 0.5).abs() < 1.0e-9, "{time}");
+}

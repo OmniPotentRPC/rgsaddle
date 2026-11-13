@@ -1,0 +1,22 @@
+temperature_K,method,volume_over_Omega,sigma,spontaneous_sites,kinetic_sites,demkowicz_8788,note
+300,first-passage,194.9030,3.5860,34.0000,160.9030,254-286,13x13x13=8788; a=3.631; return layer 272 sites; radial+glide+rotation; shells changed: 2.568-100:bound->spontaneous 2.568-010:bound->spontaneous 2.568-001:spontaneous->bound 3.631-010:spontaneous->bound 4.447-001:bound->spontaneous 5.135-100:bound->spontaneous 5.135-010:bound->spontaneous
+300,radial,213.7599,,34.0000,160.9030,254-286,toward and away translation only
+300,glide,194.7872,,,,254-286,radial plus non-radial translation (|dr| < half a nearest-neighbor hop); delta -18.9727
+300,rotation,194.9030,,,,254-286,glide plus two <110> rotation saddles per target axis; delta 0.1158
+300,drift,194.9030,,,,254-286,rotation graph with measured strain barriers on away hops; delta 0.0000
+300,mean-time-tst,414.0945,,34.0000,,254-286,tau 9.409248e-10 s; nu=(2/3)*k_translation from this run
+300,mean-time-table,1291.6440,,34.0000,,254-286,same tau; nu=(2/3)*D/a^2 with D from their Table 1
+500,first-passage,184.3887,3.4319,34.0000,150.3887,161-185,13x13x13=8788; a=3.643; return layer 272 sites; radial+glide+rotation; shells changed: 2.576-001:spontaneous->bound 3.643-010:spontaneous->bound 4.462-001:bound->spontaneous 5.152-010:bound->spontaneous 7.728-100:spontaneous->bound
+500,radial,199.7322,,34.0000,150.3887,161-185,toward and away translation only
+500,glide,183.5286,,,,161-185,radial plus non-radial translation (|dr| < half a nearest-neighbor hop); delta -16.2036
+500,rotation,184.3887,,,,161-185,glide plus two <110> rotation saddles per target axis; delta 0.8600
+500,drift,184.3851,,,,161-185,rotation graph with measured strain barriers on away hops; delta -0.0036
+500,mean-time-tst,413.8396,,34.0000,,161-185,tau 2.209014e-10 s; nu=(2/3)*k_translation from this run
+500,mean-time-table,1505.6200,,34.0000,,161-185,same tau; nu=(2/3)*D/a^2 with D from their Table 1
+700,first-passage,196.5244,2.7201,34.0000,162.5244,203-210,13x13x13=8788; a=3.655; return layer 272 sites; radial+glide+rotation; shells changed: 2.584-100:bound->spontaneous 2.584-010:bound->spontaneous 2.584-001:spontaneous->bound 4.476-001:bound->spontaneous 5.169-100:bound->spontaneous 5.169-010:bound->spontaneous
+700,radial,211.0927,,34.0000,162.5244,203-210,toward and away translation only
+700,glide,192.1261,,,,203-210,radial plus non-radial translation (|dr| < half a nearest-neighbor hop); delta -18.9666
+700,rotation,196.5244,,,,203-210,glide plus two <110> rotation saddles per target axis; delta 4.3983
+700,drift,196.5244,,,,203-210,rotation graph with measured strain barriers on away hops; delta 0.0000
+700,mean-time-tst,414.1273,,34.0000,,203-210,tau 3.640642e-10 s; nu=(2/3)*k_translation from this run
+700,mean-time-table,531.5409,,34.0000,,203-210,same tau; nu=(2/3)*D/a^2 with D from their Table 1

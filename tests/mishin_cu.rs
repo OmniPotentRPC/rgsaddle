@@ -7744,3 +7744,662 @@ fn assemble_passage() {
 fn defect_pair_passage() {
     assemble_passage();
 }
+
+fn demkowicz_lattice(temperature: f64) -> f64 {
+    // Table 1 of the accepted manuscript, Phys. Rev. Materials 9, 023601,
+    // section 4. These are their zero-pressure lattice parameters, not ours.
+    match temperature as i32 {
+        300 => 3.631,
+        500 => 3.643,
+        700 => 3.655,
+        _ => 3.643,
+    }
+}
+
+fn shell_772(a: f64, repeats: usize) -> Option<[f64; 3]> {
+    let target = a * 4.5_f64.sqrt();
+    shell_table(a, repeats)
+        .into_iter()
+        .find(|(radius, _, _)| (*radius - target).abs() < 0.05)
+        .map(|(_, vector, _)| vector)
+}
+
+fn classify_shell(
+    copper: &FastCopper,
+    repeats: usize,
+    a: f64,
+    vector: [f64; 3],
+    orientation: &str,
+) -> (bool, f64, f64) {
+    let (positions, vacancy, dumbbell, cell, gap, separation, recombined) =
+        relax_pair_axis(copper, repeats, a, vector, axis_from_label(orientation), true);
+    if recombined {
+        return (true, gap, separation);
+    }
+    let (_, _, bound) = quench_bound(copper, positions, cell, vacancy, dumbbell);
+    (!bound, gap, separation)
+}
+
+#[test]
+#[ignore = "8788-atom recombination volume and the 7.72 A size check"]
+fn defect_pair_run12() {
+    let started = Instant::now();
+    let copper = FastCopper::new();
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks");
+    let path = root.join("defect_pair_run12.csv");
+    if !path.exists() {
+        let mut header = File::create(&path).expect("run12");
+        writeln!(header, "kind,repeats,temperature_K,a_A,radius_A,orientation,outcome,gap_A,separation_A,barrier_eV,force_eV_A,note").unwrap();
+    }
+    let checkpoint = Mutex::new(File::options().append(true).open(&path).expect("append"));
+    for temperature in [500.0_f64, 300.0, 700.0] {
+        let a = demkowicz_lattice(temperature);
+        for repeats in [8usize, 10, 13] {
+            let prior = std::fs::read_to_string(&path).unwrap_or_default();
+            let key = format!("size,{repeats},{temperature},");
+            if checkpoint_has(&prior, &key) {
+                continue;
+            }
+            let Some(vector) = shell_772(a, repeats) else {
+                write_tight(&checkpoint, &format!("size,{repeats},{temperature},{a:.3},,,,missing,,,,no 7.72 shell"));
+                continue;
+            };
+            let radius = (vector[0] * vector[0] + vector[1] * vector[1] + vector[2] * vector[2]).sqrt();
+            let t0 = started.elapsed().as_secs_f64();
+            let (spontaneous, gap, separation) = classify_shell(&copper, repeats, a, vector, "100");
+            let outcome = if spontaneous { "spontaneous" } else { "bound" };
+            let atoms = 4 * repeats * repeats * repeats;
+            write_tight(&checkpoint, &format!(
+                "size,{repeats},{temperature},{a:.3},{radius:.3},100,{outcome},{gap:.3},{separation:.3},,,{atoms} atoms; wall {:.1}s",
+                started.elapsed().as_secs_f64() - t0
+            ));
+        }
+    }
+    for repeats in [8usize, 13] {
+        for temperature in [300.0_f64, 500.0, 700.0] {
+            let a = demkowicz_lattice(temperature);
+            for (radius, vector, count) in shell_table(a, repeats) {
+                if radius > 9.0 {
+                    continue;
+                }
+                for orientation in distinct_orientations(vector) {
+                    let prior = std::fs::read_to_string(&path).unwrap_or_default();
+                    let key = format!("census,{repeats},{temperature},{a:.3},{radius:.3},{orientation},");
+                    if checkpoint_has(&prior, &key) {
+                        continue;
+                    }
+                    let (positions, vacancy, dumbbell, cell, gap, separation, recombined) =
+                        relax_pair_axis(&copper, repeats, a, vector, axis_from_label(orientation), true);
+                    let spontaneous = recombined || pair_recombined(&positions, vacancy, cell, dumbbell);
+                    let outcome = if spontaneous { "spontaneous" } else { "bound" };
+                    write_tight(&checkpoint, &format!(
+                        "census,{repeats},{temperature},{a:.3},{radius:.3},{orientation},{outcome},{gap:.3},{separation:.3},,,sites {count}; relax only"
+                    ));
+                }
+            }
+        }
+    }
+    for repeats in [8usize, 13] {
+        for temperature in [300.0_f64, 500.0, 700.0] {
+            let a = demkowicz_lattice(temperature);
+            for (radius, vector, count) in shell_table(a, repeats) {
+                let reduced = radius / a;
+                let interesting = (reduced - 1.0).abs() < 0.04 || (reduced - 1.5_f64.sqrt()).abs() < 0.04 || (reduced - 2.0_f64.sqrt()).abs() < 0.04;
+                if !interesting { continue; }
+                for orientation in distinct_orientations(vector) {
+                    let prior = std::fs::read_to_string(&path).unwrap_or_default();
+                    if checkpoint_has(&prior, &format!("quench,{repeats},{temperature},{a:.3},{radius:.3},{orientation},")) {
+                        continue;
+                    }
+                    let (spontaneous, gap, separation) = classify_shell(&copper, repeats, a, vector, orientation);
+                    let outcome = if spontaneous { "spontaneous" } else { "bound" };
+                    write_tight(&checkpoint, &format!(
+                        "quench,{repeats},{temperature},{a:.3},{radius:.3},{orientation},{outcome},{gap:.3},{separation:.3},,,sites {count}; full quench"
+                    ));
+                }
+            }
+        }
+    }
+    rotation_channels_300(&copper, &checkpoint, started);
+    assemble_run12();
+    eprintln!("run12 {:.1} min", started.elapsed().as_secs_f64() / 60.0);
+}
+
+fn rotation_channels_300(copper: &FastCopper, checkpoint: &Mutex<File>, started: Instant) {
+    let temperature = 300.0_f64;
+    let a = demkowicz_lattice(temperature);
+    let repeats = 8usize;
+    let length = repeats as f64 * a;
+    let (perfect, _) = fcc(repeats, a);
+    let (_, _, bulk) = copper.evaluate(perfect.view(), [[length, 0.0, 0.0], [0.0, length, 0.0], [0.0, 0.0, length]]);
+    let _ = bulk;
+    for (radius, vector, _) in shell_table(a, repeats) {
+        if !(4.0..8.5).contains(&radius) {
+            continue;
+        }
+        for orientation in ["100", "001"] {
+            let prior = std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks/defect_pair_run12.csv")).unwrap_or_default();
+            if checkpoint_has(&prior, &format!("rotation,{repeats},{temperature},{a:.3},{radius:.3},{orientation},")) {
+                continue;
+            }
+            let (positions, vacancy, dumbbell, cell, _, _, recombined) =
+                relax_pair_axis(copper, repeats, a, vector, axis_from_label(orientation), true);
+            if recombined {
+                write_tight(checkpoint, &format!("rotation,{repeats},{temperature},{a:.3},{radius:.3},{orientation},spontaneous,,,,,quench not needed"));
+                continue;
+            }
+            let (reactant, reactant_energy, bound) = quench_bound(copper, positions, cell, vacancy, dumbbell);
+            if !bound {
+                write_tight(checkpoint, &format!("rotation,{repeats},{temperature},{a:.3},{radius:.3},{orientation},spontaneous,,,,,quench recombines"));
+                continue;
+            }
+            eprintln!("rotation {radius:.3} {orientation} at {:.0}s", started.elapsed().as_secs_f64());
+            let (hint, mode) = rotation_hint(&reactant, dumbbell);
+            let Some(hit) = tight_dimer(copper, cell, hint, mode) else {
+                write_tight(checkpoint, &format!("rotation,{repeats},{temperature},{a:.3},{radius:.3},{orientation},not_converged,,,,,dimer failed"));
+                continue;
+            };
+            let barrier = hit.energy - reactant_energy;
+            let assignment = saddle_assignment(&reactant, &hit.positions, dumbbell);
+            write_tight(checkpoint, &format!(
+                "rotation,{repeats},{temperature},{a:.3},{radius:.3},{orientation},{assignment},{barrier:.6},{:.6e},{},,{assignment} seed; force tolerance 1.5e-3; free rotation at 300 K was 0.229987 eV",
+                hit.force, hit.index1
+            ));
+        }
+    }
+}
+
+fn assemble_run12() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks");
+    let census = std::fs::read_to_string(root.join("defect_pair_run12.csv")).unwrap_or_default();
+    let rates = catalogue_text();
+    let mut out = File::create(root.join("defect_pair_run12_volume.csv")).expect("volume");
+    writeln!(out, "temperature_K,method,volume_over_Omega,sigma,spontaneous_sites,kinetic_sites,demkowicz_8788,note").unwrap();
+    let diffusivity = |temperature: f64| match temperature as i32 {
+        300 => 0.143e12,
+        500 => 0.526e12,
+        700 => 0.910e12,
+        _ => f64::NAN,
+    };
+    for temperature in [300.0_f64, 500.0, 700.0] {
+        let a = demkowicz_lattice(temperature);
+        let repeats = 13usize;
+        let n_atoms = 4.0 * (repeats * repeats * repeats) as f64;
+        let omega = a * a * a / 4.0;
+        let k_mig = migration_rate(&rates, temperature);
+        let Some(k_mig) = k_mig else {
+            writeln!(out, "{temperature},first-passage,,,,,,no migration rate").unwrap();
+            continue;
+        };
+        let shells = shell_table(a, repeats);
+        let mut spontaneous = std::collections::HashSet::new();
+        let mut changed = Vec::new();
+        for (radius, vector, count) in &shells {
+            if *radius > 11.0 { continue; }
+            for orientation in ["100", "010", "001"] {
+                let hat = unit3(*vector);
+                let class_of = |label: &str| {
+                    let axis = axis_from_label(label);
+                    ((axis[0] * hat[0] + axis[1] * hat[1] + axis[2] * hat[2]).abs() * 1000.0).round() as i32
+                };
+                let want = class_of(orientation);
+                let matches = |kind: &str, label: &str, line: &str| {
+                    let fields: Vec<&str> = line.split(',').collect();
+                    fields.len() > 7
+                        && fields[0] == kind
+                        && fields[1] == "13"
+                        && fields[2].parse::<f64>().ok().is_some_and(|t| (t - temperature).abs() < 1.0)
+                        && fields[4].parse::<f64>().ok().is_some_and(|r| (r - radius).abs() < 0.02)
+                        && fields[5] == label
+                };
+                let mut line = None;
+                for kind in ["quench", "census"] {
+                    if let Some(row) = census.lines().find(|row| matches(kind, orientation, row)) {
+                        line = Some(row);
+                        break;
+                    }
+                    if let Some(row) = census.lines().find(|row| {
+                        let fields: Vec<&str> = row.split(',').collect();
+                        fields.len() > 5 && class_of(fields[5]) == want && matches(kind, fields[5], row)
+                    }) {
+                        line = Some(row);
+                        break;
+                    }
+                }
+                let is_spontaneous = line.is_some_and(|row| row.split(',').nth(6) == Some("spontaneous"));
+                let old = text_spontaneous_at_8(&rates, *radius * measured_lattice(temperature) / a, orientation, temperature);
+                if is_spontaneous != old {
+                    changed.push(format!("{radius:.3}-{orientation}:{}->{}", if old { "spontaneous" } else { "bound" }, if is_spontaneous { "spontaneous" } else { "bound" }));
+                }
+                if is_spontaneous {
+                    spontaneous.insert(format!("{radius:.3}-{orientation}"));
+                    let _ = (vector, count);
+                }
+            }
+        }
+        let max_r = shells.iter().filter(|(radius, _, _)| *radius <= 11.0).map(|(radius, _, _)| *radius).fold(0.0, f64::max);
+        let jump = a / 2.0_f64.sqrt();
+        let return_sites = return_layer_count(a, &shells, max_r);
+        let (total, sigma, spont_sites, kinetic_sites, weight, mean_graph, radial, glide, rotated, drifted) = channel_volumes(&shells, &spontaneous, &rates, temperature, k_mig, a, omega, max_r, jump, return_sites);
+        let demkowicz = match temperature as i32 { 300 => "254-286", 500 => "161-185", 700 => "203-210", _ => "" };
+        let changed_note = if changed.is_empty() { "no shell changed versus 8^3".to_string() } else { changed.join(" ") };
+        writeln!(out, "{temperature},first-passage,{total:.4},{sigma:.4},{spont_sites:.4},{kinetic_sites:.4},{demkowicz},13x13x13=8788; a={a}; return layer {return_sites} sites; radial+glide+rotation; shells changed: {changed_note}").unwrap();
+        writeln!(out, "{temperature},radial,{radial:.4},,{spont_sites:.4},{kinetic_sites:.4},{demkowicz},toward and away translation only").unwrap();
+        writeln!(out, "{temperature},glide,{glide:.4},,,,{demkowicz},radial plus non-radial translation (|dr| < half a nearest-neighbor hop); delta {:.4}", glide - radial).unwrap();
+        writeln!(out, "{temperature},rotation,{rotated:.4},,,,{demkowicz},glide plus two <110> rotation saddles per target axis; delta {:.4}", rotated - glide).unwrap();
+        writeln!(out, "{temperature},drift,{drifted:.4},,,,{demkowicz},rotation graph with measured strain barriers on away hops; delta {:.4}", drifted - rotated).unwrap();
+        eprintln!("13^3 {temperature} K radial {radial:.2} glide {glide:.2} (d {:.2}) rotation {rotated:.2} (d {:.2}) drift {drifted:.2} (d {:.2}) full {total:.2} ± {sigma:.2}", glide - radial, rotated - glide, drifted - rotated);
+        let tau_near = if weight > 0.0 { mean_graph / weight } else { f64::NAN };
+        let tau_cell = cell_averaged_time(repeats, a, k_mig, max_r, tau_near);
+        let nu_tst = (2.0 / 3.0) * k_mig;
+        let nu_table = (2.0 / 3.0) * diffusivity(temperature) / (a * a);
+        if tau_cell.is_finite() && tau_cell > 0.0 {
+            let volume_tst = n_atoms / (tau_cell * nu_tst);
+            let volume_table = n_atoms / (tau_cell * nu_table);
+            writeln!(out, "{temperature},mean-time-tst,{volume_tst:.4},,{spont_sites:.4},,{demkowicz},tau {tau_cell:.6e} s; nu=(2/3)*k_translation from this run").unwrap();
+            writeln!(out, "{temperature},mean-time-table,{volume_table:.4},,{spont_sites:.4},,{demkowicz},same tau; nu=(2/3)*D/a^2 with D from their Table 1").unwrap();
+            eprintln!("13^3 mean-time {temperature} K tst {volume_tst:.2} table-D {volume_table:.2} tau {tau_cell:.3e}");
+        }
+    }
+}
+
+fn return_layer_count(a: f64, shells: &[(f64, [f64; 3], usize)], max_r: f64) -> usize {
+    let nn_vecs = [
+        [0.5, 0.5, 0.0], [0.5, -0.5, 0.0], [-0.5, 0.5, 0.0], [-0.5, -0.5, 0.0],
+        [0.5, 0.0, 0.5], [0.5, 0.0, -0.5], [-0.5, 0.0, 0.5], [-0.5, 0.0, -0.5],
+        [0.0, 0.5, 0.5], [0.0, 0.5, -0.5], [0.0, -0.5, 0.5], [0.0, -0.5, -0.5],
+    ];
+    let mut outward = std::collections::BTreeSet::new();
+    let limit = ((2.0 * (max_r + a) / a).ceil() as i32) + 2;
+    for i in -limit..=limit {
+        for j in -limit..=limit {
+            for k in -limit..=limit {
+                if (i + j + k) % 2 != 0 || (i == 0 && j == 0 && k == 0) { continue; }
+                let cart = [i as f64 * 0.5 * a, j as f64 * 0.5 * a, k as f64 * 0.5 * a];
+                let radius = (cart[0] * cart[0] + cart[1] * cart[1] + cart[2] * cart[2]).sqrt();
+                if (radius - max_r).abs() > 1.0e-3 { continue; }
+                for step in nn_vecs {
+                    let next = [cart[0] + step[0] * a, cart[1] + step[1] * a, cart[2] + step[2] * a];
+                    let next_r = (next[0] * next[0] + next[1] * next[1] + next[2] * next[2]).sqrt();
+                    if next_r <= 0.5 * a { continue; }
+                    if shells.iter().any(|(value, _, _)| (value - next_r).abs() <= 1.0e-3) { continue; }
+                    outward.insert(((next[0] * 1.0e6).round() as i64, (next[1] * 1.0e6).round() as i64, (next[2] * 1.0e6).round() as i64));
+                }
+            }
+        }
+    }
+    outward.len()
+}
+
+fn cell_averaged_time(repeats: usize, a: f64, k_mig: f64, radius_cut: f64, tau_near: f64) -> f64 {
+    let (points, cell) = fcc(repeats, a);
+    let length = cell[0][0];
+    let center = length * 0.5;
+    let n = points.len() / 3;
+    let mut n_in = 0usize;
+    let mut outside = Vec::new();
+    for atom in 0..n {
+        let mut d = [0.0; 3];
+        for c in 0..3 {
+            let delta = points[3 * atom + c] - center;
+            d[c] = delta - length * (delta / length).round();
+        }
+        let radius = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        if radius <= radius_cut {
+            n_in += 1;
+        } else if outside.len() < 64 {
+            outside.push(atom);
+        }
+    }
+    let steps = [
+        [0.5, 0.5, 0.0], [0.5, -0.5, 0.0], [-0.5, 0.5, 0.0], [-0.5, -0.5, 0.0],
+        [0.5, 0.0, 0.5], [0.5, 0.0, -0.5], [-0.5, 0.0, 0.5], [-0.5, 0.0, -0.5],
+        [0.0, 0.5, 0.5], [0.0, 0.5, -0.5], [0.0, -0.5, 0.5], [0.0, -0.5, -0.5],
+    ];
+    let hop_rate = 12.0 * k_mig;
+    let mut sample = 0.0;
+    let mut seed = 0x1234_5678_u64;
+    for start in &outside {
+        let start = *start;
+        let mut place = [points[3 * start], points[3 * start + 1], points[3 * start + 2]];
+        let mut hops = 0u32;
+        loop {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let step = steps[(seed >> 33) as usize % 12];
+            for c in 0..3 {
+                place[c] += step[c] * a;
+                place[c] -= length * (place[c] / length).floor();
+            }
+            hops += 1;
+            let mut d = [0.0; 3];
+            for c in 0..3 {
+                let delta = place[c] - center;
+                d[c] = delta - length * (delta / length).round();
+            }
+            let radius = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+            if radius <= radius_cut || hops > 200_000 {
+                break;
+            }
+        }
+        sample += hops as f64 / hop_rate + tau_near;
+    }
+    let n_out = n - n_in;
+    let mean_out = if outside.is_empty() { tau_near } else { sample / outside.len() as f64 };
+    (n_in as f64 * tau_near + n_out as f64 * mean_out) / n as f64
+}
+
+fn rotation_channel(text: &str, temperature: f64) -> (f64, String) {
+    let mut pafi: Option<(f64, f64)> = None;
+    for line in text.lines() {
+        let fields: Vec<&str> = line.split(',').collect();
+        if fields.len() < 13 || fields[0] != "pafi" || fields[1] != "isolated" || fields[3] != "rotate" || fields[12] != "rated" {
+            continue;
+        }
+        let Ok(temp) = fields[5].parse::<f64>() else { continue };
+        let Ok(nu) = fields[10].parse::<f64>() else { continue };
+        let Ok(rate) = fields[11].parse::<f64>() else { continue };
+        if (temp - temperature).abs() < 1.0 && rate.is_finite() && rate > 0.0 {
+            return (rate, format!("PAFI rate {rate:.6e} Hz of one <110> saddle"));
+        }
+        if nu.is_finite() && nu > 0.0 && pafi.is_none_or(|(prior, _)| (temp - temperature).abs() < (prior - temperature).abs()) {
+            pafi = Some((temp, nu));
+        }
+    }
+    let mut barrier = None;
+    for line in text.lines() {
+        let fields: Vec<&str> = line.split(',').collect();
+        if fields.len() < 6 || fields[0] != "rotation" || fields[1] != "isolated" || fields[3] != "rotate" {
+            continue;
+        }
+        let Ok(temp) = fields[4].parse::<f64>() else { continue };
+        let Ok(value) = fields[5].parse::<f64>() else { continue };
+        if (temp - temperature).abs() < 1.0 && value.is_finite() && value > 0.0 {
+            barrier = Some(value);
+        }
+    }
+    let Some(barrier) = barrier else {
+        return (0.0, "no rotation barrier".into());
+    };
+    let Some((nu_t, nu)) = pafi else {
+        return (0.0, format!("barrier {barrier:.6} eV and no attempt frequency"));
+    };
+    let thermal = temperature * rgsaddle::BOLTZMANN_EV_PER_K;
+    let rate = nu * (-barrier / thermal).exp();
+    (rate, format!("TST of the measured {barrier:.6} eV barrier with the {nu_t:.0} K attempt frequency {nu:.6e} Hz; no {temperature:.0} K rotation PAFI"))
+}
+
+fn strain_away_factor(text: &str, temperature: f64, radius_ours: f64, free: f64) -> f64 {
+    let mut best: Option<(f64, f64)> = None;
+    for line in text.lines() {
+        let fields: Vec<&str> = line.split(',').collect();
+        if fields.len() < 10 || fields[0] != "strain" || fields[4] != "away" || fields[9] != "true" {
+            continue;
+        }
+        let Ok(shell) = fields[1].parse::<f64>() else { continue };
+        let Ok(temp) = fields[5].parse::<f64>() else { continue };
+        let Ok(barrier) = fields[6].parse::<f64>() else { continue };
+        if (temp - temperature).abs() > 1.0 || (shell - radius_ours).abs() > 0.05 || barrier <= 0.0 {
+            continue;
+        }
+        let gap = (shell - radius_ours).abs();
+        if best.is_none_or(|(prior, _)| gap < prior) {
+            best = Some((gap, barrier));
+        }
+    }
+    let Some((_, barrier)) = best else { return 1.0 };
+    let thermal = temperature * rgsaddle::BOLTZMANN_EV_PER_K;
+    (-(barrier - free) / thermal).exp()
+}
+
+fn attach_return(mut sites: Vec<rgsaddle::VolumeSite>, boundary: &str, outward: f64, probability: f64, count: f64, layer_id: &str) -> Vec<rgsaddle::VolumeSite> {
+    let Some(index) = sites.iter().position(|site| site.id == boundary && site.outcome == rgsaddle::SiteOutcome::Kinetic) else {
+        return sites;
+    };
+    if !(outward.is_finite() && outward > 0.0 && (0.0..1.0).contains(&probability) && count.is_finite() && count >= 0.0) {
+        return sites;
+    }
+    sites[index].rates.retain(|(destination, _)| destination != "escaped");
+    sites[index].rates.push((layer_id.to_string(), outward));
+    sites.push(rgsaddle::VolumeSite {
+        id: layer_id.to_string(),
+        count,
+        outcome: rgsaddle::SiteOutcome::Kinetic,
+        rates: vec![
+            (boundary.to_string(), outward * probability),
+            ("escaped".into(), outward * (1.0 - probability)),
+        ],
+    });
+    sites
+}
+
+fn channel_volumes(
+    shells: &[(f64, [f64; 3], usize)],
+    spontaneous: &std::collections::HashSet<String>,
+    rates: &str,
+    temperature: f64,
+    k_mig: f64,
+    a: f64,
+    omega: f64,
+    max_r: f64,
+    jump: f64,
+    return_sites: usize,
+) -> (f64, f64, f64, f64, f64, f64, f64, f64, f64, f64) {
+    let kept: Vec<_> = shells.iter().filter(|(radius, _, _)| *radius <= 11.0).cloned().collect();
+    let nn_vecs = [
+        [0.5, 0.5, 0.0], [0.5, -0.5, 0.0], [-0.5, 0.5, 0.0], [-0.5, -0.5, 0.0],
+        [0.5, 0.0, 0.5], [0.5, 0.0, -0.5], [-0.5, 0.0, 0.5], [-0.5, 0.0, -0.5],
+        [0.0, 0.5, 0.5], [0.0, 0.5, -0.5], [0.0, -0.5, 0.5], [0.0, -0.5, -0.5],
+    ];
+    let mut members: Vec<Vec<[f64; 3]>> = kept.iter().map(|_| Vec::new()).collect();
+    let limit = ((2.0 * 11.2 / a).ceil() as i32) + 1;
+    for i in -limit..=limit {
+        for j in -limit..=limit {
+            for k in -limit..=limit {
+                if (i + j + k) % 2 != 0 || (i == 0 && j == 0 && k == 0) { continue; }
+                let cart = [i as f64 * 0.5 * a, j as f64 * 0.5 * a, k as f64 * 0.5 * a];
+                let radius = (cart[0] * cart[0] + cart[1] * cart[1] + cart[2] * cart[2]).sqrt();
+                if let Some(index) = kept.iter().position(|(value, _, _)| (value - radius).abs() < 1.0e-3) {
+                    members[index].push(cart);
+                }
+            }
+        }
+    }
+    let n = kept.len();
+    let mut toward = vec![vec![0.0_f64; n]; n];
+    let mut away = vec![vec![0.0_f64; n]; n];
+    let mut tangential = vec![vec![0.0_f64; n]; n];
+    let mut escape_radial = vec![0.0_f64; n];
+    let mut escape_tangential = vec![0.0_f64; n];
+    let mut vacancy = vec![0.0_f64; n];
+    for (index, group) in members.iter().enumerate() {
+        if group.is_empty() { continue; }
+        let radius = kept[index].0;
+        for site in group {
+            for step in nn_vecs {
+                let next = [site[0] + step[0] * a, site[1] + step[1] * a, site[2] + step[2] * a];
+                let next_r = (next[0] * next[0] + next[1] * next[1] + next[2] * next[2]).sqrt();
+                if next_r <= 0.5 * a {
+                    vacancy[index] += 1.0;
+                    continue;
+                }
+                let Ok(class) = rgsaddle::classify_separation(radius, next_r, 0.08) else { continue };
+                let hop = a / 2.0_f64.sqrt();
+                // A nearest-neighbor step changes the separation by ~hop²/2R even
+                // when it is perpendicular to the vacancy line, so the 0.08 Å
+                // tangential test never joins two shells. A hop is non-radial
+                // when less than half of it lies along the line to the vacancy.
+                let oblique = (next_r - radius).abs() < 0.5 * hop;
+                if let Some(other) = kept.iter().position(|(value, _, _)| (value - next_r).abs() < 1.0e-3) {
+                    if oblique || class == rgsaddle::DirectionClass::Tangential {
+                        tangential[index][other] += 1.0;
+                    } else {
+                        match class {
+                            rgsaddle::DirectionClass::Toward => toward[index][other] += 1.0,
+                            rgsaddle::DirectionClass::Away => away[index][other] += 1.0,
+                            rgsaddle::DirectionClass::Tangential => tangential[index][other] += 1.0,
+                        }
+                    }
+                } else if oblique || class == rgsaddle::DirectionClass::Tangential {
+                    escape_tangential[index] += 1.0;
+                } else {
+                    escape_radial[index] += 1.0;
+                }
+            }
+        }
+        let norm = group.len() as f64;
+        vacancy[index] /= norm;
+        escape_radial[index] /= norm;
+        escape_tangential[index] /= norm;
+        for other in 0..n {
+            toward[index][other] /= norm;
+            away[index][other] /= norm;
+            tangential[index][other] /= norm;
+        }
+    }
+    let mut tang_between = 0.0_f64;
+    let mut radial_between = 0.0_f64;
+    let mut strict_tangential = 0.0_f64;
+    for index in 0..n {
+        for other in 0..n {
+            if other == index { continue; }
+            tang_between += tangential[index][other];
+            radial_between += toward[index][other] + away[index][other];
+            if (kept[index].0 - kept[other].0).abs() < 0.08 {
+                strict_tangential += tangential[index][other];
+            }
+        }
+    }
+    eprintln!("13^3 {temperature} K neighbor weights: along-line {radial_between:.2} oblique {tang_between:.2} within-0.08A {strict_tangential:.2}");
+    let (k_rot, rotation_note) = rotation_channel(rates, temperature);
+    eprintln!("13^3 {temperature} K rotation {k_rot:.6e} Hz; {rotation_note}");
+    let translation_text = std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks/defect_pair_translation.csv")).unwrap_or_default();
+    let free_barrier = translation_text.lines().find_map(|line| {
+        let fields: Vec<&str> = line.split(',').collect();
+        if fields.len() < 6 || fields[0] != "translation" || fields[1] != "isolated" || fields[3] != "neighbor" {
+            return None;
+        }
+        let temp = fields[4].parse::<f64>().ok()?;
+        let barrier = fields[5].parse::<f64>().ok()?;
+        ((temp - temperature).abs() < 1.0 && barrier > 0.0).then_some(barrier)
+    }).unwrap_or(0.0);
+    let a_ours = measured_lattice(temperature);
+    let layer = return_sites as f64 / 3.0;
+    let probability = rgsaddle::spherical_return_probability(max_r, jump).unwrap_or(0.0);
+    let solve = |glide: bool, rotation: bool, drift: bool| -> (f64, f64, f64, f64, Vec<(usize, f64, f64)>, Vec<rgsaddle::VolumeSite>) {
+        let mut sites = Vec::new();
+        let mut capture_index = Vec::new();
+        for orientation in ["100", "010", "001"] {
+            for (index, (radius, _, count)) in kept.iter().enumerate() {
+                let id = format!("{radius:.3}-{orientation}");
+                let share = *count as f64 / 3.0;
+                if spontaneous.contains(&id) {
+                    sites.push(rgsaddle::VolumeSite { id, count: share, outcome: rgsaddle::SiteOutcome::Spontaneous, rates: Vec::new() });
+                    continue;
+                }
+                let mut capture_neighbors = vacancy[index];
+                let mut edges = Vec::new();
+                let mut rotation_capture = 0.0_f64;
+                let away_factor = if drift { strain_away_factor(rates, temperature, radius * a_ours / a, free_barrier) } else { 1.0 };
+                for other in 0..n {
+                    for (weight, factor, use_edge) in [(toward[index][other], 1.0, true), (away[index][other], away_factor, true), (tangential[index][other], 1.0, glide)] {
+                        if !use_edge || weight <= 0.0 { continue; }
+                        let other_radius = kept[other].0;
+                        let other_id = format!("{other_radius:.3}-{orientation}");
+                        if spontaneous.contains(&other_id) {
+                            capture_neighbors += weight;
+                        } else if other != index {
+                            edges.push((other_id, weight * k_mig * factor));
+                        }
+                    }
+                }
+                if rotation {
+                    for other_orient in ["100", "010", "001"] {
+                        if other_orient == orientation { continue; }
+                        let dest = format!("{radius:.3}-{other_orient}");
+                        let rate = 2.0 * k_rot;
+                        if spontaneous.contains(&dest) {
+                            rotation_capture += rate;
+                        } else if rate > 0.0 {
+                            edges.push((dest, rate));
+                        }
+                    }
+                }
+                let escape = escape_radial[index] + if glide { escape_tangential[index] } else { 0.0 };
+                if escape > 0.0 {
+                    edges.push(("escaped".into(), escape * k_mig));
+                }
+                let radius_ours = radius * a_ours / a;
+                let capture = capture_rate_row(rates, radius_ours, orientation, temperature);
+                if capture_neighbors > 0.0 {
+                    let (per_hop, relative) = capture.unwrap_or((k_mig, 0.0));
+                    let total = capture_neighbors * per_hop;
+                    capture_index.push((sites.len(), total, relative));
+                    edges.push(("recombined".into(), total));
+                } else if let Some((rate, relative)) = capture {
+                    capture_index.push((sites.len(), rate, relative));
+                    edges.push(("recombined".into(), rate));
+                }
+                if rotation_capture > 0.0 {
+                    edges.push(("recombined".into(), rotation_capture));
+                }
+                if edges.is_empty() {
+                    edges.push(("escaped".into(), k_mig));
+                }
+                sites.push(rgsaddle::VolumeSite { id, count: share, outcome: rgsaddle::SiteOutcome::Kinetic, rates: edges });
+            }
+        }
+        for orientation in ["100", "010", "001"] {
+            let boundary = format!("{max_r:.3}-{orientation}");
+            let outward = sites.iter().find(|site| site.id == boundary).and_then(|site| site.rates.iter().find(|(destination, _)| destination == "escaped").map(|(_, rate)| *rate)).unwrap_or(0.0);
+            sites = attach_return(sites, &boundary, outward, probability, layer, &format!("free-{orientation}"));
+        }
+        let (total, spont, kinetic) = match rgsaddle::kinetic_recombination_volume(&sites, omega) {
+            Ok(volume) => (volume.total_sites, volume.spontaneous_sites, volume.kinetic_sites),
+            Err(_) => (f64::NAN, f64::NAN, f64::NAN),
+        };
+        let time = rgsaddle::mean_absorption_time(&sites).unwrap_or(f64::NAN);
+        (total, spont, kinetic, time, capture_index, sites)
+    };
+    let (radial, _, _, _, _, _) = solve(false, false, false);
+    let (glide, _, _, _, _, _) = solve(true, false, false);
+    let (rotated, spont, kinetic, time, capture_index, embedded) = solve(true, true, false);
+    let (drifted, _, _, _, _, _) = solve(true, true, true);
+    let mut samples = vec![0.0; 16];
+    for sample in 0..samples.len() {
+        let mut varied = embedded.clone();
+        for (place, rate, relative) in &capture_index {
+            if let Some(site) = varied.get_mut(*place) {
+                let sign = if sample % 2 == 0 { 1.0 } else { -1.0 };
+                let factor = (sign * relative).exp();
+                if let Some(edge) = site.rates.iter_mut().find(|(destination, value)| destination == "recombined" && (*value - rate).abs() <= 1.0e-6 * rate.abs().max(1.0)) {
+                    edge.1 = rate * factor;
+                }
+            }
+        }
+        if let Ok(value) = rgsaddle::kinetic_recombination_volume(&varied, omega) {
+            samples[sample] = value.total_sites;
+        }
+    }
+    let sample_mean = samples.iter().sum::<f64>() / samples.len() as f64;
+    let sigma = (samples.iter().map(|value| (value - sample_mean) * (value - sample_mean)).sum::<f64>() / samples.len() as f64).sqrt();
+    let weight = embedded.iter().map(|site| site.count).sum::<f64>();
+    (rotated, sigma, spont, kinetic, weight, time * weight, radial, glide, rotated, drifted)
+}
+
+fn text_spontaneous_at_8(text: &str, radius_ours: f64, orientation: &str, temperature: f64) -> bool {
+    let barrier = lowest_barrier(text, radius_ours, orientation, temperature);
+    let recombines = text.lines().any(|line| {
+        let fields: Vec<&str> = line.split(',').collect();
+        if fields.len() < 13 { return false; }
+        let Ok(shell) = fields[1].parse::<f64>() else { return false };
+        let Ok(temp) = fields[5].parse::<f64>() else { return false };
+        (shell - radius_ours).abs() < 0.08 && fields[2] == orientation && (temp - temperature).abs() < 1.0 && (fields[12] == "spontaneous" || fields[12] == "barrierless")
+    });
+    rgsaddle::capture_is_spontaneous_within(recombines, barrier, 0.001)
+}
+
+#[test]
+#[ignore = "assemble the 8788-atom volume from the size census"]
+fn defect_pair_run12_volume() {
+    assemble_run12();
+}

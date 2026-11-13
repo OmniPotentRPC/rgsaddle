@@ -1446,6 +1446,87 @@ pub fn product_tangent(path: &crate::pafi::ArcPath, arc: f64) -> Result<Array1<f
     unit(&tangent)
 }
 
+/// Mean time to absorption on the same rate graph as [`kinetic_recombination_volume`].
+///
+/// Spontaneous shells and every non-transient destination (`"recombined"`,
+/// `"escaped"`, anything that is not another site's id) are absorbing, with
+/// time 0. The returned time is the multiplicity-weighted mean over every
+/// input site, spontaneous ones included. Rates are in Hz when the time is
+/// in seconds. This is the mean-time input of a recombination volume: for a
+/// cell of `n_atoms` and a migration frequency `nu`, `n_atoms / (mean_time * nu)`.
+pub fn mean_absorption_time(sites: &[VolumeSite]) -> Result<f64, SaddleError> {
+    let mut transient: Vec<&VolumeSite> = Vec::new();
+    let mut weight = 0.0;
+    for site in sites {
+        if !(site.count.is_finite() && site.count >= 0.0) {
+            return Err(SaddleError::Invalid(
+                "site multiplicity must be finite and non-negative".into(),
+            ));
+        }
+        weight += site.count;
+        if site.outcome != SiteOutcome::Spontaneous {
+            transient.push(site);
+        }
+    }
+    if weight <= 0.0 {
+        return Err(SaddleError::Invalid(
+            "the cell has no sites".into(),
+        ));
+    }
+    let n = transient.len();
+    let mut times = vec![0.0; sites.len()];
+    if n > 0 {
+        let index: std::collections::HashMap<&str, usize> = transient
+            .iter()
+            .enumerate()
+            .map(|(i, site)| (site.id.as_str(), i))
+            .collect();
+        let mut matrix = vec![vec![0.0; n]; n];
+        let rhs = vec![1.0; n];
+        for (i, site) in transient.iter().enumerate() {
+            let mut total = 0.0;
+            for (_, rate) in &site.rates {
+                if !(rate.is_finite() && *rate >= 0.0) {
+                    return Err(SaddleError::Invalid(
+                        "a hop rate must be finite and non-negative".into(),
+                    ));
+                }
+                total += *rate;
+            }
+            if total <= 0.0 {
+                return Err(SaddleError::Invalid(format!(
+                    "site {} has no outgoing rate",
+                    site.id
+                )));
+            }
+            matrix[i][i] = total;
+            for (destination, rate) in &site.rates {
+                if let Some(&j) = index.get(destination.as_str()) {
+                    matrix[i][j] -= *rate;
+                }
+            }
+            let _ = rhs[i];
+        }
+        let solved = solve_linear(matrix, rhs)?;
+        for (site, time) in transient.iter().zip(&solved) {
+            if !(time.is_finite() && *time >= 0.0) {
+                return Err(SaddleError::Invalid(format!(
+                    "mean time for {} is not finite and non-negative",
+                    site.id
+                )));
+            }
+            if let Some(slot) = sites.iter().position(|item| item.id == site.id) {
+                times[slot] = *time;
+            }
+        }
+    }
+    let mut accum = 0.0;
+    for (site, time) in sites.iter().zip(&times) {
+        accum += site.count * *time;
+    }
+    Ok(accum / weight)
+}
+
 /// Embed `sites` in free migration.
 ///
 /// The boundary's absorbing `"escaped"` edge is replaced by a hop into
