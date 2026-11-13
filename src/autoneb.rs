@@ -267,21 +267,27 @@ pub(crate) fn image_block(n_images: usize, rank: usize, n_ranks: usize) -> std::
     start..start + len
 }
 
-struct OwnedBlock {
-    start: usize,
+/// One rank's block and the arrays its surface call fills, kept from
+/// one evaluation to the next.
+#[derive(Default)]
+struct RankBlock {
+    rows: std::ops::Range<usize>,
     energies: Array1<f64>,
     gradients: Array2<f64>,
+    result: Option<Result<(), SaddleError>>,
 }
 
 /// Worker threads kept for every image evaluation of one search.
 ///
-/// [`eval_images`] builds a pool for a single call. [`AutoNeb`] keeps
-/// one pool for the whole run, so a band step does not spawn operating
-/// system threads. Each rank still owns [`image_block`], and the block
+/// [`eval_images`] builds a pool for a single call. [`AutoNeb`] and a
+/// band session with image threads keep one pool for the whole run,
+/// so a band step does not spawn operating system threads or allocate
+/// block arrays. Each rank still owns [`image_block`], and the block
 /// is stored at that image index after every rank has finished.
 pub(crate) struct ImageEvalPool {
     threads: usize,
     pool: rayon::ThreadPool,
+    blocks: Mutex<Vec<RankBlock>>,
 }
 
 impl ImageEvalPool {
@@ -296,7 +302,15 @@ impl ImageEvalPool {
             .num_threads(threads)
             .build()
             .map_err(|err| SaddleError::Invalid(format!("image evaluation pool: {err}")))?;
-        Ok(Self { threads, pool })
+        Ok(Self {
+            threads,
+            pool,
+            blocks: Mutex::new(Vec::new()),
+        })
+    }
+
+    pub(crate) fn threads(&self) -> usize {
+        self.threads
     }
 
     /// Evaluate `positions` on this pool. See [`eval_images`].
@@ -369,36 +383,33 @@ fn eval_checked<S: BandSurface + ?Sized>(
         return surface.eval(positions, energies, gradients);
     }
     let pool = pool.expect("pool");
-    let blocks: Vec<std::ops::Range<usize>> = (0..ranks)
-        .map(|rank| image_block(n, rank, ranks))
-        .filter(|range| !range.is_empty())
-        .collect();
-    let slots: Vec<std::sync::Mutex<Option<Result<OwnedBlock, SaddleError>>>> = (0..blocks.len())
-        .map(|_| std::sync::Mutex::new(None))
-        .collect();
-    pool.pool.scope(|scope| {
-        for (slot, range) in slots.iter().zip(blocks.iter()) {
-            let range = range.clone();
-            scope.spawn(move |_| {
-                let rows = range.end - range.start;
-                let view = positions.slice(ndarray::s![range.start..range.end, ..]);
-                let mut block_energies = Array1::zeros(rows);
-                let mut block_gradients = Array2::zeros((rows, dof));
-                let result = surface
-                    .eval(view, &mut block_energies, &mut block_gradients)
-                    .map(|()| OwnedBlock {
-                        start: range.start,
-                        energies: block_energies,
-                        gradients: block_gradients,
-                    });
-                *slot.lock().unwrap_or_else(|err| err.into_inner()) = Some(result);
-            });
+    let mut held = pool.blocks.lock().unwrap_or_else(|err| err.into_inner());
+    held.resize_with(ranks, RankBlock::default);
+    let blocks = &mut held[..ranks];
+    for (rank, block) in blocks.iter_mut().enumerate() {
+        block.rows = image_block(n, rank, ranks);
+        let len = block.rows.len();
+        if block.energies.len() != len {
+            block.energies = Array1::zeros(len);
         }
+        if block.gradients.dim() != (len, dof) {
+            block.gradients = Array2::zeros((len, dof));
+        }
+        block.energies.fill(0.0);
+        block.gradients.fill(0.0);
+        block.result = None;
+    }
+    debug_assert!(blocks_cover(blocks, n));
+    pool.pool.install(|| {
+        use rayon::prelude::*;
+        blocks.par_iter_mut().for_each(|block| {
+            let view = positions.slice(ndarray::s![block.rows.clone(), ..]);
+            block.result = Some(surface.eval(view, &mut block.energies, &mut block.gradients));
+        });
     });
-    let mut ok = Vec::with_capacity(slots.len());
-    for slot in &slots {
-        match slot.lock().unwrap_or_else(|err| err.into_inner()).take() {
-            Some(Ok(block)) => ok.push(block),
+    for block in blocks.iter_mut() {
+        match block.result.take() {
+            Some(Ok(())) => {}
             Some(Err(err)) => return Err(err),
             None => {
                 return Err(SaddleError::Invalid(
@@ -407,27 +418,24 @@ fn eval_checked<S: BandSurface + ?Sized>(
             }
         }
     }
-    ok.sort_by_key(|block| block.start);
-    debug_assert!(blocks_cover(&ok, n));
-    for block in ok {
-        let end = block.start + block.energies.len();
+    for block in blocks.iter() {
         energies
-            .slice_mut(ndarray::s![block.start..end])
+            .slice_mut(ndarray::s![block.rows.clone()])
             .assign(&block.energies);
         gradients
-            .slice_mut(ndarray::s![block.start..end, ..])
+            .slice_mut(ndarray::s![block.rows.clone(), ..])
             .assign(&block.gradients);
     }
     Ok(())
 }
 
-fn blocks_cover(blocks: &[OwnedBlock], n: usize) -> bool {
+fn blocks_cover(blocks: &[RankBlock], n: usize) -> bool {
     let mut next = 0;
     for block in blocks {
-        if block.start != next {
+        if block.rows.start != next {
             return false;
         }
-        next += block.energies.len();
+        next = block.rows.end;
     }
     next == n
 }

@@ -13,7 +13,7 @@ use std::f64::consts::PI;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use ndarray::{Array1, Array2, ArrayView1};
+use ndarray::{Array1, Array2, ArrayView1, Zip};
 use rgmin::{Accept, Control, Method, Oracle, Solver};
 
 use crate::error::SaddleError;
@@ -289,6 +289,8 @@ struct Counted<'a, S: PointSurface> {
     surface: &'a S,
     calls: &'a AtomicUsize,
     space: Option<&'a Complement>,
+    /// The displaced point of a finite-difference action.
+    shifted: Mutex<Array1<f64>>,
 }
 
 impl<S: PointSurface> Counted<'_, S> {
@@ -311,7 +313,14 @@ impl<S: PointSurface> Counted<'_, S> {
         unit: ArrayView1<f64>,
         step: f64,
     ) -> Result<Array1<f64>, SaddleError> {
-        let shifted = &x + &(&unit * step);
+        let mut shifted = self.shifted.lock().unwrap_or_else(|e| e.into_inner());
+        if shifted.len() != x.len() {
+            *shifted = Array1::zeros(x.len());
+        }
+        Zip::from(&mut *shifted)
+            .and(x)
+            .and(unit)
+            .for_each(|s, &x, &u| *s = x + u * step);
         Ok(self.eval(shifted.view())?.1)
     }
 
@@ -344,11 +353,21 @@ impl<S: PointSurface> Counted<'_, S> {
         } else {
             let dr = config.dr;
             match config.difference {
-                FiniteDifference::Forward => (&self.gradient_along(x, direction, dr)? - &g0) / dr,
+                FiniteDifference::Forward => {
+                    let mut action = self.gradient_along(x, direction, dr)?;
+                    Zip::from(&mut action)
+                        .and(g0)
+                        .for_each(|a, &g| *a = (*a - g) / dr);
+                    action
+                }
                 FiniteDifference::Central => {
-                    let plus = self.gradient_along(x, direction, dr)?;
+                    let mut action = self.gradient_along(x, direction, dr)?;
                     let minus = self.gradient_along(x, direction, -dr)?;
-                    (&plus - &minus) / (2.0 * dr)
+                    let width = 2.0 * dr;
+                    Zip::from(&mut action)
+                        .and(&minus)
+                        .for_each(|a, &m| *a = (*a - m) / width);
+                    action
                 }
             }
         };
@@ -357,11 +376,6 @@ impl<S: PointSurface> Counted<'_, S> {
             None => action,
         })
     }
-}
-
-/// Component of `h` perpendicular to the unit vector `n`.
-fn perpendicular(h: &Array1<f64>, n: &Array1<f64>) -> Array1<f64> {
-    crate::stencil::perp(h.view(), n.view())
 }
 
 /// Dimer rotation by the modified Newton step.
@@ -453,17 +467,31 @@ fn rotate_dimer<S: PointSurface>(
     history.retain_dimension(n.len());
     let mut force_prev = history.force.take();
     let mut dir_prev = history.direction.take();
+    // One set of buffers for every iteration; the pairs kept as the
+    // previous force and direction trade places with them.
+    let dim = n.len();
+    let mut force = Array1::zeros(dim);
+    let mut dir = Array1::zeros(dim);
+    let mut theta = Array1::zeros(dim);
+    let mut n1 = Array1::zeros(dim);
+    let mut n_new = Array1::zeros(dim);
+    let mut theta_rotated = Array1::zeros(dim);
+    let mut change = Array1::zeros(dim);
     loop {
-        let force = -perpendicular(&h, &n);
+        let along = h.dot(&n);
+        Zip::from(&mut force)
+            .and(&h)
+            .and(&n)
+            .for_each(|f, &h, &n| *f = -(h - n * along));
         let force_norm = force.dot(&force).sqrt();
         if rotation_finished(config, torque_window, force_norm, rotations) {
             // A finished rotation keeps its force for the next centre.
             // The cap leaves the previous iteration's pair: that
             // rotation did not meet the residual.
             if rotations < config.max_rotations && force_norm.is_finite() {
-                force_prev = Some(force);
-                if let Some(direction) = dir_prev.take() {
-                    let carried = perpendicular(&direction, &n);
+                keep(&mut force_prev, &mut force);
+                if let Some(mut carried) = dir_prev.take() {
+                    perp_in_place(&mut carried, &n);
                     if carried.dot(&carried).sqrt() > 1e-14 {
                         dir_prev = Some(carried);
                     }
@@ -471,26 +499,39 @@ fn rotate_dimer<S: PointSurface>(
             }
             break;
         }
-        let mut dir = force.clone();
+        dir.assign(&force);
         if let (Some(fp), Some(dp)) = (&force_prev, &dir_prev) {
-            let gamma = ((&force - fp).dot(&force) / fp.dot(fp)).max(0.0);
+            Zip::from(&mut change)
+                .and(&force)
+                .and(fp)
+                .for_each(|c, &f, &p| *c = f - p);
+            let gamma = (change.dot(&force) / fp.dot(fp)).max(0.0);
             if gamma.is_finite() {
-                dir = &dir + &(dp * gamma);
+                Zip::from(&mut dir)
+                    .and(dp)
+                    .for_each(|d, &p| *d += p * gamma);
             }
         }
-        dir = perpendicular(&dir, &n);
+        perp_in_place(&mut dir, &n);
         let dir_norm = dir.dot(&dir).sqrt();
         if dir_norm <= 1e-14 * (1.0 + force_norm) {
             break;
         }
-        let theta = &dir / dir_norm;
+        Zip::from(&mut theta)
+            .and(&dir)
+            .for_each(|t, &d| *t = d / dir_norm);
         // dC/dphi at phi = 0 is 2 h.theta (negative along a descent
         // direction). The trial angle is the Kastner-Sherwood guess
         // from a harmonic model, kept inside (1e-4, pi/4].
         let b1 = h.dot(&theta);
         let phi1 = (0.5 * (b1.abs() / (curvature.abs() + 1e-300)).atan())
             .clamp(MIN_TRIAL_ANGLE, 0.25 * PI);
-        let n1 = normalize(&(&n * phi1.cos()) + &(&theta * phi1.sin()));
+        let (trial_sin, trial_cos) = (phi1.sin(), phi1.cos());
+        Zip::from(&mut n1)
+            .and(&n)
+            .and(&theta)
+            .for_each(|v, &n, &t| *v = n * trial_cos + t * trial_sin);
+        normalize_in_place(&mut n1);
         let h1 = surface.action(x, g0, n1.view(), config)?;
         let c1 = crate::stencil::curvature_along(h1.view(), n1.view());
         rotations += 1;
@@ -512,12 +553,13 @@ fn rotate_dimer<S: PointSurface>(
             // noisy surface): keep the better of the two measured
             // dimers and continue from it.
             if c1 < curvature {
-                n = n1;
+                std::mem::swap(&mut n, &mut n1);
                 h = h1;
                 curvature = c1;
             }
-            force_prev = Some(force);
-            dir_prev = Some(theta * dir_norm);
+            keep(&mut force_prev, &mut force);
+            theta.mapv_inplace(|t| t * dir_norm);
+            keep(&mut dir_prev, &mut theta);
             if config.rotation_angle_tol > 0.0 && phi1 < config.rotation_angle_tol {
                 break;
             }
@@ -527,8 +569,15 @@ fn rotate_dimer<S: PointSurface>(
         let s1 = phi1.sin();
         let w_old = (phi1 - phi).sin() / s1;
         let w_trial = s / s1;
-        let theta_rotated = &(&theta * c) - &(&n * s);
-        let n_new = normalize(&(&n * c) + &(&theta * s));
+        Zip::from(&mut theta_rotated)
+            .and(&theta)
+            .and(&n)
+            .for_each(|r, &t, &n| *r = t * c - n * s);
+        Zip::from(&mut n_new)
+            .and(&n)
+            .and(&theta)
+            .for_each(|v, &n, &t| *v = n * c + t * s);
+        normalize_in_place(&mut n_new);
         if phi1 <= MIN_TRIAL_ANGLE && w_old.abs().max(w_trial.abs()) > MAX_EXTRAPOLATION {
             // A forward-difference action is not the exact H v: its
             // Rayleigh quotient carries dr/2 T[v,v,v], so C'(0) differs
@@ -545,21 +594,24 @@ fn rotate_dimer<S: PointSurface>(
             rotations += 1;
             if c_new.is_nan() || c_new > c1.min(curvature) + slack {
                 if c1 < curvature {
-                    n = n1;
+                    std::mem::swap(&mut n, &mut n1);
                     curvature = c1;
                 }
                 break;
             }
             h = h_new;
-            n = n_new;
+            std::mem::swap(&mut n, &mut n_new);
             curvature = c_new;
         } else {
-            h = &(&h * w_old) + &(&h1 * w_trial);
-            n = n_new;
+            Zip::from(&mut h)
+                .and(&h1)
+                .for_each(|h, &h1| *h = *h * w_old + h1 * w_trial);
+            std::mem::swap(&mut n, &mut n_new);
             curvature = crate::stencil::curvature_along(h.view(), n.view());
         }
-        force_prev = Some(force);
-        dir_prev = Some(theta_rotated * dir_norm);
+        keep(&mut force_prev, &mut force);
+        theta_rotated.mapv_inplace(|t| t * dir_norm);
+        keep(&mut dir_prev, &mut theta_rotated);
         if config.rotation_angle_tol > 0.0 && phi.abs() < config.rotation_angle_tol {
             break;
         }
@@ -568,6 +620,34 @@ fn rotate_dimer<S: PointSurface>(
     history.direction = dir_prev;
     history.centre = Some(x.to_owned());
     Ok((n, curvature, rotations))
+}
+
+/// Make `buffer` the value of `slot`, handing the slot's old storage
+/// back as the buffer. An empty slot takes the buffer and leaves an
+/// empty one, which the next write resizes.
+fn keep(slot: &mut Option<Array1<f64>>, buffer: &mut Array1<f64>) {
+    match slot {
+        Some(held) if held.len() == buffer.len() => std::mem::swap(held, buffer),
+        _ => {
+            let dim = buffer.len();
+            *slot = Some(std::mem::replace(buffer, Array1::zeros(dim)));
+        }
+    }
+}
+
+/// Component of `v` perpendicular to the unit vector `n`, in place:
+/// `v - (v . n) n`, the arithmetic of [`crate::stencil::perp`].
+fn perp_in_place(v: &mut Array1<f64>, n: &Array1<f64>) {
+    let along = v.dot(n);
+    Zip::from(v).and(n).for_each(|v, &n| *v -= n * along);
+}
+
+/// [`normalize`] in place.
+fn normalize_in_place(v: &mut Array1<f64>) {
+    let norm = v.dot(v).sqrt();
+    if norm > 1e-14 {
+        *v /= norm;
+    }
 }
 
 /// Classic dimer torque window plus the residual and the rotation cap.
@@ -764,6 +844,7 @@ pub type KrylovBlock = Vec<(Array1<f64>, Array1<f64>)>;
 /// when the relative change in the lowest Ritz value falls under
 /// `rotation_tol`, or when the residual `beta |s|` does. A seed that
 /// is already the mode closes the Krylov on the first product.
+#[allow(clippy::too_many_arguments)]
 fn lanczos_mode<S: PointSurface>(
     surface: &Counted<'_, S>,
     x: ArrayView1<f64>,
@@ -772,13 +853,33 @@ fn lanczos_mode<S: PointSurface>(
     config: &MinModeConfig,
     stop: LanczosStop,
     mut block: Option<&mut KrylovBlock>,
+    work: &mut LanczosWork,
 ) -> Result<(Array1<f64>, f64, usize, bool), SaddleError> {
     let n = seed.len();
     let m = config.krylov_dim.min(n).max(1);
-    let mut q: Vec<Array1<f64>> = Vec::with_capacity(m);
-    let mut alpha: Vec<f64> = Vec::with_capacity(m);
-    let mut beta: Vec<f64> = Vec::with_capacity(m);
-    q.push(normalize(seed));
+    let LanczosWork {
+        q,
+        w,
+        alpha,
+        beta,
+        ritz,
+        spare,
+        ..
+    } = work;
+    alpha.clear();
+    beta.clear();
+    if q.first().is_some_and(|q0| q0.len() != n) {
+        q.clear();
+    }
+    if w.len() != n {
+        *w = Array1::zeros(n);
+    }
+    if q.is_empty() {
+        q.push(seed);
+    } else {
+        q[0].assign(&seed);
+    }
+    normalize_in_place(&mut q[0]);
 
     let mut actions = 0;
     let mut ew_old: Option<f64> = None;
@@ -786,11 +887,22 @@ fn lanczos_mode<S: PointSurface>(
         let j = alpha.len();
         let hv = surface.action(x, g0, q[j].view(), config)?;
         actions += 1;
-        if let Some(block) = block.as_deref_mut() {
-            block.push((q[j].clone(), hv.clone()));
-        }
         let a = crate::stencil::curvature_along(hv.view(), q[j].view());
         alpha.push(a);
+        Zip::from(&mut *w)
+            .and(&hv)
+            .and(&q[j])
+            .for_each(|w, &h, &q| *w = h - q * a);
+        if let Some(block) = block.as_deref_mut() {
+            let basis = match spare.pop() {
+                Some((mut held, _)) if held.len() == n => {
+                    held.assign(&q[j]);
+                    held
+                }
+                _ => q[j].clone(),
+            };
+            block.push((basis, hv));
+        }
         // eOn quit_early: the curvature along the incoming mode is
         // already within tolerance of the previous estimate, so the
         // direction is kept. One Hessian action, then the translation.
@@ -800,18 +912,23 @@ fn lanczos_mode<S: PointSurface>(
         if j == 0 && lanczos_quit_early(&stop, a, config.rotation_tol) {
             return Ok((q[0].clone(), a, actions, true));
         }
-        let mut w = &hv - &(&q[j] * a);
         if j > 0 {
-            w = &w - &(&q[j - 1] * beta[j - 1]);
+            let b = beta[j - 1];
+            Zip::from(&mut *w)
+                .and(&q[j - 1])
+                .for_each(|w, &q| *w -= q * b);
         }
         // Full reorthogonalization: the Krylov dimension is small and
         // finite-difference actions are noisy.
-        for qi in q.iter() {
+        for qi in q[..=j].iter() {
             let overlap = w.dot(qi);
-            w = &w - &(qi * overlap);
+            Zip::from(&mut *w)
+                .and(qi)
+                .for_each(|w, &q| *w -= q * overlap);
         }
-        let b = w.dot(&w).sqrt();
-        let (theta, s) = lowest_ritz(&alpha, &beta);
+        let b = w.dot(&*w).sqrt();
+        let theta = ritz.lowest(alpha, beta);
+        let s = &ritz.vector;
         let residual = b * s[j].abs();
         // Olsen, Kroes, Henkelman, Arnaldsson, and Jónsson, J. Chem.
         // Phys. 121, 9776 (2004), doi:10.1063/1.1809574: stop on the
@@ -824,15 +941,77 @@ fn lanczos_mode<S: PointSurface>(
         let capped = alpha.len() == m;
         if residual_ok || agreed || capped || b <= 1e-12 {
             let mut mode = Array1::zeros(n);
-            for (qi, si) in q.iter().zip(s.iter()) {
-                mode = &mode + &(qi * *si);
+            for (qi, &si) in q[..=j].iter().zip(s.iter()) {
+                Zip::from(&mut mode).and(qi).for_each(|m, &q| *m += q * si);
             }
             let converged = residual_ok || agreed || b <= 1e-12;
-            return Ok((normalize(mode), theta, actions, converged));
+            normalize_in_place(&mut mode);
+            return Ok((mode, theta, actions, converged));
         }
         ew_old = Some(theta);
         beta.push(b);
-        q.push(w / b);
+        if q.len() == j + 1 {
+            q.push(Array1::zeros(n));
+        }
+        Zip::from(&mut q[j + 1])
+            .and(&*w)
+            .for_each(|q, &w| *q = w / b);
+    }
+}
+
+/// Storage one Lanczos estimate hands to the next: the Krylov vectors,
+/// the residual, the tridiagonal coefficients, the Ritz eigensolver's
+/// tables, and the pairs of the Krylov blocks the session dropped,
+/// whose basis buffers later blocks reuse. All of it is written before
+/// it is read.
+#[derive(Default)]
+struct LanczosWork {
+    q: Vec<Array1<f64>>,
+    w: Array1<f64>,
+    alpha: Vec<f64>,
+    beta: Vec<f64>,
+    ritz: RitzWork,
+    spare: KrylovBlock,
+    /// An empty block whose storage the next estimate fills.
+    block: KrylovBlock,
+}
+
+/// Tables of [`lowest_ritz`], kept between calls.
+#[derive(Default)]
+struct RitzWork {
+    /// The tridiagonal, rotated in place, `k * k` row-major.
+    t: Vec<f64>,
+    /// Eigenvector table `v[row * k + col]`.
+    v: Vec<f64>,
+    /// The lowest eigenvector.
+    vector: Vec<f64>,
+}
+
+impl RitzWork {
+    /// [`lowest_ritz`] into these tables; the eigenvector lands in
+    /// `self.vector`.
+    fn lowest(&mut self, alpha: &[f64], beta: &[f64]) -> f64 {
+        let k = alpha.len();
+        self.t.clear();
+        self.t.resize(k * k, 0.0);
+        for i in 0..k {
+            self.t[i * k + i] = alpha[i];
+            if i + 1 < k {
+                self.t[i * k + i + 1] = beta[i];
+                self.t[(i + 1) * k + i] = beta[i];
+            }
+        }
+        jacobi_eigen(&mut self.t, &mut self.v, k);
+        let mut lowest = 0;
+        for i in 1..k {
+            if self.t[i * k + i] < self.t[lowest * k + lowest] {
+                lowest = i;
+            }
+        }
+        self.vector.clear();
+        self.vector
+            .extend((0..k).map(|row| self.v[row * k + lowest]));
+        self.t[lowest * k + lowest]
     }
 }
 
@@ -876,23 +1055,9 @@ fn lanczos_ritz_agreed(
 /// Lowest eigenpair of the symmetric tridiagonal (alpha, beta), with
 /// the eigenvector in the Lanczos basis.
 fn lowest_ritz(alpha: &[f64], beta: &[f64]) -> (f64, Vec<f64>) {
-    let k = alpha.len();
-    let mut t = vec![vec![0.0; k]; k];
-    for i in 0..k {
-        t[i][i] = alpha[i];
-        if i + 1 < k {
-            t[i][i + 1] = beta[i];
-            t[i + 1][i] = beta[i];
-        }
-    }
-    let (evals, evecs) = jacobi_eigen(&mut t);
-    let mut lowest = 0;
-    for i in 1..k {
-        if evals[i] < evals[lowest] {
-            lowest = i;
-        }
-    }
-    (evals[lowest], evecs.iter().map(|row| row[lowest]).collect())
+    let mut work = RitzWork::default();
+    let theta = work.lowest(alpha, beta);
+    (theta, work.vector)
 }
 
 /// Components of an eigenvector with eigenvalue `lambda` on the Lanczos
@@ -948,21 +1113,22 @@ fn extrapolated_eigenvalue(alpha: &[f64], beta: &[f64], previous: Option<f64>, t
     }
 }
 
-/// Cyclic Jacobi for a small symmetric matrix. Returns eigenvalues
-/// and the column-major eigenvector table `v[row][col]`.
+/// Cyclic Jacobi for a small symmetric matrix `a`, `n * n` row-major,
+/// diagonalized in place: the eigenvalues end on its diagonal. `v`
+/// receives the eigenvector table `v[row * n + col]`.
 // The rotation sweeps touch two columns of one row at a time, so an
 // index loop is the readable form here.
 #[allow(clippy::needless_range_loop)]
-fn jacobi_eigen(a: &mut [Vec<f64>]) -> (Vec<f64>, Vec<Vec<f64>>) {
-    let n = a.len();
-    let mut v = vec![vec![0.0; n]; n];
-    for (i, row) in v.iter_mut().enumerate() {
-        row[i] = 1.0;
+fn jacobi_eigen(a: &mut [f64], v: &mut Vec<f64>, n: usize) {
+    v.clear();
+    v.resize(n * n, 0.0);
+    for i in 0..n {
+        v[i * n + i] = 1.0;
     }
     for _sweep in 0..64 {
         let mut off = 0.0;
-        for (i, row) in a.iter().enumerate() {
-            for value in row.iter().skip(i + 1) {
+        for i in 0..n {
+            for value in a[i * n + i + 1..(i + 1) * n].iter() {
                 off += value * value;
             }
         }
@@ -971,36 +1137,34 @@ fn jacobi_eigen(a: &mut [Vec<f64>]) -> (Vec<f64>, Vec<Vec<f64>>) {
         }
         for p in 0..n {
             for qi in (p + 1)..n {
-                if a[p][qi].abs() < 1e-18 {
+                if a[p * n + qi].abs() < 1e-18 {
                     continue;
                 }
-                let theta = (a[qi][qi] - a[p][p]) / (2.0 * a[p][qi]);
+                let theta = (a[qi * n + qi] - a[p * n + p]) / (2.0 * a[p * n + qi]);
                 let t = theta.signum() / (theta.abs() + (theta * theta + 1.0).sqrt());
                 let c = 1.0 / (t * t + 1.0).sqrt();
                 let s = t * c;
                 for k in 0..n {
-                    let akp = a[k][p];
-                    let akq = a[k][qi];
-                    a[k][p] = c * akp - s * akq;
-                    a[k][qi] = s * akp + c * akq;
+                    let akp = a[k * n + p];
+                    let akq = a[k * n + qi];
+                    a[k * n + p] = c * akp - s * akq;
+                    a[k * n + qi] = s * akp + c * akq;
                 }
                 for k in 0..n {
-                    let apk = a[p][k];
-                    let aqk = a[qi][k];
-                    a[p][k] = c * apk - s * aqk;
-                    a[qi][k] = s * apk + c * aqk;
+                    let apk = a[p * n + k];
+                    let aqk = a[qi * n + k];
+                    a[p * n + k] = c * apk - s * aqk;
+                    a[qi * n + k] = s * apk + c * aqk;
                 }
                 for k in 0..n {
-                    let vkp = v[k][p];
-                    let vkq = v[k][qi];
-                    v[k][p] = c * vkp - s * vkq;
-                    v[k][qi] = s * vkp + c * vkq;
+                    let vkp = v[k * n + p];
+                    let vkq = v[k * n + qi];
+                    v[k * n + p] = c * vkp - s * vkq;
+                    v[k * n + qi] = s * vkp + c * vkq;
                 }
             }
         }
     }
-    let evals = (0..n).map(|i| a[i][i]).collect();
-    (evals, v)
 }
 
 /// The surface's answer at one point.
@@ -1163,6 +1327,8 @@ pub struct MinModeSession {
     /// The Krylov vectors and actions of the last Lanczos estimate in
     /// the full space; empty after a dimer or with excluded modes.
     krylov: KrylovBlock,
+    /// Buffers of the Lanczos estimate.
+    lanczos_work: LanczosWork,
 }
 
 /// Solver used by the min-mode translation. `istep` is FIRE's opening
@@ -1243,6 +1409,7 @@ impl MinModeSession {
             centre: None,
             surface_error: Mutex::new(None),
             krylov: Vec::new(),
+            lanczos_work: LanczosWork::default(),
             mode_fresh: false,
             pending_turn: 0.0,
             lanczos_ready: false,
@@ -1535,9 +1702,9 @@ impl MinModeSession {
             _ => 1,
         };
         let stored = std::mem::take(&mut self.lbfgs_shadow);
-        for (s, y) in stored {
-            let s = perpendicular(&s, &mode);
-            let y = perpendicular(&y, &mode);
+        for (mut s, mut y) in stored {
+            perp_in_place(&mut s, &mode);
+            perp_in_place(&mut y, &mode);
             self.note_lbfgs_pair(&s, &y);
         }
         while self.lbfgs_shadow.len() > memory {
@@ -1615,6 +1782,7 @@ impl MinModeSession {
             );
         }
         let reduced = Counted {
+            shifted: Default::default(),
             surface: surface.surface,
             calls: surface.calls,
             space: Some(&space),
@@ -1631,6 +1799,27 @@ impl MinModeSession {
             None,
         )?;
         Ok((space.lift(mode.view()), curvature, rotations, ready))
+    }
+
+    /// [`MinModeSession::mode_at`] with the Krylov block it leaves
+    /// becoming [`MinModeSession::krylov_block`]. A failed estimate
+    /// keeps the previous block. The block it replaces lends its
+    /// vectors to a later estimate.
+    fn mode_into_krylov<S: PointSurface>(
+        &mut self,
+        surface: &Counted<'_, S>,
+        position: ArrayView1<f64>,
+        gradient: ArrayView1<f64>,
+    ) -> Result<(Array1<f64>, f64, usize, bool), SaddleError> {
+        let mut block = std::mem::take(&mut self.lanczos_work.block);
+        let answer = self.mode_at(surface, position, gradient, &mut block);
+        let mut retired = match answer {
+            Ok(_) => std::mem::replace(&mut self.krylov, block),
+            Err(_) => block,
+        };
+        self.lanczos_work.spare.append(&mut retired);
+        self.lanczos_work.block = retired;
+        answer
     }
 
     /// Dimer or Lanczos in the full space. A failed callback does not
@@ -1731,7 +1920,7 @@ impl MinModeSession {
     /// Lanczos from `seed`. `block` receives the Krylov vectors and
     /// their actions when the caller keeps them for the climb model.
     fn lanczos_at<S: PointSurface>(
-        &self,
+        &mut self,
         surface: &Counted<'_, S>,
         position: ArrayView1<f64>,
         gradient: ArrayView1<f64>,
@@ -1747,7 +1936,8 @@ impl MinModeSession {
             self.curvature
         };
         let early = !replaced_seed && self.lanczos_ready;
-        lanczos_mode(
+        let mut work = std::mem::take(&mut self.lanczos_work);
+        let answer = lanczos_mode(
             surface,
             position,
             gradient,
@@ -1759,7 +1949,10 @@ impl MinModeSession {
                 early,
             },
             block,
-        )
+            &mut work,
+        );
+        self.lanczos_work = work;
+        answer
     }
 
     fn refresh_mode<S: PointSurface>(
@@ -1768,10 +1961,8 @@ impl MinModeSession {
         g0: ArrayView1<f64>,
     ) -> Result<(f64, usize), SaddleError> {
         let position = self.x.clone();
-        let mut block = Vec::new();
         let (mode, curvature, rotations, ready) =
-            self.mode_at(surface, position.view(), g0, &mut block)?;
-        self.krylov = block;
+            self.mode_into_krylov(surface, position.view(), g0)?;
         self.mode = mode;
         self.curvature = curvature;
         self.lanczos_ready = ready;
@@ -1791,6 +1982,7 @@ impl MinModeSession {
         self.lanczos_carry = None;
         let calls = AtomicUsize::new(0);
         let counted = Counted {
+            shifted: Default::default(),
             surface,
             calls: &calls,
             space: None,
@@ -1842,6 +2034,7 @@ impl MinModeSession {
         }
         let calls = AtomicUsize::new(0);
         let counted = Counted {
+            shifted: Default::default(),
             surface,
             calls: &calls,
             space: None,
@@ -1913,6 +2106,7 @@ impl MinModeSession {
             });
         }
         let counted = Counted {
+            shifted: Default::default(),
             surface,
             calls: &calls,
             space: if excluded.nrows() == 0 {
@@ -2158,7 +2352,8 @@ impl MinModeSession {
     ) -> Result<(Array1<f64>, Option<PointEval>), SaddleError> {
         let scale = curvature_scale(curvature).unwrap_or(0.0);
         let parallel = gradient.dot(mode);
-        let g_perp = perpendicular(gradient, mode);
+        let mut g_perp = gradient.clone();
+        perp_in_place(&mut g_perp, mode);
         let mut direction = -&g_perp;
         if let (Some(prev), Some(dir)) = (&self.cg_prev_perp, &self.cg_dir) {
             let delta = &g_perp - prev;
@@ -2168,7 +2363,7 @@ impl MinModeSession {
                 direction = &direction + &(dir * beta);
             }
         }
-        direction = perpendicular(&direction, mode);
+        perp_in_place(&mut direction, mode);
         let alpha = self
             .cg_alpha
             .filter(|alpha| alpha.is_finite() && *alpha > 0.0)
@@ -2199,9 +2394,10 @@ impl MinModeSession {
         let Some((trial, energy, arrived)) = chosen else {
             return Ok((origin, self.centre.clone()));
         };
-        let step = &trial - &origin;
-        let step_perp = perpendicular(&step, mode);
-        let g_new = perpendicular(&arrived, mode);
+        let mut step_perp = &trial - &origin;
+        perp_in_place(&mut step_perp, mode);
+        let mut g_new = arrived.clone();
+        perp_in_place(&mut g_new, mode);
         let secant = &g_new - &g_perp;
         let sy = step_perp.dot(&secant);
         let ss = step_perp.dot(&step_perp);
@@ -2325,6 +2521,7 @@ impl MinModeSession {
         self.lanczos_carry = None;
         let calls = AtomicUsize::new(0);
         let counted = Counted {
+            shifted: Default::default(),
             surface,
             calls: &calls,
             space: None,
@@ -2490,10 +2687,8 @@ impl MinModeSession {
             // Force and curvature in a convergence decision describe the
             // same point. The accepted gradient supplies the centre, so
             // confirmation pays only for the required Hessian actions.
-            let mut block = Vec::new();
             let (mode, accepted_curvature, accepted_rotations, ready) =
-                self.mode_at(&counted, x.view(), centre.gradient.view(), &mut block)?;
-            self.krylov = block;
+                self.mode_into_krylov(&counted, x.view(), centre.gradient.view())?;
             let turned = self.mode.dot(&mode).abs().min(1.0).acos();
             self.retire_translation_memory(turned);
             self.mode = mode;

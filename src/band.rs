@@ -4,7 +4,9 @@
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 
-use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
+use ndarray::{
+    Array1, Array2, ArrayBase, ArrayView1, ArrayView2, ArrayViewMut1, DataMut, Ix1, Zip, s,
+};
 use rgmin::{Accept, Control, Exp, ExpParams, Method, Neighbours, Oracle, Solver};
 
 use crate::cell_log::{M3, m3_det};
@@ -74,6 +76,11 @@ impl Cell {
     /// shorter than half the shortest cell height. Axes with a zero
     /// row (a slab's vacuum direction, a molecule) are left unwrapped.
     pub fn minimum_image(&self, diff: &mut Array1<f64>) {
+        self.minimum_image_view(diff.view_mut());
+    }
+
+    /// [`Cell::minimum_image`] on borrowed storage.
+    pub(crate) fn minimum_image_view(&self, mut diff: ArrayViewMut1<f64>) {
         let h = &self.0;
         let periodic: [bool; 3] = std::array::from_fn(|i| h[i].iter().any(|v| *v != 0.0));
         if periodic.iter().all(|p| *p)
@@ -496,6 +503,10 @@ struct BandState {
     previous: Mutex<Option<BandEval>>,
     /// Rows evaluated by the surface during the current step.
     rows: AtomicUsize,
+    /// Buffers of the evaluation and assembly. Locked before `last`.
+    work: Mutex<BandWork>,
+    /// Image threads ([`BandSession::set_image_threads`]).
+    pool: Option<crate::autoneb::ImageEvalPool>,
 }
 
 impl BandState {
@@ -512,6 +523,21 @@ impl BandState {
             last: Mutex::new(None),
             previous: Mutex::new(None),
             rows: AtomicUsize::new(0),
+            work: Mutex::new(BandWork::default()),
+            pool: None,
+        }
+    }
+    /// One surface call, split into image blocks on the image threads.
+    fn eval_rows(
+        &self,
+        surface: &dyn BandSurface,
+        positions: ArrayView2<f64>,
+        energies: &mut Array1<f64>,
+        gradients: &mut Array2<f64>,
+    ) -> Result<(), SaddleError> {
+        match &self.pool {
+            Some(pool) => pool.eval(surface, positions, energies, gradients),
+            None => surface.eval(positions, energies, gradients),
         }
     }
     fn convergence_force(&self, force: &Array1<f64>) -> f64 {
@@ -567,6 +593,22 @@ impl BandState {
         }
         false
     }
+    /// Make `start` the cached answer again when it was taken at `x`
+    /// and neither cache slot holds `x`.
+    fn reinstate(&self, start: Option<BandEval>, x: &Array1<f64>) {
+        let Some(start) = start.filter(|s| s.x == *x) else {
+            return;
+        };
+        let mut last = self.last.lock().unwrap_or_else(|e| e.into_inner());
+        let mut previous = self.previous.lock().unwrap_or_else(|e| e.into_inner());
+        let held = |slot: &Option<BandEval>| slot.as_ref().is_some_and(|e| e.x == *x);
+        if held(&last) || held(&previous) {
+            return;
+        }
+        *previous = last.take();
+        *last = Some(start);
+    }
+
     /// The climbing baseline and the armed image belong to one
     /// relaxation; the surface caches stay.
     fn restart(&self) {
@@ -592,87 +634,266 @@ impl BandState {
     }
 }
 
-/// Energies and gradients of the whole band at interior `x`: from the
-/// last evaluation when `x` matches it bitwise, else from one surface
-/// call (interior rows only once the endpoint energies are cached).
-fn evaluate_band(
-    state: &BandState,
+/// Buffers of one interior image's force. Each interior image owns
+/// one, so the images can be assembled apart from one another.
+#[derive(Default)]
+struct ImageWork {
+    diff_next: Array1<f64>,
+    diff_prev: Array1<f64>,
+    tangent: Array1<f64>,
+    force: Array1<f64>,
+    parallel: Array1<f64>,
+    full: Array1<f64>,
+    perp: Array1<f64>,
+    dneb: Array1<f64>,
+    scratch: Array1<f64>,
+    l_next: Array1<f64>,
+    l_here: Array1<f64>,
+}
+
+impl ImageWork {
+    fn sized(dof: usize) -> Self {
+        let zero = || Array1::zeros(dof);
+        Self {
+            diff_next: zero(),
+            diff_prev: zero(),
+            tangent: zero(),
+            force: zero(),
+            parallel: zero(),
+            full: zero(),
+            perp: zero(),
+            dneb: zero(),
+            scratch: zero(),
+            l_next: zero(),
+            l_here: zero(),
+        }
+    }
+}
+
+/// Storage that one band evaluation and assembly hand to the next.
+///
+/// `spare` is the evaluation that the cache dropped last, kept as the
+/// storage of the next one, and `spare_projected` the projected force
+/// buffer of a recycled evaluation. Both refill before they are read.
+#[derive(Default)]
+struct BandWork {
+    images: Vec<ImageWork>,
+    interior_e: Array1<f64>,
+    interior_g: Array2<f64>,
+    whole: Array2<f64>,
+    ks: Vec<f64>,
+    spare: Option<BandEval>,
+    spare_projected: Array1<f64>,
+}
+
+/// One [`ImageWork`] of length `dof` per interior image.
+fn fit_images(images: &mut Vec<ImageWork>, n_interior: usize, dof: usize) -> &mut [ImageWork] {
+    if images.first().is_some_and(|w| w.tangent.len() != dof) {
+        images.clear();
+    }
+    images.resize_with(n_interior, || ImageWork::sized(dof));
+    images
+}
+
+impl BandWork {
+    /// Storage for a new atomic evaluation of `n_images` rows: the
+    /// recycled `spare` when it has that shape, a fresh one otherwise.
+    /// Its projected force is cleared, the mark of an unassembled point.
+    fn take_eval(&mut self, n_images: usize, dof: usize) -> BandEval {
+        let fits = |e: &BandEval| {
+            e.x.len() == (n_images - 2) * dof && e.gradients.dim() == (n_images, dof)
+        };
+        match self.spare.take().filter(fits) {
+            Some(mut eval) => {
+                let projected = std::mem::replace(&mut eval.projected, Array1::zeros(0));
+                if projected.len() > self.spare_projected.len() {
+                    self.spare_projected = projected;
+                }
+                eval
+            }
+            None => BandEval {
+                x: Array1::zeros((n_images - 2) * dof),
+                energies: Array1::zeros(n_images),
+                gradients: Array2::zeros((n_images, dof)),
+                projected: Array1::zeros(0),
+                stresses: Array2::zeros((0, 9)),
+                band_positions: Array2::zeros((0, dof)),
+                band_cells: Vec::new(),
+            },
+        }
+    }
+
+    /// Store `projected` in `eval`, in the recycled buffer when `eval`
+    /// has none of that length.
+    fn store_projected(&mut self, eval: &mut BandEval, projected: &Array1<f64>) {
+        if eval.projected.len() != projected.len() {
+            std::mem::swap(&mut eval.projected, &mut self.spare_projected);
+        }
+        if eval.projected.len() == projected.len() {
+            eval.projected.assign(projected);
+        } else {
+            eval.projected = projected.clone();
+        }
+    }
+}
+
+fn fit1(buffer: &mut Array1<f64>, len: usize) {
+    if buffer.len() != len {
+        *buffer = Array1::zeros(len);
+    }
+    buffer.fill(0.0);
+}
+
+fn fit2(buffer: &mut Array2<f64>, dim: (usize, usize)) {
+    if buffer.dim() != dim {
+        *buffer = Array2::zeros(dim);
+    }
+    buffer.fill(0.0);
+}
+
+/// Make `state.last` the surface's answer at interior `x` and return
+/// it locked: kept when `x` matches it bitwise, swapped back from
+/// `state.previous` when `x` matches that (a stepper that went back to
+/// the point before its trial), else one surface call (interior rows
+/// only once the endpoint energies are cached). The
+/// surface receives zeroed energies and interior gradients, and on a
+/// whole-band call the gradients of the evaluation it replaces, as
+/// freshly built arrays would hold. The evaluation the cache drops
+/// becomes the storage of the next one.
+fn evaluate_band<'s>(
+    state: &'s BandState,
+    work: &mut BandWork,
     surface: &dyn BandSurface,
     endpoint_first: ArrayView1<f64>,
     endpoint_last: ArrayView1<f64>,
     x: ArrayView1<f64>,
-) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
+) -> Result<std::sync::MutexGuard<'s, Option<BandEval>>, SaddleError> {
     let dof = endpoint_first.len();
     let n_images = x.len() / dof + 2;
     let mut slot = state.last.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(prev) = slot.as_ref()
-        && prev.x == x
+    if slot.as_ref().is_some_and(|prev| prev.x == x) {
+        return Ok(slot);
+    }
     {
-        return Ok((prev.energies.clone(), prev.gradients.clone()));
+        let mut previous = state.previous.lock().unwrap_or_else(|e| e.into_inner());
+        if previous.as_ref().is_some_and(|prev| prev.x == x) {
+            std::mem::swap(&mut *slot, &mut *previous);
+            return Ok(slot);
+        }
     }
     let interior = x
         .to_shape((n_images - 2, dof))
         .map_err(|e| SaddleError::Shape(e.to_string()))?;
-    let mut energies = Array1::zeros(n_images);
-    // Endpoint gradient rows are evaluated once; keep the last ones known.
-    let mut gradients = match slot.as_ref() {
-        Some(prev) => prev.gradients.clone(),
-        None => Array2::zeros((n_images, dof)),
-    };
+    let mut next = work.take_eval(n_images, dof);
+    let answered = fill_band(
+        state,
+        work,
+        surface,
+        slot.as_ref(),
+        &mut next,
+        endpoint_first,
+        endpoint_last,
+        interior.view(),
+    );
+    if let Err(err) = answered {
+        work.spare = Some(next);
+        return Err(err);
+    }
+    next.x.assign(&x);
+    if state.endpoints().is_none() {
+        state.set_endpoints(Some([next.energies[0], next.energies[n_images - 1]]));
+    }
+    if let Some(old) = slot.take() {
+        work.spare = state
+            .previous
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .replace(old);
+    }
+    *slot = Some(next);
+    Ok(slot)
+}
+
+/// One surface call into `next`, checked for finite values. `prev` is
+/// the evaluation `next` replaces: its endpoint gradient rows stay
+/// known when the call carries the interior alone.
+#[allow(clippy::too_many_arguments)]
+fn fill_band(
+    state: &BandState,
+    work: &mut BandWork,
+    surface: &dyn BandSurface,
+    prev: Option<&BandEval>,
+    next: &mut BandEval,
+    endpoint_first: ArrayView1<f64>,
+    endpoint_last: ArrayView1<f64>,
+    interior: ArrayView2<f64>,
+) -> Result<(), SaddleError> {
+    let n_images = next.energies.len();
+    let dof = endpoint_first.len();
+    let last = n_images - 1;
+    next.energies.fill(0.0);
     match state.endpoints() {
         Some([e_first, e_last]) => {
-            let mut interior_e = Array1::zeros(n_images - 2);
-            let mut interior_g = Array2::zeros((n_images - 2, dof));
-            surface.eval(interior.view(), &mut interior_e, &mut interior_g)?;
+            fit1(&mut work.interior_e, n_images - 2);
+            fit2(&mut work.interior_g, (n_images - 2, dof));
+            state.eval_rows(
+                surface,
+                interior,
+                &mut work.interior_e,
+                &mut work.interior_g,
+            )?;
             state.rows.fetch_add(n_images - 2, Ordering::Relaxed);
-            energies[0] = e_first;
-            energies[n_images - 1] = e_last;
-            energies.slice_mut(s![1..n_images - 1]).assign(&interior_e);
-            gradients
-                .slice_mut(s![1..n_images - 1, ..])
-                .assign(&interior_g);
+            next.energies[0] = e_first;
+            next.energies[last] = e_last;
+            next.energies
+                .slice_mut(s![1..last])
+                .assign(&work.interior_e);
+            for end in [0, last] {
+                match prev {
+                    Some(prev) => next.gradients.row_mut(end).assign(&prev.gradients.row(end)),
+                    None => next.gradients.row_mut(end).fill(0.0),
+                }
+            }
+            next.gradients
+                .slice_mut(s![1..last, ..])
+                .assign(&work.interior_g);
         }
         None => {
-            let mut full = Array2::zeros((n_images, dof));
-            full.row_mut(0).assign(&endpoint_first);
-            full.row_mut(n_images - 1).assign(&endpoint_last);
-            full.slice_mut(s![1..n_images - 1, ..]).assign(&interior);
-            surface.eval(full.view(), &mut energies, &mut gradients)?;
+            fit2(&mut work.whole, (n_images, dof));
+            work.whole.row_mut(0).assign(&endpoint_first);
+            work.whole.row_mut(last).assign(&endpoint_last);
+            work.whole.slice_mut(s![1..last, ..]).assign(&interior);
+            match prev {
+                Some(prev) => next.gradients.assign(&prev.gradients),
+                None => next.gradients.fill(0.0),
+            }
+            state.eval_rows(
+                surface,
+                work.whole.view(),
+                &mut next.energies,
+                &mut next.gradients,
+            )?;
             state.rows.fetch_add(n_images, Ordering::Relaxed);
         }
     }
-    if !energies.iter().all(|e| e.is_finite()) {
+    if !next.energies.iter().all(|e| e.is_finite()) {
         return Err(SaddleError::NonFinite("band energies"));
     }
-    if !gradients
-        .slice(s![1..n_images - 1, ..])
+    if !next
+        .gradients
+        .slice(s![1..last, ..])
         .iter()
         .all(|g| g.is_finite())
     {
         return Err(SaddleError::NonFinite("band gradients"));
     }
-    if state.endpoints().is_none() {
-        state.set_endpoints(Some([energies[0], energies[n_images - 1]]));
-    }
-    if let Some(old) = slot.take() {
-        *state.previous.lock().unwrap_or_else(|e| e.into_inner()) = Some(old);
-    }
-    *slot = Some(BandEval {
-        x: x.to_owned(),
-        energies: energies.clone(),
-        gradients: gradients.clone(),
-        projected: Array1::zeros(0),
-        stresses: Array2::zeros((0, 9)),
-        band_positions: Array2::zeros((0, dof)),
-        band_cells: Vec::new(),
-    });
-    Ok((energies, gradients))
+    Ok(())
 }
 
 /// Remove the mean Cartesian force (eOn's `zeroTranslation`). An image
 /// with one atom has no internal force apart from the mean, so it
 /// keeps its force.
-pub(crate) fn remove_net_translation(force: &mut Array1<f64>) {
+pub(crate) fn remove_net_translation<S: DataMut<Elem = f64>>(force: &mut ArrayBase<S, Ix1>) {
     let n = force.len() / 3;
     if n < 2 || force.len() != 3 * n {
         return;
@@ -1198,6 +1419,229 @@ fn image_force(
     Ok((projected, driving))
 }
 
+/// The springs of one band evaluation. A kind whose constants or
+/// displacements follow the band resolves without building a new
+/// [`SpringKind`]: the energy-weighted constants land in a reused
+/// buffer, and the live Onsager-Machlup displacements are formed per
+/// image from the gradients.
+enum BandSpring<'a> {
+    Kind(&'a SpringKind),
+    Weighted(&'a [f64]),
+    Live { k: f64, alpha: f64 },
+}
+
+impl<'a> BandSpring<'a> {
+    fn at(kind: &'a SpringKind, energies: ArrayView1<f64>, ks: &'a mut Vec<f64>) -> Self {
+        match kind {
+            SpringKind::OnsagerMachlupLive { k } => BandSpring::Live {
+                k: *k,
+                alpha: crate::spring::onsager_machlup_scale(*k),
+            },
+            SpringKind::EnergyWeighted { k_min, k_max } => {
+                crate::spring::energy_weighted_constants_into(energies, *k_min, *k_max, ks);
+                BandSpring::Weighted(ks)
+            }
+            other => BandSpring::Kind(other),
+        }
+    }
+}
+
+/// Spring forces at interior image `i` into `parallel` and `full`, the
+/// arithmetic of [`SpringKind::compute`] on the resolved springs.
+#[allow(clippy::too_many_arguments)]
+fn spring_into(
+    spring: &BandSpring,
+    i: usize,
+    gradients: &Array2<f64>,
+    dist_next: f64,
+    dist_prev: f64,
+    tangent: ArrayView1<f64>,
+    diff_next: ArrayView1<f64>,
+    diff_prev: ArrayView1<f64>,
+    l_next: &mut Array1<f64>,
+    l_here: &mut Array1<f64>,
+    parallel: ArrayViewMut1<f64>,
+    full: ArrayViewMut1<f64>,
+) {
+    use crate::stencil::Coupling;
+    let weighted = |ks: &[f64]| Coupling::Weighted {
+        k_next: ks[i],
+        k_prev: ks[i - 1],
+    };
+    let coupling = match spring {
+        BandSpring::Weighted(ks) => weighted(ks),
+        BandSpring::Live { k, alpha } => {
+            let n_images = gradients.nrows();
+            if i + 1 == n_images - 1 {
+                l_next.fill(0.0);
+            } else {
+                Zip::from(&mut *l_next)
+                    .and(gradients.row(i + 1))
+                    .for_each(|l, &g| *l = alpha * -g);
+            }
+            Zip::from(&mut *l_here)
+                .and(gradients.row(i))
+                .for_each(|l, &g| *l = alpha * -g);
+            Coupling::Onsager {
+                k: *k,
+                l_next: l_next.view(),
+                l_here: l_here.view(),
+            }
+        }
+        BandSpring::Kind(SpringKind::Uniform { k }) => Coupling::Uniform { k: *k },
+        BandSpring::Kind(SpringKind::Weighted { ks }) => weighted(ks),
+        BandSpring::Kind(SpringKind::OnsagerMachlup { k, l_vecs }) => Coupling::Onsager {
+            k: *k,
+            l_next: l_vecs[i + 1].view(),
+            l_here: l_vecs[i].view(),
+        },
+        BandSpring::Kind(SpringKind::OnsagerMachlupLive { k }) => {
+            l_next.fill(0.0);
+            l_here.fill(0.0);
+            Coupling::Onsager {
+                k: *k,
+                l_next: l_next.view(),
+                l_here: l_here.view(),
+            }
+        }
+        BandSpring::Kind(SpringKind::EnergyWeighted { k_min, .. }) => {
+            Coupling::Uniform { k: *k_min }
+        }
+    };
+    crate::stencil::coupling_forces_into(
+        &coupling, tangent, dist_next, dist_prev, diff_next, diff_prev, parallel, full,
+    );
+}
+
+/// [`image_force`] without a metric, written into `out` through the
+/// image's own buffers.
+#[allow(clippy::too_many_arguments)]
+fn image_force_into(
+    config: &BandConfig,
+    spring: &BandSpring,
+    i: usize,
+    climb: bool,
+    endpoint_first: ArrayView1<f64>,
+    endpoint_last: ArrayView1<f64>,
+    x: ArrayView1<f64>,
+    energies: &Array1<f64>,
+    gradients: &Array2<f64>,
+    w: &mut ImageWork,
+    mut out: ArrayViewMut1<f64>,
+) -> Result<(), SaddleError> {
+    let dof = endpoint_first.len();
+    let n_images = energies.len();
+    let row = |k: usize| -> ArrayView1<f64> {
+        if k == 0 {
+            endpoint_first
+        } else if k == n_images - 1 {
+            endpoint_last
+        } else {
+            x.slice_move(s![(k - 1) * dof..k * dof])
+        }
+    };
+    let (pos_prev, pos, pos_next) = (row(i - 1), row(i), row(i + 1));
+    let ImageWork {
+        diff_next,
+        diff_prev,
+        tangent,
+        force,
+        parallel,
+        full,
+        perp,
+        dneb,
+        scratch,
+        l_next,
+        l_here,
+    } = w;
+    Zip::from(&mut *diff_next)
+        .and(pos_next)
+        .and(pos)
+        .for_each(|d, &a, &b| *d = a - b);
+    Zip::from(&mut *diff_prev)
+        .and(pos)
+        .and(pos_prev)
+        .for_each(|d, &a, &b| *d = a - b);
+    if let Some(cell) = &config.cell {
+        cell.minimum_image_view(diff_next.view_mut());
+        cell.minimum_image_view(diff_prev.view_mut());
+    }
+    let dist_next = diff_next.dot(&*diff_next).sqrt();
+    let dist_prev = diff_prev.dot(&*diff_prev).sqrt();
+    let rule = match config.tangent {
+        TangentKind::Simple => crate::stencil::TangentRule::Simple,
+        TangentKind::Improved => crate::stencil::TangentRule::Improved,
+    };
+    crate::stencil::unit_tangent_into(
+        rule,
+        diff_next.view(),
+        diff_prev.view(),
+        energies[i],
+        energies[i - 1],
+        energies[i + 1],
+        tangent.view_mut(),
+    )
+    .map_err(|e| SaddleError::Invalid(format!("image {i}: {e}")))?;
+    Zip::from(&mut *force)
+        .and(gradients.row(i))
+        .for_each(|f, &g| *f = -g);
+    spring_into(
+        spring,
+        i,
+        gradients,
+        dist_next,
+        dist_prev,
+        tangent.view(),
+        diff_next.view(),
+        diff_prev.view(),
+        l_next,
+        l_here,
+        parallel.view_mut(),
+        full.view_mut(),
+    );
+    let doubly = config.projection == ProjectionKind::DoublyNudged;
+    if doubly {
+        crate::stencil::perp_into(force.view(), tangent.view(), perp.view_mut());
+        crate::projection::dneb_component_into(
+            full.view(),
+            tangent.view(),
+            perp.view(),
+            dneb.view_mut(),
+            scratch.view_mut(),
+        );
+    }
+    if climb {
+        if !doubly {
+            dneb.fill(0.0);
+        }
+        crate::stencil::reflect_into(force.view(), tangent.view(), out.view_mut());
+        Zip::from(&mut out).and(&*dneb).for_each(|o, &d| *o += d);
+    } else {
+        match config.projection {
+            ProjectionKind::PlainElasticBand => Zip::from(&mut out)
+                .and(&*full)
+                .and(&*force)
+                .for_each(|o, &s, &f| *o = s + f),
+            ProjectionKind::Neb => {
+                crate::stencil::perp_into(force.view(), tangent.view(), perp.view_mut());
+                Zip::from(&mut out)
+                    .and(&*parallel)
+                    .and(&*perp)
+                    .for_each(|o, &s, &p| *o = s + p);
+            }
+            ProjectionKind::DoublyNudged => Zip::from(&mut out)
+                .and(&*parallel)
+                .and(&*perp)
+                .and(&*dneb)
+                .for_each(|o, &s, &p, &d| *o = s + p + d),
+        }
+    }
+    if config.remove_translation {
+        remove_net_translation(&mut out);
+    }
+    Ok(())
+}
+
 fn max_abs(v: &Array1<f64>) -> f64 {
     v.iter().fold(0.0_f64, |m, c| m.max(c.abs()))
 }
@@ -1284,7 +1728,10 @@ fn assemble_band_with(
     x: ArrayView1<f64>,
     metrics: Option<&[Exp]>,
 ) -> Result<(f64, Array1<f64>, f64, Option<Array1<f64>>), SaddleError> {
-    let (energies, gradients) = evaluate_band(state, surface, endpoint_first, endpoint_last, x)?;
+    let mut work = state.work.lock().unwrap_or_else(|e| e.into_inner());
+    let mut slot = evaluate_band(state, &mut work, surface, endpoint_first, endpoint_last, x)?;
+    let eval = slot.as_ref().expect("evaluate_band leaves an evaluation");
+    let (energies, gradients) = (&eval.energies, &eval.gradients);
     let n_images = energies.len();
     let dof = endpoint_first.len();
 
@@ -1300,8 +1747,8 @@ fn assemble_band_with(
         endpoint_first,
         endpoint_last,
         x,
-        &energies,
-        &gradients,
+        energies,
+        gradients,
     );
     let climbing = config.climbing.is_some();
     let armed = climbing && state.armed.load(Ordering::Relaxed);
@@ -1311,32 +1758,62 @@ fn assemble_band_with(
             .store(climb_target.map_or(-1, |i| i as i64), Ordering::Relaxed);
     }
     let ci_at = if armed { climb_target } else { None };
-    let spring = config.spring.at_band(energies.view(), gradients.view());
+    let pseudo_energy: f64 = energies.slice(s![1..n_images - 1]).sum();
 
+    let BandWork { images, ks, .. } = &mut *work;
+    let springs = match metrics {
+        Some(_) => Springs::Metric(config.spring.at_band(energies.view(), gradients.view())),
+        None => Springs::Band(BandSpring::at(&config.spring, energies.view(), ks)),
+    };
+    let images = fit_images(images, n_images - 2, dof);
     let metric_of = |i: usize| metrics.and_then(|m| m.get(i - 1));
     // An armed climbing image under the metric climbs in the P-metric,
     // so a metric slice carries every image.
     let mut projected = Array1::zeros((n_images - 2) * dof);
     let mut driving = metrics.map(|_| Array1::zeros((n_images - 2) * dof));
-    for i in 1..n_images - 1 {
-        let (f, d) = image_force(
-            config,
-            &spring,
-            i,
-            ci_at == Some(i),
-            endpoint_first,
-            endpoint_last,
-            x,
-            &energies,
-            &gradients,
-            metric_of(i),
-        )?;
-        projected.slice_mut(s![(i - 1) * dof..i * dof]).assign(&f);
-        if let Some(driving) = driving.as_mut() {
-            driving
-                .slice_mut(s![(i - 1) * dof..i * dof])
-                .assign(d.as_ref().unwrap_or(&f));
+    let mut assemble = |i: usize,
+                        climb: bool,
+                        projected: &mut Array1<f64>,
+                        driving: &mut Option<Array1<f64>>|
+     -> Result<(), SaddleError> {
+        let rows = s![(i - 1) * dof..i * dof];
+        match &springs {
+            Springs::Metric(spring) => {
+                let (f, d) = image_force(
+                    config,
+                    spring,
+                    i,
+                    climb,
+                    endpoint_first,
+                    endpoint_last,
+                    x,
+                    energies,
+                    gradients,
+                    metric_of(i),
+                )?;
+                projected.slice_mut(rows).assign(&f);
+                if let Some(driving) = driving.as_mut() {
+                    driving.slice_mut(rows).assign(d.as_ref().unwrap_or(&f));
+                }
+            }
+            Springs::Band(spring) => image_force_into(
+                config,
+                spring,
+                i,
+                climb,
+                endpoint_first,
+                endpoint_last,
+                x,
+                energies,
+                gradients,
+                &mut images[i - 1],
+                projected.slice_mut(rows),
+            )?,
         }
+        Ok(())
+    };
+    for i in 1..n_images - 1 {
+        assemble(i, ci_at == Some(i), &mut projected, &mut driving)?;
     }
     let mut max_component = state.convergence_force(&projected);
 
@@ -1360,26 +1837,7 @@ fn assemble_band_with(
             .ci_index
             .store(climb_target.map_or(-1, |i| i as i64), Ordering::Relaxed);
         if let Some(ci_i) = climb_target {
-            let (f, d) = image_force(
-                config,
-                &spring,
-                ci_i,
-                true,
-                endpoint_first,
-                endpoint_last,
-                x,
-                &energies,
-                &gradients,
-                metric_of(ci_i),
-            )?;
-            projected
-                .slice_mut(s![(ci_i - 1) * dof..ci_i * dof])
-                .assign(&f);
-            if let Some(driving) = driving.as_mut() {
-                driving
-                    .slice_mut(s![(ci_i - 1) * dof..ci_i * dof])
-                    .assign(d.as_ref().unwrap_or(&f));
-            }
+            assemble(ci_i, true, &mut projected, &mut driving)?;
             max_component = state.convergence_force(&projected);
         }
     }
@@ -1389,21 +1847,23 @@ fn assemble_band_with(
     if !projected.dot(&projected).is_finite() {
         return Err(SaddleError::NonFinite("band force norm"));
     }
-    if let Some(last) = state
-        .last
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .as_mut()
+    if let Some(last) = slot.as_mut()
         && last.x == x
     {
-        last.projected.clone_from(&projected);
+        work.store_projected(last, &projected);
     }
     *state
         .last_max_force
         .lock()
         .unwrap_or_else(|e| e.into_inner()) = max_component;
-    let pseudo_energy: f64 = energies.slice(s![1..n_images - 1]).sum();
     Ok((pseudo_energy, projected, max_component, driving))
+}
+
+/// The springs of an assembly: resolved per evaluation into a
+/// [`SpringKind`] for the metric path, in place otherwise.
+enum Springs<'a> {
+    Metric(std::borrow::Cow<'a, SpringKind>),
+    Band(BandSpring<'a>),
 }
 
 /// A solver step must leave finite coordinates, and must move the band
@@ -1473,15 +1933,18 @@ impl<S: BandSurface> BandSurface for CachedBandSurface<'_, S> {
     ) -> Result<(), SaddleError> {
         let last = positions.nrows() - 1;
         let x: Array1<f64> = positions.slice(s![1..last, ..]).iter().copied().collect();
-        let (e, g) = evaluate_band(
+        let mut work = self.state.work.lock().unwrap_or_else(|e| e.into_inner());
+        let slot = evaluate_band(
             self.state,
+            &mut work,
             self.surface,
             positions.row(0),
             positions.row(last),
             x.view(),
         )?;
-        energies.assign(&e);
-        gradients.assign(&g);
+        let eval = slot.as_ref().expect("evaluate_band leaves an evaluation");
+        energies.assign(&eval.energies);
+        gradients.assign(&eval.gradients);
         Ok(())
     }
 }
@@ -1884,6 +2347,34 @@ impl BandSession {
         self.rtr = config.map(|config| crate::rtr::BandRtr::new(config, false));
         self.restart();
         Ok(())
+    }
+
+    /// Evaluate the band on `threads` worker threads, kept for the
+    /// session. One (the default) keeps the surface on the calling
+    /// thread; zero is an error. The force assembly stays on the
+    /// calling thread.
+    ///
+    /// Each surface call is split into `min(threads, rows)` contiguous
+    /// image blocks, one [`BandSurface::eval`] per block, and the
+    /// answers are stored at their image indices once every block has
+    /// finished. When the surface's answer for a row
+    /// depends on that row alone, the band, its forces and its
+    /// trajectory are bitwise those of one thread, and the first
+    /// failing image is the one reported. A surface that tells the
+    /// whole-band evaluation from an interior one by the row count
+    /// should stay at one thread, as
+    /// [`crate::autoneb::AutoNebTuning::threads`] says.
+    pub fn set_image_threads(&mut self, threads: usize) -> Result<(), SaddleError> {
+        self.state.pool = match threads {
+            1 => None,
+            _ => Some(crate::autoneb::ImageEvalPool::new(threads)?),
+        };
+        Ok(())
+    }
+
+    /// The image thread count of [`BandSession::set_image_threads`].
+    pub fn image_threads(&self) -> usize {
+        self.state.pool.as_ref().map_or(1, |pool| pool.threads())
     }
 
     pub fn positions(&self) -> ArrayView2<'_, f64> {
@@ -2393,6 +2884,14 @@ impl BandSession {
             last.view(),
             initial.view(),
         )?;
+        // The products and the trial push the start out of the cache;
+        // a rejected step ends on it again.
+        let start = self
+            .state
+            .last
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let mut trial = self.positions.clone();
         let cached = CachedBandSurface {
             state: &self.state,
@@ -2407,6 +2906,7 @@ impl BandSession {
             .iter()
             .copied()
             .collect();
+        self.state.reinstate(start, &interior);
         assemble_band(
             &self.config,
             &self.state,

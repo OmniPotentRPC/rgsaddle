@@ -23,17 +23,7 @@ fn ocineb_c_abi() {
     };
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let out = std::env::temp_dir().join(format!("rgsaddle_ocineb_abi_{}", std::process::id()));
-    let mut libdir = std::env::current_exe().unwrap();
-    libdir.pop();
-    if libdir.ends_with("deps") {
-        libdir.pop();
-    }
-    if !libdir.join("librgsaddle.so").exists() {
-        let deps = libdir.join("deps");
-        if deps.join("librgsaddle.so").exists() {
-            libdir = deps;
-        }
-    }
+    let libdir = cdylib_dir();
 
     let status = Command::new(&cc)
         .arg(root.join("tests/c/ocineb_abi.c"))
@@ -65,3 +55,8 @@ fn ocineb_c_abi() {
     );
     let _ = std::fs::remove_file(&out);
 }
+
+include!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/common/cdylib_dir.rs"
+));

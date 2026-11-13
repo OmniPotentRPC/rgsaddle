@@ -21,5 +21,6 @@ pub use control::{Action, ArtControl, Controller, Fixed, Report, Role, StencilVi
 pub use surface::{FromBand, FromPoint, ImageId, Surface};
 pub use triad::{
     Coupling, CouplingForces, Delta, Euclidean, Metric, Point, Sides, TangentRule, Triad, ascend,
-    coupling_forces, curvature_along, perp, reflect, unit_tangent,
+    coupling_forces, coupling_forces_into, curvature_along, perp, perp_into, reflect, reflect_into,
+    unit_tangent, unit_tangent_into,
 };
