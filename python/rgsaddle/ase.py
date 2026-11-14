@@ -974,23 +974,129 @@ def _build_neb_optimizer() -> type:
     return NEBOptimizer
 
 
-def _effective_force(forces: Float64, mode: Float64, curvature: float) -> Float64:
-    """ASE force after the minimum-mode translation of the gradient."""
-    flat = np.asarray(forces, dtype=np.float64).reshape(-1)
-    tau = np.asarray(mode, dtype=np.float64).reshape(-1)
-    norm = float(np.dot(tau, tau) ** 0.5)
-    if norm == 0.0:
-        return flat.reshape(forces.shape)
-    tau = tau / norm
-    parallel = float(np.dot(flat, tau))
-    if curvature < 0.0:
-        eff = flat - 2.0 * parallel * tau
-    else:
-        eff = -parallel * tau
-    return eff.reshape(forces.shape)
+def _constrained_direction(atoms: Any, vector: Any) -> Float64:
+    """``vector`` with each constraint's force projection applied, as ASE masks a force."""
+    direction = np.array(vector, dtype=np.float64, copy=True).reshape(-1, 3)
+    for constraint in getattr(atoms, "constraints", []) or []:
+        adjust = getattr(constraint, "adjust_forces", None)
+        if adjust is not None:
+            adjust(atoms, direction)
+    return direction
+
+
+def _unit(vector: Any) -> Float64:
+    flat = np.asarray(vector, dtype=np.float64)
+    norm = float(np.linalg.norm(flat))
+    if not np.isfinite(norm) or norm == 0.0:
+        raise ValueError("the eigenmode guess is zero on the free coordinates")
+    return flat / norm
+
+
+_DIMER_DEFAULTS: dict[str, Any] = {
+    "eigenmode_method": "dimer",
+    "f_rot_min": 0.1,
+    "f_rot_max": 1.00,
+    "max_num_rot": 1,
+    "trial_angle": float(np.pi / 4.0),
+    "trial_trans_step": 0.001,
+    "maximum_translation": 0.1,
+    "cg_translation": True,
+    "use_central_forces": True,
+    "dimer_separation": 0.0001,
+    "initial_eigenmode_method": "gauss",
+    "extrapolate_forces": False,
+    "displacement_method": "gauss",
+    "gauss_std": 0.1,
+    "order": 1,
+    "mask": None,
+    "displacement_center": None,
+    "displacement_radius": None,
+    "number_of_displacement_atoms": None,
+}
+
+# ASE parameters the rgsaddle session has no knob for. rgsaddle's
+# MinModeTranslate steps with its own L-BFGS translation.
+_DIMER_UNUSED = ("trial_angle", "trial_trans_step", "cg_translation", "extrapolate_forces")
+
+# Before 0.3.3 MinModeAtoms took mode=, kind=, dr= and max_rotations=
+# with these defaults.
+_LEGACY_DIMER = {
+    "dimer_separation": 1e-3,
+    "max_num_rot": 10,
+    "f_rot_min": 1e-4,
+    "f_rot_max": 1.0,
+    "maximum_translation": 0.2,
+}
+
+
+class DimerControl:
+    """Dimer parameters under ``ase.mep.dimer.DimerControl``'s names and defaults.
+
+    ``eigenmode_method`` is ``dimer`` or ``lanczos``. The session reads
+    ``dimer_separation`` (half the dimer length), ``f_rot_min`` (the
+    rotational force under which rotation stops), ``f_rot_max`` (above
+    ``f_rot_min``: stop after one rotation once the rotational force is
+    under 1, rgsaddle's fixed window), ``max_num_rot``,
+    ``maximum_translation`` and ``use_central_forces`` (forward
+    differences when true). ``displace`` reads the displacement keys.
+    ``trial_angle``, ``trial_trans_step``, ``cg_translation`` and
+    ``extrapolate_forces`` are stored and not used. ``order`` must be 1.
+    Nothing is written to ``logfile``.
+    """
+
+    parameters: dict[str, Any]
+
+    def __init__(
+        self, logfile: Any = "-", eigenmode_logfile: Any = None, comm: Any = None, **kwargs: Any
+    ) -> None:
+        del comm
+        self.parameters = dict(_DIMER_DEFAULTS)
+        self.explicit: set[str] = set()
+        for key, value in kwargs.items():
+            self.set_parameter(key, value, log=False)
+        self.logfile = logfile
+        self.eigenmode_logfile = eigenmode_logfile
+        self.counters = {"forcecalls": 0, "rotcount": 0, "optcount": 0}
+
+    def set_parameter(self, parameter: str, value: Any, log: bool = True) -> None:
+        del log
+        if parameter not in self.parameters:
+            raise ValueError(f"Invalid parameter >>{parameter}<< with value >>{value!s}<<")
+        if parameter == "eigenmode_method" and str(value).lower() not in ("dimer", "lanczos"):
+            raise ValueError("eigenmode_method must be dimer or lanczos")
+        if parameter == "order" and int(value) != 1:
+            raise ValueError("order must be 1; the index-k step has no Python session")
+        self.parameters[parameter] = value
+        self.explicit.add(parameter)
+
+    def get_parameter(self, parameter: str) -> Any:
+        if parameter not in self.parameters:
+            raise ValueError(f"Invalid parameter >>{parameter}<<")
+        return self.parameters[parameter]
+
+    def get_logfile(self) -> Any:
+        return self.logfile
+
+    def get_eigenmode_logfile(self) -> Any:
+        return self.eigenmode_logfile
+
+    def get_counter(self, counter: str) -> int:
+        return self.counters[counter]
+
+    def increment_counter(self, counter: str) -> None:
+        self.counters[counter] += 1
+
+    def reset_counter(self, counter: str) -> None:
+        self.counters[counter] = 0
+
+    def reset_all_counters(self) -> None:
+        for key in self.counters:
+            self.counters[key] = 0
 
 
 class _MinModeView:
+    """ASE optimizable over the effective force; converged needs negative curvature."""
+
     def __init__(self, search: MinModeAtoms) -> None:
         self._search = search
 
@@ -998,107 +1104,542 @@ class _MinModeView:
         return np.ascontiguousarray(self._search.atoms.get_positions(), dtype=np.float64).reshape(-1)
 
     def set_x(self, x: Float64) -> None:
-        count = len(self._search.atoms)
-        self._search.atoms.set_positions(
-            np.asarray(x, dtype=np.float64).reshape(count, 3), apply_constraint=False
-        )
-        self._search._moved()
+        self._search.atoms.set_positions(np.asarray(x, dtype=np.float64).reshape(-1, 3))
 
     def get_gradient(self) -> Float64:
         return -np.ascontiguousarray(self._search.get_forces(), dtype=np.float64).reshape(-1)
 
     def get_value(self) -> float:
-        return float(self._search.atoms.get_potential_energy())
+        return float(self._search.get_potential_energy())
 
     def ndofs(self) -> int:
         return 3 * len(self._search.atoms)
 
+    def gradient_norm(self, gradient: Float64) -> float:
+        return _max_atom_norm(gradient)
+
+    def converged(self, gradient: Float64, fmax: float) -> bool:
+        return self.gradient_norm(gradient) < fmax and self._search.get_curvature() < 0.0
+
+    def iterimages(self) -> Any:
+        return self._search.atoms.iterimages()
+
 
 class MinModeAtoms:
-    """One ASE ``Atoms`` object driven by a dimer or Lanczos mode.
+    """One ASE ``Atoms`` object driven along its lowest mode, as ``ase.mep.dimer.MinModeAtoms``.
 
-    ``get_forces`` estimates the lowest mode and returns the effective
-    force an ASE optimizer should follow. Positive curvature drops the
-    force perpendicular to the mode. Negative curvature reflects the
-    force along the mode. The atoms object itself is not copied.
+    ``MinModeAtoms(atoms, control, eigenmodes=None, random_seed=None)``
+    takes a ``DimerControl`` (this module's or ASE's). The mode comes
+    from one rgsaddle ``MinMode`` session that stays with the object, so
+    the previous mode seeds the next rotation after a translation.
+    ``get_forces()`` is the effective force: above the well (positive
+    curvature) the force along the mode, reversed; below it the force
+    with its component along the mode reflected. ``get_forces(real=True)``
+    is ``Atoms.get_forces()``. A mode guess is projected onto the
+    coordinates the constraints leave free. Other attributes, and
+    ``get_original_*`` on the state at construction, pass through to the
+    atoms, as in ASE.
+
+    Before 0.3.3 the call was ``MinModeAtoms(atoms, mode, kind=, dr=,
+    max_rotations=)``. That call still works: a mode in the second
+    position warns, and without a control the old defaults hold
+    (separation 1e-3, ten rotations, rotational tolerance 1e-4,
+    translation cap 0.2). ``mode`` and ``curvature`` stay as the flat
+    mode and the latest curvature.
     """
 
     def __init__(
         self,
         atoms: Any,
-        mode: Any = None,
+        control: Any = None,
+        eigenmodes: Any = None,
+        random_seed: int | None = None,
+        comm: Any = None,
         *,
-        kind: str = "dimer",
-        dr: float = 1e-3,
-        max_rotations: int = 10,
+        mode: Any = None,
+        kind: str | None = None,
+        dr: float | None = None,
+        max_rotations: int | None = None,
+        **kwargs: Any,
     ) -> None:
+        del comm
         if getattr(atoms, "calc", None) is None:
             raise ValueError("atoms has no calculator")
-        self.atoms = atoms
-        self.kind = kind
-        self.dr = float(dr)
-        self.max_rotations = int(max_rotations)
-        count = len(atoms)
-        if mode is None:
-            guess = np.zeros(count * 3, dtype=np.float64)
-            guess[0] = 1.0
+        if control is not None and not hasattr(control, "get_parameter"):
+            warnings.warn(
+                "the second argument of MinModeAtoms is a DimerControl, as in ASE; "
+                "pass the mode as mode=",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            if mode is not None:
+                raise TypeError("mode was given twice")
+            mode, control = control, None
+        logfile = kwargs.pop("logfile", None)
+        mlogfile = kwargs.pop("eigenmode_logfile", None)
+        if control is None:
+            settings = dict(_LEGACY_DIMER)
+            settings.update(kwargs)
+            control = DimerControl(logfile=logfile, eigenmode_logfile=mlogfile, **settings)
+            self._legacy = True
         else:
-            guess = np.ascontiguousarray(mode, dtype=np.float64).reshape(-1)
-        self._mode0 = guess
-        self._session: Any = None
+            for key, value in kwargs.items():
+                control.set_parameter(key, value)
+            self._legacy = False
+        if kind is not None:
+            control.set_parameter("eigenmode_method", kind)
+        if dr is not None:
+            control.set_parameter("dimer_separation", float(dr))
+        if max_rotations is not None:
+            control.set_parameter("max_num_rot", int(max_rotations))
+        if int(control.get_parameter("order")) != 1:
+            raise ValueError("order must be 1; the index-k step has no Python session")
+        unused = sorted(
+            name
+            for name in set(getattr(control, "explicit", ())) & set(_DIMER_UNUSED)
+            if control.get_parameter(name) != _DIMER_DEFAULTS[name]
+        )
+        if unused:
+            warnings.warn(
+                "rgsaddle's minimum-mode session does not read " + ", ".join(unused),
+                UserWarning,
+                stacklevel=2,
+            )
+        self.minmode_init = True
+        self.atoms = atoms
+        self.control = control
+        self.order = 1
+        if mode is not None:
+            eigenmodes = [np.asarray(mode, dtype=np.float64).reshape(-1, 3)]
+        self.eigenmodes: list[Float64] | None = (
+            None if eigenmodes is None else [np.asarray(m, dtype=np.float64) for m in eigenmodes]
+        )
+        self.curvatures = [100.0]
+        self.random_state = np.random.RandomState(random_seed)
+        self.atoms0 = atoms.copy()
+        self.save_original_forces()
+        self.logfile = control.get_logfile()
+        self.mlogfile = control.get_eigenmode_logfile()
         self.mode: Float64 | None = None
         self.curvature = float("nan")
+        self.rotation_required = True
+        self._session: Any = None
+        self._force_tol = 0.05 if not self._legacy else 1e-3
+        self._checked: Float64 | None = None
+        self.forces0: Float64 | None = None
+        self.energy0 = float("nan")
 
-    def _moved(self) -> None:
-        self._session = None
+    def __getattr__(self, attr: str) -> Any:
+        if attr.startswith("__") or attr in ("atoms", "atoms0"):
+            raise AttributeError(attr)
+        if "original" in attr.split("_"):
+            return getattr(self.__dict__["atoms0"], attr.replace("_original_", "_"))
+        return getattr(self.__dict__["atoms"], attr)
+
+    def __len__(self) -> int:
+        return len(self.atoms)
 
     def __ase_optimizable__(self) -> _MinModeView:
         return _MinModeView(self)
 
-    def _surface(self, positions: Float64) -> tuple[Float64, Float64]:
-        saved = np.array(self.atoms.get_positions(), dtype=np.float64, copy=True)
-        count = len(self.atoms)
-        try:
-            row = np.ascontiguousarray(positions, dtype=np.float64).reshape(count, 3)
-            self.atoms.set_positions(row, apply_constraint=False)
-            energy = float(self.atoms.get_potential_energy())
-            gradient = -np.ascontiguousarray(self.atoms.get_forces(), dtype=np.float64).reshape(1, -1)
-        finally:
-            self.atoms.set_positions(saved, apply_constraint=False)
+    @property
+    def kind(self) -> str:
+        return str(self.control.get_parameter("eigenmode_method")).lower()
+
+    @property
+    def dr(self) -> float:
+        return float(self.control.get_parameter("dimer_separation"))
+
+    @property
+    def max_rotations(self) -> int:
+        return int(self.control.get_parameter("max_num_rot"))
+
+    def save_original_forces(self, force_calculation: bool = False) -> None:
+        """Keep the energy and forces of the starting state on ``atoms0``."""
+        calc = self.atoms.calc
+        required = getattr(calc, "calculation_required", None)
+        if (required is not None and not required(self.atoms, ["energy", "forces"])) or (
+            force_calculation
+        ):
+            self.atoms0.calc = _ase("ase.calculators.singlepoint", "SinglePointCalculator")(
+                self.atoms0,
+                energy=self.atoms.get_potential_energy(),
+                forces=self.atoms.get_forces(),
+            )
+
+    def get_control(self) -> Any:
+        return self.control
+
+    def get_atoms(self) -> Any:
+        return self.atoms
+
+    def set_atoms(self, atoms: Any) -> None:
+        self.atoms = atoms
+        self._session = None
+        self._checked = None
+
+    def get_curvature(self, order: Any = "max") -> float:
+        if order == "max":
+            return float(max(self.curvatures))
+        return float(self.curvatures[int(order) - 1])
+
+    def get_eigenmode(self, order: int = 1) -> Float64:
+        if self.eigenmodes is None:
+            raise RuntimeError("no eigenmode yet; call get_forces() first")
+        return self.eigenmodes[order - 1]
+
+    def set_eigenmode(self, eigenmode: Any, order: int = 1) -> None:
+        mode = _unit(_constrained_direction(self.atoms, eigenmode))
+        if self.eigenmodes is None:
+            self.eigenmodes = [mode]
+        else:
+            self.eigenmodes[order - 1] = mode
+        if self._session is not None:
+            self._session.set_mode(np.ascontiguousarray(mode.reshape(-1)))
+        self.rotation_required = True
+
+    def set_curvature(self, curvature: float, order: int = 1) -> None:
+        self.curvatures[order - 1] = float(curvature)
+
+    def calculation_required(self) -> bool:
+        if self.minmode_init or self._checked is None:
+            return True
+        return not np.array_equal(self._checked, self.atoms.get_positions())
+
+    def initialize_eigenmodes(
+        self, method: str | None = None, eigenmodes: Any = None, gauss_std: float | None = None
+    ) -> None:
+        """The first mode guess, as ASE makes it, projected onto the free coordinates."""
+        if eigenmodes is None:
+            pos = np.asarray(self.atoms.get_positions(), dtype=np.float64)
+            old = np.asarray(self.atoms0.get_positions(), dtype=np.float64)
+            chosen = method or str(self.control.get_parameter("initial_eigenmode_method"))
+            if self._legacy and method is None:
+                free = np.abs(_constrained_direction(self.atoms, np.ones_like(pos))).sum(axis=1)
+                guess = np.zeros_like(pos)
+                guess[int(np.argmax(free > 0.0)), 0] = 1.0
+            elif chosen.lower() == "displacement" and (pos - old).any():
+                guess = pos - old
+            elif chosen.lower() == "gauss":
+                self.displace(log=False, gauss_std=gauss_std, method="gauss")
+                guess = np.asarray(self.atoms.get_positions(), dtype=np.float64) - pos
+                self.atoms.set_positions(pos, apply_constraint=False)
+            else:
+                raise NotImplementedError(
+                    "initial_eigenmode must use either 'gauss' or 'displacement', if the "
+                    "latter is used the atoms must have moved away from the original "
+                    f"positions. You have requested '{chosen}'."
+                )
+            eigenmodes = [guess]
+        self.eigenmodes = [_unit(_constrained_direction(self.atoms, eigenmodes[0]))]
+
+    def calculate_real_forces_and_energies(self, **kwargs: Any) -> None:
+        if self.minmode_init:
+            self.minmode_init = False
+            self.initialize_eigenmodes(eigenmodes=self.eigenmodes)
+        self.rotation_required = True
+        self.forces0 = np.array(self.atoms.get_forces(**kwargs), dtype=np.float64, copy=True)
+        self.energy0 = float(self.atoms.get_potential_energy())
+        self.control.increment_counter("forcecalls")
+        self._checked = np.array(self.atoms.get_positions(), dtype=np.float64, copy=True)
+
+    def get_potential_energy(self) -> float:
+        if self.calculation_required():
+            self.calculate_real_forces_and_energies()
+        return self.energy0
+
+    def get_forces(self, real: bool = False, pos: Any = None, **kwargs: Any) -> Float64:
+        """The effective force, or with ``real=True`` the force of ``Atoms``."""
+        if self.calculation_required() and pos is None:
+            self.calculate_real_forces_and_energies(**kwargs)
+        if real and pos is None:
+            assert self.forces0 is not None
+            return np.array(self.forces0, dtype=np.float64, copy=True)
+        if real:
+            old = np.array(self.atoms.get_positions(), dtype=np.float64, copy=True)
+            self.atoms.set_positions(pos)
+            forces = np.array(self.atoms.get_forces(), dtype=np.float64, copy=True)
+            self.control.increment_counter("forcecalls")
+            self.atoms.set_positions(old)
+            return forces
+        if self.rotation_required:
+            self.find_eigenmodes(order=self.order)
+            self.rotation_required = False
+            self.control.increment_counter("optcount")
+        return self.get_projected_forces()
+
+    def _session_options(self) -> dict[str, Any]:
+        control = self.control
+        f_min = float(control.get_parameter("f_rot_min"))
+        f_max = float(control.get_parameter("f_rot_max"))
+        return {
+            "kind": str(control.get_parameter("eigenmode_method")).lower(),
+            "dr": float(control.get_parameter("dimer_separation")),
+            "force_tol": float(self._force_tol),
+            "max_move": float(control.get_parameter("maximum_translation")),
+            "rotation_tol": f_min,
+            "max_rotations": int(control.get_parameter("max_num_rot")),
+            "method": "lbfgs",
+            "difference": "forward" if control.get_parameter("use_central_forces") else "central",
+            "force_gate": "max_atom",
+            "torque_window": 1 if f_max > f_min else 0,
+        }
+
+    def _point(self, positions: Float64) -> tuple[Float64, Float64]:
+        """Session surface. The atoms keep the last geometry so its result stays cached."""
+        row = np.ascontiguousarray(positions, dtype=np.float64).reshape(len(self.atoms), 3)
+        self.atoms.set_positions(row, apply_constraint=False)
+        energy = float(self.atoms.get_potential_energy())
+        gradient = -np.ascontiguousarray(self.atoms.get_forces(), dtype=np.float64).reshape(1, -1)
+        self.control.increment_counter("forcecalls")
         return np.array([energy], dtype=np.float64), gradient
 
-    def _ensure(self) -> Any:
+    def _sync(self, search: Any) -> None:
+        self.mode = np.asarray(search.mode(), dtype=np.float64)
+        self.eigenmodes = [self.mode.reshape(-1, 3)]
+
+    def _ensure_session(self) -> Any:
         if self._session is None:
             from rgsaddle._core import MinMode
 
-            coordinates = np.ascontiguousarray(self.atoms.get_positions(), dtype=np.float64).reshape(-1)
-            self._session = MinMode(
-                coordinates,
-                self._mode0,
-                kind=self.kind,
-                dr=self.dr,
-                max_rotations=self.max_rotations,
-            )
+            assert self.eigenmodes is not None
+            x = np.ascontiguousarray(self.atoms.get_positions(), dtype=np.float64).reshape(-1)
+            seed = np.ascontiguousarray(self.eigenmodes[0], dtype=np.float64).reshape(-1)
+            self._session = MinMode(x, seed, **self._session_options())
         return self._session
 
-    def get_forces(self) -> Float64:
-        search = self._ensure()
-        report = search.estimate(self._surface)
+    def find_eigenmodes(self, order: int = 1) -> None:
+        """Rotate rgsaddle's session into the lowest mode at the current point."""
+        del order
+        assert self.forces0 is not None
+        search = self._ensure_session()
+        here = np.array(self.atoms.get_positions(), dtype=np.float64, copy=True)
+        search.set_position(
+            np.ascontiguousarray(here.reshape(-1)),
+            np.ascontiguousarray(-self.forces0.reshape(-1)),
+        )
+        report = search.estimate(self._point)
+        self.atoms.set_positions(here, apply_constraint=False)
+        self._checked = here
         self.curvature = float(report.curvature)
-        self.mode = np.asarray(search.mode(), dtype=np.float64)
-        forces = np.array(self.atoms.get_forces(), dtype=np.float64, copy=True)
-        return _effective_force(forces, self.mode, self.curvature)
+        self.curvatures = [self.curvature]
+        self.control.counters["rotcount"] = int(report.rotations)
+        self._sync(search)
+
+    def get_projected_forces(self, pos: Any = None) -> Float64:
+        """ASE's projection: reverse along the mode above the well, reflect below it."""
+        if pos is not None:
+            forces = self.get_forces(real=True, pos=pos).copy()
+        else:
+            assert self.forces0 is not None
+            forces = self.forces0.copy()
+        assert self.eigenmodes is not None
+        mode = self.eigenmodes[0]
+        parallel = float(np.vdot(forces, mode)) * mode
+        if self.get_curvature(order=1) > 0.0:
+            return np.asarray(-parallel, dtype=np.float64)
+        return np.asarray(forces - 2.0 * parallel, dtype=np.float64)
+
+    def _set_force_tol(self, fmax: float) -> None:
+        if float(fmax) != self._force_tol:
+            self._force_tol = float(fmax)
+            if self._session is not None:
+                self._session = None
+                self.rotation_required = True
+
+    def translate(self) -> Any:
+        """One translation of rgsaddle's session from the current point."""
+        self.get_forces()
+        search = self._ensure_session()
+        report = search.step(self._point)
+        x = np.asarray(search.position(), dtype=np.float64).reshape(len(self.atoms), 3)
+        self.atoms.set_positions(x, apply_constraint=False)
+        self._sync(search)
+        return report
+
+    def restore_original_positions(self) -> None:
+        self.atoms.set_positions(self.atoms0.get_positions())
+
+    def get_barrier_energy(self) -> float:
+        """Energy now minus the energy of the starting state."""
+        try:
+            original = float(self.atoms0.get_potential_energy())
+        except RuntimeError:
+            warnings.warn(
+                "The potential energy is not available, without further calculations, "
+                "most likely at the original state.",
+                UserWarning,
+                stacklevel=2,
+            )
+            return float("nan")
+        return self.get_potential_energy() - original
+
+    def displace(
+        self,
+        displacement_vector: Any = None,
+        mask: Any = None,
+        method: str | None = None,
+        displacement_center: Any = None,
+        radius: float | None = None,
+        number_of_atoms: int | None = None,
+        gauss_std: float | None = None,
+        mic: bool = True,
+        log: bool = True,
+    ) -> None:
+        """Move the atoms away from their current position, as ASE's ``displace``."""
+        del log
+        control = self.control
+        count = len(self.atoms)
+        if mask is None:
+            mask = control.get_parameter("mask")
+        if method is None:
+            method = str(control.get_parameter("displacement_method"))
+        if gauss_std is None:
+            gauss_std = control.get_parameter("gauss_std")
+        if displacement_center is None:
+            displacement_center = control.get_parameter("displacement_center")
+        if radius is None:
+            radius = control.get_parameter("displacement_radius")
+        if number_of_atoms is None:
+            number_of_atoms = control.get_parameter("number_of_displacement_atoms")
+        if displacement_vector is not None and method.lower() != "vector":
+            raise ValueError(
+                f"displacement_vector was supplied but a different method ('{method}') was chosen."
+            )
+        if displacement_vector is None and method.lower() == "vector":
+            raise ValueError(f"A displacement_vector must be supplied when using method = '{method}'.")
+        if displacement_center is not None and radius is None and number_of_atoms is None:
+            raise ValueError(
+                "When displacement_center is chosen, either radius or number_of_atoms must be supplied."
+            )
+        positions = np.asarray(self.atoms.get_positions(), dtype=np.float64)
+        centre_mask: list[bool] | None = None
+        if displacement_center is not None:
+            centre = displacement_center
+            if isinstance(centre, (int, np.integer)):
+                index = int(centre) % count
+                distances = [
+                    (k, float(self.atoms.get_distance(k, index, mic=mic))) for k in range(count)
+                ]
+            elif len(centre) == 3 and all(isinstance(c, float) for c in centre):
+                distances = [
+                    (k, float(np.linalg.norm(positions[k] - np.asarray(centre)))) for k in range(count)
+                ]
+            else:
+                raise ValueError(
+                    "displacement_center must be either the number of an atom in "
+                    "MinModeAtoms object or a 3D position (3-tuple of floats)."
+                )
+            near = [d < radius for _, d in distances] if radius is not None else [True] * count
+            if number_of_atoms is not None:
+                nearest = [k for k, _ in sorted(distances, key=lambda item: item[1])][:number_of_atoms]
+                closest = [k in nearest for k in range(count)]
+            else:
+                closest = [True] * count
+            centre_mask = [near[k] and closest[k] for k in range(count)]
+        if mask is None:
+            mask = [True] * count
+            if centre_mask is None:
+                warnings.warn(
+                    "It was not possible to figure out which atoms to displace, "
+                    "Will try to displace all atoms.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+        if centre_mask is not None:
+            mask = [bool(mask[k]) and centre_mask[k] for k in range(count)]
+        if displacement_vector is None:
+            if method.lower() != "gauss":
+                raise ValueError(f"Invalid displacement method >>{method}<<")
+            std = gauss_std or control.get_parameter("gauss_std")
+            vector = np.zeros((count, 3), dtype=np.float64)
+            for k in range(count):
+                if mask[k]:
+                    vector[k] = [self.random_state.normal(0.0, std) for _ in range(3)]
+        else:
+            vector = np.array(displacement_vector, dtype=np.float64, copy=True).reshape(count, 3)
+        for k in range(count):
+            if not mask[k]:
+                vector[k] = 0.0
+        self.atoms.set_positions(positions + vector)
+
+    def summarize(self) -> None:
+        """Print the barrier, curvature, steps and force calls, as ASE does."""
+        import sys
+
+        out = self.logfile if hasattr(self.logfile, "write") else sys.stdout
+        label = "MINMODE:SUMMARY: "
+        text = label + "-------------------------\n"
+        text += label + "Barrier: %16.4f\n" % self.get_barrier_energy()
+        text += label + "Curvature: %14.4f\n" % self.get_curvature()
+        text += label + "Optimizer steps: %8i\n" % self.control.get_counter("optcount")
+        text += label + "Forcecalls: %13i\n" % self.control.get_counter("forcecalls")
+        text += label + "-------------------------\n"
+        out.write(text)
+
+
+def _build_min_mode_translate() -> type:
+    from ase.optimize.optimize import DEFAULT_MAX_STEPS, Optimizer
+
+    class MinModeTranslate(Optimizer):
+        """rgsaddle's minimum-mode translation behind ``ase.mep.dimer.MinModeTranslate``'s call.
+
+        Each ``step`` is one step of the ``MinModeAtoms`` session: the
+        mode found at this point, then rgsaddle's L-BFGS translation on
+        the effective force, or one ``maximum_translation`` step along
+        the mode while the curvature is not negative. ``run(fmax)``
+        stops when the largest per-atom effective force is under
+        ``fmax`` and the curvature is negative, as ASE's does.
+        """
+
+        def __init__(
+            self,
+            dimeratoms: MinModeAtoms,
+            logfile: Any = "-",
+            trajectory: Any = None,
+            **kwargs: Any,
+        ) -> None:
+            if not isinstance(dimeratoms, MinModeAtoms):
+                raise TypeError("MinModeTranslate drives an rgsaddle.ase.MinModeAtoms")
+            self.dimeratoms = dimeratoms
+            self.control = dimeratoms.get_control()
+            self.report: Any = None
+            atoms: Any = dimeratoms
+            super().__init__(atoms, None, logfile, trajectory, **kwargs)
+
+        def initialize(self) -> None:
+            return None
+
+        def read(self) -> None:
+            raise NotImplementedError("MinModeTranslate does not read a restart file")
+
+        def irun(self, fmax: float = 0.05, steps: int = DEFAULT_MAX_STEPS) -> Any:  # type: ignore[override]
+            self.dimeratoms._set_force_tol(fmax)
+            base: Any = super()
+            return base.irun(fmax=fmax, steps=steps)
+
+        def run(self, fmax: float = 0.05, steps: int = DEFAULT_MAX_STEPS) -> bool:  # type: ignore[override]
+            self.dimeratoms._set_force_tol(fmax)
+            base: Any = super()
+            return bool(base.run(fmax=fmax, steps=steps))
+
+        def step(self) -> None:  # pyright: ignore[reportIncompatibleMethodOverride]
+            self.report = self.dimeratoms.translate()
+
+    MinModeTranslate.__qualname__ = "MinModeTranslate"
+    return MinModeTranslate
 
 
 def __getattr__(name: str) -> Any:
-    # ASE is imported when this class is first used.
-    if name != "NEBOptimizer":
+    # ASE is imported when one of these classes is first used.
+    if name == "NEBOptimizer":
+        built = _build_neb_optimizer()
+    elif name == "MinModeTranslate":
+        built = _build_min_mode_translate()
+    else:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    built = _build_neb_optimizer()
     globals()[name] = built
     return built
-
-
 
 
 class _SellaView:
