@@ -54,7 +54,7 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =rgsaddle_minmode_set_kappa=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_kappa_dimer_force=. Purpose: Inputs and outputs do not overlap. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_irc_create=. Purpose: Create an IRC session. Parameters: the declaration. Units: the caller's.
-- =rgsaddle_irc_create_from_surface=. Purpose: Same, but the imaginary mode is dest Lanczos on the host surface. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_irc_create_from_surface=. Purpose: Same, but the launch mode is the lowest eigenvector of the mass-weighted Hessian, from Lanczos on the host surface. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_irc_step=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_irc_position=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_irc_set_direction=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.

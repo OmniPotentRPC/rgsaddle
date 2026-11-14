@@ -22,7 +22,7 @@ These ~MinModeConfig~ fields set the cost of an estimate and of the translation:
 | ~rotation_tol~ | Rotational-force residual. At 1e-4 and any looser value the dimer also stops after one rotation once that force is under 1. A tighter value keeps iterating. Lanczos uses it as the Ritz residual and, with no host relative tolerance, as the relative change of the lowest Ritz value | 1e-4 |
 | ~max_rotations~ | Rotation cap for one dimer estimate | 20 |
 | ~max_move~ | Largest per-atom translation. A curvature that is not negative takes one step of this length along the mode. The L-BFGS pairs and the FIRE velocity are kept while the mode turns by at most 45 degrees, and dropped past that cone | 0.2 |
-| ~seed_curvature~ | The first empty L-BFGS step uses ~H0 = 1/|λ|~, and the first FIRE displacement uses that scale, when the step fits in ~max_move~. Later steps are the stepper's own. ~set_seed_curvature~ sets the same switch on a live session | off |
+| ~seed_curvature~ | The first empty L-BFGS step uses ~H0 = 1/abs(λ)~, and the first FIRE displacement uses that scale, when the step fits in ~max_move~. Later steps are the stepper's own. ~set_seed_curvature~ sets the same switch on a live session | off |
 
 From C, ~difference~ and ~rotation_angle_tol~ sit in ~rgsaddle_minmode_config_t~ and are read only when the config's ~version.minor~ is 5 or more. A zeroed C struct leaves ~rotation_angle_tol~ at 0, so the angle test stays off. The C++ helper ~minmode_config~ does that, and sets ~rotation_tol~ to 1e-3, which is loose enough for the torque window. The Python point stencil does not take ~rotation_angle_tol~; it uses the Rust default of five degrees. ~rotation_tol~ on that stencil defaults to 1e-4.
 

@@ -5,8 +5,8 @@ from __future__ import annotations
 project = "rgsaddle"
 copyright = "2026, Rohit Goswami"
 author = "Rohit Goswami"
-release = "0.2.2"
-version = "0.2"
+release = "0.4.0"
+version = "0.4.0"
 
 extensions = [
     "sphinx.ext.mathjax",

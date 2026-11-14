@@ -1,5 +1,0 @@
-=halve_raised_energy= and =trust_update= decide a halved step and a
-Sella trust radius from energies the host already holds. Neither call
-evaluates a surface. The C names are =rgsaddle_halve_raised_energy= and
-=rgsaddle_trust_update= at ABI minor 36, and the Python names are the
-same on =rgsaddle._core=.

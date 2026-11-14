@@ -1,6 +1,0 @@
-=IndexKSession= and =indexk_step= take one minimum-mode step in the k lowest modes.
-=k = 1= is the existing dimer or Lanczos step.
-The block solver is LOBPCG or block Lanczos, behind =LowestEigenpairs=, so a later rgmin =lowest_eigenpairs= can replace it.
-=reflect_force= is the Householder product.
-C ABI minor 37 adds =rgsaddle_indexk_*= and =rgsaddle_reflect_force=.
-The C++ owner is =rgsaddle::IndexK=.

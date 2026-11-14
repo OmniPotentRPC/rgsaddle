@@ -81,7 +81,7 @@ fn main() -> Result<(), SaddleError> {
 }
 ```
 
-With rgsaddle 0.3.2 from crates.io, `cargo run` prints:
+With rgsaddle 0.4.0 from crates.io, `cargo run` prints:
 
 ```text
 Converged after 8 steps, max force 2.8e-4
@@ -157,7 +157,7 @@ fn main() -> Result<(), SaddleError> {
 }
 ```
 
-With rgsaddle 0.3.2 from crates.io, `cargo run` prints:
+With rgsaddle 0.4.0 from crates.io, `cargo run` prints:
 
 ```text
 Converged after 8 steps, max force 2.8e-4

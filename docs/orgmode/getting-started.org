@@ -6,7 +6,7 @@ A host builds a band, steps until the projected force is under =force_tol=, and 
 * 1. Depend on the published crate
 #+begin_src toml
 [dependencies]
-rgsaddle = "0.2"
+rgsaddle = "0.4.0"
 rgmin = "0.3"
 ndarray = "0.17"
 #+end_src

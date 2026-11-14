@@ -1,5 +1,0 @@
-Changelog entries are towncrier fragments under ~docs/newsfragments~,
-one Org file per change.
-At a release ~towncrier build~ collects them into
-~docs/orgmode/changelog.org~.
-~docs/orgmode/contributing/index.org~ names the fragment types.

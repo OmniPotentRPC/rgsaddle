@@ -1,8 +1,0 @@
-Each sphere step of the intrinsic reaction coordinate (IRC) passes its quasi-Newton pairs to rgmin at unit length.
-rgmin skips a pair whose ~y.s~ or ~|s.B s|~ is at most 1e-12, and both products fall as the square of the trial length.
-The Broyden-Fletcher-Goldfarb-Shanno (BFGS) update is unchanged when ~s~ and ~y~ scale together, so the floor now bounds the curvature along the step.
-One forward step of ~IrcKind::Gs2~ on Mueller-Brown, at radius 0.00625 and ~force_tol~ 1e-4, used all ten trials.
-Its first pair gave the model a curvature of 2.0e6 across the valley, and each later pair fell under the floor.
-That step now takes three trials.
-Over radii 0.05 to 0.00625, the forward slope of the ~Gs2~ path error is 2.0046, against 1.8415.
-Default sessions on the path probe keep their step counts, and their points move by at most 3.0673e-7.

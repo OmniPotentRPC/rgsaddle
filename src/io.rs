@@ -23,8 +23,11 @@ use crate::mic::Cell;
 
 /// One CON frame as a 3N Cartesian, per-atom masses, and a linkcell box.
 pub struct MolecularFrame {
+    /// Cartesian coordinates, 3N, in the host's length unit.
     pub positions: Array1<f64>,
+    /// One mass per atom, in the host's mass unit.
     pub masses: Array1<f64>,
+    /// Periodic cell, when the frame has one.
     pub cell: Option<Cell>,
 }
 
@@ -33,8 +36,11 @@ pub struct MolecularFrame {
 /// `symbols` is one entry per atom, in the same order as the coordinate
 /// triples. A missing vector is an error. This crate does not invent an element.
 pub struct ConSpecies<'a> {
+    /// One entry per atom, in the same order as the coordinate triples.
     pub symbols: &'a [&'a str],
+    /// One mass per atom.
     pub masses: &'a [f64],
+    /// Periodic cell shared by the geometry. `None` writes no cell.
     pub cell: Option<&'a Cell>,
 }
 
@@ -43,9 +49,13 @@ pub struct ConSpecies<'a> {
 /// `forces` is the flat 3N gradient. `None` omits the forces section.
 /// `neb_bead` set here wins. On [`write_band`], `None` uses the file index.
 pub struct ConImage<'a> {
+    /// Flat 3N Cartesian coordinates.
     pub positions: &'a [f64],
+    /// Potential energy. `None` omits it.
     pub energy: Option<f64>,
+    /// Flat 3N gradient. `None` omits the forces section.
     pub forces: Option<&'a [f64]>,
+    /// Bead index. On [`write_band`], `None` uses the file index.
     pub neb_bead: Option<u64>,
 }
 

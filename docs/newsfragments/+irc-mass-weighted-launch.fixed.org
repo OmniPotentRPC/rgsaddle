@@ -1,5 +1,0 @@
-~IrcSession::from_surface~ and ~rgsaddle_irc_create_from_surface~ launch a branch along the lowest eigenvector ~u~ of the mass-weighted Hessian ~M^{-1/2} H M^{-1/2}~, as the Cartesian displacement ~M^{-1/2} u~.
-The intrinsic reaction coordinate leaves the saddle along that direction in mass-weighted coordinates.
-They took the lowest eigenvector of the Cartesian Hessian ~H~, which differs from it when the masses differ.
-The directions a surface excludes are now removed in the mass-weighted metric as well.
-On the quadratic saddle over two atoms of masses 1 and 16 in ~tests/irc_rolldown.rs~, the old kick lay 38.836 degrees from the mass-weighted mode, and the new one lies 1.352e-14 degrees from it.
