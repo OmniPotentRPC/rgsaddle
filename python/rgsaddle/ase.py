@@ -285,7 +285,18 @@ def _image_positions(images: list[Any]) -> Float64:
     return np.ascontiguousarray(np.stack(rows), dtype=np.float64)
 
 
-class _NebView:
+class _View:
+    """Convergence test of an ASE optimizable: the largest per-atom force."""
+
+    def gradient_norm(self, gradient: Float64) -> float:
+        forces = np.asarray(gradient, dtype=np.float64).reshape(-1, 3)
+        return float(np.linalg.norm(forces, axis=1).max())
+
+    def converged(self, gradient: Float64, fmax: float) -> bool:
+        return self.gradient_norm(gradient) < fmax
+
+
+class _NebView(_View):
     """ASE optimizable view of interior images."""
 
     def __init__(self, neb: NEB) -> None:
@@ -305,13 +316,6 @@ class _NebView:
 
     def ndofs(self) -> int:
         return int(self.get_x().shape[0])
-
-    def gradient_norm(self, gradient: Float64) -> float:
-        forces = np.asarray(gradient, dtype=np.float64).reshape(-1, 3)
-        return float(np.linalg.norm(forces, axis=1).max())
-
-    def converged(self, gradient: Float64, fmax: float) -> bool:
-        return self.gradient_norm(gradient) < fmax
 
     def iterimages(self) -> list[Any]:
         return list(self._neb.images)
@@ -483,7 +487,7 @@ def _effective_force(forces: Float64, mode: Float64, curvature: float) -> Float6
     return eff.reshape(forces.shape)
 
 
-class _MinModeView:
+class _MinModeView(_View):
     def __init__(self, search: MinModeAtoms) -> None:
         self._search = search
 
@@ -505,6 +509,9 @@ class _MinModeView:
 
     def ndofs(self) -> int:
         return 3 * len(self._search.atoms)
+
+    def iterimages(self) -> list[Any]:
+        return [self._search.atoms]
 
 
 class MinModeAtoms:
@@ -583,7 +590,7 @@ class MinModeAtoms:
         return _effective_force(forces, self.mode, self.curvature)
 
 
-class _SellaView:
+class _SellaView(_View):
     def __init__(self, opt: Sella) -> None:
         self._opt = opt
 
@@ -605,6 +612,9 @@ class _SellaView:
 
     def ndofs(self) -> int:
         return 3 * len(self._opt.atoms)
+
+    def iterimages(self) -> list[Any]:
+        return [self._opt.atoms]
 
 
 class Sella:

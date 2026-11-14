@@ -96,6 +96,26 @@ def test_min_mode_drops_the_perpendicular_force_above_the_well() -> None:
     assert search.curvature > 0.0
 
 
+class DoubleWell(Calculator):
+    implemented_properties = ["energy", "forces"]
+
+    def calculate(self, atoms, properties, system_changes):  # type: ignore[no-untyped-def]
+        Calculator.calculate(self, atoms, properties, system_changes)
+        x, y, z = atoms.positions[0]
+        energy = (x * x - 1.0) ** 2 + 2.0 * y * y + 2.0 * z * z
+        forces = np.array([[-4.0 * x * (x * x - 1.0), -4.0 * y, -4.0 * z]])
+        self.results = {"energy": float(energy), "forces": forces}
+
+
+def test_an_ase_optimizer_climbs_min_mode_atoms_to_the_saddle() -> None:
+    atoms = Atoms("H", positions=[[0.7, 0.2, 0.0]])
+    atoms.calc = DoubleWell()
+    search = MinModeAtoms(atoms, mode=[1.0, 0.0, 0.0], kind="dimer")
+    assert FIRE(search, logfile=None).run(fmax=1e-4, steps=1000)
+    assert np.abs(atoms.positions[0]).max() < 1e-3
+    assert search.curvature < 0.0
+
+
 def test_sella_step_stays_finite() -> None:
     atoms = Atoms("H3", positions=[[0.2, 0.0, 0.0], [1.2, 0.1, 0.0], [0.4, 1.1, 0.0]])
     atoms.calc = Bowl()

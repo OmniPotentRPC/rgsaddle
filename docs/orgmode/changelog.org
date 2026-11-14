@@ -173,6 +173,7 @@
   The 13-atom Lennard-Jones cluster (LJ13) forward branch at 0.05 takes 67 steps and 263 calls, against 504 and 1031.
   With one session for both LJ13 branches, the reverse branch at 0.05 ran 1000 steps without a minimum.
   It now stops after 34 steps, as in a fresh session.
+- An ASE optimizer drives ~rgsaddle.ase.MinModeAtoms~ and ~rgsaddle.ase.Sella~. Their optimizable views lacked ~gradient_norm~, ~converged~ and ~iterimages~, so ~FIRE(MinModeAtoms(atoms)).run()~ raised ~AttributeError~ under ASE 3.29.
 
 * 0.3.2 (2026-10-25)
 
