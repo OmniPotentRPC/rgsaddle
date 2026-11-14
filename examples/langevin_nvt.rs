@@ -20,6 +20,10 @@
 //! ```
 //!
 //! `MD_CHECK=1` checks the cohesive energy and times one force call.
+//! `MD_CAPTURE=ws` replaces the 12-fold test by Wigner-Seitz occupancy:
+//! recombined when every lattice site holds exactly one atom. Above about
+//! 600 K thermal vibration alone keeps 100 or more atoms off 12-fold
+//! coordination, so the 12-fold count never reaches zero.
 //! A CSV row is skipped when the same temperature, shell, orientation,
 //! seed, and window are already in the output.
 
@@ -1016,6 +1020,7 @@ struct RunSpec {
     gamma_per_ps: f64,
     r_max_500: f64,
     repeats: usize,
+    capture_ws: bool,
 }
 
 fn env_f64(key: &str, default: f64) -> f64 {
@@ -1047,6 +1052,7 @@ fn run_spec() -> RunSpec {
         gamma_per_ps: env_f64("MD_GAMMA_PER_PS", 1.0),
         r_max_500: env_f64("MD_RMAX", 10.8),
         repeats: env_u64("MD_REPEATS", 13) as usize,
+        capture_ws: env::var("MD_CAPTURE").ok().as_deref() == Some("ws"),
     }
 }
 
@@ -1151,20 +1157,43 @@ fn run_job(potential: &mut MishinCu, spec: &RunSpec, job: &Job) -> (usize, Traje
     let thermostat =
         Langevin::from_physical(spec.dt_fs, spec.gamma_per_ps, job.temperature, CU_MASS_AMU);
     let equil = Langevin::from_physical(spec.dt_fs, 1.0, job.temperature, CU_MASS_AMU);
-    let outcome = langevin_until(
-        potential,
-        &mut positions,
-        cell,
-        thermostat,
-        equil,
-        2.0,
-        spec.window_ps,
-        SAMPLE_PS,
-        spec.dt_fs,
-        job.seed,
-        crystal_recombined,
-        coordination_deficit,
-    );
+    let outcome = if spec.capture_ws {
+        let reference = mean_position(&positions);
+        let defects = |positions: &[f64], _: [[f64; 3]; 3]| {
+            let mean = mean_position(positions);
+            let shift = [0, 1, 2].map(|axis| mean[axis] - reference[axis]);
+            occupancy_defects(positions, job.lattice, spec.repeats, shift)
+        };
+        langevin_until(
+            potential,
+            &mut positions,
+            cell,
+            thermostat,
+            equil,
+            2.0,
+            spec.window_ps,
+            SAMPLE_PS,
+            spec.dt_fs,
+            job.seed,
+            |positions, cell| defects(positions, cell) == 0,
+            defects,
+        )
+    } else {
+        langevin_until(
+            potential,
+            &mut positions,
+            cell,
+            thermostat,
+            equil,
+            2.0,
+            spec.window_ps,
+            SAMPLE_PS,
+            spec.dt_fs,
+            job.seed,
+            crystal_recombined,
+            coordination_deficit,
+        )
+    };
     (n_atoms, outcome)
 }
 
@@ -1439,7 +1468,9 @@ fn table_diffusivity(temperature: f64) -> Option<(f64, f64)> {
 fn summarize(csv: &std::path::Path) -> String {
     let file = File::open(csv).expect("csv");
     let mut groups: BTreeMap<(u64, u64, String, u64), Group> = BTreeMap::new();
+    let mut occupancy = false;
     for line in BufReader::new(file).lines().map_while(Result::ok) {
+        occupancy |= line.contains("ws_defects");
         let fields: Vec<&str> = line.split(',').collect();
         if fields.len() < 19 {
             continue;
@@ -1486,9 +1517,16 @@ fn summarize(csv: &std::path::Path) -> String {
     }
     let mut text = String::new();
     text.push_str("# Direct-MD vacancy-SIA volume, Mishin Cu\n\n");
-    text.push_str("Independent NVT trajectories of one vacancy and one <100> dumbbell on the Mishin EAM1 evaluated by `tests/mishin_cu.rs`. The driver is `examples/langevin_nvt.rs`. The cell is 13×13×13 conventional cells (8788 atoms) at the branch's NPT lattice constant. Capture is the paper's 12-fold test: coordination cutoff 3.1 Å, sampled every 0.25 ps (Mwungeli, Liu, and Demkowicz, Phys. Rev. Materials 9, 023601 (2025)). The shell sum counts recombined sites, with each orientation owning one third of its shell. The survival-curve volume defined in section 2 of that paper is computed from the same trajectories.\n\n");
+    let test = if occupancy {
+        "Capture is Wigner-Seitz occupancy (`MD_CAPTURE=ws`): every atom is assigned to its nearest lattice site after the drift of the cell's centre of mass is removed, and the pair has recombined at the first sample, every 0.25 ps, where every site holds exactly one atom. The columns `initial_ws_defects` and `final_ws_defects` count sites that do not. The 12-fold coordination test of Mwungeli, Liu, and Demkowicz (Phys. Rev. Materials 9, 023601 (2025)) cannot be used at 700 K, where thermal vibration alone keeps 100 to 200 atoms of the 13³ cell off 12-fold coordination, so its count never reaches zero."
+    } else {
+        "Capture is the paper's 12-fold test: coordination cutoff 3.1 Å, sampled every 0.25 ps (Mwungeli, Liu, and Demkowicz, Phys. Rev. Materials 9, 023601 (2025))."
+    };
+    text.push_str(&format!("Independent NVT trajectories of one vacancy and one <100> dumbbell on the Mishin EAM1 evaluated by `tests/mishin_cu.rs`. The driver is `examples/langevin_nvt.rs`. The cell is 13×13×13 conventional cells (8788 atoms) at the branch's NPT lattice constant. {test} The shell sum counts recombined sites, with each orientation owning one third of its shell. The survival-curve volume defined in section 2 of that paper is computed from the same trajectories.\n\n"));
     text.push_str("The clock starts at the ideal dumbbell (offset 1.025 Å) with Maxwellian velocities. There is no separate NPH equilibration. The thermostat is the Langevin velocity Verlet in `npt_lattice`, without the barostat. Friction and timestep are the columns `gamma_per_ps` and `dt_fs`.\n\n");
-    text.push_str("A 3 ps control at 500 K, 2 fs, and gamma = 1/ps, sampled every 0.25 ps, fixes what a zero in the 12-fold count means. The perfect 13³ crystal started at 0 atoms off 12-fold coordination and then fluctuated: minimum 0, mean 6.2, maximum 14, with 4 of 12 samples exactly 0. The nearest shell, a <100> dumbbell, started at 13 and fell into that same cloud (minimum 0, mean 5.7, maximum 16, 2 of 12 samples exactly 0). The outermost shell inside 10.8 Å started at 20 and stayed separated (minimum 22, mean 32.0, maximum 47, 0 of 12 samples exactly 0). Capture in the table is the first sample whose off-12 count is 0.\n\n");
+    if !occupancy {
+        text.push_str("A 3 ps control at 500 K, 2 fs, and gamma = 1/ps, sampled every 0.25 ps, fixes what a zero in the 12-fold count means. The perfect 13³ crystal started at 0 atoms off 12-fold coordination and then fluctuated: minimum 0, mean 6.2, maximum 14, with 4 of 12 samples exactly 0. The nearest shell, a <100> dumbbell, started at 13 and fell into that same cloud (minimum 0, mean 5.7, maximum 16, 2 of 12 samples exactly 0). The outermost shell inside 10.8 Å started at 20 and stayed separated (minimum 22, mean 32.0, maximum 47, 0 of 12 samples exactly 0). Capture in the table is the first sample whose off-12 count is 0.\n\n");
+    }
     text.push_str("Binomial standard error of a capture probability is sqrt(p (1-p) / N). The volume error adds the orientation contributions in quadrature. A shell whose trajectories all agree has a binomial error of zero.\n\n");
     if groups.is_empty() {
         text.push_str("No trajectory rows were found.\n");
@@ -1576,6 +1614,27 @@ fn summarize(csv: &std::path::Path) -> String {
 /// coordinate, then re-round the worst one if the sum is odd). `shift` is the
 /// lattice translation to remove first. Returns `None` unless exactly one
 /// site holds two atoms and none holds more.
+fn nearest_site(atom: &[f64], half: f64, period: i64, shift: [f64; 3]) -> (usize, [i64; 3]) {
+    let u = [
+        (atom[0] - shift[0]) / half,
+        (atom[1] - shift[1]) / half,
+        (atom[2] - shift[2]) / half,
+    ];
+    let mut site = u.map(|value| value.round() as i64);
+    if (site[0] + site[1] + site[2]).rem_euclid(2) != 0 {
+        let mut worst = 0;
+        for axis in 1..3 {
+            if (u[axis] - site[axis] as f64).abs() > (u[worst] - site[worst] as f64).abs() {
+                worst = axis;
+            }
+        }
+        site[worst] += if u[worst] > site[worst] as f64 { 1 } else { -1 };
+    }
+    let wrapped = site.map(|value| value.rem_euclid(period));
+    let index = ((wrapped[0] * period + wrapped[1]) * period + wrapped[2]) as usize;
+    (index, wrapped)
+}
+
 fn interstitial_site(
     positions: &[f64],
     lattice: f64,
@@ -1585,25 +1644,8 @@ fn interstitial_site(
     let period = 2 * repeats as i64;
     let mut count = vec![0u8; (period * period * period) as usize];
     let mut doubled = Vec::new();
-    let half = 0.5 * lattice;
     for atom in positions.chunks_exact(3) {
-        let u = [
-            (atom[0] - shift[0]) / half,
-            (atom[1] - shift[1]) / half,
-            (atom[2] - shift[2]) / half,
-        ];
-        let mut site = u.map(|value| value.round() as i64);
-        if (site[0] + site[1] + site[2]).rem_euclid(2) != 0 {
-            let mut worst = 0;
-            for axis in 1..3 {
-                if (u[axis] - site[axis] as f64).abs() > (u[worst] - site[worst] as f64).abs() {
-                    worst = axis;
-                }
-            }
-            site[worst] += if u[worst] > site[worst] as f64 { 1 } else { -1 };
-        }
-        let wrapped = site.map(|value| value.rem_euclid(period));
-        let index = ((wrapped[0] * period + wrapped[1]) * period + wrapped[2]) as usize;
+        let (index, wrapped) = nearest_site(atom, 0.5 * lattice, period, shift);
         count[index] = count[index].saturating_add(1);
         match count[index] {
             2 => doubled.push((index, wrapped)),
@@ -1615,6 +1657,43 @@ fn interstitial_site(
         [(_, site)] => Some(*site),
         _ => None,
     }
+}
+
+/// Lattice sites of the `repeats`³ fcc cell that do not hold exactly one atom.
+///
+/// The assignment is the one in [`interstitial_site`]. A vacancy with an
+/// interstitial counts two and the recombined crystal zero, independent of
+/// temperature while atoms stay inside their Wigner-Seitz cells.
+pub fn occupancy_defects(positions: &[f64], lattice: f64, repeats: usize, shift: [f64; 3]) -> usize {
+    let period = 2 * repeats as i64;
+    let sites = (period * period * period) as usize;
+    let mut count = vec![0u8; sites];
+    for atom in positions.chunks_exact(3) {
+        let (index, _) = nearest_site(atom, 0.5 * lattice, period, shift);
+        count[index] = count[index].saturating_add(1);
+    }
+    let mut defects = 0;
+    for i in 0..period {
+        for j in 0..period {
+            for k in 0..period {
+                if (i + j + k) % 2 == 0 && count[((i * period + j) * period + k) as usize] != 1 {
+                    defects += 1;
+                }
+            }
+        }
+    }
+    defects
+}
+
+fn mean_position(positions: &[f64]) -> [f64; 3] {
+    let n = (positions.len() / 3).max(1) as f64;
+    let mut mean = [0.0; 3];
+    for atom in positions.chunks_exact(3) {
+        for axis in 0..3 {
+            mean[axis] += atom[axis] / n;
+        }
+    }
+    mean
 }
 
 fn site_step(from: [i64; 3], to: [i64; 3], period: i64) -> [i64; 3] {
@@ -1693,17 +1772,7 @@ fn track_interstitial(
     zero_com(&mut velocities);
     let mut gradient = vec![0.0; positions.len()];
     potential.energy_gradient(&positions, cell, &mut gradient);
-    let n = (positions.len() / 3) as f64;
-    let mean_of = |positions: &[f64]| {
-        let mut mean = [0.0; 3];
-        for atom in positions.chunks_exact(3) {
-            for axis in 0..3 {
-                mean[axis] += atom[axis] / n;
-            }
-        }
-        mean
-    };
-    let reference = mean_of(&positions);
+    let reference = mean_position(&positions);
     let period = 2 * spec.repeats as i64;
     let step_ps = spec.dt_fs * 1.0e-3;
     let equil_steps = (2.0 / step_ps).round() as usize;
@@ -1731,7 +1800,7 @@ fn track_interstitial(
         if step < equil_steps || (step - equil_steps) % sample_steps != 0 {
             continue;
         }
-        let mean = mean_of(&positions);
+        let mean = mean_position(&positions);
         let shift = [mean[0] - reference[0], mean[1] - reference[1], mean[2] - reference[2]];
         let Some(here) = interstitial_site(&positions, lattice, spec.repeats, shift) else {
             out.rejected += 1;
@@ -1984,7 +2053,12 @@ fn main() {
     }
     if !path.exists() {
         let mut header = File::create(&path).expect("csv");
-        writeln!(header, "{HEADER}").unwrap();
+        let names = if spec.capture_ws {
+            HEADER.replace("initial_non12,final_non12", "initial_ws_defects,final_ws_defects")
+        } else {
+            HEADER.to_string()
+        };
+        writeln!(header, "{names}").unwrap();
     }
     let done = existing_keys(&path, spec.window_ps);
     let pending: Vec<&Job> = jobs
@@ -2159,6 +2233,16 @@ mod tests {
         }
         assert_eq!(interstitial_site(&positions, a, 5, shift), Some(host));
         assert_eq!(site_step([9, 0, 1], [0, 9, 1], 10), [1, -1, 0]);
+    }
+
+    #[test]
+    fn occupancy_counts_the_pair_and_not_a_perfect_crystal() {
+        let a = measured_lattice(700.0);
+        let (perfect, _) = fcc(4, a);
+        assert_eq!(occupancy_defects(&perfect, a, 4, [0.0; 3]), 0);
+        let shells = shell_table(a, 6.0);
+        let (pair, _) = place_vacancy_dumbbell(4, a, shells[3].1, [0.0, 0.0, 1.0]);
+        assert_eq!(occupancy_defects(&pair, a, 4, [0.0; 3]), 2);
     }
 
     #[test]
