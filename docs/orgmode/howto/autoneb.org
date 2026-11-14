@@ -59,7 +59,7 @@ fn main() -> Result<(), SaddleError> {
 #+end_src
 
 #+begin_example
-7 images, climbing image 3 at x = 0.0000
+7 images, climbing image 4 at x = 0.0000
 #+end_example
 
 ~run~ is one shot. A second call is refused. The endpoints never move.

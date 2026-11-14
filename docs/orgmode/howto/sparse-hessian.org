@@ -20,14 +20,16 @@ The pattern is symmetric and off-diagonal. The diagonal block is implied. ~from_
 The partition is Curtis, Powell, and Reid, IMA J. Appl. Math. 13, 117 (1974), https://doi.org/10.1093/imamat/13.1.117. The distance-2 rule is Gebremedhin, Manne, and Pothen, SIAM Rev. 47, 629 (2005), https://doi.org/10.1137/S0036144504444711. Powell and Toint, SIAM J. Numer. Anal. 16, 1060 (1979), https://doi.org/10.1137/0716078, cover the symmetric direct read and the substitution. Star colouring is Coleman and Moré, Math. Program. 28, 243 (1984), https://doi.org/10.1007/BF02612334.
 
 The program builds the Hessian of a periodic simple cubic lattice of 27 atoms.
-Nearest neighbours, 1.5 apart, are joined by unit springs, and the cutoff of 2 leaves out every other pair.
-The three lowest eigenvalues are the rigid translations, which cost no energy.
+Nearest neighbours, 1.5 apart, are joined by unit springs at rest, and the cutoff of 2 leaves out every other pair.
+Each atom has 6 neighbours.
+A spring at rest is stiff only along its own axis, so the =x x= entry of an atom is 2 and its coupling to the neighbour along =x= is -1.
+Central differences cost ~n_colours * 3 * 2~ gradients, against 162 for the dense Hessian.
+The same springs give no shear stiffness, so the lowest eigenvalue is zero.
 
 #+begin_src rust
 use ndarray::{Array1, ArrayView1};
-use rgsaddle::{
-    Cell, PointSurface, SaddleError, SparseHessianOpts, SparsityPattern, sparse_hessian,
-};
+use rgsaddle::mic::Cell;
+use rgsaddle::{PointSurface, SaddleError, SparseHessianOpts, SparsityPattern, sparse_hessian};
 
 const SIDE: f64 = 4.5;
 const CUTOFF: f64 = 2.0;
@@ -66,16 +68,25 @@ fn main() -> Result<(), SaddleError> {
     let x = Array1::from_iter((0..27).flat_map(|a| {
         [a % 3, (a / 3) % 3, a / 9].map(|c| 1.5 * c as f64)
     }));
-    let cell = Cell([[SIDE, 0.0, 0.0], [0.0, SIDE, 0.0], [0.0, 0.0, SIDE]]);
+    let cell = Cell::ortho(SIDE, SIDE, SIDE).expect("a cube is a valid cell");
     let opts = SparseHessianOpts::default();
     let pattern = SparsityPattern::from_positions(x.view(), Some(&cell), CUTOFF, opts.search_skin())?;
     let hessian = sparse_hessian(&Lattice, x.view(), &pattern, opts)?;
     let dense = hessian.to_dense();
-    let pairs = hessian.lowest_eigenpairs(4)?;
+    let pairs = hessian.lowest_eigenpairs(1)?;
     println!("dense Hessian {} x {}", dense.nrows(), dense.ncols());
-    for value in pairs.values.iter() {
-        println!("{:.4}", value.abs());
-    }
+    println!("atom 0 has {} neighbours", pattern.neighbors(0).len());
+    println!("{} colours, {} gradient calls", hessian.n_colours(), hessian.evaluations());
+    println!("H[0][0] = {:.4}, H[0][3] = {:.4}", hessian.entry(0, 0), hessian.entry(0, 3));
+    println!("lowest eigenvalue {:.4}", pairs.values[0].abs());
     Ok(())
 }
 #+end_src
+
+#+begin_example
+dense Hessian 81 x 81
+atom 0 has 6 neighbours
+14 colours, 84 gradient calls
+H[0][0] = 2.0000, H[0][3] = -1.0000
+lowest eigenvalue 0.0000
+#+end_example
