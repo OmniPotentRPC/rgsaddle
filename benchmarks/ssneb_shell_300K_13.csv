@@ -1,29 +1,17 @@
-shell_A,orientation,mechanism,cell,n_atoms,barrier_eV,end_sep_A,reactant_sep_A,max_force,force_calls,steps,converged,free_barrier_eV,barrier_minus_free_eV,rotation_below_translation
-2.566,001,capture,fixed,8788,1.307429,0.006,2.577,3.300753e-3,1164,230,0,,,
-2.566,001,capture,free,8788,-0.000099,0.006,2.577,7.918632e-3,1219,241,0,,,
-3.628,010,capture,fixed,8788,1.324132,2.594,3.593,1.867514e-2,1314,260,0,,,
-3.628,010,capture,free,8788,0.565843,2.594,3.593,4.805834e-3,1284,254,0,,,
-4.444,100,capture,fixed,8788,0.305319,1.847,4.458,1.252223e-3,769,151,1,,,
-4.444,100,capture,free,8788,-0.000018,1.847,4.458,9.027745e-4,629,123,1,,,
-4.444,100,away,fixed,8788,0.165329,6.300,4.458,1.123192e-1,1314,260,0,,,
-4.444,100,away,free,8788,0.626311,6.300,4.458,1.010272e-1,1314,260,0,,,
-4.444,100,away,fixed,8788,0.986552,5.468,4.458,3.465628e-2,1299,257,0,,,
-4.444,100,away,free,8788,0.249376,5.468,4.458,1.382446e-3,1234,244,1,,,
-5.131,001,capture,fixed,8788,4.540879,2.559,5.129,1.555659e-2,1229,243,0,,,
-5.131,001,capture,free,8788,5.012529,2.559,5.129,1.060426e-1,1254,248,0,,,
-5.737,100,capture,fixed,8788,0.341039,2.870,5.733,3.379395e-3,1264,250,0,,,
-5.737,100,capture,free,8788,0.362446,2.870,5.733,7.856040e-2,1314,260,0,,,
-6.284,100,rotation,fixed,8788,0.206955,6.265,6.279,9.759967e-3,1194,236,0,0.226412,-0.019457,
-6.284,100,rotation,free,8788,0.200481,6.265,6.279,4.484690e-3,1184,234,0,0.230979,-0.030499,
-6.284,100,capture,fixed,8788,0.185202,4.295,6.279,1.215988e-2,1269,251,0,,,
-6.284,100,capture,free,8788,0.092620,4.295,6.279,2.422895e-2,1289,255,0,,,
-6.788,100,capture,fixed,8788,0.192062,4.657,6.781,1.145969e-3,1024,202,1,,,
-6.788,100,capture,free,8788,0.194275,4.657,6.781,5.992469e-3,1314,260,0,,,
-6.788,100,translation,fixed,8788,0.226083,6.785,6.781,5.348319e-2,1234,244,0,,,
-6.788,100,translation,free,8788,5.143025,6.785,6.781,4.892071e-2,1289,255,0,,,
-isolated,100,translation,fixed,8789,4.663444,2.587,0.000,2.653316e-2,1229,243,0,,,
-isolated,100,translation,free,8789,4.817143,2.587,0.000,9.741920e-2,1274,252,0,,,
-isolated,100,rotation,fixed,8789,0.226412,0.000,0.000,1.098879e-3,349,67,1,,,
-isolated,100,rotation,free,8789,0.230979,0.000,0.000,1.159468e-3,459,89,1,,,
-4.444,100,away,fixed,8788,0.025760,6.273,4.458,1.389075e-1,1314,260,0,,,
-4.444,100,away,free,8788,0.634837,6.273,4.458,1.033851e-1,1314,260,0,,,
+shell_A,sites,orientation,reactant_sep_A,cell,lattice_A,rotation_eV,rotation_source,rotation_force,rotation_end_sep_A,rotation_recombined,rotation_hop,translation_eV,translation_source,translation_force,translation_end_sep_A,translation_recombined,translation_hop,capture_eV,capture_source,capture_force,capture_end_sep_A,capture_recombined,capture_hop,rotation_minus_isolated_eV,translation_minus_isolated_eV,rotation_below_translation,rotation_below_isolated_translation,templates
+isolated,1,100,0.000,fixed,3.628311,0.226447,band,9.596e-4,0.000,0,rotation,0.093073,band,7.593e-4,2.560,0,translation,,,,,,,,,0,,dimer channels of the free dumbbell
+2.566,12,001,2.577,fixed,3.628311,,,,,,,,via_recombination,1.369e-3,4.455,0,away,-0.000013,band,9.932e-4,0.000,1,capture,,,,,translate->away x4; translate->capture x4; rotate->capture x2
+3.628,6,,,fixed,,,,,,,,,,,,,,0.000000,spontaneous,,0.000,1,capture,,,,,translate->away x2; translate->capture x6; rotate->capture x2; reactant recombines when relaxed to 5e-4 eV/A
+4.444,24,100,4.458,fixed,3.628311,,,,,,,0.100756,band,1.109e-3,5.730,0,away,0.002884,band,1.168e-3,0.000,1,capture,,0.007683,,,translate->away x4; translate->translation x2; translate->capture x2; rotate->capture x2
+5.131,12,001,5.129,fixed,3.628311,,,,,,,0.096988,band,1.197e-3,6.778,0,away,0.068832,band,5.242e-4,0.000,1,capture,,0.003915,,,translate->away x4; translate->capture x4; rotate->capture x2
+5.737,24,100,5.733,fixed,3.628311,,via_recombination,9.912e-4,5.731,0,rotation,0.088465,band,1.137e-3,7.258,0,away,0.057390,band,1.117e-3,0.000,1,capture,,-0.004609,,,translate->away x4; translate->capture x4; rotate->rotation x2
+6.284,8,100,6.279,fixed,3.628311,,via_recombination,1.468e-3,6.279,0,rotation,0.089661,band,1.017e-3,6.778,0,away,0.077843,band,1.042e-3,0.000,1,capture,,-0.003412,,,translate->away x6; translate->capture x2; rotate->rotation x2
+6.788,48,100,6.781,fixed,3.628311,,intermediate_minimum,1.400e-3,6.772,0,rotation,0.093069,band,1.240e-3,9.244,0,away,0.046486,band,1.372e-3,0.000,1,capture,,-0.000005,,,translate->away x4; translate->translation x1; translate->capture x1; translate->toward x2; rotate->rotation x2
+isolated,1,100,0.000,free,3.615176,0.230981,band,1.493e-3,0.000,0,rotation,0.097485,band,1.256e-3,2.560,0,translation,,,,,,,,,0,,dimer channels of the free dumbbell
+2.566,12,001,2.577,free,3.615166,,,,,,,,via_recombination,7.698e-4,4.455,0,away,,via_recombination,1.319e-3,0.000,1,capture,,,,,translate->away x4; translate->capture x4; rotate->capture x2
+3.628,6,,,free,,,,,,,,,,,,,,0.000000,spontaneous,,0.000,1,capture,,,,,translate->away x2; translate->capture x6; rotate->capture x2; reactant recombines when relaxed to 5e-4 eV/A
+4.444,24,100,4.458,free,3.615136,,,,,,,0.105393,band,7.851e-4,5.730,0,away,0.001882,band,9.954e-4,0.000,1,capture,,0.007908,,,translate->away x4; translate->translation x2; translate->capture x2; rotate->capture x2
+5.131,12,001,5.129,free,3.615137,,,,,,,0.101277,direct_dimer,1.300e-3,6.778,0,away,0.071263,band,1.230e-3,0.000,1,capture,,0.003792,,,translate->away x4; translate->capture x4; rotate->capture x2
+5.737,24,100,5.733,free,3.615139,,via_recombination,1.423e-3,5.731,0,rotation,0.092037,band,1.168e-3,7.258,0,away,0.058539,band,1.061e-3,0.000,1,capture,,-0.005448,,,translate->away x4; translate->capture x4; rotate->rotation x2
+6.284,8,100,6.279,free,3.615135,,via_recombination,1.231e-3,6.279,0,rotation,0.093876,band,8.021e-4,6.778,0,away,0.081244,band,1.455e-3,0.000,1,capture,,-0.003609,,,translate->away x6; translate->capture x2; rotate->rotation x2
+6.788,48,100,6.781,free,3.615135,,via_recombination,1.496e-3,6.772,0,rotation,0.097410,band,1.295e-3,9.244,0,away,0.047371,band,1.108e-3,0.000,1,capture,,-0.000075,,,translate->away x4; translate->translation x1; translate->capture x1; translate->toward x2; rotate->rotation x2

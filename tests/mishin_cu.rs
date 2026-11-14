@@ -6258,6 +6258,16 @@ fn tighten_dimer(
     guess: &Array1<f64>,
     mode: &Array1<f64>,
 ) -> TightSaddle {
+    tighten_dimer_steps(copper, cell, guess, mode, env_usize("RGSADDLE_SSNEB_DIMER", 100))
+}
+
+fn tighten_dimer_steps(
+    copper: &FastCopper,
+    cell: [[f64; 3]; 3],
+    guess: &Array1<f64>,
+    mode: &Array1<f64>,
+    steps: usize,
+) -> TightSaddle {
     let search = MinModeConfig {
         force_tol: 2.0e-3,
         max_move: 0.08,
@@ -6283,7 +6293,7 @@ fn tighten_dimer(
             note: "dimer setup failed".into(),
         };
     };
-    let report = dimer.run(&held, env_usize("RGSADDLE_SSNEB_DIMER", 100));
+    let report = dimer.run(&held, steps);
     let positions = dimer.positions().to_owned();
     let mode = dimer.mode().to_owned();
     let (energy, gradient) = held.eval(positions.view()).unwrap_or((f64::NAN, Array1::zeros(1)));
@@ -6367,8 +6377,20 @@ fn relax_joint(
     positions: &Array1<f64>,
     cell: [[f64; 3]; 3],
 ) -> Result<(Array1<f64>, [[f64; 3]; 3], f64, f64), String> {
+    relax_joint_to(copper, positions, cell, 0.0, 2.0e-3, 80)
+}
+
+fn relax_joint_to(
+    copper: &FastCopper,
+    positions: &Array1<f64>,
+    cell: [[f64; 3]; 3],
+    pressure: f64,
+    tol: f64,
+    max_steps: usize,
+) -> Result<(Array1<f64>, [[f64; 3]; 3], f64, f64), String> {
     let n = positions.len() / 3;
-    let chart = JointChart::new(cell, n, CellMask::all(), [[0.0; 3]; 3], 1.0)
+    let external = [[pressure, 0.0, 0.0], [0.0, pressure, 0.0], [0.0, 0.0, pressure]];
+    let chart = JointChart::new(cell, n, CellMask::all(), external, 1.0)
         .map_err(|error| error.to_string())?;
     let mut q = joint_coordinate(&chart, CellMask::all(), positions.view(), cell)
         .map_err(|error| error.to_string())?;
@@ -6384,11 +6406,11 @@ fn relax_joint(
     );
     solver.set_atom_maxmove(0.08);
     let mut force = f64::MAX;
-    for _ in 0..80 {
+    for _ in 0..max_steps {
         let oracle = Oracle::unbounded(q.len(), |x: ArrayView1<f64>| joint_value(&chart, copper, x));
         solver.step(&oracle, &mut q).map_err(|error| error.to_string())?;
         force = max_abs(&joint_value(&chart, copper, q.view()).1);
-        if force < 2.0e-3 {
+        if force < tol {
             break;
         }
     }
@@ -8151,95 +8173,6 @@ fn shell_hops(copper: &FastCopper, repeats: usize, lattice: f64, shell: [f64; 3]
     hops
 }
 
-fn isolated_hops(copper: &FastCopper, repeats: usize, lattice: f64) -> Vec<ThirteenHop> {
-    let axis = [1.0, 0.0, 0.0];
-    let built = build_oriented(repeats, lattice, [lattice, 0.0, 0.0], axis, false);
-    let length = repeats as f64 * lattice;
-    let cell = [[length, 0.0, 0.0], [0.0, length, 0.0], [0.0, 0.0, length]];
-    let mut reactant = built.positions;
-    relax_fast(copper, &mut reactant, cell, 1.0e-3, 80);
-    let dumbbell = built.dumbbell;
-    let energy = copper.evaluate(reactant.view(), cell).0;
-    let origin = centroid(&reactant, dumbbell);
-    let mut hops = Vec::new();
-    for step in fcc_neighbor_steps(lattice) {
-        let end = quench_end(
-            copper,
-            shift_dumbbell(&reactant, dumbbell, step),
-            origin,
-            dumbbell,
-            cell,
-            energy,
-        );
-        let shift = dist(centroid(&end.positions, dumbbell), origin);
-        let now = dumbbell_axis(&end.positions, dumbbell, cell);
-        eprintln!(
-            "isolated translation try shift {shift:.3} axis {}",
-            axis_name(now)
-        );
-        if shift > 2.0 && axis_overlap(now, axis) > 0.75 {
-            hops.push(ThirteenHop {
-                shell: "isolated".into(),
-                orientation: "100".into(),
-                mechanism: "translation",
-                sites: 1,
-                reactant_sep: 0.0,
-                end_sep: shift,
-                reaction: end.reaction,
-                job: hop_job("translation", "isolated", "100", lattice, &reactant, &end, cell),
-            });
-            break;
-        }
-    }
-    let rotated = quench_end(
-        copper,
-        rotate_dumbbell(&reactant, dumbbell, [1.0, 1.0, 0.0]),
-        origin,
-        dumbbell,
-        cell,
-        energy,
-    );
-    let shift = dist(centroid(&rotated.positions, dumbbell), origin);
-    let now = dumbbell_axis(&rotated.positions, dumbbell, cell);
-    eprintln!(
-        "isolated rotation quench shift {shift:.3} axis {} overlap110 {:.3}",
-        axis_name(now),
-        axis_overlap(now, [1.0, 1.0, 0.0])
-    );
-    if shift < 0.5 && axis_overlap(now, [1.0, 1.0, 0.0]) > 0.75 {
-        hops.push(ThirteenHop {
-            shell: "isolated".into(),
-            orientation: "100".into(),
-            mechanism: "rotation",
-            sites: 1,
-            reactant_sep: 0.0,
-            end_sep: shift,
-            reaction: rotated.reaction,
-            job: hop_job("rotation", "isolated", "100", lattice, &reactant, &rotated, cell),
-        });
-    } else if let Some(end) = dimer_rotation(copper, &reactant, dumbbell, cell, [1.0, 1.0, 0.0]) {
-        let end_shift = dist(centroid(&end.positions, dumbbell), origin);
-        let now = dumbbell_axis(&end.positions, dumbbell, cell);
-        eprintln!(
-            "isolated dimer rotation shift {end_shift:.3} axis {}",
-            axis_name(now)
-        );
-        if end_shift < 0.5 && axis_overlap(now, axis) < 0.85 {
-        hops.push(ThirteenHop {
-            shell: "isolated".into(),
-            orientation: "100".into(),
-            mechanism: "rotation",
-            sites: 1,
-            reactant_sep: 0.0,
-            end_sep: end_shift,
-            reaction: end.reaction,
-            job: hop_job("rotation", "isolated", "100", lattice, &reactant, &end, cell),
-        });
-        }
-    }
-    hops
-}
-
 fn dimer_rotation(
     copper: &FastCopper,
     reactant: &Array1<f64>,
@@ -8310,21 +8243,6 @@ fn dimer_rotation(
     })
 }
 
-struct ThirteenRow {
-    shell: String,
-    orientation: String,
-    mechanism: String,
-    cell: String,
-    n_atoms: usize,
-    barrier: f64,
-    end_sep: f64,
-    reactant_sep: f64,
-    force: f64,
-    calls: usize,
-    steps: usize,
-    converged: bool,
-}
-
 #[test]
 fn fast_eam_matches_a_sheared_cell() {
     let (positions, _) = fcc(2, 3.628311);
@@ -8341,321 +8259,1988 @@ fn fast_eam_matches_a_sheared_cell() {
     }
 }
 
-#[test]
-#[ignore = "13x13x13 300 K shells inside 7 A; writes benchmarks/ssneb_shell_300K_13.csv"]
-fn ssneb_shell_300k_13() {
-    let lattice = 3.628311_f64;
-    let repeats = 13usize;
-    let copper = FastCopper::new();
-    let (sample, sample_cell) = fcc(repeats, lattice);
-    let started = Instant::now();
-    let _ = copper.evaluate(sample.view(), sample_cell);
-    eprintln!("13^3 eval {:.3} s, atoms {}", started.elapsed().as_secs_f64(), sample.len() / 3);
-    let shells: Vec<_> = shell_table(lattice, repeats)
-        .into_iter()
-        .filter(|(radius, _, _)| *radius < 7.0)
-        .collect();
-    assert!(shells.len() >= 5, "expected the neighbor shells inside 7 A");
-    let mut hops: Vec<ThirteenHop> = shells
-        .par_iter()
-        .flat_map(|(radius, vector, sites)| {
-            let _ = radius;
-            let local = FastCopper::new();
-            shell_hops(&local, repeats, lattice, *vector, *sites)
-        })
-        .collect();
-    hops.extend(isolated_hops(&copper, repeats, lattice));
-    assert!(hops.iter().any(|hop| hop.mechanism == "rotation" && hop.shell == "isolated"));
-    assert!(hops.iter().any(|hop| hop.mechanism == "away"), "no 4.456 away end");
-    let measured: Vec<_> = hops
-        .par_iter()
-        .map(|hop| {
-            if hop.mechanism == "capture" && hop.reaction == 0.0 && (hop.end_sep - hop.reactant_sep).abs() < 1.0e-8 {
-                let zero = BandStat {
-                    barrier: 0.0,
-                    force: 0.0,
-                    steps: 0,
-                    calls: 0,
-                    converged: true,
-                };
-                return (hop, zero.clone(), zero);
-            }
-            let local = FastCopper::new();
-            let (fixed, free) = size_pair(&local, &hop.job);
-            (hop, fixed, free)
-        })
-        .collect();
-    let mut rows = Vec::new();
-    for (hop, fixed, free) in &measured {
-        for (mode, stat) in [("fixed", fixed), ("free", free)] {
-            rows.push(ThirteenRow {
-                shell: hop.shell.clone(),
-                orientation: hop.orientation.clone(),
-                mechanism: hop.mechanism.to_string(),
-                cell: mode.into(),
-                n_atoms: hop.job.reactant.len() / 3,
-                barrier: stat.barrier,
-                end_sep: hop.end_sep,
-                reactant_sep: hop.reactant_sep,
-                force: stat.force,
-                calls: stat.calls,
-                steps: stat.steps,
-                converged: stat.converged,
-            });
-        }
-    }
-    let reference = |mechanism: &str, cell: &str| -> Option<f64> {
-        rows.iter()
-            .find(|row| row.shell == "isolated" && row.mechanism == mechanism && row.cell == cell && row.converged)
-            .map(|row| row.barrier)
-    };
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks/ssneb_shell_300K_13.csv");
-    let mut file = File::create(&path).expect("300 K 13^3 csv");
-    writeln!(
-        file,
-        "shell_A,orientation,mechanism,cell,n_atoms,barrier_eV,end_sep_A,reactant_sep_A,max_force,force_calls,steps,converged,free_barrier_eV,barrier_minus_free_eV,rotation_below_translation"
-    )
-    .unwrap();
-    for row in &rows {
-        let free_kind = if row.mechanism == "rotation" { "rotation" } else { "translation" };
-        let free_barrier = if row.shell == "isolated" { None } else { reference(free_kind, &row.cell) };
-        let translation = reference("translation", &row.cell);
-        let below = if row.mechanism == "rotation" && row.shell != "isolated" && row.converged {
-            translation.map(|value| if row.barrier < value { "1" } else { "0" })
-        } else {
-            None
-        };
-        let delta = free_barrier.map(|value| row.barrier - value);
-        writeln!(
-            file,
-            "{shell},{orientation},{mechanism},{cell},{n},{barrier:.6},{end:.3},{reactant:.3},{force:.6e},{calls},{steps},{ok},{free},{minus},{below}",
-            shell = row.shell,
-            orientation = row.orientation,
-            mechanism = row.mechanism,
-            cell = row.cell,
-            n = row.n_atoms,
-            barrier = row.barrier,
-            end = row.end_sep,
-            reactant = row.reactant_sep,
-            force = row.force,
-            calls = row.calls,
-            steps = row.steps,
-            ok = row.converged as u8,
-            free = free_barrier.map(|value| format!("{value:.6}")).unwrap_or_default(),
-            minus = delta.map(|value| format!("{value:.6}")).unwrap_or_default(),
-            below = below.unwrap_or(""),
-        )
-        .unwrap();
-        eprintln!(
-            "{shell} {orientation} {mechanism} {cell} barrier {barrier:.4} end {end:.3} force {force:.3e} below {below}",
-            shell = row.shell,
-            orientation = row.orientation,
-            mechanism = row.mechanism,
-            cell = row.cell,
-            barrier = row.barrier,
-            end = row.end_sep,
-            force = row.force,
-            below = below.unwrap_or("-"),
-        );
-    }
-    let require = |shell: &str, mechanism: &str, cell: &str| {
-        rows.iter().any(|row| {
-            row.shell == shell && row.mechanism == mechanism && row.cell == cell && row.converged
-        })
-    };
-    assert!(require("isolated", "translation", "fixed") && require("isolated", "translation", "free"));
-    assert!(require("isolated", "rotation", "fixed") && require("isolated", "rotation", "free"));
-    let away_fixed = rows
-        .iter()
-        .filter(|row| row.shell == "4.444" && row.mechanism == "away" && row.cell == "fixed" && row.converged)
-        .count();
-    assert!(away_fixed >= 2, "4.444 A away ends converged in fixed cell: {away_fixed}");
+const DUMBBELL_GAP: f64 = 2.40;
+const BAND_TOL: f64 = 1.5e-3;
+
+#[derive(Clone)]
+struct DefectSite {
+    center: [f64; 3],
+    axis: [f64; 3],
+    gap: f64,
 }
 
-#[test]
-#[ignore = "nearest 4.444 away ends and the isolated translation on the 13^3 cell"]
-fn ssneb_300k_13_finish() {
-    let lattice = 3.628311_f64;
-    let repeats = 13usize;
-    let copper = FastCopper::new();
-    let mut jobs = Vec::new();
-    let shell = shell_vector(lattice, repeats, 1.224744871);
-    let (reactant, vacancy, dumbbell, cell, sep, gone) =
-        shell_frame(&copper, repeats, lattice, shell, [1.0, 0.0, 0.0]);
-    assert!(!gone, "4.444 shell recombined");
-    let energy = copper.evaluate(reactant.view(), cell).0;
-    let mut away = Vec::new();
-    for step in fcc_neighbor_steps(lattice) {
-        let end = quench_end(
-            &copper,
-            shift_dumbbell(&reactant, dumbbell, step),
-            vacancy,
-            dumbbell,
-            cell,
-            energy,
-        );
-        eprintln!(
-            "4.444 try sep {:.3}->{:.3} dE {:.4} recombined {}",
-            sep, end.separation, end.reaction, end.recombined as u8
-        );
-        if end.recombined || end.separation < sep + 0.08 || end.reaction.abs() > 1.0 {
-            continue;
-        }
-        if distinct_end(&away, &end) {
-            away.push(end);
+/// Closest atom pair within `radius` of `near`; `None` when no pair is
+/// shorter than a split-interstitial bond.
+fn defect_site(
+    positions: &Array1<f64>,
+    cell: [[f64; 3]; 3],
+    near: [f64; 3],
+    radius: f64,
+) -> Option<DefectSite> {
+    let atoms: Vec<usize> = (0..positions.len() / 3)
+        .filter(|&atom| mic_distance(point_of(positions, atom), near, cell) < radius)
+        .collect();
+    let mut best: Option<(f64, usize, usize)> = None;
+    for (k, &i) in atoms.iter().enumerate() {
+        let here = point_of(positions, i);
+        for &j in &atoms[k + 1..] {
+            let gap = mic_distance(here, point_of(positions, j), cell);
+            if best.is_none_or(|(least, _, _)| gap < least) {
+                best = Some((gap, i, j));
+            }
         }
     }
-    away.sort_by(|left, right| left.separation.partial_cmp(&right.separation).unwrap_or(std::cmp::Ordering::Equal));
-    eprintln!("4.444 kept {} away ends", away.len());
-    for end in away.into_iter().take(2) {
-        jobs.push(ThirteenHop {
-            shell: "4.444".into(),
-            orientation: "100".into(),
-            mechanism: "away",
-            sites: 24,
-            reactant_sep: sep,
-            end_sep: end.separation,
-            reaction: end.reaction,
-            job: hop_job("away", "4.444", "100", lattice, &reactant, &end, cell),
-        });
+    let (gap, i, j) = best?;
+    if gap > DUMBBELL_GAP {
+        return None;
     }
-    let axis = [1.0, 0.0, 0.0];
-    let built = build_oriented(repeats, lattice, [lattice, 0.0, 0.0], axis, false);
-    let length = repeats as f64 * lattice;
-    let icell = [[length, 0.0, 0.0], [0.0, length, 0.0], [0.0, 0.0, length]];
-    let mut isolated = built.positions;
-    relax_fast(&copper, &mut isolated, icell, 1.0e-3, 80);
-    let idumb = built.dumbbell;
-    let ienergy = copper.evaluate(isolated.view(), icell).0;
-    let origin = centroid(&isolated, idumb);
-    let mut translated = None;
-    for step in fcc_neighbor_steps(lattice) {
-        let end = quench_end(
-            &copper,
-            shift_dumbbell(&isolated, idumb, step),
-            origin,
-            idumb,
-            icell,
-            ienergy,
-        );
-        let shift = dist(centroid(&end.positions, idumb), origin);
-        let now = dumbbell_axis(&end.positions, idumb, icell);
-        eprintln!(
-            "isolated try shift {shift:.3} axis {} dE {:.4}",
-            axis_name(now),
-            end.reaction
-        );
-        let reaction = end.reaction.abs();
-        let better = translated.as_ref().is_none_or(|(_, _, best)| reaction < *best);
-        if shift > 2.0 && axis_overlap(now, axis) > 0.75 && better {
-            translated = Some((end, shift, reaction));
+    let here = point_of(positions, i);
+    let delta = mic_delta(point_of(positions, j), here, cell);
+    Some(DefectSite {
+        center: [here[0] + 0.5 * delta[0], here[1] + 0.5 * delta[1], here[2] + 0.5 * delta[2]],
+        axis: unit3(delta),
+        gap,
+    })
+}
+
+fn closest_gap(positions: &Array1<f64>, cell: [[f64; 3]; 3], near: [f64; 3], radius: f64) -> f64 {
+    let atoms: Vec<usize> = (0..positions.len() / 3)
+        .filter(|&atom| mic_distance(point_of(positions, atom), near, cell) < radius)
+        .collect();
+    let mut least = f64::MAX;
+    for (k, &i) in atoms.iter().enumerate() {
+        for &j in &atoms[k + 1..] {
+            least = least.min(mic_distance(point_of(positions, i), point_of(positions, j), cell));
         }
     }
-    let (end, shift, _) = translated.expect("isolated translation end");
-    eprintln!("isolated translation chosen shift {shift:.3} dE {:.4}", end.reaction);
-    jobs.push(ThirteenHop {
-        shell: "isolated".into(),
-        orientation: "100".into(),
-        mechanism: "translation",
-        sites: 1,
-        reactant_sep: 0.0,
-        end_sep: shift,
-        reaction: end.reaction,
-        job: hop_job("translation", "isolated", "100", lattice, &isolated, &end, icell),
-    });
-    let mode = &end.positions - &isolated;
-    let mid = blend_positions(&isolated, icell, &end.positions, icell, icell, 0.5);
-    let mechanism = capture_mechanism(
-        &copper,
-        &isolated,
-        icell,
-        idumb,
-        &mid,
-        &end.positions,
-        &mode,
-        end.reaction,
-    );
-    let center = centroid(&reactant, dumbbell);
-    let mapped = mapped_hops(&reactant, cell, center, [1.0, 0.0, 0.0], &[mechanism]);
-    let mut mapped_away = Vec::new();
-    for hop in mapped {
-        let mut product = hop.product;
-        relax_fast(&copper, &mut product, cell, 1.5e-3, 60);
-        let after = rgsaddle::pair_separation(product.view(), cell, vacancy, &dumbbell).unwrap_or(sep);
-        let reaction = copper.evaluate(product.view(), cell).0 - energy;
-        let recombined = pair_recombined(&product, vacancy, dumbbell, cell);
-        eprintln!("mapped sep {sep:.3}->{after:.3} dE {reaction:.4} recombined {}", recombined as u8);
-        if recombined || after < sep + 0.08 || reaction.abs() > 0.5 {
-            continue;
-        }
-        let end = QuenchedEnd {
-            positions: product,
-            separation: after,
-            reaction,
-            recombined: false,
-        };
-        if distinct_end(&mapped_away, &end) {
-            mapped_away.push(end);
+    least
+}
+
+fn labeled_gap(left: &Array1<f64>, right: &Array1<f64>, cell: [[f64; 3]; 3]) -> f64 {
+    (0..left.len() / 3)
+        .map(|atom| mic_distance(point_of(left, atom), point_of(right, atom), cell))
+        .fold(0.0, f64::max)
+}
+
+fn cubic_cell(cell: [[f64; 3]; 3]) -> [[f64; 3]; 3] {
+    let length = det3(cell).abs().cbrt();
+    [[length, 0.0, 0.0], [0.0, length, 0.0], [0.0, 0.0, length]]
+}
+
+struct EndInfo {
+    site: Option<DefectSite>,
+    separation: f64,
+    recombined: bool,
+    reaction: f64,
+}
+
+/// `origin` is where the defect is searched for. The separation is to
+/// `vacancy` when there is one, otherwise the distance moved from `origin`.
+fn end_info(
+    copper: &FastCopper,
+    positions: &Array1<f64>,
+    cell: [[f64; 3]; 3],
+    vacancy: Option<[f64; 3]>,
+    origin: [f64; 3],
+    reactant_energy: f64,
+) -> EndInfo {
+    let site = defect_site(positions, cell, origin, 11.0);
+    let recombined = vacancy.is_some_and(|place| occupied(positions, place, cell) || site.is_none());
+    let reference = vacancy.unwrap_or(origin);
+    let separation = site
+        .as_ref()
+        .map(|found| mic_distance(found.center, reference, cell))
+        .unwrap_or(0.0);
+    EndInfo {
+        site,
+        separation,
+        recombined,
+        reaction: copper.evaluate(positions.view(), cell).0 - reactant_energy,
+    }
+}
+
+fn hop_class(reactant: &EndInfo, end: &EndInfo, cell: [[f64; 3]; 3], isolated: bool) -> Option<&'static str> {
+    if end.recombined {
+        return Some("capture");
+    }
+    let (from, to) = (reactant.site.as_ref()?, end.site.as_ref()?);
+    let moved = mic_distance(from.center, to.center, cell);
+    if moved < 0.7 {
+        return (axis_overlap(from.axis, to.axis) < 0.85).then_some("rotation");
+    }
+    if isolated {
+        return (moved > 1.5).then_some("translation");
+    }
+    let delta = end.separation - reactant.separation;
+    Some(if delta < -0.25 {
+        "toward"
+    } else if delta > 0.25 {
+        "away"
+    } else {
+        "translation"
+    })
+}
+
+fn quench_pair(
+    copper: &FastCopper,
+    saddle: &Array1<f64>,
+    mode: &Array1<f64>,
+    cell: [[f64; 3]; 3],
+    steps: usize,
+) -> Option<(Array1<f64>, Array1<f64>)> {
+    let mut peak = 0.0_f64;
+    for atom in 0..saddle.len() / 3 {
+        let norm = (0..3).map(|c| mode[3 * atom + c] * mode[3 * atom + c]).sum::<f64>().sqrt();
+        peak = peak.max(norm);
+    }
+    if peak < 1.0e-8 {
+        return None;
+    }
+    let step = mode * (0.3 / peak);
+    let mut plus = saddle + &step;
+    let mut minus = saddle - &step;
+    relax_fast(copper, &mut plus, cell, 1.0e-3, steps);
+    relax_fast(copper, &mut minus, cell, 1.0e-3, steps);
+    Some((plus, minus))
+}
+
+/// The saddle relaxes, along its two signs, onto these two labelled minima.
+fn joins(
+    copper: &FastCopper,
+    saddle: &Array1<f64>,
+    mode: &Array1<f64>,
+    cell: [[f64; 3]; 3],
+    reactant: &Array1<f64>,
+    product: &Array1<f64>,
+) -> bool {
+    let Some((plus, minus)) = quench_pair(copper, saddle, mode, cell, 250) else {
+        return false;
+    };
+    let near = |left: &Array1<f64>, right: &Array1<f64>| labeled_gap(left, right, cell) < 0.4;
+    (near(&plus, reactant) && near(&minus, product)) || (near(&minus, reactant) && near(&plus, product))
+}
+
+#[derive(Clone)]
+struct ShellHop {
+    shell: String,
+    sites: usize,
+    orientation: String,
+    class: &'static str,
+    reactant: Array1<f64>,
+    product: Array1<f64>,
+    saddle: Array1<f64>,
+    cell: [[f64; 3]; 3],
+    lattice: f64,
+    vacancy: Option<[f64; 3]>,
+    reactant_sep: f64,
+    end_sep: f64,
+    end_axis: String,
+    reaction: f64,
+    recombined: bool,
+    seed_barrier: f64,
+    seed_index: i64,
+    connected: bool,
+}
+
+/// Signed permutations, proper and improper, that send `from` to `±to`:
+/// the operations of the cubic crystal that keep a dumbbell director.
+fn director_ops(from: [f64; 3], to: [f64; 3]) -> Vec<[[f64; 3]; 3]> {
+    let from = unit3(from);
+    let to = unit3(to);
+    let mut ops = Vec::new();
+    for perm in [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]] {
+        for mask in 0..8 {
+            let mut op = [[0.0; 3]; 3];
+            for (row, &column) in perm.iter().enumerate() {
+                op[row][column] = if mask & (1 << row) == 0 { 1.0 } else { -1.0 };
+            }
+            let image = mat_vec(op, from);
+            if (image[0] * to[0] + image[1] * to[1] + image[2] * to[2]).abs() > 0.9 {
+                ops.push(op);
+            }
         }
     }
-    mapped_away.sort_by(|left, right| {
-        left.separation.partial_cmp(&right.separation).unwrap_or(std::cmp::Ordering::Equal)
-    });
-    for end in mapped_away.into_iter().take(2) {
-        jobs.push(ThirteenHop {
-            shell: "4.444".into(),
-            orientation: "100".into(),
-            mechanism: "away",
-            sites: 24,
-            reactant_sep: sep,
-            end_sep: end.separation,
-            reaction: end.reaction,
-            job: hop_job("away", "4.444", "100", lattice, &reactant, &end, cell),
-        });
+    ops
+}
+
+fn mapped_hops_full(
+    reactant: &Array1<f64>,
+    cell: [[f64; 3]; 3],
+    center: [f64; 3],
+    axis: [f64; 3],
+    mechanisms: &[Mechanism],
+) -> Vec<rgsaddle::HopTemplate> {
+    let mut hops: Vec<rgsaddle::HopTemplate> = Vec::new();
+    for mechanism in mechanisms {
+        for op in director_ops(mechanism.axis, axis) {
+            if let Some(hop) = assign_mapped(reactant, cell, center, op, mechanism)
+                && !hops.iter().any(|prior| moved_gap(&prior.product, &hop.product, reactant, cell) < 0.45)
+            {
+                hops.push(hop);
+            }
+        }
     }
-    let measured: Vec<_> = jobs
-        .par_iter()
-        .map(|hop| {
-            let local = FastCopper::new();
-            let (fixed, free) = size_pair(&local, &hop.job);
-            (hop, fixed, free)
+    hops
+}
+
+/// Hausdorff distance over the atoms that either state moved off `reactant`.
+fn moved_gap(left: &Array1<f64>, right: &Array1<f64>, reactant: &Array1<f64>, cell: [[f64; 3]; 3]) -> f64 {
+    let moved: Vec<usize> = (0..reactant.len() / 3)
+        .filter(|&atom| {
+            let home = point_of(reactant, atom);
+            mic_distance(point_of(left, atom), home, cell) > 1.0e-6
+                || mic_distance(point_of(right, atom), home, cell) > 1.0e-6
         })
         .collect();
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks/ssneb_shell_300K_13_finish.csv");
-    let mut file = File::create(&path).expect("finish csv");
-    writeln!(
-        file,
-        "shell_A,orientation,mechanism,cell,n_atoms,barrier_eV,end_sep_A,reactant_sep_A,max_force,force_calls,steps,converged,reaction_eV"
-    )
-    .unwrap();
-    for (hop, fixed, free) in &measured {
-        for (mode, stat) in [("fixed", fixed), ("free", free)] {
-            writeln!(
-                file,
-                "{shell},{orientation},{mechanism},{mode},{n},{barrier:.6},{end:.3},{reactant:.3},{force:.6e},{calls},{steps},{ok},{reaction:.4}",
-                shell = hop.shell,
-                orientation = hop.orientation,
-                mechanism = hop.mechanism,
-                n = hop.job.reactant.len() / 3,
-                barrier = stat.barrier,
-                end = hop.end_sep,
-                reactant = hop.reactant_sep,
-                force = stat.force,
-                calls = stat.calls,
-                steps = stat.steps,
-                ok = stat.converged as u8,
-                reaction = hop.reaction,
-            )
-            .unwrap();
+    let directed = |from: &Array1<f64>, to: &Array1<f64>| {
+        moved
+            .iter()
+            .map(|&i| {
+                moved
+                    .iter()
+                    .map(|&j| mic_distance(point_of(from, i), point_of(to, j), cell))
+                    .fold(f64::MAX, f64::min)
+            })
+            .fold(0.0, f64::max)
+    };
+    directed(left, right).max(directed(right, left))
+}
+
+/// Every hop of the isolated mechanisms mapped onto this dumbbell,
+/// quenched, classified, and one frozen dimer per distinct end state.
+fn frame_hops(
+    copper: &FastCopper,
+    shell: &str,
+    sites: usize,
+    reactant: &Array1<f64>,
+    cell: [[f64; 3]; 3],
+    lattice: f64,
+    vacancy: Option<[f64; 3]>,
+    origin: [f64; 3],
+    mechanisms: &[Mechanism],
+    keep_away: bool,
+) -> (Vec<ShellHop>, String) {
+    let isolated = vacancy.is_none();
+    let reactant_energy = copper.evaluate(reactant.view(), cell).0;
+    let start = end_info(copper, reactant, cell, vacancy, origin, reactant_energy);
+    let Some(site) = start.site.clone() else {
+        eprintln!("{shell}: no dumbbell in the reactant");
+        return (Vec::new(), "no dumbbell in the reactant".into());
+    };
+    let orientation = axis_name(site.axis);
+    let templates = mapped_hops_full(reactant, cell, site.center, site.axis, mechanisms);
+    eprintln!(
+        "{shell}: {orientation} sep {:.3} gap {:.3}, {} mapped hops",
+        start.separation,
+        site.gap,
+        templates.len()
+    );
+    let fates: Vec<_> = templates
+        .into_par_iter()
+        .map(|hop| {
+            let local = FastCopper::new();
+            let mut product = hop.product.clone();
+            relax_fast(&local, &mut product, cell, 1.0e-3, 200);
+            let kind = hop.name.clone();
+            if labeled_gap(&product, reactant, cell) < 0.3 {
+                return (kind, "reverts", None);
+            }
+            let info = end_info(&local, &product, cell, vacancy, origin, reactant_energy);
+            match hop_class(&start, &info, cell, isolated) {
+                Some(class) => (kind, class, Some((hop, product, info, class))),
+                None => (kind, "same state", None),
+            }
+        })
+        .collect();
+    let mut tally: Vec<(String, &str, usize)> = Vec::new();
+    for (kind, fate, _) in &fates {
+        match tally.iter_mut().find(|(name, seen, _)| name == kind && seen == fate) {
+            Some(entry) => entry.2 += 1,
+            None => tally.push((kind.clone(), fate, 1)),
+        }
+    }
+    let note = tally
+        .iter()
+        .map(|(kind, fate, count)| format!("{kind}->{fate} x{count}"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    eprintln!("{shell}: templates {note}");
+    let quenched: Vec<_> = fates
+        .into_iter()
+        .filter_map(|(_, _, item)| item)
+        .filter(|item| keep_away || item.3 != "away")
+        .collect();
+    let mut distinct: Vec<(rgsaddle::HopTemplate, Array1<f64>, EndInfo, &'static str)> = Vec::new();
+    for item in quenched {
+        let same = distinct.iter().any(|kept| {
+            kept.3 == item.3
+                && (kept.2.separation - item.2.separation).abs() < 0.08
+                && (kept.2.reaction - item.2.reaction).abs() < 3.0e-3
+                && match (&kept.2.site, &item.2.site) {
+                    (Some(left), Some(right)) => axis_overlap(left.axis, right.axis) > 0.85,
+                    (None, None) => true,
+                    _ => false,
+                }
+        });
+        if !same {
+            distinct.push(item);
+        }
+    }
+    let hops = distinct
+        .into_par_iter()
+        .map(|(hop, product, info, class)| {
+            let local = FastCopper::new();
+            let guess = hop
+                .saddle
+                .clone()
+                .unwrap_or_else(|| blend_positions(reactant, cell, &product, cell, cell, 0.5));
+            let mode = hop.mode.clone().unwrap_or_else(|| &product - reactant);
+            let tight = tighten_dimer_steps(&local, cell, &guess, &mode, 200);
+            let connected =
+                tight.converged && joins(&local, &tight.positions, &tight.mode, cell, reactant, &product);
             eprintln!(
-                "{shell} {mechanism} {mode} {barrier:.4} end {end:.3} force {force:.3e} ok {ok}",
-                shell = hop.shell,
-                mechanism = hop.mechanism,
-                barrier = stat.barrier,
-                end = hop.end_sep,
-                force = stat.force,
-                ok = stat.converged as u8,
+                "{shell} {class}: end sep {:.3} dE {:.4} dimer {:.4} index {} joins {}",
+                info.separation,
+                info.reaction,
+                tight.energy - reactant_energy,
+                tight.index,
+                connected as u8
+            );
+            ShellHop {
+                shell: shell.into(),
+                sites,
+                orientation: orientation.clone(),
+                class,
+                reactant: reactant.clone(),
+                saddle: if connected { tight.positions.clone() } else { guess },
+                product,
+                cell,
+                lattice,
+                vacancy,
+                reactant_sep: start.separation,
+                end_sep: info.separation,
+                end_axis: info.site.as_ref().map(|found| axis_name(found.axis)).unwrap_or_default(),
+                reaction: info.reaction,
+                recombined: info.recombined,
+                seed_barrier: if connected { tight.energy - reactant_energy } else { f64::NAN },
+                seed_index: tight.index,
+                connected,
+            }
+        })
+        .collect();
+    (hops, note)
+}
+
+/// Lowest joined hop of each class; every distinct away end when asked.
+fn pick_hops(hops: Vec<ShellHop>, every_away: bool) -> Vec<ShellHop> {
+    let rank = |hop: &ShellHop| {
+        if hop.connected {
+            hop.seed_barrier
+        } else {
+            1.0e3 + hop.reaction.abs()
+        }
+    };
+    let mut kept = Vec::new();
+    for class in ["rotation", "translation", "toward", "capture", "away"] {
+        let mut group: Vec<&ShellHop> = hops.iter().filter(|hop| hop.class == class).collect();
+        group.sort_by(|left, right| rank(left).partial_cmp(&rank(right)).unwrap_or(std::cmp::Ordering::Equal));
+        let take = if class == "away" && every_away { 3 } else { 1 };
+        let mut chosen: Vec<&ShellHop> = Vec::new();
+        for hop in group {
+            let mirror = chosen.iter().any(|kept| {
+                (kept.end_sep - hop.end_sep).abs() < 0.08
+                    && (kept.reaction - hop.reaction).abs() < 3.0e-3
+                    && (kept.connected == hop.connected)
+                    && (!hop.connected || (kept.seed_barrier - hop.seed_barrier).abs() < 2.0e-3)
+            });
+            if !mirror && chosen.len() < take {
+                chosen.push(hop);
+            }
+        }
+        kept.extend(chosen.into_iter().cloned());
+    }
+    kept
+}
+
+fn shell_reactant(
+    copper: &FastCopper,
+    repeats: usize,
+    lattice: f64,
+    vector: [f64; 3],
+    radius: f64,
+) -> Option<(Array1<f64>, [f64; 3], [[f64; 3]; 3])> {
+    let mut best: Option<(f64, Array1<f64>, [f64; 3], [[f64; 3]; 3])> = None;
+    for axis in [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]] {
+        let (reactant, vacancy, _, cell, _, _) = shell_frame(copper, repeats, lattice, vector, axis);
+        let energy = copper.evaluate(reactant.view(), cell).0;
+        let info = end_info(copper, &reactant, cell, Some(vacancy), vacancy, energy);
+        if info.recombined {
+            continue;
+        }
+        let miss = (info.separation - radius).abs();
+        if best.as_ref().is_none_or(|(least, ..)| miss < *least) {
+            best = Some((miss, reactant, vacancy, cell));
+        }
+    }
+    best.map(|(_, reactant, vacancy, cell)| (reactant, vacancy, cell))
+}
+
+fn band_images_n(
+    reactant: &Array1<f64>,
+    reactant_cell: [[f64; 3]; 3],
+    saddle: &Array1<f64>,
+    saddle_cell: [[f64; 3]; 3],
+    product: &Array1<f64>,
+    product_cell: [[f64; 3]; 3],
+    n: usize,
+) -> (Array2<f64>, Vec<Cell>) {
+    let mid = n / 2;
+    let mut positions = Array2::zeros((n, reactant.len()));
+    let mut cells = Vec::with_capacity(n);
+    for i in 0..n {
+        let (row, cell) = if i <= mid {
+            let t = i as f64 / mid as f64;
+            let cell = blend_cell(reactant_cell, saddle_cell, t);
+            (blend_positions(reactant, reactant_cell, saddle, saddle_cell, cell, t), cell)
+        } else {
+            let t = (i - mid) as f64 / (n - 1 - mid) as f64;
+            let cell = blend_cell(saddle_cell, product_cell, t);
+            (blend_positions(saddle, saddle_cell, product, product_cell, cell, t), cell)
+        };
+        positions.row_mut(i).assign(&row);
+        cells.push(Cell(cell));
+    }
+    (positions, cells)
+}
+
+fn resample_band(positions: &Array2<f64>, cells: &[[[f64; 3]; 3]], n: usize) -> (Array2<f64>, Vec<Cell>) {
+    let m = positions.nrows();
+    let mut out = Array2::zeros((n, positions.ncols()));
+    let mut out_cells = Vec::with_capacity(n);
+    for i in 0..n {
+        let s = i as f64 * (m - 1) as f64 / (n - 1) as f64;
+        let j = (s.floor() as usize).min(m - 2);
+        let t = s - j as f64;
+        let cell = blend_cell(cells[j], cells[j + 1], t);
+        let row = blend_positions(
+            &positions.row(j).to_owned(),
+            cells[j],
+            &positions.row(j + 1).to_owned(),
+            cells[j + 1],
+            cell,
+            t,
+        );
+        out.row_mut(i).assign(&row);
+        out_cells.push(Cell(cell));
+    }
+    (out, out_cells)
+}
+
+fn enthalpy_of(copper: &FastCopper, positions: ArrayView1<f64>, cell: [[f64; 3]; 3], pressure: f64) -> f64 {
+    copper.evaluate(positions, cell).0 + pressure * det3(cell).abs()
+}
+
+fn enthalpies(copper: &FastCopper, positions: &Array2<f64>, cells: &[[[f64; 3]; 3]], pressure: f64) -> Array1<f64> {
+    let values: Vec<f64> = (0..positions.nrows())
+        .into_par_iter()
+        .map(|i| enthalpy_of(copper, positions.row(i), cells[i], pressure))
+        .collect();
+    Array1::from(values)
+}
+
+/// Capped L-BFGS keeps twenty pairs and moves an atom at most 0.06 Å a
+/// step; FIRE moves at most 0.1 Å.
+fn band_method(name: &str) -> (Method, f64, f64) {
+    match name {
+        "fire" => (Method::Fire { kind: FireKind::V2 }, 0.1, 0.1),
+        _ => (Method::Lbfgs { memory: 20 }, 0.06, 0.08),
+    }
+}
+
+fn run_band(
+    copper: &FastCopper,
+    start: Array2<f64>,
+    start_cells: Vec<Cell>,
+    fixed: Option<[[f64; 3]; 3]>,
+    pressure: f64,
+    method: &str,
+    relax_first: bool,
+    climb_steps: usize,
+) -> Result<BandEnd, String> {
+    let surface = EamBand { copper, fixed };
+    let mut positions = start;
+    let mut cells = start_cells;
+    let mut steps = 0usize;
+    let mut best_force = f64::MAX;
+    let mut best_positions = positions.clone();
+    let mut best_cells: Vec<[[f64; 3]; 3]> = cells.iter().map(|cell| cell.0).collect();
+    let mut phases = Vec::new();
+    if relax_first {
+        phases.push((0u8, None, 0.2_f64, 40usize));
+    }
+    phases.push((1, Some(CiConfig::after(0.1)), BAND_TOL, climb_steps));
+    for (phase, climbing, tol, limit) in phases {
+        let solid = fixed.is_none().then(|| SolidState::new(cells.clone()).with_pressure(pressure));
+        let (stepper, max_move, time_step) = band_method(method);
+        let mut config = neb_config(SpringKind::Uniform { k: 1.0 }, climbing, tol, solid);
+        config.method = stepper;
+        config.max_move = max_move;
+        config.time_step = time_step;
+        let mut session = BandSession::new(config, positions.clone()).map_err(|error| error.to_string())?;
+        for _ in 0..limit {
+            let report = session.step(&surface).map_err(|error| error.to_string())?;
+            steps += 1;
+            let improved = phase == 1 && report.max_force < best_force;
+            if improved || phase == 0 {
+                positions = session.positions().to_owned();
+                let fallback = fixed.unwrap_or_else(|| cells.first().map(|cell| cell.0).unwrap_or([[0.0; 3]; 3]));
+                let n_images = positions.nrows();
+                cells = session
+                    .image_cells()
+                    .map(|image| image.to_vec())
+                    .unwrap_or_else(|| vec![Cell(fallback); n_images]);
+            }
+            if improved {
+                best_force = report.max_force;
+                best_positions = positions.clone();
+                best_cells = cells.iter().map(|cell| cell.0).collect();
+            }
+            if !report.max_force.is_finite() || report.status != BandStatus::Running || report.max_force < tol {
+                break;
+            }
+        }
+    }
+    if !best_force.is_finite() {
+        return Err("band force was not finite".into());
+    }
+    Ok(BandEnd {
+        positions: best_positions,
+        cells: best_cells,
+        force: best_force,
+        steps,
+        converged: best_force < BAND_TOL,
+    })
+}
+
+#[derive(Clone)]
+struct Attempt {
+    method: &'static str,
+    images: usize,
+    seed: &'static str,
+    barrier: f64,
+    force: f64,
+    steps: usize,
+    calls: usize,
+    converged: bool,
+}
+
+#[derive(Clone)]
+struct DimerFix {
+    enthalpy: f64,
+    barrier: f64,
+    force: f64,
+    negative: i64,
+    eigenvalue: f64,
+    converged: bool,
+    steps: usize,
+    calls: usize,
+}
+
+struct BandOutcome {
+    attempts: Vec<Attempt>,
+    positions: Array2<f64>,
+    cells: Vec<[[f64; 3]; 3]>,
+    barrier: f64,
+    force: f64,
+    converged: bool,
+    dimer: Option<DimerFix>,
+    path: String,
+    direct: Option<(DimerFix, bool)>,
+}
+
+impl BandOutcome {
+    /// Barrier, its source and force: a converged band, else an index-1
+    /// dimer that met the band tolerance. A band that does not cross one
+    /// barrier counts only through a direct index-1 saddle joining its ends.
+    fn value(&self) -> Option<(f64, &'static str, f64)> {
+        if self.path != "single" {
+            return self
+                .direct
+                .as_ref()
+                .filter(|(dimer, linked)| *linked && dimer.converged && dimer.force < BAND_TOL)
+                .map(|(dimer, _)| (dimer.barrier, "direct_dimer", dimer.force));
+        }
+        if self.converged {
+            return Some((self.barrier, "band", self.force));
+        }
+        self.dimer
+            .as_ref()
+            .filter(|dimer| dimer.converged && dimer.force < BAND_TOL)
+            .map(|dimer| (dimer.barrier, "dimer", dimer.force))
+    }
+
+    fn highest(&self, copper: &FastCopper, pressure: f64) -> (Array1<f64>, [[f64; 3]; 3]) {
+        let energies = enthalpies(copper, &self.positions, &self.cells, pressure);
+        let ci = highest_interior(&energies);
+        (self.positions.row(ci).to_owned(), self.cells[ci])
+    }
+}
+
+fn band_try(
+    copper: &FastCopper,
+    start: &(Array2<f64>, Vec<Cell>),
+    fixed: Option<[[f64; 3]; 3]>,
+    pressure: f64,
+    method: &'static str,
+    seed: &'static str,
+    climb_steps: usize,
+) -> (Attempt, Option<BandEnd>) {
+    let before = copper.calls.load(Ordering::Relaxed);
+    let result = run_band(copper, start.0.clone(), start.1.clone(), fixed, pressure, method, seed == "seed", climb_steps);
+    let calls = copper.calls.load(Ordering::Relaxed) - before;
+    let images = start.0.nrows();
+    match result {
+        Ok(end) => {
+            let energies = enthalpies(copper, &end.positions, &end.cells, pressure);
+            let barrier = energies[highest_interior(&energies)] - energies[0];
+            (
+                Attempt {
+                    method,
+                    images,
+                    seed,
+                    barrier,
+                    force: end.force,
+                    steps: end.steps,
+                    calls,
+                    converged: end.converged,
+                },
+                Some(end),
+            )
+        }
+        Err(error) => {
+            eprintln!("band {method} {seed}: {error}");
+            (
+                Attempt {
+                    method,
+                    images,
+                    seed,
+                    barrier: f64::NAN,
+                    force: f64::NAN,
+                    steps: 0,
+                    calls,
+                    converged: false,
+                },
+                None,
+            )
+        }
+    }
+}
+
+/// Minimum-mode refinement of the highest image; frozen or joint cell.
+fn refine_highest(
+    copper: &FastCopper,
+    positions: &Array2<f64>,
+    cells: &[[[f64; 3]; 3]],
+    fixed: bool,
+    pressure: f64,
+) -> DimerFix {
+    let energies = enthalpies(copper, positions, cells, pressure);
+    let ci = highest_interior(&energies);
+    let cell = cells[ci];
+    let ahead = into_cell(&positions.row(ci + 1).to_owned(), cells[ci + 1], cell);
+    let behind = into_cell(&positions.row(ci - 1).to_owned(), cells[ci - 1], cell);
+    let guess = positions.row(ci).to_owned();
+    run_dimer(copper, guess, cell, &chord(&behind, &ahead, cell), fixed, pressure, energies[0]).0
+}
+
+fn chord(from: &Array1<f64>, to: &Array1<f64>, cell: [[f64; 3]; 3]) -> Array1<f64> {
+    let mut tangent = Array1::zeros(from.len());
+    for atom in 0..from.len() / 3 {
+        let step = mic_delta(point_of(to, atom), point_of(from, atom), cubic_cell(cell));
+        for c in 0..3 {
+            tangent[3 * atom + c] = step[c];
+        }
+    }
+    tangent
+}
+
+/// Index-1 dimer from `guess` along `tangent`; returns the fix with the
+/// final positions, cell and mode.
+fn run_dimer(
+    copper: &FastCopper,
+    guess: Array1<f64>,
+    cell: [[f64; 3]; 3],
+    tangent: &Array1<f64>,
+    fixed: bool,
+    pressure: f64,
+    reference: f64,
+) -> (DimerFix, Option<(Array1<f64>, [[f64; 3]; 3], Array1<f64>)>) {
+    let before = copper.calls.load(Ordering::Relaxed);
+    let search = MinModeConfig {
+        force_tol: 1.0e-3,
+        max_move: 0.05,
+        dr: 1.0e-3,
+        max_rotations: 8,
+        ..MinModeConfig::default()
+    };
+    let check = IndexCheck::first_order().with_step(1.0e-3).with_escapes(2);
+    let config = if fixed {
+        SolidDimerConfig::frozen(search).with_index_check(check)
+    } else {
+        SolidDimerConfig::new(search).with_pressure(pressure).with_index_check(check)
+    };
+    let held = FastHeld { copper, cell };
+    let failed = |calls| DimerFix {
+        enthalpy: f64::NAN,
+        barrier: f64::NAN,
+        force: f64::NAN,
+        negative: -1,
+        eigenvalue: f64::NAN,
+        converged: false,
+        steps: 0,
+        calls,
+    };
+    let width = guess.len();
+    let Ok(mut dimer) = SolidDimer::new(config, guess, cell, unit_mode(tangent, width)) else {
+        return (failed(0), None);
+    };
+    let Ok(report) = dimer.run(&held, 400) else {
+        return (failed(copper.calls.load(Ordering::Relaxed) - before), None);
+    };
+    let enthalpy = enthalpy_of(copper, dimer.positions(), dimer.cell(), pressure);
+    let negative = report.negative_modes.map(|count| count as i64).unwrap_or(-1);
+    let fix = DimerFix {
+        enthalpy,
+        barrier: enthalpy - reference,
+        force: report.max_force,
+        negative,
+        eigenvalue: report.eigenvalues.first().copied().unwrap_or(report.curvature),
+        converged: report.status == MinModeStatus::Converged && !report.rejected && negative == 1,
+        steps: report.iteration,
+        calls: copper.calls.load(Ordering::Relaxed) - before,
+    };
+    let atoms = dimer.positions().len();
+    let mode = dimer.mode().slice(ndarray::s![..atoms]).to_owned();
+    (fix, Some((dimer.positions().to_owned(), dimer.cell(), mode)))
+}
+
+/// Capped L-BFGS on nine images, FIRE on the same seed when `compare`
+/// or when L-BFGS stalls, then both again on the best band re-seeded to
+/// thirteen images, then a dimer on its highest image.
+fn converge_band(
+    copper: &FastCopper,
+    seed: (Array2<f64>, Vec<Cell>),
+    fixed: Option<[[f64; 3]; 3]>,
+    pressure: f64,
+    compare: bool,
+    label: &str,
+) -> BandOutcome {
+    let mut attempts = Vec::new();
+    let mut best: Option<BandEnd> = None;
+    let mut keep = |attempt: Attempt, end: Option<BandEnd>, best: &mut Option<BandEnd>| {
+        eprintln!(
+            "{label}: {} {} images {} barrier {:.5} force {:.3e} steps {}",
+            attempt.method, attempt.seed, attempt.images, attempt.barrier, attempt.force, attempt.steps
+        );
+        if let Some(end) = end
+            && best.as_ref().is_none_or(|kept| end.force < kept.force)
+        {
+            *best = Some(end);
+        }
+        attempts.push(attempt);
+    };
+    let done = |best: &Option<BandEnd>| best.as_ref().is_some_and(|end| end.converged);
+    let (attempt, end) = band_try(copper, &seed, fixed, pressure, "lbfgs", "seed", 500);
+    keep(attempt, end, &mut best);
+    if compare || !done(&best) {
+        let (attempt, end) = band_try(copper, &seed, fixed, pressure, "fire", "seed", 800);
+        keep(attempt, end, &mut best);
+    }
+    if !done(&best)
+        && let Some(stopped) = best.as_ref()
+    {
+        let reseed = resample_band(&stopped.positions, &stopped.cells, 13);
+        let (attempt, end) = band_try(copper, &reseed, fixed, pressure, "lbfgs", "reseed", 600);
+        keep(attempt, end, &mut best);
+        if !done(&best) {
+            let (attempt, end) = band_try(copper, &reseed, fixed, pressure, "fire", "reseed", 900);
+            keep(attempt, end, &mut best);
+        }
+    }
+    let Some(end) = best else {
+        return BandOutcome {
+            attempts,
+            positions: seed.0,
+            cells: seed.1.iter().map(|cell| cell.0).collect(),
+            barrier: f64::NAN,
+            force: f64::NAN,
+            converged: false,
+            dimer: None,
+            path: String::new(),
+            direct: None,
+        };
+    };
+    let energies = enthalpies(copper, &end.positions, &end.cells, pressure);
+    let barrier = energies[highest_interior(&energies)] - energies[0];
+    let dimer = (!end.converged).then(|| {
+        let fix = refine_highest(copper, &end.positions, &end.cells, fixed.is_some(), pressure);
+        eprintln!(
+            "{label}: dimer barrier {:.5} force {:.3e} negative {} eigenvalue {:.4} converged {}",
+            fix.barrier, fix.force, fix.negative, fix.eigenvalue, fix.converged as u8
+        );
+        fix
+    });
+    BandOutcome {
+        attempts,
+        barrier,
+        force: end.force,
+        converged: end.converged,
+        positions: end.positions,
+        cells: end.cells,
+        dimer,
+        path: String::new(),
+        direct: None,
+    }
+}
+
+/// Index-1 saddle from the mapped hop saddle along the end-to-end chord,
+/// and whether its two descents reach `start` and `end`.
+fn direct_saddle(
+    copper: &FastCopper,
+    hop: &ShellHop,
+    start: (&Array1<f64>, [[f64; 3]; 3]),
+    end: (&Array1<f64>, [[f64; 3]; 3]),
+    fixed: bool,
+    pressure: f64,
+) -> (DimerFix, bool) {
+    let cell = start.1;
+    let guess = into_cell(&hop.saddle, hop.cell, cell);
+    let product = into_cell(end.0, end.1, cell);
+    let reference = enthalpy_of(copper, start.0.view(), cell, pressure);
+    let (fix, found) = run_dimer(copper, guess, cell, &chord(start.0, &product, cell), fixed, pressure, reference);
+    let linked = found.is_some_and(|(positions, at, mode)| {
+        let near = |state: &Array1<f64>, from| into_cell(state, from, at);
+        fix.converged && joins(copper, &positions, &mode, at, &near(start.0, cell), &near(end.0, end.1))
+    });
+    (fix, linked)
+}
+
+/// `single` when the band crosses one barrier between its two end
+/// states; otherwise how it departs from that.
+fn path_kind(copper: &FastCopper, outcome: &BandOutcome, hop: &ShellHop, pressure: f64) -> String {
+    let n = outcome.positions.nrows();
+    if n < 3 {
+        return "none".into();
+    }
+    let energies = enthalpies(copper, &outcome.positions, &outcome.cells, pressure);
+    let recombined: Vec<bool> = (0..n)
+        .map(|i| {
+            hop.vacancy.is_some_and(|vacancy| {
+                let mapped = into_cell(&outcome.positions.row(i).to_owned(), outcome.cells[i], hop.cell);
+                occupied(&mapped, vacancy, hop.cell) || defect_site(&mapped, hop.cell, vacancy, 11.0).is_none()
+            })
+        })
+        .collect();
+    let top = highest_interior(&energies);
+    let first = outcome.positions.row(0).to_owned();
+    let last = into_cell(&outcome.positions.row(n - 1).to_owned(), outcome.cells[n - 1], outcome.cells[0]);
+    let mover = (0..first.len() / 3)
+        .max_by(|&left, &right| {
+            let step = |atom| mic_distance(point_of(&first, atom), point_of(&last, atom), cubic_cell(outcome.cells[0]));
+            step(left).partial_cmp(&step(right)).unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .unwrap_or(0);
+    let peak = into_cell(&outcome.positions.row(top).to_owned(), outcome.cells[top], cubic_cell(outcome.cells[top]));
+    let tightest = closest_gap(&peak, cubic_cell(outcome.cells[top]), point_of(&peak, mover), 8.0);
+    if tightest < 1.8 {
+        return "atom_overlap".into();
+    }
+    let reemitted = (0..n).any(|i| recombined[i] && (i + 1..n).any(|j| !recombined[j]));
+    if reemitted {
+        return "via_recombination".into();
+    }
+    let floor = energies[0].min(energies[n - 1]);
+    if (1..n - 1).any(|i| energies[i] < floor - 0.02) {
+        return "intermediate_minimum".into();
+    }
+    let mut peaks = 0;
+    for i in 1..n - 1 {
+        if energies[i] > energies[i - 1] && energies[i] >= energies[i + 1] {
+            let left = (0..i).map(|j| energies[j]).fold(f64::MAX, f64::min);
+            let right = (i + 1..n).map(|j| energies[j]).fold(f64::MAX, f64::min);
+            if (energies[i] - left).min(energies[i] - right) > 0.01 {
+                peaks += 1;
+            }
+        }
+    }
+    if peaks > 1 { "multi_peak".into() } else { "single".into() }
+}
+
+struct FreeEnds {
+    lattice: f64,
+    reactant_force: f64,
+    product_force: f64,
+    reactant_shift: f64,
+    product_shift: f64,
+}
+
+struct HopResult {
+    hop: ShellHop,
+    fixed: BandOutcome,
+    free: BandOutcome,
+    ends: FreeEnds,
+}
+
+fn measure_hop(copper: &FastCopper, hop: &ShellHop) -> HopResult {
+    let cell = hop.cell;
+    let mut reactant = hop.reactant.clone();
+    relax_fast(copper, &mut reactant, cell, 5.0e-4, 300);
+    let mut product = hop.product.clone();
+    relax_fast(copper, &mut product, cell, 5.0e-4, 300);
+    let compare = hop.class == "away" || (hop.shell == "isolated" && hop.class == "translation");
+    let label = format!("{} {} end {:.3}", hop.shell, hop.class, hop.end_sep);
+    let seed = band_images_n(&reactant, cell, &hop.saddle, cell, &product, cell, 9);
+    let mut fixed = converge_band(copper, seed, Some(cell), 0.0, compare, &format!("{label} fixed"));
+    fixed.path = path_kind(copper, &fixed, hop, 0.0);
+    if fixed.path != "single" {
+        fixed.direct = Some(direct_saddle(copper, hop, (&reactant, cell), (&product, cell), true, 0.0));
+    }
+    let (saddle, saddle_cell) = fixed.highest(copper, 0.0);
+    let relaxed = |positions: &Array1<f64>| {
+        relax_joint_to(copper, positions, cell, 0.0, 1.0e-3, 800)
+            .unwrap_or_else(|_| (positions.clone(), cell, f64::NAN, f64::NAN))
+    };
+    let (free_reactant, reactant_cell, _, reactant_force) = relaxed(&reactant);
+    let (free_product, product_cell, _, product_force) = relaxed(&product);
+    let ends = FreeEnds {
+        lattice: scaled_lattice(hop.lattice, cell, reactant_cell),
+        reactant_force,
+        product_force,
+        reactant_shift: labeled_gap(&into_cell(&free_reactant, reactant_cell, cell), &reactant, cell),
+        product_shift: labeled_gap(&into_cell(&free_product, product_cell, cell), &product, cell),
+    };
+    let seed = band_images_n(&free_reactant, reactant_cell, &saddle, saddle_cell, &free_product, product_cell, 9);
+    let mut free = converge_band(copper, seed, None, 0.0, compare, &format!("{label} free"));
+    free.path = path_kind(copper, &free, hop, 0.0);
+    if free.path != "single" {
+        free.direct = Some(direct_saddle(
+            copper,
+            hop,
+            (&free_reactant, reactant_cell),
+            (&free_product, product_cell),
+            false,
+            0.0,
+        ));
+    }
+    for (mode, outcome) in [("fixed", &fixed), ("free", &free)] {
+        if let Some((fix, linked)) = &outcome.direct {
+            eprintln!(
+                "{label} {mode}: direct dimer barrier {:.5} force {:.3e} negative {} eigenvalue {:.4} converged {} joins {}",
+                fix.barrier, fix.force, fix.negative, fix.eigenvalue, fix.converged as u8, *linked as u8
             );
         }
     }
+    eprintln!("{label}: fixed path {} free path {}", fixed.path, free.path);
+    HopResult {
+        hop: hop.clone(),
+        fixed,
+        free,
+        ends,
+    }
+}
+
+fn scaled_lattice(lattice: f64, from: [[f64; 3]; 3], to: [[f64; 3]; 3]) -> f64 {
+    lattice * (det3(to) / det3(from)).abs().cbrt()
+}
+
+fn opt_num(value: Option<f64>, digits: usize) -> String {
+    value.filter(|item| item.is_finite()).map(|item| format!("{item:.digits$}")).unwrap_or_default()
+}
+
+fn band_rows(result: &HopResult) -> Vec<String> {
+    let hop = &result.hop;
+    let mut rows = Vec::new();
+    for (mode, outcome) in [("fixed", &result.fixed), ("free", &result.free)] {
+        let lattice = if mode == "free" { result.ends.lattice } else { hop.lattice };
+        let ends = if mode == "free" {
+            format!(
+                "{:.3e},{:.3e},{:.3},{:.3}",
+                result.ends.reactant_force, result.ends.product_force, result.ends.reactant_shift, result.ends.product_shift
+            )
+        } else {
+            ",,,".to_string()
+        };
+        let head = format!(
+            "{},{},{},{},{},{},{:.3},{:.3},{},{},{:.4},{},{},{},{:.6},{},{ends}",
+            hop.shell,
+            hop.sites,
+            hop.orientation,
+            hop.class,
+            mode,
+            hop.reactant.len() / 3,
+            hop.reactant_sep,
+            hop.end_sep,
+            hop.end_axis,
+            hop.recombined as u8,
+            hop.reaction,
+            if hop.connected { "dimer" } else { "mapped" },
+            opt_num(Some(hop.seed_barrier), 6),
+            hop.seed_index,
+            lattice,
+            outcome.path,
+        );
+        for attempt in &outcome.attempts {
+            rows.push(format!(
+                "{head},{},{},{},{},{},{},{},{},,",
+                attempt.method,
+                attempt.images,
+                attempt.seed,
+                opt_num(Some(attempt.barrier), 6),
+                if attempt.force.is_finite() { format!("{:.6e}", attempt.force) } else { String::new() },
+                attempt.steps,
+                attempt.calls,
+                attempt.converged as u8,
+            ));
+        }
+        let refined = outcome.dimer.iter().map(|dimer| ("dimer", "highest", dimer));
+        let direct = outcome
+            .direct
+            .iter()
+            .map(|(dimer, linked)| ("direct_dimer", if *linked { "joins_ends" } else { "apart" }, dimer));
+        for (method, start, dimer) in refined.chain(direct) {
+            rows.push(format!(
+                "{head},{method},1,{start},{},{},{},{},{},{},{}",
+                opt_num(Some(dimer.barrier), 6),
+                if dimer.force.is_finite() { format!("{:.6e}", dimer.force) } else { String::new() },
+                dimer.steps,
+                dimer.calls,
+                dimer.converged as u8,
+                dimer.negative,
+                opt_num(Some(dimer.eigenvalue), 5),
+            ));
+        }
+    }
+    rows
+}
+
+fn band_header() -> &'static str {
+    "shell_A,sites,orientation,mechanism,cell,n_atoms,reactant_sep_A,end_sep_A,end_axis,end_recombined,reaction_eV,saddle_seed,seed_dimer_barrier_eV,seed_dimer_index,lattice_A,path,free_reactant_force,free_product_force,free_reactant_shift_A,free_product_shift_A,method,images,start,barrier_eV,max_force,steps,force_calls,converged,negative_modes,lowest_eigenvalue"
+}
+
+struct SideCell {
+    value: Option<(f64, &'static str, f64)>,
+    path: String,
+    class: &'static str,
+    end_sep: f64,
+    recombined: bool,
+    force: f64,
+}
+
+fn side_cell(results: &[&HopResult], classes: &[&str], mode: &str) -> Option<SideCell> {
+    results
+        .iter()
+        .filter(|result| classes.contains(&result.hop.class))
+        .map(|result| {
+            let outcome = if mode == "fixed" { &result.fixed } else { &result.free };
+            SideCell {
+                value: outcome.value(),
+                path: outcome.path.clone(),
+                class: result.hop.class,
+                end_sep: result.hop.end_sep,
+                recombined: result.hop.recombined,
+                force: outcome.force,
+            }
+        })
+        .min_by(|left, right| {
+            let key = |cell: &SideCell| cell.value.map(|(value, _, _)| value).unwrap_or(f64::INFINITY);
+            key(left).partial_cmp(&key(right)).unwrap_or(std::cmp::Ordering::Equal)
+        })
+}
+
+fn side_fields(cell: &Option<SideCell>) -> String {
+    match cell {
+        None => ",,,,,".into(),
+        Some(found) => format!(
+            "{},{},{},{:.3},{},{}",
+            opt_num(found.value.map(|value| value.0), 6),
+            found
+                .value
+                .map(|value| value.1.to_string())
+                .unwrap_or_else(|| if found.path == "single" { "unconverged".into() } else { found.path.clone() }),
+            if found.force.is_finite() { format!("{:.3e}", found.force) } else { String::new() },
+            found.end_sep,
+            found.recombined as u8,
+            found.class,
+        ),
+    }
+}
+
+fn note_of(notes: &[(String, String)], label: &str) -> String {
+    csv_quote(
+        notes
+            .iter()
+            .find(|(name, _)| name == label)
+            .map(|(_, note)| note.as_str())
+            .unwrap_or(""),
+    )
+}
+
+fn put_len(out: &mut Vec<u8>, value: usize) {
+    out.extend((value as u64).to_le_bytes());
+}
+
+fn put_values(out: &mut Vec<u8>, values: &[f64]) {
+    put_len(out, values.len());
+    for value in values {
+        out.extend(value.to_le_bytes());
+    }
+}
+
+fn put_text(out: &mut Vec<u8>, text: &str) {
+    put_len(out, text.len());
+    out.extend(text.as_bytes());
+}
+
+struct ByteReader<'a> {
+    data: &'a [u8],
+    at: usize,
+}
+
+impl ByteReader<'_> {
+    fn take(&mut self, count: usize) -> Option<&[u8]> {
+        let slice = self.data.get(self.at..self.at + count)?;
+        self.at += count;
+        Some(slice)
+    }
+
+    fn len(&mut self) -> Option<usize> {
+        Some(u64::from_le_bytes(self.take(8)?.try_into().ok()?) as usize)
+    }
+
+    fn values(&mut self) -> Option<Vec<f64>> {
+        let count = self.len()?;
+        (0..count)
+            .map(|_| Some(f64::from_le_bytes(self.take(8)?.try_into().ok()?)))
+            .collect()
+    }
+
+    fn text(&mut self) -> Option<String> {
+        let count = self.len()?;
+        String::from_utf8(self.take(count)?.to_vec()).ok()
+    }
+}
+
+fn class_name(text: &str) -> Option<&'static str> {
+    ["rotation", "translation", "toward", "capture", "away"]
+        .into_iter()
+        .find(|name| *name == text)
+}
+
+fn save_hops(path: &PathBuf, built: &BuiltHops) {
+    let (hops, notes, spontaneous) = built;
+    let mut out = Vec::new();
+    put_len(&mut out, hops.len());
+    for hop in hops {
+        put_text(&mut out, &hop.shell);
+        put_text(&mut out, &hop.orientation);
+        put_text(&mut out, hop.class);
+        put_text(&mut out, &hop.end_axis);
+        put_values(&mut out, hop.reactant.as_slice().expect("contiguous"));
+        put_values(&mut out, hop.product.as_slice().expect("contiguous"));
+        put_values(&mut out, hop.saddle.as_slice().expect("contiguous"));
+        put_values(&mut out, &flat(hop.cell));
+        put_values(&mut out, hop.vacancy.as_ref().map(|place| place.as_slice()).unwrap_or(&[]));
+        put_values(
+            &mut out,
+            &[
+                hop.sites as f64,
+                hop.lattice,
+                hop.reactant_sep,
+                hop.end_sep,
+                hop.reaction,
+                hop.recombined as u8 as f64,
+                hop.seed_barrier,
+                hop.seed_index as f64,
+                hop.connected as u8 as f64,
+            ],
+        );
+    }
+    put_len(&mut out, notes.len());
+    for (label, note) in notes {
+        put_text(&mut out, label);
+        put_text(&mut out, note);
+    }
+    put_len(&mut out, spontaneous.len());
+    for (label, sites) in spontaneous {
+        put_text(&mut out, label);
+        put_len(&mut out, *sites);
+    }
+    if let Err(error) = std::fs::write(path, out) {
+        eprintln!("hop cache not written: {error}");
+    }
+}
+
+fn load_hops(path: &PathBuf) -> Option<BuiltHops> {
+    let data = std::fs::read(path).ok()?;
+    let mut reader = ByteReader { data: &data, at: 0 };
+    let mut hops = Vec::new();
+    for _ in 0..reader.len()? {
+        let shell = reader.text()?;
+        let orientation = reader.text()?;
+        let class = class_name(&reader.text()?)?;
+        let end_axis = reader.text()?;
+        let reactant = Array1::from(reader.values()?);
+        let product = Array1::from(reader.values()?);
+        let saddle = Array1::from(reader.values()?);
+        let cell = unflat(&reader.values()?.try_into().ok()?);
+        let vacancy = reader.values()?;
+        let numbers = reader.values()?;
+        hops.push(ShellHop {
+            shell,
+            sites: numbers[0] as usize,
+            orientation,
+            class,
+            reactant,
+            product,
+            saddle,
+            cell,
+            lattice: numbers[1],
+            vacancy: (vacancy.len() == 3).then(|| [vacancy[0], vacancy[1], vacancy[2]]),
+            reactant_sep: numbers[2],
+            end_sep: numbers[3],
+            end_axis,
+            reaction: numbers[4],
+            recombined: numbers[5] > 0.5,
+            seed_barrier: numbers[6],
+            seed_index: numbers[7] as i64,
+            connected: numbers[8] > 0.5,
+        });
+    }
+    let mut notes = Vec::new();
+    for _ in 0..reader.len()? {
+        notes.push((reader.text()?, reader.text()?));
+    }
+    let mut spontaneous = Vec::new();
+    for _ in 0..reader.len()? {
+        spontaneous.push((reader.text()?, reader.len()?));
+    }
+    eprintln!("loaded {} hops from the cache", hops.len());
+    Some((hops, notes, spontaneous))
+}
+
+type BuiltHops = (Vec<ShellHop>, Vec<(String, String)>, Vec<(String, usize)>);
+
+fn build_13_hops(
+    copper: &FastCopper,
+    repeats: usize,
+    lattice: f64,
+    shells: &[(f64, [f64; 3], usize)],
+    with_isolated: bool,
+) -> BuiltHops {
+    let channels = isolate_channels(copper, repeats, lattice);
+    for channel in &channels {
+        eprintln!("isolated {} dimer barrier {:.5}", channel.kind, channel.barrier);
+    }
+    let mechanisms: Vec<Mechanism> = channels
+        .iter()
+        .map(|channel| {
+            capture_mechanism(
+                copper,
+                &channel.reactant,
+                channel.cell,
+                channel.dumbbell,
+                &channel.saddle,
+                &channel.product,
+                &channel.mode,
+                channel.barrier,
+            )
+        })
+        .collect();
+    let mut hops: Vec<ShellHop> = Vec::new();
+    if with_isolated {
+        for channel in &channels {
+            let energy = copper.evaluate(channel.reactant.view(), channel.cell).0;
+            let origin = centroid(&channel.reactant, channel.dumbbell);
+            let start = end_info(copper, &channel.reactant, channel.cell, None, origin, energy);
+            let origin = start.site.as_ref().map(|site| site.center).unwrap_or(origin);
+            let end = end_info(copper, &channel.product, channel.cell, None, origin, energy);
+            let class = if channel.kind == "translate" { "translation" } else { "rotation" };
+            hops.push(ShellHop {
+                shell: "isolated".into(),
+                sites: 1,
+                orientation: start.site.as_ref().map(|site| axis_name(site.axis)).unwrap_or_default(),
+                class,
+                reactant: channel.reactant.clone(),
+                product: channel.product.clone(),
+                saddle: channel.saddle.clone(),
+                cell: channel.cell,
+                lattice,
+                vacancy: None,
+                reactant_sep: 0.0,
+                end_sep: end.separation,
+                end_axis: end.site.as_ref().map(|site| axis_name(site.axis)).unwrap_or_default(),
+                reaction: end.reaction,
+                recombined: false,
+                seed_barrier: channel.barrier,
+                seed_index: 1,
+                connected: true,
+            });
+        }
+    }
+    let mut spontaneous = Vec::new();
+    let built: Vec<(String, usize, Vec<ShellHop>, String)> = shells
+        .par_iter()
+        .map(|(radius, vector, sites)| {
+            let local = FastCopper::new();
+            let label = format!("{radius:.3}");
+            let Some((reactant, vacancy, cell)) = shell_reactant(&local, repeats, lattice, *vector, *radius) else {
+                eprintln!("{label}: recombines on relaxation for every <100> axis");
+                return (label, *sites, Vec::new(), "recombines on relaxation for every <100> axis".into());
+            };
+            let every_away = (radius / lattice - 1.224744871).abs() < 0.04;
+            let (all, note) = frame_hops(
+                &local, &label, *sites, &reactant, cell, lattice, Some(vacancy), vacancy, &mechanisms, true,
+            );
+            (label, *sites, pick_hops(all, every_away), note)
+        })
+        .collect();
+    let mut notes: Vec<(String, String)> = vec![("isolated".into(), "dimer channels of the free dumbbell".into())];
+    for (label, sites, picked, note) in built {
+        if picked.is_empty() {
+            spontaneous.push((label.clone(), sites));
+        }
+        notes.push((label, note));
+        hops.extend(picked);
+    }
+    (hops, notes, spontaneous)
+}
+
+#[test]
+#[ignore = "13x13x13 300 K bands converged to 1.5e-3 eV/A; writes benchmarks/ssneb_shell_300K_13.csv and _bands.csv"]
+fn ssneb_300k_13_converge() {
+    let lattice = 3.628311_f64;
+    let repeats = 13usize;
+    let copper = FastCopper::new();
+    let only = env_csv("RGSADDLE_13_ONLY", "");
+    let wanted = |label: &str| only.is_empty() || only.iter().any(|item| item == label);
+    let started = Instant::now();
+    let shells: Vec<_> = shell_table(lattice, repeats)
+        .into_iter()
+        .filter(|(radius, _, _)| *radius < 7.0 && wanted(&format!("{radius:.3}")))
+        .collect();
+    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/ssneb_300k_13_hops.bin");
+    let cached = if std::env::var("RGSADDLE_13_CACHE").is_ok() { load_hops(&cache) } else { None };
+    let (built, mut notes, mut spontaneous) = match cached {
+        Some(found) => found,
+        None => {
+            let built = build_13_hops(&copper, repeats, lattice, &shells, wanted("isolated"));
+            save_hops(&cache, &built);
+            built
+        }
+    };
+    let settles: Vec<bool> = built
+        .par_iter()
+        .map(|hop| {
+            let Some(vacancy) = hop.vacancy else {
+                return true;
+            };
+            let local = FastCopper::new();
+            let energy = local.evaluate(hop.reactant.view(), hop.cell).0;
+            let mut reactant = hop.reactant.clone();
+            relax_fast(&local, &mut reactant, hop.cell, 5.0e-4, 300);
+            !end_info(&local, &reactant, hop.cell, Some(vacancy), vacancy, energy).recombined
+        })
+        .collect();
+    let mut hops = Vec::new();
+    for (hop, settles) in built.into_iter().zip(settles) {
+        if settles {
+            hops.push(hop);
+            continue;
+        }
+        if spontaneous.iter().all(|(label, _)| *label != hop.shell) {
+            eprintln!("{}: reactant recombines when relaxed to 5e-4 eV/A", hop.shell);
+            spontaneous.push((hop.shell.clone(), hop.sites));
+            if let Some((_, note)) = notes.iter_mut().find(|(label, _)| *label == hop.shell) {
+                note.push_str("; reactant recombines when relaxed to 5e-4 eV/A");
+            }
+        }
+    }
+    eprintln!(
+        "built {} hops in {:.0} s",
+        hops.len(),
+        started.elapsed().as_secs_f64()
+    );
+    for hop in &hops {
+        eprintln!(
+            "hop {} {} {}: sep {:.3}->{:.3} axis {} dE {:.4} seed {:.5} joins {}",
+            hop.shell, hop.orientation, hop.class, hop.reactant_sep, hop.end_sep, hop.end_axis, hop.reaction,
+            hop.seed_barrier, hop.connected as u8
+        );
+    }
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks");
+    let suffix = if only.is_empty() { String::new() } else { "_partial".into() };
+    let detail = Mutex::new(File::create(dir.join(format!("ssneb_shell_300K_13_bands{suffix}.csv"))).expect("bands csv"));
+    writeln!(detail.lock().unwrap(), "{}", band_header()).unwrap();
+    let results: Vec<HopResult> = hops
+        .par_iter()
+        .map(|hop| {
+            let local = FastCopper::new();
+            let result = measure_hop(&local, hop);
+            let mut handle = detail.lock().unwrap_or_else(|poison| poison.into_inner());
+            for row in band_rows(&result) {
+                writeln!(handle, "{row}").unwrap();
+            }
+            handle.flush().unwrap();
+            result
+        })
+        .collect();
+    let mut order: Vec<String> = vec!["isolated".into()];
+    for (radius, _, _) in &shells {
+        order.push(format!("{radius:.3}"));
+    }
+    let mut detail = detail.into_inner().unwrap();
+    detail.flush().unwrap();
+    let mut side = File::create(dir.join(format!("ssneb_shell_300K_13{suffix}.csv"))).expect("side csv");
+    writeln!(
+        side,
+        "shell_A,sites,orientation,reactant_sep_A,cell,lattice_A,\
+rotation_eV,rotation_source,rotation_force,rotation_end_sep_A,rotation_recombined,rotation_hop,\
+translation_eV,translation_source,translation_force,translation_end_sep_A,translation_recombined,translation_hop,\
+capture_eV,capture_source,capture_force,capture_end_sep_A,capture_recombined,capture_hop,\
+rotation_minus_isolated_eV,translation_minus_isolated_eV,rotation_below_translation,rotation_below_isolated_translation,templates"
+    )
+    .unwrap();
+    let isolated: Vec<&HopResult> = results.iter().filter(|result| result.hop.shell == "isolated").collect();
+    for mode in ["fixed", "free"] {
+        let reference_rotation = side_cell(&isolated, &["rotation"], mode).and_then(|cell| cell.value);
+        let reference_translation = side_cell(&isolated, &["translation"], mode).and_then(|cell| cell.value);
+        for label in &order {
+            let group: Vec<&HopResult> = results.iter().filter(|result| &result.hop.shell == label).collect();
+            if group.is_empty() {
+                if let Some((_, sites)) = spontaneous.iter().find(|(name, _)| name == label) {
+                    let mut fields = vec![label.clone(), sites.to_string(), String::new(), String::new(), mode.to_string()];
+                    fields.extend(std::iter::repeat_n(String::new(), 13));
+                    fields.extend(["0.000000", "spontaneous", "", "0.000", "1", "capture"].map(String::from));
+                    fields.extend(std::iter::repeat_n(String::new(), 4));
+                    fields.push(note_of(&notes, label));
+                    writeln!(side, "{}", fields.join(",")).unwrap();
+                }
+                continue;
+            }
+            let first = group[0];
+            let rotation = side_cell(&group, &["rotation"], mode);
+            let translation = side_cell(&group, &["translation", "toward", "away"], mode);
+            let capture = side_cell(&group, &["capture"], mode);
+            let value = |cell: &Option<SideCell>| cell.as_ref().and_then(|found| found.value.map(|item| item.0));
+            let minus = |cell: &Option<SideCell>, reference: Option<(f64, &str, f64)>| {
+                if label == "isolated" {
+                    return None;
+                }
+                Some(value(cell)? - reference?.0)
+            };
+            let below = match (value(&rotation), value(&translation)) {
+                (Some(left), Some(right)) => (if left < right { "1" } else { "0" }).to_string(),
+                _ => String::new(),
+            };
+            let below_isolated = match (value(&rotation), reference_translation) {
+                (Some(left), Some(right)) if label != "isolated" => (if left < right.0 { "1" } else { "0" }).to_string(),
+                _ => String::new(),
+            };
+            let lattice_value = if mode == "free" {
+                first.ends.lattice
+            } else {
+                first.hop.lattice
+            };
+            let line = format!(
+                "{label},{},{},{:.3},{mode},{lattice_value:.6},{},{},{},{},{},{}",
+                first.hop.sites,
+                first.hop.orientation,
+                first.hop.reactant_sep,
+                side_fields(&rotation),
+                side_fields(&translation),
+                side_fields(&capture),
+                opt_num(minus(&rotation, reference_rotation), 6),
+                opt_num(minus(&translation, reference_translation), 6),
+                format!("{below},{below_isolated},{}", note_of(&notes, label)),
+            );
+            eprintln!("{line}");
+            writeln!(side, "{line}").unwrap();
+        }
+    }
+    eprintln!("done in {:.0} s", started.elapsed().as_secs_f64());
+}
+
+struct Probe {
+    vacancy: [f64; 3],
+    reference_cell: [[f64; 3]; 3],
+    reference_energy: f64,
+    lattice: f64,
+}
+
+impl Probe {
+    fn state(
+        &self,
+        copper: &FastCopper,
+        positions: &Array1<f64>,
+        cell: [[f64; 3]; 3],
+        pressure: f64,
+    ) -> (f64, f64, f64, f64, bool) {
+        let mapped = into_cell(positions, cell, self.reference_cell);
+        let site = defect_site(&mapped, self.reference_cell, self.vacancy, 11.0);
+        let recombined = occupied(&mapped, self.vacancy, self.reference_cell) || site.is_none();
+        let separation = site
+            .map(|found| mic_distance(found.center, self.vacancy, self.reference_cell))
+            .unwrap_or(0.0);
+        let energy = copper.evaluate(positions.view(), cell).0;
+        (
+            energy - self.reference_energy,
+            energy + pressure * det3(cell).abs(),
+            scaled_lattice(self.lattice, self.reference_cell, cell),
+            separation,
+            recombined,
+        )
+    }
+
+    fn end_row(
+        &self,
+        copper: &FastCopper,
+        case: &str,
+        item: &str,
+        positions: &Array1<f64>,
+        cell: [[f64; 3]; 3],
+        force: f64,
+        pressure: f64,
+        fixed: &Array1<f64>,
+    ) -> String {
+        let (energy, _, lattice, separation, recombined) = self.state(copper, positions, cell, pressure);
+        let gap = labeled_gap(&into_cell(positions, cell, self.reference_cell), fixed, self.reference_cell);
+        format!(
+            "{case},{item},{energy:.6},{lattice:.6},{force:.3e},{separation:.3},{},{gap:.3},,,,,",
+            recombined as u8
+        )
+    }
+
+    fn profile(
+        &self,
+        copper: &FastCopper,
+        case: &str,
+        positions: &Array2<f64>,
+        cells: &[[[f64; 3]; 3]],
+        pressure: f64,
+    ) -> Vec<String> {
+        let first = enthalpy_of(copper, positions.row(0), cells[0], pressure);
+        (0..positions.nrows())
+            .map(|i| {
+                let row = positions.row(i).to_owned();
+                let (energy, enthalpy, lattice, separation, recombined) =
+                    self.state(copper, &row, cells[i], pressure);
+                format!(
+                    "{case},image{i},{energy:.6},{lattice:.6},,{separation:.3},{},,{:.6},,,,",
+                    recombined as u8,
+                    enthalpy - first,
+                )
+            })
+            .collect()
+    }
+}
+
+fn outcome_row(case: &str, outcome: &BandOutcome, reference: f64, note: &str) -> Vec<String> {
+    let mut rows = Vec::new();
+    for attempt in &outcome.attempts {
+        rows.push(format!(
+            "{case},band_{}_{}_{},,,,,,,{},{},{},,{note}",
+            attempt.method,
+            attempt.seed,
+            attempt.images,
+            opt_num(Some(attempt.barrier), 6),
+            if attempt.force.is_finite() { format!("{:.3e}", attempt.force) } else { String::new() },
+            attempt.converged as u8,
+        ));
+    }
+    if let Some(dimer) = &outcome.dimer {
+        rows.push(format!(
+            "{case},dimer_highest,,,,,,,{},{},{},{},eigenvalue {}",
+            opt_num(Some(dimer.enthalpy - reference), 6),
+            if dimer.force.is_finite() { format!("{:.3e}", dimer.force) } else { String::new() },
+            dimer.converged as u8,
+            dimer.negative,
+            opt_num(Some(dimer.eigenvalue), 5),
+        ));
+    }
+    rows
+}
+
+#[test]
+#[ignore = "why the variable-cell 13^3 4.444 A capture band loses its barrier; writes benchmarks/ssneb_4444_capture_free.csv"]
+fn ssneb_4444_capture_free() {
+    let lattice = 3.628311_f64;
+    let repeats = 13usize;
+    let copper = FastCopper::new();
+    let mut rows: Vec<String> = Vec::new();
+    let (perfect, perfect_cell) = fcc(repeats, lattice);
+    let stress = copper.evaluate(perfect.view(), perfect_cell).2;
+    let mean = (stress[0][0] + stress[1][1] + stress[2][2]) / 3.0;
+    let mut hold = 0.0_f64;
+    let mut hold_lattice = f64::NAN;
+    for trial in [mean, -mean] {
+        let (_, cell, _, _) = relax_joint_to(&copper, &perfect, perfect_cell, trial, 1.0e-5, 400).expect("perfect relax");
+        let reached = scaled_lattice(lattice, perfect_cell, cell);
+        eprintln!("perfect crystal at pressure {trial:.6e}: lattice {reached:.6}");
+        if !((hold_lattice - lattice).abs() <= (reached - lattice).abs()) {
+            hold_lattice = reached;
+            hold = trial;
+        }
+    }
+    let (_, zero_cell, _, _) = relax_joint_to(&copper, &perfect, perfect_cell, 0.0, 1.0e-5, 400).expect("perfect relax");
+    rows.push(format!(
+        "perfect,zero_stress,,{:.6},,,,,,,,,",
+        scaled_lattice(lattice, perfect_cell, zero_cell)
+    ));
+    rows.push(format!("perfect,held_300K,,{hold_lattice:.6},,,,,,,,,pressure {hold:.6e} eV/A^3"));
+
+    let shell = shell_vector(lattice, repeats, 1.224744871);
+    let hops = shell_hops(&copper, repeats, lattice, shell, 24);
+    let old_away: Vec<(f64, Array1<f64>)> = hops
+        .iter()
+        .filter(|hop| hop.shell == "4.444" && hop.mechanism == "away")
+        .map(|hop| (hop.end_sep, hop.job.product.clone()))
+        .collect();
+    let capture = hops
+        .into_iter()
+        .find(|hop| hop.shell == "4.444" && hop.mechanism == "capture")
+        .expect("run-11 4.444 capture hop");
+    let axis = axis_from_label(&capture.orientation);
+    let (frame, vacancy, _, cell, _, _) = shell_frame(&copper, repeats, lattice, shell, axis);
+    let job = capture.job;
+    eprintln!("run-11 reactant matches the frame to {:.2e} A", labeled_gap(&frame, &job.reactant, cell));
+    let mut reactant = job.reactant.clone();
+    relax_fast(&copper, &mut reactant, cell, 5.0e-4, 300);
+    let mut product = job.product.clone();
+    relax_fast(&copper, &mut product, cell, 5.0e-4, 300);
+    let probe = Probe {
+        vacancy,
+        reference_cell: cell,
+        reference_energy: copper.evaluate(reactant.view(), cell).0,
+        lattice,
+    };
+    let force_of = |positions: &Array1<f64>| max_abs(&copper.evaluate(positions.view(), cell).1);
+    rows.push(probe.end_row(&copper, "fixed", "reactant", &reactant, cell, force_of(&reactant), 0.0, &reactant));
+    rows.push(probe.end_row(&copper, "fixed", "product", &product, cell, force_of(&product), 0.0, &product));
+    let channels = isolate_channels(&copper, repeats, lattice);
+    let mechanisms: Vec<Mechanism> = channels
+        .iter()
+        .map(|channel| {
+            capture_mechanism(
+                &copper,
+                &channel.reactant,
+                channel.cell,
+                channel.dumbbell,
+                &channel.saddle,
+                &channel.product,
+                &channel.mode,
+                channel.barrier,
+            )
+        })
+        .collect();
+    let far = |positions: &Array1<f64>| {
+        (0..reactant.len() / 3)
+            .filter(|&atom| mic_distance(point_of(positions, atom), point_of(&reactant, atom), cell) > 1.0)
+            .count()
+    };
+    let (mapped, _) =
+        frame_hops(&copper, "4.444", 24, &reactant, cell, lattice, Some(vacancy), vacancy, &mechanisms, true);
+    for (old_sep, old_end) in &old_away {
+        let mut end = old_end.clone();
+        relax_fast(&copper, &mut end, cell, 5.0e-4, 300);
+        let (energy, _, _, separation, recombined) = probe.state(&copper, &end, cell, 0.0);
+        let nearest = mapped
+            .iter()
+            .filter(|hop| hop.class == "away")
+            .map(|hop| (hausdorff(&end, &hop.product, cell), hop.end_sep))
+            .min_by(|left, right| left.0.partial_cmp(&right.0).unwrap_or(std::cmp::Ordering::Equal));
+        rows.push(format!(
+            "run11_away_{old_sep:.3},relocated,{energy:.6},,,{separation:.3},{},,,,,,atoms moved over 1 A {}; nearest mapped away end {} at hausdorff {} A",
+            recombined as u8,
+            far(&end),
+            nearest.map(|item| format!("{:.3}", item.1)).unwrap_or_default(),
+            nearest.map(|item| format!("{:.3}", item.0)).unwrap_or_default(),
+        ));
+    }
+    rows.push(format!(
+        "run11_product,vs_reactant,,,,,1,,,,,,atoms moved over 1 A {}",
+        far(&product)
+    ));
+    for hop in mapped.iter().filter(|hop| hop.class == "capture") {
+        let mut end = hop.product.clone();
+        relax_fast(&copper, &mut end, cell, 5.0e-4, 300);
+        rows.push(format!(
+            "mapped_capture_product,vs_run11,{:.6},,,,1,{:.3},{},,{},{},hausdorff {:.3} A; atoms moved over 1 A {}",
+            copper.evaluate(end.view(), cell).0 - probe.reference_energy,
+            labeled_gap(&end, &product, cell),
+            opt_num(Some(hop.seed_barrier), 6),
+            hop.connected as u8,
+            hop.seed_index,
+            hausdorff(&end, &product, cell),
+            far(&end),
+        ));
+    }
+
+    let (old_r, old_rc, _, old_rf) = relax_joint(&copper, &job.reactant, cell).expect("run-11 free reactant");
+    let (old_p, old_pc, _, old_pf) = relax_joint(&copper, &job.product, cell).expect("run-11 free product");
+    rows.push(probe.end_row(&copper, "free_run11", "reactant", &old_r, old_rc, old_rf, 0.0, &reactant));
+    rows.push(probe.end_row(&copper, "free_run11", "product", &old_p, old_pc, old_pf, 0.0, &product));
+    let (tight_r, tight_rc, _, tight_rf) =
+        relax_joint_to(&copper, &reactant, cell, 0.0, 5.0e-4, 2000).expect("tight free reactant");
+    let (tight_p, tight_pc, _, tight_pf) =
+        relax_joint_to(&copper, &product, cell, 0.0, 5.0e-4, 2000).expect("tight free product");
+    rows.push(probe.end_row(&copper, "free_tight", "reactant", &tight_r, tight_rc, tight_rf, 0.0, &reactant));
+    rows.push(probe.end_row(&copper, "free_tight", "product", &tight_p, tight_pc, tight_pf, 0.0, &product));
+    let (held_r, held_rc, _, held_rf) =
+        relax_joint_to(&copper, &reactant, cell, hold, 5.0e-4, 2000).expect("held reactant");
+    let (held_p, held_pc, _, held_pf) =
+        relax_joint_to(&copper, &product, cell, hold, 5.0e-4, 2000).expect("held product");
+    rows.push(probe.end_row(&copper, "held_300K", "reactant", &held_r, held_rc, held_rf, hold, &reactant));
+    rows.push(probe.end_row(&copper, "held_300K", "product", &held_p, held_pc, held_pf, hold, &product));
+    for row in &rows {
+        eprintln!("{row}");
+    }
+
+    let mid = blend_positions(&reactant, cell, &product, cell, cell, 0.5);
+    let fixed = converge_band(
+        &copper,
+        band_images_n(&reactant, cell, &mid, cell, &product, cell, 9),
+        Some(cell),
+        0.0,
+        false,
+        "4.444 capture fixed",
+    );
+    rows.extend(outcome_row("fixed", &fixed, probe.reference_energy, ""));
+    rows.extend(probe.profile(&copper, "fixed", &fixed.positions, &fixed.cells, 0.0));
+    let (saddle, saddle_cell) = fixed.highest(&copper, 0.0);
+
+    let old_mid = blend_positions(&old_r, old_rc, &old_p, old_pc, blend_cell(old_rc, old_pc, 0.5), 0.5);
+    let (old_positions, old_cells) = band_images(&old_r, old_rc, &old_mid, cell, &old_p, old_pc);
+    match drive_band(&copper, old_positions, old_cells, None, SpringKind::Uniform { k: 1.0 }) {
+        Ok(end) => {
+            let energies = enthalpies(&copper, &end.positions, &end.cells, 0.0);
+            rows.push(format!(
+                "free_run11,band_lbfgs10_seed_7,,,,,,,{:.6},{:.3e},{},,run-11 protocol",
+                energies[highest_interior(&energies)] - energies[0],
+                end.force,
+                end.converged as u8
+            ));
+            rows.extend(probe.profile(&copper, "free_run11", &end.positions, &end.cells, 0.0));
+        }
+        Err(error) => rows.push(format!("free_run11,band_lbfgs10_seed_7,,,,,,,,,,,{error}")),
+    }
+
+    let free = converge_band(
+        &copper,
+        band_images_n(&tight_r, tight_rc, &saddle, saddle_cell, &tight_p, tight_pc, 9),
+        None,
+        0.0,
+        false,
+        "4.444 capture free tight",
+    );
+    let free_reference = enthalpy_of(&copper, tight_r.view(), tight_rc, 0.0);
+    rows.extend(outcome_row("free_tight", &free, free_reference, ""));
+    rows.extend(probe.profile(&copper, "free_tight", &free.positions, &free.cells, 0.0));
+
+    let mut frozen_p = into_cell(&tight_p, tight_pc, tight_rc);
+    relax_fast(&copper, &mut frozen_p, tight_rc, 5.0e-4, 300);
+    let mut frozen_r = tight_r.clone();
+    relax_fast(&copper, &mut frozen_r, tight_rc, 5.0e-4, 300);
+    let frozen_saddle = into_cell(&saddle, saddle_cell, tight_rc);
+    let in_zero = converge_band(
+        &copper,
+        band_images_n(&frozen_r, tight_rc, &frozen_saddle, tight_rc, &frozen_p, tight_rc, 9),
+        Some(tight_rc),
+        0.0,
+        false,
+        "4.444 capture fixed in zero-stress cell",
+    );
+    rows.extend(outcome_row(
+        "fixed_in_zero_stress_cell",
+        &in_zero,
+        copper.evaluate(frozen_r.view(), tight_rc).0,
+        "",
+    ));
+    rows.extend(probe.profile(&copper, "fixed_in_zero_stress_cell", &in_zero.positions, &in_zero.cells, 0.0));
+
+    let ci = highest_interior(&enthalpies(&copper, &fixed.positions, &fixed.cells, 0.0));
+    let mut three = Array2::zeros((3, fixed.positions.ncols()));
+    for (k, i) in [ci - 1, ci, ci + 1].into_iter().enumerate() {
+        three
+            .row_mut(k)
+            .assign(&into_cell(&fixed.positions.row(i).to_owned(), fixed.cells[i], tight_rc));
+    }
+    let joint = refine_highest(&copper, &three, &[tight_rc; 3], false, 0.0);
+    rows.push(format!(
+        "joint_dimer_from_fixed_saddle,dimer,,,,,,,{},{},{},{},eigenvalue {}",
+        opt_num(Some(joint.enthalpy - free_reference), 6),
+        if joint.force.is_finite() { format!("{:.3e}", joint.force) } else { String::new() },
+        joint.converged as u8,
+        joint.negative,
+        opt_num(Some(joint.eigenvalue), 5),
+    ));
+
+    let held = converge_band(
+        &copper,
+        band_images_n(&held_r, held_rc, &saddle, saddle_cell, &held_p, held_pc, 9),
+        None,
+        hold,
+        false,
+        "4.444 capture held at 300 K",
+    );
+    let held_reference = enthalpy_of(&copper, held_r.view(), held_rc, hold);
+    rows.extend(outcome_row("held_300K", &held, held_reference, ""));
+    rows.extend(probe.profile(&copper, "held_300K", &held.positions, &held.cells, hold));
+
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks/ssneb_4444_capture_free.csv");
+    let mut file = File::create(&path).expect("capture csv");
+    writeln!(
+        file,
+        "case,item,energy_eV,lattice_A,max_force,sep_A,recombined,gap_to_fixed_A,barrier_eV,band_force,converged,negative_modes,note"
+    )
+    .unwrap();
+    for row in &rows {
+        eprintln!("{row}");
+        writeln!(file, "{row}").unwrap();
+    }
+}
+
+/// `product` with the atoms that moved more than 0.5 Å reassigned to
+/// those atoms' reactant sites so that the summed squared displacement
+/// is least.
+fn relabel_like(reactant: &Array1<f64>, product: &Array1<f64>, cell: [[f64; 3]; 3]) -> Array1<f64> {
+    let order = least_moving_labels(reactant, product, cell).expect("at most ten atoms move more than 0.5 A");
+    permuted(product, &order)
+}
+
+fn permuted(positions: &Array1<f64>, order: &[usize]) -> Array1<f64> {
+    let mut out = positions.clone();
+    for (slot, &atom) in order.iter().enumerate() {
+        for c in 0..3 {
+            out[3 * slot + c] = positions[3 * atom + c];
+        }
+    }
+    out
+}
+
+/// For each label, the `product` atom that takes it so that the summed
+/// squared displacement from `reactant` is least, searched exactly over
+/// the atoms that moved more than 0.5 Å; `None` past ten such atoms.
+fn least_moving_labels(reactant: &Array1<f64>, product: &Array1<f64>, cell: [[f64; 3]; 3]) -> Option<Vec<usize>> {
+    let moved: Vec<usize> = (0..reactant.len() / 3)
+        .filter(|&atom| mic_distance(point_of(product, atom), point_of(reactant, atom), cell) > 0.5)
+        .collect();
+    let n = moved.len();
+    if n > 10 {
+        return None;
+    }
+    let cost: Vec<Vec<f64>> = moved
+        .iter()
+        .map(|&slot| {
+            moved
+                .iter()
+                .map(|&atom| mic_distance(point_of(reactant, slot), point_of(product, atom), cell).powi(2))
+                .collect()
+        })
+        .collect();
+    fn search(
+        row: usize,
+        cost: &[Vec<f64>],
+        used: &mut Vec<bool>,
+        current: &mut Vec<usize>,
+        total: f64,
+        best: &mut (f64, Vec<usize>),
+    ) {
+        if total >= best.0 {
+            return;
+        }
+        if row == cost.len() {
+            *best = (total, current.clone());
+            return;
+        }
+        for column in 0..cost.len() {
+            if !used[column] {
+                used[column] = true;
+                current.push(column);
+                search(row + 1, cost, used, current, total + cost[row][column], best);
+                current.pop();
+                used[column] = false;
+            }
+        }
+    }
+    let mut best = (f64::MAX, (0..n).collect::<Vec<_>>());
+    search(0, &cost, &mut vec![false; n], &mut Vec::new(), 0.0, &mut best);
+    let mut order: Vec<usize> = (0..reactant.len() / 3).collect();
+    for (row, &column) in best.1.iter().enumerate() {
+        order[moved[row]] = moved[column];
+    }
+    Some(order)
+}
+
+#[test]
+#[ignore = "run-11 4.444 A away ends on the 13^3 cell, as labelled and relabelled; writes benchmarks/ssneb_4444_run11_away.csv"]
+fn ssneb_4444_run11_away() {
+    let lattice = 3.628311_f64;
+    let repeats = 13usize;
+    let copper = FastCopper::new();
+    let shell = shell_vector(lattice, repeats, 1.224744871);
+    let hops = shell_hops(&copper, repeats, lattice, shell, 24);
+    let mut jobs = Vec::new();
+    for hop in hops.iter().filter(|hop| hop.shell == "4.444" && hop.mechanism == "away") {
+        let (reactant, vacancy, _, cell, _, _) =
+            shell_frame(&copper, repeats, lattice, shell, axis_from_label(&hop.orientation));
+        let energy = copper.evaluate(reactant.view(), cell).0;
+        let start = end_info(&copper, &reactant, cell, Some(vacancy), vacancy, energy);
+        let mut end = hop.job.product.clone();
+        relax_fast(&copper, &mut end, cell, 5.0e-4, 300);
+        let relabelled = relabel_like(&reactant, &end, cell);
+        for (tag, product) in [("run11_labels", end.clone()), ("relabelled", relabelled)] {
+            let info = end_info(&copper, &product, cell, Some(vacancy), vacancy, energy);
+            eprintln!(
+                "{tag} away {:.3}: true sep {:.3} dE {:.4} max labelled move {:.3}",
+                hop.end_sep,
+                info.separation,
+                info.reaction,
+                labeled_gap(&product, &reactant, cell)
+            );
+            jobs.push(ShellHop {
+                shell: format!("4.444_{tag}"),
+                sites: 24,
+                orientation: hop.orientation.clone(),
+                class: "away",
+                saddle: blend_positions(&reactant, cell, &product, cell, cell, 0.5),
+                reactant: reactant.clone(),
+                product,
+                cell,
+                lattice,
+                vacancy: Some(vacancy),
+                reactant_sep: start.separation,
+                end_sep: info.separation,
+                end_axis: info.site.as_ref().map(|site| axis_name(site.axis)).unwrap_or_default(),
+                reaction: info.reaction,
+                recombined: info.recombined,
+                seed_barrier: f64::NAN,
+                seed_index: -1,
+                connected: false,
+            });
+        }
+    }
+    assert!(!jobs.is_empty(), "no run-11 4.444 away ends");
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks/ssneb_4444_run11_away.csv");
+    let file = Mutex::new(File::create(&path).expect("run-11 away csv"));
+    writeln!(file.lock().unwrap(), "{}", band_header()).unwrap();
+    jobs.par_iter().for_each(|hop| {
+        let local = FastCopper::new();
+        let result = measure_hop(&local, hop);
+        let mut handle = file.lock().unwrap_or_else(|poison| poison.into_inner());
+        for row in band_rows(&result) {
+            eprintln!("{row}");
+            writeln!(handle, "{row}").unwrap();
+        }
+        handle.flush().unwrap();
+    });
 }
