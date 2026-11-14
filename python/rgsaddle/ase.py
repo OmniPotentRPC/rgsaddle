@@ -15,7 +15,7 @@ from __future__ import annotations
 from typing import Any, Literal
 
 import numpy as np
-from numpy.typing import NDArray
+from numpy.typing import ArrayLike, NDArray
 
 from rgsaddle._core import ClaimSlot
 
@@ -290,7 +290,7 @@ class _View:
 
     def gradient_norm(self, gradient: Float64) -> float:
         forces = np.asarray(gradient, dtype=np.float64).reshape(-1, 3)
-        return float(np.linalg.norm(forces, axis=1).max())
+        return float(np.max(np.linalg.norm(forces, axis=1)))
 
     def converged(self, gradient: Float64, fmax: float) -> bool:
         return self.gradient_norm(gradient) < fmax
@@ -431,9 +431,9 @@ class NEB:
             return np.zeros((0, 3), dtype=np.float64)
         return np.concatenate(blocks, axis=0)
 
-    def set_positions(self, positions: Any) -> None:
+    def set_positions(self, positions: ArrayLike) -> None:
         natoms = len(self.images[0])
-        array = np.asarray(positions, dtype=np.float64).reshape((-1, 3))
+        array = np.asarray(positions, dtype=np.float64).reshape(-1, 3)
         expect = (len(self.images) - 2) * natoms
         if array.shape[0] != expect:
             raise ValueError(f"positions: expected {expect} atoms, got {array.shape[0]}")
@@ -473,8 +473,8 @@ class NEB:
 
 def _effective_force(forces: Float64, mode: Float64, curvature: float) -> Float64:
     """ASE force after the minimum-mode translation of the gradient."""
-    flat = np.asarray(forces, dtype=np.float64).reshape(-1)
-    tau = np.asarray(mode, dtype=np.float64).reshape(-1)
+    flat: Float64 = np.asarray(forces, dtype=np.float64).reshape(-1)
+    tau: Float64 = np.asarray(mode, dtype=np.float64).reshape(-1)
     norm = float(np.dot(tau, tau) ** 0.5)
     if norm == 0.0:
         return flat.reshape(forces.shape)
