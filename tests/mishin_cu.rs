@@ -2279,14 +2279,11 @@ fn eam_eval_fast(
     positions: ArrayView1<f64>,
     cell: [[f64; 3]; 3],
 ) -> (f64, Array1<f64>, [[f64; 3]; 3]) {
-    if cell[0][1].abs() + cell[0][2].abs() + cell[1][0].abs() + cell[1][2].abs() + cell[2][0].abs()
-        + cell[2][1].abs()
-        > 1.0e-8
-    {
-        return eam_eval(positions, cell);
-    }
     let n = positions.len() / 3;
-    let lengths = [cell[0][0].abs(), cell[1][1].abs(), cell[2][2].abs()];
+    let lengths = [0, 1, 2].map(|row| {
+        (cell[row][0] * cell[row][0] + cell[row][1] * cell[row][1] + cell[row][2] * cell[row][2])
+            .sqrt()
+    });
     let nimg = ((RC / lengths.into_iter().fold(f64::MAX, f64::min)).ceil() as i32).max(1);
     let nside = lengths.map(|length| ((length / RC).floor() as i32).max(1));
     let bins_n = (nside[0] * nside[1] * nside[2]) as usize;
@@ -2334,9 +2331,9 @@ fn eam_eval_fast(
                                 continue;
                             }
                             let shift = [
-                                sx as f64 * cell[0][0],
-                                sy as f64 * cell[1][1],
-                                sz as f64 * cell[2][2],
+                                sx as f64 * cell[0][0] + sy as f64 * cell[1][0] + sz as f64 * cell[2][0],
+                                sx as f64 * cell[0][1] + sy as f64 * cell[1][1] + sz as f64 * cell[2][1],
+                                sx as f64 * cell[0][2] + sy as f64 * cell[1][2] + sz as f64 * cell[2][2],
                             ];
                             let d = [
                                 positions[3 * j] + shift[0] - positions[3 * i],
@@ -6147,7 +6144,7 @@ fn drive_band(
     spring: SpringKind,
 ) -> Result<BandEnd, String> {
     let surface = EamBand { copper, fixed };
-    let climb_limit = env_usize("RGSADDLE_SSNEB_CLIMB", 500);
+    let climb_limit = env_usize("RGSADDLE_SSNEB_CLIMB", 220);
     let mut positions = start;
     let mut cells = start_cells;
     let mut steps = 0usize;
@@ -7134,6 +7131,7 @@ fn ssneb_crosscheck_cu() {
     eprintln!("cross-check {:.1} min", started.elapsed().as_secs_f64() / 60.0);
 }
 
+#[derive(Clone)]
 struct BandStat {
     barrier: f64,
     force: f64,
@@ -7789,5 +7787,873 @@ fn ssneb_4456_fill() {
         write_size_row(&sink, *repeats, 500.0, job, "free", &free);
         assert!(fixed.converged, "fixed force {}", fixed.force);
         assert!(free.converged, "free force {}", free.force);
+    }
+}
+
+fn fcc_neighbor_steps(a: f64) -> Vec<[f64; 3]> {
+    let half = 0.5 * a;
+    let signs = [-1.0_f64, 1.0];
+    let mut steps = Vec::new();
+    for &left in &signs {
+        for &right in &signs {
+            steps.push([left * half, right * half, 0.0]);
+            steps.push([left * half, 0.0, right * half]);
+            steps.push([0.0, left * half, right * half]);
+        }
+    }
+    steps
+}
+
+fn dumbbell_axis(positions: &Array1<f64>, dumbbell: [usize; 2], cell: [[f64; 3]; 3]) -> [f64; 3] {
+    let center = centroid(positions, dumbbell);
+    unit3(mic_delta(point_of(positions, dumbbell[0]), center, cell))
+}
+
+fn axis_overlap(left: [f64; 3], right: [f64; 3]) -> f64 {
+    let left = unit3(left);
+    let right = unit3(right);
+    (left[0] * right[0] + left[1] * right[1] + left[2] * right[2]).abs()
+}
+
+fn axis_name(axis: [f64; 3]) -> String {
+    let axis = unit3(axis);
+    format!(
+        "{}{}{}",
+        if axis[0].abs() > 0.6 { 1 } else { 0 },
+        if axis[1].abs() > 0.6 { 1 } else { 0 },
+        if axis[2].abs() > 0.6 { 1 } else { 0 }
+    )
+}
+
+fn pair_recombined(
+    positions: &Array1<f64>,
+    vacancy: [f64; 3],
+    dumbbell: [usize; 2],
+    cell: [[f64; 3]; 3],
+) -> bool {
+    let gap = dist(point_of(positions, dumbbell[0]), point_of(positions, dumbbell[1]));
+    let separation = dist(centroid(positions, dumbbell), vacancy);
+    occupied(positions, vacancy, cell) || !(1.2..2.5).contains(&gap) || separation < 1.6
+}
+
+fn shift_dumbbell(positions: &Array1<f64>, dumbbell: [usize; 2], delta: [f64; 3]) -> Array1<f64> {
+    let mut moved = positions.clone();
+    for atom in dumbbell {
+        for c in 0..3 {
+            moved[3 * atom + c] += delta[c];
+        }
+    }
+    moved
+}
+
+fn rotate_dumbbell(positions: &Array1<f64>, dumbbell: [usize; 2], axis: [f64; 3]) -> Array1<f64> {
+    let center = centroid(positions, dumbbell);
+    let half = dist(point_of(positions, dumbbell[0]), center).max(0.8);
+    let axis = unit3(axis);
+    let mut moved = positions.clone();
+    for (atom, sign) in dumbbell.into_iter().zip([-1.0, 1.0]) {
+        for c in 0..3 {
+            moved[3 * atom + c] = center[c] + sign * half * axis[c];
+        }
+    }
+    moved
+}
+
+struct QuenchedEnd {
+    positions: Array1<f64>,
+    separation: f64,
+    reaction: f64,
+    recombined: bool,
+}
+
+fn quench_end(
+    copper: &FastCopper,
+    guess: Array1<f64>,
+    vacancy: [f64; 3],
+    dumbbell: [usize; 2],
+    cell: [[f64; 3]; 3],
+    reactant_energy: f64,
+) -> QuenchedEnd {
+    let mut positions = guess;
+    relax_fast(copper, &mut positions, cell, 1.5e-3, 60);
+    let mobile = [dumbbell[0], dumbbell[1]];
+    let separation = rgsaddle::pair_separation(positions.view(), cell, vacancy, &mobile).unwrap_or(0.0);
+    let recombined = pair_recombined(&positions, vacancy, dumbbell, cell);
+    let reaction = copper.evaluate(positions.view(), cell).0 - reactant_energy;
+    QuenchedEnd {
+        positions,
+        separation,
+        reaction,
+        recombined,
+    }
+}
+
+struct ThirteenHop {
+    shell: String,
+    orientation: String,
+    mechanism: &'static str,
+    sites: usize,
+    reactant_sep: f64,
+    end_sep: f64,
+    reaction: f64,
+    job: CrossJob,
+}
+
+fn hop_job(
+    mechanism: &'static str,
+    shell: &str,
+    orientation: &str,
+    lattice: f64,
+    reactant: &Array1<f64>,
+    end: &QuenchedEnd,
+    cell: [[f64; 3]; 3],
+) -> CrossJob {
+    CrossJob {
+        kind: "shell",
+        shell: shell.into(),
+        orientation: orientation.into(),
+        direction: format!(
+            "{mechanism};sep={:.3};dE={:.4}",
+            end.separation, end.reaction
+        ),
+        lattice,
+        lattice_note: "300 K NPT lattice".into(),
+        reactant: reactant.clone(),
+        product: end.positions.clone(),
+        saddle: reactant.clone(),
+        mode: Array1::zeros(reactant.len()),
+        cell,
+        csv: Vec::new(),
+        relax_product: false,
+        energy_weighted: false,
+    }
+}
+
+fn distinct_end(ends: &[QuenchedEnd], end: &QuenchedEnd) -> bool {
+    ends.iter().all(|kept| (kept.separation - end.separation).abs() > 0.12)
+}
+
+fn shell_frame(
+    copper: &FastCopper,
+    repeats: usize,
+    lattice: f64,
+    shell: [f64; 3],
+    axis: [f64; 3],
+) -> (Array1<f64>, [f64; 3], [usize; 2], [[f64; 3]; 3], f64, bool) {
+    let (mut reactant, vacancy, dumbbell, cell, _, _, recombined) =
+        relax_pair_axis(copper, repeats, lattice, shell, axis, true);
+    if recombined {
+        relax_fast(copper, &mut reactant, cell, 1.5e-3, 20);
+    }
+    let mobile = [dumbbell[0], dumbbell[1]];
+    let separation = rgsaddle::pair_separation(reactant.view(), cell, vacancy, &mobile).unwrap_or(0.0);
+    let gone = pair_recombined(&reactant, vacancy, dumbbell, cell);
+    (reactant, vacancy, dumbbell, cell, separation, gone)
+}
+
+fn shell_hops(copper: &FastCopper, repeats: usize, lattice: f64, shell: [f64; 3], sites: usize) -> Vec<ThirteenHop> {
+    let radius = (shell[0] * shell[0] + shell[1] * shell[1] + shell[2] * shell[2]).sqrt();
+    let label = format!("{radius:.3}");
+    let axes = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    let mut frames = Vec::new();
+    for axis in axes {
+        frames.push((axis, shell_frame(copper, repeats, lattice, shell, axis)));
+    }
+    let (axis, (reactant, vacancy, dumbbell, cell, reactant_sep, gone)) = frames
+        .into_iter()
+        .min_by(|left, right| {
+            let left_err = if left.1.5 { 100.0 } else { (left.1.4 - radius).abs() };
+            let right_err = if right.1.5 { 100.0 } else { (right.1.4 - radius).abs() };
+            left_err.partial_cmp(&right_err).unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .expect("three <100> axes");
+    let orientation = axis_name(axis);
+    let _ = gone;
+    let reactant_energy = copper.evaluate(reactant.view(), cell).0;
+    if pair_recombined(&reactant, vacancy, dumbbell, cell) {
+        eprintln!("shell {label} recombines on relaxation");
+        let end = QuenchedEnd {
+            positions: reactant.clone(),
+            separation: reactant_sep,
+            reaction: 0.0,
+            recombined: true,
+        };
+        return vec![ThirteenHop {
+            shell: label,
+            orientation,
+            mechanism: "capture",
+            sites,
+            reactant_sep,
+            end_sep: reactant_sep,
+            reaction: 0.0,
+            job: hop_job("capture", &format!("{radius:.3}"), &axis_name(axis), lattice, &reactant, &end, cell),
+        }];
+    }
+    let mut hops = Vec::new();
+    let rotation_axis = if axis[2].abs() > 0.6 {
+        [0.0, 1.0, 1.0]
+    } else {
+        [1.0, 1.0, 0.0]
+    };
+    let rotated = quench_end(
+        copper,
+        rotate_dumbbell(&reactant, dumbbell, rotation_axis),
+        vacancy,
+        dumbbell,
+        cell,
+        reactant_energy,
+    );
+    let rotated_axis = dumbbell_axis(&rotated.positions, dumbbell, cell);
+    let rotated_shift = (rotated.separation - reactant_sep).abs();
+    if !rotated.recombined && rotated_shift < 0.45 && axis_overlap(rotated_axis, axis) < 0.85 {
+        hops.push(ThirteenHop {
+            shell: label.clone(),
+            orientation: orientation.clone(),
+            mechanism: "rotation",
+            sites,
+            reactant_sep,
+            end_sep: rotated.separation,
+            reaction: rotated.reaction,
+            job: hop_job("rotation", &label, &orientation, lattice, &reactant, &rotated, cell),
+        });
+    }
+    if !hops.iter().any(|hop| hop.mechanism == "rotation")
+        && let Some(end) = dimer_rotation(copper, &reactant, dumbbell, cell, rotation_axis)
+    {
+        let now = dumbbell_axis(&end.positions, dumbbell, cell);
+        let sep = rgsaddle::pair_separation(end.positions.view(), cell, vacancy, &dumbbell)
+            .unwrap_or(reactant_sep);
+        if (sep - reactant_sep).abs() < 0.45 && axis_overlap(now, axis) < 0.85 {
+            let sep = sep;
+            eprintln!("shell {label} dimer rotation axis {} sep {sep:.3}", axis_name(now));
+            hops.push(ThirteenHop {
+                shell: label.clone(),
+                orientation: orientation.clone(),
+                mechanism: "rotation",
+                sites,
+                reactant_sep,
+                end_sep: sep,
+                reaction: end.reaction,
+                job: hop_job("rotation", &label, &orientation, lattice, &reactant, &end, cell),
+            });
+        }
+    }
+    let mut toward: Vec<QuenchedEnd> = Vec::new();
+    let mut away: Vec<QuenchedEnd> = Vec::new();
+    let mut tangential: Vec<QuenchedEnd> = Vec::new();
+    for step in fcc_neighbor_steps(lattice) {
+        let end = quench_end(
+            copper,
+            shift_dumbbell(&reactant, dumbbell, step),
+            vacancy,
+            dumbbell,
+            cell,
+            reactant_energy,
+        );
+        if hausdorff(&end.positions, &reactant, cell) < 0.35 {
+            continue;
+        }
+        if end.recombined || end.separation + 0.08 < reactant_sep {
+            if distinct_end(&toward, &end) {
+                toward.push(end);
+            }
+            continue;
+        }
+        if end.separation > reactant_sep + 0.08 {
+            if distinct_end(&away, &end) {
+                away.push(end);
+            }
+            continue;
+        }
+        if distinct_end(&tangential, &end) {
+            tangential.push(end);
+        }
+    }
+    let capture = toward.into_iter().min_by(|left, right| {
+        left.separation.partial_cmp(&right.separation).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    if let Some(end) = capture {
+        hops.push(ThirteenHop {
+            shell: label.clone(),
+            orientation: orientation.clone(),
+            mechanism: "capture",
+            sites,
+            reactant_sep,
+            end_sep: end.separation,
+            reaction: end.reaction,
+            job: hop_job("capture", &label, &orientation, lattice, &reactant, &end, cell),
+        });
+    }
+    let away_shell = (radius / lattice - 1.224744871).abs() < 0.04;
+    if away_shell && away.len() < 2 {
+        for step in fcc_neighbor_steps(lattice) {
+            for extra in [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]] {
+                if axis_name(extra) == orientation {
+                    continue;
+                }
+                let shifted = shift_dumbbell(&reactant, dumbbell, step);
+                let end = quench_end(
+                    copper,
+                    rotate_dumbbell(&shifted, dumbbell, extra),
+                    vacancy,
+                    dumbbell,
+                    cell,
+                    reactant_energy,
+                );
+                if end.recombined || end.separation <= reactant_sep + 0.08 || !distinct_end(&away, &end) {
+                    continue;
+                }
+                away.push(end);
+            }
+        }
+    }
+    eprintln!(
+        "shell {label} {orientation} sep {reactant_sep:.3} away {}",
+        away.len()
+    );
+    if away_shell {
+        away.sort_by(|left, right| right.separation.partial_cmp(&left.separation).unwrap_or(std::cmp::Ordering::Equal));
+        for end in away.into_iter().take(2) {
+            hops.push(ThirteenHop {
+                shell: label.clone(),
+                orientation: orientation.clone(),
+                mechanism: "away",
+                sites,
+                reactant_sep,
+                end_sep: end.separation,
+                reaction: end.reaction,
+                job: hop_job("away", &label, &orientation, lattice, &reactant, &end, cell),
+            });
+        }
+    }
+    let translation = tangential.into_iter().find(|end| {
+        let shift = dist(centroid(&end.positions, dumbbell), centroid(&reactant, dumbbell));
+        shift > 1.5 && axis_overlap(dumbbell_axis(&end.positions, dumbbell, cell), axis) > 0.7
+    });
+    if let Some(end) = translation {
+        hops.push(ThirteenHop {
+            shell: label.clone(),
+            orientation: orientation.clone(),
+            mechanism: "translation",
+            sites,
+            reactant_sep,
+            end_sep: end.separation,
+            reaction: end.reaction,
+            job: hop_job("translation", &label, &orientation, lattice, &reactant, &end, cell),
+        });
+    }
+    eprintln!(
+        "shell {label} {orientation} built {} hops, reactant sep {reactant_sep:.3}",
+        hops.len()
+    );
+    hops
+}
+
+fn isolated_hops(copper: &FastCopper, repeats: usize, lattice: f64) -> Vec<ThirteenHop> {
+    let axis = [1.0, 0.0, 0.0];
+    let built = build_oriented(repeats, lattice, [lattice, 0.0, 0.0], axis, false);
+    let length = repeats as f64 * lattice;
+    let cell = [[length, 0.0, 0.0], [0.0, length, 0.0], [0.0, 0.0, length]];
+    let mut reactant = built.positions;
+    relax_fast(copper, &mut reactant, cell, 1.0e-3, 80);
+    let dumbbell = built.dumbbell;
+    let energy = copper.evaluate(reactant.view(), cell).0;
+    let origin = centroid(&reactant, dumbbell);
+    let mut hops = Vec::new();
+    for step in fcc_neighbor_steps(lattice) {
+        let end = quench_end(
+            copper,
+            shift_dumbbell(&reactant, dumbbell, step),
+            origin,
+            dumbbell,
+            cell,
+            energy,
+        );
+        let shift = dist(centroid(&end.positions, dumbbell), origin);
+        let now = dumbbell_axis(&end.positions, dumbbell, cell);
+        eprintln!(
+            "isolated translation try shift {shift:.3} axis {}",
+            axis_name(now)
+        );
+        if shift > 2.0 && axis_overlap(now, axis) > 0.75 {
+            hops.push(ThirteenHop {
+                shell: "isolated".into(),
+                orientation: "100".into(),
+                mechanism: "translation",
+                sites: 1,
+                reactant_sep: 0.0,
+                end_sep: shift,
+                reaction: end.reaction,
+                job: hop_job("translation", "isolated", "100", lattice, &reactant, &end, cell),
+            });
+            break;
+        }
+    }
+    let rotated = quench_end(
+        copper,
+        rotate_dumbbell(&reactant, dumbbell, [1.0, 1.0, 0.0]),
+        origin,
+        dumbbell,
+        cell,
+        energy,
+    );
+    let shift = dist(centroid(&rotated.positions, dumbbell), origin);
+    let now = dumbbell_axis(&rotated.positions, dumbbell, cell);
+    eprintln!(
+        "isolated rotation quench shift {shift:.3} axis {} overlap110 {:.3}",
+        axis_name(now),
+        axis_overlap(now, [1.0, 1.0, 0.0])
+    );
+    if shift < 0.5 && axis_overlap(now, [1.0, 1.0, 0.0]) > 0.75 {
+        hops.push(ThirteenHop {
+            shell: "isolated".into(),
+            orientation: "100".into(),
+            mechanism: "rotation",
+            sites: 1,
+            reactant_sep: 0.0,
+            end_sep: shift,
+            reaction: rotated.reaction,
+            job: hop_job("rotation", "isolated", "100", lattice, &reactant, &rotated, cell),
+        });
+    } else if let Some(end) = dimer_rotation(copper, &reactant, dumbbell, cell, [1.0, 1.0, 0.0]) {
+        let end_shift = dist(centroid(&end.positions, dumbbell), origin);
+        let now = dumbbell_axis(&end.positions, dumbbell, cell);
+        eprintln!(
+            "isolated dimer rotation shift {end_shift:.3} axis {}",
+            axis_name(now)
+        );
+        if end_shift < 0.5 && axis_overlap(now, axis) < 0.85 {
+        hops.push(ThirteenHop {
+            shell: "isolated".into(),
+            orientation: "100".into(),
+            mechanism: "rotation",
+            sites: 1,
+            reactant_sep: 0.0,
+            end_sep: end_shift,
+            reaction: end.reaction,
+            job: hop_job("rotation", "isolated", "100", lattice, &reactant, &end, cell),
+        });
+        }
+    }
+    hops
+}
+
+fn dimer_rotation(
+    copper: &FastCopper,
+    reactant: &Array1<f64>,
+    dumbbell: [usize; 2],
+    cell: [[f64; 3]; 3],
+    target: [f64; 3],
+) -> Option<QuenchedEnd> {
+    let center = centroid(reactant, dumbbell);
+    let half = dist(point_of(reactant, dumbbell[0]), center).max(0.8);
+    let target = unit3(target);
+    let mut kick = Array1::zeros(reactant.len());
+    for (atom, sign) in dumbbell.into_iter().zip([-1.0, 1.0]) {
+        let here = point_of(reactant, atom);
+        for c in 0..3 {
+            kick[3 * atom + c] = 0.55 * (center[c] + sign * half * target[c] - here[c]);
+        }
+    }
+    let mode_norm = kick.dot(&kick).sqrt();
+    if mode_norm < 1.0e-6 {
+        return None;
+    }
+    let mode = &kick / mode_norm;
+    let search = MinModeConfig {
+        force_tol: 5.0e-3,
+        max_move: 0.1,
+        dr: 1.0e-3,
+        max_rotations: 8,
+        ..MinModeConfig::default()
+    };
+    let config = SolidDimerConfig::frozen(search)
+        .with_index_check(IndexCheck::first_order().with_step(1.0e-3).with_escapes(2));
+    let mut dimer = SolidDimer::new(config, reactant + &kick, cell, mode).ok()?;
+    let held = FastHeld { copper, cell };
+    let report = dimer.run(&held, 120).ok()?;
+    if report.status != MinModeStatus::Converged || report.rejected || report.negative_modes != Some(1) {
+        eprintln!("isolated rotation dimer {:?}", report.status);
+        return None;
+    }
+    let saddle = dimer.positions().to_owned();
+    let unstable = dimer.mode().to_owned();
+    let mut peak = 0.0_f64;
+    for atom in 0..saddle.len() / 3 {
+        let mut acc = 0.0;
+        for c in 0..3 {
+            acc += unstable[3 * atom + c] * unstable[3 * atom + c];
+        }
+        peak = peak.max(acc.sqrt());
+    }
+    if peak < 1.0e-8 {
+        return None;
+    }
+    let step = &unstable * (0.45 / peak);
+    let mut plus = &saddle + &step;
+    let mut minus = &saddle - &step;
+    relax_fast(copper, &mut plus, cell, 1.5e-3, 60);
+    relax_fast(copper, &mut minus, cell, 1.5e-3, 60);
+    let product = if hausdorff(&plus, reactant, cell) < hausdorff(&minus, reactant, cell) {
+        minus
+    } else {
+        plus
+    };
+    let energy = copper.evaluate(reactant.view(), cell).0;
+    Some(QuenchedEnd {
+        separation: 0.0,
+        reaction: copper.evaluate(product.view(), cell).0 - energy,
+        recombined: false,
+        positions: product,
+    })
+}
+
+struct ThirteenRow {
+    shell: String,
+    orientation: String,
+    mechanism: String,
+    cell: String,
+    n_atoms: usize,
+    barrier: f64,
+    end_sep: f64,
+    reactant_sep: f64,
+    force: f64,
+    calls: usize,
+    steps: usize,
+    converged: bool,
+}
+
+#[test]
+fn fast_eam_matches_a_sheared_cell() {
+    let (positions, _) = fcc(2, 3.628311);
+    let cell = [
+        [7.3, 0.15, -0.08],
+        [0.04, 7.2, 0.12],
+        [-0.05, 0.07, 7.4],
+    ];
+    let slow = eam_eval(positions.view(), cell);
+    let fast = eam_eval_fast(positions.view(), cell);
+    assert!((slow.0 - fast.0).abs() < 1.0e-8, "energy {} vs {}", slow.0, fast.0);
+    for (left, right) in slow.1.iter().zip(fast.1.iter()) {
+        assert!((left - right).abs() < 1.0e-8, "force {left} vs {right}");
+    }
+}
+
+#[test]
+#[ignore = "13x13x13 300 K shells inside 7 A; writes benchmarks/ssneb_shell_300K_13.csv"]
+fn ssneb_shell_300k_13() {
+    let lattice = 3.628311_f64;
+    let repeats = 13usize;
+    let copper = FastCopper::new();
+    let (sample, sample_cell) = fcc(repeats, lattice);
+    let started = Instant::now();
+    let _ = copper.evaluate(sample.view(), sample_cell);
+    eprintln!("13^3 eval {:.3} s, atoms {}", started.elapsed().as_secs_f64(), sample.len() / 3);
+    let shells: Vec<_> = shell_table(lattice, repeats)
+        .into_iter()
+        .filter(|(radius, _, _)| *radius < 7.0)
+        .collect();
+    assert!(shells.len() >= 5, "expected the neighbor shells inside 7 A");
+    let mut hops: Vec<ThirteenHop> = shells
+        .par_iter()
+        .flat_map(|(radius, vector, sites)| {
+            let _ = radius;
+            let local = FastCopper::new();
+            shell_hops(&local, repeats, lattice, *vector, *sites)
+        })
+        .collect();
+    hops.extend(isolated_hops(&copper, repeats, lattice));
+    assert!(hops.iter().any(|hop| hop.mechanism == "rotation" && hop.shell == "isolated"));
+    assert!(hops.iter().any(|hop| hop.mechanism == "away"), "no 4.456 away end");
+    let measured: Vec<_> = hops
+        .par_iter()
+        .map(|hop| {
+            if hop.mechanism == "capture" && hop.reaction == 0.0 && (hop.end_sep - hop.reactant_sep).abs() < 1.0e-8 {
+                let zero = BandStat {
+                    barrier: 0.0,
+                    force: 0.0,
+                    steps: 0,
+                    calls: 0,
+                    converged: true,
+                };
+                return (hop, zero.clone(), zero);
+            }
+            let local = FastCopper::new();
+            let (fixed, free) = size_pair(&local, &hop.job);
+            (hop, fixed, free)
+        })
+        .collect();
+    let mut rows = Vec::new();
+    for (hop, fixed, free) in &measured {
+        for (mode, stat) in [("fixed", fixed), ("free", free)] {
+            rows.push(ThirteenRow {
+                shell: hop.shell.clone(),
+                orientation: hop.orientation.clone(),
+                mechanism: hop.mechanism.to_string(),
+                cell: mode.into(),
+                n_atoms: hop.job.reactant.len() / 3,
+                barrier: stat.barrier,
+                end_sep: hop.end_sep,
+                reactant_sep: hop.reactant_sep,
+                force: stat.force,
+                calls: stat.calls,
+                steps: stat.steps,
+                converged: stat.converged,
+            });
+        }
+    }
+    let reference = |mechanism: &str, cell: &str| -> Option<f64> {
+        rows.iter()
+            .find(|row| row.shell == "isolated" && row.mechanism == mechanism && row.cell == cell && row.converged)
+            .map(|row| row.barrier)
+    };
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks/ssneb_shell_300K_13.csv");
+    let mut file = File::create(&path).expect("300 K 13^3 csv");
+    writeln!(
+        file,
+        "shell_A,orientation,mechanism,cell,n_atoms,barrier_eV,end_sep_A,reactant_sep_A,max_force,force_calls,steps,converged,free_barrier_eV,barrier_minus_free_eV,rotation_below_translation"
+    )
+    .unwrap();
+    for row in &rows {
+        let free_kind = if row.mechanism == "rotation" { "rotation" } else { "translation" };
+        let free_barrier = if row.shell == "isolated" { None } else { reference(free_kind, &row.cell) };
+        let translation = reference("translation", &row.cell);
+        let below = if row.mechanism == "rotation" && row.shell != "isolated" && row.converged {
+            translation.map(|value| if row.barrier < value { "1" } else { "0" })
+        } else {
+            None
+        };
+        let delta = free_barrier.map(|value| row.barrier - value);
+        writeln!(
+            file,
+            "{shell},{orientation},{mechanism},{cell},{n},{barrier:.6},{end:.3},{reactant:.3},{force:.6e},{calls},{steps},{ok},{free},{minus},{below}",
+            shell = row.shell,
+            orientation = row.orientation,
+            mechanism = row.mechanism,
+            cell = row.cell,
+            n = row.n_atoms,
+            barrier = row.barrier,
+            end = row.end_sep,
+            reactant = row.reactant_sep,
+            force = row.force,
+            calls = row.calls,
+            steps = row.steps,
+            ok = row.converged as u8,
+            free = free_barrier.map(|value| format!("{value:.6}")).unwrap_or_default(),
+            minus = delta.map(|value| format!("{value:.6}")).unwrap_or_default(),
+            below = below.unwrap_or(""),
+        )
+        .unwrap();
+        eprintln!(
+            "{shell} {orientation} {mechanism} {cell} barrier {barrier:.4} end {end:.3} force {force:.3e} below {below}",
+            shell = row.shell,
+            orientation = row.orientation,
+            mechanism = row.mechanism,
+            cell = row.cell,
+            barrier = row.barrier,
+            end = row.end_sep,
+            force = row.force,
+            below = below.unwrap_or("-"),
+        );
+    }
+    let require = |shell: &str, mechanism: &str, cell: &str| {
+        rows.iter().any(|row| {
+            row.shell == shell && row.mechanism == mechanism && row.cell == cell && row.converged
+        })
+    };
+    assert!(require("isolated", "translation", "fixed") && require("isolated", "translation", "free"));
+    assert!(require("isolated", "rotation", "fixed") && require("isolated", "rotation", "free"));
+    let away_fixed = rows
+        .iter()
+        .filter(|row| row.shell == "4.444" && row.mechanism == "away" && row.cell == "fixed" && row.converged)
+        .count();
+    assert!(away_fixed >= 2, "4.444 A away ends converged in fixed cell: {away_fixed}");
+}
+
+#[test]
+#[ignore = "nearest 4.444 away ends and the isolated translation on the 13^3 cell"]
+fn ssneb_300k_13_finish() {
+    let lattice = 3.628311_f64;
+    let repeats = 13usize;
+    let copper = FastCopper::new();
+    let mut jobs = Vec::new();
+    let shell = shell_vector(lattice, repeats, 1.224744871);
+    let (reactant, vacancy, dumbbell, cell, sep, gone) =
+        shell_frame(&copper, repeats, lattice, shell, [1.0, 0.0, 0.0]);
+    assert!(!gone, "4.444 shell recombined");
+    let energy = copper.evaluate(reactant.view(), cell).0;
+    let mut away = Vec::new();
+    for step in fcc_neighbor_steps(lattice) {
+        let end = quench_end(
+            &copper,
+            shift_dumbbell(&reactant, dumbbell, step),
+            vacancy,
+            dumbbell,
+            cell,
+            energy,
+        );
+        eprintln!(
+            "4.444 try sep {:.3}->{:.3} dE {:.4} recombined {}",
+            sep, end.separation, end.reaction, end.recombined as u8
+        );
+        if end.recombined || end.separation < sep + 0.08 || end.reaction.abs() > 1.0 {
+            continue;
+        }
+        if distinct_end(&away, &end) {
+            away.push(end);
+        }
+    }
+    away.sort_by(|left, right| left.separation.partial_cmp(&right.separation).unwrap_or(std::cmp::Ordering::Equal));
+    eprintln!("4.444 kept {} away ends", away.len());
+    for end in away.into_iter().take(2) {
+        jobs.push(ThirteenHop {
+            shell: "4.444".into(),
+            orientation: "100".into(),
+            mechanism: "away",
+            sites: 24,
+            reactant_sep: sep,
+            end_sep: end.separation,
+            reaction: end.reaction,
+            job: hop_job("away", "4.444", "100", lattice, &reactant, &end, cell),
+        });
+    }
+    let axis = [1.0, 0.0, 0.0];
+    let built = build_oriented(repeats, lattice, [lattice, 0.0, 0.0], axis, false);
+    let length = repeats as f64 * lattice;
+    let icell = [[length, 0.0, 0.0], [0.0, length, 0.0], [0.0, 0.0, length]];
+    let mut isolated = built.positions;
+    relax_fast(&copper, &mut isolated, icell, 1.0e-3, 80);
+    let idumb = built.dumbbell;
+    let ienergy = copper.evaluate(isolated.view(), icell).0;
+    let origin = centroid(&isolated, idumb);
+    let mut translated = None;
+    for step in fcc_neighbor_steps(lattice) {
+        let end = quench_end(
+            &copper,
+            shift_dumbbell(&isolated, idumb, step),
+            origin,
+            idumb,
+            icell,
+            ienergy,
+        );
+        let shift = dist(centroid(&end.positions, idumb), origin);
+        let now = dumbbell_axis(&end.positions, idumb, icell);
+        eprintln!(
+            "isolated try shift {shift:.3} axis {} dE {:.4}",
+            axis_name(now),
+            end.reaction
+        );
+        let reaction = end.reaction.abs();
+        let better = translated.as_ref().is_none_or(|(_, _, best)| reaction < *best);
+        if shift > 2.0 && axis_overlap(now, axis) > 0.75 && better {
+            translated = Some((end, shift, reaction));
+        }
+    }
+    let (end, shift, _) = translated.expect("isolated translation end");
+    eprintln!("isolated translation chosen shift {shift:.3} dE {:.4}", end.reaction);
+    jobs.push(ThirteenHop {
+        shell: "isolated".into(),
+        orientation: "100".into(),
+        mechanism: "translation",
+        sites: 1,
+        reactant_sep: 0.0,
+        end_sep: shift,
+        reaction: end.reaction,
+        job: hop_job("translation", "isolated", "100", lattice, &isolated, &end, icell),
+    });
+    let mode = &end.positions - &isolated;
+    let mid = blend_positions(&isolated, icell, &end.positions, icell, icell, 0.5);
+    let mechanism = capture_mechanism(
+        &copper,
+        &isolated,
+        icell,
+        idumb,
+        &mid,
+        &end.positions,
+        &mode,
+        end.reaction,
+    );
+    let center = centroid(&reactant, dumbbell);
+    let mapped = mapped_hops(&reactant, cell, center, [1.0, 0.0, 0.0], &[mechanism]);
+    let mut mapped_away = Vec::new();
+    for hop in mapped {
+        let mut product = hop.product;
+        relax_fast(&copper, &mut product, cell, 1.5e-3, 60);
+        let after = rgsaddle::pair_separation(product.view(), cell, vacancy, &dumbbell).unwrap_or(sep);
+        let reaction = copper.evaluate(product.view(), cell).0 - energy;
+        let recombined = pair_recombined(&product, vacancy, dumbbell, cell);
+        eprintln!("mapped sep {sep:.3}->{after:.3} dE {reaction:.4} recombined {}", recombined as u8);
+        if recombined || after < sep + 0.08 || reaction.abs() > 0.5 {
+            continue;
+        }
+        let end = QuenchedEnd {
+            positions: product,
+            separation: after,
+            reaction,
+            recombined: false,
+        };
+        if distinct_end(&mapped_away, &end) {
+            mapped_away.push(end);
+        }
+    }
+    mapped_away.sort_by(|left, right| {
+        left.separation.partial_cmp(&right.separation).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    for end in mapped_away.into_iter().take(2) {
+        jobs.push(ThirteenHop {
+            shell: "4.444".into(),
+            orientation: "100".into(),
+            mechanism: "away",
+            sites: 24,
+            reactant_sep: sep,
+            end_sep: end.separation,
+            reaction: end.reaction,
+            job: hop_job("away", "4.444", "100", lattice, &reactant, &end, cell),
+        });
+    }
+    let measured: Vec<_> = jobs
+        .par_iter()
+        .map(|hop| {
+            let local = FastCopper::new();
+            let (fixed, free) = size_pair(&local, &hop.job);
+            (hop, fixed, free)
+        })
+        .collect();
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks/ssneb_shell_300K_13_finish.csv");
+    let mut file = File::create(&path).expect("finish csv");
+    writeln!(
+        file,
+        "shell_A,orientation,mechanism,cell,n_atoms,barrier_eV,end_sep_A,reactant_sep_A,max_force,force_calls,steps,converged,reaction_eV"
+    )
+    .unwrap();
+    for (hop, fixed, free) in &measured {
+        for (mode, stat) in [("fixed", fixed), ("free", free)] {
+            writeln!(
+                file,
+                "{shell},{orientation},{mechanism},{mode},{n},{barrier:.6},{end:.3},{reactant:.3},{force:.6e},{calls},{steps},{ok},{reaction:.4}",
+                shell = hop.shell,
+                orientation = hop.orientation,
+                mechanism = hop.mechanism,
+                n = hop.job.reactant.len() / 3,
+                barrier = stat.barrier,
+                end = hop.end_sep,
+                reactant = hop.reactant_sep,
+                force = stat.force,
+                calls = stat.calls,
+                steps = stat.steps,
+                ok = stat.converged as u8,
+                reaction = hop.reaction,
+            )
+            .unwrap();
+            eprintln!(
+                "{shell} {mechanism} {mode} {barrier:.4} end {end:.3} force {force:.3e} ok {ok}",
+                shell = hop.shell,
+                mechanism = hop.mechanism,
+                barrier = stat.barrier,
+                end = hop.end_sep,
+                force = stat.force,
+                ok = stat.converged as u8,
+            );
+        }
     }
 }
