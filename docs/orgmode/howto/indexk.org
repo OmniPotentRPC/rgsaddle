@@ -1,14 +1,22 @@
 #+TITLE: Follow k lowest modes
 #+OPTIONS: toc:nil num:nil
 
+#+begin_export rst
+:cite:`goswamiEnhancedClimbingImage2026,goswamiEfficientImplementationGaussian2025,henkelmanDimerMethodFinding1999,knyazevLobpcg2001,gouldDimerPreconditioning2016,zhangShrinkingDimer2012,yinHighIndexDimer2019`
+#+end_export
+
 =IndexKSession= and =indexk_step= take one minimum-mode step in a k-dimensional unstable subspace. =k = 1= is =MinModeSession=: the same dimer or Lanczos estimate, the same translated force, and the same translator step. A Gaussian-process surrogate supplies the Hessian action through =PointSurface::hessian_vector=, or through =WithHessian= when the product is a separate callback. With no action, the session uses the finite difference on =MinModeConfig=.
 
 The translated force is =F - 2 Σ_i v_i (v_i · F)= once every one of the k curvatures is negative (Goswami, Gunde, and Jónsson, Front. Chem. 14, 1807063 (2026), doi:10.3389/fchem.2026.1807063, Equation 3, for one mode). While any of those curvatures is not negative the step climbs inside the subspace and drops the orthogonal force, the one-mode rule of Henkelman and Jónsson, J. Chem. Phys. 111, 7010 (1999), doi:10.1063/1.480097. =reflect_force= is the Householder product alone. =translated_force= applies the sign rule.
 
 The k lowest pairs are a local block iteration behind =LowestEigenpairs=. LOBPCG keeps the previous block and its conjugate direction (Knyazev, SIAM J. Sci. Comput. 23, 517 (2001), doi:10.1137/S1064827500366124). Lanczos selects a reorthogonalized block Lanczos. Either slot can later call rgmin's =lowest_eigenpairs=. The step does not loop the one-vector eigenpair.
 
-Gould, Ortner, and Packwood, Math. Comp. 85, 2939 (2016), doi:10.1090/mcom/3096, analyse the dimer; the third author is Packwood, not Zhang. The shrinking-dimer convergence they use is Zhang and Du, SIAM J. Numer. Anal. 50, 1899 (2012), doi:10.1137/110843149. The index-k dimer is Yin, Zhang, and Zhang, SIAM J. Sci. Comput. 41, A3576 (2019), doi:10.1137/19M1253356. The surrogate that owns the Hessian product is the one in Goswami, Masterov, Kamath, Peña-Torres, and Jónsson, J. Chem. Theory Comput. 21, 7935 (2025), doi:10.1021/acs.jctc.5c00866.
+Gould, Ortner, and Packwood, Math. Comp. 85, 2939 (2016), doi:10.1090/mcom/3096, analyse the dimer. The shrinking-dimer convergence they use is Zhang and Du, SIAM J. Numer. Anal. 50, 1899 (2012), doi:10.1137/110843149. The index-k dimer is Yin, Zhang, and Zhang, SIAM J. Sci. Comput. 41, A3576 (2019), doi:10.1137/19M1253356. The surrogate that owns the Hessian product is the one in Goswami, Masterov, Kamath, Peña-Torres, and Jónsson, J. Chem. Theory Comput. 21, 7935 (2025), doi:10.1021/acs.jctc.5c00866.
 
 From C, ABI minor 37 adds =rgsaddle_indexk_create=, =rgsaddle_indexk_step=, =rgsaddle_indexk_modes=, =rgsaddle_indexk_translated=, =rgsaddle_indexk_position=, =rgsaddle_indexk_set_position=, =rgsaddle_indexk_free=, and =rgsaddle_reflect_force=. =modes= is row-major n-by-k with =n = 3 * n_atoms=, and may be NULL. A null Hessian callback estimates the action from the surface. The report's =curvature= is the lowest of the k values. The translator is FIRE. =k = 1= with =RGSADDLE_MINMODE_LOBPCG= uses Lanczos. =k < 1= or =k= larger than the dimension makes =rgsaddle_indexk_create= return NULL. The C++ owner is =rgsaddle::IndexK= in =include/rgsaddle/session.hpp=. There is no Python session name.
 
-The runnable example is the doctest on =IndexKSession=: an index-2 quadratic, an analytic Hessian action, and a search that finishes at the origin. =cargo test --doc indexk= runs it.
+The runnable example is the doctest on =IndexKSession=: an index-2 quadratic, an analytic Hessian action, and a search that finishes at the origin. It runs with the crate's doctests:
+
+#+begin_src sh
+cargo test --doc indexk
+#+end_src

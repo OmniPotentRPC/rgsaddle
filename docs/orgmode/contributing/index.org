@@ -18,7 +18,7 @@
 Build and test a pinned checkout with its Cargo lockfile.
 The C and C++ smoke tests require the C ABI library as well as the test executables.
 
-#+begin_src sh
+#+begin_src sh :skip "ci.yml runs these"
 cargo build --locked --features capi
 cargo test --locked --features capi
 CMAKE_POLICY_VERSION_MINIMUM=3.5 cargo clippy --locked --all-targets --all-features -- -D warnings
@@ -40,10 +40,26 @@ Narrative pages are the Org sources under ~docs/orgmode~.
 Git ignores those files, so edit the Org source and do not add the generated files.
 Build the site as the docs workflow does:
 
-#+begin_src sh
+#+begin_src sh :skip "docs.yml runs these"
 emacs --batch -l docs/export.el
 python -m pip install -r docs/requirements.txt
 sphinx-build -b html -n docs/source docs/build
+#+end_src
+
+Every Rust, Python and shell block of the pages and of the README runs in the ~docs-examples~ job of ~ci.yml~.
+A Rust block is a complete program with a ~main~ function.
+An ~#+begin_example~ block right after a source block holds lines its output must contain.
+A block that needs software the job does not install carries ~:skip "reason"~, and the job prints every reason.
+In the README the same marker is an HTML comment, ~<!-- docs-example: skip "reason" -->~, on the line before the fence.
+~docs/check_names.py~ fails when inline code names a Rust item, a C symbol, a Python name or a file that does not exist.
+It reads the rustdoc of rgsaddle and rgmin, so build that first.
+A name that belongs to another project goes in ~docs/known_names.txt~ with its origin.
+
+#+begin_src sh :skip "the docs-examples job runs these"
+cargo doc --no-deps --all-features -p rgsaddle
+cargo doc --no-deps -p rgmin
+python3 docs/check_names.py
+python3 docs/run_examples.py
 #+end_src
 
 Retain numerical assertions and record the source, dependency and library revisions with performance results.
@@ -58,7 +74,7 @@ The types are the sections of ~towncrier.toml~: ~breaking~, ~security~,
 Write Org markup with one sentence per line.
 A release collects the fragments under a new heading, and ~--draft~
 prints that heading without writing it:
-#+begin_src sh
+#+begin_src sh :skip "rewrites the changelog"
 python -m pip install towncrier
 towncrier build --draft --version <version>
 towncrier build --version <version>

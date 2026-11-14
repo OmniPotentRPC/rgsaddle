@@ -25,26 +25,20 @@
      </div>
 #+end_export
 
-The band and the minimum-mode search take one rgmin =Solver= step on a force this crate assembled. =Index1Session= takes a restricted-step partitioned RFO step and updates the Hessian with Powell or Bofill. There is no run-to-completion contract. =run= is a loop over =step=.
+The band and the minimum-mode search take one rgmin =Solver= step on a force this crate assembled. =Index1Session= takes a restricted-step partitioned RFO step and updates the Hessian with Powell or Bofill. The sessions have no run-to-completion contract. =run= is a loop over =step=.
 
-Force assembly ports eOn's NEB: Mills–Jónsson–Schenter and Henkelman–Jónsson tangents, uniform / energy-weighted / Onsager–Machlup springs, PEB / NEB / DNEB projections, climbing image with the eOn trigger. Positions are unwrapped Cartesian. A =Cell= supplies minimum-image differences.
+The force assembly ports eOn's NEB. It has the tangents of Mills, Jónsson and Schenter and of Henkelman and Jónsson, uniform, energy-weighted and Onsager-Machlup springs, the plain elastic band, NEB and doubly nudged projections, and the climbing image with eOn's trigger. Positions are unwrapped Cartesian. A =Cell= supplies minimum-image differences.
 
 * Install
-#+begin_src console
+#+begin_src console :dir new-crate
 $ cargo add rgsaddle
 $ cargo add rgsaddle --features capi   # C header and cdylib
 #+end_src
 
 * First minute
-The analytic double well in =tests/double_well.rs=: minima at \((\pm 1, 0, 0)\), saddle at the origin, barrier 1. Nine images, host loop, endpoints stay put.
+The analytic double well has minima at \((\pm 1, 0, 0)\) and a saddle at the origin, with barrier 1. Nine images start bowed off the straight path. The host calls =step= until the band reports =Converged=, and the endpoints stay put. This is =examples/double_well.rs=:
 
-#+begin_src rust
-let mut session = BandSession::new(BandConfig::default(), initial_band(9))?;
-let mut report = session.step(&DoubleWell)?;
-while report.status != BandStatus::Converged {
-    report = session.step(&DoubleWell)?;
-}
-#+end_src
+#+INCLUDE: "../../examples/double_well.rs" src rust :lines "9-"
 
 #+begin_export rst
 .. toctree::

@@ -5,21 +5,42 @@
 :cite:`goswamiEnhancedClimbingImage2026,henkelmanDimerMethodFinding1999,malekFindingSaddlePoints2000`
 #+end_export
 
-=Stencil::point= builds a minimiser, a dimer, Lanczos, ART, or eigen following. The defaults match =MinModeConfig=: forward difference, =dr = 1e-3=, rotation tolerance =1e-4=, rotation angle five degrees (zero disables it), 20 rotations, Krylov dimension 12, FIRE, maximum move 0.2. When the per-atom cap shortens a negative-curvature FIRE step and the arrival is no longer negative, that step is replaced from the last negative point by 0.01 times the reflected force. Dimer and Lanczos are a =MinModeSession=. Dimer rotational conjugate-gradient history crosses translations. A negative curvature reflects the parallel force. A curvature that is not negative takes one full per-atom maximum move along the mode and drops the perpendicular force. Henkelman and Jónsson (1999), doi:10.1063/1.480097. Goswami, Gunde, and Jónsson, Front. Chem. (2026), doi:10.3389/fchem.2026.1807063, Eq. 9.
+=Stencil::point= builds a minimiser, a dimer, Lanczos, ART, or eigen following. The defaults match =MinModeConfig=: forward difference, =dr = 1e-3=, rotation tolerance =1e-4=, rotation angle five degrees (zero disables it), 20 rotations, Krylov dimension 12, FIRE, maximum move 0.2. When the per-atom cap shortens a negative-curvature FIRE step and the arrival is no longer negative, that step is replaced from the last negative point by 0.01 times the reflected force. Dimer and Lanczos are a =MinModeSession=. Dimer rotational conjugate-gradient history crosses translations. A negative curvature reflects the parallel force. A curvature that is not negative takes one full per-atom maximum move along the mode and drops the perpendicular force. The dimer is Henkelman and Jónsson, J. Chem. Phys. 111, 7010 (1999), doi:10.1063/1.480097. The reflection is Goswami, Gunde, and Jónsson, Front. Chem. 14 (2026), doi:10.3389/fchem.2026.1807063, Eq. 9.
+
+The program runs the dimer preset on the double well \(V = (x^2 - 1)^2 + 2y^2 + 2z^2\) from a point near the minimum at \(x = 1\).
 
 #+begin_src rust
-let mut search = Stencil::point(x0)
-    .preset(Preset::Dimer)
-    .mode(seed)
-    .build()?;
-let report = search.step(&surface)?;
+use ndarray::{Array1, ArrayView1, array};
+use rgsaddle::{PointSurface, Preset, SaddleError, Stencil, StencilStatus};
+
+struct DoubleWell;
+
+impl PointSurface for DoubleWell {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        let energy = (x[0] * x[0] - 1.0).powi(2) + 2.0 * x[1] * x[1] + 2.0 * x[2] * x[2];
+        let g = array![4.0 * x[0] * (x[0] * x[0] - 1.0), 4.0 * x[1], 4.0 * x[2]];
+        Ok((energy, g))
+    }
+}
+
+fn main() -> Result<(), SaddleError> {
+    let x0 = array![0.7, 0.2, 0.0];
+    let seed = array![1.0, 0.0, 0.0];
+    let mut search = Stencil::point(x0).preset(Preset::Dimer).mode(seed).build()?;
+    let first = search.step(&DoubleWell)?;
+    println!("first step: curvature {:.1}", first.curvature);
+    let report = search.run(&DoubleWell, 500)?;
+    assert_eq!(report.status, StencilStatus::Converged);
+    println!("saddle at x = {:.4}, curvature {:.1}", search.position()[0].abs(), report.curvature);
+    Ok(())
+}
 #+end_src
 
-ART pushes along the seed until the curvature falls under =art_threshold= (default 0), then climbs with Lanczos. Malek and Mousseau (2000), doi:10.1103/PhysRevE.62.7723. Eigen following builds a central-difference Hessian, calls =exact_eigh=, and makes the largest-magnitude component of the lowest mode positive. =build= rejects =Climb::Reflect= on a minimiser, a window on a point, a zero thread count, and ART without a mode solver.
+ART pushes along the seed until the curvature falls under =art_threshold= (default 0), then climbs with Lanczos. ART is from Malek and Mousseau, Phys. Rev. E 62, 7723 (2000), doi:10.1103/PhysRevE.62.7723. Eigen following builds a central-difference Hessian, calls =exact_eigh=, and makes the largest-magnitude component of the lowest mode positive. =build= rejects =Climb::Reflect= on a minimiser, a window on a point, a zero thread count, and ART without a mode solver.
 
-=Stencil::band= checks the array and then returns =band presets stay on feat/band-methods-zoom=. Zoom, energy-weighted springs, and the band side of the builder are that branch. The chain, the mesh (remesh, insert, window), and the point controller are on this branch.
+=Stencil::band(x).build()= checks the array and then returns an =Invalid= error whose text is =BAND_PRESET_SEAM=. The builder has no band presets. A band runs through =BandSession=, whose =BandConfig= carries the zoom and the energy-weighted springs. The chain, the mesh (remesh, insert, window), and the point controller are in =rgsaddle::stencil=.
 
-From C, =rgsaddle_stencil_config_new= takes the preset discriminant. Unknown keys return =RGSADDLE_INVALID_PARAMETER=. =rgsaddle_last_error= is thread-local. =rgsaddle_stencil_run= loops over =rgsaddle_stencil_step=. The report opens with =struct_size=. The older band and min-mode entries stay step-only, and the ABI minor stays 16.
+From C, =rgsaddle_stencil_config_new= takes the preset discriminant. Unknown keys return =RGSADDLE_INVALID_PARAMETER=. =rgsaddle_last_error= is thread-local. =rgsaddle_stencil_run= loops over =rgsaddle_stencil_step=. The report opens with =struct_size=. The older band and min-mode entries stay step-only. The stencil symbols arrived at ABI minor 16.
 
 From Python, =rgsaddle.Stencil.point(x, preset="dimer")= takes a C-contiguous float64 vector. =step(surface)= releases the thread, and the surface callback re-attaches. =rgsaddle.ase.Point(atoms, preset="dimer").run(fmax, steps)= is an ASE =Optimizer= whose =step= is one stencil step. A second thread that enters the same handle raises =RuntimeError=.
 

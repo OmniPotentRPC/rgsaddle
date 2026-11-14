@@ -12,22 +12,22 @@ Enable =capi=. The header is =rgsaddle.h=. ABI major 1. Every wire struct opens 
 
 =rgsaddle_band_set_positions= with the band the host read back (even wrapped into its cell) costs no evaluation; only moved rows retire the cached values. =rgsaddle_report_t.evaluations= counts the image evaluations of each step.
 
-There is no run-to-completion C entry point. Units are the caller's. Positions are unwrapped Cartesian, image-major, stride =3 * n_atoms=.
+The band and min-mode entries have no run-to-completion call. =rgsaddle_stencil_run= and =rgsaddle_connect= run to completion. Units are the caller's. Positions are unwrapped Cartesian, image-major, stride =3 * n_atoms=.
 
 * Grow the band with AutoNEB
-=howto/autoneb= is the AutoNEB loop: insert where the resolution is worst, relax a local window, and climb. The tuning sits on =BandConfig::autoneb=. A weighted spring supplied by the host is refused for now; zoom-NEB will recompute it.
+=howto/autoneb= is the AutoNEB loop: insert where the resolution is worst, relax a local window, and climb. The tuning sits on =BandConfig::autoneb=. A weighted spring supplied by the host is refused.
 
 * Pick tangents, springs, projections
 | Kind             | Variants                                                             |
 |------------------+----------------------------------------------------------------------|
 | =TangentKind=    | =Simple= (Mills–Jónsson–Schenter), =Improved= (Henkelman–Jónsson) |
-| =SpringKind=     | =Uniform { k }=, energy-weighted, Onsager–Machlup                   |
-| =ProjectionKind= | plain elastic band, =Neb=, =Dneb=                                    |
+| =SpringKind=     | =Uniform { k }=, =Weighted=, =EnergyWeighted=, =OnsagerMachlup=, =OnsagerMachlupLive= |
+| =ProjectionKind= | =PlainElasticBand=, =Neb=, =DoublyNudged=                            |
 
-Defaults: improved tangent, uniform spring =k = 5=, NEB projection, climbing image with trigger factor 0.5.
+Defaults: improved tangent, uniform spring =k = 5=, NEB projection, FIRE 2.0, and a climbing image that arms by =CiConfig::after(0.5)=, when the largest force component falls under 0.5. The armed climbing image is refined by its lowest mode (=BandConfig::min_mode=). =howto/band= has the references.
 
 * Step one point with a stencil
-=howto/stencil= builds =Stencil::point= for a minimiser, the dimer, Lanczos, ART, or eigen following. =Stencil::band= is the =feat/band-methods-zoom= seam. The C names are =rgsaddle_stencil_*= and =rgsaddle_last_error=. Python is =rgsaddle.Stencil.point= and =rgsaddle.ase.Point=.
+=howto/stencil= builds =Stencil::point= for a minimiser, the dimer, Lanczos, ART, or eigen following. =Stencil::band= has no presets yet; its =build= returns the =BAND_PRESET_SEAM= error. The C names are =rgsaddle_stencil_*= and =rgsaddle_last_error=. Python is =rgsaddle.Stencil.point= and =rgsaddle.ase.Point=.
 
 * Minimum-mode instead of a band
 =MinModeSession= refreshes the lowest curvature mode (dimer rotation or Lanczos on finite-difference Hessian actions), inverts the force along it, and takes one solver step. Same host loop. =PointSurface= evals a single geometry.

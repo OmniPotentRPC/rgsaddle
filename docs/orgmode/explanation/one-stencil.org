@@ -2,12 +2,12 @@
 #+options: toc:nil num:nil
 
 #+begin_export rst
-:cite:`goswamiEnhancedClimbingImage2026,goswamiTruncatedChain2026,eon2901,goswamiEfficientExploration2025`
+:cite:`goswamiEnhancedClimbingImage2026,goswamiTruncatedChain2026,goswamiEfficientExploration2025,goswamiBayesianHierarchicalModels2025,eon2901`
 #+end_export
 
-The dimer translation and the climbing image are one Householder reflection of the true force. Goswami, Gunde, and Jónsson, Front. Chem. (2026), doi:10.3389/fchem.2026.1807063, Eqs. 3, 8, and 9, and Sec. 2.3.1 and Sec. 4. The dimer is that reflection on a three-image chain with free ends. Goswami (2026), arXiv:2603.10992, doi:10.48550/arXiv.2603.10992, Eqs. 2.14-2.16.
+The dimer translation and the climbing image are one Householder reflection of the true force. Goswami, Gunde, and Jónsson, Front. Chem. 14 (2026), doi:10.3389/fchem.2026.1807063, Eqs. 3, 8, and 9, and Sec. 2.3.1 and Sec. 4. The dimer is that reflection on a three-image chain with free ends. Goswami, ACS Phys. Chem. Au 6, 633 (2026), doi:10.1021/acsphyschemau.6c00038, and Eqs. 2.14-2.16 of its preprint, arXiv:2603.10992.
 
-A preset chooses the sides, the tangent, the coupling, the climb, and the mesh. =Stencil::point= runs a minimiser, the dimer, Lanczos, ART, and eigen following. Dimer and Lanczos construct =MinModeSession=, so the recorded position and energy hashes stay the same. =Stencil::band= names the band presets and returns the =feat/band-methods-zoom= seam. Zoom, the recomputed energy-weighted spring, and the band keys are that branch.
+A preset chooses the sides, the tangent, the coupling, the climb, and the mesh. =Stencil::point= runs a minimiser, the dimer, Lanczos, ART, and eigen following. Dimer and Lanczos construct =MinModeSession=, so the recorded position and energy hashes stay the same. =Stencil::band= names the band presets, and its =build= returns an error with the text =BAND_PRESET_SEAM=. The zoom and the energy-weighted spring are on =BandConfig= and run through =BandSession=, not through the stencil builder.
 
 | Preset | Tangent | Climb | Mode |
 |--------+---------+-------+------|
@@ -23,6 +23,6 @@ rgmin started as Rohit Goswami's xtsci-optimize (2023-2024), which composed mini
 
 The C surface is =rgsaddle_stencil_*= with an opaque config, typed key setters, and a thread-local =rgsaddle_last_error=. =include/rgsaddle/stencil.hpp= is the RAII wrapper. Python =rgsaddle.Stencil.point= and =rgsaddle.ase.Point= call that wrapper. =Point.run= uses an ASE =Optimizer= subclass. The extension is nanobind with =Py_MOD_GIL_NOT_USED= on a free-threaded build.
 
-Method papers, after the citations above: Henkelman and Jónsson (1999), doi:10.1063/1.480097; Henkelman, Uberuaga, and Jónsson (2000), doi:10.1063/1.1329672; Henkelman and Jónsson (2000), doi:10.1063/1.1323224; Jónsson, Mills, and Jacobsen (1998); Ásgeirsson et al. (2021), doi:10.1021/acs.jctc.1c00462; Kolsbjerg, Groves, and Hammer (2016), doi:10.1063/1.4961868; Malek and Mousseau (2000), doi:10.1103/PhysRevE.62.7723; Smidstrup et al. (2014), doi:10.1063/1.4878664; Schmerwitz, Ásgeirsson, and Jónsson (2024), doi:10.1021/acs.jctc.3c01111; Curtis, Powell, and Reid (1974), doi:10.1093/imamat/13.1.117.
+Method papers, after the citations above: Henkelman and Jónsson (1999), doi:10.1063/1.480097; Henkelman, Uberuaga, and Jónsson (2000), doi:10.1063/1.1329672; Henkelman and Jónsson (2000), doi:10.1063/1.1323224; Jónsson, Mills, and Jacobsen (1998), doi:10.1142/9789812839664_0016; Ásgeirsson et al. (2021), doi:10.1021/acs.jctc.1c00462; Kolsbjerg, Groves, and Hammer (2016), doi:10.1063/1.4961868; Malek and Mousseau (2000), doi:10.1103/PhysRevE.62.7723; Smidstrup et al. (2014), doi:10.1063/1.4878664; Schmerwitz, Ásgeirsson, and Jónsson (2024), doi:10.1021/acs.jctc.3c01111; Curtis, Powell, and Reid (1974), doi:10.1093/imamat/13.1.117.
 
-A benchmark that changes iterates cites Goswami, AIP Adv. (2025), doi:10.1063/5.0283639, first. This branch does not change the recorded iterates.
+A benchmark that changes iterates cites Goswami, AIP Adv. 15, 085210 (2025), doi:10.1063/5.0283639, first. The stencil does not change the recorded iterates.

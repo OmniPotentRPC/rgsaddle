@@ -1,17 +1,78 @@
 #+TITLE: Optimize a saddle with Sella's step
 #+OPTIONS: toc:nil num:nil
 
-Sella's order-1 step is a partitioned rational-function optimization inside a trust radius: uphill along the lowest mode, downhill along the rest. It is not a dimer translation. The Rust type is ~SellaSaddleSession~. The Python call matches Sella's optimizer loop.
+#+begin_export rst
+:cite:`hermesAcceleratedSaddlePoint2019,hermesSellaOpensourceAutomationfriendly2022,bakerAlgorithmLocationTransition1986,banerjeeSearchStationaryPoints1985`
+#+end_export
+
+Sella's order-1 step is a partitioned rational-function optimization (P-RFO) inside a trust radius.
+It goes uphill along the lowest mode and downhill along the rest.
+It is not a dimer translation.
+The method is that of Sella (Hermes, Sargsyan, Najm and Zádor, J. Chem. Theory Comput. 15, 6536 (2019), doi:10.1021/acs.jctc.9b00869; J. Chem. Theory Comput. 18, 6974 (2022), doi:10.1021/acs.jctc.2c00395).
+P-RFO is from Banerjee, Adams, Simons and Shepard, J. Phys. Chem. 89, 52 (1985), doi:10.1021/j100247a015, and Baker, J. Comput. Chem. 7, 385 (1986), doi:10.1002/jcc.540070402.
+The Rust type is ~SellaSaddleSession~.
+The Python class ~rgsaddle.ase.Sella~ has Sella's ~run(fmax, steps)~ loop.
+
+The program below uses a model triatomic.
+The bond between atoms 0 and 1 is a double well with minima at 1 and 2 and its barrier at 1.5.
+The other two bonds are springs of rest length 1.
+The energy depends only on the three distances, so it does not change when the molecule moves or rotates as a whole.
 
 #+begin_src python
+import numpy as np
+from ase import Atoms
+from ase.calculators.calculator import Calculator, all_changes
+
 from rgsaddle.ase import Sella
 
+
+class Triatomic(Calculator):
+    """A double well in r01 and springs on r02 and r12."""
+
+    implemented_properties = ["energy", "forces"]
+
+    def calculate(self, atoms=None, properties=("energy",), system_changes=all_changes):
+        super().calculate(atoms, properties, system_changes)
+        r = self.atoms.positions
+        energy = 0.0
+        forces = np.zeros_like(r)
+        for i, j, well in ((0, 1, True), (0, 2, False), (1, 2, False)):
+            d = r[i] - r[j]
+            dist = np.linalg.norm(d)
+            if well:
+                s = dist - 1.5
+                energy += (s * s - 0.25) ** 2
+                slope = 4.0 * s * (s * s - 0.25)
+            else:
+                energy += (dist - 1.0) ** 2
+                slope = 2.0 * (dist - 1.0)
+            forces[i] -= slope * d / dist
+            forces[j] += slope * d / dist
+        self.results = {"energy": energy, "forces": forces}
+
+
+atoms = Atoms("H3", positions=[[0.0, 0.0, 0.0], [1.35, 0.0, 0.0], [0.7, 0.75, 0.0]])
+atoms.calc = Triatomic()
 opt = Sella(atoms, order=1, delta=0.1)
-opt.run(fmax=0.05, steps=50)
+converged = opt.run(fmax=1e-3, steps=100)
+print(f"converged {converged}, r01 {atoms.get_distance(0, 1):.3f}")
+print(f"r02 {atoms.get_distance(0, 2):.3f}, r12 {atoms.get_distance(1, 2):.3f}")
 #+end_src
 
-~atoms~ is an ASE ~Atoms~ with a calculator. Masses are ~atoms.get_masses~. ~delta~ is the trust radius per free coordinate. ~run~ is ASE's loop: each step asks the calculator for the energy and the gradient, takes one trust step, and writes the accepted positions back. ~tests/python/test_ase_dropin.py~ runs two steps on a three-atom bowl and checks that the positions stay finite.
+#+begin_example
+converged True, r01 1.500
+r02 1.000, r12 1.000
+#+end_example
 
-The default geometry for three or more atoms is the rigid quotient, so a translation or a rotation of the whole molecule is not a step. A smaller system, or a host that already has internal coordinates, uses the Rust constructors ~SellaSaddleSession::on~ and ~on_internal~. Those are not on the Python class.
+The masses are ~atoms.get_masses()~.
+~delta~ is the trust radius per free coordinate.
+~run~ is ASE's loop.
+Each step asks the calculator for the energy and the gradient, takes one trust step, and writes the accepted positions back.
+~tests/python/test_ase_dropin.py~ runs two steps on a three-atom bowl and checks that the positions stay finite.
 
-Order 0, a minimization, is ~SellaMinSession~. It uses the quasi-Newton step rather than the partitioned one.
+For three or more atoms the default geometry is the rigid quotient, so a translation or a rotation of the whole molecule is not a step.
+A smaller system, or a host that already has internal coordinates, uses the Rust constructors ~SellaSaddleSession::on~ and ~SellaSaddleSession::on_internal~.
+The Python class does not have them.
+
+Order 0, a minimization, is ~SellaMinSession~.
+It takes the quasi-Newton step, not the partitioned one.

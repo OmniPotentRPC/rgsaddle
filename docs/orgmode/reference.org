@@ -14,7 +14,7 @@ The table below lists the main types.
 | =AutoNebTuning=                | =n_simul=, =n_max=, local tolerance and step caps, =space_energy_ratio=, =climb=, =full_band=, =threads=, =record_samples=. Stored on =BandConfig= |
 | =BandConfig=                   | Tangent, spring, projection, climbing, cell, tolerances, method, optional AutoNEB tuning, =min_mode= refinement, =zoom= |
 | =MinModeRefine=                | OCI-NEB refinement of the climbing image. Non-exhaustive. Trigger at any force, stability 1, start alignment 0.85, no alignment exit, retry under 0.5 of the starting force, refresh at 0.3 of the measured curvature or overlap 0.8 every 4 steps at most, budget 1000, Lanczos with twenty actions and relative tolerance 0.05 |
-| =ZoomConfig=                   | The nudged elastic band (NEB) zoom, Zoom-NEB, on =BandConfig::zoom=. Non-exhaustive, off unless set. Recommended settings for a band that opts in are the defaults: =alpha= 0.5, =offset= 1, =stability= 5, cubic placement, and =after= 0. An =after= of 0 zooms once the largest per-image force, measured by the session's convergence norm, is below twice =force_tol=. The window always reaches both neighbours of the climbing image. The min-mode refinement waits for the zoom decision. Plain climbing image NEB (CI-NEB) on the 51 benchmark pairs of the 38-atom Lennard-Jones cluster (LJ38) converged 20 pairs with the zoom on and 21 without it. It used more force calls on 10 of the 17 pairs that converged both ways. With the default min-mode refinement on, one LJ38 pair ran to the 250000 call cap. On Müller-Brown at 13 images with FIRE and =max_move= 0.05, plain CI-NEB took 30593 force calls with the zoom and 31308 without it. With L-BFGS of memory 100 and climbing from half the first force, the zoom does not help on Müller-Brown: the band took 6503 force calls with it and 3280 without it. The zoom is an opt-in, not a general default. |
+| =ZoomConfig=                   | The nudged elastic band (NEB) zoom, Zoom-NEB, on =BandConfig::zoom=. Non-exhaustive, off unless set. The defaults are =alpha= 0.5, =offset= 1, =stability= 5, cubic placement, and =after= 0. An =after= of 0 zooms once the largest per-image force, measured by the session's convergence norm, is below twice =force_tol=. The window always reaches both neighbours of the climbing image. The min-mode refinement waits for the zoom decision. Plain climbing image NEB (CI-NEB) on the 51 benchmark pairs of the 38-atom Lennard-Jones cluster (LJ38) converged 20 pairs with the zoom on and 21 without it. It used more force calls on 10 of the 17 pairs that converged both ways. With the default min-mode refinement on, one LJ38 pair ran to the 250000 call cap. On Müller-Brown at 13 images with FIRE and =max_move= 0.05, plain CI-NEB took 30593 force calls with the zoom and 31308 without it. With L-BFGS of memory 100 and climbing from half the first force, the zoom does not help on Müller-Brown: the band took 6503 force calls with it and 3280 without it. The zoom is an opt-in, not a general default. |
 | =BandSurface=                  | Host potential on a band (energies + gradients per image)                                                          |
 | =BandReport=                   | =status=, =max_force=, =ci_index=, =iteration=, =surface_rows=, =curvature= (refinement steps only)                |
 | =MinModeSession=               | Dimer or Lanczos lowest-mode search, same stepping contract; =set_position=, =set_mode=, =estimate_mode= for reuse; =set_torque_window= sets the dimer torque window apart from =rotation_tol= |
@@ -28,9 +28,11 @@ The table below lists the main types.
 | =nichols_step=                 | i-PI Nichols shift from a supplied spectrum                                                                        |
 | =restricted_prfo_displacement= | Baker restricted-step partitioned RFO from =H= and =g=                                                             |
 | =SellaSaddleConfig=            | Settings of the order-1 Sella session for partitioned rational function optimization |
+| =IrcSession=                   | Intrinsic reaction coordinate. =new=, =new_euclidean=, =from_surface=, =step=, =run=, =set_direction=, =reset=, =position= |
+| =IrcConfig=                    | =dx= 0.1, =force_tol= 0.05, =force_gate= =MaxForceOnAtom=, =max_inner= 10, =dr= 1e-3, =krylov_dim= 12, =eigen_kind= =Lanczos=, =kind= =IrcKind::SellaSphere=. No =max_move= or =method= field. =IrcKind::Gs2= runs only when named |
 | =Cell=                         | 3×3 lattice (rows are vectors), fractional minimum-image wrap                                                      |
-| =SaddleError=                  | Shape, surface, non-finite, solver, ABI                                                                            |
-| =Stencil=                      | Point builder. Dimer and Lanczos wrap =MinModeSession=. Band presets return the zoom seam. See @@rst::doc:`one stencil <explanation/one-stencil>`@@ |
+| =SaddleError=                  | =Shape=, =Surface=, =NonFinite=, =Solver=, =Invalid=, =Stalled=                                                    |
+| =Stencil=                      | Point builder. Dimer and Lanczos wrap =MinModeSession=. Band presets return the =BAND_PRESET_SEAM= error. See @@rst::doc:`one stencil <explanation/one-stencil>`@@ |
 | =Chain=                        | Positions, ids, and roles. =evaluate= uses a fixed block of one image. =Mesh= remeshes, inserts, or windows with no force call |
 | =Preset=                       | =Min=, =Dimer=, =Lanczos=, =Art=, =EigenFollow=, and the named band presets                                         |
 | =ConnectConfig=                | IDPP Lanczos climb and the COMPASS fallback. =optbench= sets the LJ38 force tolerance, eight Lanczos actions, relative tolerance 0.05, and quenched split nodes |
@@ -51,8 +53,7 @@ This section lists the entry points, codes and flags of =include/rgsaddle.h=.
 A C host reaches them through the application binary interface (ABI).
 =RGSADDLE_ABI_MAJOR= is 1.
 Status codes include =RGSADDLE_OK=, =RGSADDLE_SHAPE=, =RGSADDLE_SURFACE_FAILED=, =RGSADDLE_ABI_MISMATCH=.
-The methods on the wire are the fast inertial relaxation engine (FIRE) and quick-min.
-Limited-memory Broyden-Fletcher-Goldfarb-Shanno (L-BFGS) is also on the wire.
+The methods on the wire are the fast inertial relaxation engine (FIRE, =RGSADDLE_METHOD_FIRE=), limited-memory Broyden-Fletcher-Goldfarb-Shanno (L-BFGS, =RGSADDLE_METHOD_LBFGS=), the band trust-region stepper (=RGSADDLE_METHOD_RTR=) and quick-min (=RGSADDLE_METHOD_QUICKMIN=).
 From minor 22 so is ODE12r (=RGSADDLE_METHOD_ODE12R=), the adaptive ordinary differential equation (ODE) step.
 From minor 22, =rgsaddle_band_set_exp_precon= installs the per-image exponential metric on the band solver.
 With ODE12r that gives ODE12r-Exp.
@@ -74,12 +75,14 @@ Its =rotation_angle_tol= field stops a dimer rotation once the optimal angle fal
 The Rust default is five degrees, 0 turns the stop off, and a C config stores the value it is given.
 Both fields are read only from a config whose version minor is 5 or newer.
 =RGSADDLE_ABI_MINOR= is 37.
+Minor 37 adds the index-k session: =rgsaddle_indexk_create=, =rgsaddle_indexk_step=, =rgsaddle_indexk_modes=, =rgsaddle_indexk_translated=, =rgsaddle_indexk_position=, =rgsaddle_indexk_set_position=, =rgsaddle_indexk_free=, and the Householder product =rgsaddle_reflect_force=.
+Minor 36 adds =rgsaddle_halve_raised_energy= and =rgsaddle_trust_update=.
 From minor 24, =rgsaddle_sella_saddle_set_symmetrized_ritz= sets =SellaSaddleConfig::symmetrized_ritz= from 0 or 1.
 It returns =RGSADDLE_INVALID_PARAMETER= for any other value.
 =rgsaddle_sella_saddle_set_small_system_atom_ceiling= (minor 25) sets =SellaSaddleConfig::small_system_atom_ceiling= from 0 or 1.
 It returns =RGSADDLE_INVALID_PARAMETER= for any other value.
 =rgsaddle_band_set_zoom= (minor 31) sets or clears Zoom-NEB on a band.
-Recommended when enabled: =alpha= 0.5, =offset= 1, =after= 0 (twice =force_tol= on the largest per-image force), =stability= 5 and =cubic= 1.
+The Rust defaults are =alpha= 0.5, =offset= 1, =after= 0 (twice =force_tol= on the largest per-image force), =stability= 5 and =cubic= 1.
 Its window always reaches both neighbours of the climbing image, and the min-mode refinement waits for the zoom decision.
 =rgsaddle_minmode_set_torque_window= (minor 32) calls =MinModeSession::set_torque_window= with -1, 0 or 1.
 The value -1 infers the window from =rotation_tol= as a new session does, 0 turns it off and 1 turns it on.
@@ -120,14 +123,17 @@ The importable package is =rgsaddle=. =rgsaddle._core= is the nanobind extension
 
 | Name | Role |
 |------+------|
-| =ForceGate=, =HessUpdate=, =IrcKind=, =MinModeKind=, =EigenDevice=, =ExpandKind=, =CellChart=, =RestrictedKind= | =enum.IntEnum= controls. Names and values match the previous module |
+| =ForceGate=, =HessUpdate=, =IrcKind=, =MinModeKind=, =EigenDevice=, =ExpandKind=, =CellChart=, =RestrictedKind= | =enum.IntEnum= controls with the C ordinals |
 | =NumericalError= | =ArithmeticError= for =RGSADDLE_NON_FINITE= |
 | =last_error= | Thread-local text reserved for the C ABI last-error call. Empty unless an error text was set. =raise_status= reads it and then clears the slot |
 | =raise_status= | Map an =rgsaddle_status_t= value. The message is the stored text, or the status name when that text is empty. =RGSADDLE_OK= returns true |
 | =rgsaddle.ase.SurfaceAdapter= | =list[Atoms]= evaluated as =(ids, x) -> (energies, gradients)= request rows. Optional extra =ase= |
-| =rgsaddle.Stencil= | Point search. =point=, =step=, =run=, =positions=, =mode=, =curvature=. =band= raises =ValueError= with the zoom seam |
+| =rgsaddle.Stencil= | Point search. =point=, =step=, =run=, =positions=, =mode=, =curvature=. =band= raises =ValueError= with the =BAND_PRESET_SEAM= text |
 | =rgsaddle.connect= | Run-to-completion double-ended search. =surface(x)= is the one-image =(energy, gradient)= callback. =ConnectReport= holds the geometry, energy, gradient norm, kind, Hessian index, and evaluation count |
 | =rgsaddle.ase.Point= | ASE =Optimizer= driver for one point preset. =run(fmax, steps)= is ASE's own loop |
+| =rgsaddle.ase.NEB= | Drop-in for =ase.mep.NEB= as NEB or CI-NEB, driven by an ASE optimizer |
+| =rgsaddle.ase.MinModeAtoms= | Dimer or Lanczos effective force for an ASE optimizer |
+| =rgsaddle.ase.Sella= | Order-1 saddle optimizer with =run(fmax, steps)= |
 
 =SurfaceAdapter= keeps =get_forces(apply_constraint=False)= on =raw_forces=. The returned gradient is minus =get_forces()= after constraints. The adapter evaluates the given rows in order on the calling thread. =owners()= and =reentrant()= are what a driver uses to group. A second call while the first holds the adapter raises =RuntimeError=.
 
@@ -151,7 +157,7 @@ The importable package is =rgsaddle=. =rgsaddle._core= is the nanobind extension
   a dimer estimate allocates as often at eight rotations as at two,
   and Lanczos as often at eight Krylov products as at two,
   and five searches keep the hashes of the allocating code.
-- =tests/nichols_saddle.rs= — Nichols step against i-PI on the same Hessian and gradient, Muller-Brown saddles, quadratic saddle
+- =tests/nichols_saddle.rs= — Nichols step against i-PI on the same Hessian and gradient, Müller-Brown saddles, quadratic saddle
 - =tests/prfo_saddle.rs= — partitioned RFO against the augmented Hessian, trust sphere changes the mode ratio
 - =tests/sella_symmetrized_ritz.rs=: the Sella saddle walk on a linear gradient field with an antisymmetric Jacobian part.
   With the atom ceiling off, the walk keeps its evaluation counts and positions bit for bit.

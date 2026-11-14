@@ -59,6 +59,7 @@ From ABI minor 35, ~rgsaddle_irc_config_t~ ~kind~ 0 (~RGSADDLE_IRC_GS2~) is the 
 A config whose version minor is 34 or older runs the sphere about the last point for every kind but Morokuma, as those versions did.
 Minor 34 is the curvature probe and leaves IRC kinds unchanged.
 From minor 35, create returns NULL on a kind other than 0, 1 and 2.
-The C++ helper ~irc_config~ selects ~RGSADDLE_IRC_SELLA_SPHERE~.
+The C++ helper ~irc_config~ selects ~RGSADDLE_IRC_SELLA_SPHERE~, the Rust default.
+A zeroed C config at minor 35 or newer has kind 0 and runs ~RGSADDLE_IRC_GS2~, so a C host that wants the Rust default sets ~kind~ to ~RGSADDLE_IRC_SELLA_SPHERE~.
 
-~include/rgsaddle/session.hpp~ provides the C++ owning wrappers. ~Band~, ~MinMode~ and ~Irc~ release their opaque handles automatically and translate failing statuses into exceptions. ~tests/c/main_abi_contract.h~ checks the retained main layouts and signatures; the C and C++ smoke executables exercise the official header and library together.
+~include/rgsaddle/session.hpp~ provides the C++ owning wrappers. ~Band~, ~MinMode~, ~Irc~, ~Ocineb~ and ~IndexK~ release their opaque handles and turn failing statuses into exceptions. ~include/rgsaddle/stencil.hpp~ wraps the point stencil. ~tests/c/main_abi_contract.h~ checks the retained main layouts and signatures; the C and C++ smoke executables exercise the official header and library together.

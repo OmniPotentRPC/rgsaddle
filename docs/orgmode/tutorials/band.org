@@ -1,10 +1,10 @@
 #+TITLE: Find a saddle with a nudged elastic band
 #+OPTIONS: toc:nil num:nil author:nil ^:{}
 
-This tutorial finds the saddle between minima A and B of the Mueller-Brown surface, a two-dimensional model with three minima, with a nudged elastic band (NEB). It runs the search twice from the same start: once as a climbing-image NEB (CI-NEB), and once with this crate's default, which also refines the climbing image along the lowest curvature mode. That refinement is the off-path climbing image NEB (OCI-NEB) of Goswami, Gunde, and Jonsson, Front. Chem. 14 (2026), doi:10.3389/fchem.2026.1807063. The climbing image itself is Henkelman, Uberuaga, and Jonsson, J. Chem. Phys. 113, 9901 (2000). At the end you have the converged path, the saddle, and the force calls each method spent.
+This tutorial finds the saddle between minima A and B of the Müller-Brown surface with a nudged elastic band (NEB). The surface is a two-dimensional model with three minima (Müller and Brown, Theor. Chim. Acta 53, 75 (1979), doi:10.1007/BF00547608). The search runs twice from the same start. The first run is a climbing-image NEB (CI-NEB). The second run is this crate's default, which also refines the climbing image along the lowest curvature mode. That refinement is the off-path climbing image NEB (OCI-NEB) of Goswami, Gunde and Jónsson, Front. Chem. 14 (2026), doi:10.3389/fchem.2026.1807063. The climbing image is from Henkelman, Uberuaga and Jónsson, J. Chem. Phys. 113, 9901 (2000), doi:10.1063/1.1329672. At the end you have the converged path, the saddle, and the force calls each method spent.
 
 #+begin_export rst
-:cite:`goswamiEnhancedClimbingImage2026,henkelmanClimbingImageNudged2000`
+:cite:`goswamiEnhancedClimbingImage2026,henkelmanClimbingImageNudged2000,mullerLocationSaddlePoints1979`
 #+end_export
 
 * What you need
@@ -23,7 +23,7 @@ oci-neb  Converged after 56 steps, 483 force calls, max force 6.8e-4, climbing i
 Both runs stop on the same saddle. The rest of this page goes through the program, =examples/muller_brown_band.rs=, and then the two figures.
 
 * The surface
-The host owns the potential. A =BandSurface= receives a block of images, one per row, and fills their energies and gradients. The atom moves in the plane z = 0, so the z gradient is zero. The counter is there only to count force calls.
+The host owns the potential. A =BandSurface= receives a block of images, one per row, and fills their energies and gradients. The atom moves in the plane z = 0, so the z gradient is zero. The counter counts force calls.
 
 #+INCLUDE: "../../../examples/muller_brown_band.rs" src rust :lines "43-68"
 
@@ -33,7 +33,7 @@ The host owns the potential. A =BandSurface= receives a block of images, one per
 #+INCLUDE: "../../../examples/muller_brown_band.rs" src rust :lines "140-155"
 
 * The host loop
-The session never runs to completion by itself. Each =step= assembles the NEB force and takes one solver step on it, and the host decides whether to call it again. =BandReport::surface_rows= counts the images the surface evaluated during the step; the example checks it against its own counter after every step.
+The session never runs to completion by itself. Each =step= assembles the NEB force and takes one solver step on it, and the host decides whether to call it again. =BandReport::surface_rows= counts the images the surface evaluated during the step. The example checks it against its own counter after every step.
 
 #+INCLUDE: "../../../examples/muller_brown_band.rs" src rust :lines "96-119"
 
@@ -42,8 +42,8 @@ The session never runs to completion by itself. Each =step= assembles the NEB fo
 [[file:../../source/figures/band-tutorial/host_loop.png]]
 
 * The path
-#+ATTR_RST: :alt Converged CI-NEB and OCI-NEB bands on Mueller-Brown contours, and their energy profiles
-#+CAPTION: Left: converged bands on the Mueller-Brown contours, from the straight-line start. Right: energy along each band. The star is the climbing image.
+#+ATTR_RST: :alt Converged CI-NEB and OCI-NEB bands on Müller-Brown contours, and their energy profiles
+#+CAPTION: Left: converged bands on the Müller-Brown contours, from the straight-line start. Right: energy along each band. The star is the climbing image.
 [[file:../../source/figures/band-tutorial/mep.png]]
 
 The climbing image is image 3 in both runs, at (-0.82200, 0.62431) with energy -40.664844. The Hessian there has eigenvalues -750.9 and 490.2, one negative, so the point is a first-order saddle. The band passes the intermediate minimum near image 6 and then crosses a lower barrier near images 7 and 8 on its way to B. One climbing image climbs only the highest barrier.
@@ -58,7 +58,7 @@ The first step evaluates 20 images and every later step 9, the interior images. 
 The CI-NEB climbing image is under 0.001 for good from step 147, after 1334 force calls. The run continues to 16418 calls because its stopping test is different: CI-NEB stops when the projected force on every image is under =force_tol=, and OCI-NEB stops when the climbing image's own gradient is. After step 52 the OCI-NEB surface calls carry the climbing image alone, so the other images stay where that band step left them. That is why the two energy profiles differ away from the climbing image. Use CI-NEB when the whole path matters, and the default when the saddle is what you need.
 
 * Make the figures
-#+begin_src console
+#+begin_src console :skip "needs uv and Graphviz; the figures are committed"
 $ uv run --no-project --with matplotlib --with numpy \
     python docs/source/figures/band-tutorial/plot.py target/muller_brown
 $ (cd docs/source/figures/band-tutorial && dot -Tpng -Gdpi=150 host_loop.dot -o host_loop.png)

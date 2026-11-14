@@ -1,16 +1,23 @@
 #+TITLE: Formal stencil
 #+OPTIONS: toc:nil num:nil
 
-The climbing image with a zero doubly-nudged term is the Householder reflection of the true force. Goswami, Gunde, and Jónsson, Front. Chem. (2026), doi:10.3389/fchem.2026.1807063, Eq. 9, is the identity used first. The same reflection is the negative-curvature dimer translation. Henkelman and Jónsson, J. Chem. Phys. 111, 7010 (1999), doi:10.1063/1.480097, define that step. The improved tangent is Henkelman and Jónsson, J. Chem. Phys. 113, 9978 (2000), doi:10.1063/1.1323224.
+#+begin_export rst
+:cite:`goswamiEnhancedClimbingImage2026,henkelmanDimerMethodFinding1999,henkelmanImprovedTangentEstimate2000,highamAccuracyStability2002,mathlib2020`
+#+end_export
+
+The climbing image with a zero doubly-nudged term is the Householder reflection of the true force. Goswami, Gunde, and Jónsson, Front. Chem. 14 (2026), doi:10.3389/fchem.2026.1807063, Eq. 9, is the identity used first. The same reflection is the negative-curvature dimer translation. Henkelman and Jónsson, J. Chem. Phys. 111, 7010 (1999), doi:10.1063/1.480097, define that step. The improved tangent is Henkelman and Jónsson, J. Chem. Phys. 113, 9978 (2000), doi:10.1063/1.1323224.
 
 * Check
-#+begin_src console
-$ cd formal && ./check.sh
+#+begin_src console :skip "needs the pinned Lean toolchain; verify.yml runs check.sh"
+$ (cd formal && ./check.sh)
 $ (cd formal && lake exe mirror)
+#+end_src
+
+#+begin_src console
 $ cargo test --features capi --test formal_mirror
 #+end_src
 
-=formal/check.sh= builds the pinned Lean toolchain and refuses =sorry=, =admit=, and axioms beyond =propext=, =Classical.choice=, and =Quot.sound=. =lake exe mirror= writes =formal/golden/stencil.json=. The Rust test compares those bits.
+The proofs are in Lean 4 with Mathlib (The mathlib Community, CPP 2020, doi:10.1145/3372885.3373824). =formal/check.sh= builds the pinned Lean toolchain and refuses =sorry=, =admit=, and axioms beyond =propext=, =Classical.choice=, and =Quot.sound=. =lake exe mirror= writes =formal/golden/stencil.json=. The Rust test compares those bits.
 
 The MPFR comparison is a separate feature so a default build does not link GMP.
 

@@ -1,9 +1,9 @@
 #+TITLE: Python package
 #+OPTIONS: toc:nil num:nil
 
-The package is a nanobind extension, =rgsaddle._core=, with a pure Python layer. =import rgsaddle= does not import ASE. Install ASE only when you construct =rgsaddle.ase.SurfaceAdapter=:
+The package is a nanobind extension, =rgsaddle._core=, with a pure Python layer. =import rgsaddle= does not import ASE. Install ASE when you use =rgsaddle.ase=:
 
-#+begin_src sh
+#+begin_src sh :skip "installs the package; the docs-examples job installs it before this script runs"
 pip install .
 pip install 'rgsaddle[ase]'
 #+end_src
@@ -11,7 +11,7 @@ pip install 'rgsaddle[ase]'
 Wheels are cp310, cp311, cp312-abi3 (CPython 3.12 through 3.15 with the GIL), cp314t and cp315t. There is no musllinux wheel and no cp313t wheel.
 
 * Enum controls
-Eight =IntEnum= classes keep the names and values of the previous module: =ForceGate=, =HessUpdate=, =IrcKind=, =MinModeKind=, =EigenDevice=, =ExpandKind=, =CellChart=, =RestrictedKind=. An unknown ordinal raises =ValueError=. =rgsaddle.__version__= is the package version.
+Eight =IntEnum= classes carry the C ordinals: =ForceGate=, =HessUpdate=, =IrcKind=, =MinModeKind=, =EigenDevice=, =ExpandKind=, =CellChart=, =RestrictedKind=. An unknown ordinal raises =ValueError=. =IrcKind.GS2= is 0, as in C. There is no Python IRC session, so the Rust default kind, =IrcKind::SellaSphere=, does not apply here. =rgsaddle.__version__= is the package version.
 
 #+begin_src python
 import rgsaddle

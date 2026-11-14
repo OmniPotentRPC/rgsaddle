@@ -2,18 +2,20 @@
 #+OPTIONS: toc:nil num:nil
 
 #+begin_export rst
-:cite:`goswamiEnhancedClimbingImage2026,goswamiTwoDimensionalRmsd2026,mullerLocationSaddlePoints1979,hermesSellaOpensourceAutomationfriendly2022,gonzalezImprovedAlgorithmReaction1989`
+:cite:`goswamiEnhancedClimbingImage2026,goswamiTwoDimensionalRmsd2026,fukuiFormulationReactionCoordinate1970,fukuiPathChemicalReactions1981,mullerLocationSaddlePoints1979,hermesSellaOpensourceAutomationfriendly2022,gonzalezImprovedAlgorithmReaction1989,gonzalezReactionPathFollowing1990,ishidaIntrinsicReactionCoordinate1977`
 #+end_export
 
-~IrcSession~ traces the intrinsic reaction coordinate (IRC) on either side of a supplied saddle.
-The saddle and the mode it leaves along can come from the climbing image aligned with the Hessian eigenmode (Goswami, Gunde, and Jonsson, Front. Chem. 14 (2026), doi:10.3389/fchem.2026.1807063), and two-dimensional root-mean-square deviation (RMSD) projections compare a branch with a band (Goswami, MethodsX 16, 103851 (2026), doi:10.1016/j.mex.2026.103851).
+~IrcSession~ traces the intrinsic reaction coordinate (IRC) of Fukui (J. Phys. Chem. 74, 4161 (1970), doi:10.1021/j100717a029; Acc. Chem. Res. 14, 363 (1981), doi:10.1021/ar00072a001) on either side of a supplied saddle.
+The saddle and the mode it leaves along can come from the climbing image aligned with the Hessian eigenmode (Goswami, Gunde, and Jónsson, Front. Chem. 14 (2026), doi:10.3389/fchem.2026.1807063), and two-dimensional root-mean-square deviation (RMSD) projections compare a branch with a band (Goswami, MethodsX 16, 103851 (2026), doi:10.1016/j.mex.2026.103851).
 Each call to ~step~ performs one outer IRC move, of one of three kinds.
+~IrcConfig::kind~ picks it.
+~IrcConfig~ has no ~max_move~ and no ~method~ field: the kind is the step.
 
-- ~IrcKind::SellaSphere~, the default, takes the energy minimum on the mass-weighted sphere of radius ~dx~ about the last point, the first about the saddle. Mueller and Brown constrain the step to that sphere (Theor. Chim. Acta 53, 75 (1979), doi:10.1007/BF00547608). Sella's ~IRCTrustRegion~ takes the same step (Hermes, Sargsyan, Najm, and Zador, J. Chem. Theory Comput. 18, 6974 (2022), doi:10.1021/acs.jctc.2c00395). Its path error is first order in ~dx~.
-- ~IrcKind::Gs2~ is the step of Gonzalez and Schlegel, J. Chem. Phys. 90, 2154 (1989), doi:10.1063/1.456010. Its pivot sits ~dx/2~ down the mass-weighted gradient from the last point, or ~dx/2~ along the launch mode from the saddle for the first step. The next point is the energy minimum on the sphere of radius ~dx/2~ about that pivot. Both points lie on one circular arc tangent to the gradient at each of them. The path error is therefore second order in ~dx~. Radial projection maps a model minimum between the last point and the pivot back onto the last point. Until the model is positive definite and the arc exceeds eight radii, a model minimum inside the sphere therefore carries the step on along its line to the far side. The report's ~arc~ adds the mass-weighted chord of each step.
-- ~IrcKind::Morokuma~ selects the predictor-corrector path.
+- ~IrcKind::SellaSphere~, the default, takes the energy minimum on the mass-weighted sphere of radius ~dx~ about the last point, the first about the saddle. Müller and Brown constrain the step to that sphere (Theor. Chim. Acta 53, 75 (1979), doi:10.1007/BF00547608). Sella's ~IRCTrustRegion~ takes the same step (Hermes, Sargsyan, Najm, and Zádor, J. Chem. Theory Comput. 18, 6974 (2022), doi:10.1021/acs.jctc.2c00395). Its path error is first order in ~dx~.
+- ~IrcKind::Gs2~ is the step of Gonzalez and Schlegel, J. Chem. Phys. 90, 2154 (1989), doi:10.1063/1.456010, in mass-weighted coordinates as in J. Phys. Chem. 94, 5523 (1990), doi:10.1021/j100377a021. It runs only when the config names it. Its pivot sits ~dx/2~ down the mass-weighted gradient from the last point, or ~dx/2~ along the launch mode from the saddle for the first step. The next point is the energy minimum on the sphere of radius ~dx/2~ about that pivot. Both points lie on one circular arc tangent to the gradient at each of them. The path error is therefore second order in ~dx~. Radial projection maps a model minimum between the last point and the pivot back onto the last point. Until the model is positive definite and the arc exceeds eight radii, a model minimum inside the sphere therefore carries the step on along its line to the far side. The report's ~arc~ adds the mass-weighted chord of each step.
+- ~IrcKind::Morokuma~ selects the predictor-corrector path of Ishida, Morokuma and Komornicki, J. Chem. Phys. 66, 2153 (1977), doi:10.1063/1.434152.
 
-~tests/irc_mueller_brown.rs~ fits both orders on the Mueller-Brown surface.
+~tests/irc_mueller_brown.rs~ fits both orders on the Müller-Brown surface.
 
 ~new~ accepts a molecular Cartesian packing and atom masses. ~new_euclidean~ accepts an arbitrary nonzero dimension with unit coordinate weights. ~from_surface~ estimates the launch mode through Hessian actions as the lowest eigenvector of the mass-weighted Hessian. A host can instead pass a measured mode to ~new~.
 
@@ -32,7 +34,7 @@ Through the C interface, ~rgsaddle_irc_step~ writes ~RGSADDLE_STATUS_CONVERGED~ 
 ~tests/irc_termination.rs~ checks that stop on both branches from two saddles that eOn hands over.
 These are the 13-atom Lennard-Jones cluster (LJ13) and the Morse Pt adatom.
 The default run checks the LJ13 reverse branch at ~force_tol~ 0.005 and eight Pt adatom branches.
-The full LJ13 set, both branches at 0.05, 0.01 and 0.005, is ignored in a debug build:
+The full LJ13 set, both branches at 0.05, 0.01 and 0.005, is marked ~#[ignore]~ in every build. Run it in release:
 
 #+begin_src sh
 cargo test --release --test irc_termination -- --include-ignored
@@ -46,4 +48,4 @@ test lj13_branches_under_the_force_threshold_report_a_minimum ... ok
 test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.72s
 #+end_example
 
-Select ~L2Norm~ or ~LinfNorm~ for a generic vector packing. ~MaxForceOnAtom~ groups Cartesian triples. The C interface exposes construction, stepping, position access, direction changes, reset and destruction; ~tests/c/irc_abi.c~ exercises both directions of both sphere kinds and the Morokuma path. ~RGSADDLE_IRC_SELLA_SPHERE~ needs ABI minor 35. A config whose version minor is 34 or older runs the Sella sphere for every kind but ~RGSADDLE_IRC_MOROKUMA~, and from minor 35 an unknown kind makes create return NULL. Minor 34 is the curvature probe and leaves IRC kinds unchanged.
+Select ~L2Norm~ or ~LinfNorm~ for a generic vector packing. ~MaxForceOnAtom~ groups Cartesian triples. The C interface exposes construction, stepping, position access, direction changes, reset and destruction. ~tests/c/irc_abi.c~ exercises both directions of both sphere kinds and the Morokuma path. ~RGSADDLE_IRC_SELLA_SPHERE~ needs ABI minor 35. A config whose version minor is 34 or older runs the Sella sphere for every kind but ~RGSADDLE_IRC_MOROKUMA~, and from minor 35 an unknown kind makes create return NULL. Minor 34 is the curvature probe and leaves IRC kinds unchanged.

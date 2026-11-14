@@ -4,24 +4,63 @@
 AutoNEB starts from the endpoints, inserts an image where the band is coarsest, relaxes that neighbourhood, and climbs at the end. The climbing image and the dimer are one Householder reflection: Goswami, Gunde, and Jónsson, Front. Chem. (2026), doi:10.3389/fchem.2026.1807063. The band and this climb stage follow that step, then Chill et al., Modelling Simul. Mater. Sci. Eng. 22, 055002 (2014), doi:10.1088/0965-0393/22/5/055002, with eOn v2.9.0.1, doi:10.5281/zenodo.18529496, then Kolsbjerg, Groves, and Hammer, J. Chem. Phys. 145, 094107 (2016), doi:10.1063/1.4961868.
 
 #+begin_export rst
-:cite:`goswamiEnhancedClimbingImage2026,chillBenchmarksCharacterization2014,eon2901,kolsbjergAutomatedNudgedElastic2016`
+:cite:`goswamiEnhancedClimbingImage2026,goswamiReproducibleOrchestration2026,chillBenchmarksCharacterization2014,eon2901,kolsbjergAutomatedNudgedElastic2016,smidstrupImprovedInitialGuess2014`
 #+end_export
 
-On the double well, AutoNEB used more force calls than one fixed CI-NEB: 1.42 times as many, median 71 against 52, with a 95% BCa interval of 1.33 to 1.52 over 32 paired seeds. Prefer CI-NEB for that single barrier. Müller-Brown from B to C has mean ratio 0.46 (median 268 against 762, interval 0.35 to 0.79) over 31 paired seeds. The two-barrier path from A to B through the intermediate minimum has mean ratio 0.95, interval 0.81 to 1.23, medians 643 and 740, over 32 paired seeds. A pair with a censored side is dropped. Zoom-NEB is the growth method under development.
+On the double well, AutoNEB used more force calls than one fixed CI-NEB: 1.42 times as many, median 71 against 52, with a 95% BCa interval of 1.33 to 1.52 over 32 paired seeds. Prefer CI-NEB for that single barrier. Müller-Brown from B to C has mean ratio 0.46 (median 268 against 762, interval 0.35 to 0.79) over 31 paired seeds. The two-barrier path from A to B through the intermediate minimum has mean ratio 0.95, interval 0.81 to 1.23, medians 643 and 740, over 32 paired seeds. A pair with a censored side is dropped. The zoom of a fixed band, ~BandConfig::zoom~, is in =howto/band=.
 
 * Minimal example
 ~BandConfig::autoneb~ carries the tuning. ~None~ is a fixed band. ~AutoNeb::new~ reads that tuning, or the defaults when it is ~None~.
 
+The program grows a band between the minima of the double well \(V = (x^2 - 1)^2 + 2y^2 + 2z^2\) from its two endpoints.
+
 #+begin_src rust
-let mut config = BandConfig::default();
-config.autoneb = Some(AutoNebTuning {
-    n_simul: 3,
-    n_max: 7,
-    ..AutoNebTuning::default()
-});
-let mut search = AutoNeb::new(config, endpoints)?;
-let report = search.run(&surface)?;
+use ndarray::{Array1, Array2, ArrayView2, array};
+use rgsaddle::{AutoNeb, AutoNebTuning, BandConfig, BandStatus, BandSurface, SaddleError};
+
+struct DoubleWell;
+
+impl BandSurface for DoubleWell {
+    fn eval(
+        &self,
+        positions: ArrayView2<f64>,
+        energies: &mut Array1<f64>,
+        gradients: &mut Array2<f64>,
+    ) -> Result<(), SaddleError> {
+        for (i, r) in positions.outer_iter().enumerate() {
+            energies[i] = (r[0] * r[0] - 1.0).powi(2) + 2.0 * r[1] * r[1] + 2.0 * r[2] * r[2];
+            gradients[(i, 0)] = 4.0 * r[0] * (r[0] * r[0] - 1.0);
+            gradients[(i, 1)] = 4.0 * r[1];
+            gradients[(i, 2)] = 4.0 * r[2];
+        }
+        Ok(())
+    }
+}
+
+fn main() -> Result<(), SaddleError> {
+    let endpoints = array![[-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
+    let config = BandConfig {
+        force_tol: 1e-3,
+        max_move: 0.1,
+        autoneb: Some(AutoNebTuning {
+            n_simul: 3,
+            n_max: 7,
+            ..AutoNebTuning::default()
+        }),
+        ..BandConfig::default()
+    };
+    let mut search = AutoNeb::new(config, endpoints)?;
+    let report = search.run(&DoubleWell)?;
+    assert_eq!(report.status, BandStatus::Converged);
+    let ci = report.ci_index.expect("a climbing image");
+    println!("{} images, climbing image {ci} at x = {:.4}", report.n_images, search.positions()[(ci, 0)]);
+    Ok(())
+}
 #+end_src
+
+#+begin_example
+7 images, climbing image 3 at x = 0.0000
+#+end_example
 
 ~run~ is one shot. A second call is refused. The endpoints never move.
 
@@ -48,12 +87,12 @@ Construction fills the band to ~n_simul + 2~ by cutting the longest segment, one
 
 The peak-weighted gap of a segment is the absolute value of ~(E[j+1] - E[j]) * (E[j+1] + E[j] - 2 E_min) / (2 (E_max - E_min))~. ~f_R~ is the longest length over the endpoint separation. ~g_R~ is the largest weight over ~(E_max - E_min)~. The longest segment is cut when ~g_R~ is not positive or ~f_R / g_R~ exceeds ~space_energy_ratio~. Otherwise the largest weight is cut. Ties keep the lower index, including ~+0.0~ against ~-0.0~.
 
-Climbing uses ~BandConfig::climbing~. The default trigger factor is 0.5 and the trigger force is 0. The climbing window and, when ~full_band~ is set, the full band stop at ~BandConfig::force_tol~. Buildup leaves climbing off. The default leaves ~full_band~ off and stops after the climbing window, as ASE and the paper do. The extra stage costs calls: on the same budget comparison its median was 30 on the double well, 315 from B to C, and 285 from A to B, and it raised the two-barrier call ratio to 1.70 over 31 paired seeds. A pair with a censored side is dropped.
+Climbing uses ~BandConfig::climbing~. ~BandConfig::default~ sets ~CiConfig::after(0.5)~: a trigger force of 0.5 and a trigger factor of 0. When ~climbing~ is ~None~ the climbing window uses a trigger factor of 0.5 and a trigger force of 0. The climbing window and, when ~full_band~ is set, the full band stop at ~BandConfig::force_tol~. Buildup leaves climbing off. The default leaves ~full_band~ off and stops after the climbing window, as ASE and the paper do. The extra stage costs calls: on the same budget comparison its median was 30 on the double well, 315 from B to C, and 285 from A to B, and it raised the two-barrier call ratio to 1.70 over 31 paired seeds. A pair with a censored side is dropped.
 
 * How it differs from ASE
 The inserted image is the minimum-image midpoint. The fill from two endpoints cuts one midpoint at a time, while ASE places ~n_simul~ images in one interpolate. The Müller-Brown comparison uses FIRE 1.0, ASE's original FIRE, with this crate's step cap of 2.5 times the starting step. Both codes then insert at index 2 and then at index 1.
 
-~AutoNebInterpolant::Linear~, the default, places that midpoint. ASE's AutoNEB defaults to ~interpolate_method='idpp'~ and interpolates the three images ~[left, copy, right]~ of the cut segment. ~AutoNebInterpolant::Idpp~ does the same for every new image, the fill included: the target pair distances are the mean of the two segment ends, as in Smidstrup, Pedersen, Stokbro, and Jonsson, J. Chem. Phys. 140, 214106 (2014), doi:10.1063/1.4878664. The relaxation is this crate's L-BFGS with ~IdppConfig~, not ASE's MDMin, and pair distances use the minimum image when ~BandConfig::cell~ is set. That cell must have three non-zero, independent rows. With two endpoints and one free image the fill is the interior row of ~idpp_path~ with three images. A single atom has no pairs, so both interpolants place the same image.
+~AutoNebInterpolant::Linear~, the default, places that midpoint. ASE's AutoNEB defaults to ~interpolate_method='idpp'~ and interpolates the three images ~[left, copy, right]~ of the cut segment. ~AutoNebInterpolant::Idpp~ does the same for every new image, the fill included: the target pair distances are the mean of the two segment ends, as in Smidstrup, Pedersen, Stokbro, and Jónsson, J. Chem. Phys. 140, 214106 (2014), doi:10.1063/1.4878664. The relaxation is this crate's L-BFGS with ~IdppConfig~, not ASE's MDMin, and pair distances use the minimum image when ~BandConfig::cell~ is set. That cell must have three non-zero, independent rows. With two endpoints and one free image the fill is the interior row of ~idpp_path~ with three images. A single atom has no pairs, so both interpolants place the same image.
 
 * One session per unchanged window
 An unchanged window keeps its ~BandSession~, so the L-BFGS pairs survive the moment climbing is armed on those same images. A new index set starts with empty memory. The optional full band is a new session when it is not the same index set as the local window.
@@ -66,4 +105,4 @@ An unchanged window keeps its ~BandSession~, so the L-BFGS pairs survive the mom
 One thread evaluates the batch in a single call. The surface then sees one block per call when ~threads~ is above 1. A host that tells a whole-band evaluation from an interior evaluation by the row count should leave ~threads~ at 1.
 
 * Springs
-The search keeps a private per-segment spring list. A fill from two endpoints sets every segment to ~k * (n_simul + 1)~. Each later insertion replaces the cut segment with two segments of twice that constant. A start that already holds more than two images doubles on every fill insert. A weighted or Onsager-Machlup spring supplied on ~BandConfig~ is refused. The refusal is temporary: zoom-NEB will recompute those springs on insertion. The solid-state block is not part of this loop.
+The search keeps a private per-segment spring list. A fill from two endpoints sets every segment to ~k * (n_simul + 1)~. Each later insertion replaces the cut segment with two segments of twice that constant. A start that already holds more than two images doubles on every fill insert. A weighted or Onsager-Machlup spring supplied on ~BandConfig~ is refused. The solid-state block is not part of this loop.

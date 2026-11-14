@@ -1,22 +1,75 @@
 #+TITLE: Find a saddle with the dimer
 #+OPTIONS: toc:nil num:nil
 
-A minimum-mode search estimates the lowest curvature direction, reflects the force along it, and takes one solver step. The host owns the loop. This page is the dimer. Lanczos is the same session with ~MinModeKind::Lanczos~.
+#+begin_export rst
+:cite:`goswamiEnhancedClimbingImage2026,goswamiBayesianHierarchicalModels2025,henkelmanDimerMethodFinding1999,heydenEfficientMethodsFinding2005,kastnerSuperlinearlyConvergingDimer2008,olsenComparisonMethodsFinding2004`
+#+end_export
 
-The double well \(V = (x^2 - 1)^2 + 2y^2 + 2z^2\) has a saddle at the origin. The runnable form is the example on ~MinModeSession~ in the crate docs, and ~examples/double_well.rs~ is the band on the same surface. From Python, ~rgsaddle.ase.MinModeAtoms~ is the ASE-shaped call:
+A minimum-mode search estimates the direction of lowest curvature and reflects the force along it.
+A solver then takes one step on that force.
+The host owns the loop.
+This page uses the dimer of Henkelman and Jónsson, J. Chem. Phys. 111, 7010 (1999), doi:10.1063/1.480097.
+The rotation takes the modified Newton step of Heyden, Bell and Keil, J. Chem. Phys. 123, 224101 (2005), doi:10.1063/1.2104507, along conjugate-gradient directions, with the extrapolation of Kästner and Sherwood, J. Chem. Phys. 128, 014106 (2008), doi:10.1063/1.2815812.
+Goswami, AIP Adv. 15, 085210 (2025), doi:10.1063/5.0283639, compares conjugate-gradient and L-BFGS rotations of the dimer on 500 molecular systems.
+The force reflection is Eq. 9 of Goswami, Gunde and Jónsson, Front. Chem. 14 (2026), doi:10.3389/fchem.2026.1807063.
+Lanczos is the same session with ~MinModeKind::Lanczos~ on the Rust config, or ~kind="lanczos"~ in Python.
+
+The double well \(V = (x^2 - 1)^2 + 2y^2 + 2z^2\) has minima at \(x = \pm 1\) and a saddle at the origin.
+The program below starts one atom near the minimum at \(x = 1\).
+~rgsaddle.ase.MinModeAtoms~ is the object an ASE optimizer drives.
+ASE's FIRE climbs it to the saddle.
 
 #+begin_src python
+import numpy as np
 from ase import Atoms
+from ase.calculators.calculator import Calculator, all_changes
+from ase.optimize import FIRE
+
 from rgsaddle.ase import MinModeAtoms
 
-atoms = Atoms("H", positions=[[0.4, 0.3, 0.0]])
-atoms.calc = bowl  # energy 2 x^2 + 5 y^2
+
+class DoubleWell(Calculator):
+    """V = (x^2 - 1)^2 + 2 y^2 + 2 z^2 for one atom."""
+
+    implemented_properties = ["energy", "forces"]
+
+    def calculate(self, atoms=None, properties=("energy",), system_changes=all_changes):
+        super().calculate(atoms, properties, system_changes)
+        x, y, z = self.atoms.positions[0]
+        energy = (x * x - 1.0) ** 2 + 2.0 * y * y + 2.0 * z * z
+        forces = np.array([[-4.0 * x * (x * x - 1.0), -4.0 * y, -4.0 * z]])
+        self.results = {"energy": energy, "forces": forces}
+
+
+atoms = Atoms("H", positions=[[0.7, 0.2, 0.0]])
+atoms.calc = DoubleWell()
 search = MinModeAtoms(atoms, mode=[1.0, 0.0, 0.0], kind="dimer")
+
 forces = search.get_forces()
+print(f"start: curvature {search.curvature:.1f}, perpendicular force {abs(forces[0, 1]):.1e}")
+
+FIRE(search, logfile=None).run(fmax=1e-4, steps=1000)
+distance = np.linalg.norm(atoms.positions[0])
+print(f"distance from the saddle below 1e-3: {distance < 1e-3}, curvature {search.curvature:.1f}")
 #+end_src
 
-Above the well the curvature is positive, so the returned force lies along the mode and the perpendicular part is dropped. ~tests/python/test_ase_dropin.py~ checks that on this bowl. Once the curvature is negative the force along the mode is reflected and the perpendicular force stays, which is the translation Henkelman and Jónsson use to leave a minimum toward a saddle.
+#+begin_example
+start: curvature 1.9, perpendicular force 0.0e+00
+distance from the saddle below 1e-3: True, curvature -4.0
+#+end_example
 
-The stepper is an rgmin method on that effective force. FIRE is the default. L-BFGS takes one step per call because the reflected force is not the gradient of the energy the surface reports. ~MinModeConfig.seed_curvature~ scales only the first empty translation by \(1/|\lambda|\).
+At the start the curvature along the mode is positive: \(12x^2 - 4 = 1.88\). The dimer estimates it by finite differences.
+~get_forces~ then returns the force along the mode with its sign flipped and drops the perpendicular part, so the atom climbs along \(x\).
+Past \(x = 1/\sqrt{3}\) the curvature is negative.
+The force along the mode is reflected and the perpendicular force stays, so \(y\) relaxes while \(x\) climbs.
+~tests/python/test_ase_dropin.py~ checks the positive-curvature case on a bowl.
 
-Lanczos builds a Krylov subspace of finite-difference Hessian actions and stops on the residual. Set ~kind="lanczos"~ on the Python object, or ~MinModeKind::Lanczos~ on the Rust config. The same ~get_forces~ contract holds.
+In Rust, ~MinModeSession~ takes one ~step~ per call with an rgmin stepper on that effective force.
+FIRE is the default there.
+L-BFGS takes one step per call because the reflected force is not the gradient of the energy the surface reports.
+~MinModeConfig::seed_curvature~ scales only the first empty translation by \(1/|\lambda|\).
+The crate docs on ~MinModeSession~ have a runnable Rust example, and ~examples/double_well.rs~ runs the band on the same surface.
+
+Lanczos builds a Krylov subspace of finite-difference Hessian actions and stops on the residual (Lanczos, J. Res. Natl. Bur. Stand. 45, 255 (1950), doi:10.6028/jres.045.026).
+The same ~get_forces~ contract holds.
+The minimum-mode how-to compares the two estimators and lists the published references.

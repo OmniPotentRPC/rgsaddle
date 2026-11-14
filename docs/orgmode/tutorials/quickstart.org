@@ -4,22 +4,29 @@
 
 * Roll down from a first-order saddle
 
-A two-atom double well has a saddle at
-the origin and minima at \(x = \pm 1\). ~IrcSession~ kicks along
-the imaginary mode, then projects each inner step onto the
-mass-weighted sphere from [[https://github.com/OmniPotentRPC/rgmin][rgmin]] (~IrcTrust~). Forward and
-reverse leave the col in opposite directions.
+#+begin_export rst
+:cite:`fukuiFormulationReactionCoordinate1970,hermesSellaOpensourceAutomationfriendly2022,gonzalezImprovedAlgorithmReaction1989,gonzalezReactionPathFollowing1990`
+#+end_export
+
+The intrinsic reaction coordinate (IRC) is the steepest-descent path in mass-weighted coordinates from a saddle to the two minima it joins (Fukui, J. Phys. Chem. 74, 4161 (1970), doi:10.1021/j100717a029).
+This tutorial traces one step of each branch on a two-atom double well.
+The well has its saddle at the origin and its minima at \(x = \pm 1\) along the first coordinate.
+
+~IrcSession~ kicks along the imaginary mode.
+Each later step is the energy minimum on a mass-weighted sphere, an rgmin ~IrcTrust~.
+The forward and the reverse branch leave the saddle in opposite directions.
 
 ** What you will need
 
-A checkout of ~rgsaddle~ with its pinned ~rgmin~ dependency.
+A checkout of ~rgsaddle~ and Rust 1.88 or newer.
 
-** The surface
+** The program
 
 #+begin_src rust
 use ndarray::{Array1, ArrayView1};
-use rgsaddle::{PointSurface, SaddleError};
+use rgsaddle::{IrcConfig, IrcDirection, IrcKind, IrcSession, PointSurface, SaddleError};
 
+/// V = (x^2 - 1)^2 in the first coordinate of two atoms.
 struct DoubleWell;
 
 impl PointSurface for DoubleWell {
@@ -31,49 +38,45 @@ impl PointSurface for DoubleWell {
         Ok((energy, g))
     }
 }
+
+fn main() -> Result<(), SaddleError> {
+    let saddle = Array1::zeros(6);
+    let masses = Array1::from(vec![1.0, 1.0]);
+    let seed = Array1::from(vec![1.0, 0.1, 0.0, 0.0, 0.0, 0.0]);
+    let config = IrcConfig { dx: 0.2, ..IrcConfig::default() };
+    assert_eq!(config.kind, IrcKind::SellaSphere);
+
+    let mut session =
+        IrcSession::from_surface(config, saddle, masses, seed, IrcDirection::Forward, &DoubleWell)?;
+    session.step(&DoubleWell)?;
+    let x_fwd = session.position()[0];
+    session.set_direction(IrcDirection::Reverse);
+    session.step(&DoubleWell)?;
+    let x_rev = session.position()[0];
+    assert!(x_fwd * x_rev < 0.0);
+    println!("forward x = {x_fwd:.3}, reverse x = {x_rev:.3}");
+
+    let report = session.run(&DoubleWell, 200)?;
+    println!("reverse branch at x = {:.3}, minimum {}", session.position()[0], report.at_minimum);
+    Ok(())
+}
 #+end_src
 
-** Both branches
+#+begin_example
+forward x = 0.200, reverse x = -0.200
+reverse branch at x = -1.000, minimum true
+#+end_example
 
-#+begin_src rust
-use ndarray::Array1;
-use rgsaddle::{IrcConfig, IrcDirection, IrcSession};
+** What happened
 
-let saddle = Array1::zeros(6);
-let masses = Array1::from(vec![1.0, 1.0]);
-let seed = Array1::from(vec![1.0, 0.1, 0.0, 0.0, 0.0, 0.0]);
-let mut session = IrcSession::from_surface(
-    IrcConfig { dx: 0.2, ..IrcConfig::default() },
-    saddle,
-    masses,
-    seed,
-    IrcDirection::Forward,
-    &DoubleWell,
-)
-.unwrap();
-let _fwd = session.step(&DoubleWell).unwrap();
-let x_fwd = session.position()[0];
-session.set_direction(IrcDirection::Reverse);
-let _rev = session.step(&DoubleWell).unwrap();
-let x_rev = session.position()[0];
-assert!(x_fwd * x_rev < 0.0);
-#+end_src
+1. ~from_surface~ estimated the lowest mode of the mass-weighted Hessian ~M^{-1/2} H M^{-1/2}~ by Lanczos on finite-difference Hessian actions. It does not form a dense Hessian.
+2. The first ~step~ kicked along that mode onto the mass-weighted sphere of radius ~dx~.
+3. ~set_direction(Reverse)~ restored the saddle and flipped the kick. The two accepted points sit on opposite sides of the saddle.
+4. ~run(surface, max_steps)~ calls ~step~ until the report sets ~at_minimum~ or the step count reaches ~max_steps~.
 
-~from_surface~ estimates the lowest mode of the mass-weighted
-Hessian ~M^{-1/2} H M^{-1/2}~ with matrix-free Lanczos
-(finite-difference ~H v~). It does not form a dense Hessian or
-invoke a dense eigensolver.
+The default kind is ~IrcKind::SellaSphere~, the step of Sella's ~IRCTrustRegion~ (Hermes, Sargsyan, Najm and Zádor, J. Chem. Theory Comput. 18, 6974 (2022), doi:10.1021/acs.jctc.2c00395).
+The second-order step of Gonzalez and Schlegel (J. Chem. Phys. 90, 2154 (1989), doi:10.1063/1.456010; J. Phys. Chem. 94, 5523 (1990), doi:10.1021/j100377a021) runs only when the config names it: ~IrcConfig { kind: IrcKind::Gs2, ..IrcConfig::default() }~.
+~IrcConfig~ has no ~max_move~ and no ~method~ field.
 
-** The resulting path
-
-1. Lanczos evaluates Hessian actions at the origin and
-   returns the negative-curvature direction.
-2. The first ~step~ kicked along that mode onto the mass-weighted sphere of
-   radius ~dx~.
-3. ~set_direction(Reverse)~ restored the saddle and flipped the
-   kick. The two accepted points sit on opposite sides of the col.
-
-The host owns the loop after that. ~run(surface, max_steps)~ is
-a convenience over ~step~ until ~at_minimum~. ~reset~ drops quasi-Newton
-history at a model-update boundary, as for
-~BandSession~.
+The host owns the loop. ~reset~ drops the quasi-Newton history at a model-update boundary, as for ~BandSession~.
+The IRC how-to describes the three kinds and the stopping test.
