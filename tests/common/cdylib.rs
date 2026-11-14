@@ -36,7 +36,7 @@ fn build_cdylib() -> std::path::PathBuf {
     check_cdylib_features(manifest);
     let target_dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
         .parent()
-        .expect("CARGO_TARGET_TMPDIR is <dir>/tmp");
+        .expect("CARGO_TARGET_TMPDIR has a parent directory");
     let features: Vec<&str> = CDYLIB_FEATURES
         .iter()
         .filter(|(_, on)| *on)
