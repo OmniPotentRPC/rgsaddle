@@ -59,11 +59,11 @@ def test_interpolate_places_the_interior_on_the_segment() -> None:
     neb.interpolate()
     assert images[1].positions[0, 0] == 0.0
     try:
-        neb.interpolate(method="idpp")
+        neb.interpolate(method="spline")
     except ValueError as err:
-        assert "idpp_path" in str(err)
+        assert "linear or idpp" in str(err)
     else:
-        raise AssertionError("idpp interpolation was accepted")
+        raise AssertionError("spline interpolation was accepted")
 
 
 def test_a_slope_into_the_band_does_not_climb() -> None:
