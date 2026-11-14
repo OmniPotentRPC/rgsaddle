@@ -4,20 +4,22 @@
 The Rust sessions are the source of the mechanics. The Python classes in ~rgsaddle.ase~ follow the call shape of ASE's nudged elastic band, minimum-mode atoms, and Sella's ~run(fmax, steps)~. Where the numbers differ, the difference is the one the tests lock in.
 
 * From ASE's NEB
-~rgsaddle.ase.NEB(images, k=0.1, climb=False)~ takes the same list of ~Atoms~ with calculators. ~interpolate()~ places the interior images on the straight line between the ends. ~get_positions~ and ~get_forces~ are the interior images only, and ~ase.optimize.FIRE~ drives them through ~__ase_optimizable__~. ~get_potential_energy~ is the highest image energy.
+=howto/ase= has a before-and-after script and the full parameter table.
+
+~rgsaddle.ase.NEB(images, k=0.1, climb=False)~ takes the same list of ~Atoms~ with calculators. ~interpolate(method, mic, apply_constraint)~ is ASE's straight line, and ~method='idpp'~ then relaxes it with ~idpp_path~. ~get_positions~ and ~get_forces~ are the interior images only, and ~ase.optimize.FIRE~ drives them through ~__ase_optimizable__~. ~rgsaddle.ase.NEBOptimizer~ drives them with the Rust band session. ~get_potential_energy~ is the highest image energy.
 
 The spring constant defaults to 0.1, ASE's value. A ~BandSession~ still defaults to 5, eOn's value. Pass the number you mean.
 
-~method='improvedtangent'~ and ~method='aseneb'~ build the same force. The tangent is a unit vector, so ASE's extra division by the tangent norm in the ~aseneb~ climbing step is 1. ~eb~ keeps the full spring. ~dneb~ adds the doubly nudged correction. ~spline~ and ~string~ are not this class; the exponential metric is ~BandConfig.exp_precon~ on the Rust session.
+~method='improvedtangent'~ gives ASE's forces. ~aseneb~ and ~eb~ have no rgsaddle equivalent and warn: ~aseneb~ uses the improved tangent, and ~eb~ is rgsaddle's plain elastic band. ~dneb~ adds the doubly nudged correction. ~spline~ and ~string~ are not this class; the exponential metric is ~BandConfig.exp_precon~ on the Rust session.
 
 ~climb=True~ climbs on the call, with no arming delay. It does not climb when a higher endpoint slopes down into the band. ASE climbs the highest image anyway. That image then feels the reflected force and walks up a slope that has no saddle between it and the endpoint. ~tests/python/test_ase_dropin.py~ and ~tests/api_input.rs~ lock the refusal. A ~BandSession~ still waits until the band force drops before it arms the climb; the one-shot projection does not, because the caller already asked for it.
 
-~remove_rotation_and_translation=True~ removes the mean Cartesian force. It does not rotate an image onto its neighbour. A Kabsch rotation would change the geometry the calculator evaluates, and the unit tangent already fixes the path direction.
+~remove_rotation_and_translation=True~ aligns each image onto the one before it with ~ase.build.minimize_rotation_and_translation~ before the force call, as ASE does. Atoms held by ~FixAtoms~ keep a zero force.
 
 Image freezing (ASE's dynamic NEB) is not implemented.
 
 * From ASE's dimer and from Sella
-~rgsaddle.ase.MinModeAtoms(atoms, mode=...)~ estimates a dimer or Lanczos mode and returns the effective force. Above the well the perpendicular force is dropped. Below it the force along the mode is reflected. An ASE optimizer can drive that object.
+~rgsaddle.ase.MinModeAtoms(atoms, control)~ with ~rgsaddle.ase.DimerControl~ estimates a dimer or Lanczos mode and returns the effective force. While the curvature is positive, only the force along the mode is kept, reversed. Once it is negative, the force along the mode is reflected. ~MinModeTranslate~ or any ASE optimizer can drive that object. The older ~MinModeAtoms(atoms, mode=...)~ call still works.
 
 ~rgsaddle.ase.Sella(atoms, order=1)~ is the saddle optimizer. ~run(fmax, steps)~ is ASE's loop. One step is the partitioned rational-function trust step, not a dimer translation. Masses come from ~atoms.get_masses~.
 

@@ -1,0 +1,11 @@
+=rgsaddle.ase= now takes ASE scripts with only the imports changed.
+=NEBOptimizer= steps the band with the Rust session. =DimerControl=,
+=MinModeAtoms(atoms, control)= and =MinModeTranslate= follow
+=ase.mep.dimer=. =NEB= takes a list of spring constants, finds spring
+vectors at the minimum image of a periodic cell, aligns images for
+=remove_rotation_and_translation= as ASE does, interpolates with
+=mic= and =idpp=, and keeps =imax=, =real_forces=, =get_residual= and
+=set_calculators=. The extension gains =Band=, =idpp_path=,
+=MinMode.set_mode=, and =cell= and =ks= on =project_band=. Passing
+=method= as the sixth positional argument of =NEB=, and a mode as
+the second of =MinModeAtoms=, still works but warns.

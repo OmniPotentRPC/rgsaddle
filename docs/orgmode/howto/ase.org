@@ -1,0 +1,123 @@
+#+TITLE: Use rgsaddle from an ASE script
+#+OPTIONS: toc:nil num:nil
+
+=rgsaddle.ase= has the same class names and arguments as ASE's =ase.mep.NEB=, =ase.mep.NEBOptimizer= and =ase.mep.dimer=. In most scripts you only change the imports. The images, calculators, constraints, optimizers and trajectories stay ASE's. =import rgsaddle.ase= does not import ASE. ASE is imported only when a class needs it.
+
+* A nudged elastic band
+This is ASE's NEB tutorial, an Al adatom hopping between two hollow sites on Al(100), written against ASE:
+
+#+begin_src python
+from ase.build import add_adsorbate, fcc100
+from ase.calculators.emt import EMT
+from ase.constraints import FixAtoms
+from ase.mep import NEB, NEBOptimizer
+from ase.optimize import BFGS
+
+slab = fcc100("Al", size=(2, 2, 3), vacuum=6.0)
+add_adsorbate(slab, "Al", 1.7, "hollow")
+slab.set_constraint(FixAtoms(mask=[atom.tag > 1 for atom in slab]))
+slab.calc = EMT()
+BFGS(slab).run(fmax=0.01)
+final = slab.copy()
+final.positions[-1, 0] += slab.cell[0, 0] / 2
+final.calc = EMT()
+BFGS(final).run(fmax=0.01)
+
+images = [slab] + [slab.copy() for _ in range(5)] + [final]
+for image in images[1:-1]:
+    image.calc = EMT()
+
+neb = NEB(images, climb=True, method="improvedtangent")
+neb.interpolate()
+NEBOptimizer(neb, trajectory="neb.traj").run(fmax=0.01)
+#+end_src
+
+To run it with rgsaddle, change one import line:
+
+#+begin_src python
+from rgsaddle.ase import NEB, NEBOptimizer
+#+end_src
+
+=NEBOptimizer= now takes steps with rgsaddle's band session. =method= can be ="ode"= (ODE12r, ASE's default), ="fire"=, ="lbfgs"=, ="quickmin"= or ="rtr"=. If you would rather keep ASE's optimizer, keep its import and pass the rgsaddle band to it:
+
+#+begin_src python
+from ase.optimize import FIRE
+from rgsaddle.ase import NEB
+
+neb = NEB(images, climb=True)
+neb.interpolate()
+FIRE(neb, trajectory="neb.traj").run(fmax=0.01)
+#+end_src
+
+In both cases the energies and forces are stored on the =Atoms= objects. The trajectory holds every image at every step, as ASE writes it. =neb.energies=, =neb.real_forces=, =neb.imax=, =neb.emax= and =neb.get_residual()= mean what they mean in ASE.
+
+** Parameter mapping
+| ASE                                    | rgsaddle                                                                                                                |
+|----------------------------------------+-------------------------------------------------------------------------------------------------------------------------|
+| =images=, each with its own calculator | Same.                                                                                                                   |
+| =allow_shared_calculator=True=         | Same. Without it, a shared calculator raises =ValueError= at the first force call.                                      |
+| =k= (one value or one per segment)     | Same. The default is 0.1.                                                                                               |
+| =climb=True=                           | Same, except that no image climbs when a higher endpoint slopes down into the band.                                     |
+| =method='improvedtangent'=             | Same forces, to rounding.                                                                                               |
+| =method='aseneb'=                      | Warns and uses the improved tangent. rgsaddle has no equivalent of ASE's =aseneb=.                                      |
+| =method='eb'=                          | Warns and uses rgsaddle's plain elastic band, which is not ASE's =FullSpringMethod=.                                    |
+| =method='spline'=, ='string'=          | Refused.                                                                                                                |
+| =remove_rotation_and_translation=True= | Same: neighbouring images are aligned with =ase.build.minimize_rotation_and_translation=.                                |
+| =interpolate(method, mic, apply_constraint)= | Same. =method='idpp'= relaxes the straight line with rgsaddle's =idpp_path=.                                      |
+| =idpp_interpolate()=                   | Deprecated in ASE and here. It calls =interpolate(method='idpp')= and writes no files.                                  |
+| periodic cell, =pbc=                   | Springs use the minimum image along periodic axes. An endpoint wrapped back into the cell gives the same band.          |
+| =FixAtoms= and other constraints       | =set_positions= applies them. A fixed atom feels no force and does not move.                                            |
+| =parallel=True=, =world= of size > 1, =precon= | Refused. Images are evaluated one after another on the calling thread.                                          |
+| =NEBOptimizer(neb, method='ODE')=      | Same call. =fmax= limits the largest force component (ASE's =get_residual=), and the climbing image must meet it too. |
+| =FIRE=, =BFGS=, =MDMin= and so on      | Same. =fmax= is the largest per-atom force norm, as in ASE.                                                             |
+
+The convergence measure differs between ASE's =NEBOptimizer= and its other optimizers, and rgsaddle keeps both measures. With =NEBOptimizer=, ASE does not check the climbing image against =fmax=. rgsaddle does. =NEBOptimizer= cannot drive a band built with =remove_rotation_and_translation=True=. Use an ASE optimizer for that band.
+
+=NEBOptimizer= has some extra keyword arguments. =max_move= is the step cap, =memory= is the L-BFGS history length, and =min_mode=True= refines the climbing image with a minimum-mode search. =ci_after= and =ci_after_rel= set when the climbing image switches on. The climbing image switches on once the largest force falls below =ci_after= (0.5 by default), or below =ci_after_rel= times the first force. Pass =ci_after=float("inf")= to climb from the first step, as ASE does.
+
+* A dimer search
+ASE's minimum-mode script works after you change the import:
+
+#+begin_src python
+# from ase.mep.dimer import DimerControl, MinModeAtoms, MinModeTranslate
+from rgsaddle.ase import DimerControl, MinModeAtoms, MinModeTranslate
+
+control = DimerControl(
+    initial_eigenmode_method="displacement",
+    displacement_method="vector",
+    mask=[atom.tag == 0 for atom in slab],
+    logfile=None,
+)
+d_atoms = MinModeAtoms(slab, control)
+vector = np.zeros((len(slab), 3))
+vector[-1] = [0.6, 0.1, 0.0]
+d_atoms.displace(displacement_vector=vector)
+MinModeTranslate(d_atoms, trajectory="dimer.traj").run(fmax=0.001)
+print(d_atoms.get_curvature(), d_atoms.get_eigenmode())
+#+end_src
+
+=MinModeTranslate= takes one step of rgsaddle's minimum-mode session at a time. The session rotates the dimer and then makes an L-BFGS translation. An ASE optimizer can also drive =d_atoms= directly. It then reads =get_forces()=, the force with its component along the lowest mode reversed. The search counts as converged only when the curvature is negative.
+
+| ASE =DimerControl=                         | rgsaddle                                                                                    |
+|--------------------------------------------+---------------------------------------------------------------------------------------------|
+| =eigenmode_method='dimer'= or ='lanczos'=  | Same names.                                                                                 |
+| =dimer_separation=                         | The finite-difference length. The default is 1e-4.                                          |
+| =f_rot_min=                                | Rotation stops once the rotational force is below this value.                                |
+| =f_rot_max=                                | If it is above =f_rot_min=, rotation also stops after one rotation once the rotational force is below 1. The threshold is rgsaddle's fixed value of 1, whatever =f_rot_max= is set to. |
+| =max_num_rot=                              | The most rotations per step.                                                                |
+| =maximum_translation=                      | The translation step cap.                                                                   |
+| =use_central_forces=                       | =True= takes one gradient per rotation, =False= two (central difference).                   |
+| =initial_eigenmode_method=, =displacement_method=, =gauss_std=, =mask=, =displacement_center=, =displacement_radius=, =number_of_displacement_atoms= | Same, through =MinModeAtoms.displace=. |
+| =trial_angle=, =trial_trans_step=, =cg_translation=, =extrapolate_forces= | Not used. A warning is raised if one is set away from ASE's default.          |
+| =order= other than 1                       | Refused. For index-k searches, use =IndexKSession= (see =howto/indexk=).                    |
+
+Each =DimerControl= stores its own parameters. ASE's class shares one parameter dictionary between all its instances, so a value set on one control carries over to later ones.
+
+The older call =MinModeAtoms(atoms, mode=..., kind="dimer", dr=..., max_rotations=...)= still works with its old defaults. Passing a mode as the second positional argument raises a =DeprecationWarning=.
+
+* What the tests compare
+=tests/python/test_ase_parity.py= runs three EMT cases: an Al adatom and an Au adatom on Al(100), and a vacancy hop in periodic bulk Al with the final state wrapped back into the cell. In each case rgsaddle's =NEBOptimizer= and ASE's =FIRE= on =ase.mep.NEB= must reach the same climbing-image barrier to within 1e-3 eV. The test prints the barrier and force-call count of both codes. The same file also checks:
+- ASE's =FIRE= driving rgsaddle's band, with the trajectory read back;
+- that =FixAtoms= atoms do not move;
+- that per-image calculators and one shared calculator give the same band;
+- that a dimer search from a displaced minimum reaches ASE's saddle, where a finite-difference Hessian has exactly one negative eigenvalue.
