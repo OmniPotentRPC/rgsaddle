@@ -3,8 +3,9 @@
 //! Goswami, Gunde, and Jónsson, Front. Chem. (2026),
 //! doi:10.3389/fchem.2026.1807063, Eq. 9: the dimer translation and the
 //! climbing image are one Householder reflection of the true force.
-//! Goswami (2026), arXiv:2603.10992, Eqs. 2.14-2.16: the dimer is that
-//! reflection on a three-image chain with free ends.
+//! Goswami, ACS Phys. Chem. Au 6, 633 (2026),
+//! doi:10.1021/acsphyschemau.6c00038 (arXiv:2603.10992, Eqs. 2.14-2.16):
+//! the dimer is that reflection on a three-image chain with free ends.
 
 mod builder;
 mod chain;

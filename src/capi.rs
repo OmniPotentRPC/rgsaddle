@@ -52,10 +52,10 @@ pub const RGSADDLE_BAND_NO_MIN_MODE: u64 = 8;
 
 /// Request bit 0. Positions and gradients are one image.
 pub const RGSADDLE_REQ_ONE_IMAGE: u64 = 1;
-/// Request bit 1 (ABI minor 23). The request carries the band's
+/// Request bit 1 (ABI minor 22). The request carries the band's
 /// climbing image alone, for the min-mode refinement, and `image` is
 /// its band index in the batched mode too. Set only for a band whose
-/// config minor is 23 or newer.
+/// config minor is 22 or newer.
 pub const RGSADDLE_REQ_CLIMBING_IMAGE: u64 = 2;
 
 /// The RGSADDLE OK.

@@ -81,10 +81,10 @@ extern "C" {
 #define RGSADDLE_REQ_ONE_IMAGE (1ull << 0)
 
 /**
- * Request flags bit 1, ABI minor 23. The request carries the band's
+ * Request flags bit 1, ABI minor 22. The request carries the band's
  * climbing image alone, for the min-mode refinement (see
  * RGSADDLE_BAND_NO_MIN_MODE), and image is its band index. Set only on
- * a band whose config version minor is 23 or newer, with
+ * a band whose config version minor is 22 or newer, with
  * RGSADDLE_REQ_ONE_IMAGE for a per-image band and alone (n_images = 1)
  * for a batched one. A host that keys per-image state on the band
  * index reads it here, and an MPI host can give that one image every
@@ -216,7 +216,7 @@ typedef struct RgsaddleMinMode RgsaddleMinMode;
  * While the min-mode refinement runs (ABI minor 21, see
  * RGSADDLE_BAND_NO_MIN_MODE) each request carries the climbing image
  * alone: with RGSADDLE_REQ_ONE_IMAGE as above, and batched as one
- * geometry with n_images = 1 and image -1. From a config at minor 23
+ * geometry with n_images = 1 and image -1. From a config at minor 22
  * those requests also set RGSADDLE_REQ_CLIMBING_IMAGE, and a batched
  * one then has image set to the climbing image's band index.
  *
@@ -1069,8 +1069,8 @@ void rgsaddle_samd_free(RgsaddleSamd *session);
  * `cell` is a row-major 3x3 lattice, or NULL in free space. Interior
  * images are relaxed toward interpolated minimum-image pair distances.
  * `max_iterations`, `grad_tol` (L2 norm of the IDPP gradient), and
- * `max_move` (per-atom cap) are the per-image L-BFGS stop. The
- * defaults are 5000, 1e-3, and 0.1. ABI minor 19.
+ * `max_move` (per-atom cap) are the per-image L-BFGS stop. Pass 5000,
+ * 1e-3, and 0.1 for the Rust IdppConfig::default(). ABI minor 19.
  */
 rgsaddle_status_t rgsaddle_idpp_path(int64_t n_images, int64_t n_atoms,
                                      const double *reactant,
@@ -1232,8 +1232,8 @@ rgsaddle_status_t rgsaddle_band_set_zoom(RgsaddleBand *band, int32_t enabled,
  * rgsaddle_stencil_run is a loop over rgsaddle_stencil_step.
  * The older band and min-mode sessions stay step-only.
  * Band presets (5 through 13) fail at rgsaddle_stencil_new with
- * rgsaddle_last_error(); the band builder is feat/band-methods-zoom.
- * ABI minor stays 16. These symbols are additive.
+ * rgsaddle_last_error(); the message is the Rust BAND_PRESET_SEAM.
+ * Added at ABI minor 16. These symbols are additive.
  */
 typedef struct rgsaddle_stencil_config rgsaddle_stencil_config_t;
 typedef struct rgsaddle_stencil rgsaddle_stencil_t;

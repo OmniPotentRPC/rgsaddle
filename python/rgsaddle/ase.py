@@ -326,7 +326,7 @@ class NEB:
 
     The constructor matches ``ase.mep.NEB``: ``images`` carry the
     calculators, ``k`` is the spring constant, and ``climb`` turns the
-    climbing image on for every force call.     ``get_positions`` and
+    climbing image on for every force call. ``get_positions`` and
     ``get_forces`` are the interior images only, shape
     ``((n_images - 2) * n_atoms, 3)``, which is what ASE's optimizer
     reads. ``get_potential_energy`` is the highest interior energy,
@@ -365,7 +365,7 @@ class NEB:
         if parallel:
             raise ValueError("this NEB evaluates images on the calling thread")
         if precon is not None:
-            raise ValueError("preconditioning belongs on BandConfig.exp_precon")
+            raise ValueError("preconditioning belongs on BandConfig::exp_precon in Rust")
         if kwargs:
             name = next(iter(kwargs))
             raise ValueError(f"unsupported NEB argument {name}")

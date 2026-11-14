@@ -83,7 +83,8 @@ impl IrcKind {
 pub struct IrcConfig {
     /// Sphere radius in the session metric (Sella `dx`) and Morokuma `h`.
     pub dx: f64,
-    /// The search stops when the largest absolute force component falls under this value, in the host's force units.
+    /// The search stops when the force, measured by `force_gate`, is at
+    /// or below this value, in the host's force units.
     pub force_tol: f64,
     /// eOn / gpr_optim `ConvergenceForceNorm`.
     pub force_gate: crate::ForceGate,
@@ -119,7 +120,8 @@ impl Default for IrcConfig {
 pub struct IrcReport {
     /// Potential energy in the host's energy unit.
     pub energy: f64,
-    /// Largest absolute force component, in the host's force units.
+    /// Force measured by [`IrcConfig::force_gate`], in the host's force
+    /// units.
     pub max_force: f64,
     /// The arc.
     pub arc: f64,
