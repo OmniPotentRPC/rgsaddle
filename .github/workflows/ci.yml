@@ -92,3 +92,28 @@ jobs:
         run: cargo test --features readcon-db --verbose
       - name: Clippy with the corpus
         run: cargo clippy --features readcon-db -- -D warnings
+
+  docs-examples:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # m4 builds GMP for the verify feature; cargo doc --all-features needs it.
+      - name: Install the build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y m4 python3-dev
+          python3 -m pip install 'scikit-build-core>=1.1' 'nanobind>=3.1' 'numpy' 'ase==3.29.0'
+      - name: Build the rustdoc that the name check reads
+        run: |
+          cargo doc --no-deps --all-features -p rgsaddle
+          cargo doc --no-deps -p rgmin
+      - name: Every inline name on a page exists
+        run: python3 docs/check_names.py
+      - name: Install the Python package
+        run: python3 -m pip install . --no-build-isolation
+      - name: Run every code block of the docs and the README
+        run: python3 docs/run_examples.py
