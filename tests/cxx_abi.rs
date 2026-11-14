@@ -13,11 +13,7 @@ fn cxx_session_wrapper_uses_the_official_abi() {
     let compiler = std::env::var("CXX").unwrap_or_else(|_| "c++".into());
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let out = std::env::temp_dir().join(format!("rgsaddle_cxx_smoke_{}", std::process::id()));
-    let libdir = cdylib_dir();
-    assert!(
-        libdir.join("librgsaddle.so").exists(),
-        "build the C ABI library before testing"
-    );
+    let lib = cdylib();
     let build = Command::new(compiler)
         .arg("-std=c++17")
         .arg("-Wall")
@@ -26,9 +22,7 @@ fn cxx_session_wrapper_uses_the_official_abi() {
         .arg(root.join("tests/c/wrap_smoke.cpp"))
         .arg("-I")
         .arg(root.join("include"))
-        .arg("-L")
-        .arg(&libdir)
-        .arg("-lrgsaddle")
+        .arg(&lib)
         .arg("-o")
         .arg(&out)
         .output()
@@ -39,7 +33,7 @@ fn cxx_session_wrapper_uses_the_official_abi() {
         String::from_utf8_lossy(&build.stderr)
     );
     let run = Command::new(&out)
-        .env("LD_LIBRARY_PATH", &libdir)
+        .env("LD_LIBRARY_PATH", lib.parent().expect("library directory"))
         .output()
         .expect("run C++ session smoke test");
     assert!(

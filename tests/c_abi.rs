@@ -1,4 +1,5 @@
-//! Compiles and runs tests/c/abi_smoke.c against the built cdylib.
+//! Builds the cdylib for this test run, then compiles tests/c/abi_smoke.c
+//! against it and runs it.
 //! Skips when no C compiler is available.
 
 use std::path::PathBuf;
@@ -30,15 +31,13 @@ fn c_abi_smoke() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let out = std::env::temp_dir().join(format!("rgsaddle_abi_smoke_{}", std::process::id()));
 
-    let libdir = cdylib_dir();
+    let lib = cdylib();
 
     let status = Command::new(&cc)
         .arg(root.join("tests/c/abi_smoke.c"))
         .arg("-I")
         .arg(root.join("include"))
-        .arg("-L")
-        .arg(&libdir)
-        .arg("-lrgsaddle")
+        .arg(&lib)
         .arg("-lm")
         .arg("-o")
         .arg(&out)
@@ -47,7 +46,7 @@ fn c_abi_smoke() {
     assert!(status.success(), "C smoke test failed to build");
 
     let run = Command::new(&out)
-        .env("LD_LIBRARY_PATH", &libdir)
+        .env("LD_LIBRARY_PATH", lib.parent().expect("library directory"))
         .output()
         .expect("run the C smoke test");
     let stdout = String::from_utf8_lossy(&run.stdout);

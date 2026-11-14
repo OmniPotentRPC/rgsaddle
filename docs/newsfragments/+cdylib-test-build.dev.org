@@ -1,0 +1,2 @@
+The C and C++ smoke tests build ~librgsaddle.so~ with ~cargo build --lib~ for the features and profile of the running test and link the file cargo reports.
+They no longer link whatever library an earlier ~cargo build~ left in the profile directory, and ~cargo test~ needs no build before it.

@@ -13,11 +13,7 @@ fn c_abi_irc_analytic_well() {
     let compiler = std::env::var("CC").unwrap_or_else(|_| "cc".into());
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let out = std::env::temp_dir().join(format!("rgsaddle_irc_abi_{}", std::process::id()));
-    let libdir = cdylib_dir();
-    assert!(
-        libdir.join("librgsaddle.so").exists(),
-        "build the C ABI library before testing"
-    );
+    let lib = cdylib();
     let build = Command::new(compiler)
         .arg("-std=c11")
         .arg("-Wall")
@@ -26,9 +22,7 @@ fn c_abi_irc_analytic_well() {
         .arg(root.join("tests/c/irc_abi.c"))
         .arg("-I")
         .arg(root.join("include"))
-        .arg("-L")
-        .arg(&libdir)
-        .arg("-lrgsaddle")
+        .arg(&lib)
         .arg("-lm")
         .arg("-o")
         .arg(&out)
@@ -40,7 +34,7 @@ fn c_abi_irc_analytic_well() {
         String::from_utf8_lossy(&build.stderr)
     );
     let run = Command::new(&out)
-        .env("LD_LIBRARY_PATH", &libdir)
+        .env("LD_LIBRARY_PATH", lib.parent().expect("library directory"))
         .output()
         .expect("run the IRC C ABI test");
     let stdout = String::from_utf8_lossy(&run.stdout);
