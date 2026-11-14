@@ -1578,7 +1578,7 @@ fn defect_centroid(
     let mut best_gap = f64::MAX;
     let mut best_follow = f64::MAX;
     let mut pair = [0.0; 3];
-    let cutoff = 2.20;
+    let cutoff = 2.45;
     let cutoff2 = cutoff * cutoff;
     let nside = lengths.map(|length| ((length / cutoff).floor() as i32).max(1));
     let bins_n = (nside[0] * nside[1] * nside[2]) as usize;
@@ -1616,9 +1616,10 @@ fn defect_centroid(
                     d[axis] -= lengths[axis] * (d[axis] / lengths[axis]).round();
                 }
                 let r2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
-                if r2 >= cutoff2 {
+                if r2 >= cutoff2 || r2 < 1.6 * 1.6 {
                     continue;
                 }
+                let bond = r2.sqrt();
                 let center = [ri[0] + 0.5 * d[0], ri[1] + 0.5 * d[1], ri[2] + 0.5 * d[2]];
                 let follow = if let Some(previous) = previous {
                     let mut distance = 0.0;
@@ -1629,16 +1630,16 @@ fn defect_centroid(
                     }
                     distance
                 } else {
-                    r2
+                    0.0
                 };
-                let better = if previous.is_some() {
-                    follow < best_follow
-                } else {
-                    r2 < best_gap
-                };
+                // The dumbbell bond is ~2.05 Å. A nearest-neighbor pair is ~a/√2
+                // and only looks short when it vibrates. Prefer the bond length,
+                // then continuity with the previous centre.
+                let score = (bond - 2.05) * (bond - 2.05) + 0.02 * follow;
+                let better = score < best_follow;
                 if better {
                     best_gap = r2;
-                    best_follow = follow;
+                    best_follow = score;
                     pair = center;
                 }
             }
@@ -1782,10 +1783,10 @@ fn main() {
             fs::create_dir_all(parent).expect("validation dir");
         }
         let mut out = File::create(&path).expect("diffusivity");
-        writeln!(out, "temperature_K,D_A2_per_ps,seed,window_ps").unwrap();
+        writeln!(out, "temperature_K,D_A2_per_ps,error_A2_per_ps,seed,window_ps,hops,channel_Hz,rejected").unwrap();
         for &temperature in &spec.temps {
             let lattice = measured_lattice(temperature);
-            for seed in 0..4u64 {
+            for seed in 0..spec.seeds {
                 let (mut positions, cell) = isolated_dumbbell(spec.repeats, lattice);
                 let mut potential = MishinCu::new();
                 let production = Langevin::from_physical(
@@ -1811,13 +1812,15 @@ fn main() {
                 let mut origin = defect_centroid(&positions, lengths, None).unwrap_or([0.0; 3]);
                 let mut cursor = origin;
                 let mut unwrapped = origin;
-                let window_ps = 40.0;
+                let window_ps = spec.window_ps.max(40.0);
                 let steps = ((window_ps / (spec.dt_fs * 1.0e-3)).round() as usize).max(1);
                 let equil_steps = ((2.0 / (spec.dt_fs * 1.0e-3)).round() as usize);
-                let sample_steps = ((0.25 / (spec.dt_fs * 1.0e-3)).round() as usize).max(1);
+                let sample_steps = ((0.1 / (spec.dt_fs * 1.0e-3)).round() as usize).max(1);
                 let mut start = unwrapped;
                 let mut started = false;
                 let mut rejected = 0usize;
+                let mut hops = 0usize;
+                let mut samples_pos: Vec<[f64; 3]> = Vec::new();
                 for step in 1..=steps {
                     let phase = if step <= equil_steps {
                         equil
@@ -1844,9 +1847,13 @@ fn main() {
                         delta -= lengths[axis] * (delta / lengths[axis]).round();
                         jump += delta * delta;
                     }
-                    if jump.sqrt() > 3.6 {
+                    let hop = jump.sqrt();
+                    if hop > 3.6 {
                         rejected += 1;
                         continue;
+                    }
+                    if started && hop > 1.5 {
+                        hops += 1;
                     }
                     for axis in 0..3 {
                         let mut delta = here[axis] - cursor[axis];
@@ -1859,17 +1866,42 @@ fn main() {
                         origin = unwrapped;
                         started = true;
                     }
+                    if started {
+                        samples_pos.push(unwrapped);
+                    }
                 }
                 let elapsed = if started { window_ps - 2.0 } else { window_ps };
-                let shift = [
-                    unwrapped[0] - start[0],
-                    unwrapped[1] - start[1],
-                    unwrapped[2] - start[2],
-                ];
-                let msd = shift[0] * shift[0] + shift[1] * shift[1] + shift[2] * shift[2];
+                let msd = samples_pos.last().map(|end| {
+                    let d = [end[0] - start[0], end[1] - start[1], end[2] - start[2]];
+                    d[0] * d[0] + d[1] * d[1] + d[2] * d[2]
+                }).unwrap_or(0.0);
                 let d_i = msd / (6.0 * elapsed);
-                writeln!(out, "{temperature:.0},{d_i:.8e},{seed},{elapsed:.2}").unwrap();
-                println!("msd T {temperature:.0} seed {seed} D {d_i:.6e} rejected {rejected}");
+                let blocks = 4usize;
+                let block_n = (samples_pos.len() / blocks).max(1);
+                let mut block_d = Vec::new();
+                for block in 0..blocks {
+                    let end = ((block + 1) * block_n).min(samples_pos.len());
+                    let begin = block * block_n;
+                    if end <= begin + 1 || begin >= samples_pos.len() {
+                        continue;
+                    }
+                    let a0 = samples_pos[begin];
+                    let a1 = samples_pos[end - 1];
+                    let d = [a1[0] - a0[0], a1[1] - a0[1], a1[2] - a0[2]];
+                    let block_time = elapsed * (end - begin) as f64 / samples_pos.len().max(1) as f64;
+                    block_d.push((d[0] * d[0] + d[1] * d[1] + d[2] * d[2]) / (6.0 * block_time));
+                }
+                let mean = if block_d.is_empty() { d_i } else { block_d.iter().sum::<f64>() / block_d.len() as f64 };
+                let error = if block_d.len() < 2 {
+                    0.0
+                } else {
+                    let var = block_d.iter().map(|value| (value - mean).powi(2)).sum::<f64>()
+                        / (block_d.len() as f64 * (block_d.len() - 1) as f64);
+                    var.sqrt()
+                };
+                let channel = hops as f64 / elapsed * 1.0e12 / 8.0;
+                writeln!(out, "{temperature:.0},{d_i:.8e},{error:.8e},{seed},{elapsed:.2},{hops},{channel:.6e},{rejected}").unwrap();
+                println!("msd T {temperature:.0} seed {seed} D {d_i:.4} ± {error:.4} hops {hops} channel {channel:.3e} rejected {rejected}");
             }
         }
         return;

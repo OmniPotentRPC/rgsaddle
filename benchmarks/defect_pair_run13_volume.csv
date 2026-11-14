@@ -1,55 +1,55 @@
 temperature_K,cutoff_A,volume_over_Omega,sigma,spontaneous_sites,kinetic_sites,demkowicz_8788,note
-300,smoluchowski,104.5777,,34.0000,5.0362,254-286,cutoff 10.8; return 272; D_graph 0.297364 A2/ps; D_table 0.143000; delta NaN
+300,smoluchowski,104.5777,,34.0000,5.0362,254-286,cutoff 10.8; V(D_graph) 104.58; V(D_table) 217.47; D_graph 0.297364; D_table 0.143000; delta NaN
 300,mean-time,104.5777,,34.0000,,254-286,cutoff 10.8; tau 5.588649e-9 s; nu=(2/3)*D_graph/a^2
 300,site-sum,276.6103,4.3518,34.0000,,254-286,cutoff 10.8; this sum grows with the shell count
-300,smoluchowski,108.9299,,34.0000,5.2458,254-286,cutoff 14.0; return 144; D_graph 0.297364 A2/ps; D_table 0.143000; delta 4.3523
+300,smoluchowski,108.9299,,34.0000,5.2458,254-286,cutoff 14.0; V(D_graph) 108.93; V(D_table) 226.52; D_graph 0.297364; D_table 0.143000; delta 4.3523
 300,mean-time,108.9299,,34.0000,,254-286,cutoff 14.0; tau 5.365355e-9 s; nu=(2/3)*D_graph/a^2
 300,site-sum,506.1301,8.3926,34.0000,,254-286,cutoff 14.0; this sum grows with the shell count
-300,smoluchowski,108.4954,,34.0000,5.2249,254-286,cutoff 18.0; return 564; D_graph 0.297364 A2/ps; D_table 0.143000; delta -0.4346
+300,smoluchowski,108.4954,,34.0000,5.2249,254-286,cutoff 18.0; V(D_graph) 108.50; V(D_table) 225.61; D_graph 0.297364; D_table 0.143000; delta -0.4346
 300,mean-time,108.4954,,34.0000,,254-286,cutoff 18.0; tau 5.386845e-9 s; nu=(2/3)*D_graph/a^2
 300,site-sum,869.1003,15.3257,34.0000,,254-286,cutoff 18.0; this sum grows with the shell count
-300,smoluchowski,109.3337,,34.0000,5.2652,254-286,cutoff 22.0; return 996; D_graph 0.297364 A2/ps; D_table 0.143000; delta 0.8383
+300,smoluchowski,109.3337,,34.0000,5.2652,254-286,cutoff 22.0; V(D_graph) 109.33; V(D_table) 227.36; D_graph 0.297364; D_table 0.143000; delta 0.8383
 300,mean-time,109.3337,,34.0000,,254-286,cutoff 22.0; tau 5.345543e-9 s; nu=(2/3)*D_graph/a^2
 300,site-sum,1306.8829,23.6495,34.0000,,254-286,cutoff 22.0; this sum grows with the shell count
-300,smoluchowski,109.8891,,34.0000,5.2920,254-286,cutoff 26.0; return 336; D_graph 0.297364 A2/ps; D_table 0.143000; delta 0.5554
+300,smoluchowski,109.8891,,34.0000,5.2920,254-286,cutoff 26.0; V(D_graph) 109.89; V(D_table) 228.51; D_graph 0.297364; D_table 0.143000; delta 0.5554
 300,mean-time,109.8891,,34.0000,,254-286,cutoff 26.0; tau 5.318525e-9 s; nu=(2/3)*D_graph/a^2
 300,site-sum,1813.1730,33.3000,34.0000,,254-286,cutoff 26.0; this sum grows with the shell count
-300,smoluchowski,109.9465,,34.0000,5.2948,254-286,cutoff 30.0; return 312; D_graph 0.297364 A2/ps; D_table 0.143000; delta 0.0574
+300,smoluchowski,109.9465,,34.0000,5.2948,254-286,cutoff 30.0; V(D_graph) 109.95; V(D_table) 228.63; D_graph 0.297364; D_table 0.143000; delta 0.0574
 300,mean-time,109.9465,,34.0000,,254-286,cutoff 30.0; tau 5.315749e-9 s; nu=(2/3)*D_graph/a^2
 300,site-sum,2439.2663,45.2904,34.0000,,254-286,cutoff 30.0; this sum grows with the shell count
-500,smoluchowski,98.1363,,34.0000,4.7416,161-185,cutoff 10.8; return 272; D_graph 1.275786 A2/ps; D_table 0.526000; delta NaN
+500,smoluchowski,98.1363,,34.0000,4.7416,161-185,cutoff 10.8; V(D_graph) 98.14; V(D_table) 238.02; D_graph 1.275786; D_table 0.526000; delta NaN
 500,mean-time,98.1363,,34.0000,,161-185,cutoff 10.8; tau 1.397308e-9 s; nu=(2/3)*D_graph/a^2
 500,site-sum,262.3581,4.4619,34.0000,,161-185,cutoff 10.8; this sum grows with the shell count
-500,smoluchowski,102.9876,,34.0000,4.9760,161-185,cutoff 14.0; return 144; D_graph 1.275786 A2/ps; D_table 0.526000; delta 4.8514
+500,smoluchowski,102.9876,,34.0000,4.9760,161-185,cutoff 14.0; V(D_graph) 102.99; V(D_table) 249.79; D_graph 1.275786; D_table 0.526000; delta 4.8514
 500,mean-time,102.9876,,34.0000,,161-185,cutoff 14.0; tau 1.331486e-9 s; nu=(2/3)*D_graph/a^2
 500,site-sum,479.5911,8.6480,34.0000,,161-185,cutoff 14.0; this sum grows with the shell count
-500,smoluchowski,102.4412,,34.0000,4.9496,161-185,cutoff 18.0; return 168; D_graph 1.275786 A2/ps; D_table 0.526000; delta -0.5464
+500,smoluchowski,102.4412,,34.0000,4.9496,161-185,cutoff 18.0; V(D_graph) 102.44; V(D_table) 248.47; D_graph 1.275786; D_table 0.526000; delta -0.5464
 500,mean-time,102.4412,,34.0000,,161-185,cutoff 18.0; tau 1.338589e-9 s; nu=(2/3)*D_graph/a^2
 500,site-sum,790.5295,15.1405,34.0000,,161-185,cutoff 18.0; this sum grows with the shell count
-500,smoluchowski,104.3341,,34.0000,5.0411,161-185,cutoff 22.0; return 216; D_graph 1.275786 A2/ps; D_table 0.526000; delta 1.8928
+500,smoluchowski,104.3341,,34.0000,5.0411,161-185,cutoff 22.0; V(D_graph) 104.33; V(D_table) 253.06; D_graph 1.275786; D_table 0.526000; delta 1.8928
 500,mean-time,104.3341,,34.0000,,161-185,cutoff 22.0; tau 1.314304e-9 s; nu=(2/3)*D_graph/a^2
 500,site-sum,1201.5125,23.5395,34.0000,,161-185,cutoff 22.0; this sum grows with the shell count
-500,smoluchowski,107.5356,,34.0000,5.1958,161-185,cutoff 26.0; return 432; D_graph 1.275786 A2/ps; D_table 0.526000; delta 3.2015
+500,smoluchowski,107.5356,,34.0000,5.1958,161-185,cutoff 26.0; V(D_graph) 107.54; V(D_table) 260.82; D_graph 1.275786; D_table 0.526000; delta 3.2015
 500,mean-time,107.5356,,34.0000,,161-185,cutoff 26.0; tau 1.275175e-9 s; nu=(2/3)*D_graph/a^2
 500,site-sum,1752.8977,34.6941,34.0000,,161-185,cutoff 26.0; this sum grows with the shell count
-500,smoluchowski,104.6110,,34.0000,5.0545,161-185,cutoff 30.0; return 1008; D_graph 1.275786 A2/ps; D_table 0.526000; delta -2.9246
+500,smoluchowski,104.6110,,34.0000,5.0545,161-185,cutoff 30.0; V(D_graph) 104.61; V(D_table) 253.73; D_graph 1.275786; D_table 0.526000; delta -2.9246
 500,mean-time,104.6110,,34.0000,,161-185,cutoff 30.0; tau 1.310825e-9 s; nu=(2/3)*D_graph/a^2
 500,site-sum,2311.0352,46.6576,34.0000,,161-185,cutoff 30.0; this sum grows with the shell count
-700,smoluchowski,97.5967,,34.0000,4.7311,203-210,cutoff 10.8; return 272; D_graph 1.521444 A2/ps; D_table 0.910000; delta NaN
+700,smoluchowski,97.5967,,34.0000,4.7311,203-210,cutoff 10.8; V(D_graph) 97.60; V(D_table) 163.17; D_graph 1.521444; D_table 0.910000; delta NaN
 700,mean-time,97.5967,,34.0000,,203-210,cutoff 10.8; tau 1.185946e-9 s; nu=(2/3)*D_graph/a^2
 700,site-sum,261.3281,3.0987,34.0000,,203-210,cutoff 10.8; this sum grows with the shell count
-700,smoluchowski,101.9550,,34.0000,4.9424,203-210,cutoff 14.0; return 144; D_graph 1.521444 A2/ps; D_table 0.910000; delta 4.3583
+700,smoluchowski,101.9550,,34.0000,4.9424,203-210,cutoff 14.0; V(D_graph) 101.96; V(D_table) 170.46; D_graph 1.521444; D_table 0.910000; delta 4.3583
 700,mean-time,101.9550,,34.0000,,203-210,cutoff 14.0; tau 1.135250e-9 s; nu=(2/3)*D_graph/a^2
 700,site-sum,476.4157,5.9556,34.0000,,203-210,cutoff 14.0; this sum grows with the shell count
-700,smoluchowski,101.4649,,34.0000,4.9186,203-210,cutoff 18.0; return 168; D_graph 1.521444 A2/ps; D_table 0.910000; delta -0.4902
+700,smoluchowski,101.4649,,34.0000,4.9186,203-210,cutoff 18.0; V(D_graph) 101.46; V(D_table) 169.64; D_graph 1.521444; D_table 0.910000; delta -0.4902
 700,mean-time,101.4649,,34.0000,,203-210,cutoff 18.0; tau 1.140734e-9 s; nu=(2/3)*D_graph/a^2
 700,site-sum,784.4736,10.3763,34.0000,,203-210,cutoff 18.0; this sum grows with the shell count
-700,smoluchowski,103.3339,,34.0000,5.0092,203-210,cutoff 22.0; return 216; D_graph 1.521444 A2/ps; D_table 0.910000; delta 1.8691
+700,smoluchowski,103.3339,,34.0000,5.0092,203-210,cutoff 22.0; V(D_graph) 103.33; V(D_table) 172.77; D_graph 1.521444; D_table 0.910000; delta 1.8691
 700,mean-time,103.3339,,34.0000,,203-210,cutoff 22.0; tau 1.120101e-9 s; nu=(2/3)*D_graph/a^2
 700,site-sum,1191.5183,16.0848,34.0000,,203-210,cutoff 22.0; this sum grows with the shell count
-700,smoluchowski,106.5113,,34.0000,5.1632,203-210,cutoff 26.0; return 432; D_graph 1.521444 A2/ps; D_table 0.910000; delta 3.1774
+700,smoluchowski,106.5113,,34.0000,5.1632,203-210,cutoff 26.0; V(D_graph) 106.51; V(D_table) 178.08; D_graph 1.521444; D_table 0.910000; delta 3.1774
 700,mean-time,106.5113,,34.0000,,203-210,cutoff 26.0; tau 1.086686e-9 s; nu=(2/3)*D_graph/a^2
 700,site-sum,1737.6652,23.6672,34.0000,,203-210,cutoff 26.0; this sum grows with the shell count
-700,smoluchowski,99.8993,,34.0000,4.8427,203-210,cutoff 30.0; return 168; D_graph 1.521444 A2/ps; D_table 0.910000; delta -6.6120
+700,smoluchowski,99.8993,,34.0000,4.8427,203-210,cutoff 30.0; V(D_graph) 99.90; V(D_table) 167.02; D_graph 1.521444; D_table 0.910000; delta -6.6120
 700,mean-time,99.8993,,34.0000,,203-210,cutoff 30.0; tau 1.158611e-9 s; nu=(2/3)*D_graph/a^2
 700,site-sum,2192.3542,30.6916,34.0000,,203-210,cutoff 30.0; this sum grows with the shell count

@@ -8788,7 +8788,8 @@ fn assemble_run13() {
             let sphere_volume = rgsaddle::volume_from_frequency(capture_rate, nu).unwrap_or(f64::NAN);
             let sphere = sphere_volume / omega;
             let delta = previous.map(|prior: f64| sphere - prior).unwrap_or(f64::NAN);
-            writeln!(out, "{temperature},smoluchowski,{sphere:.4},,{spont_sites:.4},{r_eff:.4},{table},cutoff {cutoff:.1}; return {return_sites}; D_graph {d_ps:.6} A2/ps; D_table {d_tab:.6}; delta {delta:.4}", d_ps = d_graph / 1.0e12, d_tab = d_table / 1.0e12).unwrap();
+            let with_table = if d_table > 0.0 { sphere * d_graph / d_table } else { f64::NAN };
+            writeln!(out, "{temperature},smoluchowski,{sphere:.4},,{spont_sites:.4},{r_eff:.4},{table},cutoff {cutoff:.1}; V(D_graph) {sphere:.2}; V(D_table) {with_table:.2}; D_graph {d_ps:.6}; D_table {d_tab:.6}; delta {delta:.4}", d_ps = d_graph / 1.0e12, d_tab = d_table / 1.0e12).unwrap();
             writeln!(out, "{temperature},mean-time,{mean_volume:.4},,{spont_sites:.4},,{table},cutoff {cutoff:.1}; tau {tau_cell:.6e} s; nu=(2/3)*D_graph/a^2").unwrap();
             writeln!(out, "{temperature},site-sum,{total:.4},{sigma:.4},{spont_sites:.4},,{table},cutoff {cutoff:.1}; this sum grows with the shell count").unwrap();
             eprintln!("run14 {temperature} K R {cutoff:.1} sphere {sphere:.2} (d {delta:.2}) R_eff {r_eff:.3} mean {mean_volume:.2} site-sum {total:.2} D {d_ps:.4}/{d_tab:.4}", d_ps = d_graph / 1.0e12, d_tab = d_table / 1.0e12);
