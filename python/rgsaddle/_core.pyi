@@ -167,9 +167,12 @@ def project_band(
     tangent: str = "improved",
     remove_translation: bool = False,
     force_tol: float = 0.001,
+    cell: NDArray[numpy.float64] | None = None,
+    ks: NDArray[numpy.float64] | None = None,
 ) -> tuple[NDArray[numpy.float64], int]:
     """
     Project an evaluated band. forces is flat, one row per image, endpoints zero. ci_index is -1 when no image climbs.
+    cell is a (3, 3) row-major lattice with a zero row for an axis that does not wrap. ks holds one spring per segment.
     """
 
 class MinMode:
@@ -184,12 +187,65 @@ class MinMode:
         rotation_tol: float = 0.0001,
         max_rotations: int = 20,
         krylov_dim: int = 12,
+        method: str = "lbfgs",
+        difference: str = "forward",
+        force_gate: str = "linf",
+        torque_window: int = -1,
     ) -> None: ...
     def estimate(self, surface: Callable[..., tuple[NDArray[numpy.float64], NDArray[numpy.float64]]]) -> SessionReport: ...
     def step(self, surface: Callable[..., tuple[NDArray[numpy.float64], NDArray[numpy.float64]]]) -> SessionReport: ...
     def set_position(self, x: NDArray[numpy.float64], gradient: object | None = None) -> None: ...
+    def set_mode(self, mode: NDArray[numpy.float64]) -> None: ...
     def position(self) -> NDArray[numpy.float64]: ...
     def mode(self) -> NDArray[numpy.float64]: ...
+
+class Band:
+    def __init__(
+        self,
+        positions: NDArray[numpy.float64],
+        k: float = 0.1,
+        ks: NDArray[numpy.float64] | None = None,
+        climb: bool = False,
+        ci_after: float = 0.5,
+        ci_after_rel: float = 0.0,
+        projection: str = "neb",
+        tangent: str = "improved",
+        method: str = "fire",
+        cell: NDArray[numpy.float64] | None = None,
+        force_tol: float = 0.05,
+        max_move: float = 0.2,
+        memory: int = 0,
+        min_mode: bool = False,
+        remove_translation: bool = False,
+        force_gate: str = "max_atom",
+    ) -> None: ...
+    def step(
+        self,
+        surface: Callable[
+            [NDArray[numpy.int64], NDArray[numpy.float64]],
+            tuple[NDArray[numpy.float64], NDArray[numpy.float64]],
+        ],
+    ) -> SessionReport: ...
+    def positions(self) -> NDArray[numpy.float64]: ...
+    def set_positions(self, positions: NDArray[numpy.float64]) -> None: ...
+    def evaluation(
+        self,
+    ) -> tuple[NDArray[numpy.float64], NDArray[numpy.float64], NDArray[numpy.float64]] | None: ...
+    def restart(self) -> None: ...
+    def reset(self) -> None: ...
+
+def idpp_path(
+    reactant: NDArray[numpy.float64],
+    product: NDArray[numpy.float64],
+    n_images: int,
+    cell: NDArray[numpy.float64] | None = None,
+    max_iterations: int = 5000,
+    grad_tol: float = 0.001,
+    max_move: float = 0.1,
+) -> NDArray[numpy.float64]:
+    """
+    Image dependent pair potential path, shaped (n_images, 3N), endpoints included.
+    """
 
 class SellaSaddle:
     def __init__(

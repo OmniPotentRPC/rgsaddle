@@ -934,9 +934,71 @@ int32_t projection_code(const std::string &name) {
   throw nb::value_error("projection must be neb, improvedtangent, aseneb, eb, or dneb");
 }
 
+int32_t tangent_code(const std::string &name) {
+  if (name == "simple") {
+    return RGSADDLE_TANGENT_SIMPLE;
+  }
+  if (name == "improved" || name == "improvedtangent") {
+    return RGSADDLE_TANGENT_IMPROVED;
+  }
+  throw nb::value_error("tangent must be improved, improvedtangent, or simple");
+}
+
+// A cell of nine zeros is no cell. Rows that are zero stay unwrapped.
+std::vector<double> take_cell(nb::handle cell) {
+  if (cell.is_none()) {
+    return {};
+  }
+  auto values = take_f64_2d(cell, "cell", 3, 3);
+  std::vector<double> out(values.data(), values.data() + 9);
+  for (double v : out) {
+    if (!std::isfinite(v)) {
+      throw nb::value_error("cell entries must be finite");
+    }
+  }
+  return out;
+}
+
+std::vector<double> take_ks(nb::handle ks, std::size_t springs) {
+  if (ks.is_none()) {
+    return {};
+  }
+  auto values = take_f64_1d(ks, "ks", springs);
+  std::vector<double> out(values.data(), values.data() + springs);
+  for (double v : out) {
+    if (!std::isfinite(v)) {
+      throw nb::value_error("ks entries must be finite");
+    }
+  }
+  return out;
+}
+
+void set_springs(rgsaddle_band_config_t &config, double k, const std::vector<double> &ks) {
+  config.spring_k = k;
+  if (ks.empty()) {
+    config.spring = RGSADDLE_SPRING_UNIFORM;
+    config.spring_ks = nullptr;
+  } else {
+    config.spring = RGSADDLE_SPRING_WEIGHTED;
+    config.spring_ks = ks.data();
+  }
+}
+
+nb::ndarray<nb::numpy, double> copy_matrix(const std::vector<double> &values, std::size_t rows,
+                                           std::size_t cols) {
+  const std::size_t n = rows * cols == 0 ? 1 : rows * cols;
+  auto *raw = new double[n];
+  if (rows * cols != 0) {
+    std::memcpy(raw, values.data(), rows * cols * sizeof(double));
+  }
+  nb::capsule owner(raw, [](void *ptr) noexcept { delete[] static_cast<double *>(ptr); });
+  const std::size_t shape[2] = {rows, cols};
+  return nb::ndarray<nb::numpy, double>(raw, 2, shape, owner);
+}
+
 nb::tuple project_band(Matrix positions, Vector energies, Matrix gradients, double k, bool climb,
                        const std::string &projection, const std::string &tangent,
-                       bool remove_translation, double force_tol) {
+                       bool remove_translation, double force_tol, nb::handle cell, nb::handle ks) {
   if (positions.shape(0) < 3 || positions.shape(1) <= 0 || positions.shape(1) % 3 != 0) {
     throw nb::value_error("positions must be (images >= 3, 3N)");
   }
@@ -949,6 +1011,8 @@ nb::tuple project_band(Matrix positions, Vector energies, Matrix gradients, doub
   if (!(k == k) || !(force_tol >= 0.0) || !(force_tol == force_tol)) {
     throw nb::value_error("spring constant must be finite and force_tol non-negative");
   }
+  const std::vector<double> cell_rows = take_cell(cell);
+  const std::vector<double> spring_ks = take_ks(ks, static_cast<std::size_t>(rows - 1));
   rgsaddle_band_config_t config{};
   config.version.major = RGSADDLE_ABI_MAJOR;
   config.version.minor = RGSADDLE_ABI_MINOR;
@@ -956,15 +1020,12 @@ nb::tuple project_band(Matrix positions, Vector energies, Matrix gradients, doub
   if (!remove_translation) {
     config.flags |= RGSADDLE_BAND_KEEP_TRANSLATION;
   }
-  config.tangent = tangent == "simple" ? 0 : 1;
-  if (tangent != "simple" && tangent != "improved" && tangent != "improvedtangent") {
-    throw nb::value_error("tangent must be improved, improvedtangent, or simple");
-  }
-  config.spring = 0;
+  config.tangent = tangent_code(tangent);
+  set_springs(config, k, spring_ks);
   config.projection = projection_code(projection);
   config.method = RGSADDLE_METHOD_FIRE;
-  config.spring_k = k;
   config.ci_trigger_factor = climb ? 1.0 : 0.0;
+  config.cell = cell_rows.empty() ? nullptr : cell_rows.data();
   config.force_tol = force_tol;
   config.max_move = 0.2;
   std::vector<double> forces(static_cast<std::size_t>(rows * dof), 0.0);
@@ -1000,9 +1061,42 @@ double trust_update_py(double radius, double predicted, double actual, double st
   return out;
 }
 
+rgsaddle_force_gate_t force_gate_code(const std::string &name) {
+  if (name == "linf") {
+    return RGSADDLE_FORCE_LINF;
+  }
+  if (name == "l2") {
+    return RGSADDLE_FORCE_L2;
+  }
+  if (name == "max_atom") {
+    return RGSADDLE_FORCE_MAX_ATOM;
+  }
+  throw nb::value_error("force_gate must be linf, l2, or max_atom");
+}
+
+int32_t method_code(const std::string &name) {
+  if (name == "fire") {
+    return RGSADDLE_METHOD_FIRE;
+  }
+  if (name == "lbfgs") {
+    return RGSADDLE_METHOD_LBFGS;
+  }
+  if (name == "rtr") {
+    return RGSADDLE_METHOD_RTR;
+  }
+  if (name == "quickmin") {
+    return RGSADDLE_METHOD_QUICKMIN;
+  }
+  if (name == "ode12r") {
+    return RGSADDLE_METHOD_ODE12R;
+  }
+  throw nb::value_error("method must be fire, lbfgs, rtr, quickmin, or ode12r");
+}
+
 PyMinMode make_minmode(Vector x, Vector mode, const std::string &kind, double dr, double force_tol,
                        double max_move, double rotation_tol, std::int64_t max_rotations,
-                       std::int64_t krylov_dim) {
+                       std::int64_t krylov_dim, const std::string &method, const std::string &difference,
+                       const std::string &force_gate, std::int32_t torque_window) {
   if (x.shape(0) <= 0 || x.shape(0) % 3 != 0 || x.shape(0) != mode.shape(0)) {
     throw nb::value_error("position and mode must share a positive multiple of three");
   }
@@ -1013,7 +1107,21 @@ PyMinMode make_minmode(Vector x, Vector mode, const std::string &kind, double dr
   if (kind != "dimer" && kind != "lanczos") {
     throw nb::value_error("kind must be dimer or lanczos");
   }
-  config.method = RGSADDLE_METHOD_LBFGS;
+  if (method != "lbfgs" && method != "fire") {
+    throw nb::value_error("a minimum-mode translation is lbfgs or fire");
+  }
+  config.method = method_code(method);
+  if (difference == "forward") {
+    config.difference = RGSADDLE_DIFFERENCE_FORWARD;
+  } else if (difference == "central") {
+    config.difference = RGSADDLE_DIFFERENCE_CENTRAL;
+  } else {
+    throw nb::value_error("difference must be forward or central");
+  }
+  const rgsaddle_force_gate_t gate = force_gate_code(force_gate);
+  if (torque_window < -1 || torque_window > 1) {
+    throw nb::value_error("torque_window must be -1, 0, or 1");
+  }
   config.dr = dr;
   config.rotation_tol = rotation_tol;
   config.max_rotations = max_rotations;
@@ -1027,7 +1135,232 @@ PyMinMode make_minmode(Vector x, Vector mode, const std::string &kind, double dr
   if (out.handle == nullptr) {
     throw nb::value_error("minimum-mode configuration was refused");
   }
+  if (rgsaddle_minmode_set_force_gate(out.handle, gate) != RGSADDLE_OK ||
+      rgsaddle_minmode_set_torque_window(out.handle, torque_window) != RGSADDLE_OK) {
+    throw nb::value_error("minimum-mode force gate or torque window was refused");
+  }
   return out;
+}
+
+struct PyBand {
+  RgsaddleBand *handle = nullptr;
+  std::int64_t n_images = 0;
+  std::int64_t n_atoms = 0;
+
+  PyBand() = default;
+  PyBand(const PyBand &) = delete;
+  PyBand &operator=(const PyBand &) = delete;
+  PyBand(PyBand &&other) noexcept
+      : handle(other.handle), n_images(other.n_images), n_atoms(other.n_atoms) {
+    other.handle = nullptr;
+  }
+  PyBand &operator=(PyBand &&other) noexcept {
+    if (this != &other) {
+      if (handle != nullptr) {
+        rgsaddle_band_free(handle);
+      }
+      handle = other.handle;
+      n_images = other.n_images;
+      n_atoms = other.n_atoms;
+      other.handle = nullptr;
+    }
+    return *this;
+  }
+  ~PyBand() {
+    if (handle != nullptr) {
+      rgsaddle_band_free(handle);
+    }
+  }
+};
+
+PyBand make_band_session(Matrix positions, double k, nb::handle ks, bool climb, double ci_after,
+                         double ci_after_rel, const std::string &projection, const std::string &tangent,
+                         const std::string &method, nb::handle cell, double force_tol, double max_move,
+                         std::int64_t memory, bool min_mode, bool remove_translation,
+                         const std::string &force_gate) {
+  if (positions.shape(0) < 3 || positions.shape(1) <= 0 || positions.shape(1) % 3 != 0) {
+    throw nb::value_error("positions must be (images >= 3, 3N)");
+  }
+  if (!std::isfinite(k) || !(force_tol > 0.0) || !std::isfinite(force_tol) || !(max_move > 0.0) ||
+      memory < 0) {
+    throw nb::value_error("k must be finite, force_tol and max_move positive, memory non-negative");
+  }
+  if (climb && (!(ci_after >= 0.0) || !(ci_after_rel >= 0.0))) {
+    throw nb::value_error("ci_after and ci_after_rel must not be negative");
+  }
+  const auto rows = static_cast<std::int64_t>(positions.shape(0));
+  const auto dof = static_cast<std::int64_t>(positions.shape(1));
+  const std::vector<double> cell_rows = take_cell(cell);
+  const std::vector<double> spring_ks = take_ks(ks, static_cast<std::size_t>(rows - 1));
+  const rgsaddle_force_gate_t gate = force_gate_code(force_gate);
+  rgsaddle_band_config_t config{};
+  config.version.major = RGSADDLE_ABI_MAJOR;
+  config.version.minor = RGSADDLE_ABI_MINOR;
+  config.flags = 0;
+  if (!min_mode) {
+    config.flags |= RGSADDLE_BAND_NO_MIN_MODE;
+  }
+  if (!remove_translation) {
+    config.flags |= RGSADDLE_BAND_KEEP_TRANSLATION;
+  }
+  if (climb) {
+    config.flags |= RGSADDLE_BAND_CI_AFTER;
+    config.ci_trigger_force = ci_after;
+    config.ci_trigger_factor = ci_after_rel;
+  }
+  config.tangent = tangent_code(tangent);
+  set_springs(config, k, spring_ks);
+  config.projection = projection_code(projection);
+  config.method = method_code(method);
+  config.cell = cell_rows.empty() ? nullptr : cell_rows.data();
+  config.force_tol = force_tol;
+  config.max_move = max_move;
+  config.memory = memory;
+  PyBand out;
+  out.n_images = rows;
+  out.n_atoms = dof / 3;
+  out.handle = rgsaddle_band_create(&config, rows, dof / 3, positions.data());
+  if (out.handle == nullptr) {
+    throw nb::value_error("band configuration was refused");
+  }
+  if (rgsaddle_band_set_force_gate(out.handle, gate) != RGSADDLE_OK) {
+    throw nb::value_error("band force gate was refused");
+  }
+  return out;
+}
+
+struct BandCallback {
+  nb::callable *fn;
+  rgbind::CallContext *ctx;
+  std::int64_t band;
+};
+
+// The session sends the whole band, the interior, or the climbing image
+// alone. The callback sees band indices, the SurfaceAdapter row ids.
+extern "C" rgsaddle_status_t band_python_surface(void *user, rgsaddle_surface_request_t *req) {
+  auto *state = static_cast<BandCallback *>(user);
+  if (state == nullptr || req == nullptr || req->positions == nullptr || req->energies == nullptr ||
+      req->gradients == nullptr || req->n_images <= 0 || req->n_atoms <= 0) {
+    return RGSADDLE_INVALID_PARAMETER;
+  }
+  const std::size_t dof = static_cast<std::size_t>(req->n_atoms) * 3;
+  std::vector<std::int64_t> ids;
+  if ((req->flags & RGSADDLE_REQ_ONE_IMAGE) != 0 || (req->flags & RGSADDLE_REQ_CLIMBING_IMAGE) != 0) {
+    ids.push_back(req->image);
+  } else if (req->n_images == state->band) {
+    for (std::int64_t i = 0; i < state->band; ++i) {
+      ids.push_back(i);
+    }
+  } else if (req->n_images == state->band - 2) {
+    for (std::int64_t i = 1; i < state->band - 1; ++i) {
+      ids.push_back(i);
+    }
+  } else {
+    rgsaddle_py_set_last_error("band request rows match neither the band nor its interior");
+    return RGSADDLE_SHAPE;
+  }
+  const std::size_t rows = ids.size();
+  try {
+    nb::gil_scoped_acquire gil;
+    if (!gil.is_valid()) {
+      return RGSADDLE_SURFACE_FAILED;
+    }
+    auto *id_raw = new std::int64_t[rows];
+    std::memcpy(id_raw, ids.data(), rows * sizeof(std::int64_t));
+    nb::capsule id_owner(id_raw, [](void *ptr) noexcept { delete[] static_cast<std::int64_t *>(ptr); });
+    auto *x_raw = new double[rows * dof];
+    std::memcpy(x_raw, req->positions, rows * dof * sizeof(double));
+    nb::capsule x_owner(x_raw, [](void *ptr) noexcept { delete[] static_cast<double *>(ptr); });
+    const std::size_t id_shape[1] = {rows};
+    const std::size_t x_shape[2] = {rows, dof};
+    nb::ndarray<nb::numpy, std::int64_t> id_arr(id_raw, 1, id_shape, id_owner);
+    nb::ndarray<nb::numpy, double> x_arr(x_raw, 2, x_shape, x_owner);
+    nb::object result = (*state->fn)(id_arr, x_arr);
+    copy_callback_result(result, rows, dof, req->energies, req->gradients);
+    if (PyErr_CheckSignals() < 0) {
+      nb::python_error err;
+      state->ctx->capture(err);
+      return RGSADDLE_SURFACE_FAILED;
+    }
+    return RGSADDLE_OK;
+  } catch (nb::python_error &err) {
+    state->ctx->capture(err);
+    return RGSADDLE_SURFACE_FAILED;
+  } catch (const std::exception &err) {
+    rgsaddle_py_set_last_error(err.what());
+    return RGSADDLE_SURFACE_FAILED;
+  }
+}
+
+SessionReport band_step_python(PyBand &self, nb::callable &fn) {
+  rgbind::CallContext ctx;
+  BandCallback state{&fn, &ctx, self.n_images};
+  rgsaddle_report_t report{};
+  rgsaddle_status_t status = RGSADDLE_OK;
+  {
+    nb::gil_scoped_release release;
+    status = rgsaddle_band_step(self.handle, band_python_surface, static_cast<void *>(&state), &report);
+  }
+  if (ctx.has_error()) {
+    ctx.rethrow_if_set();
+  }
+  if (status == RGSADDLE_STALLED) {
+    SessionReport out = report_from(report);
+    out.status = RGSADDLE_STALLED;
+    return out;
+  }
+  if (status != RGSADDLE_OK) {
+    std::string last = rgsaddle_py_last_error();
+    rgsaddle_py_set_last_error("");
+    if (last.empty()) {
+      status_error(status);
+    }
+    throw nb::value_error(last.c_str());
+  }
+  return report_from(report);
+}
+
+nb::object band_evaluation_python(const PyBand &self) {
+  const auto rows = static_cast<std::size_t>(self.n_images);
+  const auto dof = static_cast<std::size_t>(self.n_atoms * 3);
+  std::vector<double> energies(rows, 0.0);
+  std::vector<double> gradients(rows * dof, 0.0);
+  std::vector<double> projected((rows - 2) * dof, 0.0);
+  const auto status =
+      rgsaddle_band_evaluation(self.handle, energies.data(), gradients.data(), projected.data());
+  if (status == RGSADDLE_NO_EVALUATION) {
+    return nb::none();
+  }
+  if (status != RGSADDLE_OK) {
+    status_error(status);
+  }
+  return nb::make_tuple(copy_vector(energies), copy_matrix(gradients, rows, dof),
+                        copy_matrix(projected, rows - 2, dof));
+}
+
+nb::ndarray<nb::numpy, double> idpp_path_python(Vector reactant, Vector product, std::int64_t n_images,
+                                                nb::handle cell, std::int64_t max_iterations, double grad_tol,
+                                                double max_move) {
+  if (reactant.shape(0) <= 0 || reactant.shape(0) % 3 != 0 || reactant.shape(0) != product.shape(0)) {
+    throw nb::value_error("reactant and product must share a positive multiple of three");
+  }
+  if (n_images < 3) {
+    throw nb::value_error("n_images counts the endpoints and must be at least 3");
+  }
+  const std::vector<double> cell_rows = take_cell(cell);
+  const auto dof = static_cast<std::size_t>(reactant.shape(0));
+  std::vector<double> out(static_cast<std::size_t>(n_images) * dof, 0.0);
+  rgsaddle_status_t status = RGSADDLE_OK;
+  {
+    nb::gil_scoped_release release;
+    status = rgsaddle_idpp_path(n_images, static_cast<std::int64_t>(dof / 3), reactant.data(), product.data(),
+                                cell_rows.empty() ? nullptr : cell_rows.data(), max_iterations, grad_tol,
+                                max_move, out.data());
+  }
+  if (status != RGSADDLE_OK) {
+    status_error(status);
+  }
+  return copy_matrix(out, static_cast<std::size_t>(n_images), dof);
 }
 
 void minmode_set_position(PyMinMode &self, Vector x, nb::handle gradient) {
@@ -1043,6 +1376,16 @@ void minmode_set_position(PyMinMode &self, Vector x, nb::handle gradient) {
     grad = values.data();
   }
   const auto status = rgsaddle_minmode_set_position(self.handle, x.data(), grad);
+  if (status != RGSADDLE_OK) {
+    status_error(status);
+  }
+}
+
+void minmode_set_mode(PyMinMode &self, Vector mode) {
+  if (self.handle == nullptr || mode.shape(0) != self.n_atoms * 3) {
+    throw nb::value_error("mode length must stay 3N");
+  }
+  const auto status = rgsaddle_minmode_set_mode(self.handle, mode.data());
   if (status != RGSADDLE_OK) {
     status_error(status);
   }
@@ -1200,12 +1543,15 @@ NB_MODULE(_core, m) {
       "project_band", &project_band, nb::arg("positions").noconvert(), nb::arg("energies").noconvert(),
       nb::arg("gradients").noconvert(), nb::arg("k") = 0.1, nb::arg("climb") = false,
       nb::arg("projection") = "neb", nb::arg("tangent") = "improved",
-      nb::arg("remove_translation") = false, nb::arg("force_tol") = 1e-3,
+      nb::arg("remove_translation") = false, nb::arg("force_tol") = 1e-3, nb::arg("cell") = nb::none(),
+      nb::arg("ks") = nb::none(),
       "Project an evaluated band. Returns (forces, ci_index). forces is flat, "
       "one row per image including zero endpoints, in the ASE force convention. "
       "climb selects the interior image by the endpoint-slope rule on this call; "
       "a higher endpoint that slopes into the band does not climb. Units are the "
-      "caller's. k is energy per length squared.");
+      "caller's. k is energy per length squared. cell is a (3, 3) row-major lattice "
+      "for minimum-image differences, with a zero row for a direction that does not "
+      "wrap. ks, when given, holds one constant per segment and replaces k.");
 
   m.def(
       "halve_raised_energy", &halve_raised_energy_py, nb::arg("previous"), nb::arg("trial"),
@@ -1229,14 +1575,24 @@ NB_MODULE(_core, m) {
       .def(
           "__init__",
           [](PyMinMode *self, Vector x, Vector mode, const std::string &kind, double dr, double force_tol,
-             double max_move, double rotation_tol, std::int64_t max_rotations, std::int64_t krylov_dim) {
+             double max_move, double rotation_tol, std::int64_t max_rotations, std::int64_t krylov_dim,
+             const std::string &method, const std::string &difference, const std::string &force_gate,
+             std::int32_t torque_window) {
             new (self) PyMinMode(make_minmode(x, mode, kind, dr, force_tol, max_move, rotation_tol,
-                                              max_rotations, krylov_dim));
+                                              max_rotations, krylov_dim, method, difference, force_gate,
+                                              torque_window));
           },
           nb::arg("x").noconvert(), nb::arg("mode").noconvert(), nb::arg("kind") = "dimer",
           nb::arg("dr") = 1e-3, nb::arg("force_tol") = 1e-3, nb::arg("max_move") = 0.2,
           nb::arg("rotation_tol") = 1e-4, nb::arg("max_rotations") = 20, nb::arg("krylov_dim") = 12,
-          "Dimer or Lanczos minimum-mode session. Lengths are the caller's.")
+          nb::arg("method") = "lbfgs", nb::arg("difference") = "forward", nb::arg("force_gate") = "linf",
+          nb::arg("torque_window") = -1,
+          "Dimer or Lanczos minimum-mode session. Lengths are the caller's. method is the "
+          "translation stepper, lbfgs or fire. difference is forward (one gradient per "
+          "action) or central (two). force_gate is linf, l2, or max_atom (the largest "
+          "per-atom norm, ASE's fmax). torque_window 1 stops a rotation after one "
+          "iteration once the rotational force is under 1, 0 never does, and -1 does so "
+          "when rotation_tol is at least 1e-4.")
       .def(
           "estimate",
           [](PyMinMode &self, nb::callable fn) {
@@ -1256,6 +1612,8 @@ NB_MODULE(_core, m) {
       .def(
           "set_position", &minmode_set_position, nb::arg("x").noconvert(), nb::arg("gradient") = nb::none(),
           "Move to a new point. gradient, when given, skips the next centre evaluation.")
+      .def("set_mode", &minmode_set_mode, nb::arg("mode").noconvert(),
+           "Replace the mode guess. The rotation history and carried curvature are dropped.")
       .def(
           "position",
           [](const PyMinMode &self) {
@@ -1278,6 +1636,96 @@ NB_MODULE(_core, m) {
             return copy_vector(out);
           },
           "Copy of the current mode.");
+
+  nb::class_<PyBand>(m, "Band")
+      .def(
+          "__init__",
+          [](PyBand *self, Matrix positions, double k, nb::handle ks, bool climb, double ci_after,
+             double ci_after_rel, const std::string &projection, const std::string &tangent,
+             const std::string &method, nb::handle cell, double force_tol, double max_move, std::int64_t memory,
+             bool min_mode, bool remove_translation, const std::string &force_gate) {
+            new (self) PyBand(make_band_session(positions, k, ks, climb, ci_after, ci_after_rel, projection, tangent,
+                                                method, cell, force_tol, max_move, memory, min_mode,
+                                                remove_translation, force_gate));
+          },
+          nb::arg("positions").noconvert(), nb::arg("k") = 0.1, nb::arg("ks") = nb::none(),
+          nb::arg("climb") = false, nb::arg("ci_after") = 0.5, nb::arg("ci_after_rel") = 0.0,
+          nb::arg("projection") = "neb", nb::arg("tangent") = "improved", nb::arg("method") = "fire",
+          nb::arg("cell") = nb::none(), nb::arg("force_tol") = 0.05, nb::arg("max_move") = 0.2,
+          nb::arg("memory") = 0, nb::arg("min_mode") = false, nb::arg("remove_translation") = false,
+          nb::arg("force_gate") = "max_atom",
+          "Band session over (images, 3N) positions, endpoints included and fixed. "
+          "climb arms the climbing image once the largest force is under ci_after, or "
+          "under ci_after_rel times the first one; ci_after=inf climbs from the first "
+          "evaluation. method is fire, lbfgs, rtr, quickmin, or ode12r; memory 0 keeps "
+          "the L-BFGS default. min_mode hands an armed climbing image to the OCI-NEB "
+          "refinement. force_gate max_atom is the largest per-atom force norm, ASE's fmax.")
+      .def(
+          "step", &band_step_python, nb::arg("surface"),
+          nb::sig("def step(self, surface: collections.abc.Callable[[numpy.typing.NDArray[numpy.int64], "
+                  "numpy.typing.NDArray[numpy.float64]], tuple[numpy.typing.NDArray[numpy.float64], "
+                  "numpy.typing.NDArray[numpy.float64]]]) -> SessionReport"),
+          "One optimizer step. surface(ids, x) receives the band indices and their rows, "
+          "shaped (rows, 3N), and returns (energies, gradients). The first call carries the "
+          "whole band and later calls the interior images. A step that left the band "
+          "unchanged above force_tol reports status -13 (RGSADDLE_STALLED).")
+      .def(
+          "positions",
+          [](const PyBand &self) {
+            const auto rows = static_cast<std::size_t>(self.n_images);
+            const auto dof = static_cast<std::size_t>(self.n_atoms * 3);
+            std::vector<double> out(rows * dof, 0.0);
+            const auto status = rgsaddle_band_positions(self.handle, out.data());
+            if (status != RGSADDLE_OK) {
+              status_error(status);
+            }
+            return copy_matrix(out, rows, dof);
+          },
+          "Copy of the band, shaped (images, 3N).")
+      .def(
+          "set_positions",
+          [](PyBand &self, Matrix positions) {
+            if (positions.shape(0) != static_cast<std::size_t>(self.n_images) ||
+                positions.shape(1) != static_cast<std::size_t>(self.n_atoms * 3)) {
+              throw nb::value_error("positions must keep the band shape");
+            }
+            const auto status = rgsaddle_band_set_positions(self.handle, positions.data());
+            if (status != RGSADDLE_OK) {
+              status_error(status);
+            }
+          },
+          nb::arg("positions").noconvert(),
+          "Replace the band. Rows equal to the session's up to the minimum image keep their cached values.")
+      .def(
+          "evaluation", &band_evaluation_python,
+          nb::sig("def evaluation(self) -> tuple[numpy.typing.NDArray[numpy.float64], "
+                  "numpy.typing.NDArray[numpy.float64], numpy.typing.NDArray[numpy.float64]] | None"),
+          "(energies, gradients, projected) at the current band, or None when there is no "
+          "evaluation there. projected is the interior force the stepper used.")
+      .def(
+          "restart",
+          [](PyBand &self) {
+            const auto status = rgsaddle_band_restart(self.handle);
+            if (status != RGSADDLE_OK) {
+              status_error(status);
+            }
+          },
+          "Drop the optimizer history and the climbing state. Keep the cached evaluation.")
+      .def(
+          "reset",
+          [](PyBand &self) {
+            const auto status = rgsaddle_band_reset(self.handle);
+            if (status != RGSADDLE_OK) {
+              status_error(status);
+            }
+          },
+          "Surface boundary: drop the history, the climbing state, and every cached value.");
+
+  m.def("idpp_path", &idpp_path_python, nb::arg("reactant").noconvert(), nb::arg("product").noconvert(),
+        nb::arg("n_images"), nb::arg("cell") = nb::none(), nb::arg("max_iterations") = 5000,
+        nb::arg("grad_tol") = 1e-3, nb::arg("max_move") = 0.1,
+        "Image dependent pair potential path, shaped (n_images, 3N), endpoints included. "
+        "cell is a (3, 3) row-major lattice for minimum-image pair distances, or None.");
 
   nb::class_<PySella>(m, "SellaSaddle")
       .def(
