@@ -336,6 +336,371 @@ where
     Ok(1.0 / inverse)
 }
 
+/// Survival against a perfectly absorbing sphere at the origin of a periodic cube.
+///
+/// Times are reduced, `s = D t` in Å². `at_starts[i][j]` is the probability
+/// that a walker from `starts[i]` has not touched any image of the sphere by
+/// `reduced_times[j]`. `cell_mean[j]` is the same average over a uniform start
+/// in the cell, inside the sphere included.
+#[derive(Debug, Clone)]
+pub struct PeriodicSinkSurvival {
+    pub reduced_times: Vec<f64>,
+    pub at_starts: Vec<Vec<f64>>,
+    pub cell_mean: Vec<f64>,
+}
+
+struct OctantGrid {
+    nodes: usize,
+    side: usize,
+    spacing: f64,
+    half: f64,
+    absorbing: Vec<bool>,
+    neighbors: Vec<[usize; 6]>,
+    coupling: Vec<[f64; 6]>,
+    sink: Vec<f64>,
+    weight: Vec<f64>,
+}
+
+impl OctantGrid {
+    /// The backward equation `∂S/∂s = ∇²S` on `[0, L/2]³`.
+    ///
+    /// Mirror symmetry of the sphere and of the lattice of images makes every
+    /// face of the octant reflecting. Next to the sphere the second difference
+    /// uses the distance to the surface (Shortley–Weller), and that link is
+    /// stepped implicitly so the explicit limit stays `h²/6`.
+    fn new(radius: f64, cell_length: f64, spacing: f64) -> Result<Self, SaddleError> {
+        if !(radius.is_finite() && radius > 0.0 && cell_length.is_finite() && spacing.is_finite()) {
+            return Err(SaddleError::Invalid(
+                "radius, cell length and spacing must be finite".into(),
+            ));
+        }
+        let half = 0.5 * cell_length;
+        if !(spacing > 0.0 && radius + spacing < half) {
+            return Err(SaddleError::Invalid(
+                "the sphere must fit inside half the cell with one spacing to spare".into(),
+            ));
+        }
+        let m = (half / spacing).round().max(2.0) as usize;
+        let h = half / m as f64;
+        let side = m + 1;
+        let nodes = side * side * side;
+        let index = |i: usize, j: usize, k: usize| (i * side + j) * side + k;
+        let coordinate = |n: usize| n as f64 * h;
+        let mut absorbing = vec![false; nodes];
+        for i in 0..side {
+            for j in 0..side {
+                for k in 0..side {
+                    let r2 = coordinate(i).powi(2) + coordinate(j).powi(2) + coordinate(k).powi(2);
+                    absorbing[index(i, j, k)] = r2 <= radius * radius;
+                }
+            }
+        }
+        let mut neighbors = vec![[0usize; 6]; nodes];
+        let mut coupling = vec![[0.0; 6]; nodes];
+        let mut sink = vec![0.0; nodes];
+        let mut weight = vec![0.0; nodes];
+        for i in 0..side {
+            for j in 0..side {
+                for k in 0..side {
+                    let here = index(i, j, k);
+                    let mut w = 1.0;
+                    for n in [i, j, k] {
+                        if n == 0 || n == m {
+                            w *= 0.5;
+                        }
+                    }
+                    weight[here] = w;
+                    if absorbing[here] {
+                        continue;
+                    }
+                    let point = [coordinate(i), coordinate(j), coordinate(k)];
+                    let ijk = [i, j, k];
+                    for axis in 0..3 {
+                        let mut gaps = [h; 2];
+                        let mut targets = [None; 2];
+                        for (side_index, sign) in [-1i64, 1].into_iter().enumerate() {
+                            let raw = ijk[axis] as i64 + sign;
+                            let mirrored = if raw < 0 {
+                                1
+                            } else if raw > m as i64 {
+                                m - 1
+                            } else {
+                                raw as usize
+                            };
+                            let mut other = ijk;
+                            other[axis] = mirrored;
+                            let target = index(other[0], other[1], other[2]);
+                            if absorbing[target] {
+                                let along = point[axis];
+                                let across: f64 = (0..3)
+                                    .filter(|&a| a != axis)
+                                    .map(|a| point[a] * point[a])
+                                    .sum();
+                                let surface = (radius * radius - across).max(0.0).sqrt();
+                                let gap = (along + sign as f64 * surface).abs();
+                                gaps[side_index] = gap.clamp(1.0e-3 * h, h);
+                            } else {
+                                targets[side_index] = Some(target);
+                            }
+                        }
+                        let span = gaps[0] + gaps[1];
+                        for side_index in 0..2 {
+                            let factor = 2.0 / (span * gaps[side_index]);
+                            let slot = 2 * axis + side_index;
+                            match targets[side_index] {
+                                Some(target) => {
+                                    neighbors[here][slot] = target;
+                                    coupling[here][slot] = factor;
+                                }
+                                None => {
+                                    neighbors[here][slot] = here;
+                                    sink[here] += factor;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(Self {
+            nodes,
+            side,
+            spacing: h,
+            half,
+            absorbing,
+            neighbors,
+            coupling,
+            sink,
+            weight,
+        })
+    }
+
+    fn stable_step(&self) -> f64 {
+        self.spacing * self.spacing / 6.0
+    }
+
+    fn advance(&self, current: &[f64], next: &mut [f64], step: f64) {
+        next.par_iter_mut().enumerate().for_each(|(node, value)| {
+            if self.absorbing[node] {
+                *value = 0.0;
+                return;
+            }
+            let here = current[node];
+            let mut flow = 0.0;
+            for slot in 0..6 {
+                flow += self.coupling[node][slot] * (current[self.neighbors[node][slot]] - here);
+            }
+            *value = (here + step * flow) / (1.0 + step * self.sink[node]);
+        });
+    }
+
+    fn mean(&self, values: &[f64]) -> f64 {
+        let total: f64 = self.weight.iter().sum();
+        values.iter().zip(&self.weight).map(|(v, w)| v * w).sum::<f64>() / total
+    }
+
+    fn sample(&self, values: &[f64], start: [f64; 3]) -> f64 {
+        let length = 2.0 * self.half;
+        let folded = start.map(|x| {
+            let wrapped = x.rem_euclid(length);
+            let reflected = if wrapped > self.half { length - wrapped } else { wrapped };
+            reflected / self.spacing
+        });
+        let m = self.side - 1;
+        let base = folded.map(|u| (u.floor() as usize).min(m - 1));
+        let frac = [0, 1, 2].map(|a| folded[a] - base[a] as f64);
+        let mut value = 0.0;
+        for corner in 0..8 {
+            let mut w = 1.0;
+            let mut at = [0usize; 3];
+            for a in 0..3 {
+                let up = (corner >> a) & 1 == 1;
+                at[a] = base[a] + usize::from(up);
+                w *= if up { frac[a] } else { 1.0 - frac[a] };
+            }
+            value += w * values[(at[0] * self.side + at[1]) * self.side + at[2]];
+        }
+        value
+    }
+}
+
+/// [`PeriodicSinkSurvival`] for a sphere of `radius` in a cube of `cell_length`.
+///
+/// `spacing` is the grid step; `reduced_times` must be non-negative and
+/// increasing. Nothing here depends on the lattice or the defects.
+pub fn periodic_sink_survival(
+    radius: f64,
+    cell_length: f64,
+    spacing: f64,
+    starts: &[[f64; 3]],
+    reduced_times: &[f64],
+) -> Result<PeriodicSinkSurvival, SaddleError> {
+    if reduced_times.windows(2).any(|pair| pair[1] < pair[0])
+        || reduced_times.iter().any(|t| !(t.is_finite() && *t >= 0.0))
+    {
+        return Err(SaddleError::Invalid(
+            "reduced times must be finite, non-negative and increasing".into(),
+        ));
+    }
+    let grid = OctantGrid::new(radius, cell_length, spacing)?;
+    let mut current: Vec<f64> = grid.absorbing.iter().map(|&a| if a { 0.0 } else { 1.0 }).collect();
+    let mut next = vec![0.0; grid.nodes];
+    let limit = grid.stable_step();
+    let mut clock = 0.0;
+    let mut at_starts = vec![Vec::with_capacity(reduced_times.len()); starts.len()];
+    let mut cell_mean = Vec::with_capacity(reduced_times.len());
+    for &target in reduced_times {
+        while clock < target {
+            let step = limit.min(target - clock);
+            grid.advance(&current, &mut next, step);
+            std::mem::swap(&mut current, &mut next);
+            clock += step;
+            if target - clock < 1.0e-12 * limit {
+                clock = target;
+            }
+        }
+        for (series, &start) in at_starts.iter_mut().zip(starts) {
+            series.push(grid.sample(&current, start));
+        }
+        cell_mean.push(grid.mean(&current));
+    }
+    Ok(PeriodicSinkSurvival {
+        reduced_times: reduced_times.to_vec(),
+        at_starts,
+        cell_mean,
+    })
+}
+
+/// One trajectory: separation vector at time zero, then the first sample at
+/// which the pair counted as recombined, or the end of the window.
+#[derive(Debug, Clone, Copy)]
+pub struct CaptureRecord {
+    pub start: [f64; 3],
+    pub time: f64,
+    pub captured: bool,
+}
+
+/// Log-likelihood of capture records under a sphere of `radius` in a periodic cube.
+///
+/// A capture at `time` happened after the previous sample at
+/// `time - interval`. One grid solve in reduced time serves every entry of
+/// `diffusivities`; the result has one log-likelihood per entry.
+pub fn periodic_capture_log_likelihood(
+    radius: f64,
+    cell_length: f64,
+    spacing: f64,
+    interval: f64,
+    diffusivities: &[f64],
+    records: &[CaptureRecord],
+) -> Result<Vec<f64>, SaddleError> {
+    if !(interval.is_finite() && interval > 0.0)
+        || diffusivities.iter().any(|d| !(d.is_finite() && *d > 0.0))
+        || records.iter().any(|r| !(r.time.is_finite() && r.time >= 0.0))
+    {
+        return Err(SaddleError::Invalid(
+            "interval, diffusivities and times must be finite and positive".into(),
+        ));
+    }
+    let mut starts: Vec<[f64; 3]> = Vec::new();
+    let mut slot = Vec::with_capacity(records.len());
+    for record in records {
+        let index = starts.iter().position(|s| *s == record.start).unwrap_or_else(|| {
+            starts.push(record.start);
+            starts.len() - 1
+        });
+        slot.push(index);
+    }
+    let fastest = diffusivities.iter().copied().fold(0.0, f64::max);
+    let slowest = diffusivities.iter().copied().fold(f64::MAX, f64::min);
+    let latest = records.iter().map(|r| r.time).fold(0.0, f64::max);
+    let resolution = 0.25 * slowest * interval;
+    let count = ((fastest * latest / resolution).ceil() as usize).max(1);
+    let grid_times: Vec<f64> = (0..=count).map(|j| j as f64 * resolution).collect();
+    let survival = periodic_sink_survival(radius, cell_length, spacing, &starts, &grid_times)?;
+    let at = |series: &[f64], reduced: f64| {
+        let u = (reduced / resolution).clamp(0.0, count as f64);
+        let low = (u.floor() as usize).min(count.saturating_sub(1));
+        let frac = u - low as f64;
+        series[low] * (1.0 - frac) + series[(low + 1).min(count)] * frac
+    };
+    Ok(diffusivities
+        .iter()
+        .map(|&d| {
+            records
+                .iter()
+                .zip(&slot)
+                .map(|(record, &index)| {
+                    let series = &survival.at_starts[index];
+                    let late = at(series, d * record.time);
+                    let p = if record.captured {
+                        let before = if record.time - interval <= 0.0 {
+                            1.0
+                        } else {
+                            at(series, d * (record.time - interval))
+                        };
+                        before - late
+                    } else {
+                        late
+                    };
+                    p.max(1.0e-300).ln()
+                })
+                .sum()
+        })
+        .collect())
+}
+
+/// Rate constants a periodic cell measures for a sphere of `radius`.
+///
+/// Both are `k / D` in Å, so `k = D * value`. `decay` is `V λ` with `λ` the
+/// long-time decay of the cell-mean survival in reduced time. `mean_time` is
+/// `V / ∫ S ds` over a uniform start. An infinite cell gives `4 π radius` for
+/// both.
+#[derive(Debug, Clone, Copy)]
+pub struct PeriodicSinkRate {
+    pub decay: f64,
+    pub mean_time: f64,
+}
+
+pub fn periodic_sink_rate(
+    radius: f64,
+    cell_length: f64,
+    spacing: f64,
+) -> Result<PeriodicSinkRate, SaddleError> {
+    let grid = OctantGrid::new(radius, cell_length, spacing)?;
+    let volume = cell_length.powi(3);
+    let mut current: Vec<f64> = grid.absorbing.iter().map(|&a| if a { 0.0 } else { 1.0 }).collect();
+    let mut next = vec![0.0; grid.nodes];
+    let step = grid.stable_step();
+    let relax = cell_length * cell_length / (2.0 * std::f64::consts::PI * std::f64::consts::PI);
+    let horizon = 6.0 * relax;
+    let mut clock = 0.0;
+    let mut integral = 0.0;
+    let mut previous = grid.mean(&current);
+    let mut checkpoint = None;
+    while clock < horizon {
+        grid.advance(&current, &mut next, step);
+        std::mem::swap(&mut current, &mut next);
+        clock += step;
+        let mean = grid.mean(&current);
+        integral += 0.5 * step * (previous + mean);
+        previous = mean;
+        if checkpoint.is_none() && clock >= 0.5 * horizon {
+            checkpoint = Some((clock, mean));
+        }
+    }
+    let (early_clock, early_mean) = checkpoint
+        .ok_or_else(|| SaddleError::Solver("periodic sink horizon too short".into()))?;
+    if !(previous > 0.0 && early_mean > previous) {
+        return Err(SaddleError::NonFinite("periodic sink decay"));
+    }
+    let decay = (early_mean / previous).ln() / (clock - early_clock);
+    integral += previous / decay;
+    Ok(PeriodicSinkRate {
+        decay: volume * decay,
+        mean_time: volume / integral,
+    })
+}
+
 /// Factor on one direction of a shell pair after a saddle shift.
 ///
 /// `source_factor` is the Boltzmann factor of the away barrier measured on

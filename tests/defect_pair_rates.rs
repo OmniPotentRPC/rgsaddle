@@ -857,3 +857,94 @@ fn spontaneous_share(rows: &[(f64, bool)]) -> f64 {
         .map(|(count, spontaneous)| if *spontaneous { count / 3.0 } else { 0.0 })
         .sum()
 }
+
+fn erfc(x: f64) -> f64 {
+    // Abramowitz and Stegun 7.1.26, |error| < 1.5e-7.
+    let t = 1.0 / (1.0 + 0.3275911 * x.abs());
+    let poly = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
+    let value = poly * (-x * x).exp();
+    if x >= 0.0 { value } else { 2.0 - value }
+}
+
+#[test]
+fn a_periodic_sink_mean_time_is_the_felderhof_deutch_trapping_rate() {
+    let (radius, length): (f64, f64) = (3.0, 20.0);
+    let phi = 4.0 / 3.0 * std::f64::consts::PI * (radius / length).powi(3);
+    let series = 1.0 / (1.0 - 1.7601 * phi.cbrt() + phi - 1.5593 * phi * phi);
+    let free = 4.0 * std::f64::consts::PI * radius;
+    let fine = rgsaddle::periodic_sink_rate(radius, length, 0.5).unwrap();
+    let coarse = rgsaddle::periodic_sink_rate(radius, length, 1.0).unwrap();
+    assert!((fine.mean_time / free / series - 1.0).abs() < 0.005, "{fine:?} {series}");
+    assert!((coarse.decay / fine.decay - 1.0).abs() < 0.005, "{coarse:?} {fine:?}");
+    assert!(free < fine.decay && fine.decay < fine.mean_time, "{fine:?}");
+}
+
+#[test]
+fn a_periodic_sink_starts_as_the_free_smoluchowski_sphere() {
+    let (radius, length): (f64, f64) = (3.0, 20.0);
+    let times = [0.5, 1.0, 2.0, 4.0];
+    let starts = [[6.0, 0.0, 0.0], [0.0, 4.5, 1.0], [-5.0, 0.0, 0.0]];
+    let survival =
+        rgsaddle::periodic_sink_survival(radius, length, 0.5, &starts, &times).unwrap();
+    for (start, series) in starts.iter().zip(&survival.at_starts) {
+        let r0 = start.iter().map(|v| v * v).sum::<f64>().sqrt();
+        for (s, value) in times.iter().zip(series) {
+            let free = 1.0 - radius / r0 * erfc((r0 - radius) / (2.0 * s.sqrt()));
+            assert!((value - free).abs() < 0.01, "r0 {r0} s {s}: {value} against {free}");
+        }
+    }
+    let inside = 4.0 / 3.0 * std::f64::consts::PI * radius.powi(3) / length.powi(3);
+    assert!((survival.cell_mean[0] - (1.0 - inside)).abs() < 0.05);
+}
+
+#[test]
+fn the_capture_likelihood_recovers_the_radius_of_simulated_walkers() {
+    let (radius, length, diffusivity, interval, window): (f64, f64, f64, f64, f64) =
+        (3.0, 20.0, 1.0, 0.25, 30.0);
+    let mut state = 0x2545_F491_4F6C_DD1Du64;
+    let mut normal = move || {
+        let mut uniform = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            ((state >> 11) as f64 + 0.5) / (1u64 << 53) as f64
+        };
+        let (u1, u2) = (uniform(), uniform());
+        (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
+    };
+    let starts = [[5.0, 0.0, 0.0], [0.0, 4.0, 4.0], [3.0, 4.0, 5.0], [7.0, 7.0, 0.0]];
+    let step = 1.0e-3;
+    let sigma = (2.0 * diffusivity * step).sqrt();
+    let per_sample = (interval / step).round() as usize;
+    let mut records = Vec::new();
+    for start in starts {
+        for _ in 0..150 {
+            let mut x = start;
+            let mut record = rgsaddle::CaptureRecord { start, time: window, captured: false };
+            'walk: for sample in 1..=(window / interval).round() as usize {
+                for _ in 0..per_sample {
+                    for axis in 0..3 {
+                        x[axis] += sigma * normal();
+                    }
+                    let r2: f64 = x.iter().map(|v| (v - length * (v / length).round()).powi(2)).sum();
+                    if r2 <= radius * radius {
+                        record.time = sample as f64 * interval;
+                        record.captured = true;
+                        break 'walk;
+                    }
+                }
+            }
+            records.push(record);
+        }
+    }
+    let radii: Vec<f64> = (0..=16).map(|i| 2.0 + 0.125 * i as f64).collect();
+    let scores: Vec<f64> = radii
+        .iter()
+        .map(|&r| {
+            rgsaddle::periodic_capture_log_likelihood(r, length, 0.5, interval, &[diffusivity], &records)
+                .unwrap()[0]
+        })
+        .collect();
+    let best = (0..radii.len()).max_by(|&a, &b| scores[a].total_cmp(&scores[b])).unwrap();
+    assert!((radii[best] - radius).abs() <= 0.25, "best {} scores {scores:?}", radii[best]);
+}
