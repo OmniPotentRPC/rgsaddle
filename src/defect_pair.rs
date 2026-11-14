@@ -580,11 +580,12 @@ pub struct CaptureRecord {
     pub captured: bool,
 }
 
-/// Log-likelihood of capture records under a sphere of `radius` in a periodic cube.
+/// Log-likelihood terms of capture records under a sphere of `radius` in a periodic cube.
 ///
 /// A capture at `time` happened after the previous sample at
 /// `time - interval`. One grid solve in reduced time serves every entry of
-/// `diffusivities`; the result has one log-likelihood per entry.
+/// `diffusivities`. Entry `[d][i]` is the log-probability of record `i` at
+/// `diffusivities[d]`; a sum over any subset of records is its log-likelihood.
 pub fn periodic_capture_log_likelihood(
     radius: f64,
     cell_length: f64,
@@ -592,7 +593,7 @@ pub fn periodic_capture_log_likelihood(
     interval: f64,
     diffusivities: &[f64],
     records: &[CaptureRecord],
-) -> Result<Vec<f64>, SaddleError> {
+) -> Result<Vec<Vec<f64>>, SaddleError> {
     if !(interval.is_finite() && interval > 0.0)
         || diffusivities.iter().any(|d| !(d.is_finite() && *d > 0.0))
         || records.iter().any(|r| !(r.time.is_finite() && r.time >= 0.0))
@@ -644,7 +645,7 @@ pub fn periodic_capture_log_likelihood(
                     };
                     p.max(1.0e-300).ln()
                 })
-                .sum()
+                .collect()
         })
         .collect())
 }

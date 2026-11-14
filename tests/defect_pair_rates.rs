@@ -943,6 +943,8 @@ fn the_capture_likelihood_recovers_the_radius_of_simulated_walkers() {
         .map(|&r| {
             rgsaddle::periodic_capture_log_likelihood(r, length, 0.5, interval, &[diffusivity], &records)
                 .unwrap()[0]
+                .iter()
+                .sum::<f64>()
         })
         .collect();
     let best = (0..radii.len()).max_by(|&a, &b| scores[a].total_cmp(&scores[b])).unwrap();
