@@ -1569,93 +1569,286 @@ fn summarize(csv: &std::path::Path) -> String {
     text
 }
 
-fn defect_centroid(
+/// The doubly occupied Wigner-Seitz site of an fcc cell holding one extra atom.
+///
+/// A site is an integer triple in units of a/2 with an even sum, wrapped
+/// into the `repeats`³ cell. Each atom goes to its nearest site (round every
+/// coordinate, then re-round the worst one if the sum is odd). `shift` is the
+/// lattice translation to remove first. Returns `None` unless exactly one
+/// site holds two atoms and none holds more.
+fn interstitial_site(
     positions: &[f64],
-    lengths: [f64; 3],
-    previous: Option<[f64; 3]>,
-) -> Option<[f64; 3]> {
-    let n = positions.len() / 3;
-    let mut best_gap = f64::MAX;
-    let mut best_follow = f64::MAX;
-    let mut pair = [0.0; 3];
-    let cutoff = 2.45;
-    let cutoff2 = cutoff * cutoff;
-    let nside = lengths.map(|length| ((length / cutoff).floor() as i32).max(1));
-    let bins_n = (nside[0] * nside[1] * nside[2]) as usize;
-    let mut members = vec![Vec::new(); bins_n];
-    for i in 0..n {
-        let bin = bin_of(
-            [
-                positions[3 * i] / lengths[0],
-                positions[3 * i + 1] / lengths[1],
-                positions[3 * i + 2] / lengths[2],
-            ],
-            nside,
-        );
-        members[bin].push(i);
-    }
-    for i in 0..n {
-        let ri = [positions[3 * i], positions[3 * i + 1], positions[3 * i + 2]];
-        let home = [
-            (ri[0] / lengths[0]).rem_euclid(1.0) * nside[0] as f64,
-            (ri[1] / lengths[1]).rem_euclid(1.0) * nside[1] as f64,
-            (ri[2] / lengths[2]).rem_euclid(1.0) * nside[2] as f64,
+    lattice: f64,
+    repeats: usize,
+    shift: [f64; 3],
+) -> Option<[i64; 3]> {
+    let period = 2 * repeats as i64;
+    let mut count = vec![0u8; (period * period * period) as usize];
+    let mut doubled = Vec::new();
+    let half = 0.5 * lattice;
+    for atom in positions.chunks_exact(3) {
+        let u = [
+            (atom[0] - shift[0]) / half,
+            (atom[1] - shift[1]) / half,
+            (atom[2] - shift[2]) / half,
         ];
-        let (bins, count) = neighbor_bins(home, nside);
-        for bin in bins.into_iter().take(count) {
-            for &j in &members[bin] {
-                if j <= i {
-                    continue;
+        let mut site = u.map(|value| value.round() as i64);
+        if (site[0] + site[1] + site[2]).rem_euclid(2) != 0 {
+            let mut worst = 0;
+            for axis in 1..3 {
+                if (u[axis] - site[axis] as f64).abs() > (u[worst] - site[worst] as f64).abs() {
+                    worst = axis;
                 }
-                let mut d = [
-                    positions[3 * j] - ri[0],
-                    positions[3 * j + 1] - ri[1],
-                    positions[3 * j + 2] - ri[2],
-                ];
+            }
+            site[worst] += if u[worst] > site[worst] as f64 { 1 } else { -1 };
+        }
+        let wrapped = site.map(|value| value.rem_euclid(period));
+        let index = ((wrapped[0] * period + wrapped[1]) * period + wrapped[2]) as usize;
+        count[index] = count[index].saturating_add(1);
+        match count[index] {
+            2 => doubled.push((index, wrapped)),
+            3.. => return None,
+            _ => {}
+        }
+    }
+    match doubled.as_slice() {
+        [(_, site)] => Some(*site),
+        _ => None,
+    }
+}
+
+fn site_step(from: [i64; 3], to: [i64; 3], period: i64) -> [i64; 3] {
+    let mut step = [0; 3];
+    for axis in 0..3 {
+        let mut delta = (to[axis] - from[axis]).rem_euclid(period);
+        if delta > period / 2 {
+            delta -= period;
+        }
+        step[axis] = delta;
+    }
+    step
+}
+
+/// Per-replica statistics of one tracked interstitial.
+struct DiffusionReplica {
+    samples: usize,
+    rejected: usize,
+    site_changes: usize,
+    jumps: usize,
+    jump_sq: f64,
+    msd_end: f64,
+    elapsed_ps: f64,
+    d_msd: f64,
+}
+
+/// Samples a site must hold before a move to it counts as a jump.
+const DWELL_SAMPLES: usize = 3;
+const TRACK_SAMPLE_PS: f64 = 0.1;
+
+/// Multi-origin MSD slope 6 D over lags from `lag_min` to `lag_max` samples.
+fn msd_slope(track: &[[f64; 3]], lag_min: usize, lag_max: usize, sample_ps: f64) -> f64 {
+    let mut lags = Vec::new();
+    let mut values = Vec::new();
+    for lag in lag_min..=lag_max.min(track.len().saturating_sub(1)) {
+        let mut sum = 0.0;
+        let origins = track.len() - lag;
+        for origin in 0..origins {
+            let a = track[origin];
+            let b = track[origin + lag];
+            sum += (b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2) + (b[2] - a[2]).powi(2);
+        }
+        lags.push(lag as f64 * sample_ps);
+        values.push(sum / origins as f64);
+    }
+    let n = lags.len() as f64;
+    if n < 2.0 {
+        return 0.0;
+    }
+    let mean_t = lags.iter().sum::<f64>() / n;
+    let mean_m = values.iter().sum::<f64>() / n;
+    let mut cov = 0.0;
+    let mut var = 0.0;
+    for (t, m) in lags.iter().zip(values.iter()) {
+        cov += (t - mean_t) * (m - mean_m);
+        var += (t - mean_t) * (t - mean_t);
+    }
+    cov / var / 6.0
+}
+
+fn track_interstitial(
+    temperature: f64,
+    seed: u64,
+    window_ps: f64,
+    spec: &RunSpec,
+) -> DiffusionReplica {
+    let lattice = measured_lattice(temperature);
+    let (mut positions, cell) = isolated_dumbbell(spec.repeats, lattice);
+    let mut potential = MishinCu::new();
+    let production =
+        Langevin::from_physical(spec.dt_fs, spec.gamma_per_ps, temperature, CU_MASS_AMU);
+    let equil = Langevin::from_physical(spec.dt_fs, 1.0, temperature, CU_MASS_AMU);
+    let mut rng = SplitRng::new(mix_seed(&[temperature.to_bits(), seed, 0xD1FF]));
+    let sigma = (production.thermal / production.mass).sqrt();
+    let mut velocities: Vec<f64> = (0..positions.len()).map(|_| rng.normal() * sigma).collect();
+    zero_com(&mut velocities);
+    let mut gradient = vec![0.0; positions.len()];
+    potential.energy_gradient(&positions, cell, &mut gradient);
+    let n = (positions.len() / 3) as f64;
+    let mean_of = |positions: &[f64]| {
+        let mut mean = [0.0; 3];
+        for atom in positions.chunks_exact(3) {
+            for axis in 0..3 {
+                mean[axis] += atom[axis] / n;
+            }
+        }
+        mean
+    };
+    let reference = mean_of(&positions);
+    let period = 2 * spec.repeats as i64;
+    let step_ps = spec.dt_fs * 1.0e-3;
+    let equil_steps = (2.0 / step_ps).round() as usize;
+    let sample_steps = ((TRACK_SAMPLE_PS / step_ps).round() as usize).max(1);
+    let production_steps = (window_ps / step_ps).round() as usize;
+    let mut site = None;
+    let mut unwrapped = [0i64; 3];
+    let mut committed = [0i64; 3];
+    let mut candidate = [0i64; 3];
+    let mut dwell = 0usize;
+    let mut out = DiffusionReplica {
+        samples: 0,
+        rejected: 0,
+        site_changes: 0,
+        jumps: 0,
+        jump_sq: 0.0,
+        msd_end: 0.0,
+        elapsed_ps: production_steps as f64 * step_ps,
+        d_msd: 0.0,
+    };
+    let mut track = Vec::with_capacity(production_steps / sample_steps + 1);
+    for step in 1..=equil_steps + production_steps {
+        let phase = if step <= equil_steps { equil } else { production };
+        phase.step(&mut potential, &mut positions, &mut velocities, &mut gradient, cell, &mut rng);
+        if step < equil_steps || (step - equil_steps) % sample_steps != 0 {
+            continue;
+        }
+        let mean = mean_of(&positions);
+        let shift = [mean[0] - reference[0], mean[1] - reference[1], mean[2] - reference[2]];
+        let Some(here) = interstitial_site(&positions, lattice, spec.repeats, shift) else {
+            out.rejected += 1;
+            continue;
+        };
+        if let Some(previous) = site {
+            let delta = site_step(previous, here, period);
+            if delta != [0, 0, 0] {
+                out.site_changes += 1;
                 for axis in 0..3 {
-                    d[axis] -= lengths[axis] * (d[axis] / lengths[axis]).round();
-                }
-                let r2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
-                if r2 >= cutoff2 || r2 < 1.6 * 1.6 {
-                    continue;
-                }
-                let bond = r2.sqrt();
-                let center = [ri[0] + 0.5 * d[0], ri[1] + 0.5 * d[1], ri[2] + 0.5 * d[2]];
-                let follow = if let Some(previous) = previous {
-                    let mut distance = 0.0;
-                    for axis in 0..3 {
-                        let mut delta = center[axis] - previous[axis];
-                        delta -= lengths[axis] * (delta / lengths[axis]).round();
-                        distance += delta * delta;
-                    }
-                    distance
-                } else {
-                    0.0
-                };
-                // The dumbbell bond is ~2.05 Å. A nearest-neighbor pair is ~a/√2
-                // and only looks short when it vibrates. Prefer the bond length,
-                // then continuity with the previous centre.
-                let score = (bond - 2.05) * (bond - 2.05) + 0.02 * follow;
-                let better = score < best_follow;
-                if better {
-                    best_gap = r2;
-                    best_follow = score;
-                    pair = center;
+                    unwrapped[axis] += delta[axis];
                 }
             }
         }
+        site = Some(here);
+        if step == equil_steps {
+            committed = unwrapped;
+            candidate = unwrapped;
+            out.site_changes = 0;
+            out.rejected = 0;
+        }
+        if unwrapped == candidate {
+            dwell += 1;
+        } else {
+            candidate = unwrapped;
+            dwell = 1;
+        }
+        if dwell == DWELL_SAMPLES && candidate != committed {
+            let d2: i64 = (0..3).map(|axis| (candidate[axis] - committed[axis]).pow(2)).sum();
+            out.jumps += 1;
+            out.jump_sq += d2 as f64 * 0.25 * lattice * lattice;
+            committed = candidate;
+        }
+        track.push(unwrapped.map(|value| value as f64 * 0.5 * lattice));
     }
-    (best_gap < f64::MAX).then_some(pair)
+    out.samples = track.len();
+    if let (Some(first), Some(last)) = (track.first(), track.last()) {
+        out.msd_end = (0..3).map(|axis| (last[axis] - first[axis]).powi(2)).sum();
+    }
+    let lag_max = ((track.len() / 8).min((20.0 / TRACK_SAMPLE_PS) as usize)).max(2);
+    out.d_msd = msd_slope(&track, (lag_max / 4).max(1), lag_max, TRACK_SAMPLE_PS);
+    out
 }
 
-fn centroid_of(positions: &[f64], atoms: [usize; 2]) -> [f64; 3] {
-    let mut center = [0.0; 3];
-    for atom in atoms {
-        for axis in 0..3 {
-            center[axis] += positions[3 * atom + axis];
+const DIFFUSION_HEADER: &str = "temperature_K,lattice_A,seed,dt_fs,gamma_per_ps,window_ps,samples,rejected,site_changes,committed_jumps,jump_sq_A2,msd_end_A2,D_msd_A2_per_ps,D_end_A2_per_ps,D_jump_A2_per_ps";
+
+/// Free-interstitial tracer diffusivity from independent replicas.
+///
+/// `MD_PS_BY_T=300:250,500:150` sets the production window per temperature;
+/// otherwise every temperature uses `MD_PS`. Replicas run in parallel and
+/// append to `MD_OUT` (default validation/direct_md_sia_d.csv).
+fn diffusion_run(spec: &RunSpec) {
+    let windows: BTreeMap<i64, f64> = env::var("MD_PS_BY_T")
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|item| {
+            let (t, ps) = item.split_once(':')?;
+            Some((t.trim().parse().ok()?, ps.trim().parse().ok()?))
+        })
+        .collect();
+    let path = env::var("MD_OUT").map(PathBuf::from).unwrap_or_else(|_| {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("validation/direct_md_sia_d.csv")
+    });
+    if !path.exists() {
+        let mut header = File::create(&path).expect("diffusivity csv");
+        writeln!(header, "{DIFFUSION_HEADER}").unwrap();
+    }
+    let mut jobs = Vec::new();
+    for &temperature in &spec.temps {
+        let window = windows.get(&(temperature as i64)).copied().unwrap_or(spec.window_ps);
+        for seed in 0..spec.seeds {
+            jobs.push((temperature, seed, window));
         }
     }
-    [center[0] * 0.5, center[1] * 0.5, center[2] * 0.5]
+    let file = Mutex::new(OpenOptions::new().append(true).open(&path).expect("append"));
+    let cursor = AtomicUsize::new(0);
+    let workers = thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .min(jobs.len().max(1));
+    thread::scope(|scope| {
+        for _ in 0..workers {
+            let (jobs, cursor, file) = (&jobs, &cursor, &file);
+            scope.spawn(move || {
+                loop {
+                    let index = cursor.fetch_add(1, Ordering::Relaxed);
+                    let Some(&(temperature, seed, window)) = jobs.get(index) else {
+                        break;
+                    };
+                    let r = track_interstitial(temperature, seed, window, spec);
+                    let d_end = r.msd_end / (6.0 * r.elapsed_ps);
+                    let d_jump = r.jump_sq / (6.0 * r.elapsed_ps);
+                    let line = format!(
+                        "{temperature:.0},{:.6},{seed},{:.4},{:.4},{:.2},{},{},{},{},{:.6},{:.6},{:.8e},{:.8e},{:.8e}",
+                        measured_lattice(temperature),
+                        spec.dt_fs,
+                        spec.gamma_per_ps,
+                        r.elapsed_ps,
+                        r.samples,
+                        r.rejected,
+                        r.site_changes,
+                        r.jumps,
+                        r.jump_sq,
+                        r.msd_end,
+                        r.d_msd,
+                        d_end,
+                        d_jump,
+                    );
+                    writeln!(file.lock().expect("csv lock"), "{line}").unwrap();
+                    println!(
+                        "msd T {temperature:.0} seed {seed} D {:.4} D_end {d_end:.4} D_jump {d_jump:.4} jumps {} changes {} rejected {}",
+                        r.d_msd, r.jumps, r.site_changes, r.rejected
+                    );
+                }
+            });
+        }
+    });
 }
 
 fn isolated_dumbbell(repeats: usize, a: f64) -> (Vec<f64>, [[f64; 3]; 3]) {
@@ -1777,133 +1970,7 @@ fn main() {
     }
 
     if env::var("MD_MSD").ok().as_deref() == Some("1") {
-        let spec = run_spec();
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("validation/direct_md_sia_d.csv");
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).expect("validation dir");
-        }
-        let mut out = File::create(&path).expect("diffusivity");
-        writeln!(out, "temperature_K,D_A2_per_ps,error_A2_per_ps,seed,window_ps,hops,channel_Hz,rejected").unwrap();
-        for &temperature in &spec.temps {
-            let lattice = measured_lattice(temperature);
-            for seed in 0..spec.seeds {
-                let (mut positions, cell) = isolated_dumbbell(spec.repeats, lattice);
-                let mut potential = MishinCu::new();
-                let production = Langevin::from_physical(
-                    spec.dt_fs,
-                    spec.gamma_per_ps,
-                    temperature,
-                    CU_MASS_AMU,
-                );
-                let equil = Langevin::from_physical(spec.dt_fs, 1.0, temperature, CU_MASS_AMU);
-                let mut velocities = vec![0.0; positions.len()];
-                let mut rng = SplitRng::new(
-                    seed.wrapping_mul(0xD1FF)
-                        .wrapping_add(temperature.to_bits()),
-                );
-                let sigma = (production.thermal / production.mass).sqrt();
-                for velocity in &mut velocities {
-                    *velocity = rng.normal() * sigma;
-                }
-                zero_com(&mut velocities);
-                let mut gradient = vec![0.0; positions.len()];
-                potential.energy_gradient(&positions, cell, &mut gradient);
-                let lengths = [cell[0][0], cell[1][1], cell[2][2]];
-                let mut origin = defect_centroid(&positions, lengths, None).unwrap_or([0.0; 3]);
-                let mut cursor = origin;
-                let mut unwrapped = origin;
-                let window_ps = spec.window_ps.max(40.0);
-                let steps = ((window_ps / (spec.dt_fs * 1.0e-3)).round() as usize).max(1);
-                let equil_steps = ((2.0 / (spec.dt_fs * 1.0e-3)).round() as usize);
-                let sample_steps = ((0.1 / (spec.dt_fs * 1.0e-3)).round() as usize).max(1);
-                let mut start = unwrapped;
-                let mut started = false;
-                let mut rejected = 0usize;
-                let mut hops = 0usize;
-                let mut samples_pos: Vec<[f64; 3]> = Vec::new();
-                for step in 1..=steps {
-                    let phase = if step <= equil_steps {
-                        equil
-                    } else {
-                        production
-                    };
-                    phase.step(
-                        &mut potential,
-                        &mut positions,
-                        &mut velocities,
-                        &mut gradient,
-                        cell,
-                        &mut rng,
-                    );
-                    if step % sample_steps != 0 && step != equil_steps {
-                        continue;
-                    }
-                    let Some(here) = defect_centroid(&positions, lengths, Some(cursor)) else {
-                        continue;
-                    };
-                    let mut jump = 0.0;
-                    for axis in 0..3 {
-                        let mut delta = here[axis] - cursor[axis];
-                        delta -= lengths[axis] * (delta / lengths[axis]).round();
-                        jump += delta * delta;
-                    }
-                    let hop = jump.sqrt();
-                    if hop > 3.6 {
-                        rejected += 1;
-                        continue;
-                    }
-                    if started && hop > 1.5 {
-                        hops += 1;
-                    }
-                    for axis in 0..3 {
-                        let mut delta = here[axis] - cursor[axis];
-                        delta -= lengths[axis] * (delta / lengths[axis]).round();
-                        unwrapped[axis] += delta;
-                    }
-                    cursor = here;
-                    if step == equil_steps {
-                        start = unwrapped;
-                        origin = unwrapped;
-                        started = true;
-                    }
-                    if started {
-                        samples_pos.push(unwrapped);
-                    }
-                }
-                let elapsed = if started { window_ps - 2.0 } else { window_ps };
-                let msd = samples_pos.last().map(|end| {
-                    let d = [end[0] - start[0], end[1] - start[1], end[2] - start[2]];
-                    d[0] * d[0] + d[1] * d[1] + d[2] * d[2]
-                }).unwrap_or(0.0);
-                let d_i = msd / (6.0 * elapsed);
-                let blocks = 4usize;
-                let block_n = (samples_pos.len() / blocks).max(1);
-                let mut block_d = Vec::new();
-                for block in 0..blocks {
-                    let end = ((block + 1) * block_n).min(samples_pos.len());
-                    let begin = block * block_n;
-                    if end <= begin + 1 || begin >= samples_pos.len() {
-                        continue;
-                    }
-                    let a0 = samples_pos[begin];
-                    let a1 = samples_pos[end - 1];
-                    let d = [a1[0] - a0[0], a1[1] - a0[1], a1[2] - a0[2]];
-                    let block_time = elapsed * (end - begin) as f64 / samples_pos.len().max(1) as f64;
-                    block_d.push((d[0] * d[0] + d[1] * d[1] + d[2] * d[2]) / (6.0 * block_time));
-                }
-                let mean = if block_d.is_empty() { d_i } else { block_d.iter().sum::<f64>() / block_d.len() as f64 };
-                let error = if block_d.len() < 2 {
-                    0.0
-                } else {
-                    let var = block_d.iter().map(|value| (value - mean).powi(2)).sum::<f64>()
-                        / (block_d.len() as f64 * (block_d.len() - 1) as f64);
-                    var.sqrt()
-                };
-                let channel = hops as f64 / elapsed * 1.0e12 / 8.0;
-                writeln!(out, "{temperature:.0},{d_i:.8e},{error:.8e},{seed},{elapsed:.2},{hops},{channel:.6e},{rejected}").unwrap();
-                println!("msd T {temperature:.0} seed {seed} D {d_i:.4} ± {error:.4} hops {hops} channel {channel:.3e} rejected {rejected}");
-            }
-        }
+        diffusion_run(&run_spec());
         return;
     }
 
@@ -2072,6 +2139,24 @@ mod tests {
             worst = worst.max((energy + kinetic - 0.5).abs());
         }
         assert!(worst < 1.0e-4, "{worst}");
+    }
+
+    #[test]
+    fn the_doubly_occupied_site_is_the_dumbbell_host_under_any_translation() {
+        let a = measured_lattice(500.0);
+        let (mut positions, _) = isolated_dumbbell(5, a);
+        let host = interstitial_site(&positions, a, 5, [0.0; 3]).expect("one double site");
+        let pair = &positions[positions.len() - 6..];
+        let middle = [0, 1, 2].map(|axis| ((pair[axis] + pair[3 + axis]) / a).round() as i64);
+        assert_eq!(host, middle);
+        let shift = [0.31, -0.22, 0.17];
+        for atom in positions.chunks_exact_mut(3) {
+            for axis in 0..3 {
+                atom[axis] += shift[axis] + 5.0 * a;
+            }
+        }
+        assert_eq!(interstitial_site(&positions, a, 5, shift), Some(host));
+        assert_eq!(site_step([9, 0, 1], [0, 9, 1], 10), [1, -1, 0]);
     }
 
     #[test]
