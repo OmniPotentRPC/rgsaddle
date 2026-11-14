@@ -1,7 +1,7 @@
 #+TITLE: Use rgsaddle from an ASE script
 #+OPTIONS: toc:nil num:nil
 
-=rgsaddle.ase= has the same class names and arguments as ASE's =ase.mep.NEB=, =ase.mep.NEBOptimizer= and =ase.mep.dimer=. In most scripts you only change the imports. The images, calculators, constraints, optimizers and trajectories stay ASE's. =import rgsaddle.ase= does not import ASE. ASE is imported only when a class needs it.
+=rgsaddle.ase= has the same class names and arguments as ASE's =ase.mep.NEB=, =ase.mep.neb.NEBOptimizer= and =ase.mep.dimer=. In most scripts you only change the imports. The images, calculators, constraints, optimizers and trajectories stay ASE's. =import rgsaddle.ase= does not import ASE. ASE is imported only when a class needs it.
 
 * A nudged elastic band
 This is ASE's NEB tutorial, an Al adatom hopping between two hollow sites on Al(100), written against ASE:
@@ -10,7 +10,7 @@ This is ASE's NEB tutorial, an Al adatom hopping between two hollow sites on Al(
 from ase.build import add_adsorbate, fcc100
 from ase.calculators.emt import EMT
 from ase.constraints import FixAtoms
-from ase.mep import NEB, NEBOptimizer
+from ase.mep.neb import NEB, NEBOptimizer
 from ase.optimize import BFGS
 
 slab = fcc100("Al", size=(2, 2, 3), vacuum=6.0)

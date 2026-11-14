@@ -795,7 +795,7 @@ def _build_neb_optimizer() -> type:
     from ase.optimize.optimize import Optimizer
 
     class NEBOptimizer(Optimizer):
-        """rgsaddle's band optimizer behind ``ase.mep.NEBOptimizer``'s call.
+        """rgsaddle's band optimizer behind ``ase.mep.neb.NEBOptimizer``'s call.
 
         ``neb`` is an ``rgsaddle.ase.NEB``. Each ``step`` is one step of
         rgsaddle's band session (``rgsaddle._core.Band``) on the same
