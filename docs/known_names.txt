@@ -1,0 +1,69 @@
+# Inline code on the docs pages that names another project's code.
+# docs/check_names.py resolves every other name against the rustdoc,
+# the C and C++ headers, the Python package, ASE and the repository.
+# Each entry must be used by a page.
+
+# Rust language
+main
+f64
+false
+Some(true)
+Some(false)
+
+# eOn client
+NEBTangent
+NEBSpringForce
+NEBForceProjection
+NEBZoom.cpp
+buildSpringStrategy
+updateForces
+convergenceForce
+safe_recip
+ci_after
+ci_after_rel
+quit_early
+torque_min
+MinModeObjectiveFunction::knownCurvature
+LBFGS::getStep
+client/LBFGS.cpp
+
+# ASE NEB method strings and AutoNEB locals
+aseneb
+dneb
+spline
+nneb
+first_missing
+last_missing
+
+# Sella
+IRCTrustRegion
+symmetrize_Y
+delta0
+sella/optimize/restricted_step.py
+sella/optimize/optimize.py
+
+# Lean
+sorry
+admit
+propext
+Classical.choice
+Quot.sound
+
+# CPython C API
+Py_MOD_GIL_NOT_USED
+PyErr_CheckSignals
+
+# readcon-core frame metadata
+lattice_vectors
+
+# Build tools and crates
+CXX
+cstddef
+pulp
+ljos
+docs/newsfragments
+
+# Symbols of the formulas on the pages
+r_c
+g_R
+f_R
