@@ -2300,8 +2300,8 @@ fn eam_eval_fast(
         bins[frac_bin(frac[i], nside)].push(i);
     }
     let cutoff2 = RC * RC;
-    let mut pairs = Vec::new();
-    for i in 0..n {
+    let neighbors = |i: usize| {
+        let mut pairs = Vec::new();
         for sx in -nimg..=nimg {
             for sy in -nimg..=nimg {
                 for sz in -nimg..=nimg {
@@ -2349,7 +2349,9 @@ fn eam_eval_fast(
                 }
             }
         }
-    }
+        pairs
+    };
+    let pairs: Vec<Pair> = (0..n).into_par_iter().flat_map_iter(neighbors).collect();
     accumulate_eam(n, positions.len(), &pairs, det(cell).abs())
 }
 
