@@ -3,11 +3,14 @@
 /// `cargo test` compiles the cdylib for the harness but does not copy
 /// it into the profile directory, so a `librgsaddle.so` found there
 /// may come from another feature set or an older tree. This runs
-/// `cargo build --lib` with the features, profile, and target
-/// directory of the running test binary and returns the cdylib that
-/// cargo reports. Cargo releases the build-directory lock before it
-/// runs test binaries, so the nested build shares `target/`. It sees
-/// `RUSTFLAGS` and config files, not `--config` given to `cargo test`.
+/// `cargo build --lib` with the features and profile of the running
+/// test binary and returns the cdylib that cargo reports. Cargo
+/// releases the build-directory lock before it runs test binaries, so
+/// the nested build reuses the compiled crates. Its `--target-dir` is
+/// the directory that holds `CARGO_TARGET_TMPDIR`: the target
+/// directory, or the build directory when `build.build-dir` sets one.
+/// It sees `RUSTFLAGS` and config files, not `--config` given to
+/// `cargo test`.
 fn cdylib() -> std::path::PathBuf {
     static LIB: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
     LIB.get_or_init(build_cdylib).clone()
@@ -33,7 +36,7 @@ fn build_cdylib() -> std::path::PathBuf {
     check_cdylib_features(manifest);
     let target_dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
         .parent()
-        .expect("CARGO_TARGET_TMPDIR is <target-dir>/tmp");
+        .expect("CARGO_TARGET_TMPDIR is <dir>/tmp");
     let features: Vec<&str> = CDYLIB_FEATURES
         .iter()
         .filter(|(_, on)| *on)
@@ -51,7 +54,7 @@ fn build_cdylib() -> std::path::PathBuf {
         .arg("--no-default-features")
         .arg("--features")
         .arg(features.join(","));
-    let (triple, profile) = build_layout(target_dir);
+    let (triple, profile) = build_layout();
     if let Some(triple) = triple {
         command.arg("--target").arg(triple);
     }
@@ -115,40 +118,33 @@ fn check_cdylib_features(manifest: &std::path::Path) {
     }
 }
 
-/// `(--target triple, --profile name)` of the running test binary,
-/// read from its path under the target directory: `<profile-dir>/...`
-/// or `<triple>/<profile-dir>/...`. `cargo bench` also writes to
+/// `(--target triple, --profile name)` of the running test binary.
+/// It sits in `<profile-dir>/build/<package>/<hash>/out` (Cargo 1.100)
+/// or `<profile-dir>/deps`, and `<profile-dir>` is under the build
+/// directory or under `<triple>` there. `cargo bench` also writes to
 /// `release`, and its default profile builds the same library.
-fn build_layout(target_dir: &std::path::Path) -> (Option<String>, String) {
+fn build_layout() -> (Option<String>, String) {
     let exe = std::env::current_exe().expect("test executable");
     let parts: Vec<String> = exe
-        .strip_prefix(target_dir)
-        .unwrap_or_else(|_| {
-            panic!(
-                "test executable {} is outside the target directory {}",
-                exe.display(),
-                target_dir.display()
-            )
-        })
         .components()
         .map(|part| part.as_os_str().to_string_lossy().into_owned())
         .collect();
-    let profile = |dir: &str| match dir {
+    let Some(at) = parts
+        .iter()
+        .rposition(|part| part == "build" || part == "deps")
+        .filter(|at| *at >= 2)
+    else {
+        panic!("no <profile>/build or <profile>/deps above {}", exe.display());
+    };
+    let profile = match parts[at - 1].as_str() {
         "debug" => "dev".to_owned(),
         other => other.to_owned(),
     };
-    let first = parts[0].as_str();
-    if first == "debug" || first == "release" {
-        return (None, profile(first));
-    }
+    let parent = parts[at - 2].as_str();
     let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
     let is_triple = std::process::Command::new(rustc)
         .args(["--print", "target-list"])
         .output()
-        .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).lines().any(|t| t == first));
-    if is_triple {
-        (Some(first.to_owned()), profile(&parts[1]))
-    } else {
-        (None, profile(first))
-    }
+        .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).lines().any(|t| t == parent));
+    (is_triple.then(|| parent.to_owned()), profile)
 }
