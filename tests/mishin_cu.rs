@@ -8769,30 +8769,65 @@ fn assemble_run13() {
             let jump = a / 2.0_f64.sqrt();
             let return_sites = return_layer_count(a, &shells, max_r);
             let binding = |radius: f64, orientation: &str| field.as_ref().map(|item| item.binding(radius, orientation)).unwrap_or(0.0);
-            let (total, sigma, spont_sites, kinetic_sites, _, _, _, _, _, _, _tau_capture, chain_radius) = channel_volumes(
+            let (total, sigma, spont_sites, _kinetic_sites, _, _, _, _, _, _, _tau_capture, chain_radius) = channel_volumes(
                 &shells, &spontaneous, &rates, temperature, k_mig, a, omega, max_r, jump, return_sites, cutoff + 0.05, true, &binding,
             );
             let (k_rot, _) = rotation_channel(&rates, temperature);
             let d_graph = rgsaddle::dumbbell_diffusivity(a, k_mig, k_rot).unwrap_or(f64::NAN);
-            let d_table = match temperature as i32 { 300 => 0.143e12, 500 => 0.526e12, 700 => 0.910e12, _ => f64::NAN };
             let nu = (2.0 / 3.0) * d_graph / (a * a);
             let n_atoms = 4.0 * (13usize * 13 * 13) as f64;
             let energy = |radius: f64| field.as_ref().map(|item| item.effective(radius, thermal)).unwrap_or(0.0);
             let r_eff = rgsaddle::debye_matched_radius(chain_radius, max_r, thermal, energy).unwrap_or(chain_radius);
-            // The mean time in the cell is the Smoluchowski time of this same radius.
-            // Hitting the geometric cutoff and then adding the sealed-graph time
-            // measures a larger absorber, which is why that clock was about 3x high.
             let capture_rate = rgsaddle::smoluchowski_rate(d_graph, r_eff).unwrap_or(f64::NAN);
-            let tau_cell = if capture_rate.is_finite() && capture_rate > 0.0 { n_atoms * omega / capture_rate } else { f64::NAN };
-            let mean_volume = if tau_cell.is_finite() && tau_cell > 0.0 && nu.is_finite() && nu > 0.0 { n_atoms / (tau_cell * nu) } else { f64::NAN };
             let sphere_volume = rgsaddle::volume_from_frequency(capture_rate, nu).unwrap_or(f64::NAN);
             let sphere = sphere_volume / omega;
+            // Table 1 measures k in the 13³ cell, where the sink's periodic images
+            // speed up capture. The same radius is put in that cell here.
+            let cell_length = 13.0 * a;
+            let cell = rgsaddle::periodic_sink_rate(r_eff, cell_length, 1.0).ok();
+            let (decay_volume, mean_volume, tau_cell) = match cell {
+                Some(rate) => {
+                    let tau = n_atoms * omega / (d_graph * rate.mean_time);
+                    (rate.decay * d_graph / nu / omega, n_atoms / (tau * nu), tau)
+                }
+                None => (f64::NAN, f64::NAN, f64::NAN),
+            };
             let delta = previous.map(|prior: f64| sphere - prior).unwrap_or(f64::NAN);
-            let with_table = if d_table > 0.0 { sphere * d_graph / d_table } else { f64::NAN };
-            writeln!(out, "{temperature},smoluchowski,{sphere:.4},,{spont_sites:.4},{r_eff:.4},{table},cutoff {cutoff:.1}; V(D_graph) {sphere:.2}; V(D_table) {with_table:.2}; D_graph {d_ps:.6}; D_table {d_tab:.6}; delta {delta:.4}", d_ps = d_graph / 1.0e12, d_tab = d_table / 1.0e12).unwrap();
-            writeln!(out, "{temperature},mean-time,{mean_volume:.4},,{spont_sites:.4},,{table},cutoff {cutoff:.1}; tau {tau_cell:.6e} s; nu=(2/3)*D_graph/a^2").unwrap();
+            writeln!(out, "{temperature},smoluchowski,{sphere:.4},,{spont_sites:.4},{r_eff:.4},{table},cutoff {cutoff:.1}; infinite crystal 24 pi R_eff/a; chain R {chain_radius:.4} before the Debye far field; D_graph {d_ps:.6}; delta {delta:.4}", d_ps = d_graph / 1.0e12).unwrap();
+            writeln!(out, "{temperature},cell-decay,{decay_volume:.4},,{spont_sites:.4},{r_eff:.4},{table},cutoff {cutoff:.1}; long-time decay of the uniform survival in the 13^3 cell, L {cell_length:.4}").unwrap();
+            writeln!(out, "{temperature},mean-time,{mean_volume:.4},,{spont_sites:.4},{r_eff:.4},{table},cutoff {cutoff:.1}; uniform-start mean time in the 13^3 cell {tau_cell:.6e} s; nu=(2/3)*D_graph/a^2").unwrap();
             writeln!(out, "{temperature},site-sum,{total:.4},{sigma:.4},{spont_sites:.4},,{table},cutoff {cutoff:.1}; this sum grows with the shell count").unwrap();
-            eprintln!("run14 {temperature} K R {cutoff:.1} sphere {sphere:.2} (d {delta:.2}) R_eff {r_eff:.3} mean {mean_volume:.2} site-sum {total:.2} D {d_ps:.4}/{d_tab:.4}", d_ps = d_graph / 1.0e12, d_tab = d_table / 1.0e12);
+            eprintln!("run19 {temperature} K R {cutoff:.1} sphere {sphere:.2} (d {delta:.2}) chain {chain_radius:.3} R_eff {r_eff:.3} cell {decay_volume:.2}/{mean_volume:.2} site-sum {total:.2} D {:.4}", d_graph / 1.0e12);
+            if cutoff == 30.0 {
+                let mut by_shell: std::collections::BTreeMap<String, usize> = Default::default();
+                for key in &spontaneous {
+                    let shell = key.split('-').next().unwrap_or_default().to_string();
+                    *by_shell.entry(shell).or_default() += 1;
+                }
+                for (label, need) in [("any", 1usize), ("all", 3)] {
+                    let mut isotropic = std::collections::HashSet::new();
+                    for (shell, count) in &by_shell {
+                        if *count >= need {
+                            for orientation in ["100", "010", "001"] {
+                                isotropic.insert(format!("{shell}-{orientation}"));
+                            }
+                        }
+                    }
+                    let variant = channel_volumes(
+                        &shells, &isotropic, &rates, temperature, k_mig, a, omega, max_r, jump, return_sites, cutoff + 0.05, true, &binding,
+                    );
+                    let r_variant = rgsaddle::debye_matched_radius(variant.11, max_r, thermal, energy).unwrap_or(variant.11);
+                    let v_variant = 24.0 * std::f64::consts::PI * r_variant / a;
+                    writeln!(out, "{temperature},isotropic-{label},{v_variant:.4},,{:.4},{r_variant:.4},{table},cutoff {cutoff:.1}; a shell is spontaneous in every orientation when {label} of its orientations are; infinite crystal", variant.2).unwrap();
+                    eprintln!("run19 {temperature} K isotropic-{label} R_eff {r_variant:.3} V {v_variant:.2}");
+                }
+                let unbiased = channel_volumes(
+                    &shells, &spontaneous, &rates, temperature, k_mig, a, omega, max_r, jump, return_sites, cutoff + 0.05, true, &|_, _| 0.0,
+                );
+                let v_unbiased = 24.0 * std::f64::consts::PI * unbiased.11 / a;
+                writeln!(out, "{temperature},no-strain-bias,{v_unbiased:.4},,{:.4},{:.4},{table},cutoff {cutoff:.1}; hop rates without the dipole interaction and no Debye far field; infinite crystal", unbiased.2, unbiased.11).unwrap();
+                eprintln!("run19 {temperature} K no-strain-bias R_eff {:.3} V {v_unbiased:.2}", unbiased.11);
+            }
             previous = Some(sphere);
         }
     }
@@ -9307,4 +9342,277 @@ fn neighbor_translation_barrier(temperature: f64) -> Option<f64> {
         let barrier = fields[5].parse::<f64>().ok()?;
         ((temp - temperature).abs() < 1.0 && barrier > 0.0).then_some(barrier)
     })
+}
+
+/// Tracer diffusivity per (temperature, timestep, friction) from the replica CSV.
+///
+/// Returns the replica mean of the multi-origin MSD slope, its standard
+/// error, the mean committed-jump diffusivity, and the replica count.
+fn md_replica_diffusivity() -> std::collections::BTreeMap<(i64, i64, i64), (f64, f64, f64, usize)> {
+    let path = std::env::var("RUN19_DIFFUSION").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("validation/direct_md_sia_d.csv"));
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let mut groups: std::collections::BTreeMap<(i64, i64, i64), Vec<(f64, f64)>> = Default::default();
+    for line in text.lines().skip(1) {
+        let fields: Vec<&str> = line.split(',').collect();
+        let parse = |i: usize| fields.get(i).and_then(|v| v.parse::<f64>().ok());
+        let (Some(t), Some(dt), Some(gamma), Some(d), Some(jump)) = (parse(0), parse(3), parse(4), parse(12), parse(14)) else {
+            continue;
+        };
+        let key = (t.round() as i64, (dt * 1000.0).round() as i64, (gamma * 1000.0).round() as i64);
+        groups.entry(key).or_default().push((d, jump));
+    }
+    groups
+        .into_iter()
+        .map(|(key, values)| {
+            let n = values.len();
+            let mean = values.iter().map(|v| v.0).sum::<f64>() / n as f64;
+            let var = values.iter().map(|v| (v.0 - mean).powi(2)).sum::<f64>() / ((n.max(2) - 1) as f64);
+            let jump = values.iter().map(|v| v.1).sum::<f64>() / n as f64;
+            (key, (mean, (var / n as f64).sqrt(), jump, n))
+        })
+        .collect()
+}
+
+fn rate_model_radius(temperature: f64) -> Option<f64> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks/defect_pair_run13_volume.csv");
+    let text = std::fs::read_to_string(path).ok()?;
+    text.lines()
+        .filter(|line| {
+            let fields: Vec<&str> = line.split(',').collect();
+            fields.len() > 7
+                && fields[1] == "smoluchowski"
+                && fields[0].parse::<f64>().is_ok_and(|t| (t - temperature).abs() < 1.0)
+        })
+        .last()
+        .and_then(|line| line.split(',').nth(5)?.parse().ok())
+}
+
+/// Largest log-likelihood on a grid, refined by the parabola through its neighbours,
+/// and the interval where the profile stays within 1/2 of it.
+fn profile_peak(xs: &[f64], ys: &[f64]) -> (f64, f64, f64, f64) {
+    let best = (0..xs.len()).max_by(|&a, &b| ys[a].total_cmp(&ys[b])).unwrap_or(0);
+    let mut peak = xs[best];
+    let mut top = ys[best];
+    if best > 0 && best + 1 < xs.len() {
+        let (y0, y1, y2) = (ys[best - 1], ys[best], ys[best + 1]);
+        let h = xs[best + 1] - xs[best];
+        let curvature = y0 - 2.0 * y1 + y2;
+        if curvature < 0.0 {
+            let shift = 0.5 * h * (y0 - y2) / curvature;
+            peak += shift;
+            top = y1 - 0.125 * (y0 - y2) * (y0 - y2) / curvature;
+        }
+    }
+    let crossing = |range: Vec<usize>| {
+        let mut previous = best;
+        for i in range {
+            if ys[i] < top - 0.5 {
+                let (xa, ya, xb, yb) = (xs[previous], ys[previous], xs[i], ys[i]);
+                return xa + (top - 0.5 - ya) * (xb - xa) / (yb - ya);
+            }
+            previous = i;
+        }
+        f64::NAN
+    };
+    let low = crossing((0..best).rev().collect());
+    let high = crossing((best + 1..xs.len()).collect());
+    (peak, low, high, top)
+}
+
+#[test]
+#[ignore = "fit the direct-MD capture times to a Smoluchowski sink in the periodic cell"]
+fn direct_md_capture_radius() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let files = std::env::var("RUN19_CAPTURE").unwrap_or_else(|_| "validation/direct_md_long.csv,validation/direct_md_ws.csv".into());
+    let diffusion = md_replica_diffusivity();
+    let mut groups: std::collections::BTreeMap<((i64, i64, i64), &str), Vec<(f64, f64, rgsaddle::CaptureRecord)>> = Default::default();
+    for file in files.split(',') {
+    let text = std::fs::read_to_string(root.join(file)).expect("capture csv");
+    let criterion = if text.lines().next().is_some_and(|header| header.contains("ws_defects")) { "wigner-seitz" } else { "12-fold" };
+    for line in text.lines().skip(1) {
+        let f: Vec<&str> = line.split(',').collect();
+        let p = |i: usize| f.get(i).and_then(|v| v.parse::<f64>().ok());
+        let (Some(t), Some(a), Some(n), Some(x), Some(y), Some(z), Some(dt), Some(gamma), Some(window), Some(captured), Some(time)) =
+            (p(0), p(1), p(2), p(5), p(6), p(7), p(11), p(12), p(13), p(14), p(15))
+        else {
+            continue;
+        };
+        let key = (t.round() as i64, (dt * 1000.0).round() as i64, (gamma * 1000.0).round() as i64);
+        let record = rgsaddle::CaptureRecord { start: [x, y, z], time: if captured > 0.5 { time } else { window }, captured: captured > 0.5 };
+        groups.entry((key, criterion)).or_default().push((n * a, a, record));
+    }
+    }
+    let mut out = File::create(root.join("benchmarks/defect_pair_run19_capture_radius.csv")).expect("radius csv");
+    writeln!(out, "temperature_K,capture_test,dt_fs,gamma_per_ps,min_start_A,records,captured,D_md,D_md_se,replicas,R_fit_A,R_low_A,R_high_A,R_at_D_minus_A,R_at_D_plus_A,R_joint_A,D_joint,tail_from_ps,relax_ps,tail_events,k_tail_A3_per_ps,k_tail_se,R_tail_A,V_tail_cell,R_rate_model_A,V_inf_fit,V_cell_decay_fit,V_cell_mean_fit,V_cell_decay_at_R_low,V_cell_decay_at_R_high").unwrap();
+    for ((key, criterion), rows) in &groups {
+        let temperature = key.0 as f64;
+        let Some(&(d_md, d_se, _, replicas)) = diffusion.get(key) else {
+            eprintln!("no MD diffusivity for {key:?}; skipped");
+            continue;
+        };
+        let (length, lattice) = (rows[0].0, rows[0].1);
+        let window = rows.iter().map(|r| r.2.time).fold(0.0, f64::max);
+        let r0 = |record: &rgsaddle::CaptureRecord| record.start.iter().map(|v| v * v).sum::<f64>().sqrt();
+        let records: Vec<rgsaddle::CaptureRecord> = rows.iter().map(|r| r.2).filter(|r| r0(r) > 4.4).collect();
+        let mut scale: Vec<f64> = (0..=15).map(|i| 0.5 + 0.1 * i as f64).collect();
+        scale.extend((1..=8).map(|i| 2.0 + 0.25 * i as f64));
+        let spacing: f64 = std::env::var("RUN19_SPACING").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
+        let mut diffusivities: Vec<f64> = scale.iter().map(|s| s * d_md).collect();
+        diffusivities.push((d_md - d_se).max(0.05 * d_md));
+        diffusivities.push(d_md + d_se);
+        let radii: Vec<f64> = (0..=36).map(|i| 1.0 + 0.25 * i as f64).filter(|r| *r < 8.0).collect();
+        let started = Instant::now();
+        let terms: Vec<Vec<Vec<f64>>> = radii
+            .iter()
+            .map(|&r| rgsaddle::periodic_capture_log_likelihood(r, length, spacing, SAMPLE_INTERVAL_PS, &diffusivities, &records).expect("likelihood"))
+            .collect();
+        eprintln!("{temperature} K {criterion}: {} radii in {:.0}s", radii.len(), started.elapsed().as_secs_f64());
+        let rate_r = rate_model_radius(temperature).unwrap_or(f64::NAN);
+        for cut in [4.4_f64, 6.3, 8.1] {
+            let keep: Vec<usize> = (0..records.len()).filter(|&i| r0(&records[i]) > cut).collect();
+            let usable: Vec<usize> = (0..radii.len()).filter(|&j| radii[j] < cut - 0.2).collect();
+            let score = |j: usize, d: usize| keep.iter().map(|&i| terms[j][d][i]).sum::<f64>();
+            let xs: Vec<f64> = usable.iter().map(|&j| radii[j]).collect();
+            let fixed = scale.iter().position(|s| (s - 1.0).abs() < 1.0e-9).expect("unit scale");
+            let at = |d: usize| profile_peak(&xs, &usable.iter().map(|&j| score(j, d)).collect::<Vec<_>>());
+            let (r_fit, r_low, r_high, _) = at(fixed);
+            let (r_minus, ..) = at(diffusivities.len() - 2);
+            let (r_plus, ..) = at(diffusivities.len() - 1);
+            let mut joint = (f64::MIN, f64::NAN, f64::NAN);
+            for d in 0..scale.len() {
+                let (r, _, _, top) = at(d);
+                if top > joint.0 {
+                    joint = (top, r, diffusivities[d]);
+                }
+            }
+            for (j, &r) in xs.iter().enumerate() {
+                eprintln!("{temperature} K cut {cut} R {r:.2} logL {:.3}", score(usable[j], fixed));
+            }
+            let captured = keep.iter().filter(|&&i| records[i].captured).count();
+            let rates = |r: f64| rgsaddle::periodic_sink_rate(r, length, 1.0).expect("periodic rate");
+            let cell_volume = |r: f64| if r.is_finite() && r > 0.0 { 6.0 * rates(r).decay / lattice } else { f64::NAN };
+            let (v_inf, v_decay, v_mean) = if r_fit.is_finite() && r_fit > 0.0 {
+                let rate = rates(r_fit);
+                (24.0 * std::f64::consts::PI * r_fit / lattice, 6.0 * rate.decay / lattice, 6.0 * rate.mean_time / lattice)
+            } else {
+                (f64::NAN, f64::NAN, f64::NAN)
+            };
+            let (v_low, v_high) = (cell_volume(r_low), cell_volume(r_high));
+            for t0 in [50.0_f64, 100.0, 150.0] {
+                let mut events = 0usize;
+                let mut exposure = 0.0;
+                for &i in &keep {
+                    let record = &records[i];
+                    if record.time > t0 {
+                        exposure += record.time - t0;
+                        events += usize::from(record.captured);
+                    }
+                }
+                let lambda = events as f64 / exposure.max(1.0e-12);
+                let k_tail = lambda * length.powi(3);
+                let k_se = k_tail / (events.max(1) as f64).sqrt();
+                let v_tail = 6.0 * k_tail / (d_md * lattice);
+                let target = k_tail / d_md;
+                // The tail is the slowest mode only after a few of these.
+                let relax = length * length / (4.0 * std::f64::consts::PI * std::f64::consts::PI * d_md);
+                let (mut lo, mut hi) = (0.2_f64, 0.45 * length - 1.0);
+                let r_tail = if events == 0 || rates(hi).decay < target {
+                    f64::NAN
+                } else {
+                    for _ in 0..30 {
+                        let mid = 0.5 * (lo + hi);
+                        if rates(mid).decay < target { lo = mid } else { hi = mid }
+                        if hi - lo < 0.02 { break; }
+                    }
+                    0.5 * (lo + hi)
+                };
+                writeln!(out, "{temperature:.0},{criterion},{:.4},{:.4},{cut:.2},{},{captured},{d_md:.6},{d_se:.6},{replicas},{r_fit:.4},{r_low:.4},{r_high:.4},{r_minus:.4},{r_plus:.4},{:.4},{:.6},{t0:.0},{relax:.1},{events},{k_tail:.4},{k_se:.4},{r_tail:.4},{v_tail:.4},{rate_r:.4},{v_inf:.4},{v_decay:.4},{v_mean:.4},{v_low:.4},{v_high:.4}",
+                    key.1 as f64 / 1000.0, key.2 as f64 / 1000.0, keep.len(), joint.1, joint.2).unwrap();
+                eprintln!("{temperature} K {criterion} dt {} cut {cut}: R {r_fit:.3} [{r_low:.3}, {r_high:.3}] D±σ {r_minus:.3}/{r_plus:.3} joint R {:.3} D {:.4} tail({t0}) k {k_tail:.2}±{k_se:.2} R {r_tail:.3} V {v_tail:.1} n {events} rate-model {rate_r:.3} V {v_inf:.1}/{v_decay:.1}/{v_mean:.1} window {window}", key.1, joint.1, joint.2);
+            }
+        }
+    }
+}
+
+const SAMPLE_INTERVAL_PS: f64 = 0.25;
+
+#[test]
+#[ignore = "bound the elastic drift on the capture radius by the most attractive dipole envelope"]
+fn defect_pair_run19_field() {
+    let copper = FastCopper::new();
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks");
+    let mut out = File::create(root.join("defect_pair_run19_field.csv")).expect("field csv");
+    writeln!(out, "temperature_K,radius_A,E_min_eV,E_max_eV,R_rate_model_A,R_attractive_envelope_A,R_repulsive_envelope_A").unwrap();
+    for temperature in [300.0_f64, 500.0, 700.0] {
+        let a = demkowicz_lattice(temperature);
+        let thermal = temperature * rgsaddle::BOLTZMANN_EV_PER_K;
+        let field = pair_field(&copper, a).expect("pair field");
+        let directions = fibonacci_directions(200);
+        let envelope = |radius: f64, pick: fn(f64, f64) -> f64, start: f64| {
+            let mut value = start;
+            for direction in &directions {
+                for which in 0..3 {
+                    value = pick(value, field.interaction(radius, *direction, which));
+                }
+            }
+            value
+        };
+        let chain = rate_model_radius(temperature).unwrap_or(f64::NAN);
+        let attractive = rgsaddle::debye_matched_radius(chain, chain, thermal, |r| envelope(r, f64::min, f64::MAX)).unwrap_or(f64::NAN);
+        let repulsive = rgsaddle::debye_matched_radius(chain, chain, thermal, |r| envelope(r, f64::max, f64::MIN)).unwrap_or(f64::NAN);
+        for radius in [3.0_f64, 4.0, 5.0, 6.0, 8.0, 10.0] {
+            let (low, high) = (envelope(radius, f64::min, f64::MAX), envelope(radius, f64::max, f64::MIN));
+            writeln!(out, "{temperature:.0},{radius:.1},{low:.6},{high:.6},{chain:.4},{attractive:.4},{repulsive:.4}").unwrap();
+            eprintln!("{temperature:.0} K r {radius:.1} E [{low:.5}, {high:.5}] eV");
+        }
+        eprintln!("{temperature:.0} K R_eff {chain:.4} attractive envelope {attractive:.4} repulsive envelope {repulsive:.4}");
+    }
+}
+
+fn graph_diffusivity(temperature: f64) -> Option<f64> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks/defect_pair_run13_volume.csv");
+    let text = std::fs::read_to_string(path).ok()?;
+    let line = text.lines().find(|line| {
+        let fields: Vec<&str> = line.split(',').collect();
+        fields.len() > 7 && fields[1] == "smoluchowski" && fields[0].parse::<f64>().is_ok_and(|t| (t - temperature).abs() < 1.0)
+    })?;
+    let note = line.split_once("D_graph ")?.1;
+    note.split(';').next()?.trim().parse().ok()
+}
+
+#[test]
+#[ignore = "summarise the free-dumbbell replicas into D, the jump diffusivity and f"]
+fn direct_md_diffusivity_summary() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("validation/direct_md_sia_d.csv");
+    let text = std::fs::read_to_string(path).expect("replica csv");
+    let mut groups: std::collections::BTreeMap<(i64, i64, i64), Vec<(f64, f64, f64)>> = Default::default();
+    for line in text.lines().skip(1) {
+        let f: Vec<&str> = line.split(',').collect();
+        let p = |i: usize| f.get(i).and_then(|v| v.parse::<f64>().ok());
+        let (Some(t), Some(dt), Some(gamma), Some(jumps), Some(d), Some(jump)) = (p(0), p(3), p(4), p(9), p(12), p(14)) else {
+            continue;
+        };
+        groups.entry((t.round() as i64, (dt * 1000.0).round() as i64, (gamma * 1000.0).round() as i64)).or_default().push((d, jump, jumps));
+    }
+    let stats = |values: &[f64]| {
+        let n = values.len() as f64;
+        let mean = values.iter().sum::<f64>() / n;
+        let var = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (n - 1.0).max(1.0);
+        (mean, (var / n).sqrt())
+    };
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks");
+    let mut out = File::create(root.join("defect_pair_run19_diffusivity.csv")).expect("summary");
+    writeln!(out, "temperature_K,dt_fs,gamma_per_ps,replicas,jumps,D_msd,D_msd_se,D_jump,D_jump_se,f_md,f_md_se,D_graph,f_graph,f_graph_se").unwrap();
+    for ((t, dt, gamma), rows) in &groups {
+        let (d, d_se) = stats(&rows.iter().map(|r| r.0).collect::<Vec<_>>());
+        let (jump, jump_se) = stats(&rows.iter().map(|r| r.1).collect::<Vec<_>>());
+        let jumps: f64 = rows.iter().map(|r| r.2).sum();
+        let f_md = d / jump;
+        let f_md_se = f_md * ((d_se / d).powi(2) + (jump_se / jump).powi(2)).sqrt();
+        let graph = graph_diffusivity(*t as f64).unwrap_or(f64::NAN);
+        writeln!(out, "{t},{:.1},{:.1},{},{jumps:.0},{d:.5},{d_se:.5},{jump:.5},{jump_se:.5},{f_md:.4},{f_md_se:.4},{graph:.6},{:.4},{:.4}",
+            *dt as f64 / 1000.0, *gamma as f64 / 1000.0, rows.len(), d / graph, d_se / graph).unwrap();
+        eprintln!("{t} K dt {dt} gamma {gamma}: n {} D {d:.4}±{d_se:.4} ({:.1}%) D_jump {jump:.4}±{jump_se:.4} f_md {f_md:.3}±{f_md_se:.3} f_graph {:.3}±{:.3}",
+            rows.len(), 100.0 * d_se / d, d / graph, d_se / graph);
+    }
 }
