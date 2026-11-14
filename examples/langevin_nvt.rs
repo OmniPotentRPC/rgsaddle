@@ -1781,7 +1781,8 @@ const DIFFUSION_HEADER: &str = "temperature_K,lattice_A,seed,dt_fs,gamma_per_ps,
 /// Free-interstitial tracer diffusivity from independent replicas.
 ///
 /// `MD_PS_BY_T=300:250,500:150` sets the production window per temperature;
-/// otherwise every temperature uses `MD_PS`. Replicas run in parallel and
+/// otherwise every temperature uses `MD_PS`. `MD_SEED_START` offsets the
+/// replica seeds so a later run adds replicas. Replicas run in parallel and
 /// append to `MD_OUT` (default validation/direct_md_sia_d.csv).
 fn diffusion_run(spec: &RunSpec) {
     let windows: BTreeMap<i64, f64> = env::var("MD_PS_BY_T")
@@ -1799,10 +1800,11 @@ fn diffusion_run(spec: &RunSpec) {
         let mut header = File::create(&path).expect("diffusivity csv");
         writeln!(header, "{DIFFUSION_HEADER}").unwrap();
     }
+    let first_seed = env_u64("MD_SEED_START", 0);
     let mut jobs = Vec::new();
     for &temperature in &spec.temps {
         let window = windows.get(&(temperature as i64)).copied().unwrap_or(spec.window_ps);
-        for seed in 0..spec.seeds {
+        for seed in first_seed..first_seed + spec.seeds {
             jobs.push((temperature, seed, window));
         }
     }
