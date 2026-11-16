@@ -14308,12 +14308,19 @@ struct NetworkScale {
 /// `computed` holds `ln(k/k_kind)` of one direction of a hop class, by hop
 /// label and source state id, and replaces the barrier-shift model there;
 /// `shift` adds to `ln k` of both directions of a hop class, whatever its
-/// rate source.
+/// rate source. `model` adds to `ln k` of every direction still on the
+/// barrier-shift model, by hop kind (translation, rotation): the surrogate
+/// calibration.
 #[derive(Clone, Default)]
 struct ClassRates {
     computed: std::collections::HashMap<(String, String), f64>,
     shift: std::collections::HashMap<String, f64>,
+    model: [f64; 2],
 }
+
+/// Feature row of the surrogate calibration: one common bias, the same
+/// for both directions of a hop class, so detailed balance holds.
+const CALIBRATION_FEATURES: [f64; 1] = [1.0];
 
 /// One per-vector volume and what built it.
 struct NetworkVolumes {
@@ -14333,8 +14340,9 @@ struct NetworkVolumes {
 /// The per-vector absorbing chain at one cutoff. Inside the census radius
 /// every state is spontaneous or bound from the census, and with `explicit`
 /// each hop out of a bound state there runs at
-/// `k_kind exp(-(E_saddle - E_state - E0_kind)/kT)`, `E0_kind` the isolated
-/// barrier in the same cell, unless `classes` holds a computed rate for
+/// `k_kind exp(c - (E_saddle - E_state - E0_kind)/kT)`, `E0_kind` the
+/// isolated barrier in the same cell and `c` the calibration shift of
+/// `classes.model` for its kind, unless `classes` holds a computed rate for
 /// that direction, which then runs at `k_kind exp(computed)` and takes no
 /// `capture` factor. Any other hop runs at `k_kind` times half the
 /// change of the vector- and orientation-resolved dipole interaction,
@@ -14423,7 +14431,11 @@ fn network_volumes(
             ) {
                 tally(usize::from(inputs.band.contains(&label)));
                 let barrier = (saddle - state).max(0.0);
-                return base * class * scale.capture * (-(barrier - reference) / thermal).exp();
+                let calibrated = classes.model[usize::from(rotation)];
+                return base
+                    * class
+                    * scale.capture
+                    * (calibrated - (barrier - reference) / thermal).exp();
             }
             tally(3);
         } else {
@@ -14735,22 +14747,44 @@ fn class_sensitivities(
 /// PAFI rates of one temperature of `defect_pair_network_pafi.csv`. Each
 /// rated direction of a hop class gets
 /// `ln(k/k_kind) = ln(nu/nu_iso) - (F - F_iso)/kT`, against the isolated
-/// hop of the same kind in the same cell. The isolated hop ends in a state
-/// equivalent to its start, so its two directions measure one barrier:
-/// `F_iso` is their inverse-variance mean and `nu_iso` the mean of the two
-/// end frequencies, and half the gap between the two directions is the
-/// drift of one integrated profile along its path. That drift is added in
-/// quadrature to the error of every direction of the same kind, in `sigma`,
-/// and to the isolated error, which is kept apart by kind because every
-/// class of a kind shares it. `residuals` sets each rated direction against
-/// the barrier-shift model of [`network_volumes`].
+/// hop of the same kind in the same cell. A path that ends in a bound state
+/// gives both directions, and [`rgsaddle::balanced_barriers`] balances its
+/// two barriers against the zero-temperature energies of its ends, with
+/// half the drift of that path in their common error; `drifts` holds those
+/// drifts. The isolated hop ends in a state equivalent to its start, so it
+/// is balanced against no gap: `F_iso` is the inverse-variance mean of its
+/// two directions and `nu_iso` the mean of the two end frequencies. Half
+/// of its drift, in `drift`, is added in quadrature to the error of every
+/// direction of the same kind rated one way only, and is in the isolated
+/// error, which is kept apart by kind because every class of a kind shares
+/// it. `residuals` sets each rated class against the barrier-shift model of
+/// [`network_volumes`].
 struct PafiInputs {
-    computed: std::collections::BTreeMap<(String, String), (f64, f64, bool)>,
+    computed: std::collections::BTreeMap<(String, String), Rated>,
     isolated_sigma: [f64; 2],
     drift: [f64; 2],
-    residuals: Vec<f64>,
+    drifts: Vec<f64>,
+    residuals: Vec<Residual>,
     rated: usize,
     seconds: f64,
+}
+
+/// One rated direction: `ln(k/k_kind)`, its error in `ln k` without the
+/// isolated one, its hop kind, and the index of its hop class, whose
+/// directions share one error draw.
+struct Rated {
+    value: f64,
+    sigma: f64,
+    rotation: bool,
+    class: usize,
+}
+
+/// One rated hop class against the barrier-shift model: the mean of
+/// `computed - model` in `ln k` over its directions, and the error of its
+/// computed rates without the isolated one.
+struct Residual {
+    value: f64,
+    error: f64,
 }
 
 /// Largest band force a PAFI path may keep and still be rated, the gate of
@@ -14777,13 +14811,19 @@ fn pafi_inputs(
     let mut drift = [f64::NAN; 2];
     for f in rows.iter().filter(|f| f[2] == "isolated" && usable(f)) {
         let kind = usize::from(f[3] == "rotate");
-        let (forward, forward_error) = (number(f, 12), number(f, 13));
-        let (back, back_error) = (number(f, 15), number(f, 16));
-        let (weight_f, weight_b) = (forward_error.powi(-2), back_error.powi(-2));
-        let free = (weight_f * forward + weight_b * back) / (weight_f + weight_b);
-        drift[kind] = 0.5 * (forward - back).abs();
-        let error = ((weight_f + weight_b).recip() + drift[kind].powi(2)).sqrt();
-        isolated[kind] = (free, error, 0.5 * (number(f, 14) + number(f, 17)));
+        let Ok(both) = rgsaddle::balanced_barriers(
+            (number(f, 12), number(f, 13)),
+            (number(f, 15), number(f, 16)),
+            0.0,
+        ) else {
+            continue;
+        };
+        drift[kind] = 0.5 * both.drift.abs();
+        isolated[kind] = (
+            both.forward,
+            both.error,
+            0.5 * (number(f, 14) + number(f, 17)),
+        );
     }
     let bound: std::collections::HashSet<String> = (0..network.states.len())
         .map(|i| network.id(i))
@@ -14793,6 +14833,7 @@ fn pafi_inputs(
         computed: Default::default(),
         isolated_sigma: isolated.map(|reference| reference.1),
         drift,
+        drifts: Vec::new(),
         residuals: Vec::new(),
         rated: 0,
         seconds: rows
@@ -14803,38 +14844,64 @@ fn pafi_inputs(
     };
     for f in rows.iter().filter(|f| f[2] == "hop" && usable(f)) {
         let rotation = f[3] == "rotate";
+        let class = inputs.rated;
         inputs.rated += 1;
         let label = f[4].to_string();
-        let mut directions = vec![(f[5].to_string(), 12)];
-        if bound.contains(f[6]) && f[6] != f[5] {
-            directions.push((f[6].to_string(), 15));
-        }
         let (free_iso, _, nu_iso) = isolated[usize::from(rotation)];
-        let path = drift[usize::from(rotation)];
-        for (source, column) in directions {
-            let (free, sigma, nu) = (
-                number(f, column),
-                number(f, column + 1),
-                number(f, column + 2),
-            );
-            if ![free, sigma, nu, free_iso, nu_iso, path]
+        let forward = (number(f, 12), number(f, 13));
+        let gap = match (saddles.states.get(f[5]), saddles.states.get(f[6])) {
+            (Some(start), Some(end)) if bound.contains(f[6]) && f[6] != f[5] => Some(end - start),
+            _ => None,
+        };
+        let balanced = gap.and_then(|gap| {
+            rgsaddle::balanced_barriers(forward, (number(f, 15), number(f, 16)), gap).ok()
+        });
+        let (sigma, directions) = match balanced {
+            Some(both) => {
+                inputs.drifts.push(both.drift);
+                (
+                    both.error,
+                    vec![
+                        (f[5], both.forward, number(f, 14)),
+                        (f[6], both.reverse, number(f, 17)),
+                    ],
+                )
+            }
+            None => (
+                forward.1.hypot(drift[usize::from(rotation)]),
+                vec![(f[5], forward.0, number(f, 14))],
+            ),
+        };
+        let reference = saddles.isolated[usize::from(rotation)];
+        let mut residuals = Vec::new();
+        for (source, free, nu) in directions {
+            if ![free, sigma, nu, free_iso, nu_iso]
                 .iter()
                 .all(|v| v.is_finite())
             {
                 continue;
             }
             let computed = (nu / nu_iso).ln() - (free.max(0.0) - free_iso) / thermal;
-            let reference = saddles.isolated[usize::from(rotation)];
             if let (Some(saddle), Some(state)) =
-                (saddles.saddles.get(&label), saddles.states.get(&source))
+                (saddles.saddles.get(&label), saddles.states.get(source))
             {
-                let model = -((saddle - state).max(0.0) - reference) / thermal;
-                inputs.residuals.push(computed - model);
+                residuals.push(computed + ((saddle - state).max(0.0) - reference) / thermal);
             }
             inputs.computed.insert(
-                (label.clone(), source),
-                (computed, sigma.hypot(path) / thermal, rotation),
+                (label.clone(), source.to_string()),
+                Rated {
+                    value: computed,
+                    sigma: sigma / thermal,
+                    rotation,
+                    class,
+                },
             );
+        }
+        if !residuals.is_empty() {
+            inputs.residuals.push(Residual {
+                value: residuals.iter().sum::<f64>() / residuals.len() as f64,
+                error: sigma / thermal,
+            });
         }
     }
     inputs
@@ -14844,37 +14911,77 @@ impl PafiInputs {
     /// Root mean square of the residuals, `None` below two.
     fn model_sigma(&self) -> Option<f64> {
         (self.residuals.len() >= 2).then(|| {
-            (self.residuals.iter().map(|r| r * r).sum::<f64>() / self.residuals.len() as f64).sqrt()
+            (self
+                .residuals
+                .iter()
+                .map(|r| r.value * r.value)
+                .sum::<f64>()
+                / self.residuals.len() as f64)
+                .sqrt()
         })
     }
 
-    fn central(&self) -> ClassRates {
+    /// [`rgsaddle::calibrate_surrogate`] over the residuals with
+    /// [`CALIBRATION_FEATURES`]; `None` when it cannot fit.
+    fn calibration(&self) -> Option<rgsaddle::SurrogateCalibration> {
+        let features = vec![CALIBRATION_FEATURES.to_vec(); self.residuals.len()];
+        let values: Vec<f64> = self.residuals.iter().map(|r| r.value).collect();
+        let errors: Vec<f64> = self.residuals.iter().map(|r| r.error).collect();
+        rgsaddle::calibrate_surrogate(&features, &values, &errors).ok()
+    }
+
+    /// The computed rates, and with `calibration` its shift on every
+    /// direction still on the model.
+    fn central(&self, calibration: Option<&rgsaddle::SurrogateCalibration>) -> ClassRates {
+        let shift = calibration.map_or(0.0, |fit| fit.shift(&CALIBRATION_FEATURES));
         ClassRates {
             computed: self
                 .computed
                 .iter()
-                .map(|(key, value)| (key.clone(), value.0))
+                .map(|(key, rated)| (key.clone(), rated.value))
                 .collect(),
             shift: Default::default(),
+            model: [shift; 2],
         }
     }
 
-    /// The computed rates moved by `z`: one normal per rated direction in
-    /// key order, then one per isolated kind.
-    fn drawn(&self, z: &[f64], thermal: f64) -> ClassRates {
-        let n = self.computed.len();
+    /// The rates of [`Self::central`] moved by `z`: one normal per rated
+    /// hop class, shared by its directions, one per isolated kind, then one
+    /// per calibration coefficient. The calibrated model directions of a
+    /// kind share its isolated normal, since the computed rates they are
+    /// fitted to carry it.
+    fn drawn(
+        &self,
+        z: &[f64],
+        thermal: f64,
+        calibration: Option<&rgsaddle::SurrogateCalibration>,
+    ) -> ClassRates {
+        let n = self.rated;
+        let common = |kind: usize| z[n + kind] * self.isolated_sigma[kind] / thermal;
+        let model = calibration.map_or([0.0; 2], |fit| {
+            let shift: f64 = fit
+                .draw(&z[n + 2..])
+                .iter()
+                .zip(&CALIBRATION_FEATURES)
+                .map(|(b, x)| b * x)
+                .sum();
+            std::array::from_fn(|kind| shift + common(kind))
+        });
         ClassRates {
             computed: self
                 .computed
                 .iter()
-                .enumerate()
-                .map(|(index, (key, (value, sigma, rotation)))| {
-                    let kind = usize::from(*rotation);
-                    let common = z[n + kind] * self.isolated_sigma[kind] / thermal;
-                    (key.clone(), value + z[index] * sigma + common)
+                .map(|(key, rated)| {
+                    (
+                        key.clone(),
+                        rated.value
+                            + z[rated.class] * rated.sigma
+                            + common(usize::from(rated.rotation)),
+                    )
                 })
                 .collect(),
             shift: Default::default(),
+            model,
         }
     }
 
@@ -14894,14 +15001,19 @@ fn table_i_tolerance(temperature: f64) -> f64 {
     table_i_8788(temperature).map_or(f64::NAN, |[(_, alpha), (_, beta)]| alpha.min(beta))
 }
 
+/// Fraction of [`table_i_tolerance`] the classes left on the model may
+/// shift the volume by once PAFI rates are in place.
+const COVER_MARGIN: f64 = 0.5;
+
 /// `defect_pair_network_sensitivity.csv`: every near-shell hop class ranked
 /// by `|dV_cell/d ln k|` of the 30 Å cell-decay volume. Stage `model` uses
 /// the barrier-shift rates and the spread of [`barrier_shift_spread`];
 /// classes are covered by [`rgsaddle::sensitivity_cover`] until the rest,
 /// all moved by that spread together, shift the volume by less than the
 /// smaller Table 1 error. Stage `pafi` repeats it with the rated classes of
-/// `defect_pair_network_pafi.csv` in place and the spread of the model
-/// against them, and covers only the classes still on the model.
+/// `defect_pair_network_pafi.csv` in place, the model calibrated against
+/// them and the spread of that calibration, and covers only the classes
+/// still on the model, down to [`COVER_MARGIN`] of the tolerance.
 fn write_sensitivities() {
     let started = Instant::now();
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks");
@@ -14933,16 +15045,22 @@ fn write_sensitivities() {
             &context.inputs,
             &explicit_network,
         );
-        let mut stages = vec![("model", ClassRates::default(), model_sigma, None)];
+        let mut stages = vec![("model", ClassRates::default(), model_sigma, tolerance, None)];
         if pafi.rated > 0 {
+            let calibration = pafi.calibration();
             stages.push((
                 "pafi",
-                pafi.central(),
-                pafi.model_sigma().unwrap_or(model_sigma),
+                pafi.central(calibration.as_ref()),
+                calibration
+                    .as_ref()
+                    .map(|fit| fit.spread(&CALIBRATION_FEATURES))
+                    .or(pafi.model_sigma())
+                    .unwrap_or(model_sigma),
+                COVER_MARGIN * tolerance,
                 Some(&pafi),
             ));
         }
-        for (stage, base, sigma, computed) in &stages {
+        for (stage, base, sigma, tolerance, computed) in &stages {
             let sensitivity = class_sensitivities(&context, &network, &group, &classes, base);
             let on_model: Vec<usize> = (0..classes.len())
                 .filter(|i| computed.is_none_or(|pafi| !pafi.covers(&classes[*i])))
@@ -14953,7 +15071,7 @@ fn write_sensitivities() {
                     .map(|i| sensitivity[*i][1])
                     .collect::<Vec<_>>(),
                 *sigma,
-                tolerance,
+                *tolerance,
             );
             let mut rank_of = vec![None; classes.len()];
             for (rank, position) in cover.order.iter().enumerate() {
@@ -15400,24 +15518,55 @@ fn defect_pair_network_pafi() {
     );
 }
 
+/// Which near-shell rates the error draws of [`assemble_network`] move:
+/// the bare model, the PAFI rates over the bare model, or the PAFI rates
+/// over the calibrated model.
+#[derive(Clone, Copy)]
+enum Draws {
+    Model,
+    Pafi,
+    Calibrated,
+}
+
+/// The coefficients of a surrogate calibration with their errors, and its
+/// scatter.
+fn calibration_text(fit: &rgsaddle::SurrogateCalibration) -> String {
+    let coefficients: Vec<String> = fit
+        .coefficients
+        .iter()
+        .zip(&fit.covariance)
+        .enumerate()
+        .map(|(i, (beta, line))| format!("{beta:+.4}±{:.4}", line[i].max(0.0).sqrt()))
+        .collect();
+    format!(
+        "shift {} and scatter {:.4} in ln k",
+        coefficients.join(" "),
+        fit.scatter
+    )
+}
+
 /// V_iv from the per-vector network: the flow census, the converged
 /// isolated rates, the near-shell saddles of `defect_pair_network.csv` and
 /// the PAFI rates of `defect_pair_network_pafi.csv`. A rated PAFI direction
 /// replaces the barrier-shift model there; the other near-shell rates keep
-/// the model. The errors are the spread over the 64 draws of the isolated
-/// translation and rotation rates within their own errors, a common factor
+/// the model, shifted by its calibration against the PAFI classes,
+/// [`PafiInputs::calibration`]. The errors are the spread over the 64 draws
+/// of the isolated translation and rotation rates within their own errors,
+/// the calibration coefficients within their covariance, a common factor
 /// `exp(z sigma)` on every near-shell rate still on the model, `sigma` the
-/// root mean square of the model against the PAFI directions, and an
-/// independent normal on each PAFI direction within its free-energy error
-/// plus one per isolated kind within the isolated PAFI error, both with the
-/// drift of [`PafiInputs`] added. At the 30 Å
-/// cutoff the change from the recorded converged-campaign volume is split
-/// into five steps: the lumped model without its near-shell rows; the
-/// per-vector network with dipole-biased rates only and the lumped model's
-/// return layer and chain radius; the same network matched to the crystal
-/// outside the cutoff; the matched network with the near-shell saddles,
-/// its errors with the spread of [`barrier_shift_spread`]; and the same
-/// with the PAFI rates.
+/// scatter of the calibration, and an independent normal on each PAFI class
+/// within its free-energy error, shared by its directions, plus one per
+/// isolated kind within the isolated PAFI error, both with the drifts of
+/// [`PafiInputs`]; the calibrated model directions of a kind share its
+/// isolated normal. At the 30 Å cutoff the change from the recorded
+/// converged-campaign volume is split into six steps: the lumped model
+/// without its near-shell rows; the per-vector network with dipole-biased
+/// rates only and the lumped model's return layer and chain radius; the
+/// same network matched to the crystal outside the cutoff; the matched
+/// network with the near-shell saddles, its errors with the spread of
+/// [`barrier_shift_spread`]; the same with the PAFI rates over the bare
+/// model, `sigma` the root mean square of the model against the PAFI
+/// classes; and the same over the calibrated model.
 fn assemble_network() {
     let started = Instant::now();
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks");
@@ -15469,7 +15618,10 @@ fn assemble_network() {
             &explicit_network,
         );
         let model_sigma = pafi.model_sigma().unwrap_or(recorded_sigma);
-        let rated = pafi.central();
+        let calibration = pafi.calibration();
+        let scatter = calibration.as_ref().map_or(model_sigma, |fit| fit.scatter);
+        let rated = pafi.central(None);
+        let calibrated = pafi.central(calibration.as_ref());
         let table = match temperature as i32 {
             300 => "254-286",
             500 => "161-185",
@@ -15492,11 +15644,13 @@ fn assemble_network() {
             .map(|_| [rng.gauss(), rng.gauss(), rng.gauss()])
             .collect();
         let mut class_rng = TinyRng(0x5eed_9af1_0000 + temperature as u64);
+        let mut calibration_rng = TinyRng(0x5eed_ca1b_0000 + temperature as u64);
+        let coefficients = calibration.as_ref().map_or(0, |fit| fit.coefficients.len());
         let class_shifts: Vec<Vec<f64>> = (0..draws)
             .map(|_| {
-                (0..pafi.computed.len() + 2)
-                    .map(|_| class_rng.gauss())
-                    .collect()
+                let mut z: Vec<f64> = (0..pafi.rated + 2).map(|_| class_rng.gauss()).collect();
+                z.extend((0..coefficients).map(|_| calibration_rng.gauss()));
+                z
             })
             .collect();
         let scale_of = |z: &[f64; 3], sigma: f64| NetworkScale {
@@ -15504,14 +15658,17 @@ fn assemble_network() {
             rot: (z[1] * rot_spread).exp(),
             capture: (z[2] * sigma).exp(),
         };
-        let spread_of = |network: &rgsaddle::PairNetwork, explicit: bool, with_pafi: bool| {
+        let spread_of = |network: &rgsaddle::PairNetwork, explicit: bool, rates: Draws| {
             let samples: Vec<[f64; 3]> = (0..draws)
                 .into_par_iter()
                 .map(|draw| {
-                    let (classes, sigma) = if with_pafi {
-                        (pafi.drawn(&class_shifts[draw], thermal), model_sigma)
-                    } else {
-                        (ClassRates::default(), recorded_sigma)
+                    let z = &class_shifts[draw];
+                    let (classes, sigma) = match rates {
+                        Draws::Model => (ClassRates::default(), recorded_sigma),
+                        Draws::Pafi => (pafi.drawn(z, thermal, None), model_sigma),
+                        Draws::Calibrated => {
+                            (pafi.drawn(z, thermal, calibration.as_ref()), scatter)
+                        }
                     };
                     let varied = context
                         .volumes(
@@ -15529,16 +15686,20 @@ fn assemble_network() {
             draw_spread(&samples)
         };
         let common = format!(
-            "per-vector network; flow census; near-shell saddles of defect_pair_network.csv; {} PAFI classes ({} directions) of defect_pair_network_pafi.csv; k_mig {k_mig:.4e} Hz {mig_note}; k_rot {k_rot:.4e} Hz; sigma from {draws} draws (translation, rotation, model factor sigma {model_sigma:.4} over {} PAFI directions, PAFI free-energy errors)",
+            "per-vector network; flow census; near-shell saddles of defect_pair_network.csv; {} PAFI classes ({} directions, {} classes balanced on the energies of their ends) of defect_pair_network_pafi.csv; model directions calibrated against {} PAFI classes, {}; k_mig {k_mig:.4e} Hz {mig_note}; k_rot {k_rot:.4e} Hz; sigma from {draws} draws (translation, rotation, calibration coefficients, model factor sigma {scatter:.4}, PAFI free-energy errors)",
             pafi.rated,
             pafi.computed.len(),
-            pafi.residuals.len()
+            pafi.drifts.len(),
+            pafi.residuals.len(),
+            calibration
+                .as_ref()
+                .map_or("not fitted".to_string(), calibration_text)
         );
         let mut at_30 = None;
         for cutoff in [10.8_f64, 14.0, 18.0, 22.0, 26.0, 30.0] {
             let network = context.network_to(cutoff);
-            let central = context.volumes(&network, &group, true, UNIT_SCALE, &rated, true);
-            let spread = spread_of(&network, true, true).map(blank_or);
+            let central = context.volumes(&network, &group, true, UNIT_SCALE, &calibrated, true);
+            let spread = spread_of(&network, true, Draws::Calibrated).map(blank_or);
             let SphereVolumes {
                 d_graph,
                 r_eff,
@@ -15583,7 +15744,11 @@ fn assemble_network() {
                 at_30 = Some((network, central.sphere, spread));
             }
         }
-        let (network, with_pafi, pafi_spread) = at_30.expect("30 A cutoff");
+        let (network, with_calibration, calibration_spread) = at_30.expect("30 A cutoff");
+        let with_pafi = context
+            .volumes(&network, &group, true, UNIT_SCALE, &rated, true)
+            .sphere;
+        let pafi_spread = spread_of(&network, true, Draws::Pafi).map(blank_or);
         let estimators = ["smoluchowski", "cell-decay", "mean-time"];
         let recorded: Vec<(f64, String)> = estimators
             .iter()
@@ -15631,12 +15796,12 @@ fn assemble_network() {
         let elastic = context
             .volumes(&network, &group, false, UNIT_SCALE, &plain, true)
             .sphere;
-        let elastic_spread = spread_of(&network, false, false).map(blank_or);
+        let elastic_spread = spread_of(&network, false, Draws::Model).map(blank_or);
         let explicit = context
             .volumes(&network, &group, true, UNIT_SCALE, &plain, true)
             .sphere;
-        let explicit_spread = spread_of(&network, true, false).map(blank_or);
-        let steps: [(&str, [f64; 3], [String; 3], &str); 6] = [
+        let explicit_spread = spread_of(&network, true, Draws::Model).map(blank_or);
+        let steps: [(&str, [f64; 3], [String; 3], &str); 7] = [
             (
                 "before",
                 [recorded[0].0, recorded[1].0, recorded[2].0],
@@ -15683,7 +15848,17 @@ fn assemble_network() {
                     with_pafi.mean_volume,
                 ],
                 pafi_spread,
-                "the same network with the PAFI rates of the covered classes; model factor sigma from the PAFI directions",
+                "the same network with the PAFI rates of the covered classes; model factor sigma from the PAFI classes",
+            ),
+            (
+                "vector-calibrated",
+                [
+                    with_calibration.sphere,
+                    with_calibration.decay_volume,
+                    with_calibration.mean_volume,
+                ],
+                calibration_spread,
+                "the same network with every direction still on the model shifted by the surrogate calibration against the PAFI classes; calibration coefficients drawn from their covariance and the model factor sigma from its scatter",
             ),
         ];
         for (step, values, spreads, note) in &steps {
@@ -15769,7 +15944,7 @@ fn network_notes() -> String {
             .unwrap_or((f64::NAN, String::new()))
     };
     let mut notes = vec![
-        "Near-shell saddles of every symmetry-distinct vacancy-dumbbell hop in the 13^3 (8788-site) cell on the Table 1 lattices, from defect_pair_network.csv; the sensitivity of the cell-decay V_iv to each hop class, from defect_pair_network_sensitivity.csv; PAFI rates of the classes that carry it, from defect_pair_network_pafi.csv; and the per-vector V_iv of defect_pair_network_volume.csv. Generated by network_notes in tests/mishin_cu.rs. A negative barrier is a saddle below a bound state that is flat to the 1e-3 eV/A tolerance; the assembly takes it as zero. A PAFI direction runs at k_kind (nu/nu_iso) exp(-(F - F_iso)/kT) against the isolated hop of the same kind in the same cell.".to_string(),
+        "Near-shell saddles of every symmetry-distinct vacancy-dumbbell hop in the 13^3 (8788-site) cell on the Table 1 lattices, from defect_pair_network.csv; the sensitivity of the cell-decay V_iv to each hop class, from defect_pair_network_sensitivity.csv; PAFI rates of the classes that carry it, from defect_pair_network_pafi.csv; and the per-vector V_iv of defect_pair_network_volume.csv. Generated by network_notes in tests/mishin_cu.rs. A negative barrier is a saddle below a bound state that is flat to the 1e-3 eV/A tolerance; the assembly takes it as zero. A PAFI direction runs at k_kind (nu/nu_iso) exp(-(F - F_iso)/kT) against the isolated hop of the same kind in the same cell; a direction still on the barrier-shift model takes exp(c) on top, c its calibration against the rated classes by weighted least squares with a Paule-Mandel scatter.".to_string(),
     ];
     for temperature in ["300", "500", "700"] {
         let here: Vec<&Vec<&str>> = rows.iter().filter(|f| f[0] == temperature).collect();
@@ -15853,9 +16028,15 @@ fn network_notes() -> String {
                     )
                 })
         };
-        let mean_residual = pafi.residuals.iter().sum::<f64>() / pafi.residuals.len().max(1) as f64;
+        let mean_residual = pafi.residuals.iter().map(|r| r.value).sum::<f64>()
+            / pafi.residuals.len().max(1) as f64;
+        let thermal = t * rgsaddle::BOLTZMANN_EV_PER_K;
+        let balanced = pafi.drifts.len().max(1) as f64;
+        let drift_mean = pafi.drifts.iter().sum::<f64>() / balanced / thermal;
+        let drift_rms =
+            (pafi.drifts.iter().map(|d| d * d).sum::<f64>() / balanced).sqrt() / thermal;
         notes.push(format!(
-            "T {temperature} K PAFI: the model-stage cover (sigma {} in ln k, tolerance {} Omega) selects {} of {} hop classes and the PAFI-stage covers of later passes {} more; {} hop rows, {} rated ({} through the dimer saddle, {} through the band top), {} with an unconverged band and {} without a path; {} rated directions; isolated translation {}, rotation {}; half the gap between the two isolated directions, {:.4} eV translating and {:.4} eV rotating, is added to the error of every direction of that kind; the model against the {} rated directions with a model rate: mean {mean_residual:+.4}, root mean square {} in ln k; {:.1} job-hours, the summed wall time of jobs run eight at a time on eight threads.",
+            "T {temperature} K PAFI: the model-stage cover (sigma {} in ln k, tolerance {} Omega) selects {} of {} hop classes, and later passes rated {} more; {} hop rows, {} rated ({} through the dimer saddle, {} through the band top), {} with an unconverged band and {} without a path; {} rated directions; isolated translation {}, rotation {}; the {} classes rated both ways are balanced on the zero-temperature energies of their ends, with drifts of mean {drift_mean:+.3} and root mean square {drift_rms:.3} kT; half the gap between the two isolated directions, {:.4} eV translating and {:.4} eV rotating, is added to the error of every direction of that kind rated one way only; the model against the {} rated classes with a model rate: mean {mean_residual:+.4}, root mean square {} in ln k, calibrated to {}; {:.1} job-hours, the summed wall time of the jobs.",
             model.first().map_or("", |f| f[11]),
             model.first().map_or("", |f| f[12]),
             model.iter().filter(|f| f[10] == "yes").count(),
@@ -15870,10 +16051,14 @@ fn network_notes() -> String {
             pafi.computed.len(),
             reference("translate"),
             reference("rotate"),
+            pafi.drifts.len(),
             pafi.drift[0],
             pafi.drift[1],
             pafi.residuals.len(),
             pafi.model_sigma().map_or(String::new(), |sigma| format!("{sigma:.4}")),
+            pafi.calibration()
+                .as_ref()
+                .map_or("nothing".to_string(), calibration_text),
             pafi.seconds / 3600.0
         ));
         if let Some(first) = after.first() {
@@ -15884,7 +16069,7 @@ fn network_notes() -> String {
                 .map(|f| f[6].parse::<f64>().expect("sensitivity").abs())
                 .sum();
             notes.push(format!(
-                "T {temperature} K after PAFI: {} classes computed; the {} still on the model, all moved by sigma {sigma:.4}, shift the cell-decay volume by at most {:.2} Omega against the tolerance {} Omega; {} more selected.",
+                "T {temperature} K after PAFI: {} classes computed; the {} still on the calibrated model, all moved by its spread {sigma:.4}, shift the cell-decay volume by at most {:.2} Omega against {} Omega, {COVER_MARGIN} of the tolerance; {} more selected.",
                 after.len() - on_model.len(),
                 on_model.len(),
                 sigma * rest,
@@ -15959,6 +16144,7 @@ fn network_notes() -> String {
                 "vector-dipole",
                 "vector-saddles",
                 "vector-pafi",
+                "vector-calibrated",
             ];
             let values: Vec<f64> = steps
                 .iter()
@@ -15973,7 +16159,7 @@ fn network_notes() -> String {
                 "T {temperature} K {estimator} breakdown at 30 A: before {:.2}; {}; total {:+.2}.",
                 values[0],
                 moves.join(", "),
-                values[5] - values[0]
+                values[values.len() - 1] - values[0]
             ));
         }
     }
