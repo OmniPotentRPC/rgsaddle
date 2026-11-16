@@ -200,7 +200,8 @@ pub use pafi::{
 };
 pub use pair_network::{
     Mat3i, PairConfig, PairEdge, PairExit, PairHop, PairMove, PairNetwork, PairStateClass,
-    PairTarget, SensitivityCover, Vec3i, cubic_group, sensitivity_cover,
+    PairTarget, SensitivityCover, SurrogateCalibration, Vec3i, calibrate_surrogate, cubic_group,
+    sensitivity_cover,
 };
 pub use prfo::{PrfoKind, partitioned_rfo_eigen, restricted_prfo_displacement};
 pub use projection::ProjectionKind;

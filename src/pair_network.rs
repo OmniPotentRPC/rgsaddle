@@ -525,6 +525,236 @@ pub fn sensitivity_cover(sensitivity: &[f64], spread: f64, tolerance: f64) -> Se
     }
 }
 
+/// Linear correction of a surrogate `ln k`, fitted to rates that were
+/// computed.
+///
+/// Each computed rate gives a residual `ln k_computed - ln k_surrogate`,
+/// its standard error `σ`, and a row of features `x`. The residual is
+/// modelled as `x · β` plus its own error plus a scatter `τ` common to all
+/// residuals, the part of the surrogate's error the features do not
+/// explain. A rate still on the surrogate takes [`Self::shift`] and, as a
+/// new draw from the same population, [`Self::spread`].
+#[derive(Clone, Debug)]
+pub struct SurrogateCalibration {
+    /// `β`, one per feature column, in `ln k`.
+    pub coefficients: Vec<f64>,
+    /// Covariance of [`Self::coefficients`], row-major.
+    pub covariance: Vec<Vec<f64>>,
+    /// `τ`, in `ln k`.
+    pub scatter: f64,
+    /// Residuals in the fit.
+    pub count: usize,
+}
+
+impl SurrogateCalibration {
+    /// `x · β`.
+    pub fn shift(&self, features: &[f64]) -> f64 {
+        features
+            .iter()
+            .zip(&self.coefficients)
+            .map(|(x, b)| x * b)
+            .sum()
+    }
+
+    /// Standard error of [`Self::shift`] from the coefficients alone.
+    pub fn shift_error(&self, features: &[f64]) -> f64 {
+        let mut variance = 0.0;
+        for (i, xi) in features.iter().enumerate() {
+            for (j, xj) in features.iter().enumerate() {
+                variance += xi * self.covariance[i][j] * xj;
+            }
+        }
+        variance.max(0.0).sqrt()
+    }
+
+    /// Standard error of one more rate about its shifted surrogate:
+    /// [`Self::shift_error`] and [`Self::scatter`] in quadrature.
+    pub fn spread(&self, features: &[f64]) -> f64 {
+        self.shift_error(features).hypot(self.scatter)
+    }
+
+    /// Coefficients moved by the standard normals `z`, one per coefficient,
+    /// through the lower Cholesky factor of [`Self::covariance`]: one draw
+    /// from the sampling distribution of the fit. Missing normals count as
+    /// zero.
+    pub fn draw(&self, z: &[f64]) -> Vec<f64> {
+        let p = self.coefficients.len();
+        let mut lower = vec![vec![0.0; p]; p];
+        for i in 0..p {
+            for j in 0..=i {
+                let dot: f64 = lower[i][..j]
+                    .iter()
+                    .zip(&lower[j][..j])
+                    .map(|(a, b)| a * b)
+                    .sum();
+                let value = self.covariance[i][j] - dot;
+                lower[i][j] = if i == j {
+                    value.max(0.0).sqrt()
+                } else if lower[j][j] > 0.0 {
+                    value / lower[j][j]
+                } else {
+                    0.0
+                };
+            }
+        }
+        self.coefficients
+            .iter()
+            .zip(&lower)
+            .map(|(beta, line)| {
+                beta + line
+                    .iter()
+                    .enumerate()
+                    .map(|(j, l)| l * z.get(j).copied().unwrap_or(0.0))
+                    .sum::<f64>()
+            })
+            .collect()
+    }
+}
+
+/// Fits [`SurrogateCalibration`] by weighted least squares with weights
+/// `1 / (σ² + τ²)`. `τ` is the Paule-Mandel value: zero when the errors
+/// already account for the spread of the residuals, otherwise the one that
+/// brings the weighted sum of squared residuals to its degrees of freedom.
+/// `features` holds one row per residual; a column of ones fits a common
+/// bias. A zero `σ` is allowed only when the residuals scatter beyond it.
+pub fn calibrate_surrogate(
+    features: &[Vec<f64>],
+    residuals: &[f64],
+    errors: &[f64],
+) -> Result<SurrogateCalibration, SaddleError> {
+    let n = residuals.len();
+    let p = features.first().map_or(0, Vec::len);
+    if features.len() != n || errors.len() != n || p == 0 {
+        return Err(SaddleError::Shape(
+            "calibration needs one feature row and one error per residual".into(),
+        ));
+    }
+    if n <= p {
+        return Err(SaddleError::Invalid(
+            "calibration needs more residuals than features".into(),
+        ));
+    }
+    let finite = features
+        .iter()
+        .all(|row| row.len() == p && row.iter().all(|x| x.is_finite()))
+        && residuals.iter().all(|r| r.is_finite())
+        && errors.iter().all(|e| e.is_finite() && *e >= 0.0);
+    if !finite {
+        return Err(SaddleError::Invalid(
+            "calibration features, residuals and errors must be finite, errors non-negative".into(),
+        ));
+    }
+    let fit = |tau: f64| -> Option<(Vec<f64>, Vec<Vec<f64>>, f64)> {
+        let weights: Vec<f64> = errors.iter().map(|e| 1.0 / (e * e + tau * tau)).collect();
+        if !weights.iter().all(|w| w.is_finite()) {
+            return None;
+        }
+        let mut normal = vec![vec![0.0; p]; p];
+        let mut rhs = vec![0.0; p];
+        for ((row, r), w) in features.iter().zip(residuals).zip(&weights) {
+            for ((slot, line), xi) in rhs.iter_mut().zip(normal.iter_mut()).zip(row) {
+                *slot += w * xi * r;
+                for (cell, xj) in line.iter_mut().zip(row) {
+                    *cell += w * xi * xj;
+                }
+            }
+        }
+        let covariance = invert(&normal)?;
+        let beta: Vec<f64> = covariance
+            .iter()
+            .map(|line| line.iter().zip(&rhs).map(|(c, b)| c * b).sum())
+            .collect();
+        let q = features
+            .iter()
+            .zip(residuals)
+            .zip(&weights)
+            .map(|((row, r), w)| {
+                let d = r - row.iter().zip(&beta).map(|(x, b)| x * b).sum::<f64>();
+                w * d * d
+            })
+            .sum();
+        Some((beta, covariance, q))
+    };
+    let dof = (n - p) as f64;
+    let degenerate = || SaddleError::Invalid("calibration fit is singular".into());
+    let tau = match fit(0.0) {
+        Some((_, _, q)) if q <= dof => 0.0,
+        _ => {
+            let mean = residuals.iter().sum::<f64>() / n as f64;
+            let spread = (residuals.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / n as f64)
+                .sqrt()
+                .max(errors.iter().copied().fold(0.0, f64::max))
+                .max(f64::MIN_POSITIVE.sqrt());
+            let mut high = spread;
+            while fit(high).ok_or_else(degenerate)?.2 > dof {
+                high *= 2.0;
+                if !high.is_finite() {
+                    return Err(degenerate());
+                }
+            }
+            let mut low = 0.0;
+            for _ in 0..200 {
+                let mid = 0.5 * (low + high);
+                match fit(mid) {
+                    Some((_, _, q)) if q <= dof => high = mid,
+                    _ => low = mid,
+                }
+                if high - low <= 1.0e-12 * high {
+                    break;
+                }
+            }
+            high
+        }
+    };
+    let (coefficients, covariance, _) = fit(tau).ok_or_else(degenerate)?;
+    Ok(SurrogateCalibration {
+        coefficients,
+        covariance,
+        scatter: tau,
+        count: n,
+    })
+}
+
+/// Gauss-Jordan inverse with partial pivoting; `None` when singular.
+fn invert(matrix: &[Vec<f64>]) -> Option<Vec<Vec<f64>>> {
+    let p = matrix.len();
+    let mut a: Vec<Vec<f64>> = matrix.to_vec();
+    let mut inverse: Vec<Vec<f64>> = (0..p)
+        .map(|i| (0..p).map(|j| f64::from(u8::from(i == j))).collect())
+        .collect();
+    let scale = matrix.iter().flatten().fold(0.0_f64, |m, v| m.max(v.abs()));
+    if !(scale.is_finite() && scale > 0.0) {
+        return None;
+    }
+    for column in 0..p {
+        let pivot =
+            (column..p).max_by(|l, r| a[*l][column].abs().total_cmp(&a[*r][column].abs()))?;
+        if a[pivot][column].abs() <= 1.0e-12 * scale {
+            return None;
+        }
+        a.swap(column, pivot);
+        inverse.swap(column, pivot);
+        let lead = a[column][column];
+        a[column].iter_mut().for_each(|value| *value /= lead);
+        inverse[column].iter_mut().for_each(|value| *value /= lead);
+        let pivot_row = a[column].clone();
+        let pivot_inverse = inverse[column].clone();
+        for (row, (line, inverse_line)) in a.iter_mut().zip(inverse.iter_mut()).enumerate() {
+            let factor = line[column];
+            if row == column || factor == 0.0 {
+                continue;
+            }
+            for (value, lead) in line.iter_mut().zip(&pivot_row) {
+                *value -= factor * lead;
+            }
+            for (value, lead) in inverse_line.iter_mut().zip(&pivot_inverse) {
+                *value -= factor * lead;
+            }
+        }
+    }
+    Some(inverse)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -761,5 +991,72 @@ mod tests {
                 "P r {value} against {mean}"
             );
         }
+    }
+
+    #[test]
+    fn calibration_bias_matches_the_closed_form() {
+        let residuals = [-0.9, -0.2, -0.5, 0.3, -0.7, -0.4];
+        let sigma = 0.1;
+        let n = residuals.len() as f64;
+        let mean = residuals.iter().sum::<f64>() / n;
+        let sample = residuals.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (n - 1.0);
+        let fit = calibrate_surrogate(&vec![vec![1.0]; 6], &residuals, &[sigma; 6]).unwrap();
+        assert!((fit.coefficients[0] - mean).abs() < 1e-12);
+        assert!((fit.scatter - (sample - sigma * sigma).sqrt()).abs() < 1e-9);
+        assert!((fit.covariance[0][0] - sample / n).abs() < 1e-9);
+        assert_eq!(fit.count, 6);
+        let spread = fit.spread(&[1.0]);
+        assert!(
+            (spread.powi(2) - fit.shift_error(&[1.0]).powi(2) - fit.scatter.powi(2)).abs() < 1e-12
+        );
+        assert!((fit.shift(&[1.0]) - mean).abs() < 1e-12);
+    }
+
+    #[test]
+    fn calibration_keeps_zero_scatter_when_errors_cover_the_spread() {
+        let x = [0.0, 1.0, 2.0, 3.0, 4.0];
+        let rows: Vec<Vec<f64>> = x.iter().map(|x| vec![1.0, *x]).collect();
+        let residuals: Vec<f64> = x.iter().map(|x| 2.0 - 3.0 * x).collect();
+        let fit = calibrate_surrogate(&rows, &residuals, &[0.2; 5]).unwrap();
+        assert_eq!(fit.scatter, 0.0);
+        assert!((fit.coefficients[0] - 2.0).abs() < 1e-12);
+        assert!((fit.coefficients[1] + 3.0).abs() < 1e-12);
+        let sxx: f64 = x.iter().map(|x| (x - 2.0).powi(2)).sum();
+        assert!((fit.covariance[1][1] - 0.04 / sxx).abs() < 1e-12);
+        assert!((fit.shift(&[1.0, 5.0]) + 13.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn calibration_rejects_what_it_cannot_fit() {
+        assert!(calibrate_surrogate(&[vec![1.0]], &[0.1], &[0.1]).is_err());
+        assert!(calibrate_surrogate(&[vec![1.0], vec![1.0]], &[0.1], &[0.1, 0.1]).is_err());
+        assert!(
+            calibrate_surrogate(
+                &[vec![1.0], vec![1.0], vec![1.0]],
+                &[0.1, f64::NAN, 0.2],
+                &[0.1; 3]
+            )
+            .is_err()
+        );
+        let twins = vec![vec![1.0, 2.0]; 4];
+        assert!(calibrate_surrogate(&twins, &[0.1, 0.3, -0.2, 0.0], &[0.1; 4]).is_err());
+    }
+
+    #[test]
+    fn calibration_draws_through_the_cholesky_factor() {
+        let fit = SurrogateCalibration {
+            coefficients: vec![0.5, -1.0],
+            covariance: vec![vec![4.0, 2.0], vec![2.0, 5.0]],
+            scatter: 0.0,
+            count: 9,
+        };
+        assert_eq!(fit.draw(&[]), vec![0.5, -1.0]);
+        let moved = fit.draw(&[1.0, 1.0]);
+        assert!((moved[0] - 2.5).abs() < 1e-12 && (moved[1] - 2.0).abs() < 1e-12);
+        let flat = SurrogateCalibration {
+            covariance: vec![vec![0.0, 0.0], vec![0.0, 1.0]],
+            ..fit
+        };
+        assert_eq!(flat.draw(&[3.0, 2.0]), vec![0.5, 1.0]);
     }
 }
