@@ -14800,17 +14800,15 @@ fn class_sensitivities(
 /// rated direction of a hop class gets
 /// `ln(k/k_kind) = ln(nu/nu_iso) - (F - F_iso)/kT`, against the isolated
 /// hop of the same kind in the same cell. A path that ends in a bound state
-/// gives both directions, and [`rgsaddle::balanced_barriers`] balances its
-/// two barriers against the zero-temperature energies of its ends, with
-/// half the drift of that path in their common error; `drifts` holds those
-/// drifts. The isolated hop ends in a state equivalent to its start, so it
-/// is balanced against no gap: `F_iso` is the inverse-variance mean of its
-/// two directions and `nu_iso` the mean of the two end frequencies. Half
-/// of its drift, in `drift`, is added in quadrature to the error of every
-/// direction of the same kind rated one way only, and is in the isolated
-/// error, which is kept apart by kind because every class of a kind shares
-/// it. `residuals` sets each rated class against the barrier-shift model of
-/// [`network_volumes`].
+/// gives both directions, and [`rgsaddle::anchored_barriers`] takes both
+/// from its forward barrier and the zero-temperature energies of its ends,
+/// with the forward error; `drifts` holds what the barrier from the last
+/// plane adds to that gap. The isolated hop ends in a state equivalent to
+/// its start, so it is anchored against no gap: `F_iso` is its forward
+/// barrier, `nu_iso` the mean of the two end frequencies, and `drift` the
+/// forward less the back barrier. The isolated error is kept apart by kind
+/// because every class of a kind shares it. `residuals` sets each rated
+/// class against the barrier-shift model of [`network_volumes`].
 struct PafiInputs {
     computed: std::collections::BTreeMap<(String, String), Rated>,
     isolated_sigma: [f64; 2],
@@ -14863,14 +14861,14 @@ fn pafi_inputs(
     let mut drift = [f64::NAN; 2];
     for f in rows.iter().filter(|f| f[2] == "isolated" && usable(f)) {
         let kind = usize::from(f[3] == "rotate");
-        let Ok(both) = rgsaddle::balanced_barriers(
+        let Ok(both) = rgsaddle::anchored_barriers(
             (number(f, 12), number(f, 13)),
             (number(f, 15), number(f, 16)),
             0.0,
         ) else {
             continue;
         };
-        drift[kind] = 0.5 * both.drift.abs();
+        drift[kind] = both.drift;
         isolated[kind] = (
             both.forward,
             both.error,
@@ -14905,10 +14903,10 @@ fn pafi_inputs(
             (Some(start), Some(end)) if bound.contains(f[6]) && f[6] != f[5] => Some(end - start),
             _ => None,
         };
-        let balanced = gap.and_then(|gap| {
-            rgsaddle::balanced_barriers(forward, (number(f, 15), number(f, 16)), gap).ok()
+        let anchored = gap.and_then(|gap| {
+            rgsaddle::anchored_barriers(forward, (number(f, 15), number(f, 16)), gap).ok()
         });
-        let (sigma, directions) = match balanced {
+        let (sigma, directions) = match anchored {
             Some(both) => {
                 inputs.drifts.push(both.drift);
                 (
@@ -14919,10 +14917,7 @@ fn pafi_inputs(
                     ],
                 )
             }
-            None => (
-                forward.1.hypot(drift[usize::from(rotation)]),
-                vec![(f[5], forward.0, number(f, 14))],
-            ),
+            None => (forward.1, vec![(f[5], forward.0, number(f, 14))]),
         };
         let reference = saddles.isolated[usize::from(rotation)];
         let mut residuals = Vec::new();
@@ -15738,7 +15733,7 @@ fn assemble_network() {
             draw_spread(&samples)
         };
         let common = format!(
-            "per-vector network; flow census; near-shell saddles of defect_pair_network.csv; {} PAFI classes ({} directions, {} classes balanced on the energies of their ends) of defect_pair_network_pafi.csv; model directions calibrated against {} PAFI classes, {}; k_mig {k_mig:.4e} Hz {mig_note}; k_rot {k_rot:.4e} Hz; sigma from {draws} draws (translation, rotation, calibration coefficients, model factor sigma {scatter:.4}, PAFI free-energy errors)",
+            "per-vector network; flow census; near-shell saddles of defect_pair_network.csv; {} PAFI classes ({} directions, {} classes rated both ways from the forward barrier and the energies of their ends) of defect_pair_network_pafi.csv; model directions calibrated against {} PAFI classes, {}; k_mig {k_mig:.4e} Hz {mig_note}; k_rot {k_rot:.4e} Hz; sigma from {draws} draws (translation, rotation, calibration coefficients, model factor sigma {scatter:.4}, PAFI free-energy errors)",
             pafi.rated,
             pafi.computed.len(),
             pafi.drifts.len(),
@@ -15996,7 +15991,7 @@ fn network_notes() -> String {
             .unwrap_or((f64::NAN, String::new()))
     };
     let mut notes = vec![
-        "Near-shell saddles of every symmetry-distinct vacancy-dumbbell hop in the 13^3 (8788-site) cell on the Table 1 lattices, from defect_pair_network.csv; the sensitivity of the cell-decay V_iv to each hop class, from defect_pair_network_sensitivity.csv; PAFI rates of the classes that carry it, from defect_pair_network_pafi.csv; and the per-vector V_iv of defect_pair_network_volume.csv. Generated by network_notes in tests/mishin_cu.rs. A negative barrier is a saddle below a bound state that is flat to the 1e-3 eV/A tolerance; the assembly takes it as zero. A PAFI direction runs at k_kind (nu/nu_iso) exp(-(F - F_iso)/kT) against the isolated hop of the same kind in the same cell; a direction still on the barrier-shift model takes exp(c) on top, c its calibration against the rated classes by weighted least squares with a Paule-Mandel scatter.".to_string(),
+        "Near-shell saddles of every symmetry-distinct vacancy-dumbbell hop in the 13^3 (8788-site) cell on the Table 1 lattices, from defect_pair_network.csv; the sensitivity of the cell-decay V_iv to each hop class, from defect_pair_network_sensitivity.csv; PAFI rates of the classes that carry it, from defect_pair_network_pafi.csv; and the per-vector V_iv of defect_pair_network_volume.csv. Generated by network_notes in tests/mishin_cu.rs. A negative barrier is a saddle below a bound state that is flat to the 1e-3 eV/A tolerance; the assembly takes it as zero. A PAFI direction runs at k_kind (nu/nu_iso) exp(-(F - F_iso)/kT) against the isolated hop of the same kind in the same cell, F the forward barrier of its path, less the zero-temperature gap of the ends for the reverse direction, and F_iso the forward barrier of the isolated path; a direction still on the barrier-shift model takes exp(c) on top, c its calibration against the rated classes by weighted least squares with a Paule-Mandel scatter.".to_string(),
     ];
     for temperature in ["300", "500", "700"] {
         let here: Vec<&Vec<&str>> = rows.iter().filter(|f| f[0] == temperature).collect();
@@ -16083,12 +16078,12 @@ fn network_notes() -> String {
         let mean_residual = pafi.residuals.iter().map(|r| r.value).sum::<f64>()
             / pafi.residuals.len().max(1) as f64;
         let thermal = t * rgsaddle::BOLTZMANN_EV_PER_K;
-        let balanced = pafi.drifts.len().max(1) as f64;
-        let drift_mean = pafi.drifts.iter().sum::<f64>() / balanced / thermal;
+        let both_ways = pafi.drifts.len().max(1) as f64;
+        let drift_mean = pafi.drifts.iter().sum::<f64>() / both_ways / thermal;
         let drift_rms =
-            (pafi.drifts.iter().map(|d| d * d).sum::<f64>() / balanced).sqrt() / thermal;
+            (pafi.drifts.iter().map(|d| d * d).sum::<f64>() / both_ways).sqrt() / thermal;
         notes.push(format!(
-            "T {temperature} K PAFI: the model-stage cover (sigma {} in ln k, tolerance {} Omega) selects {} of {} hop classes, and later passes rated {} more; {} hop rows, {} rated ({} through the dimer saddle, {} through the band top), {} with an unconverged band and {} without a path; {} rated directions; isolated translation {}, rotation {}; the {} classes rated both ways are balanced on the zero-temperature energies of their ends, with drifts of mean {drift_mean:+.3} and root mean square {drift_rms:.3} kT; half the gap between the two isolated directions, {:.4} eV translating and {:.4} eV rotating, is added to the error of every direction of that kind rated one way only; the model against the {} rated classes with a model rate: mean {mean_residual:+.4}, root mean square {} in ln k, calibrated to {}; {:.1} job-hours, the summed wall time of the jobs.",
+            "T {temperature} K PAFI: the model-stage cover (sigma {} in ln k, tolerance {} Omega) selects {} of {} hop classes, and later passes rated {} more; {} hop rows, {} rated ({} through the dimer saddle, {} through the band top), {} with an unconverged band and {} without a path; {} rated directions; isolated translation {}, rotation {}; the {} classes rated both ways take the reverse barrier from the forward one and the zero-temperature energies of their ends, and their drifts, the forward less the back barrier less that gap, have mean {drift_mean:+.3} and root mean square {drift_rms:.3} kT; the isolated hops take their forward barriers, which exceed the back ones by {:+.4} eV translating and {:+.4} eV rotating; the model against the {} rated classes with a model rate: mean {mean_residual:+.4}, root mean square {} in ln k, calibrated to {}; {:.1} job-hours, the summed wall time of the jobs.",
             model.first().map_or("", |f| f[11]),
             model.first().map_or("", |f| f[12]),
             model.iter().filter(|f| f[10] == "yes").count(),
