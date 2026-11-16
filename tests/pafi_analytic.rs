@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use ndarray::{Array1, ArrayView1};
 use rgsaddle::{
     ArcPath, PafiConfig, PafiIntegrator, PathFrame, PointSurface, RelaxConfig, SaddleError,
-    average_hyperplane, balanced_barriers, integrate_profile, pafi_profile,
+    anchored_barriers, average_hyperplane, balanced_barriers, integrate_profile, pafi_profile,
     zero_temperature_barrier,
 };
 
@@ -272,6 +272,30 @@ fn balanced_barriers_close_on_the_end_gap() {
     assert!((even.forward - 0.9).abs() < 1.0e-12 && (even.reverse - 0.9).abs() < 1.0e-12);
     assert!(balanced_barriers((1.0, 0.0), (0.8, 0.1), 0.0).is_err());
     assert!(balanced_barriers((1.0, 0.1), (f64::NAN, 0.1), 0.0).is_err());
+}
+
+/// The same profile anchored on its forward barrier: the reverse barrier
+/// is the forward one less the end gap, the error is the forward one, and
+/// the drift is the same -0.6.
+#[test]
+fn anchored_barriers_keep_the_forward_barrier() {
+    let profile = integrate_profile(
+        &[0.0, 1.0, 2.0, 3.0],
+        &[0.0, 2.0, -1.0, -3.0],
+        &[0.1, 0.1, 0.2, 0.2],
+    )
+    .expect("profile");
+    let anchored = profile.anchored(0.1).expect("anchored");
+    assert!((anchored.forward - 1.5).abs() < 1.0e-12);
+    assert!((anchored.reverse - 1.4).abs() < 1.0e-12);
+    assert!((anchored.error - profile.barrier_error).abs() < 1.0e-12);
+    assert!(
+        (anchored.drift + 0.6).abs() < 1.0e-12,
+        "drift {}",
+        anchored.drift
+    );
+    assert!(anchored_barriers((1.0, 0.0), (0.8, 0.1), 0.0).is_err());
+    assert!(anchored_barriers((1.0, 0.1), (0.8, 0.1), f64::INFINITY).is_err());
 }
 
 #[test]

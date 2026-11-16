@@ -979,6 +979,17 @@ impl FreeEnergyProfile {
             end_gap,
         )
     }
+
+    /// [`anchored_barriers`] of [`Self::barrier`] and
+    /// [`Self::reverse_barrier`] against `end_gap`, the free energy of the
+    /// last end less that of the first, known apart from this profile.
+    pub fn anchored(&self, end_gap: f64) -> Result<BalancedBarriers, SaddleError> {
+        anchored_barriers(
+            (self.barrier, self.barrier_error),
+            self.reverse_barrier(),
+            end_gap,
+        )
+    }
 }
 
 /// Both barriers of one path, made to differ by the free-energy
@@ -989,7 +1000,9 @@ pub struct BalancedBarriers {
     pub forward: f64,
     /// Barrier above the last end, `end_gap` below [`Self::forward`].
     pub reverse: f64,
-    /// Standard error of both, with half of [`Self::drift`] in quadrature.
+    /// Standard error of both: with half of [`Self::drift`] in quadrature
+    /// from [`balanced_barriers`], that of the forward barrier from
+    /// [`anchored_barriers`].
     pub error: f64,
     /// `forward - reverse - end_gap` of the inputs: what the integral adds
     /// to the free-energy difference of the ends.
@@ -1008,13 +1021,62 @@ pub struct BalancedBarriers {
 /// their inverse-variance mean, the reverse barrier `end_gap` below it, and
 /// the drift. Half the drift is added to the error in quadrature: it is
 /// what the mean moves when the whole drift lies on one side of the
-/// dividing surface and the two estimates weigh alike. `end_gap = 0` is a
-/// path between two equivalent states. Errors must be positive.
+/// dividing surface and the two estimates weigh alike; when it is known to
+/// lie past it, [`anchored_barriers`] keeps the forward barrier instead.
+/// `end_gap = 0` is a path between two equivalent states. Errors must be
+/// positive.
 pub fn balanced_barriers(
     forward: (f64, f64),
     reverse: (f64, f64),
     end_gap: f64,
 ) -> Result<BalancedBarriers, SaddleError> {
+    check_barriers(forward, reverse, end_gap)?;
+    let (weight_f, weight_r) = (forward.1.powi(-2), reverse.1.powi(-2));
+    let mean = (weight_f * forward.0 + weight_r * (reverse.0 + end_gap)) / (weight_f + weight_r);
+    let drift = forward.0 - reverse.0 - end_gap;
+    Ok(BalancedBarriers {
+        forward: mean,
+        reverse: mean - end_gap,
+        error: ((weight_f + weight_r).recip() + (0.5 * drift).powi(2)).sqrt(),
+        drift,
+    })
+}
+
+/// Both barriers of one path from its forward barrier and the free-energy
+/// difference of its ends.
+///
+/// The forward barrier integrates the profile from the first plane to the
+/// dividing surface and [`FreeEnergyProfile::reverse_barrier`] from there
+/// to the last plane, so each carries the drift of its own stretch. With
+/// `end_gap`, the free energy of the last end less that of the first,
+/// known apart from the profile, the reverse barrier by detailed balance
+/// is `forward - end_gap`, and only the forward stretch enters either. The
+/// error is that of `forward`, and [`BalancedBarriers::drift`] still
+/// reports `forward - reverse - end_gap`. It is the estimate to take over
+/// [`balanced_barriers`] when the drift lies past the dividing surface, as
+/// a path integrated again from its other end shows: the barriers from the
+/// start of each integration then agree, and those from its end do not.
+/// `end_gap = 0` is a path between two equivalent states. Errors must be
+/// positive.
+pub fn anchored_barriers(
+    forward: (f64, f64),
+    reverse: (f64, f64),
+    end_gap: f64,
+) -> Result<BalancedBarriers, SaddleError> {
+    check_barriers(forward, reverse, end_gap)?;
+    Ok(BalancedBarriers {
+        forward: forward.0,
+        reverse: forward.0 - end_gap,
+        error: forward.1,
+        drift: forward.0 - reverse.0 - end_gap,
+    })
+}
+
+fn check_barriers(
+    forward: (f64, f64),
+    reverse: (f64, f64),
+    end_gap: f64,
+) -> Result<(), SaddleError> {
     if ![forward.0, forward.1, reverse.0, reverse.1, end_gap]
         .iter()
         .all(|v| v.is_finite())
@@ -1026,15 +1088,7 @@ pub fn balanced_barriers(
             "PAFI barrier errors must be positive".into(),
         ));
     }
-    let (weight_f, weight_r) = (forward.1.powi(-2), reverse.1.powi(-2));
-    let mean = (weight_f * forward.0 + weight_r * (reverse.0 + end_gap)) / (weight_f + weight_r);
-    let drift = forward.0 - reverse.0 - end_gap;
-    Ok(BalancedBarriers {
-        forward: mean,
-        reverse: mean - end_gap,
-        error: ((weight_f + weight_r).recip() + (0.5 * drift).powi(2)).sqrt(),
-        drift,
-    })
+    Ok(())
 }
 
 /// Sample one hyperplane and return the PAFI gradient.
