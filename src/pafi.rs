@@ -968,6 +968,73 @@ impl FreeEnergyProfile {
             variance.sqrt(),
         )
     }
+
+    /// [`balanced_barriers`] of [`Self::barrier`] and
+    /// [`Self::reverse_barrier`] against `end_gap`, the free energy of the
+    /// last end less that of the first, known apart from this profile.
+    pub fn balanced(&self, end_gap: f64) -> Result<BalancedBarriers, SaddleError> {
+        balanced_barriers(
+            (self.barrier, self.barrier_error),
+            self.reverse_barrier(),
+            end_gap,
+        )
+    }
+}
+
+/// Both barriers of one path, made to differ by the free-energy
+/// difference of its ends.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BalancedBarriers {
+    /// Barrier above the first end.
+    pub forward: f64,
+    /// Barrier above the last end, `end_gap` below [`Self::forward`].
+    pub reverse: f64,
+    /// Standard error of both, with half of [`Self::drift`] in quadrature.
+    pub error: f64,
+    /// `forward - reverse - end_gap` of the inputs: what the integral adds
+    /// to the free-energy difference of the ends.
+    pub drift: f64,
+}
+
+/// Combine the forward and reverse barriers of one path given the
+/// free-energy difference of its ends.
+///
+/// The barrier above the first plane and [`FreeEnergyProfile::reverse_barrier`]
+/// above the last measure one dividing surface from the two ends, so their
+/// difference is `end_gap`, the free energy of the last end less that of
+/// the first, plus whatever the integral drifts along the path. With
+/// `end_gap` known apart from the profile, `forward` and
+/// `reverse + end_gap` are two estimates of one barrier. The result is
+/// their inverse-variance mean, the reverse barrier `end_gap` below it, and
+/// the drift. Half the drift is added to the error in quadrature: it is
+/// what the mean moves when the whole drift lies on one side of the
+/// dividing surface and the two estimates weigh alike. `end_gap = 0` is a
+/// path between two equivalent states. Errors must be positive.
+pub fn balanced_barriers(
+    forward: (f64, f64),
+    reverse: (f64, f64),
+    end_gap: f64,
+) -> Result<BalancedBarriers, SaddleError> {
+    if ![forward.0, forward.1, reverse.0, reverse.1, end_gap]
+        .iter()
+        .all(|v| v.is_finite())
+    {
+        return Err(SaddleError::NonFinite("PAFI barrier"));
+    }
+    if !(forward.1 > 0.0 && reverse.1 > 0.0) {
+        return Err(SaddleError::Invalid(
+            "PAFI barrier errors must be positive".into(),
+        ));
+    }
+    let (weight_f, weight_r) = (forward.1.powi(-2), reverse.1.powi(-2));
+    let mean = (weight_f * forward.0 + weight_r * (reverse.0 + end_gap)) / (weight_f + weight_r);
+    let drift = forward.0 - reverse.0 - end_gap;
+    Ok(BalancedBarriers {
+        forward: mean,
+        reverse: mean - end_gap,
+        error: ((weight_f + weight_r).recip() + (0.5 * drift).powi(2)).sqrt(),
+        drift,
+    })
 }
 
 /// Sample one hyperplane and return the PAFI gradient.
