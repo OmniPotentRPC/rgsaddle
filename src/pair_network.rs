@@ -476,6 +476,55 @@ impl PairNetwork {
     }
 }
 
+/// Which classes to compute so the rest stay within a tolerance.
+#[derive(Clone, Debug)]
+pub struct SensitivityCover {
+    /// Class indices by decreasing `|sensitivity|`.
+    pub order: Vec<usize>,
+    /// How many leading entries of [`Self::order`] are to be computed.
+    pub covered: usize,
+    /// `spread` times the summed `|sensitivity|` of the classes after
+    /// each rank: the worst coherent shift the remaining model rates can
+    /// make when all of them move by `spread` in `ln k`.
+    pub remaining: Vec<f64>,
+}
+
+/// Ranks classes by `|d result / d ln k|` and covers the fewest leading
+/// ones after which `spread * sum |sensitivity|` over the rest is below
+/// `tolerance`. Non-finite sensitivities rank first and are always covered.
+pub fn sensitivity_cover(sensitivity: &[f64], spread: f64, tolerance: f64) -> SensitivityCover {
+    let magnitude = |i: usize| {
+        let value = sensitivity[i].abs();
+        if value.is_finite() {
+            value
+        } else {
+            f64::INFINITY
+        }
+    };
+    let mut order: Vec<usize> = (0..sensitivity.len()).collect();
+    order.sort_by(|l, r| magnitude(*r).total_cmp(&magnitude(*l)).then(l.cmp(r)));
+    let mut remaining = vec![0.0; order.len()];
+    let mut tail = 0.0;
+    for rank in (0..order.len()).rev() {
+        remaining[rank] = spread.abs() * tail;
+        tail += magnitude(order[rank]);
+    }
+    let head = spread.abs() * tail;
+    let covered = if head < tolerance {
+        0
+    } else {
+        remaining
+            .iter()
+            .position(|rest| *rest < tolerance)
+            .map_or(order.len(), |rank| rank + 1)
+    };
+    SensitivityCover {
+        order,
+        covered,
+        remaining,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -500,6 +549,17 @@ mod tests {
             PairMove::new("rotate", [0, 0, 0], [1, 0, 0], [0, 1, 0], [1, 1, 0]),
         ];
         PairMove::orbit(&seed, &cubic_group())
+    }
+
+    #[test]
+    fn sensitivity_cover_stops_once_the_rest_is_inside_the_tolerance() {
+        let cover = sensitivity_cover(&[1.0, -8.0, 0.5, 4.0, -2.0], 0.5, 1.6);
+        assert_eq!(cover.order, vec![1, 3, 4, 0, 2]);
+        assert_eq!(cover.remaining, vec![3.75, 1.75, 0.75, 0.25, 0.0]);
+        assert_eq!(cover.covered, 3);
+        assert_eq!(sensitivity_cover(&[1.0, 1.0], 0.5, 1.5).covered, 0);
+        assert_eq!(sensitivity_cover(&[1.0, f64::NAN], 0.5, 10.0).order[0], 1);
+        assert_eq!(sensitivity_cover(&[1.0, f64::NAN], 0.5, 10.0).covered, 1);
     }
 
     #[test]

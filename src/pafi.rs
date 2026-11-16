@@ -624,6 +624,31 @@ pub struct FreeEnergyProfile {
     pub samples: usize,
 }
 
+impl FreeEnergyProfile {
+    /// Barrier from the last plane back over the dividing plane,
+    /// `F(dividing) - F(last)`, with the standard error of the trapezoid
+    /// sum over the planes between them. A path whose last plane is the
+    /// product minimum gives the reverse hop from the same samples.
+    pub fn reverse_barrier(&self) -> (f64, f64) {
+        let last = self.free_energy.len().saturating_sub(1);
+        let mut weights = vec![0.0; self.arc.len()];
+        for k in self.dividing + 1..=last {
+            let span = self.arc[k] - self.arc[k - 1];
+            weights[k - 1] += 0.5 * span;
+            weights[k] += 0.5 * span;
+        }
+        let variance: f64 = weights
+            .iter()
+            .zip(&self.gradient_error)
+            .map(|(w, e)| w * w * e * e)
+            .sum();
+        (
+            self.free_energy[self.dividing] - self.free_energy[last],
+            variance.sqrt(),
+        )
+    }
+}
+
 /// Sample one hyperplane and return the PAFI gradient.
 ///
 /// With [`PafiConfig::max_jump`] set, the production run is cut into

@@ -225,6 +225,21 @@ fn trajectory_ensemble_uses_the_reference_error() {
 }
 
 #[test]
+fn reverse_barrier_runs_from_the_last_plane() {
+    let profile = integrate_profile(
+        &[0.0, 1.0, 2.0, 3.0],
+        &[0.0, 2.0, -1.0, -3.0],
+        &[0.1, 0.1, 0.2, 0.2],
+    )
+    .expect("profile");
+    assert_eq!(profile.dividing, 2);
+    assert!((profile.barrier - 1.5).abs() < 1.0e-12);
+    let (barrier, error) = profile.reverse_barrier();
+    assert!((barrier - 2.0).abs() < 1.0e-12, "reverse {barrier}");
+    assert!((error - 0.02_f64.sqrt()).abs() < 1.0e-12, "error {error}");
+}
+
+#[test]
 fn zero_temperature_integral_recovers_the_barrier() {
     let frames: Vec<Array1<f64>> = (0..41)
         .map(|i| {
