@@ -113,6 +113,14 @@ let both = profile.balanced(product_energy - reactant_energy)?;
 let (forward, backward, error) = (both.forward, both.reverse, both.error);
 #+end_src
 
+The classes left on the rate model should not inherit its bias. Each computed class gives a residual =ln k_computed - ln k_model=, its error and a row of features; the two directions of a balanced class share one error, so they enter as one residual, their mean. =calibrate_surrogate= fits =x · β= to the residuals by weighted least squares with weights =1/(σ² + τ²)=. The scatter =τ= is the Paule–Mandel value: zero when the errors already explain the residuals, otherwise the one that brings the weighted sum of squares to its degrees of freedom. A direction still on the model then takes =SurrogateCalibration::shift=, and =SurrogateCalibration::spread= is its error as one more draw from the same population, the spread to hand back to =sensitivity_cover=. =SurrogateCalibration::draw= moves the coefficients within their covariance for error draws. A column of ones fits a common bias. A feature that differs between the two directions of one hop class changes their ratio, so it keeps detailed balance only when that difference is a difference of a function of the state.
+
+#+begin_src rust
+let fit = rgsaddle::calibrate_surrogate(&features, &residuals, &errors)?;
+let (shift, spread) = (fit.shift(&[1.0]), fit.spread(&[1.0]));
+let cover = rgsaddle::sensitivity_cover(&on_model, spread, tolerance);
+#+end_src
+
 * Assumptions
 The dividing surface is a hyperplane normal to the path, not a variationally optimized surface. The harmonic prefactor uses a caller-chosen block of atoms when the whole-cell Hessian is too large; modes below =10⁻⁴= in the surface's curvature unit are left out of the product. Overdamped sampling assumes the constrained ensemble has been reached after =thermalize= steps. The basin of the path on a plane is the one its in-plane quench from the path reaches, tested at the ends of stretches; a crossing that comes back within a stretch stays in the average. The Bennett–Chandler plateau is whatever record the caller names; a negative =κ= means that record is not a transmission coefficient and no rate is stored. The cell of a frozen search is the cell bound into the surface.
 
