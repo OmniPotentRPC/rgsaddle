@@ -1,0 +1,8 @@
+#!/bin/sh
+# Full-length mask series of the isolated copper hop (Mishin EAM).
+# The ignored test pafi_mask_series samples shares 0.90, 0.95, 0.99 and
+# 1 on the 13^3 cell at the campaign length and writes
+# benchmarks/pafi_mask_fix.csv. The corrected barriers are the full tangent.
+set -eu
+cd "$(dirname "$0")/.."
+exec cargo test --release --test mishin_cu -- --ignored pafi_mask_series --nocapture

@@ -17,7 +17,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use ndarray::{Array1, Array2, ArrayView1};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use rayon::prelude::*;
 use rgmin::{Control, FireKind, Method, Oracle, Solver};
 use rgsaddle::{
@@ -15271,8 +15271,8 @@ fn campaign_pafi(temperature: f64) -> rgsaddle::PafiConfig {
     campaign_pafi_at(temperature, CAMPAIGN_STEP)
 }
 
-/// Planes on the atoms that carry 95% of the summed squared steps of the
-/// band, Leimkuhler-Matthews steps of `time_step` at mobility 0.2, 30 time
+/// The full tangent, Leimkuhler-Matthews steps of `time_step` at mobility
+/// 0.2, 30 time
 /// units from each in-plane minimum before sampling, every step recorded,
 /// 40 time units a plane in the first pass, and up to four passes until
 /// the barrier error is at most 0.2 kT. A window of 20 time units whose end
@@ -15295,7 +15295,6 @@ fn campaign_pafi_at(temperature: f64, time_step: f64) -> rgsaddle::PafiConfig {
         .with_retain(4)
         .with_target_error(0.2 * thermal)
         .with_max_rounds(4)
-        .with_active_share(0.95)
         .with_max_jump(0.4)
         .with_jump_tol(0.05)
 }
@@ -16387,7 +16386,10 @@ fn frame_runs() -> Vec<FrameRun> {
         (rgsaddle::PairConfig::new([3, -1, 0], [0, 1, 0]), false),
         (rgsaddle::PairConfig::new([3, 0, 1], [0, 0, 1]), false),
     ];
-    let share = campaign_pafi(300.0).active_share;
+    // The share in the key is how a row of defect_pair_pafi_frames.csv is
+    // recognized. Those rows are the truncated tangent and are not
+    // recomputed: pafi_frames now samples the full tangent.
+    let share = 0.95;
     let mut runs = Vec::new();
     for time_step in [0.1, 0.2] {
         for (target, reversed) in frames {
@@ -16478,11 +16480,16 @@ fn defect_pair_pafi_frames() {
             images.clone()
         };
         let band = rgsaddle::ArcPath::from_positions(&frames).expect("path");
-        let active = band.frame_planes(run.share).expect("planes").active.len();
-        let pafi = campaign_pafi_at(temperature, run.time_step)
-            .with_seed(run.seed)
-            .with_active_share(run.share);
-        let (profile, planes) = rgsaddle::pafi_frames(&held, &band, &pafi).expect("pafi");
+        let active = band
+            .truncated_planes(run.share)
+            .expect("planes")
+            .active
+            .len();
+        let pafi = campaign_pafi_at(temperature, run.time_step).with_seed(run.seed);
+        // The file records the truncated coordinate. The path barrier is
+        // pafi_frames, which does not take a share.
+        let (profile, planes) =
+            rgsaddle::pafi_truncated(&held, &band, run.share, &pafi).expect("pafi");
         let (reverse, reverse_error) = profile.reverse_barrier();
         let base = planes[0].energy;
         let key = run.key();
@@ -16615,6 +16622,486 @@ fn pafi_frames_agree_across_frames() {
         assert!(
             (barrier - campaign).abs() <= 3.0 * error.hypot(campaign_error),
             "{key} at {barrier:.4} against {campaign:.4}"
+        );
+    }
+}
+
+/// Rows of one mask series: the truncated barrier, the compliance
+/// correction, and the full-tangent barrier on the same frames.
+struct MaskRow {
+    share: f64,
+    active: usize,
+    raw: f64,
+    raw_error: f64,
+    corrected: f64,
+    full: f64,
+    full_error: f64,
+    slide_reactant: f64,
+    slide_dividing: f64,
+    tau: f64,
+}
+
+struct HeldRows<'a> {
+    held: FastHeld<'a>,
+}
+
+impl rgsaddle::BandSurface for HeldRows<'_> {
+    fn eval(
+        &self,
+        positions: ArrayView2<f64>,
+        energies: &mut Array1<f64>,
+        gradients: &mut Array2<f64>,
+    ) -> Result<(), SaddleError> {
+        for (image, row) in positions.outer_iter().enumerate() {
+            let (energy, gradient) = self.held.eval(row)?;
+            energies[image] = energy;
+            gradients.row_mut(image).assign(&gradient);
+        }
+        Ok(())
+    }
+}
+
+/// Isolated dumbbell translation on `repeats`³, Mishin copper at the
+/// 300 K lattice. Seven images, climbing, stopped at the campaign force
+/// tolerance or after 40 steps.
+fn smoke_translation(copper: &FastCopper, repeats: usize) -> (NetworkState, Vec<Array1<f64>>) {
+    let temperature = 300.0;
+    let a = demkowicz_lattice(temperature);
+    let source = rgsaddle::PairConfig::new([2, 0, 0], [1, 0, 0]);
+    let target = rgsaddle::PairConfig::new([3, 1, 0], [0, 1, 0]);
+    let (state, _, _) = network_state(copper, repeats, a, source, false);
+    let (_seed, mode) = hop_guess(&state, a, source, target, false, [0, 0, 0]);
+    let product = settle(
+        copper,
+        &state.positions + &mode,
+        state.cell,
+        rgsaddle::DEFAULT_FORCE_TOL,
+    )
+    .expect("product");
+    let initial = rgsaddle::linear_path(state.positions.view(), product.view(), 7, None)
+        .expect("linear path");
+    let config = rgsaddle::BandConfig::default()
+        .with_force_tol(0.01)
+        .with_max_move(0.08)
+        .with_time_step(0.08)
+        .with_min_mode(None)
+        .with_climbing(rgsaddle::CiConfig::always())
+        .with_spring(rgsaddle::SpringKind::Uniform { k: 1.0 })
+        .with_cell(rgsaddle::Cell(state.cell));
+    let surface = HeldRows {
+        held: FastHeld {
+            copper,
+            cell: state.cell,
+        },
+    };
+    let mut session = rgsaddle::BandSession::new(config, initial).expect("band");
+    let report = session.run(&surface, 40).expect("neb");
+    eprintln!("smoke band {:?} after the step cap", report.status);
+    let images = session
+        .positions()
+        .outer_iter()
+        .map(|row| row.to_owned())
+        .collect();
+    (state, images)
+}
+
+/// `bᵀ A⁻¹ b` for a symmetric matvec, with `basis` projected out of `A`.
+///
+/// MINRES (Paige and Saunders, SIAM J. Numer. Anal. 12, 617 (1975),
+/// doi:10.1137/0712047) minimizes the residual for a symmetric `A`,
+/// definite or not, so one negative curvature does not have to be split
+/// off by hand. The probe length of the Hessian product is `ε^{1/3}`:
+/// a central difference has truncation `O(η²)` and roundoff `O(ε / η)`,
+/// and with derivatives of order one in eV and Å those meet at
+/// `η = ε^{1/3}`. The iteration stops when the residual is that factor
+/// times `‖b‖`. A right-hand side the probe maps to an all-zero product
+/// is a piece shorter than the probe's own guard; of a unit normal, that
+/// piece does not move `nᵀ A⁻¹ n` at this tolerance, and the form is zero.
+fn symmetric_compliance<F>(vector: &Array1<f64>, basis: ArrayView2<f64>, mut apply: F) -> f64
+where
+    F: FnMut(&Array1<f64>) -> Array1<f64>,
+{
+    let mut matvec = |direction: &Array1<f64>| {
+        let mut product = apply(direction);
+        rgsaddle::HyperplaneConstraint::project_out(&mut product, basis);
+        product
+    };
+    let mut rhs = vector.clone();
+    rgsaddle::HyperplaneConstraint::project_out(&mut rhs, basis);
+    let beta1 = rhs.dot(&rhs).sqrt();
+    if beta1 == 0.0 {
+        return 0.0;
+    }
+    let unseen = matvec(&rhs);
+    if unseen.iter().all(|value| *value == 0.0) {
+        assert!(
+            beta1 < 1.0,
+            "projected hessian has a kernel along a unit normal"
+        );
+        return 0.0;
+    }
+    let eta = f64::EPSILON.cbrt();
+    let stop = beta1 * eta;
+    let mut x = Array1::zeros(rhs.len());
+    let mut r1 = rhs.clone();
+    let mut y = rhs.clone();
+    let mut beta = beta1;
+    let mut oldb = 0.0;
+    let mut dbar = 0.0;
+    let mut epsln = 0.0;
+    let mut phibar = beta1;
+    let mut cs = -1.0;
+    let mut sn = 0.0;
+    let mut w = Array1::zeros(rhs.len());
+    let mut w2 = Array1::zeros(rhs.len());
+    let mut r2 = r1.clone();
+    for _ in 0..rhs.len() {
+        let v = &y / beta;
+        y = matvec(&v);
+        if oldb != 0.0 {
+            y = &y - &(&r1 * (beta / oldb));
+        }
+        let alfa = v.dot(&y);
+        y = &y - &(&r2 * (alfa / beta));
+        r1 = r2;
+        r2 = y.clone();
+        y = r2.clone();
+        oldb = beta;
+        beta = r2.dot(&y).sqrt();
+        let oldeps = epsln;
+        let delta = cs * dbar + sn * alfa;
+        let gbar = sn * dbar - cs * alfa;
+        epsln = sn * beta;
+        dbar = -cs * beta;
+        let gamma = gbar.hypot(beta).max(f64::EPSILON);
+        cs = gbar / gamma;
+        sn = beta / gamma;
+        let phi = cs * phibar;
+        phibar *= sn;
+        let denom = 1.0 / gamma;
+        let w1 = w2;
+        w2 = w;
+        w = (&v - &(&w1 * oldeps) - &(&w2 * delta)) * denom;
+        x = &x + &(&w * phi);
+        // `phibar` is the Lanczos estimate of the residual. It can fall
+        // early when the basis loses orthogonality, so the return waits
+        // for the residual of the product itself.
+        if phibar.abs() <= stop || beta == 0.0 {
+            let mut residual = &rhs - &matvec(&x);
+            rgsaddle::HyperplaneConstraint::project_out(&mut residual, basis);
+            let left = residual.dot(&residual).sqrt();
+            if left <= stop || beta == 0.0 {
+                assert!(left <= stop, "compliance residual {left} exceeds {stop}");
+                return rhs.dot(&x);
+            }
+        }
+    }
+    panic!("compliance iteration left a residual {}", phibar.abs());
+}
+
+/// `nᵀ H⁻¹ n` with rigid translations removed. `H` may have the one
+/// negative curvature of a saddle.
+fn masked_compliance(
+    held: &FastHeld,
+    position: &Array1<f64>,
+    gradient: &Array1<f64>,
+    normal: &Array1<f64>,
+    translations: ArrayView2<f64>,
+) -> f64 {
+    let eta = f64::EPSILON.cbrt();
+    symmetric_compliance(normal, translations, |direction| {
+        rgsaddle::numerical_hvp(
+            held,
+            position.view(),
+            gradient.view(),
+            direction.view(),
+            eta,
+            true,
+        )
+        .expect("hessian product")
+    })
+}
+
+fn constraint_normal(held: &FastHeld, frame: &Array1<f64>, raw: &Array1<f64>) -> Array1<f64> {
+    let modes = held.excluded_modes(frame.view()).expect("modes");
+    rgsaddle::HyperplaneConstraint::orthogonal_to(raw.view(), modes.view()).expect("normal")
+}
+
+/// Full-tangent barrier and the corrected truncated barriers on one band.
+fn mask_rows(
+    held: &FastHeld,
+    images: &[Array1<f64>],
+    config: &rgsaddle::PafiConfig,
+    shares: &[f64],
+) -> Vec<MaskRow> {
+    let path = rgsaddle::ArcPath::from_positions(images).expect("path");
+    let full_planes = path.frame_planes().expect("full planes");
+    let (full, full_samples) = rgsaddle::pafi_frames(held, &path, config).expect("full");
+    let dividing = full.dividing;
+    let frames = [0, dividing];
+    let mut path_energy = [0.0; 2];
+    let mut gradient = [Array1::zeros(0), Array1::zeros(0)];
+    for (slot, &frame) in frames.iter().enumerate() {
+        let (energy, force) = held.eval(images[frame].view()).expect("frame");
+        path_energy[slot] = energy;
+        gradient[slot] = force;
+    }
+    let translations = {
+        let modes = held.excluded_modes(images[0].view()).expect("translations");
+        rgsaddle::HyperplaneConstraint::orthonormal_basis(modes.view(), images[0].len())
+            .expect("basis")
+    };
+    let full_normal = [
+        constraint_normal(held, &images[0], &full_planes.normals[0]),
+        constraint_normal(held, &images[dividing], &full_planes.normals[dividing]),
+    ];
+    let mut tau = full_normal[1].clone();
+    rgsaddle::HyperplaneConstraint::project_out(&mut tau, translations.view());
+    let tau_norm = tau.dot(&tau).sqrt();
+    tau /= tau_norm;
+    let mut curvature = rgsaddle::numerical_hvp(
+        held,
+        images[dividing].view(),
+        gradient[1].view(),
+        tau.view(),
+        f64::EPSILON.cbrt(),
+        true,
+    )
+    .expect("curvature");
+    rgsaddle::HyperplaneConstraint::project_out(&mut curvature, translations.view());
+    let lambda = tau.dot(&curvature);
+    let residual = &curvature - &(&tau * lambda);
+    eprintln!(
+        "dividing curvature {lambda}, eigen residual {}",
+        residual.dot(&residual).sqrt()
+    );
+    let full_compliance = [
+        masked_compliance(
+            held,
+            &images[0],
+            &gradient[0],
+            &full_normal[0],
+            translations.view(),
+        ),
+        masked_compliance(
+            held,
+            &images[dividing],
+            &gradient[1],
+            &full_normal[1],
+            translations.view(),
+        ),
+    ];
+    let slide_full = [
+        path_energy[0] - full_samples[0].energy,
+        path_energy[1] - full_samples[dividing].energy,
+    ];
+    let mut rows = Vec::new();
+    for &share in shares {
+        let planes = path.truncated_planes(share).expect("truncated");
+        let (profile, samples) =
+            rgsaddle::pafi_truncated(held, &path, share, config).expect("truncated sampling");
+        let normal = [
+            constraint_normal(held, &images[0], &planes.normals[0]),
+            constraint_normal(held, &images[dividing], &planes.normals[dividing]),
+        ];
+        let compliance = [
+            masked_compliance(
+                held,
+                &images[0],
+                &gradient[0],
+                &normal[0],
+                translations.view(),
+            ),
+            masked_compliance(
+                held,
+                &images[dividing],
+                &gradient[1],
+                &normal[1],
+                translations.view(),
+            ),
+        ];
+        let slide = [
+            path_energy[0] - samples[0].energy,
+            path_energy[1] - samples[dividing].energy,
+        ];
+        let anchored =
+            profile.free_energy[dividing] + (slide[1] - slide_full[1]) - (slide[0] - slide_full[0]);
+        let corrected = rgsaddle::harmonic_mask_shift(
+            anchored,
+            full_compliance[0],
+            compliance[0],
+            full_compliance[1],
+            compliance[1],
+            config.thermal,
+        )
+        .expect("shift");
+        let row = MaskRow {
+            share,
+            active: planes.active.len(),
+            raw: profile.free_energy[dividing],
+            raw_error: profile.free_energy_error[dividing],
+            corrected,
+            full: full.free_energy[dividing],
+            full_error: full.free_energy_error[dividing],
+            slide_reactant: slide[0],
+            slide_dividing: slide[1],
+            tau: samples[dividing].tau,
+        };
+        eprintln!(
+            "share {:.2} atoms {} raw {:.6} ± {:.6} corrected {:.6} full {:.6} ± {:.6} slide {:.6} {:.6} c {:.6} {:.6} tau {:.2} jumps {} own {:.6}",
+            row.share,
+            row.active,
+            row.raw,
+            row.raw_error,
+            row.corrected,
+            row.full,
+            row.full_error,
+            row.slide_reactant,
+            row.slide_dividing,
+            compliance[0],
+            compliance[1],
+            row.tau,
+            samples[dividing].jumps,
+            profile.barrier
+        );
+        rows.push(row);
+    }
+    rows
+}
+
+/// MINRES on a diagonal indefinite matrix, and with a kernel row removed.
+#[test]
+fn minres_inverts_an_indefinite_diagonal() {
+    let curvature = [2.0, -3.0, 5.0, 4.0];
+    let normal = Array1::from_vec(vec![1.0, 1.0, 1.0, 1.0]);
+    let empty = Array2::<f64>::zeros((0, 4));
+    let got = symmetric_compliance(&normal, empty.view(), |direction| {
+        Array1::from_vec(
+            direction
+                .iter()
+                .zip(curvature)
+                .map(|(component, lambda)| component * lambda)
+                .collect(),
+        )
+    });
+    let expect = curvature.iter().map(|lambda| 1.0 / lambda).sum::<f64>();
+    assert!(
+        (got - expect).abs() < f64::EPSILON.sqrt(),
+        "compliance {got} against {expect}"
+    );
+    let mut kernel = Array2::<f64>::zeros((1, 3));
+    kernel[(0, 0)] = 1.0;
+    let normal = Array1::from_vec(vec![5.0, 1.0, 1.0]);
+    let got = symmetric_compliance(&normal, kernel.view(), |direction| {
+        Array1::from_vec(vec![0.0, 2.0 * direction[1], -4.0 * direction[2]])
+    });
+    let expect = 1.0 / 2.0 + 1.0 / -4.0;
+    assert!(
+        (got - expect).abs() < f64::EPSILON.sqrt(),
+        "projected compliance {got} against {expect}"
+    );
+}
+
+fn mask_smoke_config() -> rgsaddle::PafiConfig {
+    let thermal = 300.0 * rgsaddle::BOLTZMANN_EV_PER_K;
+    rgsaddle::PafiConfig::default()
+        .with_thermal(thermal)
+        .with_mobility(0.2)
+        .with_time_step(0.05)
+        .with_thermalize(80)
+        .with_stride(1)
+        .with_samples(400)
+        .with_window(40)
+        .with_blocks(8)
+        .with_seed(7)
+        .with_retain(0)
+        .with_target_error(None)
+        .with_max_rounds(1)
+        .with_relax_tol(rgsaddle::DEFAULT_FORCE_TOL)
+        .with_max_jump(Some(0.4))
+        .with_jump_tol(0.05)
+}
+
+/// The corrected truncated barriers agree with the full tangent. The
+/// tolerance is the same three combined standard errors the frame study
+/// uses. Share 1 is that tangent, so its raw barrier matches as well.
+#[test]
+fn isolated_hop_mask_matches_the_full_tangent() {
+    let copper = FastCopper::new();
+    let (state, images) = smoke_translation(&copper, 4);
+    let held = FastHeld {
+        copper: &copper,
+        cell: state.cell,
+    };
+    let shares = [0.90, 0.95, 0.99, 1.0];
+    let rows = mask_rows(&held, &images, &mask_smoke_config(), &shares);
+    let full = rows[0].full;
+    for row in &rows {
+        let tol = 3.0 * row.raw_error.hypot(row.full_error);
+        assert!(
+            (row.corrected - full).abs() <= tol,
+            "share {} corrected {:.6} against {:.6}, tolerance {tol:.6}",
+            row.share,
+            row.corrected,
+            full
+        );
+        if row.share == 1.0 {
+            assert!(
+                (row.raw - full).abs() <= f64::EPSILON.sqrt() * full.abs().max(1.0),
+                "share 1 raw {:.6} against {full:.6}",
+                row.raw
+            );
+        }
+    }
+}
+
+const MASK_SERIES_HEADER: &str = "share,active_atoms,raw_eV,raw_error_eV,corrected_eV,full_eV,full_error_eV,slide_reactant_eV,slide_dividing_eV,tau";
+
+/// Campaign-length mask series on the 13³ isolated translation. The
+/// script `scripts/pafi-mask-fix` runs this.
+#[test]
+#[ignore = "full-length PAFI mask series of the isolated copper hop; writes benchmarks/pafi_mask_fix.csv"]
+fn pafi_mask_series() {
+    let copper = FastCopper::new();
+    let temperature = 300.0;
+    let target = rgsaddle::PairConfig::new([3, 1, 0], [0, 1, 0]);
+    let (state, images, meta) = isolated_frame_band(&copper, temperature, target);
+    eprintln!("mask series: {meta}");
+    let held = FastHeld {
+        copper: &copper,
+        cell: state.cell,
+    };
+    let shares = [0.90, 0.95, 0.99, 1.0];
+    let rows = mask_rows(&held, &images, &campaign_pafi(temperature), &shares);
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("benchmarks")
+        .join("pafi_mask_fix.csv");
+    let mut text = format!("{MASK_SERIES_HEADER}\n");
+    for row in &rows {
+        text.push_str(&format!(
+            "{:.2},{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.4}\n",
+            row.share,
+            row.active,
+            row.raw,
+            row.raw_error,
+            row.corrected,
+            row.full,
+            row.full_error,
+            row.slide_reactant,
+            row.slide_dividing,
+            row.tau
+        ));
+    }
+    std::fs::write(&path, text).expect("mask series csv");
+    let full = rows[0].full;
+    for row in &rows {
+        let tol = 3.0 * row.raw_error.hypot(row.full_error);
+        assert!(
+            (row.corrected - full).abs() <= tol,
+            "share {} corrected {:.6} against {:.6}",
+            row.share,
+            row.corrected,
+            full
         );
     }
 }

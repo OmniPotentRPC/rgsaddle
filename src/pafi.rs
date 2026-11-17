@@ -2,10 +2,10 @@
 //!
 //! Swinburne and Marinica, Phys. Rev. Lett. 120, 135503 (2018),
 //! doi:10.1103/PhysRevLett.120.135503, give a path-based free-energy
-//! gradient that does not need a collective variable. The path `X(s)` is
-//! the spline through the images of [`ArcPath`], and the hyperplane at `s`
-//! is `(x - X) · t = 0`, with `t = X'` less its center-of-mass part when
-//! the center of mass is held. With `ψ = (x - X) · X'' / |t|²`,
+//! gradient that does not need a collective variable. [`pafi_profile`]
+//! takes the spline through the images of [`ArcPath`]. The hyperplane at
+//! `s` is `(x - X) · t = 0`, with `t = X'` less its center-of-mass part
+//! when the center of mass is held. With `ψ = (x - X) · X'' / |t|²`,
 //!
 //! `dF/ds = ⟨ (∇E · t) (1 - ψ) ⟩`.
 //!
@@ -15,21 +15,39 @@
 //! public driver record. The force-only integral is the free energy of the
 //! flat hyperplanes,
 //! `-kT ln ∫ δ((x - X) · t / |t|) exp(-E/kT) dx`, which does not depend on
-//! how the path is parametrized. Production samples arrive through
+//! how the path is parametrized.
+//!
+//! [`pafi_frames`] samples the Euclidean surface measure on the flat
+//! hyperplane `(x - X) · ν = 0`. With `τ = dX/dr` the path derivative and
+//! `ν` the unit constraint normal,
+//!
+//! `dF/dr = ⟨ (∇E · ν) (τ · ν - (x - X) · dν/dr) ⟩`.
+//!
+//! When `ν` is the unit tangent and `r` is its arc length, `τ · ν = 1`
+//! and this is the multiply form above. A normal that keeps only some of
+//! the atoms is a different foliation, and [`pafi_frames`] therefore uses
+//! the full tangent. Rigid translations are removed from it by
+//! [`crate::ohtst::HyperplaneConstraint::orthogonal_to`], and the estimator
+//! uses that same unit normal.
+//!
+//! Production samples of the spline path arrive through
 //! [`HyperplaneSampler`]. The built-in overdamped Langevin implementation,
-//! the paper's Eq. (9), is retained only as the deterministic
-//! analytic-surface reference. [`PafiIntegrator`] selects the direct
-//! Euler-Maruyama discretization or the step of Leimkuhler and Matthews,
-//! Appl. Math. Res. Express 2013, 34 (2013), doi:10.1093/amrx/abs010,
-//! Eq. (3). The latter sums two consecutive noise draws, which makes
-//! stationary averages second order in the step and exact on a harmonic
-//! plane. The walk projects drift and noise, then restores the plane after
-//! every step. Holding the center of mass is optional and is the `com yes`
-//! choice of `fix pafi`. The integral of `dF/ds` from the reactant is the
-//! potential of mean force. One trajectory uses block averages of the
-//! equilibrated records for its standard error. An ensemble of
-//! trajectories uses the spread of independent trajectory means, as
-//! Swinburne's reference code does.
+//! the paper's Eq. (9), is the deterministic analytic-surface reference,
+//! and the frame chains use the same step. [`PafiIntegrator`] selects the
+//! direct Euler-Maruyama discretization or the step of Leimkuhler and
+//! Matthews, Appl. Math. Res. Express 2013, 34 (2013),
+//! doi:10.1093/amrx/abs010, Eq. (3). The latter sums two consecutive noise
+//! draws, which makes stationary averages second order in the step and
+//! exact on a harmonic plane. The walk projects drift and noise, then
+//! restores the plane after every step. Holding the center of mass is
+//! optional and is the `com yes` choice of `fix pafi`. The integral of
+//! `dF/ds` from the reactant is the potential of mean force. One
+//! trajectory uses block averages of the equilibrated records for its
+//! standard error. An ensemble of trajectories uses the spread of
+//! independent trajectory means, as Swinburne's reference code does. The
+//! frame chain reports the larger of the block-mean error and the one from
+//! the integrated autocorrelation time in a Sokal window, and continues
+//! from where it stopped when a plane needs more samples.
 //!
 //! # What goes in
 //!
@@ -126,7 +144,7 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use ndarray::{Array1, Array2, ArrayView1};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use rayon::prelude::*;
 use std::sync::{Arc, Mutex};
 
@@ -135,6 +153,7 @@ use rgmin::{Control, Error, Method, Oracle, Solver, Status, StopNorm};
 use crate::Region;
 use crate::error::SaddleError;
 use crate::minmode::PointSurface;
+use crate::ohtst::{self, HyperplaneConstraint};
 use crate::projector::{
     Hyperplane, HyperplaneEnsemble, HyperplaneObservation, HyperplaneSampleBudget,
     HyperplaneSampler, ProjectedConstraint, TangentProjector,
@@ -242,10 +261,6 @@ pub struct PafiConfig {
     /// Reaching the step cap, or a stall of the method, ends the quench
     /// where it is.
     pub quench: RelaxConfig,
-    /// Share of the summed squared steps of the path carried by the atoms
-    /// the planes of [`pafi_frames`] constrain, in `(0, 1]`. 1 constrains
-    /// every atom.
-    pub active_share: f64,
     /// Largest atom force left in the plane when [`pafi_frames`] relaxes a
     /// frame in its plane before sampling.
     pub relax_tol: f64,
@@ -279,7 +294,6 @@ with_setters!(PafiConfig {
     with_max_rounds => max_rounds: val usize,
     with_max_jump => max_jump: opt f64,
     with_quench => quench: val RelaxConfig,
-    with_active_share => active_share: val f64,
     with_relax_tol => relax_tol: val f64,
     with_jump_tol => jump_tol: val f64,
     with_window => window: val usize,
@@ -323,7 +337,6 @@ impl Default for PafiConfig {
             region: None,
             max_jump: Some(0.4),
             quench: RelaxConfig::default().with_method(Method::Ode12r),
-            active_share: 1.0,
             relax_tol: 1.0e-4,
             jump_tol: 1.0e-2,
             window: 0,
@@ -371,11 +384,6 @@ impl PafiConfig {
                 ));
             }
             self.quench.check()?;
-        }
-        if !(self.active_share > 0.0 && self.active_share <= 1.0) {
-            return Err(SaddleError::Invalid(
-                "PAFI active share must lie in (0, 1]".into(),
-            ));
         }
         if !(self.relax_tol.is_finite() && self.relax_tol > 0.0)
             || !(self.jump_tol.is_finite() && self.jump_tol > 0.0)
@@ -596,17 +604,34 @@ impl ArcPath {
 
     /// The planes of [`pafi_frames`].
     ///
-    /// The atoms kept are the fewest, largest first, whose summed squared
-    /// steps along the path reach `share` of the total; 1 keeps every atom.
-    /// On those atoms the normal is the unit tangent of the parabola
-    /// through the frame and its two neighbours, in the arc length of the
-    /// chords, and the curvature is the same derivative of the normals.
-    /// The end frames take the parabola through themselves and the next
-    /// two. Both are of second order in the spacing, where a chord tilts
-    /// the plane by half the angle the path turns over it, and a reversed
-    /// band gives the same planes. [`ArcPath::geometry`] stays the spline
-    /// through the same frames.
-    pub fn frame_planes(&self, share: f64) -> Result<FramePlanes, SaddleError> {
+    /// The normal is the unit tangent of the parabola through the frame
+    /// and its two neighbours, in the arc length of the chords, and the
+    /// curvature is the same derivative of the normals. The end frames
+    /// take the parabola through themselves and the next two. Both are of
+    /// second order in the spacing, where a chord tilts the plane by half
+    /// the angle the path turns over it, and a reversed band gives the
+    /// same planes. Every atom carries the tangent: keeping only the atoms
+    /// that hold some fraction of the summed squared steps replaces this
+    /// plane by the one [`Self::truncated_planes`] builds, and the barrier
+    /// of that plane depends on the fraction. [`ArcPath::geometry`] stays
+    /// the spline through the same frames.
+    pub fn frame_planes(&self) -> Result<FramePlanes, SaddleError> {
+        self.planes_on(1.0)
+    }
+
+    /// Planes whose normals are zero off the fewest atoms, largest first,
+    /// that carry `share` of the summed squared steps.
+    ///
+    /// This is not the plane of [`pafi_frames`]. The constraint
+    /// `(x - X) · ν = 0` with `ν` the renormalized masked tangent is a
+    /// different foliation from `(x - X) · τ = 0`. On a harmonic transverse
+    /// well the two barriers differ by [`harmonic_mask_shift`]. `share`
+    /// lies in `(0, 1]`; 1 is [`Self::frame_planes`].
+    pub fn truncated_planes(&self, share: f64) -> Result<FramePlanes, SaddleError> {
+        self.planes_on(share)
+    }
+
+    fn planes_on(&self, share: f64) -> Result<FramePlanes, SaddleError> {
         let count = self.frames.len();
         if !(share > 0.0 && share <= 1.0) {
             return Err(SaddleError::Invalid(
@@ -913,6 +938,94 @@ fn check_barriers(
         ));
     }
     Ok(())
+}
+
+/// Flat-hyperplane derivative at one configuration.
+///
+/// `dF/dr = (∇E · ν) (τ · ν - (x - X) · dν/dr)` on the Euclidean surface
+/// measure of `(x - X) · ν = 0`. `normal` is the unit constraint normal
+/// `ν`, `normal_rate` is `dν/dr`, `path_tangent` is `τ = dX/dr`, and
+/// `displacement` is `x - X`. When `ν` is the unit path tangent and `r`
+/// its arc length, `τ · ν = 1` and this is `(∇E · ν) (1 - ψ)`.
+pub fn flat_hyperplane_gradient(
+    gradient: ArrayView1<f64>,
+    displacement: ArrayView1<f64>,
+    normal: ArrayView1<f64>,
+    normal_rate: ArrayView1<f64>,
+    path_tangent: ArrayView1<f64>,
+) -> Result<f64, SaddleError> {
+    let n = gradient.len();
+    if displacement.len() != n
+        || normal.len() != n
+        || normal_rate.len() != n
+        || path_tangent.len() != n
+    {
+        return Err(SaddleError::Shape(
+            "PAFI flat gradient needs one length for every vector".into(),
+        ));
+    }
+    if !gradient
+        .iter()
+        .chain(displacement.iter())
+        .chain(normal.iter())
+        .chain(normal_rate.iter())
+        .chain(path_tangent.iter())
+        .all(|v| v.is_finite())
+    {
+        return Err(SaddleError::NonFinite("PAFI flat gradient"));
+    }
+    let factor = path_tangent.dot(&normal) - displacement.dot(&normal_rate);
+    Ok(gradient.dot(&normal) * factor)
+}
+
+/// Map a masked-plane barrier onto the barrier of another normal.
+///
+/// On a path whose transverse motion is harmonic, and whose planes pass
+/// through the same stationary points, the flat-hyperplane barrier with
+/// unit normal `n` and the one with unit normal `n*` differ by the
+/// entropy of the two curvatures. With `c(n) = nᵀ H⁻¹ n` the compliance,
+/// `det(H restricted to n⊥) = det(H) c(n)` for invertible `H`, so the
+/// Gaussian integrals give
+///
+/// `ΔF(n*) = ΔF(n) + (kT/2) ln[ (c_s(n*)/c_s(n)) (c_m(n)/c_m(n*)) ]`.
+///
+/// `reactant_*` is `c` on the reactant plane and `dividing_*` is `c` on
+/// the dividing plane. A negative curvature, as at a saddle, is carried
+/// by a negative compliance; the ratio of the two dividing compliances
+/// has to be positive, and likewise the reactant pair. The shift does not
+/// include a slide of the plane's minimum off the path point: that energy
+/// is `E(path) - E(minimum)` and is added by the caller.
+pub fn harmonic_mask_shift(
+    barrier: f64,
+    reactant_full: f64,
+    reactant_mask: f64,
+    dividing_full: f64,
+    dividing_mask: f64,
+    thermal: f64,
+) -> Result<f64, SaddleError> {
+    let values = [
+        barrier,
+        reactant_full,
+        reactant_mask,
+        dividing_full,
+        dividing_mask,
+        thermal,
+    ];
+    if !values.iter().all(|v| v.is_finite()) {
+        return Err(SaddleError::NonFinite("PAFI mask shift"));
+    }
+    if thermal <= 0.0 {
+        return Err(SaddleError::Invalid(
+            "PAFI mask shift needs a positive kT".into(),
+        ));
+    }
+    let ratio = (dividing_full / dividing_mask) * (reactant_mask / reactant_full);
+    if !(ratio.is_finite() && ratio > 0.0) {
+        return Err(SaddleError::Invalid(
+            "PAFI mask compliances need a positive ratio at each end".into(),
+        ));
+    }
+    Ok(barrier + 0.5 * thermal * ratio.ln())
 }
 
 /// Sample one hyperplane and return the PAFI gradient.
@@ -1825,7 +1938,8 @@ fn average_windowed<S: PointSurface>(
     geometry: &PathGeometry,
     config: &PafiConfig,
 ) -> Result<HyperplaneAverage, SaddleError> {
-    let plane = Plane::new(geometry, config.fix_com)?;
+    let directions = plane_directions(surface, geometry.positions.view(), config.fix_com)?;
+    let plane = Plane::new(geometry, directions.view())?;
     let mut chain = Chain::new(&plane, config.seed, config);
     chain.run(surface, &plane, config, config.thermalize, config.samples)?;
     if chain.values.is_empty() {
@@ -1839,24 +1953,57 @@ fn average_windowed<S: PointSurface>(
 /// One hyperplane on every frame of `path`, each sampled from its own
 /// minimum, integrated against the zero-temperature energy of those minima.
 ///
-/// The planes are [`ArcPath::frame_planes`] at
-/// [`PafiConfig::active_share`]. Each frame is relaxed in its plane to
-/// [`PafiConfig::relax_tol`]. With `g = (∇E · n)(1 - ψ)`,
+/// The planes are [`ArcPath::frame_planes`]: the full tangent, not a
+/// truncation of it. Each frame is relaxed in its plane to
+/// [`PafiConfig::relax_tol`], giving `x*_k` and `E*_k`; its chain starts
+/// there and `ψ` is measured from there. With
+/// `g = (∇E · ν) (τ · ν - (x - X) · dν/ds)`,
 ///
 /// `F_k = E*_k - E*_0 + Σ trapezoid(⟨g⟩ - g(x*))`
 ///
-/// over the arc length of the constrained atoms. [`pafi_profile`] keeps
-/// the spline hyperplanes.
+/// over the arc length of the path. At zero temperature the sum vanishes
+/// and the barrier is the energy of the in-plane minima whatever the
+/// spacing of the frames, so the trapezoid acts only on the thermal part.
+/// The dividing surface is the maximum of `F`, and passes go on as in
+/// [`pafi_profile`]. Each plane's [`HyperplaneAverage::evaluations`]
+/// includes its relaxation. [`pafi_profile`] keeps the spline hyperplanes.
 pub fn pafi_frames<S: PointSurface + Sync>(
     surface: &S,
     path: &ArcPath,
     config: &PafiConfig,
 ) -> Result<(FreeEnergyProfile, Vec<HyperplaneAverage>), SaddleError> {
+    let planes = path.frame_planes()?;
+    sample_frame_planes(surface, path, &planes, config)
+}
+
+/// [`pafi_frames`] on the truncated planes of [`ArcPath::truncated_planes`].
+///
+/// The barrier is the free energy of that truncated foliation. It depends
+/// on `share`. [`harmonic_mask_shift`] maps it onto the full-tangent
+/// barrier when the transverse motion is harmonic and both planes pass
+/// through the same points; a minimum that has slid off the path point
+/// adds `E(path) - E(minimum)` at the dividing frame and subtracts it at
+/// the reactant.
+pub fn pafi_truncated<S: PointSurface + Sync>(
+    surface: &S,
+    path: &ArcPath,
+    share: f64,
+    config: &PafiConfig,
+) -> Result<(FreeEnergyProfile, Vec<HyperplaneAverage>), SaddleError> {
+    let planes = path.truncated_planes(share)?;
+    sample_frame_planes(surface, path, &planes, config)
+}
+
+fn sample_frame_planes<S: PointSurface + Sync>(
+    surface: &S,
+    path: &ArcPath,
+    planes: &FramePlanes,
+    config: &PafiConfig,
+) -> Result<(FreeEnergyProfile, Vec<HyperplaneAverage>), SaddleError> {
     config.check()?;
-    let planes = path.frame_planes(config.active_share)?;
-    let frames = path.frames();
-    let n = frames[0].positions.len();
-    let relaxed = frames
+    let n = path.frames[0].positions.len();
+    let relaxed = path
+        .frames
         .par_iter()
         .zip(&planes.normals)
         .map(|(frame, normal)| {
@@ -1867,7 +2014,8 @@ pub fn pafi_frames<S: PointSurface + Sync>(
                 jerk: Array1::zeros(n),
                 arc: 0.0,
             };
-            let plane = Plane::new(&geometry, config.fix_com)?;
+            let directions = plane_directions(surface, frame.positions.view(), config.fix_com)?;
+            let plane = Plane::new(&geometry, directions.view())?;
             match relax_in_plane(surface, &plane, frame.positions.clone(), config.relax_tol)? {
                 (minimum, evaluations, true) => Ok((minimum, evaluations)),
                 _ => Err(SaddleError::Stalled(format!(
@@ -1912,7 +2060,10 @@ where
 {
     let planes = geometries
         .iter()
-        .map(|geometry| Plane::new(geometry, config.fix_com))
+        .map(|geometry| {
+            let directions = plane_directions(surface, geometry.positions.view(), config.fix_com)?;
+            Plane::new(geometry, directions.view())
+        })
         .collect::<Result<Vec<_>, _>>()?;
     let mut chains: Vec<Chain> = planes
         .iter()
@@ -1983,17 +2134,20 @@ fn control_variate(
     Ok(profile)
 }
 
-/// The plane `(x - X) · t = 0` of one geometry and the projection onto it.
+/// The plane `(x - X) · ν = 0` and the vectors the estimator dots with.
 struct Plane<'a> {
     geometry: &'a PathGeometry,
-    /// `t` with the mean Cartesian drift removed when that is held, at
-    /// unit length: the one direction the dynamics may not take.
-    unit: Array1<f64>,
-    com: bool,
+    /// Constraint. Its normal is `ν`, rigid directions removed.
+    constraint: HyperplaneConstraint,
+    /// `ν (τ · ν)`, so `∇E · tangent` is `(∇E · ν)(τ · ν)`.
+    tangent: Array1<f64>,
+    /// `(dν/ds) / (τ · ν)`, so `(1 - (x - X) · curvature)` supplies the
+    /// rest of `τ · ν - (x - X) · dν/ds`.
+    curvature: Array1<f64>,
 }
 
 impl<'a> Plane<'a> {
-    fn new(geometry: &'a PathGeometry, fix_com: bool) -> Result<Self, SaddleError> {
+    fn new(geometry: &'a PathGeometry, directions: ArrayView2<f64>) -> Result<Self, SaddleError> {
         let n = geometry.positions.len();
         if geometry.tangent.len() != n || geometry.curvature.len() != n {
             return Err(SaddleError::Shape(
@@ -2009,42 +2163,72 @@ impl<'a> Plane<'a> {
         {
             return Err(SaddleError::NonFinite("PAFI path geometry"));
         }
-        let com = fix_com && n >= 6 && n.is_multiple_of(3);
-        let mut unit = geometry.tangent.clone();
-        if com {
-            remove_com(&mut unit);
-        }
-        let length = norm(&unit);
-        if !(length.is_finite() && length > 0.0) {
-            return Err(SaddleError::Invalid("PAFI tangent vanishes".into()));
-        }
-        unit /= length;
+        let (tangent, curvature) = if directions.nrows() == 0 {
+            (geometry.tangent.clone(), geometry.curvature.clone())
+        } else {
+            // τ is the stored tangent and dτ/ds its stored derivative.
+            // ν = Pτ / |Pτ|, and the estimator wants
+            // (∇E · ν) (τ · ν - (x - X) · dν/ds).
+            let (normal, rate) = HyperplaneConstraint::orthogonal_rate(
+                geometry.tangent.view(),
+                geometry.curvature.view(),
+                directions,
+            )?;
+            let alpha = geometry.tangent.dot(&normal);
+            if !(alpha.is_finite() && alpha != 0.0) {
+                return Err(SaddleError::Invalid(
+                    "PAFI tangent is orthogonal to its rigid-mode-free normal".into(),
+                ));
+            }
+            (&normal * alpha, &rate / alpha)
+        };
+        let constraint =
+            HyperplaneConstraint::through(geometry.positions.clone(), tangent.view(), directions)?;
         Ok(Self {
             geometry,
-            unit,
-            com,
+            constraint,
+            tangent,
+            curvature,
         })
     }
 
     fn project(&self, vector: &mut Array1<f64>) {
-        if self.com {
-            remove_com(vector);
-        }
-        let along = vector.dot(&self.unit);
-        vector.scaled_add(-along, &self.unit);
+        self.constraint.project(vector);
     }
 
     fn restore(&self, x: &mut Array1<f64>) {
-        let tangent = &self.geometry.tangent;
-        let slip = (&*x - &self.geometry.positions).dot(tangent) / self.unit.dot(tangent);
-        x.scaled_add(-slip, &self.unit);
+        self.constraint.restore(x);
     }
 
     fn noise(&self, rng: &mut Rng) -> Array1<f64> {
-        let mut noise = Array1::from_shape_fn(self.unit.len(), |_| rng.normal());
+        let mut noise = Array1::from_shape_fn(self.tangent.len(), |_| rng.normal());
         self.project(&mut noise);
         noise
     }
+}
+
+fn plane_directions<S: PointSurface>(
+    surface: &S,
+    positions: ArrayView1<f64>,
+    fix_com: bool,
+) -> Result<Array2<f64>, SaddleError> {
+    if !fix_com {
+        return Ok(Array2::zeros((0, positions.len())));
+    }
+    let modes = surface.excluded_modes(positions)?;
+    if modes.nrows() > 0 {
+        if modes.ncols() != positions.len() {
+            return Err(SaddleError::Shape(
+                "PAFI rigid modes must match the path".into(),
+            ));
+        }
+        return Ok(modes);
+    }
+    let n = positions.len();
+    if n >= 6 && n.is_multiple_of(3) {
+        return Ok(ohtst::uniform_translations(n / 3));
+    }
+    Ok(Array2::zeros((0, n)))
 }
 
 /// Windows a pass may run for each one it asks for, the dropped included.
@@ -2262,11 +2446,17 @@ impl Chain {
                 ));
             }
             if self.evaluations == 0 {
-                self.origin = (energy, gradient.dot(&geometry.tangent));
+                self.origin = (energy, gradient.dot(&plane.tangent));
             }
             self.evaluations += 1;
             if step >= thermalize && (step - thermalize).is_multiple_of(config.stride) {
-                let (value, psi) = chord_projected_gradient(&gradient, &self.x, geometry);
+                let (value, psi) = chord_projected_gradient(
+                    &gradient,
+                    &self.x,
+                    &geometry.positions,
+                    &plane.tangent,
+                    &plane.curvature,
+                );
                 if !value.is_finite() || !psi.is_finite() {
                     return Err(SaddleError::NonFinite("PAFI projected gradient"));
                 }
@@ -2432,10 +2622,12 @@ fn relax_in_plane<S: PointSurface>(
 fn chord_projected_gradient(
     gradient: &Array1<f64>,
     x: &Array1<f64>,
-    geometry: &PathGeometry,
+    origin: &Array1<f64>,
+    tangent: &Array1<f64>,
+    curvature: &Array1<f64>,
 ) -> (f64, f64) {
-    let psi = (x - &geometry.positions).dot(&geometry.curvature);
-    let parallel = gradient.dot(&geometry.tangent);
+    let psi = (x - origin).dot(curvature);
+    let parallel = gradient.dot(tangent);
     (parallel * (1.0 - psi), psi)
 }
 
