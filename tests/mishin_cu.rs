@@ -15561,7 +15561,7 @@ fn defect_pair_network_pafi() {
             &group,
         );
         let columns = match &found {
-            Err(error) => format!("no_path,,,,,,,,,,,,{},", error.replace(',', ";")),
+            Err(error) => format!("no_path,,,,,,,,,,,{},", error.replace(',', ";")),
             Ok(found) => format!(
                 "{},{},{},{},{:.3e},{},{},{},{},{},{},{},{}",
                 if found.band_force <= PAFI_BAND_FORCE {
