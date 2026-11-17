@@ -2740,9 +2740,9 @@ fn accumulate_eam(
     pairs: &[Pair],
     volume: f64,
 ) -> (f64, Array1<f64>, [[f64; 3]; 3]) {
+    let densities: Vec<(f64, f64)> = pairs.iter().map(|bond| density(bond.r)).collect();
     let mut rho = vec![0.0; n];
-    for bond in pairs {
-        let weight = density(bond.r).0;
+    for (bond, &(weight, _)) in pairs.iter().zip(&densities) {
         rho[bond.i] += weight;
         if bond.i != bond.j {
             rho[bond.j] += weight;
@@ -2759,9 +2759,8 @@ fn accumulate_eam(
     }
     let mut gradient = Array1::zeros(n_coord);
     let mut virial = [[0.0; 3]; 3];
-    for bond in pairs {
+    for (bond, &(_, drho)) in pairs.iter().zip(&densities) {
         let (v, dv) = pair(bond.r);
-        let (_, drho) = density(bond.r);
         let inv_r = 1.0 / bond.r;
         if bond.i != bond.j {
             energy += v;
