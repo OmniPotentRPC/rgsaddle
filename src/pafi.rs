@@ -154,7 +154,7 @@ use crate::Region;
 use crate::error::SaddleError;
 use crate::minmode::PointSurface;
 use crate::ohtst::{
-    self, HyperplaneConstraint, TransmissionCoefficient, TransmissionConfig,
+    self, EndState, HyperplaneConstraint, TransmissionCoefficient, TransmissionConfig,
     transmission_coefficient,
 };
 use crate::projector::{
@@ -1187,6 +1187,13 @@ pub fn pafi_transmission<S: PointSurface>(
             "PAFI transmission needs one sampled plane per profile value".into(),
         ));
     }
+    if (profile.dividing == 0 || profile.dividing + 1 == planes.len())
+        && matches!(&config.end_state, EndState::Side)
+    {
+        return Err(SaddleError::Invalid(
+            "an endpoint PAFI dividing plane needs basin end-state assignment".into(),
+        ));
+    }
     let dividing = &planes[profile.dividing];
     if dividing.retained.is_empty() {
         return Err(SaddleError::Invalid(
@@ -1650,6 +1657,76 @@ struct Quench {
     /// Whether the solver stalled or spent the step cap instead of
     /// reaching the force tolerance.
     unconverged: bool,
+}
+
+#[cfg(test)]
+mod transmission_tests {
+    use ndarray::{Array1, ArrayView1, array};
+
+    use super::*;
+
+    struct Flat;
+
+    impl PointSurface for Flat {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            Ok((0.0, Array1::zeros(x.len())))
+        }
+    }
+
+    fn plane() -> HyperplaneAverage {
+        HyperplaneAverage {
+            plane: Hyperplane::new(array![0.0], array![1.0]).unwrap(),
+            gradient: 0.0,
+            error: 0.0,
+            psi: 0.0,
+            samples: 1,
+            tau: 0.5,
+            n_eff: 1.0,
+            evaluations: 1,
+            retained: vec![array![0.0]],
+            equilibration: EquilibrationReport {
+                discard: 0,
+                equilibration_steps: 0,
+                tau: 0.5,
+                n_eff: 1.0,
+                split_half_drift: 0.0,
+                split_half_error: 0.0,
+                sigma_multiple: 4.0,
+                drift_passed: true,
+            },
+            rejected: 0,
+            unconverged_quenches: 0,
+            energy: 0.0,
+            zero: 0.0,
+            widest: 0.0,
+            jumps: 0,
+        }
+    }
+
+    #[test]
+    fn endpoint_transmission_requires_basin_assignment() {
+        let planes = vec![plane(), plane()];
+        for dividing in [0, 1] {
+            let profile = FreeEnergyProfile {
+                arc: vec![0.0, 1.0],
+                gradient: vec![0.0; 2],
+                gradient_error: vec![0.0; 2],
+                free_energy: vec![0.0; 2],
+                free_energy_error: vec![0.0; 2],
+                barrier: 0.0,
+                barrier_error: 0.0,
+                dividing,
+                samples: 2,
+            };
+            let error = pafi_transmission(&Flat, &profile, &planes, &TransmissionConfig::default())
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                SaddleError::Invalid(message)
+                    if message.contains("endpoint PAFI dividing plane")
+            ));
+        }
+    }
 }
 
 /// Integrate plane gradients with the trapezoid rule.
