@@ -15137,6 +15137,8 @@ struct ClassPafi {
     nu_backward: f64,
     product: String,
     samples: usize,
+    /// Windows the jump test dropped, summed over the planes.
+    jumps: usize,
 }
 
 /// A basin label that is the configuration `expect` up to the group, or
@@ -15149,29 +15151,34 @@ fn same_basin(basin: &str, expect: &str, group: &[rgsaddle::Mat3i]) -> bool {
         )
 }
 
+/// The band a hop class is integrated along, with what [`ClassPafi`]
+/// records about it.
+struct ClassBand {
+    path: &'static str,
+    band: rgsaddle::ArcPath,
+    band_force: f64,
+    d_e0: f64,
+    zero: f64,
+    product: String,
+    recombines: bool,
+}
+
 /// Searches the saddle again as [`network_saddle`] does, then joins the
 /// bound state, the saddle and the target basin by a climbing band of
-/// thirteen images with energy-weighted springs, and integrates the
-/// projected average force along it at `temperature`. A recombining target
-/// is several eV down, so its band ends at the saddle pushed 0.3 Å
-/// (largest atom) toward it, or at the campaign band image after the top.
-/// The forward barrier is the free-energy maximum above the reactant, the
-/// backward one the same maximum above the last plane, and each attempt
-/// frequency comes from the curvature along the path at its end. A
-/// maximum on an end plane carries the error of the next plane in, not
-/// zero.
+/// thirteen images with energy-weighted springs. A recombining target is
+/// several eV down, so its band ends at the saddle pushed 0.3 Å (largest
+/// atom) toward it, or at the campaign band image after the top.
 #[allow(clippy::too_many_arguments)]
-fn class_pafi(
+fn class_band(
     copper: &FastCopper,
     state: &NetworkState,
     repeats: usize,
     a: f64,
-    temperature: f64,
     bulk: [[f64; 3]; 3],
     hint: (Array1<f64>, Array1<f64>),
     want: &[String; 2],
     group: &[rgsaddle::Mat3i],
-) -> Result<ClassPafi, String> {
+) -> Result<ClassBand, String> {
     let cell = state.cell;
     let expect = &want[1];
     let saddle = network_saddle(copper, state, repeats, a, hint, want)?;
@@ -15244,16 +15251,87 @@ fn class_pafi(
     let d_e0 = held
         .eval(peak.view())
         .map_or(f64::NAN, |(energy, _)| energy - state.energy);
+    Ok(ClassBand {
+        path,
+        band,
+        band_force,
+        d_e0,
+        zero,
+        product,
+        recombines,
+    })
+}
+
+/// Overdamped time step of the near-shell campaign, at mobility 0.2.
+const CAMPAIGN_STEP: f64 = 0.2;
+
+/// The PAFI sampling of the near-shell campaign at `temperature`, for
+/// [`rgsaddle::pafi_frames`], at [`CAMPAIGN_STEP`].
+fn campaign_pafi(temperature: f64) -> rgsaddle::PafiConfig {
+    campaign_pafi_at(temperature, CAMPAIGN_STEP)
+}
+
+/// Planes on the atoms that carry 95% of the summed squared steps of the
+/// band, Leimkuhler-Matthews steps of `time_step` at mobility 0.2, 30 time
+/// units from each in-plane minimum before sampling, every step recorded,
+/// 40 time units a plane in the first pass, and up to four passes until
+/// the barrier error is at most 0.2 kT. A window of 20 time units whose end
+/// relaxes, to 0.05 eV/Å, more than 0.4 Å from the minimum of its plane,
+/// the threshold of Swinburne's PAFI, is dropped: near the saddle of the
+/// isolated translation the planes also cut a basin of the interstitial
+/// 0.9 Å away, which a chain on them reaches in a few tens of time units.
+fn campaign_pafi_at(temperature: f64, time_step: f64) -> rgsaddle::PafiConfig {
     let thermal = temperature * rgsaddle::BOLTZMANN_EV_PER_K;
-    let pafi = config
-        .pafi
-        .clone()
+    rgsaddle::PafiConfig::default()
         .with_thermal(thermal)
-        .with_samples(16)
-        .with_thermalize(20)
+        .with_mobility(0.2)
+        .with_time_step(time_step)
+        .with_thermalize((30.0 / time_step).round() as usize)
+        .with_stride(1)
+        .with_samples((40.0 / time_step).round() as usize)
+        .with_window((20.0 / time_step).round() as usize)
+        .with_blocks(6)
+        .with_seed(7)
+        .with_retain(4)
+        .with_target_error(0.2 * thermal)
         .with_max_rounds(4)
-        .with_target_error(0.2 * thermal);
-    let (profile, _) = rgsaddle::pafi_profile(&held, &band, &band.arcs(), &pafi)
+        .with_active_share(0.95)
+        .with_max_jump(0.4)
+        .with_jump_tol(0.05)
+}
+
+/// [`class_band`], then the projected average force on its frames at
+/// `temperature` with [`campaign_pafi`]. The forward barrier is the
+/// free-energy maximum above the reactant, the backward one the same
+/// maximum above the last plane, and each attempt frequency comes from the
+/// curvature along the path at its end. A maximum on an end plane carries
+/// the error of the next plane in, not zero.
+#[allow(clippy::too_many_arguments)]
+fn class_pafi(
+    copper: &FastCopper,
+    state: &NetworkState,
+    repeats: usize,
+    a: f64,
+    temperature: f64,
+    bulk: [[f64; 3]; 3],
+    hint: (Array1<f64>, Array1<f64>),
+    want: &[String; 2],
+    group: &[rgsaddle::Mat3i],
+) -> Result<ClassPafi, String> {
+    let ClassBand {
+        path,
+        band,
+        band_force,
+        d_e0,
+        zero,
+        product,
+        recombines,
+    } = class_band(copper, state, repeats, a, bulk, hint, want, group)?;
+    let held = FastHeld {
+        copper,
+        cell: state.cell,
+    };
+    let (profile, planes) = rgsaddle::pafi_frames(&held, &band, &campaign_pafi(temperature))
         .map_err(|error| format!("pafi {error}"))?;
     let (start, end) = band.bounds();
     let frequency = |arc: f64| -> f64 {
@@ -15293,10 +15371,11 @@ fn class_pafi(
         nu_backward,
         product,
         samples: profile.samples,
+        jumps: planes.iter().map(|plane| plane.jumps).sum(),
     })
 }
 
-const PAFI_HEADER: &str = "temperature_K,lattice_A,kind,mechanism,hop,source,target,outcome,path,dE0_eV,zero_T_eV,band_force_eV_per_A,dF_forward_eV,dF_forward_error_eV,nu_forward_Hz,dF_backward_eV,dF_backward_error_eV,nu_backward_Hz,product_basin,samples,seconds";
+const PAFI_HEADER: &str = "temperature_K,lattice_A,kind,mechanism,hop,source,target,outcome,path,dE0_eV,zero_T_eV,band_force_eV_per_A,dF_forward_eV,dF_forward_error_eV,nu_forward_Hz,dF_backward_eV,dF_backward_error_eV,nu_backward_Hz,product_basin,samples,seconds,jumps";
 
 /// Scientific notation with six digits, blank when not finite.
 fn sci6(value: f64) -> String {
@@ -15307,6 +15386,10 @@ fn sci6(value: f64) -> String {
     }
 }
 
+/// Rates the isolated hops and the classes the sensitivity cover selects
+/// that the ledger does not hold yet. `RGSADDLE_PAFI_FROM` names an
+/// earlier ledger whose classes are rated again as well, as when the
+/// estimator changes.
 #[test]
 #[ignore = "PAFI rates of the near-shell hop classes that carry the capture weight, 8788-atom cell"]
 fn defect_pair_network_pafi() {
@@ -15329,13 +15412,22 @@ fn defect_pair_network_pafi() {
     let census = std::fs::read_to_string(root.join("defect_pair_census.csv")).expect("census");
     let ranking = std::fs::read_to_string(root.join("defect_pair_network_sensitivity.csv"))
         .expect("run defect_pair_network_sensitivity first");
-    let selected: std::collections::HashSet<(i64, String)> = ranking
+    let mut selected: std::collections::HashSet<(i64, String)> = ranking
         .lines()
         .skip(1)
         .map(|line| line.split(',').collect::<Vec<_>>())
         .filter(|f| f.len() > 10 && f[10] == "yes")
         .filter_map(|f| Some((f[0].parse::<f64>().ok()?.round() as i64, f[2].to_string())))
         .collect();
+    if let Ok(previous) = std::env::var("RGSADDLE_PAFI_FROM") {
+        let text = std::fs::read_to_string(&previous).expect("previous ledger");
+        selected.extend(
+            network_done(&text)
+                .into_iter()
+                .filter(|(_, kind, _)| kind == "hop")
+                .map(|(temperature, _, hop)| (temperature, hop)),
+        );
+    }
     let (group, network) = dumbbell_network(EXPLICIT_NORM2);
     let checkpoint = Mutex::new(File::options().append(true).open(&path).expect("append"));
     let write = |line: String| {
@@ -15500,11 +15592,14 @@ fn defect_pair_network_pafi() {
             None => ("isolated", job.kind.clone(), "isolated".to_string()),
         };
         write(format!(
-            "{},{a:.3},{kind},{},{hop},{source},{},{columns},{:.1}",
+            "{},{a:.3},{kind},{},{hop},{source},{},{columns},{:.1},{}",
             job.temperature,
             job.kind,
             job.target,
-            clock.elapsed().as_secs_f64()
+            clock.elapsed().as_secs_f64(),
+            found
+                .as_ref()
+                .map_or(String::new(), |found| found.jumps.to_string())
         ));
     });
     eprintln!(
@@ -16188,4 +16283,338 @@ fn table_i_8788_parses_every_temperature() {
     assert_eq!(table_i_8788(300.0), Some([(254.0, 21.0), (286.0, 28.0)]));
     assert_eq!(table_i_8788(500.0), Some([(185.0, 23.0), (161.0, 15.0)]));
     assert_eq!(table_i_8788(700.0), Some([(203.0, 10.0), (210.0, 21.0)]));
+}
+
+/// The isolated translation of the network PAFI campaign at `temperature`
+/// to `target`, one of the symmetry-equivalent products of the bound
+/// <100> dumbbell, with its band cached in the target directory: the
+/// state, the frames, and a line describing the band.
+fn isolated_frame_band(
+    copper: &FastCopper,
+    temperature: f64,
+    target: rgsaddle::PairConfig,
+) -> (NetworkState, Vec<Array1<f64>>, String) {
+    let repeats = 13usize;
+    let a = demkowicz_lattice(temperature);
+    let source = rgsaddle::PairConfig::new([2, 0, 0], [1, 0, 0]);
+    let (state, _, _) = network_state(copper, repeats, a, source, false);
+    let label = config_label(target);
+    let cache = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!(
+        "isolated_translate_{temperature}_{}.txt",
+        label.replace(':', "o")
+    ));
+    if let Ok(text) = std::fs::read_to_string(&cache) {
+        let mut lines = text.lines();
+        let meta = lines.next().expect("band line").to_string();
+        let images = lines
+            .map(|line| {
+                Array1::from_vec(
+                    line.split(' ')
+                        .map(|v| v.parse().expect("coordinate"))
+                        .collect(),
+                )
+            })
+            .collect();
+        return (state, images, meta);
+    }
+    let (perfect, cell) = fcc(repeats, a);
+    let bulk = copper.evaluate(perfect.view(), cell).2;
+    let group = rgsaddle::cubic_group();
+    let hint = hop_guess(&state, a, source, target, false, [0, 0, 0]);
+    let found = class_band(
+        copper,
+        &state,
+        repeats,
+        a,
+        bulk,
+        hint,
+        &[config_label(source), label],
+        &group,
+    )
+    .expect("isolated band");
+    let images: Vec<Array1<f64>> = found
+        .band
+        .frames()
+        .iter()
+        .map(|frame| frame.positions.clone())
+        .collect();
+    let meta = format!(
+        "{} dE0 {:.6} zero {:.6} force {:.3e} product {}",
+        found.path, found.d_e0, found.zero, found.band_force, found.product
+    );
+    let mut text = format!("{meta}\n");
+    for image in &images {
+        let line: Vec<String> = image.iter().map(|v| format!("{v}")).collect();
+        text.push_str(&line.join(" "));
+        text.push('\n');
+    }
+    std::fs::write(&cache, text).expect("band cache");
+    (state, images, meta)
+}
+
+/// One run of the frame study of the isolated translation.
+struct FrameRun {
+    role: &'static str,
+    target: rgsaddle::PairConfig,
+    reversed: bool,
+    seed: u64,
+    time_step: f64,
+    share: f64,
+}
+
+impl FrameRun {
+    fn key(&self) -> String {
+        format!(
+            "{},{},{},{},{},{}",
+            self.role,
+            config_label(self.target),
+            if self.reversed { "reversed" } else { "forward" },
+            self.seed,
+            self.time_step,
+            self.share
+        )
+    }
+}
+
+/// The as-built band forward and reversed and two symmetry-equivalent
+/// bands, at two overdamped steps; then, at [`CAMPAIGN_STEP`], a second
+/// seed and active shares either side of the campaign's.
+fn frame_runs() -> Vec<FrameRun> {
+    let built = rgsaddle::PairConfig::new([3, 1, 0], [0, 1, 0]);
+    let frames = [
+        (built, false),
+        (built, true),
+        (rgsaddle::PairConfig::new([3, -1, 0], [0, 1, 0]), false),
+        (rgsaddle::PairConfig::new([3, 0, 1], [0, 0, 1]), false),
+    ];
+    let share = campaign_pafi(300.0).active_share;
+    let mut runs = Vec::new();
+    for time_step in [0.1, 0.2] {
+        for (target, reversed) in frames {
+            runs.push(FrameRun {
+                role: "frame",
+                target,
+                reversed,
+                seed: 7,
+                time_step,
+                share,
+            });
+        }
+    }
+    for (role, seed, share) in [
+        ("reseed", 101, share),
+        ("share", 7, 0.9),
+        ("share", 7, 0.99),
+    ] {
+        runs.push(FrameRun {
+            role,
+            target: built,
+            reversed: false,
+            seed,
+            time_step: CAMPAIGN_STEP,
+            share,
+        });
+    }
+    runs
+}
+
+const FRAMES_HEADER: &str = "role,target,traversal,seed,time_step,active_share,active_atoms,forward_eV,forward_error_eV,reverse_eV,reverse_error_eV,drift_eV,minimum_eV,dividing,samples,jumps,evaluations,widest_A,seconds";
+
+const FRAME_PLANES_HEADER: &str = "role,target,traversal,seed,time_step,active_share,plane,arc_A,gradient_eV_per_A,gradient_error_eV_per_A,zero_eV_per_A,minimum_eV,tau,samples,jumps,widest_A";
+
+#[test]
+#[ignore = "isolated-translation PAFI in symmetry-equivalent frames and both traversals at 300 K; writes benchmarks/defect_pair_pafi_frames.csv"]
+fn defect_pair_pafi_frames() {
+    let started = Instant::now();
+    let temperature = 300.0;
+    let copper = FastCopper::new();
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks");
+    let path = root.join("defect_pair_pafi_frames.csv");
+    let planes_path = root.join("defect_pair_pafi_frames_planes.csv");
+    for (file, header) in [(&path, FRAMES_HEADER), (&planes_path, FRAME_PLANES_HEADER)] {
+        if !file.exists() {
+            std::fs::write(file, format!("{header}\n")).expect("frames csv");
+        }
+    }
+    let text = std::fs::read_to_string(&path).expect("frames csv");
+    let roles = env_csv("RGSADDLE_FRAME_ROLES", "frame,reseed,share");
+    let runs: Vec<FrameRun> = frame_runs()
+        .into_iter()
+        .filter(|run| roles.iter().any(|role| role == run.role))
+        .filter(|run| !text.lines().any(|line| line.starts_with(&run.key())))
+        .collect();
+    let mut targets: Vec<rgsaddle::PairConfig> = runs.iter().map(|run| run.target).collect();
+    targets.sort();
+    targets.dedup();
+    let bands: Vec<(rgsaddle::PairConfig, NetworkState, Vec<Array1<f64>>)> = targets
+        .iter()
+        .map(|&target| {
+            let (state, images, meta) = isolated_frame_band(&copper, temperature, target);
+            eprintln!("frames: band {} {meta}", config_label(target));
+            (target, state, images)
+        })
+        .collect();
+    let rows = Mutex::new(File::options().append(true).open(&path).expect("append"));
+    let plane_rows = Mutex::new(
+        File::options()
+            .append(true)
+            .open(&planes_path)
+            .expect("append"),
+    );
+    eprintln!("frames: {} runs", runs.len());
+    runs.par_iter().for_each(|run| {
+        let clock = Instant::now();
+        let (_, state, images) = bands
+            .iter()
+            .find(|band| band.0 == run.target)
+            .expect("band");
+        let held = FastHeld {
+            copper: &copper,
+            cell: state.cell,
+        };
+        let frames: Vec<Array1<f64>> = if run.reversed {
+            images.iter().rev().cloned().collect()
+        } else {
+            images.clone()
+        };
+        let band = rgsaddle::ArcPath::from_positions(&frames).expect("path");
+        let active = band.frame_planes(run.share).expect("planes").active.len();
+        let pafi = campaign_pafi_at(temperature, run.time_step)
+            .with_seed(run.seed)
+            .with_active_share(run.share);
+        let (profile, planes) = rgsaddle::pafi_frames(&held, &band, &pafi).expect("pafi");
+        let (reverse, reverse_error) = profile.reverse_barrier();
+        let base = planes[0].energy;
+        let key = run.key();
+        for (k, plane) in planes.iter().enumerate() {
+            append_checkpoint(
+                &plane_rows,
+                &format!(
+                    "{key},{k},{:.6},{:.6},{:.6},{:.6},{:.6},{:.2},{},{},{:.4}",
+                    profile.arc[k],
+                    plane.gradient,
+                    plane.error,
+                    plane.zero,
+                    plane.energy - base,
+                    plane.tau,
+                    plane.samples,
+                    plane.jumps,
+                    plane.widest
+                ),
+            );
+        }
+        let line = format!(
+            "{key},{active},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{},{},{},{},{:.4},{:.1}",
+            profile.barrier,
+            profile.barrier_error,
+            reverse,
+            reverse_error,
+            profile.barrier - reverse,
+            planes[profile.dividing].energy - base,
+            profile.dividing,
+            profile.samples,
+            planes.iter().map(|plane| plane.jumps).sum::<usize>(),
+            planes.iter().map(|plane| plane.evaluations).sum::<usize>(),
+            planes.iter().map(|plane| plane.widest).fold(0.0, f64::max),
+            clock.elapsed().as_secs_f64()
+        );
+        eprintln!(
+            "frames: {line} at {:.1} min",
+            started.elapsed().as_secs_f64() / 60.0
+        );
+        append_checkpoint(&rows, &line);
+    });
+}
+
+/// The 99% point of the chi-square distribution on 1 to 8 degrees of
+/// freedom.
+const CHI2_99: [f64; 8] = [6.635, 9.210, 11.345, 13.277, 15.086, 16.812, 18.475, 20.090];
+
+/// Inverse-variance mean of `(value, error)` pairs, its error, and the
+/// chi-square of the pairs about it.
+fn weighted_mean(values: &[(f64, f64)]) -> (f64, f64, f64) {
+    let weight: f64 = values.iter().map(|(_, e)| e.powi(-2)).sum();
+    let mean = values.iter().map(|(v, e)| v * e.powi(-2)).sum::<f64>() / weight;
+    let chi2 = values
+        .iter()
+        .map(|(v, e)| ((v - mean) / e).powi(2))
+        .sum::<f64>();
+    (mean, weight.recip().sqrt(), chi2)
+}
+
+/// Forward barriers of the frame study by role and time step.
+fn frame_barriers(text: &str, role: &str, time_step: f64) -> Vec<(String, f64, f64)> {
+    let mut lines = text.lines();
+    let header: Vec<&str> = lines.next().expect("header").split(',').collect();
+    let column = |name: &str| header.iter().position(|h| *h == name).expect(name);
+    let (role_at, step_at, forward_at, error_at) = (
+        column("role"),
+        column("time_step"),
+        column("forward_eV"),
+        column("forward_error_eV"),
+    );
+    lines
+        .map(|line| line.split(',').collect::<Vec<_>>())
+        .filter(|f| f[role_at] == role && f[step_at].parse::<f64>().ok() == Some(time_step))
+        .map(|f| {
+            (
+                f[..6].join(","),
+                f[forward_at].parse().expect("forward"),
+                f[error_at].parse().expect("error"),
+            )
+        })
+        .collect()
+}
+
+/// The barrier of the isolated translation does not depend on the frame:
+/// the as-built band forward and reversed and two symmetry-equivalent
+/// bands agree within their errors at each overdamped step, the two steps
+/// agree, and so does a second seed.
+#[test]
+fn pafi_frames_agree_across_frames() {
+    let text = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("benchmarks")
+            .join("defect_pair_pafi_frames.csv"),
+    )
+    .expect("run defect_pair_pafi_frames");
+    let mut means = Vec::new();
+    for time_step in [0.1, 0.2] {
+        let rows = frame_barriers(&text, "frame", time_step);
+        assert_eq!(rows.len(), 4, "four frames at step {time_step}");
+        let pairs: Vec<(f64, f64)> = rows.iter().map(|row| (row.1, row.2)).collect();
+        let (mean, error, chi2) = weighted_mean(&pairs);
+        assert!(
+            chi2 <= CHI2_99[pairs.len() - 2],
+            "frames disagree at step {time_step}: chi2 {chi2:.2} about {mean:.4}"
+        );
+        for (i, left) in rows.iter().enumerate() {
+            for right in &rows[i + 1..] {
+                assert!(
+                    (left.1 - right.1).abs() <= 3.0 * left.2.hypot(right.2),
+                    "{} and {} differ by {:.4}",
+                    left.0,
+                    right.0,
+                    left.1 - right.1
+                );
+            }
+        }
+        means.push((time_step, mean, error));
+    }
+    let (_, slow, slow_error) = means[0];
+    let (_, fast, fast_error) = means[1];
+    assert!(
+        (slow - fast).abs() <= 3.0 * slow_error.hypot(fast_error),
+        "steps disagree: {slow:.4} and {fast:.4}"
+    );
+    let (_, campaign, campaign_error) = *means
+        .iter()
+        .find(|mean| mean.0 == CAMPAIGN_STEP)
+        .expect("frames at the campaign step");
+    for (key, barrier, error) in frame_barriers(&text, "reseed", CAMPAIGN_STEP) {
+        assert!(
+            (barrier - campaign).abs() <= 3.0 * error.hypot(campaign_error),
+            "{key} at {barrier:.4} against {campaign:.4}"
+        );
+    }
 }
