@@ -2102,9 +2102,10 @@ impl Chain {
     /// has kept no window when its pass gives up leaves the basin of the
     /// path faster than one window. It halves its window and runs the
     /// pass again from the origin, thermalizing in windows as well, and
-    /// goes on halving, the pass discarded, while a pass drops more
-    /// windows than it keeps, up to [`WINDOW_HALVINGS`] times: a long
-    /// window that ends in the basin may still have spent time outside.
+    /// goes on halving, the pass discarded and the chain thermalized again
+    /// from the origin, while a pass drops more windows than it keeps, up
+    /// to [`WINDOW_HALVINGS`] times: a long window that ends in the basin
+    /// may still have spent time outside.
     /// A `window` of 0 records one pass and does not test jumps.
     fn run<S: PointSurface>(
         &mut self,
@@ -2119,6 +2120,7 @@ impl Chain {
         }
         let goal = self.values.len() + samples;
         let shortest = (config.window >> WINDOW_HALVINGS).max(1);
+        let mut thermalize = thermalize;
         loop {
             let mark = (
                 self.values.len(),
@@ -2144,6 +2146,10 @@ impl Chain {
                 self.widest = mark.3;
                 self.kept = None;
                 self.x.assign(&plane.geometry.positions);
+                if let Some(previous) = self.previous.as_mut() {
+                    *previous = plane.noise(&mut self.rng);
+                }
+                thermalize = config.thermalize;
             }
             self.window = self.window.div_ceil(2).max(shortest);
         }
