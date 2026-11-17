@@ -3767,6 +3767,7 @@ fn cu_config(
         .with_direction_tol(0.08)
         .with_pafi(
             rgsaddle::PafiConfig::default()
+                .with_integrator(rgsaddle::Integrator::EulerMaruyama)
                 .with_thermalize(40)
                 .with_stride(16)
                 .with_samples(samples)
