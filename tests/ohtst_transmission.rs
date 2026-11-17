@@ -131,6 +131,9 @@ fn harmonic_saddle_against_kramers_and_turned_planes() {
                     result.error
                 );
                 assert_eq!(result.unassigned, 0);
+                assert_eq!(result.scores.len(), result.shots);
+                let score_mean = result.scores.iter().sum::<f64>() / result.scores.len() as f64;
+                assert!((score_mean - result.kappa).abs() < 1.0e-15);
                 errors.push(result.error);
             }
             if exact_case {
