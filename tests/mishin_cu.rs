@@ -3780,17 +3780,16 @@ fn cu_config(
                 .with_target_error(target)
                 .with_max_rounds(4),
         )
-        .with_shooting(
-            rgsaddle::ShootingConfig::default()
+        .with_transmission(
+            rgsaddle::TransmissionConfig::default()
                 .with_friction(2.0)
                 .with_time_step(0.03)
                 .with_steps(80)
-                .with_record_every(20)
+                .with_check_every(20)
                 .with_shots(32)
                 .with_blocks(4)
                 .with_seed(seed.wrapping_add(9))
-                .with_plateau_record(2)
-                .with_mass(63.546),
+                .with_counting(rgsaddle::Counting::Final),
         )
         .with_temperatures(temperatures.to_vec())
         .with_boltzmann(rgsaddle::BOLTZMANN_EV_PER_K)
@@ -3801,6 +3800,19 @@ fn cu_config(
         .with_planes(11)
         .with_zero_t_tol(0.02)
         .with_bulk_stress(bulk)
+}
+
+#[test]
+fn cu_config_routes_bennett_chandler_settings_to_transmission() {
+    let config = cu_config(&[300.0], 24, 0.01, [[0.0; 3]; 3], Vec::new(), 17);
+    assert_eq!(config.transmission.friction, 2.0);
+    assert_eq!(config.transmission.time_step, 0.03);
+    assert_eq!(config.transmission.steps, 80);
+    assert_eq!(config.transmission.check_every, 20);
+    assert_eq!(config.transmission.shots, 32);
+    assert_eq!(config.transmission.blocks, 4);
+    assert_eq!(config.transmission.seed, 26);
+    assert_eq!(config.transmission.counting, rgsaddle::Counting::Final);
 }
 
 struct Campaign {
@@ -13893,6 +13905,69 @@ fn network_done(text: &str) -> std::collections::HashSet<(i64, String, String)> 
         .collect()
 }
 
+/// Completed rows in a κ-aware PAFI ledger.
+///
+/// The previous ledger schema ended at `jumps` and therefore described no
+/// transmission calculation. Rejecting that schema prevents those rows from
+/// silently standing for κ = 1 or sharing a header with new κ columns.
+fn pafi_done(text: &str) -> Result<std::collections::HashSet<(i64, String, String)>, String> {
+    let mut lines = text.lines();
+    let header = lines.next().unwrap_or_default();
+    if header != PAFI_HEADER {
+        return Err(format!(
+            "PAFI ledger schema mismatch: expected `{PAFI_HEADER}`, found `{header}`"
+        ));
+    }
+    Ok(lines
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split(',').collect();
+            if fields.len() != 25 || fields[7] != "rated" {
+                return None;
+            }
+            let kappa = fields[22].parse::<f64>().ok()?;
+            let error = fields[23].parse::<f64>().ok()?;
+            let shots = fields[24].parse::<usize>().ok()?;
+            if !(kappa.is_finite()
+                && (0.0..=1.0).contains(&kappa)
+                && error.is_finite()
+                && error >= 0.0
+                && shots > 0)
+            {
+                return None;
+            }
+            let temperature = fields[0].parse::<f64>().ok()?.round() as i64;
+            Some((temperature, fields[2].to_string(), fields[4].to_string()))
+        })
+        .collect())
+}
+
+#[test]
+fn pafi_completion_requires_the_kappa_schema_and_values() {
+    let old_header = PAFI_HEADER
+        .split(',')
+        .take(22)
+        .collect::<Vec<_>>()
+        .join(",");
+    assert!(pafi_done(&old_header).is_err());
+
+    let valid = "300,3.631,hop,translate,3_1_0,source,target,rated,dimer,0.1,0.1,0.001,0.2,0.01,1e12,0.2,0.01,1e12,product,200,1.0,0,0.2,0.01,1024";
+    let done = pafi_done(&format!("{PAFI_HEADER}\n{valid}\n")).unwrap();
+    assert!(done.contains(&(300, "hop".into(), "3_1_0".into())));
+
+    let unrated = valid.replacen(",rated,", ",unconverged,", 1);
+    assert!(
+        pafi_done(&format!("{PAFI_HEADER}\n{unrated}\n"))
+            .unwrap()
+            .is_empty()
+    );
+    let invalid = valid.replacen(",0.2,0.01,1024", ",1.2,0.01,1024", 1);
+    assert!(
+        pafi_done(&format!("{PAFI_HEADER}\n{invalid}\n"))
+            .unwrap()
+            .is_empty()
+    );
+}
+
 /// The isolated dumbbell in the same cell, for the reference barriers: the
 /// dumbbell at (2,0,0) a/2 along x, its translation to (3,1,0) along y and
 /// its rotation to y through the (1,1,0) saddle.
@@ -15457,15 +15532,20 @@ fn defect_pair_network_pafi() {
         .expect("hop limit");
     let copper = FastCopper::new();
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks");
-    let path = root.join(if smoke {
-        "defect_pair_kappa_smoke.csv"
-    } else {
-        "defect_pair_network_pafi.csv"
-    });
+    let path = std::env::var_os("RGSADDLE_PAFI_OUTPUT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            root.join(if smoke {
+                "defect_pair_kappa_smoke.csv"
+            } else {
+                "defect_pair_network_pafi.csv"
+            })
+        });
     if !path.exists() {
         std::fs::write(&path, format!("{PAFI_HEADER}\n")).expect("pafi");
     }
-    let done = network_done(&std::fs::read_to_string(&path).expect("pafi"));
+    let done = pafi_done(&std::fs::read_to_string(&path).expect("pafi"))
+        .unwrap_or_else(|error| panic!("{error}; select a new RGSADDLE_PAFI_OUTPUT"));
     let census = std::fs::read_to_string(root.join("defect_pair_census.csv")).expect("census");
     let ranking = std::fs::read_to_string(root.join("defect_pair_network_sensitivity.csv"))
         .expect("run defect_pair_network_sensitivity first");
