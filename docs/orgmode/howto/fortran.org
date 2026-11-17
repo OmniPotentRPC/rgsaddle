@@ -1,0 +1,41 @@
+#+TITLE: Use the Fortran bindings
+#+OPTIONS: toc:nil num:nil
+
+The optional Fortran layer is a Fortran 2008 module, =rgsaddle=, built on top of =include/rgsaddle.h= with =iso_c_binding=. The feature is off by default. Enable it in meson with:
+
+#+begin_src sh
+meson setup build -Dfortran=enabled
+meson compile -C build
+meson install -C build
+#+end_src
+
+The install has:
+
+- =librgsaddle_fortran=, the wrapper library
+- =rgsaddle.mod= under =include/rgsaddle/fortran=
+- =rgsaddle-fortran.pc=
+- CMake package files under =lib/cmake/rgsaddleFortran=
+
+The module exports typed handles with finalizers for:
+
+- climbing-image band sessions (NEB)
+- minimum-mode sessions (dimer and Lanczos)
+
+Surface callbacks are available in two forms:
+
+1. A native Fortran callback, =surface_proc=, that receives positions, energies and gradients in image-major order.
+2. A raw C callback path (=step_c=) that takes a =c_funptr= to an existing C-compatible callback.
+
+Both routes call the same Rust C ABI and are checked against each other by the Fortran tests.
+
+* Minimal loop
+1. Fill and stamp =rgsaddle_band_config_t= with =init_band_config=.
+2. Create a =band_handle= with =create=.
+3. Call =step= (Fortran callback) or =step_c= (C callback) until =report%status= is =RGSADDLE_STATUS_CONVERGED=.
+4. Read back rows with =positions=.
+5. Let scope exit free the handle through the finalizer.
+
+Minimum-mode uses the same pattern through =rgsaddle_minmode_config_t= and =minmode_handle=.
+
+* Current ABI coverage
+The current C ABI in =include/rgsaddle.h= does not expose dedicated PAFI or OH-TST session handles. The Fortran module therefore leaves these as explicit unsupported placeholders (=pafi_handle= and =ohtst_handle= return =RGSADDLE_INVALID_PARAMETER= on =create=) rather than duplicating non-ABI Rust internals.
