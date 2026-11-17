@@ -5,7 +5,10 @@
 //! `κ = sqrt(1+α²) - α` with `α = γ / (2 ω_b)`.
 
 use ndarray::{Array1, ArrayView1};
-use rgsaddle::{PointSurface, SaddleError, ShootingConfig, bennett_chandler};
+use rgsaddle::{
+    ArcPath, Counting, PafiConfig, PointSurface, SaddleError, ShootingConfig, TransmissionConfig,
+    bennett_chandler, pafi_frames, pafi_transmission,
+};
 
 struct Quartic;
 
@@ -70,4 +73,37 @@ fn high_friction_matches_kramers() {
         "plateau {mean} kramers {kramers} curve {window:?}"
     );
     assert!(transmission.error < 0.15, "error {}", transmission.error);
+}
+
+#[test]
+fn pafi_maximum_plane_has_the_known_newtonian_transmission() {
+    let path = ArcPath::from_positions(&[
+        Array1::from_vec(vec![-1.0]),
+        Array1::from_vec(vec![0.0]),
+        Array1::from_vec(vec![1.0]),
+    ])
+    .unwrap();
+    let pafi = PafiConfig::default()
+        .with_thermal(0.05)
+        .with_thermalize(2)
+        .with_stride(1)
+        .with_samples(4)
+        .with_blocks(2)
+        .with_retain(2)
+        .with_fix_com(false);
+    let (profile, planes) = pafi_frames(&Quartic, &path, &pafi).unwrap();
+    assert_eq!(profile.dividing, 1);
+    let shooting = TransmissionConfig::default()
+        .with_thermal(0.05)
+        .with_friction(0.0)
+        .with_time_step(0.002)
+        .with_steps(100)
+        .with_check_every(25)
+        .with_shots(64)
+        .with_blocks(4)
+        .with_counting(Counting::Final);
+    let transmission = pafi_transmission(&Quartic, &profile, &planes, &shooting).unwrap();
+    assert_eq!(transmission.shots, 64);
+    assert_eq!(transmission.unassigned, 0);
+    assert!((transmission.kappa - 1.0).abs() < 1.0e-12);
 }

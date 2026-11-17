@@ -60,13 +60,27 @@ Bennett, in Algorithms for Chemical Computations, ACS Symposium Series 46, 63 (1
 
 : κ(t) = ⟨ v_τ(0) θ(s(t)) ⟩ / ⟨ v_τ(0) θ(v_τ(0)) ⟩
 
-=s(t) = (x(t) - x_surface) · τ= and =θ(s)= is 1 on the product side of the surface. The numerator keeps the sign of the initial velocity. =τ= is the path tangent from the reactant toward the product, the direction of increasing arc length on a reactant-first path. A tangent that points the other way is reversed before the shot. The opposite normal is not tried, and a negative =κ= is not clamped into =[0, 1]=. The reported =κ= is =κ(t)= at the requested plateau record, with a block standard error. A rate is formed only when =κ= lies in =[0, 1]=.
+=s(t) = (x(t) - x_surface) · τ= and =θ(s)= is 1 on the product side of the surface. Folding the two velocity signs onto the positive flux distribution gives the forward/backward form used by =pafi_transmission=, =κ(t) = ⟨h_P(t) - h_P(-t)⟩=. =τ= is the path tangent from the reactant toward the product, the direction of increasing arc length on a reactant-first path. The opposite normal is not tried, and a negative =κ= is not clamped into =[0, 1]=. The reported =κ= is the last requested checkpoint, with a block standard error. A rate is formed only when =κ= lies in =[0, 1]=.
 
 On the quartic =V = (x² - 1)²= the barrier curvature gives =ω_b = 2= at unit mass. Newtonian trajectories that start at the top with =v > 0= are still on the product side a short time later, so =κ = 1=. With friction =γ = 2=, Kramers, Physica 7, 284 (1940), doi:10.1016/S0031-8914(40)90098-2, gives
 
 : κ = sqrt(1 + α²) - α,    α = γ / (2 ω_b) = 1/2,
 
 which is =sqrt(5)/2 - 1/2 ≈ 0.618=. =tests/bennett_kramers.rs= compares the plateau of =κ(t)= with that value.
+
+=pafi_transmission= is the system-agnostic bridge from PAFI to the
+forward/backward shooter. It selects =profile.dividing=, takes the
+constrained-equilibrium configurations retained by that plane's PAFI
+chain, and delegates to =transmission_coefficient=. The forward half
+represents the future and the velocity-reversed backward half the past.
+=Counting::Final= is Bennett--Chandler counting; =Counting::FirstCrossing=
+is the equivalent positive-flux estimator after the halves commit to
+their states. The result reports =κ=, its block standard error, assigned
+and unassigned shots, reactive shots, recrossings and force evaluations.
+Set the same masses, thermostat friction and temperature as the dynamics
+the coefficient corrects. A plane with no retained samples is an error:
+increase =PafiConfig::retain= rather than shooting the unsampled path
+frame.
 
 * The catalogue
 =RateCatalogue::to_json= writes =rgsaddle.defect_pair_rates= version 1. =from_json= reads it back. Each entry is one exit channel. The key is =(shell, direction, hop, temperature, cell_repeats)=. =rate_Hz= is =k(T)= in the caller's frequency unit (Hz when the angular scale is =angular_scale_rad_s=).
@@ -111,7 +125,7 @@ let (sites, exits) = network.sites(&spontaneous, &rate)?;
 
 Which hop classes deserve a free-energy calculation follows from the network itself. Perturb =ln k= of one class at a time in the rate closure, take =d V / d ln k= by central differences, and hand the values to =sensitivity_cover= with the spread of the rate model and the tolerance of the result. It ranks the classes by =abs(d V / d ln k)= and returns how many leading ones to compute so that the first-order shift estimate =spread * sum abs(d V / d ln k)= over the rest is below the tolerance. One PAFI path through a class's saddle that ends in the product minimum gives both directions: =FreeEnergyProfile::barrier= from the reactant and =FreeEnergyProfile::reverse_barrier= from the last plane, each with its own error. Their difference is the free-energy difference of the two ends plus whatever the integral drifts along the path, and the errors of the plane averages need not cover that drift. When the difference of the ends is known, for two minima from their zero-temperature energies, =FreeEnergyProfile::balanced= (or =balanced_barriers= on the numbers) takes the forward barrier and the reverse one plus that gap as two estimates of one barrier. It returns their inverse-variance mean, the reverse barrier the gap below it, and the drift, with half the drift added to the error. A path between two equivalent states is balanced against no gap. The two directions then obey detailed balance with the end energies they were balanced on.
 
-The two barriers need not be equally good. The forward one integrates the profile up to the dividing surface and the reverse one past it to the last plane, so each carries the drift of its own stretch. A path integrated again from its other end shows which: the barrier above each end is then read once from the start of an integration and once from its end. When the readings from the start agree and those from the end do not, the drift lies past the dividing surface, and =FreeEnergyProfile::anchored= (or =anchored_barriers=) keeps the forward barrier and its error and puts the reverse barrier the gap below it. Its =drift= is still what the barrier from the last plane adds to the gap, a check on the paths it was not taken from. Rate the isolated reference the same way as the classes it anchors, or the ratio of their rates keeps the drift.
+The two barriers need not be equally good. The forward one integrates the profile up to the dividing surface and the reverse one past it to the last plane, so each carries the drift of its own stretch. A path integrated again from its other end shows which: the barrier above each end is then read once from the start of an integration and once from its end. When the readings from the start agree and those from the end do not, the drift lies past the dividing surface, and =FreeEnergyProfile::anchored= (or =anchored_barriers=) keeps the forward barrier and its error and puts the reverse barrier the gap below it. Its =drift= is still what the barrier from the last plane adds to the gap, a check on the paths it was not taken from. Rate the isolated reference the same way as the classes it anchors, or the ratio of their rates keeps the drift. One hop class has one dividing plane, so its same =κ= multiplies both directional PAFI rates. In uncertainty draws the two directions share the class draw, with =σ²_ln k = (σ_F/kT)² + (σ_κ/κ)²=; the isolated reference carries its own shared term. Setting =κ= to exactly one and =σ_κ= to zero leaves the former network arithmetic bit for bit.
 
 #+begin_src rust
 let cover = rgsaddle::sensitivity_cover(&sensitivity, model_spread, tolerance);

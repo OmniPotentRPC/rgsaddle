@@ -14805,7 +14805,7 @@ fn pafi_inputs(
         .collect();
     let number = |f: &[&str], index: usize| f[index].parse::<f64>().unwrap_or(f64::NAN);
     let usable = |f: &[&str]| f[7] == "rated";
-    let mut isolated = [(f64::NAN, f64::NAN, f64::NAN); 2];
+    let mut isolated = [(f64::NAN, f64::NAN, f64::NAN, 1.0, 0.0); 2];
     let mut drift = [f64::NAN; 2];
     for f in rows.iter().filter(|f| f[2] == "isolated" && usable(f)) {
         let kind = usize::from(f[3] == "rotate");
@@ -14821,6 +14821,8 @@ fn pafi_inputs(
             both.forward,
             both.error,
             0.5 * (number(f, 14) + number(f, 17)),
+            if f.len() > 22 { number(f, 22) } else { 1.0 },
+            if f.len() > 23 { number(f, 23) } else { 0.0 },
         );
     }
     let bound: std::collections::HashSet<String> = (0..network.states.len())
@@ -14829,7 +14831,8 @@ fn pafi_inputs(
         .collect();
     let mut inputs = PafiInputs {
         computed: Default::default(),
-        isolated_sigma: isolated.map(|reference| reference.1),
+        isolated_sigma: isolated
+            .map(|reference| (reference.1 / thermal).hypot(reference.4 / reference.3)),
         drift,
         drifts: Vec::new(),
         residuals: Vec::new(),
@@ -14845,7 +14848,9 @@ fn pafi_inputs(
         let class = inputs.rated;
         inputs.rated += 1;
         let label = f[4].to_string();
-        let (free_iso, _, nu_iso) = isolated[usize::from(rotation)];
+        let (free_iso, _, nu_iso, kappa_iso, _) = isolated[usize::from(rotation)];
+        let kappa = if f.len() > 22 { number(f, 22) } else { 1.0 };
+        let kappa_error = if f.len() > 23 { number(f, 23) } else { 0.0 };
         let forward = (number(f, 12), number(f, 13));
         let gap = match (saddles.states.get(f[5]), saddles.states.get(f[6])) {
             (Some(start), Some(end)) if bound.contains(f[6]) && f[6] != f[5] => Some(end - start),
@@ -14854,7 +14859,7 @@ fn pafi_inputs(
         let anchored = gap.and_then(|gap| {
             rgsaddle::anchored_barriers(forward, (number(f, 15), number(f, 16)), gap).ok()
         });
-        let (sigma, directions) = match anchored {
+        let (free_sigma, directions) = match anchored {
             Some(both) => {
                 inputs.drifts.push(both.drift);
                 (
@@ -14870,13 +14875,24 @@ fn pafi_inputs(
         let reference = saddles.isolated[usize::from(rotation)];
         let mut residuals = Vec::new();
         for (source, free, nu) in directions {
-            if ![free, sigma, nu, free_iso, nu_iso]
+            if ![free, free_sigma, nu, free_iso, nu_iso]
                 .iter()
                 .all(|v| v.is_finite())
             {
                 continue;
             }
-            let computed = (nu / nu_iso).ln() - (free.max(0.0) - free_iso) / thermal;
+            if !(kappa.is_finite()
+                && kappa > 0.0
+                && kappa_iso.is_finite()
+                && kappa_iso > 0.0
+                && kappa_error.is_finite()
+                && kappa_error >= 0.0)
+            {
+                continue;
+            }
+            let computed = (nu / nu_iso).ln() - (free.max(0.0) - free_iso) / thermal
+                + (kappa / kappa_iso).ln();
+            let sigma = (free_sigma / thermal).hypot(kappa_error / kappa);
             if let (Some(saddle), Some(state)) =
                 (saddles.saddles.get(&label), saddles.states.get(source))
             {
@@ -14886,7 +14902,7 @@ fn pafi_inputs(
                 (label.clone(), source.to_string()),
                 Rated {
                     value: computed,
-                    sigma: sigma / thermal,
+                    sigma,
                     rotation,
                     class,
                 },
@@ -14895,7 +14911,7 @@ fn pafi_inputs(
         if !residuals.is_empty() {
             inputs.residuals.push(Residual {
                 value: residuals.iter().sum::<f64>() / residuals.len() as f64,
-                error: sigma / thermal,
+                error: (free_sigma / thermal).hypot(kappa_error / kappa),
             });
         }
     }
@@ -14947,14 +14963,9 @@ impl PafiInputs {
     /// per calibration coefficient. The calibrated model directions of a
     /// kind share its isolated normal, since the computed rates they are
     /// fitted to carry it.
-    fn drawn(
-        &self,
-        z: &[f64],
-        thermal: f64,
-        calibration: Option<&rgsaddle::SurrogateCalibration>,
-    ) -> ClassRates {
+    fn drawn(&self, z: &[f64], calibration: Option<&rgsaddle::SurrogateCalibration>) -> ClassRates {
         let n = self.rated;
-        let common = |kind: usize| z[n + kind] * self.isolated_sigma[kind] / thermal;
+        let common = |kind: usize| z[n + kind] * self.isolated_sigma[kind];
         let model = calibration.map_or([0.0; 2], |fit| {
             let shift: f64 = fit
                 .draw(&z[n + 2..])
@@ -15143,6 +15154,9 @@ struct ClassPafi {
     nu_backward: f64,
     product: String,
     samples: usize,
+    kappa: f64,
+    kappa_error: f64,
+    kappa_shots: usize,
     /// Windows the jump test dropped, summed over the planes.
     jumps: usize,
 }
@@ -15274,6 +15288,22 @@ const CAMPAIGN_STEP: f64 = 0.2;
 /// The PAFI sampling of the near-shell campaign at `temperature`, for
 /// [`rgsaddle::pafi_frames`], at [`CAMPAIGN_STEP`].
 fn campaign_pafi(temperature: f64) -> rgsaddle::PafiConfig {
+    if std::env::var_os("RGSADDLE_KAPPA_SMOKE").is_some() {
+        return rgsaddle::PafiConfig::default()
+            .with_thermal(temperature * rgsaddle::BOLTZMANN_EV_PER_K)
+            .with_mobility(0.2)
+            .with_time_step(CAMPAIGN_STEP)
+            .with_thermalize(20)
+            .with_stride(1)
+            .with_samples(24)
+            .with_window(12)
+            .with_blocks(4)
+            .with_seed(7)
+            .with_retain(8)
+            .with_max_rounds(1)
+            .with_max_jump(0.4)
+            .with_jump_tol(0.05);
+    }
     campaign_pafi_at(temperature, CAMPAIGN_STEP)
 }
 
@@ -15338,6 +15368,26 @@ fn class_pafi(
     };
     let (profile, planes) = rgsaddle::pafi_frames(&held, &band, &campaign_pafi(temperature))
         .map_err(|error| format!("pafi {error}"))?;
+    let shots = std::env::var("RGSADDLE_KAPPA_SHOTS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(256usize);
+    let transmission = rgsaddle::pafi_transmission(
+        &held,
+        &profile,
+        &planes,
+        &rgsaddle::TransmissionConfig::default()
+            .with_thermal(temperature * rgsaddle::BOLTZMANN_EV_PER_K)
+            .with_friction(2.0)
+            .with_time_step(0.03)
+            .with_steps(400)
+            .with_check_every(40)
+            .with_shots(shots)
+            .with_blocks(16.min(shots / 2).max(2))
+            .with_masses(vec![63.546; state.positions.len()])
+            .with_counting(rgsaddle::Counting::Final),
+    )
+    .map_err(|error| format!("transmission {error}"))?;
     let (start, end) = band.bounds();
     let frequency = |arc: f64| -> f64 {
         band.geometry(arc).ok().map_or(f64::NAN, |frame| {
@@ -15376,11 +15426,14 @@ fn class_pafi(
         nu_backward,
         product,
         samples: profile.samples,
+        kappa: transmission.kappa,
+        kappa_error: transmission.error,
+        kappa_shots: transmission.shots,
         jumps: planes.iter().map(|plane| plane.jumps).sum(),
     })
 }
 
-const PAFI_HEADER: &str = "temperature_K,lattice_A,kind,mechanism,hop,source,target,outcome,path,dE0_eV,zero_T_eV,band_force_eV_per_A,dF_forward_eV,dF_forward_error_eV,nu_forward_Hz,dF_backward_eV,dF_backward_error_eV,nu_backward_Hz,product_basin,samples,seconds,jumps";
+const PAFI_HEADER: &str = "temperature_K,lattice_A,kind,mechanism,hop,source,target,outcome,path,dE0_eV,zero_T_eV,band_force_eV_per_A,dF_forward_eV,dF_forward_error_eV,nu_forward_Hz,dF_backward_eV,dF_backward_error_eV,nu_backward_Hz,product_basin,samples,seconds,jumps,kappa,kappa_error,kappa_shots";
 
 /// Scientific notation with six digits, blank when not finite.
 fn sci6(value: f64) -> String {
@@ -15399,6 +15452,7 @@ fn sci6(value: f64) -> String {
 #[ignore = "PAFI rates of the near-shell hop classes that carry the capture weight, 8788-atom cell"]
 fn defect_pair_network_pafi() {
     let started = Instant::now();
+    let smoke = std::env::var_os("RGSADDLE_KAPPA_SMOKE").is_some();
     let repeats = 13usize;
     let temperatures: Vec<f64> = env_csv("RGSADDLE_TEMPS", "300,500,700")
         .iter()
@@ -15409,7 +15463,11 @@ fn defect_pair_network_pafi() {
         .expect("hop limit");
     let copper = FastCopper::new();
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks");
-    let path = root.join("defect_pair_network_pafi.csv");
+    let path = root.join(if smoke {
+        "defect_pair_kappa_smoke.csv"
+    } else {
+        "defect_pair_network_pafi.csv"
+    });
     if !path.exists() {
         std::fs::write(&path, format!("{PAFI_HEADER}\n")).expect("pafi");
     }
@@ -15421,7 +15479,16 @@ fn defect_pair_network_pafi() {
         .lines()
         .skip(1)
         .map(|line| line.split(',').collect::<Vec<_>>())
-        .filter(|f| f.len() > 10 && f[10] == "yes")
+        .filter(|f| {
+            f.len() > 10
+                && if smoke {
+                    f[0] == "300"
+                        && f[1] == "model"
+                        && f[8].parse::<usize>().is_ok_and(|rank| rank <= 3)
+                } else {
+                    f[10] == "yes"
+                }
+        })
         .filter_map(|f| Some((f[0].parse::<f64>().ok()?.round() as i64, f[2].to_string())))
         .collect();
     if let Ok(previous) = std::env::var("RGSADDLE_PAFI_FROM") {
@@ -15457,6 +15524,9 @@ fn defect_pair_network_pafi() {
     let mut jobs: Vec<PafiJob> = Vec::new();
     for &temperature in &temperatures {
         for (kind, to, via) in isolated_network_moves() {
+            if smoke && kind != "translate" {
+                continue;
+            }
             if !done.contains(&(temperature as i64, "isolated".into(), kind.into())) {
                 jobs.push(PafiJob {
                     temperature,
@@ -15597,14 +15667,17 @@ fn defect_pair_network_pafi() {
             None => ("isolated", job.kind.clone(), "isolated".to_string()),
         };
         write(format!(
-            "{},{a:.3},{kind},{},{hop},{source},{},{columns},{:.1},{}",
+            "{},{a:.3},{kind},{},{hop},{source},{},{columns},{:.1},{},{:.8},{:.8},{}",
             job.temperature,
             job.kind,
             job.target,
             clock.elapsed().as_secs_f64(),
             found
                 .as_ref()
-                .map_or(String::new(), |found| found.jumps.to_string())
+                .map_or(String::new(), |found| found.jumps.to_string()),
+            found.as_ref().map_or(f64::NAN, |found| found.kappa),
+            found.as_ref().map_or(f64::NAN, |found| found.kappa_error),
+            found.as_ref().map_or(0, |found| found.kappa_shots)
         ));
     });
     eprintln!(
@@ -15704,7 +15777,6 @@ fn assemble_network() {
             ..
         } = context;
         let inputs = &context.inputs;
-        let thermal = temperature * rgsaddle::BOLTZMANN_EV_PER_K;
         let pafi = pafi_inputs(
             &pafi_text,
             temperature,
@@ -15760,10 +15832,8 @@ fn assemble_network() {
                     let z = &class_shifts[draw];
                     let (classes, sigma) = match rates {
                         Draws::Model => (ClassRates::default(), recorded_sigma),
-                        Draws::Pafi => (pafi.drawn(z, thermal, None), model_sigma),
-                        Draws::Calibrated => {
-                            (pafi.drawn(z, thermal, calibration.as_ref()), scatter)
-                        }
+                        Draws::Pafi => (pafi.drawn(z, None), model_sigma),
+                        Draws::Calibrated => (pafi.drawn(z, calibration.as_ref()), scatter),
                     };
                     let varied = context
                         .volumes(

@@ -26,6 +26,37 @@ use std::collections::BTreeMap;
 use crate::defect_pair::{SiteOutcome, VolumeSite};
 use crate::error::SaddleError;
 
+/// Apply a transmission coefficient to a PAFI rate and its logarithmic error.
+///
+/// The returned rate is `kappa * rate` and
+/// `sigma_ln² = log_error² + (kappa_error / kappa)²`. The exact identity
+/// correction `(1, 0)` returns both inputs without floating-point work, so
+/// adding an explicit unit coefficient cannot perturb an existing network.
+pub fn transmitted_pafi_rate(
+    rate: f64,
+    log_error: f64,
+    kappa: f64,
+    kappa_error: f64,
+) -> Result<(f64, f64), SaddleError> {
+    if ![rate, log_error, kappa, kappa_error]
+        .iter()
+        .all(|value| value.is_finite())
+        || rate < 0.0
+        || log_error < 0.0
+        || kappa <= 0.0
+        || kappa_error < 0.0
+    {
+        return Err(SaddleError::Invalid(
+            "a transmitted PAFI rate needs a non-negative rate and errors and positive kappa"
+                .into(),
+        ));
+    }
+    if kappa == 1.0 && kappa_error == 0.0 {
+        return Ok((rate, log_error));
+    }
+    Ok((kappa * rate, log_error.hypot(kappa_error / kappa)))
+}
+
 /// Integer lattice vector.
 pub type Vec3i = [i32; 3];
 
