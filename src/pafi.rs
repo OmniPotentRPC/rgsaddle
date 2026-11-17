@@ -255,7 +255,9 @@ pub struct PafiConfig {
     /// test of [`Self::max_jump`] in charge of [`average_hyperplane`].
     pub jump_tol: f64,
     /// Recorded samples between two tests of the windowed jump test.
-    /// `0` leaves that test off. At least 1 when the test is on.
+    /// `0` leaves that test off and leaves the quench basin test in charge.
+    /// A plane that keeps no window in its first pass halves this, up to
+    /// four times, and thermalizes in windows of that length too.
     pub window: usize,
 }
 
@@ -1846,7 +1848,7 @@ fn average_windowed<S: PointSurface>(
     config: &PafiConfig,
 ) -> Result<HyperplaneAverage, SaddleError> {
     let plane = Plane::new(geometry, config.fix_com)?;
-    let mut chain = Chain::new(&plane, config.seed, config.integrator);
+    let mut chain = Chain::new(&plane, config.seed, config);
     chain.run(surface, &plane, config, config.thermalize, config.samples)?;
     if chain.values.is_empty() {
         return Err(SaddleError::Stalled(
@@ -1939,7 +1941,7 @@ where
         .enumerate()
         .map(|(index, plane)| {
             let seed = config.seed.wrapping_add(index as u64).wrapping_add(1);
-            Chain::new(plane, seed, config.integrator)
+            Chain::new(plane, seed, config)
         })
         .collect();
     chains
@@ -2070,6 +2072,9 @@ impl<'a> Plane<'a> {
 /// Windows a pass may run for each one it asks for, the dropped included.
 const WINDOW_TRIES: usize = 4;
 
+/// Times a chain that keeps no window halves [`PafiConfig::window`].
+const WINDOW_HALVINGS: u32 = 4;
+
 /// One overdamped chain on one plane, kept between passes.
 struct Chain {
     x: Array1<f64>,
@@ -2084,13 +2089,15 @@ struct Chain {
     minimum: Option<Array1<f64>>,
     kept: Option<Array1<f64>>,
     jumps: usize,
+    /// Steps between two jump tests.
+    window: usize,
 }
 
 impl Chain {
-    fn new(plane: &Plane, seed: u64, integrator: Integrator) -> Self {
+    fn new(plane: &Plane, seed: u64, config: &PafiConfig) -> Self {
         let mut rng = Rng::new(seed);
         let previous =
-            (integrator == Integrator::LeimkuhlerMatthews).then(|| plane.noise(&mut rng));
+            (config.integrator == Integrator::LeimkuhlerMatthews).then(|| plane.noise(&mut rng));
         Self {
             x: plane.geometry.positions.clone(),
             previous,
@@ -2104,9 +2111,23 @@ impl Chain {
             minimum: None,
             kept: None,
             jumps: 0,
+            window: config.window,
         }
     }
 
+    /// `thermalize` steps, then `samples` more recorded `config.stride`
+    /// apart in windows of `config.window`, each put to
+    /// [`PafiConfig::max_jump`]. A dropped window is run again, from where
+    /// the last kept window ended with fresh noise, or from the origin,
+    /// thermalized again, when no window has been kept; the pass gives up
+    /// after [`WINDOW_TRIES`] times the windows it asked for. A chain that
+    /// has kept no window when its pass gives up leaves the basin of the
+    /// path faster than one window. It halves its window and runs the
+    /// pass again from the origin, thermalizing in windows as well, and
+    /// goes on halving, the pass discarded, while a pass drops more
+    /// windows than it keeps, up to [`WINDOW_HALVINGS`] times: a long
+    /// window that ends in the basin may still have spent time outside.
+    /// A `window` of 0 records one pass and does not test jumps.
     fn run<S: PointSurface>(
         &mut self,
         surface: &S,
@@ -2115,30 +2136,80 @@ impl Chain {
         thermalize: usize,
         samples: usize,
     ) -> Result<(), SaddleError> {
-        let window = if config.window == 0 {
-            samples.max(1)
-        } else {
-            config.window
-        };
-        let mut warm = thermalize;
+        if config.window == 0 && self.window == 0 {
+            self.window = samples.max(1);
+        }
         let goal = self.values.len() + samples;
-        let mut tries = WINDOW_TRIES * samples.div_ceil(window);
+        let shortest = (config.window >> WINDOW_HALVINGS).max(1);
+        loop {
+            let mark = (
+                self.values.len(),
+                self.retained.len(),
+                self.psi_sum,
+                self.widest,
+                self.jumps,
+            );
+            let kept = self.pass(surface, plane, config, thermalize, goal)?;
+            if config.window == 0 || config.max_jump.is_none() || self.window <= shortest {
+                return Ok(());
+            }
+            if self.window == config.window {
+                if !self.values.is_empty() {
+                    return Ok(());
+                }
+            } else if kept > self.jumps - mark.4 {
+                return Ok(());
+            } else {
+                self.values.truncate(mark.0);
+                self.retained.truncate(mark.1);
+                self.psi_sum = mark.2;
+                self.widest = mark.3;
+                self.kept = None;
+                self.x.assign(&plane.geometry.positions);
+            }
+            self.window = self.window.div_ceil(2).max(shortest);
+        }
+    }
+
+    /// One pass of [`Self::run`] in windows of the current length, giving
+    /// the windows it kept.
+    fn pass<S: PointSurface>(
+        &mut self,
+        surface: &S,
+        plane: &Plane,
+        config: &PafiConfig,
+        thermalize: usize,
+        goal: usize,
+    ) -> Result<usize, SaddleError> {
+        let window = self.window;
+        let windowed = config.window > 0 && window < config.window;
+        let mut warm = thermalize;
+        let mut kept = 0;
+        let mut tries = WINDOW_TRIES * (goal - self.values.len()).div_ceil(window);
+        if windowed {
+            tries += WINDOW_TRIES * thermalize.div_ceil(window);
+        }
         while self.values.len() < goal && tries > 0 {
             tries -= 1;
-            let take = (goal - self.values.len()).min(window);
+            let (heat, take) = if windowed && warm > 0 {
+                (warm.min(window), 0)
+            } else {
+                (warm, (goal - self.values.len()).min(window))
+            };
             let mark = (
                 self.values.len(),
                 self.retained.len(),
                 self.psi_sum,
                 self.widest,
             );
-            self.advance(surface, plane, config, warm, take)?;
-            warm = 0;
+            self.advance(surface, plane, config, heat, take)?;
+            warm -= heat;
             let Some(limit) = config.max_jump.filter(|_| config.window > 0) else {
                 continue;
             };
             if !self.jumped(surface, plane, config, limit)? {
                 self.kept = Some(self.x.clone());
+                kept += 1;
                 continue;
             }
             self.values.truncate(mark.0);
@@ -2147,7 +2218,10 @@ impl Chain {
             self.widest = mark.3;
             self.jumps += 1;
             match &self.kept {
-                Some(kept) => self.x.assign(kept),
+                Some(checkpoint) => {
+                    self.x.assign(checkpoint);
+                    warm += heat;
+                }
                 None => {
                     self.x.assign(&plane.geometry.positions);
                     warm = config.thermalize;
@@ -2157,7 +2231,7 @@ impl Chain {
                 *previous = plane.noise(&mut self.rng);
             }
         }
-        Ok(())
+        Ok(kept)
     }
 
     fn jumped<S: PointSurface>(
