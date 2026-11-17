@@ -2203,6 +2203,8 @@ pub unsafe extern "C" fn rgsaddle_idpp_path(
 
 mod indexk;
 pub use indexk::*;
+mod pafi_ohtst;
+pub use pafi_ohtst::*;
 mod sessions;
 pub use sessions::*;
 mod quickmin;
