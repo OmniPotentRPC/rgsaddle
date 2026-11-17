@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 45u
+#define RGSADDLE_ABI_MINOR 46u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -855,6 +855,54 @@ rgsaddle_status_t rgsaddle_kappa_dimer_force(const rgsaddle_kappa_config_t *conf
     int64_t n_dof, const double *gradient, const double *mode,
     int64_t n_excluded, const double *excluded, rgsaddle_hessian_fn hessian,
     void *user, double *force, rgsaddle_kappa_report_t *report);
+
+/** Point energy and gradient callback for PAFI transmission shooting. */
+typedef int (*rgsaddle_point_surface_fn)(void *user, int64_t n_dof,
+    const double *position, double *energy, double *gradient);
+
+/** Forward/backward shooting settings for a PAFI dividing plane (minor 46). */
+typedef struct {
+  rgsaddle_version_t version;
+  double thermal;
+  double friction;
+  double time_step;
+  int64_t steps;
+  int64_t check_every;
+  int64_t commit;
+  int64_t shots;
+  int64_t blocks;
+  uint64_t seed;
+  int32_t counting;       /**< 0 Bennett-Chandler final, 1 first crossing. */
+  int32_t hold_excluded;  /**< C point callbacks expose no excluded modes. */
+} rgsaddle_pafi_transmission_config_t;
+
+typedef struct {
+  rgsaddle_version_t version;
+  double kappa;
+  double error;
+  int64_t dividing;
+  int64_t shots;
+  int64_t unassigned;
+  int64_t reactive;
+  int64_t recrossed;
+  int64_t evaluations;
+} rgsaddle_pafi_transmission_report_t;
+
+/** Fill Bennett-Chandler defaults for PAFI transmission shooting. */
+rgsaddle_status_t rgsaddle_pafi_transmission_config_default(
+    rgsaddle_pafi_transmission_config_t *config);
+
+/**
+ * Select the maximum of free_energy and shoot retained samples from that
+ * PAFI plane. start_offsets has n_planes + 1 entries; masses may be NULL.
+ */
+rgsaddle_status_t rgsaddle_pafi_transmission(
+    const rgsaddle_pafi_transmission_config_t *config,
+    int64_t n_dof, int64_t n_planes, const double *free_energy,
+    const double *points, const double *normals, const int64_t *start_offsets,
+    const double *starts, const double *masses,
+    rgsaddle_point_surface_fn surface, void *user,
+    rgsaddle_pafi_transmission_report_t *report);
 
 
 

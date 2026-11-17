@@ -198,12 +198,12 @@ pub use pafi::{
     PafiConfig, PafiIntegrator, PafiMeanForce, PathFrame, PathGeometry, anchored_barriers,
     average_hyperplane, average_hyperplane_with_sampler, balanced_barriers,
     flat_hyperplane_gradient, harmonic_mask_shift, integrate_profile, pafi_frames, pafi_profile,
-    pafi_truncated, zero_temperature_barrier,
+    pafi_transmission, pafi_truncated, zero_temperature_barrier,
 };
 pub use pair_network::{
     Mat3i, PairConfig, PairEdge, PairExit, PairHop, PairMove, PairNetwork, PairStateClass,
     PairTarget, SensitivityCover, SurrogateCalibration, Vec3i, calibrate_surrogate, cubic_group,
-    sensitivity_cover,
+    sensitivity_cover, transmitted_pafi_rate,
 };
 pub use prfo::{PrfoKind, partitioned_rfo_eigen, restricted_prfo_displacement};
 pub use projection::ProjectionKind;

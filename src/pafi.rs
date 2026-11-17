@@ -153,7 +153,10 @@ use rgmin::{Control, Error, Method, Oracle, Solver, Status, StopNorm};
 use crate::Region;
 use crate::error::SaddleError;
 use crate::minmode::PointSurface;
-use crate::ohtst::{self, HyperplaneConstraint};
+use crate::ohtst::{
+    self, HyperplaneConstraint, TransmissionCoefficient, TransmissionConfig,
+    transmission_coefficient,
+};
 use crate::projector::{
     Hyperplane, HyperplaneEnsemble, HyperplaneObservation, HyperplaneSampleBudget,
     HyperplaneSampler, ProjectedConstraint, TangentProjector,
@@ -719,6 +722,8 @@ pub struct FramePlanes {
 /// their means; `equilibration` is that of the first trajectory.
 #[derive(Clone, Debug)]
 pub struct HyperplaneAverage {
+    /// The constrained plane, with its normal toward increasing path arc.
+    pub plane: Hyperplane,
     /// `dF/ds` in energy per arc length.
     pub gradient: f64,
     /// Standard error from the block means.
@@ -1093,6 +1098,7 @@ pub fn average_hyperplane<S: PointSurface>(
         retained.extend(trajectory.retained.iter().take(remaining).cloned());
     }
     Ok(HyperplaneAverage {
+        plane: trajectories[0].plane.clone(),
         gradient,
         error,
         psi,
@@ -1141,6 +1147,34 @@ fn average_trajectory<S: PointSurface>(
     Ok(average)
 }
 
+/// Shoot the maximum-free-energy plane of a sampled PAFI profile.
+///
+/// The starts are the constrained-equilibrium configurations retained by
+/// [`pafi_profile`] or [`pafi_frames`] on the profile's dividing plane.
+/// Shooting is unconstrained in both time directions and is delegated to
+/// [`transmission_coefficient`]. The PAFI plane normal points toward
+/// increasing path arc, the product side of a reactant-first band.
+pub fn pafi_transmission<S: PointSurface>(
+    surface: &S,
+    profile: &FreeEnergyProfile,
+    planes: &[HyperplaneAverage],
+    config: &TransmissionConfig,
+) -> Result<TransmissionCoefficient, SaddleError> {
+    if planes.len() != profile.free_energy.len() || profile.dividing >= planes.len() {
+        return Err(SaddleError::Shape(
+            "PAFI transmission needs one sampled plane per profile value".into(),
+        ));
+    }
+    let dividing = &planes[profile.dividing];
+    if dividing.retained.is_empty() {
+        return Err(SaddleError::Invalid(
+            "PAFI transmission needs retained constrained samples; raise PafiConfig::retain".into(),
+        ));
+    }
+    let mut dynamics = ohtst::AnalyticSurfaceDynamics::new(surface);
+    transmission_coefficient(&mut dynamics, &dividing.plane, &dividing.retained, config)
+}
+
 /// Estimate the PAFI mean force from any constrained-ensemble engine.
 pub fn average_hyperplane_with_sampler<E: HyperplaneSampler>(
     sampler: &mut E,
@@ -1176,7 +1210,7 @@ pub fn average_hyperplane_with_sampler<E: HyperplaneSampler>(
         budget = budget.with_region(Arc::clone(region));
     }
     let ensemble = sampler.sample_hyperplane(&plane, &budget)?;
-    estimate_pafi(ensemble, &path_plane, config)
+    estimate_pafi(ensemble, &path_plane, config, &plane)
 }
 
 /// The hyperplane `(x - X) · t = 0` through a point of the path.
@@ -1226,6 +1260,7 @@ fn estimate_pafi(
     ensemble: HyperplaneEnsemble,
     plane: &PathPlane<'_>,
     config: &PafiConfig,
+    hyperplane: &Hyperplane,
 ) -> Result<HyperplaneAverage, SaddleError> {
     if ensemble.observations.len() != config.samples {
         return Err(SaddleError::Invalid(
@@ -1286,6 +1321,7 @@ fn estimate_pafi(
     };
     let (gradient, error, _, _) = block_mean(kept_values, config.blocks);
     Ok(HyperplaneAverage {
+        plane: hyperplane.clone(),
         gradient,
         error,
         psi,
@@ -1947,7 +1983,7 @@ fn average_windowed<S: PointSurface>(
             "PAFI plane left the basin of the path in every window".into(),
         ));
     }
-    Ok(chain.average(config))
+    Ok(chain.average(config, &plane))
 }
 
 /// One hyperplane on every frame of `path`, each sampled from its own
@@ -2084,8 +2120,11 @@ where
             "PAFI plane {index} left the basin of the path in every window"
         )));
     }
-    let mut averages: Vec<HyperplaneAverage> =
-        chains.iter().map(|chain| chain.average(config)).collect();
+    let mut averages: Vec<HyperplaneAverage> = chains
+        .iter()
+        .zip(&planes)
+        .map(|(chain, plane)| chain.average(config, plane))
+        .collect();
     let mut profile = integrate(&averages)?;
     let mut round = 1usize;
     while let Some(target) = config.target_error {
@@ -2105,7 +2144,11 @@ where
                 let more = more.clamp(config.samples, 8 * config.samples);
                 chain.run(surface, plane, config, 0, more)
             })?;
-        averages = chains.iter().map(|chain| chain.average(config)).collect();
+        averages = chains
+            .iter()
+            .zip(&planes)
+            .map(|(chain, plane)| chain.average(config, plane))
+            .collect();
         profile = integrate(&averages)?;
         round += 1;
     }
@@ -2500,7 +2543,7 @@ impl Chain {
         Ok(())
     }
 
-    fn average(&self, config: &PafiConfig) -> HyperplaneAverage {
+    fn average(&self, config: &PafiConfig, plane: &Plane) -> HyperplaneAverage {
         let (gradient, error, tau, n_eff) = windowed_block_mean(&self.values, config.blocks);
         let equilibration = equilibrate(
             &self.values,
@@ -2519,6 +2562,7 @@ impl Chain {
             drift_passed: false,
         });
         HyperplaneAverage {
+            plane: plane.constraint.plane().clone(),
             gradient,
             error,
             psi: self.psi_sum / self.values.len().max(1) as f64,
