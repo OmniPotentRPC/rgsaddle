@@ -1078,6 +1078,17 @@ fn basin_gradient(from: f64, to: f64) -> f64 {
     sum / weight
 }
 
+/// The ridge in `y` between the two basins on the plane.
+fn basin_top() -> f64 {
+    let mut top = 0.0;
+    for _ in 0..50 {
+        let slope = 4.0 * BASIN_BARRIER * top * (top * top - 1.0) + BASIN_COUPLING * BASIN_PLANE;
+        let bend = 4.0 * BASIN_BARRIER * (3.0 * top * top - 1.0);
+        top -= slope / bend;
+    }
+    top
+}
+
 /// On a plane that also cuts a deeper basin, the jump test keeps the chain
 /// in the basin it starts from, and the average is that basin's alone.
 /// Without the test the chain falls into the other one.
@@ -1110,12 +1121,7 @@ fn jump_test_keeps_the_basin_of_the_path() {
     .expect("kept");
     let free = average_hyperplane(&TwoBasins, &geometry, &config.clone().with_max_jump(None))
         .expect("free");
-    let mut top = 0.0;
-    for _ in 0..50 {
-        let slope = 4.0 * BASIN_BARRIER * top * (top * top - 1.0) + BASIN_COUPLING * BASIN_PLANE;
-        let bend = 4.0 * BASIN_BARRIER * (3.0 * top * top - 1.0);
-        top -= slope / bend;
-    }
+    let top = basin_top();
     let upper = basin_gradient(top, 4.0);
     let lower = basin_gradient(-4.0, top);
     eprintln!(
@@ -1131,4 +1137,44 @@ fn jump_test_keeps_the_basin_of_the_path() {
         kept.error
     );
     assert!((free.gradient - upper).abs() > 0.25 * (upper - lower).abs());
+}
+
+/// A window far longer than a chain stays in the basin of the path keeps
+/// nothing. The plane then halves its window until it keeps one, and the
+/// average is still that basin's.
+#[test]
+fn jump_test_halves_a_window_no_chain_outlasts() {
+    let geometry = PathGeometry {
+        positions: Array1::from_vec(vec![BASIN_PLANE, 1.0]),
+        tangent: Array1::from_vec(vec![1.0, 0.0]),
+        curvature: Array1::zeros(2),
+        jerk: Array1::zeros(2),
+        arc: 0.0,
+    };
+    let config = PafiConfig::default()
+        .with_thermal(BASIN_THERMAL)
+        .with_mobility(1.0)
+        .with_time_step(0.01)
+        .with_thermalize(200)
+        .with_stride(1)
+        .with_samples(40_000)
+        .with_window(40_000)
+        .with_blocks(8)
+        .with_seed(3)
+        .with_fix_com(false)
+        .with_retain(0)
+        .with_max_jump(Some(0.5));
+    let kept = average_hyperplane(&TwoBasins, &geometry, &config).expect("kept");
+    let upper = basin_gradient(basin_top(), 4.0);
+    eprintln!(
+        "kept {:.4} ± {:.4} from {} samples after {} jumps, upper basin {upper:.4}",
+        kept.gradient, kept.error, kept.samples, kept.jumps
+    );
+    assert!(kept.jumps >= 4, "{} jumps", kept.jumps);
+    assert!(
+        (kept.gradient - upper).abs() < 3.0 * kept.error + 0.02,
+        "kept {} ± {} against {upper}",
+        kept.gradient,
+        kept.error
+    );
 }
