@@ -560,7 +560,7 @@ contains
   recursive integer(c_int) function band_step(self, callback, user, out) result(status)
     class(band_handle), intent(inout) :: self
     procedure(surface_proc), pointer, intent(in) :: callback
-    type(c_ptr), value, intent(in), optional :: user
+    type(c_ptr), intent(in), optional :: user
     type(rgsaddle_report_t), intent(out), optional :: out
     type(rgsaddle_report_t) :: report
     type(callback_box), target :: box
@@ -575,7 +575,7 @@ contains
   recursive integer(c_int) function band_step_c(self, surface, user, out) result(status)
     class(band_handle), intent(inout) :: self
     type(c_funptr), value :: surface
-    type(c_ptr), value, intent(in), optional :: user
+    type(c_ptr), intent(in), optional :: user
     type(rgsaddle_report_t), intent(out), optional :: out
     type(rgsaddle_report_t) :: report
     type(c_ptr) :: user_ptr
@@ -616,7 +616,7 @@ contains
   recursive integer(c_int) function minmode_step(self, callback, user, out) result(status)
     class(minmode_handle), intent(inout) :: self
     procedure(surface_proc), pointer, intent(in) :: callback
-    type(c_ptr), value, intent(in), optional :: user
+    type(c_ptr), intent(in), optional :: user
     type(rgsaddle_report_t), intent(out), optional :: out
     type(rgsaddle_report_t) :: report
     type(callback_box), target :: box
@@ -631,7 +631,7 @@ contains
   recursive integer(c_int) function minmode_step_c(self, surface, user, out) result(status)
     class(minmode_handle), intent(inout) :: self
     type(c_funptr), value :: surface
-    type(c_ptr), value, intent(in), optional :: user
+    type(c_ptr), intent(in), optional :: user
     type(rgsaddle_report_t), intent(out), optional :: out
     type(rgsaddle_report_t) :: report
     type(c_ptr) :: user_ptr
@@ -700,7 +700,7 @@ contains
   recursive integer(c_int) function pafi_run(self, callback, user) result(status)
     class(pafi_handle), intent(inout) :: self
     procedure(point_surface_proc), pointer, intent(in) :: callback
-    type(c_ptr), value, intent(in), optional :: user
+    type(c_ptr), intent(in), optional :: user
     type(callback_box), target :: box
     box%surface => null()
     box%point => callback
@@ -712,7 +712,7 @@ contains
   recursive integer(c_int) function pafi_run_c(self, surface, user) result(status)
     class(pafi_handle), intent(inout) :: self
     type(c_funptr), value :: surface
-    type(c_ptr), value, intent(in), optional :: user
+    type(c_ptr), intent(in), optional :: user
     type(c_ptr) :: user_ptr
     user_ptr = c_null_ptr
     if (present(user)) user_ptr = user
@@ -779,7 +779,7 @@ contains
   recursive integer(c_int) function ohtst_run(self, callback, user) result(status)
     class(ohtst_handle), intent(inout) :: self
     procedure(point_surface_proc), pointer, intent(in) :: callback
-    type(c_ptr), value, intent(in), optional :: user
+    type(c_ptr), intent(in), optional :: user
     type(callback_box), target :: box
     box%surface => null()
     box%point => callback
@@ -791,7 +791,7 @@ contains
   recursive integer(c_int) function ohtst_run_c(self, surface, user) result(status)
     class(ohtst_handle), intent(inout) :: self
     type(c_funptr), value :: surface
-    type(c_ptr), value, intent(in), optional :: user
+    type(c_ptr), intent(in), optional :: user
     type(c_ptr) :: user_ptr
     user_ptr = c_null_ptr
     if (present(user)) user_ptr = user
