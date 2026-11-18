@@ -632,7 +632,7 @@ void make_band(nb::ndarray<const double, nb::ndim<2>, nb::c_contig> x, const std
   }
   const char *text = rgsaddle_last_error();
   rgsaddle_py_set_last_error(text == nullptr ? "" : text);
-  throw nb::value_error(text == nullptr || text[0] == '\0' ? "band presets stay on feat/band-methods-zoom"
+  throw nb::value_error(text == nullptr || text[0] == '\0' ? "band presets are not implemented"
                                                            : text);
 }
 
