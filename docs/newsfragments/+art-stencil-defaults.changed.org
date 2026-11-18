@@ -1,0 +1,2 @@
+The C point-stencil configuration (~rgsaddle_stencil_config_new~) and Python ~Stencil.point~ take their default ART curvature threshold and push count (-0.01 and 3) from ~ArtNConfig::default~, matching Rust ~Stencil::point~.
+C ABI minor 44.

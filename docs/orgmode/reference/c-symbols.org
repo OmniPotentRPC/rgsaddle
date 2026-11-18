@@ -142,7 +142,7 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =rgsaddle_band_set_fixed_atoms=. Purpose: Per-atom fixed mask shared by every image, ABI minor 39. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_band_set_zoom=. Purpose: Zoom-NEB, eOn's zoom_* keys. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_last_error=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
-- =rgsaddle_stencil_config_new=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_stencil_config_new=. Purpose: Allocate a point-stencil configuration with the Stencil::point defaults; from ABI minor 44, RGSADDLE_STENCIL_KEY_ART_THRESHOLD is -0.01 and RGSADDLE_STENCIL_KEY_ART_PUSH is 3 (rgsaddle_artn_config_default). Parameters: the declaration. Units: the caller's.
 - =rgsaddle_stencil_config_set_f64=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_stencil_config_set_i64=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_stencil_config_set_array=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.

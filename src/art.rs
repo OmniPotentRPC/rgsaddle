@@ -15,7 +15,7 @@
 //!    [`crate::MinModeSession::estimate_mode`];
 //! 4. [`ArtPhase::Climb`] takes one [`crate::MinModeSession::step`] and
 //!    returns to the perpendicular relaxation;
-//! 5. [`ArtPhase::Certify`] calls [`crate::saddle_index`];
+//! 5. [`ArtPhase::Certify`] calls [`crate::saddle_index()`];
 //! 6. [`ArtPhase::PushOver`] steps both ways along the unstable mode;
 //! 7. [`ArtPhase::Quench`] minimizes both images with no constraint;
 //! 8. [`ArtPhase::Report`] records whether the quenches are reversible
@@ -351,7 +351,7 @@ pub struct ArtOutcome {
     pub saddle: Option<Array1<f64>>,
     /// Energy of [`Self::saddle`].
     pub saddle_energy: Option<f64>,
-    /// Index from [`crate::saddle_index`], when certification ran.
+    /// Index from [`crate::saddle_index()`], when certification ran.
     pub saddle_index: Option<usize>,
     /// Whether that certificate met its residual tolerance.
     pub certificate_converged: bool,
@@ -1039,7 +1039,7 @@ pub fn connection_verdict(
 /// RMSD or, when `permute_identical` is set, the RMSD of the sorted
 /// pairwise distances. The sorted spectrum is unchanged by translation,
 /// rotation, and permutation, which is the identical-atom comparison of
-/// Malek and Mousseau. More than [`PERMUTATION_ATOM_CAP`] atoms is refused
+/// Malek and Mousseau. More than eight atoms is refused
 /// when permutations are requested, because the caller should not discover
 /// that limit only after a search.
 pub fn structure_distance(
@@ -1365,9 +1365,9 @@ fn plain_rmsd(reference: &[[f64; 3]], moving: &[[f64; 3]]) -> f64 {
 fn kabsch_rotation(reference: &[[f64; 3]], moving: &[[f64; 3]]) -> Option<[[f64; 3]; 3]> {
     let mut covariance = [[0.0; 3]; 3];
     for (point, target) in moving.iter().zip(reference) {
-        for row in 0..3 {
-            for column in 0..3 {
-                covariance[row][column] += target[row] * point[column];
+        for (cov_row, &target_coord) in covariance.iter_mut().zip(target) {
+            for (entry, &point_coord) in cov_row.iter_mut().zip(point) {
+                *entry += target_coord * point_coord;
             }
         }
     }
@@ -1397,14 +1397,14 @@ fn kabsch_rotation(reference: &[[f64; 3]], moving: &[[f64; 3]]) -> Option<[[f64;
     }
     let mut left = [[0.0; 3]; 3];
     let floor = largest * f64::EPSILON * 32.0;
-    for column in 0..3 {
-        if sigma[column] > floor {
-            for row in 0..3 {
+    for (column, &sigma_col) in sigma.iter().enumerate() {
+        if sigma_col > floor {
+            for (left_row, cov_row) in left.iter_mut().zip(&covariance) {
                 let mut sum = 0.0;
-                for k in 0..3 {
-                    sum += covariance[row][k] * vectors[k][column];
+                for (&cov_entry, vec_row) in cov_row.iter().zip(&vectors) {
+                    sum += cov_entry * vec_row[column];
                 }
-                left[row][column] = sum / sigma[column];
+                left_row[column] = sum / sigma_col;
             }
         }
     }
@@ -1422,12 +1422,12 @@ fn kabsch_rotation(reference: &[[f64; 3]], moving: &[[f64; 3]]) -> Option<[[f64;
             vector_row[column] = -vector_row[column];
         }
         if sigma[column] > floor {
-            for row in 0..3 {
+            for (left_row, cov_row) in left.iter_mut().zip(&covariance) {
                 let mut sum = 0.0;
-                for k in 0..3 {
-                    sum += covariance[row][k] * vectors[k][column];
+                for (&cov_entry, vec_row) in cov_row.iter().zip(&vectors) {
+                    sum += cov_entry * vec_row[column];
                 }
-                left[row][column] = sum / sigma[column];
+                left_row[column] = sum / sigma[column];
             }
         }
         complete_left(&mut left, &sigma, floor);

@@ -15,11 +15,11 @@ let mut search = Stencil::point(x0)
 let report = search.step(&surface)?;
 #+end_src
 
-ART pushes along the seed until the curvature falls under =art_threshold= (default 0), then climbs with Lanczos. Malek and Mousseau (2000), doi:10.1103/PhysRevE.62.7723. Eigen following builds a central-difference Hessian, calls =exact_eigh=, and makes the largest-magnitude component of the lowest mode positive. =build= rejects =Climb::Reflect= on a minimiser, a window on a point, a zero thread count, and ART without a mode solver.
+ART pushes along the seed with perpendicular relaxation, starts Lanczos after =art_push_steps= pushes (default 3; =art_push= in Python and =RGSADDLE_STENCIL_KEY_ART_PUSH= in C), and climbs with Lanczos once the lowest curvature falls under =art_threshold= (default -0.01), matching =ArtNConfig=. Malek and Mousseau (2000), doi:10.1103/PhysRevE.62.7723. Eigen following builds a central-difference Hessian, calls =exact_eigh=, and makes the largest-magnitude component of the lowest mode positive. =build= rejects =Climb::Reflect= on a minimiser, a window on a point, a zero thread count, and ART without a mode solver.
 
 =Stencil::band= checks the array and then returns =band presets stay on feat/band-methods-zoom=. Zoom, energy-weighted springs, and the band side of the builder are that branch. The chain, the mesh (remesh, insert, window), and the point controller are on this branch.
 
-From C, =rgsaddle_stencil_config_new= takes the preset discriminant. Unknown keys return =RGSADDLE_INVALID_PARAMETER=. =rgsaddle_last_error= is thread-local. =rgsaddle_stencil_run= loops over =rgsaddle_stencil_step=. The report opens with =struct_size=. The older band and min-mode entries stay step-only, and the ABI minor stays 16.
+From C, =rgsaddle_stencil_config_new= takes the preset discriminant and fills the =Stencil::point= defaults (from ABI minor 44, =RGSADDLE_STENCIL_KEY_ART_THRESHOLD= is -0.01 and =RGSADDLE_STENCIL_KEY_ART_PUSH= is 3). Unknown keys return =RGSADDLE_INVALID_PARAMETER=. =rgsaddle_last_error= is thread-local. =rgsaddle_stencil_run= loops over =rgsaddle_stencil_step=. The report opens with =struct_size=. The older band and min-mode entries stay step-only, and these stencil symbols entered at ABI minor 16.
 
 From Python, =rgsaddle.Stencil.point(x, preset="dimer")= takes a C-contiguous float64 vector. =step(surface)= releases the thread, and the surface callback re-attaches. =rgsaddle.ase.Point(atoms, preset="dimer").run(fmax, steps)= is an ASE =Optimizer= whose =step= is one stencil step. A second thread that enters the same handle raises =RuntimeError=.
 
