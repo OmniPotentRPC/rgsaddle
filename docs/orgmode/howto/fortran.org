@@ -14,7 +14,7 @@ The install has:
 - =librgsaddle_fortran=, the wrapper library
 - =rgsaddle.mod= under =include/rgsaddle/fortran=
 - =rgsaddle-fortran.pc=
-- CMake package files under =lib/cmake/rgsaddleFortran=
+- CMake package files under =lib/cmake/rgsaddleFortran= (or =<libdir>/cmake/rgsaddleFortran=)
 
 The module exports typed handles with finalizers for:
 
@@ -39,54 +39,128 @@ Both routes call the same Rust C ABI and are checked against each other by the F
 
 Minimum-mode uses the same pattern through =rgsaddle_minmode_config_t= and =minmode_handle=.
 
-* PAFI on an analytic one-dimensional barrier
-PAFI takes a point callback, =point_surface_proc=, over one geometry:
+* Runnable PAFI and OH-TST example
+Both =pafi_handle= and =ohtst_handle= take a =point_surface_proc= callback (or =c_funptr= via =run_c=). Save the following program as =pafi_ohtst_demo.f90=:
 
 #+begin_src fortran
-type(pafi_handle) :: pafi
-type(rgsaddle_pafi_config_t) :: cfg
-type(rgsaddle_pafi_result_t) :: out
-real(c_double) :: frames(41), arcs(41)
-integer(c_int) :: status
-procedure(point_surface_proc), pointer :: cb
+module demo_surfaces
+  use, intrinsic :: iso_c_binding
+  use rgsaddle, only: RGSADDLE_OK, RGSADDLE_INVALID_PARAMETER
+  implicit none
+contains
+  integer(c_int) function double_well(user, n_dof, position, energy, gradient) result(status)
+    type(c_ptr), value :: user
+    integer(c_int64_t), value :: n_dof
+    real(c_double), intent(in) :: position(*)
+    real(c_double), intent(inout) :: energy
+    real(c_double), intent(inout) :: gradient(*)
+    real(c_double) :: x
+    if (n_dof /= 1_c_int64_t) then
+      status = RGSADDLE_INVALID_PARAMETER
+      return
+    end if
+    x = position(1)
+    energy = (1.0_c_double - x * x) ** 2
+    gradient(1) = -4.0_c_double * x * (1.0_c_double - x * x)
+    status = RGSADDLE_OK
+  end function double_well
 
-call init_pafi_config(cfg)
-cfg%thermal = 0.02_c_double
-cfg%samples = 4_c_int64_t
-cfg%blocks = 2_c_int64_t
-cfg%seed = 3_c_int64_t
-! Fill frames/arcs for x in [-1, 1].
-status = pafi%create(cfg, 41_c_int64_t, 1_c_int64_t, frames, arcs)
-cb => my_point_surface
-status = pafi%run(cb, c_null_ptr)
-status = pafi%result(out)
+  integer(c_int) function quad_saddle(user, n_dof, position, energy, gradient) result(status)
+    type(c_ptr), value :: user
+    integer(c_int64_t), value :: n_dof
+    real(c_double), intent(in) :: position(*)
+    real(c_double), intent(inout) :: energy
+    real(c_double), intent(inout) :: gradient(*)
+    if (n_dof /= 2_c_int64_t) then
+      status = RGSADDLE_INVALID_PARAMETER
+      return
+    end if
+    energy = 0.5_c_double * (-position(1) ** 2 + 4.0_c_double * position(2) ** 2)
+    gradient(1) = -position(1)
+    gradient(2) = 4.0_c_double * position(2)
+    status = RGSADDLE_OK
+  end function quad_saddle
+end module demo_surfaces
+
+program pafi_ohtst_demo
+  use, intrinsic :: iso_c_binding
+  use rgsaddle
+  use demo_surfaces
+  implicit none
+
+  integer, parameter :: n_frames = 41
+  type(pafi_handle) :: pafi
+  type(rgsaddle_pafi_config_t) :: pcfg
+  type(rgsaddle_pafi_result_t) :: pout
+  real(c_double) :: frames(n_frames), arcs(n_frames)
+  real(c_double) :: grad(n_frames), grad_err(n_frames), free_e(n_frames), free_err(n_frames)
+  integer(c_int64_t) :: written
+  integer(c_int) :: status, i
+  procedure(point_surface_proc), pointer :: cb
+
+  type(ohtst_handle) :: tx
+  type(rgsaddle_ohtst_config_t) :: ocfg
+  type(rgsaddle_ohtst_result_t) :: oout
+  real(c_double) :: point(2), normal(2), t(32), kappa_t(32)
+
+  call init_pafi_config(pcfg)
+  pcfg%thermal = 0.02_c_double
+  pcfg%time_step = 0.01_c_double
+  pcfg%thermalize = 5_c_int64_t
+  pcfg%stride = 1_c_int64_t
+  pcfg%samples = 200_c_int64_t
+  pcfg%blocks = 5_c_int64_t
+  pcfg%seed = 3_c_int64_t
+  pcfg%fix_com = 0_c_int32_t
+  pcfg%retain = 1_c_int64_t
+  pcfg%max_rounds = 1_c_int64_t
+
+  do i = 1, n_frames
+    frames(i) = -1.0_c_double + 2.0_c_double * real(i - 1, c_double) / real(n_frames - 1, c_double)
+    arcs(i) = 2.0_c_double * real(i - 1, c_double) / real(n_frames - 1, c_double)
+  end do
+
+  status = pafi%create(pcfg, int(n_frames, c_int64_t), 1_c_int64_t, frames, arcs)
+  if (status /= RGSADDLE_OK) stop 1
+  cb => double_well
+  status = pafi%run(cb, c_null_ptr)
+  if (status /= RGSADDLE_OK) stop 2
+  status = pafi%result(pout)
+  if (status /= RGSADDLE_OK) stop 3
+  status = pafi%profile(arcs, grad, grad_err, free_e, free_err, written)
+  if (status /= RGSADDLE_OK) stop 4
+
+  call init_ohtst_config(ocfg)
+  ocfg%thermal = 0.5_c_double
+  ocfg%shooting_friction = 1.5_c_double
+  ocfg%shooting_shots = 4096_c_int64_t
+  point = [0.0_c_double, 0.0_c_double]
+  normal = [1.0_c_double, 0.0_c_double]
+  status = tx%create(ocfg, 2_c_int64_t, point, normal)
+  if (status /= RGSADDLE_OK) stop 5
+  cb => quad_saddle
+  status = tx%run(cb, c_null_ptr)
+  if (status /= RGSADDLE_OK) stop 6
+  status = tx%result(oout)
+  if (status /= RGSADDLE_OK) stop 7
+  status = tx%curve(t, kappa_t, written)
+  if (status /= RGSADDLE_OK) stop 8
+
+  write(*, '(a,1x,f8.5,1x,a,1x,f8.5)') 'barrier=', pout%barrier, 'kappa=', oout%kappa
+end program pafi_ohtst_demo
 #+end_src
 
-The profile arrays come from =pafi%profile(...)= (arc, gradient, gradient error, free energy, free-energy error).
+Build and run it against the installed prefix and =librgsaddle=:
 
-* OH-TST on a quadratic saddle
-OH-TST also takes a point callback and exposes the transmission summary and curve:
-
-#+begin_src fortran
-type(ohtst_handle) :: tx
-type(rgsaddle_ohtst_config_t) :: cfg
-type(rgsaddle_ohtst_result_t) :: out
-real(c_double) :: point(2), normal(2), t(32), kappa_t(32)
-integer(c_int64_t) :: written
-integer(c_int) :: status
-procedure(point_surface_proc), pointer :: cb
-
-call init_ohtst_config(cfg)
-cfg%thermal = 0.5_c_double
-cfg%shooting_friction = 1.5_c_double
-cfg%shooting_shots = 4096_c_int64_t
-point = [0.0_c_double, 0.0_c_double]
-normal = [1.0_c_double, 0.0_c_double]
-status = tx%create(cfg, 2_c_int64_t, point, normal)
-cb => my_point_surface
-status = tx%run(cb, c_null_ptr)
-status = tx%result(out)
-status = tx%curve(t, kappa_t, written)
+#+begin_src sh
+cargo build --locked --features capi
+meson setup build -Dfortran=enabled --prefix "$PWD/dist" --libdir=lib
+meson install -C build
+PKG_CONFIG_PATH="$PWD/dist/lib/pkgconfig:$PWD/dist/share/pkgconfig" \
+  gfortran -std=f2008 $(pkg-config --cflags rgsaddle-fortran) \
+  pafi_ohtst_demo.f90 $(pkg-config --libs rgsaddle-fortran) \
+  -Ltarget/debug -lrgsaddle -Wl,-rpath,"$PWD/target/debug" -o pafi_ohtst_demo.x
+./pafi_ohtst_demo.x
 #+end_src
 
-These are exercised in =tests/fortran/test_pafi.f90= and =tests/fortran/test_ohtst.f90= on the same analytic surfaces as the Rust OH-TST and PAFI tests.
+The full test suite in =tests/fortran/= exercises NEB, dimer, Lanczos, PAFI (1D double well and 2D widening barrier), and OH-TST (aligned and tilted planes, BAOAB and GHMC).
