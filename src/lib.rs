@@ -260,6 +260,7 @@ pub use tangent::TangentKind;
 
 pub mod cell_log;
 pub mod constraints;
+pub mod covalent;
 pub mod eigensolve;
 pub mod elastic;
 pub mod field;
@@ -280,6 +281,7 @@ pub mod samd;
 pub mod seed_direction;
 pub mod sella_min;
 pub mod sella_saddle;
+pub mod topology;
 pub mod vocn;
 
 pub use cell_log::{CellChart, expm_3x3, logm_3x3};
@@ -315,6 +317,12 @@ pub use pes::CartesianPes;
 pub use pes_internal::{
     CellCartesianPes, CellInternalPes, InternalPes, SellaPes, niggli_reduce_cell,
     niggli_reduce_vectors, place_perp_dummy,
+};
+
+pub use covalent::{atomic_number, covalent_radius, element_symbol};
+pub use topology::{
+    AtomMap, DummyHost, InternalTopology, LinearBend, PlanarWatch, TopologyCheck, TopologyConfig,
+    check_chart,
 };
 
 pub use qn::{
