@@ -1,6 +1,9 @@
 #+title: Reference
 #+options: toc:nil num:nil
 
+* CI gate report
+=reference/ci-gate= defines the report header, status rows, checks, and artefacts.
+
 * Public Rust types
 The API documentation for every public item is on [[https://docs.rs/rgsaddle][docs.rs/rgsaddle]].
 =cargo doc --open= builds the same pages from a checkout.

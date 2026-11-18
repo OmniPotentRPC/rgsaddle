@@ -1,0 +1,15 @@
+#+title: CI gate report
+#+options: toc:nil num:nil
+
+The gate report starts with:
+
+- =Instance / host=: the Actions runner name or =local=, and the host name.
+- =Repository=: the checkout's =origin= URL.
+- =Building on=: the operating system and the gate's one-CPU limit.
+- =Building for arch=: the machine architecture.
+- =Job dir=: the checkout used for every command.
+- =Commit SHA=: the tested commit.
+
+The status table records submission, start, finish, and the final reason. The finished row lists every command's exit status, the output scan for =error|FAILED|panicked=, and test counts.
+
+Artefacts record pixi, Rust, Cargo, Python, the EESSI stack and compiler, loaded modules, and test summaries when they apply. =EESSI not available= means the EESSI leg did not run; it is never reported as success.
