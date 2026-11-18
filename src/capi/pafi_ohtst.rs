@@ -14,7 +14,7 @@ use crate::pafi::{ArcPath, FreeEnergyProfile, HyperplaneAverage, PafiConfig, paf
 use super::{
     RGSADDLE_ABI_MAJOR, RGSADDLE_ABI_MINOR, RGSADDLE_INVALID_PARAMETER, RGSADDLE_NO_EVALUATION,
     RGSADDLE_NULL_REPORT, RGSADDLE_NULL_SESSION, RGSADDLE_NULL_SURFACE, RGSADDLE_OK,
-    RgsaddleVersion, status_of,
+    RGSADDLE_SHAPE, RgsaddleVersion, status_of,
 };
 
 /// The point-surface callback used by the PAFI and OH-TST C handles.
@@ -52,38 +52,59 @@ impl PointSurface for CPointSurface {
     }
 }
 
+/// PAFI configuration over the C ABI.
 #[repr(C)]
-#[allow(missing_docs)]
 pub struct RgsaddlePafiConfig {
+    /// ABI version this value was built against.
     pub version: RgsaddleVersion,
+    /// Bit flags. Reserved; write zero.
     pub flags: u64,
+    /// Thermal energy `kT` in the surface's energy unit.
     pub thermal: f64,
+    /// Overdamped mobility `mu`.
     pub mobility: f64,
+    /// Overdamped integration time step.
     pub time_step: f64,
+    /// Steps discarded per hyperplane before recording.
     pub thermalize: i64,
+    /// Steps between recorded samples.
     pub stride: i64,
+    /// Recorded samples per hyperplane.
     pub samples: i64,
+    /// Contiguous blocks for block averaging.
     pub blocks: i64,
+    /// Random seed for the Langevin noise.
     pub seed: u64,
+    /// Nonzero removes center-of-mass drift for multi-atom paths.
     pub fix_com: i32,
+    /// Number of configurations retained per hyperplane.
     pub retain: i64,
+    /// Positive target barrier error enables adaptive rounds; non-positive runs one pass.
     pub target_error: f64,
+    /// Maximum adaptive resampling rounds.
     pub max_rounds: i64,
 }
 
+/// PAFI barrier summary returned after `rgsaddle_pafi_run`.
 #[repr(C)]
-#[allow(missing_docs)]
 pub struct RgsaddlePafiResult {
+    /// ABI version stamped by the library.
     pub version: RgsaddleVersion,
+    /// Bit flags. Zeroed by the library.
     pub flags: u64,
+    /// Free-energy barrier maximum relative to the reactant plane.
     pub barrier: f64,
+    /// Propagated block standard error at the barrier.
     pub barrier_error: f64,
+    /// Zero-based index of the dividing hyperplane in the profile.
     pub dividing: i64,
+    /// Total recorded samples summed over hyperplanes and rounds.
     pub samples: i64,
+    /// Total surface evaluations summed over hyperplanes and rounds.
     pub evaluations: i64,
 }
 
-#[allow(missing_docs)]
+/// Opaque PAFI session created by [`rgsaddle_pafi_create`].
 pub struct RgsaddlePafi {
     config: PafiConfig,
     path: ArcPath,
@@ -121,12 +142,15 @@ fn parse_pafi_config(config: &RgsaddlePafiConfig) -> Result<PafiConfig, SaddleEr
         usize::try_from(config.retain).map_err(|_| SaddleError::Invalid("PAFI retain".into()))?;
     let max_rounds = usize::try_from(config.max_rounds)
         .map_err(|_| SaddleError::Invalid("PAFI max rounds".into()))?;
+    if config.target_error.is_nan() {
+        return Err(SaddleError::Invalid("PAFI target error is NaN".into()));
+    }
     let target_error = if config.target_error.is_finite() && config.target_error > 0.0 {
         Some(config.target_error)
     } else {
         None
     };
-    Ok(PafiConfig::default()
+    let parsed = PafiConfig::default()
         .with_thermal(config.thermal)
         .with_mobility(config.mobility)
         .with_time_step(config.time_step)
@@ -138,7 +162,9 @@ fn parse_pafi_config(config: &RgsaddlePafiConfig) -> Result<PafiConfig, SaddleEr
         .with_fix_com(config.fix_com != 0)
         .with_retain(retain)
         .with_target_error(target_error)
-        .with_max_rounds(max_rounds))
+        .with_max_rounds(max_rounds);
+    parsed.check()?;
+    Ok(parsed)
 }
 
 fn parse_frames(
@@ -157,18 +183,48 @@ fn parse_frames(
     let total = rows
         .checked_mul(dof)
         .ok_or_else(|| SaddleError::Shape("PAFI path size overflow".into()))?;
+    if total > isize::MAX as usize / size_of::<f64>() {
+        return Err(SaddleError::Shape("PAFI path exceeds address space".into()));
+    }
     let raw = unsafe { slice::from_raw_parts(frames, total) };
     let mut points = Vec::with_capacity(rows);
     for i in 0..rows {
         points.push(Array1::from_vec(raw[i * dof..(i + 1) * dof].to_vec()));
     }
     let path = ArcPath::from_positions(&points)?;
-    if arcs.is_null() || n_arcs <= 0 {
+    if arcs.is_null() {
+        if n_arcs != 0 {
+            return Err(SaddleError::Shape(
+                "PAFI null arcs with nonzero count".into(),
+            ));
+        }
         let arc = path.arcs();
         return Ok((path, arc));
     }
+    if n_arcs == 0 {
+        let arc = path.arcs();
+        return Ok((path, arc));
+    }
+    if n_arcs < 2 {
+        return Err(SaddleError::Invalid(
+            "PAFI needs at least two arc points".into(),
+        ));
+    }
     let count = usize::try_from(n_arcs).map_err(|_| SaddleError::Shape("PAFI arcs".into()))?;
+    if count > isize::MAX as usize / size_of::<f64>() {
+        return Err(SaddleError::Shape("PAFI arcs exceed address space".into()));
+    }
     let arc = unsafe { slice::from_raw_parts(arcs, count) }.to_vec();
+    for (i, value) in arc.iter().enumerate() {
+        if !value.is_finite() {
+            return Err(SaddleError::NonFinite("PAFI arc"));
+        }
+        if i > 0 && *value <= arc[i - 1] {
+            return Err(SaddleError::Invalid(
+                "PAFI arcs must strictly increase".into(),
+            ));
+        }
+    }
     Ok((path, arc))
 }
 
@@ -325,10 +381,14 @@ pub unsafe extern "C" fn rgsaddle_pafi_profile(
         return RGSADDLE_NO_EVALUATION;
     };
     let n = profile.arc.len();
-    let cap = match usize::try_from(capacity) {
-        Ok(v) => v,
-        Err(_) => return RGSADDLE_INVALID_PARAMETER,
+    let Ok(cap) = usize::try_from(capacity) else {
+        return RGSADDLE_SHAPE;
     };
+    if !written.is_null() {
+        unsafe {
+            *written = as_i64_saturated(n);
+        }
+    }
     if cap < n {
         return RGSADDLE_INVALID_PARAMETER;
     }
@@ -343,11 +403,6 @@ pub unsafe extern "C" fn rgsaddle_pafi_profile(
     copy(gradient_errors, &profile.gradient_error);
     copy(free_energy, &profile.free_energy);
     copy(free_energy_errors, &profile.free_energy_error);
-    if !written.is_null() {
-        unsafe {
-            *written = as_i64_saturated(n);
-        }
-    }
     RGSADDLE_OK
 }
 
@@ -360,47 +415,77 @@ pub unsafe extern "C" fn rgsaddle_pafi_free(session: *mut RgsaddlePafi) {
     }
 }
 
+/// OH-TST configuration over the C ABI.
 #[repr(C)]
-#[allow(missing_docs)]
 pub struct RgsaddleOhtstConfig {
+    /// ABI version this value was built against.
     pub version: RgsaddleVersion,
+    /// Bit flags. Reserved; write zero.
     pub flags: u64,
+    /// Thermal energy `kT` in the surface's energy unit.
     pub thermal: f64,
+    /// Hyperplane sampler time step.
     pub sample_time_step: f64,
+    /// Hyperplane sampler Langevin friction.
     pub sample_friction: f64,
+    /// Hyperplane sampler burn-in steps.
     pub sample_burn_in: i64,
+    /// Steps between hyperplane sampler records.
     pub sample_stride: i64,
+    /// Hyperplane sampler records.
     pub sample_records: i64,
+    /// Contiguous blocks for hyperplane sampler error estimation.
     pub sample_blocks: i64,
+    /// Random seed for hyperplane sampling.
     pub sample_seed: u64,
+    /// Number of plane configurations retained for shooting starts.
     pub sample_retain: i64,
+    /// Hyperplane integrator: 0 BAOAB, 1 GHMC.
     pub sample_integrator: i32,
+    /// Shooting trajectory Langevin friction (`>= 0`).
     pub shooting_friction: f64,
+    /// Shooting trajectory integration time step.
     pub shooting_time_step: f64,
+    /// Steps per forward and backward half-trajectory.
     pub shooting_steps: i64,
+    /// Steps between transmission checkpoints.
     pub shooting_check_every: i64,
+    /// Consecutive checkpoint commitment threshold, or 0 to run to the end.
     pub shooting_commit: i64,
+    /// Total shooting trajectories.
     pub shooting_shots: i64,
+    /// Contiguous blocks for shooting error estimation.
     pub shooting_blocks: i64,
+    /// Random seed for shooting velocities and noise.
     pub shooting_seed: u64,
+    /// Crossing counting rule: 0 final state, 1 first crossing.
     pub counting: i32,
 }
 
+/// OH-TST transmission summary returned after `rgsaddle_ohtst_run`.
 #[repr(C)]
-#[allow(missing_docs)]
 pub struct RgsaddleOhtstResult {
+    /// ABI version stamped by the library.
     pub version: RgsaddleVersion,
+    /// Bit flags. Zeroed by the library.
     pub flags: u64,
+    /// Transmission coefficient `kappa` at the end of the halves.
     pub kappa: f64,
+    /// Block standard error of `kappa`.
     pub error: f64,
+    /// Shots whose halves both reached a state.
     pub shots: i64,
+    /// Shots that ended unassigned.
     pub unassigned: i64,
+    /// Shots counted as reactive.
     pub reactive: i64,
+    /// Backward halves that recrossed the dividing plane.
     pub recrossed: i64,
+    /// Surface evaluations spent during shooting.
     pub evaluations: i64,
 }
 
-#[allow(missing_docs)]
+/// Opaque OH-TST session created by [`rgsaddle_ohtst_create`].
 pub struct RgsaddleOhtst {
     sampler: LangevinConfig,
     shooting: TransmissionConfig,
@@ -410,6 +495,7 @@ pub struct RgsaddleOhtst {
 
 fn parse_ohtst_config(
     config: &RgsaddleOhtstConfig,
+    n_dof: usize,
 ) -> Result<(LangevinConfig, TransmissionConfig), SaddleError> {
     if config.version.major != RGSADDLE_ABI_MAJOR {
         return Err(SaddleError::Invalid("OH-TST ABI major mismatch".into()));
@@ -435,6 +521,12 @@ fn parse_ohtst_config(
             ));
         }
     };
+    let sample_retain = to_usize(config.sample_retain, "sample retain")?;
+    if sample_retain == 0 {
+        return Err(SaddleError::Invalid(
+            "OH-TST sample retain must be positive".into(),
+        ));
+    }
     let sampler = LangevinConfig::default()
         .with_thermal(config.thermal)
         .with_time_step(config.sample_time_step)
@@ -444,8 +536,9 @@ fn parse_ohtst_config(
         .with_records(to_usize(config.sample_records, "sample records")?)
         .with_blocks(to_usize(config.sample_blocks, "sample blocks")?)
         .with_seed(config.sample_seed)
-        .with_retain(to_usize(config.sample_retain, "sample retain")?)
+        .with_retain(sample_retain)
         .with_integrator(sample_integrator);
+    sampler.check()?;
     let shooting = TransmissionConfig::default()
         .with_thermal(config.thermal)
         .with_friction(config.shooting_friction)
@@ -460,6 +553,7 @@ fn parse_ohtst_config(
         .with_blocks(to_usize(config.shooting_blocks, "shooting blocks")?)
         .with_seed(config.shooting_seed)
         .with_counting(counting);
+    shooting.check(n_dof)?;
     Ok((sampler, shooting))
 }
 
@@ -476,12 +570,15 @@ pub unsafe extern "C" fn rgsaddle_ohtst_create(
     if config.is_null() || point.is_null() || normal.is_null() || n_dof < 1 {
         return std::ptr::null_mut();
     }
-    let cfg = unsafe { &*config };
-    let (sampler, shooting) = match parse_ohtst_config(cfg) {
+    let n = match usize::try_from(n_dof) {
         Ok(value) => value,
         Err(_) => return std::ptr::null_mut(),
     };
-    let n = match usize::try_from(n_dof) {
+    if n > isize::MAX as usize / size_of::<f64>() {
+        return std::ptr::null_mut();
+    }
+    let cfg = unsafe { &*config };
+    let (sampler, shooting) = match parse_ohtst_config(cfg, n) {
         Ok(value) => value,
         Err(_) => return std::ptr::null_mut(),
     };
@@ -515,11 +612,11 @@ pub unsafe extern "C" fn rgsaddle_ohtst_set_config(
     if config.is_null() {
         return RGSADDLE_INVALID_PARAMETER;
     }
-    let (sampler, shooting) = match parse_ohtst_config(unsafe { &*config }) {
+    let session = unsafe { &mut *session };
+    let (sampler, shooting) = match parse_ohtst_config(unsafe { &*config }, session.plane.dim()) {
         Ok(value) => value,
         Err(err) => return status_of(&err),
     };
-    let session = unsafe { &mut *session };
     session.sampler = sampler;
     session.shooting = shooting;
     session.transmission = None;
@@ -619,11 +716,15 @@ pub unsafe extern "C" fn rgsaddle_ohtst_curve(
     let Some(transmission) = session.transmission.as_ref() else {
         return RGSADDLE_NO_EVALUATION;
     };
-    let cap = match usize::try_from(capacity) {
-        Ok(value) => value,
-        Err(_) => return RGSADDLE_INVALID_PARAMETER,
+    let Ok(cap) = usize::try_from(capacity) else {
+        return RGSADDLE_SHAPE;
     };
     let n = transmission.time.len();
+    if !written.is_null() {
+        unsafe {
+            *written = as_i64_saturated(n);
+        }
+    }
     if cap < n {
         return RGSADDLE_INVALID_PARAMETER;
     }
@@ -634,11 +735,6 @@ pub unsafe extern "C" fn rgsaddle_ohtst_curve(
     if !kappa_of_t.is_null() {
         let out = unsafe { slice::from_raw_parts_mut(kappa_of_t, n) };
         out.copy_from_slice(&transmission.kappa_of_t);
-    }
-    if !written.is_null() {
-        unsafe {
-            *written = as_i64_saturated(n);
-        }
     }
     RGSADDLE_OK
 }
@@ -722,7 +818,7 @@ mod tests {
         let mut frames = Vec::new();
         let n_frames = 41usize;
         for i in 0..n_frames {
-            let x = -1.0 + i as f64 / (n_frames - 1) as f64;
+            let x = -1.0 + 2.0 * i as f64 / (n_frames - 1) as f64;
             frames.push(x);
         }
         let mut arcs = Vec::with_capacity(n_frames);
@@ -741,15 +837,6 @@ mod tests {
         };
         assert!(!session.is_null());
 
-        config.samples = 200;
-        assert_eq!(
-            unsafe { rgsaddle_pafi_set_config(session, &config) },
-            RGSADDLE_OK
-        );
-        assert_eq!(
-            unsafe { rgsaddle_pafi_run(session, Some(pafi_along_x), std::ptr::null_mut()) },
-            RGSADDLE_OK
-        );
         let mut result = RgsaddlePafiResult {
             version: RgsaddleVersion { major: 0, minor: 0 },
             flags: 0,
@@ -759,6 +846,20 @@ mod tests {
             samples: 0,
             evaluations: 0,
         };
+        assert_eq!(
+            unsafe { rgsaddle_pafi_result(session, &mut result) },
+            RGSADDLE_NO_EVALUATION
+        );
+
+        config.samples = 200;
+        assert_eq!(
+            unsafe { rgsaddle_pafi_set_config(session, &config) },
+            RGSADDLE_OK
+        );
+        assert_eq!(
+            unsafe { rgsaddle_pafi_run(session, Some(pafi_along_x), std::ptr::null_mut()) },
+            RGSADDLE_OK
+        );
         assert_eq!(
             unsafe { rgsaddle_pafi_result(session, &mut result) },
             RGSADDLE_OK
@@ -772,7 +873,26 @@ mod tests {
             miss,
             result.barrier_error
         );
+        assert_eq!(result.dividing, 20);
         assert_eq!(result.version.major, RGSADDLE_ABI_MAJOR);
+
+        let mut queried = 0i64;
+        assert_eq!(
+            unsafe {
+                rgsaddle_pafi_profile(
+                    session,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    0,
+                    &mut queried,
+                )
+            },
+            RGSADDLE_INVALID_PARAMETER
+        );
+        assert_eq!(queried, n_frames as i64);
 
         let mut out_arcs = vec![0.0; n_frames];
         let mut out_grad = vec![0.0; n_frames];
@@ -796,7 +916,8 @@ mod tests {
             RGSADDLE_OK
         );
         assert_eq!(written, n_frames as i64);
-        assert!(out_free[n_frames - 1].is_finite());
+        assert!((out_free[20] - 0.9975).abs() < 1e-12);
+        assert!(out_free[n_frames - 1].abs() < 1e-12);
         unsafe { rgsaddle_pafi_free(session) };
     }
 

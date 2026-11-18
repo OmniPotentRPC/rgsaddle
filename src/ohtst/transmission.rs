@@ -784,7 +784,7 @@ impl TransmissionConfig {
         self
     }
 
-    fn check(&self, n: usize) -> Result<(), SaddleError> {
+    pub(crate) fn check(&self, n: usize) -> Result<(), SaddleError> {
         if !(self.thermal.is_finite() && self.thermal > 0.0) {
             return Err(SaddleError::Invalid(
                 "shooting kT must be finite and positive".into(),
