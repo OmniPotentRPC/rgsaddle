@@ -6,7 +6,21 @@ module rgsaddle
   integer(c_int), parameter, public :: RGSADDLE_ABI_MAJOR = 1_c_int
   integer(c_int), parameter, public :: RGSADDLE_ABI_MINOR = 45_c_int
   integer(c_int), parameter, public :: RGSADDLE_OK = 0_c_int
+  integer(c_int), parameter, public :: RGSADDLE_NULL_SESSION = -1_c_int
+  integer(c_int), parameter, public :: RGSADDLE_NULL_BAND = -2_c_int
+  integer(c_int), parameter, public :: RGSADDLE_NULL_SURFACE = -3_c_int
+  integer(c_int), parameter, public :: RGSADDLE_NULL_REPORT = -4_c_int
+  integer(c_int), parameter, public :: RGSADDLE_SHAPE = -5_c_int
+  integer(c_int), parameter, public :: RGSADDLE_SURFACE_FAILED = -6_c_int
+  integer(c_int), parameter, public :: RGSADDLE_NON_FINITE = -7_c_int
+  integer(c_int), parameter, public :: RGSADDLE_SOLVER = -8_c_int
+  integer(c_int), parameter, public :: RGSADDLE_ABI_MISMATCH = -9_c_int
+  integer(c_int), parameter, public :: RGSADDLE_ALLOC = -10_c_int
   integer(c_int), parameter, public :: RGSADDLE_INVALID_PARAMETER = -11_c_int
+  integer(c_int), parameter, public :: RGSADDLE_NO_EVALUATION = -12_c_int
+  integer(c_int), parameter, public :: RGSADDLE_STALLED = -13_c_int
+  integer(c_int), parameter, public :: RGSADDLE_NOT_EQUILIBRATED = -14_c_int
+  integer(c_int), parameter, public :: RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES = -15_c_int
   integer(c_int), parameter, public :: RGSADDLE_STATUS_RUNNING = 0_c_int
   integer(c_int), parameter, public :: RGSADDLE_STATUS_CONVERGED = 1_c_int
   integer(c_int), parameter, public :: RGSADDLE_METHOD_FIRE = 0_c_int
@@ -230,6 +244,12 @@ module rgsaddle
       integer(c_int) :: status
     end function c_rgsaddle_abi_stamp
 
+    function c_rgsaddle_status_name(status) bind(C, name="rgsaddle_status_name") result(ptr)
+      import :: c_int, c_ptr
+      integer(c_int), value :: status
+      type(c_ptr) :: ptr
+    end function c_rgsaddle_status_name
+
     function c_rgsaddle_band_create(config, n_images, n_atoms, positions) bind(C, name="rgsaddle_band_create") result(handle)
       import :: c_ptr, c_int64_t, rgsaddle_band_config_t, c_double
       type(rgsaddle_band_config_t), intent(in) :: config
@@ -410,14 +430,24 @@ contains
   function status_name(status) result(name)
     integer(c_int), value :: status
     character(len=:), allocatable :: name
-    select case (status)
-    case (RGSADDLE_OK)
-      name = "RGSADDLE_OK"
-    case (RGSADDLE_INVALID_PARAMETER)
-      name = "RGSADDLE_INVALID_PARAMETER"
-    case default
-      name = "RGSADDLE_STATUS"
-    end select
+    type(c_ptr) :: ptr
+    character(len=1, kind=c_char), pointer :: chars(:)
+    integer :: n, i
+    ptr = c_rgsaddle_status_name(status)
+    if (.not. c_associated(ptr)) then
+      name = "UNKNOWN"
+      return
+    end if
+    call c_f_pointer(ptr, chars, [64])
+    n = 0
+    do i = 1, 64
+      if (chars(i) == c_null_char) exit
+      n = i
+    end do
+    allocate(character(len=n) :: name)
+    do i = 1, n
+      name(i:i) = chars(i)
+    end do
   end function status_name
 
   subroutine init_band_config(config)
@@ -468,6 +498,7 @@ contains
     integer(c_int64_t), value :: n_images
     integer(c_int64_t), value :: n_atoms
     real(c_double), intent(in) :: positions(*)
+    call band_finalize(self)
     self%raw = c_rgsaddle_band_create(config, n_images, n_atoms, positions)
     if (c_associated(self%raw)) then
       status = RGSADDLE_OK
@@ -518,6 +549,7 @@ contains
     integer(c_int64_t), value :: n_atoms
     real(c_double), intent(in) :: position(*)
     real(c_double), intent(in) :: mode(*)
+    call minmode_finalize(self)
     self%raw = c_rgsaddle_minmode_create(config, n_atoms, position, mode)
     if (c_associated(self%raw)) then
       status = RGSADDLE_OK
@@ -574,11 +606,18 @@ contains
     integer(c_int64_t), value :: n_frames
     integer(c_int64_t), value :: n_dof
     real(c_double), intent(in) :: frames(*)
-    real(c_double), intent(in), target :: arcs(:)
+    real(c_double), intent(in), contiguous, target, optional :: arcs(:)
     type(c_ptr) :: arcs_ptr
     integer(c_int64_t) :: n_arcs
-    arcs_ptr = c_loc(arcs(1))
-    n_arcs = size(arcs, kind=c_int64_t)
+    call pafi_finalize(self)
+    arcs_ptr = c_null_ptr
+    n_arcs = 0_c_int64_t
+    if (present(arcs)) then
+      n_arcs = size(arcs, kind=c_int64_t)
+      if (n_arcs > 0_c_int64_t) then
+        arcs_ptr = c_loc(arcs(1))
+      end if
+    end if
     self%raw = c_rgsaddle_pafi_create(config, n_frames, n_dof, frames, arcs_ptr, n_arcs)
     if (c_associated(self%raw)) then
       status = RGSADDLE_OK
@@ -637,7 +676,10 @@ contains
     integer(c_int64_t), intent(out), optional :: written
     integer(c_int64_t) :: n_written
     integer(c_int64_t) :: cap
-    cap = size(arcs, kind=c_int64_t)
+    n_written = 0_c_int64_t
+    cap = min(size(arcs, kind=c_int64_t), size(gradients, kind=c_int64_t), &
+      size(gradient_errors, kind=c_int64_t), size(free_energy, kind=c_int64_t), &
+      size(free_energy_errors, kind=c_int64_t))
     status = c_rgsaddle_pafi_profile(self%raw, arcs, gradients, gradient_errors, &
       free_energy, free_energy_errors, cap, n_written)
     if (present(written)) written = n_written
@@ -649,6 +691,7 @@ contains
     integer(c_int64_t), value :: n_dof
     real(c_double), intent(in) :: point(*)
     real(c_double), intent(in) :: normal(*)
+    call ohtst_finalize(self)
     self%raw = c_rgsaddle_ohtst_create(config, n_dof, point, normal)
     if (c_associated(self%raw)) then
       status = RGSADDLE_OK
@@ -703,7 +746,8 @@ contains
     integer(c_int64_t), intent(out), optional :: written
     integer(c_int64_t) :: n_written
     integer(c_int64_t) :: cap
-    cap = size(times, kind=c_int64_t)
+    n_written = 0_c_int64_t
+    cap = min(size(times, kind=c_int64_t), size(kappa_of_t, kind=c_int64_t))
     status = c_rgsaddle_ohtst_curve(self%raw, times, kappa_of_t, cap, n_written)
     if (present(written)) written = n_written
   end function ohtst_curve
@@ -778,6 +822,7 @@ contains
     type(c_ptr), value :: gradient_ptr
     real(c_double), pointer :: position(:)
     real(c_double), pointer :: gradient(:)
+    energy = 0.0_c_double
     if (.not. associated(active_point_surface)) then
       status = RGSADDLE_INVALID_PARAMETER
       return

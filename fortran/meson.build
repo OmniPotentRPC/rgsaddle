@@ -15,9 +15,29 @@ rgsaddle_fortran_dep = declare_dependency(
 meson.override_dependency('rgsaddle-fortran', rgsaddle_fortran_dep)
 
 if not meson.is_subproject()
-    install_data(
-        meson.current_build_dir() / 'rgsaddle.mod',
+    py = find_program('python3', 'python')
+    rgsaddle_fortran_mod = custom_target(
+        'rgsaddle_fortran_mod',
+        output: 'rgsaddle.mod',
+        depends: rgsaddle_fortran_lib,
+        build_by_default: true,
+        install: true,
         install_dir: fortran_moduledir,
+        command: [
+            py,
+            '-c',
+            'import os, shutil, sys\n' +
+            'root, dst = sys.argv[1], sys.argv[2]\n' +
+            'for dirpath, _, names in os.walk(root):\n' +
+            '    if "rgsaddle.mod" in names:\n' +
+            '        src = os.path.join(dirpath, "rgsaddle.mod")\n' +
+            '        if os.path.abspath(src) != os.path.abspath(dst):\n' +
+            '            shutil.copyfile(src, dst)\n' +
+            '        sys.exit(0)\n' +
+            'sys.exit("rgsaddle.mod not found under " + root)\n',
+            meson.current_build_dir(),
+            '@OUTPUT@',
+        ],
     )
 
     pkg = import('pkgconfig')
@@ -27,6 +47,7 @@ if not meson.is_subproject()
         version: meson.project_version(),
         libraries: rgsaddle_fortran_lib,
         requires: ['rgsaddle-headers'],
+        subdirs: 'rgsaddle/fortran',
         variables: [
             'moduledir=' + get_option('prefix') / fortran_moduledir,
         ],
