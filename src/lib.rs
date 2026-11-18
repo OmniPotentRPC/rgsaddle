@@ -77,6 +77,7 @@ pub mod defect_pair;
 pub mod error;
 pub mod idpp;
 pub mod indexk;
+pub mod ladder;
 #[cfg(feature = "lammps")]
 pub mod lammps;
 pub mod lineb;
