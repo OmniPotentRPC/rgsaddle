@@ -121,8 +121,8 @@ pub use optimize::{
 pub use path::PlanePath;
 pub use plane::{FixedCell, Hyperplane, MassWeighted, mass_weighted_rigid_translations};
 pub use rate::{
-    OhTstRate, PlaneDensity, RateMultiplicity, flux_mass, ohtst_rate, plane_transmission,
-    rate_from_parts,
+    OhTstRate, OhTstRateConfig, PlaneDensity, RateMultiplicity, flux_mass, ohtst_rate,
+    ohtst_rate_with_config, plane_transmission, rate_from_parts,
 };
 pub use reactant::{ReactantDensity, reactant_density};
 pub(crate) use sample::sample_plane_pilot_with_sampler;

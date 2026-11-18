@@ -449,10 +449,6 @@ fn surface_of(eval: Option<RgsaddlePointFn>, user: *mut c_void, n: usize) -> Res
     })
 }
 
-fn option_or_nan(value: Option<f64>) -> f64 {
-    value.unwrap_or(f64::NAN)
-}
-
 /// # Safety
 /// `point`, `normal`, `centroid` and `grad_normal` each hold `n` doubles.
 /// `surface` is called with that length and may run on more than one thread.
@@ -911,20 +907,33 @@ unsafe fn work_call(
         Ok(work) => work,
         Err(err) => return fail(&err),
     };
+    let mut output = RgsaddleOhtstWorkReport {
+        version: stamp(),
+        flags: 0,
+        work: work.work,
+        error: work.error,
+        integrated_work: work.integrated_work,
+        integrated_error: work.integrated_error,
+        bar_work: f64::NAN,
+        bar_error: f64::NAN,
+        mbar_work: f64::NAN,
+        mbar_error: f64::NAN,
+        evaluations: work.evaluations as u64,
+    };
+    if let Some(value) = work.bar_work {
+        output.bar_work = value;
+    }
+    if let Some(value) = work.bar_error {
+        output.bar_error = value;
+    }
+    if let Some(value) = work.mbar_work {
+        output.mbar_work = value;
+    }
+    if let Some(value) = work.mbar_error {
+        output.mbar_error = value;
+    }
     unsafe {
-        *report = RgsaddleOhtstWorkReport {
-            version: stamp(),
-            flags: 0,
-            work: work.work,
-            error: work.error,
-            integrated_work: work.integrated_work,
-            integrated_error: work.integrated_error,
-            bar_work: option_or_nan(work.bar_work),
-            bar_error: option_or_nan(work.bar_error),
-            mbar_work: option_or_nan(work.mbar_work),
-            mbar_error: option_or_nan(work.mbar_error),
-            evaluations: work.evaluations as u64,
-        };
+        *report = output;
     }
     RGSADDLE_OK
 }

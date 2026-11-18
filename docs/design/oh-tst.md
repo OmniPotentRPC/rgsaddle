@@ -477,10 +477,13 @@ specific problems:
    $k = (4.5\pm0.2)\times10^{-7}$. By Eq. (3) the only ratio of
    configuration integrals in the prefactor is $Q_{Z_R}/Q_R$. A value of
    0.765 for $Q^\ddagger/Q_{Z_R} = e^{-\beta\Delta A}$ would contradict the
-   barrier of about $10\,kT$, so the label is presumably $Q_{Z_R}/Q_R$. The
-   absolute rates of Section III B could not be reproduced, because the time
-   unit and the reactant minimum are not stated. Section 10.3 gives
-   recomputed values instead.
+   barrier of about $13\,kT$, so the label is $Q_{Z_R}/Q_R$. The same
+   paragraph says $k_BT=0.1E_A$, but Appendix B gives $E_A=3.63395$ from the
+   reactant minimum. Its printed speed and Vineyard rate instead both select
+   $k_BT=0.25$ in the Appendix B energy units with unit mass. At that
+   convention the paper's crossing estimator and trapezoidal work, repeated
+   over eight seeds, give $(4.340\pm0.132)\times10^{-7}$, inside the printed
+   $(4.5\pm0.2)\times10^{-7}$ band. Section 10.3 gives the full check.
 
 ### 3.9 Numerical checks
 
@@ -1434,7 +1437,7 @@ This is the potential of the 2001 paper, its Appendix B:
   $\alpha = 1.942$;
 - $V(x,y) = V_\mathrm{LEPS}(x, r_{AC} - x) + 2k_c(x - (r_{AC}/2 - y/c))^2$
   with $r_{AC} = 3.742$, $k_c = 0.2025$, $c = 1.154$;
-- unit masses.
+- no mass or physical unit is specified in the paper.
 
 Recomputed stationary points:
 
@@ -1445,8 +1448,9 @@ Recomputed stationary points:
 | shallow minimum | (3.00128, −1.30434) | −2.62029 | 0.58397, 20.9082 |
 
 The barrier is $E_A = 3.63395$ from the deep minimum and 1.74506 from the
-shallow one. Rates below are at $kT = 0.1E_A$, in units with unit mass and
-the potential's own energy and length units.
+shallow one. The first table is the independent low-temperature check at
+$kT = 0.1E_A$, in units with unit mass and the potential's own energy and
+length units.
 
 | Reactant | $k_\mathrm{HTST}$ | TST, saddle line | TST, optimal line | Optimal line relative to saddle line |
 |---|---|---|---|---|
@@ -1474,19 +1478,38 @@ length:
 | deep | 0.6594, 0.6516 | 0.5100, 0.5080 | 3.9177, 3.7495 |
 | shallow | 0.9297, 0.8266 | 0.7298, 0.8072 | 4.3668, 3.8018 |
 
-Published values: the 2001 paper gives $(4.5\pm0.2)\times10^{-7}$ for
-OH-TST, $(4.4\pm0.1)\times10^{-7}$ from hyperdynamics and $4.3\times10^{-7}$
-from harmonic TST, with no units. Recomputed, TST through the optimal line
-is 4.5% below harmonic TST (deep) or 3.6% below (shallow). The published
-ratios are 1.05 ± 0.05 (OH-TST) and 1.02 ± 0.02 (hyperdynamics) relative to
-harmonic TST. The published hyperdynamics rate is also above harmonic TST,
-while the recomputed TST rate, which bounds the exact rate, is below it. The
-source does not give enough detail to locate the difference. The value
-0.765 does not match any of the recomputed basin terms, because its plane
-position is not stated. This model tests the PAFI-plus-optimization path on
-a twisted valley. The tilt of the optimal line is small here, so most of the
-gain over a fixed orientation comes from following the path, not from the
-finite-temperature optimization.
+**Section III B reproduction.** The paper gives
+$(4.5\pm0.2)\times10^{-7}$ for OH-TST, $(4.4\pm0.1)\times10^{-7}$ from
+hyperdynamics, $4.3\times10^{-7}$ from harmonic TST and
+$\langle|v|\rangle=0.399$, with no units. Although the same paragraph says
+$k_BT=0.1E_A$, the latter two numbers uniquely reproduce at $k_BT=0.25$ in
+the Appendix B energy units with unit mass: $\langle|v|\rangle=0.398942$ and
+$k_\mathrm{hTST}=4.33127\times10^{-7}$. At that convention:
+
+| Estimate | Rate |
+|---|---|
+| analytic Vineyard hTST | $4.33127\times10^{-7}$ |
+| optimal-line quadrature | $4.20148\times10^{-7}$ |
+| Eq. (22) crossings plus trapezoidal work, 8 independent seeds | $(4.340\pm0.132)\times10^{-7}$ |
+| paper | $(4.5\pm0.2)\times10^{-7}$ |
+
+The sampled estimate uses 1000 records for each plane optimization, 8000
+records for Eq. (22), and 2000 records on each of 17 work planes. The paper
+states only that canonical averages use one molecular-dynamics trajectory
+with stochastic collisions; it does not report a time step, collision
+frequency, trajectory length, number of planes, masses, or physical units.
+The test therefore states its sample counts rather than attributing them to
+the paper. It keeps the paper's crossing estimator and trapezoidal
+integration; Simpson quadrature gives $4.211\times10^{-7}$ and exposes the
+small upward discretization bias that puts the paper-style estimate inside
+the printed band.
+
+The apparent $Q^\ddagger/Q_{Z_R}=0.765$ is a label error: Eq. (3) needs
+$Q_{Z_R}/Q_R$ in the prefactor, while $Q^\ddagger/Q_{Z_R}$ is the
+exponentially small work factor. This model also tests the
+PAFI-plus-optimization path on a twisted valley. The tilt of the optimal
+line is small here, so most of the gain over a fixed orientation comes from
+following the path, not from the finite-temperature optimization.
 
 ### 10.4 System–bath models with exact references in high dimension
 

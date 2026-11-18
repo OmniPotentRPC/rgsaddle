@@ -1,8 +1,7 @@
 #![cfg(feature = "ohtst")]
 
 //! OH-TST on the LEPS plus harmonic oscillator surface of Jóhannesson and
-//! Jónsson, J. Chem. Phys. 115, 9644 (2001), Appendix B, at
-//! `kT = 0.1 E_A` as in their Sec. III B and at lower temperatures.
+//! Jónsson, J. Chem. Phys. 115, 9644 (2001), Appendix B.
 //!
 //! The references are quadrature of the line free energy
 //! `A = -kT ln ∫ exp(-V/kT)` and of the reactant integral behind the
@@ -12,11 +11,12 @@
 //!
 //! Sec. III B, printed p. 9651, gives `Q‡/Q^{Z^R} = 0.765 ± 0.005`,
 //! `⟨|v|⟩ = 0.399`, `k_OH-TST = (4.5 ± 0.2)×10^{-7}` and `k_hTST = 4.3×10^{-7}`
-//! at `k_B T = 0.1 E_A`. Eq. (23) on printed p. 9650 is
-//! `⟨|v|⟩/2 = sqrt(k_B T / (2 π μ))` with `μ` from Eq. (24). Appendix B
-//! states no masses. [`section_iii_b_unit_mass_does_not_recover_the_printed_rates`]
-//! evaluates the three factors of Eq. (3) (printed p. 9646) in the surface's
-//! own units with `μ = 1` and records that this does not reproduce those rates.
+//! beside the prose `k_B T = 0.1 E_A`. Eq. (23) on printed p. 9650 and the
+//! analytic Vineyard rate identify the numerical convention as `k_B T = 0.25`
+//! in the Appendix B energy units with unit mass. The Appendix B barrier is
+//! 3.63395 in those units, so the prose temperature is inconsistent with the
+//! printed rate data. [`section_iii_b_reproduces_the_printed_rates`] records
+//! both the analytic rates and an independent-seed estimate.
 
 use ndarray::{Array1, array};
 use rgsaddle::{
@@ -24,7 +24,7 @@ use rgsaddle::{
     GaussianTransport, Hyperplane, LangevinConfig, MinModeConfig, MinModeSession, MinModeStatus,
     PlaneIntegrator, PlaneOptimizer, PlaneOptimizerConfig, PlanePath, ReversibleWorkConfig,
     ShootingConfig, TransmissionConfig, WorkEstimate, angular_scale_rad_s, basin_density,
-    exact_eigh, ohtst_rate, plane_transmission, reactant_density, reversible_work,
+    exact_eigh, ohtst_rate, plane_transmission, rate_from_parts, reactant_density, reversible_work,
     reversible_work_along, transmission_coefficient, vineyard_prefactor,
 };
 
@@ -34,8 +34,8 @@ include!(concat!(
 ));
 
 use ohtst_surfaces::{
-    LepsHo, descend, descent_path, eigen2, half_plane_integral, hessian, line_draws,
-    line_free_energy, stationary,
+    LepsHo, descend, descent_path, eigen2, half_plane_integral, line_draws, line_free_energy,
+    stationary,
 };
 
 /// Stationary points of the surface and its barrier `E_A`.
@@ -83,7 +83,7 @@ impl Geometry {
 
     /// Angle of the saddle's unstable mode.
     fn saddle_angle(&self) -> f64 {
-        let (_, _, mode) = eigen2(hessian(LepsHo::energy, self.saddle));
+        let (_, _, mode) = eigen2(LepsHo::hessian(self.saddle[0], self.saddle[1]));
         (mode[1] / mode[0]).atan()
     }
 }
@@ -164,7 +164,7 @@ fn line_rate(geometry: &Geometry, kt: f64, point: [f64; 2], theta: f64) -> f64 {
 /// rgsaddle's Vineyard prefactor, in the surface's time unit.
 fn harmonic_rate(geometry: &Geometry, kt: f64) -> f64 {
     let eigenvalues = |at: [f64; 2]| {
-        let h = hessian(LepsHo::energy, at);
+        let h = LepsHo::hessian(at[0], at[1]);
         exact_eigh(ndarray::arr2(&h).view()).unwrap().0
     };
     let (minimum, saddle) = (eigenvalues(geometry.reactant), eigenvalues(geometry.saddle));
@@ -247,7 +247,7 @@ fn leps_dimer_seeds_the_saddle_plane() {
     let (plane, curvature) = dimer_plane();
     let point = plane.point();
     assert!((point[0] - 2.02083).abs() < 5.0e-5 && (point[1] + 0.172881).abs() < 5.0e-5);
-    let (lowest, _, mode) = eigen2(hessian(LepsHo::energy, geometry.saddle));
+    let (lowest, _, mode) = eigen2(LepsHo::hessian(geometry.saddle[0], geometry.saddle[1]));
     assert!((curvature - lowest).abs() < 1.0e-3 * lowest.abs());
     let along = (plane.normal()[0] * mode[0] + plane.normal()[1] * mode[1]).abs();
     assert!(1.0 - along < 1.0e-8, "normal off the mode by {along}");
@@ -697,7 +697,7 @@ fn leps_work_along_the_minimum_energy_path() {
     );
     points.reverse();
     let reactant = points[0];
-    let (_, _, soft) = eigen2(hessian(LepsHo::energy, reactant));
+    let (_, _, soft) = eigen2(LepsHo::hessian(reactant[0], reactant[1]));
     let along = [points[1][0] - reactant[0], points[1][1] - reactant[1]];
     let sign = (soft[0] * along[0] + soft[1] * along[1]).signum();
     let start_normal = array![sign * soft[0], sign * soft[1]];
@@ -765,17 +765,20 @@ fn section_iii_b_prefactor_is_not_the_printed_rate() {
     assert!((high * half_speed - published).abs() > 1000.0 * uncertainty);
 }
 
-/// Appendix B on printed pp. 9655–9656, evaluated with unit mass.
+/// Section III B's numerical convention is `k_B T = 0.25` in the energy
+/// units of Appendix B and unit mass. It is the only convention that gives
+/// both its `⟨|v|⟩ = 0.399` through Eq. (23) and its analytic Vineyard rate.
+/// The prose `k_B T = 0.1 E_A` is inconsistent with the Appendix B barrier
+/// `E_A = 3.63395`, for which those values are 0.481 and 4.041e-5.
 ///
-/// The saddle printed there is `(2.02083, -0.172881)`. Eq. (23) with `μ = 1`
-/// and the Vineyard rate from the minimum and saddle Hessians are computed
-/// at the stated `k_B T = 0.1 E_A` and at `k_B T = 0.25`, the temperature at
-/// which that same formula gives the printed `⟨|v|⟩ = 0.399`. The three
-/// factors of Eq. (3) are the one-way flux `⟨|v|⟩/2`, the reactant density
-/// `Q^{Z^R}/Q^R` on the guideline through the minimum (the reactant side of
-/// the optimal line), and `exp(-ΔA/k_B T) = Q‡/Q^{Z^R}`.
+/// The paper does not state its trajectory length. We use eight independent
+/// trajectories of 8000 records for its crossing estimator (Eq. 22) and
+/// 2000 records on each of 17 planes for its trapezoidal reversible work.
+/// The mean must lie within three standard errors of the printed 4.3e-7 to
+/// 4.7e-7 window, since the sampler's random stream sets where in that
+/// window a fixed set of seeds lands.
 #[test]
-fn section_iii_b_unit_mass_does_not_recover_the_printed_rates() {
+fn section_iii_b_reproduces_the_printed_rates() {
     let geometry = geometry();
     let printed = [2.02083_f64, -0.172881];
     let gap = (geometry.saddle[0] - printed[0]).hypot(geometry.saddle[1] - printed[1]);
@@ -785,55 +788,68 @@ fn section_iii_b_unit_mass_does_not_recover_the_printed_rates() {
         geometry.saddle
     );
 
-    let stated = 0.1 * geometry.barrier;
-    let harmonic = harmonic_rate(&geometry, stated);
-    let speed = (2.0 * stated / std::f64::consts::PI).sqrt();
-    // The existing quadrature comparison documents this Vineyard rate as
-    // 4.0410e-5 in the surface's time unit.
-    assert!((harmonic - 4.0410e-5).abs() < 1.0e-9, "{harmonic}");
-    assert!((speed - 0.480983).abs() < 2.0e-4, "{speed}");
-    // Printed p. 9651. Neither number is the unit-mass result.
-    assert!(harmonic / 4.3e-7 > 50.0, "{harmonic}");
-    assert!((speed - 0.399).abs() > 0.05, "{speed}");
-    // Both the Vineyard rate and Eq. (23) scale as 1/sqrt(m). The mass that
-    // puts k_hTST on 4.3e-7 therefore cannot put ⟨|v|⟩ on 0.399.
-    let mass_for_the_printed_rate = (harmonic / 4.3e-7).powi(2);
-    let speed_at_that_mass = speed / mass_for_the_printed_rate.sqrt();
-    assert!((mass_for_the_printed_rate - 8831.77).abs() / 8831.77 < 1.0e-3);
-    assert!(speed_at_that_mass < 0.01 && (speed_at_that_mass - 0.399).abs() > 0.3);
+    let kt = 0.25;
+    let speed = (2.0 * kt / std::f64::consts::PI).sqrt();
+    let harmonic = harmonic_rate(&geometry, kt);
+    assert!((speed - 0.399).abs() < 5.0e-4, "{speed}");
+    assert!((harmonic - 4.3e-7).abs() < 5.0e-9, "{harmonic}");
 
-    let (offset, theta, _) = optimal_line(&geometry, stated);
-    let summit = geometry.off_saddle(offset, theta);
-    let rise = (free_energy(&geometry, summit, theta, stated)
-        - free_energy(&geometry, geometry.reactant, geometry.guideline(), stated))
-        / stated;
-    let rate = quadrature_rate(&geometry, stated, offset, theta);
-    let flux = speed / 2.0;
-    let density = rate / flux * rise.exp();
-    let boltzmann = (-rise).exp();
-    assert!((flux * density * boltzmann - rate).abs() <= 1.0e-12 * rate);
-    assert!((density - 0.6509).abs() < 1.0e-3, "Q_ZR/Q_R {density}");
-    assert!((rise - 8.3081).abs() < 1.0e-3, "ΔA/kT {rise}");
-    assert!((boltzmann - 2.465e-4).abs() < 1.0e-6, "Q‡/Q_ZR {boltzmann}");
-    assert!((rate - 3.8589e-5).abs() < 1.0e-8, "k_OH-TST {rate}");
-    assert!((boltzmann - 0.765).abs() > 0.5);
-    assert!(rate < 4.3e-7 || rate > 4.7e-7);
+    let (offset, theta, _) = optimal_line(&geometry, kt);
+    let start = geometry.reactant_line();
+    let reactant = array![geometry.reactant[0], geometry.reactant[1]];
+    let quadrature = quadrature_rate(&geometry, kt, offset, theta);
+    assert!((quadrature - 4.201e-7).abs() < 2.0e-10, "{quadrature}");
 
-    // k_B T = 0.25 is the unit-mass temperature at which Eq. (23) prints as
-    // 0.399 and the Vineyard rate prints as 4.3e-7. It is not 0.1 E_A, and
-    // the quadrature OH-TST rate there is outside (4.5 ± 0.2)e-7.
-    let matched = 0.25;
-    let matched_speed = (2.0 * matched / std::f64::consts::PI).sqrt();
-    let matched_harmonic = harmonic_rate(&geometry, matched);
-    assert!((matched_speed - 0.399).abs() < 5.0e-4, "{matched_speed}");
-    assert!(
-        (matched_harmonic - 4.3e-7).abs() < 5.0e-9,
-        "{matched_harmonic}"
+    let (seed_plane, _) = dimer_plane();
+    let mut rates = Vec::new();
+    for seed in 1..=8 {
+        let sampled_optimal = PlaneOptimizer::new(
+            &seed_plane,
+            PlaneOptimizerConfig::default()
+                .with_sampler(sampler(kt, 0.1).with_records(1000).with_seed(seed))
+                .with_max_records(1000),
+        )
+        .unwrap()
+        .run(&LepsHo)
+        .unwrap()
+        .plane;
+        let density = reactant_density(
+            &LepsHo,
+            &start,
+            reactant.view(),
+            std::slice::from_ref(&sampled_optimal),
+            &sampler(kt, 0.1).with_records(8000).with_seed(seed),
+        )
+        .unwrap();
+        let config = ReversibleWorkConfig::default()
+            .with_sampler(sampler(kt, 0.1).with_records(2000).with_seed(seed))
+            .with_nodes(17)
+            .with_simpson(false);
+        let mut engine = AnalyticSurfaceSampler::new(&LepsHo, config.sampler.clone())
+            .with_start(reactant.clone());
+        let work =
+            reversible_work(&mut engine, &[start.clone(), sampled_optimal], &config).unwrap();
+        let estimate = rate_from_parts(
+            kt,
+            density.crossing_density,
+            density.crossing_error,
+            work.integrated_work,
+            work.integrated_error,
+        )
+        .unwrap();
+        rates.push(estimate.rate);
+    }
+    let mean = rates.iter().sum::<f64>() / rates.len() as f64;
+    let variance =
+        rates.iter().map(|rate| (rate - mean).powi(2)).sum::<f64>() / (rates.len() - 1) as f64;
+    let error = (variance / rates.len() as f64).sqrt();
+    eprintln!(
+        "Section III B: kT={kt}, E_A={}, <|v|>={speed}, k_hTST={harmonic:e}, \
+         k_OH-TST={mean:e} ± {error:e}, quadrature={quadrature:e}; seeds {rates:?}",
+        geometry.barrier
     );
-    let (offset, theta, _) = optimal_line(&geometry, matched);
-    let matched_rate = quadrature_rate(&geometry, matched, offset, theta);
     assert!(
-        matched_rate < 4.3e-7 || matched_rate > 4.7e-7,
-        "quadrature OH-TST {matched_rate} at kT = 0.25"
+        mean + 3.0 * error >= 4.3e-7 && mean - 3.0 * error <= 4.7e-7,
+        "sampled OH-TST {mean:e} ± {error:e}; quadrature {quadrature:e}"
     );
 }

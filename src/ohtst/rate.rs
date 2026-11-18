@@ -187,22 +187,69 @@ impl RateMultiplicity {
     }
 }
 
-/// How close two unit normals must be before the planes are the same.
-/// A normal is dimensionless, so this is an absolute gap, not a length.
-const SAME_NORMAL_GAP: f64 = 1.0e-12;
+/// Tolerances used when combining a reactant density and reversible work.
+#[non_exhaustive]
+#[derive(Clone, Debug)]
+pub struct OhTstRateConfig {
+    /// Largest gap between the dot product of two unit normals and one.
+    pub normal_gap: f64,
+    /// Largest plane-offset difference as a fraction of `1 + |point|`.
+    pub offset_fraction: f64,
+    /// Largest temperature difference as a fraction of `kT`.
+    pub thermal_fraction: f64,
+}
 
-/// A plane matches when its offset is within this fraction of `1 + |point|`.
-/// The scale follows the plane away from the origin instead of fixing a length.
-const SAME_OFFSET_FRACTION: f64 = 1.0e-9;
+impl Default for OhTstRateConfig {
+    fn default() -> Self {
+        Self {
+            normal_gap: 1.0e-12,
+            offset_fraction: 1.0e-9,
+            thermal_fraction: 1.0e-12,
+        }
+    }
+}
 
-/// Temperatures match when they differ by less than this fraction of `kT`.
-const SAME_TEMPERATURE_FRACTION: f64 = 1.0e-12;
+impl OhTstRateConfig {
+    /// Set [`Self::normal_gap`].
+    #[must_use]
+    pub fn with_normal_gap(mut self, normal_gap: f64) -> Self {
+        self.normal_gap = normal_gap;
+        self
+    }
 
-fn same_plane(a: &Hyperplane, b: &Hyperplane) -> bool {
+    /// Set [`Self::offset_fraction`].
+    #[must_use]
+    pub fn with_offset_fraction(mut self, offset_fraction: f64) -> Self {
+        self.offset_fraction = offset_fraction;
+        self
+    }
+
+    /// Set [`Self::thermal_fraction`].
+    #[must_use]
+    pub fn with_thermal_fraction(mut self, thermal_fraction: f64) -> Self {
+        self.thermal_fraction = thermal_fraction;
+        self
+    }
+
+    fn check(&self) -> Result<(), SaddleError> {
+        if [self.normal_gap, self.offset_fraction, self.thermal_fraction]
+            .iter()
+            .all(|value| value.is_finite() && *value >= 0.0)
+        {
+            Ok(())
+        } else {
+            Err(SaddleError::Invalid(
+                "OH-TST rate tolerances must be finite and non-negative".into(),
+            ))
+        }
+    }
+}
+
+fn same_plane(a: &Hyperplane, b: &Hyperplane, config: &OhTstRateConfig) -> bool {
     let scale = 1.0 + a.point().dot(&a.point()).sqrt();
     a.dim() == b.dim()
-        && a.normal().dot(&b.normal()) > 1.0 - SAME_NORMAL_GAP
-        && a.distance(b.point()).abs() <= SAME_OFFSET_FRACTION * scale
+        && a.normal().dot(&b.normal()) > 1.0 - config.normal_gap
+        && a.distance(b.point()).abs() <= config.offset_fraction * scale
 }
 
 /// An estimate of `Z_H / Z_R` per unit mass-weighted length along the
@@ -240,9 +287,20 @@ pub fn ohtst_rate<D: PlaneDensity + ?Sized>(
     density: &D,
     work: &ReversibleWork,
 ) -> Result<OhTstRate, SaddleError> {
+    ohtst_rate_with_config(density, work, &OhTstRateConfig::default())
+}
+
+/// Combine a reactant density and reversible work using explicit matching
+/// tolerances.
+pub fn ohtst_rate_with_config<D: PlaneDensity + ?Sized>(
+    density: &D,
+    work: &ReversibleWork,
+    config: &OhTstRateConfig,
+) -> Result<OhTstRate, SaddleError> {
+    config.check()?;
     let kt = density.thermal();
     let (value, value_error) = density.density();
-    if (work.thermal - kt).abs() > SAME_TEMPERATURE_FRACTION * kt {
+    if (work.thermal - kt).abs() > config.thermal_fraction * kt {
         return Err(SaddleError::Invalid(
             "the reactant density and the work come from different temperatures".into(),
         ));
@@ -251,7 +309,7 @@ pub fn ohtst_rate<D: PlaneDensity + ?Sized>(
         .nodes
         .first()
         .ok_or_else(|| SaddleError::Invalid("the work path has no nodes".into()))?;
-    if !same_plane(&start.plane, density.plane()) {
+    if !same_plane(&start.plane, density.plane(), config) {
         return Err(SaddleError::Invalid(
             "the work path does not start at the plane of the reactant density".into(),
         ));
@@ -539,6 +597,10 @@ mod tests {
         let mut hot = density.clone();
         hot.thermal = 0.6;
         assert!(ohtst_rate(&hot, &work).is_err());
+        let tolerant = OhTstRateConfig::default().with_thermal_fraction(0.25);
+        assert!(ohtst_rate_with_config(&hot, &work, &tolerant).is_ok());
+        let invalid = OhTstRateConfig::default().with_normal_gap(f64::NAN);
+        assert!(ohtst_rate_with_config(&density, &work, &invalid).is_err());
         let mut elsewhere = density.clone();
         elsewhere.plane = Hyperplane::new(array![-0.4, 0.0], array![1.0, 0.0]).unwrap();
         assert!(ohtst_rate(&elsewhere, &work).is_err());
