@@ -1845,7 +1845,7 @@ mod tests {
     }
 
     #[test]
-    fn a_zigzag_chain_wraps_the_cell_and_leaves_only_translations_free() {
+    fn a_zigzag_chain_wraps_the_cell_without_leaking_translations() {
         let cell = Cell::from_vectors(
             [2.5, 0.0, 0.0],
             [0.0, 10.0, 0.0],
@@ -1854,14 +1854,33 @@ mod tests {
         )
         .unwrap();
         let x = pack_cart(&[[0.0, 0.0, 0.0], [1.25, 0.8, 0.0]]);
-        let t = InternalTopology::from_geometry(&[6, 6], x.view(), Some(&cell)).unwrap();
+        // The next image of a two-atom chain is a pure translate, so every
+        // backbone dihedral is a parallelogram and sits at pi for every
+        // azimuth around the lattice vector. Its gradient vanishes. Bonds
+        // and angles fix the two distances and leave that azimuth free, so
+        // the Wilson rank is 2 of 3. Translations do not leak.
+        let refused = InternalTopology::from_geometry(&[6, 6], x.view(), Some(&cell)).unwrap_err();
+        let msg = format!("{refused}");
+        assert!(msg.contains("rank 2 of 3"), "{msg}");
+        let cfg = TopologyConfig::default().with_require_complete(false);
+        let t = InternalTopology::from_geometry_with(&[6, 6], x.view(), Some(&cell), &cfg).unwrap();
         let k = t.check();
         assert!(k.periodic_network);
         assert_eq!(k.rigid_dof, 3);
         assert_eq!(k.expected_rank, 3);
-        assert!(k.complete, "{k:?}");
+        assert_eq!(k.rank, 2, "{k:?}");
+        assert!(k.rigid_leak <= PAPER_SV_TOL, "{k:?}");
+        assert!(!k.complete);
         let c = t.constraints().counts();
         assert_eq!(c.nbonds, 2);
+        let mut dihedrals = 0;
+        for eq in t.constraints().equalities() {
+            if let Equality::Dihedral { target, .. } = eq {
+                dihedrals += 1;
+                assert!((*target - std::f64::consts::PI).abs() <= PAPER_SV_TOL);
+            }
+        }
+        assert_eq!(dihedrals, 2);
     }
 
     #[test]
