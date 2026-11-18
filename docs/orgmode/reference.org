@@ -61,7 +61,7 @@ The table below lists the main types.
 | =SellaSaddleConfig=            | Settings of the order-1 Sella session for partitioned rational function optimization |
 | =Cell=                         | 3×3 lattice (rows are vectors), fractional minimum-image wrap                                                      |
 | =SaddleError=                  | Shape, surface, non-finite, solver, invalid, stalled, not-equilibrated, and insufficient-effective-samples errors |
-| =Stencil=                      | Point builder. Dimer and Lanczos wrap =MinModeSession=. Band presets return the zoom seam. See @@rst::doc:`one stencil <explanation/one-stencil>`@@ |
+| =Stencil=                      | Point builder. Dimer and Lanczos wrap =MinModeSession=. =Stencil::band= rejects band presets as not implemented. See @@rst::doc:`one stencil <explanation/one-stencil>`@@ |
 | =Chain=                        | Positions, ids, and roles. =evaluate= uses a fixed block of one image. =Mesh= remeshes (linear, Hermite, or not-a-knot spline), inserts, or windows with no force call |
 | =reparametrize=                | Equal arc-length placement of a band, =Reparametrization::Linear= on the polyline or =NotAKnot= on the not-a-knot cubic spline. =RtrConfig::reparametrization= selects it for the trust-region band |
 | =Preset=                       | =Min=, =Dimer=, =Lanczos=, =Art=, =EigenFollow=, and the named band presets                                         |

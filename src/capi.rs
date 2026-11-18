@@ -494,7 +494,7 @@ pub(crate) fn status_of(err: &SaddleError) -> i32 {
 }
 
 #[unsafe(no_mangle)]
-/// Rgsaddle abi version.
+/// Packed `(RGSADDLE_ABI_MAJOR << 16) | RGSADDLE_ABI_MINOR` of the linked library.
 pub extern "C" fn rgsaddle_abi_version() -> i32 {
     ((RGSADDLE_ABI_MAJOR << 16) | RGSADDLE_ABI_MINOR) as i32
 }
@@ -514,7 +514,7 @@ pub unsafe extern "C" fn rgsaddle_abi_stamp(out: *mut RgsaddleVersion) -> i32 {
 }
 
 #[unsafe(no_mangle)]
-/// Rgsaddle status name.
+/// Static NUL-terminated symbolic name for an `rgsaddle_status_t` code (`"UNKNOWN"` if unrecognised).
 pub extern "C" fn rgsaddle_status_name(status: i32) -> *const c_char {
     let s: &'static str = match status {
         RGSADDLE_OK => "OK\0",

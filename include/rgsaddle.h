@@ -1477,6 +1477,8 @@ rgsaddle_status_t rgsaddle_band_set_string(RgsaddleBand *band, int32_t enabled,
  * The older band and min-mode sessions stay step-only.
  * Band presets (5 through 13) fail at rgsaddle_stencil_new with
  * "band presets are not implemented" from rgsaddle_last_error().
+ * These symbols are additive: opaque handles and
+ * rgsaddle_stencil_report_t.struct_size carry layout without RGSADDLE_ABI_MINOR.
  */
 typedef struct rgsaddle_stencil_config rgsaddle_stencil_config_t;
 typedef struct rgsaddle_stencil rgsaddle_stencil_t;

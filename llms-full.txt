@@ -286,7 +286,7 @@ The table below lists the main types.
 | `SellaSaddleConfig`            | Settings of the order-1 Sella session for partitioned rational function optimization |
 | `Cell`                         | 3×3 lattice (rows are vectors), fractional minimum-image wrap                                                      |
 | `SaddleError`                  | Shape, surface, non-finite, solver, invalid, stalled, not-equilibrated, and insufficient-effective-samples errors |
-| `Stencil`                      | Point builder. Dimer and Lanczos wrap `MinModeSession`. Band presets return the zoom seam. See [one stencil](explanation/one-stencil.html) |
+| `Stencil`                      | Point builder. Dimer and Lanczos wrap `MinModeSession`. `Stencil::band` rejects band presets as not implemented. See [one stencil](explanation/one-stencil.html) |
 | `Chain`                        | Positions, ids, and roles. `evaluate` uses a fixed block of one image. `Mesh` remeshes (linear, Hermite, or not-a-knot spline), inserts, or windows with no force call |
 | `reparametrize`                | Equal arc-length placement of a band, `Reparametrization::Linear` on the polyline or `NotAKnot` on the not-a-knot cubic spline. `RtrConfig::reparametrization` selects it for the trust-region band |
 | `Preset`                       | `Min`, `Dimer`, `Lanczos`, `Art`, `EigenFollow`, and the named band presets                                         |
@@ -1359,17 +1359,7 @@ Construction fills the band to `n_simul + 2` by cutting the longest segment, one
 
 The peak-weighted gap of a segment is the absolute value of `(E[j+1] - E[j]) * (E[j+1] + E[j] - 2 E_min) / (2 (E_max - E_min))`. `f_R` is the longest length over the endpoint separation. `g_R` is the largest weight over `(E_max - E_min)`. The longest segment is cut when `g_R` is not positive or `f_R / g_R` exceeds `space_energy_ratio`. Otherwise the largest weight is cut. Ties keep the lower index, including `+0.0` against `-0.0`.
 
-Climbing uses `BandConfig::climbing`. The default is
-`CiConfig::after(0.5)`: the climbing image arms when the largest force
-component falls below the absolute threshold 0.5 in the host's force
-units. Its relative trigger factor is 0. Buildup leaves climbing off.
-The climbing window and, when `full_band` is set, the full band stop at
-`BandConfig::force_tol`. The default leaves `full_band` off and stops
-after the climbing window, as ASE and the paper do. The extra stage costs
-calls: on the same budget comparison its median was 30 on the double
-well, 315 from B to C, and 285 from A to B, and it raised the two-barrier
-call ratio to 1.70 over 31 paired seeds. A pair with a censored side is
-dropped.
+Climbing uses `BandConfig::climbing`: `BandConfig::default()` sets `CiConfig::after(0.5)`, with trigger factor 0 and trigger force 0.5, and `None` falls back to trigger factor 0.5 and trigger force 0 when `climb` is on. The climbing window and, when `full_band` is set, the full band stop at `BandConfig::force_tol`. Buildup leaves climbing off. The default leaves `full_band` off and stops after the climbing window, as ASE and the paper do. The extra stage costs calls: on the same budget comparison its median was 30 on the double well, 315 from B to C, and 285 from A to B, and it raised the two-barrier call ratio to 1.70 over 31 paired seeds. A pair with a censored side is dropped.
 
 ## How it differs from ASE
 The inserted image is the minimum-image midpoint. The fill from two endpoints cuts one midpoint at a time, while ASE places `n_simul` images in one interpolate. The Müller-Brown comparison uses FIRE 1.0, ASE's original FIRE, with this crate's step cap of 2.5 times the starting step. Both codes then insert at index 2 and then at index 1.
@@ -3368,7 +3358,7 @@ ART pushes along the seed until the curvature falls under `art_threshold` (defau
 
 `Stencil::band` checks the array and then returns `band presets are not implemented`. Use `BandSession`, `AutoNeb`, or `OcinebSession` directly for a band search. The chain, the mesh (remesh, insert, window), and the point controller are implemented.
 
-From C, `rgsaddle_stencil_config_new` takes the preset discriminant. Unknown keys return `RGSADDLE_INVALID_PARAMETER`. `rgsaddle_last_error` is thread-local. `rgsaddle_stencil_run` loops over `rgsaddle_stencil_step`. The report opens with `struct_size`. The older band and min-mode entries stay step-only.
+From C, `rgsaddle_stencil_config_new` takes the preset discriminant. Unknown keys return `RGSADDLE_INVALID_PARAMETER`. `rgsaddle_last_error` is thread-local. `rgsaddle_stencil_run` loops over `rgsaddle_stencil_step`. The report opens with `struct_size`. The older band and min-mode entries stay step-only, and the ABI minor stays 16.
 
 From Python, `rgsaddle.Stencil.point(x, preset`"dimer")= takes a C-contiguous float64 vector. `step(surface)` releases the thread, and the surface callback re-attaches. `rgsaddle.ase.Point(atoms, preset`"dimer").run(fmax, steps)= is an ASE `Optimizer` whose `step` is one stencil step. A second thread that enters the same handle raises `RuntimeError`.
 
@@ -3415,7 +3405,7 @@ In unweighted Cartesian coordinates, a minimum energy path between two basins sa
 
 > Householder reflection shared by climbing-image NEB and minimum-mode searches
 
-The dimer translation and the climbing image are one Householder reflection of the true force. Goswami, Gunde, and Jónsson, Front. Chem. (2026), doi:10.3389/fchem.2026.1807063, Eqs. 3, 8, and 9, and Sec. 2.3.1 and Sec. 4. The dimer is that reflection on a three-image chain with free ends. Goswami (2026), arXiv:2603.10992, doi:10.48550/arXiv.2603.10992, Eqs. 2.14-2.16.
+The dimer translation and the climbing image are one Householder reflection of the true force. Goswami, Gunde, and Jónsson, Front. Chem. (2026), doi:10.3389/fchem.2026.1807063, Eqs. 3, 8, and 9, and Sec. 2.3.1 and Sec. 4. CI-NEB and dimer translation share that reflection, using the path tangent and minimum mode, respectively, as the distinguished direction. Goswami (2026), arXiv:2603.10992, doi:10.48550/arXiv.2603.10992, Eqs. 2.14-2.16.
 
 A preset chooses the sides, the tangent, the coupling, the climb, and the mesh. `Stencil::point` runs a minimiser, the dimer, Lanczos, ART, and eigen following. Dimer and Lanczos construct `MinModeSession`, so the recorded position and energy hashes stay the same. `Stencil::band` names the band presets but returns an error because band presets are not implemented. Use the dedicated band sessions instead.
 
@@ -3435,7 +3425,7 @@ The C surface is `rgsaddle_stencil_*` with an opaque config, typed key setters, 
 
 Method papers, after the citations above: Henkelman and Jónsson (1999), doi:10.1063/1.480097; Henkelman, Uberuaga, and Jónsson (2000), doi:10.1063/1.1329672; Henkelman and Jónsson (2000), doi:10.1063/1.1323224; Jónsson, Mills, and Jacobsen (1998); Ásgeirsson et al. (2021), doi:10.1021/acs.jctc.1c00462; Kolsbjerg, Groves, and Hammer (2016), doi:10.1063/1.4961868; Malek and Mousseau (2000), doi:10.1103/PhysRevE.62.7723; Smidstrup et al. (2014), doi:10.1063/1.4878664; Schmerwitz, Ásgeirsson, and Jónsson (2024), doi:10.1021/acs.jctc.3c01111; Curtis, Powell, and Reid (1974), doi:10.1093/imamat/13.1.117.
 
-A benchmark that changes iterates cites Goswami, AIP Adv. (2025), doi:10.1063/5.0283639, first. This branch does not change the recorded iterates.
+A benchmark that changes iterates cites Goswami, AIP Adv. (2025), doi:10.1063/5.0283639, first.
 
 # Hyperplane methods on one geometric footing (`docs/orgmode/explanation/hyperplane-methods.org`)
 
