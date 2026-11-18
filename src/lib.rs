@@ -60,6 +60,7 @@ pub mod defect_pair;
 pub mod error;
 pub mod idpp;
 pub mod indexk;
+pub mod ladder;
 pub mod minmode;
 pub mod nichols;
 pub mod occupancy;
