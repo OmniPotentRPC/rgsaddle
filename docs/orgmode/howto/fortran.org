@@ -34,7 +34,20 @@ Surface callbacks are available in two forms:
 1. A native Fortran callback, =surface_proc= or =point_surface_proc=. The trampoline passes the number of rows that are actually in the buffers. For =RGSADDLE_REQ_ONE_IMAGE= that number is 1 and =image= is the band index; a batch passes =image = -1=.
 2. A raw C callback path (=step_c= / =run_c=) that takes a =c_funptr= to an existing C-compatible callback.
 
-The position, energy, and gradient arguments are assumed-size. The caller, and the trampoline, must supply the length the C request describes. A request whose row count does not fit in the default integer returns =RGSADDLE_SHAPE= and does not call the callback.
+The position, energy, and gradient arguments (and =frames= on =pafi_handle%create=) are assumed-size. The caller, and the trampoline, must supply the length the C request describes. A request whose row count does not fit in the default integer returns =RGSADDLE_SHAPE= and does not call the callback. In C, band buffers are row-major =n_images= by =3 * n_atoms= (image stride =3 * n_atoms=) and PAFI frames are row-major =n_frames= by =n_dof= (frame stride =n_dof=). Because Fortran stores arrays in column-major order (the first subscript varies fastest in memory), coordinate dimensions come first and the image or frame dimension comes last, mapping directly onto the C layout without transposing:
+
+#+begin_src fortran
+real(c_double) :: band(3, n_atoms, n_images)
+real(c_double) :: frames(n_dof, n_frames)
+
+! Atom a of image i occupies three contiguous doubles at band(:, a, i).
+band(:, a, i) = [x, y, z]
+status = neb%create(bcfg, int(n_images, c_int64_t), int(n_atoms, c_int64_t), band)
+
+! Frame k occupies n_dof contiguous doubles at frames(:, k).
+frames(:, k) = q(:)
+status = pafi%create(pcfg, int(n_frames, c_int64_t), int(n_dof, c_int64_t), frames)
+#+end_src
 
 PAFI and OH-TST call the point callback from worker threads. The procedure must be safe to run concurrently and must be declared =recursive= (gfortran's recursion check treats those calls as re-entrant). The callback and its =user= pointer travel in the C user-context argument for that call. There is no module-level callback, so one run can call back into another.
 
@@ -180,4 +193,4 @@ PKG_CONFIG_PATH="$PWD/dist/lib/pkgconfig:$PWD/dist/share/pkgconfig" \
 ./pafi_ohtst_demo.x
 #+end_src
 
-The full test suite in =tests/fortran/= exercises NEB, dimer, Lanczos, PAFI (1D double well and 2D widening barrier), and OH-TST (aligned and tilted planes, BAOAB and GHMC).
+The full test suite in =tests/fortran/= exercises NEB, dimer, Lanczos, PAFI (1D double well and 2D widening barrier), OH-TST (aligned and tilted planes, BAOAB and GHMC), callback =user= forwarding, and nested re-entrancy.
