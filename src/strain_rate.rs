@@ -74,7 +74,7 @@ pub struct Strain {
 }
 
 impl Strain {
-    /// The zero strain.
+    /// Zero tensor: no deformation from the reference cell.
     pub fn zero() -> Self {
         Self {
             tensor: [[0.0; 3]; 3],
@@ -118,7 +118,7 @@ impl Strain {
         }
     }
 
-    /// The symmetric tensor.
+    /// Symmetric 3×3 strain tensor.
     pub fn tensor(self) -> M3 {
         self.tensor
     }
@@ -219,7 +219,7 @@ impl ElasticDipole {
         Ok(Self { tensor })
     }
 
-    /// The symmetric tensor.
+    /// Symmetric 3×3 elastic-dipole tensor in eV.
     pub fn tensor(self) -> M3 {
         self.tensor
     }
