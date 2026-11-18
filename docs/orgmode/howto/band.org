@@ -11,7 +11,7 @@ Call ~reset~ when the surface changes. The session retains evaluated endpoints a
 
 * Runnable example: NEB, climbing image, OCI-NEB, and IDPP
 
-Orchestration and best practices for nudged elastic band paths follow Goswami, arXiv:2603.14737 (2026), doi:10.48550/arXiv.2603.14737, and the off-path climbing image refinement (OCI-NEB) follows Goswami, Gunde, and Jónsson, Front. Chem. 14, 1807063 (2026), doi:10.3389/fchem.2026.1807063. Image-dependent pair potential (IDPP) path initialization follows Goswami, MethodsX, 103899 (2026), doi:10.1016/j.mex.2026.103899, Smidstrup, Pedersen, Stokbro, and Jónsson, J. Chem. Phys. 140, 214106 (2014), doi:10.1063/1.4878664, and the sequential S-IDPP variant of Schmerwitz, Ásgeirsson, and Jónsson, J. Chem. Theory Comput. 20, 155 (2024), doi:10.1021/acs.jctc.3c01111.
+Orchestration and best practices for nudged elastic band paths follow Goswami, MethodsX 16, 103899 (2026), doi:10.1016/j.mex.2026.103899, and the off-path climbing image refinement (OCI-NEB) follows Goswami, Gunde, and Jónsson, Front. Chem. 14, 1807063 (2026), doi:10.3389/fchem.2026.1807063. Image-dependent pair potential (IDPP) path initialization follows Goswami, MethodsX, 103899 (2026), doi:10.1016/j.mex.2026.103899, Smidstrup, Pedersen, Stokbro, and Jónsson, J. Chem. Phys. 140, 214106 (2014), doi:10.1063/1.4878664, and the sequential S-IDPP variant of Schmerwitz, Ásgeirsson, and Jónsson, J. Chem. Theory Comput. 20, 155 (2024), doi:10.1021/acs.jctc.3c01111.
 
 #+begin_src rust
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, array};
