@@ -30,6 +30,11 @@ The table below lists the main types.
 | =defect_pair_rates=            | One relaxed geometry and a hop catalogue. Solid dimer, index check, connectivity, fixed CI-NEB, PAFI =ΔF=, Bennett–Chandler =κ=. =k = κ ν exp(-ΔF/kT)=. =RateCatalogue= is =rgsaddle.defect_pair_rates= |
 | =PairNetwork=                  | States are orbits of (relative vector, orientation) under a caller's integer point group; hop classes are orbits of the unordered configuration pair and saddle director. =sites= takes a per-edge rate closure and returns =VolumeSite= rows and outer hops. =cubic_group= is O_h |
 | =matched_capture_radius=       | Closes a site chain at its cutoff with capture =R/d= for an outer hop to =d=, =R= matched to the mean =P r= of the outermost sites, in closed form |
+| =sensitivity_cover=            | Ranks classes by =abs(d result / d ln k)= and covers the fewest leading ones after which =spread * sum abs(sensitivity)= over the rest is below a tolerance |
+| =calibrate_surrogate=          | Fits =x · β= to the residuals of a surrogate =ln k= against computed rates, weights =1/(σ² + τ²)= with the Paule–Mandel scatter =τ=. =SurrogateCalibration= gives =shift=, =shift_error=, =spread= of one more rate, and =draw= of the coefficients within their covariance |
+| =FreeEnergyProfile::reverse_barrier= | =F(dividing) - F(last)= with its trapezoid error: the reverse barrier of a path that ends in the product minimum |
+| =balanced_barriers=            | The forward and reverse barriers of one path against a known =F(last) - F(first)=: their inverse-variance mean, the reverse barrier that gap below it, the =drift= the integral adds, and half of it in the error. =FreeEnergyProfile::balanced= takes them from a profile |
+| =anchored_barriers=            | The same inputs kept on the forward barrier: the reverse barrier the gap below it, the error of the forward barrier, and the =drift= the barrier from the last plane adds. =FreeEnergyProfile::anchored= takes them from a profile |
 | =Hyperplane=                   | OH-TST plane: a point and a unit normal toward the product in mass-weighted coordinates. =from_min_mode= seeds it from a converged dimer or Lanczos session; =packed= and =from_packed= are its =[p; ν]= layout, the one of =PlaneSample::directional=; =from_cartesian= and =to_cartesian= convert |
 | =MassWeighted=                 | =q = M^{1/2} x= over a Cartesian =PointSurface=; =FixedCell= holds the cell of a crystal fixed per temperature. =flux_mass= is =1 / Σ nᵢ²/mᵢ=, not the 2001 Eq. 24 |
 | =sample_plane=                 | Plane-restricted Langevin sampling at =kT= by projected BAOAB or GHMC (=PlaneIntegrator=), reproducible from a seed. =PlaneSample= holds the Euclidean gradient blocks, the centroid torque and the virial, each with a block standard error; =HarmonicReference= adds Stein control variates |
@@ -192,7 +197,7 @@ The importable package is =rgsaddle=. =rgsaddle._core= is the nanobind extension
 - =tests/ssneb.rs= — a frozen =SolidNeb= matches the ordinary band and CI-NEB; the variable-cell double well barrier is 1
 - =tests/ssneb_validate_cu.rs= — release CI-SS-NEB on the 109-atom Mishin cell against =benchmarks/solid_dimer_cu.csv=
 - =tests/mishin_cu.rs= — Mishin copper, four-atom cohesive energy and virial, the <100> to <110> dumbbell saddle under shear, and the ignored vacancy/SIA catalogue
-- =tests/pafi_analytic.rs= — PAFI on a 1D barrier and on a 2D well with a known transverse free-energy shift
+- =tests/pafi_analytic.rs= — PAFI on a 1D barrier and on a 2D well with a known transverse free-energy shift, and the reverse barrier of an integrated profile
 - =tests/bennett_kramers.rs= — Bennett–Chandler =κ = 1= for a short Newtonian crossing, and the Kramers value at =γ = 2=
 - =tests/defect_pair_rates.rs= — direction labels, equal toward/away rates on a flat control, and the catalogue round trip
 - =tests/ohtst_estimators.rs= — OH-TST force, torque and centroid torque against closed forms on a Gaussian and line quadrature on LEPS; control variates exact on the Gaussian and unbiased on LEPS

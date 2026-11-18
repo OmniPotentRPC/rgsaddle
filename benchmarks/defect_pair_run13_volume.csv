@@ -1,82 +1,82 @@
 temperature_K,cutoff_A,volume_over_Omega,sigma,spontaneous_sites,kinetic_sites,demkowicz_8788,note
-300,smoluchowski,104.5778,,34.0000,5.0362,254-286,cutoff 10.8; infinite crystal 24 pi R_eff/a; chain R 5.0362 before the Debye far field; D_graph 0.297364; delta NaN
-300,cell-decay,145.7255,,34.0000,5.0362,254-286,cutoff 10.8; long-time decay of the uniform survival in the 13^3 cell, L 47.2030
-300,mean-time,148.8373,,34.0000,5.0362,254-286,cutoff 10.8; uniform-start mean time in the 13^3 cell 3.926757e-9 s; nu=(2/3)*D_graph/a^2
+300,smoluchowski,46.4790,,34.0000,5.0362,254-286,cutoff 10.8; infinite crystal 16 pi alpha R_eff/a with alpha=2/3; chain R 5.0362 before the Debye far field; D_graph 0.297364; delta NaN
+300,cell-decay,64.7669,,34.0000,5.0362,254-286,cutoff 10.8; long-time decay of the uniform survival in the 13^3 cell, L 47.2030
+300,mean-time,66.1499,,34.0000,5.0362,254-286,cutoff 10.8; uniform-start mean time in the 13^3 cell 3.926757e-9 s; nu=D_graph/((2/3)*a^2)
 300,site-sum,276.6106,4.3518,34.0000,,254-286,cutoff 10.8; this sum grows with the shell count
-300,smoluchowski,108.9301,,34.0000,5.2458,254-286,cutoff 14.0; infinite crystal 24 pi R_eff/a; chain R 5.2458 before the Debye far field; D_graph 0.297364; delta 4.3523
-300,cell-decay,154.1156,,34.0000,5.2458,254-286,cutoff 14.0; long-time decay of the uniform survival in the 13^3 cell, L 47.2030
-300,mean-time,157.7075,,34.0000,5.2458,254-286,cutoff 14.0; uniform-start mean time in the 13^3 cell 3.705898e-9 s; nu=(2/3)*D_graph/a^2
+300,smoluchowski,48.4134,,34.0000,5.2458,254-286,cutoff 14.0; infinite crystal 16 pi alpha R_eff/a with alpha=2/3; chain R 5.2458 before the Debye far field; D_graph 0.297364; delta 1.9343
+300,cell-decay,68.4958,,34.0000,5.2458,254-286,cutoff 14.0; long-time decay of the uniform survival in the 13^3 cell, L 47.2030
+300,mean-time,70.0922,,34.0000,5.2458,254-286,cutoff 14.0; uniform-start mean time in the 13^3 cell 3.705898e-9 s; nu=D_graph/((2/3)*a^2)
 300,site-sum,506.1307,8.3927,34.0000,,254-286,cutoff 14.0; this sum grows with the shell count
-300,smoluchowski,108.4955,,34.0000,5.2249,254-286,cutoff 18.0; infinite crystal 24 pi R_eff/a; chain R 5.2249 before the Debye far field; D_graph 0.297364; delta -0.4346
-300,cell-decay,153.2698,,34.0000,5.2249,254-286,cutoff 18.0; long-time decay of the uniform survival in the 13^3 cell, L 47.2030
-300,mean-time,156.8113,,34.0000,5.2249,254-286,cutoff 18.0; uniform-start mean time in the 13^3 cell 3.727077e-9 s; nu=(2/3)*D_graph/a^2
+300,smoluchowski,48.2202,,34.0000,5.2249,254-286,cutoff 18.0; infinite crystal 16 pi alpha R_eff/a with alpha=2/3; chain R 5.2249 before the Debye far field; D_graph 0.297364; delta -0.1931
+300,cell-decay,68.1199,,34.0000,5.2249,254-286,cutoff 18.0; long-time decay of the uniform survival in the 13^3 cell, L 47.2030
+300,mean-time,69.6939,,34.0000,5.2249,254-286,cutoff 18.0; uniform-start mean time in the 13^3 cell 3.727077e-9 s; nu=D_graph/((2/3)*a^2)
 300,site-sum,869.1014,15.3257,34.0000,,254-286,cutoff 18.0; this sum grows with the shell count
-300,smoluchowski,109.3338,,34.0000,5.2653,254-286,cutoff 22.0; infinite crystal 24 pi R_eff/a; chain R 5.2653 before the Debye far field; D_graph 0.297364; delta 0.8383
-300,cell-decay,154.9032,,34.0000,5.2653,254-286,cutoff 22.0; long-time decay of the uniform survival in the 13^3 cell, L 47.2030
-300,mean-time,158.5424,,34.0000,5.2653,254-286,cutoff 22.0; uniform-start mean time in the 13^3 cell 3.686382e-9 s; nu=(2/3)*D_graph/a^2
+300,smoluchowski,48.5928,,34.0000,5.2653,254-286,cutoff 22.0; infinite crystal 16 pi alpha R_eff/a with alpha=2/3; chain R 5.2653 before the Debye far field; D_graph 0.297364; delta 0.3726
+300,cell-decay,68.8459,,34.0000,5.2653,254-286,cutoff 22.0; long-time decay of the uniform survival in the 13^3 cell, L 47.2030
+300,mean-time,70.4633,,34.0000,5.2653,254-286,cutoff 22.0; uniform-start mean time in the 13^3 cell 3.686382e-9 s; nu=D_graph/((2/3)*a^2)
 300,site-sum,1306.8846,23.6495,34.0000,,254-286,cutoff 22.0; this sum grows with the shell count
-300,smoluchowski,109.8892,,34.0000,5.2920,254-286,cutoff 26.0; infinite crystal 24 pi R_eff/a; chain R 5.2920 before the Debye far field; D_graph 0.297364; delta 0.5554
-300,cell-decay,155.9899,,34.0000,5.2920,254-286,cutoff 26.0; long-time decay of the uniform survival in the 13^3 cell, L 47.2030
-300,mean-time,159.6950,,34.0000,5.2920,254-286,cutoff 26.0; uniform-start mean time in the 13^3 cell 3.659776e-9 s; nu=(2/3)*D_graph/a^2
+300,smoluchowski,48.8397,,34.0000,5.2920,254-286,cutoff 26.0; infinite crystal 16 pi alpha R_eff/a with alpha=2/3; chain R 5.2920 before the Debye far field; D_graph 0.297364; delta 0.2469
+300,cell-decay,69.3288,,34.0000,5.2920,254-286,cutoff 26.0; long-time decay of the uniform survival in the 13^3 cell, L 47.2030
+300,mean-time,70.9755,,34.0000,5.2920,254-286,cutoff 26.0; uniform-start mean time in the 13^3 cell 3.659776e-9 s; nu=D_graph/((2/3)*a^2)
 300,site-sum,1813.1754,33.3000,34.0000,,254-286,cutoff 26.0; this sum grows with the shell count
-300,smoluchowski,109.9466,,34.0000,5.2948,254-286,cutoff 30.0; infinite crystal 24 pi R_eff/a; chain R 5.2948 before the Debye far field; D_graph 0.297364; delta 0.0574
-300,cell-decay,156.1024,,34.0000,5.2948,254-286,cutoff 30.0; long-time decay of the uniform survival in the 13^3 cell, L 47.2030
-300,mean-time,159.8143,,34.0000,5.2948,254-286,cutoff 30.0; uniform-start mean time in the 13^3 cell 3.657043e-9 s; nu=(2/3)*D_graph/a^2
+300,smoluchowski,48.8652,,34.0000,5.2948,254-286,cutoff 30.0; infinite crystal 16 pi alpha R_eff/a with alpha=2/3; chain R 5.2948 before the Debye far field; D_graph 0.297364; delta 0.0255
+300,cell-decay,69.3788,,34.0000,5.2948,254-286,cutoff 30.0; long-time decay of the uniform survival in the 13^3 cell, L 47.2030
+300,mean-time,71.0286,,34.0000,5.2948,254-286,cutoff 30.0; uniform-start mean time in the 13^3 cell 3.657043e-9 s; nu=D_graph/((2/3)*a^2)
 300,site-sum,2439.2696,45.2904,34.0000,,254-286,cutoff 30.0; this sum grows with the shell count
-300,isotropic-any,113.5583,,54.0000,5.4687,254-286,cutoff 30.0; a shell is spontaneous in every orientation when any of its orientations are; infinite crystal
-300,isotropic-all,91.4465,,0.0000,4.4038,254-286,cutoff 30.0; a shell is spontaneous in every orientation when all of its orientations are; infinite crystal
-300,no-strain-bias,109.9468,,34.0000,5.2948,254-286,cutoff 30.0; hop rates without the dipole interaction and no Debye far field; infinite crystal
-500,smoluchowski,98.1363,,34.0000,4.7416,161-185,cutoff 10.8; infinite crystal 24 pi R_eff/a; chain R 4.7416 before the Debye far field; D_graph 1.275786; delta NaN
-500,cell-decay,133.7056,,34.0000,4.7416,161-185,cutoff 10.8; long-time decay of the uniform survival in the 13^3 cell, L 47.3590
-500,mean-time,136.1933,,34.0000,4.7416,161-185,cutoff 10.8; uniform-start mean time in the 13^3 cell 1.006853e-9 s; nu=(2/3)*D_graph/a^2
+300,isotropic-any,50.4704,,54.0000,5.4687,254-286,cutoff 30.0; a shell is spontaneous in every orientation when any of its orientations are; infinite crystal
+300,isotropic-all,40.6429,,0.0000,4.4038,254-286,cutoff 30.0; a shell is spontaneous in every orientation when all of its orientations are; infinite crystal
+300,no-strain-bias,48.8652,,34.0000,5.2948,254-286,cutoff 30.0; hop rates without the dipole interaction and no Debye far field; infinite crystal
+500,smoluchowski,43.6161,,34.0000,4.7416,161-185,cutoff 10.8; infinite crystal 16 pi alpha R_eff/a with alpha=2/3; chain R 4.7416 before the Debye far field; D_graph 1.275786; delta NaN
+500,cell-decay,59.4247,,34.0000,4.7416,161-185,cutoff 10.8; long-time decay of the uniform survival in the 13^3 cell, L 47.3590
+500,mean-time,60.5304,,34.0000,4.7416,161-185,cutoff 10.8; uniform-start mean time in the 13^3 cell 1.006853e-9 s; nu=D_graph/((2/3)*a^2)
 500,site-sum,262.3581,4.4619,34.0000,,161-185,cutoff 10.8; this sum grows with the shell count
-500,smoluchowski,102.9877,,34.0000,4.9760,161-185,cutoff 14.0; infinite crystal 24 pi R_eff/a; chain R 4.9760 before the Debye far field; D_graph 1.275786; delta 4.8514
-500,cell-decay,142.7106,,34.0000,4.9760,161-185,cutoff 14.0; long-time decay of the uniform survival in the 13^3 cell, L 47.3590
-500,mean-time,145.6578,,34.0000,4.9760,161-185,cutoff 14.0; uniform-start mean time in the 13^3 cell 9.414302e-10 s; nu=(2/3)*D_graph/a^2
+500,smoluchowski,45.7723,,34.0000,4.9760,161-185,cutoff 14.0; infinite crystal 16 pi alpha R_eff/a with alpha=2/3; chain R 4.9760 before the Debye far field; D_graph 1.275786; delta 2.1562
+500,cell-decay,63.4269,,34.0000,4.9760,161-185,cutoff 14.0; long-time decay of the uniform survival in the 13^3 cell, L 47.3590
+500,mean-time,64.7368,,34.0000,4.9760,161-185,cutoff 14.0; uniform-start mean time in the 13^3 cell 9.414302e-10 s; nu=D_graph/((2/3)*a^2)
 500,site-sum,479.5912,8.6480,34.0000,,161-185,cutoff 14.0; this sum grows with the shell count
-500,smoluchowski,102.4413,,34.0000,4.9496,161-185,cutoff 18.0; infinite crystal 24 pi R_eff/a; chain R 4.9496 before the Debye far field; D_graph 1.275786; delta -0.5464
-500,cell-decay,141.6815,,34.0000,4.9496,161-185,cutoff 18.0; long-time decay of the uniform survival in the 13^3 cell, L 47.3590
-500,mean-time,144.5740,,34.0000,4.9496,161-185,cutoff 18.0; uniform-start mean time in the 13^3 cell 9.484878e-10 s; nu=(2/3)*D_graph/a^2
+500,smoluchowski,45.5294,,34.0000,4.9496,161-185,cutoff 18.0; infinite crystal 16 pi alpha R_eff/a with alpha=2/3; chain R 4.9496 before the Debye far field; D_graph 1.275786; delta -0.2429
+500,cell-decay,62.9695,,34.0000,4.9496,161-185,cutoff 18.0; long-time decay of the uniform survival in the 13^3 cell, L 47.3590
+500,mean-time,64.2551,,34.0000,4.9496,161-185,cutoff 18.0; uniform-start mean time in the 13^3 cell 9.484878e-10 s; nu=D_graph/((2/3)*a^2)
 500,site-sum,790.5298,15.1405,34.0000,,161-185,cutoff 18.0; this sum grows with the shell count
-500,smoluchowski,104.3341,,34.0000,5.0411,161-185,cutoff 22.0; infinite crystal 24 pi R_eff/a; chain R 5.0411 before the Debye far field; D_graph 1.275786; delta 1.8928
-500,cell-decay,145.2598,,34.0000,5.0411,161-185,cutoff 22.0; long-time decay of the uniform survival in the 13^3 cell, L 47.3590
-500,mean-time,148.3461,,34.0000,5.0411,161-185,cutoff 22.0; uniform-start mean time in the 13^3 cell 9.243698e-10 s; nu=(2/3)*D_graph/a^2
+500,smoluchowski,46.3707,,34.0000,5.0411,161-185,cutoff 22.0; infinite crystal 16 pi alpha R_eff/a with alpha=2/3; chain R 5.0411 before the Debye far field; D_graph 1.275786; delta 0.8413
+500,cell-decay,64.5599,,34.0000,5.0411,161-185,cutoff 22.0; long-time decay of the uniform survival in the 13^3 cell, L 47.3590
+500,mean-time,65.9316,,34.0000,5.0411,161-185,cutoff 22.0; uniform-start mean time in the 13^3 cell 9.243698e-10 s; nu=D_graph/((2/3)*a^2)
 500,site-sum,1201.5130,23.5395,34.0000,,161-185,cutoff 22.0; this sum grows with the shell count
-500,smoluchowski,107.5356,,34.0000,5.1958,161-185,cutoff 26.0; infinite crystal 24 pi R_eff/a; chain R 5.1958 before the Debye far field; D_graph 1.275786; delta 3.2015
-500,cell-decay,151.4082,,34.0000,5.1958,161-185,cutoff 26.0; long-time decay of the uniform survival in the 13^3 cell, L 47.3590
-500,mean-time,154.8406,,34.0000,5.1958,161-185,cutoff 26.0; uniform-start mean time in the 13^3 cell 8.855986e-10 s; nu=(2/3)*D_graph/a^2
+500,smoluchowski,47.7936,,34.0000,5.1958,161-185,cutoff 26.0; infinite crystal 16 pi alpha R_eff/a with alpha=2/3; chain R 5.1958 before the Debye far field; D_graph 1.275786; delta 1.4229
+500,cell-decay,67.2925,,34.0000,5.1958,161-185,cutoff 26.0; long-time decay of the uniform survival in the 13^3 cell, L 47.3590
+500,mean-time,68.8181,,34.0000,5.1958,161-185,cutoff 26.0; uniform-start mean time in the 13^3 cell 8.855986e-10 s; nu=D_graph/((2/3)*a^2)
 500,site-sum,1752.8984,34.6941,34.0000,,161-185,cutoff 26.0; this sum grows with the shell count
-500,smoluchowski,104.6110,,34.0000,5.0545,161-185,cutoff 30.0; infinite crystal 24 pi R_eff/a; chain R 5.0545 before the Debye far field; D_graph 1.275786; delta -2.9246
-500,cell-decay,145.7889,,34.0000,5.0545,161-185,cutoff 30.0; long-time decay of the uniform survival in the 13^3 cell, L 47.3590
-500,mean-time,148.9041,,34.0000,5.0545,161-185,cutoff 30.0; uniform-start mean time in the 13^3 cell 9.209055e-10 s; nu=(2/3)*D_graph/a^2
+500,smoluchowski,46.4938,,34.0000,5.0545,161-185,cutoff 30.0; infinite crystal 16 pi alpha R_eff/a with alpha=2/3; chain R 5.0545 before the Debye far field; D_graph 1.275786; delta -1.2998
+500,cell-decay,64.7951,,34.0000,5.0545,161-185,cutoff 30.0; long-time decay of the uniform survival in the 13^3 cell, L 47.3590
+500,mean-time,66.1796,,34.0000,5.0545,161-185,cutoff 30.0; uniform-start mean time in the 13^3 cell 9.209055e-10 s; nu=D_graph/((2/3)*a^2)
 500,site-sum,2311.0361,46.6576,34.0000,,161-185,cutoff 30.0; this sum grows with the shell count
-500,isotropic-any,109.9903,,54.0000,5.3144,161-185,cutoff 30.0; a shell is spontaneous in every orientation when any of its orientations are; infinite crystal
-500,isotropic-all,75.5975,,0.0000,3.6526,161-185,cutoff 30.0; a shell is spontaneous in every orientation when all of its orientations are; infinite crystal
-500,no-strain-bias,104.6111,,34.0000,5.0545,161-185,cutoff 30.0; hop rates without the dipole interaction and no Debye far field; infinite crystal
-700,smoluchowski,97.5967,,34.0000,4.7311,203-210,cutoff 10.8; infinite crystal 24 pi R_eff/a; chain R 4.7311 before the Debye far field; D_graph 1.521444; delta NaN
-700,cell-decay,132.7230,,34.0000,4.7311,203-210,cutoff 10.8; long-time decay of the uniform survival in the 13^3 cell, L 47.5150
-700,mean-time,135.1635,,34.0000,4.7311,203-210,cutoff 10.8; uniform-start mean time in the 13^3 cell 8.563286e-10 s; nu=(2/3)*D_graph/a^2
+500,isotropic-any,48.8846,,54.0000,5.3144,161-185,cutoff 30.0; a shell is spontaneous in every orientation when any of its orientations are; infinite crystal
+500,isotropic-all,33.5989,,0.0000,3.6526,161-185,cutoff 30.0; a shell is spontaneous in every orientation when all of its orientations are; infinite crystal
+500,no-strain-bias,46.4938,,34.0000,5.0545,161-185,cutoff 30.0; hop rates without the dipole interaction and no Debye far field; infinite crystal
+700,smoluchowski,43.3763,,34.0000,4.7311,203-210,cutoff 10.8; infinite crystal 16 pi alpha R_eff/a with alpha=2/3; chain R 4.7311 before the Debye far field; D_graph 1.521444; delta NaN
+700,cell-decay,58.9880,,34.0000,4.7311,203-210,cutoff 10.8; long-time decay of the uniform survival in the 13^3 cell, L 47.5150
+700,mean-time,60.0727,,34.0000,4.7311,203-210,cutoff 10.8; uniform-start mean time in the 13^3 cell 8.563286e-10 s; nu=D_graph/((2/3)*a^2)
 700,site-sum,261.3280,3.0987,34.0000,,203-210,cutoff 10.8; this sum grows with the shell count
-700,smoluchowski,101.9550,,34.0000,4.9424,203-210,cutoff 14.0; infinite crystal 24 pi R_eff/a; chain R 4.9424 before the Debye far field; D_graph 1.521444; delta 4.3583
-700,cell-decay,140.7662,,34.0000,4.9424,203-210,cutoff 14.0; long-time decay of the uniform survival in the 13^3 cell, L 47.5150
-700,mean-time,143.6101,,34.0000,4.9424,203-210,cutoff 14.0; uniform-start mean time in the 13^3 cell 8.059629e-10 s; nu=(2/3)*D_graph/a^2
+700,smoluchowski,45.3133,,34.0000,4.9424,203-210,cutoff 14.0; infinite crystal 16 pi alpha R_eff/a with alpha=2/3; chain R 4.9424 before the Debye far field; D_graph 1.521444; delta 1.9370
+700,cell-decay,62.5627,,34.0000,4.9424,203-210,cutoff 14.0; long-time decay of the uniform survival in the 13^3 cell, L 47.5150
+700,mean-time,63.8267,,34.0000,4.9424,203-210,cutoff 14.0; uniform-start mean time in the 13^3 cell 8.059629e-10 s; nu=D_graph/((2/3)*a^2)
 700,site-sum,476.4155,5.9556,34.0000,,203-210,cutoff 14.0; this sum grows with the shell count
-700,smoluchowski,101.4648,,34.0000,4.9186,203-210,cutoff 18.0; infinite crystal 24 pi R_eff/a; chain R 4.9186 before the Debye far field; D_graph 1.521444; delta -0.4902
-700,cell-decay,139.8486,,34.0000,4.9186,203-210,cutoff 18.0; long-time decay of the uniform survival in the 13^3 cell, L 47.5150
-700,mean-time,142.6446,,34.0000,4.9186,203-210,cutoff 18.0; uniform-start mean time in the 13^3 cell 8.114181e-10 s; nu=(2/3)*D_graph/a^2
+700,smoluchowski,45.0955,,34.0000,4.9186,203-210,cutoff 18.0; infinite crystal 16 pi alpha R_eff/a with alpha=2/3; chain R 4.9186 before the Debye far field; D_graph 1.521444; delta -0.2179
+700,cell-decay,62.1549,,34.0000,4.9186,203-210,cutoff 18.0; long-time decay of the uniform survival in the 13^3 cell, L 47.5150
+700,mean-time,63.3976,,34.0000,4.9186,203-210,cutoff 18.0; uniform-start mean time in the 13^3 cell 8.114181e-10 s; nu=D_graph/((2/3)*a^2)
 700,site-sum,784.4732,10.3763,34.0000,,203-210,cutoff 18.0; this sum grows with the shell count
-700,smoluchowski,103.3339,,34.0000,5.0092,203-210,cutoff 22.0; infinite crystal 24 pi R_eff/a; chain R 5.0092 before the Debye far field; D_graph 1.521444; delta 1.8691
-700,cell-decay,143.3636,,34.0000,5.0092,203-210,cutoff 22.0; long-time decay of the uniform survival in the 13^3 cell, L 47.5150
-700,mean-time,146.3459,,34.0000,5.0092,203-210,cutoff 22.0; uniform-start mean time in the 13^3 cell 7.908963e-10 s; nu=(2/3)*D_graph/a^2
+700,smoluchowski,45.9262,,34.0000,5.0092,203-210,cutoff 22.0; infinite crystal 16 pi alpha R_eff/a with alpha=2/3; chain R 5.0092 before the Debye far field; D_graph 1.521444; delta 0.8307
+700,cell-decay,63.7172,,34.0000,5.0092,203-210,cutoff 22.0; long-time decay of the uniform survival in the 13^3 cell, L 47.5150
+700,mean-time,65.0426,,34.0000,5.0092,203-210,cutoff 22.0; uniform-start mean time in the 13^3 cell 7.908963e-10 s; nu=D_graph/((2/3)*a^2)
 700,site-sum,1191.5178,16.0848,34.0000,,203-210,cutoff 22.0; this sum grows with the shell count
-700,smoluchowski,106.5113,,34.0000,5.1632,203-210,cutoff 26.0; infinite crystal 24 pi R_eff/a; chain R 5.1632 before the Debye far field; D_graph 1.521444; delta 3.1774
-700,cell-decay,149.4303,,34.0000,5.1632,203-210,cutoff 26.0; long-time decay of the uniform survival in the 13^3 cell, L 47.5150
-700,mean-time,152.7493,,34.0000,5.1632,203-210,cutoff 26.0; uniform-start mean time in the 13^3 cell 7.577412e-10 s; nu=(2/3)*D_graph/a^2
+700,smoluchowski,47.3383,,34.0000,5.1632,203-210,cutoff 26.0; infinite crystal 16 pi alpha R_eff/a with alpha=2/3; chain R 5.1632 before the Debye far field; D_graph 1.521444; delta 1.4122
+700,cell-decay,66.4135,,34.0000,5.1632,203-210,cutoff 26.0; long-time decay of the uniform survival in the 13^3 cell, L 47.5150
+700,mean-time,67.8886,,34.0000,5.1632,203-210,cutoff 26.0; uniform-start mean time in the 13^3 cell 7.577412e-10 s; nu=D_graph/((2/3)*a^2)
 700,site-sum,1737.6645,23.6672,34.0000,,203-210,cutoff 26.0; this sum grows with the shell count
-700,smoluchowski,99.8993,,34.0000,4.8427,203-210,cutoff 30.0; infinite crystal 24 pi R_eff/a; chain R 4.8427 before the Debye far field; D_graph 1.521444; delta -6.6120
-700,cell-decay,136.9369,,34.0000,4.8427,203-210,cutoff 30.0; long-time decay of the uniform survival in the 13^3 cell, L 47.5150
-700,mean-time,139.5840,,34.0000,4.8427,203-210,cutoff 30.0; uniform-start mean time in the 13^3 cell 8.292099e-10 s; nu=(2/3)*D_graph/a^2
+700,smoluchowski,44.3997,,34.0000,4.8427,203-210,cutoff 30.0; infinite crystal 16 pi alpha R_eff/a with alpha=2/3; chain R 4.8427 before the Debye far field; D_graph 1.521444; delta -2.9387
+700,cell-decay,60.8609,,34.0000,4.8427,203-210,cutoff 30.0; long-time decay of the uniform survival in the 13^3 cell, L 47.5150
+700,mean-time,62.0373,,34.0000,4.8427,203-210,cutoff 30.0; uniform-start mean time in the 13^3 cell 8.292099e-10 s; nu=D_graph/((2/3)*a^2)
 700,site-sum,2192.3533,30.6916,34.0000,,203-210,cutoff 30.0; this sum grows with the shell count
-700,isotropic-any,105.1286,,54.0000,5.0962,203-210,cutoff 30.0; a shell is spontaneous in every orientation when any of its orientations are; infinite crystal
-700,isotropic-all,70.2169,,0.0000,3.4038,203-210,cutoff 30.0; a shell is spontaneous in every orientation when all of its orientations are; infinite crystal
-700,no-strain-bias,99.8993,,34.0000,4.8427,203-210,cutoff 30.0; hop rates without the dipole interaction and no Debye far field; infinite crystal
+700,isotropic-any,46.7238,,54.0000,5.0962,203-210,cutoff 30.0; a shell is spontaneous in every orientation when any of its orientations are; infinite crystal
+700,isotropic-all,31.2075,,0.0000,3.4038,203-210,cutoff 30.0; a shell is spontaneous in every orientation when all of its orientations are; infinite crystal
+700,no-strain-bias,44.3997,,34.0000,4.8427,203-210,cutoff 30.0; hop rates without the dipole interaction and no Debye far field; infinite crystal

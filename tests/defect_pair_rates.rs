@@ -726,6 +726,44 @@ fn eight_channels_set_the_diffusivity_and_rotation_does_not() {
 }
 
 #[test]
+fn the_channel_rate_inverts_the_dumbbell_diffusivity() {
+    let lattice = 3.643_f64;
+    let channel = 3.0e11_f64;
+    let diffusivity = dumbbell_diffusivity(lattice, channel, 0.0).expect("D");
+    let back = dumbbell_channel_rate(lattice, diffusivity).expect("rate");
+    assert!(
+        (back - channel).abs() / channel < 1.0e-12,
+        "{back} {channel}"
+    );
+    let alpha = 2.0 / 3.0;
+    let direct = diffusivity / (alpha * lattice * lattice);
+    assert!((back - direct).abs() / direct < 1.0e-12, "{back} {direct}");
+    assert!(dumbbell_channel_rate(0.0, diffusivity).is_err());
+    assert!(dumbbell_channel_rate(lattice, -1.0).is_err());
+}
+
+#[test]
+fn the_channel_rate_reproduces_the_published_600_k_volume() {
+    // Mwungeli, Liu, and Demkowicz, Phys. Rev. Materials 9, 023601 (2025):
+    // Fig. 1 fits log(n/N) = -0.00173 t (t in ps) for 8788 atoms at 600 K, and
+    // Table 1 lists a = 3.649 Å, D_i = 0.728 Å²/ps, and V_iv = 186 ± 14 Ω.
+    let (lattice, diffusivity, slope) = (3.649_f64, 0.728_f64, 0.00173_f64);
+    let omega = lattice.powi(3) / 4.0;
+    let rate = slope * 8788.0 * omega;
+    let channel = dumbbell_channel_rate(lattice, diffusivity).expect("rate");
+    let volume = rgsaddle::volume_from_frequency(rate, channel).expect("volume") / omega;
+    assert!((volume - 185.4).abs() < 0.05, "{volume}");
+    assert!((volume - 186.0).abs() < 14.0, "{volume}");
+    // With α inverted, k a² / (α D_i), the same fit gives 1/α² = 9/4 of that.
+    let inverted = rate * lattice * lattice / ((2.0 / 3.0) * diffusivity) / omega;
+    assert!(
+        (inverted / volume - 2.25).abs() < 1.0e-9,
+        "{inverted} {volume}"
+    );
+    assert!((inverted - 186.0).abs() > 14.0 * 10.0, "{inverted}");
+}
+
+#[test]
 fn the_smoluchowski_radius_does_not_grow_when_the_return_layer_does() {
     let radius = 5.0_f64;
     let jump = 1.0_f64;
@@ -765,11 +803,12 @@ fn the_smoluchowski_radius_does_not_grow_when_the_return_layer_does() {
     assert!((radii[0] - radius).abs() < 1.0e-3, "{}", radii[0]);
     assert!((radii[1] - radii[0]).abs() < 1.0e-9, "{radii:?}");
     let rate = rgsaddle::smoluchowski_rate(1.5, radii[0]).expect("rate");
-    let migration = (2.0 / 3.0) * 1.5 / (4.0 * 4.0);
+    let migration = dumbbell_channel_rate(4.0, 1.5).expect("rate");
     let volume = rgsaddle::volume_from_frequency(rate, migration).expect("volume");
     let atomic = 4.0_f64.powi(3) / 4.0;
     let per_atom = volume / atomic;
-    let closed = 16.0 * std::f64::consts::PI * radius / ((2.0 / 3.0) * 4.0);
+    // 4π R D / ν over a³/4 with ν = D / (α a²) is 16 π α R / a.
+    let closed = 16.0 * std::f64::consts::PI * (2.0 / 3.0) * radius / 4.0;
     assert!(
         (per_atom - closed).abs() / closed < 1.0e-4,
         "{per_atom} {closed}"
