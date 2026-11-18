@@ -315,8 +315,8 @@ pub use linalg::{
 pub use pes::CartesianPes;
 
 pub use pes_internal::{
-    CellCartesianPes, CellInternalPes, InternalPes, SellaPes, niggli_reduce_cell,
-    niggli_reduce_vectors, place_perp_dummy,
+    CellCartesianPes, CellInternalPes, HessianCarry, InternalPes, RebuildReason, RebuildReport,
+    SellaPes, niggli_reduce_cell, niggli_reduce_vectors, place_perp_dummy,
 };
 
 pub use covalent::{atomic_number, covalent_radius, element_symbol};

@@ -23,6 +23,10 @@ use crate::mic::Cell;
 use crate::minmode::PointSurface;
 use crate::pes::{CartesianPes, HessUpdate};
 
+mod auto;
+
+pub use auto::{HessianCarry, RebuildReason, RebuildReport};
+
 /// Sella `InternalPES`: Cartesian geometry, internals chart, internals Hessian.
 pub struct InternalPes {
     cart: CartesianPes,
@@ -31,6 +35,9 @@ pub struct InternalPes {
     update: HessUpdate,
     /// Extra 3-vectors Sella hangs on linear fragments. Not in the surface.
     dummies: Array1<f64>,
+    /// Present when the chart was built by [`InternalPes::auto`]; a
+    /// hand-specified chart keeps `None` and is never rebuilt.
+    auto: Option<Box<auto::AutoState>>,
 }
 
 impl InternalPes {
@@ -55,6 +62,7 @@ impl InternalPes {
             hess: BfgsModel::identity(nint),
             update: HessUpdate::Bfgs,
             dummies: Array1::zeros(0),
+            auto: None,
         };
         pes.guess_hessian();
         Ok(pes)
@@ -100,6 +108,7 @@ impl InternalPes {
             hess: BfgsModel::identity(nint),
             update: HessUpdate::Bfgs,
             dummies,
+            auto: None,
         };
         pes.guess_hessian();
         Ok(pes)
@@ -151,14 +160,7 @@ impl InternalPes {
         }
         self.hess.forget();
         for (i, eq) in self.chart.equalities().iter().enumerate() {
-            let lam = match eq {
-                crate::constraints::Equality::Translation { .. } => 70.0,
-                crate::constraints::Equality::Bond { .. } => 0.5,
-                crate::constraints::Equality::Angle { .. } => 0.2,
-                crate::constraints::Equality::Dihedral { .. } => 0.1,
-                crate::constraints::Equality::Rotation { .. } => 1.0,
-                crate::constraints::Equality::Displacement { .. } => 1.0,
-            };
+            let lam = guess_curvature(eq);
             let mut u = Array1::zeros(nint);
             u[i] = 1.0;
             self.hess.seed_mode(&u, lam);
@@ -211,6 +213,13 @@ impl InternalPes {
     /// Internals gradient `B^{+T} g` on the Wilson frame. Dummy
     /// slots have zero Cartesian force.
     pub fn internals_grad(&self, g_cart: ArrayView1<f64>) -> Result<Array1<f64>, SaddleError> {
+        if let Some(auto) = &self.auto {
+            let frame = self.frame();
+            let j = self.effective_jacobian(&frame)?;
+            return Ok(
+                crate::topology::Wilson::new(&j, auto.sv_tol())?.gradient(&g_cart.to_owned())
+            );
+        }
         let b = self.b_matrix()?;
         let g = self.pad_grad(g_cart);
         internals_grad_from_b(&b, g.view())
@@ -218,6 +227,10 @@ impl InternalPes {
 
     /// Map `dq` onto the Wilson frame by `B dx = dq`. No surface eval.
     pub fn displace(&mut self, dq: ArrayView1<f64>) -> Result<(), SaddleError> {
+        if self.auto.is_some() {
+            let dx = self.move_auto(dq)?;
+            return self.cart.displace(dx.view());
+        }
         let b = self.b_matrix()?;
         if dq.len() != b.nrows() {
             return Err(SaddleError::Shape(
@@ -242,6 +255,9 @@ impl InternalPes {
         surface: &S,
         dq: ArrayView1<f64>,
     ) -> Result<(f64, Array1<f64>), SaddleError> {
+        if self.auto.is_some() {
+            return self.kick_auto(surface, dq);
+        }
         let b = self.b_matrix()?;
         if dq.len() != b.nrows() {
             return Err(SaddleError::Shape(
@@ -273,6 +289,19 @@ impl InternalPes {
     pub fn reset(&mut self) {
         self.cart.reset();
         self.guess_hessian();
+    }
+}
+
+/// Sella `Internals.guess_hessian` diagonal entry of one internal.
+pub(crate) fn guess_curvature(eq: &crate::constraints::Equality) -> f64 {
+    use crate::constraints::Equality;
+    match eq {
+        Equality::Translation { .. } => 70.0,
+        Equality::Bond { .. } => 0.5,
+        Equality::Angle { .. } => 0.2,
+        Equality::Dihedral { .. } => 0.1,
+        Equality::Rotation { .. } => 1.0,
+        Equality::Displacement { .. } => 1.0,
     }
 }
 
