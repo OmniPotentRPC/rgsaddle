@@ -72,12 +72,17 @@ steps. =md_state= returns positions, projected forces, removed velocities,
 the scalar constraint force, the force-evaluation count, and the completed
 step count.
 
-LAMMPS hard-region sampling additionally requires lammpc to advertise that
-=md_step= applies a registered hard-boundary callback, restores the complete
-accepted state on rejection, and refreshes projected forces after reflection.
-The callback registration symbols alone do not establish this behavior.
-Current lammpc main does not provide it, so the adapter fails closed for a
-sampling budget with a region.
+When the sampling budget supplies a hard =Region=, the adapter extracts its
+=Region::planar_boundaries= and installs a planar reflecting callback through
+=lammpc_session_set_hard_boundary= (cleared on drop with
+=lammpc_session_clear_hard_boundary=). On constrained MD steps, the callback
+projects each crossed face normal into the plane's tangent space and reflects
+the position and tangent velocity. Non-planar regions are rejected. The
+adapter requires exactly one callback invocation per requested =md_step= and
+fails closed otherwise; the registration symbols alone do not establish this
+capability. lammpc must restore the complete accepted state, including forces,
+on rejection and re-project and re-evaluate forces after reflection. Current
+lammpc main does not provide this contract; =fix/md-step-hard-boundary= does.
 
 The extension is generic. It does not contain an OH-TST, PAFI, pair-style,
 or material type. rgsaddle maps those arrays into =HyperplaneObservation=.

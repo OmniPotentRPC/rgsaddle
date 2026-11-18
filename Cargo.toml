@@ -64,7 +64,7 @@ rgpot-core = { version = "=3.7.0", git = "https://github.com/OmniPotentRPC/rgpot
 
 [package.metadata.rgsaddle-lammps]
 lammpc-git = "https://github.com/OmniPotentRPC/lammpc"
-lammpc-rev = "dc443997"
+lammpc-rev = "0f5c6bb907956e75243eedfae2e44763c726a2f0"
 rgpot-git = "https://github.com/OmniPotentRPC/rgpot"
 rgpot-rev = "97ebba0b062128b7dc4637501c4b70ed4944ae9d"
 

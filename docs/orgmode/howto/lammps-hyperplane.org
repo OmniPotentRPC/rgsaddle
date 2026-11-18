@@ -8,7 +8,7 @@ compile rgpot or load LAMMPS.
 
 The supported native stack is:
 
-- =OmniPotentRPC/lammpc= at =dc443997= plus the constrained MD API patch
+- =OmniPotentRPC/lammpc= at =0f5c6bb907956e75243eedfae2e44763c726a2f0=
 - =OmniPotentRPC/rgpot= at =97ebba0b=
 - LAMMPS =stable_22Jul2025_update2=, built as a serial shared library
 
@@ -76,11 +76,14 @@ tail, and rejects split-half drift. The backend adds no hidden burn-in.
 
 lammpc advances one projected BAOAB step at a time. Each step projects the
 force and velocity, restores the position to the plane after each drift,
-and thermostats tangent velocity with Langevin noise. LAMMPS hard-region
-sampling is pending a lammpc capability that invokes its registered boundary
-callback on every constrained MD step. Current lammpc main has the callback
-registration entry points but not that constrained-step behavior, so the
-adapter must reject a region until the capability is available. The force
+and thermostats tangent velocity with Langevin noise. When the budget supplies
+a hard region, every face must be available from =Region::planar_boundaries=;
+non-planar regions are rejected. The sampler installs its planar reflecting
+callback through =lammpc_session_set_hard_boundary= and verifies that each
+constrained MD step invokes it exactly once. Current lammpc main fails this
+capability check; use lammpc =fix/md-step-hard-boundary=. Reflected states are
+re-projected and force-evaluated, while rejection restores the complete
+accepted state. Periodic displacements use the live LAMMPS box. The force
 evaluation is the live in-process LAMMPS session. No penalty restraint is
 used.
 

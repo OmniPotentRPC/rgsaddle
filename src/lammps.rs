@@ -7,6 +7,7 @@
 
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::path::{Path, PathBuf};
+use std::slice;
 
 use libloading::Library;
 use ndarray::Array1;
@@ -398,7 +399,13 @@ impl HyperplaneSampler for LammpsHyperplaneSampler {
                     "LAMMPS requires a region with engine-portable planar boundaries".into(),
                 )
             })?;
-            engine.set_boundaries(&boundaries, plane.dim())?;
+            engine.set_boundaries(
+                &boundaries,
+                plane.normal().as_slice().expect("hyperplane is contiguous"),
+                self.system.coordinate_masses(),
+                budget.coordinates,
+                plane.dim(),
+            )?;
         }
         engine.step(budget.thermalize)?;
 
@@ -487,6 +494,8 @@ type AvailableFn = unsafe extern "C" fn() -> c_int;
 type AbiVersionFn = unsafe extern "C" fn() -> c_int;
 type LastErrorFn = unsafe extern "C" fn() -> *const c_char;
 type FinalizeFn = unsafe extern "C" fn();
+// lammpc's md_* and hard-boundary entry points all accept the owning
+// LammpcSession handle returned by session_create_from_config.
 type SessionCreateFn = unsafe extern "C" fn(*const c_void, usize) -> *mut c_void;
 type SessionDestroyFn = unsafe extern "C" fn(*mut c_void);
 type MdInitializeFn = unsafe extern "C" fn(
@@ -499,8 +508,11 @@ type MdInitializeFn = unsafe extern "C" fn(
     *const MdConfig,
 ) -> c_int;
 type MdStepFn = unsafe extern "C" fn(*mut c_void, usize) -> c_int;
-type MdSetBoundariesFn =
-    unsafe extern "C" fn(*mut c_void, *const f64, *const f64, usize, usize) -> c_int;
+type HardBoundaryCallbackFn =
+    unsafe extern "C" fn(*mut c_void, c_int, *mut f64, *mut f64, *const c_void) -> c_int;
+type SessionSetHardBoundaryFn =
+    unsafe extern "C" fn(*mut c_void, Option<HardBoundaryCallbackFn>, *mut c_void) -> c_int;
+type SessionClearHardBoundaryFn = unsafe extern "C" fn(*mut c_void) -> c_int;
 type MdStateFn = unsafe extern "C" fn(
     *mut c_void,
     *mut f64,
@@ -518,6 +530,44 @@ struct MdState {
     accounting: MdObservation,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BoundaryCoordinates {
+    MassWeighted,
+    Cartesian,
+}
+
+#[derive(Clone, Debug)]
+struct BoundaryFace {
+    point: Vec<f64>,
+    normal: Vec<f64>,
+}
+
+#[derive(Clone, Debug)]
+struct HardBoundaryData {
+    faces: Vec<BoundaryFace>,
+    plane_normal: Vec<f64>,
+    coordinates: BoundaryCoordinates,
+    sqrt_masses: Vec<f64>,
+    callback_calls: usize,
+}
+
+const BOUNDARY_ACCEPT: c_int = 0;
+const BOUNDARY_REJECT: c_int = 1;
+const BOUNDARY_REFLECT: c_int = 2;
+const BOUNDARY_ERROR: c_int = -1;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct BoundaryBox {
+    lo: [f64; 3],
+    hi: [f64; 3],
+    xy: f64,
+    xz: f64,
+    yz: f64,
+    periodic: [c_int; 3],
+    triclinic: c_int,
+}
+
 struct Engine {
     session: *mut c_void,
     destroy: SessionDestroyFn,
@@ -525,7 +575,9 @@ struct Engine {
     last_error: LastErrorFn,
     md_initialize: MdInitializeFn,
     md_step: MdStepFn,
-    md_set_boundaries: Option<MdSetBoundariesFn>,
+    set_hard_boundary: Option<SessionSetHardBoundaryFn>,
+    clear_hard_boundary: Option<SessionClearHardBoundaryFn>,
+    hard_boundary: Option<Box<HardBoundaryData>>,
     md_state: MdStateFn,
     _library: Library,
 }
@@ -572,8 +624,12 @@ impl Engine {
             let md_step = *library
                 .get::<MdStepFn>(b"lammpc_session_md_step\0")
                 .map_err(load_error)?;
-            let md_set_boundaries = library
-                .get::<MdSetBoundariesFn>(b"lammpc_session_md_set_boundaries\0")
+            let set_hard_boundary = library
+                .get::<SessionSetHardBoundaryFn>(b"lammpc_session_set_hard_boundary\0")
+                .ok()
+                .map(|symbol| *symbol);
+            let clear_hard_boundary = library
+                .get::<SessionClearHardBoundaryFn>(b"lammpc_session_clear_hard_boundary\0")
                 .ok()
                 .map(|symbol| *symbol);
             let md_state = *library
@@ -602,7 +658,9 @@ impl Engine {
                 last_error,
                 md_initialize,
                 md_step,
-                md_set_boundaries,
+                set_hard_boundary,
+                clear_hard_boundary,
+                hard_boundary: None,
                 md_state,
                 _library: library,
             })
@@ -631,42 +689,101 @@ impl Engine {
     }
 
     fn step(&mut self, steps: usize) -> Result<(), SaddleError> {
+        let callbacks_before = self
+            .hard_boundary
+            .as_ref()
+            .map(|boundary| boundary.callback_calls);
         let status = unsafe { (self.md_step)(self.session, steps) };
-        self.check(status)
+        self.check(status)?;
+        if let (Some(before), Some(boundary)) = (callbacks_before, self.hard_boundary.as_ref()) {
+            let callbacks = boundary.callback_calls.saturating_sub(before);
+            if steps > 0 && callbacks != steps {
+                return Err(SaddleError::Surface(format!(
+                    "liblammpc lacks constrained-MD hard-boundary capability: \
+                     md_step requested {steps} steps but invoked the callback {callbacks} times"
+                )));
+            }
+        }
+        Ok(())
     }
 
     fn set_boundaries(
         &mut self,
         boundaries: &[crate::PlanarBoundary],
+        plane_normal: &[f64],
+        coordinate_masses: impl Iterator<Item = f64>,
+        coordinates: HyperplaneCoordinates,
         dimension: usize,
     ) -> Result<(), SaddleError> {
-        let set = self.md_set_boundaries.ok_or_else(|| {
-            SaddleError::Surface(
-                "liblammpc lacks hard-region support; update lammpc with the generic boundary ABI"
-                    .into(),
-            )
-        })?;
-        let mut points = Vec::with_capacity(boundaries.len() * dimension);
-        let mut normals = Vec::with_capacity(boundaries.len() * dimension);
+        let set = self
+            .set_hard_boundary
+            .zip(self.clear_hard_boundary)
+            .map(|pair| pair.0)
+            .ok_or_else(|| {
+                SaddleError::Surface(
+                    "liblammpc lacks hard-region support; update lammpc with the generic boundary ABI"
+                        .into(),
+                )
+            })?;
+        if plane_normal.len() != dimension {
+            return Err(SaddleError::Shape(
+                "LAMMPS plane normal and boundary dimensions differ".into(),
+            ));
+        }
+        let sqrt_masses: Vec<f64> = coordinate_masses.map(|mass| mass.sqrt()).collect();
+        if sqrt_masses.len() != dimension {
+            return Err(SaddleError::Shape(
+                "LAMMPS masses and boundary dimensions differ".into(),
+            ));
+        }
+        if sqrt_masses
+            .iter()
+            .any(|value| !(value.is_finite() && *value > 0.0))
+        {
+            return Err(SaddleError::Invalid(
+                "LAMMPS masses must be finite and positive".into(),
+            ));
+        }
+        let callback_coordinates = match coordinates {
+            HyperplaneCoordinates::MassWeighted => BoundaryCoordinates::MassWeighted,
+            HyperplaneCoordinates::Cartesian => BoundaryCoordinates::Cartesian,
+        };
+        let mut faces = Vec::with_capacity(boundaries.len());
         for boundary in boundaries {
             if boundary.point().len() != dimension {
                 return Err(SaddleError::Shape(
                     "LAMMPS boundary and plane dimensions differ".into(),
                 ));
             }
-            points.extend(boundary.point());
-            normals.extend(boundary.normal());
+            faces.push(BoundaryFace {
+                point: boundary.point().to_vec(),
+                normal: boundary.normal().to_vec(),
+            });
         }
+        let mut data = Box::new(HardBoundaryData {
+            faces,
+            plane_normal: plane_normal.to_vec(),
+            coordinates: callback_coordinates,
+            sqrt_masses,
+            callback_calls: 0,
+        });
         let status = unsafe {
             set(
                 self.session,
-                points.as_ptr(),
-                normals.as_ptr(),
-                boundaries.len(),
-                dimension,
+                Some(hard_boundary_callback),
+                data.as_mut() as *mut HardBoundaryData as *mut c_void,
             )
         };
-        self.check(status)
+        self.check(status)?;
+        self.hard_boundary = Some(data);
+        Ok(())
+    }
+
+    fn clear_boundaries(&mut self) {
+        if let Some(clear) = self.clear_hard_boundary {
+            let _ = unsafe { clear(self.session) };
+        }
+        self.hard_boundary = None;
     }
 
     fn state(&mut self, dimension: usize) -> Result<MdState, SaddleError> {
@@ -704,8 +821,264 @@ impl Engine {
     }
 }
 
+fn apply_hard_boundary(
+    data: &HardBoundaryData,
+    positions: &mut [f64],
+    velocities: &mut [f64],
+    simulation_box: &BoundaryBox,
+) -> Result<c_int, SaddleError> {
+    if positions.len() != velocities.len() {
+        return Err(SaddleError::Shape(
+            "LAMMPS boundary callback needs matching position and velocity dimensions".into(),
+        ));
+    }
+    if positions.len() != data.plane_normal.len() || positions.len() != data.sqrt_masses.len() {
+        return Err(SaddleError::Shape(
+            "LAMMPS boundary callback dimensions differ from boundary data".into(),
+        ));
+    }
+    let mut coordinates = positions.to_vec();
+    let mut tangent_velocities = velocities.to_vec();
+    if data.coordinates == BoundaryCoordinates::MassWeighted {
+        for axis in 0..coordinates.len() {
+            coordinates[axis] *= data.sqrt_masses[axis];
+            tangent_velocities[axis] *= data.sqrt_masses[axis];
+        }
+    }
+    let mut reflected = false;
+    for face in &data.faces {
+        let displacement = boundary_displacement(data, &coordinates, &face.point, simulation_box)?;
+        let signed = dot(&face.normal, &displacement)?;
+        if signed <= 0.0 {
+            continue;
+        }
+        let mut tangent_normal = project_to_tangent(&face.normal, &data.plane_normal)?;
+        normalize_in_place(&mut tangent_normal)?;
+        let penetration = dot(&tangent_normal, &displacement)?;
+        if penetration <= 0.0 {
+            return Ok(BOUNDARY_REJECT);
+        }
+        mirror_position(&mut coordinates, &tangent_normal, penetration);
+        mirror_velocity(&mut tangent_velocities, &tangent_normal);
+        reflected = true;
+    }
+    if data.coordinates == BoundaryCoordinates::MassWeighted {
+        for axis in 0..coordinates.len() {
+            positions[axis] = coordinates[axis] / data.sqrt_masses[axis];
+            velocities[axis] = tangent_velocities[axis] / data.sqrt_masses[axis];
+        }
+    } else {
+        positions.copy_from_slice(&coordinates);
+        velocities.copy_from_slice(&tangent_velocities);
+    }
+    if reflected {
+        Ok(BOUNDARY_REFLECT)
+    } else {
+        Ok(BOUNDARY_ACCEPT)
+    }
+}
+
+fn boundary_displacement(
+    data: &HardBoundaryData,
+    position: &[f64],
+    point: &[f64],
+    simulation_box: &BoundaryBox,
+) -> Result<Vec<f64>, SaddleError> {
+    if position.len() != point.len() || position.len() != data.sqrt_masses.len() {
+        return Err(SaddleError::Shape(
+            "LAMMPS boundary callback received inconsistent dimensions".into(),
+        ));
+    }
+    if !position.len().is_multiple_of(3) {
+        return Err(SaddleError::Shape(
+            "LAMMPS boundary callback needs three coordinates per atom".into(),
+        ));
+    }
+    let box_values = [
+        simulation_box.lo[0],
+        simulation_box.lo[1],
+        simulation_box.lo[2],
+        simulation_box.hi[0],
+        simulation_box.hi[1],
+        simulation_box.hi[2],
+        simulation_box.xy,
+        simulation_box.xz,
+        simulation_box.yz,
+    ];
+    if !box_values.iter().all(|value| value.is_finite()) {
+        return Err(SaddleError::NonFinite("LAMMPS boundary box"));
+    }
+    let lengths = [
+        simulation_box.hi[0] - simulation_box.lo[0],
+        simulation_box.hi[1] - simulation_box.lo[1],
+        simulation_box.hi[2] - simulation_box.lo[2],
+    ];
+    for length in lengths {
+        if !(length.is_finite() && length > 0.0) {
+            return Err(SaddleError::Invalid(
+                "LAMMPS boundary box has a nonpositive length".into(),
+            ));
+        }
+    }
+
+    let mut displacement = Vec::with_capacity(position.len());
+    for atom in 0..(position.len() / 3) {
+        let offset = 3 * atom;
+        let mut cartesian = [0.0; 3];
+        for axis in 0..3 {
+            let delta = position[offset + axis] - point[offset + axis];
+            cartesian[axis] = if data.coordinates == BoundaryCoordinates::MassWeighted {
+                delta / data.sqrt_masses[offset + axis]
+            } else {
+                delta
+            };
+        }
+        let mut fractional = [
+            (cartesian[0]
+                - simulation_box.xy * cartesian[1] / lengths[1]
+                - simulation_box.xz * cartesian[2] / lengths[2]
+                + simulation_box.xy * simulation_box.yz * cartesian[2] / (lengths[1] * lengths[2]))
+                / lengths[0],
+            (cartesian[1] - simulation_box.yz * cartesian[2] / lengths[2]) / lengths[1],
+            cartesian[2] / lengths[2],
+        ];
+        for axis in 0..3 {
+            if simulation_box.periodic[axis] != 0 {
+                fractional[axis] -= fractional[axis].round();
+            }
+        }
+        cartesian = [
+            lengths[0] * fractional[0]
+                + simulation_box.xy * fractional[1]
+                + simulation_box.xz * fractional[2],
+            lengths[1] * fractional[1] + simulation_box.yz * fractional[2],
+            lengths[2] * fractional[2],
+        ];
+        for axis in 0..3 {
+            let delta = if data.coordinates == BoundaryCoordinates::MassWeighted {
+                cartesian[axis] * data.sqrt_masses[offset + axis]
+            } else {
+                cartesian[axis]
+            };
+            if !delta.is_finite() {
+                return Err(SaddleError::NonFinite("LAMMPS boundary displacement"));
+            }
+            displacement.push(delta);
+        }
+    }
+    Ok(displacement)
+}
+
+fn project_to_tangent(vector: &[f64], plane_normal: &[f64]) -> Result<Vec<f64>, SaddleError> {
+    if vector.len() != plane_normal.len() {
+        return Err(SaddleError::Shape(
+            "LAMMPS boundary normal and plane normal dimensions differ".into(),
+        ));
+    }
+    let denominator = dot(plane_normal, plane_normal)?;
+    if denominator <= 0.0 {
+        return Err(SaddleError::Invalid(
+            "LAMMPS plane normal vanishes in boundary callback".into(),
+        ));
+    }
+    let coefficient = dot(vector, plane_normal)? / denominator;
+    let mut projected = Vec::with_capacity(vector.len());
+    for axis in 0..vector.len() {
+        projected.push(vector[axis] - coefficient * plane_normal[axis]);
+    }
+    Ok(projected)
+}
+
+fn dot(left: &[f64], right: &[f64]) -> Result<f64, SaddleError> {
+    if left.len() != right.len() {
+        return Err(SaddleError::Shape(
+            "LAMMPS boundary callback dot-product dimensions differ".into(),
+        ));
+    }
+    let mut sum = 0.0;
+    for axis in 0..left.len() {
+        sum += left[axis] * right[axis];
+    }
+    if sum.is_finite() {
+        Ok(sum)
+    } else {
+        Err(SaddleError::NonFinite(
+            "LAMMPS boundary callback dot product",
+        ))
+    }
+}
+
+fn normalize_in_place(vector: &mut [f64]) -> Result<(), SaddleError> {
+    let mut norm_sq = 0.0;
+    for value in vector.iter() {
+        norm_sq += value * value;
+    }
+    if !norm_sq.is_finite() {
+        return Err(SaddleError::NonFinite("LAMMPS boundary tangent normal"));
+    }
+    if norm_sq <= f64::EPSILON {
+        return Err(SaddleError::Invalid(
+            "LAMMPS boundary has no tangent-space normal component".into(),
+        ));
+    }
+    let norm = norm_sq.sqrt();
+    for value in vector.iter_mut() {
+        *value /= norm;
+    }
+    Ok(())
+}
+
+fn mirror_position(position: &mut [f64], normal: &[f64], penetration: f64) {
+    for axis in 0..position.len() {
+        position[axis] -= 2.0 * penetration * normal[axis];
+    }
+}
+
+fn mirror_velocity(velocity: &mut [f64], normal: &[f64]) {
+    let mut component = 0.0;
+    for axis in 0..velocity.len() {
+        component += velocity[axis] * normal[axis];
+    }
+    for axis in 0..velocity.len() {
+        velocity[axis] -= 2.0 * component * normal[axis];
+    }
+}
+
+unsafe extern "C" fn hard_boundary_callback(
+    user: *mut c_void,
+    n_atoms: c_int,
+    positions: *mut f64,
+    velocities: *mut f64,
+    simulation_box: *const c_void,
+) -> c_int {
+    let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if user.is_null()
+            || positions.is_null()
+            || velocities.is_null()
+            || simulation_box.is_null()
+            || n_atoms < 0
+        {
+            return Ok(BOUNDARY_ERROR);
+        }
+        let data = unsafe { &mut *(user as *mut HardBoundaryData) };
+        data.callback_calls = data.callback_calls.saturating_add(1);
+        let coordinates = 3usize
+            .checked_mul(n_atoms as usize)
+            .ok_or_else(|| SaddleError::Invalid("LAMMPS atom count overflow".into()))?;
+        let positions_slice = unsafe { slice::from_raw_parts_mut(positions, coordinates) };
+        let velocities_slice = unsafe { slice::from_raw_parts_mut(velocities, coordinates) };
+        let simulation_box = unsafe { &*(simulation_box as *const BoundaryBox) };
+        apply_hard_boundary(data, positions_slice, velocities_slice, simulation_box)
+    }));
+    match run {
+        Ok(Ok(status)) => status,
+        Ok(Err(_)) | Err(_) => BOUNDARY_ERROR,
+    }
+}
+
 impl Drop for Engine {
     fn drop(&mut self) {
+        self.clear_boundaries();
         unsafe {
             (self.destroy)(self.session);
             self.session = std::ptr::null_mut();
@@ -765,5 +1138,140 @@ mod tests {
             observables.get(LAMMPS_OBSERVABLE_EFFECTIVE_DOF),
             Some(&14.0)
         );
+    }
+
+    fn single_face_data(
+        point: Vec<f64>,
+        normal: Vec<f64>,
+        plane_normal: Vec<f64>,
+        coordinates: BoundaryCoordinates,
+    ) -> HardBoundaryData {
+        HardBoundaryData {
+            faces: vec![BoundaryFace { point, normal }],
+            plane_normal,
+            coordinates,
+            sqrt_masses: vec![1.0, 1.0, 1.0],
+            callback_calls: 0,
+        }
+    }
+
+    fn nonperiodic_box() -> BoundaryBox {
+        BoundaryBox {
+            lo: [-10.0; 3],
+            hi: [10.0; 3],
+            xy: 0.0,
+            xz: 0.0,
+            yz: 0.0,
+            periodic: [0; 3],
+            triclinic: 0,
+        }
+    }
+
+    #[test]
+    fn hard_boundary_accepts_inside_points() {
+        let data = single_face_data(
+            vec![0.0, 0.0, 0.0],
+            vec![1.0, 0.0, 0.0],
+            vec![0.0, 1.0, 0.0],
+            BoundaryCoordinates::Cartesian,
+        );
+        let mut positions = vec![-0.5, 0.1, 0.0];
+        let mut velocities = vec![0.2, 0.3, 0.0];
+        let status =
+            apply_hard_boundary(&data, &mut positions, &mut velocities, &nonperiodic_box())
+                .unwrap();
+        assert_eq!(status, BOUNDARY_ACCEPT);
+        assert_eq!(positions, vec![-0.5, 0.1, 0.0]);
+        assert_eq!(velocities, vec![0.2, 0.3, 0.0]);
+    }
+
+    #[test]
+    fn hard_boundary_reflects_crossings() {
+        let data = single_face_data(
+            vec![0.0, 0.0, 0.0],
+            vec![1.0, 0.0, 0.0],
+            vec![0.0, 1.0, 0.0],
+            BoundaryCoordinates::Cartesian,
+        );
+        let mut positions = vec![0.2, -0.1, 0.0];
+        let mut velocities = vec![0.4, 0.3, 0.0];
+        let status =
+            apply_hard_boundary(&data, &mut positions, &mut velocities, &nonperiodic_box())
+                .unwrap();
+        assert_eq!(status, BOUNDARY_REFLECT);
+        let expected_positions = [-0.2, -0.1, 0.0];
+        let expected_velocities = [-0.4, 0.3, 0.0];
+        for axis in 0..positions.len() {
+            assert!((positions[axis] - expected_positions[axis]).abs() <= 32.0 * f64::EPSILON);
+            assert!((velocities[axis] - expected_velocities[axis]).abs() <= 32.0 * f64::EPSILON);
+        }
+    }
+
+    #[test]
+    fn hard_boundary_callback_rejects_ill_defined_tangent_faces() {
+        let mut data = Box::new(single_face_data(
+            vec![0.0, 0.0, 0.0],
+            vec![0.0, 1.0, 0.0],
+            vec![0.0, 1.0, 0.0],
+            BoundaryCoordinates::Cartesian,
+        ));
+        let mut positions = vec![0.0, 0.5, 0.0];
+        let mut velocities = vec![0.0, -0.2, 0.0];
+        let simulation_box = nonperiodic_box();
+        let status = unsafe {
+            hard_boundary_callback(
+                data.as_mut() as *mut HardBoundaryData as *mut c_void,
+                1,
+                positions.as_mut_ptr(),
+                velocities.as_mut_ptr(),
+                (&raw const simulation_box).cast(),
+            )
+        };
+        assert_eq!(status, BOUNDARY_ERROR);
+    }
+
+    #[test]
+    fn hard_boundary_mass_weighted_mode_converts_back_to_cartesian() {
+        let mut data = single_face_data(
+            vec![0.0, 0.0, 0.0],
+            vec![1.0, 0.0, 0.0],
+            vec![0.0, 1.0, 0.0],
+            BoundaryCoordinates::MassWeighted,
+        );
+        data.sqrt_masses = vec![2.0, 2.0, 1.0];
+        let mut positions = vec![0.2, -0.3, 0.0];
+        let mut velocities = vec![0.5, 0.1, 0.0];
+        let status =
+            apply_hard_boundary(&data, &mut positions, &mut velocities, &nonperiodic_box())
+                .unwrap();
+        assert_eq!(status, BOUNDARY_REFLECT);
+        assert!((positions[0] + 0.2).abs() <= 64.0 * f64::EPSILON);
+        assert!((velocities[0] + 0.5).abs() <= 64.0 * f64::EPSILON);
+    }
+
+    #[test]
+    fn hard_boundary_uses_periodic_minimum_image() {
+        let data = single_face_data(
+            vec![9.8, 0.0, 0.0],
+            vec![1.0, 0.0, 0.0],
+            vec![0.0, 1.0, 0.0],
+            BoundaryCoordinates::Cartesian,
+        );
+        let simulation_box = BoundaryBox {
+            lo: [0.0; 3],
+            hi: [10.0; 3],
+            xy: 0.0,
+            xz: 0.0,
+            yz: 0.0,
+            periodic: [1, 0, 0],
+            triclinic: 0,
+        };
+        let mut positions = vec![0.2, 0.0, 0.0];
+        let mut velocities = vec![0.5, 0.0, 0.0];
+        let status =
+            apply_hard_boundary(&data, &mut positions, &mut velocities, &simulation_box).unwrap();
+        assert_eq!(status, BOUNDARY_REFLECT);
+        assert!((positions[0] + 0.6).abs() <= 64.0 * f64::EPSILON);
+        assert!((velocities[0] + 0.5).abs() <= 64.0 * f64::EPSILON);
     }
 }

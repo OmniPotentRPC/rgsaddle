@@ -1,15 +1,16 @@
 #![cfg(feature = "lammps")]
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use capnp::message::Builder;
 use capnp::serialize;
-use ndarray::{Array1, ArrayView1};
+use ndarray::{Array1, ArrayView1, array};
 use rgpot_core::Potentials_capnp::potential_config;
 use rgsaddle::{
     AnalyticSurfaceSampler, Hyperplane, HyperplaneCoordinates, HyperplaneSampleBudget,
     HyperplaneSampler, LammpsHyperplaneSampler, LammpsSamplerConfig, LammpsSystem, LangevinConfig,
-    PointSurface, SaddleError, sample_plane_with_sampler,
+    PlanarBoundary, PointSurface, SaddleError, sample_plane_with_sampler,
 };
 
 const EPSILON: f64 = 0.2;
@@ -277,4 +278,65 @@ fn copper_eam_alloy_vacancy_plane_smoke() {
     assert!(sample.normal_force.is_finite());
     assert!(sample.normal_force_error.is_finite());
     assert!(sample.evaluations >= 4_200);
+}
+
+fn sample_lj_with_optional_boundary(with_boundary: bool) -> Result<Vec<Array1<f64>>, SaddleError> {
+    let mut backend = lj_backend().ok_or_else(|| {
+        SaddleError::Invalid("LAMMPC_LIBRARY is required for the LAMMPS boundary test".into())
+    })?;
+    let point = backend.system().positions.clone();
+    let plane = Hyperplane::new(
+        point,
+        Array1::from_vec(vec![-1.0, 0.5, 0.0, 1.0, -0.5, 0.0]),
+    )?;
+    let mut budget = HyperplaneSampleBudget::default()
+        .with_thermal(0.02)
+        .with_seed(71)
+        .with_thermalize(50)
+        .with_stride(2)
+        .with_samples(400)
+        .with_coordinates(HyperplaneCoordinates::Cartesian)
+        .with_positions(true);
+    if with_boundary {
+        let boundary = PlanarBoundary::new(
+            array![0.0, 0.0, 0.0, 3.05, 0.0, 0.0],
+            array![0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+        )?;
+        budget = budget.with_region(Arc::new(boundary));
+    }
+    let ensemble = backend.sample_hyperplane(&plane, &budget)?;
+    ensemble
+        .observations
+        .into_iter()
+        .map(|observation| {
+            observation.position.ok_or_else(|| {
+                SaddleError::Invalid("LAMMPS boundary test requires retained positions".into())
+            })
+        })
+        .collect()
+}
+
+#[test]
+fn hard_boundary_callback_confines_lammps_trajectory() {
+    if library_path().is_none() {
+        eprintln!(
+            "SKIPPED hard_boundary_callback_confines_lammps_trajectory: \
+             set LAMMPC_LIBRARY to a real liblammpc"
+        );
+        return;
+    }
+    let with_boundary =
+        sample_lj_with_optional_boundary(true).expect("LAMMPS hard boundary must be enforced");
+    let without_boundary =
+        sample_lj_with_optional_boundary(false).expect("unbounded LAMMPS sample");
+    let leaves_without = without_boundary
+        .iter()
+        .filter(|position| position[3] > 3.05)
+        .count();
+    let leaves_with = with_boundary
+        .iter()
+        .filter(|position| position[3] > 3.05)
+        .count();
+    assert_eq!(leaves_with, 0);
+    assert!(leaves_without > 0);
 }

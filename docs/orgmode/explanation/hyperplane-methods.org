@@ -84,13 +84,15 @@ contained point before velocity reflection.
 
 The engine-neutral sampling budget carries the same region.  The analytic
 BAOAB/GHMC implementation consumes it through its existing drift or proposal
-step.  LAMMPS hard-region sampling is pending a lammpc capability that applies
-a host boundary callback after every =lammpc_session_md_step=, restores a
-complete accepted state on rejection, and refreshes forces after reflection.
-The callback registration entry points already exist, but current lammpc main
-does not apply them to constrained MD steps.  Until lammpc advertises that
-behavior, the LAMMPS adapter fails closed when a sampling budget carries a
-region.
+step.  The LAMMPS adapter installs a planar reflecting callback from
+=Region::planar_boundaries= through =lammpc_session_set_hard_boundary= and
+clears it with =lammpc_session_clear_hard_boundary=.  It verifies at runtime
+that every requested =lammpc_session_md_step= invokes the callback exactly
+once; symbol presence alone is insufficient.  Current lammpc main fails this
+check, while lammpc's =fix/md-step-hard-boundary= branch provides the required
+behavior.  The callback projects each crossed face normal into the plane's
+tangent space and mirrors the position and tangent velocity in the active
+coordinate convention.
 
 * One constraint and its metric
 
@@ -444,11 +446,14 @@ estimate is silently emitted.
   pinned rgpot potential profile and creates a lammpc session. lammpc's
   projected BAOAB stepper constrains \(\nu^T(q-p)=0\), projects force and
   velocity in the selected coordinate convention, thermostats tangent
-  velocity, and restores the plane after each drift. It returns the scalar
-  constraint force, removed velocity, position, projected force, and force
-  call count. Hard-region enforcement remains pending the constrained-step
-  callback capability described above. No LAMMPS class or pointer appears in
-  the Rust trait.
+  velocity, and restores the plane after each drift. When the budget carries a
+  hard region, the sampler installs the planar reflecting callback through
+  =lammpc_session_set_hard_boundary= and verifies its constrained-step
+  application. Reflected states are re-projected and their forces recomputed;
+  rejected states restore positions, velocities, forces, and constraint
+  bookkeeping. It returns the scalar constraint force, removed velocity,
+  position, projected force, and force call count. No LAMMPS class or pointer
+  appears in the Rust trait.
 - *OpenMM.*  The adapter may represent the signed plane coordinate with a
   =CustomCVForce= plus a constraint-force readback, or use a
   constraint-projection integrator.  It must expose the same scalar
