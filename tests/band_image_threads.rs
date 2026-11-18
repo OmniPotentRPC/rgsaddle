@@ -9,7 +9,8 @@ use std::sync::Mutex;
 
 use ndarray::{Array1, Array2, ArrayView2};
 use rgsaddle::{
-    BandConfig, BandSession, BandSurface, CiConfig, ProjectionKind, SaddleError, SpringKind,
+    BandConfig, BandSession, BandSurface, CiConfig, ExpBandPrecon, ProjectionKind, SaddleError,
+    SpringKind,
 };
 
 const DOF: usize = 6;
@@ -90,6 +91,11 @@ fn configs() -> Vec<(&'static str, BandConfig)> {
         (
             "ocineb-fire",
             base.clone().with_min_mode(BandConfig::default().min_mode),
+        ),
+        (
+            "exp-ode12r",
+            base.with_method(rgmin::Method::Ode12r)
+                .with_exp_precon(ExpBandPrecon::default().with_mu(1.0)),
         ),
     ]
 }

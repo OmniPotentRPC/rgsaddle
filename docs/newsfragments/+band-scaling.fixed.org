@@ -1,0 +1,3 @@
+Band evaluations now cache exponential-metric driving forces, build metric
+neighbours with linkcell, solve not-a-knot splines in linear time, and
+parallelize per-image force assembly when image threads are enabled.

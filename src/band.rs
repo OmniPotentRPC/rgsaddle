@@ -738,14 +738,18 @@ const SAME_ROW_TOL: f64 = 1e-10;
 /// The surface's answer at one band geometry. `x` is the flat
 /// interior; `energies` and `gradients` cover the whole band (the
 /// endpoint gradient rows hold whatever the last whole-band
-/// evaluation returned); `projected` is the assembled interior force
-/// under the climbing state of the most recent assembly.
+/// evaluation returned); `projected` and `driving` are the assembled
+/// residual and optional preconditioned force under the climbing state
+/// of the most recent assembly.
 #[derive(Clone)]
 struct BandEval {
     x: Array1<f64>,
     energies: Array1<f64>,
     gradients: Array2<f64>,
     projected: Array1<f64>,
+    driving: Array1<f64>,
+    /// Climbing image used by the cached assembly; `i64::MIN` means none.
+    assembly_ci: i64,
     /// Cauchy stress, whole band, row-major 9. Empty on an atomic band.
     stresses: Array2<f64>,
     /// Geometry the solid-state assembly evaluated. Empty on an atomic band.
@@ -786,6 +790,8 @@ struct BandState {
     previous: Mutex<Option<BandEval>>,
     /// Rows evaluated by the surface during the current step.
     rows: AtomicUsize,
+    /// Number of exponential-metric PCG solves, for cache regression tests.
+    pcg_solves: AtomicUsize,
     /// Buffers of the evaluation and assembly. Locked before `last`.
     work: Mutex<BandWork>,
     /// Image threads ([`BandSession::set_image_threads`]).
@@ -810,6 +816,7 @@ impl BandState {
             last: Mutex::new(None),
             previous: Mutex::new(None),
             rows: AtomicUsize::new(0),
+            pcg_solves: AtomicUsize::new(0),
             work: Mutex::new(BandWork::default()),
             pool: None,
         }
@@ -896,9 +903,20 @@ impl BandState {
         *last = Some(start);
     }
 
+    fn invalidate_assembly(&self) {
+        for slot in [&self.last, &self.previous] {
+            if let Some(eval) = slot.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+                eval.projected = Array1::zeros(0);
+                eval.driving = Array1::zeros(0);
+                eval.assembly_ci = i64::MIN;
+            }
+        }
+    }
+
     /// The climbing baseline and the armed image belong to one
     /// relaxation; the surface caches stay.
     fn restart(&self) {
+        self.invalidate_assembly();
         *self.baseline.lock().unwrap_or_else(|e| e.into_inner()) = None;
         *self.atom_baseline.lock().unwrap_or_else(|e| e.into_inner()) = None;
         self.armed.store(false, Ordering::Relaxed);
@@ -971,6 +989,7 @@ struct BandWork {
     ks: Vec<f64>,
     spare: Option<BandEval>,
     spare_projected: Array1<f64>,
+    spare_driving: Array1<f64>,
 }
 
 /// One [`ImageWork`] of length `dof` per interior image.
@@ -985,7 +1004,7 @@ fn fit_images(images: &mut Vec<ImageWork>, n_interior: usize, dof: usize) -> &mu
 impl BandWork {
     /// Storage for a new atomic evaluation of `n_images` rows: the
     /// recycled `spare` when it has that shape, a fresh one otherwise.
-    /// Its projected force is cleared, the mark of an unassembled point.
+    /// Its forces are cleared, the mark of an unassembled point.
     fn take_eval(&mut self, n_images: usize, dof: usize) -> BandEval {
         let fits = |e: &BandEval| {
             e.x.len() == (n_images - 2) * dof && e.gradients.dim() == (n_images, dof)
@@ -996,6 +1015,11 @@ impl BandWork {
                 if projected.len() > self.spare_projected.len() {
                     self.spare_projected = projected;
                 }
+                let driving = std::mem::replace(&mut eval.driving, Array1::zeros(0));
+                if driving.len() > self.spare_driving.len() {
+                    self.spare_driving = driving;
+                }
+                eval.assembly_ci = i64::MIN;
                 eval
             }
             None => BandEval {
@@ -1003,6 +1027,8 @@ impl BandWork {
                 energies: Array1::zeros(n_images),
                 gradients: Array2::zeros((n_images, dof)),
                 projected: Array1::zeros(0),
+                driving: Array1::zeros(0),
+                assembly_ci: i64::MIN,
                 stresses: Array2::zeros((0, 9)),
                 band_positions: Array2::zeros((0, dof)),
                 band_cells: Vec::new(),
@@ -1010,16 +1036,36 @@ impl BandWork {
         }
     }
 
-    /// Store `projected` in `eval`, in the recycled buffer when `eval`
-    /// has none of that length.
-    fn store_projected(&mut self, eval: &mut BandEval, projected: &Array1<f64>) {
-        if eval.projected.len() != projected.len() {
-            std::mem::swap(&mut eval.projected, &mut self.spare_projected);
+    /// Store an assembled force in `target`, using `spare` when needed.
+    fn store_force(target: &mut Array1<f64>, spare: &mut Array1<f64>, force: &Array1<f64>) {
+        if target.len() != force.len() {
+            std::mem::swap(target, spare);
         }
-        if eval.projected.len() == projected.len() {
-            eval.projected.assign(projected);
+        if target.len() == force.len() {
+            target.assign(force);
         } else {
-            eval.projected = projected.clone();
+            *target = force.clone();
+        }
+    }
+
+    /// Store the residual and optional preconditioned driving force.
+    fn store_forces(
+        &mut self,
+        eval: &mut BandEval,
+        projected: &Array1<f64>,
+        driving: Option<&Array1<f64>>,
+    ) {
+        Self::store_force(&mut eval.projected, &mut self.spare_projected, projected);
+        match driving {
+            Some(force) => {
+                Self::store_force(&mut eval.driving, &mut self.spare_driving, force);
+            }
+            None => {
+                if eval.driving.len() > self.spare_driving.len() {
+                    std::mem::swap(&mut eval.driving, &mut self.spare_driving);
+                }
+                eval.driving = Array1::zeros(0);
+            }
         }
     }
 }
@@ -1377,6 +1423,8 @@ fn evaluate_solid(
         energies: energies.clone(),
         gradients: gradients.clone(),
         projected: Array1::zeros(0),
+        driving: Array1::zeros(0),
+        assembly_ci: i64::MIN,
         stresses: stresses.clone(),
         band_positions: positions.clone(),
         band_cells: cells.clone(),
@@ -1589,6 +1637,7 @@ fn assemble_solid(
 #[allow(clippy::too_many_arguments)]
 fn image_force(
     config: &BandConfig,
+    state: &BandState,
     spring_kind: &SpringKind,
     i: usize,
     climb: bool,
@@ -1667,6 +1716,7 @@ fn image_force(
             match free {
                 None => {
                     (driving, projected) = metric_force(
+                        state,
                         p,
                         gradients.row(i),
                         tangent.view(),
@@ -1682,6 +1732,7 @@ fn image_force(
                         free.iter().map(|&c| v[c]).collect()
                     };
                     let (driving_free, projected_free) = metric_force(
+                        state,
                         p,
                         gather(gradients.row(i)).view(),
                         gather(tangent.view()).view(),
@@ -1715,6 +1766,7 @@ fn image_force(
 /// band measures, on the coordinates `p` acts on. `curvature` is
 /// `d_next - d_prev`; `spring_k` is the uniform spring, if any.
 fn metric_force(
+    state: &BandState,
     p: &Exp,
     gradient: ArrayView1<f64>,
     tangent: ArrayView1<f64>,
@@ -1725,6 +1777,7 @@ fn metric_force(
     // Makri, Ortner and Kermode, Eq. (9) and (10): the gradient
     // through P^{-1}, the tangent normalised in the P-norm, and
     // the spring along that tangent with the P inner product.
+    state.pcg_solves.fetch_add(1, Ordering::Relaxed);
     let s = p.solve(gradient).ok_or(SaddleError::Invalid(
         "exponential metric: the linear solve failed".into(),
     ))?;
@@ -2117,6 +2170,63 @@ fn assemble_band(
     Ok((energy, projected, max_component))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn assemble_image_force(
+    config: &BandConfig,
+    state: &BandState,
+    springs: &Springs<'_>,
+    metric: Option<(&Exp, Option<&[usize]>)>,
+    i: usize,
+    climb: bool,
+    endpoint_first: ArrayView1<f64>,
+    endpoint_last: ArrayView1<f64>,
+    x: ArrayView1<f64>,
+    energies: &Array1<f64>,
+    gradients: &Array2<f64>,
+    work: &mut ImageWork,
+    mut projected: ArrayViewMut1<f64>,
+    mut driving: Option<ArrayViewMut1<f64>>,
+) -> Result<(), SaddleError> {
+    match springs {
+        Springs::Metric(spring) => {
+            let (force, step) = image_force(
+                config,
+                state,
+                spring,
+                i,
+                climb,
+                endpoint_first,
+                endpoint_last,
+                x,
+                energies,
+                gradients,
+                metric,
+            )?;
+            projected.assign(&force);
+            if let Some(out) = driving.as_mut() {
+                match step.as_ref() {
+                    Some(step) => out.assign(step),
+                    None => out.assign(&force),
+                }
+            }
+        }
+        Springs::Band(spring) => image_force_into(
+            config,
+            spring,
+            i,
+            climb,
+            endpoint_first,
+            endpoint_last,
+            x,
+            energies,
+            gradients,
+            work,
+            projected,
+        )?,
+    }
+    Ok(())
+}
+
 /// The band assembly, and with `metrics` also the preconditioned driving
 /// force the solver integrates in place of the projected one.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
@@ -2160,6 +2270,21 @@ fn assemble_band_with(
     }
     let ci_at = if armed { climb_target } else { None };
     let pseudo_energy: f64 = energies.slice(s![1..n_images - 1]).sum();
+    let force_len = (n_images - 2) * dof;
+    let assembly_ci = ci_at.map_or(-1, |i| i as i64);
+    if eval.projected.len() == force_len
+        && eval.assembly_ci == assembly_ci
+        && (metrics.is_none() || eval.driving.len() == force_len)
+    {
+        let projected = eval.projected.clone();
+        let driving = metrics.map(|_| eval.driving.clone());
+        let max_component = state.convergence_force(&projected);
+        *state
+            .last_max_force
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = max_component;
+        return Ok((pseudo_energy, projected, max_component, driving));
+    }
 
     let BandWork { images, ks, .. } = &mut *work;
     let springs = match metrics {
@@ -2172,49 +2297,100 @@ fn assemble_band_with(
     // so a metric slice carries every image.
     let mut projected = Array1::zeros((n_images - 2) * dof);
     let mut driving = metrics.map(|_| Array1::zeros((n_images - 2) * dof));
-    let mut assemble = |i: usize,
-                        climb: bool,
-                        projected: &mut Array1<f64>,
-                        driving: &mut Option<Array1<f64>>|
-     -> Result<(), SaddleError> {
-        let rows = s![(i - 1) * dof..i * dof];
-        match &springs {
-            Springs::Metric(spring) => {
-                let (f, d) = image_force(
-                    config,
-                    spring,
-                    i,
-                    climb,
-                    endpoint_first,
-                    endpoint_last,
-                    x,
-                    energies,
-                    gradients,
-                    metric_of(i),
-                )?;
-                projected.slice_mut(rows).assign(&f);
-                if let Some(driving) = driving.as_mut() {
-                    driving.slice_mut(rows).assign(d.as_ref().unwrap_or(&f));
-                }
-            }
-            Springs::Band(spring) => image_force_into(
+    let assemble_all = || -> Vec<Result<(), SaddleError>> {
+        use rayon::prelude::*;
+        match driving.as_mut() {
+            Some(driving) => images
+                .par_iter_mut()
+                .zip(
+                    projected
+                        .as_slice_mut()
+                        .expect("flat force")
+                        .par_chunks_mut(dof),
+                )
+                .zip(
+                    driving
+                        .as_slice_mut()
+                        .expect("flat driving force")
+                        .par_chunks_mut(dof),
+                )
+                .enumerate()
+                .map(|(index, ((work, projected), driving))| {
+                    let i = index + 1;
+                    assemble_image_force(
+                        config,
+                        state,
+                        &springs,
+                        metric_of(i),
+                        i,
+                        ci_at == Some(i),
+                        endpoint_first,
+                        endpoint_last,
+                        x,
+                        energies,
+                        gradients,
+                        work,
+                        ArrayViewMut1::from(projected),
+                        Some(ArrayViewMut1::from(driving)),
+                    )
+                })
+                .collect(),
+            None => images
+                .par_iter_mut()
+                .zip(
+                    projected
+                        .as_slice_mut()
+                        .expect("flat force")
+                        .par_chunks_mut(dof),
+                )
+                .enumerate()
+                .map(|(index, (work, projected))| {
+                    let i = index + 1;
+                    assemble_image_force(
+                        config,
+                        state,
+                        &springs,
+                        metric_of(i),
+                        i,
+                        ci_at == Some(i),
+                        endpoint_first,
+                        endpoint_last,
+                        x,
+                        energies,
+                        gradients,
+                        work,
+                        ArrayViewMut1::from(projected),
+                        None,
+                    )
+                })
+                .collect(),
+        }
+    };
+    if let Some(pool) = &state.pool {
+        for result in pool.install(assemble_all) {
+            result?;
+        }
+    } else {
+        for (index, work) in images.iter_mut().enumerate() {
+            let i = index + 1;
+            let rows = s![index * dof..(index + 1) * dof];
+            assemble_image_force(
                 config,
-                spring,
+                state,
+                &springs,
+                metric_of(i),
                 i,
-                climb,
+                ci_at == Some(i),
                 endpoint_first,
                 endpoint_last,
                 x,
                 energies,
                 gradients,
-                &mut images[i - 1],
+                work,
                 projected.slice_mut(rows),
-            )?,
+                driving.as_mut().map(|force| force.slice_mut(rows)),
+            )?;
         }
-        Ok(())
-    };
-    for i in 1..n_images - 1 {
-        assemble(i, ci_at == Some(i), &mut projected, &mut driving)?;
     }
     let mut max_component = state.convergence_force(&projected);
 
@@ -2238,7 +2414,24 @@ fn assemble_band_with(
             .ci_index
             .store(climb_target.map_or(-1, |i| i as i64), Ordering::Relaxed);
         if let Some(ci_i) = climb_target {
-            assemble(ci_i, true, &mut projected, &mut driving)?;
+            let index = ci_i - 1;
+            let rows = s![index * dof..(index + 1) * dof];
+            assemble_image_force(
+                config,
+                state,
+                &springs,
+                metric_of(ci_i),
+                ci_i,
+                true,
+                endpoint_first,
+                endpoint_last,
+                x,
+                energies,
+                gradients,
+                &mut images[index],
+                projected.slice_mut(rows),
+                driving.as_mut().map(|force| force.slice_mut(rows)),
+            )?;
             max_component = state.convergence_force(&projected);
         }
     }
@@ -2251,7 +2444,8 @@ fn assemble_band_with(
     if let Some(last) = slot.as_mut()
         && last.x == x
     {
-        work.store_projected(last, &projected);
+        work.store_forces(last, &projected, driving.as_ref());
+        last.assembly_ci = state.ci().map_or(-1, |i| i as i64);
     }
     *state
         .last_max_force
@@ -2655,6 +2849,7 @@ impl BandSession {
                 .has_fixed()
                 .then(|| free_coordinates(&self.config.fixed_atoms)),
         });
+        self.state.invalidate_assembly();
         Ok(())
     }
 
@@ -2680,7 +2875,7 @@ impl BandSession {
     /// cutoff, as ASE's `Exp` does under `FixAtoms`; the lists index the
     /// free atoms in order, and a bond from a free atom to a fixed one
     /// is an anchor, which adds to the free atom's diagonal only.
-    fn band_neighbours(&self, r_cut_factor: f64) -> (Vec<Neighbours>, f64) {
+    fn band_neighbours(&self, r_cut_factor: f64) -> Result<(Vec<Neighbours>, f64), SaddleError> {
         let fixed = &self.state.fixed;
         let free_index: Vec<Option<usize>> = {
             let mut next = 0;
@@ -2697,58 +2892,104 @@ impl BandSession {
         };
         let n_images = self.positions.nrows();
         let n_atoms = self.positions.ncols() / 3;
-        let mut per_image: Vec<Vec<(usize, usize, f64)>> = Vec::new();
-        let mut r_nn = 0.0_f64;
-        for img in 1..n_images - 1 {
-            let row = self.positions.row(img);
-            let mut pairs = Vec::new();
-            let mut nearest = vec![f64::INFINITY; n_atoms];
-            for a in 0..n_atoms {
-                for b in a + 1..n_atoms {
-                    let mut d = Array1::from(vec![
-                        row[3 * b] - row[3 * a],
-                        row[3 * b + 1] - row[3 * a + 1],
-                        row[3 * b + 2] - row[3 * a + 2],
-                    ]);
-                    if let Some(cell) = &self.config.cell {
-                        cell.minimum_image(&mut d);
-                    }
-                    let r = d.dot(&d).sqrt();
-                    nearest[a] = nearest[a].min(r);
-                    nearest[b] = nearest[b].min(r);
-                    pairs.push((a, b, r));
-                }
+        let n_frames = n_images - 2;
+        let mut points = Vec::with_capacity(n_frames * n_atoms);
+        for row in self.positions.slice(s![1..n_images - 1, ..]).outer_iter() {
+            points.extend(
+                row.as_slice()
+                    .expect("a band row is contiguous")
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
+                    .copied(),
+            );
+        }
+        let mut lo = [f64::INFINITY; 3];
+        let mut hi = [f64::NEG_INFINITY; 3];
+        for point in &points {
+            for axis in 0..3 {
+                lo[axis] = lo[axis].min(point[axis]);
+                hi[axis] = hi[axis].max(point[axis]);
             }
-            r_nn = nearest
-                .iter()
-                .copied()
-                .filter(|r| r.is_finite())
-                .fold(r_nn, f64::max);
-            per_image.push(pairs);
+        }
+        let diagonal = (0..3)
+            .map(|axis| (hi[axis] - lo[axis]).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        let margin = (r_cut_factor.abs() + 2.0) * diagonal.max(1.0);
+        let mut vectors = self.config.cell.map_or([[0.0; 3]; 3], |cell| cell.0);
+        for axis in 0..3 {
+            if vectors[axis].iter().all(|value| *value == 0.0) {
+                vectors[axis][axis] = hi[axis] - lo[axis] + 2.0 * margin;
+            }
+        }
+        let origin = std::array::from_fn(|axis| lo[axis] - margin);
+        let cell = linkcell::Cell::from_vectors(vectors[0], vectors[1], vectors[2], origin)
+            .map_err(|err| {
+                SaddleError::Invalid(format!("exponential metric neighbour cell: {err}"))
+            })?;
+
+        let mut nearest_index = vec![-1; n_frames * n_atoms];
+        let mut nearest_d2 = vec![f64::NAN; n_frames * n_atoms];
+        linkcell::knearest_into_many(
+            &points,
+            n_atoms,
+            n_frames,
+            &cell,
+            1,
+            None,
+            None,
+            &mut nearest_index,
+            Some(&mut nearest_d2),
+        )
+        .map_err(|err| {
+            SaddleError::Invalid(format!("exponential metric nearest neighbours: {err}"))
+        })?;
+        let r_nn = nearest_d2
+            .iter()
+            .copied()
+            .filter(|distance| distance.is_finite())
+            .fold(0.0_f64, f64::max)
+            .sqrt();
+        if !(r_nn.is_finite() && r_nn > 0.0) {
+            return Ok(((0..n_frames).map(|_| Neighbours::default()).collect(), r_nn));
         }
         let r_cut = r_cut_factor * r_nn;
-        let lists = per_image
-            .into_iter()
-            .map(|pairs| {
-                let mut neigh = Neighbours::default();
-                for (i, j, r) in pairs {
-                    if r >= r_cut {
-                        continue;
-                    }
-                    match (free_index[i], free_index[j]) {
-                        (Some(i), Some(j)) => {
-                            neigh.i.push(i);
-                            neigh.j.push(j);
-                            neigh.r.push(r);
-                        }
-                        (Some(a), None) | (None, Some(a)) => neigh.anchor.push((a, r)),
-                        (None, None) => {}
-                    }
+        let mut lists = Vec::with_capacity(n_frames);
+        for frame in 0..n_frames {
+            let frame_points = &points[frame * n_atoms..(frame + 1) * n_atoms];
+            let mut pairs =
+                linkcell::pairs_within(frame_points, &cell, r_cut, None, Some(r_cut), true)
+                    .map_err(|err| {
+                        SaddleError::Invalid(format!("exponential metric cutoff neighbours: {err}"))
+                    })?;
+            pairs.retain(|pair| pair.i != pair.j);
+            pairs.sort_by(|a, b| {
+                (a.i, a.j)
+                    .cmp(&(b.i, b.j))
+                    .then(a.dist2.total_cmp(&b.dist2))
+            });
+            let mut last = None;
+            let mut neigh = Neighbours::default();
+            for pair in pairs {
+                if last == Some((pair.i, pair.j)) {
+                    continue;
                 }
-                neigh
-            })
-            .collect();
-        (lists, r_nn)
+                last = Some((pair.i, pair.j));
+                let r = pair.dist2.sqrt();
+                match (free_index[pair.i], free_index[pair.j]) {
+                    (Some(i), Some(j)) => {
+                        neigh.i.push(i);
+                        neigh.j.push(j);
+                        neigh.r.push(r);
+                    }
+                    (Some(a), None) | (None, Some(a)) => neigh.anchor.push((a, r)),
+                    (None, None) => {}
+                }
+            }
+            lists.push(neigh);
+        }
+        Ok((lists, r_nn))
     }
 
     /// Build the per-image metrics at the current positions, estimating
@@ -2759,7 +3000,7 @@ impl BandSession {
         };
         let precon = exp.precon;
         let held_mu = exp.mu;
-        let (lists, r_nn) = self.band_neighbours(precon.r_cut_factor);
+        let (lists, r_nn) = self.band_neighbours(precon.r_cut_factor)?;
         if !(r_nn.is_finite() && r_nn > 0.0) {
             return Err(SaddleError::Invalid(
                 "exponential metric: no finite nearest-neighbour distance on the band".into(),
@@ -2894,9 +3135,9 @@ impl BandSession {
     }
 
     /// Evaluate the band on `threads` worker threads, kept for the
-    /// session. One (the default) keeps the surface on the calling
-    /// thread; zero is an error. The force assembly stays on the
-    /// calling thread.
+    /// session. One (the default) keeps the surface and force assembly
+    /// on the calling thread; zero is an error. More than one also
+    /// splits tangent, spring, projection and metric solves by image.
     ///
     /// Each surface call is split into `min(threads, rows)` contiguous
     /// image blocks, one [`BandSurface::eval`] per block, and the
@@ -3792,5 +4033,133 @@ mod tests {
         // Climbing force (-2, 3, 0, 5, 1, 0) minus its mean (1.5, 2, 0).
         assert_force(&projected, &[-3.5, 1.0, 0.0, 3.5, -1.0, 0.0]);
         assert_eq!(state.ci(), Some(1));
+    }
+
+    #[test]
+    fn linkcell_band_neighbours_match_the_previous_pair_scan() {
+        let cells = [
+            Cell([[7.0, 0.0, 0.0], [0.0, 8.0, 0.0], [0.0, 0.0, 9.0]]),
+            Cell([[7.0, 0.0, 0.0], [1.1, 7.5, 0.0], [-0.6, 0.8, 8.0]]),
+        ];
+        let mut seed = 0xbb67_ae85_84ca_a73b_u64;
+        let mut random = || {
+            seed = seed
+                .wrapping_mul(2_862_933_555_777_941_757)
+                .wrapping_add(3_037_000_493);
+            (seed >> 11) as f64 / (1_u64 << 53) as f64
+        };
+        for cell in cells {
+            let mic = linkcell::Cell::from_vectors(cell.0[0], cell.0[1], cell.0[2], [0.0; 3])
+                .expect("periodic cell");
+            let n_images = 6;
+            let n_atoms = 24;
+            let positions = Array2::from_shape_fn((n_images, 3 * n_atoms), |(image, col)| {
+                let atom = col / 3;
+                let axis = col % 3;
+                let tag = (image * n_atoms + atom) as f64;
+                let frac = [
+                    (random() + 0.003 * tag).fract(),
+                    (random() + 0.005 * tag).fract(),
+                    (random() + 0.007 * tag).fract(),
+                ];
+                frac[0] * cell.0[0][axis] + frac[1] * cell.0[1][axis] + frac[2] * cell.0[2][axis]
+            });
+            let config = BandConfig::default()
+                .with_cell(cell)
+                .with_min_mode(None)
+                .with_climbing(None);
+            let session = BandSession::new(config, positions.clone()).expect("band");
+            let (got, got_r_nn) = session.band_neighbours(2.0).expect("linkcell neighbours");
+
+            let mut all_pairs = Vec::new();
+            let mut want_r_nn = 0.0_f64;
+            for image in 1..n_images - 1 {
+                let row = positions.row(image);
+                let mut nearest = vec![f64::INFINITY; n_atoms];
+                let mut pairs = Vec::new();
+                for i in 0..n_atoms {
+                    for j in i + 1..n_atoms {
+                        let p = [row[3 * i], row[3 * i + 1], row[3 * i + 2]];
+                        let q = [row[3 * j], row[3 * j + 1], row[3 * j + 2]];
+                        let distance = mic.dist2_euclidean(p, q).sqrt();
+                        nearest[i] = nearest[i].min(distance);
+                        nearest[j] = nearest[j].min(distance);
+                        pairs.push((i, j, distance));
+                    }
+                }
+                want_r_nn = nearest.into_iter().fold(want_r_nn, f64::max);
+                all_pairs.push(pairs);
+            }
+            assert_abs_diff_eq!(got_r_nn, want_r_nn, epsilon = 2e-12);
+            let cutoff = 2.0 * want_r_nn;
+            for (actual, pairs) in got.iter().zip(all_pairs) {
+                let expected: Vec<_> = pairs
+                    .into_iter()
+                    .filter(|(_, _, distance)| *distance < cutoff)
+                    .collect();
+                assert_eq!(actual.i.len(), expected.len());
+                assert!(actual.anchor.is_empty());
+                for (index, (i, j, distance)) in expected.into_iter().enumerate() {
+                    assert_eq!((actual.i[index], actual.j[index]), (i, j));
+                    assert_abs_diff_eq!(actual.r[index], distance, epsilon = 2e-12);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cached_metric_force_does_not_repeat_pcg_solves() {
+        let positions = Array2::from_shape_vec(
+            (3, 9),
+            vec![
+                0.0, 0.0, 0.0, 1.1, 0.0, 0.0, 0.0, 1.2, 0.1, 0.2, 0.1, 0.0, 1.2, 0.2, 0.0, 0.1,
+                1.3, 0.2, 0.4, 0.2, 0.0, 1.3, 0.4, 0.1, 0.2, 1.4, 0.3,
+            ],
+        )
+        .expect("positions");
+        let gradient = Array2::from_shape_fn((3, 9), |(row, col)| {
+            0.2 * (row + 1) as f64 - 0.03 * col as f64
+        });
+        let surface = Prescribed {
+            energy: vec![0.0, 1.0, 0.2],
+            gradient,
+        };
+        let config = BandConfig::default()
+            .with_climbing(None)
+            .with_min_mode(None)
+            .with_remove_translation(false)
+            .with_exp_precon(ExpBandPrecon::default().with_mu(1.0));
+        let mut session = BandSession::new(config, positions).expect("band");
+        session.refresh_exp(&surface).expect("metric");
+        let x = session.interior_flat();
+        let metrics = session.exp.as_ref().map(|exp| BandMetrics {
+            per_image: &exp.metrics,
+            free: exp.free.as_deref(),
+        });
+        let first = assemble_band_with(
+            &session.config,
+            &session.state,
+            &surface,
+            session.positions.row(0),
+            session.positions.row(2),
+            x.view(),
+            metrics,
+        )
+        .expect("first assembly");
+        let solves = session.state.pcg_solves.load(Ordering::Relaxed);
+        assert_eq!(solves, 1);
+        let second = assemble_band_with(
+            &session.config,
+            &session.state,
+            &surface,
+            session.positions.row(0),
+            session.positions.row(2),
+            x.view(),
+            metrics,
+        )
+        .expect("cached assembly");
+        assert_eq!(session.state.pcg_solves.load(Ordering::Relaxed), solves);
+        assert_eq!(first.1, second.1);
+        assert_eq!(first.3, second.3);
     }
 }
