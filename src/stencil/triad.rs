@@ -15,7 +15,7 @@ use crate::error::SaddleError;
 /// Inner product used by a stencil. The Euclidean product is
 /// `ndarray`'s dot, the same product the band and the dimer already use.
 pub trait Metric {
-    /// Inner.
+    /// Inner product of two vectors in the stencil coordinate space.
     fn inner(&self, left: ArrayView1<f64>, right: ArrayView1<f64>) -> f64;
 }
 
@@ -32,11 +32,11 @@ impl Metric for Euclidean {
 /// One geometry on the stencil. The view borrows the caller's storage.
 #[derive(Clone, Copy)]
 pub struct Point<'a> {
-    /// The x.
+    /// Cartesian or generalized coordinates.
     pub x: ArrayView1<'a, f64>,
-    /// The e.
+    /// Potential energy at `x`.
     pub e: f64,
-    /// The g.
+    /// Energy gradient at `x`, with the same length and order as `x`.
     pub g: ArrayView1<'a, f64>,
 }
 
@@ -46,7 +46,7 @@ pub struct Point<'a> {
 /// to pick that width; the session still stores the chosen δ.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Delta {
-    /// The Fixed.
+    /// A fixed positive half-separation in the coordinate length unit.
     Fixed(f64),
     /// A step chosen from the gradient noise.
     FromNoise {
@@ -58,9 +58,9 @@ pub enum Delta {
 /// Where the two side points come from.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Sides {
-    /// The None.
+    /// No side points.
     None,
-    /// The Neighbours.
+    /// Use the adjacent points already present in a chain.
     Neighbours,
     /// Side points from a rigid displacement.
     Rigid {
@@ -77,18 +77,18 @@ pub enum Sides {
 /// Centre and its two neighbours. The metric is a value, not a trait object.
 #[derive(Clone, Copy)]
 pub struct Triad<'a, M: Metric = Euclidean> {
-    /// The prev.
+    /// Point on the backward side, when available.
     pub prev: Option<Point<'a>>,
-    /// The centre.
+    /// Point where the stencil operation is evaluated.
     pub centre: Point<'a>,
-    /// The next.
+    /// Point on the forward side, when available.
     pub next: Option<Point<'a>>,
-    /// The metric.
+    /// Inner product used for projections and curvature.
     pub metric: M,
 }
 
 impl<'a, M: Metric> Triad<'a, M> {
-    /// New.
+    /// Build a centre-only triad; assign `prev` and `next` as needed.
     pub fn new(centre: Point<'a>, metric: M) -> Self {
         Self {
             prev: None,
@@ -172,9 +172,11 @@ pub fn curvature_along(action: ArrayView1<f64>, axis: ArrayView1<f64>) -> f64 {
 /// Tangent rule. The same two branches as [`crate::tangent::TangentKind`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TangentRule {
-    /// The Simple.
+    /// Forward-difference tangent of Mills, Jónsson, and Schenter,
+    /// *Surface Science* 324, 305 (1995).
     Simple,
-    /// The Improved.
+    /// Energy-weighted tangent of Henkelman and Jónsson,
+    /// *J. Chem. Phys.* 113, 9978 (2000), doi:10.1063/1.1323224.
     Improved,
 }
 
@@ -276,36 +278,36 @@ pub fn unit_tangent_into(
 
 /// Parallel and full spring, the two pieces a projection consumes.
 pub struct CouplingForces {
-    /// The parallel.
+    /// Spring force projected along the unit tangent.
     pub parallel: Array1<f64>,
-    /// The full.
+    /// Unprojected spring force.
     pub full: Array1<f64>,
 }
 
 /// Coupling along the tangent. `Rigid` contributes no spring force.
 pub enum Coupling<'a> {
-    /// The Uniform.
+    /// Uniform elastic-band spring.
     Uniform {
         /// Spring constant, energy per length squared.
         k: f64,
     },
-    /// The Weighted.
+    /// Different spring constants on the forward and backward segments.
     Weighted {
-        /// The k next.
+        /// Spring constant of the forward segment.
         k_next: f64,
-        /// The k prev.
+        /// Spring constant of the backward segment.
         k_prev: f64,
     },
-    /// The Onsager.
+    /// Onsager-Machlup spring with force-derived displacements.
     Onsager {
         /// Spring constant, energy per length squared.
         k: f64,
-        /// The l next.
+        /// Onsager-Machlup displacement at the next image.
         l_next: ArrayView1<'a, f64>,
-        /// The l here.
+        /// Onsager-Machlup displacement at the centre image.
         l_here: ArrayView1<'a, f64>,
     },
-    /// The Rigid.
+    /// No spring coupling.
     Rigid,
 }
 
