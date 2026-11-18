@@ -28,12 +28,12 @@ def test_dimer_with_positive_curvature_moves_along_the_mode() -> None:
     assert report.iteration >= 1
 
 
-def test_band_preset_names_the_zoom_seam() -> None:
+def test_band_preset_reports_unimplemented_support() -> None:
     images = np.zeros((3, 2), dtype=np.float64)
     try:
         Stencil.band(images, preset="ci-neb")
     except ValueError as err:
-        assert "feat/band-methods-zoom" in str(err)
+        assert str(err) == "band presets are not implemented"
     else:
         raise AssertionError("band build returned")
 

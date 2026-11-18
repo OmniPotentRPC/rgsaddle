@@ -84,7 +84,7 @@ class Stencil:
 
     @staticmethod
     def band(x: Annotated[NDArray[numpy.float64], dict(shape=(None, None), order='C', writable=False)], preset: str = 'ci-neb') -> None:
-        """Band presets stay on feat/band-methods-zoom and raise ValueError."""
+        """Band presets are not implemented and raise ValueError."""
 
     def step(self, surface: Callable[..., StencilReport]) -> StencilReport:
         """
