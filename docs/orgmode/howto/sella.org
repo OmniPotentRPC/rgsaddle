@@ -258,3 +258,61 @@ Those are the starts Sella 2.6.0 reaches in Cartesian coordinates.
 It checks that the ceiling never passes the starting radius and that the search still reaches the saddle.
 It also checks that a twelve-coordinate search and a search with ~eig: false~ step the same with the option on or off.
 A last case confirms that the default takes the ceiling.
+
+* Let the session build its own internals
+
+Use ~SellaSaddleSession::on_auto_internal~ or ~SellaMinSession::on_auto_internal~ when you have atomic numbers and a geometry but no list of bonds, angles and dihedrals.
+~InternalPes::auto~ is the same chart without a session.
+
+#+begin_src rust
+let topology = TopologyConfig::default();
+let mut session = SellaSaddleSession::on_auto_internal(
+    config, x, masses, &elements, None, &topology,
+)?;
+session.set_update(HessUpdate::TsBfgs);
+while !session.step(&surface)?.at_saddle {}
+println!("rebuilt {} times", session.topology_restarts());
+#+end_src
+
+~InternalTopology::from_geometry~ does the construction alone and returns the ~Constraints~, the real and dummy atom map, the dummy pins and a ~TopologyCheck~.
+It follows section 2.1 of Hermes, Sargsyan, Najm and Zador, J. Chem. Theory Comput. 18, 6974 (2022), doi:10.1021/acs.jctc.2c00395, and the Sella 2.6.0 source:
+
+- Two atoms are bonded under 1.25 times the sum of their Cordero radii (Dalton Trans. 2008, 2832, doi:10.1039/B801115J).
+  Fragments that stay apart are welded by growing that factor 5 % on pairs between fragments.
+- Two bonds that share an atom make an angle. Two angles that chain through a shared edge make a proper dihedral.
+- A bend within 15 degrees of 0 or 180 is left out. A vertex with three or more bonds takes the improper dihedral ~a-b-d-c~ with ~d~ the nearest other bonded atom.
+  A vertex with two bonds takes a dummy atom 1 length unit away along the cross product of its arms, pinned by one bond and two right angles, and the improper ~a-b-x-c~.
+- Singular values of the Wilson matrix under one millionth count as zero.
+
+A cell makes every one of these periodic: ~Some(&cell)~ finds bonds across the boundary, stores a lattice image on each primitive, and measures them on the positions you pass without wrapping.
+A bond network that wraps the cell leaves only translations free, and the check expects that.
+~CellInternalPes~ keeps the chart you give it; the cell is fixed in an automatic chart.
+
+~TopologyCheck~ compares the rank of the Wilson matrix with what the rigid quotient leaves, ~3N - 6~ (~3N - 5~ on a line, ~3N - 3~ on a wrapped network), and measures how far the internals are from invariant under rigid motion.
+~TopologyConfig::require_complete~, on by default, refuses a chart that falls short.
+A dummy atom adds its pins: at an exactly linear geometry the two right-angle pins are not both first-order handles, so CO2 has a pinned rank of 3 against 4 real degrees of freedom, and the check knows it.
+
+Two things are this crate's own.
+A centre with three neighbours and no torsion through it folds the bond and angle chart when it goes planar, as ammonia does.
+Its three bends come within ~planar_tol~ (15 degrees) of a full turn, and the build adds the improper dihedral then.
+Sella 2.6 adds an improper at every such centre, so NH3 and CH4 have one and two more dihedrals there than here; the other 13 molecules of ~tests/fixtures/sella_topology.txt~ match it in bonds, angles, dihedrals and dummies.
+The second is that the dummy atoms follow the real atoms along their pins.
+The step and the gradient live on the real atoms, and the Jacobian the chart uses is ~B_r + B_d D~ with ~D = -J_d^+ J_r~.
+
+The chart is rebuilt at the accepted geometry, before the next gradient is read, when:
+
+| Reason | Trigger |
+|---|---|
+| ~SingularJacobian~ | the Wilson matrix is short of rank, or a value cannot be evaluated |
+| ~NearLinearBend~ | a bend in the chart enters the window, or a replaced bend leaves it |
+| ~NearPlanar~ | a centre with no improper comes within ~planar_tol~ of planar |
+| ~BackTransform~ | a back-transformation does not converge, or the dummy atoms cannot be put back on their pins, even with the step halved five times |
+
+The Hessian crosses a rebuild as ~H_x = J_old^T H_q J_old~ on the real atoms, read back as ~(J_new^+)^T H_x J_new^+~, with the Sella guess curvature on directions only the new chart has.
+It is reseeded from the guess when the old Jacobian cannot be evaluated.
+The trust radius restarts at ~delta * n_int~ and the pair-update history is cleared.
+~InternalPes::stale_reason~ and ~rebuild_if_stale~ let a host drive the same rule by hand.
+A chart you build with ~InternalPes::new~ or ~VocnFound~ is never rebuilt, so those stay the override: ~is_auto()~ is false and ~rebuild_topology~ refuses.
+
+A TS search in internals needs ~HessUpdate::TsBfgs~; a plain BFGS update cannot learn the negative curvature.
+~tests/auto_internals.rs~ finds the same first-order saddle with an automatic and a hand-written chart on ethane, hydrogen peroxide, methanol, methanethiol and ammonia (energies within 1e-6, RMSD under 1e-3, one negative finite-difference mode), through the linear window of an OCO bend with a rebuild and a dummy, and across the boundary of a 10 length-unit cell.
