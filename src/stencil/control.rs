@@ -1,7 +1,6 @@
 //! Controllers for a point stencil.
 //!
-//! The zoom controller stays on `feat/band-methods-zoom`. This module
-//! owns the fixed loop and the ART push-then-climb switch.
+//! This module owns the fixed loop and the ART push-then-climb switch.
 //! Malek and Mousseau, Phys. Rev. E 62, 7723 (2000),
 //! doi:10.1103/PhysRevE.62.7723.
 
