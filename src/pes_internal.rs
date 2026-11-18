@@ -193,6 +193,28 @@ impl InternalPes {
         &self.chart
     }
 
+    /// Keep a periodic chart on the living cell. Image indices stay, so
+    /// this is a deformation of the same basis.
+    pub(crate) fn follow_lattice(&mut self, lattice: [[f64; 3]; 3]) {
+        if self.chart.is_periodic() {
+            self.chart.set_lattice(lattice);
+        }
+        if let Some(auto) = self.auto.as_mut() {
+            auto.follow_lattice(lattice);
+        }
+    }
+
+    /// Point a periodic chart at a new basis of the same lattice.
+    pub(crate) fn retarget_lattice(&mut self, lattice: [[f64; 3]; 3]) -> Result<(), SaddleError> {
+        if self.chart.is_periodic() || self.chart.lattice().is_some() {
+            self.chart.retarget_lattice(lattice)?;
+        }
+        if let Some(auto) = self.auto.as_mut() {
+            auto.retarget_lattice(lattice)?;
+        }
+        Ok(())
+    }
+
     /// Cartesian.
     pub fn cartesian(&self) -> &CartesianPes {
         &self.cart
@@ -663,6 +685,12 @@ impl CellCartesianPes {
 }
 
 /// Internals PES plus a periodic cell.
+///
+/// The primitives stay as given. A periodic chart's lattice follows the
+/// living cell: [`Self::set_cell`] and [`Self::kick_packed`] write the
+/// new vectors into the chart, and [`Self::maybe_niggli_reduce`] retargets
+/// the chart's images onto the reduced basis so Cartesian image offsets
+/// are unchanged.
 pub struct CellInternalPes {
     inner: InternalPes,
     state: CellState,
@@ -682,12 +710,14 @@ impl CellInternalPes {
         let n_atoms = inner.position().len() / 3;
         let state = CellState::new(cell, n_atoms);
         let n = inner.n_int() + state.n_cell_dof();
-        Ok(Self {
+        let mut pes = Self {
             inner,
             state,
             hess: PackedHess::identity(n),
             update: HessUpdate::Bfgs,
-        })
+        };
+        pes.inner.follow_lattice(pes.state.lattice());
+        Ok(pes)
     }
 
     /// Simulation cell. Row i is lattice vector a_i.
@@ -698,6 +728,7 @@ impl CellInternalPes {
     /// Set cell.
     pub fn set_cell(&mut self, cell: Cell) {
         self.state.set_cell(cell);
+        self.inner.follow_lattice(self.state.lattice());
     }
 
     /// Set update.
@@ -820,6 +851,7 @@ impl CellInternalPes {
         self.state.kick_params(&dcell)?;
         let dq = d.slice(s![..nint]).to_owned();
         self.inner.displace(dq.view())?;
+        self.inner.follow_lattice(self.state.lattice());
         let (e, g1) = surface.eval_in_cell(self.inner.position(), &self.cell9())?;
         if !g1.iter().all(|v| v.is_finite()) {
             return Err(SaddleError::NonFinite("pes gradient"));
@@ -836,13 +868,34 @@ impl CellInternalPes {
     }
 
     /// Sella `maybe_niggli_reduce`. Log chart transforms H; entries drops it.
+    ///
+    /// A periodic chart is checked against the reduced basis before the
+    /// cell moves, then retargeted once the reduction is applied. A
+    /// refusal leaves the cell and the images where they were.
     pub fn maybe_niggli_reduce(&mut self, angle_threshold: f64) -> Result<bool, SaddleError> {
+        let [a, b, c] = self.state.lattice();
+        let skew = [angle_deg(b, c), angle_deg(a, c), angle_deg(a, b)]
+            .into_iter()
+            .map(|x| (x - 90.0).abs())
+            .fold(0.0_f64, f64::max);
+        let staged = if skew > angle_threshold && self.inner.chart().is_periodic() {
+            let (a2, b2, c2) = niggli_reduce_vectors(a, b, c);
+            let next = [a2, b2, c2];
+            let mut trial = self.inner.chart().clone();
+            trial.retarget_lattice(next)?;
+            Some(next)
+        } else {
+            None
+        };
         let n_noncell = self.inner.n_int();
         let (applied, t) = self
             .state
             .maybe_niggli(angle_threshold, niggli_reduce_vectors)?;
         if !applied {
             return Ok(false);
+        }
+        if staged.is_some() {
+            self.inner.retarget_lattice(self.state.lattice())?;
         }
         if let Some(t) = t {
             let mut h = self.hess.hessian().to_owned();

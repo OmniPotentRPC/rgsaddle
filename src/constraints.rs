@@ -19,11 +19,14 @@ use rgmin::Manifold;
 use rgmin::vecops::{axpy, dot, nrm2};
 
 use crate::SaddleError;
+use crate::cell_log::{m3_inv, m3_mul};
 use crate::internal::{CartAxis, Displacement, Rotation, Translation};
 
 const RESTORE_ITERS: usize = 12;
 const RESTORE_TOL: f64 = 1e-12;
 const RANK_TOL: f64 = 1e-10;
+/// A basis-change entry this close to an integer is that integer.
+const BASIS_ROUND_TOL: f64 = 1.0 / 1_000_000.0;
 
 /// Cartesian shift of each atom of one primitive; only the first
 /// `atoms.len()` rows are read.
@@ -395,6 +398,34 @@ impl Constraints {
         self.periodic.as_ref().and_then(|p| p.lattice)
     }
 
+    /// Rewrite image indices for a new basis of the same lattice.
+    ///
+    /// `lattice` must be an integer unimodular combination of the stored
+    /// basis, as a Niggli reduction is. Cartesian image offsets are
+    /// unchanged. A chart with no periodic image only stores the basis.
+    pub(crate) fn retarget_lattice(&mut self, lattice: [[f64; 3]; 3]) -> Result<(), SaddleError> {
+        let Some(old) = self.lattice() else {
+            return Ok(());
+        };
+        if !self.is_periodic() {
+            self.set_lattice(lattice);
+            return Ok(());
+        }
+        let change = m3_mul(lattice, m3_inv(old)?);
+        let forward = round_unimodular(change)?;
+        let backward = unimodular_inverse(forward)?;
+        let Some(periodic) = self.periodic.as_mut() else {
+            return Ok(());
+        };
+        for images in periodic.images.iter_mut().flatten() {
+            for shift in images.iter_mut() {
+                *shift = row_times(*shift, backward);
+            }
+        }
+        periodic.lattice = Some(lattice);
+        Ok(())
+    }
+
     /// Lattice image of each atom of equality `index`. `None` when the
     /// equality sits in the home cell.
     pub fn images(&self, index: usize) -> Option<&[[i32; 3]]> {
@@ -572,6 +603,70 @@ fn wrap_pi(a: f64) -> f64 {
         w += two_pi;
     }
     w - std::f64::consts::PI
+}
+
+fn round_unimodular(m: [[f64; 3]; 3]) -> Result<[[i32; 3]; 3], SaddleError> {
+    let mut out = [[0i32; 3]; 3];
+    for i in 0..3 {
+        for j in 0..3 {
+            let nearest = m[i][j].round();
+            if !nearest.is_finite() || (m[i][j] - nearest).abs() > BASIS_ROUND_TOL {
+                return Err(SaddleError::Invalid(
+                    "lattice basis change is not an integer unimodular rewrite".into(),
+                ));
+            }
+            out[i][j] = i32::try_from(nearest as i64).map_err(|_| {
+                SaddleError::Invalid(
+                    "lattice basis change is not an integer unimodular rewrite".into(),
+                )
+            })?;
+        }
+    }
+    let det = det_unimodular(out);
+    if det != 1 && det != -1 {
+        return Err(SaddleError::Invalid(
+            "lattice basis change is not an integer unimodular rewrite".into(),
+        ));
+    }
+    Ok(out)
+}
+
+fn det_unimodular(m: [[i32; 3]; 3]) -> i64 {
+    let e = |i: usize, j: usize| i64::from(m[i][j]);
+    e(0, 0) * (e(1, 1) * e(2, 2) - e(1, 2) * e(2, 1))
+        - e(0, 1) * (e(1, 0) * e(2, 2) - e(1, 2) * e(2, 0))
+        + e(0, 2) * (e(1, 0) * e(2, 1) - e(1, 1) * e(2, 0))
+}
+
+fn unimodular_inverse(m: [[i32; 3]; 3]) -> Result<[[i32; 3]; 3], SaddleError> {
+    let det = det_unimodular(m);
+    let minor = |r0: usize, r1: usize, c0: usize, c1: usize| -> i64 {
+        i64::from(m[r0][c0]) * i64::from(m[r1][c1]) - i64::from(m[r0][c1]) * i64::from(m[r1][c0])
+    };
+    let cofactor = [
+        [minor(1, 2, 1, 2), -minor(1, 2, 0, 2), minor(1, 2, 0, 1)],
+        [-minor(0, 2, 1, 2), minor(0, 2, 0, 2), -minor(0, 2, 0, 1)],
+        [minor(0, 1, 1, 2), -minor(0, 1, 0, 2), minor(0, 1, 0, 1)],
+    ];
+    let mut inv = [[0i32; 3]; 3];
+    for i in 0..3 {
+        for j in 0..3 {
+            inv[i][j] = i32::try_from(det * cofactor[j][i]).map_err(|_| {
+                SaddleError::Invalid(
+                    "lattice basis change is not an integer unimodular rewrite".into(),
+                )
+            })?;
+        }
+    }
+    Ok(inv)
+}
+
+fn row_times(n: [i32; 3], m: [[i32; 3]; 3]) -> [i32; 3] {
+    [
+        n[0] * m[0][0] + n[1] * m[1][0] + n[2] * m[2][0],
+        n[0] * m[0][1] + n[1] * m[1][1] + n[2] * m[2][1],
+        n[0] * m[0][2] + n[1] * m[1][2] + n[2] * m[2][2],
+    ]
 }
 
 fn atom3(x: ArrayView1<f64>, i: usize) -> Result<[f64; 3], SaddleError> {

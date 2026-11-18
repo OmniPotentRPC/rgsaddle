@@ -19,9 +19,10 @@
 //!   be met ([`RebuildReason::BackTransform`]).
 //!
 //! The Hessian is carried across by way of the Cartesian curvature of
-//! the real atoms, `H_x = B^T H_q B`, and read back in the new chart,
-//! `H_q' = B'^+T H_x B'^+`; directions the new chart has and the old one
-//! did not see get the Sella guess curvature. When the old Wilson matrix
+//! the real atoms, `H_x = J_old^T H_q J_old`, and read back in the new
+//! chart, `H_q' = (J_new^+)^T H_x J_new^+`. The Sella guess curvature
+//! goes on `ker(J_new^T)`. Cartesian directions the new chart spans and
+//! the old one does not get zero curvature. When the old Wilson matrix
 //! cannot be evaluated the Hessian is reseeded from the guess.
 
 use ndarray::{Array1, Array2, ArrayView1, s};
@@ -130,6 +131,25 @@ impl AutoState {
 
     pub(super) fn sv_tol(&self) -> f64 {
         self.config.sv_tol
+    }
+
+    pub(super) fn follow_lattice(&mut self, lattice: [[f64; 3]; 3]) {
+        if self.pins.is_periodic() {
+            self.pins.set_lattice(lattice);
+        }
+        if self.lattice.is_some() {
+            self.lattice = Some(lattice);
+        }
+    }
+
+    pub(super) fn retarget_lattice(&mut self, lattice: [[f64; 3]; 3]) -> Result<(), SaddleError> {
+        if self.pins.is_periodic() || self.pins.lattice().is_some() {
+            self.pins.retarget_lattice(lattice)?;
+        }
+        if self.lattice.is_some() {
+            self.lattice = Some(lattice);
+        }
+        Ok(())
     }
 }
 
@@ -633,8 +653,9 @@ fn hessian_model(h: &Array2<f64>) -> Result<BfgsModel, SaddleError> {
 /// `j_old` and `j_new` are the chart Jacobians with respect to the real
 /// atoms alone (`3 n_real` columns, dummies slaved to them). The real
 /// Cartesian curvature `J_old^T H J_old` is kept and read back through
-/// the new chart, `H' = J_new^+T H_x J_new^+`. Curvature outside the
-/// range of `j_new` is the Sella guess.
+/// the new chart, `H' = J_new^+T H_x J_new^+`. The guess curvature goes
+/// on `ker(J_new^T)`. A Cartesian direction in the row space of `J_new`
+/// and not of `J_old` arrives with zero curvature.
 pub(crate) fn transport_hessian(
     h_old: &Array2<f64>,
     j_old: &Array2<f64>,

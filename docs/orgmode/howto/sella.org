@@ -286,7 +286,7 @@ It follows section 2.1 of Hermes, Sargsyan, Najm and Zador, J. Chem. Theory Comp
 
 A cell makes every one of these periodic: ~Some(&cell)~ finds bonds across the boundary, stores a lattice image on each primitive, and measures them on the positions you pass without wrapping.
 A bond network that wraps the cell leaves only translations free, and the check expects that.
-~CellInternalPes~ keeps the chart you give it; the cell is fixed in an automatic chart.
+~CellInternalPes~ keeps the primitives you give it. A periodic chart's lattice follows the living cell, and a Niggli reduction retargets that chart's images onto the reduced basis.
 
 ~TopologyCheck~ compares the rank of the Wilson matrix with what the rigid quotient leaves, ~3N - 6~ (~3N - 5~ on a line, ~3N - 3~ on a wrapped network), and measures how far the internals are from invariant under rigid motion.
 ~TopologyConfig::require_complete~, on by default, refuses a chart that falls short.
@@ -308,7 +308,7 @@ The chart is rebuilt at the accepted geometry, before the next gradient is read,
 | ~NearPlanar~ | a centre with no improper comes within ~planar_tol~ of planar |
 | ~BackTransform~ | a back-transformation does not converge, or the dummy atoms cannot be put back on their pins, even with the step halved five times |
 
-The Hessian crosses a rebuild as ~H_x = J_old^T H_q J_old~ on the real atoms, read back as ~(J_new^+)^T H_x J_new^+~, with the Sella guess curvature on directions only the new chart has.
+The Hessian crosses a rebuild as ~H_x = J_old^T H_q J_old~ on the real atoms, read back as ~(J_new^+)^T H_x J_new^+~. The Sella guess curvature goes on ~ker(J_new^T)~. Cartesian directions the new chart spans and the old one does not get zero curvature.
 It is reseeded from the guess when the old Jacobian cannot be evaluated.
 The trust radius restarts at ~delta * n_int~ and the pair-update history is cleared.
 ~InternalPes::stale_reason~ and ~rebuild_if_stale~ let a host drive the same rule by hand.
