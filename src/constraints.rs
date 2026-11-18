@@ -155,17 +155,26 @@ impl InternalCounts {
     }
 }
 
+/// Lattice rows and the images of the equalities that carry one.
+#[derive(Clone, Debug, Default)]
+struct Periodic {
+    /// Row `i` is lattice vector `a_i`. Needed once an equality carries
+    /// an image.
+    lattice: Option<[[f64; 3]; 3]>,
+    /// Per equality, the lattice image of each atom of a bond, angle or
+    /// dihedral. `None` is the home cell for every atom; shorter than the
+    /// equality list when the later ones are all in the home cell.
+    images: Vec<Option<Vec<[i32; 3]>>>,
+}
+
 /// Equality internals on a 3N Cartesian frame.
 #[derive(Clone, Debug)]
 pub struct Constraints {
     n_atoms: usize,
     eqs: Vec<Equality>,
-    /// Per equality, the lattice image of each atom of a bond, angle or
-    /// dihedral. `None` is the home cell for every atom.
-    images: Vec<Option<Vec<[i32; 3]>>>,
-    /// Row `i` is lattice vector `a_i`. Needed once an equality carries
-    /// an image.
-    lattice: Option<[[f64; 3]; 3]>,
+    /// Lattice and images; absent for a set that never leaves the home
+    /// cell, so the common case stays small.
+    periodic: Option<Box<Periodic>>,
     /// Sella `ignore_rotation`: drop rotation residuals from `residual`.
     ignore_rotation: bool,
 }
@@ -181,8 +190,7 @@ impl Constraints {
         Ok(Self {
             n_atoms,
             eqs: Vec::new(),
-            images: Vec::new(),
-            lattice: None,
+            periodic: None,
             ignore_rotation: true,
         })
     }
@@ -379,23 +387,28 @@ impl Constraints {
     /// Lattice vectors, one per row, that turn an image offset into a
     /// Cartesian shift.
     pub fn set_lattice(&mut self, lattice: [[f64; 3]; 3]) {
-        self.lattice = Some(lattice);
+        self.periodic.get_or_insert_with(Box::default).lattice = Some(lattice);
     }
 
     /// The lattice set by [`Self::set_lattice`], if any.
     pub fn lattice(&self) -> Option<[[f64; 3]; 3]> {
-        self.lattice
+        self.periodic.as_ref().and_then(|p| p.lattice)
     }
 
     /// Lattice image of each atom of equality `index`. `None` when the
     /// equality sits in the home cell.
     pub fn images(&self, index: usize) -> Option<&[[i32; 3]]> {
-        self.images.get(index).and_then(|v| v.as_deref())
+        self.periodic
+            .as_ref()
+            .and_then(|p| p.images.get(index))
+            .and_then(|v| v.as_deref())
     }
 
     /// Whether any equality carries a lattice image.
     pub fn is_periodic(&self) -> bool {
-        self.images.iter().any(Option::is_some)
+        self.periodic
+            .as_ref()
+            .is_some_and(|p| p.images.iter().any(Option::is_some))
     }
 
     /// Current internals values, length `equalities`.
@@ -463,8 +476,13 @@ impl Constraints {
     }
 
     fn push_eq(&mut self, eq: Equality, images: Option<Vec<[i32; 3]>>) {
+        let index = self.eqs.len();
         self.eqs.push(eq);
-        self.images.push(images);
+        if images.is_some() {
+            let periodic = self.periodic.get_or_insert_with(Box::default);
+            periodic.images.resize(index, None);
+            periodic.images.push(images);
+        }
     }
 
     fn offsets_for(&self, images: &[[i32; 3]]) -> Result<Offsets, SaddleError> {
@@ -472,7 +490,7 @@ impl Constraints {
         if images.iter().all(|im| *im == [0; 3]) {
             return Ok(off);
         }
-        let Some(lattice) = self.lattice else {
+        let Some(lattice) = self.lattice() else {
             return Err(SaddleError::Shape(
                 "a periodic image needs a lattice on the constraint set".into(),
             ));
@@ -488,7 +506,7 @@ impl Constraints {
     }
 
     fn offsets_at(&self, i: usize) -> Result<Offsets, SaddleError> {
-        match &self.images[i] {
+        match self.images(i) {
             None => Ok([[0.0; 3]; 4]),
             Some(v) => self.offsets_for(v),
         }
