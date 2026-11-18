@@ -21,7 +21,7 @@ use crate::minmode::{
     convex_displacement, translated_gradient,
 };
 /// Error text [`BandBuilder::build`] returns until `feat/band-methods-zoom` lands.
-pub const BAND_PRESET_SEAM: &str = "band presets stay on feat/band-methods-zoom";
+pub const BAND_PRESET_SEAM: &str = "band presets are not implemented";
 
 /// Closed preset list. A band value is accepted by the builder and
 /// rejected by [`BandBuilder::build`] and by [`PointBuilder::build`].
