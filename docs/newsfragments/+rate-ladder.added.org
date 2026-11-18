@@ -1,0 +1,5 @@
+~rgsaddle::ladder~ climbs a harmonic rate by the analytic free-energy factor, a sampled OH-TST rate, and a transmission coefficient.
+~decide~ adopts only after the relative error is at the target or the sample is at the cap, and it does not form ~z~ while the sample is still growing.
+The analytic step tests ~log φ~ and the transmission step tests ~κ − 1~. The sampled rate is the one comparison of two independent rates, and it replaces an unresolved plane factor.
+~paper_repro_passes~ keeps a copper catalog off those rungs until the published OH-TST band holds.
+An adopted product that overflows or underflows is rejected.

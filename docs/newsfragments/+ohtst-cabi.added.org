@@ -1,0 +1,3 @@
+The OH-TST plane sampler, plane optimizer, MBAR solver, reversible work, transmission coefficient and rate are callable through the C ABI at minor 51.
+~rgsaddle_ohtst_sample~, ~rgsaddle_ohtst_optimize~, ~rgsaddle_ohtst_mbar~, ~rgsaddle_ohtst_work~, ~rgsaddle_ohtst_transmission~ and ~rgsaddle_ohtst_rate~ take a ~rgsaddle_point_fn~ and are exported with the crate feature ~ohtst~.
+Python exposes them as ~rgsaddle.ohtst_sample~, ~rgsaddle.ohtst_optimize~, ~rgsaddle.ohtst_mbar~, ~rgsaddle.ohtst_work~, ~rgsaddle.ohtst_transmission~ and ~rgsaddle.ohtst_rate~.

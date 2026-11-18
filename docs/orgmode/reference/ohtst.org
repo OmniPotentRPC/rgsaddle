@@ -80,5 +80,23 @@ Full API documentation for every item below is on [[https://docs.rs/rgsaddle][do
 | =anharmonic_correction= | First-order correction to harmonic TST, =ln(k / k_HTST) = c_1 * kT + O(kT^2)=, and the first-order offset of the optimal plane, from Hessian actions and directional derivatives at Gaussian probes; no full Hessian is formed. =AnharmonicConfig= defaults: =probes = 2000=, =step = 1e-2=, =hvp_step = 1e-4=, =krylov = 64=, =krylov_tolerance = 1e-8=, =seed = 1=. =AnharmonicCorrection= holds the first-order anharmonic coefficients =reactant= / =reactant_error= (=A_R= at the minimum) and =saddle= / =saddle_error= (=A^\ddagger= on the saddle plane), =slope= / =slope_error= (=S=), =curvature= (\(\lvert \lambda_u \rvert\)), =coefficient= / =coefficient_error= (=c_1=) and =evaluations=, with methods =log_ratio=, =fixed_log_ratio= and =offset= |
 | =flux_mass= | =flux_mass(normal, masses)= is =1 / sum(n_i^2 / m_i)= for normalized =n=, the Cartesian flux mass along a normal; the 2001 paper's Eq. 24, =mu = sum(m_i n_i^2)=, agrees with it only for equal masses |
 
+* The rate ladder
+=rgsaddle::ladder= decides whether a sampled correction replaces the harmonic rate. It names no catalog type: the caller supplies each estimate and the module applies one stop and adopt rule.
+
+| Item | Role |
+|---------------------------------+--------------------------------------------------------------|
+| =LadderConfig= | Relative error target =relative_error= (=with_relative_error=), the resolved threshold =z_resolved= (=with_z_resolved=), the margin =growth= (=with_growth=) on the next sample size, the first sample =pilot= (=with_pilot=), the largest sample =cap=, and =temperature_tolerance= (=with_temperature_tolerance=) |
+| =Comparison= | =Analytic= for =log φ=, =Transmission= for =κ=, and =Independent= for a sampled rate against the rate in hand |
+| =decide= | Runs one =Comparison= and returns a =Decision= |
+| =Decision= | The climb, which is stop, grow to a larger sample with the same seed, adopt or open, and =z= when the rule computed it |
+| =Ladder= | Holds the adopted rate and the rung the next comparison has to finish, and =record= writes a =LadderRecord= |
+| =LadderRecord= | Adopted rate and error, temperature, =κ=, the free-energy factor, the rung (0 harmonic, 1 plane free energy, 2 transmission) and whether a rung reached the cap open |
+| =temperatures_match= | Compares two temperatures bit for bit, or within =temperature_tolerance= |
+| =prefix_values= | The uniform stream for a seed, where a longer draw repeats the prefix of a shorter one |
+
+A comparison forms =z= only when the relative error is at the target or the sample is at the cap, and it does not form =z= while the sample is still growing. An adopted product that overflows or underflows is rejected.
+
+=paper_repro_passes= is true when a rate lies in the published band =4.3e-7= to =4.7e-7=, and =sampled_rungs_allowed= returns an error when it does not. =OHTST_PAPER_RATE=, =OHTST_PAPER_HALF_WIDTH=, =OHTST_PAPER_LOW= and =OHTST_PAPER_HIGH= are the band of Jóhannesson and Jónsson. The check applies to the reproduction in the surface's own time unit. =physical_rate_per_s= turns a coordinate-time rate into a rate per second with =angular_scale_rad_s= and is not applied to that reproduction or to a rate already in Hz.
+
 * What the tests check
 =tests/ohtst_estimators.rs=, =tests/ohtst_transmission.rs=, =tests/ohtst_bligaard_jonsson.rs=, =tests/ohtst_skewed_well.rs=, =tests/ohtst_coupled_modes.rs= and =tests/ohtst_leps.rs= check every piece above against closed forms, line or product quadrature, or exact draws; the full list with the numbers each test checks is in =reference.org='s main table and ~howto/oh-tst~'s own. =examples/ohtst_tutorial.rs= runs the same kind of pipeline on a simpler, reflection-symmetric surface, with numbers printed rather than asserted; =tutorials/oh-tst= walks through it.

@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 48u
+#define RGSADDLE_ABI_MINOR 51u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface

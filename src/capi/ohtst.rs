@@ -28,7 +28,7 @@ use super::{
 
 /// Minor at which these entry points appeared. A config stamped earlier
 /// is refused.
-const OHTST_MINOR: u32 = 48;
+const OHTST_MINOR: u32 = 51;
 
 /// Thermodynamic integration.
 const ESTIMATE_INTEGRATION: i32 = 0;

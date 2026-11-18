@@ -267,6 +267,16 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =rgsaddle_indexk_config_t=. Purpose: Index-k minimum-mode configuration, ABI minor 37.
 - =rgsaddle_saddle_check_t=. Purpose: Saddle-index certification, ABI minor 40.
 - =rgsaddle_saddle_index_t=. Purpose: A certificate, ABI minor 40.
+- =rgsaddle_ohtst_sample_config_t=. Purpose: Langevin sample of one plane.
+- =rgsaddle_ohtst_sample_report_t=. Purpose: Averages written by rgsaddle_ohtst_sample.
+- =rgsaddle_ohtst_optimize_config_t=. Purpose: Trust-region climb of the plane free energy.
+- =rgsaddle_ohtst_optimize_report_t=. Purpose: The last accepted plane of rgsaddle_ohtst_optimize.
+- =rgsaddle_ohtst_work_config_t=. Purpose: Reversible work.
+- =rgsaddle_ohtst_work_report_t=. Purpose: A(last) minus A(first).
+- =rgsaddle_ohtst_transmission_config_t=. Purpose: Shooting from one plane.
+- =rgsaddle_ohtst_transmission_report_t=. Purpose: Transmission coefficient counted at the first crossing.
+- =rgsaddle_ohtst_rate_in_t=. Purpose: Parts of the OH-TST rate.
+- =rgsaddle_ohtst_rate_out_t=. Purpose: Rate in the time unit of the mass-weighted surface.
 - =rgsaddle_growing_string_phase_t=. Purpose: Phase of a growing string session, ABI minor 44.
 - =rgsaddle_growing_string_config_t=. Purpose: Configuration of rgsaddle_growing_string_create, ABI minor 44.
 - =rgsaddle_free_end_side_t=. Purpose: Which terminal image moves on the target-energy level set, ABI minor 45.
@@ -282,6 +292,7 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =rgsaddle_solid_surface_fn=. Purpose: Callback typedef in include/rgsaddle.h.
 - =rgsaddle_hessian_fn=. Purpose: Callback typedef in include/rgsaddle.h.
 - =rgsaddle_stencil_eval_fn=. Purpose: Callback typedef in include/rgsaddle.h.
+- =rgsaddle_point_fn=. Purpose: Point surface, ABI minor 51.
 
 * Macros and enum constants
 

@@ -31,6 +31,7 @@
 //! ```
 
 use crate::SaddleError;
+use crate::stats::Rng;
 
 /// Published OH-TST rate at the center of the Jóhannesson and Jónsson band.
 pub const OHTST_PAPER_RATE: f64 = 4.5e-7;
@@ -254,7 +255,7 @@ impl Ladder {
                 "the harmonic standard error must be finite and non-negative".into(),
             ));
         }
-        let ladder = Self {
+        Ok(Self {
             config,
             harmonic,
             rate: harmonic,
@@ -264,9 +265,7 @@ impl Ladder {
             rung: 0,
             open: false,
             waiting: None,
-        };
-        let _ = ladder.record(1.0);
-        Err(not_implemented())
+        })
     }
 
     /// Apply one comparison.
@@ -278,37 +277,230 @@ impl Ladder {
     /// comparison has to name the rate in hand, and a later rung is not
     /// applied backwards.
     pub fn apply(&mut self, comparison: Comparison) -> Result<Decision, SaddleError> {
-        let _ = (comparison.stage(), comparison.n(), self.rung, self.open);
-        Err(not_implemented())
+        self.prepare(&comparison)?;
+        let decision = decide(&self.config, comparison)?;
+        let stage = comparison.stage();
+        if self.blocks(stage) {
+            return Ok(decision);
+        }
+        match decision.climb {
+            Climb::Grow { .. } => self.waiting = Some(stage),
+            Climb::Open => {
+                self.open = true;
+                self.waiting = None;
+            }
+            Climb::Stop => {
+                self.waiting = None;
+                if stage == Stage::Plane {
+                    self.open = false;
+                }
+            }
+            Climb::Adopt => {
+                self.adopt(comparison)?;
+                self.waiting = None;
+                if stage == Stage::Plane {
+                    self.open = false;
+                }
+            }
+        }
+        Ok(decision)
     }
 
     /// The adopted rate and its factors, at `temperature_k`.
     pub fn record(&self, temperature_k: f64) -> Result<LadderRecord, SaddleError> {
-        let _ = (
-            self.config.pilot,
-            self.harmonic.value,
-            self.rate.value,
-            self.phi,
-            self.kappa,
-            self.kappa_error,
-            self.rung,
-            self.open,
-            self.waiting,
+        if !(temperature_k.is_finite() && temperature_k > 0.0) {
+            return Err(SaddleError::Invalid(
+                "the record temperature must be finite and positive".into(),
+            ));
+        }
+        Ok(LadderRecord {
+            rate: self.rate.value,
+            rate_error: self.rate.error,
             temperature_k,
-        );
-        Err(not_implemented())
+            kappa: self.kappa,
+            kappa_error: self.kappa_error,
+            anharmonic: self.phi,
+            rung: self.rung,
+            open: self.open,
+        })
+    }
+
+    fn prepare(&self, comparison: &Comparison) -> Result<(), SaddleError> {
+        match *comparison {
+            Comparison::Independent { current, .. } => {
+                if !self.holds(current) {
+                    return Err(SaddleError::Invalid(
+                        "the sampled comparison is not against the rate in hand".into(),
+                    ));
+                }
+                if self.rung >= 2 {
+                    return Err(SaddleError::Invalid(
+                        "a sampled rate does not replace a rate that already includes transmission"
+                            .into(),
+                    ));
+                }
+            }
+            Comparison::Analytic { .. } => {
+                if self.rung >= 1 {
+                    return Err(SaddleError::Invalid(
+                        "the analytic factor does not multiply a rate that already has a plane factor"
+                            .into(),
+                    ));
+                }
+            }
+            Comparison::Transmission { .. } => {
+                if self.rung >= 2 {
+                    return Err(SaddleError::Invalid(
+                        "transmission does not multiply a rate that already includes it".into(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn blocks(&self, stage: Stage) -> bool {
+        let waiting_blocks = match self.waiting {
+            Some(Stage::Plane) => stage == Stage::Transmission,
+            Some(Stage::Transmission) => stage == Stage::Plane,
+            None => false,
+        };
+        waiting_blocks || (self.open && stage == Stage::Transmission)
+    }
+
+    fn holds(&self, estimate: Estimate) -> bool {
+        estimate.value.to_bits() == self.rate.value.to_bits()
+            && estimate.error.to_bits() == self.rate.error.to_bits()
+            && estimate.n == self.rate.n
+    }
+
+    fn adopt(&mut self, comparison: Comparison) -> Result<(), SaddleError> {
+        match comparison {
+            Comparison::Analytic { log_phi, error, n } => {
+                let factor = log_phi.exp();
+                if !factor.is_finite() {
+                    return Err(SaddleError::NonFinite("free-energy factor"));
+                }
+                if factor <= 0.0 {
+                    return Err(SaddleError::Invalid(
+                        "the free-energy factor is not a positive rate".into(),
+                    ));
+                }
+                let value = self.rate.value * factor;
+                let rate_error = finite_product(factor * self.rate.error, value * error)?;
+                self.store_rate(value, rate_error, n, factor)?;
+                self.rung = 1;
+            }
+            Comparison::Transmission { kappa, error, n } => {
+                let value = self.rate.value * kappa;
+                let rate_error = finite_product(kappa * self.rate.error, self.rate.value * error)?;
+                self.store_rate(value, rate_error, n, self.phi)?;
+                self.kappa = kappa;
+                self.kappa_error = error;
+                self.rung = 2;
+            }
+            Comparison::Independent { next, .. } => {
+                let phi = next.value / self.harmonic.value;
+                self.store_rate(next.value, next.error, next.n, phi)?;
+                self.rung = 1;
+            }
+        }
+        Ok(())
+    }
+
+    fn store_rate(
+        &mut self,
+        value: f64,
+        rate_error: f64,
+        n: usize,
+        phi: f64,
+    ) -> Result<(), SaddleError> {
+        if !value.is_finite() {
+            return Err(SaddleError::NonFinite("adopted rate"));
+        }
+        if value == 0.0 {
+            return Err(SaddleError::Invalid("the adopted rate underflowed".into()));
+        }
+        if value < 0.0 {
+            return Err(SaddleError::Invalid(
+                "the adopted rate must be positive".into(),
+            ));
+        }
+        if !rate_error.is_finite() {
+            return Err(SaddleError::NonFinite("adopted rate error"));
+        }
+        if rate_error < 0.0 {
+            return Err(SaddleError::Invalid(
+                "the adopted standard error must be non-negative".into(),
+            ));
+        }
+        if !phi.is_finite() {
+            return Err(SaddleError::NonFinite("free-energy factor"));
+        }
+        if phi == 0.0 {
+            return Err(SaddleError::Invalid(
+                "the free-energy factor underflowed".into(),
+            ));
+        }
+        if phi < 0.0 {
+            return Err(SaddleError::Invalid(
+                "the free-energy factor must be positive".into(),
+            ));
+        }
+        self.rate = Estimate {
+            value,
+            error: rate_error,
+            n,
+        };
+        self.phi = phi;
+        Ok(())
     }
 }
 
-fn not_implemented() -> SaddleError {
-    SaddleError::Invalid("not implemented".into())
+fn finite_product(left: f64, right: f64) -> Result<f64, SaddleError> {
+    if !left.is_finite() || !right.is_finite() {
+        return Err(SaddleError::NonFinite("adopted rate error"));
+    }
+    let error = left.hypot(right);
+    if error.is_finite() {
+        Ok(error)
+    } else {
+        Err(SaddleError::NonFinite("adopted rate error"))
+    }
 }
 
 /// Stop, grow, adopt, or leave the rung open.
 pub fn decide(config: &LadderConfig, comparison: Comparison) -> Result<Decision, SaddleError> {
     config.check()?;
-    let _ = comparison.n();
-    Err(not_implemented())
+    let relative = relative_error(&comparison)?;
+    let n = comparison.n();
+    if n == 0 {
+        return Err(SaddleError::Invalid(
+            "a rung needs at least one sample".into(),
+        ));
+    }
+    if relative > config.relative_error && n < config.cap {
+        return Ok(Decision {
+            climb: Climb::Grow {
+                n: grown(config, n, relative),
+            },
+            z: None,
+        });
+    }
+    let z = form_z(&comparison)?;
+    let resolved = match z {
+        Some(value) if value.abs() > config.z_resolved => Climb::Adopt,
+        Some(_) => Climb::Stop,
+        None => zero_climb(config, &comparison)?,
+    };
+    let climb = if relative > config.relative_error && resolved == Climb::Adopt {
+        Climb::Open
+    } else if relative > config.relative_error {
+        Climb::Stop
+    } else {
+        resolved
+    };
+    Ok(Decision { climb, z })
 }
 
 /// True when `rate` lies on the inclusive published ends `4.3e-7` and `4.7e-7`.
@@ -318,20 +510,19 @@ pub fn decide(config: &LadderConfig, comparison: Comparison) -> Result<Decision,
 /// is in the surface's own time unit. [`physical_rate_per_s`] is not applied
 /// to it.
 pub fn paper_repro_passes(rate: f64) -> bool {
-    let _ = (
-        rate,
-        OHTST_PAPER_RATE,
-        OHTST_PAPER_HALF_WIDTH,
-        OHTST_PAPER_LOW,
-        OHTST_PAPER_HIGH,
-    );
-    false
+    (OHTST_PAPER_LOW..=OHTST_PAPER_HIGH).contains(&rate)
 }
 
 /// Error when the OH-TST reproduction is outside the published band.
 pub fn sampled_rungs_allowed(repro_rate: f64) -> Result<(), SaddleError> {
-    let _ = repro_rate;
-    Err(not_implemented())
+    if paper_repro_passes(repro_rate) {
+        Ok(())
+    } else {
+        Err(SaddleError::Invalid(
+            "sampled rungs stay closed until the OH-TST reproduction is inside the published band"
+                .into(),
+        ))
+    }
 }
 
 /// Convert one coordinate-time rate to 1/s.
@@ -344,18 +535,170 @@ pub fn sampled_rungs_allowed(repro_rate: f64) -> Result<(), SaddleError> {
 /// that factor once for a first-order saddle. Do not call this on a rate
 /// that is already in Hz, and do not call it on the LEPS reproduction.
 pub fn physical_rate_per_s(coordinate_rate: f64) -> Result<f64, SaddleError> {
-    let _ = coordinate_rate;
-    Err(not_implemented())
+    if !(coordinate_rate.is_finite() && coordinate_rate > 0.0) {
+        return Err(SaddleError::Invalid(
+            "the coordinate-time rate must be finite and positive".into(),
+        ));
+    }
+    let rate = coordinate_rate * crate::angular_scale_rad_s();
+    if !rate.is_finite() {
+        return Err(SaddleError::NonFinite("physical rate"));
+    }
+    Ok(rate)
 }
 
 /// `None` compares the bits. `Some` matches an absolute gap of at most the tolerance.
 pub fn temperatures_match(config: &LadderConfig, stored: f64, asked: f64) -> bool {
-    let _ = (config.temperature_tolerance, stored, asked);
-    false
+    if !stored.is_finite() || !asked.is_finite() {
+        return false;
+    }
+    if stored.to_bits() == asked.to_bits() {
+        return true;
+    }
+    match config.temperature_tolerance {
+        Some(tol) if tol.is_finite() && tol >= 0.0 => (stored - asked).abs() <= tol,
+        _ => false,
+    }
 }
 
 /// `n` draws of the uniform stream. A longer `n` with the same seed repeats the prefix.
 pub fn prefix_values(seed: u64, n: usize) -> Vec<f64> {
-    let _ = (seed, n);
-    Vec::new()
+    let mut rng = Rng::new(seed);
+    (0..n).map(|_| rng.uniform()).collect()
+}
+
+fn relative_error(comparison: &Comparison) -> Result<f64, SaddleError> {
+    match *comparison {
+        Comparison::Analytic { log_phi, error, .. } => {
+            check_sigma(error)?;
+            if !log_phi.is_finite() {
+                return Err(SaddleError::Invalid("log phi must be finite".into()));
+            }
+            Ok(error)
+        }
+        Comparison::Transmission { kappa, error, .. } => {
+            check_sigma(error)?;
+            if !(kappa.is_finite() && kappa > 0.0 && kappa <= 1.0) {
+                return Err(SaddleError::Invalid("kappa must lie in (0, 1]".into()));
+            }
+            Ok(error / kappa)
+        }
+        Comparison::Independent { current, next } => {
+            check_sigma(current.error)?;
+            if !(current.value.is_finite() && current.value > 0.0) {
+                return Err(SaddleError::Invalid(
+                    "the rate in hand must be finite and positive".into(),
+                ));
+            }
+            check_rate(next)?;
+            Ok(next.error / next.value)
+        }
+    }
+}
+
+fn form_z(comparison: &Comparison) -> Result<Option<f64>, SaddleError> {
+    let z = match *comparison {
+        Comparison::Analytic { log_phi, error, .. } => {
+            if error == 0.0 {
+                None
+            } else {
+                Some(log_phi / error)
+            }
+        }
+        Comparison::Transmission { kappa, error, .. } => {
+            if error == 0.0 {
+                None
+            } else {
+                Some((kappa - 1.0) / error)
+            }
+        }
+        Comparison::Independent { current, next } => {
+            if current.error == 0.0 || next.error == 0.0 {
+                None
+            } else {
+                Some((next.value - current.value) / current.error.hypot(next.error))
+            }
+        }
+    };
+    if z.is_some_and(|value| !value.is_finite()) {
+        return Err(SaddleError::NonFinite("z"));
+    }
+    Ok(z)
+}
+
+fn zero_climb(config: &LadderConfig, comparison: &Comparison) -> Result<Climb, SaddleError> {
+    let adopt = match *comparison {
+        Comparison::Analytic { log_phi, error, .. } => {
+            if error != 0.0 {
+                return Err(SaddleError::Invalid(
+                    "a positive analytic error has a z".into(),
+                ));
+            }
+            log_phi != 0.0
+        }
+        Comparison::Transmission { kappa, error, .. } => {
+            if error != 0.0 {
+                return Err(SaddleError::Invalid(
+                    "a positive transmission error has a z".into(),
+                ));
+            }
+            kappa != 1.0
+        }
+        Comparison::Independent { current, next } => {
+            if current.error == 0.0 && next.error == 0.0 {
+                current.value != next.value
+            } else if current.error == 0.0 {
+                (next.value - current.value).abs() > config.z_resolved * next.error
+            } else if next.error == 0.0 {
+                (next.value - current.value).abs() > config.z_resolved * current.error
+            } else {
+                return Err(SaddleError::Invalid(
+                    "two positive rate errors have a z".into(),
+                ));
+            }
+        }
+    };
+    Ok(if adopt { Climb::Adopt } else { Climb::Stop })
+}
+
+fn grown(config: &LadderConfig, n: usize, relative: f64) -> usize {
+    let ratio = relative / config.relative_error;
+    let raw = config.growth * n as f64 * ratio * ratio;
+    let ceiled = if raw.is_finite() {
+        let rounded = raw.ceil();
+        if rounded >= usize::MAX as f64 {
+            config.cap
+        } else {
+            rounded as usize
+        }
+    } else {
+        config.cap
+    };
+    n.saturating_add(1).max(ceiled).min(config.cap)
+}
+
+fn check_sigma(error: f64) -> Result<(), SaddleError> {
+    if error.is_finite() && error >= 0.0 {
+        Ok(())
+    } else {
+        Err(SaddleError::Invalid(
+            "a standard error must be finite and non-negative".into(),
+        ))
+    }
+}
+
+fn check_rate(estimate: Estimate) -> Result<(), SaddleError> {
+    check_sigma(estimate.error)?;
+    if estimate.n == 0 {
+        return Err(SaddleError::Invalid(
+            "a sampled rate needs at least one sample".into(),
+        ));
+    }
+    if estimate.value.is_finite() && estimate.value > 0.0 {
+        Ok(())
+    } else {
+        Err(SaddleError::Invalid(
+            "a sampled rate must be finite and positive".into(),
+        ))
+    }
 }
