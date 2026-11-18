@@ -250,9 +250,38 @@ pub fn ohtst_rate<D: PlaneDensity + ?Sized>(
             "the reactant density {value} ± {value_error} is not positive; sample longer or move the plane toward the minimum"
         )));
     }
-    let flux = (kt / TAU).sqrt();
-    let log_rate = flux.ln() + value.ln() - work.work / kt;
-    let log_rate_error = ((value_error / value).powi(2) + (work.error / kt).powi(2)).sqrt();
+    rate_from_parts(kt, value, value_error, work.work, work.error)
+}
+
+/// `k = √(kT/2π) ρ exp(-ΔA/kT)` from the parts [`ohtst_rate`] multiplies.
+///
+/// `ρ` is the reactant density on the first plane of the work path and
+/// `ΔA` is the reversible work from that plane. The caller has already
+/// checked that both belong to the same temperature and the same plane.
+pub fn rate_from_parts(
+    thermal: f64,
+    density: f64,
+    density_error: f64,
+    free_energy: f64,
+    free_energy_error: f64,
+) -> Result<OhTstRate, SaddleError> {
+    if !(thermal.is_finite() && thermal > 0.0) {
+        return Err(SaddleError::Invalid(
+            "kT must be finite and positive".into(),
+        ));
+    }
+    if !(density.is_finite() && density > 0.0) {
+        return Err(SaddleError::Invalid(
+            "the reactant density must be finite and positive".into(),
+        ));
+    }
+    if !(density_error.is_finite() && free_energy.is_finite() && free_energy_error.is_finite()) {
+        return Err(SaddleError::NonFinite("rate"));
+    }
+    let flux = (thermal / TAU).sqrt();
+    let log_rate = flux.ln() + density.ln() - free_energy / thermal;
+    let log_rate_error =
+        ((density_error / density).powi(2) + (free_energy_error / thermal).powi(2)).sqrt();
     let rate = log_rate.exp();
     Ok(OhTstRate {
         rate,
@@ -260,10 +289,10 @@ pub fn ohtst_rate<D: PlaneDensity + ?Sized>(
         log_rate,
         log_rate_error,
         flux,
-        density: value,
-        density_error: value_error,
-        free_energy: work.work,
-        free_energy_error: work.error,
+        density,
+        density_error,
+        free_energy,
+        free_energy_error,
     })
 }
 

@@ -175,6 +175,12 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =rgsaddle_ocineb_set_saddle_check=. Purpose: rgsaddle_band_set_saddle_check for an OCI-NEB session. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_ocineb_saddle_index=. Purpose: rgsaddle_band_saddle_index for an OCI-NEB session. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_saddle_index=. Purpose: Certify one point, ABI minor 40. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_ohtst_sample=. Purpose: Sample the plane through point with the given normal. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_ohtst_optimize=. Purpose: Climb the plane free energy from point and normal, and write the optimum back. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_ohtst_mbar=. Purpose: Solve MBAR. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_ohtst_work=. Purpose: Reversible work through n_planes planes stored row-major. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_ohtst_transmission=. Purpose: Transmission coefficient of the plane, from n_starts configurations stored row-major. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_ohtst_rate=. Purpose: OH-TST rate from a reactant density and the reversible work off its plane. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_growing_string_config_default=. Purpose: Fill out with the default growing-string controls (n_images 11, frontier_tol 0.2, min_steps_per_node 1, not-a-knot spline), ABI minor 44. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_growing_string_create=. Purpose: Open a growing string session between reactant and product (3 * n_atoms values each), ABI minor 44. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_growing_string_step=. Purpose: Advance a growing string session by one step (or one simplified-string step once joined), ABI minor 44. Parameters: the declaration. Units: the caller's.

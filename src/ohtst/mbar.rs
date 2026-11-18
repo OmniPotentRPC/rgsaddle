@@ -163,6 +163,58 @@ fn evaluate(u: &Array2<f64>, log_n: &Array1<f64>, f: &Array1<f64>) -> (f64, Arra
     (total - counts.dot(f), w)
 }
 
+/// Settings of [`mbar_free_energies`].
+#[non_exhaustive]
+#[derive(Clone, Debug, Default)]
+pub struct MbarConfig {
+    /// Starting reduced free energies, one per state. `None` starts at zero.
+    /// The solved energies are shifted so the first state is zero.
+    pub initial: Option<Array1<f64>>,
+}
+
+impl MbarConfig {
+    /// Set [`Self::initial`].
+    #[must_use]
+    pub fn with_initial(mut self, initial: Array1<f64>) -> Self {
+        self.initial = Some(initial);
+        self
+    }
+}
+
+/// Reduced free energies from MBAR, with `f_0 = 0`, their covariance, and
+/// the overlap matrix whose rows sum to one.
+#[non_exhaustive]
+#[derive(Clone, Debug)]
+pub struct MbarFreeEnergy {
+    /// Reduced free energy of every state.
+    pub free_energies: Array1<f64>,
+    /// Asymptotic covariance of [`Self::free_energies`].
+    pub covariance: Array2<f64>,
+    /// Overlap matrix. `O_ij` is the chance a sample of state `i` is taken
+    /// for one of state `j`.
+    pub overlap: Array2<f64>,
+}
+
+/// Solve MBAR for reduced potentials `reduced`, one row per sample and one
+/// column per state, with `counts[k]` samples drawn from state `k`.
+pub fn mbar_free_energies(
+    reduced: &Array2<f64>,
+    counts: &[usize],
+    config: &MbarConfig,
+) -> Result<MbarFreeEnergy, SaddleError> {
+    let states = reduced.ncols();
+    let initial = match &config.initial {
+        Some(start) => start.to_vec(),
+        None => vec![0.0; states],
+    };
+    let solved = mbar(reduced, counts, &initial)?;
+    Ok(MbarFreeEnergy {
+        free_energies: solved.free_energies,
+        covariance: solved.covariance,
+        overlap: solved.overlap,
+    })
+}
+
 /// The overlap `O_ab` of two states from the forward works `w_F` of the
 /// samples of `a` and the reverse works `w_R` of those of `b`, in units of
 /// `kT`, at `Δf = f_b - f_a`.

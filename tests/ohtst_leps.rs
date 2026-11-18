@@ -8,8 +8,15 @@
 //! `A = -kT ln ∫ exp(-V/kT)` and of the reactant integral behind the
 //! optimal line, with unit masses, computed in each test and independent of
 //! the sampler, and harmonic TST through rgsaddle's dimer and Vineyard
-//! functions. The paper gives its rate constants without units, so they
-//! are not compared here.
+//! functions.
+//!
+//! Sec. III B, J. Chem. Phys. 115, 9651 (2001), prints
+//! `Q‡/Q_{Z_R} = 0.765 ± 0.005`, `⟨|v|⟩ = 0.399` and
+//! `k_OH-TST = (4.5 ± 0.2)×10^{-7}` at `k_B T = 0.1 E_A`, with
+//! `k = (4.4 ± 0.1)×10^{-7}` from hyperdynamics and `k_hTST = 4.3×10^{-7}`.
+//! Eq. (1) on p. 9645 is `k = ⟨|v⊥|⟩ Q‡ / (2 Q_R)`. The product of the two
+//! tabulated factors is not that rate, and `ΔA` is drawn in Fig. 8 rather
+//! than printed, so the absolute rate is not asserted.
 
 use ndarray::{Array1, array};
 use rgsaddle::{
@@ -734,4 +741,26 @@ fn leps_work_along_the_minimum_energy_path() {
     }
     assert!(work.warnings.is_empty() && rigid.warnings.is_empty());
     assert!(smallest(&rigid) > 0.3 && smallest(&work) > smallest(&rigid));
+}
+
+/// Sec. III B, p. 9651, pairs `⟨|v|⟩ = 0.399` and `Q‡/Q_{Z_R} = 0.765 ± 0.005`
+/// with `k_OH-TST = (4.5 ± 0.2)×10^{-7}`. Eq. (1) on p. 9645 multiplies
+/// `⟨|v⊥|⟩/2` by a ratio of configuration integrals. That product of the
+/// two printed factors is not the printed rate: `ΔA` is in Fig. 8, which
+/// does not give a number that can be read back.
+#[test]
+fn section_iii_b_prefactor_is_not_the_printed_rate() {
+    let half_speed = 0.399_f64 / 2.0;
+    let ratio = 0.765_f64;
+    let prefactor = half_speed * ratio;
+    let published = 4.5_f64 / 10_000_000.0;
+    let uncertainty = 0.2_f64 / 10_000_000.0;
+    assert!(
+        (prefactor - published).abs() > 1000.0 * uncertainty,
+        "{prefactor} against {published} ± {uncertainty}"
+    );
+    let low = ratio - 0.005;
+    let high = ratio + 0.005;
+    assert!((low * half_speed - published).abs() > 1000.0 * uncertainty);
+    assert!((high * half_speed - published).abs() > 1000.0 * uncertainty);
 }

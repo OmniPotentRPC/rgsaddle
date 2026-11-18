@@ -113,6 +113,7 @@ pub use anharmonic::{AnharmonicConfig, AnharmonicCorrection, anharmonic_correcti
 pub use basin::{BasinConfig, BasinDensity, BasinEnd, basin_density};
 pub use control::HarmonicReference;
 pub use gaussian::{ExactGaussianPlaneSampler, HyperplaneObservable, QuadraticModel};
+pub use mbar::{MbarConfig, MbarFreeEnergy, mbar_free_energies};
 pub use optimize::{
     PlaneMetric, PlaneOptimizer, PlaneOptimizerConfig, PlaneOptimizerStatus, PlaneOptimum,
     PlaneTrace, optimize_plane,
@@ -121,6 +122,7 @@ pub use path::PlanePath;
 pub use plane::{FixedCell, Hyperplane, MassWeighted, mass_weighted_rigid_translations};
 pub use rate::{
     OhTstRate, PlaneDensity, RateMultiplicity, flux_mass, ohtst_rate, plane_transmission,
+    rate_from_parts,
 };
 pub use reactant::{ReactantDensity, reactant_density};
 pub(crate) use sample::sample_plane_pilot_with_sampler;

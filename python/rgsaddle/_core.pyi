@@ -488,6 +488,208 @@ class SellaSaddle:
     def position(self) -> NDArray[numpy.float64]:
         """Copy of the current Cartesian position."""
 
+class OhtstSample:
+    """Langevin sample of one hyperplane: centroid, normal force, virial."""
+
+    @property
+    def centroid(self) -> NDArray[numpy.float64]:
+        """Centroid of the retained records."""
+
+    @property
+    def grad_normal(self) -> NDArray[numpy.float64]:
+        """Mean gradient of the normal force in the plane."""
+
+    @property
+    def normal_force(self) -> float:
+        """Mean force along the normal."""
+
+    @property
+    def normal_force_error(self) -> float:
+        """Block standard error of the normal force."""
+
+    @property
+    def virial(self) -> float:
+        """In-plane virial."""
+
+    @property
+    def virial_error(self) -> float:
+        """Block standard error of the virial."""
+
+    @property
+    def acceptance(self) -> float:
+        """Accepted fraction of the proposals."""
+
+    @property
+    def records(self) -> int:
+        """Records inside the blocks."""
+
+    @property
+    def evaluations(self) -> int:
+        """Surface evaluations."""
+
+class OhtstOptimum:
+    """Last accepted plane of a free-energy climb."""
+
+    @property
+    def point(self) -> NDArray[numpy.float64]:
+        """A point on the plane."""
+
+    @property
+    def normal(self) -> NDArray[numpy.float64]:
+        """Unit normal, pointing toward the product."""
+
+    @property
+    def iterations(self) -> int:
+        """Outer trust-region iterations."""
+
+    @property
+    def evaluations(self) -> int:
+        """Surface evaluations."""
+
+    @property
+    def normal_force(self) -> float:
+        """Mean force along the last normal."""
+
+    @property
+    def normal_force_error(self) -> float:
+        """Block standard error of that force."""
+
+class OhtstMbar:
+    """MBAR free energies, covariance and overlap."""
+
+    @property
+    def free_energies(self) -> NDArray[numpy.float64]:
+        """Reduced free energy of every state, with the first at zero."""
+
+    @property
+    def covariance(self) -> NDArray[numpy.float64]:
+        """Asymptotic covariance, one row and column per state."""
+
+    @property
+    def overlap(self) -> NDArray[numpy.float64]:
+        """Overlap matrix. Each row sums to one."""
+
+class OhtstWork:
+    """Reversible work from the first plane to the last."""
+
+    @property
+    def work(self) -> float:
+        """Work by the requested estimate."""
+
+    @property
+    def error(self) -> float:
+        """Standard error of that work."""
+
+    @property
+    def integrated_work(self) -> float:
+        """Work by thermodynamic integration."""
+
+    @property
+    def integrated_error(self) -> float:
+        """Standard error of the integral."""
+
+    @property
+    def bar_work(self) -> float:
+        """Work by BAR, or NaN when no configurations were kept."""
+
+    @property
+    def bar_error(self) -> float:
+        """Standard error of the BAR work, or NaN."""
+
+    @property
+    def mbar_work(self) -> float:
+        """Work by MBAR, or NaN when MBAR is off."""
+
+    @property
+    def mbar_error(self) -> float:
+        """Standard error of the MBAR work, or NaN."""
+
+    @property
+    def evaluations(self) -> int:
+        """Surface evaluations over the nodes."""
+
+class OhtstTransmission:
+    """Transmission coefficient counted at the first crossing."""
+
+    @property
+    def kappa(self) -> float:
+        """Transmission coefficient."""
+
+    @property
+    def error(self) -> float:
+        """Block standard error of kappa."""
+
+    @property
+    def shots(self) -> int:
+        """Shots whose halves both reached a state."""
+
+    @property
+    def unassigned(self) -> int:
+        """Shots left out."""
+
+    @property
+    def reactive(self) -> int:
+        """Shots from the reactant into the product."""
+
+    @property
+    def recrossed(self) -> int:
+        """Backward halves that crossed the plane again."""
+
+    @property
+    def evaluations(self) -> int:
+        """Surface evaluations."""
+
+class OhtstRate:
+    """OH-TST rate from a reactant density and a reversible work."""
+
+    @property
+    def rate(self) -> float:
+        """The rate, in the time unit of the mass-weighted surface."""
+
+    @property
+    def error(self) -> float:
+        """First-order standard error of the rate."""
+
+    @property
+    def log_rate(self) -> float:
+        """Natural log of the rate."""
+
+    @property
+    def log_rate_error(self) -> float:
+        """Standard error of the log rate."""
+
+    @property
+    def flux(self) -> float:
+        """One-way flux factor, square root of kT over 2 pi."""
+
+def ohtst_sample(surface: Callable[..., tuple[float, numpy.typing.NDArray[numpy.float64]]], point: numpy.typing.NDArray[numpy.float64], normal: numpy.typing.NDArray[numpy.float64], thermal: float, time_step: float, friction: float, burn_in: int, stride: int, records: int, blocks: int, seed: int) -> OhtstSample:
+    """
+    Sample one hyperplane. surface(q) returns (energy, gradient) for a point of length n.
+    """
+
+def ohtst_optimize(surface: Callable[..., tuple[float, numpy.typing.NDArray[numpy.float64]]], point: numpy.typing.NDArray[numpy.float64], normal: numpy.typing.NDArray[numpy.float64], thermal: float, time_step: float, friction: float, burn_in: int, stride: int, records: int, blocks: int, seed: int, max_iterations: int, max_translation: float, max_rotation: float, patience: int = 3, translate: bool = True, rotate: bool = True) -> OhtstOptimum:
+    """Climb the plane free energy. surface(q) returns (energy, gradient)."""
+
+def ohtst_mbar(reduced: numpy.typing.NDArray[numpy.float64], counts: numpy.typing.NDArray[numpy.int64], initial: numpy.typing.NDArray[numpy.float64] | None = None) -> OhtstMbar:
+    """
+    Solve MBAR. reduced is (samples, states); counts has one positive entry per state.
+    """
+
+def ohtst_work(surface: Callable[..., tuple[float, numpy.typing.NDArray[numpy.float64]]], points: numpy.typing.NDArray[numpy.float64], normals: numpy.typing.NDArray[numpy.float64], thermal: float, time_step: float, friction: float, burn_in: int, stride: int, records: int, blocks: int, seed: int, nodes: int, bar_samples: int, start: numpy.typing.NDArray[numpy.float64] | None = None, mbar: bool = False, estimate: int = 0) -> OhtstWork:
+    """
+    Reversible work along planes. estimate is 0 for integration, 1 for BAR, 2 for MBAR. nodes must be odd when Simpson weights are used.
+    """
+
+def ohtst_transmission(surface: Callable[..., tuple[float, numpy.typing.NDArray[numpy.float64]]], point: numpy.typing.NDArray[numpy.float64], normal: numpy.typing.NDArray[numpy.float64], starts: numpy.typing.NDArray[numpy.float64], thermal: float, time_step: float, friction: float, steps: int, check_every: int, shots: int, blocks: int, seed: int) -> OhtstTransmission:
+    """
+    Shoot from starts on the plane. Friction zero is Newtonian. surface(q) returns (energy, gradient).
+    """
+
+def ohtst_rate(thermal: float, density: float, density_error: float, work: float, work_error: float) -> OhtstRate:
+    """
+    k = sqrt(kT / 2 pi) * density * exp(-work / kT). density is the reactant density on the first plane.
+    """
+
 def raise_status(code: int) -> bool:
     """
     Map an rgsaddle_status_t value. The message is the stored text, or the status name when that text is empty. The stored text is cleared. True on OK. False is not used: convergence is not a status code.

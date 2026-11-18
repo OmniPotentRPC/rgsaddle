@@ -1,12 +1,16 @@
 #![cfg(feature = "ohtst")]
 
 //! OH-TST on the two-dimensional surfaces of Bligaard and Jónsson, Comput.
-//! Phys. Commun. 169, 284 (2005), and Jóhannesson and Jónsson, J. Chem.
-//! Phys. 115, 9644 (2001).
+//! Phys. Commun. 169, 284–288 (2005), and Jóhannesson and Jónsson, J. Chem.
+//! Phys. 115, 9644–9656 (2001).
 //!
-//! Every reference here is computed in the test by quadrature of the line
-//! integral, `A = -kT ln ∫ exp(-V/kT)` along the line, independent of the
-//! sampler; the papers' own numbers are checked against that quadrature.
+//! The angles below are the ones printed in Comput. Phys. Commun. 169,
+//! 286–287 (2005), Sec. 2 and Fig. 2, checked here against quadrature of
+//! `A = -kT ln ∫ exp(-V/kT)` along the line. That quadrature is independent
+//! of the sampler. The peak printed as 1.24° at `T = 0.01 E_a/k_B` (p. 286)
+//! is not the quadrature maximum. The 2005 paper does not print a rate with
+//! an uncertainty. The LEPS rate `(4.5 ± 0.2)×10^{-7}` is J. Chem. Phys.
+//! 115, 9651 (2001), Sec. III B, and is handled in `ohtst_leps`.
 //! Units are those of the surfaces with unit masses, so lengths and
 //! mass-weighted lengths agree.
 
@@ -164,9 +168,10 @@ fn assert_near_maximum(paper: f64, quadrature: f64, kt: f64) {
     );
 }
 
-/// The angles of Bligaard and Jónsson, Sec. 2 and Fig. 2, against
-/// quadrature of the line free energy. All angles are those of the normal
-/// from the x axis, which is the line's angle from the vertical axis.
+/// The angles of Bligaard and Jónsson, Comput. Phys. Commun. 169, 286–287
+/// (2005), Sec. 2 and Fig. 2, against quadrature of the line free energy.
+/// All angles are those of the normal from the x axis, which is the line's
+/// angle from the vertical axis.
 ///
 /// The line through the saddle across its unstable mode is at 1.16°. A
 /// secondary maximum appears near 43° at `T = 0.1182 E_a/k_B` (quadrature:
