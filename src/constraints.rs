@@ -776,7 +776,8 @@ fn dihedral_grad(
                 dot3(ddx2, cross3(n1, n2)) + dot3(dx2, add3(cross3(dn1, n2), cross3(n1, dn2)));
             let dnorm = dot3(dx2, ddx2) / dx2_norm;
             let ddenom = dnorm * dot3(n1, n2) + dx2_norm * (dot3(dn1, n2) + dot3(n1, dn2));
-            g[3 * atoms[local] + dim] = (denom * dnumer - numer * ddenom) / atan_n2;
+            // Distinct images of one atom both land on this slot.
+            g[3 * atoms[local] + dim] += (denom * dnumer - numer * ddenom) / atan_n2;
         }
     }
     Ok(g)
