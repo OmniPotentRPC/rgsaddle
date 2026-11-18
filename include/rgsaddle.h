@@ -273,9 +273,24 @@ typedef struct {
   int64_t evaluations;
 } rgsaddle_hyperplane_ti_result_t;
 
+/**
+ * Create a callback sampler. The callback is required; context is passed
+ * through unchanged and may be NULL. Returns NULL for a null callback.
+ */
 RgsaddleHyperplaneSampler *rgsaddle_hyperplane_sampler_create(
-    void *, rgsaddle_sample_hyperplane_fn);
+    void *context, rgsaddle_sample_hyperplane_fn sample);
+
+/**
+ * Free a callback sampler. NULL is accepted. A non-null pointer must have
+ * come from rgsaddle_hyperplane_sampler_create and be freed exactly once.
+ */
 void rgsaddle_hyperplane_sampler_free(RgsaddleHyperplaneSampler *);
+
+/**
+ * Integrate V_full - V_harmonic over lambda on a fixed hyperplane.
+ * point and normal each hold dimension doubles. config is read and result
+ * is written during the call; sampler must remain live. ABI minor 42.
+ */
 int32_t rgsaddle_hyperplane_thermodynamic_integration(
     RgsaddleHyperplaneSampler *, const double *, const double *, size_t,
     const rgsaddle_hyperplane_ti_config_t *,
@@ -540,8 +555,8 @@ void rgsaddle_band_free(RgsaddleBand *band);
  * positions, energies and gradients cover every image, endpoints
  * included. forces receives the same shape, in the force convention
  * (minus the energy gradient); endpoint rows are zero. *ci_index is
- * the climbing image, or -1. Lengths are energy per length for the
- * spring and the host's force unit for the tolerance. ABI minor 35.
+ * the climbing image, or -1. Spring constants are energy per length
+ * squared; force_tol is in the host's force unit. ABI minor 35.
  */
 rgsaddle_status_t rgsaddle_band_project(const rgsaddle_band_config_t *config,
                                         int64_t n_images, int64_t n_atoms,
@@ -1205,7 +1220,7 @@ void rgsaddle_samd_free(RgsaddleSamd *session);
  *
  * Goswami, MethodsX (2026), doi:10.1016/j.mex.2026.103899.
  * Smidstrup, Pedersen, Stokbro, and Jonsson, J. Chem. Phys. 140,
- * 214106 (2014).
+ * 214106 (2014), doi:10.1063/1.4878664.
  *
  * `reactant` and `product` each hold `3 * n_atoms` doubles. `n_images`
  * counts the endpoints. `out` holds `n_images * 3 * n_atoms` doubles,
@@ -1567,12 +1582,6 @@ typedef struct {
   int32_t evaluations;
 } rgsaddle_connect_report_t;
 
-/**
- * Run the connect search. left and right each hold 3 * n_atoms
- * positions. position receives the returned geometry. The surface is
- * called with one image and writes the energy and the Cartesian
- * gradient. A non-OK surface status fails the search.
- */
 typedef struct RgsaddleIndexK RgsaddleIndexK;
 
 /**
@@ -1641,6 +1650,12 @@ rgsaddle_status_t rgsaddle_reflect_force(int64_t n, int64_t k,
                                          const double *force,
                                          const double *modes, double *out);
 
+/**
+ * Run the connect search. left and right each hold 3 * n_atoms
+ * positions. position receives the returned geometry. The surface is
+ * called with one image and writes the energy and the Cartesian
+ * gradient. A non-OK surface status fails the search.
+ */
 rgsaddle_status_t rgsaddle_connect(const rgsaddle_connect_config_t *config,
                                    int64_t n_atoms, const double *left,
                                    const double *right,
