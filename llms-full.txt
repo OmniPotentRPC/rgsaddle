@@ -706,8 +706,8 @@ $ cargo run --release --example muller_brown_band -- target/muller_brown
 ```
 
 ```text
-ci-neb   Converged after 1823 steps, 16418 force calls, max force 1.0e-3, climbing image 3 at (-0.822002, 0.624313), energy -40.664844
-oci-neb  Converged after 56 steps, 483 force calls, max force 6.8e-4, climbing image 3 at (-0.822000, 0.624314), energy -40.664844
+ci-neb   Converged after 1712 steps, 16889 force calls, max force 9.8e-4, climbing image 3 at (-0.822002, 0.624313), energy -40.664844
+oci-neb  Converged after 50 steps, 513 force calls, max force 3.0e-4, climbing image 3 at (-0.822001, 0.624313), energy -40.664844
 ```
 
 Both runs stop on the same saddle. The rest of this page goes through the program, `examples/muller_brown_band.rs`, and then the two figures.
@@ -3293,6 +3293,16 @@ There is no global mutable state. The last-error string is thread-local. Arrays 
 
 The Rust sessions are the source of the mechanics. The Python classes in `rgsaddle.ase` follow the call shape of ASE's nudged elastic band, minimum-mode atoms, and Sella's `run(fmax, steps)`. Where the numbers differ, the difference is the one the tests lock in.
 
+## From 0.5.x to 0.6.0
+A converged band, minimum-mode, or OCI-NEB session now certifies the saddle index by default.
+Those finite-difference evaluations count in the step report, so force-call totals can increase even when the search takes the same path.
+Use `with_saddle_check(None)` on `BandConfig` or `MinModeConfig` when reproducing 0.5.x counts.
+
+`BandReport`, `MinModeReport`, and `OcinebReport` add `saddle_index`.
+Code that constructs or exhaustively matches one of those reports must accept the new field.
+The C ABI introduced the saddle-check structs and functions at minor 40; a config stamped with an older minor keeps the check off.
+Python's `_core.MinMode` enables the check by default and returns it through `SessionReport.saddle_index` and `MinMode.saddle_index()`.
+
 ## From ASE's NEB
 `rgsaddle.ase.NEB(images, k=0.1, climb=False)` takes the same list of `Atoms` with calculators. `interpolate()` places the interior images on the straight line between the ends. `get_positions` and `get_forces` are the interior images only, and `ase.optimize.FIRE` drives them through `__ase_optimizable__`. `get_potential_energy` is the highest image energy.
 
@@ -4719,9 +4729,13 @@ Git ignores those files, so edit the Org source and do not add the generated fil
 Build the site as the docs workflow does:
 
 ```sh
+python docs/check_c_symbols.py
+python docs/check_paths.py
+python docs/check_dois.py
 emacs --batch -l docs/export.el
 python -m pip install -r docs/requirements.txt
-sphinx-build -b html -n docs/source docs/build
+sphinx-build -b html -n -W --keep-going docs/source docs/build
+sphinx-build -b linkcheck -n -W --keep-going docs/source docs/build/linkcheck
 ```
 
 The API documentation builds with every rustdoc warning denied on each feature set CI tests, and once with private items.
@@ -4769,7 +4783,7 @@ Only the `publish` job runs in the `pypi` environment and holds `id-token: write
 
 To release a version:
 
-1. Set it in `Cargo.toml`, `pyproject.toml` and `meson.build`; `tests/package_version.rs` holds them equal.
+1. Set it in `Cargo.toml`, `pyproject.toml`, `meson.build`, `docs/source/conf.py`, and the install example in `docs/orgmode/getting-started.org`; `tests/package_version.rs` holds the first three equal.
 2. Collect the fragments with `towncrier build --version <version>` and commit.
 3. Push the tag `v<version>` on that commit.
 

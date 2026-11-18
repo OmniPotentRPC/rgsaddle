@@ -27,6 +27,7 @@ The [contributing page][contributing] lists prerequisites, contact and acknowled
 cargo add rgsaddle
 ```
 
+The crate requires Rust 1.88 or newer.
 The [Python](#python) section below installs the Python package.
 The [C interface guide](https://omnipotentrpc.github.io/rgsaddle/howto/c-abi.html) covers the C library.
 A meson project takes the C and C++ headers from the top-level `meson.build`, as a wrap subproject or through `rgsaddle-headers.pc`; the [meson guide](https://omnipotentrpc.github.io/rgsaddle/howto/meson.html) has the wrap file.
@@ -76,8 +77,14 @@ fn main() -> Result<(), SaddleError> {
     }
     let ci = report.ci_index.expect("a climbing image");
     let saddle = session.positions().row(ci).to_owned();
+    let energy = (saddle[0] * saddle[0] - 1.0).powi(2)
+        + 2.0 * saddle[1] * saddle[1]
+        + 2.0 * saddle[2] * saddle[2];
     println!("{:?} after {} steps, max force {:.1e}", report.status, report.iteration, report.max_force);
-    println!("climbing image {ci} at ({:.4}, {:.4}, {:.4})", saddle[0], saddle[1], saddle[2]);
+    println!(
+        "climbing image {ci} at ({:.4}, {:.4}, {:.4}), energy {:.6}",
+        saddle[0], saddle[1], saddle[2], energy
+    );
     Ok(())
 }
 ```
@@ -86,7 +93,7 @@ With rgsaddle 0.5.0 from crates.io, `cargo run` prints:
 
 ```text
 Converged after 8 steps, max force 2.6e-4
-climbing image 4 at (0.0000, -0.0001, 0.0000)
+climbing image 4 at (0.0000, -0.0001, 0.0000), energy 1.000000
 ```
 
 ## Learn more
@@ -167,7 +174,7 @@ The [PAFI guide](https://omnipotentrpc.github.io/rgsaddle/howto/pafi.html) lists
 `validation/` has the sympy and sollya
 checks of the rotation formulas, the Lanczos residual bound, and the
 finite-difference curvature error terms
-(`uv run --no-project --with sympy python validation/<script>.py`,
+(`uv run --no-project --with sympy python validation/dimer_rotation.py`,
 `sollya validation/fd_curvature.sollya`).
 `validation/bain_lj_reference.py` scans the relaxed Bain path (bcc to
 fcc) of a switched Lennard-Jones crystal, the reference for
