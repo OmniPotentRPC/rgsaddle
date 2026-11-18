@@ -118,10 +118,11 @@ impl Strain {
         }
     }
 
-    /// Stored 3×3 strain tensor, returned without further symmetrization.
+    /// Stored 3×3 strain tensor `ε` in `h = h0 (I + ε)`.
     ///
-    /// [`Self::from_tensor`] symmetrizes its input. The named shear
-    /// constructors store their documented one-sided entries verbatim.
+    /// Symmetric for [`Self::from_tensor`], [`Self::uniaxial_x`],
+    /// [`Self::hydrostatic`], and [`Self::transform`]; [`Self::shear_yx`]
+    /// and [`Self::shear_xz`] store only the single off-diagonal right-strain entry.
     pub fn tensor(self) -> M3 {
         self.tensor
     }

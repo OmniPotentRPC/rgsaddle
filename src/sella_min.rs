@@ -89,13 +89,13 @@ impl Default for SellaMinConfig {
     }
 }
 
-/// The SellaMinReport.
+/// Diagnostics returned by [`SellaMinSession::step`] and [`SellaMinSession::run`].
 pub struct SellaMinReport {
     /// Potential energy in the host's energy unit.
     pub energy: f64,
-    /// Largest absolute force component, in the host's force units.
+    /// Convergence force norm selected by [`SellaMinConfig::force_gate`], in the host's force units.
     pub max_force: f64,
-    /// The at minimum.
+    /// `true` once `max_force` is at or below [`SellaMinConfig::force_tol`].
     pub at_minimum: bool,
     /// Ratio of the actual energy change to the model's prediction.
     pub rho: f64,
@@ -103,7 +103,7 @@ pub struct SellaMinReport {
     pub delta: f64,
 }
 
-/// The SellaMinSession.
+/// Step-by-step Sella order-0 quasi-Newton minimizer over Cartesian, internal, or cell charts.
 pub struct SellaMinSession {
     pes: SellaPes,
     config: SellaMinConfig,
@@ -113,7 +113,7 @@ pub struct SellaMinSession {
 }
 
 impl SellaMinSession {
-    /// New.
+    /// Build a Cartesian session on `x` (`3N`) with per-atom `masses` (`N`), using the rigid quotient for `N >= 3`.
     pub fn new(
         config: SellaMinConfig,
         x: Array1<f64>,
@@ -133,7 +133,7 @@ impl SellaMinSession {
         Self::on(config, x, masses, SellaGeom::Chart(chart))
     }
 
-    /// On.
+    /// Build a Cartesian session on `x` (`3N`) with explicit manifold geometry `geom`.
     pub fn on(
         config: SellaMinConfig,
         x: Array1<f64>,
@@ -288,7 +288,7 @@ impl SellaMinSession {
         })
     }
 
-    /// Geom.
+    /// Active manifold or equality-constraint geometry of the session.
     pub fn geom(&self) -> &SellaGeom {
         &self.geom
     }
@@ -361,7 +361,7 @@ impl SellaMinSession {
         self.rho
     }
 
-    /// Reset.
+    /// Reset the quasi-Newton Hessian, trust radius `delta`, and model ratio `rho` at a surface-epoch boundary.
     pub fn reset(&mut self) {
         self.pes.reset();
         let n_free = match &self.pes {
@@ -374,7 +374,7 @@ impl SellaMinSession {
         self.rho = 1.0;
     }
 
-    /// Index of the step inside its stage.
+    /// Advance one restricted quasi-Newton minimization step on `surface`.
     pub fn step<S: PointSurface>(&mut self, surface: &S) -> Result<SellaMinReport, SaddleError> {
         match &self.pes {
             SellaPes::Internal(_) => self.step_internal(surface),
@@ -655,7 +655,7 @@ impl SellaMinSession {
         })
     }
 
-    /// Run.
+    /// Step up to `max_steps` iterations, stopping early once [`SellaMinReport::at_minimum`] holds.
     pub fn run<S: PointSurface>(
         &mut self,
         surface: &S,
