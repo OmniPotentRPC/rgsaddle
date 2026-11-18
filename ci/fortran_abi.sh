@@ -17,8 +17,8 @@ cd "$root"
 rustup toolchain install stable --profile minimal
 cargo +stable build --locked --features capi
 
-export FFLAGS="${FFLAGS:--fcheck=all -Wall -Wextra}"
-meson setup "$build_dir" -Dfortran=enabled --prefix="$prefix_dir" --libdir=lib
+export FFLAGS="${FFLAGS:--std=f2008 -Wall -Wextra -fcheck=all}"
+meson setup "$build_dir" -Dfortran=enabled --werror --prefix="$prefix_dir" --libdir=lib
 meson compile -C "$build_dir"
 meson install -C "$build_dir"
 
@@ -133,7 +133,7 @@ mkdir -p "$work/gfortran-mods"
 for name in "${tests[@]}"; do
   # shellcheck disable=SC2046
   compile_and_run gfortran "$name" \
-    -std=f2008 -Wall -Wextra -fcheck=all \
+    -std=f2008 -Wall -Wextra -Werror -fcheck=all \
     -J"$work/gfortran-mods" \
     $pc_cflags \
     "$test_dir/support.f90" "$test_dir/$name.f90" \
@@ -141,7 +141,7 @@ for name in "${tests[@]}"; do
     $pc_libs
 done
 # shellcheck disable=SC2046
-gfortran -std=f2008 -Wall -Wextra -fcheck=all \
+gfortran -std=f2008 -Wall -Wextra -Werror -fcheck=all \
   -J"$work/gfortran-mods" \
   $pc_cflags \
   "$test_dir/test_assign.f90" \
@@ -247,7 +247,7 @@ fi
 
 # The packaged archive, not only the pkg-config link line.
 mkdir -p "$work/archive-mods"
-gfortran -std=f2008 -Wall -Wextra -fcheck=all \
+gfortran -std=f2008 -Wall -Wextra -Werror -fcheck=all \
   -J"$work/archive-mods" -I"$mod_dir" \
   "$test_dir/support.f90" "$work/smoke.f90" \
   "$fortran_lib" \

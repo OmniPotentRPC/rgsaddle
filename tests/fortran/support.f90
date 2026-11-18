@@ -107,6 +107,7 @@ contains
     integer :: i
     integer :: n_eval
     real(c_double) :: row(3), grad(3), energy
+    if (c_associated(user)) continue
     status = RGSADDLE_OK
     if (n_atoms /= 1_c_int64_t) then
       status = RGSADDLE_INVALID_PARAMETER
@@ -136,6 +137,7 @@ contains
     integer(c_int64_t), value :: image
     integer :: i, n_eval
     real(c_double) :: row(3), grad(3), energy
+    if (c_associated(user)) continue
     if (n_atoms /= 1_c_int64_t .or. n_images < 1_c_int64_t) then
       status = RGSADDLE_INVALID_PARAMETER
       return
@@ -186,6 +188,7 @@ contains
     integer(c_int64_t) :: npos, neval
     integer :: i
     real(c_double) :: row(3), g(3), energy
+    if (c_associated(user)) continue
     call c_f_pointer(req_ptr, req)
     if (.not. associated(req)) then
       status = RGSADDLE_INVALID_PARAMETER
@@ -218,6 +221,7 @@ contains
     real(c_double), intent(inout) :: gradient(*)
     integer :: i
     real(c_double) :: x
+    if (c_associated(user)) continue
     if (n_dof < 1_c_int64_t) then
       status = RGSADDLE_INVALID_PARAMETER
       return
@@ -238,6 +242,7 @@ contains
     real(c_double), intent(inout) :: energy
     real(c_double), intent(inout) :: gradient(*)
     real(c_double) :: x, y, well, stiffness
+    if (c_associated(user)) continue
     if (n_dof /= 2_c_int64_t) then
       status = RGSADDLE_INVALID_PARAMETER
       return
@@ -258,6 +263,7 @@ contains
     real(c_double), intent(in) :: position(*)
     real(c_double), intent(inout) :: energy
     real(c_double), intent(inout) :: gradient(*)
+    if (c_associated(user)) continue
     if (n_dof /= 2_c_int64_t) then
       status = RGSADDLE_INVALID_PARAMETER
       return
