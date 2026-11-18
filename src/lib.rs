@@ -60,6 +60,7 @@ pub mod defect_pair;
 pub mod error;
 pub mod idpp;
 pub mod indexk;
+pub mod line_neb;
 pub mod minmode;
 pub mod nichols;
 pub mod occupancy;
@@ -120,6 +121,10 @@ pub use idpp::{IdppConfig, SidppConfig, idpp_path, linear_path, sidpp_path};
 pub use indexk::{
     BlockEigenKind, HessianProduct, IndexKConfig, IndexKReport, IndexKSession, WithHessian,
     indexk_step, reflect_force, translated_force,
+};
+pub use line_neb::{
+    CubicSample, LineNebConfig, LineNebReport, LineNebSession, LineNebStatus, NaturalCubic,
+    fixed_energy_action, fixed_energy_action_force, fixed_energy_mep_seed,
 };
 pub use minmode::{
     FiniteDifference, MinModeConfig, MinModeKind, MinModeReport, MinModeSession, MinModeStatus,

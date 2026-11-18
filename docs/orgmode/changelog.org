@@ -3,6 +3,13 @@
 
 # towncrier release notes start
 
+* Unreleased
+
+** Added
+
+- Fixed-energy line-integral NEB (LI-NEB): host-stepped session controls, discrete fixed-energy action and action-force helpers, natural cubic interpolation support, and fixed-energy MEP seeding are now available in Rust, C, and Python.
+  The C ABI minor is 42 via this LI-NEB addition.
+
 * 0.5.0 (2026-11-17)
 
 ** Breaking

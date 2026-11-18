@@ -755,6 +755,165 @@ struct ConnectReportPy {
   int evaluations;
 };
 
+nb::ndarray<nb::numpy, double> copy_vector(const std::vector<double> &values);
+bool raise_status(int code);
+
+struct LineNebReportPy {
+  int status;
+  int evaluations;
+  double max_interior_optimized;
+  double max_interior_perpendicular;
+  double sum_interior_perpendicular;
+  double max_endpoint_optimized;
+  double action;
+  std::int64_t iteration;
+
+  bool converged() const { return status == RGSADDLE_STATUS_CONVERGED; }
+};
+
+class PyLineNeb {
+public:
+  PyLineNeb(Matrix positions, Vector masses, double energy, double spring_k,
+            double endpoint_kappa, double force_tol,
+            double endpoint_force_tol, double sum_force_tol, double time_step,
+            double reduced_planck)
+      : rows_(positions.shape(0)), dof_(positions.shape(1)) {
+    if (rows_ < 3 || dof_ <= 0 || dof_ % 3 != 0 ||
+        masses.shape(0) != dof_) {
+      throw nb::value_error(
+          "LineNeb positions must be (at least 3, 3N) and masses must be 3N");
+    }
+    rgsaddle_line_neb_config_t config{};
+    config.version = RGSADDLE_VERSION_INIT;
+    config.spring_k = spring_k;
+    config.endpoint_kappa = endpoint_kappa;
+    config.force_tol = force_tol;
+    config.endpoint_force_tol = endpoint_force_tol;
+    config.sum_force_tol = sum_force_tol;
+    config.energy = energy;
+    config.masses = masses.data();
+    config.time_step = time_step;
+    config.reduced_planck = reduced_planck;
+    inner_ = rgsaddle_line_neb_create(
+        &config, static_cast<std::int64_t>(rows_),
+        static_cast<std::int64_t>(dof_ / 3), positions.data());
+    if (inner_ == nullptr) {
+      throw nb::value_error("invalid fixed-energy LI-NEB configuration");
+    }
+  }
+
+  ~PyLineNeb() { rgsaddle_line_neb_free(inner_); }
+  PyLineNeb(const PyLineNeb &) = delete;
+  PyLineNeb &operator=(const PyLineNeb &) = delete;
+  PyLineNeb(PyLineNeb &&) = delete;
+  PyLineNeb &operator=(PyLineNeb &&) = delete;
+
+  LineNebReportPy step(nb::callable fn) {
+    rgsaddle_line_neb_report_t report{};
+    rgbind::CallContext ctx;
+    ConnectCallback state{&fn, &ctx};
+    rgsaddle_status_t status;
+    {
+      nb::gil_scoped_release release;
+      status =
+          rgsaddle_line_neb_step(inner_, connect_python_surface, &state, &report);
+    }
+    if (ctx.has_error()) {
+      ctx.rethrow_if_set();
+    }
+    if (status != RGSADDLE_OK) {
+      raise_status(status);
+      throw nb::value_error("fixed-energy LI-NEB step failed");
+    }
+    return LineNebReportPy{
+        report.status,
+        report.evaluations,
+        report.max_interior_optimized,
+        report.max_interior_perpendicular,
+        report.sum_interior_perpendicular,
+        report.max_endpoint_optimized,
+        report.action,
+        report.iteration,
+    };
+  }
+
+  LineNebReportPy run(nb::callable fn, std::size_t max_steps) {
+    if (max_steps == 0) {
+      throw nb::value_error("max_steps must be positive");
+    }
+    LineNebReportPy report{};
+    for (std::size_t step_index = 0; step_index < max_steps; ++step_index) {
+      report = step(fn);
+      if (report.converged()) {
+        break;
+      }
+    }
+    return report;
+  }
+
+  nb::ndarray<nb::numpy, double> positions() const {
+    std::vector<double> values(static_cast<std::size_t>(rows_ * dof_));
+    const rgsaddle_status_t status =
+        rgsaddle_line_neb_positions(inner_, values.data());
+    if (status != RGSADDLE_OK) {
+      raise_status(status);
+      throw nb::value_error("fixed-energy LI-NEB positions failed");
+    }
+    auto *raw = new double[values.size()];
+    std::memcpy(raw, values.data(), values.size() * sizeof(double));
+    nb::capsule owner(raw,
+                      [](void *ptr) noexcept { delete[] static_cast<double *>(ptr); });
+    const std::size_t shape[2] = {static_cast<std::size_t>(rows_),
+                                  static_cast<std::size_t>(dof_)};
+    return nb::ndarray<nb::numpy, double>(raw, 2, shape, owner);
+  }
+
+private:
+  RgsaddleLineNeb *inner_{nullptr};
+  std::int64_t rows_;
+  std::int64_t dof_;
+};
+
+class PyNaturalCubic {
+public:
+  PyNaturalCubic(Vector knots, Matrix values) : width_(values.shape(1)) {
+    if (knots.shape(0) != values.shape(0) || knots.shape(0) < 2 ||
+        width_ <= 0) {
+      throw nb::value_error(
+          "NaturalCubic needs matching knots and nonempty value rows");
+    }
+    inner_ = rgsaddle_natural_cubic_create(
+        static_cast<std::int64_t>(knots.shape(0)),
+        static_cast<std::int64_t>(width_), knots.data(), values.data());
+    if (inner_ == nullptr) {
+      throw nb::value_error(
+          "NaturalCubic knots must be finite and strictly increasing");
+    }
+  }
+
+  ~PyNaturalCubic() { rgsaddle_natural_cubic_free(inner_); }
+  PyNaturalCubic(const PyNaturalCubic &) = delete;
+  PyNaturalCubic &operator=(const PyNaturalCubic &) = delete;
+
+  nb::tuple sample(double x) const {
+    std::vector<double> value(static_cast<std::size_t>(width_));
+    std::vector<double> first(static_cast<std::size_t>(width_));
+    std::vector<double> second(static_cast<std::size_t>(width_));
+    const rgsaddle_status_t status = rgsaddle_natural_cubic_sample(
+        inner_, x, value.data(), first.data(), second.data());
+    if (status != RGSADDLE_OK) {
+      raise_status(status);
+      throw nb::value_error("NaturalCubic sample failed");
+    }
+    return nb::make_tuple(copy_vector(value), copy_vector(first),
+                          copy_vector(second));
+  }
+
+private:
+  RgsaddleNaturalCubic *inner_{nullptr};
+  std::int64_t width_;
+};
+
 ConnectReportPy connect_python(nb::callable fn, nb::ndarray<const double, nb::ndim<1>, nb::c_contig> left,
                                nb::ndarray<const double, nb::ndim<1>, nb::c_contig> right, double force_tol,
                                std::int64_t max_calls, bool quench_nodes) {
@@ -797,6 +956,91 @@ ConnectReportPy connect_python(nb::callable fn, nb::ndarray<const double, nb::nd
   std::string kind(1, static_cast<char>(report.kind));
   return ConnectReportPy{std::move(position), report.energy, report.force_norm, std::move(kind),
                          report.hessian_index, report.evaluations};
+}
+
+double fixed_energy_action_python(Matrix positions, Vector energies,
+                                  Vector masses, double energy,
+                                  double reduced_planck) {
+  if (positions.shape(0) != energies.shape(0) ||
+      positions.shape(1) != masses.shape(0)) {
+    throw nb::value_error(
+        "positions, energies, and masses have inconsistent shapes");
+  }
+  double action = 0.0;
+  const rgsaddle_status_t status = rgsaddle_fixed_energy_action(
+      static_cast<std::int64_t>(positions.shape(0)),
+      static_cast<std::int64_t>(positions.shape(1)), positions.data(),
+      energies.data(), masses.data(), energy, reduced_planck, &action);
+  if (status != RGSADDLE_OK) {
+    raise_status(status);
+    throw nb::value_error("fixed-energy action failed");
+  }
+  return action;
+}
+
+nb::ndarray<nb::numpy, double>
+fixed_energy_action_force_python(Matrix positions, Vector energies,
+                                 Matrix gradients, Vector masses,
+                                 double energy, double reduced_planck) {
+  if (positions.shape(0) != energies.shape(0) ||
+      positions.shape(0) != gradients.shape(0) ||
+      positions.shape(1) != gradients.shape(1) ||
+      positions.shape(1) != masses.shape(0)) {
+    throw nb::value_error(
+        "positions, energies, gradients, and masses have inconsistent shapes");
+  }
+  const std::size_t rows = static_cast<std::size_t>(positions.shape(0));
+  const std::size_t dof = static_cast<std::size_t>(positions.shape(1));
+  auto *raw = new double[rows * dof];
+  const rgsaddle_status_t status = rgsaddle_fixed_energy_action_force(
+      static_cast<std::int64_t>(rows), static_cast<std::int64_t>(dof),
+      positions.data(), energies.data(), gradients.data(), masses.data(),
+      energy, reduced_planck, raw);
+  if (status != RGSADDLE_OK) {
+    delete[] raw;
+    raise_status(status);
+    throw nb::value_error("fixed-energy action force failed");
+  }
+  nb::capsule owner(raw,
+                    [](void *ptr) noexcept { delete[] static_cast<double *>(ptr); });
+  const std::size_t shape[2] = {rows, dof};
+  return nb::ndarray<nb::numpy, double>(raw, 2, shape, owner);
+}
+
+nb::ndarray<nb::numpy, double>
+fixed_energy_mep_seed_python(nb::callable fn, Vector saddle, Vector mode,
+                             Vector masses, double saddle_energy,
+                             double target_energy, std::int64_t images) {
+  const std::int64_t dof = saddle.shape(0);
+  if (dof <= 0 || dof % 3 != 0 || mode.shape(0) != dof ||
+      masses.shape(0) != dof || images < 3) {
+    throw nb::value_error(
+        "saddle, mode, and masses must be matching 3N vectors and images >= 3");
+  }
+  auto *raw = new double[static_cast<std::size_t>(images * dof)];
+  rgbind::CallContext ctx;
+  ConnectCallback state{&fn, &ctx};
+  rgsaddle_status_t status;
+  {
+    nb::gil_scoped_release release;
+    status = rgsaddle_fixed_energy_mep_seed(
+        connect_python_surface, &state, dof / 3, saddle.data(), mode.data(),
+        masses.data(), saddle_energy, target_energy, images, raw);
+  }
+  if (ctx.has_error()) {
+    delete[] raw;
+    ctx.rethrow_if_set();
+  }
+  if (status != RGSADDLE_OK) {
+    delete[] raw;
+    raise_status(status);
+    throw nb::value_error("fixed-energy MEP seed failed");
+  }
+  nb::capsule owner(raw,
+                    [](void *ptr) noexcept { delete[] static_cast<double *>(ptr); });
+  const std::size_t shape[2] = {static_cast<std::size_t>(images),
+                                static_cast<std::size_t>(dof)};
+  return nb::ndarray<nb::numpy, double>(raw, 2, shape, owner);
 }
 
 nb::ndarray<nb::numpy, double> copy_vector(const std::vector<double> &values) {
@@ -1361,6 +1605,68 @@ NB_MODULE(_core, m) {
           "Copy of the mode, or None for a minimiser.")
       .def("curvature", [](PyStencil &self) { return self.inner.curvature(); },
            "Curvature along the mode.");
+
+  nb::class_<LineNebReportPy>(m, "LineNebReport")
+      .def_prop_ro("status",
+                   [](const LineNebReportPy &report) { return report.status; })
+      .def_prop_ro("evaluations", [](const LineNebReportPy &report) {
+        return report.evaluations;
+      })
+      .def_prop_ro("max_interior_optimized",
+                   [](const LineNebReportPy &report) {
+                     return report.max_interior_optimized;
+                   })
+      .def_prop_ro("max_interior_perpendicular",
+                   [](const LineNebReportPy &report) {
+                     return report.max_interior_perpendicular;
+                   })
+      .def_prop_ro("sum_interior_perpendicular",
+                   [](const LineNebReportPy &report) {
+                     return report.sum_interior_perpendicular;
+                   })
+      .def_prop_ro("max_endpoint_optimized",
+                   [](const LineNebReportPy &report) {
+                     return report.max_endpoint_optimized;
+                   })
+      .def_prop_ro("action",
+                   [](const LineNebReportPy &report) { return report.action; })
+      .def_prop_ro("iteration", [](const LineNebReportPy &report) {
+        return report.iteration;
+      })
+      .def("converged", &LineNebReportPy::converged);
+
+  nb::class_<PyLineNeb>(m, "LineNeb")
+      .def(nb::init<Matrix, Vector, double, double, double, double, double,
+                    double, double, double>(),
+           nb::arg("positions").noconvert(), nb::arg("masses").noconvert(),
+           nb::arg("energy"), nb::arg("spring_k") = 1.0,
+           nb::arg("endpoint_kappa") = 1.0, nb::arg("force_tol") = 0.001,
+           nb::arg("endpoint_force_tol") = 0.001,
+           nb::arg("sum_force_tol") = 0.001, nb::arg("time_step") = 0.01,
+           nb::arg("reduced_planck") = 1.0)
+      .def("step", &PyLineNeb::step, nb::arg("surface"))
+      .def("run", &PyLineNeb::run, nb::arg("surface"),
+           nb::arg("max_steps"))
+      .def("positions", &PyLineNeb::positions);
+
+  nb::class_<PyNaturalCubic>(m, "NaturalCubic")
+      .def(nb::init<Vector, Matrix>(), nb::arg("knots").noconvert(),
+           nb::arg("values").noconvert())
+      .def("sample", &PyNaturalCubic::sample, nb::arg("x"));
+
+  m.def("fixed_energy_action", &fixed_energy_action_python,
+        nb::arg("positions").noconvert(), nb::arg("energies").noconvert(),
+        nb::arg("masses").noconvert(), nb::arg("energy"),
+        nb::arg("reduced_planck") = 1.0);
+  m.def("fixed_energy_action_force", &fixed_energy_action_force_python,
+        nb::arg("positions").noconvert(), nb::arg("energies").noconvert(),
+        nb::arg("gradients").noconvert(), nb::arg("masses").noconvert(),
+        nb::arg("energy"), nb::arg("reduced_planck") = 1.0);
+  m.def("fixed_energy_mep_seed", &fixed_energy_mep_seed_python,
+        nb::arg("surface"), nb::arg("saddle").noconvert(),
+        nb::arg("mode").noconvert(), nb::arg("masses").noconvert(),
+        nb::arg("saddle_energy"), nb::arg("target_energy"),
+        nb::arg("images"));
 
   nb::class_<ConnectReportPy>(m, "ConnectReport")
       .def_prop_ro("position", [](const ConnectReportPy &report) { return copy_vector(report.position); },

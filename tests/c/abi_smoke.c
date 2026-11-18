@@ -174,6 +174,84 @@ static rgsaddle_status_t surface(void *user, rgsaddle_surface_request_t *req) {
   return RGSADDLE_OK;
 }
 
+static rgsaddle_status_t line_surface(void *user,
+                                     rgsaddle_surface_request_t *req) {
+  (void)user;
+  const long dof = 3 * (long)req->n_atoms;
+  for (long i = 0; i < (long)req->n_images; ++i) {
+    const double *p = req->positions + i * dof;
+    double *g = req->gradients + i * dof;
+    const double x = p[0], y = p[1], z = p[2];
+    req->energies[i] =
+        (x * x - 1.0) * (x * x - 1.0) + y * y + z * z;
+    g[0] = 4.0 * x * (x * x - 1.0);
+    g[1] = 2.0 * y;
+    g[2] = 2.0 * z;
+  }
+  return RGSADDLE_OK;
+}
+
+static rgsaddle_status_t line_neb_smoke(void) {
+  const long n_images = 9;
+  double positions[9 * 3];
+  const double turning = sqrt(1.0 - sqrt(0.3));
+  for (long i = 0; i < n_images; ++i) {
+    const double fraction = (double)i / (double)(n_images - 1);
+    positions[3 * i] = -turning + 2.0 * turning * fraction;
+    positions[3 * i + 1] = 0.18 * sin(3.14159265358979 * fraction);
+    positions[3 * i + 2] = 0.0;
+  }
+  double masses[3] = {1.0, 2.0, 3.0};
+  rgsaddle_line_neb_config_t config;
+  memset(&config, 0, sizeof config);
+  config.version = (rgsaddle_version_t)RGSADDLE_VERSION_INIT;
+  config.spring_k = 0.4;
+  config.endpoint_kappa = 1.5;
+  config.force_tol = 2e-6;
+  config.endpoint_force_tol = 2e-6;
+  config.sum_force_tol = 2e-6;
+  config.energy = 0.25;
+  config.masses = masses;
+  config.time_step = 0.03;
+  config.reduced_planck = 1.0;
+  RgsaddleLineNeb *line = rgsaddle_line_neb_create(
+      &config, n_images, 1, positions);
+  if (line == NULL) {
+    return fail(RGSADDLE_SHAPE, "line-neb create");
+  }
+  rgsaddle_line_neb_report_t report;
+  int steps = 0;
+  rgsaddle_status_t status;
+  do {
+    memset(&report, 0, sizeof report);
+    status = rgsaddle_line_neb_step(line, line_surface, NULL, &report);
+    if (status != RGSADDLE_OK) {
+      rgsaddle_line_neb_free(line);
+      return fail(status, "line-neb step");
+    }
+    ++steps;
+  } while (report.status == RGSADDLE_STATUS_RUNNING && steps < 80000);
+  if (report.status != RGSADDLE_STATUS_CONVERGED) {
+    rgsaddle_line_neb_free(line);
+    return fail(RGSADDLE_SOLVER, "line-neb convergence");
+  }
+  if (rgsaddle_line_neb_positions(line, positions) != RGSADDLE_OK) {
+    rgsaddle_line_neb_free(line);
+    return fail(RGSADDLE_SHAPE, "line-neb positions");
+  }
+  rgsaddle_line_neb_free(line);
+  const double saddle_x = positions[3 * (n_images / 2)];
+  const double saddle_y = positions[3 * (n_images / 2) + 1];
+  const double saddle_energy =
+      (saddle_x * saddle_x - 1.0) * (saddle_x * saddle_x - 1.0) +
+      saddle_y * saddle_y;
+  if (fabs(saddle_x) > 2e-5 || fabs(saddle_y) > 2e-5 ||
+      fabs(saddle_energy - 1.0) > 2e-6) {
+    return fail(RGSADDLE_SOLVER, "line-neb analytic saddle");
+  }
+  return RGSADDLE_OK;
+}
+
 int main(void) {
   rgsaddle_status_t st = RGSADDLE_OK;
   if (rgsaddle_abi_version() !=
@@ -187,6 +265,10 @@ int main(void) {
   }
   if (rgsaddle_abi_stamp(NULL) != RGSADDLE_INVALID_PARAMETER) {
     return fail(RGSADDLE_INVALID_PARAMETER, "NULL stamp must fail closed");
+  }
+  st = line_neb_smoke();
+  if (st != RGSADDLE_OK) {
+    return st;
   }
 
   const long n_images = 9, n_atoms = 1;

@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 41u
+#define RGSADDLE_ABI_MINOR 42u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -206,6 +206,8 @@ typedef enum {
 } rgsaddle_run_status_t;
 
 typedef struct RgsaddleBand RgsaddleBand;
+typedef struct RgsaddleLineNeb RgsaddleLineNeb;
+typedef struct RgsaddleNaturalCubic RgsaddleNaturalCubic;
 typedef struct RgsaddleMinMode RgsaddleMinMode;
 
 /**
@@ -275,6 +277,92 @@ typedef struct {
   double max_move;
   int64_t memory;
 } rgsaddle_band_config_t;
+
+/** Fixed-energy line-integral NEB configuration. ABI minor 35. */
+typedef struct {
+  rgsaddle_version_t version;
+  /** RGSADDLE_BAND_PER_IMAGE is the only defined flag. */
+  uint64_t flags;
+  double spring_k;
+  double endpoint_kappa;
+  double force_tol;
+  double endpoint_force_tol;
+  double sum_force_tol;
+  double energy;
+  /** 3 * n_atoms positive coordinate masses, copied at create. */
+  const double *masses;
+  double time_step;
+  double reduced_planck;
+} rgsaddle_line_neb_config_t;
+
+/** One fixed-energy LI-NEB step report. ABI minor 35. */
+typedef struct {
+  rgsaddle_version_t version;
+  uint64_t flags;
+  int32_t status;      /**< rgsaddle_run_status_t */
+  int32_t evaluations; /**< Image rows evaluated in this step. */
+  double max_interior_optimized;
+  double max_interior_perpendicular;
+  double sum_interior_perpendicular;
+  double max_endpoint_optimized;
+  double action;
+  int64_t iteration;
+} rgsaddle_line_neb_report_t;
+
+/**
+ * Create a host-stepped fixed-energy LI-NEB session. Positions are
+ * n_images x (3 * n_atoms), copied in. Endpoints move on V = E.
+ * ABI minor 35.
+ */
+RgsaddleLineNeb *
+rgsaddle_line_neb_create(const rgsaddle_line_neb_config_t *config,
+                         int64_t n_images, int64_t n_atoms,
+                         const double *positions);
+
+/** Take one LI-NEB optimizer step. ABI minor 35. */
+rgsaddle_status_t
+rgsaddle_line_neb_step(RgsaddleLineNeb *line, rgsaddle_surface_fn surface,
+                       void *user, rgsaddle_line_neb_report_t *out);
+
+/** Copy n_images * 3 * n_atoms current positions. ABI minor 35. */
+rgsaddle_status_t rgsaddle_line_neb_positions(const RgsaddleLineNeb *line,
+                                              double *out);
+
+/** Free an LI-NEB session; NULL is accepted. ABI minor 35. */
+void rgsaddle_line_neb_free(RgsaddleLineNeb *line);
+
+/** Discrete fixed-energy abbreviated action for arbitrary n_dof. */
+rgsaddle_status_t rgsaddle_fixed_energy_action(
+    int64_t n_images, int64_t n_dof, const double *positions,
+    const double *energies, const double *masses, double energy,
+    double reduced_planck, double *out);
+
+/** Negative physical-coordinate gradient of the discrete action. */
+rgsaddle_status_t rgsaddle_fixed_energy_action_force(
+    int64_t n_images, int64_t n_dof, const double *positions,
+    const double *energies, const double *gradients, const double *masses,
+    double energy, double reduced_planck, double *out);
+
+/**
+ * Energy-sliced steepest-descent seed from an index-one saddle.
+ * Inputs contain 3 * n_atoms values; out contains images * 3 * n_atoms.
+ */
+rgsaddle_status_t rgsaddle_fixed_energy_mep_seed(
+    rgsaddle_surface_fn surface, void *user, int64_t n_atoms,
+    const double *saddle, const double *mode, const double *masses,
+    double saddle_energy, double target_energy, int64_t images, double *out);
+
+/** Natural vector-valued cubic interpolation on a strict knot grid. */
+RgsaddleNaturalCubic *rgsaddle_natural_cubic_create(
+    int64_t count, int64_t width, const double *knots, const double *values);
+
+/** Sample value and first two derivatives; each output has width values. */
+rgsaddle_status_t rgsaddle_natural_cubic_sample(
+    const RgsaddleNaturalCubic *cubic, double x, double *value, double *first,
+    double *second);
+
+/** Free a natural cubic interpolation; NULL is accepted. */
+void rgsaddle_natural_cubic_free(RgsaddleNaturalCubic *cubic);
 
 /** One step's report. The session stamps version and flags. */
 typedef struct {

@@ -19,6 +19,10 @@ use crate::band::{BandConfig, BandSession, BandStatus, BandSurface, Cell, CiConf
 use crate::connect::{ConnectConfig, connect};
 use crate::error::SaddleError;
 use crate::geom::{TrustSchedule, trust_update};
+use crate::line_neb::{
+    LineNebConfig, LineNebSession, LineNebStatus, NaturalCubic, fixed_energy_action,
+    fixed_energy_action_force, fixed_energy_mep_seed,
+};
 use crate::minmode::{
     FiniteDifference, MinModeConfig, MinModeKind, MinModeSession, MinModeStatus, PointSurface,
     halve_raised_energy,
@@ -36,7 +40,7 @@ use crate::tangent::TangentKind;
 /// The RGSADDLE ABI MAJOR.
 pub const RGSADDLE_ABI_MAJOR: u32 = 1;
 /// The RGSADDLE ABI MINOR.
-pub const RGSADDLE_ABI_MINOR: u32 = 41;
+pub const RGSADDLE_ABI_MINOR: u32 = 42;
 
 /// A band, min-mode or OCI-NEB config of this minor or newer certifies
 /// the saddle index at convergence by default.
@@ -179,6 +183,58 @@ pub struct RgsaddleBandConfig {
     pub max_move: f64,
     /// Number of vector pairs a limited-memory stepper stores.
     pub memory: i64,
+}
+
+#[repr(C)]
+/// Fixed-energy LI-NEB configuration.
+pub struct RgsaddleLineNebConfig {
+    /// ABI version this value was built against.
+    pub version: RgsaddleVersion,
+    /// Bit flags. The header names each bit.
+    pub flags: u64,
+    /// Uniform spring constant in mass-scaled coordinates.
+    pub spring_k: f64,
+    /// Endpoint restraint coefficient.
+    pub endpoint_kappa: f64,
+    /// Interior optimized-force tolerance.
+    pub force_tol: f64,
+    /// Endpoint optimized-force tolerance.
+    pub endpoint_force_tol: f64,
+    /// Summed interior transverse-force tolerance.
+    pub sum_force_tol: f64,
+    /// Fixed target energy.
+    pub energy: f64,
+    /// 3 * n_atoms positive coordinate masses, copied at create.
+    pub masses: *const f64,
+    /// Quick-min time step.
+    pub time_step: f64,
+    /// Reduced Planck constant.
+    pub reduced_planck: f64,
+}
+
+#[repr(C)]
+/// One fixed-energy LI-NEB step report.
+pub struct RgsaddleLineNebReport {
+    /// ABI version this value was built against.
+    pub version: RgsaddleVersion,
+    /// Bit flags. The header names each bit.
+    pub flags: u64,
+    /// `rgsaddle_run_status_t`.
+    pub status: i32,
+    /// Surface rows evaluated in this step.
+    pub evaluations: i32,
+    /// Largest interior optimized-force norm.
+    pub max_interior_optimized: f64,
+    /// Largest interior transverse-force norm.
+    pub max_interior_perpendicular: f64,
+    /// Sum of interior transverse-force norms.
+    pub sum_interior_perpendicular: f64,
+    /// Largest endpoint optimized-force norm.
+    pub max_endpoint_optimized: f64,
+    /// Discrete fixed-energy action.
+    pub action: f64,
+    /// Accepted LI-NEB step count.
+    pub iteration: i64,
 }
 
 #[repr(C)]
@@ -401,6 +457,19 @@ pub struct RgsaddleBand {
     climbing_request: bool,
 }
 
+/// The RgsaddleLineNeb.
+pub struct RgsaddleLineNeb {
+    session: LineNebSession,
+    n_images: i64,
+    n_atoms: i64,
+    per_image: bool,
+}
+
+/// The RgsaddleNaturalCubic.
+pub struct RgsaddleNaturalCubic {
+    spline: NaturalCubic,
+    width: usize,
+}
 /// The RgsaddleMinMode.
 pub struct RgsaddleMinMode {
     session: MinModeSession,
@@ -480,6 +549,391 @@ pub extern "C" fn rgsaddle_status_name(status: i32) -> *const c_char {
 /// Open a band over `n_images` rows of `3 * n_atoms` positions.
 /// NULL when the config or the shape is refused.
 ///
+/// # Safety
+/// The config, masses, and positions must be valid for the declared shape.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_line_neb_create(
+    config: *const RgsaddleLineNebConfig,
+    n_images: i64,
+    n_atoms: i64,
+    positions: *const f64,
+) -> *mut RgsaddleLineNeb {
+    if config.is_null() || positions.is_null() || n_images < 3 || n_atoms < 1 {
+        return std::ptr::null_mut();
+    }
+    let cfg = unsafe { &*config };
+    if cfg.version.major != RGSADDLE_ABI_MAJOR || cfg.masses.is_null() {
+        return std::ptr::null_mut();
+    }
+    let Some(dof) = usize::try_from(n_atoms)
+        .ok()
+        .and_then(|atoms| atoms.checked_mul(3))
+    else {
+        return std::ptr::null_mut();
+    };
+    let Some(position_len) = usize::try_from(n_images)
+        .ok()
+        .and_then(|images| images.checked_mul(dof))
+    else {
+        return std::ptr::null_mut();
+    };
+    let masses = Array1::from(unsafe { slice::from_raw_parts(cfg.masses, dof) }.to_vec());
+    let position_values = unsafe { slice::from_raw_parts(positions, position_len) }.to_vec();
+    let Ok(position_array) = Array2::from_shape_vec((n_images as usize, dof), position_values)
+    else {
+        return std::ptr::null_mut();
+    };
+    let line_config = LineNebConfig::default()
+        .with_spring_k(cfg.spring_k)
+        .with_endpoint_kappa(cfg.endpoint_kappa)
+        .with_force_tol(cfg.force_tol)
+        .with_endpoint_force_tol(cfg.endpoint_force_tol)
+        .with_sum_force_tol(cfg.sum_force_tol)
+        .with_energy(cfg.energy)
+        .with_masses(masses)
+        .with_time_step(cfg.time_step)
+        .with_reduced_planck(cfg.reduced_planck);
+    match LineNebSession::new(line_config, position_array) {
+        Ok(session) => Box::into_raw(Box::new(RgsaddleLineNeb {
+            session,
+            n_images,
+            n_atoms,
+            per_image: cfg.flags & RGSADDLE_BAND_PER_IMAGE != 0,
+        })),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// # Safety
+/// The session and report must be valid and the callback must obey the
+/// surface request contract.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_line_neb_step(
+    line: *mut RgsaddleLineNeb,
+    surface: Option<RgsaddleSurfaceFn>,
+    user: *mut c_void,
+    out: *mut RgsaddleLineNebReport,
+) -> i32 {
+    if line.is_null() {
+        return RGSADDLE_NULL_BAND;
+    }
+    if out.is_null() {
+        return RGSADDLE_NULL_REPORT;
+    }
+    let Some(f) = surface else {
+        return RGSADDLE_NULL_SURFACE;
+    };
+    let line = unsafe { &mut *line };
+    let surface = CSurface {
+        f,
+        user,
+        n_atoms: line.n_atoms,
+        n_images: line.n_images,
+        per_image: line.per_image,
+        climbing_request: false,
+        rows: std::sync::atomic::AtomicUsize::new(0),
+    };
+    match line.session.step(&surface) {
+        Ok(report) => {
+            let out = unsafe { &mut *out };
+            out.version = RgsaddleVersion {
+                major: RGSADDLE_ABI_MAJOR,
+                minor: RGSADDLE_ABI_MINOR,
+            };
+            out.flags = 0;
+            out.status = match report.status {
+                LineNebStatus::Running => 0,
+                LineNebStatus::Converged => 1,
+            };
+            out.evaluations = report.surface_rows.min(i32::MAX as usize) as i32;
+            out.max_interior_optimized = report.max_interior_optimized;
+            out.max_interior_perpendicular = report.max_interior_perpendicular;
+            out.sum_interior_perpendicular = report.sum_interior_perpendicular;
+            out.max_endpoint_optimized = report.max_endpoint_optimized;
+            out.action = report.action;
+            out.iteration = report.iteration.min(i64::MAX as usize) as i64;
+            RGSADDLE_OK
+        }
+        Err(err) => status_of(&err),
+    }
+}
+
+/// # Safety
+/// `out` must hold `n_images * 3 * n_atoms` doubles.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_line_neb_positions(
+    line: *const RgsaddleLineNeb,
+    out: *mut f64,
+) -> i32 {
+    if line.is_null() {
+        return RGSADDLE_NULL_BAND;
+    }
+    if out.is_null() {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let positions = unsafe { &*line }.session.positions();
+    for (destination, value) in unsafe { slice::from_raw_parts_mut(out, positions.len()) }
+        .iter_mut()
+        .zip(positions.iter())
+    {
+        *destination = *value;
+    }
+    RGSADDLE_OK
+}
+
+/// # Safety
+/// `line` must be a live session pointer or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_line_neb_free(line: *mut RgsaddleLineNeb) {
+    if !line.is_null() {
+        drop(unsafe { Box::from_raw(line) });
+    }
+}
+
+/// # Safety
+/// Input and output pointers must be valid for their documented lengths.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_fixed_energy_action(
+    n_images: i64,
+    n_dof: i64,
+    positions: *const f64,
+    energies: *const f64,
+    masses: *const f64,
+    energy: f64,
+    reduced_planck: f64,
+    out: *mut f64,
+) -> i32 {
+    if n_images < 3
+        || n_dof < 1
+        || positions.is_null()
+        || energies.is_null()
+        || masses.is_null()
+        || out.is_null()
+    {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let images = n_images as usize;
+    let dof = n_dof as usize;
+    let Some(position_len) = images.checked_mul(dof) else {
+        return RGSADDLE_SHAPE;
+    };
+    let position_values = unsafe { slice::from_raw_parts(positions, position_len) }.to_vec();
+    let Ok(position_array) = Array2::from_shape_vec((images, dof), position_values) else {
+        return RGSADDLE_SHAPE;
+    };
+    let energy_array = Array1::from(unsafe { slice::from_raw_parts(energies, images) }.to_vec());
+    let mass_array = Array1::from(unsafe { slice::from_raw_parts(masses, dof) }.to_vec());
+    match fixed_energy_action(
+        position_array.view(),
+        energy_array.view(),
+        mass_array.view(),
+        energy,
+        reduced_planck,
+    ) {
+        Ok(action) => {
+            unsafe { *out = action };
+            RGSADDLE_OK
+        }
+        Err(err) => status_of(&err),
+    }
+}
+
+/// # Safety
+/// Input and output pointers must be valid for their documented lengths.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_fixed_energy_action_force(
+    n_images: i64,
+    n_dof: i64,
+    positions: *const f64,
+    energies: *const f64,
+    gradients: *const f64,
+    masses: *const f64,
+    energy: f64,
+    reduced_planck: f64,
+    out: *mut f64,
+) -> i32 {
+    if n_images < 3
+        || n_dof < 1
+        || positions.is_null()
+        || energies.is_null()
+        || gradients.is_null()
+        || masses.is_null()
+        || out.is_null()
+    {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let images = n_images as usize;
+    let dof = n_dof as usize;
+    let Some(value_len) = images.checked_mul(dof) else {
+        return RGSADDLE_SHAPE;
+    };
+    let position_values = unsafe { slice::from_raw_parts(positions, value_len) }.to_vec();
+    let gradient_values = unsafe { slice::from_raw_parts(gradients, value_len) }.to_vec();
+    let Ok(position_array) = Array2::from_shape_vec((images, dof), position_values) else {
+        return RGSADDLE_SHAPE;
+    };
+    let Ok(gradient_array) = Array2::from_shape_vec((images, dof), gradient_values) else {
+        return RGSADDLE_SHAPE;
+    };
+    let energy_array = Array1::from(unsafe { slice::from_raw_parts(energies, images) }.to_vec());
+    let mass_array = Array1::from(unsafe { slice::from_raw_parts(masses, dof) }.to_vec());
+    match fixed_energy_action_force(
+        position_array.view(),
+        energy_array.view(),
+        gradient_array.view(),
+        mass_array.view(),
+        energy,
+        reduced_planck,
+    ) {
+        Ok(force) => {
+            for (destination, value) in unsafe { slice::from_raw_parts_mut(out, value_len) }
+                .iter_mut()
+                .zip(force.iter())
+            {
+                *destination = *value;
+            }
+            RGSADDLE_OK
+        }
+        Err(err) => status_of(&err),
+    }
+}
+
+/// # Safety
+/// Inputs and output must be valid for `3 * n_atoms` coordinates and
+/// `images * 3 * n_atoms` output values.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_fixed_energy_mep_seed(
+    surface: Option<RgsaddleSurfaceFn>,
+    user: *mut c_void,
+    n_atoms: i64,
+    saddle: *const f64,
+    mode: *const f64,
+    masses: *const f64,
+    saddle_energy: f64,
+    target_energy: f64,
+    images: i64,
+    out: *mut f64,
+) -> i32 {
+    let Some(f) = surface else {
+        return RGSADDLE_NULL_SURFACE;
+    };
+    if n_atoms < 1
+        || images < 3
+        || saddle.is_null()
+        || mode.is_null()
+        || masses.is_null()
+        || out.is_null()
+    {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let Some(dof) = usize::try_from(n_atoms)
+        .ok()
+        .and_then(|atoms| atoms.checked_mul(3))
+    else {
+        return RGSADDLE_SHAPE;
+    };
+    let surface = CSurface {
+        f,
+        user,
+        n_atoms,
+        n_images: 1,
+        per_image: false,
+        climbing_request: false,
+        rows: std::sync::atomic::AtomicUsize::new(0),
+    };
+    let saddle = Array1::from(unsafe { slice::from_raw_parts(saddle, dof) }.to_vec());
+    let mode = Array1::from(unsafe { slice::from_raw_parts(mode, dof) }.to_vec());
+    let masses = Array1::from(unsafe { slice::from_raw_parts(masses, dof) }.to_vec());
+    match fixed_energy_mep_seed(
+        &surface,
+        saddle.view(),
+        mode.view(),
+        masses.view(),
+        saddle_energy,
+        target_energy,
+        images as usize,
+    ) {
+        Ok(path) => {
+            let Some(out_len) = (images as usize).checked_mul(dof) else {
+                return RGSADDLE_SHAPE;
+            };
+            for (destination, value) in unsafe { slice::from_raw_parts_mut(out, out_len) }
+                .iter_mut()
+                .zip(path.iter())
+            {
+                *destination = *value;
+            }
+            RGSADDLE_OK
+        }
+        Err(err) => status_of(&err),
+    }
+}
+
+/// # Safety
+/// Knots and row-major values must be valid for the declared dimensions.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_natural_cubic_create(
+    count: i64,
+    width: i64,
+    knots: *const f64,
+    values: *const f64,
+) -> *mut RgsaddleNaturalCubic {
+    if count < 2 || width < 1 || knots.is_null() || values.is_null() {
+        return std::ptr::null_mut();
+    }
+    let count = count as usize;
+    let width = width as usize;
+    let Some(value_len) = count.checked_mul(width) else {
+        return std::ptr::null_mut();
+    };
+    let knots = unsafe { slice::from_raw_parts(knots, count) }.to_vec();
+    let flat = unsafe { slice::from_raw_parts(values, value_len) };
+    let rows = flat.chunks_exact(width).map(<[f64]>::to_vec).collect();
+    match NaturalCubic::new(knots, rows) {
+        Ok(spline) => Box::into_raw(Box::new(RgsaddleNaturalCubic { spline, width })),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// # Safety
+/// Each output must hold the spline width in doubles.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_natural_cubic_sample(
+    cubic: *const RgsaddleNaturalCubic,
+    x: f64,
+    value: *mut f64,
+    first: *mut f64,
+    second: *mut f64,
+) -> i32 {
+    if cubic.is_null() {
+        return RGSADDLE_NULL_SESSION;
+    }
+    if value.is_null() || first.is_null() || second.is_null() {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let cubic = unsafe { &*cubic };
+    match cubic.spline.sample(x) {
+        Ok(sample) => {
+            unsafe {
+                slice::from_raw_parts_mut(value, cubic.width).copy_from_slice(&sample.value);
+                slice::from_raw_parts_mut(first, cubic.width).copy_from_slice(&sample.first);
+                slice::from_raw_parts_mut(second, cubic.width).copy_from_slice(&sample.second);
+            }
+            RGSADDLE_OK
+        }
+        Err(err) => status_of(&err),
+    }
+}
+
+/// # Safety
+/// `cubic` must be a live interpolation pointer or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_natural_cubic_free(cubic: *mut RgsaddleNaturalCubic) {
+    if !cubic.is_null() {
+        drop(unsafe { Box::from_raw(cubic) });
+    }
+}
+
 /// # Safety
 /// `config` and `positions` must be valid for the declared shape.
 ///

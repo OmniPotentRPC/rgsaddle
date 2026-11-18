@@ -27,6 +27,10 @@ mod min_mode;
 mod pair_model;
 mod saddle_check;
 mod zoom;
+pub use crate::line_neb::{
+    CubicSample, LineNebConfig, LineNebReport, LineNebSession, LineNebStatus, NaturalCubic,
+    fixed_energy_action, fixed_energy_action_force, fixed_energy_mep_seed,
+};
 pub use min_mode::MinModeRefine;
 pub(crate) use min_mode::RefinePhase;
 pub use zoom::ZoomConfig;
