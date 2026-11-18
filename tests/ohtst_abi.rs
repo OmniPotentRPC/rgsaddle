@@ -5,12 +5,12 @@ use std::os::raw::c_void;
 use std::ptr;
 
 use rgsaddle::capi::{
-    RGSADDLE_ABI_MAJOR, RGSADDLE_ABI_MINOR, RGSADDLE_OK, RgsaddleOhtstOptimizeConfig,
-    RgsaddleOhtstOptimizeReport, RgsaddleOhtstRateIn, RgsaddleOhtstRateOut,
-    RgsaddleOhtstSampleConfig, RgsaddleOhtstSampleReport, RgsaddleOhtstTransmissionConfig,
-    RgsaddleOhtstTransmissionReport, RgsaddleOhtstWorkConfig, RgsaddleOhtstWorkReport,
-    RgsaddleVersion, rgsaddle_ohtst_mbar, rgsaddle_ohtst_optimize, rgsaddle_ohtst_rate,
-    rgsaddle_ohtst_sample, rgsaddle_ohtst_transmission, rgsaddle_ohtst_work,
+    RGSADDLE_ABI_MAJOR, RGSADDLE_ABI_MINOR, RGSADDLE_INVALID_PARAMETER, RGSADDLE_OK,
+    RGSADDLE_SHAPE, RgsaddleOhtstOptimizeConfig, RgsaddleOhtstOptimizeReport, RgsaddleOhtstRateIn,
+    RgsaddleOhtstRateOut, RgsaddleOhtstSampleConfig, RgsaddleOhtstSampleReport,
+    RgsaddleOhtstTransmissionConfig, RgsaddleOhtstTransmissionReport, RgsaddleOhtstWorkConfig,
+    RgsaddleOhtstWorkReport, RgsaddleVersion, rgsaddle_ohtst_mbar, rgsaddle_ohtst_optimize,
+    rgsaddle_ohtst_rate, rgsaddle_ohtst_sample, rgsaddle_ohtst_transmission, rgsaddle_ohtst_work,
 };
 
 extern "C" fn well(
@@ -268,4 +268,299 @@ fn sample_and_rate_and_mbar_round_trip() {
     assert_eq!(status, RGSADDLE_OK);
     assert!(kappa.kappa.is_finite());
     assert_eq!(kappa.shots + kappa.unassigned, 4);
+}
+
+fn blank_rate_out() -> RgsaddleOhtstRateOut {
+    RgsaddleOhtstRateOut {
+        version: version(),
+        flags: 0,
+        rate: 0.0,
+        error: 0.0,
+        log_rate: 0.0,
+        log_rate_error: 0.0,
+        flux: 0.0,
+    }
+}
+
+#[test]
+fn unknown_flags_and_negative_rate_errors_are_rejected() {
+    let mut input = RgsaddleOhtstRateIn {
+        version: version(),
+        flags: 1,
+        thermal: 0.25,
+        density: 1.0,
+        density_error: 0.0,
+        work: 0.0,
+        work_error: 0.0,
+    };
+    let mut out = blank_rate_out();
+    let status = unsafe { rgsaddle_ohtst_rate(&input, &mut out) };
+    assert_eq!(status, RGSADDLE_INVALID_PARAMETER);
+    input.flags = 0;
+    input.density_error = -0.01;
+    let status = unsafe { rgsaddle_ohtst_rate(&input, &mut out) };
+    assert_eq!(status, RGSADDLE_INVALID_PARAMETER);
+    input.density_error = 0.0;
+    input.work_error = -0.01;
+    let status = unsafe { rgsaddle_ohtst_rate(&input, &mut out) };
+    assert_eq!(status, RGSADDLE_INVALID_PARAMETER);
+
+    let mut sample = RgsaddleOhtstSampleConfig {
+        version: version(),
+        flags: 1,
+        thermal: 0.25,
+        time_step: 0.05,
+        friction: 1.0,
+        burn_in: 0,
+        stride: 1,
+        records: 4,
+        blocks: 2,
+        seed: 1,
+    };
+    let mut report = RgsaddleOhtstSampleReport {
+        version: version(),
+        flags: 0,
+        normal_force: 0.0,
+        normal_force_error: 0.0,
+        virial: 0.0,
+        virial_error: 0.0,
+        acceptance: 0.0,
+        records: 0,
+        evaluations: 0,
+    };
+    let point = [0.0, 0.0];
+    let normal = [1.0, 0.0];
+    let mut centroid = [0.0, 0.0];
+    let mut grad_normal = [0.0, 0.0];
+    let status = unsafe {
+        rgsaddle_ohtst_sample(
+            &sample,
+            2,
+            point.as_ptr(),
+            normal.as_ptr(),
+            Some(well),
+            ptr::null_mut(),
+            centroid.as_mut_ptr(),
+            grad_normal.as_mut_ptr(),
+            &mut report,
+        )
+    };
+    assert_eq!(status, RGSADDLE_INVALID_PARAMETER);
+    sample.flags = 0;
+    let status = unsafe {
+        rgsaddle_ohtst_sample(
+            &sample,
+            -1,
+            point.as_ptr(),
+            normal.as_ptr(),
+            Some(well),
+            ptr::null_mut(),
+            centroid.as_mut_ptr(),
+            grad_normal.as_mut_ptr(),
+            &mut report,
+        )
+    };
+    assert_eq!(status, RGSADDLE_INVALID_PARAMETER);
+
+    let optimize = RgsaddleOhtstOptimizeConfig {
+        version: version(),
+        flags: 1,
+        thermal: 0.25,
+        time_step: 0.05,
+        friction: 1.0,
+        burn_in: 0,
+        stride: 1,
+        records: 4,
+        blocks: 2,
+        seed: 1,
+        max_iterations: 1,
+        max_translation: 0.1,
+        max_rotation: 0.1,
+        translate: 1,
+        rotate: 0,
+        patience: 1,
+    };
+    let mut optimum = RgsaddleOhtstOptimizeReport {
+        version: version(),
+        flags: 0,
+        iterations: 0,
+        evaluations: 0,
+        normal_force: 0.0,
+        normal_force_error: 0.0,
+    };
+    let mut point = [0.0, 0.0];
+    let mut normal = [1.0, 0.0];
+    let status = unsafe {
+        rgsaddle_ohtst_optimize(
+            &optimize,
+            2,
+            point.as_mut_ptr(),
+            normal.as_mut_ptr(),
+            Some(well),
+            ptr::null_mut(),
+            &mut optimum,
+        )
+    };
+    assert_eq!(status, RGSADDLE_INVALID_PARAMETER);
+
+    let work = RgsaddleOhtstWorkConfig {
+        version: version(),
+        flags: 1,
+        thermal: 0.25,
+        time_step: 0.05,
+        friction: 1.0,
+        burn_in: 0,
+        stride: 1,
+        records: 4,
+        blocks: 2,
+        seed: 1,
+        nodes: 3,
+        bar_samples: 0,
+        mbar: 0,
+        estimate: 0,
+    };
+    let mut work_report = RgsaddleOhtstWorkReport {
+        version: version(),
+        flags: 0,
+        work: 0.0,
+        error: 0.0,
+        integrated_work: 0.0,
+        integrated_error: 0.0,
+        bar_work: 0.0,
+        bar_error: 0.0,
+        mbar_work: 0.0,
+        mbar_error: 0.0,
+        evaluations: 0,
+    };
+    let planes = [0.0, 0.0, 0.2, 0.0];
+    let status = unsafe {
+        rgsaddle_ohtst_work(
+            &work,
+            2,
+            2,
+            planes.as_ptr(),
+            planes.as_ptr(),
+            ptr::null(),
+            Some(well),
+            ptr::null_mut(),
+            &mut work_report,
+        )
+    };
+    assert_eq!(status, RGSADDLE_INVALID_PARAMETER);
+    let status = unsafe {
+        rgsaddle_ohtst_work(
+            &RgsaddleOhtstWorkConfig { flags: 0, ..work },
+            2,
+            -3,
+            planes.as_ptr(),
+            planes.as_ptr(),
+            ptr::null(),
+            Some(well),
+            ptr::null_mut(),
+            &mut work_report,
+        )
+    };
+    assert_eq!(status, RGSADDLE_INVALID_PARAMETER);
+
+    let shooting = RgsaddleOhtstTransmissionConfig {
+        version: version(),
+        flags: 1,
+        thermal: 0.25,
+        time_step: 0.05,
+        friction: 0.0,
+        steps: 4,
+        check_every: 2,
+        shots: 2,
+        blocks: 2,
+        seed: 1,
+    };
+    let mut kappa = RgsaddleOhtstTransmissionReport {
+        version: version(),
+        flags: 0,
+        kappa: 0.0,
+        error: 0.0,
+        shots: 0,
+        unassigned: 0,
+        reactive: 0,
+        recrossed: 0,
+        evaluations: 0,
+    };
+    let starts = [0.0, 0.0];
+    let status = unsafe {
+        rgsaddle_ohtst_transmission(
+            &shooting,
+            2,
+            point.as_ptr(),
+            normal.as_ptr(),
+            1,
+            starts.as_ptr(),
+            Some(well),
+            ptr::null_mut(),
+            &mut kappa,
+        )
+    };
+    assert_eq!(status, RGSADDLE_INVALID_PARAMETER);
+}
+
+#[test]
+fn mbar_state_square_that_does_not_fit_is_rejected() {
+    let dummy = 1_i64;
+    let status = unsafe {
+        rgsaddle_ohtst_mbar(
+            1,
+            1_i64 << 32,
+            ptr::null(),
+            &dummy,
+            ptr::null(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+        )
+    };
+    assert_eq!(status, RGSADDLE_SHAPE);
+}
+
+/// `1 << 32` does not fit in a 32-bit `usize`. The cast must fail before
+/// any allocation.
+#[cfg(target_pointer_width = "32")]
+#[test]
+fn dimension_above_usize_is_rejected() {
+    let sample = RgsaddleOhtstSampleConfig {
+        version: version(),
+        flags: 0,
+        thermal: 0.25,
+        time_step: 0.05,
+        friction: 1.0,
+        burn_in: 0,
+        stride: 1,
+        records: 4,
+        blocks: 2,
+        seed: 1,
+    };
+    let mut report = RgsaddleOhtstSampleReport {
+        version: version(),
+        flags: 0,
+        normal_force: 0.0,
+        normal_force_error: 0.0,
+        virial: 0.0,
+        virial_error: 0.0,
+        acceptance: 0.0,
+        records: 0,
+        evaluations: 0,
+    };
+    let point = [0.0_f64; 0];
+    let status = unsafe {
+        rgsaddle_ohtst_sample(
+            &sample,
+            1_i64 << 32,
+            point.as_ptr(),
+            point.as_ptr(),
+            Some(well),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &mut report,
+        )
+    };
+    assert_eq!(status, RGSADDLE_INVALID_PARAMETER);
 }

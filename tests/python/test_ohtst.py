@@ -98,3 +98,52 @@ def test_mbar_pins_the_first_state_at_zero() -> None:
 def test_rate_refuses_a_non_positive_density() -> None:
     with pytest.raises(ValueError):
         ohtst_rate(0.25, 0.0, 0.0, 0.0, 0.0)
+
+
+def test_rate_refuses_a_negative_standard_error() -> None:
+    with pytest.raises(ValueError):
+        ohtst_rate(0.25, 1.0, -0.1, 0.0, 0.0)
+    with pytest.raises(ValueError):
+        ohtst_rate(0.25, 1.0, 0.0, 1.0, -0.1)
+
+
+def test_transmission_stops_entering_python_after_a_callback_error() -> None:
+    calls = {"n": 0}
+
+    def failing(q: np.ndarray) -> tuple[float, np.ndarray]:
+        calls["n"] += 1
+        if calls["n"] > 8:
+            raise RuntimeError("stop the other shots")
+        return surface(q)
+
+    point = np.array([0.0, 0.0], dtype=np.float64)
+    normal = np.array([1.0, 0.0], dtype=np.float64)
+    starts = np.zeros((16, 2), dtype=np.float64)
+    with pytest.raises(RuntimeError, match="stop the other shots"):
+        ohtst_transmission(failing, point, normal, starts, 0.25, 0.02, 0.0, 40, 10, 16, 2, 1)
+    # Sixteen shots of forty steps would be hundreds of callbacks if the
+    # others kept entering Python after the first exception.
+    assert calls["n"] < 80
+
+
+def test_mbar_covariance_is_states_by_states() -> None:
+    reduced = np.array([[0.0, 4.0, 8.0], [0.2, 3.5, 7.5], [4.0, 0.1, 4.0], [8.0, 4.0, 0.0]])
+    counts = np.array([1, 1, 2], dtype=np.int64)
+    solved = ohtst_mbar(reduced, counts)
+    covariance = np.asarray(solved.covariance)
+    overlap = np.asarray(solved.overlap)
+    assert covariance.shape == (3, 3)
+    assert overlap.shape == (3, 3)
+    assert covariance.size == 9
+    assert overlap.size == 9
+
+
+def test_mbar_rejects_a_state_square_that_overflows() -> None:
+    states = 1 << 32
+    base = np.zeros(1, dtype=np.float64)
+    reduced = np.lib.stride_tricks.as_strided(base, shape=(1, states), strides=(8, 0))
+    counts = np.lib.stride_tricks.as_strided(
+        np.ones(1, dtype=np.int64), shape=(states,), strides=(0,)
+    )
+    with pytest.raises(ValueError, match="overflows"):
+        ohtst_mbar(reduced, counts)

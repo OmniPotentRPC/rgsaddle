@@ -45,6 +45,7 @@
 #include <cstdint>
 #include <cstring>
 #include <exception>
+#include <limits>
 #include <map>
 #include <optional>
 #include <string>
@@ -144,6 +145,30 @@ using FlagArray = nb::ndarray<const std::uint8_t, nb::ndim<1>, nb::c_contig, nb:
 using Matrix = nb::ndarray<const double, nb::ndim<2>, nb::c_contig, nb::device::cpu>;
 using Vector = nb::ndarray<const double, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
 using Loose = nb::ndarray<nb::numpy, nb::device::cpu>;
+// Shape is visible before a contiguity check, so an overflowing
+// `states * states` can be refused without a contiguous allocation.
+using MatrixShape = nb::ndarray<const double, nb::ndim<2>, nb::device::cpu>;
+using IdShape = nb::ndarray<const std::int64_t, nb::ndim<1>, nb::device::cpu>;
+
+template <typename Array> bool row_major(const Array &array) {
+  if (!array.is_valid() || array.ndim() == 0) {
+    return false;
+  }
+  std::int64_t step = 1;
+  for (std::size_t axis = array.ndim(); axis-- > 0;) {
+    const auto length = static_cast<std::int64_t>(array.shape(axis));
+    if (length > 1 && array.stride(axis) != step) {
+      return false;
+    }
+    if (length > 1) {
+      if (step > std::numeric_limits<std::int64_t>::max() / length) {
+        return false;
+      }
+      step *= length;
+    }
+  }
+  return true;
+}
 
 [[noreturn]] void shape_error(const char *name, const std::string &expected, const std::string &got) {
   const std::string msg = std::string(name) + ": expected shape " + expected + ", got " + got;
@@ -1871,6 +1896,12 @@ extern "C" rgsaddle_status_t ohtst_python_point(void *user, int64_t n, const dou
   if (state == nullptr || n <= 0 || q == nullptr || energy == nullptr || gradient == nullptr) {
     return RGSADDLE_INVALID_PARAMETER;
   }
+  // Transmission shoots several trajectories at once. Once any worker has
+  // captured a Python exception, CallContext::stop is set. Check it before
+  // acquiring the GIL so later shots do not enter Python.
+  if (state->ctx == nullptr || state->ctx->stop.load(std::memory_order_acquire)) {
+    return RGSADDLE_SURFACE_FAILED;
+  }
   try {
     nb::gil_scoped_acquire gil;
     if (!gil.is_valid()) {
@@ -2073,7 +2104,7 @@ OhtstOptimum ohtst_optimize(nb::callable fn, Vector point, Vector normal, double
                       report.normal_force, report.normal_force_error};
 }
 
-OhtstMbar ohtst_mbar(Matrix reduced, IdArray counts, nb::object initial) {
+OhtstMbar ohtst_mbar(MatrixShape reduced, IdShape counts, nb::object initial) {
   if (reduced.shape(0) <= 0 || reduced.shape(1) < 2) {
     throw nb::value_error("MBAR needs one row per sample and at least two states");
   }
@@ -2081,6 +2112,15 @@ OhtstMbar ohtst_mbar(Matrix reduced, IdArray counts, nb::object initial) {
     throw nb::value_error("counts has one entry per state");
   }
   const std::size_t states = static_cast<std::size_t>(reduced.shape(1));
+  // Covariance and overlap are states by states. Refuse a product that
+  // does not fit in size_t before any of those buffers are allocated.
+  if (states != 0 && states > std::numeric_limits<std::size_t>::max() / states) {
+    throw nb::value_error("states*states overflows size_t");
+  }
+  if (!row_major(reduced) || !row_major(counts)) {
+    throw nb::type_error("ohtst_mbar: expected float64 C-contiguous");
+  }
+  const std::size_t state_square = states * states;
   std::vector<double> start;
   const double *start_ptr = nullptr;
   if (!initial.is_none()) {
@@ -2092,8 +2132,8 @@ OhtstMbar ohtst_mbar(Matrix reduced, IdArray counts, nb::object initial) {
     start_ptr = start.data();
   }
   std::vector<double> free_energies(states);
-  std::vector<double> covariance(states * states);
-  std::vector<double> overlap(states * states);
+  std::vector<double> covariance(state_square);
+  std::vector<double> overlap(state_square);
   const auto status = rgsaddle_ohtst_mbar(reduced.shape(0), reduced.shape(1), reduced.data(), counts.data(),
                                           start_ptr, free_energies.data(), covariance.data(), overlap.data());
   if (status != RGSADDLE_OK) {
@@ -2974,8 +3014,16 @@ NB_MODULE(_core, m) {
       .def_prop_ro(
           "covariance",
           [](const OhtstMbar &self) {
-            auto *raw = new double[self.covariance.size()];
-            std::memcpy(raw, self.covariance.data(), self.covariance.size() * sizeof(double));
+            if (self.states != 0 &&
+                self.states > std::numeric_limits<std::size_t>::max() / self.states) {
+              throw nb::value_error("states*states overflows size_t");
+            }
+            const std::size_t state_square = self.states * self.states;
+            if (self.covariance.size() != state_square) {
+              throw nb::value_error("covariance is not states by states");
+            }
+            auto *raw = new double[state_square];
+            std::memcpy(raw, self.covariance.data(), state_square * sizeof(double));
             nb::capsule owner(raw, [](void *ptr) noexcept { delete[] static_cast<double *>(ptr); });
             const std::size_t shape[2] = {self.states, self.states};
             return nb::ndarray<nb::numpy, double>(raw, 2, shape, owner);
@@ -2984,8 +3032,16 @@ NB_MODULE(_core, m) {
       .def_prop_ro(
           "overlap",
           [](const OhtstMbar &self) {
-            auto *raw = new double[self.overlap.size()];
-            std::memcpy(raw, self.overlap.data(), self.overlap.size() * sizeof(double));
+            if (self.states != 0 &&
+                self.states > std::numeric_limits<std::size_t>::max() / self.states) {
+              throw nb::value_error("states*states overflows size_t");
+            }
+            const std::size_t state_square = self.states * self.states;
+            if (self.overlap.size() != state_square) {
+              throw nb::value_error("overlap is not states by states");
+            }
+            auto *raw = new double[state_square];
+            std::memcpy(raw, self.overlap.data(), state_square * sizeof(double));
             nb::capsule owner(raw, [](void *ptr) noexcept { delete[] static_cast<double *>(ptr); });
             const std::size_t shape[2] = {self.states, self.states};
             return nb::ndarray<nb::numpy, double>(raw, 2, shape, owner);

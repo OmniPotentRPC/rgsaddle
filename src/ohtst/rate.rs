@@ -187,11 +187,22 @@ impl RateMultiplicity {
     }
 }
 
+/// How close two unit normals must be before the planes are the same.
+/// A normal is dimensionless, so this is an absolute gap, not a length.
+const SAME_NORMAL_GAP: f64 = 1.0e-12;
+
+/// A plane matches when its offset is within this fraction of `1 + |point|`.
+/// The scale follows the plane away from the origin instead of fixing a length.
+const SAME_OFFSET_FRACTION: f64 = 1.0e-9;
+
+/// Temperatures match when they differ by less than this fraction of `kT`.
+const SAME_TEMPERATURE_FRACTION: f64 = 1.0e-12;
+
 fn same_plane(a: &Hyperplane, b: &Hyperplane) -> bool {
     let scale = 1.0 + a.point().dot(&a.point()).sqrt();
     a.dim() == b.dim()
-        && a.normal().dot(&b.normal()) > 1.0 - 1.0e-12
-        && a.distance(b.point()).abs() <= 1.0e-9 * scale
+        && a.normal().dot(&b.normal()) > 1.0 - SAME_NORMAL_GAP
+        && a.distance(b.point()).abs() <= SAME_OFFSET_FRACTION * scale
 }
 
 /// An estimate of `Z_H / Z_R` per unit mass-weighted length along the
@@ -231,7 +242,7 @@ pub fn ohtst_rate<D: PlaneDensity + ?Sized>(
 ) -> Result<OhTstRate, SaddleError> {
     let kt = density.thermal();
     let (value, value_error) = density.density();
-    if (work.thermal - kt).abs() > 1.0e-12 * kt {
+    if (work.thermal - kt).abs() > SAME_TEMPERATURE_FRACTION * kt {
         return Err(SaddleError::Invalid(
             "the reactant density and the work come from different temperatures".into(),
         ));
@@ -277,6 +288,11 @@ pub fn rate_from_parts(
     }
     if !(density_error.is_finite() && free_energy.is_finite() && free_energy_error.is_finite()) {
         return Err(SaddleError::NonFinite("rate"));
+    }
+    if density_error < 0.0 || free_energy_error < 0.0 {
+        return Err(SaddleError::Invalid(
+            "standard errors of the density and the free energy must be non-negative".into(),
+        ));
     }
     let flux = (thermal / TAU).sqrt();
     let log_rate = flux.ln() + density.ln() - free_energy / thermal;
@@ -529,6 +545,8 @@ mod tests {
         let mut empty = density;
         empty.density = -0.01;
         assert!(ohtst_rate(&empty, &work).is_err());
+        assert!(rate_from_parts(kt, 0.4, -0.02, 3.0, 0.1).is_err());
+        assert!(rate_from_parts(kt, 0.4, 0.02, 3.0, -0.1).is_err());
     }
 
     #[test]

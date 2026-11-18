@@ -10,13 +10,13 @@
 //! the sampler, and harmonic TST through rgsaddle's dimer and Vineyard
 //! functions.
 //!
-//! Sec. III B, J. Chem. Phys. 115, 9651 (2001), prints
-//! `Q‡/Q_{Z_R} = 0.765 ± 0.005`, `⟨|v|⟩ = 0.399` and
-//! `k_OH-TST = (4.5 ± 0.2)×10^{-7}` at `k_B T = 0.1 E_A`, with
-//! `k = (4.4 ± 0.1)×10^{-7}` from hyperdynamics and `k_hTST = 4.3×10^{-7}`.
-//! Eq. (1) on p. 9645 is `k = ⟨|v⊥|⟩ Q‡ / (2 Q_R)`. The product of the two
-//! tabulated factors is not that rate, and `ΔA` is drawn in Fig. 8 rather
-//! than printed, so the absolute rate is not asserted.
+//! Sec. III B, printed p. 9651, gives `Q‡/Q^{Z^R} = 0.765 ± 0.005`,
+//! `⟨|v|⟩ = 0.399`, `k_OH-TST = (4.5 ± 0.2)×10^{-7}` and `k_hTST = 4.3×10^{-7}`
+//! at `k_B T = 0.1 E_A`. Eq. (23) on printed p. 9650 is
+//! `⟨|v|⟩/2 = sqrt(k_B T / (2 π μ))` with `μ` from Eq. (24). Appendix B
+//! states no masses. [`section_iii_b_unit_mass_does_not_recover_the_printed_rates`]
+//! evaluates the three factors of Eq. (3) (printed p. 9646) in the surface's
+//! own units with `μ = 1` and records that this does not reproduce those rates.
 
 use ndarray::{Array1, array};
 use rgsaddle::{
@@ -763,4 +763,77 @@ fn section_iii_b_prefactor_is_not_the_printed_rate() {
     let high = ratio + 0.005;
     assert!((low * half_speed - published).abs() > 1000.0 * uncertainty);
     assert!((high * half_speed - published).abs() > 1000.0 * uncertainty);
+}
+
+/// Appendix B on printed pp. 9655–9656, evaluated with unit mass.
+///
+/// The saddle printed there is `(2.02083, -0.172881)`. Eq. (23) with `μ = 1`
+/// and the Vineyard rate from the minimum and saddle Hessians are computed
+/// at the stated `k_B T = 0.1 E_A` and at `k_B T = 0.25`, the temperature at
+/// which that same formula gives the printed `⟨|v|⟩ = 0.399`. The three
+/// factors of Eq. (3) are the one-way flux `⟨|v|⟩/2`, the reactant density
+/// `Q^{Z^R}/Q^R` on the guideline through the minimum (the reactant side of
+/// the optimal line), and `exp(-ΔA/k_B T) = Q‡/Q^{Z^R}`.
+#[test]
+fn section_iii_b_unit_mass_does_not_recover_the_printed_rates() {
+    let geometry = geometry();
+    let printed = [2.02083_f64, -0.172881];
+    let gap = (geometry.saddle[0] - printed[0]).hypot(geometry.saddle[1] - printed[1]);
+    assert!(
+        gap < 5.0e-5,
+        "saddle {:?} against the printed {printed:?}, gap {gap}",
+        geometry.saddle
+    );
+
+    let stated = 0.1 * geometry.barrier;
+    let harmonic = harmonic_rate(&geometry, stated);
+    let speed = (2.0 * stated / std::f64::consts::PI).sqrt();
+    // The existing quadrature comparison documents this Vineyard rate as
+    // 4.0410e-5 in the surface's time unit.
+    assert!((harmonic - 4.0410e-5).abs() < 1.0e-9, "{harmonic}");
+    assert!((speed - 0.480983).abs() < 2.0e-4, "{speed}");
+    // Printed p. 9651. Neither number is the unit-mass result.
+    assert!(harmonic / 4.3e-7 > 50.0, "{harmonic}");
+    assert!((speed - 0.399).abs() > 0.05, "{speed}");
+    // Both the Vineyard rate and Eq. (23) scale as 1/sqrt(m). The mass that
+    // puts k_hTST on 4.3e-7 therefore cannot put ⟨|v|⟩ on 0.399.
+    let mass_for_the_printed_rate = (harmonic / 4.3e-7).powi(2);
+    let speed_at_that_mass = speed / mass_for_the_printed_rate.sqrt();
+    assert!((mass_for_the_printed_rate - 8831.77).abs() / 8831.77 < 1.0e-3);
+    assert!(speed_at_that_mass < 0.01 && (speed_at_that_mass - 0.399).abs() > 0.3);
+
+    let (offset, theta, _) = optimal_line(&geometry, stated);
+    let summit = geometry.off_saddle(offset, theta);
+    let rise = (free_energy(&geometry, summit, theta, stated)
+        - free_energy(&geometry, geometry.reactant, geometry.guideline(), stated))
+        / stated;
+    let rate = quadrature_rate(&geometry, stated, offset, theta);
+    let flux = speed / 2.0;
+    let density = rate / flux * rise.exp();
+    let boltzmann = (-rise).exp();
+    assert!((flux * density * boltzmann - rate).abs() <= 1.0e-12 * rate);
+    assert!((density - 0.6509).abs() < 1.0e-3, "Q_ZR/Q_R {density}");
+    assert!((rise - 8.3081).abs() < 1.0e-3, "ΔA/kT {rise}");
+    assert!((boltzmann - 2.465e-4).abs() < 1.0e-6, "Q‡/Q_ZR {boltzmann}");
+    assert!((rate - 3.8589e-5).abs() < 1.0e-8, "k_OH-TST {rate}");
+    assert!((boltzmann - 0.765).abs() > 0.5);
+    assert!(rate < 4.3e-7 || rate > 4.7e-7);
+
+    // k_B T = 0.25 is the unit-mass temperature at which Eq. (23) prints as
+    // 0.399 and the Vineyard rate prints as 4.3e-7. It is not 0.1 E_A, and
+    // the quadrature OH-TST rate there is outside (4.5 ± 0.2)e-7.
+    let matched = 0.25;
+    let matched_speed = (2.0 * matched / std::f64::consts::PI).sqrt();
+    let matched_harmonic = harmonic_rate(&geometry, matched);
+    assert!((matched_speed - 0.399).abs() < 5.0e-4, "{matched_speed}");
+    assert!(
+        (matched_harmonic - 4.3e-7).abs() < 5.0e-9,
+        "{matched_harmonic}"
+    );
+    let (offset, theta, _) = optimal_line(&geometry, matched);
+    let matched_rate = quadrature_rate(&geometry, matched, offset, theta);
+    assert!(
+        matched_rate < 4.3e-7 || matched_rate > 4.7e-7,
+        "quadrature OH-TST {matched_rate} at kT = 0.25"
+    );
 }

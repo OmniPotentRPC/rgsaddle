@@ -45,7 +45,7 @@ pub type RgsaddlePointFn = extern "C" fn(*mut c_void, i64, *const f64, *mut f64,
 pub struct RgsaddleOhtstSampleConfig {
     /// ABI version this value was built against.
     pub version: RgsaddleVersion,
-    /// Bit flags. None are defined.
+    /// Bit flags. None are defined, and any nonzero value is rejected.
     pub flags: u64,
     /// `kT` in the energy unit of the surface.
     pub thermal: f64,
@@ -93,7 +93,7 @@ pub struct RgsaddleOhtstSampleReport {
 pub struct RgsaddleOhtstOptimizeConfig {
     /// ABI version this value was built against.
     pub version: RgsaddleVersion,
-    /// Bit flags. None are defined.
+    /// Bit flags. None are defined, and any nonzero value is rejected.
     pub flags: u64,
     /// `kT` in the energy unit of the surface.
     pub thermal: f64,
@@ -147,7 +147,7 @@ pub struct RgsaddleOhtstOptimizeReport {
 pub struct RgsaddleOhtstWorkConfig {
     /// ABI version this value was built against.
     pub version: RgsaddleVersion,
-    /// Bit flags. None are defined.
+    /// Bit flags. None are defined, and any nonzero value is rejected.
     pub flags: u64,
     /// `kT` in the energy unit of the surface.
     pub thermal: f64,
@@ -207,7 +207,7 @@ pub struct RgsaddleOhtstWorkReport {
 pub struct RgsaddleOhtstTransmissionConfig {
     /// ABI version this value was built against.
     pub version: RgsaddleVersion,
-    /// Bit flags. None are defined.
+    /// Bit flags. None are defined, and any nonzero value is rejected.
     pub flags: u64,
     /// `kT` in the energy unit of the surface.
     pub thermal: f64,
@@ -255,7 +255,7 @@ pub struct RgsaddleOhtstTransmissionReport {
 pub struct RgsaddleOhtstRateIn {
     /// ABI version this value was built against.
     pub version: RgsaddleVersion,
-    /// Bit flags. None are defined.
+    /// Bit flags. None are defined, and any nonzero value is rejected.
     pub flags: u64,
     /// `kT` shared by the density and the work.
     pub thermal: f64,
@@ -358,6 +358,27 @@ fn as_usize(value: u64) -> Result<usize, i32> {
     usize::try_from(value).map_err(|_| RGSADDLE_INVALID_PARAMETER)
 }
 
+/// A positive length stored in an `i64`. Negative values and values that
+/// do not fit in `usize` are rejected, so a 32-bit target cannot truncate
+/// a count before the allocation check.
+fn positive_length(value: i64) -> Result<usize, i32> {
+    let length = usize::try_from(value).map_err(|_| RGSADDLE_INVALID_PARAMETER)?;
+    if length == 0 {
+        return Err(RGSADDLE_INVALID_PARAMETER);
+    }
+    Ok(length)
+}
+
+/// Input flags. No bits are defined, so a nonzero word would ask for
+/// behaviour this minor does not implement.
+fn known_flags(flags: u64) -> i32 {
+    if flags == 0 {
+        RGSADDLE_OK
+    } else {
+        RGSADDLE_INVALID_PARAMETER
+    }
+}
+
 fn finite_slice(ptr: *const f64, n: usize) -> Result<Vec<f64>, i32> {
     if ptr.is_null() || n == 0 {
         return Err(RGSADDLE_INVALID_PARAMETER);
@@ -428,13 +449,8 @@ fn surface_of(eval: Option<RgsaddlePointFn>, user: *mut c_void, n: usize) -> Res
     })
 }
 
-#[allow(clippy::manual_unwrap_or)]
 fn option_or_nan(value: Option<f64>) -> f64 {
-    if let Some(value) = value {
-        value
-    } else {
-        f64::NAN
-    }
+    value.unwrap_or(f64::NAN)
 }
 
 /// # Safety
@@ -487,7 +503,14 @@ unsafe fn sample_call(
     if version != RGSADDLE_OK {
         return version;
     }
-    let n = n as usize;
+    let flags = known_flags(config.flags);
+    if flags != RGSADDLE_OK {
+        return flags;
+    }
+    let n = match positive_length(n) {
+        Ok(n) => n,
+        Err(code) => return code,
+    };
     let point = match finite_slice(point, n) {
         Ok(values) => values,
         Err(code) => return code,
@@ -576,7 +599,14 @@ unsafe fn optimize_call(
     if version != RGSADDLE_OK {
         return version;
     }
-    let n = n as usize;
+    let flags = known_flags(config.flags);
+    if flags != RGSADDLE_OK {
+        return flags;
+    }
+    let n = match positive_length(n) {
+        Ok(n) => n,
+        Err(code) => return code,
+    };
     let point_in = match finite_slice(point, n) {
         Ok(values) => values,
         Err(code) => return code,
@@ -692,17 +722,24 @@ unsafe fn mbar_call(
     covariance: *mut f64,
     overlap: *mut f64,
 ) -> i32 {
-    if samples <= 0 || states < 2 || counts.is_null() {
+    if samples <= 0 || states < 2 {
         return RGSADDLE_SHAPE;
     }
-    if free_energies.is_null() || covariance.is_null() || overlap.is_null() {
-        return RGSADDLE_INVALID_PARAMETER;
-    }
-    let samples = samples as usize;
-    let states = states as usize;
-    let Some(cells) = samples.checked_mul(states) else {
+    let Ok(samples) = usize::try_from(samples) else {
         return RGSADDLE_SHAPE;
     };
+    let Ok(states) = usize::try_from(states) else {
+        return RGSADDLE_SHAPE;
+    };
+    // The covariance and the overlap are `states` by `states`. Reject the
+    // product before any allocation so a 32-bit `usize` cannot wrap it.
+    if samples.checked_mul(states).is_none() || states.checked_mul(states).is_none() {
+        return RGSADDLE_SHAPE;
+    }
+    let cells = samples * states;
+    if counts.is_null() || free_energies.is_null() || covariance.is_null() || overlap.is_null() {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
     let reduced = match finite_slice(reduced, cells) {
         Ok(values) => values,
         Err(code) => return code,
@@ -777,7 +814,7 @@ unsafe fn work_call(
     user: *mut c_void,
     report: *mut RgsaddleOhtstWorkReport,
 ) -> i32 {
-    if config.is_null() || report.is_null() || n <= 0 || n_planes < 2 {
+    if config.is_null() || report.is_null() {
         return RGSADDLE_INVALID_PARAMETER;
     }
     let config = unsafe { &*config };
@@ -785,8 +822,20 @@ unsafe fn work_call(
     if version != RGSADDLE_OK {
         return version;
     }
-    let n = n as usize;
-    let n_planes = n_planes as usize;
+    let flags = known_flags(config.flags);
+    if flags != RGSADDLE_OK {
+        return flags;
+    }
+    let n = match positive_length(n) {
+        Ok(n) => n,
+        Err(code) => return code,
+    };
+    let Ok(n_planes) = usize::try_from(n_planes) else {
+        return RGSADDLE_INVALID_PARAMETER;
+    };
+    if n_planes < 2 {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
     let Some(cells) = n.checked_mul(n_planes) else {
         return RGSADDLE_SHAPE;
     };
@@ -922,8 +971,18 @@ unsafe fn transmission_call(
     if version != RGSADDLE_OK {
         return version;
     }
-    let n = n as usize;
-    let n_starts = n_starts as usize;
+    let flags = known_flags(config.flags);
+    if flags != RGSADDLE_OK {
+        return flags;
+    }
+    let n = match positive_length(n) {
+        Ok(n) => n,
+        Err(code) => return code,
+    };
+    let n_starts = match positive_length(n_starts) {
+        Ok(n_starts) => n_starts,
+        Err(code) => return code,
+    };
     let Some(cells) = n.checked_mul(n_starts) else {
         return RGSADDLE_SHAPE;
     };
@@ -1017,6 +1076,10 @@ unsafe fn rate_call(input: *const RgsaddleOhtstRateIn, out: *mut RgsaddleOhtstRa
     let version = accept_version(input.version);
     if version != RGSADDLE_OK {
         return version;
+    }
+    let flags = known_flags(input.flags);
+    if flags != RGSADDLE_OK {
+        return flags;
     }
     let rate = match rate_from_parts(
         input.thermal,

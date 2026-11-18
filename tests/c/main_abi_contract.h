@@ -637,6 +637,23 @@ _Static_assert(sizeof(rgsaddle_ohtst_transmission_report_t) == 72, "ohtst transm
 _Static_assert(sizeof(rgsaddle_ohtst_rate_in_t) == 56, "ohtst rate in");
 _Static_assert(sizeof(rgsaddle_ohtst_rate_out_t) == 56, "ohtst rate out");
 
+typedef rgsaddle_status_t (*abi51_signature_rgsaddle_ohtst_optimize)(
+    const rgsaddle_ohtst_optimize_config_t *config, int64_t n, double *point, double *normal,
+    rgsaddle_point_fn surface, void *user, rgsaddle_ohtst_optimize_report_t *report);
+_Static_assert(_Generic(&rgsaddle_ohtst_optimize, abi51_signature_rgsaddle_ohtst_optimize: 1, default: 0), "rgsaddle_ohtst_optimize signature");
+
+typedef rgsaddle_status_t (*abi51_signature_rgsaddle_ohtst_work)(
+    const rgsaddle_ohtst_work_config_t *config, int64_t n, int64_t n_planes, const double *points,
+    const double *normals, const double *start, rgsaddle_point_fn surface, void *user,
+    rgsaddle_ohtst_work_report_t *report);
+_Static_assert(_Generic(&rgsaddle_ohtst_work, abi51_signature_rgsaddle_ohtst_work: 1, default: 0), "rgsaddle_ohtst_work signature");
+
+typedef rgsaddle_status_t (*abi51_signature_rgsaddle_ohtst_transmission)(
+    const rgsaddle_ohtst_transmission_config_t *config, int64_t n, const double *point,
+    const double *normal, int64_t n_starts, const double *starts, rgsaddle_point_fn surface,
+    void *user, rgsaddle_ohtst_transmission_report_t *report);
+_Static_assert(_Generic(&rgsaddle_ohtst_transmission, abi51_signature_rgsaddle_ohtst_transmission: 1, default: 0), "rgsaddle_ohtst_transmission signature");
+
 typedef rgsaddle_status_t (*abi51_signature_rgsaddle_ohtst_sample)(
     const rgsaddle_ohtst_sample_config_t *config, int64_t n, const double *point,
     const double *normal, rgsaddle_point_fn surface, void *user, double *centroid,
