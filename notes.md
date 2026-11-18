@@ -174,5 +174,17 @@ the converged quadrature value is also just below the band.
 
 ## Verification
 
-Test counts and log hashes are filled from the packaged logs after the
-required full Rust, Meson consumer, and Python runs.
+All logs begin with the tested Git SHA and are included in the delivery
+archive.
+
+| Command | Passed | Failed | Ignored/skipped |
+|---|---:|---:|---:|
+| `cargo test --features capi` | 970 | 0 | 36 |
+| Meson consumer, subproject mode | 1 | 0 | 0 |
+| Meson consumer, installed pkg-config mode | 1 | 0 | 0 |
+| `pytest tests/python` | 81 | 0 | 0 |
+
+The Rust total sums all 103 test-harness and doctest summaries in
+`cargo-test.log`. The C and C++ ABI smoke programs are among the Rust
+integration tests; `meson-tests.log` additionally records both supported
+Meson consumer modes.
