@@ -1803,7 +1803,9 @@ NB_MODULE(_core, m) {
       .def(
           "step", [](PyStencil &self, nb::callable fn) { return step_python(self, fn, 1, false); },
           nb::arg("surface"),
-          nb::sig("def step(self, surface: collections.abc.Callable[..., StencilReport]) -> StencilReport"),
+          nb::sig("def step(self, surface: collections.abc.Callable[..., "
+                  "tuple[numpy.typing.NDArray[numpy.float64], numpy.typing.NDArray[numpy.float64]]]) "
+                  "-> StencilReport"),
           "One step. surface(x) returns (energy, gradient) with x shaped (rows, dof).")
       .def(
           "run",
@@ -1811,7 +1813,9 @@ NB_MODULE(_core, m) {
             return step_python(self, fn, max_steps, true);
           },
           nb::arg("surface"), nb::arg("max_steps"),
-          nb::sig("def run(self, surface: collections.abc.Callable[..., StencilReport], max_steps: int) -> StencilReport"),
+          nb::sig("def run(self, surface: collections.abc.Callable[..., "
+                  "tuple[numpy.typing.NDArray[numpy.float64], numpy.typing.NDArray[numpy.float64]]], "
+                  "max_steps: int) -> StencilReport"),
           "Loop of step until convergence or max_steps.")
       .def(
           "positions", [](PyStencil &self) { return copy_vector(self.inner.positions()); },
@@ -1857,7 +1861,8 @@ NB_MODULE(_core, m) {
   nb::class_<SessionReport>(m, "SessionReport")
       .def_ro("status", &SessionReport::status, "0 while running, 1 when converged.")
       .def_ro("max_force", &SessionReport::max_force, "Largest force component, or NaN for an estimate.")
-      .def_ro("curvature", &SessionReport::curvature, "Curvature along the mode. 0 for a band projection.")
+      .def_ro("curvature", &SessionReport::curvature,
+              "Lowest tracked curvature, or NaN when unavailable.")
       .def_ro("iteration", &SessionReport::iteration, "Steps taken.")
       .def_ro("evaluations", &SessionReport::evaluations, "Surface evaluations in this call.")
       .def_ro("ci_index", &SessionReport::ci_index, "Climbing image, or -1.")
@@ -1958,7 +1963,7 @@ NB_MODULE(_core, m) {
           nb::arg("dr") = 1e-3, nb::arg("force_tol") = 1e-3, nb::arg("max_move") = 0.2,
           nb::arg("rotation_tol") = 1e-4, nb::arg("max_rotations") = 20, nb::arg("krylov_dim") = 12,
           nb::arg("rotation_stop_length") = 0.0,
-          "Dimer or Lanczos minimum-mode session. Lengths are the caller's. A positive "
+          "Dimer or Lanczos minimum-mode session translated by L-BFGS. Lengths are the caller's. A positive "
           "rotation_stop_length stops a rotation once |C| * rotation_stop_length * |sin w| is "
           "at most force_tol (Kastner and Sherwood 2008); 0 turns that stop off.")
       .def(
@@ -2026,7 +2031,8 @@ NB_MODULE(_core, m) {
            "Replace the saddle check. enabled=False turns it off. escape_attempts above 0 pushes "
            "a converged point of index two or more by escape_push, the largest per-atom "
            "displacement, doubled on each later attempt, along its extra negative modes and "
-           "searches again.");
+           "searches again. The block size stays 2, finite differences stay forward, and the "
+           "seed stays at the deterministic C default.");
 
   nb::class_<PyBand>(m, "Band")
       .def(
