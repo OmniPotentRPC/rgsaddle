@@ -1,7 +1,7 @@
 use ndarray::{Array1, Array2, ArrayView2, array};
 use rgsaddle::{
-    BandSurface, LineNebConfig, LineNebSession, LineNebStatus, SaddleError, Spline,
-    fixed_energy_action, fixed_energy_action_force, fixed_energy_mep_seed,
+    BandSurface, FixedEnergySeed, LineNebConfig, LineNebSession, LineNebStatus, SaddleError,
+    Spline, fixed_energy_action, fixed_energy_action_force, fixed_energy_mep_seed,
 };
 
 fn analytic_surface(positions: ArrayView2<'_, f64>) -> (Array1<f64>, Array2<f64>) {
@@ -88,10 +88,10 @@ fn endpoint_restraint_may_cross_the_target_energy() {
 #[test]
 fn natural_cubic_returns_value_and_derivatives() {
     let spline = Spline::natural(&[0.0, 1.0, 2.0], &array![[1.0], [3.0], [5.0]]).unwrap();
-    let (value, first, second) = spline.sample(0.5).unwrap();
-    assert_eq!(value[0], 2.0);
-    assert_eq!(first[0], 2.0);
-    assert_eq!(second[0], 0.0);
+    let sample = spline.sample(0.5).unwrap();
+    assert_eq!(sample.value[0], 2.0);
+    assert_eq!(sample.first[0], 2.0);
+    assert_eq!(sample.second[0], 0.0);
 }
 
 struct DoubleWell;
@@ -121,10 +121,12 @@ fn a_seed_without_a_budget_is_exhausted() {
         array![0.0, 0.0].view(),
         array![1.0, 0.0].view(),
         array![1.0, 2.0].view(),
-        1.0,
-        0.25,
-        9,
-        0,
+        FixedEnergySeed {
+            saddle_energy: 1.0,
+            target_energy: 0.25,
+            images: 9,
+            max_evaluations: 0,
+        },
     );
     assert!(matches!(err, Err(SaddleError::Exhausted(_))));
 }
@@ -136,10 +138,12 @@ fn energy_sliced_seed_follows_the_double_well_mep() {
         array![0.0, 0.0].view(),
         array![1.0, 0.0].view(),
         array![1.0, 2.0].view(),
-        1.0,
-        0.25,
-        9,
-        20_000,
+        FixedEnergySeed {
+            saddle_energy: 1.0,
+            target_energy: 0.25,
+            images: 9,
+            max_evaluations: 20_000,
+        },
     )
     .unwrap();
     assert_eq!(path.raw_dim(), ndarray::Ix2(9, 2));
