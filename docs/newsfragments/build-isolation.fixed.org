@@ -1,0 +1,1 @@
+Isolate the C ABI test library from doctest artifacts and include the benchmark harness in wheel test sources.
