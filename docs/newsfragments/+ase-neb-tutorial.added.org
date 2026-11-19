@@ -1,0 +1,1 @@
+~examples/ase_neb.py~ runs ASE's gold adatom on Al(100) with ~ase.mep.NEB~ and with ~rgsaddle.ase.NEB~, and a new tutorial walks through the one-line import change. Both classes give 0.3748 eV in 32 steps.

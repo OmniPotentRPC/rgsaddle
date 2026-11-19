@@ -5,8 +5,8 @@ from __future__ import annotations
 project = "rgsaddle"
 copyright = "2026, Rohit Goswami"
 author = "Rohit Goswami"
-release = "0.5.0"
-version = "0.5.0"
+release = "0.6.0"
+version = "0.6.0"
 
 extensions = [
     "sphinx.ext.mathjax",
@@ -54,3 +54,7 @@ copybutton_prompt_text = r"\$ "
 copybutton_prompt_is_regexp = True
 
 bibtex_bibfiles = ["references.bib"]
+
+# DOI publishers commonly reject automated requests after doi.org resolves
+# them. check_dois.py verifies those handles directly against the DOI registry.
+linkcheck_ignore = [r"https://doi\.org/.*"]

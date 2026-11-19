@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Write one reference line per C function declared in include/rgsaddle.h.
+"""Write one reference line per public C function in include/rgsaddle.h.
 
 The how-to stays the narrative. This page is the checklist: every
-declared rgsaddle_* function, then the first sentence of the comment
+declared rgsaddle_* or xts_* function, then the first sentence of the comment
 above it. Units are the caller's unless that sentence names them.
 """
 
@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 HEADER = ROOT / "include" / "rgsaddle.h"
 OUT = ROOT / "docs" / "orgmode" / "reference" / "c-symbols.org"
 
-DECL = re.compile(r"^[\w\s\*]+\b(rgsaddle_[A-Za-z0-9_]+)\s*\(", re.M)
+DECL = re.compile(r"^[\w\s\*]+\b((?:rgsaddle|xts)_[A-Za-z0-9_]+)\s*\(", re.M)
 
 
 def first_sentence(comment: str) -> str:
@@ -24,10 +24,10 @@ def first_sentence(comment: str) -> str:
     text = re.sub(r"\s+", " ", text).strip()
     if not text:
         return "Declared in include/rgsaddle.h."
-    stop = text.find(". ")
-    if stop == -1:
+    stop = re.search(r"\.(?=\s+[A-Z`])", text)
+    if stop is None:
         return text if text.endswith(".") else text + "."
-    return text[: stop + 1]
+    return text[: stop.end()]
 
 
 def entries(header: str) -> list[tuple[str, str]]:

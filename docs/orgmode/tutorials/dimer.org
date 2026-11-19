@@ -6,16 +6,37 @@ A minimum-mode search estimates the lowest curvature direction, reflects the for
 The double well \(V = (x^2 - 1)^2 + 2y^2 + 2z^2\) has a saddle at the origin. The runnable form is the example on ~MinModeSession~ in the crate docs, and ~examples/double_well.rs~ is the band on the same surface. From Python, ~rgsaddle.ase.MinModeAtoms~ is the ASE-shaped call:
 
 #+begin_src python
+import numpy as np
 from ase import Atoms
+from ase.calculators.calculator import Calculator
+
 from rgsaddle.ase import MinModeAtoms
 
+
+class Bowl(Calculator):
+    """Energy 2 x^2 + 5 y^2 for one atom."""
+
+    implemented_properties = ["energy", "forces"]
+
+    def calculate(self, atoms, properties, system_changes):
+        Calculator.calculate(self, atoms, properties, system_changes)
+        x, y, _ = atoms.positions[0]
+        forces = np.zeros((1, 3))
+        forces[0, :2] = [-4.0 * x, -10.0 * y]
+        self.results = {"energy": 2.0 * x**2 + 5.0 * y**2, "forces": forces}
+
+
 atoms = Atoms("H", positions=[[0.4, 0.3, 0.0]])
-atoms.calc = bowl  # energy 2 x^2 + 5 y^2
+atoms.calc = Bowl()
 search = MinModeAtoms(atoms, mode=[1.0, 0.0, 0.0], kind="dimer")
-forces = search.get_forces()
+print(search.get_forces())
 #+end_src
 
-Above the well the curvature is positive, so the returned force lies along the mode and the perpendicular part is dropped. ~tests/python/test_ase_dropin.py~ checks that on this bowl. Once the curvature is negative the force along the mode is reflected and the perpendicular force stays, which is the translation Henkelman and Jónsson use to leave a minimum toward a saddle.
+#+begin_example
+[[1.6 0.  0. ]]
+#+end_example
+
+Above the well the curvature is positive, so the returned force lies along the mode and the perpendicular part is dropped. The true force along the mode is -1.6, and the returned +1.6 points uphill, which is what makes an optimizer climb. ~tests/python/test_ase_dropin.py~ checks that on this bowl. Once the curvature is negative the force along the mode is reflected and the perpendicular force stays, which is the translation Henkelman and Jónsson use to leave a minimum toward a saddle.
 
 The stepper is an rgmin method on that effective force. FIRE is the default. L-BFGS takes one step per call because the reflected force is not the gradient of the energy the surface reports. ~MinModeConfig.seed_curvature~ scales only the first empty translation by \(1/|\lambda|\).
 

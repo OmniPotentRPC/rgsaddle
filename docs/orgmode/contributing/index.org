@@ -95,10 +95,16 @@ Git ignores those files, so edit the Org source and do not add the generated fil
 Build the site as the docs workflow does:
 
 #+begin_src sh
+python docs/check_c_symbols.py
+python docs/check_paths.py
+python docs/check_dois.py
 emacs --batch -l docs/export.el
 python -m pip install -r docs/requirements.txt
-sphinx-build -b html -n docs/source docs/build
+sphinx-build -b html -n -W --keep-going docs/source docs/build
+sphinx-build -b linkcheck -n -W --keep-going docs/source docs/build/linkcheck
 #+end_src
+
+~docs/check_dois.py~ asks the DOI registry whether each handle cited in the sources resolves; the link check then follows the other URLs.
 
 The API documentation builds with every rustdoc warning denied on each feature set CI tests, and once with private items.
 A public doc that links a private item, a broken or redundant intra-doc link, a bare URL or unclosed HTML fails the CI test job.
@@ -145,7 +151,7 @@ Only the ~publish~ job runs in the ~pypi~ environment and holds ~id-token: write
 
 To release a version:
 
-1. Set it in ~Cargo.toml~, ~pyproject.toml~ and ~meson.build~; ~tests/package_version.rs~ holds them equal.
+1. Set it in ~Cargo.toml~, ~pyproject.toml~, ~meson.build~, ~docs/source/conf.py~ and the install example in ~docs/orgmode/getting-started.org~; ~tests/package_version.rs~ holds the first three equal.
 2. Collect the fragments with ~towncrier build --version <version>~ and commit.
 3. Push the tag ~v<version>~ on that commit.
 

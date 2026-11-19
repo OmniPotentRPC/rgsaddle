@@ -1,0 +1,15 @@
+#+title: Tutorials
+#+options: toc:nil num:nil
+
+Each tutorial is a lesson you follow from a clean checkout to a result you can check. Pick the one that matches the language and the search you have.
+
+#+begin_export rst
+- :doc:`getting-started` depends on the crate, builds a band on the double well, and steps it from a host loop. Rust.
+- :doc:`tutorials/band` finds the saddle of the Mueller-Brown surface with a climbing-image band and with the default OCI-NEB, and compares their force calls. Rust.
+- :doc:`tutorials/ase-neb` runs ASE's own gold-on-aluminium NEB with ``rgsaddle.ase.NEB`` and gets ASE's barrier. Python.
+- :doc:`tutorials/dimer` finds a saddle with the dimer and with Lanczos. Rust and Python.
+- :doc:`tutorials/sella` optimizes a saddle with Sella's partitioned step. Python.
+- :doc:`tutorials/quickstart` rolls down from a first-order saddle along the intrinsic reaction coordinate. Rust.
+#+end_export
+
+The how-to guides solve a task you already have, the reference lists every item, and the explanation pages say why the mechanics are what they are.

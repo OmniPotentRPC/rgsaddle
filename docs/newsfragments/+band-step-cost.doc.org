@@ -1,0 +1,1 @@
+~BandReport::surface_rows~ and the Mueller-Brown tutorial say that a step in which FIRE backs up after an uphill move assembles the band a second time and costs twice the interior images.

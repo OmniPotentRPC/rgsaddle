@@ -1,5 +1,0 @@
-Engine-neutral hyperplane optimization, reversible work, unconstrained
-shooting, restricted Hessian modes, exact Gaussian sampling, and fixed-plane
-thermodynamic integration now share =HyperplaneSampler= and
-=HyperplaneDynamics=.  The fixed-plane TI sampler is also available through
-the callback C ABI and Python binding.

@@ -46,26 +46,36 @@ while report.status != BandStatus::Converged {
 }
 #+end_src
 
+* From ASE
+The Python classes in =rgsaddle.ase= take ASE's call shapes. A script that runs =ase.mep.NEB= changes one import:
+
+#+begin_src python
+from rgsaddle.ase import NEB  # was: from ase.mep import NEB
+#+end_src
+
+=Sella= keeps the =run(fmax, steps)= loop of Sella's own optimizer. =MinModeAtoms=, =Point=, =SimplifiedString= and =GrowingString= work on ASE =Atoms= and use ASE's optimizer loop. The [[file:tutorials/ase-neb.org][ASE tutorial]] runs both classes on one system and gets the same barrier.
+
+* How these pages are organised
+The pages follow the Diataxis split. Tutorials are lessons that end in a result. How-to guides solve one task. The reference lists every item and its contract. The explanation pages say why the mechanics are what they are.
+
 #+begin_export rst
 .. toctree::
    :maxdepth: 1
-   :caption: Guides
-   :hidden:
+   :caption: Tutorials
 
+   tutorials
    getting-started
-   howto
-   reference
-   explanation
-   seat
-
-.. toctree::
-   :maxdepth: 1
-   :caption: Session guides
-
    tutorials/band
+   tutorials/ase-neb
    tutorials/dimer
    tutorials/sella
    tutorials/quickstart
+
+.. toctree::
+   :maxdepth: 1
+   :caption: How-to guides
+
+   howto
    howto/band
    howto/autoneb
    howto/minmode
@@ -87,14 +97,32 @@ while report.status != BandStatus::Converged {
    howto/migrate
    howto/stencil
    howto/formal
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Reference
+
+   reference
+   reference/c-symbols
+   reference/bibliography
+   reference/lammps-hyperplane
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Explanation
+
+   explanation
    explanation/mep
    explanation/one-stencil
    explanation/hyperplane-methods
    explanation/symmetry-regions
    reference/architecture
-   reference/lammps-hyperplane
-   reference/bibliography
-   reference/c-symbols
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Project
+
    contributing/index
    changelog
+   seat
 #+end_export

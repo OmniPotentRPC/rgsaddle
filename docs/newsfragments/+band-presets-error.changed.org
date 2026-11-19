@@ -1,0 +1,1 @@
+~Stencil::band~, ~rgsaddle_stencil_new~ and the Python and C++ stencil bindings report one stable error, band presets are not implemented, in place of text that named a development branch. The array checks and the preset ordinals are unchanged. Use ~BandSession~, ~AutoNeb~ or ~OcinebSession~ for a band.

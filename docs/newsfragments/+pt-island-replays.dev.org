@@ -1,3 +1,0 @@
-~validation/benchmark/pt_island/proxy.py~ tabulates pt-island campaign runs at matched horizons, a run still going from its checkpoint, in the outcome classes of ~export.py~, with the SHA-256 of each run's searches so that two runs compare without their per-search tables.
-~modes.py~ replays the first catalog climbs of a template through ~rgsaddle_minmode_step~ and records where the session mode first meets negative curvature and the saddle it ends on; ~same_saddle.py~ numbers the saddles those replays reach.
-~dimer-lbfgs-tight.toml~ is optbench's dimer L-BFGS template with ~rotation_tol~ 1e-6, which turns the torque window off.

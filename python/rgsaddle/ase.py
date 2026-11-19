@@ -202,7 +202,7 @@ class Point:
     ``step`` is one ``Stencil`` step, so the log, the trajectory, and
     the return value are ASE's. ASE is imported on first use.
     ``preset`` is ``dimer``, ``lanczos``, ``art``, ``eigen-follow``,
-    or ``min``. Band presets stay on ``feat/band-methods-zoom``.
+    or ``min``. Band presets are not implemented.
     """
 
     def __init__(self, atoms: Any, *, preset: str = "dimer", **options: Any) -> None:

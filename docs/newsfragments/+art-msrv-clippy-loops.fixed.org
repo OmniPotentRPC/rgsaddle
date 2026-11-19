@@ -1,1 +1,0 @@
-The =kabsch_rotation= helper in =src/art.rs= iterates over slices instead of index ranges, clearing four =needless_range_loop= errors on Rust 1.88 Clippy.

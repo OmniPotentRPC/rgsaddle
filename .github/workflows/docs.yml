@@ -26,14 +26,16 @@ jobs:
         with:
           python-version: "3.12"
       - run: sudo apt-get install -y emacs-nox
-      - name: Check the C index and reject machine-local paths
+      - name: Check the C index, machine-local paths and DOI handles
         run: |
           python docs/check_c_symbols.py
           python docs/check_paths.py
+          python docs/check_dois.py
       - name: Export the nested guides and the changelog from the org sources
         run: emacs --batch -l docs/export.el
       - run: python -m pip install -q -r docs/requirements.txt
       - run: sphinx-build -b html -n -W --keep-going docs/source docs/build
+      - run: sphinx-build -b linkcheck -n -W --keep-going docs/source docs/build/linkcheck
       - uses: actions/configure-pages@v5
         if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/') || github.event_name == 'pull_request'
         with:

@@ -190,9 +190,9 @@ impl Cell {
 #[derive(Clone, Copy, Debug)]
 #[non_exhaustive]
 pub struct CiConfig {
-    /// The trigger factor.
+    /// Relative threshold against the first evaluation's force.
     pub trigger_factor: f64,
-    /// The trigger force.
+    /// Absolute force threshold in the host's force unit.
     pub trigger_force: f64,
 }
 
@@ -641,11 +641,11 @@ struct BandMetrics<'a> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-/// The BandStatus.
+/// Progress of a band session.
 pub enum BandStatus {
-    /// The Running.
+    /// More host-controlled steps are required.
     Running,
-    /// The Converged.
+    /// The largest force component is at most [`BandConfig::force_tol`].
     Converged,
 }
 
@@ -662,9 +662,10 @@ pub struct BandReport {
     pub iteration: usize,
     /// Image evaluations the surface performed during this step: the
     /// sum of the row counts over every [`BandSurface::eval`] call.
-    /// A warm step costs `n_images - 2`; the first step after
-    /// [`BandSession::new`] or [`BandSession::reset`] adds the two
-    /// endpoints.
+    /// A warm step costs `n_images - 2`, twice that when the stepper
+    /// ends away from its last trial (FIRE backing up after an uphill
+    /// move); the first step after [`BandSession::new`] or
+    /// [`BandSession::reset`] adds the two endpoints.
     pub surface_rows: usize,
     /// Curvature along the climbing image's lowest mode on a step of
     /// the min-mode refinement; `None` on a band step.
@@ -2357,7 +2358,7 @@ pub(crate) fn check_force_driven(method: &Method) -> Result<(), SaddleError> {
 /// projected interior force the solver stepped on.
 #[derive(Clone, Debug)]
 pub struct BandEvaluation {
-    /// The energies.
+    /// One energy per image, endpoints included.
     pub energies: Array1<f64>,
     /// Energy gradients, one row per image, in the same order as the positions.
     pub gradients: Array2<f64>,
@@ -3017,7 +3018,6 @@ impl BandSession {
         self.solid.as_ref().map(|solid| solid.cells.as_slice())
     }
 
-    /// Jacobian fixed from the mean endpoint volume at session build.
     /// Replace the initial time step of FIRE and quick-min
     /// (`BandConfig::time_step`). The solver is rebuilt, so optimizer
     /// history and the HiGHS selection go; cached surface values stay.

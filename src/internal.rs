@@ -439,17 +439,17 @@ impl Manifold for Displacement {
 /// the remaining Sella slots MaxInternalStep weights.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InternalSlot {
-    /// The Translation.
+    /// A translation coordinate, packed first.
     Translation,
-    /// The Bond.
+    /// A bond length.
     Bond,
-    /// The Angle.
+    /// A bond angle.
     Angle,
-    /// The Dihedral.
+    /// A dihedral angle.
     Dihedral,
-    /// The Other.
+    /// Any other coordinate, such as a Cartesian displacement.
     Other,
-    /// The Rotation.
+    /// A rotation coordinate, packed last.
     Rotation,
 }
 

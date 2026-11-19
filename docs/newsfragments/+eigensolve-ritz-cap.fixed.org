@@ -1,2 +1,0 @@
-~rayleigh_ritz_iter~ returns the exact Ritz pairs once its basis has as many columns as the matrix has rows.
-Before, it went on to build an expansion system that could be singular, and failed with ~SaddleError::Solver~ for a 1 x 1 matrix of value 1 with the ~Gd~ expansion.

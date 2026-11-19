@@ -1,4 +1,0 @@
-~pypi.yml~ publishes each ~v*~ tag to PyPI through trusted publishing: an sdist and wheels for Linux ~x86_64~ and ~aarch64~ (~manylinux_2_28~), macOS ~arm64~ and ~x86_64~, and Windows ~x86_64~.
-The run stops before building when the tag, ~Cargo.toml~ and ~pyproject.toml~ disagree.
-cibuildwheel tests every wheel, and the upload waits for a smoke job that installs the wheels and the sdist into fresh virtual environments and imports the package.
-A manual run with the ~tag~ input publishes an existing tag, such as ~v0.5.0~, which reached crates.io but not PyPI.

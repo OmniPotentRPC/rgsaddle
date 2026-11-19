@@ -1,2 +1,0 @@
-The crate overview links the optional =ohtst= module only when that feature is enabled.
-A default-feature rustdoc build names the module and the feature in code font, so the intra-doc link is not broken.

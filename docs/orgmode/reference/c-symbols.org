@@ -7,9 +7,9 @@ Parameters are that declaration.
 Units are the caller's unless the sentence names them.
 The narrative for a session is the C and C++ how-to, not this list.
 
-- =rgsaddle_hyperplane_sampler_create=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
-- =rgsaddle_hyperplane_sampler_free=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
-- =rgsaddle_hyperplane_thermodynamic_integration=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_hyperplane_sampler_create=. Purpose: Create a callback sampler. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_hyperplane_sampler_free=. Purpose: Free a callback sampler. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_hyperplane_thermodynamic_integration=. Purpose: Integrate V_full - V_harmonic over lambda on a fixed hyperplane. point and normal each hold dimension doubles. config is read and result is written during the call; sampler must remain live. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_thermodynamic_derivative_observable=. Purpose: Stable observable name `potential.full_minus_harmonic` for TI records. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_abi_version=. Purpose: (major << 16) | minor. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_abi_stamp=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
@@ -22,6 +22,7 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =rgsaddle_band_cells=. Purpose: Copy the band's cells out (n_images * 9 doubles). Parameters: the declaration. Units: the caller's.
 - =rgsaddle_band_solid_jacobian=. Purpose: The fixed Jacobian J = (V/N)^(1/3) sqrt(N) weight, V the mean endpoint volume: the length unit of the cell block. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_band_step=. Purpose: One optimizer step over the assembled band force. Parameters: the declaration. Units: the caller's.
+- =xts_band_step=. Purpose: xtsci name of rgsaddle_band_step. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_band_positions=. Purpose: Copy the current band out (n_images * 3 * n_atoms doubles). Parameters: the declaration. Units: the caller's.
 - =rgsaddle_band_set_positions=. Purpose: Replace the band; the host may move images between steps. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_band_reset=. Purpose: Surface boundary: drop optimizer history, climbing state, the endpoint energies, and the last evaluation. Parameters: the declaration. Units: the caller's.
@@ -29,10 +30,11 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =rgsaddle_band_evaluation=. Purpose: The last evaluation, when it was taken at the current band (after a step, it is the accepted point). Parameters: the declaration. Units: the caller's.
 - =rgsaddle_band_free=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_band_project=. Purpose: Project an already evaluated band. Parameters: the declaration. Units: the caller's.
-- =rgsaddle_band_project_fixed=. Purpose: rgsaddle_band_project with a per-atom fixed mask, ABI minor 39. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_band_project_fixed=. Purpose: rgsaddle_band_project with a per-atom fixed mask, ABI minor 39. fixed is NULL, which is rgsaddle_band_project, or n_atoms bytes, 1 for a fixed atom and 0 for a free one, as rgsaddle_band_set_fixed_atoms reads them. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_minmode_create=. Purpose: Create a minimum-mode session at one geometry with an initial mode estimate; both are 3 * n_atoms doubles, copied in. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_minmode_step=. Purpose: Refresh the lowest mode, invert along it, take one step. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_minmode_estimate=. Purpose: Refresh the lowest mode without translating. Parameters: the declaration. Units: the caller's.
+- =xts_minmode_estimate=. Purpose: xtsci name of rgsaddle_minmode_estimate. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_minmode_set_position=. Purpose: Move the session to a new point (3 * n_atoms doubles). Parameters: the declaration. Units: the caller's.
 - =rgsaddle_minmode_set_mode=. Purpose: Replace the mode seed (3 * n_atoms doubles, normalized on entry) and clear dimer rotational history and carried Lanczos curvature. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_minmode_position=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
@@ -132,14 +134,14 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =rgsaddle_ocineb_positions=. Purpose: Copy the current band out (n_images * 3 * n_atoms doubles). Parameters: the declaration. Units: the caller's.
 - =rgsaddle_ocineb_reset=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_ocineb_free=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
-- =rgsaddle_band_set_highs=. Purpose: Select the optional HiGHS feasible-set step. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_band_set_highs=. Purpose: Select the optional HiGHS feasible-set step. enabled is 0 or 1. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_minmode_set_highs=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_minmode_set_torque_window=. Purpose: ABI minor 32. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_minmode_set_rotation_stop_length=. Purpose: ABI minor 38. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_artn_config_default=. Purpose: ABI minor 43. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_minmode_set_artn=. Purpose: ABI minor 43. Parameters: the declaration. Units: the caller's.
-- =rgsaddle_band_set_exp_precon=. Purpose: Per-image exponential metric (Packwood et al. Parameters: the declaration. Units: the caller's.
-- =rgsaddle_band_set_fixed_atoms=. Purpose: Per-atom fixed mask shared by every image, ABI minor 39. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_band_set_exp_precon=. Purpose: Per-image exponential metric (Packwood et al. 2016) inside the band projection, as Makri, Ortner and Kermode 2019, Eq. (9) and (10), write it: each image is driven by -(P^-1 g - t_P (t_P . g)) plus the spring along the P-normalised tangent t_P, and the stepper integrates that force. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_band_set_fixed_atoms=. Purpose: Per-atom fixed mask shared by every image, ABI minor 39. mask holds n_atoms bytes, 1 for a fixed atom and 0 for a free one; all zeros clears the mask and leaves the band bitwise as one that never had it. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_band_set_zoom=. Purpose: Zoom-NEB, eOn's zoom_* keys. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_band_set_string=. Purpose: Select the simplified string method on the band, ABI minor 44. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_last_error=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
@@ -154,23 +156,23 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =rgsaddle_stencil_positions=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_stencil_query=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_stencil_free=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
-- =rgsaddle_indexk_create=. Purpose: Create an index-k session. Parameters: the declaration. Units: the caller's.
-- =rgsaddle_indexk_step=. Purpose: One index-k step. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_indexk_create=. Purpose: Create an index-k session. position holds 3 * n_atoms doubles. modes is row-major (3 * n_atoms) by k, or NULL for the coordinate seed. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_indexk_step=. Purpose: One index-k step. hessian NULL estimates the action from surface, as rgsaddle_minmode_step does. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_indexk_position=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_indexk_modes=. Purpose: Writes n-by-k row-major modes and k curvatures. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_indexk_translated=. Purpose: The effective gradient of the last successful step, length 3 * n_atoms. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_indexk_set_position=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_indexk_free=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
-- =rgsaddle_reflect_force=. Purpose: Householder reflection of force through an orthonormal n-by-k block. Parameters: the declaration. Units: the caller's.
-- =rgsaddle_connect=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_reflect_force=. Purpose: Householder reflection of force through an orthonormal n-by-k block. modes is row-major. out must not alias force. k == 1 is force - v * dot(force, v) * 2. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_connect=. Purpose: Run the connect search. left and right each hold 3 * n_atoms positions. position receives the returned geometry. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_saddle_check_default=. Purpose: Fill out with the default saddle check, ABI minor 40. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_band_set_saddle_check=. Purpose: Replace the band's saddle check between steps, ABI minor 40; NULL turns it off. Parameters: the declaration. Units: the caller's.
-- =rgsaddle_band_saddle_index=. Purpose: The certificate of the climbing image at its current position, ABI minor 40. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_band_saddle_index=. Purpose: The certificate of the climbing image at its current position, ABI minor 40. curvatures may be NULL when capacity is 0. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_minmode_set_saddle_check=. Purpose: rgsaddle_band_set_saddle_check for a min-mode session. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_minmode_saddle_index=. Purpose: rgsaddle_band_saddle_index for a min-mode session. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_ocineb_set_saddle_check=. Purpose: rgsaddle_band_set_saddle_check for an OCI-NEB session. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_ocineb_saddle_index=. Purpose: rgsaddle_band_saddle_index for an OCI-NEB session. Parameters: the declaration. Units: the caller's.
-- =rgsaddle_saddle_index=. Purpose: Certify one point, ABI minor 40. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_saddle_index=. Purpose: Certify one point, ABI minor 40. position holds 3 * n_atoms values; gradient is its gradient or NULL (one surface call then finds it), mode a direction to seed with or NULL, and fixed n_atoms bytes (1 fixed, 0 free) or NULL. surface is called as by rgsaddle_minmode_step. check NULL takes the defaults of rgsaddle_saddle_check_default; its escape fields are not read. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_growing_string_config_default=. Purpose: Fill out with the default growing-string controls (n_images 11, frontier_tol 0.2, min_steps_per_node 1, not-a-knot spline), ABI minor 44. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_growing_string_create=. Purpose: Open a growing string session between reactant and product (3 * n_atoms values each), ABI minor 44. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_growing_string_step=. Purpose: Advance a growing string session by one step (or one simplified-string step once joined), ABI minor 44. Parameters: the declaration. Units: the caller's.

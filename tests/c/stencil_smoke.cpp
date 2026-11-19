@@ -44,8 +44,8 @@ int main() {
     return 1;
   }
   const char *text = rgsaddle_last_error();
-  if (text == nullptr || std::string(text).find("feat/band-methods-zoom") == std::string::npos) {
-    std::fprintf(stderr, "missing seam: %s\n", text == nullptr ? "" : text);
+  if (text == nullptr || std::string(text) != "band presets are not implemented") {
+    std::fprintf(stderr, "unexpected band error: %s\n", text == nullptr ? "" : text);
     return 1;
   }
   rgsaddle_stencil_config_free(config);

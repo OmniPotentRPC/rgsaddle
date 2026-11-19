@@ -1,8 +1,0 @@
-Hyperplane samplers can now consume a generic hard =Region=.  A
-=SymmetryUniqueRegion= builds the Voronoi cell of one representative from
-caller-supplied point- or space-group operations and reports its explicit
-in-plane degeneracy.  Analytic MD reflects at its faces and GHMC rejects
-outside proposals without a soft bias.  LAMMPS reflection remains pending
-lammpc constrained-step callback support.  =RateMultiplicity= keeps this
-degeneracy separate from path or hop multiplicity, preventing symmetry
-images from being counted twice.

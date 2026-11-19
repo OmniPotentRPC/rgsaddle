@@ -1,0 +1,1 @@
+The generated C function index lists the ~xts_band_step~ and ~xts_minmode_estimate~ aliases and keeps the year of a citation in the first sentence of an entry.

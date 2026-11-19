@@ -97,33 +97,35 @@ pub const RGSADDLE_REQ_ONE_IMAGE: u64 = 1;
 /// config minor is 23 or newer.
 pub const RGSADDLE_REQ_CLIMBING_IMAGE: u64 = 2;
 
-/// The RGSADDLE OK.
+/// The call completed successfully.
 pub const RGSADDLE_OK: i32 = 0;
-/// The RGSADDLE NULL SESSION.
+/// A required non-band session pointer was null.
 pub const RGSADDLE_NULL_SESSION: i32 = -1;
-/// The RGSADDLE NULL BAND.
+/// A required band session pointer was null.
 pub const RGSADDLE_NULL_BAND: i32 = -2;
-/// The RGSADDLE NULL SURFACE.
+/// A required surface callback was null.
 pub const RGSADDLE_NULL_SURFACE: i32 = -3;
-/// The RGSADDLE NULL REPORT.
+/// A required report output pointer was null.
 pub const RGSADDLE_NULL_REPORT: i32 = -4;
-/// The RGSADDLE SHAPE.
+/// Array dimensions or geometry sizes are incompatible.
 pub const RGSADDLE_SHAPE: i32 = -5;
-/// The RGSADDLE SURFACE FAILED.
+/// The host surface callback failed or returned an invalid result.
 pub const RGSADDLE_SURFACE_FAILED: i32 = -6;
-/// The RGSADDLE NON FINITE.
+/// An input or computed quantity was NaN or infinite.
 pub const RGSADDLE_NON_FINITE: i32 = -7;
-/// The RGSADDLE SOLVER.
+/// The optimizer could not produce a valid step.
 pub const RGSADDLE_SOLVER: i32 = -8;
-/// The RGSADDLE ABI MISMATCH.
+/// A wire struct's ABI major is not supported by this library.
 pub const RGSADDLE_ABI_MISMATCH: i32 = -9;
-/// The RGSADDLE ALLOC.
+/// Memory allocation failed. The library does not return this status
+/// itself; it is reserved for hosts and wrappers.
 pub const RGSADDLE_ALLOC: i32 = -10;
-/// The RGSADDLE INVALID PARAMETER.
+/// A pointer, enum ordinal, or scalar parameter is invalid.
 pub const RGSADDLE_INVALID_PARAMETER: i32 = -11;
-/// The RGSADDLE NO EVALUATION.
+/// The session holds no result to report yet: a band has no evaluation at
+/// its current positions, or an index-k session has taken no step.
 pub const RGSADDLE_NO_EVALUATION: i32 = -12;
-/// The RGSADDLE STALLED.
+/// A solver left the state unchanged above the force tolerance.
 pub const RGSADDLE_STALLED: i32 = -13;
 /// The constrained-ensemble tail still drifts after equilibration.
 pub const RGSADDLE_NOT_EQUILIBRATED: i32 = -14;
@@ -141,27 +143,45 @@ pub struct RgsaddleVersion {
 }
 
 #[repr(C)]
-/// The RgsaddleSurfaceRequest.
+/// Borrowed input and output buffers for one host surface callback.
+///
+/// Every pointer is valid only for the duration of the callback. The host
+/// reads `positions` and fills every entry of `energies` and `gradients`.
+/// `rgsaddle_surface_request_t` in the C header gives the layout of the
+/// batched, one-image and climbing-image requests.
 pub struct RgsaddleSurfaceRequest {
     /// ABI version this value was built against.
     pub version: RgsaddleVersion,
-    /// Bit flags. The header names each bit.
+    /// [`RGSADDLE_REQ_ONE_IMAGE`] and
+    /// [`RGSADDLE_REQ_CLIMBING_IMAGE`], or zero.
     pub flags: u64,
-    /// Number of images, endpoints included.
+    /// Images carried by a batched request, or the band length when
+    /// [`RGSADDLE_REQ_ONE_IMAGE`] is set. Endpoints are included in
+    /// the band length.
     pub n_images: i64,
     /// Number of atoms in one image.
     pub n_atoms: i64,
-    /// Positions, `n_images` rows of `3 * n_atoms`, row-major.
+    /// Borrowed positions, row-major: one row of `3 * n_atoms` per
+    /// carried image, so a single row when [`RGSADDLE_REQ_ONE_IMAGE`]
+    /// is set.
     pub positions: *const f64,
-    /// One energy per row of `positions`, written by the host.
+    /// Borrowed output with one energy per row of `positions`, written
+    /// by the host.
     pub energies: *mut f64,
-    /// Energy gradients, one row per image, in the same order as the positions.
+    /// Borrowed output of energy gradients, one row per row of
+    /// `positions`, in the same row-major order.
     pub gradients: *mut f64,
-    /// -1 for the whole band. Otherwise the image this call fills.
+    /// Band index of the one image carried when
+    /// [`RGSADDLE_REQ_ONE_IMAGE`] is set, and -1 for a batched request.
+    ///
+    /// A batched climbing-image request from ABI minor 23 is the
+    /// exception: it has one row and carries the climbing image's band
+    /// index.
     pub image: i64,
 }
 
-/// The RgsaddleSurfaceFn.
+/// Host surface callback: reads the request and returns
+/// [`RGSADDLE_OK`] or another status, which fails the step.
 pub type RgsaddleSurfaceFn = extern "C" fn(*mut c_void, *mut RgsaddleSurfaceRequest) -> i32;
 
 #[repr(C)]
@@ -259,24 +279,25 @@ pub struct RgsaddleArtNConfig {
 }
 
 #[repr(C)]
-/// The RgsaddleReport.
+/// Result of one band, minimum-mode, or index-1 step.
 pub struct RgsaddleReport {
     /// ABI version this value was built against.
     pub version: RgsaddleVersion,
-    /// Bit flags. The header names each bit.
+    /// Reserved for future report flags; currently zero.
     pub flags: u64,
-    /// Whether this step is still running or has converged.
+    /// `RGSADDLE_STATUS_RUNNING` (0) or `RGSADDLE_STATUS_CONVERGED` (1).
     pub status: i32,
     /// Geometries the surface evaluated during the step (band image
     /// rows, or single points for the min-mode and index-1 sessions).
     pub evaluations: i32,
     /// Largest absolute force component, in the host's force units.
     pub max_force: f64,
-    /// Index of the climbing image, or none when no image climbs.
+    /// Index of the climbing image, or -1 when no image climbs.
     pub ci_index: i64,
     /// Number of steps taken.
     pub iteration: i64,
-    /// Curvature along the mode, energy per length squared.
+    /// Curvature along the mode, in energy per length squared; zero on
+    /// an ordinary band step.
     pub curvature: f64,
     /// Dimer rotations or Lanczos actions in the step's mode estimate;
     /// 0 on a band step.

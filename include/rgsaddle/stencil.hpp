@@ -7,7 +7,7 @@
  * The handle is move-only. A compare-exchange claim rejects a second
  * thread. Exceptions from the callback are stored and rethrown after
  * the C call returns, so nothing unwinds through the C boundary.
- * Band presets fail with the feat/band-methods-zoom seam.
+ * Band presets fail with "band presets are not implemented".
  */
 
 #include "../rgsaddle.h"

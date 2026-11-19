@@ -1,14 +1,17 @@
 //! Minimum-image convention via [linkcell](https://github.com/d-SEAMS/linkcell).
 //!
-//! Band and IRC differences go through this module. vesin builds cutoff
-//! neighbour lists when a surface needs them; it is not a second MIC.
+//! IDPP uses [`wrap_difference`]; the other periodic algorithms consume
+//! the re-exported [`Cell`] directly. Neighbour lists remain the surface's
+//! responsibility.
 
 use ndarray::Array1;
 
-/// Re-export: the periodic cell is [linkcell::Cell], not a private 3x3.
+/// Periodic cell implementation used by the algorithms in this crate.
 pub use linkcell::Cell;
 
-/// Wrap every per-atom 3-vector in `diff` to its minimum image.
+/// Wrap each complete Cartesian 3-vector in `diff` to its minimum image.
+///
+/// Any trailing one or two entries are left unchanged.
 pub fn wrap_difference(cell: &Cell, diff: &mut Array1<f64>) {
     let origin = cell.origin();
     for a in 0..diff.len() / 3 {

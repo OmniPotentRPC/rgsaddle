@@ -82,8 +82,10 @@ jobs:
           cargo run --release --example elastic_field_bench -- 2000
           MD_CHECK=1 cargo run --release --example langevin_nvt
           python3 -m pip install -e . --no-build-isolation
+          python3 -m pip install 'ase>=3.23'
           python3 examples/usage.py
           python3 examples/step_controls.py
+          python3 examples/ase_neb.py
 
   # A meson parent project takes the headers from this checkout, as a
   # wrap-git subproject or from the installed rgsaddle-headers.pc, and

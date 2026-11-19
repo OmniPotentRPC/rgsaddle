@@ -27,6 +27,7 @@ The [contributing page][contributing] lists prerequisites, contact and acknowled
 cargo add rgsaddle
 ```
 
+The crate requires Rust 1.88 or newer.
 The [Python](#python) section below installs the Python package.
 The [C interface guide](https://omnipotentrpc.github.io/rgsaddle/howto/c-abi.html) covers the C library.
 A meson project takes the C and C++ headers from the top-level `meson.build`, as a wrap subproject or through `rgsaddle-headers.pc`; the [meson guide](https://omnipotentrpc.github.io/rgsaddle/howto/meson.html) has the wrap file.
@@ -76,94 +77,23 @@ fn main() -> Result<(), SaddleError> {
     }
     let ci = report.ci_index.expect("a climbing image");
     let saddle = session.positions().row(ci).to_owned();
+    let energy = (saddle[0] * saddle[0] - 1.0).powi(2)
+        + 2.0 * saddle[1] * saddle[1]
+        + 2.0 * saddle[2] * saddle[2];
     println!("{:?} after {} steps, max force {:.1e}", report.status, report.iteration, report.max_force);
-    println!("climbing image {ci} at ({:.4}, {:.4}, {:.4})", saddle[0], saddle[1], saddle[2]);
+    println!(
+        "climbing image {ci} at ({:.4}, {:.4}, {:.4}), energy {:.6}",
+        saddle[0], saddle[1], saddle[2], energy
+    );
     Ok(())
 }
 ```
 
-With rgsaddle 0.5.0 from crates.io, `cargo run` prints:
+`cargo run` prints:
 
 ```text
 Converged after 8 steps, max force 2.6e-4
-climbing image 4 at (0.0000, -0.0001, 0.0000)
-```
-
-## Learn more
-
-- [Getting started](https://omnipotentrpc.github.io/rgsaddle/getting-started.html) builds a band and steps it from a host loop.
-- [The tutorial](https://omnipotentrpc.github.io/rgsaddle/tutorials/quickstart.html) follows the intrinsic reaction coordinate (IRC) down from a first-order saddle.
-- [How-to guides](https://omnipotentrpc.github.io/rgsaddle/howto.html) cover AutoNEB, the minimum-mode search, the C interface and Python.
-- [The API documentation](https://docs.rs/rgsaddle) on docs.rs lists every public item.
-
-## Design notes
-
-## Install
-
-```sh
-cargo add rgsaddle
-```
-
-The [Python](#python) section below installs the Python package.
-The [C interface guide](https://omnipotentrpc.github.io/rgsaddle/howto/c-abi.html) covers the C library.
-A meson project takes the C and C++ headers from the top-level `meson.build`, as a wrap subproject or through `rgsaddle-headers.pc`; the [meson guide](https://omnipotentrpc.github.io/rgsaddle/howto/meson.html) has the wrap file.
-
-## Example
-
-This program relaxes a band of nine images on the double well V = (x² − 1)² + 2y² + 2z².
-The surface has minima at (±1, 0, 0) and its saddle at the origin.
-It needs `cargo add rgsaddle ndarray@0.17`.
-
-```rust
-use ndarray::{Array1, Array2, ArrayView2};
-use rgsaddle::{BandConfig, BandSession, BandStatus, BandSurface, SaddleError};
-
-/// V = (x² − 1)² + 2y² + 2z²: minima at (±1, 0, 0), saddle at the origin.
-struct DoubleWell;
-
-impl BandSurface for DoubleWell {
-    fn eval(
-        &self,
-        positions: ArrayView2<f64>,
-        energies: &mut Array1<f64>,
-        gradients: &mut Array2<f64>,
-    ) -> Result<(), SaddleError> {
-        for (i, r) in positions.outer_iter().enumerate() {
-            let (x, y, z) = (r[0], r[1], r[2]);
-            energies[i] = (x * x - 1.0).powi(2) + 2.0 * y * y + 2.0 * z * z;
-            gradients[(i, 0)] = 4.0 * x * (x * x - 1.0);
-            gradients[(i, 1)] = 4.0 * y;
-            gradients[(i, 2)] = 4.0 * z;
-        }
-        Ok(())
-    }
-}
-
-fn main() -> Result<(), SaddleError> {
-    // Nine images from (-1, 0, 0) to (1, 0, 0), bowed off the axis in y.
-    let initial = Array2::from_shape_fn((9, 3), |(i, k)| {
-        let t = i as f64 / 8.0;
-        [2.0 * t - 1.0, 0.3 * (std::f64::consts::PI * t).sin(), 0.0][k]
-    });
-    let config = BandConfig::default().with_force_tol(1e-3).with_max_move(0.1);
-    let mut session = BandSession::new(config, initial)?;
-    let mut report = session.step(&DoubleWell)?;
-    while report.status == BandStatus::Running {
-        report = session.step(&DoubleWell)?;
-    }
-    let ci = report.ci_index.expect("a climbing image");
-    let saddle = session.positions().row(ci).to_owned();
-    println!("{:?} after {} steps, max force {:.1e}", report.status, report.iteration, report.max_force);
-    println!("climbing image {ci} at ({:.4}, {:.4}, {:.4})", saddle[0], saddle[1], saddle[2]);
-    Ok(())
-}
-```
-
-With rgsaddle 0.5.0 from crates.io, `cargo run` prints:
-
-```text
-Converged after 8 steps, max force 2.6e-4
-climbing image 4 at (0.0000, -0.0001, 0.0000)
+climbing image 4 at (0.0000, -0.0001, 0.0000), energy 1.000000
 ```
 
 ## Learn more
@@ -238,7 +168,7 @@ potential.
 `validation/` has the sympy and sollya
 checks of the rotation formulas, the Lanczos residual bound, and the
 finite-difference curvature error terms
-(`uv run --no-project --with sympy python validation/<script>.py`,
+(`uv run --no-project --with sympy python validation/dimer_rotation.py`,
 `sollya validation/fd_curvature.sollya`).
 `validation/bain_lj_reference.py` scans the relaxed Bain path (bcc to
 fcc) of a switched Lennard-Jones crystal, the reference for

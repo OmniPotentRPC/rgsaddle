@@ -1,1 +1,0 @@
-Copy strided mode columns to a contiguous buffer before passing them to the C Hessian callback in ~rgsaddle_indexk_step~.

@@ -1,1 +1,0 @@
-The module docs of ~ohtst::work~ link ~sample_plane~ by its crate path, so the rustdoc build with all features and private items has no broken link.

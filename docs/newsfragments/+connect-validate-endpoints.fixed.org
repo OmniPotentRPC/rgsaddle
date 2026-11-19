@@ -1,1 +1,0 @@
-Validate endpoint lengths, finiteness, step budget, and force tolerance on entry to ~connect~ instead of panicking on mismatched or empty inputs.

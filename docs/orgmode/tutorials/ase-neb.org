@@ -1,0 +1,52 @@
+#+TITLE: Run an ASE nudged elastic band on rgsaddle
+#+OPTIONS: toc:nil num:nil author:nil
+
+This tutorial takes the system of ASE's own NEB tutorial, a gold adatom hopping between hollow sites of Al(100) under the EMT calculator, and runs it twice: with =ase.mep.NEB= and with =rgsaddle.ase.NEB=. The two runs differ in one import. At the end you have the barrier from each and the evidence that they agree.
+
+* What you need
+Python 3.10 or newer, ASE 3.23 or newer, and the package with its ASE extra.
+
+#+begin_src console
+$ pip install 'rgsaddle[ase]'
+#+end_src
+
+* Run it
+From a checkout of this repository:
+
+#+begin_src console
+$ python3 examples/ase_neb.py
+#+end_src
+
+#+begin_example
+ase.mep.NEB        barrier 0.3748 eV in 32 steps
+rgsaddle.ase.NEB   barrier 0.3748 eV in 32 steps
+#+end_example
+
+Both bands climb the same barrier in the same number of FIRE steps. =tests/python/test_ase_example.py= runs the script and compares the two.
+
+* The one-line change
+The script imports both classes so that it can run them side by side. In your own script you replace the ASE import:
+
+#+begin_src diff
+-from ase.mep import NEB
++from rgsaddle.ase import NEB
+#+end_src
+
+Everything else stays as it was: the list of =Atoms= with calculators, =interpolate()=, and an ASE optimizer on the band.
+
+#+INCLUDE: "../../../examples/ase_neb.py" src python :lines "40-56"
+
+=barrier= builds =[initial, *interior, final]=, hands the list to the class under test, and lets =ase.optimize.FIRE= drive it. ASE's optimizer reaches the band through =__ase_optimizable__=, which exposes the interior images only, as ASE's own class does. =get_potential_energy= on the band is the highest interior energy.
+
+* The system
+=hollow_to_hollow= builds the slab, fixes the lower layers with =FixAtoms=, and relaxes both endpoints with =FIRE= to a force under 0.05 eV/Angstrom. =FixAtoms= on the images is read into the band's fixed-atom mask, so those atoms get zero force rows.
+
+#+INCLUDE: "../../../examples/ase_neb.py" src python :lines "22-38"
+
+* Where the two classes differ
+=rgsaddle.ase.NEB(images, k=0.1, climb=False)= accepts the arguments that ASE's class takes and refuses the ones it does not implement. =parallel=True= and =precon= raise =ValueError=, and so does a =method= other than =improvedtangent=, =aseneb=, =eb=, or =dneb=. With =climb=True= the class does not climb an interior image when a higher endpoint slopes down into the band, where ASE's class does. The migration page lists these and the other differences, and what each one costs.
+
+* Next
+#+begin_export rst
+:doc:`../howto/migrate` says where the Python classes follow ASE and where they do not. :doc:`../howto/python` lists the Python names. :doc:`band` runs the same kind of search from Rust on a two-dimensional surface.
+#+end_export

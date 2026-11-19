@@ -1,2 +1,0 @@
-The ~rgmin~ dependency now resolves from crates.io at ~=0.6.0~ instead of a pinned git revision.
-The workspace lockfile and the consumer fixture lock against the crates.io source, so downstream graphs no longer split ~rgmin~ by source when they also consume the published crate.

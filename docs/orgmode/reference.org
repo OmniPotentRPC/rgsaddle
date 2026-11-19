@@ -56,7 +56,7 @@ The table below lists the main types.
 | =SellaSaddleConfig=            | Settings of the order-1 Sella session for partitioned rational function optimization |
 | =Cell=                         | 3×3 lattice (rows are vectors), fractional minimum-image wrap                                                      |
 | =SaddleError=                  | Shape, surface, non-finite, solver, invalid, stalled, not-equilibrated, and insufficient-effective-samples errors |
-| =Stencil=                      | Point builder. Dimer and Lanczos wrap =MinModeSession=. Band presets return the zoom seam. See @@rst::doc:`one stencil <explanation/one-stencil>`@@ |
+| =Stencil=                      | Point builder. Dimer and Lanczos wrap =MinModeSession=. =Stencil::band= returns an error because band presets are not implemented. See @@rst::doc:`one stencil <explanation/one-stencil>`@@ |
 | =Chain=                        | Positions, ids, and roles. =evaluate= uses a fixed block of one image. =Mesh= remeshes (linear, Hermite, or not-a-knot spline), inserts, or windows with no force call |
 | =reparametrize=                | Equal arc-length placement of a band, =Reparametrization::Linear= on the polyline or =NotAKnot= on the not-a-knot cubic spline. =RtrConfig::reparametrization= selects it for the trust-region band |
 | =Preset=                       | =Min=, =Dimer=, =Lanczos=, =Art=, =EigenFollow=, and the named band presets                                         |
@@ -154,12 +154,15 @@ The importable package is =rgsaddle=. =rgsaddle._core= is the nanobind extension
 
 | Name | Role |
 |------+------|
-| =ForceGate=, =HessUpdate=, =IrcKind=, =MinModeKind=, =EigenDevice=, =ExpandKind=, =CellChart=, =RestrictedKind= | =enum.IntEnum= controls. Names and values match the previous module |
+| =ForceGate=, =HessUpdate=, =IrcKind=, =MinModeKind=, =EigenDevice=, =ExpandKind=, =CellChart=, =RestrictedKind= | =enum.IntEnum= controls. =MinModeKind= exposes dimer and Lanczos; index-k LOBPCG remains C++/C/Rust-only |
 | =NumericalError= | =ArithmeticError= for =RGSADDLE_NON_FINITE= |
 | =last_error= | Thread-local text reserved for the C ABI last-error call. Empty unless an error text was set. =raise_status= reads it and then clears the slot |
 | =raise_status= | Map an =rgsaddle_status_t= value. The message is the stored text, or the status name when that text is empty. =RGSADDLE_OK= returns true |
+| =saddle_index=, =SaddleIndex= | Certify one point with the Python surface callback and return its lowest curvatures |
+| =hyperplane_thermodynamic_integration=, =THERMODYNAMIC_DERIVATIVE= | Fixed-plane lambda thermodynamic integration through a Python sampler, and the observable name its samples carry |
+| =reparametrize= | Place band images at equal polyline or not-a-knot arc length |
 | =rgsaddle.ase.SurfaceAdapter= | =list[Atoms]= evaluated as =(ids, x) -> (energies, gradients)= request rows. Optional extra =ase= |
-| =rgsaddle.Stencil= | Point search. =point=, =step=, =run=, =positions=, =mode=, =curvature=. =band= raises =ValueError= with the zoom seam |
+| =rgsaddle.Stencil= | Point search. =point=, =step=, =run=, =positions=, =mode=, =curvature=. =band= raises =ValueError= because band presets are not implemented |
 | =rgsaddle.connect= | Run-to-completion double-ended search. =surface(x)= is the one-image =(energy, gradient)= callback. =ConnectReport= holds the geometry, energy, gradient norm, kind, Hessian index, and evaluation count |
 | =rgsaddle.Band= | Stepping NEB and simplified-string session (=string=True=, =reparametrization=). =step=, =run=, =positions=, =set_positions=, =evaluation=, =set_string=, =set_fixed_atoms=, =saddle_index=, =set_saddle_check=, =restart=, =reset= |
 | =rgsaddle.GrowingString= | Stepping growing-string session (Peters et al. 2004) with hand-off to =StringSession= upon join. =step=, =run=, =n_images=, =joined=, =positions=, =ids=, =set_fixed_atoms=, =saddle_index= |
@@ -167,6 +170,12 @@ The importable package is =rgsaddle=. =rgsaddle._core= is the nanobind extension
 | =rgsaddle.ase.SimplifiedString= | ASE =Optimizer= driver and =Optimizable= for the simplified string method over =list[Atoms]=, with =FixAtoms=, optional climbing image, and =saddle_index= |
 | =rgsaddle.ase.GrowingString= | ASE driver for the growing string method over =list[Atoms]=, preserving image IDs and batched calculator evaluation |
 | =rgsaddle.ase.Point= | ASE =Optimizer= driver for one point preset. =run(fmax, steps)= is ASE's own loop |
+| =rgsaddle.ase.NEB= | Drop-in for ASE's nudged elastic band over =list[Atoms]=: =interpolate=, =get_positions=, =get_forces=, =get_potential_energy=, =saddle_index=. Any ASE optimizer drives it |
+| =rgsaddle.ase.MinModeAtoms=, =rgsaddle.ase.Sella= | One =Atoms= object under a dimer or Lanczos mode, and an order-1 saddle optimizer with ASE's =run(fmax, steps)= loop |
+| =rgsaddle.ase.saddle_index= | =saddle_index= for =Atoms= on their calculator, with =FixAtoms= as the mask |
+| =_core.project_band= | One-shot projection of an already evaluated band |
+| =_core.MinMode=, =_core.SellaSaddle= | Low-level sessions used by the ASE-shaped drivers; =MinMode= translates with L-BFGS |
+| =_core.halve_raised_energy=, =_core.trust_update= | Stateless step-control helpers |
 
 =SurfaceAdapter= keeps =get_forces(apply_constraint=False)= on =raw_forces=. The returned gradient is minus =get_forces()= after constraints. The adapter evaluates the given rows in order on the calling thread. =owners()= and =reentrant()= are what a driver uses to group. A second call while the first holds the adapter raises =RuntimeError=.
 

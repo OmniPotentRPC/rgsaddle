@@ -1,0 +1,1 @@
+The IDPP declaration and module cite Smidstrup, Pedersen, Stokbro and Jónsson with their DOI for the plain path, and no longer cite the NEB orchestration paper for an algorithm it does not define.

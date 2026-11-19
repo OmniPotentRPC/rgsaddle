@@ -16,8 +16,8 @@ $ cargo run --release --example muller_brown_band -- target/muller_brown
 #+end_src
 
 #+begin_example
-ci-neb   Converged after 1823 steps, 16418 force calls, max force 1.0e-3, climbing image 3 at (-0.822002, 0.624313), energy -40.664844
-oci-neb  Converged after 56 steps, 483 force calls, max force 6.8e-4, climbing image 3 at (-0.822000, 0.624314), energy -40.664844
+ci-neb   Converged after 1712 steps, 16889 force calls, max force 9.8e-4, climbing image 3 at (-0.822002, 0.624313), energy -40.664844
+oci-neb  Converged after 50 steps, 513 force calls, max force 3.0e-4, climbing image 3 at (-0.822001, 0.624313), energy -40.664844
 #+end_example
 
 Both runs stop on the same saddle. The rest of this page goes through the program, =examples/muller_brown_band.rs=, and then the two figures.
@@ -53,9 +53,9 @@ The climbing image is image 3 in both runs, at (-0.82200, 0.62431) with energy -
 #+CAPTION: Gradient norm at the highest image against force calls, and the CI-NEB band's own max_force. The vertical line is where the climbing image arms.
 [[file:../../source/figures/band-tutorial/force_calls.png]]
 
-The first step evaluates 20 images and every later step 9, the interior images. The two runs take identical steps until step 52; the climbing image arms at step 51, after 470 force calls. From there OCI-NEB estimates the lowest mode at the climbing image and climbs that image alone. Its gradient is under =force_tol= (0.001) after 483 force calls, and the run stops.
+The first step evaluates 20 images. A later step evaluates the 9 interior images, or 18 when it assembles the band twice, as when FIRE backs up after an uphill move; the step that arms the climbing image costs 18 in this run. The two runs take identical steps through step 46; the climbing image arms at step 45, after 497 force calls. From there OCI-NEB estimates the lowest mode at the climbing image and climbs that image alone. Its gradient is under =force_tol= (0.001) after 510 force calls, and the run stops at step 50 with 513.
 
-The CI-NEB climbing image is under 0.001 for good from step 147, after 1334 force calls. The run continues to 16418 calls because its stopping test is different: CI-NEB stops when the projected force on every image is under =force_tol=, and OCI-NEB stops when the climbing image's own gradient is. After step 52 the OCI-NEB surface calls carry the climbing image alone, so the other images stay where that band step left them. That is why the two energy profiles differ away from the climbing image. Use CI-NEB when the whole path matters, and the default when the saddle is what you need.
+The CI-NEB climbing image is under 0.001 for good from step 135, after 1370 force calls. The run continues to 16889 calls because its stopping test is different: CI-NEB stops when the projected force on every image is under =force_tol=, and OCI-NEB stops when the climbing image's own gradient is. After step 46 the OCI-NEB surface calls carry the climbing image alone, so the other images stay where that band step left them. That is why the two energy profiles differ away from the climbing image. Use CI-NEB when the whole path matters, and the default when the saddle is what you need.
 
 * Make the figures
 #+begin_src console
