@@ -58,3 +58,22 @@ fn npt_extends_the_run_until_the_pressure_rule_is_evaluable() {
     assert_eq!(report.blocks, 4);
     assert!(!report.pressure_converged);
 }
+
+#[test]
+fn npt_pressure_includes_the_kinetic_virial() {
+    let (mut positions, mut cell) = one_atom(3.6);
+    let config = NptConfig::default()
+        .with_repeats(1)
+        .with_steps(40)
+        .with_maximum_steps(40)
+        .with_equilibration_steps(20)
+        .with_block_steps(5)
+        .with_seed(11);
+
+    let report = npt_lattice(&mut positions, &mut cell, 600.0, 63.546, config, |x, _| {
+        Ok((0.0, Array1::zeros(x.len()), [[0.0; 3]; 3]))
+    })
+    .unwrap();
+
+    assert!(report.mean_pressure > 0.0);
+}
