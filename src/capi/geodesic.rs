@@ -6,6 +6,7 @@
 use std::ffi::c_void;
 use std::slice;
 
+use minimage::Cell;
 use ndarray::{Array1, Array2, ArrayView1};
 
 use super::{
@@ -16,7 +17,6 @@ use crate::error::SaddleError;
 use crate::geodesic::{
     GeodesicChart, GeodesicConfig, MorsePairChart, geodesic_interpolate, geodesic_path,
 };
-use crate::mic::Cell;
 
 /// Wire controls for [`rgsaddle_geodesic_path`]. One hundred four bytes.
 #[repr(C)]
@@ -59,6 +59,7 @@ struct CallbackChart {
     n_coords: usize,
     fun: extern "C" fn(*mut c_void, *const f64, i64, *mut f64, *mut f64, i64) -> i32,
     ctx: *mut c_void,
+    cell: Option<Cell>,
 }
 
 // SAFETY: the stepper calls the chart on the thread that entered the C
@@ -69,6 +70,10 @@ unsafe impl Sync for CallbackChart {}
 impl GeodesicChart for CallbackChart {
     fn n_coords(&self) -> usize {
         self.n_coords
+    }
+
+    fn cell(&self) -> Option<&Cell> {
+        self.cell.as_ref()
     }
 
     fn eval(
@@ -150,6 +155,25 @@ fn config_from(ptr: *const RgsaddleGeodesicConfig) -> Result<GeodesicConfig, i32
     Ok(config)
 }
 
+/// Row-major 3x3 lattice, or null for free space.
+fn cell_from(ptr: *const f64) -> Result<Option<Cell>, i32> {
+    if ptr.is_null() {
+        return Ok(None);
+    }
+    let raw = unsafe { slice::from_raw_parts(ptr, 9) };
+    if !raw.iter().all(|v| v.is_finite()) {
+        return Err(RGSADDLE_INVALID_PARAMETER);
+    }
+    Cell::from_vectors(
+        [raw[0], raw[1], raw[2]],
+        [raw[3], raw[4], raw[5]],
+        [raw[6], raw[7], raw[8]],
+        [0.0, 0.0, 0.0],
+    )
+    .map(Some)
+    .map_err(|_| RGSADDLE_INVALID_PARAMETER)
+}
+
 fn as_i64(value: usize) -> Result<i64, i32> {
     i64::try_from(value).map_err(|_| RGSADDLE_INVALID_PARAMETER)
 }
@@ -219,9 +243,12 @@ pub unsafe extern "C" fn rgsaddle_geodesic_config_default(out: *mut RgsaddleGeod
 
 /// # Safety
 /// `path` holds `n_images * dof` doubles. `out` holds the same number.
-/// `chart` is a live callback or null. `config` is a live config or null.
-/// `length`, `lower`, and `upper` are live doubles or null. `ctx` is the
-/// host pointer passed back to `chart`.
+/// `chart` is a live callback or null. `cell` is 9 row-major lattice
+/// entries or null, and a non-null `cell` needs `dof` divisible by 3.
+/// `config` is a live config or null. `length`, `lower`, and `upper`
+/// are live doubles or null. `ctx` is the host pointer passed back to
+/// `chart`. The chart applies the same minimum image convention to its
+/// own distances.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rgsaddle_geodesic_path(
     n_images: i64,
@@ -230,6 +257,7 @@ pub unsafe extern "C" fn rgsaddle_geodesic_path(
     n_coords: i64,
     chart: RgsaddleGeodesicChartFn,
     ctx: *mut c_void,
+    cell: *const f64,
     config: *const RgsaddleGeodesicConfig,
     out: *mut f64,
     length: *mut f64,
@@ -257,6 +285,13 @@ pub unsafe extern "C" fn rgsaddle_geodesic_path(
     let Some(total) = n_images.checked_mul(dof) else {
         return RGSADDLE_INVALID_PARAMETER;
     };
+    if !cell.is_null() && dof % 3 != 0 {
+        return RGSADDLE_SHAPE;
+    }
+    let cell = match cell_from(cell) {
+        Ok(cell) => cell,
+        Err(code) => return code,
+    };
     let mut config = match config_from(config) {
         Ok(config) => config,
         Err(code) => return code,
@@ -270,7 +305,12 @@ pub unsafe extern "C" fn rgsaddle_geodesic_path(
         Ok(value) => value,
         Err(_) => return RGSADDLE_SHAPE,
     };
-    let adapter = CallbackChart { n_coords, fun, ctx };
+    let adapter = CallbackChart {
+        n_coords,
+        fun,
+        ctx,
+        cell,
+    };
     match geodesic_path(owned.view(), &adapter, &config) {
         Ok((optimized, report)) => {
             let status = write_path(&optimized, out);
@@ -336,18 +376,9 @@ pub unsafe extern "C" fn rgsaddle_geodesic_morse(
         Ok(chart) => chart,
         Err(err) => return status_of(&err),
     };
-    if !cell.is_null() {
-        let raw = unsafe { slice::from_raw_parts(cell, 9) };
-        let parsed = match Cell::from_vectors(
-            [raw[0], raw[1], raw[2]],
-            [raw[3], raw[4], raw[5]],
-            [raw[6], raw[7], raw[8]],
-            [0.0, 0.0, 0.0],
-        ) {
-            Ok(cell) => cell,
-            Err(_) => return RGSADDLE_INVALID_PARAMETER,
-        };
-        chart = chart.with_cell(parsed);
+    match cell_from(cell) {
+        Ok(parsed) => chart = chart.with_cell(parsed),
+        Err(code) => return code,
     }
     let reactant = match Array1::from_shape_vec(dof, reactant_raw.to_vec()) {
         Ok(value) => value,
