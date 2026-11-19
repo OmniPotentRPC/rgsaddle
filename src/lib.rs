@@ -76,6 +76,7 @@ pub mod indexk;
 pub mod lammps;
 pub mod minmode;
 pub mod nichols;
+pub mod npt;
 pub mod occupancy;
 pub mod ocineb;
 #[cfg(feature = "ohtst")]
@@ -166,6 +167,7 @@ pub use nichols::{
     HessianUpdate, Index1Config, Index1Report, Index1Session, Index1Status, NicholsMode,
     bofill_update, cap_max_abs, nichols_displacement, nichols_step, powell_update,
 };
+pub use npt::{NptConfig, NptReport, npt_lattice};
 pub use occupancy::{SiteOccupancy, site_occupancy};
 pub use ocineb::{
     MIN_ALIGNMENT, OcinebConfig, OcinebPhase, OcinebReport, OcinebSession, OcinebStatus,
