@@ -236,7 +236,10 @@ fn sample_on_sphere(dim: usize, rng: &mut SplitMix64) -> Array1<f64> {
 mod tests {
     use ndarray::{Array1, ArrayView1, array};
 
-    use super::{hessian_mode_sweep_directions, spectral_gap_rank};
+    use super::{
+        hessian_mode_sweep_directions, mode_sweep_schedule,
+        spectral_gap_rank,
+    };
     use crate::{PointSurface, SaddleError};
 
     struct DiagonalHarmonic;
@@ -289,6 +292,17 @@ mod tests {
         let plan = hessian_mode_sweep_directions(&LargeHarmonic, minimum.view(), 3, 0.25, None)
             .expect("large mode sweep");
         assert_eq!(plan.directions.len(), 96);
+    }
+
+    #[test]
+    fn short_chirp_stratifies_the_whole_mode_band() {
+        assert_eq!(mode_sweep_schedule(10, 4).unwrap(), vec![1, 3, 6, 8]);
+        assert_eq!(
+            mode_sweep_schedule(3, 7).unwrap(),
+            vec![0, 1, 2, 0, 1, 2, 0]
+        );
+        assert!(mode_sweep_schedule(0, 1).is_err());
+        assert!(mode_sweep_schedule(3, 0).is_err());
     }
 
     #[test]
