@@ -5,6 +5,7 @@
 The API documentation for every public item is on [[https://docs.rs/rgsaddle][docs.rs/rgsaddle]].
 =cargo doc --open= builds the same pages from a checkout.
 Runnable examples open =BandSession=, =AutoNeb=, =OcinebSession=, =MinModeSession=, =Index1Session=, =IndexKSession=, =SolidDimer=, =SolidNeb=, =Stencil= and the =ohtst= module, and, with =--features capi=, the C band, min-mode and stencil handles.
+~meson -Dfortran=enabled~ adds the Fortran 2008 =rgsaddle= module on the same C ABI.
 =cargo test --doc= runs them.
 Every public configuration struct is non-exhaustive.
 Start from =Default= or the type's named constructor and chain the =with_*= setters, as in =BandConfig::default().with_force_tol(1e-3)=.
@@ -16,11 +17,12 @@ The table below lists the main types.
 | =OcinebSession=                | The band's refinement with the published controls (=OcinebConfig::refine=). =step= reports =Band=, =Align=, or =MinMode= |
 | =AutoNeb=                      | Insert on the worst gap, relax a local window, and climb. The full band runs only when =full_band= is set. =run= is one shot |
 | =AutoNebTuning=                | =n_simul=, =n_max=, local tolerance and step caps, =space_energy_ratio=, =climb=, =full_band=, =threads=, =record_samples=. Stored on =BandConfig= |
-| =BandConfig=                   | Tangent, spring, projection, climbing, cell, tolerances, method, optional AutoNEB tuning, =min_mode= refinement, =zoom=, =string= |
+| =BandConfig=                   | Tangent, spring, projection, climbing, cell, tolerances, method, optional AutoNEB tuning, =min_mode= refinement, =zoom=, =string=, optional =dynamic= (=DynamicNeb=, off unless set) |
 | =StringConfig=                 | Simplified string method of E, Ren, and Vanden-Eijnden (2007) on =BandConfig::string=. Non-exhaustive, off unless set. Evolves interior images under the full potential force and reparametrizes to equal arc length on =Reparametrization::NotAKnot= (default, =StringConfig::spline()=) or =Linear= (=StringConfig::linear()=), anchoring an armed climbing image |
 | =StringSession=                | Standalone simplified string session preserving per-image =ImageId=s and batched surface evaluations; target of =GrowingStringSession= hand-off |
 | =GrowingStringSession=         | Growing string method of Peters, Heyden, Bell, and Chakraborty (2004). Reactant and product fragments with frontier tangent constraints, configurable node-add criterion (=GrowingStringConfig=), separate fragment relaxation, join detection, and hand-off to =StringSession= |
 | =MinModeRefine=                | OCI-NEB refinement of the climbing image. Non-exhaustive. Trigger at any force, stability 1, start alignment 0.85, no alignment exit, retry under 0.5 of the starting force, refresh at 0.3 of the measured curvature or overlap 0.8 every 4 steps at most, budget 1000, Lanczos with twenty actions and relative tolerance 0.05 |
+| =DynamicNeb=                  | Dynamic NEB on =BandConfig::dynamic=. Non-exhaustive, off unless set. =fmax= 0.05 and =scale_fmax= 0 match ASE 3.29 =DyNEB=: an interior image whose largest per-atom projected force is strictly below =fmax * (1 + distance * scale_fmax)= keeps its last energy and force. =distance= is the Euclidean norm from the highest-energy image, with no minimum image. That image stays in the spring and the tangent and is evaluated again when the projected force exceeds the threshold. The highest-energy image is never given a zero force. |
 | =ZoomConfig=                   | The nudged elastic band (NEB) zoom, Zoom-NEB, on =BandConfig::zoom=. Non-exhaustive, off unless set. Recommended settings for a band that opts in are the defaults: =alpha= 0.5, =offset= 1, =stability= 5, cubic placement, and =after= 0. An =after= of 0 zooms once the largest per-image force, measured by the session's convergence norm, is below twice =force_tol=. The window always reaches both neighbours of the climbing image. The min-mode refinement waits for the zoom decision. Plain climbing image NEB (CI-NEB) on the 51 benchmark pairs of the 38-atom Lennard-Jones cluster (LJ38) converged 20 pairs with the zoom on and 21 without it. It used more force calls on 10 of the 17 pairs that converged both ways. With the default min-mode refinement on, one LJ38 pair ran to the 250000 call cap. On Müller-Brown at 13 images with FIRE and =max_move= 0.05, plain CI-NEB took 30593 force calls with the zoom and 31308 without it. With L-BFGS of memory 100 and climbing from half the first force, the zoom does not help on Müller-Brown: the band took 6503 force calls with it and 3280 without it. The zoom is an opt-in, not a general default. |
 | =BandSurface=                  | Host potential on a band (energies + gradients per image)                                                          |
 | =BandReport=                   | =status=, =max_force=, =ci_index=, =iteration=, =surface_rows=, =curvature= (refinement steps only), =saddle_index= (converged steps) |
@@ -104,6 +106,8 @@ Its =rotation_angle_tol= field stops a dimer rotation once the optimal angle fal
 The Rust default is five degrees, 0 turns the stop off, and a C config stores the value it is given.
 Both fields are read only from a config whose version minor is 5 or newer.
 =RGSADDLE_ABI_MINOR= is 45.
+=rgsaddle_band_set_dynamic= (minor 46) sets or clears =DynamicNeb= on a band.
+=rgsaddle_dyneb_mask= (minor 46) applies that mask to a projected band.
 From minor 24, =rgsaddle_sella_saddle_set_symmetrized_ritz= sets =SellaSaddleConfig::symmetrized_ritz= from 0 or 1.
 It returns =RGSADDLE_INVALID_PARAMETER= for any other value.
 =rgsaddle_sella_saddle_set_small_system_atom_ceiling= (minor 25) sets =SellaSaddleConfig::small_system_atom_ceiling= from 0 or 1.
@@ -133,6 +137,7 @@ The surface writes energy and the Cartesian gradient for one image.
 It also carries the kind (=s=, =u=, or =f=), the Hessian index and the evaluation count.
 That count includes the finite differences that decide a step or an index.
 The Lanczos acceptance does not build a dense Hessian.
+=howto/fortran= wraps this ABI for Fortran with finalizer-backed handles for band, min-mode, PAFI, and OH-TST sessions (=rgsaddle_pafi_*= and =rgsaddle_ohtst_*=, ABI minor 45).
 Band flag bit 2 is =RGSADDLE_BAND_CI_AFTER=.
 It arms the climbing image under =ci_trigger_force= or =ci_trigger_factor= times the first force.
 Either of the two may be 0.
@@ -149,6 +154,25 @@ Cells go in and Cauchy stresses come out through =rgsaddle_solid_surface_request
 =rgsaddle_band_cells= and =rgsaddle_band_solid_jacobian= read the solid-state band back.
 The report's =evaluations= field took the place of =reserved= at minor 5.
 =cargo cinstall= installs =include/rgsaddle.h= as written.
+
+* Fortran module (meson ~-Dfortran=enabled~)
+=fortran/rgsaddle.f90= defines the Fortran 2008 module =rgsaddle= on top of =include/rgsaddle.h= at ABI major 1, minor 45 (~RGSADDLE_ABI_MAJOR = 1~, ~RGSADDLE_ABI_MINOR = 45~). Meson installs =librgsaddle_fortran.a=, =include/rgsaddle/fortran/rgsaddle.mod=, =rgsaddle-fortran.pc=, and the relocatable CMake package =rgsaddleFortran= (imported target =rgsaddle::fortran=). =librgsaddle= itself is built by cargo (=--features capi=). Narrative and runnable programs are in @@rst::doc:`howto/fortran <howto/fortran>`@@.
+
+| Item | Role |
+|------+------|
+| =band_handle= | Owning NEB session. =create(config, n_images, n_atoms, positions)=, =step(callback[, user, out])=, =step_c(surface[, user, out])=, =positions(positions)=, =move_from(src)=, =release()=, scope-exit finalizer. Empty handle returns =RGSADDLE_NULL_BAND= |
+| =minmode_handle= | Owning dimer or Lanczos session. =create(config, n_atoms, position, mode)=, =step(callback[, user, out])=, =step_c(surface[, user, out])=, =position(position)=, =mode(mode)=, =move_from(src)=, =release()=, scope-exit finalizer. Empty handle returns =RGSADDLE_NULL_SESSION= |
+| =pafi_handle= | Owning PAFI session. =create(config, n_frames, n_dof, frames[, arcs])=, =set_config(config)=, =run(callback[, user])=, =run_c(surface[, user])=, =result(out)=, =profile(arcs, gradients, gradient_errors, free_energy, free_energy_errors[, written])=, =move_from(src)=, =release()=, scope-exit finalizer |
+| =ohtst_handle= | Owning OH-TST session. =create(config, n_dof, point, normal)=, =set_config(config)=, =run(callback[, user])=, =run_c(surface[, user])=, =result(out)=, =curve(times, kappa_of_t[, written])=, =move_from(src)=, =release()=, scope-exit finalizer |
+| ~assignment(=)~ | Overloaded on all four handle types; executes =error stop RGSADDLE_HANDLE_NOT_ASSIGNABLE= (17) so raw C session pointers are never copied |
+| =init_band_config=, =init_minmode_config=, =init_pafi_config=, =init_ohtst_config= | Populate default settings and stamp =version= with =abi_stamp=. =init_minmode_config(config[, kind])= defaults to =RGSADDLE_MINMODE_DIMER= and sets the five-degree =rotation_angle_tol= |
+| =abi_stamp=, =status_name=, =uint64_bits= | Stamp an =rgsaddle_version_t=, map a status code to an allocatable ~character(len=:)~ (=UNKNOWN= when unmapped), and pack two 32-bit halves =(high, low)= into a signed =c_int64_t= bit pattern for C =uint64_t= seeds |
+| =surface_proc= | Abstract interface =(user, n_images, n_atoms, positions, energies, gradients, image) -> c_int=. =n_images= is the evaluated row count (=1= for =RGSADDLE_REQ_ONE_IMAGE=); =image= is the zero-based band index or =-1= for a batch |
+| =point_surface_proc= | Abstract interface =(user, n_dof, position, energy, gradient) -> c_int=. Invoked from worker threads during PAFI and OH-TST runs; implementations must be thread-safe and =recursive= |
+| =rgsaddle_version_t=, =rgsaddle_surface_request_t=, =rgsaddle_band_config_t=, =rgsaddle_minmode_config_t=, =rgsaddle_report_t=, =rgsaddle_pafi_config_t=, =rgsaddle_pafi_result_t=, =rgsaddle_ohtst_config_t=, =rgsaddle_ohtst_result_t= | =bind(C)= wire structs matching =include/rgsaddle.h= |
+| Status and mode constants | =RGSADDLE_OK= through =RGSADDLE_STALLED=, =RGSADDLE_STATUS_RUNNING=, =RGSADDLE_STATUS_CONVERGED=, =RGSADDLE_METHOD_FIRE=, =RGSADDLE_METHOD_LBFGS=, =RGSADDLE_MINMODE_DIMER=, =RGSADDLE_MINMODE_LANCZOS=, =RGSADDLE_OHTST_INTEGRATOR_BAOAB=, =RGSADDLE_OHTST_INTEGRATOR_GHMC=, =RGSADDLE_OHTST_COUNT_FINAL=, =RGSADDLE_OHTST_COUNT_FIRST_CROSSING=, =RGSADDLE_BAND_PER_IMAGE=, =RGSADDLE_REQ_ONE_IMAGE=, =RGSADDLE_HANDLE_NOT_ASSIGNABLE= |
+
+Fortran arrays map onto the row-major C buffers without transposing when coordinate dimensions precede the image or frame dimension: =(3, n_atoms, n_images)= for bands and =(n_dof, n_frames)= for PAFI. =rgsaddle_report_t%ci_index= and =rgsaddle_pafi_result_t%dividing= are zero-based C indices. =pafi_handle%profile= and =ohtst_handle%curve= pass the minimum slice length as capacity; when shorter than the stored series, they return =RGSADDLE_INVALID_PARAMETER= and write the required length to =written=. Trampolines store the callback and =user= pointer per call with no module state, allowing nested sessions and concurrent worker callbacks.
 
 * Python package
 The importable package is =rgsaddle=. =rgsaddle._core= is the nanobind extension. =import rgsaddle= does not import ASE.
@@ -168,6 +192,10 @@ The importable package is =rgsaddle=. =rgsaddle._core= is the nanobind extension
 | =rgsaddle.ase.SimplifiedString= | ASE =Optimizer= driver and =Optimizable= for the simplified string method over =list[Atoms]=, with =FixAtoms=, optional climbing image, and =saddle_index= |
 | =rgsaddle.ase.GrowingString= | ASE driver for the growing string method over =list[Atoms]=, preserving image IDs and batched calculator evaluation |
 | =rgsaddle.ase.Point= | ASE =Optimizer= driver for one point preset. =run(fmax, steps)= is ASE's own loop |
+| =rgsaddle.ase.NEB= | ASE's band call. =k= is a scalar or one value per spring. =method= is =improvedtangent=, =aseneb=, =eb=, or =dneb=. =spline=, =string=, =precon=, and the DyNEB keywords =dynamic_relaxation=, =fmax=, and =scale_fmax= raise =NotImplementedError=. =interpolate(method='idpp')= and =idpp_interpolate= run =idpp_path= |
+| =rgsaddle.ase.DyNEB= | ASE 3.29 dynamic NEB. =dynamic_relaxation= (default true) leaves an image in place once its per-atom force is below =fmax=. =scale_fmax= scales that test by the distance from the highest-energy image. =dynamic_relaxation= false is the ordinary band |
+| =rgsaddle.idpp_path= | Image-dependent pair-potential path, endpoints included, shape =(n_images, 3N)=. =cell= is the 3x3 row-major lattice |
+| =rgsaddle.ase.DimerControl=, =MinModeAtoms=, =MinModeTranslate= | ASE's dimer. The mode and curvature come from =MinMode=. The trial step and conjugate gradient are ASE's. =order= other than 1 and a gauss displacement raise =NotImplementedError= |
 
 =SurfaceAdapter= keeps =get_forces(apply_constraint=False)= on =raw_forces=. The returned gradient is minus =get_forces()= after constraints. The adapter evaluates the given rows in order on the calling thread. =owners()= and =reentrant()= are what a driver uses to group. A second call while the first holds the adapter raises =RuntimeError=.
 
@@ -205,6 +233,7 @@ The importable package is =rgsaddle=. =rgsaddle._core= is the nanobind extension
   A twelve-coordinate search and a search without iterative diagonalization step the same with the option on or off.
   The default takes the ceiling.
 - =tests/c_abi.rs= — header and symbols with =capi=
+- =tests/fortran/= and =ci/fortran_abi.sh= — Fortran 2008 module, relocatable pkg-config and CMake consumers, static archive link, handle move/release and non-assignability, NEB (batch and per-image), dimer, Lanczos, PAFI 1D and 2D widening barriers, OH-TST aligned and tilted planes under BAOAB and GHMC, optional and forwarded =user= pointers on =step=, =step_c=, =run=, and =run_c=, nested outer band, min-mode, PAFI, and OH-TST re-entrancy, and the documented runnable examples under ~-std=f2008 -Wall -Wextra -Werror -fcheck=all~
 - =tests/solid_bain_lj.rs= — =tests/c/solid_bain_lj.c= runs the solid-state band from bcc to fcc for switched LJ on the two-atom tetragonal cell through =rgsaddle_band_create_solid=; the climbing image matches the relaxed scan of =validation/bain_lj_reference.py= in c/a within 2.5e-4 and in barrier within 1.2e-6 eV/atom, and every image keeps a diagonal tetragonal cell and its fractional coordinates
 - =tests/solid_dimer_barrier.rs= — the variable-cell dimer and the solid-state band meet on the shear-coupled double well; a frozen cell reproduces the one-dimensional barrier
 - =tests/ssneb.rs= — a frozen =SolidNeb= matches the ordinary band and CI-NEB; the variable-cell double well barrier is 1

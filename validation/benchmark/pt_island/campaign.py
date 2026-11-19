@@ -22,15 +22,14 @@ import sys
 import time
 from pathlib import Path
 
-from optbench.campaign import load_template, resolve_problem
-from optbench.rgsaddle_minmode import run_template
-
-
 def head(path):
     return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=path, text=True).strip()
 
 
 def main():
+    from optbench.campaign import load_template, resolve_problem
+    from optbench.rgsaddle_minmode import run_template
+
     root = Path(os.environ["OPTBENCH_ROOT"])
     name, output = sys.argv[1], Path(sys.argv[2])
     template = load_template(root, name)
@@ -58,4 +57,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) == 1:
+        print(__doc__.splitlines()[2])
+    else:
+        main()

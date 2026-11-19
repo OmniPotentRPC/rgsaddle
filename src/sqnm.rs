@@ -15,6 +15,8 @@
 #[cfg(feature = "faer")]
 use faer::Mat;
 
+use crate::vec3::{dot_slice as dot, norm_slice as norm};
+
 #[derive(Clone)]
 pub struct ConstrainedOpt {
     n: usize,
@@ -402,14 +404,6 @@ impl ConstrainedOpt {
             ndim,
         }
     }
-}
-
-fn dot(a: &[f64], b: &[f64]) -> f64 {
-    a.iter().zip(b).map(|(x, y)| x * y).sum()
-}
-
-fn norm(a: &[f64]) -> f64 {
-    dot(a, a).sqrt()
 }
 
 fn max_atom(v: &[f64]) -> f64 {

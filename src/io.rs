@@ -368,7 +368,7 @@ fn cell_from_header(
             "CON cell angles define a singular or invalid lattice".into(),
         ));
     }
-    Cell::from_vectors(vectors[0], vectors[1], vectors[2], [0.0; 3])
+    Cell::from_con(vectors)
         .map(Some)
         .map_err(|error| SaddleError::Invalid(format!("invalid CON cell: {error}")))
 }

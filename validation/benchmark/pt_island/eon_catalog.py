@@ -28,12 +28,6 @@ import time
 from pathlib import Path
 
 import numpy as np
-from optbench import rgsaddle_minmode as M
-from optbench.campaign import resolve_problem
-from optbench.connection import ProcessTable, periodic_lengths
-from optbench.connection import connected as linked
-from optbench.displacement import displace, neighbours
-from optbench.surfaces import load_con, potential_from_problem
 
 CONFIG = """[Main]
 job = saddle_search
@@ -81,6 +75,13 @@ def write_con(template, path, coords):
 
 
 def main():
+    from optbench import rgsaddle_minmode as M
+    from optbench.campaign import resolve_problem
+    from optbench.connection import ProcessTable, periodic_lengths
+    from optbench.connection import connected as linked
+    from optbench.displacement import displace, neighbours
+    from optbench.surfaces import load_con, potential_from_problem
+
     flavour, limit, out = sys.argv[1], int(sys.argv[2]), Path(sys.argv[3])
     out.mkdir(parents=True, exist_ok=True)
     root = Path(os.environ["OPTBENCH_ROOT"])
@@ -165,4 +166,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) == 1:
+        print(__doc__.splitlines()[2])
+    else:
+        main()

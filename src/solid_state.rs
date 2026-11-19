@@ -11,6 +11,7 @@ use ndarray::{Array1, ArrayView1};
 
 use crate::cell_log::{M3, m3_det, m3_inv, m3_mul};
 use crate::error::SaddleError;
+use crate::vec3::{cross3, dot3, norm3};
 
 /// True when `value` is not strictly above `floor`; NaN is not above
 /// anything, so it fails every bound written with this test.
@@ -67,22 +68,6 @@ fn m3_sub(a: M3, b: M3) -> M3 {
         }
     }
     c
-}
-
-fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
-fn norm3(a: [f64; 3]) -> f64 {
-    dot3(a, a).sqrt()
-}
-
-fn cross3(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
 }
 
 /// Rotate the lab frame so the first lattice vector lies on x and the

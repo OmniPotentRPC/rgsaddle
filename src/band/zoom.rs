@@ -295,7 +295,7 @@ impl BandSession {
         self.forget_optimizer();
         self.refine = super::min_mode::RefineState::default();
         if let Some(exp) = self.exp.as_mut() {
-            exp.metrics.clear();
+            exp.clear_metrics();
         }
         self.zoom.window = Some((lo, hi));
         true

@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 45u
+#define RGSADDLE_ABI_MINOR 46u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -305,6 +305,9 @@ const char *rgsaddle_thermodynamic_derivative_observable(void);
  * image carried (endpoints 0 and band - 1 appear only on the first
  * evaluation), positions and gradients are 3 * n_atoms, energies is
  * one value, and n_images is the length of the band.
+ * From ABI minor 46 a dynamic NEB step sends this request, without
+ * RGSADDLE_REQ_CLIMBING_IMAGE, for an interior image a neighbour
+ * pulled back over its threshold.
  *
  * While the min-mode refinement runs (ABI minor 21, see
  * RGSADDLE_BAND_NO_MIN_MODE) each request carries the climbing image
@@ -672,6 +675,165 @@ rgsaddle_status_t rgsaddle_minmode_mode(const RgsaddleMinMode *session,
 /** Clear optimizer/rotation history, carried curvature, and the centre cache. */
 rgsaddle_status_t rgsaddle_minmode_reset(RgsaddleMinMode *session);
 void rgsaddle_minmode_free(RgsaddleMinMode *session);
+
+typedef struct RgsaddlePafi RgsaddlePafi;
+
+/** Point-surface callback used by PAFI and OH-TST handles. */
+typedef rgsaddle_status_t (*rgsaddle_point_surface_fn)(
+    void *user, int64_t n_dof, const double *position, double *energy,
+    double *gradient);
+
+/** PAFI configuration. The caller stamps version and zeroes flags. */
+typedef struct {
+  rgsaddle_version_t version;
+  uint64_t flags;
+  double thermal;
+  double mobility;
+  double time_step;
+  int64_t thermalize;
+  int64_t stride;
+  int64_t samples;
+  int64_t blocks;
+  uint64_t seed;
+  int32_t fix_com;
+  int64_t retain;
+  /** Positive target error enables adaptive rounds; non-positive means one pass. */
+  double target_error;
+  int64_t max_rounds;
+} rgsaddle_pafi_config_t;
+
+/** PAFI barrier summary after rgsaddle_pafi_run. */
+typedef struct {
+  rgsaddle_version_t version;
+  uint64_t flags;
+  double barrier;
+  double barrier_error;
+  int64_t dividing;
+  int64_t samples;
+  int64_t evaluations;
+} rgsaddle_pafi_result_t;
+
+/**
+ * Create a PAFI session from path frames. `frames` is row-major
+ * `n_frames` by `n_dof`. `arcs`, when non-NULL and `n_arcs > 0`, holds
+ * increasing arc values; otherwise arc lengths are built from the
+ * frames.
+ */
+RgsaddlePafi *rgsaddle_pafi_create(const rgsaddle_pafi_config_t *config,
+                                   int64_t n_frames, int64_t n_dof,
+                                   const double *frames, const double *arcs,
+                                   int64_t n_arcs);
+/** Replace the PAFI configuration between runs. */
+rgsaddle_status_t rgsaddle_pafi_set_config(
+    RgsaddlePafi *session, const rgsaddle_pafi_config_t *config);
+/** Run PAFI and store the profile in the session. */
+rgsaddle_status_t rgsaddle_pafi_run(RgsaddlePafi *session,
+                                    rgsaddle_point_surface_fn surface,
+                                    void *user);
+/** Read the last PAFI barrier summary. */
+rgsaddle_status_t rgsaddle_pafi_result(const RgsaddlePafi *session,
+                                       rgsaddle_pafi_result_t *out);
+/**
+ * Read the full stored profile. `capacity` is the writable length of
+ * every non-NULL array output. When `capacity` is shorter than the
+ * stored profile the call returns RGSADDLE_INVALID_PARAMETER and, if
+ * `written` is non-NULL, sets `*written` to the number of points the
+ * profile needs. The output arrays are left unchanged in that case.
+ */
+rgsaddle_status_t rgsaddle_pafi_profile(const RgsaddlePafi *session,
+                                        double *arcs, double *gradients,
+                                        double *gradient_errors,
+                                        double *free_energy,
+                                        double *free_energy_errors,
+                                        int64_t capacity, int64_t *written);
+void rgsaddle_pafi_free(RgsaddlePafi *session);
+
+typedef struct RgsaddleOhtst RgsaddleOhtst;
+
+/**
+ * OH-TST sample integrator kind for rgsaddle_ohtst_config_t:
+ * 0 BAOAB, 1 GHMC.
+ */
+typedef enum {
+  RGSADDLE_OHTST_INTEGRATOR_BAOAB = 0,
+  RGSADDLE_OHTST_INTEGRATOR_GHMC = 1
+} rgsaddle_ohtst_integrator_t;
+
+/**
+ * OH-TST trajectory counting kind for rgsaddle_ohtst_config_t:
+ * 0 final state, 1 first crossing.
+ */
+typedef enum {
+  RGSADDLE_OHTST_COUNT_FINAL = 0,
+  RGSADDLE_OHTST_COUNT_FIRST_CROSSING = 1
+} rgsaddle_ohtst_counting_t;
+
+/** OH-TST configuration. The caller stamps version and zeroes flags. */
+typedef struct {
+  rgsaddle_version_t version;
+  uint64_t flags;
+  double thermal;
+  double sample_time_step;
+  double sample_friction;
+  int64_t sample_burn_in;
+  int64_t sample_stride;
+  int64_t sample_records;
+  int64_t sample_blocks;
+  uint64_t sample_seed;
+  int64_t sample_retain;
+  int32_t sample_integrator; /**< rgsaddle_ohtst_integrator_t */
+  double shooting_friction;
+  double shooting_time_step;
+  int64_t shooting_steps;
+  int64_t shooting_check_every;
+  int64_t shooting_commit;
+  int64_t shooting_shots;
+  int64_t shooting_blocks;
+  uint64_t shooting_seed;
+  int32_t counting; /**< rgsaddle_ohtst_counting_t */
+} rgsaddle_ohtst_config_t;
+
+/** OH-TST summary after rgsaddle_ohtst_run. */
+typedef struct {
+  rgsaddle_version_t version;
+  uint64_t flags;
+  double kappa;
+  double error;
+  int64_t shots;
+  int64_t unassigned;
+  int64_t reactive;
+  int64_t recrossed;
+  int64_t evaluations;
+} rgsaddle_ohtst_result_t;
+
+/**
+ * Create an OH-TST session on one dividing plane. `point` and `normal`
+ * each hold `n_dof` doubles.
+ */
+RgsaddleOhtst *rgsaddle_ohtst_create(const rgsaddle_ohtst_config_t *config,
+                                     int64_t n_dof, const double *point,
+                                     const double *normal);
+/** Replace the OH-TST configuration between runs. */
+rgsaddle_status_t rgsaddle_ohtst_set_config(
+    RgsaddleOhtst *session, const rgsaddle_ohtst_config_t *config);
+/** Sample the plane, run transmission shooting, and store the result. */
+rgsaddle_status_t rgsaddle_ohtst_run(RgsaddleOhtst *session,
+                                     rgsaddle_point_surface_fn surface,
+                                     void *user);
+/** Read the last OH-TST transmission summary. */
+rgsaddle_status_t rgsaddle_ohtst_result(const RgsaddleOhtst *session,
+                                        rgsaddle_ohtst_result_t *out);
+/**
+ * Read the stored κ(t) curve. `capacity` is the writable length of every
+ * non-NULL output. When `capacity` is shorter than the stored curve the
+ * call returns RGSADDLE_INVALID_PARAMETER and, if `written` is non-NULL,
+ * sets `*written` to the number of points the curve needs. The output
+ * arrays are left unchanged in that case.
+ */
+rgsaddle_status_t rgsaddle_ohtst_curve(const RgsaddleOhtst *session,
+                                       double *times, double *kappa_of_t,
+                                       int64_t capacity, int64_t *written);
+void rgsaddle_ohtst_free(RgsaddleOhtst *session);
 
 typedef enum {
   RGSADDLE_HESS_POWELL = 0,
@@ -1455,6 +1617,50 @@ rgsaddle_status_t rgsaddle_band_set_zoom(RgsaddleBand *band, int32_t enabled,
  */
 rgsaddle_status_t rgsaddle_band_set_string(RgsaddleBand *band, int32_t enabled,
                                            int32_t scheme);
+
+/**
+ * Dynamic NEB (Lindgren, Kastlunger and Peterson, J. Chem. Theory
+ * Comput. 15, 5787 (2019); ASE 3.29 DyNEB). ABI minor 46.
+ * `enabled` 0 clears it and ignores fmax and scale_fmax. `enabled` 1
+ * leaves an image in place once the largest per-atom norm of its
+ * projected force is strictly below `fmax`, scaled by
+ * `fmax * (1 + distance * scale_fmax)` where distance is the Euclidean
+ * norm of the coordinate difference from the highest-energy image.
+ * A converged image keeps its last energy and force and stays in the
+ * spring and the tangent. It is evaluated again when a neighbour moves
+ * enough that the projected force exceeds that threshold. The highest
+ * energy image is never given a zero force. The default band, with
+ * this unset, evaluates every image.
+ *
+ * Refused on a solid-state band and on the trust-region stepper.
+ * Returns RGSADDLE_NULL_BAND for a null band, and
+ * RGSADDLE_INVALID_PARAMETER for enabled other than 0 or 1, a
+ * non-finite fmax or scale_fmax, a solid-state band, or the
+ * trust-region stepper.
+ */
+rgsaddle_status_t rgsaddle_band_set_dynamic(RgsaddleBand *band, int32_t enabled,
+                                            double fmax, double scale_fmax);
+
+/**
+ * ASE 3.29 DyNEB mask, ABI minor 46. `positions`, `energies` and
+ * `forces` are the whole band, image-major, `n_images * 3 * n_atoms`
+ * for the coordinates and the forces. Interior force rows whose
+ * largest per-atom norm is strictly below
+ * `fmax * (1 + distance * scale_fmax)` are set to zero, except the
+ * highest-energy image, whose force is kept. `distance` does not use
+ * the minimum image. `frozen`, when non-null, receives `n_images`
+ * bytes: 1 when that image would not be moved (the force after this
+ * mask is strictly below `fmax`). Both endpoints are 1.
+ *
+ * Returns RGSADDLE_SHAPE for a null pointer, fewer than 3 images or a
+ * non-positive atom count, RGSADDLE_NON_FINITE for a non-finite input,
+ * and RGSADDLE_INVALID_PARAMETER for a non-finite fmax or scale_fmax.
+ */
+rgsaddle_status_t rgsaddle_dyneb_mask(int64_t n_images, int64_t n_atoms,
+                                      const double *positions,
+                                      const double *energies, double *forces,
+                                      double fmax, double scale_fmax,
+                                      uint8_t *frozen);
 
 /**
  * Point stencil. Opaque config, typed keys, one callback.

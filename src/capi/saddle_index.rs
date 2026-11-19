@@ -329,15 +329,7 @@ pub unsafe extern "C" fn rgsaddle_saddle_index(
             None => return RGSADDLE_INVALID_PARAMETER,
         }
     };
-    let cs = CSurface {
-        f,
-        user,
-        n_atoms,
-        n_images: 1,
-        per_image: false,
-        climbing_request: false,
-        rows: Default::default(),
-    };
+    let cs = CSurface::point(f, user, n_atoms);
     match saddle_index(
         &check,
         &cs,

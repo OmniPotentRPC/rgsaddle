@@ -1,0 +1,345 @@
+#+TITLE: Use the Fortran bindings
+#+OPTIONS: toc:nil num:nil author:nil
+
+The optional Fortran layer builds a Fortran 2008 module, =rgsaddle=, over =include/rgsaddle.h= (ABI major 1, minor 46) using =iso_c_binding=. See @@rst::doc:`the reference page <../reference>`@@ for the full symbol table of the module.
+
+* Build and link
+The feature is off by default in the top-level =meson.build=. Build the Rust C ABI library first, then configure and install the Fortran wrapper with meson:
+
+#+begin_src sh
+cargo build --locked --features capi
+meson setup build -Dfortran=enabled --prefix "$PWD/dist" --libdir=lib
+meson compile -C build
+meson install -C build
+#+end_src
+
+The install layout under =--prefix= contains:
+
+- =<libdir>/librgsaddle_fortran.a=, the compiled Fortran wrapper archive
+- =<includedir>/rgsaddle/fortran/rgsaddle.mod=, the Fortran module file
+- =<libdir>/pkgconfig/rgsaddle-fortran.pc=, pkg-config metadata naming =-lrgsaddle_fortran= and =-lrgsaddle=
+- =<libdir>/cmake/rgsaddleFortran/rgsaddleFortranConfig.cmake= and its version file, defining the =rgsaddle::fortran= imported target
+
+Fortran =.mod= files are specific to the compiler vendor and major version. Configure meson with the same Fortran compiler (~FC=...~) that builds the consumer, or compile =fortran/rgsaddle.f90= directly alongside the consumer sources (as =ci/fortran_abi.sh= does for =flang-20= and =ifx=).
+
+=librgsaddle= is built by cargo (=cargo build --features capi= or =cargo cinstall=), not by meson. All three build-system integrations reference it:
+
+- *pkg-config*: pass =-L= (and =-Wl,-rpath,= for a shared build) for the directory holding =librgsaddle= before =$(pkg-config --libs rgsaddle-fortran)=. When an installed prefix is moved to a new directory on Linux, pass =--define-prefix= to =pkg-config= so =${prefix}= is recomputed from the =.pc= file path (Windows enables =--define-prefix= by default).
+- *CMake*: call =find_package(rgsaddleFortran REQUIRED)= and link =rgsaddle::fortran=. All paths in =rgsaddleFortranConfig.cmake= are computed relative to the config file, so the installed prefix is relocatable. Pass ~-DrgsaddleFortran_CAPI_LIBRARY="$PWD/target/debug/librgsaddle.so"~ when =librgsaddle= is not in =<libdir>= or the default library search path:
+
+#+begin_src cmake
+cmake_minimum_required(VERSION 3.16)
+project(app LANGUAGES Fortran)
+find_package(rgsaddleFortran REQUIRED)
+add_executable(app main.f90)
+target_link_libraries(app PRIVATE rgsaddle::fortran)
+#+end_src
+
+- *Meson*: resolve =dependency('rgsaddle-fortran')= from =PKG_CONFIG_PATH= (or from a subproject configured with =-Dfortran=enabled=) and pass the link directory for =librgsaddle=.
+
+* Bound subset and status handling
+=rgsaddle= binds four session families from the C ABI at minor 46:
+
+- =band_handle=: =create=, =step=, =step_c=, =positions=, =move_from=, =release=
+- =minmode_handle=: =create=, =step=, =step_c=, =position=, =mode=, =move_from=, =release=
+- =pafi_handle=: =create=, =set_config=, =run=, =run_c=, =result=, =profile=, =move_from=, =release=
+- =ohtst_handle=: =create=, =set_config=, =run=, =run_c=, =result=, =curve=, =move_from=, =release=
+
+Entry points outside this subset (=set_positions=, =restart=, =reset=, =evaluation=, =estimate=, =connect=, =index1=, =indexk=, =sella_*=, =irc=, =solid_*=, =stencil=, and standalone =saddle_index=) remain on the C header; see @@rst::doc:`the C and C++ how-to <c-abi>`@@.
+
+Every status code (=RGSADDLE_OK= through =RGSADDLE_STALLED=), the step states (=RGSADDLE_STATUS_RUNNING=, =RGSADDLE_STATUS_CONVERGED=), and the method, minimum-mode, OH-TST, =RGSADDLE_BAND_PER_IMAGE=, and =RGSADDLE_REQ_ONE_IMAGE= constants used by the bound calls are exported. Integer selectors not re-exported as Fortran parameters (such as tangent, spring, projection, finite-difference scheme, =RGSADDLE_BAND_NO_MIN_MODE=, or quick-min variants) take their integer values from =include/rgsaddle.h=. =status_name(status)= maps any status integer to an allocatable Fortran string.
+
+Configuration initializers stamp =config%version= via =abi_stamp=:
+
+- =init_band_config(config)= sets improved tangent, uniform spring ~k = 5~, NEB projection, FIRE, ~ci_trigger_factor = 0.5~, ~force_tol = sqrt(epsilon(1.0_c_double))~, ~max_move = 0.1~, and L-BFGS ~memory = 10~.
+- =init_minmode_config(config[, kind])= fills the Rust =MinModeConfig= defaults (=RGSADDLE_MINMODE_DIMER= when =kind= is omitted, FIRE, ~dr = 0.001~, ~rotation_tol = 0.0001~, ~max_rotations = 20~, ~krylov_dim = 12~, ~force_tol = 0.001~, ~max_move = 0.2~, and the five-degree =rotation_angle_tol=).
+- =init_pafi_config(config)= and =init_ohtst_config(config)= fill their respective sampling and shooting defaults. Their =seed=, =sample_seed=, and =shooting_seed= fields hold the 64-bit pattern of C =uint64_t= in =integer(c_int64_t)=; values above \(2^{63} - 1\) appear negative in signed 64-bit arithmetic and can be constructed from two 32-bit halves with =uint64_bits(high, low)=.
+
+On =create=, the wrapper checks the ABI major and dimensions before or alongside the C constructor so that a major version other than 1 returns =RGSADDLE_ABI_MISMATCH=, non-positive or overflowing dimensions return =RGSADDLE_SHAPE=, and invalid configuration values (such as negative temperature or non-monotonic =arcs=) return =RGSADDLE_INVALID_PARAMETER=.
+
+=pafi_handle%profile= and =ohtst_handle%curve= take assumed-shape 1D slices and pass the minimum slice length as =capacity=. When any slice is shorter than the stored series, the call returns =RGSADDLE_INVALID_PARAMETER= and sets the optional =written= output to the required length.
+
+* Handle ownership and finalization
+Each handle owns one opaque C session pointer and has a =final= subroutine:
+
+- Assignment (~b = a~) is overloaded on all four handle types and terminates with =error stop RGSADDLE_HANDLE_NOT_ASSIGNABLE= (exit code 17), preventing two handles from aliasing and double-freeing the same C session.
+- =call b%move_from(a)= frees any session currently held by =b=, transfers ownership from =a= to =b=, and leaves =a= empty. Self-move (=call a%move_from(a)=) is a no-op. Calling =create= on an already-live handle frees the old session first.
+- Calling a query or step method on an empty handle returns =RGSADDLE_NULL_BAND= for =band_handle= and =RGSADDLE_NULL_SESSION= for =minmode_handle=, =pafi_handle=, and =ohtst_handle=.
+- =call a%release()= frees the C session immediately and leaves =a= empty. Under Fortran 2008, local non-=save= variables of subroutines, functions, and =block= constructs run their finalizer on scope exit, whereas variables declared in the main =program= unit or with =save= are not finalized when the program exits; call =release()= explicitly in a main program if deterministic teardown is required.
+
+* Array layout and callbacks
+Position, energy, and gradient buffers on =band_handle= and =minmode_handle= (and =frames= on =pafi_handle%create=) are passed as contiguous =real(c_double)= storage. In C, band buffers are row-major =n_images= by =3 * n_atoms= (image stride =3 * n_atoms=) and PAFI frames are row-major =n_frames= by =n_dof= (frame stride =n_dof=). Because Fortran stores arrays in column-major order (the first subscript varies fastest in memory), placing coordinate subscripts first and the image or frame subscript last matches the C layout directly without transposing:
+
+#+begin_src fortran
+type(band_handle) :: band
+type(pafi_handle) :: pafi
+real(c_double) :: positions(3, n_atoms, n_images)
+real(c_double) :: frames(n_dof, n_frames)
+
+! Atom a of image i occupies three contiguous doubles at positions(:, a, i).
+positions(:, a, i) = [x, y, z]
+status = band%create(bcfg, int(n_images, c_int64_t), int(n_atoms, c_int64_t), positions)
+
+! Frame k occupies n_dof contiguous doubles at frames(:, k).
+frames(:, k) = q(:)
+status = pafi%create(pcfg, int(n_frames, c_int64_t), int(n_dof, c_int64_t), frames)
+#+end_src
+
+Note that indices stored in C report and result structs (=rgsaddle_report_t%ci_index= and =rgsaddle_pafi_result_t%dividing=) are zero-based C indices: add =1= when indexing a 1-based Fortran array such as =positions(:, :, report%ci_index + 1)=.
+
+Surface callbacks are supported in two forms:
+
+1. *Native Fortran procedure pointers* (=step= and =run=), typed by the abstract interfaces =surface_proc= (for =band_handle= and =minmode_handle=) and =point_surface_proc= (for =pafi_handle= and =ohtst_handle=). For =surface_proc=, the trampoline passes the number of rows actually present in =positions=, =energies=, and =gradients= as =n_images=: when the C request sets =RGSADDLE_REQ_ONE_IMAGE=, =n_images= is =1= and =image= is the zero-based band index; on a batch evaluation, =image= is =-1=. A request whose buffer extent exceeds =huge(0)= returns =RGSADDLE_SHAPE= without invoking the callback.
+2. *Raw C function pointers* (=step_c= and =run_c=), accepting a =type(c_funptr)= bound with =bind(C)= that matches =rgsaddle_surface_fn= or =rgsaddle_point_surface_fn= from =include/rgsaddle.h=.
+
+On all eight =step=, =step_c=, =run=, and =run_c= methods, the =user= (=type(c_ptr)=) argument is optional; omitting =user= forwards =c_null_ptr=. On =step= and =step_c=, the =out= (=type(rgsaddle_report_t)=) argument is also optional.
+
+The Fortran trampolines pack the procedure pointer and caller =user= pointer into a stack-allocated box passed through the C =user= context of that call. No module-level state is used:
+
+- A surface or point callback can create and run nested =band_handle=, =minmode_handle=, =pafi_handle=, or =ohtst_handle= sessions without clobbering the outer callback or its =user= pointer.
+- =pafi_handle%run= and =ohtst_handle%run= invoke =point_surface_proc= concurrently from worker threads. Point callbacks must be free of unsynchronized shared writes and must carry the =recursive= prefix (required by ~gfortran -fcheck=recursion~ and ~-fcheck=all~).
+- Every =surface_proc= and =point_surface_proc= signature declares the =user= dummy argument. Under =-Wall= or =-Wextra=, gfortran enables =-Wunused-dummy-argument= if =user= is untouched; unpack =user= with =c_f_pointer= when passing state, or check =c_associated(user)= when no state is expected.
+
+* Runnable band and minimum-mode example
+The host steps =band_handle= or =minmode_handle= in a loop until ~report%status == RGSADDLE_STATUS_CONVERGED~, then reads back the geometry. Save the following program as =band_minmode_demo.f90=:
+
+#+begin_src fortran
+module band_minmode_surfaces
+  use, intrinsic :: iso_c_binding
+  use rgsaddle, only: RGSADDLE_OK, RGSADDLE_INVALID_PARAMETER
+  implicit none
+contains
+  recursive integer(c_int) function double_well_3d(user, n_images, n_atoms, &
+      positions, energies, gradients, image) result(status)
+    type(c_ptr), value :: user
+    integer(c_int64_t), value :: n_images
+    integer(c_int64_t), value :: n_atoms
+    real(c_double), intent(in) :: positions(*)
+    real(c_double), intent(inout) :: energies(*)
+    real(c_double), intent(inout) :: gradients(*)
+    integer(c_int64_t), value :: image
+    integer :: i, base
+    real(c_double) :: x, y, z
+    if (c_associated(user) .or. n_atoms /= 1_c_int64_t .or. &
+        n_images < 1_c_int64_t .or. image < -1_c_int64_t) then
+      status = RGSADDLE_INVALID_PARAMETER
+      return
+    end if
+    do i = 1, int(n_images, kind=kind(0))
+      base = 3 * (i - 1)
+      x = positions(base + 1)
+      y = positions(base + 2)
+      z = positions(base + 3)
+      energies(i) = (x * x - 1.0_c_double) ** 2 + 2.0_c_double * (y * y + z * z)
+      gradients(base + 1) = 4.0_c_double * x * (x * x - 1.0_c_double)
+      gradients(base + 2) = 4.0_c_double * y
+      gradients(base + 3) = 4.0_c_double * z
+    end do
+    status = RGSADDLE_OK
+  end function double_well_3d
+end module band_minmode_surfaces
+
+program band_minmode_demo
+  use, intrinsic :: iso_c_binding
+  use rgsaddle
+  use band_minmode_surfaces
+  implicit none
+
+  integer, parameter :: n_images = 9
+  type(band_handle) :: band
+  type(rgsaddle_band_config_t) :: bcfg
+  type(rgsaddle_report_t) :: report
+  real(c_double) :: path(3, 1, n_images), t
+  type(minmode_handle) :: dimer
+  type(rgsaddle_minmode_config_t) :: mcfg
+  real(c_double) :: start(3), seed(3), saddle(3), mode(3)
+  procedure(surface_proc), pointer :: cb
+  integer(c_int) :: status
+  integer :: i, step, ci
+
+  do i = 1, n_images
+    t = real(i - 1, c_double) / real(n_images - 1, c_double)
+    path(1, 1, i) = -1.0_c_double + 2.0_c_double * t
+    path(2, 1, i) = 0.4_c_double * sin(acos(-1.0_c_double) * t)
+    path(3, 1, i) = 0.0_c_double
+  end do
+
+  call init_band_config(bcfg)
+  bcfg%force_tol = 1.0_c_double / 10000.0_c_double
+  bcfg%max_move = 0.1_c_double
+  bcfg%ci_trigger_force = 0.5_c_double
+
+  status = band%create(bcfg, int(n_images, c_int64_t), 1_c_int64_t, path)
+  if (status /= RGSADDLE_OK) stop 1
+  cb => double_well_3d
+  do step = 1, 4000
+    status = band%step(cb, out=report)
+    if (status /= RGSADDLE_OK) stop 2
+    if (report%status == RGSADDLE_STATUS_CONVERGED) exit
+  end do
+  if (report%status /= RGSADDLE_STATUS_CONVERGED) stop 3
+  status = band%positions(path)
+  if (status /= RGSADDLE_OK) stop 4
+  ci = int(report%ci_index, kind=kind(0)) + 1
+
+  start = [0.35_c_double, 0.20_c_double, -0.15_c_double]
+  seed = [0.8_c_double, 0.2_c_double, 0.1_c_double]
+  call init_minmode_config(mcfg, int(RGSADDLE_MINMODE_DIMER, c_int32_t))
+  mcfg%force_tol = 1.0_c_double / 1000.0_c_double
+  mcfg%max_move = 0.1_c_double
+  status = dimer%create(mcfg, 1_c_int64_t, start, seed)
+  if (status /= RGSADDLE_OK) stop 5
+  do step = 1, 4000
+    status = dimer%step(cb, out=report)
+    if (status /= RGSADDLE_OK) stop 6
+    if (report%status == RGSADDLE_STATUS_CONVERGED) exit
+  end do
+  if (report%status /= RGSADDLE_STATUS_CONVERGED) stop 7
+  status = dimer%position(saddle)
+  if (status /= RGSADDLE_OK) stop 8
+  status = dimer%mode(mode)
+  if (status /= RGSADDLE_OK) stop 9
+
+  write(*, '(a,1x,i0,1x,3f8.4,1x,a,1x,3f8.4,1x,a,1x,f6.4)') &
+    'ci=', ci, path(:, 1, ci), 'dimer=', saddle, 'mode_x=', abs(mode(1))
+  call band%release()
+  call dimer%release()
+end program band_minmode_demo
+#+end_src
+
+* Runnable PAFI and OH-TST example
+Both =pafi_handle= and =ohtst_handle= take a =point_surface_proc= callback (or =c_funptr= via =run_c=). Below, =double_well= runs with =user= omitted (checking =if (c_associated(user))=) while =quad_saddle= unpacks caller parameters through =c_f_pointer=, so both compile cleanly under =-Wall -Wextra=. Save the following program as =pafi_ohtst_demo.f90=:
+
+#+begin_src fortran
+module demo_surfaces
+  use, intrinsic :: iso_c_binding
+  use rgsaddle, only: RGSADDLE_OK, RGSADDLE_INVALID_PARAMETER
+  implicit none
+
+  type :: saddle_params
+    real(c_double) :: transverse_k = 4.0_c_double
+  end type saddle_params
+
+contains
+  recursive integer(c_int) function double_well(user, n_dof, position, energy, gradient) result(status)
+    type(c_ptr), value :: user
+    integer(c_int64_t), value :: n_dof
+    real(c_double), intent(in) :: position(*)
+    real(c_double), intent(inout) :: energy
+    real(c_double), intent(inout) :: gradient(*)
+    real(c_double) :: x
+    if (c_associated(user) .or. n_dof /= 1_c_int64_t) then
+      status = RGSADDLE_INVALID_PARAMETER
+      return
+    end if
+    x = position(1)
+    energy = (1.0_c_double - x * x) ** 2
+    gradient(1) = -4.0_c_double * x * (1.0_c_double - x * x)
+    status = RGSADDLE_OK
+  end function double_well
+
+  recursive integer(c_int) function quad_saddle(user, n_dof, position, energy, gradient) result(status)
+    type(c_ptr), value :: user
+    integer(c_int64_t), value :: n_dof
+    real(c_double), intent(in) :: position(*)
+    real(c_double), intent(inout) :: energy
+    real(c_double), intent(inout) :: gradient(*)
+    type(saddle_params), pointer :: params
+    if (.not. c_associated(user) .or. n_dof /= 2_c_int64_t) then
+      status = RGSADDLE_INVALID_PARAMETER
+      return
+    end if
+    call c_f_pointer(user, params)
+    energy = 0.5_c_double * (-position(1) ** 2 + params%transverse_k * position(2) ** 2)
+    gradient(1) = -position(1)
+    gradient(2) = params%transverse_k * position(2)
+    status = RGSADDLE_OK
+  end function quad_saddle
+end module demo_surfaces
+
+program pafi_ohtst_demo
+  use, intrinsic :: iso_c_binding
+  use rgsaddle
+  use demo_surfaces
+  implicit none
+
+  integer, parameter :: n_frames = 41
+  type(pafi_handle) :: pafi
+  type(rgsaddle_pafi_config_t) :: pcfg
+  type(rgsaddle_pafi_result_t) :: pout
+  real(c_double) :: frames(n_frames), arcs(n_frames)
+  real(c_double) :: grad(n_frames), grad_err(n_frames), free_e(n_frames), free_err(n_frames)
+  integer(c_int64_t) :: written
+  integer(c_int) :: status, i
+  procedure(point_surface_proc), pointer :: cb
+
+  type(ohtst_handle) :: tx
+  type(rgsaddle_ohtst_config_t) :: ocfg
+  type(rgsaddle_ohtst_result_t) :: oout
+  type(saddle_params), target :: params
+  real(c_double) :: point(2), normal(2), t(32), kappa_t(32)
+
+  call init_pafi_config(pcfg)
+  pcfg%thermal = 0.02_c_double
+  pcfg%time_step = 0.01_c_double
+  pcfg%thermalize = 5_c_int64_t
+  pcfg%stride = 1_c_int64_t
+  pcfg%samples = 200_c_int64_t
+  ! A 1D path gives a deterministic series with 2.2 effective samples.
+  pcfg%blocks = 2_c_int64_t
+  pcfg%seed = 3_c_int64_t
+  pcfg%fix_com = 0_c_int32_t
+  pcfg%retain = 1_c_int64_t
+  pcfg%max_rounds = 1_c_int64_t
+
+  do i = 1, n_frames
+    frames(i) = -1.0_c_double + 2.0_c_double * real(i - 1, c_double) / real(n_frames - 1, c_double)
+    arcs(i) = 2.0_c_double * real(i - 1, c_double) / real(n_frames - 1, c_double)
+  end do
+
+  status = pafi%create(pcfg, int(n_frames, c_int64_t), 1_c_int64_t, frames, arcs)
+  if (status /= RGSADDLE_OK) stop 1
+  cb => double_well
+  status = pafi%run(cb)
+  if (status /= RGSADDLE_OK) stop 2
+  status = pafi%result(pout)
+  if (status /= RGSADDLE_OK) stop 3
+  status = pafi%profile(arcs, grad, grad_err, free_e, free_err, written)
+  if (status /= RGSADDLE_OK) stop 4
+
+  call init_ohtst_config(ocfg)
+  ocfg%thermal = 0.5_c_double
+  ocfg%shooting_friction = 1.5_c_double
+  ocfg%shooting_shots = 4096_c_int64_t
+  point = [0.0_c_double, 0.0_c_double]
+  normal = [1.0_c_double, 0.0_c_double]
+  status = tx%create(ocfg, 2_c_int64_t, point, normal)
+  if (status /= RGSADDLE_OK) stop 5
+  cb => quad_saddle
+  status = tx%run(cb, c_loc(params))
+  if (status /= RGSADDLE_OK) stop 6
+  status = tx%result(oout)
+  if (status /= RGSADDLE_OK) stop 7
+  status = tx%curve(t, kappa_t, written)
+  if (status /= RGSADDLE_OK) stop 8
+
+  write(*, '(a,1x,f8.5,1x,a,1x,f8.5)') 'barrier=', pout%barrier, 'kappa=', oout%kappa
+  call pafi%release()
+  call tx%release()
+end program pafi_ohtst_demo
+#+end_src
+
+Compile and run either example against the installed prefix. =-L= for the cargo library precedes =$(pkg-config --libs rgsaddle-fortran)=, which already appends =-lrgsaddle=:
+
+#+begin_src sh
+PKG_CONFIG_PATH="$PWD/dist/lib/pkgconfig:$PWD/dist/share/pkgconfig" \
+  gfortran -std=f2008 -Wall -Wextra -fcheck=all \
+  $(pkg-config --cflags rgsaddle-fortran) \
+  pafi_ohtst_demo.f90 \
+  -Ltarget/debug -Wl,-rpath,"$PWD/target/debug" \
+  $(pkg-config --libs rgsaddle-fortran) \
+  -o pafi_ohtst_demo.x
+./pafi_ohtst_demo.x
+#+end_src
+
+=ci/fortran_abi.sh= runs both documented programs and the full =tests/fortran/= suite (NEB, per-image requests, dimer, Lanczos, PAFI 1D and 2D widening profiles, OH-TST aligned and tilted planes under BAOAB and GHMC, handle move/release/non-assignability, optional and forwarded =user= pointers on =step=, =step_c=, =run=, and =run_c=, and nested outer band, min-mode, PAFI, and OH-TST re-entrancy).

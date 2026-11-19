@@ -49,7 +49,7 @@ use super::control::{HarmonicReference, conjugate_gradients};
 use super::plane::Hyperplane;
 use super::rate::PlaneDensity;
 use super::sample::{Controlled, LangevinConfig, held_directions, sample_plane_controlled};
-use super::spline::{Spline, simpson_rule};
+use crate::spline::{Spline, simpson_rule};
 use crate::{PointSurface, SaddleError};
 
 /// Simpson pairs per spline interval of the integral.

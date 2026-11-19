@@ -1,0 +1,53 @@
+#+TITLE: Find an optimal tunneling path with LI-NEB
+#+OPTIONS: toc:nil num:nil
+
+#+begin_export rst
+:cite:`asgeirssonEfficientEvaluation2018`
+#+end_export
+
+* What is computed
+At a fixed energy =E= below a barrier, the optimal tunneling path minimizes the JWKB action between two points on the surface =V = E=. Ásgeirsson, Arnaldsson and Jónsson, J. Chem. Phys. 148, 102334 (2018), doi:10.1063/1.5007180, find it with a line integral extension of the nudged elastic band (LI-NEB). In mass-weighted coordinates =q = M^{1/2} x= the discretized action of =n= images is
+
+: W = sum_j (sigma_j + sigma_{j+1}) |q_{j+1} - q_j| / 2,   sigma = sqrt(2 (V - E))
+
+Interior images move along the perpendicular gradient of =W=, springs keep them evenly spaced, and each end moves along the force until it sits on =V = E=. The half period of the periodic orbit on the inverted potential then sets the temperature =hbar / (k_B tau)= at which the path is an instanton, and the ring polymer built on it gives the harmonic quantum TST rate.
+
+The module takes any =PointSurface=. Energies, lengths and masses are in the surface's own units, and =LinebConfig::hbar= and =LinebConfig::boltzmann= are given in the same units. Both default to one.
+
+* One energy
+#+begin_src rust
+let config = LinebConfig::new(opt_tol, perp_tol);
+let masses = Masses::coordinates(mass.view())?;
+let mut session = LinebSession::new(config, masses, images, energy)?;
+let report = session.run(&surface, 1000)?;
+assert_eq!(report.status, LinebStatus::Converged);
+let path = session.path(&surface)?;
+#+end_src
+
+=images= is one row per image in Cartesian coordinates, endpoints included. The two tolerances have no default. =opt_tol= stops the nudged force on every image and =perp_tol= the perpendicular action gradient on the interior ones. Both are norms in mass-weighted coordinates, so they carry units of the square root of an energy. A tolerance stated on the dimensionless action =W / hbar= per Cartesian length converts by =tol = g hbar / sqrt(m)=; the paper's 1e-2 per Angstrom for H, in eV, Angstrom and amu, is 6.44e-4.
+
+=Masses::coordinates= takes one mass per coordinate and leaves rigid motions alone. Use it for atoms in an external field, such as adsorbates over a fixed slab. =Masses::molecule= takes one mass per atom and removes the rigid translation and rotation between images by quaternion alignment, for a free molecule.
+
+=time_step= is the initial FIRE step. From rest a step moves an image by about =time_step^2 |F|=. The default 0.1 converges the Müller-Brown continuation at every other default; a surface with a stiffer action needs a smaller step. =max_move= caps the step of one atom with molecular masses and the whole band step otherwise. An interior image may not fall below =E + w=, where =w= is =turning_width= times the height of the highest starting image above =E=; a step that would put one there is retried at a shorter length. Any other error from the surface ends the step and is returned.
+
+=LinebPath= holds the action, the half period from the quadrature of the action's energy derivative (=half_period=) and from constrained dynamics along the path (=half_period_dynamics=), both temperatures, and =calls=: the force calls of the optimizer, of the period quadrature and time table, and of the dynamics, counted apart.
+
+* An energy ladder from a minimum energy path
+#+begin_src rust
+let ladder = Continuation::new(delta, images, levels);
+let paths = continue_from_mep(&surface, mep.view(), &masses, &config, &ladder)?;
+#+end_src
+
+The first energy is the highest MEP energy minus =delta=, seeded by the MEP segment between its two crossings of that energy. Each lower energy is =delta= further down and starts from the previous path with both ends walked downhill to the new energy. The MEP has to fall below the lowest energy on both sides of the barrier. A level still running after =max_steps= (1000 by default) is an error. Surface calls beyond the sum of the =calls= of the returned paths are the seeds.
+
+* The rate
+#+begin_src rust
+let rate = hqtst_rate(&surface, &path, beads)?;
+#+end_src
+
+=beads= replicas are placed at equal imaginary times along the path. The ring-polymer Hessian is applied block by block from Hessian-vector products at the =beads / 2 + 1= distinct replicas, and its log-determinant comes from Lanczos with the zero mode and any rigid modes deflated. Without an analytic =hessian_vector= each product is a central difference, so the rate costs =(beads / 2 + 1) (1 + 2 dof)= force calls. =log_rate_over_reactant= is =ln(k Z_r)= on the surface's own energy zero. On a total energy far from zero =rate_over_reactant= overflows or underflows while the log stays finite.
+
+The paper's interpolated finite-difference Hessian is built with the =lineb-oracle= feature as =hqtst_rate_interpolated_hessian=, for tests and benches. On Müller-Brown at 64 replicas the replica products take 165 force calls and the oracle 92, and the two logs of the rate differ by 4.0e-4.
+
+* Measured: H2 on Cu(110) through rgpot
+rgpot serves its Cu-H EAM over RPC as =CuH2=. A =PointSurface= around =rgpot_core::rpc::client::RpcClient= moved the two H atoms over the 216 Cu atoms of rgpot's =CppCore/rgpot/CuH2/tmp.con=, with the copper held at the fixture positions. From a 15-image MEP of associative desorption, with a barrier 0.469 eV above the reactant, a ladder of 9 energies 0.05 eV apart on 10 images, at the converted tolerance 6.44e-4 and otherwise default settings, covered 235 K to 63 K. The optimizer took 310 to 580 force calls per energy, mean 466.7 and sample standard deviation 98.0, the same in each of 6 serial runs. The quadrature and time table took 925.0 per energy on average, the dynamics 259.8, the seeds 977 for all 9, and the rate at 32 replicas 221 per energy. For the same system on its own empirical potential the paper reports that computing the reactive flux took on average ca. 900 energy and force evaluations.

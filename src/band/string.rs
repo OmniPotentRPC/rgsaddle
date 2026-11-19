@@ -20,8 +20,8 @@ use rgmin::{Exp, Method, Oracle};
 
 use super::{
     BandConfig, BandMetrics, BandReport, BandSession, BandState, BandStatus, BandSurface,
-    build_solver, climb_target, evaluate_band, max_abs, metric_force, min_mode, pin_fixed_rows,
-    remove_net_translation, zero_fixed,
+    MetricBuildId, build_solver, climb_target, evaluate_band, max_abs, metric_force, min_mode,
+    pin_fixed_rows, remove_net_translation, zero_fixed,
 };
 use crate::error::SaddleError;
 use crate::reparam::{Reparametrization, reparametrize};
@@ -128,6 +128,11 @@ pub(super) fn check_string(config: &BandConfig) -> Result<(), SaddleError> {
             "the simplified string method does not carry a solid-state cell block".into(),
         ));
     }
+    if config.dynamic.is_some() {
+        return Err(SaddleError::Invalid(
+            "the simplified string method evaluates every image; dynamic NEB is for the NEB".into(),
+        ));
+    }
     Ok(())
 }
 
@@ -161,6 +166,7 @@ fn lock_guard<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 #[allow(clippy::too_many_arguments)]
 fn string_image_force(
     config: &BandConfig,
+    state: &BandState,
     i: usize,
     climb: bool,
     endpoint_first: ArrayView1<f64>,
@@ -258,6 +264,7 @@ fn string_image_force(
             match free {
                 None => {
                     (d, evol) = metric_force(
+                        state,
                         p,
                         gradients.row(i),
                         tangent.view(),
@@ -272,6 +279,7 @@ fn string_image_force(
                     };
                     let zero_free = Array1::zeros(free.len());
                     let (d_free, e_free) = metric_force(
+                        state,
                         p,
                         gather(gradients.row(i)).view(),
                         gather(tangent.view()).view(),
@@ -355,6 +363,7 @@ fn assemble_string_with(
         let rows = s![(i - 1) * dof..i * dof];
         let (f, d) = string_image_force(
             config,
+            state,
             i,
             ci_at == Some(i),
             endpoint_first,
@@ -401,6 +410,12 @@ impl BandSession {
                         .into(),
                 ));
             }
+            if self.config.dynamic.is_some() {
+                return Err(SaddleError::Invalid(
+                    "the simplified string method evaluates every image; dynamic NEB is for the NEB"
+                        .into(),
+                ));
+            }
         }
         self.config.string = string;
         self.restart();
@@ -440,10 +455,18 @@ impl BandSession {
         let endpoint_first = self.positions.row(0).to_owned();
         let endpoint_last = self.positions.row(n_images - 1).to_owned();
         let before = self.interior_flat();
-        let metrics = self.exp.as_ref().map(|e| BandMetrics {
-            per_image: e.metrics.as_slice(),
-            free: e.free.as_deref(),
-        });
+        let metrics = match &self.exp {
+            Some(exp) => Some(
+                exp.fresh_metrics(before.view(), n_images - 2)
+                    .ok_or_else(|| {
+                        SaddleError::Invalid(
+                            "exponential metric is not current at the start of the string step"
+                                .into(),
+                        )
+                    })?,
+            ),
+            None => None,
+        };
 
         let (e_start, evol_start, step_force_start, _) = assemble_string_with(
             &self.config,
@@ -657,7 +680,10 @@ impl BandSession {
             if let Some(eval) = last.as_mut()
                 && eval.x == trial.x
             {
-                work.store_projected(eval, &eff_force);
+                work.store_forces(eval, &eff_force, None);
+                eval.assembly_ci = i64::MIN;
+                eval.assembly_metric =
+                    Some(metrics.map_or(MetricBuildId::EUCLIDEAN, |m| m.build_id));
             }
         }
         *lock_guard(&self.state.last_max_force) = max_component;

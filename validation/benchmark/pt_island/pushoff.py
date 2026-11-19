@@ -21,12 +21,6 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from optbench import rgsaddle_minmode as M
-from optbench.campaign import load_template, resolve_problem
-from optbench.connection import connected as linked
-from optbench.connection import periodic_lengths
-from optbench.displacement import displace, neighbours
-from optbench.surfaces import load_con, potential_from_problem
 
 FIELDS = (
     "search",
@@ -51,6 +45,13 @@ def largest_atom(delta):
 
 def replay(name, wanted):
     """Yield the row of each catalog search in ``wanted``, in order."""
+    from optbench import rgsaddle_minmode as M
+    from optbench.campaign import load_template, resolve_problem
+    from optbench.connection import connected as linked
+    from optbench.connection import periodic_lengths
+    from optbench.displacement import displace, neighbours
+    from optbench.surfaces import load_con, potential_from_problem
+
     root = Path(os.environ["OPTBENCH_ROOT"])
     template = load_template(root, name)
     problem = resolve_problem(root, "saddle-search/pt-island")
@@ -140,4 +141,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) == 1:
+        print(__doc__.splitlines()[2])
+    else:
+        main()

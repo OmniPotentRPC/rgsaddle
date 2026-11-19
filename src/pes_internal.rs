@@ -22,6 +22,7 @@ use crate::error::SaddleError;
 use crate::mic::Cell;
 use crate::minmode::PointSurface;
 use crate::pes::{CartesianPes, HessUpdate};
+use crate::vec3::{dot3, norm3};
 
 /// Sella `InternalPES`: Cartesian geometry, internals chart, internals Hessian.
 pub struct InternalPes {
@@ -898,14 +899,6 @@ fn internals_grad_from_b(
         bg[i] = acc;
     }
     Ok(solve_bbt(b, &bg))
-}
-
-fn dot3(u: [f64; 3], v: [f64; 3]) -> f64 {
-    u[0] * v[0] + u[1] * v[1] + u[2] * v[2]
-}
-
-fn norm3(u: [f64; 3]) -> f64 {
-    dot3(u, u).sqrt()
 }
 
 fn angle_deg(u: [f64; 3], v: [f64; 3]) -> f64 {

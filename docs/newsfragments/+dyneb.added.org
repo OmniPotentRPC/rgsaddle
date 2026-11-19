@@ -1,0 +1,4 @@
+~DynamicNeb~ is an opt-in on ~BandConfig~ (default off) that follows ASE 3.29 ~DyNEB~: an interior image whose largest per-atom projected force is strictly below ~fmax~ keeps its last energy and force, stays in the spring and the tangent, and is evaluated again when a neighbour moves the projected force back over the threshold.
+~scale_fmax~ scales that threshold by the Euclidean distance from the highest-energy image, which is never given a zero force.
+~rgsaddle.ase.DyNEB~ is that band; ~NEB~ still refuses ~dynamic_relaxation~, ~fmax~, and ~scale_fmax~.
+The C ABI moves to minor 46 with ~rgsaddle_band_set_dynamic~ and ~rgsaddle_dyneb_mask~.

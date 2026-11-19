@@ -40,7 +40,7 @@ They import optbench and take a checkout plus a long run, so they are not part o
 
 A git dependency names a full 40-character ~rev~, never a ~tag~ or ~branch~, with the exact version of the crate at that commit, such as ~version = "=0.5.2"~.
 Cargo keys a git source by its reference, so a dependent that pins the same commit another way locks a second copy.
-~ci/consumer~ is such a dependent: it takes this checkout by path and pins linkcell, rgmin and rgpot-core by rev.
+~ci/consumer~ is such a dependent: it takes this checkout by path and pins linkcell, minimage and rgmin from crates.io and rgpot-core by rev.
 Bump its revs together with ~Cargo.toml~.
 The CI test job runs the check and compiles the consumer:
 

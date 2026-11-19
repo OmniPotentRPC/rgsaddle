@@ -65,42 +65,15 @@ impl Default for RelaxConfig {
     }
 }
 
+with_setters!(RelaxConfig {
+    with_method => method: val Method,
+    with_force_tol => force_tol: val f64,
+    with_max_steps => max_steps: val usize,
+    with_max_atom_move => max_atom_move: val f64,
+    with_initial_step => initial_step: val f64,
+});
+
 impl RelaxConfig {
-    /// Replace the minimizer.
-    #[must_use]
-    pub fn with_method(mut self, method: Method) -> Self {
-        self.method = method;
-        self
-    }
-
-    /// Replace the per-atom force tolerance.
-    #[must_use]
-    pub fn with_force_tol(mut self, force_tol: f64) -> Self {
-        self.force_tol = force_tol;
-        self
-    }
-
-    /// Replace the step cap.
-    #[must_use]
-    pub fn with_max_steps(mut self, max_steps: usize) -> Self {
-        self.max_steps = max_steps;
-        self
-    }
-
-    /// Replace the per-atom step cap.
-    #[must_use]
-    pub fn with_max_atom_move(mut self, max_atom_move: f64) -> Self {
-        self.max_atom_move = max_atom_move;
-        self
-    }
-
-    /// Replace the initial step.
-    #[must_use]
-    pub fn with_initial_step(mut self, initial_step: f64) -> Self {
-        self.initial_step = initial_step;
-        self
-    }
-
     pub(crate) fn check(&self) -> Result<(), SaddleError> {
         if !(self.force_tol.is_finite() && self.force_tol > 0.0) {
             return Err(SaddleError::Invalid(

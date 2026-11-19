@@ -146,7 +146,9 @@ of ~threads~ workers that the session keeps.
 Each surface call is split into ~min(threads, rows)~ contiguous image
 blocks, one ~BandSurface::eval~ per block, and the answers are stored at
 their image indices once every block has finished.
-The force assembly stays on the calling thread.
+The tangent, spring, projection and optional preconditioned solve are
+also split by image on that pool.  Each worker writes only its image's
+fixed output slice, and errors are read back in image order.
 One thread is the default and leaves the band as it was; zero threads is
 refused.
 When the surface's answer for a row depends on that row alone, the band,
@@ -164,6 +166,12 @@ A band the session already holds does not go to the surface again: the
 accepted band and the band before it answer a repeated request, so a
 stepper that rejects a trial and returns to its start, as ODE12r does,
 makes no surface call for it.
+The assembled projected force is cached with that surface answer.  With
+the exponential metric its preconditioned driving force is cached too,
+so an ODE12r rejection does not repeat the per-image PCG solves.
+Metric neighbour construction uses linkcell's nearest-neighbour and
+cutoff walks, including minimum images in triclinic cells, rather than an
+all-pairs scan.
 The projected trust-region method (RTR) keeps the Hessian-vector
 products around its current base until the base, the climbing image or
 the force gate changes, so the step after a rejection reuses them.
@@ -173,6 +181,14 @@ Henkelman, Uberuaga and Jonsson, J. Chem. Phys. 113, 9901 (2000),
 doi:10.1063/1.1329672.
 
 ** Measured scaling
+The not-a-knot reparametrization solves the spline's tridiagonal
+second-moment equations in linear work per coordinate.  Its cost
+therefore grows as the number of images times the number of Cartesian
+coordinates, rather than cubically in the image count.
+~cargo bench --bench band_scaling~ is a small regression smoke check for
+one preconditioned band step and a 64-image spline; campaign-scale timing
+belongs to BenchBot.
+
 ~examples/band_scaling.rs~ times a climbing-image band with FIRE on an
 adatom hop of an all-pairs Lennard-Jones cluster (the sites of a
 face-centred cubic lattice nearest the origin).
@@ -261,3 +277,10 @@ python docs/source/figures/band-scaling/run.py \
 uv run --no-project --with matplotlib --with numpy \
     python docs/source/figures/band-scaling/plot.py target/scaling
 #+end_src
+
+* Dynamic NEB
+~BandConfig::dynamic~ is off unless set. ~DynamicNeb::default()~ is ASE 3.29 ~DyNEB~: ~fmax~ 0.05 and ~scale_fmax~ 0. ~with_fmax~ and ~with_scale_fmax~ change them. ~fmax~ is the largest per-atom Euclidean norm of the projected force, the optimizer's ~fmax~, which is a different number from the band's ~force_tol~ (the largest absolute component).
+
+An interior image whose norm is strictly below ~fmax * (1 + distance * scale_fmax)~ is left where it is. ~distance~ is the Euclidean norm of the coordinate difference from the highest-energy image, with no minimum image. That image keeps the energy and the Cartesian force from the last time it was evaluated. The spring and the tangent still include it. The highest-energy image is never given a zero force. When a neighbour moves far enough that the projected force exceeds the threshold, the image is evaluated again.
+
+The climbing-image min-mode refinement is a separate phase and does not use this mask. The force the session reports is the projected force before that mask. The optimizer sees the masked force, and a step that leaves the band where it was stops when that masked force is under ~force_tol~. An image whose force was not cleared stays free while its own convergence force is still above ~force_tol~. An image the mask cleared stays pinned, so the reported force can remain above ~force_tol~ when the step stops. A solid-state band and the trust-region stepper refuse the option. ~BandSession::set_dynamic~ and ~rgsaddle_band_set_dynamic~ change it between steps. ~rgsaddle_dyneb_mask~ applies the same mask to a band the host has already projected. ~rgsaddle.ase.DyNEB~ is the ASE call; ~rgsaddle.ase.NEB~ still refuses ~dynamic_relaxation~, ~fmax~, and ~scale_fmax~.

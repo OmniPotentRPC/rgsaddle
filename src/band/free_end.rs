@@ -55,7 +55,7 @@ use rgmin::{Accept, Control, LevelSetConstraint, Method, Oracle, Solver};
 
 use super::zoom::resample;
 use super::{
-    BandConfig, BandMetrics, BandReport, BandSession, BandStatus, BandSurface, SAME_ROW_TOL,
+    BandConfig, BandReport, BandSession, BandStatus, BandSurface, SAME_ROW_TOL,
     build_solver, climb_target, image_force, max_abs, min_mode, pin_fixed_rows,
     remove_net_translation, zero_fixed,
 };
@@ -668,10 +668,10 @@ impl BandSession {
             .config
             .spring
             .at_band(energies.view(), gradients.view());
-        let metrics = self.exp.as_ref().map(|exp| BandMetrics {
-            per_image: exp.metrics.as_slice(),
-            free: exp.free.as_deref(),
-        });
+        let metrics = self
+            .exp
+            .as_ref()
+            .and_then(|exp| exp.fresh_metrics(interior.view(), n_images - 2));
         let mut projected = Array1::zeros((n_images - 2) * dof);
         for image in 1..n_images - 1 {
             let rows = s![(image - 1) * dof..image * dof];
@@ -679,6 +679,7 @@ impl BandSession {
                 metrics.and_then(|band| band.per_image.get(image - 1).map(|p| (p, band.free)));
             let (force, _) = image_force(
                 &self.config,
+                &self.state,
                 &resolved_spring,
                 image,
                 ci_at == Some(image),
@@ -929,10 +930,10 @@ impl BandSession {
             .config
             .spring
             .at_band(energies.view(), gradients.view());
-        let metrics = self.exp.as_ref().map(|e| BandMetrics {
-            per_image: e.metrics.as_slice(),
-            free: e.free.as_deref(),
-        });
+        let metrics = self
+            .exp
+            .as_ref()
+            .and_then(|exp| exp.fresh_metrics(before.view(), n_images - 2));
         let metric_of =
             |i: usize| metrics.and_then(|m| m.per_image.get(i - 1).map(|p| (p, m.free)));
 
@@ -942,6 +943,7 @@ impl BandSession {
             let rows = s![(i - 1) * dof..i * dof];
             let (proj, drv) = image_force(
                 &self.config,
+                &self.state,
                 &resolved_spring,
                 i,
                 ci_at == Some(i),
@@ -991,6 +993,7 @@ impl BandSession {
                 let rows = s![(ci_i - 1) * dof..ci_i * dof];
                 let (proj, drv) = image_force(
                     &self.config,
+                    &self.state,
                     &resolved_spring,
                     ci_i,
                     true,
@@ -1070,6 +1073,7 @@ impl BandSession {
                     let rows = s![(i - 1) * dof..i * dof];
                     match image_force(
                         config_ref,
+                        state_ref,
                         &tr_spring,
                         i,
                         ci_at == Some(i),

@@ -213,4 +213,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) == 1:
+        print(__doc__.splitlines()[2])
+    else:
+        main()

@@ -62,6 +62,7 @@ use crate::minmode::{
     MinModeConfig, MinModeKind, MinModeSession, MinModeStatus, PointSurface, translated_gradient,
 };
 use crate::sqnm::ConstrainedOpt;
+use crate::vec3::{dot_slice as dot, norm_slice as norm};
 
 type SurfaceFn<'a> = dyn FnMut(&[f64]) -> Result<(f64, Vec<f64>), SaddleError> + 'a;
 
@@ -2124,14 +2125,6 @@ fn sub(a: &[f64], b: &[f64]) -> Vec<f64> {
 
 fn scale(v: &[f64], s: f64) -> Vec<f64> {
     v.iter().map(|x| x * s).collect()
-}
-
-fn dot(a: &[f64], b: &[f64]) -> f64 {
-    a.iter().zip(b).map(|(x, y)| x * y).sum()
-}
-
-fn norm(v: &[f64]) -> f64 {
-    dot(v, v).sqrt()
 }
 
 fn cosine(a: &[f64], b: &[f64]) -> f64 {

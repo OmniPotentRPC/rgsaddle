@@ -355,83 +355,44 @@ impl Displacement {
     }
 }
 
-impl Manifold for Translation {
-    fn required_dim(&self, n: usize) -> Result<(), usize> {
-        let need = packed_need(&self.indices);
-        if n >= need && n.is_multiple_of(3) {
-            Ok(())
-        } else {
-            Err(need)
+macro_rules! level_set_manifold {
+    ($ty:ty) => {
+        impl Manifold for $ty {
+            fn required_dim(&self, n: usize) -> Result<(), usize> {
+                let need = packed_need(&self.indices);
+                if n >= need && n.is_multiple_of(3) {
+                    Ok(())
+                } else {
+                    Err(need)
+                }
+            }
+
+            fn project(&self, x: &Array1<f64>, v: &Array1<f64>) -> Array1<f64> {
+                match self.gradient(x.view()) {
+                    Ok(g) => project_ker(&g, v),
+                    Err(_) => v.clone(),
+                }
+            }
+
+            fn retract(&self, x: &Array1<f64>, v: &Array1<f64>) -> Array1<f64> {
+                restore_level(x, v, |z| self.value(z), |z| self.gradient(z))
+            }
+
+            fn transport(
+                &self,
+                _x_from: &Array1<f64>,
+                x_to: &Array1<f64>,
+                v: &Array1<f64>,
+            ) -> Array1<f64> {
+                self.project(x_to, v)
+            }
         }
-    }
-
-    fn project(&self, x: &Array1<f64>, v: &Array1<f64>) -> Array1<f64> {
-        match self.gradient(x.view()) {
-            Ok(g) => project_ker(&g, v),
-            Err(_) => v.clone(),
-        }
-    }
-
-    fn retract(&self, x: &Array1<f64>, v: &Array1<f64>) -> Array1<f64> {
-        restore_level(x, v, |z| self.value(z), |z| self.gradient(z))
-    }
-
-    fn transport(&self, _x_from: &Array1<f64>, x_to: &Array1<f64>, v: &Array1<f64>) -> Array1<f64> {
-        self.project(x_to, v)
-    }
+    };
 }
 
-impl Manifold for Rotation {
-    fn required_dim(&self, n: usize) -> Result<(), usize> {
-        let need = packed_need(&self.indices);
-        if n >= need && n.is_multiple_of(3) {
-            Ok(())
-        } else {
-            Err(need)
-        }
-    }
-
-    fn project(&self, x: &Array1<f64>, v: &Array1<f64>) -> Array1<f64> {
-        match self.gradient(x.view()) {
-            Ok(g) => project_ker(&g, v),
-            Err(_) => v.clone(),
-        }
-    }
-
-    fn retract(&self, x: &Array1<f64>, v: &Array1<f64>) -> Array1<f64> {
-        restore_level(x, v, |z| self.value(z), |z| self.gradient(z))
-    }
-
-    fn transport(&self, _x_from: &Array1<f64>, x_to: &Array1<f64>, v: &Array1<f64>) -> Array1<f64> {
-        self.project(x_to, v)
-    }
-}
-
-impl Manifold for Displacement {
-    fn required_dim(&self, n: usize) -> Result<(), usize> {
-        let need = packed_need(&self.indices);
-        if n >= need && n.is_multiple_of(3) {
-            Ok(())
-        } else {
-            Err(need)
-        }
-    }
-
-    fn project(&self, x: &Array1<f64>, v: &Array1<f64>) -> Array1<f64> {
-        match self.gradient(x.view()) {
-            Ok(g) => project_ker(&g, v),
-            Err(_) => v.clone(),
-        }
-    }
-
-    fn retract(&self, x: &Array1<f64>, v: &Array1<f64>) -> Array1<f64> {
-        restore_level(x, v, |z| self.value(z), |z| self.gradient(z))
-    }
-
-    fn transport(&self, _x_from: &Array1<f64>, x_to: &Array1<f64>, v: &Array1<f64>) -> Array1<f64> {
-        self.project(x_to, v)
-    }
-}
+level_set_manifold!(Translation);
+level_set_manifold!(Rotation);
+level_set_manifold!(Displacement);
 
 /// Which Sella internal a host packed into an internals chart.
 ///
@@ -540,7 +501,7 @@ fn center_rows(pos: &mut Array2<f64>) {
 
 /// Sella `R = dx.T @ refpos`. The rightmost quaternion is the inverse
 /// Kabsch rotation: a +axis body rotation reads negative.
-fn kabsch_f(pos: &Array2<f64>, refpos: &Array2<f64>) -> [[f64; 4]; 4] {
+pub(crate) fn kabsch_f(pos: &Array2<f64>, refpos: &Array2<f64>) -> [[f64; 4]; 4] {
     let mut r = [[0.0; 3]; 3];
     for i in 0..pos.nrows() {
         for a in 0..3 {
@@ -664,7 +625,7 @@ fn solve4(mut a: [[f64; 4]; 4], mut b: [f64; 4]) -> [f64; 4] {
     x
 }
 
-fn jacobi4(mut a: [[f64; 4]; 4]) -> ([f64; 4], [[f64; 4]; 4]) {
+pub(crate) fn jacobi4(mut a: [[f64; 4]; 4]) -> ([f64; 4], [[f64; 4]; 4]) {
     let mut v = [[0.0; 4]; 4];
     for (i, row) in v.iter_mut().enumerate() {
         row[i] = 1.0;

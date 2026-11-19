@@ -100,7 +100,29 @@ impl Spline {
             + (self.y[j + 1] / h - m1 * h / 6.0) * b
     }
 
+    /// Second derivative of the piece containing `t`. It is linear on
+    /// each interval, equal to the stored knot values at the knots.
+    pub(crate) fn second_derivative(&self, t: f64) -> f64 {
+        let j = self.interval(t);
+        let (x0, x1) = (self.x[j], self.x[j + 1]);
+        let h = x1 - x0;
+        let (a, b) = (x1 - t, t - x0);
+        (self.second[j] * a + self.second[j + 1] * b) / h
+    }
+
+    /// Derivative of the piece containing `t`.
+    pub(crate) fn derivative(&self, t: f64) -> f64 {
+        let j = self.interval(t);
+        let (x0, x1) = (self.x[j], self.x[j + 1]);
+        let h = x1 - x0;
+        let (a, b) = (x1 - t, t - x0);
+        let (m0, m1) = (self.second[j], self.second[j + 1]);
+        -m0 * a * a / (2.0 * h) + m1 * b * b / (2.0 * h) - (self.y[j] / h - m0 * h / 6.0)
+            + (self.y[j + 1] / h - m1 * h / 6.0)
+    }
+
     /// `∫ S` from the first knot to `t`.
+    #[cfg(any(test, feature = "ohtst"))]
     pub(crate) fn primitive(&self, t: f64) -> f64 {
         let j = self.interval(t);
         self.cumulative[j] + self.piece_primitive(j, t)
@@ -109,6 +131,7 @@ impl Spline {
 
 /// Nodes and weights of the composite Simpson rule with `2 pairs`
 /// subintervals on `[a, b]`.
+#[cfg(any(test, feature = "ohtst"))]
 pub(crate) fn simpson_rule(a: f64, b: f64, pairs: usize) -> impl Iterator<Item = (f64, f64)> {
     let intervals = 2 * pairs;
     let h = (b - a) / intervals as f64;
@@ -135,10 +158,29 @@ mod tests {
         let primitive = |t: f64| 0.2 * t.powi(4) - 0.3 * t.powi(3) + 0.5 * t * t - 0.3 * t;
         let values: Vec<f64> = x.iter().map(|&t| cubic(t)).collect();
         let spline = Spline::new(&x, &values);
+        let slope = |t: f64| 2.4 * t * t - 1.8 * t + 1.0;
+        let bend = |t: f64| 4.8 * t - 1.8;
+        let roundoff = f64::EPSILON * (x.len() as f64).powi(2);
         for t in [-1.0, -0.8, 0.0, 0.3, 1.0, 1.9, 3.5] {
-            assert!((spline.value(t) - cubic(t)).abs() < 1e-12, "{t}");
+            // Relative to the cubic, its derivative, its second derivative,
+            // and its primitive.
+            assert!(
+                (spline.value(t) - cubic(t)).abs() <= cubic(t).abs() * roundoff,
+                "{t}"
+            );
+            assert!(
+                (spline.derivative(t) - slope(t)).abs() <= slope(t).abs() * roundoff,
+                "{t}"
+            );
+            assert!(
+                (spline.second_derivative(t) - bend(t)).abs() <= bend(t).abs() * roundoff,
+                "{t}"
+            );
             let integral = primitive(t) - primitive(-1.0);
-            assert!((spline.primitive(t) - integral).abs() < 1e-12, "{t}");
+            assert!(
+                (spline.primitive(t) - integral).abs() <= integral.abs() * roundoff,
+                "{t}"
+            );
         }
     }
 

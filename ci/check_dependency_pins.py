@@ -72,15 +72,25 @@ def lock_packages(where: Path) -> list[dict]:
 
 def check_lock(where: Path, label: str) -> list[str]:
     errors = []
+    by_name: dict[str, list[str]] = {}
     for pkg in lock_packages(where):
+        name = pkg["name"]
         source = pkg.get("source", "")
+        if name in OWN:
+            by_name.setdefault(name, []).append(f"{pkg['version']} ({source or 'local'})")
         if not source.startswith("git+"):
             continue
         m = LOCKED_GIT.fullmatch(source)
         if m is None or m["rev"] != m["precise"]:
             errors.append(
-                f"{label}/Cargo.lock: {pkg['name']} {pkg['version']} is locked from "
+                f"{label}/Cargo.lock: {name} {pkg['version']} is locked from "
                 f"{source}, not a full rev"
+            )
+    for name, entries in sorted(by_name.items()):
+        if len(entries) > 1:
+            errors.append(
+                f"{label}/Cargo.lock: locks more than one version of {name}: "
+                + ", ".join(entries)
             )
     return errors
 
@@ -177,11 +187,18 @@ def main() -> int:
     if errors:
         print("dependency pins:\n" + "\n".join(errors), file=sys.stderr)
         return 1
-    pins = sorted(
-        f"{pkg['name']} {pkg['version']} @ {LOCKED_GIT.fullmatch(pkg['source'])['rev']}"
-        for pkg in lock_packages(ROOT)
-        if pkg.get("source", "").startswith("git+")
-    )
+    pins = []
+    for pkg in sorted(lock_packages(ROOT), key=lambda p: p["name"]):
+        source = pkg.get("source", "")
+        if pkg["name"] not in OWN and not source.startswith("git+"):
+            continue
+        if not source:
+            continue
+        if source.startswith("git+"):
+            rev = LOCKED_GIT.fullmatch(source)["rev"]
+            pins.append(f"{pkg['name']} {pkg['version']} @ {rev}")
+        else:
+            pins.append(f"{pkg['name']} {pkg['version']}")
     print("dependency pins ok: " + "; ".join(pins))
     return 0
 

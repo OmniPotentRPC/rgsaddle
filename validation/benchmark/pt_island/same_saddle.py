@@ -16,13 +16,14 @@ import csv
 import sys
 
 import numpy as np
-from optbench.connection import per_atom_max
 
 BARRIER_TOL = 0.01
 ATOM_TOL = 0.1
 
 
 def main():
+    from optbench.connection import per_atom_max
+
     out = sys.argv[1]
     saddles = []
     rows = []
@@ -51,4 +52,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) == 1:
+        print(__doc__.splitlines()[2])
+    else:
+        main()

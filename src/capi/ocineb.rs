@@ -9,6 +9,7 @@ use super::{
     CSurface, RGSADDLE_ABI_MAJOR, RGSADDLE_ABI_MINOR, RGSADDLE_INVALID_PARAMETER,
     RGSADDLE_NULL_REPORT, RGSADDLE_NULL_SESSION, RGSADDLE_NULL_SURFACE, RGSADDLE_OK,
     RgsaddleBandConfig, RgsaddleMinModeConfig, RgsaddleVersion, parse_band_config, status_of,
+    write_doubles,
 };
 use crate::minmode::{FiniteDifference, MinModeConfig, MinModeKind};
 use crate::ocineb::{OcinebConfig, OcinebPhase, OcinebSession, OcinebStatus};
@@ -233,10 +234,7 @@ pub unsafe extern "C" fn rgsaddle_ocineb_positions(
     let session = unsafe { &*session };
     let pos = session.session.positions();
     let n = pos.len();
-    let dst = unsafe { slice::from_raw_parts_mut(out, n) };
-    for (i, v) in pos.iter().enumerate() {
-        dst[i] = *v;
-    }
+    unsafe { write_doubles(out, n, pos.iter().copied()) };
     RGSADDLE_OK
 }
 

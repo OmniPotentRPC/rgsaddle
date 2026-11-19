@@ -277,6 +277,28 @@ pub fn trust_update(
     }
 }
 
+/// Ratio and radius the Sella sessions store after one trial.
+///
+/// A prediction whose absolute value is below `1e-14` reports ratio 1
+/// and leaves `radius` unchanged. Otherwise the ratio is `actual /
+/// predicted` and the radius is [`trust_update`] of the same pair.
+pub(crate) fn accepted_trust(
+    radius: f64,
+    predicted: f64,
+    actual: f64,
+    step_norm: f64,
+    sch: &TrustSchedule,
+) -> (f64, f64) {
+    if predicted.abs() >= 1e-14 {
+        (
+            actual / predicted,
+            trust_update(radius, predicted, actual, step_norm, sch),
+        )
+    } else {
+        (1.0, radius)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

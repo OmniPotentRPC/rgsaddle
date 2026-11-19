@@ -15,7 +15,7 @@ use rgmin::vecops::{Vector, axpy, dot, vdot, vnrm2};
 
 use crate::constraints::Constraints;
 use crate::error::SaddleError;
-use crate::geom::{SellaGeom, TrustSchedule, trust_update};
+use crate::geom::{SellaGeom, TrustSchedule, accepted_trust};
 use crate::minmode::PointSurface;
 use crate::pes::CartesianPes;
 use crate::pes_internal::{CellCartesianPes, CellInternalPes, InternalPes, SellaPes};
@@ -783,30 +783,25 @@ impl SellaSaddleSession {
         let x_new = pes.position().to_owned();
         let g1_r = self.geom.egrad2rgrad(&x_new, &g1);
         let max_force = self.config.force_gate.value(g1_r.view());
-        if pred.abs() >= 1e-14 {
-            self.rho = (energy - e0) / pred;
-            if cap_active {
-                self.atom_delta = trust_update(
-                    atom_delta,
-                    pred,
-                    energy - e0,
-                    crate::restricted::ras_cons(&s),
-                    &self.config.schedule(),
-                );
-                if ceiling == AtomCeiling::Alone {
-                    self.atom_delta = self.atom_delta.min(self.delta);
-                }
-            } else {
-                self.delta = trust_update(
-                    self.delta,
-                    pred,
-                    energy - e0,
-                    self.config.restricted.step_magnitude(&s),
-                    &self.config.schedule(),
-                );
+        if cap_active {
+            (self.rho, self.atom_delta) = accepted_trust(
+                atom_delta,
+                pred,
+                energy - e0,
+                crate::restricted::ras_cons(&s),
+                &self.config.schedule(),
+            );
+            if pred.abs() >= 1e-14 && ceiling == AtomCeiling::Alone {
+                self.atom_delta = self.atom_delta.min(self.delta);
             }
         } else {
-            self.rho = 1.0;
+            (self.rho, self.delta) = accepted_trust(
+                self.delta,
+                pred,
+                energy - e0,
+                self.config.restricted.step_magnitude(&s),
+                &self.config.schedule(),
+            );
         }
         Ok(SellaSaddleReport {
             energy,
@@ -910,18 +905,13 @@ impl SellaSaddleSession {
         let pred = vdot(&vg, &vs) + 0.5 * dot(s.view(), hs.view());
         let (energy, g1) = pes.kick(surface, s.view())?;
         let max_force = self.config.force_gate.value(g1.view());
-        if pred.abs() >= 1e-14 {
-            self.rho = (energy - e0) / pred;
-            self.delta = trust_update(
-                self.delta,
-                pred,
-                energy - e0,
-                self.config.restricted.step_magnitude(&s),
-                &self.config.schedule(),
-            );
-        } else {
-            self.rho = 1.0;
-        }
+        (self.rho, self.delta) = accepted_trust(
+            self.delta,
+            pred,
+            energy - e0,
+            self.config.restricted.step_magnitude(&s),
+            &self.config.schedule(),
+        );
         Ok(SellaSaddleReport {
             energy,
             max_force,
@@ -999,18 +989,13 @@ impl SellaSaddleSession {
             g1_cart[i] = g1p[i];
         }
         let max_force = self.config.force_gate.value(g1_cart.view());
-        if pred.abs() >= 1e-14 {
-            self.rho = (energy - e0) / pred;
-            self.delta = trust_update(
-                self.delta,
-                pred,
-                energy - e0,
-                self.config.restricted.step_magnitude(&s),
-                &self.config.schedule(),
-            );
-        } else {
-            self.rho = 1.0;
-        }
+        (self.rho, self.delta) = accepted_trust(
+            self.delta,
+            pred,
+            energy - e0,
+            self.config.restricted.step_magnitude(&s),
+            &self.config.schedule(),
+        );
         Ok(SellaSaddleReport {
             energy,
             max_force,
@@ -1084,18 +1069,13 @@ impl SellaSaddleSession {
         let (energy, _) = pes.kick_packed(surface, s.view())?;
         let (_, g1) = surface.eval_in_cell(pes.position(), &pes.cell9())?;
         let max_force = self.config.force_gate.value(g1.view());
-        if pred.abs() >= 1e-14 {
-            self.rho = (energy - e0) / pred;
-            self.delta = trust_update(
-                self.delta,
-                pred,
-                energy - e0,
-                self.config.restricted.step_magnitude(&s),
-                &self.config.schedule(),
-            );
-        } else {
-            self.rho = 1.0;
-        }
+        (self.rho, self.delta) = accepted_trust(
+            self.delta,
+            pred,
+            energy - e0,
+            self.config.restricted.step_magnitude(&s),
+            &self.config.schedule(),
+        );
         Ok(SellaSaddleReport {
             energy,
             max_force,

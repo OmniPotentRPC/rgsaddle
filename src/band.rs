@@ -2,7 +2,7 @@
 //! one rgmin solver step, report. Hosts own the loop.
 
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 
 use ndarray::{
     Array1, Array2, ArrayBase, ArrayView1, ArrayView2, ArrayViewMut1, DataMut, Ix1, Zip, s,
@@ -25,6 +25,7 @@ use crate::tangent::compute_tangent;
 mod climb;
 mod free_end;
 mod growing_string;
+mod dynamic;
 mod min_mode;
 mod pair_model;
 mod saddle_check;
@@ -34,6 +35,8 @@ pub use free_end::{FeaNebReport, FeaNebSession, FreeEndConfig, FreeEndReport, Fr
 pub use growing_string::{
     GrowingStringConfig, GrowingStringPhase, GrowingStringReport, GrowingStringSession,
 };
+pub use dynamic::DynamicNeb;
+pub(crate) use dynamic::dynamic_mask;
 pub use min_mode::MinModeRefine;
 pub(crate) use min_mode::RefinePhase;
 pub use string::{StringConfig, StringSession};
@@ -84,6 +87,19 @@ impl Cell {
         ])
     }
 
+    /// Convert a non-singular three-axis periodic cell to [`minimage::Cell`].
+    ///
+    /// Returns `None` when any row is zero (a slab or open axis) or the
+    /// lattice matrix is singular.
+    pub fn as_minimage(&self) -> Option<minimage::Cell> {
+        let periodic: [bool; 3] = std::array::from_fn(|i| self.0[i].iter().any(|v| *v != 0.0));
+        if !periodic.iter().all(|p| *p) {
+            return None;
+        }
+        self.inverse()?;
+        minimage::Cell::from_ase(self.0).ok()
+    }
+
     /// Wrap every per-atom 3-vector in `diff` to its nearest lattice
     /// image: fractional components `s = d H^-1` are shifted by
     /// `round(s)` and mapped back, `d - round(s) H`. A diagonal cell
@@ -98,25 +114,18 @@ impl Cell {
 
     /// [`Cell::minimum_image`] on borrowed storage.
     pub(crate) fn minimum_image_view(&self, mut diff: ArrayViewMut1<f64>) {
-        let h = &self.0;
-        let periodic: [bool; 3] = std::array::from_fn(|i| h[i].iter().any(|v| *v != 0.0));
-        if periodic.iter().all(|p| *p)
-            && let Some(inv) = self.inverse()
-        {
+        if let Some(cell) = self.as_minimage() {
             for a in 0..diff.len() / 3 {
                 let d = [diff[3 * a], diff[3 * a + 1], diff[3 * a + 2]];
-                let mut shift = [0.0; 3];
-                for (i, si) in shift.iter_mut().enumerate() {
-                    let s = d[0] * inv[0][i] + d[1] * inv[1][i] + d[2] * inv[2][i];
-                    *si = s.round();
-                }
-                for c in 0..3 {
-                    diff[3 * a + c] =
-                        d[c] - (shift[0] * h[0][c] + shift[1] * h[1][c] + shift[2] * h[2][c]);
-                }
+                let wrapped = cell.displacement([0.0; 3], d);
+                diff[3 * a] = wrapped[0];
+                diff[3 * a + 1] = wrapped[1];
+                diff[3 * a + 2] = wrapped[2];
             }
             return;
         }
+        let h = &self.0;
+        let periodic: [bool; 3] = std::array::from_fn(|i| h[i].iter().any(|v| *v != 0.0));
         // Partially periodic or singular: wrap only along axes whose
         // lattice vector is the coordinate axis itself.
         for a in 0..diff.len() / 3 {
@@ -417,6 +426,12 @@ pub struct BandConfig {
     /// with repeated adaptive cut-and-remesh around the detected saddle.
     /// `None`, the default, keeps both endpoints fixed.
     pub free_end: Option<FreeEndConfig>,
+    /// Dynamic NEB ([`DynamicNeb`]). `None`, the default, evaluates
+    /// every image on every step. Images under the threshold keep their
+    /// last energy and force, stay in the spring and the tangent, and
+    /// are evaluated again when a neighbour moves enough that the
+    /// projected force exceeds the threshold.
+    pub dynamic: Option<DynamicNeb>,
 }
 
 with_setters!(BandConfig {
@@ -441,6 +456,7 @@ with_setters!(BandConfig {
     with_saddle_check => saddle_check: opt SaddleIndexCheck,
     with_string => string: opt StringConfig,
     with_free_end => free_end: opt FreeEndConfig,
+    with_dynamic => dynamic: opt DynamicNeb,
 });
 
 impl BandConfig {
@@ -570,6 +586,7 @@ impl Default for BandConfig {
             saddle_check: Some(SaddleIndexCheck::default()),
             string: None,
             free_end: None,
+            dynamic: None,
         }
     }
 }
@@ -635,10 +652,21 @@ impl Default for ExpBandPrecon {
     }
 }
 
+/// Identifies the metric matrices an assembly solved against. Zero is
+/// the Euclidean metric; positive values number each [`ExpBandState`]
+/// build on the session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MetricBuildId(u64);
+
+impl MetricBuildId {
+    const EUCLIDEAN: Self = Self(0);
+}
+
 /// The band metric: one matrix per interior image and where they were built.
 #[derive(Clone, Debug)]
 struct ExpBandState {
     precon: ExpBandPrecon,
+    build_id: Option<MetricBuildId>,
     built_at: Array1<f64>,
     r_nn: f64,
     /// Energy scale in force; `None` until estimated on the first step.
@@ -650,12 +678,59 @@ struct ExpBandState {
     free: Option<Vec<usize>>,
 }
 
+impl ExpBandState {
+    fn clear_metrics(&mut self) {
+        self.build_id = None;
+        self.built_at = Array1::zeros(0);
+        self.r_nn = 0.0;
+        self.metrics.clear();
+    }
+
+    fn is_stale(&self, x: ArrayView1<f64>, n_interior: usize) -> bool {
+        self.build_id.is_none()
+            || self.metrics.len() != n_interior
+            || self.built_at.len() != x.len()
+            || rgmin::needs_rebuild(
+                rgmin::max_atom_displacement(self.built_at.view(), x),
+                self.r_nn,
+            )
+    }
+
+    /// Metrics valid at `x`, or `None` before the first build or once an
+    /// interior atom has moved more than `r_nn / 2` from `built_at`.
+    fn fresh_metrics(&self, x: ArrayView1<f64>, n_interior: usize) -> Option<BandMetrics<'_>> {
+        let build_id = self.build_id?;
+        if self.is_stale(x, n_interior) {
+            return None;
+        }
+        Some(BandMetrics {
+            build_id,
+            built_at: self.built_at.view(),
+            r_nn: self.r_nn,
+            per_image: self.metrics.as_slice(),
+            free: self.free.as_deref(),
+        })
+    }
+}
+
 /// The band metrics of one step: one matrix per interior image, on the
 /// coordinates `free` lists, or on all of them.
 #[derive(Clone, Copy)]
 struct BandMetrics<'a> {
+    build_id: MetricBuildId,
+    built_at: ArrayView1<'a, f64>,
+    r_nn: f64,
     per_image: &'a [Exp],
     free: Option<&'a [usize]>,
+}
+
+impl BandMetrics<'_> {
+    fn is_fresh_at(&self, x: ArrayView1<f64>, n_interior: usize) -> bool {
+        self.build_id != MetricBuildId::EUCLIDEAN
+            && self.per_image.len() == n_interior
+            && self.built_at.len() == x.len()
+            && !rgmin::needs_rebuild(rgmin::max_atom_displacement(self.built_at, x), self.r_nn)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -766,6 +841,20 @@ pub trait BandSurface: Sync {
         let _ = image;
         min_mode::one_row(self, position)
     }
+
+    /// Energy and Cartesian gradient of band image `image` alone, for a
+    /// dynamic-NEB refresh of one interior image. The default is a
+    /// one-row [`BandSurface::eval`]. A host that keys per-image state
+    /// on the band index overrides it. This is not the climbing-image
+    /// request: [`BandSurface::eval_image`] stays that channel.
+    fn eval_indexed(
+        &self,
+        image: usize,
+        position: ArrayView1<f64>,
+    ) -> Result<(f64, Array1<f64>), SaddleError> {
+        let _ = image;
+        min_mode::one_row(self, position)
+    }
 }
 
 /// Oriented cells and the Jacobian fixed at session build.
@@ -786,14 +875,20 @@ const SAME_ROW_TOL: f64 = 1e-10;
 /// The surface's answer at one band geometry. `x` is the flat
 /// interior; `energies` and `gradients` cover the whole band (the
 /// endpoint gradient rows hold whatever the last whole-band
-/// evaluation returned); `projected` is the assembled interior force
-/// under the climbing state of the most recent assembly.
+/// evaluation returned); `projected` and `driving` are the assembled
+/// residual and optional preconditioned force under the climbing state
+/// of the most recent assembly.
 #[derive(Clone)]
 struct BandEval {
     x: Array1<f64>,
     energies: Array1<f64>,
     gradients: Array2<f64>,
     projected: Array1<f64>,
+    driving: Array1<f64>,
+    /// Climbing image used by the cached assembly; `i64::MIN` means none.
+    assembly_ci: i64,
+    /// Metric build used by the cached assembly; `None` when unassembled.
+    assembly_metric: Option<MetricBuildId>,
     /// Cauchy stress, whole band, row-major 9. Empty on an atomic band.
     stresses: Array2<f64>,
     /// Geometry the solid-state assembly evaluated. Empty on an atomic band.
@@ -834,6 +929,10 @@ struct BandState {
     previous: Mutex<Option<BandEval>>,
     /// Rows evaluated by the surface during the current step.
     rows: AtomicUsize,
+    /// Number of exponential-metric PCG solves, for cache regression tests.
+    pcg_solves: AtomicUsize,
+    /// Monotonic identifier handed to each exponential-metric build.
+    next_metric_id: AtomicU64,
     /// Buffers of the evaluation and assembly. Locked before `last`.
     work: Mutex<BandWork>,
     /// Image threads ([`BandSession::set_image_threads`]).
@@ -843,6 +942,8 @@ struct BandState {
     fixed: Vec<bool>,
     /// Stable per-image identities when tracking across growth or remeshing.
     ids: Vec<crate::stencil::ImageId>,
+    /// Dynamic NEB cache and the images pinned for the step in progress.
+    dynamic: Mutex<dynamic::DynamicRun>,
 }
 
 impl BandState {
@@ -861,9 +962,32 @@ impl BandState {
             last: Mutex::new(None),
             previous: Mutex::new(None),
             rows: AtomicUsize::new(0),
+            pcg_solves: AtomicUsize::new(0),
+            next_metric_id: AtomicU64::new(1),
             work: Mutex::new(BandWork::default()),
             pool: None,
+            dynamic: Mutex::new(dynamic::DynamicRun::default()),
         }
+    }
+
+    fn dynamic_run(&self) -> std::sync::MutexGuard<'_, dynamic::DynamicRun> {
+        self.dynamic.lock().unwrap_or_else(|err| err.into_inner())
+    }
+
+    fn dynamic_enabled(&self) -> bool {
+        self.dynamic_run().spec.is_some()
+    }
+
+    fn dynamic_spec(&self) -> Option<DynamicNeb> {
+        self.dynamic_run().spec
+    }
+
+    fn install_dynamic(&self, spec: Option<DynamicNeb>) {
+        self.dynamic_run().install(spec);
+    }
+
+    fn alloc_metric_id(&self) -> MetricBuildId {
+        MetricBuildId(self.next_metric_id.fetch_add(1, Ordering::Relaxed))
     }
     /// One surface call, split into image blocks on the image threads.
     fn eval_rows(
@@ -955,9 +1079,44 @@ impl BandState {
         *last = Some(start);
     }
 
+    fn invalidate_assembly(&self) {
+        for slot in [&self.last, &self.previous] {
+            let mut guard = match slot.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if let Some(eval) = guard.as_mut() {
+                eval.projected = Array1::zeros(0);
+                eval.driving = Array1::zeros(0);
+                eval.assembly_ci = i64::MIN;
+                eval.assembly_metric = None;
+            }
+        }
+    }
+
+    /// Forget which climbing image an assembly belongs to.
+    ///
+    /// The projected force and its metric stamp stay, so
+    /// [`BandSession::evaluation`] still reports the force the last
+    /// step used. The next assembly misses this key, recaptures the
+    /// baseline, and can arm again. Dropping the force here made
+    /// `evaluation` report nothing after [`BandSession::restart`].
+    fn retire_assembly_key(&self) {
+        for slot in [&self.last, &self.previous] {
+            let mut guard = match slot.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if let Some(eval) = guard.as_mut() {
+                eval.assembly_ci = i64::MIN;
+            }
+        }
+    }
+
     /// The climbing baseline and the armed image belong to one
-    /// relaxation; the surface caches stay.
+    /// relaxation; the surface caches and the last projected force stay.
     fn restart(&self) {
+        self.retire_assembly_key();
         *self.baseline.lock().unwrap_or_else(|e| e.into_inner()) = None;
         *self.atom_baseline.lock().unwrap_or_else(|e| e.into_inner()) = None;
         self.armed.store(false, Ordering::Relaxed);
@@ -1030,6 +1189,7 @@ struct BandWork {
     ks: Vec<f64>,
     spare: Option<BandEval>,
     spare_projected: Array1<f64>,
+    spare_driving: Array1<f64>,
 }
 
 /// One [`ImageWork`] of length `dof` per interior image.
@@ -1044,7 +1204,7 @@ fn fit_images(images: &mut Vec<ImageWork>, n_interior: usize, dof: usize) -> &mu
 impl BandWork {
     /// Storage for a new atomic evaluation of `n_images` rows: the
     /// recycled `spare` when it has that shape, a fresh one otherwise.
-    /// Its projected force is cleared, the mark of an unassembled point.
+    /// Its forces are cleared, the mark of an unassembled point.
     fn take_eval(&mut self, n_images: usize, dof: usize) -> BandEval {
         let fits = |e: &BandEval| {
             e.x.len() == (n_images - 2) * dof && e.gradients.dim() == (n_images, dof)
@@ -1055,6 +1215,12 @@ impl BandWork {
                 if projected.len() > self.spare_projected.len() {
                     self.spare_projected = projected;
                 }
+                let driving = std::mem::replace(&mut eval.driving, Array1::zeros(0));
+                if driving.len() > self.spare_driving.len() {
+                    self.spare_driving = driving;
+                }
+                eval.assembly_ci = i64::MIN;
+                eval.assembly_metric = None;
                 eval
             }
             None => BandEval {
@@ -1062,6 +1228,9 @@ impl BandWork {
                 energies: Array1::zeros(n_images),
                 gradients: Array2::zeros((n_images, dof)),
                 projected: Array1::zeros(0),
+                driving: Array1::zeros(0),
+                assembly_ci: i64::MIN,
+                assembly_metric: None,
                 stresses: Array2::zeros((0, 9)),
                 band_positions: Array2::zeros((0, dof)),
                 band_cells: Vec::new(),
@@ -1069,16 +1238,40 @@ impl BandWork {
         }
     }
 
-    /// Store `projected` in `eval`, in the recycled buffer when `eval`
-    /// has none of that length.
-    fn store_projected(&mut self, eval: &mut BandEval, projected: &Array1<f64>) {
-        if eval.projected.len() != projected.len() {
-            std::mem::swap(&mut eval.projected, &mut self.spare_projected);
+    /// Store an assembled force in `target`, using `spare` when needed.
+    fn store_force(target: &mut Array1<f64>, spare: &mut Array1<f64>, force: &Array1<f64>) {
+        if target.len() != force.len() {
+            std::mem::swap(target, spare);
         }
-        if eval.projected.len() == projected.len() {
-            eval.projected.assign(projected);
+        if target.len() == force.len() {
+            target.assign(force);
         } else {
-            eval.projected = projected.clone();
+            *target = force.clone();
+        }
+    }
+
+    /// Store the residual and optional preconditioned driving force.
+    fn store_forces(
+        &mut self,
+        eval: &mut BandEval,
+        projected: &Array1<f64>,
+        driving: Option<&Array1<f64>>,
+    ) {
+        Self::store_force(&mut eval.projected, &mut self.spare_projected, projected);
+        match driving {
+            Some(force) => {
+                Self::store_force(&mut eval.driving, &mut self.spare_driving, force);
+            }
+            None => {
+                // This residual was assembled without the metric. Keeping
+                // a driving force beside it would let the next metric
+                // read return this residual as if it were the
+                // preconditioned one.
+                if eval.driving.len() > self.spare_driving.len() {
+                    std::mem::swap(&mut eval.driving, &mut self.spare_driving);
+                }
+                eval.driving = Array1::zeros(0);
+            }
         }
     }
 }
@@ -1180,30 +1373,34 @@ fn fill_band(
     next.energies.fill(0.0);
     match state.endpoints() {
         Some([e_first, e_last]) => {
-            fit1(&mut work.interior_e, n_images - 2);
-            fit2(&mut work.interior_g, (n_images - 2, dof));
-            state.eval_rows(
-                surface,
-                1..last,
-                interior,
-                &mut work.interior_e,
-                &mut work.interior_g,
-            )?;
-            state.rows.fetch_add(n_images - 2, Ordering::Relaxed);
             next.energies[0] = e_first;
             next.energies[last] = e_last;
-            next.energies
-                .slice_mut(s![1..last])
-                .assign(&work.interior_e);
             for end in [0, last] {
                 match prev {
                     Some(prev) => next.gradients.row_mut(end).assign(&prev.gradients.row(end)),
                     None => next.gradients.row_mut(end).fill(0.0),
                 }
             }
-            next.gradients
-                .slice_mut(s![1..last, ..])
-                .assign(&work.interior_g);
+            if state.dynamic_enabled() {
+                fill_dynamic_interior(state, work, surface, next, interior)?;
+            } else {
+                fit1(&mut work.interior_e, n_images - 2);
+                fit2(&mut work.interior_g, (n_images - 2, dof));
+                state.eval_rows(
+                    surface,
+                    1..last,
+                    interior,
+                    &mut work.interior_e,
+                    &mut work.interior_g,
+                )?;
+                state.rows.fetch_add(n_images - 2, Ordering::Relaxed);
+                next.energies
+                    .slice_mut(s![1..last])
+                    .assign(&work.interior_e);
+                next.gradients
+                    .slice_mut(s![1..last, ..])
+                    .assign(&work.interior_g);
+            }
         }
         None => {
             fit2(&mut work.whole, (n_images, dof));
@@ -1240,7 +1437,92 @@ fn fill_band(
             zero_fixed(&state.fixed, &mut row);
         }
     }
+    if state.dynamic_enabled() {
+        remember_dynamic(state, interior, next);
+    }
     Ok(())
+}
+
+/// Interior rows for dynamic NEB. An image whose coordinates still
+/// equal its last answer reuses that energy and gradient. A full miss
+/// stays one batched call. A partial miss asks for those images alone
+/// through [`BandSurface::eval_indexed`].
+fn fill_dynamic_interior(
+    state: &BandState,
+    work: &mut BandWork,
+    surface: &dyn BandSurface,
+    next: &mut BandEval,
+    interior: ArrayView2<f64>,
+) -> Result<(), SaddleError> {
+    let n_interior = interior.nrows();
+    let dof = interior.ncols();
+    let mut reuse = Vec::with_capacity(n_interior);
+    {
+        let run = state.dynamic_run();
+        for i in 0..n_interior {
+            reuse.push(run.recall(i, interior.row(i)));
+        }
+    }
+    let fresh: Vec<usize> = reuse
+        .iter()
+        .enumerate()
+        .filter(|(_, hit)| hit.is_none())
+        .map(|(i, _)| i)
+        .collect();
+    if fresh.len() == n_interior {
+        fit1(&mut work.interior_e, n_interior);
+        fit2(&mut work.interior_g, (n_interior, dof));
+        state.eval_rows(
+            surface,
+            1..(n_interior + 1),
+            interior,
+            &mut work.interior_e,
+            &mut work.interior_g,
+        )?;
+        state.rows.fetch_add(n_interior, Ordering::Relaxed);
+        let last = n_interior + 1;
+        next.energies
+            .slice_mut(s![1..last])
+            .assign(&work.interior_e);
+        next.gradients
+            .slice_mut(s![1..last, ..])
+            .assign(&work.interior_g);
+        return Ok(());
+    }
+    for (i, hit) in reuse.iter().enumerate() {
+        if let Some((energy, gradient)) = hit {
+            next.energies[i + 1] = *energy;
+            next.gradients.row_mut(i + 1).assign(gradient);
+        }
+    }
+    for i in fresh {
+        let (energy, mut gradient) = surface.eval_indexed(i + 1, interior.row(i))?;
+        if !energy.is_finite() || !gradient.iter().all(|component| component.is_finite()) {
+            return Err(SaddleError::NonFinite("band gradients"));
+        }
+        zero_fixed(&state.fixed, &mut gradient);
+        next.energies[i + 1] = energy;
+        next.gradients.row_mut(i + 1).assign(&gradient);
+        state.rows.fetch_add(1, Ordering::Relaxed);
+    }
+    Ok(())
+}
+
+/// Keep the surface answer of every interior image for the next dynamic step.
+fn remember_dynamic(state: &BandState, interior: ArrayView2<f64>, next: &BandEval) {
+    let mut run = state.dynamic_run();
+    let n_interior = interior.nrows();
+    if run.images.len() != n_interior {
+        run.images = (0..n_interior).map(|_| None).collect();
+    }
+    for i in 0..n_interior {
+        run.remember(
+            i,
+            interior.row(i),
+            next.energies[i + 1],
+            next.gradients.row(i + 1),
+        );
+    }
 }
 
 /// Remove the mean Cartesian force (eOn's `zeroTranslation`). An image
@@ -1438,6 +1720,9 @@ fn evaluate_solid(
         energies: energies.clone(),
         gradients: gradients.clone(),
         projected: Array1::zeros(0),
+        driving: Array1::zeros(0),
+        assembly_ci: i64::MIN,
+        assembly_metric: None,
         stresses: stresses.clone(),
         band_positions: positions.clone(),
         band_cells: cells.clone(),
@@ -1650,6 +1935,7 @@ fn assemble_solid(
 #[allow(clippy::too_many_arguments)]
 fn image_force(
     config: &BandConfig,
+    state: &BandState,
     spring_kind: &SpringKind,
     i: usize,
     climb: bool,
@@ -1728,6 +2014,7 @@ fn image_force(
             match free {
                 None => {
                     (driving, projected) = metric_force(
+                        state,
                         p,
                         gradients.row(i),
                         tangent.view(),
@@ -1743,6 +2030,7 @@ fn image_force(
                         free.iter().map(|&c| v[c]).collect()
                     };
                     let (driving_free, projected_free) = metric_force(
+                        state,
                         p,
                         gather(gradients.row(i)).view(),
                         gather(tangent.view()).view(),
@@ -1776,6 +2064,7 @@ fn image_force(
 /// band measures, on the coordinates `p` acts on. `curvature` is
 /// `d_next - d_prev`; `spring_k` is the uniform spring, if any.
 fn metric_force(
+    state: &BandState,
     p: &Exp,
     gradient: ArrayView1<f64>,
     tangent: ArrayView1<f64>,
@@ -1786,6 +2075,7 @@ fn metric_force(
     // Makri, Ortner and Kermode, Eq. (9) and (10): the gradient
     // through P^{-1}, the tangent normalised in the P-norm, and
     // the spring along that tangent with the P inner product.
+    state.pcg_solves.fetch_add(1, Ordering::Relaxed);
     let s = p.solve(gradient).ok_or(SaddleError::Invalid(
         "exponential metric: the linear solve failed".into(),
     ))?;
@@ -2149,6 +2439,89 @@ fn climb_target(
     (!blocked).then_some(max_i)
 }
 
+/// Convergence force of each interior row of an unmasked projected force.
+fn row_convergence(
+    state: &BandState,
+    projected: &Array1<f64>,
+    n_interior: usize,
+    dof: usize,
+) -> Vec<f64> {
+    (0..n_interior)
+        .map(|i| {
+            let row = projected.slice(s![i * dof..(i + 1) * dof]).to_owned();
+            state.convergence_force(&row)
+        })
+        .collect()
+}
+
+/// Record the dynamic mask at `origin` from the evaluation already
+/// stored there. A solver that cached this point does not ask for it
+/// again, and the trial it does ask for must not be what pins the images.
+fn seed_dynamic_decision(state: &BandState, origin: ArrayView1<f64>, force_tol: f64) {
+    let Some(spec) = state.dynamic_spec() else {
+        return;
+    };
+    let Some((projected, energies, n_interior, dof)) = cached_dynamic_inputs(state, origin) else {
+        return;
+    };
+    let mut rows = Array2::zeros((n_interior, dof));
+    for i in 0..n_interior {
+        rows.row_mut(i)
+            .assign(&projected.slice(s![i * dof..(i + 1) * dof]));
+    }
+    let Ok(interior) = origin.to_shape((n_interior, dof)) else {
+        return;
+    };
+    let Ok(mask) = dynamic_mask(
+        interior.view(),
+        energies.slice(s![1..n_interior + 1]),
+        &mut rows,
+        spec,
+    ) else {
+        return;
+    };
+    let mut masked = Array1::zeros(origin.len());
+    for i in 0..n_interior {
+        masked
+            .slice_mut(s![i * dof..(i + 1) * dof])
+            .assign(&rows.row(i));
+    }
+    let visible = state.convergence_force(&masked);
+    let row_gate = row_convergence(state, &projected, n_interior, dof);
+    let _zeroed = state
+        .dynamic_run()
+        .decision(origin, &mask, visible, &row_gate, force_tol);
+}
+
+fn cached_dynamic_inputs(
+    state: &BandState,
+    origin: ArrayView1<f64>,
+) -> Option<(Array1<f64>, Array1<f64>, usize, usize)> {
+    let slot = state.last.lock().unwrap_or_else(|e| e.into_inner());
+    let last = slot.as_ref()?;
+    if last.x != origin {
+        return None;
+    }
+    let n_images = last.energies.len();
+    if n_images < 3 {
+        return None;
+    }
+    let n_interior = n_images - 2;
+    if n_interior == 0 || !origin.len().is_multiple_of(n_interior) {
+        return None;
+    }
+    let dof = origin.len() / n_interior;
+    if last.projected.len() != origin.len() || dof == 0 || !dof.is_multiple_of(3) {
+        return None;
+    }
+    Some((
+        last.projected.clone(),
+        last.energies.clone(),
+        n_interior,
+        dof,
+    ))
+}
+
 /// Assemble the projected band force at interior `x`. Returns
 /// (pseudo-energy, projected interior forces, max abs component).
 ///
@@ -2176,6 +2549,63 @@ fn assemble_band(
         None,
     )?;
     Ok((energy, projected, max_component))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn assemble_image_force(
+    config: &BandConfig,
+    state: &BandState,
+    springs: &Springs<'_>,
+    metric: Option<(&Exp, Option<&[usize]>)>,
+    i: usize,
+    climb: bool,
+    endpoint_first: ArrayView1<f64>,
+    endpoint_last: ArrayView1<f64>,
+    x: ArrayView1<f64>,
+    energies: &Array1<f64>,
+    gradients: &Array2<f64>,
+    work: &mut ImageWork,
+    mut projected: ArrayViewMut1<f64>,
+    mut driving: Option<ArrayViewMut1<f64>>,
+) -> Result<(), SaddleError> {
+    match springs {
+        Springs::Metric(spring) => {
+            let (force, step) = image_force(
+                config,
+                state,
+                spring,
+                i,
+                climb,
+                endpoint_first,
+                endpoint_last,
+                x,
+                energies,
+                gradients,
+                metric,
+            )?;
+            projected.assign(&force);
+            if let Some(out) = driving.as_mut() {
+                match step.as_ref() {
+                    Some(step) => out.assign(step),
+                    None => out.assign(&force),
+                }
+            }
+        }
+        Springs::Band(spring) => image_force_into(
+            config,
+            spring,
+            i,
+            climb,
+            endpoint_first,
+            endpoint_last,
+            x,
+            energies,
+            gradients,
+            work,
+            projected,
+        )?,
+    }
+    Ok(())
 }
 
 /// The band assembly, and with `metrics` also the preconditioned driving
@@ -2221,6 +2651,31 @@ fn assemble_band_with(
     }
     let ci_at = if armed { climb_target } else { None };
     let pseudo_energy: f64 = energies.slice(s![1..n_images - 1]).sum();
+    let n_interior = n_images - 2;
+    let force_len = n_interior * dof;
+    let assembly_ci = ci_at.map_or(-1, |i| i as i64);
+    let cache_metric = match metrics {
+        None => Some(MetricBuildId::EUCLIDEAN),
+        Some(m) if m.is_fresh_at(x, n_interior) => Some(m.build_id),
+        Some(_) => None,
+    };
+    if let Some(metric_id) = cache_metric
+        && eval.projected.len() == force_len
+        && eval.assembly_ci == assembly_ci
+        && eval.assembly_metric == Some(metric_id)
+        && (metrics.is_none() || eval.driving.len() == force_len)
+        && !state.dynamic_enabled()
+    {
+        let projected = eval.projected.clone();
+        let driving = metrics.map(|_| eval.driving.clone());
+        let max_component = state.convergence_force(&projected);
+        let mut last_max = match state.last_max_force.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *last_max = max_component;
+        return Ok((pseudo_energy, projected, max_component, driving));
+    }
 
     let BandWork { images, ks, .. } = &mut *work;
     let springs = match metrics {
@@ -2233,49 +2688,100 @@ fn assemble_band_with(
     // so a metric slice carries every image.
     let mut projected = Array1::zeros((n_images - 2) * dof);
     let mut driving = metrics.map(|_| Array1::zeros((n_images - 2) * dof));
-    let mut assemble = |i: usize,
-                        climb: bool,
-                        projected: &mut Array1<f64>,
-                        driving: &mut Option<Array1<f64>>|
-     -> Result<(), SaddleError> {
-        let rows = s![(i - 1) * dof..i * dof];
-        match &springs {
-            Springs::Metric(spring) => {
-                let (f, d) = image_force(
-                    config,
-                    spring,
-                    i,
-                    climb,
-                    endpoint_first,
-                    endpoint_last,
-                    x,
-                    energies,
-                    gradients,
-                    metric_of(i),
-                )?;
-                projected.slice_mut(rows).assign(&f);
-                if let Some(driving) = driving.as_mut() {
-                    driving.slice_mut(rows).assign(d.as_ref().unwrap_or(&f));
-                }
-            }
-            Springs::Band(spring) => image_force_into(
+    let assemble_all = || -> Vec<Result<(), SaddleError>> {
+        use rayon::prelude::*;
+        match driving.as_mut() {
+            Some(driving) => images
+                .par_iter_mut()
+                .zip(
+                    projected
+                        .as_slice_mut()
+                        .expect("flat force")
+                        .par_chunks_mut(dof),
+                )
+                .zip(
+                    driving
+                        .as_slice_mut()
+                        .expect("flat driving force")
+                        .par_chunks_mut(dof),
+                )
+                .enumerate()
+                .map(|(index, ((work, projected), driving))| {
+                    let i = index + 1;
+                    assemble_image_force(
+                        config,
+                        state,
+                        &springs,
+                        metric_of(i),
+                        i,
+                        ci_at == Some(i),
+                        endpoint_first,
+                        endpoint_last,
+                        x,
+                        energies,
+                        gradients,
+                        work,
+                        ArrayViewMut1::from(projected),
+                        Some(ArrayViewMut1::from(driving)),
+                    )
+                })
+                .collect(),
+            None => images
+                .par_iter_mut()
+                .zip(
+                    projected
+                        .as_slice_mut()
+                        .expect("flat force")
+                        .par_chunks_mut(dof),
+                )
+                .enumerate()
+                .map(|(index, (work, projected))| {
+                    let i = index + 1;
+                    assemble_image_force(
+                        config,
+                        state,
+                        &springs,
+                        metric_of(i),
+                        i,
+                        ci_at == Some(i),
+                        endpoint_first,
+                        endpoint_last,
+                        x,
+                        energies,
+                        gradients,
+                        work,
+                        ArrayViewMut1::from(projected),
+                        None,
+                    )
+                })
+                .collect(),
+        }
+    };
+    if let Some(pool) = &state.pool {
+        for result in pool.install(assemble_all) {
+            result?;
+        }
+    } else {
+        for (index, work) in images.iter_mut().enumerate() {
+            let i = index + 1;
+            let rows = s![index * dof..(index + 1) * dof];
+            assemble_image_force(
                 config,
-                spring,
+                state,
+                &springs,
+                metric_of(i),
                 i,
-                climb,
+                ci_at == Some(i),
                 endpoint_first,
                 endpoint_last,
                 x,
                 energies,
                 gradients,
-                &mut images[i - 1],
+                work,
                 projected.slice_mut(rows),
-            )?,
+                driving.as_mut().map(|force| force.slice_mut(rows)),
+            )?;
         }
-        Ok(())
-    };
-    for i in 1..n_images - 1 {
-        assemble(i, ci_at == Some(i), &mut projected, &mut driving)?;
     }
     let mut max_component = state.convergence_force(&projected);
 
@@ -2299,7 +2805,24 @@ fn assemble_band_with(
             .ci_index
             .store(climb_target.map_or(-1, |i| i as i64), Ordering::Relaxed);
         if let Some(ci_i) = climb_target {
-            assemble(ci_i, true, &mut projected, &mut driving)?;
+            let index = ci_i - 1;
+            let rows = s![index * dof..(index + 1) * dof];
+            assemble_image_force(
+                config,
+                state,
+                &springs,
+                metric_of(ci_i),
+                ci_i,
+                true,
+                endpoint_first,
+                endpoint_last,
+                x,
+                energies,
+                gradients,
+                &mut images[index],
+                projected.slice_mut(rows),
+                driving.as_mut().map(|force| force.slice_mut(rows)),
+            )?;
             max_component = state.convergence_force(&projected);
         }
     }
@@ -2309,10 +2832,84 @@ fn assemble_band_with(
     if !projected.dot(&projected).is_finite() {
         return Err(SaddleError::NonFinite("band force norm"));
     }
+    // The solver sees forces ASE would hand the optimizer. The stored
+    // evaluation keeps the projected force before that mask, which is
+    // what convergence and [`BandSession::evaluation`] report.
+    let stored = if let Some(spec) = state.dynamic_spec() {
+        let saved = projected.clone();
+        let saved_driving = driving.clone();
+        let n_interior = n_images - 2;
+        let mut rows = Array2::zeros((n_interior, dof));
+        for i in 0..n_interior {
+            rows.row_mut(i)
+                .assign(&saved.slice(s![i * dof..(i + 1) * dof]));
+        }
+        let interior_pos = match x.to_shape((n_interior, dof)) {
+            Ok(view) => view,
+            Err(err) => return Err(SaddleError::Shape(err.to_string())),
+        };
+        let mask = dynamic_mask(
+            interior_pos.view(),
+            energies.slice(s![1..n_images - 1]),
+            &mut rows,
+            spec,
+        )?;
+        let mut masked_flat = Array1::zeros(saved.len());
+        for i in 0..n_interior {
+            masked_flat
+                .slice_mut(s![i * dof..(i + 1) * dof])
+                .assign(&rows.row(i));
+        }
+        let visible = state.convergence_force(&masked_flat);
+        let row_gate = row_convergence(state, &saved, n_interior, dof);
+        let zeroed = state
+            .dynamic_run()
+            .decision(x, &mask, visible, &row_gate, config.force_tol);
+        if zeroed.len() != n_interior {
+            return Err(SaddleError::Shape(
+                "dynamic NEB image count changed during the step".into(),
+            ));
+        }
+        for (i, &clear) in zeroed.iter().enumerate() {
+            let range = s![i * dof..(i + 1) * dof];
+            if clear {
+                projected.slice_mut(range).fill(0.0);
+                if let Some(drive) = driving.as_mut() {
+                    drive.slice_mut(range).fill(0.0);
+                }
+            } else {
+                projected.slice_mut(range).assign(&saved.slice(range));
+                if let Some(drive) = driving.as_mut()
+                    && let Some(saved_drive) = saved_driving.as_ref()
+                {
+                    drive.slice_mut(range).assign(&saved_drive.slice(range));
+                }
+            }
+        }
+        Some(saved)
+    } else {
+        None
+    };
     if let Some(last) = slot.as_mut()
         && last.x == x
     {
-        work.store_projected(last, &projected);
+        match cache_metric {
+            Some(metric_id) => {
+                let force = match &stored {
+                    Some(force) => force,
+                    None => &projected,
+                };
+                work.store_forces(last, force, driving.as_ref());
+                last.assembly_ci = state.ci().map_or(-1, |i| i as i64);
+                last.assembly_metric = Some(metric_id);
+            }
+            None => {
+                last.projected = Array1::zeros(0);
+                last.driving = Array1::zeros(0);
+                last.assembly_ci = i64::MIN;
+                last.assembly_metric = None;
+            }
+        }
     }
     *state
         .last_max_force
@@ -2386,6 +2983,21 @@ pub struct BandEvaluation {
 struct CachedBandSurface<'a, S> {
     state: &'a BandState,
     surface: &'a S,
+}
+
+struct CachedEvaluationOnly;
+
+impl BandSurface for CachedEvaluationOnly {
+    fn eval(
+        &self,
+        _positions: ArrayView2<f64>,
+        _energies: &mut Array1<f64>,
+        _gradients: &mut Array2<f64>,
+    ) -> Result<(), SaddleError> {
+        Err(SaddleError::Invalid(
+            "the cached band evaluation is unavailable".into(),
+        ))
+    }
 }
 
 impl<S: BandSurface> BandSurface for CachedBandSurface<'_, S> {
@@ -2561,6 +3173,14 @@ impl BandSession {
                 "band force tolerance must be finite and non-negative".into(),
             ));
         }
+        if let Some(spec) = config.dynamic {
+            spec.check()?;
+            if config.solid.is_some() {
+                return Err(SaddleError::Invalid(
+                    "dynamic NEB does not run on a solid-state band".into(),
+                ));
+            }
+        }
         if let SpringKind::Uniform { k } = config.spring
             && !k.is_finite()
         {
@@ -2630,6 +3250,7 @@ impl BandSession {
             session.state.fixed = session.config.fixed_atoms.clone();
             session.pin_fixed();
         }
+        session.state.install_dynamic(session.config.dynamic);
         if let Some(precon) = session.config.exp_precon {
             session.set_exp_precon(precon)?;
         }
@@ -2666,7 +3287,7 @@ impl BandSession {
                 .config
                 .has_fixed()
                 .then(|| free_coordinates(&self.config.fixed_atoms));
-            exp.metrics.clear();
+            exp.clear_metrics();
         }
         self.state.drop_last();
         self.restart();
@@ -2719,6 +3340,7 @@ impl BandSession {
         // are built on the first step.
         self.exp = Some(ExpBandState {
             precon,
+            build_id: None,
             built_at: Array1::zeros(0),
             r_nn: 0.0,
             mu: precon.mu,
@@ -2728,6 +3350,8 @@ impl BandSession {
                 .has_fixed()
                 .then(|| free_coordinates(&self.config.fixed_atoms)),
         });
+        self.state.invalidate_assembly();
+        self.solver.forget_evaluation();
         Ok(())
     }
 
@@ -2753,7 +3377,7 @@ impl BandSession {
     /// cutoff, as ASE's `Exp` does under `FixAtoms`; the lists index the
     /// free atoms in order, and a bond from a free atom to a fixed one
     /// is an anchor, which adds to the free atom's diagonal only.
-    fn band_neighbours(&self, r_cut_factor: f64) -> (Vec<Neighbours>, f64) {
+    fn band_neighbours(&self, r_cut_factor: f64) -> Result<(Vec<Neighbours>, f64), SaddleError> {
         let fixed = &self.state.fixed;
         let free_index: Vec<Option<usize>> = {
             let mut next = 0;
@@ -2770,58 +3394,104 @@ impl BandSession {
         };
         let n_images = self.positions.nrows();
         let n_atoms = self.positions.ncols() / 3;
-        let mut per_image: Vec<Vec<(usize, usize, f64)>> = Vec::new();
-        let mut r_nn = 0.0_f64;
-        for img in 1..n_images - 1 {
-            let row = self.positions.row(img);
-            let mut pairs = Vec::new();
-            let mut nearest = vec![f64::INFINITY; n_atoms];
-            for a in 0..n_atoms {
-                for b in a + 1..n_atoms {
-                    let mut d = Array1::from(vec![
-                        row[3 * b] - row[3 * a],
-                        row[3 * b + 1] - row[3 * a + 1],
-                        row[3 * b + 2] - row[3 * a + 2],
-                    ]);
-                    if let Some(cell) = &self.config.cell {
-                        cell.minimum_image(&mut d);
-                    }
-                    let r = d.dot(&d).sqrt();
-                    nearest[a] = nearest[a].min(r);
-                    nearest[b] = nearest[b].min(r);
-                    pairs.push((a, b, r));
-                }
+        let n_frames = n_images - 2;
+        let mut points = Vec::with_capacity(n_frames * n_atoms);
+        for row in self.positions.slice(s![1..n_images - 1, ..]).outer_iter() {
+            points.extend(
+                row.as_slice()
+                    .expect("a band row is contiguous")
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
+                    .copied(),
+            );
+        }
+        let mut lo = [f64::INFINITY; 3];
+        let mut hi = [f64::NEG_INFINITY; 3];
+        for point in &points {
+            for axis in 0..3 {
+                lo[axis] = lo[axis].min(point[axis]);
+                hi[axis] = hi[axis].max(point[axis]);
             }
-            r_nn = nearest
-                .iter()
-                .copied()
-                .filter(|r| r.is_finite())
-                .fold(r_nn, f64::max);
-            per_image.push(pairs);
+        }
+        let diagonal = (0..3)
+            .map(|axis| (hi[axis] - lo[axis]).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        let margin = (r_cut_factor.abs() + 2.0) * diagonal.max(1.0);
+        let mut vectors = self.config.cell.map_or([[0.0; 3]; 3], |cell| cell.0);
+        for axis in 0..3 {
+            if vectors[axis].iter().all(|value| *value == 0.0) {
+                vectors[axis][axis] = hi[axis] - lo[axis] + 2.0 * margin;
+            }
+        }
+        let origin = std::array::from_fn(|axis| lo[axis] - margin);
+        let cell = linkcell::Cell::from_vectors(vectors[0], vectors[1], vectors[2], origin)
+            .map_err(|err| {
+                SaddleError::Invalid(format!("exponential metric neighbour cell: {err}"))
+            })?;
+
+        let mut nearest_index = vec![-1; n_frames * n_atoms];
+        let mut nearest_d2 = vec![f64::NAN; n_frames * n_atoms];
+        linkcell::knearest_into_many(
+            &points,
+            n_atoms,
+            n_frames,
+            &cell,
+            1,
+            None,
+            None,
+            &mut nearest_index,
+            Some(&mut nearest_d2),
+        )
+        .map_err(|err| {
+            SaddleError::Invalid(format!("exponential metric nearest neighbours: {err}"))
+        })?;
+        let r_nn = nearest_d2
+            .iter()
+            .copied()
+            .filter(|distance| distance.is_finite())
+            .fold(0.0_f64, f64::max)
+            .sqrt();
+        if !(r_nn.is_finite() && r_nn > 0.0) {
+            return Ok(((0..n_frames).map(|_| Neighbours::default()).collect(), r_nn));
         }
         let r_cut = r_cut_factor * r_nn;
-        let lists = per_image
-            .into_iter()
-            .map(|pairs| {
-                let mut neigh = Neighbours::default();
-                for (i, j, r) in pairs {
-                    if r >= r_cut {
-                        continue;
-                    }
-                    match (free_index[i], free_index[j]) {
-                        (Some(i), Some(j)) => {
-                            neigh.i.push(i);
-                            neigh.j.push(j);
-                            neigh.r.push(r);
-                        }
-                        (Some(a), None) | (None, Some(a)) => neigh.anchor.push((a, r)),
-                        (None, None) => {}
-                    }
+        let mut lists = Vec::with_capacity(n_frames);
+        for frame in 0..n_frames {
+            let frame_points = &points[frame * n_atoms..(frame + 1) * n_atoms];
+            let mut pairs =
+                linkcell::pairs_within(frame_points, &cell, r_cut, None, Some(r_cut), true)
+                    .map_err(|err| {
+                        SaddleError::Invalid(format!("exponential metric cutoff neighbours: {err}"))
+                    })?;
+            pairs.retain(|pair| pair.i != pair.j);
+            pairs.sort_by(|a, b| {
+                (a.i, a.j)
+                    .cmp(&(b.i, b.j))
+                    .then(a.dist2.total_cmp(&b.dist2))
+            });
+            let mut last = None;
+            let mut neigh = Neighbours::default();
+            for pair in pairs {
+                if last == Some((pair.i, pair.j)) {
+                    continue;
                 }
-                neigh
-            })
-            .collect();
-        (lists, r_nn)
+                last = Some((pair.i, pair.j));
+                let r = pair.dist2.sqrt();
+                match (free_index[pair.i], free_index[pair.j]) {
+                    (Some(i), Some(j)) => {
+                        neigh.i.push(i);
+                        neigh.j.push(j);
+                        neigh.r.push(r);
+                    }
+                    (Some(a), None) | (None, Some(a)) => neigh.anchor.push((a, r)),
+                    (None, None) => {}
+                }
+            }
+            lists.push(neigh);
+        }
+        Ok((lists, r_nn))
     }
 
     /// Build the per-image metrics at the current positions, estimating
@@ -2832,7 +3502,7 @@ impl BandSession {
         };
         let precon = exp.precon;
         let held_mu = exp.mu;
-        let (lists, r_nn) = self.band_neighbours(precon.r_cut_factor);
+        let (lists, r_nn) = self.band_neighbours(precon.r_cut_factor)?;
         if !(r_nn.is_finite() && r_nn > 0.0) {
             return Err(SaddleError::Invalid(
                 "exponential metric: no finite nearest-neighbour distance on the band".into(),
@@ -2908,12 +3578,19 @@ impl BandSession {
                 .map_err(|e| SaddleError::Solver(format!("exponential metric: {e}")))?;
             metrics.push(metric);
         }
+        let build_id = self.state.alloc_metric_id();
         let flat = self.interior_flat();
         if let Some(exp) = self.exp.as_mut() {
+            exp.build_id = Some(build_id);
             exp.built_at = flat;
             exp.r_nn = r_nn;
             exp.mu = Some(mu);
             exp.metrics = metrics;
+            // The cached driving force was solved with the matrices just
+            // replaced. Drop it on every slot, as set_exp_precon does,
+            // so the next assembly cannot reuse it.
+            self.state.invalidate_assembly();
+            self.solver.forget_evaluation();
         }
         Ok(())
     }
@@ -2921,20 +3598,35 @@ impl BandSession {
     /// Build the band metrics on the first step and rebuild them when an
     /// atom has moved more than `r_nn / 2` since the last build. The
     /// energy scale found on the first build is kept.
-    fn refresh_exp<S: BandSurface>(&mut self, surface: &S) -> Result<(), SaddleError> {
+    pub(super) fn refresh_exp<S: BandSurface>(&mut self, surface: &S) -> Result<(), SaddleError> {
         let Some(exp) = &self.exp else {
             return Ok(());
         };
+        let n_interior = self.positions.nrows() - 2;
         let flat = self.interior_flat();
-        let stale = exp.metrics.is_empty()
-            || rgmin::needs_rebuild(
-                rgmin::max_atom_displacement(exp.built_at.view(), flat.view()),
-                exp.r_nn,
-            );
-        if stale {
+        if exp.is_stale(flat.view(), n_interior) {
             self.build_metrics(surface)?;
         }
         Ok(())
+    }
+
+    /// Drop built metric matrices once an interior atom has moved past
+    /// `r_nn / 2` from where they were assembled, keeping `mu` for the
+    /// next rebuild.
+    pub(super) fn invalidate_stale_exp(&mut self) {
+        let n_interior = self.positions.nrows() - 2;
+        let flat = self.interior_flat();
+        let stale = match &self.exp {
+            Some(exp) => exp.build_id.is_some() && exp.is_stale(flat.view(), n_interior),
+            None => false,
+        };
+        if stale {
+            if let Some(exp) = self.exp.as_mut() {
+                exp.clear_metrics();
+            }
+            self.state.invalidate_assembly();
+            self.solver.forget_evaluation();
+        }
     }
 
     /// Select the optional HiGHS feasible-set step; requires the `highs` feature.
@@ -2966,6 +3658,11 @@ impl BandSession {
                     .into(),
             ));
         }
+        if self.config.dynamic.is_some() && config.is_some() {
+            return Err(SaddleError::Invalid(
+                "dynamic NEB does not use the trust-region stepper".into(),
+            ));
+        }
         if let Some(config) = config {
             config.validate()?;
         }
@@ -2974,10 +3671,39 @@ impl BandSession {
         Ok(())
     }
 
+    /// Turn dynamic NEB on or off between steps. `None` restores a
+    /// full evaluation of every image. The image cache is dropped, so
+    /// the next step evaluates the band again. A solid-state band and
+    /// the trust-region stepper are refused.
+    pub fn set_dynamic(&mut self, dynamic: Option<DynamicNeb>) -> Result<(), SaddleError> {
+        if let Some(spec) = dynamic {
+            spec.check()?;
+            if self.solid.is_some() {
+                return Err(SaddleError::Invalid(
+                    "dynamic NEB does not run on a solid-state band".into(),
+                ));
+            }
+            if self.rtr.is_some() {
+                return Err(SaddleError::Invalid(
+                    "dynamic NEB does not use the trust-region stepper".into(),
+                ));
+            }
+            if self.config.string.is_some() {
+                return Err(SaddleError::Invalid(
+                    "dynamic NEB is for the NEB; the simplified string method evaluates every image"
+                        .into(),
+                ));
+            }
+        }
+        self.config.dynamic = dynamic;
+        self.state.install_dynamic(dynamic);
+        Ok(())
+    }
+
     /// Evaluate the band on `threads` worker threads, kept for the
-    /// session. One (the default) keeps the surface on the calling
-    /// thread; zero is an error. The force assembly stays on the
-    /// calling thread.
+    /// session. One (the default) keeps the surface and force assembly
+    /// on the calling thread; zero is an error. More than one also
+    /// splits tangent, spring, projection and metric solves by image.
     ///
     /// Each surface call is split into `min(threads, rows)` contiguous
     /// image blocks, one [`BandSurface::eval`] per block, and the
@@ -3153,6 +3879,7 @@ impl BandSession {
         }
         self.pin_fixed();
         if moved {
+            self.invalidate_stale_exp();
             self.state.drop_last();
             self.refine = min_mode::RefineState::default();
             self.saddle.forget();
@@ -3226,6 +3953,34 @@ impl BandSession {
         }
     }
 
+    fn expected_metric_at(&self, x: ArrayView1<f64>) -> Option<MetricBuildId> {
+        if self.solid.is_some() || self.rtr.is_some() {
+            return Some(MetricBuildId::EUCLIDEAN);
+        }
+        match &self.exp {
+            Some(exp) => exp
+                .fresh_metrics(x, self.positions.nrows() - 2)
+                .map(|m| m.build_id),
+            None => Some(MetricBuildId::EUCLIDEAN),
+        }
+    }
+
+    fn has_assembled_at(&self, x: ArrayView1<f64>, force_len: usize) -> bool {
+        let Some(expected) = self.expected_metric_at(x) else {
+            return false;
+        };
+        let slot = match self.state.last.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        slot.as_ref().is_some_and(|last| {
+            last.x == x
+                && last.projected.len() == force_len
+                && last.assembly_metric == Some(expected)
+                && (expected == MetricBuildId::EUCLIDEAN || last.driving.len() == force_len)
+        })
+    }
+
     /// The last evaluation, if it was taken at the current positions:
     /// energies and gradients from the surface and the projected
     /// interior force the step used. `None` before the first step and
@@ -3236,8 +3991,29 @@ impl BandSession {
         } else {
             self.interior_flat()
         };
-        let slot = self.state.last.lock().unwrap_or_else(|e| e.into_inner());
-        let last = slot.as_ref().filter(|l| l.x == x)?;
+        let expected_metric = self.expected_metric_at(x.view())?;
+        if self.solid.is_none() && self.refine.converged {
+            let force_len = (self.positions.nrows() - 2) * self.positions.ncols();
+            if !self.has_assembled_at(x.view(), force_len) {
+                let has_surface_values = match self.state.last.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => poisoned.into_inner(),
+                }
+                .as_ref()
+                .is_some_and(|last| last.x == x);
+                if has_surface_values {
+                    self.assemble_accepted(&CachedEvaluationOnly, x.view())
+                        .ok()?;
+                }
+            }
+        }
+        let slot = match self.state.last.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let last = slot.as_ref().filter(|l| {
+            l.x == x && (self.solid.is_some() || l.assembly_metric == Some(expected_metric))
+        })?;
         let n_images = self.positions.nrows();
         let dof = self.positions.ncols();
         let n_interior = n_images - 2;
@@ -3273,11 +4049,16 @@ impl BandSession {
         gradients: Array2<f64>,
         projected: Array1<f64>,
     ) {
+        let x = self.interior_flat();
+        let assembly_metric = self.expected_metric_at(x.view());
         let evaluation = BandEval {
-            x: self.interior_flat(),
+            x,
             energies,
             gradients,
+            driving: projected.clone(),
             projected,
+            assembly_ci: i64::MIN,
+            assembly_metric,
             stresses: Array2::zeros((0, 0)),
             band_positions: Array2::zeros((0, 0)),
             band_cells: Vec::new(),
@@ -3326,6 +4107,35 @@ impl BandSession {
         Ok(report)
     }
 
+    /// Assemble the accepted geometry, including the preconditioned
+    /// driving force when a metric is installed. A plain residual
+    /// assembly would clear that force.
+    fn assemble_accepted<S: BandSurface>(
+        &self,
+        surface: &S,
+        x: ArrayView1<f64>,
+    ) -> Result<(), SaddleError> {
+        let n_images = self.positions.nrows();
+        let metrics = match (&self.exp, &self.rtr) {
+            (Some(exp), None) => Some(exp.fresh_metrics(x, n_images - 2).ok_or_else(|| {
+                SaddleError::Invalid(
+                    "exponential metric is not current at the accepted band".into(),
+                )
+            })?),
+            _ => None,
+        };
+        assemble_band_with(
+            &self.config,
+            &self.state,
+            surface,
+            self.positions.row(0),
+            self.positions.row(n_images - 1),
+            x,
+            metrics,
+        )?;
+        Ok(())
+    }
+
     fn step_inner<S: BandSurface>(&mut self, surface: &S) -> Result<BandReport, SaddleError> {
         if self.solid.is_some() {
             if self.rtr.is_some() {
@@ -3356,6 +4166,11 @@ impl BandSession {
             });
         }
         if self.rtr.is_some() {
+            if self.config.dynamic.is_some() {
+                return Err(SaddleError::Invalid(
+                    "dynamic NEB does not use the trust-region stepper".into(),
+                ));
+            }
             return self.step_rtr(surface);
         }
         let n_images = self.positions.nrows();
@@ -3368,33 +4183,59 @@ impl BandSession {
 
         let endpoint_first = self.positions.row(0).to_owned();
         let endpoint_last = self.positions.row(n_images - 1).to_owned();
-        let config = &self.config;
-        let state = &self.state;
-        let metrics = self.exp.as_ref().map(|e| BandMetrics {
-            per_image: e.metrics.as_slice(),
-            free: e.free.as_deref(),
-        });
-        let oracle =
-            Oracle::unbounded(interior_dof, |x: ArrayView1<f64>| match assemble_band_with(
-                config,
-                state,
-                surface,
-                endpoint_first.view(),
-                endpoint_last.view(),
-                x,
-                metrics,
-            ) {
-                Ok((e, f, _, driving)) => (e, -driving.unwrap_or(f)),
-                Err(err) => {
-                    state.record_error(err);
-                    (f64::INFINITY, Array1::zeros(interior_dof))
-                }
-            });
-
         let mut x = self.interior_flat();
         let before = x.clone();
-        let stepped = self.solver.step(&oracle, &mut x);
-        drop(oracle);
+        let stepped = {
+            let config = &self.config;
+            let state = &self.state;
+            let metrics = match &self.exp {
+                Some(exp) => Some(exp.fresh_metrics(before.view(), n_images - 2).ok_or_else(
+                    || {
+                        SaddleError::Invalid(
+                            "exponential metric is not current at the start of the band step"
+                                .into(),
+                        )
+                    },
+                )?),
+                None => None,
+            };
+            if config.dynamic.is_some() {
+                state.dynamic_run().begin_step(x.clone());
+                // The solver reuses its cached force at this geometry, so
+                // the oracle's first call is a trial and would not record
+                // the mask. Record it from the evaluation already stored.
+                seed_dynamic_decision(state, x.view(), config.force_tol);
+            }
+            let oracle = Oracle::unbounded(interior_dof, |query: ArrayView1<f64>| {
+                let pinned = if config.dynamic.is_some() {
+                    state.dynamic_run().pin(query)
+                } else {
+                    None
+                };
+                let y = match &pinned {
+                    Some(pinned) => pinned.view(),
+                    None => query,
+                };
+                match assemble_band_with(
+                    config,
+                    state,
+                    surface,
+                    endpoint_first.view(),
+                    endpoint_last.view(),
+                    y,
+                    metrics,
+                ) {
+                    Ok((e, f, _, driving)) => (e, -driving.unwrap_or(f)),
+                    Err(err) => {
+                        state.record_error(err);
+                        (f64::INFINITY, Array1::zeros(interior_dof))
+                    }
+                }
+            });
+            let stepped = self.solver.step(&oracle, &mut x);
+            drop(oracle);
+            stepped
+        };
         // The surface error is the root cause of whatever the solver
         // did with an infinite energy and a zero gradient, so it
         // outranks a solver error. `x` is a local copy; the session's
@@ -3406,11 +4247,26 @@ impl BandSession {
             return Err(err);
         }
         stepped.map_err(|e| SaddleError::Solver(e.to_string()))?;
+        if self.config.dynamic.is_some() {
+            self.state.dynamic_run().snap(&mut x);
+        }
+        // A dynamic step that no longer moves, with every force the
+        // optimizer still sees under force_tol, is ASE's stop: images
+        // under the scaled threshold do not count.
+        let dynamic_settled = self.config.dynamic.is_some()
+            && x == before
+            && self
+                .state
+                .dynamic_run()
+                .visible_max()
+                .is_some_and(|visible| visible <= self.config.force_tol);
         // ODE12r keeps the band where it was when it rejects a trial and
         // retries with a shorter step, so an unchanged band is a stall
         // only once the step has shrunk past any use (64 rejections at
         // a quarter each).
-        if x == before && matches!(self.config.method, Method::Ode12r) && self.unmoved < 64 {
+        if dynamic_settled {
+            self.unmoved = 0;
+        } else if x == before && matches!(self.config.method, Method::Ode12r) && self.unmoved < 64 {
             self.unmoved += 1;
         } else {
             self.unmoved = 0;
@@ -3418,32 +4274,21 @@ impl BandSession {
         }
         self.scatter_interior(x.view());
         self.iteration += 1;
+        self.refresh_exp(surface)?;
 
         // A solver that ends on a point it did not evaluate last (a
-        // line search that backtracked) is assembled once more; the
-        // cache answers when the accepted point was the last one, and
-        // the start of the step comes back from the previous slot when
-        // the stepper rejected its trial and stayed there.
-        let at_last = self.state.restore_at(&x)
-            && self
-                .state
-                .last
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .as_ref()
-                .is_some_and(|l| l.projected.len() == interior_dof);
+        // line search that backtracked) is assembled once more. That
+        // assembly carries the metric on every stepper: a plain residual
+        // would drop the driving force, and the next step would solve
+        // the metric again. The cache answers when the accepted point
+        // was the last evaluation, and the start of the step comes back
+        // from the previous slot when the stepper rejected its trial.
+        let at_last = self.state.restore_at(&x) && self.has_assembled_at(x.view(), interior_dof);
         if !at_last {
-            assemble_band(
-                &self.config,
-                &self.state,
-                surface,
-                endpoint_first.view(),
-                endpoint_last.view(),
-                x.view(),
-            )?;
+            self.assemble_accepted(surface, x.view())?;
         }
         let max_force = self.state.last_max_force();
-        let status = if max_force <= self.config.force_tol {
+        let status = if max_force <= self.config.force_tol || dynamic_settled {
             BandStatus::Converged
         } else {
             BandStatus::Running
@@ -3639,6 +4484,7 @@ impl BandSession {
         )?;
         self.positions.assign(&trial);
         self.pin_fixed();
+        self.invalidate_stale_exp();
         self.iteration += 1;
         let max_force = self.state.last_max_force();
         let status = if max_force <= self.config.force_tol {
@@ -3941,5 +4787,725 @@ mod tests {
         // Climbing force (-2, 3, 0, 5, 1, 0) minus its mean (1.5, 2, 0).
         assert_force(&projected, &[-3.5, 1.0, 0.0, 3.5, -1.0, 0.0]);
         assert_eq!(state.ci(), Some(1));
+    }
+
+    #[test]
+    fn linkcell_band_neighbours_match_the_previous_pair_scan() {
+        let cells = [
+            Cell([[7.0, 0.0, 0.0], [0.0, 8.0, 0.0], [0.0, 0.0, 9.0]]),
+            Cell([[7.0, 0.0, 0.0], [1.1, 7.5, 0.0], [-0.6, 0.8, 8.0]]),
+        ];
+        let mut seed = 0xbb67_ae85_84ca_a73b_u64;
+        let mut random = || {
+            seed = seed
+                .wrapping_mul(2_862_933_555_777_941_757)
+                .wrapping_add(3_037_000_493);
+            (seed >> 11) as f64 / (1_u64 << 53) as f64
+        };
+        for cell in cells {
+            let mic = linkcell::Cell::from_vectors(cell.0[0], cell.0[1], cell.0[2], [0.0; 3])
+                .expect("periodic cell");
+            let n_images = 6;
+            let n_atoms = 24;
+            let positions = Array2::from_shape_fn((n_images, 3 * n_atoms), |(image, col)| {
+                let atom = col / 3;
+                let axis = col % 3;
+                let tag = (image * n_atoms + atom) as f64;
+                let frac = [
+                    (random() + 0.003 * tag).fract(),
+                    (random() + 0.005 * tag).fract(),
+                    (random() + 0.007 * tag).fract(),
+                ];
+                frac[0] * cell.0[0][axis] + frac[1] * cell.0[1][axis] + frac[2] * cell.0[2][axis]
+            });
+            let config = BandConfig::default()
+                .with_cell(cell)
+                .with_min_mode(None)
+                .with_climbing(None);
+            let session = BandSession::new(config, positions.clone()).expect("band");
+            let (got, got_r_nn) = session.band_neighbours(2.0).expect("linkcell neighbours");
+
+            let mut all_pairs = Vec::new();
+            let mut want_r_nn = 0.0_f64;
+            for image in 1..n_images - 1 {
+                let row = positions.row(image);
+                let mut nearest = vec![f64::INFINITY; n_atoms];
+                let mut pairs = Vec::new();
+                for i in 0..n_atoms {
+                    for j in i + 1..n_atoms {
+                        let p = [row[3 * i], row[3 * i + 1], row[3 * i + 2]];
+                        let q = [row[3 * j], row[3 * j + 1], row[3 * j + 2]];
+                        let distance = mic.dist2_euclidean(p, q).sqrt();
+                        nearest[i] = nearest[i].min(distance);
+                        nearest[j] = nearest[j].min(distance);
+                        pairs.push((i, j, distance));
+                    }
+                }
+                want_r_nn = nearest.into_iter().fold(want_r_nn, f64::max);
+                all_pairs.push(pairs);
+            }
+            assert_abs_diff_eq!(got_r_nn, want_r_nn, epsilon = 2e-12);
+            let cutoff = 2.0 * want_r_nn;
+            for (actual, pairs) in got.iter().zip(all_pairs) {
+                let expected: Vec<_> = pairs
+                    .into_iter()
+                    .filter(|(_, _, distance)| *distance < cutoff)
+                    .collect();
+                assert_eq!(actual.i.len(), expected.len());
+                assert!(actual.anchor.is_empty());
+                for (index, (i, j, distance)) in expected.into_iter().enumerate() {
+                    assert_eq!((actual.i[index], actual.j[index]), (i, j));
+                    assert_abs_diff_eq!(actual.r[index], distance, epsilon = 2e-12);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cached_metric_force_does_not_repeat_pcg_solves() {
+        let positions = Array2::from_shape_vec(
+            (3, 9),
+            vec![
+                0.0, 0.0, 0.0, 1.1, 0.0, 0.0, 0.0, 1.2, 0.1, 0.2, 0.1, 0.0, 1.2, 0.2, 0.0, 0.1,
+                1.3, 0.2, 0.4, 0.2, 0.0, 1.3, 0.4, 0.1, 0.2, 1.4, 0.3,
+            ],
+        )
+        .expect("positions");
+        let gradient = Array2::from_shape_fn((3, 9), |(row, col)| {
+            0.2 * (row + 1) as f64 - 0.03 * col as f64
+        });
+        let surface = Prescribed {
+            energy: vec![0.0, 1.0, 0.2],
+            gradient,
+        };
+        let config = BandConfig::default()
+            .with_climbing(None)
+            .with_min_mode(None)
+            .with_remove_translation(false)
+            .with_exp_precon(ExpBandPrecon::default().with_mu(1.0));
+        let mut session = BandSession::new(config, positions).expect("band");
+        session.refresh_exp(&surface).expect("metric");
+        let x = session.interior_flat();
+        let metrics = metric_view(&session);
+        let first = assemble_band_with(
+            &session.config,
+            &session.state,
+            &surface,
+            session.positions.row(0),
+            session.positions.row(2),
+            x.view(),
+            metrics,
+        )
+        .expect("first assembly");
+        let solves = session.state.pcg_solves.load(Ordering::Relaxed);
+        assert_eq!(solves, 1);
+        let second = assemble_band_with(
+            &session.config,
+            &session.state,
+            &surface,
+            session.positions.row(0),
+            session.positions.row(2),
+            x.view(),
+            metrics,
+        )
+        .expect("cached assembly");
+        assert_eq!(session.state.pcg_solves.load(Ordering::Relaxed), solves);
+        assert_eq!(first.1, second.1);
+        assert_eq!(first.3, second.3);
+    }
+
+    struct Harmonic;
+
+    impl BandSurface for Harmonic {
+        fn eval(
+            &self,
+            positions: ArrayView2<f64>,
+            energies: &mut Array1<f64>,
+            gradients: &mut Array2<f64>,
+        ) -> Result<(), SaddleError> {
+            for (i, row) in positions.outer_iter().enumerate() {
+                let mut energy = 0.0;
+                for (c, &q) in row.iter().enumerate() {
+                    let k = 1.0 + 0.1 * c as f64;
+                    energy += 0.5 * k * q * q;
+                    gradients[(i, c)] = k * q;
+                }
+                energies[i] = energy;
+            }
+            Ok(())
+        }
+    }
+
+    struct BacktrackingBand {
+        calls: AtomicUsize,
+    }
+
+    impl BandSurface for BacktrackingBand {
+        fn eval(
+            &self,
+            positions: ArrayView2<f64>,
+            energies: &mut Array1<f64>,
+            gradients: &mut Array2<f64>,
+        ) -> Result<(), SaddleError> {
+            let call = self.calls.fetch_add(1, Ordering::Relaxed);
+            let energy = match call {
+                0 => 1.0,
+                1 => 1.0 - f64::EPSILON,
+                _ => 2.0,
+            };
+            energies.fill(energy);
+            for i in 0..positions.nrows() {
+                gradients[(i, 0)] = 0.001;
+                gradients[(i, 1)] = -0.002;
+            }
+            Ok(())
+        }
+    }
+
+    fn metric_view(session: &BandSession) -> Option<BandMetrics<'_>> {
+        let x = session.interior_flat();
+        session
+            .exp
+            .as_ref()
+            .and_then(|exp| exp.fresh_metrics(x.view(), session.positions.nrows() - 2))
+    }
+
+    #[test]
+    fn fire_finish_off_the_last_evaluation_keeps_the_driving_force() {
+        let positions = Array2::from_shape_vec(
+            (3, 9),
+            vec![
+                0.0, 0.0, 0.0, 1.1, 0.0, 0.0, 0.0, 1.2, 0.1, 0.2, 0.1, 0.0, 1.2, 0.2, 0.0, 0.1,
+                1.3, 0.2, 0.4, 0.2, 0.0, 1.3, 0.4, 0.1, 0.2, 1.4, 0.3,
+            ],
+        )
+        .expect("positions");
+        let config = BandConfig::default()
+            .with_method(Method::fire(rgmin::FireKind::V2))
+            .with_climbing(None)
+            .with_min_mode(None)
+            .with_saddle_check(None)
+            .with_remove_translation(false)
+            .with_exp_precon(ExpBandPrecon::default().with_mu(1.0));
+        let mut session = BandSession::new(config, positions).expect("band");
+        assert!(!matches!(session.config.method, Method::Ode12r));
+        let surface = Harmonic;
+        let report = session.step(&surface).expect("fire step");
+        assert_eq!(report.status, BandStatus::Running);
+        let accepted = session.interior_flat();
+        let solves = session.state.pcg_solves.load(Ordering::Relaxed);
+        let _ = assemble_band_with(
+            &session.config,
+            &session.state,
+            &surface,
+            session.positions.row(0),
+            session.positions.row(2),
+            accepted.view(),
+            metric_view(&session),
+        )
+        .expect("accepted geometry is cached");
+        assert_eq!(
+            session.state.pcg_solves.load(Ordering::Relaxed),
+            solves,
+            "the fire step left no driving force at the accepted geometry"
+        );
+
+        // The finish used when the accepted point is not the oracle's
+        // last evaluation. FIRE reaches it when a step leaves that point.
+        let mut off = accepted.clone();
+        off[0] += 0.05;
+        let before = session.state.pcg_solves.load(Ordering::Relaxed);
+        session
+            .assemble_accepted(&surface, off.view())
+            .expect("finish");
+        let finished = session.state.pcg_solves.load(Ordering::Relaxed);
+        assert!(
+            finished > before,
+            "the finish assembled a plain residual and did not solve the driving force"
+        );
+        let _ = assemble_band_with(
+            &session.config,
+            &session.state,
+            &surface,
+            session.positions.row(0),
+            session.positions.row(2),
+            off.view(),
+            metric_view(&session),
+        )
+        .expect("cached finish");
+        assert_eq!(session.state.pcg_solves.load(Ordering::Relaxed), finished);
+    }
+
+    #[test]
+    fn lbfgs_step_finishes_the_accepted_point_with_the_metric() {
+        let positions = Array2::from_shape_vec(
+            (3, 9),
+            vec![
+                0.0, 0.0, 0.0, 1.1, 0.0, 0.0, 0.0, 1.2, 0.1, 0.2, 0.1, 0.0, 1.2, 0.2, 0.0, 0.1,
+                1.3, 0.2, 0.4, 0.2, 0.0, 1.3, 0.4, 0.1, 0.2, 1.4, 0.3,
+            ],
+        )
+        .expect("positions");
+        let config = BandConfig::default()
+            .with_method(Method::lbfgs())
+            .with_climbing(None)
+            .with_min_mode(None)
+            .with_saddle_check(None)
+            .with_remove_translation(false)
+            .with_exp_precon(ExpBandPrecon::default().with_mu(1.0));
+        let mut session = BandSession::new(config, positions).expect("band");
+        session
+            .solver
+            .set_lbfgs_step(rgmin::LbfgsStep::Wolfe)
+            .expect("Wolfe L-BFGS");
+        session.solver.set_geometry_step(false);
+        session.solver.set_accept(Accept::None);
+        let surface = BacktrackingBand {
+            calls: AtomicUsize::new(0),
+        };
+        let before = session.interior_flat();
+        let report = session.step(&surface).expect("L-BFGS step");
+        assert_eq!(report.status, BandStatus::Running);
+        let calls = surface.calls.load(Ordering::Relaxed);
+        assert!(calls > 3, "the Wolfe search made {calls} surface calls");
+        let accepted = session.interior_flat();
+        assert_ne!(accepted, before);
+
+        let solves = session.state.pcg_solves.load(Ordering::Relaxed);
+        let _ = assemble_band_with(
+            &session.config,
+            &session.state,
+            &surface,
+            session.positions.row(0),
+            session.positions.row(2),
+            accepted.view(),
+            metric_view(&session),
+        )
+        .expect("accepted geometry is cached");
+        assert_eq!(
+            session.state.pcg_solves.load(Ordering::Relaxed),
+            solves,
+            "the off-last finish did not cache the accepted driving force"
+        );
+    }
+
+    #[test]
+    fn rebuilding_the_metric_drops_the_cached_driving_force() {
+        let positions = Array2::from_shape_vec(
+            (3, 9),
+            vec![
+                0.0, 0.0, 0.0, 1.1, 0.0, 0.0, 0.0, 1.2, 0.1, 0.2, 0.1, 0.0, 1.2, 0.2, 0.0, 0.1,
+                1.3, 0.2, 0.4, 0.2, 0.0, 1.3, 0.4, 0.1, 0.2, 1.4, 0.3,
+            ],
+        )
+        .expect("positions");
+        let gradient = Array2::from_shape_fn((3, 9), |(row, col)| {
+            0.2 * (row + 1) as f64 - 0.03 * col as f64
+        });
+        let surface = Prescribed {
+            energy: vec![0.0, 1.0, 0.2],
+            gradient,
+        };
+        let config = BandConfig::default()
+            .with_climbing(None)
+            .with_min_mode(None)
+            .with_remove_translation(false)
+            .with_exp_precon(ExpBandPrecon::default().with_mu(1.0));
+        let mut session = BandSession::new(config, positions).expect("band");
+        session.refresh_exp(&surface).expect("metric");
+        let x = session.interior_flat();
+        let _ = assemble_band_with(
+            &session.config,
+            &session.state,
+            &surface,
+            session.positions.row(0),
+            session.positions.row(2),
+            x.view(),
+            metric_view(&session),
+        )
+        .expect("assembly");
+        let solves = session.state.pcg_solves.load(Ordering::Relaxed);
+        {
+            let mut last = session.state.last.lock().unwrap_or_else(|e| e.into_inner());
+            let eval = last.as_mut().expect("cached evaluation");
+            eval.driving.fill(f64::NAN);
+        }
+        session.build_metrics(&surface).expect("rebuild");
+        let again = assemble_band_with(
+            &session.config,
+            &session.state,
+            &surface,
+            session.positions.row(0),
+            session.positions.row(2),
+            x.view(),
+            metric_view(&session),
+        )
+        .expect("assembly after rebuild");
+        let driving = again.3.expect("driving force");
+        assert!(driving.iter().all(|v| v.is_finite()));
+        assert!(
+            session.state.pcg_solves.load(Ordering::Relaxed) > solves,
+            "the rebuilt metric reused the cached driving force"
+        );
+    }
+
+    #[test]
+    fn step_after_metric_rebuild_starts_with_the_new_driving_force() {
+        let positions = Array2::from_shape_vec(
+            (3, 9),
+            vec![
+                0.0, 0.0, 0.0, 1.1, 0.0, 0.0, 0.0, 1.2, 0.1, 0.2, 0.1, 0.0, 1.2, 0.2, 0.0, 0.1,
+                1.3, 0.2, 0.4, 0.2, 0.0, 1.3, 0.4, 0.1, 0.2, 1.4, 0.3,
+            ],
+        )
+        .expect("positions");
+        let config = BandConfig::default()
+            .with_method(Method::fire(rgmin::FireKind::V2))
+            .with_climbing(None)
+            .with_min_mode(None)
+            .with_saddle_check(None)
+            .with_remove_translation(false)
+            .with_exp_precon(ExpBandPrecon::default().with_mu(1.0));
+        let mut session = BandSession::new(config, positions).expect("band");
+        let surface = Harmonic;
+        session.step(&surface).expect("first step");
+
+        session.exp.as_mut().expect("metric state").precon.a *= 4.0;
+        session.build_metrics(&surface).expect("metric rebuild");
+        let solves = session.state.pcg_solves.load(Ordering::Relaxed);
+        session.step(&surface).expect("step after rebuild");
+        assert!(
+            session.state.pcg_solves.load(Ordering::Relaxed) >= solves + 2,
+            "the solver skipped the new-metric force at the accepted start"
+        );
+    }
+
+    struct ShiftedSaddle;
+
+    impl BandSurface for ShiftedSaddle {
+        fn eval(
+            &self,
+            positions: ArrayView2<f64>,
+            energies: &mut Array1<f64>,
+            gradients: &mut Array2<f64>,
+        ) -> Result<(), SaddleError> {
+            let saddle = [3.2, 0.1, 0.0, 1.2, 0.2, 0.0, 0.1, 1.3, 0.2];
+            for (i, row) in positions.outer_iter().enumerate() {
+                let d0 = row[0] - saddle[0];
+                let mut energy = 10.0 - d0 * d0;
+                gradients[(i, 0)] = -2.0 * d0;
+                for c in 1..9 {
+                    let stiff = 3.0 + 0.5 * c as f64;
+                    let dc = row[c] - saddle[c];
+                    energy += 0.5 * stiff * dc * dc;
+                    gradients[(i, c)] = stiff * dc;
+                }
+                energies[i] = energy;
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn converged_refinement_past_rebuild_radius_matches_fresh_evaluation() {
+        let positions = Array2::from_shape_vec(
+            (4, 9),
+            vec![
+                -2.8, 0.1, 0.0, 1.2, 0.2, 0.0, 0.1, 1.3, 0.2, // endpoint 0
+                0.2, 0.1, 0.0, 1.2, 0.2, 0.0, 0.1, 1.3, 0.2, // interior image 1
+                -0.4, 0.5, 0.0, 0.6, 0.6, 0.0, -0.5, 1.7, 0.2, // interior image 2
+                6.8, 0.1, 0.0, 1.2, 0.2, 0.0, 0.1, 1.3, 0.2, // endpoint 3
+            ],
+        )
+        .expect("positions");
+        let refine = MinModeRefine::default()
+            .with_alignment_tol(0.2)
+            .with_stable_steps(1);
+        let config = BandConfig::default()
+            .with_method(Method::fire(rgmin::FireKind::V2))
+            .with_climbing(CiConfig::always())
+            .with_min_mode(refine)
+            .with_saddle_check(None)
+            .with_remove_translation(false)
+            .with_max_move(0.5)
+            .with_force_tol(0.0001)
+            .with_exp_precon(ExpBandPrecon::default().with_mu(1.0));
+
+        let surface = ShiftedSaddle;
+        let mut session = BandSession::new(config.clone(), positions).expect("band");
+        let first = session.step(&surface).expect("initial band step");
+        assert_eq!(first.status, BandStatus::Running);
+        let exp = session.exp.as_ref().expect("metric built");
+        let built_at = exp.built_at.clone();
+        let initial_r_nn = exp.r_nn;
+        assert_abs_diff_eq!(initial_r_nn, 1.49_f64.sqrt(), epsilon = 0.001);
+
+        let mut report = first;
+        while report.status == BandStatus::Running && session.iteration < 200 {
+            report = session.step(&surface).expect("refinement step");
+        }
+        assert_eq!(report.status, BandStatus::Converged);
+        assert!(
+            report.curvature.is_some(),
+            "convergence must return through refine_step"
+        );
+        let moved = rgmin::max_atom_displacement(built_at.view(), session.interior_flat().view());
+        assert!(
+            moved > 2.5 && rgmin::needs_rebuild(moved, initial_r_nn),
+            "expected move past rebuild threshold {}, got {moved} (r_nn {initial_r_nn})",
+            0.5 * initial_r_nn
+        );
+
+        let got = session.evaluation().expect("converged band evaluation");
+        let converged_positions = session.positions().to_owned();
+        let mut fresh = BandSession::new(config.with_min_mode(None), converged_positions)
+            .expect("fresh band at converged geometry");
+        fresh.refresh_exp(&surface).expect("fresh metric");
+        fresh
+            .assemble_accepted(&surface, fresh.interior_flat().view())
+            .expect("fresh assembly");
+        let want = fresh.evaluation().expect("fresh evaluation");
+
+        assert_eq!(got.energies, want.energies);
+        assert_eq!(
+            got.gradients.slice(s![1..3, ..]),
+            want.gradients.slice(s![1..3, ..])
+        );
+        for ((r, c), &g) in got.projected.indexed_iter() {
+            let w = want.projected[(r, c)];
+            assert_abs_diff_eq!(g, w, epsilon = 0.000000000001);
+        }
+    }
+
+    #[test]
+    fn set_exp_precon_forgets_the_cached_euclidean_solver_evaluation() {
+        let positions = Array2::from_shape_vec(
+            (3, 9),
+            vec![
+                0.0, 0.0, 0.0, 1.1, 0.0, 0.0, 0.0, 1.2, 0.1, 0.2, 0.1, 0.0, 1.2, 0.2, 0.0, 0.1,
+                1.3, 0.2, 0.4, 0.2, 0.0, 1.3, 0.4, 0.1, 0.2, 1.4, 0.3,
+            ],
+        )
+        .expect("positions");
+        let config = BandConfig::default()
+            .with_method(Method::fire(rgmin::FireKind::V2))
+            .with_climbing(None)
+            .with_min_mode(None)
+            .with_saddle_check(None)
+            .with_remove_translation(false);
+        let mut session = BandSession::new(config, positions).expect("band");
+        let surface = Harmonic;
+        session.step(&surface).expect("euclidean step");
+        assert!(session.evaluation().is_some());
+
+        let accepted = session.interior_flat();
+        session
+            .set_exp_precon(ExpBandPrecon::default().with_mu(1.0))
+            .expect("install exponential metric");
+        assert!(
+            session.evaluation().is_none(),
+            "evaluation must stay unavailable until the new metric is built"
+        );
+
+        let evaluated_start = AtomicBool::new(false);
+        let expected_start = accepted.clone();
+        let oracle = Oracle::unbounded(accepted.len(), |x: ArrayView1<f64>| {
+            if x == expected_start.view() {
+                evaluated_start.store(true, Ordering::Relaxed);
+            }
+            (1.0, Array1::from_elem(x.len(), 0.25))
+        });
+        let mut trial = accepted;
+        session
+            .solver
+            .step(&oracle, &mut trial)
+            .expect("solver step after set_exp_precon");
+        assert!(
+            evaluated_start.load(Ordering::Relaxed),
+            "set_exp_precon left the Euclidean evaluation cached on the solver"
+        );
+    }
+
+    #[test]
+    fn metric_build_id_mismatch_on_identical_geometry_forces_rebuild() {
+        let positions = Array2::from_shape_vec(
+            (3, 9),
+            vec![
+                0.0, 0.0, 0.0, 1.1, 0.0, 0.0, 0.0, 1.2, 0.1, 0.2, 0.1, 0.0, 1.2, 0.2, 0.0, 0.1,
+                1.3, 0.2, 0.4, 0.2, 0.0, 1.3, 0.4, 0.1, 0.2, 1.4, 0.3,
+            ],
+        )
+        .expect("positions");
+        let gradient = Array2::from_shape_fn((3, 9), |(row, col)| {
+            0.2 * (row + 1) as f64 - 0.03 * col as f64
+        });
+        let surface = Prescribed {
+            energy: vec![0.0, 1.0, 0.2],
+            gradient,
+        };
+        let config = BandConfig::default()
+            .with_climbing(None)
+            .with_min_mode(None)
+            .with_saddle_check(None)
+            .with_remove_translation(false)
+            .with_exp_precon(ExpBandPrecon::default().with_mu(1.0));
+        let mut session = BandSession::new(config, positions).expect("band");
+        session.refresh_exp(&surface).expect("initial metric");
+        let x = session.interior_flat();
+        let first_id = session
+            .exp
+            .as_ref()
+            .and_then(|exp| exp.build_id)
+            .expect("first MetricBuildId");
+        let first = assemble_band_with(
+            &session.config,
+            &session.state,
+            &surface,
+            session.positions.row(0),
+            session.positions.row(2),
+            x.view(),
+            metric_view(&session),
+        )
+        .expect("first assembly");
+        assert_eq!(session.state.pcg_solves.load(Ordering::Relaxed), 1);
+        assert!(session.has_assembled_at(x.view(), x.len()));
+        assert!(session.evaluation().is_some());
+
+        let first_eval = session
+            .state
+            .last
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+
+        {
+            let exp_ref = session.exp.as_ref().expect("metric state");
+            let euclidean_view = BandMetrics {
+                build_id: MetricBuildId::EUCLIDEAN,
+                built_at: x.view(),
+                r_nn: exp_ref.r_nn,
+                per_image: exp_ref.metrics.as_slice(),
+                free: None,
+            };
+            assert!(
+                !euclidean_view.is_fresh_at(x.view(), 1),
+                "Euclidean MetricBuildId must not be accepted as a fresh exponential metric"
+            );
+
+            let exp = session.exp.as_mut().expect("metric state");
+            assert_eq!(exp.built_at, x);
+            exp.precon.a *= 4.0;
+            exp.build_id = None;
+        }
+        session
+            .refresh_exp(&surface)
+            .expect("metric rebuild on identical geometry");
+        let second_id = session
+            .exp
+            .as_ref()
+            .and_then(|exp| exp.build_id)
+            .expect("rebuilt MetricBuildId");
+        assert_ne!(
+            second_id, first_id,
+            "refresh_exp skipped rebuilding the metric on identical geometry"
+        );
+
+        // Restore the intact `first_id` assembly at the identical geometry `x`
+        // so only `MetricBuildId` differs between `last` and `session.exp`.
+        *session.state.last.lock().unwrap_or_else(|e| e.into_inner()) = first_eval;
+        assert!(
+            !session.has_assembled_at(x.view(), x.len()),
+            "has_assembled_at accepted a mismatched MetricBuildId at identical geometry"
+        );
+        assert!(
+            session.evaluation().is_none(),
+            "evaluation() returned forces solved under an older MetricBuildId"
+        );
+
+        let solves_before = session.state.pcg_solves.load(Ordering::Relaxed);
+        let second = assemble_band_with(
+            &session.config,
+            &session.state,
+            &CachedEvaluationOnly,
+            session.positions.row(0),
+            session.positions.row(2),
+            x.view(),
+            metric_view(&session),
+        )
+        .expect("reassembly under new MetricBuildId");
+        assert_eq!(
+            session.state.pcg_solves.load(Ordering::Relaxed),
+            solves_before + 1,
+            "MetricBuildId mismatch on identical geometry reused the cached driving force"
+        );
+        assert_ne!(second.1, first.1);
+        assert_ne!(second.3, first.3);
+        assert!(session.has_assembled_at(x.view(), x.len()));
+        assert!(session.evaluation().is_some());
+    }
+
+    #[test]
+    fn restart_keeps_the_projected_force_and_retires_the_climbing_key() {
+        struct AlongX;
+        impl BandSurface for AlongX {
+            fn eval(
+                &self,
+                positions: ArrayView2<f64>,
+                energies: &mut Array1<f64>,
+                gradients: &mut Array2<f64>,
+            ) -> Result<(), SaddleError> {
+                for (i, row) in positions.outer_iter().enumerate() {
+                    energies[i] = row[1];
+                    gradients.row_mut(i).fill(0.0);
+                    gradients[(i, 1)] = 1.0;
+                }
+                Ok(())
+            }
+        }
+        let positions =
+            Array2::from_shape_vec((3, 3), vec![-1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0])
+                .expect("positions");
+        let config = BandConfig::default()
+            .with_climbing(CiConfig::always())
+            .with_min_mode(None)
+            .with_remove_translation(false);
+        let mut session = BandSession::new(config, positions).expect("band");
+        session.step(&AlongX).expect("first step");
+        let (projected, metric, assembly_ci) = {
+            let slot = session.state.last.lock().unwrap_or_else(|e| e.into_inner());
+            let eval = slot.as_ref().expect("assembly");
+            (
+                eval.projected.clone(),
+                eval.assembly_metric,
+                eval.assembly_ci,
+            )
+        };
+        assert!(projected.iter().any(|value| *value != 0.0));
+        assert!(metric.is_some());
+        assert!(assembly_ci >= 0);
+        assert!(session.climbing_image().is_some());
+
+        session.restart();
+        assert!(session.climbing_image().is_none());
+        {
+            let slot = session.state.last.lock().unwrap_or_else(|e| e.into_inner());
+            let eval = slot.as_ref().expect("surface cache");
+            assert_eq!(eval.projected, projected);
+            assert_eq!(eval.assembly_metric, metric);
+            assert_eq!(eval.assembly_ci, i64::MIN);
+        }
+        let kept = session
+            .evaluation()
+            .expect("restart keeps the last evaluation");
+        assert_eq!(kept.projected.len(), projected.len());
+        assert!(
+            kept.projected
+                .iter()
+                .zip(projected.iter())
+                .all(|(got, want)| got == want)
+        );
+
+        session.step(&AlongX).expect("step after restart");
+        assert!(session.climbing_image().is_some());
     }
 }

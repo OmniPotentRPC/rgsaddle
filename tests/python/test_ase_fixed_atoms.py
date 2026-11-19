@@ -69,11 +69,18 @@ def test_fix_atoms_keeps_every_bit_through_a_climbing_run() -> None:
     assert abs(images[neb.ci].positions[2, 0] - 1.0) < 1e-2
 
 
-def test_interpolate_leaves_fixed_atoms_on_the_endpoint() -> None:
+def test_interpolate_uses_ase_constraint_modes() -> None:
     images = _band(fix=[0, 1])
     for image in images[1:-1]:
         image.positions[:2] += 0.5
-    NEB(images, k=1.0).interpolate()
+    neb = NEB(images, k=1.0)
+    with pytest.raises(RuntimeError, match="Constraints in image 1"):
+        neb.interpolate()
+    shifted = [image.positions[:2].copy() for image in images]
+    neb.interpolate(apply_constraint=True)
+    for image, before in zip(images, shifted):
+        assert np.array_equal(image.positions[:2], before)
+    neb.interpolate(apply_constraint=False)
     for image in images:
         assert np.array_equal(image.positions[:2], images[0].positions[:2])
 

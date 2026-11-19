@@ -990,19 +990,19 @@ _MINIMAGE = None
 def bind_minimage(library):
     global _MINIMAGE
     lib = library.lib
-    lib.mi_cell_from_ase.argtypes = [
+    lib.minimage_cell_from_ase.argtypes = [
         ctypes.POINTER(ctypes.c_double),
         ctypes.POINTER(ctypes.c_double),
         ctypes.POINTER(MiCell),
     ]
-    lib.mi_cell_from_ase.restype = ctypes.c_int
-    lib.mi_displacement_euclidean.argtypes = [
+    lib.minimage_cell_from_ase.restype = ctypes.c_int
+    lib.minimage_displacement_euclidean.argtypes = [
         ctypes.POINTER(MiCell),
         ctypes.POINTER(ctypes.c_double),
         ctypes.POINTER(ctypes.c_double),
         ctypes.POINTER(ctypes.c_double),
     ]
-    lib.mi_displacement_euclidean.restype = ctypes.c_int
+    lib.minimage_displacement_euclidean.restype = ctypes.c_int
     _MINIMAGE = lib
 
 
@@ -1015,24 +1015,24 @@ def mic_vectors(origin, dest, cell):
     dest = np.ascontiguousarray(dest, dtype=np.float64)
     rows = np.ascontiguousarray(np.asarray(cell, dtype=np.float64).reshape(-1))
     box = MiCell()
-    code = _MINIMAGE.mi_cell_from_ase(
+    code = _MINIMAGE.minimage_cell_from_ase(
         rows.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
         None,
         ctypes.byref(box),
     )
     if code != 0:
-        raise RuntimeError(f"mi_cell_from_ase returned {code}")
+        raise RuntimeError(f"minimage_cell_from_ase returned {code}")
     out = np.empty_like(origin)
     dr = np.empty(3, dtype=np.float64)
     for index in range(origin.shape[0]):
-        code = _MINIMAGE.mi_displacement_euclidean(
+        code = _MINIMAGE.minimage_displacement_euclidean(
             ctypes.byref(box),
             origin[index].ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
             dest[index].ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
             dr.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
         )
         if code != 0:
-            raise RuntimeError(f"mi_displacement_euclidean returned {code}")
+            raise RuntimeError(f"minimage_displacement_euclidean returned {code}")
         out[index] = dr
     return out
 

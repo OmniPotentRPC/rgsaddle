@@ -20,6 +20,7 @@ use rgmin::vecops::{axpy, dot, nrm2};
 
 use crate::SaddleError;
 use crate::internal::{CartAxis, Displacement, Rotation, Translation};
+use crate::vec3::{cross3, dot3, norm3, sub3};
 
 const RESTORE_ITERS: usize = 12;
 const RESTORE_TOL: f64 = 1e-12;
@@ -459,26 +460,6 @@ fn atom3(x: ArrayView1<f64>, i: usize) -> Result<[f64; 3], SaddleError> {
     Ok([x[slot], x[slot + 1], x[slot + 2]])
 }
 
-fn sub3(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-
-fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
-fn cross3(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-
-fn nrm3(a: [f64; 3]) -> f64 {
-    dot3(a, a).sqrt()
-}
-
 fn scale3(a: [f64; 3], s: f64) -> [f64; 3] {
     [a[0] * s, a[1] * s, a[2] * s]
 }
@@ -497,7 +478,7 @@ fn scatter3(g: &mut Array1<f64>, atom: usize, v: [f64; 3]) {
 fn bond_value(x: ArrayView1<f64>, atoms: [usize; 2]) -> Result<f64, SaddleError> {
     let a = atom3(x, atoms[0])?;
     let b = atom3(x, atoms[1])?;
-    let r = nrm3(sub3(b, a));
+    let r = norm3(sub3(b, a));
     if r <= f64::MIN_POSITIVE {
         return Err(SaddleError::NonFinite("constraint bond"));
     }
@@ -508,7 +489,7 @@ fn bond_grad(x: ArrayView1<f64>, atoms: [usize; 2]) -> Result<Array1<f64>, Saddl
     let a = atom3(x, atoms[0])?;
     let b = atom3(x, atoms[1])?;
     let d = sub3(b, a);
-    let r = nrm3(d);
+    let r = norm3(d);
     if r <= f64::MIN_POSITIVE {
         return Err(SaddleError::NonFinite("constraint bond"));
     }
@@ -525,7 +506,7 @@ fn angle_value(x: ArrayView1<f64>, atoms: [usize; 3]) -> Result<f64, SaddleError
     let c = atom3(x, atoms[2])?;
     let u = sub3(a, b);
     let v = sub3(c, b);
-    let denom = nrm3(u) * nrm3(v);
+    let denom = norm3(u) * norm3(v);
     if denom <= f64::MIN_POSITIVE {
         return Err(SaddleError::NonFinite("constraint angle"));
     }
@@ -538,8 +519,8 @@ fn angle_grad(x: ArrayView1<f64>, atoms: [usize; 3]) -> Result<Array1<f64>, Sadd
     let c = atom3(x, atoms[2])?;
     let u = sub3(a, b);
     let v = sub3(c, b);
-    let ru = nrm3(u);
-    let rv = nrm3(v);
+    let ru = norm3(u);
+    let rv = norm3(v);
     let denom = ru * rv;
     if denom <= f64::MIN_POSITIVE {
         return Err(SaddleError::NonFinite("constraint angle"));
@@ -576,7 +557,7 @@ fn dihedral_value(x: ArrayView1<f64>, atoms: [usize; 4]) -> Result<f64, SaddleEr
     let n1 = cross3(dx1, dx2);
     let n2 = cross3(dx2, dx3);
     let numer = dot3(dx2, cross3(n1, n2));
-    let denom = nrm3(dx2) * dot3(n1, n2);
+    let denom = norm3(dx2) * dot3(n1, n2);
     if numer * numer + denom * denom <= f64::MIN_POSITIVE {
         return Err(SaddleError::NonFinite("constraint dihedral"));
     }
@@ -593,7 +574,7 @@ fn dihedral_grad(x: ArrayView1<f64>, atoms: [usize; 4]) -> Result<Array1<f64>, S
     let dx1 = sub3(pts[1], pts[0]);
     let dx2 = sub3(pts[2], pts[1]);
     let dx3 = sub3(pts[3], pts[2]);
-    let dx2_norm = nrm3(dx2);
+    let dx2_norm = norm3(dx2);
     if dx2_norm <= f64::MIN_POSITIVE {
         return Err(SaddleError::NonFinite("constraint dihedral"));
     }

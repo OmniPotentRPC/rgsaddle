@@ -18,3 +18,7 @@ pub fn quickmin(options: rgmin::QuickMinOptions) -> rgmin::QuickMinOptions {
 pub fn cell(cell: linkcell::Cell) -> rgsaddle::mic::Cell {
     cell
 }
+
+pub fn minimage_cell(cell: minimage::Cell) -> rgsaddle::mic::Cell {
+    cell
+}

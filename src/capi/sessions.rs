@@ -326,15 +326,7 @@ pub unsafe extern "C" fn rgsaddle_irc_create_from_surface(
     } else {
         IrcDirection::Forward
     };
-    let cs = CSurface {
-        f,
-        user,
-        n_atoms,
-        n_images: 1,
-        per_image: false,
-        climbing_request: false,
-        rows: Default::default(),
-    };
+    let cs = CSurface::point(f, user, n_atoms);
     match IrcSession::from_surface(irc_cfg, x, m, sd, dir, &cs) {
         Ok(session) => Box::into_raw(Box::new(RgsaddleIrc { session, n_atoms })),
         Err(_) => std::ptr::null_mut(),
@@ -360,15 +352,7 @@ pub unsafe extern "C" fn rgsaddle_irc_step(
         return RGSADDLE_NULL_SURFACE;
     };
     let session = unsafe { &mut *session };
-    let cs = CSurface {
-        f,
-        user,
-        n_atoms: session.n_atoms,
-        n_images: 1,
-        per_image: false,
-        climbing_request: false,
-        rows: Default::default(),
-    };
+    let cs = CSurface::point(f, user, session.n_atoms);
     match session.session.step(&cs) {
         Ok(report) => {
             let out = unsafe { &mut *out };
@@ -398,10 +382,7 @@ pub unsafe extern "C" fn rgsaddle_irc_position(session: *const RgsaddleIrc, out:
     }
     let session = unsafe { &*session };
     let dof = (3 * session.n_atoms) as usize;
-    let dst = unsafe { slice::from_raw_parts_mut(out, dof) };
-    for (i, v) in session.session.position().iter().enumerate() {
-        dst[i] = *v;
-    }
+    unsafe { write_doubles(out, dof, session.session.position().iter().copied()) };
     RGSADDLE_OK
 }
 
@@ -467,10 +448,7 @@ mod irc_abi_tests {
             let x = Array1::from(pos.to_vec());
             let (e, g) = Well.eval(x.view()).unwrap();
             *req.energies = e;
-            let gout = slice::from_raw_parts_mut(req.gradients, n);
-            for (i, v) in g.iter().enumerate() {
-                gout[i] = *v;
-            }
+            write_doubles(req.gradients, n, g.iter().copied());
         }
         RGSADDLE_OK
     }
@@ -1311,15 +1289,7 @@ pub unsafe extern "C" fn rgsaddle_sella_min_step(
         return RGSADDLE_NULL_SURFACE;
     };
     let session = unsafe { &mut *session };
-    let cs = CSurface {
-        f,
-        user,
-        n_atoms: session.n_atoms,
-        n_images: 1,
-        per_image: false,
-        climbing_request: false,
-        rows: Default::default(),
-    };
+    let cs = CSurface::point(f, user, session.n_atoms);
     match session.session.step(&cs) {
         Ok(report) => {
             let out = unsafe { &mut *out };
@@ -1352,10 +1322,7 @@ pub unsafe extern "C" fn rgsaddle_sella_min_position(
     }
     let session = unsafe { &*session };
     let dof = (3 * session.n_atoms) as usize;
-    let dst = unsafe { slice::from_raw_parts_mut(out, dof) };
-    for (i, v) in session.session.position().iter().enumerate() {
-        dst[i] = *v;
-    }
+    unsafe { write_doubles(out, dof, session.session.position().iter().copied()) };
     RGSADDLE_OK
 }
 
@@ -1673,15 +1640,7 @@ pub unsafe extern "C" fn rgsaddle_sella_saddle_step(
         return RGSADDLE_NULL_SURFACE;
     };
     let session = unsafe { &mut *session };
-    let cs = CSurface {
-        f,
-        user,
-        n_atoms: session.n_atoms,
-        n_images: 1,
-        per_image: false,
-        climbing_request: false,
-        rows: Default::default(),
-    };
+    let cs = CSurface::point(f, user, session.n_atoms);
     match session.session.step(&cs) {
         Ok(report) => {
             let out = unsafe { &mut *out };
@@ -1714,10 +1673,7 @@ pub unsafe extern "C" fn rgsaddle_sella_saddle_position(
     }
     let session = unsafe { &*session };
     let dof = (3 * session.n_atoms) as usize;
-    let dst = unsafe { slice::from_raw_parts_mut(out, dof) };
-    for (i, v) in session.session.position().iter().enumerate() {
-        dst[i] = *v;
-    }
+    unsafe { write_doubles(out, dof, session.session.position().iter().copied()) };
     RGSADDLE_OK
 }
 
@@ -2002,10 +1958,7 @@ pub unsafe extern "C" fn rgsaddle_constraints_project(
     let x = Array1::from(unsafe { slice::from_raw_parts(x, dof) }.to_vec());
     let v = Array1::from(unsafe { slice::from_raw_parts(v, dof) }.to_vec());
     let p = cons.cons.project(&x, &v);
-    let dst = unsafe { slice::from_raw_parts_mut(out, dof) };
-    for (k, val) in p.iter().enumerate() {
-        dst[k] = *val;
-    }
+    unsafe { write_doubles(out, dof, p.iter().copied()) };
     RGSADDLE_OK
 }
 
@@ -2029,10 +1982,7 @@ pub unsafe extern "C" fn rgsaddle_constraints_retract(
     let x = Array1::from(unsafe { slice::from_raw_parts(x, dof) }.to_vec());
     let v = Array1::from(unsafe { slice::from_raw_parts(v, dof) }.to_vec());
     let y = cons.cons.retract(&x, &v);
-    let dst = unsafe { slice::from_raw_parts_mut(out, dof) };
-    for (k, val) in y.iter().enumerate() {
-        dst[k] = *val;
-    }
+    unsafe { write_doubles(out, dof, y.iter().copied()) };
     RGSADDLE_OK
 }
 
@@ -2082,15 +2032,7 @@ pub unsafe extern "C" fn rgsaddle_samd_create(
         .with_tf(positive_or(cfg.tf, defaults.tf))
         .with_ngen(ngen)
         .with_exponential(cfg.exponential != 0);
-    let cs = CSurface {
-        f,
-        user,
-        n_atoms,
-        n_images: 1,
-        per_image: false,
-        climbing_request: false,
-        rows: Default::default(),
-    };
+    let cs = CSurface::point(f, user, n_atoms);
     match SamdSession::new(samd, pos, vel, &cs) {
         Ok(session) => Box::into_raw(Box::new(RgsaddleSamd { session, n_atoms })),
         Err(_) => std::ptr::null_mut(),
@@ -2122,15 +2064,7 @@ pub unsafe extern "C" fn rgsaddle_samd_step(
     let session = unsafe { &mut *session };
     let dof = (3 * session.n_atoms) as usize;
     let draw = Array1::from(unsafe { slice::from_raw_parts(r, dof) }.to_vec());
-    let cs = CSurface {
-        f,
-        user,
-        n_atoms: session.n_atoms,
-        n_images: 1,
-        per_image: false,
-        climbing_request: false,
-        rows: Default::default(),
-    };
+    let cs = CSurface::point(f, user, session.n_atoms);
     match session.session.step(&cs, draw.view()) {
         Ok(report) => {
             let out = unsafe { &mut *out };
@@ -2163,10 +2097,7 @@ pub unsafe extern "C" fn rgsaddle_samd_position(
     }
     let session = unsafe { &*session };
     let dof = (3 * session.n_atoms) as usize;
-    let dst = unsafe { slice::from_raw_parts_mut(out, dof) };
-    for (i, v) in session.session.position().iter().enumerate() {
-        dst[i] = *v;
-    }
+    unsafe { write_doubles(out, dof, session.session.position().iter().copied()) };
     RGSADDLE_OK
 }
 
@@ -2214,10 +2145,7 @@ pub unsafe extern "C" fn rgsaddle_pes_position(pes: *const RgsaddlePes, out: *mu
     }
     let pes = unsafe { &*pes };
     let dof = (3 * pes.n_atoms) as usize;
-    let dst = unsafe { slice::from_raw_parts_mut(out, dof) };
-    for (i, v) in pes.pes.position().iter().enumerate() {
-        dst[i] = *v;
-    }
+    unsafe { write_doubles(out, dof, pes.pes.position().iter().copied()) };
     RGSADDLE_OK
 }
 
@@ -2242,15 +2170,7 @@ pub unsafe extern "C" fn rgsaddle_pes_kick(
     let pes = unsafe { &mut *pes };
     let dof = (3 * pes.n_atoms) as usize;
     let dx = Array1::from(unsafe { slice::from_raw_parts(d, dof) }.to_vec());
-    let cs = CSurface {
-        f,
-        user,
-        n_atoms: pes.n_atoms,
-        n_images: 1,
-        per_image: false,
-        climbing_request: false,
-        rows: Default::default(),
-    };
+    let cs = CSurface::point(f, user, pes.n_atoms);
     match pes.pes.kick(&cs, dx.view()) {
         Ok(_) => RGSADDLE_OK,
         Err(e) => status_of(&e),
@@ -2289,10 +2209,7 @@ pub unsafe extern "C" fn rgsaddle_pes_project(
     let dof = (3 * pes.n_atoms) as usize;
     let v = Array1::from(unsafe { slice::from_raw_parts(v, dof) }.to_vec());
     let p = pes.pes.project(&v);
-    let dst = unsafe { slice::from_raw_parts_mut(out, dof) };
-    for (k, val) in p.iter().enumerate() {
-        dst[k] = *val;
-    }
+    unsafe { write_doubles(out, dof, p.iter().copied()) };
     RGSADDLE_OK
 }
 
@@ -2314,10 +2231,7 @@ pub unsafe extern "C" fn rgsaddle_pes_retract(
     let dof = (3 * pes.n_atoms) as usize;
     let v = Array1::from(unsafe { slice::from_raw_parts(v, dof) }.to_vec());
     let y = pes.pes.retract(&v);
-    let dst = unsafe { slice::from_raw_parts_mut(out, dof) };
-    for (k, val) in y.iter().enumerate() {
-        dst[k] = *val;
-    }
+    unsafe { write_doubles(out, dof, y.iter().copied()) };
     RGSADDLE_OK
 }
 
@@ -2342,10 +2256,7 @@ pub unsafe extern "C" fn rgsaddle_pes_transport(
     let x_to = Array1::from(unsafe { slice::from_raw_parts(x_to, dof) }.to_vec());
     let v = Array1::from(unsafe { slice::from_raw_parts(v, dof) }.to_vec());
     let t = pes.pes.transport(&x_from, &x_to, &v);
-    let dst = unsafe { slice::from_raw_parts_mut(out, dof) };
-    for (k, val) in t.iter().enumerate() {
-        dst[k] = *val;
-    }
+    unsafe { write_doubles(out, dof, t.iter().copied()) };
     RGSADDLE_OK
 }
 
@@ -2555,10 +2466,7 @@ pub unsafe extern "C" fn rgsaddle_internal_pes_internals(
         Ok(q) => q,
         Err(e) => return status_of(&e),
     };
-    let dst = unsafe { slice::from_raw_parts_mut(out, q.len()) };
-    for (i, v) in q.iter().enumerate() {
-        dst[i] = *v;
-    }
+    unsafe { write_doubles(out, q.len(), q.iter().copied()) };
     RGSADDLE_OK
 }
 
@@ -2577,10 +2485,7 @@ pub unsafe extern "C" fn rgsaddle_internal_pes_position(
     }
     let pes = unsafe { &*pes };
     let dof = (3 * pes.n_atoms) as usize;
-    let dst = unsafe { slice::from_raw_parts_mut(out, dof) };
-    for (i, v) in pes.pes.position().iter().enumerate() {
-        dst[i] = *v;
-    }
+    unsafe { write_doubles(out, dof, pes.pes.position().iter().copied()) };
     RGSADDLE_OK
 }
 
@@ -2605,15 +2510,7 @@ pub unsafe extern "C" fn rgsaddle_internal_pes_kick(
     let pes = unsafe { &mut *pes };
     let nint = pes.pes.n_int();
     let q = Array1::from(unsafe { slice::from_raw_parts(dq, nint) }.to_vec());
-    let cs = CSurface {
-        f,
-        user,
-        n_atoms: pes.n_atoms,
-        n_images: 1,
-        per_image: false,
-        climbing_request: false,
-        rows: Default::default(),
-    };
+    let cs = CSurface::point(f, user, pes.n_atoms);
     match pes.pes.kick(&cs, q.view()) {
         Ok(_) => RGSADDLE_OK,
         Err(e) => status_of(&e),
@@ -2658,10 +2555,7 @@ pub unsafe extern "C" fn rgsaddle_internal_pes_grad(
         Ok(q) => q,
         Err(e) => return status_of(&e),
     };
-    let dst = unsafe { slice::from_raw_parts_mut(out, gint.len()) };
-    for (i, v) in gint.iter().enumerate() {
-        dst[i] = *v;
-    }
+    unsafe { write_doubles(out, gint.len(), gint.iter().copied()) };
     RGSADDLE_OK
 }
 
@@ -3729,6 +3623,35 @@ pub unsafe extern "C" fn rgsaddle_growing_string_set_fixed_atoms(
         return RGSADDLE_SHAPE;
     };
     match session.session.set_fixed_atoms(mask) {
+        Ok(()) => RGSADDLE_OK,
+        Err(e) => status_of(&e),
+    }
+}
+
+/// Dynamic NEB on the band (ABI minor 46). `enabled` 0 clears it.
+///
+/// # Safety
+/// `band` is a live session or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_band_set_dynamic(
+    band: *mut RgsaddleBand,
+    enabled: i32,
+    fmax: f64,
+    scale_fmax: f64,
+) -> i32 {
+    if band.is_null() {
+        return RGSADDLE_NULL_BAND;
+    }
+    let dynamic = match enabled {
+        0 => None,
+        1 => Some(
+            crate::DynamicNeb::default()
+                .with_fmax(fmax)
+                .with_scale_fmax(scale_fmax),
+        ),
+        _ => return RGSADDLE_INVALID_PARAMETER,
+    };
+    match unsafe { (*band).session.set_dynamic(dynamic) } {
         Ok(()) => RGSADDLE_OK,
         Err(e) => status_of(&e),
     }

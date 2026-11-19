@@ -15,9 +15,8 @@ borders two other states; the dimer rotation history kept across
 translations (116b92e) passes.
 """
 
+import os
 import sys
-
-from pushoff import replay
 
 PINNED = (("dimer-fire", (1, 2, 5, 18)), ("dimer-rotskip", (62,)))
 
@@ -35,6 +34,8 @@ def miss_class(row):
 
 
 def main():
+    from pushoff import replay
+
     failures = []
     print("method search class barrier_eV saddle_A minus_A plus_A overlap")
     for method, searches in PINNED:
@@ -66,4 +67,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if "OPTBENCH_ROOT" not in os.environ or "RGSADDLE_LIB" not in os.environ:
+        print(__doc__.splitlines()[2])
+    else:
+        main()

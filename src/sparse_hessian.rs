@@ -141,13 +141,10 @@ impl SparsityPattern {
 
     /// Pairs within `interaction_range + skin`.
     ///
-    /// The search uses a linkcell binning on [`Cell`] primitives
-    /// (`fractional`, `widths`, `lattice_shift`, `dist2`,
-    /// `dist2_shifted`). The pinned linkcell crate exposes k-nearest
-    /// queries, not a cutoff pair list, so the cutoff walk lives here.
-    /// An open cluster (`cell == None`) is binned in Cartesian space.
-    /// The range is inclusive. A periodic image of an atom is not stored
-    /// as a loop. Coordinates are Cartesian, atom-major.
+    /// Periodic systems use [`linkcell::pairs_within`] on [`Cell`], and
+    /// open clusters (`cell == None`) use [`linkcell::pairs_open`]. A
+    /// periodic image of an atom is not stored as a loop. Coordinates
+    /// are Cartesian, atom-major.
     ///
     /// `skin` is an extra pad. [`SparseHessianOpts::search_skin`] is
     /// `max(2 * step, skin)`, so a neighbour that is still outside the
@@ -206,7 +203,7 @@ fn coords_of(positions: ArrayView1<f64>) -> Vec<[f64; 3]> {
     }
 }
 
-/// Every image of an unordered pair whose Cartesian distance is at most
+/// Every image of an unordered pair whose Cartesian distance is within
 /// `range`. `dr` points from `i` to that image of `j`, with `i < j`.
 /// A lattice image of one atom is not reported.
 fn visit_cutoff(
@@ -220,319 +217,36 @@ fn visit_cutoff(
         return;
     }
     match cell {
-        None => visit_open(points, range, &mut visit),
-        Some(cell) if ortho_single_image(cell, range) => {
-            visit_ortho_mic(points, cell, range, &mut visit);
-        }
-        Some(cell) if n <= 64 => visit_brute_images(points, cell, range, &mut visit),
-        Some(cell) => visit_binned_images(points, cell, range, &mut visit),
-    }
-}
-
-fn ortho_single_image(cell: &Cell, range: f64) -> bool {
-    if !cell.is_ortho() {
-        return false;
-    }
-    let widths = cell.widths();
-    widths.iter().all(|width| *width > 2.0 * range)
-}
-
-fn image_reach(cell: &Cell, range: f64) -> [i32; 3] {
-    let widths = cell.widths();
-    let mut reach = [1i32; 3];
-    for axis in 0..3 {
-        let width = widths[axis].abs().max(1e-15);
-        let images = (range / width).ceil();
-        let images = if images.is_finite() { images as i32 } else { 1 };
-        // One extra shell covers a skewed metric past the perpendicular bound.
-        reach[axis] = images.saturating_add(1).max(1);
-    }
-    reach
-}
-
-fn visit_brute_images(
-    points: &[[f64; 3]],
-    cell: &Cell,
-    range: f64,
-    visit: &mut impl FnMut(usize, usize, [f64; 3]),
-) {
-    let range2 = range * range;
-    let reach = image_reach(cell, range);
-    for i in 0..points.len() {
-        for j in (i + 1)..points.len() {
-            emit_images(points, cell, i, j, reach, range2, visit);
-        }
-    }
-}
-
-fn emit_images(
-    points: &[[f64; 3]],
-    cell: &Cell,
-    i: usize,
-    j: usize,
-    reach: [i32; 3],
-    range2: f64,
-    visit: &mut impl FnMut(usize, usize, [f64; 3]),
-) {
-    for na in -reach[0]..=reach[0] {
-        for nb in -reach[1]..=reach[1] {
-            for nc in -reach[2]..=reach[2] {
-                let shift = cell.lattice_shift(na, nb, nc);
-                let dr = [
-                    points[j][0] + shift[0] - points[i][0],
-                    points[j][1] + shift[1] - points[i][1],
-                    points[j][2] + shift[2] - points[i][2],
-                ];
-                let d2 = dr[0] * dr[0] + dr[1] * dr[1] + dr[2] * dr[2];
-                if d2 > 0.0 && d2 <= range2 {
-                    visit(i, j, dr);
-                }
-            }
-        }
-    }
-}
-
-fn visit_open(points: &[[f64; 3]], range: f64, visit: &mut impl FnMut(usize, usize, [f64; 3])) {
-    let n = points.len();
-    let mut lo = [f64::MAX; 3];
-    let mut hi = [f64::MIN; 3];
-    for point in points {
-        for axis in 0..3 {
-            lo[axis] = lo[axis].min(point[axis]);
-            hi[axis] = hi[axis].max(point[axis]);
-        }
-    }
-    let inv = 1.0 / range;
-    let dims = [0, 1, 2].map(|axis| {
-        let span = ((hi[axis] - lo[axis]) * inv).floor();
-        if span.is_finite() && span >= 0.0 {
-            (span as usize).saturating_add(1).clamp(1, 4096)
-        } else {
-            1
-        }
-    });
-    let bins = fill_bins(n, dims, |atom| {
-        let point = points[atom];
-        [0, 1, 2].map(|axis| {
-            let slot = ((point[axis] - lo[axis]) * inv).floor();
-            if slot.is_finite() && slot >= 0.0 {
-                (slot as usize).min(dims[axis] - 1)
-            } else {
-                0
-            }
-        })
-    });
-    let range2 = range * range;
-    for i in 0..n {
-        let origin = bin_of_open(points[i], lo, inv, dims);
-        for dz in -1isize..=1 {
-            for dy in -1isize..=1 {
-                for dx in -1isize..=1 {
-                    let x = origin[0] as isize + dx;
-                    let y = origin[1] as isize + dy;
-                    let z = origin[2] as isize + dz;
-                    if x < 0 || y < 0 || z < 0 {
-                        continue;
-                    }
-                    let x = x as usize;
-                    let y = y as usize;
-                    let z = z as usize;
-                    if x >= dims[0] || y >= dims[1] || z >= dims[2] {
-                        continue;
-                    }
-                    let slot = bin_slot([x, y, z], dims);
-                    for &j in &bins[slot] {
-                        if j <= i {
-                            continue;
-                        }
+        None => {
+            if let Ok(pairs) = linkcell::pairs_open(points, range, None) {
+                for pair in pairs {
+                    if pair.i < pair.j && pair.dist2 > 0.0 {
                         let dr = [
-                            points[j][0] - points[i][0],
-                            points[j][1] - points[i][1],
-                            points[j][2] - points[i][2],
+                            points[pair.j][0] - points[pair.i][0],
+                            points[pair.j][1] - points[pair.i][1],
+                            points[pair.j][2] - points[pair.i][2],
                         ];
-                        let d2 = dr[0] * dr[0] + dr[1] * dr[1] + dr[2] * dr[2];
-                        if d2 > 0.0 && d2 <= range2 {
-                            visit(i, j, dr);
-                        }
+                        visit(pair.i, pair.j, dr);
+                    }
+                }
+            }
+        }
+        Some(cell) => {
+            if let Ok(pairs) = linkcell::pairs_within(points, cell, range, None, None, true) {
+                for pair in pairs {
+                    if pair.i < pair.j && pair.dist2 > 0.0 {
+                        let shift = cell.lattice_shift(pair.shift[0], pair.shift[1], pair.shift[2]);
+                        let dr = [
+                            points[pair.j][0] + shift[0] - points[pair.i][0],
+                            points[pair.j][1] + shift[1] - points[pair.i][1],
+                            points[pair.j][2] + shift[2] - points[pair.i][2],
+                        ];
+                        visit(pair.i, pair.j, dr);
                     }
                 }
             }
         }
     }
-}
-
-fn bin_of_open(point: [f64; 3], lo: [f64; 3], inv: f64, dims: [usize; 3]) -> [usize; 3] {
-    [0, 1, 2].map(|axis| {
-        let slot = ((point[axis] - lo[axis]) * inv).floor();
-        if slot.is_finite() && slot >= 0.0 {
-            (slot as usize).min(dims[axis] - 1)
-        } else {
-            0
-        }
-    })
-}
-
-fn visit_ortho_mic(
-    points: &[[f64; 3]],
-    cell: &Cell,
-    range: f64,
-    visit: &mut impl FnMut(usize, usize, [f64; 3]),
-) {
-    let n = points.len();
-    let widths = cell.widths();
-    let dims = [0, 1, 2].map(|axis| (widths[axis] / range).floor().max(1.0) as usize);
-    let frac: Vec<[f64; 3]> = points
-        .iter()
-        .copied()
-        .map(|point| cell.fractional(point))
-        .collect();
-    let bins = fill_bins(n, dims, |atom| {
-        [0, 1, 2].map(|axis| {
-            let slot = (frac[atom][axis] * dims[axis] as f64).floor();
-            if slot.is_finite() && slot >= 0.0 {
-                (slot as usize) % dims[axis]
-            } else {
-                0
-            }
-        })
-    });
-    let range2 = range * range;
-    for i in 0..n {
-        let origin = [0, 1, 2].map(|axis| {
-            let slot = (frac[i][axis] * dims[axis] as f64).floor();
-            if slot.is_finite() && slot >= 0.0 {
-                (slot as usize) % dims[axis]
-            } else {
-                0
-            }
-        });
-        for dz in -1isize..=1 {
-            for dy in -1isize..=1 {
-                for dx in -1isize..=1 {
-                    let slot = bin_slot(
-                        [
-                            wrap_bin(origin[0] as isize + dx, dims[0]),
-                            wrap_bin(origin[1] as isize + dy, dims[1]),
-                            wrap_bin(origin[2] as isize + dz, dims[2]),
-                        ],
-                        dims,
-                    );
-                    for &j in &bins[slot] {
-                        if j <= i {
-                            continue;
-                        }
-                        let dr = cell.displacement(points[i], points[j]);
-                        let d2 = dr[0] * dr[0] + dr[1] * dr[1] + dr[2] * dr[2];
-                        if d2 > 0.0 && d2 <= range2 {
-                            visit(i, j, dr);
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn visit_binned_images(
-    points: &[[f64; 3]],
-    cell: &Cell,
-    range: f64,
-    visit: &mut impl FnMut(usize, usize, [f64; 3]),
-) {
-    let n = points.len();
-    let widths = cell.widths();
-    let dims = [0, 1, 2].map(|axis| {
-        let bins = (widths[axis] / range).floor();
-        if bins.is_finite() && bins >= 1.0 {
-            bins as usize
-        } else {
-            1
-        }
-    });
-    let stencil = [0, 1, 2].map(|axis| {
-        let width = widths[axis].abs().max(1e-15);
-        let frac_radius = range / width;
-        let bins = (frac_radius * dims[axis] as f64).ceil();
-        let bins = if bins.is_finite() { bins as isize } else { 1 };
-        bins.saturating_add(1).clamp(1, dims[axis] as isize)
-    });
-    let frac: Vec<[f64; 3]> = points
-        .iter()
-        .copied()
-        .map(|point| cell.fractional(point))
-        .collect();
-    let bins = fill_bins(n, dims, |atom| {
-        [0, 1, 2].map(|axis| {
-            let slot = (frac[atom][axis] * dims[axis] as f64).floor();
-            if slot.is_finite() && slot >= 0.0 {
-                (slot as usize) % dims[axis]
-            } else {
-                0
-            }
-        })
-    });
-    let reach = image_reach(cell, range);
-    let range2 = range * range;
-    for (i, frac_i) in frac.iter().enumerate() {
-        let origin = [0, 1, 2].map(|axis| {
-            let slot = (frac_i[axis] * dims[axis] as f64).floor();
-            if slot.is_finite() && slot >= 0.0 {
-                (slot as usize) % dims[axis]
-            } else {
-                0
-            }
-        });
-        for dz in -stencil[2]..=stencil[2] {
-            for dy in -stencil[1]..=stencil[1] {
-                for dx in -stencil[0]..=stencil[0] {
-                    let slot = bin_slot(
-                        [
-                            wrap_bin(origin[0] as isize + dx, dims[0]),
-                            wrap_bin(origin[1] as isize + dy, dims[1]),
-                            wrap_bin(origin[2] as isize + dz, dims[2]),
-                        ],
-                        dims,
-                    );
-                    for &j in &bins[slot] {
-                        if j <= i {
-                            continue;
-                        }
-                        emit_images(points, cell, i, j, reach, range2, visit);
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn fill_bins(n: usize, dims: [usize; 3], bin: impl Fn(usize) -> [usize; 3]) -> Vec<Vec<usize>> {
-    let mut bins = vec![
-        Vec::new();
-        dims[0]
-            .saturating_mul(dims[1])
-            .saturating_mul(dims[2])
-            .max(1)
-    ];
-    for atom in 0..n {
-        let slot = bin_slot(bin(atom), dims);
-        if slot < bins.len() {
-            bins[slot].push(atom);
-        }
-    }
-    bins
-}
-
-fn bin_slot(index: [usize; 3], dims: [usize; 3]) -> usize {
-    index[0] + dims[0] * (index[1] + dims[1] * index[2])
-}
-
-fn wrap_bin(index: isize, dim: usize) -> usize {
-    let dim = dim.max(1) as isize;
-    let mut wrapped = index % dim;
-    if wrapped < 0 {
-        wrapped += dim;
-    }
-    wrapped as usize
 }
 
 fn pack_rows(mut rows: Vec<Vec<usize>>) -> SparsityPattern {
@@ -758,35 +472,14 @@ pub struct SparseHessianOpts {
     pub skin: f64,
 }
 
+with_setters!(SparseHessianOpts {
+    with_difference => difference: val FiniteDifference,
+    with_step => step: val f64,
+    with_memory_budget => memory_budget: val usize,
+    with_skin => skin: val f64,
+});
+
 impl SparseHessianOpts {
-    /// Finite-difference sides.
-    #[must_use]
-    pub fn with_difference(mut self, difference: FiniteDifference) -> Self {
-        self.difference = difference;
-        self
-    }
-
-    /// Displacement `h`. See the struct docs for the truncation and roundoff.
-    #[must_use]
-    pub fn with_step(mut self, step: f64) -> Self {
-        self.step = step;
-        self
-    }
-
-    /// Byte cap on one colour block's geometry and gradient buffers.
-    #[must_use]
-    pub fn with_memory_budget(mut self, memory_budget: usize) -> Self {
-        self.memory_budget = memory_budget;
-        self
-    }
-
-    /// Extra pattern pad, combined with `2 * step` by [`Self::search_skin`].
-    #[must_use]
-    pub fn with_skin(mut self, skin: f64) -> Self {
-        self.skin = skin;
-        self
-    }
-
     /// `max(2 * step, skin)`, the pad added to an interaction range.
     pub fn search_skin(self) -> f64 {
         (2.0 * self.step).max(self.skin)
@@ -1593,6 +1286,22 @@ fn chunk_dot(x: ArrayView1<f64>, y: ArrayView1<f64>, start: usize) -> f64 {
         sum += x[i] * y[i];
     }
     sum
+}
+
+/// Every eigenvalue of a symmetric operator of size `n`, ascending:
+/// the Lanczos of [`lanczos_lowest`] with full reorthogonalization run
+/// for all `n` steps. The thick restart there sizes its cycle for a few
+/// wanted pairs and cannot return all of them. Memory is `n²`.
+pub(crate) fn lanczos_spectrum(
+    apply: impl Fn(ArrayView1<f64>) -> Array1<f64>,
+    n: usize,
+) -> Result<Array1<f64>, SaddleError> {
+    if n == 0 {
+        return Err(SaddleError::Invalid(
+            "the Lanczos spectrum needs a non-empty operator".into(),
+        ));
+    }
+    Ok(lanczos_full(&apply, n, n)?.values)
 }
 
 fn lanczos_lowest(
@@ -2737,6 +2446,44 @@ mod tests {
         );
     }
 
+    /// One recovery of a 12³ vacancy, on a private pool, after the global
+    /// pool exists. Unoptimized this exceeds the cap and the vacancy
+    /// strong-scaling test then runs for hours. The cap is what keeps a
+    /// slow build from hanging CI.
+    #[test]
+    #[cfg(feature = "par")]
+    fn colour_block_recovery_of_a_small_vacancy_is_bounded() {
+        use rayon::prelude::*;
+        use std::time::Duration;
+
+        let _warm: usize = (0..64usize).into_par_iter().sum();
+        let (positions, cell) = fcc_vacancy_cell(12);
+        let coords = Array1::from(positions);
+        let rc = 2.5;
+        let opts = SparseHessianOpts::default();
+        let pattern =
+            SparsityPattern::from_positions(coords.view(), Some(&cell), rc, opts.search_skin())
+                .unwrap();
+        let surface = ShiftedForce::periodic(1.0, rc, cell);
+        let started = std::time::Instant::now();
+        let recovered = with_threads(1, || {
+            sparse_hessian(&surface, coords.view(), &pattern, opts).unwrap()
+        });
+        let elapsed = started.elapsed();
+        eprintln!(
+            "12^3 vacancy atoms {} colours {} evaluations {} elapsed {elapsed:?}",
+            coords.len() / 3,
+            recovered.n_colours(),
+            recovered.evaluations()
+        );
+        assert!(recovered.n_colours() > 1);
+        assert!(recovered.evaluations() > recovered.n_colours());
+        assert!(
+            elapsed < Duration::from_secs(60),
+            "12^3 vacancy colour-block recovery took {elapsed:?}"
+        );
+    }
+
     #[test]
     #[cfg(feature = "par")]
     #[ignore = "slow strong-scaling sweep over 97555-atom cells; run with --ignored"]
@@ -3128,7 +2875,7 @@ mod tests {
             let points = coords_of(positions.view());
             let brute = oracle_pairs(&points, Some(&cell), range);
             let mut binned = std::collections::BTreeSet::new();
-            visit_binned_images(&points, &cell, range, &mut |i, j, _| {
+            visit_cutoff(&points, Some(&cell), range, |i, j, _| {
                 binned.insert((i, j));
             });
             assert_eq!(brute, binned, "seed {seed}");
@@ -3150,7 +2897,7 @@ mod tests {
         let range = 2.5;
         let brute = oracle_pairs(&points, Some(&cell), range);
         let mut mic = std::collections::BTreeSet::new();
-        visit_ortho_mic(&points, &cell, range, &mut |i, j, _| {
+        visit_cutoff(&points, Some(&cell), range, |i, j, _| {
             mic.insert((i, j));
         });
         assert_eq!(brute, mic);

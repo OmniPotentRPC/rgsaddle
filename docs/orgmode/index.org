@@ -77,12 +77,14 @@ while report.status != BandStatus::Converged {
    howto/defect-pair-rates
    howto/oh-tst
    howto/lammps-hyperplane
+   howto/lineb
    howto/sparse-hessian
    howto/sella
    howto/irc
    howto/io
    howto/c-abi
    howto/meson
+   howto/fortran
    howto/python
    howto/migrate
    howto/stencil
@@ -91,6 +93,7 @@ while report.status != BandStatus::Converged {
    explanation/one-stencil
    explanation/hyperplane-methods
    explanation/symmetry-regions
+   explanation/elastic-dipole
    reference/architecture
    reference/lammps-hyperplane
    reference/bibliography

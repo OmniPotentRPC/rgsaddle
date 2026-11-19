@@ -15,14 +15,15 @@ crate-type = ["lib", "cdylib", "staticlib"]
 
 [features]
 default = ["faer"]
-capi = []
+# The C header declares the OH-TST handle, so the C ABI builds the ohtst module.
+capi = ["ohtst"]
 par = ["rgmin/par"]
 highs = ["rgmin/highs"]
 ohtst = []
 lammps = ["ohtst", "dep:capnp", "dep:libloading", "dep:rgpot-core"]
 readcon = ["dep:readcon-core"]
-# readcon-db 0.2 pins readcon-core = "=0.17.1", the same release as
-# below, so the corpus and the CON writer share one readcon-core.
+# readcon-db 0.2.1 still pins readcon-core = "=0.17.1", the same release
+# as below, so the corpus and the CON writer share one readcon-core.
 readcon-db = ["readcon", "dep:readcon-db"]
 chemfiles = ["readcon", "readcon-core/chemfiles"]
 # GMP and MPFR stay off the default build. `cargo test --features capi`
@@ -36,10 +37,14 @@ verify = ["dep:proptest", "dep:rug"]
 # would turn this feature on. The verify workflow overrides that command
 # and does not pass `--ignore-global-asm`.
 faer = ["dep:faer"]
+# Finite-difference Hessians that compare the matrix-free tunneling rate.
+# Off the default build. Tests and benches that call it request it.
+lineb-oracle = []
 
 [dependencies]
 dlpk = { version = "0.1.5", features = ["ndarray"] }
 # ConFrameWriter::new is RoundTrip and canonical stays off.
+# readcon-db 0.2.1 still pins readcon-core = "=0.17.1".
 readcon-core = { version = "=0.17.1", optional = true }
 readcon-db = { version = "0.2", optional = true }
 # Control::default leaves ftol_rel and noise_floor unset, the 0.5.1
@@ -51,11 +56,10 @@ ndarray = "0.17"
 faer = { version = "0.24.4", optional = true, default-features = false, features = ["std", "linalg"] }
 rayon = "1.12"
 thiserror = "2"
-# The rev is tag v0.3.5. Its own minimage requirement is the caret
-# ^0.1.2, so the exact pin below is what holds 0.1.2.
-linkcell = { version = "=0.3.5", git = "https://github.com/d-SEAMS/linkcell", rev = "49f94dd2d2ff1e0d854cebc8a664599abe569156", default-features = false }
-# Matches the Cell that linkcell v0.3.5 re-exports; 0.1.3's displacement fix lands in a separate change.
-minimage = "=0.1.2"
+linkcell = { version = "=0.4.2", default-features = false }
+# Default features keep the `minimage_*` C ABI and leave `capi-compat-names`
+# off so `mi_version` is not exported alongside mimalloc.
+minimage = "=0.2.3"
 proptest = { version = "1.6", optional = true }
 rug = { version = "1.27", optional = true }
 capnp = { version = "0.20", optional = true }
@@ -83,6 +87,19 @@ required-features = ["ohtst"]
 name = "ohtst_skewed_well"
 required-features = ["ohtst"]
 
+[[bench]]
+name = "band_scaling"
+harness = false
+
+[[test]]
+name = "lineb"
+required-features = ["lineb-oracle"]
+
+[[bench]]
+name = "lineb"
+harness = false
+required-features = ["lineb-oracle"]
+
 [profile.dev.package.faer]
 opt-level = 3
 
@@ -93,6 +110,16 @@ opt-level = 3
 opt-level = 3
 
 [profile.dev.package.gemm-common]
+opt-level = 3
+
+# cargo test inherits dev and would compile this crate at opt-level 0.
+# colour_block_strong_scaling_on_vacancy_cells recovers a 10975-atom
+# vacancy and a 97555-atom vacancy, five times at each thread count.
+# Unoptimized, one recovery of the 6911-atom cell takes about 105s and
+# the full test runs for hours. At opt-level 3 that recovery takes
+# about 13s, and one recovery of the 10975-atom cell takes about 20s.
+# Debug assertions stay on.
+[profile.test]
 opt-level = 3
 
 # include/rgsaddle.h is the hand-written contract (surface request,

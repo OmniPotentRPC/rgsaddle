@@ -31,10 +31,6 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from optbench import rgsaddle_minmode as M
-from optbench.campaign import load_template, resolve_problem
-from optbench.displacement import displace, neighbours
-from optbench.surfaces import load_con, potential_from_problem
 
 ISLAND = 7
 
@@ -63,6 +59,8 @@ def largest_atom(delta):
 
 
 def island_weight(vector):
+    from optbench import rgsaddle_minmode as M
+
     unit = M._unit(vector)
     return float(np.dot(unit[: 3 * ISLAND], unit[: 3 * ISLAND]))
 
@@ -76,6 +74,11 @@ def text(value):
 
 
 def main():
+    from optbench import rgsaddle_minmode as M
+    from optbench.campaign import load_template, resolve_problem
+    from optbench.displacement import displace, neighbours
+    from optbench.surfaces import load_con, potential_from_problem
+
     name, searches, output = sys.argv[1], int(sys.argv[2]), Path(sys.argv[3])
     root = Path(os.environ["OPTBENCH_ROOT"])
     template = load_template(root, name)
@@ -171,4 +174,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) == 1:
+        print(__doc__.splitlines()[2])
+    else:
+        main()

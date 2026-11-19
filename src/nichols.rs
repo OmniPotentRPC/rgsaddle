@@ -74,49 +74,14 @@ pub struct Index1Config {
     pub sparse_pattern: Option<SparsityPattern>,
 }
 
-impl Index1Config {
-    /// Hessian update used after the seed step.
-    #[must_use]
-    pub fn with_update(mut self, update: HessianUpdate) -> Self {
-        self.update = update;
-        self
-    }
-
-    /// Nichols target, index-1 by default.
-    #[must_use]
-    pub fn with_mode(mut self, mode: NicholsMode) -> Self {
-        self.mode = mode;
-        self
-    }
-
-    /// Euclidean bound on the Cartesian step.
-    #[must_use]
-    pub fn with_trust_radius(mut self, trust_radius: f64) -> Self {
-        self.trust_radius = trust_radius;
-        self
-    }
-
-    /// Stop when every gradient component is at or under this.
-    #[must_use]
-    pub fn with_force_tol(mut self, force_tol: f64) -> Self {
-        self.force_tol = force_tol;
-        self
-    }
-
-    /// Central-difference width used when no Hessian was supplied.
-    #[must_use]
-    pub fn with_fd_dr(mut self, fd_dr: f64) -> Self {
-        self.fd_dr = fd_dr;
-        self
-    }
-
-    /// Opt into the direct CPR seed. The default seed stays dense.
-    #[must_use]
-    pub fn with_sparse_pattern(mut self, pattern: SparsityPattern) -> Self {
-        self.sparse_pattern = Some(pattern);
-        self
-    }
-}
+with_setters!(Index1Config {
+    with_update => update: val HessianUpdate,
+    with_mode => mode: val NicholsMode,
+    with_trust_radius => trust_radius: val f64,
+    with_force_tol => force_tol: val f64,
+    with_fd_dr => fd_dr: val f64,
+    with_sparse_pattern => sparse_pattern: opt SparsityPattern,
+});
 
 impl Default for Index1Config {
     fn default() -> Self {

@@ -59,6 +59,7 @@ use crate::strain_rate::{
     self, ElasticDipole, Json, double_dot, obj_get, parse_json, required_f64, required_matrix,
     required_str, split_translational_modes,
 };
+use crate::vec3::{norm3, sub3};
 
 /// Which way the mobile defect moves relative to the fixed defect.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3249,14 +3250,6 @@ fn mic(delta: [f64; 3], cell: M3) -> Result<[f64; 3], SaddleError> {
         s[0] * cell[0][1] + s[1] * cell[1][1] + s[2] * cell[2][1],
         s[0] * cell[0][2] + s[1] * cell[1][2] + s[2] * cell[2][2],
     ])
-}
-
-fn sub3(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-
-fn norm3(v: [f64; 3]) -> f64 {
-    (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt()
 }
 
 fn norm1(v: &Array1<f64>) -> f64 {

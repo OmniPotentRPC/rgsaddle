@@ -353,7 +353,7 @@ pub(super) struct RefineState {
     prev_ci: Option<usize>,
     cached_mode: Option<Array1<f64>>,
     run: Option<Run>,
-    converged: bool,
+    pub(super) converged: bool,
     last: Option<RefineStep>,
     /// An escape started a climb; it runs under the default controls
     /// when the band has none.
@@ -477,13 +477,14 @@ impl BandSession {
         let Some(config) = self.refine_config() else {
             return Ok(None);
         };
+        self.state.rows.store(0, Ordering::Relaxed);
         if self.refine.converged {
+            self.refresh_exp(surface)?;
             return Ok(Some(self.refine_report(BandStatus::Converged, None)));
         }
         let Some(run) = self.refine.run.as_ref() else {
             return Ok(None);
         };
-        self.state.rows.store(0, Ordering::Relaxed);
         if run.climb.is_none() {
             return self.refine_align(&config, surface).map(Some);
         }
@@ -557,6 +558,7 @@ impl BandSession {
                 Outcome::Restore
             };
             self.refine_finish(&config, outcome);
+            self.refresh_exp(surface)?;
             return Ok(Some(self.refine_stop(
                 RefineStep {
                     fell_back: true,
@@ -573,6 +575,7 @@ impl BandSession {
         }
         if gate <= self.config.force_tol {
             self.refine.converged = true;
+            self.refresh_exp(surface)?;
             return Ok(Some(self.refine_stop(
                 step,
                 BandStatus::Converged,
@@ -583,6 +586,7 @@ impl BandSession {
         if turned || run.steps >= config.max_steps {
             let fell_back = turned;
             self.refine_finish(&config, Outcome::Leave);
+            self.refresh_exp(surface)?;
             return Ok(Some(self.refine_stop(
                 RefineStep { fell_back, ..step },
                 BandStatus::Running,
@@ -640,10 +644,12 @@ impl BandSession {
         self.iteration += 1;
         if estimate.curvature > 0.0 {
             self.refine_finish(config, Outcome::Restore);
+            self.refresh_exp(surface)?;
             return Ok(self.refine_stop(step, BandStatus::Running, estimate.curvature));
         }
         if alignment < config.alignment_tol && !run.escape {
             self.refine_finish(config, Outcome::Leave);
+            self.refresh_exp(surface)?;
             return Ok(self.refine_stop(step, BandStatus::Running, estimate.curvature));
         }
         let step = RefineStep {
@@ -653,6 +659,7 @@ impl BandSession {
         run.best = Some((gate, run.current.clone(), estimate.mode.clone()));
         if gate <= force_tol {
             self.refine.converged = true;
+            self.refresh_exp(surface)?;
             return Ok(self.refine_stop(step, BandStatus::Converged, estimate.curvature));
         }
         let rigid = rigid_motions(&run.current.x, cell.as_ref(), remove_translation, fixed);
@@ -850,7 +857,8 @@ impl BandSession {
     }
 
     /// Write one image and its surface answer into the band and its
-    /// last evaluation. The other rows keep their cached values.
+    /// last evaluation. The other rows keep their cached surface values;
+    /// tangents, springs, climbing forces and metric solves do not.
     pub(super) fn put_image(&mut self, image: usize, point: &Point, projected: ArrayView1<f64>) {
         self.positions.row_mut(image).assign(&point.x);
         self.pin_fixed();
@@ -867,6 +875,10 @@ impl BandSession {
                     .assign(&projected);
             }
         }
+        drop(slot);
+        self.state.invalidate_assembly();
+        self.solver.forget_evaluation();
+        self.invalidate_stale_exp();
     }
 
     pub(super) fn image_tangent(
@@ -901,18 +913,20 @@ impl BandSession {
 
     fn refine_report(&self, status: BandStatus, curvature: Option<f64>) -> BandReport {
         let image = self.state.ci();
-        let max_force = image
-            .and_then(|i| {
-                let slot = self.state.last.lock().unwrap_or_else(|e| e.into_inner());
-                slot.as_ref()
-                    .map(|last| self.state.force_gate.value(last.gradients.row(i)))
-            })
-            .unwrap_or(f64::INFINITY);
-        let rows = if status == BandStatus::Converged && curvature.is_none() {
-            0
-        } else {
-            self.state.rows.load(Ordering::Relaxed)
+        let max_force = match image {
+            Some(i) => {
+                let slot = match self.state.last.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                match slot.as_ref() {
+                    Some(last) => self.state.force_gate.value(last.gradients.row(i)),
+                    None => f64::INFINITY,
+                }
+            }
+            None => f64::INFINITY,
         };
+        let rows = self.state.rows.load(Ordering::Relaxed);
         BandReport {
             status,
             max_force,
@@ -943,4 +957,247 @@ pub(super) fn one_row<S: BandSurface + ?Sized>(
     let mut gradients = ndarray::Array2::zeros((1, x.len()));
     surface.eval(row, &mut energies, &mut gradients)?;
     Ok((energies[0], gradients.row(0).to_owned()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::band::{BandConfig, CiConfig, ExpBandPrecon, assemble_band_with};
+    use crate::minmode::MinModeConfig;
+    use approx::assert_abs_diff_eq;
+    use ndarray::{Array2, ArrayView2, array};
+    use rgmin::Method;
+
+    struct Ridge;
+
+    impl BandSurface for Ridge {
+        fn eval(
+            &self,
+            positions: ArrayView2<f64>,
+            energies: &mut Array1<f64>,
+            gradients: &mut Array2<f64>,
+        ) -> Result<(), SaddleError> {
+            for (i, row) in positions.outer_iter().enumerate() {
+                energies[i] = 1.0 - row[0] * row[0];
+                gradients[(i, 0)] = 1.0;
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn first_band_step_after_refine_finish_uses_the_climbing_force() {
+        let positions = array![[-1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
+        let config = BandConfig::default()
+            .with_method(Method::lbfgs())
+            .with_climbing(CiConfig::always())
+            .with_min_mode(None)
+            .with_saddle_check(None)
+            .with_remove_translation(false)
+            .with_max_move(0.1);
+        let mut band = BandSession::new(config, positions).expect("band");
+        let surface = Ridge;
+        let x = band.interior_flat();
+        assemble_band_with(
+            &band.config,
+            &band.state,
+            &surface,
+            band.positions.row(0),
+            band.positions.row(2),
+            x.view(),
+            None,
+        )
+        .expect("armed climbing assembly");
+        assert_eq!(band.state.ci(), Some(1));
+
+        let saved = Point {
+            x: array![0.0, 0.0, 0.0],
+            energy: 1.0,
+            gradient: array![1.0, 0.0, 0.0],
+        };
+        let current = Point {
+            x: array![0.2, 0.0, 0.0],
+            energy: 0.96,
+            gradient: array![1.0, 0.0, 0.0],
+        };
+        let refine_config = MinModeRefine::default().with_restore_unhelpful(false);
+        band.refine.run = Some(Run {
+            image: 1,
+            saved,
+            entry_force: 1.0,
+            tangent: array![1.0, 0.0, 0.0],
+            session: MinModeSession::new(
+                MinModeConfig::default().with_saddle_check(None),
+                current.x.clone(),
+                array![1.0, 0.0, 0.0],
+            )
+            .expect("refinement session"),
+            climb: None,
+            current,
+            previous: None,
+            best: None,
+            alignment: 1.0,
+            steps: refine_config.max_steps,
+            since_refresh: 0,
+            escape: false,
+        });
+        band.refine_finish(&refine_config, Outcome::Leave);
+        let refined_x = band.positions[(1, 0)];
+        assert_eq!(refined_x, 0.2);
+
+        band.step(&surface).expect("first band step");
+        assert!(
+            band.positions[(1, 0)] > refined_x,
+            "the climbing image followed the raw negative gradient"
+        );
+    }
+
+    struct TransverseSlope;
+
+    impl BandSurface for TransverseSlope {
+        fn eval(
+            &self,
+            positions: ArrayView2<f64>,
+            energies: &mut Array1<f64>,
+            gradients: &mut Array2<f64>,
+        ) -> Result<(), SaddleError> {
+            for (i, row) in positions.outer_iter().enumerate() {
+                energies[i] = row[1];
+                gradients[(i, 1)] = 1.0;
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn put_image_forgets_the_cached_solver_evaluation() {
+        let positions = array![[-1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
+        let config = BandConfig::default()
+            .with_quickmin(true)
+            .with_climbing(None)
+            .with_min_mode(None)
+            .with_saddle_check(None)
+            .with_remove_translation(false)
+            .with_max_move(0.1);
+        let mut band = BandSession::new(config, positions).expect("band");
+        let surface = TransverseSlope;
+        band.step(&surface).expect("initial band step");
+        let y_after_first = band.positions[(1, 1)];
+        assert!(y_after_first < 0.0);
+
+        let updated = Point {
+            x: band.positions.row(1).to_owned(),
+            energy: -y_after_first,
+            gradient: array![0.0, -4.0, 0.0],
+        };
+        let projected = array![0.0, 4.0, 0.0];
+        band.put_image(1, &updated, projected.view());
+
+        band.step(&surface).expect("step after put_image");
+        assert!(
+            band.positions[(1, 1)] > y_after_first,
+            "solver reused the pre-put_image evaluation instead of reassembling"
+        );
+    }
+
+    struct AtomShear;
+
+    impl BandSurface for AtomShear {
+        fn eval(
+            &self,
+            positions: ArrayView2<f64>,
+            energies: &mut Array1<f64>,
+            gradients: &mut Array2<f64>,
+        ) -> Result<(), SaddleError> {
+            for (i, row) in positions.outer_iter().enumerate() {
+                energies[i] = 2.0 * (row[1] - row[7]);
+                gradients[(i, 1)] = 2.0;
+                gradients[(i, 7)] = -2.0;
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn put_image_invalidates_stale_exp_metric_and_next_force_uses_rebuilt_metric() {
+        let positions = array![
+            [-1.0, 0.0, 0.0, 1.2, 0.0, 0.0, 0.0, 1.3, 0.0],
+            [0.0, 0.0, 0.0, 1.2, 0.0, 0.0, 0.0, 1.3, 0.0],
+            [1.0, 0.0, 0.0, 1.2, 0.0, 0.0, 0.0, 1.3, 0.0],
+        ];
+        let config = BandConfig::default()
+            .with_quickmin(true)
+            .with_climbing(None)
+            .with_min_mode(None)
+            .with_saddle_check(None)
+            .with_remove_translation(false)
+            .with_max_move(0.2)
+            .with_exp_precon(ExpBandPrecon::default().with_mu(1.0).with_a(3.0));
+        let surface = AtomShear;
+        let mut band = BandSession::new(config.clone(), positions.clone()).expect("band");
+        band.refresh_exp(&surface).expect("initial metric");
+        let initial_r_nn = band.exp.as_ref().expect("metric state").r_nn;
+        assert_abs_diff_eq!(initial_r_nn, 1.3, epsilon = 0.000_000_000_001);
+
+        // An intermediate refinement image past `r_nn / 2` (0.8 > 0.65)
+        // must drop the cached metric matrices at once.
+        let excursion = Point {
+            x: array![0.8, 0.0, 0.0, 1.2, 0.0, 0.0, 0.0, 1.3, 0.0],
+            energy: 0.0,
+            gradient: array![0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, -2.0, 0.0],
+        };
+        let excursion_proj = -&excursion.gradient;
+        band.put_image(1, &excursion, excursion_proj.view());
+        let invalidated_on_excursion = band
+            .exp
+            .as_ref()
+            .is_some_and(|exp| exp.build_id.is_none() && exp.metrics.is_empty());
+
+        // A subsequent restore/best placement back within `r_nn / 2` of the
+        // initial build (0.45 < 0.65) shrinks the 0-1 pair to 0.75, changing
+        // `r_nn` and the 0-2 weight. Without the invalidation above, the
+        // next step would reuse the initial metric instead of rebuilding.
+        let settled = Point {
+            x: array![0.45, 0.0, 0.0, 1.2, 0.0, 0.0, 0.0, 1.3, 0.0],
+            energy: 0.0,
+            gradient: array![0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, -2.0, 0.0],
+        };
+        let settled_proj = -&settled.gradient;
+        band.put_image(1, &settled, settled_proj.view());
+
+        let mut uninvalidated =
+            BandSession::new(config.clone(), positions.clone()).expect("control band");
+        uninvalidated
+            .refresh_exp(&surface)
+            .expect("control initial metric");
+        uninvalidated.put_image(1, &settled, settled_proj.view());
+        uninvalidated.step(&surface).expect("control step");
+
+        let mut settled_positions = positions;
+        settled_positions.row_mut(1).assign(&settled.x);
+        let mut fresh = BandSession::new(config, settled_positions).expect("fresh band");
+        fresh.step(&surface).expect("fresh step");
+
+        band.step(&surface).expect("step after excursion");
+        let stale_gap = (&uninvalidated.positions().row(1) - &fresh.positions().row(1))
+            .iter()
+            .map(|v| v.abs())
+            .fold(0.0_f64, f64::max);
+        assert!(
+            stale_gap > 0.001,
+            "initial and rebuilt metrics must produce distinct steps (gap {stale_gap})"
+        );
+        for (got, want) in band.positions().iter().zip(fresh.positions().iter()) {
+            assert_abs_diff_eq!(got, want, epsilon = 0.000_000_000_001);
+        }
+        let got_eval = band.evaluation().expect("band evaluation");
+        let want_eval = fresh.evaluation().expect("fresh evaluation");
+        for (got, want) in got_eval.projected.iter().zip(want_eval.projected.iter()) {
+            assert_abs_diff_eq!(got, want, epsilon = 0.000_000_000_001);
+        }
+        assert!(
+            invalidated_on_excursion,
+            "put_image past r_nn / 2 kept the stale exponential metric matrix"
+        );
+    }
 }

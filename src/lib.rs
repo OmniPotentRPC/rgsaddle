@@ -15,6 +15,11 @@
 //! Image blocks are stored by image index after every rank finishes,
 //! so the band does not depend on which block finished first.
 //!
+//! [`lineb::LinebSession`] minimizes the fixed-energy tunneling action
+//! of Ásgeirsson, Arnaldsson and Jónsson, J. Chem. Phys. 148, 102334
+//! (2018), doi:10.1063/1.5007180, and [`lineb::hqtst_rate`] turns the
+//! resulting instanton into a harmonic quantum TST rate.
+//!
 //! [`nichols::Index1Session`] is the index-1 search on a dense
 //! Hessian: Baker's restricted-step partitioned RFO (maximize the
 //! lowest mode, minimize the rest, with the step inside a Euclidean
@@ -59,6 +64,8 @@ mod config;
 
 #[cfg(feature = "ohtst")]
 pub mod adaptive_ohtst;
+mod vec3;
+
 pub mod art;
 pub mod autoneb;
 pub mod band;
@@ -69,11 +76,13 @@ pub mod capi;
 pub mod capi_hyperplane;
 pub mod connect;
 pub mod defect_pair;
+pub mod elastic_dipole;
 pub mod error;
 pub mod idpp;
 pub mod indexk;
 #[cfg(feature = "lammps")]
 pub mod lammps;
+pub mod lineb;
 pub mod minmode;
 pub mod nichols;
 pub mod occupancy;
@@ -89,6 +98,7 @@ pub mod region;
 pub mod relax;
 pub mod saddle_index;
 pub mod solid_dimer;
+pub mod solid_prefactor;
 pub mod solid_state;
 pub mod spring;
 pub mod ssneb;
@@ -106,6 +116,7 @@ mod kani_proofs;
 #[cfg(all(test, feature = "verify"))]
 mod differential;
 
+mod spline;
 mod sqnm;
 mod stats;
 #[cfg(feature = "ohtst")]
@@ -123,9 +134,10 @@ pub use art::{
 pub use autoneb::{AutoNeb, AutoNebInterpolant, AutoNebReport, AutoNebTuning};
 pub use band::{
     BandConfig, BandEvaluation, BandReport, BandSession, BandStatus, BandSurface, Cell, CiConfig,
-    ExpBandPrecon, FeaNebReport, FeaNebSession, FreeEndConfig, FreeEndReport, FreeEndSide,
-    GrowingStringConfig, GrowingStringPhase, GrowingStringReport, GrowingStringSession,
-    MinModeRefine, SolidState, StringConfig, StringSession, ZoomConfig, climbing_image,
+    DynamicNeb, ExpBandPrecon, FeaNebReport, FeaNebSession, FreeEndConfig, FreeEndReport,
+    FreeEndSide, GrowingStringConfig, GrowingStringPhase, GrowingStringReport,
+    GrowingStringSession, MinModeRefine, SolidState, StringConfig, StringSession, ZoomConfig,
+    climbing_image,
 };
 pub use bennett::{ShootingConfig, Transmission, bennett_chandler};
 pub use connect::{ConnectConfig, ConnectProfile, ConnectReport, connect};
@@ -145,6 +157,11 @@ pub use defect_pair::{
 pub use elastic::{
     ElasticMultipole, LocalField, Octupole, Quadrupole, StrainGradient, quadrupole_energy,
 };
+pub use elastic_dipole::{
+    AnisotropicGreen, AnisotropicGreenConfig, CorrectedEnergy, CorrectedRate, DefectDipole,
+    ElasticConstants, ElasticCorrection, ElasticPairState, ElasticRate, GreenSecondDerivative,
+    InteractionEstimate, PeriodicElastic, PeriodicElasticConfig, Tensor4,
+};
 pub use error::SaddleError;
 pub use field::{DefectSource, DirectSolver, FieldSolver, FmmSolver, Kelvin};
 pub use idpp::{IdppConfig, SidppConfig, idpp_path, linear_path, sidpp_path};
@@ -156,6 +173,12 @@ pub use indexk::{
 pub use lammps::{
     LammpsHyperplaneSampler, LammpsSamplerConfig, LammpsSystem, LammpsThermodynamicReference,
     LammpsThermostatKind, LammpsThermostatRecord,
+};
+#[cfg(any(test, feature = "lineb-oracle"))]
+pub use lineb::hqtst_rate_interpolated_hessian;
+pub use lineb::{
+    Continuation, HqtstRate, LinebCalls, LinebConfig, LinebPath, LinebReport, LinebSession,
+    LinebStatus, Masses, continue_from_mep, hqtst_rate,
 };
 pub use minmode::{
     ArtNConfig, FiniteDifference, MinModeConfig, MinModeKind, MinModeReport, MinModeSession,
@@ -223,6 +246,10 @@ pub use solid_dimer::{
     CellMask, IndexCheck, IndexReport, JointChart, STRAIN_VOIGT, SolidDimer, SolidDimerConfig,
     SolidDimerReport, StressCheck, check_cauchy_stress, finite_difference_cauchy_stress, index_at,
     virial,
+};
+pub use solid_prefactor::{
+    JointHessian, JointHessianConfig, JointVineyard, JointVineyardConfig, joint_hessian,
+    joint_vineyard_prefactor,
 };
 pub use spring::SpringKind;
 pub use ssneb::{SolidImage, SolidNeb, joint_coordinate};
