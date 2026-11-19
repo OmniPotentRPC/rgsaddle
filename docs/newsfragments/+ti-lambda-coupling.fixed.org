@@ -1,3 +1,0 @@
-Lambda thermodynamic integration passes the harmonic reference geometry into the lammpc mixing hook and evaluates =V_full - V_harm= in the sampler frame.
-A missing full-potential symbol is a surface error when lambda is set, and =ThermodynamicSampler= leaves records unchanged unless the observable or a lambda was requested.
-The Python module exports =THERMODYNAMIC_DERIVATIVE=.

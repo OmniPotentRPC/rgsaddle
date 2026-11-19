@@ -5,6 +5,49 @@ All notable changes to rgsaddle since 0.3.2 are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-11-19
+
+### Added
+
+- `ThermodynamicDerivative` (`potential.full_minus_harmonic`) is a generic lambda thermodynamic-integration observable, with harmonic Taylor reference helpers, `ThermodynamicSurfaceSampler`, `ThermodynamicSampler`, a LAMMPS thermodynamic-reference configuration, and the C symbol `rgsaddle_thermodynamic_derivative_observable`.
+- An adaptive OH-TST hyperplane string shares constrained samples, runs a correlated pilot whose stride doubles until the autocorrelation time fits fourteen records, relaxes at production resolution, and reports a finite-temperature profile with measured geometry and quadrature errors. `TargetMet`, `SampleCap`, and `Unresolved` name the combined-error outcomes. Correlation-width batching is shared by every engine-backed hyperplane sample. Symmetry multiplicity is applied with `with_region` once inside the estimator.
+- `ArtNConfig` adds the opt-in ART nouveau basin-exit and activation protocol to `MinModeSession` and the point builder. C ABI minor 43 adds `rgsaddle_artn_config_t`, its default initializer, and the live-session setter.
+- `ArtSession` runs ART nouveau as eight persisted phases and lists every surface evaluation on `ArtSession::force_calls`. `ArtStatus::Reverted` is a quench pair that falls in one basin.
+- `SymmetryUniqueRegion::from_crystal_operations` lifts crystal operations and reactant or saddle geometries into a hard region on one hop's dividing plane. Path multiplicity and in-plane region degeneracy stay separate.
+- Hyperplane optimization, reversible work, unconstrained shooting, restricted Hessian modes, exact Gaussian sampling, and fixed-plane thermodynamic integration share `HyperplaneSampler` and `HyperplaneDynamics`. Samplers consume a generic hard `Region`.
+- The `rgmin` dependency stays at requirement `=0.6.0` and is pinned by full rev at `f3d18706c2b1ab380fd75f62449fdab46d01f5e2`, which carries `LevelSetConstraint`.
+- `BandConfig::with_free_end` and `FeaNebSession` add the free-end adaptive nudged elastic band. One terminal image moves on a target-energy level set, and fixed endpoints stay the default. C ABI minor 45 adds `rgsaddle_band_set_free_end`, `rgsaddle_band_free_end_residual`, and `rgsaddle_band_free_end_cuts`.
+- `BandConfig::with_string` and `BandSession::set_string` add the simplified string method beside NEB, on a cubic spline or a polyline, with an optional climbing image. C ABI minor 44 adds `RGSADDLE_BAND_STRING` and `rgsaddle_band_set_string`. Python adds `rgsaddle.Band(..., string=True)` and `rgsaddle.ase.SimplifiedString`.
+- `GrowingStringSession` implements the growing string method and hands a joined path to the simplified string. C ABI minor 44 adds `rgsaddle_growing_string_*`. Python adds `rgsaddle.GrowingString` and `rgsaddle.ase.GrowingString`.
+- `SaddleIndexCheck` certifies the saddle index of a converged band climbing image, min-mode search, or OCI-NEB climbing image. `saddle_index` reports the result, and `SaddleIndexCheck::escape` can leave an index of two or more. The C ABI gained this at minor 40, and Python exposes `saddle_index` on the session report, `MinMode`, and the ASE helpers.
+- `pypi.yml` publishes each `v*` tag to PyPI through trusted publishing, with wheels for Linux, macOS, and Windows, and checks that the tag matches `Cargo.toml` and `pyproject.toml`.
+
+### Changed
+
+- A converged band, min-mode, or OCI-NEB step certifies the saddle index of its point by default. The check's surface evaluations count in that step's `surface_rows` or `evaluations`, and every step still reaches the same positions. On the slab of `tests/band_fixed_atoms.rs`, FIRE at `force_tol` 1e-3 takes 141 force rows with the check and 81 without it. `with_saddle_check(None)` turns the check off, and the `fixed_slab_precon`, `minmode_trust`, and `minmode_calls` examples do so to keep their recorded counts. `BandReport`, `MinModeReport`, and `OcinebReport` include `saddle_index`. A C config stamped with ABI minor 40 or newer certifies by default, and one stamped earlier does not. Python's `MinMode` certifies by default.
+
+### Fixed
+
+- A Lanczos min-mode estimate stops on the same torque window as a classic dimer rotation. `MinModeSession::set_torque_window` and `rgsaddle_minmode_set_torque_window` apply to Lanczos sessions. C ABI minor 41.
+- `rgsaddle_indexk_step` copies strided mode columns into a contiguous buffer before the C Hessian callback.
+- Lambda thermodynamic integration passes the harmonic reference geometry into the LAMMPS mixing hook and evaluates `V_full - V_harm` in the sampler frame.
+- `kabsch_rotation` iterates over slices, which clears the Rust 1.88 `needless_range_loop` lints in `src/art.rs`.
+- The checked-in Python stub for `hyperplane_thermodynamic_integration` matches the binding.
+- The crate overview links the optional `ohtst` module only when that feature is enabled, and the examples job builds `ohtst_skewed_well` with `--features ohtst`.
+- The verify workflow's symbolic step skips `validation/benchmark/`, and its `libm-diff` job downloads only the `libm-*` artifacts with a ten-minute timeout.
+- `connect` checks endpoint lengths, finiteness, and force tolerance on entry.
+- `rayleigh_ritz_iter` returns the exact Ritz pairs once the basis is square, including a 1 by 1 matrix.
+- `rgsaddle.ase.GrowingString.run` restores the reactant and product geometries after every step. `join_tol` compares the frontier gap after the step's node additions, `rgsaddle_growing_string_nodes_added` reports nodes grown, and `rgsaddle_growing_string_create` treats -1.0 as no early join.
+
+### Documentation
+
+- `ohtst::work` links `sample_plane` by its crate path.
+- The rustdoc of the band, stencil, dimer, P-RFO, IRC, IDPP, OH-TST, and index-k modules states units, shapes, errors, and the method papers. Windows, force tolerances, and eigensolver sizes whose docs disagreed with the code are corrected.
+
+### Developer
+
+- The pt-island proxy tabulates campaign runs at matched horizons and records a SHA-256 of each run's searches. `modes.py` replays the first catalog climbs, and `dimer-lbfgs-tight.toml` is the dimer L-BFGS template with `rotation_tol` 1e-6.
+
 ## [0.5.0] - 2026-11-17
 
 ### Breaking
@@ -145,6 +188,7 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   A negative `maxmove` in that control means no step cap.
   The band and minimum-mode sessions over atoms keep the rgmin 0.5.0 behaviour.
 
+[0.6.0]: https://github.com/OmniPotentRPC/rgsaddle/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/OmniPotentRPC/rgsaddle/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/OmniPotentRPC/rgsaddle/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/OmniPotentRPC/rgsaddle/releases/tag/v0.3.2

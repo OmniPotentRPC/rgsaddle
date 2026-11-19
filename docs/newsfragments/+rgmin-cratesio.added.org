@@ -1,2 +1,0 @@
-The ~rgmin~ dependency is pinned by full rev at f3d18706c2b1ab380fd75f62449fdab46d01f5e2 with the requirement ~=0.6.0~, the version at that commit.
-The crates.io 0.6.0 release has no ~LevelSetConstraint~, which the free-end band needs, so the workspace lockfile and the consumer fixture lock the git source until an rgmin release carries it.

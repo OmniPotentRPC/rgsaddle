@@ -1,2 +1,0 @@
-The verify workflow's ~libm-diff~ job pulls only the ~libm-*~ artifacts and has a ten-minute timeout.
-A download that never finishes should not keep the run open until the repository run limit.

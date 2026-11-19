@@ -1,3 +1,0 @@
-The verify workflow's symbolic-script step runs the checks under ~validation/~ and ~tests/symbolic/~ and leaves ~validation/benchmark/~ out.
-Those files are the pt-island campaign drivers.
-They import optbench and take a checkout plus a long run, so they are not part of the minute-long symbolic check.

@@ -1,6 +1,0 @@
-* Added
-- Generic lambda thermodynamic-integration observable =ThermodynamicDerivative=
-  (`potential.full_minus_harmonic`), harmonic Taylor reference helpers,
-  =ThermodynamicSurfaceSampler= and =ThermodynamicSampler=, LAMMPS
-  thermodynamic-reference configuration, and C symbol
-  =rgsaddle_thermodynamic_derivative_observable=.

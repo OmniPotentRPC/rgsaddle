@@ -1,3 +1,0 @@
-~rgsaddle.ase.GrowingString.run~ restores the reactant and product geometries after every step, so the evaluation of the last list slot no longer leaves scratch coordinates in ~images[-1]~.
-The growing string ~join_tol~ early join compares the frontier gap measured after the step's node additions, and ~rgsaddle_growing_string_step~ reports nodes grown through the new ~rgsaddle_growing_string_nodes_added~ instead of the ~rotations~ field.
-~rgsaddle_growing_string_create~ uses -1.0 for no early join, accepts zero as an inclusive zero-gap threshold, and rejects other negative or non-finite ~join_tol~ values.

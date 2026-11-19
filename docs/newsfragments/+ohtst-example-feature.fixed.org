@@ -1,2 +1,0 @@
-The examples job passes ~--features ohtst~ when it runs ~ohtst_skewed_well~.
-The example is built only with that feature.

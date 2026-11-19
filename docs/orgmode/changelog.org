@@ -3,6 +3,145 @@
 
 # towncrier release notes start
 
+* 0.6.0 (2026-11-19)
+
+** Added
+
+- * Added
+  - Generic lambda thermodynamic-integration observable =ThermodynamicDerivative=
+    (`potential.full_minus_harmonic`), harmonic Taylor reference helpers,
+    =ThermodynamicSurfaceSampler= and =ThermodynamicSampler=, LAMMPS
+    thermodynamic-reference configuration, and C symbol
+    =rgsaddle_thermodynamic_derivative_observable=.
+- * Added an adaptive OH-TST hyperplane string with shared constrained samples,
+    a correlated pilot whose stride doubles until the autocorrelation time fits
+    fourteen records, production-resolution relaxation, and a finite-temperature
+    profile whose geometry and quadrature errors are measured. The offset
+    quadrature gap stops at the dividing plane. `TargetMet` requires the
+    combined error. `SampleCap` is the record cap with that combined target
+    still unmet, including when the sample itself is already precise.
+    `Unresolved` is the same split below the cap.
+    Correlation-width batching is shared by every engine-backed hyperplane
+    sample, so it can change reported standard errors outside the adaptive
+    string as well. An odd tail is dropped so every block has the same width.
+    The effective-sample floor is the block count that caller passed, 20 for
+    a plane or thermodynamic integration and 5 for PAFI.
+    Symmetry
+    multiplicity is `with_region` once inside the estimator; the caller adds
+    `with_paths` and does not call `with_region` again. Rotating bounded planes
+    remain an explicit error until wall-contact derivatives are available.
+- =ArtNConfig= adds the opt-in ART nouveau basin-exit and activation protocol to =MinModeSession= and the point builder. It delays Lanczos during random-direction pushes, relaxes perpendicular to each push, follows the negative mode during activation, and warm-starts each Lanczos solve from the previous direction. Ordinary dimer and Lanczos configurations remain unchanged. C ABI minor 43 adds =rgsaddle_artn_config_t=, its default initializer and the live-session setter. Malek and Mousseau, Phys. Rev. E 62, 7723 (2000), doi:10.1103/PhysRevE.62.7723; Marinica, Willaime, and Mousseau, Phys. Rev. B 83, 094119 (2011), doi:10.1103/PhysRevB.83.094119; Jay et al., J. Chem. Theory Comput. 16, 6726 (2020), doi:10.1021/acs.jctc.0c00541.
+- =ArtSession= runs ART nouveau as eight persisted phases: a host seed and displacement mask, perpendicular relaxation, Lanczos, a lowest-mode climb, an index-1 certificate, a push both ways along the unstable mode, an unconstrained quench of the two images, and a reversibility report. =run_events= marks duplicate saddles. =ArtStatus::Reverted= is a quench pair that falls in one basin and is not a completed exit. Every surface evaluation is listed on =ArtSession::force_calls=. Malek and Mousseau, Phys. Rev. E 62, 7723 (2000), doi:10.1103/PhysRevE.62.7723.
+- =SymmetryUniqueRegion::from_crystal_operations= lifts generic
+  three-dimensional crystal operations, explicit or species-matched atom
+  permutations, and reactant/saddle geometries into a hard region on one
+  hop's dividing plane.  Periodic matching uses =minimage=.  The path
+  multiplicity is the number of distinct saddle images under the reactant
+  stabilizer and is the argument of =RateMultiplicity::with_paths=.  The
+  region degeneracy is the order of the operations that stabilize both
+  endpoints, which is the in-plane symmetry of that one hop, and the sampled
+  cell is the asymmetric unit of the plane.  Jóhannesson and Jónsson, /The
+  Journal of Chemical Physics/ 115, 9644-9656 (2001),
+  doi:10.1063/1.1415499, Secs. II D and III D, sample one symmetric part of a
+  hyperplane this way.  The twelve fcc nearest-neighbour vacancy directions
+  are a path multiplicity, not that region degeneracy.
+- Engine-neutral hyperplane optimization, reversible work, unconstrained
+  shooting, restricted Hessian modes, exact Gaussian sampling, and fixed-plane
+  thermodynamic integration now share =HyperplaneSampler= and
+  =HyperplaneDynamics=.  The fixed-plane TI sampler is also available through
+  the callback C ABI and Python binding.
+- Hyperplane samplers can now consume a generic hard =Region=.  A
+  =SymmetryUniqueRegion= builds the Voronoi cell of one representative from
+  caller-supplied point- or space-group operations and reports its explicit
+  in-plane degeneracy.  Analytic MD reflects at its faces and GHMC rejects
+  outside proposals without a soft bias.  LAMMPS reflection remains pending
+  lammpc constrained-step callback support.  =RateMultiplicity= keeps this
+  degeneracy separate from path or hop multiplicity, preventing symmetry
+  images from being counted twice.
+- The ~rgmin~ dependency is pinned by full rev at f3d18706c2b1ab380fd75f62449fdab46d01f5e2 with the requirement ~=0.6.0~, the version at that commit.
+  The crates.io 0.6.0 release has no ~LevelSetConstraint~, which the free-end band needs, so the workspace lockfile and the consumer fixture lock the git source until an rgmin release carries it.
+- ~BandConfig::with_free_end~, ~BandSession::set_free_end~, ~FreeEndConfig~, ~FreeEndSide~, ~FreeEndReport~ (~FeaNebReport~), and ~FeaNebSession~ add the free-end adaptive nudged elastic band (FEA-NEB) method of Jiayong Zhang, Hongwu Zhang, Hongfei Ye, and Yonggang Zheng, J. Chem. Phys. 145, 094104 (2016), doi:10.1063/1.4962019, and the level-set free-end formulation of Ting Zhu, Ju Li, Amit Samanta, Hyoung Gyu Kim, and Subra Suresh, Proc. Natl. Acad. Sci. U.S.A. 104, 3031 (2007), doi:10.1073/pnas.0611097104.
+  One terminal image moves subject to \(E(x_{\mathrm{end}}) = E_{\mathrm{target}}\). Its force is Zhang et al. Eq. (7), the potential force perpendicular to the path, with no spring. Net translation is removed before that force is projected onto the level set, and ~rgmin::Solver~ with ~LevelSetConstraint~ retracts the endpoint onto the target energy. The endpoint gradient must be nonzero. The step reports ~target_energy_residual~ and ~BandSession::evaluation~ at the positions it accepted. Adaptive cuts keep a local window around the peak and are counted only when images are removed. Fixed endpoints stay the default.
+  C ABI minor 45 adds ~rgsaddle_band_set_free_end~, ~rgsaddle_band_free_end_residual~, and ~rgsaddle_band_free_end_cuts~ (~Band::set_free_end~, ~Band::free_end_residual~, and ~Band::free_end_cuts~ in C++, and ~Band.set_free_end~, ~Band.target_energy_residual~, and ~Band.free_end_cuts~ in Python). A host checks ~rgsaddle_abi_version()~ for minor 45 or newer. The simplified string and the growing string stay at minor 44.
+- ~BandConfig::with_string(StringConfig::default())~ and ~BandSession::set_string~ add the simplified string method of E, Ren, and Vanden-Eijnden, J. Chem. Phys. 126, 164103 (2007), doi:10.1063/1.2720838, as an opt-in band method beside NEB.
+  Interior images evolve under the full potential force (no spring, no tangent projection) through the band's ~rgmin::Solver~ steppers (~FIRE~, ~L-BFGS~, ~QuickMin~, ~Bb~, and ~ODE12r~) and are placed at equal arc length after each step on the not-a-knot cubic spline (~StringConfig::spline()~, default) or on the polyline (~StringConfig::linear()~).
+  When ~BandConfig::climbing~ arms an interior image, that image reflects the potential force along the path tangent and stays anchored during reparametrization while each side is spaced at equal arc length on its own, with ~MinModeRefine~, ~SaddleIndexCheck~, ~ExpBandPrecon~, ~Cell~, ~fixed_atoms~, and ~set_image_threads~ supported as on an atomic band.
+  On the 25-image Müller-Brown path between minima A and B (=tests/simplified_string.rs=), the spline string reaches a maximum deviation of 0.0111 from the steepest-descent minimum energy path (against 0.0144 for the polyline string and 0.0305 for 25-image CI-NEB), and the climbing string locates both barriers' saddles within 0.001 of the analytic saddles and CI-NEB.
+  On the 107-atom Morse Cu fcc vacancy hop (=tests/makri_vacancy.rs=, 5 images, ~L-BFGS~ memory 20, tolerance 0.001 eV/Å), a rerun of that test measured the spline string at 37 steps (75.67 evaluations per interior image, 1.84369893 eV), the climbing spline string at 35 steps (71.67 evaluations per image, 1.84369903 eV), and the linear string at 149 steps (1.84370066 eV), against NEB at 18 steps (19.67 evaluations per image, 1.84369917 eV).
+  C ABI minor 44 adds ~RGSADDLE_BAND_STRING~ and ~rgsaddle_band_set_string~ (~Band::set_string~ in C++), and Python adds ~rgsaddle.Band(..., string=True)~, ~_core.project_band(..., projection="string")~, and ~rgsaddle.ase.SimplifiedString~.
+- ~GrowingStringSession~, ~GrowingStringConfig~, ~GrowingStringPhase~, ~GrowingStringReport~, and ~StringSession~ implement the growing string method of Peters, Heyden, Bell, and Chakraborty, J. Chem. Phys. 120, 7877 (2004), doi:10.1063/1.1691018, with hand-off upon join to the simplified string method of E, Ren, and Vanden-Eijnden, J. Chem. Phys. 126, 164103 (2007), doi:10.1063/1.2720838.
+  Reactant and product fragments relax separately under frontier tangent constraints and advance inward according to a configurable node-add criterion (~frontier_tol~, ~min_steps_per_node~, ~max_steps_per_node~, ~join_tol~) while preserving stable ~ImageId~s and batched calculator evaluations.
+  C ABI minor 44 adds ~rgsaddle_growing_string_*~ (~rgsaddle::GrowingString~ in C++), and Python adds ~rgsaddle.GrowingString~ and ~rgsaddle.ase.GrowingString~.
+- ~SaddleIndexCheck~ certifies the saddle index of a converged band's climbing image, min-mode search or OCI-NEB climbing image: block Lanczos on forward-difference Hessian actions, seeded with the search's mode and pseudo-random vectors, estimates the lowest curvatures on the free coordinates and counts those under ~-negative_tol~.
+  Fixed atoms, the rigid motions a band removes and the coordinates a host zeroes in the gradient are left out.
+  ~BandConfig::saddle_check~ and ~MinModeConfig::saddle_check~ hold it, ~BandReport::saddle_index~, ~MinModeReport::saddle_index~ and ~OcinebReport::saddle_index~ carry the ~SaddleIndex~ of the converged step, and ~saddle_evaluations~ sums the check's evaluations over a session.
+  ~rgsaddle::saddle_index~ certifies one point of a ~PointSurface~.
+  ~SaddleIndexCheck::escape~, off by default, takes a ~SaddleEscape~: at index two or more the point is pushed along each negative mode but the reaction mode, to that mode's lower-energy side, and the search climbs again, the downward search of Yin, Wang, Chen, Zhang, and Zhang, Phys. Rev. Lett. 124, 090601 (2020).
+  On the 37-atom Morse slab of ~tests/band_fixed_atoms.rs~ every stepper stops its climbing image on the mirror at -50.6503755, and the check reports index 3 there in 58 to 60 evaluations at ~force_tol~ 1e-3, with the curvatures -1.3798, -0.1640 and -0.0590 for FIRE.
+  With the escape, FIRE at ~force_tol~ 1e-4 reaches the first-order saddle at -50.6761677129, index 1, curvature -0.9133, 0.559 Å off the mirror, in 264 force rows, and Lanczos started on the mirror point reaches it in 1292 evaluations.
+  The C ABI moves to minor 40 with ~rgsaddle_saddle_check_t~, ~rgsaddle_saddle_index_t~, ~rgsaddle_saddle_check_default~, ~rgsaddle_band_set_saddle_check~, ~rgsaddle_minmode_set_saddle_check~, ~rgsaddle_ocineb_set_saddle_check~, the matching ~_saddle_index~ calls and ~rgsaddle_saddle_index~.
+  The C++ ~Band~, ~MinMode~ and ~Ocineb~ gain ~set_saddle_check~ and ~saddle_index~, and Python adds ~SessionReport.saddle_index~, ~MinMode.saddle_index~, ~MinMode.set_saddle_check~, ~rgsaddle.saddle_index~, ~rgsaddle.ase.saddle_index~ and ~rgsaddle.ase.NEB.saddle_index~.
+- ~pypi.yml~ publishes each ~v*~ tag to PyPI through trusted publishing: an sdist and wheels for Linux ~x86_64~ and ~aarch64~ (~manylinux_2_28~), macOS ~arm64~ and ~x86_64~, and Windows ~x86_64~.
+  The run stops before building when the tag, ~Cargo.toml~ and ~pyproject.toml~ disagree.
+  cibuildwheel tests every wheel, and the upload waits for a smoke job that installs the wheels and the sdist into fresh virtual environments and imports the package.
+  A manual run with the ~tag~ input publishes an existing tag, such as ~v0.5.0~, which reached crates.io but not PyPI.
+
+** Documentation
+
+- The module docs of ~ohtst::work~ link ~sample_plane~ by its crate path, so the rustdoc build with all features and private items has no broken link.
+- The rustdoc of the band, stencil, dimer, P-RFO, IRC, IDPP, OH-TST and index-k modules is audited. Public items state their units (eV, Å, fs), array shapes and order, errors and panics, and cite the method papers by DOI. Windows, force tolerances and eigensolver subspace sizes whose docs disagreed with the code are corrected. Top-level entry points gain runnable examples on analytic surfaces, and the C entry points for index-k, quick-min and solid-state bands document their status codes and buffer layouts.
+
+** Developer
+
+- ~validation/benchmark/pt_island/proxy.py~ tabulates pt-island campaign runs at matched horizons, a run still going from its checkpoint, in the outcome classes of ~export.py~, with the SHA-256 of each run's searches so that two runs compare without their per-search tables.
+  ~modes.py~ replays the first catalog climbs of a template through ~rgsaddle_minmode_step~ and records where the session mode first meets negative curvature and the saddle it ends on; ~same_saddle.py~ numbers the saddles those replays reach.
+  ~dimer-lbfgs-tight.toml~ is optbench's dimer L-BFGS template with ~rotation_tol~ 1e-6, which turns the torque window off.
+
+** Changed
+
+- A converged band, min-mode or OCI-NEB step certifies the saddle index of its point by default.
+  The check's surface evaluations count in that step's ~surface_rows~ or ~evaluations~, and every step still reaches the same positions.
+  On the slab of ~tests/band_fixed_atoms.rs~ FIRE at ~force_tol~ 1e-3 takes 141 force rows with the check and 81 without it.
+  ~with_saddle_check(None)~ turns the check off. The ~fixed_slab_precon~, ~minmode_trust~ and ~minmode_calls~ examples do so to keep their recorded counts.
+  ~BandReport~, ~MinModeReport~ and ~OcinebReport~ include ~saddle_index~.
+  A C config stamped with ABI minor 40 or newer certifies by default. A config stamped earlier does not.
+  Python's ~MinMode~ certifies by default.
+
+** Fixed
+
+- A Lanczos min-mode estimate now stops where a classic dimer rotation does: at the stock ~rotation_tol~ of 1e-4 and any looser value, once its first two Krylov vectors leave the Ritz residual under 1 (eOn ~dimer_torque_max~).
+  Those two vectors span the plane of a steepest-descent dimer rotation, and their Ritz vector is that dimer turned to the lowest curvature in the plane (Zeng, Xiao, and Henkelman, J. Chem. Phys. 140, 044115 (2014), doi:10.1063/1.4862410).
+  Before, Lanczos converged the lowest mode afresh at every translation while the dimer turned only part of the way, and its climbs kept arriving at the nearest saddles.
+  ~MinModeSession::set_torque_window~ and ~rgsaddle_minmode_set_torque_window~ now act on Lanczos sessions as well, and ~Some(false)~ (0 from C) runs the estimate to its residual as before.
+  A session with ~set_lanczos_rel_tol~, as in the climbing-image refinement of a band and the connection driver, keeps its own stop unless the window is set on.
+  On the optbench pt-island catalog (seed 20261016, =validation/benchmark/pt_island/results/torque_window=) Lanczos finds 16 connected saddles in the first 300 searches where it found 11, as many as the dimer, and 21 in 2000 where it found 17, with 74 distinct saddles of any barrier where it found 56, at 463 force calls a search instead of 620.
+  Its misses are now mostly disconnected and over-barrier saddles, as the dimer's are, instead of 1743 repeats in 2000 searches, and the dimer searches are unchanged.
+  Run on to the catalog's stop, it reaches the 27 connected saddles at search 18171.
+  On the 255-atom vacancy of ~examples/minmode_calls.rs~ the window costs more calls (=validation/minmode_lanczos_window.csv=).
+  C ABI minor 41.
+- Copy strided mode columns to a contiguous buffer before passing them to the C Hessian callback in ~rgsaddle_indexk_step~.
+- Lambda thermodynamic integration passes the harmonic reference geometry into the lammpc mixing hook and evaluates =V_full - V_harm= in the sampler frame.
+  A missing full-potential symbol is a surface error when lambda is set, and =ThermodynamicSampler= leaves records unchanged unless the observable or a lambda was requested.
+  The Python module exports =THERMODYNAMIC_DERIVATIVE=.
+- The =kabsch_rotation= helper in =src/art.rs= iterates over slices instead of index ranges, clearing four =needless_range_loop= errors on Rust 1.88 Clippy.
+- The checked-in Python stub for ~hyperplane_thermodynamic_integration~ matches nanobind stubgen.
+  The function sits after ~last_error~, and its signature and docstring are the ones the binding renders.
+- The crate overview links the optional =ohtst= module only when that feature is enabled.
+  A default-feature rustdoc build names the module and the feature in code font, so the intra-doc link is not broken.
+- The examples job passes ~--features ohtst~ when it runs ~ohtst_skewed_well~.
+  The example is built only with that feature.
+- The verify workflow's symbolic-script step runs the checks under ~validation/~ and ~tests/symbolic/~ and leaves ~validation/benchmark/~ out.
+  Those files are the pt-island campaign drivers.
+  They import optbench and take a checkout plus a long run, so they are not part of the minute-long symbolic check.
+- The verify workflow's ~libm-diff~ job pulls only the ~libm-*~ artifacts and has a ten-minute timeout.
+  A download that never finishes should not keep the run open until the repository run limit.
+- Validate endpoint lengths, finiteness, and force tolerance on entry to ~connect~ instead of panicking on mismatched or empty inputs.
+- ~rayleigh_ritz_iter~ returns the exact Ritz pairs once its basis has as many columns as the matrix has rows.
+  Before, it went on to build an expansion system that could be singular, and failed with ~SaddleError::Solver~ for a 1 x 1 matrix of value 1 with the ~Gd~ expansion.
+- ~rgsaddle.ase.GrowingString.run~ restores the reactant and product geometries after every step, so the evaluation of the last list slot no longer leaves scratch coordinates in ~images[-1]~.
+  The growing string ~join_tol~ early join compares the frontier gap measured after the step's node additions, and ~rgsaddle_growing_string_step~ reports nodes grown through the new ~rgsaddle_growing_string_nodes_added~ instead of the ~rotations~ field.
+  ~rgsaddle_growing_string_create~ uses -1.0 for no early join, accepts zero as an inclusive zero-gap threshold, and rejects other negative or non-finite ~join_tol~ values.
+
 * 0.5.0 (2026-11-17)
 
 ** Breaking

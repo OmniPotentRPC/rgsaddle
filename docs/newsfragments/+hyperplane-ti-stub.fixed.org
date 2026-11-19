@@ -1,2 +1,0 @@
-The checked-in Python stub for ~hyperplane_thermodynamic_integration~ matches nanobind stubgen.
-The function sits after ~last_error~, and its signature and docstring are the ones the binding renders.
