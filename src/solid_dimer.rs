@@ -2788,6 +2788,26 @@ mod tests {
         assert_eq!(ok.negative_modes, Some(1));
     }
 
+    #[test]
+    fn vineyard_pair_reports_the_invalid_stationary_point() {
+        let check = IndexCheck::first_order();
+        let double = IndexSurface { double: true };
+        let minimum = array![1.0, 0.0, 0.0];
+        let saddle = array![0.0, 0.0, 0.0];
+        let error = certify_vineyard_pair(
+            &Well,
+            minimum.view(),
+            &double,
+            saddle.view(),
+            check,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            VineyardIndexError::Saddle { negative: 2, .. }
+        ));
+    }
+
     /// A negative eigenvalue along a rigid translation is not an index.
     struct Translated {
         negative_relative: bool,
