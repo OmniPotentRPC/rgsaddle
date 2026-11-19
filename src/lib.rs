@@ -317,7 +317,7 @@ pub use samd::{
 };
 pub use seed_direction::{
     ModeSweepDirectionPlan, SoftModeDirectionPlan, hessian_mode_sweep_directions,
-    soft_mode_then_full_directions, spectral_gap_rank,
+    mode_sweep_schedule, soft_mode_then_full_directions, spectral_gap_rank,
 };
 
 pub use sella_min::{SellaMinConfig, SellaMinReport, SellaMinSession};
