@@ -115,6 +115,21 @@ impl BandSurface for DoubleWell {
 }
 
 #[test]
+fn a_seed_without_a_budget_is_exhausted() {
+    let err = fixed_energy_mep_seed(
+        &DoubleWell,
+        array![0.0, 0.0].view(),
+        array![1.0, 0.0].view(),
+        array![1.0, 2.0].view(),
+        1.0,
+        0.25,
+        9,
+        0,
+    );
+    assert!(matches!(err, Err(SaddleError::Exhausted(_))));
+}
+
+#[test]
 fn energy_sliced_seed_follows_the_double_well_mep() {
     let path = fixed_energy_mep_seed(
         &DoubleWell,
@@ -124,6 +139,7 @@ fn energy_sliced_seed_follows_the_double_well_mep() {
         1.0,
         0.25,
         9,
+        20_000,
     )
     .unwrap();
     assert_eq!(path.raw_dim(), ndarray::Ix2(9, 2));
@@ -180,4 +196,18 @@ fn fixed_energy_double_well_path_converges() {
     }
     assert!(report.max_interior_perpendicular <= 2.0e-6);
     assert!(report.max_endpoint_optimized <= 2.0e-6);
+    let mut energies = Array1::zeros(converged.nrows());
+    let mut gradients = Array2::zeros(converged.raw_dim());
+    DoubleWell
+        .eval(converged.view(), &mut energies, &mut gradients)
+        .unwrap();
+    let converged_action = fixed_energy_action(
+        converged.view(),
+        energies.view(),
+        array![1.0, 2.0].view(),
+        target,
+        1.0,
+    )
+    .unwrap();
+    assert_eq!(report.action, converged_action);
 }
