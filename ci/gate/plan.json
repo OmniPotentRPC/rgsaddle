@@ -153,6 +153,6 @@
       "runner": "ubuntu-24.04-arm"
     }
   ],
-  "max_cpus": 1,
+  "max_cpus": 8,
   "schema": 1
 }

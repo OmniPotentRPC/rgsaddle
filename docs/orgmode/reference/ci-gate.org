@@ -5,7 +5,7 @@ The gate report starts with:
 
 - =Instance / host=: the Actions runner name or =local=, and the host name.
 - =Repository=: the checkout's =origin= URL.
-- =Building on=: the operating system and the gate's one-CPU limit.
+- =Building on=: the operating system and the gate's eight-CPU ceiling.
 - =Building for arch=: the machine architecture.
 - =Job dir=: the checkout used for every command.
 - =Commit SHA=: the tested commit.
