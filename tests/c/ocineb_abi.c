@@ -95,6 +95,32 @@ int main(void) {
   int saw_align = 0, saw_minmode = 0, saw_fallback = 0;
   rgsaddle_ocineb_report_t report;
   memset(&report, 0, sizeof report);
+#ifdef RGSADDLE_NO_FAER
+  rgsaddle_status_t climb_st = RGSADDLE_OK;
+  for (int i = 0; i < 400; ++i) {
+    rgsaddle_status_t st = rgsaddle_ocineb_step(session, surface, NULL, &report);
+    if (st != RGSADDLE_OK) {
+      climb_st = st;
+      break;
+    }
+    if (report.phase == RGSADDLE_OCINEB_ALIGN) {
+      saw_align = 1;
+    }
+  }
+  if (!saw_align || climb_st != RGSADDLE_SOLVER) {
+    fprintf(stderr, "without faer: saw_align=%d st=%d (%s)\n", saw_align, climb_st,
+            rgsaddle_status_name(climb_st));
+    rgsaddle_ocineb_free(session);
+    return 1;
+  }
+  if (rgsaddle_ocineb_reset(session) != RGSADDLE_OK) {
+    rgsaddle_ocineb_free(session);
+    return fail(RGSADDLE_SOLVER, "reset");
+  }
+  rgsaddle_ocineb_free(session);
+  printf("RGSADDLE_OCINEB_ABI_OK no_faer_status=%s\n", rgsaddle_status_name(climb_st));
+  return 0;
+#else
   for (int i = 0; i < 4000; ++i) {
     rgsaddle_status_t st = rgsaddle_ocineb_step(session, surface, NULL, &report);
     if (st != RGSADDLE_OK) {
@@ -161,4 +187,5 @@ int main(void) {
   printf("RGSADDLE_OCINEB_ABI_OK force=%.6g iter=%lld\n", report.max_force,
          (long long)report.iteration);
   return 0;
+#endif
 }

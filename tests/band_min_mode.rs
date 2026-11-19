@@ -58,6 +58,7 @@ fn run(config: BandConfig) -> (BandSession, Vec<rgsaddle::BandReport>) {
     (session, reports)
 }
 
+#[cfg(feature = "faer")]
 #[test]
 fn the_refined_climbing_image_lands_on_the_saddle() {
     let (session, reports) = run(config(Some(MinModeRefine::default())));
@@ -85,6 +86,7 @@ fn the_refined_climbing_image_lands_on_the_saddle() {
     assert_eq!(pos[(6, 0)], 1.0);
 }
 
+#[cfg(feature = "faer")]
 #[test]
 fn the_refinement_counts_its_one_image_evaluations() {
     let (_, reports) = run(config(Some(MinModeRefine::default())));
@@ -97,6 +99,18 @@ fn the_refinement_counts_its_one_image_evaluations() {
             "a refinement step is one image's Lanczos and step: {}",
             report.surface_rows
         );
+    }
+}
+
+#[cfg(not(feature = "faer"))]
+#[test]
+fn without_faer_the_refinement_climb_returns_solver_error() {
+    let mut session =
+        BandSession::new(config(Some(MinModeRefine::default())), initial_band(7)).unwrap();
+    let err = session.run(&DoubleWell, 200).unwrap_err();
+    match err {
+        SaddleError::Solver(msg) => assert!(msg.contains("faer"), "{msg}"),
+        other => panic!("expected SaddleError::Solver, got {other:?}"),
     }
 }
 
@@ -129,6 +143,7 @@ fn an_infinite_trigger_needs_a_retry_factor() {
     assert!(BandSession::new(config(Some(refine)), initial_band(7)).is_ok());
 }
 
+#[cfg(feature = "faer")]
 #[test]
 fn the_alignment_exit_still_lands_on_the_saddle() {
     let refine = MinModeRefine::default().with_climb_alignment(true);
@@ -140,8 +155,10 @@ fn the_alignment_exit_still_lands_on_the_saddle() {
 }
 
 /// The double well, recording the band index of every one-image call.
+#[cfg(feature = "faer")]
 struct Indexed(std::sync::Mutex<Vec<usize>>);
 
+#[cfg(feature = "faer")]
 impl BandSurface for Indexed {
     fn eval(
         &self,
@@ -165,6 +182,7 @@ impl BandSurface for Indexed {
     }
 }
 
+#[cfg(feature = "faer")]
 #[test]
 fn the_refinement_evaluates_the_climbing_image_by_index() {
     let surface = Indexed(std::sync::Mutex::new(Vec::new()));
@@ -278,6 +296,7 @@ mod capi {
         seen
     }
 
+    #[cfg(feature = "faer")]
     #[test]
     fn the_c_band_refines_unless_the_flag_is_set() {
         assert!(curvatures(0).iter().any(|&c| c < 0.0));
@@ -286,5 +305,60 @@ mod capi {
                 .iter()
                 .all(|&c| c == 0.0)
         );
+    }
+
+    #[cfg(not(feature = "faer"))]
+    #[test]
+    fn the_c_band_refinement_without_faer_returns_solver_status() {
+        assert!(
+            curvatures(RGSADDLE_BAND_NO_MIN_MODE)
+                .iter()
+                .all(|&c| c == 0.0)
+        );
+        let n = 7usize;
+        let mut x = vec![0.0; 3 * n];
+        for i in 0..n {
+            let t = i as f64 / (n - 1) as f64;
+            x[3 * i] = -1.0 + 2.0 * t;
+            x[3 * i + 1] = 0.3 * (std::f64::consts::PI * t).sin();
+        }
+        let config = RgsaddleBandConfig {
+            version: RgsaddleVersion {
+                major: RGSADDLE_ABI_MAJOR,
+                minor: RGSADDLE_ABI_MINOR,
+            },
+            flags: 0,
+            tangent: 1,
+            spring: 0,
+            projection: 1,
+            method: 1,
+            spring_k: 5.0,
+            spring_ks: std::ptr::null(),
+            ci_trigger_factor: 0.5,
+            ci_trigger_force: 0.0,
+            cell: std::ptr::null(),
+            force_tol: 1e-5,
+            max_move: 0.1,
+            memory: 20,
+        };
+        let session = unsafe { rgsaddle_band_create(&config, n as i64, 1, x.as_ptr()) };
+        assert!(!session.is_null());
+        let mut report: RgsaddleReport = unsafe { std::mem::zeroed() };
+        let mut rc = RGSADDLE_OK;
+        for _ in 0..200 {
+            rc = unsafe {
+                rgsaddle_band_step(
+                    session,
+                    Some(double_well),
+                    std::ptr::null_mut(),
+                    &mut report,
+                )
+            };
+            if rc != RGSADDLE_OK {
+                break;
+            }
+        }
+        unsafe { rgsaddle_band_free(session) };
+        assert_eq!(rc, RGSADDLE_SOLVER);
     }
 }

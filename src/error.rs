@@ -3,6 +3,7 @@
 use thiserror::Error;
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
 /// The SaddleError.
 pub enum SaddleError {
     #[error("shape mismatch: {0}")]

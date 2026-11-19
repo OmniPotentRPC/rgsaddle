@@ -31,7 +31,10 @@
 //! 121, 9776 (2004), doi:10.1063/1.1809574, or the dimer. The climb is
 //! the order-1 P-RFO step on a dense TS-BFGS model (`climb`) fit to the
 //! pair-stretch Hessian and the estimate's Krylov block, following the
-//! estimated mode by overlap. The mode is estimated again, its block
+//! estimated mode by overlap. The model spectrum is computed with `faer`,
+//! so the climb requires the `faer` Cargo feature (on by default) and
+//! returns [`SaddleError::Solver`] when the crate is built without it.
+//! The mode is estimated again, its block
 //! imposed and its direction followed, once the followed curvature has
 //! kept under `curvature_retained` of the last measured value or
 //! the followed mode turned under `min_overlap`, at most every
@@ -64,7 +67,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// under half the force it started from. The budget is 1000 steps per
 /// refinement. The Lanczos estimate keeps up to twenty actions, which
 /// fit the climb model, and stops when the lowest Ritz value changes by
-/// under 5%.
+/// under 5%. The climb diagonalizes its dense model with `faer`, so it
+/// requires the `faer` Cargo feature (on by default) and returns
+/// [`SaddleError::Solver`] when built without it.
 ///
 /// Non-exhaustive: start from [`MinModeRefine::default`] and chain the
 /// `with_*` setters.

@@ -37,7 +37,10 @@
 //! Units and shapes: positions are one row per image, each row a flat `3N`
 //! Cartesian vector in Angstrom (atom-major), endpoints included; forces
 //! and thresholds are in eV/Angstrom and curvatures in eV/Angstrom^2.
-//! Errors are [`SaddleError::Invalid`] for settings out of range and
+//! The P-RFO climb diagonalizes its dense model with `faer`, so a climb
+//! step requires the `faer` Cargo feature (on by default) and returns
+//! [`SaddleError::Solver`] when the crate is built without it. Other
+//! errors are [`SaddleError::Invalid`] for settings out of range and
 //! [`SaddleError::Shape`] for a malformed path, plus whatever the surface
 //! returns.
 
@@ -312,6 +315,10 @@ impl<S: BandSurface + PointSurface> BandSurface for Handoff<'_, S> {
 
 /// Host-stepped CI-NEB to minimum-mode hand-off.
 ///
+/// The P-RFO climb step ([`OcinebPhase::MinMode`]) diagonalizes its dense
+/// TS-BFGS model with `faer`, so it requires the `faer` Cargo feature (on by
+/// default) and returns [`SaddleError::Solver`] when built without it.
+///
 /// # Examples
 ///
 /// OCI-NEB between minima B and C of the Müller-Brown surface, one atom
@@ -374,11 +381,14 @@ impl<S: BandSurface + PointSurface> BandSurface for Handoff<'_, S> {
 /// let band = config.band.clone().with_max_move(0.05).with_force_tol(1e-2);
 /// let config = config.with_band(band);
 /// let mut session = OcinebSession::new(config, linear_path(b.view(), c.view(), 7, None)?)?;
+/// # #[cfg(feature = "faer")]
+/// # {
 /// let report = session.run(&MullerBrown, 2000)?;
 ///
 /// assert_eq!(report.status, OcinebStatus::Converged);
 /// let saddle = session.positions().row(report.ci_index.unwrap()).to_owned();
 /// assert!((saddle[0] - 0.212).abs() < 0.01 && (saddle[1] - 0.293).abs() < 0.01);
+/// # }
 /// # Ok::<(), SaddleError>(())
 /// ```
 pub struct OcinebSession {
@@ -500,7 +510,8 @@ impl OcinebSession {
     ///
     /// # Errors
     ///
-    /// The errors of [`BandSession::step`] and of `surface`.
+    /// The errors of [`BandSession::step`] (including [`SaddleError::Solver`]
+    /// when a climb step runs without the `faer` feature) and of `surface`.
     pub fn step<S: BandSurface + PointSurface>(
         &mut self,
         surface: &S,

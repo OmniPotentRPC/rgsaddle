@@ -132,6 +132,7 @@ fn band_session_steps_by_rtr_when_configured() {
     );
 }
 
+#[cfg(feature = "faer")]
 #[test]
 fn refined_rtr_band_converges_on_the_saddle() {
     let n = 7;

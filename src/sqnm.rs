@@ -15,6 +15,8 @@
 #[cfg(feature = "faer")]
 use faer::Mat;
 
+use crate::error::SaddleError;
+
 #[derive(Clone)]
 pub struct ConstrainedOpt {
     n: usize,
@@ -76,7 +78,7 @@ impl ConstrainedOpt {
         constraint_w_in: Option<&[f64]>,
         constraint_b_in: f64,
         curv2: f64,
-    ) -> Step {
+    ) -> Result<Step, SaddleError> {
         let n = self.n;
         self.position[self.nhist].copy_from_slice(pos);
         self.force[self.nhist].copy_from_slice(force);
@@ -222,7 +224,7 @@ impl ConstrainedOpt {
         let (ov_eval, ov_evec) = if hist == 0 {
             (Vec::new(), Vec::new())
         } else {
-            eigh(&overlap)
+            eigh(&overlap)?
         };
         let mut basis: Vec<Vec<f64>> = Vec::new();
         let mut fdiff: Vec<Vec<f64>> = Vec::new();
@@ -268,7 +270,7 @@ impl ConstrainedOpt {
         let (h_eval, h_evec) = if ndim == 0 {
             (Vec::new(), Vec::new())
         } else {
-            eigh(&hessian)
+            eigh(&hessian)?
         };
         let mut diagonal_basis = vec![vec![0.0; ndim]; n];
         let mut diagonal_fdiff = vec![vec![0.0; ndim]; n];
@@ -395,12 +397,12 @@ impl ConstrainedOpt {
             }
         }
 
-        Step {
+        Ok(Step {
             position: self.position[current].clone(),
             displacement,
             displacement2,
             ndim,
-        }
+        })
     }
 }
 
@@ -490,13 +492,13 @@ fn solve_spd(gram: &[Vec<f64>], rhs: &[f64]) -> Vec<f64> {
     b
 }
 
-fn eigh(matrix: &[Vec<f64>]) -> (Vec<f64>, Vec<Vec<f64>>) {
-    // The Kani build turns faer off. Those harnesses return before SQNM.
-    // A call that reaches this panic fails the proof.
+fn eigh(matrix: &[Vec<f64>]) -> Result<(Vec<f64>, Vec<Vec<f64>>), SaddleError> {
     #[cfg(not(feature = "faer"))]
     {
         let _ = matrix;
-        panic!("self-adjoint spectrum requires the faer feature");
+        Err(SaddleError::Solver(
+            "self-adjoint spectrum requires the faer feature".into(),
+        ))
     }
     #[cfg(feature = "faer")]
     {
@@ -507,7 +509,9 @@ fn eigh(matrix: &[Vec<f64>]) -> (Vec<f64>, Vec<Vec<f64>>) {
                 m[(i, j)] = matrix[i][j];
             }
         }
-        let eig = m.self_adjoint_eigen(faer::Side::Lower).unwrap();
+        let eig = m
+            .self_adjoint_eigen(faer::Side::Lower)
+            .map_err(|_| SaddleError::Solver("self-adjoint eigen did not converge".into()))?;
         let mut evals = vec![0.0; n];
         let mut evecs = vec![vec![0.0; n]; n];
         for k in 0..n {
@@ -516,7 +520,7 @@ fn eigh(matrix: &[Vec<f64>]) -> (Vec<f64>, Vec<Vec<f64>>) {
                 evecs[i][k] = eig.U()[(i, k)];
             }
         }
-        (evals, evecs)
+        Ok((evals, evecs))
     }
 }
 
@@ -524,6 +528,7 @@ fn eigh(matrix: &[Vec<f64>]) -> (Vec<f64>, Vec<Vec<f64>>) {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "faer")]
     #[test]
     fn constrained_quadratic_matches_compass() {
         let mut opt = ConstrainedOpt::new(3, 0.001, f64::INFINITY, 10, Some(0.05));
@@ -541,7 +546,9 @@ mod tests {
         for target in expect {
             let energy = pos[0] * pos[0] + 0.25 * pos[1] * pos[1];
             let force = vec![-2.0 * pos[0], -0.5 * pos[1], 0.0];
-            let step = opt.step(&pos, energy, &force, &pz, &[0.0], Some(&w), 0.0, 0.0);
+            let step = opt
+                .step(&pos, energy, &force, &pz, &[0.0], Some(&w), 0.0, 0.0)
+                .unwrap();
             for k in 0..3 {
                 pos[k] = step.position[k] - step.displacement[k];
             }
@@ -551,6 +558,30 @@ mod tests {
                     "pos {pos:?} target {target:?}"
                 );
             }
+        }
+    }
+
+    #[cfg(not(feature = "faer"))]
+    #[test]
+    fn without_faer_subspace_step_returns_solver_error() {
+        let mut opt = ConstrainedOpt::new(3, 0.001, f64::INFINITY, 10, Some(0.05));
+        let mut pos = vec![1.0, 0.4, 0.0];
+        let w = vec![0.0, 1.0, 0.0];
+        let pz = vec![vec![0.0, 0.0, 1.0]];
+        let energy = pos[0] * pos[0] + 0.25 * pos[1] * pos[1];
+        let force = vec![-2.0 * pos[0], -0.5 * pos[1], 0.0];
+        let step = opt
+            .step(&pos, energy, &force, &pz, &[0.0], Some(&w), 0.0, 0.0)
+            .unwrap();
+        for k in 0..3 {
+            pos[k] = step.position[k] - step.displacement[k];
+        }
+        let energy = pos[0] * pos[0] + 0.25 * pos[1] * pos[1];
+        let force = vec![-2.0 * pos[0], -0.5 * pos[1], 0.0];
+        match opt.step(&pos, energy, &force, &pz, &[0.0], Some(&w), 0.0, 0.0) {
+            Err(SaddleError::Solver(msg)) => assert!(msg.contains("faer"), "{msg}"),
+            Ok(_) => panic!("expected SaddleError::Solver without faer"),
+            Err(other) => panic!("expected SaddleError::Solver, got {other:?}"),
         }
     }
 }

@@ -249,6 +249,7 @@ impl ModelClimb {
 /// call it was before, so the 9-dof triangle fixtures of the climb tests
 /// keep Jacobi. LJ38, a Pt-island image, and the 40-wide
 /// `wide_ts_bfgs_matches_jacobi` model take faer.
+#[cfg(feature = "faer")]
 const TS_BFGS_JACOBI_LIMIT: usize = 32;
 
 #[cfg(all(test, feature = "faer"))]
@@ -377,6 +378,7 @@ fn eigh(matrix: &Array2<f64>) -> Result<(Array1<f64>, Array2<f64>), SaddleError>
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "faer")]
     use super::super::pair_model::rigid_basis;
     use super::*;
 
@@ -391,6 +393,7 @@ mod tests {
         Array1::from(vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.4, 0.9, 0.0])
     }
 
+    #[cfg(feature = "faer")]
     #[test]
     fn the_fitted_model_carries_the_measured_mode() {
         let x = triangle();
@@ -418,6 +421,7 @@ mod tests {
         assert!((stretch.dot(&climb.b.dot(&stretch)) - 0.25 * along).abs() < 1e-12);
     }
 
+    #[cfg(feature = "faer")]
     #[test]
     fn rigid_motions_take_no_step() {
         let x = triangle();
@@ -431,6 +435,7 @@ mod tests {
         assert!(q.t().dot(&s).iter().all(|v| v.abs() < 1e-8), "{s}");
     }
 
+    #[cfg(feature = "faer")]
     #[test]
     fn the_step_climbs_the_mode_and_descends_the_rest() {
         let x = Array1::from(vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
@@ -443,6 +448,7 @@ mod tests {
         assert!(s[3] < 0.0, "downhill off the mode: {s:?}");
     }
 
+    #[cfg(feature = "faer")]
     #[test]
     fn the_climb_follows_its_mode_past_a_lower_one() {
         let x = triangle();
@@ -464,6 +470,7 @@ mod tests {
         assert!(s[8] < 0.0, "downhill along the deeper one: {s}");
     }
 
+    #[cfg(feature = "faer")]
     #[test]
     fn the_trust_radius_follows_the_energy_ratio() {
         let x = Array1::from(vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
@@ -543,6 +550,7 @@ mod tests {
         assert!(err < 1e-10, "TS-BFGS left Jacobi by {err}");
     }
 
+    #[cfg(feature = "faer")]
     #[test]
     fn the_step_respects_the_per_atom_cap() {
         let x = Array1::from(vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
@@ -550,5 +558,22 @@ mod tests {
         let g = Array1::from(vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
         let s = climb.step(&g, 0.0, 0.05).unwrap();
         assert!(ras_cons(&s) <= 0.05 + 1e-12, "{s:?}");
+    }
+
+    #[cfg(not(feature = "faer"))]
+    #[test]
+    fn without_faer_the_climb_model_returns_solver_error() {
+        let x = triangle();
+        let mode = unit(9, 1);
+        let mut climb = ModelClimb::fitted(&x, None, None, &[], &mode, -2.0, 0.1);
+        match climb.lowest() {
+            Err(SaddleError::Solver(msg)) => assert!(msg.contains("faer"), "{msg}"),
+            other => panic!("expected SaddleError::Solver, got {other:?}"),
+        }
+        let g = Array1::zeros(9);
+        match climb.step(&g, 0.0, 0.1) {
+            Err(SaddleError::Solver(msg)) => assert!(msg.contains("faer"), "{msg}"),
+            other => panic!("expected SaddleError::Solver, got {other:?}"),
+        }
     }
 }

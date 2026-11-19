@@ -172,6 +172,7 @@ fn a_one_sided_energy_window_keeps_the_climber_inside() {
     assert_saddle_at(&session, report.ci_index, 0.3);
 }
 
+#[cfg(feature = "faer")]
 #[test]
 fn the_zoom_decides_before_the_min_mode_refinement_starts() {
     let refined = |zoom| BandConfig::default().with_max_move(0.1).with_zoom(zoom);

@@ -5,11 +5,14 @@
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, array};
 use rgmin::Method;
 use rgsaddle::{
-    AutoNeb, AutoNebInterpolant, AutoNebTuning, BandConfig, BandSession, BandStatus, BandSurface,
-    Cell, CellMask, CiConfig, ConnectConfig, ExpBandPrecon, ForceGate, IdppConfig, MinModeKind,
-    MinModeRefine, OcinebConfig, OcinebPhase, OcinebSession, OcinebStatus, PointSurface,
-    ProjectionKind, Reparametrization, RtrConfig, SaddleError, SaddleIndexCheck, SolidNeb,
-    SolidState, SpringKind, TangentKind, connect, joint_coordinate, linear_path,
+    AutoNeb, AutoNebInterpolant, AutoNebTuning, BandConfig, BandStatus, BandSurface, Cell,
+    CellMask, CiConfig, ConnectConfig, IdppConfig, OcinebConfig, OcinebSession, PointSurface,
+    SaddleError, SolidNeb, SpringKind, connect, joint_coordinate, linear_path,
+};
+#[cfg(feature = "faer")]
+use rgsaddle::{
+    BandSession, ExpBandPrecon, ForceGate, MinModeKind, MinModeRefine, OcinebPhase, OcinebStatus,
+    ProjectionKind, Reparametrization, RtrConfig, SaddleIndexCheck, SolidState, TangentKind,
 };
 
 const MB_A: [f64; 4] = [-200.0, -100.0, -170.0, 15.0];
@@ -118,6 +121,7 @@ fn two_barrier_toy(x: &[f64]) -> Result<(f64, Vec<f64>), SaddleError> {
     Ok((energy, gradient))
 }
 
+#[cfg(feature = "faer")]
 #[test]
 fn connect_falls_back_through_compass_and_sqnm_when_idpp_hits_well() {
     // With band_images = 1, the sole interior IDPP image lands at the
@@ -206,6 +210,7 @@ fn connect_falls_back_through_compass_and_sqnm_when_idpp_hits_well() {
     }
 }
 
+#[cfg(feature = "faer")]
 #[test]
 fn connect_zero_steps_returns_ok() {
     let left = [-2.0, 0.0, 0.0];
@@ -334,6 +339,7 @@ fn autoneb_idpp_full_band_and_threads_converge_on_muller_brown() {
     assert!(rgsaddle::autoneb::worst_segment(&[1.0], &[0.0, 1.0], 1.0, -0.1).is_err());
 }
 
+#[cfg(feature = "faer")]
 #[test]
 fn neb_variants_and_ocineb_controls_cover_all_projections_and_springs() {
     let b = array![-0.050011, 0.466694, 0.0];
@@ -555,4 +561,37 @@ fn solid_neb_accessors_and_joint_coordinate_errors() {
     assert_eq!(joint.cartesian().unwrap().dim(), (5, 3));
     assert_eq!(joint.generalized().dim(), (5, 6));
     assert!(joint.step_surface(&DoubleWell).is_err());
+}
+
+#[cfg(not(feature = "faer"))]
+#[test]
+fn connect_and_ocineb_without_faer_return_solver_error() {
+    let left = [-2.0, 0.0, 0.0];
+    let right = [2.0, 0.0, 0.0];
+    let cfg = ConnectConfig::default()
+        .with_band_images(1)
+        .with_nsteps(10)
+        .with_minimize_nsteps(10)
+        .with_n_loops(2);
+    match connect(two_barrier_toy, &left, &right, &cfg) {
+        Err(SaddleError::Solver(msg)) => assert!(msg.contains("faer"), "{msg}"),
+        other => panic!("expected SaddleError::Solver, got {other:?}"),
+    }
+
+    let b = array![-0.050011, 0.466694, 0.0];
+    let c = array![0.623499, 0.028038, 0.0];
+    let path = linear_path(b.view(), c.view(), 7, None).unwrap();
+    let oci_cfg = OcinebConfig::default()
+        .with_band(
+            BandConfig::default()
+                .with_climbing(CiConfig::after_rel(0.5))
+                .with_force_tol(1e-2)
+                .with_max_move(0.05),
+        )
+        .with_stability_count(2);
+    let mut oci = OcinebSession::new(oci_cfg, path).unwrap();
+    match oci.run(&MullerBrown, 200) {
+        Err(SaddleError::Solver(msg)) => assert!(msg.contains("faer"), "{msg}"),
+        other => panic!("expected SaddleError::Solver, got {other:?}"),
+    }
 }

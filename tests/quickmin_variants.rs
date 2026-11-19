@@ -2,7 +2,9 @@
 //! climbing-image saddle.
 
 use ndarray::{Array1, Array2, ArrayView2};
-use rgsaddle::{BandConfig, BandSession, BandStatus, BandSurface, CiConfig, SaddleError};
+use rgsaddle::{BandConfig, BandSession, BandSurface, SaddleError};
+#[cfg(feature = "faer")]
+use rgsaddle::{BandStatus, CiConfig};
 
 /// One atom on V = (x^2 - 1)^2 + 2 y^2 + 2 z^2: minima at x = +-1, the
 /// saddle at the origin with energy 1.
@@ -26,6 +28,7 @@ impl BandSurface for DoubleWell {
     }
 }
 
+#[cfg(feature = "faer")]
 fn relax(options: rgmin::QuickMinOptions, time_step: f64) -> (usize, f64) {
     let n = 7;
     let mut band = Array2::zeros((n, 3));
@@ -53,6 +56,7 @@ fn relax(options: rgmin::QuickMinOptions, time_step: f64) -> (usize, f64) {
     (report.iteration, x)
 }
 
+#[cfg(feature = "faer")]
 #[test]
 fn every_quick_min_variant_finds_the_saddle() {
     // The eOn variant keeps its time step fixed; 1 is too large for it

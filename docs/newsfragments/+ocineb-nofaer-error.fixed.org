@@ -1,0 +1,2 @@
+OCI-NEB's P-RFO climb, ~connect~, ~sqnm~, and ~exact_eigh~ above dimension 128 return ~SaddleError::Solver~ (~RGSADDLE_SOLVER~ in the C ABI) instead of panicking when the crate is built without the ~faer~ Cargo feature.
+~SaddleError~ is now marked ~#[non_exhaustive]~.

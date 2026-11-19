@@ -1,13 +1,14 @@
 //! CI-NEB to minimum-mode hand-off on analytic surfaces.
 
+#[cfg(feature = "faer")]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+#[cfg(feature = "faer")]
 use approx::assert_abs_diff_eq;
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
-use rgsaddle::{
-    BandConfig, BandSession, BandStatus, BandSurface, OcinebConfig, OcinebPhase, OcinebSession,
-    OcinebStatus, PointSurface, SaddleError,
-};
+#[cfg(feature = "faer")]
+use rgsaddle::{BandConfig, BandSession, BandStatus, OcinebStatus};
+use rgsaddle::{BandSurface, OcinebConfig, OcinebPhase, OcinebSession, PointSurface, SaddleError};
 
 struct Well {
     y_k: f64,
@@ -25,6 +26,7 @@ impl Well {
         }
     }
 
+    #[cfg(feature = "faer")]
     fn stiff() -> Self {
         Self {
             y_k: 25.0,
@@ -33,6 +35,7 @@ impl Well {
         }
     }
 
+    #[cfg(feature = "faer")]
     fn flat() -> Self {
         Self {
             y_k: 4.0,
@@ -143,11 +146,13 @@ impl PointSurface for Bowl {
     }
 }
 
+#[cfg(feature = "faer")]
 struct Counted<S> {
     inner: S,
     geometries: AtomicUsize,
 }
 
+#[cfg(feature = "faer")]
 impl<S> Counted<S> {
     fn new(inner: S) -> Self {
         Self {
@@ -161,6 +166,7 @@ impl<S> Counted<S> {
     }
 }
 
+#[cfg(feature = "faer")]
 impl<S: BandSurface> BandSurface for Counted<S> {
     fn eval(
         &self,
@@ -174,6 +180,7 @@ impl<S: BandSurface> BandSurface for Counted<S> {
     }
 }
 
+#[cfg(feature = "faer")]
 impl<S: PointSurface> PointSurface for Counted<S> {
     fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
         self.geometries.fetch_add(1, Ordering::Relaxed);
@@ -207,6 +214,7 @@ fn ocineb_config(force_tol: f64) -> OcinebConfig {
     config.with_band(band).with_minmode(minmode)
 }
 
+#[cfg(feature = "faer")]
 fn run_ocineb(well: &Well, n_images: usize, y_amp: f64, force_tol: f64) -> (OcinebSession, usize) {
     let surface = Counted::new(Well {
         y_k: well.y_k,
@@ -234,6 +242,7 @@ fn run_ocineb(well: &Well, n_images: usize, y_amp: f64, force_tol: f64) -> (Ocin
     (session, surface.geometries())
 }
 
+#[cfg(feature = "faer")]
 fn run_band(
     well: &Well,
     n_images: usize,
@@ -261,6 +270,7 @@ fn run_band(
 }
 
 /// Position and energy of the climbing image.
+#[cfg(feature = "faer")]
 fn climbing_point(well: &Well, positions: ArrayView2<f64>, ci: usize) -> ([f64; 3], f64) {
     let x = [positions[(ci, 0)], positions[(ci, 1)], positions[(ci, 2)]];
     (x, well.energy_grad(x[0], x[1], x[2]).0)
@@ -376,6 +386,7 @@ fn positive_curvature_restores_the_climbing_image() {
     assert!(saw, "positive-curvature fallback did not run");
 }
 
+#[cfg(feature = "faer")]
 #[test]
 fn handoff_finds_the_same_saddle_as_plain_ci_neb() {
     let n_images = 9;
@@ -408,6 +419,121 @@ fn handoff_finds_the_same_saddle_as_plain_ci_neb() {
     assert_abs_diff_eq!(pos[(ci, 1)], plain_pos[(plain_ci, 1)], epsilon = 0.05);
 }
 
+#[cfg(not(feature = "faer"))]
+#[test]
+fn handoff_climb_without_faer_returns_solver_error() {
+    let mut session = OcinebSession::new(ocineb_config(1e-3), initial_band(9, 0.3)).unwrap();
+    let err = session.run(&Well::smooth(), 400).unwrap_err();
+    assert_eq!(session.phase(), OcinebPhase::MinMode);
+    match err {
+        SaddleError::Solver(msg) => assert!(msg.contains("faer"), "{msg}"),
+        other => panic!("expected SaddleError::Solver, got {other:?}"),
+    }
+}
+
+#[cfg(all(feature = "capi", not(feature = "faer")))]
+#[test]
+fn c_abi_handoff_climb_without_faer_returns_solver_status() {
+    use rgsaddle::capi::*;
+    use std::ffi::c_void;
+
+    extern "C" fn double_well(_user: *mut c_void, req: *mut RgsaddleSurfaceRequest) -> i32 {
+        let req = unsafe { &mut *req };
+        let rows = req.n_images as usize;
+        let x = unsafe { std::slice::from_raw_parts(req.positions, 3 * rows) };
+        let e = unsafe { std::slice::from_raw_parts_mut(req.energies, rows) };
+        let g = unsafe { std::slice::from_raw_parts_mut(req.gradients, 3 * rows) };
+        for i in 0..rows {
+            let (px, py, pz) = (x[3 * i], x[3 * i + 1], x[3 * i + 2]);
+            e[i] = (px * px - 1.0).powi(2) + 2.0 * py * py + 2.0 * pz * pz;
+            g[3 * i] = 4.0 * px * (px * px - 1.0);
+            g[3 * i + 1] = 4.0 * py;
+            g[3 * i + 2] = 4.0 * pz;
+        }
+        RGSADDLE_OK
+    }
+
+    let n_images = 9usize;
+    let pos: Vec<f64> = initial_band(n_images, 0.3).into_iter().collect();
+    let band = RgsaddleBandConfig {
+        version: RgsaddleVersion {
+            major: RGSADDLE_ABI_MAJOR,
+            minor: RGSADDLE_ABI_MINOR,
+        },
+        flags: 0,
+        tangent: 1,
+        spring: 0,
+        projection: 1,
+        method: 0,
+        spring_k: 5.0,
+        spring_ks: std::ptr::null(),
+        ci_trigger_factor: 0.5,
+        ci_trigger_force: 0.0,
+        cell: std::ptr::null(),
+        force_tol: 1e-3,
+        max_move: 0.1,
+        memory: 0,
+    };
+    let mm = RgsaddleMinModeConfig {
+        version: RgsaddleVersion {
+            major: RGSADDLE_ABI_MAJOR,
+            minor: RGSADDLE_ABI_MINOR,
+        },
+        flags: 0,
+        kind: 0,
+        method: 0,
+        dr: 1e-3,
+        rotation_tol: 1e-4,
+        max_rotations: 20,
+        krylov_dim: 8,
+        force_tol: 1e-3,
+        max_move: 0.1,
+        rotation_angle_tol: 5f64.to_radians(),
+        difference: 0,
+        reserved: 0,
+    };
+    let cfg = RgsaddleOcinebConfig {
+        version: RgsaddleVersion {
+            major: RGSADDLE_ABI_MAJOR,
+            minor: RGSADDLE_ABI_MINOR,
+        },
+        flags: 0,
+        trigger_factor: 0.31,
+        trigger_force: 0.0,
+        angle_tol: 0.85,
+        stability_count: 5,
+        max_mmf_steps: 1000,
+        restore_unhelpful: 0,
+        reserved: 0,
+    };
+    let session =
+        unsafe { rgsaddle_ocineb_create(&band, &mm, &cfg, n_images as i64, 1, pos.as_ptr()) };
+    assert!(!session.is_null());
+    let mut report: RgsaddleOcinebReport = unsafe { std::mem::zeroed() };
+    let mut saw_align = false;
+    let mut final_rc = RGSADDLE_OK;
+    for _ in 0..400 {
+        let rc = unsafe {
+            rgsaddle_ocineb_step(
+                session,
+                Some(double_well),
+                std::ptr::null_mut(),
+                &mut report,
+            )
+        };
+        if rc != RGSADDLE_OK {
+            final_rc = rc;
+            break;
+        }
+        if report.phase == 1 {
+            saw_align = true;
+        }
+    }
+    unsafe { rgsaddle_ocineb_free(session) };
+    assert!(saw_align, "expected alignment step before climb failure");
+    assert_eq!(final_rc, RGSADDLE_SOLVER);
+}
+
 /// OCI-NEB (Goswami, Gunde, and Jónsson, "Enhanced climbing image
 /// nudged elastic band method with Hessian eigenmode alignment",
 /// Front. Chem. 14 (2026), doi:10.3389/fchem.2026.1807063) against
@@ -423,6 +549,7 @@ fn handoff_finds_the_same_saddle_as_plain_ci_neb() {
 /// The OCI/CI force-call ratios are 0.170, 0.167 and 0.201 on these
 /// starts and at most 0.332 over initial bows of 0.2 to 0.5, so the
 /// bound is half the CI-NEB count.
+#[cfg(feature = "faer")]
 #[test]
 fn benchmark_force_calls_against_plain_ci_neb() {
     let tol = 1e-3;

@@ -418,7 +418,14 @@ fn connect_force(
         let down_minus = minimize(&mut ev, &minus, settings)?;
         let mut unique = Vec::new();
         for node in [left_min, right_min, down_plus, down_minus] {
-            if unique.iter().any(|kept: &Img| same_basin(kept, &node)) {
+            let mut duplicate = false;
+            for kept in &unique {
+                if same_basin(kept, &node)? {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if duplicate {
                 continue;
             }
             unique.push(node);
@@ -1202,7 +1209,7 @@ fn search_pair(
     let mut ev = Eval { f: energy_force };
     let a = minimize(&mut ev, left, settings)?;
     let mut b = minimize(&mut ev, right, settings)?;
-    let (b_pos, b_force) = align_to(&b.pos, &b.force, &a.pos);
+    let (b_pos, b_force) = align_to(&b.pos, &b.force, &a.pos)?;
     b.pos = b_pos;
     b.force = b_force;
     let mut nodes = vec![a.clone(), b.clone()];
@@ -1236,7 +1243,7 @@ fn search_pair(
         }
         let (isegment, _) = select(&segments, &nodes, settings.energy_difference_threshold);
         let mut pair = [nodes[isegment].clone(), nodes[isegment + 1].clone()];
-        let (pos, force) = align_to(&pair[1].pos, &pair[1].force, &pair[0].pos);
+        let (pos, force) = align_to(&pair[1].pos, &pair[1].force, &pair[0].pos)?;
         pair[1].pos = pos;
         pair[1].force = force;
         let outcome = optimization_loop(&mut ev, pair, settings)?;
@@ -1465,7 +1472,7 @@ fn optimization_loop(
             &mut ndim,
             &mut constant_distance_desired,
             settings,
-        ) {
+        )? {
             StepResult::Stop {
                 saddle,
                 barrier,
@@ -1527,7 +1534,7 @@ fn optimization_step(
     ndim: &mut usize,
     constant_distance_desired: &mut f64,
     settings: &Settings,
-) -> StepResult {
+) -> Result<StepResult, SaddleError> {
     let n = images[0].pos.len();
     let energy = [images[0].energy, images[1].energy];
     let pos = [images[0].pos.clone(), images[1].pos.clone()];
@@ -1622,37 +1629,37 @@ fn optimization_step(
         && energy_max > energy_est + settings.energy_difference_threshold
     {
         *distance_reached = true;
-        return StepResult::Stop {
+        return Ok(StepResult::Stop {
             saddle: false,
             barrier: energy_est,
             past_cap: false,
-        };
+        });
     }
     if moving_sides.len() == 1 && *distance_reached {
-        return StepResult::Stop {
+        return Ok(StepResult::Stop {
             saddle: false,
             barrier: energy_est,
             past_cap: false,
-        };
+        });
     }
     if moving_sides.len() > 1
         && perp_norm < settings.forcetol
         && perp_norm < settings.forcetol_per_distance * dist
         && *distance_reached
     {
-        return StepResult::Stop {
+        return Ok(StepResult::Stop {
             saddle: cosp > settings.saddle_cosp,
             barrier: energy_est,
             past_cap: false,
-        };
+        });
     }
     if it >= settings.nsteps {
         // Python increments `it` before leaving, so the caller sees it > nsteps.
-        return StepResult::Stop {
+        return Ok(StepResult::Stop {
             saddle: false,
             barrier: energy_est,
             past_cap: true,
-        };
+        });
     }
     let projection_w = energy_cols;
     let projection_b: Vec<f64> = if projection_w.is_empty() {
@@ -1672,7 +1679,7 @@ fn optimization_step(
         Some(&constraint),
         0.0,
         0.0,
-    );
+    )?;
     *ndim = out.ndim;
     let projected = out.position;
     let mut r = [projected[..n].to_vec(), projected[n..].to_vec()];
@@ -1750,7 +1757,7 @@ fn optimization_step(
         .iter()
         .map(|&side| (side, r[side].clone()))
         .collect();
-    StepResult::Moved { positions }
+    Ok(StepResult::Moved { positions })
 }
 
 fn record_extrema(
@@ -1871,13 +1878,17 @@ fn minimize(ev: &mut Eval<'_>, pos: &[f64], settings: &Settings) -> Result<Img, 
         if max_atom(&img.force) < settings.minimize_fmax || it == settings.minimize_nsteps {
             return Ok(img);
         }
-        let step = opt.step(&x, img.energy, &img.force, &[], &[], None, 0.0, 0.0);
+        let step = opt.step(&x, img.energy, &img.force, &[], &[], None, 0.0, 0.0)?;
         x = sub(&step.position, &step.displacement);
         it += 1;
     }
 }
 
-fn align_to(pos: &[f64], force: &[f64], target: &[f64]) -> (Vec<f64>, Vec<f64>) {
+fn align_to(
+    pos: &[f64],
+    force: &[f64],
+    target: &[f64],
+) -> Result<(Vec<f64>, Vec<f64>), SaddleError> {
     let n = pos.len() / 3;
     let mut c = [0.0; 3];
     let mut c0 = [0.0; 3];
@@ -1918,7 +1929,7 @@ fn align_to(pos: &[f64], force: &[f64], target: &[f64]) -> (Vec<f64>, Vec<f64>) 
         r21 += py * qx;
         r32 += pz * qy;
     }
-    let rot = quaternion_rotation(r11, r22, r33, r12, r23, r31, r13, r21, r32);
+    let rot = quaternion_rotation(r11, r22, r33, r12, r23, r31, r13, r21, r32)?;
     let mut out = vec![0.0; pos.len()];
     let mut fout = vec![0.0; force.len()];
     for i in 0..n {
@@ -1939,7 +1950,7 @@ fn align_to(pos: &[f64], force: &[f64], target: &[f64]) -> (Vec<f64>, Vec<f64>) 
             fout[3 * i + r] = vf;
         }
     }
-    (out, fout)
+    Ok((out, fout))
 }
 
 struct Mat3 {
@@ -1977,13 +1988,13 @@ fn quaternion_rotation(
     r13: f64,
     r21: f64,
     r32: f64,
-) -> Mat3 {
-    // The Kani build turns faer off. Those harnesses return before connect.
-    // A call that reaches this panic fails the proof.
+) -> Result<Mat3, SaddleError> {
     #[cfg(not(feature = "faer"))]
     {
         let _ = (r11, r22, r33, r12, r23, r31, r13, r21, r32);
-        panic!("quaternion spectrum requires the faer feature");
+        Err(SaddleError::Solver(
+            "quaternion spectrum requires the faer feature".into(),
+        ))
     }
     #[cfg(feature = "faer")]
     {
@@ -2001,7 +2012,7 @@ fn quaternion_rotation(
         }
         let eig = m
             .self_adjoint_eigen(faer::Side::Lower)
-            .expect("quaternion eigh");
+            .map_err(|_| SaddleError::Solver("quaternion eigen did not converge".into()))?;
         let mut best = 0;
         for k in 1..4 {
             if eig.S()[k] > eig.S()[best] {
@@ -2022,7 +2033,7 @@ fn quaternion_rotation(
         rot[(2, 0)] = 2.0 * (q1 * q3 - q0 * q2);
         rot[(2, 1)] = 2.0 * (q2 * q3 + q0 * q1);
         rot[(2, 2)] = q0 * q0 - q1 * q1 - q2 * q2 + q3 * q3;
-        rot
+        Ok(rot)
     }
 }
 
@@ -2150,18 +2161,18 @@ fn max_atom(v: &[f64]) -> f64 {
         .fold(0.0, f64::max)
 }
 
-fn same_basin(a: &Img, b: &Img) -> bool {
+fn same_basin(a: &Img, b: &Img) -> Result<bool, SaddleError> {
     if (a.energy - b.energy).abs() >= 0.05 {
-        return false;
+        return Ok(false);
     }
-    let (pos, _) = align_to(&a.pos, &a.force, &b.pos);
+    let (pos, _) = align_to(&a.pos, &a.force, &b.pos)?;
     let atoms = (pos.len() / 3).max(1) as f64;
     let mut acc = 0.0;
     for (x, y) in pos.iter().zip(&b.pos) {
         let d = x - y;
         acc += d * d;
     }
-    (acc / atoms).sqrt() < 0.30
+    Ok((acc / atoms).sqrt() < 0.30)
 }
 
 fn gradient(ev: &mut Eval<'_>, pos: &[f64]) -> Result<Vec<f64>, SaddleError> {
@@ -2198,7 +2209,7 @@ fn vibrational_mode(ev: &mut Eval<'_>, pos: &[f64]) -> Result<(usize, Vec<f64>),
         }
     }
     let modes = rigid_basis(pos);
-    let (evals, evecs) = eigh_dense(&project_rigid(&hess, &modes));
+    let (evals, evecs) = eigh_dense(&project_rigid(&hess, &modes))?;
     let mut index = 0;
     for value in &evals {
         if *value < -1e-6 {
@@ -2314,12 +2325,14 @@ fn rigid_basis(pos: &[f64]) -> Vec<Vec<f64>> {
     basis
 }
 
-fn eigh_dense(matrix: &[Vec<f64>]) -> (Vec<f64>, Vec<Vec<f64>>) {
+fn eigh_dense(matrix: &[Vec<f64>]) -> Result<(Vec<f64>, Vec<Vec<f64>>), SaddleError> {
     // Same faer gate as `quaternion_rotation`.
     #[cfg(not(feature = "faer"))]
     {
         let _ = matrix;
-        panic!("self-adjoint spectrum requires the faer feature");
+        Err(SaddleError::Solver(
+            "self-adjoint spectrum requires the faer feature".into(),
+        ))
     }
     #[cfg(feature = "faer")]
     {
@@ -2330,7 +2343,9 @@ fn eigh_dense(matrix: &[Vec<f64>]) -> (Vec<f64>, Vec<Vec<f64>>) {
                 m[(i, j)] = matrix[i][j];
             }
         }
-        let eig = m.self_adjoint_eigen(faer::Side::Lower).unwrap();
+        let eig = m
+            .self_adjoint_eigen(faer::Side::Lower)
+            .map_err(|_| SaddleError::Solver("self-adjoint eigen did not converge".into()))?;
         let mut evals = vec![0.0; n];
         let mut evecs = vec![vec![0.0; n]; n];
         for k in 0..n {
@@ -2341,7 +2356,7 @@ fn eigh_dense(matrix: &[Vec<f64>]) -> (Vec<f64>, Vec<Vec<f64>>) {
             }
             evecs[k] = col;
         }
-        (evals, evecs)
+        Ok((evals, evecs))
     }
 }
 

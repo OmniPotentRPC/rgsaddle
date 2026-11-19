@@ -30,7 +30,11 @@ fn ocineb_c_abi() {
     let out = std::env::temp_dir().join(format!("rgsaddle_ocineb_abi_{}", std::process::id()));
     let libdir = cdylib_dir();
 
-    let status = Command::new(&cc)
+    let mut cmd = Command::new(&cc);
+    if cfg!(not(feature = "faer")) {
+        cmd.arg("-DRGSADDLE_NO_FAER=1");
+    }
+    let status = cmd
         .arg(root.join("tests/c/ocineb_abi.c"))
         .arg("-I")
         .arg(root.join("include"))

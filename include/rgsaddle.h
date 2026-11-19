@@ -75,7 +75,10 @@ extern "C" {
  * vectors, following that mode, while the other images stay. The band
  * resumes when the measured curvature turns positive; a refinement
  * that did not lower the force waits for half the force it started
- * from. rgsaddle_ocineb_create does not read the bit.
+ * from. The P-RFO climb diagonalizes its dense model with faer, so it
+ * requires the faer Cargo feature (on by default) and returns
+ * RGSADDLE_SOLVER when the library is built without it.
+ * rgsaddle_ocineb_create does not read the bit.
  */
 #define RGSADDLE_BAND_NO_MIN_MODE (1ull << 3)
 
@@ -1286,7 +1289,11 @@ RgsaddleOcineb *rgsaddle_ocineb_create(const rgsaddle_band_config_t *band,
                                        int64_t n_images, int64_t n_atoms,
                                        const double *positions);
 
-/** One band step, one alignment, or one P-RFO climb step. */
+/**
+ * One band step, one alignment, or one P-RFO climb step. The climb
+ * step requires the faer Cargo feature (on by default) and returns
+ * RGSADDLE_SOLVER when the library is built without it.
+ */
 rgsaddle_status_t rgsaddle_ocineb_step(RgsaddleOcineb *session,
                                        rgsaddle_surface_fn surface, void *user,
                                        rgsaddle_ocineb_report_t *out);

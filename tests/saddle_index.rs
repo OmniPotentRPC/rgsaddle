@@ -182,6 +182,7 @@ fn the_symmetric_band_climbs_to_the_index_two_top() {
     assert_eq!(session.saddle_escapes(), 0);
 }
 
+#[cfg(feature = "faer")]
 #[test]
 fn the_band_escape_climbs_to_an_index_one_saddle() {
     let (session, reports) = band(band_config(Some(escape())));

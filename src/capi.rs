@@ -2001,6 +2001,7 @@ pub unsafe extern "C" fn rgsaddle_index1_free(session: *mut RgsaddleIndex1) {
 }
 
 mod ocineb;
+pub use ocineb::*;
 #[repr(C)]
 /// The RgsaddleConnectConfig.
 pub struct RgsaddleConnectConfig {

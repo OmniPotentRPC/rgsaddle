@@ -9,9 +9,13 @@
 //! the band without a mask.
 
 use rgsaddle::{
-    BandConfig, BandRtr, BandSession, BandStatus, BandSurface, ExpBandPrecon, MinModeConfig,
-    MinModeKind, MinModeSession, MinModeStatus, PointSurface, RtrConfig, SaddleError, SaddleEscape,
-    SaddleIndex, SaddleIndexCheck, band_forces,
+    BandConfig, BandRtr, BandSession, BandSurface, ExpBandPrecon, RtrConfig, SaddleError,
+    band_forces,
+};
+#[cfg(feature = "faer")]
+use rgsaddle::{
+    BandStatus, MinModeConfig, MinModeKind, MinModeSession, MinModeStatus, PointSurface,
+    SaddleEscape, SaddleIndex, SaddleIndexCheck,
 };
 
 include!(concat!(
@@ -19,13 +23,16 @@ include!(concat!(
     "/tests/common/morse_slab.rs"
 ));
 
+#[cfg(feature = "faer")]
 const N_IMAGES: usize = 7;
 
 /// The stationary point on the mirror; its Hessian on the free
 /// coordinates has three negative eigenvalues.
+#[cfg(feature = "faer")]
 const MIRROR_POINT: f64 = -50.6503755;
 
 /// The first-order saddle off the mirror, curvature -0.913 along the hop.
+#[cfg(feature = "faer")]
 const SADDLE: f64 = -50.6761677;
 
 fn config() -> BandConfig {
@@ -38,6 +45,7 @@ fn exp() -> ExpBandPrecon {
     ExpBandPrecon::default()
 }
 
+#[cfg(feature = "faer")]
 fn escape() -> Option<SaddleIndexCheck> {
     Some(SaddleIndexCheck::default().with_escape(Some(SaddleEscape::default())))
 }
@@ -55,6 +63,7 @@ fn frozen_bits(band: ArrayView2<f64>) -> Vec<u64> {
         .collect()
 }
 
+#[cfg(feature = "faer")]
 fn free_max(gradient: ndarray::ArrayView1<f64>) -> f64 {
     let fixed = slab_fixed();
     gradient
@@ -68,6 +77,7 @@ fn free_max(gradient: ndarray::ArrayView1<f64>) -> f64 {
 /// `y = r0` of the adatom's row, to the nearest atom of `x` under the
 /// cell. The slab and the straight band map onto themselves, so this is
 /// zero on every image of the starting band.
+#[cfg(feature = "faer")]
 fn mirror_error(x: ArrayView1<f64>) -> f64 {
     let side = slab_box();
     let atoms = x.len() / 3;
@@ -96,6 +106,7 @@ fn mirror_error(x: ArrayView1<f64>) -> f64 {
 
 /// A converged run: the climbing image, its energy and free-atom
 /// gradient, the surface rows and the saddle certificate.
+#[cfg(feature = "faer")]
 struct Converged {
     energy: f64,
     residual: f64,
@@ -106,6 +117,7 @@ struct Converged {
     check_rows: usize,
 }
 
+#[cfg(feature = "faer")]
 fn converge(config: BandConfig, rtr: bool, band: &Array2<f64>) -> Converged {
     let surface = SlabSurface::new();
     let mut session = BandSession::new(config, band.clone()).expect("session");
@@ -142,10 +154,12 @@ fn converge(config: BandConfig, rtr: bool, band: &Array2<f64>) -> Converged {
     }
 }
 
+#[cfg(feature = "faer")]
 fn index_of(run: &Converged) -> usize {
     run.index.as_ref().expect("certified").index
 }
 
+#[cfg(feature = "faer")]
 #[test]
 fn frozen_atoms_are_bitwise_unchanged_by_every_stepper() {
     let band = slab_band(N_IMAGES);
@@ -174,6 +188,7 @@ fn frozen_atoms_are_bitwise_unchanged_by_every_stepper() {
     }
 }
 
+#[cfg(feature = "faer")]
 #[test]
 fn fire_min_mode_refinement_keeps_the_band_mirror() {
     // The band's own climbing image converges on the mirror through the
@@ -215,6 +230,7 @@ fn fire_min_mode_refinement_keeps_the_band_mirror() {
     assert!((curvatures[2] + 0.059).abs() < 1e-2, "{curvatures:?}");
 }
 
+#[cfg(feature = "faer")]
 #[test]
 fn exp_precon_with_a_frozen_layer_reaches_the_same_mirror_point() {
     let band = slab_band(N_IMAGES);
@@ -270,6 +286,7 @@ fn exp_precon_with_a_frozen_layer_reaches_the_same_mirror_point() {
     }
 }
 
+#[cfg(feature = "faer")]
 #[test]
 fn the_escape_leaves_the_mirror_for_the_first_order_saddle() {
     let band = slab_band(N_IMAGES);
@@ -306,8 +323,10 @@ fn the_escape_leaves_the_mirror_for_the_first_order_saddle() {
 
 /// The slab as a point surface for a min-mode search: the frozen layer's
 /// gradient is zeroed and its coordinates are excluded from the mode.
+#[cfg(feature = "faer")]
 struct FrozenPoint;
 
+#[cfg(feature = "faer")]
 impl PointSurface for FrozenPoint {
     fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
         let (e, mut g) = slab_energy(x);
@@ -330,6 +349,7 @@ impl PointSurface for FrozenPoint {
     }
 }
 
+#[cfg(feature = "faer")]
 #[test]
 fn a_min_mode_search_from_the_mirror_point_escapes_to_the_first_order_saddle() {
     let band = slab_band(N_IMAGES);
@@ -380,6 +400,7 @@ fn a_min_mode_search_from_the_mirror_point_escapes_to_the_first_order_saddle() {
     );
 }
 
+#[cfg(feature = "faer")]
 fn steps(config: BandConfig, band: &Array2<f64>, n: usize) -> (Array2<f64>, Vec<u64>) {
     let surface = SlabSurface::new();
     let mut session = BandSession::new(config, band.clone()).expect("session");
@@ -393,6 +414,7 @@ fn steps(config: BandConfig, band: &Array2<f64>, n: usize) -> (Array2<f64>, Vec<
     (session.positions().to_owned(), trace)
 }
 
+#[cfg(feature = "faer")]
 #[test]
 fn an_all_false_mask_is_bitwise_the_band_without_a_mask() {
     let band = slab_band(5);
@@ -514,6 +536,7 @@ fn frozen_atoms_carry_no_force_in_the_projection_or_the_report() {
         "the test needs a frozen layer under load: {frozen_gradient}"
     );
     assert!(report.max_force.is_finite());
+    assert!(surface.rows() > 0);
 }
 
 #[test]
@@ -577,6 +600,7 @@ fn malformed_masks_are_refused() {
     ));
 }
 
+#[cfg(feature = "faer")]
 #[test]
 fn setting_the_mask_mid_run_pins_the_interior_to_the_first_image() {
     let mut band = slab_band(5);

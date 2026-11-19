@@ -130,9 +130,9 @@ pub(crate) const DENSE_JACOBI_LIMIT: usize = 128;
 ///
 /// Eigenvalues come back in nondecreasing order. Dimension
 /// `DENSE_JACOBI_LIMIT` (128) and below uses cyclic Jacobi. A larger
-/// matrix uses faer's self-adjoint eigensolver. The Kani build leaves
-/// that feature off and panics if a block above the Jacobi limit is
-/// reached; those harnesses return before a Sella session.
+/// matrix uses faer's self-adjoint eigensolver. Without the `faer`
+/// feature, a block above the Jacobi limit returns
+/// [`SaddleError::Solver`].
 ///
 /// `a` is a square matrix; it is symmetrised as `(a + a^T) / 2` first. Returns the
 /// eigenvalues (length `n`) and the orthonormal eigenvectors as the columns of an
@@ -141,7 +141,8 @@ pub(crate) const DENSE_JACOBI_LIMIT: usize = 128;
 /// # Errors
 ///
 /// [`SaddleError::Shape`] when `a` is not square; [`SaddleError::Solver`] when
-/// the eigen solver does not converge.
+/// the eigen solver does not converge or `a` is larger than 128 without the
+/// `faer` feature.
 ///
 /// # Examples
 ///
@@ -182,13 +183,15 @@ pub fn exact_eigh(a: ArrayView2<f64>) -> Result<(Array1<f64>, Array2<f64>), Sadd
 /// Eigenvalues are nondecreasing. Columns are the eigenvectors.
 ///
 /// The `faer` feature is on by default. A build without it still
-/// compiles, and this function panics if a caller reaches it. Connect
+/// compiles and returns [`SaddleError::Solver`] when reached. Connect
 /// and SQNM use the same gate.
 pub(crate) fn faer_eigh(a: &Array2<f64>) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
     #[cfg(not(feature = "faer"))]
     {
         let _ = a;
-        panic!("self-adjoint spectrum requires the faer feature");
+        Err(SaddleError::Solver(
+            "self-adjoint spectrum requires the faer feature".into(),
+        ))
     }
     #[cfg(feature = "faer")]
     {
@@ -967,6 +970,7 @@ mod tests {
     use rgmin::Manifold;
     use rgmin::ManifoldKind;
 
+    #[cfg(feature = "faer")]
     #[test]
     fn small_exact_eigh_matches_jacobi_and_faer() {
         let n = 40;
@@ -997,6 +1001,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "faer")]
     #[test]
     fn large_exact_eigh_matches_the_laplacian_spectrum() {
         let n = 160;
@@ -1028,6 +1033,21 @@ mod tests {
             residual += diff * diff;
         }
         assert!(residual.sqrt() < 1e-8, "residual {}", residual.sqrt());
+    }
+
+    #[cfg(not(feature = "faer"))]
+    #[test]
+    fn without_faer_faer_eigh_and_wide_exact_eigh_return_solver_error() {
+        let small = Array2::<f64>::eye(4);
+        match faer_eigh(&small) {
+            Err(SaddleError::Solver(msg)) => assert!(msg.contains("faer"), "{msg}"),
+            other => panic!("expected SaddleError::Solver, got {other:?}"),
+        }
+        let wide = Array2::<f64>::eye(DENSE_JACOBI_LIMIT + 1);
+        match exact_eigh(wide.view()) {
+            Err(SaddleError::Solver(msg)) => assert!(msg.contains("faer"), "{msg}"),
+            other => panic!("expected SaddleError::Solver, got {other:?}"),
+        }
     }
 
     #[test]

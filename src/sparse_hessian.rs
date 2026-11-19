@@ -3439,6 +3439,7 @@ mod tests {
     #[test]
     fn lanczos_matches_exact_eigh_above_96_dof_and_on_500_atoms() {
         check_dimer_saddle(38);
+        #[cfg(feature = "faer")]
         check_dimer_saddle(498);
     }
 

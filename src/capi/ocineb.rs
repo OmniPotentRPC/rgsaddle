@@ -14,35 +14,60 @@ use crate::minmode::{FiniteDifference, MinModeConfig, MinModeKind};
 use crate::ocineb::{OcinebConfig, OcinebPhase, OcinebSession, OcinebStatus};
 
 #[repr(C)]
+/// The RgsaddleOcinebConfig.
 pub struct RgsaddleOcinebConfig {
+    /// ABI version this value was built against.
     pub version: RgsaddleVersion,
+    /// Bit flags. The header names each bit.
     pub flags: u64,
+    /// Relative trigger on the largest per-atom force.
     pub trigger_factor: f64,
+    /// Absolute trigger on the largest per-atom force when `trigger_factor` is 0.
     pub trigger_force: f64,
+    /// Minimum `|mode . tangent|`.
     pub angle_tol: f64,
+    /// Stable climbing-image iterations required before a hand-off.
     pub stability_count: i64,
+    /// Climb steps per hand-off.
     pub max_mmf_steps: i64,
+    /// Restore the climbing image when a walk does not lower the force.
     pub restore_unhelpful: i32,
+    /// The reserved.
     pub reserved: i32,
 }
 
 #[repr(C)]
+/// The RgsaddleOcinebReport.
 pub struct RgsaddleOcinebReport {
+    /// ABI version this value was built against.
     pub version: RgsaddleVersion,
+    /// Bit flags. The header names each bit.
     pub flags: u64,
+    /// Whether this step is still running or has converged.
     pub status: i32,
+    /// Which solver this step ran.
     pub phase: i32,
+    /// Whether the climb fell back to the band.
     pub fell_back: i32,
+    /// Surface evaluations performed by this call.
     pub evaluations: i32,
+    /// Largest absolute force component.
     pub max_force: f64,
+    /// Curvature along the mode.
     pub curvature: f64,
+    /// `|mode . tangent|` of the last alignment.
     pub alignment: f64,
+    /// Current hand-off force threshold.
     pub threshold: f64,
+    /// Index of the climbing image, or -1.
     pub ci_index: i64,
+    /// Number of steps taken.
     pub iteration: i64,
+    /// Mode rotations in the last alignment or climb step.
     pub rotations: i64,
 }
 
+/// The RgsaddleOcineb.
 pub struct RgsaddleOcineb {
     session: OcinebSession,
     n_images: i64,

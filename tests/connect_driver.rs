@@ -200,6 +200,49 @@ fn c_abi_connects_the_toy() {
     assert!((position[0].abs() - (4.0 / 3.0_f64).sqrt()).abs() < 1e-4);
 }
 
+#[cfg(not(feature = "faer"))]
+#[test]
+fn c_abi_connect_compass_fallback_without_faer_returns_solver_status() {
+    extern "C" fn bowl_surface(_user: *mut c_void, req: *mut RgsaddleSurfaceRequest) -> i32 {
+        let req = unsafe { &mut *req };
+        let n = (req.n_images as usize) * (req.n_atoms as usize) * 3;
+        let pos = unsafe { std::slice::from_raw_parts(req.positions, n) };
+        let g = unsafe { std::slice::from_raw_parts_mut(req.gradients, n) };
+        let energy: f64 = pos.iter().map(|v| 0.5 * v * v).sum();
+        g.copy_from_slice(pos);
+        unsafe { *req.energies = energy };
+        RGSADDLE_OK
+    }
+
+    let config = RgsaddleConnectConfig {
+        version: RgsaddleVersion {
+            major: RGSADDLE_ABI_MAJOR,
+            minor: RGSADDLE_ABI_MINOR,
+        },
+        flags: 0,
+        force_tol: 1e-3,
+        max_calls: 50,
+        quench_nodes: 1,
+    };
+    let left = [-1.0, 0.0, 0.0];
+    let right = [1.0, 0.0, 0.0];
+    let mut position = [0.0_f64; 3];
+    let mut report: RgsaddleConnectReport = unsafe { std::mem::zeroed() };
+    let status = unsafe {
+        rgsaddle::capi::rgsaddle_connect(
+            &config,
+            1,
+            left.as_ptr(),
+            right.as_ptr(),
+            Some(bowl_surface),
+            std::ptr::null_mut(),
+            position.as_mut_ptr(),
+            &mut report,
+        )
+    };
+    assert_eq!(status, rgsaddle::capi::RGSADDLE_SOLVER);
+}
+
 fn add_profile(total: &mut ConnectProfile, profile: &ConnectProfile) {
     total.sqnm_calls += profile.sqnm_calls;
     total.sqnm_steps += profile.sqnm_steps;

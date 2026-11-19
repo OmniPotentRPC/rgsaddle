@@ -37,9 +37,11 @@ use rgmin::{Manifold, prfo_restricted, rfo_get_s};
 /// keep Jacobi. Any wider partition takes faer, in a test as in a climb:
 /// the LJ38 and Pt-island downhill blocks, and the 59-wide downhill block
 /// behind `secular_root_matches_the_augmented_step_on_a_wide_diagonal`.
+#[cfg(feature = "faer")]
 const AUGMENTED_JACOBI_LIMIT: usize = 32;
 
 /// Floor on the last augmented coordinate, matching rgmin `rfo_get_s`.
+#[cfg(feature = "faer")]
 const AUGMENTED_DENOM_FLOOR: f64 = 1e-12;
 
 const TRUST_ITERS: usize = 64;

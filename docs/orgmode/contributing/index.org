@@ -28,7 +28,7 @@ cargo fmt --check
 
 Optional features are checked with their dependencies enabled.
 The ~faer~ feature is part of the default set.
-It is the dense self-adjoint spectrum used by connect and SQNM.
+It is the dense self-adjoint spectrum used by OCI-NEB, connect, SQNM, and ~exact_eigh~ above dimension 128; without ~faer~, those paths return ~SaddleError::Solver~ (~RGSADDLE_SOLVER~ in the C ABI).
 The Kani workflow's prove step builds with ~--no-default-features --features capi~ so that job does not compile ~pulp~.
 The ~kani-github-action~ default command is a bare ~cargo-kani~, which would enable ~faer~.
 The workflow overrides that command and does not pass ~--ignore-global-asm~.

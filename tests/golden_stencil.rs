@@ -13,15 +13,22 @@ use std::fs;
 use std::path::PathBuf;
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
+#[cfg(feature = "faer")]
 use rayon::ThreadPoolBuilder;
+#[cfg(feature = "faer")]
 use rgsaddle::{
-    AutoNeb, AutoNebInterpolant, AutoNebTuning, BandConfig, BandSession, BandSurface, CiConfig,
-    FiniteDifference, MinModeConfig, MinModeKind, MinModeSession, PointSurface, Preset,
-    ProjectionKind, SaddleError, SpringKind, Stencil, TangentKind,
+    AutoNeb, AutoNebInterpolant, AutoNebTuning, BandConfig, BandSession, CiConfig, ProjectionKind,
+    SpringKind, TangentKind,
+};
+use rgsaddle::{
+    BandSurface, FiniteDifference, MinModeConfig, MinModeKind, MinModeSession, PointSurface,
+    Preset, SaddleError, Stencil,
 };
 use sha2::{Digest, Sha256};
 
+#[cfg(feature = "faer")]
 const THREADS: [usize; 4] = [1, 2, 3, 8];
+#[cfg(feature = "faer")]
 const BAND_STEPS: usize = 4;
 const MODE_STEPS: usize = 3;
 
@@ -40,6 +47,7 @@ fn hash_bytes(positions: ArrayView2<f64>, energies: &[f64]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+#[cfg(feature = "faer")]
 fn on_pool<T: Send>(threads: usize, body: impl FnOnce() -> T + Send) -> T {
     let pool = ThreadPoolBuilder::new()
         .num_threads(threads)
@@ -205,6 +213,7 @@ fn array_from(values: &[f64]) -> Array1<f64> {
     Array1::from_vec(values.to_vec())
 }
 
+#[cfg(feature = "faer")]
 fn lerp_band(start: &[f64], end: &[f64], n_images: usize) -> Array2<f64> {
     let dof = start.len();
     let mut band = Array2::zeros((n_images, dof));
@@ -217,6 +226,7 @@ fn lerp_band(start: &[f64], end: &[f64], n_images: usize) -> Array2<f64> {
     band
 }
 
+#[cfg(feature = "faer")]
 fn double_well_band() -> Array2<f64> {
     let n = 7;
     let mut band = Array2::zeros((n, 3));
@@ -228,10 +238,12 @@ fn double_well_band() -> Array2<f64> {
     band
 }
 
+#[cfg(feature = "faer")]
 fn muller_band() -> Array2<f64> {
     lerp_band(&[-0.558, 1.442, 0.0], &[0.623, 0.028, 0.0], 5)
 }
 
+#[cfg(feature = "faer")]
 fn chain_band() -> Array2<f64> {
     lerp_band(
         &[-1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
@@ -240,6 +252,7 @@ fn chain_band() -> Array2<f64> {
     )
 }
 
+#[cfg(feature = "faer")]
 fn band_config(preset: &str) -> BandConfig {
     let config = BandConfig::default()
         .with_tangent(TangentKind::Improved)
@@ -270,6 +283,7 @@ fn band_config(preset: &str) -> BandConfig {
     }
 }
 
+#[cfg(feature = "faer")]
 fn run_band(preset: &str, fixture: &str) -> (Array2<f64>, Vec<f64>) {
     let initial = match fixture {
         "double-well" => double_well_band(),
@@ -373,6 +387,7 @@ fn run_mode(preset: &str, fixture: &str) -> (Array2<f64>, Vec<f64>) {
     (positions, energies)
 }
 
+#[cfg(feature = "faer")]
 fn run_autoneb(fixture: &str, threads: usize) -> (Array2<f64>, Vec<f64>) {
     let initial = match fixture {
         "double-well" => lerp_band(&[-1.0, 0.0, 0.0], &[1.0, 0.0, 0.0], 2),
@@ -426,6 +441,7 @@ fn run_autoneb(fixture: &str, threads: usize) -> (Array2<f64>, Vec<f64>) {
     (positions, energies)
 }
 
+#[cfg(feature = "faer")]
 fn cases() -> Vec<(&'static str, &'static str)> {
     let fixtures = ["double-well", "muller-brown", "harmonic-chain"];
     let mut out = Vec::new();
@@ -445,6 +461,7 @@ fn cases() -> Vec<(&'static str, &'static str)> {
     out
 }
 
+#[cfg(feature = "faer")]
 fn digest(preset: &str, fixture: &str, threads: usize) -> String {
     let (positions, energies) = if preset == "dimer" || preset == "lanczos" {
         run_mode(preset, fixture)
@@ -456,6 +473,7 @@ fn digest(preset: &str, fixture: &str, threads: usize) -> String {
     hash_bytes(positions.view(), &energies)
 }
 
+#[cfg(feature = "faer")]
 fn collect_lines() -> Vec<String> {
     let mut lines = Vec::new();
     for (preset, fixture) in cases() {
@@ -539,6 +557,7 @@ fn run_stencil_mode(preset: &str, fixture: &str) -> (Array2<f64>, Vec<f64>) {
     (positions, energies)
 }
 
+#[cfg(feature = "faer")]
 #[test]
 fn golden_hashes_match_the_recorded_bytes() {
     let lines = collect_lines();

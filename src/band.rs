@@ -366,8 +366,10 @@ pub struct BandConfig {
     pub autoneb: Option<crate::autoneb::AutoNebTuning>,
     /// OCI-NEB min-mode refinement of the armed climbing image
     /// (Goswami, Gunde, and Jónsson, Front. Chem. 14, 1807063 (2026)).
-    /// On by default; it needs `climbing` and runs on the atomic band,
-    /// not on the solid-state block. `None` keeps the plain CI-NEB.
+    /// On by default; it needs `climbing` and the `faer` feature (on by
+    /// default), and runs on the atomic band, not on the solid-state
+    /// block. Without `faer` a climb step returns
+    /// [`SaddleError::Solver`]; `None` keeps the plain CI-NEB.
     pub min_mode: Option<MinModeRefine>,
     /// Per-image exponential metric on the band solver. `None` runs
     /// the stepper in the Euclidean metric. Refused on a solid-state
@@ -2486,6 +2488,8 @@ fn build_solver(config: &BandConfig, method: &Method, interior_dof: usize) -> So
 /// });
 /// let config = BandConfig::default().with_force_tol(1e-3).with_max_move(0.1);
 /// let mut session = BandSession::new(config, initial)?;
+/// # #[cfg(feature = "faer")]
+/// # {
 /// let mut report = session.step(&DoubleWell)?;
 /// while report.status == BandStatus::Running {
 ///     report = session.step(&DoubleWell)?;
@@ -2494,6 +2498,7 @@ fn build_solver(config: &BandConfig, method: &Method, interior_dof: usize) -> So
 /// assert_eq!(report.status, BandStatus::Converged);
 /// let saddle = session.positions().row(report.ci_index.unwrap()).to_owned();
 /// assert!(saddle.iter().all(|c| c.abs() < 1e-2));
+/// # }
 /// # Ok::<(), SaddleError>(())
 /// ```
 pub struct BandSession {
