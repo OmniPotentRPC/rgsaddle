@@ -61,7 +61,8 @@ fn npt_extends_the_run_until_the_pressure_rule_is_evaluable() {
 
 #[test]
 fn npt_pressure_includes_the_kinetic_virial() {
-    let (mut positions, mut cell) = one_atom(3.6);
+    let (_, mut cell) = one_atom(3.6);
+    let mut positions = Array1::from_vec(vec![0.9, 0.9, 0.9, 2.7, 2.7, 2.7]);
     let config = NptConfig::default()
         .with_repeats(1)
         .with_steps(40)

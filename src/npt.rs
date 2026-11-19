@@ -291,7 +291,14 @@ where
         }
         velocity = &velocity + &(&gradient * (-0.5 * dt / mass_amu));
 
-        let hydrostatic_stress = (stress[0][0] + stress[1][1] + stress[2][2]) / 3.0;
+        let configurational_stress = (stress[0][0] + stress[1][1] + stress[2][2]) / 3.0;
+        let kinetic_energy = velocity
+            .iter()
+            .map(|value| 0.5 * mass_amu * value * value)
+            .sum::<f64>();
+        let volume = determinant(*cell).abs();
+        let kinetic_pressure = 2.0 * kinetic_energy / (3.0 * volume);
+        let hydrostatic_stress = configurational_stress - kinetic_pressure;
         let drive = hydrostatic_stress + config.target_pressure_ev_a3;
         let volume_factor =
             (1.0 - config.compressibility_per_ev_a3 * dt / tau * drive).clamp(0.995, 1.005);
