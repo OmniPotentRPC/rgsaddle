@@ -661,6 +661,14 @@ fn sample<C: GeodesicChart + ?Sized>(chart: &C, x: ArrayView1<f64>) -> Result<Sa
             "geodesic chart needs a coordinate and a degree of freedom".into(),
         ));
     }
+    if nq
+        .checked_mul(dof)
+        .is_none_or(|cells| cells > isize::MAX as usize / size_of::<f64>())
+    {
+        return Err(SaddleError::Shape(
+            "geodesic Wilson matrix is too large to allocate".into(),
+        ));
+    }
     let mut q = Array1::zeros(nq);
     let mut b = Array2::zeros((nq, dof));
     chart.eval(x, &mut q, &mut b)?;

@@ -174,6 +174,21 @@ fn cell_from(ptr: *const f64) -> Result<Option<Cell>, i32> {
     .map_err(|_| RGSADDLE_INVALID_PARAMETER)
 }
 
+/// `count` doubles as a slice length: no overflow, and under the `isize::MAX` bytes a slice may span.
+fn buffer_len(count: usize) -> Result<usize, i32> {
+    match count.checked_mul(size_of::<f64>()) {
+        Some(bytes) if bytes <= isize::MAX as usize => Ok(count),
+        _ => Err(RGSADDLE_INVALID_PARAMETER),
+    }
+}
+
+/// `a * b` doubles, checked.
+fn product_len(a: usize, b: usize) -> Result<usize, i32> {
+    a.checked_mul(b)
+        .ok_or(RGSADDLE_INVALID_PARAMETER)
+        .and_then(buffer_len)
+}
+
 fn as_i64(value: usize) -> Result<i64, i32> {
     i64::try_from(value).map_err(|_| RGSADDLE_INVALID_PARAMETER)
 }
@@ -282,9 +297,14 @@ pub unsafe extern "C" fn rgsaddle_geodesic_path(
     if path.is_null() || out.is_null() {
         return RGSADDLE_INVALID_PARAMETER;
     }
-    let Some(total) = n_images.checked_mul(dof) else {
-        return RGSADDLE_INVALID_PARAMETER;
+    let total = match product_len(n_images, dof) {
+        Ok(total) => total,
+        Err(code) => return code,
     };
+    // The chart fills `n_coords * dof` Wilson entries per sample.
+    if let Err(code) = product_len(n_coords, dof) {
+        return code;
+    }
     if !cell.is_null() && dof % 3 != 0 {
         return RGSADDLE_SHAPE;
     }
@@ -361,6 +381,20 @@ pub unsafe extern "C" fn rgsaddle_geodesic_morse(
     let Some(dof) = n_atoms.checked_mul(3) else {
         return RGSADDLE_INVALID_PARAMETER;
     };
+    if let Err(code) = buffer_len(dof) {
+        return code;
+    }
+    // `out` holds `n_images * dof` doubles and each sample fills one
+    // Wilson row of `dof` entries per atom pair.
+    if let Err(code) = product_len(n_images, dof) {
+        return code;
+    }
+    let Some(n_pairs) = n_atoms.checked_mul(n_atoms - 1).map(|doubled| doubled / 2) else {
+        return RGSADDLE_INVALID_PARAMETER;
+    };
+    if let Err(code) = product_len(n_pairs, dof) {
+        return code;
+    }
     let mut config = match config_from(config) {
         Ok(config) => config,
         Err(code) => return code,

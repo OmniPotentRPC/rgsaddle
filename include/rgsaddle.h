@@ -1997,6 +1997,8 @@ rgsaddle_status_t rgsaddle_geodesic_config_default(
  * `upper` may be NULL; otherwise they receive the Eq. (17) length and
  * the Eq. (B5) and Eq. (B18) bounds. A nonzero chart return is
  * `RGSADDLE_SURFACE_FAILED` when it happens on the starting path.
+ * `n_images * dof` and `n_coords * dof` must fit in memory sizes; an
+ * overflow returns `RGSADDLE_INVALID_PARAMETER`.
  */
 rgsaddle_status_t rgsaddle_geodesic_path(
     int64_t n_images, int64_t dof, const double *path, int64_t n_coords,
@@ -2013,7 +2015,9 @@ rgsaddle_status_t rgsaddle_geodesic_path(
  * endpoints and must be at least 2. `out` holds `n_images * 3 * n_atoms`
  * doubles. Alpha 1.7 and beta 0.01 are Eq. (7) of Zhu, Thompson, and
  * Martinez (2019). `config` NULL selects the defaults. The scalar
- * outputs follow `rgsaddle_geodesic_path`.
+ * outputs follow `rgsaddle_geodesic_path`. `n_images * 3 * n_atoms` and
+ * the pair count times `3 * n_atoms` must fit in memory sizes; an
+ * overflow returns `RGSADDLE_INVALID_PARAMETER`.
  */
 rgsaddle_status_t rgsaddle_geodesic_morse(
     int64_t n_images, int64_t n_atoms, const double *reactant,
