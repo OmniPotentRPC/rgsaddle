@@ -4,7 +4,7 @@
 //! constraint normal by modified Gram-Schmidt and drops a row only inside
 //! Higham's roundoff bound. The estimator uses that same unit normal.
 
-use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
+use ndarray::{Array1, Array2, ArrayView1};
 
 use crate::error::SaddleError;
 use crate::minmode::PointSurface;
