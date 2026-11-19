@@ -2857,14 +2857,8 @@ mod tests {
         let double = IndexSurface { double: true };
         let minimum = array![1.0, 0.0, 0.0];
         let saddle = array![0.0, 0.0, 0.0];
-        let error = certify_vineyard_pair(
-            &Well,
-            minimum.view(),
-            &double,
-            saddle.view(),
-            check,
-        )
-        .unwrap_err();
+        let error = certify_vineyard_pair(&Well, minimum.view(), &double, saddle.view(), check)
+            .unwrap_err();
         assert!(matches!(
             error,
             VineyardIndexError::Saddle { negative: 2, .. }
