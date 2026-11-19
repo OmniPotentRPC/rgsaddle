@@ -80,6 +80,7 @@ pub mod indexk;
 #[cfg(feature = "lammps")]
 pub mod lammps;
 pub mod lineb;
+pub mod line_neb;
 pub mod minmode;
 pub mod nichols;
 pub mod occupancy;
@@ -175,6 +176,10 @@ pub use lineb::{
     cartesian_image_hessian, hqtst_rate_from_image_hessians, hqtst_rate_interpolated_hessian,
     hqtst_rate_interpolated_hessian_observed, hqtst_rate_interpolated_hessian_with_step,
 };
+pub use line_neb::{
+    LineNebConfig, LineNebReport, LineNebSession, LineNebStatus, fixed_energy_action,
+    fixed_energy_action_force, fixed_energy_mep_seed,
+};
 pub use minmode::{
     ArtNConfig, FiniteDifference, MinModeConfig, MinModeKind, MinModeReport, MinModeSession,
     MinModeStatus, ModeEstimate, PointSurface, RaisedStep, halve_raised_energy,
@@ -212,9 +217,10 @@ pub use ohtst::{
     transmission_coefficient_on_surface,
 };
 pub use pafi::{
-    ArcPath, FreeEnergyProfile, HyperplaneAverage, PafiConfig, PafiIntegrator, PafiMeanForce,
-    PathFrame, PathGeometry, average_hyperplane, average_hyperplane_with_sampler,
-    integrate_profile, pafi_profile, zero_temperature_barrier,
+    ArcPath, FixedEnergyTrajectory, FreeEnergyProfile, HyperplaneAverage, PafiConfig,
+    PafiIntegrator, PafiMeanForce, PathFrame, PathGeometry, TrajectoryPoint, arc_at_time,
+    average_hyperplane, average_hyperplane_with_sampler, integrate_profile, pafi_profile,
+    zero_temperature_barrier,
 };
 pub use pair_network::{
     Mat3i, PairConfig, PairEdge, PairExit, PairHop, PairMove, PairNetwork, PairStateClass,
@@ -304,7 +310,8 @@ pub use internal::{CartAxis, Displacement, InternalSlot, Rotation, Translation};
 pub mod sparse_hessian;
 pub use sparse_hessian::{
     Colouring, LowestEigenpairs, SparseHessian, SparseHessianOpts, SparsityPattern,
-    distance2_colouring, eval_displacements, one_atom_hessian, prefactor_hessian, sparse_hessian,
+    action_pair_blocks, distance2_colouring, eval_displacements, one_atom_hessian,
+    prefactor_hessian, sparse_hessian,
 };
 
 pub use linalg::{
@@ -365,7 +372,7 @@ pub mod afir;
 pub use afir::{afir_force, try_afir_force};
 
 pub mod reparam;
-pub use reparam::{Reparametrization, reparametrize};
+pub use reparam::{Reparametrization, Spline, SplineEnds, reparametrize};
 
 pub mod rtr;
 pub use rtr::{
