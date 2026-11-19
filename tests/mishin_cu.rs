@@ -21,10 +21,10 @@ use ndarray::{Array1, Array2, ArrayView1};
 use rayon::prelude::*;
 use rgmin::{Control, FireKind, Method, Oracle, Solver};
 use rgsaddle::{
-    BOLTZMANN_EV_PER_K, CellMask, DefectSource, ElasticDipole, ElasticMultipole, FieldSolver,
-    FmmSolver, IndexCheck, Kelvin, LINEAR_FOLD_EV, MinModeConfig, MinModeStatus, PointSurface,
-    SaddleError, SaddleSeed, SolidDimer, SolidDimerConfig, Strain, StrainResponse, StressCheck,
-    Trust, TrustPolicy, cubic_rotations, index_at,
+    BOLTZMANN_EV_PER_K, BerendsenIsotropic, CellMask, DefectSource, ElasticDipole,
+    ElasticMultipole, FieldSolver, FmmSolver, IndexCheck, Kelvin, LINEAR_FOLD_EV, MinModeConfig,
+    MinModeStatus, PointSurface, SaddleError, SaddleSeed, SolidDimer, SolidDimerConfig, Strain,
+    StrainResponse, StressCheck, Trust, TrustPolicy, cubic_rotations, index_at,
 };
 
 include!(concat!(
@@ -3158,11 +3158,47 @@ fn cart_of(key: (i32, i32, i32), a: f64) -> [f64; 3] {
     ]
 }
 
+/// Bulk modulus of the Mishin barostat, in eV per Å³.
+///
+/// The inline step stored `beta = 1/0.87` and multiplied the tension by
+/// `beta`. Passing `0.87` makes `1/modulus` that same `beta`.
+const NPT_BERENDSEN_MODULUS: f64 = 0.87;
+
+/// Largest absolute change of the Berendsen volume factor in one
+/// `npt_lattice` step. The inline factor was limited to one minus this
+/// value and one plus this value.
+const NPT_MAX_VOLUME_STRAIN: f64 = 0.005;
+
+#[test]
+fn npt_berendsen_step_matches_the_inline_volume_factor() {
+    let beta = 1.0 / NPT_BERENDSEN_MODULUS;
+    let omega = rgsaddle::angular_scale_rad_s();
+    let dt = 2.0e-15 * omega;
+    let tau = 0.5e-12 * omega;
+    let low = 1.0 - NPT_MAX_VOLUME_STRAIN;
+    let high = 1.0 + NPT_MAX_VOLUME_STRAIN;
+    let samples = [-10.0, -2.0, -0.5, -0.01, 0.0, 0.01, 0.5, 1.09, 2.0, 10.0];
+    for hydro in samples {
+        let mu = (1.0 - beta * dt / tau * hydro).clamp(low, high);
+        let inline = mu.cbrt();
+        let shared = BerendsenIsotropic::default()
+            .with_max_strain_per_step(NPT_MAX_VOLUME_STRAIN)
+            .scale(hydro, NPT_BERENDSEN_MODULUS, dt, tau)
+            .expect("berendsen scale");
+        assert_eq!(
+            shared.to_bits(),
+            inline.to_bits(),
+            "hydro {hydro} shared {shared} inline {inline}"
+        );
+    }
+}
+
 /// Zero-pressure lattice parameter of the Mishin crystal.
 ///
 /// Langevin dynamics plus a Berendsen barostat. The stress this EAM
-/// returns is tension-positive, so a compressed cell (negative trace)
-/// is expanded. The average is the second half of the run.
+/// returns is the potential Cauchy stress, positive in tension. The
+/// loop does not add the kinetic pressure. A compressed cell (negative
+/// trace) is expanded. The average is the second half of the run.
 fn npt_lattice(copper: &FastCopper, temperature: f64) -> f64 {
     let repeats = 6usize;
     let (mut positions, mut cell) = fcc(repeats, 3.615);
@@ -3178,7 +3214,6 @@ fn npt_lattice(copper: &FastCopper, temperature: f64) -> f64 {
         *value = rng.normal() * sigma;
     }
     zero_mean(&mut velocity);
-    let beta = 1.0 / 0.87;
     let tau = 0.5e-12 * omega;
     let steps = 4000usize;
     let mut sum = 0.0;
@@ -3197,8 +3232,10 @@ fn npt_lattice(copper: &FastCopper, temperature: f64) -> f64 {
         let (_, gradient, stress) = copper.evaluate(positions.view(), cell);
         velocity = &velocity + &(&gradient * (-0.5 * dt / mass));
         let hydro = (stress[0][0] + stress[1][1] + stress[2][2]) / 3.0;
-        let mu = (1.0 - beta * dt / tau * hydro).clamp(0.995, 1.005);
-        let scale = mu.cbrt();
+        let scale = BerendsenIsotropic::default()
+            .with_max_strain_per_step(NPT_MAX_VOLUME_STRAIN)
+            .scale(hydro, NPT_BERENDSEN_MODULUS, dt, tau)
+            .expect("berendsen scale");
         positions *= scale;
         cell[0][0] *= scale;
         cell[1][1] *= scale;

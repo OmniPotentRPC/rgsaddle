@@ -30,6 +30,8 @@ The table below lists the main types.
 | =ArtSession=                   | ART nouveau in eight persisted phases: masked host seed, perpendicular relaxation, Lanczos, lowest-mode climb, index-1 certificate, push both ways, unconstrained quench, reversibility. =run_events= marks duplicate saddles. =ArtStatus::Reverted= is not a completed exit. =force_calls= lists every surface evaluation. Non-exhaustive =ArtConfig= |
 | =IndexKSession=                | Index-k minimum-mode step. =k = 1= is =MinModeSession=. =indexk_step= is one shot. =reflect_force= and =translated_force= are the subspace maps |
 | =SolidDimer=                   | That search on atoms plus Jacobian-scaled cell strain. =CellMask::frozen= is the fixed-cell dimer. =stress= and =elastic_dipole= are =σ= and =V σ=. =SolidDimerConfig=, =IndexCheck=, =StressCheck=, =SolidDimerReport= and =IndexReport= are non-exhaustive |
+| =finite_difference_cauchy_stress= | Central difference of the Cauchy stress of =PointSurface::eval_in_cell=, positive in tension. =virial= is =V σ= |
+| =berendsen_isotropic_scale=    | One isotropic Berendsen step on the hydrostatic part of that stress. =BerendsenIsotropic= is non-exhaustive: =Default= and =with_max_strain_per_step=. The scale multiplies every cell vector and every position |
 | =StrainResponse=               | One hop. =barrier(ε)= is the lowest symmetry image of =ΔE0 - (P_saddle - P_minimum):ε=, or =NeedsSearch= past the validity bound. =ElasticDipole::from_stress= is =-V (σ_defect - σ_bulk)=. =refine= caches an index-1 solid dimer. =to_json= is the event record |
 | =defect_pair_rates=            | One relaxed geometry and a hop catalogue. Solid dimer, index check, connectivity, fixed CI-NEB, PAFI =ΔF=, Bennett–Chandler =κ=. =k = κ ν exp(-ΔF/kT)=. =RateCatalogue= is =rgsaddle.defect_pair_rates= |
 | =PairNetwork=                  | States are orbits of (relative vector, orientation) under a caller's integer point group; hop classes are orbits of the unordered configuration pair and saddle director. =sites= takes a per-edge rate closure and returns =VolumeSite= rows and outer hops. =cubic_group= is O_h |
@@ -63,6 +65,18 @@ The table below lists the main types.
 | =ConnectConfig=                | IDPP Lanczos climb and the COMPASS fallback. =optbench= sets the LJ38 force tolerance, eight Lanczos actions, relative tolerance 0.05, and quenched split nodes |
 | =sidpp_path=                   | Sequential IDPP (S-IDPP) initial path. =SidppConfig= holds the spring, the two force stops, and the quick-min step. =idpp_path= is the per-image IDPP start |
 | =connect=                      | Double-ended search. The callback returns energy and the Cartesian gradient. =evaluations= counts finite differences that decide a step or an index. The Lanczos acceptance does not build a dense Hessian |
+
+=finite_difference_cauchy_stress= is the central difference of the Cauchy stress, positive in tension.
+=berendsen_isotropic_scale= is one isotropic Berendsen step on the mean of its diagonal.
+=BerendsenIsotropic= is non-exhaustive.
+Start from =Default= and chain =with_max_strain_per_step= to cap the absolute change of the volume factor.
+The caller supplies the hydrostatic tension.
+The function does not add the kinetic pressure.
+The returned scale multiplies every cell vector and every Cartesian position.
+On a triclinic cell that includes the entries off the diagonal, and the fractional coordinates stay fixed.
+Berendsen, Postma, van Gunsteren, DiNola, and Haak, J. Chem. Phys. 81, 3684 (1984), doi:10.1063/1.448118, couple the volume to a pressure bath through the isothermal compressibility.
+The modulus is the reciprocal of that compressibility.
+It sets the rate, not the volume at which the tension vanishes.
 
 =SellaSaddleConfig= has options that follow Sella.
 Each finite-difference diagonalization runs =symm=2= products in its residual test.

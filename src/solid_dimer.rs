@@ -614,6 +614,163 @@ impl JointChart {
     }
 }
 
+/// Settings for one isotropic Berendsen barostat step.
+///
+/// The step is [`berendsen_isotropic_scale`]. [`Default`] sets no cap on
+/// the volume factor. [`Self::with_max_strain_per_step`] sets one.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[non_exhaustive]
+pub struct BerendsenIsotropic {
+    /// Largest absolute change of the volume factor accepted in one step.
+    ///
+    /// `None` leaves the factor uncapped. Zero holds the volume. The
+    /// value must be finite, at least zero, and strictly below one, so
+    /// the lower end of the cap stays a positive volume factor.
+    pub max_strain_per_step: Option<f64>,
+}
+
+impl BerendsenIsotropic {
+    /// Cap the absolute change of the volume factor at `max_strain_per_step`.
+    #[must_use]
+    pub const fn with_max_strain_per_step(mut self, max_strain_per_step: f64) -> Self {
+        self.max_strain_per_step = Some(max_strain_per_step);
+        self
+    }
+
+    /// Linear scale for these settings.
+    ///
+    /// See [`berendsen_isotropic_scale`] for the sign, the modulus, and
+    /// the tension the caller supplies.
+    ///
+    /// # Errors
+    ///
+    /// [`SaddleError::Invalid`] when an argument is non-finite, the
+    /// modulus or a time is not positive, `max_strain_per_step` is set
+    /// and is not a finite value in the half open interval from zero
+    /// to one, or the volume factor is not positive.
+    pub fn scale(
+        self,
+        hydrostatic_tension: f64,
+        modulus: f64,
+        dt: f64,
+        tau: f64,
+    ) -> Result<f64, SaddleError> {
+        berendsen_isotropic_scale_with(self, hydrostatic_tension, modulus, dt, tau)
+    }
+}
+
+/// Isotropic linear scale of one Berendsen barostat step.
+///
+/// The scale does not depend on a cubic cell. Multiply every cell
+/// vector and every Cartesian position by it. On a triclinic cell that
+/// scales the entries off the diagonal as well as the edges, and the
+/// fractional coordinates stay fixed.
+///
+/// `hydrostatic_tension` is the hydrostatic tension the caller supplies.
+/// It uses the sign of [`finite_difference_cauchy_stress`]: positive in
+/// tension, the mean of the diagonal of that stress. This function does
+/// not add the kinetic pressure. The copper `npt_lattice` loop supplies
+/// the potential Cauchy tension and leaves the kinetic term out. A
+/// caller who wants the ideal gas pressure subtracts it from the tension
+/// before the call, because that pressure is a negative contribution to
+/// the tension.
+///
+/// `modulus` is the bulk modulus in energy per volume, the reciprocal
+/// of the isothermal compressibility in Berendsen, Postma, van
+/// Gunsteren, DiNola, and Haak, J. Chem. Phys. 81, 3684 (1984),
+/// doi:10.1063/1.448118. It sets how fast the cell moves, not the
+/// volume at which the tension vanishes. `dt` and `tau` are the
+/// barostat step and the piston time, in the same unit. A negative
+/// tension is compression and the scale is greater than one.
+///
+/// [`BerendsenIsotropic::with_max_strain_per_step`] caps the absolute
+/// change of the volume factor in one step. This function is the scale
+/// from [`BerendsenIsotropic::default`], which sets no cap.
+///
+/// # Errors
+///
+/// [`SaddleError::Invalid`] when an argument is non-finite, the modulus
+/// or a time is not positive, or the volume factor is not positive.
+///
+/// # Examples
+///
+/// ```
+/// use rgsaddle::berendsen_isotropic_scale;
+///
+/// let compressed = berendsen_isotropic_scale(-0.1, 1.0, 1.0, 1.0)?;
+/// assert!(compressed > 1.0);
+/// let scale = berendsen_isotropic_scale(0.1, 1.0, 1.0, 1.0)?;
+/// assert!(scale < 1.0);
+/// let mut cell = [[2.0, 0.1, -0.2], [0.0, 1.5, 0.3], [0.0, 0.0, 1.2]];
+/// let mut position = [0.4, -0.2, 0.5];
+/// for row in &mut cell {
+///     for entry in row.iter_mut() {
+///         *entry *= scale;
+///     }
+/// }
+/// for coordinate in &mut position {
+///     *coordinate *= scale;
+/// }
+/// assert!(cell[0][1] < 0.1);
+/// # Ok::<(), rgsaddle::SaddleError>(())
+/// ```
+pub fn berendsen_isotropic_scale(
+    hydrostatic_tension: f64,
+    modulus: f64,
+    dt: f64,
+    tau: f64,
+) -> Result<f64, SaddleError> {
+    BerendsenIsotropic::default().scale(hydrostatic_tension, modulus, dt, tau)
+}
+
+fn berendsen_isotropic_scale_with(
+    config: BerendsenIsotropic,
+    hydrostatic_tension: f64,
+    modulus: f64,
+    dt: f64,
+    tau: f64,
+) -> Result<f64, SaddleError> {
+    if !(hydrostatic_tension.is_finite()
+        && modulus.is_finite()
+        && modulus > 0.0
+        && dt.is_finite()
+        && dt > 0.0
+        && tau.is_finite()
+        && tau > 0.0)
+    {
+        return Err(SaddleError::Invalid(
+            "Berendsen scale needs finite tension, a positive modulus, and positive dt and tau"
+                .into(),
+        ));
+    }
+    if let Some(max_strain) = config.max_strain_per_step
+        && !(max_strain.is_finite() && (0.0..1.0).contains(&max_strain))
+    {
+        return Err(SaddleError::Invalid(
+            "Berendsen max strain per step must be finite, at least zero, and below one".into(),
+        ));
+    }
+    // Compressibility first, then `beta * dt / tau * tension`, so a
+    // caller that stored `beta = 1/modulus` keeps that product order.
+    let compressibility = 1.0 / modulus;
+    let mut volume_factor = 1.0 - compressibility * dt / tau * hydrostatic_tension;
+    if let Some(max_strain) = config.max_strain_per_step {
+        let low = 1.0 - max_strain;
+        let high = 1.0 + max_strain;
+        if volume_factor < low {
+            volume_factor = low;
+        } else if volume_factor > high {
+            volume_factor = high;
+        }
+    }
+    if !(volume_factor.is_finite() && volume_factor > 0.0) {
+        return Err(SaddleError::Invalid(
+            "Berendsen volume factor is not positive".into(),
+        ));
+    }
+    Ok(volume_factor.cbrt())
+}
+
 /// Central-difference Cauchy stress of [`PointSurface::eval_in_cell`].
 ///
 /// Each of the nine right-strain entries is perturbed with the atoms
@@ -1962,6 +2119,171 @@ mod tests {
     use ndarray::{ArrayView1, array};
     use rgmin::Method;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn berendsen_scale_expands_a_compressed_cell() {
+        let compressed = berendsen_isotropic_scale(-0.1, 1.0, 1.0, 1.0).expect("scale");
+        let stretched = berendsen_isotropic_scale(0.1, 1.0, 1.0, 1.0).expect("scale");
+        assert!(compressed > 1.0);
+        assert!(stretched < 1.0);
+        let idle = berendsen_isotropic_scale(0.0, 1.0, 1.0, 1.0).expect("scale");
+        assert!((idle - 1.0).abs() < 1.0e-15);
+        assert!(berendsen_isotropic_scale(0.1, 0.0, 1.0, 1.0).is_err());
+    }
+
+    /// Strain step for the pair-spring Cauchy stress.
+    const PAIR_STRESS_STEP: f64 = 1.0e-6;
+    /// Lattice constant agreement for the relaxed pair crystal.
+    const PAIR_LATTICE_TOLERANCE: f64 = 1.0e-8;
+    /// Hydrostatic tension left at that lattice constant.
+    const PAIR_TENSION_TOLERANCE: f64 = 1.0e-6;
+
+    /// Nearest image springs along the three cell edges.
+    struct EdgeSprings {
+        k: f64,
+        r0: f64,
+    }
+
+    impl PointSurface for EdgeSprings {
+        fn eval(&self, r: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            self.eval_in_cell(r, &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0])
+        }
+
+        fn eval_in_cell(
+            &self,
+            r: ArrayView1<f64>,
+            cell: &[f64; 9],
+        ) -> Result<(f64, Array1<f64>), SaddleError> {
+            let mut energy = 0.0;
+            for edge in 0..3 {
+                let base = 3 * edge;
+                let length = (cell[base] * cell[base]
+                    + cell[base + 1] * cell[base + 1]
+                    + cell[base + 2] * cell[base + 2])
+                    .sqrt();
+                let delta = length - self.r0;
+                energy += 0.5 * self.k * delta * delta;
+            }
+            Ok((energy, Array1::zeros(r.len())))
+        }
+    }
+
+    fn hydrostatic_tension(stress: M3) -> f64 {
+        (stress[0][0] + stress[1][1] + stress[2][2]) / 3.0
+    }
+
+    fn pair_tension(length: f64) -> f64 {
+        let springs = EdgeSprings { k: 1.0, r0: 1.0 };
+        let origin = array![0.0, 0.0, 0.0];
+        let stress = finite_difference_cauchy_stress(
+            &springs,
+            origin.view(),
+            diagonal(length, length, length),
+            PAIR_STRESS_STEP,
+        )
+        .expect("pair stress");
+        hydrostatic_tension(stress)
+    }
+
+    #[test]
+    fn berendsen_scale_is_identity_at_zero_tension() {
+        let cases = [(1.0, 1.0, 1.0), (0.87, 0.002, 0.5), (4.0, 0.1, 10.0)];
+        for (modulus, dt, tau) in cases {
+            let scale = berendsen_isotropic_scale(0.0, modulus, dt, tau).expect("scale");
+            assert_eq!(scale.to_bits(), 1.0_f64.to_bits());
+            let capped = BerendsenIsotropic::default()
+                .with_max_strain_per_step(0.005)
+                .scale(0.0, modulus, dt, tau)
+                .expect("capped");
+            assert_eq!(capped.to_bits(), 1.0_f64.to_bits());
+        }
+    }
+
+    #[test]
+    fn berendsen_scale_shrinks_a_stretched_cell() {
+        let stretched = pair_tension(1.05);
+        assert!(
+            stretched > 0.0,
+            "a stretched pair cell is under tension, got {stretched}"
+        );
+        let shrink = berendsen_isotropic_scale(stretched, 1.0, 0.2, 1.0).expect("scale");
+        assert!(
+            shrink < 1.0,
+            "tension {stretched} must shrink the cell, scale {shrink}"
+        );
+        let compressed = pair_tension(0.95);
+        assert!(
+            compressed < 0.0,
+            "a compressed pair cell is under compression, got {compressed}"
+        );
+        let grow = berendsen_isotropic_scale(compressed, 1.0, 0.2, 1.0).expect("scale");
+        assert!(
+            grow > 1.0,
+            "tension {compressed} must expand the cell, scale {grow}"
+        );
+    }
+
+    #[test]
+    fn berendsen_scale_rejects_bad_arguments() {
+        let bad = [
+            (f64::NAN, 1.0, 1.0, 1.0),
+            (f64::INFINITY, 1.0, 1.0, 1.0),
+            (f64::NEG_INFINITY, 1.0, 1.0, 1.0),
+            (0.1, f64::NAN, 1.0, 1.0),
+            (0.1, f64::INFINITY, 1.0, 1.0),
+            (0.1, 0.0, 1.0, 1.0),
+            (0.1, -1.0, 1.0, 1.0),
+            (0.1, 1.0, f64::NAN, 1.0),
+            (0.1, 1.0, 0.0, 1.0),
+            (0.1, 1.0, -0.5, 1.0),
+            (0.1, 1.0, 1.0, f64::NAN),
+            (0.1, 1.0, 1.0, 0.0),
+            (0.1, 1.0, 1.0, -1.0),
+        ];
+        for (tension, modulus, dt, tau) in bad {
+            assert!(
+                berendsen_isotropic_scale(tension, modulus, dt, tau).is_err(),
+                "tension {tension} modulus {modulus} dt {dt} tau {tau}"
+            );
+        }
+        assert!(berendsen_isotropic_scale(2.0, 1.0, 1.0, 1.0).is_err());
+        let bad_caps = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.1, 1.0, 1.5];
+        for cap in bad_caps {
+            assert!(
+                BerendsenIsotropic::default()
+                    .with_max_strain_per_step(cap)
+                    .scale(0.1, 1.0, 1.0, 1.0)
+                    .is_err(),
+                "cap {cap}"
+            );
+        }
+        let capped = BerendsenIsotropic::default()
+            .with_max_strain_per_step(0.005)
+            .scale(2.0, 1.0, 1.0, 1.0)
+            .expect("capped");
+        assert_eq!(capped.to_bits(), (1.0 - 0.005_f64).cbrt().to_bits());
+    }
+
+    #[test]
+    fn berendsen_scale_relaxes_a_pair_crystal_to_zero_stress() {
+        let rest = 1.0;
+        let mut length = 1.08;
+        let mut scale = 0.0;
+        for _ in 0..400 {
+            let tension = pair_tension(length);
+            scale = berendsen_isotropic_scale(tension, 1.0, 0.25, 1.0).expect("scale");
+            length *= scale;
+        }
+        assert!(
+            (length - rest).abs() < PAIR_LATTICE_TOLERANCE,
+            "lattice {length} last scale {scale}"
+        );
+        let tension = pair_tension(length);
+        assert!(
+            tension.abs() < PAIR_TENSION_TOLERANCE,
+            "tension {tension} at lattice {length}"
+        );
+    }
 
     fn diagonal(x: f64, y: f64, z: f64) -> M3 {
         [[x, 0.0, 0.0], [0.0, y, 0.0], [0.0, 0.0, z]]

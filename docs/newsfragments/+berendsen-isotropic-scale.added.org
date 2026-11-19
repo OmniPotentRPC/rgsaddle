@@ -1,0 +1,6 @@
+=berendsen_isotropic_scale= is one isotropic Berendsen step on the hydrostatic tension from =finite_difference_cauchy_stress=.
+=BerendsenIsotropic= is non-exhaustive.
+Start from =Default= and use =with_max_strain_per_step= to cap the absolute change of the volume factor.
+The caller supplies that tension, and the function does not add the kinetic pressure.
+The scale multiplies every cell vector and every Cartesian position, including the entries off the diagonal of a triclinic cell.
+Berendsen, Postma, van Gunsteren, DiNola, and Haak, J. Chem. Phys. 81, 3684 (1984), doi:10.1063/1.448118.

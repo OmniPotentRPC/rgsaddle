@@ -220,9 +220,9 @@ pub use relax::{
 };
 pub use saddle_index::{SaddleEscape, SaddleIndex, SaddleIndexCheck, saddle_index};
 pub use solid_dimer::{
-    CellMask, IndexCheck, IndexReport, JointChart, STRAIN_VOIGT, SolidDimer, SolidDimerConfig,
-    SolidDimerReport, StressCheck, check_cauchy_stress, finite_difference_cauchy_stress, index_at,
-    virial,
+    BerendsenIsotropic, CellMask, IndexCheck, IndexReport, JointChart, STRAIN_VOIGT, SolidDimer,
+    SolidDimerConfig, SolidDimerReport, StressCheck, berendsen_isotropic_scale,
+    check_cauchy_stress, finite_difference_cauchy_stress, index_at, virial,
 };
 pub use spring::SpringKind;
 pub use ssneb::{SolidImage, SolidNeb, joint_coordinate};
