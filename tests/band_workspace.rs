@@ -91,6 +91,7 @@ fn band(n_images: usize) -> Array2<f64> {
 
 fn configs() -> Vec<(&'static str, BandConfig)> {
     let base = BandConfig::default()
+        .with_finish(None)
         .with_climbing(CiConfig::always())
         .with_min_mode(None)
         .with_max_move(0.05)

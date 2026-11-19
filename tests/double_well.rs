@@ -170,7 +170,7 @@ impl BandSurface for Counting {
 fn endpoints_are_evaluated_once_and_each_step_costs_one_interior_eval() {
     let n_images = 7;
     let interior = n_images - 2;
-    let config = BandConfig::default().with_min_mode(None);
+    let config = BandConfig::default().with_finish(None).with_min_mode(None);
     let mut session = BandSession::new(config, initial_band(n_images)).unwrap();
     let surface = Counting::new();
 
@@ -239,6 +239,7 @@ fn wrapped_resync_keeps_the_cached_band() {
     let n_images = 7;
     let interior = n_images - 2;
     let config = BandConfig::default()
+        .with_finish(None)
         .with_cell(rgsaddle::band::Cell([
             [3.0, 0.0, 0.0],
             [0.0, 3.0, 0.0],

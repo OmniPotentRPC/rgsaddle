@@ -1,7 +1,7 @@
 #+TITLE: Use the C and C++ interfaces
 #+OPTIONS: toc:nil num:nil
 
-~include/rgsaddle.h~ declares the C application binary interface (ABI), major 1, minor 43. It preserves the main band, minimum-mode and index-1 layouts and adds intrinsic reaction coordinate (IRC), Sella, constraint and geometry controls. Include this header rather than duplicating its structures. Check ~rgsaddle_abi_stamp~ before constructing a session. A meson project takes the headers from the top-level ~meson.build~; see @@rst::doc:`the meson how-to <meson>`@@.
+~include/rgsaddle.h~ declares the C application binary interface (ABI), major 1, minor 44. It preserves the main band, minimum-mode and index-1 layouts and adds intrinsic reaction coordinate (IRC), Sella, constraint and geometry controls. Include this header rather than duplicating its structures. Check ~rgsaddle_abi_stamp~ before constructing a session. A meson project takes the headers from the top-level ~meson.build~; see @@rst::doc:`the meson how-to <meson>`@@.
 
 A surface callback returns ~rgsaddle_status_t~ and receives one ~rgsaddle_surface_request_t~. Positions and gradients are image-major Cartesian triples. The host supplies the energy and gradient arrays for every requested image; the library performs no Message Passing Interface (MPI) communication.
 From ABI minor 42, ~RGSADDLE_NOT_EQUILIBRATED~ and ~RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES~ report constrained-ensemble tails that fail the drift or effective-sample guards.
@@ -47,6 +47,8 @@ The value -1 is the state of a new session, with the window on exactly when ~rot
 Any other value returns ~RGSADDLE_INVALID_PARAMETER~ and leaves the session unchanged.
 A library below minor 32 does not export the symbol.
 From minor 41 a Lanczos session reads the window too: a step's estimate stops once two Krylov vectors leave the Ritz residual under 1, and the value 0 runs it to its residual as before.
+
+ABI minor 44 adds =RGSADDLE_METHOD_FIRE_ONLY=. A band created with =RGSADDLE_METHOD_FIRE= now steps with FIRE until its largest force is at or under 5, then with L-BFGS of the config's memory, 20 for zero. =RGSADDLE_METHOD_FIRE_ONLY= keeps FIRE to the end.
 
 ABI minor 43 adds the opt-in ART nouveau controls.
 ~rgsaddle_artn_config_default~ initializes an ~rgsaddle_artn_config_t~ with the published defaults, and ~rgsaddle_minmode_set_artn~ enables those controls on a Lanczos session.

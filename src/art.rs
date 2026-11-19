@@ -15,7 +15,7 @@
 //!    [`crate::MinModeSession::estimate_mode`];
 //! 4. [`ArtPhase::Climb`] takes one [`crate::MinModeSession::step`] and
 //!    returns to the perpendicular relaxation;
-//! 5. [`ArtPhase::Certify`] calls [`crate::saddle_index`];
+//! 5. [`ArtPhase::Certify`] calls [`crate::saddle_index()`];
 //! 6. [`ArtPhase::PushOver`] steps both ways along the unstable mode;
 //! 7. [`ArtPhase::Quench`] minimizes both images with no constraint;
 //! 8. [`ArtPhase::Report`] records whether the quenches are reversible
@@ -351,7 +351,7 @@ pub struct ArtOutcome {
     pub saddle: Option<Array1<f64>>,
     /// Energy of [`Self::saddle`].
     pub saddle_energy: Option<f64>,
-    /// Index from [`crate::saddle_index`], when certification ran.
+    /// Index from [`mod@crate::saddle_index`], when certification ran.
     pub saddle_index: Option<usize>,
     /// Whether that certificate met its residual tolerance.
     pub certificate_converged: bool,
@@ -1039,7 +1039,7 @@ pub fn connection_verdict(
 /// RMSD or, when `permute_identical` is set, the RMSD of the sorted
 /// pairwise distances. The sorted spectrum is unchanged by translation,
 /// rotation, and permutation, which is the identical-atom comparison of
-/// Malek and Mousseau. More than [`PERMUTATION_ATOM_CAP`] atoms is refused
+/// Malek and Mousseau. More than eight atoms is refused
 /// when permutations are requested, because the caller should not discover
 /// that limit only after a search.
 pub fn structure_distance(

@@ -1,0 +1,3 @@
+The default band stepper is now FIRE until the band's largest per-atom force is at or under 5, then eOn's capped L-BFGS with memory 20 (=BandConfig::finish=, =Finish=). A band whose first evaluation is already under 5 never runs FIRE and spends the force calls of eOn's NEB, about a third of FIRE's on a settled band; a band that starts in a repulsive wall keeps FIRE's gradient flow, which holds its topology.
+Set =with_finish(None)= or, from C, =RGSADDLE_METHOD_FIRE_ONLY= (ABI minor 44) for FIRE alone.
+Quick-min bands, solid bands and L-BFGS, RTR and ODE12r bands are unchanged.

@@ -242,6 +242,7 @@ fn chain_band() -> Array2<f64> {
 
 fn band_config(preset: &str) -> BandConfig {
     let config = BandConfig::default()
+        .with_finish(None)
         .with_tangent(TangentKind::Improved)
         .with_spring(SpringKind::Uniform { k: 5.0 })
         .with_projection(ProjectionKind::Neb)
@@ -385,6 +386,7 @@ fn run_autoneb(fixture: &str, threads: usize) -> (Array2<f64>, Vec<f64>) {
         other => panic!("unknown fixture {other}"),
     };
     let config = BandConfig::default()
+        .with_finish(None)
         .with_force_tol(1e-3)
         .with_max_move(0.1)
         .with_method(rgmin::Method::fire(rgmin::FireKind::V2))

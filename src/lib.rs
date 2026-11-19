@@ -114,7 +114,7 @@ pub use art::{
 pub use autoneb::{AutoNeb, AutoNebInterpolant, AutoNebReport, AutoNebTuning};
 pub use band::{
     BandConfig, BandEvaluation, BandReport, BandSession, BandStatus, BandSurface, Cell, CiConfig,
-    ExpBandPrecon, MinModeRefine, SolidState, ZoomConfig, climbing_image,
+    ExpBandPrecon, Finish, MinModeRefine, SolidState, ZoomConfig, climbing_image,
 };
 pub use bennett::{ShootingConfig, Transmission, bennett_chandler};
 pub use connect::{ConnectConfig, ConnectProfile, ConnectReport, connect};

@@ -78,6 +78,7 @@ Status codes include =RGSADDLE_OK=, =RGSADDLE_SHAPE=, =RGSADDLE_SURFACE_FAILED=,
 The methods on the wire are the fast inertial relaxation engine (FIRE) and quick-min.
 Limited-memory Broyden-Fletcher-Goldfarb-Shanno (L-BFGS) is also on the wire.
 From minor 22 so is ODE12r (=RGSADDLE_METHOD_ODE12R=), the adaptive ordinary differential equation (ODE) step.
+From minor 44, =RGSADDLE_METHOD_FIRE= on an atomic band hands over to L-BFGS once the band's force is at or under 5, and =RGSADDLE_METHOD_FIRE_ONLY= keeps FIRE to the end.
 From minor 22, =rgsaddle_band_set_exp_precon= installs the per-image exponential metric on the band solver.
 With ODE12r that gives ODE12r-Exp.
 From minor 39, =rgsaddle_band_set_fixed_atoms= fixes atoms on a band and the exponential metric is then built on the free atoms; =rgsaddle_band_project_fixed= projects with the same mask.
@@ -100,7 +101,7 @@ A failed callback leaves it unchanged.
 Its =rotation_angle_tol= field stops a dimer rotation once the optimal angle falls under this tolerance in radians.
 The Rust default is five degrees, 0 turns the stop off, and a C config stores the value it is given.
 Both fields are read only from a config whose version minor is 5 or newer.
-=RGSADDLE_ABI_MINOR= is 43.
+=RGSADDLE_ABI_MINOR= is 44.
 From minor 24, =rgsaddle_sella_saddle_set_symmetrized_ritz= sets =SellaSaddleConfig::symmetrized_ritz= from 0 or 1.
 It returns =RGSADDLE_INVALID_PARAMETER= for any other value.
 =rgsaddle_sella_saddle_set_small_system_atom_ceiling= (minor 25) sets =SellaSaddleConfig::small_system_atom_ceiling= from 0 or 1.

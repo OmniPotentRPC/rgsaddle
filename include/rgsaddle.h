@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 43u
+#define RGSADDLE_ABI_MINOR 44u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -175,7 +175,15 @@ typedef enum {
    * not. With rgsaddle_band_set_exp_precon it is ODE12r-Exp. Min-mode
    * create returns null for this code. ABI minor 22.
    */
-  RGSADDLE_METHOD_ODE12R = 4
+  RGSADDLE_METHOD_ODE12R = 4,
+  /**
+   * FIRE alone. RGSADDLE_METHOD_FIRE on an atomic band hands over to
+   * L-BFGS (memory from the config, 20 for zero) once the band's force
+   * is at or under 5 in the host's force units, and a band whose first
+   * evaluation is already under that never runs FIRE. This code keeps
+   * FIRE to the end. Min-mode create reads it as FIRE. ABI minor 44.
+   */
+  RGSADDLE_METHOD_FIRE_ONLY = 5
 } rgsaddle_method_t;
 
 typedef enum {

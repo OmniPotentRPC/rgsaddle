@@ -196,6 +196,7 @@ fn ocineb_config(force_tol: f64) -> OcinebConfig {
     let band = config
         .band
         .clone()
+        .with_finish(None)
         .with_force_tol(force_tol)
         .with_max_move(0.1);
     let minmode = config
@@ -246,6 +247,7 @@ fn run_band(
         quartic: well.quartic,
     });
     let config = BandConfig::default()
+        .with_finish(None)
         .with_force_tol(force_tol)
         .with_max_move(0.1)
         .with_min_mode(None);

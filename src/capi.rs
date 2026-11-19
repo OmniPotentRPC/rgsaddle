@@ -15,7 +15,9 @@ use std::slice;
 use ndarray::{Array1, Array2, ArrayView2};
 use rgmin::{FireKind, Method};
 
-use crate::band::{BandConfig, BandSession, BandStatus, BandSurface, Cell, CiConfig, SolidState};
+use crate::band::{
+    BandConfig, BandSession, BandStatus, BandSurface, Cell, CiConfig, Finish, SolidState,
+};
 use crate::connect::{ConnectConfig, connect};
 use crate::error::SaddleError;
 use crate::geom::{TrustSchedule, trust_update};
@@ -36,7 +38,11 @@ use crate::tangent::TangentKind;
 /// The RGSADDLE ABI MAJOR.
 pub const RGSADDLE_ABI_MAJOR: u32 = 1;
 /// The RGSADDLE ABI MINOR.
-pub const RGSADDLE_ABI_MINOR: u32 = 43;
+pub const RGSADDLE_ABI_MINOR: u32 = 44;
+
+/// Band `method` code 5, ABI minor 44: FIRE alone, without the hand-over
+/// to L-BFGS that code 0 makes once the band force is small.
+pub const RGSADDLE_METHOD_FIRE_ONLY: i32 = 5;
 
 /// A band, min-mode or OCI-NEB config of this minor or newer certifies
 /// the saddle index at convergence by default.
@@ -696,6 +702,10 @@ pub(super) unsafe fn parse_band_config(
             .with_max_move(cfg.max_move)
             .with_remove_translation(cfg.flags & RGSADDLE_BAND_KEEP_TRANSLATION == 0)
             .with_method(method_of(cfg.method, cfg.memory))
+            .with_finish(
+                (cfg.method != RGSADDLE_METHOD_FIRE_ONLY)
+                    .then(|| Finish::default().with_method(method_of(1, cfg.memory))),
+            )
             .with_solid(solid)
             .with_quickmin(cfg.method == 3)
             .with_quickmin_options(rgmin::QuickMinOptions::rgmin())

@@ -53,7 +53,7 @@ int main(void) {
   band.tangent = RGSADDLE_TANGENT_IMPROVED;
   band.spring = RGSADDLE_SPRING_UNIFORM;
   band.projection = RGSADDLE_PROJECTION_NEB;
-  band.method = RGSADDLE_METHOD_FIRE;
+  band.method = RGSADDLE_METHOD_FIRE_ONLY;
   band.spring_k = 5.0;
   band.ci_trigger_factor = 0.5;
   band.force_tol = 1e-3;

@@ -54,7 +54,10 @@ fn equal_cells_and_zero_stress_match_the_atomic_band() {
         stress_xx: 0.0,
     };
     let mut atomic_session = BandSession::new(
-        BandConfig::default().with_climbing(None).with_max_move(0.2),
+        BandConfig::default()
+            .with_finish(None)
+            .with_climbing(None)
+            .with_max_move(0.2),
         positions.clone(),
     )
     .unwrap();

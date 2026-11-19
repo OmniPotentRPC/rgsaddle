@@ -174,7 +174,12 @@ fn a_one_sided_energy_window_keeps_the_climber_inside() {
 
 #[test]
 fn the_zoom_decides_before_the_min_mode_refinement_starts() {
-    let refined = |zoom| BandConfig::default().with_max_move(0.1).with_zoom(zoom);
+    let refined = |zoom| {
+        BandConfig::default()
+            .with_finish(None)
+            .with_max_move(0.1)
+            .with_zoom(zoom)
+    };
     assert!(refined(None).min_mode.is_some());
     let zoom = ZoomConfig::default().with_after(10.0);
     let surface = Recorded::new(well);

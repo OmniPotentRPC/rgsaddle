@@ -284,6 +284,36 @@ int main(void) {
     rgsaddle_band_free(b21);
   }
 
+  /* FIRE alone converges too, on a path of its own: the default FIRE
+   * hands over to L-BFGS. */
+  {
+    rgsaddle_band_config_t fire_only = cfg;
+    fire_only.method = RGSADDLE_METHOD_FIRE_ONLY;
+    RgsaddleBand *bf = rgsaddle_band_create(&fire_only, n_images, n_atoms, pos);
+    if (!bf) {
+      return fail(RGSADDLE_SHAPE, "FIRE only band create failed");
+    }
+    climbing_seen_t seen_fire = {1, 0, -1};
+    rgsaddle_report_t rf;
+    memset(&rf, 0, sizeof rf);
+    int k = 0;
+    do {
+      st = rgsaddle_band_step(bf, surface, &seen_fire, &rf);
+      if (st != RGSADDLE_OK) {
+        return fail(st, "FIRE only step");
+      }
+      ++k;
+    } while (rf.status == RGSADDLE_STATUS_RUNNING && k < 3000);
+    if (rf.status != RGSADDLE_STATUS_CONVERGED) {
+      return fail(RGSADDLE_SOLVER, "FIRE only band did not converge");
+    }
+    if (steps == k) {
+      fprintf(stderr, "hybrid %d steps, FIRE only %d steps\n", steps, k);
+      return fail(RGSADDLE_SOLVER, "FIRE only must not hand over");
+    }
+    rgsaddle_band_free(bf);
+  }
+
   double out[9 * 3];
   st = rgsaddle_band_positions(band, out);
   if (st != RGSADDLE_OK) {

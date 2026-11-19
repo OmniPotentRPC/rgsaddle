@@ -88,7 +88,7 @@ fn digest(search: &AutoNeb) -> u64 {
 }
 
 fn run(tuning: AutoNebTuning, initial: Array2<f64>) -> AutoNeb {
-    let config = BandConfig::default().with_autoneb(tuning);
+    let config = BandConfig::default().with_finish(None).with_autoneb(tuning);
     let mut search = AutoNeb::new(config, initial).unwrap();
     search.run(&Pairs).unwrap();
     search

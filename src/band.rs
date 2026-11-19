@@ -165,6 +165,80 @@ impl Cell {
     }
 }
 
+/// The force at which the FIRE stage of a band hands over, in the
+/// host's force units (eV/A for eOn).
+const FINISH_FORCE: f64 = 5.0;
+
+/// Correction pairs of the finishing L-BFGS stepper, eOn's `lbfgs_memory`.
+pub(crate) const FINISH_MEMORY: usize = 20;
+
+/// The second stage of a band that starts on FIRE: once the band's
+/// convergence force is at or under [`Finish::force`], the capped
+/// quasi-Newton stepper [`Finish::method`] takes over from the current
+/// positions with empty history, and FIRE does not return.
+///
+/// FIRE keeps a band that starts in a repulsive wall on the gradient
+/// flow, which is what holds the band's topology; once the force is
+/// moderate the band is nearly quadratic and L-BFGS reaches the gate in
+/// a third of the force calls. The band and climbing image conventions
+/// are those of Goswami, Gunde, and Jonsson, Front. Chem. 14, 1807063
+/// (2026), doi:10.3389/fchem.2026.1807063, and the NEB practice of
+/// Goswami, MethodsX 16, 103899 (2026), doi:10.1016/j.mex.2026.103899.
+/// The steppers are FIRE (Bitzek et al., Phys. Rev. Lett. 97, 170201
+/// (2006), doi:10.1103/PhysRevLett.97.170201) and L-BFGS (Liu and
+/// Nocedal, Math. Program. 45, 503 (1989), doi:10.1007/BF01589116). A band whose first evaluation is already at or under
+/// the force never runs FIRE, which is eOn's NEB stepper. The
+/// per-atom cap [`BandConfig::max_move`] applies to both stages.
+///
+/// Non-exhaustive: start from [`Finish::default`] and chain the `with_*`
+/// setters.
+///
+/// # Examples
+///
+/// ```
+/// use rgsaddle::{BandConfig, Finish};
+///
+/// let config = BandConfig::default().with_finish(Finish::default().with_force(1.0));
+/// assert_eq!(config.finish.map(|f| f.force), Some(1.0));
+/// assert!(BandConfig::default().with_finish(None).finish.is_none());
+/// ```
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct Finish {
+    /// The stepper that takes over. It must step on the force alone,
+    /// like [`BandConfig::method`].
+    pub method: Method,
+    /// The band hands over once its convergence force is at or under
+    /// this value, in the host's force units.
+    pub force: f64,
+}
+
+with_setters!(Finish {
+    with_method => method: val Method,
+    with_force => force: val f64,
+});
+
+impl Default for Finish {
+    fn default() -> Self {
+        Self {
+            method: Method::lbfgs_with_memory(FINISH_MEMORY),
+            force: FINISH_FORCE,
+        }
+    }
+}
+
+impl Finish {
+    pub(crate) fn validate(&self) -> Result<(), SaddleError> {
+        check_force_driven(&self.method)?;
+        if self.force.is_nan() || self.force <= 0.0 {
+            return Err(SaddleError::Invalid(
+                "the band finish force must be positive".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Climbing-image activation, the eOn trigger rule: CI arms when the
 /// convergence force falls under `trigger_factor * baseline` (eOn
 /// `ci_after_rel`, the baseline is the first evaluation's force) or
@@ -330,6 +404,11 @@ pub struct BandConfig {
     /// drops its pairs and steps along the force, and an empty memory
     /// scales that step by 0.01.
     pub method: Method,
+    /// The stepper that takes over from a FIRE band once its force is
+    /// small, [`Finish`]. L-BFGS under 5 force units by default; `None`
+    /// keeps FIRE to the end. It acts only on an atomic band whose
+    /// [`BandConfig::method`] is FIRE.
+    pub finish: Option<Finish>,
     /// Joint atomic and cell block. `None` is the atomic band.
     pub solid: Option<SolidState>,
     /// Ask for the quick-min step. The flag builds the solver as
@@ -400,6 +479,7 @@ with_setters!(BandConfig {
     with_max_move => max_move: val f64,
     with_remove_translation => remove_translation: val bool,
     with_method => method: val Method,
+    with_finish => finish: opt Finish,
     with_solid => solid: opt SolidState,
     with_quickmin => quickmin: val bool,
     with_quickmin_options => quickmin_options: val rgmin::QuickMinOptions,
@@ -527,6 +607,7 @@ impl Default for BandConfig {
             max_move: 0.2,
             remove_translation: true,
             method: Method::fire(rgmin::FireKind::V2),
+            finish: Some(Finish::default()),
             solid: None,
             quickmin: false,
             quickmin_options: rgmin::QuickMinOptions::rgmin(),
@@ -2385,6 +2466,29 @@ fn build_solver(config: &BandConfig, method: &Method, interior_dof: usize) -> So
     solver
 }
 
+/// The second solver of a band, the force it takes over at, and
+/// whether it has: once `done`, `spare` holds the first stage's solver.
+struct Handover {
+    spare: Solver,
+    force: f64,
+    done: bool,
+}
+
+impl Handover {
+    /// The finishing solver of an atomic FIRE band that has one.
+    fn build(config: &BandConfig, method: &Method, interior_dof: usize) -> Option<Self> {
+        let finish = config.finish.as_ref()?;
+        if config.solid.is_some() || config.quickmin || !matches!(method, Method::Fire { .. }) {
+            return None;
+        }
+        Some(Self {
+            spare: build_solver(config, &finish.method, interior_dof),
+            force: finish.force,
+            done: false,
+        })
+    }
+}
+
 /// Stepping band relaxation over an rgmin solver. Endpoints (rows 0
 /// and `n_images - 1`) never move.
 ///
@@ -2439,6 +2543,9 @@ pub struct BandSession {
     config: BandConfig,
     positions: Array2<f64>,
     solver: Solver,
+    /// The finishing solver, parked until the band force is small
+    /// enough, and the FIRE solver parked after the hand-over.
+    handover: Option<Handover>,
     state: BandState,
     iteration: usize,
     rtr: Option<crate::rtr::BandRtr>,
@@ -2527,6 +2634,9 @@ impl BandSession {
         if let Some(check) = &config.saddle_check {
             check.validate()?;
         }
+        if let Some(finish) = &config.finish {
+            finish.validate()?;
+        }
         if let Some(zoom) = &config.zoom {
             zoom::check_zoom(&config, zoom)?;
         }
@@ -2539,10 +2649,12 @@ impl BandSession {
         let segment = if solid.is_some() { dof + 9 } else { dof };
         let interior_dof = (n_images - 2) * segment;
         let solver = build_solver(&config, &method, interior_dof);
+        let handover = Handover::build(&config, &method, interior_dof);
         let mut session = Self {
             config,
             positions,
             solver,
+            handover,
             state: BandState::new(),
             iteration: 0,
             rtr: None,
@@ -2868,6 +2980,9 @@ impl BandSession {
     /// Disabled by default.
     pub fn set_highs(&mut self, enabled: bool) {
         self.solver.set_highs(enabled);
+        if let Some(handover) = &mut self.handover {
+            handover.spare.set_highs(enabled);
+        }
     }
 
     /// Select the convergence and climbing-trigger norm, retaining surface values.
@@ -2952,6 +3067,7 @@ impl BandSession {
         let segment = if self.solid.is_some() { dof + 9 } else { dof };
         let interior_dof = (self.positions.nrows() - 2) * segment;
         self.solver = build_solver(&self.config, &method, interior_dof);
+        self.handover = Handover::build(&self.config, &method, interior_dof);
         self.state.restart();
         self.refine = min_mode::RefineState::default();
         Ok(())
@@ -2987,6 +3103,9 @@ impl BandSession {
     /// does not inherit a stale quasi-Newton pair.
     pub(crate) fn forget_optimizer(&mut self) {
         self.solver.forget();
+        if let Some(handover) = &mut self.handover {
+            handover.spare.forget();
+        }
         if let Some(rtr) = &mut self.rtr {
             let gate = self.state.force_gate;
             *rtr = crate::rtr::BandRtr::new(rtr.config, false);
@@ -3101,6 +3220,13 @@ impl BandSession {
     /// reparameterization; with [`BandSession::set_positions`] for the
     /// moved images the next step evaluates only the interior images.
     pub fn restart(&mut self) {
+        if let Some(handover) = &mut self.handover {
+            if handover.done {
+                std::mem::swap(&mut self.solver, &mut handover.spare);
+                handover.done = false;
+            }
+            handover.spare.forget();
+        }
         self.solver.forget();
         self.state.restart();
         self.refine = min_mode::RefineState::default();
@@ -3225,6 +3351,30 @@ impl BandSession {
             per_image: e.metrics.as_slice(),
             free: e.free.as_deref(),
         });
+        let mut x = self.interior_flat();
+        if let Some(handover) = self.handover.as_mut().filter(|h| !h.done) {
+            let settled = state
+                .last
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .is_some_and(|l| l.x == x && l.projected.len() == interior_dof);
+            if !settled {
+                assemble_band_with(
+                    config,
+                    state,
+                    surface,
+                    endpoint_first.view(),
+                    endpoint_last.view(),
+                    x.view(),
+                    metrics,
+                )?;
+            }
+            if state.last_max_force() <= handover.force {
+                std::mem::swap(&mut self.solver, &mut handover.spare);
+                handover.done = true;
+            }
+        }
         let oracle =
             Oracle::unbounded(interior_dof, |x: ArrayView1<f64>| match assemble_band_with(
                 config,
@@ -3242,7 +3392,6 @@ impl BandSession {
                 }
             });
 
-        let mut x = self.interior_flat();
         let before = x.clone();
         let stepped = self.solver.step(&oracle, &mut x);
         drop(oracle);
