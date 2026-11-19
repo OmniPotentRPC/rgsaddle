@@ -25,6 +25,7 @@ The default bounds are 0.95 and 1.1, the paper's insertion thresholds.
 ~geodesic_path~ keeps the first and last images fixed.
 Each interior image is one L-BFGS minimization of the total length, using the analytic gradient of their Algorithm 1.
 Images are swept forward and then back until the largest displacement of a pass is at or below ~step_tol~.
+A round of sweeps that uses all of ~max_sweeps~ with an image still moving by more than ~step_tol~ ends the run with ~GeodesicReport::converged~ false, and the path is the last iterate.
 If the bounds are still loose, Cartesian midpoints are inserted on the loose segments, up to ~max_images~, and the sweeps start again.
 A trial the chart refuses is discarded. That image keeps its last accepted point.
 A chart that returns a ~cell~ from ~GeodesicChart::cell~ marks the rows as one 3-vector per atom in a periodic box.
@@ -46,4 +47,5 @@ On the Morse pair chart a dissociation whose distance only increases has length 
 
 From C, ~rgsaddle_geodesic_config_default~ fills ~rgsaddle_geodesic_config_t~, ~rgsaddle_geodesic_path~ takes a host chart and an optional row-major cell, and ~rgsaddle_geodesic_morse~ uses Eq. (7).
 A host chart given a cell applies the same minimum image to its own distances.
+A run that exhausts ~max_sweeps~ without settling returns ~RGSADDLE_NOT_CONVERGED~ with ~out~, ~length~, ~lower~, and ~upper~ holding the last iterate.
 A NULL config selects the defaults. ~length~, ~lower~, and ~upper~ may be NULL.

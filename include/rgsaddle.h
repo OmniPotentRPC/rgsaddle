@@ -151,7 +151,12 @@ typedef enum {
   /** The constrained-ensemble tail still drifts after equilibration. ABI minor 42. */
   RGSADDLE_NOT_EQUILIBRATED = -14,
   /** The constrained-ensemble tail has too few effective samples. ABI minor 42. */
-  RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES = -15
+  RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES = -15,
+  /**
+   * A geodesic interpolation used all of its sweeps with an image still
+   * moving. The outputs hold the last iterate.
+   */
+  RGSADDLE_NOT_CONVERGED = -16
 } rgsaddle_status_t;
 
 typedef enum {
@@ -1954,7 +1959,7 @@ typedef int (*rgsaddle_geodesic_chart_fn)(void *ctx, const double *x,
  * `flags` must be 0. `lower_ratio` is in (0, 1] and `upper_ratio` is
  * at least 1. Counts are at least 1, and `bound_samples` and
  * `max_images` are at least 2. `seed` seeds the ten noisy starts of
- * rgsaddle_geodesic_morse (Algorithm 3) and takes any value.
+ * Algorithm 3 in `rgsaddle_geodesic_morse` and takes any value.
  */
 typedef struct {
   rgsaddle_version_t version;
@@ -1997,6 +2002,9 @@ rgsaddle_status_t rgsaddle_geodesic_config_default(
  * `upper` may be NULL; otherwise they receive the Eq. (17) length and
  * the Eq. (B5) and Eq. (B18) bounds. A nonzero chart return is
  * `RGSADDLE_SURFACE_FAILED` when it happens on the starting path.
+ * When a round of sweeps uses all of `max_sweeps` with an image still
+ * moving by more than `step_tol`, `out`, `length`, `lower`, and `upper`
+ * hold the last iterate and the call returns `RGSADDLE_NOT_CONVERGED`.
  * `n_images * dof` and `n_coords * dof` must fit in memory sizes; an
  * overflow returns `RGSADDLE_INVALID_PARAMETER`.
  */

@@ -11,7 +11,7 @@ use ndarray::{Array1, Array2, ArrayView1};
 
 use super::{
     RGSADDLE_ABI_MAJOR, RGSADDLE_ABI_MINOR, RGSADDLE_ABI_MISMATCH, RGSADDLE_INVALID_PARAMETER,
-    RGSADDLE_OK, RGSADDLE_SHAPE, RgsaddleVersion, status_of,
+    RGSADDLE_NOT_CONVERGED, RGSADDLE_OK, RGSADDLE_SHAPE, RgsaddleVersion, status_of,
 };
 use crate::error::SaddleError;
 use crate::geodesic::{
@@ -340,7 +340,11 @@ pub unsafe extern "C" fn rgsaddle_geodesic_path(
             write_f64(length, report.length);
             write_f64(lower, report.lower);
             write_f64(upper, report.upper);
-            RGSADDLE_OK
+            if report.converged {
+                RGSADDLE_OK
+            } else {
+                RGSADDLE_NOT_CONVERGED
+            }
         }
         Err(err) => status_of(&err),
     }
@@ -431,7 +435,11 @@ pub unsafe extern "C" fn rgsaddle_geodesic_morse(
             write_f64(length, report.length);
             write_f64(lower, report.lower);
             write_f64(upper, report.upper);
-            RGSADDLE_OK
+            if report.converged {
+                RGSADDLE_OK
+            } else {
+                RGSADDLE_NOT_CONVERGED
+            }
         }
         Err(err) => status_of(&err),
     }

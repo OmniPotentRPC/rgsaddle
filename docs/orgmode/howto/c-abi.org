@@ -123,4 +123,5 @@ ABI minor 45 adds the free-end adaptive NEB of Zhang, Zhang, Ye, and Zheng, J. C
 The C ABI also has geodesic interpolation (Zhu, Thompson, and Martinez, J. Chem. Phys. 150, 164103 (2019), doi:10.1063/1.5090303 @@rst::cite:`zhuGeodesicInterpolation2019`@@).
 ~rgsaddle_geodesic_config_default~ fills an ~rgsaddle_geodesic_config_t~.
 ~rgsaddle_geodesic_path~ minimizes the length of an existing image-major path under a host chart callback, and ~rgsaddle_geodesic_morse~ builds the path between two geometries with the Morse pair coordinates of their Eq. (7) (alpha 1.7, beta 0.01).
+~rgsaddle_geodesic_path~ and ~rgsaddle_geodesic_morse~ return ~RGSADDLE_NOT_CONVERGED~ when a round of sweeps uses all of ~max_sweeps~ with an image still moving; the outputs then hold the last iterate.
 A NULL config selects the defaults. ~length~, ~lower~, and ~upper~ may be NULL.
