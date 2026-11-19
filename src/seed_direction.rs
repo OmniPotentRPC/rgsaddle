@@ -251,6 +251,14 @@ mod tests {
         }
     }
 
+    struct LargeHarmonic;
+
+    impl PointSurface for LargeHarmonic {
+        fn eval(&self, x: ArrayView1<'_, f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            Ok((0.5 * x.dot(&x), x.to_owned()))
+        }
+    }
+
     #[test]
     fn hessian_chirp_visits_each_nonrigid_mode_with_overlap_floor() {
         let minimum = Array1::zeros(6);
@@ -272,6 +280,20 @@ mod tests {
                     >= plan.minimum_squared_mode_weight
             );
         }
+    }
+
+    #[test]
+    fn hessian_chirp_supports_more_than_lanczos_full_dimension() {
+        let minimum = Array1::zeros(99);
+        let plan = hessian_mode_sweep_directions(
+            &LargeHarmonic,
+            minimum.view(),
+            3,
+            0.25,
+            None,
+        )
+        .expect("large mode sweep");
+        assert_eq!(plan.directions.len(), 96);
     }
 
     #[test]
