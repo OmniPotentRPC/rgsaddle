@@ -1,0 +1,4 @@
+~npt_lattice~, ~NptConfig~ and ~NptReport~ sample the lattice parameter of a crystal under isotropic Langevin dynamics with a Berendsen barostat.
+The run is split into equilibration and production blocks, and the report carries the block mean and standard error of both the lattice parameter and the pressure.
+~pressure_converged~ is true when the mean pressure is within two standard errors of the target, which is zero by default.
+A run that misses the criterion extends by ~extension_steps~ until it passes or reaches ~maximum_steps~.
