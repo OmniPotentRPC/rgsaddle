@@ -39,13 +39,22 @@ inline rgsaddle_version_t abi_stamp() {
     return stamp;
 }
 
-inline bool abi_compatible() noexcept {
+inline bool abi_stamp_at_least(rgsaddle_version_t const& stamp, std::uint32_t minor) noexcept {
+    return stamp.major == RGSADDLE_ABI_MAJOR && stamp.minor >= minor;
+}
+
+inline bool abi_at_least(std::uint32_t minor) noexcept {
     rgsaddle_version_t stamp{};
     if (rgsaddle_abi_stamp(&stamp) != RGSADDLE_OK) {
         return false;
     }
-    return stamp.major == RGSADDLE_ABI_MAJOR && stamp.minor >= 15;
+    return abi_stamp_at_least(stamp, minor);
 }
+
+inline bool abi_compatible() noexcept { return abi_at_least(15); }
+
+// First ABI minor that carries the rgsaddle_growing_string_* symbols.
+inline constexpr std::uint32_t growing_string_abi_minor = 44;
 
 struct Report {
     int status = RGSADDLE_STATUS_RUNNING;
@@ -669,8 +678,8 @@ public:
                   std::int64_t n_atoms, double const* reactant,
                   double const* product)
         : n_atoms_(n_atoms) {
-        if (!abi_compatible()) {
-            throw std::runtime_error("rgsaddle ABI 1.15 or later is required");
+        if (!abi_at_least(growing_string_abi_minor)) {
+            throw std::runtime_error("rgsaddle ABI 1.44 or later is required");
         }
         handle_ = rgsaddle_growing_string_create(&config, n_atoms, reactant, product);
         if (handle_ == nullptr) {
