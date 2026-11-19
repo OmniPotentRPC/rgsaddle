@@ -141,9 +141,46 @@ fn sample_on_sphere(dim: usize, rng: &mut SplitMix64) -> Array1<f64> {
 
 #[cfg(test)]
 mod tests {
-    use ndarray::array;
+    use ndarray::{Array1, ArrayView1, array};
 
-    use super::spectral_gap_rank;
+    use super::{hessian_mode_sweep_directions, spectral_gap_rank};
+    use crate::{PointSurface, SaddleError};
+
+    struct DiagonalHarmonic;
+
+    impl PointSurface for DiagonalHarmonic {
+        fn eval(
+            &self,
+            x: ArrayView1<'_, f64>,
+        ) -> Result<(f64, Array1<f64>), SaddleError> {
+            let diagonal = array![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+            let gradient = &diagonal * &x;
+            Ok((0.5 * x.dot(&gradient), gradient))
+        }
+    }
+
+    #[test]
+    fn hessian_chirp_visits_each_nonrigid_mode_with_overlap_floor() {
+        let minimum = Array1::zeros(6);
+        let weights = array![[0.0, 1.0], [1.0, 0.0]];
+        let plan = hessian_mode_sweep_directions(
+            &DiagonalHarmonic,
+            minimum.view(),
+            1,
+            0.25,
+            Some(weights.view()),
+        )
+        .expect("mode sweep");
+        assert_eq!(plan.mode_indices, vec![1, 2, 3, 4, 5]);
+        assert_eq!(plan.directions.len(), 5);
+        assert!((plan.minimum_squared_mode_weight - 0.04).abs() < 1.0e-14);
+        for (direction, &mode) in plan.directions.iter().zip(&plan.mode_indices) {
+            assert!(
+                direction[mode].powi(2) + 1.0e-14
+                    >= plan.minimum_squared_mode_weight
+            );
+        }
+    }
 
     #[test]
     fn spectral_gap_rank_uses_full_space_when_gaps_are_degenerate() {
