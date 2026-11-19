@@ -202,7 +202,7 @@ fn c_abi_morse_and_chart_match_the_published_lengths() {
         unsafe { rgsaddle_geodesic_config_default(&mut config) },
         RGSADDLE_OK
     );
-    assert_eq!(config.version.minor, rgsaddle::capi::RGSADDLE_ABI_MINOR);
+    assert_eq!(config.version.minor, 54);
 
     let initial = bowed_flat();
     let mut out = vec![0.0; initial.len()];

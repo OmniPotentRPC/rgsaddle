@@ -1,4 +1,4 @@
-//! Geodesic interpolation.
+//! Geodesic interpolation (ABI minor 54).
 //!
 //! Zhu, Thompson, and Martinez, J. Chem. Phys. 150, 164103 (2019),
 //! doi:10.1063/1.5090303.
