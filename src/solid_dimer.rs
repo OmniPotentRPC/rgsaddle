@@ -2000,6 +2000,17 @@ mod tests {
     }
 
     #[test]
+    fn frozen_first_order_enables_projected_index_certification() {
+        let config = SolidDimerConfig::frozen_first_order(MinModeConfig::default());
+        let check = config
+            .index
+            .expect("Vineyard searches must certify one projected negative mode");
+        assert_eq!(check.lowest, IndexCheck::first_order().lowest);
+        assert_eq!(check.negative, IndexCheck::first_order().negative);
+        assert!(check.escapes > 0);
+    }
+
+    #[test]
     fn frozen_cell_matches_the_fixed_cell_dimer() {
         let start = array![0.4, 0.15, -0.05];
         let mode = array![0.2, 1.0, -0.4];
