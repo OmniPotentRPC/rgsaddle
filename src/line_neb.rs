@@ -414,13 +414,39 @@ fn one_surface(
     Ok((energies[0], gradients.row(0).to_owned()))
 }
 
+fn coordinate_extent(values: impl Iterator<Item = f64>) -> Result<f64, SaddleError> {
+    let mut extent = 0.0;
+    for value in values {
+        let magnitude = value.abs();
+        if !magnitude.is_finite() {
+            return Err(SaddleError::NonFinite("MEP coordinate"));
+        }
+        if magnitude > extent {
+            extent = magnitude;
+        }
+    }
+    Ok(extent)
+}
+
+fn charge(budget: &mut usize) -> Result<(), SaddleError> {
+    if *budget == 0 {
+        return Err(SaddleError::Exhausted(
+            "MEP energy slice used its surface-call budget".into(),
+        ));
+    }
+    *budget -= 1;
+    Ok(())
+}
+
 fn energy_slice(
     surface: &impl BandSurface,
     q: ArrayView1<'_, f64>,
     sqrt_masses: ArrayView1<'_, f64>,
     target: f64,
+    budget: &mut usize,
 ) -> Result<Array1<f64>, SaddleError> {
     let position = &q / &sqrt_masses;
+    charge(budget)?;
     let (energy, gradient) = one_surface(surface, position.view())?;
     if energy <= target {
         return Ok(q.to_owned());
@@ -434,14 +460,20 @@ fn energy_slice(
     }
     let direction = force_q / force_norm;
     let mut lower = 0.0;
-    let scale = q.iter().map(|value| value.abs()).fold(1.0_f64, f64::max);
-    let mut upper = scale.sqrt() * f64::EPSILON.sqrt();
+    let extent = coordinate_extent(q.iter().copied())?;
+    if !(extent > 0.0) {
+        return Err(SaddleError::Invalid(
+            "MEP energy slice has no coordinate extent".into(),
+        ));
+    }
+    let mut upper = extent.sqrt() * f64::EPSILON.sqrt();
     if !(upper > 0.0 && upper.is_finite()) {
         return Err(SaddleError::NonFinite("MEP energy-slice step"));
     }
     loop {
         let trial_q = q.to_owned() + upper * &direction;
         let trial = &trial_q / &sqrt_masses;
+        charge(budget)?;
         if one_surface(surface, trial.view())?.0 <= target {
             break;
         }
@@ -460,6 +492,7 @@ fn energy_slice(
         }
         let trial_q = q.to_owned() + middle * &direction;
         let trial = &trial_q / &sqrt_masses;
+        charge(budget)?;
         if one_surface(surface, trial.view())?.0 > target {
             lower = middle;
         } else {
@@ -474,7 +507,12 @@ fn energy_slice(
 /// Each branch follows the mass-scaled force from the unstable mode and
 /// locates equal energy drops by bracketing, then both branches are resampled
 /// to `images` equal arc-length positions. The requested image count sets the
-/// energy resolution; there is no coordinate step or iteration limit.
+/// energy resolution. `max_evaluations` is the surface-call budget for
+/// every slice on both branches.
+///
+/// # Errors
+///
+/// [`SaddleError::Exhausted`] when the budget is used up.
 pub fn fixed_energy_mep_seed(
     surface: &impl BandSurface,
     saddle: ArrayView1<'_, f64>,
@@ -483,6 +521,7 @@ pub fn fixed_energy_mep_seed(
     saddle_energy: f64,
     target_energy: f64,
     images: usize,
+    max_evaluations: usize,
 ) -> Result<Array2<f64>, SaddleError> {
     if images < 3
         || saddle.len() != mode.len()
@@ -506,11 +545,16 @@ pub fn fixed_energy_mep_seed(
         ));
     }
     let direction = mode_q / mode_norm;
-    let scale = saddle_q
-        .iter()
-        .map(|value| value.abs())
-        .fold(1.0_f64, f64::max);
-    let displacement = scale.sqrt() * f64::EPSILON.sqrt();
+    let extent = coordinate_extent(saddle_q.iter().copied())?;
+    // A saddle at the origin has no coordinate extent. The kick is then
+    // one normalized-mode length, which is 1 after the division above.
+    let length = if extent > 0.0 {
+        extent
+    } else {
+        direction.dot(&direction).sqrt()
+    };
+    let displacement = length.sqrt() * f64::EPSILON.sqrt();
+    let mut budget = max_evaluations;
     let mut branches = Vec::with_capacity(2);
     for sign in [-1.0, 1.0] {
         let mut branch = Vec::with_capacity(images);
@@ -519,7 +563,7 @@ pub fn fixed_energy_mep_seed(
         for slice in 1..images {
             let fraction = slice as f64 / (images - 1) as f64;
             let level = saddle_energy + fraction * (target_energy - saddle_energy);
-            q = energy_slice(surface, q.view(), sqrt_masses.view(), level)?;
+            q = energy_slice(surface, q.view(), sqrt_masses.view(), level, &mut budget)?;
             branch.push(q.clone());
         }
         branches.push(branch);
@@ -640,7 +684,7 @@ impl LineNebSession {
         let shape = self.q.raw_dim();
         let config = &self.config;
         let error = Mutex::new(None);
-        let latest = Mutex::new(None);
+        let latest: Mutex<Option<(Array1<f64>, Evaluation)>> = Mutex::new(None);
         let rows = AtomicUsize::new(0);
         let oracle = Oracle::unbounded(self.q.len(), |flat: ArrayView1<'_, f64>| {
             let q = match flat.to_owned().into_shape_with_order(shape) {
@@ -656,7 +700,7 @@ impl LineNebSession {
                     let gradient =
                         -Array1::from_iter(evaluation.optimization_force.iter().copied());
                     let action = evaluation.action;
-                    if !store(&latest, Some(evaluation)) {
+                    if !store(&latest, Some((flat.to_owned(), evaluation))) {
                         let _ = store(
                             &error,
                             Some(SaddleError::Invalid(
@@ -690,6 +734,7 @@ impl LineNebSession {
             return Err(err);
         }
         stepped.map_err(|err| SaddleError::Solver(err.to_string()))?;
+        let accepted = flat.clone();
         self.q = flat
             .into_shape_with_order(shape)
             .map_err(|err| SaddleError::Shape(err.to_string()))?;
@@ -700,18 +745,21 @@ impl LineNebSession {
             .iteration
             .checked_add(1)
             .ok_or_else(|| SaddleError::Solver("LI-NEB iteration counter overflow".into()))?;
-        let evaluation = match latest.into_inner() {
-            Ok(Some(evaluation)) => evaluation,
-            Ok(None) => {
-                return Err(SaddleError::Solver(
-                    "LI-NEB step produced no evaluation".into(),
-                ));
-            }
+        let cached = match latest.into_inner() {
+            Ok(value) => value,
             Err(_) => {
                 self.solver.forget_evaluation();
                 return Err(SaddleError::Invalid(
                     "a shared evaluation lock was poisoned".into(),
                 ));
+            }
+        };
+        let evaluation = match cached {
+            Some((evaluated, evaluation)) if evaluated == accepted => evaluation,
+            _ => {
+                let evaluation = evaluate(config, surface, self.q.view())?;
+                rows.fetch_add(self.q.nrows(), Ordering::Relaxed);
+                evaluation
             }
         };
         let status = if evaluation.max_interior_perpendicular <= self.config.force_tol

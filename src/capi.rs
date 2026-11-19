@@ -483,6 +483,7 @@ pub(crate) fn status_of(err: &SaddleError) -> i32 {
         SaddleError::Stalled(_) => RGSADDLE_STALLED,
         SaddleError::NotEquilibrated { .. } => RGSADDLE_NOT_EQUILIBRATED,
         SaddleError::InsufficientEffectiveSamples { .. } => RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES,
+        SaddleError::Exhausted(_) => RGSADDLE_INVALID_PARAMETER,
     }
 }
 

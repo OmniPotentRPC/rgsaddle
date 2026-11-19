@@ -727,14 +727,23 @@ impl FixedEnergyTrajectory {
 
     /// Integrate from the left endpoint until the path ends or the
     /// velocity turns back. `time_step` is the fixed step of that
-    /// integration.
+    /// integration. `max_steps` is how many of those steps may be taken.
+    ///
+    /// A proposal that reaches or passes the end knot is an integration
+    /// event: the corrector acceleration is sampled at that knot, and the
+    /// stored arc is the knot. No state past the knot is formed.
     ///
     /// # Errors
     ///
     /// [`SaddleError::Invalid`] when `time_step` is not positive and
-    /// finite, or when a step stops advancing. The errors of
-    /// [`Self::acceleration`].
-    pub fn half(&self, time_step: f64) -> Result<Vec<TrajectoryPoint>, SaddleError> {
+    /// finite, or when a step stops advancing.
+    /// [`SaddleError::Exhausted`] when `max_steps` is used up. The errors
+    /// of [`Self::acceleration`].
+    pub fn half(
+        &self,
+        time_step: f64,
+        max_steps: usize,
+    ) -> Result<Vec<TrajectoryPoint>, SaddleError> {
         if !(time_step.is_finite() && time_step > 0.0) {
             return Err(SaddleError::Invalid(
                 "fixed-energy trajectory step must be positive and finite".into(),
@@ -745,7 +754,14 @@ impl FixedEnergyTrajectory {
             arc: 0.0,
             velocity: 0.0,
         }];
+        let mut steps = 0usize;
         loop {
+            if steps == max_steps {
+                return Err(SaddleError::Exhausted(
+                    "fixed-energy trajectory used its step budget".into(),
+                ));
+            }
+            steps += 1;
             let current = *trajectory.last().ok_or_else(|| {
                 SaddleError::Solver("fixed-energy trajectory lost its initial point".into())
             })?;
@@ -753,16 +769,22 @@ impl FixedEnergyTrajectory {
             let proposed_arc =
                 current.arc + time_step * current.velocity + 0.5 * time_step.powi(2) * a0;
             let predicted_velocity = current.velocity + time_step * a0;
-            let limited = if proposed_arc < 1.0 {
-                proposed_arc
-            } else {
-                1.0
-            };
-            let a1 = self.acceleration(limited, predicted_velocity)?;
-            let proposed_velocity = current.velocity + 0.5 * time_step * (a0 + a1);
-            let next_time = current.time + time_step;
+            if !(proposed_arc.is_finite() && predicted_velocity.is_finite()) {
+                return Err(SaddleError::Invalid(format!(
+                    "inverted-potential trajectory stopped at s={:.17e}, v={:.17e}, a={:.17e}",
+                    current.arc, current.velocity, a0
+                )));
+            }
             if proposed_arc >= 1.0 {
+                let a1 = self.acceleration(1.0, predicted_velocity)?;
+                let proposed_velocity = current.velocity + 0.5 * time_step * (a0 + a1);
                 let ds = proposed_arc - current.arc;
+                if !(ds.is_finite() && ds > 0.0 && proposed_velocity.is_finite()) {
+                    return Err(SaddleError::Invalid(format!(
+                        "inverted-potential trajectory stopped at s={:.17e}, v={:.17e}, a={:.17e}",
+                        current.arc, current.velocity, a0
+                    )));
+                }
                 let fraction = (1.0 - current.arc) / ds;
                 trajectory.push(TrajectoryPoint {
                     time: current.time + fraction * time_step,
@@ -771,6 +793,9 @@ impl FixedEnergyTrajectory {
                 });
                 return Ok(trajectory);
             }
+            let a1 = self.acceleration(proposed_arc, predicted_velocity)?;
+            let proposed_velocity = current.velocity + 0.5 * time_step * (a0 + a1);
+            let next_time = current.time + time_step;
             if current.velocity > 0.0 && proposed_velocity <= 0.0 {
                 let fraction = current.velocity / (current.velocity - proposed_velocity);
                 trajectory.push(TrajectoryPoint {
@@ -781,7 +806,6 @@ impl FixedEnergyTrajectory {
                 return Ok(trajectory);
             }
             if !(proposed_arc > current.arc
-                && proposed_arc.is_finite()
                 && proposed_velocity.is_finite()
                 && next_time.is_finite())
             {
@@ -803,8 +827,8 @@ impl FixedEnergyTrajectory {
     /// # Errors
     ///
     /// The errors of [`Self::half`].
-    pub fn period(&self, time_step: f64) -> Result<f64, SaddleError> {
-        let trajectory = self.half(time_step)?;
+    pub fn period(&self, time_step: f64, max_steps: usize) -> Result<f64, SaddleError> {
+        let trajectory = self.half(time_step, max_steps)?;
         let last = trajectory.last().ok_or_else(|| {
             SaddleError::Shape("fixed-energy trajectory produced no points".into())
         })?;
@@ -1876,9 +1900,10 @@ mod tests {
         assert!(geometry.curvature[0].abs() < 1e-12);
         let acceleration = path.acceleration(0.25, 0.0).unwrap();
         assert!((acceleration - 1.0).abs() < 1e-12);
-        let half = path.half(0.1).unwrap();
+        let half = path.half(0.1, 10_000).unwrap();
         assert!((half.last().unwrap().arc - 1.0).abs() < 1e-12);
-        let period = path.period(0.1).unwrap();
+        assert!(matches!(path.half(0.1, 1), Err(SaddleError::Exhausted(_))));
+        let period = path.period(0.1, 10_000).unwrap();
         assert!((period - 2.0 * half.last().unwrap().time).abs() < 1e-15);
         let mid = arc_at_time(&half, 0.0).unwrap();
         assert_eq!(mid, 0.0);
