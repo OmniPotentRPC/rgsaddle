@@ -72,6 +72,7 @@ rgpot-rev = "97ebba0b062128b7dc4637501c4b70ed4944ae9d"
 approx = "0.5"
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 faer = { version = "0.24.4", default-features = false, features = ["std", "linalg"] }
+serde_json = "1"
 sha2 = "0.10"
 
 [[bench]]

@@ -16,6 +16,9 @@ pytest = "*"
 pytest-timeout = "*"
 rust = ">=1.88"
 
+[feature.python.pypi-dependencies]
+tomli = { version = ">=2.0.1", env-markers = "python_version < '3.11'" }
+
 [feature.python.tasks]
 python-build = "python -m pip install ."
 python-test = { cmd = "pytest tests/python/ -q --timeout=120", depends-on = ["python-build"] }

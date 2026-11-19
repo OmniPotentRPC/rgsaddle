@@ -89,6 +89,7 @@ jobs:
           cargo run --release --features ohtst --example ohtst_skewed_well
           cargo run --release --example elastic_field_bench -- 2000
           MD_CHECK=1 cargo run --release --example langevin_nvt
+          cargo run --release --example recompute_coverage_rmsd
           python3 -m pip install -e . --no-build-isolation
           python3 examples/usage.py
           python3 examples/step_controls.py

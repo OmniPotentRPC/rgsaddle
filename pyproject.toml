@@ -31,6 +31,7 @@ test = [
   "hypothesis>=6",
   "numpy>=1.24",
   "ase==3.29.0",
+  "tomli>=2.0.1; python_version < '3.11'",
 ]
 
 [project.urls]
@@ -50,7 +51,14 @@ build = "cp310-* cp311-* cp312-* cp314t-* cp315t-*"
 skip = ["pp*", "*-musllinux*", "*_i686", "*-win32"]
 manylinux-x86_64-image = "manylinux_2_28"
 manylinux-aarch64-image = "manylinux_2_28"
-test-requires = ["pytest", "pytest-timeout", "numpy", "hypothesis", "ase==3.29.0"]
+test-requires = [
+  "pytest",
+  "pytest-timeout",
+  "numpy",
+  "hypothesis",
+  "ase==3.29.0",
+  "tomli>=2.0.1; python_version < '3.11'",
+]
 test-command = "python -m pytest -q tests/python --timeout=180 -o faulthandler_timeout=120"
 test-sources = ["tests/python"]
 

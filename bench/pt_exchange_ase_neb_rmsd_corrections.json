@@ -1,0 +1,226 @@
+{
+  "generator": "examples/recompute_coverage_rmsd.rs",
+  "legacy_code": {
+    "base": "bench/harness.py rmsd -> mic_vectors -> mi_displacement_euclidean",
+    "cell_revision": "7c1d432 uses minimage 0.1.2; src/mic.rs uses Cell fractional wrapping for rgsaddle band internals"
+  },
+  "rows": [
+    {
+      "cause": "The rejected independent check included fixed slab atoms and used a custom radius-2 lattice-image search; the benchmark uses free atoms only and minimage 0.1.2's Smith/Minkowski-reduced 27-image Euclidean convention. The legacy harness passes raw stored positions directly to minimage::Cell::displacement_euclidean through the C ABI, performs no ASE get_distances call, explicit wrapping, centering, or alignment, and computes sqrt(mean(per-atom squared 3D displacement)) over free atoms. For ase-neb it compares the reference with the highest-energy interior image selected from the final unconverged band. All rounds are identical because ASE BFGS starts from the same linear band without a seed and deterministically reaches the same final selected structure; each run stores that structure independently.",
+      "images": 7,
+      "method": "ase-neb",
+      "rmsd_new": 7.60084937208391,
+      "rmsd_old": 7.60084937208391,
+      "round": 0,
+      "system": "pt_exchange"
+    },
+    {
+      "cause": "The rejected independent check included fixed slab atoms and used a custom radius-2 lattice-image search; the benchmark uses free atoms only and minimage 0.1.2's Smith/Minkowski-reduced 27-image Euclidean convention. The legacy harness passes raw stored positions directly to minimage::Cell::displacement_euclidean through the C ABI, performs no ASE get_distances call, explicit wrapping, centering, or alignment, and computes sqrt(mean(per-atom squared 3D displacement)) over free atoms. For ase-neb it compares the reference with the highest-energy interior image selected from the final unconverged band. All rounds are identical because ASE BFGS starts from the same linear band without a seed and deterministically reaches the same final selected structure; each run stores that structure independently.",
+      "images": 7,
+      "method": "ase-neb",
+      "rmsd_new": 7.60084937208391,
+      "rmsd_old": 7.60084937208391,
+      "round": 1,
+      "system": "pt_exchange"
+    },
+    {
+      "cause": "The rejected independent check included fixed slab atoms and used a custom radius-2 lattice-image search; the benchmark uses free atoms only and minimage 0.1.2's Smith/Minkowski-reduced 27-image Euclidean convention. The legacy harness passes raw stored positions directly to minimage::Cell::displacement_euclidean through the C ABI, performs no ASE get_distances call, explicit wrapping, centering, or alignment, and computes sqrt(mean(per-atom squared 3D displacement)) over free atoms. For ase-neb it compares the reference with the highest-energy interior image selected from the final unconverged band. All rounds are identical because ASE BFGS starts from the same linear band without a seed and deterministically reaches the same final selected structure; each run stores that structure independently.",
+      "images": 7,
+      "method": "ase-neb",
+      "rmsd_new": 7.60084937208391,
+      "rmsd_old": 7.60084937208391,
+      "round": 2,
+      "system": "pt_exchange"
+    },
+    {
+      "cause": "The rejected independent check included fixed slab atoms and used a custom radius-2 lattice-image search; the benchmark uses free atoms only and minimage 0.1.2's Smith/Minkowski-reduced 27-image Euclidean convention. The legacy harness passes raw stored positions directly to minimage::Cell::displacement_euclidean through the C ABI, performs no ASE get_distances call, explicit wrapping, centering, or alignment, and computes sqrt(mean(per-atom squared 3D displacement)) over free atoms. For ase-neb it compares the reference with the highest-energy interior image selected from the final unconverged band. All rounds are identical because ASE BFGS starts from the same linear band without a seed and deterministically reaches the same final selected structure; each run stores that structure independently.",
+      "images": 7,
+      "method": "ase-neb",
+      "rmsd_new": 7.60084937208391,
+      "rmsd_old": 7.60084937208391,
+      "round": 3,
+      "system": "pt_exchange"
+    },
+    {
+      "cause": "The rejected independent check included fixed slab atoms and used a custom radius-2 lattice-image search; the benchmark uses free atoms only and minimage 0.1.2's Smith/Minkowski-reduced 27-image Euclidean convention. The legacy harness passes raw stored positions directly to minimage::Cell::displacement_euclidean through the C ABI, performs no ASE get_distances call, explicit wrapping, centering, or alignment, and computes sqrt(mean(per-atom squared 3D displacement)) over free atoms. For ase-neb it compares the reference with the highest-energy interior image selected from the final unconverged band. All rounds are identical because ASE BFGS starts from the same linear band without a seed and deterministically reaches the same final selected structure; each run stores that structure independently.",
+      "images": 7,
+      "method": "ase-neb",
+      "rmsd_new": 7.60084937208391,
+      "rmsd_old": 7.60084937208391,
+      "round": 4,
+      "system": "pt_exchange"
+    },
+    {
+      "cause": "The rejected independent check included fixed slab atoms and used a custom radius-2 lattice-image search; the benchmark uses free atoms only and minimage 0.1.2's Smith/Minkowski-reduced 27-image Euclidean convention. The legacy harness passes raw stored positions directly to minimage::Cell::displacement_euclidean through the C ABI, performs no ASE get_distances call, explicit wrapping, centering, or alignment, and computes sqrt(mean(per-atom squared 3D displacement)) over free atoms. For ase-neb it compares the reference with the highest-energy interior image selected from the final unconverged band. All rounds are identical because ASE BFGS starts from the same linear band without a seed and deterministically reaches the same final selected structure; each run stores that structure independently.",
+      "images": 7,
+      "method": "ase-neb",
+      "rmsd_new": 7.60084937208391,
+      "rmsd_old": 7.60084937208391,
+      "round": 5,
+      "system": "pt_exchange"
+    },
+    {
+      "cause": "The rejected independent check included fixed slab atoms and used a custom radius-2 lattice-image search; the benchmark uses free atoms only and minimage 0.1.2's Smith/Minkowski-reduced 27-image Euclidean convention. The legacy harness passes raw stored positions directly to minimage::Cell::displacement_euclidean through the C ABI, performs no ASE get_distances call, explicit wrapping, centering, or alignment, and computes sqrt(mean(per-atom squared 3D displacement)) over free atoms. For ase-neb it compares the reference with the highest-energy interior image selected from the final unconverged band. All rounds are identical because ASE BFGS starts from the same linear band without a seed and deterministically reaches the same final selected structure; each run stores that structure independently.",
+      "images": 7,
+      "method": "ase-neb",
+      "rmsd_new": 7.60084937208391,
+      "rmsd_old": 7.60084937208391,
+      "round": 6,
+      "system": "pt_exchange"
+    },
+    {
+      "cause": "The rejected independent check included fixed slab atoms and used a custom radius-2 lattice-image search; the benchmark uses free atoms only and minimage 0.1.2's Smith/Minkowski-reduced 27-image Euclidean convention. The legacy harness passes raw stored positions directly to minimage::Cell::displacement_euclidean through the C ABI, performs no ASE get_distances call, explicit wrapping, centering, or alignment, and computes sqrt(mean(per-atom squared 3D displacement)) over free atoms. For ase-neb it compares the reference with the highest-energy interior image selected from the final unconverged band. All rounds are identical because ASE BFGS starts from the same linear band without a seed and deterministically reaches the same final selected structure; each run stores that structure independently.",
+      "images": 7,
+      "method": "ase-neb",
+      "rmsd_new": 7.60084937208391,
+      "rmsd_old": 7.60084937208391,
+      "round": 7,
+      "system": "pt_exchange"
+    },
+    {
+      "cause": "The rejected independent check included fixed slab atoms and used a custom radius-2 lattice-image search; the benchmark uses free atoms only and minimage 0.1.2's Smith/Minkowski-reduced 27-image Euclidean convention. The legacy harness passes raw stored positions directly to minimage::Cell::displacement_euclidean through the C ABI, performs no ASE get_distances call, explicit wrapping, centering, or alignment, and computes sqrt(mean(per-atom squared 3D displacement)) over free atoms. For ase-neb it compares the reference with the highest-energy interior image selected from the final unconverged band. All rounds are identical because ASE BFGS starts from the same linear band without a seed and deterministically reaches the same final selected structure; each run stores that structure independently.",
+      "images": 7,
+      "method": "ase-neb",
+      "rmsd_new": 7.60084937208391,
+      "rmsd_old": 7.60084937208391,
+      "round": 8,
+      "system": "pt_exchange"
+    },
+    {
+      "cause": "The rejected independent check included fixed slab atoms and used a custom radius-2 lattice-image search; the benchmark uses free atoms only and minimage 0.1.2's Smith/Minkowski-reduced 27-image Euclidean convention. The legacy harness passes raw stored positions directly to minimage::Cell::displacement_euclidean through the C ABI, performs no ASE get_distances call, explicit wrapping, centering, or alignment, and computes sqrt(mean(per-atom squared 3D displacement)) over free atoms. For ase-neb it compares the reference with the highest-energy interior image selected from the final unconverged band. All rounds are identical because ASE BFGS starts from the same linear band without a seed and deterministically reaches the same final selected structure; each run stores that structure independently.",
+      "images": 7,
+      "method": "ase-neb",
+      "rmsd_new": 7.60084937208391,
+      "rmsd_old": 7.60084937208391,
+      "round": 9,
+      "system": "pt_exchange"
+    },
+    {
+      "cause": "The rejected independent check included fixed slab atoms and used a custom radius-2 lattice-image search; the benchmark uses free atoms only and minimage 0.1.2's Smith/Minkowski-reduced 27-image Euclidean convention. The legacy harness passes raw stored positions directly to minimage::Cell::displacement_euclidean through the C ABI, performs no ASE get_distances call, explicit wrapping, centering, or alignment, and computes sqrt(mean(per-atom squared 3D displacement)) over free atoms. For ase-neb it compares the reference with the highest-energy interior image selected from the final unconverged band. All rounds are identical because ASE BFGS starts from the same linear band without a seed and deterministically reaches the same final selected structure; each run stores that structure independently.",
+      "images": 7,
+      "method": "ase-neb",
+      "rmsd_new": 7.60084937208391,
+      "rmsd_old": 7.60084937208391,
+      "round": 10,
+      "system": "pt_exchange"
+    },
+    {
+      "cause": "The rejected independent check included fixed slab atoms and used a custom radius-2 lattice-image search; the benchmark uses free atoms only and minimage 0.1.2's Smith/Minkowski-reduced 27-image Euclidean convention. The legacy harness passes raw stored positions directly to minimage::Cell::displacement_euclidean through the C ABI, performs no ASE get_distances call, explicit wrapping, centering, or alignment, and computes sqrt(mean(per-atom squared 3D displacement)) over free atoms. For ase-neb it compares the reference with the highest-energy interior image selected from the final unconverged band. All rounds are identical because ASE BFGS starts from the same linear band without a seed and deterministically reaches the same final selected structure; each run stores that structure independently.",
+      "images": 7,
+      "method": "ase-neb",
+      "rmsd_new": 7.60084937208391,
+      "rmsd_old": 7.60084937208391,
+      "round": 11,
+      "system": "pt_exchange"
+    },
+    {
+      "cause": "The rejected independent check included fixed slab atoms and used a custom radius-2 lattice-image search; the benchmark uses free atoms only and minimage 0.1.2's Smith/Minkowski-reduced 27-image Euclidean convention. The legacy harness passes raw stored positions directly to minimage::Cell::displacement_euclidean through the C ABI, performs no ASE get_distances call, explicit wrapping, centering, or alignment, and computes sqrt(mean(per-atom squared 3D displacement)) over free atoms. For ase-neb it compares the reference with the highest-energy interior image selected from the final unconverged band. All rounds are identical because ASE BFGS starts from the same linear band without a seed and deterministically reaches the same final selected structure; each run stores that structure independently.",
+      "images": 11,
+      "method": "ase-neb",
+      "rmsd_new": 3.9989735889028406,
+      "rmsd_old": 3.9989735889028406,
+      "round": 0,
+      "system": "pt_exchange"
+    },
+    {
+      "cause": "The rejected independent check included fixed slab atoms and used a custom radius-2 lattice-image search; the benchmark uses free atoms only and minimage 0.1.2's Smith/Minkowski-reduced 27-image Euclidean convention. The legacy harness passes raw stored positions directly to minimage::Cell::displacement_euclidean through the C ABI, performs no ASE get_distances call, explicit wrapping, centering, or alignment, and computes sqrt(mean(per-atom squared 3D displacement)) over free atoms. For ase-neb it compares the reference with the highest-energy interior image selected from the final unconverged band. All rounds are identical because ASE BFGS starts from the same linear band without a seed and deterministically reaches the same final selected structure; each run stores that structure independently.",
+      "images": 11,
+      "method": "ase-neb",
+      "rmsd_new": 3.9989735889028406,
+      "rmsd_old": 3.9989735889028406,
+      "round": 1,
+      "system": "pt_exchange"
+    },
+    {
+      "cause": "The rejected independent check included fixed slab atoms and used a custom radius-2 lattice-image search; the benchmark uses free atoms only and minimage 0.1.2's Smith/Minkowski-reduced 27-image Euclidean convention. The legacy harness passes raw stored positions directly to minimage::Cell::displacement_euclidean through the C ABI, performs no ASE get_distances call, explicit wrapping, centering, or alignment, and computes sqrt(mean(per-atom squared 3D displacement)) over free atoms. For ase-neb it compares the reference with the highest-energy interior image selected from the final unconverged band. All rounds are identical because ASE BFGS starts from the same linear band without a seed and deterministically reaches the same final selected structure; each run stores that structure independently.",
+      "images": 11,
+      "method": "ase-neb",
+      "rmsd_new": 3.9989735889028406,
+      "rmsd_old": 3.9989735889028406,
+      "round": 2,
+      "system": "pt_exchange"
+    },
+    {
+      "cause": "The rejected independent check included fixed slab atoms and used a custom radius-2 lattice-image search; the benchmark uses free atoms only and minimage 0.1.2's Smith/Minkowski-reduced 27-image Euclidean convention. The legacy harness passes raw stored positions directly to minimage::Cell::displacement_euclidean through the C ABI, performs no ASE get_distances call, explicit wrapping, centering, or alignment, and computes sqrt(mean(per-atom squared 3D displacement)) over free atoms. For ase-neb it compares the reference with the highest-energy interior image selected from the final unconverged band. All rounds are identical because ASE BFGS starts from the same linear band without a seed and deterministically reaches the same final selected structure; each run stores that structure independently.",
+      "images": 11,
+      "method": "ase-neb",
+      "rmsd_new": 3.9989735889028406,
+      "rmsd_old": 3.9989735889028406,
+      "round": 3,
+      "system": "pt_exchange"
+    },
+    {
+      "cause": "The rejected independent check included fixed slab atoms and used a custom radius-2 lattice-image search; the benchmark uses free atoms only and minimage 0.1.2's Smith/Minkowski-reduced 27-image Euclidean convention. The legacy harness passes raw stored positions directly to minimage::Cell::displacement_euclidean through the C ABI, performs no ASE get_distances call, explicit wrapping, centering, or alignment, and computes sqrt(mean(per-atom squared 3D displacement)) over free atoms. For ase-neb it compares the reference with the highest-energy interior image selected from the final unconverged band. All rounds are identical because ASE BFGS starts from the same linear band without a seed and deterministically reaches the same final selected structure; each run stores that structure independently.",
+      "images": 11,
+      "method": "ase-neb",
+      "rmsd_new": 3.9989735889028406,
+      "rmsd_old": 3.9989735889028406,
+      "round": 4,
+      "system": "pt_exchange"
+    },
+    {
+      "cause": "The rejected independent check included fixed slab atoms and used a custom radius-2 lattice-image search; the benchmark uses free atoms only and minimage 0.1.2's Smith/Minkowski-reduced 27-image Euclidean convention. The legacy harness passes raw stored positions directly to minimage::Cell::displacement_euclidean through the C ABI, performs no ASE get_distances call, explicit wrapping, centering, or alignment, and computes sqrt(mean(per-atom squared 3D displacement)) over free atoms. For ase-neb it compares the reference with the highest-energy interior image selected from the final unconverged band. All rounds are identical because ASE BFGS starts from the same linear band without a seed and deterministically reaches the same final selected structure; each run stores that structure independently.",
+      "images": 11,
+      "method": "ase-neb",
+      "rmsd_new": 3.9989735889028406,
+      "rmsd_old": 3.9989735889028406,
+      "round": 5,
+      "system": "pt_exchange"
+    },
+    {
+      "cause": "The rejected independent check included fixed slab atoms and used a custom radius-2 lattice-image search; the benchmark uses free atoms only and minimage 0.1.2's Smith/Minkowski-reduced 27-image Euclidean convention. The legacy harness passes raw stored positions directly to minimage::Cell::displacement_euclidean through the C ABI, performs no ASE get_distances call, explicit wrapping, centering, or alignment, and computes sqrt(mean(per-atom squared 3D displacement)) over free atoms. For ase-neb it compares the reference with the highest-energy interior image selected from the final unconverged band. All rounds are identical because ASE BFGS starts from the same linear band without a seed and deterministically reaches the same final selected structure; each run stores that structure independently.",
+      "images": 11,
+      "method": "ase-neb",
+      "rmsd_new": 3.9989735889028406,
+      "rmsd_old": 3.9989735889028406,
+      "round": 6,
+      "system": "pt_exchange"
+    },
+    {
+      "cause": "The rejected independent check included fixed slab atoms and used a custom radius-2 lattice-image search; the benchmark uses free atoms only and minimage 0.1.2's Smith/Minkowski-reduced 27-image Euclidean convention. The legacy harness passes raw stored positions directly to minimage::Cell::displacement_euclidean through the C ABI, performs no ASE get_distances call, explicit wrapping, centering, or alignment, and computes sqrt(mean(per-atom squared 3D displacement)) over free atoms. For ase-neb it compares the reference with the highest-energy interior image selected from the final unconverged band. All rounds are identical because ASE BFGS starts from the same linear band without a seed and deterministically reaches the same final selected structure; each run stores that structure independently.",
+      "images": 11,
+      "method": "ase-neb",
+      "rmsd_new": 3.9989735889028406,
+      "rmsd_old": 3.9989735889028406,
+      "round": 7,
+      "system": "pt_exchange"
+    },
+    {
+      "cause": "The rejected independent check included fixed slab atoms and used a custom radius-2 lattice-image search; the benchmark uses free atoms only and minimage 0.1.2's Smith/Minkowski-reduced 27-image Euclidean convention. The legacy harness passes raw stored positions directly to minimage::Cell::displacement_euclidean through the C ABI, performs no ASE get_distances call, explicit wrapping, centering, or alignment, and computes sqrt(mean(per-atom squared 3D displacement)) over free atoms. For ase-neb it compares the reference with the highest-energy interior image selected from the final unconverged band. All rounds are identical because ASE BFGS starts from the same linear band without a seed and deterministically reaches the same final selected structure; each run stores that structure independently.",
+      "images": 11,
+      "method": "ase-neb",
+      "rmsd_new": 3.9989735889028406,
+      "rmsd_old": 3.9989735889028406,
+      "round": 8,
+      "system": "pt_exchange"
+    },
+    {
+      "cause": "The rejected independent check included fixed slab atoms and used a custom radius-2 lattice-image search; the benchmark uses free atoms only and minimage 0.1.2's Smith/Minkowski-reduced 27-image Euclidean convention. The legacy harness passes raw stored positions directly to minimage::Cell::displacement_euclidean through the C ABI, performs no ASE get_distances call, explicit wrapping, centering, or alignment, and computes sqrt(mean(per-atom squared 3D displacement)) over free atoms. For ase-neb it compares the reference with the highest-energy interior image selected from the final unconverged band. All rounds are identical because ASE BFGS starts from the same linear band without a seed and deterministically reaches the same final selected structure; each run stores that structure independently.",
+      "images": 11,
+      "method": "ase-neb",
+      "rmsd_new": 3.9989735889028406,
+      "rmsd_old": 3.9989735889028406,
+      "round": 9,
+      "system": "pt_exchange"
+    },
+    {
+      "cause": "The rejected independent check included fixed slab atoms and used a custom radius-2 lattice-image search; the benchmark uses free atoms only and minimage 0.1.2's Smith/Minkowski-reduced 27-image Euclidean convention. The legacy harness passes raw stored positions directly to minimage::Cell::displacement_euclidean through the C ABI, performs no ASE get_distances call, explicit wrapping, centering, or alignment, and computes sqrt(mean(per-atom squared 3D displacement)) over free atoms. For ase-neb it compares the reference with the highest-energy interior image selected from the final unconverged band. All rounds are identical because ASE BFGS starts from the same linear band without a seed and deterministically reaches the same final selected structure; each run stores that structure independently.",
+      "images": 11,
+      "method": "ase-neb",
+      "rmsd_new": 3.9989735889028406,
+      "rmsd_old": 3.9989735889028406,
+      "round": 10,
+      "system": "pt_exchange"
+    },
+    {
+      "cause": "The rejected independent check included fixed slab atoms and used a custom radius-2 lattice-image search; the benchmark uses free atoms only and minimage 0.1.2's Smith/Minkowski-reduced 27-image Euclidean convention. The legacy harness passes raw stored positions directly to minimage::Cell::displacement_euclidean through the C ABI, performs no ASE get_distances call, explicit wrapping, centering, or alignment, and computes sqrt(mean(per-atom squared 3D displacement)) over free atoms. For ase-neb it compares the reference with the highest-energy interior image selected from the final unconverged band. All rounds are identical because ASE BFGS starts from the same linear band without a seed and deterministically reaches the same final selected structure; each run stores that structure independently.",
+      "images": 11,
+      "method": "ase-neb",
+      "rmsd_new": 3.9989735889028406,
+      "rmsd_old": 3.9989735889028406,
+      "round": 11,
+      "system": "pt_exchange"
+    }
+  ],
+  "source_results": "bench/results.json"
+}
