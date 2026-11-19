@@ -39,9 +39,11 @@ template <> struct status_traits<rgsaddle_status_t> {
     case RGSADDLE_ABI_MISMATCH:
     case RGSADDLE_ALLOC:
     case RGSADDLE_NO_EVALUATION:
-    case RGSADDLE_NOT_EQUILIBRATED:
-    case RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES:
       return static_cast<int>(Status::other);
+    case RGSADDLE_NOT_EQUILIBRATED:
+      return static_cast<int>(RGSADDLE_NOT_EQUILIBRATED);
+    case RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES:
+      return static_cast<int>(RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES);
     }
     return static_cast<int>(Status::other);
   }

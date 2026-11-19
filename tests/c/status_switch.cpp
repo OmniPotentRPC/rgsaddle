@@ -7,8 +7,17 @@ int main() {
       rgbind::status_traits<rgsaddle_status_t>::code(RGSADDLE_NOT_EQUILIBRATED);
   const int samples = rgbind::status_traits<rgsaddle_status_t>::code(
       RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES);
-  if (ok != 0 || equilibration == 0 || samples == 0) {
+  if (ok != static_cast<int>(rgbind::Status::ok)) {
     return 1;
+  }
+  if (equilibration != static_cast<int>(RGSADDLE_NOT_EQUILIBRATED) ||
+      samples != static_cast<int>(RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES)) {
+    return 2;
+  }
+  if (equilibration == static_cast<int>(rgbind::Status::other) ||
+      samples == static_cast<int>(rgbind::Status::other) ||
+      equilibration == samples) {
+    return 3;
   }
   return 0;
 }

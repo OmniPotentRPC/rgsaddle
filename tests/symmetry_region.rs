@@ -126,6 +126,35 @@ fn fcc_vacancy_nearest_neighbour_hop_has_twelve_paths() {
 }
 
 #[test]
+fn a_lattice_translation_is_not_the_identity() {
+    let reactant = array![[0.0, 0.0, 0.0]];
+    let saddle = array![[1.0, 0.0, 0.0]];
+    let translated = operation(Array2::eye(3)).with_translation(array![4.0, 0.0, 0.0]);
+    let error = SymmetryUniqueRegion::from_crystal_operations(
+        reactant.view(),
+        saddle.view(),
+        &[0],
+        &[translated],
+        &CrystalSymmetryConfig::default(),
+    )
+    .expect_err("a lattice translation is not the identity");
+    assert!(
+        matches!(error, rgsaddle::SaddleError::Invalid(_)),
+        "{error:?}"
+    );
+    let guide = include_str!("../docs/orgmode/explanation/symmetry-regions.org");
+    assert!(
+        guide.to_ascii_lowercase().contains("lattice translation"),
+        "the symmetry reference must say a lattice translation is not the identity"
+    );
+    let source = include_str!("../src/region.rs");
+    assert!(
+        source.to_ascii_lowercase().contains("lattice translation"),
+        "rustdoc must say a lattice translation is not the identity"
+    );
+}
+
+#[test]
 fn identity_group_gives_the_trivial_region() {
     let geometry = array![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
     let identity = operation(Array2::eye(3)).with_permutation(vec![0, 1]);

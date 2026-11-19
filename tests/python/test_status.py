@@ -65,6 +65,16 @@ NAMES = {
 }
 
 
+def test_equilibration_statuses_keep_the_c_values() -> None:
+    from rgsaddle._core._testing import mapped_status
+
+    other = 11
+    assert mapped_status(NOT_EQUILIBRATED) == NOT_EQUILIBRATED
+    assert mapped_status(INSUFFICIENT_EFFECTIVE_SAMPLES) == INSUFFICIENT_EFFECTIVE_SAMPLES
+    assert mapped_status(NOT_EQUILIBRATED) != other
+    assert mapped_status(INSUFFICIENT_EFFECTIVE_SAMPLES) != other
+
+
 def test_ok_returns_true() -> None:
     assert rgsaddle.raise_status(OK) is True
     assert rgsaddle.last_error() == ""

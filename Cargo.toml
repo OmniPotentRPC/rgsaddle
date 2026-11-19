@@ -70,9 +70,11 @@ rgpot-rev = "97ebba0b062128b7dc4637501c4b70ed4944ae9d"
 
 [dev-dependencies]
 approx = "0.5"
+cc = "1"
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 faer = { version = "0.24.4", default-features = false, features = ["std", "linalg"] }
 sha2 = "0.10"
+tempfile = "3"
 
 [[bench]]
 name = "ohtst"

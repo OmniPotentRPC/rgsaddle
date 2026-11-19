@@ -136,8 +136,13 @@ typedef enum {
   RGSADDLE_NULL_REPORT = -4,
   RGSADDLE_SHAPE = -5,
   RGSADDLE_SURFACE_FAILED = -6,
+  /** A required value was NaN or infinite. */
   RGSADDLE_NON_FINITE = -7,
   RGSADDLE_SOLVER = -8,
+  /**
+   * The struct version major is not the library major, or the minor is
+   * older than the call requires.
+   */
   RGSADDLE_ABI_MISMATCH = -9,
   RGSADDLE_ALLOC = -10,
   RGSADDLE_INVALID_PARAMETER = -11,

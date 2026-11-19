@@ -533,6 +533,9 @@ impl SymmetryUniqueRegion {
     ///
     /// Permutations are either supplied or obtained by species-aware
     /// nearest-image matching. The supplied group must include the identity.
+    /// A lattice translation is not the identity: `operation_is_identity`
+    /// rejects a translation whose absolute component exceeds
+    /// `matching_tolerance`.
     ///
     /// ```
     /// use ndarray::{Array2, array};
@@ -939,6 +942,12 @@ fn validate_crystal_input(
     Ok(())
 }
 
+/// Report whether `operation` is the identity.
+///
+/// A lattice translation is not the identity. A translation whose absolute
+/// component exceeds `matching_tolerance` is rejected, as is a permutation
+/// that moves an atom or a rotation that is not the identity within
+/// `orthogonality_tolerance`.
 fn operation_is_identity(
     operation: &CrystalSymmetryOperation,
     config: &CrystalSymmetryConfig,
