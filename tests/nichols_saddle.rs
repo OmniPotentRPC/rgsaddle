@@ -130,6 +130,27 @@ fn mass_weighted_nichols_matches_ipi() {
 }
 
 #[test]
+fn an_overflowing_update_is_refused_and_leaves_the_hessian_alone() {
+    let step = array![1.0, 1.0];
+    let dg = array![1.5e308, 1.5e308];
+    let seed = array![[1.0, 0.0], [0.0, 1.0]];
+
+    let mut powell = seed.clone();
+    assert!(matches!(
+        powell_update(&mut powell, step.view(), dg.view()),
+        Err(SaddleError::NonFinite(_))
+    ));
+    assert_eq!(powell, seed);
+
+    let mut bofill = seed.clone();
+    assert!(matches!(
+        bofill_update(&mut bofill, step.view(), dg.view()),
+        Err(SaddleError::NonFinite(_))
+    ));
+    assert_eq!(bofill, seed);
+}
+
+#[test]
 fn powell_and_bofill_match_the_reference_update() {
     let step = array![0.2, -0.1];
     let dg = array![-0.05, 0.4];

@@ -501,6 +501,9 @@ fn prepare_update(
 /// `step` is the Cartesian displacement. `dg` is the change in the
 /// energy gradient. i-PI passes the change in the force with the
 /// opposite subtraction order, which is this same vector.
+///
+/// Finite inputs can still overflow. The result is checked, and on
+/// [`SaddleError::NonFinite`] `h` keeps its previous value.
 pub fn powell_update(
     h: &mut Array2<f64>,
     step: ArrayView1<f64>,
@@ -512,18 +515,23 @@ pub fn powell_update(
     let ddi = 1.0 / ss;
     let xix = xi.dot(&step);
     let n = step.len();
+    let mut next = h.clone();
     for i in 0..n {
         for j in 0..n {
-            h[(i, j)] += ddi * (xi[i] * step[j] + step[i] * xi[j] - xix * step[i] * step[j] * ddi);
+            next[(i, j)] +=
+                ddi * (xi[i] * step[j] + step[i] * xi[j] - xix * step[i] * step[j] * ddi);
         }
     }
-    Ok(())
+    commit_update(h, next)
 }
 
 /// Bofill Hessian update: `(1 - phi)` Powell plus `phi` times the
 /// symmetric rank-one term.
 ///
 /// `phi = (s^T xi)^2 / ((s^T s)(xi^T xi))` with `xi = dg - H s`.
+///
+/// As for [`powell_update`], an overflowing update returns
+/// [`SaddleError::NonFinite`] and leaves `h` unchanged.
 pub fn bofill_update(
     h: &mut Array2<f64>,
     step: ArrayView1<f64>,
@@ -543,13 +551,24 @@ pub fn bofill_update(
     let rank_ss = (1.0 - phi) * xix * ddi * ddi;
     let ms = xix / (ss * xixi);
     let n = step.len();
+    let mut next = h.clone();
     for i in 0..n {
         for j in 0..n {
-            h[(i, j)] += powell_scale * (xi[i] * step[j] + step[i] * xi[j])
+            next[(i, j)] += powell_scale * (xi[i] * step[j] + step[i] * xi[j])
                 - rank_ss * step[i] * step[j]
                 + ms * xi[i] * xi[j];
         }
     }
+    commit_update(h, next)
+}
+
+/// Replace `h` with the updated matrix only when every entry is finite. The
+/// inputs were finite, so a non-finite entry is an overflow in the update.
+fn commit_update(h: &mut Array2<f64>, next: Array2<f64>) -> Result<(), SaddleError> {
+    if next.iter().any(|v| !v.is_finite()) {
+        return Err(SaddleError::NonFinite("Hessian update result"));
+    }
+    *h = next;
     Ok(())
 }
 
