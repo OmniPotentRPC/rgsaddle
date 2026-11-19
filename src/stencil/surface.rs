@@ -271,6 +271,50 @@ impl<T: Surface + ?Sized> BandSurface for T {
         )?;
         Ok(())
     }
+
+    fn hessian_vector(
+        &self,
+        positions: ArrayView2<f64>,
+        direction: ArrayView2<f64>,
+    ) -> Result<Option<Array2<f64>>, SaddleError> {
+        let rows = direction.nrows();
+        let cols = direction.ncols();
+        if positions.nrows() != rows + 2 || positions.ncols() != cols {
+            return Err(SaddleError::Shape(
+                "band Hessian product rows do not match the positions".into(),
+            ));
+        }
+        if rows == 0 {
+            return Ok(None);
+        }
+        let mut out = Array2::zeros((rows, cols));
+        for row in 0..rows {
+            match Surface::hessian_vector(self, positions.row(row + 1), direction.row(row)) {
+                None => {
+                    if row > 0 {
+                        return Err(SaddleError::Surface(
+                            "analytic Hessian product stopped after earlier rows".into(),
+                        ));
+                    }
+                    return Ok(None);
+                }
+                Some(result) => {
+                    let action = result?;
+                    if action.len() != cols || action.iter().any(|value| !value.is_finite()) {
+                        return Err(if action.len() != cols {
+                            SaddleError::Shape(
+                                "analytic Hessian product length does not match the row".into(),
+                            )
+                        } else {
+                            SaddleError::NonFinite("analytic Hessian product")
+                        });
+                    }
+                    out.row_mut(row).assign(&action);
+                }
+            }
+        }
+        Ok(Some(out))
+    }
 }
 
 #[cfg(test)]

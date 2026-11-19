@@ -1,0 +1,6 @@
+~BandSurface::hessian_vector~ supplies Cartesian Hessian actions for ~BandRtr~.
+An ordinary image keeps the part perpendicular to the tangent, and the climbing image uses the reflected Hessian.
+Net translation is removed with rgmin's rigid translation projector when the band drops it.
+C ABI minor 47 adds ~rgsaddle_band_set_hvp~ and ~rgsaddle_minmode_set_hvp~ (~Band::set_hvp~ and ~MinMode::set_hvp~ in C++).
+A null function clears the callback.
+A length other than ~3 * n_atoms~ is refused and the stored callback stays.

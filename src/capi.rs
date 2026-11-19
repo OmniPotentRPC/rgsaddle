@@ -12,7 +12,7 @@ use std::ffi::c_void;
 use std::os::raw::c_char;
 use std::slice;
 
-use ndarray::{Array1, Array2, ArrayView2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use rgmin::{FireKind, Method};
 
 use crate::band::{BandConfig, BandSession, BandStatus, BandSurface, Cell, CiConfig, SolidState};
@@ -36,7 +36,7 @@ use crate::tangent::TangentKind;
 /// The RGSADDLE ABI MAJOR.
 pub const RGSADDLE_ABI_MAJOR: u32 = 1;
 /// The RGSADDLE ABI MINOR.
-pub const RGSADDLE_ABI_MINOR: u32 = 45;
+pub const RGSADDLE_ABI_MINOR: u32 = 47;
 
 /// A band, min-mode or OCI-NEB config of this minor or newer certifies
 /// the saddle index at convergence by default.
@@ -440,6 +440,199 @@ impl PointSurface for CSurface {
     }
 }
 
+/// Analytic Cartesian Hessian action for one band image.
+///
+/// `image` counts from the first endpoint. `position`, `vector` and
+/// `action` each hold `n_dof` values. Return 0, or [`RGSADDLE_SHAPE`]
+/// when `n_dof` is not the session length.
+pub type RgsaddleBandHvpFn =
+    extern "C" fn(*mut c_void, i64, i64, *const f64, *const f64, *mut f64) -> i32;
+
+/// Analytic Cartesian Hessian action for one minimum mode point.
+///
+/// `position`, `vector` and `action` each hold `n_dof` values. Return
+/// 0, or [`RGSADDLE_SHAPE`] when `n_dof` is not the session length.
+pub type RgsaddleMinmodeHvpFn =
+    extern "C" fn(*mut c_void, i64, *const f64, *const f64, *mut f64) -> i32;
+
+struct BandHvp<'a, S: ?Sized> {
+    inner: &'a S,
+    hvp: RgsaddleBandHvpFn,
+    user: *mut c_void,
+}
+
+// The host owns the callback's thread safety. Sessions call it only
+// from the thread that entered the step.
+unsafe impl<S: ?Sized + Sync> Sync for BandHvp<'_, S> {}
+unsafe impl<S: ?Sized + Sync> Send for BandHvp<'_, S> {}
+
+fn callback_status(rc: i32, what: &str) -> Result<(), SaddleError> {
+    if rc == 0 {
+        Ok(())
+    } else if rc == RGSADDLE_SHAPE {
+        Err(SaddleError::Shape(format!("{what} length was refused")))
+    } else {
+        Err(SaddleError::Surface(format!("{what} callback rc={rc}")))
+    }
+}
+
+fn finite_action(action: &[f64], what: &'static str) -> Result<(), SaddleError> {
+    if action.iter().any(|value| !value.is_finite()) {
+        Err(SaddleError::NonFinite(what))
+    } else {
+        Ok(())
+    }
+}
+
+impl<S: BandSurface + ?Sized> BandSurface for BandHvp<'_, S> {
+    fn eval(
+        &self,
+        positions: ArrayView2<f64>,
+        energies: &mut Array1<f64>,
+        gradients: &mut Array2<f64>,
+    ) -> Result<(), SaddleError> {
+        self.inner.eval(positions, energies, gradients)
+    }
+
+    fn eval_with_ids(
+        &self,
+        ids: &[crate::stencil::ImageId],
+        positions: ArrayView2<f64>,
+        energies: &mut Array1<f64>,
+        gradients: &mut Array2<f64>,
+    ) -> Result<(), SaddleError> {
+        self.inner
+            .eval_with_ids(ids, positions, energies, gradients)
+    }
+
+    fn eval_cells(
+        &self,
+        positions: ArrayView2<f64>,
+        cells: &[Cell],
+        energies: &mut Array1<f64>,
+        gradients: &mut Array2<f64>,
+        stresses: &mut Array2<f64>,
+    ) -> Result<(), SaddleError> {
+        self.inner
+            .eval_cells(positions, cells, energies, gradients, stresses)
+    }
+
+    fn eval_image(
+        &self,
+        image: usize,
+        position: ArrayView1<f64>,
+    ) -> Result<(f64, Array1<f64>), SaddleError> {
+        self.inner.eval_image(image, position)
+    }
+
+    fn hessian_vector(
+        &self,
+        positions: ArrayView2<f64>,
+        direction: ArrayView2<f64>,
+    ) -> Result<Option<Array2<f64>>, SaddleError> {
+        let n_int = direction.nrows();
+        let dof = direction.ncols();
+        if positions.nrows() != n_int + 2 || positions.ncols() != dof {
+            return Err(SaddleError::Shape(
+                "band Hessian product length was refused".into(),
+            ));
+        }
+        let mut out = Array2::zeros((n_int, dof));
+        for row in 0..n_int {
+            let pos = positions.row(row + 1).to_vec();
+            let dir = direction.row(row).to_vec();
+            if pos.len() != dir.len() {
+                return Err(SaddleError::Shape(
+                    "band Hessian product length was refused".into(),
+                ));
+            }
+            let mut action = vec![0.0; dof];
+            let rc = (self.hvp)(
+                self.user,
+                (row + 1) as i64,
+                dof as i64,
+                pos.as_ptr(),
+                dir.as_ptr(),
+                action.as_mut_ptr(),
+            );
+            callback_status(rc, "band Hessian product")?;
+            finite_action(&action, "band Hessian product")?;
+            out.row_mut(row).assign(&ArrayView1::from(&action));
+        }
+        Ok(Some(out))
+    }
+}
+
+struct PointHvp<'a> {
+    inner: &'a CSurface,
+    hvp: RgsaddleMinmodeHvpFn,
+    user: *mut c_void,
+}
+
+// The host owns the callback's thread safety. Sessions call it only
+// from the thread that entered the step.
+unsafe impl Sync for PointHvp<'_> {}
+unsafe impl Send for PointHvp<'_> {}
+
+impl PointSurface for PointHvp<'_> {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        PointSurface::eval(self.inner, x)
+    }
+
+    fn excluded_modes(&self, x: ArrayView1<f64>) -> Result<Array2<f64>, SaddleError> {
+        self.inner.excluded_modes(x)
+    }
+
+    fn hessian_vector(
+        &self,
+        x: ArrayView1<f64>,
+        v: ArrayView1<f64>,
+    ) -> Result<Option<Array1<f64>>, SaddleError> {
+        if x.len() != v.len() {
+            return Err(SaddleError::Shape(
+                "minimum mode Hessian product length was refused".into(),
+            ));
+        }
+        let pos = x.to_vec();
+        let dir = v.to_vec();
+        let mut action = vec![0.0; pos.len()];
+        let rc = (self.hvp)(
+            self.user,
+            pos.len() as i64,
+            pos.as_ptr(),
+            dir.as_ptr(),
+            action.as_mut_ptr(),
+        );
+        callback_status(rc, "minimum mode Hessian product")?;
+        finite_action(&action, "minimum mode Hessian product")?;
+        Ok(Some(Array1::from(action)))
+    }
+}
+
+fn store_hvp<F>(
+    slot: &mut Option<F>,
+    user_slot: &mut *mut c_void,
+    hvp: Option<F>,
+    user: *mut c_void,
+    n_dof: i64,
+    n_atoms: i64,
+) -> i32 {
+    let Some(hvp) = hvp else {
+        *slot = None;
+        *user_slot = std::ptr::null_mut();
+        return RGSADDLE_OK;
+    };
+    let Some(expected) = n_atoms.checked_mul(3) else {
+        return RGSADDLE_SHAPE;
+    };
+    if n_dof != expected {
+        return RGSADDLE_SHAPE;
+    }
+    *slot = Some(hvp);
+    *user_slot = user;
+    RGSADDLE_OK
+}
+
 /// The RgsaddleBand.
 pub struct RgsaddleBand {
     session: BandSession,
@@ -447,12 +640,16 @@ pub struct RgsaddleBand {
     n_atoms: i64,
     per_image: bool,
     climbing_request: bool,
+    hvp: Option<RgsaddleBandHvpFn>,
+    hvp_user: *mut c_void,
 }
 
 /// The RgsaddleMinMode.
 pub struct RgsaddleMinMode {
     session: MinModeSession,
     n_atoms: i64,
+    hvp: Option<RgsaddleMinmodeHvpFn>,
+    hvp_user: *mut c_void,
 }
 
 fn method_of(v: i32, memory: i64) -> Method {
@@ -782,6 +979,8 @@ unsafe fn band_from_parts(
                 n_atoms,
                 per_image,
                 climbing_request,
+                hvp: None,
+                hvp_user: std::ptr::null_mut(),
             }))
         }
         Err(_) => std::ptr::null_mut(),
@@ -988,7 +1187,17 @@ pub unsafe extern "C" fn rgsaddle_band_step(
         climbing_request: band.climbing_request,
         rows: Default::default(),
     };
-    match band.session.step(&cs) {
+    let stepped = if let Some(hvp) = band.hvp {
+        let wrapped = BandHvp {
+            inner: &cs,
+            hvp,
+            user: band.hvp_user,
+        };
+        band.session.step(&wrapped)
+    } else {
+        band.session.step(&cs)
+    };
+    match stepped {
         Ok(report) => {
             let out = unsafe { &mut *out };
             stamp_report(out);
@@ -1136,6 +1345,36 @@ pub unsafe extern "C" fn rgsaddle_band_evaluation(
     RGSADDLE_OK
 }
 
+/// Register an optional analytic Hessian vector product on a band.
+///
+/// `n_dof` is `3 * n_atoms`. A null `hvp` clears the callback and
+/// restores finite differences. A different length returns
+/// [`RGSADDLE_SHAPE`] and leaves the stored callback unchanged.
+///
+/// # Safety
+/// `band` is a live session or null. `hvp` and `user` stay valid until
+/// replaced, cleared, or the session is freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_band_set_hvp(
+    band: *mut RgsaddleBand,
+    hvp: Option<RgsaddleBandHvpFn>,
+    user: *mut c_void,
+    n_dof: i64,
+) -> i32 {
+    if band.is_null() {
+        return RGSADDLE_NULL_BAND;
+    }
+    let band = unsafe { &mut *band };
+    store_hvp(
+        &mut band.hvp,
+        &mut band.hvp_user,
+        hvp,
+        user,
+        n_dof,
+        band.n_atoms,
+    )
+}
+
 /// # Safety
 /// `band` must come from [`rgsaddle_band_create`] and be freed once.
 #[unsafe(no_mangle)]
@@ -1255,7 +1494,12 @@ pub unsafe extern "C" fn rgsaddle_minmode_create(
             (cfg.version.minor >= SADDLE_INDEX_MINOR).then(SaddleIndexCheck::default),
         );
     match MinModeSession::new(mm_config, x, m) {
-        Ok(session) => Box::into_raw(Box::new(RgsaddleMinMode { session, n_atoms })),
+        Ok(session) => Box::into_raw(Box::new(RgsaddleMinMode {
+            session,
+            n_atoms,
+            hvp: None,
+            hvp_user: std::ptr::null_mut(),
+        })),
         Err(_) => std::ptr::null_mut(),
     }
 }
@@ -1288,7 +1532,17 @@ pub unsafe extern "C" fn rgsaddle_minmode_step(
         climbing_request: false,
         rows: Default::default(),
     };
-    match session.session.step(&cs) {
+    let stepped = if let Some(hvp) = session.hvp {
+        let wrapped = PointHvp {
+            inner: &cs,
+            hvp,
+            user: session.hvp_user,
+        };
+        session.session.step(&wrapped)
+    } else {
+        session.session.step(&cs)
+    };
+    match stepped {
         Ok(report) => {
             let out = unsafe { &mut *out };
             stamp_report(out);
@@ -1337,7 +1591,17 @@ pub unsafe extern "C" fn rgsaddle_minmode_estimate(
         climbing_request: false,
         rows: Default::default(),
     };
-    match session.session.push_estimate(&cs) {
+    let estimated = if let Some(hvp) = session.hvp {
+        let wrapped = PointHvp {
+            inner: &cs,
+            hvp,
+            user: session.hvp_user,
+        };
+        session.session.push_estimate(&wrapped)
+    } else {
+        session.session.push_estimate(&cs)
+    };
+    match estimated {
         Ok(est) => {
             let out = unsafe { &mut *out };
             stamp_report(out);
@@ -1352,6 +1616,36 @@ pub unsafe extern "C" fn rgsaddle_minmode_estimate(
         }
         Err(e) => status_of(&e),
     }
+}
+
+/// Register an optional analytic Hessian vector product on a minimum mode session.
+///
+/// `n_dof` is `3 * n_atoms`. A null `hvp` clears the callback and
+/// restores gradient finite differences. A different length returns
+/// [`RGSADDLE_SHAPE`] and leaves the stored callback unchanged.
+///
+/// # Safety
+/// `session` is a live session or null. `hvp` and `user` stay valid
+/// until replaced, cleared, or the session is freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_minmode_set_hvp(
+    session: *mut RgsaddleMinMode,
+    hvp: Option<RgsaddleMinmodeHvpFn>,
+    user: *mut c_void,
+    n_dof: i64,
+) -> i32 {
+    if session.is_null() {
+        return RGSADDLE_NULL_SESSION;
+    }
+    let session = unsafe { &mut *session };
+    store_hvp(
+        &mut session.hvp,
+        &mut session.hvp_user,
+        hvp,
+        user,
+        n_dof,
+        session.n_atoms,
+    )
 }
 
 /// xtsci name of [`rgsaddle_minmode_estimate`].

@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 45u
+#define RGSADDLE_ABI_MINOR 47u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -1928,6 +1928,37 @@ rgsaddle_status_t rgsaddle_band_free_end_residual(const RgsaddleBand *band,
  * free-end band, or 0 for NULL, ABI minor 45.
  */
 int64_t rgsaddle_band_free_end_cuts(const RgsaddleBand *band);
+
+/** Analytic Cartesian Hessian action for one band image, ABI minor 47. */
+typedef int (*rgsaddle_band_hvp_fn)(void *user, int64_t image, int64_t n_dof,
+                                    const double *position,
+                                    const double *vector, double *action);
+
+/** Analytic Cartesian Hessian action for one minimum mode point, ABI minor 47. */
+typedef int (*rgsaddle_minmode_hvp_fn)(void *user, int64_t n_dof,
+                                       const double *position,
+                                       const double *vector, double *action);
+
+/**
+ * Register an optional analytic Hessian vector product on a band, ABI minor 47.
+ * n_dof is 3 * n_atoms. NULL hvp clears the callback and restores finite
+ * differences. A NULL band returns RGSADDLE_NULL_BAND. Any other length
+ * returns RGSADDLE_SHAPE and leaves the stored callback unchanged.
+ */
+rgsaddle_status_t rgsaddle_band_set_hvp(RgsaddleBand *band,
+                                        rgsaddle_band_hvp_fn hvp, void *user,
+                                        int64_t n_dof);
+
+/**
+ * Register an optional analytic Hessian vector product on a minimum mode
+ * session, ABI minor 47. n_dof is 3 * n_atoms. NULL hvp clears the callback
+ * and restores gradient finite differences. A NULL session returns
+ * RGSADDLE_NULL_SESSION. Any other length returns RGSADDLE_SHAPE and leaves
+ * the stored callback unchanged.
+ */
+rgsaddle_status_t rgsaddle_minmode_set_hvp(RgsaddleMinMode *session,
+                                           rgsaddle_minmode_hvp_fn hvp,
+                                           void *user, int64_t n_dof);
 
 #ifdef __cplusplus
 }

@@ -519,6 +519,14 @@ impl<S: BandSurface> BandSurface for RankedEval<'_, S> {
             None => self.surface.eval(positions, energies, gradients),
         }
     }
+
+    fn hessian_vector(
+        &self,
+        positions: ArrayView2<f64>,
+        direction: ArrayView2<f64>,
+    ) -> Result<Option<Array2<f64>>, SaddleError> {
+        self.surface.hessian_vector(positions, direction)
+    }
 }
 
 impl AutoNebStage {

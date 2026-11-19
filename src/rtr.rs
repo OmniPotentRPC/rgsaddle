@@ -24,7 +24,7 @@
 //! assert!((result.model_decrease - 1.0).abs() < 1e-12);
 //! ```
 
-use ndarray::{Array1, Array2, ArrayView2, s};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
 
 use crate::band::{BandConfig, BandSurface, zero_fixed};
 use crate::error::SaddleError;
@@ -36,6 +36,7 @@ use crate::tangent::compute_tangent;
 pub use rgmin::rtr::{RtrRadius, TcgResult, TcgStop, truncated_cg_projected as truncated_cg};
 
 use rgmin::vecops::{dot, nrm2};
+use rgmin::{RigidMode, RigidRequest, RigidWorkspace};
 
 /// The assembled band at one point: per-image energies, chord tangents of
 /// the interior images and the NEB force on the interior, flattened.
@@ -413,6 +414,141 @@ impl HvpMemo {
     }
 }
 
+/// Where the products inside one trust step come from.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HessianSource {
+    /// The surface has not yet answered.
+    Probe,
+    /// The surface supplies analytic products.
+    Analytic,
+    /// The surface left the product empty, so the step differences forces.
+    Difference,
+}
+
+fn accept_band_product(
+    product: Array2<f64>,
+    rows: usize,
+    cols: usize,
+) -> Result<Array2<f64>, SaddleError> {
+    if product.nrows() != rows || product.ncols() != cols {
+        return Err(SaddleError::Shape(
+            "analytic band Hessian product has the wrong shape".into(),
+        ));
+    }
+    if product.iter().any(|value| !value.is_finite()) {
+        return Err(SaddleError::NonFinite("analytic band Hessian product"));
+    }
+    Ok(product)
+}
+
+/// Remove the net Cartesian translation with rgmin's rigid projector.
+///
+/// One atom has no internal translation to remove, matching
+/// [`crate::band::remove_net_translation`].
+fn project_out_translation(
+    workspace: &mut RigidWorkspace,
+    position: &[f64],
+    vector: &mut Array1<f64>,
+) {
+    let atoms = vector.len() / 3;
+    if atoms < 2 || vector.len() != 3 * atoms || position.len() != vector.len() {
+        return;
+    }
+    let mut raw = vector.to_vec();
+    let request = RigidRequest::cartesian(position, RigidMode::Translation);
+    workspace.project(&mut raw, &request);
+    for (slot, value) in vector.iter_mut().zip(raw) {
+        *slot = value;
+    }
+}
+
+/// Symmetric reflected Hessian on the climbing image:
+/// `H v - (t · H v) t - (t · v) H t`.
+fn reflected_hessian(
+    action: ArrayView1<f64>,
+    tangent: ArrayView1<f64>,
+    tangent_action: ArrayView1<f64>,
+    direction: ArrayView1<f64>,
+) -> Array1<f64> {
+    let along_action = tangent.dot(&action);
+    let along_direction = tangent.dot(&direction);
+    &action
+        - &(&tangent.to_owned() * along_action)
+        - &(&tangent_action.to_owned() * along_direction)
+}
+
+fn climbing_tangent_action<S: BandSurface + ?Sized>(
+    surface: &S,
+    base: ArrayView2<f64>,
+    tangents: ArrayView2<f64>,
+    ci: usize,
+) -> Result<Option<Array1<f64>>, SaddleError> {
+    let rows = tangents.nrows();
+    let cols = tangents.ncols();
+    let mut seed = Array2::zeros((rows, cols));
+    seed.row_mut(ci - 1).assign(&tangents.row(ci - 1));
+    match surface.hessian_vector(base, seed.view())? {
+        None => Ok(None),
+        Some(product) => {
+            let product = accept_band_product(product, rows, cols)?;
+            Ok(Some(product.row(ci - 1).to_owned()))
+        }
+    }
+}
+
+struct AnalyticParts<'a> {
+    action: &'a Array2<f64>,
+    direction: &'a Array2<f64>,
+    base: &'a Array2<f64>,
+    tangents: &'a Array2<f64>,
+    climbing: Option<usize>,
+    tangent_action: Option<&'a Array1<f64>>,
+}
+
+fn assemble_analytic_product(
+    parts: &AnalyticParts<'_>,
+    remove_translation: bool,
+    fixed: &[bool],
+    workspace: &mut RigidWorkspace,
+) -> Result<Array1<f64>, SaddleError> {
+    let n_images = parts.base.nrows();
+    let dof = parts.base.ncols();
+    let mut out = Array1::zeros((n_images - 2) * dof);
+    for image in 0..n_images - 2 {
+        let tangent = parts.tangents.row(image);
+        let hv = parts.action.row(image);
+        let mut segment = if parts.climbing == Some(image + 1) {
+            let Some(along_tangent) = parts.tangent_action else {
+                return Err(SaddleError::Invalid(
+                    "climbing image analytic product needs the tangent action".into(),
+                ));
+            };
+            reflected_hessian(
+                hv,
+                tangent,
+                along_tangent.view(),
+                parts.direction.row(image),
+            )
+        } else {
+            crate::stencil::perp(hv, tangent)
+        };
+        zero_fixed(fixed, &mut segment);
+        if remove_translation {
+            let position = parts.base.row(image + 1).to_vec();
+            project_out_translation(workspace, &position, &mut segment);
+        }
+        out.slice_mut(s![image * dof..(image + 1) * dof])
+            .assign(&segment);
+    }
+    Ok(out)
+}
+
+fn keep_hvp_error(slot: &std::cell::RefCell<Option<SaddleError>>, error: SaddleError) {
+    if slot.borrow().is_none() {
+        *slot.borrow_mut() = Some(error);
+    }
+}
+
 impl BandRtr {
     /// New.
     pub fn new(config: RtrConfig, climb: bool) -> Self {
@@ -449,8 +585,13 @@ impl BandRtr {
     }
 
     /// One RTR-tCG step on `positions` (modified in place when accepted).
-    /// Two surface evaluations per Hessian-vector product, one for the trial
-    /// point.
+    ///
+    /// Without [`BandSurface::hessian_vector`], each product takes two
+    /// surface evaluations and the trial point takes one more. A supplied
+    /// product replaces those probes: ordinary images use the component
+    /// perpendicular to the tangent, and the climbing image uses the
+    /// reflected Hessian. Net translation is removed with rgmin's rigid
+    /// translation projector when the band drops it.
     pub fn step<S: BandSurface + ?Sized>(
         &mut self,
         band: &BandConfig,
@@ -469,7 +610,8 @@ impl BandRtr {
             here
         };
         let grad = -&here.force;
-        let tangents = here.tangents.clone();
+        let tangents_hvp = here.tangents.clone();
+        let tangents = tangents_hvp.clone();
         let project = move |v: &Array1<f64>| -> Array1<f64> {
             let mut out = v.clone();
             for i in 0..n_images - 2 {
@@ -486,6 +628,20 @@ impl BandRtr {
         };
         let h = self.config.fd_step;
         let base = positions.clone();
+        let remove_translation = band.drops_translation();
+        let fixed = band.fixed_atoms.clone();
+        let tangent_action = match ci {
+            Some(index) => {
+                climbing_tangent_action(surface, base.view(), tangents_hvp.view(), index)?
+            }
+            None => None,
+        };
+        let source = std::cell::Cell::new(match (ci.is_some(), tangent_action.is_some()) {
+            (true, true) => HessianSource::Analytic,
+            (true, false) => HessianSource::Difference,
+            (false, _) => HessianSource::Probe,
+        });
+        let translation = std::cell::RefCell::new(RigidWorkspace::new());
         self.memo.around(&base, ci);
         // Two bands per product, at most `max_cg` products per step.
         let products_capacity = 2 * self.config.max_cg;
@@ -520,6 +676,67 @@ impl BandRtr {
             if vn <= 0.0 || vn.is_nan() {
                 return Array1::zeros(interior);
             }
+            if source.get() != HessianSource::Difference {
+                let direction = match Array2::from_shape_vec((n_images - 2, dof), v.to_vec()) {
+                    Ok(direction) => direction,
+                    Err(_) => {
+                        keep_hvp_error(
+                            &hvp_error,
+                            SaddleError::Shape(
+                                "analytic band Hessian product has the wrong shape".into(),
+                            ),
+                        );
+                        return Array1::from_elem(interior, f64::INFINITY);
+                    }
+                };
+                match surface.hessian_vector(base.view(), direction.view()) {
+                    Ok(Some(product)) => match accept_band_product(product, n_images - 2, dof) {
+                        Ok(action) => {
+                            source.set(HessianSource::Analytic);
+                            let parts = AnalyticParts {
+                                action: &action,
+                                direction: &direction,
+                                base: &base,
+                                tangents: &tangents_hvp,
+                                climbing: ci,
+                                tangent_action: tangent_action.as_ref(),
+                            };
+                            match assemble_analytic_product(
+                                &parts,
+                                remove_translation,
+                                &fixed,
+                                &mut translation.borrow_mut(),
+                            ) {
+                                Ok(out) => return out,
+                                Err(error) => {
+                                    keep_hvp_error(&hvp_error, error);
+                                    return Array1::from_elem(interior, f64::INFINITY);
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            keep_hvp_error(&hvp_error, error);
+                            return Array1::from_elem(interior, f64::INFINITY);
+                        }
+                    },
+                    Ok(None) => {
+                        if source.get() == HessianSource::Analytic {
+                            keep_hvp_error(
+                                &hvp_error,
+                                SaddleError::Surface(
+                                    "analytic band Hessian product was not supplied".into(),
+                                ),
+                            );
+                            return Array1::from_elem(interior, f64::INFINITY);
+                        }
+                        source.set(HessianSource::Difference);
+                    }
+                    Err(error) => {
+                        keep_hvp_error(&hvp_error, error);
+                        return Array1::from_elem(interior, f64::INFINITY);
+                    }
+                }
+            }
             let scatter = |sign: f64| {
                 let mut x = base.clone();
                 for i in 1..n_images - 1 {
@@ -534,9 +751,7 @@ impl BandRtr {
             match (plus, minus) {
                 (Ok(p), Ok(m)) => (&m - &p) * (vn / (2.0 * h)),
                 (Err(error), _) | (_, Err(error)) => {
-                    if hvp_error.borrow().is_none() {
-                        *hvp_error.borrow_mut() = Some(error);
-                    }
+                    keep_hvp_error(&hvp_error, error);
                     Array1::from_elem(interior, f64::INFINITY)
                 }
             }
@@ -715,5 +930,338 @@ mod tests {
         assert!(r.update(0.5, 1.0, 0.1)); // rho = 0.5 interior: unchanged
         assert!((r.radius - 0.5).abs() < 1e-15);
         assert!(!r.update(1.0, 0.0, 0.1)); // no predicted decrease: reject
+    }
+
+    /// Largest absolute coordinate gap allowed between one analytic trust
+    /// step and the central difference of the same band force.
+    const ANALYTIC_FINITE_DIFFERENCE_GAP: f64 = 1e-5;
+
+    use crate::spring::SpringKind;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn quiet_band() -> crate::band::BandConfig {
+        crate::band::BandConfig::default()
+            .with_spring(SpringKind::Uniform { k: 0.0 })
+            .with_remove_translation(true)
+    }
+
+    struct CountedQuadratic {
+        curvatures: &'static [f64],
+        analytic: bool,
+        malformed: bool,
+        evals: AtomicUsize,
+        hvps: AtomicUsize,
+    }
+
+    impl BandSurface for CountedQuadratic {
+        fn eval(
+            &self,
+            positions: ArrayView2<f64>,
+            energies: &mut Array1<f64>,
+            gradients: &mut Array2<f64>,
+        ) -> Result<(), SaddleError> {
+            self.evals.fetch_add(1, Ordering::Relaxed);
+            for (image, row) in positions.outer_iter().enumerate() {
+                let mut energy = 0.0;
+                for (axis, &curvature) in self.curvatures.iter().enumerate() {
+                    let coordinate = row[axis];
+                    energy += 0.5 * curvature * coordinate * coordinate;
+                    gradients[(image, axis)] = curvature * coordinate;
+                }
+                energies[image] = energy;
+            }
+            Ok(())
+        }
+
+        fn hessian_vector(
+            &self,
+            _positions: ArrayView2<f64>,
+            direction: ArrayView2<f64>,
+        ) -> Result<Option<Array2<f64>>, SaddleError> {
+            if !self.analytic {
+                return Ok(None);
+            }
+            self.hvps.fetch_add(1, Ordering::Relaxed);
+            if self.malformed {
+                return Ok(Some(Array2::zeros((1, 1))));
+            }
+            let mut action = Array2::zeros(direction.dim());
+            for (image, row) in direction.outer_iter().enumerate() {
+                for (axis, &curvature) in self.curvatures.iter().enumerate() {
+                    action[(image, axis)] = curvature * row[axis];
+                }
+            }
+            Ok(Some(action))
+        }
+    }
+
+    fn counted(curvatures: &'static [f64], analytic: bool) -> CountedQuadratic {
+        CountedQuadratic {
+            curvatures,
+            analytic,
+            malformed: false,
+            evals: AtomicUsize::new(0),
+            hvps: AtomicUsize::new(0),
+        }
+    }
+
+    fn max_abs_diff(left: &Array2<f64>, right: &Array2<f64>) -> f64 {
+        left.iter()
+            .zip(right.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f64::max)
+    }
+
+    #[test]
+    fn rigid_translation_matches_mean_removal() {
+        let position = [0.2, -0.4, 0.1, 1.5, 0.3, -0.2, -0.7, 0.8, 0.4];
+        let mut mean_free = array![0.4, -1.2, 0.3, 1.1, 0.5, -0.8, 0.2, 2.4, -0.1];
+        let mut projected = mean_free.clone();
+        crate::band::remove_net_translation(&mut mean_free);
+        let mut workspace = RigidWorkspace::new();
+        project_out_translation(&mut workspace, &position, &mut projected);
+        let gap = mean_free
+            .iter()
+            .zip(projected.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f64::max);
+        assert!(gap < 1e-12, "{gap} {projected:?}");
+    }
+
+    #[test]
+    fn analytic_hvp_skips_gradient_probes_and_matches_finite_differences() {
+        const CURVATURES: [f64; 6] = [1.0, 4.0, 9.0, 2.0, 3.0, 5.0];
+        let band = quiet_band();
+        let start = Array2::from_shape_vec(
+            (4, 6),
+            vec![
+                -1.5, 0.0, 0.0, -1.5, 1.0, 0.0, -0.4, 0.05, -0.02, -0.4, 1.04, 0.03, 0.45, -0.04,
+                0.02, 0.45, 0.96, -0.01, 1.5, 0.0, 0.0, 1.5, 1.0, 0.0,
+            ],
+        )
+        .expect("band shape");
+        let analytic = counted(&CURVATURES, true);
+        let mut analytic_positions = start.clone();
+        let mut analytic_step = BandRtr::new(RtrConfig::default(), false);
+        let analytic_report = analytic_step
+            .step(&band, &analytic, &mut analytic_positions)
+            .expect("analytic step");
+        assert!(analytic_report.accepted);
+        assert_eq!(
+            analytic.evals.load(Ordering::Relaxed),
+            2,
+            "base evaluation and the trial, with no curvature probes"
+        );
+        assert!(analytic.hvps.load(Ordering::Relaxed) >= 1);
+
+        let difference = counted(&CURVATURES, false);
+        let mut difference_positions = start.clone();
+        let mut difference_step = BandRtr::new(RtrConfig::default(), false);
+        difference_step
+            .step(&band, &difference, &mut difference_positions)
+            .expect("finite difference step");
+        assert!(difference.evals.load(Ordering::Relaxed) > 2);
+        let gap = max_abs_diff(&analytic_positions, &difference_positions);
+        assert!(
+            gap < ANALYTIC_FINITE_DIFFERENCE_GAP,
+            "analytic and finite difference positions differ by {gap}"
+        );
+    }
+
+    #[test]
+    fn climbing_image_uses_the_reflected_hessian() {
+        // Negative curvature along the band, so the reflected operator is
+        // positive definite and the Newton step stays inside the trust ball.
+        const CURVATURES: [f64; 3] = [-2.0, 5.0, 8.0];
+        let band = quiet_band();
+        let options = RtrConfig::default().with_radius_max(8.0);
+        let start = Array2::from_shape_vec(
+            (3, 3),
+            vec![-1.0, 0.2, -0.15, 0.35, 0.2, -0.15, 1.0, 0.2, -0.15],
+        )
+        .expect("band shape");
+        let analytic = counted(&CURVATURES, true);
+        let mut analytic_positions = start.clone();
+        let mut analytic_step = BandRtr::new(options, true);
+        analytic_step
+            .step(&band, &analytic, &mut analytic_positions)
+            .expect("climbing analytic step");
+        assert_eq!(
+            analytic.evals.load(Ordering::Relaxed),
+            3,
+            "two base evaluations and the trial, with no curvature probes"
+        );
+        assert!(analytic.hvps.load(Ordering::Relaxed) >= 1);
+        assert!(
+            (analytic_positions[(1, 0)] - start[(1, 0)]).abs() > 1e-3,
+            "climbing image should move along the tangent"
+        );
+
+        let difference = counted(&CURVATURES, false);
+        let mut difference_positions = start;
+        let mut difference_step = BandRtr::new(options, true);
+        difference_step
+            .step(&band, &difference, &mut difference_positions)
+            .expect("climbing finite difference step");
+        let gap = max_abs_diff(&analytic_positions, &difference_positions);
+        assert!(
+            gap < ANALYTIC_FINITE_DIFFERENCE_GAP,
+            "reflected Hessian and finite difference positions differ by {gap}"
+        );
+    }
+
+    fn reflected_product(
+        surface: &CountedQuadratic,
+        band: &crate::band::BandConfig,
+        base: &Array2<f64>,
+        direction: &Array1<f64>,
+    ) -> (Array1<f64>, Array1<f64>, Array1<f64>) {
+        let assembled = band_forces(band, surface, base.view(), Some(1)).expect("base force");
+        let mut direction_rows = Array2::zeros((1, direction.len()));
+        direction_rows.row_mut(0).assign(direction);
+        let action = surface
+            .hessian_vector(base.view(), direction_rows.view())
+            .expect("direction product")
+            .expect("analytic direction product");
+        let mut tangent_rows = Array2::zeros(direction_rows.dim());
+        tangent_rows.row_mut(0).assign(&assembled.tangents.row(0));
+        let tangent_action = surface
+            .hessian_vector(base.view(), tangent_rows.view())
+            .expect("tangent product")
+            .expect("analytic tangent product");
+        let along = tangent_action.row(0).to_owned();
+        let product = assemble_analytic_product(
+            &AnalyticParts {
+                action: &action,
+                direction: &direction_rows,
+                base,
+                tangents: &assembled.tangents,
+                climbing: Some(1),
+                tangent_action: Some(&along),
+            },
+            band.drops_translation(),
+            &band.fixed_atoms,
+            &mut RigidWorkspace::new(),
+        )
+        .expect("reflected product");
+        (
+            product,
+            action.row(0).to_owned(),
+            assembled.tangents.row(0).to_owned(),
+        )
+    }
+
+    /// Central difference of a climbing force, with the same scaling the
+    /// trust step uses for a direction of length `vn`.
+    fn central_force_difference(
+        plus: &Array1<f64>,
+        minus: &Array1<f64>,
+        vn: f64,
+        h: f64,
+    ) -> Array1<f64> {
+        (minus - plus) * (vn / (2.0 * h))
+    }
+
+    #[test]
+    fn climbing_reflected_product_matches_central_force_difference() {
+        // Straight band, so the tangent is the x axis and an eigenvector of
+        // the diagonal Hessian. The reflected product then equals the
+        // central difference of the climbing force at that tangent, and the
+        // tangent component of Hv changes sign.
+        const CURVATURES: [f64; 3] = [-2.0, 5.0, 8.0];
+        let band = quiet_band();
+        let surface = counted(&CURVATURES, true);
+        let base = Array2::from_shape_vec(
+            (3, 3),
+            vec![-1.0, 0.2, -0.15, 0.35, 0.2, -0.15, 1.0, 0.2, -0.15],
+        )
+        .expect("band shape");
+        let h = 1e-6;
+        let direction = array![0.35, -0.2, 0.15];
+        let (product, raw, tangent) = reflected_product(&surface, &band, &base, &direction);
+        let vn = nrm2(direction.view());
+        let climbing_at = |sign: f64| {
+            let mut shifted = base.clone();
+            shifted.row_mut(1).scaled_add(sign * h / vn, &direction);
+            let mut energies = Array1::zeros(shifted.nrows());
+            let mut gradients = Array2::zeros(shifted.dim());
+            surface
+                .eval(shifted.view(), &mut energies, &mut gradients)
+                .expect("shifted energy");
+            let true_force = -&gradients.row(1).to_owned();
+            climbing_image_force(
+                true_force.view(),
+                tangent.view(),
+                Array1::zeros(direction.len()).view(),
+            )
+        };
+        let finite = central_force_difference(&climbing_at(1.0), &climbing_at(-1.0), vn, h);
+        let gap = finite
+            .iter()
+            .zip(product.iter())
+            .map(|(left, right)| (left - right).abs())
+            .fold(0.0, f64::max);
+        assert!(
+            finite.dot(&product) > 0.0,
+            "reflected product and the climbing-force difference disagree in sign\n{product:?}\n{finite:?}"
+        );
+        assert!(
+            gap < 1e-8,
+            "reflected product and the central climbing-force difference differ by {gap}\n{product:?}\n{finite:?}"
+        );
+        let parallel_raw = tangent.dot(&raw);
+        let parallel_product = tangent.dot(&product);
+        assert!(
+            parallel_raw < 0.0 && parallel_product > 0.0,
+            "climbing product should reverse the tangent component of Hv ({parallel_raw} -> {parallel_product})"
+        );
+        assert!(
+            (parallel_product + parallel_raw).abs() < 1e-8,
+            "reversed tangent component {parallel_product} is not the negation of {parallel_raw}"
+        );
+
+        // Along the tangent the assembled band force has the same difference:
+        // both segments stay on the line, so the tangent does not tilt.
+        let along = tangent.clone();
+        let (along_product, _, _) = reflected_product(&surface, &band, &base, &along);
+        let along_norm = nrm2(along.view());
+        let band_force_at = |sign: f64| {
+            let mut shifted = base.clone();
+            shifted.row_mut(1).scaled_add(sign * h / along_norm, &along);
+            band_forces(&band, &surface, shifted.view(), Some(1))
+                .expect("shifted band force")
+                .force
+        };
+        let assembled =
+            central_force_difference(&band_force_at(1.0), &band_force_at(-1.0), along_norm, h);
+        let assembled_gap = assembled
+            .iter()
+            .zip(along_product.iter())
+            .map(|(left, right)| (left - right).abs())
+            .fold(0.0, f64::max);
+        assert!(
+            assembled.dot(&along_product) > 0.0 && assembled_gap < 1e-7,
+            "assembled climbing force difference {assembled:?} product {along_product:?} gap {assembled_gap}"
+        );
+    }
+
+    #[test]
+    fn malformed_analytic_product_is_rejected() {
+        let band = quiet_band();
+        let surface = CountedQuadratic {
+            curvatures: &[1.0, 4.0, 9.0],
+            analytic: true,
+            malformed: true,
+            evals: AtomicUsize::new(0),
+            hvps: AtomicUsize::new(0),
+        };
+        let mut positions =
+            Array2::from_shape_vec((3, 3), vec![-1.0, 0.0, 0.0, 0.2, 0.3, 0.1, 1.0, 0.0, 0.0])
+                .expect("band shape");
+        let mut step = BandRtr::new(RtrConfig::default(), false);
+        let error = step
+            .step(&band, &surface, &mut positions)
+            .expect_err("wrong product shape");
+        assert!(matches!(error, SaddleError::Shape(_)));
     }
 }

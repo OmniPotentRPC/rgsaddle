@@ -164,9 +164,15 @@ A band the session already holds does not go to the surface again: the
 accepted band and the band before it answer a repeated request, so a
 stepper that rejects a trial and returns to its start, as ODE12r does,
 makes no surface call for it.
-The projected trust-region method (RTR) keeps the Hessian-vector
+The projected trust-region method (RTR) keeps the Hessian vector
 products around its current base until the base, the climbing image or
 the force gate changes, so the step after a rejection reuses them.
+~BandSurface::hessian_vector~ supplies those products.
+An ordinary image keeps the part perpendicular to the tangent.
+The climbing image uses the reflected Hessian, ~Hv - (t · Hv) t - (t · v) Ht~.
+Net translation is removed with rgmin's rigid translation projector when the band drops it.
+Without a product the step keeps the central difference of the assembled force.
+From C, ~rgsaddle_band_set_hvp~ (ABI minor 47) registers the same callback, and ~Band::set_hvp~ wraps it.
 None of this changes a step of the band methods of Goswami, Gunde and
 Jonsson, Front. Chem. 14 (2026), doi:10.3389/fchem.2026.1807063, and
 Henkelman, Uberuaga and Jonsson, J. Chem. Phys. 113, 9901 (2000),

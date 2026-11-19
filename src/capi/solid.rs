@@ -213,7 +213,17 @@ pub unsafe extern "C" fn rgsaddle_band_step_solid(
         n_images: band.n_images,
         per_image: band.per_image,
     };
-    match band.session.step(&cs) {
+    let stepped = if let Some(hvp) = band.hvp {
+        let wrapped = BandHvp {
+            inner: &cs,
+            hvp,
+            user: band.hvp_user,
+        };
+        band.session.step(&wrapped)
+    } else {
+        band.session.step(&cs)
+    };
+    match stepped {
         Ok(report) => {
             let out = unsafe { &mut *out };
             stamp_report(out);

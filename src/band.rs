@@ -766,6 +766,22 @@ pub trait BandSurface: Sync {
         let _ = image;
         min_mode::one_row(self, position)
     }
+
+    /// Optional analytic Cartesian Hessian action on the interior images.
+    ///
+    /// `positions` has one row per band image and `direction` has one row
+    /// per interior image. Row `r` of a supplied product is the action of
+    /// the Hessian at `positions[r + 1]` on `direction[r]`, with shape
+    /// `(n_images - 2, dof)`. [`Ok`]`(None)` keeps the central difference
+    /// in [`crate::rtr::BandRtr`]. The default is [`Ok`]`(None)`.
+    fn hessian_vector(
+        &self,
+        positions: ArrayView2<f64>,
+        direction: ArrayView2<f64>,
+    ) -> Result<Option<Array2<f64>>, SaddleError> {
+        let _ = (positions, direction);
+        Ok(None)
+    }
 }
 
 /// Oriented cells and the Jacobian fixed at session build.
@@ -2410,6 +2426,14 @@ impl<S: BandSurface> BandSurface for CachedBandSurface<'_, S> {
         energies.assign(&eval.energies);
         gradients.assign(&eval.gradients);
         Ok(())
+    }
+
+    fn hessian_vector(
+        &self,
+        positions: ArrayView2<f64>,
+        direction: ArrayView2<f64>,
+    ) -> Result<Option<Array2<f64>>, SaddleError> {
+        self.surface.hessian_vector(positions, direction)
     }
 }
 

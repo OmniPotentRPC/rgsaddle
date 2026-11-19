@@ -308,6 +308,14 @@ impl<S: BandSurface + PointSurface> BandSurface for Handoff<'_, S> {
     ) -> Result<(f64, Array1<f64>), SaddleError> {
         PointSurface::eval(self.0, position)
     }
+
+    fn hessian_vector(
+        &self,
+        positions: ndarray::ArrayView2<f64>,
+        direction: ndarray::ArrayView2<f64>,
+    ) -> Result<Option<ndarray::Array2<f64>>, SaddleError> {
+        BandSurface::hessian_vector(self.0, positions, direction)
+    }
 }
 
 /// Host-stepped CI-NEB to minimum-mode hand-off.

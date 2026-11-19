@@ -551,6 +551,48 @@ impl<S: PointSurface> BandSurface for PointBand<'_, S> {
         }
         Ok(())
     }
+
+    fn hessian_vector(
+        &self,
+        positions: ndarray::ArrayView2<f64>,
+        direction: ndarray::ArrayView2<f64>,
+    ) -> Result<Option<ndarray::Array2<f64>>, SaddleError> {
+        let rows = direction.nrows();
+        let cols = direction.ncols();
+        if positions.nrows() != rows + 2 || positions.ncols() != cols {
+            return Err(SaddleError::Shape(
+                "band Hessian product rows do not match the positions".into(),
+            ));
+        }
+        if rows == 0 {
+            return Ok(None);
+        }
+        let mut out = ndarray::Array2::zeros((rows, cols));
+        for row in 0..rows {
+            match self
+                .surface
+                .hessian_vector(positions.row(row + 1), direction.row(row))?
+            {
+                None => {
+                    if row > 0 {
+                        return Err(SaddleError::Surface(
+                            "analytic Hessian product stopped after earlier rows".into(),
+                        ));
+                    }
+                    return Ok(None);
+                }
+                Some(action) => {
+                    if action.len() != cols {
+                        return Err(SaddleError::Shape(
+                            "point Hessian product length does not match the row".into(),
+                        ));
+                    }
+                    out.row_mut(row).assign(&action);
+                }
+            }
+        }
+        Ok(Some(out))
+    }
 }
 
 fn build_solver(config: &BandConfig, method: &Method, interior_dof: usize) -> Solver {

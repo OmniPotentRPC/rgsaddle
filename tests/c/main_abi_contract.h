@@ -5,7 +5,7 @@
 #include <stddef.h>
 
 _Static_assert(RGSADDLE_ABI_MAJOR == 1u, "main ABI major");
-_Static_assert(RGSADDLE_ABI_MINOR == 45u, "ABI minor");
+_Static_assert(RGSADDLE_ABI_MINOR == 47u, "ABI minor");
 _Static_assert(RGSADDLE_BAND_NO_MIN_MODE == (1ull << 3), "band flag bit 3");
 _Static_assert(RGSADDLE_BAND_SPLINE_REPARAM == (1ull << 4), "band flag bit 4");
 _Static_assert(RGSADDLE_BAND_STRING == (1ull << 5), "band flag bit 5");
@@ -552,5 +552,13 @@ _Static_assert(_Generic(&rgsaddle_band_free_end_residual, abi45_signature_rgsadd
 typedef int64_t (*abi45_signature_rgsaddle_band_free_end_cuts)(
     const RgsaddleBand *band);
 _Static_assert(_Generic(&rgsaddle_band_free_end_cuts, abi45_signature_rgsaddle_band_free_end_cuts: 1, default: 0), "rgsaddle_band_free_end_cuts signature");
+
+typedef rgsaddle_status_t (*abi47_signature_rgsaddle_band_set_hvp)(
+    RgsaddleBand *band, rgsaddle_band_hvp_fn hvp, void *user, int64_t n_dof);
+_Static_assert(_Generic(&rgsaddle_band_set_hvp, abi47_signature_rgsaddle_band_set_hvp: 1, default: 0), "rgsaddle_band_set_hvp signature");
+
+typedef rgsaddle_status_t (*abi47_signature_rgsaddle_minmode_set_hvp)(
+    RgsaddleMinMode *session, rgsaddle_minmode_hvp_fn hvp, void *user, int64_t n_dof);
+_Static_assert(_Generic(&rgsaddle_minmode_set_hvp, abi47_signature_rgsaddle_minmode_set_hvp: 1, default: 0), "rgsaddle_minmode_set_hvp signature");
 
 #endif

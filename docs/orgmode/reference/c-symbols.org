@@ -185,3 +185,5 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =rgsaddle_band_set_free_end=. Purpose: Enable, replace, or clear the free-end adaptive NEB (FEA-NEB) of Zhang, Zhang, Ye, and Zheng, J. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_band_free_end_residual=. Purpose: Read the signed target-energy residual `E(x_end) - E_target` from the most recent free-end step into `out`, ABI minor 45. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_band_free_end_cuts=. Purpose: Number of adaptive cut-and-remesh refinements performed so far on a free-end band, or 0 for NULL, ABI minor 45. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_band_set_hvp=. Purpose: Register an optional analytic Hessian vector product on a band, ABI minor 47. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_minmode_set_hvp=. Purpose: Register an optional analytic Hessian vector product on a minimum mode session, ABI minor 47. Parameters: the declaration. Units: the caller's.
