@@ -1,5 +1,0 @@
-A converged band, min-mode or OCI-NEB step certifies the saddle index of its point by default, and the check's surface evaluations count in that step's ~surface_rows~ or ~evaluations~; every step still reaches the same positions.
-On the slab of ~tests/band_fixed_atoms.rs~ FIRE at ~force_tol~ 1e-3 takes 141 force rows with the check and 81 without it.
-~with_saddle_check(None)~ turns it off, and the ~fixed_slab_precon~, ~minmode_trust~ and ~minmode_calls~ examples do so to keep their recorded counts.
-~BandReport~, ~MinModeReport~ and ~OcinebReport~ gain the public field ~saddle_index~, so a struct literal or an exhaustive pattern of one no longer compiles outside this crate.
-A C config stamped with ABI minor 40 or newer certifies by default and one stamped earlier does not; Python's ~MinMode~ certifies by default.
