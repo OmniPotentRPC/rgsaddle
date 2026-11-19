@@ -1,0 +1,1 @@
+Path sampling drops rigid translations from its plane without the =ohtst= feature. =HyperplaneConstraint= now lives with the sampler. Transmission shooting stays on that feature, and a build without it keeps the one-sided Bennett--Chandler shot.
