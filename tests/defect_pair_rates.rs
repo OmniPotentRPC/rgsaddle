@@ -59,7 +59,7 @@ fn control_config() -> DefectPairConfig {
         .with_max_move(0.04)
         .with_dr(1.0e-3)
         .with_max_rotations(8);
-    DefectPairConfig::default()
+    let config = DefectPairConfig::default()
         .with_dimer(SolidDimerConfig::frozen(search).with_index_check(IndexCheck::first_order()))
         .with_band(
             BandConfig::default()
@@ -96,18 +96,20 @@ fn control_config() -> DefectPairConfig {
                 .with_seed(5)
                 .with_fix_com(false)
                 .with_retain(8),
-        )
-        .with_transmission(
-            rgsaddle::TransmissionConfig::default()
-                .with_friction(0.0)
-                .with_time_step(0.01)
-                .with_steps(30)
-                .with_check_every(10)
-                .with_shots(24)
-                .with_blocks(4)
-                .with_seed(9)
-                .with_counting(rgsaddle::Counting::Final),
-        )
+        );
+    #[cfg(feature = "ohtst")]
+    let config = config.with_transmission(
+        rgsaddle::TransmissionConfig::default()
+            .with_friction(0.0)
+            .with_time_step(0.01)
+            .with_steps(30)
+            .with_check_every(10)
+            .with_shots(24)
+            .with_blocks(4)
+            .with_seed(9)
+            .with_counting(rgsaddle::Counting::Final),
+    );
+    config
         .with_temperatures(vec![0.05])
         .with_boltzmann(1.0)
         .with_mass(1.0)

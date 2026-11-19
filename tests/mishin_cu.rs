@@ -3739,7 +3739,7 @@ fn cu_config(
         .with_max_move(0.1)
         .with_dr(1.0e-3)
         .with_max_rotations(8);
-    rgsaddle::DefectPairConfig::default()
+    let config = rgsaddle::DefectPairConfig::default()
         .with_dimer(
             SolidDimerConfig::frozen(search)
                 .with_index_check(IndexCheck::first_order().with_step(1.0e-3).with_escapes(1)),
@@ -3779,18 +3779,20 @@ fn cu_config(
                 .with_retain(4)
                 .with_target_error(target)
                 .with_max_rounds(4),
-        )
-        .with_transmission(
-            rgsaddle::TransmissionConfig::default()
-                .with_friction(2.0)
-                .with_time_step(0.03)
-                .with_steps(80)
-                .with_check_every(20)
-                .with_shots(32)
-                .with_blocks(4)
-                .with_seed(seed.wrapping_add(9))
-                .with_counting(rgsaddle::Counting::Final),
-        )
+        );
+    #[cfg(feature = "ohtst")]
+    let config = config.with_transmission(
+        rgsaddle::TransmissionConfig::default()
+            .with_friction(2.0)
+            .with_time_step(0.03)
+            .with_steps(80)
+            .with_check_every(20)
+            .with_shots(32)
+            .with_blocks(4)
+            .with_seed(seed.wrapping_add(9))
+            .with_counting(rgsaddle::Counting::Final),
+    );
+    config
         .with_temperatures(temperatures.to_vec())
         .with_boltzmann(rgsaddle::BOLTZMANN_EV_PER_K)
         .with_mass(63.546)
@@ -3803,6 +3805,7 @@ fn cu_config(
 }
 
 #[test]
+#[cfg(feature = "ohtst")]
 fn cu_config_routes_bennett_chandler_settings_to_transmission() {
     let config = cu_config(&[300.0], 24, 0.01, [[0.0; 3]; 3], Vec::new(), 17);
     assert_eq!(config.transmission.friction, 2.0);
@@ -15447,22 +15450,32 @@ fn class_pafi(
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(256usize);
-    let transmission = rgsaddle::pafi_transmission(
-        &held,
-        &profile,
-        &planes,
-        &rgsaddle::TransmissionConfig::default()
-            .with_thermal(temperature * rgsaddle::BOLTZMANN_EV_PER_K)
-            .with_friction(2.0)
-            .with_time_step(0.03)
-            .with_steps(400)
-            .with_check_every(40)
-            .with_shots(shots)
-            .with_blocks(16.min(shots / 2).max(2))
-            .with_masses(vec![63.546; state.positions.len()])
-            .with_counting(rgsaddle::Counting::Final),
-    )
-    .map_err(|error| format!("transmission {error}"))?;
+    #[cfg(feature = "ohtst")]
+    let (kappa, kappa_error, kappa_shots) = {
+        let _ = shots;
+        let transmission = rgsaddle::pafi_transmission(
+            &held,
+            &profile,
+            &planes,
+            &rgsaddle::TransmissionConfig::default()
+                .with_thermal(temperature * rgsaddle::BOLTZMANN_EV_PER_K)
+                .with_friction(2.0)
+                .with_time_step(0.03)
+                .with_steps(400)
+                .with_check_every(40)
+                .with_shots(shots)
+                .with_blocks(16.min(shots / 2).max(2))
+                .with_masses(vec![63.546; state.positions.len()])
+                .with_counting(rgsaddle::Counting::Final),
+        )
+        .map_err(|error| format!("transmission {error}"))?;
+        (transmission.kappa, transmission.error, transmission.shots)
+    };
+    #[cfg(not(feature = "ohtst"))]
+    let (kappa, kappa_error, kappa_shots) = {
+        let _ = shots;
+        (f64::NAN, f64::NAN, 0)
+    };
     let (start, end) = band.bounds();
     let frequency = |arc: f64| -> f64 {
         band.geometry(arc).ok().map_or(f64::NAN, |frame| {
@@ -15501,9 +15514,9 @@ fn class_pafi(
         nu_backward,
         product,
         samples: profile.samples,
-        kappa: transmission.kappa,
-        kappa_error: transmission.error,
-        kappa_shots: transmission.shots,
+        kappa,
+        kappa_error,
+        kappa_shots,
         jumps: planes.iter().map(|plane| plane.jumps).sum(),
     })
 }

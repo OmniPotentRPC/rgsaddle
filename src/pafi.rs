@@ -27,8 +27,8 @@
 //! and this is the multiply form above. A normal that keeps only some of
 //! the atoms is a different foliation, and [`pafi_frames`] therefore uses
 //! the full tangent. Rigid translations are removed from it by
-//! [`crate::ohtst::HyperplaneConstraint::orthogonal_to`], and the estimator
-//! uses that same unit normal.
+//! `HyperplaneConstraint::orthogonal_to`, and the estimator uses that same
+//! unit normal.
 //!
 //! Production samples of the spline path arrive through
 //! [`HyperplaneSampler`]. The built-in overdamped Langevin implementation,
@@ -152,10 +152,11 @@ use rgmin::{Control, Error, Method, Oracle, Solver, Status, StopNorm};
 
 use crate::Region;
 use crate::error::SaddleError;
+use crate::hyperplane_constraint::{HyperplaneConstraint, uniform_translations};
 use crate::minmode::PointSurface;
+#[cfg(feature = "ohtst")]
 use crate::ohtst::{
-    self, EndState, HyperplaneConstraint, TransmissionCoefficient, TransmissionConfig,
-    transmission_coefficient,
+    self, EndState, TransmissionCoefficient, TransmissionConfig, transmission_coefficient,
 };
 use crate::projector::{
     Hyperplane, HyperplaneEnsemble, HyperplaneObservation, HyperplaneSampleBudget,
@@ -1176,6 +1177,7 @@ fn average_trajectory<S: PointSurface>(
 /// Shooting is unconstrained in both time directions and is delegated to
 /// [`transmission_coefficient`]. The PAFI plane normal points toward
 /// increasing path arc, the product side of a reactant-first band.
+#[cfg(feature = "ohtst")]
 pub fn pafi_transmission<S: PointSurface>(
     surface: &S,
     profile: &FreeEnergyProfile,
@@ -1659,7 +1661,7 @@ struct Quench {
     unconverged: bool,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "ohtst"))]
 mod transmission_tests {
     use ndarray::{Array1, ArrayView1, array};
 
@@ -2368,7 +2370,7 @@ fn plane_directions<S: PointSurface>(
     }
     let n = positions.len();
     if n >= 6 && n.is_multiple_of(3) {
-        return Ok(ohtst::uniform_translations(n / 3));
+        return Ok(uniform_translations(n / 3));
     }
     Ok(Array2::zeros((0, n)))
 }

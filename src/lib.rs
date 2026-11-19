@@ -70,6 +70,8 @@ pub mod capi_hyperplane;
 pub mod connect;
 pub mod defect_pair;
 pub mod error;
+mod hyperplane_constraint;
+pub use hyperplane_constraint::{HyperplaneConstraint, uniform_translations};
 pub mod idpp;
 pub mod indexk;
 #[cfg(feature = "lammps")]
@@ -178,27 +180,29 @@ pub use ohtst::{
     AnalyticSurfaceDynamics, AnalyticSurfaceSampler, AnalyticThermodynamicSampler,
     AnharmonicConfig, AnharmonicCorrection, BasinConfig, BasinDensity, BasinEnd, Basins, Counting,
     EndState, Endpoint, ExactGaussianPlaneSampler, FixedCell, GaussianTransport, HarmonicExpansion,
-    HarmonicReference, HyperplaneConstraint, HyperplaneDynamics, HyperplaneObservable,
-    LangevinConfig, MassWeighted, OhTstRate, PermutationDistance, PlaneDensity, PlaneIntegrator,
-    PlaneMetric, PlaneOptimizer, PlaneOptimizerConfig, PlaneOptimizerStatus, PlaneOptimum,
-    PlanePath, PlaneSample, PlaneTrace, QuadraticModel, QuenchConfig, QuenchedTransitionRegion,
-    RateMultiplicity, ReactantDensity, ReversibleWork, ReversibleWorkConfig, StateDistance,
-    THERMODYNAMIC_DERIVATIVE, ThermodynamicDerivative, ThermodynamicIntegrationConfig,
-    ThermodynamicIntegrationEstimate, ThermodynamicIntegrationNode, ThermodynamicSampler,
-    ThermodynamicSurfaceSampler, TransmissionCoefficient, TransmissionConfig, TransmissionEstimate,
-    Transport, Uncontrolled, WorkEstimate, WorkNode, anharmonic_correction, basin_density,
-    flux_mass, harmonic_energy_at, mass_weighted_rigid_translations, ohtst_rate, optimize_plane,
-    plane_transmission, reactant_density, restricted_thermodynamic_integration, reversible_work,
-    reversible_work_along, reversible_work_along_on_surface, reversible_work_on_surface,
-    sample_plane, sample_plane_with_sampler, thermodynamic_integration, transmission_coefficient,
-    transmission_coefficient_on_surface, uniform_translations,
+    HarmonicReference, HyperplaneDynamics, HyperplaneObservable, LangevinConfig, MassWeighted,
+    OhTstRate, PermutationDistance, PlaneDensity, PlaneIntegrator, PlaneMetric, PlaneOptimizer,
+    PlaneOptimizerConfig, PlaneOptimizerStatus, PlaneOptimum, PlanePath, PlaneSample, PlaneTrace,
+    QuadraticModel, QuenchConfig, QuenchedTransitionRegion, RateMultiplicity, ReactantDensity,
+    ReversibleWork, ReversibleWorkConfig, StateDistance, THERMODYNAMIC_DERIVATIVE,
+    ThermodynamicDerivative, ThermodynamicIntegrationConfig, ThermodynamicIntegrationEstimate,
+    ThermodynamicIntegrationNode, ThermodynamicSampler, ThermodynamicSurfaceSampler,
+    TransmissionCoefficient, TransmissionConfig, TransmissionEstimate, Transport, Uncontrolled,
+    WorkEstimate, WorkNode, anharmonic_correction, basin_density, flux_mass, harmonic_energy_at,
+    mass_weighted_rigid_translations, ohtst_rate, optimize_plane, plane_transmission,
+    reactant_density, restricted_thermodynamic_integration, reversible_work, reversible_work_along,
+    reversible_work_along_on_surface, reversible_work_on_surface, sample_plane,
+    sample_plane_with_sampler, thermodynamic_integration, transmission_coefficient,
+    transmission_coefficient_on_surface,
 };
+#[cfg(feature = "ohtst")]
+pub use pafi::pafi_transmission;
 pub use pafi::{
     ArcPath, BalancedBarriers, FramePlanes, FreeEnergyProfile, HyperplaneAverage, Integrator,
     PafiConfig, PafiIntegrator, PafiMeanForce, PathFrame, PathGeometry, anchored_barriers,
     average_hyperplane, average_hyperplane_with_sampler, balanced_barriers,
     flat_hyperplane_gradient, harmonic_mask_shift, integrate_profile, pafi_frames, pafi_profile,
-    pafi_transmission, pafi_truncated, zero_temperature_barrier,
+    pafi_truncated, zero_temperature_barrier,
 };
 pub use pair_network::{
     Mat3i, PairConfig, PairEdge, PairExit, PairHop, PairMove, PairNetwork, PairStateClass,

@@ -84,6 +84,7 @@ fn c_force_matches_the_contour_definition_and_propagates_errors() {
 }
 
 #[test]
+#[cfg(feature = "ohtst")]
 fn c_pafi_transmission_selects_the_free_energy_maximum() {
     unsafe {
         let mut cfg = MaybeUninit::uninit();

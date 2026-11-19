@@ -49,7 +49,8 @@ use crate::cell_log::{M3, m3_det, m3_inv, m3_mul, m3_to_row9};
 use crate::eigensolve::exact_eigh;
 use crate::error::SaddleError;
 use crate::minmode::{MinModeStatus, PointSurface};
-use crate::ohtst::{Counting, TransmissionCoefficient, TransmissionConfig};
+#[cfg(feature = "ohtst")]
+use crate::ohtst::{Counting, TransmissionConfig};
 use crate::pafi::{self, ArcPath, PafiConfig};
 use crate::relax::{RelaxConfig, max_atom_force, relax_to_tolerance};
 use crate::solid_dimer::{
@@ -828,6 +829,8 @@ pub struct DefectPairConfig {
     pub pafi: PafiConfig,
     /// Unconstrained forward/backward shooting. `thermal` is replaced the
     /// same way and [`Self::mass`] is installed on every coordinate.
+    /// Present when the `ohtst` feature supplies the shooter.
+    #[cfg(feature = "ohtst")]
     pub transmission: TransmissionConfig,
     /// Legacy one-sided shooting settings retained for callers that run
     /// [`crate::bennett_chandler`] themselves.
@@ -869,7 +872,6 @@ with_setters!(DefectPairConfig {
     with_connect_rmsd => connect_rmsd: val f64,
     with_direction_tol => direction_tol: val f64,
     with_pafi => pafi: val PafiConfig,
-    with_transmission => transmission: val TransmissionConfig,
     with_shooting => shooting: val ShootingConfig,
     with_temperatures => temperatures: val Vec<f64>,
     with_boltzmann => boltzmann: val f64,
@@ -881,6 +883,16 @@ with_setters!(DefectPairConfig {
     with_finite_temperature => finite_temperature: val bool,
     with_zero_t_tol => zero_t_tol: val f64,
 });
+
+#[cfg(feature = "ohtst")]
+impl DefectPairConfig {
+    /// Set [`Self::transmission`].
+    #[must_use]
+    pub fn with_transmission(mut self, transmission: TransmissionConfig) -> Self {
+        self.transmission = transmission;
+        self
+    }
+}
 
 impl Default for DefectPairConfig {
     fn default() -> Self {
@@ -906,6 +918,7 @@ impl Default for DefectPairConfig {
             connect_rmsd: 0.3,
             direction_tol: 0.05,
             pafi: PafiConfig::default(),
+            #[cfg(feature = "ohtst")]
             transmission: TransmissionConfig::default().with_counting(Counting::Final),
             shooting: ShootingConfig::default(),
             temperatures: vec![300.0],
@@ -1549,13 +1562,13 @@ fn fill_entry<S: PointSurface + Sync>(
     entry.d_f_error = Some(profile.barrier_error);
     entry.pafi_samples = profile.samples;
     entry.pafi_evaluations = planes.iter().map(|plane| plane.evaluations).sum();
-    let transmission = shoot(surface, config, &profile, &planes, thermal)?;
-    entry.kappa = Some(transmission.kappa);
-    entry.kappa_error = Some(transmission.error);
+    let (kappa, kappa_error) = shoot(surface, config, path, &profile, &planes, thermal)?;
+    entry.kappa = Some(kappa);
+    entry.kappa_error = Some(kappa_error);
     if let Some(nu) = harmonic.nu
-        && (0.0..=1.0).contains(&transmission.kappa)
+        && (0.0..=1.0).contains(&kappa)
     {
-        entry.rate = Some(arrhenius(transmission.kappa * nu, profile.barrier, thermal));
+        entry.rate = Some(arrhenius(kappa * nu, profile.barrier, thermal));
     }
     Ok(())
 }
@@ -1630,19 +1643,55 @@ fn harmonic_rates<S: PointSurface>(
     })
 }
 
+#[cfg(feature = "ohtst")]
 fn shoot<S: PointSurface>(
     surface: &S,
     config: &DefectPairConfig,
+    _path: &pafi::ArcPath,
     profile: &pafi::FreeEnergyProfile,
     planes: &[pafi::HyperplaneAverage],
     thermal: f64,
-) -> Result<TransmissionCoefficient, SaddleError> {
+) -> Result<(f64, f64), SaddleError> {
     let shooting = config
         .transmission
         .clone()
         .with_thermal(thermal)
         .with_masses(vec![config.mass; planes[profile.dividing].plane.dim()]);
-    pafi::pafi_transmission(surface, profile, planes, &shooting)
+    let coefficient = pafi::pafi_transmission(surface, profile, planes, &shooting)?;
+    Ok((coefficient.kappa, coefficient.error))
+}
+
+#[cfg(not(feature = "ohtst"))]
+fn shoot<S: PointSurface>(
+    surface: &S,
+    config: &DefectPairConfig,
+    path: &pafi::ArcPath,
+    profile: &pafi::FreeEnergyProfile,
+    planes: &[pafi::HyperplaneAverage],
+    thermal: f64,
+) -> Result<(f64, f64), SaddleError> {
+    let dividing = profile.dividing;
+    let geometry = path.geometry(profile.arc[dividing])?;
+    let starts = if planes[dividing].retained.is_empty() {
+        vec![geometry.positions.clone()]
+    } else {
+        planes[dividing].retained.clone()
+    };
+    let shooting = config
+        .shooting
+        .clone()
+        .with_thermal(thermal)
+        .with_mass(config.mass);
+    // The product side is the side of increasing arc length.
+    let normal = product_tangent(path, geometry.arc)?;
+    let transmission = crate::bennett::bennett_chandler(
+        surface,
+        &starts,
+        geometry.positions.view(),
+        normal.view(),
+        &shooting,
+    )?;
+    Ok((transmission.kappa, transmission.error))
 }
 
 fn climb_path<S: PointSurface>(

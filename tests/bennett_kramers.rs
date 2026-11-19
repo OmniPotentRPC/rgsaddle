@@ -1,3 +1,5 @@
+#![cfg(feature = "ohtst")]
+
 //! Bennett–Chandler shooting against a transmission coefficient that is known.
 //!
 //! Chandler, J. Chem. Phys. 68, 2959 (1978), doi:10.1063/1.436049.

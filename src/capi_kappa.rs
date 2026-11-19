@@ -3,6 +3,9 @@ use crate::{
     SaddleError,
     capi::*,
     kappa::{KappaDimerConfig, kappa_dimer_force},
+};
+#[cfg(feature = "ohtst")]
+use crate::{
     minmode::PointSurface,
     ohtst::{
         AnalyticSurfaceDynamics, Counting, Hyperplane, TransmissionConfig, transmission_coefficient,
@@ -56,9 +59,11 @@ pub struct RgsaddleKappaReport {
 pub type RgsaddleHessianFn = extern "C" fn(*mut c_void, i64, *const f64, *mut f64) -> i32;
 
 /// The point energy-and-gradient callback used by PAFI transmission.
+#[cfg(feature = "ohtst")]
 pub type RgsaddlePointSurfaceFn =
     extern "C" fn(*mut c_void, i64, *const f64, *mut f64, *mut f64) -> i32;
 
+#[cfg(feature = "ohtst")]
 #[repr(C)]
 #[derive(Clone, Copy)]
 /// Settings for forward/backward shooting from a PAFI dividing plane.
@@ -89,6 +94,7 @@ pub struct RgsaddlePafiTransmissionConfig {
     pub hold_excluded: i32,
 }
 
+#[cfg(feature = "ohtst")]
 #[repr(C)]
 #[derive(Clone, Copy)]
 /// PAFI transmission estimate and trajectory counts.
@@ -113,11 +119,13 @@ pub struct RgsaddlePafiTransmissionReport {
     pub evaluations: i64,
 }
 
+#[cfg(feature = "ohtst")]
 struct CPointSurface {
     callback: RgsaddlePointSurfaceFn,
     user: *mut c_void,
 }
 
+#[cfg(feature = "ohtst")]
 impl PointSurface for CPointSurface {
     fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
         let mut energy = 0.0;
@@ -138,8 +146,10 @@ impl PointSurface for CPointSurface {
     }
 }
 
+#[cfg(feature = "ohtst")]
 unsafe impl Sync for CPointSurface {}
 
+#[cfg(feature = "ohtst")]
 /// Fill default PAFI transmission settings.
 ///
 /// # Safety
@@ -174,6 +184,7 @@ pub unsafe extern "C" fn rgsaddle_pafi_transmission_config_default(
     RGSADDLE_OK
 }
 
+#[cfg(feature = "ohtst")]
 /// Select the maximum-free-energy PAFI plane and shoot its retained samples.
 ///
 /// # Safety
@@ -320,6 +331,7 @@ pub unsafe extern "C" fn rgsaddle_pafi_transmission(
     }
 }
 
+#[cfg(feature = "ohtst")]
 fn transmission_status(error: SaddleError) -> i32 {
     status_of(&error)
 }
