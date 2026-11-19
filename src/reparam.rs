@@ -37,6 +37,7 @@ use std::cmp::Ordering;
 use ndarray::{Array1, Array2};
 
 use crate::band::Cell;
+use crate::error::SaddleError;
 
 /// How interior images are placed at equal arc length.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -196,18 +197,205 @@ fn distinct_knots(s: &[f64], anchor: Option<usize>, tol: f64) -> Vec<usize> {
     kept
 }
 
-/// Interpolating spline through knots `t` (strictly increasing) and the
-/// rows of `values`: the chord for two knots, the parabola for three,
-/// and the not-a-knot cubic spline for four or more.
+/// End condition of [`Spline`].
+///
+/// [`SplineEnds::NotAKnot`] is the chord, parabola, or not-a-knot that
+/// string reparametrization builds with [`Spline::fit`].
+/// [`SplineEnds::Natural`] uses the same Hermite pieces with the second
+/// derivative zero at both end knots.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SplineEnds {
+    /// Chord for two knots, one parabola for three, not-a-knot for four or more.
+    NotAKnot,
+    /// Second derivative zero at the first and last knot.
+    Natural,
+}
+
+/// Interpolating spline through knots and the rows of `values`.
+///
+/// [`Spline::fit`] and [`SplineEnds::NotAKnot`] are the chord for two
+/// knots, the parabola for three, and the not-a-knot cubic for four or
+/// more: that is the spline the string reparametrization places images
+/// on. [`SplineEnds::Natural`] keeps those pieces and sets the end
+/// curvature to zero. Sampling an interior knot reads the segment that
+/// starts there; the last knot reads the last segment. The arc-length
+/// walk uses [`Spline::derivatives`], which reads an interior knot on
+/// the segment that ends there.
 #[derive(Clone, Debug)]
-pub(crate) struct Spline {
+pub struct Spline {
     t: Vec<f64>,
     y: Array2<f64>,
-    /// Second derivatives at the knots; zero for the chord.
+    /// Second derivatives at the knots; zero for the chord and for the
+    /// natural ends.
     m: Array2<f64>,
 }
 
 impl Spline {
+    /// Interpolate `values` on `knots` with the given end condition.
+    ///
+    /// [`SplineEnds::NotAKnot`] is [`Spline::fit`]. [`SplineEnds::Natural`]
+    /// is a chord for two knots and, for three or more, the tridiagonal
+    /// system with the second derivative zero at both ends.
+    ///
+    /// # Errors
+    ///
+    /// [`SaddleError::Shape`] when the knot count and the row count
+    /// disagree, when there are fewer than two knots, or when a row is
+    /// empty. [`SaddleError::Invalid`] when a knot spacing is not
+    /// positive and finite, or when the not-a-knot system has no
+    /// solution. [`SaddleError::NonFinite`] when a value or a second
+    /// derivative is not finite.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ndarray::array;
+    /// use rgsaddle::{Spline, SplineEnds};
+    /// let spline = Spline::new(
+    ///     &[0.0, 1.0, 2.0],
+    ///     &array![[1.0], [3.0], [5.0]],
+    ///     SplineEnds::Natural,
+    /// )
+    /// .expect("line");
+    /// let (value, slope, curvature) = spline.sample(0.5).expect("sample");
+    /// assert_eq!((value[0], slope[0], curvature[0]), (2.0, 2.0, 0.0));
+    /// ```
+    pub fn new(knots: &[f64], values: &Array2<f64>, ends: SplineEnds) -> Result<Self, SaddleError> {
+        match ends {
+            SplineEnds::NotAKnot => Self::fit(knots, values).ok_or_else(|| {
+                SaddleError::Invalid(
+                    "not-a-knot spline needs finite, strictly increasing knots and matching rows"
+                        .into(),
+                )
+            }),
+            SplineEnds::Natural => Self::natural_ends(knots, values),
+        }
+    }
+
+    /// [`Spline::new`] with [`SplineEnds::Natural`].
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`Spline::new`].
+    pub fn natural(knots: &[f64], values: &Array2<f64>) -> Result<Self, SaddleError> {
+        Self::new(knots, values, SplineEnds::Natural)
+    }
+
+    fn natural_ends(knots: &[f64], values: &Array2<f64>) -> Result<Self, SaddleError> {
+        if knots.len() != values.nrows() || knots.len() < 2 {
+            return Err(SaddleError::Shape(
+                "cubic interpolation needs at least two equally counted knots and rows".into(),
+            ));
+        }
+        let width = values.ncols();
+        if width == 0 {
+            return Err(SaddleError::Shape(
+                "cubic interpolation rows must have one common nonzero width".into(),
+            ));
+        }
+        for pair in knots.windows(2) {
+            let spacing = pair[1] - pair[0];
+            if !(spacing.is_finite() && spacing > 0.0) {
+                return Err(SaddleError::Invalid(
+                    "cubic interpolation knots must be finite and strictly increasing".into(),
+                ));
+            }
+        }
+        let count = knots.len();
+        let mut second = Array2::zeros(values.raw_dim());
+        if count > 2 {
+            for component in 0..width {
+                let interior = count - 2;
+                let mut diagonal = vec![0.0; interior];
+                let mut upper = vec![0.0; interior];
+                let mut rhs = vec![0.0; interior];
+                for row in 0..interior {
+                    let i = row + 1;
+                    let left = knots[i] - knots[i - 1];
+                    let right = knots[i + 1] - knots[i];
+                    if !(left.is_finite() && right.is_finite() && left > 0.0 && right > 0.0) {
+                        return Err(SaddleError::Invalid(
+                            "cubic interpolation knots must be finite and strictly increasing"
+                                .into(),
+                        ));
+                    }
+                    diagonal[row] = 2.0 * (left + right);
+                    if row + 1 < interior {
+                        upper[row] = right;
+                    }
+                    rhs[row] = 6.0
+                        * ((values[(i + 1, component)] - values[(i, component)]) / right
+                            - (values[(i, component)] - values[(i - 1, component)]) / left);
+                    if row > 0 {
+                        let factor = left / diagonal[row - 1];
+                        diagonal[row] -= factor * upper[row - 1];
+                        rhs[row] -= factor * rhs[row - 1];
+                    }
+                }
+                for row in (0..interior).rev() {
+                    let next = if row + 1 < interior {
+                        upper[row] * second[(row + 2, component)]
+                    } else {
+                        0.0
+                    };
+                    second[(row + 1, component)] = (rhs[row] - next) / diagonal[row];
+                }
+            }
+        }
+        if !values.iter().all(|value| value.is_finite())
+            || !second.iter().all(|value| value.is_finite())
+        {
+            return Err(SaddleError::NonFinite("cubic interpolation"));
+        }
+        Ok(Self {
+            t: knots.to_vec(),
+            y: values.to_owned(),
+            m: second,
+        })
+    }
+
+    /// Knots the spline was built on, in increasing order.
+    pub fn knots(&self) -> &[f64] {
+        &self.t
+    }
+
+    /// Value, first derivative, and second derivative at `at`.
+    ///
+    /// # Errors
+    ///
+    /// [`SaddleError::Invalid`] when `at` is not finite or lies outside
+    /// the end knots.
+    pub fn sample(&self, at: f64) -> Result<(Array1<f64>, Array1<f64>, Array1<f64>), SaddleError> {
+        if !at.is_finite() || at < self.t[0] || at > self.t[self.t.len() - 1] {
+            return Err(SaddleError::Invalid(
+                "cubic interpolation sample lies outside its knot interval".into(),
+            ));
+        }
+        let i = match self.t.binary_search_by(|value| value.total_cmp(&at)) {
+            Ok(index) => index.min(self.t.len() - 2),
+            Err(index) => index.saturating_sub(1).min(self.t.len() - 2),
+        };
+        let h = self.t[i + 1] - self.t[i];
+        let a = (self.t[i + 1] - at) / h;
+        let b = (at - self.t[i]) / h;
+        let width = self.y.ncols();
+        let mut value = Array1::zeros(width);
+        let mut first = Array1::zeros(width);
+        let mut second = Array1::zeros(width);
+        for component in 0..width {
+            let y0 = self.y[(i, component)];
+            let y1 = self.y[(i + 1, component)];
+            let m0 = self.m[(i, component)];
+            let m1 = self.m[(i + 1, component)];
+            value[component] =
+                a * y0 + b * y1 + ((a * a * a - a) * m0 + (b * b * b - b) * m1) * h * h / 6.0;
+            first[component] =
+                (y1 - y0) / h + ((-3.0 * a * a + 1.0) * m0 + (3.0 * b * b - 1.0) * m1) * h / 6.0;
+            second[component] = a * m0 + b * m1;
+        }
+        Ok((value, first, second))
+    }
+
     pub(crate) fn fit(t: &[f64], y: &Array2<f64>) -> Option<Self> {
         let k = t.len();
         if k < 2
@@ -384,11 +572,6 @@ impl Spline {
             }
         }
         Some(t)
-    }
-
-    /// The knots.
-    pub(crate) fn knots(&self) -> &[f64] {
-        &self.t
     }
 
     /// The interpolated rows, one per knot.
@@ -714,6 +897,36 @@ mod tests {
                 .iter()
                 .zip(before.iter())
                 .all(|(a, b)| a.to_bits() == b.to_bits())
+        );
+    }
+
+    #[test]
+    fn natural_cubic_holds_the_end_curvature_at_zero() {
+        let values = array![[0.0], [1.0], [0.0], [1.0]];
+        let spline = Spline::natural(&[0.0, 1.0, 2.0, 3.0], &values).unwrap();
+        assert_eq!(spline.sample(0.0).unwrap().2[0], 0.0);
+        assert_eq!(spline.sample(1.0).unwrap().2[0], -4.0);
+        assert_eq!(spline.sample(2.0).unwrap().2[0], 4.0);
+        assert_eq!(spline.sample(3.0).unwrap().2[0], 0.0);
+        assert!(spline.sample(-0.1).is_err());
+        assert!(spline.sample(3.1).is_err());
+        assert!(matches!(
+            Spline::natural(&[1.0, 0.0], &array![[0.0], [1.0]]),
+            Err(SaddleError::Invalid(_))
+        ));
+        let not_a_knot = Spline::fit(&[0.0, 1.0, 2.0, 3.0], &values).unwrap();
+        assert_ne!(not_a_knot.sample(0.0).unwrap().2[0], 0.0);
+        let through_option =
+            Spline::new(&[0.0, 1.0, 2.0, 3.0], &values, SplineEnds::Natural).unwrap();
+        assert_eq!(
+            through_option.sample(1.0).unwrap().2[0],
+            spline.sample(1.0).unwrap().2[0]
+        );
+        let default_option =
+            Spline::new(&[0.0, 1.0, 2.0, 3.0], &values, SplineEnds::NotAKnot).unwrap();
+        assert_eq!(
+            default_option.sample(0.0).unwrap().2[0],
+            not_a_knot.sample(0.0).unwrap().2[0]
         );
     }
 }
