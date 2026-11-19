@@ -5,10 +5,10 @@
 //! the soft-subspace rank from the largest spectral gap, and emits search
 //! directions in two phases:
 //!
-//! 1. low-discrepancy-like draws in that soft subspace, then
+//! 1. pseudorandom Gaussian draws in that soft subspace, then
 //! 2. isotropic full-space draws for verification coverage.
 
-use ndarray::{Array1, Array2, ArrayView1};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 
 use crate::{PointSurface, SaddleError, SparseHessianOpts, SparsityPattern, sparse_hessian};
 
@@ -21,6 +21,98 @@ pub struct SoftModeDirectionPlan {
     pub eigenvalues: Array1<f64>,
     /// Seed directions: soft-subspace stage first, then full-space verification.
     pub directions: Vec<Array1<f64>>,
+}
+
+/// Deterministic soft-to-stiff Hessian-mode sweep.
+#[derive(Clone, Debug)]
+pub struct ModeSweepDirectionPlan {
+    /// Lowest-to-highest eigenvalues of the recovered Hessian.
+    pub eigenvalues: Array1<f64>,
+    /// Eigenvector column used for each direction.
+    pub mode_indices: Vec<usize>,
+    /// One direction for every non-rigid mode.
+    pub directions: Vec<Array1<f64>>,
+    /// Proven lower bound on squared overlap with each selected mode.
+    pub minimum_squared_mode_weight: f64,
+}
+
+/// Build one localized seed for every non-rigid Hessian mode, soft to stiff.
+///
+/// `localization_weights`, when present, has one row per localization centre
+/// and one column per atom. Entries must lie in `[0, 1]`; rows are assigned
+/// cyclically to modes. The direction for mode `e_m` is
+/// `(L e_m + carrier e_m) / ||L e_m + carrier e_m||`, so its squared overlap
+/// with `e_m` is at least `(carrier / (1 + carrier))²`.
+pub fn hessian_mode_sweep_directions<S: PointSurface>(
+    surface: &S,
+    minimum: ArrayView1<'_, f64>,
+    rigid_modes: usize,
+    carrier: f64,
+    localization_weights: Option<ArrayView2<'_, f64>>,
+) -> Result<ModeSweepDirectionPlan, SaddleError> {
+    let dof = minimum.len();
+    if dof == 0 || !dof.is_multiple_of(3) {
+        return Err(SaddleError::Shape(
+            "mode sweep expects a non-empty 3N Cartesian point".into(),
+        ));
+    }
+    if rigid_modes >= dof {
+        return Err(SaddleError::Invalid(
+            "mode sweep needs at least one non-rigid mode".into(),
+        ));
+    }
+    if !(carrier.is_finite() && carrier > 0.0) {
+        return Err(SaddleError::Invalid(
+            "mode sweep carrier must be finite and positive".into(),
+        ));
+    }
+    let n_atoms = dof / 3;
+    if let Some(weights) = localization_weights {
+        if weights.nrows() == 0 || weights.ncols() != n_atoms {
+            return Err(SaddleError::Shape(
+                "localization weights must have shape (centres, atoms)".into(),
+            ));
+        }
+        if weights
+            .iter()
+            .any(|value| !value.is_finite() || !(0.0..=1.0).contains(value))
+        {
+            return Err(SaddleError::Invalid(
+                "localization weights must be finite and lie in [0, 1]".into(),
+            ));
+        }
+    }
+    let mut pairs = Vec::new();
+    for i in 0..n_atoms {
+        for j in (i + 1)..n_atoms {
+            pairs.push((i, j));
+        }
+    }
+    let pattern = SparsityPattern::from_adjacency(n_atoms, &pairs)?;
+    let hessian =
+        sparse_hessian(surface, minimum, &pattern, SparseHessianOpts::default())?;
+    let eigenpairs = hessian.lowest_eigenpairs(dof)?;
+    let mut directions = Vec::with_capacity(dof - rigid_modes);
+    let mode_indices = (rigid_modes..dof).collect::<Vec<_>>();
+    for (sweep_index, &mode_index) in mode_indices.iter().enumerate() {
+        let mode = eigenpairs.vectors.column(mode_index).to_owned();
+        let mut localized = mode.clone();
+        if let Some(weights) = localization_weights {
+            let row = weights.row(sweep_index % weights.nrows());
+            for atom in 0..n_atoms {
+                for axis in 0..3 {
+                    localized[3 * atom + axis] *= row[atom];
+                }
+            }
+        }
+        directions.push(unit(localized + &(mode * carrier)));
+    }
+    Ok(ModeSweepDirectionPlan {
+        eigenvalues: eigenpairs.values,
+        mode_indices,
+        directions,
+        minimum_squared_mode_weight: (carrier / (1.0 + carrier)).powi(2),
+    })
 }
 
 /// Pick the soft-subspace rank from the largest adjacent relative spectral gap.
