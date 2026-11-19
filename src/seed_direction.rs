@@ -10,7 +10,9 @@
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 
-use crate::{PointSurface, SaddleError, SparseHessianOpts, SparsityPattern, sparse_hessian};
+use crate::{
+    PointSurface, SaddleError, SparseHessianOpts, SparsityPattern, exact_eigh, sparse_hessian,
+};
 
 /// Soft-mode-first direction plan.
 #[derive(Clone, Debug)]
@@ -89,13 +91,12 @@ pub fn hessian_mode_sweep_directions<S: PointSurface>(
         }
     }
     let pattern = SparsityPattern::from_adjacency(n_atoms, &pairs)?;
-    let hessian =
-        sparse_hessian(surface, minimum, &pattern, SparseHessianOpts::default())?;
-    let eigenpairs = hessian.lowest_eigenpairs(dof)?;
+    let hessian = sparse_hessian(surface, minimum, &pattern, SparseHessianOpts::default())?;
+    let (eigenvalues, eigenvectors) = exact_eigh(hessian.to_dense().view())?;
     let mut directions = Vec::with_capacity(dof - rigid_modes);
     let mode_indices = (rigid_modes..dof).collect::<Vec<_>>();
     for (sweep_index, &mode_index) in mode_indices.iter().enumerate() {
-        let mode = eigenpairs.vectors.column(mode_index).to_owned();
+        let mode = eigenvectors.column(mode_index).to_owned();
         let mut localized = mode.clone();
         if let Some(weights) = localization_weights {
             let row = weights.row(sweep_index % weights.nrows());
@@ -108,7 +109,7 @@ pub fn hessian_mode_sweep_directions<S: PointSurface>(
         directions.push(unit(localized + &(mode * carrier)));
     }
     Ok(ModeSweepDirectionPlan {
-        eigenvalues: eigenpairs.values,
+        eigenvalues,
         mode_indices,
         directions,
         minimum_squared_mode_weight: (carrier / (1.0 + carrier)).powi(2),
@@ -285,14 +286,8 @@ mod tests {
     #[test]
     fn hessian_chirp_supports_more_than_lanczos_full_dimension() {
         let minimum = Array1::zeros(99);
-        let plan = hessian_mode_sweep_directions(
-            &LargeHarmonic,
-            minimum.view(),
-            3,
-            0.25,
-            None,
-        )
-        .expect("large mode sweep");
+        let plan = hessian_mode_sweep_directions(&LargeHarmonic, minimum.view(), 3, 0.25, None)
+            .expect("large mode sweep");
         assert_eq!(plan.directions.len(), 96);
     }
 
