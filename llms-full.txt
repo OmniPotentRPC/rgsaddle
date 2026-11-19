@@ -4458,7 +4458,7 @@ The narrative for a session is the C and C++ how-to, not this list.
 - `rgsaddle_band_set_free_end`. Purpose: Enable, replace, or clear the free-end adaptive NEB (FEA-NEB) of Zhang, Zhang, Ye, and Zheng, J. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_band_free_end_residual`. Purpose: Read the signed target-energy residual `E(x_end) - E_target` from the most recent free-end step into `out`, ABI minor 45. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_band_free_end_cuts`. Purpose: Number of adaptive cut-and-remesh refinements performed so far on a free-end band, or 0 for NULL, ABI minor 45. Parameters: the declaration. Units: the caller's.
-- `rgsaddle_geodesic_config_default`. Purpose: Fill `out` with the default geodesic controls (step and gradient tolerances 1e-6, max_move 0.5, lower_ratio 0.95, upper_ratio 1.1, 40 sweeps, 40 iterations, memory 8, 10 bound samples, 32 images). Parameters: the declaration. Units: the caller's.
+- `rgsaddle_geodesic_config_default`. Purpose: Fill `out` with the default geodesic controls (step and gradient tolerances 1e-6, max_move 0.5, lower_ratio 0.95, upper_ratio 1.1, 40 sweeps, 40 iterations, memory 8, 10 bound samples, 32 images, seed 0). Parameters: the declaration. Units: the caller's.
 - `rgsaddle_geodesic_path`. Purpose: Minimize the geodesic length of an existing path. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_geodesic_morse`. Purpose: Morse pair geodesic between two geometries. Parameters: the declaration. Units: the caller's.
 
