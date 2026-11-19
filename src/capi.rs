@@ -2201,6 +2201,8 @@ pub unsafe extern "C" fn rgsaddle_idpp_path(
     }
 }
 
+mod geodesic;
+pub use geodesic::*;
 mod indexk;
 pub use indexk::*;
 mod sessions;

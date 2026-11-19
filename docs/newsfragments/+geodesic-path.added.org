@@ -1,0 +1,4 @@
+~geodesic_path~, ~geodesic_interpolate~, ~geodesic_lengths~, ~GeodesicConfig~, and ~MorsePairChart~ minimize the redundant coordinate path length of Zhu, Thompson, and Martinez, J. Chem. Phys. 150, 164103 (2019), doi:10.1063/1.5090303.
+The chart is caller supplied. ~MorsePairChart~ is their Eq. (7) with alpha 1.7 and beta 0.01, and minimum image distances when a cell is set.
+Interior images take an L-BFGS step from rgmin on the analytic length gradient. The endpoints stay fixed.
+The C ABI adds ~rgsaddle_geodesic_config_default~, ~rgsaddle_geodesic_path~, and ~rgsaddle_geodesic_morse~.
