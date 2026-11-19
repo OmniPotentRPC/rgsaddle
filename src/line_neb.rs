@@ -451,9 +451,9 @@ fn energy_slice(
     if energy <= target {
         return Ok(q.to_owned());
     }
-    let force_q = -gradient / &sqrt_masses;
+    let force_q = -gradient / sqrt_masses;
     let force_norm = force_q.dot(&force_q).sqrt();
-    if !(force_norm > 0.0) {
+    if force_norm <= 0.0 || force_norm.is_nan() {
         return Err(SaddleError::Invalid(
             "MEP energy slice reached a stationary point above its target".into(),
         ));
@@ -461,7 +461,7 @@ fn energy_slice(
     let direction = force_q / force_norm;
     let mut lower = 0.0;
     let extent = coordinate_extent(q.iter().copied())?;
-    if !(extent > 0.0) {
+    if extent <= 0.0 {
         return Err(SaddleError::Invalid(
             "MEP energy slice has no coordinate extent".into(),
         ));
@@ -502,13 +502,26 @@ fn energy_slice(
     Ok(q.to_owned() + lower * direction)
 }
 
+/// Scalar controls for [`fixed_energy_mep_seed`].
+#[derive(Clone, Copy, Debug)]
+pub struct FixedEnergySeed {
+    /// Energy at the index-one saddle.
+    pub saddle_energy: f64,
+    /// Energy both branches descend to.
+    pub target_energy: f64,
+    /// Images on the joined path, including both ends. At least 3.
+    pub images: usize,
+    /// Surface calls available to every slice on both branches.
+    pub max_evaluations: usize,
+}
+
 /// Energy-sliced steepest-descent seed from an index-one saddle.
 ///
 /// Each branch follows the mass-scaled force from the unstable mode and
 /// locates equal energy drops by bracketing, then both branches are resampled
-/// to `images` equal arc-length positions. The requested image count sets the
-/// energy resolution. `max_evaluations` is the surface-call budget for
-/// every slice on both branches.
+/// to [`FixedEnergySeed::images`] equal arc-length positions. The requested
+/// image count sets the energy resolution. [`FixedEnergySeed::max_evaluations`]
+/// is the surface-call budget for every slice on both branches.
 ///
 /// # Errors
 ///
@@ -518,18 +531,15 @@ pub fn fixed_energy_mep_seed(
     saddle: ArrayView1<'_, f64>,
     mode: ArrayView1<'_, f64>,
     masses: ArrayView1<'_, f64>,
-    saddle_energy: f64,
-    target_energy: f64,
-    images: usize,
-    max_evaluations: usize,
+    seed: FixedEnergySeed,
 ) -> Result<Array2<f64>, SaddleError> {
-    if images < 3
+    if seed.images < 3
         || saddle.len() != mode.len()
         || saddle.len() != masses.len()
         || !masses.iter().all(|mass| mass.is_finite() && *mass > 0.0)
-        || !(saddle_energy.is_finite()
-            && target_energy.is_finite()
-            && target_energy < saddle_energy)
+        || !(seed.saddle_energy.is_finite()
+            && seed.target_energy.is_finite()
+            && seed.target_energy < seed.saddle_energy)
     {
         return Err(SaddleError::Invalid(
             "fixed-energy MEP seed input is inconsistent".into(),
@@ -539,7 +549,7 @@ pub fn fixed_energy_mep_seed(
     let saddle_q = &saddle * &sqrt_masses;
     let mode_q = &mode * &sqrt_masses;
     let mode_norm = mode_q.dot(&mode_q).sqrt();
-    if !(mode_norm > 0.0) {
+    if mode_norm <= 0.0 || mode_norm.is_nan() {
         return Err(SaddleError::Invalid(
             "fixed-energy MEP seed mode must be nonzero".into(),
         ));
@@ -554,15 +564,15 @@ pub fn fixed_energy_mep_seed(
         direction.dot(&direction).sqrt()
     };
     let displacement = length.sqrt() * f64::EPSILON.sqrt();
-    let mut budget = max_evaluations;
+    let mut budget = seed.max_evaluations;
     let mut branches = Vec::with_capacity(2);
     for sign in [-1.0, 1.0] {
-        let mut branch = Vec::with_capacity(images);
+        let mut branch = Vec::with_capacity(seed.images);
         branch.push(saddle_q.clone());
         let mut q = &saddle_q + sign * displacement * &direction;
-        for slice in 1..images {
-            let fraction = slice as f64 / (images - 1) as f64;
-            let level = saddle_energy + fraction * (target_energy - saddle_energy);
+        for slice in 1..seed.images {
+            let fraction = slice as f64 / (seed.images - 1) as f64;
+            let level = seed.saddle_energy + fraction * (seed.target_energy - seed.saddle_energy);
             q = energy_slice(surface, q.view(), sqrt_masses.view(), level, &mut budget)?;
             branch.push(q.clone());
         }
@@ -584,9 +594,9 @@ pub fn fixed_energy_mep_seed(
             "fixed-energy MEP seed has zero arc length".into(),
         ));
     }
-    let mut result_q = Array2::zeros((images, saddle.len()));
-    for image in 0..images {
-        let wanted = total * image as f64 / (images - 1) as f64;
+    let mut result_q = Array2::zeros((seed.images, saddle.len()));
+    for image in 0..seed.images {
+        let wanted = total * image as f64 / (seed.images - 1) as f64;
         let right = arc
             .partition_point(|value| *value < wanted)
             .min(arc.len() - 1);

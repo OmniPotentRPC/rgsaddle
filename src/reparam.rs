@@ -197,6 +197,17 @@ fn distinct_knots(s: &[f64], anchor: Option<usize>, tol: f64) -> Vec<usize> {
     kept
 }
 
+/// Value and the first two derivatives of a [`Spline`] at one parameter.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SplineSample {
+    /// Interpolated value.
+    pub value: Array1<f64>,
+    /// First derivative with respect to the knot parameter.
+    pub first: Array1<f64>,
+    /// Second derivative with respect to the knot parameter.
+    pub second: Array1<f64>,
+}
+
 /// End condition of [`Spline`].
 ///
 /// [`SplineEnds::NotAKnot`] is the chord, parabola, or not-a-knot that
@@ -257,8 +268,11 @@ impl Spline {
     ///     SplineEnds::Natural,
     /// )
     /// .expect("line");
-    /// let (value, slope, curvature) = spline.sample(0.5).expect("sample");
-    /// assert_eq!((value[0], slope[0], curvature[0]), (2.0, 2.0, 0.0));
+    /// let sample = spline.sample(0.5).expect("sample");
+    /// assert_eq!(
+    ///     (sample.value[0], sample.first[0], sample.second[0]),
+    ///     (2.0, 2.0, 0.0)
+    /// );
     /// ```
     pub fn new(knots: &[f64], values: &Array2<f64>, ends: SplineEnds) -> Result<Self, SaddleError> {
         match ends {
@@ -365,7 +379,7 @@ impl Spline {
     ///
     /// [`SaddleError::Invalid`] when `at` is not finite or lies outside
     /// the end knots.
-    pub fn sample(&self, at: f64) -> Result<(Array1<f64>, Array1<f64>, Array1<f64>), SaddleError> {
+    pub fn sample(&self, at: f64) -> Result<SplineSample, SaddleError> {
         if !at.is_finite() || at < self.t[0] || at > self.t[self.t.len() - 1] {
             return Err(SaddleError::Invalid(
                 "cubic interpolation sample lies outside its knot interval".into(),
@@ -393,7 +407,11 @@ impl Spline {
                 (y1 - y0) / h + ((-3.0 * a * a + 1.0) * m0 + (3.0 * b * b - 1.0) * m1) * h / 6.0;
             second[component] = a * m0 + b * m1;
         }
-        Ok((value, first, second))
+        Ok(SplineSample {
+            value,
+            first,
+            second,
+        })
     }
 
     pub(crate) fn fit(t: &[f64], y: &Array2<f64>) -> Option<Self> {
@@ -904,10 +922,10 @@ mod tests {
     fn natural_cubic_holds_the_end_curvature_at_zero() {
         let values = array![[0.0], [1.0], [0.0], [1.0]];
         let spline = Spline::natural(&[0.0, 1.0, 2.0, 3.0], &values).unwrap();
-        assert_eq!(spline.sample(0.0).unwrap().2[0], 0.0);
-        assert_eq!(spline.sample(1.0).unwrap().2[0], -4.0);
-        assert_eq!(spline.sample(2.0).unwrap().2[0], 4.0);
-        assert_eq!(spline.sample(3.0).unwrap().2[0], 0.0);
+        assert_eq!(spline.sample(0.0).unwrap().second[0], 0.0);
+        assert_eq!(spline.sample(1.0).unwrap().second[0], -4.0);
+        assert_eq!(spline.sample(2.0).unwrap().second[0], 4.0);
+        assert_eq!(spline.sample(3.0).unwrap().second[0], 0.0);
         assert!(spline.sample(-0.1).is_err());
         assert!(spline.sample(3.1).is_err());
         assert!(matches!(
@@ -915,18 +933,18 @@ mod tests {
             Err(SaddleError::Invalid(_))
         ));
         let not_a_knot = Spline::fit(&[0.0, 1.0, 2.0, 3.0], &values).unwrap();
-        assert_ne!(not_a_knot.sample(0.0).unwrap().2[0], 0.0);
+        assert_ne!(not_a_knot.sample(0.0).unwrap().second[0], 0.0);
         let through_option =
             Spline::new(&[0.0, 1.0, 2.0, 3.0], &values, SplineEnds::Natural).unwrap();
         assert_eq!(
-            through_option.sample(1.0).unwrap().2[0],
-            spline.sample(1.0).unwrap().2[0]
+            through_option.sample(1.0).unwrap().second[0],
+            spline.sample(1.0).unwrap().second[0]
         );
         let default_option =
             Spline::new(&[0.0, 1.0, 2.0, 3.0], &values, SplineEnds::NotAKnot).unwrap();
         assert_eq!(
-            default_option.sample(0.0).unwrap().2[0],
-            not_a_knot.sample(0.0).unwrap().2[0]
+            default_option.sample(0.0).unwrap().second[0],
+            not_a_knot.sample(0.0).unwrap().second[0]
         );
     }
 }

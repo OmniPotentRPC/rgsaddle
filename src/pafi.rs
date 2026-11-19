@@ -561,14 +561,14 @@ impl PathGeometry {
     ///
     /// The errors of [`Spline::sample`].
     pub fn on_spline(spline: &Spline, arc: f64) -> Result<Self, SaddleError> {
-        let (positions, tangent, curvature) = spline.sample(arc)?;
-        // `derivatives` selects the segment #163's arc-length walk uses, so
-        // the one-sided third derivative matches `ArcPath::geometry`.
+        let sample = spline.sample(arc)?;
+        // The third derivative is the one-sided value from `derivatives`,
+        // the same segment `ArcPath::geometry` reads.
         let jerk = spline.derivatives(arc)[3].clone();
         Ok(Self {
-            positions,
-            tangent,
-            curvature,
+            positions: sample.value,
+            tangent: sample.first,
+            curvature: sample.second,
             jerk,
             arc,
         })
@@ -714,7 +714,7 @@ impl FixedEnergyTrajectory {
     /// length, and the errors of [`Spline::sample`].
     pub fn acceleration(&self, arc: f64, velocity: f64) -> Result<f64, SaddleError> {
         let geometry = PathGeometry::on_spline(&self.coordinate, arc)?;
-        let force = self.parallel_force.sample(arc)?.0[0];
+        let force = self.parallel_force.sample(arc)?.value[0];
         let metric = geometry.tangent.dot(&geometry.tangent);
         if !(metric.is_finite() && metric > 0.0) {
             return Err(SaddleError::Invalid(

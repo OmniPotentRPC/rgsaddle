@@ -177,8 +177,8 @@ pub use lineb::{
     hqtst_rate_interpolated_hessian_observed, hqtst_rate_interpolated_hessian_with_step,
 };
 pub use line_neb::{
-    LineNebConfig, LineNebReport, LineNebSession, LineNebStatus, fixed_energy_action,
-    fixed_energy_action_force, fixed_energy_mep_seed,
+    FixedEnergySeed, LineNebConfig, LineNebReport, LineNebSession, LineNebStatus,
+    fixed_energy_action, fixed_energy_action_force, fixed_energy_mep_seed,
 };
 pub use minmode::{
     ArtNConfig, FiniteDifference, MinModeConfig, MinModeKind, MinModeReport, MinModeSession,
@@ -372,7 +372,7 @@ pub mod afir;
 pub use afir::{afir_force, try_afir_force};
 
 pub mod reparam;
-pub use reparam::{Reparametrization, Spline, SplineEnds, reparametrize};
+pub use reparam::{Reparametrization, Spline, SplineEnds, SplineSample, reparametrize};
 
 pub mod rtr;
 pub use rtr::{
