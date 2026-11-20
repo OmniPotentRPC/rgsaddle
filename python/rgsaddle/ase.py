@@ -908,8 +908,8 @@ class AutoNEB:
             return energies, gradients
 
         positions = _image_positions(self.all_images)
-        local_fmax, force_tol = _staged(self.fmax, 0.025)
-        local_steps, climb_steps = _staged_int(self.maxsteps, 10000)
+        local_fmax, force_tol = _staged(self.fmax)
+        local_steps, climb_steps = _staged_int(self.maxsteps)
         report = autoneb_run(
             surface,
             positions,
@@ -973,7 +973,7 @@ class AutoNEB:
         return energies
 
 
-def _staged(value: Any, default: float) -> tuple[float, float]:
+def _staged(value: Any) -> tuple[float, float]:
     pair = _pair_of(value, "fmax")
     if pair is None:
         number = float(value)
@@ -981,8 +981,7 @@ def _staged(value: Any, default: float) -> tuple[float, float]:
     return pair
 
 
-def _staged_int(value: Any, default: int) -> tuple[int, int]:
-    del default
+def _staged_int(value: Any) -> tuple[int, int]:
     pair = _pair_of(value, "maxsteps")
     if pair is None:
         number = int(value)
