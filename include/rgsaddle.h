@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 45u
+#define RGSADDLE_ABI_MINOR 46u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -1928,6 +1928,203 @@ rgsaddle_status_t rgsaddle_band_free_end_residual(const RgsaddleBand *band,
  * free-end band, or 0 for NULL, ABI minor 45.
  */
 int64_t rgsaddle_band_free_end_cuts(const RgsaddleBand *band);
+
+/**
+ * Point surface, ABI minor 46. q and gradient each hold n doubles.
+ * The callback may run on more than one thread.
+ */
+typedef rgsaddle_status_t (*rgsaddle_point_fn)(void *user, int64_t n, const double *q,
+                                               double *energy, double *gradient);
+
+/** Langevin sample of one plane. Friction must be positive. */
+typedef struct {
+  rgsaddle_version_t version;
+  uint64_t flags;
+  double thermal;
+  double time_step;
+  double friction;
+  uint64_t burn_in;
+  uint64_t stride;
+  uint64_t records;
+  uint64_t blocks;
+  uint64_t seed;
+} rgsaddle_ohtst_sample_config_t;
+
+/** Averages written by rgsaddle_ohtst_sample. */
+typedef struct {
+  rgsaddle_version_t version;
+  uint64_t flags;
+  double normal_force;
+  double normal_force_error;
+  double virial;
+  double virial_error;
+  double acceptance;
+  uint64_t records;
+  uint64_t evaluations;
+} rgsaddle_ohtst_sample_report_t;
+
+/** Trust-region climb of the plane free energy. translate and rotate are nonzero to enable that move. patience is the converged samples in a row that stop the climb. */
+typedef struct {
+  rgsaddle_version_t version;
+  uint64_t flags;
+  double thermal;
+  double time_step;
+  double friction;
+  uint64_t burn_in;
+  uint64_t stride;
+  uint64_t records;
+  uint64_t blocks;
+  uint64_t seed;
+  uint64_t max_iterations;
+  double max_translation;
+  double max_rotation;
+  int32_t translate;
+  int32_t rotate;
+  uint64_t patience;
+} rgsaddle_ohtst_optimize_config_t;
+
+/** The last accepted plane of rgsaddle_ohtst_optimize. */
+typedef struct {
+  rgsaddle_version_t version;
+  uint64_t flags;
+  uint64_t iterations;
+  uint64_t evaluations;
+  double normal_force;
+  double normal_force_error;
+} rgsaddle_ohtst_optimize_report_t;
+
+/**
+ * Reversible work. nodes is the count on each segment and must be odd.
+ * estimate is 0 for integration, 1 for BAR and 2 for MBAR.
+ */
+typedef struct {
+  rgsaddle_version_t version;
+  uint64_t flags;
+  double thermal;
+  double time_step;
+  double friction;
+  uint64_t burn_in;
+  uint64_t stride;
+  uint64_t records;
+  uint64_t blocks;
+  uint64_t seed;
+  uint64_t nodes;
+  uint64_t bar_samples;
+  int32_t mbar;
+  int32_t estimate;
+} rgsaddle_ohtst_work_config_t;
+
+/** A(last) minus A(first). Absent BAR or MBAR fields are NaN. */
+typedef struct {
+  rgsaddle_version_t version;
+  uint64_t flags;
+  double work;
+  double error;
+  double integrated_work;
+  double integrated_error;
+  double bar_work;
+  double bar_error;
+  double mbar_work;
+  double mbar_error;
+  uint64_t evaluations;
+} rgsaddle_ohtst_work_report_t;
+
+/** Shooting from one plane. Friction zero is Newtonian. */
+typedef struct {
+  rgsaddle_version_t version;
+  uint64_t flags;
+  double thermal;
+  double time_step;
+  double friction;
+  uint64_t steps;
+  uint64_t check_every;
+  uint64_t shots;
+  uint64_t blocks;
+  uint64_t seed;
+} rgsaddle_ohtst_transmission_config_t;
+
+/** Transmission coefficient counted at the first crossing. */
+typedef struct {
+  rgsaddle_version_t version;
+  uint64_t flags;
+  double kappa;
+  double error;
+  uint64_t shots;
+  uint64_t unassigned;
+  uint64_t reactive;
+  uint64_t recrossed;
+  uint64_t evaluations;
+} rgsaddle_ohtst_transmission_report_t;
+
+/** Parts of the OH-TST rate. work is the free-energy difference from the density plane. */
+typedef struct {
+  rgsaddle_version_t version;
+  uint64_t flags;
+  double thermal;
+  double density;
+  double density_error;
+  double work;
+  double work_error;
+} rgsaddle_ohtst_rate_in_t;
+
+/** Rate in the time unit of the mass-weighted surface. */
+typedef struct {
+  rgsaddle_version_t version;
+  uint64_t flags;
+  double rate;
+  double error;
+  double log_rate;
+  double log_rate_error;
+  double flux;
+} rgsaddle_ohtst_rate_out_t;
+
+/**
+ * Sample the plane through point with the given normal.
+ * centroid and grad_normal each receive n doubles.
+ */
+rgsaddle_status_t rgsaddle_ohtst_sample(const rgsaddle_ohtst_sample_config_t *config, int64_t n,
+                                        const double *point, const double *normal,
+                                        rgsaddle_point_fn surface, void *user, double *centroid,
+                                        double *grad_normal, rgsaddle_ohtst_sample_report_t *report);
+
+/**
+ * Climb the plane free energy from point and normal, and write the optimum back.
+ */
+rgsaddle_status_t rgsaddle_ohtst_optimize(const rgsaddle_ohtst_optimize_config_t *config, int64_t n,
+                                          double *point, double *normal, rgsaddle_point_fn surface,
+                                          void *user, rgsaddle_ohtst_optimize_report_t *report);
+
+/**
+ * Solve MBAR. reduced is samples by states, row-major, and counts sum to samples.
+ * initial may be NULL. Each output is required.
+ */
+rgsaddle_status_t rgsaddle_ohtst_mbar(int64_t samples, int64_t states, const double *reduced,
+                                      const int64_t *counts, const double *initial,
+                                      double *free_energies, double *covariance, double *overlap);
+
+/**
+ * Reversible work through n_planes planes stored row-major.
+ * start may be NULL. MBAR is the multistate Bennett acceptance ratio.
+ */
+rgsaddle_status_t rgsaddle_ohtst_work(const rgsaddle_ohtst_work_config_t *config, int64_t n,
+                                      int64_t n_planes, const double *points, const double *normals,
+                                      const double *start, rgsaddle_point_fn surface, void *user,
+                                      rgsaddle_ohtst_work_report_t *report);
+
+/**
+ * Transmission coefficient of the plane, from n_starts configurations stored row-major.
+ */
+rgsaddle_status_t
+rgsaddle_ohtst_transmission(const rgsaddle_ohtst_transmission_config_t *config, int64_t n,
+                            const double *point, const double *normal, int64_t n_starts,
+                            const double *starts, rgsaddle_point_fn surface, void *user,
+                            rgsaddle_ohtst_transmission_report_t *report);
+
+/**
+ * OH-TST rate from a reactant density and the reversible work off its plane.
+ */
+rgsaddle_status_t rgsaddle_ohtst_rate(const rgsaddle_ohtst_rate_in_t *input,
+                                      rgsaddle_ohtst_rate_out_t *out);
 
 #ifdef __cplusplus
 }

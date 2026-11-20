@@ -189,6 +189,12 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =rgsaddle_band_set_free_end=. Purpose: Enable, replace, or clear the free-end adaptive NEB (FEA-NEB) of Zhang, Zhang, Ye, and Zheng, J. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_band_free_end_residual=. Purpose: Read the signed target-energy residual `E(x_end) - E_target` from the most recent free-end step into `out`, ABI minor 45. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_band_free_end_cuts=. Purpose: Number of adaptive cut-and-remesh refinements performed so far on a free-end band, or 0 for NULL, ABI minor 45. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_ohtst_sample=. Purpose: Sample the plane through point with the given normal. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_ohtst_optimize=. Purpose: Climb the plane free energy from point and normal, and write the optimum back. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_ohtst_mbar=. Purpose: Solve MBAR. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_ohtst_work=. Purpose: Reversible work through n_planes planes stored row-major. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_ohtst_transmission=. Purpose: Transmission coefficient of the plane, from n_starts configurations stored row-major. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_ohtst_rate=. Purpose: OH-TST rate from a reactant density and the reversible work off its plane. Parameters: the declaration. Units: the caller's.
 
 * Types and callbacks
 
@@ -255,12 +261,23 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =rgsaddle_growing_string_phase_t=. Purpose: Phase of a growing string session, ABI minor 44.
 - =rgsaddle_growing_string_config_t=. Purpose: Configuration of rgsaddle_growing_string_create, ABI minor 44.
 - =rgsaddle_free_end_side_t=. Purpose: Which terminal image moves on the target-energy level set, ABI minor 45.
+- =rgsaddle_ohtst_sample_config_t=. Purpose: Langevin sample of one plane.
+- =rgsaddle_ohtst_sample_report_t=. Purpose: Averages written by rgsaddle_ohtst_sample.
+- =rgsaddle_ohtst_optimize_config_t=. Purpose: Trust-region climb of the plane free energy.
+- =rgsaddle_ohtst_optimize_report_t=. Purpose: The last accepted plane of rgsaddle_ohtst_optimize.
+- =rgsaddle_ohtst_work_config_t=. Purpose: Reversible work.
+- =rgsaddle_ohtst_work_report_t=. Purpose: A(last) minus A(first).
+- =rgsaddle_ohtst_transmission_config_t=. Purpose: Shooting from one plane.
+- =rgsaddle_ohtst_transmission_report_t=. Purpose: Transmission coefficient counted at the first crossing.
+- =rgsaddle_ohtst_rate_in_t=. Purpose: Parts of the OH-TST rate.
+- =rgsaddle_ohtst_rate_out_t=. Purpose: Rate in the time unit of the mass-weighted surface.
 - =rgsaddle_hyperplane_emit_fn=. Purpose: Callback typedef in include/rgsaddle.h.
 - =rgsaddle_sample_hyperplane_fn=. Purpose: Callback typedef in include/rgsaddle.h.
 - =rgsaddle_surface_fn=. Purpose: Callback typedef in include/rgsaddle.h.
 - =rgsaddle_solid_surface_fn=. Purpose: Callback typedef in include/rgsaddle.h.
 - =rgsaddle_hessian_fn=. Purpose: Callback typedef in include/rgsaddle.h.
 - =rgsaddle_stencil_eval_fn=. Purpose: Callback typedef in include/rgsaddle.h.
+- =rgsaddle_point_fn=. Purpose: Point surface, ABI minor 46.
 
 * Macros and enum constants
 
