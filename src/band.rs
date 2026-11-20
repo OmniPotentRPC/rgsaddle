@@ -5309,4 +5309,122 @@ mod tests {
             "set_exp_precon left the Euclidean evaluation cached on the solver"
         );
     }
+
+    #[test]
+    fn metric_build_id_mismatch_on_identical_geometry_forces_rebuild() {
+        let positions = Array2::from_shape_vec(
+            (3, 9),
+            vec![
+                0.0, 0.0, 0.0, 1.1, 0.0, 0.0, 0.0, 1.2, 0.1, 0.2, 0.1, 0.0, 1.2, 0.2, 0.0, 0.1,
+                1.3, 0.2, 0.4, 0.2, 0.0, 1.3, 0.4, 0.1, 0.2, 1.4, 0.3,
+            ],
+        )
+        .expect("positions");
+        let gradient = Array2::from_shape_fn((3, 9), |(row, col)| {
+            0.2 * (row + 1) as f64 - 0.03 * col as f64
+        });
+        let surface = Prescribed {
+            energy: vec![0.0, 1.0, 0.2],
+            gradient,
+        };
+        let config = BandConfig::default()
+            .with_climbing(None)
+            .with_min_mode(None)
+            .with_saddle_check(None)
+            .with_remove_translation(false)
+            .with_exp_precon(ExpBandPrecon::default().with_mu(1.0));
+        let mut session = BandSession::new(config, positions).expect("band");
+        session.refresh_exp(&surface).expect("initial metric");
+        let x = session.interior_flat();
+        let first_id = session
+            .exp
+            .as_ref()
+            .and_then(|exp| exp.build_id)
+            .expect("first MetricBuildId");
+        let first = assemble_band_with(
+            &session.config,
+            &session.state,
+            &surface,
+            session.positions.row(0),
+            session.positions.row(2),
+            x.view(),
+            metric_view(&session),
+        )
+        .expect("first assembly");
+        assert_eq!(session.state.pcg_solves.load(Ordering::Relaxed), 1);
+        assert!(session.has_assembled_at(x.view(), x.len()));
+        assert!(session.evaluation().is_some());
+
+        let first_eval = session
+            .state
+            .last
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+
+        {
+            let exp_ref = session.exp.as_ref().expect("metric state");
+            let euclidean_view = BandMetrics {
+                build_id: MetricBuildId::EUCLIDEAN,
+                built_at: x.view(),
+                r_nn: exp_ref.r_nn,
+                per_image: exp_ref.metrics.as_slice(),
+                free: None,
+            };
+            assert!(
+                !euclidean_view.is_fresh_at(x.view(), 1),
+                "Euclidean MetricBuildId must not be accepted as a fresh exponential metric"
+            );
+
+            let exp = session.exp.as_mut().expect("metric state");
+            assert_eq!(exp.built_at, x);
+            exp.precon.a *= 4.0;
+            exp.build_id = None;
+        }
+        session
+            .refresh_exp(&surface)
+            .expect("metric rebuild on identical geometry");
+        let second_id = session
+            .exp
+            .as_ref()
+            .and_then(|exp| exp.build_id)
+            .expect("rebuilt MetricBuildId");
+        assert_ne!(
+            second_id, first_id,
+            "refresh_exp skipped rebuilding the metric on identical geometry"
+        );
+
+        // Restore the intact `first_id` assembly at the identical geometry `x`
+        // so only `MetricBuildId` differs between `last` and `session.exp`.
+        *session.state.last.lock().unwrap_or_else(|e| e.into_inner()) = first_eval;
+        assert!(
+            !session.has_assembled_at(x.view(), x.len()),
+            "has_assembled_at accepted a mismatched MetricBuildId at identical geometry"
+        );
+        assert!(
+            session.evaluation().is_none(),
+            "evaluation() returned forces solved under an older MetricBuildId"
+        );
+
+        let solves_before = session.state.pcg_solves.load(Ordering::Relaxed);
+        let second = assemble_band_with(
+            &session.config,
+            &session.state,
+            &CachedEvaluationOnly,
+            session.positions.row(0),
+            session.positions.row(2),
+            x.view(),
+            metric_view(&session),
+        )
+        .expect("reassembly under new MetricBuildId");
+        assert_eq!(
+            session.state.pcg_solves.load(Ordering::Relaxed),
+            solves_before + 1,
+            "MetricBuildId mismatch on identical geometry reused the cached driving force"
+        );
+        assert_ne!(second.1, first.1);
+        assert_ne!(second.3, first.3);
+        assert!(session.has_assembled_at(x.view(), x.len()));
+        assert!(session.evaluation().is_some());
+    }
 }

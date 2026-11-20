@@ -962,8 +962,9 @@ pub(super) fn one_row<S: BandSurface + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::band::{BandConfig, CiConfig, assemble_band_with};
+    use crate::band::{BandConfig, CiConfig, ExpBandPrecon, assemble_band_with};
     use crate::minmode::MinModeConfig;
+    use approx::assert_abs_diff_eq;
     use ndarray::{Array2, ArrayView2, array};
     use rgmin::Method;
 
@@ -1096,6 +1097,107 @@ mod tests {
         assert!(
             band.positions[(1, 1)] > y_after_first,
             "solver reused the pre-put_image evaluation instead of reassembling"
+        );
+    }
+
+    struct AtomShear;
+
+    impl BandSurface for AtomShear {
+        fn eval(
+            &self,
+            positions: ArrayView2<f64>,
+            energies: &mut Array1<f64>,
+            gradients: &mut Array2<f64>,
+        ) -> Result<(), SaddleError> {
+            for (i, row) in positions.outer_iter().enumerate() {
+                energies[i] = 2.0 * (row[1] - row[7]);
+                gradients[(i, 1)] = 2.0;
+                gradients[(i, 7)] = -2.0;
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn put_image_invalidates_stale_exp_metric_and_next_force_uses_rebuilt_metric() {
+        let positions = array![
+            [-1.0, 0.0, 0.0, 1.2, 0.0, 0.0, 0.0, 1.3, 0.0],
+            [0.0, 0.0, 0.0, 1.2, 0.0, 0.0, 0.0, 1.3, 0.0],
+            [1.0, 0.0, 0.0, 1.2, 0.0, 0.0, 0.0, 1.3, 0.0],
+        ];
+        let config = BandConfig::default()
+            .with_quickmin(true)
+            .with_climbing(None)
+            .with_min_mode(None)
+            .with_saddle_check(None)
+            .with_remove_translation(false)
+            .with_max_move(0.2)
+            .with_exp_precon(ExpBandPrecon::default().with_mu(1.0).with_a(3.0));
+        let surface = AtomShear;
+        let mut band = BandSession::new(config.clone(), positions.clone()).expect("band");
+        band.refresh_exp(&surface).expect("initial metric");
+        let initial_r_nn = band.exp.as_ref().expect("metric state").r_nn;
+        assert_abs_diff_eq!(initial_r_nn, 1.3, epsilon = 0.000_000_000_001);
+
+        // An intermediate refinement image past `r_nn / 2` (0.8 > 0.65)
+        // must drop the cached metric matrices at once.
+        let excursion = Point {
+            x: array![0.8, 0.0, 0.0, 1.2, 0.0, 0.0, 0.0, 1.3, 0.0],
+            energy: 0.0,
+            gradient: array![0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, -2.0, 0.0],
+        };
+        let excursion_proj = -&excursion.gradient;
+        band.put_image(1, &excursion, excursion_proj.view());
+        let invalidated_on_excursion = band
+            .exp
+            .as_ref()
+            .is_some_and(|exp| exp.build_id.is_none() && exp.metrics.is_empty());
+
+        // A subsequent restore/best placement back within `r_nn / 2` of the
+        // initial build (0.45 < 0.65) shrinks the 0-1 pair to 0.75, changing
+        // `r_nn` and the 0-2 weight. Without the invalidation above, the
+        // next step would reuse the initial metric instead of rebuilding.
+        let settled = Point {
+            x: array![0.45, 0.0, 0.0, 1.2, 0.0, 0.0, 0.0, 1.3, 0.0],
+            energy: 0.0,
+            gradient: array![0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, -2.0, 0.0],
+        };
+        let settled_proj = -&settled.gradient;
+        band.put_image(1, &settled, settled_proj.view());
+
+        let mut uninvalidated =
+            BandSession::new(config.clone(), positions.clone()).expect("control band");
+        uninvalidated
+            .refresh_exp(&surface)
+            .expect("control initial metric");
+        uninvalidated.put_image(1, &settled, settled_proj.view());
+        uninvalidated.step(&surface).expect("control step");
+
+        let mut settled_positions = positions;
+        settled_positions.row_mut(1).assign(&settled.x);
+        let mut fresh = BandSession::new(config, settled_positions).expect("fresh band");
+        fresh.step(&surface).expect("fresh step");
+
+        band.step(&surface).expect("step after excursion");
+        let stale_gap = (&uninvalidated.positions().row(1) - &fresh.positions().row(1))
+            .iter()
+            .map(|v| v.abs())
+            .fold(0.0_f64, f64::max);
+        assert!(
+            stale_gap > 0.001,
+            "initial and rebuilt metrics must produce distinct steps (gap {stale_gap})"
+        );
+        for (got, want) in band.positions().iter().zip(fresh.positions().iter()) {
+            assert_abs_diff_eq!(got, want, epsilon = 0.000_000_000_001);
+        }
+        let got_eval = band.evaluation().expect("band evaluation");
+        let want_eval = fresh.evaluation().expect("fresh evaluation");
+        for (got, want) in got_eval.projected.iter().zip(want_eval.projected.iter()) {
+            assert_abs_diff_eq!(got, want, epsilon = 0.000_000_000_001);
+        }
+        assert!(
+            invalidated_on_excursion,
+            "put_image past r_nn / 2 kept the stale exponential metric matrix"
         );
     }
 }
