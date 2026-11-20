@@ -442,12 +442,17 @@ impl BandSurface for CSurface {
         let image = image as i64;
         // One interior image, named by its band index. Not the
         // climbing-image request: a dynamic step refreshes whichever
-        // image the spring pulled back over the threshold.
-        if self.per_image {
-            self.call(self.n_images, image, &flat, &mut e, &mut g)?;
-        } else {
-            self.request(RGSADDLE_REQ_ONE_IMAGE, 1, image, &flat, &mut e, &mut g)?;
-        }
+        // image the spring pulled back over the threshold. n_images
+        // stays the band length, as RGSADDLE_REQ_ONE_IMAGE requires;
+        // the buffers hold the one image.
+        self.request(
+            RGSADDLE_REQ_ONE_IMAGE,
+            self.n_images,
+            image,
+            &flat,
+            &mut e,
+            &mut g,
+        )?;
         Ok((e[0], Array1::from(g)))
     }
 }

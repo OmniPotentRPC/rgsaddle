@@ -91,8 +91,8 @@ pub(crate) struct DynamicImage {
 /// Apply ASE's DyNEB mask to interior `forces` (the projected force the
 /// optimizer would see). `energies` are the interior images only. The
 /// highest-energy image is the last interior image that attains the
-/// maximum, which is ASE's `NEBState.imax` for distinct energies and the
-/// rightmost tie.
+/// maximum. That is ASE's `NEBState.imax` when the maximum is unique.
+/// An exact tie keeps the last image at that energy.
 pub(crate) fn dynamic_mask(
     interior: ArrayView2<f64>,
     energies: ArrayView1<f64>,
@@ -260,17 +260,31 @@ impl DynamicRun {
     /// step's origin records the set; later assemblies of this step
     /// keep it, so a trial geometry does not unfreeze an image that the
     /// position update will put back.
+    /// `row_gate` is the convergence force of each unmasked row.
+    /// A non-zeroed image whose gate is still above `force_tol` is left
+    /// free, so a band tolerance tighter than `fmax` can still be met.
+    /// A zeroed image stays pinned: ASE has already taken it out of the
+    /// optimizer.
     pub(crate) fn decision(
         &mut self,
         x: ArrayView1<f64>,
         mask: &[DynamicImage],
         visible: f64,
+        row_gate: &[f64],
+        force_tol: f64,
     ) -> Vec<bool> {
         if let Some(step) = &self.step {
             return step.zeroed.clone();
         }
         let zeroed: Vec<bool> = mask.iter().map(|image| image.zeroed).collect();
-        let frozen: Vec<bool> = mask.iter().map(|image| image.frozen).collect();
+        let frozen: Vec<bool> = mask
+            .iter()
+            .enumerate()
+            .map(|(i, image)| {
+                let under_tol = row_gate.get(i).is_some_and(|gate| *gate <= force_tol);
+                image.frozen && (image.zeroed || under_tol)
+            })
+            .collect();
         let at_origin = self
             .origin
             .as_ref()
