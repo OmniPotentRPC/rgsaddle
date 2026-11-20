@@ -42,13 +42,26 @@ loop {
 let path = session.positions();
 #+end_src
 
-~LineNebConfig~ is non-exhaustive. Its defaults are unit spring constant and restraint, force tolerance 1e-3, a fixed energy of 0, unit masses (=masses= is =None=), time step 0.1, and unit reduced Planck constant (~with_reduced_planck~); a host in other units sets every field it relies on.
+~LineNebConfig~ is non-exhaustive. Its defaults are unit spring constant and restraint, force tolerance 1e-3, a fixed energy of 0, unit masses (=masses= is =None=), time step 0.1, unit reduced Planck constant (~with_reduced_planck~), and ~EndpointBelowEnergy::Restrained~; a host in other units sets every field it relies on.
 
 Each interior image moves under the action force perpendicular to the improved tangent of Henkelman and Jónsson, J. Chem. Phys. 113, 9978 (2000), doi:10.1063/1.1323224 @@rst::cite:`henkelmanImprovedTangentEstimate2000`@@, plus a uniform spring along it. When the two neighbour energies are equal the weighted tangent points along the secant from the previous image to the next, so on a plateau of three equal energies that secant is used unscaled. Each endpoint moves under the spring perpendicular to its own force and a restraint =endpoint_kappa (E_end - E)= along that force.
 
 ~LineNebReport~ carries three maxima: ~max_interior_perpendicular~, ~max_interior_spring~, and ~max_endpoint_optimized~. ~LineNebStatus::Converged~ needs all three within ~force_tol~. With one coordinate per image the transverse force is zero by construction and the endpoints can already sit on =E=, so the spring residual is what keeps an unevenly spaced band from stopping early.
 
-The restraint can carry an endpoint below =E= during the optimization. The session keeps stepping and gives that endpoint zero weight, as at a turning point, until the restraint brings it back. ~LineNebReport::action~ equals ~fixed_energy_action~ whenever both endpoints are at or above =E=.
+* Choose the endpoint policy
+Equations 19 to 22 of Ásgeirsson, Arnaldsson, and Jónsson @@rst::cite:`asgeirssonEfficientEvaluationAtom2018`@@ define the endpoint steepest descent direction. With =f_hat = -grad V / |grad V|= and =g_sp = k (r_neighbour - r_end)=, this implementation uses
+
+#+begin_src text
+g_opt = g_sp - (g_sp . f_hat) f_hat
+        + endpoint_kappa (V(r_end) - E) f_hat
+#+end_src
+
+The projection removes the spring component normal to the isoenergy contour. The positive sign on the last term moves an endpoint above =E= along =f_hat=, which lowers its energy. Below =E= the negative energy difference reverses that direction and raises the energy. In both cases the endpoint returns to =V = E=.
+
+Set the session policy with ~with_endpoint_below_energy~:
+
+- ~EndpointBelowEnergy::Restrained~ is the default and follows the paper's scheme. The session gives an endpoint below =E= zero action weight, as at a turning point, while the restraint returns it to the contour. The session continues, and ~LineNebReport::action~ equals ~fixed_energy_action~ again when both endpoints are at or above =E=.
+- ~EndpointBelowEnergy::Strict~ stops immediately. It returns ~SaddleError::LineNebEndpointBelowEnergy~ with the endpoint name (=first= or =last=), the signed difference =V - E=, and the one based session step. It never substitutes a turning point weight.
 
 * Dynamics along the path
 ~FixedEnergyTrajectory~ splines a converged path in mass-weighted coordinates and integrates the motion on the inverted potential along it, the dynamics Ásgeirsson, Arnaldsson, and Jónsson use to find the temperature at which the path is an instanton. Both splines are a ~Spline~ with ~SplineEnds::Natural~, zero curvature at the end knots; string reparametrization keeps the not-a-knot spline. ~Spline::sample~ returns a ~SplineSample~ with the value and the first two derivatives. ~half~ runs from the left turning point until the path ends or the velocity turns back and returns one ~TrajectoryPoint~ per step, ~period~ is twice that time, and ~arc_at_time~ interpolates the arc between stored points. A spent step budget is ~SaddleError::Invalid~ with a message that starts =work budget exhausted=.
