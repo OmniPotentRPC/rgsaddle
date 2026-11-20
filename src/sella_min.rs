@@ -110,6 +110,10 @@ pub struct SellaMinSession {
     geom: SellaGeom,
     delta: f64,
     rho: f64,
+    /// Rebuilds of an automatic internals chart so far.
+    restarts: usize,
+    /// The most recent of them.
+    last_rebuild: Option<crate::RebuildReport>,
 }
 
 impl SellaMinSession {
@@ -148,6 +152,8 @@ impl SellaMinSession {
             geom,
             delta,
             rho: 1.0,
+            restarts: 0,
+            last_rebuild: None,
         })
     }
 
@@ -171,7 +177,67 @@ impl SellaMinSession {
             geom,
             delta,
             rho: 1.0,
+            restarts: 0,
+            last_rebuild: None,
         })
+    }
+
+    /// QN in automatic internals: bonds, angles, dihedrals and dummy
+    /// atoms found from the geometry (see [`crate::InternalTopology`]).
+    ///
+    /// The chart is rebuilt at the accepted geometry when it goes
+    /// singular or a bend nears linear; the Hessian is carried across and
+    /// the trust radius restarts.
+    pub fn on_auto_internal(
+        config: SellaMinConfig,
+        x: Array1<f64>,
+        masses: Array1<f64>,
+        elements: &[u8],
+        cell: Option<&crate::mic::Cell>,
+        topology: &crate::TopologyConfig,
+    ) -> Result<Self, SaddleError> {
+        let pes = InternalPes::auto(x, masses, elements, cell, topology)?;
+        let n_free = pes.n_int().max(1);
+        let geom = SellaGeom::Chart(pes.chart().clone());
+        let delta = config.delta * n_free as f64;
+        Ok(Self {
+            pes: SellaPes::Internal(pes),
+            config,
+            geom,
+            delta,
+            rho: 1.0,
+            restarts: 0,
+            last_rebuild: None,
+        })
+    }
+
+    /// How many times an automatic internals chart has been rebuilt.
+    pub fn topology_restarts(&self) -> usize {
+        self.restarts
+    }
+
+    /// The most recent rebuild of an automatic internals chart.
+    pub fn last_rebuild(&self) -> Option<&crate::RebuildReport> {
+        self.last_rebuild.as_ref()
+    }
+
+    /// Rebuild an automatic chart that has gone stale, before the
+    /// gradient is read in it, and start the trust radius over.
+    fn refresh_topology(&mut self) -> Result<(), SaddleError> {
+        let report = match &mut self.pes {
+            SellaPes::Internal(p) => p.rebuild_if_stale()?,
+            SellaPes::Cartesian(_) | SellaPes::Cell(_) | SellaPes::CellInternal(_) => None,
+        };
+        if let Some(report) = report {
+            if let SellaPes::Internal(p) = &self.pes {
+                self.geom = SellaGeom::Chart(p.chart().clone());
+                self.delta = self.config.delta * p.n_int().max(1) as f64;
+            }
+            self.rho = 1.0;
+            self.restarts += 1;
+            self.last_rebuild = Some(report);
+        }
+        Ok(())
     }
 
     /// QN in internals with Sella dummy 3-vectors on the Wilson frame.
@@ -192,6 +258,8 @@ impl SellaMinSession {
             geom,
             delta,
             rho: 1.0,
+            restarts: 0,
+            last_rebuild: None,
         })
     }
 
@@ -216,6 +284,8 @@ impl SellaMinSession {
             geom: SellaGeom::Kind(rgmin::ManifoldKind::Euclidean),
             delta,
             rho: 1.0,
+            restarts: 0,
+            last_rebuild: None,
         })
     }
 
@@ -238,6 +308,8 @@ impl SellaMinSession {
             geom: SellaGeom::Kind(rgmin::ManifoldKind::Euclidean),
             delta,
             rho: 1.0,
+            restarts: 0,
+            last_rebuild: None,
         })
     }
 
@@ -261,6 +333,8 @@ impl SellaMinSession {
             geom,
             delta,
             rho: 1.0,
+            restarts: 0,
+            last_rebuild: None,
         })
     }
 
@@ -285,6 +359,8 @@ impl SellaMinSession {
             geom,
             delta,
             rho: 1.0,
+            restarts: 0,
+            last_rebuild: None,
         })
     }
 
@@ -460,6 +536,7 @@ impl SellaMinSession {
         &mut self,
         surface: &S,
     ) -> Result<SellaMinReport, SaddleError> {
+        self.refresh_topology()?;
         let pes = match &mut self.pes {
             SellaPes::Internal(p) => p,
             SellaPes::Cartesian(_) | SellaPes::Cell(_) | SellaPes::CellInternal(_) => {
