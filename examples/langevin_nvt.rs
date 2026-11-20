@@ -984,6 +984,11 @@ fn nearest(points: &[[f64; 3]], target: [f64; 3], skip: Option<usize>) -> usize 
     best
 }
 
+/// STALE: these values came from an NPT integrator that left the kinetic
+/// pressure out of the barostat, and are too small by 0.003 to 0.007 A at
+/// 300 to 700 K. `tests/mishin_cu.rs` holds the corrected table. They are
+/// kept here because the NVT data under `validation/` was produced with
+/// them; rerun that data before changing them.
 fn measured_lattice(temperature: f64) -> f64 {
     match temperature as i32 {
         300 => 3.628311,
