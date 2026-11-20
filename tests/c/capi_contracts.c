@@ -81,13 +81,13 @@ static rgsaddle_status_t idx2_surface(void *user,
   return RGSADDLE_OK;
 }
 
-static int idx2_hessian(void *user, int64_t n_dof, const double *v,
-                        double *action) {
+static int idx2_hessian(void *user, int64_t n_dof, const double *position,
+                        const double *v, double *action) {
   int *fail_flag = (int *)user;
   if (fail_flag && *fail_flag) {
     return -1;
   }
-  if (n_dof != 3) {
+  if (n_dof != 3 || position == NULL || v == NULL) {
     return -2;
   }
   action[0] = -2.0 * v[0];

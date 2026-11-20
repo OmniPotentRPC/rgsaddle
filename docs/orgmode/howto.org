@@ -77,6 +77,9 @@ A host that climbs with its own optimizer keeps one session for the whole search
 * Index-k minimum mode
 =indexk_step= and =IndexKSession= reflect the force in the k lowest modes and take one translator step. =k = 1= is the dimer or Lanczos step, bit for bit. The block solver is LOBPCG or block Lanczos. See =howto/indexk=. From C, ABI minor 37, the names are =rgsaddle_indexk_*= and =rgsaddle_reflect_force=.
 
+* Solution landscape
+=LandscapeSession= pushes a certified saddle along each unstable eigenvector and follows index-(k-1) minimum-mode dynamics down to minima. The result is a =PathwayMap=. See =howto/landscape=. From C, the names are =rgsaddle_landscape_*=. Python is =Landscape=.
+
 * Index-1 Newton
 =Index1Session= takes a restricted-step partitioned rational function optimization (RFO) step on a dense Hessian and updates it with Powell or Bofill. Pass an initial Hessian, or leave it empty and the first step builds one by central differences. =Index1Config= is non-exhaustive. =with_sparse_pattern= builds that seed from a distance-2 colouring instead. The flag stays off unless set. The trust radius is the Euclidean bound on the Cartesian step. See @@rst::doc:`the sparse Hessian how-to <howto/sparse-hessian>`@@.
 

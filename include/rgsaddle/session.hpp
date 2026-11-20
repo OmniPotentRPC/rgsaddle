@@ -785,4 +785,94 @@ private:
     std::int64_t n_atoms_ = 0;
 };
 
+struct LandscapeReport {
+    std::int64_t n_nodes = 0;
+    std::int64_t n_edges = 0;
+    std::int32_t bound = 0;
+    std::int64_t evaluations = 0;
+};
+
+inline rgsaddle_landscape_config_t landscape_config() {
+    rgsaddle_landscape_config_t config{};
+    check(rgsaddle_landscape_config_default(&config));
+    return config;
+}
+
+class Landscape {
+public:
+    Landscape(rgsaddle_landscape_config_t const& config, std::int64_t n_atoms,
+              double const* position, double const* modes, std::int32_t k)
+        : n_atoms_(n_atoms) {
+        if (!abi_compatible()) {
+            throw std::runtime_error("rgsaddle ABI 1.15 or later is required");
+        }
+        handle_ = rgsaddle_landscape_create(&config, n_atoms, position, modes, k);
+        if (handle_ == nullptr) {
+            throw std::runtime_error("rgsaddle_landscape_create failed");
+        }
+    }
+
+    Landscape(Landscape const&) = delete;
+    Landscape& operator=(Landscape const&) = delete;
+
+    Landscape(Landscape&& other) noexcept : handle_(other.handle_), n_atoms_(other.n_atoms_) {
+        other.handle_ = nullptr;
+    }
+
+    Landscape& operator=(Landscape&& other) noexcept {
+        if (this != &other) {
+            reset_handle();
+            handle_ = other.handle_;
+            n_atoms_ = other.n_atoms_;
+            other.handle_ = nullptr;
+        }
+        return *this;
+    }
+
+    ~Landscape() { reset_handle(); }
+
+    LandscapeReport run(rgsaddle_surface_fn surface, rgsaddle_hessian_fn hessian, void* user) {
+        rgsaddle_landscape_report_t out{};
+        const auto status = rgsaddle_landscape_run(handle_, surface, hessian, user, &out);
+        if (status == RGSADDLE_LANDSCAPE_BOUND) {
+            throw std::runtime_error(std::string(status_name(status)) + " nodes=" +
+                                     std::to_string(out.n_nodes) + " evaluations=" +
+                                     std::to_string(out.evaluations) + " bound=" +
+                                     std::to_string(out.bound));
+        }
+        check(status);
+        return LandscapeReport{out.n_nodes, out.n_edges, out.bound, out.evaluations};
+    }
+
+    void node(std::int64_t index, double* position, double* energy, std::int32_t* saddle_index,
+              double* curvatures, std::int32_t curvature_capacity, std::int32_t* n_curvatures,
+              std::int64_t* evaluations) const {
+        check(rgsaddle_landscape_node(handle_, index, position, energy, saddle_index, curvatures,
+                                      curvature_capacity, n_curvatures, evaluations));
+    }
+
+    void modes(std::int64_t index, double* out, std::int32_t* n_columns) const {
+        check(rgsaddle_landscape_modes(handle_, index, out, n_columns));
+    }
+
+    void edge(std::int64_t index, std::int64_t* parent, std::int64_t* child, std::int32_t* direction,
+              std::int32_t* sign, std::int64_t* evaluations) const {
+        check(rgsaddle_landscape_edge(handle_, index, parent, child, direction, sign, evaluations));
+    }
+
+    [[nodiscard]] std::int64_t n_atoms() const noexcept { return n_atoms_; }
+    [[nodiscard]] RgsaddleLandscape* native() const noexcept { return handle_; }
+
+private:
+    void reset_handle() {
+        if (handle_ != nullptr) {
+            rgsaddle_landscape_free(handle_);
+            handle_ = nullptr;
+        }
+    }
+
+    RgsaddleLandscape* handle_ = nullptr;
+    std::int64_t n_atoms_ = 0;
+};
+
 }  // namespace rgsaddle

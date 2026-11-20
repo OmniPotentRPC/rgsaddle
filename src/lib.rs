@@ -15,6 +15,10 @@
 //! Image blocks are stored by image index after every rank finishes,
 //! so the band does not depend on which block finished first.
 //!
+//! [`landscape::LandscapeSession`] builds a pathway map by pushing a
+//! certified saddle along each unstable eigenvector and following
+//! index-(k-1) minimum-mode dynamics down to minima.
+//!
 //! [`nichols::Index1Session`] is the index-1 search on a dense
 //! Hessian: Baker's restricted-step partitioned RFO (maximize the
 //! lowest mode, minimize the rest, with the step inside a Euclidean
@@ -330,7 +334,13 @@ pub use prfo::{
 };
 
 pub mod irc;
+pub mod landscape;
 pub use irc::{IrcConfig, IrcDirection, IrcKind, IrcReport, IrcSession};
+pub use landscape::{
+    CriticalPoint, DEFAULT_DUPLICATE_DISTANCE, DEFAULT_LANDSCAPE_MAX_EVALUATIONS,
+    DEFAULT_LANDSCAPE_MAX_NODES, DEFAULT_LANDSCAPE_MAX_STEPS, DEFAULT_LANDSCAPE_PUSH,
+    LandscapeBoundKind, LandscapeConfig, LandscapeEdge, LandscapeSession, PathwayMap,
+};
 
 #[cfg(feature = "capi")]
 pub mod capi_kappa;

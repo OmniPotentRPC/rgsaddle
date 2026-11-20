@@ -3,8 +3,15 @@
 use rgsaddle::{capi::*, capi_kappa::*};
 use std::{ffi::c_void, mem::MaybeUninit, ptr};
 
-extern "C" fn hessian(_: *mut c_void, n: i64, v: *const f64, out: *mut f64) -> i32 {
+extern "C" fn hessian(
+    _: *mut c_void,
+    n: i64,
+    position: *const f64,
+    v: *const f64,
+    out: *mut f64,
+) -> i32 {
     assert_eq!(n, 3);
+    assert!(position.is_null());
     for (i, lambda) in [-4., 2., 6.].iter().enumerate() {
         unsafe {
             *out.add(i) = lambda * *v.add(i);
@@ -12,7 +19,7 @@ extern "C" fn hessian(_: *mut c_void, n: i64, v: *const f64, out: *mut f64) -> i
     }
     0
 }
-extern "C" fn fail(_: *mut c_void, _: i64, _: *const f64, _: *mut f64) -> i32 {
+extern "C" fn fail(_: *mut c_void, _: i64, _: *const f64, _: *const f64, _: *mut f64) -> i32 {
     17
 }
 

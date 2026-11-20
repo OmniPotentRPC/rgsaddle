@@ -129,6 +129,9 @@ pub const RGSADDLE_STALLED: i32 = -13;
 pub const RGSADDLE_NOT_EQUILIBRATED: i32 = -14;
 /// The constrained-ensemble tail has too few effective samples.
 pub const RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES: i32 = -15;
+/// A solution-landscape search met `max_nodes` or `max_evaluations`.
+/// The report carries the counts; the pathway is not returned.
+pub const RGSADDLE_LANDSCAPE_BOUND: i32 = -16;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -483,6 +486,7 @@ pub(crate) fn status_of(err: &SaddleError) -> i32 {
         SaddleError::Stalled(_) => RGSADDLE_STALLED,
         SaddleError::NotEquilibrated { .. } => RGSADDLE_NOT_EQUILIBRATED,
         SaddleError::InsufficientEffectiveSamples { .. } => RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES,
+        SaddleError::LandscapeBound { .. } => RGSADDLE_LANDSCAPE_BOUND,
     }
 }
 
@@ -526,6 +530,7 @@ pub extern "C" fn rgsaddle_status_name(status: i32) -> *const c_char {
         RGSADDLE_STALLED => "STALLED\0",
         RGSADDLE_NOT_EQUILIBRATED => "NOT_EQUILIBRATED\0",
         RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES => "INSUFFICIENT_EFFECTIVE_SAMPLES\0",
+        RGSADDLE_LANDSCAPE_BOUND => "LANDSCAPE_BOUND\0",
         _ => "UNKNOWN\0",
     };
     s.as_ptr() as *const c_char
@@ -2203,6 +2208,8 @@ pub unsafe extern "C" fn rgsaddle_idpp_path(
 
 mod indexk;
 pub use indexk::*;
+mod landscape;
+pub use landscape::*;
 mod sessions;
 pub use sessions::*;
 mod quickmin;

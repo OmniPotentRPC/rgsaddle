@@ -49,7 +49,8 @@ pub struct RgsaddleKappaReport {
 }
 
 /// The RgsaddleHessianFn.
-pub type RgsaddleHessianFn = extern "C" fn(*mut c_void, i64, *const f64, *mut f64) -> i32;
+pub type RgsaddleHessianFn =
+    extern "C" fn(*mut c_void, i64, *const f64, *const f64, *mut f64) -> i32;
 
 /// # Safety
 /// `config` points to one writable configuration.
@@ -82,6 +83,7 @@ pub unsafe extern "C" fn rgsaddle_kappa_config_default(config: *mut RgsaddleKapp
 /// are `n_excluded` consecutive rows of `n_dof` doubles, or null for zero rows.
 /// Input and output buffers do not overlap. The callback writes `n_dof`
 /// Hessian-action values, returns zero on success, and must not unwind.
+/// This entry has no geometry, so the position pointer is null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rgsaddle_kappa_dimer_force(
     config: *const RgsaddleKappaConfig,
@@ -149,7 +151,7 @@ pub unsafe extern "C" fn rgsaddle_kappa_dimer_force(
         excluded,
         |v| {
             let mut out = Array1::zeros(n);
-            let status = hessian(user, n_dof, v.as_ptr(), out.as_mut_ptr());
+            let status = hessian(user, n_dof, std::ptr::null(), v.as_ptr(), out.as_mut_ptr());
             if status != 0 {
                 return Err(SaddleError::Surface(format!(
                     "Hessian callback status {status}"
@@ -189,6 +191,7 @@ pub unsafe extern "C" fn rgsaddle_kappa_dimer_force(
         Err(SaddleError::InsufficientEffectiveSamples { .. }) => {
             crate::capi::RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES
         }
+        Err(SaddleError::LandscapeBound { .. }) => crate::capi::RGSADDLE_LANDSCAPE_BOUND,
         Err(SaddleError::Solver(message)) => {
             eprintln!("kappa eigensolver: {message}");
             RGSADDLE_SOLVER
