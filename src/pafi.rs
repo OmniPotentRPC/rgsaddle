@@ -266,17 +266,19 @@ pub struct PafiConfig {
     /// where it is.
     pub quench: RelaxConfig,
     /// Largest atom force left in the plane when [`pafi_frames`] relaxes a
-    /// frame in its plane before sampling.
+    /// frame in its plane before sampling. Default 1e-4.
     pub relax_tol: f64,
     /// Largest atom force left by the in-plane relaxation of the windowed
     /// jump test. The test runs when [`Self::window`] is at least 1 and
     /// [`Self::max_jump`] is set; a window of 0 leaves the quench basin
     /// test of [`Self::max_jump`] in charge of [`average_hyperplane`].
+    /// Default 1e-2.
     pub jump_tol: f64,
     /// Recorded samples between two tests of the windowed jump test.
     /// `0` leaves that test off and leaves the quench basin test in charge.
     /// A plane that keeps no window in its first pass halves this, up to
-    /// four times, and thermalizes in windows of that length too.
+    /// four times, and thermalizes in windows of that length too. Default
+    /// 0.
     pub window: usize,
 }
 
@@ -320,7 +322,13 @@ impl Default for PafiConfig {
     /// configurations, one pass, and a largest jump of 0.4 (Å), the
     /// `MaxJumpThresh` of Swinburne's reference code, quenched along the
     /// steepest-descent flow ([`Method::Ode12r`]) under the other
-    /// [`RelaxConfig`] defaults.
+    /// [`RelaxConfig`] defaults. Frames are relaxed in their plane to a
+    /// force of 1e-4 ([`PafiConfig::relax_tol`]), the quench of the jump
+    /// test to 1e-2 ([`PafiConfig::jump_tol`]), and the windowed jump test
+    /// is off ([`PafiConfig::window`] of 0). The relaxation sets the energy
+    /// the profile is measured from, so its error is second order in the
+    /// force; the jump test only has to place a quench on one side of
+    /// `max_jump`, which a force of 1e-2 does to a small fraction of it.
     fn default() -> Self {
         Self {
             thermal: 0.02585,
@@ -721,6 +729,7 @@ pub struct FramePlanes {
 /// gradient is the mean of the trajectories and `error` the spread of
 /// their means; `equilibration` is that of the first trajectory.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct HyperplaneAverage {
     /// The constrained plane, with its normal toward increasing path arc.
     pub plane: Hyperplane,
