@@ -66,7 +66,15 @@ def run_pafi(repo_root: Path, config: dict[str, float]) -> dict[str, float]:
             [str(binary), str(config_path), str(result_path)],
             check=True,
         )
-        return json.loads(result_path.read_text())
+        value: object = json.loads(result_path.read_text())
+        if not isinstance(value, dict) or not all(
+            isinstance(key, str)
+            and isinstance(item, (int, float))
+            and not isinstance(item, bool)
+            for key, item in value.items()
+        ):
+            raise ValueError(f"{result_path} is not a string-to-number object")
+        return {key: float(item) for key, item in value.items()}
 
 
 def main() -> None:
