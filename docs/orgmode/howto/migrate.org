@@ -4,22 +4,24 @@
 The Rust sessions are the source of the mechanics. The Python classes in ~rgsaddle.ase~ follow the call shape of ASE's nudged elastic band, minimum-mode atoms, and Sella's ~run(fmax, steps)~. Where the numbers differ, the difference is the one the tests lock in.
 
 * From ASE's NEB
-~rgsaddle.ase.NEB(images, k=0.1, climb=False)~ takes the same list of ~Atoms~ with calculators. ~interpolate()~ places the interior images on the straight line between the ends. ~get_positions~ and ~get_forces~ are the interior images only, and ~ase.optimize.FIRE~ drives them through ~__ase_optimizable__~. ~get_potential_energy~ is the highest image energy.
+~rgsaddle.ase.NEB(images, k=0.1, climb=False)~ takes the same list of ~Atoms~ with calculators. ~k~ is one spring or one constant per segment. ~interpolate()~ places the interior images on the straight line between the ends, and ~interpolate(method='idpp')~ then runs ~idpp_path~. ~mic~ uses the minimum image for the straight line. ~get_positions~ and ~get_forces~ are the interior images only, and ~ase.optimize~ (~BFGS~, ~FIRE~, ~MDMin~) drives them through ~__ase_optimizable__~. ~get_potential_energy~ is the highest interior energy.
 
 The spring constant defaults to 0.1, ASE's value. A ~BandSession~ still defaults to 5, eOn's value. Pass the number you mean.
 
-~method='improvedtangent'~ and ~method='aseneb'~ build the same force. The tangent is a unit vector, so ASE's extra division by the tangent norm in the ~aseneb~ climbing step is 1. ~eb~ keeps the full spring. ~dneb~ adds the doubly nudged correction. ~spline~ and ~string~ are not this class; the exponential metric is ~BandConfig.exp_precon~ on the Rust session.
+~method='improvedtangent'~ and ~method='aseneb'~ build the same force. The tangent is a unit vector, so ASE's extra division by the tangent norm in the ~aseneb~ climbing step is 1. ~eb~ keeps the full spring. ~dneb~ adds the doubly nudged correction. ~spline~ and ~string~ raise ~NotImplementedError~ naming the method. A ~precon~ does too. The exponential metric stays ~BandConfig.exp_precon~ on the Rust session.
 
 ~climb=True~ climbs on the call, with no arming delay. It does not climb when a higher endpoint slopes down into the band. ASE climbs the highest image anyway. That image then feels the reflected force and walks up a slope that has no saddle between it and the endpoint. ~tests/python/test_ase_dropin.py~ and ~tests/api_input.rs~ lock the refusal. A ~BandSession~ still waits until the band force drops before it arms the climb; the one-shot projection does not, because the caller already asked for it.
 
-~remove_rotation_and_translation=True~ removes the mean Cartesian force. It does not rotate an image onto its neighbour. A Kabsch rotation would change the geometry the calculator evaluates, and the unit tangent already fixes the path direction.
+~remove_rotation_and_translation=True~ on a free, non-periodic band moves each image onto the previous one with ASE's rigid fit before the force is built, and ~interpolate~ fits the product onto the reactant. A fixed atom is not rotated, and a periodic image is not rotated: the mean Cartesian force is removed instead, and a fixed atom keeps that mean. ~parallel=True~ on one rank evaluates on the calling thread. ~world.size > 1~ raises ~NotImplementedError~.
 
 ~FixAtoms~ on the images is read into the band's fixed-atom mask, as ~rgsaddle_band_set_fixed_atoms~ takes it from C. The fixed atoms get zero force rows, keep the mean force even with ~remove_rotation_and_translation=True~, and stay where the first image has them through ~interpolate()~. Every image must fix the same atoms. Other constraints act through ~get_forces()~ as before.
 
-Image freezing (ASE's dynamic NEB) is not implemented.
+~dynamic_relaxation~, ~fmax~, and ~scale_fmax~ raise ~NotImplementedError~. Dynamic NEB is not implemented. A variable cell in a periodic direction raises ~NotImplementedError~ as well.
 
 * From ASE's dimer and from Sella
 ~rgsaddle.ase.MinModeAtoms(atoms, mode=...)~ estimates a dimer or Lanczos mode and returns the effective force. Above the well the perpendicular force is dropped. Below it the force along the mode is reflected. An ASE optimizer can drive that object.
+
+~MinModeAtoms(atoms, control)~ with a ~DimerControl~ is ASE's dimer call. ~displace(method='vector')~ applies a Cartesian displacement, ~get_eigenmode~, ~get_curvature~, and ~get_barrier_energy~ read the estimate, and ~MinModeTranslate~ takes the trial step and the conjugate-gradient direction from ASE while the mode comes from this dimer. ~order~ other than 1, an ~eigenmode_method~ other than ~dimer~, a gauss displacement, and a communicator with ~size > 1~ raise ~NotImplementedError~ naming the option. The mode's sign follows the guess. Convergence wants the force below ~fmax~ and a negative curvature.
 
 ~rgsaddle.ase.Sella(atoms, order=1)~ is the saddle optimizer. ~run(fmax, steps)~ is ASE's loop. One step is the partitioned rational-function trust step, not a dimer translation. Masses come from ~atoms.get_masses~.
 
@@ -29,3 +31,32 @@ The band tangents, springs, projections, and the climbing-image arm follow eOn's
 eOn's client reads a config file and a potential plugin. Here the host passes positions and a surface. There is no system name, species table, or potential key in the session. A solid-state band takes one cell per image and the Cauchy stress through ~BandSurface::eval_cells~.
 
 Live Onsager-Machlup displacements are the atomic force over ~2k~. A solid-state band has a cell block in the same vector, so that spring is refused at construction rather than applied as zeros.
+
+* ASE 3.29 tests
+~tests/python/ase_upstream~ vendors ASE 3.29.0's NEB and dimer tests (LGPL-2.1-or-later) and substitutes ~rgsaddle.ase.NEB~, ~MinModeAtoms~, ~DimerControl~, ~MinModeTranslate~, ~interpolate~, and ~idpp_interpolate~. The Python CI job sets ~RGSADDLE_REQUIRE_ASE=1~, so a missing ASE install fails collection. ~ase/test/neb/test_dynamic_neb.py~ is not vendored: it drives DyNEB. ~ase/optimize/test/neb.py~ is not vendored: it is a script with no pytest entry and no assertion.
+
+| Result | Test | Why |
+|--------+------+-----|
+| passing | ~test_neb~ | Al(100)+Au, ~FixAtoms~, BFGS, constrained and unconstrained forces |
+| passing | ~test_idpp~ | ethane methyl permutation through ~idpp_path~ |
+| passing | ~test_interpolate_images~ | linear placement, ~mic~, constraints, cell and scaled coordinates |
+| passing | ~test_COCu111~, ~test_COCu111_2~ | IDPP start, BFGS, shared calculator, trajectory |
+| passing | ~test_neb_methods~ ~aseneb~ and ~improvedtangent~, precon ~None~ | Morse vacancy barrier |
+| passing | ~test_deprecations~, ~test_neb_default~, ~test_raising_parallel_errors~, ~test_no_shared_calc~, ~test_init_checks~, ~test_freeze_method~ | constructor, shared calculator, image checks, frozen results |
+| passing | ~test_dimer_method~ | Pt hop with ~DimerControl~, ~displace~, and ~MinModeTranslate~ |
+| skipped | ~test_autoneb.py~ | drives ASE AutoNEB image insertion, not these drivers |
+| skipped | ~test_dimer.py~ | ~FixBondLength~ on a two-atom cluster, not the minimum-mode method |
+| skipped | ~test_get_neb_method~ | asserts ASE's private NEB method classes, not the public force |
+| skipped | ~test_neb_optimizers~ | drives ASE ~NEBOptimizer~ on a spline band with an Exp preconditioner |
+| skipped | ~test_precon_initialisation~, ~test_single_precon_initialisation~, ~test_list_precon_initialisation~, ~test_precon_assembly~ | asserts ASE Exp preconditioner assembly, not the band force |
+| skipped | ~test_spline_fit~ | asserts ASE's cubic-spline fit object, not the band force |
+| skipped | ~test_integrate_forces~ | integrates forces on ASE's spline fit, not the band force |
+| skipped | ~test_neb_methods~ ~spline~ and ~string~, and any precon | spline, string, and preconditioned NEB have no rgsaddle force |
+| skipped | ~test_neb_tr~ | FIRE step-count ratio follows ASE's partial BFGS IDPP path; the band force matches on one geometry and the barriers agree, but the aligned run is not faster by the factor 0.75 |
+| not supported | DyNEB (~dynamic_relaxation~, ~fmax~, ~scale_fmax~) | dynamic NEB is not implemented |
+| not supported | ~method~ ~spline~ and ~string~, ~precon~ | no force equivalent; the name is in the ~NotImplementedError~ |
+| not supported | ~parallel~ with ~world.size > 1~ | no MPI image distribution |
+| not supported | ~idpp~ ~mic~ on a partially periodic cell | ~idpp_path~ wraps every axis |
+| not supported | ~idpp_interpolate~ ~optimizer~ other than ~MDMin~ or ~BFGS~, and a custom ~traj~ or ~log~ | the path is ~idpp_path~ and it writes no trajectory |
+| not supported | gauss displacement, ~order~ other than 1, ~eigenmode_method~ other than ~dimer~ | the estimator is the dimer or Lanczos mode of order 1 |
+| not supported | variable cell in a periodic direction | the band cell is one lattice |

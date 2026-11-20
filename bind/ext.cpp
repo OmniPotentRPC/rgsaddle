@@ -1162,7 +1162,8 @@ int32_t projection_code(const std::string &name) {
 
 nb::tuple project_band(Matrix positions, Vector energies, Matrix gradients, double k, bool climb,
                        const std::string &projection, const std::string &tangent,
-                       bool remove_translation, double force_tol, nb::handle fixed) {
+                       bool remove_translation, double force_tol, nb::handle fixed, nb::handle spring_ks,
+                       nb::handle cell) {
   if (positions.shape(0) < 3 || positions.shape(1) <= 0 || positions.shape(1) % 3 != 0) {
     throw nb::value_error("positions must be (images >= 3, 3N)");
   }
@@ -1196,6 +1197,33 @@ nb::tuple project_band(Matrix positions, Vector energies, Matrix gradients, doub
   config.ci_trigger_factor = climb ? 1.0 : 0.0;
   config.force_tol = force_tol;
   config.max_move = 0.2;
+  std::vector<double> ks;
+  if (!spring_ks.is_none()) {
+    auto view = nb::cast<Vector>(spring_ks);
+    if (static_cast<std::int64_t>(view.shape(0)) != rows - 1) {
+      throw nb::value_error("spring_ks must hold one constant per spring");
+    }
+    ks.assign(view.data(), view.data() + view.shape(0));
+    for (double value : ks) {
+      if (!(value == value)) {
+        throw nb::value_error("spring constant must be finite");
+      }
+    }
+    config.spring = 1;
+    config.spring_ks = ks.data();
+    if (!ks.empty()) {
+      config.spring_k = ks.front();
+    }
+  }
+  std::vector<double> box;
+  if (!cell.is_none()) {
+    auto view = nb::cast<Matrix>(cell);
+    if (view.shape(0) != 3 || view.shape(1) != 3) {
+      throw nb::value_error("cell must be 3x3");
+    }
+    box.assign(view.data(), view.data() + 9);
+    config.cell = box.data();
+  }
   std::vector<std::uint8_t> mask;
   if (!fixed.is_none()) {
     auto view = nb::cast<nb::ndarray<const std::uint8_t, nb::ndim<1>, nb::c_contig, nb::device::cpu>>(fixed);
@@ -1213,6 +1241,43 @@ nb::tuple project_band(Matrix positions, Vector energies, Matrix gradients, doub
     status_error(status);
   }
   return nb::make_tuple(copy_vector(forces), ci);
+}
+
+nb::ndarray<nb::numpy, double> idpp_path_py(Vector reactant, Vector product, std::int64_t n_images,
+                                            nb::handle cell, std::int64_t max_iterations, double grad_tol,
+                                            double max_move) {
+  if (reactant.shape(0) <= 0 || reactant.shape(0) % 3 != 0 || reactant.shape(0) != product.shape(0)) {
+    throw nb::value_error("IDPP endpoints must be matching 3N vectors");
+  }
+  if (n_images < 3) {
+    throw nb::value_error("IDPP path needs at least 3 images");
+  }
+  if (max_iterations < 0 || !(grad_tol == grad_tol) || grad_tol < 0.0 || !(max_move > 0.0)) {
+    throw nb::value_error("IDPP stop must be a non-negative tolerance and a positive step");
+  }
+  const auto n_atoms = static_cast<std::int64_t>(reactant.shape(0) / 3);
+  std::vector<double> box;
+  if (!cell.is_none()) {
+    auto view = nb::cast<Matrix>(cell);
+    if (view.shape(0) != 3 || view.shape(1) != 3) {
+      throw nb::value_error("cell must be 3x3");
+    }
+    box.assign(view.data(), view.data() + 9);
+  }
+  const std::size_t rows = static_cast<std::size_t>(n_images);
+  const std::size_t dof = static_cast<std::size_t>(reactant.shape(0));
+  std::vector<double> out(rows * dof, 0.0);
+  const auto status = rgsaddle_idpp_path(n_images, n_atoms, reactant.data(), product.data(),
+                                          box.empty() ? nullptr : box.data(), max_iterations, grad_tol, max_move,
+                                          out.data());
+  if (status != RGSADDLE_OK) {
+    status_error(status);
+  }
+  auto *raw = new double[rows * dof];
+  std::memcpy(raw, out.data(), rows * dof * sizeof(double));
+  nb::capsule owner(raw, [](void *ptr) noexcept { delete[] static_cast<double *>(ptr); });
+  const std::size_t shape[2] = {rows, dof};
+  return nb::ndarray<nb::numpy, double>(raw, 2, shape, owner);
 }
 
 nb::ndarray<nb::numpy, double> reparametrize_py(Matrix positions, const std::string &scheme,
@@ -1900,20 +1965,38 @@ NB_MODULE(_core, m) {
       nb::arg("gradients").noconvert(), nb::arg("k") = 0.1, nb::arg("climb") = false,
       nb::arg("projection") = "neb", nb::arg("tangent") = "improved",
       nb::arg("remove_translation") = false, nb::arg("force_tol") = 1e-3, nb::arg("fixed") = nb::none(),
+      nb::arg("spring_ks") = nb::none(), nb::arg("cell") = nb::none(),
       nb::sig("def project_band(positions: numpy.typing.NDArray[numpy.float64], energies: "
               "numpy.typing.NDArray[numpy.float64], gradients: numpy.typing.NDArray[numpy.float64], "
               "k: float = 0.1, climb: bool = False, projection: str = 'neb', tangent: str = 'improved', "
               "remove_translation: bool = False, force_tol: float = 0.001, "
-              "fixed: numpy.typing.NDArray[numpy.uint8] | None = None) -> "
+              "fixed: numpy.typing.NDArray[numpy.uint8] | None = None, "
+              "spring_ks: numpy.typing.NDArray[numpy.float64] | None = None, "
+              "cell: numpy.typing.NDArray[numpy.float64] | None = None) -> "
               "tuple[numpy.typing.NDArray[numpy.float64], int]"),
       "Project an evaluated band. Returns (forces, ci_index). forces is flat, "
       "one row per image including zero endpoints, in the ASE force convention. "
       "climb selects the interior image by the endpoint-slope rule on this call; "
       "a higher endpoint that slopes into the band does not climb. Units are the "
-      "caller's. k is energy per length squared. fixed is one uint8 per atom, 1 "
-      "for a fixed atom (ABI minor 39): its force rows are zero, tangents and "
+      "caller's. k is energy per length squared. spring_ks, when given, is one "
+      "constant per spring (length images - 1) and replaces k. cell is the 3x3 "
+      "row-major lattice; a zero row is not wrapped. fixed is one uint8 per atom, "
+      "1 for a fixed atom (ABI minor 39): its force rows are zero, tangents and "
       "springs use the free atoms, and the mean force stays. The endpoints must "
       "agree on every fixed atom.");
+
+  m.def(
+      "idpp_path", &idpp_path_py, nb::arg("reactant").noconvert(), nb::arg("product").noconvert(),
+      nb::arg("n_images"), nb::arg("cell") = nb::none(), nb::arg("max_iterations") = 5000,
+      nb::arg("grad_tol") = 1e-3, nb::arg("max_move") = 0.1,
+      nb::sig("def idpp_path(reactant: numpy.typing.NDArray[numpy.float64], product: "
+              "numpy.typing.NDArray[numpy.float64], n_images: int, "
+              "cell: numpy.typing.NDArray[numpy.float64] | None = None, max_iterations: int = 5000, "
+              "grad_tol: float = 0.001, max_move: float = 0.1) -> numpy.typing.NDArray[numpy.float64]"),
+      "Image-dependent pair-potential path, endpoints included, shape (n_images, 3N). "
+      "Interior images are relaxed toward linearly interpolated minimum-image pair "
+      "distances by L-BFGS. cell is a 3x3 row-major lattice, or None in free space. "
+      "No surface is evaluated.");
 
   m.def(
       "reparametrize", &reparametrize_py, nb::arg("positions").noconvert(), nb::arg("scheme") = "linear",
