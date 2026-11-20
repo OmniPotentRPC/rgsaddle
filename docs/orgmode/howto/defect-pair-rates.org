@@ -119,7 +119,7 @@ The classes left on the rate model should not inherit its bias. Each computed cl
 
 #+begin_src rust
 let fit = rgsaddle::calibrate_surrogate(&features, &residuals, &errors)?;
-let (shift, spread) = (fit.shift(&[1.0]), fit.spread(&[1.0]));
+let (shift, spread) = (fit.shift(&[1.0])?, fit.spread(&[1.0])?);
 let cover = rgsaddle::sensitivity_cover(&on_model, spread, tolerance);
 #+end_src
 
