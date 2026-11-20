@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 45u
+#define RGSADDLE_ABI_MINOR 46u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -1928,6 +1928,33 @@ rgsaddle_status_t rgsaddle_band_free_end_residual(const RgsaddleBand *band,
  * free-end band, or 0 for NULL, ABI minor 45.
  */
 int64_t rgsaddle_band_free_end_cuts(const RgsaddleBand *band);
+
+/** Refine stepper of rgsaddle_band_set_refine, ABI minor 46. */
+typedef enum {
+  RGSADDLE_REFINE_NONE = 0,
+  RGSADDLE_REFINE_LBFGS = 1
+} rgsaddle_refine_method_t;
+
+/**
+ * Per-step refine stepper, ABI minor 46. `method` is an
+ * rgsaddle_refine_method_t. RGSADDLE_REFINE_NONE clears the stepper and
+ * does not read `threshold`. RGSADDLE_REFINE_LBFGS steps with L-BFGS
+ * when the convergence force is at or under `threshold`, and with the
+ * band method otherwise. `memory` is the number of L-BFGS pairs; 0
+ * selects 20. A `threshold` of 0 selects the default 0.5, in the
+ * host's force units. A negative or NaN threshold, and an unknown
+ * method, are refused. A string, trust-region, solid-state, quick-min,
+ * or free-end band keeps its own stepper and ignores this one.
+ */
+rgsaddle_status_t rgsaddle_band_set_refine(RgsaddleBand *band, int32_t method,
+                                           double threshold, int64_t memory);
+
+/**
+ * 1 when the last first-order step used the refine stepper, else 0.
+ * 0 for NULL, before the first such step, and when no refine stepper
+ * is installed. ABI minor 46.
+ */
+int32_t rgsaddle_band_is_refining(const RgsaddleBand *band);
 
 #ifdef __cplusplus
 }

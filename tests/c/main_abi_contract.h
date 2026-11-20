@@ -5,7 +5,7 @@
 #include <stddef.h>
 
 _Static_assert(RGSADDLE_ABI_MAJOR == 1u, "main ABI major");
-_Static_assert(RGSADDLE_ABI_MINOR == 45u, "ABI minor");
+_Static_assert(RGSADDLE_ABI_MINOR == 46u, "ABI minor");
 _Static_assert(RGSADDLE_BAND_NO_MIN_MODE == (1ull << 3), "band flag bit 3");
 _Static_assert(RGSADDLE_BAND_SPLINE_REPARAM == (1ull << 4), "band flag bit 4");
 _Static_assert(RGSADDLE_BAND_STRING == (1ull << 5), "band flag bit 5");
@@ -552,5 +552,12 @@ _Static_assert(_Generic(&rgsaddle_band_free_end_residual, abi45_signature_rgsadd
 typedef int64_t (*abi45_signature_rgsaddle_band_free_end_cuts)(
     const RgsaddleBand *band);
 _Static_assert(_Generic(&rgsaddle_band_free_end_cuts, abi45_signature_rgsaddle_band_free_end_cuts: 1, default: 0), "rgsaddle_band_free_end_cuts signature");
+
+typedef rgsaddle_status_t (*abi46_signature_rgsaddle_band_set_refine)(
+    RgsaddleBand *band, int32_t method, double threshold, int64_t memory);
+_Static_assert(_Generic(&rgsaddle_band_set_refine, abi46_signature_rgsaddle_band_set_refine: 1, default: 0), "rgsaddle_band_set_refine signature");
+
+typedef int32_t (*abi46_signature_rgsaddle_band_is_refining)(const RgsaddleBand *band);
+_Static_assert(_Generic(&rgsaddle_band_is_refining, abi46_signature_rgsaddle_band_is_refining: 1, default: 0), "rgsaddle_band_is_refining signature");
 
 #endif
