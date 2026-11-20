@@ -56,79 +56,20 @@ impl Default for NptConfig {
     }
 }
 
-impl NptConfig {
-    /// Set the conventional-cell repeat count.
-    pub fn with_repeats(mut self, repeats: usize) -> Self {
-        self.repeats = repeats;
-        self
-    }
-
-    /// Set the initial integration length.
-    pub fn with_steps(mut self, steps: usize) -> Self {
-        self.steps = steps;
-        self
-    }
-
-    /// Set the maximum integration length.
-    pub fn with_maximum_steps(mut self, steps: usize) -> Self {
-        self.maximum_steps = steps;
-        self
-    }
-
-    /// Set the extension between pressure checks.
-    pub fn with_extension_steps(mut self, steps: usize) -> Self {
-        self.extension_steps = steps;
-        self
-    }
-
-    /// Set the equilibration discard.
-    pub fn with_equilibration_steps(mut self, steps: usize) -> Self {
-        self.equilibration_steps = steps;
-        self
-    }
-
-    /// Set the statistics block length.
-    pub fn with_block_steps(mut self, steps: usize) -> Self {
-        self.block_steps = steps;
-        self
-    }
-
-    /// Set the velocity-Verlet time step.
-    pub fn with_timestep_s(mut self, timestep_s: f64) -> Self {
-        self.timestep_s = timestep_s;
-        self
-    }
-
-    /// Set the Langevin friction.
-    pub fn with_langevin_gamma_per_s(mut self, gamma_per_s: f64) -> Self {
-        self.langevin_gamma_per_s = gamma_per_s;
-        self
-    }
-
-    /// Set the Berendsen pressure-coupling time.
-    pub fn with_berendsen_tau_s(mut self, tau_s: f64) -> Self {
-        self.berendsen_tau_s = tau_s;
-        self
-    }
-
-    /// Set the isotropic compressibility.
-    pub fn with_compressibility_per_ev_a3(mut self, compressibility: f64) -> Self {
-        self.compressibility_per_ev_a3 = compressibility;
-        self
-    }
-
-    /// Set the target thermodynamic pressure.
-    pub fn with_target_pressure_ev_a3(mut self, pressure: f64) -> Self {
-        self.target_pressure_ev_a3 = pressure;
-        self
-    }
-
-    /// Set the thermostat seed.
-    pub fn with_seed(mut self, seed: u64) -> Self {
-        self.seed = seed;
-        self
-    }
-}
+with_setters!(NptConfig {
+    with_repeats => repeats: val usize,
+    with_steps => steps: val usize,
+    with_maximum_steps => maximum_steps: val usize,
+    with_extension_steps => extension_steps: val usize,
+    with_equilibration_steps => equilibration_steps: val usize,
+    with_block_steps => block_steps: val usize,
+    with_timestep_s => timestep_s: val f64,
+    with_langevin_gamma_per_s => langevin_gamma_per_s: val f64,
+    with_berendsen_tau_s => berendsen_tau_s: val f64,
+    with_compressibility_per_ev_a3 => compressibility_per_ev_a3: val f64,
+    with_target_pressure_ev_a3 => target_pressure_ev_a3: val f64,
+    with_seed => seed: val u64,
+});
 
 /// Block-averaged result of an NPT lattice run.
 #[derive(Clone, Copy, Debug)]
@@ -150,7 +91,8 @@ pub struct NptReport {
     pub pressure_standard_error: f64,
     /// Effective number of production-step pressure samples after correlation.
     pub pressure_effective_samples: f64,
-    /// Whether pressure blocking found a standard-error plateau.
+    /// Whether pressure blocking found a standard-error plateau or the
+    /// sampled pressure had exactly zero variance.
     pub pressure_statistics_resolved: bool,
     /// Whether `|mean pressure - target| <= 2 SE`, including exact zero,
     /// with resolved statistics and at least 16 effective samples.
@@ -269,7 +211,8 @@ fn block_statistics(values: &[f64]) -> BlockEstimate {
     let resolved = plateau.is_some();
     let standard_error = plateau
         .map(|window| window.iter().map(|level| level.0).fold(0.0, f64::max))
-        .unwrap_or_else(|| levels.iter().map(|level| level.0).fold(0.0, f64::max));
+        .or_else(|| levels.iter().map(|level| level.0).reduce(f64::max))
+        .unwrap_or_else(|| (raw_variance / values.len() as f64).sqrt());
     let effective_samples = if standard_error > 0.0 {
         (raw_variance / standard_error.powi(2)).min(values.len() as f64)
     } else {
@@ -482,5 +425,14 @@ mod tests {
             "{report:?}"
         );
         assert!(!report.pressure_converged, "{report:?}");
+    }
+
+    #[test]
+    fn short_nonconstant_series_keeps_a_nonzero_unresolved_error() {
+        let series: Vec<f64> = (0..12).map(|value| value as f64).collect();
+        let estimate = block_statistics(&series);
+
+        assert!(estimate.standard_error > 0.0, "{estimate:?}");
+        assert!(!estimate.resolved, "{estimate:?}");
     }
 }
