@@ -63,7 +63,7 @@ use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 
 use crate::band::{BandConfig, BandSession, BandStatus, BandSurface, Cell, CiConfig};
 use crate::error::SaddleError;
-use crate::idpp::IdppConfig;
+use crate::idpp::{IdppConfig, PathInitializer, TricsStartConfig, initialize_path};
 use crate::spring::SpringKind;
 
 /// Where one new image is placed.
@@ -165,6 +165,57 @@ impl ImageInterpolation for IdppInterpolation {
     }
 }
 
+/// TRICS midpoint constructed from a seven-image segment.
+struct TricsInterpolation {
+    config: TricsStartConfig,
+}
+
+const TRICS_INSERTION_IMAGES: usize = 7;
+
+impl TricsInterpolation {
+    fn new(cell: Option<Cell>, config: TricsStartConfig) -> Result<Self, SaddleError> {
+        if cell.is_some() {
+            return Err(SaddleError::Invalid(
+                "AutoNEB TRICS interpolation needs unwrapped free space coordinates".into(),
+            ));
+        }
+        if let crate::idpp::TricsSeed::Idpp(idpp) = &config.seed {
+            crate::idpp::check_config(idpp)?;
+        }
+        Ok(Self { config })
+    }
+}
+
+impl ImageInterpolation for TricsInterpolation {
+    fn insert(
+        &self,
+        chain: ArrayView2<f64>,
+        energies: &[Option<f64>],
+        after: usize,
+    ) -> Result<Array1<f64>, SaddleError> {
+        let _ = energies;
+        if after + 1 >= chain.nrows() {
+            return Err(SaddleError::Shape(format!(
+                "TRICS interpolation needs a segment after row {after}"
+            )));
+        }
+        let path = initialize_path(
+            chain.row(after),
+            chain.row(after + 1),
+            TRICS_INSERTION_IMAGES,
+            None,
+            &PathInitializer::Trics(self.config.clone()),
+        )?;
+        let middle = path.row(TRICS_INSERTION_IMAGES / 2);
+        if middle == chain.row(after) || middle == chain.row(after + 1) {
+            return Err(SaddleError::Solver(
+                "TRICS interpolation produced a degenerate midpoint".into(),
+            ));
+        }
+        Ok(middle.to_owned())
+    }
+}
+
 /// Placement of each new image, the initial fill included.
 #[derive(Clone, Debug, Default)]
 pub enum AutoNebInterpolant {
@@ -175,6 +226,8 @@ pub enum AutoNebInterpolant {
     /// with target pair distances the mean of the segment ends. ASE's
     /// AutoNEB default. A cell must be non-singular in every row.
     Idpp(IdppConfig),
+    /// TRICS interpolation of the cut segment.
+    Trics(TricsStartConfig),
 }
 
 /// Index of the segment where the next image goes.
@@ -906,6 +959,10 @@ impl AutoNeb {
             }
             AutoNebInterpolant::Idpp(idpp) => {
                 let interpolation = IdppInterpolation::new(config.cell, idpp)?;
+                Self::with_interpolation(config, initial, interpolation)
+            }
+            AutoNebInterpolant::Trics(trics) => {
+                let interpolation = TricsInterpolation::new(config.cell, trics)?;
                 Self::with_interpolation(config, initial, interpolation)
             }
         }
@@ -2472,5 +2529,45 @@ mod tests {
         );
         assert!(rows[0].1 > 0.0);
         assert!(join_median > Duration::ZERO || join_pool.threads == 1);
+    }
+
+    #[test]
+    fn trics_interpolation_does_not_silently_fall_back_to_linear() {
+        let chain = array![
+            [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, -0.3, 0.95, 0.2]
+        ];
+        let impossible_config = crate::TricsStartConfig::default().with_trics(
+            crate::TricsConfig::default().with_inversion(
+                crate::TricInversionConfig::default()
+                    .with_max_iterations(1)
+                    .with_tolerance(1e-14)
+                    .with_max_atom_move(1e-8),
+            ),
+        );
+        let interpolant = TricsInterpolation::new(None, impossible_config).unwrap();
+        assert!(matches!(
+            interpolant.insert(chain.view(), &[None, None], 0),
+            Err(SaddleError::Solver(_))
+        ));
+
+        let same_chain = array![
+            [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+        ];
+        let default_interpolant =
+            TricsInterpolation::new(None, crate::TricsStartConfig::default()).unwrap();
+        assert!(matches!(
+            default_interpolant.insert(same_chain.view(), &[None, None], 0),
+            Err(SaddleError::Solver(_))
+        ));
+
+        let bad_seed = crate::TricsStartConfig::default().with_seed(crate::TricsSeed::Idpp(
+            crate::IdppConfig::default().with_max_iterations(0),
+        ));
+        assert!(matches!(
+            TricsInterpolation::new(None, bad_seed),
+            Err(SaddleError::Invalid(_))
+        ));
     }
 }
