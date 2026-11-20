@@ -34,6 +34,7 @@ python-build = "python -m pip install ."
 python-test = { cmd = "pytest tests/python/ -q --timeout=120", depends-on = ["python-build"] }
 gate-python-build = "python -m pip install '.[test]'"
 gate-python-test = "RGSADDLE_REQUIRE_ASE=1 python -m pytest tests/python -ra --timeout=180 -o faulthandler_timeout=120"
+gate-selftest = "python -m pytest ci/gate -ra -p no:cacheprovider"
 
 [feature.docs]
 platforms = ["linux-64"]
@@ -70,3 +71,4 @@ make = ">=4.4.1,<5"
 actionlint = ">=1.7.12,<2"
 meson = ">=1.12.1,<2"
 pkg-config = ">=0.29.2,<0.30"
+capnproto = ">=1.5.0,<2"
