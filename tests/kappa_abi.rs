@@ -16,6 +16,7 @@ extern "C" fn fail(_: *mut c_void, _: i64, _: *const f64, _: *mut f64) -> i32 {
     17
 }
 
+#[cfg(feature = "ohtst")]
 extern "C" fn quartic(
     _: *mut c_void,
     n: i64,
