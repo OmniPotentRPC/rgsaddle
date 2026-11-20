@@ -269,7 +269,7 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =rgsaddle_sample_hyperplane_fn=. Purpose: Callback typedef in include/rgsaddle.h.
 - =rgsaddle_surface_fn=. Purpose: Callback typedef in include/rgsaddle.h.
 - =rgsaddle_solid_surface_fn=. Purpose: Callback typedef in include/rgsaddle.h.
-- =rgsaddle_hessian_fn=. Purpose: Callback typedef in include/rgsaddle.h.
+- =rgsaddle_hessian_fn=. Purpose: Hessian action at `position`, applied to `vector`, written to `action`.
 - =rgsaddle_stencil_eval_fn=. Purpose: Callback typedef in include/rgsaddle.h.
 
 * Macros and enum constants

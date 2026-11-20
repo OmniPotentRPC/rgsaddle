@@ -110,9 +110,9 @@ impl std::fmt::Display for LandscapeBoundKind {
 ///
 /// `search.k` is replaced on each leg by the child index. The child
 /// index-k search clears `search.search.saddle_check` and
-/// `search.search.artn` on its own copy, so a certificate escape does not
-/// run inside a leg. The landscape certifies every accepted point with
-/// [`LandscapeConfig::certificate`]. `certificate.escape` is not read.
+/// `search.search.artn` on its own copy, and the leg follows that
+/// stepper. The landscape certifies every accepted point with
+/// [`LandscapeConfig::certificate`], on a copy whose `escape` is cleared.
 ///
 /// The parent and every saddle leg stop on [`crate::MinModeConfig::force_tol`].
 /// A minimum stops on [`RelaxConfig::force_tol`]. All three measure the

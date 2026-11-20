@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 46u
+#define RGSADDLE_ABI_MINOR 49u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -156,6 +156,7 @@ typedef enum {
    * A solution-landscape search met its node limit or its force-evaluation
    * limit. The report's counts are the nodes already accepted and the
    * evaluations already performed. Node and edge queries have no pathway.
+   * ABI minor 49.
    */
   RGSADDLE_LANDSCAPE_BOUND = -16
 } rgsaddle_status_t;
@@ -1950,7 +1951,7 @@ rgsaddle_status_t rgsaddle_band_free_end_residual(const RgsaddleBand *band,
 int64_t rgsaddle_band_free_end_cuts(const RgsaddleBand *band);
 
 /**
- * Downward solution-landscape search.
+ * Downward solution-landscape search, ABI minor 49.
  * The parent is certified by the saddle-index check, each unstable
  * direction is pushed by `push`, and an index-(k-1) minimum-mode leg
  * follows it. A minimum is an rgmin solve on the true gradient.

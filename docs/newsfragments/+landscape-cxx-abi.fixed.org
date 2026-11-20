@@ -1,0 +1,1 @@
+~rgsaddle::Landscape~ requires ABI 1.49. ~abi_has_landscape~ accepts a stamp whose major matches and whose minor is at least 49, the minor of the landscape symbols.
