@@ -850,6 +850,10 @@ class AutoNEB:
         self.prefix = str(prefix)
         self.n_simul = int(n_simul)
         self.n_max = int(n_max)
+        if self.n_simul < 1:
+            raise ValueError("n_simul must be at least 1")
+        if self.n_max < self.n_simul + 2:
+            raise ValueError("n_max must be at least n_simul + 2")
         self.climb = bool(climb)
         self.fmax = fmax
         self.maxsteps = maxsteps

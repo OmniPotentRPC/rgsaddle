@@ -840,6 +840,12 @@ AutonebReportPy autoneb_run_py(nb::callable fn, Matrix positions, double k, bool
   const auto n_init = static_cast<std::int64_t>(positions.shape(0));
   const auto dof = static_cast<std::size_t>(positions.shape(1));
   const auto n_atoms = static_cast<std::int64_t>(dof / 3);
+  if (n_max < n_init) {
+    throw nb::value_error("n_max must be at least the number of initial images");
+  }
+  if (static_cast<std::size_t>(n_max) > std::vector<double>().max_size() / dof) {
+    throw nb::value_error("n_max images do not fit in memory");
+  }
   std::vector<double> box;
   if (!cell.is_none()) {
     auto view = nb::cast<Matrix>(cell);
