@@ -213,25 +213,7 @@ impl Rotation {
 
     fn f_eigen(&self, x: ArrayView1<f64>) -> Result<(f64, [f64; 4]), crate::SaddleError> {
         let f = self.f_matrix(x)?;
-        let (evals, evecs) = jacobi4(f);
-        let mut imax = 0;
-        for i in 1..4 {
-            if evals[i] > evals[imax] {
-                imax = i;
-            }
-        }
-        let mut q = [
-            evecs[0][imax],
-            evecs[1][imax],
-            evecs[2][imax],
-            evecs[3][imax],
-        ];
-        if q[0] < 0.0 {
-            for v in &mut q {
-                *v = -*v;
-            }
-        }
-        Ok((evals[imax], q))
+        Ok(max_kabsch_quaternion(&f))
     }
 
     fn f_matrix(&self, x: ArrayView1<f64>) -> Result<[[f64; 4]; 4], crate::SaddleError> {
@@ -589,79 +571,96 @@ fn asinc_deriv(x: f64) -> f64 {
     (asinc(x + h) - asinc(x - h)) / (2.0 * h)
 }
 
+fn max_kabsch_quaternion(f: &[[f64; 4]; 4]) -> (f64, [f64; 4]) {
+    let (evals, evecs) = jacobi4(*f);
+    let mut imax = 0;
+    for i in 1..4 {
+        if evals[i] > evals[imax] {
+            imax = i;
+        }
+    }
+    let lam = evals[imax];
+    let tol = 1e-10 * (1.0 + lam.abs());
+    let mut q = [0.0; 4];
+    for j in 0..4 {
+        if (lam - evals[j]).abs() <= tol {
+            let weight = evecs[0][j];
+            for (qi, row) in q.iter_mut().zip(&evecs) {
+                *qi += weight * row[j];
+            }
+        }
+    }
+    let norm = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]).sqrt();
+    if norm > 1e-12 {
+        for qi in &mut q {
+            *qi /= norm;
+        }
+    } else {
+        q = [
+            evecs[0][imax],
+            evecs[1][imax],
+            evecs[2][imax],
+            evecs[3][imax],
+        ];
+    }
+    if q[0] < 0.0 {
+        for v in &mut q {
+            *v = -*v;
+        }
+    }
+    (lam, q)
+}
+
 /// Rightmost-eigenvector JVP: `pinv(λI - F) (dF q - (q^T dF q) q)`.
 fn eigvec_jvp(f: &[[f64; 4]; 4], lam: f64, q: &[f64; 4], df: &[[f64; 4]; 4]) -> [f64; 4] {
+    let (evals, evecs) = jacobi4(*f);
+    let tol = 1e-10 * (1.0 + lam.abs());
     let mut dfq = [0.0; 4];
     for i in 0..4 {
         for (dfij, qj) in df[i].iter().zip(q) {
             dfq[i] += dfij * qj;
         }
     }
-    let mut ldot = 0.0;
-    for i in 0..4 {
-        ldot += q[i] * dfq[i];
-    }
-    let mut rhs = [0.0; 4];
-    for i in 0..4 {
-        rhs[i] = dfq[i] - ldot * q[i];
-    }
-    // `(λI - F + q q^T)` is invertible on the complement of `q`.
-    let mut a = [[0.0; 4]; 4];
-    for i in 0..4 {
-        for j in 0..4 {
-            a[i][j] = -f[i][j] + q[i] * q[j];
+    let mut dq = [0.0; 4];
+    let mut g_e0 = [0.0; 4];
+    for (j, &eval) in evals.iter().enumerate() {
+        let gap = lam - eval;
+        if gap <= tol {
+            continue;
         }
-        a[i][i] += lam;
+        let vj = [evecs[0][j], evecs[1][j], evecs[2][j], evecs[3][j]];
+        let v_dot_dfq = vj[0] * dfq[0] + vj[1] * dfq[1] + vj[2] * dfq[2] + vj[3] * dfq[3];
+        let coeff = v_dot_dfq / gap;
+        let coeff_e0 = vj[0] / gap;
+        for i in 0..4 {
+            dq[i] += coeff * vj[i];
+            g_e0[i] += coeff_e0 * vj[i];
+        }
     }
-    let mut dq = solve4(a, rhs);
-    let mut proj = 0.0;
-    for i in 0..4 {
-        proj += dq[i] * q[i];
+    if q[0].abs() > 1e-10 {
+        let mut df_ge0 = [0.0; 4];
+        for i in 0..4 {
+            for (dfij, gk) in df[i].iter().zip(&g_e0) {
+                df_ge0[i] += dfij * gk;
+            }
+        }
+        for (j, &eval) in evals.iter().enumerate() {
+            if (lam - eval).abs() <= tol {
+                let vj = [evecs[0][j], evecs[1][j], evecs[2][j], evecs[3][j]];
+                let proj =
+                    (vj[0] * df_ge0[0] + vj[1] * df_ge0[1] + vj[2] * df_ge0[2] + vj[3] * df_ge0[3])
+                        / q[0];
+                for i in 0..4 {
+                    dq[i] += proj * vj[i];
+                }
+            }
+        }
     }
+    let proj = dq[0] * q[0] + dq[1] * q[1] + dq[2] * q[2] + dq[3] * q[3];
     for i in 0..4 {
         dq[i] -= proj * q[i];
     }
     dq
-}
-
-fn solve4(mut a: [[f64; 4]; 4], mut b: [f64; 4]) -> [f64; 4] {
-    for k in 0..4 {
-        let mut piv = k;
-        for i in (k + 1)..4 {
-            if a[i][k].abs() > a[piv][k].abs() {
-                piv = i;
-            }
-        }
-        if a[piv][k].abs() < 1e-16 {
-            continue;
-        }
-        if piv != k {
-            a.swap(k, piv);
-            b.swap(k, piv);
-        }
-        let pivot_row = a[k];
-        let pivot_rhs = b[k];
-        for (row, rhs) in a.iter_mut().zip(b.iter_mut()).skip(k + 1) {
-            let f = row[k] / pivot_row[k];
-            for (value, pivot) in row.iter_mut().zip(pivot_row).skip(k) {
-                *value -= f * pivot;
-            }
-            *rhs -= f * pivot_rhs;
-        }
-    }
-    let mut x = [0.0; 4];
-    for i in (0..4).rev() {
-        let mut acc = b[i];
-        for (aij, xj) in a[i].iter().zip(x.iter()).skip(i + 1) {
-            acc -= aij * xj;
-        }
-        x[i] = if a[i][i].abs() < 1e-16 {
-            0.0
-        } else {
-            acc / a[i][i]
-        };
-    }
-    x
 }
 
 fn jacobi4(mut a: [[f64; 4]; 4]) -> ([f64; 4], [[f64; 4]; 4]) {
