@@ -389,9 +389,8 @@ impl PafiConfig {
             }
             self.quench.check()?;
         }
-        if !(self.relax_tol.is_finite() && self.relax_tol > 0.0)
-            || !(self.jump_tol.is_finite() && self.jump_tol > 0.0)
-        {
+        let positive = |value: f64| value.is_finite() && value > 0.0;
+        if !(positive(self.relax_tol) && positive(self.jump_tol)) {
             return Err(SaddleError::Invalid(
                 "PAFI relaxation and jump tolerances must be finite and positive".into(),
             ));
