@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 45u
+#define RGSADDLE_ABI_MINOR 49u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -1311,9 +1311,9 @@ rgsaddle_status_t rgsaddle_minmode_set_highs(RgsaddleMinMode *session, int32_t e
  * on, 0 turns it off, and -1, the state of a new session, turns it on
  * when rotation_tol is at least 1e-4 and either the estimator is
  * Lanczos or the improved dimer angle test is disabled
- * (rotation_angle_tol <= 0). An improved dimer with positive
- * rotation_angle_tol leaves the classic window off unless `window` is
- * 1. From ABI minor 41 a Lanczos session reads it too: with the window
+ * (rotation_angle_tol <= 0). From ABI minor 49 an improved dimer with
+ * positive rotation_angle_tol leaves the classic window off unless
+ * `window` is 1. From ABI minor 41 a Lanczos session reads it too: with the window
  * on, an estimate stops once two Krylov vectors leave the Ritz residual
  * under 1, and 0 restores the estimate that runs to its residual.
  * Other values return RGSADDLE_INVALID_PARAMETER and leave the session
