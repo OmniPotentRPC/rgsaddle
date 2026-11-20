@@ -350,6 +350,90 @@ static rgsaddle_status_t pafi_and_ohtst(void) {
   return RGSADDLE_OK;
 }
 
+/* Every set_config entry point refuses a NULL session first, then a NULL
+ * config, then another major, and accepts its own config afterwards. */
+static rgsaddle_status_t set_config_statuses(void) {
+  rgsaddle_pafi_config_t pcfg;
+  memset(&pcfg, 0, sizeof pcfg);
+  pcfg.version.major = RGSADDLE_ABI_MAJOR;
+  pcfg.version.minor = RGSADDLE_ABI_MINOR;
+  pcfg.thermal = 0.02;
+  pcfg.mobility = 1.0;
+  pcfg.time_step = 0.01;
+  pcfg.thermalize = 5;
+  pcfg.stride = 1;
+  pcfg.samples = 16;
+  pcfg.blocks = 2;
+  pcfg.seed = 3;
+  pcfg.retain = 1;
+  pcfg.max_rounds = 1;
+  rgsaddle_pafi_config_t other_pcfg = pcfg;
+  other_pcfg.version.major = RGSADDLE_ABI_MAJOR + 1u;
+  const double frames[3] = {-1.0, 0.0, 1.0};
+  if (rgsaddle_pafi_create(&other_pcfg, 3, 1, frames, NULL, 0) != NULL) {
+    return fail(RGSADDLE_ABI_MISMATCH, "pafi create accepted another major");
+  }
+  RgsaddlePafi *pafi = rgsaddle_pafi_create(&pcfg, 3, 1, frames, NULL, 0);
+  if (!pafi) {
+    return fail(RGSADDLE_SHAPE, "pafi create for set_config");
+  }
+  if (rgsaddle_pafi_set_config(NULL, &pcfg) != RGSADDLE_NULL_SESSION ||
+      rgsaddle_pafi_set_config(NULL, &other_pcfg) != RGSADDLE_NULL_SESSION ||
+      rgsaddle_pafi_set_config(NULL, NULL) != RGSADDLE_NULL_SESSION ||
+      rgsaddle_pafi_set_config(pafi, NULL) != RGSADDLE_INVALID_PARAMETER ||
+      rgsaddle_pafi_set_config(pafi, &other_pcfg) != RGSADDLE_ABI_MISMATCH ||
+      rgsaddle_pafi_set_config(pafi, &pcfg) != RGSADDLE_OK) {
+    rgsaddle_pafi_free(pafi);
+    return fail(RGSADDLE_ABI_MISMATCH, "pafi set_config statuses");
+  }
+  rgsaddle_pafi_free(pafi);
+
+  rgsaddle_ohtst_config_t ocfg;
+  memset(&ocfg, 0, sizeof ocfg);
+  ocfg.version.major = RGSADDLE_ABI_MAJOR;
+  ocfg.version.minor = RGSADDLE_ABI_MINOR;
+  ocfg.thermal = 0.5;
+  ocfg.sample_time_step = 0.1;
+  ocfg.sample_friction = 1.0;
+  ocfg.sample_burn_in = 10;
+  ocfg.sample_stride = 1;
+  ocfg.sample_records = 16;
+  ocfg.sample_blocks = 2;
+  ocfg.sample_seed = 9;
+  ocfg.sample_retain = 4;
+  ocfg.sample_integrator = RGSADDLE_OHTST_INTEGRATOR_BAOAB;
+  ocfg.shooting_friction = 1.5;
+  ocfg.shooting_time_step = 0.05;
+  ocfg.shooting_steps = 20;
+  ocfg.shooting_check_every = 5;
+  ocfg.shooting_shots = 8;
+  ocfg.shooting_blocks = 2;
+  ocfg.shooting_seed = 17;
+  ocfg.counting = RGSADDLE_OHTST_COUNT_FINAL;
+  rgsaddle_ohtst_config_t other_ocfg = ocfg;
+  other_ocfg.version.major = RGSADDLE_ABI_MAJOR + 1u;
+  const double point[2] = {0.0, 0.0};
+  const double normal[2] = {1.0, 0.0};
+  if (rgsaddle_ohtst_create(&other_ocfg, 2, point, normal) != NULL) {
+    return fail(RGSADDLE_ABI_MISMATCH, "ohtst create accepted another major");
+  }
+  RgsaddleOhtst *ohtst = rgsaddle_ohtst_create(&ocfg, 2, point, normal);
+  if (!ohtst) {
+    return fail(RGSADDLE_SHAPE, "ohtst create for set_config");
+  }
+  if (rgsaddle_ohtst_set_config(NULL, &ocfg) != RGSADDLE_NULL_SESSION ||
+      rgsaddle_ohtst_set_config(NULL, &other_ocfg) != RGSADDLE_NULL_SESSION ||
+      rgsaddle_ohtst_set_config(NULL, NULL) != RGSADDLE_NULL_SESSION ||
+      rgsaddle_ohtst_set_config(ohtst, NULL) != RGSADDLE_INVALID_PARAMETER ||
+      rgsaddle_ohtst_set_config(ohtst, &other_ocfg) != RGSADDLE_ABI_MISMATCH ||
+      rgsaddle_ohtst_set_config(ohtst, &ocfg) != RGSADDLE_OK) {
+    rgsaddle_ohtst_free(ohtst);
+    return fail(RGSADDLE_ABI_MISMATCH, "ohtst set_config statuses");
+  }
+  rgsaddle_ohtst_free(ohtst);
+  return RGSADDLE_OK;
+}
+
 int main(void) {
   rgsaddle_status_t st = RGSADDLE_OK;
   if (rgsaddle_abi_version() !=
@@ -740,6 +824,11 @@ int main(void) {
   }
 
   st = pafi_and_ohtst();
+  if (st != RGSADDLE_OK) {
+    return st;
+  }
+
+  st = set_config_statuses();
   if (st != RGSADDLE_OK) {
     return st;
   }

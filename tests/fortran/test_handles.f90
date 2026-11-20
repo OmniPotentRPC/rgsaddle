@@ -75,10 +75,10 @@ contains
   end subroutine check_create_status
 
   subroutine check_set_config_status()
-    type(pafi_handle) :: pafi
-    type(ohtst_handle) :: ohtst
-    type(rgsaddle_pafi_config_t) :: pafi_cfg
-    type(rgsaddle_ohtst_config_t) :: ohtst_cfg
+    type(pafi_handle) :: pafi, pafi_null
+    type(ohtst_handle) :: ohtst, ohtst_null
+    type(rgsaddle_pafi_config_t) :: pafi_cfg, pafi_other
+    type(rgsaddle_ohtst_config_t) :: ohtst_cfg, ohtst_other
     real(c_double) :: frames(2), point(2), normal(2)
     integer(c_int) :: status
 
@@ -87,18 +87,38 @@ contains
     normal = [1.0_c_double, 0.0_c_double]
 
     call init_pafi_config(pafi_cfg)
+    pafi_other = pafi_cfg
+    pafi_other%version%major = 9_c_int32_t
+    status = pafi_null%set_config(pafi_cfg)
+    call check_i64("pafi set config null handle", status, RGSADDLE_NULL_SESSION)
+    status = pafi_null%set_config(pafi_other)
+    call check_i64("pafi set config null handle major", status, RGSADDLE_NULL_SESSION)
     status = pafi%create(pafi_cfg, 2_c_int64_t, 1_c_int64_t, frames)
     call check_status("pafi set config create", status)
-    pafi_cfg%version%major = 9_c_int32_t
-    status = pafi%set_config(pafi_cfg)
+    status = pafi%set_config(pafi_other)
     call check_i64("pafi set config major", status, RGSADDLE_ABI_MISMATCH)
+    status = pafi%set_config(pafi_cfg)
+    call check_status("pafi set config", status)
+    call pafi%release()
+    status = pafi%set_config(pafi_other)
+    call check_i64("pafi set config released major", status, RGSADDLE_NULL_SESSION)
 
     call init_ohtst_config(ohtst_cfg)
+    ohtst_other = ohtst_cfg
+    ohtst_other%version%major = 9_c_int32_t
+    status = ohtst_null%set_config(ohtst_cfg)
+    call check_i64("ohtst set config null handle", status, RGSADDLE_NULL_SESSION)
+    status = ohtst_null%set_config(ohtst_other)
+    call check_i64("ohtst set config null handle major", status, RGSADDLE_NULL_SESSION)
     status = ohtst%create(ohtst_cfg, 2_c_int64_t, point, normal)
     call check_status("ohtst set config create", status)
-    ohtst_cfg%version%major = 9_c_int32_t
-    status = ohtst%set_config(ohtst_cfg)
+    status = ohtst%set_config(ohtst_other)
     call check_i64("ohtst set config major", status, RGSADDLE_ABI_MISMATCH)
+    status = ohtst%set_config(ohtst_cfg)
+    call check_status("ohtst set config", status)
+    call ohtst%release()
+    status = ohtst%set_config(ohtst_other)
+    call check_i64("ohtst set config released major", status, RGSADDLE_NULL_SESSION)
   end subroutine check_set_config_status
 
   subroutine check_band_release()
@@ -307,7 +327,7 @@ contains
     real(c_double) :: energy
     integer(c_int) :: status
     req%version%major = 1_c_int32_t
-    req%version%minor = 45_c_int32_t
+    req%version%minor = int(RGSADDLE_ABI_MINOR, c_int32_t)
     req%flags = RGSADDLE_REQ_ONE_IMAGE
     req%n_images = 4_c_int64_t
     req%n_atoms = 2_c_int64_t ** 30
