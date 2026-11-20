@@ -439,8 +439,8 @@ fn coordinate_extent(values: impl Iterator<Item = f64>) -> Result<f64, SaddleErr
 
 fn charge(budget: &mut usize) -> Result<(), SaddleError> {
     if *budget == 0 {
-        return Err(SaddleError::Exhausted(
-            "MEP energy slice used its surface-call budget".into(),
+        return Err(SaddleError::Invalid(
+            "work budget exhausted: MEP energy slice used its surface-call budget".into(),
         ));
     }
     *budget -= 1;
@@ -534,7 +534,11 @@ pub struct FixedEnergySeed {
 ///
 /// # Errors
 ///
-/// [`SaddleError::Exhausted`] when the budget is used up.
+/// [`SaddleError::Invalid`] when the input is inconsistent, when a slice
+/// meets a stationary point or never crosses its level, and, with a
+/// message that starts `work budget exhausted`, when the budget is used
+/// up. [`SaddleError::NonFinite`] when the surface returns a non-finite
+/// value, and the errors of [`BandSurface::eval`].
 pub fn fixed_energy_mep_seed(
     surface: &impl BandSurface,
     saddle: ArrayView1<'_, f64>,

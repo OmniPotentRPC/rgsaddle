@@ -128,7 +128,10 @@ fn a_seed_without_a_budget_is_exhausted() {
             max_evaluations: 0,
         },
     );
-    assert!(matches!(err, Err(SaddleError::Exhausted(_))));
+    assert!(matches!(
+        err,
+        Err(SaddleError::Invalid(message)) if message.starts_with("work budget exhausted")
+    ));
 }
 
 #[test]
