@@ -1,0 +1,1 @@
+The documented defaults of =PafiConfig::relax_tol=, =PafiConfig::jump_tol= and =PafiConfig::window= are 1e-4, 1e-2 and 0, the values the code uses, with the reason for each. =HyperplaneAverage= is =#[non_exhaustive]=, as its entry said it was.

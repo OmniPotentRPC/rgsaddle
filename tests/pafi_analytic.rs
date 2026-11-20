@@ -1547,3 +1547,20 @@ fn psi_does_not_depend_on_the_parameter_of_the_path() {
         );
     }
 }
+
+#[test]
+fn frame_controls_default_to_the_documented_values_and_have_setters() {
+    let config = PafiConfig::default();
+    assert_eq!(
+        (config.relax_tol, config.jump_tol, config.window),
+        (1.0e-4, 1.0e-2, 0)
+    );
+    let set = config
+        .with_relax_tol(1.0e-6)
+        .with_jump_tol(1.0e-3)
+        .with_window(16);
+    assert_eq!(
+        (set.relax_tol, set.jump_tol, set.window),
+        (1.0e-6, 1.0e-3, 16)
+    );
+}
