@@ -1,4 +1,4 @@
-~rgsaddle.ase.NEB.interpolate~ accepts ~method='idpp'~ through ~idpp_path~ and ~mic=True~ through ASE's minimum-image displacement, and ~apply_constraint=None~ raises ~RuntimeError~ when a constraint other than ~FixAtoms~ would move an atom.
+~rgsaddle.ase.NEB.interpolate~ accepts ~method='idpp'~ through ~idpp_path~ and ~mic=True~ through ASE's minimum-image displacement (a slab or wire keeps its non-periodic axes unfolded), and ~apply_constraint=None~ raises ~RuntimeError~ when a constraint other than ~FixAtoms~ would move an atom.
 ~DyNEB~ freezes images that are already under ~fmax~, and ~NEB~ keeps that behaviour off unless ~dynamic_relaxation=True~ is passed.
 ~AutoNEB~, ~DimerControl~, and ~MinModeTranslate~ follow the ASE call shape: AutoNEB runs ~autoneb_run~, and the dimer optimizer takes one ~MinMode.step~ per iteration.
 C ABI minor 46 adds ~rgsaddle_autoneb_run~, ~rgsaddle_autoneb_config_t~, ~rgsaddle_autoneb_report_t~, ~RGSADDLE_AUTONEB_CLIMB~, ~RGSADDLE_AUTONEB_IDPP~, and ~RGSADDLE_AUTONEB_KEEP_TRANSLATION~.

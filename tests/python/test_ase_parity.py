@@ -31,6 +31,7 @@ from rgsaddle.ase import (
     MinModeTranslate,
     NEB,
     UnsupportedFeature,
+    _periodic_cell,
 )
 
 # Müller-Brown saddle between minima B and C, from the AutoNEB example.
@@ -84,6 +85,16 @@ class QuadraticSaddle(Calculator):
             "energy": -2.0 * x * x + 5.0 * y * y,
             "forces": np.array([[4.0 * x, -10.0 * y, 0.0]]),
         }
+
+
+class Flat(Calculator):
+    """Zero energy and force, for tests that only place atoms."""
+
+    implemented_properties = ["energy", "forces"]
+
+    def calculate(self, atoms, properties, system_changes):  # type: ignore[no-untyped-def]
+        Calculator.calculate(self, atoms, properties, system_changes)
+        self.results = {"energy": 0.0, "forces": np.zeros((len(atoms), 3))}
 
 
 class Nudge(FixConstraint):
@@ -422,3 +433,84 @@ def test_fixatoms_still_follow_the_first_image() -> None:
     # to the first image's fixed coordinates.
     assert placed(AseNeb) == pytest.approx(0.5)
     assert placed(NEB) == pytest.approx(0.2)
+
+
+_PERIODIC_CASES = {
+    "slab": ([[4.0, 0.0, 0.0], [0.0, 4.0, 0.0], [0.0, 0.0, 10.0]], [True, True, False]),
+    "wire": ([[4.0, 0.0, 0.0], [0.0, 10.0, 0.0], [0.0, 0.0, 10.0]], [True, False, False]),
+    "skewed_slab": ([[4.0, 0.0, 0.0], [2.0, 3.5, 0.0], [1.0, 1.0, 10.0]], [True, True, False]),
+}
+
+
+def _hopping(cell, pbc, ends):  # type: ignore[no-untyped-def]
+    """Two anchor atoms and an adatom that moves between ``ends``."""
+    images = []
+    for x, z in ends:
+        atoms = Atoms(
+            "H3",
+            positions=[[0.5, 1.0, 0.0], [2.0, 1.0, 0.0], [x, 1.0, z]],
+            cell=cell,
+            pbc=pbc,
+        )
+        atoms.calc = Flat()
+        images.append(atoms)
+    return images
+
+
+@pytest.mark.parametrize("case", sorted(_PERIODIC_CASES))
+def test_idpp_mic_follows_the_minimum_image_on_mixed_periodicity(case: str) -> None:
+    cell, pbc = _PERIODIC_CASES[case]
+    images = _hopping(cell, pbc, [(0.6, 1.0), (2.0, 1.0), (3.6, 1.0)])
+    band = NEB(images, k=0.1, climb=False, method="improvedtangent")
+    band.interpolate(method="idpp", mic=True)
+    middle = images[1].positions[2]
+    print(f"idpp {case} interior adatom={middle}")
+    # The minimum image of 0.6 -> 3.6 crosses the cell edge at x = 0. The
+    # straight line would pass x = 2.1.
+    assert middle[0] < 1.0
+    assert np.all(np.isfinite(images[1].positions))
+    assert np.allclose(images[0].positions[2], [0.6, 1.0, 1.0])
+    assert np.allclose(images[-1].positions[2], [3.6, 1.0, 1.0])
+
+
+def test_idpp_mic_does_not_fold_a_non_periodic_axis() -> None:
+    cell = [[4.0, 0.0, 0.0], [0.0, 4.0, 0.0], [0.0, 0.0, 5.0]]
+    images = _hopping(cell, [True, True, False], [(2.0, 0.0), (2.0, 2.0), (2.0, 4.0)])
+    band = NEB(images, k=0.1, climb=False, method="improvedtangent")
+    band.interpolate(method="idpp", mic=True)
+    # The adatom climbs 4 A through a cell 5 A tall. Folding z would send
+    # it 1 A the other way.
+    assert 1.0 < images[1].positions[2, 2] < 3.0
+
+
+def test_periodic_cell_completes_the_open_axes() -> None:
+    cell, pbc = _PERIODIC_CASES["skewed_slab"]
+    images = _hopping(cell, pbc, [(0.6, 1.0), (2.0, 1.0), (3.6, 1.0)])
+    built = _periodic_cell(images)
+    assert built is not None
+    assert abs(np.linalg.det(built)) > 1.0
+    assert np.allclose(built[:2], np.asarray(cell)[:2])
+    # The open row is normal to both periodic rows and longer than the images span.
+    assert np.allclose(built[2] @ built[0], 0.0, atol=1e-9)
+    assert np.allclose(built[2] @ built[1], 0.0, atol=1e-9)
+    assert np.linalg.norm(built[2]) > 10.0
+
+    wire = _hopping(*_PERIODIC_CASES["wire"], [(0.6, 1.0), (2.0, 1.0), (3.6, 1.0)])
+    built = _periodic_cell(wire)
+    assert built is not None
+    assert abs(np.linalg.det(built)) > 1.0
+    assert np.allclose(built[0], [4.0, 0.0, 0.0])
+    assert abs(built[1] @ built[0]) < 1e-9 and abs(built[2] @ built[0]) < 1e-9
+    assert abs(built[1] @ built[2]) < 1e-9
+
+    free = _hopping(cell, [False, False, False], [(0.6, 1.0), (2.0, 1.0), (3.6, 1.0)])
+    assert _periodic_cell(free) is None
+    full = _hopping(cell, [True, True, True], [(0.6, 1.0), (2.0, 1.0), (3.6, 1.0)])
+    assert np.allclose(_periodic_cell(full), np.asarray(cell))
+
+
+def test_periodic_cell_refuses_dependent_periodic_vectors() -> None:
+    flat = [[4.0, 0.0, 0.0], [8.0, 0.0, 0.0], [0.0, 0.0, 10.0]]
+    images = _hopping(flat, [True, True, False], [(0.6, 1.0), (2.0, 1.0), (3.6, 1.0)])
+    with pytest.raises(ValueError, match="linearly independent"):
+        _periodic_cell(images)

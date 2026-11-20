@@ -1426,17 +1426,42 @@ class Sella:
         return bool(host.run(fmax=fmax, steps=steps))
 
 
+# A non-periodic axis gets a vector this many times the reach of the images.
+# The minimum image wraps a difference only past half of it, so that axis
+# never wraps, and the matrix stays invertible for the Rust cell.
+_OPEN_AXIS_REACH = 16.0
+
+
 def _periodic_cell(images: list[Any]) -> Float64 | None:
+    """Row-major cell for the minimum image of the band, or None in free space.
+
+    ``images[0].pbc`` decides which axes are periodic. A periodic axis keeps
+    its lattice vector. Each non-periodic axis takes a vector normal to the
+    periodic ones, so that the minimum image wraps only along the periodic
+    plane or line and the slab or wire is not folded across its vacuum.
+    """
     if not images:
         return None
     pbc = np.asarray(images[0].pbc, dtype=bool)
     if not pbc.any():
         return None
-    raw = np.asarray(images[0].cell.array, dtype=np.float64).copy()
+    cell = np.asarray(images[0].cell.array, dtype=np.float64)
+    if pbc.all():
+        return np.ascontiguousarray(cell.copy(), dtype=np.float64)
+    lattice = cell[pbc]
+    _, singular, rows = np.linalg.svd(lattice)
+    if singular.min() <= 1e-12 * singular.max():
+        raise ValueError("the periodic axes need linearly independent cell vectors")
+    normals = rows[len(lattice) :]
+    points = np.concatenate([np.asarray(image.get_positions(), dtype=np.float64) for image in images])
+    reach = float(np.sqrt((lattice * lattice).sum(axis=1)).max())
+    for normal in normals:
+        reach += float(np.ptp(points @ normal))
+    open_rows = iter(normals * (_OPEN_AXIS_REACH * reach))
+    full = np.empty((3, 3), dtype=np.float64)
     for axis in range(3):
-        if not pbc[axis]:
-            raw[axis, :] = 0.0
-    return np.ascontiguousarray(raw, dtype=np.float64)
+        full[axis] = cell[axis] if pbc[axis] else next(open_rows)
+    return np.ascontiguousarray(full, dtype=np.float64)
 
 
 class _StringView:
