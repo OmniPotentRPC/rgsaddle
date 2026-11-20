@@ -1212,7 +1212,8 @@ pub fn angular_scale_rad_s() -> f64 {
 /// in eV/Å². Translations are already removed, and the saddle's negative
 /// eigenvalue is not included. Every atom has the same mass `mass_amu`.
 /// `ν_i = ω_i / 2π` with `ω_i = sqrt(λ_i / m)`, and the prefactor is
-/// `(∏ ν_min) / (∏ ν_sad)`.
+/// `(∏ ν_min) / (∏ ν_sad)`. The minimum product must contain exactly one
+/// more mode than the saddle product, so the result has units of frequency.
 pub fn vineyard_prefactor(
     min_lambda: &[f64],
     sad_lambda: &[f64],
