@@ -477,13 +477,14 @@ impl BandSession {
         let Some(config) = self.refine_config() else {
             return Ok(None);
         };
+        self.state.rows.store(0, Ordering::Relaxed);
         if self.refine.converged {
+            self.refresh_exp(surface)?;
             return Ok(Some(self.refine_report(BandStatus::Converged, None)));
         }
         let Some(run) = self.refine.run.as_ref() else {
             return Ok(None);
         };
-        self.state.rows.store(0, Ordering::Relaxed);
         if run.climb.is_none() {
             return self.refine_align(&config, surface).map(Some);
         }
@@ -557,6 +558,7 @@ impl BandSession {
                 Outcome::Restore
             };
             self.refine_finish(&config, outcome);
+            self.refresh_exp(surface)?;
             return Ok(Some(self.refine_stop(
                 RefineStep {
                     fell_back: true,
@@ -573,6 +575,7 @@ impl BandSession {
         }
         if gate <= self.config.force_tol {
             self.refine.converged = true;
+            self.refresh_exp(surface)?;
             return Ok(Some(self.refine_stop(
                 step,
                 BandStatus::Converged,
@@ -583,6 +586,7 @@ impl BandSession {
         if turned || run.steps >= config.max_steps {
             let fell_back = turned;
             self.refine_finish(&config, Outcome::Leave);
+            self.refresh_exp(surface)?;
             return Ok(Some(self.refine_stop(
                 RefineStep { fell_back, ..step },
                 BandStatus::Running,
@@ -640,10 +644,12 @@ impl BandSession {
         self.iteration += 1;
         if estimate.curvature > 0.0 {
             self.refine_finish(config, Outcome::Restore);
+            self.refresh_exp(surface)?;
             return Ok(self.refine_stop(step, BandStatus::Running, estimate.curvature));
         }
         if alignment < config.alignment_tol && !run.escape {
             self.refine_finish(config, Outcome::Leave);
+            self.refresh_exp(surface)?;
             return Ok(self.refine_stop(step, BandStatus::Running, estimate.curvature));
         }
         let step = RefineStep {
@@ -653,6 +659,7 @@ impl BandSession {
         run.best = Some((gate, run.current.clone(), estimate.mode.clone()));
         if gate <= force_tol {
             self.refine.converged = true;
+            self.refresh_exp(surface)?;
             return Ok(self.refine_stop(step, BandStatus::Converged, estimate.curvature));
         }
         let rigid = rigid_motions(&run.current.x, cell.as_ref(), remove_translation, fixed);
@@ -871,6 +878,7 @@ impl BandSession {
         drop(slot);
         self.state.invalidate_assembly();
         self.solver.forget_evaluation();
+        self.invalidate_stale_exp();
     }
 
     pub(super) fn image_tangent(
@@ -905,18 +913,20 @@ impl BandSession {
 
     fn refine_report(&self, status: BandStatus, curvature: Option<f64>) -> BandReport {
         let image = self.state.ci();
-        let max_force = image
-            .and_then(|i| {
-                let slot = self.state.last.lock().unwrap_or_else(|e| e.into_inner());
-                slot.as_ref()
-                    .map(|last| self.state.force_gate.value(last.gradients.row(i)))
-            })
-            .unwrap_or(f64::INFINITY);
-        let rows = if status == BandStatus::Converged && curvature.is_none() {
-            0
-        } else {
-            self.state.rows.load(Ordering::Relaxed)
+        let max_force = match image {
+            Some(i) => {
+                let slot = match self.state.last.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                match slot.as_ref() {
+                    Some(last) => self.state.force_gate.value(last.gradients.row(i)),
+                    None => f64::INFINITY,
+                }
+            }
+            None => f64::INFINITY,
         };
+        let rows = self.state.rows.load(Ordering::Relaxed);
         BandReport {
             status,
             max_force,
