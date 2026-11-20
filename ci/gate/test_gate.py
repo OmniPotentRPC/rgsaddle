@@ -228,3 +228,97 @@ def test_check_gate_exits_nonzero_on_drift(gate_tree):
     )
     assert completed.returncode == 1
     assert "+# edit" not in completed.stderr and "-# edit" in completed.stderr
+
+
+CARGO_OUTPUT = """
+     Running unittests src/lib.rs (target/debug/deps/rgsaddle-0123456789abcdef)
+test result: ok. 1000 passed; 0 failed; 30 ignored; 0 measured; 0 filtered out; finished in 41.20s
+
+     Running tests/band.rs (target/debug/deps/band-0123456789abcdef)
+test result: ok. 40 passed; 0 failed; 8 ignored; 0 measured; 0 filtered out; finished in 2.03s
+
+   Doc-tests rgsaddle
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.51s
+"""
+
+
+def test_cargo_counts_keep_ignored_tests():
+    counts = run.parse_test_counts(CARGO_OUTPUT)
+    assert counts == [run.TestCounts("cargo", 1046, 0, 38, 0)]
+    assert str(counts[0]) == "cargo: 1046 passed, 0 failed, 38 ignored, 0 skipped"
+
+
+def test_cargo_counts_failures_and_filtered_tests():
+    output = (
+        "test result: FAILED. 4 passed; 1 failed; 2 ignored; 0 measured; "
+        "7 filtered out; finished in 0.10s\n"
+    )
+    assert run.cargo_counts(output) == run.TestCounts("cargo", 4, 1, 2, 7)
+
+
+@pytest.mark.parametrize(
+    ("output", "expected"),
+    [
+        (
+            "======= 120 passed, 3 skipped, 2 xfailed, 1 warning in 12.30s =======\n",
+            run.TestCounts("pytest", 120, 0, 2, 3),
+        ),
+        ("5 passed, 2 deselected in 0.40s\n", run.TestCounts("pytest", 5, 0, 0, 2)),
+        (
+            "=== 2 failed, 7 passed, 1 skipped, 1 xpassed, 3 errors in 63.00s (0:01:03) ===\n",
+            run.TestCounts("pytest", 8, 5, 0, 1),
+        ),
+        ("============ no tests ran in 0.01s ============\n", run.TestCounts("pytest", 0, 0, 0, 0)),
+    ],
+)
+def test_pytest_counts(output, expected):
+    assert run.parse_test_counts(output) == [expected]
+
+
+def test_pytest_counts_read_the_last_summary_only():
+    output = (
+        "SKIPPED [1] tests/python/test_ase_against.py:12: ase is missing\n"
+        "==== 1 passed in 0.01s ====\n"
+        "==== 9 passed, 1 skipped in 1.00s ====\n"
+    )
+    assert run.pytest_counts(output) == run.TestCounts("pytest", 9, 0, 0, 1)
+
+
+def test_meson_counts():
+    output = textwrap.dedent(
+        """
+        Ok:                 3
+        Expected Fail:      1
+        Fail:               0
+        Unexpected Pass:    0
+        Skipped:            2
+        Timeout:            0
+        """
+    )
+    assert run.parse_test_counts(output) == [run.TestCounts("Meson", 3, 0, 1, 2)]
+
+
+def test_meson_counts_unexpected_passes_and_timeouts_fail():
+    output = "Ok: 1\nFail: 1\nUnexpected Pass: 1\nTimeout: 2\n"
+    assert run.meson_counts(output) == run.TestCounts("Meson", 1, 4, 0, 0)
+
+
+def test_no_counts_without_a_summary():
+    assert run.parse_test_counts("Compiling rgsaddle v0.5.0\nFinished\n") == []
+
+
+def test_a_test_command_with_failures_does_not_pass():
+    result = run.CommandResult(
+        name="tests",
+        kind="test",
+        argv=["true"],
+        returncode=0,
+        output="",
+        tests=[run.TestCounts("cargo", 3, 1, 0, 0)],
+    )
+    assert not result.passed
+
+
+def test_eessi_leg_reports_all_four_counts(fake_eessi):
+    leg = run.eessi_leg(fake_eessi)
+    assert "test summary: cargo: 3 passed, 0 failed, 1 ignored, 2 skipped" in leg.artefacts

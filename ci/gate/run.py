@@ -33,7 +33,7 @@ class CommandResult:
     argv: list[str]
     returncode: int
     output: str
-    tests: list[str] = field(default_factory=list)
+    tests: list[TestCounts] = field(default_factory=list)
 
     @property
     def clean(self) -> bool:
@@ -42,7 +42,8 @@ class CommandResult:
     @property
     def passed(self) -> bool:
         counts_present = self.kind != "test" or bool(self.tests)
-        return self.returncode == 0 and self.clean and counts_present
+        no_failures = all(counts.failed == 0 for counts in self.tests)
+        return self.returncode == 0 and self.clean and counts_present and no_failures
 
 
 @dataclass
@@ -81,23 +82,81 @@ def run_capture(
     return completed.returncode, completed.stdout
 
 
-def test_counts(output: str) -> list[str]:
-    counts: list[str] = []
-    cargo_matches = re.findall(
-        r"test result: [^.]+\.\s+(\d+) passed;\s+(\d+) failed", output
+@dataclass(frozen=True)
+class TestCounts:
+    tool: str
+    passed: int
+    failed: int
+    ignored: int
+    skipped: int
+
+    def __str__(self) -> str:
+        return (
+            f"{self.tool}: {self.passed} passed, {self.failed} failed, "
+            f"{self.ignored} ignored, {self.skipped} skipped"
+        )
+
+
+CARGO_RESULT = re.compile(
+    r"test result: \w+\. (\d+) passed; (\d+) failed; (\d+) ignored; "
+    r"\d+ measured; (\d+) filtered out"
+)
+PYTEST_SUMMARY = re.compile(
+    r"(?m)^=*\s*((?:\d+ [a-z]+, )*\d+ [a-z]+|no tests ran) in [\d.]+s\b"
+)
+PYTEST_OUTCOME = re.compile(r"(\d+) ([a-z]+)")
+MESON_LABELS = ("Ok", "Expected Fail", "Fail", "Unexpected Pass", "Skipped", "Timeout")
+
+
+def cargo_counts(output: str) -> TestCounts | None:
+    """Sum every libtest summary; filtered out tests count as skipped."""
+    matches = CARGO_RESULT.findall(output)
+    if not matches:
+        return None
+    passed, failed, ignored, skipped = (
+        sum(int(match[index]) for match in matches) for index in range(4)
     )
-    if cargo_matches:
-        passed = sum(int(item[0]) for item in cargo_matches)
-        failed = sum(int(item[1]) for item in cargo_matches)
-        counts.append(f"cargo: {passed} passed, {failed} failed")
-    pytest_matches = re.findall(r"(?m)(\d+) passed(?:,| in)", output)
-    if pytest_matches:
-        counts.append(f"pytest: {pytest_matches[-1]} passed")
-    meson_ok = re.findall(r"(?m)^Ok:\s+(\d+)\s*$", output)
-    meson_failed = re.findall(r"(?m)^Fail:\s+(\d+)\s*$", output)
-    if meson_ok and meson_failed:
-        counts.append(f"Meson: {meson_ok[-1]} passed, {meson_failed[-1]} failed")
-    return counts
+    return TestCounts("cargo", passed, failed, ignored, skipped)
+
+
+def pytest_counts(output: str) -> TestCounts | None:
+    """Read the last summary; errors fail, xfailed is ignored, deselected skipped."""
+    summaries = PYTEST_SUMMARY.findall(output)
+    if not summaries:
+        return None
+    outcomes: dict[str, int] = {}
+    for number, outcome in PYTEST_OUTCOME.findall(summaries[-1]):
+        outcomes[outcome] = outcomes.get(outcome, 0) + int(number)
+    return TestCounts(
+        "pytest",
+        outcomes.get("passed", 0) + outcomes.get("xpassed", 0),
+        outcomes.get("failed", 0) + outcomes.get("error", 0) + outcomes.get("errors", 0),
+        outcomes.get("xfailed", 0),
+        outcomes.get("skipped", 0) + outcomes.get("deselected", 0),
+    )
+
+
+def meson_counts(output: str) -> TestCounts | None:
+    """Read the last summary; unexpected passes and timeouts fail."""
+    values: dict[str, int] = {}
+    for label in MESON_LABELS:
+        found = re.findall(rf"(?m)^{label}:\s+(\d+)\s*$", output)
+        if found:
+            values[label] = int(found[-1])
+    if "Ok" not in values or "Fail" not in values:
+        return None
+    return TestCounts(
+        "Meson",
+        values["Ok"],
+        values["Fail"] + values.get("Unexpected Pass", 0) + values.get("Timeout", 0),
+        values.get("Expected Fail", 0),
+        values.get("Skipped", 0),
+    )
+
+
+def parse_test_counts(output: str) -> list[TestCounts]:
+    parsed = (cargo_counts(output), pytest_counts(output), meson_counts(output))
+    return [counts for counts in parsed if counts is not None]
 
 
 def shell_argv(script: str) -> list[str]:
@@ -122,7 +181,7 @@ def execute_commands(
                 argv=argv,
                 returncode=returncode,
                 output=output,
-                tests=test_counts(output) if kind == "test" else [],
+                tests=parse_test_counts(output) if kind == "test" else [],
             )
         )
     return results
@@ -145,11 +204,7 @@ def pixi_leg(plan: dict[str, object]) -> LegResult:
         if not failures
         else "failed checks: " + ", ".join(failures)
     )
-    summaries = [
-        count
-        for result in results
-        for count in result.tests
-    ]
+    summaries = [str(counts) for result in results for counts in result.tests]
     artefacts = [
         f"pixi version: {version_line(['pixi', '--version'])}",
         f"Rust toolchain: {version_line(['pixi', 'run', 'rustc', '--version'])}",
@@ -262,11 +317,7 @@ def eessi_leg(plan: dict[str, object]) -> LegResult:
         failures.append("module list")
     if version_code != 0 or len(tool_versions) != 3:
         failures.append("toolchain versions")
-    summaries = [
-        count
-        for result in results
-        for count in result.tests
-    ]
+    summaries = [str(counts) for result in results for counts in result.tests]
     reason = (
         "all EESSI build and test checks passed"
         if not failures
@@ -342,7 +393,7 @@ def details_block(legs: list[LegResult], success: bool) -> str:
             )
             if result.kind == "test":
                 count_mark = ":white_check_mark:" if result.tests else ":x:"
-                summary = "; ".join(result.tests) if result.tests else "none"
+                summary = "; ".join(map(str, result.tests)) if result.tests else "none"
                 lines.append(f"  - {count_mark} test counts found: {summary}")
     lines.extend(["", "_Artefacts_", ""])
     for leg in legs:
