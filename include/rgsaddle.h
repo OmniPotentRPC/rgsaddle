@@ -1462,6 +1462,50 @@ rgsaddle_status_t rgsaddle_band_set_string(RgsaddleBand *band, int32_t enabled,
                                            int32_t scheme);
 
 /**
+ * Dynamic NEB (Lindgren, Kastlunger and Peterson, J. Chem. Theory
+ * Comput. 15, 5787 (2019); ASE 3.29 DyNEB). ABI minor 45.
+ * `enabled` 0 clears it and ignores fmax and scale_fmax. `enabled` 1
+ * leaves an image in place once the largest per-atom norm of its
+ * projected force is strictly below `fmax`, scaled by
+ * `fmax * (1 + distance * scale_fmax)` where distance is the Euclidean
+ * norm of the coordinate difference from the highest-energy image.
+ * A converged image keeps its last energy and force and stays in the
+ * spring and the tangent. It is evaluated again when a neighbour moves
+ * enough that the projected force exceeds that threshold. The highest
+ * energy image is never given a zero force. The default band, with
+ * this unset, evaluates every image.
+ *
+ * Refused on a solid-state band and on the trust-region stepper.
+ * Returns RGSADDLE_NULL_BAND for a null band, and
+ * RGSADDLE_INVALID_PARAMETER for enabled other than 0 or 1, a
+ * non-finite fmax or scale_fmax, a solid-state band, or the
+ * trust-region stepper.
+ */
+rgsaddle_status_t rgsaddle_band_set_dynamic(RgsaddleBand *band, int32_t enabled,
+                                            double fmax, double scale_fmax);
+
+/**
+ * ASE 3.29 DyNEB mask, ABI minor 45. `positions`, `energies` and
+ * `forces` are the whole band, image-major, `n_images * 3 * n_atoms`
+ * for the coordinates and the forces. Interior force rows whose
+ * largest per-atom norm is strictly below
+ * `fmax * (1 + distance * scale_fmax)` are set to zero, except the
+ * highest-energy image, whose force is kept. `distance` does not use
+ * the minimum image. `frozen`, when non-null, receives `n_images`
+ * bytes: 1 when that image would not be moved (the force after this
+ * mask is strictly below `fmax`). Both endpoints are 1.
+ *
+ * Returns RGSADDLE_SHAPE for a null pointer, fewer than 3 images or a
+ * non-positive atom count, RGSADDLE_NON_FINITE for a non-finite input,
+ * and RGSADDLE_INVALID_PARAMETER for a non-finite fmax or scale_fmax.
+ */
+rgsaddle_status_t rgsaddle_dyneb_mask(int64_t n_images, int64_t n_atoms,
+                                      const double *positions,
+                                      const double *energies, double *forces,
+                                      double fmax, double scale_fmax,
+                                      uint8_t *frozen);
+
+/**
  * Point stencil. Opaque config, typed keys, one callback.
  * rgsaddle_stencil_run is a loop over rgsaddle_stencil_step.
  * The older band and min-mode sessions stay step-only.

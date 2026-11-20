@@ -213,6 +213,11 @@ def project_band(positions: numpy.typing.NDArray[numpy.float64], energies: numpy
     Project an evaluated band. Returns (forces, ci_index). forces is flat, one row per image including zero endpoints, in the ASE force convention. climb selects the interior image by the endpoint-slope rule on this call; a higher endpoint that slopes into the band does not climb. Units are the caller's. k is energy per length squared. spring_ks, when given, is one constant per spring (length images - 1) and replaces k. cell is the 3x3 row-major lattice; a zero row is not wrapped. fixed is one uint8 per atom, 1 for a fixed atom (ABI minor 39): its force rows are zero, tangents and springs use the free atoms, and the mean force stays. The endpoints must agree on every fixed atom.
     """
 
+def dyneb_mask(positions: numpy.typing.NDArray[numpy.float64], energies: numpy.typing.NDArray[numpy.float64], forces: numpy.typing.NDArray[numpy.float64], fmax: float, scale_fmax: float) -> tuple[numpy.typing.NDArray[numpy.float64], numpy.typing.NDArray[numpy.uint8]]:
+    """
+    ASE 3.29 DyNEB mask on a whole band (image-major positions, energies and projected forces). Returns (forces, frozen). An interior image whose largest per-atom force norm is strictly below fmax * (1 + distance * scale_fmax) is zeroed, except the highest-energy image. frozen is one uint8 per image, 1 when the optimizer would leave it in place.
+    """
+
 def idpp_path(reactant: numpy.typing.NDArray[numpy.float64], product: numpy.typing.NDArray[numpy.float64], n_images: int, cell: numpy.typing.NDArray[numpy.float64] | None = None, max_iterations: int = 5000, grad_tol: float = 0.001, max_move: float = 0.1) -> numpy.typing.NDArray[numpy.float64]:
     """
     Image-dependent pair-potential path, endpoints included, shape (n_images, 3N). Interior images are relaxed toward linearly interpolated minimum-image pair distances by L-BFGS. cell is a 3x3 row-major lattice, or None in free space. No surface is evaluated.

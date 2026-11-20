@@ -593,7 +593,8 @@ class NEB:
     call, and ``method`` is ``improvedtangent`` (default), ``aseneb``,
     ``eb``, or ``dneb``. ``spline`` and ``string`` raise
     ``NotImplementedError``. So does ``precon``, and any of
-    ``dynamic_relaxation``, ``fmax``, or ``scale_fmax`` (DyNEB).
+    ``dynamic_relaxation``, ``fmax``, or ``scale_fmax``. Those three
+    belong to :class:`DyNEB`.
 
     ``get_positions`` and ``get_forces`` are the interior images only,
     shape ``((n_images - 2) * n_atoms, 3)``. ``get_potential_energy`` is
@@ -913,6 +914,109 @@ class NEB:
         positions = _image_positions(self.images)
         tangent = positions[self.ci + 1] - positions[self.ci - 1]
         return saddle_index(self.images[self.ci], tangent, **options)
+
+
+class DyNEB(NEB):
+    """ASE 3.29 dynamic NEB.
+
+    ``dynamic_relaxation`` leaves an interior image where it is once the
+    largest per-atom norm of its projected force is strictly below
+    ``fmax``. ``scale_fmax`` scales that test by the Euclidean distance
+    from the highest-energy image,
+    ``fmax * (1 + distance * scale_fmax)``, with no minimum image. The
+    highest-energy image keeps its force. A skipped image keeps the
+    energy and the force from the last evaluation and still enters the
+    spring and the tangent; a neighbour that pulls the projected force
+    back over the threshold is evaluated again. ``fmax`` is the
+    optimizer's ``fmax``.
+
+    ``dynamic_relaxation=False`` is the ordinary band.
+    ``scale_fmax`` with that flag raises ``ValueError``. ``parallel=True``
+    raises ``ValueError`` while dynamic relaxation is on. The mask is
+    ``rgsaddle._core.dyneb_mask``.
+    """
+
+    def __init__(
+        self,
+        images: list[Any],
+        k: Any = 0.1,
+        fmax: float = 0.05,
+        climb: bool = False,
+        parallel: bool = False,
+        remove_rotation_and_translation: bool = False,
+        world: Any = None,
+        dynamic_relaxation: bool = True,
+        scale_fmax: float = 0.0,
+        method: str | None = None,
+        allow_shared_calculator: bool = False,
+        precon: Any = None,
+    ) -> None:
+        super().__init__(
+            images,
+            k=k,
+            climb=climb,
+            parallel=parallel,
+            remove_rotation_and_translation=remove_rotation_and_translation,
+            world=world,
+            method=method,
+            allow_shared_calculator=allow_shared_calculator,
+            precon=precon,
+        )
+        self.fmax = float(fmax)
+        self.dynamic_relaxation = bool(dynamic_relaxation)
+        self.scale_fmax = float(scale_fmax)
+        if not self.dynamic_relaxation and self.scale_fmax:
+            raise ValueError(
+                "Scaled convergence criteria only implemented in series with dynamic relaxation."
+            )
+
+    def set_positions(self, positions: Any, adjust_positions: bool = True) -> None:
+        if not self.dynamic_relaxation:
+            super().set_positions(positions, adjust_positions)
+            return
+        if self.parallel:
+            raise ValueError(
+                "Dynamic relaxation does not work efficiently when parallelizing over images. "
+                "Try AutoNEB routine for freezing images in parallel."
+            )
+        natoms = len(self.images[0])
+        array = np.asarray(positions, dtype=np.float64).reshape((-1, 3))
+        expect = (len(self.images) - 2) * natoms
+        if len(array) != expect:
+            raise ValueError(f"positions: expected {expect} atoms, got {len(array)}")
+        n1 = 0
+        for index, image in enumerate(self.images[1:-1]):
+            block = self.get_forces()[index * natoms : (index + 1) * natoms]
+            image_fmax = float(np.sqrt((block**2).sum(axis=1)).max()) if block.size else 0.0
+            if image_fmax < self.fmax:
+                n1 += natoms
+            else:
+                image.set_positions(array[n1 : n1 + natoms], apply_constraint=False)
+                n1 += natoms
+
+    def get_forces(self) -> Float64:
+        interior = super().get_forces()
+        if not self.dynamic_relaxation:
+            return interior
+        from rgsaddle._core import dyneb_mask
+
+        count = len(self.images)
+        natoms = len(self.images[0])
+        if count < 3 or self.energies is None:
+            return interior
+        positions = np.ascontiguousarray(_image_positions(self.images).reshape(-1), dtype=np.float64)
+        energies = np.ascontiguousarray(self.energies, dtype=np.float64)
+        full = np.zeros(count * natoms * 3, dtype=np.float64)
+        full[natoms * 3 : (count - 1) * natoms * 3] = np.asarray(interior, dtype=np.float64).reshape(-1)
+        masked, _frozen = dyneb_mask(
+            positions,
+            energies,
+            full,
+            self.fmax,
+            self.scale_fmax,
+        )
+        masked = np.asarray(masked, dtype=np.float64).reshape(count, natoms, 3)
+        return np.ascontiguousarray(masked[1:-1].reshape(-1, 3), dtype=np.float64)
 
 
 class SingleCalculatorNEB(NEB):

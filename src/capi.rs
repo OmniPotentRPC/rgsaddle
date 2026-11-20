@@ -430,6 +430,26 @@ impl BandSurface for CSurface {
         }
         Ok((e[0], Array1::from(g)))
     }
+
+    fn eval_indexed(
+        &self,
+        image: usize,
+        position: ndarray::ArrayView1<f64>,
+    ) -> Result<(f64, Array1<f64>), SaddleError> {
+        let flat: Vec<f64> = position.iter().copied().collect();
+        let mut e = [0.0];
+        let mut g = vec![0.0; flat.len()];
+        let image = image as i64;
+        // One interior image, named by its band index. Not the
+        // climbing-image request: a dynamic step refreshes whichever
+        // image the spring pulled back over the threshold.
+        if self.per_image {
+            self.call(self.n_images, image, &flat, &mut e, &mut g)?;
+        } else {
+            self.request(RGSADDLE_REQ_ONE_IMAGE, 1, image, &flat, &mut e, &mut g)?;
+        }
+        Ok((e[0], Array1::from(g)))
+    }
 }
 
 impl PointSurface for CSurface {
@@ -960,6 +980,77 @@ unsafe fn project_band(
         }
         Err(err) => status_of(&err),
     }
+}
+
+/// ASE 3.29 DyNEB mask. See [`rgsaddle_dyneb_mask`] in the C header.
+///
+/// # Safety
+/// `positions`, `energies` and `forces` address `n_images * 3 * n_atoms`
+/// doubles. `frozen`, when non-null, addresses `n_images` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_dyneb_mask(
+    n_images: i64,
+    n_atoms: i64,
+    positions: *const f64,
+    energies: *const f64,
+    forces: *mut f64,
+    fmax: f64,
+    scale_fmax: f64,
+    frozen: *mut u8,
+) -> i32 {
+    if positions.is_null() || energies.is_null() || forces.is_null() || n_images < 3 || n_atoms < 1
+    {
+        return RGSADDLE_SHAPE;
+    }
+    let rows = n_images as usize;
+    let dof = (3 * n_atoms) as usize;
+    let total = rows * dof;
+    let pos = unsafe { slice::from_raw_parts(positions, total) };
+    let energy = unsafe { slice::from_raw_parts(energies, rows) };
+    let force = unsafe { slice::from_raw_parts_mut(forces, total) };
+    if !pos.iter().all(|v| v.is_finite())
+        || !energy.iter().all(|v| v.is_finite())
+        || !force.iter().all(|v| v.is_finite())
+    {
+        return RGSADDLE_NON_FINITE;
+    }
+    let Ok(interior_pos) = Array2::from_shape_vec((rows - 2, dof), pos[dof..total - dof].to_vec())
+    else {
+        return RGSADDLE_SHAPE;
+    };
+    let Ok(mut force_rows) =
+        Array2::from_shape_vec((rows - 2, dof), force[dof..total - dof].to_vec())
+    else {
+        return RGSADDLE_SHAPE;
+    };
+    let interior_e = Array1::from(energy[1..rows - 1].to_vec());
+    let spec = crate::DynamicNeb::default()
+        .with_fmax(fmax)
+        .with_scale_fmax(scale_fmax);
+    let mask = match crate::band::dynamic_mask(
+        interior_pos.view(),
+        interior_e.view(),
+        &mut force_rows,
+        spec,
+    ) {
+        Ok(mask) => mask,
+        Err(err) => return status_of(&err),
+    };
+    for (i, row) in force_rows.outer_iter().enumerate() {
+        let start = (i + 1) * dof;
+        for (c, value) in row.iter().enumerate() {
+            force[start + c] = *value;
+        }
+    }
+    if !frozen.is_null() {
+        let flags = unsafe { slice::from_raw_parts_mut(frozen, rows) };
+        flags[0] = 1;
+        flags[rows - 1] = 1;
+        for (i, image) in mask.iter().enumerate() {
+            flags[i + 1] = u8::from(image.frozen);
+        }
+    }
+    RGSADDLE_OK
 }
 
 /// # Safety

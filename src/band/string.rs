@@ -128,6 +128,11 @@ pub(super) fn check_string(config: &BandConfig) -> Result<(), SaddleError> {
             "the simplified string method does not carry a solid-state cell block".into(),
         ));
     }
+    if config.dynamic.is_some() {
+        return Err(SaddleError::Invalid(
+            "the simplified string method evaluates every image; dynamic NEB is for the NEB".into(),
+        ));
+    }
     Ok(())
 }
 
@@ -398,6 +403,12 @@ impl BandSession {
                 return Err(SaddleError::Invalid(
                     "the simplified string method uses the band's first-order stepper, \
                      not the trust-region stepper"
+                        .into(),
+                ));
+            }
+            if self.config.dynamic.is_some() {
+                return Err(SaddleError::Invalid(
+                    "the simplified string method evaluates every image; dynamic NEB is for the NEB"
                         .into(),
                 ));
             }

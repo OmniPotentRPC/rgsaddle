@@ -7,10 +7,10 @@ copied from tag 3.29.0. This file replaces ``ase.mep.NEB`` and the
 minimum-mode classes with the rgsaddle drivers before those modules
 import them.
 
-DyNEB is not vendored. ``ase/test/neb/test_dynamic_neb.py`` drives
-``ase.mep.DyNEB`` (dynamic and scaled image relaxation). rgsaddle does
-not implement dynamic NEB, and a keyword that would select it raises
-``NotImplementedError``.
+``ase/test/neb/test_dynamic_neb.py`` is vendored. It drives
+``ase.mep.DyNEB``, which this file replaces with ``rgsaddle.ase.DyNEB``
+before the vendor modules import it. ``rgsaddle.ase.NEB`` still refuses
+``dynamic_relaxation``, ``fmax``, and ``scale_fmax``.
 
 ``ase/optimize/test/neb.py`` is not vendored. It is a script with no
 pytest entry and no assertion.
@@ -35,7 +35,7 @@ import ase.mep.dimer as ase_dimer
 import ase.mep.neb as ase_neb
 
 import rgsaddle.ase as drivers
-from rgsaddle.ase import MinModeAtoms, NEB
+from rgsaddle.ase import DyNEB, MinModeAtoms, NEB
 
 # Vendor modules bind ``from ase.mep import NEB`` at import. Patch first,
 # import them, then put ASE's classes back so the rest of the suite still
@@ -49,6 +49,14 @@ _ORIG_DIMER = {
 
 mep.NEB = NEB
 ase_neb.NEB = NEB
+mep.DyNEB = DyNEB
+ase_neb.DyNEB = DyNEB
+try:
+    import ase.mep.dyneb as ase_dyneb
+
+    ase_dyneb.DyNEB = DyNEB
+except ImportError:
+    pass
 mep.MinModeAtoms = MinModeAtoms
 ase_dimer.MinModeAtoms = MinModeAtoms
 
@@ -59,7 +67,7 @@ _OPTIONAL = (
     "idpp_interpolate",
     "SingleCalculatorNEB",
 )
-_OVERRIDES: dict[str, object] = {"NEB": NEB, "MinModeAtoms": MinModeAtoms}
+_OVERRIDES: dict[str, object] = {"NEB": NEB, "DyNEB": DyNEB, "MinModeAtoms": MinModeAtoms}
 for _name in _OPTIONAL:
     _obj = getattr(drivers, _name, None)
     if _obj is None:

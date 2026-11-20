@@ -553,4 +553,13 @@ typedef int64_t (*abi45_signature_rgsaddle_band_free_end_cuts)(
     const RgsaddleBand *band);
 _Static_assert(_Generic(&rgsaddle_band_free_end_cuts, abi45_signature_rgsaddle_band_free_end_cuts: 1, default: 0), "rgsaddle_band_free_end_cuts signature");
 
+typedef rgsaddle_status_t (*abi45_signature_rgsaddle_band_set_dynamic)(
+    RgsaddleBand *band, int32_t enabled, double fmax, double scale_fmax);
+_Static_assert(_Generic(&rgsaddle_band_set_dynamic, abi45_signature_rgsaddle_band_set_dynamic: 1, default: 0), "rgsaddle_band_set_dynamic signature");
+
+typedef rgsaddle_status_t (*abi45_signature_rgsaddle_dyneb_mask)(
+    int64_t n_images, int64_t n_atoms, const double *positions, const double *energies,
+    double *forces, double fmax, double scale_fmax, uint8_t *frozen);
+_Static_assert(_Generic(&rgsaddle_dyneb_mask, abi45_signature_rgsaddle_dyneb_mask: 1, default: 0), "rgsaddle_dyneb_mask signature");
+
 #endif
