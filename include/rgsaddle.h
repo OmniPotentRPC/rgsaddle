@@ -289,7 +289,7 @@ void rgsaddle_hyperplane_sampler_free(RgsaddleHyperplaneSampler *);
 /**
  * Integrate V_full - V_harmonic over lambda on a fixed hyperplane.
  * point and normal each hold dimension doubles. config is read and result
- * is written during the call; sampler must remain live. ABI minor 42.
+ * is written during the call; sampler must remain live. ABI minor 45.
  */
 int32_t rgsaddle_hyperplane_thermodynamic_integration(
     RgsaddleHyperplaneSampler *, const double *, const double *, size_t,

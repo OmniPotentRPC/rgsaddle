@@ -9,7 +9,7 @@
 //! Algorithms implemented by Michele Ceriotti and Benjamin Helfrecht, 2015
 //!
 //! The level shift is Simons and Nichols, *Int. J. Quantum Chem.* 38
-//! (1990) 263-276, <https://doi.org/10.1002/qua.560382435>.
+//! (1990) 263-276, <https://doi.org/10.1002/qua.560382427>.
 //! Powell's symmetric update is Fletcher, *Practical Methods of
 //! Optimization*, 2nd ed. (1987).
 //! Bofill's mix of that update with the symmetric rank-one term is
