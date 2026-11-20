@@ -1915,6 +1915,7 @@ dependencies = [
  "criterion",
  "dlpk",
  "eindir-core",
+ "either",
  "faer",
  "flate2",
  "libloading",
@@ -1931,6 +1932,7 @@ dependencies = [
  "rug",
  "sha2",
  "thiserror 2.0.21",
+ "zerocopy",
 ]
 
 [[package]]
