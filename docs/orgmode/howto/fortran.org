@@ -55,6 +55,8 @@ PAFI and OH-TST call the point callback from worker threads. The procedure must 
 
 =profile= and =curve= take the array length as the capacity. When the arrays are shorter than the stored series, the call returns =RGSADDLE_INVALID_PARAMETER= and sets the =written= argument to the length that was required. The same contract is on =rgsaddle_pafi_profile= and =rgsaddle_ohtst_curve=. A null =create= keeps =RGSADDLE_ABI_MISMATCH= when the config major is not 1 and =RGSADDLE_SHAPE= when the dimensions are not a session, instead of reporting both as =RGSADDLE_INVALID_PARAMETER=.
 
+=set_config= on a PAFI or OH-TST handle checks in the order of the C setter. An empty or released handle returns =RGSADDLE_NULL_SESSION= whatever the config holds. A live handle given another major returns =RGSADDLE_ABI_MISMATCH= and keeps its previous config.
+
 Both callback routes call the same Rust C ABI. The Fortran tests check convergence on an analytic surface, not only that the two routes agree.
 
 * Minimal loop

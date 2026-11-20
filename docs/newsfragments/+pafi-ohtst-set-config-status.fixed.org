@@ -1,0 +1,4 @@
+~rgsaddle_pafi_set_config~ and ~rgsaddle_ohtst_set_config~ return ~RGSADDLE_ABI_MISMATCH~ for a config with another major instead of ~RGSADDLE_INVALID_PARAMETER~, and a NULL session returns ~RGSADDLE_NULL_SESSION~ before the config is read.
+The Fortran ~set_config~ wrappers check the handle first as well, so an empty or released ~pafi_handle~ or ~ohtst_handle~ returns ~RGSADDLE_NULL_SESSION~ with any config.
+~rgsaddle_pafi_result~ returns ~RGSADDLE_SHAPE~ and leaves ~out~ unchanged when the summed evaluation count does not fit in ~int64_t~, instead of overflowing.
+CI runs the Fortran handle create, release, and assignment tests under valgrind.
