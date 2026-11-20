@@ -31,6 +31,7 @@ rgsaddle is system-agnostic and unit-agnostic: surfaces supply energies, gradien
 - [Grow a band with AutoNEB](https://omnipotentrpc.github.io/rgsaddle/howto/autoneb.html): AutoNEB window insertion and spring scaling (`docs/orgmode/howto/autoneb.org`)
 - [Follow a minimum mode](https://omnipotentrpc.github.io/rgsaddle/howto/minmode.html): Dimer, Lanczos, soft-mode seeding, surrogate Hessian actions, saddle index, and ARTn protocol (`docs/orgmode/howto/minmode.org`)
 - [Leave a minimum with ART nouveau](https://omnipotentrpc.github.io/rgsaddle/howto/art.html): Phased Activation-Relaxation Technique nouveau (ArtSession) (`docs/orgmode/howto/art.org`)
+- [Choose saddle search directions from a minimum](https://omnipotentrpc.github.io/rgsaddle/howto/direction-cover.html): Signed per-atom direction cover and arm picker for saddle searches from a minimum (DirectionCover) (`docs/orgmode/howto/direction-cover.org`)
 - [Follow k lowest modes](https://omnipotentrpc.github.io/rgsaddle/howto/indexk.html): Index-k minimum-mode searches with LOBPCG and block Lanczos (`docs/orgmode/howto/indexk.org`)
 - [Solid-state dimer](https://omnipotentrpc.github.io/rgsaddle/howto/solid-dimer.html): Variable-cell solid-state dimer on atoms and strain (`docs/orgmode/howto/solid-dimer.org`)
 - [Solid-state NEB](https://omnipotentrpc.github.io/rgsaddle/howto/ssneb.html): Generalized solid-state NEB on the joint atom-strain chart (`docs/orgmode/howto/ssneb.org`)

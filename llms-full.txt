@@ -167,6 +167,9 @@ Defaults: improved tangent, uniform spring `k ` 5=, NEB projection, climbing ima
 ## Leave a minimum with ART nouveau
 `howto/art` is the phased search: a host seed and mask, perpendicular relaxation, Lanczos, a lowest-mode climb, an index-1 certificate, a push both ways off the saddle, and the two quenches. `ArtStatus::Reverted` is not a completed exit.
 
+## Choose search directions from a minimum
+`howto/direction-cover` is `DirectionCover`: a signed cover of unit vectors on every active atom's sphere, an optional Gaussian kick on its neighbours, and a picker that orders the arms by angular gap or by expected improvement of the barrier. Each arm is one `ArtSession`. The coverage readout has the covering radius per atom, a record per arm, and the distinct saddles against draws.
+
 ## Step one point with a stencil
 `howto/stencil` builds `Stencil::point` for a minimiser, the dimer, Lanczos, ART, or eigen following. `Stencil::band` is the `feat/band-methods-zoom` seam. The C names are `rgsaddle_stencil_*` and `rgsaddle_last_error`. Python is `rgsaddle.Stencil.point` and `rgsaddle.ase.Point`.
 
@@ -252,6 +255,7 @@ The table below lists the main types.
 | `MinModeSession`               | Dimer or Lanczos lowest-mode search, same stepping contract; `set_position`, `set_mode`, `estimate_mode` for reuse; `set_torque_window` sets the dimer and Lanczos torque window apart from `rotation_tol`; `set_rotation_stop_length` turns on the curvature-aware rotation stop; `set_artn` enables or disables the ART nouveau protocol |
 | `SoftModeDirectionPlan`        | Soft-mode-subspace-first direction seeding (`soft_mode_then_full_directions`, `spectral_gap_rank`). Recovers a sparse Hessian at a minimum, selects the soft-subspace rank `k` from the largest spectral gap, and emits `2 * phase_count` unit directions |
 | `ArtSession`                   | ART nouveau in eight persisted phases: masked host seed, perpendicular relaxation, Lanczos, lowest-mode climb, index-1 certificate, push both ways, unconstrained quench, reversibility. `run_events` marks duplicate saddles. `ArtStatus::Reverted` is not a completed exit. `force_calls` lists every surface evaluation. Non-exhaustive `ArtConfig` |
+| `DirectionCover`               | Signed per-atom direction cover and arm picker for saddle searches from one minimum. Each active atom is its own centre with an even signed cover of `cover_points` on its sphere and an optional Gaussian kick on neighbours within `kick_radius`. The climb is `ArtSession`. `run`, or `suggest`, `run_arm` and `record` for a host loop. `coverage` is the `CoverageReport`: exact covering radius per centre, per arm records, distinct saddles against draws, frequency counts, and the next arm with its score. No Hessian. Non-exhaustive `DirectionCoverConfig` and `CoverBudget` |
 | `IndexKSession`                | Index-k minimum-mode step. `k ` 1= is `MinModeSession`. `indexk_step` is one shot. `reflect_force` and `translated_force` are the subspace maps |
 | `SolidDimer`                   | That search on atoms plus Jacobian-scaled cell strain. `CellMask::frozen` is the fixed-cell dimer. `stress` and `elastic_dipole` are `σ` and `V σ`. `SolidDimerConfig`, `IndexCheck`, `StressCheck`, `SolidDimerReport` and `IndexReport` are non-exhaustive |
 | `StrainResponse`               | One hop. `barrier(ε)` is the lowest symmetry image of `ΔE0 - (P_saddle - P_minimum):ε`, or `NeedsSearch` past the validity bound. `ElasticDipole::from_stress` is `-V (σ_defect - σ_bulk)`. `refine` caches an index-1 solid dimer. `with_prefactor`, `with_variants`, `with_point_group`, `with_policy`, and `with_multipoles` attach options. `to_json` and `from_json` are the event record |
@@ -315,6 +319,7 @@ Every public module exported by `src/lib.rs`, with its public types, free functi
 | `connect` | Types: `ConnectConfig`, `ConnectProfile`, `ConnectReport`. Functions: `connect` |
 | `constraints` | Types: `Constraints`, `Equality`, `InternalCounts` |
 | `defect_pair` | Types: `BasinSaddle`, `CaptureRecord`, `CellMode`, `DefectPairConfig`, `DimerSeed`, `DirectionClass`, `FreeMigration`, `HopOutcome`, `HopTemplate`, `MatchedCapture`, `OuterHop`, `PairSetup`, `PeriodicSinkRate`, `PeriodicSinkSurvival`, `RateCatalogue`, `RateEntry`, `RecombinationVolume`, `SiteOutcome`, `SphereLanding`, `VolumePlacement`, `VolumeSite`. Functions: `attempt_frequency`, `capture_is_spontaneous`, `capture_is_spontaneous_within`, `classify_separation`, `debye_hit_probability`, `debye_matched_radius`, `debye_radius`, `debye_resistance`, `defect_pair_rates`, `descend_to_floor`, `effective_capture_radius`, `embed_free_migration`, `embed_sphere_return`, `kinetic_recombination_volume`, `matched_capture_radius`, `mean_absorption_time`, `pair_separation`, `periodic_capture_log_likelihood`, `periodic_sink_rate`, `periodic_sink_survival`, `product_tangent`, `seeded_saddles`, `segment_band`, `shell_pair_factor`, `smoluchowski_rate`, `sphere_hit_probability`, `spherical_return_probability`, `volume_from_frequency`. Constants: `FREE_CRYSTAL`, `SPONTANEOUS_BARRIER_EV` |
+| `direction_cover` | Types: `ArmFailure`, `ArmId`, `ArmOutcome`, `ArmPolicy`, `ArmRecord`, `ArmSuggestion`, `ArmTrial`, `AtomCoverage`, `CoverBudget`, `CoverageReport`, `DirectionCover`, `DirectionCoverConfig`, `ProductState`, `SaddleEntry`. Functions: `covering_radius_s2`, `sphere_cover` |
 | `eigensolve` | Types: `EigenDevice`, `ExpandKind`, `RitzDecomposition`. Functions: `eigh_on`, `exact_eigh`, `expand`, `lowest_on`, `rayleigh_ritz`, `rayleigh_ritz_iter` |
 | `elastic` | Types: `ElasticMultipole`, `LocalField`, `Octupole`, `Quadrupole`, `StrainGradient`. Functions: `quadrupole_energy` |
 | `error` | Types: `SaddleError` |
@@ -385,10 +390,12 @@ Every public configuration struct, its public fields, and the corresponding chai
 | `CartesianPes` | `with_proj` (`CartesianPes::with_proj`, `set_proj`) |
 | `CiConfig` | `trigger_factor` (`with_trigger_factor`), `trigger_force` (`with_trigger_force`) |
 | `ConnectConfig` | `alpha0` (`with_alpha0`), `band_images` (`with_band_images`), `distance_step_max` (`with_distance_step_max`), `distance_step_min` (`with_distance_step_min`), `energy_difference_threshold` (`with_energy_difference_threshold`), `forcetol` (`with_forcetol`), `forcetol_per_distance` (`with_forcetol_per_distance`), `lanczos_iterations` (`with_lanczos_iterations`), `lanczos_rel_tol` (`with_lanczos_rel_tol`), `minimize_fmax` (`with_minimize_fmax`), `minimize_maxrise` (`with_minimize_maxrise`), `minimize_nsteps` (`with_minimize_nsteps`), `minmode_max_move` (`with_minmode_max_move`), `minmode_memory` (`with_minmode_memory`), `n_loops` (`with_n_loops`), `nhistx` (`with_nhistx`), `nsteps` (`with_nsteps`), `quench_nodes` (`with_quench_nodes`), `saddle_cosp` (`with_saddle_cosp`), `target_distance_other` (`with_target_distance_other`), `target_distance_saddle` (`with_target_distance_saddle`), `trusted_force_difference` (`with_trusted_force_difference`), `trustradius` (`with_trustradius`) |
+| `CoverBudget` | `max_arms` (`with_max_arms`), `max_force_calls` (`with_max_force_calls`) |
 | `CrystalSymmetryConfig` | `cell` (`with_cell`), `matching_tolerance` (`with_matching_tolerance`), `orbit_tolerance` (`with_orbit_tolerance`), `orthogonality_tolerance` (`with_orthogonality_tolerance`) |
 | `CrystalSymmetryOperation` | `centre` (`with_centre`), `permutation` (`with_permutation`), `rotation` (`with_rotation`), `translation` (`with_translation`) |
 | `CurvatureBound` | `fraction` (`with_fraction`), `lambda0` (`with_lambda0`), `slope` (`with_slope`) |
 | `DefectPairConfig` | `angular_scale` (`with_angular_scale`), `band` (`with_band`), `boltzmann` (`with_boltzmann`), `bulk_stress` (`with_bulk_stress`), `cell_mode` (`with_cell_mode`), `connect_rmsd` (`with_connect_rmsd`), `dimer` (`with_dimer`), `direction_tol` (`with_direction_tol`), `external_stress` (`with_external_stress`), `finite_temperature` (`with_finite_temperature`), `harmonic_atoms` (`with_harmonic_atoms`), `harmonic_step` (`with_harmonic_step`), `images` (`with_images`), `mass` (`with_mass`), `max_band_steps` (`with_max_band_steps`), `max_dimer_steps` (`with_max_dimer_steps`), `pafi` (`with_pafi`), `planes` (`with_planes`), `push` (`with_push`), `relax` (`with_relax`), `seed_fraction` (`with_seed_fraction`), `shooting` (`with_shooting`), `temperatures` (`with_temperatures`), `zero_t_tol` (`with_zero_t_tol`) |
+| `DirectionCoverConfig` | `art` (`with_art`), `art_max_steps` (`with_art_max_steps`), `batch` (`with_batch`), `cell` (`with_cell`), `cover_points` (`with_cover_points`), `cover_sweeps` (`with_cover_sweeps`), `ei_margin` (`with_ei_margin`), `kick_radius` (`with_kick_radius`), `kick_width` (`with_kick_width`), `length_scale` (`with_length_scale`), `minimum_energy_tol` (`with_minimum_energy_tol`), `minimum_rmsd_tol` (`with_minimum_rmsd_tol`), `policy` (`with_policy`), `saddle_energy_tol` (`with_saddle_energy_tol`), `saddle_rmsd_tol` (`with_saddle_rmsd_tol`) |
 | `ExpBandPrecon` | `a` (`with_a`), `c_stab` (`with_c_stab`), `mu` (`with_mu`), `r_cut_factor` (`with_r_cut_factor`) |
 | `FmmSolver` | `green` (`with_green`), `leaf` (`with_leaf`), `theta` (`with_theta`) |
 | `ForceMatchOpts` | `bond_scale` (`with_bond_scale`), `kinds` (`with_kinds`), `rcut_factor` (`with_rcut_factor`), `tvecs` (`with_tvecs`) |
@@ -1930,6 +1937,129 @@ fn main() -> Result<(), SaddleError> {
     Ok(())
 }
 ```
+
+# Choose saddle search directions from a minimum (`docs/orgmode/howto/direction-cover.org`)
+
+> Signed per-atom direction cover and arm picker for saddle searches from a minimum (DirectionCover)
+
+`DirectionCover` decides where the saddle searches out of one minimum start, and in which order. It is written for adaptive kinetic Monte Carlo, where every visited minimum needs its low saddles and a measure of how much of the search space has been tried (Xu and Henkelman, J. Chem. Phys. 129, 114104 (2008), doi:10.1063/1.2976010). It supplies the starts and the order only. Each start runs as one `ArtSession`, the phased ART nouveau of `howto/art`, so the push, perpendicular relaxation, Lanczos climb, index-1 certificate and both quenches are the ones documented there.
+
+Nothing here builds a Hessian. The inputs are the minimum, an optional per-atom active mask, a `u64` seed, a `DirectionCoverConfig` and a `CoverBudget`. Bad input returns `SaddleError`; nothing is clamped or replaced.
+
+## Run a budget of arms
+Build the chooser on the surface and the relaxed minimum, then spend a budget. A budget sets `max_arms`, `max_force_calls`, or both; an empty budget is refused.
+
+```rust
+use ndarray::{Array1, ArrayView1, array};
+use rgsaddle::{
+    ArmOutcome, ArtConfig, CoverBudget, DirectionCover, DirectionCoverConfig, MinModeConfig,
+    MinModeKind, PointSurface, SaddleError,
+};
+
+struct DoubleWell;
+
+impl PointSurface for DoubleWell {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        let (px, py, pz) = (x[0], x[1], x[2]);
+        let e = (px * px - 1.0).powi(2) + 0.25 * (py * py + pz * pz);
+        Ok((e, array![4.0 * px * (px * px - 1.0), 0.5 * py, 0.5 * pz]))
+    }
+}
+
+fn main() -> Result<(), SaddleError> {
+    let mode = MinModeConfig::default()
+        .with_kind(MinModeKind::Lanczos)
+        .with_saddle_check(None)
+        .with_force_tol(0.02)
+        .with_max_move(0.1)
+        .with_krylov_dim(4)
+        .with_max_rotations(6);
+    let art = ArtConfig::default()
+        .with_mode(mode)
+        .with_push_length(0.5)
+        .with_max_pushes(12)
+        .with_max_climbs(25)
+        .with_push_over(0.25);
+    let config = DirectionCoverConfig::default().with_art(art);
+    let mut cover = DirectionCover::new(&DoubleWell, array![-1.0, 0.0, 0.0], None, 7, config)?;
+    let report = cover.run(&DoubleWell, CoverBudget::default().with_max_arms(12))?;
+    assert_eq!(report.saddles.len(), 1);
+    assert!(report
+        .records
+        .iter()
+        .any(|r| r.outcome == ArmOutcome::DuplicateSaddle(0)));
+    Ok(())
+}
+```
+
+The same example is the doctest on `DirectionCover`. Arms whose push points away from the barrier end as `NonConverged` (ART spent its pushes without negative curvature). Once one product is known the picker turns to the untried directions next to it.
+
+## Drive the arms from the host
+`run` is the loop `suggest_batch`, `run_arm` for each pick on rayon's pool, then `record` in pick order. A host that schedules its own workers can split it:
+
+1. `suggest` or `suggest_batch(k)` returns `ArmSuggestion` values: the `ArmId` (centre atom and cover point), its score, and the policy that produced it.
+2. `seed(arm)` is the `ArtSeed` for that arm, if the host runs ART itself; `run_arm(surface, arm)` runs it and returns an `ArmTrial`.
+3. `record(trial)` files the verdict. A host that runs another climb builds the trial with `ArmTrial::connected`, `returned`, `failed` or `non_converged`.
+4. `set_prefactor(arm, ν)` attaches a prefactor the host computed later.
+5. `coverage()` is the readout.
+
+Recording the same arm twice is an error. The picker is a function of the recorded trials, so a host that records in a fixed order gets the same picks whatever its thread count.
+
+## Confine the search to a region
+Pass `Some(&active)` with one `bool` per atom. Only active atoms are centres, and only they move in their own seeds: the ART mask is one on the centre and on each kicked neighbour, zero elsewhere. Neighbour kicks reach atoms within `kick_radius` of the centre, inactive ones included, so set the radius to zero to keep every push on the active atoms alone. A mask of the wrong length is `SaddleError::Shape`; a mask with no active atom is `SaddleError::Invalid`.
+
+## Reference
+### Cover
+Every active atom carries the same cover: `cover_points` signed unit vectors on its own sphere (64 by default, at least 4). A direction and its opposite are separate arms. The points are spread by the geodesic repulsion of Plasencia Gutiérrez, Argáez and Jónsson (J. Chem. Theory Comput. 13, 125 (2017), doi:10.1021/acs.jctc.5b01216), relaxed for `cover_sweeps` Gauss-Seidel sweeps from a start drawn from the seed, then ordered farthest point first. `sphere_cover(n, sweeps, seed)` returns that set.
+
+An arm's seed is its cover vector on the centre plus, when `kick_radius` is positive, independent Gaussian components of standard deviation `kick_width` on every atom within the radius. Pedersen, Hafstein and Jónsson (SIAM J. Sci. Comput. 33, 633 (2011), doi:10.1137/100792743) show that this centre, radius and width set which saddles a minimum-mode search reaches and how often. Distances use the minimum image when `cell` is set; ART itself runs on open coordinates.
+
+### Arm verdicts
+| `ArtStatus`               | `ArmOutcome`                                                        |
+| --- | --- |
+| `Connected`               | `NewSaddle`, or `DuplicateSaddle(id)` for a saddle already recorded |
+| `Reverted`                | `ReturnedToStart`: both quenches came back                          |
+| `LostCurvature`           | `Failed(ArmFailure::LostCurvature)`: no quench ran                  |
+| `Irreversible`            | `Failed(ArmFailure::Disconnected)`                                  |
+| `NotIndexOne`             | `Failed(ArmFailure::NotIndexOne)`                                   |
+| `NotDownhill`             | `Failed(ArmFailure::NotDownhill)`                                   |
+| `Exhausted`               | `NonConverged`                                                      |
+| an error from the session | `Failed(ArmFailure::Error(message))`                                |
+
+Two saddles are one when their energies differ by less than `saddle_energy_tol` and their per-atom RMSD is below `saddle_rmsd_tol`. Product minima use `minimum_energy_tol` and `minimum_rmsd_tol` the same way. The RMSD is per atom and Cartesian, under the minimum image when `cell` is set; it does not match permuted identical atoms, so symmetry copies of one saddle on different atoms count as different saddles.
+
+### Pick policies
+| Policy                | Score of an untried arm                                                                                          |
+| --- | --- |
+| `Gap` (default)       | angle to the nearest tried direction on the same centre, times the distinct states among the three nearest tried |
+| `ExpectedImprovement` | expected improvement on the barrier from a Gaussian process on the centre's sphere, times the gap over π         |
+| `Auto`                | `ExpectedImprovement` once two different barriers are known, `Gap` before                                        |
+
+The start counts as one state in the gap score, so a hole bounded by arms that led to different minima is tried before one whose edges all came back. The expected improvement is that of Jones, Schonlau and Welch (J. Global Optim. 13, 455 (1998), doi:10.1023/A:1008306431147) with kernel `exp(-θ²/2ℓ²)` of angular length scale `length_scale` (0.6 rad), the mean and variance of all known barriers, and target `best barrier - ei_margin`. `ExpectedImprovement` alone refuses to score before two different barriers are known. Ties go to the centre with fewer tried arms, then the lower atom, then the lower cover point, so the first pass touches every centre once. `batch` arms (1 by default) are picked greedily, each scored as if the earlier picks of the batch were already tried.
+
+### Coverage readout
+`CoverageReport` has:
+
+- `subspace_dim`: three times the number of active atoms
+- `covering_radius`: the largest, over centres, of the exact covering radius of that centre's tried signed directions on the sphere (`covering_radius_s2`); π before any arm
+- `atoms`: per centre, the tried count, the covering radius and the distinct states reached
+- `records`: one `ArmRecord` per arm, in record order, with the direction, outcome, saddle and product ids, barrier, optional prefactor and force calls
+- `saddles`, `products`: the distinct saddles with their hit counts, and the distinct product minima
+- `discovery`: distinct saddles after each arm; `saddle_draws` and `frequency_counts` are the connected draws and the number of saddles seen once, twice, and so on, for a Good-Turing (Good, Biometrika 40, 237 (1953), doi:10.1093/biomet/40.3-4.237) or capture-recapture estimate of what is left
+- `force_calls`: the total over all arms
+- `next`: the next suggestion and its score, or `None` when every arm is tried
+
+### Determinism
+Every random draw comes from the `u64` seed. A batch is chosen before it runs, its arms run on rayon's pool, and their trials are recorded in pick order, so the records are the same at one thread and at four; `tests/direction_cover.rs` checks that bitwise.
+
+### Measured
+`tests/direction_cover.rs` runs the picker on Müller-Brown, embedded as one atom with a stiff third coordinate, where 16 arms from the shallow minimum find both saddles next to it. On a 13-atom Lennard-Jones icosahedron, 5 of 16 arms reach another minimum, each through a different saddle. A bare displacement of the same length along the Lanczos soft mode, quenched, came back to the start on all 16. The ignored test `scaling_with_cluster_size` prints force calls per saddle and time per arm for 13, 38 and 75 atoms:
+
+```sh
+cargo test --release --test direction_cover -- --ignored --nocapture
+```
+
+`ArtSession` keeps every force call with its position, so memory per arm grows with the number of atoms times the calls the arm spends.
 
 # Follow k lowest modes (`docs/orgmode/howto/indexk.org`)
 

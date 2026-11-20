@@ -72,6 +72,7 @@ while report.status != BandStatus::Converged {
    howto/autoneb
    howto/minmode
    howto/art
+   howto/direction-cover
    howto/indexk
    howto/solid-dimer
    howto/ssneb
