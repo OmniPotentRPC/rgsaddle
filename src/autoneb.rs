@@ -313,6 +313,11 @@ impl ImageEvalPool {
         self.threads
     }
 
+    /// Run deterministic per-image work on the pool kept by the session.
+    pub(crate) fn install<R: Send>(&self, work: impl FnOnce() -> R + Send) -> R {
+        self.pool.install(work)
+    }
+
     /// Evaluate `positions` on this pool. See [`eval_images`].
     pub(crate) fn eval<S: BandSurface + ?Sized>(
         &self,

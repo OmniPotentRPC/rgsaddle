@@ -166,6 +166,7 @@ fn lock_guard<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 #[allow(clippy::too_many_arguments)]
 fn string_image_force(
     config: &BandConfig,
+    state: &BandState,
     i: usize,
     climb: bool,
     endpoint_first: ArrayView1<f64>,
@@ -263,6 +264,7 @@ fn string_image_force(
             match free {
                 None => {
                     (d, evol) = metric_force(
+                        state,
                         p,
                         gradients.row(i),
                         tangent.view(),
@@ -277,6 +279,7 @@ fn string_image_force(
                     };
                     let zero_free = Array1::zeros(free.len());
                     let (d_free, e_free) = metric_force(
+                        state,
                         p,
                         gather(gradients.row(i)).view(),
                         gather(tangent.view()).view(),
@@ -360,6 +363,7 @@ fn assemble_string_with(
         let rows = s![(i - 1) * dof..i * dof];
         let (f, d) = string_image_force(
             config,
+            state,
             i,
             ci_at == Some(i),
             endpoint_first,
@@ -668,7 +672,8 @@ impl BandSession {
             if let Some(eval) = last.as_mut()
                 && eval.x == trial.x
             {
-                work.store_projected(eval, &eff_force);
+                work.store_forces(eval, &eff_force, None);
+                eval.assembly_ci = i64::MIN;
             }
         }
         *lock_guard(&self.state.last_max_force) = max_component;

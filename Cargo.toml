@@ -114,6 +114,10 @@ required-features = ["ohtst"]
 name = "howto_convergence"
 required-features = ["ohtst"]
 
+[[bench]]
+name = "band_scaling"
+harness = false
+
 [profile.dev.package.faer]
 opt-level = 3
 
