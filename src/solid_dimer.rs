@@ -400,7 +400,7 @@ pub enum VineyardIndexError {
         /// Number of Ritz intervals that contain the cutoff.
         unresolved: usize,
         /// Full lowest-spectrum diagnostic.
-        report: IndexReport,
+        report: Box<IndexReport>,
     },
     /// At least one saddle Ritz interval contains the index cutoff.
     #[error("Vineyard saddle index has {unresolved} unresolved projected modes")]
@@ -408,7 +408,7 @@ pub enum VineyardIndexError {
         /// Number of Ritz intervals that contain the cutoff.
         unresolved: usize,
         /// Full lowest-spectrum diagnostic.
-        report: IndexReport,
+        report: Box<IndexReport>,
     },
     /// The reactant is not a projected local minimum.
     #[error("Vineyard minimum has {negative} projected negative modes")]
@@ -416,7 +416,7 @@ pub enum VineyardIndexError {
         /// Number of projected modes below the registered cutoff.
         negative: usize,
         /// Full lowest-spectrum diagnostic.
-        report: IndexReport,
+        report: Box<IndexReport>,
     },
     /// The transition state is not projected index one.
     #[error("Vineyard saddle has {negative} projected negative modes")]
@@ -424,7 +424,7 @@ pub enum VineyardIndexError {
         /// Number of projected modes below the registered cutoff.
         negative: usize,
         /// Full lowest-spectrum diagnostic.
-        report: IndexReport,
+        report: Box<IndexReport>,
     },
 }
 
@@ -502,26 +502,26 @@ pub fn certify_vineyard_pair<M: PointSurface, S: PointSurface>(
     if minimum.unresolved != 0 {
         return Err(VineyardIndexError::MinimumUnresolved {
             unresolved: minimum.unresolved,
-            report: minimum,
+            report: Box::new(minimum),
         });
     }
     if minimum.negative != 0 {
         return Err(VineyardIndexError::Minimum {
             negative: minimum.negative,
-            report: minimum,
+            report: Box::new(minimum),
         });
     }
     let saddle = index_at(saddle_surface, saddle, check)?;
     if saddle.unresolved != 0 {
         return Err(VineyardIndexError::SaddleUnresolved {
             unresolved: saddle.unresolved,
-            report: saddle,
+            report: Box::new(saddle),
         });
     }
     if saddle.negative != 1 {
         return Err(VineyardIndexError::Saddle {
             negative: saddle.negative,
-            report: saddle,
+            report: Box::new(saddle),
         });
     }
     Ok(VineyardIndexReport { minimum, saddle })
@@ -1468,15 +1468,19 @@ impl SolidDimer {
     }
 }
 
+struct IndexDiagnostic {
+    negative_modes: Option<usize>,
+    unresolved_modes: Option<usize>,
+    index_evaluations: usize,
+    eigenvalues: Vec<f64>,
+}
+
 fn map_report(
     report: MinModeReport,
     stress: Option<M3>,
     volume: f64,
-    negative_modes: Option<usize>,
-    unresolved_modes: Option<usize>,
+    index: IndexDiagnostic,
     rejected: bool,
-    index_evaluations: usize,
-    eigenvalues: Vec<f64>,
 ) -> SolidDimerReport {
     SolidDimerReport {
         status: report.status,
@@ -1487,11 +1491,11 @@ fn map_report(
         evaluations: report.evaluations,
         stress,
         volume,
-        negative_modes,
-        unresolved_modes,
+        negative_modes: index.negative_modes,
+        unresolved_modes: index.unresolved_modes,
         rejected,
-        index_evaluations,
-        eigenvalues,
+        index_evaluations: index.index_evaluations,
+        eigenvalues: index.eigenvalues,
     }
 }
 
@@ -1563,11 +1567,13 @@ impl SolidDimer {
             report,
             self.stress,
             self.volume,
-            negative_modes,
-            unresolved_modes,
+            IndexDiagnostic {
+                negative_modes,
+                unresolved_modes,
+                index_evaluations: self.index_calls,
+                eigenvalues,
+            },
             rejected,
-            self.index_calls,
-            eigenvalues,
         ))
     }
 
@@ -1648,6 +1654,8 @@ fn rms_to_nearest(point: &Array1<f64>, previous: &[Array1<f64>]) -> f64 {
     nearest
 }
 
+type RitzPairs = (Vec<f64>, Array2<f64>, Vec<f64>);
+
 /// Lanczos with full reorthogonalisation. The Rayleigh-Ritz projection
 /// of the actions is diagonalised directly, so the reorthogonalisation
 /// coefficients are not dropped. The lowest values are returned once
@@ -1658,7 +1666,7 @@ fn ritz_lowest<S: PointSurface>(
     modes: &[Array1<f64>],
     check: IndexCheck,
     calls: &std::cell::Cell<usize>,
-) -> Result<(Vec<f64>, Array2<f64>, Vec<f64>), SaddleError> {
+) -> Result<RitzPairs, SaddleError> {
     let n = x.len();
     let k = check.lowest.min(n);
     let mut seed = Array1::zeros(n);
@@ -1765,7 +1773,7 @@ fn fresh_direction(basis: &[Array1<f64>], modes: &[Array1<f64>], n: usize) -> Op
 fn ritz_from_actions(
     basis: &[Array1<f64>],
     actions: &[Array1<f64>],
-) -> Result<(Vec<f64>, Array2<f64>, Vec<f64>), SaddleError> {
+) -> Result<RitzPairs, SaddleError> {
     let m = actions.len().min(basis.len());
     let mut projected = Array2::zeros((m, m));
     for j in 0..m {
