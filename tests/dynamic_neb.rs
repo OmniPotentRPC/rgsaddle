@@ -6,7 +6,9 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ndarray::{Array1, Array2, ArrayView2};
-use rgsaddle::{BandConfig, BandSession, BandStatus, BandSurface, DynamicNeb, SaddleError};
+use rgsaddle::{
+    BandConfig, BandSession, BandStatus, BandSurface, DynamicNeb, SaddleError, StringConfig,
+};
 
 /// `V = (x^2 - 1)^2 + 2 y^2 + 2 z^2`. Minima at `(±1, 0, 0)`.
 struct Well {
@@ -144,4 +146,28 @@ fn dynamic_default_converges_at_the_stock_tolerances() {
         "max force {}",
         report.max_force
     );
+}
+
+#[test]
+fn dynamic_neb_and_the_simplified_string_method_exclude_each_other() {
+    let band = bowed(5);
+    let spec = DynamicNeb::default();
+    let string = StringConfig::default();
+    assert!(matches!(
+        BandSession::new(config(Some(spec)).with_string(Some(string)), band.clone()),
+        Err(SaddleError::Invalid(_))
+    ));
+    let mut stringy = BandSession::new(config(None).with_string(Some(string)), band.clone())
+        .expect("string band");
+    assert!(matches!(
+        stringy.set_dynamic(Some(spec)),
+        Err(SaddleError::Invalid(_))
+    ));
+    assert!(stringy.string().is_some());
+    let mut dynamic = BandSession::new(config(Some(spec)), band).expect("dynamic band");
+    assert!(matches!(
+        dynamic.set_string(Some(string)),
+        Err(SaddleError::Invalid(_))
+    ));
+    assert!(dynamic.string().is_none());
 }
