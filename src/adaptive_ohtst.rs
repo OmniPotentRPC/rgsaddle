@@ -3,14 +3,12 @@
 //! Unlike fixed-path PAFI, this method translates and rotates interior
 //! hyperplanes under their sampled OH-TST free-energy gradients.
 
-use std::f64::consts::TAU;
-
 use ndarray::{Array1, ArrayView1, s};
 
 use crate::SaddleError;
 use crate::ohtst::{
     Hyperplane, LangevinConfig, OhTstRate, PlaneDensity, PlanePath, PlaneSample, RateMultiplicity,
-    sample_plane_pilot_with_sampler, sample_plane_with_sampler,
+    rate_from_parts, sample_plane_pilot_with_sampler, sample_plane_with_sampler,
 };
 use crate::projector::HyperplaneSampler;
 
@@ -1447,25 +1445,13 @@ fn rate_from_profile<D: PlaneDensity + ?Sized>(
             "adaptive OH-TST rate inputs must be finite and non-negative".into(),
         ));
     }
-    let flux = (thermal / TAU).sqrt();
-    let log_rate = flux.ln() + value.ln() - profile.barrier / thermal;
-    let log_rate_error =
-        ((value_error / value).powi(2) + (profile.barrier_error / thermal).powi(2)).sqrt();
-    let rate = log_rate.exp();
-    if !(rate.is_finite() && log_rate.is_finite() && log_rate_error.is_finite()) {
-        return Err(SaddleError::NonFinite("adaptive OH-TST rate"));
-    }
-    Ok(OhTstRate {
-        rate,
-        error: rate * log_rate_error,
-        log_rate,
-        log_rate_error,
-        flux,
-        density: value,
-        density_error: value_error,
-        free_energy: profile.barrier,
-        free_energy_error: profile.barrier_error,
-    })
+    rate_from_parts(
+        thermal,
+        value,
+        value_error,
+        profile.barrier,
+        profile.barrier_error,
+    )
 }
 
 fn checked_sum(left: usize, right: usize) -> Result<usize, SaddleError> {

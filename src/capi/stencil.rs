@@ -57,14 +57,14 @@ fn c_string(text: &str) -> CString {
     unsafe { CString::from_vec_unchecked(bytes) }
 }
 
-fn set_last_error(text: &str) {
+pub(super) fn set_last_error(text: &str) {
     let owned = c_string(text);
     LAST_ERROR.with(|slot| {
         *slot.borrow_mut() = owned;
     });
 }
 
-fn clear_last_error() {
+pub(super) fn clear_last_error() {
     set_last_error("");
 }
 

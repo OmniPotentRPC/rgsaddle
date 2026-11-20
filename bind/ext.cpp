@@ -43,6 +43,7 @@
 #include <cstdint>
 #include <cstring>
 #include <exception>
+#include <limits>
 #include <map>
 #include <optional>
 #include <string>
@@ -142,6 +143,30 @@ using FlagArray = nb::ndarray<const std::uint8_t, nb::ndim<1>, nb::c_contig, nb:
 using Matrix = nb::ndarray<const double, nb::ndim<2>, nb::c_contig, nb::device::cpu>;
 using Vector = nb::ndarray<const double, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
 using Loose = nb::ndarray<nb::numpy, nb::device::cpu>;
+// Shape is visible before a contiguity check, so an overflowing
+// `states * states` can be refused without a contiguous allocation.
+using MatrixShape = nb::ndarray<const double, nb::ndim<2>, nb::device::cpu>;
+using IdShape = nb::ndarray<const std::int64_t, nb::ndim<1>, nb::device::cpu>;
+
+template <typename Array> bool row_major(const Array &array) {
+  if (!array.is_valid() || array.ndim() == 0) {
+    return false;
+  }
+  std::int64_t step = 1;
+  for (std::size_t axis = array.ndim(); axis-- > 0;) {
+    const auto length = static_cast<std::int64_t>(array.shape(axis));
+    if (length > 1 && array.stride(axis) != step) {
+      return false;
+    }
+    if (length > 1) {
+      if (step > std::numeric_limits<std::int64_t>::max() / length) {
+        return false;
+      }
+      step *= length;
+    }
+  }
+  return true;
+}
 
 [[noreturn]] void shape_error(const char *name, const std::string &expected, const std::string &got) {
   const std::string msg = std::string(name) + ": expected shape " + expected + ", got " + got;
@@ -1717,6 +1742,382 @@ nb::ndarray<nb::numpy, std::uint64_t> copy_u64_vector(const std::vector<std::uin
   return nb::ndarray<nb::numpy, std::uint64_t>(raw, 1, shape, owner);
 }
 
+struct PointCallback {
+  nb::callable *fn;
+  rgbind::CallContext *ctx;
+};
+
+extern "C" rgsaddle_status_t ohtst_python_point(void *user, int64_t n, const double *q, double *energy,
+                                                double *gradient) {
+  auto *state = static_cast<PointCallback *>(user);
+  if (state == nullptr || n <= 0 || q == nullptr || energy == nullptr || gradient == nullptr) {
+    return RGSADDLE_INVALID_PARAMETER;
+  }
+  // Transmission shoots several trajectories at once. Once any worker has
+  // captured a Python exception, CallContext::stop is set. Check it before
+  // acquiring the GIL so later shots do not enter Python.
+  if (state->ctx == nullptr || state->ctx->stop.load(std::memory_order_acquire)) {
+    return RGSADDLE_SURFACE_FAILED;
+  }
+  try {
+    nb::gil_scoped_acquire gil;
+    if (!gil.is_valid()) {
+      return RGSADDLE_SURFACE_FAILED;
+    }
+    const std::size_t len = static_cast<std::size_t>(n);
+    auto *raw = new double[len];
+    std::memcpy(raw, q, len * sizeof(double));
+    nb::capsule owner(raw, [](void *ptr) noexcept { delete[] static_cast<double *>(ptr); });
+    const std::size_t shape[1] = {len};
+    nb::ndarray<nb::numpy, double> position(raw, 1, shape, owner);
+    nb::object result = (*state->fn)(position);
+    if (!nb::isinstance<nb::tuple>(result)) {
+      state->ctx->capture(std::make_exception_ptr(nb::value_error("point surface must return (energy, gradient)")));
+      return RGSADDLE_SURFACE_FAILED;
+    }
+    nb::tuple pair = nb::cast<nb::tuple>(result);
+    if (pair.size() != 2) {
+      state->ctx->capture(std::make_exception_ptr(nb::value_error("point surface must return (energy, gradient)")));
+      return RGSADDLE_SURFACE_FAILED;
+    }
+    *energy = nb::cast<double>(pair[0]);
+    auto grad = nb::cast<nb::ndarray<const double, nb::ndim<1>, nb::c_contig>>(pair[1]);
+    if (static_cast<std::size_t>(grad.shape(0)) != len) {
+      state->ctx->capture(std::make_exception_ptr(nb::value_error("gradient length does not match the position")));
+      return RGSADDLE_SHAPE;
+    }
+    std::memcpy(gradient, grad.data(), len * sizeof(double));
+    if (PyErr_CheckSignals() < 0) {
+      nb::python_error err;
+      state->ctx->capture(err);
+      return RGSADDLE_SURFACE_FAILED;
+    }
+    return RGSADDLE_OK;
+  } catch (nb::python_error &err) {
+    state->ctx->capture(err);
+    return RGSADDLE_SURFACE_FAILED;
+  } catch (const std::exception &) {
+    state->ctx->capture(std::current_exception());
+    return RGSADDLE_SURFACE_FAILED;
+  }
+}
+
+[[noreturn]] void throw_ohtst(rgsaddle_status_t status) {
+  std::string message;
+  if (const char *text = rgsaddle_last_error(); text != nullptr && text[0] != '\0') {
+    message = text;
+  } else if (const char *py_text = rgsaddle_py_last_error(); py_text != nullptr && py_text[0] != '\0') {
+    message = py_text;
+  } else if (const char *name = rgsaddle_status_name(status); name != nullptr && name[0] != '\0') {
+    message = name;
+  } else {
+    message = "OH-TST call failed";
+  }
+  rgsaddle_py_set_last_error("");
+  if (status == RGSADDLE_NON_FINITE) {
+    throw rgbind::NumericalError(message.c_str());
+  }
+  throw nb::value_error(message.c_str());
+}
+
+struct OhtstSample {
+  std::vector<double> centroid;
+  std::vector<double> grad_normal;
+  double normal_force = 0.0;
+  double normal_force_error = 0.0;
+  double virial = 0.0;
+  double virial_error = 0.0;
+  double acceptance = 0.0;
+  std::uint64_t records = 0;
+  std::uint64_t evaluations = 0;
+};
+
+struct OhtstOptimum {
+  std::vector<double> point;
+  std::vector<double> normal;
+  std::uint64_t iterations = 0;
+  std::uint64_t evaluations = 0;
+  double normal_force = 0.0;
+  double normal_force_error = 0.0;
+};
+
+struct OhtstMbar {
+  std::vector<double> free_energies;
+  std::vector<double> covariance;
+  std::vector<double> overlap;
+  std::size_t states = 0;
+};
+
+struct OhtstWork {
+  double work = 0.0;
+  double error = 0.0;
+  double integrated_work = 0.0;
+  double integrated_error = 0.0;
+  double bar_work = 0.0;
+  double bar_error = 0.0;
+  double mbar_work = 0.0;
+  double mbar_error = 0.0;
+  std::uint64_t evaluations = 0;
+};
+
+struct OhtstTransmission {
+  double kappa = 0.0;
+  double error = 0.0;
+  std::uint64_t shots = 0;
+  std::uint64_t unassigned = 0;
+  std::uint64_t reactive = 0;
+  std::uint64_t recrossed = 0;
+  std::uint64_t evaluations = 0;
+};
+
+struct OhtstRate {
+  double rate = 0.0;
+  double error = 0.0;
+  double log_rate = 0.0;
+  double log_rate_error = 0.0;
+  double flux = 0.0;
+};
+
+OhtstSample ohtst_sample(nb::callable fn, Vector point, Vector normal, double thermal, double time_step,
+                         double friction, std::uint64_t burn_in, std::uint64_t stride, std::uint64_t records,
+                         std::uint64_t blocks, std::uint64_t seed) {
+  if (point.shape(0) <= 0 || point.shape(0) != normal.shape(0)) {
+    throw nb::value_error("point and normal must share one positive length");
+  }
+  rgsaddle_ohtst_sample_config_t config{};
+  config.version.major = RGSADDLE_ABI_MAJOR;
+  config.version.minor = RGSADDLE_ABI_MINOR;
+  config.thermal = thermal;
+  config.time_step = time_step;
+  config.friction = friction;
+  config.burn_in = burn_in;
+  config.stride = stride;
+  config.records = records;
+  config.blocks = blocks;
+  config.seed = seed;
+  const std::size_t n = static_cast<std::size_t>(point.shape(0));
+  std::vector<double> centroid(n);
+  std::vector<double> grad_normal(n);
+  rgsaddle_ohtst_sample_report_t report{};
+  rgbind::CallContext ctx;
+  PointCallback state{&fn, &ctx};
+  rgsaddle_status_t status = RGSADDLE_OK;
+  {
+    nb::gil_scoped_release release;
+    status = rgsaddle_ohtst_sample(&config, static_cast<std::int64_t>(n), point.data(), normal.data(),
+                                   ohtst_python_point, &state, centroid.data(), grad_normal.data(), &report);
+  }
+  if (ctx.has_error()) {
+    ctx.rethrow_if_set();
+  }
+  if (status != RGSADDLE_OK) {
+    throw_ohtst(status);
+  }
+  return OhtstSample{std::move(centroid),
+                     std::move(grad_normal),
+                     report.normal_force,
+                     report.normal_force_error,
+                     report.virial,
+                     report.virial_error,
+                     report.acceptance,
+                     report.records,
+                     report.evaluations};
+}
+
+OhtstOptimum ohtst_optimize(nb::callable fn, Vector point, Vector normal, double thermal, double time_step,
+                            double friction, std::uint64_t burn_in, std::uint64_t stride, std::uint64_t records,
+                            std::uint64_t blocks, std::uint64_t seed, std::uint64_t max_iterations,
+                            double max_translation, double max_rotation, std::uint64_t patience,
+                            bool translate, bool rotate) {
+  if (point.shape(0) <= 0 || point.shape(0) != normal.shape(0)) {
+    throw nb::value_error("point and normal must share one positive length");
+  }
+  rgsaddle_ohtst_optimize_config_t config{};
+  config.version.major = RGSADDLE_ABI_MAJOR;
+  config.version.minor = RGSADDLE_ABI_MINOR;
+  config.thermal = thermal;
+  config.time_step = time_step;
+  config.friction = friction;
+  config.burn_in = burn_in;
+  config.stride = stride;
+  config.records = records;
+  config.blocks = blocks;
+  config.seed = seed;
+  config.max_iterations = max_iterations;
+  config.max_translation = max_translation;
+  config.max_rotation = max_rotation;
+  config.translate = translate ? 1 : 0;
+  config.rotate = rotate ? 1 : 0;
+  config.patience = patience;
+  const std::size_t n = static_cast<std::size_t>(point.shape(0));
+  std::vector<double> out_point(point.data(), point.data() + n);
+  std::vector<double> out_normal(normal.data(), normal.data() + n);
+  rgsaddle_ohtst_optimize_report_t report{};
+  rgbind::CallContext ctx;
+  PointCallback state{&fn, &ctx};
+  rgsaddle_status_t status = RGSADDLE_OK;
+  {
+    nb::gil_scoped_release release;
+    status = rgsaddle_ohtst_optimize(&config, static_cast<std::int64_t>(n), out_point.data(), out_normal.data(),
+                                     ohtst_python_point, &state, &report);
+  }
+  if (ctx.has_error()) {
+    ctx.rethrow_if_set();
+  }
+  if (status != RGSADDLE_OK) {
+    throw_ohtst(status);
+  }
+  return OhtstOptimum{std::move(out_point), std::move(out_normal), report.iterations, report.evaluations,
+                      report.normal_force, report.normal_force_error};
+}
+
+OhtstMbar ohtst_mbar(MatrixShape reduced, IdShape counts, nb::object initial) {
+  if (reduced.shape(0) <= 0 || reduced.shape(1) < 2) {
+    throw nb::value_error("MBAR needs one row per sample and at least two states");
+  }
+  if (counts.shape(0) != reduced.shape(1)) {
+    throw nb::value_error("counts has one entry per state");
+  }
+  const std::size_t states = static_cast<std::size_t>(reduced.shape(1));
+  // Covariance and overlap are states by states. Refuse a product that
+  // does not fit in size_t before any of those buffers are allocated.
+  if (states != 0 && states > std::numeric_limits<std::size_t>::max() / states) {
+    throw nb::value_error("states*states overflows size_t");
+  }
+  if (!row_major(reduced) || !row_major(counts)) {
+    throw nb::type_error("ohtst_mbar: expected float64 C-contiguous");
+  }
+  const std::size_t state_square = states * states;
+  std::vector<double> start;
+  const double *start_ptr = nullptr;
+  if (!initial.is_none()) {
+    auto values = nb::cast<Vector>(initial);
+    if (static_cast<std::size_t>(values.shape(0)) != states) {
+      throw nb::value_error("initial free energies have one entry per state");
+    }
+    start.assign(values.data(), values.data() + states);
+    start_ptr = start.data();
+  }
+  std::vector<double> free_energies(states);
+  std::vector<double> covariance(state_square);
+  std::vector<double> overlap(state_square);
+  const auto status = rgsaddle_ohtst_mbar(reduced.shape(0), reduced.shape(1), reduced.data(), counts.data(),
+                                          start_ptr, free_energies.data(), covariance.data(), overlap.data());
+  if (status != RGSADDLE_OK) {
+    throw_ohtst(status);
+  }
+  return OhtstMbar{std::move(free_energies), std::move(covariance), std::move(overlap), states};
+}
+
+OhtstWork ohtst_work(nb::callable fn, Matrix points, Matrix normals, double thermal, double time_step,
+                     double friction, std::uint64_t burn_in, std::uint64_t stride, std::uint64_t records,
+                     std::uint64_t blocks, std::uint64_t seed, std::uint64_t nodes, std::uint64_t bar_samples,
+                     nb::object start, bool mbar, int estimate) {
+  if (points.ndim() != 2 || points.shape(0) < 2 || points.shape(1) <= 0 || points.shape(0) != normals.shape(0) ||
+      points.shape(1) != normals.shape(1)) {
+    throw nb::value_error("points and normals are (planes, dimension) with at least two planes");
+  }
+  const std::size_t n = static_cast<std::size_t>(points.shape(1));
+  std::vector<double> start_values;
+  const double *start_ptr = nullptr;
+  if (!start.is_none()) {
+    auto values = nb::cast<Vector>(start);
+    if (static_cast<std::size_t>(values.shape(0)) != n) {
+      throw nb::value_error("start has one entry per coordinate");
+    }
+    start_values.assign(values.data(), values.data() + n);
+    start_ptr = start_values.data();
+  }
+  rgsaddle_ohtst_work_config_t config{};
+  config.version.major = RGSADDLE_ABI_MAJOR;
+  config.version.minor = RGSADDLE_ABI_MINOR;
+  config.thermal = thermal;
+  config.time_step = time_step;
+  config.friction = friction;
+  config.burn_in = burn_in;
+  config.stride = stride;
+  config.records = records;
+  config.blocks = blocks;
+  config.seed = seed;
+  config.nodes = nodes;
+  config.bar_samples = bar_samples;
+  config.mbar = mbar ? 1 : 0;
+  config.estimate = estimate;
+  rgsaddle_ohtst_work_report_t report{};
+  rgbind::CallContext ctx;
+  PointCallback state{&fn, &ctx};
+  rgsaddle_status_t status = RGSADDLE_OK;
+  {
+    nb::gil_scoped_release release;
+    status = rgsaddle_ohtst_work(&config, static_cast<std::int64_t>(n), points.shape(0), points.data(),
+                                 normals.data(), start_ptr, ohtst_python_point, &state, &report);
+  }
+  if (ctx.has_error()) {
+    ctx.rethrow_if_set();
+  }
+  if (status != RGSADDLE_OK) {
+    throw_ohtst(status);
+  }
+  return OhtstWork{report.work,          report.error,       report.integrated_work, report.integrated_error,
+                   report.bar_work,      report.bar_error,   report.mbar_work,       report.mbar_error,
+                   report.evaluations};
+}
+
+OhtstTransmission ohtst_transmission(nb::callable fn, Vector point, Vector normal, Matrix starts, double thermal,
+                                     double time_step, double friction, std::uint64_t steps,
+                                     std::uint64_t check_every, std::uint64_t shots, std::uint64_t blocks,
+                                     std::uint64_t seed) {
+  if (point.shape(0) <= 0 || point.shape(0) != normal.shape(0) || starts.shape(0) <= 0 ||
+      starts.shape(1) != point.shape(0)) {
+    throw nb::value_error("starts are (shots, dimension) on the plane");
+  }
+  rgsaddle_ohtst_transmission_config_t config{};
+  config.version.major = RGSADDLE_ABI_MAJOR;
+  config.version.minor = RGSADDLE_ABI_MINOR;
+  config.thermal = thermal;
+  config.time_step = time_step;
+  config.friction = friction;
+  config.steps = steps;
+  config.check_every = check_every;
+  config.shots = shots;
+  config.blocks = blocks;
+  config.seed = seed;
+  rgsaddle_ohtst_transmission_report_t report{};
+  rgbind::CallContext ctx;
+  PointCallback state{&fn, &ctx};
+  rgsaddle_status_t status = RGSADDLE_OK;
+  {
+    nb::gil_scoped_release release;
+    status = rgsaddle_ohtst_transmission(&config, point.shape(0), point.data(), normal.data(), starts.shape(0),
+                                         starts.data(), ohtst_python_point, &state, &report);
+  }
+  if (ctx.has_error()) {
+    ctx.rethrow_if_set();
+  }
+  if (status != RGSADDLE_OK) {
+    throw_ohtst(status);
+  }
+  return OhtstTransmission{report.kappa,    report.error,     report.shots, report.unassigned,
+                           report.reactive, report.recrossed, report.evaluations};
+}
+
+OhtstRate ohtst_rate(double thermal, double density, double density_error, double work, double work_error) {
+  rgsaddle_ohtst_rate_in_t input{};
+  input.version.major = RGSADDLE_ABI_MAJOR;
+  input.version.minor = RGSADDLE_ABI_MINOR;
+  input.thermal = thermal;
+  input.density = density;
+  input.density_error = density_error;
+  input.work = work;
+  input.work_error = work_error;
+  rgsaddle_ohtst_rate_out_t out{};
+  const auto status = rgsaddle_ohtst_rate(&input, &out);
+  if (status != RGSADDLE_OK) {
+    throw_ohtst(status);
+  }
+  return OhtstRate{out.rate, out.error, out.log_rate, out.log_rate_error, out.flux};
+}
+
 } // namespace
 
 NB_MODULE(_core, m) {
@@ -2336,6 +2737,163 @@ NB_MODULE(_core, m) {
             return copy_vector(out);
           },
           "Copy of the current Cartesian position.");
+
+  nb::class_<OhtstSample>(m, "OhtstSample",
+                          "Langevin sample of one hyperplane: centroid, normal force, virial.")
+      .def_prop_ro("centroid", [](const OhtstSample &self) { return copy_vector(self.centroid); },
+                   nb::rv_policy::move, "Mean configuration on the plane over the recorded samples.")
+      .def_prop_ro("grad_normal", [](const OhtstSample &self) { return copy_vector(self.grad_normal); },
+                   nb::rv_policy::move, "Gradient of the plane free energy with respect to the unit normal.")
+      .def_ro("normal_force", &OhtstSample::normal_force, "Mean force along the normal.")
+      .def_ro("normal_force_error", &OhtstSample::normal_force_error,
+              "Block standard error of the normal force.")
+      .def_ro("virial", &OhtstSample::virial, "In-plane virial.")
+      .def_ro("virial_error", &OhtstSample::virial_error, "Block standard error of the virial.")
+      .def_ro("acceptance", &OhtstSample::acceptance, "Accepted fraction of the proposals.")
+      .def_ro("records", &OhtstSample::records, "Records inside the blocks.")
+      .def_ro("evaluations", &OhtstSample::evaluations, "Surface evaluations.");
+
+  nb::class_<OhtstOptimum>(m, "OhtstOptimum", "Last accepted plane of a free-energy climb.")
+      .def_prop_ro("point", [](const OhtstOptimum &self) { return copy_vector(self.point); },
+                   nb::rv_policy::move, "A point on the plane.")
+      .def_prop_ro("normal", [](const OhtstOptimum &self) { return copy_vector(self.normal); },
+                   nb::rv_policy::move, "Unit normal, pointing toward the product.")
+      .def_ro("iterations", &OhtstOptimum::iterations, "Outer trust-region iterations.")
+      .def_ro("evaluations", &OhtstOptimum::evaluations, "Surface evaluations.")
+      .def_ro("normal_force", &OhtstOptimum::normal_force, "Mean force along the last normal.")
+      .def_ro("normal_force_error", &OhtstOptimum::normal_force_error,
+              "Block standard error of that force.");
+
+  nb::class_<OhtstMbar>(m, "OhtstMbar", "MBAR free energies, covariance and overlap.")
+      .def_prop_ro(
+          "free_energies", [](const OhtstMbar &self) { return copy_vector(self.free_energies); },
+          nb::rv_policy::move, "Reduced free energy of every state, with the first at zero.")
+      .def_prop_ro(
+          "covariance",
+          [](const OhtstMbar &self) {
+            if (self.states != 0 &&
+                self.states > std::numeric_limits<std::size_t>::max() / self.states) {
+              throw nb::value_error("states*states overflows size_t");
+            }
+            const std::size_t state_square = self.states * self.states;
+            if (self.covariance.size() != state_square) {
+              throw nb::value_error("covariance is not states by states");
+            }
+            auto *raw = new double[state_square];
+            std::memcpy(raw, self.covariance.data(), state_square * sizeof(double));
+            nb::capsule owner(raw, [](void *ptr) noexcept { delete[] static_cast<double *>(ptr); });
+            const std::size_t shape[2] = {self.states, self.states};
+            return nb::ndarray<nb::numpy, double>(raw, 2, shape, owner);
+          },
+          nb::rv_policy::move, "Asymptotic covariance, one row and column per state.")
+      .def_prop_ro(
+          "overlap",
+          [](const OhtstMbar &self) {
+            if (self.states != 0 &&
+                self.states > std::numeric_limits<std::size_t>::max() / self.states) {
+              throw nb::value_error("states*states overflows size_t");
+            }
+            const std::size_t state_square = self.states * self.states;
+            if (self.overlap.size() != state_square) {
+              throw nb::value_error("overlap is not states by states");
+            }
+            auto *raw = new double[state_square];
+            std::memcpy(raw, self.overlap.data(), state_square * sizeof(double));
+            nb::capsule owner(raw, [](void *ptr) noexcept { delete[] static_cast<double *>(ptr); });
+            const std::size_t shape[2] = {self.states, self.states};
+            return nb::ndarray<nb::numpy, double>(raw, 2, shape, owner);
+          },
+          nb::rv_policy::move, "Overlap matrix. Each row sums to one.");
+
+  nb::class_<OhtstWork>(m, "OhtstWork", "Reversible work from the first plane to the last.")
+      .def_ro("work", &OhtstWork::work, "Work by the requested estimate.")
+      .def_ro("error", &OhtstWork::error, "Standard error of that work.")
+      .def_ro("integrated_work", &OhtstWork::integrated_work, "Work by thermodynamic integration.")
+      .def_ro("integrated_error", &OhtstWork::integrated_error, "Standard error of the integral.")
+      .def_ro("bar_work", &OhtstWork::bar_work, "Work by BAR, or NaN when no configurations were kept.")
+      .def_ro("bar_error", &OhtstWork::bar_error, "Standard error of the BAR work, or NaN.")
+      .def_ro("mbar_work", &OhtstWork::mbar_work, "Work by MBAR, or NaN when MBAR is off.")
+      .def_ro("mbar_error", &OhtstWork::mbar_error, "Standard error of the MBAR work, or NaN.")
+      .def_ro("evaluations", &OhtstWork::evaluations, "Surface evaluations over the nodes.");
+
+  nb::class_<OhtstTransmission>(m, "OhtstTransmission",
+                                "Transmission coefficient counted at the first crossing.")
+      .def_ro("kappa", &OhtstTransmission::kappa, "Transmission coefficient.")
+      .def_ro("error", &OhtstTransmission::error, "Block standard error of kappa.")
+      .def_ro("shots", &OhtstTransmission::shots, "Shots whose halves both reached a state.")
+      .def_ro("unassigned", &OhtstTransmission::unassigned, "Shots left out.")
+      .def_ro("reactive", &OhtstTransmission::reactive, "Shots from the reactant into the product.")
+      .def_ro("recrossed", &OhtstTransmission::recrossed, "Backward halves that crossed the plane again.")
+      .def_ro("evaluations", &OhtstTransmission::evaluations, "Surface evaluations.");
+
+  nb::class_<OhtstRate>(m, "OhtstRate", "OH-TST rate from a reactant density and a reversible work.")
+      .def_ro("rate", &OhtstRate::rate, "The rate, in the time unit of the mass-weighted surface.")
+      .def_ro("error", &OhtstRate::error, "First-order standard error of the rate.")
+      .def_ro("log_rate", &OhtstRate::log_rate, "Natural log of the rate.")
+      .def_ro("log_rate_error", &OhtstRate::log_rate_error, "Standard error of the log rate.")
+      .def_ro("flux", &OhtstRate::flux, "One-way flux factor, square root of kT over 2 pi.");
+
+  m.def(
+      "ohtst_sample", &ohtst_sample, nb::arg("surface"), nb::arg("point").noconvert(),
+      nb::arg("normal").noconvert(), nb::arg("thermal"), nb::arg("time_step"), nb::arg("friction"),
+      nb::arg("burn_in"), nb::arg("stride"), nb::arg("records"), nb::arg("blocks"), nb::arg("seed"),
+      nb::sig("def ohtst_sample(surface: collections.abc.Callable[..., tuple[float, "
+              "numpy.typing.NDArray[numpy.float64]]], point: numpy.typing.NDArray[numpy.float64], "
+              "normal: numpy.typing.NDArray[numpy.float64], thermal: float, time_step: float, friction: float, "
+              "burn_in: int, stride: int, records: int, blocks: int, seed: int) -> OhtstSample"),
+      "Sample one hyperplane. surface(q) returns (energy, gradient) for a point of length n.");
+  m.def(
+      "ohtst_optimize", &ohtst_optimize, nb::arg("surface"), nb::arg("point").noconvert(),
+      nb::arg("normal").noconvert(), nb::arg("thermal"), nb::arg("time_step"), nb::arg("friction"),
+      nb::arg("burn_in"), nb::arg("stride"), nb::arg("records"), nb::arg("blocks"), nb::arg("seed"),
+      nb::arg("max_iterations"), nb::arg("max_translation"), nb::arg("max_rotation"),
+      nb::arg("patience") = static_cast<std::uint64_t>(3), nb::arg("translate") = true,
+      nb::arg("rotate") = true,
+      nb::sig("def ohtst_optimize(surface: collections.abc.Callable[..., tuple[float, "
+              "numpy.typing.NDArray[numpy.float64]]], point: numpy.typing.NDArray[numpy.float64], "
+              "normal: numpy.typing.NDArray[numpy.float64], thermal: float, time_step: float, friction: float, "
+              "burn_in: int, stride: int, records: int, blocks: int, seed: int, max_iterations: int, "
+              "max_translation: float, max_rotation: float, patience: int = 3, translate: bool = True, "
+              "rotate: bool = True) -> OhtstOptimum"),
+      "Climb the plane free energy. surface(q) returns (energy, gradient).");
+  m.def(
+      "ohtst_mbar", &ohtst_mbar, nb::arg("reduced").noconvert(), nb::arg("counts").noconvert(),
+      nb::arg("initial") = nb::none(),
+      nb::sig("def ohtst_mbar(reduced: numpy.typing.NDArray[numpy.float64], counts: "
+              "numpy.typing.NDArray[numpy.int64], initial: numpy.typing.NDArray[numpy.float64] | None = None) "
+              "-> OhtstMbar"),
+      "Solve MBAR. reduced is (samples, states); counts has one positive entry per state.");
+  m.def(
+      "ohtst_work", &ohtst_work, nb::arg("surface"), nb::arg("points").noconvert(),
+      nb::arg("normals").noconvert(), nb::arg("thermal"), nb::arg("time_step"), nb::arg("friction"),
+      nb::arg("burn_in"), nb::arg("stride"), nb::arg("records"), nb::arg("blocks"), nb::arg("seed"),
+      nb::arg("nodes"), nb::arg("bar_samples"), nb::arg("start") = nb::none(), nb::arg("mbar") = false,
+      nb::arg("estimate") = 0,
+      nb::sig("def ohtst_work(surface: collections.abc.Callable[..., tuple[float, "
+              "numpy.typing.NDArray[numpy.float64]]], points: numpy.typing.NDArray[numpy.float64], "
+              "normals: numpy.typing.NDArray[numpy.float64], thermal: float, time_step: float, friction: float, "
+              "burn_in: int, stride: int, records: int, blocks: int, seed: int, nodes: int, bar_samples: int, "
+              "start: numpy.typing.NDArray[numpy.float64] | None = None, mbar: bool = False, estimate: int = 0) "
+              "-> OhtstWork"),
+      "Reversible work along planes using Simpson weights (nodes must be odd and at least 3). "
+      "estimate is 0 for integration, 1 for BAR, 2 for MBAR.");
+  m.def(
+      "ohtst_transmission", &ohtst_transmission, nb::arg("surface"), nb::arg("point").noconvert(),
+      nb::arg("normal").noconvert(), nb::arg("starts").noconvert(), nb::arg("thermal"),
+      nb::arg("time_step"), nb::arg("friction"), nb::arg("steps"), nb::arg("check_every"),
+      nb::arg("shots"), nb::arg("blocks"), nb::arg("seed"),
+      nb::sig("def ohtst_transmission(surface: collections.abc.Callable[..., tuple[float, "
+              "numpy.typing.NDArray[numpy.float64]]], point: numpy.typing.NDArray[numpy.float64], "
+              "normal: numpy.typing.NDArray[numpy.float64], starts: numpy.typing.NDArray[numpy.float64], "
+              "thermal: float, time_step: float, friction: float, steps: int, check_every: int, shots: int, "
+              "blocks: int, seed: int) -> OhtstTransmission"),
+      "Shoot from starts on the plane. Friction zero is Newtonian. surface(q) returns (energy, gradient).");
+  m.def(
+      "ohtst_rate", &ohtst_rate, nb::arg("thermal"), nb::arg("density"), nb::arg("density_error"),
+      nb::arg("work"), nb::arg("work_error"),
+      nb::sig("def ohtst_rate(thermal: float, density: float, density_error: float, work: float, "
+              "work_error: float) -> OhtstRate"),
+      "k = sqrt(kT / 2 pi) * density * exp(-work / kT). density is the reactant density on the first plane.");
 
   m.def("raise_status", &raise_status, nb::arg("code"),
         "Map an rgsaddle_status_t value. The message is the stored text, or the "

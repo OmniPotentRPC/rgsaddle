@@ -18,6 +18,19 @@ The rate is
 
 with unit mass in mass-weighted coordinates. In Cartesian coordinates the flux mass along a normal =n= is =1 / Σ nᵢ²/mᵢ= (=flux_mass=). The paper's Eq. 24, =μ = Σ mᵢ nᵢ²=, agrees with it only for equal masses, which is one reason everything here is mass-weighted.
 
+* Reproduction of Jóhannesson and Jónsson, Section III B
+The Appendix B LEPS-plus-harmonic-oscillator potential gives =E_A = 3.63395= from the reactant minimum. Section III B says =k_B T = 0.1 E_A=, but the same paragraph's =⟨|v|⟩ = 0.399= and analytic Vineyard rate =k_hTST = 4.3e-7= both select =k_B T = 0.25= in the Appendix B energy units with unit mass. At that numerical convention rgsaddle gives:
+
+| Estimate | Rate |
+|------------------------------+--------------------------|
+| analytic Vineyard hTST | =4.33127e-7= |
+| optimal-line quadrature | =4.20148e-7= |
+| 17-node trapezoidal protocol, quadrature reference | =4.31468e-7= |
+| Eq. 22 crossings plus trapezoidal work, 144 independent seeds | =(4.333 ± 0.037)e-7= |
+| paper | =(4.5 ± 0.2)e-7= |
+
+The sampled reproduction uses 1000 records for each plane optimization, 8000 records for the crossing estimator, and 2000 records on each of 17 work planes. The paper states that each canonical average uses one molecular-dynamics trajectory with stochastic collisions, but does not state a time step, collision frequency, trajectory length, number of planes, masses, or physical units. Its printed =Q‡/Q_ZR = 0.765 ± 0.005= is a label error: Eq. 3 uses =Q_ZR/Q_R= in the prefactor, whereas =Q‡/Q_ZR= is the exponentially small reversible-work factor. The mean over 144 seeds is =4.333e-7= with a sample standard deviation of =0.438e-7= between seeds and a standard error of =0.037e-7=. It is 3.70% below the published central value and 3.14% above the optimal-line quadrature rate. The 17-node trapezoidal reference, computed from quadrature by the test, is =4.31468e-7=. The test requires the sampled mean to be within three standard errors of that reference and separately requires the reference to lie in the published =[4.3, 4.7]e-7= interval. Run =cargo test --features ohtst --test ohtst_leps section_iii_b_reproduces_the_printed_rates -- --nocapture= to regenerate every number. =docs/design/ohtst-paper-reproduction.md= has the quoted source text and the full comparison.
+
 * A rate in five calls
 #+begin_src rust
 let seed = Hyperplane::from_min_mode(&dimer)?.oriented_toward(product.view());
@@ -72,7 +85,7 @@ Every reference is computed independently of the sampler: closed forms, quadratu
 | =tests/ohtst_bligaard_jonsson.rs= | the 2005 paper's Eckart model, line quadrature | the paper's angles 1.16°, 43° at 0.1182, 1.33° and 71.2° at 0.2266, 1.43° and 75.6° at 0.3 against quadrature; its 1.24° at 0.01 is 1.170°; =κ(1.405°)/κ(75.6°)= 0.63679 ± 0.01465 against 0.62660 from the quadrature =k_TST= ratio |
 | =tests/ohtst_skewed_well.rs= | two-dimensional quadrature | =Z_H/Z_R= 1.3966 ± 0.0017 against 1.396348 at =kT = 0.1=; =ln κ k_TST= -12.11548 and -12.13886 on lines whose =ln k_TST= are -11.78081 and -10.32538; work along the PAFI planes of the minimum energy path at =kT = 0.4=, 0.87431 ± 0.00679 (Simpson), 0.87673 ± 0.00545 (MBAR) against 0.87272; along the optimizer's trace 0.06295 ± 0.00392 against 0.06199 |
 | =tests/ohtst_coupled_modes.rs= | product quadrature, 48 dimensions | =Z_H/Z_R= 3.4669 ± 0.0035 against 3.466707; the optimizer from the saddle plane turned 0.3 rad ends 0.0022 rad off the axis at the offset 0.068867 ± 0.000224 against 0.068873; =ln κ + ln Z= -47.57538 ± 0.00853 and -47.63150 ± 0.02744 on two planes; work to the saddle plane 2.60477 ± 0.00192 (Simpson), 2.60107 ± 0.00431 (MBAR, rigid) and 2.60063 ± 0.00519 (MBAR, Gaussian) against 2.60354 |
-| =tests/ohtst_leps.rs= | line quadrature, harmonic TST | the dimer seed, the climb from it, =Z_H/Z_R= 0.6516 ± 0.0007 against 0.6509, the rate against quadrature, the approach to harmonic TST; =κ k_TST= 2.9441e-5 and 2.9078e-5 on two lines; work along the PAFI planes 2.92179 ± 0.03840 (Simpson), 2.92919 ± 0.00290 (MBAR) against 2.92859, with the smallest neighbour overlap 0.346 under the rigid map and 0.471 under the Gaussian one |
+| =tests/ohtst_leps.rs= | line quadrature, harmonic TST, 2001 Section III B | the dimer seed, the climb from it, =Z_H/Z_R= 0.6516 ± 0.0007 against 0.6509, the rate against quadrature, the approach to harmonic TST; Section III B =(4.333 ± 0.037)e-7= against the computed 17-node reference =4.31468e-7= and printed =(4.5 ± 0.2)e-7=; =κ k_TST= 2.9441e-5 and 2.9078e-5 on two lines; work along the PAFI planes 2.92179 ± 0.03840 (Simpson), 2.92919 ± 0.00290 (MBAR) against 2.92859, with the smallest neighbour overlap 0.346 under the rigid map and 0.471 under the Gaussian one |
 
 * Limits
 The optimizer's trust region tests the change of =A= by trapezoids of sampled gradients under common random numbers, not by a BAR difference with its error, and an averaged stochastic-gradient variant is not here. One reaction channel is assumed: a plane that cuts a second channel is not detected. The Gaussian transport map is affine, so it gains little on a plane whose in-plane distribution has more than one mode. Integration along a curve of planes needs nodes dense enough to follow the turn of the planes; BAR and MBAR do not, but their errors assume that the retained configurations are independent.

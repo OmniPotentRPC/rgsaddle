@@ -34,6 +34,8 @@ jobs:
         run: cargo clippy --features capi -- -D warnings
       - name: Build the C ABI library (capi,ohtst)
         run: cargo build --features capi,ohtst --verbose
+      - name: Test (ohtst)
+        run: cargo test --features ohtst --verbose
       - name: Test (capi,ohtst)
         run: cargo test --features capi,ohtst --verbose
       - name: Clippy (capi,ohtst)
@@ -88,6 +90,7 @@ jobs:
           cargo run --release --example fixed_slab_precon
           cargo run --release --example akmc_strain
           cargo run --release --features ohtst --example ohtst_skewed_well
+          cargo run --release --features ohtst --example ohtst_analytic
           cargo run --release --example elastic_field_bench -- 2000
           MD_CHECK=1 cargo run --release --example langevin_nvt
           cargo run --release --example pafi_tutorial
@@ -101,6 +104,7 @@ jobs:
           python3 examples/step_controls.py
           python3 examples/pafi_tutorial.py
           python3 examples/ohtst_tutorial.py
+          python3 examples/ohtst_analytic.py
 
   # A meson parent project takes the headers from this checkout, as a
   # wrap-git subproject or from the installed rgsaddle-headers.pc, and
