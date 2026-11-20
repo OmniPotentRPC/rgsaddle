@@ -6,6 +6,8 @@ program test_handles
 
   call check_new_statuses()
   call check_create_status()
+  call check_default_configs_match_rust()
+  call check_create_keeps_live_handle_on_invalid_args()
   call check_band_release()
   call check_moves()
   call check_trampoline_shape()
@@ -115,6 +117,85 @@ contains
     status = session%positions(probe)
     call check_i64("released band", status, RGSADDLE_NULL_BAND)
   end subroutine check_band_release
+
+  subroutine check_default_configs_match_rust()
+    type(rgsaddle_band_config_t) :: bcfg
+    type(rgsaddle_ohtst_config_t) :: ocfg
+    call init_band_config(bcfg)
+    call check_i64("band flags", int(bcfg%flags, c_int), int(RGSADDLE_BAND_CI_AFTER, c_int))
+    if (.not. close_enough(bcfg%ci_trigger_factor, 0.0_c_double, 1.0_c_double)) stop 6
+    if (.not. close_enough(bcfg%ci_trigger_force, 0.5_c_double, 1.0_c_double)) stop 6
+    if (.not. close_enough(bcfg%max_move, 0.2_c_double, 1.0_c_double)) stop 6
+
+    call init_ohtst_config(ocfg)
+    if (.not. close_enough(ocfg%sample_time_step, 0.05_c_double, 1.0_c_double)) stop 6
+    if (ocfg%sample_burn_in /= 500_c_int64_t) stop 6
+    if (ocfg%sample_records /= 2000_c_int64_t) stop 6
+    if (ocfg%sample_blocks /= 20_c_int64_t) stop 6
+    if (ocfg%sample_retain /= 16_c_int64_t) stop 6
+    if (.not. close_enough(ocfg%shooting_friction, 0.0_c_double, 1.0_c_double)) stop 6
+    if (ocfg%shooting_shots /= 256_c_int64_t) stop 6
+    if (ocfg%shooting_seed /= 1_c_int64_t) stop 6
+    if (ocfg%counting /= int(RGSADDLE_OHTST_COUNT_FIRST_CROSSING, c_int32_t)) stop 6
+  end subroutine check_default_configs_match_rust
+
+  subroutine check_create_keeps_live_handle_on_invalid_args()
+    type(band_handle) :: band
+    type(minmode_handle) :: mode
+    type(pafi_handle) :: pafi
+    type(ohtst_handle) :: ohtst
+    type(rgsaddle_band_config_t) :: bcfg
+    type(rgsaddle_minmode_config_t) :: mcfg
+    type(rgsaddle_pafi_config_t) :: pcfg
+    type(rgsaddle_ohtst_config_t) :: ocfg
+    type(rgsaddle_ohtst_result_t) :: oresult
+    type(rgsaddle_pafi_result_t) :: presult
+    real(c_double) :: images(3, 3), out(3, 3)
+    real(c_double) :: point(3), seed(3), mode_out(3)
+    real(c_double) :: frames(2), plane(2), normal(2)
+    integer(c_int) :: status
+
+    images = 0.0_c_double
+    images(1, 2) = 0.5_c_double
+    images(1, 3) = 1.0_c_double
+    point = 0.0_c_double
+    seed = [1.0_c_double, 0.0_c_double, 0.0_c_double]
+    frames = [-1.0_c_double, 1.0_c_double]
+    plane = 0.0_c_double
+    normal = [1.0_c_double, 0.0_c_double]
+
+    call init_band_config(bcfg)
+    status = band%create(bcfg, 3_c_int64_t, 1_c_int64_t, images)
+    call check_status("band live create", status)
+    status = band%create(bcfg, 2_c_int64_t, 1_c_int64_t, images)
+    call check_i64("band invalid create", status, RGSADDLE_SHAPE)
+    status = band%positions(out)
+    call check_status("band alive after invalid create", status)
+
+    call init_minmode_config(mcfg)
+    status = mode%create(mcfg, 1_c_int64_t, point, seed)
+    call check_status("minmode live create", status)
+    status = mode%create(mcfg, 0_c_int64_t, point, seed)
+    call check_i64("minmode invalid create", status, RGSADDLE_SHAPE)
+    status = mode%mode(mode_out)
+    call check_status("minmode alive after invalid create", status)
+
+    call init_pafi_config(pcfg)
+    status = pafi%create(pcfg, 2_c_int64_t, 1_c_int64_t, frames)
+    call check_status("pafi live create", status)
+    status = pafi%create(pcfg, 1_c_int64_t, 1_c_int64_t, frames)
+    call check_i64("pafi invalid create", status, RGSADDLE_SHAPE)
+    status = pafi%result(presult)
+    call check_i64("pafi alive after invalid create", status, RGSADDLE_NO_EVALUATION)
+
+    call init_ohtst_config(ocfg)
+    status = ohtst%create(ocfg, 2_c_int64_t, plane, normal)
+    call check_status("ohtst live create", status)
+    status = ohtst%create(ocfg, 0_c_int64_t, plane, normal)
+    call check_i64("ohtst invalid create", status, RGSADDLE_SHAPE)
+    status = ohtst%result(oresult)
+    call check_i64("ohtst alive after invalid create", status, RGSADDLE_NO_EVALUATION)
+  end subroutine check_create_keeps_live_handle_on_invalid_args
 
   subroutine check_moves()
     call move_band()

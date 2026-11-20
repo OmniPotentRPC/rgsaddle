@@ -150,6 +150,15 @@ gfortran -std=f2008 -Wall -Wextra -Werror -fcheck=all \
   $pc_libs \
   -o "$work/test_assign.gfortran.x"
 run_assign gfortran "$work/test_assign.gfortran.x"
+# gfortran with -std=f2008 rejects finalized-structure intrinsic assignment
+# (f08/0011). Compile this regression probe under the newer standard.
+compile_and_run gfortran test_handle_container_assign \
+  -std=f2018 -Wall -Wextra -Werror -fcheck=all \
+  -J"$work/gfortran-mods" \
+  $pc_cflags \
+  "$test_dir/support.f90" "$test_dir/test_handle_container_assign.f90" \
+  $(link_runtime) \
+  $pc_libs
 
 cat >"$work/smoke.f90" <<'EOF'
 program smoke
