@@ -2296,25 +2296,22 @@ impl<'a> Plane<'a> {
         {
             return Err(SaddleError::NonFinite("PAFI path geometry"));
         }
-        let (tangent, curvature) = if directions.nrows() == 0 {
-            (geometry.tangent.clone(), geometry.curvature.clone())
-        } else {
-            // τ is the stored tangent and dτ/ds its stored derivative.
-            // ν = Pτ / |Pτ|, and the estimator wants
-            // (∇E · ν) (τ · ν - (x - X) · dν/ds).
-            let (normal, rate) = HyperplaneConstraint::orthogonal_rate(
-                geometry.tangent.view(),
-                geometry.curvature.view(),
-                directions,
-            )?;
-            let alpha = geometry.tangent.dot(&normal);
-            if !(alpha.is_finite() && alpha != 0.0) {
-                return Err(SaddleError::Invalid(
-                    "PAFI tangent is orthogonal to its rigid-mode-free normal".into(),
-                ));
-            }
-            (&normal * alpha, &rate / alpha)
-        };
+        // ν = Pτ / |Pτ|, P dropping the rigid directions (none, when there
+        // are none). The estimator wants (∇E · ν) (τ · ν - (x - X) · dν/ds),
+        // so the stored τ and dτ/ds, in whatever parameter the path has,
+        // enter only through ν, τ · ν and dν/ds.
+        let (normal, rate) = HyperplaneConstraint::orthogonal_rate(
+            geometry.tangent.view(),
+            geometry.curvature.view(),
+            directions,
+        )?;
+        let alpha = geometry.tangent.dot(&normal);
+        if !(alpha.is_finite() && alpha != 0.0) {
+            return Err(SaddleError::Invalid(
+                "PAFI tangent is orthogonal to its rigid-mode-free normal".into(),
+            ));
+        }
+        let (tangent, curvature) = (&normal * alpha, &rate / alpha);
         let constraint =
             HyperplaneConstraint::through(geometry.positions.clone(), tangent.view(), directions)?;
         Ok(Self {
@@ -2891,6 +2888,49 @@ mod tests {
         assert_eq!(sampler.planes.len(), 1);
         assert_eq!(sampler.planes[0].point(), geometry.positions);
         assert_eq!(sampler.planes[0].normal(), array![1.0, 0.0]);
+    }
+}
+
+#[cfg(test)]
+mod plane_tests {
+    use ndarray::{Array1, Array2, array};
+
+    use super::{PathGeometry, Plane, uniform_translations};
+
+    /// The same curve with its parameter scaled: the tangent by `k`, the
+    /// curvature by `k²`.
+    fn geometry(scale: f64) -> PathGeometry {
+        PathGeometry {
+            positions: array![0.1, -0.2, 0.3, 0.7, 0.4, -0.5],
+            tangent: array![1.0, 0.5, -0.2, 0.3, 0.8, 0.1] * scale,
+            curvature: array![0.2, -0.1, 0.4, 0.6, 0.0, -0.3] * (scale * scale),
+            jerk: Array1::zeros(6),
+            arc: 0.0,
+        }
+    }
+
+    #[test]
+    fn the_plane_does_not_depend_on_the_parameter_of_the_path() {
+        let none = Array2::zeros((0, 6));
+        let rigid = uniform_translations(2);
+        for directions in [none.view(), rigid.view()] {
+            let base_geometry = geometry(1.0);
+            let base = Plane::new(&base_geometry, directions).expect("plane");
+            for scale in [0.2, 5.0] {
+                let scaled_geometry = geometry(scale);
+                let scaled = Plane::new(&scaled_geometry, directions).expect("plane");
+                let drift = (scaled.constraint.normal().to_owned() - base.constraint.normal())
+                    .mapv(f64::abs)
+                    .sum();
+                assert!(drift < 1.0e-12, "normal moved by {drift}");
+                let curvature = (&scaled.curvature - &base.curvature).mapv(f64::abs).sum();
+                assert!(curvature < 1.0e-12, "curvature moved by {curvature}");
+                let tangent = (&scaled.tangent - &(&base.tangent * scale))
+                    .mapv(f64::abs)
+                    .sum();
+                assert!(tangent < 1.0e-12, "tangent moved by {tangent}");
+            }
+        }
     }
 }
 
