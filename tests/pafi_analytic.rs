@@ -10,9 +10,9 @@ use std::f64::consts::{FRAC_PI_2, FRAC_PI_4};
 
 use rgsaddle::{
     ArcPath, PafiConfig, PafiIntegrator, PathFrame, PathGeometry, PointSurface, RelaxConfig,
-    SaddleError, anchored_barriers, average_hyperplane, balanced_barriers, flat_hyperplane_gradient,
-    harmonic_mask_shift, integrate_profile, pafi_frames, pafi_profile, pafi_truncated,
-    zero_temperature_barrier,
+    SaddleError, anchored_barriers, average_hyperplane, balanced_barriers,
+    flat_hyperplane_gradient, harmonic_mask_shift, integrate_profile, pafi_frames, pafi_profile,
+    pafi_truncated, zero_temperature_barrier,
 };
 
 struct AlongX;

@@ -2068,7 +2068,6 @@ pub(crate) fn remove_com(vector: &mut Array1<f64>) {
     }
 }
 
-
 /// Sample one plane with the windowed chain.
 fn average_windowed<S: PointSurface>(
     surface: &S,
