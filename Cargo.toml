@@ -55,6 +55,13 @@ ndarray = "0.17"
 faer = { version = "0.24.4", optional = true, default-features = false, features = ["std", "linalg"] }
 rayon = "1.12"
 thiserror = "2"
+# Not used by this crate. The dev-dependency criterion turns on std for
+# either and derive for zerocopy under `cargo test`, which would otherwise
+# rebuild rgmin with other features than a plain `cargo build --lib`. The
+# two copies of rgmin then differ as types and the doctests of this crate
+# fail to compile. Enabling the same features here keeps one copy.
+either = { version = "1", features = ["use_std"] }
+zerocopy = { version = "0.8", features = ["derive"] }
 # The rev is tag v0.3.5. Its own minimage requirement is the caret
 # ^0.1.2, so it builds against any 0.1.x from 0.1.2 up, and the range
 # below is what keeps one minimage between this crate and linkcell.
