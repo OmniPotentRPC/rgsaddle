@@ -24,6 +24,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import TypedDict
 
 
 def stiffness(x: float) -> float:
@@ -55,7 +56,57 @@ def find_binary(repo_root: Path) -> Path:
     return binary
 
 
-def run_pafi(repo_root: Path, config: dict[str, float]) -> dict[str, float]:
+class PafiTutorialResult(TypedDict):
+    """JSON written by ``examples/pafi_tutorial.rs``."""
+
+    cold_barrier: float
+    barrier: float
+    barrier_error: float
+    closed_form: float
+    nu: float
+    rate: float
+    tau_max: float
+    n_eff_min: float
+
+
+def _json_fields(text: str) -> dict[str, object]:
+    parsed: object = json.loads(text)
+    if not isinstance(parsed, dict):
+        raise TypeError("tutorial result must be a JSON object")
+    fields: dict[str, object] = {}
+    for key, value in parsed.items():
+        if not isinstance(key, str):
+            raise TypeError("tutorial result keys must be strings")
+        fields[key] = value
+    return fields
+
+
+def _number(fields: dict[str, object], key: str) -> float:
+    try:
+        value = fields[key]
+    except KeyError as exc:
+        raise TypeError(f"tutorial result is missing {key}") from exc
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"tutorial result field {key} must be a number")
+    return float(value)
+
+
+def load_pafi_result(text: str) -> PafiTutorialResult:
+    """Parse the example's JSON object into floats."""
+    fields = _json_fields(text)
+    return {
+        "cold_barrier": _number(fields, "cold_barrier"),
+        "barrier": _number(fields, "barrier"),
+        "barrier_error": _number(fields, "barrier_error"),
+        "closed_form": _number(fields, "closed_form"),
+        "nu": _number(fields, "nu"),
+        "rate": _number(fields, "rate"),
+        "tau_max": _number(fields, "tau_max"),
+        "n_eff_min": _number(fields, "n_eff_min"),
+    }
+
+
+def run_pafi(repo_root: Path, config: dict[str, float]) -> PafiTutorialResult:
     """Run the compiled PAFI example on ``config`` and return its result."""
     binary = find_binary(repo_root)
     with tempfile.TemporaryDirectory() as workdir:
@@ -66,7 +117,7 @@ def run_pafi(repo_root: Path, config: dict[str, float]) -> dict[str, float]:
             [str(binary), str(config_path), str(result_path)],
             check=True,
         )
-        return json.loads(result_path.read_text())
+        return load_pafi_result(result_path.read_text())
 
 
 def main() -> None:

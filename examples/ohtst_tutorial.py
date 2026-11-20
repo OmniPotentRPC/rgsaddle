@@ -23,6 +23,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import TypedDict
 
 
 def find_binary(repo_root: Path) -> Path:
@@ -39,13 +40,79 @@ def find_binary(repo_root: Path) -> Path:
     return binary
 
 
-def run_ohtst(repo_root: Path) -> dict[str, float]:
+class OhTstTutorialResult(TypedDict):
+    """JSON written by ``examples/ohtst_tutorial.rs``."""
+
+    turn_degrees: float
+    density: float
+    density_error: float
+    integrated_work: float
+    integrated_error: float
+    bar_work: float
+    bar_error: float
+    mbar_work: float
+    mbar_error: float
+    closed_form: float
+    bare_rate: float
+    bare_rate_error: float
+    kappa: float
+    kappa_error: float
+    final_rate: float
+    final_error: float
+
+
+def _json_fields(text: str) -> dict[str, object]:
+    parsed: object = json.loads(text)
+    if not isinstance(parsed, dict):
+        raise TypeError("tutorial result must be a JSON object")
+    fields: dict[str, object] = {}
+    for key, value in parsed.items():
+        if not isinstance(key, str):
+            raise TypeError("tutorial result keys must be strings")
+        fields[key] = value
+    return fields
+
+
+def _number(fields: dict[str, object], key: str) -> float:
+    try:
+        value = fields[key]
+    except KeyError as exc:
+        raise TypeError(f"tutorial result is missing {key}") from exc
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"tutorial result field {key} must be a number")
+    return float(value)
+
+
+def load_ohtst_result(text: str) -> OhTstTutorialResult:
+    """Parse the example's JSON object into floats."""
+    fields = _json_fields(text)
+    return {
+        "turn_degrees": _number(fields, "turn_degrees"),
+        "density": _number(fields, "density"),
+        "density_error": _number(fields, "density_error"),
+        "integrated_work": _number(fields, "integrated_work"),
+        "integrated_error": _number(fields, "integrated_error"),
+        "bar_work": _number(fields, "bar_work"),
+        "bar_error": _number(fields, "bar_error"),
+        "mbar_work": _number(fields, "mbar_work"),
+        "mbar_error": _number(fields, "mbar_error"),
+        "closed_form": _number(fields, "closed_form"),
+        "bare_rate": _number(fields, "bare_rate"),
+        "bare_rate_error": _number(fields, "bare_rate_error"),
+        "kappa": _number(fields, "kappa"),
+        "kappa_error": _number(fields, "kappa_error"),
+        "final_rate": _number(fields, "final_rate"),
+        "final_error": _number(fields, "final_error"),
+    }
+
+
+def run_ohtst(repo_root: Path) -> OhTstTutorialResult:
     """Run the compiled OH-TST example and return its JSON result."""
     binary = find_binary(repo_root)
     with tempfile.TemporaryDirectory() as workdir:
         result_path = Path(workdir) / "result.json"
         subprocess.run([str(binary), str(result_path)], check=True)
-        return json.loads(result_path.read_text())
+        return load_ohtst_result(result_path.read_text())
 
 
 def main() -> None:
