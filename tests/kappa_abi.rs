@@ -84,50 +84,117 @@ fn c_force_matches_the_contour_definition_and_propagates_errors() {
     }
 }
 
-#[test]
 #[cfg(feature = "ohtst")]
-fn c_pafi_transmission_selects_the_free_energy_maximum() {
-    unsafe {
+mod pafi_transmission {
+    use super::*;
+
+    struct Band {
+        free: Vec<f64>,
+        points: Vec<f64>,
+        normals: Vec<f64>,
+        offsets: Vec<i64>,
+        starts: Vec<f64>,
+    }
+
+    fn band() -> Band {
+        Band {
+            free: vec![0.0, 1.0, 0.0],
+            points: vec![-1.0, 0.0, 1.0],
+            normals: vec![1.0; 3],
+            offsets: vec![0, 1, 3, 4],
+            starts: vec![-1.0, 0.0, 0.0, 1.0],
+        }
+    }
+
+    fn config() -> RgsaddlePafiTransmissionConfig {
         let mut cfg = MaybeUninit::uninit();
-        assert_eq!(
-            rgsaddle_pafi_transmission_config_default(cfg.as_mut_ptr()),
-            RGSADDLE_OK
-        );
-        let mut cfg = cfg.assume_init();
-        cfg.thermal = 0.05;
-        cfg.friction = 0.0;
-        cfg.time_step = 0.002;
-        cfg.steps = 100;
-        cfg.check_every = 25;
-        cfg.shots = 32;
-        cfg.blocks = 4;
-        cfg.seed = 7;
-        let free = [0.0, 1.0];
-        let points = [-1.0, 0.0];
-        let normals = [1.0, 1.0];
-        let offsets = [0_i64, 1, 3];
-        let starts = [-1.0, 0.0, 0.0];
-        let mut report = MaybeUninit::uninit();
-        assert_eq!(
+        unsafe {
+            assert_eq!(
+                rgsaddle_pafi_transmission_config_default(cfg.as_mut_ptr()),
+                RGSADDLE_OK
+            );
+            let mut cfg = cfg.assume_init();
+            cfg.thermal = 0.05;
+            cfg.friction = 0.0;
+            cfg.time_step = 0.002;
+            cfg.steps = 100;
+            cfg.check_every = 25;
+            cfg.shots = 32;
+            cfg.blocks = 4;
+            cfg.seed = 7;
+            cfg
+        }
+    }
+
+    fn shoot(
+        cfg: &RgsaddlePafiTransmissionConfig,
+        band: &Band,
+    ) -> (i32, RgsaddlePafiTransmissionReport) {
+        let mut report = MaybeUninit::<RgsaddlePafiTransmissionReport>::zeroed();
+        let status = unsafe {
             rgsaddle_pafi_transmission(
-                &cfg,
+                cfg,
                 1,
-                2,
-                free.as_ptr(),
-                points.as_ptr(),
-                normals.as_ptr(),
-                offsets.as_ptr(),
-                starts.as_ptr(),
+                band.free.len() as i64,
+                band.free.as_ptr(),
+                band.points.as_ptr(),
+                band.normals.as_ptr(),
+                band.offsets.as_ptr(),
+                band.starts.as_ptr(),
                 ptr::null(),
                 Some(quartic),
                 ptr::null_mut(),
                 report.as_mut_ptr(),
-            ),
-            RGSADDLE_OK
-        );
-        let report = report.assume_init();
+            )
+        };
+        (status, unsafe { report.assume_init() })
+    }
+
+    #[test]
+    fn c_pafi_transmission_selects_the_free_energy_maximum() {
+        let (status, report) = shoot(&config(), &band());
+        assert_eq!(status, RGSADDLE_OK);
         assert_eq!(report.dividing, 1);
         assert_eq!(report.shots, 32);
+        assert_eq!(report.version.major, RGSADDLE_ABI_MAJOR);
+        assert_eq!(report.version.minor, RGSADDLE_ABI_MINOR);
         assert!((report.kappa - 1.0).abs() < 1.0e-12, "{:?}", report.kappa);
+    }
+
+    #[test]
+    fn c_pafi_transmission_refuses_a_minor_newer_than_the_library() {
+        let mut cfg = config();
+        cfg.version.minor = RGSADDLE_ABI_MINOR + 1;
+        assert_eq!(shoot(&cfg, &band()).0, RGSADDLE_ABI_MISMATCH);
+    }
+
+    #[test]
+    fn c_pafi_transmission_refuses_a_minor_older_than_its_structs() {
+        let mut cfg = config();
+        cfg.version.minor = 45;
+        assert_eq!(shoot(&cfg, &band()).0, RGSADDLE_ABI_MISMATCH);
+    }
+
+    #[test]
+    fn c_pafi_transmission_reports_a_major_mismatch_before_other_checks() {
+        let mut cfg = config();
+        cfg.version.major = RGSADDLE_ABI_MAJOR + 1;
+        assert_eq!(shoot(&cfg, &band()).0, RGSADDLE_ABI_MISMATCH);
+        cfg.steps = 0;
+        assert_eq!(shoot(&cfg, &band()).0, RGSADDLE_ABI_MISMATCH);
+        cfg.version.major = RGSADDLE_ABI_MAJOR;
+        assert_eq!(shoot(&cfg, &band()).0, RGSADDLE_INVALID_PARAMETER);
+    }
+
+    #[test]
+    fn c_pafi_transmission_refuses_a_maximum_at_either_end() {
+        let cfg = config();
+        for free in [[0.0, 0.5, 1.0], [1.0, 0.5, 0.0]] {
+            let mut band = band();
+            band.free = free.to_vec();
+            let (status, report) = shoot(&cfg, &band);
+            assert_eq!(status, RGSADDLE_INVALID_PARAMETER, "{free:?}");
+            assert_eq!(report.shots, 0, "{free:?}");
+        }
     }
 }
