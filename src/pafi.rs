@@ -572,7 +572,7 @@ pub struct HyperplaneAverage {
     pub samples: usize,
     /// Integrated autocorrelation time of the recorded series, in samples.
     pub tau: f64,
-    /// `samples / max(1, 2 τ)`.
+    /// `(samples - equilibration.discard) / max(1, 2 τ)`.
     pub n_eff: f64,
     /// Force evaluations spent on this plane, the quenches of
     /// [`PafiConfig::max_jump`] included, summed over rounds.
