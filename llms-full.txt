@@ -151,6 +151,9 @@ There is no run-to-completion C entry point. Units are the caller's. Positions a
 ## Use the headers from meson
 The top-level `meson.build` provides the headers as the dependency `rgsaddle-headers` (also `rgsaddle`), from a wrap or from an installed `rgsaddle-headers.pc`. It does not build the library. `howto/meson` has the wrap, the migration from a packagefiles overlay, and the run-time loading.
 
+## Use the Fortran module
+Enable meson's optional `fortran` feature to build the `rgsaddle` Fortran 2008 module and `librgsaddle_fortran`. `howto/fortran` has the callback contract, finalizer-backed handles, and the pkg-config and CMake entries.
+
 ## Grow the band with AutoNEB
 `howto/autoneb` is the AutoNEB loop: insert where the resolution is worst, relax a local window, and climb. The tuning sits on `BandConfig::autoneb`. A weighted spring supplied by the host is refused for now; zoom-NEB will recompute it.
 
@@ -227,6 +230,7 @@ Call `reset` after any model update. That is the documented boundary. A host tha
 The API documentation for every public item is on [docs.rs/rgsaddle](https://docs.rs/rgsaddle).
 `cargo doc --open` builds the same pages from a checkout.
 Runnable examples open `BandSession`, `AutoNeb`, `OcinebSession`, `MinModeSession`, `Index1Session`, `IndexKSession`, `SolidDimer`, `SolidNeb`, `Stencil` and the `ohtst` module, and, with `--features capi`, the C band, min-mode and stencil handles.
+=meson -Dfortran=enabled= adds the Fortran 2008 `rgsaddle` module on the same C ABI.
 `cargo test --doc` runs them.
 Every public configuration struct is non-exhaustive.
 Start from `Default` or the type's named constructor and chain the `with_*` setters, as in `BandConfig::default().with_force_tol(1e-3)`.
@@ -508,6 +512,7 @@ The surface writes energy and the Cartesian gradient for one image.
 It also carries the kind (`s`, `u`, or `f`), the Hessian index and the evaluation count.
 That count includes the finite differences that decide a step or an index.
 The Lanczos acceptance does not build a dense Hessian.
+`howto/fortran` wraps this ABI for Fortran with finalizer-backed handles for band, min-mode, PAFI, and OH-TST sessions (`rgsaddle_pafi_*` and `rgsaddle_ohtst_*`, ABI minor 45).
 Band flag bit 2 is `RGSADDLE_BAND_CI_AFTER`.
 It arms the climbing image under `ci_trigger_force` or `ci_trigger_factor` times the first force.
 Either of the two may be 0.
@@ -3148,7 +3153,7 @@ ABI minor 45 adds the free-end adaptive NEB of Zhang, Zhang, Ye, and Zheng, J. C
 
 > Consuming rgsaddle headers from Meson wrap-git or pkg-config
 
-The top-level `meson.build` gives a C or C++ project the rgsaddle headers: `rgsaddle.h`, `rgsaddle/session.hpp` and `rgsaddle/stencil.hpp`. It does not build the Rust library. The host links the library that `cargo build --features capi` or `cargo cinstall` produces, or loads it at run time. The headers are the hand-written contract, the same files cargo-c installs, so there is nothing to generate.
+The top-level `meson.build` gives a C or C++ project the rgsaddle headers: `rgsaddle.h`, `rgsaddle/session.hpp` and `rgsaddle/stencil.hpp`. By default it is headers only. The optional =-Dfortran=enabled= feature adds the Fortran 2008 wrappers documented in `howto/fortran`. The Rust library is still built by cargo; the host links that library (for example from `cargo build --features capi` or `cargo cinstall`) or loads it at run time. The headers are the hand-written contract, the same files cargo-c installs, so there is nothing to generate.
 
 The meson project is `rgsaddle`, and its version is the crate's. `tests/package_version.rs` fails when `meson.build` and `Cargo.toml` disagree. The dependency answers to two names, `rgsaddle-headers` and `rgsaddle`, and the variable `rgsaddle_headers_dep` holds it.
 
@@ -4300,6 +4305,18 @@ The narrative for a session is the C and C++ how-to, not this list.
 - `rgsaddle_minmode_mode`. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_minmode_reset`. Purpose: Clear optimizer/rotation history, carried curvature, and the centre cache. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_minmode_free`. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_pafi_create`. Purpose: Create a PAFI session from path frames. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_pafi_set_config`. Purpose: Replace the PAFI configuration between runs. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_pafi_run`. Purpose: Run PAFI and store the profile in the session. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_pafi_result`. Purpose: Read the last PAFI barrier summary. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_pafi_profile`. Purpose: Read the full stored profile. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_pafi_free`. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_ohtst_create`. Purpose: Create an OH-TST session on one dividing plane. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_ohtst_set_config`. Purpose: Replace the OH-TST configuration between runs. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_ohtst_run`. Purpose: Sample the plane, run transmission shooting, and store the result. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_ohtst_result`. Purpose: Read the last OH-TST transmission summary. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_ohtst_curve`. Purpose: Read the stored κ(t) curve. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_ohtst_free`. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_nichols_step`. Purpose: Nichols displacement from a spectrum of the mass-weighted energy Hessian. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_prfo_step`. Purpose: Restricted-step partitioned RFO. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_hessian_powell`. Purpose: Powell symmetric Broyden update of a Cartesian energy Hessian. Parameters: the declaration. Units: the caller's.
@@ -4452,6 +4469,8 @@ The narrative for a session is the C and C++ how-to, not this list.
 - `RgsaddleBand`. Purpose: Opaque session handle in include/rgsaddle.h.
 - `RgsaddleMinMode`. Purpose: Opaque session handle in include/rgsaddle.h.
 - `RgsaddleHyperplaneSampler`. Purpose: Opaque session handle in include/rgsaddle.h.
+- `RgsaddlePafi`. Purpose: Opaque session handle in include/rgsaddle.h.
+- `RgsaddleOhtst`. Purpose: Opaque session handle in include/rgsaddle.h.
 - `RgsaddleIndex1`. Purpose: Opaque session handle in include/rgsaddle.h.
 - `RgsaddleIrc`. Purpose: Opaque session handle in include/rgsaddle.h.
 - `RgsaddleSellaMin`. Purpose: Opaque session handle in include/rgsaddle.h.
@@ -4486,6 +4505,12 @@ The narrative for a session is the C and C++ how-to, not this list.
 - `rgsaddle_quickmin_t`. Purpose: Quick-min variants (rgmin QuickMinOptions).
 - `rgsaddle_minmode_config_t`. Purpose: Minimum-mode configuration.
 - `rgsaddle_artn_config_t`. Purpose: ART nouveau protocol controls, ABI minor 43.
+- `rgsaddle_pafi_config_t`. Purpose: PAFI configuration.
+- `rgsaddle_pafi_result_t`. Purpose: PAFI barrier summary after rgsaddle_pafi_run.
+- `rgsaddle_ohtst_integrator_t`. Purpose: OH-TST sample integrator kind for rgsaddle_ohtst_config_t: 0 BAOAB, 1 GHMC.
+- `rgsaddle_ohtst_counting_t`. Purpose: OH-TST trajectory counting kind for rgsaddle_ohtst_config_t: 0 final state, 1 first crossing.
+- `rgsaddle_ohtst_config_t`. Purpose: OH-TST configuration.
+- `rgsaddle_ohtst_result_t`. Purpose: OH-TST summary after rgsaddle_ohtst_run.
 - `rgsaddle_hess_update_t`. Purpose: C enum typedef in include/rgsaddle.h.
 - `rgsaddle_nichols_mode_t`. Purpose: C enum typedef in include/rgsaddle.h.
 - `rgsaddle_prfo_t`. Purpose: C enum typedef in include/rgsaddle.h.
@@ -4516,6 +4541,7 @@ The narrative for a session is the C and C++ how-to, not this list.
 - `rgsaddle_sample_hyperplane_fn`. Purpose: Callback typedef in include/rgsaddle.h.
 - `rgsaddle_surface_fn`. Purpose: Callback typedef in include/rgsaddle.h.
 - `rgsaddle_solid_surface_fn`. Purpose: Callback typedef in include/rgsaddle.h.
+- `rgsaddle_point_surface_fn`. Purpose: Point-surface callback used by PAFI and OH-TST handles.
 - `rgsaddle_hessian_fn`. Purpose: Callback typedef in include/rgsaddle.h.
 - `rgsaddle_stencil_eval_fn`. Purpose: Callback typedef in include/rgsaddle.h.
 
@@ -4600,6 +4626,10 @@ The narrative for a session is the C and C++ how-to, not this list.
 - `RGSADDLE_QUICKMIN_RGMIN`. Purpose: Enumerator of `rgsaddle_quickmin_t`.
 - `RGSADDLE_QUICKMIN_EON`. Purpose: Enumerator of `rgsaddle_quickmin_t`.
 - `RGSADDLE_QUICKMIN_PER_ATOM`. Purpose: Enumerator of `rgsaddle_quickmin_t`.
+- `RGSADDLE_OHTST_INTEGRATOR_BAOAB`. Purpose: Enumerator of `rgsaddle_ohtst_integrator_t`.
+- `RGSADDLE_OHTST_INTEGRATOR_GHMC`. Purpose: Enumerator of `rgsaddle_ohtst_integrator_t`.
+- `RGSADDLE_OHTST_COUNT_FINAL`. Purpose: Enumerator of `rgsaddle_ohtst_counting_t`.
+- `RGSADDLE_OHTST_COUNT_FIRST_CROSSING`. Purpose: Enumerator of `rgsaddle_ohtst_counting_t`.
 - `RGSADDLE_HESS_POWELL`. Purpose: Enumerator of `rgsaddle_hess_update_t`.
 - `RGSADDLE_HESS_BOFILL`. Purpose: Enumerator of `rgsaddle_hess_update_t`.
 - `RGSADDLE_NICHOLS_MINIMIZE`. Purpose: Enumerator of `rgsaddle_nichols_mode_t`.
