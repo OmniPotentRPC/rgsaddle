@@ -22,24 +22,26 @@ mod ohtst_surfaces {
     const K_C: f64 = 0.2025;
     const C_HO: f64 = 1.154;
 
-    /// `(Q, dQ/dr, J, dJ/dr)` of one pair.
-    fn coulomb_exchange(d: f64, r: f64) -> (f64, f64, f64, f64) {
+    /// `(Q, dQ/dr, d²Q/dr², J, dJ/dr, d²J/dr²)` of one pair.
+    fn coulomb_exchange(d: f64, r: f64) -> (f64, f64, f64, f64, f64, f64) {
         let e1 = (-ALPHA * (r - R0)).exp();
         let e2 = e1 * e1;
         let q = 0.5 * d * (1.5 * e2 - e1);
         let dq = 0.5 * d * (-3.0 * ALPHA * e2 + ALPHA * e1);
+        let d2q = 0.5 * d * ALPHA * ALPHA * (6.0 * e2 - e1);
         let j = 0.25 * d * (e2 - 6.0 * e1);
         let dj = 0.25 * d * (-2.0 * ALPHA * e2 + 6.0 * ALPHA * e1);
-        (q, dq, j, dj)
+        let d2j = 0.25 * d * ALPHA * ALPHA * (4.0 * e2 - 6.0 * e1);
+        (q, dq, d2q, j, dj, d2j)
     }
 
     impl LepsHo {
         /// Energy and gradient at `(x, y)`. `r_AB = x`, `r_BC = r_AC - x`,
         /// so `r_AC` is fixed and its pair terms are constants.
         pub fn energy(x: f64, y: f64) -> (f64, f64, f64) {
-            let (qab, dqab, jab, djab) = coulomb_exchange(D_AB, x);
-            let (qbc, dqbc, jbc, djbc) = coulomb_exchange(D_BC, R_AC - x);
-            let (qac, _, jac, _) = coulomb_exchange(D_AC, R_AC);
+            let (qab, dqab, _, jab, djab, _) = coulomb_exchange(D_AB, x);
+            let (qbc, dqbc, _, jbc, djbc, _) = coulomb_exchange(D_BC, R_AC - x);
+            let (qac, _, _, jac, _, _) = coulomb_exchange(D_AC, R_AC);
             let (sa, sb, sc) = (1.0 + LEPS_A, 1.0 + LEPS_B, 1.0 + LEPS_C);
             let (u, w, z) = (jab / sa, jbc / sb, jac / sc);
             let s = u * u + w * w + z * z - u * w - w * z - u * z;
@@ -56,6 +58,30 @@ mod ohtst_surfaces {
                 dleps + 4.0 * K_C * stretch,
                 4.0 * K_C * stretch / C_HO,
             )
+        }
+
+        /// Analytic Hessian of the Appendix B potential.
+        pub fn hessian(x: f64, _y: f64) -> [[f64; 2]; 2] {
+            let (_, _, d2qab, jab, djab, d2jab) = coulomb_exchange(D_AB, x);
+            let (_, _, d2qbc, jbc, djbc, d2jbc) = coulomb_exchange(D_BC, R_AC - x);
+            let (_, _, _, jac, _, _) = coulomb_exchange(D_AC, R_AC);
+            let (sa, sb, sc) = (1.0 + LEPS_A, 1.0 + LEPS_B, 1.0 + LEPS_C);
+            let (u, w, z) = (jab / sa, jbc / sb, jac / sc);
+            let (du, dw) = (djab / sa, -djbc / sb);
+            let (d2u, d2w) = (d2jab / sa, d2jbc / sb);
+            let s = u * u + w * w + z * z - u * w - w * z - u * z;
+            let root = s.sqrt();
+            let ds = (2.0 * u - w - z) * du + (2.0 * w - u - z) * dw;
+            let d2s = 2.0 * (du * du + dw * dw - du * dw)
+                + (2.0 * u - w - z) * d2u
+                + (2.0 * w - u - z) * d2w;
+            let leps_xx =
+                d2qab / sa + d2qbc / sb - d2s / (2.0 * root) + ds * ds / (4.0 * root.powi(3));
+            let oscillator = 4.0 * K_C;
+            [
+                [leps_xx + oscillator, oscillator / C_HO],
+                [oscillator / C_HO, oscillator / (C_HO * C_HO)],
+            ]
         }
     }
 
