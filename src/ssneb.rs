@@ -141,6 +141,7 @@ struct JointRun {
     qs: Array2<f64>,
     state: JointState,
     solver: Solver,
+    solver_ci: Option<usize>,
     iteration: usize,
     unmoved: usize,
 }
@@ -317,6 +318,7 @@ impl SolidNeb {
                 qs,
                 state: JointState::new(),
                 solver,
+                solver_ci: None,
                 iteration: 0,
                 unmoved: 0,
             })),
@@ -919,6 +921,20 @@ impl JointRun {
             }
         });
         let mut x = self.pack();
+        assemble(
+            &self.config,
+            &self.chart,
+            &self.state,
+            surface,
+            q_first.view(),
+            q_last.view(),
+            x.view(),
+        )?;
+        let current_ci = self.state.ci();
+        if current_ci != self.solver_ci {
+            self.solver.forget();
+            self.solver_ci = current_ci;
+        }
         let before = x.clone();
         let stepped = self.solver.step(&oracle, &mut x);
         drop(oracle);

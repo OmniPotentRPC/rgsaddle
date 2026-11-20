@@ -12,7 +12,12 @@
 //!
 //! then symmetrized, because the defect has no net torque (their Eq. (1)).
 //! The same tensor is the first moment of the Kanzaki forces when those
-//! forces are known.
+//! forces are known.  The residual-stress, homogeneous-strain, and force
+//! routes are reviewed by Clouet, Varvenne, and Jourdan, Comput. Mater.
+//! Sci. 147, 49 (2018), doi:10.1016/j.commatsci.2018.01.053.  The
+//! finite-cell interpretation and image correction follow Varvenne,
+//! Bruneval, Marinica, and Clouet, Phys. Rev. B 88, 134102 (2013),
+//! doi:10.1103/PhysRevB.88.134102.
 //!
 //! A hop's barrier at an imposed strain follows by subtracting the two
 //! interaction energies:
@@ -163,6 +168,30 @@ impl ElasticDipole {
     pub fn from_stress(volume: f64, defect: M3, bulk: M3) -> Result<Self, SaddleError> {
         Ok(Self {
             tensor: elastic_dipole(volume, defect, bulk)?,
+        })
+    }
+
+    /// Homogeneous-strain route, `P = -(∂E_defect/∂ε - ∂E_bulk/∂ε)`.
+    ///
+    /// Both arguments are energy derivatives with respect to the full
+    /// symmetric strain tensor.  A stress-based evaluator has
+    /// `∂E/∂ε = V σ`, so this route is algebraically identical to
+    /// [`Self::from_stress`] without requiring the caller to divide by
+    /// the volume first.
+    pub fn from_energy_strain_gradient(defect: M3, bulk: M3) -> Result<Self, SaddleError> {
+        if !finite_m3(defect) || !finite_m3(bulk) {
+            return Err(SaddleError::NonFinite(
+                "homogeneous-strain energy derivative",
+            ));
+        }
+        let mut tensor = [[0.0; 3]; 3];
+        for i in 0..3 {
+            for j in 0..3 {
+                tensor[i][j] = -(defect[i][j] - bulk[i][j]);
+            }
+        }
+        Ok(Self {
+            tensor: symmetrize(tensor),
         })
     }
 
@@ -1212,7 +1241,8 @@ pub fn angular_scale_rad_s() -> f64 {
 /// in eV/Å². Translations are already removed, and the saddle's negative
 /// eigenvalue is not included. Every atom has the same mass `mass_amu`.
 /// `ν_i = ω_i / 2π` with `ω_i = sqrt(λ_i / m)`, and the prefactor is
-/// `(∏ ν_min) / (∏ ν_sad)`.
+/// `(∏ ν_min) / (∏ ν_sad)`. The minimum product must contain exactly one
+/// more mode than the saddle product, so the result has units of frequency.
 pub fn vineyard_prefactor(
     min_lambda: &[f64],
     sad_lambda: &[f64],
@@ -1228,9 +1258,9 @@ pub fn vineyard_prefactor(
             "Vineyard needs at least one positive minimum eigenvalue".into(),
         ));
     }
-    if min_lambda.len() < sad_lambda.len() {
+    if min_lambda.len() != sad_lambda.len() + 1 {
         return Err(SaddleError::Invalid(
-            "the saddle product is longer than the minimum product".into(),
+            "Vineyard products need exactly one missing saddle mode".into(),
         ));
     }
     let mut log_ratio = 0.0;

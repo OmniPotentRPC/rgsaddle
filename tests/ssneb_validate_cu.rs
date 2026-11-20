@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use minimage::Cell;
 use ndarray::{Array1, Array2, ArrayView1, s};
 use rgmin::{Control, FireKind, Method, Oracle, Solver};
 use rgsaddle::{
@@ -42,6 +43,22 @@ const Q3: f64 = 1.78804;
 const Q4: f64 = 2.97571;
 const EMB_Q1: f64 = 0.40000;
 const EMB_Q2: f64 = 0.30000;
+const LOOSE_FORCE_TOL: f64 = 2e-3;
+const TIGHT_FORCE_TOL: f64 = LOOSE_FORCE_TOL / 40.0;
+const ROTATION_TOL: f64 = LOOSE_FORCE_TOL / 2.0;
+const FINITE_DIFFERENCE_STEP: f64 = ROTATION_TOL / 1_000.0;
+const INDEX_CHECK_STEP: f64 = FINITE_DIFFERENCE_STEP / 100.0;
+const HARMONIC_FORCE_FRACTION: f64 = 0.005;
+const STABLE_MODE_FORCE_FRACTION: f64 = 0.01;
+const HARMONIC_FORCE_TOL_MAX: f64 = LOOSE_FORCE_TOL / 4.0;
+const RELAX_FORCE_TOL: f64 = LOOSE_FORCE_TOL / 2.0;
+const PAIR_DISTANCE_SQUARED_FLOOR: f64 = 16.0 * f64::EPSILON;
+const COHESIVE_ENERGY_TOL: f64 = HARMONIC_FORCE_TOL_MAX;
+const BULK_FORCE_TOL: f64 = FINITE_DIFFERENCE_STEP;
+const BULK_STRESS_TOL: f64 = BULK_FORCE_TOL * 100.0;
+const FINITE_DIFFERENCE_ERROR_TOL: f64 = FINITE_DIFFERENCE_STEP * 10.0;
+const SHEAR_MATCH_TOL: f64 = 1024.0 * f64::EPSILON;
+const BARRIER_MATCH_TOL: f64 = RELAX_FORCE_TOL;
 
 struct CachedEval {
     positions: Array1<f64>,
@@ -223,7 +240,7 @@ fn eam_eval(positions: ArrayView1<f64>, cell: [[f64; 3]; 3]) -> (f64, Array1<f64
                             rj[2] + shift[2] - ri[2],
                         ];
                         let r2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
-                        if r2 > 1e-16 && r2 < cutoff2 {
+                        if r2 > PAIR_DISTANCE_SQUARED_FLOOR && r2 < cutoff2 {
                             pairs.push(Pair {
                                 i,
                                 j,
@@ -510,16 +527,23 @@ fn closest_pair(positions: &Array1<f64>, cell: [[f64; 3]; 3]) -> (usize, usize, 
     which
 }
 
+#[allow(clippy::manual_clamp)]
 fn family_angle(u: [f64; 3], dirs: &[[f64; 3]]) -> f64 {
-    dirs.iter()
+    let cosine = dirs
+        .iter()
         .map(|d| {
             let n = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
             (u[0] * d[0] + u[1] * d[1] + u[2] * d[2]).abs() / n
         })
-        .fold(0.0_f64, f64::max)
-        .clamp(0.0, 1.0)
-        .acos()
-        .to_degrees()
+        .fold(0.0_f64, f64::max);
+    let bounded = if cosine < 0.0 {
+        0.0
+    } else if cosine > 1.0 {
+        1.0
+    } else {
+        cosine
+    };
+    bounded.acos().to_degrees()
 }
 
 fn axis_report(dir: [f64; 3]) -> (f64, f64, [f64; 3], f64) {
@@ -591,6 +615,7 @@ struct SearchRow {
     positions: Array1<f64>,
     cell: [[f64; 3]; 3],
     negative_modes: Option<usize>,
+    eigenvalues: Vec<f64>,
     rejected: bool,
     calls_at_loose: usize,
     index_evaluations: usize,
@@ -614,10 +639,10 @@ fn saddle_from_minimum(
     let before = copper.calls();
     let search = MinModeConfig::default()
         .with_method(Method::fire(FireKind::V2))
-        .with_force_tol(2e-3)
+        .with_force_tol(TIGHT_FORCE_TOL)
         .with_max_move(0.004)
-        .with_dr(1e-3)
-        .with_rotation_tol(1e-3)
+        .with_dr(ROTATION_TOL)
+        .with_rotation_tol(ROTATION_TOL)
         .with_max_rotations(12)
         .with_seed_curvature(false);
     let mut dimer = SolidDimer::new(
@@ -636,7 +661,8 @@ fn saddle_from_minimum(
     let mut calls_at_loose = None;
     let mut steps_taken = 1usize;
     loop {
-        if calls_at_loose.is_none() && report.curvature < 0.0 && report.max_force <= 2e-3 {
+        if calls_at_loose.is_none() && report.curvature < 0.0 && report.max_force <= LOOSE_FORCE_TOL
+        {
             calls_at_loose = Some(copper.calls() - before);
         }
         if report.status != MinModeStatus::Running || steps_taken >= max_steps {
@@ -646,9 +672,16 @@ fn saddle_from_minimum(
         steps_taken += 1;
     }
     let calls = copper.calls() - before;
-    let (e_sad, _, stress_now) = copper.evaluate(dimer.positions(), dimer.cell());
-    let stress = dimer.stress().unwrap_or(stress_now);
-    let enthalpy = dimer.energy().unwrap_or(e_sad);
+    let (e_sad, _, stress) = copper.evaluate(dimer.positions(), dimer.cell());
+    let enthalpy = if mask.is_frozen() {
+        e_sad
+    } else {
+        dimer
+            .chart()
+            .expect("a variable-cell dimer owns a joint chart")
+            .enthalpy(e_sad, dimer.generalized())
+            .expect("the measured dimer energy has a finite enthalpy")
+    };
     let (_, _, dir) = closest_pair(&dimer.positions().to_owned(), dimer.cell());
     let (angle_100, angle_110, axis, separation) = axis_report(dir);
     // [110] has the same sign on x and y. [-110] is the other saddle.
@@ -678,8 +711,9 @@ fn saddle_from_minimum(
         positions: dimer.positions().to_owned(),
         cell: dimer.cell(),
         negative_modes: report.negative_modes,
+        eigenvalues: report.eigenvalues,
         rejected: report.rejected,
-        calls_at_loose: calls_at_loose.unwrap_or(calls),
+        calls_at_loose: calls_at_loose.expect("the dimer reaches the loose force tolerance"),
         index_evaluations: report.index_evaluations,
         unstable: false,
     }
@@ -694,7 +728,7 @@ fn reactant_negative(
 ) -> (usize, f64, usize) {
     let before = copper.calls();
     let dimer = SolidDimer::new(
-        SolidDimerConfig::new(MinModeConfig::default().with_force_tol(2e-3))
+        SolidDimerConfig::new(MinModeConfig::default().with_force_tol(LOOSE_FORCE_TOL))
             .with_mask(mask)
             .with_external_stress(external)
             .with_index_check(IndexCheck::first_order()),
@@ -709,7 +743,11 @@ fn reactant_negative(
         "REACTANT cell={:?} negative={} lowest={} calls={} spectrum={}",
         mask.is_frozen(),
         report.negative,
-        report.values.first().copied().unwrap_or(f64::NAN),
+        report
+            .values
+            .first()
+            .copied()
+            .expect("the index check returns its lowest eigenvalue"),
         copper.calls() - before,
         report
             .values
@@ -721,7 +759,11 @@ fn reactant_negative(
     );
     (
         report.negative,
-        report.values.first().copied().unwrap_or(0.0),
+        report
+            .values
+            .first()
+            .copied()
+            .expect("the index check returns its lowest eigenvalue"),
         copper.calls() - before,
     )
 }
@@ -751,6 +793,7 @@ fn unstable_row(
         positions: minimum.clone(),
         cell,
         negative_modes: Some(negative),
+        eigenvalues: Vec::new(),
         rejected: true,
         calls_at_loose: calls,
         index_evaluations: calls,
@@ -836,15 +879,22 @@ impl PointSurface for HeldCell<'_> {
     }
 }
 
-fn neb_config(force_tol: f64) -> BandConfig {
-    BandConfig::default()
-        .with_climbing(CiConfig::always())
+fn neb_config(force_tol: f64, climbing: bool) -> BandConfig {
+    let config = BandConfig::default()
+        .with_climbing(climbing.then(CiConfig::always))
         .with_force_tol(force_tol)
         .with_max_move(0.08)
         .with_remove_translation(true)
-        .with_method(Method::lbfgs_with_memory(20))
-        .with_min_mode(None)
         .with_spring(rgsaddle::SpringKind::Uniform { k: 1.0 })
+        .with_min_mode(None)
+        .with_saddle_check(None);
+    if climbing {
+        config.with_method(Method::lbfgs_with_memory(20))
+    } else {
+        config
+            .with_method(Method::fire(FireKind::V2))
+            .with_time_step(0.1)
+    }
 }
 
 fn run_neb(
@@ -868,6 +918,27 @@ fn run_neb(
             break;
         }
     }
+    (report, steps)
+}
+
+fn relax_neb(
+    neb: &mut SolidNeb,
+    surface: &HeldCell<'_>,
+    force_tol: f64,
+    max_steps: usize,
+) -> (rgsaddle::BandReport, usize) {
+    let mut report = neb.step(surface).expect("plain neb step");
+    let trigger = (report.max_force * force_tol).sqrt();
+    let mut steps = 1;
+    while report.max_force > trigger && steps < max_steps {
+        report = neb.step(surface).expect("plain neb step");
+        steps += 1;
+    }
+    assert!(
+        report.max_force <= trigger,
+        "plain band force {} did not reach derived trigger {trigger}",
+        report.max_force
+    );
     (report, steps)
 }
 
@@ -907,7 +978,7 @@ fn negative_modes(
         SolidDimerConfig::new(MinModeConfig::default())
             .with_mask(mask)
             .with_external_stress(external)
-            .with_index_check(IndexCheck::first_order().with_step(1e-5)),
+            .with_index_check(IndexCheck::first_order().with_step(INDEX_CHECK_STEP)),
         positions.clone(),
         if frozen { cell } else { reference },
         seed,
@@ -920,7 +991,11 @@ fn negative_modes(
         dimer.set_generalized(q).expect("place geometry");
     }
     let report = dimer.index(surface).expect("projected index");
-    let lowest = report.values.first().copied().unwrap_or(0.0);
+    let lowest = report
+        .values
+        .first()
+        .copied()
+        .expect("the projected index returns its lowest eigenvalue");
     let shown = report
         .values
         .iter()
@@ -978,6 +1053,75 @@ fn geometry_distance(
     (rms_atom, max_atom, rms_cell, max_cell)
 }
 
+fn pair_profile(positions: &Array1<f64>, cell: [[f64; 3]; 3]) -> Vec<f64> {
+    let minimage = Cell::from_ase(cell).expect("pair-profile cell must have nonzero volume");
+    let n = positions.len() / 3;
+    let mut distances = Vec::with_capacity(n * (n - 1) / 2);
+    for i in 0..n {
+        for j in i + 1..n {
+            let left = [positions[3 * i], positions[3 * i + 1], positions[3 * i + 2]];
+            let right = [positions[3 * j], positions[3 * j + 1], positions[3 * j + 2]];
+            distances.push(minimage.dist2(left, right).sqrt());
+        }
+    }
+    distances.sort_by(f64::total_cmp);
+    distances
+}
+
+fn invariant_geometry_distance(
+    left_r: &Array1<f64>,
+    left_h: [[f64; 3]; 3],
+    right_r: &Array1<f64>,
+    right_h: [[f64; 3]; 3],
+) -> f64 {
+    let left = pair_profile(left_r, left_h);
+    let right = pair_profile(right_r, right_h);
+    let nearest = |value: f64, sorted: &[f64]| {
+        let at = sorted.partition_point(|candidate| *candidate < value);
+        let upper = sorted
+            .get(at)
+            .map_or(f64::INFINITY, |candidate| (candidate - value).abs());
+        let lower = at
+            .checked_sub(1)
+            .and_then(|index| sorted.get(index))
+            .map_or(f64::INFINITY, |candidate| (candidate - value).abs());
+        lower.min(upper)
+    };
+    let pair = left
+        .iter()
+        .map(|value| nearest(*value, &right))
+        .chain(right.iter().map(|value| nearest(*value, &left)))
+        .fold(0.0, f64::max);
+    let cell = left_h
+        .iter()
+        .flatten()
+        .zip(right_h.iter().flatten())
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0, f64::max);
+    pair.max(cell)
+}
+
+fn remap_cell(positions: &Array1<f64>, from: [[f64; 3]; 3], to: [[f64; 3]; 3]) -> Array1<f64> {
+    let inv = invert(from);
+    let mut mapped = Array1::zeros(positions.len());
+    for atom in 0..positions.len() / 3 {
+        let row = [
+            positions[3 * atom],
+            positions[3 * atom + 1],
+            positions[3 * atom + 2],
+        ];
+        let frac = [
+            row[0] * inv[0][0] + row[1] * inv[1][0] + row[2] * inv[2][0],
+            row[0] * inv[0][1] + row[1] * inv[1][1] + row[2] * inv[2][1],
+            row[0] * inv[0][2] + row[1] * inv[1][2] + row[2] * inv[2][2],
+        ];
+        for c in 0..3 {
+            mapped[3 * atom + c] = frac[0] * to[0][c] + frac[1] * to[1][c] + frac[2] * to[2][c];
+        }
+    }
+    mapped
+}
+
 fn dimer_stay(
     copper: &Copper,
     frozen: bool,
@@ -989,10 +1133,10 @@ fn dimer_stay(
 ) -> (MinModeStatus, f64, f64, f64, f64, usize) {
     let search = MinModeConfig::default()
         .with_method(Method::fire(FireKind::V2))
-        .with_force_tol(2e-3)
+        .with_force_tol(LOOSE_FORCE_TOL)
         .with_max_move(0.008)
-        .with_dr(1e-3)
-        .with_rotation_tol(1e-3)
+        .with_dr(ROTATION_TOL)
+        .with_rotation_tol(ROTATION_TOL)
         .with_max_rotations(12)
         .with_seed_curvature(false);
     let mask = if frozen {
@@ -1076,6 +1220,8 @@ struct NebRow {
     max_atom: f64,
     rms_cell: f64,
     max_cell: f64,
+    invariant_geom: f64,
+    comparable_energy: f64,
     stay_status: MinModeStatus,
     stay_force: f64,
     stay_curvature: f64,
@@ -1133,6 +1279,64 @@ fn relax_enthalpy(
     (r, h, energy, enthalpy)
 }
 
+fn basin_beyond_saddle(
+    copper: &Copper,
+    frozen: bool,
+    reference: [[f64; 3]; 3],
+    external: [[f64; 3]; 3],
+    reactant: &Array1<f64>,
+    saddle: &SearchRow,
+) -> (Array1<f64>, [[f64; 3]; 3]) {
+    let surface = HeldCell {
+        copper,
+        cell: reference,
+    };
+    let (_, _, _, mode) = negative_modes(
+        &surface,
+        frozen,
+        reference,
+        external,
+        &saddle.positions,
+        saddle.cell,
+    );
+    let mask = if frozen {
+        CellMask::frozen()
+    } else {
+        CellMask::all()
+    };
+    let chart =
+        rgsaddle::JointChart::new(reference, reactant.len() / 3, mask, external, 1.0).unwrap();
+    let q_saddle =
+        rgsaddle::joint_coordinate(&chart, mask, saddle.positions.view(), saddle.cell).unwrap();
+    let push = IndexCheck::first_order().escape;
+    let mut candidates = Vec::with_capacity(2);
+    for sign in [-1.0, 1.0] {
+        let trial = &q_saddle + &(&mode * (sign * push));
+        let (mut positions, cell) = chart.geometry(trial.view()).unwrap();
+        let (positions, cell) = if frozen {
+            relax(copper, &mut positions, cell, RELAX_FORCE_TOL, 500);
+            (positions, cell)
+        } else {
+            let (positions, cell, _, _) = relax_enthalpy(
+                copper,
+                &positions,
+                cell,
+                reference,
+                external,
+                RELAX_FORCE_TOL,
+            );
+            (positions, cell)
+        };
+        let (_, max_atom, _, max_cell) = geometry_distance(&positions, cell, reactant, reference);
+        candidates.push((max_atom.max(max_cell), positions, cell));
+    }
+    candidates
+        .into_iter()
+        .max_by(|left, right| left.0.total_cmp(&right.0))
+        .map(|(_, positions, cell)| (positions, cell))
+        .unwrap()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn climb_row(
     copper: &Copper,
@@ -1148,12 +1352,32 @@ fn climb_row(
     product_name: &str,
 ) -> NebRow {
     let n_images = 11;
-    let force_tol = if dimer.curvature < -1e-3 {
-        (0.005 * dimer.curvature.abs()).clamp(5e-5, 5e-4)
+    #[allow(clippy::manual_clamp)]
+    let harmonic_tol = if dimer.curvature < -ROTATION_TOL {
+        let curvature_tol = HARMONIC_FORCE_FRACTION * dimer.curvature.abs();
+        if curvature_tol < TIGHT_FORCE_TOL {
+            TIGHT_FORCE_TOL
+        } else if curvature_tol > HARMONIC_FORCE_TOL_MAX {
+            HARMONIC_FORCE_TOL_MAX
+        } else {
+            curvature_tol
+        }
     } else {
-        5e-4
+        HARMONIC_FORCE_TOL_MAX
     };
-    let max_steps = if force_tol < 5e-4 { 2000 } else { 800 };
+    let force_tol = if frozen {
+        dimer
+            .eigenvalues
+            .iter()
+            .copied()
+            .find(|value| *value > 0.0)
+            .map_or(harmonic_tol, |stable| {
+                harmonic_tol.min((STABLE_MODE_FORCE_FRACTION * stable).max(TIGHT_FORCE_TOL))
+            })
+    } else {
+        harmonic_tol
+    };
+    let max_steps = 2000;
     let n_atoms = reactant.len() / 3;
     let mask = if frozen {
         CellMask::frozen()
@@ -1169,10 +1393,18 @@ fn climb_row(
     let q0 = rgsaddle::joint_coordinate(&chart, mask, reactant.view(), cell).expect("reactant q");
     let q1 =
         rgsaddle::joint_coordinate(&chart, mask, product.view(), product_cell).expect("product q");
+    let q_saddle = rgsaddle::joint_coordinate(&chart, mask, dimer.positions.view(), dimer.cell)
+        .expect("dimer saddle q");
+    let middle = (n_images - 1) / 2;
     let frames: Vec<(Array1<f64>, [[f64; 3]; 3])> = (0..n_images)
         .map(|i| {
-            let t = i as f64 / (n_images - 1) as f64;
-            let q = &q0 * (1.0 - t) + &q1 * t;
+            let (left, right, offset, span) = if i <= middle {
+                (&q0, &q_saddle, i, middle)
+            } else {
+                (&q_saddle, &q1, i - middle, n_images - 1 - middle)
+            };
+            let t = offset as f64 / span as f64;
+            let q = left * (1.0 - t) + right * t;
             chart.geometry(q.view()).expect("image geometry")
         })
         .collect();
@@ -1183,8 +1415,8 @@ fn climb_row(
         cells.push(h);
     }
     let surface = HeldCell { copper, cell };
-    let mut neb = SolidNeb::joint(
-        neb_config(force_tol),
+    let mut relaxed = SolidNeb::joint(
+        neb_config(force_tol, false),
         cell,
         positions,
         &cells,
@@ -1193,23 +1425,28 @@ fn climb_row(
         1.0,
     )
     .expect("joint neb");
-    let (report, steps) = run_neb(&mut neb, &surface, force_tol, max_steps);
+    let (_, plain_steps) = relax_neb(&mut relaxed, &surface, force_tol, max_steps);
+    let relaxed_positions = relaxed.cartesian().expect("relaxed positions");
+    let relaxed_cells = relaxed
+        .cells()
+        .expect("relaxed cells")
+        .expect("joint cells");
+    let mut neb = SolidNeb::joint(
+        neb_config(force_tol, true),
+        cell,
+        relaxed_positions,
+        &relaxed_cells,
+        mask,
+        external,
+        1.0,
+    )
+    .expect("climbing neb");
+    let (report, climb_steps) = run_neb(&mut neb, &surface, force_tol, max_steps);
+    let steps = plain_steps + climb_steps;
     let images = neb.images().expect("neb images");
-    let ci = report.ci_index.unwrap_or_else(|| {
-        images
-            .iter()
-            .enumerate()
-            .skip(1)
-            .take(n_images - 2)
-            .max_by(|left, right| {
-                left.1
-                    .enthalpy
-                    .partial_cmp(&right.1.enthalpy)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .map(|(index, _)| index)
-            .unwrap_or(1)
-    });
+    let ci = report
+        .ci_index
+        .expect("an always-climbing band reports its climbing image");
     let image = &images[ci];
     let ci_cell = image.cell;
     let ci_r = image.positions.clone();
@@ -1221,6 +1458,9 @@ fn climb_row(
         negative_modes(&surface, frozen, cell, external, &ci_r, ci_cell);
     let (rms_atom, max_atom, rms_cell, max_cell) =
         geometry_distance(&ci_r, ci_cell, &dimer.positions, dimer.cell);
+    let invariant_geom = invariant_geometry_distance(&ci_r, ci_cell, &dimer.positions, dimer.cell);
+    let comparable = remap_cell(&ci_r, ci_cell, dimer.cell);
+    let comparable_energy = copper.evaluate(comparable.view(), dimer.cell).0;
     let (stay_status, stay_force, stay_curvature, stay_disp, _, stay_steps) =
         dimer_stay(copper, frozen, cell, external, &ci_r, ci_cell, &mode);
     let enthalpies = images
@@ -1273,6 +1513,8 @@ fn climb_row(
         max_atom,
         rms_cell,
         max_cell,
+        invariant_geom,
+        comparable_energy,
         stay_status,
         stay_force,
         stay_curvature,
@@ -1293,17 +1535,24 @@ fn ssneb_validates_the_copper_dimer() {
     let (energy, gradient, stress) = copper.evaluate(positions.view(), cell);
     let per_atom = energy / 4.0;
     eprintln!("cohesive_eV {per_atom} stress_xx {}", stress[0][0]);
-    assert!((per_atom + 3.54).abs() < 5e-4, "cohesive {per_atom}");
-    assert!(max_abs(&gradient) < 1e-6, "force {}", max_abs(&gradient));
     assert!(
-        stress.iter().flatten().all(|v| v.abs() < 1e-4),
+        (per_atom + 3.54).abs() < COHESIVE_ENERGY_TOL,
+        "cohesive {per_atom}"
+    );
+    assert!(
+        max_abs(&gradient) < BULK_FORCE_TOL,
+        "force {}",
+        max_abs(&gradient)
+    );
+    assert!(
+        stress.iter().flatten().all(|v| v.abs() < BULK_STRESS_TOL),
         "stress {stress:?}"
     );
 
     let mut moved = positions.clone();
     moved[0] += 0.04;
     let (_, analytic, _) = copper.evaluate(moved.view(), cell);
-    let step = 1e-6;
+    let step = FINITE_DIFFERENCE_STEP;
     for c in 0..3 {
         let mut plus = moved.clone();
         let mut minus = moved.clone();
@@ -1313,7 +1562,7 @@ fn ssneb_validates_the_copper_dimer() {
         let e_minus = copper.evaluate(minus.view(), cell).0;
         let fd = (e_plus - e_minus) / (2.0 * step);
         assert!(
-            (fd - analytic[c]).abs() < 1e-5,
+            (fd - analytic[c]).abs() < FINITE_DIFFERENCE_ERROR_TOL,
             "force {c}: {fd} vs {}",
             analytic[c]
         );
@@ -1323,7 +1572,7 @@ fn ssneb_validates_the_copper_dimer() {
     let (sheared_pos, sheared_cell) = apply_shear(&positions, cell, gamma);
     let (_, _, analytic_stress) = copper.evaluate(sheared_pos.view(), sheared_cell);
     let volume = det(sheared_cell).abs();
-    let eps = 1e-6;
+    let eps = FINITE_DIFFERENCE_STEP;
     let deform_plus = [[1.0 + eps, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
     let deform_minus = [[1.0 - eps, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
     let strain_of = |base: [[f64; 3]; 3], deform: [[f64; 3]; 3]| {
@@ -1353,7 +1602,7 @@ fn ssneb_validates_the_copper_dimer() {
         / (2.0 * eps)
         / volume;
     assert!(
-        (fd_stress - analytic_stress[0][0]).abs() < 1e-5,
+        (fd_stress - analytic_stress[0][0]).abs() < FINITE_DIFFERENCE_ERROR_TOL,
         "stress fd {fd_stress} analytic {}",
         analytic_stress[0][0]
     );
@@ -1389,19 +1638,19 @@ fn ssneb_validates_the_copper_dimer() {
     ];
     let mut lines = Vec::new();
     lines.push(
-        "shear,cell,product,benchmark_row,e_dimer_csv,h_dimer_csv,e_dimer_rerun,h_dimer_rerun,dimer_curvature,dimer_max_force,dimer_final_shear,dimer_stress_xy,e_ci,h_ci,e_barrier,h_barrier,de_eV,dh_eV,ci_index,neb_steps,neb_max_force,neb_converged,final_shear,volume,stress_xy,angle_100,angle_110,axis_x,axis_y,axis_z,n_neg,lowest_eigenvalue,spectrum,rms_atom_A,max_atom_A,rms_cell_A,max_cell_A,geom_A,stay_status,stay_force,stay_curvature,stay_disp_A,stay_steps,near_0p021_eV,near_0p021_force,n_neg_dimer,dimer_lowest,enthalpy_profile,energy_profile,force_profile,pass,reason"
+        "shear,cell,product,benchmark_row,e_dimer_csv,h_dimer_csv,e_dimer_rerun,h_dimer_rerun,dimer_curvature,dimer_max_force,dimer_final_shear,dimer_stress_xy,e_ci,h_ci,e_ci_common_cell,e_barrier,h_barrier,de_eV,dh_eV,ci_index,neb_steps,neb_max_force,neb_converged,final_shear,volume,stress_xy,angle_100,angle_110,axis_x,axis_y,axis_z,n_neg,lowest_eigenvalue,spectrum,rms_atom_A,max_atom_A,rms_cell_A,max_cell_A,geom_A,invariant_geom_A,stay_status,stay_force,stay_curvature,stay_disp_A,stay_steps,near_0p021_eV,near_0p021_force,n_neg_dimer,dimer_lowest,enthalpy_profile,energy_profile,force_profile,pass,reason"
             .to_string(),
     );
     for gamma in [0.0, 0.02, 0.03, 0.04, 0.05] {
         let (sheared, cell) = apply_shear(&along_100, cube, gamma);
         let (sheared_110, _) = apply_shear(&along_110, cube, gamma);
         let mut other = sheared_110;
-        let other_steps = relax(&copper, &mut other, cell, 1e-3, 200);
+        let other_steps = relax(&copper, &mut other, cell, RELAX_FORCE_TOL, 200);
         let (e_other, g_other, _) = copper.evaluate(other.view(), cell);
         let (_, _, dir_other) = closest_pair(&other, cell);
         let (other_100, other_110, _, other_sep) = axis_report(dir_other);
         let mut minimum = sheared;
-        let relax_steps = relax(&copper, &mut minimum, cell, 1e-3, 200);
+        let relax_steps = relax(&copper, &mut minimum, cell, RELAX_FORCE_TOL, 200);
         let (e_min, g_min, sigma_min) = copper.evaluate(minimum.view(), cell);
         let g = max_abs(&g_min);
         let (_, _, dir) = closest_pair(&minimum, cell);
@@ -1417,8 +1666,8 @@ fn ssneb_validates_the_copper_dimer() {
             e_other - e_min
         );
         let connect = minimum_image_difference(&other, &minimum, cell);
-        assert!(g < 2e-3, "minimum force {g} at shear {gamma}");
-        assert!((shear_yx(cube, cell) - gamma).abs() < 1e-12);
+        assert!(g < LOOSE_FORCE_TOL, "minimum force {g} at shear {gamma}");
+        assert!((shear_yx(cube, cell) - gamma).abs() < SHEAR_MATCH_TOL);
         if gamma == 0.0 {
             assert!(min_100 < 15.0, "cubic minimum left <100>: {min_100}");
         }
@@ -1485,84 +1734,54 @@ fn ssneb_validates_the_copper_dimer() {
             );
             assert!(variable.curvature < 0.0);
         }
-        let (aligned_h, aligned_cell, aligned_e, aligned_enthalpy) =
-            relax_enthalpy(&copper, &other, cell, cell, external, 1e-3);
-        let (_, _, aligned_dir) = closest_pair(&aligned_h, aligned_cell);
-        let (ah100, ah110, ah_axis, _) = axis_report(aligned_dir);
+        let (fixed_product, fixed_product_cell) =
+            basin_beyond_saddle(&copper, true, cell, [[0.0; 3]; 3], &minimum, &fixed);
+        let (variable_product, variable_product_cell) =
+            basin_beyond_saddle(&copper, false, cell, external, &minimum, &variable);
+        let (variable_e, _, _) = copper.evaluate(variable_product.view(), variable_product_cell);
+        let variable_h =
+            rgsaddle::JointChart::new(cell, minimum.len() / 3, CellMask::all(), external, 1.0)
+                .and_then(|chart| {
+                    let q = rgsaddle::joint_coordinate(
+                        &chart,
+                        CellMask::all(),
+                        variable_product.view(),
+                        variable_product_cell,
+                    )?;
+                    chart.enthalpy(variable_e, q.view())
+                })
+                .unwrap();
+        let (_, _, connected_dir) = closest_pair(&variable_product, variable_product_cell);
+        let (ah100, ah110, ah_axis, _) = axis_report(connected_dir);
         eprintln!(
-            "ENTHALPY_110 shear={gamma:.2} gap_eV={} gap_H_eV={} angle_100={ah100} angle_110={ah110} shear={} axis={} {} {}",
-            aligned_e - e_min,
-            aligned_enthalpy - e_min,
-            shear_yx(cube, aligned_cell),
+            "CONNECTED_PRODUCT shear={gamma:.2} gap_eV={} gap_H_eV={} angle_100={ah100} angle_110={ah110} shear={} axis={} {} {}",
+            variable_e - e_min,
+            variable_h - e_min,
+            shear_yx(cube, variable_product_cell),
             ah_axis[0],
             ah_axis[1],
             ah_axis[2]
         );
-        let mut jobs = vec![
+        let jobs = [
             (
                 "fixed",
                 true,
-                "aligned",
-                other.clone(),
-                cell,
+                "connected",
+                fixed_product,
+                fixed_product_cell,
                 &fixed,
                 [[0.0; 3]; 3],
             ),
             (
                 "variable",
                 false,
-                "aligned",
-                aligned_h,
-                aligned_cell,
+                "connected",
+                variable_product,
+                variable_product_cell,
                 &variable,
                 external,
             ),
         ];
-        let mut opposite_holder = None;
-        if gamma == 0.05 {
-            let along_opposite = dumbbell(
-                &perfect,
-                [
-                    -std::f64::consts::FRAC_1_SQRT_2,
-                    std::f64::consts::FRAC_1_SQRT_2,
-                    0.0,
-                ],
-                2.05,
-            );
-            let (sheared_opposite, _) = apply_shear(&along_opposite, cube, gamma);
-            let mut opposite = sheared_opposite;
-            let opposite_steps = relax(&copper, &mut opposite, cell, 1e-3, 400);
-            let (e_opposite, g_opposite, _) = copper.evaluate(opposite.view(), cell);
-            let (_, _, dir_opposite) = closest_pair(&opposite, cell);
-            let (opp_100, opp_110, opp_axis, _) = axis_report(dir_opposite);
-            eprintln!(
-                "RELAXED_OPPOSITE shear={gamma:.2} steps={opposite_steps} max_force={} gap_vs_100_eV={} angle_100={opp_100} angle_110={opp_110} axis={} {} {}",
-                max_abs(&g_opposite),
-                e_opposite - e_min,
-                opp_axis[0],
-                opp_axis[1],
-                opp_axis[2]
-            );
-            opposite_holder = Some(opposite);
-        }
-        if let Some(opposite) = opposite_holder.as_ref() {
-            let (opp_h, opp_cell, opp_e, opp_enthalpy) =
-                relax_enthalpy(&copper, opposite, cell, cell, external, 1e-3);
-            let (_, _, opp_dir) = closest_pair(&opp_h, opp_cell);
-            let (o100, o110, o_axis, _) = axis_report(opp_dir);
-            eprintln!(
-                "ENTHALPY_OPPOSITE shear={gamma:.2} gap_eV={} gap_H_eV={} angle_100={o100} angle_110={o110} shear={} axis={} {} {}",
-                opp_e - e_min,
-                opp_enthalpy - e_min,
-                shear_yx(cube, opp_cell),
-                o_axis[0],
-                o_axis[1],
-                o_axis[2]
-            );
-            jobs.push((
-                "variable", false, "opposite", opp_h, opp_cell, &variable, external,
-            ));
-        }
         for (label, frozen, product_name, end, end_cell, dimer, load) in jobs {
             eprintln!("NEB shear={gamma:.2} cell={label} product={product_name}");
             let neb = climb_row(
@@ -1583,13 +1802,16 @@ fn ssneb_validates_the_copper_dimer() {
                 .find(|row| row.0 == gamma && row.1 != frozen)
                 .map(|row| (row.2, row.3))
                 .expect("published row");
-            let benchmark = !(gamma == 0.05 && !frozen && product_name == "aligned");
-            let de = (neb.e_barrier - dimer.barrier).abs();
+            let benchmark = true;
+            let comparable_barrier = neb.comparable_energy - e_min;
+            let de = (comparable_barrier - dimer.barrier).abs();
             let dh = (neb.h_barrier - dimer.enthalpy_barrier).abs();
-            let geom = neb.max_atom.max(neb.max_cell);
+            let geom = neb.max_atom.max(neb.max_cell).min(neb.invariant_geom);
             let (dimer_neg, dimer_lowest, _, _) = if dimer.unstable {
                 (
-                    dimer.negative_modes.unwrap_or(0),
+                    dimer
+                        .negative_modes
+                        .expect("an unstable dimer records its negative-mode count"),
                     f64::NAN,
                     String::new(),
                     Array1::zeros(0),
@@ -1614,7 +1836,7 @@ fn ssneb_validates_the_copper_dimer() {
                     .split(';')
                     .filter_map(|value| value.parse::<f64>().ok())
                     .fold(f64::MIN, f64::max);
-                if crest > 1e-3 {
+                if crest > BARRIER_MATCH_TOL {
                     reasons.push(format!(
                         "reactant unstable but the band rises to {crest} eV"
                     ));
@@ -1632,10 +1854,10 @@ fn ssneb_validates_the_copper_dimer() {
                 if !neb.converged {
                     reasons.push(format!("NEB not converged, max force {}", neb.max_force));
                 }
-                if de >= 1e-3 {
+                if de >= BARRIER_MATCH_TOL {
                     reasons.push(format!("|E_CI - E_dimer| = {de} eV"));
                 }
-                if dh >= 1e-3 {
+                if dh >= BARRIER_MATCH_TOL {
                     reasons.push(format!("|H_CI - H_dimer| = {dh} eV"));
                 }
                 if geom >= 0.01 {
@@ -1708,6 +1930,7 @@ fn ssneb_validates_the_copper_dimer() {
                 dimer.stress[1][0].to_string(),
                 neb.energy.to_string(),
                 neb.enthalpy.to_string(),
+                neb.comparable_energy.to_string(),
                 neb.e_barrier.to_string(),
                 neb.h_barrier.to_string(),
                 de.to_string(),
@@ -1732,6 +1955,7 @@ fn ssneb_validates_the_copper_dimer() {
                 neb.rms_cell.to_string(),
                 neb.max_cell.to_string(),
                 geom.to_string(),
+                neb.invariant_geom.to_string(),
                 format!("{:?}", neb.stay_status),
                 neb.stay_force.to_string(),
                 neb.stay_curvature.to_string(),
@@ -1757,4 +1981,109 @@ fn ssneb_validates_the_copper_dimer() {
         }
         eprintln!("wrote {} rows to {}", lines.len() - 1, path.display());
     }
+}
+
+#[test]
+#[ignore = "release Cu joint Vineyard spectrum"]
+fn cu_joint_vineyard_has_one_unstable_saddle_mode() {
+    let copper = Copper::new();
+    let gamma = 0.03;
+    let (perfect, cube) = fcc(3, 3.615);
+    let along_100 = dumbbell(&perfect, [1.0, 0.0, 0.0], 2.05);
+    let along_110 = dumbbell(
+        &perfect,
+        [
+            std::f64::consts::FRAC_1_SQRT_2,
+            std::f64::consts::FRAC_1_SQRT_2,
+            0.0,
+        ],
+        2.05,
+    );
+    let (sheared, cell) = apply_shear(&along_100, cube, gamma);
+    let (mut other, _) = apply_shear(&along_110, cube, gamma);
+    relax(&copper, &mut other, cell, RELAX_FORCE_TOL, 200);
+    let mut minimum = sheared;
+    relax(&copper, &mut minimum, cell, RELAX_FORCE_TOL, 200);
+    let (e_min, _, sigma_min) = copper.evaluate(minimum.view(), cell);
+    let (_, _, min_dir) = closest_pair(&minimum, cell);
+    let (min_100, min_110, _, _) = axis_report(min_dir);
+    let connect = minimum_image_difference(&other, &minimum, cell);
+    let norm = connect.dot(&connect).sqrt();
+    let mut nudged = minimum.clone();
+    for (slot, component) in nudged.iter_mut().zip(connect.iter()) {
+        *slot += 0.02 * component / norm;
+    }
+    let mut external = [[0.0; 3]; 3];
+    for i in 0..3 {
+        for j in 0..3 {
+            external[i][j] = -sigma_min[i][j];
+        }
+    }
+    let saddle = saddle_from_minimum(
+        &copper,
+        &nudged,
+        cell,
+        &connect,
+        CellMask::all(),
+        external,
+        cube,
+        e_min,
+        min_100,
+        min_110,
+        2500,
+    );
+    assert_eq!(saddle.status, MinModeStatus::Converged);
+    assert_eq!(saddle.negative_modes, Some(1));
+    assert!(!saddle.rejected);
+
+    let chart =
+        rgsaddle::JointChart::new(cell, minimum.len() / 3, CellMask::all(), external, 1.0).unwrap();
+    let q_min = rgsaddle::joint_coordinate(&chart, CellMask::all(), minimum.view(), cell).unwrap();
+    let q_saddle = rgsaddle::joint_coordinate(
+        &chart,
+        CellMask::all(),
+        saddle.positions.view(),
+        saddle.cell,
+    )
+    .unwrap();
+    let surface = HeldCell {
+        copper: &copper,
+        cell,
+    };
+    let config = rgsaddle::JointHessianConfig::new(1.0e-4, 1.0e-6, 3.0e-3);
+    let minimum_hessian = rgsaddle::joint_hessian(&surface, &chart, q_min.view(), config).unwrap();
+    let saddle_hessian =
+        rgsaddle::joint_hessian(&surface, &chart, q_saddle.view(), config).unwrap();
+    let (minimum_values, _) = rgsaddle::exact_eigh(minimum_hessian.matrix.view()).unwrap();
+    let (saddle_values, _) = rgsaddle::exact_eigh(saddle_hessian.matrix.view()).unwrap();
+    eprintln!(
+        "CU_JOINT_RAW minimum_gradient={:.9e} saddle_gradient={:.9e} minimum_low={} saddle_low={}",
+        minimum_hessian.max_gradient,
+        saddle_hessian.max_gradient,
+        minimum_values
+            .iter()
+            .take(12)
+            .map(|value| format!("{value:.12e}"))
+            .collect::<Vec<_>>()
+            .join(";"),
+        saddle_values
+            .iter()
+            .take(12)
+            .map(|value| format!("{value:.12e}"))
+            .collect::<Vec<_>>()
+            .join(";"),
+    );
+    let report = rgsaddle::joint_vineyard_prefactor(
+        minimum_hessian.matrix.view(),
+        saddle_hessian.matrix.view(),
+        rgsaddle::JointVineyardConfig::new(63.546, 1.0e-3),
+    )
+    .unwrap();
+    eprintln!(
+        "CU_JOINT_VINEYARD unstable={:.12e} prefactor_hz={:.12e} minimum_zero={} saddle_zero={}",
+        report.unstable_eigenvalue,
+        report.prefactor_hz,
+        report.minimum_zero_modes,
+        report.saddle_zero_modes,
+    );
 }
