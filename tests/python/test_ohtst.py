@@ -27,6 +27,38 @@ def surface(q: np.ndarray) -> tuple[float, np.ndarray]:
     return energy, gradient
 
 
+def coupled_surface(
+    q: np.ndarray, linear: float = 0.1, quadratic: float = 0.0
+) -> tuple[float, np.ndarray]:
+    x = float(q[0])
+    y = float(q[1])
+    well = x * x - 1.0
+    stiffness = 1.0 + 2.0 * linear * x + 2.0 * quadratic * x * x
+    energy = 0.25 * well * well + 0.5 * stiffness * y * y
+    gradient = np.array(
+        [
+            x * well + (linear + 2.0 * quadratic * x) * y * y,
+            stiffness * y,
+        ],
+        dtype=np.float64,
+    )
+    return energy, gradient
+
+
+def coupled_optimum(thermal: float, linear: float, quadratic: float) -> float:
+    def mean_gradient(x: float) -> float:
+        stiffness = 1.0 + 2.0 * linear * x + 2.0 * quadratic * x * x
+        return x * (x * x - 1.0) + (linear + 2.0 * quadratic * x) * thermal / stiffness
+
+    x = linear * thermal
+    for _ in range(20):
+        h = 1.0e-6
+        derivative = (mean_gradient(x + h) - mean_gradient(x - h)) / (2.0 * h)
+        x -= mean_gradient(x) / derivative
+    assert abs(mean_gradient(x)) < 1.0e-12
+    return x
+
+
 def test_sample_optimize_work_transmission_and_rate() -> None:
     point = np.array([0.3, 0.0], dtype=np.float64)
     normal = np.array([1.0, 0.0], dtype=np.float64)
@@ -142,6 +174,33 @@ def test_optimize_refuses_to_report_converged_when_unconverged() -> None:
         )
 
 
+@pytest.mark.parametrize(("linear", "quadratic"), [(0.1, 0.0), (0.12, 0.08)])
+def test_optimize_converges_on_coupled_surface(
+    linear: float, quadratic: float
+) -> None:
+    thermal = 0.02585
+    point = np.array(
+        [coupled_optimum(thermal, linear, quadratic), 0.0], dtype=np.float64
+    )
+    optimum = ohtst_optimize(
+        lambda q: coupled_surface(q, linear, quadratic),
+        point,
+        np.array([1.0, 0.0], dtype=np.float64),
+        thermal,
+        0.05,
+        1.0,
+        500,
+        5,
+        2000,
+        20,
+        1,
+        100,
+        0.1,
+        0.05,
+    )
+    assert optimum.normal_force_error > 0.0
+
+
 def test_mbar_pins_the_first_state_at_zero() -> None:
     reduced = np.array([[0.0, 4.0], [0.1, 3.8], [3.9, 0.0], [4.2, 0.2]], dtype=np.float64)
     counts = np.array([2, 2], dtype=np.int64)
@@ -153,6 +212,14 @@ def test_mbar_pins_the_first_state_at_zero() -> None:
     assert overlap.shape == (2, 2)
     assert abs(float(overlap.sum(axis=1)[0]) - 1.0) < 0.000_001
     assert abs(float(overlap.sum(axis=1)[1]) - 1.0) < 0.000_001
+
+
+def test_mbar_accepts_positive_infinite_reduced_energy() -> None:
+    reduced = np.array(
+        [[0.0, math.inf], [0.1, 3.8], [3.9, 0.0], [4.2, 0.2]], dtype=np.float64
+    )
+    solved = ohtst_mbar(reduced, np.array([2, 2], dtype=np.int64))
+    assert np.asarray(solved.free_energies).shape == (2,)
 
 
 def test_rate_refuses_a_non_positive_density() -> None:

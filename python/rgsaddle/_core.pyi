@@ -557,8 +557,10 @@ def ohtst_sample(surface: Callable[..., tuple[float, numpy.typing.NDArray[numpy.
     Sample one hyperplane. surface(q) returns (energy, gradient) for a point of length n.
     """
 
-def ohtst_optimize(surface: Callable[..., tuple[float, numpy.typing.NDArray[numpy.float64]]], point: numpy.typing.NDArray[numpy.float64], normal: numpy.typing.NDArray[numpy.float64], thermal: float, time_step: float, friction: float, burn_in: int, stride: int, records: int, blocks: int, seed: int, max_iterations: int, max_translation: float, max_rotation: float, patience: int = 3, translate: bool = True, rotate: bool = True) -> OhtstOptimum:
-    """Climb the plane free energy. surface(q) returns (energy, gradient)."""
+def ohtst_optimize(surface: Callable[..., tuple[float, numpy.typing.NDArray[numpy.float64]]], point: numpy.typing.NDArray[numpy.float64], normal: numpy.typing.NDArray[numpy.float64], thermal: float, time_step: float, friction: float, burn_in: int, stride: int, records: int, blocks: int, seed: int, max_iterations: int, max_translation: float, max_rotation: float, patience: int = 3, translate: bool = True, rotate: bool = True, tolerance: float = 0.0, max_records: int = 16000, norm_test: float = 0.5, confidence: float = 2.0) -> OhtstOptimum:
+    """
+    Climb the plane free energy. surface(q) returns (energy, gradient); max_records, norm_test, confidence and tolerance control statistical convergence.
+    """
 
 def ohtst_mbar(reduced: numpy.typing.NDArray[numpy.float64], counts: numpy.typing.NDArray[numpy.int64], initial: numpy.typing.NDArray[numpy.float64] | None = None) -> OhtstMbar:
     """
@@ -572,7 +574,7 @@ def ohtst_work(surface: Callable[..., tuple[float, numpy.typing.NDArray[numpy.fl
 
 def ohtst_transmission(surface: Callable[..., tuple[float, numpy.typing.NDArray[numpy.float64]]], point: numpy.typing.NDArray[numpy.float64], normal: numpy.typing.NDArray[numpy.float64], starts: numpy.typing.NDArray[numpy.float64], thermal: float, time_step: float, friction: float, steps: int, check_every: int, shots: int, blocks: int, seed: int) -> OhtstTransmission:
     """
-    Shoot from starts on the plane. Friction zero is Newtonian. surface(q) returns (energy, gradient).
+    Shoot from starts on the plane. Friction zero is Newtonian. surface(q) returns (energy, gradient) and may be called concurrently from several threads.
     """
 
 def ohtst_rate(thermal: float, density: float, density_error: float, work: float, work_error: float) -> OhtstRate:
@@ -582,5 +584,5 @@ def ohtst_rate(thermal: float, density: float, density_error: float, work: float
 
 def raise_status(code: int) -> bool:
     """
-    Map an rgsaddle_status_t value. The message is the stored text, or the status name when that text is empty. The stored text is cleared. True on OK. False is not used: convergence is not a status code.
+    Map an rgsaddle_status_t value. The message is the stored text, or the status name when that text is empty. The stored text is cleared. True on OK. False is not used; capped iterative estimates raise with NOT_CONVERGED.
     """

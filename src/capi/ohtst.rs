@@ -22,8 +22,8 @@ use crate::ohtst::{
 
 use super::{
     RGSADDLE_ABI_MAJOR, RGSADDLE_ABI_MINOR, RGSADDLE_ABI_MISMATCH, RGSADDLE_INVALID_PARAMETER,
-    RGSADDLE_NULL_SURFACE, RGSADDLE_OK, RGSADDLE_SHAPE, RGSADDLE_SOLVER, RgsaddleVersion,
-    status_of,
+    RGSADDLE_NOT_CONVERGED, RGSADDLE_NULL_SURFACE, RGSADDLE_OK, RGSADDLE_SHAPE, RGSADDLE_SOLVER,
+    RgsaddleVersion, status_of,
     stencil::{clear_last_error, set_last_error},
 };
 
@@ -37,6 +37,15 @@ const ESTIMATE_INTEGRATION: i32 = 0;
 const ESTIMATE_BAR: i32 = 1;
 /// MBAR across every plane.
 const ESTIMATE_MBAR: i32 = 2;
+
+/// The plane optimizer met its convergence test.
+pub const RGSADDLE_OHTST_OPTIMIZE_CONVERGED: i32 = 0;
+/// The plane optimizer reached its record ceiling while the norm test still requested growth.
+pub const RGSADDLE_OHTST_OPTIMIZE_MAX_RECORDS: i32 = 1;
+/// The plane optimizer reached its outer-iteration ceiling.
+pub const RGSADDLE_OHTST_OPTIMIZE_MAX_ITERATIONS: i32 = 2;
+/// The plane optimizer reached its surface-evaluation ceiling.
+pub const RGSADDLE_OHTST_OPTIMIZE_MAX_EVALUATIONS: i32 = 3;
 
 /// Point energy and gradient. `q` and `gradient` each hold `n` doubles.
 pub type RgsaddlePointFn = extern "C" fn(*mut c_void, i64, *const f64, *mut f64, *mut f64) -> i32;
@@ -114,6 +123,14 @@ pub struct RgsaddleOhtstOptimizeConfig {
     pub seed: u64,
     /// Outer trust-region iterations.
     pub max_iterations: u64,
+    /// Largest sample, in records.
+    pub max_records: u64,
+    /// `theta` of the gradient norm test. Zero keeps the sample size fixed.
+    pub norm_test: f64,
+    /// Confidence multiplier of the statistical convergence test.
+    pub confidence: f64,
+    /// Absolute gradient and step tolerance.
+    pub tolerance: f64,
     /// Longest move of the plane along its normal in one step.
     pub max_translation: f64,
     /// Turn of the normal, in radians, counted as long as [`Self::max_translation`].
@@ -133,14 +150,24 @@ pub struct RgsaddleOhtstOptimizeReport {
     pub version: RgsaddleVersion,
     /// Bit flags. None are defined.
     pub flags: u64,
+    /// `rgsaddle_ohtst_optimize_status_t`.
+    pub status: i32,
+    /// Reserved. Written as zero.
+    pub reserved: i32,
     /// Outer trust-region iterations.
     pub iterations: u64,
     /// Surface evaluations, metric actions included.
     pub evaluations: u64,
+    /// Records in the last sample.
+    pub records: u64,
     /// Mean force along the normal of the last plane.
     pub normal_force: f64,
     /// Its block standard error.
     pub normal_force_error: f64,
+    /// Norm of the orientational gradient.
+    pub rotation: f64,
+    /// Root-sum-square block error of the orientational gradient.
+    pub rotation_error: f64,
 }
 
 #[repr(C)]
@@ -514,6 +541,49 @@ fn surface_of(eval: Option<RgsaddlePointFn>, user: *mut c_void, n: usize) -> Res
 }
 
 /// # Safety
+/// `config` must be a valid pointer to one optimize config or NULL.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_ohtst_optimize_config_default(
+    config: *mut RgsaddleOhtstOptimizeConfig,
+) -> i32 {
+    guard(|| {
+        if config.is_null() {
+            return fail_code(
+                RGSADDLE_INVALID_PARAMETER,
+                "optimize config pointer must be non-null",
+            );
+        }
+        let default = PlaneOptimizerConfig::default();
+        let sampler = &default.sampler;
+        unsafe {
+            *config = RgsaddleOhtstOptimizeConfig {
+                version: stamp(),
+                flags: 0,
+                thermal: sampler.thermal,
+                time_step: sampler.time_step,
+                friction: sampler.friction,
+                burn_in: sampler.burn_in as u64,
+                stride: sampler.stride as u64,
+                records: sampler.records as u64,
+                blocks: sampler.blocks as u64,
+                seed: sampler.seed,
+                max_iterations: default.max_iterations as u64,
+                max_records: default.max_records as u64,
+                norm_test: default.norm_test,
+                confidence: default.confidence,
+                tolerance: default.tolerance,
+                max_translation: default.max_translation,
+                max_rotation: default.max_rotation,
+                translate: i32::from(default.translate),
+                rotate: i32::from(default.rotate),
+                patience: default.patience as u64,
+            };
+        }
+        RGSADDLE_OK
+    })
+}
+
+/// # Safety
 /// `point`, `normal`, `centroid` and `grad_normal` each hold `n` doubles.
 /// `surface` is called with that length and may run on more than one thread.
 #[unsafe(no_mangle)]
@@ -703,7 +773,19 @@ unsafe fn optimize_call(
         Ok(value) => value,
         Err(code) => return code,
     };
-    let records = match as_usize(config.records, "records") {
+    let max_records = match as_usize(config.max_records, "max_records") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let norm_test = match finite_scalar(config.norm_test, "norm_test") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let confidence = match finite_scalar(config.confidence, "confidence") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let tolerance = match finite_scalar(config.tolerance, "tolerance") {
         Ok(value) => value,
         Err(code) => return code,
     };
@@ -722,11 +804,12 @@ unsafe fn optimize_call(
         }
         Err(code) => return code,
     };
-    let default_config = PlaneOptimizerConfig::default();
-    let max_records = default_config.max_records.max(records);
-    let optimizer = default_config
+    let optimizer = PlaneOptimizerConfig::default()
         .with_sampler(sampler)
         .with_max_records(max_records)
+        .with_norm_test(norm_test)
+        .with_confidence(confidence)
+        .with_tolerance(tolerance)
         .with_max_translation(max_translation)
         .with_max_rotation(max_rotation)
         .with_translate(config.translate != 0)
@@ -745,28 +828,55 @@ unsafe fn optimize_call(
         Ok(optimum) => optimum,
         Err(err) => return fail(&err),
     };
-    if optimum.status != PlaneOptimizerStatus::Converged {
-        return fail(&SaddleError::Solver(format!(
-            "the plane did not converge in {} iterations ({:?})",
-            optimum.iterations, optimum.status
-        )));
-    }
     if write_owned(point, optimum.plane.point().iter().copied()).is_err()
         || write_owned(normal, optimum.plane.normal().iter().copied()).is_err()
     {
         return RGSADDLE_INVALID_PARAMETER;
     }
+    let (status, status_code) = match optimum.status {
+        PlaneOptimizerStatus::Converged => (RGSADDLE_OHTST_OPTIMIZE_CONVERGED, RGSADDLE_OK),
+        PlaneOptimizerStatus::MaxRecords => {
+            (RGSADDLE_OHTST_OPTIMIZE_MAX_RECORDS, RGSADDLE_NOT_CONVERGED)
+        }
+        PlaneOptimizerStatus::MaxIterations => (
+            RGSADDLE_OHTST_OPTIMIZE_MAX_ITERATIONS,
+            RGSADDLE_NOT_CONVERGED,
+        ),
+        PlaneOptimizerStatus::MaxEvaluations => (
+            RGSADDLE_OHTST_OPTIMIZE_MAX_EVALUATIONS,
+            RGSADDLE_NOT_CONVERGED,
+        ),
+    };
+    let last = optimum.trace.last();
+    let rotation = last.map_or(0.0, |entry| entry.rotation);
+    let rotation_error = last.map_or(0.0, |entry| entry.rotation_error);
     unsafe {
         *report = RgsaddleOhtstOptimizeReport {
             version: stamp(),
             flags: 0,
+            status,
+            reserved: 0,
             iterations: optimum.iterations as u64,
             evaluations: optimum.evaluations as u64,
+            records: optimum.sample.records as u64,
             normal_force: optimum.sample.normal_force,
             normal_force_error: optimum.sample.normal_force_error,
+            rotation,
+            rotation_error,
         };
     }
-    RGSADDLE_OK
+    if status_code != RGSADDLE_OK {
+        set_last_error(&format!(
+            "the plane did not converge ({:?}): {} records, normal force {:.6e} +/- {:.6e}, rotation {:.6e} +/- {:.6e}",
+            optimum.status,
+            optimum.sample.records,
+            optimum.sample.normal_force,
+            optimum.sample.normal_force_error,
+            rotation,
+            rotation_error,
+        ));
+    }
+    status_code
 }
 
 /// # Safety
@@ -827,16 +937,33 @@ unsafe fn mbar_call(
         return fail_code(RGSADDLE_SHAPE, "MBAR matrix dimensions overflow usize");
     }
     let cells = samples * states;
+    let state_square = states * states;
+    let reduced_bytes = cells.checked_mul(std::mem::size_of::<f64>());
+    let square_bytes = state_square.checked_mul(std::mem::size_of::<f64>());
+    let count_bytes = states.checked_mul(std::mem::size_of::<i64>());
+    if reduced_bytes.is_none_or(|bytes| bytes > isize::MAX as usize)
+        || square_bytes.is_none_or(|bytes| bytes > isize::MAX as usize)
+        || count_bytes.is_none_or(|bytes| bytes > isize::MAX as usize)
+    {
+        return fail_code(RGSADDLE_SHAPE, "MBAR matrix byte length exceeds isize::MAX");
+    }
     if counts.is_null() || free_energies.is_null() || covariance.is_null() || overlap.is_null() {
         return fail_code(
             RGSADDLE_INVALID_PARAMETER,
             "counts, free_energies, covariance and overlap pointers must be non-null",
         );
     }
-    let reduced = match finite_slice(reduced, cells, "reduced") {
-        Ok(values) => values,
-        Err(code) => return code,
-    };
+    if reduced.is_null() {
+        return fail_code(RGSADDLE_INVALID_PARAMETER, "reduced must be non-null");
+    }
+    let reduced = unsafe { slice::from_raw_parts(reduced, cells) };
+    if reduced
+        .iter()
+        .any(|value| value.is_nan() || *value == f64::NEG_INFINITY)
+    {
+        return fail(&SaddleError::NonFinite("reduced"));
+    }
+    let reduced = reduced.to_vec();
     let count_raw = unsafe { slice::from_raw_parts(counts, states) };
     let mut count_usize = Vec::with_capacity(states);
     for &count in count_raw {

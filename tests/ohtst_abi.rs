@@ -9,13 +9,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use rgsaddle::PlaneOptimizerConfig;
 use rgsaddle::capi::{
     RGSADDLE_ABI_MAJOR, RGSADDLE_ABI_MINOR, RGSADDLE_INVALID_PARAMETER, RGSADDLE_NON_FINITE,
-    RGSADDLE_OK, RGSADDLE_SHAPE, RGSADDLE_SOLVER, RgsaddleOhtstOptimizeConfig,
-    RgsaddleOhtstOptimizeReport, RgsaddleOhtstRateIn, RgsaddleOhtstRateOut,
-    RgsaddleOhtstSampleConfig, RgsaddleOhtstSampleReport, RgsaddleOhtstTransmissionConfig,
-    RgsaddleOhtstTransmissionReport, RgsaddleOhtstWorkConfig, RgsaddleOhtstWorkReport,
-    RgsaddleVersion, rgsaddle_last_error, rgsaddle_ohtst_mbar, rgsaddle_ohtst_optimize,
-    rgsaddle_ohtst_rate, rgsaddle_ohtst_sample, rgsaddle_ohtst_transmission, rgsaddle_ohtst_work,
-    rgsaddle_status_name,
+    RGSADDLE_NOT_CONVERGED, RGSADDLE_OHTST_OPTIMIZE_MAX_RECORDS, RGSADDLE_OK, RGSADDLE_SHAPE,
+    RgsaddleOhtstOptimizeConfig, RgsaddleOhtstOptimizeReport, RgsaddleOhtstRateIn,
+    RgsaddleOhtstRateOut, RgsaddleOhtstSampleConfig, RgsaddleOhtstSampleReport,
+    RgsaddleOhtstTransmissionConfig, RgsaddleOhtstTransmissionReport, RgsaddleOhtstWorkConfig,
+    RgsaddleOhtstWorkReport, RgsaddleVersion, rgsaddle_last_error, rgsaddle_ohtst_mbar,
+    rgsaddle_ohtst_optimize, rgsaddle_ohtst_optimize_config_default, rgsaddle_ohtst_rate,
+    rgsaddle_ohtst_sample, rgsaddle_ohtst_transmission, rgsaddle_ohtst_work, rgsaddle_status_name,
 };
 
 extern "C" fn well(
@@ -39,11 +39,105 @@ extern "C" fn well(
     RGSADDLE_OK
 }
 
+#[derive(Clone, Copy)]
+struct Coupling {
+    linear: f64,
+    quadratic: f64,
+}
+
+extern "C" fn coupled_well(
+    user: *mut c_void,
+    n: i64,
+    q: *const f64,
+    energy: *mut f64,
+    gradient: *mut f64,
+) -> i32 {
+    if user.is_null() || n != 2 || q.is_null() || energy.is_null() || gradient.is_null() {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let coupling = unsafe { *(user as *const Coupling) };
+    let q = unsafe { std::slice::from_raw_parts(q, 2) };
+    let (x, y) = (q[0], q[1]);
+    let well = x * x - 1.0;
+    let stiffness = 1.0 + 2.0 * coupling.linear * x + 2.0 * coupling.quadratic * x * x;
+    unsafe {
+        *energy = 0.25 * well * well + 0.5 * stiffness * y * y;
+        *gradient = x * well + (coupling.linear + 2.0 * coupling.quadratic * x) * y * y;
+        *gradient.add(1) = stiffness * y;
+    }
+    RGSADDLE_OK
+}
+
+fn coupled_optimum(coupling: Coupling, thermal: f64) -> f64 {
+    let mean_gradient = |x: f64| {
+        let stiffness = 1.0 + 2.0 * coupling.linear * x + 2.0 * coupling.quadratic * x * x;
+        x * (x * x - 1.0) + (coupling.linear + 2.0 * coupling.quadratic * x) * thermal / stiffness
+    };
+    let mut x = coupling.linear * thermal;
+    for _ in 0..20 {
+        let h = 1.0e-6;
+        let derivative = (mean_gradient(x + h) - mean_gradient(x - h)) / (2.0 * h);
+        x -= mean_gradient(x) / derivative;
+    }
+    assert!(mean_gradient(x).abs() < 1.0e-12);
+    x
+}
+
 fn version() -> RgsaddleVersion {
     RgsaddleVersion {
         major: RGSADDLE_ABI_MAJOR,
         minor: RGSADDLE_ABI_MINOR,
     }
+}
+
+#[test]
+fn optimize_config_default_matches_rust_defaults() {
+    let mut config = std::mem::MaybeUninit::<RgsaddleOhtstOptimizeConfig>::uninit();
+    let status = unsafe { rgsaddle_ohtst_optimize_config_default(config.as_mut_ptr()) };
+    assert_eq!(status, RGSADDLE_OK);
+    let config = unsafe { config.assume_init() };
+    let expected = PlaneOptimizerConfig::default();
+    assert_eq!(config.version.minor, RGSADDLE_ABI_MINOR);
+    assert_eq!(config.records, expected.sampler.records as u64);
+    assert_eq!(config.max_records, expected.max_records as u64);
+    assert_eq!(config.norm_test, expected.norm_test);
+    assert_eq!(config.confidence, expected.confidence);
+    assert_eq!(config.tolerance, expected.tolerance);
+}
+
+#[test]
+fn optimize_converges_on_a_coupled_surface_under_defaults() {
+    let mut config = std::mem::MaybeUninit::<RgsaddleOhtstOptimizeConfig>::uninit();
+    assert_eq!(
+        unsafe { rgsaddle_ohtst_optimize_config_default(config.as_mut_ptr()) },
+        RGSADDLE_OK
+    );
+    let config = unsafe { config.assume_init() };
+    let coupling = Coupling {
+        linear: 0.1,
+        quadratic: 0.0,
+    };
+    let mut point = [coupled_optimum(coupling, config.thermal), 0.0];
+    let mut normal = [1.0, 0.0];
+    let mut report = std::mem::MaybeUninit::<RgsaddleOhtstOptimizeReport>::uninit();
+    let status = unsafe {
+        rgsaddle_ohtst_optimize(
+            &config,
+            2,
+            point.as_mut_ptr(),
+            normal.as_mut_ptr(),
+            Some(coupled_well),
+            (&coupling as *const Coupling).cast_mut().cast(),
+            report.as_mut_ptr(),
+        )
+    };
+    if status != RGSADDLE_OK {
+        let text = unsafe { CStr::from_ptr(rgsaddle_last_error()) };
+        panic!("{status}: {}", text.to_string_lossy());
+    }
+    let report = unsafe { report.assume_init() };
+    assert!(report.normal_force_error > 0.0);
+    assert!(report.rotation_error > 0.0);
 }
 
 #[test]
@@ -140,6 +234,21 @@ fn sample_and_rate_and_mbar_round_trip() {
     assert!(free[0].abs() <= 0.000_001);
     assert!((overlap[0] + overlap[1] - 1.0).abs() < 0.000_001);
 
+    let reduced_with_infinity = [0.0, f64::INFINITY, 0.1, 3.8, 3.9, 0.0, 4.2, 0.2];
+    let status = unsafe {
+        rgsaddle_ohtst_mbar(
+            4,
+            2,
+            reduced_with_infinity.as_ptr(),
+            counts.as_ptr(),
+            ptr::null(),
+            free.as_mut_ptr(),
+            covariance.as_mut_ptr(),
+            overlap.as_mut_ptr(),
+        )
+    };
+    assert_eq!(status, RGSADDLE_OK);
+
     let mut point = [0.0, 0.0];
     let mut normal = [1.0, 0.0];
     let optimize = RgsaddleOhtstOptimizeConfig {
@@ -154,6 +263,10 @@ fn sample_and_rate_and_mbar_round_trip() {
         blocks: 2,
         seed: 1,
         max_iterations: 6,
+        max_records: 16_000,
+        norm_test: 0.5,
+        confidence: 2.0,
+        tolerance: 0.0,
         max_translation: 0.2,
         max_rotation: 0.1,
         translate: 1,
@@ -163,10 +276,15 @@ fn sample_and_rate_and_mbar_round_trip() {
     let mut optimum = RgsaddleOhtstOptimizeReport {
         version: version(),
         flags: 0,
+        status: 0,
+        reserved: 0,
         iterations: 0,
         evaluations: 0,
+        records: 0,
         normal_force: 0.0,
         normal_force_error: 0.0,
+        rotation: 0.0,
+        rotation_error: 0.0,
     };
     let status = unsafe {
         rgsaddle_ohtst_optimize(
@@ -386,6 +504,10 @@ fn unknown_flags_and_negative_rate_errors_are_rejected() {
         blocks: 2,
         seed: 1,
         max_iterations: 1,
+        max_records: 16_000,
+        norm_test: 0.5,
+        confidence: 2.0,
+        tolerance: 0.0,
         max_translation: 0.1,
         max_rotation: 0.1,
         translate: 1,
@@ -395,10 +517,15 @@ fn unknown_flags_and_negative_rate_errors_are_rejected() {
     let mut optimum = RgsaddleOhtstOptimizeReport {
         version: version(),
         flags: 0,
+        status: 0,
+        reserved: 0,
         iterations: 0,
         evaluations: 0,
+        records: 0,
         normal_force: 0.0,
         normal_force_error: 0.0,
+        rotation: 0.0,
+        rotation_error: 0.0,
     };
     let mut point = [0.0, 0.0];
     let mut normal = [1.0, 0.0];
@@ -548,6 +675,10 @@ fn optimize_reports_not_converged_when_unconverged() {
         blocks: 2,
         seed: 1,
         max_iterations: 1,
+        max_records: 16_000,
+        norm_test: 0.5,
+        confidence: 2.0,
+        tolerance: 0.0,
         max_translation: 0.05,
         max_rotation: 0.05,
         translate: 1,
@@ -557,10 +688,15 @@ fn optimize_reports_not_converged_when_unconverged() {
     let mut optimum = RgsaddleOhtstOptimizeReport {
         version: version(),
         flags: 0,
+        status: 0,
+        reserved: 0,
         iterations: 0,
         evaluations: 0,
+        records: 0,
         normal_force: 0.0,
         normal_force_error: 0.0,
+        rotation: 0.0,
+        rotation_error: 0.0,
     };
     let status = unsafe {
         rgsaddle_ohtst_optimize(
@@ -573,7 +709,7 @@ fn optimize_reports_not_converged_when_unconverged() {
             &mut optimum,
         )
     };
-    assert_eq!(status, rgsaddle::capi::RGSADDLE_SOLVER);
+    assert_eq!(status, RGSADDLE_NOT_CONVERGED);
 }
 
 /// The first record count is only where the sample starts. The optimizer
@@ -581,33 +717,42 @@ fn optimize_reports_not_converged_when_unconverged() {
 /// records still converges.
 #[test]
 fn optimize_grows_the_sample_past_the_first_record_count() {
-    let mut point = [0.4, 0.0];
-    let mut normal = [1.0, 0.3];
+    let mut point = [0.0, 0.0];
+    let mut normal = [1.0, 0.0];
     let optimize = RgsaddleOhtstOptimizeConfig {
         version: version(),
         flags: 0,
-        thermal: 0.25,
-        time_step: 0.05,
+        thermal: 0.2,
+        time_step: 0.1,
         friction: 1.0,
-        burn_in: 2,
-        stride: 1,
-        records: 8,
-        blocks: 2,
-        seed: 6,
+        burn_in: 200,
+        stride: 4,
+        records: 600,
+        blocks: 12,
+        seed: 73,
         max_iterations: 100,
+        max_records: 16_000,
+        norm_test: 0.5,
+        confidence: 2.0,
+        tolerance: 0.0,
         max_translation: 0.05,
         max_rotation: 0.05,
         translate: 1,
-        rotate: 1,
+        rotate: 0,
         patience: 1,
     };
     let mut optimum = RgsaddleOhtstOptimizeReport {
         version: version(),
         flags: 0,
+        status: 0,
+        reserved: 0,
         iterations: 0,
         evaluations: 0,
+        records: 0,
         normal_force: 0.0,
         normal_force_error: 0.0,
+        rotation: 0.0,
+        rotation_error: 0.0,
     };
     let status = unsafe {
         rgsaddle_ohtst_optimize(
@@ -615,7 +760,7 @@ fn optimize_grows_the_sample_past_the_first_record_count() {
             2,
             point.as_mut_ptr(),
             normal.as_mut_ptr(),
-            Some(well),
+            Some(noisy_zero_mean),
             ptr::null_mut(),
             &mut optimum,
         )
@@ -624,7 +769,7 @@ fn optimize_grows_the_sample_past_the_first_record_count() {
         let text = unsafe { CStr::from_ptr(rgsaddle_last_error()) };
         panic!("{status}: {}", text.to_string_lossy());
     }
-    assert!(optimum.iterations > 0);
+    assert!(optimum.records > optimize.records);
     assert!(optimum.evaluations > 0);
 }
 
@@ -653,7 +798,7 @@ extern "C" fn noisy_zero_mean(
 }
 
 /// Sample growth stops at `PlaneOptimizerConfig::default().max_records`,
-/// and a noisy plane held at that cap returns `RGSADDLE_SOLVER` rather than
+/// and a noisy plane held at that cap returns `RGSADDLE_NOT_CONVERGED` rather than
 /// reporting false convergence.
 #[test]
 fn optimize_caps_sample_growth_at_the_default_ceiling() {
@@ -675,6 +820,10 @@ fn optimize_caps_sample_growth_at_the_default_ceiling() {
         blocks: 2,
         seed: 7,
         max_iterations,
+        max_records: default_cap,
+        norm_test: 0.5,
+        confidence: 0.01,
+        tolerance: 0.0,
         max_translation: 0.05,
         max_rotation: 0.05,
         translate: 1,
@@ -684,10 +833,15 @@ fn optimize_caps_sample_growth_at_the_default_ceiling() {
     let mut optimum = RgsaddleOhtstOptimizeReport {
         version: version(),
         flags: 0,
+        status: 0,
+        reserved: 0,
         iterations: 0,
         evaluations: 0,
+        records: 0,
         normal_force: 0.0,
         normal_force_error: 0.0,
+        rotation: 0.0,
+        rotation_error: 0.0,
     };
     let calls = AtomicU64::new(0);
     let status = unsafe {
@@ -701,7 +855,11 @@ fn optimize_caps_sample_growth_at_the_default_ceiling() {
             &mut optimum,
         )
     };
-    assert_eq!(status, RGSADDLE_SOLVER);
+    assert_eq!(status, RGSADDLE_NOT_CONVERGED);
+    assert_eq!(optimum.status, RGSADDLE_OHTST_OPTIMIZE_MAX_RECORDS);
+    assert_eq!(optimum.records, default_cap);
+    let name = unsafe { CStr::from_ptr(rgsaddle_status_name(status)) }.to_string_lossy();
+    assert_eq!(name, "NOT_CONVERGED");
     let message = unsafe { CStr::from_ptr(rgsaddle_last_error()) }.to_string_lossy();
     assert!(
         message.contains("did not converge"),
@@ -810,6 +968,10 @@ fn non_finite_inputs_return_named_non_finite_status() {
         blocks: 2,
         seed: 1,
         max_iterations: 2,
+        max_records: 16_000,
+        norm_test: 0.5,
+        confidence: 2.0,
+        tolerance: 0.0,
         max_translation: f64::NAN,
         max_rotation: 0.1,
         translate: 1,
@@ -819,10 +981,15 @@ fn non_finite_inputs_return_named_non_finite_status() {
     let mut opt_report = RgsaddleOhtstOptimizeReport {
         version: version(),
         flags: 0,
+        status: 0,
+        reserved: 0,
         iterations: 0,
         evaluations: 0,
+        records: 0,
         normal_force: 0.0,
         normal_force_error: 0.0,
+        rotation: 0.0,
+        rotation_error: 0.0,
     };
     let status = unsafe {
         rgsaddle_ohtst_optimize(

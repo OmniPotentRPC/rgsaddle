@@ -45,6 +45,7 @@
 #include <exception>
 #include <limits>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <thread>
@@ -1765,11 +1766,12 @@ extern "C" rgsaddle_status_t ohtst_python_point(void *user, int64_t n, const dou
       return RGSADDLE_SURFACE_FAILED;
     }
     const std::size_t len = static_cast<std::size_t>(n);
-    auto *raw = new double[len];
-    std::memcpy(raw, q, len * sizeof(double));
-    nb::capsule owner(raw, [](void *ptr) noexcept { delete[] static_cast<double *>(ptr); });
+    auto raw = std::make_unique<double[]>(len);
+    std::memcpy(raw.get(), q, len * sizeof(double));
+    nb::capsule owner(raw.get(), [](void *ptr) noexcept { delete[] static_cast<double *>(ptr); });
+    auto *position_data = raw.release();
     const std::size_t shape[1] = {len};
-    nb::ndarray<nb::numpy, double> position(raw, 1, shape, owner);
+    nb::ndarray<nb::numpy, double> position(position_data, 1, shape, owner);
     nb::object result = (*state->fn)(position);
     if (!nb::isinstance<nb::tuple>(result)) {
       state->ctx->capture(std::make_exception_ptr(nb::value_error("point surface must return (energy, gradient)")));
@@ -1781,7 +1783,7 @@ extern "C" rgsaddle_status_t ohtst_python_point(void *user, int64_t n, const dou
       return RGSADDLE_SURFACE_FAILED;
     }
     *energy = nb::cast<double>(pair[0]);
-    auto grad = nb::cast<nb::ndarray<const double, nb::ndim<1>, nb::c_contig>>(pair[1]);
+    auto grad = nb::cast<nb::ndarray<const double, nb::ndim<1>, nb::c_contig, nb::device::cpu>>(pair[1]);
     if (static_cast<std::size_t>(grad.shape(0)) != len) {
       state->ctx->capture(std::make_exception_ptr(nb::value_error("gradient length does not match the position")));
       return RGSADDLE_SHAPE;
@@ -1797,6 +1799,9 @@ extern "C" rgsaddle_status_t ohtst_python_point(void *user, int64_t n, const dou
     state->ctx->capture(err);
     return RGSADDLE_SURFACE_FAILED;
   } catch (const std::exception &) {
+    state->ctx->capture(std::current_exception());
+    return RGSADDLE_SURFACE_FAILED;
+  } catch (...) {
     state->ctx->capture(std::current_exception());
     return RGSADDLE_SURFACE_FAILED;
   }
@@ -1928,13 +1933,16 @@ OhtstOptimum ohtst_optimize(nb::callable fn, Vector point, Vector normal, double
                             double friction, std::uint64_t burn_in, std::uint64_t stride, std::uint64_t records,
                             std::uint64_t blocks, std::uint64_t seed, std::uint64_t max_iterations,
                             double max_translation, double max_rotation, std::uint64_t patience,
-                            bool translate, bool rotate) {
+                            bool translate, bool rotate, double tolerance, std::uint64_t max_records,
+                            double norm_test, double confidence) {
   if (point.shape(0) <= 0 || point.shape(0) != normal.shape(0)) {
     throw nb::value_error("point and normal must share one positive length");
   }
   rgsaddle_ohtst_optimize_config_t config{};
-  config.version.major = RGSADDLE_ABI_MAJOR;
-  config.version.minor = RGSADDLE_ABI_MINOR;
+  const auto default_status = rgsaddle_ohtst_optimize_config_default(&config);
+  if (default_status != RGSADDLE_OK) {
+    throw_ohtst(default_status);
+  }
   config.thermal = thermal;
   config.time_step = time_step;
   config.friction = friction;
@@ -1944,6 +1952,10 @@ OhtstOptimum ohtst_optimize(nb::callable fn, Vector point, Vector normal, double
   config.blocks = blocks;
   config.seed = seed;
   config.max_iterations = max_iterations;
+  config.max_records = max_records;
+  config.norm_test = norm_test;
+  config.confidence = confidence;
+  config.tolerance = tolerance;
   config.max_translation = max_translation;
   config.max_rotation = max_rotation;
   config.translate = translate ? 1 : 0;
@@ -1984,8 +1996,11 @@ OhtstMbar ohtst_mbar(MatrixShape reduced, IdShape counts, nb::object initial) {
   if (states != 0 && states > std::numeric_limits<std::size_t>::max() / states) {
     throw nb::value_error("states*states overflows size_t");
   }
-  if (!row_major(reduced) || !row_major(counts)) {
+  if (!row_major(reduced)) {
     throw nb::type_error("ohtst_mbar: expected float64 C-contiguous");
+  }
+  if (!row_major(counts)) {
+    throw nb::type_error("ohtst_mbar: expected int64 C-contiguous counts");
   }
   const std::size_t state_square = states * states;
   std::vector<double> start;
@@ -2001,8 +2016,12 @@ OhtstMbar ohtst_mbar(MatrixShape reduced, IdShape counts, nb::object initial) {
   std::vector<double> free_energies(states);
   std::vector<double> covariance(state_square);
   std::vector<double> overlap(state_square);
-  const auto status = rgsaddle_ohtst_mbar(reduced.shape(0), reduced.shape(1), reduced.data(), counts.data(),
-                                          start_ptr, free_energies.data(), covariance.data(), overlap.data());
+  rgsaddle_status_t status = RGSADDLE_OK;
+  {
+    nb::gil_scoped_release release;
+    status = rgsaddle_ohtst_mbar(reduced.shape(0), reduced.shape(1), reduced.data(), counts.data(),
+                                 start_ptr, free_energies.data(), covariance.data(), overlap.data());
+  }
   if (status != RGSADDLE_OK) {
     throw_ohtst(status);
   }
@@ -2848,14 +2867,18 @@ NB_MODULE(_core, m) {
       nb::arg("burn_in"), nb::arg("stride"), nb::arg("records"), nb::arg("blocks"), nb::arg("seed"),
       nb::arg("max_iterations"), nb::arg("max_translation"), nb::arg("max_rotation"),
       nb::arg("patience") = static_cast<std::uint64_t>(3), nb::arg("translate") = true,
-      nb::arg("rotate") = true,
+      nb::arg("rotate") = true, nb::arg("tolerance") = 0.0,
+      nb::arg("max_records") = static_cast<std::uint64_t>(16000), nb::arg("norm_test") = 0.5,
+      nb::arg("confidence") = 2.0,
       nb::sig("def ohtst_optimize(surface: collections.abc.Callable[..., tuple[float, "
               "numpy.typing.NDArray[numpy.float64]]], point: numpy.typing.NDArray[numpy.float64], "
               "normal: numpy.typing.NDArray[numpy.float64], thermal: float, time_step: float, friction: float, "
               "burn_in: int, stride: int, records: int, blocks: int, seed: int, max_iterations: int, "
               "max_translation: float, max_rotation: float, patience: int = 3, translate: bool = True, "
-              "rotate: bool = True) -> OhtstOptimum"),
-      "Climb the plane free energy. surface(q) returns (energy, gradient).");
+              "rotate: bool = True, tolerance: float = 0.0, max_records: int = 16000, "
+              "norm_test: float = 0.5, confidence: float = 2.0) -> OhtstOptimum"),
+      "Climb the plane free energy. surface(q) returns (energy, gradient); max_records, norm_test, "
+      "confidence and tolerance control statistical convergence.");
   m.def(
       "ohtst_mbar", &ohtst_mbar, nb::arg("reduced").noconvert(), nb::arg("counts").noconvert(),
       nb::arg("initial") = nb::none(),
@@ -2887,7 +2910,8 @@ NB_MODULE(_core, m) {
               "normal: numpy.typing.NDArray[numpy.float64], starts: numpy.typing.NDArray[numpy.float64], "
               "thermal: float, time_step: float, friction: float, steps: int, check_every: int, shots: int, "
               "blocks: int, seed: int) -> OhtstTransmission"),
-      "Shoot from starts on the plane. Friction zero is Newtonian. surface(q) returns (energy, gradient).");
+      "Shoot from starts on the plane. Friction zero is Newtonian. surface(q) returns (energy, gradient) "
+      "and may be called concurrently from several threads.");
   m.def(
       "ohtst_rate", &ohtst_rate, nb::arg("thermal"), nb::arg("density"), nb::arg("density_error"),
       nb::arg("work"), nb::arg("work_error"),
@@ -2898,7 +2922,7 @@ NB_MODULE(_core, m) {
   m.def("raise_status", &raise_status, nb::arg("code"),
         "Map an rgsaddle_status_t value. The message is the stored text, or the "
         "status name when that text is empty. The stored text is cleared. True on OK. "
-        "False is not used: convergence is not a status code.");
+        "False is not used; capped iterative estimates raise with NOT_CONVERGED.");
 
   // Test-only surface. stubgen skips a private submodule, so these
   // names stay off the public stub.

@@ -151,7 +151,9 @@ typedef enum {
   /** The constrained-ensemble tail still drifts after equilibration. ABI minor 42. */
   RGSADDLE_NOT_EQUILIBRATED = -14,
   /** The constrained-ensemble tail has too few effective samples. ABI minor 42. */
-  RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES = -15
+  RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES = -15,
+  /** A valid iterative estimate did not meet its convergence test. */
+  RGSADDLE_NOT_CONVERGED = -16
 } rgsaddle_status_t;
 
 typedef enum {
@@ -1936,6 +1938,14 @@ int64_t rgsaddle_band_free_end_cuts(const RgsaddleBand *band);
 typedef rgsaddle_status_t (*rgsaddle_point_fn)(void *user, int64_t n, const double *q,
                                                double *energy, double *gradient);
 
+/** Why rgsaddle_ohtst_optimize stopped. */
+typedef enum {
+  RGSADDLE_OHTST_OPTIMIZE_CONVERGED = 0,
+  RGSADDLE_OHTST_OPTIMIZE_MAX_RECORDS = 1,
+  RGSADDLE_OHTST_OPTIMIZE_MAX_ITERATIONS = 2,
+  RGSADDLE_OHTST_OPTIMIZE_MAX_EVALUATIONS = 3
+} rgsaddle_ohtst_optimize_status_t;
+
 /** Langevin sample of one plane. Friction must be positive. */
 typedef struct {
   rgsaddle_version_t version;
@@ -1976,6 +1986,10 @@ typedef struct {
   uint64_t blocks;
   uint64_t seed;
   uint64_t max_iterations;
+  uint64_t max_records;
+  double norm_test;
+  double confidence;
+  double tolerance;
   double max_translation;
   double max_rotation;
   int32_t translate;
@@ -1983,14 +1997,23 @@ typedef struct {
   uint64_t patience;
 } rgsaddle_ohtst_optimize_config_t;
 
+/** Write the Rust defaults into an OH-TST plane-optimizer config. */
+rgsaddle_status_t rgsaddle_ohtst_optimize_config_default(
+    rgsaddle_ohtst_optimize_config_t *config);
+
 /** The last accepted plane of rgsaddle_ohtst_optimize. */
 typedef struct {
   rgsaddle_version_t version;
   uint64_t flags;
+  int32_t status;
+  int32_t reserved;
   uint64_t iterations;
   uint64_t evaluations;
+  uint64_t records;
   double normal_force;
   double normal_force_error;
+  double rotation;
+  double rotation_error;
 } rgsaddle_ohtst_optimize_report_t;
 
 /**

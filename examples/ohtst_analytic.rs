@@ -6,7 +6,6 @@
 //! of a reversible-work leg. A two-state MBAR problem, a short transmission
 //! run and the rate from those parts follow.
 
-#[cfg(feature = "ohtst")]
 mod example {
     use ndarray::{Array1, ArrayView1, array};
     use rgsaddle::{
@@ -104,10 +103,6 @@ mod example {
     }
 }
 
-#[cfg(feature = "ohtst")]
 fn main() -> Result<(), rgsaddle::SaddleError> {
     example::run()
 }
-
-#[cfg(not(feature = "ohtst"))]
-fn main() {}

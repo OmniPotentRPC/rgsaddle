@@ -124,7 +124,8 @@ ABI minor 46 adds the OH-TST entry points =rgsaddle_ohtst_sample=, =rgsaddle_oht
 A point surface is one configuration of length ~n~, not an image of ~3 N~ atoms, and the callback may run on more than one thread.
 Every config and report carries an ~rgsaddle_version_t~ stamped with major 1 and minor 46 or newer, and the flag word must be zero.
 Non-finite array or scalar inputs return ~RGSADDLE_NON_FINITE~ with a cause stored in ~rgsaddle_last_error()~.
-~rgsaddle_ohtst_optimize~ caps norm-test sample growth at the larger of ~records~ and the optimizer default ceiling, and returns ~RGSADDLE_SOLVER~ unless the plane converged.
+Initialize ~rgsaddle_ohtst_optimize_config_t~ with ~rgsaddle_ohtst_optimize_config_default~ before overriding fields. Its ~tolerance~, ~max_records~, ~norm_test~ and ~confidence~ fields are the Rust optimizer controls. A finite estimate that reaches a configured cap returns ~RGSADDLE_NOT_CONVERGED~ and writes its typed reason and last-sample diagnostics to the report.
+~rgsaddle_ohtst_mbar~ accepts positive infinity as a zero-weight reduced energy, while rejecting NaN and negative infinity.
 ~rgsaddle_ohtst_work~ uses Simpson weights (requiring an odd node count of at least 3) and returns ~RGSADDLE_NON_FINITE~ when a reported standard error is not finite.
-A host that loads the library at run time checks ~rgsaddle_abi_version()~ for at least minor 46 before resolving these symbols.
+A host that loads the library at run time checks ~rgsaddle_abi_version()~ for at least minor 46 before resolving these symbols. The library must also have been compiled with ~--features capi,ohtst~; ~capi~ alone does not export the OH-TST symbols.
 Python exposes them as ~rgsaddle.ohtst_sample~, ~rgsaddle.ohtst_optimize~, ~rgsaddle.ohtst_mbar~, ~rgsaddle.ohtst_work~, ~rgsaddle.ohtst_transmission~ and ~rgsaddle.ohtst_rate~, returning ~OhtstSample~, ~OhtstOptimum~, ~OhtstMbar~, ~OhtstWork~, ~OhtstTransmission~ and ~OhtstRate~.

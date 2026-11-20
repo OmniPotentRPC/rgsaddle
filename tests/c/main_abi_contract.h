@@ -16,6 +16,7 @@ _Static_assert(RGSADDLE_REQ_CLIMBING_IMAGE == (1ull << 1), "request flag bit 1")
 _Static_assert(RGSADDLE_NOT_EQUILIBRATED == -14, "status NOT_EQUILIBRATED");
 _Static_assert(RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES == -15,
                "status INSUFFICIENT_EFFECTIVE_SAMPLES");
+_Static_assert(RGSADDLE_NOT_CONVERGED == -16, "status NOT_CONVERGED");
 
 typedef struct {
   uint32_t major;
@@ -556,10 +557,14 @@ _Static_assert(_Generic(&rgsaddle_band_free_end_cuts, abi45_signature_rgsaddle_b
 _Static_assert(sizeof(rgsaddle_ohtst_sample_config_t) == 80, "ohtst sample config");
 _Static_assert(offsetof(rgsaddle_ohtst_sample_config_t, thermal) == 16, "ohtst sample thermal");
 _Static_assert(sizeof(rgsaddle_ohtst_sample_report_t) == 72, "ohtst sample report");
-_Static_assert(sizeof(rgsaddle_ohtst_optimize_config_t) == 120, "ohtst optimize config");
-_Static_assert(offsetof(rgsaddle_ohtst_optimize_config_t, translate) == 104, "ohtst translate");
-_Static_assert(offsetof(rgsaddle_ohtst_optimize_config_t, patience) == 112, "ohtst patience");
-_Static_assert(sizeof(rgsaddle_ohtst_optimize_report_t) == 48, "ohtst optimize report");
+_Static_assert(sizeof(rgsaddle_ohtst_optimize_config_t) == 152, "ohtst optimize config");
+_Static_assert(offsetof(rgsaddle_ohtst_optimize_config_t, max_records) == 88, "ohtst max records");
+_Static_assert(offsetof(rgsaddle_ohtst_optimize_config_t, tolerance) == 112, "ohtst tolerance");
+_Static_assert(offsetof(rgsaddle_ohtst_optimize_config_t, translate) == 136, "ohtst translate");
+_Static_assert(offsetof(rgsaddle_ohtst_optimize_config_t, patience) == 144, "ohtst patience");
+_Static_assert(sizeof(rgsaddle_ohtst_optimize_report_t) == 80, "ohtst optimize report");
+_Static_assert(offsetof(rgsaddle_ohtst_optimize_report_t, status) == 16, "ohtst optimize status");
+_Static_assert(offsetof(rgsaddle_ohtst_optimize_report_t, records) == 40, "ohtst optimize records");
 _Static_assert(sizeof(rgsaddle_ohtst_work_config_t) == 104, "ohtst work config");
 _Static_assert(offsetof(rgsaddle_ohtst_work_config_t, mbar) == 96, "ohtst mbar flag");
 _Static_assert(sizeof(rgsaddle_ohtst_work_report_t) == 88, "ohtst work report");
@@ -572,6 +577,12 @@ typedef rgsaddle_status_t (*abi46_signature_rgsaddle_ohtst_optimize)(
     const rgsaddle_ohtst_optimize_config_t *config, int64_t n, double *point, double *normal,
     rgsaddle_point_fn surface, void *user, rgsaddle_ohtst_optimize_report_t *report);
 _Static_assert(_Generic(&rgsaddle_ohtst_optimize, abi46_signature_rgsaddle_ohtst_optimize: 1, default: 0), "rgsaddle_ohtst_optimize signature");
+
+typedef rgsaddle_status_t (*abi46_signature_rgsaddle_ohtst_optimize_config_default)(
+    rgsaddle_ohtst_optimize_config_t *config);
+_Static_assert(_Generic(&rgsaddle_ohtst_optimize_config_default,
+                        abi46_signature_rgsaddle_ohtst_optimize_config_default: 1, default: 0),
+               "rgsaddle_ohtst_optimize_config_default signature");
 
 typedef rgsaddle_status_t (*abi46_signature_rgsaddle_ohtst_work)(
     const rgsaddle_ohtst_work_config_t *config, int64_t n, int64_t n_planes, const double *points,
