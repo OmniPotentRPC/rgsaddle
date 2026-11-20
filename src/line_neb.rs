@@ -51,7 +51,8 @@ pub struct LineNebConfig {
 pub enum LineNebStatus {
     /// The force tolerance has not been met.
     Running,
-    /// Interior and endpoint forces are within `force_tol`.
+    /// The interior perpendicular action force, the interior spring
+    /// force, and the endpoint force are all within `force_tol`.
     Converged,
 }
 
@@ -63,6 +64,11 @@ pub struct LineNebReport {
     /// Largest absolute component of the transverse action force over
     /// the interior images.
     pub max_interior_perpendicular: f64,
+    /// Largest absolute component of the tangential spring force over
+    /// the interior images. With one coordinate per image the
+    /// transverse force vanishes identically and this is the whole
+    /// interior force.
+    pub max_interior_spring: f64,
     /// Largest absolute component of the complete optimized endpoint
     /// force (projected spring plus energy restraint).
     pub max_endpoint_optimized: f64,
@@ -79,6 +85,7 @@ struct Evaluation {
     action: f64,
     optimization_force: Array2<f64>,
     max_interior_perpendicular: f64,
+    max_interior_spring: f64,
     max_endpoint_optimized: f64,
 }
 
@@ -353,6 +360,7 @@ fn evaluate(
     let (_, lengths) = segments(q)?;
     let mut optimization_force = Array2::zeros(q.raw_dim());
     let mut max_interior_perpendicular = 0.0_f64;
+    let mut max_interior_spring = 0.0_f64;
 
     for j in 1..q.nrows() - 1 {
         let tangent = improved_tangent(
@@ -365,9 +373,14 @@ fn evaluate(
         )?;
         let raw = action_force.row(j);
         let perpendicular = &raw - raw.dot(&tangent) * &tangent;
-        max_interior_perpendicular =
-            max_interior_perpendicular.max(max_abs(perpendicular.iter().copied()));
+        max_interior_perpendicular = max_abs(
+            perpendicular
+                .iter()
+                .copied()
+                .chain([max_interior_perpendicular]),
+        );
         let spring = config.spring_k * (lengths[j] - lengths[j - 1]) * tangent;
+        max_interior_spring = max_abs(spring.iter().copied().chain([max_interior_spring]));
         optimization_force
             .row_mut(j)
             .assign(&(perpendicular + spring));
@@ -405,6 +418,7 @@ fn evaluate(
         action,
         optimization_force,
         max_interior_perpendicular,
+        max_interior_spring,
         max_endpoint_optimized,
     })
 }
@@ -786,6 +800,7 @@ impl LineNebSession {
             }
         };
         let status = if evaluation.max_interior_perpendicular <= self.config.force_tol
+            && evaluation.max_interior_spring <= self.config.force_tol
             && evaluation.max_endpoint_optimized <= self.config.force_tol
         {
             LineNebStatus::Converged
@@ -795,6 +810,7 @@ impl LineNebSession {
         Ok(LineNebReport {
             status,
             max_interior_perpendicular: evaluation.max_interior_perpendicular,
+            max_interior_spring: evaluation.max_interior_spring,
             max_endpoint_optimized: evaluation.max_endpoint_optimized,
             action: evaluation.action,
             iteration: self.iteration,

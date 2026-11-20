@@ -218,3 +218,60 @@ fn fixed_energy_double_well_path_converges() {
     .unwrap();
     assert_eq!(report.action, converged_action);
 }
+
+struct InvertedParabola;
+
+impl BandSurface for InvertedParabola {
+    fn eval(
+        &self,
+        positions: ArrayView2<'_, f64>,
+        energies: &mut Array1<f64>,
+        gradients: &mut Array2<f64>,
+    ) -> Result<(), SaddleError> {
+        for (i, row) in positions.outer_iter().enumerate() {
+            energies[i] = 1.0 - row[0] * row[0];
+            gradients[(i, 0)] = -2.0 * row[0];
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn an_unevenly_spaced_line_converges_only_once_its_springs_balance() {
+    // With one coordinate per image the transverse action force is zero
+    // and the endpoints sit on the fixed energy, so only the springs
+    // can tell this band apart from a converged one.
+    let positions = array![[-1.0], [-0.9], [-0.8], [0.5], [1.0]];
+    let config = LineNebConfig {
+        spring_k: 1.0,
+        endpoint_kappa: 1.0,
+        force_tol: 1.0e-8,
+        energy: 0.0,
+        masses: array![1.0],
+        time_step: 0.1,
+        reduced_planck: 1.0,
+    };
+    let mut session = LineNebSession::new(config, positions).unwrap();
+    let first = session.step(&InvertedParabola).unwrap();
+    assert_eq!(first.max_interior_perpendicular, 0.0);
+    assert_eq!(first.max_endpoint_optimized, 0.0);
+    assert!(first.max_interior_spring > 0.5, "{first:?}");
+    assert_eq!(first.status, LineNebStatus::Running);
+
+    let report = loop {
+        let report = session.step(&InvertedParabola).unwrap();
+        if report.status == LineNebStatus::Converged {
+            break report;
+        }
+        assert!(report.iteration < 100_000, "{report:?}");
+    };
+    assert!(report.max_interior_spring <= 1.0e-8);
+    let converged = session.positions();
+    for (image, expected) in [-1.0, -0.5, 0.0, 0.5, 1.0].into_iter().enumerate() {
+        assert!(
+            (converged[(image, 0)] - expected).abs() < 1.0e-7,
+            "image {image}: {}",
+            converged[(image, 0)]
+        );
+    }
+}
