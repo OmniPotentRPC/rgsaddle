@@ -1,0 +1,1 @@
+Free-end adaptive NEB and dynamic NEB are exclusive. A session built with both, ~BandSession::set_free_end~ on a dynamic band, and ~BandSession::set_dynamic~ on a free-end band return an invalid-configuration error that names both options.
