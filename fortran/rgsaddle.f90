@@ -4,7 +4,7 @@ module rgsaddle
   private
 
   integer(c_int), parameter, public :: RGSADDLE_ABI_MAJOR = 1_c_int
-  integer(c_int), parameter, public :: RGSADDLE_ABI_MINOR = 45_c_int
+  integer(c_int), parameter, public :: RGSADDLE_ABI_MINOR = 46_c_int
   integer(c_int), parameter, public :: RGSADDLE_OK = 0_c_int
   integer(c_int), parameter, public :: RGSADDLE_NULL_SESSION = -1_c_int
   integer(c_int), parameter, public :: RGSADDLE_NULL_BAND = -2_c_int
