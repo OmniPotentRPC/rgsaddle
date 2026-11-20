@@ -1,0 +1,1 @@
+=docs/check_c_symbols.py= compares the functions declared in =include/rgsaddle.h= with those the sources export, and the Cargo features that gate each export with the =Requires the `feature` feature= sentence of its header comment. The C symbol index repeats that sentence.

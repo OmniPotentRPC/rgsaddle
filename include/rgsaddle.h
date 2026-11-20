@@ -273,14 +273,20 @@ typedef struct {
   int64_t evaluations;
 } rgsaddle_hyperplane_ti_result_t;
 
+/** Create a sampler over a host callback. Requires the `ohtst` feature. */
 RgsaddleHyperplaneSampler *rgsaddle_hyperplane_sampler_create(
     void *, rgsaddle_sample_hyperplane_fn);
+/** Free a hyperplane sampler. Requires the `ohtst` feature. */
 void rgsaddle_hyperplane_sampler_free(RgsaddleHyperplaneSampler *);
+/** Thermodynamic integration over a hyperplane sampler. Requires the `ohtst` feature. */
 int32_t rgsaddle_hyperplane_thermodynamic_integration(
     RgsaddleHyperplaneSampler *, const double *, const double *, size_t,
     const rgsaddle_hyperplane_ti_config_t *,
     rgsaddle_hyperplane_ti_result_t *);
-/** Stable observable name `potential.full_minus_harmonic` for TI records. */
+/**
+ * Stable observable name `potential.full_minus_harmonic` for TI records.
+ * Requires the `ohtst` feature.
+ */
 const char *rgsaddle_thermodynamic_derivative_observable(void);
 
 /**
@@ -888,13 +894,22 @@ typedef struct {
   int64_t evaluations;
 } rgsaddle_pafi_transmission_report_t;
 
-/** Fill Bennett-Chandler defaults for PAFI transmission shooting. */
+/**
+ * Fill Bennett-Chandler defaults for PAFI transmission shooting. Requires
+ * the `ohtst` feature.
+ */
 rgsaddle_status_t rgsaddle_pafi_transmission_config_default(
     rgsaddle_pafi_transmission_config_t *config);
 
 /**
  * Select the maximum of free_energy and shoot retained samples from that
- * PAFI plane. start_offsets has n_planes + 1 entries; masses may be NULL.
+ * PAFI plane. Requires the `ohtst` feature; a library built with `capi`
+ * alone reports the same ABI minor without this symbol. start_offsets has
+ * n_planes + 1 entries; masses may be NULL. The config version must have
+ * this major and a minor from 46 up to the library's, otherwise the call
+ * returns RGSADDLE_ABI_MISMATCH. A maximum at the first or last plane
+ * returns RGSADDLE_INVALID_PARAMETER, since shots there have no state to
+ * end in on one side.
  */
 rgsaddle_status_t rgsaddle_pafi_transmission(
     const rgsaddle_pafi_transmission_config_t *config,
