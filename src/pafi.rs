@@ -736,9 +736,9 @@ impl FixedEnergyTrajectory {
     /// # Errors
     ///
     /// [`SaddleError::Invalid`] when `time_step` is not positive and
-    /// finite, or when a step stops advancing.
-    /// [`SaddleError::Exhausted`] when `max_steps` is used up. The errors
-    /// of [`Self::acceleration`].
+    /// finite, when a step stops advancing, and, with a message that
+    /// starts `work budget exhausted`, when `max_steps` is used up. The
+    /// errors of [`Self::acceleration`].
     pub fn half(
         &self,
         time_step: f64,
@@ -757,8 +757,8 @@ impl FixedEnergyTrajectory {
         let mut steps = 0usize;
         loop {
             if steps == max_steps {
-                return Err(SaddleError::Exhausted(
-                    "fixed-energy trajectory used its step budget".into(),
+                return Err(SaddleError::Invalid(
+                    "work budget exhausted: fixed-energy trajectory used its step budget".into(),
                 ));
             }
             steps += 1;
@@ -1902,7 +1902,10 @@ mod tests {
         assert!((acceleration - 1.0).abs() < 1e-12);
         let half = path.half(0.1, 10_000).unwrap();
         assert!((half.last().unwrap().arc - 1.0).abs() < 1e-12);
-        assert!(matches!(path.half(0.1, 1), Err(SaddleError::Exhausted(_))));
+        assert!(matches!(
+            path.half(0.1, 1),
+            Err(SaddleError::Invalid(message)) if message.starts_with("work budget exhausted")
+        ));
         let period = path.period(0.1, 10_000).unwrap();
         assert!((period - 2.0 * half.last().unwrap().time).abs() < 1e-15);
         let mid = arc_at_time(&half, 0.0).unwrap();
