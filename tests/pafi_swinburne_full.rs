@@ -5,6 +5,7 @@
 //! `benchmarks/pafi-swinburne-repro/NOTES.md`.
 
 use std::fmt::Write as _;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
 use capnp::message::Builder;
@@ -486,6 +487,11 @@ fn w_vacancy_matches_public_code_output() {
     );
     let thermalize = count_from_env("PAFI_THERMALIZE", 2_000);
     let samples = count_from_env("PAFI_SAMPLES", 5_000);
+    let first = system
+        .path
+        .geometry(system.path.bounds().0)
+        .expect("first path frame");
+    let atoms = NonZeroUsize::new(first.positions.len() / 3).expect("reference atoms");
     // The public example's default ReactionCoordinate axis has nine planes.
     // The PRL applications initially used ten; they are separate unavailable
     // cases and are not the source of these three values.
@@ -528,6 +534,7 @@ fn w_vacancy_matches_public_code_output() {
             .with_integrator(PafiIntegrator::EulerMaruyama)
             .with_mean_force(PafiMeanForce::ReferenceCode)
             .with_seed(10_000 + temperature as u64)
+            .with_com_atoms(atoms)
             .with_retain(0)
             .with_max_jump(Some(0.4));
         let (profile, averages) =

@@ -18,6 +18,8 @@ use crate::projector::{
     HyperplaneSampler,
 };
 
+const HYPERPLANE_TI_ABI_MINOR: u32 = 42;
+
 /// One callback sampling request.
 #[repr(C)]
 pub struct RgsaddleHyperplaneBudget {
@@ -270,7 +272,7 @@ pub unsafe extern "C" fn rgsaddle_hyperplane_thermodynamic_integration(
     // SAFETY: checked non-null above.
     let config = unsafe { &*config };
     if config.version.major != crate::capi::RGSADDLE_ABI_MAJOR
-        || config.version.minor < crate::capi::RGSADDLE_ABI_MINOR
+        || config.version.minor < HYPERPLANE_TI_ABI_MINOR
     {
         return RGSADDLE_ABI_MISMATCH;
     }
@@ -507,12 +509,16 @@ mod tests {
     #[test]
     fn hyperplane_ti_rejects_a_stale_minor() {
         let mut config = ti_config(100, 4);
-        config.version.minor = crate::capi::RGSADDLE_ABI_MINOR - 1;
+        config.version.minor = HYPERPLANE_TI_ABI_MINOR - 1;
         assert_eq!(
             integration_status(sample, &config),
             crate::capi::RGSADDLE_ABI_MISMATCH
         );
-        config.version.minor = crate::capi::RGSADDLE_ABI_MINOR;
+        config.version.minor = HYPERPLANE_TI_ABI_MINOR;
+        assert_eq!(
+            integration_status(sample, &config),
+            crate::capi::RGSADDLE_OK
+        );
         config.version.major = 0;
         assert_eq!(
             integration_status(sample, &config),

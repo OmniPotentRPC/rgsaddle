@@ -111,7 +111,7 @@ What to read, on every plane, in =HyperplaneAverage=:
 - =rejected= above zero means walks left the basin of the path on this plane, and were sampled again (see =max_jump=).
 
 * Choosing the arcs
-=pafi_profile= takes the parameters of the planes. They must be at least two, strictly increasing, and inside =ArcPath::bounds=; a value outside is =SaddleError::Invalid=. The integral is the trapezoid rule over the planes, so the spacing must resolve the changes of =dF/ds=.
+=pafi_profile= takes the parameters of the planes. They must be at least two, strictly increasing, and inside =ArcPath::bounds=; a value outside is =SaddleError::PafiArcOutsidePath=. The integral is the trapezoid rule over the planes, so the spacing must resolve the changes of =dF/ds=.
 
 One plane per image:
 

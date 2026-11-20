@@ -1,0 +1,3 @@
+A ring polymer of any ~PointSurface~ is itself a ~PointSurface~.
+~pafi_profile~ samples its centroid-hyperplane potential of mean force, the static centroid quantum transition state theory free energy, not a ring-polymer molecular dynamics rate.
+The centroid constraint is a ~Hyperplane~. The spring uses the caller's ~beta~, ~hbar~ and real masses. ~bead_study~ repeats the profile at each requested bead count, rejects time steps above the image-local Gershgorin stiffness bound, and reports the caller's effective step. ~centroid_path~ repeats a physical path onto every bead. With the ~readcon~ feature a ~.con~ of one frame per bead is an instanton orbit.

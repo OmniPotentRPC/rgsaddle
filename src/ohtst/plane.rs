@@ -3,7 +3,7 @@
 use ndarray::{Array1, Array2, ArrayView1};
 
 use crate::error::SaddleError;
-use crate::minmode::PointSurface;
+use crate::minmode::{CartesianLayout, PointSurface};
 pub use crate::projector::Hyperplane;
 pub(crate) use crate::projector::orthonormal_rows;
 use crate::projector::sqrt_masses;
@@ -148,6 +148,10 @@ impl<S: PointSurface> PointSurface for MassWeighted<'_, S> {
         }
         Ok(modes)
     }
+
+    fn cartesian_layout(&self) -> CartesianLayout {
+        CartesianLayout::NonCartesian
+    }
 }
 
 /// A surface evaluated in one fixed periodic cell, so that planes are
@@ -190,6 +194,10 @@ impl<S: PointSurface> PointSurface for FixedCell<'_, S> {
 
     fn excluded_modes(&self, x: ArrayView1<f64>) -> Result<Array2<f64>, SaddleError> {
         self.surface.excluded_modes(x)
+    }
+
+    fn cartesian_layout(&self) -> CartesianLayout {
+        self.surface.cartesian_layout()
     }
 }
 

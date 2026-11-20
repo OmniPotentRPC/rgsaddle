@@ -186,6 +186,9 @@ pub(crate) fn autocorr_time(values: &[f64]) -> f64 {
     if n < 4 {
         return 0.5;
     }
+    if values.iter().all(|value| *value == values[0]) {
+        return 0.5;
+    }
     let mean = values.iter().sum::<f64>() / n as f64;
     let mut variance = 0.0;
     for value in values {
@@ -265,6 +268,15 @@ impl Rng {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_exact_constant_series_is_independent() {
+        let values = vec![1.539_362_985_375_648_3; 144];
+        let report = equilibrate(&values, 240, 40, 6).unwrap();
+        assert_eq!(report.discard, 0);
+        assert_eq!(report.tau, 0.5);
+        assert_eq!(report.n_eff, values.len() as f64);
+    }
 
     #[test]
     fn harmonic_ou_relaxation_is_discarded() {

@@ -42,6 +42,7 @@
 use ndarray::{Array1, Array2, ArrayView1, s};
 use rayon::prelude::*;
 use rgmin::{FireKind, Method};
+use std::num::NonZeroUsize;
 
 use crate::band::{BandConfig, BandStatus, CiConfig};
 use crate::bennett::{self, ShootingConfig, Transmission};
@@ -1536,7 +1537,22 @@ fn fill_entry<S: PointSurface + Sync>(
     if !config.finite_temperature {
         return Ok(());
     }
-    let pafi_config = config.pafi.clone().with_thermal(thermal);
+    let mut pafi_config = config.pafi.clone().with_thermal(thermal);
+    if pafi_config.fix_com && pafi_config.com_atoms.is_none() {
+        if !searched.reactant.len().is_multiple_of(3) {
+            return Err(SaddleError::Shape(
+                "defect-pair PAFI needs whole Cartesian atoms".into(),
+            ));
+        }
+        let atoms = NonZeroUsize::new(searched.reactant.len() / 3).ok_or_else(|| {
+            SaddleError::Shape("defect-pair PAFI needs at least one Cartesian atom".into())
+        })?;
+        if atoms.get() >= 2 {
+            pafi_config = pafi_config.with_com_atoms(atoms);
+        } else {
+            pafi_config = pafi_config.with_fix_com(false);
+        }
+    }
     let (profile, planes) = pafi::pafi_profile(surface, path, &arcs, &pafi_config)?;
     entry.d_f = Some(profile.barrier);
     entry.d_f_error = Some(profile.barrier_error);

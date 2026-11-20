@@ -18,6 +18,7 @@
 //! first over that of the last, and planes evenly spaced in that `r`.
 
 use std::fmt::Write as _;
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 
 use ndarray::{Array1, ArrayView1, s};
@@ -50,6 +51,7 @@ const JUMP_STEPS: usize = 5_000;
 struct ReferencePath {
     crystal: EamCrystal,
     path: ArcPath,
+    atoms: NonZeroUsize,
     /// Energy of the first frame.
     start: f64,
 }
@@ -74,6 +76,7 @@ impl ReferencePath {
     }
 
     fn new(crystal: EamCrystal, mut frames: Vec<Vec<f64>>) -> Self {
+        let atoms = NonZeroUsize::new(frames[0].len() / 3).expect("reference atoms");
         for atom in frames[0].chunks_mut(3) {
             for (value, length) in atom.iter_mut().zip(crystal.lengths) {
                 *value -= length * (*value / length).floor();
@@ -121,6 +124,7 @@ impl ReferencePath {
         Self {
             crystal,
             path,
+            atoms,
             start,
         }
     }
@@ -138,7 +142,7 @@ fn planes(count: usize) -> Vec<f64> {
 /// plane average has more than one record in each block of a half. A
 /// shorter run only probes the neighborhood of the path and records 4
 /// samples in 2 blocks.
-fn descent(steps: usize) -> PafiConfig {
+fn descent(steps: usize, atoms: NonZeroUsize) -> PafiConfig {
     let (samples, blocks) = if steps >= 100 { (64, 4) } else { (4, 2) };
     PafiConfig::default()
         .with_thermal(1.0e-9)
@@ -147,6 +151,7 @@ fn descent(steps: usize) -> PafiConfig {
         .with_stride(1)
         .with_samples(samples)
         .with_blocks(blocks)
+        .with_com_atoms(atoms)
         .with_retain(1)
         .with_max_jump(None)
 }
@@ -159,7 +164,8 @@ fn relaxed(
     planes: &[f64],
     steps: usize,
 ) -> (FreeEnergyProfile, Vec<HyperplaneAverage>) {
-    pafi_profile(&system.crystal, path, planes, &descent(steps)).expect("relaxed planes")
+    pafi_profile(&system.crystal, path, planes, &descent(steps, system.atoms))
+        .expect("relaxed planes")
 }
 
 /// Overdamped sampling of every plane at `temperature` kelvin.
@@ -180,6 +186,7 @@ fn sampled(
         .with_samples(sampling.samples)
         .with_blocks(sampling.blocks)
         .with_seed(seed)
+        .with_com_atoms(system.atoms)
         .with_retain(4)
         .with_max_jump(sampling.max_jump);
     pafi_profile(&system.crystal, path, planes, &config).expect("sampled planes")
@@ -199,7 +206,7 @@ fn max_jump(
     steps: usize,
 ) -> f64 {
     let geometry = path.geometry(arc).expect("plane");
-    let config = descent(steps);
+    let config = descent(steps, system.atoms);
     let minimum = |start: &Array1<f64>| {
         let from = PathGeometry {
             positions: start.clone(),
