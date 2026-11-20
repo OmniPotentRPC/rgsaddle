@@ -161,6 +161,16 @@ impl SolidDimerConfig {
         Self::new(search).with_mask(CellMask::frozen())
     }
 
+    /// Fixed-cell dimer that accepts only a projected first-order saddle.
+    ///
+    /// This is the appropriate configuration for harmonic transition-state
+    /// calculations. Extra unstable modes trigger the bounded escape policy
+    /// in [`IndexCheck::first_order`] instead of being returned as a
+    /// transition state.
+    pub fn frozen_first_order(search: MinModeConfig) -> Self {
+        Self::frozen(search).with_index_check(IndexCheck::first_order())
+    }
+
     /// Dimer or Lanczos search and its rgmin translator.
     #[must_use]
     pub fn with_search(mut self, search: MinModeConfig) -> Self {
