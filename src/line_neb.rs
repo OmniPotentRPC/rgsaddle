@@ -27,7 +27,10 @@ use rgmin::{Control, Method, Oracle, Solver};
 use crate::{BandSurface, SaddleError};
 
 /// All dimensional controls for a fixed-energy LI-NEB session.
+///
+/// Start from [`LineNebConfig::default`] and chain the `with_*` setters.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct LineNebConfig {
     /// Uniform spring constant in the mass-scaled chart.
     pub spring_k: f64,
@@ -38,13 +41,42 @@ pub struct LineNebConfig {
     /// Fixed tunnelling energy `E`.
     pub energy: f64,
     /// One positive mass per physical coordinate (a 3N host repeats
-    /// each atomic mass three times).
-    pub masses: Array1<f64>,
+    /// each atomic mass three times). `None` is unit mass on every
+    /// coordinate.
+    pub masses: Option<Array1<f64>>,
     /// Fixed time step of the eOn global quick-min variant.
     pub time_step: f64,
     /// Reduced Planck constant in the host's unit system.
     pub reduced_planck: f64,
 }
+
+impl Default for LineNebConfig {
+    /// Unit spring constant and endpoint restraint, force tolerance
+    /// 1e-3, fixed energy 0, unit masses, time step 0.1, and unit
+    /// reduced Planck constant. These are values in units where
+    /// `hbar = 1`; a host in other units sets every field it relies on.
+    fn default() -> Self {
+        Self {
+            spring_k: 1.0,
+            endpoint_kappa: 1.0,
+            force_tol: 1.0e-3,
+            energy: 0.0,
+            masses: None,
+            time_step: 0.1,
+            reduced_planck: 1.0,
+        }
+    }
+}
+
+with_setters!(LineNebConfig {
+    with_spring_k => spring_k: val f64,
+    with_endpoint_kappa => endpoint_kappa: val f64,
+    with_force_tol => force_tol: val f64,
+    with_energy => energy: val f64,
+    with_masses => masses: opt Array1<f64>,
+    with_time_step => time_step: val f64,
+    with_reduced_planck => reduced_planck: val f64,
+});
 
 /// State of a host-stepped LI-NEB optimization.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,6 +90,7 @@ pub enum LineNebStatus {
 
 /// Diagnostics from the configuration evaluated after one step.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct LineNebReport {
     /// Whether this step met the force tolerance.
     pub status: LineNebStatus,
@@ -407,10 +440,11 @@ fn improved_tangent(
 
 fn evaluate(
     config: &LineNebConfig,
+    masses: ArrayView1<'_, f64>,
     surface: &impl BandSurface,
     q: ArrayView2<'_, f64>,
 ) -> Result<Evaluation, SaddleError> {
-    let sqrt_masses = config.masses.mapv(f64::sqrt);
+    let sqrt_masses = masses.mapv(f64::sqrt);
     let positions = &q / &sqrt_masses;
     let mut energies = Array1::zeros(q.nrows());
     let mut gradients = Array2::zeros(q.raw_dim());
@@ -427,7 +461,7 @@ fn evaluate(
         config.reduced_planck,
         BelowEndpoint::TurningPoint,
     )?;
-    let action = trapezoid_action(positions.view(), config.masses.view(), &xi)?;
+    let action = trapezoid_action(positions.view(), masses, &xi)?;
     let force_q = -&gradients / &sqrt_masses;
     let action_force = action_force_q(q, &xi, force_q.view(), config.reduced_planck)?;
     let (_, lengths) = segments(q)?;
@@ -599,7 +633,12 @@ fn energy_slice(
 }
 
 /// Scalar controls for [`fixed_energy_mep_seed`].
+///
+/// Start from [`FixedEnergySeed::default`] and set both energies with
+/// [`FixedEnergySeed::with_saddle_energy`] and
+/// [`FixedEnergySeed::with_target_energy`].
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub struct FixedEnergySeed {
     /// Energy at the index-one saddle.
     pub saddle_energy: f64,
@@ -610,6 +649,27 @@ pub struct FixedEnergySeed {
     /// Surface calls available to every slice on both branches.
     pub max_evaluations: usize,
 }
+
+impl Default for FixedEnergySeed {
+    /// Nine images and a budget of 10,000 surface calls. Both energies
+    /// are 0, which [`fixed_energy_mep_seed`] refuses: the target must lie
+    /// below the saddle, and the caller sets both.
+    fn default() -> Self {
+        Self {
+            saddle_energy: 0.0,
+            target_energy: 0.0,
+            images: 9,
+            max_evaluations: 10_000,
+        }
+    }
+}
+
+with_setters!(FixedEnergySeed {
+    with_saddle_energy => saddle_energy: val f64,
+    with_target_energy => target_energy: val f64,
+    with_images => images: val usize,
+    with_max_evaluations => max_evaluations: val usize,
+});
 
 /// Energy-sliced steepest-descent seed from an index-one saddle.
 ///
@@ -717,6 +777,7 @@ pub fn fixed_energy_mep_seed(
 /// quick-min velocity projection with a fixed time step.
 pub struct LineNebSession {
     config: LineNebConfig,
+    masses: Array1<f64>,
     q: Array2<f64>,
     solver: Solver,
     iteration: usize,
@@ -732,10 +793,14 @@ impl LineNebSession {
     /// [`SaddleError::NonFinite`] when a position or mass is not finite.
     pub fn new(config: LineNebConfig, positions: Array2<f64>) -> Result<Self, SaddleError> {
         let energies = Array1::zeros(positions.nrows());
+        let masses = config
+            .masses
+            .clone()
+            .unwrap_or_else(|| Array1::ones(positions.ncols()));
         validate_inputs(
             positions.view(),
             energies.view(),
-            config.masses.view(),
+            masses.view(),
             config.energy,
             config.reduced_planck,
         )?;
@@ -751,7 +816,7 @@ impl LineNebSession {
                 )));
             }
         }
-        let q = mass_scaled(positions.view(), config.masses.view());
+        let q = mass_scaled(positions.view(), masses.view());
         segments(q.view())?;
         let dim = q.len();
         let mut solver = Solver::new(
@@ -767,6 +832,7 @@ impl LineNebSession {
         solver.set_atom_maxmove(0.0);
         Ok(Self {
             config,
+            masses,
             q,
             solver,
             iteration: 0,
@@ -775,10 +841,11 @@ impl LineNebSession {
 
     /// Current physical positions, including the movable endpoints.
     pub fn positions(&self) -> Array2<f64> {
-        &self.q / &self.config.masses.mapv(f64::sqrt)
+        &self.q / &self.masses.mapv(f64::sqrt)
     }
 
-    /// Controls this session was built with.
+    /// Controls this session was built with. Unset masses stay `None`;
+    /// the session uses unit masses for them.
     pub fn config(&self) -> &LineNebConfig {
         &self.config
     }
@@ -793,6 +860,7 @@ impl LineNebSession {
     pub fn step<S: BandSurface>(&mut self, surface: &S) -> Result<LineNebReport, SaddleError> {
         let shape = self.q.raw_dim();
         let config = &self.config;
+        let masses = self.masses.view();
         let error = Mutex::new(None);
         let latest: Mutex<Option<(Array1<f64>, Evaluation)>> = Mutex::new(None);
         let rows = AtomicUsize::new(0);
@@ -805,7 +873,7 @@ impl LineNebSession {
                 }
             };
             rows.fetch_add(q.nrows(), Ordering::Relaxed);
-            match evaluate(config, surface, q.view()) {
+            match evaluate(config, masses, surface, q.view()) {
                 Ok(evaluation) => {
                     let gradient =
                         -Array1::from_iter(evaluation.optimization_force.iter().copied());
@@ -867,7 +935,7 @@ impl LineNebSession {
         let evaluation = match cached {
             Some((evaluated, evaluation)) if evaluated == accepted => evaluation,
             _ => {
-                let evaluation = evaluate(config, surface, self.q.view())?;
+                let evaluation = evaluate(config, masses, surface, self.q.view())?;
                 rows.fetch_add(self.q.nrows(), Ordering::Relaxed);
                 evaluation
             }

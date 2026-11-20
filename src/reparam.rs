@@ -215,6 +215,7 @@ pub struct SplineSample {
 /// [`SplineEnds::Natural`] uses the same cubic pieces with the second
 /// derivative zero at both end knots.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum SplineEnds {
     /// Chord for two knots, one parabola for three, not-a-knot for four or more.
     NotAKnot,

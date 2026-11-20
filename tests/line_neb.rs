@@ -139,15 +139,14 @@ fn a_session_endpoint_below_the_fixed_energy_has_zero_weight() {
         )
         .is_err()
     );
-    let config = LineNebConfig {
-        spring_k: 1.0,
-        endpoint_kappa: 1.0,
-        force_tol: 1.0e-6,
-        energy: target,
-        masses,
-        time_step: 0.01,
-        reduced_planck: 1.0,
-    };
+    let config = LineNebConfig::default()
+        .with_spring_k(1.0)
+        .with_endpoint_kappa(1.0)
+        .with_force_tol(1.0e-6)
+        .with_energy(target)
+        .with_masses(masses)
+        .with_time_step(0.01)
+        .with_reduced_planck(1.0);
     let mut session = LineNebSession::new(config, positions).unwrap();
     let report = session.step(&DoubleWell).unwrap();
     assert!(report.action.is_finite() && report.action > 0.0);
@@ -190,17 +189,28 @@ fn a_seed_without_a_budget_is_exhausted() {
         array![0.0, 0.0].view(),
         array![1.0, 0.0].view(),
         array![1.0, 2.0].view(),
-        FixedEnergySeed {
-            saddle_energy: 1.0,
-            target_energy: 0.25,
-            images: 9,
-            max_evaluations: 0,
-        },
+        FixedEnergySeed::default()
+            .with_saddle_energy(1.0)
+            .with_target_energy(0.25)
+            .with_images(9)
+            .with_max_evaluations(0),
     );
     assert!(matches!(
         err,
         Err(SaddleError::Invalid(message)) if message.starts_with("work budget exhausted")
     ));
+}
+
+#[test]
+fn the_default_seed_energies_must_be_set() {
+    let err = fixed_energy_mep_seed(
+        &DoubleWell,
+        array![0.0, 0.0].view(),
+        array![1.0, 0.0].view(),
+        array![1.0, 2.0].view(),
+        FixedEnergySeed::default(),
+    );
+    assert!(matches!(err, Err(SaddleError::Invalid(_))));
 }
 
 #[test]
@@ -210,12 +220,11 @@ fn energy_sliced_seed_follows_the_double_well_mep() {
         array![0.0, 0.0].view(),
         array![1.0, 0.0].view(),
         array![1.0, 2.0].view(),
-        FixedEnergySeed {
-            saddle_energy: 1.0,
-            target_energy: 0.25,
-            images: 9,
-            max_evaluations: 20_000,
-        },
+        FixedEnergySeed::default()
+            .with_saddle_energy(1.0)
+            .with_target_energy(0.25)
+            .with_images(9)
+            .with_max_evaluations(20_000),
     )
     .unwrap();
     assert_eq!(path.raw_dim(), ndarray::Ix2(9, 2));
@@ -238,15 +247,14 @@ fn fixed_energy_double_well_path_converges() {
         positions[(i, 0)] = -turning_point + 2.0 * turning_point * fraction;
         positions[(i, 1)] = 0.18 * (std::f64::consts::PI * fraction).sin();
     }
-    let config = LineNebConfig {
-        spring_k: 0.4,
-        endpoint_kappa: 1.5,
-        force_tol: 2.0e-6,
-        energy: target,
-        masses: array![1.0, 2.0],
-        time_step: 0.03,
-        reduced_planck: 1.0,
-    };
+    let config = LineNebConfig::default()
+        .with_spring_k(0.4)
+        .with_endpoint_kappa(1.5)
+        .with_force_tol(2.0e-6)
+        .with_energy(target)
+        .with_masses(array![1.0, 2.0])
+        .with_time_step(0.03)
+        .with_reduced_planck(1.0);
     let mut session = LineNebSession::new(config, positions).unwrap();
     let host_force_budget = 80_000;
     let mut rows = 0;
@@ -311,15 +319,13 @@ fn an_unevenly_spaced_line_converges_only_once_its_springs_balance() {
     // and the endpoints sit on the fixed energy, so only the springs
     // can tell this band apart from a converged one.
     let positions = array![[-1.0], [-0.9], [-0.8], [0.5], [1.0]];
-    let config = LineNebConfig {
-        spring_k: 1.0,
-        endpoint_kappa: 1.0,
-        force_tol: 1.0e-8,
-        energy: 0.0,
-        masses: array![1.0],
-        time_step: 0.1,
-        reduced_planck: 1.0,
-    };
+    let config = LineNebConfig::default()
+        .with_spring_k(1.0)
+        .with_endpoint_kappa(1.0)
+        .with_force_tol(1.0e-8)
+        .with_energy(0.0)
+        .with_time_step(0.1)
+        .with_reduced_planck(1.0);
     let mut session = LineNebSession::new(config, positions).unwrap();
     let first = session.step(&InvertedParabola).unwrap();
     assert_eq!(first.max_interior_perpendicular, 0.0);
@@ -368,15 +374,14 @@ fn a_plateau_of_three_equal_energies_still_steps() {
     // Images 1, 2, and 3 lie on the trough floor at one energy, so the
     // weighted tangent at image 2 has no energy difference to scale by.
     let positions = array![[-2.0, 0.5], [-1.0, 0.0], [0.0, 0.0], [1.0, 0.0], [2.0, 0.5]];
-    let config = LineNebConfig {
-        spring_k: 1.0,
-        endpoint_kappa: 1.0,
-        force_tol: 1.0e-6,
-        energy: 0.0,
-        masses: array![1.0, 1.0],
-        time_step: 0.05,
-        reduced_planck: 1.0,
-    };
+    let config = LineNebConfig::default()
+        .with_spring_k(1.0)
+        .with_endpoint_kappa(1.0)
+        .with_force_tol(1.0e-6)
+        .with_energy(0.0)
+        .with_masses(array![1.0, 1.0])
+        .with_time_step(0.05)
+        .with_reduced_planck(1.0);
     let mut session = LineNebSession::new(config, positions).unwrap();
     let report = session.step(&Trough).unwrap();
     assert!(report.action.is_finite());
