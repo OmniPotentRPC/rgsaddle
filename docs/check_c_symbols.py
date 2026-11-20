@@ -201,6 +201,112 @@ def collect_rust_inventory() -> tuple[list[str], list[str], list[str], list[str]
     return pub_mods, sorted(types), sorted(fns), sorted(consts), cfg_items
 
 
+CFG_ATTR_RE = re.compile(r"#\s*\[\s*cfg\s*\((.*)\)\s*\]\s*$")
+FEATURE_RE = re.compile(r"feature\s*=\s*\"([A-Za-z0-9_-]+)\"")
+EXPORT_RE = re.compile(r"#\s*\[\s*(?:unsafe\s*\(\s*)?no_mangle\s*\)?\s*\]")
+MOD_RE = re.compile(r"^\s*(?:pub(?:\([a-z]+\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;")
+
+
+def cfg_features(attrs: list[str]) -> set[str]:
+    """Cargo features, other than capi, that the cfg attributes in `attrs` require."""
+    found: set[str] = set()
+    for attr in attrs:
+        match = CFG_ATTR_RE.match(attr.strip())
+        if match and "not(" not in match.group(1) and "test" not in match.group(1):
+            found.update(FEATURE_RE.findall(match.group(1)))
+    return found - {"capi"}
+
+
+def attributes_above(lines: list[str], index: int) -> list[str]:
+    """Attribute, doc and comment lines directly above `lines[index]`."""
+    attrs: list[str] = []
+    pos = index - 1
+    while pos >= 0 and lines[pos].lstrip().startswith(("#[", "//")):
+        attrs.append(lines[pos])
+        pos -= 1
+    return attrs
+
+
+def module_gates() -> dict[Path, set[str]]:
+    """Features each capi source file needs because of how its module is declared."""
+    gates: dict[Path, set[str]] = {}
+    src = ROOT / "src"
+    roots = [src / "lib.rs", src / "capi.rs"]
+    for root in roots:
+        lines = root.read_text(encoding="utf-8").splitlines()
+        for index, line in enumerate(lines):
+            match = MOD_RE.match(line)
+            if not match:
+                continue
+            name = match.group(1)
+            if not name.startswith("capi") and root.name == "lib.rs":
+                continue
+            features = cfg_features(attributes_above(lines, index))
+            candidates = [src / f"{name}.rs", src / root.stem / f"{name}.rs"]
+            for path in candidates:
+                if path.is_file():
+                    gates[path] = features
+    return gates
+
+
+def collect_c_exports() -> dict[str, set[str]]:
+    """Every exported C symbol, with the features that gate it."""
+    gates = module_gates()
+    exports: dict[str, set[str]] = {}
+    sources = [ROOT / "src" / "capi.rs", *sorted((ROOT / "src").glob("capi_*.rs"))]
+    sources += sorted((ROOT / "src" / "capi").glob("*.rs"))
+    for path in sources:
+        lines = path.read_text(encoding="utf-8").splitlines()
+        for index, line in enumerate(lines):
+            if not EXPORT_RE.search(line):
+                continue
+            for follow in lines[index + 1 :]:
+                match = re.search(r"\bfn\s+([A-Za-z_][A-Za-z0-9_]*)", follow)
+                if match:
+                    break
+            else:
+                continue
+            features = cfg_features(attributes_above(lines, index))
+            # Attributes may sit above the doc comment or between it and the fn.
+            pos = index + 1
+            while pos < len(lines) and not re.search(r"\bfn\s", lines[pos]):
+                features |= cfg_features([lines[pos]])
+                pos += 1
+            exports[match.group(1)] = features | gates.get(path, set())
+    return exports
+
+
+def check_c_feature_gating(header: str) -> list[str]:
+    """Header declarations against the symbols the Rust sources export.
+
+    Every declared function must be exported and the other way round, and a
+    function that the library exports only under a Cargo feature must say so
+    in its header comment with "Requires the `feature` feature."
+    """
+    exports = collect_c_exports()
+    blanked = render_c_symbols._blank_comments(header)
+    declared: dict[str, set[str]] = {}
+    for match in render_c_symbols.DECL.finditer(blanked):
+        name = match.group(1)
+        if name.endswith("_t") or name.endswith("_fn") or name in declared:
+            continue
+        comment = render_c_symbols.preceding_comment(header, match.start())
+        declared[name] = render_c_symbols.required_features(comment)
+    errors: list[str] = []
+    for name in sorted(set(declared) - set(exports)):
+        errors.append(f"C symbol {name} is declared in include/rgsaddle.h but not exported")
+    for name in sorted(set(exports) - set(declared)):
+        errors.append(f"C symbol {name} is exported but not declared in include/rgsaddle.h")
+    for name in sorted(set(declared) & set(exports)):
+        if declared[name] != exports[name]:
+            said = ", ".join(sorted(declared[name])) or "none"
+            gated = ", ".join(sorted(exports[name])) or "none"
+            errors.append(
+                f"C symbol {name}: the header requires feature {said}, the sources gate it on {gated}"
+            )
+    return errors
+
+
 def collect_python_inventory() -> list[str]:
     init_tree = ast.parse((ROOT / "python" / "rgsaddle" / "__init__.py").read_text(encoding="utf-8"))
     core_tree = ast.parse((ROOT / "python" / "rgsaddle" / "_core.pyi").read_text(encoding="utf-8"))
@@ -262,6 +368,11 @@ def main() -> int:
     fresh = render_c_symbols.render(pairs, types, constants)
     if fresh != page:
         print("C index is stale; run python3 docs/render_c_symbols.py", file=sys.stderr)
+        return 1
+
+    gating = check_c_feature_gating(header)
+    if gating:
+        print("C feature gating:\n" + "\n".join(gating), file=sys.stderr)
         return 1
 
     documented = extract_documented_identifiers()

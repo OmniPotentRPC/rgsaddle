@@ -500,7 +500,11 @@ From minor 46, `rgsaddle_pafi_transmission` selects the maximum of a C
 caller's PAFI free-energy array and shoots retained configurations from
 that plane; `rgsaddle_pafi_transmission_report_t` carries `κ`, its block
 error, the selected plane, assigned and unassigned shots, recrossings and
-surface evaluations.
+surface evaluations. It and `rgsaddle_pafi_transmission_config_default`
+exist only in a library built with the `ohtst` feature. A config stamped
+with another major, a minor below 46 or a minor above the library's gets
+`RGSADDLE_ABI_MISMATCH`, and a maximum at the first or last plane gets
+`RGSADDLE_INVALID_PARAMETER`.
 `rgsaddle_minmode_set_rotation_stop_length` (minor 38) calls `MinModeSession::set_rotation_stop_length`; 0 turns the stop off and a negative or non-finite length returns `RGSADDLE_INVALID_PARAMETER`.
 From minor 43, `rgsaddle_artn_config_default` fills `rgsaddle_artn_config_t` with the published defaults and `rgsaddle_minmode_set_artn` enables them on a Lanczos session or disables them with NULL.
 `rgsaddle_reparametrize` (minor 38) places a band at equal arc length with an `rgsaddle_reparametrization_t`, and band flag bit 4, `RGSADDLE_BAND_SPLINE_REPARAM`, puts the trust-region band on the not-a-knot spline.
@@ -3195,7 +3199,7 @@ ABI minor 44 adds the growing string method of Peters, Heyden, Bell, and Chakrab
 
 ABI minor 45 adds the free-end adaptive NEB of Zhang, Zhang, Ye, and Zheng, J. Chem. Phys. 145, 094104 (2016), doi:10.1063/1.4962019 [zhangFreeEndAdaptive2016]. It is a setter, not a band flag. `rgsaddle_band_set_free_end` enables, replaces, or clears it on a live `RgsaddleBand`: `side` is `RGSADDLE_FREE_END_FIRST` or `RGSADDLE_FREE_END_LAST`, `has_target_energy` selects `target_energy` or the endpoint's initial energy, and `max_cuts`, `cut_force`, `energy_tol`, `stability`, `window_offset`, and `cubic` are the adaptive window. `stability` and `window_offset` must be at least 1. `rgsaddle_band_free_end_residual` writes the signed residual \(E(x_{\mathrm{end}}) - E_{\mathrm{target}}\) from the last step, and `rgsaddle_band_free_end_cuts` returns how many windows were actually removed. `rgsaddle_band_evaluation` returns the energies, gradients, and projected interior forces at the positions that step reported. A host that loads the library at run time checks `rgsaddle_abi_version()` for at least minor 45 before resolving these three symbols. `include/rgsaddle/session.hpp` wraps them as `Band::set_free_end`, `Band::free_end_residual`, and `Band::free_end_cuts`. The worked example is `tests/free_end_neb.rs`.
 
-ABI minor 46 adds `rgsaddle_pafi_transmission_config_default` and `rgsaddle_pafi_transmission`. The call selects the maximum of a caller-supplied free-energy array and shoots the retained configurations of that plane through `rgsaddle_point_surface_fn`. `rgsaddle_pafi_transmission_report_t` carries κ, its block error, the selected plane, and the shot counts. A host checks `rgsaddle_abi_version()` for at least minor 46 before resolving these symbols.
+ABI minor 46 adds `rgsaddle_pafi_transmission_config_default` and `rgsaddle_pafi_transmission`. The call selects the maximum of a caller-supplied free-energy array and shoots the retained configurations of that plane through `rgsaddle_point_surface_fn`. `rgsaddle_pafi_transmission_report_t` carries κ, its block error, the selected plane, and the shot counts. Both symbols exist only in a library built with the `ohtst` feature, as the hyperplane thermodynamic-integration symbols of minor 42 do. A build with `capi` alone reports minor 46 without them, so a host checks `rgsaddle_abi_version()` for at least minor 46 and then resolves the symbols, and a symbol that does not resolve means the library was built without `ohtst`. The config must be stamped with major 1 and a minor from 46 up to the library's. The version is read before any other field, and another major, a minor below 46 or a minor above the library's returns `RGSADDLE_ABI_MISMATCH`. A maximum at the first or last plane returns `RGSADDLE_INVALID_PARAMETER`, because the shots assign their ends by the side of the plane and an endpoint has no state on one side. `docs/check_c_symbols.py` holds the header, the exported symbols and this gating to each other.
 
 # Use the headers from a meson project (`docs/orgmode/howto/meson.org`)
 
@@ -4319,10 +4323,10 @@ The narrative for a session is the C and C++ how-to, not this list.
 
 ## Functions
 
-- `rgsaddle_hyperplane_sampler_create`. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
-- `rgsaddle_hyperplane_sampler_free`. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
-- `rgsaddle_hyperplane_thermodynamic_integration`. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
-- `rgsaddle_thermodynamic_derivative_observable`. Purpose: Stable observable name `potential.full_minus_harmonic` for TI records. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_hyperplane_sampler_create`. Purpose: Create a sampler over a host callback. Requires the `ohtst` feature. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_hyperplane_sampler_free`. Purpose: Free a hyperplane sampler. Requires the `ohtst` feature. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_hyperplane_thermodynamic_integration`. Purpose: Thermodynamic integration over a hyperplane sampler. Requires the `ohtst` feature. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_thermodynamic_derivative_observable`. Purpose: Stable observable name `potential.full_minus_harmonic` for TI records. Requires the `ohtst` feature. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_abi_version`. Purpose: (major << 16) | minor. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_abi_stamp`. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_status_name`. Purpose: Human-readable name for a status code. Parameters: the declaration. Units: the caller's.
@@ -4373,8 +4377,8 @@ The narrative for a session is the C and C++ how-to, not this list.
 - `rgsaddle_kappa_config_default`. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_minmode_set_kappa`. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_kappa_dimer_force`. Purpose: Inputs and outputs do not overlap. Parameters: the declaration. Units: the caller's.
-- `rgsaddle_pafi_transmission_config_default`. Purpose: Fill Bennett-Chandler defaults for PAFI transmission shooting. Parameters: the declaration. Units: the caller's.
-- `rgsaddle_pafi_transmission`. Purpose: Select the maximum of free_energy and shoot retained samples from that PAFI plane. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_pafi_transmission_config_default`. Purpose: Fill Bennett-Chandler defaults for PAFI transmission shooting. Requires the `ohtst` feature. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_pafi_transmission`. Purpose: Select the maximum of free_energy and shoot retained samples from that PAFI plane. Requires the `ohtst` feature. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_irc_create`. Purpose: Create an IRC session. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_irc_create_from_surface`. Purpose: Same, but the launch mode is the lowest eigenvector of the mass-weighted Hessian, from Lanczos on the host surface. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_irc_step`. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.

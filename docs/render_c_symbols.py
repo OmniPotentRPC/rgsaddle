@@ -23,6 +23,15 @@ BLOCK_TYPEDEF = re.compile(r"^[ \t]*typedef\s+(struct|enum)\s*\{([^}]*)\}\s*(\w+
 FN_TYPEDEF = re.compile(r"^[ \t]*typedef\s+[^;]*\(\s*\*\s*(\w+)\s*\)\s*\([^;]*\)\s*;", re.M | re.S)
 
 
+FEATURE_TAG = re.compile(r"Requires\s+the\s+`(\w+)`\s+feature", re.S)
+
+
+def required_features(comment: str) -> set[str]:
+    """Cargo features a declaration's comment says the library needs for it."""
+    flat = re.sub(r"/\*+|\*/|^\s*\*", " ", comment, flags=re.M)
+    return set(FEATURE_TAG.findall(flat))
+
+
 def first_sentence(comment: str, default: str = "Declared in include/rgsaddle.h.") -> str:
     text = re.sub(r"/\*+|\*/", " ", comment)
     text = re.sub(r"^\s*\*", " ", text, flags=re.M)
@@ -64,7 +73,12 @@ def entries(header: str) -> list[tuple[str, str]]:
             continue
         seen.add(name)
         comment = preceding_comment(header, match.start())
-        found.append((name, first_sentence(comment)))
+        sentence = first_sentence(comment)
+        for feature in sorted(required_features(comment)):
+            note = f"Requires the ={feature}= feature."
+            if note not in sentence:
+                sentence = f"{sentence} {note}"
+        found.append((name, sentence))
     return found
 
 
