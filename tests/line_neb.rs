@@ -71,18 +71,87 @@ fn action_force_matches_an_action_finite_difference() {
 }
 
 #[test]
-fn endpoint_restraint_may_cross_the_target_energy() {
-    let positions = array![[-1.0, 0.0], [0.0, 0.0], [1.0, 0.0]];
-    let energies = array![0.9, 2.0, 0.8];
+fn the_action_is_the_trapezoid_over_every_image() {
+    let positions = array![[0.0], [1.0], [2.0]];
+    let masses = array![1.0];
     let action = fixed_energy_action(
         positions.view(),
-        energies.view(),
-        array![1.0, 1.0].view(),
+        array![4.0, 2.0, 4.0].view(),
+        masses.view(),
         1.0,
         1.0,
     )
     .unwrap();
-    assert!(action.is_finite());
+    assert_eq!(action, 6.0_f64.sqrt() + 2.0_f64.sqrt());
+
+    let turning_points = fixed_energy_action(
+        positions.view(),
+        array![1.0, 3.0, 1.0].view(),
+        masses.view(),
+        1.0,
+        1.0,
+    )
+    .unwrap();
+    assert_eq!(turning_points, 2.0);
+}
+
+#[test]
+fn an_endpoint_below_the_fixed_energy_is_refused() {
+    let positions = array![[-1.0, 0.0], [0.0, 0.0], [1.0, 0.0]];
+    let masses = array![1.0, 1.0];
+    for energies in [array![0.9, 2.0, 1.0], array![1.0, 2.0, 0.8]] {
+        let action =
+            fixed_energy_action(positions.view(), energies.view(), masses.view(), 1.0, 1.0);
+        assert!(
+            matches!(&action, Err(SaddleError::Invalid(message)) if message.contains("endpoint")),
+            "{action:?}"
+        );
+        let force = fixed_energy_action_force(
+            positions.view(),
+            energies.view(),
+            Array2::ones((3, 2)).view(),
+            masses.view(),
+            1.0,
+            1.0,
+        );
+        assert!(matches!(force, Err(SaddleError::Invalid(_))));
+    }
+}
+
+#[test]
+fn a_session_endpoint_below_the_fixed_energy_has_zero_weight() {
+    let target = 0.25;
+    let positions = array![[-1.2, 0.0], [-0.5, 0.1], [0.0, 0.1], [0.5, 0.1], [1.2, 0.0]];
+    let mut energies = Array1::zeros(5);
+    let mut gradients = Array2::zeros((5, 2));
+    DoubleWell
+        .eval(positions.view(), &mut energies, &mut gradients)
+        .unwrap();
+    assert!(energies[0] < target && energies[4] < target);
+    let masses = array![1.0, 1.0];
+    assert!(
+        fixed_energy_action(
+            positions.view(),
+            energies.view(),
+            masses.view(),
+            target,
+            1.0
+        )
+        .is_err()
+    );
+    let config = LineNebConfig {
+        spring_k: 1.0,
+        endpoint_kappa: 1.0,
+        force_tol: 1.0e-6,
+        energy: target,
+        masses,
+        time_step: 0.01,
+        reduced_planck: 1.0,
+    };
+    let mut session = LineNebSession::new(config, positions).unwrap();
+    let report = session.step(&DoubleWell).unwrap();
+    assert!(report.action.is_finite() && report.action > 0.0);
+    assert_eq!(report.status, LineNebStatus::Running);
 }
 
 #[test]
