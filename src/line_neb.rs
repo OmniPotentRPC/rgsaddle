@@ -72,7 +72,11 @@ pub struct LineNebReport {
     /// Largest absolute component of the complete optimized endpoint
     /// force (projected spring plus energy restraint).
     pub max_endpoint_optimized: f64,
-    /// Abbreviated action of the configuration after the step.
+    /// Abbreviated action of the configuration after the step. This is
+    /// [`fixed_energy_action`] when both endpoints are at or above the
+    /// fixed energy. An endpoint the optimization has carried below it
+    /// has zero weight, as at a turning point, until the restraint
+    /// brings it back.
     pub action: f64,
     /// Steps completed, counting this one.
     pub iteration: usize,
@@ -140,15 +144,39 @@ fn mass_scaled(positions: ArrayView2<'_, f64>, masses: ArrayView1<'_, f64>) -> A
     &positions * &sqrt_masses
 }
 
+/// How an endpoint below the fixed energy enters the action weights.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BelowEndpoint {
+    /// Refuse it: the action is defined between turning points.
+    Refuse,
+    /// Give it zero weight, as at a turning point. A session uses this
+    /// while the restraint is still pulling an endpoint back to `E`.
+    TurningPoint,
+}
+
+/// `xi_i = sqrt(2 (E_i - E)) / hbar` on every image, endpoints included.
 fn action_weights(
     energies: ArrayView1<'_, f64>,
     energy: f64,
     reduced_planck: f64,
+    below: BelowEndpoint,
 ) -> Result<Array1<f64>, SaddleError> {
+    let last = energies.len() - 1;
     let mut xi = Array1::zeros(energies.len());
-    for i in 1..energies.len() - 1 {
+    for i in 0..=last {
         let excess = energies[i] - energy;
-        if excess.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
+        if i == 0 || i == last {
+            if excess < 0.0 {
+                match below {
+                    BelowEndpoint::Refuse => {
+                        return Err(SaddleError::Invalid(format!(
+                            "LI-NEB endpoint {i} lies below the fixed energy"
+                        )));
+                    }
+                    BelowEndpoint::TurningPoint => continue,
+                }
+            }
+        } else if excess.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
             return Err(SaddleError::Invalid(format!(
                 "LI-NEB interior image {i} must lie above the fixed energy"
             )));
@@ -177,9 +205,40 @@ fn segments(q: ArrayView2<'_, f64>) -> Result<(Vec<Array1<f64>>, Array1<f64>), S
 
 /// Trapezoidal discretization of the fixed-energy abbreviated action.
 ///
+/// With `q_i = sqrt(m) x_i` and `xi_i = sqrt(2 (E_i - E)) / hbar` on
+/// every image, both endpoints included, the action is
+/// `sum_i (xi_i + xi_{i+1}) |q_{i+1} - q_i| / 2`.
+///
 /// `positions` are physical coordinates and `masses` has one entry per
-/// coordinate. Endpoint energies may equal `energy`; every interior
-/// energy must be strictly larger.
+/// coordinate. An endpoint energy may equal `energy`, where it is a
+/// classical turning point with zero weight, or lie above it. Every
+/// interior energy must be strictly larger.
+///
+/// # Errors
+///
+/// [`SaddleError::Invalid`] when an endpoint lies below `energy`, when
+/// an interior image does not lie above it, when a segment has no
+/// length, or when a mass or `reduced_planck` is not positive.
+/// [`SaddleError::Shape`] and [`SaddleError::NonFinite`] for
+/// inconsistent or non-finite input.
+///
+/// # Examples
+///
+/// ```
+/// use ndarray::array;
+/// use rgsaddle::fixed_energy_action;
+/// let positions = array![[0.0], [1.0], [2.0]];
+/// let masses = array![1.0];
+/// let action = fixed_energy_action(
+///     positions.view(),
+///     array![4.0, 2.0, 4.0].view(),
+///     masses.view(),
+///     1.0,
+///     1.0,
+/// )
+/// .expect("every image is at or above the fixed energy");
+/// assert_eq!(action, 6.0_f64.sqrt() + 2.0_f64.sqrt());
+/// ```
 pub fn fixed_energy_action(
     positions: ArrayView2<'_, f64>,
     energies: ArrayView1<'_, f64>,
@@ -188,8 +247,16 @@ pub fn fixed_energy_action(
     reduced_planck: f64,
 ) -> Result<f64, SaddleError> {
     validate_inputs(positions, energies, masses, energy, reduced_planck)?;
+    let xi = action_weights(energies, energy, reduced_planck, BelowEndpoint::Refuse)?;
+    trapezoid_action(positions, masses, &xi)
+}
+
+fn trapezoid_action(
+    positions: ArrayView2<'_, f64>,
+    masses: ArrayView1<'_, f64>,
+    xi: &Array1<f64>,
+) -> Result<f64, SaddleError> {
     let q = mass_scaled(positions, masses);
-    let xi = action_weights(energies, energy, reduced_planck)?;
     let (_, lengths) = segments(q.view())?;
     let mut action = 0.0;
     for i in 0..lengths.len() {
@@ -203,9 +270,8 @@ pub fn fixed_energy_action(
 
 fn action_force_q(
     q: ArrayView2<'_, f64>,
-    energies: ArrayView1<'_, f64>,
+    xi: &Array1<f64>,
     force_q: ArrayView2<'_, f64>,
-    energy: f64,
     reduced_planck: f64,
 ) -> Result<Array2<f64>, SaddleError> {
     if force_q.raw_dim() != q.raw_dim() {
@@ -216,7 +282,6 @@ fn action_force_q(
     if !force_q.iter().all(|v| v.is_finite()) {
         return Err(SaddleError::NonFinite("LI-NEB physical force"));
     }
-    let xi = action_weights(energies, energy, reduced_planck)?;
     let (unit, lengths) = segments(q)?;
     let mut force = Array2::zeros(q.raw_dim());
     for j in 1..q.nrows() - 1 {
@@ -231,11 +296,18 @@ fn action_force_q(
     Ok(force)
 }
 
-/// Negative gradient of the discretized action with respect to the
+/// Negative gradient of [`fixed_energy_action`] with respect to the
 /// physical coordinates.
 ///
 /// The endpoint rows are zero because LI-NEB replaces their action
-/// gradient by the endpoint spring and iso-energy restraint.
+/// gradient by the endpoint spring and iso-energy restraint. The
+/// endpoint weights still enter the interior rows through the two end
+/// segments.
+///
+/// # Errors
+///
+/// The errors of [`fixed_energy_action`], and [`SaddleError::Shape`] or
+/// [`SaddleError::NonFinite`] when `gradients` does not match.
 pub fn fixed_energy_action_force(
     positions: ArrayView2<'_, f64>,
     energies: ArrayView1<'_, f64>,
@@ -256,7 +328,8 @@ pub fn fixed_energy_action_force(
     let sqrt_masses = masses.mapv(f64::sqrt);
     let q = &positions * &sqrt_masses;
     let force_q = -&gradients / &sqrt_masses;
-    let force = action_force_q(q.view(), energies, force_q.view(), energy, reduced_planck)?;
+    let xi = action_weights(energies, energy, reduced_planck, BelowEndpoint::Refuse)?;
+    let force = action_force_q(q.view(), &xi, force_q.view(), reduced_planck)?;
     Ok(force * &sqrt_masses)
 }
 
@@ -348,21 +421,15 @@ fn evaluate(
     if !gradients.iter().all(|v| v.is_finite()) {
         return Err(SaddleError::NonFinite("LI-NEB surface gradients"));
     }
-    let action = fixed_energy_action(
-        positions.view(),
+    let xi = action_weights(
         energies.view(),
-        config.masses.view(),
         config.energy,
         config.reduced_planck,
+        BelowEndpoint::TurningPoint,
     )?;
+    let action = trapezoid_action(positions.view(), config.masses.view(), &xi)?;
     let force_q = -&gradients / &sqrt_masses;
-    let action_force = action_force_q(
-        q,
-        energies.view(),
-        force_q.view(),
-        config.energy,
-        config.reduced_planck,
-    )?;
+    let action_force = action_force_q(q, &xi, force_q.view(), config.reduced_planck)?;
     let (_, lengths) = segments(q)?;
     let mut optimization_force = Array2::zeros(q.raw_dim());
     let mut max_interior_perpendicular = 0.0_f64;
