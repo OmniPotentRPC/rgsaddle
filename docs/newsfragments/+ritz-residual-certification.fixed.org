@@ -1,0 +1,1 @@
+Vineyard index checks now classify Ritz modes only when their residual intervals exclude the curvature cutoff, and report intervals that cross it as unresolved.
