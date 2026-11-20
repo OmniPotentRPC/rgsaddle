@@ -1,0 +1,87 @@
+jobs:
+  gate:
+    name: ${{ matrix.leg }} / ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    steps:
+    - uses: actions/checkout@v4
+    - if: matrix.leg == 'eessi'
+      name: Load EESSI
+      uses: EESSI/github-action-eessi@v3.4.0
+      with:
+        eessi_stack_version: '2026.06'
+    - if: matrix.leg == 'eessi'
+      name: Install eb-local
+      run: |-
+        set -euo pipefail
+        version=3.1.0
+        file="eb-local-${version}-$(uname -m)-linux-musl"
+        install_dir="${RUNNER_TEMP}/eb-local"
+        mkdir -p "${install_dir}"
+        curl -fL "https://github.com/stackhands/eb-local/releases/download/v${version}/${file}" -o "${install_dir}/${file}"
+        curl -fL "https://github.com/stackhands/eb-local/releases/download/v${version}/SHA256SUMS" |
+          (cd "${install_dir}" && sha256sum -c --ignore-missing)
+        mv "${install_dir}/${file}" "${install_dir}/eb-local"
+        chmod 755 "${install_dir}/eb-local"
+        echo "${install_dir}" >> "${GITHUB_PATH}"
+      shell: bash
+    - if: matrix.leg == 'pixi'
+      name: Set up pixi
+      uses: prefix-dev/setup-pixi@v0.9.3
+      with:
+        cache: true
+    - id: gate
+      name: Run gate
+      run: |-
+        set +e
+        python3 ci/gate/run.py --leg "${{ matrix.leg }}" --report "${RUNNER_TEMP}/gate.md"
+        status=$?
+        echo "status=${status}" >> "${GITHUB_OUTPUT}"
+        exit 0
+      shell: bash
+    - if: always()
+      name: Upload gate report
+      uses: actions/upload-artifact@v4
+      with:
+        if-no-files-found: error
+        name: gate-report-${{ matrix.leg }}-${{ matrix.arch }}
+        path: ${{ runner.temp }}/gate.md
+    - if: always()
+      name: Append report to job summary
+      run: cat "${RUNNER_TEMP}/gate.md" >> "${GITHUB_STEP_SUMMARY}"
+      shell: bash
+    - if: always()
+      name: Enforce gate result
+      run: test "${{ steps.gate.outputs.status }}" = 0
+      shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - arch: x86_64
+          leg: eessi
+          runner: ubuntu-24.04
+        - arch: aarch64
+          leg: eessi
+          runner: ubuntu-24.04-arm
+        - arch: x86_64
+          leg: pixi
+          runner: ubuntu-24.04
+        - arch: aarch64
+          leg: pixi
+          runner: ubuntu-24.04-arm
+  generated:
+    name: Generated files are current
+    runs-on: ubuntu-24.04
+    steps:
+    - uses: actions/checkout@v4
+    - uses: prefix-dev/setup-pixi@v0.9.3
+      with:
+        cache: true
+    - name: Check generated gate files
+      run: pixi run check-gate
+name: Reproducible build and test gate
+on:
+  pull_request: null
+  workflow_dispatch: null
+permissions:
+  contents: read

@@ -1,0 +1,33 @@
+#+title: Run the CI gate locally
+#+options: toc:nil num:nil
+
+Install pixi, then generate and check the committed gate files:
+
+#+begin_src sh
+pixi run gen-gate
+pixi run check-gate
+#+end_src
+
+=gen-gate= writes =.github/workflows/gate.yml= and =ci/gate/plan.json= from =ci/gate/plan.ncl=. =check-gate= exports the source to a temporary directory and compares it with the committed files without rewriting them. It exits 1 and prints a diff when either side changed alone, so edit =plan.ncl= rather than the workflow.
+
+Run the gate's own tests:
+
+#+begin_src sh
+pixi run -e python gate-selftest
+#+end_src
+
+Run the portable leg. The report path is relative to the checkout:
+
+#+begin_src sh
+python3 ci/gate/run.py --leg pixi --report gate.md
+#+end_src
+
+Run both legs when EESSI 2026.06 is mounted and =eb-local= is on =PATH=:
+
+#+begin_src sh
+python3 ci/gate/run.py --leg all --report gate.md
+#+end_src
+
+Without CVMFS or =eb-local=, the report says =EESSI not available=. That result is not a pass. The pixi leg still runs to completion.
+
+Add =--gist= to create a secret gist when =GH_TOKEN= is set. Without the token, the command only writes the report.
