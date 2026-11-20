@@ -140,6 +140,11 @@ contains
     real(c_double) :: probe(3)
     integer(c_size_t) :: grew, dropped
     integer(c_int) :: status
+    integer :: env_status
+    ! valgrind replaces the allocator, so mallinfo2 sees nothing; its own
+    ! leak check covers the release instead.
+    call get_environment_variable("RGSADDLE_FORTRAN_VALGRIND", status=env_status)
+    if (env_status == 0) return
     allocate(positions(3, n_atoms, n_images))
     positions = 0.0_c_double
     positions(1, :, 1) = 0.0_c_double
