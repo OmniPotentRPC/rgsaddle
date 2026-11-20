@@ -20,8 +20,8 @@ use rgmin::{Exp, Method, Oracle};
 
 use super::{
     BandConfig, BandMetrics, BandReport, BandSession, BandState, BandStatus, BandSurface,
-    build_solver, climb_target, evaluate_band, max_abs, metric_force, min_mode, pin_fixed_rows,
-    remove_net_translation, zero_fixed,
+    MetricBuildId, build_solver, climb_target, evaluate_band, max_abs, metric_force, min_mode,
+    pin_fixed_rows, remove_net_translation, zero_fixed,
 };
 use crate::error::SaddleError;
 use crate::reparam::{Reparametrization, reparametrize};
@@ -682,6 +682,8 @@ impl BandSession {
             {
                 work.store_forces(eval, &eff_force, None);
                 eval.assembly_ci = i64::MIN;
+                eval.assembly_metric =
+                    Some(metrics.map_or(MetricBuildId::EUCLIDEAN, |m| m.build_id));
             }
         }
         *lock_guard(&self.state.last_max_force) = max_component;
