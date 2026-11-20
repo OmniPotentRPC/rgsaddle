@@ -1,0 +1,1 @@
+The copper lattice table now retains each NPT row's pressure-convergence status and marks retained non-converged rows, including 600 K, explicitly.
