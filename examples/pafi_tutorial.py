@@ -66,7 +66,8 @@ def run_pafi(repo_root: Path, config: dict[str, float]) -> dict[str, float]:
             [str(binary), str(config_path), str(result_path)],
             check=True,
         )
-        return json.loads(result_path.read_text())
+        result: dict[str, float] = json.loads(result_path.read_text())
+        return result
 
 
 def main() -> None:
