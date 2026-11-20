@@ -744,7 +744,11 @@ rgsaddle_status_t rgsaddle_pafi_set_config(
 rgsaddle_status_t rgsaddle_pafi_run(RgsaddlePafi *session,
                                     rgsaddle_point_surface_fn surface,
                                     void *user);
-/** Read the last PAFI barrier summary. */
+/**
+ * Read the last PAFI barrier summary. Returns RGSADDLE_SHAPE and leaves
+ * `out` unchanged when the summed evaluation count does not fit in
+ * `int64_t`.
+ */
 rgsaddle_status_t rgsaddle_pafi_result(const RgsaddlePafi *session,
                                        rgsaddle_pafi_result_t *out);
 /**
