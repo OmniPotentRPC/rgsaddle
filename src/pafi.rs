@@ -710,13 +710,27 @@ pub fn balanced_barriers(
     end_gap: f64,
 ) -> Result<BalancedBarriers, SaddleError> {
     check_barriers(forward, reverse, end_gap)?;
-    let (weight_f, weight_r) = (forward.1.powi(-2), reverse.1.powi(-2));
-    let mean = (weight_f * forward.0 + weight_r * (reverse.0 + end_gap)) / (weight_f + weight_r);
+    let min_error = forward.1.min(reverse.1);
+    let ratio_f = min_error / forward.1;
+    let ratio_r = min_error / reverse.1;
+    let weight_f = ratio_f * ratio_f;
+    let weight_r = ratio_r * ratio_r;
+    let total_weight = weight_f + weight_r;
+    let mean = (weight_f / total_weight) * forward.0
+        + (weight_r / total_weight) * (reverse.0 + end_gap);
+    let reverse_out = mean - end_gap;
     let drift = forward.0 - reverse.0 - end_gap;
+    let error = (min_error / total_weight.sqrt()).hypot(0.5 * drift);
+    if ![mean, reverse_out, error, drift]
+        .iter()
+        .all(|v| v.is_finite())
+    {
+        return Err(SaddleError::NonFinite("PAFI barrier"));
+    }
     Ok(BalancedBarriers {
         forward: mean,
-        reverse: mean - end_gap,
-        error: ((weight_f + weight_r).recip() + (0.5 * drift).powi(2)).sqrt(),
+        reverse: reverse_out,
+        error,
         drift,
     })
 }
@@ -743,11 +757,19 @@ pub fn anchored_barriers(
     end_gap: f64,
 ) -> Result<BalancedBarriers, SaddleError> {
     check_barriers(forward, reverse, end_gap)?;
+    let reverse_out = forward.0 - end_gap;
+    let drift = forward.0 - reverse.0 - end_gap;
+    if ![forward.0, reverse_out, forward.1, drift]
+        .iter()
+        .all(|v| v.is_finite())
+    {
+        return Err(SaddleError::NonFinite("PAFI barrier"));
+    }
     Ok(BalancedBarriers {
         forward: forward.0,
-        reverse: forward.0 - end_gap,
+        reverse: reverse_out,
         error: forward.1,
-        drift: forward.0 - reverse.0 - end_gap,
+        drift,
     })
 }
 
