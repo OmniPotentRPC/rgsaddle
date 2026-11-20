@@ -728,7 +728,13 @@ RgsaddlePafi *rgsaddle_pafi_create(const rgsaddle_pafi_config_t *config,
                                    int64_t n_frames, int64_t n_dof,
                                    const double *frames, const double *arcs,
                                    int64_t n_arcs);
-/** Replace the PAFI configuration between runs. */
+/**
+ * Replace the PAFI configuration between runs. Returns
+ * RGSADDLE_NULL_SESSION for a NULL session before reading `config`,
+ * RGSADDLE_INVALID_PARAMETER for a NULL config, RGSADDLE_ABI_MISMATCH
+ * for another major, and the status of the first refused field
+ * otherwise. A refused config leaves the session unchanged.
+ */
 rgsaddle_status_t rgsaddle_pafi_set_config(
     RgsaddlePafi *session, const rgsaddle_pafi_config_t *config);
 /**
@@ -821,7 +827,12 @@ typedef struct {
 RgsaddleOhtst *rgsaddle_ohtst_create(const rgsaddle_ohtst_config_t *config,
                                      int64_t n_dof, const double *point,
                                      const double *normal);
-/** Replace the OH-TST configuration between runs. */
+/**
+ * Replace the OH-TST configuration between runs. The statuses follow
+ * rgsaddle_pafi_set_config: RGSADDLE_NULL_SESSION first, then
+ * RGSADDLE_INVALID_PARAMETER for a NULL config, then
+ * RGSADDLE_ABI_MISMATCH for another major.
+ */
 rgsaddle_status_t rgsaddle_ohtst_set_config(
     RgsaddleOhtst *session, const rgsaddle_ohtst_config_t *config);
 /**
