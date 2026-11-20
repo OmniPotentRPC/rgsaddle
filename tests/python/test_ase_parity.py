@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import inspect
 import os
+import threading
 
 import numpy as np
 import pytest
@@ -41,13 +42,50 @@ from rgsaddle.ase import (
 _SADDLE_XY = np.array([0.212, 0.293])
 
 
-class Bowl(Calculator):
+class ThreadCounter:
+    """Force-call count for the calling thread.
+
+    One search creates and discards several calculators, so the count
+    cannot live on a single instance. A class integer is shared by every
+    thread running the test, and a parallel run resets it to zero between
+    the search and the read.
+    """
+
+    def __init__(self) -> None:
+        self._local = threading.local()
+
+    def reset(self) -> None:
+        self._local.value = 0
+
+    def increment(self) -> None:
+        self._local.value = getattr(self._local, "value", 0) + 1
+
+    def get(self) -> int:
+        return int(getattr(self._local, "value", 0))
+
+
+class CountedCalculator(Calculator):
+    _calls: ThreadCounter
+
+    @classmethod
+    def reset_calls(cls) -> None:
+        cls._calls.reset()
+
+    @classmethod
+    def call_count(cls) -> int:
+        return cls._calls.get()
+
+    def _count_call(self) -> None:
+        type(self)._calls.increment()
+
+
+class Bowl(CountedCalculator):
     implemented_properties = ["energy", "forces"]
-    calls = 0
+    _calls = ThreadCounter()
 
     def calculate(self, atoms, properties, system_changes):  # type: ignore[no-untyped-def]
         Calculator.calculate(self, atoms, properties, system_changes)
-        Bowl.calls += 1
+        self._count_call()
         x, y = (float(atoms.positions[0, 0]), float(atoms.positions[0, 1]))
         self.results = {
             "energy": 0.5 * x * x + 2.0 * y * y,
@@ -74,15 +112,15 @@ class Bond(Calculator):
         self.results = {"energy": energy, "forces": forces}
 
 
-class QuadraticSaddle(Calculator):
+class QuadraticSaddle(CountedCalculator):
     """E = -2 x^2 + 5 y^2. The index-1 saddle is the origin."""
 
     implemented_properties = ["energy", "forces"]
-    calls = 0
+    _calls = ThreadCounter()
 
     def calculate(self, atoms, properties, system_changes):  # type: ignore[no-untyped-def]
         Calculator.calculate(self, atoms, properties, system_changes)
-        QuadraticSaddle.calls += 1
+        self._count_call()
         x, y = (float(atoms.positions[0, 0]), float(atoms.positions[0, 1]))
         self.results = {
             "energy": -2.0 * x * x + 5.0 * y * y,
@@ -240,13 +278,13 @@ def test_dyneb_forces_and_one_step_match() -> None:
     points = [(-0.8, 0.0), (-0.2, 0.0), (0.6, 0.1), (0.15, 0.0), (0.9, 0.0)]
 
     def run(cls):  # type: ignore[no-untyped-def]
-        Bowl.calls = 0
+        Bowl.reset_calls()
         images = _images(Bowl, points)
         band = cls(images, k=0.5, fmax=0.2, climb=False, method="improvedtangent")
         forces = band.get_forces()
         opt = FIRE(band, logfile=None, maxstep=0.05)
         opt.run(fmax=0.2, steps=1)
-        calls = Bowl.calls
+        calls = Bowl.call_count()
         print(f"DyNEB {cls.__name__} force calls={calls}")
         return forces, images[2].positions.copy(), calls
 
@@ -288,19 +326,59 @@ def _muller(x, y):  # type: ignore[no-untyped-def]
     return float(energy), float(gx), float(gy)
 
 
-class MullerBrown(Calculator):
+class MullerBrown(CountedCalculator):
     implemented_properties = ["energy", "forces"]
-    calls = 0
+    _calls = ThreadCounter()
 
     def calculate(self, atoms, properties, system_changes):  # type: ignore[no-untyped-def]
         Calculator.calculate(self, atoms, properties, system_changes)
-        MullerBrown.calls += 1
+        self._count_call()
         x, y = (float(atoms.positions[0, 0]), float(atoms.positions[0, 1]))
         energy, gx, gy = _muller(x, y)
         forces = np.zeros((len(atoms), 3))
         forces[0, 0] = -gx
         forces[0, 1] = -gy
         self.results = {"energy": energy, "forces": forces}
+
+
+def _count_on_this_thread(
+    calc_cls: type[CountedCalculator],
+    n: int,
+    phase: threading.Barrier,
+    seen: list[int],
+) -> None:
+    calc_cls.reset_calls()
+    phase.wait()
+    for index in range(n):
+        atoms = Atoms("H", positions=[[0.1 + 0.01 * index, 0.0, 0.0]])
+        atoms.calc = calc_cls()
+        atoms.get_potential_energy()
+    phase.wait()
+    seen.append(calc_cls.call_count())
+
+
+def test_force_call_counts_stay_on_their_thread() -> None:
+    """A class counter reads zero when another thread resets it."""
+    for calc_cls, left, right in (
+        (Bowl, 3, 5),
+        (QuadraticSaddle, 4, 2),
+        (MullerBrown, 1, 6),
+    ):
+        phase = threading.Barrier(2)
+        seen_left: list[int] = []
+        seen_right: list[int] = []
+        first = threading.Thread(
+            target=_count_on_this_thread, args=(calc_cls, left, phase, seen_left)
+        )
+        second = threading.Thread(
+            target=_count_on_this_thread, args=(calc_cls, right, phase, seen_right)
+        )
+        first.start()
+        second.start()
+        first.join()
+        second.join()
+        assert seen_left == [left], calc_cls.__name__
+        assert seen_right == [right], calc_cls.__name__
 
 
 class TightFIRE(FIRE):
@@ -313,7 +391,7 @@ def test_autoneb_saddle_matches() -> None:
     end = np.array([0.62349940, 0.02803776, 0.0])
 
     def run(cls, root):  # type: ignore[no-untyped-def]
-        MullerBrown.calls = 0
+        MullerBrown.reset_calls()
         prefix = os.path.join(root, "neb")
         os.makedirs(root, exist_ok=True)
         from ase.io import write
@@ -355,10 +433,10 @@ def test_autoneb_saddle_matches() -> None:
         interior = list(range(1, len(energies) - 1))
         peak = max(interior, key=lambda i: energies[i])
         print(
-            f"AutoNEB {cls.__name__} calls={MullerBrown.calls} "
+            f"AutoNEB {cls.__name__} calls={MullerBrown.call_count()} "
             f"peak={positions[peak]} energy={energies[peak]:.6f}"
         )
-        return np.asarray(positions[peak]), energies[peak], MullerBrown.calls
+        return np.asarray(positions[peak]), energies[peak], MullerBrown.call_count()
 
     import tempfile
 
@@ -394,7 +472,7 @@ def test_dimer_control_forces_match() -> None:
 
 def test_min_mode_translate_finds_the_saddle() -> None:
     def search(atoms_cls, translate_cls, control_cls):  # type: ignore[no-untyped-def]
-        QuadraticSaddle.calls = 0
+        QuadraticSaddle.reset_calls()
         atoms = Atoms("H", positions=[[0.35, 0.15, 0.0]])
         atoms.calc = QuadraticSaddle()
         control = control_cls(
@@ -408,10 +486,14 @@ def test_min_mode_translate_finds_the_saddle() -> None:
         opt = translate_cls(dimer, logfile=None)
         opt.run(fmax=0.05, steps=40)
         print(
-            f"MinModeTranslate {translate_cls.__name__} calls={QuadraticSaddle.calls} "
+            f"MinModeTranslate {translate_cls.__name__} calls={QuadraticSaddle.call_count()} "
             f"position={atoms.positions[0]} energy={atoms.get_potential_energy():.6f}"
         )
-        return atoms.positions[0].copy(), float(atoms.get_potential_energy()), QuadraticSaddle.calls
+        return (
+            atoms.positions[0].copy(),
+            float(atoms.get_potential_energy()),
+            QuadraticSaddle.call_count(),
+        )
 
     ase_pos, ase_energy, ase_calls = search(AseMinMode, AseTranslate, AseDimerControl)
     our_pos, our_energy, our_calls = search(MinModeAtoms, MinModeTranslate, DimerControl)
