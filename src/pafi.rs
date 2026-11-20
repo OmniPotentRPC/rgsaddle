@@ -1188,13 +1188,7 @@ pub fn pafi_transmission<S: PointSurface>(
             "PAFI transmission needs one sampled plane per profile value".into(),
         ));
     }
-    if (profile.dividing == 0 || profile.dividing + 1 == planes.len())
-        && matches!(&config.end_state, EndState::Side)
-    {
-        return Err(SaddleError::Invalid(
-            "an endpoint PAFI dividing plane needs basin end-state assignment".into(),
-        ));
-    }
+    check_dividing_plane(profile.dividing, planes.len(), config)?;
     let dividing = &planes[profile.dividing];
     if dividing.retained.is_empty() {
         return Err(SaddleError::Invalid(
@@ -1203,6 +1197,25 @@ pub fn pafi_transmission<S: PointSurface>(
     }
     let mut dynamics = ohtst::AnalyticSurfaceDynamics::new(surface);
     transmission_coefficient(&mut dynamics, &dividing.plane, &dividing.retained, config)
+}
+
+/// Refuse a dividing plane at either end of a band of `planes` planes when
+/// the ends of a shot are assigned by side of the plane.
+///
+/// Side assignment has no reactant behind the first plane and no product
+/// ahead of the last, so the shots there would not measure a crossing.
+#[cfg(feature = "ohtst")]
+pub(crate) fn check_dividing_plane(
+    dividing: usize,
+    planes: usize,
+    config: &TransmissionConfig,
+) -> Result<(), SaddleError> {
+    if (dividing == 0 || dividing + 1 == planes) && matches!(&config.end_state, EndState::Side) {
+        return Err(SaddleError::Invalid(
+            "an endpoint PAFI dividing plane needs basin end-state assignment".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Estimate the PAFI mean force from any constrained-ensemble engine.

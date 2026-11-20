@@ -10,6 +10,7 @@ use crate::{
     ohtst::{
         AnalyticSurfaceDynamics, Counting, Hyperplane, TransmissionConfig, transmission_coefficient,
     },
+    pafi::check_dividing_plane,
 };
 use ndarray::{Array1, ArrayView1, ArrayView2};
 use rgmin::{EigenParams, EigensolverKind};
@@ -119,6 +120,10 @@ pub struct RgsaddlePafiTransmissionReport {
     pub evaluations: i64,
 }
 
+/// First ABI minor that carries the PAFI transmission structs.
+#[cfg(feature = "ohtst")]
+const PAFI_TRANSMISSION_MINOR: u32 = 46;
+
 #[cfg(feature = "ohtst")]
 struct CPointSurface {
     callback: RgsaddlePointSurfaceFn,
@@ -151,6 +156,8 @@ unsafe impl Sync for CPointSurface {}
 
 #[cfg(feature = "ohtst")]
 /// Fill default PAFI transmission settings.
+///
+/// Requires the `ohtst` feature.
 ///
 /// # Safety
 /// `config` points to one writable configuration.
@@ -186,6 +193,12 @@ pub unsafe extern "C" fn rgsaddle_pafi_transmission_config_default(
 
 #[cfg(feature = "ohtst")]
 /// Select the maximum-free-energy PAFI plane and shoot its retained samples.
+///
+/// Requires the `ohtst` feature. The config must be stamped with this
+/// major and a minor from 46 up to the library's, or the call returns
+/// `RGSADDLE_ABI_MISMATCH`. A maximum at either end of the band is refused
+/// with `RGSADDLE_INVALID_PARAMETER`: the shots assign their ends by side
+/// of the plane, and an endpoint has no state behind or ahead of it.
 ///
 /// # Safety
 /// `free_energy` has `n_planes` values; `points` and `normals` have
@@ -227,7 +240,12 @@ pub unsafe extern "C" fn rgsaddle_pafi_transmission(
     };
     let cfg = unsafe { &*config };
     if cfg.version.major != RGSADDLE_ABI_MAJOR
-        || cfg.steps <= 0
+        || cfg.version.minor < PAFI_TRANSMISSION_MINOR
+        || cfg.version.minor > RGSADDLE_ABI_MINOR
+    {
+        return RGSADDLE_ABI_MISMATCH;
+    }
+    if cfg.steps <= 0
         || cfg.check_every <= 0
         || cfg.commit < 0
         || cfg.shots <= 0
@@ -250,6 +268,25 @@ pub unsafe extern "C" fn rgsaddle_pafi_transmission(
         if free[i] > free[dividing] {
             dividing = i;
         }
+    }
+    let mut shooting = TransmissionConfig::default()
+        .with_thermal(cfg.thermal)
+        .with_friction(cfg.friction)
+        .with_time_step(cfg.time_step)
+        .with_steps(cfg.steps as usize)
+        .with_check_every(cfg.check_every as usize)
+        .with_commit(cfg.commit as usize)
+        .with_shots(cfg.shots as usize)
+        .with_blocks(cfg.blocks as usize)
+        .with_seed(cfg.seed)
+        .with_counting(if cfg.counting == 0 {
+            Counting::Final
+        } else {
+            Counting::FirstCrossing
+        })
+        .with_hold_excluded(cfg.hold_excluded != 0);
+    if let Err(error) = check_dividing_plane(dividing, planes, &shooting) {
+        return transmission_status(error);
     }
     let offsets = unsafe { slice::from_raw_parts(start_offsets, planes + 1) };
     if offsets[0] != 0
@@ -283,22 +320,6 @@ pub unsafe extern "C" fn rgsaddle_pafi_transmission(
     let retained: Vec<Array1<f64>> = (first..last)
         .map(|i| Array1::from_vec(start_data[i * n..(i + 1) * n].to_vec()))
         .collect();
-    let mut shooting = TransmissionConfig::default()
-        .with_thermal(cfg.thermal)
-        .with_friction(cfg.friction)
-        .with_time_step(cfg.time_step)
-        .with_steps(cfg.steps as usize)
-        .with_check_every(cfg.check_every as usize)
-        .with_commit(cfg.commit as usize)
-        .with_shots(cfg.shots as usize)
-        .with_blocks(cfg.blocks as usize)
-        .with_seed(cfg.seed)
-        .with_counting(if cfg.counting == 0 {
-            Counting::Final
-        } else {
-            Counting::FirstCrossing
-        })
-        .with_hold_excluded(cfg.hold_excluded != 0);
     if !masses.is_null() {
         shooting = shooting.with_masses(unsafe { slice::from_raw_parts(masses, n) }.to_vec());
     }
