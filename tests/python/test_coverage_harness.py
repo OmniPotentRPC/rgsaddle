@@ -10,9 +10,16 @@ import numpy as np
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-SPEC = importlib.util.spec_from_file_location(
-    "saddle_coverage", ROOT / "bench" / "harness.py"
-)
+HARNESS_PATH = ROOT / "bench" / "harness.py"
+if not HARNESS_PATH.is_file():
+    pytest.skip(
+        f"bench/harness.py is not in this source tree ({HARNESS_PATH})",
+        allow_module_level=True,
+    )
+
+SPEC = importlib.util.spec_from_file_location("saddle_coverage", HARNESS_PATH)
+if SPEC is None or SPEC.loader is None:
+    raise RuntimeError(f"could not load the coverage harness at {HARNESS_PATH}")
 harness = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(harness)
 
