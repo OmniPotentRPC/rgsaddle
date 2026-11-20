@@ -54,3 +54,7 @@ copybutton_prompt_text = r"\$ "
 copybutton_prompt_is_regexp = True
 
 bibtex_bibfiles = ["references.bib"]
+
+# DOI publishers commonly reject automated requests after doi.org resolves
+# them. check_dois.py verifies those handles directly against the DOI registry.
+linkcheck_ignore = [r"https://doi\.org/.*"]

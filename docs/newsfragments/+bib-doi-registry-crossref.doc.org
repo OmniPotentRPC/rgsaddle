@@ -1,0 +1,1 @@
+Bibliography DOI metadata now matches Crossref for AFIR, Simons–Nichols, and IDPP citations. The Goswami IDPP entry no longer carries the DOI of the nudged elastic band orchestration paper.

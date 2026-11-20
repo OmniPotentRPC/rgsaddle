@@ -3,6 +3,16 @@
 
 The Rust sessions are the source of the mechanics. The Python classes in ~rgsaddle.ase~ follow the call shape of ASE's nudged elastic band, minimum-mode atoms, and Sella's ~run(fmax, steps)~. Where the numbers differ, the difference is the one the tests lock in.
 
+* From 0.5.x to 0.6.0
+A converged band, minimum-mode, or OCI-NEB session now certifies the saddle index by default.
+Those finite-difference evaluations count in the step report, so force-call totals can increase even when the search takes the same path.
+Use ~with_saddle_check(None)~ on ~BandConfig~ or ~MinModeConfig~ when reproducing 0.5.x counts.
+
+~BandReport~, ~MinModeReport~, and ~OcinebReport~ add ~saddle_index~.
+Code that constructs or exhaustively matches one of those reports must accept the new field.
+The C ABI introduced the saddle-check structs and functions at minor 40; a config stamped with an older minor keeps the check off.
+Python's ~_core.MinMode~ enables the check by default and returns it through ~SessionReport.saddle_index~ and ~MinMode.saddle_index()~.
+
 * From ASE's NEB
 ~rgsaddle.ase.NEB(images, k=0.1, climb=False)~ takes the same list of ~Atoms~ with calculators. ~interpolate()~ places the interior images on the straight line between the ends. ~get_positions~ and ~get_forces~ are the interior images only, and ~ase.optimize.FIRE~ drives them through ~__ase_optimizable__~. ~get_potential_energy~ is the highest image energy.
 

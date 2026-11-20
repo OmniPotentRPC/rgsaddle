@@ -16,8 +16,8 @@ $ cargo run --release --example muller_brown_band -- target/muller_brown
 #+end_src
 
 #+begin_example
-ci-neb   Converged after 1823 steps, 16418 force calls, max force 1.0e-3, climbing image 3 at (-0.822002, 0.624313), energy -40.664844
-oci-neb  Converged after 56 steps, 483 force calls, max force 6.8e-4, climbing image 3 at (-0.822000, 0.624314), energy -40.664844
+ci-neb   Converged after 1712 steps, 16889 force calls, max force 9.8e-4, climbing image 3 at (-0.822002, 0.624313), energy -40.664844
+oci-neb  Converged after 50 steps, 513 force calls, max force 3.0e-4, climbing image 3 at (-0.822001, 0.624313), energy -40.664844
 #+end_example
 
 Both runs stop on the same saddle. The rest of this page goes through the program, =examples/muller_brown_band.rs=, and then the two figures.

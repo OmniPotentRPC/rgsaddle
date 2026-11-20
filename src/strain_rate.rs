@@ -74,7 +74,7 @@ pub struct Strain {
 }
 
 impl Strain {
-    /// The zero strain.
+    /// Zero tensor: no deformation from the reference cell.
     pub fn zero() -> Self {
         Self {
             tensor: [[0.0; 3]; 3],
@@ -118,7 +118,11 @@ impl Strain {
         }
     }
 
-    /// The symmetric tensor.
+    /// Stored 3×3 strain tensor `ε` in `h = h0 (I + ε)`.
+    ///
+    /// Symmetric for [`Self::from_tensor`], [`Self::uniaxial_x`],
+    /// [`Self::hydrostatic`], and [`Self::transform`]; [`Self::shear_yx`]
+    /// and [`Self::shear_xz`] store only the single off-diagonal right-strain entry.
     pub fn tensor(self) -> M3 {
         self.tensor
     }
@@ -219,7 +223,7 @@ impl ElasticDipole {
         Ok(Self { tensor })
     }
 
-    /// The symmetric tensor.
+    /// Symmetric 3×3 elastic-dipole tensor in eV.
     pub fn tensor(self) -> M3 {
         self.tensor
     }

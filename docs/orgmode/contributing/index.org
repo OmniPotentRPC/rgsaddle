@@ -50,7 +50,7 @@ cargo check --manifest-path ci/consumer/Cargo.toml --target-dir target
 #+end_src
 
 * Minimum supported Rust version
-The minimum supported Rust version (MSRV) is the ~rust-version~ in ~Cargo.toml~.
+The minimum supported Rust version (MSRV) is ~1.88~, the ~rust-version~ in ~Cargo.toml~.
 A change must not need a newer compiler, and must pass the MSRV checks below as well as the stable ones.
 Clippy adds and revises lints between releases, so code that stable's clippy accepts can fail the MSRV's, and the reverse.
 The ~msrv~ job of the CI workflow reads ~rust-version~ with ~cargo metadata~ and installs that toolchain.
@@ -69,6 +69,7 @@ cargo +"$msrv" clippy --locked --all-targets --features readcon,readcon-db -- -D
 cargo +"$msrv" clippy --locked --all-targets --features capi,verify -- -D warnings
 cargo +"$msrv" build --locked --features capi
 cargo +"$msrv" test --locked --features capi
+cargo +"$msrv" test --locked --all-features
 #+end_src
 
 * Python stub
@@ -95,9 +96,13 @@ Git ignores those files, so edit the Org source and do not add the generated fil
 Build the site as the docs workflow does:
 
 #+begin_src sh
+python docs/check_c_symbols.py
+python docs/check_paths.py
+python docs/check_dois.py
 emacs --batch -l docs/export.el
 python -m pip install -r docs/requirements.txt
-sphinx-build -b html -n docs/source docs/build
+sphinx-build -b html -n -W --keep-going docs/source docs/build
+sphinx-build -b linkcheck -n -W --keep-going docs/source docs/build/linkcheck
 #+end_src
 
 The API documentation builds with every rustdoc warning denied on each feature set CI tests, and once with private items.
@@ -129,8 +134,18 @@ towncrier build --draft --version <version>
 towncrier build --version <version>
 #+end_src
 
+* Release to crates.io
+A pushed ~v*~ tag starts ~publish.yml~ on the tagged commit.
+The workflow checks out the tag, obtains a crates.io token through ~rust-lang/crates-io-auth-action~, and runs ~cargo publish --locked --no-verify -p rgsaddle~.
+~--no-verify~ stays on because the git-pinned ~rgmin~ dependency in ~Cargo.toml~ fails ~cargo package~: the packaged manifest cannot fetch that git source the way a local checkout does.
+The crates.io ~0.6.0~ release of ~rgmin~ does not export ~LevelSetConstraint~, which free-end bands need, so the workspace keeps the git pin at rev ~f3d18706c2b1ab380fd75f62449fdab46d01f5e2~ with ~version = "=0.6.0"~ until a crates.io release carries the symbol.
+Do not drop ~--no-verify~ without either switching to that release or changing how the dependency is specified.
+
+Before tagging, run the MSRV test line above, bump versions as below, and collect the changelog.
+On the maintainer machine, ~cargo package --locked -p rgsaddle~ still fails for the pin; rely on CI publish or build from the git checkout.
+
 * Release to PyPI
-A ~v*~ tag publishes the crate to crates.io through ~publish.yml~ and the Python package to PyPI through ~pypi.yml~.
+A ~v*~ tag publishes the Python package to PyPI through ~pypi.yml~; the crate upload is the crates.io workflow above.
 ~pypi.yml~ uses PyPI trusted publishing, so the repository holds no PyPI token.
 Before the first upload, the PyPI account that will own the project adds a pending publisher at https://pypi.org/manage/account/publishing/ with these values:
 
@@ -145,9 +160,9 @@ Only the ~publish~ job runs in the ~pypi~ environment and holds ~id-token: write
 
 To release a version:
 
-1. Set it in ~Cargo.toml~, ~pyproject.toml~ and ~meson.build~; ~tests/package_version.rs~ holds them equal.
-2. Collect the fragments with ~towncrier build --version <version>~ and commit.
-3. Push the tag ~v<version>~ on that commit.
+1. Set it in ~Cargo.toml~, ~pyproject.toml~, ~meson.build~, ~docs/source/conf.py~, and the install example in ~docs/orgmode/getting-started.org~; ~tests/package_version.rs~ holds the first three equal. Regenerate ~llms.txt~ and ~llms-full.txt~ with ~python docs/render_llms.py~ when narrative pages moved.
+2. Collect the fragments with ~towncrier build --version <version>~ and commit the updated ~docs/orgmode/changelog.org~.
+3. Push the release commit to ~main~, then push the tag ~v<version>~ on that commit. The tag runs ~publish.yml~ and ~pypi.yml~ on GitHub-hosted runners; neither workflow needs a local publish.
 
 The ~versions~ job stops the run unless the tag is ~v~ followed by the version in both ~Cargo.toml~ and ~pyproject.toml~.
 The ~wheels~ job runs cibuildwheel with the ~[tool.cibuildwheel]~ table of ~pyproject.toml~ on Linux ~x86_64~ and ~aarch64~, macOS ~arm64~ and ~x86_64~, and Windows ~x86_64~, and tests every wheel.
