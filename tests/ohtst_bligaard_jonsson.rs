@@ -281,9 +281,9 @@ fn eckart_optimizer_finds_both_maxima() {
 
 /// The sampled torque of a capped sample falls to zero, and the norm test
 /// cannot certify a zero torque. With `tolerance` zero the run ends at the
-/// iteration cap, not in an error and not as converged.
+/// record cap, not in an error and not as converged.
 #[test]
-fn eckart_capped_sample_without_tolerance_ends_at_the_iteration_cap() {
+fn eckart_capped_sample_without_tolerance_reports_the_record_cap() {
     let cold_kt = 0.01 * ECKART_V0;
     let kt = 0.3 * ECKART_V0;
     for (kt, start, time_step) in [(cold_kt, 4.0, 8.0), (kt, 60.0, 1.0), (kt, 4.0, 8.0)] {
@@ -291,7 +291,7 @@ fn eckart_capped_sample_without_tolerance_ends_at_the_iteration_cap() {
             .unwrap()
             .run(&EckartHo)
             .unwrap();
-        assert_eq!(optimum.status, PlaneOptimizerStatus::MaxIterations);
+        assert_eq!(optimum.status, PlaneOptimizerStatus::MaxRecords);
     }
 }
 
