@@ -2737,6 +2737,44 @@ mod tests {
         );
     }
 
+    /// One recovery of a 12³ vacancy, on a private pool, after the global
+    /// pool exists. Unoptimized this exceeds the cap and the vacancy
+    /// strong-scaling test then runs for hours. The cap is what keeps a
+    /// slow build from hanging CI.
+    #[test]
+    #[cfg(feature = "par")]
+    fn colour_block_recovery_of_a_small_vacancy_is_bounded() {
+        use rayon::prelude::*;
+        use std::time::Duration;
+
+        let _warm: usize = (0..64usize).into_par_iter().sum();
+        let (positions, cell) = fcc_vacancy_cell(12);
+        let coords = Array1::from(positions);
+        let rc = 2.5;
+        let opts = SparseHessianOpts::default();
+        let pattern =
+            SparsityPattern::from_positions(coords.view(), Some(&cell), rc, opts.search_skin())
+                .unwrap();
+        let surface = ShiftedForce::periodic(1.0, rc, cell);
+        let started = std::time::Instant::now();
+        let recovered = with_threads(1, || {
+            sparse_hessian(&surface, coords.view(), &pattern, opts).unwrap()
+        });
+        let elapsed = started.elapsed();
+        eprintln!(
+            "12^3 vacancy atoms {} colours {} evaluations {} elapsed {elapsed:?}",
+            coords.len() / 3,
+            recovered.n_colours(),
+            recovered.evaluations()
+        );
+        assert!(recovered.n_colours() > 1);
+        assert!(recovered.evaluations() > recovered.n_colours());
+        assert!(
+            elapsed < Duration::from_secs(60),
+            "12^3 vacancy colour-block recovery took {elapsed:?}"
+        );
+    }
+
     #[test]
     #[cfg(feature = "par")]
     #[ignore = "slow strong-scaling sweep over 97555-atom cells; run with --ignored"]
