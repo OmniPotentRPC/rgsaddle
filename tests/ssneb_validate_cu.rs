@@ -836,15 +836,19 @@ impl PointSurface for HeldCell<'_> {
     }
 }
 
-fn neb_config(force_tol: f64) -> BandConfig {
-    BandConfig::default()
+fn neb_config(force_tol: f64, joint: bool) -> BandConfig {
+    let config = BandConfig::default()
         .with_climbing(CiConfig::always())
         .with_force_tol(force_tol)
         .with_max_move(0.08)
         .with_remove_translation(true)
         .with_method(Method::lbfgs_with_memory(20))
-        .with_min_mode(None)
-        .with_spring(rgsaddle::SpringKind::Uniform { k: 1.0 })
+        .with_spring(rgsaddle::SpringKind::Uniform { k: 1.0 });
+    if joint {
+        config.with_min_mode(None)
+    } else {
+        config
+    }
 }
 
 fn run_neb(
@@ -1183,16 +1187,20 @@ fn climb_row(
         cells.push(h);
     }
     let surface = HeldCell { copper, cell };
-    let mut neb = SolidNeb::joint(
-        neb_config(force_tol),
-        cell,
-        positions,
-        &cells,
-        mask,
-        external,
-        1.0,
-    )
-    .expect("joint neb");
+    let mut neb = if frozen {
+        SolidNeb::frozen(neb_config(force_tol, false), positions).expect("fixed-cell neb")
+    } else {
+        SolidNeb::joint(
+            neb_config(force_tol, true),
+            cell,
+            positions,
+            &cells,
+            mask,
+            external,
+            1.0,
+        )
+        .expect("joint neb")
+    };
     let (report, steps) = run_neb(&mut neb, &surface, force_tol, max_steps);
     let images = neb.images().expect("neb images");
     let ci = report.ci_index.unwrap_or_else(|| {
