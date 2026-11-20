@@ -227,8 +227,8 @@ fn sample_variance(values: &[f64], mean: f64) -> f64 {
 
 /// Flyvbjerg--Petersen blocking estimate for a correlated series.
 ///
-/// Adjacent values are repeatedly averaged until two successive changes in
-/// the standard error overlap their sampling uncertainties. See Flyvbjerg
+/// Adjacent values are repeatedly averaged until successive standard-error
+/// estimates overlap their sampling uncertainties. See Flyvbjerg
 /// and Petersen, J. Chem. Phys. 91, 461--466 (1989),
 /// doi:10.1063/1.457480. Failure to find that plateau is explicit.
 fn block_statistics(values: &[f64]) -> BlockEstimate {
@@ -263,9 +263,9 @@ fn block_statistics(values: &[f64]) -> BlockEstimate {
         (left.0 - right.0).abs() <= 2.0 * left.1.hypot(right.1)
     };
     let plateau = levels
-        .windows(3)
+        .windows(2)
         .rev()
-        .find(|window| stable(window[0], window[1]) && stable(window[1], window[2]));
+        .find(|window| stable(window[0], window[1]));
     let resolved = plateau.is_some();
     let standard_error = plateau
         .map(|window| window.iter().map(|level| level.0).fold(0.0, f64::max))

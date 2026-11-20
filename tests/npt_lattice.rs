@@ -184,10 +184,12 @@ fn harmonic_crystal_has_zero_total_pressure() {
 
     let nkt_over_v = atoms as f64 * KT_300_EV / volume;
     eprintln!(
-        "harmonic: N {atoms} N kT/V {nkt_over_v:.6e} P {:.6e} SE {:.2e} P/NkTV {:.4} \
-         configurational-only P/NkTV {:.4} a {:.5}",
+        "harmonic: N {atoms} N kT/V {nkt_over_v:.6e} P {:.6e} SE {:.2e} ESS {:.2} \
+         statistics_resolved {} P/NkTV {:.4} configurational-only P/NkTV {:.4} a {:.5}",
         report.mean_pressure,
         report.pressure_standard_error,
+        report.pressure_effective_samples,
+        report.pressure_statistics_resolved,
         report.mean_pressure / nkt_over_v,
         configurational / samples as f64 / nkt_over_v,
         report.mean_lattice_a
