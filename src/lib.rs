@@ -194,13 +194,15 @@ pub use ohtst::{
     transmission_coefficient_on_surface,
 };
 pub use pafi::{
-    ArcPath, FreeEnergyProfile, HyperplaneAverage, PafiConfig, PafiIntegrator, PafiMeanForce,
-    PathFrame, PathGeometry, average_hyperplane, average_hyperplane_with_sampler,
-    integrate_profile, pafi_profile, zero_temperature_barrier,
+    ArcPath, BalancedBarriers, FreeEnergyProfile, HyperplaneAverage, PafiConfig, PafiIntegrator,
+    PafiMeanForce, PathFrame, PathGeometry, anchored_barriers, average_hyperplane,
+    average_hyperplane_with_sampler, balanced_barriers, integrate_profile, pafi_profile,
+    zero_temperature_barrier,
 };
 pub use pair_network::{
     Mat3i, PairConfig, PairEdge, PairExit, PairHop, PairMove, PairNetwork, PairStateClass,
-    PairTarget, Vec3i, cubic_group,
+    PairTarget, SensitivityCover, SurrogateCalibration, Vec3i, calibrate_surrogate, cubic_group,
+    sensitivity_cover,
 };
 pub use prfo::{PrfoKind, partitioned_rfo_eigen, restricted_prfo_displacement};
 pub use projection::ProjectionKind;
