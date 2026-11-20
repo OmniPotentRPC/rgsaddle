@@ -70,6 +70,7 @@ while report.status != BandStatus::Converged {
    tutorials/oh-tst
    howto/band
    howto/autoneb
+   howto/line-neb
    howto/minmode
    howto/art
    howto/indexk
