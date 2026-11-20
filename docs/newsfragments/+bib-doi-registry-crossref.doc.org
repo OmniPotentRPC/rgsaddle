@@ -1,1 +1,1 @@
-Bibliography DOI metadata now matches Crossref for AFIR, Simons–Nichols, and IDPP citations.
+Bibliography DOI metadata now matches Crossref for the AFIR and Simons–Nichols citations, and the IDPP entry no longer carries the DOI of the orchestration paper.
