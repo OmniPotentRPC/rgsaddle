@@ -556,7 +556,7 @@ pub fn index_at<S: PointSurface>(
     let calls = std::cell::Cell::new(0usize);
     let (values, vectors, residuals) = ritz_lowest(surface, x, &modes, check, &calls)?;
     let (negative, positive, unresolved) =
-        classify_ritz_intervals(&values, &residuals, check.negative);
+        classify_ritz_intervals(&values, &residuals, check.negative)?;
     Ok(IndexReport {
         negative,
         positive,
@@ -572,8 +572,13 @@ fn classify_ritz_intervals(
     values: &[f64],
     residuals: &[f64],
     threshold: f64,
-) -> (usize, usize, usize) {
-    values.iter().zip(residuals).fold(
+) -> Result<(usize, usize, usize), SaddleError> {
+    if values.len() != residuals.len() {
+        return Err(SaddleError::Shape(
+            "Ritz values and residuals have different lengths".into(),
+        ));
+    }
+    Ok(values.iter().zip(residuals).fold(
         (0, 0, 0),
         |(negative, positive, unresolved), (&theta, &residual)| {
             if theta + residual < threshold {
@@ -584,7 +589,7 @@ fn classify_ritz_intervals(
                 (negative, positive, unresolved + 1)
             }
         },
-    )
+    ))
 }
 
 impl Default for SolidDimerConfig {
@@ -1589,8 +1594,32 @@ impl SolidDimer {
     ) -> Result<bool, SaddleError> {
         let q = self.inner.position().to_owned();
         self.rejected_at.push(q.clone());
-        let soft = verdict.vectors.column(verdict.negative - 1).to_owned();
-        let hard = verdict.vectors.column(0).to_owned();
+        if verdict.values.len() != verdict.residuals.len()
+            || verdict.values.len() != verdict.vectors.ncols()
+        {
+            return Err(SaddleError::Shape(
+                "Ritz report values, residuals and vectors have different lengths".into(),
+            ));
+        }
+        let negative_indices: Vec<_> = verdict
+            .values
+            .iter()
+            .zip(&verdict.residuals)
+            .enumerate()
+            .filter_map(|(index, (&theta, &residual))| {
+                (theta + residual < self.index.expect("index check").negative).then_some(index)
+            })
+            .collect();
+        if negative_indices.len() != verdict.negative || negative_indices.len() < 2 {
+            return Err(SaddleError::Shape(
+                "Ritz report negative-mode count is inconsistent".into(),
+            ));
+        }
+        let soft = verdict
+            .vectors
+            .column(*negative_indices.last().expect("at least two modes"))
+            .to_owned();
+        let hard = verdict.vectors.column(negative_indices[0]).to_owned();
         let (reference, _) = surface.eval(q.view())?;
         let mut sign = 0.0;
         let mut lowest = reference;
@@ -2972,6 +3001,15 @@ mod tests {
         }
     }
 
+    struct ZeroModeSurface;
+
+    impl PointSurface for ZeroModeSurface {
+        fn eval(&self, r: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            let (x, y, z) = (r[0], r[1], r[2]);
+            Ok((0.5 * (y * y + 2.0 * z * z), array![0.0 * x, y, 2.0 * z]))
+        }
+    }
+
     fn placed(escapes: usize) -> SolidDimer {
         let search = MinModeConfig::default()
             .with_force_tol(1e-8)
@@ -3043,15 +3081,77 @@ mod tests {
         assert!((theta - reported).abs() < 1.0e-15);
         assert!(theta >= -1.0e-4);
         let (negative, positive, unresolved) =
-            classify_ritz_intervals(&[theta], &[residual], -1.0e-4);
+            classify_ritz_intervals(&[theta], &[residual], -1.0e-4).unwrap();
         assert_eq!((negative, positive, unresolved), (0, 0, 1));
     }
 
     #[test]
     fn vineyard_ritz_intervals_certify_well_separated_modes() {
         let (negative, positive, unresolved) =
-            classify_ritz_intervals(&[-0.25, 0.5], &[1.0e-3, 2.0e-3], -1.0e-4);
+            classify_ritz_intervals(&[-0.25, 0.5], &[1.0e-3, 2.0e-3], -1.0e-4).unwrap();
         assert_eq!((negative, positive, unresolved), (1, 1, 0));
+    }
+
+    #[test]
+    fn vineyard_ritz_intervals_include_both_threshold_boundaries() {
+        let classified = classify_ritz_intervals(&[-0.2, 0.2], &[0.1, 0.1], -0.1).unwrap();
+        assert_eq!(classified, (0, 1, 1));
+        let classified = classify_ritz_intervals(&[-0.2, 0.0], &[0.1, 0.1], -0.1).unwrap();
+        assert_eq!(classified, (0, 0, 2));
+    }
+
+    #[test]
+    fn vineyard_ritz_intervals_refuse_mismatched_diagnostics() {
+        let error = classify_ritz_intervals(&[-0.2, 0.2], &[0.1], -0.1).unwrap_err();
+        assert!(matches!(error, SaddleError::Shape(_)));
+    }
+
+    #[test]
+    fn vineyard_pair_propagates_unresolved_minimum_and_saddle_modes() {
+        let single = IndexSurface { double: false };
+        let origin = array![0.0, 0.0, 0.0];
+        let minimum = array![1.0, 0.0, 0.0];
+        let check = IndexCheck::first_order().with_lowest(3).with_negative(0.0);
+
+        let error = certify_vineyard_pair(
+            &ZeroModeSurface,
+            origin.view(),
+            &single,
+            origin.view(),
+            check,
+            VINEYARD_FORCE,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            VineyardIndexError::MinimumUnresolved { unresolved: 1, .. }
+        ));
+
+        let error = certify_vineyard_pair(
+            &Well,
+            minimum.view(),
+            &ZeroModeSurface,
+            origin.view(),
+            check,
+            VINEYARD_FORCE,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            VineyardIndexError::SaddleUnresolved { unresolved: 1, .. }
+        ));
+    }
+
+    #[test]
+    fn dimer_adjudication_rejects_an_unresolved_index() {
+        let mut dimer = placed(0);
+        dimer.index = Some(IndexCheck::first_order().with_negative(-2.0));
+        let report = dimer.step(&IndexSurface { double: true }).unwrap();
+
+        assert_eq!(report.status, MinModeStatus::Converged);
+        assert!(report.rejected);
+        assert_eq!(report.negative_modes, Some(0));
+        assert_eq!(report.unresolved_modes, Some(2));
     }
 
     #[test]
