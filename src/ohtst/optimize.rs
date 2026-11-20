@@ -1086,7 +1086,7 @@ impl<E: HyperplaneSampler> Climb<'_, E> {
             self.tested = true;
             self.test()?;
         }
-        if self.converged {
+        if self.status.is_some() {
             return Ok(Array1::zeros(x.len()));
         }
         let current = self.current.as_ref().expect("checked above");
