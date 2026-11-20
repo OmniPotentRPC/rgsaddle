@@ -29,19 +29,17 @@
 //! Hessian is the harmonic one of [`PlaneMetric::Harmonic`], or one
 //! curvature per factor measured along every trial step.
 //!
-//! Sample sizing and convergence use separate tests. The sample size follows
-//! the norm test of Byrd, Chin, Nocedal and Wu, Math. Program. 134, 127
-//! (2012), doi:10.1007/s10107-012-0572-5:
-//! when the variance of the mean gradient at an accepted plane exceeds
-//! `θ² |g|²`, the sample grows by that ratio, up to
-//! [`PlaneOptimizerConfig::max_records`], and the plane is sampled again.
-//! Convergence instead compares each accepted translational and orientational
-//! step with its gradient error propagated through the current model
-//! curvature, or with an absolute step tolerance. The criterion must hold
-//! for [`PlaneOptimizerConfig::patience`] accepted steps. Iteration and
-//! evaluation caps return a finite [`PlaneOptimum`] with a typed
-//! [`PlaneOptimizerStatus`] rather than turning sampling noise into an
-//! unbounded run.
+//! Sample sizing and convergence share the root-sum-square norm of the
+//! translational and orientational gradient blocks. A gradient within
+//! [`PlaneOptimizerConfig::confidence`] standard errors of zero is tested
+//! for convergence after the norm test of Byrd, Chin, Nocedal and Wu,
+//! Math. Program. 134, 127 (2012), doi:10.1007/s10107-012-0572-5, grows the
+//! sample when its error exceeds `θ |g|`. The accepted step uses the same
+//! norm and confidence multiplier after its error is propagated through the
+//! current model curvature. A sample that still needs growth at
+//! [`PlaneOptimizerConfig::max_records`] returns a typed sample-limit status.
+//! Iteration and evaluation caps likewise return a finite [`PlaneOptimum`]
+//! with a typed [`PlaneOptimizerStatus`].
 
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -366,6 +364,8 @@ pub struct PlaneTrace {
 pub enum PlaneOptimizerStatus {
     /// The accepted-step criterion passed for the configured patience.
     Converged,
+    /// The gradient was not resolved at the configured record ceiling.
+    MaxRecords,
     /// The outer iteration cap was reached with a finite last estimate.
     MaxIterations,
     /// Another sample would exceed the force/energy evaluation cap.
@@ -868,10 +868,26 @@ struct Blocks {
     rotation_error: f64,
 }
 
+impl Blocks {
+    fn norm(self) -> f64 {
+        self.translation.hypot(self.rotation)
+    }
+
+    fn error_norm(self) -> f64 {
+        self.translation_error.hypot(self.rotation_error)
+    }
+}
+
 #[derive(Clone, Copy, Default)]
 struct AcceptedStep {
     translation: f64,
     rotation: f64,
+}
+
+impl AcceptedStep {
+    fn norm(self) -> f64 {
+        self.translation.hypot(self.rotation)
+    }
 }
 
 /// The state the trust region's callbacks share.
@@ -1063,7 +1079,7 @@ impl<E: HyperplaneSampler> Climb<'_, E> {
                 "the trust region asked for the gradient off the current plane".into(),
             ));
         }
-        if self.status == Some(PlaneOptimizerStatus::MaxEvaluations) {
+        if self.status.is_some() {
             return Ok(Array1::zeros(x.len()));
         }
         if !self.tested {
@@ -1095,53 +1111,34 @@ impl<E: HyperplaneSampler> Climb<'_, E> {
             self.current = Some(again);
             blocks = self.blocks();
         }
-        let growth_blocked = self.records >= self.config.max_records && self.needs_growth(&blocks);
+        let sample_limited = self.records >= self.config.max_records && self.needs_growth(&blocks);
         let (rotation_curvature, translation_curvature) = self.model.curvatures();
         let propagated = |error: f64, curvature: f64| {
-            if !growth_blocked && curvature.is_finite() && curvature > 0.0 {
+            if curvature.is_finite() && curvature > 0.0 {
                 error / curvature
             } else {
                 0.0
             }
         };
-        let zero = |step: f64, error: f64, value: f64, value_error: f64| {
-            let value_zero = (!growth_blocked && value <= self.config.confidence * value_error)
-                || value <= self.config.tolerance;
-            let step_zero = step <= self.config.confidence * error || step <= self.config.tolerance;
-            value_zero && step_zero
-        };
+        let value = blocks.norm();
+        let value_error = blocks.error_norm();
+        let value_zero = self.statistically_zero(value, value_error);
         let within = match self.accepted_step {
             Some(step) => {
-                (!self.layout.translate
-                    || zero(
-                        step.translation,
-                        propagated(blocks.translation_error, translation_curvature),
-                        blocks.translation,
-                        blocks.translation_error,
-                    ))
-                    && (!self.layout.rotate
-                        || zero(
-                            step.rotation,
-                            propagated(blocks.rotation_error, rotation_curvature),
-                            blocks.rotation,
-                            blocks.rotation_error,
-                        ))
+                let step_value = step.norm();
+                let step_error = propagated(blocks.translation_error, translation_curvature)
+                    .hypot(propagated(blocks.rotation_error, rotation_curvature));
+                value_zero && self.statistically_zero(step_value, step_error)
             }
-            None => {
-                !self.needs_growth(&blocks)
-                    && (!self.layout.translate
-                        || (blocks.translation <= self.config.tolerance
-                            && blocks.translation_error == 0.0))
-                    && (!self.layout.rotate
-                        || (blocks.rotation <= self.config.tolerance
-                            && blocks.rotation_error == 0.0))
-            }
+            None => value_zero,
         };
         self.streak = if within { self.streak + 1 } else { 0 };
         self.converged =
             self.streak >= self.config.patience || (self.accepted_step.is_none() && within);
         if self.converged {
             self.status = Some(PlaneOptimizerStatus::Converged);
+        } else if sample_limited {
+            self.status = Some(PlaneOptimizerStatus::MaxRecords);
         }
         self.blocks = blocks;
         let current = self.current.as_ref().expect("an accepted plane");
@@ -1161,10 +1158,7 @@ impl<E: HyperplaneSampler> Climb<'_, E> {
         if self.config.norm_test == 0.0 {
             return false;
         }
-        let variance = blocks.translation_error.powi(2) + blocks.rotation_error.powi(2);
-        let signal =
-            self.config.norm_test.powi(2) * (blocks.translation.powi(2) + blocks.rotation.powi(2));
-        variance > signal
+        blocks.error_norm() > self.config.norm_test * blocks.norm()
     }
 
     /// Sample size the norm test asks for, when it is larger.
@@ -1172,9 +1166,8 @@ impl<E: HyperplaneSampler> Climb<'_, E> {
         if !self.needs_growth(blocks) || self.records >= self.config.max_records {
             return None;
         }
-        let variance = blocks.translation_error.powi(2) + blocks.rotation_error.powi(2);
-        let signal =
-            self.config.norm_test.powi(2) * (blocks.translation.powi(2) + blocks.rotation.powi(2));
+        let variance = blocks.error_norm().powi(2);
+        let signal = (self.config.norm_test * blocks.norm()).powi(2);
         let grown = if signal > 0.0 {
             (self.records as f64 * variance / signal).ceil()
         } else {
@@ -1182,6 +1175,10 @@ impl<E: HyperplaneSampler> Climb<'_, E> {
         };
         let records = (grown.min(self.config.max_records as f64) as usize).max(self.records);
         (records > self.records).then_some(records)
+    }
+
+    fn statistically_zero(&self, value: f64, error: f64) -> bool {
+        value <= self.config.confidence * error || value <= self.config.tolerance
     }
 
     fn blocks(&self) -> Blocks {
@@ -1629,7 +1626,7 @@ mod tests {
     }
 
     #[test]
-    fn noisy_zero_mean_optimum_terminates_under_the_force_call_cap() {
+    fn unresolved_noisy_optimum_reports_the_record_cap() {
         let start = Hyperplane::new(array![0.02, 0.0], array![1.0, 0.03]).unwrap();
         let sampling = LangevinConfig::default()
             .with_thermal(0.2)
@@ -1647,7 +1644,7 @@ mod tests {
             .with_max_evaluations(500_000)
             .with_tolerance(2.0e-4);
         let optimum = optimize_plane(&mut sampler, &start, &config).unwrap();
-        assert_eq!(optimum.status, PlaneOptimizerStatus::Converged);
+        assert_eq!(optimum.status, PlaneOptimizerStatus::MaxRecords);
         assert!(optimum.evaluations <= config.max_evaluations);
         assert!(optimum.plane.distance(array![0.0, 0.0].view()).abs() < 0.01);
         assert!(optimum.plane.normal()[1].abs() < 0.01);
@@ -1665,7 +1662,7 @@ mod tests {
     }
 
     #[test]
-    fn fixed_noisy_sample_without_growth_does_not_report_converged() {
+    fn fixed_noisy_sample_can_pass_the_statistical_test() {
         let start = Hyperplane::new(array![0.25, 0.0], array![1.0, 0.2]).unwrap();
         let sampling = LangevinConfig::default()
             .with_thermal(0.2)
@@ -1684,31 +1681,34 @@ mod tests {
             .unwrap()
             .run(&NoisyZeroMean)
             .unwrap();
-        assert_ne!(optimum.status, PlaneOptimizerStatus::Converged);
+        assert_eq!(optimum.status, PlaneOptimizerStatus::Converged);
     }
 
     #[test]
     fn grown_sample_at_the_cap_does_not_report_converged() {
-        let start = Hyperplane::new(array![0.25, 0.0], array![1.0, 0.2]).unwrap();
+        let start = Hyperplane::new(array![0.0, 0.0], array![1.0, 0.0]).unwrap();
         let sampling = LangevinConfig::default()
             .with_thermal(0.2)
             .with_time_step(0.1)
-            .with_burn_in(10)
+            .with_burn_in(0)
             .with_stride(1)
-            .with_records(8)
+            .with_records(8_000)
             .with_blocks(2)
-            .with_seed(4);
+            .with_seed(7);
         let config = PlaneOptimizerConfig::default()
             .with_sampler(sampling)
-            .with_max_records(16)
-            .with_max_iterations(100);
+            .with_max_records(16_000)
+            .with_confidence(0.01)
+            .with_rotate(false)
+            .with_patience(1)
+            .with_max_iterations(3);
         let optimum = PlaneOptimizer::new(&start, config)
             .unwrap()
             .run(&NoisyZeroMean)
             .unwrap();
-        assert_eq!(optimum.sample.records, 16);
-        assert_eq!(optimum.status, PlaneOptimizerStatus::MaxIterations);
-        assert_eq!(optimum.iterations, 100);
+        assert_eq!(optimum.sample.records, 16_000);
+        assert_eq!(optimum.status, PlaneOptimizerStatus::MaxRecords);
+        assert!(optimum.iterations < 3);
     }
 
     #[test]

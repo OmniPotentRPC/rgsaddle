@@ -33,8 +33,9 @@ Full API documentation for every item below is on [[https://docs.rs/rgsaddle][do
 |------+------|
 | =PlaneOptimizerConfig= | Non-exhaustive. Defaults: =sampler = LangevinConfig::default()=, =max_records = 16_000=, =norm_test = 0.5=, =max_translation = 0.1=, =max_rotation = 0.05=, =metric = PlaneMetric::Blocks=, =metric_rank = 32=, =rotation_basis = None=, =translate = true=, =rotate = true=, =recenter = true=, =confidence = 2.0=, =tolerance = 0.0=, =patience = 3=, =max_iterations = 100=, =max_evaluations = 10_000_000=. =with_sampler= sets the =LangevinConfig= each trial plane is sampled with; =with_rotation_basis= restricts the sphere of normals to a subspace |
 | =PlaneMetric= | =Blocks= (the default, weights the sphere by =l^2= with =l = max_translation / max_rotation=) or =Harmonic(HarmonicReference)= (the Hessian at a reference point as the sphere's tangent metric, so a step on a quadratic saddle is a Newton step) |
-| =PlaneOptimizer= | =new(seed, config)= then =run(surface)=: a Riemannian trust region on the product manifold of the sphere of normals and the offset along it, reporting the optimized plane in =PlaneOptimum::plane= |
-| =PlaneOptimum= | The optimized =plane=, outer and inner (truncated conjugate-gradient) iteration counts, accepted planes, planes sampled, and force (and Hessian-action) evaluations |
+| =PlaneOptimizer= | =new(seed, config)= then =run(surface)=: a Riemannian trust region on the product manifold of the sphere of normals and the offset along it. Sample growth and convergence share the root-sum-square gradient norm and =confidence= band |
+| =PlaneOptimizerStatus= | =Converged= only after the statistical test passes; =MaxRecords= is an unresolved gradient at the sample ceiling; =MaxIterations= and =MaxEvaluations= name the other caps |
+| =PlaneOptimum= | The last finite =plane= and =sample=, typed =status=, outer and inner (truncated conjugate-gradient) iteration counts, accepted planes, planes sampled, and force (and Hessian-action) evaluations |
 | =PlaneTrace= | One of the optimizer's accepted planes along its own iterates: =plane=, =normal_force= and its error, and the length =rotation= of the torque about the pivot, with its =rotation_error= and the =records= sampled. =PlanePath::trace= threads these into a path for =reversible_work_along= |
 
 * Reactant normalization
