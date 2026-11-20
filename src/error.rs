@@ -50,4 +50,16 @@ pub enum SaddleError {
     /// its tolerance: the step can no longer make progress.
     #[error("solver step left the state unchanged: {0}")]
     Stalled(String),
+    /// A strict LI-NEB session found an endpoint below its fixed energy.
+    #[error(
+        "LI-NEB {endpoint} endpoint lies below the fixed energy at step {step}: V - E = {energy_difference:.6e}"
+    )]
+    LineNebEndpointBelowEnergy {
+        /// Endpoint name, either `first` or `last`.
+        endpoint: &'static str,
+        /// Endpoint potential energy minus the fixed energy.
+        energy_difference: f64,
+        /// One based session step that detected the endpoint.
+        step: usize,
+    },
 }

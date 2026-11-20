@@ -177,8 +177,8 @@ pub use lineb::{
     hqtst_rate_interpolated_hessian_observed, hqtst_rate_interpolated_hessian_with_step,
 };
 pub use line_neb::{
-    FixedEnergySeed, LineNebConfig, LineNebReport, LineNebSession, LineNebStatus,
-    fixed_energy_action, fixed_energy_action_force, fixed_energy_mep_seed,
+    EndpointBelowEnergy, FixedEnergySeed, LineNebConfig, LineNebReport, LineNebSession,
+    LineNebStatus, fixed_energy_action, fixed_energy_action_force, fixed_energy_mep_seed,
 };
 pub use minmode::{
     ArtNConfig, FiniteDifference, MinModeConfig, MinModeKind, MinModeReport, MinModeSession,
