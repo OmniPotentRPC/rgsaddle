@@ -1,7 +1,8 @@
 use ndarray::{Array1, Array2, ArrayView2, array};
 use rgsaddle::{
-    BandSurface, FixedEnergySeed, LineNebConfig, LineNebSession, LineNebStatus, SaddleError,
-    Spline, fixed_energy_action, fixed_energy_action_force, fixed_energy_mep_seed,
+    BandSurface, EndpointBelowEnergy, FixedEnergySeed, LineNebConfig, LineNebSession,
+    LineNebStatus, SaddleError, Spline, fixed_energy_action, fixed_energy_action_force,
+    fixed_energy_mep_seed,
 };
 
 fn analytic_surface(positions: ArrayView2<'_, f64>) -> (Array1<f64>, Array2<f64>) {
@@ -119,9 +120,37 @@ fn an_endpoint_below_the_fixed_energy_is_refused() {
 }
 
 #[test]
-fn a_session_endpoint_below_the_fixed_energy_has_zero_weight() {
+fn the_default_endpoint_policy_is_restrained() {
+    assert_eq!(
+        LineNebConfig::default().endpoint_below_energy,
+        EndpointBelowEnergy::Restrained
+    );
+    assert_eq!(
+        EndpointBelowEnergy::default(),
+        EndpointBelowEnergy::Restrained
+    );
+}
+
+fn below_energy_band() -> Array2<f64> {
+    array![[-1.2, 0.0], [-0.5, 0.1], [0.0, 0.1], [0.5, 0.1], [1.2, 0.0]]
+}
+
+fn below_energy_config(policy: EndpointBelowEnergy) -> LineNebConfig {
+    LineNebConfig::default()
+        .with_spring_k(0.4)
+        .with_endpoint_kappa(1.5)
+        .with_force_tol(2.0e-6)
+        .with_energy(0.25)
+        .with_masses(array![1.0, 2.0])
+        .with_time_step(0.03)
+        .with_reduced_planck(1.0)
+        .with_endpoint_below_energy(policy)
+}
+
+#[test]
+fn restrained_recovers_below_energy_endpoints_and_converges() {
     let target = 0.25;
-    let positions = array![[-1.2, 0.0], [-0.5, 0.1], [0.0, 0.1], [0.5, 0.1], [1.2, 0.0]];
+    let positions = below_energy_band();
     let mut energies = Array1::zeros(5);
     let mut gradients = Array2::zeros((5, 2));
     DoubleWell
@@ -139,18 +168,50 @@ fn a_session_endpoint_below_the_fixed_energy_has_zero_weight() {
         )
         .is_err()
     );
-    let config = LineNebConfig::default()
-        .with_spring_k(1.0)
-        .with_endpoint_kappa(1.0)
-        .with_force_tol(1.0e-6)
-        .with_energy(target)
-        .with_masses(masses)
-        .with_time_step(0.01)
-        .with_reduced_planck(1.0);
+    let config = below_energy_config(EndpointBelowEnergy::Restrained);
     let mut session = LineNebSession::new(config, positions).unwrap();
-    let report = session.step(&DoubleWell).unwrap();
+    let report = loop {
+        let report = session.step(&DoubleWell).unwrap();
+        if report.status == LineNebStatus::Converged {
+            break report;
+        }
+        assert!(report.iteration < 100_000, "{report:?}");
+    };
     assert!(report.action.is_finite() && report.action > 0.0);
-    assert_eq!(report.status, LineNebStatus::Running);
+    let converged = session.positions();
+    for endpoint in [0, converged.nrows() - 1] {
+        let x = converged[(endpoint, 0)];
+        let y = converged[(endpoint, 1)];
+        let energy = (x * x - 1.0).powi(2) + y * y;
+        assert!((energy - target).abs() < 2.0e-6);
+    }
+}
+
+#[test]
+fn strict_reports_the_first_below_energy_endpoint() {
+    let positions = below_energy_band();
+    let mut energies = Array1::zeros(positions.nrows());
+    let mut gradients = Array2::zeros(positions.raw_dim());
+    DoubleWell
+        .eval(positions.view(), &mut energies, &mut gradients)
+        .unwrap();
+    let expected_difference = energies[0] - 0.25;
+    let config = below_energy_config(EndpointBelowEnergy::Strict);
+    let mut session = LineNebSession::new(config, positions).unwrap();
+
+    match session.step(&DoubleWell) {
+        Err(SaddleError::LineNebEndpointBelowEnergy {
+            endpoint,
+            energy_difference,
+            step,
+        }) => {
+            assert_eq!(endpoint, "first");
+            assert_eq!(energy_difference, expected_difference);
+            assert_eq!(step, 1);
+        }
+        other => panic!("unexpected strict result: {other:?}"),
+    }
+    assert_eq!(session.iteration(), 0);
 }
 
 #[test]

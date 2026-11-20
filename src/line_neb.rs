@@ -49,6 +49,18 @@ use rgmin::{Control, Method, Oracle, Solver};
 
 use crate::{BandSurface, SaddleError};
 
+/// Policy for an LI-NEB session endpoint below the fixed energy.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum EndpointBelowEnergy {
+    /// Give the endpoint zero action weight while the endpoint restraint
+    /// returns it to the fixed energy, as in the published LI-NEB scheme.
+    #[default]
+    Restrained,
+    /// Stop the session with [`SaddleError::LineNebEndpointBelowEnergy`].
+    Strict,
+}
+
 /// All dimensional controls for a fixed-energy LI-NEB session.
 ///
 /// Start from [`LineNebConfig::default`] and chain the `with_*` setters.
@@ -71,13 +83,16 @@ pub struct LineNebConfig {
     pub time_step: f64,
     /// Reduced Planck constant in the host's unit system.
     pub reduced_planck: f64,
+    /// Behaviour when a running session carries an endpoint below `energy`.
+    pub endpoint_below_energy: EndpointBelowEnergy,
 }
 
 impl Default for LineNebConfig {
     /// Unit spring constant and endpoint restraint, force tolerance
-    /// 1e-3, fixed energy 0, unit masses, time step 0.1, and unit
-    /// reduced Planck constant. These are values in units where
-    /// `hbar = 1`; a host in other units sets every field it relies on.
+    /// 1e-3, fixed energy 0, unit masses, time step 0.1, unit reduced
+    /// Planck constant, and [`EndpointBelowEnergy::Restrained`]. These
+    /// are values in units where `hbar = 1`; a host in other units sets
+    /// every field it relies on.
     fn default() -> Self {
         Self {
             spring_k: 1.0,
@@ -87,6 +102,7 @@ impl Default for LineNebConfig {
             masses: None,
             time_step: 0.1,
             reduced_planck: 1.0,
+            endpoint_below_energy: EndpointBelowEnergy::default(),
         }
     }
 }
@@ -99,6 +115,7 @@ with_setters!(LineNebConfig {
     with_masses => masses: opt Array1<f64>,
     with_time_step => time_step: val f64,
     with_reduced_planck => reduced_planck: val f64,
+    with_endpoint_below_energy => endpoint_below_energy: val EndpointBelowEnergy,
 });
 
 /// State of a host-stepped LI-NEB optimization.
@@ -130,9 +147,9 @@ pub struct LineNebReport {
     pub max_endpoint_optimized: f64,
     /// Abbreviated action of the configuration after the step. This is
     /// [`fixed_energy_action`] when both endpoints are at or above the
-    /// fixed energy. An endpoint the optimization has carried below it
-    /// has zero weight, as at a turning point, until the restraint
-    /// brings it back.
+    /// fixed energy. Under [`EndpointBelowEnergy::Restrained`], an
+    /// endpoint the optimization has carried below it has zero weight,
+    /// as at a turning point, until the restraint brings it back.
     pub action: f64,
     /// Steps completed, counting this one.
     pub iteration: usize,
@@ -207,7 +224,9 @@ enum BelowEndpoint {
     Refuse,
     /// Give it zero weight, as at a turning point. A session uses this
     /// while the restraint is still pulling an endpoint back to `E`.
-    TurningPoint,
+    Restrained,
+    /// Stop a strict session and identify where the violation occurred.
+    Strict { step: usize },
 }
 
 /// `xi_i = sqrt(2 (E_i - E)) / hbar` on every image, endpoints included.
@@ -229,7 +248,14 @@ fn action_weights(
                             "LI-NEB endpoint {i} lies below the fixed energy"
                         )));
                     }
-                    BelowEndpoint::TurningPoint => continue,
+                    BelowEndpoint::Restrained => continue,
+                    BelowEndpoint::Strict { step } => {
+                        return Err(SaddleError::LineNebEndpointBelowEnergy {
+                            endpoint: if i == 0 { "first" } else { "last" },
+                            energy_difference: excess,
+                            step,
+                        });
+                    }
                 }
             }
         } else if excess.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
@@ -466,6 +492,7 @@ fn evaluate(
     masses: ArrayView1<'_, f64>,
     surface: &impl BandSurface,
     q: ArrayView2<'_, f64>,
+    step: usize,
 ) -> Result<Evaluation, SaddleError> {
     let sqrt_masses = masses.mapv(f64::sqrt);
     let positions = &q / &sqrt_masses;
@@ -478,12 +505,11 @@ fn evaluate(
     if !gradients.iter().all(|v| v.is_finite()) {
         return Err(SaddleError::NonFinite("LI-NEB surface gradients"));
     }
-    let xi = action_weights(
-        energies.view(),
-        config.energy,
-        config.reduced_planck,
-        BelowEndpoint::TurningPoint,
-    )?;
+    let below = match config.endpoint_below_energy {
+        EndpointBelowEnergy::Restrained => BelowEndpoint::Restrained,
+        EndpointBelowEnergy::Strict => BelowEndpoint::Strict { step },
+    };
+    let xi = action_weights(energies.view(), config.energy, config.reduced_planck, below)?;
     let action = trapezoid_action(positions.view(), masses, &xi)?;
     let force_q = -&gradients / &sqrt_masses;
     let action_force = action_force_q(q, &xi, force_q.view(), config.reduced_planck)?;
@@ -884,6 +910,10 @@ impl LineNebSession {
         let shape = self.q.raw_dim();
         let config = &self.config;
         let masses = self.masses.view();
+        let step = self
+            .iteration
+            .checked_add(1)
+            .ok_or_else(|| SaddleError::Solver("LI-NEB iteration counter overflow".into()))?;
         let error = Mutex::new(None);
         let latest: Mutex<Option<(Array1<f64>, Evaluation)>> = Mutex::new(None);
         let rows = AtomicUsize::new(0);
@@ -896,7 +926,7 @@ impl LineNebSession {
                 }
             };
             rows.fetch_add(q.nrows(), Ordering::Relaxed);
-            match evaluate(config, masses, surface, q.view()) {
+            match evaluate(config, masses, surface, q.view(), step) {
                 Ok(evaluation) => {
                     let gradient =
                         -Array1::from_iter(evaluation.optimization_force.iter().copied());
@@ -942,10 +972,7 @@ impl LineNebSession {
         if !self.q.iter().all(|v| v.is_finite()) {
             return Err(SaddleError::NonFinite("LI-NEB step"));
         }
-        self.iteration = self
-            .iteration
-            .checked_add(1)
-            .ok_or_else(|| SaddleError::Solver("LI-NEB iteration counter overflow".into()))?;
+        self.iteration = step;
         let cached = match latest.into_inner() {
             Ok(value) => value,
             Err(_) => {
@@ -958,7 +985,7 @@ impl LineNebSession {
         let evaluation = match cached {
             Some((evaluated, evaluation)) if evaluated == accepted => evaluation,
             _ => {
-                let evaluation = evaluate(config, masses, surface, self.q.view())?;
+                let evaluation = evaluate(config, masses, surface, self.q.view(), step)?;
                 rows.fetch_add(self.q.nrows(), Ordering::Relaxed);
                 evaluation
             }
