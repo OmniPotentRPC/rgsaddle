@@ -3,7 +3,10 @@
 //! The primitive coordinates follow the TRIC construction of Wang and
 //! Song, J. Chem. Phys. 144, 214108 (2016).  Bonded fragments carry
 //! ordinary distances, angles and dihedrals together with three
-//! translations and three rotations.  Eigenvectors of the primitive
+//! translations and three rotations.  A linear angle is spanned by two
+//! linear bends, and a torsion about a linear chain is a dihedral whose
+//! central atoms lie on the line and whose terminal atoms do not, so no
+//! dihedral contains a linear angle.  Eigenvectors of the primitive
 //! Wilson metric form a nonredundant coordinate system.
 //!
 //! The segmented interpolation follows the algorithmic ideas in the
@@ -1927,20 +1930,28 @@ fn molecular_primitives(
         }
     }
     let mut dihedrals = Vec::new();
-    for &(b, c) in bonds {
-        for &a in &adjacency[b] {
-            if a == c {
-                continue;
-            }
-            for &d in &adjacency[c] {
-                if d == b || d == a {
-                    continue;
-                }
-                let forward = (a, b, c, d);
-                let reverse = (d, c, b, a);
-                let canonical = if forward <= reverse { forward } else { reverse };
-                if !dihedrals.contains(&canonical) {
-                    dihedrals.push(canonical);
+    for line in atom_lines(bonds, &adjacency, reference)? {
+        for (position, &b) in line.iter().enumerate() {
+            for &c in &line[position + 1..] {
+                for &a in &adjacency[b] {
+                    if line.contains(&a) {
+                        continue;
+                    }
+                    for &d in &adjacency[c] {
+                        if d == a
+                            || line.contains(&d)
+                            || is_linear(reference, a, b, c)?
+                            || is_linear(reference, b, c, d)?
+                        {
+                            continue;
+                        }
+                        let forward = (a, b, c, d);
+                        let reverse = (d, c, b, a);
+                        let canonical = if forward <= reverse { forward } else { reverse };
+                        if !dihedrals.contains(&canonical) {
+                            dihedrals.push(canonical);
+                        }
+                    }
                 }
             }
         }
@@ -1952,6 +1963,79 @@ fn molecular_primitives(
             .map(|(a, b, c, d)| TricPrimitive::Dihedral(a, b, c, d)),
     );
     Ok(primitives)
+}
+
+fn is_linear(
+    positions: ArrayView1<'_, f64>,
+    left: usize,
+    center: usize,
+    right: usize,
+) -> Result<bool, SaddleError> {
+    Ok(angle(positions, left, center, right)?.cos().abs() >= LINEAR_ANGLE_COSINE)
+}
+
+/// Bonds extended through every linear angle at either end.
+///
+/// A torsion about a linear chain is carried by a dihedral whose
+/// central atoms are any two atoms of the line and whose terminal
+/// atoms are bonded off the line. A dihedral with a linear angle has
+/// no defined value, so none are built through a linear centre.
+fn atom_lines(
+    bonds: &[(usize, usize)],
+    adjacency: &[Vec<usize>],
+    reference: ArrayView1<'_, f64>,
+) -> Result<Vec<Vec<usize>>, SaddleError> {
+    let mut lines: Vec<Vec<usize>> = Vec::with_capacity(bonds.len());
+    for &(left, right) in bonds {
+        let mut line = vec![left, right];
+        loop {
+            let length = line.len();
+            let front = line[0];
+            for &candidate in &adjacency[front] {
+                if line.contains(&candidate) {
+                    continue;
+                }
+                let mut linear = true;
+                for &other in &line[1..] {
+                    if !is_linear(reference, candidate, front, other)? {
+                        linear = false;
+                        break;
+                    }
+                }
+                if linear {
+                    line.insert(0, candidate);
+                    break;
+                }
+            }
+            let back = line[line.len() - 1];
+            for &candidate in &adjacency[back] {
+                if line.contains(&candidate) {
+                    continue;
+                }
+                let mut linear = true;
+                for &other in &line[..line.len() - 1] {
+                    if !is_linear(reference, other, back, candidate)? {
+                        linear = false;
+                        break;
+                    }
+                }
+                if linear {
+                    line.push(candidate);
+                    break;
+                }
+            }
+            if line.len() == length {
+                break;
+            }
+        }
+        if line[0] > line[line.len() - 1] {
+            line.reverse();
+        }
+        if !lines.contains(&line) {
+            lines.push(line);
+        }
+    }
+    Ok(lines)
 }
 
 fn fragment_positions(positions: ArrayView1<'_, f64>, fragment: &[usize]) -> Array2<f64> {
@@ -2173,6 +2257,129 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    fn assert_dihedrals_avoid_linear_angles(system: &TricSystem, positions: ArrayView1<'_, f64>) {
+        for primitive in system.primitives() {
+            if let TricPrimitive::Dihedral(a, b, c, d) = *primitive {
+                assert!(!is_linear(positions, a, b, c).unwrap(), "{primitive:?}");
+                assert!(!is_linear(positions, b, c, d).unwrap(), "{primitive:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_four_atom_linear_chain_builds_without_dihedrals() {
+        let acetylene = array![
+            -1.66, 0.0, 0.0, -0.6, 0.0, 0.0, 0.6, 0.0, 0.0, 1.66, 0.0, 0.0
+        ];
+        for config in [
+            TricConfig::default(),
+            TricConfig::default().with_bonds(Some(vec![(0, 1), (1, 2), (2, 3)])),
+        ] {
+            let system = TricSystem::new(acetylene.view(), &config).unwrap();
+            assert!(
+                !system
+                    .primitives()
+                    .iter()
+                    .any(|primitive| matches!(primitive, TricPrimitive::Dihedral(..)))
+            );
+            assert!(
+                system
+                    .wilson_b(acetylene.view())
+                    .unwrap()
+                    .iter()
+                    .all(|value| value.is_finite())
+            );
+        }
+
+        let propyne_tail = array![
+            -1.66, 0.0, 0.0, -0.6, 0.0, 0.0, 0.6, 0.0, 0.0, 2.06, 0.0, 0.0, 2.42, 1.0, 0.0, 2.42,
+            -0.5, 0.87
+        ];
+        let config =
+            TricConfig::default().with_bonds(Some(vec![(0, 1), (1, 2), (2, 3), (3, 4), (3, 5)]));
+        let system = TricSystem::new(propyne_tail.view(), &config).unwrap();
+        assert_dihedrals_avoid_linear_angles(&system, propyne_tail.view());
+        assert_eq!(system.dimension(), propyne_tail.len());
+    }
+
+    #[test]
+    fn allene_twist_is_a_dihedral_across_its_linear_centre() {
+        let allene = array![
+            -1.31, 0.0, 0.0, 0.0, 0.0, 0.0, 1.31, 0.0, 0.0, -1.85, 0.93, 0.0, -1.85, -0.93, 0.0,
+            1.85, 0.0, 0.93, 1.85, 0.0, -0.93
+        ];
+        let config = TricConfig::default().with_bonds(Some(vec![
+            (0, 1),
+            (1, 2),
+            (0, 3),
+            (0, 4),
+            (2, 5),
+            (2, 6),
+        ]));
+        let system = TricSystem::new(allene.view(), &config).unwrap();
+        assert_dihedrals_avoid_linear_angles(&system, allene.view());
+        let dihedrals: Vec<_> = system
+            .primitives()
+            .iter()
+            .filter_map(|primitive| match *primitive {
+                TricPrimitive::Dihedral(a, b, c, d) => Some((a, b, c, d)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            dihedrals,
+            vec![(3, 0, 2, 5), (3, 0, 2, 6), (4, 0, 2, 5), (4, 0, 2, 6)]
+        );
+
+        let mut twisted = allene.clone();
+        for hydrogen in [5, 6] {
+            let (y, z) = (twisted[3 * hydrogen + 1], twisted[3 * hydrogen + 2]);
+            let (sine, cosine) = 0.2_f64.sin_cos();
+            twisted[3 * hydrogen + 1] = cosine * y - sine * z;
+            twisted[3 * hydrogen + 2] = sine * y + cosine * z;
+        }
+        let displacement = system.difference(twisted.view(), allene.view()).unwrap();
+        let recovered = system
+            .back_transform(
+                allene.view(),
+                displacement.view(),
+                &TricInversionConfig::default(),
+            )
+            .unwrap();
+        assert!(aligned_max_atom_difference(recovered.view(), twisted.view()).unwrap() < 1e-5);
+    }
+
+    #[test]
+    fn a_seed_path_through_a_linear_angle_builds_every_system() {
+        let angles = [40.0_f64, 10.0, 0.0, -10.0, -40.0];
+        let mut initial = Array2::zeros((angles.len(), 12));
+        for (image, degrees) in angles.into_iter().enumerate() {
+            let (sine, cosine) = degrees.to_radians().sin_cos();
+            initial.row_mut(image).assign(&array![
+                -1.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                cosine,
+                sine,
+                0.0,
+                cosine + 0.4,
+                sine + 0.7,
+                0.6
+            ]);
+        }
+        let systems = tric_systems(initial.view(), &TricConfig::default()).unwrap();
+        for (system, image) in systems.iter().zip(initial.outer_iter()) {
+            assert_dihedrals_avoid_linear_angles(system, image);
+        }
+        let report = trics_path(initial.view(), &TricsConfig::default()).unwrap();
+        assert_eq!(report.path.row(0), initial.row(0));
+        assert_eq!(report.path.row(4), initial.row(4));
+        assert!(report.path.iter().all(|value| value.is_finite()));
     }
 
     #[test]

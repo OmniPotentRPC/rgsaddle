@@ -34,6 +34,13 @@ fragment radius of gyration.  Ordinary angles switch to two linear bend
 directions at 155 degrees, matching the angular warning threshold.  Out of
 plane primitives complete suitable three connected centers.
 
+Bonds extended through every linear angle at either end form atom lines.  A
+torsion about a line is a dihedral whose two central atoms lie on the line
+and whose terminal atoms are bonded off it, so the twist of an allene is
+carried across its linear center.  No dihedral is built with a linear angle,
+and a line with no atoms bonded off both ends, such as acetylene, carries no
+dihedral at all.
+
 * Stability diagnostic
 A separate TRIC system \(Q_i\) is built at each initial image \(x_i\).  The
 diagnostic matrix evaluates each system on every image,
