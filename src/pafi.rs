@@ -716,8 +716,8 @@ pub fn balanced_barriers(
     let weight_f = ratio_f * ratio_f;
     let weight_r = ratio_r * ratio_r;
     let total_weight = weight_f + weight_r;
-    let mean = (weight_f / total_weight) * forward.0
-        + (weight_r / total_weight) * (reverse.0 + end_gap);
+    let mean =
+        (weight_f / total_weight) * forward.0 + (weight_r / total_weight) * (reverse.0 + end_gap);
     let reverse_out = mean - end_gap;
     let drift = forward.0 - reverse.0 - end_gap;
     let error = (min_error / total_weight.sqrt()).hypot(0.5 * drift);

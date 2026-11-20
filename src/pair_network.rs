@@ -476,22 +476,23 @@ impl PairNetwork {
     }
 }
 
-/// Which classes to compute so the rest stay within a tolerance.
+/// Which classes to compute so the first-order shift estimate over the
+/// rest stays within a tolerance.
 #[derive(Clone, Debug)]
 pub struct SensitivityCover {
     /// Class indices by decreasing `|sensitivity|`.
     pub order: Vec<usize>,
     /// How many leading entries of [`Self::order`] are to be computed.
     pub covered: usize,
-    /// `spread` times the summed `|sensitivity|` of the classes after
-    /// each rank: the worst coherent shift the remaining model rates can
-    /// make when all of them move by `spread` in `ln k`.
+    /// First-order shift estimate over the remaining classes after each rank:
+    /// `spread` times their summed `|sensitivity|`.
     pub remaining: Vec<f64>,
 }
 
 /// Ranks classes by `|d result / d ln k|` and covers the fewest leading
-/// ones after which `spread * sum |sensitivity|` over the rest is below
-/// `tolerance`. Non-finite sensitivities rank first and are always covered.
+/// ones after which the first-order shift estimate
+/// `spread * sum |sensitivity|` over the rest is below `tolerance`.
+/// Non-finite sensitivities rank first and are always covered.
 pub fn sensitivity_cover(sensitivity: &[f64], spread: f64, tolerance: f64) -> SensitivityCover {
     let magnitude = |i: usize| {
         let value = sensitivity[i].abs();
