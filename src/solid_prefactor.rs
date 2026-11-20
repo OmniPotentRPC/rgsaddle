@@ -24,6 +24,7 @@ use crate::strain_rate::vineyard_prefactor;
 
 /// Required numerical controls for a joint atom-strain Hessian.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct JointHessianConfig {
     /// Central-difference displacement in the generalized coordinate.
     pub coordinate_step: f64,
@@ -32,6 +33,22 @@ pub struct JointHessianConfig {
     /// Largest accepted generalized-gradient component at the input point.
     pub stationary_tolerance: f64,
 }
+
+impl Default for JointHessianConfig {
+    fn default() -> Self {
+        Self {
+            coordinate_step: 0.0,
+            stress_step: 0.0,
+            stationary_tolerance: 0.0,
+        }
+    }
+}
+
+with_setters!(JointHessianConfig {
+    with_coordinate_step => coordinate_step: val f64,
+    with_stress_step => stress_step: val f64,
+    with_stationary_tolerance => stationary_tolerance: val f64,
+});
 
 impl JointHessianConfig {
     /// Construct controls without implicit numerical tolerances.
@@ -152,12 +169,27 @@ fn joint_gradient<S: PointSurface>(
 
 /// Required physical and numerical controls for a joint Vineyard product.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct JointVineyardConfig {
     /// Mass assigned to every component of `(r0, J epsilon)`, in atomic mass units.
     pub mass_amu: f64,
     /// Eigenvalues with absolute value at most this are excluded zero modes.
     pub mode_tolerance: f64,
 }
+
+impl Default for JointVineyardConfig {
+    fn default() -> Self {
+        Self {
+            mass_amu: 0.0,
+            mode_tolerance: 0.0,
+        }
+    }
+}
+
+with_setters!(JointVineyardConfig {
+    with_mass_amu => mass_amu: val f64,
+    with_mode_tolerance => mode_tolerance: val f64,
+});
 
 impl JointVineyardConfig {
     /// Construct controls without an implicit zero-mode threshold.
@@ -346,6 +378,49 @@ mod tests {
             assert_abs_diff_eq!(result.matrix[(index, index)], expected, epsilon = 1.0e-10);
         }
         assert_abs_diff_eq!(result.max_gradient, 0.0, epsilon = 1.0e-15);
+    }
+
+    #[test]
+    fn joint_configs_require_explicit_scales_and_support_builders() {
+        let cube = [[4.0, 0.0, 0.0], [0.0, 4.0, 0.0], [0.0, 0.0, 4.0]];
+        let chart = JointChart::new(
+            cube,
+            1,
+            CellMask::voigt([true, false, false, false, false, false]),
+            [[0.0; 3]; 3],
+            1.0,
+        )
+        .unwrap();
+        let q = Array1::zeros(4);
+        assert!(
+            joint_hessian(
+                &AtomStrainWell,
+                &chart,
+                q.view(),
+                JointHessianConfig::default()
+            )
+            .is_err()
+        );
+        let hessian = JointHessianConfig::default()
+            .with_coordinate_step(1.0e-4)
+            .with_stress_step(1.0e-5)
+            .with_stationary_tolerance(1.0e-12);
+        assert!(joint_hessian(&AtomStrainWell, &chart, q.view(), hessian).is_ok());
+
+        let minimum = Array2::from_diag(&array![0.0, 4.0]);
+        let saddle = Array2::from_diag(&array![0.0, -1.0]);
+        assert!(
+            joint_vineyard_prefactor(
+                minimum.view(),
+                saddle.view(),
+                JointVineyardConfig::default()
+            )
+            .is_err()
+        );
+        let vineyard = JointVineyardConfig::default()
+            .with_mass_amu(4.0)
+            .with_mode_tolerance(1.0e-10);
+        assert!(joint_vineyard_prefactor(minimum.view(), saddle.view(), vineyard).is_ok());
     }
 
     #[test]
