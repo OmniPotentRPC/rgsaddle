@@ -263,8 +263,17 @@ fn store<T>(mutex: &Mutex<T>, value: T) -> bool {
     }
 }
 
+/// Largest magnitude of `values`; NaN if any element is NaN.
+///
+/// `f64::max` drops a NaN operand, so a plain fold would hide a bad force.
 fn max_abs(values: impl Iterator<Item = f64>) -> f64 {
-    values.fold(0.0_f64, |maximum, value| maximum.max(value.abs()))
+    values.fold(0.0_f64, |maximum, value| {
+        if maximum.is_nan() || value.is_nan() {
+            f64::NAN
+        } else {
+            maximum.max(value.abs())
+        }
+    })
 }
 
 fn improved_tangent(
@@ -787,5 +796,23 @@ impl LineNebSession {
             iteration: self.iteration,
             surface_rows: rows.load(Ordering::Relaxed),
         })
+    }
+}
+
+#[cfg(test)]
+mod max_abs_tests {
+    use super::max_abs;
+
+    #[test]
+    fn max_abs_takes_the_largest_magnitude() {
+        assert_eq!(max_abs([1.0, -3.0, 2.0].into_iter()), 3.0);
+        assert_eq!(max_abs(std::iter::empty()), 0.0);
+    }
+
+    #[test]
+    fn max_abs_propagates_nan_from_any_position() {
+        assert!(max_abs([f64::NAN, 1.0].into_iter()).is_nan());
+        assert!(max_abs([1.0, f64::NAN, 2.0].into_iter()).is_nan());
+        assert!(max_abs([1.0, 2.0, f64::NAN].into_iter()).is_nan());
     }
 }
