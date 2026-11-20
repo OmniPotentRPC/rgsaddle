@@ -1422,9 +1422,20 @@ double trust_update_py(double radius, double predicted, double actual, double st
   return out;
 }
 
+std::int32_t minmode_method_code(const std::string &method) {
+  if (method == "fire") {
+    return RGSADDLE_METHOD_FIRE;
+  }
+  if (method == "lbfgs") {
+    return RGSADDLE_METHOD_LBFGS;
+  }
+  throw nb::value_error("method must be fire or lbfgs");
+}
+
 PyMinMode make_minmode(Vector x, Vector mode, const std::string &kind, double dr, double force_tol,
                        double max_move, double rotation_tol, std::int64_t max_rotations,
-                       std::int64_t krylov_dim, double rotation_stop_length) {
+                       std::int64_t krylov_dim, double rotation_stop_length,
+                       const std::string &method) {
   if (x.shape(0) <= 0 || x.shape(0) % 3 != 0 || x.shape(0) != mode.shape(0)) {
     throw nb::value_error("position and mode must share a positive multiple of three");
   }
@@ -1435,7 +1446,7 @@ PyMinMode make_minmode(Vector x, Vector mode, const std::string &kind, double dr
   if (kind != "dimer" && kind != "lanczos") {
     throw nb::value_error("kind must be dimer or lanczos");
   }
-  config.method = RGSADDLE_METHOD_LBFGS;
+  config.method = minmode_method_code(method);
   config.dr = dr;
   config.rotation_tol = rotation_tol;
   config.max_rotations = max_rotations;
@@ -2148,17 +2159,18 @@ NB_MODULE(_core, m) {
           "__init__",
           [](PyMinMode *self, Vector x, Vector mode, const std::string &kind, double dr, double force_tol,
              double max_move, double rotation_tol, std::int64_t max_rotations, std::int64_t krylov_dim,
-             double rotation_stop_length) {
+             double rotation_stop_length, const std::string &method) {
             new (self) PyMinMode(make_minmode(x, mode, kind, dr, force_tol, max_move, rotation_tol,
-                                              max_rotations, krylov_dim, rotation_stop_length));
+                                              max_rotations, krylov_dim, rotation_stop_length, method));
           },
           nb::arg("x").noconvert(), nb::arg("mode").noconvert(), nb::arg("kind") = "dimer",
           nb::arg("dr") = 1e-3, nb::arg("force_tol") = 1e-3, nb::arg("max_move") = 0.2,
           nb::arg("rotation_tol") = 1e-4, nb::arg("max_rotations") = 20, nb::arg("krylov_dim") = 12,
-          nb::arg("rotation_stop_length") = 0.0,
+          nb::arg("rotation_stop_length") = 0.0, nb::arg("method") = "lbfgs",
           "Dimer or Lanczos minimum-mode session. Lengths are the caller's. A positive "
           "rotation_stop_length stops a rotation once |C| * rotation_stop_length * |sin w| is "
-          "at most force_tol (Kastner and Sherwood 2008); 0 turns that stop off.")
+          "at most force_tol (Kastner and Sherwood 2008); 0 turns that stop off. method is the "
+          "translation optimizer, lbfgs (the default) or fire.")
       .def(
           "estimate",
           [](PyMinMode &self, nb::callable fn) {

@@ -5,6 +5,7 @@ Force-call counts are printed. They are not a speed claim.
 
 from __future__ import annotations
 
+import inspect
 import os
 
 import numpy as np
@@ -22,8 +23,9 @@ from ase.mep.dimer import MinModeAtoms as AseMinMode
 from ase.mep.dimer import MinModeTranslate as AseTranslate
 from ase.mep.neb import DyNEB as AseDyNEB
 from ase.optimize import FIRE
+from ase.optimize.optimize import Optimizer
 
-from rgsaddle._core import autoneb_run
+from rgsaddle._core import MinMode, autoneb_run
 from rgsaddle.ase import (
     AutoNEB,
     DimerControl,
@@ -32,6 +34,7 @@ from rgsaddle.ase import (
     MinModeTranslate,
     NEB,
     UnsupportedFeature,
+    _periodic_cell,
 )
 
 # Müller-Brown saddle between minima B and C, from the AutoNEB example.
@@ -85,6 +88,16 @@ class QuadraticSaddle(Calculator):
             "energy": -2.0 * x * x + 5.0 * y * y,
             "forces": np.array([[4.0 * x, -10.0 * y, 0.0]]),
         }
+
+
+class Flat(Calculator):
+    """Zero energy and force, for tests that only place atoms."""
+
+    implemented_properties = ["energy", "forces"]
+
+    def calculate(self, atoms, properties, system_changes):  # type: ignore[no-untyped-def]
+        Calculator.calculate(self, atoms, properties, system_changes)
+        self.results = {"energy": 0.0, "forces": np.zeros((len(atoms), 3))}
 
 
 class Nudge(FixConstraint):
@@ -425,6 +438,87 @@ def test_fixatoms_still_follow_the_first_image() -> None:
     assert placed(NEB) == pytest.approx(0.2)
 
 
+_PERIODIC_CASES = {
+    "slab": ([[4.0, 0.0, 0.0], [0.0, 4.0, 0.0], [0.0, 0.0, 10.0]], [True, True, False]),
+    "wire": ([[4.0, 0.0, 0.0], [0.0, 10.0, 0.0], [0.0, 0.0, 10.0]], [True, False, False]),
+    "skewed_slab": ([[4.0, 0.0, 0.0], [2.0, 3.5, 0.0], [1.0, 1.0, 10.0]], [True, True, False]),
+}
+
+
+def _hopping(cell, pbc, ends):  # type: ignore[no-untyped-def]
+    """Two anchor atoms and an adatom that moves between ``ends``."""
+    images = []
+    for x, z in ends:
+        atoms = Atoms(
+            "H3",
+            positions=[[0.5, 1.0, 0.0], [2.0, 1.0, 0.0], [x, 1.0, z]],
+            cell=cell,
+            pbc=pbc,
+        )
+        atoms.calc = Flat()
+        images.append(atoms)
+    return images
+
+
+@pytest.mark.parametrize("case", sorted(_PERIODIC_CASES))
+def test_idpp_mic_follows_the_minimum_image_on_mixed_periodicity(case: str) -> None:
+    cell, pbc = _PERIODIC_CASES[case]
+    images = _hopping(cell, pbc, [(0.6, 1.0), (2.0, 1.0), (3.6, 1.0)])
+    band = NEB(images, k=0.1, climb=False, method="improvedtangent")
+    band.interpolate(method="idpp", mic=True)
+    middle = images[1].positions[2]
+    print(f"idpp {case} interior adatom={middle}")
+    # The minimum image of 0.6 -> 3.6 crosses the cell edge at x = 0. The
+    # straight line would pass x = 2.1.
+    assert middle[0] < 1.0
+    assert np.all(np.isfinite(images[1].positions))
+    assert np.allclose(images[0].positions[2], [0.6, 1.0, 1.0])
+    assert np.allclose(images[-1].positions[2], [3.6, 1.0, 1.0])
+
+
+def test_idpp_mic_does_not_fold_a_non_periodic_axis() -> None:
+    cell = [[4.0, 0.0, 0.0], [0.0, 4.0, 0.0], [0.0, 0.0, 5.0]]
+    images = _hopping(cell, [True, True, False], [(2.0, 0.0), (2.0, 2.0), (2.0, 4.0)])
+    band = NEB(images, k=0.1, climb=False, method="improvedtangent")
+    band.interpolate(method="idpp", mic=True)
+    # The adatom climbs 4 A through a cell 5 A tall. Folding z would send
+    # it 1 A the other way.
+    assert 1.0 < images[1].positions[2, 2] < 3.0
+
+
+def test_periodic_cell_completes_the_open_axes() -> None:
+    cell, pbc = _PERIODIC_CASES["skewed_slab"]
+    images = _hopping(cell, pbc, [(0.6, 1.0), (2.0, 1.0), (3.6, 1.0)])
+    built = _periodic_cell(images)
+    assert built is not None
+    assert abs(np.linalg.det(built)) > 1.0
+    assert np.allclose(built[:2], np.asarray(cell)[:2])
+    # The open row is normal to both periodic rows and longer than the images span.
+    assert np.allclose(built[2] @ built[0], 0.0, atol=1e-9)
+    assert np.allclose(built[2] @ built[1], 0.0, atol=1e-9)
+    assert np.linalg.norm(built[2]) > 10.0
+
+    wire = _hopping(*_PERIODIC_CASES["wire"], [(0.6, 1.0), (2.0, 1.0), (3.6, 1.0)])
+    built = _periodic_cell(wire)
+    assert built is not None
+    assert abs(np.linalg.det(built)) > 1.0
+    assert np.allclose(built[0], [4.0, 0.0, 0.0])
+    assert abs(built[1] @ built[0]) < 1e-9 and abs(built[2] @ built[0]) < 1e-9
+    assert abs(built[1] @ built[2]) < 1e-9
+
+    free = _hopping(cell, [False, False, False], [(0.6, 1.0), (2.0, 1.0), (3.6, 1.0)])
+    assert _periodic_cell(free) is None
+    full = _hopping(cell, [True, True, True], [(0.6, 1.0), (2.0, 1.0), (3.6, 1.0)])
+    assert np.allclose(_periodic_cell(full), np.asarray(cell))
+
+
+def test_periodic_cell_refuses_dependent_periodic_vectors() -> None:
+    flat = [[4.0, 0.0, 0.0], [8.0, 0.0, 0.0], [0.0, 0.0, 10.0]]
+    images = _hopping(flat, [True, True, False], [(0.6, 1.0), (2.0, 1.0), (3.6, 1.0)])
+    with pytest.raises(ValueError, match="linearly independent"):
+        _periodic_cell(images)
+
+
 @pytest.mark.parametrize("n_max", [-1, -(2**40), 1, 2**62])
 def test_autoneb_run_validates_n_max_before_allocating(n_max: int) -> None:
     calls: list[int] = []
@@ -443,3 +537,78 @@ def test_autoneb_run_validates_n_max_before_allocating(n_max: int) -> None:
 def test_autoneb_constructor_validates_the_image_counts(n_simul: int, n_max: int) -> None:
     with pytest.raises(ValueError, match="n_max|n_simul"):
         AutoNEB(lambda images: None, "unused", n_simul=n_simul, n_max=n_max)
+
+
+def _quadratic_dimer(method: str):  # type: ignore[no-untyped-def]
+    atoms = Atoms("H", positions=[[0.35, 0.15, 0.0]])
+    atoms.calc = QuadraticSaddle()
+    control = DimerControl(
+        logfile=None,
+        max_num_rot=6,
+        dimer_separation=0.001,
+        f_rot_min=1e-4,
+        maximum_translation=0.1,
+    )
+    dimer = MinModeAtoms(
+        atoms, control=control, eigenmodes=[np.array([[1.0, 0.0, 0.0]])], method=method
+    )
+    return atoms, dimer
+
+
+def test_min_mode_translate_is_an_optimizer_class() -> None:
+    atoms, dimer = _quadratic_dimer("lbfgs")
+    opt = MinModeTranslate(dimer, logfile=None)
+    assert isinstance(opt, MinModeTranslate)
+    assert isinstance(opt, Optimizer)
+    assert issubclass(MinModeTranslate, Optimizer)
+    assert opt.run(fmax=0.05, steps=40)
+    assert np.linalg.norm(atoms.positions[0, :2]) < 0.05
+    assert opt.nsteps > 0
+
+
+def test_min_mode_translate_first_argument_is_the_dimeratoms() -> None:
+    names = list(inspect.signature(MinModeTranslate).parameters)
+    assert names == list(inspect.signature(AseTranslate).parameters)
+    assert names[0] == "dimeratoms"
+    atoms, dimer = _quadratic_dimer("lbfgs")
+    opt = MinModeTranslate(dimeratoms=dimer, logfile=None)
+    assert opt.dimeratoms is dimer
+    assert opt.control is dimer.get_control()
+    with pytest.raises(TypeError, match="MinModeAtoms"):
+        MinModeTranslate(atoms, logfile=None)
+
+
+def test_min_mode_translate_writes_the_trajectory(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from ase.io import read
+
+    atoms, dimer = _quadratic_dimer("lbfgs")
+    path = tmp_path / "translate.traj"
+    opt = MinModeTranslate(dimer, logfile=None, trajectory=str(path))
+    opt.run(fmax=0.05, steps=40)
+    frames = read(str(path), ":")
+    assert len(frames) == opt.nsteps + 1
+    assert np.allclose(frames[-1].positions, atoms.positions)
+
+
+def test_min_mode_translate_optimizer_is_lbfgs_or_fire() -> None:
+    assert "L-BFGS" in (MinModeTranslate.__doc__ or "")
+    assert "FIRE" in (MinModeTranslate.__doc__ or "")
+    first = {}
+    for method in ("lbfgs", "fire"):
+        atoms, dimer = _quadratic_dimer(method)
+        assert dimer.method == method
+        opt = MinModeTranslate(dimer, logfile=None)
+        assert opt.run(fmax=0.05, steps=60)
+        assert np.linalg.norm(atoms.positions[0, :2]) < 0.05
+        fresh, other = _quadratic_dimer(method)
+        other.translate(0.05)
+        first[method] = fresh.positions[0].copy()
+    # The first translation is the optimizer's own: L-BFGS and FIRE start differently.
+    assert not np.allclose(first["lbfgs"], first["fire"], atol=1e-3)
+    assert MinModeAtoms(Atoms("H", positions=[[0.0, 0.0, 0.0]], calculator=Flat())).method == "lbfgs"
+    with pytest.raises(ValueError, match="lbfgs or fire"):
+        MinModeAtoms(Atoms("H", positions=[[0.0, 0.0, 0.0]], calculator=Flat()), method="quickmin")
+    with pytest.raises(ValueError, match="fire or lbfgs"):
+        MinMode(np.zeros(3), np.array([1.0, 0.0, 0.0]), method="quickmin")
+    for method in ("lbfgs", "fire"):
+        assert MinMode(np.zeros(3), np.array([1.0, 0.0, 0.0]), method=method) is not None

@@ -204,7 +204,10 @@ def collect_rust_inventory() -> tuple[list[str], list[str], list[str], list[str]
 def collect_python_inventory() -> list[str]:
     init_tree = ast.parse((ROOT / "python" / "rgsaddle" / "__init__.py").read_text(encoding="utf-8"))
     core_tree = ast.parse((ROOT / "python" / "rgsaddle" / "_core.pyi").read_text(encoding="utf-8"))
-    ase_tree = ast.parse((ROOT / "python" / "rgsaddle" / "ase.py").read_text(encoding="utf-8"))
+    ase_trees = [
+        ast.parse((ROOT / "python" / "rgsaddle" / name).read_text(encoding="utf-8"))
+        for name in ("ase.py", "_translate.py")
+    ]
     names: set[str] = set()
     for node in init_tree.body:
         if isinstance(node, ast.Assign):
@@ -226,9 +229,10 @@ def collect_python_inventory() -> list[str]:
                         names.add(sub.target.id)
         elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
             names.add(node.target.id)
-    for node in ase_tree.body:
-        if isinstance(node, (ast.FunctionDef, ast.ClassDef)) and not node.name.startswith("_"):
-            names.add(node.name)
+    for ase_tree in ase_trees:
+        for node in ase_tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.ClassDef)) and not node.name.startswith("_"):
+                names.add(node.name)
     return sorted(names)
 
 

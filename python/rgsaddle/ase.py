@@ -14,12 +14,17 @@ from __future__ import annotations
 
 import math
 import warnings
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 import numpy as np
 from numpy.typing import NDArray
 
 from rgsaddle._core import ClaimSlot, GrowingString as CoreGrowingString, SaddleIndex
+
+if TYPE_CHECKING:
+    from ase.optimize.optimize import OptimizableAtoms
+
+    from rgsaddle._translate import MinModeTranslate as MinModeTranslate
 
 Float64 = NDArray[np.float64]
 Int64 = NDArray[np.int64]
@@ -1107,40 +1112,6 @@ class DimerControl:
             raise UnsupportedFeature("this dimer uses one forward difference from the centre")
 
 
-class _MinModeView:
-    def __init__(self, search: MinModeAtoms) -> None:
-        self._search = search
-
-    def get_x(self) -> Float64:
-        return np.ascontiguousarray(self._search.atoms.get_positions(), dtype=np.float64).reshape(-1)
-
-    def set_x(self, x: Float64) -> None:
-        count = len(self._search.atoms)
-        self._search.atoms.set_positions(
-            np.asarray(x, dtype=np.float64).reshape(count, 3), apply_constraint=False
-        )
-        self._search._moved()
-
-    def get_gradient(self) -> Float64:
-        return -np.ascontiguousarray(self._search.get_forces(), dtype=np.float64).reshape(-1)
-
-    def get_value(self) -> float:
-        return float(self._search.atoms.get_potential_energy())
-
-    def ndofs(self) -> int:
-        return 3 * len(self._search.atoms)
-
-    def gradient_norm(self, gradient: Float64) -> float:
-        forces = np.asarray(gradient, dtype=np.float64).reshape(-1, 3)
-        return float(np.sqrt((forces * forces).sum(axis=1)).max())
-
-    def converged(self, gradient: Float64, fmax: float) -> bool:
-        forces_ok = self.gradient_norm(gradient) < fmax
-        if self._search.control is None:
-            return forces_ok
-        return forces_ok and self._search.curvature < 0.0
-
-
 class MinModeAtoms:
     """One ASE ``Atoms`` object driven by a dimer or Lanczos mode.
 
@@ -1148,6 +1119,10 @@ class MinModeAtoms:
     force an ASE optimizer should follow. Positive curvature drops the
     force perpendicular to the mode. Negative curvature reflects the
     force along the mode. The atoms object itself is not copied.
+
+    ``method`` is the optimizer of the core's translation step, either
+    ``"lbfgs"`` (the default) or ``"fire"``. It applies to
+    ``MinModeTranslate``, whose every step is one core translation.
     """
 
     def __init__(
@@ -1161,9 +1136,13 @@ class MinModeAtoms:
         kind: str = "dimer",
         dr: float = 1e-3,
         max_rotations: int = 10,
+        method: str = "lbfgs",
         comm: Any = None,
     ) -> None:
         _refuse_parallel_world(comm)
+        if method not in ("lbfgs", "fire"):
+            raise ValueError("method must be lbfgs or fire")
+        self.method = method
         if mode is None and control is not None and not isinstance(control, DimerControl):
             if isinstance(control, (list, tuple, np.ndarray)):
                 mode = control
@@ -1218,7 +1197,9 @@ class MinModeAtoms:
     def _moved(self) -> None:
         self._session = None
 
-    def __ase_optimizable__(self) -> _MinModeView:
+    def __ase_optimizable__(self) -> OptimizableAtoms:
+        from rgsaddle._translate import _MinModeView
+
         return _MinModeView(self)
 
     def _surface(self, positions: Float64) -> tuple[Float64, Float64]:
@@ -1242,6 +1223,7 @@ class MinModeAtoms:
                 "kind": self.kind,
                 "dr": self.dr,
                 "max_rotations": self.max_rotations,
+                "method": self.method,
             }
             if self._force_tol is not None:
                 options["force_tol"] = self._force_tol
@@ -1260,6 +1242,30 @@ class MinModeAtoms:
         forces = np.array(self.atoms.get_forces(), dtype=np.float64, copy=True)
         return _effective_force(forces, self.mode, self.curvature)
 
+    def translate(self, force_tol: float) -> None:
+        """Take one core translation with the stop ``force_tol``.
+
+        The atoms move to the core's new position. A change of
+        ``force_tol``, or atoms moved by the caller since the last
+        translation, restarts the core session from the atoms.
+        """
+        if self._force_tol != force_tol:
+            self._force_tol = force_tol
+            self._moved()
+        count = len(self.atoms)
+        current = np.asarray(self.atoms.get_positions(), dtype=np.float64).reshape(-1)
+        if self._session is not None and not np.array_equal(
+            np.asarray(self._session.position(), dtype=np.float64), current
+        ):
+            self._moved()
+        search = self._ensure()
+        search.set_saddle_check(False)
+        report = search.step(self._surface)
+        updated = np.asarray(search.position(), dtype=np.float64).reshape(count, 3)
+        self.atoms.set_positions(updated, apply_constraint=False)
+        self.mode = np.asarray(search.mode(), dtype=np.float64)
+        self.curvature = float(report.curvature)
+
 
 def _refuse_unmapped_dimer(control: DimerControl, drawing_mode: bool) -> None:
     """Refuse dimer knobs the Rust step does not read.
@@ -1275,55 +1281,6 @@ def _refuse_unmapped_dimer(control: DimerControl, drawing_mode: bool) -> None:
         value = control.get_parameter(name)
         if value != control._defaults[name]:
             raise UnsupportedFeature(f"{name} is not applied by this dimer")
-
-
-class MinModeTranslate:
-    """One Rust minimum-mode step per optimizer iteration.
-
-    The constructor matches ``ase.mep.dimer.MinModeTranslate``:
-    ``atoms`` is a ``MinModeAtoms``, and the second positional argument
-    is the logfile. The translation is the core's FIRE step on the
-    effective force, not ASE's Newton line search. Convergence is the
-    effective force under ``fmax`` and, when a ``DimerControl`` is
-    attached, a negative curvature.
-    """
-
-    def __new__(cls, atoms: Any, logfile: Any = "-", trajectory: Any = None) -> Any:
-        from ase.optimize.optimize import Optimizer
-
-        if not isinstance(atoms, MinModeAtoms):
-            raise TypeError("MinModeTranslate drives a MinModeAtoms object")
-
-        class _Driver(Optimizer):
-            def initialize(self) -> None:
-                return None
-
-            def read(self) -> None:
-                return None
-
-            def step(self) -> None:  # pyright: ignore[reportIncompatibleMethodOverride]
-                dimer = self.atoms
-                search = dimer._ensure()
-                search.set_saddle_check(False)
-                report = search.step(dimer._surface)
-                count = len(dimer.atoms)
-                updated = np.asarray(search.position(), dtype=np.float64).reshape(count, 3)
-                dimer.atoms.set_positions(updated, apply_constraint=False)
-                dimer.mode = np.asarray(search.mode(), dtype=np.float64)
-                dimer.curvature = float(report.curvature)
-
-            def run(self, fmax: float = 0.05, steps: int | None = None) -> bool:
-                dimer = self.atoms
-                dimer._force_tol = float(fmax)
-                dimer._moved()
-                if steps is None:
-                    from ase.optimize.optimize import DEFAULT_MAX_STEPS
-
-                    steps = DEFAULT_MAX_STEPS
-                return bool(Optimizer.run(self, fmax=fmax, steps=steps))
-
-        driver = _Driver(atoms, logfile=logfile, trajectory=trajectory)
-        return driver
 
 
 class _SellaView:
@@ -1427,6 +1384,15 @@ class Sella:
         for function, interval, args, kwargs in self._observers:
             host.attach(function, interval, *args, **kwargs)
         return bool(host.run(fmax=fmax, steps=steps))
+
+
+def __getattr__(name: str) -> Any:
+    """Load ``MinModeTranslate`` on first use, because it subclasses an ASE class."""
+    if name == "MinModeTranslate":
+        from rgsaddle._translate import MinModeTranslate
+
+        return MinModeTranslate
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 # A non-periodic axis gets a vector this many times the reach of the images.
