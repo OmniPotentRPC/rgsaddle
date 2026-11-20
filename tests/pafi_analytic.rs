@@ -1500,3 +1500,50 @@ fn center_of_mass_uses_the_same_normal_as_the_estimator() {
     );
     assert!(plane.error < f64::EPSILON.sqrt());
 }
+
+/// Rescaling the parameter of a path by `k` multiplies its tangent by `k`
+/// and its curvature by `k²`, and moves nothing in the plane. The mean `ψ`
+/// is a property of the plane, and `dF/ds` follows the parameter.
+#[test]
+fn psi_does_not_depend_on_the_parameter_of_the_path() {
+    let config = PafiConfig::default()
+        .with_thermal(0.05)
+        .with_mobility(1.0)
+        .with_time_step(0.004)
+        .with_thermalize(100)
+        .with_stride(4)
+        .with_samples(200)
+        .with_blocks(4)
+        .with_seed(5)
+        .with_fix_com(false)
+        .with_retain(1)
+        .with_window(50)
+        .with_max_jump(None);
+    let at = |scale: f64| {
+        let geometry = PathGeometry {
+            positions: Array1::from_vec(vec![-0.3, 0.1]),
+            tangent: Array1::from_vec(vec![1.0, 0.3]) * scale,
+            curvature: Array1::from_vec(vec![0.2, 0.8]) * scale * scale,
+            jerk: Array1::zeros(2),
+            arc: 0.0,
+        };
+        average_hyperplane(&Widening, &geometry, &config).expect("plane")
+    };
+    let base = at(1.0);
+    assert!(base.psi.abs() > 1.0e-3, "psi {}", base.psi);
+    for scale in [0.2, 5.0] {
+        let scaled = at(scale);
+        assert!(
+            (scaled.psi - base.psi).abs() <= 1.0e-8 * base.psi.abs(),
+            "scale {scale}: psi {} against {}",
+            scaled.psi,
+            base.psi
+        );
+        let expected = scale * base.gradient;
+        assert!(
+            (scaled.gradient - expected).abs() <= 1.0e-8 * expected.abs().max(1.0e-3),
+            "scale {scale}: gradient {} against {expected}",
+            scaled.gradient
+        );
+    }
+}
