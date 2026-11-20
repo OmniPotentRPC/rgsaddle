@@ -553,4 +553,11 @@ typedef int64_t (*abi45_signature_rgsaddle_band_free_end_cuts)(
     const RgsaddleBand *band);
 _Static_assert(_Generic(&rgsaddle_band_free_end_cuts, abi45_signature_rgsaddle_band_free_end_cuts: 1, default: 0), "rgsaddle_band_free_end_cuts signature");
 
+typedef rgsaddle_status_t (*abi46_signature_rgsaddle_band_set_refine)(
+    RgsaddleBand *band, int32_t method, double threshold, int64_t memory);
+_Static_assert(_Generic(&rgsaddle_band_set_refine, abi46_signature_rgsaddle_band_set_refine: 1, default: 0), "rgsaddle_band_set_refine signature");
+
+typedef int32_t (*abi46_signature_rgsaddle_band_is_refining)(const RgsaddleBand *band);
+_Static_assert(_Generic(&rgsaddle_band_is_refining, abi46_signature_rgsaddle_band_is_refining: 1, default: 0), "rgsaddle_band_is_refining signature");
+
 #endif

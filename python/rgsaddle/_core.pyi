@@ -294,6 +294,14 @@ class Band:
     def set_free_end(self, enabled: bool = True, side: str = 'last', target_energy: object | None = None, max_cuts: int = 2, cut_force: float = 0.0, energy_tol: float = 0.001, stability: int = 2, window_offset: int = 1, cubic: bool = True) -> None:
         """Enable or clear free-end adaptive NEB on the band (ABI minor 45)."""
 
+    def set_refine(self, enabled: bool = True, threshold: float = 0.0, memory: int = 20) -> None:
+        """
+        Install or clear the per-step L-BFGS refine stepper (ABI minor 46). A threshold of 0 selects 0.5, in the host's force units.
+        """
+
+    def is_refining(self) -> bool:
+        """True when the last first-order step used the refine stepper."""
+
     def target_energy_residual(self) -> float | None:
         """
         Signed target-energy residual E(x_end) - E_target from the last free-end step.
