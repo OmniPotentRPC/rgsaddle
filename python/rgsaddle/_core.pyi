@@ -173,7 +173,7 @@ class AutonebReport:
 
 def autoneb_run(surface: Callable[..., tuple[numpy.typing.NDArray[numpy.float64], numpy.typing.NDArray[numpy.float64]]], positions: numpy.typing.NDArray[numpy.float64], k: float = 0.1, climb: bool = True, n_simul: int = 3, n_max: int = 7, force_tol: float = 0.025, local_force_tol: float = 0.025, local_max_steps: int = 10000, climb_max_steps: int = 10000, projection: str = 'neb', tangent: str = 'improved', remove_translation: bool = False, space_energy_ratio: float = 0.5, max_move: float = 0.2, idpp: bool = False, cell: numpy.typing.NDArray[numpy.float64] | None = None, fixed: numpy.typing.NDArray[numpy.uint8] | None = None) -> AutonebReport:
     """
-    Run AutoNEB to completion (ABI minor 46). positions is (n_init >= 2, 3N). surface(x) receives (rows, 3N) and returns (energies, gradients). One row is one force call. The search stays on the calling thread.
+    Run AutoNEB to completion (ABI minor 53). positions is (n_init >= 2, 3N). surface(x) receives (rows, 3N) and returns (energies, gradients). One row is one force call. The search stays on the calling thread.
     """
 
 class SessionReport:
