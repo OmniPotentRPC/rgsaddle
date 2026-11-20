@@ -109,17 +109,17 @@ The dividing surface is a hyperplane normal to the path, not a variationally opt
 * Copper
 The Mishin EAM1 numbers are a validation, not part of the library. The potential is the analytic form already in =tests/mishin_cu.rs= (Mishin, Mehl, Papaconstantopoulos, Voter, and Kress, Phys. Rev. B 63, 224106 (2001), doi:10.1103/PhysRevB.63.224106, Table I). The question is the one posed by Mwungeli, Liu, and Demkowicz, Phys. Rev. Materials 9, 023601 (2025), doi:10.1103/PhysRevMaterials.9.023601: whether the vacancy / self-interstitial recombination volume in Cu falls from about 290 Ω at 300 K to about 160 Ω at 500 K and above because the hop rates toward, away from, and tangential to the vacancy are anharmonic. Crossref records the paper as published 11 February 2025, Phys. Rev. Materials 9, 023601. Their Table 1 gives the zero-pressure lattice parameters 3.631, 3.637, 3.643, 3.649 and 3.655 Å at 300, 400, 500, 600 and 700 K, and cells of 10, 11, 12, 13 and 16 cubic repeats (4000, 5324, 6912, 8788 and 16384 atoms).
 
-The lattice parameter is from a zero-pressure Langevin run with a Berendsen barostat on a 6×6×6 cell of this potential, 2 fs steps, the average of the second 4 ps of an 8 ps trajectory. The barostat pressure is the configurational stress plus the kinetic pressure =N k_B T / V=. It is not taken from Table 1.
+The lattice parameter is from a zero-pressure Langevin run with a Berendsen barostat on a 6×6×6 cell of this potential, 2 fs steps, the average of the second 4 ps of an 8 ps trajectory. The barostat pressure is the configurational stress plus the kinetic pressure =N k_B T / V=. It is not taken from Table 1. Standard errors use recursive blocking of adjacent samples and require a plateau plus at least 16 effective samples (Flyvbjerg and Petersen, J. Chem. Phys. 91, 461–466 (1989), doi:10.1063/1.457480).
 
-| T / K | a / Å, this work | a / Å, Table 1 |
-|-------+------------------+----------------|
-| 300 | 3.63132 | 3.631 |
-| 400 | 3.63779 | 3.637 |
-| 500 | 3.64398 | 3.643 |
-| 600 | 3.65059 | 3.649 |
-| 700 | 3.65713 | 3.655 |
+| T / K | a / Å, this work | pressure converged | a / Å, Table 1 |
+|-------+------------------+--------------------+----------------|
+| 300 | 3.63132 | no | 3.631 |
+| 400 | 3.63779 | yes | 3.637 |
+| 500 | 3.64398 | yes | 3.643 |
+| 600 | 3.65059 | no | 3.649 |
+| 700 | 3.65713 | yes | 3.655 |
 
-The slope matches Table 1 and the offset is 0.0003 to 0.002 Å. The 600 K run misses the two standard error rule on its mean pressure at 4000 steps; the bias this leaves in =a= is about 0.0003 Å. The table before this one read 3.62831, 3.63371, 3.63867, 3.64416 and 3.64979 Å. Those runs left the kinetic pressure out of the barostat, which accounts for most of the 0.004 Å offset it showed. Benchmark files and figures produced with the older lattice constants are stale until they are rerun. =cargo test --release --test mishin_cu npt_lattice_table -- --ignored --nocapture= regenerates the table.
+The slope matches Table 1 and the offset is 0.0003 to 0.002 Å. The 300 K and 600 K runs are retained but explicitly marked non-converged. At 600 K the mean pressure is 2.2445×10⁻⁴ eV/Å³ with an autocorrelation-aware standard error of 5.38×10⁻⁵ eV/Å³ and 74.94 effective samples; its bias in =a= is about 0.0003 Å. The table before this one read 3.62831, 3.63371, 3.63867, 3.64416 and 3.64979 Å. Those runs left the kinetic pressure out of the barostat, which accounts for most of the 0.004 Å offset it showed. Benchmark files and figures produced with the older lattice constants are stale until they are rerun. =cargo test --release --test mishin_cu npt_lattice_table -- --ignored --nocapture= regenerates the table and prints the pressure convergence status for every row.
 
 Climbing L-BFGS follows the highest image. On the copper band that image was a collision left by the initial path, and the step ran up the wall; the NEB guards drop such a step and do not make it the saddle. The band used here relaxes with FIRE and climbing off, then climbs. A path is kept only when the force is at most 0.01 eV/Å and the zero-temperature integral of the path force reproduces ΔE0.
 
