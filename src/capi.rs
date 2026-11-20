@@ -476,7 +476,7 @@ pub(crate) fn status_of(err: &SaddleError) -> i32 {
         SaddleError::Shape(_) => RGSADDLE_SHAPE,
         SaddleError::Surface(_) => RGSADDLE_SURFACE_FAILED,
         SaddleError::NonFinite(_) => RGSADDLE_NON_FINITE,
-        SaddleError::Solver(_) => RGSADDLE_SOLVER,
+        SaddleError::Solver(_) | SaddleError::Singular(_) => RGSADDLE_SOLVER,
         SaddleError::Invalid(_) => RGSADDLE_INVALID_PARAMETER,
         SaddleError::Stalled(_) => RGSADDLE_STALLED,
         SaddleError::NotEquilibrated { .. } => RGSADDLE_NOT_EQUILIBRATED,
