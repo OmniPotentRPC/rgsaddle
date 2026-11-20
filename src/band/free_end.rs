@@ -1225,6 +1225,7 @@ impl BandSession {
             stepped.map_err(|e| SaddleError::Solver(e.to_string()))?;
         }
         self.scatter_interior(x_interior.view());
+        self.refresh_exp(surface)?;
 
         // Advance the free terminal image along the level-set projected
         // force and retract onto E(x_end) = target_energy via rgmin::Solver.
@@ -1339,6 +1340,7 @@ impl BandSession {
             // The window edge is the new fixed terminal image, so its
             // held energy and gradient belong to a point that is gone.
             self.free_end_state.forget_fixed_endpoint();
+            self.refresh_exp(surface)?;
         }
 
         let report_ci = if cut_this_step { None } else { ci_at };
@@ -1519,8 +1521,8 @@ mod tests {
         eq7_endpoint_force, first_cut_tolerance, peak_window, project_onto_level_set,
     };
     use crate::{
-        BandConfig, BandSession, BandSurface, FeaNebSession, FreeEndConfig, FreeEndSide,
-        SaddleError, SpringKind,
+        BandConfig, BandSession, BandSurface, ExpBandPrecon, FeaNebSession, FreeEndConfig,
+        FreeEndSide, SaddleError, SpringKind,
     };
 
     #[test]
@@ -1886,5 +1888,110 @@ mod tests {
             }
         }
         assert!(misses.is_empty(), "{misses:#?}");
+    }
+
+    /// Two atoms per image: a stiff bond of rest length 1 and a downhill
+    /// parabola on the centroid's x with its peak at 2, so the band has an
+    /// interior maximum and the free end has a nonzero gradient. `tilt`
+    /// adds a linear slope on the centroid's y, a force the band's tangent
+    /// does not remove.
+    struct PeakDiatomic {
+        tilt: f64,
+    }
+
+    impl BandSurface for PeakDiatomic {
+        fn eval(
+            &self,
+            positions: ArrayView2<f64>,
+            energies: &mut Array1<f64>,
+            gradients: &mut Array2<f64>,
+        ) -> Result<(), SaddleError> {
+            for (i, row) in positions.outer_iter().enumerate() {
+                let d = [row[3] - row[0], row[4] - row[1], row[5] - row[2]];
+                let r = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+                let cx = 0.5 * (row[0] + row[3]);
+                let cy = 0.5 * (row[1] + row[4]);
+                energies[i] = -(cx - 2.0).powi(2) + 100.0 * (r - 1.0).powi(2) + self.tilt * cy;
+                let dbond = 200.0 * (r - 1.0) / r;
+                for k in 0..3 {
+                    let centroid = match k {
+                        0 => -(cx - 2.0),
+                        1 => 0.5 * self.tilt,
+                        _ => 0.0,
+                    };
+                    gradients[(i, k)] = -dbond * d[k] + centroid;
+                    gradients[(i, 3 + k)] = dbond * d[k] + centroid;
+                }
+            }
+            Ok(())
+        }
+    }
+
+    fn peak_band(n_images: usize) -> Array2<f64> {
+        Array2::from_shape_fn((n_images, 6), |(image, column)| {
+            let t = image as f64 / (n_images - 1) as f64;
+            let half = 0.5 + 0.05 * (std::f64::consts::PI * t).sin();
+            match column {
+                0 | 3 => 4.0 * t,
+                2 => -half,
+                5 => half,
+                _ => 0.0,
+            }
+        })
+    }
+
+    fn exp_free_end_config(free_end: FreeEndConfig) -> BandConfig {
+        BandConfig::default()
+            .with_free_end(free_end)
+            .with_exp_precon(Some(ExpBandPrecon::default().with_mu(200.0)))
+            .with_max_move(0.9)
+            .with_climbing(None)
+            .with_min_mode(None)
+            .with_saddle_check(None)
+            .with_remove_translation(false)
+    }
+
+    #[test]
+    fn the_metric_is_rebuilt_after_the_interior_moves_far_in_one_step() {
+        let config = exp_free_end_config(FreeEndConfig::default().with_max_cuts(0));
+        let mut session = BandSession::new(config, peak_band(7)).expect("session");
+        let surface = PeakDiatomic { tilt: 100.0 };
+        let report = session.step_free_end(&surface).expect("step");
+        assert!(!report.cut_this_step);
+        let exp = session.exp.as_ref().expect("metric");
+        let first_band = peak_band(7);
+        let moved = (&session.positions - &first_band)
+            .iter()
+            .fold(0.0_f64, |most, delta| most.max(delta.abs()));
+        assert!(
+            moved > 0.5 * exp.r_nn,
+            "the step has to move an atom past r_nn / 2: moved {moved}, r_nn {}",
+            exp.r_nn
+        );
+        assert!(
+            session.evaluation().is_some(),
+            "the step reported forces under a stale metric"
+        );
+    }
+
+    #[test]
+    fn the_metric_is_rebuilt_after_a_cut_and_remesh() {
+        let free_end = FreeEndConfig::default()
+            .with_max_cuts(1)
+            .with_cut_force(100.0)
+            .with_stability(1)
+            .with_window_offset(1)
+            .with_cubic(false);
+        let config = exp_free_end_config(free_end);
+        let mut session = BandSession::new(config, peak_band(7)).expect("session");
+        let report = session
+            .step_free_end(&PeakDiatomic { tilt: 0.0 })
+            .expect("cut step");
+        assert!(report.cut_this_step, "the step has to cut");
+        assert_eq!(session.free_end_cuts(), 1);
+        assert!(
+            session.evaluation().is_some(),
+            "the cut left the band under a stale metric"
+        );
     }
 }
