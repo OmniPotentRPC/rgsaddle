@@ -249,6 +249,19 @@ fn moments(values: &[f64]) -> Option<(f64, f64)> {
     if n < 4 {
         return None;
     }
+    let base = values[0];
+    let shifted_mean = base + values.iter().map(|value| value - base).sum::<f64>() / n as f64;
+    let shifted_variance = values
+        .iter()
+        .map(|value| {
+            let d = value - shifted_mean;
+            d * d
+        })
+        .sum::<f64>()
+        / n as f64;
+    if shifted_variance < 1e-30 {
+        return None;
+    }
     let mean = values.iter().sum::<f64>() / n as f64;
     let mut variance = 0.0;
     for value in values {

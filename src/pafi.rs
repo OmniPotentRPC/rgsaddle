@@ -2104,7 +2104,7 @@ fn average_windowed<S: PointSurface>(
             "PAFI plane left the basin of the path in every window".into(),
         ));
     }
-    Ok(chain.average(config, &plane))
+    chain.average(config, &plane)
 }
 
 /// One hyperplane on every frame of `path`, each sampled from its own
@@ -2245,7 +2245,7 @@ where
         .iter()
         .zip(&planes)
         .map(|(chain, plane)| chain.average(config, plane))
-        .collect();
+        .collect::<Result<Vec<_>, _>>()?;
     let mut profile = integrate(&averages)?;
     let mut round = 1usize;
     while let Some(target) = config.target_error {
@@ -2269,7 +2269,7 @@ where
             .iter()
             .zip(&planes)
             .map(|(chain, plane)| chain.average(config, plane))
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
         profile = integrate(&averages)?;
         round += 1;
     }
@@ -2404,7 +2404,7 @@ struct Chain {
     previous: Option<Array1<f64>>,
     rng: Rng,
     values: Vec<f64>,
-    psi_sum: f64,
+    psis: Vec<f64>,
     retained: Vec<Array1<f64>>,
     evaluations: usize,
     widest: f64,
@@ -2426,7 +2426,7 @@ impl Chain {
             previous,
             rng,
             values: Vec::new(),
-            psi_sum: 0.0,
+            psis: Vec::new(),
             retained: Vec::new(),
             evaluations: 0,
             widest: 0.0,
@@ -2470,7 +2470,6 @@ impl Chain {
             let mark = (
                 self.values.len(),
                 self.retained.len(),
-                self.psi_sum,
                 self.widest,
                 self.jumps,
             );
@@ -2482,13 +2481,13 @@ impl Chain {
                 if !self.values.is_empty() {
                     return Ok(());
                 }
-            } else if kept > self.jumps - mark.4 {
+            } else if kept > self.jumps - mark.3 {
                 return Ok(());
             } else {
                 self.values.truncate(mark.0);
+                self.psis.truncate(mark.0);
                 self.retained.truncate(mark.1);
-                self.psi_sum = mark.2;
-                self.widest = mark.3;
+                self.widest = mark.2;
                 self.kept = None;
                 self.x.assign(&plane.geometry.positions);
                 if let Some(previous) = self.previous.as_mut() {
@@ -2525,12 +2524,7 @@ impl Chain {
             } else {
                 (warm, (goal - self.values.len()).min(window))
             };
-            let mark = (
-                self.values.len(),
-                self.retained.len(),
-                self.psi_sum,
-                self.widest,
-            );
+            let mark = (self.values.len(), self.retained.len(), self.widest);
             self.advance(surface, plane, config, heat, take)?;
             warm -= heat;
             let Some(limit) = config.max_jump.filter(|_| config.window > 0) else {
@@ -2542,9 +2536,9 @@ impl Chain {
                 continue;
             }
             self.values.truncate(mark.0);
+            self.psis.truncate(mark.0);
             self.retained.truncate(mark.1);
-            self.psi_sum = mark.2;
-            self.widest = mark.3;
+            self.widest = mark.2;
             self.jumps += 1;
             match &self.kept {
                 Some(checkpoint) => {
@@ -2623,7 +2617,7 @@ impl Chain {
                 }
                 let recorded = self.values.len();
                 self.values.push(value);
-                self.psi_sum += psi;
+                self.psis.push(psi);
                 self.widest = self
                     .widest
                     .max(largest_atom(&(&self.x - &geometry.positions)));
@@ -2661,29 +2655,26 @@ impl Chain {
         Ok(())
     }
 
-    fn average(&self, config: &PafiConfig, plane: &Plane) -> HyperplaneAverage {
-        let (gradient, error, tau, n_eff) = windowed_block_mean(&self.values, config.blocks);
+    fn average(
+        &self,
+        config: &PafiConfig,
+        plane: &Plane,
+    ) -> Result<HyperplaneAverage, SaddleError> {
         let equilibration = equilibrate(
             &self.values,
             config.thermalize,
             config.stride,
             config.blocks,
-        )
-        .unwrap_or(EquilibrationReport {
-            discard: 0,
-            equilibration_steps: config.thermalize,
-            tau,
-            n_eff,
-            split_half_drift: 0.0,
-            split_half_error: error,
-            sigma_multiple: 4.0,
-            drift_passed: false,
-        });
-        HyperplaneAverage {
+        )?;
+        let kept_values = &self.values[equilibration.discard..];
+        let kept_psis = &self.psis[equilibration.discard..];
+        let (gradient, error, tau, n_eff) = windowed_block_mean(kept_values, config.blocks);
+        let psi = kept_psis.iter().sum::<f64>() / kept_psis.len() as f64;
+        Ok(HyperplaneAverage {
             plane: plane.constraint.plane().clone(),
             gradient,
             error,
-            psi: self.psi_sum / self.values.len().max(1) as f64,
+            psi,
             samples: self.values.len(),
             tau,
             n_eff,
@@ -2696,7 +2687,7 @@ impl Chain {
             zero: self.origin.1,
             widest: self.widest,
             jumps: self.jumps,
-        }
+        })
     }
 }
 

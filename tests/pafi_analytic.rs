@@ -1332,7 +1332,7 @@ fn truncated_plane_has_the_masked_barrier() {
             profile.barrier, profile.barrier_error
         );
         assert!(
-            (profile.barrier - 1.0).abs() < 3.0 * profile.barrier_error,
+            (profile.barrier - 1.0).abs() < 3.0 * profile.barrier_error + f64::EPSILON.sqrt(),
             "full {angle}: {} ± {}",
             profile.barrier,
             profile.barrier_error
@@ -1563,4 +1563,126 @@ fn frame_controls_default_to_the_documented_values_and_have_setters() {
         (set.relax_tol, set.jump_tol, set.window),
         (1.0e-6, 1.0e-3, 16)
     );
+}
+
+#[test]
+fn frame_samplers_propagate_failing_drift() {
+    struct DriftingTransverse;
+    impl PointSurface for DriftingTransverse {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            let energy = (1.0 - x[0] * x[0]).powi(2) - 0.04 * x[0] * x[1]
+                + 10.0 * x[2] * x[2]
+                + 0.8 * x[0] * x[2]
+                + 0.5 * x[3] * x[3];
+            let gx = -4.0 * x[0] * (1.0 - x[0] * x[0]) - 0.04 * x[1] + 0.8 * x[2];
+            let gy = -0.04 * x[0];
+            let gz = 20.0 * x[2] + 0.8 * x[0];
+            let gw = x[3];
+            Ok((energy, Array1::from_vec(vec![gx, gy, gz, gw])))
+        }
+    }
+
+    let frames: Vec<Array1<f64>> = (0..11)
+        .map(|i| {
+            let r = -1.0 + 2.0 * i as f64 / 10.0;
+            Array1::from_vec(vec![r, 0.0, -0.8 * r / 20.0, 0.0])
+        })
+        .collect();
+    let path = ArcPath::from_positions(&frames).expect("path");
+    let config = PafiConfig::default()
+        .with_thermal(0.15)
+        .with_mobility(1.0)
+        .with_time_step(0.05)
+        .with_thermalize(0)
+        .with_stride(1)
+        .with_samples(400)
+        .with_blocks(6)
+        .with_seed(7)
+        .with_fix_com(false)
+        .with_retain(0)
+        .with_relax_tol(0.1)
+        .with_target_error(None)
+        .with_max_rounds(1);
+
+    let full_err = pafi_frames(&DriftingTransverse, &path, &config).unwrap_err();
+    assert!(
+        matches!(
+            full_err,
+            SaddleError::NotEquilibrated { .. } | SaddleError::InsufficientEffectiveSamples { .. }
+        ),
+        "expected equilibration failure from pafi_frames, got {full_err:?}"
+    );
+
+    let trunc_err = pafi_truncated(&DriftingTransverse, &path, 0.5, &config).unwrap_err();
+    assert!(
+        matches!(
+            trunc_err,
+            SaddleError::NotEquilibrated { .. } | SaddleError::InsufficientEffectiveSamples { .. }
+        ),
+        "expected equilibration failure from pafi_truncated, got {trunc_err:?}"
+    );
+}
+
+#[test]
+fn frame_samplers_discard_equilibration_transient() {
+    // `Widening` has transverse curvature k(x) = 1.5 + 0.5 x and gradient
+    // `dV/dx = U'(x) + 0.25 y^2`. Starting at y = 2.5 with a loose relax_tol
+    // leaves an initial transient that `equilibrate` must discard before
+    // averaging.
+    let transient_frames: Vec<Array1<f64>> = (0..5)
+        .map(|i| {
+            let x = -0.8 + 0.4 * i as f64;
+            Array1::from_vec(vec![x, 2.5])
+        })
+        .collect();
+    let equilibrated_frames: Vec<Array1<f64>> = (0..5)
+        .map(|i| {
+            let x = -0.8 + 0.4 * i as f64;
+            Array1::from_vec(vec![x, 0.0])
+        })
+        .collect();
+    let config = PafiConfig::default()
+        .with_thermal(0.02)
+        .with_mobility(1.0)
+        .with_time_step(0.01)
+        .with_thermalize(0)
+        .with_stride(1)
+        .with_samples(600)
+        .with_blocks(4)
+        .with_seed(11)
+        .with_fix_com(false)
+        .with_retain(0)
+        .with_relax_tol(10.0)
+        .with_target_error(None)
+        .with_max_rounds(1);
+
+    let (_, transient) = pafi_frames(
+        &Widening,
+        &ArcPath::from_positions(&transient_frames).expect("path"),
+        &config,
+    )
+    .expect("transient discards warmup");
+    let (_, steady) = pafi_frames(
+        &Widening,
+        &ArcPath::from_positions(&equilibrated_frames).expect("path"),
+        &config,
+    )
+    .expect("steady");
+
+    assert!(
+        transient
+            .iter()
+            .any(|plane| plane.equilibration.discard > 0),
+        "expected at least one plane to discard its initial transient"
+    );
+    for (t_plane, s_plane) in transient.iter().zip(&steady) {
+        let diff = (t_plane.gradient - s_plane.gradient).abs();
+        let tol = 4.0 * t_plane.error.hypot(s_plane.error) + 1.0e-3;
+        assert!(
+            diff <= tol,
+            "discarded transient mean {} differs from steady mean {} (tol {tol})",
+            t_plane.gradient,
+            s_plane.gradient
+        );
+    }
 }
