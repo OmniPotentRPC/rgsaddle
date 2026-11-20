@@ -330,15 +330,24 @@ impl Default for IndexCheck {
 
 /// Projected spectrum at one geometry.
 ///
-/// Eigenvalues ascend. Eigenvectors are columns of `vectors`.
+/// Ritz values ascend. Eigenvectors are columns of `vectors`. A mode is
+/// classified only when its Ritz residual interval excludes the registered
+/// cutoff; see Parlett, *The Symmetric Eigenvalue Problem*, SIAM (1998),
+/// doi:10.1137/1.9781611971163, Section 11.5.
 /// Non-exhaustive. Read the fields.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct IndexReport {
-    /// Eigenvalues strictly below [`IndexCheck::negative`].
+    /// Certified modes strictly below [`IndexCheck::negative`].
     pub negative: usize,
-    /// Lowest projected eigenvalues, ascending.
+    /// Certified modes strictly above [`IndexCheck::negative`].
+    pub positive: usize,
+    /// Modes whose residual intervals contain [`IndexCheck::negative`].
+    pub unresolved: usize,
+    /// Lowest projected Ritz values, ascending.
     pub values: Vec<f64>,
+    /// Norm of `H v - theta v` for each Ritz pair.
+    pub residuals: Vec<f64>,
     /// Eigenvectors, one column per entry of `values`.
     pub vectors: Array2<f64>,
     /// Generalized surface evaluations spent on the Hessian actions.
@@ -346,9 +355,10 @@ pub struct IndexReport {
 }
 
 impl IndexReport {
-    /// Exactly one projected eigenvalue is below the cutoff.
+    /// Exactly one projected mode is certified below the cutoff, with none
+    /// unresolved.
     pub fn is_first_order(&self) -> bool {
-        self.negative == 1
+        self.negative == 1 && self.unresolved == 0
     }
 }
 
@@ -383,6 +393,22 @@ pub enum VineyardIndexError {
         max_force: f64,
         /// Registered force tolerance.
         tolerance: f64,
+    },
+    /// At least one minimum Ritz interval contains the index cutoff.
+    #[error("Vineyard minimum index has {unresolved} unresolved projected modes")]
+    MinimumUnresolved {
+        /// Number of Ritz intervals that contain the cutoff.
+        unresolved: usize,
+        /// Full lowest-spectrum diagnostic.
+        report: IndexReport,
+    },
+    /// At least one saddle Ritz interval contains the index cutoff.
+    #[error("Vineyard saddle index has {unresolved} unresolved projected modes")]
+    SaddleUnresolved {
+        /// Number of Ritz intervals that contain the cutoff.
+        unresolved: usize,
+        /// Full lowest-spectrum diagnostic.
+        report: IndexReport,
     },
     /// The reactant is not a projected local minimum.
     #[error("Vineyard minimum has {negative} projected negative modes")]
@@ -430,7 +456,12 @@ fn projected_max_force<S: PointSurface>(
 /// its projected gradient is at most `force_tol`, because a Hessian index
 /// away from a stationary point does not classify it. The minimum must then
 /// have no projected eigenvalue below [`IndexCheck::negative`] and the
-/// saddle exactly one.
+/// saddle exactly one. Ritz pairs are certified with the inclusion interval
+/// `[theta - ||H v - theta v||, theta + ||H v - theta v||]`; an interval
+/// that contains the cutoff returns an unresolved error rather than an index.
+/// This is the standard symmetric Ritz residual bound; see Parlett,
+/// *The Symmetric Eigenvalue Problem*, SIAM (1998),
+/// doi:10.1137/1.9781611971163, Section 11.5.
 ///
 /// Each surface supplies its own constrained or rigid directions through
 /// [`PointSurface::excluded_modes`]. This keeps full- and active-coordinate
@@ -468,6 +499,12 @@ pub fn certify_vineyard_pair<M: PointSurface, S: PointSurface>(
         });
     }
     let minimum = index_at(minimum_surface, minimum, check)?;
+    if minimum.unresolved != 0 {
+        return Err(VineyardIndexError::MinimumUnresolved {
+            unresolved: minimum.unresolved,
+            report: minimum,
+        });
+    }
     if minimum.negative != 0 {
         return Err(VineyardIndexError::Minimum {
             negative: minimum.negative,
@@ -475,6 +512,12 @@ pub fn certify_vineyard_pair<M: PointSurface, S: PointSurface>(
         });
     }
     let saddle = index_at(saddle_surface, saddle, check)?;
+    if saddle.unresolved != 0 {
+        return Err(VineyardIndexError::SaddleUnresolved {
+            unresolved: saddle.unresolved,
+            report: saddle,
+        });
+    }
     if saddle.negative != 1 {
         return Err(VineyardIndexError::Saddle {
             negative: saddle.negative,
@@ -511,17 +554,37 @@ pub fn index_at<S: PointSurface>(
     }
     let modes = orthonormal_excluded(surface, x)?;
     let calls = std::cell::Cell::new(0usize);
-    let (values, vectors) = ritz_lowest(surface, x, &modes, check, &calls)?;
-    let negative = values
-        .iter()
-        .filter(|value| **value < check.negative)
-        .count();
+    let (values, vectors, residuals) = ritz_lowest(surface, x, &modes, check, &calls)?;
+    let (negative, positive, unresolved) =
+        classify_ritz_intervals(&values, &residuals, check.negative);
     Ok(IndexReport {
         negative,
+        positive,
+        unresolved,
         values,
+        residuals,
         vectors,
         evaluations: calls.get(),
     })
+}
+
+fn classify_ritz_intervals(
+    values: &[f64],
+    residuals: &[f64],
+    threshold: f64,
+) -> (usize, usize, usize) {
+    values.iter().zip(residuals).fold(
+        (0, 0, 0),
+        |(negative, positive, unresolved), (&theta, &residual)| {
+            if theta + residual < threshold {
+                (negative + 1, positive, unresolved)
+            } else if theta - residual > threshold {
+                (negative, positive + 1, unresolved)
+            } else {
+                (negative, positive, unresolved + 1)
+            }
+        },
+    )
 }
 
 impl Default for SolidDimerConfig {
@@ -560,6 +623,10 @@ pub struct SolidDimerReport {
     /// Empty when the check is off, or when a higher-index point was
     /// left and the search is still running.
     pub negative_modes: Option<usize>,
+    /// Ritz intervals that contain the index cutoff.
+    ///
+    /// `Some(0)` is a certified count. A positive count rejects the point.
+    pub unresolved_modes: Option<usize>,
     /// The force tolerance was met and the projected Hessian is not
     /// index 1. [`Self::status`] stays [`MinModeStatus::Converged`]
     /// because the force test passed; this flag is the rejection.
@@ -1406,6 +1473,7 @@ fn map_report(
     stress: Option<M3>,
     volume: f64,
     negative_modes: Option<usize>,
+    unresolved_modes: Option<usize>,
     rejected: bool,
     index_evaluations: usize,
     eigenvalues: Vec<f64>,
@@ -1420,6 +1488,7 @@ fn map_report(
         stress,
         volume,
         negative_modes,
+        unresolved_modes,
         rejected,
         index_evaluations,
         eigenvalues,
@@ -1451,6 +1520,7 @@ impl SolidDimer {
         mut report: MinModeReport,
     ) -> Result<SolidDimerReport, SaddleError> {
         let mut negative_modes = None;
+        let mut unresolved_modes = None;
         let mut rejected = false;
         let mut eigenvalues = Vec::new();
         if report.status == MinModeStatus::Converged && self.flat > 0.0 && report.curvature < -1e-3
@@ -1467,8 +1537,14 @@ impl SolidDimer {
             let verdict = index_at(surface, self.inner.position(), check)?;
             report.evaluations += verdict.evaluations;
             self.index_calls += verdict.evaluations;
-            if verdict.negative == 1 {
+            if verdict.unresolved != 0 {
+                negative_modes = Some(verdict.negative);
+                unresolved_modes = Some(verdict.unresolved);
+                eigenvalues = verdict.values;
+                rejected = true;
+            } else if verdict.negative == 1 {
                 negative_modes = Some(1);
+                unresolved_modes = Some(0);
                 eigenvalues = verdict.values;
             } else if verdict.negative > 1
                 && self.escapes_left > 0
@@ -1478,6 +1554,7 @@ impl SolidDimer {
                 report.status = MinModeStatus::Running;
             } else {
                 negative_modes = Some(verdict.negative);
+                unresolved_modes = Some(0);
                 eigenvalues = verdict.values;
                 rejected = true;
             }
@@ -1487,6 +1564,7 @@ impl SolidDimer {
             self.stress,
             self.volume,
             negative_modes,
+            unresolved_modes,
             rejected,
             self.index_calls,
             eigenvalues,
@@ -1580,7 +1658,7 @@ fn ritz_lowest<S: PointSurface>(
     modes: &[Array1<f64>],
     check: IndexCheck,
     calls: &std::cell::Cell<usize>,
-) -> Result<(Vec<f64>, Array2<f64>), SaddleError> {
+) -> Result<(Vec<f64>, Array2<f64>, Vec<f64>), SaddleError> {
     let n = x.len();
     let k = check.lowest.min(n);
     let mut seed = Array1::zeros(n);
@@ -1590,14 +1668,14 @@ fn ritz_lowest<S: PointSurface>(
     seed = remove_directions(&seed, modes);
     let norm = seed.dot(&seed).sqrt();
     if norm < 1e-14 {
-        return Ok((vec![0.0; k], Array2::zeros((n, k))));
+        return Ok((vec![0.0; k], Array2::zeros((n, k)), vec![0.0; k]));
     }
     seed /= norm;
     let mut basis = vec![seed];
     let mut actions: Vec<Array1<f64>> = Vec::new();
     let cap = n.min(64.max(k.saturating_mul(4)));
     let mut previous: Option<Vec<f64>> = None;
-    let mut kept: Option<(Vec<f64>, Array2<f64>)> = None;
+    let mut kept: Option<(Vec<f64>, Array2<f64>, Vec<f64>)> = None;
     let mut confirmed = false;
     while basis.len() <= cap {
         let j = basis.len() - 1;
@@ -1620,7 +1698,7 @@ fn ritz_lowest<S: PointSurface>(
         let chain_done = off < 1e-8 || m == n;
         let ready = chain_done || (m >= k && m.is_multiple_of(4));
         if ready {
-            let (values, vectors) = ritz_from_actions(&basis[..m], &actions)?;
+            let (values, vectors, residuals) = ritz_from_actions(&basis[..m], &actions)?;
             let stable = previous.as_ref().is_some_and(|earlier| {
                 values
                     .iter()
@@ -1631,7 +1709,7 @@ fn ritz_lowest<S: PointSurface>(
                     })
             });
             previous = Some(values.iter().take(k).copied().collect());
-            kept = Some((values, vectors));
+            kept = Some((values, vectors, residuals));
             // One chain misses a repeated eigenvalue. A fresh direction
             // orthogonal to the basis picks up that copy.
             if m < n
@@ -1654,7 +1732,7 @@ fn ritz_lowest<S: PointSurface>(
         basis.truncate(m);
         basis.push(w);
     }
-    let Some((values, vectors)) = kept else {
+    let Some((values, vectors, residuals)) = kept else {
         return Err(SaddleError::Solver(
             "index check did not build a Ritz pair".into(),
         ));
@@ -1663,6 +1741,7 @@ fn ritz_lowest<S: PointSurface>(
     Ok((
         values.into_iter().take(take).collect(),
         vectors.slice(ndarray::s![.., ..take]).to_owned(),
+        residuals.into_iter().take(take).collect(),
     ))
 }
 
@@ -1686,7 +1765,7 @@ fn fresh_direction(basis: &[Array1<f64>], modes: &[Array1<f64>], n: usize) -> Op
 fn ritz_from_actions(
     basis: &[Array1<f64>],
     actions: &[Array1<f64>],
-) -> Result<(Vec<f64>, Array2<f64>), SaddleError> {
+) -> Result<(Vec<f64>, Array2<f64>, Vec<f64>), SaddleError> {
     let m = actions.len().min(basis.len());
     let mut projected = Array2::zeros((m, m));
     for j in 0..m {
@@ -1704,11 +1783,14 @@ fn ritz_from_actions(
     let (vals, vecs) = crate::eigensolve::exact_eigh(projected.view())?;
     let n = basis.first().map(|column| column.len()).unwrap_or(0);
     let mut vectors = Array2::zeros((n, m));
+    let mut residuals = Vec::with_capacity(m);
     for column in 0..m {
+        let mut action: Array1<f64> = Array1::zeros(n);
         for (row_basis, q) in basis.iter().take(m).enumerate() {
             let weight = vecs[(row_basis, column)];
             for (i, value) in q.iter().enumerate() {
                 vectors[(i, column)] += weight * value;
+                action[i] += weight * actions[row_basis][i];
             }
         }
         let mut norm = 0.0_f64;
@@ -1720,9 +1802,21 @@ fn ritz_from_actions(
             for row in vectors.column_mut(column) {
                 *row /= norm;
             }
+            action /= norm;
         }
+        residuals.push(
+            action
+                .iter()
+                .zip(vectors.column(column))
+                .map(|(hv, v)| {
+                    let difference: f64 = *hv - vals[column] * *v;
+                    difference * difference
+                })
+                .sum::<f64>()
+                .sqrt(),
+        );
     }
-    Ok((vals.to_vec(), vectors))
+    Ok((vals.to_vec(), vectors, residuals))
 }
 
 /// Step along `soft` until its Rayleigh quotient is no longer negative.
@@ -2925,6 +3019,32 @@ mod tests {
     }
 
     const VINEYARD_FORCE: f64 = 1.0e-6;
+
+    #[test]
+    fn vineyard_ritz_interval_leaves_the_threshold_probe_unresolved() {
+        let exact_lowest: f64 = -1.0001e-4;
+        let reported: f64 = -9.9995e-5;
+        let other: f64 = 1.0;
+        let low_weight = ((other - reported) / (other - exact_lowest)).sqrt();
+        let high_weight = ((reported - exact_lowest) / (other - exact_lowest)).sqrt();
+        let theta = exact_lowest * low_weight * low_weight + other * high_weight * high_weight;
+        let residual = ((exact_lowest * low_weight - theta * low_weight).powi(2)
+            + (other * high_weight - theta * high_weight).powi(2))
+        .sqrt();
+
+        assert!((theta - reported).abs() < 1.0e-15);
+        assert!(theta >= -1.0e-4);
+        let (negative, positive, unresolved) =
+            classify_ritz_intervals(&[theta], &[residual], -1.0e-4);
+        assert_eq!((negative, positive, unresolved), (0, 0, 1));
+    }
+
+    #[test]
+    fn vineyard_ritz_intervals_certify_well_separated_modes() {
+        let (negative, positive, unresolved) =
+            classify_ritz_intervals(&[-0.25, 0.5], &[1.0e-3, 2.0e-3], -1.0e-4);
+        assert_eq!((negative, positive, unresolved), (1, 1, 0));
+    }
 
     #[test]
     fn vineyard_pair_reports_the_invalid_stationary_point() {
