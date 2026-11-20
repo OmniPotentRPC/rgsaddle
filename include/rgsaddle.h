@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 46u
+#define RGSADDLE_ABI_MINOR 52u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -1932,7 +1932,7 @@ rgsaddle_status_t rgsaddle_band_free_end_residual(const RgsaddleBand *band,
 int64_t rgsaddle_band_free_end_cuts(const RgsaddleBand *band);
 
 /**
- * Point surface, ABI minor 46. q and gradient each hold n doubles.
+ * Point surface, ABI minor 52. q and gradient each hold n doubles.
  * The callback may run on more than one thread.
  */
 typedef rgsaddle_status_t (*rgsaddle_point_fn)(void *user, int64_t n, const double *q,

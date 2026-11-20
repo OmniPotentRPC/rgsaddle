@@ -279,7 +279,7 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =rgsaddle_solid_surface_fn=. Purpose: Callback typedef in include/rgsaddle.h.
 - =rgsaddle_hessian_fn=. Purpose: Callback typedef in include/rgsaddle.h.
 - =rgsaddle_stencil_eval_fn=. Purpose: Callback typedef in include/rgsaddle.h.
-- =rgsaddle_point_fn=. Purpose: Point surface, ABI minor 46.
+- =rgsaddle_point_fn=. Purpose: Point surface, ABI minor 52.
 
 * Macros and enum constants
 
