@@ -38,6 +38,8 @@ translations removed when the Hessian is the whole cell, the unstable eigenvalue
 
 =ΔF - ΔF_h= is the anharmonic excess. At equal mass, energy in eV and length in Å, =angular_scale_rad_s= turns =sqrt(λ / m)= into rad/s and the rates are in Hz. A caller in another unit system sets =boltzmann=, =mass= and =angular_scale=.
 
+A caller that computes the Vineyard prefactor from its own minimum and saddle first calls =certify_vineyard_pair=, which refuses a point that is not stationary, a minimum with a projected negative mode and a saddle that does not have exactly one (=howto/solid-dimer=).
+
 * PAFI
 Swinburne and Marinica, Phys. Rev. Lett. 120, 135503 (2018), doi:10.1103/PhysRevLett.120.135503, give the free-energy gradient along a path without a collective variable. The path =X(s)= is =ArcPath=, the not-a-knot cubic spline of every coordinate through the images: the paper's "spline interpolation for each atomic coordinate" of NEB images (p. 135503-2) and the default end condition of scipy's =CubicSpline=, which their reference code uses. Two images give the chord and three the parabola. The hyperplane at =s= is =(x - X) · t = 0=, with =t = X'= less its center-of-mass part when the center of mass is held. With =ψ = (x - X) · X'' / |t|²=,
 
