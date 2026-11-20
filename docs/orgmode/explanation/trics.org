@@ -81,10 +81,13 @@ Cartesian update is
 \]
 
 The largest atom move is bounded by =TricInversionConfig::max_atom_move=.
-An update that increases the residual is rejected and retried at half
-damping.  Accepted updates increase damping by a factor of 1.2 up to one.
-Five consecutive rejected updates, a damped step below tolerance, or reaching
-the iteration cap above tolerance returns a solver error.
+An update that increases the residual, or that lands where a primitive or
+its Wilson row is singular, is rejected and retried at half damping.
+Accepted updates increase damping by a factor of 1.2 up to one.  Five
+consecutive rejected updates, a damped step below tolerance, or reaching the
+iteration cap above tolerance returns a solver error.  A start geometry or
+segment endpoint at which the system is singular is also a solver error,
+as is a diagnostic maze with no stable route.
 Following the reference implementation, the aligned Cartesian endpoint must
 be within 0.01 Angstrom.  The implementation tries the reverse direction and
 alternate stable coordinate systems when a candidate does not converge.

@@ -385,11 +385,20 @@ impl TricSystem {
         if initial_error <= config.tolerance {
             return Ok(positions);
         }
+        let mut b = match self.wilson_b(positions.view()) {
+            Ok(b) => b,
+            Err(SaddleError::Invalid(reason)) => {
+                return Err(SaddleError::Solver(format!(
+                    "TRIC back transformation starts at a coordinate singularity: {reason}"
+                )));
+            }
+            Err(error) => return Err(error),
+        };
         let mut best_error = initial_error;
         let mut damping = 1.0;
         let mut rejected = 0;
+        let mut singular = None;
         for _ in 0..config.max_iterations {
-            let b = self.wilson_b(positions.view())?;
             let gram = b.dot(&b.t());
             let multipliers = solve_metric(&gram, &remaining, self.rank_tolerance)?;
             let mut step = cap_atom_step(b.t().dot(&multipliers), config.max_atom_move);
@@ -398,21 +407,42 @@ impl TricSystem {
             if trial.iter().any(|value| !value.is_finite()) {
                 return Err(SaddleError::NonFinite("TRIC back transformation"));
             }
-            let actual = self.difference(trial.view(), positions.view())?;
-            let next_remaining = &remaining - &actual;
-            let error = next_remaining.dot(&next_remaining).sqrt();
-            if error > best_error {
+            let evaluated = self
+                .difference(trial.view(), positions.view())
+                .and_then(|actual| {
+                    let next_remaining = &remaining - &actual;
+                    let error = next_remaining.dot(&next_remaining).sqrt();
+                    if error > best_error {
+                        return Ok(None);
+                    }
+                    Ok(Some((next_remaining, error, self.wilson_b(trial.view())?)))
+                });
+            let accepted = match evaluated {
+                Ok(accepted) => accepted,
+                Err(SaddleError::Invalid(reason)) => {
+                    singular = Some(reason);
+                    None
+                }
+                Err(error) => return Err(error),
+            };
+            let Some((next_remaining, error, next_b)) = accepted else {
                 damping *= 0.5;
                 rejected += 1;
                 if rejected >= INVERSION_REJECTION_LIMIT {
-                    return Err(SaddleError::Solver(
-                        "TRIC back transformation rejected five damped steps".into(),
-                    ));
+                    return Err(SaddleError::Solver(match singular {
+                        Some(reason) => format!(
+                            "TRIC back transformation rejected five damped steps, \
+                             the last singular step hit: {reason}"
+                        ),
+                        None => "TRIC back transformation rejected five damped steps".into(),
+                    }));
                 }
                 continue;
-            }
+            };
+            singular = None;
             positions = trial;
             remaining = next_remaining;
+            b = next_b;
             best_error = error;
             rejected = 0;
             damping = (damping * INVERSION_DAMPING_GROWTH).min(1.0);
@@ -470,7 +500,15 @@ fn interpolate_one_direction(
     n_images: usize,
     config: &TricInversionConfig,
 ) -> Result<Array2<f64>, SaddleError> {
-    let total = system.difference(right, left)?;
+    let total = match system.difference(right, left) {
+        Ok(total) => total,
+        Err(SaddleError::Invalid(reason)) => {
+            return Err(SaddleError::Solver(format!(
+                "TRIC segment endpoint is a coordinate singularity: {reason}"
+            )));
+        }
+        Err(error) => return Err(error),
+    };
     let increment = total / (n_images - 1) as f64;
     let mut path = Array2::zeros((n_images, left.len()));
     path.row_mut(0).assign(&left);
@@ -629,7 +667,7 @@ fn maze_path(
     let n = diagnostic.nrows();
     let mut okay = Array2::from_shape_fn((n, n), |index| diagnostic[index] <= threshold);
     if !okay[(0, 0)] || !okay[(n - 1, n - 1)] {
-        return Err(SaddleError::Invalid(
+        return Err(SaddleError::Solver(
             "TRICS could not enter or leave the diagnostic maze".into(),
         ));
     }
@@ -673,13 +711,13 @@ fn maze_path(
         .iter()
         .filter_map(|candidate| candidate.as_ref().map(Vec::len))
         .min()
-        .ok_or_else(|| SaddleError::Invalid("TRICS diagnostic maze has no path".into()))?;
+        .ok_or_else(|| SaddleError::Solver("TRICS diagnostic maze has no path".into()))?;
     candidates
         .into_iter()
         .rev()
         .flatten()
         .find(|segments| segments.len() == minimum)
-        .ok_or_else(|| SaddleError::Invalid("TRICS diagnostic maze has no path".into()))
+        .ok_or_else(|| SaddleError::Solver("TRICS diagnostic maze has no path".into()))
 }
 
 fn drive_maze(
@@ -2638,6 +2676,67 @@ mod tests {
             .with_max_atom_move(0.5);
         assert!(matches!(
             system.back_transform(near_linear.view(), impossible.view(), &strict),
+            Err(SaddleError::Solver(_))
+        ));
+    }
+
+    #[test]
+    fn back_transform_damps_a_singular_trial_step() {
+        let start = array![-0.5, 0.0, 0.0, 0.5, 0.0, 0.0];
+        let system = TricSystem::new(start.view(), &TricConfig::default()).unwrap();
+        assert!(matches!(
+            system.primitives()[0],
+            TricPrimitive::Distance(0, 1)
+        ));
+        let mut collapse = Array1::zeros(system.primitives().len());
+        collapse[0] = -1.0;
+        let displacement = system.basis().t().dot(&collapse);
+        let unbounded = TricInversionConfig::default().with_max_atom_move(1.0);
+
+        let two_steps = system.back_transform(
+            start.view(),
+            displacement.view(),
+            &unbounded.clone().with_max_iterations(2),
+        );
+        assert!(
+            matches!(&two_steps, Err(SaddleError::Solver(reason)) if reason.contains("did not converge")),
+            "{two_steps:?}"
+        );
+
+        let recovered = system
+            .back_transform(start.view(), displacement.view(), &unbounded)
+            .unwrap();
+        assert!(distance(recovered.view(), 0, 1).unwrap() < 1e-6);
+
+        let coincident = array![0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let singular_start =
+            system.back_transform(coincident.view(), displacement.view(), &unbounded);
+        assert!(
+            matches!(&singular_start, Err(SaddleError::Solver(reason)) if reason.contains("singularity")),
+            "{singular_start:?}"
+        );
+    }
+
+    #[test]
+    fn a_blocked_diagnostic_maze_is_a_solver_failure() {
+        let angles = [60.0_f64, 0.0, -60.0];
+        let mut initial = Array2::zeros((angles.len(), 9));
+        for (image, degrees) in angles.into_iter().enumerate() {
+            let (sine, cosine) = degrees.to_radians().sin_cos();
+            initial
+                .row_mut(image)
+                .assign(&array![-1.0, 0.0, 0.0, 0.0, 0.0, 0.0, cosine, sine, 0.0]);
+        }
+        let config = TricsConfig::default().with_diagnostic_threshold(0);
+        let blocked = trics_path(initial.view(), &config);
+        assert!(
+            matches!(&blocked, Err(SaddleError::Solver(reason)) if reason.contains("maze")),
+            "{blocked:?}"
+        );
+        let mut closed = Array2::from_elem((3, 3), 3_u8);
+        closed[(0, 0)] = 0;
+        assert!(matches!(
+            maze_path(closed.view(), 0),
             Err(SaddleError::Solver(_))
         ));
     }
