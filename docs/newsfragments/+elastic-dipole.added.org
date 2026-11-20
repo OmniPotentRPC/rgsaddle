@@ -1,0 +1,1 @@
+- =ElasticConstants= and =AnisotropicGreen= evaluate point-defect interactions from a general stiffness tensor with Barnett's analytic Green-function derivative. =PeriodicElastic= applies a spherical periodic-image correction to pair landscapes and harmonic rate catalogues and reports angular and image-shell error estimates.
