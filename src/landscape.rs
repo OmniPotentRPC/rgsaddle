@@ -19,8 +19,10 @@
 //! Peña-Torres, and Jónsson, J. Chem. Theory Comput. 21, 7935 (2025),
 //! doi:10.1021/acs.jctc.5c00866), the search pushes a finite step along
 //! one unstable eigenvector and follows index-(k-1) HiOSD dynamics until
-//! that search converges. The point is certified, stored if it is new,
-//! and the search repeats on it. Index 0 is a minimum: the leg is an
+//! that search converges. The point is certified and stored when its
+//! index is exactly one less than the parent. A leg that lands on any
+//! other index returns [`SaddleError::Solver`], and the search repeats
+//! on an accepted child. Index 0 is a minimum: the leg is an
 //! [`rgmin`](https://github.com/OmniPotentRPC/rgmin) solve on the true
 //! gradient, not a reflected force.
 //!
@@ -585,9 +587,9 @@ impl LandscapeSession {
             position.view(),
             self.config.duplicate_distance,
         )? {
-            if nodes[known].index >= parent_index {
+            if nodes[known].index != child_index {
                 return Err(SaddleError::Solver(format!(
-                    "downward leg from node {} direction {} returned index {} at node {known}",
+                    "downward leg from node {} direction {} returned index {} at node {known}, child index is {child_index}",
                     leg.parent, leg.direction, nodes[known].index
                 )));
             }
@@ -599,9 +601,9 @@ impl LandscapeSession {
                 "child saddle-index certificate did not converge".into(),
             ));
         }
-        if certified.index.index >= parent_index {
+        if certified.index.index != child_index {
             return Err(SaddleError::Solver(format!(
-                "downward leg from node {} direction {} certified index {}",
+                "downward leg from node {} direction {} certified index {}, child index is {child_index}",
                 leg.parent, leg.direction, certified.index.index
             )));
         }

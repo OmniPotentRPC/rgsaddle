@@ -1,0 +1,2 @@
+~IndexKSession~ counts a requested curvature as negative only when it lies below ~NEGATIVE_CURVATURE_TOL~ (1e-3), the default of ~SaddleIndexCheck::negative_tol~. A converged index-k search then certifies as that index.
+~LandscapeSession~ stores a downward edge only when the certified child index is one less than the parent.
