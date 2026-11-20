@@ -9,6 +9,7 @@ use crate::{BOLTZMANN_EV_PER_K, Cell, SaddleError, angular_scale_rad_s};
 
 /// Controls an isotropic NPT lattice run.
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub struct NptConfig {
     /// Number of conventional cells along each lattice vector.
     pub repeats: usize,
@@ -92,6 +93,36 @@ impl NptConfig {
         self
     }
 
+    /// Set the velocity-Verlet time step.
+    pub fn with_timestep_s(mut self, timestep_s: f64) -> Self {
+        self.timestep_s = timestep_s;
+        self
+    }
+
+    /// Set the Langevin friction.
+    pub fn with_langevin_gamma_per_s(mut self, gamma_per_s: f64) -> Self {
+        self.langevin_gamma_per_s = gamma_per_s;
+        self
+    }
+
+    /// Set the Berendsen pressure-coupling time.
+    pub fn with_berendsen_tau_s(mut self, tau_s: f64) -> Self {
+        self.berendsen_tau_s = tau_s;
+        self
+    }
+
+    /// Set the isotropic compressibility.
+    pub fn with_compressibility_per_ev_a3(mut self, compressibility: f64) -> Self {
+        self.compressibility_per_ev_a3 = compressibility;
+        self
+    }
+
+    /// Set the target thermodynamic pressure.
+    pub fn with_target_pressure_ev_a3(mut self, pressure: f64) -> Self {
+        self.target_pressure_ev_a3 = pressure;
+        self
+    }
+
     /// Set the thermostat seed.
     pub fn with_seed(mut self, seed: u64) -> Self {
         self.seed = seed;
@@ -101,6 +132,7 @@ impl NptConfig {
 
 /// Block-averaged result of an NPT lattice run.
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub struct NptReport {
     /// Total number of integration steps.
     pub steps: usize,
@@ -110,11 +142,18 @@ pub struct NptReport {
     pub mean_lattice_a: f64,
     /// Standard error of the lattice block means in Angstrom.
     pub lattice_standard_error: f64,
+    /// Effective number of production-step lattice samples after correlation.
+    pub lattice_effective_samples: f64,
     /// Mean thermodynamic pressure in eV per cubic Angstrom.
     pub mean_pressure: f64,
     /// Standard error of the pressure block means.
     pub pressure_standard_error: f64,
-    /// Whether `|mean pressure - target| <= 2 SE`, including exact zero.
+    /// Effective number of production-step pressure samples after correlation.
+    pub pressure_effective_samples: f64,
+    /// Whether pressure blocking found a standard-error plateau.
+    pub pressure_statistics_resolved: bool,
+    /// Whether `|mean pressure - target| <= 2 SE`, including exact zero,
+    /// with resolved statistics and at least 16 effective samples.
     pub pressure_converged: bool,
 }
 
@@ -164,54 +203,123 @@ fn determinant(cell: Cell) -> f64 {
         + h[0][2] * (h[1][0] * h[2][1] - h[1][1] * h[2][0])
 }
 
-fn block_statistics(values: &[f64], block_steps: usize) -> (f64, f64, usize) {
-    let blocks = values.len() / block_steps;
-    let means: Vec<f64> = values[..blocks * block_steps]
-        .chunks_exact(block_steps)
-        .map(|block| block.iter().sum::<f64>() / block.len() as f64)
-        .collect();
-    let mean = means.iter().sum::<f64>() / blocks as f64;
-    let variance = if blocks > 1 {
-        means
-            .iter()
-            .map(|value| (value - mean).powi(2))
-            .sum::<f64>()
-            / (blocks - 1) as f64
-    } else {
-        0.0
+const MIN_EFFECTIVE_SAMPLES: f64 = 16.0;
+const MIN_PLATEAU_BLOCKS: usize = 16;
+
+#[derive(Clone, Copy, Debug)]
+struct BlockEstimate {
+    mean: f64,
+    standard_error: f64,
+    effective_samples: f64,
+    resolved: bool,
+}
+
+fn sample_variance(values: &[f64], mean: f64) -> f64 {
+    if values.len() < 2 {
+        return 0.0;
+    }
+    values
+        .iter()
+        .map(|value| (value - mean).powi(2))
+        .sum::<f64>()
+        / (values.len() - 1) as f64
+}
+
+/// Flyvbjerg--Petersen blocking estimate for a correlated series.
+///
+/// Adjacent values are repeatedly averaged until two successive changes in
+/// the standard error overlap their sampling uncertainties. See Flyvbjerg
+/// and Petersen, J. Chem. Phys. 91, 461--466 (1989),
+/// doi:10.1063/1.457480. Failure to find that plateau is explicit.
+fn block_statistics(values: &[f64]) -> BlockEstimate {
+    let mean = values.iter().sum::<f64>() / values.len() as f64;
+    let raw_variance = sample_variance(values, mean);
+    if raw_variance == 0.0 {
+        return BlockEstimate {
+            mean,
+            standard_error: 0.0,
+            effective_samples: values.len() as f64,
+            resolved: true,
+        };
+    }
+
+    let mut blocked = values.to_vec();
+    let mut levels = Vec::new();
+    while blocked.len() >= MIN_PLATEAU_BLOCKS {
+        let level_mean = blocked.iter().sum::<f64>() / blocked.len() as f64;
+        let variance = sample_variance(&blocked, level_mean);
+        let standard_error = (variance / blocked.len() as f64).sqrt();
+        let uncertainty = standard_error / (2.0 * (blocked.len() - 1) as f64).sqrt();
+        levels.push((standard_error, uncertainty));
+
+        let pairs = blocked.len() / 2;
+        for index in 0..pairs {
+            blocked[index] = 0.5 * (blocked[2 * index] + blocked[2 * index + 1]);
+        }
+        blocked.truncate(pairs);
+    }
+
+    let stable = |left: (f64, f64), right: (f64, f64)| {
+        (left.0 - right.0).abs() <= 2.0 * left.1.hypot(right.1)
     };
-    (mean, (variance / blocks as f64).sqrt(), blocks)
+    let plateau = levels
+        .windows(3)
+        .rev()
+        .find(|window| stable(window[0], window[1]) && stable(window[1], window[2]));
+    let resolved = plateau.is_some();
+    let standard_error = plateau
+        .map(|window| window.iter().map(|level| level.0).fold(0.0, f64::max))
+        .unwrap_or_else(|| levels.iter().map(|level| level.0).fold(0.0, f64::max));
+    let effective_samples = if standard_error > 0.0 {
+        (raw_variance / standard_error.powi(2)).min(values.len() as f64)
+    } else {
+        values.len() as f64
+    };
+    BlockEstimate {
+        mean,
+        standard_error,
+        effective_samples,
+        resolved,
+    }
 }
 
 fn summarize(lattice: &[f64], pressure: &[f64], config: NptConfig, steps: usize) -> NptReport {
-    let (mean_lattice_a, lattice_standard_error, blocks) =
-        block_statistics(lattice, config.block_steps);
-    let (mean_pressure, pressure_standard_error, _) =
-        block_statistics(pressure, config.block_steps);
-    let residual = (mean_pressure - config.target_pressure_ev_a3).abs();
-    let pressure_converged = if pressure_standard_error == 0.0 {
+    let complete = lattice.len() / config.block_steps * config.block_steps;
+    let lattice = block_statistics(&lattice[..complete]);
+    let pressure = block_statistics(&pressure[..complete]);
+    let residual = (pressure.mean - config.target_pressure_ev_a3).abs();
+    let within_error = if pressure.standard_error == 0.0 {
         residual == 0.0
     } else {
-        residual <= 2.0 * pressure_standard_error
+        residual <= 2.0 * pressure.standard_error
     };
+    let pressure_converged =
+        within_error && pressure.resolved && pressure.effective_samples >= MIN_EFFECTIVE_SAMPLES;
     NptReport {
         steps,
-        blocks,
-        mean_lattice_a,
-        lattice_standard_error,
-        mean_pressure,
-        pressure_standard_error,
+        blocks: complete / config.block_steps,
+        mean_lattice_a: lattice.mean,
+        lattice_standard_error: lattice.standard_error,
+        lattice_effective_samples: lattice.effective_samples,
+        mean_pressure: pressure.mean,
+        pressure_standard_error: pressure.standard_error,
+        pressure_effective_samples: pressure.effective_samples,
+        pressure_statistics_resolved: pressure.resolved,
         pressure_converged,
     }
 }
 
-/// Run isotropic NPT dynamics and return block standard errors.
+/// Run isotropic NPT dynamics and return autocorrelation-aware standard errors.
 ///
 /// `evaluate` returns `(energy, gradient, tension-positive stress)` for
 /// Cartesian `positions` and the row-major `cell`.  Energy is accepted for
 /// evaluator compatibility but is not used by the integrator.  A run extends
 /// by `extension_steps` until the zero-pressure rule is met or
 /// `maximum_steps` is reached.
+///
+/// Standard errors use recursive blocking of adjacent samples and require a
+/// resolved plateau; see Flyvbjerg and Petersen, J. Chem. Phys. 91, 461--466
+/// (1989), doi:10.1063/1.457480.
 pub fn npt_lattice<F>(
     positions: &mut Array1<f64>,
     cell: &mut Cell,
@@ -325,4 +433,54 @@ where
         }
     }
     report.ok_or_else(|| SaddleError::Invalid("NPT run produced no report".into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn blocking_recovers_the_ar1_mean_variance() {
+        let rho = 0.99_f64;
+        let count = 1 << 17;
+        let mut rng = Rng::new(0x5eed);
+        let mut value = rng.normal() / (1.0 - rho * rho).sqrt();
+        let mut series = Vec::with_capacity(count);
+        for _ in 0..count {
+            value = rho * value + rng.normal();
+            series.push(value);
+        }
+
+        let estimate = block_statistics(&series);
+        let stationary_variance = 1.0 / (1.0 - rho * rho);
+        let expected_variance_of_mean =
+            stationary_variance * (1.0 + rho) / ((1.0 - rho) * count as f64);
+        let ratio = estimate.standard_error.powi(2) / expected_variance_of_mean;
+        assert!(estimate.resolved, "{estimate:?}");
+        assert!((0.75..1.25).contains(&ratio), "{estimate:?}, ratio {ratio}");
+
+        let expected_effective = count as f64 * (1.0 - rho) / (1.0 + rho);
+        let effective_ratio = estimate.effective_samples / expected_effective;
+        assert!(
+            (0.75..1.25).contains(&effective_ratio),
+            "{estimate:?}, effective ratio {effective_ratio}"
+        );
+    }
+
+    #[test]
+    fn pressure_with_too_few_effective_samples_is_not_converged() {
+        let series = [vec![-1.0; 16], vec![1.0; 16]].concat();
+        let count = series.len();
+        let target = series.iter().sum::<f64>() / count as f64;
+        let config = NptConfig::default()
+            .with_block_steps(1)
+            .with_target_pressure_ev_a3(target);
+        let report = summarize(&series, &series, config, count);
+
+        assert!(
+            report.pressure_effective_samples < MIN_EFFECTIVE_SAMPLES,
+            "{report:?}"
+        );
+        assert!(!report.pressure_converged, "{report:?}");
+    }
 }
