@@ -591,6 +591,11 @@ pub struct TrajectoryPoint {
 /// Knots are the normalized polyline arc length of the mass-weighted
 /// images. Both splines use [`SplineEnds::Natural`]. [`Self::half`] integrates
 /// the constrained dynamics of `-V` in that normalized coordinate.
+///
+/// On a fixed-energy tunnelling path from [`crate::LineNebSession`]
+/// this is the dynamics along the path that Ásgeirsson, Arnaldsson, and
+/// Jónsson, J. Chem. Phys. 148, 102334 (2018), doi:10.1063/1.5007180,
+/// use to find the temperature at which the path is an instanton.
 #[derive(Clone, Debug)]
 pub struct FixedEnergyTrajectory {
     coordinate: Spline,

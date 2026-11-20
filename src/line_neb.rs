@@ -1,10 +1,33 @@
 //! Fixed-energy line-integral NEB (LI-NEB).
 //!
-//! This is the microcanonical path optimization of Ásgeirsson,
-//! Arnaldsson, and Jónsson, J. Chem. Phys. 148, 102334 (2018),
-//! doi:10.1063/1.5007180. Coordinates are converted to
-//! `q_i = sqrt(m_i) x_i`; the abbreviated action and all projections
-//! are evaluated in that Euclidean, mass-scaled chart.
+//! The band is the nudged elastic band as practised in Goswami,
+//! arXiv:2603.14737 (2026), doi:10.48550/arXiv.2603.14737, and
+//! Goswami, Gunde, and Jónsson, Front. Chem. 14, 1807063 (2026),
+//! doi:10.3389/fchem.2026.1807063, with the improved tangent of
+//! Henkelman and Jónsson, J. Chem. Phys. 113, 9978 (2000),
+//! doi:10.1063/1.1323224. Its objective is the line-integral extension
+//! of Ásgeirsson, Arnaldsson, and Jónsson, J. Chem. Phys. 148, 102334
+//! (2018), doi:10.1063/1.5007180: the optimal JWKB tunnelling path at a
+//! fixed energy, which minimizes the abbreviated action between two
+//! turning points. The optimizer is the global quick-min of eOn,
+//! Goswami et al., eOn v2.9.0.1 (2026), doi:10.5281/zenodo.18529496.
+//!
+//! Coordinates are converted to `q_i = sqrt(m_i) x_i`; the abbreviated
+//! action and all projections are evaluated in that Euclidean,
+//! mass-scaled chart. [`fixed_energy_action`] is the trapezoidal
+//! action over every image. The interior images move under the
+//! transverse action force and a tangential spring; each endpoint moves
+//! under the spring perpendicular to its force and a restraint that
+//! pulls its energy to `E`. [`LineNebStatus::Converged`] needs all three
+//! within the force tolerance.
+//!
+//! [`fixed_energy_mep_seed`] builds a starting band from an index-one
+//! saddle and its unstable mode, for instance from a climbing-image band
+//! on an IDPP path (Goswami, MethodsX (2026),
+//! doi:10.1016/j.mex.2026.103899). [`crate::FixedEnergyTrajectory`]
+//! integrates the motion along a converged path, the dynamics
+//! Ásgeirsson, Arnaldsson, and Jónsson use to find the temperature at
+//! which the path is an instanton.
 //!
 //! Units are deliberately not prescribed. Positions, potential
 //! energies, masses, the reduced Planck constant, spring constant,
