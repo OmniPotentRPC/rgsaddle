@@ -274,6 +274,41 @@ fn balanced_barriers_close_on_the_end_gap() {
     assert!(balanced_barriers((1.0, 0.1), (f64::NAN, 0.1), 0.0).is_err());
 }
 
+#[test]
+fn balanced_barriers_handle_tiny_positive_errors() {
+    let base = balanced_barriers((1.0, 1.0e-153), (2.0, 1.0e-153), 0.25).expect("1e-153");
+    assert_eq!(base.forward, 1.625);
+    assert_eq!(base.reverse, 1.375);
+    assert_eq!(base.error, 0.625);
+    assert_eq!(base.drift, -1.25);
+
+    for err in [1.0e-154, 1.0e-300, f64::MIN_POSITIVE] {
+        let out = balanced_barriers((1.0, err), (2.0, err), 0.25).expect("equal tiny errors");
+        assert_eq!(out.forward, base.forward);
+        assert_eq!(out.reverse, base.reverse);
+        assert_eq!(out.error, base.error);
+        assert_eq!(out.drift, base.drift);
+
+        let zero_drift =
+            balanced_barriers((1.0, err), (2.0, err), -1.0).expect("zero drift tiny errors");
+        assert!(zero_drift.forward.is_finite());
+        assert!(zero_drift.reverse.is_finite());
+        assert!(zero_drift.error.is_finite() && zero_drift.error >= 0.0);
+        assert_eq!(zero_drift.drift, 0.0);
+
+        let skewed =
+            balanced_barriers((1.0, err), (2.0, 1.0), 0.25).expect("skewed tiny/unit errors");
+        assert_eq!(skewed.forward, 1.0);
+        assert_eq!(skewed.reverse, 0.75);
+        assert!(skewed.error.is_finite());
+    }
+
+    assert!(matches!(
+        balanced_barriers((f64::MAX, 1.0), (f64::MAX, 1.0), -f64::MAX),
+        Err(SaddleError::NonFinite(_))
+    ));
+}
+
 /// The same profile anchored on its forward barrier: the reverse barrier
 /// is the forward one less the end gap, the error is the forward one, and
 /// the drift is the same -0.6.
