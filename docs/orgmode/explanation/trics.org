@@ -114,6 +114,8 @@ overlapping segment endpoints is at most
 The final path takes images from the left segment up to the midpoint of each
 overlap and from the right segment after it.  If one system is stable across
 the whole path, TRICS interpolates once and skips the splice iteration.
+Three images split into two segments leave no interior image to splice, so
+the initial path is returned with zero splice iterations.
 
 The coordinate construction is kept in =rgsaddle::trics= behind an
 engine-independent Cartesian boundary.  It can therefore serve future
