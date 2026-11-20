@@ -26,10 +26,12 @@ use std::collections::BTreeMap;
 use crate::defect_pair::{SiteOutcome, VolumeSite};
 use crate::error::SaddleError;
 
-/// Apply a transmission coefficient to a PAFI rate and its logarithmic error.
+/// Apply a transmission coefficient to a PAFI rate and its logarithmic
+/// standard error.
 ///
-/// The returned rate is `kappa * rate` and
-/// `sigma_ln² = log_error² + (kappa_error / kappa)²`. The exact identity
+/// Returns `(kappa * rate, sigma_ln)` where `sigma_ln` is the combined
+/// logarithmic standard error `hypot(log_error, kappa_error / kappa)` (so
+/// its square is `log_error² + (kappa_error / kappa)²`). The exact identity
 /// correction `(1, 0)` returns both inputs without floating-point work, so
 /// adding an explicit unit coefficient cannot perturb an existing network.
 pub fn transmitted_pafi_rate(
