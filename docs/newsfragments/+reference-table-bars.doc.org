@@ -1,0 +1,1 @@
+The reference index and the PAFI reference no longer put a vertical bar inside an Org table cell, so the exported reStructuredText grids build under Sphinx warnings-as-errors.
