@@ -1,0 +1,5 @@
+=trics_path= constructs molecular paths in nonredundant translation rotation
+internal coordinates, changes coordinate charts where the diagnostic marks a
+singularity, and splices overlapping segments.  =PathInitializer= selects
+linear, IDPP, or TRICS starts for band drivers, and AutoNEB can insert TRICS
+images.  C ABI minor 47 adds =rgsaddle_trics_path=.

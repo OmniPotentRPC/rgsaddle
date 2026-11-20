@@ -45,3 +45,19 @@ that local segment fails or produces a degenerate midpoint, insertion returns a
 solver error.  Periodic AutoNEB rejects TRICS because rotations and the
 diagnostic require unwrapped free-space coordinates.
 
+* C
+ABI minor 47 adds =rgsaddle_trics_path=.  The caller supplies an initial path
+from linear interpolation, =rgsaddle_idpp_path=, or another source.  Input and
+output each hold =n_images * 3 * n_atoms= doubles in image-major order.
+
+#+begin_src c
+rgsaddle_status_t status = rgsaddle_trics_path(
+    n_images, n_atoms, initial,
+    50, 1.0e-8, 0.1,
+    1, 0.0018, 1000,
+    output);
+#+end_src
+
+The C function uses geometry-only bond inference.  Rust callers that know the
+topology can set =TricConfig::bonds= explicitly.  Python does not expose an
+IDPP path initializer, so there is no separate Python TRICS wrapper.
