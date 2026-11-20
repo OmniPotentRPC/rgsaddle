@@ -20,6 +20,9 @@ The top-level =meson.build= provides the headers as the dependency =rgsaddle-hea
 * Grow the band with AutoNEB
 =howto/autoneb= is the AutoNEB loop: insert where the resolution is worst, relax a local window, and climb. The tuning sits on =BandConfig::autoneb=. A weighted spring supplied by the host is refused for now; zoom-NEB will recompute it.
 
+* Fixed-energy tunnelling path (LI-NEB)
+=howto/line-neb= is =LineNebSession=: the optimal JWKB tunnelling path at a fixed energy below the barrier, found by the line-integral extension of the nudged elastic band of Ásgeirsson, Arnaldsson, and Jónsson (2018). The action is the trapezoid over every image, and an endpoint below the fixed energy is refused. =fixed_energy_mep_seed= builds the starting band from a saddle and its mode. =Converged= needs the transverse action force, the interior spring force, and the endpoint force within tolerance. =FixedEnergyTrajectory= integrates the motion along the converged path.
+
 * Pick tangents, springs, projections
 | Kind             | Variants                                                             |
 |------------------+----------------------------------------------------------------------|
