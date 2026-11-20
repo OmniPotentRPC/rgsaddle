@@ -1164,6 +1164,10 @@ impl BandWork {
                 Self::store_force(&mut eval.driving, &mut self.spare_driving, force);
             }
             None => {
+                // This residual was assembled without the metric. Keeping
+                // a driving force beside it would let the next metric
+                // read return this residual as if it were the
+                // preconditioned one.
                 if eval.driving.len() > self.spare_driving.len() {
                     std::mem::swap(&mut eval.driving, &mut self.spare_driving);
                 }
@@ -3902,6 +3906,31 @@ impl BandSession {
         self.refine_step(surface)
     }
 
+    /// Assemble the accepted geometry, including the preconditioned
+    /// driving force when a metric is installed. A plain residual
+    /// assembly would clear that force.
+    fn assemble_accepted<S: BandSurface>(
+        &self,
+        surface: &S,
+        x: ArrayView1<f64>,
+    ) -> Result<(), SaddleError> {
+        let n_images = self.positions.nrows();
+        let metrics = self.exp.as_ref().map(|exp| BandMetrics {
+            per_image: exp.metrics.as_slice(),
+            free: exp.free.as_deref(),
+        });
+        assemble_band_with(
+            &self.config,
+            &self.state,
+            surface,
+            self.positions.row(0),
+            self.positions.row(n_images - 1),
+            x,
+            metrics,
+        )?;
+        Ok(())
+    }
+
     fn step_inner<S: BandSurface>(&mut self, surface: &S) -> Result<BandReport, SaddleError> {
         if self.solid.is_some() {
             if self.rtr.is_some() {
@@ -3947,50 +3976,52 @@ impl BandSession {
 
         let endpoint_first = self.positions.row(0).to_owned();
         let endpoint_last = self.positions.row(n_images - 1).to_owned();
-        let config = &self.config;
-        let state = &self.state;
-        let metrics = self.exp.as_ref().map(|e| BandMetrics {
-            per_image: e.metrics.as_slice(),
-            free: e.free.as_deref(),
-        });
         let mut x = self.interior_flat();
-        if config.dynamic.is_some() {
-            state.dynamic_run().begin_step(x.clone());
-            // The solver reuses its cached force at this geometry, so
-            // the oracle's first call is a trial and would not record
-            // the mask. Record it from the evaluation already stored.
-            seed_dynamic_decision(state, x.view(), config.force_tol);
-        }
-        let oracle = Oracle::unbounded(interior_dof, |query: ArrayView1<f64>| {
-            let pinned = if config.dynamic.is_some() {
-                state.dynamic_run().pin(query)
-            } else {
-                None
-            };
-            let y = match &pinned {
-                Some(pinned) => pinned.view(),
-                None => query,
-            };
-            match assemble_band_with(
-                config,
-                state,
-                surface,
-                endpoint_first.view(),
-                endpoint_last.view(),
-                y,
-                metrics,
-            ) {
-                Ok((e, f, _, driving)) => (e, -driving.unwrap_or(f)),
-                Err(err) => {
-                    state.record_error(err);
-                    (f64::INFINITY, Array1::zeros(interior_dof))
-                }
-            }
-        });
-
         let before = x.clone();
-        let stepped = self.solver.step(&oracle, &mut x);
-        drop(oracle);
+        let stepped = {
+            let config = &self.config;
+            let state = &self.state;
+            let metrics = self.exp.as_ref().map(|e| BandMetrics {
+                per_image: e.metrics.as_slice(),
+                free: e.free.as_deref(),
+            });
+            if config.dynamic.is_some() {
+                state.dynamic_run().begin_step(x.clone());
+                // The solver reuses its cached force at this geometry, so
+                // the oracle's first call is a trial and would not record
+                // the mask. Record it from the evaluation already stored.
+                seed_dynamic_decision(state, x.view(), config.force_tol);
+            }
+            let oracle = Oracle::unbounded(interior_dof, |query: ArrayView1<f64>| {
+                let pinned = if config.dynamic.is_some() {
+                    state.dynamic_run().pin(query)
+                } else {
+                    None
+                };
+                let y = match &pinned {
+                    Some(pinned) => pinned.view(),
+                    None => query,
+                };
+                match assemble_band_with(
+                    config,
+                    state,
+                    surface,
+                    endpoint_first.view(),
+                    endpoint_last.view(),
+                    y,
+                    metrics,
+                ) {
+                    Ok((e, f, _, driving)) => (e, -driving.unwrap_or(f)),
+                    Err(err) => {
+                        state.record_error(err);
+                        (f64::INFINITY, Array1::zeros(interior_dof))
+                    }
+                }
+            });
+            let stepped = self.solver.step(&oracle, &mut x);
+            drop(oracle);
+            stepped
+        };
         // The surface error is the root cause of whatever the solver
         // did with an infinite energy and a zero gradient, so it
         // outranks a solver error. `x` is a local copy; the session's
@@ -4031,10 +4062,12 @@ impl BandSession {
         self.iteration += 1;
 
         // A solver that ends on a point it did not evaluate last (a
-        // line search that backtracked) is assembled once more; the
-        // cache answers when the accepted point was the last one, and
-        // the start of the step comes back from the previous slot when
-        // the stepper rejected its trial and stayed there.
+        // line search that backtracked) is assembled once more. That
+        // assembly carries the metric on every stepper: a plain residual
+        // would drop the driving force, and the next step would solve
+        // the metric again. The cache answers when the accepted point
+        // was the last evaluation, and the start of the step comes back
+        // from the previous slot when the stepper rejected its trial.
         let at_last = self.state.restore_at(&x)
             && self
                 .state
@@ -4044,14 +4077,7 @@ impl BandSession {
                 .as_ref()
                 .is_some_and(|l| l.projected.len() == interior_dof);
         if !at_last {
-            assemble_band(
-                &self.config,
-                &self.state,
-                surface,
-                endpoint_first.view(),
-                endpoint_last.view(),
-                x.view(),
-            )?;
+            self.assemble_accepted(surface, x.view())?;
         }
         let max_force = self.state.last_max_force();
         let status = if max_force <= self.config.force_tol || dynamic_settled {
@@ -4680,5 +4706,100 @@ mod tests {
         assert_eq!(session.state.pcg_solves.load(Ordering::Relaxed), solves);
         assert_eq!(first.1, second.1);
         assert_eq!(first.3, second.3);
+    }
+
+    struct Harmonic;
+
+    impl BandSurface for Harmonic {
+        fn eval(
+            &self,
+            positions: ArrayView2<f64>,
+            energies: &mut Array1<f64>,
+            gradients: &mut Array2<f64>,
+        ) -> Result<(), SaddleError> {
+            for (i, row) in positions.outer_iter().enumerate() {
+                let mut energy = 0.0;
+                for (c, &q) in row.iter().enumerate() {
+                    let k = 1.0 + 0.1 * c as f64;
+                    energy += 0.5 * k * q * q;
+                    gradients[(i, c)] = k * q;
+                }
+                energies[i] = energy;
+            }
+            Ok(())
+        }
+    }
+
+    fn metric_view(session: &BandSession) -> Option<BandMetrics<'_>> {
+        session.exp.as_ref().map(|exp| BandMetrics {
+            per_image: exp.metrics.as_slice(),
+            free: exp.free.as_deref(),
+        })
+    }
+
+    #[test]
+    fn fire_finish_off_the_last_evaluation_keeps_the_driving_force() {
+        let positions = Array2::from_shape_vec(
+            (3, 9),
+            vec![
+                0.0, 0.0, 0.0, 1.1, 0.0, 0.0, 0.0, 1.2, 0.1, 0.2, 0.1, 0.0, 1.2, 0.2, 0.0, 0.1,
+                1.3, 0.2, 0.4, 0.2, 0.0, 1.3, 0.4, 0.1, 0.2, 1.4, 0.3,
+            ],
+        )
+        .expect("positions");
+        let config = BandConfig::default()
+            .with_method(Method::fire(rgmin::FireKind::V2))
+            .with_climbing(None)
+            .with_min_mode(None)
+            .with_saddle_check(None)
+            .with_remove_translation(false)
+            .with_exp_precon(ExpBandPrecon::default().with_mu(1.0));
+        let mut session = BandSession::new(config, positions).expect("band");
+        assert!(!matches!(session.config.method, Method::Ode12r));
+        let surface = Harmonic;
+        let report = session.step(&surface).expect("fire step");
+        assert_eq!(report.status, BandStatus::Running);
+        let accepted = session.interior_flat();
+        let solves = session.state.pcg_solves.load(Ordering::Relaxed);
+        let _ = assemble_band_with(
+            &session.config,
+            &session.state,
+            &surface,
+            session.positions.row(0),
+            session.positions.row(2),
+            accepted.view(),
+            metric_view(&session),
+        )
+        .expect("accepted geometry is cached");
+        assert_eq!(
+            session.state.pcg_solves.load(Ordering::Relaxed),
+            solves,
+            "the fire step left no driving force at the accepted geometry"
+        );
+
+        // The finish used when the accepted point is not the oracle's
+        // last evaluation. FIRE reaches it when a step leaves that point.
+        let mut off = accepted.clone();
+        off[0] += 0.05;
+        let before = session.state.pcg_solves.load(Ordering::Relaxed);
+        session
+            .assemble_accepted(&surface, off.view())
+            .expect("finish");
+        let finished = session.state.pcg_solves.load(Ordering::Relaxed);
+        assert!(
+            finished > before,
+            "the finish assembled a plain residual and did not solve the driving force"
+        );
+        let _ = assemble_band_with(
+            &session.config,
+            &session.state,
+            &surface,
+            session.positions.row(0),
+            session.positions.row(2),
+            off.view(),
+            metric_view(&session),
+        )
+        .expect("cached finish");
+        assert_eq!(session.state.pcg_solves.load(Ordering::Relaxed), finished);
     }
 }
