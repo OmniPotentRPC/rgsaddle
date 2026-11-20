@@ -1228,9 +1228,9 @@ pub fn vineyard_prefactor(
             "Vineyard needs at least one positive minimum eigenvalue".into(),
         ));
     }
-    if min_lambda.len() < sad_lambda.len() {
+    if min_lambda.len() != sad_lambda.len() + 1 {
         return Err(SaddleError::Invalid(
-            "the saddle product is longer than the minimum product".into(),
+            "Vineyard products need exactly one missing saddle mode".into(),
         ));
     }
     let mut log_ratio = 0.0;

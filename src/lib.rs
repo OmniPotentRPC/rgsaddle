@@ -89,6 +89,7 @@ pub mod region;
 pub mod relax;
 pub mod saddle_index;
 pub mod solid_dimer;
+pub mod solid_prefactor;
 pub mod solid_state;
 pub mod spring;
 pub mod ssneb;
@@ -223,6 +224,10 @@ pub use solid_dimer::{
     CellMask, IndexCheck, IndexReport, JointChart, STRAIN_VOIGT, SolidDimer, SolidDimerConfig,
     SolidDimerReport, StressCheck, check_cauchy_stress, finite_difference_cauchy_stress, index_at,
     virial,
+};
+pub use solid_prefactor::{
+    JointHessian, JointHessianConfig, JointVineyard, JointVineyardConfig, joint_hessian,
+    joint_vineyard_prefactor,
 };
 pub use spring::SpringKind;
 pub use ssneb::{SolidImage, SolidNeb, joint_coordinate};
