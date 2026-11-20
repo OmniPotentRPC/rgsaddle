@@ -1946,11 +1946,12 @@ typedef enum {
  * rgsaddle_refine_method_t. RGSADDLE_REFINE_NONE clears the stepper and
  * does not read `threshold`. RGSADDLE_REFINE_LBFGS steps with L-BFGS
  * when the convergence force is at or under `threshold`, and with the
- * band method otherwise. `memory` is the number of L-BFGS pairs; 0
- * selects 20. A `threshold` of 0 selects the default 0.5, in the
- * host's force units. A negative or NaN threshold, and an unknown
- * method, are refused. A string, trust-region, solid-state, quick-min,
- * or free-end band keeps its own stepper and ignores this one.
+ * band method otherwise. `memory` is the number of L-BFGS pairs; a
+ * value less than or equal to 0 selects 20. A `threshold` of 0 selects
+ * the default 0.5, in the host's force units. A negative or non-finite
+ * threshold, and an unknown method, are refused. A string, trust-region,
+ * solid-state, quick-min, or free-end band keeps its own stepper and
+ * ignores this one.
  */
 rgsaddle_status_t rgsaddle_band_set_refine(RgsaddleBand *band, int32_t method,
                                            double threshold, int64_t memory);

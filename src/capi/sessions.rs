@@ -3891,8 +3891,9 @@ pub unsafe extern "C" fn rgsaddle_band_free_end_residual(
 /// Install, replace, or clear the per-step refine stepper (ABI minor 46).
 ///
 /// `method` 0 clears it. `method` 1 is L-BFGS with `memory` pairs, or
-/// 20 when `memory` is not positive. A `threshold` of 0 is the default
-/// 0.5. A negative or NaN threshold is refused when a method is set.
+/// 20 when `memory` is less than or equal to 0. A `threshold` of 0 is
+/// the default 0.5. A negative or non-finite threshold is refused when
+/// a method is set.
 ///
 /// # Safety
 /// `band` is a live session or null.
@@ -3910,7 +3911,7 @@ pub unsafe extern "C" fn rgsaddle_band_set_refine(
         0 => None,
         1 => {
             let threshold = if threshold == 0.0 { 0.5 } else { threshold };
-            if threshold.is_nan() || threshold <= 0.0 {
+            if !threshold.is_finite() || threshold <= 0.0 {
                 return RGSADDLE_INVALID_PARAMETER;
             }
             let pairs = if memory > 0 { memory as usize } else { 20 };

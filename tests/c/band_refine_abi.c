@@ -5,6 +5,9 @@
 #include <stdio.h>
 #include <string.h>
 
+_Static_assert(RGSADDLE_REFINE_NONE == 0, "refine NONE value");
+_Static_assert(RGSADDLE_REFINE_LBFGS == 1, "refine LBFGS value");
+
 static rgsaddle_status_t fail(rgsaddle_status_t st, const char *msg) {
   fprintf(stderr, "%s (%s)\n", msg, rgsaddle_status_name(st));
   return st;
@@ -92,6 +95,10 @@ int main(void) {
   if (rgsaddle_band_set_refine(band, RGSADDLE_REFINE_LBFGS, nan(""), 20) !=
       RGSADDLE_INVALID_PARAMETER) {
     return fail(RGSADDLE_INVALID_PARAMETER, "NaN threshold");
+  }
+  if (rgsaddle_band_set_refine(band, RGSADDLE_REFINE_LBFGS, INFINITY, 20) !=
+      RGSADDLE_INVALID_PARAMETER) {
+    return fail(RGSADDLE_INVALID_PARAMETER, "infinite threshold");
   }
   if (rgsaddle_band_set_refine(band, RGSADDLE_REFINE_NONE, -1.0, 20) != RGSADDLE_OK) {
     return fail(RGSADDLE_INVALID_PARAMETER, "none ignores the threshold");
