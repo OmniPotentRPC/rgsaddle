@@ -255,6 +255,10 @@ fn a_refined_band_beats_fire_and_finds_the_same_saddle() {
     for climbing in [None, Some(CiConfig::after(0.5))] {
         let refined = run(plain(climbing).with_refine(lbfgs()), STIFF);
         let fire_only = run(plain(climbing), STIFF);
+        eprintln!(
+            "stiff climbing={climbing:?}: refined {} rows, FIRE {} rows",
+            refined.rows, fire_only.rows
+        );
         assert!(
             refined.rows < fire_only.rows,
             "refined {} rows, FIRE {} rows, climbing {climbing:?}",
@@ -274,6 +278,10 @@ fn a_refined_band_beats_fire_and_finds_the_same_saddle() {
 fn a_tame_band_needs_under_half_the_rows_of_fire() {
     let refined = run(plain(None).with_refine(lbfgs()), TAME);
     let fire_only = run(plain(None), TAME);
+    eprintln!(
+        "tame climbing=None: refined {} rows, FIRE {} rows",
+        refined.rows, fire_only.rows
+    );
     assert!(
         2 * refined.rows < fire_only.rows,
         "refined {} rows, FIRE {} rows",
@@ -284,10 +292,46 @@ fn a_tame_band_needs_under_half_the_rows_of_fire() {
 
 #[test]
 fn a_refine_threshold_that_is_not_positive_is_rejected() {
-    for bad in [0.0, -1.0, f64::NAN] {
+    for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
         let config = plain(None).with_refine(lbfgs().with_threshold(bad));
         assert!(BandSession::new(config, initial_band(9, TAME)).is_err());
     }
+}
+
+#[test]
+fn an_ode12r_refine_rejection_gets_the_ode12r_grace_window() {
+    struct Stiff;
+
+    impl BandSurface for Stiff {
+        fn eval(
+            &self,
+            positions: ArrayView2<f64>,
+            energies: &mut Array1<f64>,
+            gradients: &mut Array2<f64>,
+        ) -> Result<(), SaddleError> {
+            for (i, row) in positions.outer_iter().enumerate() {
+                let y = row[1];
+                energies[i] = 20.0 * y * y;
+                gradients[(i, 1)] = 40.0 * y;
+            }
+            Ok(())
+        }
+    }
+
+    let band = ndarray::array![[0.0, 0.0, 0.0], [1.0, 0.5, 0.0], [2.0, 0.0, 0.0]];
+    let config = plain(None)
+        .with_spring(rgsaddle::SpringKind::Uniform { k: 0.0 })
+        .with_max_move(0.0)
+        .with_refine(
+            StepRefine::default()
+                .with_method(Method::Ode12r)
+                .with_threshold(f64::MAX),
+        );
+    let mut session = BandSession::new(config, band.clone()).unwrap();
+    let report = session.step(&Stiff).unwrap();
+    assert!(session.is_refining());
+    assert_eq!(session.positions(), band.view());
+    assert_eq!(report.surface_rows, 4);
 }
 
 #[test]

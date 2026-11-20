@@ -337,7 +337,8 @@ pub struct StepRefine {
     /// as [`BandConfig::method`] does.
     pub method: Method,
     /// Convergence force, in the host's force units, at or under
-    /// which a step uses [`StepRefine::method`]. The default is 0.5.
+    /// which a step uses [`StepRefine::method`]. It must be finite and
+    /// positive. The default is 0.5.
     pub threshold: f64,
 }
 
@@ -358,9 +359,9 @@ impl Default for StepRefine {
 impl StepRefine {
     pub(crate) fn validate(&self) -> Result<(), SaddleError> {
         check_force_driven(&self.method)?;
-        if self.threshold.is_nan() || self.threshold <= 0.0 {
+        if !self.threshold.is_finite() || self.threshold <= 0.0 {
             return Err(SaddleError::Invalid(
-                "the band refine threshold must be positive".into(),
+                "the band refine threshold must be finite and positive".into(),
             ));
         }
         Ok(())
@@ -3490,23 +3491,19 @@ impl BandSession {
         let Some(threshold) = self.step_switch.as_ref().map(|switch| switch.threshold) else {
             return Ok(false);
         };
-        let settled = self
-            .state
-            .last
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-            .is_some_and(|last| last.x == *x && last.projected.len() == x.len());
-        if !settled {
-            assemble_band(
-                &self.config,
-                &self.state,
-                surface,
-                endpoint_first,
-                endpoint_last,
-                x.view(),
-            )?;
-        }
+        let metrics = self.exp.as_ref().map(|e| BandMetrics {
+            per_image: e.metrics.as_slice(),
+            free: e.free.as_deref(),
+        });
+        assemble_band_with(
+            &self.config,
+            &self.state,
+            surface,
+            endpoint_first,
+            endpoint_last,
+            x.view(),
+            metrics,
+        )?;
         let refining = self.state.last_max_force() <= threshold;
         if let Some(switch) = &mut self.step_switch {
             switch.active = refining;
@@ -3633,11 +3630,19 @@ impl BandSession {
             return Err(err);
         }
         stepped.map_err(|e| SaddleError::Solver(e.to_string()))?;
+        let active_ode12r = if refining {
+            self.config
+                .refine
+                .as_ref()
+                .is_some_and(|spec| matches!(spec.method, Method::Ode12r))
+        } else {
+            matches!(self.config.method, Method::Ode12r)
+        };
         // ODE12r keeps the band where it was when it rejects a trial and
         // retries with a shorter step, so an unchanged band is a stall
         // only once the step has shrunk past any use (64 rejections at
         // a quarter each).
-        if x == before && matches!(self.config.method, Method::Ode12r) && self.unmoved < 64 {
+        if x == before && active_ode12r && self.unmoved < 64 {
             self.unmoved += 1;
         } else {
             self.unmoved = 0;
@@ -4168,5 +4173,153 @@ mod tests {
         // Climbing force (-2, 3, 0, 5, 1, 0) minus its mean (1.5, 2, 0).
         assert_force(&projected, &[-3.5, 1.0, 0.0, 3.5, -1.0, 0.0]);
         assert_eq!(state.ci(), Some(1));
+    }
+
+    struct Bowed;
+
+    impl BandSurface for Bowed {
+        fn eval(
+            &self,
+            positions: ArrayView2<f64>,
+            energies: &mut Array1<f64>,
+            gradients: &mut Array2<f64>,
+        ) -> Result<(), SaddleError> {
+            for (i, row) in positions.outer_iter().enumerate() {
+                energies[i] = 0.5 * row[1] * row[1];
+                gradients[(i, 1)] = row[1];
+            }
+            Ok(())
+        }
+    }
+
+    fn bowed_band() -> Array2<f64> {
+        array![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.4, 0.0],
+            [2.0, 0.6, 0.0],
+            [3.0, 0.4, 0.0],
+            [4.0, 0.0, 0.0]
+        ]
+    }
+
+    fn setter_reassembles_before_refine_choice(setter: impl FnOnce(&mut BandSession)) {
+        let config = BandConfig::default()
+            .with_climbing(None)
+            .with_min_mode(None)
+            .with_saddle_check(None)
+            .with_force_tol(1e-15)
+            .with_refine(StepRefine::default().with_threshold(1e-12));
+        let mut session = BandSession::new(config, bowed_band()).unwrap();
+        session.step(&Bowed).unwrap();
+        assert!(!session.is_refining());
+        setter(&mut session);
+        *session
+            .state
+            .last_max_force
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = 0.0;
+        session.step(&Bowed).unwrap();
+        assert!(!session.is_refining());
+    }
+
+    #[test]
+    fn force_gate_change_reassembles_before_refine_choice() {
+        setter_reassembles_before_refine_choice(|session| {
+            session.set_force_gate(ForceGate::L2Norm);
+        });
+    }
+
+    #[test]
+    fn restart_reassembles_before_refine_choice() {
+        setter_reassembles_before_refine_choice(BandSession::restart);
+    }
+
+    #[test]
+    fn climbing_change_reassembles_before_refine_choice() {
+        setter_reassembles_before_refine_choice(|session| {
+            session.set_climbing(Some(CiConfig::after(1e-6)));
+        });
+    }
+
+    #[test]
+    fn clearing_string_reassembles_before_refine_choice() {
+        setter_reassembles_before_refine_choice(|session| {
+            session.set_string(None).unwrap();
+        });
+    }
+
+    #[test]
+    fn clearing_free_end_reassembles_before_refine_choice() {
+        setter_reassembles_before_refine_choice(|session| {
+            session.set_free_end(None).unwrap();
+        });
+    }
+
+    #[test]
+    fn refine_choice_uses_the_exp_metric_climbing_baseline() {
+        struct Quadratic;
+
+        impl BandSurface for Quadratic {
+            fn eval(
+                &self,
+                positions: ArrayView2<f64>,
+                energies: &mut Array1<f64>,
+                gradients: &mut Array2<f64>,
+            ) -> Result<(), SaddleError> {
+                for (i, row) in positions.outer_iter().enumerate() {
+                    energies[i] = 0.5 * row.dot(&row);
+                    gradients.row_mut(i).assign(&row);
+                }
+                Ok(())
+            }
+        }
+
+        let positions = array![
+            [0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+            [1.0, 0.5, 0.0, 1.2, -0.2, 1.1],
+            [2.0, 0.0, 0.0, 2.0, 0.0, 1.0]
+        ];
+        let config = BandConfig::default()
+            .with_remove_translation(false)
+            .with_climbing(Some(CiConfig::after(0.5)))
+            .with_min_mode(None)
+            .with_saddle_check(None)
+            .with_exp_precon(ExpBandPrecon::default().with_mu(1.0))
+            .with_refine(StepRefine::default().with_threshold(f64::MAX));
+        let mut session = BandSession::new(config, positions).unwrap();
+        session.refresh_exp(&Quadratic).unwrap();
+        let x = session.interior_flat();
+        let first = session.positions.row(0).to_owned();
+        let last = session.positions.row(2).to_owned();
+        session
+            .arm_refine_step(&x, &Quadratic, first.view(), last.view())
+            .unwrap();
+        let metric_baseline = session
+            .state
+            .baseline
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .unwrap();
+
+        let plain_state = BandState::new();
+        assemble_band(
+            &session.config,
+            &plain_state,
+            &Quadratic,
+            first.view(),
+            last.view(),
+            x.view(),
+        )
+        .unwrap();
+        let plain_baseline = plain_state
+            .baseline
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .unwrap();
+        assert_ne!(metric_baseline.to_bits(), plain_baseline.to_bits());
+        assert_eq!(
+            metric_baseline.to_bits(),
+            session.state.last_max_force().to_bits()
+        );
     }
 }
