@@ -952,7 +952,7 @@ Call `reset` when the surface changes. The session retains evaluated endpoints a
 
 ## Runnable example: NEB, climbing image, OCI-NEB, and IDPP
 
-Orchestration and best practices for nudged elastic band paths follow Goswami, arXiv:2603.14737 (2026), doi:10.48550/arXiv.2603.14737, and the off-path climbing image refinement (OCI-NEB) follows Goswami, Gunde, and Jónsson, Front. Chem. 14, 1807063 (2026), doi:10.3389/fchem.2026.1807063. Image-dependent pair potential (IDPP) path initialization follows Goswami, MethodsX, 103899 (2026), doi:10.1016/j.mex.2026.103899, Smidstrup, Pedersen, Stokbro, and Jónsson, J. Chem. Phys. 140, 214106 (2014), doi:10.1063/1.4878664, and the sequential S-IDPP variant of Schmerwitz, Ásgeirsson, and Jónsson, J. Chem. Theory Comput. 20, 155 (2024), doi:10.1021/acs.jctc.3c01111.
+Orchestration and best practices for nudged elastic band paths follow Goswami, arXiv:2603.14737 (2026), doi:10.48550/arXiv.2603.14737, and the off-path climbing image refinement (OCI-NEB) follows Goswami, Gunde, and Jónsson, Front. Chem. 14, 1807063 (2026), doi:10.3389/fchem.2026.1807063. Image-dependent pair potential (IDPP) path initialization follows Smidstrup, Pedersen, Stokbro, and Jónsson, J. Chem. Phys. 140, 214106 (2014), doi:10.1063/1.4878664, and the sequential S-IDPP variant of Schmerwitz, Ásgeirsson, and Jónsson, J. Chem. Theory Comput. 20, 155 (2024), doi:10.1021/acs.jctc.3c01111.
 
 ```rust
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, array};
@@ -1294,7 +1294,7 @@ assert_eq!(force, vec![[1.0, 0.0, 0.0], [-1.0, 0.0, 0.0]]);
 
 ## Double-ended connect and stabilized quasi-Newton (SQNM)
 
-`connect` (`ConnectConfig`, `ConnectReport`, `ConnectProfile`) runs a double-ended saddle search between two endpoint geometries. It first relaxes an IDPP initial path (Goswami, MethodsX, 103899 (2026), doi:10.1016/j.mex.2026.103899 [goswamiIdpp2026]; Smidstrup, Pedersen, Stokbro, and Jónsson, J. Chem. Phys. 140, 214106 (2014), doi:10.1063/1.4878664 [smidstrupImprovedInitialGuess2014]) and launches a Lanczos minimum-mode climb from the highest interior image along the improved tangent (Goswami, Gunde, and Jónsson, Front. Chem. 14, 1807063 (2026), doi:10.3389/fchem.2026.1807063 [goswamiEnhancedClimbingImage2026]; Olsen, Kroes, Henkelman, Arnaldsson, and Jónsson, J. Chem. Phys. 121, 9776 (2004), doi:10.1063/1.1809574 [olsenComparisonMethodsFinding2004]). When that climb does not settle on an index-1 saddle, `connect` falls back to the COMPASS two-image constrained walk of Sommer-Jörgensen and Goedecker, J. Chem. Phys. 160, 064110 (2024), doi:10.1063/5.0186903 [sommerJorgensenCompass2024], driven by the stabilized quasi-Newton method (SQNM) of Schaefer, Ghasemi, Roy, and Goedecker, J. Chem. Phys. 142, 034112 (2015), doi:10.1063/1.4905665 [schaeferStabilizedQuasiNewton2015], with node quenching after splits as in Carr, Trygubenko, and Wales, J. Chem. Phys. 122, 234903 (2005), doi:10.1063/1.1931587 [carrFindingPathways2005].
+`connect` (`ConnectConfig`, `ConnectReport`, `ConnectProfile`) runs a double-ended saddle search between two endpoint geometries. It first relaxes an IDPP initial path (Goswami, MethodsX, 103899 (2026), doi:10.1016/j.mex.2026.103899 [goswamiIdpp2026]; Smidstrup, Pedersen, Stokbro, and Jónsson, J. Chem. Phys. 140, 214106 (2014), doi:10.1063/1.4878664 [smidstrupImprovedInitialGuess2014]; Schmerwitz, Ásgeirsson, and Jónsson, J. Chem. Theory Comput. 20, 155 (2024), doi:10.1021/acs.jctc.3c01111 [schmerwitzImprovedInitializationOptimal2024]) and launches a Lanczos minimum-mode climb from the highest interior image along the improved tangent (Goswami, Gunde, and Jónsson, Front. Chem. 14, 1807063 (2026), doi:10.3389/fchem.2026.1807063 [goswamiEnhancedClimbingImage2026]; Olsen, Kroes, Henkelman, Arnaldsson, and Jónsson, J. Chem. Phys. 121, 9776 (2004), doi:10.1063/1.1809574 [olsenComparisonMethodsFinding2004]). When that climb does not settle on an index-1 saddle, `connect` falls back to the COMPASS two-image constrained walk of Sommer-Jörgensen and Goedecker, J. Chem. Phys. 160, 064110 (2024), doi:10.1063/5.0186903 [sommerJorgensenCompass2024], driven by the stabilized quasi-Newton method (SQNM) of Schaefer, Ghasemi, Roy, and Goedecker, J. Chem. Phys. 142, 034112 (2015), doi:10.1063/1.4905665 [schaeferStabilizedQuasiNewton2015], with node quenching after splits as in Carr, Trygubenko, and Wales, J. Chem. Phys. 122, 234903 (2005), doi:10.1063/1.1931587 [carrFindingPathways2005].
 
 ```rust
 use rgsaddle::{ConnectConfig, connect};
@@ -2671,7 +2671,7 @@ let _ = (dense, pairs.values, pairs.vectors, pairs.residuals);
 
 ## Runnable example: P-RFO, restricted P-RFO, Index1Session, Sella, internal coordinates, cell charts, and SAMD
 
-Partitioned rational function optimization (P-RFO) follows Baker, J. Comput. Chem. 7, 385 (1986), doi:10.1002/jcc.540070402 [bakerAlgorithmLocationTransition1986], on the rational-function form of Banerjee, Adams, Simons, and Shepard, J. Phys. Chem. 89, 52 (1985), doi:10.1021/j100247a015 [banerjeeSearchStationaryPoints1985]. Restricted-step P-RFO scales the augmented Hessian so the Cartesian step stays within the Euclidean trust sphere, following Besalú and Bofill, Theor. Chem. Acc. 100, 265 (1998), doi:10.1007/s002140050387 [besaluRestrictedStepRfo1998], and Bofill's Hessian update mixes Powell and SR1 as in Bofill, J. Comput. Chem. 15, 1 (1994), doi:10.1002/jcc.540150102 [bofillUpdatedHessian1994]. The i-PI level shift in `nichols_step` and `nichols_displacement` follows Simons and Nichols, Int. J. Quantum Chem. 38, 263 (1990), doi:10.1002/qua.560382435 [simonsWalkingPotentialSurfaces1990]. Sella's order-1 and order-0 sessions, equality `Constraints` and `InternalPes` charts, cell log-deformation chart (`CellChart::LogDeform`), and surface-adapted molecular dynamics (`SamdSession`) follow Hermes, Sargsyan, Najm, and Zádor, J. Chem. Theory Comput. 18, 6974 (2022), doi:10.1021/acs.jctc.2c00395 [hermesSellaOpensourceAutomationfriendly2022], with the canonical velocity-rescaling thermostat of Bussi, Donadio, and Parrinello, J. Chem. Phys. 126, 014101 (2007), doi:10.1063/1.2408420 [bussiCanonicalSampling2007]; the Cartesian GP dimer comparison against Sella internal coordinates is Goswami, Masterov, Kamath, Peña-Torres, and Jónsson, J. Chem. Theory Comput. 21, 7935 (2025), doi:10.1021/acs.jctc.5c00866 [goswamiGaussianProcessSaddle2025].
+Partitioned rational function optimization (P-RFO) follows Baker, J. Comput. Chem. 7, 385 (1986), doi:10.1002/jcc.540070402 [bakerAlgorithmLocationTransition1986], on the rational-function form of Banerjee, Adams, Simons, and Shepard, J. Phys. Chem. 89, 52 (1985), doi:10.1021/j100247a015 [banerjeeSearchStationaryPoints1985]. Restricted-step P-RFO scales the augmented Hessian so the Cartesian step stays within the Euclidean trust sphere, following Besalú and Bofill, Theor. Chem. Acc. 100, 265 (1998), doi:10.1007/s002140050387 [besaluRestrictedStepRfo1998], and Bofill's Hessian update mixes Powell and SR1 as in Bofill, J. Comput. Chem. 15, 1 (1994), doi:10.1002/jcc.540150102 [bofillUpdatedHessian1994]. The i-PI level shift in `nichols_step` and `nichols_displacement` follows Simons and Nichols, Int. J. Quantum Chem. 38, 263 (1990), doi:10.1002/qua.560382427 [simonsWalkingPotentialSurfaces1990]. Sella's order-1 and order-0 sessions, equality `Constraints` and `InternalPes` charts, cell log-deformation chart (`CellChart::LogDeform`), and surface-adapted molecular dynamics (`SamdSession`) follow Hermes, Sargsyan, Najm, and Zádor, J. Chem. Theory Comput. 18, 6974 (2022), doi:10.1021/acs.jctc.2c00395 [hermesSellaOpensourceAutomationfriendly2022], with the canonical velocity-rescaling thermostat of Bussi, Donadio, and Parrinello, J. Chem. Phys. 126, 014101 (2007), doi:10.1063/1.2408420 [bussiCanonicalSampling2007]; the Cartesian GP dimer comparison against Sella internal coordinates is Goswami, Masterov, Kamath, Peña-Torres, and Jónsson, J. Chem. Theory Comput. 21, 7935 (2025), doi:10.1021/acs.jctc.5c00866 [goswamiGaussianProcessSaddle2025].
 
 ```rust
 use ndarray::{Array1, Array2, ArrayView1, array};
@@ -3358,7 +3358,7 @@ ART pushes along the seed until the curvature falls under `art_threshold` (defau
 
 `Stencil::band` checks the array and then returns `band presets are not implemented`. Use `BandSession`, `AutoNeb`, or `OcinebSession` directly for a band search. The chain, the mesh (remesh, insert, window), and the point controller are implemented.
 
-From C, `rgsaddle_stencil_config_new` takes the preset discriminant. Unknown keys return `RGSADDLE_INVALID_PARAMETER`. `rgsaddle_last_error` is thread-local. `rgsaddle_stencil_run` loops over `rgsaddle_stencil_step`. The report opens with `struct_size`. The older band and min-mode entries stay step-only, and the ABI minor stays 16.
+From C, `rgsaddle_stencil_config_new` takes the preset discriminant. Unknown keys return `RGSADDLE_INVALID_PARAMETER`. `rgsaddle_last_error` is thread-local. `rgsaddle_stencil_run` loops over `rgsaddle_stencil_step`. The report opens with `struct_size`. The older band and min-mode entries stay step-only; the stencil symbols were added at ABI minor 16 and remain additive under the current ABI minor 45.
 
 From Python, `rgsaddle.Stencil.point(x, preset`"dimer")= takes a C-contiguous float64 vector. `step(surface)` releases the thread, and the surface callback re-attaches. `rgsaddle.ase.Point(atoms, preset`"dimer").run(fmax, steps)= is an ASE `Optimizer` whose `step` is one stencil step. A second thread that enters the same handle raises `RuntimeError`.
 
@@ -4694,7 +4694,7 @@ cargo check --manifest-path ci/consumer/Cargo.toml --target-dir target
 ```
 
 ## Minimum supported Rust version
-The minimum supported Rust version (MSRV) is the `rust-version` in `Cargo.toml`.
+The minimum supported Rust version (MSRV) is `1.88`, the `rust-version` in `Cargo.toml`.
 A change must not need a newer compiler, and must pass the MSRV checks below as well as the stable ones.
 Clippy adds and revises lints between releases, so code that stable's clippy accepts can fail the MSRV's, and the reverse.
 The `msrv` job of the CI workflow reads `rust-version` with `cargo metadata` and installs that toolchain.
@@ -4708,6 +4708,7 @@ These commands reproduce the job:
 msrv=$(cargo metadata --no-deps --format-version 1 | jq -er '.packages[] | select(.name == "rgsaddle") | .rust_version')
 rustup toolchain install "$msrv" --profile minimal --component clippy
 cargo +"$msrv" clippy --locked --features capi -- -D warnings
+cargo +"$msrv" clippy --locked --all-targets --features capi,ohtst -- -D warnings
 cargo +"$msrv" clippy --locked --all-targets --features readcon -- -D warnings
 cargo +"$msrv" clippy --locked --all-targets --features readcon,readcon-db -- -D warnings
 cargo +"$msrv" clippy --locked --all-targets --features capi,verify -- -D warnings
@@ -4777,8 +4778,18 @@ towncrier build --draft --version <version>
 towncrier build --version <version>
 ```
 
+## Release to crates.io
+A pushed `v*` tag starts `publish.yml` on the tagged commit.
+The workflow checks out the tag, obtains a crates.io token through `rust-lang/crates-io-auth-action`, and runs `cargo publish --locked --no-verify -p rgsaddle`.
+`--no-verify` stays on because the git-pinned `rgmin` dependency in `Cargo.toml` fails `cargo package`: the packaged manifest cannot fetch that git source the way a local checkout does.
+The crates.io `0.6.0` release of `rgmin` does not export `LevelSetConstraint`, which free-end bands need, so the workspace keeps the git pin at rev `f3d18706c2b1ab380fd75f62449fdab46d01f5e2` with `version = "=0.6.0"` until a crates.io release carries the symbol.
+Do not drop `--no-verify` without either switching to that release or changing how the dependency is specified.
+
+Before tagging, run the MSRV test line above, bump versions as below, and collect the changelog.
+On the maintainer machine, `cargo package --locked -p rgsaddle` still fails for the pin; rely on CI publish or build from the git checkout.
+
 ## Release to PyPI
-A `v*` tag publishes the crate to crates.io through `publish.yml` and the Python package to PyPI through `pypi.yml`.
+A `v*` tag publishes the Python package to PyPI through `pypi.yml`; the crate upload is the crates.io workflow above.
 `pypi.yml` uses PyPI trusted publishing, so the repository holds no PyPI token.
 Before the first upload, the PyPI account that will own the project adds a pending publisher at https://pypi.org/manage/account/publishing/ with these values:
 
@@ -4793,9 +4804,9 @@ Only the `publish` job runs in the `pypi` environment and holds `id-token: write
 
 To release a version:
 
-1. Set it in `Cargo.toml`, `pyproject.toml`, `meson.build`, `docs/source/conf.py`, and the install example in `docs/orgmode/getting-started.org`; `tests/package_version.rs` holds the first three equal.
-2. Collect the fragments with `towncrier build --version <version>` and commit.
-3. Push the tag `v<version>` on that commit.
+1. Set it in `Cargo.toml`, `pyproject.toml`, `meson.build`, `docs/source/conf.py`, and the install example in `docs/orgmode/getting-started.org`; `tests/package_version.rs` holds the first three equal. Regenerate `llms.txt` and `llms-full.txt` with `python docs/render_llms.py` when narrative pages moved.
+2. Collect the fragments with `towncrier build --version <version>` and commit the updated `docs/orgmode/changelog.org`.
+3. Push the release commit to `main`, then push the tag `v<version>` on that commit. The tag runs `publish.yml` and `pypi.yml` on GitHub-hosted runners; neither workflow needs a local publish.
 
 The `versions` job stops the run unless the tag is `v` followed by the version in both `Cargo.toml` and `pyproject.toml`.
 The `wheels` job runs cibuildwheel with the `[tool.cibuildwheel]` table of `pyproject.toml` on Linux `x86_64` and `aarch64`, macOS `arm64` and `x86_64`, and Windows `x86_64`, and tests every wheel.

@@ -23,7 +23,7 @@ The phase is stored on the session. =step= runs one phase and leaves the next on
 The runnable example is the doctest on =ArtSession=: a one-dimensional double well in three coordinates, a host seed, and a connected index-1 exit. =tests/art_session.rs= repeats the paper's census on LJ7, starting from the pentagonal bipyramid.
 
 #+begin_export rst
-:cite:`malekFindingSaddlePoints2000,cancesImprovementsActivationRelaxation2009,marinicaEnergyLandscapeSmall2011,jayFindingReactionPathways2020`
+:cite:`malekDynamicsLennardJones2000,cancesImprovementsActivationRelaxation2009,marinicaEnergyLandscapeSmall2011,jayFindingReactionPathways2020`
 #+end_export
 
 * Runnable example: phased ART nouveau session
