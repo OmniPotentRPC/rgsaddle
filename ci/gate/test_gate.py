@@ -9,6 +9,7 @@ import pathlib
 import re
 import shlex
 import shutil
+import subprocess
 import sys
 import textwrap
 import tomllib
@@ -164,3 +165,66 @@ def test_eessi_leg_keeps_the_callers_path(fake_eessi, monkeypatch):
     assert "module list: Rust/1.91.0-GCCcore-15.2.0" in leg.artefacts
     eb_local = shlex.quote(shutil.which("eb-local"))
     assert all(f"$({eb_local} dev " in script for script in scripts[1:])
+
+
+check_gate = load_module("check_gate")
+needs_nickel = pytest.mark.skipif(
+    shutil.which("nickel") is None, reason="nickel is not on PATH"
+)
+
+
+@pytest.fixture
+def gate_tree(tmp_path):
+    for relative in (check_gate.SOURCE, *(output for _, _, output in check_gate.OUTPUTS)):
+        target = tmp_path / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((ROOT / relative).read_bytes())
+    return tmp_path
+
+
+@needs_nickel
+def test_committed_gate_files_are_current():
+    assert check_gate.drift(ROOT) == []
+
+
+@needs_nickel
+def test_check_gate_rejects_a_workflow_only_edit(gate_tree):
+    workflow = gate_tree / ".github" / "workflows" / "gate.yml"
+    edited = workflow.read_text(encoding="utf-8").replace(
+        "fail-fast: false", "fail-fast: true"
+    )
+    workflow.write_text(edited, encoding="utf-8")
+    diffs = check_gate.drift(gate_tree)
+    assert len(diffs) == 1 and "-      fail-fast: true" in diffs[0]
+    assert workflow.read_text(encoding="utf-8") == edited
+
+
+@needs_nickel
+def test_check_gate_rejects_a_source_only_edit(gate_tree):
+    source = gate_tree / check_gate.SOURCE
+    source.write_text(
+        source.read_text(encoding="utf-8").replace("max_cpus = 8", "max_cpus = 4"),
+        encoding="utf-8",
+    )
+    diffs = check_gate.drift(gate_tree)
+    assert len(diffs) == 1 and '+  "max_cpus": 4,' in diffs[0]
+
+
+@needs_nickel
+def test_check_gate_rejects_a_missing_output(gate_tree):
+    (gate_tree / "ci" / "gate" / "plan.json").unlink()
+    assert len(check_gate.drift(gate_tree)) == 1
+
+
+@needs_nickel
+def test_check_gate_exits_nonzero_on_drift(gate_tree):
+    workflow = gate_tree / ".github" / "workflows" / "gate.yml"
+    workflow.write_text(workflow.read_text(encoding="utf-8") + "# edit\n", encoding="utf-8")
+    completed = subprocess.run(
+        [sys.executable, str(GATE_DIR / "check_gate.py"), "--root", str(gate_tree)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 1
+    assert "+# edit" not in completed.stderr and "-# edit" in completed.stderr
