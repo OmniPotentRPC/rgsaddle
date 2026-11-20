@@ -2865,6 +2865,21 @@ struct CachedBandSurface<'a, S> {
     surface: &'a S,
 }
 
+struct CachedEvaluationOnly;
+
+impl BandSurface for CachedEvaluationOnly {
+    fn eval(
+        &self,
+        _positions: ArrayView2<f64>,
+        _energies: &mut Array1<f64>,
+        _gradients: &mut Array2<f64>,
+    ) -> Result<(), SaddleError> {
+        Err(SaddleError::Invalid(
+            "the cached band evaluation is unavailable".into(),
+        ))
+    }
+}
+
 impl<S: BandSurface> BandSurface for CachedBandSurface<'_, S> {
     fn eval(
         &self,
@@ -3805,6 +3820,20 @@ impl BandSession {
         } else {
             self.interior_flat()
         };
+        if self.solid.is_none() && self.refine.converged {
+            let force_len = (self.positions.nrows() - 2) * self.positions.ncols();
+            let needs_assembly = self
+                .state
+                .last
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .is_some_and(|last| last.x == x && last.projected.len() != force_len);
+            if needs_assembly {
+                self.assemble_accepted(&CachedEvaluationOnly, x.view())
+                    .ok()?;
+            }
+        }
         let slot = self.state.last.lock().unwrap_or_else(|e| e.into_inner());
         let last = slot.as_ref().filter(|l| l.x == x)?;
         let n_images = self.positions.nrows();
