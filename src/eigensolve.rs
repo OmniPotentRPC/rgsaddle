@@ -178,22 +178,49 @@ pub fn exact_eigh(a: ArrayView2<f64>) -> Result<(Array1<f64>, Array2<f64>), Sadd
     }
 }
 
-/// Self-adjoint spectrum from faer. `a` is already symmetric.
+/// Relative singularity and zero-mode threshold `scale * (n as f64) * f64::EPSILON`
+/// for an `n x n` matrix of entry or spectral magnitude `scale`.
+pub fn relative_zero_tolerance(scale: f64, n: usize) -> f64 {
+    scale * (n as f64) * f64::EPSILON
+}
+
+/// Self-adjoint spectrum from faer. `a` is symmetrised as `(a + a^T) / 2` first.
 /// Eigenvalues are nondecreasing. Columns are the eigenvectors.
 ///
 /// The `faer` feature is on by default. A build without it still
-/// compiles, and this function panics if a caller reaches it. Connect
-/// and SQNM use the same gate.
-pub(crate) fn faer_eigh(a: &Array2<f64>) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
+/// compiles, and this function falls back to [`jacobi_eigh`].
+///
+/// # Errors
+///
+/// [`SaddleError::Shape`] when `a` is not square; [`SaddleError::NonFinite`]
+/// when any entry is non-finite; [`SaddleError::Solver`] when the eigensolver
+/// does not converge.
+pub fn faer_eigh(a: &Array2<f64>) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
+    if a.nrows() != a.ncols() {
+        return Err(SaddleError::Shape("eigh needs a square matrix".into()));
+    }
+    if !a.iter().all(|v| v.is_finite()) {
+        return Err(SaddleError::NonFinite("faer_eigh"));
+    }
+    let n = a.nrows();
+    if n == 0 {
+        return Ok((Array1::zeros(0), Array2::zeros((0, 0))));
+    }
     #[cfg(not(feature = "faer"))]
     {
-        let _ = a;
-        panic!("self-adjoint spectrum requires the faer feature");
+        let mut work = a.clone();
+        for i in 0..n {
+            for j in 0..i {
+                let s = 0.5 * (work[(i, j)] + work[(j, i)]);
+                work[(i, j)] = s;
+                work[(j, i)] = s;
+            }
+        }
+        jacobi_eigh(&mut work)
     }
     #[cfg(feature = "faer")]
     {
-        let n = a.nrows();
-        let mat = faer::Mat::from_fn(n, n, |i, j| a[(i, j)]);
+        let mat = faer::Mat::from_fn(n, n, |i, j| 0.5 * (a[(i, j)] + a[(j, i)]));
         let evd = mat
             .self_adjoint_eigen(faer::Side::Lower)
             .map_err(|_| SaddleError::Solver("self-adjoint eigen did not converge".into()))?;
@@ -202,19 +229,75 @@ pub(crate) fn faer_eigh(a: &Array2<f64>) -> Result<(Array1<f64>, Array2<f64>), S
         let mut values = Array1::zeros(n);
         let mut vectors = Array2::zeros((n, n));
         for column in 0..n {
-            values[column] = values_ref[column];
+            let val = values_ref[column];
+            if !val.is_finite() {
+                return Err(SaddleError::NonFinite("faer_eigh eigenvalue"));
+            }
+            values[column] = val;
             for row in 0..n {
-                vectors[(row, column)] = vectors_ref[(row, column)];
+                let vec_entry = vectors_ref[(row, column)];
+                if !vec_entry.is_finite() {
+                    return Err(SaddleError::NonFinite("faer_eigh eigenvector"));
+                }
+                vectors[(row, column)] = vec_entry;
             }
         }
         for column in 0..n {
-            if nrm2(vectors.column(column)) < 1e-18 {
+            if nrm2(vectors.column(column)) <= f64::EPSILON {
                 return Err(SaddleError::Solver(
                     "self-adjoint eigen produced a zero eigenvector".into(),
                 ));
             }
         }
         Ok((values, vectors))
+    }
+}
+
+/// Self-adjoint eigenvalues only (ascending), without accumulating eigenvectors.
+///
+/// Symmetrises `a` as `(a + a^T) / 2` before computing eigenvalues.
+///
+/// # Errors
+///
+/// [`SaddleError::Shape`] when `a` is not square; [`SaddleError::NonFinite`]
+/// when any entry is non-finite; [`SaddleError::Solver`] when the solver fails.
+pub fn exact_eigvalsh(a: ArrayView2<f64>) -> Result<Array1<f64>, SaddleError> {
+    if a.nrows() != a.ncols() {
+        return Err(SaddleError::Shape(
+            "exact_eigvalsh needs a square matrix".into(),
+        ));
+    }
+    if !a.iter().all(|v| v.is_finite()) {
+        return Err(SaddleError::NonFinite("exact_eigvalsh"));
+    }
+    let n = a.nrows();
+    if n == 0 {
+        return Ok(Array1::zeros(0));
+    }
+    #[cfg(feature = "faer")]
+    {
+        let mat = faer::Mat::from_fn(n, n, |i, j| 0.5 * (a[(i, j)] + a[(j, i)]));
+        let raw = mat
+            .self_adjoint_eigenvalues(faer::Side::Lower)
+            .map_err(|_| SaddleError::Solver("self-adjoint eigenvalues did not converge".into()))?;
+        for &v in &raw {
+            if !v.is_finite() {
+                return Err(SaddleError::NonFinite("exact_eigvalsh output"));
+            }
+        }
+        Ok(Array1::from_vec(raw))
+    }
+    #[cfg(not(feature = "faer"))]
+    {
+        let mut work = a.to_owned();
+        for i in 0..n {
+            for j in 0..i {
+                let s = 0.5 * (work[(i, j)] + work[(j, i)]);
+                work[(i, j)] = s;
+                work[(j, i)] = s;
+            }
+        }
+        Ok(jacobi_eigh(&mut work)?.0)
     }
 }
 
@@ -812,15 +895,69 @@ where
     Ok(av)
 }
 
-pub(crate) fn solve_dense(
-    a: ArrayView2<f64>,
-    b: ArrayView1<f64>,
-) -> Result<Array1<f64>, SaddleError> {
+#[cfg(feature = "faer")]
+use faer::prelude::Solve;
+
+/// Solve a dense square linear system `A x = b` with partial pivoting.
+///
+/// Uses [`relative_zero_tolerance`] across all matrix sizes and refuses
+/// non-finite inputs, singular pivots, and overflowing solutions.
+///
+/// # Errors
+///
+/// [`SaddleError::Shape`] when `a` is not square or `b` has a mismatched length;
+/// [`SaddleError::NonFinite`] when `a`, `b`, or the solution contains a non-finite
+/// entry; [`SaddleError::Singular`] when a pivot magnitude is at or below
+/// [`relative_zero_tolerance`].
+pub fn solve_dense(a: ArrayView2<f64>, b: ArrayView1<f64>) -> Result<Array1<f64>, SaddleError> {
     let n = a.nrows();
     if a.ncols() != n || b.len() != n {
         return Err(SaddleError::Shape(
             "dense solve needs a square system".into(),
         ));
+    }
+    let mut max_abs = 0.0_f64;
+    for &v in a.iter() {
+        if !v.is_finite() {
+            return Err(SaddleError::NonFinite("solve_dense matrix"));
+        }
+        let av = v.abs();
+        if av > max_abs {
+            max_abs = av;
+        }
+    }
+    if !b.iter().all(|v| v.is_finite()) {
+        return Err(SaddleError::NonFinite("solve_dense rhs"));
+    }
+    if n == 0 {
+        return Ok(Array1::zeros(0));
+    }
+    if max_abs == 0.0 {
+        return Err(SaddleError::Singular(0));
+    }
+    let tol = relative_zero_tolerance(max_abs, n);
+    #[cfg(feature = "faer")]
+    if n >= 32 {
+        let mat = faer::Mat::from_fn(n, n, |i, j| a[(i, j)]);
+        let lu = mat.partial_piv_lu();
+        let u = lu.U();
+        for k in 0..n {
+            let d = u[(k, k)].abs();
+            if !d.is_finite() || d <= tol {
+                return Err(SaddleError::Singular(k));
+            }
+        }
+        let rhs = faer::Mat::from_fn(n, 1, |i, _| b[i]);
+        let sol = lu.solve(&rhs);
+        let mut out = Array1::zeros(n);
+        for i in 0..n {
+            let v = sol[(i, 0)];
+            if !v.is_finite() {
+                return Err(SaddleError::NonFinite("solve_dense solution"));
+            }
+            out[i] = v;
+        }
+        return Ok(out);
     }
     let mut m = a.to_owned();
     let mut x = b.to_owned();
@@ -834,8 +971,8 @@ pub(crate) fn solve_dense(
                 piv = i;
             }
         }
-        if best < 1e-18 {
-            return Err(SaddleError::Solver("singular expand system".into()));
+        if !best.is_finite() || best <= tol {
+            return Err(SaddleError::Singular(k));
         }
         if piv != k {
             for j in 0..n {
@@ -862,9 +999,265 @@ pub(crate) fn solve_dense(
         for j in (i + 1)..n {
             acc -= m[(i, j)] * x[j];
         }
-        x[i] = acc / m[(i, i)];
+        let xi = acc / m[(i, i)];
+        if !xi.is_finite() {
+            return Err(SaddleError::NonFinite("solve_dense solution"));
+        }
+        x[i] = xi;
     }
     Ok(x)
+}
+
+/// Solve a dense square system `A X = B` for multiple right-hand side columns.
+///
+/// # Errors
+///
+/// [`SaddleError::Shape`] when `a` is not square or `b.nrows() != a.nrows()`;
+/// [`SaddleError::NonFinite`] when inputs or solution entries are non-finite;
+/// [`SaddleError::Singular`] when a pivot magnitude is at or below
+/// [`relative_zero_tolerance`].
+pub fn solve_dense_matrix(
+    a: ArrayView2<f64>,
+    b: ArrayView2<f64>,
+) -> Result<Array2<f64>, SaddleError> {
+    let n = a.nrows();
+    let nrhs = b.ncols();
+    if a.ncols() != n || b.nrows() != n {
+        return Err(SaddleError::Shape(
+            "solve_dense_matrix needs square A and matching B rows".into(),
+        ));
+    }
+    let mut max_abs = 0.0_f64;
+    for &v in a.iter() {
+        if !v.is_finite() {
+            return Err(SaddleError::NonFinite("solve_dense_matrix matrix"));
+        }
+        let av = v.abs();
+        if av > max_abs {
+            max_abs = av;
+        }
+    }
+    if !b.iter().all(|v| v.is_finite()) {
+        return Err(SaddleError::NonFinite("solve_dense_matrix rhs"));
+    }
+    if n == 0 || nrhs == 0 {
+        return Ok(Array2::zeros((n, nrhs)));
+    }
+    if max_abs == 0.0 {
+        return Err(SaddleError::Singular(0));
+    }
+    let tol = relative_zero_tolerance(max_abs, n);
+    #[cfg(feature = "faer")]
+    if n >= 32 {
+        let mat = faer::Mat::from_fn(n, n, |i, j| a[(i, j)]);
+        let lu = mat.partial_piv_lu();
+        let u = lu.U();
+        for k in 0..n {
+            let d = u[(k, k)].abs();
+            if !d.is_finite() || d <= tol {
+                return Err(SaddleError::Singular(k));
+            }
+        }
+        let rhs = faer::Mat::from_fn(n, nrhs, |i, j| b[(i, j)]);
+        let sol = lu.solve(&rhs);
+        let mut out = Array2::zeros((n, nrhs));
+        for i in 0..n {
+            for j in 0..nrhs {
+                let v = sol[(i, j)];
+                if !v.is_finite() {
+                    return Err(SaddleError::NonFinite("solve_dense_matrix solution"));
+                }
+                out[(i, j)] = v;
+            }
+        }
+        return Ok(out);
+    }
+    let mut out = Array2::zeros((n, nrhs));
+    for j in 0..nrhs {
+        let col = solve_dense(a, b.column(j))?;
+        out.column_mut(j).assign(&col);
+    }
+    Ok(out)
+}
+
+/// Log-absolute-determinant `ln|det(A)|` of a dense square matrix via partial-pivoting LU.
+///
+/// # Errors
+///
+/// [`SaddleError::Shape`] when `a` is not square; [`SaddleError::NonFinite`]
+/// when any entry or the resulting log-determinant is non-finite;
+/// [`SaddleError::Singular`] when a pivot magnitude is at or below
+/// [`relative_zero_tolerance`].
+pub fn dense_logabsdet(a: ArrayView2<f64>) -> Result<f64, SaddleError> {
+    let n = a.nrows();
+    if a.ncols() != n {
+        return Err(SaddleError::Shape(
+            "dense_logabsdet needs a square matrix".into(),
+        ));
+    }
+    let mut max_abs = 0.0_f64;
+    for &v in a.iter() {
+        if !v.is_finite() {
+            return Err(SaddleError::NonFinite("dense_logabsdet"));
+        }
+        let av = v.abs();
+        if av > max_abs {
+            max_abs = av;
+        }
+    }
+    if n == 0 {
+        return Ok(0.0);
+    }
+    if max_abs == 0.0 {
+        return Err(SaddleError::Singular(0));
+    }
+    let tol = relative_zero_tolerance(max_abs, n);
+    #[cfg(feature = "faer")]
+    if n >= 32 {
+        let mat = faer::Mat::from_fn(n, n, |i, j| a[(i, j)]);
+        let lu = mat.partial_piv_lu();
+        let u = lu.U();
+        let mut log_abs = 0.0;
+        for k in 0..n {
+            let d = u[(k, k)].abs();
+            if !d.is_finite() || d <= tol {
+                return Err(SaddleError::Singular(k));
+            }
+            log_abs += d.ln();
+        }
+        if !log_abs.is_finite() {
+            return Err(SaddleError::NonFinite("dense_logabsdet result"));
+        }
+        return Ok(log_abs);
+    }
+    let mut m = a.to_owned();
+    let mut log_abs = 0.0;
+    for col in 0..n {
+        let mut piv = col;
+        let mut best = m[(col, col)].abs();
+        for r in (col + 1)..n {
+            let v = m[(r, col)].abs();
+            if v > best {
+                best = v;
+                piv = r;
+            }
+        }
+        if !best.is_finite() || best <= tol {
+            return Err(SaddleError::Singular(col));
+        }
+        if piv != col {
+            for j in 0..n {
+                let tmp = m[(col, j)];
+                m[(col, j)] = m[(piv, j)];
+                m[(piv, j)] = tmp;
+            }
+        }
+        let diag = m[(col, col)];
+        log_abs += diag.abs().ln();
+        for r in (col + 1)..n {
+            let f = m[(r, col)] / diag;
+            for j in (col + 1)..n {
+                m[(r, j)] -= f * m[(col, j)];
+            }
+        }
+    }
+    if !log_abs.is_finite() {
+        return Err(SaddleError::NonFinite("dense_logabsdet result"));
+    }
+    Ok(log_abs)
+}
+
+/// Log-determinant `ln det(A)` of a symmetric positive-definite matrix via Cholesky (`LL^T`).
+///
+/// # Errors
+///
+/// [`SaddleError::Shape`] when `a` is not square; [`SaddleError::NonFinite`]
+/// when any entry or the resulting log-determinant is non-finite;
+/// [`SaddleError::Invalid`] when `a` is not symmetric within `16 * relative_zero_tolerance`;
+/// [`SaddleError::Solver`] or [`SaddleError::Singular`] when `a` is not strictly
+/// positive definite.
+pub fn spd_logdet(a: ArrayView2<f64>) -> Result<f64, SaddleError> {
+    let n = a.nrows();
+    if a.ncols() != n {
+        return Err(SaddleError::Shape(
+            "spd_logdet needs a square matrix".into(),
+        ));
+    }
+    let mut max_abs = 0.0_f64;
+    for &v in a.iter() {
+        if !v.is_finite() {
+            return Err(SaddleError::NonFinite("spd_logdet"));
+        }
+        let av = v.abs();
+        if av > max_abs {
+            max_abs = av;
+        }
+    }
+    if n == 0 {
+        return Ok(0.0);
+    }
+    if max_abs == 0.0 {
+        return Err(SaddleError::Singular(0));
+    }
+    let tol = relative_zero_tolerance(max_abs, n);
+    let sym_tol = 16.0 * tol;
+    for i in 0..n {
+        for j in 0..i {
+            if (a[(i, j)] - a[(j, i)]).abs() > sym_tol {
+                return Err(SaddleError::Invalid(
+                    "spd_logdet matrix is not symmetric".into(),
+                ));
+            }
+        }
+    }
+    #[cfg(feature = "faer")]
+    if n >= 32 {
+        let mat = faer::Mat::from_fn(n, n, |i, j| 0.5 * (a[(i, j)] + a[(j, i)]));
+        let llt = mat
+            .llt(faer::Side::Lower)
+            .map_err(|_| SaddleError::Solver("matrix is not symmetric positive definite".into()))?;
+        let l = llt.L();
+        let mut log_det = 0.0;
+        for i in 0..n {
+            let d = l[(i, i)];
+            if !d.is_finite() || d <= tol {
+                return Err(SaddleError::Solver(
+                    "matrix is not symmetric positive definite".into(),
+                ));
+            }
+            log_det += 2.0 * d.ln();
+        }
+        if !log_det.is_finite() {
+            return Err(SaddleError::NonFinite("spd_logdet result"));
+        }
+        return Ok(log_det);
+    }
+    let mut l = Array2::<f64>::zeros((n, n));
+    let mut log_det = 0.0;
+    for i in 0..n {
+        for j in 0..=i {
+            let mut sum = 0.5 * (a[(i, j)] + a[(j, i)]);
+            for k in 0..j {
+                sum -= l[(i, k)] * l[(j, k)];
+            }
+            if i == j {
+                if !sum.is_finite() || sum <= tol * tol {
+                    return Err(SaddleError::Solver(
+                        "matrix is not symmetric positive definite".into(),
+                    ));
+                }
+                let diag = sum.sqrt();
+                l[(i, i)] = diag;
+                log_det += 2.0 * diag.ln();
+            } else {
+                l[(i, j)] = sum / l[(j, j)];
+            }
+        }
+    }
+    if !log_det.is_finite() {
+        return Err(SaddleError::NonFinite("spd_logdet result"));
+    }
+    Ok(log_det)
 }
 
 fn matmul(a: ArrayView2<f64>, b: ArrayView2<f64>) -> Array2<f64> {
@@ -881,11 +1274,48 @@ fn matmul(a: ArrayView2<f64>, b: ArrayView2<f64>) -> Array2<f64> {
 /// Cyclic Jacobi for a small dense symmetric matrix.
 fn jacobi_eigh(a: &mut Array2<f64>) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
     let n = a.nrows();
+    jacobi_eigh_with_budget(a, 16 + 8 * n * n)
+}
+
+fn jacobi_eigh_with_budget(
+    a: &mut Array2<f64>,
+    max_sweeps: usize,
+) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
+    let n = a.nrows();
+    if a.ncols() != n {
+        return Err(SaddleError::Shape(
+            "jacobi_eigh needs a square matrix".into(),
+        ));
+    }
+    let mut scale = 0.0_f64;
+    for &x in a.iter() {
+        if !x.is_finite() {
+            return Err(SaddleError::NonFinite("jacobi_eigh"));
+        }
+        let ax = x.abs();
+        if ax > scale {
+            scale = ax;
+        }
+    }
+    if n == 0 {
+        return Ok((Array1::zeros(0), Array2::zeros((0, 0))));
+    }
     let mut v = Array2::<f64>::zeros((n, n));
     for i in 0..n {
         v[(i, i)] = 1.0;
     }
-    for _ in 0..(8 * n * n).max(16) {
+    if n == 1 {
+        let mut evals = Array1::zeros(1);
+        evals[0] = a[(0, 0)];
+        return Ok((evals, v));
+    }
+    let tol = if scale >= 1e-2 {
+        1e-14
+    } else {
+        relative_zero_tolerance(scale, n)
+    };
+    let mut converged = scale == 0.0;
+    for _ in 0..max_sweeps {
         let mut p = 0;
         let mut q = 1;
         let mut max = 0.0;
@@ -899,7 +1329,8 @@ fn jacobi_eigh(a: &mut Array2<f64>) -> Result<(Array1<f64>, Array2<f64>), Saddle
                 }
             }
         }
-        if max < 1e-14 {
+        if max <= tol {
+            converged = true;
             break;
         }
         let app = a[(p, p)];
@@ -934,8 +1365,16 @@ fn jacobi_eigh(a: &mut Array2<f64>) -> Result<(Array1<f64>, Array2<f64>), Saddle
         a[(p, q)] = 0.0;
         a[(q, p)] = 0.0;
     }
+    if !converged {
+        return Err(SaddleError::Solver(
+            "Jacobi eigensolver did not converge within sweep budget".into(),
+        ));
+    }
     let mut evals = Array1::zeros(n);
     for i in 0..n {
+        if !a[(i, i)].is_finite() {
+            return Err(SaddleError::NonFinite("jacobi_eigh diagonal"));
+        }
         evals[i] = a[(i, i)];
     }
     // Sort ascending.
@@ -951,7 +1390,7 @@ fn jacobi_eigh(a: &mut Array2<f64>) -> Result<(Array1<f64>, Array2<f64>), Saddle
     }
     for j in 0..n {
         let col = vecs.column(j).to_owned();
-        if nrm2(col.view()) < 1e-18 {
+        if nrm2(col.view()) <= f64::EPSILON {
             return Err(SaddleError::Solver(
                 "Jacobi produced a zero eigenvector".into(),
             ));
@@ -1312,5 +1751,220 @@ mod tests {
         assert!((nrm2(y.view()) - 1.0).abs() < 1e-12);
         let w = man.transport(&v, &y, &s);
         assert!(dot(y.view(), w.view()).abs() < 1e-12);
+    }
+
+    #[test]
+    fn faer_n_ge_32_solvers_and_logdet_match_closed_form_analytic_oracles() {
+        // 1. Kac-Murdock-Szego SPD Toeplitz matrix A_{ij} = rho^{|i-j|} for n = 40 >= 32:
+        //    Closed-form det(A) = (1 - rho^2)^{n - 1}, so ln det(A) = (n - 1) ln(1 - rho^2).
+        let n = 40;
+        let rho = 0.5_f64;
+        let mut kms = Array2::<f64>::zeros((n, n));
+        for i in 0..n {
+            for j in 0..n {
+                kms[(i, j)] = rho.powi((i as i32 - j as i32).abs());
+            }
+        }
+        let exact_logdet = (n as f64 - 1.0) * (1.0 - rho * rho).ln();
+        let lu_logdet = dense_logabsdet(kms.view()).unwrap();
+        let chol_logdet = spd_logdet(kms.view()).unwrap();
+        assert!(
+            (lu_logdet - exact_logdet).abs() < 1e-12,
+            "lu_logdet={lu_logdet} exact={exact_logdet}"
+        );
+        assert!(
+            (chol_logdet - exact_logdet).abs() < 1e-12,
+            "chol_logdet={chol_logdet} exact={exact_logdet}"
+        );
+
+        // Closed-form inverse of KMS matrix is tridiagonal:
+        // (A^{-1})_{0,0} = (A^{-1})_{n-1,n-1} = 1 / (1 - rho^2),
+        // (A^{-1})_{i,i} = (1 + rho^2) / (1 - rho^2) for 0 < i < n - 1,
+        // (A^{-1})_{i,i+-1} = -rho / (1 - rho^2).
+        // Therefore, for b = [1, 1, ..., 1]^T, the exact solution x = A^{-1} b is known in closed form:
+        // x_0 = x_{n-1} = 1 / (1 + rho), and x_i = (1 - rho) / (1 + rho) for 0 < i < n - 1.
+        let b1 = Array1::from_elem(n, 1.0);
+        let x1 = solve_dense(kms.view(), b1.view()).unwrap();
+        for i in 0..n {
+            let expected = if i == 0 || i + 1 == n {
+                1.0 / (1.0 + rho)
+            } else {
+                (1.0 - rho) / (1.0 + rho)
+            };
+            assert!(
+                (x1[i] - expected).abs() < 1e-13,
+                "i={i} got={} expected={expected}",
+                x1[i]
+            );
+        }
+
+        // Multi-column solve A X = B for n = 40 >= 32 with two planted columns.
+        let mut x_planted = Array2::<f64>::zeros((n, 2));
+        for i in 0..n {
+            x_planted[(i, 0)] = if i == 0 || i + 1 == n {
+                1.0 / (1.0 + rho)
+            } else {
+                (1.0 - rho) / (1.0 + rho)
+            };
+            x_planted[(i, 1)] = ((i + 1) as f64).sin();
+        }
+        let b_mat = matmul(kms.view(), x_planted.view());
+        let x_solved = solve_dense_matrix(kms.view(), b_mat.view()).unwrap();
+        for i in 0..n {
+            for c in 0..2 {
+                assert!(
+                    (x_solved[(i, c)] - x_planted[(i, c)]).abs() < 1e-12,
+                    "({i},{c}) got={} expected={}",
+                    x_solved[(i, c)],
+                    x_planted[(i, c)]
+                );
+            }
+        }
+
+        // 2. Symmetric tridiagonal Toeplitz matrix T_{ii} = 3, T_{i,i+-1} = -1 for n = 48 >= 32:
+        //    Closed-form eigenvalues lambda_k = 3 - 2 cos(k pi / (n + 1)), k = 1..=n.
+        let m = 48;
+        let mut tridiag = Array2::<f64>::zeros((m, m));
+        for i in 0..m {
+            tridiag[(i, i)] = 3.0;
+            if i + 1 < m {
+                tridiag[(i, i + 1)] = -1.0;
+                tridiag[(i + 1, i)] = -1.0;
+            }
+        }
+        let (evals, evecs) = faer_eigh(&tridiag).unwrap();
+        let evals_only = exact_eigvalsh(tridiag.view()).unwrap();
+        let mut exact_tridiag_logdet = 0.0;
+        for k in 0..m {
+            let theta = std::f64::consts::PI * (k + 1) as f64 / (m + 1) as f64;
+            let exact_lam = 3.0 - 2.0 * theta.cos();
+            exact_tridiag_logdet += exact_lam.ln();
+            assert!(
+                (evals[k] - exact_lam).abs() < 1e-12,
+                "k={k} faer_eigh={} exact={exact_lam}",
+                evals[k]
+            );
+            assert!(
+                (evals_only[k] - exact_lam).abs() < 1e-12,
+                "k={k} exact_eigvalsh={} exact={exact_lam}",
+                evals_only[k]
+            );
+            // Verify eigenvector residual ||T v_k - lambda_k v_k||_2.
+            let mut res_sq = 0.0;
+            for i in 0..m {
+                let mut tv = 0.0;
+                for j in 0..m {
+                    tv += tridiag[(i, j)] * evecs[(j, k)];
+                }
+                let d = tv - exact_lam * evecs[(i, k)];
+                res_sq += d * d;
+            }
+            assert!(res_sq.sqrt() < 1e-12, "k={k} residual={}", res_sq.sqrt());
+        }
+        let lu_tridiag = dense_logabsdet(tridiag.view()).unwrap();
+        let spd_tridiag = spd_logdet(tridiag.view()).unwrap();
+        assert!((lu_tridiag - exact_tridiag_logdet).abs() < 1e-11);
+        assert!((spd_tridiag - exact_tridiag_logdet).abs() < 1e-11);
+    }
+
+    #[test]
+    fn relative_singularity_tolerance_is_scale_invariant_across_small_and_large_n() {
+        for &n in &[4usize, 40usize] {
+            // A well-conditioned matrix uniformly scaled by 1e-100 must succeed
+            // (no 1e-18 absolute pivot floor).
+            let scale = 1.0e-100;
+            let mut scaled = Array2::<f64>::zeros((n, n));
+            let mut rhs = Array1::<f64>::zeros(n);
+            for i in 0..n {
+                scaled[(i, i)] = scale * 2.0;
+                rhs[i] = scale * 6.0;
+            }
+            let sol = solve_dense(scaled.view(), rhs.view()).unwrap();
+            for i in 0..n {
+                assert!((sol[i] - 3.0).abs() < 1e-12);
+            }
+
+            // Rank-deficient matrix with row 2 = row 0 + row 1 must be rejected as Singular.
+            let mut singular = Array2::<f64>::eye(n);
+            for j in 0..n {
+                singular[(0, j)] = (j + 1) as f64;
+                singular[(1, j)] = (2 * j + 3) as f64;
+                singular[(2, j)] = singular[(0, j)] + singular[(1, j)];
+            }
+            assert!(matches!(
+                solve_dense(singular.view(), Array1::ones(n).view()),
+                Err(SaddleError::Singular(_))
+            ));
+            assert!(matches!(
+                solve_dense_matrix(singular.view(), Array2::eye(n).view()),
+                Err(SaddleError::Singular(_))
+            ));
+            assert!(matches!(
+                dense_logabsdet(singular.view()),
+                Err(SaddleError::Singular(_))
+            ));
+
+            // Overflowing solution must return NonFinite.
+            let mut tiny = Array2::<f64>::zeros((n, n));
+            for i in 0..n {
+                tiny[(i, i)] = 1.0e-300;
+            }
+            let huge = Array1::from_elem(n, 1.0e300);
+            assert!(matches!(
+                solve_dense(tiny.view(), huge.view()),
+                Err(SaddleError::NonFinite(_))
+            ));
+
+            // Non-finite inputs must return NonFinite.
+            let mut nan_mat = Array2::<f64>::eye(n);
+            nan_mat[(n / 2, n / 2)] = f64::NAN;
+            assert!(matches!(
+                faer_eigh(&nan_mat),
+                Err(SaddleError::NonFinite(_))
+            ));
+            assert!(matches!(
+                exact_eigvalsh(nan_mat.view()),
+                Err(SaddleError::NonFinite(_))
+            ));
+            assert!(matches!(
+                solve_dense(nan_mat.view(), Array1::ones(n).view()),
+                Err(SaddleError::NonFinite(_))
+            ));
+            assert!(matches!(
+                solve_dense_matrix(nan_mat.view(), Array2::eye(n).view()),
+                Err(SaddleError::NonFinite(_))
+            ));
+            assert!(matches!(
+                dense_logabsdet(nan_mat.view()),
+                Err(SaddleError::NonFinite(_))
+            ));
+            assert!(matches!(
+                spd_logdet(nan_mat.view()),
+                Err(SaddleError::NonFinite(_))
+            ));
+
+            // spd_logdet refuses indefinite and asymmetric matrices.
+            let mut indef = Array2::<f64>::eye(n);
+            indef[(n - 1, n - 1)] = -1.0;
+            assert!(matches!(
+                spd_logdet(indef.view()),
+                Err(SaddleError::Solver(_))
+            ));
+            let mut asym = Array2::<f64>::eye(n);
+            asym[(0, 1)] = 0.5;
+            assert!(matches!(
+                spd_logdet(asym.view()),
+                Err(SaddleError::Invalid(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn jacobi_eigh_refuses_to_return_ok_when_sweep_budget_is_exhausted() {
+        let mut a = array![[4.0, 1.0, 0.5], [1.0, 2.0, -0.7], [0.5, -0.7, 3.0]];
+        assert!(matches!(
+            jacobi_eigh_with_budget(&mut a, 1),
+            Err(SaddleError::Solver(_))
+        ));
     }
 }
