@@ -3397,13 +3397,13 @@ pixi run -e python gate-selftest
 Run the portable leg. The report path is relative to the checkout:
 
 ```sh
-python ci/gate/run.py --leg pixi --report gate.md
+python3 ci/gate/run.py --leg pixi --report gate.md
 ```
 
 Run both legs when EESSI 2026.06 is mounted and `eb-local` is on `PATH`:
 
 ```sh
-python ci/gate/run.py --leg all --report gate.md
+python3 ci/gate/run.py --leg all --report gate.md
 ```
 
 Without CVMFS or `eb-local`, the report says `EESSI not available`. That result is not a pass. The pixi leg still runs to completion.
