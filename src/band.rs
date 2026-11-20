@@ -5260,4 +5260,53 @@ mod tests {
             assert_abs_diff_eq!(g, w, epsilon = 0.000000000001);
         }
     }
+
+    #[test]
+    fn set_exp_precon_forgets_the_cached_euclidean_solver_evaluation() {
+        let positions = Array2::from_shape_vec(
+            (3, 9),
+            vec![
+                0.0, 0.0, 0.0, 1.1, 0.0, 0.0, 0.0, 1.2, 0.1, 0.2, 0.1, 0.0, 1.2, 0.2, 0.0, 0.1,
+                1.3, 0.2, 0.4, 0.2, 0.0, 1.3, 0.4, 0.1, 0.2, 1.4, 0.3,
+            ],
+        )
+        .expect("positions");
+        let config = BandConfig::default()
+            .with_method(Method::fire(rgmin::FireKind::V2))
+            .with_climbing(None)
+            .with_min_mode(None)
+            .with_saddle_check(None)
+            .with_remove_translation(false);
+        let mut session = BandSession::new(config, positions).expect("band");
+        let surface = Harmonic;
+        session.step(&surface).expect("euclidean step");
+        assert!(session.evaluation().is_some());
+
+        let accepted = session.interior_flat();
+        session
+            .set_exp_precon(ExpBandPrecon::default().with_mu(1.0))
+            .expect("install exponential metric");
+        assert!(
+            session.evaluation().is_none(),
+            "evaluation must stay unavailable until the new metric is built"
+        );
+
+        let evaluated_start = AtomicBool::new(false);
+        let expected_start = accepted.clone();
+        let oracle = Oracle::unbounded(accepted.len(), |x: ArrayView1<f64>| {
+            if x == expected_start.view() {
+                evaluated_start.store(true, Ordering::Relaxed);
+            }
+            (1.0, Array1::from_elem(x.len(), 0.25))
+        });
+        let mut trial = accepted;
+        session
+            .solver
+            .step(&oracle, &mut trial)
+            .expect("solver step after set_exp_precon");
+        assert!(
+            evaluated_start.load(Ordering::Relaxed),
+            "set_exp_precon left the Euclidean evaluation cached on the solver"
+        );
+    }
 }

@@ -1050,4 +1050,52 @@ mod tests {
             "the climbing image followed the raw negative gradient"
         );
     }
+
+    struct TransverseSlope;
+
+    impl BandSurface for TransverseSlope {
+        fn eval(
+            &self,
+            positions: ArrayView2<f64>,
+            energies: &mut Array1<f64>,
+            gradients: &mut Array2<f64>,
+        ) -> Result<(), SaddleError> {
+            for (i, row) in positions.outer_iter().enumerate() {
+                energies[i] = row[1];
+                gradients[(i, 1)] = 1.0;
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn put_image_forgets_the_cached_solver_evaluation() {
+        let positions = array![[-1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
+        let config = BandConfig::default()
+            .with_quickmin(true)
+            .with_climbing(None)
+            .with_min_mode(None)
+            .with_saddle_check(None)
+            .with_remove_translation(false)
+            .with_max_move(0.1);
+        let mut band = BandSession::new(config, positions).expect("band");
+        let surface = TransverseSlope;
+        band.step(&surface).expect("initial band step");
+        let y_after_first = band.positions[(1, 1)];
+        assert!(y_after_first < 0.0);
+
+        let updated = Point {
+            x: band.positions.row(1).to_owned(),
+            energy: -y_after_first,
+            gradient: array![0.0, -4.0, 0.0],
+        };
+        let projected = array![0.0, 4.0, 0.0];
+        band.put_image(1, &updated, projected.view());
+
+        band.step(&surface).expect("step after put_image");
+        assert!(
+            band.positions[(1, 1)] > y_after_first,
+            "solver reused the pre-put_image evaluation instead of reassembling"
+        );
+    }
 }
