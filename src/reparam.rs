@@ -210,9 +210,9 @@ pub struct SplineSample {
 
 /// End condition of [`Spline`].
 ///
-/// [`SplineEnds::NotAKnot`] is the chord, parabola, or not-a-knot that
-/// string reparametrization builds with [`Spline::fit`].
-/// [`SplineEnds::Natural`] uses the same Hermite pieces with the second
+/// [`SplineEnds::NotAKnot`] is the chord, parabola, or not-a-knot cubic
+/// that [`reparametrize`] places string images on.
+/// [`SplineEnds::Natural`] uses the same cubic pieces with the second
 /// derivative zero at both end knots.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SplineEnds {
@@ -224,14 +224,14 @@ pub enum SplineEnds {
 
 /// Interpolating spline through knots and the rows of `values`.
 ///
-/// [`Spline::fit`] and [`SplineEnds::NotAKnot`] are the chord for two
-/// knots, the parabola for three, and the not-a-knot cubic for four or
-/// more: that is the spline the string reparametrization places images
-/// on. [`SplineEnds::Natural`] keeps those pieces and sets the end
-/// curvature to zero. Sampling an interior knot reads the segment that
-/// starts there; the last knot reads the last segment. The arc-length
-/// walk uses [`Spline::derivatives`], which reads an interior knot on
-/// the segment that ends there.
+/// [`SplineEnds::NotAKnot`] is the chord for two knots, the parabola for
+/// three, and the not-a-knot cubic for four or more: that is the spline
+/// [`reparametrize`] places string images on. [`SplineEnds::Natural`]
+/// keeps those pieces and sets the end curvature to zero.
+/// [`Spline::sample`] at an interior knot reads the segment that starts
+/// there, and at the last knot the last segment. The arc-length walk
+/// inside [`reparametrize`] reads an interior knot on the segment that
+/// ends there.
 #[derive(Clone, Debug)]
 pub struct Spline {
     t: Vec<f64>,
@@ -244,9 +244,10 @@ pub struct Spline {
 impl Spline {
     /// Interpolate `values` on `knots` with the given end condition.
     ///
-    /// [`SplineEnds::NotAKnot`] is [`Spline::fit`]. [`SplineEnds::Natural`]
-    /// is a chord for two knots and, for three or more, the tridiagonal
-    /// system with the second derivative zero at both ends.
+    /// [`SplineEnds::NotAKnot`] is the spline [`reparametrize`] fits.
+    /// [`SplineEnds::Natural`] is a chord for two knots and, for three or
+    /// more, the tridiagonal system with the second derivative zero at
+    /// both ends.
     ///
     /// # Errors
     ///
