@@ -58,9 +58,9 @@ use rgmin::{Accept, Control, LevelSetConstraint, Method, Oracle, Solver};
 
 use super::zoom::resample;
 use super::{
-    BandConfig, BandReport, BandSession, BandStatus, BandSurface, SAME_ROW_TOL, build_solver,
-    climb_target, image_force, max_abs, min_mode, pin_fixed_rows, remove_net_translation,
-    zero_fixed,
+    BandConfig, BandReport, BandSession, BandStatus, BandSurface, MetricBuildId, SAME_ROW_TOL,
+    build_solver, climb_target, image_force, max_abs, min_mode, pin_fixed_rows,
+    remove_net_translation, zero_fixed,
 };
 use crate::error::SaddleError;
 use crate::force::ForceGate;
@@ -311,6 +311,12 @@ struct FreeEndMeasurement {
     energies: Array1<f64>,
     gradients: Array2<f64>,
     projected: Array1<f64>,
+    /// Preconditioned driving force of the interior images, when the
+    /// band carries a fresh metric.
+    driving: Option<Array1<f64>>,
+    /// Metric the forces were assembled with. `None` when the band
+    /// carries a metric that is not current at the reported positions.
+    metric: Option<MetricBuildId>,
     max_force: f64,
     endpoint_force: f64,
 }
@@ -825,11 +831,12 @@ impl BandSession {
             .as_ref()
             .and_then(|exp| exp.fresh_metrics(interior.view(), n_images - 2));
         let mut projected = Array1::zeros((n_images - 2) * dof);
+        let mut driving = metrics.map(|_| Array1::zeros((n_images - 2) * dof));
         for image in 1..n_images - 1 {
             let rows = s![(image - 1) * dof..image * dof];
             let metric =
                 metrics.and_then(|band| band.per_image.get(image - 1).map(|p| (p, band.free)));
-            let (force, _) = image_force(
+            let (force, drive) = image_force(
                 &self.config,
                 &self.state,
                 &resolved_spring,
@@ -843,12 +850,22 @@ impl BandSession {
                 metric,
             )?;
             projected.slice_mut(rows).assign(&force);
+            if let (Some(all), Some(drive)) = (driving.as_mut(), drive) {
+                all.slice_mut(rows).assign(&drive);
+            }
         }
         let max_force = self.state.convergence_force(&projected).max(endpoint_force);
+        let metric = match (&self.exp, metrics) {
+            (None, _) => Some(MetricBuildId::EUCLIDEAN),
+            (Some(_), Some(band)) => Some(band.build_id),
+            (Some(_), None) => None,
+        };
         Ok(FreeEndMeasurement {
             energies,
             gradients,
             projected,
+            driving,
+            metric,
             max_force,
             endpoint_force,
         })
@@ -1360,7 +1377,13 @@ impl BandSession {
         self.free_end_state.last_endpoint_energy = Some(e_end);
         self.free_end_state.last_endpoint_force = Some(endpoint_force_norm);
         *lock_guard(&self.state.last_max_force) = max_force;
-        self.cache_free_end_evaluation(measured.energies, measured.gradients, measured.projected);
+        self.cache_free_end_evaluation(
+            measured.energies,
+            measured.gradients,
+            measured.projected,
+            measured.driving,
+            measured.metric,
+        );
         self.free_end_state.evaluated_band = Some(self.positions.clone());
 
         let all_cuts_done = fe_cfg.max_cuts == 0 || self.free_end_state.cuts >= fe_cfg.max_cuts;
@@ -1516,6 +1539,7 @@ impl FeaNebSession {
 mod tests {
     use ndarray::{Array1, Array2, ArrayView2, array};
 
+    use super::{MetricBuildId, lock_guard};
     use super::{
         SAME_ROW_TOL, accept_endpoint_pair, assembled_free_end_force, cut_force_limit,
         eq7_endpoint_force, first_cut_tolerance, peak_window, project_onto_level_set,
@@ -1927,6 +1951,20 @@ mod tests {
         }
     }
 
+    /// Fails a test that asks the surface for anything.
+    struct NoSurface;
+
+    impl BandSurface for NoSurface {
+        fn eval(
+            &self,
+            _positions: ArrayView2<f64>,
+            _energies: &mut Array1<f64>,
+            _gradients: &mut Array2<f64>,
+        ) -> Result<(), SaddleError> {
+            panic!("the cached evaluation should have answered");
+        }
+    }
+
     fn peak_band(n_images: usize) -> Array2<f64> {
         Array2::from_shape_fn((n_images, 6), |(image, column)| {
             let t = image as f64 / (n_images - 1) as f64;
@@ -1951,6 +1989,83 @@ mod tests {
             .with_remove_translation(false)
     }
 
+    /// The residual, the driving force and the metric tag of the cache.
+    fn cached_forces(session: &BandSession) -> (Array1<f64>, Array1<f64>, Option<MetricBuildId>) {
+        let slot = lock_guard(&session.state.last);
+        let last = slot.as_ref().expect("cached evaluation");
+        (
+            last.projected.clone(),
+            last.driving.clone(),
+            last.assembly_metric,
+        )
+    }
+
+    fn assert_close(left: &Array1<f64>, right: &Array1<f64>) {
+        assert_eq!(left.len(), right.len());
+        for (a, b) in left.iter().zip(right.iter()) {
+            assert!((a - b).abs() <= 1e-9 * (1.0 + a.abs()), "{a} against {b}");
+        }
+    }
+
+    /// The cache must hold what the band assembly produces at the same
+    /// geometry under the metric it names.
+    fn assert_cache_matches_assembly(session: &BandSession) {
+        let (projected, driving, metric) = cached_forces(session);
+        let exp = session.exp.as_ref().expect("metric");
+        let x = session.interior_flat();
+        let fresh = exp
+            .fresh_metrics(x.view(), session.positions.nrows() - 2)
+            .expect("the metric is current at the reported positions");
+        assert_eq!(metric, Some(fresh.build_id));
+        assert_eq!(driving.len(), projected.len());
+        session
+            .assemble_accepted(&NoSurface, x.view())
+            .expect("reassemble from the cached surface values");
+        let (again_projected, again_driving, again_metric) = cached_forces(session);
+        assert_eq!(again_metric, metric);
+        assert_close(&projected, &again_projected);
+        assert_close(&driving, &again_driving);
+    }
+
+    #[test]
+    fn the_cached_driving_force_is_the_preconditioned_force_its_tag_names() {
+        let config = exp_free_end_config(FreeEndConfig::default().with_max_cuts(0));
+        let mut session = BandSession::new(config, peak_band(7)).expect("session");
+        session
+            .step_free_end(&PeakDiatomic { tilt: 0.0 })
+            .expect("step");
+        let (projected, driving, metric) = cached_forces(&session);
+        assert!(metric.is_some_and(|id| id != MetricBuildId::EUCLIDEAN));
+        let apart = projected
+            .iter()
+            .zip(driving.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f64::max);
+        assert!(
+            apart > 1e-3,
+            "the driving force is the residual again: {apart}"
+        );
+        assert_cache_matches_assembly(&session);
+    }
+
+    #[test]
+    fn the_euclidean_cache_holds_no_driving_force() {
+        let config = BandConfig::default()
+            .with_free_end(FreeEndConfig::default().with_max_cuts(0))
+            .with_climbing(None)
+            .with_min_mode(None)
+            .with_saddle_check(None)
+            .with_remove_translation(false);
+        let mut session = BandSession::new(config, peak_band(7)).expect("session");
+        session
+            .step_free_end(&PeakDiatomic { tilt: 0.0 })
+            .expect("step");
+        let (projected, driving, metric) = cached_forces(&session);
+        assert_eq!(metric, Some(MetricBuildId::EUCLIDEAN));
+        assert_eq!(projected.len(), 5 * 6);
+        assert_eq!(driving.len(), 0);
+    }
+
     #[test]
     fn the_metric_is_rebuilt_after_the_interior_moves_far_in_one_step() {
         let config = exp_free_end_config(FreeEndConfig::default().with_max_cuts(0));
@@ -1972,6 +2087,7 @@ mod tests {
             session.evaluation().is_some(),
             "the step reported forces under a stale metric"
         );
+        assert_cache_matches_assembly(&session);
     }
 
     #[test]
@@ -1993,5 +2109,6 @@ mod tests {
             session.evaluation().is_some(),
             "the cut left the band under a stale metric"
         );
+        assert_cache_matches_assembly(&session);
     }
 }
