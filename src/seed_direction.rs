@@ -38,6 +38,29 @@ pub struct ModeSweepDirectionPlan {
     pub minimum_squared_mode_weight: f64,
 }
 
+/// Select a deterministic soft-to-stiff schedule over an available mode band.
+///
+/// A short schedule takes the midpoint of each equal-width spectral stratum,
+/// so the maximum unsampled mode-index gap is at most
+/// `ceil(total_modes / draws)`. A schedule at least as long as the mode band
+/// visits every mode once before cycling.
+pub fn mode_sweep_schedule(
+    total_modes: usize,
+    draws: usize,
+) -> Result<Vec<usize>, SaddleError> {
+    if total_modes == 0 || draws == 0 {
+        return Err(SaddleError::Invalid(
+            "mode sweep schedule needs at least one mode and one draw".into(),
+        ));
+    }
+    if draws >= total_modes {
+        return Ok((0..draws).map(|draw| draw % total_modes).collect());
+    }
+    Ok((0..draws)
+        .map(|draw| ((2 * draw + 1) * total_modes) / (2 * draws))
+        .collect())
+}
+
 /// Build one localized seed for every non-rigid Hessian mode, soft to stiff.
 ///
 /// `localization_weights`, when present, has one row per localization centre
