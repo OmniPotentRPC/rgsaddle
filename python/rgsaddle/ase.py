@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import math
 import warnings
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 import numpy as np
 from numpy.typing import NDArray
@@ -25,6 +25,12 @@ Float64 = NDArray[np.float64]
 Int64 = NDArray[np.int64]
 Uint64 = NDArray[np.uint64]
 Uint8 = NDArray[np.uint8]
+
+
+class _FindMic(Protocol):
+    """Signature of ``ase.geometry.find_mic``, which the library leaves unannotated."""
+
+    def __call__(self, v: Float64, cell: Any, pbc: Any, /) -> tuple[Float64, Float64]: ...
 
 
 class UnsupportedFeature(NotImplementedError):
@@ -593,7 +599,8 @@ class NEB:
         if mic:
             from ase.geometry import find_mic
 
-            displacement = find_mic(end - start, self.images[0].cell, self.images[0].pbc)[0]
+            minimum_image: _FindMic = find_mic
+            displacement = minimum_image(end - start, self.images[0].cell, self.images[0].pbc)[0]
         else:
             displacement = end - start
         last = len(self.images) - 1
@@ -989,10 +996,10 @@ def _optimizer_maxstep(optimizer: Any) -> float:
         from ase.optimize import FIRE
     except ImportError as err:
         raise UnsupportedFeature("AutoNEB optimizer is FIRE") from err
-    if not (optimizer is FIRE or (isinstance(optimizer, type) and issubclass(optimizer, FIRE))):
+    if not (isinstance(optimizer, type) and issubclass(optimizer, FIRE)):
         raise UnsupportedFeature("AutoNEB steps with the band FIRE solver; pass FIRE")
     try:
-        signature = inspect.signature(optimizer.__init__)
+        signature = inspect.signature(optimizer)
     except (TypeError, ValueError):
         return 0.2
     parameter = signature.parameters.get("maxstep")
