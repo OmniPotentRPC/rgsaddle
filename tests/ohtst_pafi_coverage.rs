@@ -4,6 +4,7 @@
 
 #![cfg(feature = "ohtst")]
 
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use ndarray::{Array1, Array2, ArrayView1, array};
@@ -107,6 +108,7 @@ fn pafi_adaptive_profile_zero_temp_barrier_and_region_reflection() {
         .with_samples(60)
         .with_blocks(4)
         .with_seed(7)
+        .with_fix_com(false)
         .with_target_error(Some(1e-4))
         .with_max_rounds(2)
         .with_region(boundary);
@@ -117,6 +119,9 @@ fn pafi_adaptive_profile_zero_temp_barrier_and_region_reflection() {
         profile.barrier
     );
     assert!(profile.samples > 60 * arcs.len());
+    const ADAPTIVE_GROWTH_BOUND: usize = 8;
+    let adaptive_limit = cfg.samples + cfg.samples * ADAPTIVE_GROWTH_BOUND;
+    assert!(profile.samples <= adaptive_limit * arcs.len());
     for plane in &planes {
         for q in &plane.retained {
             assert!(q[1] >= -1.15 - 1e-10, "violated boundary y={}", q[1]);
@@ -136,7 +141,8 @@ fn pafi_adaptive_profile_zero_temp_barrier_and_region_reflection() {
         .with_stride(2)
         .with_samples(40)
         .with_blocks(4)
-        .with_fix_com(true);
+        .with_fix_com(true)
+        .with_com_atoms(NonZeroUsize::new(2).expect("two atoms"));
     let (prof2, _) = pafi_profile(&TwoAtomHarmonic, &path2, &[0.0, 0.5, 1.0], &cfg2).unwrap();
     assert!(prof2.barrier.is_finite());
 

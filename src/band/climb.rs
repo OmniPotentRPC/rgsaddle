@@ -249,6 +249,7 @@ impl ModelClimb {
 /// call it was before, so the 9-dof triangle fixtures of the climb tests
 /// keep Jacobi. LJ38, a Pt-island image, and the 40-wide
 /// `wide_ts_bfgs_matches_jacobi` model take faer.
+#[cfg(feature = "faer")]
 const TS_BFGS_JACOBI_LIMIT: usize = 32;
 
 #[cfg(all(test, feature = "faer"))]

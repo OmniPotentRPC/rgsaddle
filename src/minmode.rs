@@ -10,6 +10,8 @@
 
 use std::collections::VecDeque;
 use std::f64::consts::PI;
+use std::fmt;
+use std::num::NonZeroUsize;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -22,6 +24,34 @@ use crate::kappa::{Complement, KappaDimerConfig, kappa_dimer_force};
 use crate::saddle_index::{
     Certificate, Probe, SaddleIndex, SaddleIndexCheck, certify, escape_push,
 };
+
+/// Coordinate-layout information a surface can certify.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CartesianLayout {
+    /// The surface does not certify its coordinate layout.
+    #[default]
+    Unknown,
+    /// Ordinary Cartesian coordinates for the stated number of atoms.
+    Cartesian {
+        /// Number of atoms represented by the coordinate vector.
+        atoms: NonZeroUsize,
+    },
+    /// Coordinates repeat one physical system, as in a ring polymer.
+    Wrapped,
+    /// Coordinates are known not to be ordinary Cartesian atom positions.
+    NonCartesian,
+}
+
+impl fmt::Display for CartesianLayout {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unknown => formatter.write_str("an uncertified coordinate layout"),
+            Self::Cartesian { .. } => formatter.write_str("Cartesian coordinates"),
+            Self::Wrapped => formatter.write_str("wrapped coordinates"),
+            Self::NonCartesian => formatter.write_str("non-Cartesian coordinates"),
+        }
+    }
+}
 
 /// The caller's surface for a single geometry.
 pub trait PointSurface: Sync {
@@ -42,6 +72,15 @@ pub trait PointSurface: Sync {
     /// supply only their actual symmetries. These are evaluated at the query.
     fn excluded_modes(&self, x: ArrayView1<f64>) -> Result<Array2<f64>, SaddleError> {
         Ok(Array2::zeros((0, x.len())))
+    }
+
+    /// Coordinate layout when the surface can certify it.
+    ///
+    /// PAFI accepts an explicit [`crate::PafiConfig::com_atoms`] count for an
+    /// unknown layout, checks a certified Cartesian count, and rejects wrapped
+    /// and non-Cartesian layouts.
+    fn cartesian_layout(&self) -> CartesianLayout {
+        CartesianLayout::Unknown
     }
 
     /// Energy and Cartesian gradient in a periodic cell, row-major 3x3.

@@ -2,4 +2,4 @@
 
 ~PafiIntegrator::EulerMaruyama~ selects the paper's direct overdamped Eq. (9) step. ~PafiConfig::trajectories~ runs independent trajectories and reports the ensemble error used by the public driver.
 
-~ArcPath::geometry~, and so ~pafi_profile~, return ~SaddleError::Invalid~ for an arc outside ~ArcPath::bounds~ instead of clamping it to the end. ~PathGeometry~ gains the field ~jerk~, the third derivative of the spline.
+~ArcPath::geometry~, and so ~pafi_profile~, return ~SaddleError::PafiArcOutsidePath~ for an arc outside ~ArcPath::bounds~ instead of clamping it to the end. ~PathGeometry~ gains the field ~jerk~, the third derivative of the spline.

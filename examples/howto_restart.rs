@@ -59,7 +59,8 @@ fn pafi_continuation() -> Result<(), SaddleError> {
         .with_blocks(10)
         .with_target_error(0.004)
         .with_max_rounds(6)
-        .with_seed(5);
+        .with_seed(5)
+        .with_fix_com(false);
     let (profile, _) = pafi_profile(&CurvedWell, &path, &arcs, &config)?;
     let one_round = config.samples * arcs.len();
     println!(

@@ -219,6 +219,12 @@ impl LangevinConfig {
                 "sampler friction must be finite and positive".into(),
             ));
         }
+        if self.blocks == 0 {
+            return Err(SaddleError::MissingBlocks { context: "sampler" });
+        }
+        if self.records == 0 {
+            return Err(SaddleError::MissingSamples { context: "sampler" });
+        }
         if self.stride == 0 || self.blocks < 2 || self.records < 2 * self.blocks {
             return Err(SaddleError::Invalid(
                 "sampler needs a positive stride, two blocks, and two records per block".into(),
@@ -608,7 +614,12 @@ pub struct AnalyticSurfaceSampler<'a, S> {
     config: LangevinConfig,
     start: Option<Array1<f64>>,
     held: Option<Vec<Array1<f64>>>,
-    rng: Option<Rng>,
+    rng: SamplerRng,
+}
+
+enum SamplerRng {
+    BudgetSeed,
+    Prepared(Rng),
 }
 
 impl<'a, S: PointSurface> AnalyticSurfaceSampler<'a, S> {
@@ -619,7 +630,7 @@ impl<'a, S: PointSurface> AnalyticSurfaceSampler<'a, S> {
             config,
             start: None,
             held: None,
-            rng: None,
+            rng: SamplerRng::BudgetSeed,
         }
     }
 
@@ -649,7 +660,10 @@ impl<S: PointSurface> HyperplaneSampler for AnalyticSurfaceSampler<'_, S> {
                 self.config.hold_excluded,
             )?,
         };
-        let rng = self.rng.take().unwrap_or_else(|| Rng::new(budget.seed));
+        let rng = match std::mem::replace(&mut self.rng, SamplerRng::BudgetSeed) {
+            SamplerRng::BudgetSeed => Rng::new(budget.seed),
+            SamplerRng::Prepared(rng) => rng,
+        };
         let walls: [Hyperplane; 0] = [];
         let mut config = self.config.clone();
         config.thermal = budget.thermal;
@@ -873,7 +887,8 @@ pub(crate) fn held_directions<S: PointSurface>(
             .map(|t| t.dot(&normal).powi(2))
             .sum::<f64>()
             .sqrt();
-        if overlap > 1.0e-6 {
+        let roundoff = f64::EPSILON * n as f64 * (excluded.len() + 1) as f64;
+        if overlap > roundoff {
             return Err(SaddleError::Invalid(
                 "the plane normal has a component along a held mode; take Hyperplane::orthogonal_to first"
                     .into(),
@@ -1164,9 +1179,12 @@ fn estimate_engine_plane(
     let (normal_force, normal_force_error) = mean_and_error(&normal_forces);
     let (grad_point, _) = column_means(&block_gradients, 0);
     let (grad_normal, grad_normal_error) = column_means(&block_gradients, n);
-    let centroid = block_centroids.mean_axis(ndarray::Axis(0)).ok_or_else(|| {
-        SaddleError::Invalid("OH-TST sampling produced no centroid blocks".into())
-    })?;
+    let centroid =
+        block_centroids
+            .mean_axis(ndarray::Axis(0))
+            .ok_or(SaddleError::MissingSamples {
+                context: "sampler block centroids",
+            })?;
     let mut lever = &centroid - &point;
     remove_directions(&mut lever, &independent);
     let mut centroid_block_gradients = block_gradients.clone();
@@ -1264,19 +1282,25 @@ pub(crate) fn sample_plane_controlled<S: PointSurface>(
     )?;
     let mut rng = Rng::new(config.seed);
     let mut probes = Vec::with_capacity(PROJECTIONS);
-    for _ in 0..PROJECTIONS {
+    let free_dimensions = n - held.len();
+    for _ in 0..PROJECTIONS * usize::from(free_dimensions > 0) {
         let mut w: Array1<f64> = (0..n).map(|_| rng.normal()).collect();
-        for direction in &held {
-            let c = direction.dot(&w);
-            w.scaled_add(-c, direction);
+        let raw_norm = w.dot(&w).sqrt();
+        for _ in 0..2 {
+            for direction in &held {
+                let c = direction.dot(&w);
+                w.scaled_add(-c, direction);
+            }
         }
         let norm = w.dot(&w).sqrt();
-        if norm > 1.0e-12 {
+        if !(raw_norm.is_finite() && norm.is_finite()) {
+            return Err(SaddleError::NonFinite("sampler control probe"));
+        }
+        if norm > f64::EPSILON * n as f64 * raw_norm {
             probes.push(w / norm);
         }
     }
     let excluded = held[1..].to_vec();
-    let free_dimensions = n - held.len();
     let mut control = match &config.control {
         Some(reference) => PlaneControl::new(surface, reference, &held)?,
         None => None,
@@ -1297,7 +1321,7 @@ pub(crate) fn sample_plane_controlled<S: PointSurface>(
         config: config.clone(),
         start: Some(start),
         held: Some(held),
-        rng: Some(rng),
+        rng: SamplerRng::Prepared(rng),
     };
     let ensemble = backend.sample_hyperplane(plane, &budget)?;
     let force_series: Vec<f64> = ensemble
@@ -1644,6 +1668,20 @@ mod tests {
         assert!(matches!(
             error,
             SaddleError::NotEquilibrated { .. } | SaddleError::InsufficientEffectiveSamples { .. }
+        ));
+    }
+
+    #[test]
+    fn sampler_typed_errors_cover_empty_records_and_blocks() {
+        let no_blocks = LangevinConfig::default().with_blocks(0);
+        assert!(matches!(
+            no_blocks.check(),
+            Err(SaddleError::MissingBlocks { context: "sampler" })
+        ));
+        let no_records = LangevinConfig::default().with_records(0);
+        assert!(matches!(
+            no_records.check(),
+            Err(SaddleError::MissingSamples { context: "sampler" })
         ));
     }
 

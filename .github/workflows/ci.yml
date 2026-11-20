@@ -30,6 +30,8 @@ jobs:
         run: cargo build --features capi --verbose
       - name: Test
         run: cargo test --features capi --verbose
+      - name: Ring-polymer partition correctness
+        run: cargo test --release --test ring_pafi -- --test-threads=1
       - name: Clippy
         run: cargo clippy --features capi -- -D warnings
       - name: Build the C ABI library (capi,ohtst)
@@ -88,6 +90,7 @@ jobs:
           cargo run --release --example fixed_slab_precon
           cargo run --release --example akmc_strain
           cargo run --release --features ohtst --example ohtst_skewed_well
+          cargo run --release --example centroid_pmf
           cargo run --release --example elastic_field_bench -- 2000
           MD_CHECK=1 cargo run --release --example langevin_nvt
           cargo run --release --example pafi_tutorial

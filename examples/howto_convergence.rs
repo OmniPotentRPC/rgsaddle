@@ -60,7 +60,8 @@ fn pafi_tau_and_n_eff() -> Result<(), SaddleError> {
             .with_samples(samples)
             .with_stride(stride)
             .with_blocks(10)
-            .with_seed(9);
+            .with_seed(9)
+            .with_fix_com(false);
         match pafi_profile(&CurvedWell, &path, &arcs, &config) {
             Ok((profile, planes)) => {
                 let tau_max = planes.iter().fold(0.0_f64, |m, p| m.max(p.tau));

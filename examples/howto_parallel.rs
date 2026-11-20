@@ -50,7 +50,8 @@ fn pafi_over_planes() -> Result<(), SaddleError> {
         .with_thermal(0.1)
         .with_samples(6_000)
         .with_blocks(20)
-        .with_seed(5);
+        .with_seed(5)
+        .with_fix_com(false);
 
     let threads: usize = std::thread::available_parallelism()
         .map(std::num::NonZero::get)
