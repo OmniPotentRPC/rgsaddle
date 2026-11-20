@@ -178,6 +178,12 @@ _SKIPS: tuple[tuple[str, str], ...] = (
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     for item in items:
         node = item.nodeid
+        if "test_interpolate_images.py::test_interpolate_images_fixed" in node:
+            # pytest-run-parallel iterations share this mutable Atoms fixture.
+            # Run the three calls as one serialized state transition; repeating
+            # it would start from the final unconstrained interpolation.
+            item.add_marker(pytest.mark.thread_unsafe)
+            item.add_marker(pytest.mark.iterations(1))
         for needle, reason in _SKIPS:
             if needle in node:
                 item.add_marker(pytest.mark.skip(reason=reason))
