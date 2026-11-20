@@ -275,3 +275,43 @@ fn an_unevenly_spaced_line_converges_only_once_its_springs_balance() {
         );
     }
 }
+
+struct Trough;
+
+impl BandSurface for Trough {
+    fn eval(
+        &self,
+        positions: ArrayView2<'_, f64>,
+        energies: &mut Array1<f64>,
+        gradients: &mut Array2<f64>,
+    ) -> Result<(), SaddleError> {
+        for (i, row) in positions.outer_iter().enumerate() {
+            energies[i] = 1.0 + row[1] * row[1];
+            gradients[(i, 0)] = 0.0;
+            gradients[(i, 1)] = 2.0 * row[1];
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn a_plateau_of_three_equal_energies_still_steps() {
+    // Images 1, 2, and 3 lie on the trough floor at one energy, so the
+    // weighted tangent at image 2 has no energy difference to scale by.
+    let positions = array![[-2.0, 0.5], [-1.0, 0.0], [0.0, 0.0], [1.0, 0.0], [2.0, 0.5]];
+    let config = LineNebConfig {
+        spring_k: 1.0,
+        endpoint_kappa: 1.0,
+        force_tol: 1.0e-6,
+        energy: 0.0,
+        masses: array![1.0, 1.0],
+        time_step: 0.05,
+        reduced_planck: 1.0,
+    };
+    let mut session = LineNebSession::new(config, positions).unwrap();
+    let report = session.step(&Trough).unwrap();
+    assert!(report.action.is_finite());
+    assert!(report.max_interior_perpendicular.is_finite());
+    assert!(report.max_interior_spring.is_finite());
+    assert_eq!(report.status, LineNebStatus::Running);
+}

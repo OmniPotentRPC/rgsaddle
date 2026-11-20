@@ -283,6 +283,12 @@ fn max_abs(values: impl Iterator<Item = f64>) -> f64 {
     })
 }
 
+/// Unit tangent of Henkelman and Jónsson at an interior image.
+///
+/// When the neighbour energies are equal the weighted tangent points
+/// along `forward + backward`, the secant from the previous image to the
+/// next, scaled by the larger energy difference. On a plateau of three
+/// equal energies that scale is zero, so the secant is used unscaled.
 fn improved_tangent(
     previous: ArrayView1<'_, f64>,
     current: ArrayView1<'_, f64>,
@@ -310,16 +316,16 @@ fn improved_tangent(
         } else {
             backward_difference
         };
-        match next_energy.total_cmp(&previous_energy) {
-            std::cmp::Ordering::Greater => forward * large + backward * small,
-            std::cmp::Ordering::Less => forward * small + backward * large,
-            std::cmp::Ordering::Equal => (forward + backward) * large,
+        match next_energy.partial_cmp(&previous_energy) {
+            Some(std::cmp::Ordering::Greater) => forward * large + backward * small,
+            Some(std::cmp::Ordering::Less) => forward * small + backward * large,
+            _ => forward + backward,
         }
     };
     let norm = tangent.dot(&tangent).sqrt();
     if !(norm.is_finite() && norm > 0.0) {
         return Err(SaddleError::Invalid(
-            "LI-NEB improved tangent has no direction".into(),
+            "LI-NEB tangent has no direction: the neighbouring images coincide".into(),
         ));
     }
     tangent /= norm;
@@ -834,5 +840,47 @@ mod max_abs_tests {
         assert!(max_abs([f64::NAN, 1.0].into_iter()).is_nan());
         assert!(max_abs([1.0, f64::NAN, 2.0].into_iter()).is_nan());
         assert!(max_abs([1.0, 2.0, f64::NAN].into_iter()).is_nan());
+    }
+}
+
+#[cfg(test)]
+mod tangent_tests {
+    use ndarray::array;
+
+    use super::improved_tangent;
+
+    #[test]
+    fn a_plateau_takes_the_normalized_secant() {
+        let previous = array![0.0, 0.0];
+        let current = array![1.0, 3.0];
+        let next = array![3.0, 4.0];
+        let tangent =
+            improved_tangent(previous.view(), current.view(), next.view(), 2.5, 2.5, 2.5).unwrap();
+        assert_eq!(tangent, array![0.6, 0.8]);
+    }
+
+    #[test]
+    fn equal_neighbours_point_along_the_secant() {
+        let previous = array![0.0, 0.0];
+        let current = array![1.0, 3.0];
+        let next = array![3.0, 4.0];
+        let tangent =
+            improved_tangent(previous.view(), current.view(), next.view(), 1.0, 2.5, 1.0).unwrap();
+        assert_eq!(tangent, array![0.6, 0.8]);
+    }
+
+    #[test]
+    fn coincident_neighbours_have_no_tangent() {
+        let previous = array![0.0, 0.0];
+        let current = array![1.0, 3.0];
+        let tangent = improved_tangent(
+            previous.view(),
+            current.view(),
+            previous.view(),
+            2.5,
+            2.5,
+            2.5,
+        );
+        assert!(tangent.is_err());
     }
 }
