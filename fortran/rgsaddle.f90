@@ -704,13 +704,14 @@ contains
     class(pafi_handle), intent(inout) :: self
     type(rgsaddle_pafi_config_t), intent(in) :: config
     type(c_ptr) :: ptr
-    if (config%version%major /= int(RGSADDLE_ABI_MAJOR, c_int32_t)) then
-      status = RGSADDLE_ABI_MISMATCH
-      return
-    end if
+    ! Same order as the C setter: the handle, then the config's major.
     ptr = raw_ptr(self%raw)
     if (.not. c_associated(ptr)) then
       status = RGSADDLE_NULL_SESSION
+      return
+    end if
+    if (config%version%major /= int(RGSADDLE_ABI_MAJOR, c_int32_t)) then
+      status = RGSADDLE_ABI_MISMATCH
       return
     end if
     status = c_rgsaddle_pafi_set_config(ptr, config)
@@ -789,13 +790,14 @@ contains
     class(ohtst_handle), intent(inout) :: self
     type(rgsaddle_ohtst_config_t), intent(in) :: config
     type(c_ptr) :: ptr
-    if (config%version%major /= int(RGSADDLE_ABI_MAJOR, c_int32_t)) then
-      status = RGSADDLE_ABI_MISMATCH
-      return
-    end if
+    ! Same order as the C setter: the handle, then the config's major.
     ptr = raw_ptr(self%raw)
     if (.not. c_associated(ptr)) then
       status = RGSADDLE_NULL_SESSION
+      return
+    end if
+    if (config%version%major /= int(RGSADDLE_ABI_MAJOR, c_int32_t)) then
+      status = RGSADDLE_ABI_MISMATCH
       return
     end if
     status = c_rgsaddle_ohtst_set_config(ptr, config)
