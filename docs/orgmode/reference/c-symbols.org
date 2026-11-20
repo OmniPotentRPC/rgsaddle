@@ -131,6 +131,7 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =rgsaddle_samd_position=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_samd_free=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_idpp_path=. Purpose: Image dependent pair potential initial path. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_autoneb_run=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_ocineb_create=. Purpose: Climbing-image band that hands the climbing image to a min-mode climb. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_ocineb_step=. Purpose: One band step, one alignment, or one P-RFO climb step. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_ocineb_positions=. Purpose: Copy the current band out (n_images * 3 * n_atoms doubles). Parameters: the declaration. Units: the caller's.
@@ -243,6 +244,8 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =rgsaddle_sella_saddle_config_t=. Purpose: Sella order-1 (P-RFO + trust).
 - =rgsaddle_constraints_config_t=. Purpose: Empty Constraints chart.
 - =rgsaddle_samd_config_t=. Purpose: Sella BDP thermostat.
+- =rgsaddle_autoneb_config_t=. Purpose: Run-to-completion AutoNEB, ABI minor 46.
+- =rgsaddle_autoneb_report_t=. Purpose: Result of rgsaddle_autoneb_run.
 - =rgsaddle_ocineb_phase_t=. Purpose: Phase of one OCI-NEB host step.
 - =rgsaddle_ocineb_config_t=. Purpose: Hand-off parameters.
 - =rgsaddle_ocineb_report_t=. Purpose: One OCI-NEB step.
@@ -275,6 +278,9 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =RGSADDLE_REQ_ONE_IMAGE=. Purpose: Request flags bit 0.
 - =RGSADDLE_REQ_CLIMBING_IMAGE=. Purpose: Request flags bit 1, ABI minor 23.
 - =RGSADDLE_VERSION_INIT=. Purpose: Macro constant in include/rgsaddle.h.
+- =RGSADDLE_AUTONEB_CLIMB=. Purpose: AutoNEB flag bit 0, ABI minor 46.
+- =RGSADDLE_AUTONEB_IDPP=. Purpose: AutoNEB flag bit 1, ABI minor 46.
+- =RGSADDLE_AUTONEB_KEEP_TRANSLATION=. Purpose: AutoNEB flag bit 2, ABI minor 46.
 - =RGSADDLE_STENCIL_MIN=. Purpose: Macro constant in include/rgsaddle.h.
 - =RGSADDLE_STENCIL_DIMER=. Purpose: Macro constant in include/rgsaddle.h.
 - =RGSADDLE_STENCIL_LANCZOS=. Purpose: Macro constant in include/rgsaddle.h.
