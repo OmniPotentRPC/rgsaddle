@@ -44,10 +44,7 @@ pub struct ModeSweepDirectionPlan {
 /// so the maximum unsampled mode-index gap is at most
 /// `ceil(total_modes / draws)`. A schedule at least as long as the mode band
 /// visits every mode once before cycling.
-pub fn mode_sweep_schedule(
-    total_modes: usize,
-    draws: usize,
-) -> Result<Vec<usize>, SaddleError> {
+pub fn mode_sweep_schedule(total_modes: usize, draws: usize) -> Result<Vec<usize>, SaddleError> {
     if total_modes == 0 || draws == 0 {
         return Err(SaddleError::Invalid(
             "mode sweep schedule needs at least one mode and one draw".into(),
@@ -259,19 +256,13 @@ fn sample_on_sphere(dim: usize, rng: &mut SplitMix64) -> Array1<f64> {
 mod tests {
     use ndarray::{Array1, ArrayView1, array};
 
-    use super::{
-        hessian_mode_sweep_directions, mode_sweep_schedule,
-        spectral_gap_rank,
-    };
+    use super::{hessian_mode_sweep_directions, mode_sweep_schedule, spectral_gap_rank};
     use crate::{PointSurface, SaddleError};
 
     struct DiagonalHarmonic;
 
     impl PointSurface for DiagonalHarmonic {
-        fn eval(
-            &self,
-            x: ArrayView1<'_, f64>,
-        ) -> Result<(f64, Array1<f64>), SaddleError> {
+        fn eval(&self, x: ArrayView1<'_, f64>) -> Result<(f64, Array1<f64>), SaddleError> {
             let diagonal = array![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
             let gradient = &diagonal * &x;
             Ok((0.5 * x.dot(&gradient), gradient))
@@ -302,10 +293,7 @@ mod tests {
         assert_eq!(plan.directions.len(), 5);
         assert!((plan.minimum_squared_mode_weight - 0.04).abs() < 1.0e-14);
         for (direction, &mode) in plan.directions.iter().zip(&plan.mode_indices) {
-            assert!(
-                direction[mode].powi(2) + 1.0e-14
-                    >= plan.minimum_squared_mode_weight
-            );
+            assert!(direction[mode].powi(2) + 1.0e-14 >= plan.minimum_squared_mode_weight);
         }
     }
 
