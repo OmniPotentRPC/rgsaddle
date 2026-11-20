@@ -15057,12 +15057,13 @@ const COVER_MARGIN: f64 = 0.5;
 /// `defect_pair_network_sensitivity.csv`: every near-shell hop class ranked
 /// by `|dV_cell/d ln k|` of the 30 Å cell-decay volume. Stage `model` uses
 /// the barrier-shift rates and the spread of [`barrier_shift_spread`];
-/// classes are covered by [`rgsaddle::sensitivity_cover`] until the rest,
-/// all moved by that spread together, shift the volume by less than the
-/// smaller Table 1 error. Stage `pafi` repeats it with the rated classes of
-/// `defect_pair_network_pafi.csv` in place, the model calibrated against
-/// them and the spread of that calibration, and covers only the classes
-/// still on the model, down to [`COVER_MARGIN`] of the tolerance.
+/// classes are covered by [`rgsaddle::sensitivity_cover`] until the
+/// first-order shift estimate `sigma * sum|dV/d ln k|` over the rest is
+/// less than the smaller Table 1 error. Stage `pafi` repeats it with the
+/// rated classes of `defect_pair_network_pafi.csv` in place, the model
+/// calibrated against them and the spread of that calibration, and covers
+/// only the classes still on the model, down to [`COVER_MARGIN`] of the
+/// tolerance.
 fn write_sensitivities() {
     let started = Instant::now();
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks");
@@ -15102,7 +15103,10 @@ fn write_sensitivities() {
                 pafi.central(calibration.as_ref()),
                 calibration
                     .as_ref()
-                    .map(|fit| fit.spread(&CALIBRATION_FEATURES).expect("calibration spread"))
+                    .map(|fit| {
+                        fit.spread(&CALIBRATION_FEATURES)
+                            .expect("calibration spread")
+                    })
                     .or(pafi.model_sigma())
                     .unwrap_or(model_sigma),
                 COVER_MARGIN * tolerance,
@@ -16117,13 +16121,23 @@ fn network_notes() -> String {
                 .iter()
                 .map(|f| f[6].parse::<f64>().expect("sensitivity").abs())
                 .sum();
+            let more = on_model.iter().filter(|f| f[10] == "yes").count();
+            let first_order = sigma * rest;
+            let status = if more == 0 {
+                format!(
+                    "below the {} Omega ({COVER_MARGIN} of the tolerance) target; 0 more selected",
+                    first[12]
+                )
+            } else {
+                format!(
+                    "above the {} Omega ({COVER_MARGIN} of the tolerance) target (not covered; {more} more selected)",
+                    first[12]
+                )
+            };
             notes.push(format!(
-                "T {temperature} K after PAFI: {} classes computed; the {} still on the calibrated model, all moved by its spread {sigma:.4}, shift the cell-decay volume by at most {:.2} Omega against {} Omega, {COVER_MARGIN} of the tolerance; {} more selected.",
+                "T {temperature} K after PAFI: {} classes computed; for the {} still on the calibrated model (calibrated spread {sigma:.4} in ln k), the first-order shift estimate is {first_order:.2} Omega, {status}.",
                 after.len() - on_model.len(),
                 on_model.len(),
-                sigma * rest,
-                first[12],
-                on_model.iter().filter(|f| f[10] == "yes").count()
             ));
         }
         let top: Vec<String> = model
