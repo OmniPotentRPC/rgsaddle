@@ -45,7 +45,8 @@ def run_ohtst(repo_root: Path) -> dict[str, float]:
     with tempfile.TemporaryDirectory() as workdir:
         result_path = Path(workdir) / "result.json"
         subprocess.run([str(binary), str(result_path)], check=True)
-        return json.loads(result_path.read_text())
+        result: dict[str, float] = json.loads(result_path.read_text())
+        return result
 
 
 def main() -> None:
