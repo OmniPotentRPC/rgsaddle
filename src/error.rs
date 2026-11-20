@@ -50,4 +50,7 @@ pub enum SaddleError {
     /// its tolerance: the step can no longer make progress.
     #[error("solver step left the state unchanged: {0}")]
     Stalled(String),
+    /// A caller-supplied step or evaluation budget was used up.
+    #[error("work budget exhausted: {0}")]
+    Exhausted(String),
 }
