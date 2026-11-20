@@ -1,0 +1,57 @@
+#+TITLE: Optimize a fixed-energy tunnelling path (LI-NEB)
+#+OPTIONS: toc:nil num:nil
+
+#+begin_export rst
+:cite:`goswamiReproducibleOrchestration2026,goswamiEnhancedClimbingImage2026,goswamiIdpp2026,eon2901,asgeirssonEfficientEvaluationAtom2018,henkelmanImprovedTangentEstimate2000,smidstrupImprovedInitialGuess2014`
+#+end_export
+
+* What is optimized
+At a fixed energy =E= below the barrier, the optimal JWKB tunnelling path between two classical turning points minimizes the abbreviated action. Ásgeirsson, Arnaldsson, and Jónsson, J. Chem. Phys. 148, 102334 (2018), doi:10.1063/1.5007180 @@rst::cite:`asgeirssonEfficientEvaluationAtom2018`@@, find that path with a line-integral extension of the nudged elastic band (LI-NEB). The band itself is the nudged elastic band as practised in Goswami, arXiv:2603.14737 (2026), doi:10.48550/arXiv.2603.14737 @@rst::cite:`goswamiReproducibleOrchestration2026`@@, and Goswami, Gunde, and Jónsson, Front. Chem. 14, 1807063 (2026), doi:10.3389/fchem.2026.1807063 @@rst::cite:`goswamiEnhancedClimbingImage2026`@@.
+
+The module is ~line_neb~. Coordinates are mass scaled, and the weight =xi_i= covers every image, both endpoints included, so ~fixed_energy_action~ is the trapezoid
+
+#+begin_src text
+q_i  = sqrt(m) x_i
+xi_i = sqrt(2 (E_i - E)) / hbar
+S    = sum_i (xi_i + xi_{i+1}) |q_{i+1} - q_i| / 2
+#+end_src
+
+An endpoint at =E= is a turning point with zero weight. An endpoint above =E= keeps its weight. An endpoint below =E= is refused with ~SaddleError::Invalid~, and so is an interior image that does not lie above =E=. On three images at unit spacing with energies 4, 2, and 4 and a fixed energy of 1 the action is ~sqrt(6) + sqrt(2)~. ~fixed_energy_action_force~ is its negative gradient on the interior images; the endpoint weights enter those rows through the two end segments.
+
+* Seed the band
+~fixed_energy_mep_seed~ starts from an index-one saddle and its unstable mode, for instance the climbing image of a band relaxed from an image dependent pair potential (IDPP) path (Goswami, MethodsX, 103899 (2026), doi:10.1016/j.mex.2026.103899 @@rst::cite:`goswamiIdpp2026`@@; Smidstrup, Pedersen, Stokbro, and Jónsson, J. Chem. Phys. 140, 214106 (2014), doi:10.1063/1.4878664 @@rst::cite:`smidstrupImprovedInitialGuess2014`@@). Each branch follows the mass-scaled force down from the saddle, places images at equal energy drops by bracketing, and both branches are resampled to equal arc length. ~FixedEnergySeed~ is non-exhaustive: build it with ~Default~ and ~with_saddle_energy~, ~with_target_energy~, ~with_images~, and ~with_max_evaluations~. The default energies are equal and are refused until both are set. A spent budget is ~SaddleError::Invalid~ with a message that starts =work budget exhausted=.
+
+* Step the session
+~LineNebSession::step~ evaluates the band once through ~BandSurface~ and takes one global quick-min step with a fixed time step, the eOn variant (Goswami et al., eOn v2.9.0.1 (2026), doi:10.5281/zenodo.18529496 @@rst::cite:`eon2901`@@). There is no run loop and no force budget; the host decides when to stop.
+
+#+begin_src rust
+let config = LineNebConfig::default()
+    .with_energy(target)
+    .with_masses(masses)
+    .with_spring_k(0.4)
+    .with_endpoint_kappa(1.5)
+    .with_force_tol(2.0e-6)
+    .with_time_step(0.03);
+let mut session = LineNebSession::new(config, seed)?;
+loop {
+    let report = session.step(&surface)?;
+    if report.status == LineNebStatus::Converged {
+        break;
+    }
+}
+let path = session.positions();
+#+end_src
+
+~LineNebConfig~ is non-exhaustive. Its defaults are unit spring constant and restraint, force tolerance 1e-3, a fixed energy of 0, unit masses (=masses= is =None=), time step 0.1, and unit reduced Planck constant (~with_reduced_planck~); a host in other units sets every field it relies on.
+
+Each interior image moves under the action force perpendicular to the improved tangent of Henkelman and Jónsson, J. Chem. Phys. 113, 9978 (2000), doi:10.1063/1.1323224 @@rst::cite:`henkelmanImprovedTangentEstimate2000`@@, plus a uniform spring along it. When the two neighbour energies are equal the weighted tangent points along the secant from the previous image to the next, so on a plateau of three equal energies that secant is used unscaled. Each endpoint moves under the spring perpendicular to its own force and a restraint =endpoint_kappa (E_end - E)= along that force.
+
+~LineNebReport~ carries three maxima: ~max_interior_perpendicular~, ~max_interior_spring~, and ~max_endpoint_optimized~. ~LineNebStatus::Converged~ needs all three within ~force_tol~. With one coordinate per image the transverse force is zero by construction and the endpoints can already sit on =E=, so the spring residual is what keeps an unevenly spaced band from stopping early.
+
+The restraint can carry an endpoint below =E= during the optimization. The session keeps stepping and gives that endpoint zero weight, as at a turning point, until the restraint brings it back. ~LineNebReport::action~ equals ~fixed_energy_action~ whenever both endpoints are at or above =E=.
+
+* Dynamics along the path
+~FixedEnergyTrajectory~ splines a converged path in mass-weighted coordinates and integrates the motion on the inverted potential along it, the dynamics Ásgeirsson, Arnaldsson, and Jónsson use to find the temperature at which the path is an instanton. Both splines are a ~Spline~ with ~SplineEnds::Natural~, zero curvature at the end knots; string reparametrization keeps the not-a-knot spline. ~Spline::sample~ returns a ~SplineSample~ with the value and the first two derivatives. ~half~ runs from the left turning point until the path ends or the velocity turns back and returns one ~TrajectoryPoint~ per step, ~period~ is twice that time, and ~arc_at_time~ interpolates the arc between stored points. A spent step budget is ~SaddleError::Invalid~ with a message that starts =work budget exhausted=.
+
+* Units
+None are prescribed. Positions, energies, masses, =hbar=, the spring constant, the restraint, and the time step form one consistent system: =hbar= has units of energy times time, the spring maps a mass-scaled displacement to an action-gradient force, and =endpoint_kappa= times an energy has those same force units.
