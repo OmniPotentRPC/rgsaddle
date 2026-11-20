@@ -13,6 +13,7 @@
 //! 3. Nonzero endpoint gradient requirement and fixed-endpoint default
 //!    preservation.
 
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ndarray::{Array1, Array2, ArrayView2, array};
@@ -771,6 +772,152 @@ fn assert_cached_matches(session: &BandSession, surface: &impl BandSurface) {
     assert_eq!(held.energies, energies);
     assert_eq!(held.gradients, gradients);
     assert_eq!(held.projected.dim(), (n_images - 2, dof));
+}
+
+/// Records the size of every surface call and every row's coordinates.
+#[derive(Default)]
+struct CallLog {
+    batches: Mutex<Vec<usize>>,
+    first_coordinate: Mutex<Vec<f64>>,
+}
+
+impl CallLog {
+    fn take_batches(&self) -> Vec<usize> {
+        std::mem::take(&mut *self.batches.lock().unwrap())
+    }
+
+    fn evaluations_at(&self, x: f64) -> usize {
+        self.first_coordinate
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|&&seen| seen == x)
+            .count()
+    }
+}
+
+impl BandSurface for CallLog {
+    fn eval(
+        &self,
+        positions: ArrayView2<f64>,
+        energies: &mut Array1<f64>,
+        gradients: &mut Array2<f64>,
+    ) -> Result<(), SaddleError> {
+        self.batches.lock().unwrap().push(positions.nrows());
+        self.first_coordinate
+            .lock()
+            .unwrap()
+            .extend(positions.outer_iter().map(|row| row[0]));
+        TiltedQuadratic.eval(positions, energies, gradients)
+    }
+}
+
+fn caching_band(n_images: usize) -> Array2<f64> {
+    Array2::from_shape_fn((n_images, 3), |(image, axis)| match axis {
+        0 => 1.0 + 0.4 * image as f64,
+        1 => 0.2,
+        _ => 0.0,
+    })
+}
+
+#[test]
+fn free_end_steps_do_not_evaluate_the_fixed_endpoint_or_repeat_the_last_band() {
+    let n_images = 6;
+    let steps = 6;
+    let positions = caching_band(n_images);
+    let fixed_x = positions[(0, 0)];
+    let config = BandConfig::default()
+        .with_free_end(FreeEndConfig::default().with_max_cuts(0))
+        .with_climbing(None)
+        .with_min_mode(None)
+        .with_saddle_check(None)
+        .with_remove_translation(false);
+    let mut session = BandSession::new(config, positions).expect("session");
+    let log = CallLog::default();
+
+    let mut per_step = Vec::new();
+    for _ in 0..steps {
+        let report = session.step_free_end(&log).expect("step");
+        let batches = log.take_batches();
+        assert_eq!(
+            report.surface_rows,
+            batches.iter().sum::<usize>(),
+            "the report counts the rows the surface saw"
+        );
+        per_step.push(batches);
+    }
+
+    // Step 1 meets the whole band once. The batch sizes are 1 (the
+    // level-set retraction), n - 2 (the interior trials), n - 1 (the
+    // band without its fixed endpoint) and n (the whole band).
+    assert_eq!(
+        per_step[0].iter().filter(|&&n| n == n_images).count(),
+        1,
+        "the first step evaluates the whole band: {:?}",
+        per_step[0]
+    );
+    for (index, batches) in per_step.iter().enumerate().skip(1) {
+        assert_eq!(
+            batches.iter().filter(|&&n| n == n_images).count(),
+            0,
+            "step {} evaluated the fixed endpoint again: {batches:?}",
+            index + 1
+        );
+        assert_eq!(
+            batches.iter().filter(|&&n| n == n_images - 1).count(),
+            1,
+            "step {} evaluated the band at its start as well as its end: {batches:?}",
+            index + 1
+        );
+        assert_ne!(
+            batches.first(),
+            Some(&(n_images - 1)),
+            "step {} began with a band evaluation the previous step already held: {batches:?}",
+            index + 1
+        );
+    }
+    assert_eq!(
+        log.evaluations_at(fixed_x),
+        1,
+        "the fixed endpoint is evaluated once for the whole run"
+    );
+}
+
+#[test]
+fn free_end_session_evaluates_the_band_again_after_a_host_move() {
+    let n_images = 6;
+    let positions = caching_band(n_images);
+    let config = BandConfig::default()
+        .with_free_end(FreeEndConfig::default().with_max_cuts(0))
+        .with_climbing(None)
+        .with_min_mode(None)
+        .with_saddle_check(None)
+        .with_remove_translation(false);
+    let mut session = BandSession::new(config, positions).expect("session");
+    let log = CallLog::default();
+    session.step_free_end(&log).expect("first step");
+    session.step_free_end(&log).expect("second step");
+    log.take_batches();
+
+    let mut moved = session.positions().to_owned();
+    moved[(2, 1)] += 0.05;
+    session.set_positions(moved).expect("host move");
+    session.step_free_end(&log).expect("step after the move");
+    let batches = log.take_batches();
+    assert_eq!(
+        batches.first(),
+        Some(&(n_images - 1)),
+        "a moved band is evaluated at the start of the step: {batches:?}"
+    );
+
+    session.reset();
+    session.step_free_end(&log).expect("step after reset");
+    let batches = log.take_batches();
+    assert_eq!(
+        batches.first(),
+        Some(&n_images),
+        "a reset evaluates the whole band, fixed endpoint included: {batches:?}"
+    );
 }
 
 #[test]
