@@ -1,0 +1,1 @@
+NPT pressure and lattice errors now use recursive blocking, report effective sample sizes, and refuse pressure convergence when the blocking plateau or sample size is insufficient.
