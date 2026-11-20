@@ -107,7 +107,7 @@ What to read, on every plane, in =HyperplaneAverage=:
 
 - =equilibration= is the =EquilibrationReport=: =discard= records and =equilibration_steps= steps were dropped, with the split-half drift and its error. A discard that is a large part of =samples= says the start at the path point is far from the equilibrium of the plane, so raise =thermalize=.
 - =tau= is the integrated autocorrelation time of the tail, in samples, so one =tau= is =tau * stride= steps.
-- =n_eff= is =(samples - discard) / (2 τ)=, the number of independent samples the error is worth. A small =n_eff= means a large =tau= against the tail: raise =samples=.
+- =n_eff= is =(samples - discard) / max(1, 2 τ)=, the number of independent samples the error is worth. A small =n_eff= means a large =tau= against the tail: raise =samples=.
 - =rejected= above zero means walks left the basin of the path on this plane, and were sampled again (see =max_jump=).
 
 * Choosing the arcs
@@ -180,7 +180,7 @@ One entry per plane.
 | =psi=         | the mean of =ψ=; the paper's locality condition is =1 - ψ > 0=                             |
 | =samples=     | recorded samples                                                                           |
 | =tau=         | integrated autocorrelation time of the retained tail, in samples                           |
-| =n_eff=       | =(samples - discard) / (2 τ)=                                                              |
+| =n_eff=       | =(samples - discard) / max(1, 2 τ)=                                                       |
 | =equilibration= | the =EquilibrationReport= of the series: discard, drift test and its outcome             |
 | =evaluations= | force evaluations on this plane, the quenches of =max_jump= included, summed over passes   |
 | =retained=    | up to =retain= configurations on the plane, evenly spaced through the retained tail         |
@@ -191,7 +191,7 @@ The recorded gradients are a correlated series. After the equilibration test dro
 
 : sqrt( var(block means) / number of blocks )
 
-with the variance over the block means, divided by one less than their number. So when =τ= is large, the blocks are longer and fewer than =blocks=, and a series with =2 τ= more than half its length falls back to two blocks. That error is then an estimate from two numbers, and =n_eff= says so by being below two. Read =error= together with =n_eff=.
+with the variance over the block means, divided by one less than their number. So when =τ= is large, the blocks are longer and fewer than =blocks=. Before returning an error estimate, the equilibration check also requires at least two complete blocks whose width is =ceil(2 τ)=; otherwise it returns =SaddleError::InsufficientEffectiveSamples= with twice that width as the reported requirement. An accepted error can therefore still come from only a few block means. Read =error= together with =n_eff=.
 
 With several passes, the gradients are combined by inverse variance, the errors as =1 / sqrt(Σ 1/error²)=, =samples= and =n_eff= are summed, and =tau= is the largest of the passes. The =equilibration= report is that of the first pass.
 
@@ -217,7 +217,7 @@ Every reference is computed independently of the sampler: closed forms, quadratu
 | =tests/pafi_reference.rs=     | the reference PAFI code of Swinburne and Marinica                   | see below |
 
 ** Against tomswinburne/pafi
-The reference code, github.com/tomswinburne/pafi, commit 1661a1d, ships two NEB paths with their embedded-atom tables: a vacancy hop in tungsten on the Marinica04 potential (=EAM-VAC-W=) and a dumbbell hop in iron on the Marinica07 potential (=EAM-SIA-Fe=). =tests/pafi_reference.rs= reads the LAMMPS =eam/fs= tables and data files, builds the path as the reference code does, and runs rgsaddle's PAFI on it. It makes three comparisons.
+The pinned reference code at github.com/tomswinburne/pafi ships two NEB paths with their embedded-atom tables: a vacancy hop in tungsten on the Marinica04 potential (=EAM-VAC-W=) and a dumbbell hop in iron on the Marinica07 potential (=EAM-SIA-Fe=). =tests/pafi_reference.rs= reads the LAMMPS =eam/fs= tables and data files, builds the path as the reference code does, and runs rgsaddle's PAFI on it. It makes three comparisons.
 
 - The nine zero-temperature gradients of the iron path, from =test_zero_temperature_run= in the reference =tests/test_pafi.py= (0.0, 0.614145, 0.846192, 0.59226, 0.089912, -0.426347, -0.853405, -0.792713, 0.0), agree within 1e-3. The assertion is in an ignored test.
 - The barriers of the tungsten vacancy hop at 0, 1000 and 2000 K on 9 and 33 planes are compared between the committed =benchmarks/pafi_reference.csv= and =benchmarks/pafi_reference_code.csv=, where the reference file tabulates only the forward integral and σ combines rgsaddle's block error with the reference code's worker-trajectory spread in quadrature. The forward column differs from the reference barrier by up to 1.1e-5 eV at 0 K, and at 1000 and 2000 K by up to 0.29σ on 33 planes and 1.93σ on 9 planes (the largest gap being the 9-plane trapezoid barrier at 2000 K). Against the same forward reference column, the reversed column differs by up to 2.86e-3 eV on 33 planes and 2.94e-2 eV on 9 planes at 0 K, and at 1000 and 2000 K by up to 0.41σ on 33 planes while reaching 0.0513 eV (6.08σ) on 9-plane trapezoid at 1000 K and 0.0504 eV (3.98σ) at 2000 K (9-plane remeshed stays within 0.17σ). That 9-plane reversed gap is a coarse-grid quadrature asymmetry rather than a reversal bug: the reference parameter =r = |X - X₀| / |X_end - X₀|= shifts interior knots toward =r = 1= on a curved path, so 9 planes leave a non-zero endpoint drift =F(1) - F(0)= in both codes (+0.026 eV trapezoid and -0.029 eV remeshed at 0 K; +0.040 to +0.055 eV trapezoid at 1000 K) that separates the reversed barrier =F_max - F(1)= from the forward reference =F_max - F(0)=. Compared against the reversed integral of the reference plane gradients in =benchmarks/pafi_reference_code_planes.csv=, the reversed column differs by up to 1.4e-5 eV at 0 K and up to 1.20σ on 9 planes (0.52σ on 33 planes) at 1000 and 2000 K. That comparison is read from the CSV files, not asserted in a test. The thermal runs use 5000 thermalization steps, then 400 000 steps recorded every tenth in 40 blocks, with the basin test at 0.4 Å.

@@ -7,8 +7,8 @@
 //!
 //! PAFI: [`HyperplaneAverage::tau`] is the integrated autocorrelation
 //! time, in records, and [`HyperplaneAverage::n_eff`] is
-//! `samples / (2 tau)`; a block error trusted with `n_eff` under about
-//! 20 is noisy. OH-TST: [`PlaneSample::tau`] and
+//! `samples / max(1, 2 tau)`; a block error trusted with `n_eff` under
+//! about 20 is noisy. OH-TST: [`PlaneSample::tau`] and
 //! [`PlaneSample::effective_samples`] are the same pair, and
 //! [`PlaneSample::virial`] should sit within error of `free_dimensions *
 //! kT` at equilibrium (the equipartition virial on an unconstrained
