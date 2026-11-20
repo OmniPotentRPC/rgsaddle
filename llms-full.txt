@@ -552,6 +552,12 @@ The importable package is `rgsaddle`. `rgsaddle._core` is the nanobind extension
 | `rgsaddle.ase.SimplifiedString` | ASE `Optimizer` driver and `Optimizable` for the simplified string method over `list[Atoms]` (`attach`, `interpolate`, `get_positions`, `set_positions`, `get_potential_energy`, `get_forces`, `run`, `saddle_index`), with `FixAtoms` and optional climbing image |
 | `rgsaddle.ase.GrowingString` | ASE driver for the growing string method over `list[Atoms]` (`attach`, `run`, `saddle_index`), preserving image IDs and batched calculator evaluation |
 | `rgsaddle.ase.Point` | ASE `Optimizer` driver for one point preset (`attach`, `run`). `run(fmax, steps)` is ASE's own loop |
+| `rgsaddle.ohtst_sample` | Constrained Langevin sample of one hyperplane (`OhtstSample`: `centroid`, `grad_normal`, `normal_force`, `normal_force_error`, `virial`, `virial_error`, `acceptance`, `records`, `evaluations`) |
+| `rgsaddle.ohtst_optimize` | Riemannian trust-region climb of the plane free energy (`OhtstOptimum`: `point`, `normal`, `iterations`, `evaluations`, `normal_force`, `normal_force_error`) |
+| `rgsaddle.ohtst_mbar` | Multistate Bennett acceptance ratio solver (`OhtstMbar`: `free_energies`, `covariance`, `overlap`) |
+| `rgsaddle.ohtst_work` | Reversible work along hyperplanes by Simpson integration, BAR, or MBAR (`OhtstWork`: `work`, `error`, `integrated_work`, `integrated_error`, `bar_work`, `bar_error`, `mbar_work`, `mbar_error`, `evaluations`) |
+| `rgsaddle.ohtst_transmission` | First-crossing transmission coefficient from shooting trajectories (`OhtstTransmission`: `kappa`, `error`, `shots`, `unassigned`, `reactive`, `recrossed`, `evaluations`) |
+| `rgsaddle.ohtst_rate` | OH-TST rate from reactant density and reversible work (`OhtstRate`: `rate`, `error`, `log_rate`, `log_rate_error`, `flux`) |
 
 `SurfaceAdapter` keeps =get_forces(apply_constraint=False)= on `raw_forces`. The returned gradient is minus `get_forces()` after constraints. The adapter evaluates the given rows in order on the calling thread. `owners()` and `reentrant()` are what a driver uses to group. A second call while the first holds the adapter raises `RuntimeError`.
 
@@ -3153,6 +3159,7 @@ Non-finite array or scalar inputs return `RGSADDLE_NON_FINITE` with a cause stor
 `rgsaddle_ohtst_optimize` caps norm-test sample growth at the larger of `records` and the optimizer default ceiling, and returns `RGSADDLE_SOLVER` unless the plane converged.
 `rgsaddle_ohtst_work` uses Simpson weights (requiring an odd node count of at least 3) and returns `RGSADDLE_NON_FINITE` when a reported standard error is not finite.
 A host that loads the library at run time checks `rgsaddle_abi_version()` for at least minor 46 before resolving these symbols.
+Python exposes them as `rgsaddle.ohtst_sample`, `rgsaddle.ohtst_optimize`, `rgsaddle.ohtst_mbar`, `rgsaddle.ohtst_work`, `rgsaddle.ohtst_transmission` and `rgsaddle.ohtst_rate`, returning `OhtstSample`, `OhtstOptimum`, `OhtstMbar`, `OhtstWork`, `OhtstTransmission` and `OhtstRate`.
 
 # Use the headers from a meson project (`docs/orgmode/howto/meson.org`)
 

@@ -127,3 +127,4 @@ Non-finite array or scalar inputs return ~RGSADDLE_NON_FINITE~ with a cause stor
 ~rgsaddle_ohtst_optimize~ caps norm-test sample growth at the larger of ~records~ and the optimizer default ceiling, and returns ~RGSADDLE_SOLVER~ unless the plane converged.
 ~rgsaddle_ohtst_work~ uses Simpson weights (requiring an odd node count of at least 3) and returns ~RGSADDLE_NON_FINITE~ when a reported standard error is not finite.
 A host that loads the library at run time checks ~rgsaddle_abi_version()~ for at least minor 46 before resolving these symbols.
+Python exposes them as ~rgsaddle.ohtst_sample~, ~rgsaddle.ohtst_optimize~, ~rgsaddle.ohtst_mbar~, ~rgsaddle.ohtst_work~, ~rgsaddle.ohtst_transmission~ and ~rgsaddle.ohtst_rate~, returning ~OhtstSample~, ~OhtstOptimum~, ~OhtstMbar~, ~OhtstWork~, ~OhtstTransmission~ and ~OhtstRate~.
