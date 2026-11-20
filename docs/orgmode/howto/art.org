@@ -20,6 +20,14 @@ The phase is stored on the session. =step= runs one phase and leaves the next on
 
 =ArtConfig::mode= is the Lanczos block. Its =artn= shortcut and its =saddle_check= are cleared: those steps are the phases above. =MinModeConfig::with_artn= remains the shorter opt-in inside one minimum-mode iteration. The point stencil's =Preset::Art= is still the push followed by a minimum-mode climb.
 
+The named =ArtConfig::lj_art()= preset is only for Lennard-Jones reduced
+units, with \(\epsilon = \sigma = 1\). For a potential whose characteristic
+energy and length are not one in the host units, use
+=ArtConfig::for_units(energy_scale, length_scale)=. It scales lengths,
+forces, and curvatures separately. =ArtConfig::validate()= rejects a
+perpendicular-relaxation force tolerance looser than the mode-following force
+tolerance; sessions and batches call it before consuming a configuration.
+
 The runnable example is the doctest on =ArtSession=: a one-dimensional double well in three coordinates, a host seed, and a connected index-1 exit. =tests/art_session.rs= repeats the paper's census on LJ7, starting from the pentagonal bipyramid.
 
 #+begin_export rst

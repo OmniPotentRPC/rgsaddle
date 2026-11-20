@@ -158,7 +158,7 @@ fn lj_config() -> ArtConfig {
         .with_max_move(0.08)
         .with_dr(0.001);
     let perpendicular = RelaxConfig::default()
-        .with_force_tol(0.08)
+        .with_force_tol(0.02)
         .with_max_steps(600)
         .with_max_atom_move(0.08)
         .with_initial_step(0.04);

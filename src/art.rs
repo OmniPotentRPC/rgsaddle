@@ -144,9 +144,11 @@ enum Leg {
 
 /// Tolerances and budgets of one ART nouveau event.
 ///
-/// Lengths are the host's. The estimator in [`ArtConfig::mode`] must be
-/// Lanczos. `artn` and `saddle_check` on that block are cleared: the
-/// phases below own the push, the relaxation, and the certificate.
+/// Lengths are the host's. Use [`ArtConfig::for_units`] to convert the
+/// reduced-unit preset to a potential's energy and length scales. The
+/// estimator in [`ArtConfig::mode`] must be Lanczos. `artn` and
+/// `saddle_check` on that block are cleared: the phases below own the push,
+/// the relaxation, and the certificate.
 ///
 /// Non-exhaustive: start from [`ArtConfig::default`] and chain `with_*`.
 #[non_exhaustive]
@@ -198,6 +200,17 @@ with_setters!(ArtConfig {
 
 impl Default for ArtConfig {
     fn default() -> Self {
+        Self::lj_art()
+    }
+}
+
+impl ArtConfig {
+    /// ART parameters in Lennard-Jones reduced units (`epsilon = sigma = 1`).
+    ///
+    /// These numbers are not an eV/Angstrom preset. Use [`Self::for_units`]
+    /// when the potential's energy or length scale is not one.
+    #[must_use]
+    pub fn lj_art() -> Self {
         let mode = MinModeConfig::default()
             .with_kind(MinModeKind::Lanczos)
             .with_saddle_check(None)
@@ -206,7 +219,7 @@ impl Default for ArtConfig {
             .with_force_tol(0.01)
             .with_max_move(0.2);
         let perpendicular = RelaxConfig::default()
-            .with_force_tol(0.05)
+            .with_force_tol(0.01)
             .with_max_steps(800)
             .with_max_atom_move(0.1)
             .with_initial_step(0.05);
@@ -231,10 +244,56 @@ impl Default for ArtConfig {
             permute_identical: false,
         }
     }
-}
 
-impl ArtConfig {
-    fn validate(&self) -> Result<(), SaddleError> {
+    /// Scale the Lennard-Jones ART preset to the host's potential units.
+    ///
+    /// `energy_scale` is the host energy represented by one reduced energy
+    /// unit and `length_scale` is the host length represented by one reduced
+    /// length unit. Lengths scale by `length_scale`, forces by
+    /// `energy_scale / length_scale`, and curvatures by
+    /// `energy_scale / length_scale^2`.
+    pub fn for_units(energy_scale: f64, length_scale: f64) -> Result<Self, SaddleError> {
+        if !(energy_scale.is_finite()
+            && energy_scale > 0.0
+            && length_scale.is_finite()
+            && length_scale > 0.0)
+        {
+            return Err(SaddleError::Invalid(
+                "ART energy and length scales must be finite and positive".into(),
+            ));
+        }
+        let force_scale = energy_scale / length_scale;
+        let curvature_scale = force_scale / length_scale;
+        let mut config = Self::lj_art();
+        config.mode.dr *= length_scale;
+        config.mode.rotation_tol *= curvature_scale;
+        config.mode.force_tol *= force_scale;
+        config.mode.max_move *= length_scale;
+        config.eigen_threshold *= curvature_scale;
+        config.push_length *= length_scale;
+        config.push_step *= length_scale;
+        config.perpendicular.force_tol *= force_scale;
+        config.perpendicular.max_atom_move *= length_scale;
+        config.perpendicular.initial_step *= length_scale;
+        config.quench.force_tol *= force_scale;
+        config.quench.max_atom_move *= length_scale;
+        config.quench.initial_step *= length_scale;
+        config.push_over *= length_scale;
+        config.saddle.residual_tol *= curvature_scale;
+        config.saddle.negative_tol *= curvature_scale;
+        config.saddle.dr *= length_scale;
+        if let Some(escape) = &mut config.saddle.escape {
+            escape.push *= length_scale;
+        }
+        config.basin_rmsd *= length_scale;
+        config.duplicate_rmsd *= length_scale;
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Check that ART's parameters are finite, physically consistent, and
+    /// supported by the session implementation.
+    pub fn validate(&self) -> Result<(), SaddleError> {
         if self.mode.kind != MinModeKind::Lanczos {
             return Err(SaddleError::Invalid(
                 "ART monitors the lowest curvature with Lanczos".into(),
@@ -265,6 +324,13 @@ impl ArtConfig {
         }
         self.perpendicular.check()?;
         self.quench.check()?;
+        if self.perpendicular.force_tol > self.mode.force_tol {
+            return Err(SaddleError::Invalid(format!(
+                "ART perpendicular_force_tol={:e} energy/length is looser than \
+                 mode_force_tol={:e} energy/length",
+                self.perpendicular.force_tol, self.mode.force_tol
+            )));
+        }
         self.saddle.validate()?;
         Ok(())
     }
@@ -951,6 +1017,7 @@ pub fn run_events<S: PointSurface>(
     surface: &S,
     max_steps: usize,
 ) -> Result<ArtBatch, SaddleError> {
+    config.validate()?;
     let mut outcomes = Vec::with_capacity(seeds.len());
     for (index, seed) in seeds.iter().enumerate() {
         let mut session = ArtSession::new(
@@ -1606,6 +1673,56 @@ mod tests {
             .with_max_pushes(3)
             .with_max_climbs(25)
             .with_push_over(0.25)
+    }
+
+    #[test]
+    fn default_art_tolerances_are_consistent() {
+        ArtConfig::default().validate().unwrap();
+        assert_eq!(
+            ArtConfig::default().perpendicular.force_tol,
+            ArtConfig::default().mode.force_tol
+        );
+    }
+
+    #[test]
+    fn looser_perpendicular_tolerance_has_a_typed_error() {
+        let config = ArtConfig::default().with_perpendicular(
+            RelaxConfig::default().with_force_tol(2.0 * ArtConfig::default().mode.force_tol),
+        );
+        match config.validate() {
+            Err(SaddleError::Invalid(message)) => {
+                assert!(message.contains("perpendicular_force_tol=2e-2 energy/length"));
+                assert!(message.contains("mode_force_tol=1e-2 energy/length"));
+            }
+            other => panic!("unexpected ART validation result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn art_unit_scaling_covers_lengths_forces_and_curvatures() {
+        let reduced = ArtConfig::lj_art();
+        let scaled = ArtConfig::for_units(2.0, 4.0).unwrap();
+        assert_eq!(scaled.push_length, 4.0 * reduced.push_length);
+        assert_eq!(scaled.mode.force_tol, 0.5 * reduced.mode.force_tol);
+        assert_eq!(scaled.eigen_threshold, 0.125 * reduced.eigen_threshold);
+        assert_eq!(scaled.mode.dr, 4.0 * reduced.mode.dr);
+        assert_eq!(scaled.saddle.dr, 4.0 * reduced.saddle.dr);
+        assert_eq!(
+            scaled.saddle.residual_tol,
+            0.125 * reduced.saddle.residual_tol
+        );
+        assert_eq!(scaled.basin_rmsd, 4.0 * reduced.basin_rmsd);
+        scaled.validate().unwrap();
+    }
+
+    #[test]
+    fn art_unit_scales_must_be_positive_and_finite() {
+        for (energy, length) in [(0.0, 1.0), (1.0, -1.0), (f64::NAN, 1.0)] {
+            assert!(matches!(
+                ArtConfig::for_units(energy, length),
+                Err(SaddleError::Invalid(_))
+            ));
+        }
     }
 
     #[test]
