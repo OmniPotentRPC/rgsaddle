@@ -547,30 +547,64 @@ pub struct SurrogateCalibration {
 }
 
 impl SurrogateCalibration {
+    fn check_features(&self, features: &[f64]) -> Result<(), SaddleError> {
+        let p = self.coefficients.len();
+        if features.len() != p {
+            return Err(SaddleError::Shape(format!(
+                "calibration expected {p} features, got {}",
+                features.len()
+            )));
+        }
+        if !features.iter().all(|x| x.is_finite()) {
+            return Err(SaddleError::NonFinite("calibration feature"));
+        }
+        Ok(())
+    }
+
     /// `x · β`.
-    pub fn shift(&self, features: &[f64]) -> f64 {
-        features
+    pub fn shift(&self, features: &[f64]) -> Result<f64, SaddleError> {
+        self.check_features(features)?;
+        let value = features
             .iter()
             .zip(&self.coefficients)
             .map(|(x, b)| x * b)
-            .sum()
+            .sum::<f64>();
+        if !value.is_finite() {
+            return Err(SaddleError::NonFinite("calibration shift"));
+        }
+        Ok(value)
     }
 
     /// Standard error of [`Self::shift`] from the coefficients alone.
-    pub fn shift_error(&self, features: &[f64]) -> f64 {
+    pub fn shift_error(&self, features: &[f64]) -> Result<f64, SaddleError> {
+        self.check_features(features)?;
+        let p = self.coefficients.len();
+        if self.covariance.len() != p || self.covariance.iter().any(|row| row.len() != p) {
+            return Err(SaddleError::Shape(format!(
+                "calibration covariance must be {p} by {p}"
+            )));
+        }
         let mut variance = 0.0;
         for (i, xi) in features.iter().enumerate() {
             for (j, xj) in features.iter().enumerate() {
                 variance += xi * self.covariance[i][j] * xj;
             }
         }
-        variance.max(0.0).sqrt()
+        let error = variance.max(0.0).sqrt();
+        if !error.is_finite() {
+            return Err(SaddleError::NonFinite("calibration shift error"));
+        }
+        Ok(error)
     }
 
     /// Standard error of one more rate about its shifted surrogate:
     /// [`Self::shift_error`] and [`Self::scatter`] in quadrature.
-    pub fn spread(&self, features: &[f64]) -> f64 {
-        self.shift_error(features).hypot(self.scatter)
+    pub fn spread(&self, features: &[f64]) -> Result<f64, SaddleError> {
+        let error = self.shift_error(features)?.hypot(self.scatter);
+        if !error.is_finite() {
+            return Err(SaddleError::NonFinite("calibration spread"));
+        }
+        Ok(error)
     }
 
     /// Coefficients moved by the standard normals `z`, one per coefficient,
@@ -1005,11 +1039,12 @@ mod tests {
         assert!((fit.scatter - (sample - sigma * sigma).sqrt()).abs() < 1e-9);
         assert!((fit.covariance[0][0] - sample / n).abs() < 1e-9);
         assert_eq!(fit.count, 6);
-        let spread = fit.spread(&[1.0]);
+        let spread = fit.spread(&[1.0]).unwrap();
         assert!(
-            (spread.powi(2) - fit.shift_error(&[1.0]).powi(2) - fit.scatter.powi(2)).abs() < 1e-12
+            (spread.powi(2) - fit.shift_error(&[1.0]).unwrap().powi(2) - fit.scatter.powi(2)).abs()
+                < 1e-12
         );
-        assert!((fit.shift(&[1.0]) - mean).abs() < 1e-12);
+        assert!((fit.shift(&[1.0]).unwrap() - mean).abs() < 1e-12);
     }
 
     #[test]
@@ -1023,7 +1058,22 @@ mod tests {
         assert!((fit.coefficients[1] + 3.0).abs() < 1e-12);
         let sxx: f64 = x.iter().map(|x| (x - 2.0).powi(2)).sum();
         assert!((fit.covariance[1][1] - 0.04 / sxx).abs() < 1e-12);
-        assert!((fit.shift(&[1.0, 5.0]) + 13.0).abs() < 1e-12);
+        assert!((fit.shift(&[1.0, 5.0]).unwrap() + 13.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn calibration_rejects_wrong_length_feature_rows() {
+        let fit = SurrogateCalibration {
+            coefficients: vec![0.5, -1.0],
+            covariance: vec![vec![4.0, 2.0], vec![2.0, 5.0]],
+            scatter: 0.1,
+            count: 9,
+        };
+        for bad in [&[][..], &[1.0][..], &[1.0, 2.0, 3.0][..]] {
+            assert!(matches!(fit.shift(bad), Err(SaddleError::Shape(_))));
+            assert!(matches!(fit.shift_error(bad), Err(SaddleError::Shape(_))));
+            assert!(matches!(fit.spread(bad), Err(SaddleError::Shape(_))));
+        }
     }
 
     #[test]

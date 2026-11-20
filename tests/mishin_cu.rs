@@ -14980,7 +14980,9 @@ impl PafiInputs {
     /// The computed rates, and with `calibration` its shift on every
     /// direction still on the model.
     fn central(&self, calibration: Option<&rgsaddle::SurrogateCalibration>) -> ClassRates {
-        let shift = calibration.map_or(0.0, |fit| fit.shift(&CALIBRATION_FEATURES));
+        let shift = calibration.map_or(0.0, |fit| {
+            fit.shift(&CALIBRATION_FEATURES).expect("calibration shift")
+        });
         ClassRates {
             computed: self
                 .computed
@@ -15100,7 +15102,7 @@ fn write_sensitivities() {
                 pafi.central(calibration.as_ref()),
                 calibration
                     .as_ref()
-                    .map(|fit| fit.spread(&CALIBRATION_FEATURES))
+                    .map(|fit| fit.spread(&CALIBRATION_FEATURES).expect("calibration spread"))
                     .or(pafi.model_sigma())
                     .unwrap_or(model_sigma),
                 COVER_MARGIN * tolerance,
