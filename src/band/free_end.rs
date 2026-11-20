@@ -240,6 +240,13 @@ pub(super) fn check_free_end(
             "free-end adaptive NEB cannot be combined with the simplified string method".into(),
         ));
     }
+    if config.dynamic.is_some() {
+        return Err(SaddleError::Invalid(
+            "free-end adaptive NEB cannot be combined with dynamic NEB; \
+             the free terminal image and the level-set retraction need every image evaluated"
+                .into(),
+        ));
+    }
     if !matches!(config.spring, SpringKind::Uniform { .. }) {
         return Err(SaddleError::Invalid(
             "free-end adaptive NEB requires a uniform spring".into(),
