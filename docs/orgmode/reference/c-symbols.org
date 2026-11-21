@@ -321,6 +321,9 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =RGSADDLE_LINEB_LINEAR_SEED=. Purpose: Macro constant in include/rgsaddle.h.
 - =RGSADDLE_LINEB_ENDPOINT_CONVERGENCE=. Purpose: Macro constant in include/rgsaddle.h.
 - =RGSADDLE_LINEB_PROJECTED_VERLET=. Purpose: Macro constant in include/rgsaddle.h.
+- =RGSADDLE_LINEB_MASSES_COORDINATES=. Purpose: Values of the molecular argument of the LI-NEB entry points.
+- =RGSADDLE_LINEB_MASSES_MOLECULE=. Purpose: Macro constant in include/rgsaddle.h.
+- =RGSADDLE_LINEB_MASSES_MOLECULE_ADJACENT=. Purpose: Macro constant in include/rgsaddle.h.
 - =RGSADDLE_LINEB_INTERPOLATED_FORCE_CLOCK=. Purpose: Imaginary-time velocity Verlet on the cubic signed image force.
 - =RGSADDLE_LINEB_INTERPOLATED_HESSIAN=. Purpose: Interpolate Cartesian image Hessians onto the equal-time replicas.
 - =RGSADDLE_HAS_LINEB_RATE_DIAGNOSTICS=. Purpose: Macro constant in include/rgsaddle.h.
