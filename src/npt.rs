@@ -275,6 +275,18 @@ where
     F: FnMut(ArrayView1<'_, f64>, Cell) -> Result<(f64, Array1<f64>, [[f64; 3]; 3]), SaddleError>,
 {
     let production = config.steps.saturating_sub(config.equilibration_steps);
+    if positions.iter().any(|value| !value.is_finite()) {
+        return Err(SaddleError::NonFinite("NPT initial positions"));
+    }
+    if cell.0.iter().flatten().any(|value| !value.is_finite()) {
+        return Err(SaddleError::NonFinite("NPT initial cell"));
+    }
+    let initial_volume = determinant(*cell).abs();
+    if !(initial_volume.is_finite() && initial_volume > 0.0) {
+        return Err(SaddleError::Invalid(
+            "NPT lattice sampling needs a positive finite cell volume".into(),
+        ));
+    }
     if positions.is_empty()
         || !positions.len().is_multiple_of(3)
         || config.repeats == 0
@@ -284,10 +296,11 @@ where
         || production / config.block_steps < 2
         || !(temperature_k >= 0.0 && temperature_k.is_finite())
         || !(mass_amu > 0.0 && mass_amu.is_finite())
-        || !(config.timestep_s > 0.0
-            && config.langevin_gamma_per_s > 0.0
-            && config.berendsen_tau_s > 0.0
-            && config.compressibility_per_ev_a3 > 0.0)
+        || !(config.timestep_s.is_finite() && config.timestep_s > 0.0)
+        || !(config.langevin_gamma_per_s.is_finite() && config.langevin_gamma_per_s > 0.0)
+        || !(config.berendsen_tau_s.is_finite() && config.berendsen_tau_s > 0.0)
+        || !(config.compressibility_per_ev_a3.is_finite() && config.compressibility_per_ev_a3 > 0.0)
+        || !config.target_pressure_ev_a3.is_finite()
     {
         return Err(SaddleError::Invalid(
             "NPT lattice sampling needs finite physical controls and at least two production blocks"
@@ -381,6 +394,47 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn input_error(positions: &mut Array1<f64>, cell: &mut Cell, config: NptConfig) -> SaddleError {
+        npt_lattice(positions, cell, 300.0, 1.0, config, |_, _| {
+            panic!("invalid input reached the evaluator")
+        })
+        .unwrap_err()
+    }
+
+    #[test]
+    fn npt_rejects_nonfinite_controls_cell_and_positions() {
+        let position = Array1::zeros(3);
+        let cell = Cell([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]);
+        for config in [
+            NptConfig::default().with_langevin_gamma_per_s(f64::INFINITY),
+            NptConfig::default().with_berendsen_tau_s(f64::INFINITY),
+            NptConfig::default().with_compressibility_per_ev_a3(f64::INFINITY),
+            NptConfig::default().with_target_pressure_ev_a3(f64::INFINITY),
+        ] {
+            assert!(matches!(
+                input_error(&mut position.clone(), &mut cell.clone(), config),
+                SaddleError::Invalid(_)
+            ));
+        }
+
+        let mut zero_cell = Cell([[0.0; 3]; 3]);
+        assert!(matches!(
+            input_error(&mut position.clone(), &mut zero_cell, NptConfig::default()),
+            SaddleError::Invalid(_)
+        ));
+
+        let mut nonfinite_position = position;
+        nonfinite_position[0] = f64::NAN;
+        assert!(matches!(
+            input_error(
+                &mut nonfinite_position,
+                &mut cell.clone(),
+                NptConfig::default()
+            ),
+            SaddleError::NonFinite("NPT initial positions")
+        ));
+    }
 
     #[test]
     fn blocking_recovers_the_ar1_mean_variance() {
