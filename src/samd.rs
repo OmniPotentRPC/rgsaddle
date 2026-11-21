@@ -114,7 +114,6 @@ pub struct VelocitySofteningReport {
 ///
 /// ```
 /// use ndarray::{Array1, ArrayView1, array};
-/// use rgmin::ManifoldKind;
 /// use rgsaddle::SaddleError;
 /// use rgsaddle::geom::SellaGeom;
 /// use rgsaddle::minmode::PointSurface;
@@ -128,7 +127,8 @@ pub struct VelocitySofteningReport {
 ///     }
 /// }
 ///
-/// let man = SellaGeom::Kind(ManifoldKind::Euclidean);
+/// // Three coordinates select the Euclidean manifold.
+/// let man = SellaGeom::cartesian(3);
 /// let seed = array![1.0, 1.0, 0.0];
 /// let config = VelocitySofteningConfig::default().with_steps(5);
 /// let out = soften_velocity_on(&man, Array1::<f64>::zeros(3).view(), seed.view(), &Saddle, config)?;
