@@ -142,9 +142,9 @@ fn ideal_gas_pressure_is_the_kinetic_density() {
 /// interaction. At fixed fractional coordinates the tether energy is
 /// `k |u|^2 / 2` with `u` scaling like the cell, so the configurational
 /// stress is `k u u^T / V`. Equipartition makes its hydrostatic part
-/// `N kT / V` and the virial theorem makes the total pressure zero at
-/// every volume. Without the kinetic term the sampled pressure is
-/// `-N kT / V`.
+/// `(N - 1) kT / V` after centre-of-mass momentum removal, and the virial
+/// theorem makes the total pressure zero at every volume. Without the kinetic
+/// term the sampled pressure is `-(N - 1) kT / V`.
 #[test]
 fn harmonic_crystal_has_zero_total_pressure() {
     let (mut positions, mut cell) = grid(6, 3.6);
@@ -206,6 +206,16 @@ fn harmonic_crystal_has_zero_total_pressure() {
         one_particle_pressure
     );
     assert!((report.mean_lattice_a / 3.6 - 1.0).abs() < 2.0e-3);
+}
+
+#[test]
+fn npt_documentation_uses_the_instantaneous_kinetic_pressure() {
+    let guide = include_str!("../docs/orgmode/howto/defect-pair-rates.org");
+    assert!(guide.contains("instantaneous kinetic pressure =2 E_k / (3 V)="));
+    assert!(guide.contains("=(N - 1) k_B T / V="));
+    let reference = include_str!("../docs/orgmode/reference.org");
+    assert!(reference.contains("Initial positions and cell entries must be finite"));
+    assert!(reference.contains("and a finite target pressure"));
 }
 
 #[test]
