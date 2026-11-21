@@ -141,7 +141,14 @@ pub struct SplitRng {
 
 impl SplitRng {
     pub fn new(seed: u64) -> Self {
-        Self { state: seed | 1 }
+        let mut state = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        state = (state ^ (state >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        state = (state ^ (state >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        state ^= state >> 31;
+        if state == 0 {
+            state = 0x9E37_79B9_7F4A_7C15;
+        }
+        Self { state }
     }
 
     fn u64(&mut self) -> u64 {

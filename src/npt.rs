@@ -106,7 +106,14 @@ struct Rng {
 
 impl Rng {
     fn new(seed: u64) -> Self {
-        Self { state: seed | 1 }
+        let mut state = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        state = (state ^ (state >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        state = (state ^ (state >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        state ^= state >> 31;
+        if state == 0 {
+            state = 0x9E37_79B9_7F4A_7C15;
+        }
+        Self { state }
     }
 
     fn uniform(&mut self) -> f64 {
@@ -438,6 +445,15 @@ mod tests {
             ),
             SaddleError::NonFinite("NPT initial positions")
         ));
+    }
+
+    #[test]
+    fn npt_rng_adjacent_seeds_start_different_streams() {
+        for seed in [0, 2, 10, 42, u64::MAX - 1] {
+            let mut even = Rng::new(seed);
+            let mut odd = Rng::new(seed + 1);
+            assert_ne!(even.uniform().to_bits(), odd.uniform().to_bits());
+        }
     }
 
     #[test]

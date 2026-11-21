@@ -267,6 +267,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn rng_adjacent_seeds_start_different_streams() {
+        for seed in [0, 2, 10, 42, u64::MAX - 1] {
+            let mut even = Rng::new(seed);
+            let mut odd = Rng::new(seed + 1);
+            assert_ne!(even.u64(), odd.u64());
+        }
+    }
+
+    #[test]
     fn harmonic_ou_relaxation_is_discarded() {
         // Overdamped harmonic relaxation with unit sampling interval:
         // x(t+1) = rho x(t) + noise and exact relaxation time -1/ln(rho).
