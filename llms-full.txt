@@ -262,7 +262,7 @@ The table below lists the main types.
 | `VineyardIndexError`           | Why a pair is not Vineyard-ready: `Evaluation`, `MinimumForce`, `SaddleForce`, `Minimum` or `Saddle`, the last two with the lowest projected spectrum |
 | `StrainResponse`               | One hop. `barrier(ε)` is the lowest symmetry image of `ΔE0 - (P_saddle - P_minimum):ε`, or `NeedsSearch` past the validity bound. `ElasticDipole::from_stress` is `-V (σ_defect - σ_bulk)`. `refine` caches an index-1 solid dimer. `with_prefactor`, `with_variants`, `with_point_group`, `with_policy`, and `with_multipoles` attach options. `to_json` and `from_json` are the event record |
 | `defect_pair_rates`            | One relaxed geometry and a hop catalogue. Solid dimer, index check, connectivity, fixed CI-NEB, PAFI `ΔF`, Bennett–Chandler `κ`. `k ` κ ν exp(-ΔF/kT)=. `RateCatalogue` is `rgsaddle.defect_pair_rates` |
-| `npt_lattice`                  | Isotropic Langevin dynamics with a Berendsen barostat on a crystal. Initial positions and cell entries must be finite, and the cell volume must be positive and finite. The drive includes the instantaneous kinetic pressure `2 E_k / (3 V)`. `NptConfig` is non-exhaustive: start from `Default` and chain the `with_*` setters, including `with_repeats`, `with_maximum_steps`, `with_extension_steps` and `with_block_steps`. Its floating-point controls must be finite; time step, friction, coupling time and compressibility must also be positive. `NptReport` carries the mean lattice parameter and pressure with blocking standard errors. `pressure_converged` is an indicative screen, not a proof. See [NPT lattice sampling](howto/npt-lattice.html) |
+| `npt_lattice`                  | Isotropic Langevin dynamics with a Berendsen barostat on a crystal. Initial positions and cell entries must be finite, and the cell volume must be positive and finite. The drive includes the instantaneous kinetic pressure `2 E_k / (3 V)`. `NptConfig` is non-exhaustive: start from `Default` and chain the `with_*` setters, including `with_repeats`, `with_maximum_steps`, `with_extension_steps` and `with_block_steps`. It needs finite positive time step, friction, coupling time and compressibility, and a finite target pressure. `NptReport` carries the mean lattice parameter and pressure with blocking standard errors. `pressure_converged` is an indicative screen, not a proof. See [NPT lattice sampling](howto/npt-lattice.html) |
 | `PairNetwork`                  | States are orbits of (relative vector, orientation) under a caller's integer point group; hop classes are orbits of the unordered configuration pair and saddle director. `sites` takes a per-edge rate closure and returns `VolumeSite` rows and outer hops. `cubic_group` is O_h |
 | `matched_capture_radius`       | Closes a site chain at its cutoff with capture `R/d` for an outer hop to `d`, `R` matched to the mean `P r` of the outermost sites, in closed form |
 | `ArcPath`                      | PAFI path through ordered frames, a cubic spline over chord length, with its curvature and jerk. See [PAFI types](reference/pafi.html) |
@@ -2445,15 +2445,15 @@ The Mishin EAM1 numbers are a validation, not part of the library. The potential
 
 The lattice parameter is from a zero-pressure Langevin run with a Berendsen barostat on a 6×6×6 cell of this potential, 2 fs steps, the average of the second 4 ps of an 8 ps trajectory. The barostat uses the instantaneous kinetic pressure `2 E_k / (3 V)`. Its canonical expectation is `(N - 1) k_B T / V` because the thermostat removes centre-of-mass momentum. It is not taken from Table 1.
 
-| T / K | a / Å, this work | a / Å, Table 1 |
-| --- | --- | --- |
-| 300 | 3.63195 | 3.631 |
-| 400 | 3.63817 | 3.637 |
-| 500 | 3.64349 | 3.643 |
-| 600 | 3.65095 | 3.649 |
-| 700 | 3.65747 | 3.655 |
+| T / K | a / Å, this work | pressure converged | a / Å, Table 1 |
+| --- | --- | --- | --- |
+| 300 | 3.63195 | yes | 3.631 |
+| 400 | 3.63817 | no | 3.637 |
+| 500 | 3.64349 | yes | 3.643 |
+| 600 | 3.65095 | yes | 3.649 |
+| 700 | 3.65747 | yes | 3.655 |
 
-The slope matches Table 1 and the offset is 0.0005 to 0.0025 Å. Each entry is one 4000 step run (2000 discarded) with seed `17 T + 11`, so it carries the scatter of a short run. At 600 K, eight seeds of that length (1 to 8) gave a spread of 0.0006 Å in the lattice parameter, which is larger than the offsets, so they are not resolved. The standard errors that `npt_lattice` reports for those runs, 0.00004 to 0.00013 Å, are smaller than that spread because the blocking estimate had not reached a plateau (`lattice_error_resolved` is false); they are lower bounds. Only the 500 K run passes the pressure screen at 4000 steps (see [NPT lattice sampling](/howto/npt-lattice.html)).
+The slope matches Table 1 and the offset is 0.0005 to 0.0025 Å. Each entry is one 4000 step run (2000 discarded) with seed `17 T + 11`, so it carries the scatter of a short run. The 400 K row is retained but explicitly marked non-converged. The 500 K reference row must converge and is allowed to extend to 8000 steps; this run converged at 4000. No pressure-bias estimate is assigned to a retained non-converged lattice parameter. At 600 K, eight seeds of the default length gave a spread of 0.0006 Å in the lattice parameter. The standard errors that `npt_lattice` reports for those runs, 0.00004 to 0.00013 Å, are smaller than that spread because the lattice blocking estimate had not reached a plateau (`lattice_error_resolved` is false); they are lower bounds.
 
 To see what the run length leaves in `a`, the 600 K system was run with eight seeds at 4000 steps and four seeds at 40000 steps, 2000 discarded in both, with the settings above. The means are 3.650662 Å (spread 0.000606 Å, standard error 0.000214 Å) and 3.650629 Å (spread 0.000161 Å, standard error 0.000081 Å). They differ by 0.00003 ± 0.00023 Å, so the run length leaves no bias that this comparison can resolve, and none of the four 40000 step runs misses the pressure screen. `cargo test --release --test mishin_cu npt_lattice_run_length -- --ignored --nocapture` repeats it.
 

@@ -230,9 +230,9 @@ fn mean_and_standard_error(values: &[f64]) -> (f64, f64) {
 /// rises with every doubling, and it stops rising once blocks are
 /// independent. The estimate is the largest value over the levels that keep
 /// at least [`MIN_BLOCKS`] blocks. It is `resolved` when the last doubling
-/// raised it by no more than its own sampling error, and a series with no
-/// spread is resolved with a standard error of zero. A series too short to
-/// block twice cannot show a plateau and is not resolved.
+/// has at least three levels that overlap within their sampling errors and
+/// every coarser level remains on that plateau. A series with no spread is
+/// resolved with a standard error of zero.
 fn blocked_statistics(values: &[f64]) -> Blocked {
     let mut level = values.to_vec();
     let mut estimates: Vec<(f64, usize)> = Vec::new();

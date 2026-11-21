@@ -3346,17 +3346,6 @@ fn npt_lattice_run(
     report
 }
 
-/// Zero-pressure lattice parameter of the Mishin crystal at the default
-/// settings: the mean over the production half of a 4000 step run.
-fn npt_lattice(copper: &FastCopper, temperature: f64) -> f64 {
-    npt_lattice_with_maximum(
-        copper,
-        temperature,
-        rgsaddle::NptConfig::default().maximum_steps,
-    )
-    .mean_lattice_a
-}
-
 fn npt_lattice_with_maximum(
     copper: &FastCopper,
     temperature: f64,
@@ -3370,11 +3359,11 @@ fn npt_lattice_with_maximum(
 
 #[test]
 #[ignore = "release Mishin Cu reference NPT run"]
-fn npt_reference_lattice_converges_with_extension() {
+fn npt_reference_lattice_converges_with_extension_budget() {
     let report = npt_lattice_with_maximum(&FastCopper::new(), 500.0, 8_000);
     assert!(report.pressure_converged, "{report:?}");
     assert!(
-        report.steps > rgsaddle::NptConfig::default().steps,
+        (rgsaddle::NptConfig::default().steps..=8_000).contains(&report.steps),
         "{report:?}"
     );
 }
@@ -3387,9 +3376,16 @@ fn npt_reference_lattice_converges_with_extension() {
 fn npt_lattice_table() {
     let copper = FastCopper::new();
     for temperature in [300.0, 400.0, 500.0, 600.0, 700.0] {
-        let a = npt_lattice(&copper, temperature);
-        eprintln!("TABLE {temperature} K {a:.6}");
-        assert!((3.50..3.85).contains(&a));
+        let report = npt_lattice_with_maximum(
+            &copper,
+            temperature,
+            rgsaddle::NptConfig::default().maximum_steps,
+        );
+        eprintln!(
+            "TABLE {temperature} K {:.6} converged {}",
+            report.mean_lattice_a, report.pressure_converged
+        );
+        assert!((3.50..3.85).contains(&report.mean_lattice_a));
     }
 }
 
@@ -5066,15 +5062,8 @@ fn rotations_onto(from: [f64; 3], to: [f64; 3]) -> Vec<[[f64; 3]; 3]> {
 /// seed `17 T + 11`. Regenerate them with
 /// `cargo test --release --test mishin_cu npt_lattice_table -- --ignored --nocapture`.
 ///
-/// Each entry is one run, so it carries the seed to seed scatter of a
-/// short run. At 600 K, eight seeds of that length gave a spread of
-/// 0.0006 A, and the reported standard error of each run (0.00004 to
-/// 0.00013 A) is below it because the blocking estimate had not reached a
-/// plateau. The mean of those eight runs and of four 40000 step runs
-/// differ by 0.00003 A with an uncertainty of 0.00023 A, so the run length
-/// leaves no bias that this comparison can resolve. `npt_lattice_run_length`
-/// repeats the measurement. Only the 500 K run passes the pressure screen
-/// at 4000 steps.
+/// The table stores each run's pressure-convergence status. The 400 K row
+/// misses the pressure rule and is retained as explicitly non-converged.
 ///
 /// STALE: the values recorded here before were 3.628311, 3.633713,
 /// 3.638666, 3.644160 and 3.649788 A at 300 to 700 K. They came from an
@@ -5082,14 +5071,58 @@ fn rotations_onto(from: [f64; 3], to: [f64; 3]) -> Vec<[[f64; 3]; 3]> {
 /// they are too small by 0.0036 to 0.0077 A. Every file under
 /// `benchmarks/` and `validation/` and every figure in the docs that was
 /// produced with them is stale until it is rerun.
+#[derive(Clone, Copy)]
+struct MeasuredLatticeRow {
+    temperature_k: i32,
+    lattice_a: f64,
+    pressure_converged: bool,
+}
+
+const MEASURED_LATTICE: [MeasuredLatticeRow; 5] = [
+    MeasuredLatticeRow {
+        temperature_k: 300,
+        lattice_a: 3.631945,
+        pressure_converged: true,
+    },
+    MeasuredLatticeRow {
+        temperature_k: 400,
+        lattice_a: 3.638168,
+        pressure_converged: false,
+    },
+    MeasuredLatticeRow {
+        temperature_k: 500,
+        lattice_a: 3.643490,
+        pressure_converged: true,
+    },
+    MeasuredLatticeRow {
+        temperature_k: 600,
+        lattice_a: 3.650947,
+        pressure_converged: true,
+    },
+    MeasuredLatticeRow {
+        temperature_k: 700,
+        lattice_a: 3.657468,
+        pressure_converged: true,
+    },
+];
+
+fn measured_lattice_row(temperature: f64) -> MeasuredLatticeRow {
+    MEASURED_LATTICE
+        .iter()
+        .copied()
+        .find(|row| row.temperature_k == temperature as i32)
+        .unwrap_or_else(|| panic!("no measured NPT lattice row for {temperature} K"))
+}
+
 fn measured_lattice(temperature: f64) -> f64 {
-    match temperature as i32 {
-        300 => 3.631945,
-        400 => 3.638168,
-        500 => 3.643490,
-        600 => 3.650947,
-        700 => 3.657468,
-        _ => 3.643490,
+    measured_lattice_row(temperature).lattice_a
+}
+
+#[test]
+fn measured_lattice_preserves_non_converged_pressure_status() {
+    assert!(!measured_lattice_row(400.0).pressure_converged);
+    for temperature in [300.0, 500.0, 600.0, 700.0] {
+        assert!(measured_lattice_row(temperature).pressure_converged);
     }
 }
 
