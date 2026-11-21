@@ -5,7 +5,7 @@
 #include <stddef.h>
 
 _Static_assert(RGSADDLE_ABI_MAJOR == 1u, "main ABI major");
-_Static_assert(RGSADDLE_ABI_MINOR == 46u, "ABI minor");
+_Static_assert(RGSADDLE_ABI_MINOR == 47u, "ABI minor");
 _Static_assert(RGSADDLE_BAND_NO_MIN_MODE == (1ull << 3), "band flag bit 3");
 _Static_assert(RGSADDLE_BAND_SPLINE_REPARAM == (1ull << 4), "band flag bit 4");
 _Static_assert(RGSADDLE_BAND_STRING == (1ull << 5), "band flag bit 5");
@@ -333,6 +333,13 @@ typedef rgsaddle_status_t (*abi19_signature_rgsaddle_idpp_path)(int64_t n_images
                                      const double *cell, int64_t max_iterations,
                                      double grad_tol, double max_move, double *out);
 _Static_assert(_Generic(&rgsaddle_idpp_path, abi19_signature_rgsaddle_idpp_path: 1, default: 0), "rgsaddle_idpp_path signature");
+
+typedef rgsaddle_status_t (*abi47_signature_rgsaddle_trics_path)(
+    int64_t n_images, int64_t n_atoms, const double *initial,
+    int64_t max_inversion_iterations, double inversion_tolerance,
+    double max_move, int32_t diagnostic_threshold, double splice_tolerance,
+    int64_t max_splice_iterations, double *out);
+_Static_assert(_Generic(&rgsaddle_trics_path, abi47_signature_rgsaddle_trics_path: 1, default: 0), "rgsaddle_trics_path signature");
 
 typedef RgsaddleOcineb *(*abi20_signature_rgsaddle_ocineb_create)(
     const rgsaddle_band_config_t *band, const rgsaddle_minmode_config_t *minmode,

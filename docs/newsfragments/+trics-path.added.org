@@ -1,0 +1,9 @@
+=trics_path= constructs molecular paths in nonredundant translation rotation
+internal coordinates, changes coordinate charts where the diagnostic marks a
+singularity, and splices overlapping segments.  =PathInitializer= selects
+linear, IDPP, or TRICS starts for band drivers, and AutoNEB can insert TRICS
+images; =ConnectConfig::path_initializer= selects the same policy for connect.
+C ABI minor 47 adds =rgsaddle_trics_path=.  Failed refinement returns
+=SaddleError::Solver= in Rust and =RGSADDLE_SOLVER= in C; invalid controls use
+=SaddleError::Invalid= and =RGSADDLE_INVALID_PARAMETER=, while non-finite
+geometry or derived values use =SaddleError::NonFinite= and =RGSADDLE_ERROR=.

@@ -20,6 +20,10 @@ The top-level =meson.build= provides the headers as the dependency =rgsaddle-hea
 * Grow the band with AutoNEB
 =howto/autoneb= is the AutoNEB loop: insert where the resolution is worst, relax a local window, and climb. The tuning sits on =BandConfig::autoneb=. A weighted spring supplied by the host is refused for now; zoom-NEB will recompute it.
 
+* Choose linear, IDPP, or TRICS initialization
+=howto/path-initialization= compares the generic =PathInitializer= choices,
+shows how TRICS refines a linear or IDPP seed, and gives the C entry point.
+
 * Pick tangents, springs, projections
 | Kind             | Variants                                                             |
 |------------------+----------------------------------------------------------------------|
