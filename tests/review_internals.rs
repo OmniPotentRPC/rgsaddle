@@ -138,9 +138,7 @@ fn a_cell_kick_keeps_the_periodic_chart_on_the_living_lattice() {
         close(lattice[0], living[0])
             && close(lattice[1], living[1])
             && close(lattice[2], living[2]),
-        "chart {:?} living {:?}",
-        lattice,
-        living
+        "chart {lattice:?} living {living:?}"
     );
     assert!((living[0][0] - 4.25).abs() < 1.0e-12);
     let after = pes.internals().internals().unwrap()[0];
@@ -171,9 +169,7 @@ fn niggli_reduction_retargets_periodic_images() {
         close(lattice[0], living[0])
             && close(lattice[1], living[1])
             && close(lattice[2], living[2]),
-        "chart {:?} living {:?}",
-        lattice,
-        living
+        "chart {lattice:?} living {living:?}"
     );
     let frame = pes.internals().position().to_owned();
     let after = pes.internals().chart().values(frame.view()).unwrap()[0];
