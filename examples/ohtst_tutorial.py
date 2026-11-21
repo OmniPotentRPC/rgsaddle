@@ -39,13 +39,28 @@ def find_binary(repo_root: Path) -> Path:
     return binary
 
 
+def parse_float_dict(payload: str) -> dict[str, float]:
+    """Parse a JSON object with string keys and numeric values."""
+    parsed: object = json.loads(payload)
+    if not isinstance(parsed, dict):
+        raise TypeError("expected a JSON object in result.json")
+    result: dict[str, float] = {}
+    for key, value in parsed.items():
+        if not isinstance(key, str):
+            raise TypeError("expected string keys in result.json")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise TypeError(f"expected a numeric value for key {key!r}")
+        result[key] = float(value)
+    return result
+
+
 def run_ohtst(repo_root: Path) -> dict[str, float]:
     """Run the compiled OH-TST example and return its JSON result."""
     binary = find_binary(repo_root)
     with tempfile.TemporaryDirectory() as workdir:
         result_path = Path(workdir) / "result.json"
         subprocess.run([str(binary), str(result_path)], check=True)
-        return json.loads(result_path.read_text())
+        return parse_float_dict(result_path.read_text())
 
 
 def main() -> None:
