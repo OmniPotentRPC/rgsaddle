@@ -1,9 +1,21 @@
 /// Directory that holds a freshly linked `librgsaddle.so` matching this
 /// test binary's active features and profile.
 ///
-/// C consumers link against a dedicated Cargo target directory. This keeps
-/// the nested library build from replacing the outer test profile's rlib
-/// while rustdoc still needs it and its matching dependency metadata.
+/// `cargo test` compiles integration tests against the `rlib` without
+/// uplifting `librgsaddle.so` into `target/<profile>`, so a prior
+/// `cargo build --features capi` would leave a stale `capi` only shared
+/// library behind when `cargo test --features capi,ohtst` runs. Invoking
+/// `cargo build --lib` with the active feature set refreshes
+/// `librgsaddle.so` before the C compiler links against it.
+///
+/// The nested build writes into its own `cdylib` subdirectory of the target
+/// directory, keyed by the active feature set. Cargo before 1.100 names the
+/// `rlib` of a `lib`, `cdylib` and `staticlib` crate without a hash, so a
+/// nested build in the outer target directory replaces the `librgsaddle.rlib`
+/// that rustdoc links later in the same `cargo test`. That `rlib` can be
+/// linked against another build of `rgmin` than the one the doctests name,
+/// and the doctests then fail to compile because the two copies of `rgmin`
+/// are different types.
 fn cdylib_dir() -> std::path::PathBuf {
     static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
     DIR.get_or_init(build_fresh_cdylib).clone()
@@ -43,6 +55,9 @@ fn active_features() -> Vec<&'static str> {
     }
     if cfg!(feature = "lineb-oracle") {
         features.push("lineb-oracle");
+    }
+    if cfg!(feature = "lineb-interpolated-hessian") {
+        features.push("lineb-interpolated-hessian");
     }
     if cfg!(feature = "pafi-repro") {
         features.push("pafi-repro");
@@ -101,12 +116,14 @@ fn build_fresh_cdylib() -> std::path::PathBuf {
     };
 
     let features = active_features();
-    let target_dir = target_dir.join("abi-tests").join(features.join("_"));
-    let profile_dir = match &target_triple {
-        Some(triple) => target_dir.join(triple).join(&profile_name),
-        None => target_dir.join(&profile_name),
-    };
-    let lib_path = profile_dir.join("librgsaddle.so");
+    let nested_target_dir = target_dir.join("cdylib").join(features.join("_"));
+    let mut nested_profile_dir = nested_target_dir.clone();
+    if let Some(triple) = &target_triple {
+        nested_profile_dir.push(triple);
+    }
+    nested_profile_dir.push(&profile_name);
+
+    let lib_path = nested_profile_dir.join("librgsaddle.so");
 
     let cargo = match std::env::var_os("CARGO") {
         Some(bin) => bin,
@@ -120,7 +137,7 @@ fn build_fresh_cdylib() -> std::path::PathBuf {
         .arg("--locked")
         .arg("--no-default-features")
         .arg("--target-dir")
-        .arg(&target_dir);
+        .arg(&nested_target_dir);
     if !features.is_empty() {
         cmd.arg("--features").arg(features.join(","));
     }
@@ -147,5 +164,5 @@ fn build_fresh_cdylib() -> std::path::PathBuf {
         "expected fresh cdylib at {}",
         lib_path.display()
     );
-    profile_dir
+    nested_profile_dir
 }
