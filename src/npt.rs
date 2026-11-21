@@ -258,13 +258,17 @@ fn blocked_statistics(values: &[f64]) -> Blocked {
     let standard_error = estimates
         .iter()
         .fold(0.0_f64, |worst, &(estimate, _)| worst.max(estimate));
-    let resolved = if estimates[0].0 == 0.0 {
-        true
-    } else if let [.., (previous, _), (last, blocks)] = estimates[..] {
-        last - previous <= last / (2.0 * (blocks as f64 - 1.0)).sqrt()
-    } else {
-        false
+    let stable = |left: (f64, usize), right: (f64, usize)| {
+        let left_uncertainty = left.0 / (2.0 * (left.1 as f64 - 1.0)).sqrt();
+        let right_uncertainty = right.0 / (2.0 * (right.1 as f64 - 1.0)).sqrt();
+        (left.0 - right.0).abs() <= 2.0 * left_uncertainty.hypot(right_uncertainty)
     };
+    let resolved = estimates[0].0 == 0.0
+        || (0..estimates.len().saturating_sub(2)).any(|start| {
+            estimates[start..]
+                .windows(2)
+                .all(|window| stable(window[0], window[1]))
+        });
     Blocked {
         mean,
         standard_error,
@@ -484,6 +488,21 @@ mod tests {
             extended_check(usize::MAX - 1, usize::MAX, usize::MAX),
             usize::MAX
         );
+    }
+
+    #[test]
+    fn blocking_rejects_a_fine_plateau_followed_by_coarse_growth() {
+        let series: Vec<f64> = (0_usize..256)
+            .map(|index| {
+                let drift = if index < 128 { -0.05 } else { 0.05 };
+                let fast = if index.is_multiple_of(2) { -0.05 } else { 0.05 };
+                drift + fast
+            })
+            .collect();
+        let estimate = blocked_statistics(&series);
+
+        assert!(!estimate.resolved);
+        assert!(estimate.standard_error > 0.01);
     }
 
     fn stream(seed: u64, length: usize) -> Vec<u64> {
