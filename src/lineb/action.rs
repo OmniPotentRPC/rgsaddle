@@ -282,8 +282,8 @@ fn rotate_into(force: &mut Array1<f64>, placement: &Placement) {
         let f = [force[3 * atom], force[3 * atom + 1], force[3 * atom + 2]];
         for row in 0..3 {
             let mut acc = 0.0;
-            for col in 0..3 {
-                acc += placement.rotation[row][col] * f[col];
+            for (col, component) in f.iter().enumerate() {
+                acc += placement.rotation[row][col] * component;
             }
             rotated[3 * atom + row] = acc;
         }

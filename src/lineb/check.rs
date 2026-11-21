@@ -104,17 +104,15 @@ fn integrands(sample: &Sample, u: Option<f64>) -> Result<(f64, f64), SaddleError
         return Ok((sample.sigma * sample.speed, sample.speed / sample.sigma));
     };
     let action = sample.sigma * sample.speed * 2.0 * u;
-    let period = if sample.sigma > 0.0 && u > 0.0 {
-        2.0 * u * sample.speed / sample.sigma
-    } else if (u <= 0.0 || u.is_nan()) && (sample.sigma <= 0.0 || sample.sigma.is_nan()) {
+    let period = if u <= 0.0 || u.is_nan() {
         if sample.slope <= 0.0 || sample.slope.is_nan() {
             return Err(SaddleError::Invalid(
                 "the reference potential does not rise off the turning point".into(),
             ));
         }
         2.0 * sample.speed / (2.0 * sample.slope).sqrt()
-    } else if u <= 0.0 || u.is_nan() {
-        0.0
+    } else if sample.sigma > 0.0 {
+        2.0 * u * sample.speed / sample.sigma
     } else {
         return Err(SaddleError::Invalid(
             "the reference momentum vanishes before the end of the path".into(),
@@ -196,6 +194,8 @@ fn chord<S: PointSurface>(
 struct Grid {
     action: f64,
     half_period: f64,
+    panels: usize,
+    converged: bool,
     /// `|I(n) − I(converged)|` at the library panel count, plus the
     /// converged grid's own roundoff.
     action_error: f64,
@@ -207,7 +207,8 @@ struct Grid {
 /// the change from the library panel count to that converged grid,
 /// plus the converged grid's roundoff.
 fn fine_grid<S: PointSurface>(surface: &S, path: &LinebPath) -> Result<Grid, SaddleError> {
-    let curve = Curve::with_end_tangents(path.weighted.view(), path.time_table.end_tangents.as_ref())?;
+    let curve =
+        Curve::with_end_tangents(path.weighted.view(), path.time_table.end_tangents.as_ref())?;
     let knots = curve.knots().to_vec();
     let level = Level {
         surface,
@@ -217,6 +218,7 @@ fn fine_grid<S: PointSurface>(surface: &S, path: &LinebPath) -> Result<Grid, Sad
     };
     let last = knots.len() - 1;
     let library_panels = 2 * path.quadrature_pairs;
+    let max_panels = 4096;
     let mut panels = 2usize;
     let mut previous: Option<(f64, f64)> = None;
     let mut at_library: Option<(f64, f64)> = None;
@@ -253,9 +255,9 @@ fn fine_grid<S: PointSurface>(surface: &S, path: &LinebPath) -> Result<Grid, Sad
             let samples = (panels as f64) * (last as f64);
             let action_noise = action_abs * f64::EPSILON * samples;
             let half_noise = half_abs * f64::EPSILON * samples;
-            if (action_change <= action_noise || action_change.is_nan())
-                && (half_change <= half_noise || half_change.is_nan())
-            {
+            let converged = (action_change <= action_noise || action_change.is_nan())
+                && (half_change <= half_noise || half_change.is_nan());
+            if converged || panels == max_panels {
                 // A grid that has already settled before the library
                 // panel count is at least as fine as that count.
                 let (library_action, library_half) = match at_library {
@@ -265,6 +267,8 @@ fn fine_grid<S: PointSurface>(surface: &S, path: &LinebPath) -> Result<Grid, Sad
                 return Ok(Grid {
                     action,
                     half_period: half,
+                    panels,
+                    converged,
                     action_error: (action - library_action).abs() + action_change.max(action_noise),
                     half_error: (half - library_half).abs() + half_change.max(half_noise),
                 });
@@ -396,6 +400,11 @@ fn muller_brown_action_and_period_match_a_fine_grid() {
     assert!(seed < total);
     for path in &paths {
         let grid = fine_grid(&MullerBrown, path).unwrap();
+        assert!(
+            grid.converged,
+            "fine grid did not settle by {} panels",
+            grid.panels
+        );
         assert!(
             (path.action - grid.action).abs() <= grid.action_error,
             "W({}) = {} vs fine grid {}, truncation {}",

@@ -115,9 +115,11 @@ pub fn continue_from_mep_with_observer<S: PointSurface>(
                 mep,
                 &energies,
                 saddle,
-                energy,
-                ladder.images,
-                ladder.linear_seed,
+                BracketSpec {
+                    target: energy,
+                    images: ladder.images,
+                    linear_seed: ladder.linear_seed,
+                },
             )?;
             Ok((energy, seed))
         },
@@ -279,9 +281,11 @@ pub(super) fn clip_seed<S: PointSurface>(
         seed,
         &energies,
         saddle,
-        energy,
-        seed.nrows(),
-        linear_seed,
+        BracketSpec {
+            target: energy,
+            images: seed.nrows(),
+            linear_seed,
+        },
     )
     .map(Some)
 }
@@ -316,18 +320,22 @@ fn highest(energies: &[f64]) -> Result<usize, SaddleError> {
     Ok(best)
 }
 
+struct BracketSpec {
+    target: f64,
+    images: usize,
+    linear_seed: bool,
+}
+
 fn bracket<S: PointSurface>(
     surface: &S,
     masses: &Masses,
     mep: ArrayView2<f64>,
     energies: &[f64],
     saddle: usize,
-    target: f64,
-    images: usize,
-    linear_seed: bool,
+    spec: BracketSpec,
 ) -> Result<Array2<f64>, SaddleError> {
-    let left = crossing_toward_start(energies, saddle, target)?;
-    let right = crossing_toward_end(energies, saddle, target)?;
+    let left = crossing_toward_start(energies, saddle, spec.target)?;
+    let right = crossing_toward_end(energies, saddle, spec.target)?;
     let mut weighted = Vec::new();
     weighted.push(onto_segment(
         surface,
@@ -336,9 +344,9 @@ fn bracket<S: PointSurface>(
         mep.row(left + 1),
         energies[left],
         energies[left + 1],
-        target,
+        spec.target,
     )?);
-    if !linear_seed {
+    if !spec.linear_seed {
         for index in (left + 1)..=right {
             weighted.push(masses.to_weighted(mep.row(index))?);
         }
@@ -350,9 +358,9 @@ fn bracket<S: PointSurface>(
         mep.row(right + 1),
         energies[right],
         energies[right + 1],
-        target,
+        spec.target,
     )?);
-    resample(&weighted, images).and_then(|weighted| to_cartesian(masses, weighted.view()))
+    resample(&weighted, spec.images).and_then(|weighted| to_cartesian(masses, weighted.view()))
 }
 
 fn crossing_toward_start(
@@ -726,8 +734,32 @@ mod tests {
         }
         assert!((clipped[[1, 1]] - 1.0).abs() < 1e-14);
         let energies = image_energies(&Ridge, mep.view()).unwrap();
-        let seed = bracket(&Ridge, &masses, mep.view(), &energies, 1, 0.5, 3, false).unwrap();
-        let chord = bracket(&Ridge, &masses, mep.view(), &energies, 1, 0.5, 3, true).unwrap();
+        let seed = bracket(
+            &Ridge,
+            &masses,
+            mep.view(),
+            &energies,
+            1,
+            BracketSpec {
+                target: 0.5,
+                images: 3,
+                linear_seed: false,
+            },
+        )
+        .unwrap();
+        let chord = bracket(
+            &Ridge,
+            &masses,
+            mep.view(),
+            &energies,
+            1,
+            BracketSpec {
+                target: 0.5,
+                images: 3,
+                linear_seed: true,
+            },
+        )
+        .unwrap();
         let midpoint = (&seed.row(0) + &seed.row(2)) * 0.5;
         assert!(l2((&chord.row(1) - &midpoint).view()) < 1e-12);
         assert!(l2((&seed.row(1) - &mep.row(1)).view()) < 1e-12);

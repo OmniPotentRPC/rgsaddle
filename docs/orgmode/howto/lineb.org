@@ -14,6 +14,8 @@ Interior images move along the perpendicular gradient of =W=, springs keep them 
 
 The module takes any =PointSurface=. Energies, lengths and masses are in the surface's own units, and =LinebConfig::hbar= and =LinebConfig::boltzmann= are given in the same units. Both default to one.
 
+=LinebConfig::gradient_end_tangents= is false by default. =with_gradient_end_tangents(true)= evaluates the two endpoint gradients, converts them to unit mass-weighted directions oriented along increasing path parameter, and supplies them as the endpoint tangents of the measured path spline.
+
 * One energy
 #+begin_src rust
 let config = LinebConfig::new(opt_tol, perp_tol);

@@ -88,8 +88,8 @@ pub(crate) fn restore_force(
         let f = [force[3 * atom], force[3 * atom + 1], force[3 * atom + 2]];
         for row in 0..3 {
             let mut acc = 0.0;
-            for col in 0..3 {
-                acc += placement.rotation[col][row] * f[col];
+            for (col, component) in f.iter().enumerate() {
+                acc += placement.rotation[col][row] * component;
             }
             rotated[3 * atom + row] = acc;
         }
@@ -117,8 +117,8 @@ fn align_to_reference(
         ];
         for row in 0..3 {
             let mut acc = 0.0;
-            for col in 0..3 {
-                acc += rotation[row][col] * p[col];
+            for (col, component) in p.iter().enumerate() {
+                acc += rotation[row][col] * component;
             }
             out[3 * atom + row] = acc;
         }
