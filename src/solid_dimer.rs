@@ -286,7 +286,8 @@ impl IndexCheck {
     }
 
     /// How many lowest eigenvalues to resolve. Zero is refused by
-    /// [`SolidDimer::new`] and [`index_at`].
+    /// [`SolidDimer::new`] and [`index_at`], and [`certify_vineyard_pair`]
+    /// refuses anything below two.
     #[must_use]
     pub const fn with_lowest(mut self, lowest: usize) -> Self {
         self.lowest = lowest;
@@ -430,7 +431,12 @@ fn projected_max_force<S: PointSurface>(
 /// its projected gradient is at most `force_tol`, because a Hessian index
 /// away from a stationary point does not classify it. The minimum must then
 /// have no projected eigenvalue below [`IndexCheck::negative`] and the
-/// saddle exactly one.
+/// saddle exactly one. Exactly one needs the second eigenvalue as well as
+/// the first, so `check.lowest` must be at least two: with a single
+/// resolved eigenvalue every index-two point, and every maximum, would
+/// read as index one. A smaller value is refused, as is a non-finite or
+/// empty coordinate or an unusable `check`, before any surface is
+/// evaluated.
 ///
 /// Each surface supplies its own constrained or rigid directions through
 /// [`PointSurface::excluded_modes`]. This keeps full- and active-coordinate
@@ -453,6 +459,17 @@ pub fn certify_vineyard_pair<M: PointSurface, S: PointSurface>(
         )
         .into());
     }
+    validate_index_check(check)?;
+    if check.lowest < 2 {
+        return Err(SaddleError::Invalid(
+            "Vineyard certification needs IndexCheck::lowest of at least two to resolve the \
+             second eigenvalue of the saddle"
+                .into(),
+        )
+        .into());
+    }
+    validate_index_point(minimum)?;
+    validate_index_point(saddle)?;
     let max_force = projected_max_force(minimum_surface, minimum)?;
     if max_force > force_tol {
         return Err(VineyardIndexError::MinimumForce {
@@ -484,21 +501,18 @@ pub fn certify_vineyard_pair<M: PointSurface, S: PointSurface>(
     Ok(VineyardIndexReport { minimum, saddle })
 }
 
-/// Lowest projected eigenvalues of `surface` at `x`.
-///
-/// `x` is the coordinate [`PointSurface::eval`] reads: Cartesian for a
-/// frozen cell, the generalized vector for a joint chart. The count
-/// ignores directions [`PointSurface::excluded_modes`] returns.
-pub fn index_at<S: PointSurface>(
-    surface: &S,
-    x: ArrayView1<f64>,
-    check: IndexCheck,
-) -> Result<IndexReport, SaddleError> {
+/// Refuse an empty or non-finite coordinate before anything is evaluated.
+fn validate_index_point(x: ArrayView1<f64>) -> Result<(), SaddleError> {
     if x.is_empty() || !x.iter().all(|v| v.is_finite()) {
         return Err(SaddleError::Invalid(
             "index check needs a finite coordinate".into(),
         ));
     }
+    Ok(())
+}
+
+/// Refuse an index check the Lanczos solver cannot run.
+fn validate_index_check(check: IndexCheck) -> Result<(), SaddleError> {
     if check.lowest == 0 || !(check.step.is_finite() && check.step > 0.0) {
         return Err(SaddleError::Invalid(
             "index check needs a positive difference step and at least one eigenvalue".into(),
@@ -509,6 +523,21 @@ pub fn index_at<S: PointSurface>(
             "index check cutoff and escape step must be finite".into(),
         ));
     }
+    Ok(())
+}
+
+/// Lowest projected eigenvalues of `surface` at `x`.
+///
+/// `x` is the coordinate [`PointSurface::eval`] reads: Cartesian for a
+/// frozen cell, the generalized vector for a joint chart. The count
+/// ignores directions [`PointSurface::excluded_modes`] returns.
+pub fn index_at<S: PointSurface>(
+    surface: &S,
+    x: ArrayView1<f64>,
+    check: IndexCheck,
+) -> Result<IndexReport, SaddleError> {
+    validate_index_point(x)?;
+    validate_index_check(check)?;
     let modes = orthonormal_excluded(surface, x)?;
     let calls = std::cell::Cell::new(0usize);
     let (values, vectors) = ritz_lowest(surface, x, &modes, check, &calls)?;
@@ -3047,6 +3076,159 @@ mod tests {
             error,
             VineyardIndexError::SaddleForce { max_force, .. } if (max_force - 0.6).abs() < 1e-12
         ));
+    }
+
+    /// `E = sum(c_i x_i^2) / 2` with the given curvatures, counting calls.
+    struct Quadratic {
+        curvature: [f64; 3],
+        evals: AtomicUsize,
+    }
+
+    impl Quadratic {
+        fn new(curvature: [f64; 3]) -> Self {
+            Self {
+                curvature,
+                evals: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl PointSurface for Quadratic {
+        fn eval(&self, r: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            self.evals.fetch_add(1, Ordering::Relaxed);
+            let gradient = Array1::from_iter((0..3).map(|i| self.curvature[i] * r[i]));
+            Ok((0.5 * r.dot(&gradient), gradient))
+        }
+    }
+
+    #[test]
+    fn vineyard_pair_refuses_index_two_points_and_maxima() {
+        let minimum = Quadratic::new([1.0, 2.0, 3.0]);
+        let origin = array![0.0, 0.0, 0.0];
+        let check = IndexCheck::first_order().with_lowest(2);
+        let index_one = Quadratic::new([-3.0, 1.5, 4.0]);
+        let report = certify_vineyard_pair(
+            &minimum,
+            origin.view(),
+            &index_one,
+            origin.view(),
+            check,
+            VINEYARD_FORCE,
+        )
+        .unwrap();
+        assert_eq!(report.saddle.negative, 1);
+        assert_eq!(report.saddle.values.len(), 2);
+        assert!(report.saddle.values[1] > 1.0, "{:?}", report.saddle.values);
+
+        let index_two = Quadratic::new([-3.0, -1.5, 4.0]);
+        let maximum = Quadratic::new([-3.0, -1.5, -1.0]);
+        for (name, surface) in [("index two", &index_two), ("maximum", &maximum)] {
+            for lowest in [2, 3, 8] {
+                let error = certify_vineyard_pair(
+                    &minimum,
+                    origin.view(),
+                    surface,
+                    origin.view(),
+                    check.with_lowest(lowest),
+                    VINEYARD_FORCE,
+                )
+                .unwrap_err();
+                assert!(
+                    matches!(error, VineyardIndexError::Saddle { negative, .. } if negative >= 2),
+                    "{name} with {lowest} eigenvalues: {error:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn vineyard_pair_refuses_a_single_resolved_eigenvalue() {
+        // One resolved eigenvalue cannot tell index one from index two, so
+        // the call is refused whatever the points are, and before any
+        // surface is evaluated.
+        let minimum = Quadratic::new([1.0, 2.0, 3.0]);
+        let index_two = Quadratic::new([-3.0, -1.5, 4.0]);
+        let origin = array![0.0, 0.0, 0.0];
+        for lowest in [0, 1] {
+            let error = certify_vineyard_pair(
+                &minimum,
+                origin.view(),
+                &index_two,
+                origin.view(),
+                IndexCheck::first_order().with_lowest(lowest),
+                VINEYARD_FORCE,
+            )
+            .unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    VineyardIndexError::Evaluation(SaddleError::Invalid(_))
+                ),
+                "{lowest}: {error:?}"
+            );
+        }
+        assert_eq!(minimum.evals.load(Ordering::Relaxed), 0);
+        assert_eq!(index_two.evals.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn vineyard_pair_validates_points_and_check_before_evaluating() {
+        let minimum = Quadratic::new([1.0, 2.0, 3.0]);
+        let saddle = Quadratic::new([-3.0, 1.5, 4.0]);
+        let origin = array![0.0, 0.0, 0.0];
+        let check = IndexCheck::first_order();
+        let mut bad_points = vec![Array1::zeros(0)];
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            bad_points.push(array![0.0, value, 0.0]);
+        }
+        for bad in &bad_points {
+            for (first, second) in [(bad, &origin), (&origin, bad)] {
+                let error = certify_vineyard_pair(
+                    &minimum,
+                    first.view(),
+                    &saddle,
+                    second.view(),
+                    check,
+                    VINEYARD_FORCE,
+                )
+                .unwrap_err();
+                assert!(
+                    matches!(
+                        error,
+                        VineyardIndexError::Evaluation(SaddleError::Invalid(_))
+                    ),
+                    "{bad:?}: {error:?}"
+                );
+            }
+        }
+        let bad_checks = [
+            check.with_step(0.0),
+            check.with_step(f64::NAN),
+            check.with_negative(f64::NAN),
+            check.with_negative(f64::NEG_INFINITY),
+            check.with_escape(f64::NAN),
+            check.with_escape(-1.0),
+        ];
+        for bad in bad_checks {
+            let error = certify_vineyard_pair(
+                &minimum,
+                origin.view(),
+                &saddle,
+                origin.view(),
+                bad,
+                VINEYARD_FORCE,
+            )
+            .unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    VineyardIndexError::Evaluation(SaddleError::Invalid(_))
+                ),
+                "{bad:?}: {error:?}"
+            );
+        }
+        assert_eq!(minimum.evals.load(Ordering::Relaxed), 0);
+        assert_eq!(saddle.evals.load(Ordering::Relaxed), 0);
     }
 
     #[test]
