@@ -141,7 +141,14 @@ pub struct SplitRng {
 
 impl SplitRng {
     pub fn new(seed: u64) -> Self {
-        Self { state: seed | 1 }
+        let mut state = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        state = (state ^ (state >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        state = (state ^ (state >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        state ^= state >> 31;
+        if state == 0 {
+            state = 0x9E37_79B9_7F4A_7C15;
+        }
+        Self { state }
     }
 
     fn u64(&mut self) -> u64 {
@@ -984,6 +991,11 @@ fn nearest(points: &[[f64; 3]], target: [f64; 3], skip: Option<usize>) -> usize 
     best
 }
 
+/// STALE: these values came from an NPT integrator that left the kinetic
+/// pressure out of the barostat, and are too small by 0.0036 to 0.0077 A at
+/// 300 to 700 K. `tests/mishin_cu.rs` holds the corrected table. They are
+/// kept here because the NVT data under `validation/` was produced with
+/// them; rerun that data before changing them.
 fn measured_lattice(temperature: f64) -> f64 {
     match temperature as i32 {
         300 => 3.628311,

@@ -179,6 +179,9 @@ Defaults: improved tangent, uniform spring `k ` 5=, NEB projection, climbing ima
 ## Defect-pair hop rates
 `howto/defect-pair-rates` is `defect_pair_rates`: a solid-state dimer and an index check for every hop in a caller-supplied catalogue, a fixed climbing-image band through the saddle, a PAFI free-energy barrier, and a Bennett–Chandler transmission coefficient. The rate is `κ ν exp(-ΔF/kT)`. The document is `rgsaddle.defect_pair_rates`. Copper is only in the tests.
 
+## NPT lattice parameter
+`howto/npt-lattice` is `npt_lattice`: Langevin dynamics with a Berendsen barostat that samples the zero-pressure lattice of a crystal. The report carries the mean lattice parameter and pressure with blocking standard errors, and `pressure_converged` is an indicative screen, not a proof of equilibrium. `NptConfig` is non-exhaustive and the seed expands through SplitMix64.
+
 ## Free-energy profile along a path
 `howto/pafi` is projected average force integration (PAFI; Swinburne and Marinica, Phys. Rev. Lett. 120, 135503 (2018)): the free energy along a path such as converged NEB images, from `dF/ds ` ⟨(∇E · n)(1 - ψ)⟩= averaged on the hyperplanes normal to the path. The input is a `PointSurface`, an `ArcPath` from the images (`ArcPath::from_positions`) and the arcs of the planes; the output is a `FreeEnergyProfile` with the barrier and its standard error, and one `HyperplaneAverage` per plane with `tau` and `n_eff`. `zero_temperature_barrier` is the check that the path and the surface agree. The page also says how the warm-up floor and the automated equilibration test treat each plane.
 
@@ -251,17 +254,21 @@ The table below lists the main types.
 | `SaddleIndex`                  | `index`, ascending `curvatures` and their `residuals`, `converged`, `evaluations`. `saddle_index` certifies one point on a `PointSurface` |
 | `MinModeSession`               | Dimer or Lanczos lowest-mode search, same stepping contract; `set_position`, `set_mode`, `estimate_mode` for reuse; `set_torque_window` sets the dimer and Lanczos torque window apart from `rotation_tol`; `set_rotation_stop_length` turns on the curvature-aware rotation stop; `set_artn` enables or disables the ART nouveau protocol |
 | `SoftModeDirectionPlan`        | Soft-mode-subspace-first direction seeding (`soft_mode_then_full_directions`, `spectral_gap_rank`). Recovers a sparse Hessian at a minimum, selects the soft-subspace rank `k` from the largest spectral gap, and emits `2 * phase_count` unit directions |
+| `ModeSweepDirectionPlan`       | Deterministic soft-to-stiff Hessian-mode sweep (`hessian_mode_sweep_directions`, `mode_sweep_schedule`). Recovers the Hessian by central differences, diagonalizes it in full, and emits one carrier-weighted, optionally localized unit direction for every non-rigid mode. `minimum_squared_mode_weight` is the proven overlap floor. `mode_sweep_schedule` picks a stratified list of band positions |
 | `ArtSession`                   | ART nouveau in eight persisted phases: masked host seed, perpendicular relaxation, Lanczos, lowest-mode climb, index-1 certificate, push both ways, unconstrained quench, reversibility. `run_events` marks duplicate saddles. `ArtStatus::Reverted` is not a completed exit. `force_calls` lists every surface evaluation. Non-exhaustive `ArtConfig` |
 | `IndexKSession`                | Index-k minimum-mode step. `k ` 1= is `MinModeSession`. `indexk_step` is one shot. `reflect_force` and `translated_force` are the subspace maps |
 | `SolidDimer`                   | That search on atoms plus Jacobian-scaled cell strain. `CellMask::frozen` is the fixed-cell dimer. `stress` and `elastic_dipole` are `σ` and `V σ`. `SolidDimerConfig`, `IndexCheck`, `StressCheck`, `SolidDimerReport` and `IndexReport` are non-exhaustive |
+| `VineyardIndexReport`          | The `IndexReport` of a certified `minimum` and `saddle`, returned by `certify_vineyard_pair`. The function needs each point stationary to a force tolerance, a minimum with no projected negative mode, and a saddle with exactly one |
+| `VineyardIndexError`           | Why a pair is not Vineyard-ready: `Evaluation`, `MinimumForce`, `SaddleForce`, `Minimum` or `Saddle`, the last two with the lowest projected spectrum |
 | `StrainResponse`               | One hop. `barrier(ε)` is the lowest symmetry image of `ΔE0 - (P_saddle - P_minimum):ε`, or `NeedsSearch` past the validity bound. `ElasticDipole::from_stress` is `-V (σ_defect - σ_bulk)`. `refine` caches an index-1 solid dimer. `with_prefactor`, `with_variants`, `with_point_group`, `with_policy`, and `with_multipoles` attach options. `to_json` and `from_json` are the event record |
 | `defect_pair_rates`            | One relaxed geometry and a hop catalogue. Solid dimer, index check, connectivity, fixed CI-NEB, PAFI `ΔF`, Bennett–Chandler `κ`. `k ` κ ν exp(-ΔF/kT)=. `RateCatalogue` is `rgsaddle.defect_pair_rates` |
+| `npt_lattice`                  | Isotropic Langevin dynamics with a Berendsen barostat on a crystal. Initial positions and cell entries must be finite, and the cell volume must be positive and finite. The drive includes the instantaneous kinetic pressure `2 E_k / (3 V)`. `NptConfig` is non-exhaustive: start from `Default` and chain the `with_*` setters, including `with_repeats`, `with_maximum_steps`, `with_extension_steps` and `with_block_steps`. It needs finite positive time step, friction, coupling time and compressibility, and a finite target pressure. `NptReport` carries the mean lattice parameter and pressure with blocking standard errors. `pressure_converged` is an indicative screen, not a proof. See [NPT lattice sampling](howto/npt-lattice.html) |
 | `PairNetwork`                  | States are orbits of (relative vector, orientation) under a caller's integer point group; hop classes are orbits of the unordered configuration pair and saddle director. `sites` takes a per-edge rate closure and returns `VolumeSite` rows and outer hops. `cubic_group` is O_h |
 | `matched_capture_radius`       | Closes a site chain at its cutoff with capture `R/d` for an outer hop to `d`, `R` matched to the mean `P r` of the outermost sites, in closed form |
 | `ArcPath`                      | PAFI path through ordered frames, a cubic spline over chord length, with its curvature and jerk. See [PAFI types](reference/pafi.html) |
 | `PafiConfig`                   | PAFI's overdamped Langevin sampling settings, with `target_error` and `max_rounds` for automatic extra rounds. See [PAFI types](reference/pafi.html) |
 | `pafi_profile`                 | Samples every plane of a path in parallel and integrates `dF/ds` (Swinburne and Marinica, Phys. Rev. Lett. 120, 135503 (2018), doi:10.1103/PhysRevLett.120.135503) to a `FreeEnergyProfile`. See [PAFI types](reference/pafi.html) |
-| `Hyperplane`                   | OH-TST plane: a point and a unit normal toward the product in mass-weighted coordinates. `from_min_mode` seeds it from a converged dimer or Lanczos session, preferring the vector of a converged saddle-index certificate over the session mode; `packed` and `from_packed` are its `[p; ν]` layout, the one of `PlaneSample::directional`; `from_cartesian` and `to_cartesian` convert; `orthogonal_to_mass_weighted_translations` drops rigid translations from the normal | See [OH-TST types](reference/ohtst.html) for every OH-TST type
+| `Hyperplane`                   | OH-TST plane: a point and a unit normal toward the product in mass-weighted coordinates. `from_min_mode` seeds it from a converged dimer or Lanczos session, preferring the vector of a converged saddle-index certificate over the session mode; `packed` and `from_packed` are its `[p; ν]` layout, the one of `PlaneSample::directional`; `from_cartesian` and `to_cartesian` convert; `orthogonal_to_mass_weighted_translations` drops rigid translations from the normal. See [OH-TST types](reference/ohtst.html) for every OH-TST type
 | `LammpsHyperplaneSampler`      | Opt-in lammpc backend for `HyperplaneSampler`. `LammpsSystem` owns the rgpot configuration and geometry; `LammpsSamplerConfig` owns the time step, friction, thermostat and excluded-mode count; records expose `lammps.thermostat` and `lammps.effective_degrees_of_freedom` |
 | `MassWeighted`                 | `q ` M^{1/2} x= over a Cartesian `PointSurface`; `mass_weighted_rigid_translations` returns the orthonormal rigid-translation rows in these coordinates; `FixedCell` holds the cell of a crystal fixed per temperature. `flux_mass` is `1 / Σ nᵢ²/mᵢ`, not the 2001 Eq. 24 |
 | `sample_plane`                 | Plane-restricted Langevin sampling at `kT` by projected BAOAB or GHMC (`PlaneIntegrator`), reproducible from a seed. `PlaneSample` holds the Euclidean gradient blocks, the centroid torque and the virial, each with a block standard error; `HarmonicReference` adds Stein control variates |
@@ -334,6 +341,7 @@ Every public module exported by `src/lib.rs`, with its public types, free functi
 | `mic` | Types: `Cell`. Functions: `wrap_difference` |
 | `minmode` | Types: `ArtNConfig`, `FiniteDifference`, `KrylovBlock`, `MinModeConfig`, `MinModeKind`, `MinModeReport`, `MinModeSession`, `MinModeStatus`, `ModeEstimate`, `PointSurface`, `RaisedStep`. Functions: `halve_raised_energy`, `rotation_force_error`. Constants: `DEFAULT_ROTATION_ANGLE_TOL`, `MODE_RESET_ANGLE` |
 | `nichols` | Types: `HessianUpdate`, `Index1Config`, `Index1Report`, `Index1Session`, `Index1Status`, `NicholsMode`. Functions: `bofill_update`, `cap_max_abs`, `nichols_displacement`, `nichols_step`, `powell_update` |
+| `npt` | Types: `NptConfig`, `NptReport`. Functions: `npt_lattice` |
 | `occupancy` | Types: `SiteOccupancy`. Functions: `site_occupancy` |
 | `ocineb` | Types: `OcinebConfig`, `OcinebPhase`, `OcinebReport`, `OcinebSession`, `OcinebStatus`. Functions: `backoff_threshold`, `initial_threshold`, `mode_alignment`, `should_trigger`, `success_threshold`, `walk_helped`. Constants: `MIN_ALIGNMENT` |
 | `ohtst` | Types: `AnalyticSurfaceDynamics`, `AnalyticSurfaceSampler`, `AnalyticThermodynamicSampler`, `AnharmonicConfig`, `AnharmonicCorrection`, `BasinConfig`, `BasinDensity`, `BasinEnd`, `Basins`, `Counting`, `EndState`, `Endpoint`, `ExactGaussianPlaneSampler`, `FixedCell`, `GaussianTransport`, `HarmonicExpansion`, `HarmonicReference`, `Hyperplane`, `HyperplaneDynamics`, `HyperplaneObservable`, `LangevinConfig`, `MassWeighted`, `OhTstRate`, `PermutationDistance`, `PlaneDensity`, `PlaneIntegrator`, `PlaneMetric`, `PlaneOptimizer`, `PlaneOptimizerConfig`, `PlaneOptimizerStatus`, `PlaneOptimum`, `PlanePath`, `PlaneSample`, `PlaneTrace`, `QuadraticModel`, `QuenchConfig`, `QuenchedTransitionRegion`, `RateMultiplicity`, `ReactantDensity`, `ReversibleWork`, `ReversibleWorkConfig`, `StateDistance`, `ThermodynamicDerivative`, `ThermodynamicIntegrationConfig`, `ThermodynamicIntegrationEstimate`, `ThermodynamicIntegrationNode`, `ThermodynamicSampler`, `ThermodynamicSurfaceSampler`, `TransmissionCoefficient`, `TransmissionConfig`, `TransmissionEstimate`, `Transport`, `Uncontrolled`, `WorkEstimate`, `WorkNode`, `EquilibrationReport`. Functions: `anharmonic_correction`, `basin_density`, `flux_mass`, `harmonic_energy_at`, `mass_weighted_rigid_translations`, `ohtst_rate`, `optimize_plane`, `plane_transmission`, `reactant_density`, `restricted_thermodynamic_integration`, `reversible_work`, `reversible_work_along`, `reversible_work_along_on_surface`, `reversible_work_on_surface`, `sample_plane`, `sample_plane_with_sampler`, `thermodynamic_integration`, `transmission_coefficient`, `transmission_coefficient_on_surface`. Constants: `THERMODYNAMIC_DERIVATIVE` |
@@ -354,10 +362,10 @@ Every public module exported by `src/lib.rs`, with its public types, free functi
 | `rtr` | Types: `BandForces`, `BandRtr`, `RtrConfig`, `RtrRadius`, `RtrReport`, `TcgResult`, `TcgStop`. Functions: `band_forces`, `reparametrize_equal_arc`, `reparametrize_equal_arc_in_cell`, `truncated_cg` |
 | `saddle_index` | Types: `SaddleEscape`, `SaddleIndex`, `SaddleIndexCheck`. Functions: `saddle_index` |
 | `samd` | Types: `SamdConfig`, `SamdReport`, `SamdSession`, `VelocitySofteningConfig`, `VelocitySofteningReport`. Functions: `project_velocity`, `retract_samd`, `soften_velocity_on`, `t_exp`, `t_linear`, `transport_velocity`, `verlet_increment` |
-| `seed_direction` | Types: `SoftModeDirectionPlan`. Functions: `soft_mode_then_full_directions`, `spectral_gap_rank` |
+| `seed_direction` | Types: `ModeSweepDirectionPlan`, `SoftModeDirectionPlan`. Functions: `hessian_mode_sweep_directions`, `mode_sweep_schedule`, `soft_mode_then_full_directions`, `spectral_gap_rank` |
 | `sella_min` | Types: `SellaMinConfig`, `SellaMinReport`, `SellaMinSession` |
 | `sella_saddle` | Types: `SellaSaddleConfig`, `SellaSaddleReport`, `SellaSaddleSession` |
-| `solid_dimer` | Types: `CellMask`, `IndexCheck`, `IndexReport`, `JointChart`, `SolidDimer`, `SolidDimerConfig`, `SolidDimerReport`, `StressCheck`. Functions: `check_cauchy_stress`, `finite_difference_cauchy_stress`, `index_at`, `virial`. Constants: `STRAIN_VOIGT` |
+| `solid_dimer` | Types: `CellMask`, `IndexCheck`, `IndexReport`, `JointChart`, `SolidDimer`, `SolidDimerConfig`, `SolidDimerReport`, `StressCheck`, `VineyardIndexError`, `VineyardIndexReport`. Functions: `certify_vineyard_pair`, `check_cauchy_stress`, `finite_difference_cauchy_stress`, `index_at`, `virial`. Constants: `STRAIN_VOIGT` |
 | `solid_state` | Functions: `cartesian_step`, `cell_neb_force`, `joint_displacement`, `orient_lower_triangular`, `solid_state_enthalpy`, `solid_state_jacobian` |
 | `sparse_hessian` | Types: `Colouring`, `LowestEigenpairs`, `SparseHessian`, `SparseHessianOpts`, `SparsityPattern`. Functions: `distance2_colouring`, `eval_displacements`, `one_atom_hessian`, `prefactor_hessian`, `sparse_hessian` |
 | `spring` | Types: `SpringForces`, `SpringKind`. Functions: `energy_weighted_constants`, `onsager_machlup_displacements`. Constants: `OM_RECIP_EPS` |
@@ -414,6 +422,7 @@ Every public configuration struct, its public fields, and the corresponding chai
 | `LangevinConfig` | `blocks` (`with_blocks`), `burn_in` (`with_burn_in`), `control` (`with_control`), `friction` (`with_friction`), `hold_excluded` (`with_hold_excluded`), `integrator` (`with_integrator`), `records` (`with_records`), `region` (`with_region`), `retain` (`with_retain`), `seed` (`with_seed`), `stride` (`with_stride`), `thermal` (`with_thermal`), `time_step` (`with_time_step`) |
 | `MinModeConfig` | `artn` (`with_artn`), `difference` (`with_difference`), `dr` (`with_dr`), `force_tol` (`with_force_tol`), `kind` (`with_kind`), `krylov_dim` (`with_krylov_dim`), `max_move` (`with_max_move`), `max_rotations` (`with_max_rotations`), `method` (`with_method`), `rotation_angle_tol` (`with_rotation_angle_tol`), `rotation_tol` (`with_rotation_tol`), `saddle_check` (`with_saddle_check`), `seed_curvature` (`with_seed_curvature`) |
 | `MinModeRefine` | `alignment_tol` (`with_alignment_tol`), `climb_alignment` (`with_climb_alignment`), `curvature_retained` (`with_curvature_retained`), `difference` (`with_difference`), `dr` (`with_dr`), `kind` (`with_kind`), `krylov_dim` (`with_krylov_dim`), `lanczos_rel_tol` (`with_lanczos_rel_tol`), `max_rotations` (`with_max_rotations`), `max_steps` (`with_max_steps`), `min_overlap` (`with_min_overlap`), `refresh_interval` (`with_refresh_interval`), `restore_unhelpful` (`with_restore_unhelpful`), `retry_factor` (`with_retry_factor`), `rotation_tol` (`with_rotation_tol`), `stable_steps` (`with_stable_steps`), `trigger_factor` (`with_trigger_factor`), `trigger_force` (`with_trigger_force`) |
+| `NptConfig` | `berendsen_tau_s` (`with_berendsen_tau_s`), `block_steps` (`with_block_steps`), `compressibility_per_ev_a3` (`with_compressibility_per_ev_a3`), `equilibration_steps` (`with_equilibration_steps`), `extension_steps` (`with_extension_steps`), `langevin_gamma_per_s` (`with_langevin_gamma_per_s`), `maximum_steps` (`with_maximum_steps`), `repeats` (`with_repeats`), `seed` (`with_seed`), `steps` (`with_steps`), `target_pressure_ev_a3` (`with_target_pressure_ev_a3`), `timestep_s` (`with_timestep_s`) |
 | `OcinebConfig` | `angle_tol` (`with_angle_tol`), `band` (`with_band`), `max_mmf_steps` (`with_max_mmf_steps`), `minmode` (`with_minmode`), `restore_unhelpful` (`with_restore_unhelpful`), `stability_count` (`with_stability_count`), `trigger_factor` (`with_trigger_factor`), `trigger_force` (`with_trigger_force`) |
 | `PafiConfig` | `blocks` (`with_blocks`), `fix_com` (`with_fix_com`), `max_rounds` (`with_max_rounds`), `mobility` (`with_mobility`), `region` (`with_region`), `retain` (`with_retain`), `samples` (`with_samples`), `seed` (`with_seed`), `stride` (`with_stride`), `target_error` (`with_target_error`), `thermal` (`with_thermal`), `thermalize` (`with_thermalize`), `time_step` (`with_time_step`) |
 | `PairConfig` | `offset`, `orientation` (`PairConfig::new`) |
@@ -1461,6 +1470,16 @@ On the frozen-layer Morse slab of `tests/band_fixed_atoms.rs`, Lanczos started o
 At `force_tol` 1e-3 the dimer and Lanczos both stop after two pushes at index 2, near -50.67580, with curvatures -1.147 and -0.0076: the force falls under the tolerance on that soft second mode before the search leaves it.
 The band's escape, whose climb steps on a quasi-Newton model, reaches the first-order saddle at 1e-3 from the same band (`howto/band`).
 
+### Sweep every Hessian mode of a minimum
+
+`hessian_mode_sweep_directions` seeds a saddle search from the Hessian modes of a minimum, soft to stiff, where `soft_mode_then_full_directions` draws random vectors. It recovers the Hessian by central differences over an all-pairs sparsity pattern and diagonalizes it in full, so it costs `6 N` gradient evaluations, `O((3N)^3)` time and `O((3N)^2)` memory for `N` atoms. Above 128 degrees of freedom the diagonalization needs the `faer` feature, and without it the call returns `SaddleError::Solver`.
+
+`rigid_modes` is the number of lowest eigenpairs left out, and it assumes they are the rigid modes of a stable minimum. Each eigenvector takes the sign that makes its first largest-magnitude component positive, so the directions do not follow the sign the eigensolver chose. A direction is the mode plus `carrier` times itself, with the first copy optionally scaled atom by atom by one row of `localization_weights` (entries in `[0, 1]`, rows assigned to modes cyclically), then normalized. Its squared overlap with the mode is at least `(carrier / (1 + carrier))^2`.
+
+The call returns a `ModeSweepDirectionPlan`. `eigenvalues` is the whole spectrum, ascending. `mode_indices` and `directions` list one entry for every mode that was not skipped, and `minimum_squared_mode_weight` is the overlap bound above.
+
+`mode_sweep_schedule(total_modes, draws)` picks which of those modes to try. The values it returns are positions inside the band `0..total_modes`, not eigenvector columns. A schedule shorter than the band takes the midpoint of each equal-width stratum, so the longest run of modes that nobody visits, ends included, is at most `ceil(total_modes / draws)`. A schedule at least as long as the band visits every mode once before it cycles. The arithmetic is integer, so the schedule is the same on every platform. Neither function draws random numbers, so a sweep is reproducible without a seed.
+
 ### Run the ART nouveau push, then relax protocol
 
 `ArtNConfig` is an opt-in protocol around the Lanczos session. The `mode` passed to `MinModeSession::new` is the random basin-exit direction. Before activation, one outer step pushes along that fixed direction and takes a bounded number of steepest-descent steps with the gradient projected perpendicular to it. Lanczos starts only after `lanczos_start` pushes. When its lowest Ritz value is below `eigenvalue_threshold`, activation starts: each outer step warm-starts Lanczos from the previous mode, takes the bounded \( |F_\parallel|/\max(|\lambda|,\lambda_{\rm floor}) \) displacement toward the saddle, and relaxes perpendicular to that mode. `MinModeConfig::default()` has `artn = None`, so dimer and ordinary Lanczos searches do not enter this code.
@@ -2099,6 +2118,24 @@ Keep `with_weight(1.0)`. The stiffness of a strain in the generalized coordinate
 
 Held diagonals are the one mask that moves the cell at a fixed diagonal and volume, so they are the run that finds a surface that misses tilts. On rgpot's copper EAM at the hop saddle in an untilted cell stretched 1.2%, a box refreshed only when lx, ly or lz change matches the diagonal of the finite-difference stress to 2e-10 eV/Å³. Frozen, fully free and with the shears held it takes the same steps, calls and final energies as the surface that follows every entry: the frozen cell never moves the box, and the other two change a diagonal entry at every evaluation. Those are 43 steps fully free, with the tilt moved by 0.007 Å, and 43 with the shears held. With the diagonals held the right surface converges in 18 steps and moves the tilt by 0.0074 Å, while this box runs it to -0.034, -0.275 and -0.480 Å after 40, 80 and 160 steps and the largest force in the true cell grows from 0.06 to 1.2 eV/Å. Its shear entry is 1.97e-4 eV/Å³ where the derivative of its energy is -2.8e-5. That gap is under the 3.1e-4 a tolerance on the largest entry allowed, and the per-entry check stops the box before the first step. `tests/mishin_cu.rs` stops the same box at the Mishin saddle, where the shear stress is 2.01e-4 eV/Å³ under a tension of 0.0306.
 
+### Certify a minimum and a saddle before Vineyard rates
+
+A Hessian index classifies a stationary point only. A point on the slope of a well has no negative mode and a point off a ridge still has one, so an index count alone would pass them as a minimum and a saddle. `certify_vineyard_pair` checks both points first and returns a `VineyardIndexReport` holding the `IndexReport` of the `minimum` and of the `saddle` when the pair is ready for a Vineyard prefactor.
+
+Each point must be stationary: the largest absolute component of its projected gradient is at most `force_tol`, which must be positive and finite. The minimum must then have no projected eigenvalue below `IndexCheck::negative` and the saddle exactly one. An eigenvalue between that cutoff and zero is not counted, so the cutoff is the resolution of the certificate. The two points may live on different surfaces, for example the full system and an active region, and each surface names its own constrained or rigid directions through `PointSurface::excluded_modes`. Nothing else is projected, so an open cluster has to name its rotations as well as its translations.
+
+A pair that fails returns a `VineyardIndexError`, one variant for each reason:
+
+| Variant | Meaning |
+| --- | --- |
+| `Evaluation` | A gradient, Hessian action or excluded-mode query failed, or an argument was invalid. Wraps the `SaddleError`. |
+| `MinimumForce` | The reactant is not stationary. Carries `max_force` and `tolerance`. |
+| `SaddleForce` | The transition state is not stationary. Carries `max_force` and `tolerance`. |
+| `Minimum` | The reactant has projected negative modes. Carries `negative` and the full `report`. |
+| `Saddle` | The transition state does not have exactly one. Carries `negative` and the full `report`. |
+
+`SolidDimerConfig::frozen_first_order` builds a fixed-cell dimer that certifies the projected index when it converges. A point that is still not index one after the escapes are spent comes back with `SolidDimerReport::rejected` set while its status stays converged, so a caller reads that flag before it passes the point on.
+
 ### A barrier that moves with the cell
 
 `tests/solid_dimer_barrier.rs` couples a double well to the shear. The model is `(u^2 - 1)^2 + 6 (γ - 0.2 u)^2` plus penalties that are zero on the path. At the saddle `u ` 0= and `γ ` 0=, so the energy is exactly 1. Both minima sit at energy 0, and the barrier is exactly 1. The variable-cell dimer takes 88 generalized evaluations and stops at energy 1. The solid-state band on the same surface takes 92 rows and its climbing image is at energy 1. Freezing the cell at zero shear leaves the one-dimensional barrier at 0.7744, and that dimer takes 42 evaluations. An imposed shear of 0.1 moves the frozen barrier off 0.7744 by the amount of the one-dimensional scan.
@@ -2333,6 +2370,8 @@ translations removed when the Hessian is the whole cell, the unstable eigenvalue
 
 `ΔF - ΔF_h` is the anharmonic excess. At equal mass, energy in eV and length in Å, `angular_scale_rad_s` turns `sqrt(λ / m)` into rad/s and the rates are in Hz. A caller in another unit system sets `boltzmann`, `mass` and `angular_scale`.
 
+A caller that computes the Vineyard prefactor from its own minimum and saddle first calls `certify_vineyard_pair`, which refuses a point that is not stationary, a minimum with a projected negative mode and a saddle that does not have exactly one (`howto/solid-dimer`).
+
 ## PAFI
 Swinburne and Marinica, Phys. Rev. Lett. 120, 135503 (2018), doi:10.1103/PhysRevLett.120.135503, give the free-energy gradient along a path without a collective variable. The path `X(s)` is `ArcPath`, the not-a-knot cubic spline of every coordinate through the images: the paper's "spline interpolation for each atomic coordinate" of NEB images (p. 135503-2) and the default end condition of scipy's `CubicSpline`, which their reference code uses. Two images give the chord and three the parabola. The hyperplane at `s` is `(x - X) · t ` 0=, with `t ` X'` less its center-of-mass part when the center of mass is held. With `ψ ` (x - X) · X'' / |t|²`,
 
@@ -2404,17 +2443,21 @@ The dividing surface is a hyperplane normal to the path, not a variationally opt
 ## Copper
 The Mishin EAM1 numbers are a validation, not part of the library. The potential is the analytic form already in `tests/mishin_cu.rs` (Mishin, Mehl, Papaconstantopoulos, Voter, and Kress, Phys. Rev. B 63, 224106 (2001), doi:10.1103/PhysRevB.63.224106, Table I). The question is the one posed by Mwungeli, Liu, and Demkowicz, Phys. Rev. Materials 9, 023601 (2025), doi:10.1103/PhysRevMaterials.9.023601: whether the vacancy / self-interstitial recombination volume in Cu falls from about 290 Ω at 300 K to about 160 Ω at 500 K and above because the hop rates toward, away from, and tangential to the vacancy are anharmonic. Crossref records the paper as published 11 February 2025, Phys. Rev. Materials 9, 023601. Their Table 1 gives the zero-pressure lattice parameters 3.631, 3.637, 3.643, 3.649 and 3.655 Å at 300, 400, 500, 600 and 700 K, and cells of 10, 11, 12, 13 and 16 cubic repeats (4000, 5324, 6912, 8788 and 16384 atoms).
 
-The lattice parameter is from a zero-pressure Langevin run with a Berendsen barostat on a 6×6×6 cell of this potential, 2 fs steps, the average of the second 4 ps of an 8 ps trajectory. It is not taken from Table 1.
+The lattice parameter is from a zero-pressure Langevin run with a Berendsen barostat on a 6×6×6 cell of this potential, 2 fs steps, the average of the second 4 ps of an 8 ps trajectory. The barostat uses the instantaneous kinetic pressure `2 E_k / (3 V)`. Its canonical expectation is `(N - 1) k_B T / V` because the thermostat removes centre-of-mass momentum. It is not taken from Table 1.
 
-| T / K | a / Å, this work | a / Å, Table 1 |
-| --- | --- | --- |
-| 300 | 3.62831 | 3.631 |
-| 400 | 3.63371 | 3.637 |
-| 500 | 3.63867 | 3.643 |
-| 600 | 3.64416 | 3.649 |
-| 700 | 3.64979 | 3.655 |
+| T / K | a / Å, this work | pressure converged | a / Å, Table 1 |
+| --- | --- | --- | --- |
+| 300 | 3.63195 | yes | 3.631 |
+| 400 | 3.63817 | no | 3.637 |
+| 500 | 3.64349 | yes | 3.643 |
+| 600 | 3.65095 | yes | 3.649 |
+| 700 | 3.65747 | yes | 3.655 |
 
-The slope matches Table 1. The offset is about 0.004 Å.
+The slope matches Table 1 and the offset is 0.0005 to 0.0025 Å. Each entry is one 4000 step run (2000 discarded) with seed `17 T + 11`, so it carries the scatter of a short run. The 400 K row is retained but explicitly marked non-converged. The 500 K reference row must converge and is allowed to extend to 8000 steps; this run converged at 4000. No pressure-bias estimate is assigned to a retained non-converged lattice parameter. At 600 K, eight seeds of the default length gave a spread of 0.0006 Å in the lattice parameter. The standard errors that `npt_lattice` reports for those runs, 0.00004 to 0.00013 Å, are smaller than that spread because the lattice blocking estimate had not reached a plateau (`lattice_error_resolved` is false); they are lower bounds.
+
+To see what the run length leaves in `a`, the 600 K system was run with eight seeds at 4000 steps and four seeds at 40000 steps, 2000 discarded in both, with the settings above. The means are 3.650662 Å (spread 0.000606 Å, standard error 0.000214 Å) and 3.650629 Å (spread 0.000161 Å, standard error 0.000081 Å). They differ by 0.00003 ± 0.00023 Å, so the run length leaves no bias that this comparison can resolve, and none of the four 40000 step runs misses the pressure screen. `cargo test --release --test mishin_cu npt_lattice_run_length -- --ignored --nocapture` repeats it.
+
+The table before this one read 3.62831, 3.63371, 3.63867, 3.64416 and 3.64979 Å. Those runs left the kinetic pressure out of the barostat, which accounts for most of the 0.004 Å offset it showed. Benchmark files and figures produced with the older lattice constants are stale until they are rerun. `cargo test --release --test mishin_cu npt_lattice_table -- --ignored --nocapture` regenerates the table.
 
 Climbing L-BFGS follows the highest image. On the copper band that image was a collision left by the initial path, and the step ran up the wall; the NEB guards drop such a step and do not make it the saddle. The band used here relaxes with FIRE and climbing off, then climbs. A path is kept only when the force is at most 0.01 eV/Å and the zero-temperature integral of the path force reproduces ΔE0.
 
@@ -2458,6 +2501,105 @@ Table 1 of the accepted manuscript, volumes in Ω, α-method then β-bar method.
 | 700 | 8788 | 203±10 | 210±21 |
 
 Spontaneous recombination was scanned for every placement out to 10.6 Å on 8×8×8 (2048 sites) and 10×10×10 (4000 sites), at each of the five lattice parameters, with the dumbbell along x. A shell splits into orbits under the dumbbell's symmetry; the Miller column of `benchmarks/defect_pair_shells.csv` is the orbit's representative with the first index along the dumbbell axis. Each placement is followed down the steepest-descent flow by ODE12r to 1e-3 eV/Å and counts as recombined when `site_occupancy` finds every site singly occupied. Steepest descent under a 0.02 Å cap repeats every placement: the two agree on all 440, with end states within 4.6×10⁻⁴ Å in gap and 1.9×10⁻³ Å in separation (stated tolerance 0.02 Å). ODE12r took at most 389 steps and steepest descent at most 1047; the scan took 21.5 min on 8 threads. The two cells agree at every temperature. The recombining orbits are 8 of the 12 first neighbors (1 1 0), the 2 sites of 3.63–3.65 Å along the axis (2 0 0), 16 of the 24 sites near 4.45 Å (1 2 1), 8 of the 12 near 5.14 Å (2 2 0) and 8 of the 36 near 7.70 Å (3 3 0), 42 sites. At 300 and 400 K the 4 sites of 3.63 Å perpendicular to the axis (0 2 0) recombine too, 46 sites; at 500–700 K the flow from them ends in a bound pair 3.55–3.58 Å from the vacancy with a 2.20 Å gap. That orbit sits near a basin boundary. Converged FIRE and L-BFGS each disagree with the flow on some lattices: FIRE gives 42 sites everywhere except 46 on 10×10×10 at 300 and 400 K, and L-BFGS gives 42 everywhere except 46 on 8×8×8 at 500 K. Their count is a property of the minimizer, so neither is used. The earlier counts stopped each placement after 60 FIRE steps and read a dumbbell gap outside 1.2–2.5 Å as recombination: 24 sites at 300–600 K and 30 at 700 K with rgmin 0.5.2, and 54 at 300 K and 30 at 400–700 K with rgmin 0.6.0. Truncation left placements in transit; the 7.70 Å orbit takes 213–251 ODE12r steps to recombine. 12×12×12 and 14×14×14 were not run. 46 or 42 sites is the orientation-resolved spontaneous count. It is not Table 1. The isolated rates are `benchmarks/defect_pair_cu.csv`.
+
+# NPT lattice sampling (`docs/orgmode/howto/npt-lattice.org`)
+
+> Isotropic NPT lattice sampling with blocking standard errors
+
+`npt_lattice` samples the lattice parameter of a crystal under isotropic Langevin dynamics with a Berendsen barostat. It is the zero-pressure lattice that a finite-temperature calculation needs before it builds a cell, such as the copper validation in `howto/defect-pair-rates`. The module is `npt`. It holds `NptConfig`, `NptReport` and `npt_lattice`, and the first two are re-exported at the crate root.
+
+## What the run does
+The caller passes the Cartesian `positions`, the row-major `Cell`, a temperature, a mass and an evaluator. The evaluator returns `(energy, gradient, stress)` for a position and a cell, with the stress a tension-positive Cauchy stress. Energy is accepted for compatibility and unused. Units follow `BOLTZMANN_EV_PER_K` and `angular_scale_rad_s`: eV, Å and amu, with times in seconds in the configuration.
+
+Each step is a velocity-Verlet half step, an Ornstein-Uhlenbeck thermostat step with the centre-of-mass momentum removed, the second half step, and a Berendsen rescaling of the cell and the positions by the cube root of a volume factor limited to 0.5 per cent. The pressure that drives the barostat and that the report carries is the kinetic pressure `2 K / (3 V)` minus a third of the trace of the stress. Leaving the kinetic term out would sample the cell where the configurational stress vanishes instead of the zero-pressure cell. `tests/npt_lattice.rs` checks the kinetic term against an ideal gas, which reads `(N - 1) k T / V` once the centre-of-mass momentum is removed, and against atoms tethered to cell-scaled sites, whose total pressure is zero at every volume.
+
+## Configuration
+`NptConfig` is non-exhaustive. Start from `NptConfig::default()` and chain the `with_*` setters.
+
+| Field | Setter | Default |
+| --- | --- | --- |
+| `repeats` | `with_repeats` | 6, conventional cells per lattice vector, so the reported lattice parameter is the cube root of the volume over this |
+| `steps` | `with_steps` | 4000, the first run length |
+| `maximum_steps` | `with_maximum_steps` | 4000, the longest run after extensions |
+| `extension_steps` | `with_extension_steps` | 1000, added when the pressure screen is not met |
+| `equilibration_steps` | `with_equilibration_steps` | 2000, discarded before statistics |
+| `block_steps` | `with_block_steps` | 250, the length of one reported block |
+| `timestep_s` | `with_timestep_s` | 2e-15 |
+| `langevin_gamma_per_s` | `with_langevin_gamma_per_s` | 1e12 |
+| `berendsen_tau_s` | `with_berendsen_tau_s` | 0.5e-12 |
+| `compressibility_per_ev_a3` | `with_compressibility_per_ev_a3` | 1 / 0.87 |
+| `target_pressure_ev_a3` | `with_target_pressure_ev_a3` | 0 |
+| `seed` | `with_seed` | 11 |
+
+The call needs at least two blocks of `block_steps` in the production part of `steps`, finite positive controls, and `steps <` maximum_steps=; otherwise it returns `SaddleError::Invalid`. `block_steps` sets `NptReport::blocks`, the number of complete blocks, and that floor. It does not set the standard errors.
+
+## The random stream
+The thermostat noise is xoshiro256** (Blackman and Vigna) with its state expanded from the seed by SplitMix64, as the authors prescribe. Every seed, including consecutive ones, therefore starts an unrelated stream, and seed 0 is valid. A stream is a function of the seed alone, so a run is reproducible.
+
+## Standard errors
+Successive steps of a barostatted run are correlated over many hundreds of steps, so the plain standard error of the steps, or of block means shorter than the correlation time, is too small. `npt_lattice` blocks the per-step series instead (Flyvbjerg and Petersen, J. Chem. Phys. 91, 461 (1989), doi:10.1063/1.457480). Neighbouring pairs are averaged to double the block length, the standard error of the block means is computed at every level, and the reported value is the largest over the levels that keep at least sixteen blocks. That choice errs high: on 24 uncorrelated series of 16384 values it averaged 1.14 times the plain standard error. The estimator is tested in `src/npt.rs` on autoregressive series whose standard error is known in closed form. At a correlation parameter of 0.995 over 131072 steps the estimate averaged 1.01 times the exact value over 24 seeds, where 250-step block means averaged 0.65 times it.
+
+A standard error is only as good as the run is long against the correlation. `lattice_error_resolved` and `pressure_error_resolved` are true when at least three blocking levels form a plateau that persists through every coarser level, and for a series with no spread. When a flag is false the estimate was still rising at the longest block length the run allows, and the standard error is a lower bound. A run of 2000 production steps of the copper cell in `howto/defect-pair-rates` shows it: its lattice standard errors of 0.00004 to 0.00013 Å are unresolved, and eight seeds of that run scatter by 0.0006 Å.
+
+## Reading `pressure_converged`
+`NptReport::pressure_converged` is true when the pressure error is resolved and the mean pressure is within two standard errors of the target, with a series that has no spread passing only at exactly zero residual. It is indicative. It is a screen, not a proof of equilibrium: it cannot see a drift slower than the run, and a two standard error window passes a real bias about one time in twenty. Read a true as "no evidence of bias at this run length", and read a false as "run longer or look at the spread", not as a failed calculation. The lattice standard error has its own flag and is not part of the screen.
+
+A run that fails the screen extends by `extension_steps` until it passes or reaches `maximum_steps`. With the defaults, `maximum_steps` equals `steps`, so no extension happens unless the caller raises the cap.
+
+## Runnable example: the pressure of an ideal gas
+The example is `examples/npt_lattice.rs`.
+
+```rust
+use ndarray::Array1;
+use rgsaddle::{BOLTZMANN_EV_PER_K, Cell, NptConfig, SaddleError, npt_lattice};
+
+fn main() -> Result<(), SaddleError> {
+    let per_side = 5;
+    let spacing = 4.0;
+    let mut positions = Vec::new();
+    for i in 0..per_side {
+        for j in 0..per_side {
+            for k in 0..per_side {
+                positions.extend([i, j, k].map(|index| index as f64 * spacing));
+            }
+        }
+    }
+    let atoms = positions.len() / 3;
+    let mut positions = Array1::from_vec(positions);
+    let edge = per_side as f64 * spacing;
+    let mut cell = Cell([[edge, 0.0, 0.0], [0.0, edge, 0.0], [0.0, 0.0, edge]]);
+
+    let temperature_k = 300.0;
+    let config = NptConfig::default()
+        .with_repeats(per_side)
+        .with_steps(4_000)
+        .with_maximum_steps(8_000)
+        .with_extension_steps(2_000)
+        .with_equilibration_steps(1_000)
+        .with_compressibility_per_ev_a3(1.0e-12)
+        .with_seed(3);
+    let report = npt_lattice(
+        &mut positions,
+        &mut cell,
+        temperature_k,
+        63.546,
+        config,
+        |x, _| Ok((0.0, Array1::zeros(x.len()), [[0.0; 3]; 3])),
+    )?;
+
+    let ideal = (atoms - 1) as f64 * BOLTZMANN_EV_PER_K * temperature_k / edge.powi(3);
+    println!(
+        "{} steps, pressure {:.4e} +- {:.1e} eV/A^3 (resolved {}), ideal gas {ideal:.4e}",
+        report.steps,
+        report.mean_pressure,
+        report.pressure_standard_error,
+        report.pressure_error_resolved
+    );
+    Ok(())
+}
+```
+
+It prints the pressure of 125 non-interacting atoms against `(N - 1) k T / V`. Run it with `cargo run --release --example npt_lattice`.
 
 # Optimal hyperplanar transition state theory (`docs/orgmode/howto/oh-tst.org`)
 

@@ -3185,7 +3185,14 @@ struct SplitRng {
 
 impl SplitRng {
     fn new(seed: u64) -> Self {
-        Self { state: seed | 1 }
+        let mut state = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        state = (state ^ (state >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        state = (state ^ (state >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        state ^= state >> 31;
+        if state == 0 {
+            state = 0x9E37_79B9_7F4A_7C15;
+        }
+        Self { state }
     }
 
     fn u64(&mut self) -> u64 {
@@ -3199,6 +3206,15 @@ impl SplitRng {
         let u1 = ((self.u64() >> 11) as f64 * (1.0 / ((1u64 << 53) as f64))).max(1.0e-16);
         let u2 = (self.u64() >> 11) as f64 * (1.0 / ((1u64 << 53) as f64));
         (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
+    }
+}
+
+#[test]
+fn split_rng_adjacent_seeds_start_different_streams() {
+    for seed in [0, 2, 10, 42, u64::MAX - 1] {
+        let mut even = SplitRng::new(seed);
+        let mut odd = SplitRng::new(seed + 1);
+        assert_ne!(even.u64(), odd.u64());
     }
 }
 
@@ -3294,65 +3310,147 @@ fn cart_of(key: (i32, i32, i32), a: f64) -> [f64; 3] {
     ]
 }
 
-/// Zero-pressure lattice parameter of the Mishin crystal.
+/// `rgsaddle::npt_lattice` on the 6x6x6 Mishin cell: Langevin dynamics
+/// plus a Berendsen barostat whose pressure is the configurational
+/// stress, which this EAM returns tension-positive, plus the kinetic
+/// pressure.
+fn npt_lattice_run(
+    copper: &FastCopper,
+    temperature: f64,
+    config: rgsaddle::NptConfig,
+) -> rgsaddle::NptReport {
+    let (mut positions, cell) = fcc(6, 3.615);
+    let mut cell = rgsaddle::Cell(cell);
+    let report = rgsaddle::npt_lattice(
+        &mut positions,
+        &mut cell,
+        temperature,
+        63.546,
+        config,
+        |x, h| Ok(copper.evaluate(x, h.0)),
+    )
+    .expect("NPT lattice run");
+    eprintln!(
+        "npt {temperature} K seed {} steps {} a {:.5} +- {:.5} (resolved {}) P {:.4e} +- {:.2e} \
+         (resolved {}) converged {}",
+        config.seed,
+        report.steps,
+        report.mean_lattice_a,
+        report.lattice_standard_error,
+        report.lattice_error_resolved,
+        report.mean_pressure,
+        report.pressure_standard_error,
+        report.pressure_error_resolved,
+        report.pressure_converged
+    );
+    report
+}
+
+fn npt_lattice_with_maximum(
+    copper: &FastCopper,
+    temperature: f64,
+    maximum_steps: usize,
+) -> rgsaddle::NptReport {
+    let config = rgsaddle::NptConfig::default()
+        .with_maximum_steps(maximum_steps)
+        .with_seed((temperature as u64).wrapping_mul(17).wrapping_add(11));
+    npt_lattice_run(copper, temperature, config)
+}
+
+#[test]
+#[ignore = "release Mishin Cu reference NPT run"]
+fn npt_reference_lattice_converges_with_extension_budget() {
+    let report = npt_lattice_with_maximum(&FastCopper::new(), 500.0, 8_000);
+    assert!(report.pressure_converged, "{report:?}");
+    assert!(
+        (rgsaddle::NptConfig::default().steps..=8_000).contains(&report.steps),
+        "{report:?}"
+    );
+}
+
+/// Regenerates the table in `measured_lattice`.
 ///
-/// Langevin dynamics plus a Berendsen barostat. The stress this EAM
-/// returns is tension-positive, so a compressed cell (negative trace)
-/// is expanded. The average is the second half of the run.
-fn npt_lattice(copper: &FastCopper, temperature: f64) -> f64 {
-    let repeats = 6usize;
-    let (mut positions, mut cell) = fcc(repeats, 3.615);
-    let thermal = rgsaddle::BOLTZMANN_EV_PER_K * temperature;
-    let omega = rgsaddle::angular_scale_rad_s();
-    let dt = 2.0e-15 * omega;
-    let gamma = 1.0e12 / omega;
-    let mass = 63.546;
-    let mut rng = SplitRng::new((temperature as u64).wrapping_mul(17).wrapping_add(11));
-    let mut velocity = Array1::zeros(positions.len());
-    let sigma = (thermal / mass).sqrt();
-    for value in velocity.iter_mut() {
-        *value = rng.normal() * sigma;
+/// `cargo test --release --test mishin_cu npt_lattice_table -- --ignored --nocapture`
+#[test]
+#[ignore = "release NPT lattice table for measured_lattice; prints a(T) at 300 to 700 K"]
+fn npt_lattice_table() {
+    let copper = FastCopper::new();
+    for temperature in [300.0, 400.0, 500.0, 600.0, 700.0] {
+        let report = npt_lattice_with_maximum(
+            &copper,
+            temperature,
+            rgsaddle::NptConfig::default().maximum_steps,
+        );
+        eprintln!(
+            "TABLE {temperature} K {:.6} converged {}",
+            report.mean_lattice_a, report.pressure_converged
+        );
+        assert!((3.50..3.85).contains(&report.mean_lattice_a));
     }
-    zero_mean(&mut velocity);
-    let beta = 1.0 / 0.87;
-    let tau = 0.5e-12 * omega;
-    let steps = 4000usize;
-    let mut sum = 0.0;
-    let mut count = 0.0;
-    for step in 0..steps {
-        let (_, gradient, _) = copper.evaluate(positions.view(), cell);
-        velocity = &velocity + &(&gradient * (-0.5 * dt / mass));
-        positions = &positions + &(&velocity * (0.5 * dt));
-        let damp = (-gamma * dt).exp();
-        let noise = (thermal / mass * (1.0 - damp * damp)).sqrt();
-        for value in velocity.iter_mut() {
-            *value = damp * *value + noise * rng.normal();
+}
+
+/// Measures what the default run length leaves in the 600 K lattice
+/// parameter by comparing short and long runs of the same system.
+///
+/// `SHORT_SEEDS` runs of the default 4000 steps (2000 discarded) and
+/// `LONG_SEEDS` runs of 40000 steps (2000 discarded), all with the table
+/// settings and the seeds named below, run on one thread each.
+///
+/// `cargo test --release --test mishin_cu npt_lattice_run_length -- --ignored --nocapture`
+#[test]
+#[ignore = "release NPT run-length comparison at 600 K; prints the short and long run lattice parameters"]
+fn npt_lattice_run_length() {
+    const SHORT_SEEDS: u64 = 8;
+    const LONG_SEEDS: u64 = 4;
+    let temperature = 600.0;
+    let jobs: Vec<(u64, usize)> = (1..=SHORT_SEEDS)
+        .map(|seed| (seed, 4_000))
+        .chain((1..=LONG_SEEDS).map(|seed| (seed, 40_000)))
+        .collect();
+    let next = AtomicUsize::new(0);
+    let results = std::sync::Mutex::new(Vec::new());
+    std::thread::scope(|scope| {
+        for _ in 0..8 {
+            scope.spawn(|| {
+                let copper = FastCopper::new();
+                loop {
+                    let job = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(&(seed, steps)) = jobs.get(job) else {
+                        break;
+                    };
+                    let config = rgsaddle::NptConfig::default()
+                        .with_steps(steps)
+                        .with_maximum_steps(steps)
+                        .with_seed(seed);
+                    let report = npt_lattice_run(&copper, temperature, config);
+                    results.lock().unwrap().push((steps, report.mean_lattice_a));
+                }
+            });
         }
-        zero_mean(&mut velocity);
-        positions = &positions + &(&velocity * (0.5 * dt));
-        let (_, gradient, stress) = copper.evaluate(positions.view(), cell);
-        velocity = &velocity + &(&gradient * (-0.5 * dt / mass));
-        let hydro = (stress[0][0] + stress[1][1] + stress[2][2]) / 3.0;
-        let mu = (1.0 - beta * dt / tau * hydro).clamp(0.995, 1.005);
-        let scale = mu.cbrt();
-        positions *= scale;
-        cell[0][0] *= scale;
-        cell[1][1] *= scale;
-        cell[2][2] *= scale;
-        if step + 1 == steps / 2 || step + 1 == steps {
-            eprintln!(
-                "npt {temperature} K step {} a {:.5} stress {:.4e}",
-                step + 1,
-                cell[0][0] / repeats as f64,
-                hydro
-            );
-        }
-        if step >= steps / 2 {
-            sum += cell[0][0] / repeats as f64;
-            count += 1.0;
-        }
-    }
-    sum / count
+    });
+    let results = results.into_inner().unwrap();
+    let summary = |steps: usize| {
+        let a: Vec<f64> = results
+            .iter()
+            .filter(|(length, _)| *length == steps)
+            .map(|(_, a)| *a)
+            .collect();
+        let mean = a.iter().sum::<f64>() / a.len() as f64;
+        let spread =
+            (a.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (a.len() - 1) as f64).sqrt();
+        (mean, spread, a.len())
+    };
+    let (short, short_spread, short_runs) = summary(4_000);
+    let (long, long_spread, long_runs) = summary(40_000);
+    let short_error = short_spread / (short_runs as f64).sqrt();
+    let long_error = long_spread / (long_runs as f64).sqrt();
+    eprintln!(
+        "RUN LENGTH {temperature} K: 4000 steps a {short:.6} (spread {short_spread:.6}, \
+         {short_runs} seeds, SE {short_error:.6}); 40000 steps a {long:.6} (spread \
+         {long_spread:.6}, {long_runs} seeds, SE {long_error:.6}); short minus long {:.6} +- {:.6}",
+        short - long,
+        short_error.hypot(long_error)
+    );
 }
 
 #[derive(Clone)]
@@ -4194,14 +4292,34 @@ fn defect_pair_cu_catalogue() {
     let copper = FastCopper::new();
     let relax = pair_relax();
     let mut lattice = Vec::new();
+    let mut unconverged: Vec<f64> = Vec::new();
+    let reference_temperature = temperatures
+        .iter()
+        .copied()
+        .min_by(|left, right| {
+            (left - 500.0)
+                .abs()
+                .partial_cmp(&(right - 500.0).abs())
+                .unwrap()
+        })
+        .unwrap();
     for temperature in &temperatures {
-        let a = npt_lattice(&copper, *temperature);
+        let maximum_steps = if *temperature == reference_temperature {
+            8_000
+        } else {
+            rgsaddle::NptConfig::default().maximum_steps
+        };
+        let report = npt_lattice_with_maximum(&copper, *temperature, maximum_steps);
+        let a = report.mean_lattice_a;
         eprintln!("a({temperature} K) = {a:.5} A");
         let _ = std::io::stderr().flush();
         assert!(
             (3.50..3.85).contains(&a),
             "NPT lattice parameter {a} at {temperature} K is not a copper lattice"
         );
+        if !report.pressure_converged {
+            unconverged.push(*temperature);
+        }
         lattice.push((*temperature, a));
     }
     let reference = lattice
@@ -4214,6 +4332,14 @@ fn defect_pair_cu_catalogue() {
         })
         .copied()
         .unwrap();
+    // Hop discovery uses the reference lattice, so it must be converged. The
+    // other temperatures only feed the a(T) table, and an unconverged one is
+    // reported in the notes rather than hidden.
+    assert!(
+        !unconverged.contains(&reference.0),
+        "reference NPT lattice at {} K is not pressure-converged",
+        reference.0
+    );
     let mut campaign = Campaign {
         catalogue: rgsaddle::RateCatalogue {
             entries: Vec::new(),
@@ -4225,6 +4351,13 @@ fn defect_pair_cu_catalogue() {
             reference.1, reference.0
         )],
     };
+    if !unconverged.is_empty() {
+        let list: Vec<String> = unconverged.iter().map(|t| format!("{t} K")).collect();
+        campaign.notes.push(format!(
+            "NPT pressure did not converge at {}; those a(T) rows are not converged values.",
+            list.join(", ")
+        ));
+    }
     let rate_sizes = sizes.clone();
     let mut jobs: Vec<RateJob> = Vec::new();
     if explicit.is_none() {
@@ -4922,14 +5055,74 @@ fn rotations_onto(from: [f64; 3], to: [f64; 3]) -> Vec<[[f64; 3]; 3]> {
         .collect()
 }
 
+/// Zero-pressure lattice parameter of the Mishin crystal, in Angstrom.
+///
+/// These come from `rgsaddle::npt_lattice` with the kinetic pressure
+/// included, one default 4000 step run per temperature (2000 discarded),
+/// seed `17 T + 11`. Regenerate them with
+/// `cargo test --release --test mishin_cu npt_lattice_table -- --ignored --nocapture`.
+///
+/// The table stores each run's pressure-convergence status. The 400 K row
+/// misses the pressure rule and is retained as explicitly non-converged.
+///
+/// STALE: the values recorded here before were 3.628311, 3.633713,
+/// 3.638666, 3.644160 and 3.649788 A at 300 to 700 K. They came from an
+/// integrator that left the kinetic pressure out of the barostat, so
+/// they are too small by 0.0036 to 0.0077 A. Every file under
+/// `benchmarks/` and `validation/` and every figure in the docs that was
+/// produced with them is stale until it is rerun.
+#[derive(Clone, Copy)]
+struct MeasuredLatticeRow {
+    temperature_k: i32,
+    lattice_a: f64,
+    pressure_converged: bool,
+}
+
+const MEASURED_LATTICE: [MeasuredLatticeRow; 5] = [
+    MeasuredLatticeRow {
+        temperature_k: 300,
+        lattice_a: 3.631945,
+        pressure_converged: true,
+    },
+    MeasuredLatticeRow {
+        temperature_k: 400,
+        lattice_a: 3.638168,
+        pressure_converged: false,
+    },
+    MeasuredLatticeRow {
+        temperature_k: 500,
+        lattice_a: 3.643490,
+        pressure_converged: true,
+    },
+    MeasuredLatticeRow {
+        temperature_k: 600,
+        lattice_a: 3.650947,
+        pressure_converged: true,
+    },
+    MeasuredLatticeRow {
+        temperature_k: 700,
+        lattice_a: 3.657468,
+        pressure_converged: true,
+    },
+];
+
+fn measured_lattice_row(temperature: f64) -> MeasuredLatticeRow {
+    MEASURED_LATTICE
+        .iter()
+        .copied()
+        .find(|row| row.temperature_k == temperature as i32)
+        .unwrap_or_else(|| panic!("no measured NPT lattice row for {temperature} K"))
+}
+
 fn measured_lattice(temperature: f64) -> f64 {
-    match temperature as i32 {
-        300 => 3.628311,
-        400 => 3.633713,
-        500 => 3.638666,
-        600 => 3.644160,
-        700 => 3.649788,
-        _ => 3.638666,
+    measured_lattice_row(temperature).lattice_a
+}
+
+#[test]
+fn measured_lattice_preserves_non_converged_pressure_status() {
+    assert!(!measured_lattice_row(400.0).pressure_converged);
+    for temperature in [300.0, 500.0, 600.0, 700.0] {
+        assert!(measured_lattice_row(temperature).pressure_converged);
     }
 }
 
@@ -5527,7 +5720,14 @@ fn defect_pair_science() {
         thermal_jobs.len(),
         started.elapsed().as_secs_f64() / 60.0
     ));
-    notes.push("NPT lattice parameters were measured earlier on this potential: 3.628311, 3.633713, 3.638666, 3.644160, 3.649788 A at 300 to 700 K.".into());
+    notes.push(format!(
+        "NPT lattice parameters from rgsaddle::npt_lattice with the kinetic pressure: {} A at 300 to 700 K. Earlier values 3.628311, 3.633713, 3.638666, 3.644160, 3.649788 A came from an integrator without the kinetic pressure and are stale.",
+        [300.0, 400.0, 500.0, 600.0, 700.0]
+            .iter()
+            .map(|temperature| format!("{:.6}", measured_lattice(*temperature)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ));
     notes.push("An AKMC edge is (shell, orientation, final_state, temperature). rate_Hz is the exit rate and nu_Hz is the attempt frequency along the path.".into());
     std::fs::write(root.join("defect_pair_hops_notes.txt"), notes.join("\n")).unwrap();
     eprintln!("{}", notes.join("\n"));

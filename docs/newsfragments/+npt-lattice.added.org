@@ -1,0 +1,8 @@
+~npt_lattice~, ~NptConfig~ and ~NptReport~ sample the lattice parameter of a crystal under isotropic Langevin dynamics with a Berendsen barostat.
+~NptConfig~ is non-exhaustive: start from ~Default~ and chain the ~with_*~ setters.
+The thermostat stream is xoshiro256** seeded through SplitMix64, so every seed, including consecutive ones, starts an unrelated stream.
+The run discards ~equilibration_steps~ and reports the mean lattice parameter and pressure of the rest.
+The standard errors come from blocking the per-step series (Flyvbjerg and Petersen) and take the largest estimate over the block lengths that keep at least sixteen blocks, because the barostat correlates successive steps over many hundreds of steps and the error of fixed 250-step block means falls short of the true error for such a series.
+~lattice_error_resolved~ and ~pressure_error_resolved~ say whether the estimate stopped rising with block length; when they are false the standard error is a lower bound.
+~pressure_converged~ is true when the pressure error is resolved and the mean pressure is within two standard errors of the target, which is zero by default. It is an indicative screen, not a proof of equilibrium.
+A run that misses the criterion extends by ~extension_steps~ until it passes or reaches ~maximum_steps~.
