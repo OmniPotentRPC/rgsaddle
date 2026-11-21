@@ -127,6 +127,7 @@ pub struct VelocitySofteningReport {
 ///     }
 /// }
 ///
+/// // Three coordinates select the Euclidean manifold.
 /// let man = SellaGeom::cartesian(3);
 /// let seed = array![1.0, 1.0, 0.0];
 /// let config = VelocitySofteningConfig::default().with_steps(5);
