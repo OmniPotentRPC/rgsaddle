@@ -56,8 +56,10 @@ pub fn mode_sweep_schedule(total_modes: usize, draws: usize) -> Result<Vec<usize
     if draws >= total_modes {
         return Ok((0..draws).map(|draw| draw % total_modes).collect());
     }
+    let total_modes = total_modes as u128;
+    let draws = draws as u128;
     Ok((0..draws)
-        .map(|draw| ((2 * draw + 1) * total_modes) / (2 * draws))
+        .map(|draw| (((2 * draw + 1) * total_modes) / (2 * draws)) as usize)
         .collect())
 }
 
@@ -148,7 +150,7 @@ pub fn hessian_mode_sweep_directions<S: PointSurface>(
                 }
             }
         }
-        directions.push(unit(localized + &(mode * carrier)));
+        directions.push(checked_unit(localized + &(mode * carrier))?);
     }
     Ok(ModeSweepDirectionPlan {
         eigenvalues,
@@ -328,6 +330,24 @@ mod tests {
     }
 
     #[test]
+    fn hessian_chirp_normalizes_large_finite_carriers() {
+        let plan = hessian_mode_sweep_directions(
+            &DiagonalHarmonic,
+            Array1::zeros(6).view(),
+            1,
+            1.0e200,
+            None,
+        )
+        .expect("large finite carrier");
+
+        assert_eq!(plan.minimum_squared_mode_weight, 1.0);
+        for (direction, &mode) in plan.directions.iter().zip(&plan.mode_indices) {
+            assert!(direction.iter().all(|value| value.is_finite()));
+            assert!(direction[mode].abs() > 1.0 - 1.0e-12);
+        }
+    }
+
+    #[test]
     fn short_chirp_stratifies_the_whole_mode_band() {
         assert_eq!(mode_sweep_schedule(10, 4).unwrap(), vec![1, 3, 6, 8]);
         assert_eq!(
@@ -336,6 +356,16 @@ mod tests {
         );
         assert!(mode_sweep_schedule(0, 1).is_err());
         assert!(mode_sweep_schedule(3, 0).is_err());
+    }
+
+    #[test]
+    fn stratified_schedule_handles_the_largest_mode_count() {
+        let total = usize::MAX;
+        let expected = vec![
+            ((total as u128) / 4) as usize,
+            ((3 * total as u128) / 4) as usize,
+        ];
+        assert_eq!(mode_sweep_schedule(total, 2).unwrap(), expected);
     }
 
     #[test]
@@ -501,15 +531,39 @@ fn fix_sign(v: &mut Array1<f64>) {
 }
 
 fn unit(mut v: Array1<f64>) -> Array1<f64> {
-    let norm2 = v.dot(&v);
-    if !norm2.is_finite() || norm2 <= 1.0e-24 {
+    let scale = v
+        .iter()
+        .fold(0.0_f64, |largest, value| largest.max(value.abs()));
+    if !scale.is_finite() || scale <= 1.0e-12 {
         v.fill(0.0);
         v[0] = 1.0;
         return v;
     }
-    let norm = norm2.sqrt();
+    v.mapv_inplace(|x| x / scale);
+    let norm = v.dot(&v).sqrt();
     v.mapv_inplace(|x| x / norm);
     v
+}
+
+fn checked_unit(mut v: Array1<f64>) -> Result<Array1<f64>, SaddleError> {
+    if v.iter().any(|value| !value.is_finite()) {
+        return Err(SaddleError::NonFinite("mode sweep direction"));
+    }
+    let scale = v
+        .iter()
+        .fold(0.0_f64, |largest, value| largest.max(value.abs()));
+    if scale == 0.0 {
+        return Err(SaddleError::Invalid(
+            "mode sweep produced a zero direction".into(),
+        ));
+    }
+    v.mapv_inplace(|value| value / scale);
+    let norm = v.dot(&v).sqrt();
+    if !norm.is_finite() || norm == 0.0 {
+        return Err(SaddleError::NonFinite("mode sweep direction norm"));
+    }
+    v.mapv_inplace(|value| value / norm);
+    Ok(v)
 }
 
 #[derive(Clone, Debug)]
