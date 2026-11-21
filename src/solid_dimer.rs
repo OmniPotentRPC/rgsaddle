@@ -478,6 +478,12 @@ pub fn certify_vineyard_pair<M: PointSurface, S: PointSurface>(
     check: IndexCheck,
     force_tol: f64,
 ) -> Result<VineyardIndexReport, VineyardIndexError> {
+    if check.lowest < 2 {
+        return Err(SaddleError::Invalid(
+            "Vineyard certification needs at least two lowest projected modes".into(),
+        )
+        .into());
+    }
     if !(force_tol.is_finite() && force_tol > 0.0) {
         return Err(SaddleError::Invalid(
             "Vineyard force tolerance must be positive and finite".into(),
@@ -3172,6 +3178,27 @@ mod tests {
         assert!(matches!(
             error,
             VineyardIndexError::Saddle { negative: 2, .. }
+        ));
+    }
+
+    #[test]
+    fn vineyard_pair_requires_two_lowest_modes() {
+        let double = IndexSurface { double: true };
+        let minimum = array![1.0, 0.0, 0.0];
+        let saddle = array![0.0, 0.0, 0.0];
+        let error = certify_vineyard_pair(
+            &Well,
+            minimum.view(),
+            &double,
+            saddle.view(),
+            IndexCheck::first_order().with_lowest(1),
+            VINEYARD_FORCE,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            VineyardIndexError::Evaluation(SaddleError::Invalid(_))
         ));
     }
 
