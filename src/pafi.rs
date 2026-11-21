@@ -22,10 +22,10 @@
 //! Euler-Maruyama discretization or the step of Leimkuhler and Matthews,
 //! Appl. Math. Res. Express 2013, 34 (2013), doi:10.1093/amrx/abs010,
 //! Eq. (3). The latter sums two consecutive noise draws, which makes
-//! stationary averages second order in the step and exact on a harmonic
-//! plane. The walk projects drift and noise, then restores the plane after
-//! every step. Holding the center of mass is optional and is the `com yes`
-//! choice of `fix pafi`. The integral of `dF/ds` from the reactant is the
+//! stationary averages second order in the step. The walk projects drift
+//! and noise, then restores the plane after every step. Holding the center
+//! of mass is optional and is the `com yes` choice of `fix pafi`. The
+//! integral of `dF/ds` from the reactant is the
 //! potential of mean force. One trajectory uses block averages of the
 //! equilibrated records for its standard error. An ensemble of
 //! trajectories uses the spread of independent trajectory means, as
@@ -572,7 +572,7 @@ pub struct HyperplaneAverage {
     pub samples: usize,
     /// Integrated autocorrelation time of the recorded series, in samples.
     pub tau: f64,
-    /// `samples / (2 τ)`.
+    /// `(samples - equilibration.discard) / max(1, 2 τ)`.
     pub n_eff: f64,
     /// Force evaluations spent on this plane, the quenches of
     /// [`PafiConfig::max_jump`] included, summed over rounds.
@@ -1052,8 +1052,8 @@ impl<S: PointSurface> Walk<'_, S> {
     /// Leimkuhler-Matthews integrator, Appl. Math. Res. Express 2013, 34
     /// (2013), doi:10.1093/amrx/abs010, Eq. (3), the noise is the sum of
     /// the draw of the last step, `noise`, and a new one, which replaces
-    /// it; stationary averages are then second order in `dt`, and exact on
-    /// a harmonic plane. Euler-Maruyama uses the new draw alone.
+    /// it; stationary averages are then second order in `dt`.
+    /// Euler-Maruyama uses the new draw alone.
     fn step(
         &self,
         x: &mut Array1<f64>,

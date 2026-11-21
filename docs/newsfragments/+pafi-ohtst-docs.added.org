@@ -2,4 +2,4 @@ Tutorials for PAFI and OH-TST (~tutorials/pafi~, ~tutorials/oh-tst~) take a newc
 How-tos cover wrapping an ~rgpot-pair~ potential as a ~PointSurface~ (~howto/rgpot~), restarting a PAFI or OH-TST run (~howto/pafi-ohtst-restarting~), parallel sampling (~howto/pafi-ohtst-parallel-sampling~), and checking convergence (~howto/pafi-ohtst-checking-convergence~).
 ~explanation/pafi-ohtst~ gives the equations and assumptions of harmonic TST, PAFI and OH-TST, and when to use each.
 ~reference/pafi~ and ~reference/ohtst~ list every public configuration and result type of both modules.
-Six new runnable examples back every code block in these pages and run in CI alongside the existing ones.
+Six new runnable examples back the code blocks these tutorials and how-tos include and run in CI alongside the existing ones.
