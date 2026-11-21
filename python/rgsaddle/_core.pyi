@@ -296,7 +296,7 @@ class Band:
 
     def set_refine(self, enabled: bool = True, threshold: float = 0.0, memory: int = 20) -> None:
         """
-        Install or clear the per-step L-BFGS refine stepper (ABI minor 46). A threshold of 0 selects 0.5, in the host's force units.
+        Install or clear the per-step L-BFGS refine stepper (ABI minor 59). A threshold of 0 selects 0.5, in the host's force units.
         """
 
     def is_refining(self) -> bool:

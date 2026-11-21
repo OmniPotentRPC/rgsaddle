@@ -276,7 +276,7 @@ public:
         return rgsaddle_band_free_end_cuts(handle_);
     }
 
-    // Per-step refine stepper, ABI minor 46. method 0 clears it.
+    // Per-step refine stepper, ABI minor 59. method 0 clears it.
     // threshold 0 selects the default 0.5. memory 0 selects 20 pairs.
     void set_refine(std::int32_t method, double threshold = 0.0, std::int64_t memory = 0) {
         check(rgsaddle_band_set_refine(handle_, method, threshold, memory));

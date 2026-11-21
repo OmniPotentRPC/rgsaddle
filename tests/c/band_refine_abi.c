@@ -1,4 +1,4 @@
-/* Per-step refine stepper at ABI minor 46. */
+/* Per-step refine stepper at ABI minor 59. */
 #include "rgsaddle.h"
 #include "main_abi_contract.h"
 #include <math.h>
@@ -67,8 +67,8 @@ static RgsaddleBand *open_band(const double *pos, long n_images, int32_t method,
 }
 
 int main(void) {
-  if (rgsaddle_abi_version() != (int)((RGSADDLE_ABI_MAJOR << 16) | 46u)) {
-    return fail(RGSADDLE_ABI_MISMATCH, "ABI minor is not 46");
+  if (rgsaddle_abi_version() != (int)((RGSADDLE_ABI_MAJOR << 16) | 59u)) {
+    return fail(RGSADDLE_ABI_MISMATCH, "ABI minor is not 59");
   }
   if (rgsaddle_band_set_refine(NULL, RGSADDLE_REFINE_LBFGS, 0.5, 20) != RGSADDLE_NULL_BAND) {
     return fail(RGSADDLE_NULL_BAND, "null band");

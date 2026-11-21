@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 46u
+#define RGSADDLE_ABI_MINOR 59u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -1935,14 +1935,14 @@ rgsaddle_status_t rgsaddle_band_free_end_residual(const RgsaddleBand *band,
  */
 int64_t rgsaddle_band_free_end_cuts(const RgsaddleBand *band);
 
-/** Refine stepper of rgsaddle_band_set_refine, ABI minor 46. */
+/** Refine stepper of rgsaddle_band_set_refine, ABI minor 59. */
 typedef enum {
   RGSADDLE_REFINE_NONE = 0,
   RGSADDLE_REFINE_LBFGS = 1
 } rgsaddle_refine_method_t;
 
 /**
- * Per-step refine stepper, ABI minor 46. `method` is an
+ * Per-step refine stepper, ABI minor 59. `method` is an
  * rgsaddle_refine_method_t. RGSADDLE_REFINE_NONE clears the stepper and
  * does not read `threshold`. RGSADDLE_REFINE_LBFGS steps with L-BFGS
  * when the convergence force is at or under `threshold`, and with the
@@ -1959,7 +1959,7 @@ rgsaddle_status_t rgsaddle_band_set_refine(RgsaddleBand *band, int32_t method,
 /**
  * 1 when the last first-order step used the refine stepper, else 0.
  * 0 for NULL, before the first such step, and when no refine stepper
- * is installed. ABI minor 46.
+ * is installed. ABI minor 59.
  */
 int32_t rgsaddle_band_is_refining(const RgsaddleBand *band);
 

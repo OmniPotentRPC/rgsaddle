@@ -189,7 +189,7 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =rgsaddle_band_set_free_end=. Purpose: Enable, replace, or clear the free-end adaptive NEB (FEA-NEB) of Zhang, Zhang, Ye, and Zheng, J. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_band_free_end_residual=. Purpose: Read the signed target-energy residual `E(x_end) - E_target` from the most recent free-end step into `out`, ABI minor 45. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_band_free_end_cuts=. Purpose: Number of adaptive cut-and-remesh refinements performed so far on a free-end band, or 0 for NULL, ABI minor 45. Parameters: the declaration. Units: the caller's.
-- =rgsaddle_band_set_refine=. Purpose: Per-step refine stepper, ABI minor 46. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_band_set_refine=. Purpose: Per-step refine stepper, ABI minor 59. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_band_is_refining=. Purpose: 1 when the last first-order step used the refine stepper, else 0. Parameters: the declaration. Units: the caller's.
 
 * Types and callbacks
@@ -257,7 +257,7 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =rgsaddle_growing_string_phase_t=. Purpose: Phase of a growing string session, ABI minor 44.
 - =rgsaddle_growing_string_config_t=. Purpose: Configuration of rgsaddle_growing_string_create, ABI minor 44.
 - =rgsaddle_free_end_side_t=. Purpose: Which terminal image moves on the target-energy level set, ABI minor 45.
-- =rgsaddle_refine_method_t=. Purpose: Refine stepper of rgsaddle_band_set_refine, ABI minor 46.
+- =rgsaddle_refine_method_t=. Purpose: Refine stepper of rgsaddle_band_set_refine, ABI minor 59.
 - =rgsaddle_hyperplane_emit_fn=. Purpose: Callback typedef in include/rgsaddle.h.
 - =rgsaddle_sample_hyperplane_fn=. Purpose: Callback typedef in include/rgsaddle.h.
 - =rgsaddle_surface_fn=. Purpose: Callback typedef in include/rgsaddle.h.
