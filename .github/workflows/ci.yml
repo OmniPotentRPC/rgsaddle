@@ -126,6 +126,24 @@ jobs:
       - name: Build and run the consumer (${{ matrix.mode }})
         run: ci/meson_consumer.sh ${{ matrix.mode }} target/debug/librgsaddle.so
 
+  fortran:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install meson, ninja, gfortran and valgrind
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gfortran valgrind
+          python3 -m pip install meson ninja
+      - name: Build and run Fortran ABI tests
+        run: ci/fortran_abi.sh
+      - name: Fortran handle lifetimes under valgrind
+        run: ci/fortran_valgrind.sh
+
   ase-parity:
     runs-on: ubuntu-latest
     steps:

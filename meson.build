@@ -22,6 +22,12 @@ rgsaddle_headers_dep = rgsaddle_dep
 meson.override_dependency('rgsaddle', rgsaddle_dep)
 meson.override_dependency('rgsaddle-headers', rgsaddle_dep)
 
+fortran_opt = get_option('fortran')
+if fortran_opt.enabled()
+    add_languages('fortran', native: false, required: true)
+    subdir('fortran')
+endif
+
 if not meson.is_subproject()
     install_headers('include/rgsaddle.h')
     install_headers(

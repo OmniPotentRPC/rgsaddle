@@ -5,7 +5,7 @@
 #include <stddef.h>
 
 _Static_assert(RGSADDLE_ABI_MAJOR == 1u, "main ABI major");
-_Static_assert(RGSADDLE_ABI_MINOR == 46u, "ABI minor");
+_Static_assert(RGSADDLE_ABI_MINOR == 47u, "ABI minor");
 _Static_assert(RGSADDLE_BAND_NO_MIN_MODE == (1ull << 3), "band flag bit 3");
 _Static_assert(RGSADDLE_BAND_SPLINE_REPARAM == (1ull << 4), "band flag bit 4");
 _Static_assert(RGSADDLE_BAND_STRING == (1ull << 5), "band flag bit 5");
@@ -552,5 +552,129 @@ _Static_assert(_Generic(&rgsaddle_band_free_end_residual, abi45_signature_rgsadd
 typedef int64_t (*abi45_signature_rgsaddle_band_free_end_cuts)(
     const RgsaddleBand *band);
 _Static_assert(_Generic(&rgsaddle_band_free_end_cuts, abi45_signature_rgsaddle_band_free_end_cuts: 1, default: 0), "rgsaddle_band_free_end_cuts signature");
+
+typedef struct {
+  abi15_rgsaddle_version_t version;
+  uint64_t flags;
+  double thermal;
+  double mobility;
+  double time_step;
+  int64_t thermalize;
+  int64_t stride;
+  int64_t samples;
+  int64_t blocks;
+  uint64_t seed;
+  int32_t fix_com;
+  int64_t retain;
+  double target_error;
+  int64_t max_rounds;
+} abi47_rgsaddle_pafi_config_t;
+_Static_assert(sizeof(rgsaddle_pafi_config_t) == sizeof(abi47_rgsaddle_pafi_config_t), "rgsaddle_pafi_config_t size");
+_Static_assert(_Alignof(rgsaddle_pafi_config_t) == _Alignof(abi47_rgsaddle_pafi_config_t), "rgsaddle_pafi_config_t alignment");
+_Static_assert(offsetof(rgsaddle_pafi_config_t, max_rounds) == offsetof(abi47_rgsaddle_pafi_config_t, max_rounds), "rgsaddle_pafi_config_t.max_rounds");
+
+typedef struct {
+  abi15_rgsaddle_version_t version;
+  uint64_t flags;
+  double barrier;
+  double barrier_error;
+  int64_t dividing;
+  int64_t samples;
+  int64_t evaluations;
+} abi47_rgsaddle_pafi_result_t;
+_Static_assert(sizeof(rgsaddle_pafi_result_t) == sizeof(abi47_rgsaddle_pafi_result_t), "rgsaddle_pafi_result_t size");
+_Static_assert(_Alignof(rgsaddle_pafi_result_t) == _Alignof(abi47_rgsaddle_pafi_result_t), "rgsaddle_pafi_result_t alignment");
+
+typedef struct {
+  abi15_rgsaddle_version_t version;
+  uint64_t flags;
+  double thermal;
+  double sample_time_step;
+  double sample_friction;
+  int64_t sample_burn_in;
+  int64_t sample_stride;
+  int64_t sample_records;
+  int64_t sample_blocks;
+  uint64_t sample_seed;
+  int64_t sample_retain;
+  int32_t sample_integrator;
+  double shooting_friction;
+  double shooting_time_step;
+  int64_t shooting_steps;
+  int64_t shooting_check_every;
+  int64_t shooting_commit;
+  int64_t shooting_shots;
+  int64_t shooting_blocks;
+  uint64_t shooting_seed;
+  int32_t counting;
+} abi47_rgsaddle_ohtst_config_t;
+_Static_assert(sizeof(rgsaddle_ohtst_config_t) == sizeof(abi47_rgsaddle_ohtst_config_t), "rgsaddle_ohtst_config_t size");
+_Static_assert(_Alignof(rgsaddle_ohtst_config_t) == _Alignof(abi47_rgsaddle_ohtst_config_t), "rgsaddle_ohtst_config_t alignment");
+_Static_assert(offsetof(rgsaddle_ohtst_config_t, counting) == offsetof(abi47_rgsaddle_ohtst_config_t, counting), "rgsaddle_ohtst_config_t.counting");
+
+typedef struct {
+  abi15_rgsaddle_version_t version;
+  uint64_t flags;
+  double kappa;
+  double error;
+  int64_t shots;
+  int64_t unassigned;
+  int64_t reactive;
+  int64_t recrossed;
+  int64_t evaluations;
+} abi47_rgsaddle_ohtst_result_t;
+_Static_assert(sizeof(rgsaddle_ohtst_result_t) == sizeof(abi47_rgsaddle_ohtst_result_t), "rgsaddle_ohtst_result_t size");
+_Static_assert(_Alignof(rgsaddle_ohtst_result_t) == _Alignof(abi47_rgsaddle_ohtst_result_t), "rgsaddle_ohtst_result_t alignment");
+
+typedef RgsaddlePafi *(*abi47_signature_rgsaddle_pafi_create)(
+    const rgsaddle_pafi_config_t *config, int64_t n_frames, int64_t n_dof,
+    const double *frames, const double *arcs, int64_t n_arcs);
+_Static_assert(_Generic(&rgsaddle_pafi_create, abi47_signature_rgsaddle_pafi_create: 1, default: 0), "rgsaddle_pafi_create signature");
+
+typedef rgsaddle_status_t (*abi47_signature_rgsaddle_pafi_set_config)(
+    RgsaddlePafi *session, const rgsaddle_pafi_config_t *config);
+_Static_assert(_Generic(&rgsaddle_pafi_set_config, abi47_signature_rgsaddle_pafi_set_config: 1, default: 0), "rgsaddle_pafi_set_config signature");
+
+typedef rgsaddle_status_t (*abi47_signature_rgsaddle_pafi_run)(
+    RgsaddlePafi *session, rgsaddle_point_surface_fn surface, void *user);
+_Static_assert(_Generic(&rgsaddle_pafi_run, abi47_signature_rgsaddle_pafi_run: 1, default: 0), "rgsaddle_pafi_run signature");
+
+typedef rgsaddle_status_t (*abi47_signature_rgsaddle_pafi_result)(
+    const RgsaddlePafi *session, rgsaddle_pafi_result_t *out);
+_Static_assert(_Generic(&rgsaddle_pafi_result, abi47_signature_rgsaddle_pafi_result: 1, default: 0), "rgsaddle_pafi_result signature");
+
+typedef rgsaddle_status_t (*abi47_signature_rgsaddle_pafi_profile)(
+    const RgsaddlePafi *session, double *arcs, double *gradients,
+    double *gradient_errors, double *free_energy, double *free_energy_errors,
+    int64_t capacity, int64_t *written);
+_Static_assert(_Generic(&rgsaddle_pafi_profile, abi47_signature_rgsaddle_pafi_profile: 1, default: 0), "rgsaddle_pafi_profile signature");
+
+typedef void (*abi47_signature_rgsaddle_pafi_free)(RgsaddlePafi *session);
+_Static_assert(_Generic(&rgsaddle_pafi_free, abi47_signature_rgsaddle_pafi_free: 1, default: 0), "rgsaddle_pafi_free signature");
+
+typedef RgsaddleOhtst *(*abi47_signature_rgsaddle_ohtst_create)(
+    const rgsaddle_ohtst_config_t *config, int64_t n_dof, const double *point,
+    const double *normal);
+_Static_assert(_Generic(&rgsaddle_ohtst_create, abi47_signature_rgsaddle_ohtst_create: 1, default: 0), "rgsaddle_ohtst_create signature");
+
+typedef rgsaddle_status_t (*abi47_signature_rgsaddle_ohtst_set_config)(
+    RgsaddleOhtst *session, const rgsaddle_ohtst_config_t *config);
+_Static_assert(_Generic(&rgsaddle_ohtst_set_config, abi47_signature_rgsaddle_ohtst_set_config: 1, default: 0), "rgsaddle_ohtst_set_config signature");
+
+typedef rgsaddle_status_t (*abi47_signature_rgsaddle_ohtst_run)(
+    RgsaddleOhtst *session, rgsaddle_point_surface_fn surface, void *user);
+_Static_assert(_Generic(&rgsaddle_ohtst_run, abi47_signature_rgsaddle_ohtst_run: 1, default: 0), "rgsaddle_ohtst_run signature");
+
+typedef rgsaddle_status_t (*abi47_signature_rgsaddle_ohtst_result)(
+    const RgsaddleOhtst *session, rgsaddle_ohtst_result_t *out);
+_Static_assert(_Generic(&rgsaddle_ohtst_result, abi47_signature_rgsaddle_ohtst_result: 1, default: 0), "rgsaddle_ohtst_result signature");
+
+typedef rgsaddle_status_t (*abi47_signature_rgsaddle_ohtst_curve)(
+    const RgsaddleOhtst *session, double *times, double *kappa_of_t,
+    int64_t capacity, int64_t *written);
+_Static_assert(_Generic(&rgsaddle_ohtst_curve, abi47_signature_rgsaddle_ohtst_curve: 1, default: 0), "rgsaddle_ohtst_curve signature");
+
+typedef void (*abi47_signature_rgsaddle_ohtst_free)(RgsaddleOhtst *session);
+_Static_assert(_Generic(&rgsaddle_ohtst_free, abi47_signature_rgsaddle_ohtst_free: 1, default: 0), "rgsaddle_ohtst_free signature");
 
 #endif

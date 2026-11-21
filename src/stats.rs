@@ -186,6 +186,9 @@ pub(crate) fn autocorr_time(values: &[f64]) -> f64 {
     if n < 4 {
         return 0.5;
     }
+    if values.iter().all(|value| *value == values[0]) {
+        return 0.5;
+    }
     let mean = values.iter().sum::<f64>() / n as f64;
     let mut variance = 0.0;
     for value in values {
@@ -452,5 +455,13 @@ mod tests {
                 "phi {phi}: refused {refused}, base {base}, window {low}..={high}"
             );
         }
+    }
+
+    #[test]
+    fn a_constant_non_exact_series_is_uncorrelated() {
+        let values = vec![1.428; 200];
+        let report = equilibrate(&values, 5, 1, 5).unwrap();
+        assert_eq!(report.tau, 0.5);
+        assert_eq!(report.n_eff, 200.0);
     }
 }

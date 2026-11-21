@@ -1,0 +1,4 @@
+The Fortran 2008 module ~rgsaddle~ binds a subset of the C ABI (band, minimum-mode, PAFI, and OH-TST) at minor 47.
+Handles are not assignable: ~b = a~ stops the program, and ~move_from~ transfers the session.
+Surface callbacks are carried in the C user pointer, and PAFI and OH-TST may call the point callback from worker threads, so the procedure has to be thread-safe and ~recursive~.
+~pafi_profile~ and ~ohtst_curve~ set the ~written~ argument to the stored length and return ~RGSADDLE_INVALID_PARAMETER~ when the buffer is shorter than that length.

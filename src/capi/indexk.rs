@@ -6,10 +6,10 @@ use std::slice;
 use ndarray::{Array1, Array2, ArrayView1};
 
 use super::{
-    RGSADDLE_ABI_MAJOR, RGSADDLE_ABI_MINOR, RGSADDLE_INVALID_PARAMETER, RGSADDLE_NO_EVALUATION,
-    RGSADDLE_NULL_REPORT, RGSADDLE_NULL_SESSION, RGSADDLE_NULL_SURFACE, RGSADDLE_OK,
-    RgsaddleReport, RgsaddleSurfaceFn, RgsaddleSurfaceRequest, RgsaddleVersion, stamp_report,
-    status_of,
+    RGSADDLE_ABI_MAJOR, RGSADDLE_ABI_MINOR, RGSADDLE_ABI_MISMATCH, RGSADDLE_INVALID_PARAMETER,
+    RGSADDLE_NO_EVALUATION, RGSADDLE_NULL_REPORT, RGSADDLE_NULL_SESSION, RGSADDLE_NULL_SURFACE,
+    RGSADDLE_OK, RgsaddleReport, RgsaddleSurfaceFn, RgsaddleSurfaceRequest, RgsaddleVersion,
+    stamp_report, status_of,
 };
 use crate::capi_kappa::RgsaddleHessianFn;
 use crate::error::SaddleError;
@@ -123,7 +123,7 @@ impl PointSurface for HostSurface {
 
 fn search_of(config: &RgsaddleIndexKConfig) -> Result<(MinModeConfig, BlockEigenKind), i32> {
     if config.version.major != RGSADDLE_ABI_MAJOR {
-        return Err(RGSADDLE_INVALID_PARAMETER);
+        return Err(RGSADDLE_ABI_MISMATCH);
     }
     if config.index < 1 || config.max_rotations < 0 || config.max_block_iterations <= 0 {
         return Err(RGSADDLE_INVALID_PARAMETER);
@@ -493,5 +493,33 @@ pub unsafe extern "C" fn rgsaddle_reflect_force(
             RGSADDLE_OK
         }
         Err(err) => status_of(&err),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn another_major_is_an_abi_mismatch() {
+        let mut config = RgsaddleIndexKConfig {
+            version: RgsaddleVersion {
+                major: RGSADDLE_ABI_MAJOR,
+                minor: RGSADDLE_ABI_MINOR,
+            },
+            flags: 0,
+            index: 1,
+            method: 0,
+            dr: 1e-3,
+            rotation_tol: 1e-4,
+            max_rotations: 20,
+            force_tol: 1e-3,
+            max_move: 0.2,
+            residual_tol: 1e-6,
+            max_block_iterations: 50,
+        };
+        assert!(search_of(&config).is_ok());
+        config.version.major = RGSADDLE_ABI_MAJOR + 1;
+        assert_eq!(search_of(&config).err(), Some(RGSADDLE_ABI_MISMATCH));
     }
 }

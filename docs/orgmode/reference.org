@@ -5,6 +5,7 @@
 The API documentation for every public item is on [[https://docs.rs/rgsaddle][docs.rs/rgsaddle]].
 =cargo doc --open= builds the same pages from a checkout.
 Runnable examples open =BandSession=, =AutoNeb=, =OcinebSession=, =MinModeSession=, =Index1Session=, =IndexKSession=, =SolidDimer=, =SolidNeb=, =Stencil= and the =ohtst= module, and, with =--features capi=, the C band, min-mode and stencil handles.
+=meson -Dfortran=enabled= adds the Fortran 2008 =rgsaddle= module on the same C ABI.
 =cargo test --doc= runs them.
 Every public configuration struct is non-exhaustive.
 Start from =Default= or the type's named constructor and chain the =with_*= setters, as in =BandConfig::default().with_force_tol(1e-3)=.
@@ -39,7 +40,7 @@ The table below lists the main types.
 | =ArcPath=                      | PAFI path through ordered frames, a cubic spline over chord length, with its curvature and jerk. See @@rst::doc:`PAFI types <reference/pafi>`@@ |
 | =PafiConfig=                   | PAFI's overdamped Langevin sampling settings, with =target_error= and =max_rounds= for automatic extra rounds. See @@rst::doc:`PAFI types <reference/pafi>`@@ |
 | =pafi_profile=                 | Samples every plane of a path in parallel and integrates =dF/ds= (Swinburne and Marinica, Phys. Rev. Lett. 120, 135503 (2018), doi:10.1103/PhysRevLett.120.135503) to a =FreeEnergyProfile=. See @@rst::doc:`PAFI types <reference/pafi>`@@ |
-| =Hyperplane=                   | OH-TST plane: a point and a unit normal toward the product in mass-weighted coordinates. =from_min_mode= seeds it from a converged dimer or Lanczos session, preferring the vector of a converged saddle-index certificate over the session mode; =packed= and =from_packed= are its =[p; ν]= layout, the one of =PlaneSample::directional=; =from_cartesian= and =to_cartesian= convert; =orthogonal_to_mass_weighted_translations= drops rigid translations from the normal | See @@rst::doc:`OH-TST types <reference/ohtst>`@@ for every OH-TST type
+| =Hyperplane=                   | OH-TST plane: a point and a unit normal toward the product in mass-weighted coordinates. =from_min_mode= seeds it from a converged dimer or Lanczos session, preferring the vector of a converged saddle-index certificate over the session mode; =packed= and =from_packed= are its =[p; ν]= layout, the one of =PlaneSample::directional=; =from_cartesian= and =to_cartesian= convert; =orthogonal_to_mass_weighted_translations= drops rigid translations from the normal. See @@rst::doc:`OH-TST types <reference/ohtst>`@@ for every OH-TST type |
 | =LammpsHyperplaneSampler=      | Opt-in lammpc backend for =HyperplaneSampler=. =LammpsSystem= owns the rgpot configuration and geometry; =LammpsSamplerConfig= owns the time step, friction, thermostat and excluded-mode count; records expose =lammps.thermostat= and =lammps.effective_degrees_of_freedom= |
 | =MassWeighted=                 | =q = M^{1/2} x= over a Cartesian =PointSurface=; =mass_weighted_rigid_translations= returns the orthonormal rigid-translation rows in these coordinates; =FixedCell= holds the cell of a crystal fixed per temperature. =flux_mass= is =1 / Σ nᵢ²/mᵢ=, not the 2001 Eq. 24 |
 | =sample_plane=                 | Plane-restricted Langevin sampling at =kT= by projected BAOAB or GHMC (=PlaneIntegrator=), reproducible from a seed. =PlaneSample= holds the Euclidean gradient blocks, the centroid torque and the virial, each with a block standard error; =HarmonicReference= adds Stein control variates |
@@ -255,7 +256,7 @@ A failed callback leaves it unchanged.
 Its =rotation_angle_tol= field stops a dimer rotation once the optimal angle falls under this tolerance in radians.
 The Rust default is five degrees, 0 turns the stop off, and a C config stores the value it is given.
 Both fields are read only from a config whose version minor is 5 or newer.
-=RGSADDLE_ABI_MINOR= is 46.
+=RGSADDLE_ABI_MINOR= is 47.
 From minor 24, =rgsaddle_sella_saddle_set_symmetrized_ritz= sets =SellaSaddleConfig::symmetrized_ritz= from 0 or 1.
 It returns =RGSADDLE_INVALID_PARAMETER= for any other value.
 =rgsaddle_sella_saddle_set_small_system_atom_ceiling= (minor 25) sets =SellaSaddleConfig::small_system_atom_ceiling= from 0 or 1.
@@ -286,6 +287,7 @@ The surface writes energy and the Cartesian gradient for one image.
 It also carries the kind (=s=, =u=, or =f=), the Hessian index and the evaluation count.
 That count includes the finite differences that decide a step or an index.
 The Lanczos acceptance does not build a dense Hessian.
+=howto/fortran= wraps this ABI for Fortran with finalizer-backed handles for band, min-mode, PAFI, and OH-TST sessions (=rgsaddle_pafi_*= and =rgsaddle_ohtst_*=, ABI minor 47).
 Band flag bit 2 is =RGSADDLE_BAND_CI_AFTER=.
 It arms the climbing image under =ci_trigger_force= or =ci_trigger_factor= times the first force.
 Either of the two may be 0.

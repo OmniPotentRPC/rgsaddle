@@ -15,7 +15,7 @@ crate-type = ["lib", "cdylib", "staticlib"]
 
 [features]
 default = ["faer"]
-capi = []
+capi = ["ohtst"]
 par = ["rgmin/par"]
 highs = ["rgmin/highs"]
 ohtst = []
