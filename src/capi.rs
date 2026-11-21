@@ -36,7 +36,7 @@ use crate::tangent::TangentKind;
 /// The RGSADDLE ABI MAJOR.
 pub const RGSADDLE_ABI_MAJOR: u32 = 1;
 /// The RGSADDLE ABI MINOR.
-pub const RGSADDLE_ABI_MINOR: u32 = 46;
+pub const RGSADDLE_ABI_MINOR: u32 = 54;
 
 /// A band, min-mode or OCI-NEB config of this minor or newer certifies
 /// the saddle index at convergence by default.
@@ -129,6 +129,8 @@ pub const RGSADDLE_STALLED: i32 = -13;
 pub const RGSADDLE_NOT_EQUILIBRATED: i32 = -14;
 /// The constrained-ensemble tail has too few effective samples.
 pub const RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES: i32 = -15;
+/// A geodesic interpolation used all of its sweeps with an image still moving.
+pub const RGSADDLE_NOT_CONVERGED: i32 = -16;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -526,6 +528,7 @@ pub extern "C" fn rgsaddle_status_name(status: i32) -> *const c_char {
         RGSADDLE_STALLED => "STALLED\0",
         RGSADDLE_NOT_EQUILIBRATED => "NOT_EQUILIBRATED\0",
         RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES => "INSUFFICIENT_EFFECTIVE_SAMPLES\0",
+        RGSADDLE_NOT_CONVERGED => "NOT_CONVERGED\0",
         _ => "UNKNOWN\0",
     };
     s.as_ptr() as *const c_char
@@ -2201,6 +2204,8 @@ pub unsafe extern "C" fn rgsaddle_idpp_path(
     }
 }
 
+mod geodesic;
+pub use geodesic::*;
 mod indexk;
 pub use indexk::*;
 mod sessions;

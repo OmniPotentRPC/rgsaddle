@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 46u
+#define RGSADDLE_ABI_MINOR 54u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -151,7 +151,12 @@ typedef enum {
   /** The constrained-ensemble tail still drifts after equilibration. ABI minor 42. */
   RGSADDLE_NOT_EQUILIBRATED = -14,
   /** The constrained-ensemble tail has too few effective samples. ABI minor 42. */
-  RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES = -15
+  RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES = -15,
+  /**
+   * A geodesic interpolation used all of its sweeps with an image still
+   * moving. The outputs hold the last iterate. ABI minor 54.
+   */
+  RGSADDLE_NOT_CONVERGED = -16
 } rgsaddle_status_t;
 
 typedef enum {
@@ -1934,6 +1939,101 @@ rgsaddle_status_t rgsaddle_band_free_end_residual(const RgsaddleBand *band,
  * free-end band, or 0 for NULL, ABI minor 45.
  */
 int64_t rgsaddle_band_free_end_cuts(const RgsaddleBand *band);
+
+/**
+ * Redundant coordinate chart for geodesic interpolation.
+ *
+ * Zhu, Thompson, and Martinez, J. Chem. Phys. 150, 164103 (2019).
+ * ABI minor 54.
+ *
+ * `x` holds `dof` Cartesians. The chart writes `n_coords` redundant
+ * coordinates into `q` and the row-major Wilson B matrix (`n_coords`
+ * rows, `dof` columns) into `b`. Return 0 on success and nonzero when
+ * the chart is undefined at `x`.
+ */
+typedef int (*rgsaddle_geodesic_chart_fn)(void *ctx, const double *x,
+                                          int64_t dof, double *q, double *b,
+                                          int64_t n_coords);
+
+/**
+ * Geodesic interpolation controls. Lengths are in the path's unit.
+ * `flags` must be 0. `lower_ratio` is in (0, 1] and `upper_ratio` is
+ * at least 1. Counts are at least 1, and `bound_samples` and
+ * `max_images` are at least 2. `seed` seeds the ten noisy starts of
+ * Algorithm 3 in `rgsaddle_geodesic_morse` and takes any value. ABI
+ * minor 54.
+ */
+typedef struct {
+  rgsaddle_version_t version;
+  uint64_t flags;
+  double step_tol;
+  double grad_tol;
+  double max_move;
+  double lower_ratio;
+  double upper_ratio;
+  int64_t max_sweeps;
+  int64_t max_iterations;
+  int64_t memory;
+  int64_t bound_samples;
+  int64_t max_images;
+  uint64_t seed;
+} rgsaddle_geodesic_config_t;
+
+/**
+ * Fill `out` with the default geodesic controls (step and gradient
+ * tolerances 1e-6, max_move 0.5, lower_ratio 0.95, upper_ratio 1.1,
+ * 40 sweeps, 40 iterations, memory 8, 10 bound samples, 32 images,
+ * seed 0). ABI minor 54.
+ */
+rgsaddle_status_t rgsaddle_geodesic_config_default(
+    rgsaddle_geodesic_config_t *out);
+
+/**
+ * Minimize the geodesic length of an existing path. ABI minor 54.
+ *
+ * `path` and `out` hold `n_images * dof` doubles, image-major, with
+ * `n_images` at least 2. The image count is unchanged: `out` has no
+ * room for inserted midpoints. The first and last images are copied
+ * through.
+ * `chart` writes `n_coords` redundant coordinates and their Wilson B
+ * matrix. `cell` is a row-major 3x3 lattice, or NULL in free space.
+ * With a cell, `dof` is a multiple of 3 and every midpoint, sample, and
+ * inserted image follows the minimum image displacement of its two
+ * segment ends; the chart applies the same convention to its own
+ * distances. `config` NULL selects the defaults. `length`, `lower`, and
+ * `upper` may be NULL; otherwise they receive the Eq. (17) length and
+ * the Eq. (B5) and Eq. (B18) bounds. A nonzero chart return is
+ * `RGSADDLE_SURFACE_FAILED` when it happens on the starting path.
+ * When a round of sweeps uses all of `max_sweeps` with an image still
+ * moving by more than `step_tol`, `out`, `length`, `lower`, and `upper`
+ * hold the last iterate and the call returns `RGSADDLE_NOT_CONVERGED`.
+ * `n_images * dof` and `n_coords * dof` must fit in memory sizes; an
+ * overflow returns `RGSADDLE_INVALID_PARAMETER`.
+ */
+rgsaddle_status_t rgsaddle_geodesic_path(
+    int64_t n_images, int64_t dof, const double *path, int64_t n_coords,
+    rgsaddle_geodesic_chart_fn chart, void *ctx, const double *cell,
+    const rgsaddle_geodesic_config_t *config, double *out, double *length,
+    double *lower, double *upper);
+
+/**
+ * Morse pair geodesic between two geometries. ABI minor 54.
+ *
+ * `reactant`, `product`, and each row of `out` hold `3 * n_atoms`
+ * doubles. `radii` holds one covalent radius per atom. `cell` is a
+ * row-major 3x3 lattice, or NULL in free space. `n_images` counts the
+ * endpoints and must be at least 2. `out` holds `n_images * 3 * n_atoms`
+ * doubles. Alpha 1.7 and beta 0.01 are Eq. (7) of Zhu, Thompson, and
+ * Martinez (2019). `config` NULL selects the defaults. The scalar
+ * outputs follow `rgsaddle_geodesic_path`. `n_images * 3 * n_atoms` and
+ * the pair count times `3 * n_atoms` must fit in memory sizes; an
+ * overflow returns `RGSADDLE_INVALID_PARAMETER`.
+ */
+rgsaddle_status_t rgsaddle_geodesic_morse(
+    int64_t n_images, int64_t n_atoms, const double *reactant,
+    const double *product, const double *radii, const double *cell,
+    const rgsaddle_geodesic_config_t *config, double *out, double *length,
+    double *lower, double *upper);
 
 #ifdef __cplusplus
 }
