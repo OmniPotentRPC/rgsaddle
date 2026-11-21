@@ -277,7 +277,7 @@ println!("rebuilt {} times", session.topology_restarts());
 ~InternalTopology::from_geometry~ does the construction alone and returns the ~Constraints~, the real and dummy atom map, the dummy pins and a ~TopologyCheck~.
 It follows section 2.1 of Hermes, Sargsyan, Najm and Zador, J. Chem. Theory Comput. 18, 6974 (2022), doi:10.1021/acs.jctc.2c00395, and the Sella 2.6.0 source:
 
-- Two atoms are bonded under 1.25 times the sum of their Cordero radii (Dalton Trans. 2008, 2832, doi:10.1039/B801115J).
+- Two atoms are bonded under 1.25 times the sum of their Cordero radii (Dalton Trans. 2008, 2832, digital object identifier (DOI) 10.1039/B801115J).
   Fragments that stay apart are welded by growing that factor 5 % on pairs between fragments.
 - Two bonds that share an atom make an angle. Two angles that chain through a shared edge make a proper dihedral.
 - A bend within 15 degrees of 0 or 180 is left out. A vertex with three or more bonds takes the improper dihedral ~a-b-d-c~ with ~d~ the nearest other bonded atom.
