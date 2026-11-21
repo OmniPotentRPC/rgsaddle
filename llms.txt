@@ -29,6 +29,7 @@ rgsaddle is system-agnostic and unit-agnostic: surfaces supply energies, gradien
 
 - [Step a NEB band](https://omnipotentrpc.github.io/rgsaddle/howto/band.html): NEB, climbing image, OCI-NEB, simplified and growing string, free-end adaptive NEB, IDPP, AFIR, and connect (`docs/orgmode/howto/band.org`)
 - [Grow a band with AutoNEB](https://omnipotentrpc.github.io/rgsaddle/howto/autoneb.html): AutoNEB window insertion and spring scaling (`docs/orgmode/howto/autoneb.org`)
+- [Optimize a fixed-energy tunnelling path (LI-NEB)](https://omnipotentrpc.github.io/rgsaddle/howto/line-neb.html): Fixed-energy line-integral NEB, endpoint policy, and motion along the path (`docs/orgmode/howto/line-neb.org`)
 - [Follow a minimum mode](https://omnipotentrpc.github.io/rgsaddle/howto/minmode.html): Dimer, Lanczos, soft-mode seeding, surrogate Hessian actions, saddle index, and ARTn protocol (`docs/orgmode/howto/minmode.org`)
 - [Leave a minimum with ART nouveau](https://omnipotentrpc.github.io/rgsaddle/howto/art.html): Phased Activation-Relaxation Technique nouveau (ArtSession) (`docs/orgmode/howto/art.org`)
 - [Follow k lowest modes](https://omnipotentrpc.github.io/rgsaddle/howto/indexk.html): Index-k minimum-mode searches with LOBPCG and block Lanczos (`docs/orgmode/howto/indexk.org`)

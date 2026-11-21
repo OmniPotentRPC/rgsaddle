@@ -57,8 +57,81 @@ pub enum EndpointBelowEnergy {
     /// returns it to the fixed energy, as in the published LI-NEB scheme.
     #[default]
     Restrained,
-    /// Stop the session with [`SaddleError::LineNebEndpointBelowEnergy`].
+    /// Stop the session with [`SaddleError::Invalid`].
+    ///
+    /// [`LineNebEndpointViolation`] carries the endpoint, `V - E`, and the
+    /// one-based step. [`SaddleError`] gains no variant.
     Strict,
+}
+
+/// A strict LI-NEB session found an endpoint below the fixed energy.
+///
+/// [`LineNebSession::step`] returns this as [`SaddleError::Invalid`]. The
+/// message names the endpoint (`first` or `last`), the signed difference
+/// `V - E`, and the one-based step. [`LineNebSession::endpoint_violation`]
+/// and [`Self::from_error`] read the same record. [`SaddleError`] is
+/// unchanged.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct LineNebEndpointViolation {
+    /// Endpoint name, either `first` or `last`.
+    pub endpoint: &'static str,
+    /// Endpoint potential energy minus the fixed energy, `V - E`.
+    pub energy_difference: f64,
+    /// One-based session step that detected the endpoint.
+    pub step: usize,
+}
+
+impl LineNebEndpointViolation {
+    /// The [`SaddleError::Invalid`] value a strict session returns.
+    #[must_use]
+    pub fn to_error(self) -> SaddleError {
+        SaddleError::Invalid(self.message())
+    }
+
+    /// The violation when `err` is the strict-endpoint invalid parameter.
+    #[must_use]
+    pub fn from_error(err: &SaddleError) -> Option<Self> {
+        let SaddleError::Invalid(message) = err else {
+            return None;
+        };
+        parse_endpoint_violation(message)
+    }
+
+    fn message(self) -> String {
+        format!(
+            "LI-NEB {} endpoint lies below the fixed energy at step {}: V - E = {}",
+            self.endpoint, self.step, self.energy_difference
+        )
+    }
+}
+
+fn parse_endpoint_violation(message: &str) -> Option<LineNebEndpointViolation> {
+    let rest = message.strip_prefix("LI-NEB ")?;
+    let (endpoint, rest) = if let Some(rest) =
+        rest.strip_prefix("first endpoint lies below the fixed energy at step ")
+    {
+        ("first", rest)
+    } else {
+        (
+            "last",
+            rest.strip_prefix("last endpoint lies below the fixed energy at step ")?,
+        )
+    };
+    let (step_text, difference_text) = rest.split_once(": V - E = ")?;
+    let step: usize = step_text.parse().ok()?;
+    if step_text != step.to_string() {
+        return None;
+    }
+    let energy_difference: f64 = difference_text.parse().ok()?;
+    if !energy_difference.is_finite() || difference_text != format!("{energy_difference}") {
+        return None;
+    }
+    Some(LineNebEndpointViolation {
+        endpoint,
+        energy_difference,
+        step,
+    })
 }
 
 /// All dimensional controls for a fixed-energy LI-NEB session.
@@ -250,11 +323,12 @@ fn action_weights(
                     }
                     BelowEndpoint::Restrained => continue,
                     BelowEndpoint::Strict { step } => {
-                        return Err(SaddleError::LineNebEndpointBelowEnergy {
+                        return Err(LineNebEndpointViolation {
                             endpoint: if i == 0 { "first" } else { "last" },
                             energy_difference: excess,
                             step,
-                        });
+                        }
+                        .to_error());
                     }
                 }
             }
@@ -830,6 +904,7 @@ pub struct LineNebSession {
     q: Array2<f64>,
     solver: Solver,
     iteration: usize,
+    endpoint_violation: Option<LineNebEndpointViolation>,
 }
 
 impl LineNebSession {
@@ -885,6 +960,7 @@ impl LineNebSession {
             q,
             solver,
             iteration: 0,
+            endpoint_violation: None,
         })
     }
 
@@ -904,9 +980,27 @@ impl LineNebSession {
         self.iteration
     }
 
+    /// Strict-endpoint record from the latest [`Self::step`], when that
+    /// step stopped because an endpoint was below the fixed energy.
+    #[must_use]
+    pub fn endpoint_violation(&self) -> Option<LineNebEndpointViolation> {
+        self.endpoint_violation
+    }
+
     /// Evaluate through [`BandSurface`] and take one global projected
     /// quick-min step. The host owns every call and its force budget.
+    ///
+    /// # Errors
+    ///
+    /// [`SaddleError::Invalid`] when [`EndpointBelowEnergy::Strict`] finds
+    /// an endpoint below the fixed energy. The message names that endpoint
+    /// (`first` or `last`), `V - E`, and this one-based step.
+    /// [`Self::endpoint_violation`] returns the same record, and the
+    /// session iteration does not advance. Also [`SaddleError::Shape`],
+    /// [`SaddleError::NonFinite`], [`SaddleError::Solver`], and the errors
+    /// of [`BandSurface::eval`].
     pub fn step<S: BandSurface>(&mut self, surface: &S) -> Result<LineNebReport, SaddleError> {
+        self.endpoint_violation = None;
         let shape = self.q.raw_dim();
         let config = &self.config;
         let masses = self.masses.view();
@@ -962,17 +1056,18 @@ impl LineNebSession {
         };
         if let Some(err) = stored {
             self.solver.forget_evaluation();
+            self.endpoint_violation = LineNebEndpointViolation::from_error(&err);
             return Err(err);
         }
         stepped.map_err(|err| SaddleError::Solver(err.to_string()))?;
         let accepted = flat.clone();
-        self.q = flat
+        let accepted_q = flat
             .into_shape_with_order(shape)
             .map_err(|err| SaddleError::Shape(err.to_string()))?;
-        if !self.q.iter().all(|v| v.is_finite()) {
+        if !accepted_q.iter().all(|v| v.is_finite()) {
+            self.solver.forget_evaluation();
             return Err(SaddleError::NonFinite("LI-NEB step"));
         }
-        self.iteration = step;
         let cached = match latest.into_inner() {
             Ok(value) => value,
             Err(_) => {
@@ -984,12 +1079,20 @@ impl LineNebSession {
         };
         let evaluation = match cached {
             Some((evaluated, evaluation)) if evaluated == accepted => evaluation,
-            _ => {
-                let evaluation = evaluate(config, masses, surface, self.q.view(), step)?;
-                rows.fetch_add(self.q.nrows(), Ordering::Relaxed);
-                evaluation
-            }
+            _ => match evaluate(config, masses, surface, accepted_q.view(), step) {
+                Ok(evaluation) => {
+                    rows.fetch_add(accepted_q.nrows(), Ordering::Relaxed);
+                    evaluation
+                }
+                Err(err) => {
+                    self.solver.forget_evaluation();
+                    self.endpoint_violation = LineNebEndpointViolation::from_error(&err);
+                    return Err(err);
+                }
+            },
         };
+        self.q = accepted_q;
+        self.iteration = step;
         let status = if evaluation.max_interior_perpendicular <= self.config.force_tol
             && evaluation.max_interior_spring <= self.config.force_tol
             && evaluation.max_endpoint_optimized <= self.config.force_tol
@@ -1007,6 +1110,43 @@ impl LineNebSession {
             iteration: self.iteration,
             surface_rows: rows.load(Ordering::Relaxed),
         })
+    }
+}
+
+#[cfg(test)]
+mod endpoint_violation_tests {
+    use super::LineNebEndpointViolation;
+    use crate::SaddleError;
+
+    #[test]
+    fn the_message_round_trips_the_signed_difference() {
+        for (endpoint, energy_difference, step) in [
+            ("first", -0.05640000000000003_f64, 1_usize),
+            ("last", -1.0e-20, 2),
+            ("first", (1.2_f64 * 1.2 - 1.0).powi(2) - 0.25, 7),
+        ] {
+            let violation = LineNebEndpointViolation {
+                endpoint,
+                energy_difference,
+                step,
+            };
+            let err = violation.to_error();
+            let SaddleError::Invalid(message) = &err else {
+                panic!("strict endpoint is an invalid parameter: {err:?}");
+            };
+            assert!(message.starts_with(&format!(
+                "LI-NEB {endpoint} endpoint lies below the fixed energy at step {step}:"
+            )));
+            let recovered = LineNebEndpointViolation::from_error(&err).expect("message parses");
+            assert_eq!(recovered.endpoint, endpoint);
+            assert_eq!(recovered.step, step);
+            assert_eq!(
+                recovered.energy_difference.to_bits(),
+                energy_difference.to_bits()
+            );
+        }
+        let refused = SaddleError::Invalid("LI-NEB endpoint 0 lies below the fixed energy".into());
+        assert!(LineNebEndpointViolation::from_error(&refused).is_none());
     }
 }
 

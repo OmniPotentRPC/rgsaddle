@@ -49,19 +49,23 @@ Each interior image moves under the action force perpendicular to the improved t
 ~LineNebReport~ carries three maxima: ~max_interior_perpendicular~, ~max_interior_spring~, and ~max_endpoint_optimized~. ~LineNebStatus::Converged~ needs all three within ~force_tol~. With one coordinate per image the transverse force is zero by construction and the endpoints can already sit on =E=, so the spring residual is what keeps an unevenly spaced band from stopping early.
 
 * Choose the endpoint policy
-Equations 19 to 22 of Ásgeirsson, Arnaldsson, and Jónsson @@rst::cite:`asgeirssonEfficientEvaluationAtom2018`@@ define the endpoint steepest descent direction. With =f_hat = -grad V / |grad V|= and =g_sp = k (r_neighbour - r_end)=, this implementation uses
+Equations 19 to 22 of Ásgeirsson, Arnaldsson, and Jónsson @@rst::cite:`asgeirssonEfficientEvaluationAtom2018`@@ define the endpoint steepest descent direction. The session works in mass-scaled coordinates, with ~f_hat~ the unit mass-scaled force and ~g_sp~ the spring:
 
 #+begin_src text
-g_opt = g_sp - (g_sp . f_hat) f_hat
-        + endpoint_kappa (V(r_end) - E) f_hat
+q       = sqrt(m) x
+force_q = -grad V / sqrt(m)
+f_hat   = force_q / |force_q|
+g_sp    = k (q_neighbour - q_end)
+g_opt   = g_sp - (g_sp . f_hat) f_hat
+          + endpoint_kappa (V(q_end) - E) f_hat
 #+end_src
 
-The projection removes the spring component normal to the isoenergy contour. The positive sign on the last term moves an endpoint above =E= along =f_hat=, which lowers its energy. Below =E= the negative energy difference reverses that direction and raises the energy. In both cases the endpoint returns to =V = E=.
+The projection removes the spring component along the mass-scaled force, which is the direction normal to the isoenergy contour. The positive sign on the last term moves an endpoint above =E= along =f_hat=, which lowers its energy. Below =E= the negative energy difference reverses that direction and raises the energy. In both cases the endpoint returns to the contour ~V = E~.
 
 Set the session policy with ~with_endpoint_below_energy~:
 
-- ~EndpointBelowEnergy::Restrained~ is the default and follows the paper's scheme. The session gives an endpoint below =E= zero action weight, as at a turning point, while the restraint returns it to the contour. The session continues, and ~LineNebReport::action~ equals ~fixed_energy_action~ again when both endpoints are at or above =E=.
-- ~EndpointBelowEnergy::Strict~ stops immediately. It returns ~SaddleError::LineNebEndpointBelowEnergy~ with the endpoint name (=first= or =last=), the signed difference =V - E=, and the one based session step. It never substitutes a turning point weight.
+- ~EndpointBelowEnergy::Restrained~ is the default and follows the paper's scheme. The session gives an endpoint below =E= zero action weight, as at a turning point, while the restraint returns it to the contour. The session continues, and ~LineNebReport::action~ equals ~fixed_energy_action~ again when both endpoints are at or above =E=. A converged restrained session can still sit slightly below =E= when the band approaches the contour from below, because convergence tests the force residual rather than the energy. ~fixed_energy_action~ then still returns ~SaddleError::Invalid~.
+- ~EndpointBelowEnergy::Strict~ stops immediately and never substitutes a turning point weight. It returns ~SaddleError::Invalid~, so the error enum is unchanged. The message names the endpoint (=first= or =last=), the signed difference =V - E=, and the one-based session step. ~LineNebEndpointViolation~ carries those three fields, and ~LineNebSession::endpoint_violation~ reads them. The failed step does not advance the session.
 
 * Dynamics along the path
 ~FixedEnergyTrajectory~ splines a converged path in mass-weighted coordinates and integrates the motion on the inverted potential along it, the dynamics Ásgeirsson, Arnaldsson, and Jónsson use to find the temperature at which the path is an instanton. Both splines are a ~Spline~ with ~SplineEnds::Natural~, zero curvature at the end knots; string reparametrization keeps the not-a-knot spline. ~Spline::sample~ returns a ~SplineSample~ with the value and the first two derivatives. ~half~ runs from the left turning point until the path ends or the velocity turns back and returns one ~TrajectoryPoint~ per step, ~period~ is twice that time, and ~arc_at_time~ interpolates the arc between stored points. A spent step budget is ~SaddleError::Invalid~ with a message that starts =work budget exhausted=.

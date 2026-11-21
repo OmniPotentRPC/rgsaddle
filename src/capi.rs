@@ -480,7 +480,6 @@ pub(crate) fn status_of(err: &SaddleError) -> i32 {
         SaddleError::NonFinite(_) => RGSADDLE_NON_FINITE,
         SaddleError::Solver(_) => RGSADDLE_SOLVER,
         SaddleError::Invalid(_) => RGSADDLE_INVALID_PARAMETER,
-        SaddleError::LineNebEndpointBelowEnergy { .. } => RGSADDLE_INVALID_PARAMETER,
         SaddleError::Stalled(_) => RGSADDLE_STALLED,
         SaddleError::NotEquilibrated { .. } => RGSADDLE_NOT_EQUILIBRATED,
         SaddleError::InsufficientEffectiveSamples { .. } => RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES,
@@ -2216,3 +2215,20 @@ mod solid;
 pub use solid::*;
 mod stencil;
 pub use stencil::*;
+
+#[cfg(test)]
+mod strict_endpoint_status {
+    use super::{RGSADDLE_INVALID_PARAMETER, status_of};
+    use crate::line_neb::LineNebEndpointViolation;
+
+    #[test]
+    fn a_strict_endpoint_maps_to_invalid_parameter() {
+        let err = LineNebEndpointViolation {
+            endpoint: "last",
+            energy_difference: -0.25,
+            step: 3,
+        }
+        .to_error();
+        assert_eq!(status_of(&err), RGSADDLE_INVALID_PARAMETER);
+    }
+}

@@ -79,8 +79,8 @@ pub mod idpp;
 pub mod indexk;
 #[cfg(feature = "lammps")]
 pub mod lammps;
-pub mod lineb;
 pub mod line_neb;
+pub mod lineb;
 pub mod minmode;
 pub mod nichols;
 pub mod occupancy;
@@ -165,6 +165,11 @@ pub use lammps::{
     LammpsHyperplaneSampler, LammpsSamplerConfig, LammpsSystem, LammpsThermodynamicReference,
     LammpsThermostatKind, LammpsThermostatRecord,
 };
+pub use line_neb::{
+    EndpointBelowEnergy, FixedEnergySeed, LineNebConfig, LineNebEndpointViolation, LineNebReport,
+    LineNebSession, LineNebStatus, fixed_energy_action, fixed_energy_action_force,
+    fixed_energy_mep_seed,
+};
 pub use lineb::{
     Continuation, HqtstRate, LinebCalls, LinebConfig, LinebPath, LinebRateOrbit, LinebReport,
     LinebSession, LinebStatus, LinebTurning, Masses, continue_from_mep,
@@ -175,10 +180,6 @@ pub use lineb::{
 pub use lineb::{
     cartesian_image_hessian, hqtst_rate_from_image_hessians, hqtst_rate_interpolated_hessian,
     hqtst_rate_interpolated_hessian_observed, hqtst_rate_interpolated_hessian_with_step,
-};
-pub use line_neb::{
-    EndpointBelowEnergy, FixedEnergySeed, LineNebConfig, LineNebReport, LineNebSession,
-    LineNebStatus, fixed_energy_action, fixed_energy_action_force, fixed_energy_mep_seed,
 };
 pub use minmode::{
     ArtNConfig, FiniteDifference, MinModeConfig, MinModeKind, MinModeReport, MinModeSession,

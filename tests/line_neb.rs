@@ -1,8 +1,8 @@
 use ndarray::{Array1, Array2, ArrayView2, array};
 use rgsaddle::{
-    BandSurface, EndpointBelowEnergy, FixedEnergySeed, LineNebConfig, LineNebSession,
-    LineNebStatus, SaddleError, Spline, fixed_energy_action, fixed_energy_action_force,
-    fixed_energy_mep_seed,
+    BandSurface, EndpointBelowEnergy, FixedEnergySeed, LineNebConfig, LineNebEndpointViolation,
+    LineNebSession, LineNebStatus, SaddleError, Spline, fixed_energy_action,
+    fixed_energy_action_force, fixed_energy_mep_seed,
 };
 
 fn analytic_surface(positions: ArrayView2<'_, f64>) -> (Array1<f64>, Array2<f64>) {
@@ -199,19 +199,140 @@ fn strict_reports_the_first_below_energy_endpoint() {
     let config = below_energy_config(EndpointBelowEnergy::Strict);
     let mut session = LineNebSession::new(config, positions).unwrap();
 
-    match session.step(&DoubleWell) {
-        Err(SaddleError::LineNebEndpointBelowEnergy {
-            endpoint,
-            energy_difference,
-            step,
-        }) => {
-            assert_eq!(endpoint, "first");
-            assert_eq!(energy_difference, expected_difference);
-            assert_eq!(step, 1);
+    let err = session.step(&DoubleWell).unwrap_err();
+    assert_strict_violation(&session, &err, "first", expected_difference, 1);
+}
+
+#[test]
+fn strict_reports_the_last_below_energy_endpoint() {
+    let positions = array![
+        [-1.35, 0.0],
+        [-0.5, 0.1],
+        [0.0, 0.1],
+        [0.5, 0.1],
+        [1.15, 0.0]
+    ];
+    let mut energies = Array1::zeros(positions.nrows());
+    let mut gradients = Array2::zeros(positions.raw_dim());
+    DoubleWell
+        .eval(positions.view(), &mut energies, &mut gradients)
+        .unwrap();
+    let target = 0.25;
+    assert!(energies[0] >= target && energies[4] < target);
+    let expected_difference = energies[4] - target;
+    let config = below_energy_config(EndpointBelowEnergy::Strict);
+    let mut session = LineNebSession::new(config, positions).unwrap();
+    let err = session.step(&DoubleWell).unwrap_err();
+    assert_strict_violation(&session, &err, "last", expected_difference, 1);
+}
+
+#[test]
+fn strict_reports_a_later_step_when_the_run_crosses_below() {
+    let positions = array![
+        [-1.35, 0.0],
+        [-0.45, 0.05],
+        [0.0, 0.08],
+        [0.45, 0.05],
+        [1.35, 0.0]
+    ];
+    let config = below_energy_config(EndpointBelowEnergy::Strict);
+    let mut session = LineNebSession::new(config, positions).unwrap();
+    let first = session
+        .step(&ClampedEndpoints)
+        .expect("a clamped band stays at or above the fixed energy");
+    assert_eq!(first.iteration, 1);
+    assert!(session.endpoint_violation().is_none());
+    let parked = session.positions();
+    let err = session.step(&DropLastEndpoint).unwrap_err();
+    assert_strict_violation(&session, &err, "last", -0.25, 2);
+    assert_eq!(session.positions(), parked);
+}
+
+#[test]
+fn strict_from_above_matches_the_fixed_energy_action() {
+    let target = 0.25;
+    let turning = 1.5_f64.sqrt() + 1.0e-3;
+    let positions = array![
+        [-turning, 0.0],
+        [-0.6, 0.02],
+        [0.0, 0.02],
+        [0.6, 0.02],
+        [turning, 0.0]
+    ];
+    let mut energies = Array1::zeros(positions.nrows());
+    let mut gradients = Array2::zeros(positions.raw_dim());
+    DoubleWell
+        .eval(positions.view(), &mut energies, &mut gradients)
+        .unwrap();
+    assert!(energies[0] > target && energies[4] > target);
+    let config = below_energy_config(EndpointBelowEnergy::Strict)
+        .with_time_step(0.01)
+        .with_force_tol(1.0e-3);
+    let mut session = LineNebSession::new(config, positions).unwrap();
+    let report = loop {
+        let report = session.step(&DoubleWell).unwrap();
+        if report.status == LineNebStatus::Converged {
+            break report;
         }
-        other => panic!("unexpected strict result: {other:?}"),
-    }
-    assert_eq!(session.iteration(), 0);
+        assert!(report.iteration < 100_000, "{report:?}");
+    };
+    assert!(session.endpoint_violation().is_none());
+    let converged = session.positions();
+    let mut converged_energies = Array1::zeros(converged.nrows());
+    let mut converged_gradients = Array2::zeros(converged.raw_dim());
+    DoubleWell
+        .eval(
+            converged.view(),
+            &mut converged_energies,
+            &mut converged_gradients,
+        )
+        .unwrap();
+    assert!(converged_energies[0] >= target && converged_energies[converged.nrows() - 1] >= target);
+    let masses = array![1.0, 2.0];
+    let action = fixed_energy_action(
+        converged.view(),
+        converged_energies.view(),
+        masses.view(),
+        target,
+        1.0,
+    )
+    .unwrap();
+    assert_eq!(report.action, action);
+}
+
+fn assert_strict_violation(
+    session: &LineNebSession,
+    err: &SaddleError,
+    endpoint: &str,
+    energy_difference: f64,
+    step: usize,
+) {
+    let SaddleError::Invalid(message) = err else {
+        panic!("strict failure is an invalid parameter: {err:?}");
+    };
+    assert!(
+        message.starts_with(&format!(
+            "LI-NEB {endpoint} endpoint lies below the fixed energy at step {step}:"
+        )),
+        "{message}"
+    );
+    let violation = session
+        .endpoint_violation()
+        .expect("session keeps the strict endpoint");
+    assert_eq!(violation.endpoint, endpoint);
+    assert_eq!(
+        violation.energy_difference.to_bits(),
+        energy_difference.to_bits()
+    );
+    assert_eq!(violation.step, step);
+    let parsed = LineNebEndpointViolation::from_error(err).expect("message keeps the record");
+    assert_eq!(parsed.endpoint, endpoint);
+    assert_eq!(parsed.step, step);
+    assert_eq!(
+        parsed.energy_difference.to_bits(),
+        energy_difference.to_bits()
+    );
+    assert_eq!(session.iteration(), step - 1);
 }
 
 #[test]
@@ -224,6 +345,58 @@ fn natural_cubic_returns_value_and_derivatives() {
 }
 
 struct DoubleWell;
+
+struct ClampedEndpoints;
+
+struct DropLastEndpoint;
+
+impl BandSurface for ClampedEndpoints {
+    fn eval(
+        &self,
+        positions: ArrayView2<'_, f64>,
+        energies: &mut Array1<f64>,
+        gradients: &mut Array2<f64>,
+    ) -> Result<(), SaddleError> {
+        DoubleWell.eval(positions, energies, gradients)?;
+        let target = 0.25;
+        let last = energies.len() - 1;
+        if energies[0] < target {
+            energies[0] = target;
+        }
+        if energies[last] < target {
+            energies[last] = target;
+        }
+        for energy in energies.iter_mut().take(last).skip(1) {
+            if *energy <= target {
+                *energy = target + 1.0;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl BandSurface for DropLastEndpoint {
+    fn eval(
+        &self,
+        positions: ArrayView2<'_, f64>,
+        energies: &mut Array1<f64>,
+        gradients: &mut Array2<f64>,
+    ) -> Result<(), SaddleError> {
+        DoubleWell.eval(positions, energies, gradients)?;
+        let target = 0.25;
+        let last = energies.len() - 1;
+        if energies[0] < target {
+            energies[0] = target;
+        }
+        for energy in energies.iter_mut().take(last).skip(1) {
+            if *energy <= target {
+                *energy = target + 1.0;
+            }
+        }
+        energies[last] = 0.0;
+        Ok(())
+    }
+}
 
 impl BandSurface for DoubleWell {
     fn eval(
