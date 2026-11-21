@@ -3261,17 +3261,17 @@ fn cart_of(key: (i32, i32, i32), a: f64) -> [f64; 3] {
     ]
 }
 
-/// Zero-pressure lattice parameter of the Mishin crystal.
-///
-/// This is `rgsaddle::npt_lattice` on the 6x6x6 cell: Langevin dynamics
+/// `rgsaddle::npt_lattice` on the 6x6x6 Mishin cell: Langevin dynamics
 /// plus a Berendsen barostat whose pressure is the configurational
 /// stress, which this EAM returns tension-positive, plus the kinetic
-/// pressure. The average is the second half of the run.
-fn npt_lattice(copper: &FastCopper, temperature: f64) -> f64 {
+/// pressure.
+fn npt_lattice_run(
+    copper: &FastCopper,
+    temperature: f64,
+    config: rgsaddle::NptConfig,
+) -> rgsaddle::NptReport {
     let (mut positions, cell) = fcc(6, 3.615);
     let mut cell = rgsaddle::Cell(cell);
-    let config = rgsaddle::NptConfig::default()
-        .with_seed((temperature as u64).wrapping_mul(17).wrapping_add(11));
     let report = rgsaddle::npt_lattice(
         &mut positions,
         &mut cell,
@@ -3282,15 +3282,27 @@ fn npt_lattice(copper: &FastCopper, temperature: f64) -> f64 {
     )
     .expect("NPT lattice run");
     eprintln!(
-        "npt {temperature} K steps {} a {:.5} +- {:.5} P {:.4e} +- {:.2e} converged {}",
+        "npt {temperature} K seed {} steps {} a {:.5} +- {:.5} (resolved {}) P {:.4e} +- {:.2e} \
+         (resolved {}) converged {}",
+        config.seed,
         report.steps,
         report.mean_lattice_a,
         report.lattice_standard_error,
+        report.lattice_error_resolved,
         report.mean_pressure,
         report.pressure_standard_error,
+        report.pressure_error_resolved,
         report.pressure_converged
     );
-    report.mean_lattice_a
+    report
+}
+
+/// Zero-pressure lattice parameter of the Mishin crystal at the default
+/// settings: the mean over the production half of a 4000 step run.
+fn npt_lattice(copper: &FastCopper, temperature: f64) -> f64 {
+    let config = rgsaddle::NptConfig::default()
+        .with_seed((temperature as u64).wrapping_mul(17).wrapping_add(11));
+    npt_lattice_run(copper, temperature, config).mean_lattice_a
 }
 
 /// Regenerates the table in `measured_lattice`.
@@ -3305,6 +3317,70 @@ fn npt_lattice_table() {
         eprintln!("TABLE {temperature} K {a:.6}");
         assert!((3.50..3.85).contains(&a));
     }
+}
+
+/// Measures what the default run length leaves in the 600 K lattice
+/// parameter by comparing short and long runs of the same system.
+///
+/// `SHORT_SEEDS` runs of the default 4000 steps (2000 discarded) and
+/// `LONG_SEEDS` runs of 40000 steps (2000 discarded), all with the table
+/// settings and the seeds named below, run on one thread each.
+///
+/// `cargo test --release --test mishin_cu npt_lattice_run_length -- --ignored --nocapture`
+#[test]
+#[ignore = "release NPT run-length comparison at 600 K; prints the short and long run lattice parameters"]
+fn npt_lattice_run_length() {
+    const SHORT_SEEDS: u64 = 8;
+    const LONG_SEEDS: u64 = 4;
+    let temperature = 600.0;
+    let jobs: Vec<(u64, usize)> = (1..=SHORT_SEEDS)
+        .map(|seed| (seed, 4_000))
+        .chain((1..=LONG_SEEDS).map(|seed| (seed, 40_000)))
+        .collect();
+    let next = AtomicUsize::new(0);
+    let results = std::sync::Mutex::new(Vec::new());
+    std::thread::scope(|scope| {
+        for _ in 0..8 {
+            scope.spawn(|| {
+                let copper = FastCopper::new();
+                loop {
+                    let job = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(&(seed, steps)) = jobs.get(job) else {
+                        break;
+                    };
+                    let config = rgsaddle::NptConfig::default()
+                        .with_steps(steps)
+                        .with_maximum_steps(steps)
+                        .with_seed(seed);
+                    let report = npt_lattice_run(&copper, temperature, config);
+                    results.lock().unwrap().push((steps, report.mean_lattice_a));
+                }
+            });
+        }
+    });
+    let results = results.into_inner().unwrap();
+    let summary = |steps: usize| {
+        let a: Vec<f64> = results
+            .iter()
+            .filter(|(length, _)| *length == steps)
+            .map(|(_, a)| *a)
+            .collect();
+        let mean = a.iter().sum::<f64>() / a.len() as f64;
+        let spread =
+            (a.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (a.len() - 1) as f64).sqrt();
+        (mean, spread, a.len())
+    };
+    let (short, short_spread, short_runs) = summary(4_000);
+    let (long, long_spread, long_runs) = summary(40_000);
+    let short_error = short_spread / (short_runs as f64).sqrt();
+    let long_error = long_spread / (long_runs as f64).sqrt();
+    eprintln!(
+        "RUN LENGTH {temperature} K: 4000 steps a {short:.6} (spread {short_spread:.6}, \
+         {short_runs} seeds, SE {short_error:.6}); 40000 steps a {long:.6} (spread \
+         {long_spread:.6}, {long_runs} seeds, SE {long_error:.6}); short minus long {:.6} +- {:.6}",
+        short - long,
+        short_error.hypot(long_error)
+    );
 }
 
 #[derive(Clone)]
@@ -4877,26 +4953,34 @@ fn rotations_onto(from: [f64; 3], to: [f64; 3]) -> Vec<[[f64; 3]; 3]> {
 /// Zero-pressure lattice parameter of the Mishin crystal, in Angstrom.
 ///
 /// These come from `rgsaddle::npt_lattice` with the kinetic pressure
-/// included. Regenerate them with
+/// included, one default 4000 step run per temperature (2000 discarded),
+/// seed `17 T + 11`. Regenerate them with
 /// `cargo test --release --test mishin_cu npt_lattice_table -- --ignored --nocapture`.
-/// The 600 K run misses the two standard error pressure rule at the
-/// default 4000 steps (mean pressure 2.2445e-4 eV/A^3, SE 8.28e-5); the
-/// bias this leaves in `a` is of the order of its own standard error.
+///
+/// Each entry is one run, so it carries the seed to seed scatter of a
+/// short run. At 600 K, eight seeds of that length gave a spread of
+/// 0.0006 A, and the reported standard error of each run (0.00004 to
+/// 0.00013 A) is below it because the blocking estimate had not reached a
+/// plateau. The mean of those eight runs and of four 40000 step runs
+/// differ by 0.00003 A with an uncertainty of 0.00023 A, so the run length
+/// leaves no bias that this comparison can resolve. `npt_lattice_run_length`
+/// repeats the measurement. Only the 500 K run passes the pressure screen
+/// at 4000 steps.
 ///
 /// STALE: the values recorded here before were 3.628311, 3.633713,
 /// 3.638666, 3.644160 and 3.649788 A at 300 to 700 K. They came from an
 /// integrator that left the kinetic pressure out of the barostat, so
-/// they are too small by 0.003 to 0.007 A. Every file under
+/// they are too small by 0.0036 to 0.0077 A. Every file under
 /// `benchmarks/` and `validation/` and every figure in the docs that was
 /// produced with them is stale until it is rerun.
 fn measured_lattice(temperature: f64) -> f64 {
     match temperature as i32 {
-        300 => 3.631316,
-        400 => 3.637786,
-        500 => 3.643980,
-        600 => 3.650594,
-        700 => 3.657130,
-        _ => 3.643980,
+        300 => 3.631945,
+        400 => 3.638168,
+        500 => 3.643490,
+        600 => 3.650947,
+        700 => 3.657468,
+        _ => 3.643490,
     }
 }
 
