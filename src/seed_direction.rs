@@ -12,7 +12,8 @@ use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 
 use crate::eigensolve::DENSE_JACOBI_LIMIT;
 use crate::{
-    PointSurface, SaddleError, SparseHessianOpts, SparsityPattern, exact_eigh, sparse_hessian,
+    PointSurface, SaddleError, SparseHessianOpts, SparsityPattern, exact_eigh, one_atom_hessian,
+    sparse_hessian,
 };
 
 /// Soft-mode-first direction plan.
@@ -67,7 +68,7 @@ pub fn mode_sweep_schedule(total_modes: usize, draws: usize) -> Result<Vec<usize
 /// Build one localized seed for every non-rigid Hessian mode, soft to stiff.
 ///
 /// The Hessian is recovered by central differences over an all-pairs
-/// sparsity pattern and diagonalized in full. That costs `6 N` gradient
+/// sparsity pattern, one atom per colour, and diagonalized in full. That costs `6 N` gradient
 /// evaluations, `O((3N)^3)` time and `O((3N)^2)` memory for `N` atoms, and
 /// builds every direction whatever schedule the caller then picks from
 /// [`mode_sweep_schedule`]. Above 128 degrees of freedom the diagonalization
@@ -140,7 +141,9 @@ pub fn hessian_mode_sweep_directions<S: PointSurface>(
         }
     }
     let pattern = SparsityPattern::from_adjacency(n_atoms, &pairs)?;
-    let hessian = sparse_hessian(surface, minimum, &pattern, SparseHessianOpts::default())?;
+    // Every pair of atoms is coupled, so distance-2 colouring would give each
+    // atom its own colour after an O(N^3) search. Name that partition.
+    let hessian = one_atom_hessian(surface, minimum, &pattern, SparseHessianOpts::default())?;
     let (eigenvalues, eigenvectors) = exact_eigh(hessian.to_dense().view())?;
     let mut directions = Vec::with_capacity(dof - rigid_modes);
     let mode_indices = (rigid_modes..dof).collect::<Vec<_>>();
@@ -291,7 +294,10 @@ mod tests {
         hessian_mode_sweep_directions, mode_sweep_schedule, soft_mode_then_full_directions,
         spectral_gap_rank, unit,
     };
-    use crate::{PointSurface, SaddleError, exact_eigh};
+    use crate::{
+        PointSurface, SaddleError, SparseHessianOpts, SparsityPattern, exact_eigh,
+        one_atom_hessian, sparse_hessian,
+    };
 
     struct DiagonalHarmonic;
 
@@ -568,6 +574,25 @@ mod tests {
         for direction in &plan.directions {
             assert!((direction.dot(direction) - 1.0).abs() < 1.0e-12);
         }
+    }
+
+    #[test]
+    fn the_all_pairs_pattern_needs_no_colouring_search() {
+        // The sweep recovers the Hessian with one colour per atom. That has
+        // to be the partition distance-2 colouring finds on a complete
+        // graph, or the sweep would change.
+        let atoms = 5;
+        let dof = 3 * atoms;
+        let pairs: Vec<(usize, usize)> = (0..atoms)
+            .flat_map(|i| ((i + 1)..atoms).map(move |j| (i, j)))
+            .collect();
+        let pattern = SparsityPattern::from_adjacency(atoms, &pairs).unwrap();
+        let surface = DenseQuadratic(dense_symmetric(dof));
+        let origin = Array1::from_shape_fn(dof, |i| 0.01 * (i as f64).sin());
+        let options = SparseHessianOpts::default();
+        let coloured = sparse_hessian(&surface, origin.view(), &pattern, options).unwrap();
+        let per_atom = one_atom_hessian(&surface, origin.view(), &pattern, options).unwrap();
+        assert_eq!(coloured.to_dense(), per_atom.to_dense());
     }
 
     #[test]
