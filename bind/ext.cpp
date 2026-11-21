@@ -1757,7 +1757,7 @@ LinebResultPy lineb_solve_python(nb::callable fn, Matrix positions, Vector atom_
                                  double opt_tol, double perp_tol, bool molecular, std::int64_t max_steps,
                                  std::int64_t beads, double spring, double endpoint_scale, double time_step,
                                  double max_move, double turning_width, double hbar, double boltzmann,
-                                 std::int64_t quadrature_pairs, std::optional<double> endpoint_kappa, bool linear_seed, bool endpoint_convergence, bool projected_verlet, bool return_orbit, bool interpolated_force_clock, bool interpolated_hessian, std::optional<double> image_hessian_step) {
+                                 std::int64_t quadrature_pairs, std::optional<double> endpoint_kappa, bool linear_seed, bool endpoint_convergence, bool projected_verlet, bool return_orbit, bool interpolated_force_clock, bool interpolated_hessian, std::optional<double> image_hessian_step, bool batch_surface) {
   const std::int64_t n_images = static_cast<std::int64_t>(positions.shape(0));
   const std::int64_t n_atoms = static_cast<std::int64_t>(atom_masses.shape(0));
   if (n_images < 3 || n_atoms <= 0) {
@@ -1820,7 +1820,8 @@ LinebResultPy lineb_solve_python(nb::callable fn, Matrix positions, Vector atom_
                              (endpoint_convergence ? RGSADDLE_LINEB_ENDPOINT_CONVERGENCE : 0u) |
                              (projected_verlet ? RGSADDLE_LINEB_PROJECTED_VERLET : 0u) |
                              (interpolated_force_clock ? RGSADDLE_LINEB_INTERPOLATED_FORCE_CLOCK : 0u) |
-                             (interpolated_hessian ? RGSADDLE_LINEB_INTERPOLATED_HESSIAN : 0u);
+                             (interpolated_hessian ? RGSADDLE_LINEB_INTERPOLATED_HESSIAN : 0u) |
+                             (batch_surface ? RGSADDLE_LINEB_BATCH_SURFACE : 0u);
     status = rgsaddle_lineb_solve_counted_rate(&cfg, n_images, n_atoms, positions.data(), atom_masses.data(),
                                   molecular ? 1 : 0, energy, max_steps, beads, connect_python_surface,
                                   &state, optimized.data(), &result, endpoint_kappa ? &*endpoint_kappa : nullptr, options, &counts, &negative_modes, &modes, out.orbit ? &descriptor : nullptr, &out.turning, image_hessian_step ? &*image_hessian_step : nullptr, &out.rate_diagnostics);
@@ -2089,6 +2090,7 @@ NB_MODULE(_core, m) {
       nb::arg("linear_seed") = false, nb::arg("endpoint_convergence") = false,
       nb::arg("projected_verlet") = false, nb::arg("return_orbit") = false, nb::arg("interpolated_force_clock") = false,
       nb::arg("interpolated_hessian") = false, nb::arg("image_hessian_step") = nb::none(),
+      nb::arg("batch_surface") = false,
       nb::sig(
           "def lineb_solve(surface: collections.abc.Callable[..., "
           "tuple[numpy.typing.NDArray[numpy.float64], numpy.typing.NDArray[numpy.float64]]], "
@@ -2096,10 +2098,12 @@ NB_MODULE(_core, m) {
           "energy: float, opt_tol: float, perp_tol: float, molecular: bool = False, max_steps: int = 1000, "
           "beads: int = 0, spring: float = 0.1, endpoint_scale: float = 0.2, time_step: float = 0.1, "
           "max_move: float = 0.2, turning_width: float = 0.001, hbar: float = 1.0, boltzmann: float = 1.0, "
-          "quadrature_pairs: int = 4, endpoint_kappa: float | None = None, linear_seed: bool = False, endpoint_convergence: bool = False, projected_verlet: bool = False, return_orbit: bool = False, interpolated_force_clock: bool = False, interpolated_hessian: bool = False, image_hessian_step: float | None = None) -> LinebResult"),
+          "quadrature_pairs: int = 4, endpoint_kappa: float | None = None, linear_seed: bool = False, endpoint_convergence: bool = False, projected_verlet: bool = False, return_orbit: bool = False, interpolated_force_clock: bool = False, interpolated_hessian: bool = False, image_hessian_step: float | None = None, batch_surface: bool = False) -> LinebResult"),
       "Fixed-energy LI-NEB path and optional harmonic rate. positions is (n_images, 3N). "
       "atom_masses is one positive mass per atom; molecular=False expands them to coordinates, "
-      "molecular=True aligns the free molecule. surface(x) is one image shaped (1, 3N). "
+      "molecular=True aligns the free molecule. The default callback receives one image. "
+      "With batch_surface=True, surface(x) receives (rows, 3N) and returns (rows,) energies "
+      "and (rows, 3N) gradients in input order. Call counts count geometries. "
       "beads=0 skips the rate and leaves log_rate_over_reactant as NaN. A calculator exception "
       "propagates. An unconverged search raises with the C status.");
 

@@ -93,6 +93,12 @@ request for each image plus one at the return point for the energy
 check. Verlet integration adds no potential requests.
 The measure counter includes the Simpson samples for the action.
 
+In Rust, =LinebConfig::with_gradient_end_tangents(true)= aligns the
+coordinate spline tangents with the surface gradients at both turning
+images, using two extra surface evaluations. Compare the force residual
+at the turn and at its neighbouring replicas to check how well the
+band resolves the turning region. The default uses not-a-knot tangents.
+
 * An energy ladder from a minimum energy path
 #+begin_src rust
 let ladder = Continuation::new(delta, images, levels);
@@ -153,6 +159,14 @@ With the =lineb-oracle= feature, =cartesian_image_hessian(surface, cartesian, st
 =LinebResult.surface_calls= gives integer configuration evaluations for =seed=, =optimization=, =path_preparation=, =quadrature=, =dynamics= and =rate=. Their sum is =total=. The rate entry is zero on a path-only run. In C, pass a =rgsaddle_lineb_counts_t= to =rgsaddle_lineb_solve_counted= (ABI minor 47). The combined =optimizer_calls= and =measure_calls= on the original result remain available.
 
 =rgsaddle.lineb_solve(surface, positions, atom_masses, energy, opt_tol, perp_tol, molecular=False, max_steps=1000, beads=0, ...)= is the run-to-completion binding (=howto/python=). =positions= is =(n_images, 3N)=, =atom_masses= is one mass per atom, and =surface(x)= is the one-image =(energy, gradient)= callback used by =connect=. =molecular=False= expands each atom mass to three coordinates; =molecular=True= aligns the free molecule. =beads=0= returns the path only with =log_rate_over_reactant= set to NaN. =LinebResult= exposes the optimized =positions=, the quadrature temperature =temperature= and the constrained-dynamics estimate =temperature_dynamics=, their half periods, the log rate, and the per-phase call counts. A calculator exception propagates; an unconverged search raises with the C status.
+
+Pass =batch_surface=True= when =surface= can evaluate a matrix of Cartesian
+geometries. A callback receives an array of shape =(rows, 3N)= and returns
+energies of shape =(rows,)= and gradients of shape =(rows, 3N)=, in input
+order. Independent band, quadrature and curvature evaluations can use
+multiple rows. Adaptive queries can still use a single row. The reported
+call counts count geometries. The corresponding option in C is
+~RGSADDLE_LINEB_BATCH_SURFACE~ (ABI minor 48).
 
 For a rate calculation, =LinebResult.modes= gives the number of retained
 fluctuation eigenvalues and =LinebResult.negative_modes= counts those below

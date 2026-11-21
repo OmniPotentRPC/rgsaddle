@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 47u
+#define RGSADDLE_ABI_MINOR 48u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -2028,6 +2028,10 @@ rgsaddle_status_t rgsaddle_lineb_solve_with_kappa(const rgsaddle_lineb_config_t 
 #define RGSADDLE_LINEB_INTERPOLATED_FORCE_CLOCK (1u << 3)
 /* Interpolate Cartesian image Hessians onto the equal-time replicas. */
 #define RGSADDLE_LINEB_INTERPOLATED_HESSIAN (1u << 4)
+/** Accept surface requests with multiple geometry rows in input order.
+ * Both singleton and batched requests carry their row count in n_images.
+ * LI-NEB call counts always count geometry rows. ABI minor 48. */
+#define RGSADDLE_LINEB_BATCH_SURFACE (1u << 5)
 
 /** Optimize with a choice of initial path, convergence test, and
  * integrator. Combine RGSADDLE_LINEB_LINEAR_SEED,

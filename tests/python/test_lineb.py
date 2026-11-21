@@ -77,6 +77,36 @@ def test_lineb_solve_path_only_returns_nan_rate() -> None:
     assert abs(result.half_period - exact_half) <= slack
 
 
+def test_lineb_batches_callback_rows_without_changing_the_solution() -> None:
+    positions, energy, tolerance = eckart_seed()
+    arguments = (positions, np.ones(1), energy, tolerance, tolerance)
+    scalar_sizes = []
+    batch_sizes = []
+
+    def scalar_surface(x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        scalar_sizes.append(len(x))
+        assert len(x) == 1
+        return eckart(x)
+
+    def batch_surface(x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        batch_sizes.append(len(x))
+        energies, gradients = zip(*(eckart(x[i : i + 1]) for i in range(len(x))))
+        return np.concatenate(energies), np.concatenate(gradients)
+
+    scalar = lineb_solve(scalar_surface, *arguments, max_steps=500, beads=8)
+    batch = lineb_solve(batch_surface, *arguments, max_steps=500, beads=8, batch_surface=True)
+
+    assert len(positions) in batch_sizes
+    assert len(batch_sizes) < len(scalar_sizes)
+    assert sum(batch_sizes) == sum(scalar_sizes) == batch.surface_calls["total"]
+    assert batch.surface_calls == scalar.surface_calls
+    assert batch.iterations == scalar.iterations
+    np.testing.assert_array_equal(batch.positions, scalar.positions)
+    assert batch.action == scalar.action
+    assert batch.temperature == scalar.temperature
+    assert batch.log_rate_over_reactant == scalar.log_rate_over_reactant
+
+
 def test_rate_uses_the_same_energy_zero_as_the_reactant_partition() -> None:
     positions, energy, tol = eckart_seed()
 

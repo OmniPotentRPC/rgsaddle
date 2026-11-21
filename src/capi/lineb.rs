@@ -3,17 +3,43 @@
 use std::ffi::c_void;
 use std::slice;
 
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 
 use super::stencil::{clear_last_error, fail, set_last_error};
 use super::{
     CSurface, RGSADDLE_INVALID_PARAMETER, RGSADDLE_NULL_REPORT, RGSADDLE_NULL_SURFACE, RGSADDLE_OK,
     RGSADDLE_SHAPE, RGSADDLE_STALLED, RgsaddleSurfaceFn,
 };
+use crate::error::SaddleError;
 use crate::lineb::hqtst_rate_interpolated_hessian_observed;
 use crate::lineb::{
     LinebConfig, LinebSession, LinebStatus, Masses, hqtst_rate, hqtst_rate_with_orbit,
 };
+use crate::{BandSurface, PointSurface};
+
+struct LinebSurface {
+    callback: CSurface,
+    batch: bool,
+}
+
+impl PointSurface for LinebSurface {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        PointSurface::eval(&self.callback, x)
+    }
+
+    fn eval_batch(&self, points: ArrayView2<f64>) -> Result<Vec<(f64, Array1<f64>)>, SaddleError> {
+        if !self.batch || points.nrows() < 2 {
+            return self.callback.eval_batch(points);
+        }
+        let mut energies = Array1::zeros(points.nrows());
+        let mut gradients = Array2::zeros(points.raw_dim());
+        BandSurface::eval(&self.callback, points, &mut energies, &mut gradients)?;
+        Ok(energies
+            .into_iter()
+            .zip(gradients.rows().into_iter().map(|row| row.to_owned()))
+            .collect())
+    }
+}
 
 /// Fixed-energy LI-NEB controls for [`rgsaddle_lineb_solve`] (ABI minor 47).
 ///
@@ -661,6 +687,7 @@ pub unsafe extern "C" fn rgsaddle_lineb_solve_counted_rate(
     const PROJECTED_VERLET: u32 = 4;
     const INTERPOLATED_FORCE_CLOCK: u32 = 8;
     const INTERPOLATED_HESSIAN: u32 = 16;
+    const BATCH_SURFACE: u32 = 32;
     let interpolate = options & INTERPOLATED_HESSIAN != 0;
     if image_hessian_step.is_some_and(|v| !interpolate || !v.is_finite() || v <= 0.) {
         set_last_error(
@@ -673,7 +700,8 @@ pub unsafe extern "C" fn rgsaddle_lineb_solve_counted_rate(
             | ENDPOINT_CONVERGENCE
             | PROJECTED_VERLET
             | INTERPOLATED_FORCE_CLOCK
-            | INTERPOLATED_HESSIAN)
+            | INTERPOLATED_HESSIAN
+            | BATCH_SURFACE)
         != 0
     {
         set_last_error("unknown LI-NEB solver option");
@@ -773,14 +801,17 @@ pub unsafe extern "C" fn rgsaddle_lineb_solve_counted_rate(
         Ok(cartesian) => cartesian,
         Err(_) => return RGSADDLE_SHAPE,
     };
-    let cs = CSurface {
-        f,
-        user,
-        n_atoms,
-        n_images,
-        per_image: false,
-        climbing_request: false,
-        rows: Default::default(),
+    let cs = LinebSurface {
+        callback: CSurface {
+            f,
+            user,
+            n_atoms,
+            n_images,
+            per_image: false,
+            climbing_request: false,
+            rows: Default::default(),
+        },
+        batch: options & BATCH_SURFACE != 0,
     };
     let config = config
         .with_endpoint_convergence(endpoint_convergence)
@@ -799,7 +830,7 @@ pub unsafe extern "C" fn rgsaddle_lineb_solve_counted_rate(
     };
     let outcome = session.run(&cs, max_steps_usize);
     out.iterations = as_i64(session.iteration());
-    out.optimizer_calls = as_i64(cs.rows.load(std::sync::atomic::Ordering::Relaxed));
+    out.optimizer_calls = as_i64(cs.callback.rows.load(std::sync::atomic::Ordering::Relaxed));
     let cartesian = match session.cartesian() {
         Ok(cartesian) => cartesian,
         Err(err) => return fail(&err),
