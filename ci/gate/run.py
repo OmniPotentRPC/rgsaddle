@@ -222,18 +222,22 @@ def pixi_leg(plan: dict[str, object]) -> LegResult:
     )
 
 
-def select_rust_module(output: str, prefix: str, suffix: str) -> str | None:
-    candidates = {
+def available_rust_modules(output: str) -> set[str]:
+    return {
         match.rstrip(":")
         for match in re.findall(r"Rust/[A-Za-z0-9.+_-]+", output)
-        if match.startswith(prefix) and match.endswith(suffix)
     }
 
-    def version_key(module: str) -> tuple[int, ...]:
-        version = module.removeprefix(prefix).removesuffix(suffix)
-        return tuple(int(part) for part in re.findall(r"\d+", version))
 
-    return max(candidates, key=version_key) if candidates else None
+def eessi_init_script(init: pathlib.Path) -> str:
+    # EESSI's init reads optional shell variables such as PS1. Keep nounset
+    # disabled only while sourcing it, then restore strict handling.
+    return (
+        "set -eo pipefail\n"
+        "set +u\n"
+        f"source {shlex.quote(str(init))}\n"
+        "set -u"
+    )
 
 
 def eessi_leg(plan: dict[str, object]) -> LegResult:
@@ -260,30 +264,69 @@ def eessi_leg(plan: dict[str, object]) -> LegResult:
             ],
         )
 
+    arch = platform.machine()
+    rust_modules = config["rust_modules"]
+    rust_module = rust_modules.get(arch)
+    if rust_module is None:
+        return LegResult(
+            name="eessi",
+            status="failed",
+            reason=f"no Rust module is pinned for architecture {arch}",
+            artefacts=[
+                f"EESSI stack: {stack}",
+                f"compiler: {config['compiler']}",
+                f"architecture: {arch}",
+                "module list: not queried",
+                "test summary: not run",
+            ],
+        )
+
+    init_script = eessi_init_script(init)
+    init_code, _ = run_capture(shell_argv(init_script))
+    if init_code != 0:
+        return LegResult(
+            name="eessi",
+            status="failed",
+            reason=f"EESSI initialization failed with exit {init_code}",
+            artefacts=[
+                f"EESSI stack: {stack}",
+                f"compiler: {config['compiler']}",
+                f"Rust module: {rust_module}",
+                f"EESSI init: failed with exit {init_code}",
+                "module list: not queried",
+                "test summary: not run",
+            ],
+        )
+
     module_probe = (
-        "set -euo pipefail\n"
-        f"source {shlex.quote(str(init))}\n"
+        f"{init_script}\n"
         f"module use {shlex.quote(str(modules))}\n"
         "module -t avail Rust 2>&1"
     )
     probe_code, module_output = run_capture(shell_argv(module_probe))
-    rust_module = select_rust_module(
-        module_output,
-        str(config["rust_module_prefix"]),
-        str(config["rust_module_suffix"]),
-    )
-    if probe_code != 0 or rust_module is None:
+    if probe_code != 0:
         return LegResult(
             name="eessi",
             status="failed",
-            reason=(
-                "module avail Rust did not find a module built with "
-                f"{config['compiler']}"
-            ),
+            reason=f"module avail Rust failed with exit {probe_code}",
             artefacts=[
                 f"EESSI stack: {stack}",
                 f"compiler: {config['compiler']}",
-                "module list: no matching Rust module",
+                f"Rust module: {rust_module}",
+                "module list: query failed",
+                "test summary: not run",
+            ],
+        )
+    if rust_module not in available_rust_modules(module_output):
+        return LegResult(
+            name="eessi",
+            status="failed",
+            reason=f"pinned Rust module {rust_module} is unavailable on {arch}",
+            artefacts=[
+                f"EESSI stack: {stack}",
+                f"compiler: {config['compiler']}",
+                f"Rust module: {rust_module}",
+                "module list: pinned module unavailable",
                 "test summary: not run",
             ],
         )
@@ -292,8 +335,7 @@ def eessi_leg(plan: dict[str, object]) -> LegResult:
     # would leave the host toolchain in use.
     eb_command = f"{shlex.quote(eb_local)} dev {shlex.quote(rust_module)}"
     setup = (
-        "set -euo pipefail\n"
-        f"source {shlex.quote(str(init))}\n"
+        f"{init_script}\n"
         f"module use {shlex.quote(str(modules))}\n"
         "unset LD_LIBRARY_PATH\n"
         f"export EESSI_VERSION={shlex.quote(stack)}\n"
