@@ -302,6 +302,15 @@ pub enum ArmFailure {
     /// The lowest curvature became non-negative during the climb, so
     /// the event stopped before any quench.
     LostCurvature,
+    /// ART could not recover the tracked index-1 mode.
+    IndexOneLost {
+        /// Recovery attempts made before the arm stopped.
+        attempts: usize,
+        /// Curvature of the rejected mode.
+        curvature: f64,
+        /// Absolute overlap with the last accepted mode.
+        overlap: f64,
+    },
     /// The event returned an error: a surface evaluation, or a phase
     /// solver such as the perpendicular relaxation that ran out of
     /// steps. The message is the error's.
@@ -831,11 +840,19 @@ impl DirectionCover {
         let run = session.run(&counted, self.config.art_max_steps);
         let calls = counted.calls.load(Ordering::Relaxed);
         if let Err(error) = run {
-            return Ok(ArmTrial::failed(
-                arm,
-                ArmFailure::Error(error.to_string()),
-                calls,
-            ));
+            let failure = match error {
+                SaddleError::ArtIndexOneLost {
+                    attempts,
+                    curvature,
+                    overlap,
+                } => ArmFailure::IndexOneLost {
+                    attempts,
+                    curvature,
+                    overlap,
+                },
+                other => ArmFailure::Error(other.to_string()),
+            };
+            return Ok(ArmTrial::failed(arm, failure, calls));
         }
         Ok(self.trial_from(arm, session.outcome(), calls))
     }
@@ -1540,13 +1557,13 @@ fn relax_cover(points: &mut [[f64; 3]], sweeps: usize) {
                 let g = d.acos();
                 let tangent = (1.0 - d * d).sqrt();
                 let w = 1.0 / ((tangent + f64::EPSILON) * (g * g + f64::EPSILON));
-                for axis in 0..3 {
-                    grad[axis] += w * points[i][axis];
+                for (component, &point) in grad.iter_mut().zip(&points[i]) {
+                    *component += w * point;
                 }
             }
             let radial = dot3(grad, points[j]);
-            for axis in 0..3 {
-                grad[axis] -= radial * points[j][axis];
+            for (component, &point) in grad.iter_mut().zip(&points[j]) {
+                *component -= radial * point;
             }
             let own = |p: [f64; 3], points: &[[f64; 3]]| {
                 (0..n)
