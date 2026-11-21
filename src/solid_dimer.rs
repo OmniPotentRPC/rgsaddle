@@ -354,6 +354,7 @@ impl IndexReport {
 
 /// Projected stationary-point indices used by a Vineyard calculation.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct VineyardIndexReport {
     /// Stable reactant minimum.
     pub minimum: IndexReport,
@@ -363,6 +364,7 @@ pub struct VineyardIndexReport {
 
 /// Structured reason that a stationary-point pair is not Vineyard-ready.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum VineyardIndexError {
     /// A Hessian action, gradient or excluded-mode query failed, or an
     /// argument was invalid.
@@ -3095,6 +3097,25 @@ mod tests {
                 error,
                 VineyardIndexError::Evaluation(SaddleError::Invalid(_))
             ));
+        }
+    }
+
+    #[test]
+    fn vineyard_public_diagnostics_are_non_exhaustive() {
+        let source = include_str!("solid_dimer.rs");
+        for declaration in [
+            "pub struct VineyardIndexReport",
+            "pub enum VineyardIndexError",
+        ] {
+            let prefix = source.split(declaration).next().unwrap();
+            assert!(
+                prefix
+                    .lines()
+                    .rev()
+                    .take(3)
+                    .any(|line| line.trim() == "#[non_exhaustive]"),
+                "{declaration} must remain non-exhaustive"
+            );
         }
     }
 
