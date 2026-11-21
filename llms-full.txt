@@ -318,6 +318,7 @@ Every public module exported by `src/lib.rs`, with its public types, free functi
 | `cell_log` | Types: `CellChart`, `CellState`, `M3`, `PackedHess`. Functions: `expm_3x3`, `expm_frechet`, `logm_3x3`, `m3_det`, `m3_from_row9`, `m3_inv`, `m3_mul`, `m3_to_row9`, `transform_cell_block` |
 | `connect` | Types: `ConnectConfig`, `ConnectProfile`, `ConnectReport`. Functions: `connect` |
 | `constraints` | Types: `Constraints`, `Equality`, `InternalCounts` |
+| `covalent` | Functions: `atomic_number`, `covalent_radius`, `element_symbol`. Constants: `CORDERO_2008_PM`, `LAST_CORDERO_Z` |
 | `defect_pair` | Types: `BasinSaddle`, `CaptureRecord`, `CellMode`, `DefectPairConfig`, `DimerSeed`, `DirectionClass`, `FreeMigration`, `HopOutcome`, `HopTemplate`, `MatchedCapture`, `OuterHop`, `PairSetup`, `PeriodicSinkRate`, `PeriodicSinkSurvival`, `RateCatalogue`, `RateEntry`, `RecombinationVolume`, `SiteOutcome`, `SphereLanding`, `VolumePlacement`, `VolumeSite`. Functions: `attempt_frequency`, `capture_is_spontaneous`, `capture_is_spontaneous_within`, `classify_separation`, `debye_hit_probability`, `debye_matched_radius`, `debye_radius`, `debye_resistance`, `defect_pair_rates`, `descend_to_floor`, `effective_capture_radius`, `embed_free_migration`, `embed_sphere_return`, `kinetic_recombination_volume`, `matched_capture_radius`, `mean_absorption_time`, `pair_separation`, `periodic_capture_log_likelihood`, `periodic_sink_rate`, `periodic_sink_survival`, `product_tangent`, `seeded_saddles`, `segment_band`, `shell_pair_factor`, `smoluchowski_rate`, `sphere_hit_probability`, `spherical_return_probability`, `volume_from_frequency`. Constants: `FREE_CRYSTAL`, `SPONTANEOUS_BARRIER_EV` |
 | `eigensolve` | Types: `EigenDevice`, `ExpandKind`, `RitzDecomposition`. Functions: `eigh_on`, `exact_eigh`, `expand`, `lowest_on`, `rayleigh_ritz`, `rayleigh_ritz_iter` |
 | `elastic` | Types: `ElasticMultipole`, `LocalField`, `Octupole`, `Quadrupole`, `StrainGradient`. Functions: `quadrupole_energy` |
@@ -345,7 +346,7 @@ Every public module exported by `src/lib.rs`, with its public types, free functi
 | `pafi` | Types: `ArcPath`, `FreeEnergyProfile`, `HyperplaneAverage`, `PafiConfig`, `PathFrame`, `PathGeometry`. Functions: `average_hyperplane`, `average_hyperplane_with_sampler`, `integrate_profile`, `pafi_profile`, `zero_temperature_barrier` |
 | `pair_network` | Types: `Mat3i`, `PairConfig`, `PairEdge`, `PairExit`, `PairHop`, `PairMove`, `PairNetwork`, `PairStateClass`, `PairTarget`, `Vec3i`. Functions: `cubic_group`, `director`, `norm2` |
 | `pes` | Types: `CartesianHessian`, `CartesianPes`, `HessUpdate` |
-| `pes_internal` | Types: `CellCartesianPes`, `CellInternalPes`, `InternalPes`, `SellaPes`. Functions: `niggli_reduce_cell`, `niggli_reduce_vectors`, `place_perp_dummy` |
+| `pes_internal` | Types: `CellCartesianPes`, `CellInternalPes`, `HessianCarry`, `InternalPes`, `RebuildReason`, `RebuildReport`, `SellaPes`. Functions: `niggli_reduce_cell`, `niggli_reduce_vectors`, `place_perp_dummy` |
 | `prfo` | Types: `PartitionedRationalFunctionOptimization`, `PrfoKind`. Functions: `partitioned_rfo_eigen`, `prfo_get_s`, `prfo_stepper`, `prfo_trust_region`, `restricted_partitioned_rfo`, `restricted_prfo_displacement`. Constants: `SYNONYMS` |
 | `prfo_restricted` | Types: `PrfoKind`. Functions: `partitioned_rfo_eigen`, `restricted_partitioned_rfo`, `restricted_prfo_displacement` |
 | `projection` | Types: `ProjectionKind`. Functions: `climbing_image_force`, `dneb_component`, `force_perp` |
@@ -370,6 +371,7 @@ Every public module exported by `src/lib.rs`, with its public types, free functi
 | `stencil` | Types: `Action`, `ArtControl`, `BandBuilder`, `Chain`, `Climb`, `Controller`, `Coupling`, `CouplingForces`, `Delta`, `Euclidean`, `EvalPool`, `Fixed`, `FromBand`, `FromPoint`, `ImageId`, `Mesh`, `MeshEvent`, `Metric`, `Point`, `PointBuilder`, `Preset`, `Report`, `Role`, `Sides`, `Stencil`, `StencilReport`, `StencilStatus`, `StencilView`, `Surface`, `TangentRule`, `Triad`. Functions: `ascend`, `coupling_forces`, `coupling_forces_into`, `curvature_along`, `perp`, `perp_into`, `reflect`, `reflect_into`, `unit_tangent`, `unit_tangent_into`. Constants: `BAND_PRESET_SEAM`, `EVAL_BLOCK` |
 | `strain_rate` | Types: `CurvatureBound`, `ElasticDipole`, `Estimate`, `HopVariant`, `SaddleSeed`, `SearchReason`, `Strain`, `StrainResponse`, `TranslationalSplit`, `Trust`, `TrustPolicy`. Functions: `activation_volume`, `angular_scale_rad_s`, `arrhenius`, `compliance_from_stiffness`, `cubic_rotations`, `double_dot`, `elastic_dipole`, `from_voigt`, `rotation_x`, `split_translational_modes`, `symmetrize`, `transform_tensor`, `vineyard_prefactor`, `voigt`. Constants: `BOLTZMANN_EV_PER_K`, `LINEAR_FOLD_EV`, `NEGATIVE_CURVATURE`, `VOIGT` |
 | `tangent` | Types: `TangentKind`. Functions: `compute_tangent` |
+| `topology` | Types: `AtomMap`, `DummyHost`, `InternalTopology`, `LinearBend`, `PlanarWatch`, `TopologyCheck`, `TopologyConfig`. Functions: `check_chart`. Constants: `PAPER_SV_TOL` |
 | `trust` | Types: `RestrictedStep`, `TrustRegion` |
 | `vocn` | Types: `Found`, `Primitive`, `VocnFound`, `VocnPrimitive` |
 
@@ -418,7 +420,7 @@ Every public configuration struct, its public fields, and the corresponding chai
 | `LammpsSystem` | `atomic_numbers` (`with_atomic_numbers`), `box_matrix` (`with_box_matrix`), `config_bytes` (`with_config_bytes`), `masses` (`with_masses`), `positions` (`with_positions`) |
 | `LammpsThermodynamicReference` | `energy`, `gradient`, `hessian`, `point` (`LammpsThermodynamicReference::new`) |
 | `LangevinConfig` | `blocks` (`with_blocks`), `burn_in` (`with_burn_in`), `control` (`with_control`), `friction` (`with_friction`), `hold_excluded` (`with_hold_excluded`), `integrator` (`with_integrator`), `records` (`with_records`), `region` (`with_region`), `retain` (`with_retain`), `seed` (`with_seed`), `stride` (`with_stride`), `thermal` (`with_thermal`), `time_step` (`with_time_step`) |
-| `LinebConfig` | `boltzmann` (`with_boltzmann`), `endpoint_scale` (`with_endpoint_scale`), `hbar` (`with_hbar`), `max_move` (`with_max_move`), `method` (`with_method`), `opt_tol` (`with_opt_tol`), `perp_tol` (`with_perp_tol`), `quadrature_pairs` (`with_quadrature_pairs`), `spring` (`with_spring`), `time_step` (`with_time_step`), `turning_width` (`with_turning_width`) |
+| `LinebConfig` | `boltzmann` (`with_boltzmann`), `endpoint_scale` (`with_endpoint_scale`), `gradient_end_tangents` (`with_gradient_end_tangents`), `hbar` (`with_hbar`), `max_move` (`with_max_move`), `method` (`with_method`), `opt_tol` (`with_opt_tol`), `perp_tol` (`with_perp_tol`), `quadrature_pairs` (`with_quadrature_pairs`), `spring` (`with_spring`), `time_step` (`with_time_step`), `turning_width` (`with_turning_width`) |
 | `MinModeConfig` | `artn` (`with_artn`), `difference` (`with_difference`), `dr` (`with_dr`), `force_tol` (`with_force_tol`), `kind` (`with_kind`), `krylov_dim` (`with_krylov_dim`), `max_move` (`with_max_move`), `max_rotations` (`with_max_rotations`), `method` (`with_method`), `rotation_angle_tol` (`with_rotation_angle_tol`), `rotation_tol` (`with_rotation_tol`), `saddle_check` (`with_saddle_check`), `seed_curvature` (`with_seed_curvature`) |
 | `MinModeRefine` | `alignment_tol` (`with_alignment_tol`), `climb_alignment` (`with_climb_alignment`), `curvature_retained` (`with_curvature_retained`), `difference` (`with_difference`), `dr` (`with_dr`), `kind` (`with_kind`), `krylov_dim` (`with_krylov_dim`), `lanczos_rel_tol` (`with_lanczos_rel_tol`), `max_rotations` (`with_max_rotations`), `max_steps` (`with_max_steps`), `min_overlap` (`with_min_overlap`), `refresh_interval` (`with_refresh_interval`), `restore_unhelpful` (`with_restore_unhelpful`), `retry_factor` (`with_retry_factor`), `rotation_tol` (`with_rotation_tol`), `stable_steps` (`with_stable_steps`), `trigger_factor` (`with_trigger_factor`), `trigger_force` (`with_trigger_force`) |
 | `OcinebConfig` | `angle_tol` (`with_angle_tol`), `band` (`with_band`), `max_mmf_steps` (`with_max_mmf_steps`), `minmode` (`with_minmode`), `restore_unhelpful` (`with_restore_unhelpful`), `stability_count` (`with_stability_count`), `trigger_factor` (`with_trigger_factor`), `trigger_force` (`with_trigger_force`) |
@@ -448,6 +450,7 @@ Every public configuration struct, its public fields, and the corresponding chai
 | `SymmetryOperations` | `operations` (`with_operations`) |
 | `ThermodynamicDerivative` | `full`, `reference` (`with_reference`) |
 | `ThermodynamicIntegrationConfig` | `blocks` (`with_blocks`), `nodes` (`with_nodes`), `observable` (`with_observable`), `samples` (`with_samples`), `seed` (`with_seed`), `stride` (`with_stride`), `thermal` (`with_thermal`), `thermalize` (`with_thermalize`) |
+| `TopologyConfig` | `back_transform_iterations` (`with_back_transform_iterations`), `back_transform_tol` (`with_back_transform_tol`), `bond_scale` (`with_bond_scale`), `dummy_distance` (`with_dummy_distance`), `linear_tol` (`with_linear_tol`), `max_weld_rounds` (`with_max_weld_rounds`), `planar_tol` (`with_planar_tol`), `require_complete` (`with_require_complete`), `sv_tol` (`with_sv_tol`), `weld_growth` (`with_weld_growth`) |
 | `TransmissionConfig` | `blocks` (`with_blocks`), `check_every` (`with_check_every`), `commit` (`with_commit`), `counting` (`with_counting`), `end_state` (`with_end_state`), `friction` (`with_friction`), `hold_excluded` (`with_hold_excluded`), `masses` (`with_masses`), `seed` (`with_seed`), `shots` (`with_shots`), `steps` (`with_steps`), `thermal` (`with_thermal`), `time_step` (`with_time_step`) |
 | `TrustPolicy` | `curvature` (`with_curvature`), `error_tolerance` (`with_error_tolerance`), `floor` (`with_floor`), `quadratic` (`with_quadratic`), `radius` (`with_radius`) |
 | `TrustSchedule` | `delta_min` (`with_delta_min`), `rho_dec` (`with_rho_dec`), `rho_inc` (`with_rho_inc`), `sigma_dec` (`with_sigma_dec`), `sigma_inc` (`with_sigma_inc`) |
@@ -2934,6 +2937,64 @@ It checks that the ceiling never passes the starting radius and that the search 
 It also checks that a twelve-coordinate search and a search with `eig: false` step the same with the option on or off.
 A last case confirms that the default takes the ceiling.
 
+## Let the session build its own internals
+
+Use `SellaSaddleSession::on_auto_internal` or `SellaMinSession::on_auto_internal` when you have atomic numbers and a geometry but no list of bonds, angles and dihedrals.
+`InternalPes::auto` is the same chart without a session.
+
+```rust
+let topology = TopologyConfig::default();
+let mut session = SellaSaddleSession::on_auto_internal(
+    config, x, masses, &elements, None, &topology,
+)?;
+session.set_update(HessUpdate::TsBfgs);
+while !session.step(&surface)?.at_saddle {}
+println!("rebuilt {} times", session.topology_restarts());
+```
+
+`InternalTopology::from_geometry` does the construction alone and returns the `Constraints`, the real and dummy atom map, the dummy pins and a `TopologyCheck`.
+It follows section 2.1 of Hermes, Sargsyan, Najm and Zador, J. Chem. Theory Comput. 18, 6974 (2022), doi:10.1021/acs.jctc.2c00395, and the Sella 2.6.0 source:
+
+- Two atoms are bonded under 1.25 times the sum of their Cordero radii (Dalton Trans. 2008, 2832, doi:10.1039/B801115J).
+  Fragments that stay apart are welded by growing that factor 5 % on pairs between fragments.
+- Two bonds that share an atom make an angle. Two angles that chain through a shared edge make a proper dihedral.
+- A bend within 15 degrees of 0 or 180 is left out. A vertex with three or more bonds takes the improper dihedral `a-b-d-c` with `d` the nearest other bonded atom.
+  A vertex with two bonds takes a dummy atom 1 length unit away along the cross product of its arms, pinned by one bond and two right angles, and the improper `a-b-x-c`.
+- Singular values of the Wilson matrix under one millionth count as zero.
+
+A cell makes every one of these periodic: `Some(&cell)` finds bonds across the boundary, stores a lattice image on each primitive, and measures them on the positions you pass without wrapping.
+A bond network that wraps the cell leaves only translations free, and the check expects that.
+`CellInternalPes` keeps the primitives you give it. A periodic chart's lattice follows the living cell, and a Niggli reduction retargets that chart's images onto the reduced basis.
+
+`TopologyCheck` compares the rank of the Wilson matrix with what the rigid quotient leaves, `3N - 6` (`3N - 5` on a line, `3N - 3` on a wrapped network), and measures how far the internals are from invariant under rigid motion.
+`TopologyConfig::require_complete`, on by default, refuses a chart that falls short.
+A dummy atom adds its pins: at an exactly linear geometry the two right-angle pins are not both first-order handles, so CO2 has a pinned rank of 3 against 4 real degrees of freedom, and the check knows it.
+
+Two things are this crate's own.
+A centre with three neighbours and no torsion through it folds the bond and angle chart when it goes planar, as ammonia does.
+Its three bends come within `planar_tol` (15 degrees) of a full turn, and the build adds the improper dihedral then.
+Sella 2.6 adds an improper at every such centre, so NH3 and CH4 have one and two more dihedrals there than here; the other 13 molecules of `tests/fixtures/sella_topology.txt` match it in bonds, angles, dihedrals and dummies.
+The second is that the dummy atoms follow the real atoms along their pins.
+The step and the gradient live on the real atoms, and the Jacobian the chart uses is `B_r + B_d D` with `D = -J_d^+ J_r`.
+
+The chart is rebuilt at the accepted geometry, before the next gradient is read, when:
+
+| Reason | Trigger |
+|---|---|
+| `SingularJacobian` | the Wilson matrix is short of rank, or a value cannot be evaluated |
+| `NearLinearBend` | a bend in the chart enters the window, or a replaced bend leaves it |
+| `NearPlanar` | a centre with no improper comes within `planar_tol` of planar |
+| `BackTransform` | a back-transformation does not converge, or the dummy atoms cannot be put back on their pins, even with the step halved five times |
+
+The Hessian crosses a rebuild as `H_x = J_old^T H_q J_old` on the real atoms, read back as `(J_new^+)^T H_x J_new^+`. The Sella guess curvature goes on `ker(J_new^T)`. Cartesian directions the new chart spans and the old one does not get zero curvature.
+It is reseeded from the guess when the old Jacobian cannot be evaluated.
+The trust radius restarts at `delta * n_int` and the pair-update history is cleared.
+`InternalPes::stale_reason` and `rebuild_if_stale` let a host drive the same rule by hand.
+A chart you build with `InternalPes::new` or `VocnFound` is never rebuilt, so those stay the override: `is_auto()` is false and `rebuild_topology` refuses.
+
+A TS search in internals needs `HessUpdate::TsBfgs`; a plain BFGS update cannot learn the negative curvature.
+`tests/auto_internals.rs` finds the same first-order saddle with an automatic and a hand-written chart on ethane, hydrogen peroxide, methanol, methanethiol and ammonia (energies within 1e-6, RMSD under 1e-3, one negative finite-difference mode), through the linear window of an OCO bend with a rebuild and a dummy, and across the boundary of a 10 length-unit cell.
+
 # Drive an IRC session (`docs/orgmode/howto/irc.org`)
 
 > Intrinsic reaction coordinate (IRC) integration with SellaSphere, GS2, and Morokuma steps
@@ -3043,11 +3104,24 @@ let path = session.path(&surface)?;
 
 For the paper’s convergence test, set `with_endpoint_convergence(true)`. The optimizer compares `opt_tol` with the larger endpoint force and `perp_tol` with the largest perpendicular action gradient among the interior images. The spring still redistributes interior images. The report gives the full-band, endpoint, and perpendicular maxima separately.
 
+To interpret an interior image's perpendicular action gradient in force
+units, use its two adjacent mass-weighted chord lengths, `d_prev` and
+`d_next`. Write `sigma` for the momentum used in the discrete action and
+`c ` (d_prev + d_next) * (d sigma / dV) / 2=. This is the coefficient
+of the mass-weighted physical force in the image's action gradient.
+For a perpendicular drive component `g_perp[k]`, the equivalent Cartesian
+force imbalance is `sqrt(m[k]) * g_perp[k] / c`. Thus the same `perp_tol`
+can admit different force imbalances across images or atoms. This
+conversion applies to interior images. Check the physical residual on
+the equal-time orbit separately, including at both turns.
+
 The default endpoint restraint has magnitude `endpoint_scale |V − E| / |∇V|` in mass-weighted coordinates. To use a constant coefficient as in Eqs. (19) and (21), set `with_endpoint_kappa(kappa)` in Rust, pass `endpoint_kappa` to Python, or call `rgsaddle_lineb_solve_with_kappa` from C. Its force magnitude is `kappa |V − E|`. Express the coefficient and the spring constant in the units of the action and coordinates used by the solver.
 
 `Masses::coordinates` takes one mass per coordinate and leaves rigid motions alone. Use it for atoms in an external field, such as adsorbates over a fixed slab. `Masses::molecule` takes one mass per atom for a free molecule. It centers each image and fits it to the first image by a mass-weighted quaternion rotation. `Masses::with_adjacent_alignment(true)` fits each image to the preceding aligned image instead. Each chord then has the minimum length over relative rigid motions, so reversing the band preserves its discrete action.
 
 `time_step` is the initial FIRE step. From rest a step moves an image by about `time_step^2 |F|`. The default 0.1 converges the Müller-Brown continuation at every other default; a surface with a stiffer action needs a smaller step. `max_move` caps the step of one atom with molecular masses and the whole band step otherwise. An interior image may not fall below `E + w`, where `w` is `turning_width` times the height of the highest starting image above `E`; a step that would put one there is retried at a shorter length. Any other error from the surface ends the step and is returned.
+
+The optimizer uses a smooth momentum near a turning point. For an image with energy gap `d ` V - E=, its momentum in mass-weighted coordinates is `sqrt(d + hypot(d, w))`. At the turning surface this gives `sqrt(w)`. Equation (12) of Ásgeirsson, Arnaldsson and Jónsson gives zero there. The default `turning_width` is 0.001 and the accepted range is strictly between zero and one. For a width sensitivity check, rerun the same starting band and energy with a smaller positive `turning_width` and compare the optimized coordinates, period and rate. The endpoint convergence option selects which force norms stop optimization. The momentum still uses the configured width.
 
 `LinebPath` holds the action, the half period from the quadrature of the action's energy derivative (`half_period`) and from constrained dynamics along the path (`half_period_dynamics`), both temperatures, and `calls`: the force calls of the optimizer, of the period quadrature and time table, and of the dynamics, counted apart.
 
@@ -3136,6 +3210,15 @@ units, and the result reports the applied value. C callers can discover
 `rgsaddle_lineb_solve_counted_rate` at link time and read the same fields
 from `rgsaddle_lineb_rate_diagnostics_t`.
 
+To check the image-Hessian approximation, evaluate `hqtst_rate` and
+`hqtst_rate_interpolated_hessian` on the same `LinebPath` with the same
+surface and bead count. Subtract the direct result's `log_rate_over_reactant`
+from the interpolated result's value. Exponentiating this difference gives
+the ratio of the two fluxes because their common energy zero cancels. Check the
+mode counts for both results. Increasing the bead count samples the
+interpolant more densely. Increasing the number of path images supplies
+additional curvature measurements and also lets the optimized path change.
+
 For an electronic-structure potential, `hqtst_rate_interpolated_hessian_with_step(surface, path, beads, step)` uses the same Cartesian displacement for every atom. Halving the displacement tests the sensitivity of the fluctuation spectrum to gradient noise. The result records `image_hessian_displacement` in the surface's length units and `negative_modes` on the gauge-deflated ring. A first-order instanton has one unstable mode.
 
 With the `lineb-oracle` feature, `cartesian_image_hessian(surface, cartesian, step)` measures one Cartesian energy Hessian. It evaluates the positive and negative displacement along each coordinate in one ordered batch. The matrix contains the raw gradient differences before symmetrization or mass weighting.
@@ -3158,19 +3241,19 @@ when the rate is unavailable.
 For the Cu example in the 2018 paper, pass =linear_seed=True= and =endpoint_convergence=True= to `lineb_solve` with a full MEP and the converted `spring` and `endpoint_kappa`. The first flag selects a straight path between the two energy crossings. The second applies the endpoint and perpendicular force tolerances separately. Pass =projected_verlet=True= (Rust `with_projected_verlet(true)`, C `RGSADDLE_LINEB_PROJECTED_VERLET`) to select the projected Verlet band integrator.
 
 The following dimensionless Eckart barrier has turning points at
-`x ` ±arccosh(2)= when `E ` 0.25=. Only the first coordinate enters the
-potential. The callback returns an energy for each input row and the
+`x ` ±arccosh(2)= when `E ` 0.25=. The two transverse coordinates are
+independent unit-mass harmonic oscillators. The callback returns an energy for each input row and the
 Cartesian energy gradient with the same shape as the coordinates.
 
 ```python
 import numpy as np
 from rgsaddle import lineb_solve
 
-def barrier(x):
+def barrier(x, omega=1.0):
     energy = 1.0 / np.cosh(x[:, 0])**2
-    gradient = np.zeros_like(x)
+    gradient = omega**2 * x.copy()
     gradient[:, 0] = -2.0 * energy * np.tanh(x[:, 0])
-    return energy, gradient
+    return energy + 0.5 * omega**2 * (x[:, 1:]**2).sum(axis=1), gradient
 
 seed = np.zeros((9, 3))
 seed[:, 0] = np.linspace(-2.0, 2.0, len(seed))
@@ -3183,6 +3266,43 @@ np.testing.assert_allclose(
 )
 print(path.action, path.temperature)
 ```
+
+The exact action is `pi / sqrt(2)` and the exact temperature is
+`1 / (2 pi sqrt(2))` in these units. The nine-image example gives
+2.221443 and 0.1125395 respectively.
+
+The same seed provides a check of the fluctuation factor. Doubling both
+transverse frequencies leaves the longitudinal path and period unchanged.
+Each oscillator contributes its finite-bead partition function to the
+flux. This makes the change in `log_rate_over_reactant` calculable
+without a reactant reference.
+
+```python
+from functools import partial
+
+P = 32
+def flux(omega):
+    return lineb_solve(
+        partial(barrier, omega=omega), seed, np.ones(1), 0.25, 1e-5, 1e-5,
+        endpoint_kappa=0.2, linear_seed=True, endpoint_convergence=True,
+        beads=P, return_orbit=True, interpolated_hessian=True,
+        image_hessian_step=0.001,
+    )
+
+low, high = flux(1.0), flux(2.0)
+def log_partition(omega):
+    a = P * np.arcsinh(low.half_period * omega / P)
+    return -np.log(2 * np.sinh(a))
+
+shift = high.log_rate_over_reactant - low.log_rate_over_reactant
+np.testing.assert_allclose(shift, 2 * (log_partition(2) - log_partition(1)))
+print(low.negative_modes, low.modes, low.surface_calls["rate"], round(shift, 5))
+```
+
+This prints `1 95 86 -8.69356`. The 86 rate requests comprise two
+displacements for each of three coordinates at nine images, plus
+32 orbit observations. A cache can serve repeated geometries among
+these requests.
 
 ## C ABI
 ```c
@@ -3246,6 +3366,16 @@ coordinates. Report the maximum absolute component and the RMS residual
 in force units. Inspect the turning-point beads individually. A stable
 logarithmic prefactor and one unstable mode can coexist with a large
 turning-point residual.
+
+The rate uses adjacent beads to normalize translation around the
+periodic orbit. For mass-weighted coordinates `q`, the squared length
+in the prefactor is the sum of `|q[j] - q[j-1]|^2` over the full ring.
+The same differences define the direction removed from the fluctuation
+determinant. When comparing with Eq. (8) of Ásgeirsson et al., record
+the indexing convention. The printed expression uses the displacement
+from bead `j-1` to bead `j+1`. This spans two time intervals, so a
+centered estimate of displacement per interval includes a factor of
+one half before squaring.
 
 For an absolute thermal rate, subtract the logarithm of the reactant
 partition function from `log_rate_over_reactant` using the same energy
@@ -4841,6 +4971,9 @@ The narrative for a session is the C and C++ how-to, not this list.
 - `RGSADDLE_LINEB_LINEAR_SEED`. Purpose: Macro constant in include/rgsaddle.h.
 - `RGSADDLE_LINEB_ENDPOINT_CONVERGENCE`. Purpose: Macro constant in include/rgsaddle.h.
 - `RGSADDLE_LINEB_PROJECTED_VERLET`. Purpose: Macro constant in include/rgsaddle.h.
+- `RGSADDLE_LINEB_MASSES_COORDINATES`. Purpose: Values of the molecular argument of the LI-NEB entry points.
+- `RGSADDLE_LINEB_MASSES_MOLECULE`. Purpose: Macro constant in include/rgsaddle.h.
+- `RGSADDLE_LINEB_MASSES_MOLECULE_ADJACENT`. Purpose: Macro constant in include/rgsaddle.h.
 - `RGSADDLE_LINEB_INTERPOLATED_FORCE_CLOCK`. Purpose: Imaginary-time velocity Verlet on the cubic signed image force.
 - `RGSADDLE_LINEB_INTERPOLATED_HESSIAN`. Purpose: Interpolate Cartesian image Hessians onto the equal-time replicas.
 - `RGSADDLE_HAS_LINEB_RATE_DIAGNOSTICS`. Purpose: Macro constant in include/rgsaddle.h.
