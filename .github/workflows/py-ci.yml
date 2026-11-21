@@ -30,11 +30,12 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'push' ||
       contains(github.event.pull_request.labels.*.name, 'wheels')
-    uses: OmniPotentRPC/rgpot/.github/workflows/py-wheels.yml@10a4dce7a9dc52dbbf043033ac7b9715c812e191
+    uses: OmniPotentRPC/rgpot/.github/workflows/py-wheels.yml@a0f192659abe39759d6301f2a94abfb11b2a490d
     with:
       package-dir: .
       import-names: rgsaddle._core
       test-path: tests/python
+      extra-test-sources: bench
       extras: test
 
   wheel-smoke:
@@ -53,6 +54,7 @@ jobs:
         env:
           CIBW_ARCHS: x86_64
           CIBW_BUILD: cp312-manylinux_x86_64
+          CIBW_TEST_SOURCES: tests/python bench
       - name: Audit the stable ABI
         run: |
           set -euo pipefail

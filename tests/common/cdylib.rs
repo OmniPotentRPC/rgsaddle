@@ -1,12 +1,12 @@
-/// Directory that holds a freshly linked `librgsaddle.so` matching this
-/// test binary's active features and profile.
+/// Isolated directory that holds a freshly linked `librgsaddle.so`
+/// matching this test binary's active features and profile.
 ///
 /// `cargo test` compiles integration tests against the `rlib` without
 /// uplifting `librgsaddle.so` into `target/<profile>`, so a prior
 /// `cargo build --features capi` would leave a stale `capi` only shared
-/// library behind when `cargo test --features capi,ohtst` runs. Invoking
-/// `cargo build --lib` with the active feature set refreshes
-/// `target/<profile>/librgsaddle.so` before the C compiler links against it.
+/// library behind when `cargo test --features capi,ohtst` runs. Build the
+/// cdylib with the active feature set in Cargo's test-only target directory
+/// so refreshing it cannot replace the `rlib` used by rustdoc.
 fn cdylib_dir() -> std::path::PathBuf {
     static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
     DIR.get_or_init(build_fresh_cdylib).clone()
@@ -83,20 +83,22 @@ fn build_fresh_cdylib() -> std::path::PathBuf {
     let is_target_root = |p: &std::path::Path| {
         p.join(".rustc_info.json").is_file() || p.join("CACHEDIR.TAG").is_file()
     };
-    let (target_dir, target_triple) = if is_target_root(parent) {
-        (parent.to_path_buf(), None)
-    } else if let Some(grandparent) = parent.parent().filter(|p| is_target_root(p)) {
-        (
-            grandparent.to_path_buf(),
-            parent
-                .file_name()
-                .and_then(|s| s.to_str())
-                .map(str::to_owned),
-        )
+    let target_triple = if is_target_root(parent) {
+        None
+    } else if parent.parent().is_some_and(is_target_root) {
+        parent
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(str::to_owned)
     } else {
-        (parent.to_path_buf(), None)
+        None
     };
 
+    let target_dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("cdylib");
+    let profile_dir = target_triple
+        .as_ref()
+        .map_or_else(|| target_dir.clone(), |triple| target_dir.join(triple))
+        .join(&profile_name);
     let lib_path = profile_dir.join("librgsaddle.so");
     match std::fs::remove_file(&lib_path) {
         Ok(()) => {}
