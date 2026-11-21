@@ -80,7 +80,12 @@ pub fn mode_sweep_schedule(total_modes: usize, draws: usize) -> Result<Vec<usize
 /// and one column per atom. Entries must lie in `[0, 1]`; rows are assigned
 /// cyclically to modes. The direction for mode `e_m` is
 /// `(L e_m + carrier e_m) / ||L e_m + carrier e_m||`, so its squared overlap
-/// with `e_m` is at least `(carrier / (1 + carrier))²`.
+/// with `e_m` is at least `(carrier / (1 + carrier))²`. The combination is
+/// formed at a scale that cannot overflow or underflow, so the bound holds
+/// for every finite positive carrier, from `1e-300` to `f64::MAX`.
+///
+/// A direction that cannot be formed, because the Hessian or an eigenvector
+/// is not finite, is an error. No axis is substituted for it.
 pub fn hessian_mode_sweep_directions<S: PointSurface>(
     surface: &S,
     minimum: ArrayView1<'_, f64>,
@@ -148,7 +153,12 @@ pub fn hessian_mode_sweep_directions<S: PointSurface>(
                 }
             }
         }
-        directions.push(unit(localized + &(mode * carrier)));
+        // The direction is proportional to `localized + carrier * mode`.
+        // Dividing by the larger of the carrier and the peak of `localized`
+        // keeps every term at most one, so neither a huge carrier nor a tiny
+        // one with an all-zero weight row overflows or underflows.
+        let scale = carrier.max(peak(&localized));
+        directions.push(unit(&localized / scale + &mode * (carrier / scale))?);
     }
     Ok(ModeSweepDirectionPlan {
         eigenvalues,
@@ -236,10 +246,10 @@ pub fn soft_mode_then_full_directions<S: PointSurface>(
     let mut rng = SplitMix64::new(seed);
     let mut directions = Vec::with_capacity(2 * phase_count);
     for i in 0..phase_count {
-        directions.push(sample_in_subspace(&basis, minimum, i, &mut rng));
+        directions.push(sample_in_subspace(&basis, minimum, i, &mut rng)?);
     }
     for _ in 0..phase_count {
-        directions.push(sample_on_sphere(dof, &mut rng));
+        directions.push(sample_on_sphere(dof, &mut rng)?);
     }
     Ok(SoftModeDirectionPlan {
         k,
@@ -253,20 +263,16 @@ fn sample_in_subspace(
     _minimum: ArrayView1<'_, f64>,
     _index: usize,
     rng: &mut SplitMix64,
-) -> Array1<f64> {
+) -> Result<Array1<f64>, SaddleError> {
     let k = basis.ncols();
     let mut coeffs = Array1::zeros(k);
     for c in &mut coeffs {
         *c = rng.normal();
     }
-    let mut v = basis.dot(&coeffs);
-    if v.iter().all(|x| x.abs() < 1.0e-14) {
-        v = basis.column(0).to_owned();
-    }
-    unit(v)
+    unit(basis.dot(&coeffs))
 }
 
-fn sample_on_sphere(dim: usize, rng: &mut SplitMix64) -> Array1<f64> {
+fn sample_on_sphere(dim: usize, rng: &mut SplitMix64) -> Result<Array1<f64>, SaddleError> {
     let mut v = Array1::zeros(dim);
     for c in &mut v {
         *c = rng.normal();
@@ -278,7 +284,10 @@ fn sample_on_sphere(dim: usize, rng: &mut SplitMix64) -> Array1<f64> {
 mod tests {
     use ndarray::{Array1, Array2, ArrayView1, array};
 
-    use super::{hessian_mode_sweep_directions, mode_sweep_schedule, spectral_gap_rank};
+    use super::{
+        hessian_mode_sweep_directions, mode_sweep_schedule, soft_mode_then_full_directions,
+        spectral_gap_rank, unit,
+    };
     use crate::{PointSurface, SaddleError, exact_eigh};
 
     struct DiagonalHarmonic;
@@ -470,6 +479,95 @@ mod tests {
     }
 
     #[test]
+    fn unit_scales_before_it_normalizes() {
+        for scale in [1.0, 1.0e160, 1.0e300, 1.0e-13, 1.0e-200, 1.0e-300] {
+            let direction = unit(array![3.0, -4.0, 0.0] * scale).unwrap();
+            let expected = [0.6, -0.8, 0.0];
+            for (got, want) in direction.iter().zip(expected) {
+                assert!((got - want).abs() < 1.0e-14, "{scale}: {direction:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn unit_refuses_a_vector_with_no_direction() {
+        assert!(matches!(
+            unit(Array1::zeros(3)),
+            Err(SaddleError::Invalid(_))
+        ));
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(matches!(
+                unit(array![1.0, bad, 0.0]),
+                Err(SaddleError::NonFinite(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn extreme_carriers_keep_the_documented_overlap_floor() {
+        let hessian = dense_symmetric(12);
+        let (_, vectors) = exact_eigh(hessian.view()).unwrap();
+        let zeros = Array2::<f64>::zeros((2, 4));
+        let partial = array![[1.0, 0.0, 0.5, 0.25], [0.0, 1.0, 0.75, 0.0]];
+        for carrier in [1.0e160, f64::MAX, 1.0e-13, 1.0e-200, 1.0e-300] {
+            for (name, weights) in [
+                ("none", None),
+                ("zero rows", Some(zeros.view())),
+                ("partial", Some(partial.view())),
+            ] {
+                let plan = hessian_mode_sweep_directions(
+                    &DenseQuadratic(hessian.clone()),
+                    Array1::zeros(12).view(),
+                    2,
+                    carrier,
+                    weights,
+                )
+                .unwrap();
+                for (direction, &mode) in plan.directions.iter().zip(&plan.mode_indices) {
+                    assert!(
+                        (direction.dot(direction) - 1.0).abs() < 1.0e-12,
+                        "{carrier} {name}"
+                    );
+                    let overlap = direction.dot(&vectors.column(mode)).powi(2);
+                    assert!(
+                        overlap + 1.0e-9 >= plan.minimum_squared_mode_weight,
+                        "{carrier} {name} mode {mode}: {overlap}"
+                    );
+                    if carrier > 1.0e12 || name == "zero rows" || name == "none" {
+                        assert!(overlap > 1.0 - 1.0e-9, "{carrier} {name} mode {mode}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_huge_carrier_does_not_collapse_directions_onto_the_first_axis() {
+        let plan = hessian_mode_sweep_directions(
+            &DiagonalHarmonic,
+            Array1::zeros(6).view(),
+            0,
+            1.0e160,
+            None,
+        )
+        .unwrap();
+        assert!(plan.minimum_squared_mode_weight <= 1.0);
+        for (direction, &mode) in plan.directions.iter().zip(&plan.mode_indices) {
+            assert!(direction[mode].abs() > 1.0 - 1.0e-12, "mode {mode}");
+        }
+    }
+
+    #[test]
+    fn soft_mode_directions_are_unit_vectors() {
+        let plan = soft_mode_then_full_directions(&DiagonalHarmonic, Array1::zeros(6).view(), 3, 7)
+            .unwrap();
+        assert_eq!(plan.directions.len(), 6);
+        for direction in &plan.directions {
+            assert!((direction.dot(direction) - 1.0).abs() < 1.0e-12);
+        }
+    }
+
+    #[test]
     fn spectral_gap_rank_uses_full_space_when_gaps_are_degenerate() {
         let values = array![1.0, 2.0, 3.0, 4.0];
         assert_eq!(spectral_gap_rank(values.view()), 4);
@@ -490,26 +588,42 @@ mod tests {
 }
 
 fn fix_sign(v: &mut Array1<f64>) {
-    let peak = v.iter().fold(0.0_f64, |worst, x| worst.max(x.abs()));
+    let largest = peak(v);
     let first = v
         .iter()
-        .position(|x| x.abs() >= peak * (1.0 - 1.0e-6))
+        .position(|x| x.abs() >= largest * (1.0 - 1.0e-6))
         .unwrap_or(0);
     if v[first] < 0.0 {
         v.mapv_inplace(|x| -x);
     }
 }
 
-fn unit(mut v: Array1<f64>) -> Array1<f64> {
-    let norm2 = v.dot(&v);
-    if !norm2.is_finite() || norm2 <= 1.0e-24 {
-        v.fill(0.0);
-        v[0] = 1.0;
-        return v;
+/// Largest absolute component. The vector must be finite, because
+/// `f64::max` ignores a NaN.
+fn peak(v: &Array1<f64>) -> f64 {
+    v.iter().fold(0.0_f64, |worst, x| worst.max(x.abs()))
+}
+
+/// Normalize `v` to unit length.
+///
+/// The vector is divided by its largest component before the norm is
+/// measured, so a squared norm that would overflow or underflow in `f64`
+/// does not matter. A vector that is not finite or has no length has no
+/// direction, and is an error rather than a stand-in axis.
+fn unit(mut v: Array1<f64>) -> Result<Array1<f64>, SaddleError> {
+    if v.iter().any(|x| !x.is_finite()) {
+        return Err(SaddleError::NonFinite("seed direction"));
     }
-    let norm = norm2.sqrt();
+    let largest = peak(&v);
+    if largest == 0.0 {
+        return Err(SaddleError::Invalid(
+            "seed direction has zero length and no direction".into(),
+        ));
+    }
+    v.mapv_inplace(|x| x / largest);
+    let norm = v.dot(&v).sqrt();
     v.mapv_inplace(|x| x / norm);
-    v
+    Ok(v)
 }
 
 #[derive(Clone, Debug)]
