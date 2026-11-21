@@ -1,0 +1,1 @@
+The coverage-harness checks skip when =bench/harness.py= is not in the tree, and still fail collection when that file is present but cannot be loaded.

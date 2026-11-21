@@ -36,7 +36,7 @@ use crate::tangent::TangentKind;
 /// The RGSADDLE ABI MAJOR.
 pub const RGSADDLE_ABI_MAJOR: u32 = 1;
 /// The RGSADDLE ABI MINOR.
-pub const RGSADDLE_ABI_MINOR: u32 = 46;
+pub const RGSADDLE_ABI_MINOR: u32 = 53;
 
 /// A band, min-mode or OCI-NEB config of this minor or newer certifies
 /// the saddle index at convergence by default.
@@ -2194,6 +2194,320 @@ pub unsafe extern "C" fn rgsaddle_idpp_path(
         Ok(path) => {
             for (i, v) in path.iter().enumerate() {
                 out[i] = *v;
+            }
+            RGSADDLE_OK
+        }
+        Err(err) => status_of(&err),
+    }
+}
+
+/// AutoNEB flag bit 0. The climb stage reflects the climbing image.
+pub const RGSADDLE_AUTONEB_CLIMB: u64 = 1;
+/// AutoNEB flag bit 1. Insertions use the image-dependent pair potential.
+pub const RGSADDLE_AUTONEB_IDPP: u64 = 1 << 1;
+/// AutoNEB flag bit 2. The window keeps the mean Cartesian force.
+pub const RGSADDLE_AUTONEB_KEEP_TRANSLATION: u64 = 1 << 2;
+
+#[repr(C)]
+/// The RgsaddleAutonebConfig.
+pub struct RgsaddleAutonebConfig {
+    /// ABI version this value was built against.
+    pub version: RgsaddleVersion,
+    /// Bit flags. The header names each bit.
+    pub flags: u64,
+    /// Which band projection assembles the relaxed force.
+    pub projection: i32,
+    /// How the path direction at an interior image is chosen.
+    pub tangent: i32,
+    /// Free images in a local window.
+    pub n_simul: i64,
+    /// Images at the end, endpoints included.
+    pub n_max: i64,
+    /// Step cap for every window before the climb.
+    pub local_max_steps: i64,
+    /// Step cap for the climbing window.
+    pub climb_max_steps: i64,
+    /// Uniform spring constant, in the host's energy per length squared.
+    pub k: f64,
+    /// Force stop for the climbing window, in the host's force units.
+    pub force_tol: f64,
+    /// Force stop for every window before the climb.
+    pub local_force_tol: f64,
+    /// Largest per-atom displacement of one step.
+    pub max_move: f64,
+    /// See [`crate::autoneb::worst_segment`].
+    pub space_energy_ratio: f64,
+}
+
+#[repr(C)]
+/// The RgsaddleAutonebReport.
+pub struct RgsaddleAutonebReport {
+    /// ABI version this value was built against.
+    pub version: RgsaddleVersion,
+    /// Bit flags. The header names each bit.
+    pub flags: u64,
+    /// 1 when the last stage converged, otherwise 0.
+    pub status: i32,
+    /// The reserved.
+    pub reserved: i32,
+    /// Largest absolute force component of the last stage.
+    pub max_force: f64,
+    /// Climbing image, or -1.
+    pub ci_index: i64,
+    /// Rows passed to the surface. One row is one force call.
+    pub surface_rows: i64,
+    /// Number of images, endpoints included.
+    pub n_images: i64,
+    /// Steps of the last stage.
+    pub iteration: i64,
+}
+
+struct AutonebHost {
+    function: RgsaddleSurfaceFn,
+    user: *mut c_void,
+    n_atoms: i64,
+}
+
+// SAFETY: `rgsaddle_autoneb_run` keeps the image pool at one thread, so
+// `eval` runs on the calling thread. The host pointer is not shared.
+unsafe impl Sync for AutonebHost {}
+
+impl BandSurface for AutonebHost {
+    fn eval(
+        &self,
+        positions: ArrayView2<f64>,
+        energies: &mut Array1<f64>,
+        gradients: &mut Array2<f64>,
+    ) -> Result<(), SaddleError> {
+        let rows = positions.nrows();
+        let dof = positions.ncols();
+        if energies.len() != rows || gradients.dim() != (rows, dof) {
+            return Err(SaddleError::Shape(
+                "AutoNEB surface storage does not match the request".into(),
+            ));
+        }
+        let flat = positions.as_standard_layout();
+        let Some(position_slice) = flat.as_slice() else {
+            return Err(SaddleError::Shape(
+                "AutoNEB positions are not contiguous".into(),
+            ));
+        };
+        let Some(energy_slice) = energies.as_slice_mut() else {
+            return Err(SaddleError::Shape(
+                "AutoNEB energies are not contiguous".into(),
+            ));
+        };
+        let Some(gradient_slice) = gradients.as_slice_mut() else {
+            return Err(SaddleError::Shape(
+                "AutoNEB gradients are not contiguous".into(),
+            ));
+        };
+        let Ok(n_images) = i64::try_from(rows) else {
+            return Err(SaddleError::Shape(
+                "AutoNEB request does not fit the surface row count".into(),
+            ));
+        };
+        let mut request = RgsaddleSurfaceRequest {
+            version: RgsaddleVersion {
+                major: RGSADDLE_ABI_MAJOR,
+                minor: RGSADDLE_ABI_MINOR,
+            },
+            flags: 0,
+            n_images,
+            n_atoms: self.n_atoms,
+            positions: position_slice.as_ptr(),
+            energies: energy_slice.as_mut_ptr(),
+            gradients: gradient_slice.as_mut_ptr(),
+            image: -1,
+        };
+        let status = (self.function)(self.user, &mut request);
+        if status != RGSADDLE_OK {
+            return Err(SaddleError::Surface(format!(
+                "AutoNEB surface status {status}"
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// # Safety
+/// `positions` holds `n_init * 3 * n_atoms` doubles. `out_positions`
+/// holds `n_max * 3 * n_atoms` doubles. `cell` is 9 row-major lattice
+/// entries or NULL. `fixed` is NULL or `n_atoms` bytes. `surface` is
+/// called with one or more images and must write energies and Cartesian
+/// gradients. The callback is not entered from another thread.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_autoneb_run(
+    config: *const RgsaddleAutonebConfig,
+    n_init: i64,
+    n_atoms: i64,
+    positions: *const f64,
+    cell: *const f64,
+    fixed: *const u8,
+    out_positions: *mut f64,
+    report: *mut RgsaddleAutonebReport,
+    surface: Option<RgsaddleSurfaceFn>,
+    user: *mut c_void,
+) -> i32 {
+    if config.is_null() || report.is_null() || positions.is_null() || out_positions.is_null() {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let Some(surface) = surface else {
+        return RGSADDLE_NULL_SURFACE;
+    };
+    if n_init < 2 || n_atoms < 1 {
+        return RGSADDLE_SHAPE;
+    }
+    let cfg = unsafe { &*config };
+    if cfg.version.major != RGSADDLE_ABI_MAJOR {
+        return RGSADDLE_ABI_MISMATCH;
+    }
+    let Ok(n_init_us) = usize::try_from(n_init) else {
+        return RGSADDLE_SHAPE;
+    };
+    let Ok(n_max) = usize::try_from(cfg.n_max) else {
+        return RGSADDLE_INVALID_PARAMETER;
+    };
+    let Ok(n_simul) = usize::try_from(cfg.n_simul) else {
+        return RGSADDLE_INVALID_PARAMETER;
+    };
+    let Ok(local_steps) = usize::try_from(cfg.local_max_steps) else {
+        return RGSADDLE_INVALID_PARAMETER;
+    };
+    let Ok(climb_steps) = usize::try_from(cfg.climb_max_steps) else {
+        return RGSADDLE_INVALID_PARAMETER;
+    };
+    let dof = match (n_atoms as usize).checked_mul(3) {
+        Some(dof) if dof > 0 => dof,
+        _ => return RGSADDLE_SHAPE,
+    };
+    let init_len = match dof.checked_mul(n_init_us) {
+        Some(len) => len,
+        None => return RGSADDLE_SHAPE,
+    };
+    let out_len = match dof.checked_mul(n_max) {
+        Some(len) => len,
+        None => return RGSADDLE_SHAPE,
+    };
+    let projection = match cfg.projection {
+        0 => ProjectionKind::PlainElasticBand,
+        1 => ProjectionKind::Neb,
+        2 => ProjectionKind::DoublyNudged,
+        _ => return RGSADDLE_INVALID_PARAMETER,
+    };
+    let tangent = match cfg.tangent {
+        0 => TangentKind::Simple,
+        1 => TangentKind::Improved,
+        _ => return RGSADDLE_INVALID_PARAMETER,
+    };
+    let parsed_cell = if cell.is_null() {
+        None
+    } else {
+        let raw = unsafe { slice::from_raw_parts(cell, 9) };
+        if !raw.iter().all(|v| v.is_finite()) {
+            return RGSADDLE_NON_FINITE;
+        }
+        Some(Cell([
+            [raw[0], raw[1], raw[2]],
+            [raw[3], raw[4], raw[5]],
+            [raw[6], raw[7], raw[8]],
+        ]))
+    };
+    let fixed_atoms = if fixed.is_null() {
+        Vec::new()
+    } else {
+        match unsafe { fixed_mask(fixed, n_atoms) } {
+            Some(mask) => mask,
+            None => return RGSADDLE_INVALID_PARAMETER,
+        }
+    };
+    let climb = cfg.flags & RGSADDLE_AUTONEB_CLIMB != 0;
+    let interpolant = if cfg.flags & RGSADDLE_AUTONEB_IDPP != 0 {
+        crate::autoneb::AutoNebInterpolant::Idpp(crate::idpp::IdppConfig::default())
+    } else {
+        crate::autoneb::AutoNebInterpolant::Linear
+    };
+    let tuning = crate::autoneb::AutoNebTuning::default()
+        .with_n_simul(n_simul)
+        .with_n_max(n_max)
+        .with_local_force_tol(cfg.local_force_tol)
+        .with_local_max_steps(local_steps)
+        .with_climb_max_steps(climb_steps)
+        .with_space_energy_ratio(cfg.space_energy_ratio)
+        .with_climb(climb)
+        .with_threads(1)
+        .with_interpolant(interpolant);
+    let band = BandConfig::default()
+        .with_tangent(tangent)
+        .with_spring(SpringKind::Uniform { k: cfg.k })
+        .with_projection(projection)
+        .with_climbing(climb.then(CiConfig::always))
+        .with_cell(parsed_cell)
+        .with_force_tol(cfg.force_tol)
+        .with_max_move(cfg.max_move)
+        .with_remove_translation(cfg.flags & RGSADDLE_AUTONEB_KEEP_TRANSLATION == 0)
+        .with_autoneb(Some(tuning))
+        .with_fixed_atoms(fixed_atoms);
+    let raw = unsafe { slice::from_raw_parts(positions, init_len) };
+    let initial = match Array2::from_shape_vec((n_init_us, dof), raw.to_vec()) {
+        Ok(initial) => initial,
+        Err(_) => return RGSADDLE_SHAPE,
+    };
+    let host = AutonebHost {
+        function: surface,
+        user,
+        n_atoms,
+    };
+    let result = crate::autoneb::AutoNeb::new(band, initial).and_then(|mut search| {
+        let report = search.run(&host)?;
+        Ok((report, search.positions().to_owned()))
+    });
+    match result {
+        Ok((found, path)) => {
+            let dst = unsafe { slice::from_raw_parts_mut(out_positions, out_len) };
+            dst.fill(0.0);
+            let rows = path.nrows();
+            let written = rows.saturating_mul(dof).min(out_len);
+            let standard = path.as_standard_layout();
+            let Some(slice) = standard.as_slice() else {
+                return RGSADDLE_SHAPE;
+            };
+            dst[..written].copy_from_slice(&slice[..written]);
+            let status = match found.status {
+                crate::band::BandStatus::Converged => 1,
+                crate::band::BandStatus::Running => 0,
+            };
+            let ci_index = match found.ci_index {
+                Some(index) => match i64::try_from(index) {
+                    Ok(index) => index,
+                    Err(_) => return RGSADDLE_SHAPE,
+                },
+                None => -1,
+            };
+            let Ok(surface_rows) = i64::try_from(found.surface_rows) else {
+                return RGSADDLE_SHAPE;
+            };
+            let Ok(n_images) = i64::try_from(found.n_images) else {
+                return RGSADDLE_SHAPE;
+            };
+            let Ok(iteration) = i64::try_from(found.iteration) else {
+                return RGSADDLE_SHAPE;
+            };
+            unsafe {
+                *report = RgsaddleAutonebReport {
+                    version: RgsaddleVersion {
+                        major: RGSADDLE_ABI_MAJOR,
+                        minor: RGSADDLE_ABI_MINOR,
+                    },
+                    flags: 0,
+                    status,
+                    reserved: 0,
+                    max_force: found.max_force,
+                    ci_index,
+                    surface_rows,
+                    n_images,
+                    iteration,
+                };
             }
             RGSADDLE_OK
         }

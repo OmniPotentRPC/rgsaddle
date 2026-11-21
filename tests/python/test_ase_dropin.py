@@ -65,12 +65,10 @@ def test_interpolate_places_the_interior_on_the_segment() -> None:
     neb = NEB(images, k=0.1, climb=False)
     neb.interpolate()
     assert images[1].positions[0, 0] == 0.0
-    try:
-        neb.interpolate(method="idpp")
-    except ValueError as err:
-        assert "idpp_path" in str(err)
-    else:
-        raise AssertionError("idpp interpolation was accepted")
+    images[1].positions[0, 0] = 4.0
+    neb.interpolate(method="idpp")
+    # One atom has no pairs, so the image-dependent path is the straight line.
+    assert images[1].positions[0, 0] == 0.0
 
 
 def test_a_slope_into_the_band_does_not_climb() -> None:

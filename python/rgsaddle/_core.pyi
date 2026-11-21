@@ -137,6 +137,45 @@ def connect(surface: Callable[..., tuple[numpy.typing.NDArray[numpy.float64], nu
     Double-ended connect. surface(x) returns (energy, gradient) for one image shaped (1, 3N).
     """
 
+def idpp_path(reactant: numpy.typing.NDArray[numpy.float64], product: numpy.typing.NDArray[numpy.float64], n_images: int, cell: numpy.typing.NDArray[numpy.float64] | None = None, max_iterations: int = 5000, grad_tol: float = 0.001, max_move: float = 0.1) -> numpy.typing.NDArray[numpy.float64]:
+    """
+    Image-dependent pair potential path (ABI minor 19). reactant and product are flat 3N. n_images counts the endpoints. cell is the 3x3 row-major lattice, or None in free space. Interior images are the L-BFGS minimum of the Smidstrup pair objective. The defaults are IdppConfig::default.
+    """
+
+class AutonebReport:
+    @property
+    def status(self) -> int:
+        """1 when the last stage converged, otherwise 0."""
+
+    @property
+    def max_force(self) -> float:
+        """Largest force component of the last stage."""
+
+    @property
+    def ci_index(self) -> int:
+        """Climbing image, or -1."""
+
+    @property
+    def surface_rows(self) -> int:
+        """Rows passed to the surface. One row is one force call."""
+
+    @property
+    def n_images(self) -> int:
+        """Images in the finished band, endpoints included."""
+
+    @property
+    def iteration(self) -> int:
+        """Steps of the last stage."""
+
+    @property
+    def positions(self) -> NDArray[numpy.float64]:
+        """Copy of the finished band, shaped (n_images, 3N)."""
+
+def autoneb_run(surface: Callable[..., tuple[numpy.typing.NDArray[numpy.float64], numpy.typing.NDArray[numpy.float64]]], positions: numpy.typing.NDArray[numpy.float64], k: float = 0.1, climb: bool = True, n_simul: int = 3, n_max: int = 7, force_tol: float = 0.025, local_force_tol: float = 0.025, local_max_steps: int = 10000, climb_max_steps: int = 10000, projection: str = 'neb', tangent: str = 'improved', remove_translation: bool = False, space_energy_ratio: float = 0.5, max_move: float = 0.2, idpp: bool = False, cell: numpy.typing.NDArray[numpy.float64] | None = None, fixed: numpy.typing.NDArray[numpy.uint8] | None = None) -> AutonebReport:
+    """
+    Run AutoNEB to completion (ABI minor 53). positions is (n_init >= 2, 3N). surface(x) receives (rows, 3N) and returns (energies, gradients). One row is one force call. The search stays on the calling thread.
+    """
+
 class SessionReport:
     @property
     def status(self) -> int:
@@ -229,9 +268,9 @@ def trust_update(radius: float, predicted: float, actual: float, step_norm: floa
     """
 
 class MinMode:
-    def __init__(self, x: Annotated[NDArray[numpy.float64], dict(shape=(None,), order='C', device='cpu', writable=False)], mode: Annotated[NDArray[numpy.float64], dict(shape=(None,), order='C', device='cpu', writable=False)], kind: str = 'dimer', dr: float = 0.001, force_tol: float = 0.001, max_move: float = 0.2, rotation_tol: float = 0.0001, max_rotations: int = 20, krylov_dim: int = 12, rotation_stop_length: float = 0.0) -> None:
+    def __init__(self, x: Annotated[NDArray[numpy.float64], dict(shape=(None,), order='C', device='cpu', writable=False)], mode: Annotated[NDArray[numpy.float64], dict(shape=(None,), order='C', device='cpu', writable=False)], kind: str = 'dimer', dr: float = 0.001, force_tol: float = 0.001, max_move: float = 0.2, rotation_tol: float = 0.0001, max_rotations: int = 20, krylov_dim: int = 12, rotation_stop_length: float = 0.0, method: str = 'lbfgs') -> None:
         """
-        Dimer or Lanczos minimum-mode session. Lengths are the caller's. A positive rotation_stop_length stops a rotation once |C| * rotation_stop_length * |sin w| is at most force_tol (Kastner and Sherwood 2008); 0 turns that stop off.
+        Dimer or Lanczos minimum-mode session. Lengths are the caller's. A positive rotation_stop_length stops a rotation once |C| * rotation_stop_length * |sin w| is at most force_tol (Kastner and Sherwood 2008); 0 turns that stop off. method is the translation optimizer, lbfgs (the default) or fire.
         """
 
     def estimate(self, surface: Callable[..., tuple[numpy.typing.NDArray[numpy.float64], numpy.typing.NDArray[numpy.float64]]]) -> SessionReport:
