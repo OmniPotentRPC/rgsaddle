@@ -6,7 +6,15 @@
 /// `cargo build --features capi` would leave a stale `capi` only shared
 /// library behind when `cargo test --features capi,ohtst` runs. Invoking
 /// `cargo build --lib` with the active feature set refreshes
-/// `target/<profile>/librgsaddle.so` before the C compiler links against it.
+/// `librgsaddle.so` before the C compiler links against it.
+///
+/// The nested build writes into its own `cdylib` subdirectory of the target
+/// directory. Cargo before 1.100 names the `rlib` of a `lib`, `cdylib` and
+/// `staticlib` crate without a hash, so a nested build in the outer target
+/// directory replaces the `librgsaddle.rlib` that rustdoc links later in the
+/// same `cargo test`. That `rlib` can be linked against another build of
+/// `rgmin` than the one the doctests name, and the doctests then fail to
+/// compile because the two copies of `rgmin` are different types.
 fn cdylib_dir() -> std::path::PathBuf {
     static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
     DIR.get_or_init(build_fresh_cdylib).clone()
@@ -97,7 +105,14 @@ fn build_fresh_cdylib() -> std::path::PathBuf {
         (parent.to_path_buf(), None)
     };
 
-    let lib_path = profile_dir.join("librgsaddle.so");
+    let nested_target_dir = target_dir.join("cdylib");
+    let mut nested_profile_dir = nested_target_dir.clone();
+    if let Some(triple) = &target_triple {
+        nested_profile_dir.push(triple);
+    }
+    nested_profile_dir.push(&profile_name);
+
+    let lib_path = nested_profile_dir.join("librgsaddle.so");
     match std::fs::remove_file(&lib_path) {
         Ok(()) => {}
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
@@ -119,7 +134,7 @@ fn build_fresh_cdylib() -> std::path::PathBuf {
         .arg("--locked")
         .arg("--no-default-features")
         .arg("--target-dir")
-        .arg(&target_dir);
+        .arg(&nested_target_dir);
     let features = active_features();
     if !features.is_empty() {
         cmd.arg("--features").arg(features.join(","));
@@ -147,5 +162,5 @@ fn build_fresh_cdylib() -> std::path::PathBuf {
         "expected fresh cdylib at {}",
         lib_path.display()
     );
-    profile_dir
+    nested_profile_dir
 }
