@@ -484,7 +484,7 @@ A failed callback leaves it unchanged.
 Its `rotation_angle_tol` field stops a dimer rotation once the optimal angle falls under this tolerance in radians.
 The Rust default is five degrees, 0 turns the stop off, and a C config stores the value it is given.
 Both fields are read only from a config whose version minor is 5 or newer.
-`RGSADDLE_ABI_MINOR` is 48.
+`RGSADDLE_ABI_MINOR` is 60.
 From minor 24, `rgsaddle_sella_saddle_set_symmetrized_ritz` sets `SellaSaddleConfig::symmetrized_ritz` from 0 or 1.
 It returns `RGSADDLE_INVALID_PARAMETER` for any other value.
 `rgsaddle_sella_saddle_set_small_system_atom_ceiling` (minor 25) sets `SellaSaddleConfig::small_system_atom_ceiling` from 0 or 1.
@@ -510,7 +510,7 @@ The feature macro `RGSADDLE_HAS_LINEB_RATE_DIAGNOSTICS` advertises
 64-bit outputs give the number of negative and total retained fluctuation
 modes. Each reports `-1` for a path-only or failed solve.
 
-From minor 46, `rgsaddle_band_set_refine` installs or clears the per-step L-BFGS refine stepper, and `rgsaddle_band_is_refining` reports whether the last first-order step used it. A host checks `rgsaddle_abi_version()` for minor 46 or newer. The worked example is `tests/band_refine.rs`.
+From minor 60, `rgsaddle_band_set_refine` installs or clears the per-step L-BFGS refine stepper, and `rgsaddle_band_is_refining` reports whether the last first-order step used it. A host checks `rgsaddle_abi_version()` for minor 60 or newer. The worked example is `tests/band_refine.rs`.
 The request flags are `RGSADDLE_REQ_ONE_IMAGE` (bit 0) and `RGSADDLE_REQ_CLIMBING_IMAGE` (bit 1).
 From a band config at minor 22, the refinement's one-image requests also set bit 1.
 Their `image` is then the climbing image's band index.
@@ -1112,7 +1112,7 @@ On the 2D curved parabolic channel with a central obstacle (`tests/growing_strin
 `StepRefine` (`BandConfig::with_refine`, `BandSession::set_refine`, `BandSession::is_refining`) chooses the band stepper on each step. `StepRefine::default` is L-BFGS with memory 20 and `StepRefine::threshold` 0.5, in the host's force units. `with_method` and `with_threshold` replace those. `BandConfig::refine` is `None` by default, so a band steps with `BandConfig::method` alone.
 On a step whose convergence force, the same value the `force_tol` stop reads, is at or under the threshold, the band steps with the refine method. Any other step uses the primary method. Both steppers keep their own state, so a force that rises back over the threshold returns the band to the primary stepper. The refine method must step on the force alone. A threshold that is not finite and positive is refused while a refine stepper is set.
 The choice applies to the first-order step of an atomic band whose method is FIRE, including the band steps between OCI-NEB refinements (`MinModeRefine`). A solid-state, quick-min, trust-region, simplified string, growing string, or free-end band drives its own stepper and ignores `StepRefine`. `BandSession::restart` drops both steppers.
-From C (ABI minor 46), `rgsaddle_band_set_refine` installs `RGSADDLE_REFINE_LBFGS` or clears it with `RGSADDLE_REFINE_NONE`, and `rgsaddle_band_is_refining` reports which stepper the last step used. A threshold of 0 selects 0.5. `rgsaddle::Band::set_refine` and `Band::is_refining` wrap those calls, and Python exposes `Band.set_refine` and `Band.is_refining`. The worked example is `tests/band_refine.rs`.
+From C (ABI minor 60), `rgsaddle_band_set_refine` installs `RGSADDLE_REFINE_LBFGS` or clears it with `RGSADDLE_REFINE_NONE`, and `rgsaddle_band_is_refining` reports which stepper the last step used. A threshold of 0 selects 0.5. `rgsaddle::Band::set_refine` and `Band::is_refining` wrap those calls, and Python exposes `Band.set_refine` and `Band.is_refining`. The worked example is `tests/band_refine.rs`.
 
 ## Free-end adaptive NEB
 
@@ -3370,7 +3370,7 @@ CMAKE_POLICY_VERSION_MINIMUM=3.5 cargo build --locked --features chemfiles
 
 > Stepping bands, minimum-mode sessions, Sella, IRC, and strings from C and C++
 
-`include/rgsaddle.h` declares the C application binary interface (ABI), major 1, minor 47. It preserves the main band, minimum-mode and index-1 layouts and adds intrinsic reaction coordinate (IRC), Sella, constraint and geometry controls. Include this header rather than duplicating its structures. Check `rgsaddle_abi_stamp` before constructing a session. A meson project takes the headers from the top-level `meson.build`; see [the meson how-to](meson.html).
+`include/rgsaddle.h` declares the C application binary interface (ABI), major 1, minor 60. It preserves the main band, minimum-mode and index-1 layouts and adds intrinsic reaction coordinate (IRC), Sella, constraint and geometry controls. Include this header rather than duplicating its structures. Check `rgsaddle_abi_stamp` before constructing a session. A meson project takes the headers from the top-level `meson.build`; see [the meson how-to](meson.html).
 
 A surface callback returns `rgsaddle_status_t` and receives one `rgsaddle_surface_request_t`. Positions and gradients are image-major Cartesian triples. The host supplies the energy and gradient arrays for every requested image; the library performs no Message Passing Interface (MPI) communication.
 From ABI minor 42, `RGSADDLE_NOT_EQUILIBRATED` and `RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES` report constrained-ensemble tails that fail the drift or effective-sample guards.
@@ -3497,7 +3497,7 @@ ABI minor 47 adds the one-shot fixed-energy LI-NEB and harmonic quantum TST entr
 
 The `RGSADDLE_LINEB_INTERPOLATED_FORCE_CLOCK` option selects the signed image force for the imaginary-time orbit and rate. The projected Verlet option controls band optimization independently.
 
-ABI minor 46 adds the per-step refine stepper. `rgsaddle_refine_method_t` is `RGSADDLE_REFINE_NONE` or `RGSADDLE_REFINE_LBFGS`. `rgsaddle_band_set_refine` installs L-BFGS for steps whose convergence force is at or under `threshold`, in the host's force units, and leaves every other step on the band method. A threshold of 0 selects 0.5, and `memory` less than or equal to 0 selects 20 pairs. `RGSADDLE_REFINE_NONE` clears the stepper and does not read the threshold. A negative or non-finite threshold and an unknown method are refused. `rgsaddle_band_is_refining` is 1 when the last first-order step used the refine stepper. A string, trust-region, solid-state, quick-min, or free-end band ignores the call. `include/rgsaddle/session.hpp` wraps the pair as `Band::set_refine` and `Band::is_refining`, and Python exposes `Band.set_refine` and `Band.is_refining`. A host checks `rgsaddle_abi_version()` for minor 46 or newer. The worked example is `tests/band_refine.rs`.
+ABI minor 60 adds the per-step refine stepper. `rgsaddle_refine_method_t` is `RGSADDLE_REFINE_NONE` or `RGSADDLE_REFINE_LBFGS`. `rgsaddle_band_set_refine` installs L-BFGS for steps whose convergence force is at or under `threshold`, in the host's force units, and leaves every other step on the band method. A threshold of 0 selects 0.5, and `memory` less than or equal to 0 selects 20 pairs. `RGSADDLE_REFINE_NONE` clears the stepper and does not read the threshold. A negative or non-finite threshold and an unknown method are refused. `rgsaddle_band_is_refining` is 1 when the last first-order step used the refine stepper. A string, trust-region, solid-state, quick-min, or free-end band ignores the call. `include/rgsaddle/session.hpp` wraps the pair as `Band::set_refine` and `Band::is_refining`, and Python exposes `Band.set_refine` and `Band.is_refining`. A host checks `rgsaddle_abi_version()` for minor 60 or newer. The worked example is `tests/band_refine.rs`.
 
 # Use the headers from a meson project (`docs/orgmode/howto/meson.org`)
 
@@ -3626,7 +3626,7 @@ A calculator exception, including `KeyboardInterrupt`, propagates out of `__call
 
 `_core.halve_raised_energy(previous, trial, step)` returns `(raised, new_step)`. A trial more than 1e-4 above `previous` halves `step`. `_core.trust_update(radius, predicted, actual, step_norm, sigma_inc, sigma_dec, rho_inc, rho_dec, delta_min)` is the Sella radius after those energy changes. A prediction below 1e-14 in absolute value returns `radius`. Neither call evaluates a surface.
 
-`rgsaddle.Band` is the stepping band and simplified-string session: =Band(positions, ..., string=True, reparametrization="not-a-knot")` takes a batched surface callback receiving `(rows, 3N)` and returning `(energies, gradients)=, with `step`, `run`, `positions`, `set_positions`, `evaluation`, `set_string`, `set_fixed_atoms`, `saddle_index`, `set_saddle_check`, `restart`, and `reset`. =rgsaddle.GrowingString(reactant, product, n_images=11, frontier_tol=0.2, ...)= steps the growing string and hands off to `StringSession` upon join, with `step`, `run`, `n_images`, `nodes_added`, `joined`, `positions`, `ids`, `set_fixed_atoms`, and `saddle_index`. `Band.set_free_end(enabled, side`"last", target_energy=None, max_cuts=2, cut_force=0.0, energy_tol=0.001, stability=2, window_offset=1, cubic=True)= enables the free-end adaptive NEB of Zhang, Zhang, Ye, and Zheng [zhangFreeEndAdaptive2016] on an existing band (ABI minor 45; a host checks the loaded minor before calling it). =Band.set_refine(enabled=True, threshold=0.0, memory=20)= and `Band.is_refining` install the per-step L-BFGS refine stepper (ABI minor 46). A threshold of 0 selects 0.5, in the host's force units, and =enabled=False= clears it. `Band.target_energy_residual` and `Band.free_end_cuts` report the level-set residual and how many local windows were removed. `Band.evaluation` returns the energies, gradients, and projected interior forces at the positions the last step reported. The worked example is `tests/free_end_neb.rs`. `_core.project_band` projects an evaluated band (including `projection`"string"= for the unprojected potential force with optional climbing reflection). `_core.MinMode` and `_core.SellaSaddle` are the point sessions those classes drive; their surface callback receives one image shaped `(1, 3N)` and returns `(energy, gradient)`.
+`rgsaddle.Band` is the stepping band and simplified-string session: =Band(positions, ..., string=True, reparametrization="not-a-knot")` takes a batched surface callback receiving `(rows, 3N)` and returning `(energies, gradients)=, with `step`, `run`, `positions`, `set_positions`, `evaluation`, `set_string`, `set_fixed_atoms`, `saddle_index`, `set_saddle_check`, `restart`, and `reset`. =rgsaddle.GrowingString(reactant, product, n_images=11, frontier_tol=0.2, ...)= steps the growing string and hands off to `StringSession` upon join, with `step`, `run`, `n_images`, `nodes_added`, `joined`, `positions`, `ids`, `set_fixed_atoms`, and `saddle_index`. `Band.set_free_end(enabled, side`"last", target_energy=None, max_cuts=2, cut_force=0.0, energy_tol=0.001, stability=2, window_offset=1, cubic=True)= enables the free-end adaptive NEB of Zhang, Zhang, Ye, and Zheng [zhangFreeEndAdaptive2016] on an existing band (ABI minor 45; a host checks the loaded minor before calling it). =Band.set_refine(enabled=True, threshold=0.0, memory=20)= and `Band.is_refining` install the per-step L-BFGS refine stepper (ABI minor 60). A threshold of 0 selects 0.5, in the host's force units, and =enabled=False= clears it. `Band.target_energy_residual` and `Band.free_end_cuts` report the level-set residual and how many local windows were removed. `Band.evaluation` returns the energies, gradients, and projected interior forces at the positions the last step reported. The worked example is `tests/free_end_neb.rs`. `_core.project_band` projects an evaluated band (including `projection`"string"= for the unprojected potential force with optional climbing reflection). `_core.MinMode` and `_core.SellaSaddle` are the point sessions those classes drive; their surface callback receives one image shaped `(1, 3N)` and returns `(energy, gradient)`.
 
 ## Saddle index
 A converged `_core.MinMode` step certifies the saddle index of its point, as in `howto/minmode`: `SessionReport.saddle_index` is the index on that step and -1 on the others.
@@ -4812,7 +4812,7 @@ The narrative for a session is the C and C++ how-to, not this list.
 - `rgsaddle_lineb_solve_counted_orbit`. Purpose: Counted solve with optional bead observations. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_lineb_solve_counted_turning`. Purpose: Counted orbit solve with optional return-turn geometry and energy checks. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_lineb_solve_counted_rate`. Purpose: Counted solve with selectable image-Hessian interpolation. Parameters: the declaration. Units: the caller's.
-- `rgsaddle_band_set_refine`. Purpose: Per-step refine stepper, ABI minor 46. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_band_set_refine`. Purpose: Per-step refine stepper, ABI minor 60. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_band_is_refining`. Purpose: 1 when the last first-order step used the refine stepper, else 0. Parameters: the declaration. Units: the caller's.
 
 ## Types and callbacks
@@ -4886,7 +4886,7 @@ The narrative for a session is the C and C++ how-to, not this list.
 - `rgsaddle_lineb_orbit_t`. Purpose: Opt-in observations from the rate's own surface calls.
 - `rgsaddle_lineb_turning_t`. Purpose: Return-turn agreement for the interpolated-force clock, in the caller's units.
 - `rgsaddle_lineb_rate_diagnostics_t`. Purpose: Geometry counts within the rate, and the Cartesian finite-difference displacement used at the path images (NaN for direct or path-only solves).
-- `rgsaddle_refine_method_t`. Purpose: Refine stepper of rgsaddle_band_set_refine, ABI minor 46.
+- `rgsaddle_refine_method_t`. Purpose: Refine stepper of rgsaddle_band_set_refine, ABI minor 60.
 - `rgsaddle_hyperplane_emit_fn`. Purpose: Callback typedef in include/rgsaddle.h.
 - `rgsaddle_sample_hyperplane_fn`. Purpose: Callback typedef in include/rgsaddle.h.
 - `rgsaddle_surface_fn`. Purpose: Callback typedef in include/rgsaddle.h.

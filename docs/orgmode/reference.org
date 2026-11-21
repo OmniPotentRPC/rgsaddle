@@ -259,7 +259,7 @@ A failed callback leaves it unchanged.
 Its =rotation_angle_tol= field stops a dimer rotation once the optimal angle falls under this tolerance in radians.
 The Rust default is five degrees, 0 turns the stop off, and a C config stores the value it is given.
 Both fields are read only from a config whose version minor is 5 or newer.
-=RGSADDLE_ABI_MINOR= is 48.
+=RGSADDLE_ABI_MINOR= is 60.
 From minor 24, =rgsaddle_sella_saddle_set_symmetrized_ritz= sets =SellaSaddleConfig::symmetrized_ritz= from 0 or 1.
 It returns =RGSADDLE_INVALID_PARAMETER= for any other value.
 =rgsaddle_sella_saddle_set_small_system_atom_ceiling= (minor 25) sets =SellaSaddleConfig::small_system_atom_ceiling= from 0 or 1.
@@ -285,7 +285,7 @@ The feature macro =RGSADDLE_HAS_LINEB_RATE_DIAGNOSTICS= advertises
 64-bit outputs give the number of negative and total retained fluctuation
 modes. Each reports =-1= for a path-only or failed solve.
 
-From minor 46, =rgsaddle_band_set_refine= installs or clears the per-step L-BFGS refine stepper, and =rgsaddle_band_is_refining= reports whether the last first-order step used it. A host checks =rgsaddle_abi_version()= for minor 46 or newer. The worked example is =tests/band_refine.rs=.
+From minor 60, =rgsaddle_band_set_refine= installs or clears the per-step L-BFGS refine stepper, and =rgsaddle_band_is_refining= reports whether the last first-order step used it. A host checks =rgsaddle_abi_version()= for minor 60 or newer. The worked example is =tests/band_refine.rs=.
 The request flags are =RGSADDLE_REQ_ONE_IMAGE= (bit 0) and =RGSADDLE_REQ_CLIMBING_IMAGE= (bit 1).
 From a band config at minor 22, the refinement's one-image requests also set bit 1.
 Their =image= is then the climbing image's band index.

@@ -3888,7 +3888,7 @@ pub unsafe extern "C" fn rgsaddle_band_free_end_residual(
     }
 }
 
-/// Install, replace, or clear the per-step refine stepper (ABI minor 46).
+/// Install, replace, or clear the per-step refine stepper (ABI minor 60).
 ///
 /// `method` 0 clears it. `method` 1 is L-BFGS with `memory` pairs, or
 /// 20 when `memory` is less than or equal to 0. A `threshold` of 0 is
@@ -3929,7 +3929,7 @@ pub unsafe extern "C" fn rgsaddle_band_set_refine(
     }
 }
 
-/// 1 when the last first-order step used the refine stepper (ABI minor 46).
+/// 1 when the last first-order step used the refine stepper (ABI minor 60).
 ///
 /// # Safety
 /// `band` is a live session or null.

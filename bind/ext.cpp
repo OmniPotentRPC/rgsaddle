@@ -2405,7 +2405,7 @@ NB_MODULE(_core, m) {
             }
           },
           nb::arg("enabled") = true, nb::arg("threshold") = 0.0, nb::arg("memory") = 20,
-          "Install or clear the per-step L-BFGS refine stepper (ABI minor 46). "
+          "Install or clear the per-step L-BFGS refine stepper (ABI minor 60). "
           "A threshold of 0 selects 0.5, in the host's force units.")
       .def(
           "is_refining",
