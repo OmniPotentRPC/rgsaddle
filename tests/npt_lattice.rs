@@ -102,14 +102,14 @@ fn ideal_gas_pressure_is_the_kinetic_density() {
     let (mut positions, mut cell) = grid(5, 4.0);
     let atoms = positions.len() / 3;
     let volume = 20.0_f64.powi(3);
-    let mut config = NptConfig::default()
+    let config = NptConfig::default()
         .with_repeats(5)
         .with_steps(4_000)
         .with_maximum_steps(4_000)
         .with_equilibration_steps(1_000)
         .with_block_steps(100)
+        .with_compressibility_per_ev_a3(1.0e-12)
         .with_seed(3);
-    config.compressibility_per_ev_a3 = 1.0e-12;
 
     let report = npt_lattice(&mut positions, &mut cell, 300.0, 63.546, config, |x, _| {
         Ok((0.0, Array1::zeros(x.len()), [[0.0; 3]; 3]))
@@ -202,16 +202,16 @@ fn ideal_gas_settles_at_the_target_pressure() {
     let (mut positions, mut cell) = grid(5, 4.0);
     let atoms = positions.len() / 3;
     let target = 2.0e-4;
-    let mut config = NptConfig::default()
+    let config = NptConfig::default()
         .with_repeats(5)
         .with_steps(20_000)
         .with_maximum_steps(20_000)
         .with_equilibration_steps(5_000)
         .with_block_steps(500)
+        .with_target_pressure_ev_a3(target)
+        .with_compressibility_per_ev_a3(100.0)
+        .with_berendsen_tau_s(2.0e-14)
         .with_seed(9);
-    config.target_pressure_ev_a3 = target;
-    config.compressibility_per_ev_a3 = 100.0;
-    config.berendsen_tau_s = 2.0e-14;
 
     let report = npt_lattice(&mut positions, &mut cell, 300.0, 63.546, config, |x, _| {
         Ok((0.0, Array1::zeros(x.len()), [[0.0; 3]; 3]))
@@ -226,4 +226,22 @@ fn ideal_gas_settles_at_the_target_pressure() {
     );
     assert!((report.mean_pressure / target - 1.0).abs() < 0.03);
     assert!((report.mean_lattice_a / expected - 1.0).abs() < 0.01);
+}
+
+#[test]
+fn configuration_is_built_from_defaults_with_setters() {
+    let config = NptConfig::default()
+        .with_timestep_s(1.0e-15)
+        .with_langevin_gamma_per_s(2.0e12)
+        .with_berendsen_tau_s(1.0e-12)
+        .with_compressibility_per_ev_a3(0.5)
+        .with_target_pressure_ev_a3(1.0e-4)
+        .with_seed(0);
+    assert_eq!(config.timestep_s, 1.0e-15);
+    assert_eq!(config.langevin_gamma_per_s, 2.0e12);
+    assert_eq!(config.berendsen_tau_s, 1.0e-12);
+    assert_eq!(config.compressibility_per_ev_a3, 0.5);
+    assert_eq!(config.target_pressure_ev_a3, 1.0e-4);
+    assert_eq!(config.seed, 0);
+    assert_eq!(config.repeats, NptConfig::default().repeats);
 }
