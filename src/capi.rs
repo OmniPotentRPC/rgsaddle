@@ -987,11 +987,24 @@ unsafe fn project_band(
     }
 }
 
+/// Image rows, coordinates per image and band length of a
+/// `rgsaddle_dyneb_mask` call. `None` when `3 * n_atoms` or
+/// `n_images * 3 * n_atoms` overflows, or when the band is more than
+/// `isize::MAX` bytes of doubles, which `slice::from_raw_parts` forbids.
+fn dyneb_extent(n_images: i64, n_atoms: i64) -> Option<(usize, usize, usize)> {
+    let rows = usize::try_from(n_images).ok()?;
+    let dof = usize::try_from(n_atoms).ok()?.checked_mul(3)?;
+    let total = rows.checked_mul(dof)?;
+    let bytes = total.checked_mul(std::mem::size_of::<f64>())?;
+    (bytes <= isize::MAX as usize).then_some((rows, dof, total))
+}
+
 /// ASE 3.29 DyNEB mask. See [`rgsaddle_dyneb_mask`] in the C header.
 ///
 /// # Safety
-/// `positions`, `energies` and `forces` address `n_images * 3 * n_atoms`
-/// doubles. `frozen`, when non-null, addresses `n_images` bytes.
+/// `positions` and `forces` address `n_images * 3 * n_atoms` doubles,
+/// `energies` addresses `n_images` doubles, and `frozen`, when non-null,
+/// addresses `n_images` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rgsaddle_dyneb_mask(
     n_images: i64,
@@ -1005,11 +1018,11 @@ pub unsafe extern "C" fn rgsaddle_dyneb_mask(
 ) -> i32 {
     if positions.is_null() || energies.is_null() || forces.is_null() || n_images < 3 || n_atoms < 1
     {
-        return RGSADDLE_SHAPE;
+        return RGSADDLE_INVALID_PARAMETER;
     }
-    let rows = n_images as usize;
-    let dof = (3 * n_atoms) as usize;
-    let total = rows * dof;
+    let Some((rows, dof, total)) = dyneb_extent(n_images, n_atoms) else {
+        return RGSADDLE_INVALID_PARAMETER;
+    };
     let pos = unsafe { slice::from_raw_parts(positions, total) };
     let energy = unsafe { slice::from_raw_parts(energies, rows) };
     let force = unsafe { slice::from_raw_parts_mut(forces, total) };
@@ -1021,12 +1034,12 @@ pub unsafe extern "C" fn rgsaddle_dyneb_mask(
     }
     let Ok(interior_pos) = Array2::from_shape_vec((rows - 2, dof), pos[dof..total - dof].to_vec())
     else {
-        return RGSADDLE_SHAPE;
+        return RGSADDLE_INVALID_PARAMETER;
     };
     let Ok(mut force_rows) =
         Array2::from_shape_vec((rows - 2, dof), force[dof..total - dof].to_vec())
     else {
-        return RGSADDLE_SHAPE;
+        return RGSADDLE_INVALID_PARAMETER;
     };
     let interior_e = Array1::from(energy[1..rows - 1].to_vec());
     let spec = crate::DynamicNeb::default()

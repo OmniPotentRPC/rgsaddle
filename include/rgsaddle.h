@@ -1489,8 +1489,9 @@ rgsaddle_status_t rgsaddle_band_set_dynamic(RgsaddleBand *band, int32_t enabled,
 
 /**
  * ASE 3.29 DyNEB mask, ABI minor 45. `positions`, `energies` and
- * `forces` are the whole band, image-major, `n_images * 3 * n_atoms`
- * for the coordinates and the forces. Interior force rows whose
+ * `forces` are the whole band, image-major: `n_images * 3 * n_atoms`
+ * doubles for the coordinates and the forces, `n_images` for the
+ * energies. Interior force rows whose
  * largest per-atom norm is strictly below
  * `fmax * (1 + distance * scale_fmax)` are set to zero, except the
  * highest-energy image, whose force is kept. `distance` does not use
@@ -1498,9 +1499,12 @@ rgsaddle_status_t rgsaddle_band_set_dynamic(RgsaddleBand *band, int32_t enabled,
  * bytes: 1 when that image would not be moved (the force after this
  * mask is strictly below `fmax`). Both endpoints are 1.
  *
- * Returns RGSADDLE_SHAPE for a null pointer, fewer than 3 images or a
- * non-positive atom count, RGSADDLE_NON_FINITE for a non-finite input,
- * and RGSADDLE_INVALID_PARAMETER for a non-finite fmax or scale_fmax.
+ * Returns RGSADDLE_INVALID_PARAMETER, before any array is read, for a
+ * null `positions`, `energies` or `forces`, fewer than 3 images, a
+ * non-positive atom count, a `3 * n_atoms` or `n_images * 3 * n_atoms`
+ * that overflows, or a band of more than PTRDIFF_MAX bytes, and for a
+ * non-finite fmax or scale_fmax. Returns RGSADDLE_NON_FINITE for a
+ * non-finite position, energy or force.
  */
 rgsaddle_status_t rgsaddle_dyneb_mask(int64_t n_images, int64_t n_atoms,
                                       const double *positions,
