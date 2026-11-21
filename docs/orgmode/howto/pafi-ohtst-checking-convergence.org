@@ -4,7 +4,7 @@
 Neither method runs to completion: a sampler reports whether its own records behaved like independent draws, not whether the answer is physically right. This how-to reads the diagnostics each result carries. On PAFI's side it compares a short run that the sampler refuses against a longer one that it accepts, and on OH-TST's a quadrature that does not have enough nodes against one that does.
 
 * PAFI: =tau= and =n_eff=
-=HyperplaneAverage::tau= is the integrated autocorrelation time, in records; =HyperplaneAverage::n_eff= is =(samples - discard) / (2 tau)=, the number of effectively independent draws the retained tail carries. A block standard error computed from a chain with =n_eff= in the single digits is not trustworthy, whatever number it prints, so =pafi_profile= does not print one: it returns =SaddleError::InsufficientEffectiveSamples= for a plane whose tail has fewer than 10 effective samples:
+=HyperplaneAverage::tau= is the integrated autocorrelation time, in records; =HyperplaneAverage::n_eff= is =(samples - discard) / max(1, 2 tau)=, the number of effectively independent draws the retained tail carries. A block standard error computed from a chain with =n_eff= in the single digits is not trustworthy, whatever number it prints, so =pafi_profile= does not print one: it returns =SaddleError::InsufficientEffectiveSamples= for a plane whose tail has fewer effective samples than =PafiConfig::blocks=, 5 by default. The example below sets =blocks= to 10:
 
 #+INCLUDE: "../../../examples/howto_convergence.rs" src rust :lines "49-80"
 
@@ -17,7 +17,7 @@ PAFI under-sampled: refused, constrained ensemble has only 5.280 effective sampl
 PAFI settled: barrier 0.97572 +/- 0.00268, worst tau 61.87, worst n_eff 48.5
 #+end_example
 
-The under-sampled run, 60 samples a step apart, is refused: its tail carries 5.3 effective samples behind a block error computed from 10 blocks, so the block-to-block spread would badly underestimate the true uncertainty, and the sampler says so instead of returning it. The settled run's worst =n_eff=, 48.5, is comfortably above the threshold, and its error bar can be read. A small error bar next to a low =n_eff= is a sign to run longer, not a sign of a precise answer; the sampler enforces that for a plane below 10 and leaves the judgement between 10 and a few tens to the caller. (The barrier here is not the fully converged one from =tutorials/pafi=, 1.04418 at the same =kT=: this how-to uses 9 planes on a three-point path and far fewer samples than that tutorial's 49 planes and 30000, to keep two comparable runs fast, not to give the tutorial's own number.)
+The under-sampled run, 60 samples a step apart, is refused: its tail carries 5.28 effective samples behind a block error computed from 10 blocks, so the block-to-block spread would badly underestimate the true uncertainty, and the sampler says so instead of returning it. The settled run's worst =n_eff=, 48.5, is comfortably above the threshold, and its error bar can be read. A small error bar next to a low =n_eff= means the run needs to be longer; the sampler enforces that for a plane below =blocks=, 10 in this example, and leaves the judgement above that to the caller. It also refuses a tail when blocks at least =ceil(2 tau)= records wide leave fewer than two complete blocks, even if the first effective-sample check passed. (The barrier here is not the fully converged one from =tutorials/pafi=, 1.04418 at the same =kT=: this how-to uses 9 planes on a three-point path and far fewer samples than that tutorial's 49 planes and 30000, to keep two comparable runs fast, not to give the tutorial's own number.)
 
 * OH-TST: the virial check and quadrature overlap
 =PlaneSample::virial= is the in-plane virial \(\langle (P \nabla V) \cdot (q - p) \rangle\), where \(P\) projects onto the plane's free directions; at equilibrium on an unconstrained plane it should sit within error of =free_dimensions * kT= (equipartition), and a run that misses it by several standard errors has a time step too large or a chain that has not equilibrated:
@@ -38,10 +38,10 @@ deviation from equipartition: 0.56 standard errors
 #+begin_example
 reactant -> saddle, 2 node(s): integrated 0.04503 ± 0.00606, worst neighbour overlap 0.473, warnings: []
 reactant -> saddle, 3 node(s): integrated 1.04012 ± 0.00376, worst neighbour overlap 0.490, warnings: []
-reactant -> saddle, 9 node(s): integrated 1.04531 ± 0.00283, worst neighbour overlap 0.490, warnings: []
+reactant -> saddle, 9 node(s): integrated 1.04531 ± 0.00283, worst neighbour overlap 0.487, warnings: []
 #+end_example
 
-Two nodes gives 0.04503, wildly short of the true barrier; three nodes, enough for Simpson's rule to see the curve bend once in the middle, already recovers 1.04012; nine nodes gets to 1.04531, close to the 1.04581 closed form =tutorials/oh-tst= checks its own reversible work against. None of the three runs prints an overlap warning: every neighbour pair shares enough configuration space regardless of node count, since the plane is normal to a single, smooth direction here. A low node count is a quadrature error, not an overlap failure, and =warnings= being empty does not mean the integral converged; only comparing node counts against each other, the way this how-to does, or against a closed form when one exists, shows that.
+Two nodes gives 0.04503, wildly short of the true barrier; three nodes, enough for Simpson's rule to see the curve bend once in the middle, already recovers 1.04012; nine nodes gets to 1.04531, close to the 1.04581 closed form =tutorials/oh-tst= checks its own reversible work against. None of the three runs prints an overlap warning: the worst overlaps are 0.473, 0.490 and 0.487, all above the configured threshold, since the plane is normal to a single, smooth direction here. A low node count is a quadrature error, not an overlap failure, and =warnings= being empty does not mean the integral converged; only comparing node counts against each other, the way this how-to does, or against a closed form when one exists, shows that.
 
 * Next
 #+begin_export rst
