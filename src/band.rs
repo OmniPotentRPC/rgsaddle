@@ -2829,8 +2829,9 @@ fn assemble_band_with(
         return Err(SaddleError::NonFinite("band force norm"));
     }
     // The solver sees forces ASE would hand the optimizer. The stored
-    // evaluation keeps the projected force before that mask, which is
-    // what convergence and [`BandSession::evaluation`] report.
+    // evaluation keeps the projected and driving forces before that
+    // mask: convergence and [`BandSession::evaluation`] report them, and
+    // a later band without the mask reads them back from the cache.
     let stored = if let Some(spec) = state.dynamic_spec() {
         let saved = projected.clone();
         let saved_driving = driving.clone();
@@ -2882,7 +2883,7 @@ fn assemble_band_with(
                 }
             }
         }
-        Some(saved)
+        Some((saved, saved_driving))
     } else {
         None
     };
@@ -2891,11 +2892,11 @@ fn assemble_band_with(
     {
         match cache_metric {
             Some(metric_id) => {
-                let force = match &stored {
-                    Some(force) => force,
-                    None => &projected,
+                let (force, drive) = match &stored {
+                    Some((force, drive)) => (force, drive.as_ref()),
+                    None => (&projected, driving.as_ref()),
                 };
-                work.store_forces(last, force, driving.as_ref());
+                work.store_forces(last, force, drive);
                 last.assembly_ci = state.ci().map_or(-1, |i| i as i64);
                 last.assembly_metric = Some(metric_id);
             }
@@ -3668,10 +3669,14 @@ impl BandSession {
     }
 
     /// Turn dynamic NEB on or off between steps. `None` restores a
-    /// full evaluation of every image. The image cache is dropped, so
-    /// the next step evaluates the band again. A solid-state band, the
-    /// trust-region stepper, the simplified string method, and
-    /// free-end adaptive NEB are refused.
+    /// full evaluation of every image. A change drops the image cache,
+    /// retires the cached force assembly and makes the solver forget its
+    /// cached force, which was masked under the old setting, so the next
+    /// step evaluates the band again. Setting the value the band already
+    /// holds changes nothing. A bad threshold, a solid-state band, the
+    /// trust-region stepper, the simplified string method, and free-end
+    /// adaptive NEB are refused with [`SaddleError::Invalid`] and leave
+    /// the session unchanged.
     pub fn set_dynamic(&mut self, dynamic: Option<DynamicNeb>) -> Result<(), SaddleError> {
         if let Some(spec) = dynamic {
             spec.check()?;
@@ -3697,8 +3702,13 @@ impl BandSession {
                 ));
             }
         }
+        if self.config.dynamic == dynamic {
+            return Ok(());
+        }
         self.config.dynamic = dynamic;
         self.state.install_dynamic(dynamic);
+        self.state.retire_assembly_key();
+        self.solver.forget_evaluation();
         Ok(())
     }
 
@@ -5528,5 +5538,122 @@ mod tests {
 
         session.step(&AlongX).expect("step after restart");
         assert!(session.climbing_image().is_some());
+    }
+
+    /// Five images of two atoms on [`Harmonic`]. An `fmax` far above
+    /// every force zeroes every interior image but the highest.
+    fn dynamic_band(dynamic: Option<DynamicNeb>, exp: bool) -> BandSession {
+        let positions = Array2::from_shape_fn((5, 6), |(image, c)| {
+            let t = image as f64;
+            match c {
+                0 => 0.1 * t,
+                1 => 0.05 * t,
+                3 => 1.1 + 0.1 * t,
+                4 => 0.02 * t,
+                5 => 0.1 + 0.03 * t * (4.0 - t),
+                _ => 0.0,
+            }
+        });
+        let mut config = BandConfig::default()
+            .with_method(Method::fire(rgmin::FireKind::V2))
+            .with_climbing(None)
+            .with_min_mode(None)
+            .with_saddle_check(None)
+            .with_remove_translation(false)
+            .with_dynamic(dynamic);
+        if exp {
+            config = config.with_exp_precon(ExpBandPrecon::default().with_mu(1.0));
+        }
+        BandSession::new(config, positions).expect("band")
+    }
+
+    fn assembly_key(session: &BandSession) -> i64 {
+        let slot = session.state.last.lock().unwrap_or_else(|e| e.into_inner());
+        slot.as_ref().expect("assembly").assembly_ci
+    }
+
+    fn solver_evaluates(session: &mut BandSession, at: Array1<f64>) -> bool {
+        let evaluated = AtomicBool::new(false);
+        let start = at.clone();
+        let oracle = Oracle::unbounded(at.len(), |x: ArrayView1<f64>| {
+            if x == start.view() {
+                evaluated.store(true, Ordering::Relaxed);
+            }
+            (1.0, Array1::from_elem(x.len(), 0.25))
+        });
+        let mut trial = at;
+        session
+            .solver
+            .step(&oracle, &mut trial)
+            .expect("solver step");
+        evaluated.load(Ordering::Relaxed)
+    }
+
+    #[test]
+    fn dynamic_step_caches_the_unmasked_driving_force() {
+        let spec = DynamicNeb::default().with_fmax(1000.0);
+        let mut session = dynamic_band(Some(spec), true);
+        session.step(&Harmonic).expect("dynamic step");
+        let zeroed = session
+            .state
+            .dynamic_run()
+            .step
+            .as_ref()
+            .expect("the step recorded its mask")
+            .zeroed
+            .clone();
+        assert!(zeroed.iter().any(|z| *z), "no image was masked");
+        let x = session.interior_flat();
+        let slot = session.state.last.lock().unwrap_or_else(|e| e.into_inner());
+        let eval = slot.as_ref().expect("assembly");
+        assert_eq!(eval.x, x);
+        let dof = session.positions.ncols();
+        assert_eq!(eval.driving.len(), zeroed.len() * dof);
+        for (i, &masked) in zeroed.iter().enumerate() {
+            let row = eval.driving.slice(s![i * dof..(i + 1) * dof]);
+            let force = eval.projected.slice(s![i * dof..(i + 1) * dof]);
+            assert!(force.iter().any(|v| *v != 0.0));
+            if masked {
+                assert!(
+                    row.iter().any(|v| *v != 0.0),
+                    "image {} cached the masked driving force",
+                    i + 1
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn set_dynamic_retires_the_assembly_and_the_solver_evaluation() {
+        let spec = DynamicNeb::default().with_fmax(1000.0);
+        let mut session = dynamic_band(Some(spec), false);
+        session.step(&Harmonic).expect("dynamic step");
+        let key = assembly_key(&session);
+        assert_ne!(key, i64::MIN);
+
+        session.set_dynamic(Some(spec)).expect("same setting");
+        assert_eq!(
+            assembly_key(&session),
+            key,
+            "an unchanged setting retired the assembly"
+        );
+
+        session.set_dynamic(None).expect("clear");
+        assert_eq!(assembly_key(&session), i64::MIN);
+        let x = session.interior_flat();
+        assert!(
+            solver_evaluates(&mut session, x),
+            "set_dynamic left the masked force cached on the solver"
+        );
+
+        let mut session = dynamic_band(None, false);
+        session.step(&Harmonic).expect("plain step");
+        session.set_dynamic(Some(spec)).expect("set");
+        assert_eq!(assembly_key(&session), i64::MIN);
+        let x = session.interior_flat();
+        assert!(
+            solver_evaluates(&mut session, x),
+            "set_dynamic left the unmasked force cached on the solver"
+        );
     }
 }

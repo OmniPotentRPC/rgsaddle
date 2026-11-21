@@ -1483,7 +1483,10 @@ rgsaddle_status_t rgsaddle_band_set_string(RgsaddleBand *band, int32_t enabled,
  * other than 0 or 1, and with `enabled` 1 for an fmax that is not
  * finite and positive, a scale_fmax that is not finite and
  * non-negative, a solid-state band, the trust-region stepper, the
- * simplified string method, or free-end adaptive NEB.
+ * simplified string method, or free-end adaptive NEB. A change of the
+ * setting drops the band's cached force assembly and the optimizer's
+ * cached force, so the next step evaluates the band again; setting the
+ * value the band already holds changes nothing.
  */
 rgsaddle_status_t rgsaddle_band_set_dynamic(RgsaddleBand *band, int32_t enabled,
                                             double fmax, double scale_fmax);
