@@ -73,7 +73,7 @@ use ndarray::{Array1, Array2, ArrayView1};
 use crate::cell_log::M3;
 use crate::error::SaddleError;
 use crate::force::ForceGate;
-use crate::minmode::{MinModeConfig, MinModeKind, MinModeSession, PointSurface};
+use crate::minmode::{FiniteDifference, MinModeConfig, MinModeKind, MinModeSession, PointSurface};
 use crate::relax::{RelaxConfig, relax_to_tolerance};
 use crate::saddle_index::{SaddleIndexCheck, saddle_index};
 use crate::stencil::perp;
@@ -208,7 +208,10 @@ impl ArtConfig {
     /// ART parameters in Lennard-Jones reduced units (`epsilon = sigma = 1`).
     ///
     /// These numbers are not an eV/Angstrom preset. Use [`Self::for_units`]
-    /// when the potential's energy or length scale is not one.
+    /// when the potential's energy or length scale is not one. The saddle
+    /// certificate uses central Hessian differences: under unit conversion,
+    /// both its displacement and curvature tolerance scale exactly, while the
+    /// central truncation error remains below that scaled tolerance.
     #[must_use]
     pub fn lj_art() -> Self {
         let mode = MinModeConfig::default()
@@ -238,7 +241,7 @@ impl ArtConfig {
             perpendicular,
             quench,
             push_over: 0.15,
-            saddle: SaddleIndexCheck::default(),
+            saddle: SaddleIndexCheck::default().with_difference(FiniteDifference::Central),
             basin_rmsd: 0.08,
             duplicate_rmsd: 0.08,
             permute_identical: false,
@@ -282,9 +285,6 @@ impl ArtConfig {
         config.saddle.residual_tol *= curvature_scale;
         config.saddle.negative_tol *= curvature_scale;
         config.saddle.dr *= length_scale;
-        if let Some(escape) = &mut config.saddle.escape {
-            escape.push *= length_scale;
-        }
         config.basin_rmsd *= length_scale;
         config.duplicate_rmsd *= length_scale;
         config.validate()?;
@@ -1699,29 +1699,116 @@ mod tests {
     }
 
     #[test]
+    fn art_consumers_reject_a_loose_perpendicular_tolerance() {
+        let config = ArtConfig::default().with_perpendicular(
+            RelaxConfig::default().with_force_tol(2.0 * ArtConfig::default().mode.force_tol),
+        );
+        assert!(matches!(
+            ArtSession::new(
+                config.clone(),
+                array![-1.0, 0.0, 0.0],
+                array![1.0, 0.0, 0.0],
+                full_mask(3),
+            ),
+            Err(SaddleError::Invalid(_))
+        ));
+        let minimum = array![-1.0, 0.0, 0.0];
+        let surface = Well {
+            calls: AtomicUsize::new(0),
+        };
+        assert!(matches!(
+            run_events(&config, &minimum, &[], &surface, 10),
+            Err(SaddleError::Invalid(_))
+        ));
+    }
+
+    #[test]
     fn art_unit_scaling_covers_lengths_forces_and_curvatures() {
         let reduced = ArtConfig::lj_art();
         let scaled = ArtConfig::for_units(2.0, 4.0).unwrap();
-        assert_eq!(scaled.push_length, 4.0 * reduced.push_length);
-        assert_eq!(scaled.mode.force_tol, 0.5 * reduced.mode.force_tol);
-        assert_eq!(scaled.eigen_threshold, 0.125 * reduced.eigen_threshold);
-        assert_eq!(scaled.mode.dr, 4.0 * reduced.mode.dr);
-        assert_eq!(scaled.saddle.dr, 4.0 * reduced.saddle.dr);
+        let length_scale = 4.0;
+        let force_scale = 0.5;
+        let curvature_scale = 0.125;
+        assert_eq!(scaled.mode.dr, length_scale * reduced.mode.dr);
+        assert_eq!(scaled.mode.max_move, length_scale * reduced.mode.max_move);
+        assert_eq!(scaled.push_length, length_scale * reduced.push_length);
+        assert_eq!(scaled.push_step, length_scale * reduced.push_step);
+        assert_eq!(
+            scaled.perpendicular.max_atom_move,
+            length_scale * reduced.perpendicular.max_atom_move
+        );
+        assert_eq!(
+            scaled.quench.max_atom_move,
+            length_scale * reduced.quench.max_atom_move
+        );
+        assert_eq!(scaled.push_over, length_scale * reduced.push_over);
+        assert_eq!(scaled.saddle.dr, length_scale * reduced.saddle.dr);
+        assert_eq!(scaled.basin_rmsd, length_scale * reduced.basin_rmsd);
+        assert_eq!(scaled.duplicate_rmsd, length_scale * reduced.duplicate_rmsd);
+        assert_eq!(scaled.mode.force_tol, force_scale * reduced.mode.force_tol);
+        assert_eq!(
+            scaled.perpendicular.force_tol,
+            force_scale * reduced.perpendicular.force_tol
+        );
+        assert_eq!(
+            scaled.quench.force_tol,
+            force_scale * reduced.quench.force_tol
+        );
+        assert_eq!(
+            scaled.mode.rotation_tol,
+            curvature_scale * reduced.mode.rotation_tol
+        );
+        assert_eq!(
+            scaled.eigen_threshold,
+            curvature_scale * reduced.eigen_threshold
+        );
         assert_eq!(
             scaled.saddle.residual_tol,
-            0.125 * reduced.saddle.residual_tol
+            curvature_scale * reduced.saddle.residual_tol
         );
-        assert_eq!(scaled.basin_rmsd, 4.0 * reduced.basin_rmsd);
+        assert_eq!(
+            scaled.saddle.negative_tol,
+            curvature_scale * reduced.saddle.negative_tol
+        );
+        assert_eq!(
+            scaled.perpendicular.initial_step,
+            reduced.perpendicular.initial_step
+        );
+        assert_eq!(scaled.quench.initial_step, reduced.quench.initial_step);
         scaled.validate().unwrap();
     }
 
     #[test]
     fn art_unit_scales_must_be_positive_and_finite() {
-        for (energy, length) in [(0.0, 1.0), (1.0, -1.0), (f64::NAN, 1.0)] {
-            assert!(matches!(
-                ArtConfig::for_units(energy, length),
-                Err(SaddleError::Invalid(_))
-            ));
+        for (energy, length) in [
+            (0.0, 1.0),
+            (-1.0, 1.0),
+            (f64::NAN, 1.0),
+            (f64::INFINITY, 1.0),
+            (1.0, 0.0),
+            (1.0, -1.0),
+            (1.0, f64::NAN),
+            (1.0, f64::INFINITY),
+        ] {
+            match ArtConfig::for_units(energy, length) {
+                Err(SaddleError::Invalid(message)) => assert_eq!(
+                    message,
+                    "ART energy and length scales must be finite and positive"
+                ),
+                other => panic!("unexpected ART unit-scale result: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn art_validation_rejects_each_boundary_independently() {
+        for config in [
+            ArtConfig::default().with_eigen_threshold(0.01),
+            ArtConfig::default().with_push_length(0.0),
+            ArtConfig::default().with_max_pushes(0),
+            ArtConfig::default().with_max_climbs(0),
+        ] {
+            assert!(matches!(config.validate(), Err(SaddleError::Invalid(_))));
         }
     }
 
