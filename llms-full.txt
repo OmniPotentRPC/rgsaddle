@@ -273,7 +273,7 @@ The table below lists the main types.
 | `basin_density`                | `Z_H/Z_R` on a plane through a minimum from the mean force on parallel planes: windows per side that end on a cap, a turn or a width, a not-a-knot spline refined by leave-one-out, Stein control variates from the Hessian at the minimum, and a delta-method error. `reactant_density` keeps the 2001 crossing estimator, whose variance is infinite |
 | `PlanePath`                    | Planes between two planes for `reversible_work_along`: PAFI planes along a spline through a curve with clamped or natural ends (`curve`), the optimizer's accepted planes (`trace`), straight legs (`legs`), joined by `then` |
 | `reversible_work`              | `ΔA` along straight legs; `reversible_work_along` along any `PlanePath`. Simpson or trapezoid integration of `dA`, BAR between neighbours with their overlap, MBAR across all nodes (`with_mbar`), and `WorkEstimate` for the value the rate uses. `Transport` is the rigid map or the `GaussianTransport` optimal-transport map within the plane, shrunk toward the rigid map by a James–Stein factor; `ReversibleWork::warnings` names poor overlaps and fallbacks |
-| `ohtst_rate`                   | `k ` sqrt(kT/2π) (Z_H/Z_R) exp(-ΔA/kT)= with unit mass in mass-weighted coordinates, and its error |
+| `ohtst_rate`                   | `k ` sqrt(kT/2π) (Z_H/Z_R) exp(-ΔA/kT)= with unit mass in mass-weighted coordinates, and its error. `ohtst_rate_with_config` takes the named plane and temperature matching tolerances in the non-exhaustive `OhTstRateConfig` |
 | `transmission_coefficient`     | `κ` from shots off a plane sample, with masses and Langevin friction or none: `Counting::Final` (Bennett–Chandler) or `Counting::FirstCrossing` (effective positive flux), end states by side (`EndState::Side`) or by quench into `Basins` with a Euclidean or `PermutationDistance`. `plane_transmission` shoots from a plane sample directly |
 | `anharmonic_correction`        | First-order correction to harmonic TST and the first-order offset of the optimal plane, from Hessian actions only |
 | `Index1Session`                | Restricted-step partitioned RFO, Powell or Bofill update. `Index1Config` is non-exhaustive. `with_sparse_pattern` selects a CPR seed |
@@ -2491,6 +2491,18 @@ The rate is
 
 with unit mass in mass-weighted coordinates. In Cartesian coordinates the flux mass along a normal `n` is `1 / Σ nᵢ²/mᵢ` (`flux_mass`). The paper's Eq. 24, `μ ` Σ mᵢ nᵢ²=, agrees with it only for equal masses, which is one reason everything here is mass-weighted.
 
+## Reproduction of Jóhannesson and Jónsson, Section III B
+The Appendix B LEPS-plus-harmonic-oscillator potential gives `E_A ` 3.63395= from the reactant minimum. Section III B says `k_B T ` 0.1 E_A=, but the same paragraph's `⟨|v|⟩ ` 0.399= and analytic Vineyard rate `k_hTST ` 4.3e-7= both select `k_B T ` 0.25= in the Appendix B energy units with unit mass. At that numerical convention rgsaddle gives:
+
+| Estimate | Rate |
+| --- | --- |
+| analytic Vineyard hTST | `4.33127e-7` |
+| optimal-line quadrature | `4.20148e-7` |
+| Eq. 22 crossings plus trapezoidal work, eight independent seeds | `(4.340 ± 0.132)e-7` |
+| paper | `(4.5 ± 0.2)e-7` |
+
+The sampled reproduction uses 1000 records for each plane optimization, 8000 records for the crossing estimator, and 2000 records on each of 17 work planes. The paper states that each canonical average uses one molecular-dynamics trajectory with stochastic collisions, but does not state a time step, collision frequency, trajectory length, number of planes, masses, or physical units. Its printed `Q‡/Q_ZR ` 0.765 ± 0.005= is a label error: Eq. 3 uses `Q_ZR/Q_R` in the prefactor, whereas `Q‡/Q_ZR` is the exponentially small reversible-work factor. See `notes.md` and `tests/ohtst_leps.rs` for the quoted source text and executable check.
+
 ## A rate in five calls
 ```rust
 let seed = Hyperplane::from_min_mode(&dimer)?.oriented_toward(product.view());
@@ -2535,6 +2547,13 @@ let config = PlaneOptimizerConfig::default().with_sampler(sampler.clone())
 ## Fixed volume per temperature
 A crystal at a fixed volume or lattice parameter for each temperature is a surface evaluated in that cell. Wrap it in `FixedCell` with the cell for the temperature, then in `MassWeighted`, and run the same five calls at each temperature. Nothing in the module reads a lattice constant.
 
+## Estimators, rate parts and the C and Python calls
+`mbar_free_energies` solves the multistate Bennett acceptance ratio for the reduced potentials of every sample in every state. `MbarConfig::with_initial` sets the starting reduced free energies, and the result `MbarFreeEnergy` holds the free energies with the first state at zero, their covariance and the overlap matrix whose rows sum to one. `ReversibleWorkConfig::with_mbar` and `WorkEstimate::Mbar` route a work integral through it.
+
+`ohtst_rate` checks that the reactant density and the work belong to one temperature and one plane before it multiplies them. `OhTstRateConfig` holds the three tolerances of that match: `normal_gap` for the dot product of two unit normals, `offset_fraction` for the plane offset as a fraction of `1 + |point|`, and `thermal_fraction` for the temperature as a fraction of `kT`. Change them with `with_normal_gap`, `with_offset_fraction` and `with_thermal_fraction`, and pass the config to `ohtst_rate_with_config`. `rate_from_parts` is the product itself, `k ` sqrt(kT / 2π) ρ exp(-ΔA/kT)=, for a caller that has already matched the density and the work.
+
+The C ABI and Python give the same calls over a point surface of one configuration. In Python, `ohtst_sample` returns `OhtstSample`, `ohtst_optimize` returns `OhtstOptimum`, `ohtst_work` returns `OhtstWork`, `ohtst_transmission` returns `OhtstTransmission` and `ohtst_rate` returns `OhtstRate`. `ohtst_mbar` takes the reduced potentials and the per-state counts and returns `OhtstMbar`, whose `free_energies` and `covariance` are the MBAR result. The C names are `rgsaddle_ohtst_sample`, `rgsaddle_ohtst_optimize`, `rgsaddle_ohtst_mbar`, `rgsaddle_ohtst_work`, `rgsaddle_ohtst_transmission` and `rgsaddle_ohtst_rate`, and they are exported when the library is built with the crate feature `ohtst`. `examples/ohtst_analytic.rs` and `examples/ohtst_analytic.py` run each call on an analytic double well.
+
 ## What the tests check
 Every reference is computed independently of the sampler: closed forms, quadrature of line or product integrals, or exact draws.
 
@@ -2545,7 +2564,7 @@ Every reference is computed independently of the sampler: closed forms, quadratu
 | `tests/ohtst_bligaard_jonsson.rs` | the 2005 paper's Eckart model, line quadrature | the paper's angles 1.16°, 43° at 0.1182, 1.33° and 71.2° at 0.2266, 1.43° and 75.6° at 0.3 against quadrature; its 1.24° at 0.01 is 1.170°; `κ(1.405°)/κ(75.6°)` 0.63679 ± 0.01465 against 0.62660 from the quadrature `k_TST` ratio |
 | `tests/ohtst_skewed_well.rs` | two-dimensional quadrature | `Z_H/Z_R` 1.3966 ± 0.0017 against 1.396348 at `kT ` 0.1=; `ln κ k_TST` -12.11548 and -12.13886 on lines whose `ln k_TST` are -11.78081 and -10.32538; work along the PAFI planes of the minimum energy path at `kT ` 0.4=, 0.87431 ± 0.00679 (Simpson), 0.87673 ± 0.00545 (MBAR) against 0.87272; along the optimizer's trace 0.06295 ± 0.00392 against 0.06199 |
 | `tests/ohtst_coupled_modes.rs` | product quadrature, 48 dimensions | `Z_H/Z_R` 3.4669 ± 0.0035 against 3.466707; the optimizer from the saddle plane turned 0.3 rad ends 0.0022 rad off the axis at the offset 0.068867 ± 0.000224 against 0.068873; `ln κ + ln Z` -47.57538 ± 0.00853 and -47.63150 ± 0.02744 on two planes; work to the saddle plane 2.60477 ± 0.00192 (Simpson), 2.60107 ± 0.00431 (MBAR, rigid) and 2.60063 ± 0.00519 (MBAR, Gaussian) against 2.60354 |
-| `tests/ohtst_leps.rs` | line quadrature, harmonic TST | the dimer seed, the climb from it, `Z_H/Z_R` 0.6516 ± 0.0007 against 0.6509, the rate against quadrature, the approach to harmonic TST; `κ k_TST` 2.9441e-5 and 2.9078e-5 on two lines; work along the PAFI planes 2.92179 ± 0.03840 (Simpson), 2.92919 ± 0.00290 (MBAR) against 2.92859, with the smallest neighbour overlap 0.346 under the rigid map and 0.471 under the Gaussian one |
+| `tests/ohtst_leps.rs` | line quadrature, harmonic TST, 2001 Section III B | the dimer seed, the climb from it, `Z_H/Z_R` 0.6516 ± 0.0007 against 0.6509, the rate against quadrature, the approach to harmonic TST; Section III B `(4.340 ± 0.132)e-7` against the printed `(4.5 ± 0.2)e-7`; `κ k_TST` 2.9441e-5 and 2.9078e-5 on two lines; work along the PAFI planes 2.92179 ± 0.03840 (Simpson), 2.92919 ± 0.00290 (MBAR) against 2.92859, with the smallest neighbour overlap 0.346 under the rigid map and 0.471 under the Gaussian one |
 
 ## Limits
 The optimizer's trust region tests the change of `A` by trapezoids of sampled gradients under common random numbers, not by a BAR difference with its error, and an averaged stochastic-gradient variant is not here. One reaction channel is assumed: a plane that cuts a second channel is not detected. The Gaussian transport map is affine, so it gains little on a plane whose in-plane distribution has more than one mode. Integration along a curve of planes needs nodes dense enough to follow the turn of the planes; BAR and MBAR do not, but their errors assume that the retained configurations are independent.
@@ -4778,6 +4797,12 @@ The narrative for a session is the C and C++ how-to, not this list.
 - `rgsaddle_ocineb_set_saddle_check`. Purpose: rgsaddle_band_set_saddle_check for an OCI-NEB session. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_ocineb_saddle_index`. Purpose: rgsaddle_band_saddle_index for an OCI-NEB session. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_saddle_index`. Purpose: Certify one point, ABI minor 40. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_ohtst_sample`. Purpose: Sample the plane through point with the given normal. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_ohtst_optimize`. Purpose: Climb the plane free energy from point and normal, and write the optimum back. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_ohtst_mbar`. Purpose: Solve MBAR. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_ohtst_work`. Purpose: Reversible work through n_planes planes stored row-major. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_ohtst_transmission`. Purpose: Transmission coefficient of the plane, from n_starts configurations stored row-major. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_ohtst_rate`. Purpose: OH-TST rate from a reactant density and the reversible work off its plane. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_growing_string_config_default`. Purpose: Fill out with the default growing-string controls (n_images 11, frontier_tol 0.2, min_steps_per_node 1, not-a-knot spline), ABI minor 44. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_growing_string_create`. Purpose: Open a growing string session between reactant and product (3 * n_atoms values each), ABI minor 44. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_growing_string_step`. Purpose: Advance a growing string session by one step (or one simplified-string step once joined), ABI minor 44. Parameters: the declaration. Units: the caller's.

@@ -74,6 +74,13 @@ let config = PlaneOptimizerConfig::default().with_sampler(sampler.clone())
 * Fixed volume per temperature
 A crystal at a fixed volume or lattice parameter for each temperature is a surface evaluated in that cell. Wrap it in =FixedCell= with the cell for the temperature, then in =MassWeighted=, and run the same five calls at each temperature. Nothing in the module reads a lattice constant.
 
+* Estimators, rate parts and the C and Python calls
+=mbar_free_energies= solves the multistate Bennett acceptance ratio for the reduced potentials of every sample in every state. =MbarConfig::with_initial= sets the starting reduced free energies, and the result =MbarFreeEnergy= holds the free energies with the first state at zero, their covariance and the overlap matrix whose rows sum to one. =ReversibleWorkConfig::with_mbar= and =WorkEstimate::Mbar= route a work integral through it.
+
+=ohtst_rate= checks that the reactant density and the work belong to one temperature and one plane before it multiplies them. =OhTstRateConfig= holds the three tolerances of that match: =normal_gap= for the dot product of two unit normals, =offset_fraction= for the plane offset as a fraction of =1 + |point|=, and =thermal_fraction= for the temperature as a fraction of =kT=. Change them with =with_normal_gap=, =with_offset_fraction= and =with_thermal_fraction=, and pass the config to =ohtst_rate_with_config=. =rate_from_parts= is the product itself, =k = sqrt(kT / 2π) ρ exp(-ΔA/kT)=, for a caller that has already matched the density and the work.
+
+The C ABI and Python give the same calls over a point surface of one configuration. In Python, =ohtst_sample= returns =OhtstSample=, =ohtst_optimize= returns =OhtstOptimum=, =ohtst_work= returns =OhtstWork=, =ohtst_transmission= returns =OhtstTransmission= and =ohtst_rate= returns =OhtstRate=. =ohtst_mbar= takes the reduced potentials and the per-state counts and returns =OhtstMbar=, whose =free_energies= and =covariance= are the MBAR result. The C names are =rgsaddle_ohtst_sample=, =rgsaddle_ohtst_optimize=, =rgsaddle_ohtst_mbar=, =rgsaddle_ohtst_work=, =rgsaddle_ohtst_transmission= and =rgsaddle_ohtst_rate=, and they are exported when the library is built with the crate feature =ohtst=. =examples/ohtst_analytic.rs= and =examples/ohtst_analytic.py= run each call on an analytic double well.
+
 * What the tests check
 Every reference is computed independently of the sampler: closed forms, quadrature of line or product integrals, or exact draws.
 
