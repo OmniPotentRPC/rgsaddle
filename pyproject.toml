@@ -52,7 +52,7 @@ manylinux-x86_64-image = "manylinux_2_28"
 manylinux-aarch64-image = "manylinux_2_28"
 test-requires = ["pytest", "pytest-timeout", "numpy", "hypothesis", "ase==3.29.0"]
 test-command = "python -m pytest -q tests/python --timeout=180 -o faulthandler_timeout=120"
-test-sources = ["tests/python"]
+test-sources = ["tests/python", "bench"]
 
 [tool.cibuildwheel.linux]
 before-all = """
