@@ -76,6 +76,7 @@ pub mod indexk;
 pub mod lammps;
 pub mod minmode;
 pub mod nichols;
+pub mod npt;
 pub mod occupancy;
 pub mod ocineb;
 #[cfg(feature = "ohtst")]
@@ -166,6 +167,7 @@ pub use nichols::{
     HessianUpdate, Index1Config, Index1Report, Index1Session, Index1Status, NicholsMode,
     bofill_update, cap_max_abs, nichols_displacement, nichols_step, powell_update,
 };
+pub use npt::{NptConfig, NptReport, npt_lattice};
 pub use occupancy::{SiteOccupancy, site_occupancy};
 pub use ocineb::{
     MIN_ALIGNMENT, OcinebConfig, OcinebPhase, OcinebReport, OcinebSession, OcinebStatus,
@@ -221,8 +223,8 @@ pub use relax::{
 pub use saddle_index::{SaddleEscape, SaddleIndex, SaddleIndexCheck, saddle_index};
 pub use solid_dimer::{
     CellMask, IndexCheck, IndexReport, JointChart, STRAIN_VOIGT, SolidDimer, SolidDimerConfig,
-    SolidDimerReport, StressCheck, check_cauchy_stress, finite_difference_cauchy_stress, index_at,
-    virial,
+    SolidDimerReport, StressCheck, VineyardIndexError, VineyardIndexReport, certify_vineyard_pair,
+    check_cauchy_stress, finite_difference_cauchy_stress, index_at, virial,
 };
 pub use spring::SpringKind;
 pub use ssneb::{SolidImage, SolidNeb, joint_coordinate};
@@ -316,7 +318,8 @@ pub use samd::{
     project_velocity, retract_samd, soften_velocity_on, transport_velocity, verlet_increment,
 };
 pub use seed_direction::{
-    SoftModeDirectionPlan, soft_mode_then_full_directions, spectral_gap_rank,
+    ModeSweepDirectionPlan, SoftModeDirectionPlan, hessian_mode_sweep_directions,
+    mode_sweep_schedule, soft_mode_then_full_directions, spectral_gap_rank,
 };
 
 pub use sella_min::{SellaMinConfig, SellaMinReport, SellaMinSession};

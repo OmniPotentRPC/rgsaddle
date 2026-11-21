@@ -46,6 +46,7 @@
 use std::sync::Mutex;
 
 use ndarray::{Array1, Array2, ArrayView1, s};
+use thiserror::Error;
 
 use crate::cell_log::{M3, m3_det, m3_from_row9, m3_inv, m3_mul, m3_to_row9};
 use crate::error::SaddleError;
@@ -159,6 +160,19 @@ impl SolidDimerConfig {
     /// The fixed-cell dimer. `step` calls [`PointSurface::eval`].
     pub fn frozen(search: MinModeConfig) -> Self {
         Self::new(search).with_mask(CellMask::frozen())
+    }
+
+    /// Fixed-cell dimer that certifies a projected first-order saddle.
+    ///
+    /// This is the appropriate configuration for harmonic transition-state
+    /// calculations. Extra unstable modes trigger the bounded escape policy
+    /// in [`IndexCheck::first_order`]. A point that is still not index one
+    /// once the escapes are spent comes back with
+    /// [`MinModeStatus::Converged`] and [`SolidDimerReport::rejected`] set,
+    /// so a caller must read that flag before treating it as a transition
+    /// state.
+    pub fn frozen_first_order(search: MinModeConfig) -> Self {
+        Self::frozen(search).with_index_check(IndexCheck::first_order())
     }
 
     /// Dimer or Lanczos search and its rgmin translator.
@@ -316,15 +330,24 @@ impl Default for IndexCheck {
 
 /// Projected spectrum at one geometry.
 ///
-/// Eigenvalues ascend. Eigenvectors are columns of `vectors`.
+/// Ritz values ascend. Eigenvectors are columns of `vectors`. A mode is
+/// classified only when its Ritz residual interval excludes the registered
+/// cutoff; see Parlett, *The Symmetric Eigenvalue Problem*, SIAM (1998),
+/// doi:10.1137/1.9781611971163, Section 11.5.
 /// Non-exhaustive. Read the fields.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct IndexReport {
-    /// Eigenvalues strictly below [`IndexCheck::negative`].
+    /// Certified modes strictly below [`IndexCheck::negative`].
     pub negative: usize,
-    /// Lowest projected eigenvalues, ascending.
+    /// Certified modes strictly above [`IndexCheck::negative`].
+    pub positive: usize,
+    /// Modes whose residual intervals contain [`IndexCheck::negative`].
+    pub unresolved: usize,
+    /// Lowest projected Ritz values, ascending.
     pub values: Vec<f64>,
+    /// Norm of `H v - theta v` for each Ritz pair.
+    pub residuals: Vec<f64>,
     /// Eigenvectors, one column per entry of `values`.
     pub vectors: Array2<f64>,
     /// Generalized surface evaluations spent on the Hessian actions.
@@ -332,10 +355,184 @@ pub struct IndexReport {
 }
 
 impl IndexReport {
-    /// Exactly one projected eigenvalue is below the cutoff.
+    /// Exactly one projected mode is certified below the cutoff, with none
+    /// unresolved.
     pub fn is_first_order(&self) -> bool {
-        self.negative == 1
+        self.negative == 1 && self.unresolved == 0
     }
+}
+
+/// Projected stationary-point indices used by a Vineyard calculation.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct VineyardIndexReport {
+    /// Stable reactant minimum.
+    pub minimum: IndexReport,
+    /// First-order transition state.
+    pub saddle: IndexReport,
+}
+
+/// Structured reason that a stationary-point pair is not Vineyard-ready.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum VineyardIndexError {
+    /// A Hessian action, gradient or excluded-mode query failed, or an
+    /// argument was invalid.
+    #[error(transparent)]
+    Evaluation(#[from] SaddleError),
+    /// The reactant is not stationary, so its projected index says nothing.
+    #[error("Vineyard minimum has projected force {max_force:e} above {tolerance:e}")]
+    MinimumForce {
+        /// Largest absolute component of the projected gradient.
+        max_force: f64,
+        /// Registered force tolerance.
+        tolerance: f64,
+    },
+    /// The transition state is not stationary.
+    #[error("Vineyard saddle has projected force {max_force:e} above {tolerance:e}")]
+    SaddleForce {
+        /// Largest absolute component of the projected gradient.
+        max_force: f64,
+        /// Registered force tolerance.
+        tolerance: f64,
+    },
+    /// At least one minimum Ritz interval contains the index cutoff.
+    #[error("Vineyard minimum index has {unresolved} unresolved projected modes")]
+    MinimumUnresolved {
+        /// Number of Ritz intervals that contain the cutoff.
+        unresolved: usize,
+        /// Full lowest-spectrum diagnostic.
+        report: Box<IndexReport>,
+    },
+    /// At least one saddle Ritz interval contains the index cutoff.
+    #[error("Vineyard saddle index has {unresolved} unresolved projected modes")]
+    SaddleUnresolved {
+        /// Number of Ritz intervals that contain the cutoff.
+        unresolved: usize,
+        /// Full lowest-spectrum diagnostic.
+        report: Box<IndexReport>,
+    },
+    /// The reactant is not a projected local minimum.
+    #[error("Vineyard minimum has {negative} projected negative modes")]
+    Minimum {
+        /// Number of projected modes below the registered cutoff.
+        negative: usize,
+        /// Full lowest-spectrum diagnostic.
+        report: Box<IndexReport>,
+    },
+    /// The transition state is not projected index one.
+    #[error("Vineyard saddle has {negative} projected negative modes")]
+    Saddle {
+        /// Number of projected modes below the registered cutoff.
+        negative: usize,
+        /// Full lowest-spectrum diagnostic.
+        report: Box<IndexReport>,
+    },
+}
+
+/// Largest absolute component of the gradient with the excluded
+/// directions removed.
+fn projected_max_force<S: PointSurface>(
+    surface: &S,
+    x: ArrayView1<f64>,
+) -> Result<f64, SaddleError> {
+    let modes = orthonormal_excluded(surface, x)?;
+    let (_, gradient) = surface.eval(x)?;
+    if gradient.len() != x.len() {
+        return Err(SaddleError::Shape(
+            "Vineyard force check gradient length changed".into(),
+        ));
+    }
+    if !gradient.iter().all(|value| value.is_finite()) {
+        return Err(SaddleError::NonFinite("Vineyard force check gradient"));
+    }
+    let projected = remove_directions(&gradient, &modes);
+    Ok(projected
+        .iter()
+        .fold(0.0_f64, |worst, value| worst.max(value.abs())))
+}
+
+/// Certify a stable minimum and a first-order saddle before Vineyard rates.
+///
+/// Each point must first be stationary: the largest absolute component of
+/// its projected gradient is at most `force_tol`, because a Hessian index
+/// away from a stationary point does not classify it. The minimum must then
+/// have no projected eigenvalue below [`IndexCheck::negative`] and the
+/// saddle exactly one. Ritz pairs are certified with the inclusion interval
+/// `[theta - ||H v - theta v||, theta + ||H v - theta v||]`; an interval
+/// that contains the cutoff returns an unresolved error rather than an index.
+/// This is the standard symmetric Ritz residual bound; see Parlett,
+/// *The Symmetric Eigenvalue Problem*, SIAM (1998),
+/// doi:10.1137/1.9781611971163, Section 11.5.
+///
+/// Each surface supplies its own constrained or rigid directions through
+/// [`PointSurface::excluded_modes`]. This keeps full- and active-coordinate
+/// calculations on the same projected-space convention. Nothing else is
+/// projected: a surface with soft rigid translations or rotations of an open
+/// cluster must name them there. An eigenvalue between
+/// [`IndexCheck::negative`] and zero is not counted, so the cutoff is the
+/// resolution of the certificate.
+pub fn certify_vineyard_pair<M: PointSurface, S: PointSurface>(
+    minimum_surface: &M,
+    minimum: ArrayView1<f64>,
+    saddle_surface: &S,
+    saddle: ArrayView1<f64>,
+    check: IndexCheck,
+    force_tol: f64,
+) -> Result<VineyardIndexReport, VineyardIndexError> {
+    if check.lowest < 2 {
+        return Err(SaddleError::Invalid(
+            "Vineyard certification needs at least two lowest projected modes".into(),
+        )
+        .into());
+    }
+    if !(force_tol.is_finite() && force_tol > 0.0) {
+        return Err(SaddleError::Invalid(
+            "Vineyard force tolerance must be positive and finite".into(),
+        )
+        .into());
+    }
+    let max_force = projected_max_force(minimum_surface, minimum)?;
+    if max_force > force_tol {
+        return Err(VineyardIndexError::MinimumForce {
+            max_force,
+            tolerance: force_tol,
+        });
+    }
+    let max_force = projected_max_force(saddle_surface, saddle)?;
+    if max_force > force_tol {
+        return Err(VineyardIndexError::SaddleForce {
+            max_force,
+            tolerance: force_tol,
+        });
+    }
+    let minimum = index_at(minimum_surface, minimum, check)?;
+    if minimum.unresolved != 0 {
+        return Err(VineyardIndexError::MinimumUnresolved {
+            unresolved: minimum.unresolved,
+            report: Box::new(minimum),
+        });
+    }
+    if minimum.negative != 0 {
+        return Err(VineyardIndexError::Minimum {
+            negative: minimum.negative,
+            report: Box::new(minimum),
+        });
+    }
+    let saddle = index_at(saddle_surface, saddle, check)?;
+    if saddle.unresolved != 0 {
+        return Err(VineyardIndexError::SaddleUnresolved {
+            unresolved: saddle.unresolved,
+            report: Box::new(saddle),
+        });
+    }
+    if saddle.negative != 1 {
+        return Err(VineyardIndexError::Saddle {
+            negative: saddle.negative,
+            report: Box::new(saddle),
+        });
+    }
+    Ok(VineyardIndexReport { minimum, saddle })
 }
 
 /// Lowest projected eigenvalues of `surface` at `x`.
@@ -365,17 +562,42 @@ pub fn index_at<S: PointSurface>(
     }
     let modes = orthonormal_excluded(surface, x)?;
     let calls = std::cell::Cell::new(0usize);
-    let (values, vectors) = ritz_lowest(surface, x, &modes, check, &calls)?;
-    let negative = values
-        .iter()
-        .filter(|value| **value < check.negative)
-        .count();
+    let (values, vectors, residuals) = ritz_lowest(surface, x, &modes, check, &calls)?;
+    let (negative, positive, unresolved) =
+        classify_ritz_intervals(&values, &residuals, check.negative)?;
     Ok(IndexReport {
         negative,
+        positive,
+        unresolved,
         values,
+        residuals,
         vectors,
         evaluations: calls.get(),
     })
+}
+
+fn classify_ritz_intervals(
+    values: &[f64],
+    residuals: &[f64],
+    threshold: f64,
+) -> Result<(usize, usize, usize), SaddleError> {
+    if values.len() != residuals.len() {
+        return Err(SaddleError::Shape(
+            "Ritz values and residuals have different lengths".into(),
+        ));
+    }
+    Ok(values.iter().zip(residuals).fold(
+        (0, 0, 0),
+        |(negative, positive, unresolved), (&theta, &residual)| {
+            if theta + residual < threshold {
+                (negative + 1, positive, unresolved)
+            } else if theta - residual > threshold {
+                (negative, positive + 1, unresolved)
+            } else {
+                (negative, positive, unresolved + 1)
+            }
+        },
+    ))
 }
 
 impl Default for SolidDimerConfig {
@@ -414,6 +636,10 @@ pub struct SolidDimerReport {
     /// Empty when the check is off, or when a higher-index point was
     /// left and the search is still running.
     pub negative_modes: Option<usize>,
+    /// Ritz intervals that contain the index cutoff.
+    ///
+    /// `Some(0)` is a certified count. A positive count rejects the point.
+    pub unresolved_modes: Option<usize>,
     /// The force tolerance was met and the projected Hessian is not
     /// index 1. [`Self::status`] stays [`MinModeStatus::Converged`]
     /// because the force test passed; this flag is the rejection.
@@ -1255,14 +1481,19 @@ impl SolidDimer {
     }
 }
 
+struct IndexDiagnostic {
+    negative_modes: Option<usize>,
+    unresolved_modes: Option<usize>,
+    index_evaluations: usize,
+    eigenvalues: Vec<f64>,
+}
+
 fn map_report(
     report: MinModeReport,
     stress: Option<M3>,
     volume: f64,
-    negative_modes: Option<usize>,
+    index: IndexDiagnostic,
     rejected: bool,
-    index_evaluations: usize,
-    eigenvalues: Vec<f64>,
 ) -> SolidDimerReport {
     SolidDimerReport {
         status: report.status,
@@ -1273,10 +1504,11 @@ fn map_report(
         evaluations: report.evaluations,
         stress,
         volume,
-        negative_modes,
+        negative_modes: index.negative_modes,
+        unresolved_modes: index.unresolved_modes,
         rejected,
-        index_evaluations,
-        eigenvalues,
+        index_evaluations: index.index_evaluations,
+        eigenvalues: index.eigenvalues,
     }
 }
 
@@ -1305,6 +1537,7 @@ impl SolidDimer {
         mut report: MinModeReport,
     ) -> Result<SolidDimerReport, SaddleError> {
         let mut negative_modes = None;
+        let mut unresolved_modes = None;
         let mut rejected = false;
         let mut eigenvalues = Vec::new();
         if report.status == MinModeStatus::Converged && self.flat > 0.0 && report.curvature < -1e-3
@@ -1321,8 +1554,14 @@ impl SolidDimer {
             let verdict = index_at(surface, self.inner.position(), check)?;
             report.evaluations += verdict.evaluations;
             self.index_calls += verdict.evaluations;
-            if verdict.negative == 1 {
+            if verdict.unresolved != 0 {
+                negative_modes = Some(verdict.negative);
+                unresolved_modes = Some(verdict.unresolved);
+                eigenvalues = verdict.values;
+                rejected = true;
+            } else if verdict.negative == 1 {
                 negative_modes = Some(1);
+                unresolved_modes = Some(0);
                 eigenvalues = verdict.values;
             } else if verdict.negative > 1
                 && self.escapes_left > 0
@@ -1332,6 +1571,7 @@ impl SolidDimer {
                 report.status = MinModeStatus::Running;
             } else {
                 negative_modes = Some(verdict.negative);
+                unresolved_modes = Some(0);
                 eigenvalues = verdict.values;
                 rejected = true;
             }
@@ -1340,10 +1580,13 @@ impl SolidDimer {
             report,
             self.stress,
             self.volume,
-            negative_modes,
+            IndexDiagnostic {
+                negative_modes,
+                unresolved_modes,
+                index_evaluations: self.index_calls,
+                eigenvalues,
+            },
             rejected,
-            self.index_calls,
-            eigenvalues,
         ))
     }
 
@@ -1359,8 +1602,32 @@ impl SolidDimer {
     ) -> Result<bool, SaddleError> {
         let q = self.inner.position().to_owned();
         self.rejected_at.push(q.clone());
-        let soft = verdict.vectors.column(verdict.negative - 1).to_owned();
-        let hard = verdict.vectors.column(0).to_owned();
+        if verdict.values.len() != verdict.residuals.len()
+            || verdict.values.len() != verdict.vectors.ncols()
+        {
+            return Err(SaddleError::Shape(
+                "Ritz report values, residuals and vectors have different lengths".into(),
+            ));
+        }
+        let negative_indices: Vec<_> = verdict
+            .values
+            .iter()
+            .zip(&verdict.residuals)
+            .enumerate()
+            .filter_map(|(index, (&theta, &residual))| {
+                (theta + residual < self.index.expect("index check").negative).then_some(index)
+            })
+            .collect();
+        if negative_indices.len() != verdict.negative || negative_indices.len() < 2 {
+            return Err(SaddleError::Shape(
+                "Ritz report negative-mode count is inconsistent".into(),
+            ));
+        }
+        let soft = verdict
+            .vectors
+            .column(*negative_indices.last().expect("at least two modes"))
+            .to_owned();
+        let hard = verdict.vectors.column(negative_indices[0]).to_owned();
         let (reference, _) = surface.eval(q.view())?;
         let mut sign = 0.0;
         let mut lowest = reference;
@@ -1424,6 +1691,8 @@ fn rms_to_nearest(point: &Array1<f64>, previous: &[Array1<f64>]) -> f64 {
     nearest
 }
 
+type RitzPairs = (Vec<f64>, Array2<f64>, Vec<f64>);
+
 /// Lanczos with full reorthogonalisation. The Rayleigh-Ritz projection
 /// of the actions is diagonalised directly, so the reorthogonalisation
 /// coefficients are not dropped. The lowest values are returned once
@@ -1434,7 +1703,7 @@ fn ritz_lowest<S: PointSurface>(
     modes: &[Array1<f64>],
     check: IndexCheck,
     calls: &std::cell::Cell<usize>,
-) -> Result<(Vec<f64>, Array2<f64>), SaddleError> {
+) -> Result<RitzPairs, SaddleError> {
     let n = x.len();
     let k = check.lowest.min(n);
     let mut seed = Array1::zeros(n);
@@ -1444,14 +1713,14 @@ fn ritz_lowest<S: PointSurface>(
     seed = remove_directions(&seed, modes);
     let norm = seed.dot(&seed).sqrt();
     if norm < 1e-14 {
-        return Ok((vec![0.0; k], Array2::zeros((n, k))));
+        return Ok((vec![0.0; k], Array2::zeros((n, k)), vec![0.0; k]));
     }
     seed /= norm;
     let mut basis = vec![seed];
     let mut actions: Vec<Array1<f64>> = Vec::new();
     let cap = n.min(64.max(k.saturating_mul(4)));
     let mut previous: Option<Vec<f64>> = None;
-    let mut kept: Option<(Vec<f64>, Array2<f64>)> = None;
+    let mut kept: Option<(Vec<f64>, Array2<f64>, Vec<f64>)> = None;
     let mut confirmed = false;
     while basis.len() <= cap {
         let j = basis.len() - 1;
@@ -1474,7 +1743,7 @@ fn ritz_lowest<S: PointSurface>(
         let chain_done = off < 1e-8 || m == n;
         let ready = chain_done || (m >= k && m.is_multiple_of(4));
         if ready {
-            let (values, vectors) = ritz_from_actions(&basis[..m], &actions)?;
+            let (values, vectors, residuals) = ritz_from_actions(&basis[..m], &actions)?;
             let stable = previous.as_ref().is_some_and(|earlier| {
                 values
                     .iter()
@@ -1485,7 +1754,7 @@ fn ritz_lowest<S: PointSurface>(
                     })
             });
             previous = Some(values.iter().take(k).copied().collect());
-            kept = Some((values, vectors));
+            kept = Some((values, vectors, residuals));
             // One chain misses a repeated eigenvalue. A fresh direction
             // orthogonal to the basis picks up that copy.
             if m < n
@@ -1508,7 +1777,7 @@ fn ritz_lowest<S: PointSurface>(
         basis.truncate(m);
         basis.push(w);
     }
-    let Some((values, vectors)) = kept else {
+    let Some((values, vectors, residuals)) = kept else {
         return Err(SaddleError::Solver(
             "index check did not build a Ritz pair".into(),
         ));
@@ -1517,6 +1786,7 @@ fn ritz_lowest<S: PointSurface>(
     Ok((
         values.into_iter().take(take).collect(),
         vectors.slice(ndarray::s![.., ..take]).to_owned(),
+        residuals.into_iter().take(take).collect(),
     ))
 }
 
@@ -1540,7 +1810,7 @@ fn fresh_direction(basis: &[Array1<f64>], modes: &[Array1<f64>], n: usize) -> Op
 fn ritz_from_actions(
     basis: &[Array1<f64>],
     actions: &[Array1<f64>],
-) -> Result<(Vec<f64>, Array2<f64>), SaddleError> {
+) -> Result<RitzPairs, SaddleError> {
     let m = actions.len().min(basis.len());
     let mut projected = Array2::zeros((m, m));
     for j in 0..m {
@@ -1558,11 +1828,14 @@ fn ritz_from_actions(
     let (vals, vecs) = crate::eigensolve::exact_eigh(projected.view())?;
     let n = basis.first().map(|column| column.len()).unwrap_or(0);
     let mut vectors = Array2::zeros((n, m));
+    let mut residuals = Vec::with_capacity(m);
     for column in 0..m {
+        let mut action: Array1<f64> = Array1::zeros(n);
         for (row_basis, q) in basis.iter().take(m).enumerate() {
             let weight = vecs[(row_basis, column)];
             for (i, value) in q.iter().enumerate() {
                 vectors[(i, column)] += weight * value;
+                action[i] += weight * actions[row_basis][i];
             }
         }
         let mut norm = 0.0_f64;
@@ -1574,9 +1847,21 @@ fn ritz_from_actions(
             for row in vectors.column_mut(column) {
                 *row /= norm;
             }
+            action /= norm;
         }
+        residuals.push(
+            action
+                .iter()
+                .zip(vectors.column(column))
+                .map(|(hv, v)| {
+                    let difference: f64 = *hv - vals[column] * *v;
+                    difference * difference
+                })
+                .sum::<f64>()
+                .sqrt(),
+        );
     }
-    Ok((vals.to_vec(), vectors))
+    Ok((vals.to_vec(), vectors, residuals))
 }
 
 /// Step along `soft` until its Rayleigh quotient is no longer negative.
@@ -1997,6 +2282,17 @@ mod tests {
             self.cells.fetch_add(1, Ordering::Relaxed);
             self.eval(r)
         }
+    }
+
+    #[test]
+    fn frozen_first_order_enables_projected_index_certification() {
+        let config = SolidDimerConfig::frozen_first_order(MinModeConfig::default());
+        let check = config
+            .index
+            .expect("Vineyard searches must certify one projected negative mode");
+        assert_eq!(check.lowest, IndexCheck::first_order().lowest);
+        assert_eq!(check.negative, IndexCheck::first_order().negative);
+        assert!(check.escapes > 0);
     }
 
     #[test]
@@ -2713,6 +3009,15 @@ mod tests {
         }
     }
 
+    struct ZeroModeSurface;
+
+    impl PointSurface for ZeroModeSurface {
+        fn eval(&self, r: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            let (x, y, z) = (r[0], r[1], r[2]);
+            Ok((0.5 * (y * y + 2.0 * z * z), array![0.0 * x, y, 2.0 * z]))
+        }
+    }
+
     fn placed(escapes: usize) -> SolidDimer {
         let search = MinModeConfig::default()
             .with_force_tol(1e-8)
@@ -2765,6 +3070,330 @@ mod tests {
         assert_eq!(ok.status, MinModeStatus::Converged);
         assert!(!ok.rejected);
         assert_eq!(ok.negative_modes, Some(1));
+    }
+
+    const VINEYARD_FORCE: f64 = 1.0e-6;
+
+    #[test]
+    fn vineyard_ritz_interval_leaves_the_threshold_probe_unresolved() {
+        let exact_lowest: f64 = -1.0001e-4;
+        let reported: f64 = -9.9995e-5;
+        let other: f64 = 1.0;
+        let low_weight = ((other - reported) / (other - exact_lowest)).sqrt();
+        let high_weight = ((reported - exact_lowest) / (other - exact_lowest)).sqrt();
+        let theta = exact_lowest * low_weight * low_weight + other * high_weight * high_weight;
+        let residual = ((exact_lowest * low_weight - theta * low_weight).powi(2)
+            + (other * high_weight - theta * high_weight).powi(2))
+        .sqrt();
+
+        assert!((theta - reported).abs() < 1.0e-15);
+        assert!(theta >= -1.0e-4);
+        let (negative, positive, unresolved) =
+            classify_ritz_intervals(&[theta], &[residual], -1.0e-4).unwrap();
+        assert_eq!((negative, positive, unresolved), (0, 0, 1));
+    }
+
+    #[test]
+    fn vineyard_ritz_intervals_certify_well_separated_modes() {
+        let (negative, positive, unresolved) =
+            classify_ritz_intervals(&[-0.25, 0.5], &[1.0e-3, 2.0e-3], -1.0e-4).unwrap();
+        assert_eq!((negative, positive, unresolved), (1, 1, 0));
+    }
+
+    #[test]
+    fn vineyard_ritz_intervals_include_both_threshold_boundaries() {
+        let classified = classify_ritz_intervals(&[-0.2, 0.2], &[0.1, 0.1], -0.1).unwrap();
+        assert_eq!(classified, (0, 1, 1));
+        let classified = classify_ritz_intervals(&[-0.2, 0.0], &[0.1, 0.1], -0.1).unwrap();
+        assert_eq!(classified, (0, 0, 2));
+    }
+
+    #[test]
+    fn vineyard_ritz_intervals_refuse_mismatched_diagnostics() {
+        let error = classify_ritz_intervals(&[-0.2, 0.2], &[0.1], -0.1).unwrap_err();
+        assert!(matches!(error, SaddleError::Shape(_)));
+    }
+
+    #[test]
+    fn vineyard_pair_propagates_unresolved_minimum_and_saddle_modes() {
+        let single = IndexSurface { double: false };
+        let origin = array![0.0, 0.0, 0.0];
+        let minimum = array![1.0, 0.0, 0.0];
+        let check = IndexCheck::first_order().with_lowest(3).with_negative(0.0);
+
+        let error = certify_vineyard_pair(
+            &ZeroModeSurface,
+            origin.view(),
+            &single,
+            origin.view(),
+            check,
+            VINEYARD_FORCE,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            VineyardIndexError::MinimumUnresolved { unresolved: 1, .. }
+        ));
+
+        let error = certify_vineyard_pair(
+            &Well,
+            minimum.view(),
+            &ZeroModeSurface,
+            origin.view(),
+            check,
+            VINEYARD_FORCE,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            VineyardIndexError::SaddleUnresolved { unresolved: 1, .. }
+        ));
+    }
+
+    #[test]
+    fn dimer_adjudication_rejects_an_unresolved_index() {
+        let mut dimer = placed(0);
+        dimer.index = Some(IndexCheck::first_order().with_negative(-2.0));
+        let report = dimer.step(&IndexSurface { double: true }).unwrap();
+
+        assert_eq!(report.status, MinModeStatus::Converged);
+        assert!(report.rejected);
+        assert_eq!(report.negative_modes, Some(0));
+        assert_eq!(report.unresolved_modes, Some(2));
+    }
+
+    #[test]
+    fn vineyard_pair_reports_the_invalid_stationary_point() {
+        let check = IndexCheck::first_order();
+        let double = IndexSurface { double: true };
+        let minimum = array![1.0, 0.0, 0.0];
+        let saddle = array![0.0, 0.0, 0.0];
+        let error = certify_vineyard_pair(
+            &Well,
+            minimum.view(),
+            &double,
+            saddle.view(),
+            check,
+            VINEYARD_FORCE,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            VineyardIndexError::Saddle { negative: 2, .. }
+        ));
+    }
+
+    #[test]
+    fn vineyard_pair_requires_two_lowest_modes() {
+        let double = IndexSurface { double: true };
+        let minimum = array![1.0, 0.0, 0.0];
+        let saddle = array![0.0, 0.0, 0.0];
+        let error = certify_vineyard_pair(
+            &Well,
+            minimum.view(),
+            &double,
+            saddle.view(),
+            IndexCheck::first_order().with_lowest(1),
+            VINEYARD_FORCE,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            VineyardIndexError::Evaluation(SaddleError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn vineyard_pair_accepts_a_minimum_and_a_first_order_saddle() {
+        let single = IndexSurface { double: false };
+        let minimum = array![1.0, 0.0, 0.0];
+        let saddle = array![0.0, 0.0, 0.0];
+        let report = certify_vineyard_pair(
+            &Well,
+            minimum.view(),
+            &single,
+            saddle.view(),
+            IndexCheck::first_order(),
+            VINEYARD_FORCE,
+        )
+        .unwrap();
+        assert_eq!(report.minimum.negative, 0);
+        assert!(
+            report.minimum.values[0] > 3.9,
+            "{:?}",
+            report.minimum.values
+        );
+        assert_eq!(report.saddle.negative, 1);
+        assert!(report.saddle.values[0] < -1.9 && report.saddle.values[1] > 1.9);
+    }
+
+    #[test]
+    fn vineyard_pair_refuses_a_minimum_offered_as_the_saddle_and_the_reverse() {
+        let single = IndexSurface { double: false };
+        let basin = array![1.0, 0.0, 0.0];
+        let top = array![0.0, 0.0, 0.0];
+        let check = IndexCheck::first_order();
+        let as_saddle = certify_vineyard_pair(
+            &Well,
+            basin.view(),
+            &Well,
+            basin.view(),
+            check,
+            VINEYARD_FORCE,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            as_saddle,
+            VineyardIndexError::Saddle { negative: 0, .. }
+        ));
+        let as_minimum = certify_vineyard_pair(
+            &single,
+            top.view(),
+            &single,
+            top.view(),
+            check,
+            VINEYARD_FORCE,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            as_minimum,
+            VineyardIndexError::Minimum { negative: 1, .. }
+        ));
+    }
+
+    #[test]
+    fn vineyard_pair_refuses_points_that_are_not_stationary() {
+        let single = IndexSurface { double: false };
+        let check = IndexCheck::first_order();
+        let basin = array![1.0, 0.0, 0.0];
+        let top = array![0.0, 0.0, 0.0];
+
+        // On the slope of the well the curvature is positive, so the index
+        // alone would call this a minimum.
+        let slope = array![1.2, 0.0, 0.0];
+        let report = index_at(&Well, slope.view(), check).unwrap();
+        assert_eq!(report.negative, 0);
+        let error = certify_vineyard_pair(
+            &Well,
+            slope.view(),
+            &single,
+            top.view(),
+            check,
+            VINEYARD_FORCE,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            VineyardIndexError::MinimumForce { max_force, .. } if max_force > 2.0
+        ));
+
+        // Off the ridge the surface still has one negative mode.
+        let off = array![0.3, 0.0, 0.0];
+        assert_eq!(index_at(&single, off.view(), check).unwrap().negative, 1);
+        let error = certify_vineyard_pair(
+            &Well,
+            basin.view(),
+            &single,
+            off.view(),
+            check,
+            VINEYARD_FORCE,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            VineyardIndexError::SaddleForce { max_force, .. } if (max_force - 0.6).abs() < 1e-12
+        ));
+    }
+
+    #[test]
+    fn vineyard_pair_needs_a_positive_force_tolerance() {
+        let single = IndexSurface { double: false };
+        let basin = array![1.0, 0.0, 0.0];
+        let top = array![0.0, 0.0, 0.0];
+        for tolerance in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let error = certify_vineyard_pair(
+                &Well,
+                basin.view(),
+                &single,
+                top.view(),
+                IndexCheck::first_order(),
+                tolerance,
+            )
+            .unwrap_err();
+            assert!(matches!(
+                error,
+                VineyardIndexError::Evaluation(SaddleError::Invalid(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn vineyard_public_diagnostics_are_non_exhaustive() {
+        let source = include_str!("solid_dimer.rs");
+        for declaration in [
+            "pub struct VineyardIndexReport",
+            "pub enum VineyardIndexError",
+        ] {
+            let prefix = source.split(declaration).next().unwrap();
+            assert!(
+                prefix
+                    .lines()
+                    .rev()
+                    .take(3)
+                    .any(|line| line.trim() == "#[non_exhaustive]"),
+                "{declaration} must remain non-exhaustive"
+            );
+        }
+    }
+
+    #[test]
+    fn vineyard_force_ignores_the_excluded_translation() {
+        // A uniform force on both atoms is a rigid translation. It is not
+        // a residual force on the projected surface.
+        struct Pushed;
+        impl PointSurface for Pushed {
+            fn eval(&self, r: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+                let (energy, mut gradient) = Translated {
+                    negative_relative: false,
+                }
+                .eval(r)?;
+                for atom in 0..2 {
+                    gradient[3 * atom] += 0.5;
+                }
+                Ok((energy, gradient))
+            }
+
+            fn excluded_modes(&self, x: ArrayView1<f64>) -> Result<Array2<f64>, SaddleError> {
+                Translated {
+                    negative_relative: false,
+                }
+                .excluded_modes(x)
+            }
+        }
+        let origin = Array1::zeros(6);
+        assert!(projected_max_force(&Pushed, origin.view()).unwrap() < 1e-12);
+    }
+
+    #[test]
+    fn frozen_first_order_leaves_a_double_index_point() {
+        let search = MinModeConfig::default()
+            .with_force_tol(1e-8)
+            .with_dr(1e-4)
+            .with_rotation_tol(1e-8)
+            .with_max_rotations(8)
+            .with_max_move(0.05);
+        let mut dimer = SolidDimer::new(
+            SolidDimerConfig::frozen_first_order(search),
+            array![0.0, 0.0, 0.0],
+            diagonal(5.0, 5.0, 5.0),
+            array![1.0, 0.2, 0.0],
+        )
+        .unwrap();
+        let report = dimer.step(&IndexSurface { double: true }).unwrap();
+        assert_eq!(report.status, MinModeStatus::Running);
+        assert!(!report.rejected);
+        assert!(dimer.positions().dot(&dimer.positions()) > 1e-6);
     }
 
     /// A negative eigenvalue along a rigid translation is not an index.

@@ -1,0 +1,2 @@
+The NPT pressure now includes the kinetic term. The barostat drive and the reported pressure add the kinetic pressure of the thermostatted velocities to the configurational pressure, so the sampled lattice is the zero-pressure lattice rather than the one where the configurational stress alone vanishes.
+Tests check an ideal gas, whose expected pressure is (N - 1) k T / V after centre-of-mass momentum removal, and a crystal of atoms tethered to cell-scaled sites, whose total pressure is zero at every volume.
