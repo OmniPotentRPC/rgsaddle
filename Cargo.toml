@@ -54,7 +54,7 @@ dlpk = { version = "0.1.5", features = ["ndarray"] }
 readcon-core = { version = "=0.17.1", optional = true }
 readcon-db = { version = "=0.2.0", optional = true }
 # Free-end bands retract their terminal image through rgmin’s LevelSetConstraint.
-rgmin = { version = "=0.7.0", git = "https://github.com/HaoZeke/rgmin", rev = "f2527782713dcf4b4d5d91af9da1bba80c32bc0c" }
+rgmin = { version = "=0.7.0", git = "https://github.com/OmniPotentRPC/rgmin", rev = "f2527782713dcf4b4d5d91af9da1bba80c32bc0c" }
 eindir-core = { version = "0.6.0", features = ["capi"] }
 ndarray = "0.17"
 faer = { version = "0.24.4", optional = true, default-features = false, features = ["std", "linalg"] }

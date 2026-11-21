@@ -17,6 +17,6 @@ readcon-db = ["rgsaddle/readcon-db"]
 [dependencies]
 rgsaddle = { path = "../.." }
 linkcell = { version = "=0.3.5", git = "https://github.com/d-SEAMS/linkcell", rev = "49f94dd2d2ff1e0d854cebc8a664599abe569156", default-features = false }
-rgmin = { version = "=0.7.0", git = "https://github.com/HaoZeke/rgmin", rev = "f2527782713dcf4b4d5d91af9da1bba80c32bc0c" }
+rgmin = { version = "=0.7.0", git = "https://github.com/OmniPotentRPC/rgmin", rev = "f2527782713dcf4b4d5d91af9da1bba80c32bc0c" }
 # Match the potential interface that rgsaddle exposes with pafi-repro.
 rgpot-core = { version = "=3.7.0", git = "https://github.com/OmniPotentRPC/rgpot", rev = "97ebba0b062128b7dc4637501c4b70ed4944ae9d" }
