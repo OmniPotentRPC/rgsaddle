@@ -294,12 +294,16 @@ fn summarize(lattice: &[f64], pressure: &[f64], config: NptConfig, steps: usize)
     }
 }
 
+fn extended_check(current: usize, extension: usize, maximum: usize) -> usize {
+    current.saturating_add(extension).min(maximum)
+}
+
 /// Run isotropic NPT dynamics and return block standard errors.
 ///
 /// `evaluate` returns `(energy, gradient, tension-positive stress)` for
 /// Cartesian `positions` and the row-major `cell`.  Energy is accepted for
 /// evaluator compatibility but is not used by the integrator.  A run extends
-/// by `extension_steps` until the zero-pressure rule is met or
+/// by `extension_steps` until the configured target-pressure rule is met or
 /// `maximum_steps` is reached.
 pub fn npt_lattice<F>(
     positions: &mut Array1<f64>,
@@ -423,7 +427,7 @@ where
                 return Ok(current);
             }
             report = Some(current);
-            next_check = (next_check + config.extension_steps).min(config.maximum_steps);
+            next_check = extended_check(next_check, config.extension_steps, config.maximum_steps);
         }
     }
     report.ok_or_else(|| SaddleError::Invalid("NPT run produced no report".into()))
@@ -472,6 +476,14 @@ mod tests {
             ),
             SaddleError::NonFinite("NPT initial positions")
         ));
+    }
+
+    #[test]
+    fn npt_extension_check_saturates_at_the_maximum() {
+        assert_eq!(
+            extended_check(usize::MAX - 1, usize::MAX, usize::MAX),
+            usize::MAX
+        );
     }
 
     fn stream(seed: u64, length: usize) -> Vec<u64> {
