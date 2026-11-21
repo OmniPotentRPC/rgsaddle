@@ -354,7 +354,10 @@ impl IndexReport {
 }
 
 /// Projected stationary-point indices used by a Vineyard calculation.
-#[derive(Debug)]
+///
+/// Non-exhaustive: read the fields.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct VineyardIndexReport {
     /// Stable reactant minimum.
     pub minimum: IndexReport,
@@ -363,7 +366,10 @@ pub struct VineyardIndexReport {
 }
 
 /// Structured reason that a stationary-point pair is not Vineyard-ready.
+///
+/// Non-exhaustive: match it with a wildcard arm.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum VineyardIndexError {
     /// A Hessian action, gradient or excluded-mode query failed, or an
     /// argument was invalid.
