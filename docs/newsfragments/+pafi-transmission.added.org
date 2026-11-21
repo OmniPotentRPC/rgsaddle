@@ -1,0 +1,16 @@
+PAFI rates now have a system-agnostic Bennett-Chandler correction:
+=pafi_transmission= shoots constrained-equilibrium samples retained on the
+maximum-free-energy plane in both time directions and reports =κ=, its
+block error and shot counts.  =defect_pair_rates= and the V_iv near-shell
+ledger apply the same class =κ= to both directions and propagate
+=(σ_κ/κ)²= in the logarithmic rate draws.  The C ABI exposes the same
+operation as =rgsaddle_pafi_transmission= (ABI minor 52), in a library built
+with the =ohtst= feature. It reads the config version first and answers
+=RGSADDLE_ABI_MISMATCH= for another major or a minor outside 52 up to the
+library's, and it refuses a maximum at the first or last plane, as
+=pafi_transmission= does.
+
+A 32-shot 300 K smoke calculation is recorded in
+=benchmarks/defect_pair_kappa_smoke.csv= for the isolated translation and
+the three highest-sensitivity near-shell classes.  These short estimates
+are diagnostics for BenchBot's full campaign, not converged rate data.

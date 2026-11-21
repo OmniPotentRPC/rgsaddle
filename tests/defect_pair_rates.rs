@@ -59,7 +59,7 @@ fn control_config() -> DefectPairConfig {
         .with_max_move(0.04)
         .with_dr(1.0e-3)
         .with_max_rotations(8);
-    DefectPairConfig::default()
+    let config = DefectPairConfig::default()
         .with_dimer(SolidDimerConfig::frozen(search).with_index_check(IndexCheck::first_order()))
         .with_band(
             BandConfig::default()
@@ -96,18 +96,20 @@ fn control_config() -> DefectPairConfig {
                 .with_seed(5)
                 .with_fix_com(false)
                 .with_retain(8),
-        )
-        .with_shooting(
-            rgsaddle::ShootingConfig::default()
-                .with_friction(0.0)
-                .with_time_step(0.01)
-                .with_steps(30)
-                .with_record_every(10)
-                .with_shots(24)
-                .with_blocks(4)
-                .with_seed(9)
-                .with_plateau_record(1),
-        )
+        );
+    #[cfg(feature = "ohtst")]
+    let config = config.with_transmission(
+        rgsaddle::TransmissionConfig::default()
+            .with_friction(0.0)
+            .with_time_step(0.01)
+            .with_steps(30)
+            .with_check_every(10)
+            .with_shots(24)
+            .with_blocks(4)
+            .with_seed(9)
+            .with_counting(rgsaddle::Counting::Final),
+    );
+    config
         .with_temperatures(vec![0.05])
         .with_boltzmann(1.0)
         .with_mass(1.0)
@@ -443,6 +445,45 @@ fn the_chain_matches_the_closed_form() {
     let sites = exact.iter().sum::<f64>();
     assert!((volume.kinetic_sites - sites).abs() < 1.0e-12);
     assert!((volume.total_sites - sites).abs() < 1.0e-12);
+}
+
+#[test]
+fn unit_kappa_reproduces_network_numbers_bit_for_bit() {
+    let original = chain_sites();
+    let corrected: Vec<rgsaddle::VolumeSite> = original
+        .iter()
+        .map(|site| rgsaddle::VolumeSite {
+            id: site.id.clone(),
+            count: site.count,
+            outcome: site.outcome,
+            rates: site
+                .rates
+                .iter()
+                .map(|(target, rate)| {
+                    let (rate, error) =
+                        rgsaddle::transmitted_pafi_rate(*rate, 0.25, 1.0, 0.0).unwrap();
+                    assert_eq!(error.to_bits(), 0.25_f64.to_bits());
+                    (target.clone(), rate)
+                })
+                .collect(),
+        })
+        .collect();
+    for (before, after) in original.iter().zip(&corrected) {
+        for ((_, before), (_, after)) in before.rates.iter().zip(&after.rates) {
+            assert_eq!(before.to_bits(), after.to_bits());
+        }
+    }
+    let before = rgsaddle::kinetic_recombination_volume(&original, 1.0).unwrap();
+    let after = rgsaddle::kinetic_recombination_volume(&corrected, 1.0).unwrap();
+    assert_eq!(before.volume.to_bits(), after.volume.to_bits());
+    assert_eq!(before.total_sites.to_bits(), after.total_sites.to_bits());
+    for (before, after) in before.placements.iter().zip(&after.placements) {
+        assert_eq!(before.probability.to_bits(), after.probability.to_bits());
+    }
+
+    let (rate, error) = rgsaddle::transmitted_pafi_rate(4.0, 0.3, 0.5, 0.1).unwrap();
+    assert_eq!(rate, 2.0);
+    assert!((error - 0.3_f64.hypot(0.2)).abs() < 1.0e-15);
 }
 
 #[test]

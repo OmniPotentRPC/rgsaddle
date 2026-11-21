@@ -1,4 +1,8 @@
 //! Mass-weighted and fixed-cell surfaces used with the shared hyperplane.
+//!
+//! [`HyperplaneConstraint::orthogonal_to`] removes rigid directions from a
+//! constraint normal by modified Gram-Schmidt and drops a row only inside
+//! Higham's roundoff bound. The estimator uses that same unit normal.
 
 use ndarray::{Array1, Array2, ArrayView1};
 
@@ -55,6 +59,8 @@ impl Hyperplane {
         self.orthogonal_to(translations.view())
     }
 }
+
+pub use crate::hyperplane_constraint::{HyperplaneConstraint, uniform_translations};
 
 /// A Cartesian surface in mass-weighted coordinates `q = M^{1/2} x`.
 ///
@@ -197,7 +203,7 @@ impl<S: PointSurface> PointSurface for FixedCell<'_, S> {
 mod tests {
     use super::*;
     use crate::ohtst::sample::{LangevinConfig, sample_plane};
-    use ndarray::array;
+    use ndarray::{array, s};
 
     struct Quadratic;
 
@@ -441,5 +447,94 @@ mod tests {
         let mut broken = cell;
         broken[4] = f64::NAN;
         assert!(FixedCell::new(&CellQuadratic, broken).is_err());
+    }
+
+    #[test]
+    fn orthogonal_to_removes_a_uniform_translation() {
+        let normal = array![1.0, 0.0, 0.0, 0.5, 0.0, 0.0];
+        let translations = uniform_translations(2);
+        let unit =
+            HyperplaneConstraint::orthogonal_to(normal.view(), translations.view()).expect("unit");
+        let expected = array![1.0, 0.0, 0.0, -1.0, 0.0, 0.0] / 2.0_f64.sqrt();
+        let miss: f64 = (&unit - &expected).mapv(f64::abs).sum();
+        assert!(miss < f64::EPSILON.sqrt(), "unit {unit}");
+        let mut drifted = array![3.0, 4.0, 5.0, 3.0, -1.0, 2.0];
+        let plane =
+            HyperplaneConstraint::through(Array1::zeros(6), normal.view(), translations.view())
+                .expect("plane");
+        plane.project(&mut drifted);
+        for axis in 0..3 {
+            let mean = (drifted[axis] + drifted[3 + axis]) / 2.0;
+            assert!(mean.abs() < f64::EPSILON.sqrt(), "axis {axis} mean {mean}");
+        }
+        assert!(drifted.dot(&plane.normal()).abs() < f64::EPSILON.sqrt());
+    }
+
+    #[test]
+    fn a_repeated_translation_does_not_change_the_normal() {
+        let mut directions = Array2::zeros((2, 6));
+        directions
+            .row_mut(0)
+            .assign(&uniform_translations(2).row(0));
+        directions
+            .row_mut(1)
+            .assign(&uniform_translations(2).row(0));
+        let normal = array![1.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let once =
+            HyperplaneConstraint::orthogonal_to(normal.view(), directions.slice(s![0..1, ..]))
+                .expect("once");
+        let twice =
+            HyperplaneConstraint::orthogonal_to(normal.view(), directions.view()).expect("twice");
+        let miss: f64 = (&once - &twice).mapv(f64::abs).sum();
+        assert!(miss < f64::EPSILON.sqrt(), "{once} against {twice}");
+    }
+
+    #[test]
+    fn a_normal_along_a_translation_is_rejected() {
+        let translations = uniform_translations(2);
+        let normal = translations.row(0).to_owned();
+        let error = HyperplaneConstraint::orthogonal_to(normal.view(), translations.view());
+        assert!(error.is_err());
+    }
+
+    #[test]
+    fn orthogonal_rate_matches_a_difference_of_normals() {
+        // Central difference of the unit normal. Its remainder is
+        // δ² |∂³ν| / 6, and ∂³ν of this O(1) family is O(1), so the
+        // discrepancy sits under δ².
+        let delta = f64::EPSILON.cbrt();
+        let rate = array![0.2, -0.4, 0.1, 0.5, 0.0, -0.3];
+        let normal = array![1.0, 0.3, -0.2, 0.4, 0.1, 0.0];
+        let directions = uniform_translations(2);
+        let (unit, derivative) =
+            HyperplaneConstraint::orthogonal_rate(normal.view(), rate.view(), directions.view())
+                .expect("rate");
+        let plus = HyperplaneConstraint::orthogonal_to(
+            (&normal + &rate * delta).view(),
+            directions.view(),
+        )
+        .expect("plus");
+        let minus = HyperplaneConstraint::orthogonal_to(
+            (&normal - &rate * delta).view(),
+            directions.view(),
+        )
+        .expect("minus");
+        let difference = (&plus - &minus) / (2.0 * delta);
+        let miss: f64 = (&difference - &derivative).mapv(f64::abs).sum();
+        assert!(miss < delta.powi(2), "miss {miss} unit {unit}");
+        assert!(unit.dot(&derivative).abs() < delta);
+    }
+
+    #[test]
+    fn restore_puts_a_point_on_the_plane() {
+        let origin = array![1.0, 2.0];
+        let normal = array![0.0, 2.0];
+        let plane =
+            HyperplaneConstraint::through(origin, normal.view(), Array2::zeros((0, 2)).view())
+                .expect("plane");
+        let mut point = array![1.0, 5.0];
+        plane.restore(&mut point);
+        assert!((point[1] - 2.0).abs() < f64::EPSILON.sqrt());
+        assert!((point[0] - 1.0).abs() < f64::EPSILON.sqrt());
     }
 }

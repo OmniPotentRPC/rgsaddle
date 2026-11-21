@@ -6,10 +6,13 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ndarray::{Array1, ArrayView1};
+use std::f64::consts::{FRAC_PI_2, FRAC_PI_4};
+
 use rgsaddle::{
-    ArcPath, PafiConfig, PafiIntegrator, PathFrame, PointSurface, RelaxConfig, SaddleError,
-    anchored_barriers, average_hyperplane, balanced_barriers, integrate_profile, pafi_profile,
-    zero_temperature_barrier,
+    ArcPath, PafiConfig, PafiIntegrator, PathFrame, PathGeometry, PointSurface, RelaxConfig,
+    SaddleError, anchored_barriers, average_hyperplane, balanced_barriers,
+    flat_hyperplane_gradient, harmonic_mask_shift, integrate_profile, pafi_frames, pafi_profile,
+    pafi_truncated, zero_temperature_barrier,
 };
 
 struct AlongX;
@@ -897,4 +900,789 @@ fn a_quench_that_spends_its_step_cap_is_counted() {
     );
     let average = average_hyperplane(&Widening, &geometry, &capped).expect("a capped quench ends");
     assert!(average.unconverged_quenches > 0);
+}
+
+const RING_STIFFNESS: f64 = 20.0;
+const RING_STIFFENING: f64 = 1.0;
+const RING_BARRIER: f64 = 1.0;
+const RING_THERMAL: f64 = 0.1;
+
+/// `V = A (1 + a sin²(2θ)) (r - 1)² + W sin²(2θ)`: minima on the axes and
+/// saddles on the diagonals of a ring, so every hop between neighbouring
+/// axes is the same and its path is curved. The ring is stiffer at the
+/// saddle, and the free-energy barrier is `W + ½ kT ln(1 + a)`.
+struct Ring;
+
+impl PointSurface for Ring {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        let r = x[0].hypot(x[1]);
+        let theta = x[1].atan2(x[0]);
+        let rise = (2.0 * theta).sin().powi(2);
+        let stretch = r - 1.0;
+        let stiffness = RING_STIFFNESS * (1.0 + RING_STIFFENING * rise);
+        let energy = stiffness * stretch * stretch + RING_BARRIER * rise;
+        let radial = 2.0 * stiffness * stretch;
+        let angular = 2.0
+            * (4.0 * theta).sin()
+            * (RING_STIFFNESS * RING_STIFFENING * stretch * stretch + RING_BARRIER)
+            / (r * r);
+        let gradient = Array1::from_vec(vec![
+            radial * x[0] / r - angular * x[1],
+            radial * x[1] / r + angular * x[0],
+        ]);
+        Ok((energy, gradient))
+    }
+}
+
+/// Unevenly spaced frames on the ring from the x axis to the y axis, the
+/// saddle among them, turned by `turn` and mirrored across the x axis
+/// when asked.
+fn ring_frames(turn: f64, mirror: bool) -> Vec<Array1<f64>> {
+    [
+        0.0, 0.06, 0.15, 0.27, 0.42, 0.6, FRAC_PI_4, 1.0, 1.15, 1.3, 1.45, FRAC_PI_2,
+    ]
+    .iter()
+    .map(|angle| {
+        let angle = if mirror { -angle } else { *angle } + turn;
+        Array1::from_vec(vec![angle.cos(), angle.sin()])
+    })
+    .collect()
+}
+
+/// The planes through a reversed band are the same planes, and the arc
+/// length runs the other way.
+#[test]
+fn frame_planes_do_not_depend_on_the_traversal() {
+    let frames = ring_frames(0.0, false);
+    let back: Vec<Array1<f64>> = frames.iter().rev().cloned().collect();
+    let forward = ArcPath::from_positions(&frames)
+        .expect("path")
+        .frame_planes()
+        .expect("planes");
+    let backward = ArcPath::from_positions(&back)
+        .expect("path")
+        .frame_planes()
+        .expect("planes");
+    let last = frames.len() - 1;
+    let total = forward.arcs[last];
+    for k in 0..=last {
+        let sum = &forward.normals[k] + &backward.normals[last - k];
+        assert!(sum.iter().all(|v| v.abs() < 1e-12), "normal {k}");
+        let turn = &forward.curvatures[k] - &backward.curvatures[last - k];
+        assert!(turn.iter().all(|v| v.abs() < 1e-10), "curvature {k}");
+        assert!((forward.arcs[k] - (total - backward.arcs[last - k])).abs() < 1e-12);
+    }
+}
+
+/// On the ring the normals are the tangents of the circle and the
+/// curvature points to its centre, to second order in the spacing.
+#[test]
+fn frame_planes_follow_the_ring() {
+    let frames = ring_frames(0.0, false);
+    let planes = ArcPath::from_positions(&frames)
+        .expect("path")
+        .frame_planes()
+        .expect("planes");
+    for (k, frame) in frames.iter().enumerate() {
+        let tangent = Array1::from_vec(vec![-frame[1], frame[0]]);
+        let tilt = 1.0 - planes.normals[k].dot(&tangent);
+        let bend = &planes.curvatures[k] + frame;
+        assert!(tilt < 1e-3, "frame {k} tilts by {tilt}");
+        assert!(bend.dot(&bend).sqrt() < 0.1, "frame {k} bends by {bend}");
+    }
+}
+
+/// An atom that barely moves is left out of the planes at a share its
+/// squared steps do not reach.
+#[test]
+fn frame_planes_keep_the_atoms_that_carry_the_path() {
+    let frames: Vec<Array1<f64>> = (0..5)
+        .map(|i| {
+            let t = i as f64 / 4.0;
+            Array1::from_vec(vec![t, 0.0, 0.0, 5.0 + 0.1 * t, 0.0, 0.0])
+        })
+        .collect();
+    let path = ArcPath::from_positions(&frames).expect("path");
+    let local = path.truncated_planes(0.95).expect("planes");
+    assert_eq!(local.active, vec![0]);
+    assert!(
+        local
+            .normals
+            .iter()
+            .all(|n| n[3] == 0.0 && (n[0] - 1.0).abs() < 1e-12)
+    );
+    assert!((local.arcs[4] - 1.0).abs() < 1e-12);
+    let every = path.frame_planes().expect("planes");
+    assert_eq!(every.active, vec![0, 1]);
+    assert!((every.arcs[4] - 1.01_f64.sqrt()).abs() < 1e-12);
+}
+
+/// Over unevenly spaced frames the barrier is the same on the hop turned
+/// onto the next axis and on the hop mirrored, a reversed band gives the
+/// barrier back from the other end, and the barrier keeps the entropic
+/// part `½ kT ln(1 + a)` to a tenth.
+#[test]
+fn frame_barrier_does_not_depend_on_the_frame() {
+    let config = PafiConfig::default()
+        .with_thermal(RING_THERMAL)
+        .with_mobility(1.0)
+        .with_time_step(0.01)
+        .with_thermalize(200)
+        .with_stride(1)
+        .with_samples(20_000)
+        .with_blocks(8)
+        .with_seed(5)
+        .with_fix_com(false)
+        .with_retain(0)
+        .with_target_error(None);
+    let barrier = |frames: Vec<Array1<f64>>| {
+        let path = ArcPath::from_positions(&frames).expect("path");
+        let (profile, _) = pafi_frames(&Ring, &path, &config).expect("pafi");
+        let back = profile.reverse_barrier();
+        ((profile.barrier, profile.barrier_error), back)
+    };
+    let (built, built_back) = barrier(ring_frames(0.0, false));
+    let (reversed, reversed_back) = barrier(ring_frames(0.0, false).into_iter().rev().collect());
+    let (turned, _) = barrier(ring_frames(FRAC_PI_2, false));
+    let (mirrored, _) = barrier(ring_frames(0.0, true));
+    let entropic = 0.5 * RING_THERMAL * (1.0 + RING_STIFFENING).ln();
+    eprintln!(
+        "as built {built:?} back {built_back:?}, reversed {reversed:?} back {reversed_back:?}, turned {turned:?}, mirrored {mirrored:?}, exact {}",
+        RING_BARRIER + entropic
+    );
+    let agree = |left: (f64, f64), right: (f64, f64)| {
+        (left.0 - right.0).abs() < 3.0 * left.1.hypot(right.1)
+    };
+    assert!(agree(built, turned), "turned {turned:?} against {built:?}");
+    assert!(
+        agree(built, mirrored),
+        "mirrored {mirrored:?} against {built:?}"
+    );
+    assert!(
+        agree(built, reversed_back),
+        "reversed {reversed_back:?} against {built:?}"
+    );
+    assert!(
+        agree(built_back, reversed),
+        "reversed {reversed:?} against {built_back:?}"
+    );
+    for (label, (value, error)) in [("as built", built), ("reversed", reversed)] {
+        assert!(
+            (value - RING_BARRIER - entropic).abs() < 3.0 * error + 0.1 * entropic,
+            "{label}: {value} ± {error} against {}",
+            RING_BARRIER + entropic
+        );
+    }
+}
+
+const BASIN_BARRIER: f64 = 0.4;
+const BASIN_COUPLING: f64 = 0.3;
+const BASIN_THERMAL: f64 = 0.1;
+const BASIN_PLANE: f64 = 0.5;
+
+/// `V = (1 - x²)² + B (y² - 1)² + λ x y`: the plane `x = ½` cuts two
+/// basins in `y`, the one below the deeper, and `∂V/∂x = λ y - 4x(1 - x²)`
+/// tells them apart.
+struct TwoBasins;
+
+impl PointSurface for TwoBasins {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        let (p, q) = (x[0], x[1]);
+        let energy =
+            (1.0 - p * p).powi(2) + BASIN_BARRIER * (q * q - 1.0).powi(2) + BASIN_COUPLING * p * q;
+        let gradient = Array1::from_vec(vec![
+            -4.0 * p * (1.0 - p * p) + BASIN_COUPLING * q,
+            4.0 * BASIN_BARRIER * q * (q * q - 1.0) + BASIN_COUPLING * p,
+        ]);
+        Ok((energy, gradient))
+    }
+}
+
+/// Boltzmann average of `∂V/∂x` on the plane over `y` in `(from, to)`.
+fn basin_gradient(from: f64, to: f64) -> f64 {
+    let steps = 40_000;
+    let width = (to - from) / steps as f64;
+    let (mut weight, mut sum) = (0.0, 0.0);
+    for i in 0..=steps {
+        let y = from + width * i as f64;
+        let point = Array1::from_vec(vec![BASIN_PLANE, y]);
+        let (energy, gradient) = TwoBasins.eval(point.view()).expect("energy");
+        let w = (-energy / BASIN_THERMAL).exp();
+        weight += w;
+        sum += w * gradient[0];
+    }
+    sum / weight
+}
+
+/// The ridge in `y` between the two basins on the plane.
+fn basin_top() -> f64 {
+    let mut top = 0.0;
+    for _ in 0..50 {
+        let slope = 4.0 * BASIN_BARRIER * top * (top * top - 1.0) + BASIN_COUPLING * BASIN_PLANE;
+        let bend = 4.0 * BASIN_BARRIER * (3.0 * top * top - 1.0);
+        top -= slope / bend;
+    }
+    top
+}
+
+/// On a plane that also cuts a deeper basin, the jump test keeps the chain
+/// in the basin it starts from, and the average is that basin's alone.
+/// Without the test the chain falls into the other one.
+#[test]
+fn jump_test_keeps_the_basin_of_the_path() {
+    let geometry = PathGeometry {
+        positions: Array1::from_vec(vec![BASIN_PLANE, 1.0]),
+        tangent: Array1::from_vec(vec![1.0, 0.0]),
+        curvature: Array1::zeros(2),
+        jerk: Array1::zeros(2),
+        arc: 0.0,
+    };
+    let config = PafiConfig::default()
+        .with_thermal(BASIN_THERMAL)
+        .with_mobility(1.0)
+        .with_time_step(0.01)
+        .with_thermalize(200)
+        .with_stride(1)
+        .with_samples(40_000)
+        .with_window(200)
+        .with_blocks(8)
+        .with_seed(3)
+        .with_fix_com(false)
+        .with_retain(0);
+    let kept = average_hyperplane(
+        &TwoBasins,
+        &geometry,
+        &config.clone().with_max_jump(Some(0.5)),
+    )
+    .expect("kept");
+    let free = average_hyperplane(&TwoBasins, &geometry, &config.clone().with_max_jump(None))
+        .expect("free");
+    let top = basin_top();
+    let upper = basin_gradient(top, 4.0);
+    let lower = basin_gradient(-4.0, top);
+    eprintln!(
+        "kept {:.4} ± {:.4} after {} jumps, free {:.4} ± {:.4}, upper basin {upper:.4}, lower {lower:.4}",
+        kept.gradient, kept.error, kept.jumps, free.gradient, free.error
+    );
+    assert!(kept.jumps > 0);
+    assert_eq!(free.jumps, 0);
+    assert!(
+        (kept.gradient - upper).abs() < 3.0 * kept.error + 0.02,
+        "kept {} ± {} against {upper}",
+        kept.gradient,
+        kept.error
+    );
+    assert!((free.gradient - upper).abs() > 0.25 * (upper - lower).abs());
+}
+
+/// A window far longer than a chain stays in the basin of the path keeps
+/// nothing. The plane then halves its window until it keeps one, and the
+/// average is still that basin's.
+#[test]
+fn jump_test_halves_a_window_no_chain_outlasts() {
+    let geometry = PathGeometry {
+        positions: Array1::from_vec(vec![BASIN_PLANE, 1.0]),
+        tangent: Array1::from_vec(vec![1.0, 0.0]),
+        curvature: Array1::zeros(2),
+        jerk: Array1::zeros(2),
+        arc: 0.0,
+    };
+    let config = PafiConfig::default()
+        .with_thermal(BASIN_THERMAL)
+        .with_mobility(1.0)
+        .with_time_step(0.01)
+        .with_thermalize(200)
+        .with_stride(1)
+        .with_samples(40_000)
+        .with_window(40_000)
+        .with_blocks(8)
+        .with_seed(3)
+        .with_fix_com(false)
+        .with_retain(0)
+        .with_max_jump(Some(0.5));
+    let kept = average_hyperplane(&TwoBasins, &geometry, &config).expect("kept");
+    let upper = basin_gradient(basin_top(), 4.0);
+    eprintln!(
+        "kept {:.4} ± {:.4} from {} samples after {} jumps, upper basin {upper:.4}",
+        kept.gradient, kept.error, kept.samples, kept.jumps
+    );
+    assert!(kept.jumps >= 4, "{} jumps", kept.jumps);
+    assert!(
+        (kept.gradient - upper).abs() < 3.0 * kept.error + 0.02,
+        "kept {} ± {} against {upper}",
+        kept.gradient,
+        kept.error
+    );
+}
+
+/// Transverse stiffness of the rotated double well, and `kT`.
+const MASK_STIFFNESS: f64 = 6.0;
+const MASK_THERMAL: f64 = 0.05;
+
+/// `U''` of `(1 - r²)²` at the minimum `r = -1` and at the saddle `r = 0`.
+const MASK_CURVATURE_MINIMUM: f64 = 8.0;
+const MASK_CURVATURE_SADDLE: f64 = -4.0;
+
+/// Curvature of `V` in the plane normal to `(cos θ, sin θ)`, at a point
+/// where the path curvature along `r` is `lambda` and the transverse
+/// spring is [`MASK_STIFFNESS`]. `θ = 0` is the path tangent.
+fn masked_curvature(lambda: f64, theta: f64) -> f64 {
+    let (along, across) = (theta.cos(), theta.sin());
+    lambda * across * across + MASK_STIFFNESS * along * along
+}
+
+/// `nᵀ H⁻¹ n` for that same normal. `H = λ ê_r ê_rᵀ + k ê_w ê_wᵀ`.
+fn masked_compliance(lambda: f64, theta: f64) -> f64 {
+    let (along, across) = (theta.cos(), theta.sin());
+    along * along / lambda + across * across / MASK_STIFFNESS
+}
+
+/// The masked barrier is `1 + (kT/2) ln(κ_s / κ_m)`, and the compliance
+/// shift returns the full-tangent barrier, which is 1 at every angle.
+#[test]
+fn harmonic_shift_removes_the_mask_angle() {
+    for degrees in [0.0_f64, 15.0, 30.0, 45.0] {
+        let theta = degrees.to_radians();
+        let kappa_s = masked_curvature(MASK_CURVATURE_SADDLE, theta);
+        let kappa_m = masked_curvature(MASK_CURVATURE_MINIMUM, theta);
+        assert!(kappa_s > 0.0 && kappa_m > 0.0, "angle {degrees}");
+        let raw = 1.0 + 0.5 * MASK_THERMAL * (kappa_s / kappa_m).ln();
+        let corrected = harmonic_mask_shift(
+            raw,
+            masked_compliance(MASK_CURVATURE_MINIMUM, 0.0),
+            masked_compliance(MASK_CURVATURE_MINIMUM, theta),
+            masked_compliance(MASK_CURVATURE_SADDLE, 0.0),
+            masked_compliance(MASK_CURVATURE_SADDLE, theta),
+            MASK_THERMAL,
+        )
+        .expect("shift");
+        let miss = (corrected - 1.0).abs();
+        assert!(
+            miss < f64::EPSILON.sqrt(),
+            "{degrees}° raw {raw} corrected {corrected}"
+        );
+    }
+    assert!(harmonic_mask_shift(1.0, 1.0, -1.0, 1.0, 1.0, MASK_THERMAL).is_err());
+    assert!(harmonic_mask_shift(1.0, 1.0, 1.0, 1.0, 1.0, 0.0).is_err());
+}
+
+/// `V = U(r) + ½ k w²` with the path along `θ` from the path tangent.
+struct RotatedWell {
+    theta: f64,
+}
+
+impl PointSurface for RotatedWell {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        let (along, across) = (self.theta.cos(), self.theta.sin());
+        let r = x[0] * along + x[1] * across;
+        let w = -x[0] * across + x[1] * along;
+        let well = (1.0 - r * r).powi(2);
+        let energy = well + 0.5 * MASK_STIFFNESS * w * w;
+        let slope = -4.0 * r * (1.0 - r * r);
+        let gradient = Array1::from_vec(vec![
+            slope * along - MASK_STIFFNESS * w * across,
+            slope * across + MASK_STIFFNESS * w * along,
+        ]);
+        Ok((energy, gradient))
+    }
+}
+
+fn rotated_frames(theta: f64) -> Vec<Array1<f64>> {
+    (0..11)
+        .map(|i| {
+            let r = -1.0 + 2.0 * i as f64 / 10.0;
+            Array1::from_vec(vec![r * theta.cos(), r * theta.sin()])
+        })
+        .collect()
+}
+
+fn mask_sampling() -> PafiConfig {
+    PafiConfig::default()
+        .with_thermal(MASK_THERMAL)
+        .with_mobility(1.0)
+        .with_time_step(0.004)
+        .with_thermalize(400)
+        .with_stride(4)
+        .with_samples(2_000)
+        .with_blocks(8)
+        .with_seed(11)
+        .with_fix_com(false)
+        .with_retain(0)
+        .with_target_error(None)
+        .with_max_rounds(1)
+}
+
+/// The full tangent gives the barrier 1 at two angles. A share that keeps
+/// only the first coordinate gives the masked barrier, and the compliance
+/// shift puts it back on 1.
+#[test]
+fn truncated_plane_has_the_masked_barrier() {
+    let config = mask_sampling();
+    let theta = 30.0_f64.to_radians();
+    let share = 0.5;
+    let kappa_s = masked_curvature(MASK_CURVATURE_SADDLE, theta);
+    let kappa_m = masked_curvature(MASK_CURVATURE_MINIMUM, theta);
+    let masked = 1.0 + 0.5 * MASK_THERMAL * (kappa_s / kappa_m).ln();
+    for angle in [0.0, theta] {
+        let path = ArcPath::from_positions(&rotated_frames(angle)).expect("path");
+        let (profile, _) =
+            pafi_frames(&RotatedWell { theta: angle }, &path, &config).expect("full");
+        eprintln!(
+            "full θ={angle:.3} barrier {} ± {}",
+            profile.barrier, profile.barrier_error
+        );
+        assert!(
+            (profile.barrier - 1.0).abs() < 3.0 * profile.barrier_error + f64::EPSILON.sqrt(),
+            "full {angle}: {} ± {}",
+            profile.barrier,
+            profile.barrier_error
+        );
+    }
+    let path = ArcPath::from_positions(&rotated_frames(theta)).expect("path");
+    let planes = path.truncated_planes(share).expect("planes");
+    assert_eq!(planes.active, vec![0]);
+    let (profile, _) =
+        pafi_truncated(&RotatedWell { theta }, &path, share, &config).expect("truncated");
+    let corrected = harmonic_mask_shift(
+        profile.barrier,
+        masked_compliance(MASK_CURVATURE_MINIMUM, 0.0),
+        masked_compliance(MASK_CURVATURE_MINIMUM, theta),
+        masked_compliance(MASK_CURVATURE_SADDLE, 0.0),
+        masked_compliance(MASK_CURVATURE_SADDLE, theta),
+        MASK_THERMAL,
+    )
+    .expect("shift");
+    eprintln!(
+        "masked {} ± {} truth {masked}, corrected {corrected}",
+        profile.barrier, profile.barrier_error
+    );
+    assert!(
+        (profile.barrier - masked).abs() < 3.0 * profile.barrier_error,
+        "masked {} ± {} against {masked}",
+        profile.barrier,
+        profile.barrier_error
+    );
+    assert!(
+        (corrected - 1.0).abs() < 3.0 * profile.barrier_error,
+        "corrected {corrected} ± {}",
+        profile.barrier_error
+    );
+}
+
+/// `(x - X) · ν = 0` with a fixed normal that is not the path tangent.
+/// The flat-plane derivative is the derivative of `-kT ln Z`.
+#[test]
+fn flat_gradient_of_a_masked_normal_matches_the_plane() {
+    let amplitude = 0.4;
+    let stiffness = 12.0;
+    let beta: f64 = 20.0;
+    let thermal = beta.recip();
+    let tilt: f64 = 0.3;
+    let normal = [tilt.cos(), tilt.sin()];
+    let tangent_of = |x: f64| -> [f64; 2] { [1.0, amplitude * x.cos()] };
+    let energy_grad = |x: f64, y: f64| -> (f64, [f64; 2]) {
+        let d = y - amplitude * x.sin();
+        let well = (1.0 - x * x).powi(2);
+        let energy = well + 0.5 * stiffness * d * d;
+        let slope = -4.0 * x * (1.0 - x * x);
+        (
+            energy,
+            [slope - stiffness * d * amplitude * x.cos(), stiffness * d],
+        )
+    };
+    let plane = |x0: f64, ngrid: usize| -> (f64, f64) {
+        let origin = [x0, amplitude * x0.sin()];
+        let across = [-normal[1], normal[0]];
+        let width = 6.0;
+        let step = 2.0 * width / (ngrid - 1) as f64;
+        let mut partition = 0.0;
+        let mut weighted = 0.0;
+        for i in 0..ngrid {
+            let s = -width + i as f64 * step;
+            let point = [origin[0] + s * across[0], origin[1] + s * across[1]];
+            let (energy, gradient) = energy_grad(point[0], point[1]);
+            let weight = (-beta * energy).exp();
+            let displacement = Array1::from_vec(vec![point[0] - origin[0], point[1] - origin[1]]);
+            let value = flat_hyperplane_gradient(
+                Array1::from_vec(gradient.to_vec()).view(),
+                displacement.view(),
+                Array1::from_vec(normal.to_vec()).view(),
+                Array1::zeros(2).view(),
+                Array1::from_vec(tangent_of(x0).to_vec()).view(),
+            )
+            .expect("gradient");
+            partition += weight;
+            weighted += weight * value;
+        }
+        (-thermal * partition.ln(), weighted / partition)
+    };
+    let xs: Vec<f64> = (-8..=8).map(|i| i as f64 * 0.05).collect();
+    let fine: Vec<(f64, f64)> = xs.iter().map(|x| plane(*x, 8_001)).collect();
+    let h = xs[1] - xs[0];
+    // The five-point rule has truncation C h^4. The same rule at 2h
+    // differs from it by 15 C h^4, so that difference bounds the
+    // truncation of the spacing-h derivative of this one log Z.
+    for i in 4..xs.len() - 4 {
+        let derivative = (-fine[i + 2].0 + 8.0 * fine[i + 1].0 - 8.0 * fine[i - 1].0
+            + fine[i - 2].0)
+            / (12.0 * h);
+        let wider = (-fine[i + 4].0 + 8.0 * fine[i + 2].0 - 8.0 * fine[i - 2].0 + fine[i - 4].0)
+            / (24.0 * h);
+        let stencil = (derivative - wider).abs();
+        let miss = (fine[i].1 - derivative).abs();
+        assert!(
+            miss < stencil.max(f64::EPSILON.sqrt()),
+            "x {}: estimate {} derivative {derivative} stencil {stencil}",
+            xs[i],
+            fine[i].1
+        );
+    }
+}
+
+/// Two atoms, `q = x_0 - x_3`. The path tangent carries a uniform drift.
+/// With the center of mass held, `q` is the constrained coordinate and the
+/// gradient is `U'(q) / |dX/ds|` at every sample.
+struct Relative;
+
+impl PointSurface for Relative {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        let q = x[0] - x[3];
+        let energy = (1.0 - q * q).powi(2);
+        let slope = -4.0 * q * (1.0 - q * q);
+        let mut gradient = Array1::zeros(x.len());
+        gradient[0] = slope;
+        gradient[3] = -slope;
+        for index in [1, 2, 4, 5] {
+            gradient[index] = 8.0 * x[index];
+        }
+        Ok((energy, gradient))
+    }
+}
+
+#[test]
+fn center_of_mass_uses_the_same_normal_as_the_estimator() {
+    let q = -0.5;
+    let positions: Array1<f64> = Array1::from_vec(vec![0.6 * q, 0.0, 0.0, -0.4 * q, 0.0, 0.0]);
+    let mut tangent: Array1<f64> = Array1::from_vec(vec![0.6, 0.0, 0.0, -0.4, 0.0, 0.0]);
+    let speed = tangent.dot(&tangent).sqrt();
+    tangent /= speed;
+    let geometry = PathGeometry {
+        positions,
+        tangent,
+        curvature: Array1::zeros(6),
+        jerk: Array1::zeros(6),
+        arc: 0.0,
+    };
+    let slope = -4.0 * q * (1.0 - q * q);
+    let expected = slope / speed;
+    let config = PafiConfig::default()
+        .with_thermal(0.02)
+        .with_mobility(1.0)
+        .with_time_step(0.01)
+        .with_thermalize(4)
+        .with_stride(1)
+        .with_samples(8)
+        .with_blocks(2)
+        .with_seed(3)
+        .with_fix_com(true)
+        .with_retain(0)
+        .with_target_error(None)
+        .with_max_rounds(1);
+    let plane = average_hyperplane(&Relative, &geometry, &config).expect("plane");
+    eprintln!(
+        "com gradient {} ± {} expected {expected}",
+        plane.gradient, plane.error
+    );
+    assert!(
+        (plane.gradient - expected).abs() < f64::EPSILON.sqrt(),
+        "gradient {} expected {expected}",
+        plane.gradient
+    );
+    assert!(plane.error < f64::EPSILON.sqrt());
+}
+
+/// Rescaling the parameter of a path by `k` multiplies its tangent by `k`
+/// and its curvature by `k²`, and moves nothing in the plane. The mean `ψ`
+/// is a property of the plane, and `dF/ds` follows the parameter.
+#[test]
+fn psi_does_not_depend_on_the_parameter_of_the_path() {
+    let config = PafiConfig::default()
+        .with_thermal(0.05)
+        .with_mobility(1.0)
+        .with_time_step(0.004)
+        .with_thermalize(100)
+        .with_stride(4)
+        .with_samples(200)
+        .with_blocks(4)
+        .with_seed(5)
+        .with_fix_com(false)
+        .with_retain(1)
+        .with_window(50)
+        .with_max_jump(None);
+    let at = |scale: f64| {
+        let geometry = PathGeometry {
+            positions: Array1::from_vec(vec![-0.3, 0.1]),
+            tangent: Array1::from_vec(vec![1.0, 0.3]) * scale,
+            curvature: Array1::from_vec(vec![0.2, 0.8]) * scale * scale,
+            jerk: Array1::zeros(2),
+            arc: 0.0,
+        };
+        average_hyperplane(&Widening, &geometry, &config).expect("plane")
+    };
+    let base = at(1.0);
+    assert!(base.psi.abs() > 1.0e-3, "psi {}", base.psi);
+    for scale in [0.2, 5.0] {
+        let scaled = at(scale);
+        assert!(
+            (scaled.psi - base.psi).abs() <= 1.0e-8 * base.psi.abs(),
+            "scale {scale}: psi {} against {}",
+            scaled.psi,
+            base.psi
+        );
+        let expected = scale * base.gradient;
+        assert!(
+            (scaled.gradient - expected).abs() <= 1.0e-8 * expected.abs().max(1.0e-3),
+            "scale {scale}: gradient {} against {expected}",
+            scaled.gradient
+        );
+    }
+}
+
+#[test]
+fn frame_controls_default_to_the_documented_values_and_have_setters() {
+    let config = PafiConfig::default();
+    assert_eq!(
+        (config.relax_tol, config.jump_tol, config.window),
+        (1.0e-4, 1.0e-2, 0)
+    );
+    let set = config
+        .with_relax_tol(1.0e-6)
+        .with_jump_tol(1.0e-3)
+        .with_window(16);
+    assert_eq!(
+        (set.relax_tol, set.jump_tol, set.window),
+        (1.0e-6, 1.0e-3, 16)
+    );
+}
+
+#[test]
+fn frame_samplers_propagate_failing_drift() {
+    struct DriftingTransverse;
+    impl PointSurface for DriftingTransverse {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            let energy = (1.0 - x[0] * x[0]).powi(2) - 0.04 * x[0] * x[1]
+                + 10.0 * x[2] * x[2]
+                + 0.8 * x[0] * x[2]
+                + 0.5 * x[3] * x[3];
+            let gx = -4.0 * x[0] * (1.0 - x[0] * x[0]) - 0.04 * x[1] + 0.8 * x[2];
+            let gy = -0.04 * x[0];
+            let gz = 20.0 * x[2] + 0.8 * x[0];
+            let gw = x[3];
+            Ok((energy, Array1::from_vec(vec![gx, gy, gz, gw])))
+        }
+    }
+
+    let frames: Vec<Array1<f64>> = (0..11)
+        .map(|i| {
+            let r = -1.0 + 2.0 * i as f64 / 10.0;
+            Array1::from_vec(vec![r, 0.0, -0.8 * r / 20.0, 0.0])
+        })
+        .collect();
+    let path = ArcPath::from_positions(&frames).expect("path");
+    let config = PafiConfig::default()
+        .with_thermal(0.15)
+        .with_mobility(1.0)
+        .with_time_step(0.05)
+        .with_thermalize(0)
+        .with_stride(1)
+        .with_samples(400)
+        .with_blocks(6)
+        .with_seed(7)
+        .with_fix_com(false)
+        .with_retain(0)
+        .with_relax_tol(0.1)
+        .with_target_error(None)
+        .with_max_rounds(1);
+
+    let full_err = pafi_frames(&DriftingTransverse, &path, &config).unwrap_err();
+    assert!(
+        matches!(
+            full_err,
+            SaddleError::NotEquilibrated { .. } | SaddleError::InsufficientEffectiveSamples { .. }
+        ),
+        "expected equilibration failure from pafi_frames, got {full_err:?}"
+    );
+
+    let trunc_err = pafi_truncated(&DriftingTransverse, &path, 0.5, &config).unwrap_err();
+    assert!(
+        matches!(
+            trunc_err,
+            SaddleError::NotEquilibrated { .. } | SaddleError::InsufficientEffectiveSamples { .. }
+        ),
+        "expected equilibration failure from pafi_truncated, got {trunc_err:?}"
+    );
+}
+
+#[test]
+fn frame_samplers_discard_equilibration_transient() {
+    // `Widening` has transverse curvature k(x) = 1.5 + 0.5 x and gradient
+    // `dV/dx = U'(x) + 0.25 y^2`. Starting at y = 2.5 with a loose relax_tol
+    // leaves an initial transient that `equilibrate` must discard before
+    // averaging.
+    let transient_frames: Vec<Array1<f64>> = (0..5)
+        .map(|i| {
+            let x = -0.8 + 0.4 * i as f64;
+            Array1::from_vec(vec![x, 2.5])
+        })
+        .collect();
+    let equilibrated_frames: Vec<Array1<f64>> = (0..5)
+        .map(|i| {
+            let x = -0.8 + 0.4 * i as f64;
+            Array1::from_vec(vec![x, 0.0])
+        })
+        .collect();
+    let config = PafiConfig::default()
+        .with_thermal(0.02)
+        .with_mobility(1.0)
+        .with_time_step(0.01)
+        .with_thermalize(0)
+        .with_stride(1)
+        .with_samples(600)
+        .with_blocks(4)
+        .with_seed(11)
+        .with_fix_com(false)
+        .with_retain(0)
+        .with_relax_tol(10.0)
+        .with_target_error(None)
+        .with_max_rounds(1);
+
+    let (_, transient) = pafi_frames(
+        &Widening,
+        &ArcPath::from_positions(&transient_frames).expect("path"),
+        &config,
+    )
+    .expect("transient discards warmup");
+    let (_, steady) = pafi_frames(
+        &Widening,
+        &ArcPath::from_positions(&equilibrated_frames).expect("path"),
+        &config,
+    )
+    .expect("steady");
+
+    assert!(
+        transient
+            .iter()
+            .any(|plane| plane.equilibration.discard > 0),
+        "expected at least one plane to discard its initial transient"
+    );
+    for (t_plane, s_plane) in transient.iter().zip(&steady) {
+        let diff = (t_plane.gradient - s_plane.gradient).abs();
+        let tol = 4.0 * t_plane.error.hypot(s_plane.error) + 1.0e-3;
+        assert!(
+            diff <= tol,
+            "discarded transient mean {} differs from steady mean {} (tol {tol})",
+            t_plane.gradient,
+            s_plane.gradient
+        );
+    }
 }

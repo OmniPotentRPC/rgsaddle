@@ -841,8 +841,14 @@ pub struct TransmissionCoefficient {
     pub time: Vec<f64>,
     /// `κ(t)` at those times.
     pub kappa_of_t: Vec<f64>,
+    /// Assigned final-time score of each shot, in shot order.
+    ///
+    /// These are the observations averaged into [`Self::kappa`]. They allow
+    /// callers to inspect the block-size plateau without repeating the
+    /// trajectories.
+    pub scores: Vec<f64>,
     /// Shots whose halves both reached a state at the end, the ones in
-    /// [`Self::kappa`].
+    /// [`Self::kappa`] and [`Self::scores`].
     pub shots: usize,
     /// Shots left out because a half ended in no state: the quench did
     /// not converge or found neither state.
@@ -999,6 +1005,8 @@ fn analytic_transmission_coefficient<S: PointSurface>(
             "fewer shots reached a state than there are blocks".into(),
         ));
     }
+    let assigned = finals.len();
+    let reactive = finals.iter().filter(|value| **value > 0.5).count();
     let (_, error, _, _) = block_mean(&finals, config.blocks);
     Ok(TransmissionCoefficient {
         kappa: kappa_of_t[last],
@@ -1008,9 +1016,10 @@ fn analytic_transmission_coefficient<S: PointSurface>(
             .map(|&s| s as f64 * config.time_step)
             .collect(),
         kappa_of_t,
-        shots: finals.len(),
-        unassigned: shots.len() - finals.len(),
-        reactive: finals.iter().filter(|v| **v > 0.5).count(),
+        shots: assigned,
+        scores: finals,
+        unassigned: shots.len() - assigned,
+        reactive,
         recrossed: shots.iter().filter(|s| s.recrossed).count(),
         evaluations: shots.iter().map(|s| s.evaluations).sum(),
     })

@@ -1,0 +1,5 @@
+temperature_K,lattice_A,kind,mechanism,hop,source,target,outcome,path,dE0_eV,zero_T_eV,band_force_eV_per_A,dF_forward_eV,dF_forward_error_eV,nu_forward_Hz,dF_backward_eV,dF_backward_error_eV,nu_backward_Hz,product_basin,samples,seconds,jumps,kappa,kappa_error,kappa_shots
+300,3.631,hop,translate,-4_-3_-1:001>-3_-3_0:100@000,-4_-3_-1:001,-3_-3_0:010,rated,dimer,0.076669,0.076636,1.664e-3,0.020744,0.011478,1.071147e12,,,,recombined,312,900.5,0,0.18750000,0.15728822,32
+300,3.631,hop,translate,-4_-4_0:010>-3_-3_0:100@000,-4_-4_0:010,-3_-3_0:010,rated,dimer,0.065098,0.065098,1.994e-3,0.056160,0.005997,9.334330e11,,,,recombined,312,900.5,2,0.06250000,0.14343262,32
+300,3.631,hop,translate,-3_-2_-1:100>-2_-1_-1:010@000,-3_-2_-1:100,-2_-1_-1:001,rated,dimer,0.045645,0.045599,1.959e-3,0.035679,0.005291,9.281417e11,,,,recombined,312,900.5,0,0.15625000,0.12680981,32
+300,3.631,isolated,translate,translate,isolated,3_1_0:010,rated,dimer,0.090571,0.090369,1.258e-3,0.053084,0.012238,1.041704e12,0.129613,0.006655,1.176179e12,3_1_0:010,312,900.6,0,0.18750000,0.11967839,32
