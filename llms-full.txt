@@ -478,9 +478,9 @@ A failed callback leaves it unchanged.
 Its `rotation_angle_tol` field stops a dimer rotation once the optimal angle falls under this tolerance in radians.
 The Rust default is five degrees, 0 turns the stop off, and a C config stores the value it is given.
 Both fields are read only from a config whose version minor is 5 or newer.
-`RGSADDLE_ABI_MINOR` is 46.
-`rgsaddle_band_set_dynamic` (minor 45) sets or clears `DynamicNeb` on a band.
-`rgsaddle_dyneb_mask` (minor 45) applies that mask to a projected band.
+`RGSADDLE_ABI_MINOR` is 51.
+`rgsaddle_band_set_dynamic` (minor 51) sets or clears `DynamicNeb` on a band.
+`rgsaddle_dyneb_mask` (minor 51) applies that mask to a projected band.
 From minor 24, `rgsaddle_sella_saddle_set_symmetrized_ritz` sets `SellaSaddleConfig::symmetrized_ritz` from 0 or 1.
 It returns `RGSADDLE_INVALID_PARAMETER` for any other value.
 `rgsaddle_sella_saddle_set_small_system_atom_ceiling` (minor 25) sets `SellaSaddleConfig::small_system_atom_ceiling` from 0 or 1.
@@ -3059,7 +3059,7 @@ CMAKE_POLICY_VERSION_MINIMUM=3.5 cargo build --locked --features chemfiles
 
 > Stepping bands, minimum-mode sessions, Sella, IRC, and strings from C and C++
 
-`include/rgsaddle.h` declares the C application binary interface (ABI), major 1, minor 46. It preserves the main band, minimum-mode and index-1 layouts and adds intrinsic reaction coordinate (IRC), Sella, constraint and geometry controls. Include this header rather than duplicating its structures. Check `rgsaddle_abi_stamp` before constructing a session. A meson project takes the headers from the top-level `meson.build`; see [the meson how-to](meson.html).
+`include/rgsaddle.h` declares the C application binary interface (ABI), major 1, minor 51. It preserves the main band, minimum-mode and index-1 layouts and adds intrinsic reaction coordinate (IRC), Sella, constraint and geometry controls. Include this header rather than duplicating its structures. Check `rgsaddle_abi_stamp` before constructing a session. A meson project takes the headers from the top-level `meson.build`; see [the meson how-to](meson.html).
 
 A surface callback returns `rgsaddle_status_t` and receives one `rgsaddle_surface_request_t`. Positions and gradients are image-major Cartesian triples. The host supplies the energy and gradient arrays for every requested image; the library performs no Message Passing Interface (MPI) communication.
 From ABI minor 42, `RGSADDLE_NOT_EQUILIBRATED` and `RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES` report constrained-ensemble tails that fail the drift or effective-sample guards.
@@ -3177,13 +3177,13 @@ ABI minor 44 adds the growing string method of Peters, Heyden, Bell, and Chakrab
 `include/rgsaddle/session.hpp` wraps it as `rgsaddle::GrowingString`, and Python exposes `rgsaddle.GrowingString` and `rgsaddle.ase.GrowingString`.
 
 ABI minor 45 adds the free-end adaptive NEB of Zhang, Zhang, Ye, and Zheng, J. Chem. Phys. 145, 094104 (2016), doi:10.1063/1.4962019 [zhangFreeEndAdaptive2016]. It is a setter, not a band flag. `rgsaddle_band_set_free_end` enables, replaces, or clears it on a live `RgsaddleBand`: `side` is `RGSADDLE_FREE_END_FIRST` or `RGSADDLE_FREE_END_LAST`, `has_target_energy` selects `target_energy` or the endpoint's initial energy, and `max_cuts`, `cut_force`, `energy_tol`, `stability`, `window_offset`, and `cubic` are the adaptive window. `stability` and `window_offset` must be at least 1. `rgsaddle_band_free_end_residual` writes the signed residual \(E(x_{\mathrm{end}}) - E_{\mathrm{target}}\) from the last step, and `rgsaddle_band_free_end_cuts` returns how many windows were actually removed. `rgsaddle_band_evaluation` returns the energies, gradients, and projected interior forces at the positions that step reported. A host that loads the library at run time checks `rgsaddle_abi_version()` for at least minor 45 before resolving these three symbols. `include/rgsaddle/session.hpp` wraps them as `Band::set_free_end`, `Band::free_end_residual`, and `Band::free_end_cuts`. The worked example is `tests/free_end_neb.rs`.
-ABI minor 46 adds dynamic NEB.
+ABI minor 51 adds dynamic NEB.
 `rgsaddle_band_set_dynamic` takes 0 to clear it or 1 to set `fmax` and `scale_fmax`; any other flag returns `RGSADDLE_INVALID_PARAMETER` and leaves the band unchanged.
 With 1, an `fmax` that is not finite and positive, a `scale_fmax` that is not finite and non-negative, a solid-state band, the trust-region stepper, the simplified string method, and the free-end adaptive NEB are refused with `RGSADDLE_INVALID_PARAMETER` as well.
 `rgsaddle_dyneb_mask` applies the same mask to a projected band the host already holds.
 It returns `RGSADDLE_INVALID_PARAMETER` before reading any array for a null array, fewer than three images, a non-positive atom count, a band length that overflows, or the same bad `fmax` and `scale_fmax`; `RGSADDLE_NON_FINITE` means only that a position, energy or force is not finite.
 While the option is on, an interior image that a neighbour pulls back over its threshold is requested alone: `RGSADDLE_REQ_ONE_IMAGE` is set, `image` is that image's band index, `n_images` is the band length, and `RGSADDLE_REQ_CLIMBING_IMAGE` is not set.
-A host that loads the library at run time checks `rgsaddle_abi_version()` for at least minor 46 before resolving either symbol.
+A host that loads the library at run time checks `rgsaddle_abi_version()` for at least minor 51 before resolving either symbol.
 
 # Use the headers from a meson project (`docs/orgmode/howto/meson.org`)
 
@@ -4476,7 +4476,7 @@ The narrative for a session is the C and C++ how-to, not this list.
 - `rgsaddle_band_set_zoom`. Purpose: Zoom-NEB, eOn's zoom_* keys. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_band_set_string`. Purpose: Select the simplified string method on the band, ABI minor 44. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_band_set_dynamic`. Purpose: Dynamic NEB (Lindgren, Kastlunger and Peterson, J. Parameters: the declaration. Units: the caller's.
-- `rgsaddle_dyneb_mask`. Purpose: ASE 3.29 DyNEB mask, ABI minor 45. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_dyneb_mask`. Purpose: ASE 3.29 DyNEB mask, ABI minor 51. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_last_error`. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_stencil_config_new`. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_stencil_config_set_f64`. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.

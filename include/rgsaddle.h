@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 46u
+#define RGSADDLE_ABI_MINOR 51u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -305,7 +305,7 @@ const char *rgsaddle_thermodynamic_derivative_observable(void);
  * image carried (endpoints 0 and band - 1 appear only on the first
  * evaluation), positions and gradients are 3 * n_atoms, energies is
  * one value, and n_images is the length of the band.
- * From ABI minor 46 a dynamic NEB step sends this request, without
+ * From ABI minor 51 a dynamic NEB step sends this request, without
  * RGSADDLE_REQ_CLIMBING_IMAGE, for an interior image a neighbour
  * pulled back over its threshold.
  *
@@ -1466,7 +1466,7 @@ rgsaddle_status_t rgsaddle_band_set_string(RgsaddleBand *band, int32_t enabled,
 
 /**
  * Dynamic NEB (Lindgren, Kastlunger and Peterson, J. Chem. Theory
- * Comput. 15, 5787 (2019); ASE 3.29 DyNEB). ABI minor 45.
+ * Comput. 15, 5787 (2019); ASE 3.29 DyNEB). ABI minor 51.
  * `enabled` 0 clears it and ignores fmax and scale_fmax. `enabled` 1
  * leaves an image in place once the largest per-atom norm of its
  * projected force is strictly below `fmax`, scaled by
@@ -1492,7 +1492,7 @@ rgsaddle_status_t rgsaddle_band_set_dynamic(RgsaddleBand *band, int32_t enabled,
                                             double fmax, double scale_fmax);
 
 /**
- * ASE 3.29 DyNEB mask, ABI minor 45. `positions`, `energies` and
+ * ASE 3.29 DyNEB mask, ABI minor 51. `positions`, `energies` and
  * `forces` are the whole band, image-major: `n_images * 3 * n_atoms`
  * doubles for the coordinates and the forces, `n_images` for the
  * energies. Interior force rows whose
