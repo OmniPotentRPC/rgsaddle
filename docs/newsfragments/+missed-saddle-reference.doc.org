@@ -1,0 +1,3 @@
+The reference tables and how-to pages now cover ~npt_lattice~, ~NptConfig~ and ~NptReport~, ~hessian_mode_sweep_directions~, ~ModeSweepDirectionPlan~ and ~mode_sweep_schedule~, and ~certify_vineyard_pair~, ~VineyardIndexReport~ and ~VineyardIndexError~.
+The NPT lattice how-to explains the blocking standard errors and why ~pressure_converged~ is indicative.
+~llms.txt~ and ~llms-full.txt~ are regenerated, which refreshes the defect-pair-rates table that they carried.

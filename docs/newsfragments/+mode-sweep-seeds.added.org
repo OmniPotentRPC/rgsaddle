@@ -4,3 +4,4 @@ Each direction is the mode plus a carrier-weighted, optionally localized copy of
 Each eigenvector takes a fixed sign, so the directions do not depend on the sign the eigensolver returned.
 ~mode_sweep_schedule~ picks a short, stratified list of modes from the band, and a list at least as long as the band visits every mode once before it cycles.
 Above 128 degrees of freedom the sweep needs the ~faer~ feature and returns ~SaddleError::Solver~ without it.
+Directions are formed at a scale that cannot overflow or underflow, so the overlap bound holds for every finite positive carrier, and a direction that cannot be formed is an error instead of a coordinate axis. ~ModeSweepDirectionPlan~ is non-exhaustive.
