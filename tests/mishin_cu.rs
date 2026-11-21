@@ -3349,9 +3349,34 @@ fn npt_lattice_run(
 /// Zero-pressure lattice parameter of the Mishin crystal at the default
 /// settings: the mean over the production half of a 4000 step run.
 fn npt_lattice(copper: &FastCopper, temperature: f64) -> f64 {
+    npt_lattice_with_maximum(
+        copper,
+        temperature,
+        rgsaddle::NptConfig::default().maximum_steps,
+    )
+    .mean_lattice_a
+}
+
+fn npt_lattice_with_maximum(
+    copper: &FastCopper,
+    temperature: f64,
+    maximum_steps: usize,
+) -> rgsaddle::NptReport {
     let config = rgsaddle::NptConfig::default()
+        .with_maximum_steps(maximum_steps)
         .with_seed((temperature as u64).wrapping_mul(17).wrapping_add(11));
-    npt_lattice_run(copper, temperature, config).mean_lattice_a
+    npt_lattice_run(copper, temperature, config)
+}
+
+#[test]
+#[ignore = "release Mishin Cu reference NPT run"]
+fn npt_reference_lattice_converges_with_extension() {
+    let report = npt_lattice_with_maximum(&FastCopper::new(), 500.0, 8_000);
+    assert!(report.pressure_converged, "{report:?}");
+    assert!(
+        report.steps > rgsaddle::NptConfig::default().steps,
+        "{report:?}"
+    );
 }
 
 /// Regenerates the table in `measured_lattice`.
@@ -4271,14 +4296,34 @@ fn defect_pair_cu_catalogue() {
     let copper = FastCopper::new();
     let relax = pair_relax();
     let mut lattice = Vec::new();
+    let mut unconverged: Vec<f64> = Vec::new();
+    let reference_temperature = temperatures
+        .iter()
+        .copied()
+        .min_by(|left, right| {
+            (left - 500.0)
+                .abs()
+                .partial_cmp(&(right - 500.0).abs())
+                .unwrap()
+        })
+        .unwrap();
     for temperature in &temperatures {
-        let a = npt_lattice(&copper, *temperature);
+        let maximum_steps = if *temperature == reference_temperature {
+            8_000
+        } else {
+            rgsaddle::NptConfig::default().maximum_steps
+        };
+        let report = npt_lattice_with_maximum(&copper, *temperature, maximum_steps);
+        let a = report.mean_lattice_a;
         eprintln!("a({temperature} K) = {a:.5} A");
         let _ = std::io::stderr().flush();
         assert!(
             (3.50..3.85).contains(&a),
             "NPT lattice parameter {a} at {temperature} K is not a copper lattice"
         );
+        if !report.pressure_converged {
+            unconverged.push(*temperature);
+        }
         lattice.push((*temperature, a));
     }
     let reference = lattice
@@ -4291,6 +4336,14 @@ fn defect_pair_cu_catalogue() {
         })
         .copied()
         .unwrap();
+    // Hop discovery uses the reference lattice, so it must be converged. The
+    // other temperatures only feed the a(T) table, and an unconverged one is
+    // reported in the notes rather than hidden.
+    assert!(
+        !unconverged.contains(&reference.0),
+        "reference NPT lattice at {} K is not pressure-converged",
+        reference.0
+    );
     let mut campaign = Campaign {
         catalogue: rgsaddle::RateCatalogue {
             entries: Vec::new(),
@@ -4302,6 +4355,13 @@ fn defect_pair_cu_catalogue() {
             reference.1, reference.0
         )],
     };
+    if !unconverged.is_empty() {
+        let list: Vec<String> = unconverged.iter().map(|t| format!("{t} K")).collect();
+        campaign.notes.push(format!(
+            "NPT pressure did not converge at {}; those a(T) rows are not converged values.",
+            list.join(", ")
+        ));
+    }
     let rate_sizes = sizes.clone();
     let mut jobs: Vec<RateJob> = Vec::new();
     if explicit.is_none() {
