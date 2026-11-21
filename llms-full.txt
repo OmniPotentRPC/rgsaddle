@@ -510,6 +510,7 @@ The feature macro `RGSADDLE_HAS_LINEB_RATE_DIAGNOSTICS` advertises
 64-bit outputs give the number of negative and total retained fluctuation
 modes. Each reports `-1` for a path-only or failed solve.
 
+From minor 46, `rgsaddle_band_set_refine` installs or clears the per-step L-BFGS refine stepper, and `rgsaddle_band_is_refining` reports whether the last first-order step used it. A host checks `rgsaddle_abi_version()` for minor 46 or newer. The worked example is `tests/band_refine.rs`.
 The request flags are `RGSADDLE_REQ_ONE_IMAGE` (bit 0) and `RGSADDLE_REQ_CLIMBING_IMAGE` (bit 1).
 From a band config at minor 22, the refinement's one-image requests also set bit 1.
 Their `image` is then the climbing image's band index.
@@ -1109,7 +1110,7 @@ On the 2D curved parabolic channel with a central obstacle (`tests/growing_strin
 ## Per-step refine stepper
 
 `StepRefine` (`BandConfig::with_refine`, `BandSession::set_refine`, `BandSession::is_refining`) chooses the band stepper on each step. `StepRefine::default` is L-BFGS with memory 20 and `StepRefine::threshold` 0.5, in the host's force units. `with_method` and `with_threshold` replace those. `BandConfig::refine` is `None` by default, so a band steps with `BandConfig::method` alone.
-On a step whose convergence force, the same value the `force_tol` stop reads, is at or under the threshold, the band steps with the refine method. Any other step uses the primary method. Both steppers keep their own state, so a force that rises back over the threshold returns the band to the primary stepper. The refine method must step on the force alone. A threshold that is not positive is refused while a refine stepper is set.
+On a step whose convergence force, the same value the `force_tol` stop reads, is at or under the threshold, the band steps with the refine method. Any other step uses the primary method. Both steppers keep their own state, so a force that rises back over the threshold returns the band to the primary stepper. The refine method must step on the force alone. A threshold that is not finite and positive is refused while a refine stepper is set.
 The choice applies to the first-order step of an atomic band whose method is FIRE, including the band steps between OCI-NEB refinements (`MinModeRefine`). A solid-state, quick-min, trust-region, simplified string, growing string, or free-end band drives its own stepper and ignores `StepRefine`. `BandSession::restart` drops both steppers.
 From C (ABI minor 46), `rgsaddle_band_set_refine` installs `RGSADDLE_REFINE_LBFGS` or clears it with `RGSADDLE_REFINE_NONE`, and `rgsaddle_band_is_refining` reports which stepper the last step used. A threshold of 0 selects 0.5. `rgsaddle::Band::set_refine` and `Band::is_refining` wrap those calls, and Python exposes `Band.set_refine` and `Band.is_refining`. The worked example is `tests/band_refine.rs`.
 
@@ -3496,7 +3497,7 @@ ABI minor 47 adds the one-shot fixed-energy LI-NEB and harmonic quantum TST entr
 
 The `RGSADDLE_LINEB_INTERPOLATED_FORCE_CLOCK` option selects the signed image force for the imaginary-time orbit and rate. The projected Verlet option controls band optimization independently.
 
-ABI minor 46 adds the per-step refine stepper. `rgsaddle_refine_method_t` is `RGSADDLE_REFINE_NONE` or `RGSADDLE_REFINE_LBFGS`. `rgsaddle_band_set_refine` installs L-BFGS for steps whose convergence force is at or under `threshold`, in the host's force units, and leaves every other step on the band method. A threshold of 0 selects 0.5, and `memory` 0 selects 20 pairs. `RGSADDLE_REFINE_NONE` clears the stepper and does not read the threshold. A negative or NaN threshold and an unknown method are refused. `rgsaddle_band_is_refining` is 1 when the last first-order step used the refine stepper. A string, trust-region, solid-state, quick-min, or free-end band ignores the call. `include/rgsaddle/session.hpp` wraps the pair as `Band::set_refine` and `Band::is_refining`, and Python exposes `Band.set_refine` and `Band.is_refining`. A host checks `rgsaddle_abi_version()` for minor 46 or newer. The worked example is `tests/band_refine.rs`.
+ABI minor 46 adds the per-step refine stepper. `rgsaddle_refine_method_t` is `RGSADDLE_REFINE_NONE` or `RGSADDLE_REFINE_LBFGS`. `rgsaddle_band_set_refine` installs L-BFGS for steps whose convergence force is at or under `threshold`, in the host's force units, and leaves every other step on the band method. A threshold of 0 selects 0.5, and `memory` less than or equal to 0 selects 20 pairs. `RGSADDLE_REFINE_NONE` clears the stepper and does not read the threshold. A negative or non-finite threshold and an unknown method are refused. `rgsaddle_band_is_refining` is 1 when the last first-order step used the refine stepper. A string, trust-region, solid-state, quick-min, or free-end band ignores the call. `include/rgsaddle/session.hpp` wraps the pair as `Band::set_refine` and `Band::is_refining`, and Python exposes `Band.set_refine` and `Band.is_refining`. A host checks `rgsaddle_abi_version()` for minor 46 or newer. The worked example is `tests/band_refine.rs`.
 
 # Use the headers from a meson project (`docs/orgmode/howto/meson.org`)
 

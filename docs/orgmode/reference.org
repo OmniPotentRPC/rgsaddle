@@ -285,6 +285,7 @@ The feature macro =RGSADDLE_HAS_LINEB_RATE_DIAGNOSTICS= advertises
 64-bit outputs give the number of negative and total retained fluctuation
 modes. Each reports =-1= for a path-only or failed solve.
 
+From minor 46, =rgsaddle_band_set_refine= installs or clears the per-step L-BFGS refine stepper, and =rgsaddle_band_is_refining= reports whether the last first-order step used it. A host checks =rgsaddle_abi_version()= for minor 46 or newer. The worked example is =tests/band_refine.rs=.
 The request flags are =RGSADDLE_REQ_ONE_IMAGE= (bit 0) and =RGSADDLE_REQ_CLIMBING_IMAGE= (bit 1).
 From a band config at minor 22, the refinement's one-image requests also set bit 1.
 Their =image= is then the climbing image's band index.

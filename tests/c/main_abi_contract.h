@@ -22,6 +22,8 @@ _Static_assert(RGSADDLE_REQ_CLIMBING_IMAGE == (1ull << 1), "request flag bit 1")
 _Static_assert(RGSADDLE_NOT_EQUILIBRATED == -14, "status NOT_EQUILIBRATED");
 _Static_assert(RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES == -15,
                "status INSUFFICIENT_EFFECTIVE_SAMPLES");
+_Static_assert(RGSADDLE_REFINE_NONE == 0, "refine method NONE");
+_Static_assert(RGSADDLE_REFINE_LBFGS == 1, "refine method LBFGS");
 
 typedef struct {
   uint32_t major;
