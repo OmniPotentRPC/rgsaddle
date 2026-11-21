@@ -649,9 +649,9 @@ fn unimodular_inverse(m: [[i32; 3]; 3]) -> Result<[[i32; 3]; 3], SaddleError> {
         [minor(0, 1, 1, 2), -minor(0, 1, 0, 2), minor(0, 1, 0, 1)],
     ];
     let mut inv = [[0i32; 3]; 3];
-    for i in 0..3 {
-        for j in 0..3 {
-            inv[i][j] = i32::try_from(det * cofactor[j][i]).map_err(|_| {
+    for (i, row) in inv.iter_mut().enumerate() {
+        for (j, entry) in row.iter_mut().enumerate() {
+            *entry = i32::try_from(det * cofactor[j][i]).map_err(|_| {
                 SaddleError::Invalid(
                     "lattice basis change is not an integer unimodular rewrite".into(),
                 )

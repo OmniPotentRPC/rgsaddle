@@ -712,9 +712,9 @@ impl<'a> Builder<'a> {
             None => [0.0; 3],
             Some(l) => {
                 let mut v = [0.0; 3];
-                for d in 0..3 {
-                    for c in 0..3 {
-                        v[c] += f64::from(s[d]) * l[d][c];
+                for (&sd, ld) in s.iter().zip(l.iter()) {
+                    for (vc, &lc) in v.iter_mut().zip(ld.iter()) {
+                        *vc += f64::from(sd) * lc;
                     }
                 }
                 v
@@ -745,9 +745,9 @@ impl<'a> Builder<'a> {
             return out;
         };
         let mut frac = [0.0; 3];
-        for k in 0..3 {
-            for c in 0..3 {
-                frac[k] += inv[c][k] * d0[c];
+        for (k, fk) in frac.iter_mut().enumerate() {
+            for (row, &dc) in inv.iter().zip(d0.iter()) {
+                *fk += row[k] * dc;
             }
         }
         let mut lo = [0i32; 3];
@@ -762,9 +762,9 @@ impl<'a> Builder<'a> {
                 for t2 in lo[2]..=hi[2] {
                     let t = [t0, t1, t2];
                     let mut v = d0;
-                    for d in 0..3 {
-                        for c in 0..3 {
-                            v[c] += f64::from(t[d]) * l[d][c];
+                    for (&td, ld) in t.iter().zip(l.iter()) {
+                        for (vc, &lc) in v.iter_mut().zip(ld.iter()) {
+                            *vc += f64::from(td) * lc;
                         }
                     }
                     let dist = norm3(v);
@@ -1170,9 +1170,9 @@ pub(crate) fn arm_angle(
     let at = |e: (usize, [i32; 3])| {
         let mut p = [x[3 * e.0], x[3 * e.0 + 1], x[3 * e.0 + 2]];
         if let Some(l) = lattice {
-            for d in 0..3 {
-                for k in 0..3 {
-                    p[k] += f64::from(e.1[d]) * l[d][k];
+            for (&sd, ld) in e.1.iter().zip(l.iter()) {
+                for (pk, &lk) in p.iter_mut().zip(ld.iter()) {
+                    *pk += f64::from(sd) * lk;
                 }
             }
         }
