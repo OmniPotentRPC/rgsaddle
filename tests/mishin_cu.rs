@@ -4981,28 +4981,28 @@ struct MeasuredLatticeRow {
 const MEASURED_LATTICE: [MeasuredLatticeRow; 5] = [
     MeasuredLatticeRow {
         temperature_k: 300,
-        lattice_a: 3.631316,
-        pressure_converged: false,
+        lattice_a: 3.632080,
+        pressure_converged: true,
     },
     MeasuredLatticeRow {
         temperature_k: 400,
-        lattice_a: 3.637786,
-        pressure_converged: true,
-    },
-    MeasuredLatticeRow {
-        temperature_k: 500,
-        lattice_a: 3.643980,
-        pressure_converged: true,
-    },
-    MeasuredLatticeRow {
-        temperature_k: 600,
-        lattice_a: 3.650594,
+        lattice_a: 3.638006,
         pressure_converged: false,
     },
     MeasuredLatticeRow {
-        temperature_k: 700,
-        lattice_a: 3.657130,
+        temperature_k: 500,
+        lattice_a: 3.643959,
+        pressure_converged: false,
+    },
+    MeasuredLatticeRow {
+        temperature_k: 600,
+        lattice_a: 3.650004,
         pressure_converged: true,
+    },
+    MeasuredLatticeRow {
+        temperature_k: 700,
+        lattice_a: 3.656879,
+        pressure_converged: false,
     },
 ];
 
@@ -5020,9 +5020,10 @@ fn measured_lattice(temperature: f64) -> f64 {
 
 #[test]
 fn measured_lattice_preserves_non_converged_pressure_status() {
-    assert!(!measured_lattice_row(300.0).pressure_converged);
-    assert!(!measured_lattice_row(600.0).pressure_converged);
     for temperature in [400.0, 500.0, 700.0] {
+        assert!(!measured_lattice_row(temperature).pressure_converged);
+    }
+    for temperature in [300.0, 600.0] {
         assert!(measured_lattice_row(temperature).pressure_converged);
     }
 }

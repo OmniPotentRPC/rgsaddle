@@ -2418,13 +2418,13 @@ The lattice parameter is from a zero-pressure Langevin run with a Berendsen baro
 
 | T / K | a / Å, this work | pressure converged | a / Å, Table 1 |
 | --- | --- | --- | --- |
-| 300 | 3.63132 | no | 3.631 |
-| 400 | 3.63779 | yes | 3.637 |
-| 500 | 3.64398 | yes | 3.643 |
-| 600 | 3.65059 | no | 3.649 |
-| 700 | 3.65713 | yes | 3.655 |
+| 300 | 3.63208 | yes | 3.631 |
+| 400 | 3.63801 | no | 3.637 |
+| 500 | 3.64396 | no | 3.643 |
+| 600 | 3.65000 | yes | 3.649 |
+| 700 | 3.65688 | no | 3.655 |
 
-The slope matches Table 1 and the offset is 0.0003 to 0.002 Å. The 300 K and 600 K runs are retained but explicitly marked non-converged. At 600 K the mean pressure is 2.2445×10⁻⁴ eV/Å³ with an autocorrelation-aware standard error of 5.38×10⁻⁵ eV/Å³ and 74.94 effective samples; its bias in `a` is about 0.0003 Å. The table before this one read 3.62831, 3.63371, 3.63867, 3.64416 and 3.64979 Å. Those runs left the kinetic pressure out of the barostat, which accounts for most of the 0.004 Å offset it showed. Benchmark files and figures produced with the older lattice constants are stale until they are rerun. `cargo test --release --test mishin_cu npt_lattice_table -- --ignored --nocapture` regenerates the table and prints the pressure convergence status for every row.
+The slope matches Table 1 and the offset is 0.0009 to 0.0019 Å. The 400 K, 500 K and 700 K runs are retained but explicitly marked non-converged. The 4000-step 500 K row has mean pressure 7.0262×10⁻⁶ eV/Å³ with an autocorrelation-aware standard error of 5.75×10⁻⁵ eV/Å³, 47.99 effective samples and an unresolved coarse blocking plateau. Hop discovery therefore extends the reference trajectory: at 5000 steps it gives `a ` 3.64389= Å, pressure 3.2725×10⁻⁵ ± 5.92×10⁻⁵ eV/Å³, 48.25 effective samples and a resolved plateau. No pressure-bias estimate is assigned to retained non-converged lattice parameters. The table before this one read 3.62831, 3.63371, 3.63867, 3.64416 and 3.64979 Å. Those runs left the kinetic pressure out of the barostat, which accounts for most of the 0.004 Å offset it showed. Benchmark files and figures produced with the older lattice constants are stale until they are rerun. `cargo test --release --test mishin_cu npt_lattice_table -- --ignored --nocapture` regenerates the table and prints the pressure convergence status for every row.
 
 Climbing L-BFGS follows the highest image. On the copper band that image was a collision left by the initial path, and the step ran up the wall; the NEB guards drop such a step and do not make it the saddle. The band used here relaxes with FIRE and climbing off, then climbs. A path is kept only when the force is at most 0.01 eV/Å and the zero-temperature integral of the path force reproduces ΔE0.
 
