@@ -820,7 +820,8 @@ impl DirectionCover {
     /// # Errors
     ///
     /// The errors of [`DirectionCover::seed`] and [`ArtSession::new`].
-    /// A failure inside the event is an [`ArmFailure::Surface`] trial.
+    /// A failure inside the event is an [`ArmFailure::Error`] trial, except
+    /// typed index-1 loss, which is [`ArmFailure::IndexOneLost`].
     pub fn run_arm<S: PointSurface>(
         &self,
         surface: &S,
