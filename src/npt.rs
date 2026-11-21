@@ -233,7 +233,10 @@ fn mean_and_standard_error(values: &[f64]) -> (f64, f64) {
 /// raised it by no more than its own sampling error, and a series with no
 /// spread is resolved with a standard error of zero. A series too short to
 /// block twice cannot show a plateau and is not resolved.
-fn blocked_statistics(values: &[f64]) -> Blocked {
+fn blocked_statistics(values: &[f64]) -> Result<Blocked, SaddleError> {
+    if values.iter().any(|value| !value.is_finite()) {
+        return Err(SaddleError::NonFinite("NPT sample series"));
+    }
     let mut level = values.to_vec();
     let mut estimates: Vec<(f64, usize)> = Vec::new();
     let mut mean = 0.0;
@@ -249,15 +252,25 @@ fn blocked_statistics(values: &[f64]) -> Blocked {
     }
     if estimates.is_empty() {
         let (mean, _) = mean_and_standard_error(values);
-        return Blocked {
+        return Ok(Blocked {
             mean,
             standard_error: 0.0,
             resolved: false,
-        };
+        });
     }
-    let standard_error = estimates
-        .iter()
-        .fold(0.0_f64, |worst, &(estimate, _)| worst.max(estimate));
+    // `f64::max` returns the other operand for a NaN, which would turn a
+    // NaN estimate into a zero standard error, so every estimate is
+    // checked before it is folded.
+    let mut standard_error = 0.0_f64;
+    for &(estimate, _) in &estimates {
+        if !estimate.is_finite() {
+            return Err(SaddleError::NonFinite("NPT standard error"));
+        }
+        standard_error = standard_error.max(estimate);
+    }
+    if !mean.is_finite() {
+        return Err(SaddleError::NonFinite("NPT mean"));
+    }
     let resolved = if estimates[0].0 == 0.0 {
         true
     } else if let [.., (previous, _), (last, blocks)] = estimates[..] {
@@ -265,23 +278,28 @@ fn blocked_statistics(values: &[f64]) -> Blocked {
     } else {
         false
     };
-    Blocked {
+    Ok(Blocked {
         mean,
         standard_error,
         resolved,
-    }
+    })
 }
 
-fn summarize(lattice: &[f64], pressure: &[f64], config: NptConfig, steps: usize) -> NptReport {
-    let lattice = blocked_statistics(lattice);
-    let pressure_stats = blocked_statistics(pressure);
+fn summarize(
+    lattice: &[f64],
+    pressure: &[f64],
+    config: NptConfig,
+    steps: usize,
+) -> Result<NptReport, SaddleError> {
+    let lattice = blocked_statistics(lattice)?;
+    let pressure_stats = blocked_statistics(pressure)?;
     let residual = (pressure_stats.mean - config.target_pressure_ev_a3).abs();
     let within = if pressure_stats.standard_error == 0.0 {
         residual == 0.0
     } else {
         residual <= 2.0 * pressure_stats.standard_error
     };
-    NptReport {
+    Ok(NptReport {
         steps,
         blocks: pressure.len() / config.block_steps,
         mean_lattice_a: lattice.mean,
@@ -291,7 +309,74 @@ fn summarize(lattice: &[f64], pressure: &[f64], config: NptConfig, steps: usize)
         pressure_standard_error: pressure_stats.standard_error,
         pressure_error_resolved: pressure_stats.resolved,
         pressure_converged: pressure_stats.resolved && within,
+    })
+}
+
+fn check_gradient(gradient: &Array1<f64>, length: usize) -> Result<(), SaddleError> {
+    if gradient.len() != length {
+        return Err(SaddleError::Shape(
+            "NPT gradient length differs from the positions".into(),
+        ));
     }
+    if gradient.iter().any(|value| !value.is_finite()) {
+        return Err(SaddleError::NonFinite("NPT gradient"));
+    }
+    Ok(())
+}
+
+/// Refuse every input the sampler cannot integrate, before any step runs
+/// and before `positions` or `cell` are touched.
+fn validate(
+    positions: &Array1<f64>,
+    cell: Cell,
+    temperature_k: f64,
+    mass_amu: f64,
+    config: NptConfig,
+) -> Result<(), SaddleError> {
+    let production = config.steps.saturating_sub(config.equilibration_steps);
+    let positive_finite = |value: f64| value.is_finite() && value > 0.0;
+    if positions.is_empty()
+        || !positions.len().is_multiple_of(3)
+        || config.repeats == 0
+        || config.steps > config.maximum_steps
+        || config.extension_steps == 0
+        || config.block_steps == 0
+        || production / config.block_steps < 2
+        || !(temperature_k >= 0.0 && temperature_k.is_finite())
+        || !positive_finite(mass_amu)
+        || !positive_finite(config.timestep_s)
+        || !positive_finite(config.langevin_gamma_per_s)
+        || !positive_finite(config.berendsen_tau_s)
+        || !positive_finite(config.compressibility_per_ev_a3)
+        || !config.target_pressure_ev_a3.is_finite()
+    {
+        return Err(SaddleError::Invalid(
+            "NPT lattice sampling needs finite physical controls and at least two production blocks"
+                .into(),
+        ));
+    }
+    let omega = angular_scale_rad_s();
+    if !positive_finite(config.timestep_s * omega)
+        || !positive_finite(config.langevin_gamma_per_s / omega)
+        || !positive_finite(config.berendsen_tau_s * omega)
+    {
+        return Err(SaddleError::Invalid(
+            "NPT time controls overflow or underflow in internal units".into(),
+        ));
+    }
+    if positions.iter().any(|value| !value.is_finite()) {
+        return Err(SaddleError::NonFinite("NPT positions"));
+    }
+    if cell.0.iter().flatten().any(|value| !value.is_finite()) {
+        return Err(SaddleError::NonFinite("NPT cell"));
+    }
+    let volume = determinant(cell).abs();
+    if !positive_finite(volume) {
+        return Err(SaddleError::Invalid(
+            "NPT cell must have a finite, non-zero volume".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Run isotropic NPT dynamics and return block standard errors.
@@ -301,6 +386,16 @@ fn summarize(lattice: &[f64], pressure: &[f64], config: NptConfig, steps: usize)
 /// evaluator compatibility but is not used by the integrator.  A run extends
 /// by `extension_steps` until the zero-pressure rule is met or
 /// `maximum_steps` is reached.
+///
+/// # Errors
+///
+/// [`SaddleError::Invalid`] when a control is not finite and positive (the
+/// target pressure only has to be finite), when the run is too short for two
+/// production blocks, or when the cell has no volume. [`SaddleError::NonFinite`]
+/// when `positions` or `cell` hold a NaN or an infinity, or when the
+/// evaluator or the integration produces one; no partial report is
+/// returned. Invalid input is refused before `evaluate` is called and
+/// before `positions` or `cell` change.
 pub fn npt_lattice<F>(
     positions: &mut Array1<f64>,
     cell: &mut Cell,
@@ -312,26 +407,7 @@ pub fn npt_lattice<F>(
 where
     F: FnMut(ArrayView1<'_, f64>, Cell) -> Result<(f64, Array1<f64>, [[f64; 3]; 3]), SaddleError>,
 {
-    let production = config.steps.saturating_sub(config.equilibration_steps);
-    if positions.is_empty()
-        || !positions.len().is_multiple_of(3)
-        || config.repeats == 0
-        || config.steps > config.maximum_steps
-        || config.extension_steps == 0
-        || config.block_steps == 0
-        || production / config.block_steps < 2
-        || !(temperature_k >= 0.0 && temperature_k.is_finite())
-        || !(mass_amu > 0.0 && mass_amu.is_finite())
-        || !(config.timestep_s > 0.0
-            && config.langevin_gamma_per_s > 0.0
-            && config.berendsen_tau_s > 0.0
-            && config.compressibility_per_ev_a3 > 0.0)
-    {
-        return Err(SaddleError::Invalid(
-            "NPT lattice sampling needs finite physical controls and at least two production blocks"
-                .into(),
-        ));
-    }
+    validate(positions, *cell, temperature_k, mass_amu, config)?;
 
     let thermal = BOLTZMANN_EV_PER_K * temperature_k;
     let omega = angular_scale_rad_s();
@@ -357,9 +433,7 @@ where
 
     for step in 0..config.maximum_steps {
         let (_, gradient, _) = evaluate(positions.view(), *cell)?;
-        if gradient.len() != positions.len() || gradient.iter().any(|value| !value.is_finite()) {
-            return Err(SaddleError::NonFinite("NPT gradient"));
-        }
+        check_gradient(&gradient, positions.len())?;
         velocity = &velocity + &(&gradient * (-0.5 * dt / mass_amu));
         *positions = &*positions + &(&velocity * (0.5 * dt));
 
@@ -372,11 +446,9 @@ where
         *positions = &*positions + &(&velocity * (0.5 * dt));
 
         let (_, gradient, stress) = evaluate(positions.view(), *cell)?;
-        if gradient.len() != positions.len()
-            || gradient.iter().any(|value| !value.is_finite())
-            || stress.iter().flatten().any(|value| !value.is_finite())
-        {
-            return Err(SaddleError::NonFinite("NPT force or stress"));
+        check_gradient(&gradient, positions.len())?;
+        if stress.iter().flatten().any(|value| !value.is_finite()) {
+            return Err(SaddleError::NonFinite("NPT stress"));
         }
         velocity = &velocity + &(&gradient * (-0.5 * dt / mass_amu));
 
@@ -386,11 +458,20 @@ where
             .map(|value| 0.5 * mass_amu * value * value)
             .sum::<f64>();
         let volume = determinant(*cell).abs();
+        if !(volume.is_finite() && volume > 0.0) {
+            return Err(SaddleError::NonFinite("NPT cell volume"));
+        }
         let kinetic_pressure = 2.0 * kinetic_energy / (3.0 * volume);
         let hydrostatic_stress = configurational_stress - kinetic_pressure;
+        if !hydrostatic_stress.is_finite() {
+            return Err(SaddleError::NonFinite("NPT pressure"));
+        }
         let drive = hydrostatic_stress + config.target_pressure_ev_a3;
         let volume_factor =
             (1.0 - config.compressibility_per_ev_a3 * dt / tau * drive).clamp(0.995, 1.005);
+        if !volume_factor.is_finite() {
+            return Err(SaddleError::NonFinite("NPT barostat volume factor"));
+        }
         let length_factor = volume_factor.cbrt();
         *positions *= length_factor;
         for row in &mut cell.0 {
@@ -401,11 +482,15 @@ where
 
         let completed = step + 1;
         if completed > config.equilibration_steps {
-            lattice_samples.push(determinant(*cell).abs().cbrt() / config.repeats as f64);
+            let lattice = determinant(*cell).abs().cbrt() / config.repeats as f64;
+            if !lattice.is_finite() {
+                return Err(SaddleError::NonFinite("NPT lattice sample"));
+            }
+            lattice_samples.push(lattice);
             pressure_samples.push(-hydrostatic_stress);
         }
         if completed == next_check {
-            let current = summarize(&lattice_samples, &pressure_samples, config, completed);
+            let current = summarize(&lattice_samples, &pressure_samples, config, completed)?;
             if current.pressure_converged || completed == config.maximum_steps {
                 return Ok(current);
             }
@@ -515,7 +600,7 @@ mod tests {
         let mut naive_ratio = 0.0;
         for seed in 0..seeds {
             let series = autoregressive(seed, phi, length);
-            let blocked = blocked_statistics(&series);
+            let blocked = blocked_statistics(&series).unwrap();
             ratio += blocked.standard_error / exact / seeds as f64;
             resolved += usize::from(blocked.resolved);
             let means: Vec<f64> = (0..series.len() / 250)
@@ -543,7 +628,7 @@ mod tests {
         let seeds = 24;
         for seed in 0..seeds {
             let series = autoregressive(100 + seed, phi, 1000);
-            let blocked = blocked_statistics(&series);
+            let blocked = blocked_statistics(&series).unwrap();
             resolved += usize::from(blocked.resolved);
             ratio += blocked.standard_error / exact_standard_error(phi, 1000) / seeds as f64;
         }
@@ -560,7 +645,7 @@ mod tests {
         for seed in 0..seeds {
             let mut rng = Rng::new(200 + seed);
             let series: Vec<f64> = (0..length).map(|_| rng.normal()).collect();
-            let blocked = blocked_statistics(&series);
+            let blocked = blocked_statistics(&series).unwrap();
             ratio += blocked.standard_error * (length as f64).sqrt() / seeds as f64;
         }
         eprintln!("iid: blocked SE over plain SE {ratio:.3}");
@@ -569,12 +654,38 @@ mod tests {
 
     #[test]
     fn a_series_without_spread_has_zero_error_and_is_resolved() {
-        let blocked = blocked_statistics(&[3.6; 40]);
+        let blocked = blocked_statistics(&[3.6; 40]).unwrap();
         assert_eq!(blocked.mean, 3.6);
         assert_eq!(blocked.standard_error, 0.0);
         assert!(blocked.resolved);
-        let short = blocked_statistics(&[1.0, 2.0, 4.0]);
+        let short = blocked_statistics(&[1.0, 2.0, 4.0]).unwrap();
         assert!(!short.resolved);
         assert!(short.standard_error > 0.0);
+    }
+
+    #[test]
+    fn blocking_refuses_a_series_with_a_non_finite_value() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut series = vec![3.6; 40];
+            series[17] = bad;
+            assert!(matches!(
+                blocked_statistics(&series),
+                Err(SaddleError::NonFinite(_))
+            ));
+        }
+        // A NaN used to vanish into a zero standard error.
+        assert!(blocked_statistics(&[f64::NAN; 40]).is_err());
+        assert!(blocked_statistics(&[f64::NAN, 1.0, 2.0]).is_err());
+    }
+
+    #[test]
+    fn blocking_refuses_a_series_whose_error_overflows() {
+        let series: Vec<f64> = (0..40)
+            .map(|index| if index % 2 == 0 { 1.0e200 } else { -1.0e200 })
+            .collect();
+        assert!(matches!(
+            blocked_statistics(&series),
+            Err(SaddleError::NonFinite(_))
+        ));
     }
 }
