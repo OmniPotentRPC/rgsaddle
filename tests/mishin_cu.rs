@@ -3284,9 +3284,22 @@ fn cart_of(key: (i32, i32, i32), a: f64) -> [f64; 3] {
 /// stress, which this EAM returns tension-positive, plus the kinetic
 /// pressure. The average is the second half of the run.
 fn npt_lattice(copper: &FastCopper, temperature: f64) -> rgsaddle::NptReport {
+    npt_lattice_with_maximum(
+        copper,
+        temperature,
+        rgsaddle::NptConfig::default().maximum_steps,
+    )
+}
+
+fn npt_lattice_with_maximum(
+    copper: &FastCopper,
+    temperature: f64,
+    maximum_steps: usize,
+) -> rgsaddle::NptReport {
     let (mut positions, cell) = fcc(6, 3.615);
     let mut cell = rgsaddle::Cell(cell);
     let config = rgsaddle::NptConfig::default()
+        .with_maximum_steps(maximum_steps)
         .with_seed((temperature as u64).wrapping_mul(17).wrapping_add(11));
     let report = rgsaddle::npt_lattice(
         &mut positions,
@@ -3310,6 +3323,17 @@ fn npt_lattice(copper: &FastCopper, temperature: f64) -> rgsaddle::NptReport {
         report.pressure_converged
     );
     report
+}
+
+#[test]
+#[ignore = "release Mishin Cu reference NPT run"]
+fn npt_reference_lattice_converges_with_extension() {
+    let report = npt_lattice_with_maximum(&FastCopper::new(), 500.0, 8_000);
+    assert!(report.pressure_converged, "{report:?}");
+    assert!(
+        report.steps > rgsaddle::NptConfig::default().steps,
+        "{report:?}"
+    );
 }
 
 /// Regenerates the table in `measured_lattice`.
@@ -4169,8 +4193,23 @@ fn defect_pair_cu_catalogue() {
     let relax = pair_relax();
     let mut lattice = Vec::new();
     let mut unconverged: Vec<f64> = Vec::new();
+    let reference_temperature = temperatures
+        .iter()
+        .copied()
+        .min_by(|left, right| {
+            (left - 500.0)
+                .abs()
+                .partial_cmp(&(right - 500.0).abs())
+                .unwrap()
+        })
+        .unwrap();
     for temperature in &temperatures {
-        let report = npt_lattice(&copper, *temperature);
+        let maximum_steps = if *temperature == reference_temperature {
+            8_000
+        } else {
+            rgsaddle::NptConfig::default().maximum_steps
+        };
+        let report = npt_lattice_with_maximum(&copper, *temperature, maximum_steps);
         let a = report.mean_lattice_a;
         eprintln!("a({temperature} K) = {a:.5} A");
         let _ = std::io::stderr().flush();
