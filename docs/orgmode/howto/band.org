@@ -154,11 +154,12 @@ On the 2D curved parabolic channel with a central obstacle (=tests/growing_strin
 * Free-end adaptive NEB
 
 ~BandConfig::with_free_end(FreeEndConfig::default())~ (~BandSession::set_free_end~, ~FeaNebSession~, C ~rgsaddle_band_set_free_end~ at ABI minor 45, C++ ~Band::set_free_end~, Python ~Band.set_free_end~) implements the free-end adaptive nudged elastic band (FEA-NEB) of Jiayong Zhang, Hongwu Zhang, Hongfei Ye, and Yonggang Zheng, J. Chem. Phys. 145, 094104 (2016), doi:10.1063/1.4962019 @@rst::cite:`zhangFreeEndAdaptive2016`@@, building on the free-end level-set endpoint formulation of Ting Zhu, Ju Li, Amit Samanta, Hyoung Gyu Kim, and Subra Suresh, Proc. Natl. Acad. Sci. U.S.A. 104, 3031 (2007), doi:10.1073/pnas.0611097104 @@rst::cite:`zhuInterfacialPlasticity2007`@@. Climbing on the final cut level reuses the climbing image, and with minimum-mode refinement left on, the off-path climb of Goswami, Gunde, and Jónsson, Front. Chem. 14 (2026), doi:10.3389/fchem.2026.1807063 @@rst::cite:`goswamiEnhancedClimbingImage2026`@@. A nonzero endpoint gradient is required and the endpoint residual is reported.
-Fixed endpoints remain the default (~BandConfig::free_end~ is ~None~).
+Fixed endpoints remain the default (~BandConfig::free_end~ is ~None~). The free-end band is not combined with ~BandConfig::dynamic~: ~BandSession::new~, ~BandSession::set_free_end~, and ~BandSession::set_dynamic~ return ~SaddleError::Invalid~ when both would be on.
+A free-end step asks the surface for the fixed terminal image once, and again only after a cut moves it to the window edge. The evaluation a step ends on is kept, so the next step starts from it instead of evaluating the band again, unless the host moved a row with ~BandSession::set_positions~ or called ~BandSession::reset~. ~FreeEndReport::surface_rows~ counts the rows the surface saw.
 When enabled, one terminal image (~FreeEndSide::Last~ by default, or ~FreeEndSide::First~) takes Zhang et al. Eq. (7), the potential force perpendicular to the one-neighbour tangent, \(F^p_{\mathrm{end},\perp}=-\nabla E+(\nabla E\cdot\hat{\tau}_{\mathrm{end}})\hat{\tau}_{\mathrm{end}}\). That force does not include a spring. Net translation is removed, when the band drops it, before the force is projected onto the tangent hyperplane of \(E(x_{\mathrm{end}}) = E_{\mathrm{target}}\). Each accepted endpoint geometry is then retracted onto that level set with ~rgmin::Solver~ and ~rgmin::LevelSetConstraint~.
 The terminal image requires a finite, nonzero potential gradient and reports the signed residual \(E(x_{\mathrm{end}}) - E_{\mathrm{target}}\) in ~FreeEndReport::target_energy_residual~ and ~BandSession::target_energy_residual~. ~BandSession::evaluation~ returns the energies, gradients, and projected interior forces at the positions that step reported.
 With ~max_cuts > 0~, once the detected peak image holds its index for ~stability~ steps and the band force falls below the level threshold while rising above its neighbours by more than ~energy_tol~, images outside the local window of ~window_offset~ images on each side of the peak are dropped. The band is remeshed at equal arc length along the window and, when the free terminal image lies outside that window, along the leg from the window to the free end, so the free end stays an endpoint and the spacing stays even. A window that would put the peak on an end, or that would remove no image, is not counted. A refused endpoint curvature pair is a stalled step and does not move the endpoint. ~BandSession::step_free_end~ and ~FeaNebSession::step~ run a latched minimum-mode refinement when climbing is on, the same way ~BandSession::step~ does.
-On a narrow barrier on a long tilted 2D path (=tests/free_end_neb.rs=), 7-image FEA-NEB with two cut-and-remesh refinements converges in 124 steps (2522 force evaluations, target-energy residual \(5.94 \times 10^{-8}\)) to the saddle \((0.820743, 0.205214)\) and barrier \(1.553678\), matching 21-image fixed-end CI-NEB (\((0.820788, 0.205196)\), barrier \(1.553678\), 1982 force evaluations) with three times fewer images.
+On a narrow barrier on a long tilted 2D path (=tests/free_end_neb.rs=), 7-image FEA-NEB with two cut-and-remesh refinements converges in 95 steps (1326 force evaluations, target-energy residual \(5.10 \times 10^{-8}\)) to the saddle \((0.820770, 0.205179)\) and barrier \(1.553678\), matching 21-image fixed-end CI-NEB (\((0.820788, 0.205196)\), barrier \(1.553678\), 1982 force evaluations) with three times fewer images.
 
 * Fixed atoms
 
@@ -222,7 +223,9 @@ of ~threads~ workers that the session keeps.
 Each surface call is split into ~min(threads, rows)~ contiguous image
 blocks, one ~BandSurface::eval~ per block, and the answers are stored at
 their image indices once every block has finished.
-The force assembly stays on the calling thread.
+The tangent, spring, projection and optional preconditioned solve are
+also split by image on that pool.  Each worker writes only its image's
+fixed output slice, and errors are read back in image order.
 One thread is the default and leaves the band as it was; zero threads is
 refused.
 When the surface's answer for a row depends on that row alone, the band,
@@ -240,6 +243,12 @@ A band the session already holds does not go to the surface again: the
 accepted band and the band before it answer a repeated request, so a
 stepper that rejects a trial and returns to its start, as ODE12r does,
 makes no surface call for it.
+The assembled projected force is cached with that surface answer.  With
+the exponential metric its preconditioned driving force is cached too,
+so an ODE12r rejection does not repeat the per-image PCG solves.
+Metric neighbour construction uses linkcell's nearest-neighbour and
+cutoff walks, including minimum images in triclinic cells, rather than an
+all-pairs scan.
 The projected trust-region method (RTR) keeps the Hessian-vector
 products around its current base until the base, the climbing image or
 the force gate changes, so the step after a rejection reuses them.
@@ -249,6 +258,14 @@ Henkelman, Uberuaga and Jonsson, J. Chem. Phys. 113, 9901 (2000),
 doi:10.1063/1.1329672.
 
 ** Measured scaling
+The not-a-knot reparametrization solves the spline's tridiagonal
+second-moment equations in linear work per coordinate.  Its cost
+therefore grows as the number of images times the number of Cartesian
+coordinates, rather than cubically in the image count.
+~cargo bench --bench band_scaling~ is a small regression smoke check for
+one preconditioned band step and a 64-image spline; campaign-scale timing
+belongs to BenchBot.
+
 ~examples/band_scaling.rs~ times a climbing-image band with FIRE on an
 adatom hop of an all-pairs Lennard-Jones cluster (the sites of a
 face-centred cubic lattice nearest the origin).
@@ -374,3 +391,10 @@ let report = connect(
 assert_eq!(report.kind, 's');
 assert!(report.position[0].abs() < 1e-3);
 #+end_src
+
+* Dynamic NEB
+~BandConfig::dynamic~ is off unless set. ~DynamicNeb::default()~ is ASE 3.29 ~DyNEB~: ~fmax~ 0.05 and ~scale_fmax~ 0. ~with_fmax~ and ~with_scale_fmax~ change them. ~fmax~ is the largest per-atom Euclidean norm of the projected force, the optimizer's ~fmax~, which is a different number from the band's ~force_tol~ (the largest absolute component).
+
+An interior image whose norm is strictly below ~fmax * (1 + distance * scale_fmax)~ is left where it is. ~distance~ is the Euclidean norm of the coordinate difference from the highest-energy image, with no minimum image. That image keeps the energy and the Cartesian force from the last time it was evaluated. The spring and the tangent still include it. The highest-energy image is never given a zero force. When a neighbour moves far enough that the projected force exceeds the threshold, the image is evaluated again.
+
+The climbing-image min-mode refinement is a separate phase and does not use this mask. The force the session reports is the projected force before that mask. The optimizer sees the masked force, and a step that leaves the band where it was stops when that masked force is under ~force_tol~. An image whose force was not cleared stays free while its own convergence force is still above ~force_tol~. An image the mask cleared stays pinned, so the reported force can remain above ~force_tol~ when the step stops. A solid-state band, the trust-region stepper, the simplified string method, and the free-end adaptive NEB refuse the option. ~BandSession::set_dynamic~ and ~rgsaddle_band_set_dynamic~ change it between steps. ~rgsaddle_dyneb_mask~ applies the same mask to a band the host has already projected. ~rgsaddle.ase.DyNEB~ is the ASE call; ~rgsaddle.ase.NEB~ still refuses ~dynamic_relaxation~, ~fmax~, and ~scale_fmax~.

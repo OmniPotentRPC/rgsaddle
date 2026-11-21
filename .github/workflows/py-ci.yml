@@ -94,6 +94,9 @@ jobs:
           python-version: "3.12"
       - name: Install the package with the test extra
         run: python -m pip install '.[test]'
+      # tests/python/ase_upstream vendors ASE 3.29.0 NEB and dimer tests and
+      # substitutes rgsaddle.ase. RGSADDLE_REQUIRE_ASE=1 turns a missing ASE
+      # install into a collection error, so the harness cannot skip quietly.
       - name: Pytest with ASE required
         env:
           RGSADDLE_REQUIRE_ASE: "1"

@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 46u
+#define RGSADDLE_ABI_MINOR 51u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -305,6 +305,9 @@ const char *rgsaddle_thermodynamic_derivative_observable(void);
  * image carried (endpoints 0 and band - 1 appear only on the first
  * evaluation), positions and gradients are 3 * n_atoms, energies is
  * one value, and n_images is the length of the band.
+ * From ABI minor 51 a dynamic NEB step sends this request, without
+ * RGSADDLE_REQ_CLIMBING_IMAGE, for an interior image a neighbour
+ * pulled back over its threshold.
  *
  * While the min-mode refinement runs (ABI minor 21, see
  * RGSADDLE_BAND_NO_MIN_MODE) each request carries the climbing image
@@ -1460,6 +1463,61 @@ rgsaddle_status_t rgsaddle_band_set_zoom(RgsaddleBand *band, int32_t enabled,
  */
 rgsaddle_status_t rgsaddle_band_set_string(RgsaddleBand *band, int32_t enabled,
                                            int32_t scheme);
+
+/**
+ * Dynamic NEB (Lindgren, Kastlunger and Peterson, J. Chem. Theory
+ * Comput. 15, 5787 (2019); ASE 3.29 DyNEB). ABI minor 51.
+ * `enabled` 0 clears it and ignores fmax and scale_fmax. `enabled` 1
+ * leaves an image in place once the largest per-atom norm of its
+ * projected force is strictly below `fmax`, scaled by
+ * `fmax * (1 + distance * scale_fmax)` where distance is the Euclidean
+ * norm of the coordinate difference from the highest-energy image.
+ * A converged image keeps its last energy and force and stays in the
+ * spring and the tangent. It is evaluated again when a neighbour moves
+ * enough that the projected force exceeds that threshold. The highest
+ * energy image is never given a zero force. The default band, with
+ * this unset, evaluates every image.
+ *
+ * Returns RGSADDLE_NULL_BAND for a null band. Returns
+ * RGSADDLE_INVALID_PARAMETER, with the band unchanged, for `enabled`
+ * other than 0 or 1, and with `enabled` 1 for an fmax that is not
+ * finite and positive, a scale_fmax that is not finite and
+ * non-negative, a solid-state band, the trust-region stepper, the
+ * simplified string method, or free-end adaptive NEB. A change of the
+ * setting drops the band's cached force assembly and the optimizer's
+ * cached force, so the next step evaluates the band again; setting the
+ * value the band already holds changes nothing.
+ */
+rgsaddle_status_t rgsaddle_band_set_dynamic(RgsaddleBand *band, int32_t enabled,
+                                            double fmax, double scale_fmax);
+
+/**
+ * ASE 3.29 DyNEB mask, ABI minor 51. `positions`, `energies` and
+ * `forces` are the whole band, image-major: `n_images * 3 * n_atoms`
+ * doubles for the coordinates and the forces, `n_images` for the
+ * energies. Interior force rows whose
+ * largest per-atom norm is strictly below
+ * `fmax * (1 + distance * scale_fmax)` are set to zero, except the
+ * highest-energy image, whose force is kept. `distance` does not use
+ * the minimum image. `frozen`, when non-null, receives `n_images`
+ * bytes: 1 when that image would not be moved (the force after this
+ * mask is strictly below `fmax`). Both endpoints are 1.
+ *
+ * Returns RGSADDLE_INVALID_PARAMETER, before any array is read, for a
+ * null `positions`, `energies` or `forces`, fewer than 3 images, a
+ * non-positive atom count, a `3 * n_atoms` or `n_images * 3 * n_atoms`
+ * that overflows, or a band of more than PTRDIFF_MAX bytes, and for an
+ * fmax that is not finite and positive or a scale_fmax that is not
+ * finite and non-negative. Only then are the arrays read:
+ * RGSADDLE_NON_FINITE is returned for a non-finite position, energy or
+ * force, and for nothing else. `forces` and `frozen` are written only
+ * on RGSADDLE_OK.
+ */
+rgsaddle_status_t rgsaddle_dyneb_mask(int64_t n_images, int64_t n_atoms,
+                                      const double *positions,
+                                      const double *energies, double *forces,
+                                      double fmax, double scale_fmax,
+                                      uint8_t *frozen);
 
 /**
  * Point stencil. Opaque config, typed keys, one callback.

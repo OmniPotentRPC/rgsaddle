@@ -5,7 +5,7 @@
 #include <stddef.h>
 
 _Static_assert(RGSADDLE_ABI_MAJOR == 1u, "main ABI major");
-_Static_assert(RGSADDLE_ABI_MINOR == 46u, "ABI minor");
+_Static_assert(RGSADDLE_ABI_MINOR == 51u, "ABI minor");
 _Static_assert(RGSADDLE_BAND_NO_MIN_MODE == (1ull << 3), "band flag bit 3");
 _Static_assert(RGSADDLE_BAND_SPLINE_REPARAM == (1ull << 4), "band flag bit 4");
 _Static_assert(RGSADDLE_BAND_STRING == (1ull << 5), "band flag bit 5");
@@ -552,5 +552,14 @@ _Static_assert(_Generic(&rgsaddle_band_free_end_residual, abi45_signature_rgsadd
 typedef int64_t (*abi45_signature_rgsaddle_band_free_end_cuts)(
     const RgsaddleBand *band);
 _Static_assert(_Generic(&rgsaddle_band_free_end_cuts, abi45_signature_rgsaddle_band_free_end_cuts: 1, default: 0), "rgsaddle_band_free_end_cuts signature");
+
+typedef rgsaddle_status_t (*abi51_signature_rgsaddle_band_set_dynamic)(
+    RgsaddleBand *band, int32_t enabled, double fmax, double scale_fmax);
+_Static_assert(_Generic(&rgsaddle_band_set_dynamic, abi51_signature_rgsaddle_band_set_dynamic: 1, default: 0), "rgsaddle_band_set_dynamic signature");
+
+typedef rgsaddle_status_t (*abi51_signature_rgsaddle_dyneb_mask)(
+    int64_t n_images, int64_t n_atoms, const double *positions, const double *energies,
+    double *forces, double fmax, double scale_fmax, uint8_t *frozen);
+_Static_assert(_Generic(&rgsaddle_dyneb_mask, abi51_signature_rgsaddle_dyneb_mask: 1, default: 0), "rgsaddle_dyneb_mask signature");
 
 #endif

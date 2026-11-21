@@ -1,0 +1,1 @@
+A free-end step now rebuilds the exponential band metric after its interior images move far enough to make it stale, and after a cut and remesh. Before, the reported forces and the cached evaluation were assembled without a current metric until the next step.

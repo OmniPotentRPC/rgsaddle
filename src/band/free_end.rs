@@ -58,7 +58,7 @@ use rgmin::{Accept, Control, LevelSetConstraint, Method, Oracle, Solver};
 
 use super::zoom::resample;
 use super::{
-    BandConfig, BandMetrics, BandReport, BandSession, BandStatus, BandSurface, SAME_ROW_TOL,
+    BandConfig, BandReport, BandSession, BandStatus, BandSurface, MetricBuildId, SAME_ROW_TOL,
     build_solver, climb_target, image_force, max_abs, min_mode, pin_fixed_rows,
     remove_net_translation, zero_fixed,
 };
@@ -240,6 +240,13 @@ pub(super) fn check_free_end(
             "free-end adaptive NEB cannot be combined with the simplified string method".into(),
         ));
     }
+    if config.dynamic.is_some() {
+        return Err(SaddleError::Invalid(
+            "free-end adaptive NEB cannot be combined with dynamic NEB; \
+             the free terminal image and the level-set retraction need every image evaluated"
+                .into(),
+        ));
+    }
     if !matches!(config.spring, SpringKind::Uniform { .. }) {
         return Err(SaddleError::Invalid(
             "free-end adaptive NEB requires a uniform spring".into(),
@@ -304,6 +311,12 @@ struct FreeEndMeasurement {
     energies: Array1<f64>,
     gradients: Array2<f64>,
     projected: Array1<f64>,
+    /// Preconditioned driving force of the interior images, when the
+    /// band carries a fresh metric.
+    driving: Option<Array1<f64>>,
+    /// Metric the forces were assembled with. `None` when the band
+    /// carries a metric that is not current at the reported positions.
+    metric: Option<MetricBuildId>,
     max_force: f64,
     endpoint_force: f64,
 }
@@ -312,6 +325,11 @@ struct FreeEndMeasurement {
 pub(super) struct FreeEndState {
     pub(super) resolved_target: Option<f64>,
     pub(super) fixed_endpoint_energy: Option<f64>,
+    /// Gradient of the fixed terminal image, held with its energy.
+    pub(super) fixed_endpoint_gradient: Option<Array1<f64>>,
+    /// Band the last cached evaluation was taken at. The next step
+    /// reuses that evaluation only while the band is unchanged.
+    pub(super) evaluated_band: Option<Array2<f64>>,
     pub(super) initial_fixed_energy: Option<f64>,
     pub(super) last_residual: Option<f64>,
     pub(super) last_endpoint_energy: Option<f64>,
@@ -324,6 +342,15 @@ pub(super) struct FreeEndState {
     pub(super) endpoint_dt: Option<f64>,
     pub(super) prev_end_pos: Option<Array1<f64>>,
     pub(super) prev_end_force: Option<Array1<f64>>,
+}
+
+impl FreeEndState {
+    /// Forget the fixed terminal image's energy and gradient, so the
+    /// next evaluation carries that image again.
+    pub(super) fn forget_fixed_endpoint(&mut self) {
+        self.fixed_endpoint_energy = None;
+        self.fixed_endpoint_gradient = None;
+    }
 }
 
 fn lock_guard<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -676,28 +703,54 @@ impl BandSession {
         self.free_end_state.initial_fixed_energy
     }
 
-    /// Energies, gradients, and projected forces at the positions the
-    /// step is about to report.
-    fn measure_free_end<S: BandSurface>(
+    /// Evaluate the band at the current positions. The fixed terminal
+    /// image never moves between cuts, so its energy and gradient are
+    /// asked of the surface once and held; every later call evaluates
+    /// the other `n_images - 1` rows only.
+    fn evaluate_free_end_band<S: BandSurface>(
         &mut self,
         surface: &S,
-        side: FreeEndSide,
-        end_idx: usize,
-        neigh_idx: usize,
-        ci_at: Option<usize>,
-    ) -> Result<FreeEndMeasurement, SaddleError> {
+        fixed_idx: usize,
+    ) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
         let n_images = self.positions.nrows();
         let dof = self.positions.ncols();
         let mut energies = Array1::zeros(n_images);
         let mut gradients = Array2::zeros((n_images, dof));
-        self.state.eval_rows(
-            surface,
-            0..n_images,
-            self.positions.view(),
-            &mut energies,
-            &mut gradients,
-        )?;
-        self.state.rows.fetch_add(n_images, Ordering::Relaxed);
+        let held = match (
+            self.free_end_state.fixed_endpoint_energy,
+            self.free_end_state.fixed_endpoint_gradient.clone(),
+        ) {
+            (Some(energy), Some(gradient)) => Some((energy, gradient)),
+            _ => None,
+        };
+        let range = match (&held, fixed_idx) {
+            (None, _) => 0..n_images,
+            (Some(_), 0) => 1..n_images,
+            (Some(_), _) => 0..n_images - 1,
+        };
+        let count = range.len();
+        if held.is_none() {
+            self.state.eval_rows(
+                surface,
+                range,
+                self.positions.view(),
+                &mut energies,
+                &mut gradients,
+            )?;
+        } else {
+            let mut sub_e = Array1::zeros(count);
+            let mut sub_g = Array2::zeros((count, dof));
+            let view = self.positions.slice(s![range.clone(), ..]);
+            self.state
+                .eval_rows(surface, range.clone(), view, &mut sub_e, &mut sub_g)?;
+            energies.slice_mut(s![range.clone()]).assign(&sub_e);
+            gradients.slice_mut(s![range, ..]).assign(&sub_g);
+        }
+        self.state.rows.fetch_add(count, Ordering::Relaxed);
+        if let Some((energy, gradient)) = &held {
+            energies[fixed_idx] = *energy;
+            gradients.row_mut(fixed_idx).assign(gradient);
+        }
         if !energies.iter().all(|energy| energy.is_finite()) {
             return Err(SaddleError::NonFinite("band energies"));
         }
@@ -709,6 +762,50 @@ impl BandSession {
                 zero_fixed(&self.state.fixed, &mut row);
             }
         }
+        if held.is_none() {
+            self.free_end_state.fixed_endpoint_energy = Some(energies[fixed_idx]);
+            self.free_end_state.fixed_endpoint_gradient = Some(gradients.row(fixed_idx).to_owned());
+            if self.free_end_state.initial_fixed_energy.is_none() {
+                self.free_end_state.initial_fixed_energy = Some(energies[fixed_idx]);
+            }
+        }
+        Ok((energies, gradients))
+    }
+
+    /// The evaluation the previous step cached, when the band has not
+    /// changed since. It carries every image, so the step that follows
+    /// asks the surface for none of them.
+    fn reusable_free_end_evaluation(&self) -> Option<(Array1<f64>, Array2<f64>)> {
+        let band = self.free_end_state.evaluated_band.as_ref()?;
+        if *band != self.positions {
+            return None;
+        }
+        let last = lock_guard(&self.state.last);
+        let last = last.as_ref()?;
+        let (n_images, dof) = self.positions.dim();
+        if last.x != self.interior_flat()
+            || last.energies.len() != n_images
+            || last.gradients.dim() != (n_images, dof)
+        {
+            return None;
+        }
+        Some((last.energies.clone(), last.gradients.clone()))
+    }
+
+    /// Energies, gradients, and projected forces at the positions the
+    /// step is about to report.
+    fn measure_free_end<S: BandSurface>(
+        &mut self,
+        surface: &S,
+        side: FreeEndSide,
+        end_idx: usize,
+        neigh_idx: usize,
+        fixed_idx: usize,
+        ci_at: Option<usize>,
+    ) -> Result<FreeEndMeasurement, SaddleError> {
+        let n_images = self.positions.nrows();
+        let dof = self.positions.ncols();
+        let (energies, gradients) = self.evaluate_free_end_band(surface, fixed_idx)?;
         let mut grad_end = gradients.row(end_idx).to_owned();
         zero_fixed(&self.config.fixed_atoms, &mut grad_end);
         let endpoint = assembled_free_end_force(
@@ -729,17 +826,19 @@ impl BandSession {
             .config
             .spring
             .at_band(energies.view(), gradients.view());
-        let metrics = self.exp.as_ref().map(|exp| BandMetrics {
-            per_image: exp.metrics.as_slice(),
-            free: exp.free.as_deref(),
-        });
+        let metrics = self
+            .exp
+            .as_ref()
+            .and_then(|exp| exp.fresh_metrics(interior.view(), n_images - 2));
         let mut projected = Array1::zeros((n_images - 2) * dof);
+        let mut driving = metrics.map(|_| Array1::zeros((n_images - 2) * dof));
         for image in 1..n_images - 1 {
             let rows = s![(image - 1) * dof..image * dof];
             let metric =
                 metrics.and_then(|band| band.per_image.get(image - 1).map(|p| (p, band.free)));
-            let (force, _) = image_force(
+            let (force, drive) = image_force(
                 &self.config,
+                &self.state,
                 &resolved_spring,
                 image,
                 ci_at == Some(image),
@@ -751,12 +850,22 @@ impl BandSession {
                 metric,
             )?;
             projected.slice_mut(rows).assign(&force);
+            if let (Some(all), Some(drive)) = (driving.as_mut(), drive) {
+                all.slice_mut(rows).assign(&drive);
+            }
         }
         let max_force = self.state.convergence_force(&projected).max(endpoint_force);
+        let metric = match (&self.exp, metrics) {
+            (None, _) => Some(MetricBuildId::EUCLIDEAN),
+            (Some(_), Some(band)) => Some(band.build_id),
+            (Some(_), None) => None,
+        };
         Ok(FreeEndMeasurement {
             energies,
             gradients,
             projected,
+            driving,
+            metric,
             max_force,
             endpoint_force,
         })
@@ -831,51 +940,10 @@ impl BandSession {
         self.state.rows.store(0, Ordering::Relaxed);
         self.refresh_exp(surface)?;
 
-        let mut energies = Array1::zeros(n_images);
-        let mut gradients = Array2::zeros((n_images, dof));
-        match self.free_end_state.fixed_endpoint_energy {
-            None => {
-                self.state.eval_rows(
-                    surface,
-                    0..n_images,
-                    self.positions.view(),
-                    &mut energies,
-                    &mut gradients,
-                )?;
-                self.state.rows.fetch_add(n_images, Ordering::Relaxed);
-                self.free_end_state.fixed_endpoint_energy = Some(energies[fixed_idx]);
-                if self.free_end_state.initial_fixed_energy.is_none() {
-                    self.free_end_state.initial_fixed_energy = Some(energies[fixed_idx]);
-                }
-            }
-            Some(e_fixed) => {
-                let range = match fe_cfg.side {
-                    FreeEndSide::First => 0..n_images - 1,
-                    FreeEndSide::Last => 1..n_images,
-                };
-                let count = range.len();
-                let mut sub_e = Array1::zeros(count);
-                let mut sub_g = Array2::zeros((count, dof));
-                let view = self.positions.slice(s![range.clone(), ..]);
-                self.state
-                    .eval_rows(surface, range.clone(), view, &mut sub_e, &mut sub_g)?;
-                self.state.rows.fetch_add(count, Ordering::Relaxed);
-                energies[fixed_idx] = e_fixed;
-                energies.slice_mut(s![range.clone()]).assign(&sub_e);
-                gradients.slice_mut(s![range, ..]).assign(&sub_g);
-            }
-        }
-        if !energies.iter().all(|e| e.is_finite()) {
-            return Err(SaddleError::NonFinite("band energies"));
-        }
-        if !gradients.iter().all(|g| g.is_finite()) {
-            return Err(SaddleError::NonFinite("band gradients"));
-        }
-        if !self.state.fixed.is_empty() {
-            for mut row in gradients.outer_iter_mut() {
-                zero_fixed(&self.state.fixed, &mut row);
-            }
-        }
+        let (mut energies, mut gradients) = match self.reusable_free_end_evaluation() {
+            Some(held) => held,
+            None => self.evaluate_free_end_band(surface, fixed_idx)?,
+        };
 
         let target_energy = match fe_cfg.target_energy {
             Some(t) => t,
@@ -998,10 +1066,10 @@ impl BandSession {
             .config
             .spring
             .at_band(energies.view(), gradients.view());
-        let metrics = self.exp.as_ref().map(|e| BandMetrics {
-            per_image: e.metrics.as_slice(),
-            free: e.free.as_deref(),
-        });
+        let metrics = self
+            .exp
+            .as_ref()
+            .and_then(|exp| exp.fresh_metrics(before.view(), n_images - 2));
         let metric_of =
             |i: usize| metrics.and_then(|m| m.per_image.get(i - 1).map(|p| (p, m.free)));
 
@@ -1011,6 +1079,7 @@ impl BandSession {
             let rows = s![(i - 1) * dof..i * dof];
             let (proj, drv) = image_force(
                 &self.config,
+                &self.state,
                 &resolved_spring,
                 i,
                 ci_at == Some(i),
@@ -1060,6 +1129,7 @@ impl BandSession {
                 let rows = s![(ci_i - 1) * dof..ci_i * dof];
                 let (proj, drv) = image_force(
                     &self.config,
+                    &self.state,
                     &resolved_spring,
                     ci_i,
                     true,
@@ -1139,6 +1209,7 @@ impl BandSession {
                     let rows = s![(i - 1) * dof..i * dof];
                     match image_force(
                         config_ref,
+                        state_ref,
                         &tr_spring,
                         i,
                         ci_at == Some(i),
@@ -1171,6 +1242,7 @@ impl BandSession {
             stepped.map_err(|e| SaddleError::Solver(e.to_string()))?;
         }
         self.scatter_interior(x_interior.view());
+        self.refresh_exp(surface)?;
 
         // Advance the free terminal image along the level-set projected
         // force and retract onto E(x_end) = target_energy via rgmin::Solver.
@@ -1281,11 +1353,22 @@ impl BandSession {
                 cut_this_step = true;
             }
         }
+        if cut_this_step {
+            // The window edge is the new fixed terminal image, so its
+            // held energy and gradient belong to a point that is gone.
+            self.free_end_state.forget_fixed_endpoint();
+            self.refresh_exp(surface)?;
+        }
 
         let report_ci = if cut_this_step { None } else { ci_at };
-        let measured =
-            self.measure_free_end(surface, fe_cfg.side, end_idx, neigh_idx, report_ci)?;
-        self.free_end_state.fixed_endpoint_energy = Some(measured.energies[fixed_idx]);
+        let measured = self.measure_free_end(
+            surface,
+            fe_cfg.side,
+            end_idx,
+            neigh_idx,
+            fixed_idx,
+            report_ci,
+        )?;
         let residual = measured.energies[end_idx] - target_energy;
         let e_end = measured.energies[end_idx];
         let max_force = measured.max_force;
@@ -1294,7 +1377,14 @@ impl BandSession {
         self.free_end_state.last_endpoint_energy = Some(e_end);
         self.free_end_state.last_endpoint_force = Some(endpoint_force_norm);
         *lock_guard(&self.state.last_max_force) = max_force;
-        self.cache_free_end_evaluation(measured.energies, measured.gradients, measured.projected);
+        self.cache_free_end_evaluation(
+            measured.energies,
+            measured.gradients,
+            measured.projected,
+            measured.driving,
+            measured.metric,
+        );
+        self.free_end_state.evaluated_band = Some(self.positions.clone());
 
         let all_cuts_done = fe_cfg.max_cuts == 0 || self.free_end_state.cuts >= fe_cfg.max_cuts;
         let status = if !cut_this_step && all_cuts_done && max_force <= self.config.force_tol {
@@ -1449,13 +1539,14 @@ impl FeaNebSession {
 mod tests {
     use ndarray::{Array1, Array2, ArrayView2, array};
 
+    use super::{MetricBuildId, lock_guard};
     use super::{
         SAME_ROW_TOL, accept_endpoint_pair, assembled_free_end_force, cut_force_limit,
         eq7_endpoint_force, first_cut_tolerance, peak_window, project_onto_level_set,
     };
     use crate::{
-        BandConfig, BandSession, BandSurface, FeaNebSession, FreeEndConfig, FreeEndSide,
-        SaddleError, SpringKind,
+        BandConfig, BandSession, BandSurface, ExpBandPrecon, FeaNebSession, FreeEndConfig,
+        FreeEndSide, SaddleError, SpringKind,
     };
 
     #[test]
@@ -1821,5 +1912,203 @@ mod tests {
             }
         }
         assert!(misses.is_empty(), "{misses:#?}");
+    }
+
+    /// Two atoms per image: a stiff bond of rest length 1 and a downhill
+    /// parabola on the centroid's x with its peak at 2, so the band has an
+    /// interior maximum and the free end has a nonzero gradient. `tilt`
+    /// adds a linear slope on the centroid's y, a force the band's tangent
+    /// does not remove.
+    struct PeakDiatomic {
+        tilt: f64,
+    }
+
+    impl BandSurface for PeakDiatomic {
+        fn eval(
+            &self,
+            positions: ArrayView2<f64>,
+            energies: &mut Array1<f64>,
+            gradients: &mut Array2<f64>,
+        ) -> Result<(), SaddleError> {
+            for (i, row) in positions.outer_iter().enumerate() {
+                let d = [row[3] - row[0], row[4] - row[1], row[5] - row[2]];
+                let r = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+                let cx = 0.5 * (row[0] + row[3]);
+                let cy = 0.5 * (row[1] + row[4]);
+                energies[i] = -(cx - 2.0).powi(2) + 100.0 * (r - 1.0).powi(2) + self.tilt * cy;
+                let dbond = 200.0 * (r - 1.0) / r;
+                for k in 0..3 {
+                    let centroid = match k {
+                        0 => -(cx - 2.0),
+                        1 => 0.5 * self.tilt,
+                        _ => 0.0,
+                    };
+                    gradients[(i, k)] = -dbond * d[k] + centroid;
+                    gradients[(i, 3 + k)] = dbond * d[k] + centroid;
+                }
+            }
+            Ok(())
+        }
+    }
+
+    /// Fails a test that asks the surface for anything.
+    struct NoSurface;
+
+    impl BandSurface for NoSurface {
+        fn eval(
+            &self,
+            _positions: ArrayView2<f64>,
+            _energies: &mut Array1<f64>,
+            _gradients: &mut Array2<f64>,
+        ) -> Result<(), SaddleError> {
+            panic!("the cached evaluation should have answered");
+        }
+    }
+
+    fn peak_band(n_images: usize) -> Array2<f64> {
+        Array2::from_shape_fn((n_images, 6), |(image, column)| {
+            let t = image as f64 / (n_images - 1) as f64;
+            let half = 0.5 + 0.05 * (std::f64::consts::PI * t).sin();
+            match column {
+                0 | 3 => 4.0 * t,
+                2 => -half,
+                5 => half,
+                _ => 0.0,
+            }
+        })
+    }
+
+    fn exp_free_end_config(free_end: FreeEndConfig) -> BandConfig {
+        BandConfig::default()
+            .with_free_end(free_end)
+            .with_exp_precon(Some(ExpBandPrecon::default().with_mu(200.0)))
+            .with_max_move(0.9)
+            .with_climbing(None)
+            .with_min_mode(None)
+            .with_saddle_check(None)
+            .with_remove_translation(false)
+    }
+
+    /// The residual, the driving force and the metric tag of the cache.
+    fn cached_forces(session: &BandSession) -> (Array1<f64>, Array1<f64>, Option<MetricBuildId>) {
+        let slot = lock_guard(&session.state.last);
+        let last = slot.as_ref().expect("cached evaluation");
+        (
+            last.projected.clone(),
+            last.driving.clone(),
+            last.assembly_metric,
+        )
+    }
+
+    fn assert_close(left: &Array1<f64>, right: &Array1<f64>) {
+        assert_eq!(left.len(), right.len());
+        for (a, b) in left.iter().zip(right.iter()) {
+            assert!((a - b).abs() <= 1e-9 * (1.0 + a.abs()), "{a} against {b}");
+        }
+    }
+
+    /// The cache must hold what the band assembly produces at the same
+    /// geometry under the metric it names.
+    fn assert_cache_matches_assembly(session: &BandSession) {
+        let (projected, driving, metric) = cached_forces(session);
+        let exp = session.exp.as_ref().expect("metric");
+        let x = session.interior_flat();
+        let fresh = exp
+            .fresh_metrics(x.view(), session.positions.nrows() - 2)
+            .expect("the metric is current at the reported positions");
+        assert_eq!(metric, Some(fresh.build_id));
+        assert_eq!(driving.len(), projected.len());
+        session
+            .assemble_accepted(&NoSurface, x.view())
+            .expect("reassemble from the cached surface values");
+        let (again_projected, again_driving, again_metric) = cached_forces(session);
+        assert_eq!(again_metric, metric);
+        assert_close(&projected, &again_projected);
+        assert_close(&driving, &again_driving);
+    }
+
+    #[test]
+    fn the_cached_driving_force_is_the_preconditioned_force_its_tag_names() {
+        let config = exp_free_end_config(FreeEndConfig::default().with_max_cuts(0));
+        let mut session = BandSession::new(config, peak_band(7)).expect("session");
+        session
+            .step_free_end(&PeakDiatomic { tilt: 0.0 })
+            .expect("step");
+        let (projected, driving, metric) = cached_forces(&session);
+        assert!(metric.is_some_and(|id| id != MetricBuildId::EUCLIDEAN));
+        let apart = projected
+            .iter()
+            .zip(driving.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f64::max);
+        assert!(
+            apart > 1e-3,
+            "the driving force is the residual again: {apart}"
+        );
+        assert_cache_matches_assembly(&session);
+    }
+
+    #[test]
+    fn the_euclidean_cache_holds_no_driving_force() {
+        let config = BandConfig::default()
+            .with_free_end(FreeEndConfig::default().with_max_cuts(0))
+            .with_climbing(None)
+            .with_min_mode(None)
+            .with_saddle_check(None)
+            .with_remove_translation(false);
+        let mut session = BandSession::new(config, peak_band(7)).expect("session");
+        session
+            .step_free_end(&PeakDiatomic { tilt: 0.0 })
+            .expect("step");
+        let (projected, driving, metric) = cached_forces(&session);
+        assert_eq!(metric, Some(MetricBuildId::EUCLIDEAN));
+        assert_eq!(projected.len(), 5 * 6);
+        assert_eq!(driving.len(), 0);
+    }
+
+    #[test]
+    fn the_metric_is_rebuilt_after_the_interior_moves_far_in_one_step() {
+        let config = exp_free_end_config(FreeEndConfig::default().with_max_cuts(0));
+        let mut session = BandSession::new(config, peak_band(7)).expect("session");
+        let surface = PeakDiatomic { tilt: 100.0 };
+        let report = session.step_free_end(&surface).expect("step");
+        assert!(!report.cut_this_step);
+        let exp = session.exp.as_ref().expect("metric");
+        let first_band = peak_band(7);
+        let moved = (&session.positions - &first_band)
+            .iter()
+            .fold(0.0_f64, |most, delta| most.max(delta.abs()));
+        assert!(
+            moved > 0.5 * exp.r_nn,
+            "the step has to move an atom past r_nn / 2: moved {moved}, r_nn {}",
+            exp.r_nn
+        );
+        assert!(
+            session.evaluation().is_some(),
+            "the step reported forces under a stale metric"
+        );
+        assert_cache_matches_assembly(&session);
+    }
+
+    #[test]
+    fn the_metric_is_rebuilt_after_a_cut_and_remesh() {
+        let free_end = FreeEndConfig::default()
+            .with_max_cuts(1)
+            .with_cut_force(100.0)
+            .with_stability(1)
+            .with_window_offset(1)
+            .with_cubic(false);
+        let config = exp_free_end_config(free_end);
+        let mut session = BandSession::new(config, peak_band(7)).expect("session");
+        let report = session
+            .step_free_end(&PeakDiatomic { tilt: 0.0 })
+            .expect("cut step");
+        assert!(report.cut_this_step, "the step has to cut");
+        assert_eq!(session.free_end_cuts(), 1);
+        assert!(
+            session.evaluation().is_some(),
+            "the cut left the band under a stale metric"
+        );
+        assert_cache_matches_assembly(&session);
     }
 }
