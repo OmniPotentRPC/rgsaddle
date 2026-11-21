@@ -45,7 +45,10 @@ def run_ohtst(repo_root: Path) -> dict[str, float]:
     with tempfile.TemporaryDirectory() as workdir:
         result_path = Path(workdir) / "result.json"
         subprocess.run([str(binary), str(result_path)], check=True)
-        return json.loads(result_path.read_text())
+        raw = json.loads(result_path.read_text())
+        if not isinstance(raw, dict):
+            raise ValueError("OH-TST tutorial output must be a JSON object")
+        return {str(key): float(value) for key, value in raw.items()}
 
 
 def main() -> None:

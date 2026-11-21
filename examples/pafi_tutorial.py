@@ -66,7 +66,10 @@ def run_pafi(repo_root: Path, config: dict[str, float]) -> dict[str, float]:
             [str(binary), str(config_path), str(result_path)],
             check=True,
         )
-        return json.loads(result_path.read_text())
+        raw = json.loads(result_path.read_text())
+        if not isinstance(raw, dict):
+            raise ValueError("PAFI tutorial output must be a JSON object")
+        return {str(key): float(value) for key, value in raw.items()}
 
 
 def main() -> None:
