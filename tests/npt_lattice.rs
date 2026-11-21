@@ -229,6 +229,32 @@ fn ideal_gas_settles_at_the_target_pressure() {
 }
 
 #[test]
+fn consecutive_seeds_sample_different_trajectories() {
+    let mut pressures = Vec::new();
+    for seed in 0..6_u64 {
+        let (mut positions, mut cell) = grid(3, 4.0);
+        let config = NptConfig::default()
+            .with_repeats(3)
+            .with_steps(400)
+            .with_maximum_steps(400)
+            .with_equilibration_steps(100)
+            .with_block_steps(50)
+            .with_compressibility_per_ev_a3(1.0e-12)
+            .with_seed(seed);
+        let report = npt_lattice(&mut positions, &mut cell, 300.0, 63.546, config, |x, _| {
+            Ok((0.0, Array1::zeros(x.len()), [[0.0; 3]; 3]))
+        })
+        .unwrap();
+        pressures.push(report.mean_pressure);
+    }
+    for (a, first) in pressures.iter().enumerate() {
+        for second in &pressures[a + 1..] {
+            assert_ne!(first, second);
+        }
+    }
+}
+
+#[test]
 fn configuration_is_built_from_defaults_with_setters() {
     let config = NptConfig::default()
         .with_timestep_s(1.0e-15)
