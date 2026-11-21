@@ -146,6 +146,11 @@ fn parse_pafi_config(config: &RgsaddlePafiConfig) -> Result<PafiConfig, i32> {
 }
 
 fn pafi_config_from(config: &RgsaddlePafiConfig) -> Result<PafiConfig, SaddleError> {
+    if config.flags != 0 {
+        return Err(SaddleError::Invalid(
+            "PAFI reserved flags must be zero".into(),
+        ));
+    }
     let thermalize = usize::try_from(config.thermalize)
         .map_err(|_| SaddleError::Invalid("PAFI thermalize".into()))?;
     let stride =
@@ -523,6 +528,11 @@ fn ohtst_config_from(
     config: &RgsaddleOhtstConfig,
     n_dof: usize,
 ) -> Result<(LangevinConfig, TransmissionConfig), SaddleError> {
+    if config.flags != 0 {
+        return Err(SaddleError::Invalid(
+            "OH-TST reserved flags must be zero".into(),
+        ));
+    }
     let to_usize = |value: i64, name: &str| -> Result<usize, SaddleError> {
         usize::try_from(value).map_err(|_| SaddleError::Invalid(format!("OH-TST {name}")))
     };

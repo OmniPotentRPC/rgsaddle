@@ -201,7 +201,7 @@ program smoke
   integer(c_int) :: status
   status = abi_stamp(version)
   if (status /= RGSADDLE_OK) stop 1
-  if (version%major /= 1 .or. version%minor /= 46) stop 2
+  if (version%major /= 1 .or. version%minor /= 47) stop 2
 end program smoke
 EOF
 

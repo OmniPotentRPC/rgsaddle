@@ -235,6 +235,11 @@ static rgsaddle_status_t pafi_and_ohtst(void) {
   if (rgsaddle_pafi_create(&bad_pcfg, 41, 1, frames, NULL, 0) != NULL) {
     return fail(RGSADDLE_INVALID_PARAMETER, "pafi create negative thermal");
   }
+  bad_pcfg = pcfg;
+  bad_pcfg.flags = 1;
+  if (rgsaddle_pafi_create(&bad_pcfg, 41, 1, frames, NULL, 0) != NULL) {
+    return fail(RGSADDLE_INVALID_PARAMETER, "pafi create reserved flags");
+  }
   RgsaddlePafi *pafi = rgsaddle_pafi_create(&pcfg, 41, 1, frames, NULL, 0);
   if (!pafi) {
     return fail(RGSADDLE_SHAPE, "pafi create");
@@ -311,6 +316,11 @@ static rgsaddle_status_t pafi_and_ohtst(void) {
   if (rgsaddle_ohtst_create(&bad_ocfg, 2, point, normal) != NULL) {
     return fail(RGSADDLE_INVALID_PARAMETER, "ohtst create zero retain");
   }
+  bad_ocfg = ocfg;
+  bad_ocfg.flags = 1;
+  if (rgsaddle_ohtst_create(&bad_ocfg, 2, point, normal) != NULL) {
+    return fail(RGSADDLE_INVALID_PARAMETER, "ohtst create reserved flags");
+  }
   RgsaddleOhtst *ohtst = rgsaddle_ohtst_create(&ocfg, 2, point, normal);
   if (!ohtst) {
     return fail(RGSADDLE_SHAPE, "ohtst create");
@@ -369,6 +379,8 @@ static rgsaddle_status_t set_config_statuses(void) {
   pcfg.max_rounds = 1;
   rgsaddle_pafi_config_t other_pcfg = pcfg;
   other_pcfg.version.major = RGSADDLE_ABI_MAJOR + 1u;
+  rgsaddle_pafi_config_t flagged_pcfg = pcfg;
+  flagged_pcfg.flags = 1;
   const double frames[3] = {-1.0, 0.0, 1.0};
   if (rgsaddle_pafi_create(&other_pcfg, 3, 1, frames, NULL, 0) != NULL) {
     return fail(RGSADDLE_ABI_MISMATCH, "pafi create accepted another major");
@@ -382,6 +394,8 @@ static rgsaddle_status_t set_config_statuses(void) {
       rgsaddle_pafi_set_config(NULL, NULL) != RGSADDLE_NULL_SESSION ||
       rgsaddle_pafi_set_config(pafi, NULL) != RGSADDLE_INVALID_PARAMETER ||
       rgsaddle_pafi_set_config(pafi, &other_pcfg) != RGSADDLE_ABI_MISMATCH ||
+      rgsaddle_pafi_set_config(pafi, &flagged_pcfg) !=
+          RGSADDLE_INVALID_PARAMETER ||
       rgsaddle_pafi_set_config(pafi, &pcfg) != RGSADDLE_OK) {
     rgsaddle_pafi_free(pafi);
     return fail(RGSADDLE_ABI_MISMATCH, "pafi set_config statuses");
@@ -412,6 +426,8 @@ static rgsaddle_status_t set_config_statuses(void) {
   ocfg.counting = RGSADDLE_OHTST_COUNT_FINAL;
   rgsaddle_ohtst_config_t other_ocfg = ocfg;
   other_ocfg.version.major = RGSADDLE_ABI_MAJOR + 1u;
+  rgsaddle_ohtst_config_t flagged_ocfg = ocfg;
+  flagged_ocfg.flags = 1;
   const double point[2] = {0.0, 0.0};
   const double normal[2] = {1.0, 0.0};
   if (rgsaddle_ohtst_create(&other_ocfg, 2, point, normal) != NULL) {
@@ -426,6 +442,8 @@ static rgsaddle_status_t set_config_statuses(void) {
       rgsaddle_ohtst_set_config(NULL, NULL) != RGSADDLE_NULL_SESSION ||
       rgsaddle_ohtst_set_config(ohtst, NULL) != RGSADDLE_INVALID_PARAMETER ||
       rgsaddle_ohtst_set_config(ohtst, &other_ocfg) != RGSADDLE_ABI_MISMATCH ||
+      rgsaddle_ohtst_set_config(ohtst, &flagged_ocfg) !=
+          RGSADDLE_INVALID_PARAMETER ||
       rgsaddle_ohtst_set_config(ohtst, &ocfg) != RGSADDLE_OK) {
     rgsaddle_ohtst_free(ohtst);
     return fail(RGSADDLE_ABI_MISMATCH, "ohtst set_config statuses");
