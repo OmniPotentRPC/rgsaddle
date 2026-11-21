@@ -3888,6 +3888,59 @@ pub unsafe extern "C" fn rgsaddle_band_free_end_residual(
     }
 }
 
+/// Install, replace, or clear the per-step refine stepper (ABI minor 59).
+///
+/// `method` 0 clears it. `method` 1 is L-BFGS with `memory` pairs, or
+/// 20 when `memory` is less than or equal to 0. A `threshold` of 0 is
+/// the default 0.5. A negative or non-finite threshold is refused when
+/// a method is set.
+///
+/// # Safety
+/// `band` is a live session or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_band_set_refine(
+    band: *mut RgsaddleBand,
+    method: i32,
+    threshold: f64,
+    memory: i64,
+) -> i32 {
+    if band.is_null() {
+        return RGSADDLE_NULL_BAND;
+    }
+    let refine = match method {
+        0 => None,
+        1 => {
+            let threshold = if threshold == 0.0 { 0.5 } else { threshold };
+            if !threshold.is_finite() || threshold <= 0.0 {
+                return RGSADDLE_INVALID_PARAMETER;
+            }
+            let pairs = if memory > 0 { memory as usize } else { 20 };
+            Some(
+                crate::StepRefine::default()
+                    .with_method(rgmin::Method::lbfgs_with_memory(pairs))
+                    .with_threshold(threshold),
+            )
+        }
+        _ => return RGSADDLE_INVALID_PARAMETER,
+    };
+    match unsafe { (*band).session.set_refine(refine) } {
+        Ok(()) => RGSADDLE_OK,
+        Err(err) => status_of(&err),
+    }
+}
+
+/// 1 when the last first-order step used the refine stepper (ABI minor 59).
+///
+/// # Safety
+/// `band` is a live session or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_band_is_refining(band: *const RgsaddleBand) -> i32 {
+    if band.is_null() {
+        return 0;
+    }
+    i32::from(unsafe { (*band).session.is_refining() })
+}
+
 /// Number of adaptive cut-and-remesh refinements performed so far on a
 /// free-end band (ABI minor 45).
 ///
