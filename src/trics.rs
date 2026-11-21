@@ -159,9 +159,8 @@ pub struct TricsReport {
     pub segments: Vec<TricsSegment>,
     /// Endpoint splice iterations that interpolated the segments.
     ///
-    /// Zero means no segment was spliced: either one system covered
-    /// the path, or every segment holds only its two endpoints (three
-    /// images split in two), so the initial path is returned as given.
+    /// Zero means one coordinate system covered the path, so endpoint
+    /// splicing was unnecessary.
     pub splice_iterations: usize,
 }
 
@@ -191,7 +190,7 @@ impl TricPrimitive {
     /// Coordinate value at a packed `3N` Cartesian geometry.
     pub fn value(&self, positions: ArrayView1<'_, f64>) -> Result<f64, SaddleError> {
         check_positions(positions)?;
-        match self {
+        let value = match self {
             Self::Distance(a, b) => distance(positions, *a, *b),
             Self::Angle(a, b, c) => angle(positions, *a, *b, *c),
             Self::LinearBend(a, b, c, direction) => linear_bend(positions, *a, *b, *c, *direction),
@@ -200,13 +199,14 @@ impl TricPrimitive {
             Self::Rotation(coordinate) => coordinate.value(positions),
             Self::ScaledRotation(coordinate, factor) => Ok(coordinate.value(positions)? * factor),
             Self::OutOfPlane(a, b, c, d) => out_of_plane(positions, *a, *b, *c, *d),
-        }
+        }?;
+        finite_scalar(value, "TRIC coordinate value")
     }
 
     /// Cartesian derivative of this coordinate.
     pub fn derivative(&self, positions: ArrayView1<'_, f64>) -> Result<Array1<f64>, SaddleError> {
         check_positions(positions)?;
-        match self {
+        let derivative = match self {
             Self::Distance(a, b) => distance_derivative(positions, *a, *b),
             Self::Angle(a, b, c) => angle_derivative(positions, *a, *b, *c),
             Self::Translation(coordinate) => coordinate.gradient(positions),
@@ -217,7 +217,11 @@ impl TricPrimitive {
             Self::Dihedral(..) | Self::LinearBend(..) | Self::OutOfPlane(..) => {
                 central_derivative(self, positions)
             }
+        }?;
+        if derivative.iter().any(|value| !value.is_finite()) {
+            return Err(SaddleError::NonFinite("TRIC coordinate derivative"));
         }
+        Ok(derivative)
     }
 
     /// Numerical stability level from zero through six.
@@ -261,7 +265,7 @@ impl TricPrimitive {
                 difference += period;
             }
         }
-        Ok(difference)
+        finite_scalar(difference, "TRIC coordinate difference")
     }
 }
 
@@ -382,6 +386,9 @@ impl TricSystem {
             return Err(SaddleError::Shape(
                 "TRIC inversion dimensions do not match the coordinate system".into(),
             ));
+        }
+        if displacement.iter().any(|value| !value.is_finite()) {
+            return Err(SaddleError::NonFinite("TRIC internal displacement"));
         }
         let mut positions = start.to_owned();
         let mut remaining = displacement.to_owned();
@@ -653,8 +660,7 @@ pub fn trics_path(
                         splice_iterations: 0,
                     });
                 }
-                Err(error) if first_error.is_none() => first_error = Some(error),
-                Err(_) => {}
+                Err(error) => keep_candidate_error(&mut first_error, error),
             }
         }
         return Err(first_error.unwrap_or_else(|| {
@@ -931,12 +937,12 @@ fn fill_splice_segments_with_systems(
             }
         })
         .collect();
-    if spliced.len() > 2 && spliced[1].start == 0 {
+    while spliced.len() > 2 && spliced[1].start == 0 {
         spliced.remove(0);
         filled.remove(0);
         filled[0].start = 0;
     }
-    if spliced.len() > 2 && spliced[spliced.len() - 2].end == n_images - 1 {
+    while spliced.len() > 2 && spliced[spliced.len() - 2].end == n_images - 1 {
         spliced.pop();
         filled.pop();
         let last = filled.len() - 1;
@@ -1094,11 +1100,9 @@ fn splice_path(
         .iter()
         .all(|segment| segment.end - segment.start < 2)
     {
-        return Ok(TricsReport {
-            path: initial.to_owned(),
-            segments,
-            splice_iterations: 0,
-        });
+        return Err(SaddleError::Solver(
+            "TRICS cannot refine a path whose selected segments contain only endpoints".into(),
+        ));
     }
     let mut endpoints: Vec<[Array1<f64>; 2]> = segments
         .iter()
@@ -1112,11 +1116,6 @@ fn splice_path(
     let segment_candidates =
         segment_candidates(&segments, systems, initial, config.diagnostic_threshold);
     let mut interpolated = Vec::new();
-    let splice_length = segments
-        .windows(2)
-        .map(|pair| pair[0].end + 1 - pair[1].start)
-        .min()
-        .unwrap_or_else(|| splice_length(initial.nrows()));
     let mut damping = 1.0;
     let mut last_mismatch = f64::INFINITY;
     let mut decrease_streak = 0;
@@ -1126,27 +1125,33 @@ fn splice_path(
             let segment = segments[index];
             let endpoint = &endpoints[index];
             let mut result = None;
+            let mut candidate_error = None;
             for &system in &segment_candidates[index] {
-                if let Ok(path) = interpolate_tric_segment(
+                match interpolate_tric_segment(
                     &systems[system],
                     endpoint[0].view(),
                     endpoint[1].view(),
                     segment.end - segment.start + 1,
                     &config.inversion,
                 ) {
-                    result = Some((system, path));
-                    break;
+                    Ok(path) => {
+                        result = Some((system, path));
+                        break;
+                    }
+                    Err(error) => keep_candidate_error(&mut candidate_error, error),
                 }
             }
             let Some((system, path)) = result else {
-                return Err(SaddleError::Solver(
-                    "TRICS could not interpolate a selected segment".into(),
-                ));
+                return Err(candidate_error.unwrap_or_else(|| {
+                    SaddleError::Solver(
+                        "TRICS found no candidate system for a selected segment".into(),
+                    )
+                }));
             };
             segments[index].system = system;
             interpolated.push(path);
         }
-        let mismatch = splice_mismatch(&interpolated, splice_length);
+        let mismatch = splice_mismatch(&interpolated, &segments);
         if mismatch <= config.splice_tolerance {
             let path = concatenate_segments(initial.nrows(), &segments, &interpolated);
             return Ok(TricsReport {
@@ -1165,26 +1170,24 @@ fn splice_path(
             damping = (damping * SPLICE_DAMPING_REDUCTION).max(SPLICE_DAMPING_MINIMUM);
         }
         last_mismatch = mismatch;
-        update_splice_endpoints(&interpolated, &mut endpoints, splice_length, damping);
+        update_splice_endpoints(&interpolated, &mut endpoints, &segments, damping);
     }
     Err(SaddleError::Solver(
         "TRICS splicing did not converge".into(),
     ))
 }
 
-fn splice_mismatch(paths: &[Array2<f64>], splice_length: usize) -> f64 {
+fn splice_mismatch(paths: &[Array2<f64>], segments: &[TricsSegment]) -> f64 {
     let mut mismatch = 0.0_f64;
     for pair in 0..paths.len() - 1 {
-        let left_end = paths[pair].nrows() - 1;
-        let left_start = left_end + 1 - splice_length;
-        mismatch = mismatch.max(max_atom_difference(
-            &paths[pair].row(left_start).to_owned(),
-            &paths[pair + 1].row(0).to_owned(),
-        ));
-        mismatch = mismatch.max(max_atom_difference(
-            &paths[pair].row(left_end).to_owned(),
-            &paths[pair + 1].row(splice_length - 1).to_owned(),
-        ));
+        let left_start = segments[pair + 1].start - segments[pair].start;
+        let right_end = segments[pair].end - segments[pair + 1].start;
+        for right_row in 0..=right_end {
+            mismatch = mismatch.max(max_atom_difference(
+                &paths[pair].row(left_start + right_row).to_owned(),
+                &paths[pair + 1].row(right_row).to_owned(),
+            ));
+        }
     }
     mismatch
 }
@@ -1192,13 +1195,13 @@ fn splice_mismatch(paths: &[Array2<f64>], splice_length: usize) -> f64 {
 fn update_splice_endpoints(
     paths: &[Array2<f64>],
     endpoints: &mut [[Array1<f64>; 2]],
-    splice_length: usize,
+    segments: &[TricsSegment],
     damping: f64,
 ) {
     for pair in 0..paths.len() - 1 {
         let left_end = paths[pair].nrows() - 1;
-        let left_start = left_end + 1 - splice_length;
-        let right_end = splice_length - 1;
+        let left_start = segments[pair + 1].start - segments[pair].start;
+        let right_end = segments[pair].end - segments[pair + 1].start;
         let new_left_end = &paths[pair + 1].row(right_end) * damping
             + &paths[pair].row(left_end) * (1.0 - damping);
         let new_right_start =
@@ -1314,7 +1317,7 @@ fn aligned_max_atom_difference(
     Ok(maximum)
 }
 
-fn check_trics_config(config: &TricsConfig) -> Result<(), SaddleError> {
+pub(crate) fn check_trics_config(config: &TricsConfig) -> Result<(), SaddleError> {
     check_config(&config.coordinates)?;
     check_inversion_config(&config.inversion)?;
     if config.diagnostic_threshold > 6
@@ -1384,14 +1387,51 @@ fn check_same_positions(
     Ok(())
 }
 
+fn finite_scalar(value: f64, context: &'static str) -> Result<f64, SaddleError> {
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(SaddleError::NonFinite(context))
+    }
+}
+
+fn candidate_error_priority(error: &SaddleError) -> u8 {
+    match error {
+        SaddleError::NonFinite(_) => 4,
+        SaddleError::Shape(_) | SaddleError::Invalid(_) | SaddleError::Surface(_) => 3,
+        SaddleError::Stalled(_)
+        | SaddleError::NotEquilibrated { .. }
+        | SaddleError::InsufficientEffectiveSamples { .. } => 2,
+        SaddleError::Solver(_) => 1,
+    }
+}
+
+fn keep_candidate_error(best: &mut Option<SaddleError>, error: SaddleError) {
+    if best
+        .as_ref()
+        .is_none_or(|current| candidate_error_priority(&error) > candidate_error_priority(current))
+    {
+        *best = Some(error);
+    }
+}
+
 fn atom(positions: ArrayView1<'_, f64>, index: usize) -> Result<[f64; 3], SaddleError> {
-    let start = 3 * index;
-    if start + 2 >= positions.len() {
+    let start = index
+        .checked_mul(3)
+        .ok_or_else(|| SaddleError::Shape("TRIC atom index exceeds the geometry".into()))?;
+    let y = start
+        .checked_add(1)
+        .ok_or_else(|| SaddleError::Shape("TRIC atom index exceeds the geometry".into()))?;
+    let z = start
+        .checked_add(2)
+        .ok_or_else(|| SaddleError::Shape("TRIC atom index exceeds the geometry".into()))?;
+    let (Some(&x), Some(&y), Some(&z)) = (positions.get(start), positions.get(y), positions.get(z))
+    else {
         return Err(SaddleError::Shape(
             "TRIC atom index exceeds the geometry".into(),
         ));
-    }
-    Ok([positions[start], positions[start + 1], positions[start + 2]])
+    };
+    Ok([x, y, z])
 }
 
 fn sub(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
@@ -1419,7 +1459,10 @@ fn scale(vector: [f64; 3], factor: f64) -> [f64; 3] {
 }
 
 fn distance(positions: ArrayView1<'_, f64>, left: usize, right: usize) -> Result<f64, SaddleError> {
-    let length = norm(sub(atom(positions, left)?, atom(positions, right)?));
+    let length = finite_scalar(
+        norm(sub(atom(positions, left)?, atom(positions, right)?)),
+        "TRIC distance",
+    )?;
     if length > VECTOR_TOLERANCE {
         Ok(length)
     } else {
@@ -1435,7 +1478,7 @@ fn distance_derivative(
     right: usize,
 ) -> Result<Array1<f64>, SaddleError> {
     let vector = sub(atom(positions, left)?, atom(positions, right)?);
-    let length = norm(vector);
+    let length = finite_scalar(norm(vector), "TRIC distance derivative length")?;
     if length <= VECTOR_TOLERANCE {
         return Err(SaddleError::Invalid(
             "TRIC distance has coincident atoms".into(),
@@ -1446,6 +1489,9 @@ fn distance_derivative(
     for axis in 0..3 {
         derivative[3 * left + axis] = unit[axis];
         derivative[3 * right + axis] = -unit[axis];
+    }
+    if derivative.iter().any(|value| !value.is_finite()) {
+        return Err(SaddleError::NonFinite("TRIC distance derivative"));
     }
     Ok(derivative)
 }
@@ -1458,19 +1504,19 @@ fn angle(
 ) -> Result<f64, SaddleError> {
     let u = sub(atom(positions, left)?, atom(positions, center)?);
     let v = sub(atom(positions, right)?, atom(positions, center)?);
-    let denominator = norm(u) * norm(v);
+    let denominator = finite_scalar(norm(u) * norm(v), "TRIC angle leg product")?;
     if denominator <= VECTOR_TOLERANCE {
         return Err(SaddleError::Invalid(
             "TRIC angle has a zero length leg".into(),
         ));
     }
-    let raw_cosine = dot(u, v) / denominator;
+    let raw_cosine = finite_scalar(dot(u, v) / denominator, "TRIC angle cosine")?;
     let cosine = if (-1.0..=1.0).contains(&raw_cosine) {
         raw_cosine
     } else {
         raw_cosine.signum()
     };
-    Ok(cosine.acos())
+    finite_scalar(cosine.acos(), "TRIC angle")
 }
 
 fn angle_derivative(
@@ -1481,9 +1527,18 @@ fn angle_derivative(
 ) -> Result<Array1<f64>, SaddleError> {
     let u = sub(atom(positions, left)?, atom(positions, center)?);
     let v = sub(atom(positions, right)?, atom(positions, center)?);
-    let (nu, nv) = (norm(u), norm(v));
-    let cosine = dot(u, v) / (nu * nv);
-    let sine = (1.0 - cosine * cosine).max(0.0).sqrt();
+    let (nu, nv) = (
+        finite_scalar(norm(u), "TRIC angle derivative left length")?,
+        finite_scalar(norm(v), "TRIC angle derivative right length")?,
+    );
+    let cosine = finite_scalar(
+        dot(u, v) / finite_scalar(nu * nv, "TRIC angle derivative leg product")?,
+        "TRIC angle derivative cosine",
+    )?;
+    let sine = finite_scalar(
+        (1.0 - cosine * cosine).max(0.0).sqrt(),
+        "TRIC angle derivative sine",
+    )?;
     if nu <= VECTOR_TOLERANCE || nv <= VECTOR_TOLERANCE || sine <= VECTOR_TOLERANCE {
         return Err(SaddleError::Invalid(
             "TRIC angle derivative is singular".into(),
@@ -1510,6 +1565,9 @@ fn angle_derivative(
         derivative[3 * left + axis] = left_gradient[axis];
         derivative[3 * center + axis] = center_gradient[axis];
         derivative[3 * right + axis] = right_gradient[axis];
+    }
+    if derivative.iter().any(|value| !value.is_finite()) {
+        return Err(SaddleError::NonFinite("TRIC angle derivative"));
     }
     Ok(derivative)
 }
@@ -2469,9 +2527,152 @@ mod tests {
             [left.row(0).to_owned(), left.row(4).to_owned()],
             [right.row(0).to_owned(), right.row(4).to_owned()],
         ];
-        update_splice_endpoints(&[left, right], &mut endpoints, 2, 1.0);
+        let segments = [
+            TricsSegment {
+                start: 0,
+                end: 4,
+                system: 0,
+            },
+            TricsSegment {
+                start: 3,
+                end: 7,
+                system: 1,
+            },
+        ];
+        update_splice_endpoints(&[left, right], &mut endpoints, &segments, 1.0);
         assert_eq!(endpoints[0][1], array![11.0, 0.0, 0.0]);
         assert_eq!(endpoints[1][0], array![3.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn splice_mismatch_checks_width_four_interior_rows() {
+        let left = array![
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [3.0, 0.0, 0.0],
+            [4.0, 0.0, 0.0]
+        ];
+        let right = array![
+            [1.0, 0.0, 0.0],
+            [20.0, 0.0, 0.0],
+            [3.0, 0.0, 0.0],
+            [4.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0]
+        ];
+        let segments = [
+            TricsSegment {
+                start: 0,
+                end: 5,
+                system: 0,
+            },
+            TricsSegment {
+                start: 2,
+                end: 7,
+                system: 1,
+            },
+        ];
+        assert!(splice_mismatch(&[left, right], &segments) > 10.0);
+    }
+
+    #[test]
+    fn splice_mismatch_checks_width_six_interior_rows() {
+        let mut left = Array2::zeros((8, 3));
+        let mut right = Array2::zeros((8, 3));
+        for row in 0..6 {
+            left[(row + 2, 0)] = row as f64;
+            right[(row, 0)] = row as f64;
+        }
+        right[(3, 0)] = 30.0;
+        let segments = [
+            TricsSegment {
+                start: 0,
+                end: 7,
+                system: 0,
+            },
+            TricsSegment {
+                start: 2,
+                end: 9,
+                system: 1,
+            },
+        ];
+        assert!(splice_mismatch(&[left, right], &segments) > 20.0);
+    }
+
+    #[test]
+    fn splice_mismatch_uses_each_pair_overlap() {
+        let segments = [
+            TricsSegment {
+                start: 0,
+                end: 9,
+                system: 0,
+            },
+            TricsSegment {
+                start: 5,
+                end: 24,
+                system: 1,
+            },
+            TricsSegment {
+                start: 19,
+                end: 44,
+                system: 2,
+            },
+        ];
+        let paths = segments
+            .iter()
+            .map(|segment| {
+                Array2::from_shape_fn((segment.end - segment.start + 1, 3), |(row, axis)| {
+                    if axis == 0 {
+                        (segment.start + row) as f64
+                    } else {
+                        0.0
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(splice_mismatch(&paths, &segments), 0.0);
+    }
+
+    #[test]
+    fn forty_five_image_splice_prunes_every_subsumed_boundary_segment() {
+        let mut diagnostic = Array2::from_elem((45, 45), 3_u8);
+        let leading = [
+            TricsSegment {
+                start: 0,
+                end: 0,
+                system: 0,
+            },
+            TricsSegment {
+                start: 1,
+                end: 1,
+                system: 1,
+            },
+            TricsSegment {
+                start: 2,
+                end: 20,
+                system: 2,
+            },
+            TricsSegment {
+                start: 21,
+                end: 44,
+                system: 21,
+            },
+        ];
+        for segment in leading {
+            for image in segment.start..=segment.end {
+                diagnostic[(segment.system, image)] = 0;
+            }
+        }
+        let filled = fill_splice_segments_with_systems(&leading, diagnostic.view(), 0, 6, 45);
+        assert_eq!(
+            filled
+                .iter()
+                .map(|segment| (segment.start, segment.end))
+                .collect::<Vec<_>>(),
+            vec![(0, 23), (18, 44)]
+        );
     }
 
     #[test]
@@ -2595,7 +2796,7 @@ mod tests {
     }
 
     #[test]
-    fn three_images_in_two_segments_report_no_splice() {
+    fn three_images_in_two_segments_reject_an_unchanged_refinement() {
         let angles = [0.0_f64, 30.0, 60.0];
         let mut initial = Array2::zeros((angles.len(), 9));
         for (image, degrees) in angles.into_iter().enumerate() {
@@ -2605,10 +2806,11 @@ mod tests {
                 .assign(&array![-1.0, 0.0, 0.0, 0.0, 0.0, 0.0, cosine, sine, 0.0]);
         }
         let config = TricsConfig::default().with_diagnostic_threshold(0);
-        let report = trics_path(initial.view(), &config).unwrap();
-        assert_eq!(report.segments.len(), 2);
-        assert_eq!(report.splice_iterations, 0);
-        assert_eq!(report.path, initial);
+        let result = trics_path(initial.view(), &config);
+        assert!(
+            matches!(&result, Err(SaddleError::Solver(reason)) if reason.contains("cannot refine")),
+            "{result:?}"
+        );
     }
 
     #[test]
@@ -2821,6 +3023,50 @@ mod tests {
                 &TricsConfig::default().with_diagnostic_threshold(7)
             ),
             Err(SaddleError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn large_finite_coordinates_reject_non_finite_derived_values() {
+        let huge_distance = array![1.0e308, 0.0, 0.0, -1.0e308, 0.0, 0.0];
+        assert!(matches!(
+            TricPrimitive::Distance(0, 1).value(huge_distance.view()),
+            Err(SaddleError::NonFinite(_))
+        ));
+        assert!(matches!(
+            TricPrimitive::Distance(0, 1).derivative(huge_distance.view()),
+            Err(SaddleError::NonFinite(_))
+        ));
+
+        let huge_angle = array![1.0e308, 1.0e308, 0.0, 0.0, 0.0, 0.0, -1.0e308, 1.0e308, 0.0];
+        assert!(matches!(
+            TricPrimitive::Angle(0, 1, 2).value(huge_angle.view()),
+            Err(SaddleError::NonFinite(_))
+        ));
+        assert!(matches!(
+            TricPrimitive::Angle(0, 1, 2).derivative(huge_angle.view()),
+            Err(SaddleError::NonFinite(_))
+        ));
+    }
+
+    #[test]
+    fn candidate_failure_keeps_the_most_informative_error() {
+        let mut error = Some(SaddleError::Solver("generic failure".into()));
+        keep_candidate_error(&mut error, SaddleError::Invalid("bad chart".into()));
+        keep_candidate_error(&mut error, SaddleError::NonFinite("TRIC candidate"));
+        keep_candidate_error(&mut error, SaddleError::Solver("later failure".into()));
+        assert!(matches!(
+            error,
+            Some(SaddleError::NonFinite("TRIC candidate"))
+        ));
+    }
+
+    #[test]
+    fn atom_rejects_overflowing_index_arithmetic() {
+        let positions = array![0.0, 0.0, 0.0];
+        assert!(matches!(
+            atom(positions.view(), usize::MAX),
+            Err(SaddleError::Shape(_))
         ));
     }
 

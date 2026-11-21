@@ -1235,8 +1235,11 @@ rgsaddle_status_t rgsaddle_idpp_path(int64_t n_images, int64_t n_atoms,
  * image, low diagnostic segments are interpolated in their internal metrics,
  * and overlapping endpoints are spliced to `splice_tolerance`. The published
  * tolerance is 0.0018 Angstrom. A diagnostic maze with no stable route, a
- * coordinate singularity that damped inversion cannot pass, or an inversion
- * or splice that does not converge returns `RGSADDLE_SOLVER`.
+ * coordinate singularity that damped inversion cannot pass, a requested
+ * refinement with no interior image, or an inversion or splice that does not
+ * converge returns `RGSADDLE_SOLVER`. Invalid controls return
+ * `RGSADDLE_INVALID_PARAMETER`; non-finite input or derived geometry returns
+ * `RGSADDLE_ERROR`.
  */
 rgsaddle_status_t rgsaddle_trics_path(
     int64_t n_images, int64_t n_atoms, const double *initial,

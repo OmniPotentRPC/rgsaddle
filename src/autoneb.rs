@@ -182,6 +182,7 @@ impl TricsInterpolation {
         if let crate::idpp::TricsSeed::Idpp(idpp) = &config.seed {
             crate::idpp::check_config(idpp)?;
         }
+        crate::trics::check_trics_config(&config.trics)?;
         Ok(Self { config })
     }
 }
@@ -2567,6 +2568,13 @@ mod tests {
         ));
         assert!(matches!(
             TricsInterpolation::new(None, bad_seed),
+            Err(SaddleError::Invalid(_))
+        ));
+
+        let bad_trics = crate::TricsStartConfig::default()
+            .with_trics(crate::TricsConfig::default().with_max_splice_iterations(0));
+        assert!(matches!(
+            TricsInterpolation::new(None, bad_trics),
             Err(SaddleError::Invalid(_))
         ));
     }
