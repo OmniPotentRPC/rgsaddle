@@ -173,6 +173,87 @@ static rgsaddle_status_t two_atom_well(void *user,
   return RGSADDLE_OK;
 }
 
+static rgsaddle_status_t diagonal_surface(void *user,
+                                          rgsaddle_surface_request_t *req) {
+  (void)user;
+  static const double curv[6] = {-2.0, 1.0, 4.0, 8.0, 2.0, 3.0};
+  const int64_t rows = (req->flags & RGSADDLE_REQ_ONE_IMAGE) ? 1 : req->n_images;
+  for (int64_t r = 0; r < rows; ++r) {
+    const double *p = req->positions + 6 * r;
+    double *g = req->gradients + 6 * r;
+    double e = 0.0;
+    for (int i = 0; i < 6; ++i) {
+      const double c = curv[i];
+      e += 0.5 * c * p[i] * p[i];
+      g[i] = c * p[i];
+    }
+    req->energies[r] = e;
+  }
+  return RGSADDLE_OK;
+}
+
+static RgsaddleMinMode *new_dimer_session(double rotation_tol, uint32_t minor, uint64_t flags,
+                                          double rotation_angle_tol) {
+  rgsaddle_minmode_config_t cfg;
+  memset(&cfg, 0, sizeof cfg);
+  cfg.version.major = RGSADDLE_ABI_MAJOR;
+  cfg.version.minor = minor;
+  cfg.flags = flags;
+  cfg.kind = RGSADDLE_MINMODE_DIMER;
+  cfg.method = RGSADDLE_METHOD_FIRE;
+  cfg.dr = 1e-3;
+  cfg.rotation_tol = rotation_tol;
+  cfg.max_rotations = 20;
+  cfg.krylov_dim = 12;
+  cfg.force_tol = 1e-3;
+  cfg.max_move = 0.2;
+  cfg.rotation_angle_tol = rotation_angle_tol;
+  cfg.difference = RGSADDLE_DIFFERENCE_FORWARD;
+  const double x[6] = {0.3, 0.2, 0.1, 0.4, 0.1, 0.2};
+  const double mode[6] = {0.5, 0.5, 0.5, 0.5, 0.0, 0.0};
+  return rgsaddle_minmode_create(&cfg, 2, x, mode);
+}
+
+static int minmode_rotations(RgsaddleMinMode *session) {
+  rgsaddle_report_t rep;
+  memset(&rep, 0, sizeof rep);
+  if (rgsaddle_minmode_estimate(session, diagonal_surface, NULL, &rep) != RGSADDLE_OK) {
+    return -1;
+  }
+  return (int)rep.rotations;
+}
+
+static int test_minmode_rotation_angle_defaults_and_torque_window(void) {
+  RgsaddleMinMode *legacy = new_dimer_session(1e-8, RGSADDLE_ABI_MINOR - 1, 0, 0.0);
+  RgsaddleMinMode *defaulted = new_dimer_session(1e-8, RGSADDLE_ABI_MINOR, 0, 0.0);
+  RgsaddleMinMode *explicit_zero = new_dimer_session(
+      1e-8, RGSADDLE_ABI_MINOR, RGSADDLE_MINMODE_EXPLICIT_ROTATION_ANGLE_TOL, 0.0);
+  RgsaddleMinMode *nonzero = new_dimer_session(1e-8, RGSADDLE_ABI_MINOR, 0, 1e-2);
+  CHECK(legacy != NULL && defaulted != NULL && explicit_zero != NULL && nonzero != NULL,
+        "minmode create for angle-stop tests");
+  const int legacy_rotations = minmode_rotations(legacy);
+  const int default_rotations = minmode_rotations(defaulted);
+  const int explicit_zero_rotations = minmode_rotations(explicit_zero);
+  const int nonzero_rotations = minmode_rotations(nonzero);
+  CHECK(legacy_rotations > 0 && default_rotations > 0 && explicit_zero_rotations > 0 &&
+            nonzero_rotations > 0,
+        "minmode estimate returns rotations");
+  CHECK(legacy_rotations > default_rotations, "legacy minor keeps zero as stop-off");
+  CHECK(legacy_rotations == explicit_zero_rotations, "explicit zero keeps stop-off");
+  CHECK(nonzero_rotations <= legacy_rotations, "nonzero keeps angle stop on");
+  CHECK(rgsaddle_minmode_set_torque_window(defaulted, -1) == RGSADDLE_OK,
+        "set_torque_window -1");
+  CHECK(rgsaddle_minmode_set_torque_window(defaulted, 0) == RGSADDLE_OK,
+        "set_torque_window 0");
+  CHECK(rgsaddle_minmode_set_torque_window(defaulted, 1) == RGSADDLE_OK,
+        "set_torque_window 1");
+  rgsaddle_minmode_free(legacy);
+  rgsaddle_minmode_free(defaulted);
+  rgsaddle_minmode_free(explicit_zero);
+  rgsaddle_minmode_free(nonzero);
+  return 0;
+}
+
 static int test_status_and_gates(void) {
   for (int c = -15; c <= 0; ++c) {
     const char *name = rgsaddle_status_name((rgsaddle_status_t)c);
@@ -859,6 +940,9 @@ int main(void) {
     return 1;
   }
   if (test_band_minmode_index1_and_sessions_cdylib() != 0) {
+    return 1;
+  }
+  if (test_minmode_rotation_angle_defaults_and_torque_window() != 0) {
     return 1;
   }
   printf("RGSADDLE_CAPI_CONTRACTS_OK\n");

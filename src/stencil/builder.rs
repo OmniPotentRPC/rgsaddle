@@ -634,7 +634,10 @@ fn mode_session(builder: &PointBuilder, mode: Array1<f64>) -> Result<MinModeSess
         .with_method(Method::fire(FireKind::V2))
         .with_seed_curvature(false)
         .with_saddle_check(None);
-    if let Some(rotation_angle_tol) = builder.rotation_angle_tol {
+    if kind == MinModeKind::Dimer {
+        let rotation_angle_tol = builder
+            .rotation_angle_tol
+            .unwrap_or_else(|| MinModeConfig::default().rotation_angle_tol);
         config = config.with_rotation_angle_tol(rotation_angle_tol);
     }
     if builder.preset == Preset::Art || builder.artn.is_some() {

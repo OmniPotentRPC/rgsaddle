@@ -4110,16 +4110,26 @@ mod torque_window_abi_tests {
     }
 
     fn session(rotation_tol: f64) -> *mut RgsaddleMinMode {
-        session_of(0, rotation_tol)
+        session_of_with_rotation_angle(0, RGSADDLE_ABI_MINOR, rotation_tol, 0, 0.0)
     }
 
     fn session_of(kind: i32, rotation_tol: f64) -> *mut RgsaddleMinMode {
+        session_of_with_rotation_angle(kind, RGSADDLE_ABI_MINOR, rotation_tol, 0, 0.0)
+    }
+
+    fn session_of_with_rotation_angle(
+        kind: i32,
+        minor: u32,
+        rotation_tol: f64,
+        flags: u64,
+        rotation_angle_tol: f64,
+    ) -> *mut RgsaddleMinMode {
         let cfg = RgsaddleMinModeConfig {
             version: RgsaddleVersion {
                 major: RGSADDLE_ABI_MAJOR,
-                minor: RGSADDLE_ABI_MINOR,
+                minor,
             },
-            flags: 0,
+            flags,
             kind,
             method: 0,
             dr: 1e-3,
@@ -4128,7 +4138,7 @@ mod torque_window_abi_tests {
             krylov_dim: 12,
             force_tol: 1e-3,
             max_move: 0.2,
-            rotation_angle_tol: 0.0,
+            rotation_angle_tol,
             difference: 0,
             reserved: 0,
         };
@@ -4139,8 +4149,8 @@ mod torque_window_abi_tests {
         sess
     }
 
-    fn rotations(rotation_tol: f64, window: Option<i32>) -> i64 {
-        let sess = session(rotation_tol);
+    fn rotations_with_flags(rotation_tol: f64, flags: u64, window: Option<i32>) -> i64 {
+        let sess = session_of_with_rotation_angle(0, RGSADDLE_ABI_MINOR, rotation_tol, flags, 0.0);
         if let Some(window) = window {
             assert_eq!(
                 unsafe { rgsaddle_minmode_set_torque_window(sess, window) },
@@ -4159,6 +4169,14 @@ mod torque_window_abi_tests {
         assert_eq!(status, RGSADDLE_OK);
         unsafe { rgsaddle_minmode_free(sess) };
         unsafe { report.assume_init() }.rotations
+    }
+
+    fn rotations(rotation_tol: f64, window: Option<i32>) -> i64 {
+        rotations_with_flags(
+            rotation_tol,
+            RGSADDLE_MINMODE_EXPLICIT_ROTATION_ANGLE_TOL,
+            window,
+        )
     }
 
     #[test]
@@ -4234,6 +4252,9 @@ mod torque_window_abi_tests {
         assert_eq!(rotations(0.1, None), rotations(0.1, Some(1)));
         assert_eq!(rotations(1e-6, None), rotations(1e-6, Some(-1)));
         assert_eq!(rotations(1e-6, None), rotations(1e-6, Some(0)));
+
+        let defaulted = |window| rotations_with_flags(0.1, 0, window);
+        assert_eq!(defaulted(None), defaulted(Some(0)));
     }
 
     #[test]
@@ -4243,8 +4264,63 @@ mod torque_window_abi_tests {
         assert_eq!(rotations(1e-6, Some(1)), rotations(0.1, None));
     }
 
+    #[test]
+    fn minmode_rotation_angle_tolerance_is_minor_gated() {
+        let estimate = |session: *mut RgsaddleMinMode| -> i64 {
+            let mut report = std::mem::MaybeUninit::<RgsaddleReport>::zeroed();
+            let status = unsafe {
+                rgsaddle_minmode_estimate(
+                    session,
+                    Some(quadratic_cb),
+                    std::ptr::null_mut(),
+                    report.as_mut_ptr(),
+                )
+            };
+            assert_eq!(status, RGSADDLE_OK);
+            unsafe { report.assume_init() }.rotations
+        };
+
+        // The previous minor keeps the legacy meaning of 0.0: angle stop off.
+        let legacy = session_of_with_rotation_angle(0, RGSADDLE_ABI_MINOR - 1, 1e-8, 0, 0.0);
+        // The current minor with 0.0 and no flag keeps the Rust default angle stop.
+        let defaulted = session_of_with_rotation_angle(0, RGSADDLE_ABI_MINOR, 1e-8, 0, 0.0);
+        // The current minor with the explicit flag and 0.0 keeps the stop off.
+        let explicit_zero = session_of_with_rotation_angle(
+            0,
+            RGSADDLE_ABI_MINOR,
+            1e-8,
+            RGSADDLE_MINMODE_EXPLICIT_ROTATION_ANGLE_TOL,
+            0.0,
+        );
+        // Any minor with a nonzero explicit value keeps the stop on.
+        let explicit_nonzero = session_of_with_rotation_angle(0, RGSADDLE_ABI_MINOR, 1e-8, 0, 1e-2);
+
+        let legacy_rotations = estimate(legacy);
+        let defaulted_rotations = estimate(defaulted);
+        let explicit_zero_rotations = estimate(explicit_zero);
+        let explicit_nonzero_rotations = estimate(explicit_nonzero);
+
+        assert!(legacy_rotations > defaulted_rotations);
+        assert_eq!(legacy_rotations, explicit_zero_rotations);
+        assert!(explicit_nonzero_rotations <= legacy_rotations);
+        assert!(explicit_nonzero_rotations > 0);
+
+        unsafe {
+            rgsaddle_minmode_free(legacy);
+            rgsaddle_minmode_free(defaulted);
+            rgsaddle_minmode_free(explicit_zero);
+            rgsaddle_minmode_free(explicit_nonzero);
+        }
+    }
+
     fn stopped_rotations(length: f64) -> i64 {
-        let sess = session(1e-6);
+        let sess = session_of_with_rotation_angle(
+            0,
+            RGSADDLE_ABI_MINOR,
+            1e-6,
+            RGSADDLE_MINMODE_EXPLICIT_ROTATION_ANGLE_TOL,
+            0.0,
+        );
         assert_eq!(
             unsafe { rgsaddle_minmode_set_rotation_stop_length(sess, length) },
             RGSADDLE_OK

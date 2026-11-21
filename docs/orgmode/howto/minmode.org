@@ -130,14 +130,14 @@ These ~MinModeConfig~ fields set the cost of an estimate and of the translation:
 | ~max_move~ | Largest per-atom translation. A curvature that is not negative takes one step along the mode that moves the largest atom by this length, or one of this Euclidean norm under ~set_cg_translate~. The L-BFGS pairs and the FIRE velocity are kept while the mode turns by at most 45 degrees, and dropped past that cone | 0.2 |
 | ~seed_curvature~ | The first empty L-BFGS step uses \(H_0 = 1/\lvert\lambda\rvert\), and the first FIRE displacement uses that scale, when the step fits in ~max_move~. Later steps are the stepper's own. ~set_seed_curvature~ sets the same switch on a live session | off |
 
-From C, ~difference~ and ~rotation_angle_tol~ sit in ~rgsaddle_minmode_config_t~ and are read only when the config's ~version.minor~ is 5 or more. A zeroed C struct leaves ~rotation_angle_tol~ at 0, so the angle test stays off. The C++ helper ~minmode_config~ does that, and sets ~rotation_tol~ to 1e-3, which is loose enough for the torque window. The Python point stencil does not take ~rotation_angle_tol~; it uses the Rust default of five degrees. ~rotation_tol~ on that stencil defaults to 1e-4.
+From C, ~difference~ and ~rotation_angle_tol~ sit in ~rgsaddle_minmode_config_t~ and are read only when the config's ~version.minor~ is 5 or more. For config minors 5 through 61, ~rotation_angle_tol~ is read as given and a zeroed C struct keeps the angle test off. From minor 62, ~rotation_angle_tol = 0~ keeps the Rust default angle stop unless flag bit 0, ~RGSADDLE_MINMODE_EXPLICIT_ROTATION_ANGLE_TOL~, is set. The C++ helper ~minmode_config~ leaves that flag clear and ~rotation_angle_tol~ at 0, so at minor 62 it keeps the default angle stop and at older minors it keeps the stop off. It also sets ~rotation_tol~ to 1e-3, which is loose enough for the torque window. The Python point stencil does not take ~rotation_angle_tol~; it uses the Rust default of five degrees. ~rotation_tol~ on that stencil defaults to 1e-4.
 
 ~set_torque_window~ sets the torque window apart from ~rotation_tol~.
 From C ABI minor 32 ~rgsaddle_minmode_set_torque_window~ does the same.
 ~Some(false)~ keeps a loose residual without the window.
 eOn's improved dimer does that with its ~torque_min~ of 0.1.
 ~Some(true)~ adds the window to a tighter residual or to an improved dimer.
-~None~, the default, infers the window from ~rotation_tol~ for Lanczos and for a dimer with ~rotation_angle_tol~ set to 0.
+~None~, the default, infers the window from ~rotation_tol~ for Lanczos and for a dimer whose angle stop is off.
 Lanczos reads the same window, from C ABI minor 41 as well.
 Its first two vectors span the plane of a steepest-descent dimer rotation, and their Ritz vector is that dimer turned to the lowest curvature in the plane (Zeng, Xiao, and Henkelman, J. Chem. Phys. 140, 044115 (2014), doi:10.1063/1.4862410), so the window ends both estimates on the same rotational force.
 ~Some(false)~ runs a Lanczos estimate to its residual, as before minor 41.

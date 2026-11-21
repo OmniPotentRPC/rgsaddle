@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 60u
+#define RGSADDLE_ABI_MINOR 62u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -102,6 +102,15 @@ extern "C" {
  * rgsaddle_band_create_solid.
  */
 #define RGSADDLE_BAND_STRING (1ull << 5)
+
+/**
+ * Min-mode config flags bit 0, ABI minor 62. rotation_angle_tol was
+ * set explicitly. With the bit clear and version.minor >= 62,
+ * rgsaddle_minmode_create keeps the Rust default angle tolerance (five
+ * degrees) when rotation_angle_tol is 0. With the bit set, the call
+ * reads rotation_angle_tol as given, including 0.
+ */
+#define RGSADDLE_MINMODE_EXPLICIT_ROTATION_ANGLE_TOL (1ull << 0)
 
 /** Request flags bit 0. positions and gradients are one image. */
 #define RGSADDLE_REQ_ONE_IMAGE (1ull << 0)
@@ -582,10 +591,11 @@ typedef struct {
    * Minor 5: the dimer also stops rotating when an iteration's optimal
    * angle falls under this (radians). The Rust default is five degrees
    * (Kästner and Sherwood, J. Chem. Phys. 128, 014106 (2008); eOn
-   * converged_angle). Zero disables the angle test. A C caller stores
-   * the value it writes, so a positive value also stops the rotation
-   * under a rotation_tol tighter than 1e-4; ignored when
-   * version.minor < 5.
+   * converged_angle). For config minors 5 through 61 this field is read
+   * as given, and 0 disables the angle test. From minor 62, a value of
+   * 0 keeps the Rust default unless
+   * RGSADDLE_MINMODE_EXPLICIT_ROTATION_ANGLE_TOL is set; with that bit,
+   * 0 disables the test. Ignored when version.minor < 5.
    */
   double rotation_angle_tol;
   /** Minor 5: rgsaddle_difference_t for the Hessian actions. */
@@ -1243,8 +1253,9 @@ typedef enum {
  * refinement (see RGSADDLE_BAND_NO_MIN_MODE) with these controls:
  * the trigger is on the climbing image's largest per-atom force, the
  * minimum-mode config supplies only the mode estimate (kind, dr,
- * difference, rotation_tol, max_rotations, krylov_dim), and the climb
- * is P-RFO, so its method, force_tol and max_move are not read.
+ * difference, rotation_tol, rotation_angle_tol, max_rotations,
+ * krylov_dim), and the climb is P-RFO, so its method, force_tol and
+ * max_move are not read.
  */
 typedef struct {
   rgsaddle_version_t version;
@@ -1313,7 +1324,12 @@ rgsaddle_status_t rgsaddle_minmode_set_highs(RgsaddleMinMode *session, int32_t e
  * Lanczos or the improved dimer angle test is disabled
  * (rotation_angle_tol <= 0). From ABI minor 46 an improved dimer with
  * positive rotation_angle_tol leaves the classic window off unless
- * `window` is 1. From ABI minor 41 a Lanczos session reads it too: with the window
+ * `window` is 1. From ABI minor 62, a caller that leaves
+ * rotation_angle_tol at 0 with
+ * RGSADDLE_MINMODE_EXPLICIT_ROTATION_ANGLE_TOL clear uses the default
+ * improved-dimer angle stop and therefore leaves the classic window off
+ * at -1; setting the bit with 0 keeps the old classic-window inference.
+ * From ABI minor 41 a Lanczos session reads it too: with the window
  * on, an estimate stops once two Krylov vectors leave the Ritz residual
  * under 1, and 0 restores the estimate that runs to its residual.
  * Other values return RGSADDLE_INVALID_PARAMETER and leave the session

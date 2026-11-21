@@ -36,7 +36,7 @@ use crate::tangent::TangentKind;
 /// The RGSADDLE ABI MAJOR.
 pub const RGSADDLE_ABI_MAJOR: u32 = 1;
 /// The RGSADDLE ABI MINOR.
-pub const RGSADDLE_ABI_MINOR: u32 = 60;
+pub const RGSADDLE_ABI_MINOR: u32 = 62;
 
 /// A band, min-mode or OCI-NEB config of this minor or newer certifies
 /// the saddle index at convergence by default.
@@ -70,6 +70,10 @@ pub const RGSADDLE_BAND_SPLINE_REPARAM: u64 = 16;
 /// selects the not-a-knot spline, else the polyline).
 pub const RGSADDLE_BAND_STRING: u64 = 32;
 pub(crate) const BAND_STRING_MINOR: u32 = 44;
+/// Min-mode config bit 0 (ABI minor 62). `rotation_angle_tol` was set
+/// explicitly by the caller and must be read even when it is zero.
+pub const RGSADDLE_MINMODE_EXPLICIT_ROTATION_ANGLE_TOL: u64 = 1;
+const MINMODE_EXPLICIT_ROTATION_ANGLE_TOL_MINOR: u32 = 62;
 
 /// The trust-region reparametrization a band config asks for.
 pub(crate) fn rtr_reparametrization(cfg: &RgsaddleBandConfig) -> crate::Reparametrization {
@@ -223,11 +227,13 @@ pub struct RgsaddleMinModeConfig {
     pub force_tol: f64,
     /// Largest per-atom displacement, in the host's length unit.
     pub max_move: f64,
-    /// ABI minor 5: dimer rotation angle tolerance in radians. The Rust
-    /// default is five degrees; zero disables the test. A C config
-    /// stores the caller's value, so a positive value also stops the
-    /// rotation under a `rotation_tol` tighter than 1e-4. Read only when
-    /// the minor is 5 or more.
+    /// ABI minor 5: dimer rotation angle tolerance in radians. For
+    /// config minors 5 through 61 this value is read as given, including
+    /// zero, which disables the angle stop. From minor 62 a zero value
+    /// keeps the Rust default (five degrees) unless
+    /// [`RGSADDLE_MINMODE_EXPLICIT_ROTATION_ANGLE_TOL`] is set; with that
+    /// bit, zero disables the angle stop. Read only when the minor is 5
+    /// or more.
     pub rotation_angle_tol: f64,
     /// ABI minor 5: 0 forward difference, 1 central.
     pub difference: i32,
@@ -463,6 +469,49 @@ fn method_of(v: i32, memory: i64) -> Method {
         4 => Method::Ode12r,
         _ => Method::fire(FireKind::V2),
     }
+}
+
+fn minmode_config_from(cfg: &RgsaddleMinModeConfig) -> Option<MinModeConfig> {
+    if cfg.version.major != RGSADDLE_ABI_MAJOR {
+        return None;
+    }
+    let default_rotation_angle_tol = MinModeConfig::default().rotation_angle_tol;
+    let explicit_rotation_angle = cfg.version.minor >= MINMODE_EXPLICIT_ROTATION_ANGLE_TOL_MINOR
+        && (cfg.flags & RGSADDLE_MINMODE_EXPLICIT_ROTATION_ANGLE_TOL != 0
+            || cfg.rotation_angle_tol != 0.0);
+    Some(
+        MinModeConfig::default()
+            .with_kind(if cfg.kind == 1 {
+                MinModeKind::Lanczos
+            } else {
+                MinModeKind::Dimer
+            })
+            .with_dr(cfg.dr)
+            .with_rotation_tol(cfg.rotation_tol)
+            .with_rotation_angle_tol(if cfg.version.minor < 5 {
+                0.0
+            } else if cfg.version.minor < MINMODE_EXPLICIT_ROTATION_ANGLE_TOL_MINOR
+                || explicit_rotation_angle
+            {
+                cfg.rotation_angle_tol
+            } else {
+                default_rotation_angle_tol
+            })
+            .with_difference(if cfg.version.minor >= 5 && cfg.difference == 1 {
+                FiniteDifference::Central
+            } else {
+                FiniteDifference::Forward
+            })
+            .with_max_rotations(cfg.max_rotations as usize)
+            .with_krylov_dim(cfg.krylov_dim as usize)
+            .with_force_tol(cfg.force_tol)
+            .with_max_move(cfg.max_move)
+            .with_method(method_of(cfg.method, 0))
+            .with_seed_curvature(false)
+            .with_saddle_check(
+                (cfg.version.minor >= SADDLE_INDEX_MINOR).then(SaddleIndexCheck::default),
+            ),
+    )
 }
 
 fn stamp_report(out: &mut RgsaddleReport) {
@@ -1220,42 +1269,15 @@ pub unsafe extern "C" fn rgsaddle_minmode_create(
         return std::ptr::null_mut();
     }
     let cfg = unsafe { &*config };
-    if cfg.version.major != RGSADDLE_ABI_MAJOR {
-        return std::ptr::null_mut();
-    }
     let dof = (3 * n_atoms) as usize;
     let x = Array1::from(unsafe { slice::from_raw_parts(position, dof) }.to_vec());
     let m = Array1::from(unsafe { slice::from_raw_parts(mode, dof) }.to_vec());
     if cfg.method == 3 || cfg.method == 4 {
         return std::ptr::null_mut();
     }
-    let mm_config = MinModeConfig::default()
-        .with_kind(if cfg.kind == 1 {
-            MinModeKind::Lanczos
-        } else {
-            MinModeKind::Dimer
-        })
-        .with_dr(cfg.dr)
-        .with_rotation_tol(cfg.rotation_tol)
-        .with_rotation_angle_tol(if cfg.version.minor >= 5 {
-            cfg.rotation_angle_tol
-        } else {
-            0.0
-        })
-        .with_difference(if cfg.version.minor >= 5 && cfg.difference == 1 {
-            FiniteDifference::Central
-        } else {
-            FiniteDifference::Forward
-        })
-        .with_max_rotations(cfg.max_rotations as usize)
-        .with_krylov_dim(cfg.krylov_dim as usize)
-        .with_force_tol(cfg.force_tol)
-        .with_max_move(cfg.max_move)
-        .with_method(method_of(cfg.method, 0))
-        .with_seed_curvature(false)
-        .with_saddle_check(
-            (cfg.version.minor >= SADDLE_INDEX_MINOR).then(SaddleIndexCheck::default),
-        );
+    let Some(mm_config) = minmode_config_from(cfg) else {
+        return std::ptr::null_mut();
+    };
     match MinModeSession::new(mm_config, x, m) {
         Ok(session) => Box::into_raw(Box::new(RgsaddleMinMode { session, n_atoms })),
         Err(_) => std::ptr::null_mut(),

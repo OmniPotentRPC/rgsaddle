@@ -193,9 +193,9 @@ Every public configuration struct, its public fields, and the corresponding chai
 | =LammpsSystem= | =atomic_numbers= (=with_atomic_numbers=), =box_matrix= (=with_box_matrix=), =config_bytes= (=with_config_bytes=), =masses= (=with_masses=), =positions= (=with_positions=) |
 | =LammpsThermodynamicReference= | =energy=, =gradient=, =hessian=, =point= (=LammpsThermodynamicReference::new=) |
 | =LangevinConfig= | =blocks= (=with_blocks=), =burn_in= (=with_burn_in=), =control= (=with_control=), =friction= (=with_friction=), =hold_excluded= (=with_hold_excluded=), =integrator= (=with_integrator=), =records= (=with_records=), =region= (=with_region=), =retain= (=with_retain=), =seed= (=with_seed=), =stride= (=with_stride=), =thermal= (=with_thermal=), =time_step= (=with_time_step=) |
-| =LinebConfig= | =boltzmann= (=with_boltzmann=), =endpoint_scale= (=with_endpoint_scale=), =hbar= (=with_hbar=), =max_move= (=with_max_move=), =method= (=with_method=), =opt_tol= (=with_opt_tol=), =perp_tol= (=with_perp_tol=), =quadrature_pairs= (=with_quadrature_pairs=), =spring= (=with_spring=), =time_step= (=with_time_step=), =turning_width= (=with_turning_width=) |
+| =LinebConfig= | =boltzmann= (=with_boltzmann=), =endpoint_scale= (=with_endpoint_scale=), =gradient_end_tangents= (=with_gradient_end_tangents=), =hbar= (=with_hbar=), =max_move= (=with_max_move=), =method= (=with_method=), =opt_tol= (=with_opt_tol=), =perp_tol= (=with_perp_tol=), =quadrature_pairs= (=with_quadrature_pairs=), =spring= (=with_spring=), =time_step= (=with_time_step=), =turning_width= (=with_turning_width=) |
 | =MinModeConfig= | =artn= (=with_artn=), =difference= (=with_difference=), =dr= (=with_dr=), =force_tol= (=with_force_tol=), =kind= (=with_kind=), =krylov_dim= (=with_krylov_dim=), =max_move= (=with_max_move=), =max_rotations= (=with_max_rotations=), =method= (=with_method=), =rotation_angle_tol= (=with_rotation_angle_tol=), =rotation_tol= (=with_rotation_tol=), =saddle_check= (=with_saddle_check=), =seed_curvature= (=with_seed_curvature=) |
-| =MinModeRefine= | =alignment_tol= (=with_alignment_tol=), =climb_alignment= (=with_climb_alignment=), =curvature_retained= (=with_curvature_retained=), =difference= (=with_difference=), =dr= (=with_dr=), =kind= (=with_kind=), =krylov_dim= (=with_krylov_dim=), =lanczos_rel_tol= (=with_lanczos_rel_tol=), =max_rotations= (=with_max_rotations=), =max_steps= (=with_max_steps=), =min_overlap= (=with_min_overlap=), =refresh_interval= (=with_refresh_interval=), =restore_unhelpful= (=with_restore_unhelpful=), =retry_factor= (=with_retry_factor=), =rotation_tol= (=with_rotation_tol=), =stable_steps= (=with_stable_steps=), =trigger_factor= (=with_trigger_factor=), =trigger_force= (=with_trigger_force=) |
+| =MinModeRefine= | =alignment_tol= (=with_alignment_tol=), =climb_alignment= (=with_climb_alignment=), =curvature_retained= (=with_curvature_retained=), =difference= (=with_difference=), =dr= (=with_dr=), =kind= (=with_kind=), =krylov_dim= (=with_krylov_dim=), =lanczos_rel_tol= (=with_lanczos_rel_tol=), =max_rotations= (=with_max_rotations=), =max_steps= (=with_max_steps=), =min_overlap= (=with_min_overlap=), =refresh_interval= (=with_refresh_interval=), =restore_unhelpful= (=with_restore_unhelpful=), =retry_factor= (=with_retry_factor=), =rotation_angle_tol= (=with_rotation_angle_tol=), =rotation_tol= (=with_rotation_tol=), =stable_steps= (=with_stable_steps=), =trigger_factor= (=with_trigger_factor=), =trigger_force= (=with_trigger_force=) |
 | =OcinebConfig= | =angle_tol= (=with_angle_tol=), =band= (=with_band=), =max_mmf_steps= (=with_max_mmf_steps=), =minmode= (=with_minmode=), =restore_unhelpful= (=with_restore_unhelpful=), =stability_count= (=with_stability_count=), =trigger_factor= (=with_trigger_factor=), =trigger_force= (=with_trigger_force=) |
 | =PafiConfig= | =blocks= (=with_blocks=), =fix_com= (=with_fix_com=), =max_rounds= (=with_max_rounds=), =mobility= (=with_mobility=), =region= (=with_region=), =retain= (=with_retain=), =samples= (=with_samples=), =seed= (=with_seed=), =stride= (=with_stride=), =target_error= (=with_target_error=), =thermal= (=with_thermal=), =thermalize= (=with_thermalize=), =time_step= (=with_time_step=) |
 | =PairConfig= | =offset=, =orientation= (=PairConfig::new=) |
@@ -257,9 +257,11 @@ Dimer Polak-Ribiere history survives =set_position= and is cleared by =set_mode=
 A failed callback leaves it unchanged.
 =rgsaddle_minmode_config_t.difference= picks =RGSADDLE_DIFFERENCE_FORWARD= or =_CENTRAL=.
 Its =rotation_angle_tol= field stops a dimer rotation once the optimal angle falls under this tolerance in radians.
-The Rust default is five degrees, 0 turns the stop off, and a C config stores the value it is given.
+For config minors 5 through 61 this field is read as given, so 0 disables the angle stop.
+From minor 62, 0 keeps the Rust default unless flag bit 0, =RGSADDLE_MINMODE_EXPLICIT_ROTATION_ANGLE_TOL=, is set; then 0 disables it.
+The Rust default is five degrees. With an explicit 0 (legacy minors, or minor 62 with the explicit flag) the stop is off.
 Both fields are read only from a config whose version minor is 5 or newer.
-=RGSADDLE_ABI_MINOR= is 60.
+=RGSADDLE_ABI_MINOR= is 62.
 From minor 24, =rgsaddle_sella_saddle_set_symmetrized_ritz= sets =SellaSaddleConfig::symmetrized_ritz= from 0 or 1.
 It returns =RGSADDLE_INVALID_PARAMETER= for any other value.
 =rgsaddle_sella_saddle_set_small_system_atom_ceiling= (minor 25) sets =SellaSaddleConfig::small_system_atom_ceiling= from 0 or 1.
@@ -268,7 +270,8 @@ It returns =RGSADDLE_INVALID_PARAMETER= for any other value.
 Recommended when enabled: =alpha= 0.5, =offset= 1, =after= 0 (twice =force_tol= on the largest per-image force), =stability= 5 and =cubic= 1.
 Its window always reaches both neighbours of the climbing image, and the min-mode refinement waits for the zoom decision.
 =rgsaddle_minmode_set_torque_window= (minor 32) calls =MinModeSession::set_torque_window= with -1, 0 or 1.
-The value -1 infers the window as a new session does: on when =rotation_tol= is at least 1e-4 and the session is Lanczos or a dimer with =rotation_angle_tol= 0. A dimer with a positive =rotation_angle_tol= keeps it off unless the value is 1. 0 turns it off and 1 turns it on.
+The value -1 infers the window as a new session does: on when =rotation_tol= is at least 1e-4 and the session is Lanczos or a dimer whose angle stop is off. 0 turns it off and 1 turns it on.
+For config minors 5 through 61, =rotation_angle_tol= 0 keeps the angle stop off. From minor 62, =rotation_angle_tol= 0 keeps the Rust default unless =RGSADDLE_MINMODE_EXPLICIT_ROTATION_ANGLE_TOL= is set.
 It returns =RGSADDLE_INVALID_PARAMETER= for any other value.
 From minor 41 a Lanczos session reads it too.
 From minor 46, -1 leaves the window off for an improved dimer with a positive =rotation_angle_tol=.

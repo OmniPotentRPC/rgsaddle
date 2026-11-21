@@ -5,7 +5,7 @@
 #include <stddef.h>
 
 _Static_assert(RGSADDLE_ABI_MAJOR == 1u, "main ABI major");
-_Static_assert(RGSADDLE_ABI_MINOR == 60u, "ABI minor");
+_Static_assert(RGSADDLE_ABI_MINOR == 62u, "ABI minor");
 _Static_assert(RGSADDLE_LINEB_LINEAR_SEED == (1u << 0), "lineb flag bit 0");
 _Static_assert(RGSADDLE_LINEB_ENDPOINT_CONVERGENCE == (1u << 1), "lineb flag bit 1");
 _Static_assert(RGSADDLE_LINEB_PROJECTED_VERLET == (1u << 2), "lineb flag bit 2");
@@ -15,6 +15,8 @@ _Static_assert(RGSADDLE_LINEB_INTERPOLATED_HESSIAN == (1u << 4), "lineb flag bit
 _Static_assert(RGSADDLE_BAND_NO_MIN_MODE == (1ull << 3), "band flag bit 3");
 _Static_assert(RGSADDLE_BAND_SPLINE_REPARAM == (1ull << 4), "band flag bit 4");
 _Static_assert(RGSADDLE_BAND_STRING == (1ull << 5), "band flag bit 5");
+_Static_assert(RGSADDLE_MINMODE_EXPLICIT_ROTATION_ANGLE_TOL == (1ull << 0),
+               "minmode flag bit 0");
 _Static_assert(RGSADDLE_REPARAM_LINEAR == 0, "rgsaddle_reparametrization_t LINEAR");
 _Static_assert(RGSADDLE_REPARAM_NOT_A_KNOT == 1, "rgsaddle_reparametrization_t NOT_A_KNOT");
 _Static_assert(RGSADDLE_REQ_ONE_IMAGE == (1ull << 0), "request flag bit 0");

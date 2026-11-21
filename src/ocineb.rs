@@ -283,6 +283,7 @@ impl OcinebConfig {
             .with_dr(self.minmode.dr)
             .with_difference(self.minmode.difference)
             .with_rotation_tol(self.minmode.rotation_tol)
+            .with_rotation_angle_tol(self.minmode.rotation_angle_tol)
             .with_max_rotations(self.minmode.max_rotations)
     }
 }

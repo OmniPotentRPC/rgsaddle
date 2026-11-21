@@ -146,9 +146,11 @@ inline rgsaddle_minmode_config_t minmode_config() {
     c.max_rotations = 20;
     c.force_tol = 1e-3;
     c.max_move = 0.1;
-    // Left at 0 by the zero-initialized struct. The angle test is off.
-    // The Rust MinModeConfig default is five degrees; a C config stores
-    // the value written here.
+    // At ABI minor 62 and newer, rotation_angle_tol = 0 with
+    // RGSADDLE_MINMODE_EXPLICIT_ROTATION_ANGLE_TOL clear keeps the Rust
+    // default angle stop of five degrees.
+    // At minors 5 through 61, rotation_angle_tol = 0 disables the angle
+    // stop.
     return c;
 }
 
@@ -374,8 +376,11 @@ public:
         check(rgsaddle_minmode_set_highs(handle_, enabled ? 1 : 0));
     }
     // -1 infers the window: on when rotation_tol is at least 1e-4 and
-    // the session is Lanczos or a dimer with rotation_angle_tol 0. A
-    // dimer with a positive rotation_angle_tol stays off unless 1.
+    // the session is Lanczos or a dimer whose angle stop is disabled.
+    // From ABI minor 62, rotation_angle_tol 0 with
+    // RGSADDLE_MINMODE_EXPLICIT_ROTATION_ANGLE_TOL clear uses the default
+    // improved dimer stop and leaves the window off. Setting the bit with
+    // 0 keeps the classic inference. A positive angle stays off unless 1.
     // 0 turns it off, 1 on.
     void set_torque_window(int window) {
         check(rgsaddle_minmode_set_torque_window(handle_, window));
