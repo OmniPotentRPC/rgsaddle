@@ -82,12 +82,14 @@ An arm's seed is its cover vector on the centre plus, when =kick_radius= is posi
 |---------------------------+---------------------------------------------------------------------|
 | =Connected=               | =NewSaddle=, or =DuplicateSaddle(id)= for a saddle already recorded |
 | =Reverted=                | =ReturnedToStart=: both quenches came back                          |
-| =LostCurvature=           | =Failed(ArmFailure::LostCurvature)=: no quench ran                  |
 | =Irreversible=            | =Failed(ArmFailure::Disconnected)=                                  |
 | =NotIndexOne=             | =Failed(ArmFailure::NotIndexOne)=                                   |
 | =NotDownhill=             | =Failed(ArmFailure::NotDownhill)=                                   |
 | =Exhausted=               | =NonConverged=                                                      |
+| =SaddleError::ArtIndexOneLost= | =Failed(ArmFailure::IndexOneLost { ... })=: recovery was exhausted |
 | an error from the session | =Failed(ArmFailure::Error(message))=                                |
+
+During a climb, consecutive lowest modes must retain an absolute overlap of =ArtConfig::mode_overlap_tol= (1/√2 by default) and negative curvature. If the estimate loses either condition, ART first measures the carried mode's Rayleigh curvature directly. A still-negative carried mode continues the climb. Otherwise ART restarts from its last accepted index-1 point with a halved translation cap, at most =index_one_recovery_attempts= times (6 by default), then returns the typed =SaddleError::ArtIndexOneLost=. =DirectionCover= preserves its attempts, curvature, and overlap in =ArmFailure::IndexOneLost=; it does not turn the failure into a soft-mode result.
 
 Two saddles are one when their energies differ by less than =saddle_energy_tol= and their per-atom RMSD is below =saddle_rmsd_tol=. Product minima use =minimum_energy_tol= and =minimum_rmsd_tol= the same way. The RMSD is per atom and Cartesian, under the minimum image when =cell= is set; it does not match permuted identical atoms, so symmetry copies of one saddle on different atoms count as different saddles.
 
@@ -115,11 +117,7 @@ The start counts as one state in the gap score, so a hole bounded by arms that l
 ** Determinism
 Every random draw comes from the =u64= seed. A batch is chosen before it runs, its arms run on rayon's pool, and their trials are recorded in pick order, so the records are the same at one thread and at four; =tests/direction_cover.rs= checks that bitwise.
 
-** Measured
-=tests/direction_cover.rs= runs the picker on Müller-Brown, embedded as one atom with a stiff third coordinate, where 16 arms from the shallow minimum find both saddles next to it. On a 13-atom Lennard-Jones icosahedron, 5 of 16 arms reach another minimum, each through a different saddle. A bare displacement of the same length along the Lanczos soft mode, quenched, came back to the start on all 16. The ignored test =scaling_with_cluster_size= prints force calls per saddle and time per arm for 13, 38 and 75 atoms:
+** Force-call history
+=ArtSession= stores at most the most recent =ArtConfig::force_call_window= force calls with their positions (64 by default). =force_call_count()= and =ArtOutcome::force_call_count= retain the total even after old positions leave the window. Set the window to zero when only counts are needed. Thus the position-history memory of each arm is bounded by the configured window times the Cartesian dimension rather than by all calls spent.
 
-#+begin_src sh
-cargo test --release --test direction_cover -- --ignored --nocapture
-#+end_src
-
-=ArtSession= keeps every force call with its position, so memory per arm grows with the number of atoms times the calls the arm spends.
+Quick timing observations belong in =NOTES.md=, not in this reference.
