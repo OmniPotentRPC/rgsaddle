@@ -184,7 +184,6 @@ pub unsafe extern "C" fn rgsaddle_kappa_dimer_force(
         Err(SaddleError::NonFinite(_)) => RGSADDLE_NON_FINITE,
         Err(SaddleError::Surface(_)) => RGSADDLE_SURFACE_FAILED,
         Err(SaddleError::Invalid(_)) => RGSADDLE_INVALID_PARAMETER,
-        Err(SaddleError::LineNebEndpointBelowEnergy { .. }) => RGSADDLE_INVALID_PARAMETER,
         Err(SaddleError::Stalled(_)) => crate::capi::RGSADDLE_STALLED,
         Err(SaddleError::NotEquilibrated { .. }) => crate::capi::RGSADDLE_NOT_EQUILIBRATED,
         Err(SaddleError::InsufficientEffectiveSamples { .. }) => {

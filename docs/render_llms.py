@@ -40,6 +40,10 @@ SECTIONS: list[tuple[str, list[tuple[str, str]]]] = [
         [
             ("howto/band.org", "NEB, climbing image, OCI-NEB, simplified and growing string, free-end adaptive NEB, IDPP, AFIR, and connect"),
             ("howto/autoneb.org", "AutoNEB window insertion and spring scaling"),
+            (
+                "howto/line-neb.org",
+                "Fixed-energy line-integral NEB, endpoint policy, and motion along the path",
+            ),
             ("howto/minmode.org", "Dimer, Lanczos, soft-mode seeding, surrogate Hessian actions, saddle index, and ARTn protocol"),
             ("howto/art.org", "Phased Activation-Relaxation Technique nouveau (ArtSession)"),
             ("howto/indexk.org", "Index-k minimum-mode searches with LOBPCG and block Lanczos"),
