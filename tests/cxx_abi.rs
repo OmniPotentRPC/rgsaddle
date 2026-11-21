@@ -50,3 +50,88 @@ fn cxx_session_wrapper_uses_the_official_abi() {
     assert!(String::from_utf8_lossy(&run.stdout).contains("RGSADDLE_CXX_WRAP_OK"));
     std::fs::remove_file(out).expect("remove temporary smoke executable");
 }
+
+#[test]
+fn cxx_landscape_limit_is_an_error_and_hessian_sees_x() {
+    let compiler = std::env::var("CXX").unwrap_or_else(|_| "c++".into());
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let out = std::env::temp_dir().join(format!(
+        "rgsaddle_cxx_landscape_host_{}",
+        std::process::id()
+    ));
+    let libdir = cdylib_dir();
+    let build = Command::new(compiler)
+        .arg("-std=c++17")
+        .arg("-Wall")
+        .arg("-Wextra")
+        .arg("-Werror")
+        .arg(root.join("tests/c/landscape_host.cpp"))
+        .arg("-I")
+        .arg(root.join("include"))
+        .arg("-L")
+        .arg(&libdir)
+        .arg("-lrgsaddle")
+        .arg("-o")
+        .arg(&out)
+        .output()
+        .expect("compile the landscape host test");
+    assert!(
+        build.status.success(),
+        "C++ compile failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let run = Command::new(&out)
+        .env("LD_LIBRARY_PATH", &libdir)
+        .output()
+        .expect("run the landscape host test");
+    assert!(
+        run.status.success(),
+        "landscape host failed: {}\n{}",
+        String::from_utf8_lossy(&run.stderr),
+        String::from_utf8_lossy(&run.stdout)
+    );
+    assert!(String::from_utf8_lossy(&run.stdout).contains("RGSADDLE_LANDSCAPE_HOST_OK"));
+    std::fs::remove_file(out).expect("remove temporary landscape host executable");
+}
+
+#[test]
+fn cxx_landscape_guard_matches_the_symbol_minor() {
+    let compiler = std::env::var("CXX").unwrap_or_else(|_| "c++".into());
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let out = std::env::temp_dir().join(format!(
+        "rgsaddle_cxx_landscape_guard_{}",
+        std::process::id()
+    ));
+    let libdir = cdylib_dir();
+    let build = Command::new(compiler)
+        .arg("-std=c++17")
+        .arg("-Wall")
+        .arg("-Wextra")
+        .arg("-Werror")
+        .arg(root.join("tests/c/landscape_guard.cpp"))
+        .arg("-I")
+        .arg(root.join("include"))
+        .arg("-L")
+        .arg(&libdir)
+        .arg("-lrgsaddle")
+        .arg("-o")
+        .arg(&out)
+        .output()
+        .expect("compile the landscape guard test");
+    assert!(
+        build.status.success(),
+        "C++ compile failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let run = Command::new(&out)
+        .env("LD_LIBRARY_PATH", &libdir)
+        .output()
+        .expect("run the landscape guard test");
+    assert!(
+        run.status.success(),
+        "landscape guard failed: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(String::from_utf8_lossy(&run.stdout).contains("RGSADDLE_LANDSCAPE_GUARD_OK"));
+    std::fs::remove_file(out).expect("remove temporary landscape guard executable");
+}

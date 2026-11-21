@@ -189,6 +189,13 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =rgsaddle_band_set_free_end=. Purpose: Enable, replace, or clear the free-end adaptive NEB (FEA-NEB) of Zhang, Zhang, Ye, and Zheng, J. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_band_free_end_residual=. Purpose: Read the signed target-energy residual `E(x_end) - E_target` from the most recent free-end step into `out`, ABI minor 45. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_band_free_end_cuts=. Purpose: Number of adaptive cut-and-remesh refinements performed so far on a free-end band, or 0 for NULL, ABI minor 45. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_landscape_config_default=. Purpose: Write the Rust defaults. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_landscape_create=. Purpose: Open a search. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_landscape_run=. Purpose: Run the search. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_landscape_node=. Purpose: Read one node. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_landscape_modes=. Purpose: Unstable modes, row-major, 3 * n_atoms by the saddle index. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_landscape_edge=. Purpose: One downward edge. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_landscape_free=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 
 * Types and callbacks
 
@@ -208,6 +215,7 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =rgsaddle_stencil_t=. Purpose: Opaque session handle in include/rgsaddle.h.
 - =RgsaddleIndexK=. Purpose: Opaque session handle in include/rgsaddle.h.
 - =RgsaddleGrowingString=. Purpose: Opaque handle to a growing string session, ABI minor 44.
+- =RgsaddleLandscape=. Purpose: Opaque session handle in include/rgsaddle.h.
 - =rgsaddle_version_t=. Purpose: Version head carried by every wire struct.
 - =rgsaddle_status_t=. Purpose: C enum typedef in include/rgsaddle.h.
 - =rgsaddle_tangent_t=. Purpose: C enum typedef in include/rgsaddle.h.
@@ -255,11 +263,13 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =rgsaddle_growing_string_phase_t=. Purpose: Phase of a growing string session, ABI minor 44.
 - =rgsaddle_growing_string_config_t=. Purpose: Configuration of rgsaddle_growing_string_create, ABI minor 44.
 - =rgsaddle_free_end_side_t=. Purpose: Which terminal image moves on the target-energy level set, ABI minor 45.
+- =rgsaddle_landscape_config_t=. Purpose: C struct typedef in include/rgsaddle.h.
+- =rgsaddle_landscape_report_t=. Purpose: C struct typedef in include/rgsaddle.h.
 - =rgsaddle_hyperplane_emit_fn=. Purpose: Callback typedef in include/rgsaddle.h.
 - =rgsaddle_sample_hyperplane_fn=. Purpose: Callback typedef in include/rgsaddle.h.
 - =rgsaddle_surface_fn=. Purpose: Callback typedef in include/rgsaddle.h.
 - =rgsaddle_solid_surface_fn=. Purpose: Callback typedef in include/rgsaddle.h.
-- =rgsaddle_hessian_fn=. Purpose: Callback typedef in include/rgsaddle.h.
+- =rgsaddle_hessian_fn=. Purpose: Hessian action at `position`, applied to `vector`, written to `action`.
 - =rgsaddle_stencil_eval_fn=. Purpose: Callback typedef in include/rgsaddle.h.
 
 * Macros and enum constants
@@ -318,6 +328,7 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =RGSADDLE_STALLED=. Purpose: Enumerator of =rgsaddle_status_t=.
 - =RGSADDLE_NOT_EQUILIBRATED=. Purpose: Enumerator of =rgsaddle_status_t=.
 - =RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES=. Purpose: Enumerator of =rgsaddle_status_t=.
+- =RGSADDLE_LANDSCAPE_BOUND=. Purpose: Enumerator of =rgsaddle_status_t=.
 - =RGSADDLE_TANGENT_SIMPLE=. Purpose: Enumerator of =rgsaddle_tangent_t=.
 - =RGSADDLE_TANGENT_IMPROVED=. Purpose: Enumerator of =rgsaddle_tangent_t=.
 - =RGSADDLE_SPRING_UNIFORM=. Purpose: Enumerator of =rgsaddle_spring_t=.

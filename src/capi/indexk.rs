@@ -63,11 +63,27 @@ pub struct RgsaddleIndexK {
     k: usize,
 }
 
-struct HostSurface {
+pub(crate) struct HostSurface {
     function: RgsaddleSurfaceFn,
     user: *mut c_void,
     n_atoms: i64,
     hessian: Option<RgsaddleHessianFn>,
+}
+
+impl HostSurface {
+    pub(crate) fn new(
+        function: RgsaddleSurfaceFn,
+        user: *mut c_void,
+        n_atoms: i64,
+        hessian: Option<RgsaddleHessianFn>,
+    ) -> Self {
+        Self {
+            function,
+            user,
+            n_atoms,
+            hessian,
+        }
+    }
 }
 
 unsafe impl Send for HostSurface {}
@@ -100,17 +116,24 @@ impl PointSurface for HostSurface {
 
     fn hessian_vector(
         &self,
-        _x: ArrayView1<f64>,
+        x: ArrayView1<f64>,
         vector: ArrayView1<f64>,
     ) -> Result<Option<Array1<f64>>, SaddleError> {
         let Some(hessian) = self.hessian else {
             return Ok(None);
         };
+        if x.len() != vector.len() {
+            return Err(SaddleError::Shape(
+                "hessian vector must match the position".into(),
+            ));
+        }
+        let position = x.to_vec();
         let flat = vector.to_vec();
         let mut action = vec![0.0; flat.len()];
         let rc = hessian(
             self.user,
             flat.len() as i64,
+            position.as_ptr(),
             flat.as_ptr(),
             action.as_mut_ptr(),
         );
@@ -144,7 +167,11 @@ fn search_of(config: &RgsaddleIndexKConfig) -> Result<(MinModeConfig, BlockEigen
     Ok((search, block))
 }
 
-fn read_modes(n: usize, k: usize, modes: *const f64) -> Result<Option<Array2<f64>>, i32> {
+pub(crate) fn read_modes(
+    n: usize,
+    k: usize,
+    modes: *const f64,
+) -> Result<Option<Array2<f64>>, i32> {
     if modes.is_null() {
         return Ok(None);
     }
@@ -159,7 +186,7 @@ fn read_modes(n: usize, k: usize, modes: *const f64) -> Result<Option<Array2<f64
     Ok(Some(block))
 }
 
-fn write_modes(modes: ndarray::ArrayView2<f64>, out: &mut [f64]) {
+pub(crate) fn write_modes(modes: ndarray::ArrayView2<f64>, out: &mut [f64]) {
     let (rows, cols) = modes.dim();
     for row in 0..rows {
         for column in 0..cols {
@@ -266,12 +293,7 @@ pub unsafe extern "C" fn rgsaddle_indexk_step(
         return RGSADDLE_NULL_SURFACE;
     };
     let session = unsafe { &mut *session };
-    let host = HostSurface {
-        function,
-        user,
-        n_atoms: session.n_atoms,
-        hessian,
-    };
+    let host = HostSurface::new(function, user, session.n_atoms, hessian);
     match session.session.step(&host) {
         Ok(report) => {
             let out = unsafe { &mut *out };
@@ -493,5 +515,71 @@ pub unsafe extern "C" fn rgsaddle_reflect_force(
             RGSADDLE_OK
         }
         Err(err) => status_of(&err),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    struct Seen {
+        position: Vec<f64>,
+        vector: Vec<f64>,
+    }
+
+    static SEEN: Mutex<Option<Seen>> = Mutex::new(None);
+
+    extern "C" fn idle_surface(_user: *mut c_void, _request: *mut RgsaddleSurfaceRequest) -> i32 {
+        RGSADDLE_OK
+    }
+
+    extern "C" fn recording_hessian(
+        _user: *mut c_void,
+        n: i64,
+        position: *const f64,
+        vector: *const f64,
+        action: *mut f64,
+    ) -> i32 {
+        if position.is_null() || vector.is_null() || action.is_null() || n != 3 {
+            return -1;
+        }
+        let count = n as usize;
+        let position = unsafe { slice::from_raw_parts(position, count) }.to_vec();
+        let vector = unsafe { slice::from_raw_parts(vector, count) }.to_vec();
+        for (slot, value) in unsafe { slice::from_raw_parts_mut(action, count) }
+            .iter_mut()
+            .zip(vector.iter())
+        {
+            *slot = -value;
+        }
+        *SEEN.lock().expect("hessian record") = Some(Seen { position, vector });
+        0
+    }
+
+    #[test]
+    fn host_hessian_receives_the_position() {
+        *SEEN.lock().expect("clear") = None;
+        let host = HostSurface::new(
+            idle_surface,
+            std::ptr::null_mut(),
+            1,
+            Some(recording_hessian),
+        );
+        let position = Array1::from_vec(vec![0.2, -0.4, 0.6]);
+        let vector = Array1::from_vec(vec![1.0, 0.0, -1.0]);
+        let action = host
+            .hessian_vector(position.view(), vector.view())
+            .expect("callback")
+            .expect("analytic action");
+        assert_eq!(action, Array1::from_vec(vec![-1.0, 0.0, 1.0]));
+        let seen = SEEN
+            .lock()
+            .expect("read")
+            .take()
+            .expect("position was recorded");
+        assert_eq!(seen.position, position.to_vec());
+        assert_eq!(seen.vector, vector.to_vec());
+        assert_ne!(seen.position, seen.vector);
     }
 }

@@ -43,6 +43,7 @@ SECTIONS: list[tuple[str, list[tuple[str, str]]]] = [
             ("howto/minmode.org", "Dimer, Lanczos, soft-mode seeding, surrogate Hessian actions, saddle index, and ARTn protocol"),
             ("howto/art.org", "Phased Activation-Relaxation Technique nouveau (ArtSession)"),
             ("howto/indexk.org", "Index-k minimum-mode searches with LOBPCG and block Lanczos"),
+            ("howto/landscape.org", "Downward pathway maps from a certified saddle to minima"),
             ("howto/solid-dimer.org", "Variable-cell solid-state dimer on atoms and strain"),
             ("howto/ssneb.org", "Generalized solid-state NEB on the joint atom-strain chart"),
             ("howto/strain-rate.org", "Elastic dipoles, multipoles, FMM fields, and strain response of a hop"),

@@ -53,6 +53,7 @@ use crate::minmode::{
     FiniteDifference, MinModeConfig, MinModeKind, MinModeSession, MinModeStatus, PointSurface,
     build_solver, translated_gradient,
 };
+use crate::saddle_index::counts_as_negative;
 
 /// Which block iteration finds the k lowest pairs when `k > 1`.
 ///
@@ -182,7 +183,8 @@ impl Default for IndexKConfig {
 /// One index-k translation.
 #[derive(Clone, Debug)]
 pub struct IndexKReport {
-    /// Running until every sought curvature is negative and the force is under tolerance.
+    /// Running until every sought curvature is below
+    /// [`crate::NEGATIVE_CURVATURE_TOL`] and the force is under tolerance.
     pub status: MinModeStatus,
     /// Geometry after the step.
     pub position: Array1<f64>,
@@ -354,6 +356,10 @@ pub struct IndexKSession {
     modes: Array2<f64>,
     curvatures: Array1<f64>,
     translated: Array1<f64>,
+    /// Steps on which `k = 1` had a vanishing force and a curvature above
+    /// the negative threshold. The one-mode session then reports the same
+    /// iteration again, so this count keeps a host loop moving.
+    refused_steps: usize,
 }
 
 enum Engine {
@@ -412,6 +418,7 @@ impl IndexKSession {
                 modes: stored,
                 curvatures,
                 translated: Array1::zeros(0),
+                refused_steps: 0,
             });
         }
         crate::band::check_force_driven(&config.search.method)?;
@@ -441,7 +448,19 @@ impl IndexKSession {
             modes: seed.clone(),
             curvatures: Array1::from_elem(seed.ncols(), f64::NAN),
             translated: Array1::zeros(0),
+            refused_steps: 0,
         })
+    }
+
+    /// Convergence norm for the one-mode session and the block session.
+    ///
+    /// A landscape leg passes [`crate::LandscapeConfig::force_gate`] so the
+    /// search stops on the same norm the pathway check uses.
+    pub fn set_force_gate(&mut self, gate: ForceGate) {
+        match &mut self.engine {
+            Engine::One(session) => session.set_force_gate(gate),
+            Engine::Block(session) => session.force_gate = gate,
+        }
     }
 
     /// Current geometry.
@@ -496,15 +515,31 @@ impl IndexKSession {
                             "min-mode step did not record a translated force".into(),
                         )
                     })?;
+                // The one-mode translator still treats any negative curvature as
+                // unstable. Convergence uses the saddle-index threshold, so a
+                // curvature between that threshold and zero stays running.
+                // That session repeats its iteration once the force has
+                // vanished, and the refusal count advances the report.
+                let (status, iteration) = if report.status == MinModeStatus::Converged
+                    && !counts_as_negative(report.curvature)
+                {
+                    self.refused_steps = self.refused_steps.saturating_add(1);
+                    (
+                        MinModeStatus::Running,
+                        report.iteration.saturating_add(self.refused_steps),
+                    )
+                } else {
+                    (report.status, report.iteration)
+                };
                 Ok(IndexKReport {
-                    status: report.status,
+                    status,
                     position: session.position().to_owned(),
                     max_force: report.max_force,
                     modes: self.modes.clone(),
                     curvatures: self.curvatures.clone(),
                     translated_force: self.translated.clone(),
                     rotations: report.rotations,
-                    iteration: report.iteration,
+                    iteration,
                     evaluations: report.evaluations,
                 })
             }
@@ -575,7 +610,7 @@ impl BlockSession {
         let previous = self.modes.clone();
         align_signs(&mut modes, previous.view());
         let eff = translated_force(gradient.view(), modes.view(), curvatures.view())?;
-        let all_negative = curvatures.iter().all(|value| *value < 0.0);
+        let all_negative = curvatures.iter().copied().all(counts_as_negative);
         let max_force_here = self.force_gate.value(gradient.view());
         if all_negative && max_force_here <= self.config.search.force_tol {
             self.modes = modes.clone();
@@ -645,7 +680,7 @@ impl BlockSession {
             gradient: arrived_gradient,
         });
         let status = if max_force <= self.config.search.force_tol
-            && curvatures.iter().all(|value| *value < 0.0)
+            && curvatures.iter().copied().all(counts_as_negative)
         {
             MinModeStatus::Converged
         } else {
