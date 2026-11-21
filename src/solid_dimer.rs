@@ -46,6 +46,7 @@
 use std::sync::Mutex;
 
 use ndarray::{Array1, Array2, ArrayView1, s};
+use thiserror::Error;
 
 use crate::cell_log::{M3, m3_det, m3_from_row9, m3_inv, m3_mul, m3_to_row9};
 use crate::error::SaddleError;
@@ -346,6 +347,68 @@ impl IndexReport {
     pub fn is_first_order(&self) -> bool {
         self.negative == 1
     }
+}
+
+/// Projected stationary-point indices used by a Vineyard calculation.
+#[derive(Debug)]
+pub struct VineyardIndexReport {
+    /// Stable reactant minimum.
+    pub minimum: IndexReport,
+    /// First-order transition state.
+    pub saddle: IndexReport,
+}
+
+/// Structured reason that a stationary-point pair is not Vineyard-ready.
+#[derive(Debug, Error)]
+pub enum VineyardIndexError {
+    /// A Hessian action or excluded-mode query failed.
+    #[error(transparent)]
+    Evaluation(#[from] SaddleError),
+    /// The reactant is not a projected local minimum.
+    #[error("Vineyard minimum has {negative} projected negative modes")]
+    Minimum {
+        /// Number of projected modes below the registered cutoff.
+        negative: usize,
+        /// Full lowest-spectrum diagnostic.
+        report: IndexReport,
+    },
+    /// The transition state is not projected index one.
+    #[error("Vineyard saddle has {negative} projected negative modes")]
+    Saddle {
+        /// Number of projected modes below the registered cutoff.
+        negative: usize,
+        /// Full lowest-spectrum diagnostic.
+        report: IndexReport,
+    },
+}
+
+/// Certify a stable minimum and a first-order saddle before Vineyard rates.
+///
+/// Each surface supplies its own constrained or rigid directions through
+/// [`PointSurface::excluded_modes`]. This keeps full- and active-coordinate
+/// calculations on the same projected-space convention.
+pub fn certify_vineyard_pair<M: PointSurface, S: PointSurface>(
+    minimum_surface: &M,
+    minimum: ArrayView1<f64>,
+    saddle_surface: &S,
+    saddle: ArrayView1<f64>,
+    check: IndexCheck,
+) -> Result<VineyardIndexReport, VineyardIndexError> {
+    let minimum = index_at(minimum_surface, minimum, check)?;
+    if minimum.negative != 0 {
+        return Err(VineyardIndexError::Minimum {
+            negative: minimum.negative,
+            report: minimum,
+        });
+    }
+    let saddle = index_at(saddle_surface, saddle, check)?;
+    if saddle.negative != 1 {
+        return Err(VineyardIndexError::Saddle {
+            negative: saddle.negative,
+            report: saddle,
+        });
+    }
+    Ok(VineyardIndexReport { minimum, saddle })
 }
 
 /// Lowest projected eigenvalues of `surface` at `x`.
@@ -2786,6 +2849,20 @@ mod tests {
         assert_eq!(ok.status, MinModeStatus::Converged);
         assert!(!ok.rejected);
         assert_eq!(ok.negative_modes, Some(1));
+    }
+
+    #[test]
+    fn vineyard_pair_reports_the_invalid_stationary_point() {
+        let check = IndexCheck::first_order();
+        let double = IndexSurface { double: true };
+        let minimum = array![1.0, 0.0, 0.0];
+        let saddle = array![0.0, 0.0, 0.0];
+        let error = certify_vineyard_pair(&Well, minimum.view(), &double, saddle.view(), check)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            VineyardIndexError::Saddle { negative: 2, .. }
+        ));
     }
 
     /// A negative eigenvalue along a rigid translation is not an index.
