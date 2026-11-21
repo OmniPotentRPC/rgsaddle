@@ -5,8 +5,13 @@
 /// uplifting `librgsaddle.so` into `target/<profile>`, so a prior
 /// `cargo build --features capi` would leave a stale `capi` only shared
 /// library behind when `cargo test --features capi,ohtst` runs. Invoking
-/// `cargo build --lib` with the active feature set refreshes
-/// `target/<profile>/librgsaddle.so` before the C compiler links against it.
+/// `cargo build --lib` with the active feature set links a fresh
+/// `librgsaddle.so` before the C compiler links against it.
+///
+/// The nested build uses its own target directory, `<target>/cdylib-tests`.
+/// Sharing the outer one let it replace the unhashed `librgsaddle.rlib`
+/// that rustdoc later links the doctests against, with a copy built
+/// against a different `rgmin`.
 fn cdylib_dir() -> std::path::PathBuf {
     static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
     DIR.get_or_init(build_fresh_cdylib).clone()
@@ -97,7 +102,12 @@ fn build_fresh_cdylib() -> std::path::PathBuf {
         (parent.to_path_buf(), None)
     };
 
-    let lib_path = profile_dir.join("librgsaddle.so");
+    let nested_target = target_dir.join("cdylib-tests");
+    let nested_profile = match &target_triple {
+        Some(triple) => nested_target.join(triple).join(&profile_name),
+        None => nested_target.join(&profile_name),
+    };
+    let lib_path = nested_profile.join("librgsaddle.so");
     match std::fs::remove_file(&lib_path) {
         Ok(()) => {}
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
@@ -119,7 +129,7 @@ fn build_fresh_cdylib() -> std::path::PathBuf {
         .arg("--locked")
         .arg("--no-default-features")
         .arg("--target-dir")
-        .arg(&target_dir);
+        .arg(&nested_target);
     let features = active_features();
     if !features.is_empty() {
         cmd.arg("--features").arg(features.join(","));
@@ -147,5 +157,5 @@ fn build_fresh_cdylib() -> std::path::PathBuf {
         "expected fresh cdylib at {}",
         lib_path.display()
     );
-    profile_dir
+    nested_profile
 }
