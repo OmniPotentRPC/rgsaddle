@@ -2657,6 +2657,7 @@ fn assemble_band_with(
     };
     if let Some(metric_id) = cache_metric
         && eval.projected.len() == force_len
+        && eval.assembly_ci != i64::MIN
         && eval.assembly_ci == assembly_ci
         && eval.assembly_metric == Some(metric_id)
         && (metrics.is_none() || eval.driving.len() == force_len)
@@ -3259,7 +3260,8 @@ impl BandSession {
     /// endpoints must agree on every fixed atom up to the minimum
     /// image; the interior images take the first image's fixed
     /// coordinates. Optimizer history, the climbing state, the
-    /// min-mode refinement and the last evaluation are dropped, the
+    /// min-mode refinement, the dynamic NEB image answers (their
+    /// gradients carry the old mask) and the last evaluation are dropped, the
     /// endpoint energies kept, and an installed exponential metric is
     /// rebuilt on the new free atoms at the next step. On an error the
     /// session is unchanged.
@@ -3905,7 +3907,8 @@ impl BandSession {
 
     /// The model-update boundary: drop quasi-Newton history, the
     /// climbing baseline, the armed climbing image, and every cached
-    /// surface value (endpoint energies, the last evaluation). The
+    /// surface value (endpoint energies, the last evaluation, the dynamic
+    /// NEB image answers). The
     /// next evaluation carries the whole band. Use it when the surface
     /// itself changed (a surrogate refit, a new calculator setting).
     pub fn reset(&mut self) {
@@ -3927,10 +3930,12 @@ impl BandSession {
     }
 
     /// Replace the climbing rule without dropping quasi-Newton pairs.
-    /// The cached force is forgotten so the next step uses the new rule.
+    /// The cached force and the dynamic NEB step state are forgotten so
+    /// the next step uses the new rule.
     pub(crate) fn set_climbing(&mut self, climbing: Option<CiConfig>) {
         self.config.climbing = climbing;
         self.state.restart();
+        self.state.dynamic_run().forget();
         self.refine = min_mode::RefineState::default();
         self.solver.forget_evaluation();
     }
@@ -3952,13 +3957,14 @@ impl BandSession {
 
     /// Restart the relaxation on the same surface: drop quasi-Newton
     /// history (FIRE velocity, L-BFGS pairs), the climbing baseline,
-    /// and the armed climbing image, keep the endpoint energies and
-    /// the last evaluation. Mirrors eOn's optimizer reset after a
+    /// and the armed climbing image, and the dynamic NEB image answers;
+    /// keep the endpoint energies and the last evaluation. Mirrors eOn's optimizer reset after a
     /// reparameterization; with [`BandSession::set_positions`] for the
     /// moved images the next step evaluates only the interior images.
     pub fn restart(&mut self) {
         self.forget_optimizer();
         self.state.restart();
+        self.state.dynamic_run().forget();
         self.refine = min_mode::RefineState::default();
         self.saddle.forget();
     }
@@ -5655,5 +5661,149 @@ mod tests {
             solver_evaluates(&mut session, x),
             "set_dynamic left the unmasked force cached on the solver"
         );
+    }
+
+    /// [`Harmonic`] with every energy raised by `offset`.
+    struct RaisedHarmonic {
+        offset: f64,
+    }
+
+    impl BandSurface for RaisedHarmonic {
+        fn eval(
+            &self,
+            positions: ArrayView2<f64>,
+            energies: &mut Array1<f64>,
+            gradients: &mut Array2<f64>,
+        ) -> Result<(), SaddleError> {
+            Harmonic.eval(positions, energies, gradients)?;
+            energies.mapv_inplace(|e| e + self.offset);
+            Ok(())
+        }
+    }
+
+    fn dynamic_run_is_empty(session: &BandSession) -> bool {
+        let run = session.state.dynamic_run();
+        run.images.is_empty() && run.step.is_none() && run.origin.is_none()
+    }
+
+    fn masked_steps<S: BandSurface>(session: &mut BandSession, surface: &S, steps: usize) {
+        for _ in 0..steps {
+            session.step(surface).expect("dynamic step");
+        }
+        let run = session.state.dynamic_run();
+        assert!(run.images.iter().any(Option::is_some));
+        assert!(
+            run.step
+                .as_ref()
+                .is_some_and(|step| step.zeroed.iter().any(|z| *z))
+        );
+    }
+
+    #[test]
+    fn reset_drops_the_dynamic_image_answers() {
+        let spec = DynamicNeb::default().with_fmax(1000.0);
+        let mut session = dynamic_band(Some(spec), false);
+        masked_steps(&mut session, &Harmonic, 3);
+        session.reset();
+        assert!(dynamic_run_is_empty(&session));
+
+        let raised = RaisedHarmonic { offset: 10.0 };
+        session.step(&raised).expect("step on the new surface");
+        let evaluation = session.evaluation().expect("evaluation");
+        let n_images = session.positions.nrows();
+        let mut fresh_e = Array1::zeros(n_images);
+        let mut fresh_g = Array2::zeros(session.positions.dim());
+        raised
+            .eval(session.positions.view(), &mut fresh_e, &mut fresh_g)
+            .expect("fresh");
+        for i in 1..n_images - 1 {
+            assert_eq!(
+                evaluation.energies[i], fresh_e[i],
+                "image {i} kept the energy of the surface before reset"
+            );
+        }
+    }
+
+    #[test]
+    fn set_fixed_atoms_drops_the_dynamic_image_answers() {
+        let spec = DynamicNeb::default().with_fmax(1000.0);
+        let mut session = dynamic_band(Some(spec), false);
+        for mut row in session.positions.outer_iter_mut() {
+            row[0] = 0.3;
+            row[1] = 0.2;
+            row[2] = 0.1;
+        }
+        session
+            .set_fixed_atoms(vec![true, false])
+            .expect("fix atom 0");
+        masked_steps(&mut session, &Harmonic, 3);
+        session
+            .set_fixed_atoms(Vec::new())
+            .expect("free every atom");
+        assert!(dynamic_run_is_empty(&session));
+
+        session.step(&Harmonic).expect("step with every atom free");
+        let evaluation = session.evaluation().expect("evaluation");
+        let n_images = session.positions.nrows();
+        let mut fresh_e = Array1::zeros(n_images);
+        let mut fresh_g = Array2::zeros(session.positions.dim());
+        Harmonic
+            .eval(session.positions.view(), &mut fresh_e, &mut fresh_g)
+            .expect("fresh");
+        for i in 1..n_images - 1 {
+            assert_ne!(fresh_g[(i, 0)], 0.0);
+            assert_eq!(
+                evaluation.gradients.row(i),
+                fresh_g.row(i),
+                "image {i} kept a gradient masked by the old fixed atoms"
+            );
+        }
+    }
+
+    #[test]
+    fn restart_drops_the_dynamic_image_answers() {
+        let spec = DynamicNeb::default().with_fmax(1000.0);
+        let mut session = dynamic_band(Some(spec), false);
+        masked_steps(&mut session, &Harmonic, 3);
+        session.restart();
+        assert!(dynamic_run_is_empty(&session));
+        assert_eq!(session.state.dynamic_spec(), Some(spec));
+        session.step(&Harmonic).expect("step after restart");
+    }
+
+    #[test]
+    fn set_climbing_drops_the_dynamic_step_state() {
+        let spec = DynamicNeb::default().with_fmax(1000.0);
+        let mut session = dynamic_band(Some(spec), false);
+        masked_steps(&mut session, &Harmonic, 3);
+        session.set_climbing(Some(CiConfig::always()));
+        assert!(dynamic_run_is_empty(&session));
+        assert_eq!(session.state.dynamic_spec(), Some(spec));
+        session
+            .step(&Harmonic)
+            .expect("step with the new climbing rule");
+    }
+
+    #[test]
+    fn a_retired_assembly_key_is_never_a_cache_hit() {
+        let mut session = dynamic_band(None, false);
+        session.step(&Harmonic).expect("plain step");
+        let x = session.interior_flat();
+        let rows = session.state.rows.load(Ordering::Relaxed);
+        session.state.retire_assembly_key();
+        let solves = session.state.pcg_solves.load(Ordering::Relaxed);
+        assemble_band_with(
+            &session.config,
+            &session.state,
+            &CachedEvaluationOnly,
+            session.positions.row(0),
+            session.positions.row(4),
+            x.view(),
+            None,
+        )
+        .expect("reassembly from the cached surface values");
+        assert_eq!(session.state.rows.load(Ordering::Relaxed), rows);
+        assert_eq!(session.state.pcg_solves.load(Ordering::Relaxed), solves);
+        assert_ne!(assembly_key(&session), i64::MIN);
     }
 }

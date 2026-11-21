@@ -229,6 +229,15 @@ impl DynamicRun {
         self.images.clear();
     }
 
+    /// Drop the per-image answers and the step in progress, keeping the
+    /// setting. The answers carry gradients masked by the fixed atoms
+    /// and decisions taken under the climbing rule of their time.
+    pub(crate) fn forget(&mut self) {
+        self.origin = None;
+        self.step = None;
+        self.images.clear();
+    }
+
     pub(crate) fn begin_step(&mut self, origin: Array1<f64>) {
         self.step = None;
         self.origin = Some(origin);
