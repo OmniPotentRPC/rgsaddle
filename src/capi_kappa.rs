@@ -122,7 +122,7 @@ pub struct RgsaddlePafiTransmissionReport {
 
 /// First ABI minor that carries the PAFI transmission structs.
 #[cfg(feature = "ohtst")]
-const PAFI_TRANSMISSION_MINOR: u32 = 46;
+const PAFI_TRANSMISSION_MINOR: u32 = 52;
 
 #[cfg(feature = "ohtst")]
 struct CPointSurface {
@@ -195,7 +195,7 @@ pub unsafe extern "C" fn rgsaddle_pafi_transmission_config_default(
 /// Select the maximum-free-energy PAFI plane and shoot its retained samples.
 ///
 /// Requires the `ohtst` feature. The config must be stamped with this
-/// major and a minor from 46 up to the library's, or the call returns
+/// major and a minor from 52 up to the library's, or the call returns
 /// `RGSADDLE_ABI_MISMATCH`. A maximum at either end of the band is refused
 /// with `RGSADDLE_INVALID_PARAMETER`: the shots assign their ends by side
 /// of the plane, and an endpoint has no state behind or ahead of it.

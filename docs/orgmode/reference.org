@@ -262,7 +262,7 @@ A failed callback leaves it unchanged.
 Its =rotation_angle_tol= field stops a dimer rotation once the optimal angle falls under this tolerance in radians.
 The Rust default is five degrees, 0 turns the stop off, and a C config stores the value it is given.
 Both fields are read only from a config whose version minor is 5 or newer.
-=RGSADDLE_ABI_MINOR= is 46.
+=RGSADDLE_ABI_MINOR= is 52.
 From minor 24, =rgsaddle_sella_saddle_set_symmetrized_ritz= sets =SellaSaddleConfig::symmetrized_ritz= from 0 or 1.
 It returns =RGSADDLE_INVALID_PARAMETER= for any other value.
 =rgsaddle_sella_saddle_set_small_system_atom_ceiling= (minor 25) sets =SellaSaddleConfig::small_system_atom_ceiling= from 0 or 1.
@@ -274,13 +274,13 @@ Its window always reaches both neighbours of the climbing image, and the min-mod
 The value -1 infers the window from =rotation_tol= as a new session does, 0 turns it off and 1 turns it on.
 It returns =RGSADDLE_INVALID_PARAMETER= for any other value.
 From minor 41 a Lanczos session reads it too.
-From minor 46, =rgsaddle_pafi_transmission= selects the maximum of a C
+From minor 52, =rgsaddle_pafi_transmission= selects the maximum of a C
 caller's PAFI free-energy array and shoots retained configurations from
 that plane; =rgsaddle_pafi_transmission_report_t= carries =κ=, its block
 error, the selected plane, assigned and unassigned shots, recrossings and
 surface evaluations. It and =rgsaddle_pafi_transmission_config_default=
 exist only in a library built with the =ohtst= feature. A config stamped
-with another major, a minor below 46 or a minor above the library's gets
+with another major, a minor below 52 or a minor above the library's gets
 =RGSADDLE_ABI_MISMATCH=, and a maximum at the first or last plane gets
 =RGSADDLE_INVALID_PARAMETER=.
 =rgsaddle_minmode_set_rotation_stop_length= (minor 38) calls =MinModeSession::set_rotation_stop_length=; 0 turns the stop off and a negative or non-finite length returns =RGSADDLE_INVALID_PARAMETER=.

@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 46u
+#define RGSADDLE_ABI_MINOR 52u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -866,7 +866,7 @@ rgsaddle_status_t rgsaddle_kappa_dimer_force(const rgsaddle_kappa_config_t *conf
 typedef int (*rgsaddle_point_surface_fn)(void *user, int64_t n_dof,
     const double *position, double *energy, double *gradient);
 
-/** Forward/backward shooting settings for a PAFI dividing plane (minor 46). */
+/** Forward/backward shooting settings for a PAFI dividing plane (minor 52). */
 typedef struct {
   rgsaddle_version_t version;
   double thermal;
@@ -906,7 +906,7 @@ rgsaddle_status_t rgsaddle_pafi_transmission_config_default(
  * PAFI plane. Requires the `ohtst` feature; a library built with `capi`
  * alone reports the same ABI minor without this symbol. start_offsets has
  * n_planes + 1 entries; masses may be NULL. The config version must have
- * this major and a minor from 46 up to the library's, otherwise the call
+ * this major and a minor from 52 up to the library's, otherwise the call
  * returns RGSADDLE_ABI_MISMATCH. A maximum at the first or last plane
  * returns RGSADDLE_INVALID_PARAMETER, since shots there have no state to
  * end in on one side.

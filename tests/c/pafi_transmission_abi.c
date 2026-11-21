@@ -82,7 +82,7 @@ int main(void) {
     return fail(st, "a minor newer than the library must be refused");
   }
   bad = cfg;
-  bad.version.minor = 45u;
+  bad.version.minor = 51u;
   st = shoot(&bad, &b, &report);
   if (st != RGSADDLE_ABI_MISMATCH) {
     return fail(st, "a minor older than the structs must be refused");

@@ -238,7 +238,7 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =rgsaddle_force_gate_t=. Purpose: Convergence norm for sessions with a selectable force criterion.
 - =rgsaddle_kappa_config_t=. Purpose: Basin constrained dimer.
 - =rgsaddle_kappa_report_t=. Purpose: C struct typedef in include/rgsaddle.h.
-- =rgsaddle_pafi_transmission_config_t=. Purpose: Forward/backward shooting settings for a PAFI dividing plane (minor 46).
+- =rgsaddle_pafi_transmission_config_t=. Purpose: Forward/backward shooting settings for a PAFI dividing plane (minor 52).
 - =rgsaddle_pafi_transmission_report_t=. Purpose: C struct typedef in include/rgsaddle.h.
 - =rgsaddle_irc_kind_t=. Purpose: RGSADDLE_IRC_GS2 is the Gonzalez and Schlegel step: the energy minimum on the mass-weighted sphere of radius dx/2 about a pivot dx/2 down the gradient.
 - =rgsaddle_irc_dir_t=. Purpose: C enum typedef in include/rgsaddle.h.

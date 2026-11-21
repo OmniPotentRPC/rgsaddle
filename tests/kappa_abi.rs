@@ -171,7 +171,7 @@ mod pafi_transmission {
     #[test]
     fn c_pafi_transmission_refuses_a_minor_older_than_its_structs() {
         let mut cfg = config();
-        cfg.version.minor = 45;
+        cfg.version.minor = 51;
         assert_eq!(shoot(&cfg, &band()).0, RGSADDLE_ABI_MISMATCH);
     }
 
