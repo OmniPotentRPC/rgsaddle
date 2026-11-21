@@ -211,13 +211,19 @@ fn block_statistics(values: &[f64]) -> BlockEstimate {
     let stable = |left: (f64, f64), right: (f64, f64)| {
         (left.0 - right.0).abs() <= 2.0 * left.1.hypot(right.1)
     };
-    let plateau = levels
-        .windows(2)
-        .rev()
-        .find(|window| stable(window[0], window[1]));
-    let resolved = plateau.is_some();
-    let standard_error = plateau
-        .map(|window| window.iter().map(|level| level.0).fold(0.0, f64::max))
+    let plateau_start = (0..levels.len().saturating_sub(2)).find(|&start| {
+        levels[start..]
+            .windows(2)
+            .all(|window| stable(window[0], window[1]))
+    });
+    let resolved = plateau_start.is_some();
+    let standard_error = plateau_start
+        .map(|start| {
+            levels[start..]
+                .iter()
+                .map(|level| level.0)
+                .fold(0.0, f64::max)
+        })
         .or_else(|| levels.iter().map(|level| level.0).reduce(f64::max))
         .unwrap_or_else(|| (raw_variance / values.len() as f64).sqrt());
     let effective_samples = if standard_error > 0.0 {
@@ -507,6 +513,21 @@ mod tests {
             "{report:?}"
         );
         assert!(!report.pressure_converged, "{report:?}");
+    }
+
+    #[test]
+    fn blocking_rejects_a_fine_plateau_followed_by_coarse_growth() {
+        let series: Vec<f64> = (0_usize..256)
+            .map(|index| {
+                let drift = if index < 128 { -0.05 } else { 0.05 };
+                let fast = if index.is_multiple_of(2) { -0.05 } else { 0.05 };
+                drift + fast
+            })
+            .collect();
+        let estimate = block_statistics(&series);
+
+        assert!(!estimate.resolved, "{estimate:?}");
+        assert!(estimate.standard_error > 0.01, "{estimate:?}");
     }
 
     #[test]
