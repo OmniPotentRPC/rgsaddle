@@ -1023,6 +1023,12 @@ pub unsafe extern "C" fn rgsaddle_dyneb_mask(
     let Some((rows, dof, total)) = dyneb_extent(n_images, n_atoms) else {
         return RGSADDLE_INVALID_PARAMETER;
     };
+    let spec = crate::DynamicNeb::default()
+        .with_fmax(fmax)
+        .with_scale_fmax(scale_fmax);
+    if let Err(err) = spec.check() {
+        return status_of(&err);
+    }
     let pos = unsafe { slice::from_raw_parts(positions, total) };
     let energy = unsafe { slice::from_raw_parts(energies, rows) };
     let force = unsafe { slice::from_raw_parts_mut(forces, total) };
@@ -1042,9 +1048,6 @@ pub unsafe extern "C" fn rgsaddle_dyneb_mask(
         return RGSADDLE_INVALID_PARAMETER;
     };
     let interior_e = Array1::from(energy[1..rows - 1].to_vec());
-    let spec = crate::DynamicNeb::default()
-        .with_fmax(fmax)
-        .with_scale_fmax(scale_fmax);
     let mask = match crate::band::dynamic_mask(
         interior_pos.view(),
         interior_e.view(),

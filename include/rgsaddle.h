@@ -1478,11 +1478,12 @@ rgsaddle_status_t rgsaddle_band_set_string(RgsaddleBand *band, int32_t enabled,
  * energy image is never given a zero force. The default band, with
  * this unset, evaluates every image.
  *
- * Refused on a solid-state band and on the trust-region stepper.
- * Returns RGSADDLE_NULL_BAND for a null band, and
- * RGSADDLE_INVALID_PARAMETER for enabled other than 0 or 1, a
- * non-finite fmax or scale_fmax, a solid-state band, or the
- * trust-region stepper.
+ * Returns RGSADDLE_NULL_BAND for a null band. Returns
+ * RGSADDLE_INVALID_PARAMETER, with the band unchanged, for `enabled`
+ * other than 0 or 1, and with `enabled` 1 for an fmax that is not
+ * finite and positive, a scale_fmax that is not finite and
+ * non-negative, a solid-state band, the trust-region stepper, the
+ * simplified string method, or free-end adaptive NEB.
  */
 rgsaddle_status_t rgsaddle_band_set_dynamic(RgsaddleBand *band, int32_t enabled,
                                             double fmax, double scale_fmax);
@@ -1502,9 +1503,12 @@ rgsaddle_status_t rgsaddle_band_set_dynamic(RgsaddleBand *band, int32_t enabled,
  * Returns RGSADDLE_INVALID_PARAMETER, before any array is read, for a
  * null `positions`, `energies` or `forces`, fewer than 3 images, a
  * non-positive atom count, a `3 * n_atoms` or `n_images * 3 * n_atoms`
- * that overflows, or a band of more than PTRDIFF_MAX bytes, and for a
- * non-finite fmax or scale_fmax. Returns RGSADDLE_NON_FINITE for a
- * non-finite position, energy or force.
+ * that overflows, or a band of more than PTRDIFF_MAX bytes, and for an
+ * fmax that is not finite and positive or a scale_fmax that is not
+ * finite and non-negative. Only then are the arrays read:
+ * RGSADDLE_NON_FINITE is returned for a non-finite position, energy or
+ * force, and for nothing else. `forces` and `frozen` are written only
+ * on RGSADDLE_OK.
  */
 rgsaddle_status_t rgsaddle_dyneb_mask(int64_t n_images, int64_t n_atoms,
                                       const double *positions,

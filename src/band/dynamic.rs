@@ -32,11 +32,12 @@ pub struct DynamicNeb {
     /// An image is eligible to be left in place when the largest
     /// per-atom Euclidean norm of its projected force is strictly below
     /// this value. ASE requires it to equal the optimizer's `fmax`.
+    /// Must be finite and positive.
     pub fmax: f64,
     /// The threshold at an image is `fmax * (1 + distance * scale_fmax)`.
     /// `distance` is the Euclidean norm of the coordinate difference
     /// from the highest-energy image, with no minimum image. Zero
-    /// leaves the threshold uniform.
+    /// leaves the threshold uniform. Must be finite and non-negative.
     pub scale_fmax: f64,
 }
 
@@ -55,12 +56,20 @@ impl Default for DynamicNeb {
 }
 
 impl DynamicNeb {
+    /// Thresholds are parameters, not surface data, so a bad one is
+    /// [`SaddleError::Invalid`] and never [`SaddleError::NonFinite`].
     pub(crate) fn check(self) -> Result<(), SaddleError> {
-        if !self.fmax.is_finite() {
-            return Err(SaddleError::NonFinite("dynamic NEB fmax"));
+        if !(self.fmax.is_finite() && self.fmax > 0.0) {
+            return Err(SaddleError::Invalid(format!(
+                "dynamic NEB fmax must be finite and positive, got {}",
+                self.fmax
+            )));
         }
-        if !self.scale_fmax.is_finite() {
-            return Err(SaddleError::NonFinite("dynamic NEB scale_fmax"));
+        if !(self.scale_fmax.is_finite() && self.scale_fmax >= 0.0) {
+            return Err(SaddleError::Invalid(format!(
+                "dynamic NEB scale_fmax must be finite and non-negative, got {}",
+                self.scale_fmax
+            )));
         }
         Ok(())
     }
@@ -338,6 +347,7 @@ mod tests {
     use ndarray::Array2;
 
     use super::{DynamicNeb, dynamic_mask};
+    use crate::error::SaddleError;
 
     fn row(values: [f64; 3]) -> [f64; 3] {
         values
@@ -422,5 +432,45 @@ mod tests {
         assert_eq!(forces[(0, 0)], 1.0);
         assert!(!mask[1].zeroed);
         assert!(mask[1].frozen);
+    }
+
+    #[test]
+    fn bad_thresholds_are_invalid_parameters_and_non_finite_data_is_not() {
+        let interior =
+            Array2::from_shape_vec((2, 3), vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0]).expect("shape");
+        let energies = ndarray::arr1(&[0.0, 1.0]);
+        let forces = Array2::from_shape_vec((2, 3), vec![0.5; 6]).expect("shape");
+        let bad = [
+            DynamicNeb::default().with_fmax(f64::NAN),
+            DynamicNeb::default().with_fmax(f64::INFINITY),
+            DynamicNeb::default().with_fmax(0.0),
+            DynamicNeb::default().with_fmax(-0.05),
+            DynamicNeb::default().with_scale_fmax(f64::NAN),
+            DynamicNeb::default().with_scale_fmax(f64::NEG_INFINITY),
+            DynamicNeb::default().with_scale_fmax(-1.0),
+        ];
+        for spec in bad {
+            assert!(
+                matches!(spec.check(), Err(SaddleError::Invalid(_))),
+                "{spec:?}"
+            );
+            let mut rows = forces.clone();
+            assert!(matches!(
+                dynamic_mask(interior.view(), energies.view(), &mut rows, spec),
+                Err(SaddleError::Invalid(_))
+            ));
+            assert_eq!(rows, forces);
+        }
+        let mut rows = forces.clone();
+        rows[(1, 2)] = f64::NAN;
+        assert!(matches!(
+            dynamic_mask(
+                interior.view(),
+                energies.view(),
+                &mut rows,
+                DynamicNeb::default()
+            ),
+            Err(SaddleError::NonFinite(_))
+        ));
     }
 }
