@@ -3185,7 +3185,14 @@ struct SplitRng {
 
 impl SplitRng {
     fn new(seed: u64) -> Self {
-        Self { state: seed | 1 }
+        let mut state = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        state = (state ^ (state >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        state = (state ^ (state >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        state ^= state >> 31;
+        if state == 0 {
+            state = 0x9E37_79B9_7F4A_7C15;
+        }
+        Self { state }
     }
 
     fn u64(&mut self) -> u64 {
@@ -3199,6 +3206,15 @@ impl SplitRng {
         let u1 = ((self.u64() >> 11) as f64 * (1.0 / ((1u64 << 53) as f64))).max(1.0e-16);
         let u2 = (self.u64() >> 11) as f64 * (1.0 / ((1u64 << 53) as f64));
         (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
+    }
+}
+
+#[test]
+fn split_rng_adjacent_seeds_start_different_streams() {
+    for seed in [0, 2, 10, 42, u64::MAX - 1] {
+        let mut even = SplitRng::new(seed);
+        let mut odd = SplitRng::new(seed + 1);
+        assert_ne!(even.u64(), odd.u64());
     }
 }
 
