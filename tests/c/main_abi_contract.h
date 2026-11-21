@@ -621,5 +621,11 @@ typedef rgsaddle_status_t (*abi46_signature_rgsaddle_lineb_solve)(
     double energy, int64_t max_steps, int64_t beads, rgsaddle_surface_fn surface,
     void *user, double *optimized_positions, rgsaddle_lineb_result_t *out);
 _Static_assert(_Generic(&rgsaddle_lineb_solve, abi46_signature_rgsaddle_lineb_solve: 1, default: 0), "rgsaddle_lineb_solve signature");
+typedef rgsaddle_status_t (*abi46_signature_rgsaddle_band_set_refine)(
+    RgsaddleBand *band, int32_t method, double threshold, int64_t memory);
+_Static_assert(_Generic(&rgsaddle_band_set_refine, abi46_signature_rgsaddle_band_set_refine: 1, default: 0), "rgsaddle_band_set_refine signature");
+
+typedef int32_t (*abi46_signature_rgsaddle_band_is_refining)(const RgsaddleBand *band);
+_Static_assert(_Generic(&rgsaddle_band_is_refining, abi46_signature_rgsaddle_band_is_refining: 1, default: 0), "rgsaddle_band_is_refining signature");
 
 #endif

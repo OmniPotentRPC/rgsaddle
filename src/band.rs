@@ -298,6 +298,76 @@ impl SolidState {
     }
 }
 
+/// The default [`StepRefine::threshold`], in the host's force units.
+/// The library converts no units.
+const REFINE_THRESHOLD: f64 = 0.5;
+
+/// Per-step refine stepper. `None` on [`BandConfig`] steps with
+/// [`BandConfig::method`] alone.
+///
+/// On every step whose convergence force is at or under `threshold`
+/// the band steps with `method`, and on every other step with the
+/// primary method. The comparison reads the same value as the
+/// `force_tol` stop, the largest absolute component of the projected
+/// force under the default infinity-norm gate. Both steppers keep
+/// their own state, so a force that rises back over the threshold
+/// returns the band to the primary stepper without dropping the
+/// refine history. The rule is the `[Refine]` section of eOn: no
+/// refine stepper by default, and a threshold of 0.5 when one is set.
+///
+/// It acts on the first-order step of an atomic band whose method is
+/// FIRE: plain and climbing-image bands, and the band steps between
+/// OCI-NEB refinements. A solid-state, quick-min, trust-region,
+/// simplified string, growing string, or free-end band drives its own
+/// stepper and ignores this one.
+///
+/// Non-exhaustive: start from [`StepRefine::default`] and chain the
+/// `with_*` setters.
+///
+/// ```
+/// use rgsaddle::StepRefine;
+///
+/// let spec = StepRefine::default().with_threshold(0.25);
+/// assert_eq!(spec.threshold.to_bits(), 0.25_f64.to_bits());
+/// ```
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct StepRefine {
+    /// Optimizer used when the convergence force is at or under
+    /// [`StepRefine::threshold`]. It must step on the force alone,
+    /// as [`BandConfig::method`] does.
+    pub method: Method,
+    /// Convergence force, in the host's force units, at or under
+    /// which a step uses [`StepRefine::method`]. The default is 0.5.
+    pub threshold: f64,
+}
+
+with_setters!(StepRefine {
+    with_method => method: val Method,
+    with_threshold => threshold: val f64,
+});
+
+impl Default for StepRefine {
+    fn default() -> Self {
+        Self {
+            method: Method::lbfgs_with_memory(20),
+            threshold: REFINE_THRESHOLD,
+        }
+    }
+}
+
+impl StepRefine {
+    pub(crate) fn validate(&self) -> Result<(), SaddleError> {
+        check_force_driven(&self.method)?;
+        if self.threshold.is_nan() || self.threshold <= 0.0 {
+            return Err(SaddleError::Invalid(
+                "the band refine threshold must be positive".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Band configuration. `force_tol` is on the max absolute component
 /// of the projected force over interior images.
 ///
@@ -337,6 +407,9 @@ pub struct BandConfig {
     /// set in [`BandConfig::fixed_atoms`] keeps the mean whatever this
     /// flag says.
     pub remove_translation: bool,
+    /// Per-step refine stepper ([`StepRefine`]). `None`, the default,
+    /// steps with [`BandConfig::method`] alone.
+    pub refine: Option<StepRefine>,
     /// Band stepper. FIRE by default (eOn's velocity NEB stepper).
     /// L-BFGS runs under rgmin's `Accept::Step`: the two-loop
     /// direction, capped per atom, one band evaluation per step and no
@@ -430,6 +503,7 @@ with_setters!(BandConfig {
     with_max_move => max_move: val f64,
     with_remove_translation => remove_translation: val bool,
     with_method => method: val Method,
+    with_refine => refine: opt StepRefine,
     with_solid => solid: opt SolidState,
     with_quickmin => quickmin: val bool,
     with_quickmin_options => quickmin_options: val rgmin::QuickMinOptions,
@@ -559,6 +633,7 @@ impl Default for BandConfig {
             max_move: 0.2,
             remove_translation: true,
             method: Method::fire(rgmin::FireKind::V2),
+            refine: None,
             solid: None,
             quickmin: false,
             quickmin_options: rgmin::QuickMinOptions::rgmin(),
@@ -2449,6 +2524,33 @@ fn build_solver(config: &BandConfig, method: &Method, interior_dof: usize) -> So
     solver
 }
 
+/// The refine solver, the threshold that selects it, and whether the
+/// last step used it. The primary solver and this one each keep their
+/// own state across switches.
+struct StepSwitch {
+    solver: Solver,
+    threshold: f64,
+    active: bool,
+}
+
+/// The refine solver of an atomic FIRE band. Other bands ignore
+/// [`BandConfig::refine`] because they drive or rebuild their own stepper.
+fn build_step_switch(
+    config: &BandConfig,
+    method: &Method,
+    interior_dof: usize,
+) -> Option<StepSwitch> {
+    let spec = config.refine.as_ref()?;
+    if config.solid.is_some() || config.quickmin || !matches!(method, Method::Fire { .. }) {
+        return None;
+    }
+    Some(StepSwitch {
+        solver: build_solver(config, &spec.method, interior_dof),
+        threshold: spec.threshold,
+        active: false,
+    })
+}
+
 /// Stepping band relaxation over an rgmin solver. Endpoints (rows 0
 /// and `n_images - 1`) never move.
 ///
@@ -2503,6 +2605,8 @@ pub struct BandSession {
     config: BandConfig,
     positions: Array2<f64>,
     solver: Solver,
+    /// Refine solver of [`BandConfig::refine`], when this band steps with it.
+    step_switch: Option<StepSwitch>,
     state: BandState,
     iteration: usize,
     rtr: Option<crate::rtr::BandRtr>,
@@ -2588,6 +2692,9 @@ impl BandSession {
             config.method.clone()
         };
         check_force_driven(&method)?;
+        if let Some(refine) = &config.refine {
+            refine.validate()?;
+        }
         if let Some(refine) = &config.min_mode {
             refine.validate()?;
         }
@@ -2612,10 +2719,12 @@ impl BandSession {
         let segment = if solid.is_some() { dof + 9 } else { dof };
         let interior_dof = (n_images - 2) * segment;
         let solver = build_solver(&config, &method, interior_dof);
+        let step_switch = build_step_switch(&config, &method, interior_dof);
         let mut session = Self {
             config,
             positions,
             solver,
+            step_switch,
             state: BandState::new(),
             iteration: 0,
             rtr: None,
@@ -2945,6 +3054,9 @@ impl BandSession {
     pub fn set_highs(&mut self, enabled: bool) {
         self.highs = enabled;
         self.solver.set_highs(enabled);
+        if let Some(switch) = &mut self.step_switch {
+            switch.solver.set_highs(enabled);
+        }
     }
 
     /// Select the convergence and climbing-trigger norm, retaining surface values.
@@ -3063,6 +3175,7 @@ impl BandSession {
         let segment = if self.solid.is_some() { dof + 9 } else { dof };
         let interior_dof = (self.positions.nrows() - 2) * segment;
         self.solver = build_solver(&self.config, &method, interior_dof);
+        self.step_switch = build_step_switch(&self.config, &method, interior_dof);
         self.highs = false;
         self.clear_string_state();
         self.state.restart();
@@ -3099,7 +3212,7 @@ impl BandSession {
     /// an image outside the solver uses this so the next band step
     /// does not inherit a stale quasi-Newton pair.
     pub(crate) fn forget_optimizer(&mut self) {
-        self.solver.forget();
+        self.forget_solver_state();
         self.clear_string_state();
         self.free_end_state.endpoint_dt = None;
         self.free_end_state.prev_end_pos = None;
@@ -3151,7 +3264,7 @@ impl BandSession {
                 // The interior may be unchanged, so the solver's own
                 // cached force (assembled against the old endpoint)
                 // would answer the next step; drop it, keep the memory.
-                self.solver.forget_evaluation();
+                self.forget_solver_evaluation();
             }
             // The last evaluation's tangents read the neighbours, so
             // any moved row retires it.
@@ -3196,7 +3309,7 @@ impl BandSession {
         self.config.climbing = climbing;
         self.state.restart();
         self.refine = min_mode::RefineState::default();
-        self.solver.forget_evaluation();
+        self.forget_solver_evaluation();
     }
 
     /// Record endpoint energies the host already holds.
@@ -3307,6 +3420,101 @@ impl BandSession {
         self.pin_fixed();
     }
 
+    /// Drop both steppers' history and mark the next step as primary.
+    fn forget_solver_state(&mut self) {
+        self.solver.forget();
+        if let Some(switch) = &mut self.step_switch {
+            switch.solver.forget();
+            switch.active = false;
+        }
+    }
+
+    /// Drop both steppers' cached evaluations and keep their history.
+    fn forget_solver_evaluation(&mut self) {
+        self.solver.forget_evaluation();
+        if let Some(switch) = &mut self.step_switch {
+            switch.solver.forget_evaluation();
+        }
+    }
+
+    /// Whether the last first-order step used [`BandConfig::refine`].
+    /// False before the first such step and for a band without a
+    /// refine stepper.
+    #[must_use]
+    pub fn is_refining(&self) -> bool {
+        self.step_switch
+            .as_ref()
+            .is_some_and(|switch| switch.active)
+    }
+
+    /// The installed refine stepper, if any.
+    #[must_use]
+    pub fn refine(&self) -> Option<&StepRefine> {
+        self.config.refine.as_ref()
+    }
+
+    /// Install, replace, or clear the per-step refine stepper.
+    /// A band that does not step with FIRE keeps the value and does
+    /// not use it. On an error the session is unchanged.
+    pub fn set_refine(&mut self, refine: Option<StepRefine>) -> Result<(), SaddleError> {
+        if let Some(spec) = &refine {
+            spec.validate()?;
+        }
+        self.config.refine = refine;
+        let method = if self.config.quickmin {
+            Method::QuickMin
+        } else {
+            self.config.method.clone()
+        };
+        let dof = self.positions.ncols();
+        let segment = if self.solid.is_some() { dof + 9 } else { dof };
+        let interior_dof = (self.positions.nrows() - 2) * segment;
+        self.step_switch = build_step_switch(&self.config, &method, interior_dof);
+        if self.highs
+            && let Some(switch) = &mut self.step_switch
+        {
+            switch.solver.set_highs(true);
+        }
+        Ok(())
+    }
+
+    /// Choose the stepper for this step from the convergence force at
+    /// `x`. A point the band has not assembled yet is assembled first,
+    /// so the choice reads the force the stop test would read.
+    fn arm_refine_step<S: BandSurface>(
+        &mut self,
+        x: &Array1<f64>,
+        surface: &S,
+        endpoint_first: ArrayView1<f64>,
+        endpoint_last: ArrayView1<f64>,
+    ) -> Result<bool, SaddleError> {
+        let Some(threshold) = self.step_switch.as_ref().map(|switch| switch.threshold) else {
+            return Ok(false);
+        };
+        let settled = self
+            .state
+            .last
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .is_some_and(|last| last.x == *x && last.projected.len() == x.len());
+        if !settled {
+            assemble_band(
+                &self.config,
+                &self.state,
+                surface,
+                endpoint_first,
+                endpoint_last,
+                x.view(),
+            )?;
+        }
+        let refining = self.state.last_max_force() <= threshold;
+        if let Some(switch) = &mut self.step_switch {
+            switch.active = refining;
+        }
+        Ok(refining)
+    }
+
     /// One solver step over the assembled band force. The host
     /// interleaves its policy between calls.
     ///
@@ -3380,6 +3588,9 @@ impl BandSession {
 
         let endpoint_first = self.positions.row(0).to_owned();
         let endpoint_last = self.positions.row(n_images - 1).to_owned();
+        let mut x = self.interior_flat();
+        let refining =
+            self.arm_refine_step(&x, surface, endpoint_first.view(), endpoint_last.view())?;
         let config = &self.config;
         let state = &self.state;
         let metrics = self.exp.as_ref().map(|e| BandMetrics {
@@ -3403,9 +3614,14 @@ impl BandSession {
                 }
             });
 
-        let mut x = self.interior_flat();
         let before = x.clone();
-        let stepped = self.solver.step(&oracle, &mut x);
+        let stepped = {
+            let solver = match self.step_switch.as_mut() {
+                Some(switch) if refining => &mut switch.solver,
+                _ => &mut self.solver,
+            };
+            solver.step(&oracle, &mut x)
+        };
         drop(oracle);
         // The surface error is the root cause of whatever the solver
         // did with an infinite energy and a zero gradient, so it
@@ -3414,7 +3630,7 @@ impl BandSession {
         if let Some(err) = self.state.take_error() {
             // The solver cached the failed point's infinite energy and
             // zero force; the next step must evaluate the band again.
-            self.solver.forget_evaluation();
+            self.forget_solver_evaluation();
             return Err(err);
         }
         stepped.map_err(|e| SaddleError::Solver(e.to_string()))?;
@@ -3558,7 +3774,7 @@ impl BandSession {
         if let Some(err) = self.state.take_error() {
             // The solver cached the failed point's infinite energy and
             // zero force; the next step must evaluate the band again.
-            self.solver.forget_evaluation();
+            self.forget_solver_evaluation();
             return Err(err);
         }
         stepped.map_err(|e| SaddleError::Solver(e.to_string()))?;
