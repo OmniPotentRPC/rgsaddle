@@ -23,6 +23,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import cast
 
 
 def find_binary(repo_root: Path) -> Path:
@@ -45,7 +46,7 @@ def run_ohtst(repo_root: Path) -> dict[str, float]:
     with tempfile.TemporaryDirectory() as workdir:
         result_path = Path(workdir) / "result.json"
         subprocess.run([str(binary), str(result_path)], check=True)
-        return json.loads(result_path.read_text())
+        return cast(dict[str, float], json.loads(result_path.read_text()))
 
 
 def main() -> None:
