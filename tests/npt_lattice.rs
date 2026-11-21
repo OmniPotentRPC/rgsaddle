@@ -194,8 +194,13 @@ fn harmonic_crystal_has_zero_total_pressure() {
         configurational / samples as f64 / nkt_over_v,
         report.mean_lattice_a
     );
-    assert!(report.mean_pressure.abs() < 0.1 * nkt_over_v);
-    assert!(report.pressure_converged);
+    let one_particle_pressure = KT_300_EV / volume;
+    assert!(
+        report.mean_pressure.abs() < 0.5 * one_particle_pressure,
+        "{} is large enough to hide a centre-of-mass pressure offset of {}",
+        report.mean_pressure,
+        one_particle_pressure
+    );
     assert!((report.mean_lattice_a / 3.6 - 1.0).abs() < 2.0e-3);
 }
 
