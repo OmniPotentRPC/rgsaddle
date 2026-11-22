@@ -27,7 +27,10 @@ pub struct SoftModeDirectionPlan {
 }
 
 /// Deterministic soft-to-stiff Hessian-mode sweep.
+///
+/// Non-exhaustive: read the fields.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct ModeSweepDirectionPlan {
     /// Lowest-to-highest eigenvalues of the recovered Hessian.
     pub eigenvalues: Array1<f64>,
