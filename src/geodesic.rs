@@ -18,15 +18,20 @@
 //! length, or the upper bound over `upper_ratio` times the length,
 //! inserts Cartesian midpoints on the loose segments and starts again.
 //! [`geodesic_interpolate`] builds the first path from the two endpoints
-//! by the deterministic part of their Algorithm 3: three seeds (the
-//! reactant, the product, and their Cartesian average) are pulled toward
-//! the average redundant coordinate, and the shortest three point path
-//! is copied onto the images in thirds.
+//! by their Algorithm 3. The target is the average of the redundant
+//! coordinates, `q_mid = (q(A) + q(B)) / 2`, not the coordinates of the
+//! Cartesian average. Ten starts alternate between the reactant (odd
+//! starts) and the product (even starts), each with Gaussian noise of
+//! scale 0.1 from the seeded generator of [`GeodesicConfig::seed`]. Each
+//! start minimizes `|q(x) - q_mid|^2`, the shortest three point path
+//! `[A, x, B]` is relaxed with the middle image free, and the images are
+//! copied onto thirds of the path before the final relaxation.
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ArrayViewMut1};
 
 use crate::error::SaddleError;
 use crate::mic::{self, Cell};
+use crate::stats::Rng;
 
 /// Morse exponent of Zhu, Thompson, and Martinez, Eq. (7).
 pub const MORSE_ALPHA: f64 = 1.7;
@@ -41,6 +46,10 @@ const CHORD_FLOOR: f64 = 1e-14;
 const MIDPOINT_WEIGHT: f64 = 0.5;
 /// First L-BFGS trial step, in the coordinate unit of the path.
 const INITIAL_STEP: f64 = 1.0;
+/// Noisy starts of Algorithm 3: odd starts begin at the reactant, even starts at the product.
+const START_COUNT: usize = 10;
+/// Scale of the Gaussian noise added to a start, in the path's length unit (Algorithm 3).
+const START_NOISE: f64 = 0.1;
 
 const DEFAULT_STEP_TOL: f64 = 1e-6;
 const DEFAULT_GRAD_TOL: f64 = 1e-6;
@@ -52,6 +61,7 @@ const DEFAULT_MAX_ITERATIONS: usize = 40;
 const DEFAULT_MEMORY: usize = 8;
 const DEFAULT_BOUND_SAMPLES: usize = 10;
 const DEFAULT_MAX_IMAGES: usize = 32;
+const DEFAULT_SEED: u64 = 0;
 
 /// Redundant coordinates `q(x)` and the Wilson B matrix `dq/dx`.
 ///
@@ -249,6 +259,8 @@ pub struct GeodesicConfig {
     pub bound_samples: usize,
     /// Image cap, endpoints included, after midpoint insertion. At least 2.
     pub max_images: usize,
+    /// Seed of the noisy starts of [`geodesic_interpolate`]. Any value; the same seed repeats the path.
+    pub seed: u64,
 }
 
 with_setters!(GeodesicConfig {
@@ -262,6 +274,7 @@ with_setters!(GeodesicConfig {
     with_memory => memory: val usize,
     with_bound_samples => bound_samples: val usize,
     with_max_images => max_images: val usize,
+    with_seed => seed: val u64,
 });
 
 impl Default for GeodesicConfig {
@@ -277,6 +290,7 @@ impl Default for GeodesicConfig {
             memory: DEFAULT_MEMORY,
             bound_samples: DEFAULT_BOUND_SAMPLES,
             max_images: DEFAULT_MAX_IMAGES,
+            seed: DEFAULT_SEED,
         }
     }
 }
@@ -488,33 +502,7 @@ pub fn geodesic_interpolate<C: GeodesicChart + ?Sized>(
         path.row_mut(n_images - 1).assign(&product);
         return geodesic_path(path.view(), chart, config);
     }
-    let mut average = Array1::zeros(dof);
-    for k in 0..dof {
-        average[k] = MIDPOINT_WEIGHT * (reactant[k] + product[k]);
-    }
-    let target = sample(chart, average.view())?.q;
-    let mut best: Option<(f64, Array1<f64>)> = None;
-    for seed in [reactant.to_owned(), product.to_owned(), average] {
-        let Ok(matched) = pull_to_target(seed.view(), target.view(), chart, config) else {
-            continue;
-        };
-        let mut trial = Array2::zeros((3, dof));
-        trial.row_mut(0).assign(&reactant);
-        trial.row_mut(1).assign(&matched);
-        trial.row_mut(2).assign(&product);
-        let Ok(lengths) = geodesic_lengths(trial.view(), chart, config.bound_samples) else {
-            continue;
-        };
-        let replace = match &best {
-            None => true,
-            Some((best_len, _)) => lengths.length < *best_len,
-        };
-        if replace {
-            best = Some((lengths.length, matched));
-        }
-    }
-    let (_, mid) = best
-        .ok_or_else(|| SaddleError::Surface("geodesic seed search failed on every start".into()))?;
+    let mid = interior_seed(reactant, product, chart, config)?;
     let third = n_images / 3;
     let two_thirds = (2 * n_images) / 3;
     let mut path = Array2::zeros((n_images, dof));
@@ -531,6 +519,85 @@ pub fn geodesic_interpolate<C: GeodesicChart + ?Sized>(
     path.row_mut(0).assign(&reactant);
     path.row_mut(n_images - 1).assign(&product);
     geodesic_path(path.view(), chart, config)
+}
+
+/// Average redundant coordinates `(q(A) + q(B)) / 2` of Algorithm 3.
+fn internal_midpoint<C: GeodesicChart + ?Sized>(
+    reactant: ArrayView1<f64>,
+    product: ArrayView1<f64>,
+    chart: &C,
+) -> Result<Array1<f64>, SaddleError> {
+    let q_reactant = sample(chart, reactant)?.q;
+    let q_product = sample(chart, product)?.q;
+    let mut mid = Array1::zeros(q_reactant.len());
+    for i in 0..mid.len() {
+        mid[i] = MIDPOINT_WEIGHT * (q_reactant[i] + q_product[i]);
+    }
+    Ok(mid)
+}
+
+/// Best of the ten noisy starts of Algorithm 3, before any path adjustment.
+///
+/// Starts alternate between reactant and product. Each is pulled to
+/// `q_mid` and the one whose three point path `[A, x, B]` is shortest wins.
+fn pulled_start<C: GeodesicChart + ?Sized>(
+    reactant: ArrayView1<f64>,
+    product: ArrayView1<f64>,
+    chart: &C,
+    config: &GeodesicConfig,
+) -> Result<Array1<f64>, SaddleError> {
+    let dof = reactant.len();
+    let target = internal_midpoint(reactant, product, chart)?;
+    let mut rng = Rng::new(config.seed);
+    let mut best: Option<(f64, Array1<f64>)> = None;
+    for start in 0..START_COUNT {
+        let base = if start % 2 == 0 { reactant } else { product };
+        let mut x0 = base.to_owned();
+        for value in x0.iter_mut() {
+            *value += START_NOISE * rng.normal();
+        }
+        if sample(chart, x0.view()).is_err() {
+            continue;
+        }
+        let Ok(matched) = pull_to_target(x0.view(), target.view(), chart, config) else {
+            continue;
+        };
+        let mut trial = Array2::zeros((3, dof));
+        trial.row_mut(0).assign(&reactant);
+        trial.row_mut(1).assign(&matched);
+        trial.row_mut(2).assign(&product);
+        let Ok(lengths) = geodesic_lengths(trial.view(), chart, config.bound_samples) else {
+            continue;
+        };
+        if best
+            .as_ref()
+            .is_none_or(|(shortest, _)| lengths.length < *shortest)
+        {
+            best = Some((lengths.length, matched));
+        }
+    }
+    best.map(|(_, matched)| matched)
+        .ok_or_else(|| SaddleError::Surface("geodesic seed search failed on every start".into()))
+}
+
+/// Middle image of Algorithm 3: the best noisy start, then the geodesic
+/// procedure adjusts that image alone on the path `[A, x_mid, B]`.
+fn interior_seed<C: GeodesicChart + ?Sized>(
+    reactant: ArrayView1<f64>,
+    product: ArrayView1<f64>,
+    chart: &C,
+    config: &GeodesicConfig,
+) -> Result<Array1<f64>, SaddleError> {
+    let dof = reactant.len();
+    let mid = pulled_start(reactant, product, chart, config)?;
+    let mut trial = Array2::zeros((3, dof));
+    trial.row_mut(0).assign(&reactant);
+    trial.row_mut(1).assign(&mid);
+    trial.row_mut(2).assign(&product);
+    // Three images only: the procedure moves the middle image and inserts none.
+    let fixed = config.clone().with_max_images(3);
+    let (adjusted, _) = geodesic_path(trial.view(), chart, &fixed)?;
+    Ok(adjusted.row(1).to_owned())
 }
 
 struct Sample {
@@ -1043,5 +1110,63 @@ mod tests {
                 measured.total.length
             );
         }
+    }
+
+    fn dissociation_ends() -> (Array1<f64>, Array1<f64>) {
+        (
+            array![0.0, 0.0, 0.0, 2.0, 0.0, 0.0],
+            array![0.0, 0.0, 0.0, 6.0, 0.0, 0.0],
+        )
+    }
+
+    fn morse_q(chart: &MorsePairChart, x: &Array1<f64>) -> f64 {
+        sample(chart, x.view()).unwrap().q[0]
+    }
+
+    #[test]
+    fn the_target_is_the_average_of_the_coordinates() {
+        let chart = MorsePairChart::new(array![1.0, 1.0]).unwrap();
+        let (a, b) = dissociation_ends();
+        let target = internal_midpoint(a.view(), b.view(), &chart).unwrap();
+        let expect = 0.5 * (morse_q(&chart, &a) + morse_q(&chart, &b));
+        assert!(
+            (target[0] - expect).abs() < 1e-15,
+            "{} vs {expect}",
+            target[0]
+        );
+        let cartesian_average = (&a + &b) * 0.5;
+        let wrong = morse_q(&chart, &cartesian_average);
+        assert!(
+            (wrong - expect).abs() > 0.3,
+            "q(avg) {wrong}, avg(q) {expect}"
+        );
+    }
+
+    #[test]
+    fn the_pulled_start_reaches_the_average_coordinate() {
+        let chart = MorsePairChart::new(array![1.0, 1.0]).unwrap();
+        let (a, b) = dissociation_ends();
+        let expect = 0.5 * (morse_q(&chart, &a) + morse_q(&chart, &b));
+        let config = GeodesicConfig::default();
+        let start = pulled_start(a.view(), b.view(), &chart, &config).unwrap();
+        let reached = morse_q(&chart, &start);
+        // q(x) lands on (q(A) + q(B)) / 2. The Cartesian average would land on q((A + B) / 2).
+        assert!(
+            (reached - expect).abs() < 1e-5,
+            "q(x) {reached}, target {expect}"
+        );
+    }
+
+    #[test]
+    fn the_same_seed_repeats_the_noisy_starts_and_another_seed_changes_them() {
+        let chart = MorsePairChart::new(array![1.0, 1.0, 1.0]).unwrap();
+        let a = array![0.0, 0.0, 0.0, 1.5, 0.0, 0.0, 3.5, 0.0, 0.0];
+        let b = array![0.0, 0.0, 0.0, 0.0, 1.5, 0.0, 0.0, 3.0, 0.5];
+        let base = GeodesicConfig::default();
+        let first = pulled_start(a.view(), b.view(), &chart, &base).unwrap();
+        let again = pulled_start(a.view(), b.view(), &chart, &base).unwrap();
+        assert_eq!(first, again);
+        let other = pulled_start(a.view(), b.view(), &chart, &base.clone().with_seed(7)).unwrap();
+        assert!(first.iter().zip(other.iter()).any(|(u, v)| u != v));
     }
 }

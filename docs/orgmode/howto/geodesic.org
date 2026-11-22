@@ -28,8 +28,12 @@ Images are swept forward and then back until the largest displacement of a pass 
 If the bounds are still loose, Cartesian midpoints are inserted on the loose segments, up to ~max_images~, and the sweeps start again.
 A trial the chart refuses is discarded. That image keeps its last accepted point.
 
-~geodesic_interpolate~ builds the first path from the reactant and the product.
-With three or more images it pulls three seeds (the reactant, the product, and their Cartesian average) toward the average redundant coordinate, keeps the shortest three point path, and copies that middle geometry onto the middle third of the images (the deterministic part of their Algorithm 3).
+~geodesic_interpolate~ builds the first path from the reactant and the product by their Algorithm 3.
+With three or more images the target is the average of the redundant coordinates, \(q_{\mathrm{mid}} = (q(A) + q(B)) / 2\), and not the coordinates of the Cartesian average.
+Ten starts alternate between the reactant (odd starts) and the product (even starts), each with Gaussian noise of scale 0.1 in the path's unit from a generator seeded by ~GeodesicConfig::seed~ (~with_seed~).
+Each start minimizes \(|q(x) - q_{\mathrm{mid}}|^2\), and the shortest three point path \([A, x, B]\) wins.
+The geodesic procedure then adjusts that middle image on the three point path with no insertion, and the result is copied onto the thirds of the images.
+The same seed repeats the path.
 ~geodesic_path~ then minimizes the length.
 ~geodesic_lengths~ reports the length and both bounds without moving the path, as ~GeodesicLengths~.
 ~geodesic_path~ and ~geodesic_interpolate~ return the path with a ~GeodesicReport~: the length, both bounds, the image count, and the passes run.

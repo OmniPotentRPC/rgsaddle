@@ -18,7 +18,7 @@ use crate::geodesic::{
 };
 use crate::mic::Cell;
 
-/// Wire controls for [`rgsaddle_geodesic_path`]. Ninety six bytes.
+/// Wire controls for [`rgsaddle_geodesic_path`]. One hundred four bytes.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct RgsaddleGeodesicConfig {
@@ -46,6 +46,8 @@ pub struct RgsaddleGeodesicConfig {
     pub bound_samples: i64,
     /// Image cap, endpoints included.
     pub max_images: i64,
+    /// Seed of the noisy starts of [`rgsaddle_geodesic_morse`].
+    pub seed: u64,
 }
 
 /// Host chart. `q` has `n_coords` entries and `b` is row major
@@ -142,6 +144,7 @@ fn config_from(ptr: *const RgsaddleGeodesicConfig) -> Result<GeodesicConfig, i32
         memory: positive_usize(raw.memory)?,
         bound_samples: positive_usize(raw.bound_samples)?,
         max_images: positive_usize(raw.max_images)?,
+        seed: raw.seed,
     };
     config.check().map_err(|err| status_of(&err))?;
     Ok(config)
@@ -208,6 +211,7 @@ pub unsafe extern "C" fn rgsaddle_geodesic_config_default(out: *mut RgsaddleGeod
             memory,
             bound_samples,
             max_images,
+            seed: config.seed,
         };
     }
     RGSADDLE_OK

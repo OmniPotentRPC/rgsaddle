@@ -194,6 +194,7 @@ fn c_abi_morse_and_chart_match_the_published_lengths() {
         memory: 0,
         bound_samples: 0,
         max_images: 0,
+        seed: 1,
     };
     assert_eq!(
         unsafe { rgsaddle_geodesic_config_default(&mut config) },
