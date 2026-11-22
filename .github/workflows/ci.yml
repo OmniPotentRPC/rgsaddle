@@ -105,6 +105,7 @@ jobs:
           python3 examples/step_controls.py
           python3 examples/pafi_tutorial.py
           python3 examples/ohtst_tutorial.py
+          python3 examples/ohtst_analytic.py
 
   # A meson parent project takes the headers from this checkout, as a
   # wrap-git subproject or from the installed rgsaddle-headers.pc, and
