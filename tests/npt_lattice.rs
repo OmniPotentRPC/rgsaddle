@@ -10,7 +10,7 @@ fn one_atom(a: f64) -> (Array1<f64>, Cell) {
 
 #[test]
 fn npt_reports_block_standard_errors_and_zero_pressure_convergence() {
-    let (mut positions, mut cell) = one_atom(3.6);
+    let (mut positions, mut cell) = two_atoms(3.6);
     let config = NptConfig::default()
         .with_repeats(1)
         .with_steps(40)
@@ -35,7 +35,7 @@ fn npt_reports_block_standard_errors_and_zero_pressure_convergence() {
 
 #[test]
 fn npt_extends_the_run_until_the_pressure_rule_is_evaluable() {
-    let (mut positions, mut cell) = one_atom(3.6);
+    let (mut positions, mut cell) = two_atoms(3.6);
     let config = NptConfig::default()
         .with_repeats(1)
         .with_steps(20)
@@ -61,8 +61,7 @@ fn npt_extends_the_run_until_the_pressure_rule_is_evaluable() {
 
 #[test]
 fn npt_pressure_includes_the_kinetic_virial() {
-    let (_, mut cell) = one_atom(3.6);
-    let mut positions = Array1::from_vec(vec![0.9, 0.9, 0.9, 2.7, 2.7, 2.7]);
+    let (mut positions, mut cell) = two_atoms(3.6);
     let config = NptConfig::default()
         .with_repeats(1)
         .with_steps(40)
@@ -452,4 +451,38 @@ fn a_non_finite_evaluator_result_is_an_error() {
         |_, _| Ok((0.0, Array1::zeros(1), [[0.0; 3]; 3])),
     );
     assert!(matches!(result, Err(SaddleError::Shape(_))));
+}
+
+#[test]
+fn a_single_atom_has_no_thermal_motion_and_is_refused() {
+    // With one atom the removed centre-of-mass momentum is all of the
+    // momentum, so every velocity is zero at any temperature. The run used
+    // to return a converged zero pressure with no spread at 1000 K.
+    for temperature in [0.0, 300.0, 1000.0] {
+        let (mut positions, mut cell) = one_atom(3.6);
+        let before = (positions.clone(), cell);
+        let (result, calls) = run_free(
+            &mut positions,
+            &mut cell,
+            temperature,
+            63.546,
+            short_config(),
+        );
+        assert!(
+            matches!(result, Err(SaddleError::Invalid(_))),
+            "{temperature} K: {result:?}"
+        );
+        assert_eq!(calls, 0);
+        assert_eq!(positions, before.0);
+        assert_eq!(cell.0, before.1.0);
+    }
+}
+
+#[test]
+fn two_atoms_have_thermal_motion_and_a_positive_kinetic_pressure() {
+    let (mut positions, mut cell) = two_atoms(3.6);
+    let (result, _) = run_free(&mut positions, &mut cell, 1000.0, 63.546, short_config());
+    let report = result.unwrap();
+    assert!(report.mean_pressure > 0.0);
+    assert!(report.pressure_standard_error > 0.0);
 }

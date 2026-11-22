@@ -335,6 +335,13 @@ fn validate(
 ) -> Result<(), SaddleError> {
     let production = config.steps.saturating_sub(config.equilibration_steps);
     let positive_finite = |value: f64| value.is_finite() && value > 0.0;
+    // The thermostat removes the centre-of-mass momentum, which leaves
+    // 3 (N - 1) thermal degrees of freedom. A single atom has none.
+    if positions.len() == 3 {
+        return Err(SaddleError::Invalid(
+            "NPT sampling removes the centre-of-mass momentum and needs at least two atoms".into(),
+        ));
+    }
     if positions.is_empty()
         || !positions.len().is_multiple_of(3)
         || config.repeats == 0
@@ -389,9 +396,12 @@ fn validate(
 ///
 /// # Errors
 ///
-/// [`SaddleError::Invalid`] when a control is not finite and positive (the
-/// target pressure only has to be finite), when the run is too short for two
-/// production blocks, or when the cell has no volume. [`SaddleError::NonFinite`]
+/// [`SaddleError::Invalid`] for a single atom, which has no thermal degrees
+/// of freedom once the centre-of-mass momentum is removed, when `positions`
+/// is empty or not a multiple of three, when a control is not finite and
+/// positive (the target pressure only has to be finite), when the run is
+/// too short for two production blocks, or when the cell has no volume.
+/// [`SaddleError::NonFinite`]
 /// when `positions` or `cell` hold a NaN or an infinity, or when the
 /// evaluator or the integration produces one; no partial report is
 /// returned. Invalid input is refused before `evaluate` is called and
