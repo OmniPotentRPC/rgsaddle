@@ -36,7 +36,7 @@ use crate::tangent::TangentKind;
 /// The RGSADDLE ABI MAJOR.
 pub const RGSADDLE_ABI_MAJOR: u32 = 1;
 /// The RGSADDLE ABI MINOR.
-pub const RGSADDLE_ABI_MINOR: u32 = 62;
+pub const RGSADDLE_ABI_MINOR: u32 = 63;
 
 /// A band, min-mode or OCI-NEB config of this minor or newer certifies
 /// the saddle index at convergence by default.
@@ -70,10 +70,10 @@ pub const RGSADDLE_BAND_SPLINE_REPARAM: u64 = 16;
 /// selects the not-a-knot spline, else the polyline).
 pub const RGSADDLE_BAND_STRING: u64 = 32;
 pub(crate) const BAND_STRING_MINOR: u32 = 44;
-/// Min-mode config bit 0 (ABI minor 62). `rotation_angle_tol` was set
+/// Min-mode config bit 0 (ABI minor 63). `rotation_angle_tol` was set
 /// explicitly by the caller and must be read even when it is zero.
 pub const RGSADDLE_MINMODE_EXPLICIT_ROTATION_ANGLE_TOL: u64 = 1;
-const MINMODE_EXPLICIT_ROTATION_ANGLE_TOL_MINOR: u32 = 62;
+const MINMODE_EXPLICIT_ROTATION_ANGLE_TOL_MINOR: u32 = 63;
 
 /// The trust-region reparametrization a band config asks for.
 pub(crate) fn rtr_reparametrization(cfg: &RgsaddleBandConfig) -> crate::Reparametrization {
@@ -228,8 +228,8 @@ pub struct RgsaddleMinModeConfig {
     /// Largest per-atom displacement, in the host's length unit.
     pub max_move: f64,
     /// ABI minor 5: dimer rotation angle tolerance in radians. For
-    /// config minors 5 through 61 this value is read as given, including
-    /// zero, which disables the angle stop. From minor 62 a zero value
+    /// config minors 5 through 62 this value is read as given, including
+    /// zero, which disables the angle stop. From minor 63 a zero value
     /// keeps the Rust default (five degrees) unless
     /// [`RGSADDLE_MINMODE_EXPLICIT_ROTATION_ANGLE_TOL`] is set; with that
     /// bit, zero disables the angle stop. Read only when the minor is 5

@@ -1,7 +1,7 @@
 #+TITLE: Use the C and C++ interfaces
 #+OPTIONS: toc:nil num:nil
 
-~include/rgsaddle.h~ declares the C application binary interface (ABI), major 1, minor 62. It preserves the main band, minimum-mode and index-1 layouts and adds intrinsic reaction coordinate (IRC), Sella, constraint and geometry controls. Include this header rather than duplicating its structures. Check ~rgsaddle_abi_stamp~ before constructing a session. A meson project takes the headers from the top-level ~meson.build~; see @@rst::doc:`the meson how-to <meson>`@@.
+~include/rgsaddle.h~ declares the C application binary interface (ABI), major 1, minor 63. It preserves the main band, minimum-mode and index-1 layouts and adds intrinsic reaction coordinate (IRC), Sella, constraint and geometry controls. Include this header rather than duplicating its structures. Check ~rgsaddle_abi_stamp~ before constructing a session. A meson project takes the headers from the top-level ~meson.build~; see @@rst::doc:`the meson how-to <meson>`@@.
 
 A surface callback returns ~rgsaddle_status_t~ and receives one ~rgsaddle_surface_request_t~. Positions and gradients are image-major Cartesian triples. The host supplies the energy and gradient arrays for every requested image; the library performs no Message Passing Interface (MPI) communication.
 From ABI minor 42, ~RGSADDLE_NOT_EQUILIBRATED~ and ~RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES~ report constrained-ensemble tails that fail the drift or effective-sample guards.
@@ -44,8 +44,8 @@ The value 1 turns on the classic dimer torque window.
 A rotation then also stops after one iteration once the rotational force is under 1.
 The value 0 turns that window off, so the rotation runs to ~rotation_tol~, the angle test or ~max_rotations~.
 The value -1 is the state of a new session. It turns the window on when ~rotation_tol~ is at least 1e-4 and the session is Lanczos or a dimer whose angle stop is off. A dimer with a positive ~rotation_angle_tol~, the improved dimer, keeps the window off unless the value is 1.
-For config minors 5 through 61, ~rotation_angle_tol~ is read as given and 0 keeps the angle stop off.
-From minor 62, ~rotation_angle_tol~ = 0 keeps the Rust default angle stop unless flag bit 0, ~RGSADDLE_MINMODE_EXPLICIT_ROTATION_ANGLE_TOL~, is set; with that bit and 0 the old stop-off behaviour remains.
+For config minors 5 through 62, ~rotation_angle_tol~ is read as given and 0 keeps the angle stop off.
+From minor 63, ~rotation_angle_tol~ = 0 keeps the Rust default angle stop unless flag bit 0, ~RGSADDLE_MINMODE_EXPLICIT_ROTATION_ANGLE_TOL~, is set; with that bit and 0 the old stop-off behaviour remains.
 Any other value returns ~RGSADDLE_INVALID_PARAMETER~ and leaves the session unchanged.
 A library below minor 32 does not export the symbol.
 From minor 41 a Lanczos session reads the window too: a step's estimate stops once two Krylov vectors leave the Ritz residual under 1, and the value 0 runs it to its residual as before.

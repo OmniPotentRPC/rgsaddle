@@ -140,17 +140,17 @@ inline rgsaddle_minmode_config_t minmode_config() {
     c.method = RGSADDLE_METHOD_LBFGS;
     c.dr = 1e-3;
     // Residual tolerance for the rotational force.
-    // At ABI minor 62+ this helper resolves the dimer angle stop to five
+    // At ABI minor 63+ this helper resolves the dimer angle stop to five
     // degrees, so the inferred classic torque window stays off for dimer.
     // Lanczos still infers the window from this value when left at -1.
     c.rotation_tol = 1e-3;
     c.max_rotations = 20;
     c.force_tol = 1e-3;
     c.max_move = 0.1;
-    // At ABI minor 62 and newer, rotation_angle_tol = 0 with
+    // At ABI minor 63 and newer, rotation_angle_tol = 0 with
     // RGSADDLE_MINMODE_EXPLICIT_ROTATION_ANGLE_TOL clear keeps the Rust
     // default angle stop of five degrees.
-    // At minors 5 through 61, rotation_angle_tol = 0 disables the angle
+    // At minors 5 through 62, rotation_angle_tol = 0 disables the angle
     // stop.
     return c;
 }
@@ -378,9 +378,9 @@ public:
     }
     // -1 infers the window: on when rotation_tol is at least 1e-4 and
     // the session is Lanczos or a dimer whose angle stop is disabled.
-    // With minmode_config() at ABI minor 62+, the resolved five-degree
+    // With minmode_config() at ABI minor 63+, the resolved five-degree
     // angle stop keeps that dimer window off unless 1 forces it on.
-    // From ABI minor 62, rotation_angle_tol 0 with
+    // From ABI minor 63, rotation_angle_tol 0 with
     // RGSADDLE_MINMODE_EXPLICIT_ROTATION_ANGLE_TOL clear uses the default
     // improved dimer stop and leaves the window off. Setting the bit with
     // 0 keeps the classic inference. A positive angle stays off unless 1.
