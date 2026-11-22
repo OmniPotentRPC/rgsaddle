@@ -1049,9 +1049,9 @@ pub fn solve_dense_matrix(
     if max_abs == 0.0 {
         return Err(SaddleError::Singular(0));
     }
-    let tol = relative_zero_tolerance(max_abs, n);
     #[cfg(feature = "faer")]
     if n >= 32 {
+        let tol = relative_zero_tolerance(max_abs, n);
         let mat = faer::Mat::from_fn(n, n, |i, j| a[(i, j)]);
         let lu = mat.partial_piv_lu();
         let u = lu.U();
