@@ -5,12 +5,16 @@
 //! the soft-subspace rank from the largest spectral gap, and emits search
 //! directions in two phases:
 //!
-//! 1. low-discrepancy-like draws in that soft subspace, then
+//! 1. pseudorandom Gaussian draws in that soft subspace, then
 //! 2. isotropic full-space draws for verification coverage.
 
-use ndarray::{Array1, Array2, ArrayView1};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 
-use crate::{PointSurface, SaddleError, SparseHessianOpts, SparsityPattern, sparse_hessian};
+use crate::eigensolve::DENSE_JACOBI_LIMIT;
+use crate::{
+    PointSurface, SaddleError, SparseHessianOpts, SparsityPattern, exact_eigh, one_atom_hessian,
+    sparse_hessian,
+};
 
 /// Soft-mode-first direction plan.
 #[derive(Clone, Debug)]
@@ -21,6 +25,231 @@ pub struct SoftModeDirectionPlan {
     pub eigenvalues: Array1<f64>,
     /// Seed directions: soft-subspace stage first, then full-space verification.
     pub directions: Vec<Array1<f64>>,
+}
+
+/// Deterministic soft-to-stiff Hessian-mode sweep.
+///
+/// Non-exhaustive: read the fields.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct ModeSweepDirectionPlan {
+    /// Lowest-to-highest eigenvalues of the recovered Hessian.
+    pub eigenvalues: Array1<f64>,
+    /// Eigenvector column used for each direction.
+    pub mode_indices: Vec<usize>,
+    /// One direction for every non-rigid mode.
+    pub directions: Vec<Array1<f64>>,
+    /// Proven lower bound on squared overlap with each selected mode.
+    pub minimum_squared_mode_weight: f64,
+}
+
+/// Select a deterministic soft-to-stiff schedule over an available mode band.
+///
+/// The returned values are positions within the band, `0..total_modes`, not
+/// eigenvector columns. A short schedule takes the midpoint of each
+/// equal-width stratum of the mode index, so the longest run of unsampled
+/// modes, ends included, is at most `ceil(total_modes / draws)`. A schedule
+/// at least as long as the mode band visits every mode once before cycling.
+/// The stratum index is `floor((2 * draw + 1) * total_modes / (2 * draws))`,
+/// evaluated with a wide product so a `usize` intermediate cannot overflow.
+/// The result does not depend on the platform. A schedule longer than a
+/// [`Vec`] can store (`isize::MAX` bytes) is an error.
+pub fn mode_sweep_schedule(total_modes: usize, draws: usize) -> Result<Vec<usize>, SaddleError> {
+    if total_modes == 0 || draws == 0 {
+        return Err(SaddleError::Invalid(
+            "mode sweep schedule needs at least one mode and one draw".into(),
+        ));
+    }
+    if !schedule_length_fits(draws) {
+        return Err(SaddleError::Invalid(
+            "mode sweep schedule is too long to represent".into(),
+        ));
+    }
+    if draws >= total_modes {
+        return Ok((0..draws).map(|draw| draw % total_modes).collect());
+    }
+    let mut schedule = Vec::with_capacity(draws);
+    for draw in 0..draws {
+        schedule.push(stratum_midpoint(draw, total_modes, draws)?);
+    }
+    Ok(schedule)
+}
+
+/// `true` when a `Vec<usize>` of this length is within the allocation limit.
+fn schedule_length_fits(draws: usize) -> bool {
+    (draws as u128).saturating_mul(std::mem::size_of::<usize>() as u128) <= isize::MAX as u128
+}
+
+/// `floor((2 * draw + 1) * total_modes / (2 * draws))` without a wrapping product.
+fn stratum_midpoint(draw: usize, total_modes: usize, draws: usize) -> Result<usize, SaddleError> {
+    let odd = 2u128 * draw as u128 + 1;
+    let denominator = 2u128 * draws as u128;
+    let index = mul_div_floor(odd, total_modes as u128, denominator)
+        .ok_or_else(|| SaddleError::Invalid("mode sweep schedule arithmetic overflows".into()))?;
+    usize::try_from(index)
+        .map_err(|_| SaddleError::Invalid("mode sweep schedule arithmetic overflows".into()))
+}
+
+/// `floor(a * b / d)`. `None` when `d` is zero or the quotient does not fit in `u128`.
+fn mul_div_floor(a: u128, b: u128, d: u128) -> Option<u128> {
+    if d == 0 {
+        return None;
+    }
+    let (hi, lo) = widening_mul(a, b);
+    div_wide(hi, lo, d)
+}
+
+/// `a * b` as a 256-bit value `(hi, lo)` with value `hi * 2^128 + lo`.
+fn widening_mul(a: u128, b: u128) -> (u128, u128) {
+    let a0 = a as u64 as u128;
+    let a1 = a >> 64;
+    let b0 = b as u64 as u128;
+    let b1 = b >> 64;
+    let p0 = a0 * b0;
+    let p1 = a0 * b1;
+    let p2 = a1 * b0;
+    let p3 = a1 * b1;
+    let mid = (p0 >> 64) + (p1 & u64::MAX as u128) + (p2 & u64::MAX as u128);
+    let lo = (p0 & u64::MAX as u128) | ((mid & u64::MAX as u128) << 64);
+    let hi = p3 + (p1 >> 64) + (p2 >> 64) + (mid >> 64);
+    (hi, lo)
+}
+
+/// `floor((hi * 2^128 + lo) / d)` when the quotient fits in `u128`.
+fn div_wide(hi: u128, lo: u128, d: u128) -> Option<u128> {
+    if d == 0 || hi >= d {
+        return None;
+    }
+    if hi == 0 {
+        return Some(lo / d);
+    }
+    let mut rem = hi;
+    let mut quot = 0u128;
+    for bit_index in (0..128).rev() {
+        let bit = (lo >> bit_index) & 1;
+        let rem_overflow = rem > (u128::MAX >> 1);
+        let doubled = (rem << 1) | bit;
+        if rem_overflow || doubled >= d {
+            rem = if rem_overflow {
+                doubled.wrapping_sub(d)
+            } else {
+                doubled - d
+            };
+            quot |= 1u128 << bit_index;
+        } else {
+            rem = doubled;
+        }
+    }
+    Some(quot)
+}
+
+/// Build one localized seed for every non-rigid Hessian mode, soft to stiff.
+///
+/// The Hessian is recovered by central differences over an all-pairs
+/// sparsity pattern, one atom per colour, and diagonalized in full. That costs `6 N` gradient
+/// evaluations, `O((3N)^3)` time and `O((3N)^2)` memory for `N` atoms, and
+/// builds every direction whatever schedule the caller then picks from
+/// [`mode_sweep_schedule`]. Above 128 degrees of freedom the diagonalization
+/// needs the `faer` feature; without it this returns an error.
+///
+/// `rigid_modes` is the number of lowest eigenpairs skipped. It assumes the
+/// rigid modes are the lowest of a stable minimum. Within a degenerate
+/// eigenvalue the modes are an arbitrary orthonormal basis. Each eigenvector
+/// takes the sign that makes its first largest-magnitude component
+/// positive, so the plan does not depend on the sign the eigensolver chose.
+///
+/// `localization_weights`, when present, has one row per localization centre
+/// and one column per atom. Entries must lie in `[0, 1]`; rows are assigned
+/// cyclically to modes. The direction for mode `e_m` is
+/// `(L e_m + carrier e_m) / ||L e_m + carrier e_m||`, so its squared overlap
+/// with `e_m` is at least `(carrier / (1 + carrier))²`. The combination is
+/// formed at a scale that cannot overflow or underflow, so the bound holds
+/// for every finite positive carrier, from `1e-300` to `f64::MAX`.
+///
+/// A direction that cannot be formed, because the Hessian or an eigenvector
+/// is not finite, is an error. No axis is substituted for it.
+pub fn hessian_mode_sweep_directions<S: PointSurface>(
+    surface: &S,
+    minimum: ArrayView1<'_, f64>,
+    rigid_modes: usize,
+    carrier: f64,
+    localization_weights: Option<ArrayView2<'_, f64>>,
+) -> Result<ModeSweepDirectionPlan, SaddleError> {
+    let dof = minimum.len();
+    if dof == 0 || !dof.is_multiple_of(3) {
+        return Err(SaddleError::Shape(
+            "mode sweep expects a non-empty 3N Cartesian point".into(),
+        ));
+    }
+    if rigid_modes >= dof {
+        return Err(SaddleError::Invalid(
+            "mode sweep needs at least one non-rigid mode".into(),
+        ));
+    }
+    if !(carrier.is_finite() && carrier > 0.0) {
+        return Err(SaddleError::Invalid(
+            "mode sweep carrier must be finite and positive".into(),
+        ));
+    }
+    if !cfg!(feature = "faer") && dof > DENSE_JACOBI_LIMIT {
+        return Err(SaddleError::Solver(
+            "mode sweep above 128 degrees of freedom requires the faer feature".into(),
+        ));
+    }
+    let n_atoms = dof / 3;
+    if let Some(weights) = localization_weights {
+        if weights.nrows() == 0 || weights.ncols() != n_atoms {
+            return Err(SaddleError::Shape(
+                "localization weights must have shape (centres, atoms)".into(),
+            ));
+        }
+        if weights
+            .iter()
+            .any(|value| !value.is_finite() || !(0.0..=1.0).contains(value))
+        {
+            return Err(SaddleError::Invalid(
+                "localization weights must be finite and lie in [0, 1]".into(),
+            ));
+        }
+    }
+    let mut pairs = Vec::new();
+    for i in 0..n_atoms {
+        for j in (i + 1)..n_atoms {
+            pairs.push((i, j));
+        }
+    }
+    let pattern = SparsityPattern::from_adjacency(n_atoms, &pairs)?;
+    // Every pair of atoms is coupled, so distance-2 colouring would give each
+    // atom its own colour after an O(N^3) search. Name that partition.
+    let hessian = one_atom_hessian(surface, minimum, &pattern, SparseHessianOpts::default())?;
+    let (eigenvalues, eigenvectors) = exact_eigh(hessian.to_dense().view())?;
+    let mut directions = Vec::with_capacity(dof - rigid_modes);
+    let mode_indices = (rigid_modes..dof).collect::<Vec<_>>();
+    for (sweep_index, &mode_index) in mode_indices.iter().enumerate() {
+        let mut mode = eigenvectors.column(mode_index).to_owned();
+        fix_sign(&mut mode);
+        let mut localized = mode.clone();
+        if let Some(weights) = localization_weights {
+            let row = weights.row(sweep_index % weights.nrows());
+            for atom in 0..n_atoms {
+                for axis in 0..3 {
+                    localized[3 * atom + axis] *= row[atom];
+                }
+            }
+        }
+        // The direction is proportional to `localized + carrier * mode`.
+        // Dividing by the larger of the carrier and the peak of `localized`
+        // keeps every term at most one, so neither a huge carrier nor a tiny
+        // one with an all-zero weight row overflows or underflows.
+        let scale = carrier.max(peak(&localized));
+        directions.push(unit(&localized / scale + &mode * (carrier / scale))?);
+    }
+    Ok(ModeSweepDirectionPlan {
+        eigenvalues,
+        mode_indices,
+        directions,
+        minimum_squared_mode_weight: (carrier / (1.0 + carrier)).powi(2),
+    })
 }
 
 /// Pick the soft-subspace rank from the largest adjacent relative spectral gap.
@@ -101,10 +330,10 @@ pub fn soft_mode_then_full_directions<S: PointSurface>(
     let mut rng = SplitMix64::new(seed);
     let mut directions = Vec::with_capacity(2 * phase_count);
     for i in 0..phase_count {
-        directions.push(sample_in_subspace(&basis, minimum, i, &mut rng));
+        directions.push(sample_in_subspace(&basis, minimum, i, &mut rng)?);
     }
     for _ in 0..phase_count {
-        directions.push(sample_on_sphere(dof, &mut rng));
+        directions.push(sample_on_sphere(dof, &mut rng)?);
     }
     Ok(SoftModeDirectionPlan {
         k,
@@ -118,20 +347,16 @@ fn sample_in_subspace(
     _minimum: ArrayView1<'_, f64>,
     _index: usize,
     rng: &mut SplitMix64,
-) -> Array1<f64> {
+) -> Result<Array1<f64>, SaddleError> {
     let k = basis.ncols();
     let mut coeffs = Array1::zeros(k);
     for c in &mut coeffs {
         *c = rng.normal();
     }
-    let mut v = basis.dot(&coeffs);
-    if v.iter().all(|x| x.abs() < 1.0e-14) {
-        v = basis.column(0).to_owned();
-    }
-    unit(v)
+    unit(basis.dot(&coeffs))
 }
 
-fn sample_on_sphere(dim: usize, rng: &mut SplitMix64) -> Array1<f64> {
+fn sample_on_sphere(dim: usize, rng: &mut SplitMix64) -> Result<Array1<f64>, SaddleError> {
     let mut v = Array1::zeros(dim);
     for c in &mut v {
         *c = rng.normal();
@@ -141,9 +366,360 @@ fn sample_on_sphere(dim: usize, rng: &mut SplitMix64) -> Array1<f64> {
 
 #[cfg(test)]
 mod tests {
-    use ndarray::array;
+    use ndarray::{Array1, Array2, ArrayView1, array};
 
-    use super::spectral_gap_rank;
+    use super::{
+        div_wide, hessian_mode_sweep_directions, mode_sweep_schedule,
+        soft_mode_then_full_directions, spectral_gap_rank, unit, widening_mul,
+    };
+    use crate::{
+        PointSurface, SaddleError, SparseHessianOpts, SparsityPattern, exact_eigh,
+        one_atom_hessian, sparse_hessian,
+    };
+
+    struct DiagonalHarmonic;
+
+    impl PointSurface for DiagonalHarmonic {
+        fn eval(&self, x: ArrayView1<'_, f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            let diagonal = array![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+            let gradient = &diagonal * &x;
+            Ok((0.5 * x.dot(&gradient), gradient))
+        }
+    }
+
+    struct LargeHarmonic;
+
+    impl PointSurface for LargeHarmonic {
+        fn eval(&self, x: ArrayView1<'_, f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            Ok((0.5 * x.dot(&x), x.to_owned()))
+        }
+    }
+
+    #[test]
+    fn hessian_chirp_visits_each_nonrigid_mode_with_overlap_floor() {
+        let minimum = Array1::zeros(6);
+        let weights = array![[0.0, 1.0], [1.0, 0.0]];
+        let plan = hessian_mode_sweep_directions(
+            &DiagonalHarmonic,
+            minimum.view(),
+            1,
+            0.25,
+            Some(weights.view()),
+        )
+        .expect("mode sweep");
+        assert_eq!(plan.mode_indices, vec![1, 2, 3, 4, 5]);
+        assert_eq!(plan.directions.len(), 5);
+        assert!((plan.minimum_squared_mode_weight - 0.04).abs() < 1.0e-14);
+        for (direction, &mode) in plan.directions.iter().zip(&plan.mode_indices) {
+            assert!(direction[mode].powi(2) + 1.0e-14 >= plan.minimum_squared_mode_weight);
+        }
+    }
+
+    #[test]
+    fn hessian_chirp_supports_more_than_lanczos_full_dimension() {
+        let minimum = Array1::zeros(99);
+        let plan = hessian_mode_sweep_directions(&LargeHarmonic, minimum.view(), 3, 0.25, None)
+            .expect("large mode sweep");
+        assert_eq!(plan.directions.len(), 96);
+    }
+
+    #[test]
+    fn short_chirp_stratifies_the_whole_mode_band() {
+        assert_eq!(mode_sweep_schedule(10, 4).unwrap(), vec![1, 3, 6, 8]);
+        assert_eq!(
+            mode_sweep_schedule(3, 7).unwrap(),
+            vec![0, 1, 2, 0, 1, 2, 0]
+        );
+        assert!(mode_sweep_schedule(0, 1).is_err());
+        assert!(mode_sweep_schedule(3, 0).is_err());
+    }
+
+    #[test]
+    fn schedule_is_exact_at_usize_max_edges() {
+        // `(2 * draw + 1) * total_modes` does not fit in `usize` for these
+        // inputs. The old product panicked in debug and wrapped in release.
+        let total = usize::MAX as u128;
+        let expect = |draws: usize| -> Vec<usize> {
+            (0..draws)
+                .map(|draw| {
+                    let index = (2 * draw as u128 + 1) * total / (2 * draws as u128);
+                    usize::try_from(index).unwrap()
+                })
+                .collect()
+        };
+        assert_eq!(mode_sweep_schedule(usize::MAX, 1).unwrap(), expect(1));
+        assert_eq!(mode_sweep_schedule(usize::MAX, 2).unwrap(), expect(2));
+        assert_eq!(mode_sweep_schedule(usize::MAX, 3).unwrap(), expect(3));
+        assert!(mode_sweep_schedule(usize::MAX, usize::MAX).is_err());
+        assert!(mode_sweep_schedule(2, usize::MAX).is_err());
+        assert!(mode_sweep_schedule(0, usize::MAX).is_err());
+    }
+
+    #[test]
+    fn wide_division_reproduces_the_product() {
+        let samples = [
+            (1u128, 1u128, 1u128),
+            (3, u128::MAX, 4),
+            (5, u128::MAX, 6),
+            (1 << 64, 1 << 64, 1 << 64),
+            (u128::MAX, u128::MAX, u128::MAX),
+            (2 * (usize::MAX as u128) + 1, usize::MAX as u128, 6),
+        ];
+        for (a, b, d) in samples {
+            let (hi, lo) = widening_mul(a, b);
+            let quot = div_wide(hi, lo, d).expect("quotient fits");
+            if let Some(product) = a.checked_mul(b) {
+                assert_eq!(quot, product / d, "{a} * {b} / {d}");
+            }
+            let (qhi, qlo) = widening_mul(quot, d);
+            let (rem_lo, borrow) = lo.overflowing_sub(qlo);
+            let rem_hi = hi - qhi - u128::from(borrow);
+            assert_eq!(rem_hi, 0, "remainder limb {a} {b} {d}");
+            assert!(rem_lo < d, "remainder {rem_lo} vs {d}");
+        }
+        assert_eq!(widening_mul(1 << 64, 1 << 64), (1, 0));
+        assert_eq!(widening_mul(u128::MAX, u128::MAX), (u128::MAX - 1, 1));
+        assert_eq!(div_wide(1, 5, u128::MAX).unwrap(), 1);
+    }
+
+    #[test]
+    fn stratified_schedule_bounds_the_unsampled_run_for_every_size() {
+        for modes in 1..=40_usize {
+            for draws in 1..=60_usize {
+                let schedule = mode_sweep_schedule(modes, draws).unwrap();
+                assert_eq!(schedule.len(), draws);
+                assert!(schedule.iter().all(|&mode| mode < modes));
+                let mut visited = vec![false; modes];
+                for &mode in &schedule {
+                    visited[mode] = true;
+                }
+                if draws >= modes {
+                    assert!(visited.iter().all(|&seen| seen), "{modes} {draws}");
+                    continue;
+                }
+                assert!(schedule.windows(2).all(|pair| pair[0] < pair[1]));
+                let mut run = 0;
+                let mut longest = 0;
+                for seen in visited {
+                    run = if seen { 0 } else { run + 1 };
+                    longest = longest.max(run);
+                }
+                assert!(
+                    longest <= modes.div_ceil(draws),
+                    "{modes} {draws} {longest}"
+                );
+            }
+        }
+    }
+
+    /// Symmetric matrix with a spread, non-degenerate spectrum.
+    fn dense_symmetric(n: usize) -> Array2<f64> {
+        Array2::from_shape_fn((n, n), |(i, j)| {
+            let coupling = 0.05 * ((i + 1) as f64 * (j + 1) as f64).sin();
+            if i == j {
+                1.0 + 0.1 * i as f64 + coupling
+            } else {
+                coupling
+            }
+        })
+    }
+
+    struct DenseQuadratic(Array2<f64>);
+
+    impl PointSurface for DenseQuadratic {
+        fn eval(&self, x: ArrayView1<'_, f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            let gradient = self.0.dot(&x);
+            Ok((0.5 * x.dot(&gradient), gradient))
+        }
+    }
+
+    #[test]
+    fn localized_directions_are_unit_and_respect_the_overlap_floor() {
+        let hessian = dense_symmetric(12);
+        let (values, vectors) = exact_eigh(hessian.view()).unwrap();
+        let weights = array![
+            [1.0, 0.0, 0.5, 0.25],
+            [0.0, 1.0, 0.75, 0.0],
+            [0.3, 0.3, 0.3, 0.3]
+        ];
+        let carrier = 0.25;
+        let plan = hessian_mode_sweep_directions(
+            &DenseQuadratic(hessian),
+            Array1::zeros(12).view(),
+            2,
+            carrier,
+            Some(weights.view()),
+        )
+        .unwrap();
+        assert_eq!(plan.directions.len(), 10);
+        assert_eq!(plan.mode_indices, (2..12).collect::<Vec<_>>());
+        for (a, b) in plan.eigenvalues.iter().zip(values.iter()) {
+            assert!((a - b).abs() < 1.0e-6, "{a} {b}");
+        }
+        let floor = plan.minimum_squared_mode_weight;
+        let mut loosest = 1.0_f64;
+        for (direction, &mode) in plan.directions.iter().zip(&plan.mode_indices) {
+            assert!((direction.dot(direction) - 1.0).abs() < 1.0e-12);
+            let overlap = direction.dot(&vectors.column(mode)).powi(2);
+            assert!(
+                overlap + 1.0e-9 >= floor,
+                "mode {mode}: {overlap} < {floor}"
+            );
+            loosest = loosest.min(overlap);
+        }
+        assert!(loosest < 0.9, "localization never changed a direction");
+    }
+
+    #[cfg(feature = "faer")]
+    #[test]
+    fn unlocalized_sweep_returns_each_eigenvector_above_the_dense_limit() {
+        let n = 135;
+        let hessian = dense_symmetric(n);
+        let surface = DenseQuadratic(hessian.clone());
+        let minimum = Array1::zeros(n);
+        let plan = hessian_mode_sweep_directions(&surface, minimum.view(), 0, 0.25, None).unwrap();
+        assert_eq!(plan.directions.len(), n);
+        assert!(
+            plan.eigenvalues
+                .to_vec()
+                .windows(2)
+                .all(|pair| pair[0] <= pair[1])
+        );
+        for (direction, &mode) in plan.directions.iter().zip(&plan.mode_indices) {
+            let residual = hessian.dot(direction) - direction * plan.eigenvalues[mode];
+            assert!(residual.dot(&residual).sqrt() < 1.0e-5, "mode {mode}");
+            let peak = direction
+                .iter()
+                .fold(0.0_f64, |worst, x| worst.max(x.abs()));
+            let first = direction
+                .iter()
+                .position(|x| x.abs() > 0.999 * peak)
+                .unwrap();
+            assert!(direction[first] > 0.0, "mode {mode} sign");
+        }
+        let again = hessian_mode_sweep_directions(&surface, minimum.view(), 0, 0.25, None).unwrap();
+        for (left, right) in plan.directions.iter().zip(&again.directions) {
+            assert_eq!(left, right);
+        }
+    }
+
+    #[cfg(not(feature = "faer"))]
+    #[test]
+    fn mode_sweep_without_faer_reports_the_dense_limit() {
+        let n = 135;
+        let surface = DenseQuadratic(dense_symmetric(n));
+        let error = hessian_mode_sweep_directions(&surface, Array1::zeros(n).view(), 0, 0.25, None)
+            .unwrap_err();
+        assert!(matches!(error, SaddleError::Solver(_)));
+    }
+
+    #[test]
+    fn unit_scales_before_it_normalizes() {
+        for scale in [1.0, 1.0e160, 1.0e300, 1.0e-13, 1.0e-200, 1.0e-300] {
+            let direction = unit(array![3.0, -4.0, 0.0] * scale).unwrap();
+            let expected = [0.6, -0.8, 0.0];
+            for (got, want) in direction.iter().zip(expected) {
+                assert!((got - want).abs() < 1.0e-14, "{scale}: {direction:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn unit_refuses_a_vector_with_no_direction() {
+        assert!(matches!(
+            unit(Array1::zeros(3)),
+            Err(SaddleError::Invalid(_))
+        ));
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(matches!(
+                unit(array![1.0, bad, 0.0]),
+                Err(SaddleError::NonFinite(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn extreme_carriers_keep_the_documented_overlap_floor() {
+        let hessian = dense_symmetric(12);
+        let (_, vectors) = exact_eigh(hessian.view()).unwrap();
+        let zeros = Array2::<f64>::zeros((2, 4));
+        let partial = array![[1.0, 0.0, 0.5, 0.25], [0.0, 1.0, 0.75, 0.0]];
+        for carrier in [1.0e160, f64::MAX, 1.0e-13, 1.0e-200, 1.0e-300] {
+            for (name, weights) in [
+                ("none", None),
+                ("zero rows", Some(zeros.view())),
+                ("partial", Some(partial.view())),
+            ] {
+                let plan = hessian_mode_sweep_directions(
+                    &DenseQuadratic(hessian.clone()),
+                    Array1::zeros(12).view(),
+                    2,
+                    carrier,
+                    weights,
+                )
+                .unwrap();
+                for (direction, &mode) in plan.directions.iter().zip(&plan.mode_indices) {
+                    assert!(
+                        (direction.dot(direction) - 1.0).abs() < 1.0e-12,
+                        "{carrier} {name}"
+                    );
+                    let overlap = direction.dot(&vectors.column(mode)).powi(2);
+                    assert!(
+                        overlap + 1.0e-9 >= plan.minimum_squared_mode_weight,
+                        "{carrier} {name} mode {mode}: {overlap}"
+                    );
+                    if carrier > 1.0e12 || name == "zero rows" || name == "none" {
+                        assert!(overlap > 1.0 - 1.0e-9, "{carrier} {name} mode {mode}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_huge_carrier_does_not_collapse_directions_onto_the_first_axis() {
+        let plan = hessian_mode_sweep_directions(
+            &DiagonalHarmonic,
+            Array1::zeros(6).view(),
+            0,
+            1.0e160,
+            None,
+        )
+        .unwrap();
+        assert!(plan.minimum_squared_mode_weight <= 1.0);
+        for (direction, &mode) in plan.directions.iter().zip(&plan.mode_indices) {
+            assert!(direction[mode].abs() > 1.0 - 1.0e-12, "mode {mode}");
+        }
+    }
+
+    #[test]
+    fn soft_mode_directions_are_unit_vectors() {
+        let plan = soft_mode_then_full_directions(&DiagonalHarmonic, Array1::zeros(6).view(), 3, 7)
+            .unwrap();
+        assert_eq!(plan.directions.len(), 6);
+        for direction in &plan.directions {
+            assert!((direction.dot(direction) - 1.0).abs() < 1.0e-12);
+        }
+    }
+
+    #[test]
+    fn the_all_pairs_pattern_needs_no_colouring_search() {
+        // The sweep recovers the Hessian with one colour per atom. That has
+        // to be the partition distance-2 colouring finds on a complete
+        // graph, or the sweep would change.
+        let atoms = 5;
+        let dof = 3 * atoms;
+        let pairs: Vec<(usize, usize)> = (0..atoms)
+            .flat_map(|i| ((i + 1)..atoms).map(move |j| (i, j)))
+            .collect();
+        let pattern = SparsityPattern::from_adjacency(atoms, &pairs).unwrap();
+        let surface = DenseQuadratic(dense_symmetric(dof));
+        let origin = Array1::from_shape_fn(dof, |i| 0.01 * (i as f64).sin());
+        let options = SparseHessianOpts::default();
+        let coloured = sparse_hessian(&surface, origin.view(), &pattern, options).unwrap();
+        let per_atom = one_atom_hessian(&surface, origin.view(), &pattern, options).unwrap();
+        assert_eq!(coloured.to_dense(), per_atom.to_dense());
+    }
 
     #[test]
     fn spectral_gap_rank_uses_full_space_when_gaps_are_degenerate() {
@@ -165,16 +741,43 @@ mod tests {
     }
 }
 
-fn unit(mut v: Array1<f64>) -> Array1<f64> {
-    let norm2 = v.dot(&v);
-    if !norm2.is_finite() || norm2 <= 1.0e-24 {
-        v.fill(0.0);
-        v[0] = 1.0;
-        return v;
+fn fix_sign(v: &mut Array1<f64>) {
+    let largest = peak(v);
+    let first = v
+        .iter()
+        .position(|x| x.abs() >= largest * (1.0 - 1.0e-6))
+        .unwrap_or(0);
+    if v[first] < 0.0 {
+        v.mapv_inplace(|x| -x);
     }
-    let norm = norm2.sqrt();
+}
+
+/// Largest absolute component. The vector must be finite, because
+/// `f64::max` ignores a NaN.
+fn peak(v: &Array1<f64>) -> f64 {
+    v.iter().fold(0.0_f64, |worst, x| worst.max(x.abs()))
+}
+
+/// Normalize `v` to unit length.
+///
+/// The vector is divided by its largest component before the norm is
+/// measured, so a squared norm that would overflow or underflow in `f64`
+/// does not matter. A vector that is not finite or has no length has no
+/// direction, and is an error rather than a stand-in axis.
+fn unit(mut v: Array1<f64>) -> Result<Array1<f64>, SaddleError> {
+    if v.iter().any(|x| !x.is_finite()) {
+        return Err(SaddleError::NonFinite("seed direction"));
+    }
+    let largest = peak(&v);
+    if largest == 0.0 {
+        return Err(SaddleError::Invalid(
+            "seed direction has zero length and no direction".into(),
+        ));
+    }
+    v.mapv_inplace(|x| x / largest);
+    let norm = v.dot(&v).sqrt();
     v.mapv_inplace(|x| x / norm);
-    v
+    Ok(v)
 }
 
 #[derive(Clone, Debug)]

@@ -48,6 +48,9 @@ Defaults: improved tangent, uniform spring =k = 5=, NEB projection, climbing ima
 * Defect-pair hop rates
 =howto/defect-pair-rates= is =defect_pair_rates=: a solid-state dimer and an index check for every hop in a caller-supplied catalogue, a fixed climbing-image band through the saddle, a PAFI free-energy barrier, and a Bennett–Chandler transmission coefficient. The rate is =κ ν exp(-ΔF/kT)=. The document is =rgsaddle.defect_pair_rates=. Copper is only in the tests.
 
+* NPT lattice parameter
+=howto/npt-lattice= is =npt_lattice=: Langevin dynamics with a Berendsen barostat that samples the zero-pressure lattice of a crystal. The report carries the mean lattice parameter and pressure with blocking standard errors, and =pressure_converged= is an indicative screen, not a proof of equilibrium. =NptConfig= is non-exhaustive and the seed expands through SplitMix64.
+
 * Free-energy profile along a path
 =howto/pafi= is projected average force integration (PAFI; Swinburne and Marinica, Phys. Rev. Lett. 120, 135503 (2018)): the free energy along a path such as converged NEB images, from =dF/ds = ⟨(∇E · n)(1 - ψ)⟩= averaged on the hyperplanes normal to the path. The input is a =PointSurface=, an =ArcPath= from the images (=ArcPath::from_positions=) and the arcs of the planes; the output is a =FreeEnergyProfile= with the barrier and its standard error, and one =HyperplaneAverage= per plane with =tau= and =n_eff=. =zero_temperature_barrier= is the check that the path and the surface agree. The page also says how the warm-up floor and the automated equilibration test treat each plane.
 

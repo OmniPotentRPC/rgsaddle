@@ -1,0 +1,1 @@
+~mode_sweep_schedule~ evaluates its stratum index with a wide product, so a mode count near the top of ~usize~ no longer overflows, and a schedule too long to store is an error.
