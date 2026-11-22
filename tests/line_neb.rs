@@ -623,3 +623,81 @@ fn a_plateau_of_three_equal_energies_still_steps() {
     assert!(report.max_interior_spring.is_finite());
     assert_eq!(report.status, LineNebStatus::Running);
 }
+
+/// `V(x, y) = (((x/scale) - 2)^2 - 1)^2 + (y/scale)^2`.
+///
+/// The saddle sits at `(2 * scale, 0)`, so the coordinate extent scales
+/// with the length unit and the seed must scale with it.
+struct ScaledShiftedWell {
+    scale: f64,
+}
+
+impl BandSurface for ScaledShiftedWell {
+    fn eval(
+        &self,
+        positions: ArrayView2<'_, f64>,
+        energies: &mut Array1<f64>,
+        gradients: &mut Array2<f64>,
+    ) -> Result<(), SaddleError> {
+        let scale = self.scale;
+        for (i, row) in positions.outer_iter().enumerate() {
+            let along = row[0] / scale - 2.0;
+            let across = row[1] / scale;
+            let well = along * along - 1.0;
+            energies[i] = well * well + across * across;
+            gradients[(i, 0)] = 4.0 * along * well / scale;
+            gradients[(i, 1)] = 2.0 * across / scale;
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn the_seed_perturbation_is_invariant_under_a_change_of_length_unit() {
+    let seed = FixedEnergySeed::default()
+        .with_saddle_energy(1.0)
+        .with_target_energy(0.25)
+        .with_images(5)
+        .with_max_evaluations(20_000);
+    let scale = 8.0;
+    let unit = fixed_energy_mep_seed(
+        &ScaledShiftedWell { scale: 1.0 },
+        array![2.0, 0.0].view(),
+        array![1.0, 0.0].view(),
+        array![1.0, 1.0].view(),
+        seed,
+    )
+    .unwrap();
+    let again = fixed_energy_mep_seed(
+        &ScaledShiftedWell { scale: 1.0 },
+        array![2.0, 0.0].view(),
+        array![1.0, 0.0].view(),
+        array![1.0, 1.0].view(),
+        seed,
+    )
+    .unwrap();
+    assert_eq!(unit, again);
+    let scaled = fixed_energy_mep_seed(
+        &ScaledShiftedWell { scale },
+        array![2.0 * scale, 0.0].view(),
+        array![1.0, 0.0].view(),
+        array![1.0, 1.0].view(),
+        seed,
+    )
+    .unwrap();
+    assert_eq!(scaled.raw_dim(), unit.raw_dim());
+    for (got, reference) in scaled.iter().zip(unit.iter()) {
+        let expected = reference * scale;
+        assert!(
+            (got - expected).abs() <= 1e-9 * scale,
+            "scaled {got} expected {expected}"
+        );
+    }
+    let half_width = 0.5_f64.sqrt();
+    for (endpoint, sign) in [(0, -1.0), (unit.nrows() - 1, 1.0)] {
+        let expected = 2.0 + sign * half_width;
+        assert!((unit[(endpoint, 0)] - expected).abs() < 1e-8);
+        assert!(unit[(endpoint, 1)].abs() < 1e-8);
+        assert!((scaled[(endpoint, 0)] - expected * scale).abs() < 1e-8 * scale);
+    }
+}

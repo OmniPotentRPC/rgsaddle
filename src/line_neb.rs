@@ -681,6 +681,25 @@ fn coordinate_extent(values: impl Iterator<Item = f64>) -> Result<f64, SaddleErr
     Ok(extent)
 }
 
+/// Opening step as a fraction of a path length.
+///
+/// The fraction is `sqrt(f64::EPSILON)`, which is dimensionless, so the
+/// step has the unit of `length_scale`. A uniform change of length unit
+/// scales the step with the coordinates. The value is fixed for a given
+/// length scale.
+fn opening_step(length_scale: f64) -> Result<f64, SaddleError> {
+    if !(length_scale.is_finite() && length_scale > 0.0) {
+        return Err(SaddleError::Invalid(
+            "MEP opening step needs a positive finite length scale".into(),
+        ));
+    }
+    let step = length_scale * f64::EPSILON.sqrt();
+    if !(step.is_finite() && step > 0.0) {
+        return Err(SaddleError::NonFinite("MEP opening step"));
+    }
+    Ok(step)
+}
+
 fn charge(budget: &mut usize) -> Result<(), SaddleError> {
     if *budget == 0 {
         return Err(SaddleError::Invalid(
@@ -719,10 +738,9 @@ fn energy_slice(
             "MEP energy slice has no coordinate extent".into(),
         ));
     }
-    let mut upper = extent.sqrt() * f64::EPSILON.sqrt();
-    if !(upper > 0.0 && upper.is_finite()) {
-        return Err(SaddleError::NonFinite("MEP energy-slice step"));
-    }
+    // Linear in the coordinate extent, so a change of length unit scales
+    // the bracket with the path.
+    let mut upper = opening_step(extent)?;
     loop {
         let trial_q = q.to_owned() + upper * &direction;
         let trial = &trial_q / &sqrt_masses;
@@ -802,6 +820,15 @@ with_setters!(FixedEnergySeed {
 /// image count sets the energy resolution. [`FixedEnergySeed::max_evaluations`]
 /// is the surface-call budget for every slice on both branches.
 ///
+/// The opening displacement off the saddle, and the first trial step of
+/// each energy slice, is `sqrt(f64::EPSILON)` times a length scale of the
+/// mass-scaled coordinates. The scale is the largest absolute coordinate.
+/// A saddle at the origin has no extent, and the scale is then the length
+/// of the normalized unstable mode, which is 1. The factor is
+/// dimensionless, so the step is a length and a uniform change of length
+/// unit scales it with the coordinates. The step is fixed for a given
+/// saddle, mode, masses, and [`FixedEnergySeed`].
+///
 /// # Errors
 ///
 /// [`SaddleError::Invalid`] when the input is inconsistent, when a slice
@@ -839,14 +866,15 @@ pub fn fixed_energy_mep_seed(
     }
     let direction = mode_q / mode_norm;
     let extent = coordinate_extent(saddle_q.iter().copied())?;
-    // A saddle at the origin has no coordinate extent. The kick is then
-    // one normalized-mode length, which is 1 after the division above.
-    let length = if extent > 0.0 {
+    // A saddle at the origin has no coordinate extent. The length scale
+    // is then the normalized mode, whose length is 1 after the division
+    // above. The step is linear in that scale.
+    let length_scale = if extent > 0.0 {
         extent
     } else {
         direction.dot(&direction).sqrt()
     };
-    let displacement = length.sqrt() * f64::EPSILON.sqrt();
+    let displacement = opening_step(length_scale)?;
     let mut budget = seed.max_evaluations;
     let mut branches = Vec::with_capacity(2);
     for sign in [-1.0, 1.0] {
@@ -1207,5 +1235,21 @@ mod tangent_tests {
             2.5,
         );
         assert!(tangent.is_err());
+    }
+}
+
+#[cfg(test)]
+mod opening_step_tests {
+    use super::opening_step;
+
+    #[test]
+    fn the_opening_step_scales_linearly_with_length() {
+        let unit = opening_step(1.0).unwrap();
+        let scaled = opening_step(8.0).unwrap();
+        assert_eq!(unit, f64::EPSILON.sqrt());
+        assert_eq!(scaled, unit * 8.0);
+        assert!(opening_step(0.0).is_err());
+        assert!(opening_step(f64::NAN).is_err());
+        assert!(opening_step(f64::INFINITY).is_err());
     }
 }

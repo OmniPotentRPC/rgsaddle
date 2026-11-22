@@ -1,0 +1,1 @@
+The fixed-energy MEP seed and each energy slice open with a step of sqrt(machine epsilon) times a length scale of the mass-scaled path (the largest absolute coordinate, or the normalized mode length when the saddle is at the origin). The factor is dimensionless, so a change of length unit scales the step with the coordinates, and the step is fixed for a given seed.
