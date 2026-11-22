@@ -1,2 +1,3 @@
 The copper validation lattice table now comes from ~npt_lattice~ with the kinetic pressure in the barostat, and the older table, which left it out, is marked stale where it is still recorded.
 The defect-pair guide lists the new lattice parameters and the ~cargo test --release --test mishin_cu npt_lattice_table -- --ignored --nocapture~ command that regenerates them.
+The guide gives the run settings, the 0.0006 Å seed to seed spread of a 4000 step run at 600 K, and a measured comparison of eight 4000 step runs with four 40000 step runs (~npt_lattice_run_length~), which replaces an estimate of the bias that the run length leaves.
