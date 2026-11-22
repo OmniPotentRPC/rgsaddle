@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 63u
+#define RGSADDLE_ABI_MINOR 64u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -163,7 +163,7 @@ typedef enum {
   RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES = -15,
   /**
    * A geodesic interpolation used all of its sweeps with an image still
-   * moving. The outputs hold the last iterate.
+   * moving. The outputs hold the last iterate. ABI minor 64.
    */
   RGSADDLE_NOT_CONVERGED = -16
 } rgsaddle_status_t;
@@ -2219,6 +2219,7 @@ int32_t rgsaddle_band_is_refining(const RgsaddleBand *band);
  * Redundant coordinate chart for geodesic interpolation.
  *
  * Zhu, Thompson, and Martinez, J. Chem. Phys. 150, 164103 (2019).
+ * ABI minor 64.
  *
  * `x` holds `dof` Cartesians. The chart writes `n_coords` redundant
  * coordinates into `q` and the row-major Wilson B matrix (`n_coords`
@@ -2238,7 +2239,8 @@ typedef int (*rgsaddle_geodesic_chart_fn)(void *ctx, const double *x,
  * above their `n_images`, because the output buffer cannot grow; the
  * call returns `RGSADDLE_INVALID_PARAMETER` instead of clamping the cap.
  * `seed` seeds the ten noisy starts of
- * Algorithm 3 in `rgsaddle_geodesic_morse` and takes any value.
+ * Algorithm 3 in `rgsaddle_geodesic_morse` and takes any value. ABI
+ * minor 64.
  */
 typedef struct {
   rgsaddle_version_t version;
@@ -2260,13 +2262,13 @@ typedef struct {
  * Fill `out` with the default geodesic controls (step and gradient
  * tolerances 1e-6, max_move 0.5, lower_ratio 0.95, upper_ratio 1.1,
  * 40 sweeps, 40 iterations, memory 8, 10 bound samples, 32 images,
- * seed 0).
+ * seed 0). ABI minor 64.
  */
 rgsaddle_status_t rgsaddle_geodesic_config_default(
     rgsaddle_geodesic_config_t *out);
 
 /**
- * Minimize the geodesic length of an existing path.
+ * Minimize the geodesic length of an existing path. ABI minor 64.
  *
  * `path` and `out` hold `n_images * dof` doubles, image-major, with
  * `n_images` at least 2. The image count is unchanged: `out` has no
@@ -2297,7 +2299,7 @@ rgsaddle_status_t rgsaddle_geodesic_path(
     double *lower, double *upper);
 
 /**
- * Morse pair geodesic between two geometries.
+ * Morse pair geodesic between two geometries. ABI minor 64.
  *
  * `reactant`, `product`, and each row of `out` hold `3 * n_atoms`
  * doubles. `radii` holds one covalent radius per atom. `cell` is a

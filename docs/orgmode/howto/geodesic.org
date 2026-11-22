@@ -49,7 +49,8 @@ The same seed repeats the path.
 On the Morse pair chart a dissociation whose distance only increases has length ~|q(end) - q(start)|~, the equality case of Eq. (B5).
 ~tests/geodesic_path.rs~ checks that length for ~r_e = 2~ from ~r = 2~ to ~r = 6~, and the straight segment of length 5 on a flat chart (Appendix A).
 
-From C, ~rgsaddle_geodesic_config_default~ fills ~rgsaddle_geodesic_config_t~, ~rgsaddle_geodesic_path~ takes a host chart and an optional row-major cell, and ~rgsaddle_geodesic_morse~ uses Eq. (7).
+From C, ABI minor 64, ~rgsaddle_geodesic_config_default~ fills ~rgsaddle_geodesic_config_t~, ~rgsaddle_geodesic_path~ takes a host chart and an optional row-major cell, and ~rgsaddle_geodesic_morse~ uses Eq. (7).
 A host chart given a cell applies the same minimum image to its own distances.
 A run that exhausts ~max_sweeps~ without settling returns ~RGSADDLE_NOT_CONVERGED~ with ~out~, ~length~, ~lower~, and ~upper~ holding the last iterate.
 A NULL config selects the defaults. ~length~, ~lower~, and ~upper~ may be NULL.
+A host that loads the library at run time checks ~rgsaddle_abi_version()~ for at least minor 64 before resolving these symbols.

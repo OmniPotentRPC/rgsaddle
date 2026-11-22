@@ -4280,10 +4280,24 @@ mod torque_window_abi_tests {
             unsafe { report.assume_init() }.rotations
         };
 
-        // The previous minor keeps the legacy meaning of 0.0: angle stop off.
-        let legacy = session_of_with_rotation_angle(0, RGSADDLE_ABI_MINOR - 1, 1e-8, 0, 0.0);
-        // The current minor with 0.0 and no flag keeps the Rust default angle stop.
-        let defaulted = session_of_with_rotation_angle(0, RGSADDLE_ABI_MINOR, 1e-8, 0, 0.0);
+        // A minor below `MINMODE_EXPLICIT_ROTATION_ANGLE_TOL_MINOR` keeps
+        // the legacy meaning of 0.0: angle stop off. The checks pin that
+        // boundary instead of `RGSADDLE_ABI_MINOR`.
+        let legacy = session_of_with_rotation_angle(
+            0,
+            MINMODE_EXPLICIT_ROTATION_ANGLE_TOL_MINOR - 1,
+            1e-8,
+            0,
+            0.0,
+        );
+        // The introducing minor with 0.0 and no flag keeps the Rust default angle stop.
+        let defaulted = session_of_with_rotation_angle(
+            0,
+            MINMODE_EXPLICIT_ROTATION_ANGLE_TOL_MINOR,
+            1e-8,
+            0,
+            0.0,
+        );
         // The current minor with the explicit flag and 0.0 keeps the stop off.
         let explicit_zero = session_of_with_rotation_angle(
             0,

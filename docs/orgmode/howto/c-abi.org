@@ -1,7 +1,7 @@
 #+TITLE: Use the C and C++ interfaces
 #+OPTIONS: toc:nil num:nil
 
-~include/rgsaddle.h~ declares the C application binary interface (ABI), major 1, minor 63. It preserves the main band, minimum-mode and index-1 layouts and adds intrinsic reaction coordinate (IRC), Sella, constraint and geometry controls. Include this header rather than duplicating its structures. Check ~rgsaddle_abi_stamp~ before constructing a session. A meson project takes the headers from the top-level ~meson.build~; see @@rst::doc:`the meson how-to <meson>`@@.
+~include/rgsaddle.h~ declares the C application binary interface (ABI), major 1, minor 64. It preserves the main band, minimum-mode and index-1 layouts and adds intrinsic reaction coordinate (IRC), Sella, constraint and geometry controls. Include this header rather than duplicating its structures. Check ~rgsaddle_abi_stamp~ before constructing a session. A meson project takes the headers from the top-level ~meson.build~; see @@rst::doc:`the meson how-to <meson>`@@.
 
 A surface callback returns ~rgsaddle_status_t~ and receives one ~rgsaddle_surface_request_t~. Positions and gradients are image-major Cartesian triples. The host supplies the energy and gradient arrays for every requested image; the library performs no Message Passing Interface (MPI) communication.
 From ABI minor 42, ~RGSADDLE_NOT_EQUILIBRATED~ and ~RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES~ report constrained-ensemble tails that fail the drift or effective-sample guards.
@@ -132,10 +132,11 @@ The =RGSADDLE_LINEB_INTERPOLATED_FORCE_CLOCK= option selects the signed image fo
 
 ABI minor 60 adds the per-step refine stepper. ~rgsaddle_refine_method_t~ is ~RGSADDLE_REFINE_NONE~ or ~RGSADDLE_REFINE_LBFGS~. ~rgsaddle_band_set_refine~ installs L-BFGS for steps whose convergence force is at or under ~threshold~, in the host's force units, and leaves every other step on the band method. A threshold of 0 selects 0.5, and ~memory~ less than or equal to 0 selects 20 pairs. ~RGSADDLE_REFINE_NONE~ clears the stepper and does not read the threshold. A negative or non-finite threshold and an unknown method are refused. ~rgsaddle_band_is_refining~ is 1 when the last first-order step used the refine stepper. A string, trust-region, solid-state, quick-min, or free-end band ignores the call. ~include/rgsaddle/session.hpp~ wraps the pair as ~Band::set_refine~ and ~Band::is_refining~, and Python exposes ~Band.set_refine~ and ~Band.is_refining~. A host checks ~rgsaddle_abi_version()~ for minor 60 or newer. The worked example is =tests/band_refine.rs=.
 
-The C ABI also has geodesic interpolation (Zhu, Thompson, and Martinez, J. Chem. Phys. 150, 164103 (2019), doi:10.1063/1.5090303 @@rst::cite:`zhuGeodesicInterpolation2019`@@).
+ABI minor 64 adds geodesic interpolation (Zhu, Thompson, and Martinez, J. Chem. Phys. 150, 164103 (2019), doi:10.1063/1.5090303 @@rst::cite:`zhuGeodesicInterpolation2019`@@).
 ~rgsaddle_geodesic_config_default~ fills an ~rgsaddle_geodesic_config_t~.
 ~rgsaddle_geodesic_path~ minimizes the length of an existing image-major path under a host chart callback, and ~rgsaddle_geodesic_morse~ builds the path between two geometries with the Morse pair coordinates of their Eq. (7) (alpha 1.7, beta 0.01).
 ~rgsaddle_geodesic_path~ and ~rgsaddle_geodesic_morse~ return ~RGSADDLE_NOT_CONVERGED~ when a round of sweeps uses all of ~max_sweeps~ with an image still moving; the outputs then hold the last iterate.
 A NULL config selects the defaults, including ~max_images~ 32, so it requires ~n_images~ of at least 32.
 A supplied ~max_images~ above ~n_images~ is ~RGSADDLE_INVALID_PARAMETER~: the output buffer cannot grow, and the cap is not clamped.
 ~bound_samples~ is even. ~length~, ~lower~, and ~upper~ may be NULL.
+A host that loads the library at run time checks ~rgsaddle_abi_version()~ for at least minor 64 before resolving these symbols.
