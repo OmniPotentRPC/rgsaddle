@@ -68,6 +68,7 @@ The table below lists the main types.
 | =Preset=                       | =Min=, =Dimer=, =Lanczos=, =Art=, =EigenFollow=, and the named band presets                                         |
 | =ConnectConfig=                | IDPP Lanczos climb and the COMPASS fallback. =optbench= sets the LJ38 force tolerance, eight Lanczos actions, relative tolerance 0.05, and quenched split nodes |
 | =sidpp_path=                   | Sequential IDPP (S-IDPP) initial path. =SidppConfig= holds the spring, the two force stops, and the quick-min step. =idpp_path= is the per-image IDPP start |
+| =geodesic_path=                | Geodesic interpolation on a caller supplied chart (Zhu, Thompson, and Martinez, J. Chem. Phys. 150, 164103 (2019)). =GeodesicConfig= and =MorsePairChart= are non-exhaustive. =geodesic_interpolate= builds the path from the two endpoints |
 | =connect=                      | Double-ended search. The callback returns energy and the Cartesian gradient. =evaluations= counts finite differences that decide a step or an index. The Lanczos acceptance does not build a dense Hessian |
 
 =SellaSaddleConfig= has options that follow Sella.
@@ -300,6 +301,7 @@ From a band config at minor 22, the refinement's one-image requests also set bit
 Their =image= is then the climbing image's band index.
 =rgsaddle_idpp_path= writes the image-dependent pair potential initial path with its endpoints.
 It takes a row-major cell or NULL.
+=rgsaddle_geodesic_config_default=, =rgsaddle_geodesic_path=, and =rgsaddle_geodesic_morse= interpolate a path in a redundant coordinate chart (Zhu, Thompson, and Martinez, J. Chem. Phys. 150, 164103 (2019), doi:10.1063/1.5090303). =rgsaddle_geodesic_path= takes a host chart. =rgsaddle_geodesic_morse= uses Eq. (7) with alpha 1.7 and beta 0.01. A NULL config selects the defaults.
 =rgsaddle_ocineb_step= reports the hand-off phase (band, tangent alignment, or minimum-mode translation).
 =rgsaddle_connect= runs the double-ended search of =connect= to completion on two endpoint arrays and a host surface.
 The surface writes energy and the Cartesian gradient for one image.

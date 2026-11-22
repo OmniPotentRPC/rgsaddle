@@ -75,6 +75,7 @@ pub mod capi_hyperplane;
 pub mod connect;
 pub mod defect_pair;
 pub mod error;
+pub mod geodesic;
 pub mod idpp;
 pub mod indexk;
 #[cfg(feature = "lammps")]
@@ -155,6 +156,10 @@ pub use elastic::{
 };
 pub use error::SaddleError;
 pub use field::{DefectSource, DirectSolver, FieldSolver, FmmSolver, Kelvin};
+pub use geodesic::{
+    GeodesicChart, GeodesicConfig, GeodesicLengths, GeodesicReport, MORSE_ALPHA, MORSE_BETA,
+    MorsePairChart, geodesic_interpolate, geodesic_lengths, geodesic_path,
+};
 pub use idpp::{IdppConfig, SidppConfig, idpp_path, linear_path, sidpp_path};
 pub use indexk::{
     BlockEigenKind, HessianProduct, IndexKConfig, IndexKReport, IndexKSession, WithHessian,
