@@ -198,6 +198,13 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =rgsaddle_lineb_solve_counted_orbit=. Purpose: Counted solve with optional bead observations. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_lineb_solve_counted_turning=. Purpose: Counted orbit solve with optional return-turn geometry and energy checks. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_lineb_solve_counted_rate=. Purpose: Counted solve with selectable image-Hessian interpolation. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_ohtst_optimize_config_default=. Purpose: Write the Rust defaults into an OH-TST plane-optimizer config. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_ohtst_sample=. Purpose: Sample the plane through point with the given normal. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_ohtst_optimize=. Purpose: Climb the plane free energy from point and normal, and write the optimum back. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_ohtst_mbar=. Purpose: Solve MBAR. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_ohtst_work=. Purpose: Reversible work through n_planes planes stored row-major. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_ohtst_transmission=. Purpose: Transmission coefficient of the plane, from n_starts configurations stored row-major. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_ohtst_rate=. Purpose: OH-TST rate from a reactant density and the reversible work off its plane. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_band_set_refine=. Purpose: Per-step refine stepper, ABI minor 60. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_band_is_refining=. Purpose: 1 when the last first-order step used the refine stepper, else 0. Parameters: the declaration. Units: the caller's.
 
@@ -272,6 +279,17 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =rgsaddle_lineb_orbit_t=. Purpose: Opt-in observations from the rate's own surface calls.
 - =rgsaddle_lineb_turning_t=. Purpose: Return-turn agreement for the interpolated-force clock, in the caller's units.
 - =rgsaddle_lineb_rate_diagnostics_t=. Purpose: Geometry counts within the rate, and the Cartesian finite-difference displacement used at the path images (NaN for direct or path-only solves).
+- =rgsaddle_ohtst_optimize_status_t=. Purpose: Why rgsaddle_ohtst_optimize stopped.
+- =rgsaddle_ohtst_sample_config_t=. Purpose: Langevin sample of one plane.
+- =rgsaddle_ohtst_sample_report_t=. Purpose: Averages written by rgsaddle_ohtst_sample.
+- =rgsaddle_ohtst_optimize_config_t=. Purpose: Trust-region climb of the plane free energy.
+- =rgsaddle_ohtst_optimize_report_t=. Purpose: The last accepted plane of rgsaddle_ohtst_optimize.
+- =rgsaddle_ohtst_work_config_t=. Purpose: Reversible work.
+- =rgsaddle_ohtst_work_report_t=. Purpose: A(last) minus A(first).
+- =rgsaddle_ohtst_transmission_config_t=. Purpose: Shooting from one plane.
+- =rgsaddle_ohtst_transmission_report_t=. Purpose: Transmission coefficient counted at the first crossing.
+- =rgsaddle_ohtst_rate_in_t=. Purpose: Parts of the OH-TST rate.
+- =rgsaddle_ohtst_rate_out_t=. Purpose: Rate in the time unit of the mass-weighted surface.
 - =rgsaddle_refine_method_t=. Purpose: Refine stepper of rgsaddle_band_set_refine, ABI minor 60.
 - =rgsaddle_hyperplane_emit_fn=. Purpose: Callback typedef in include/rgsaddle.h.
 - =rgsaddle_sample_hyperplane_fn=. Purpose: Callback typedef in include/rgsaddle.h.
@@ -279,11 +297,13 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =rgsaddle_solid_surface_fn=. Purpose: Callback typedef in include/rgsaddle.h.
 - =rgsaddle_hessian_fn=. Purpose: Callback typedef in include/rgsaddle.h.
 - =rgsaddle_stencil_eval_fn=. Purpose: Callback typedef in include/rgsaddle.h.
+- =rgsaddle_point_fn=. Purpose: Point surface callback.
 
 * Macros and enum constants
 
 - =RGSADDLE_ABI_MAJOR=. Purpose: Macro constant in include/rgsaddle.h.
 - =RGSADDLE_ABI_MINOR=. Purpose: Macro constant in include/rgsaddle.h.
+- =RGSADDLE_OHTST_MINOR=. Purpose: OH-TST entry points and structs are gated on config version.minor >= this value.
 - =RGSADDLE_BAND_PER_IMAGE=. Purpose: Band config flags bit 0.
 - =RGSADDLE_BAND_KEEP_TRANSLATION=. Purpose: Band config flags bit 1.
 - =RGSADDLE_BAND_CI_AFTER=. Purpose: Band config flags bit 2, ABI minor 17.
@@ -349,6 +369,7 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =RGSADDLE_STALLED=. Purpose: Enumerator of =rgsaddle_status_t=.
 - =RGSADDLE_NOT_EQUILIBRATED=. Purpose: Enumerator of =rgsaddle_status_t=.
 - =RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES=. Purpose: Enumerator of =rgsaddle_status_t=.
+- =RGSADDLE_NOT_CONVERGED=. Purpose: Enumerator of =rgsaddle_status_t=.
 - =RGSADDLE_TANGENT_SIMPLE=. Purpose: Enumerator of =rgsaddle_tangent_t=.
 - =RGSADDLE_TANGENT_IMPROVED=. Purpose: Enumerator of =rgsaddle_tangent_t=.
 - =RGSADDLE_SPRING_UNIFORM=. Purpose: Enumerator of =rgsaddle_spring_t=.
@@ -395,5 +416,9 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =RGSADDLE_GROWING_STRING_JOINED=. Purpose: Enumerator of =rgsaddle_growing_string_phase_t=.
 - =RGSADDLE_FREE_END_FIRST=. Purpose: Enumerator of =rgsaddle_free_end_side_t=.
 - =RGSADDLE_FREE_END_LAST=. Purpose: Enumerator of =rgsaddle_free_end_side_t=.
+- =RGSADDLE_OHTST_OPTIMIZE_CONVERGED=. Purpose: Enumerator of =rgsaddle_ohtst_optimize_status_t=.
+- =RGSADDLE_OHTST_OPTIMIZE_MAX_RECORDS=. Purpose: Enumerator of =rgsaddle_ohtst_optimize_status_t=.
+- =RGSADDLE_OHTST_OPTIMIZE_MAX_ITERATIONS=. Purpose: Enumerator of =rgsaddle_ohtst_optimize_status_t=.
+- =RGSADDLE_OHTST_OPTIMIZE_MAX_EVALUATIONS=. Purpose: Enumerator of =rgsaddle_ohtst_optimize_status_t=.
 - =RGSADDLE_REFINE_NONE=. Purpose: Enumerator of =rgsaddle_refine_method_t=.
 - =RGSADDLE_REFINE_LBFGS=. Purpose: Enumerator of =rgsaddle_refine_method_t=.

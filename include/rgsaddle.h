@@ -28,9 +28,9 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 63u
+#define RGSADDLE_ABI_MINOR 64u
 /** OH-TST entry points and structs are gated on config version.minor >= this value. */
-#define RGSADDLE_OHTST_MINOR 63u
+#define RGSADDLE_OHTST_MINOR 64u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface

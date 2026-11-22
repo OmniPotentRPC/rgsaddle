@@ -1,4 +1,4 @@
-//! OH-TST entry points, ABI minor 63.
+//! OH-TST entry points, ABI minor 64.
 //!
 //! A point surface is one configuration of length `n`, not an image of
 //! `3 N` atoms. Sampling, plane optimisation, reversible work (with MBAR),
@@ -29,7 +29,7 @@ use super::{
 
 /// Minor at which these entry points appeared. A config stamped earlier
 /// is refused.
-pub const RGSADDLE_OHTST_MINOR: u32 = 63;
+pub const RGSADDLE_OHTST_MINOR: u32 = 64;
 
 /// Thermodynamic integration.
 const ESTIMATE_INTEGRATION: i32 = 0;
@@ -408,7 +408,7 @@ fn accept_version(version: RgsaddleVersion) -> i32 {
     if version.major != RGSADDLE_ABI_MAJOR || version.minor < RGSADDLE_OHTST_MINOR {
         fail_code(
             RGSADDLE_ABI_MISMATCH,
-            "OH-TST requires ABI major 1 and minor 63 or newer",
+            "OH-TST requires ABI major 1 and minor 64 or newer",
         )
     } else {
         RGSADDLE_OK

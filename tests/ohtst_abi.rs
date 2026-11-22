@@ -198,7 +198,7 @@ fn versioned_entry_points_reject_an_older_abi() {
     let message = unsafe { CStr::from_ptr(rgsaddle_last_error()) };
     assert_eq!(
         message.to_string_lossy(),
-        "OH-TST requires ABI major 1 and minor 63 or newer"
+        "OH-TST requires ABI major 1 and minor 64 or newer"
     );
 }
 
