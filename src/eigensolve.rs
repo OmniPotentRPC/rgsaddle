@@ -189,7 +189,7 @@ pub fn relative_zero_tolerance(scale: f64, n: usize) -> f64 {
 /// Eigenvalues are nondecreasing. Columns are the eigenvectors.
 ///
 /// The `faer` feature is on by default. A build without it still
-/// compiles, and this function falls back to [`jacobi_eigh`].
+/// compiles, and this function falls back to cyclic Jacobi.
 ///
 /// # Errors
 ///
