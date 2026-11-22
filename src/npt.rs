@@ -1,4 +1,5 @@
-//! Isotropic Langevin--Berendsen sampling of a crystal lattice.
+//! Isotropic NPT sampling of a crystal lattice: Langevin dynamics with a
+//! Berendsen barostat.
 //!
 //! The force evaluator supplies a tension-positive Cauchy stress.  The
 //! reported pressure is therefore minus one third of its trace.
@@ -8,7 +9,11 @@ use ndarray::{Array1, ArrayView1};
 use crate::{BOLTZMANN_EV_PER_K, Cell, SaddleError, angular_scale_rad_s};
 
 /// Controls an isotropic NPT lattice run.
-#[derive(Clone, Copy, Debug)]
+///
+/// Non-exhaustive: start from [`NptConfig::default`] and chain the
+/// `with_*` setters.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct NptConfig {
     /// Number of conventional cells along each lattice vector.
     pub repeats: usize,
@@ -36,6 +41,21 @@ pub struct NptConfig {
     pub seed: u64,
 }
 
+with_setters!(NptConfig {
+    with_repeats => repeats: val usize,
+    with_steps => steps: val usize,
+    with_maximum_steps => maximum_steps: val usize,
+    with_extension_steps => extension_steps: val usize,
+    with_equilibration_steps => equilibration_steps: val usize,
+    with_block_steps => block_steps: val usize,
+    with_timestep_s => timestep_s: val f64,
+    with_langevin_gamma_per_s => langevin_gamma_per_s: val f64,
+    with_berendsen_tau_s => berendsen_tau_s: val f64,
+    with_compressibility_per_ev_a3 => compressibility_per_ev_a3: val f64,
+    with_target_pressure_ev_a3 => target_pressure_ev_a3: val f64,
+    with_seed => seed: val u64,
+});
+
 impl Default for NptConfig {
     fn default() -> Self {
         Self {
@@ -52,50 +72,6 @@ impl Default for NptConfig {
             target_pressure_ev_a3: 0.0,
             seed: 11,
         }
-    }
-}
-
-impl NptConfig {
-    /// Set the conventional-cell repeat count.
-    pub fn with_repeats(mut self, repeats: usize) -> Self {
-        self.repeats = repeats;
-        self
-    }
-
-    /// Set the initial integration length.
-    pub fn with_steps(mut self, steps: usize) -> Self {
-        self.steps = steps;
-        self
-    }
-
-    /// Set the maximum integration length.
-    pub fn with_maximum_steps(mut self, steps: usize) -> Self {
-        self.maximum_steps = steps;
-        self
-    }
-
-    /// Set the extension between pressure checks.
-    pub fn with_extension_steps(mut self, steps: usize) -> Self {
-        self.extension_steps = steps;
-        self
-    }
-
-    /// Set the equilibration discard.
-    pub fn with_equilibration_steps(mut self, steps: usize) -> Self {
-        self.equilibration_steps = steps;
-        self
-    }
-
-    /// Set the statistics block length.
-    pub fn with_block_steps(mut self, steps: usize) -> Self {
-        self.block_steps = steps;
-        self
-    }
-
-    /// Set the thermostat seed.
-    pub fn with_seed(mut self, seed: u64) -> Self {
-        self.seed = seed;
-        self
     }
 }
 
