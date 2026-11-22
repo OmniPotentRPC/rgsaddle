@@ -212,11 +212,15 @@ say which direction that count leaves out.
 
 Sample sizing and convergence are separate.  The gradient norm test may grow
 the constrained ensemble up to =max_records=.  It does not decide
-convergence: the accepted translation and orientation steps must instead be
-smaller than =confidence= times their gradient errors propagated through the
-current model curvature, or smaller than =tolerance=, for =patience=
-consecutive accepted steps.  =max_iterations= and =max_evaluations= return a
-finite last estimate with =PlaneOptimizerStatus::MaxIterations= or
+convergence: both the gradient norm against its error and any accepted
+translation and orientation step against its gradient error propagated
+through the current model curvature must be at most =confidence= times
+their errors, or at most =tolerance=, for =patience= consecutive
+within-threshold steps before stopping with
+=PlaneOptimizerStatus::Converged=.  An unresolved sample at =max_records=
+that still fails the norm test returns =PlaneOptimizerStatus::MaxRecords=;
+=max_iterations= and =max_evaluations= return a finite last estimate
+with =PlaneOptimizerStatus::MaxIterations= or
 =PlaneOptimizerStatus::MaxEvaluations=; sampling noise cannot make the run
 unbounded.
 
