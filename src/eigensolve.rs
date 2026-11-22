@@ -10,8 +10,9 @@
 //! eV/Angstrom^2 (the eigenvalues then carry that unit; the eigenvectors
 //! are dimensionless unit columns). Subspace bases hold one vector per
 //! column. Failures are [`SaddleError::Shape`] for incompatible array
-//! shapes and [`SaddleError::Solver`] for a failed diagonalisation, an
-//! empty subspace or a singular expansion system.
+//! shapes, [`SaddleError::Solver`] for a failed diagonalisation or an
+//! empty subspace, and [`SaddleError::Singular`] for a singular expansion
+//! system or factorization.
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
 use rgmin::vecops::{axpy, dot, nrm2};
@@ -130,9 +131,9 @@ pub(crate) const DENSE_JACOBI_LIMIT: usize = 128;
 ///
 /// Eigenvalues come back in nondecreasing order. Dimension
 /// `DENSE_JACOBI_LIMIT` (128) and below uses cyclic Jacobi. A larger
-/// matrix uses faer's self-adjoint eigensolver. The Kani build leaves
-/// that feature off and panics if a block above the Jacobi limit is
-/// reached; those harnesses return before a Sella session.
+/// matrix uses faer's self-adjoint eigensolver. A build without the
+/// `faer` feature, such as the Kani build, runs cyclic Jacobi at every
+/// dimension.
 ///
 /// `a` is a square matrix; it is symmetrised as `(a + a^T) / 2` first. Returns the
 /// eigenvalues (length `n`) and the orthonormal eigenvectors as the columns of an
@@ -420,7 +421,8 @@ pub fn lowest_on(
 /// # Errors
 ///
 /// [`SaddleError::Shape`] when the shapes above disagree or `seeking >= n`;
-/// [`SaddleError::Solver`] when a correction system is singular.
+/// [`SaddleError::Singular`] when a correction system is singular;
+/// [`SaddleError::NonFinite`] when an input or a correction is non-finite.
 pub fn expand(
     v: ArrayView2<f64>,
     y: ArrayView2<f64>,
@@ -563,7 +565,8 @@ pub fn expand(
 /// # Errors
 ///
 /// [`SaddleError::Shape`] when `a` is not square or `v0` has a different row
-/// count; [`SaddleError::Solver`] when `v0` spans nothing or a solve fails.
+/// count; [`SaddleError::Solver`] when `v0` spans nothing; the errors of
+/// [`expand`] when a correction solve fails.
 ///
 /// # Examples
 ///
