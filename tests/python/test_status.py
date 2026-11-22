@@ -8,7 +8,8 @@ import rgsaddle
 from rgsaddle import NumericalError
 from rgsaddle._core._testing import set_last_error
 
-# Codes from include/rgsaddle.h. Convergence is a run report, not a status.
+# Codes from include/rgsaddle.h. Convergence of a stepping run is a report. Only a
+# geodesic interpolation that exhausts its sweeps has a status of its own.
 OK = 0
 NULL_SESSION = -1
 NULL_BAND = -2
@@ -25,6 +26,7 @@ NO_EVALUATION = -12
 STALLED = -13
 NOT_EQUILIBRATED = -14
 INSUFFICIENT_EFFECTIVE_SAMPLES = -15
+NOT_CONVERGED = -16
 
 VALUE = {SHAPE, INVALID_PARAMETER}
 NUMERICAL = {NON_FINITE}
@@ -41,6 +43,7 @@ RUNTIME = {
     STALLED,
     NOT_EQUILIBRATED,
     INSUFFICIENT_EFFECTIVE_SAMPLES,
+    NOT_CONVERGED,
     99,
 }
 
@@ -61,6 +64,7 @@ NAMES = {
     STALLED: "STALLED",
     NOT_EQUILIBRATED: "NOT_EQUILIBRATED",
     INSUFFICIENT_EFFECTIVE_SAMPLES: "INSUFFICIENT_EFFECTIVE_SAMPLES",
+    NOT_CONVERGED: "NOT_CONVERGED",
     99: "UNKNOWN",
 }
 

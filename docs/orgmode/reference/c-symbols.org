@@ -354,6 +354,7 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =RGSADDLE_STALLED=. Purpose: Enumerator of =rgsaddle_status_t=.
 - =RGSADDLE_NOT_EQUILIBRATED=. Purpose: Enumerator of =rgsaddle_status_t=.
 - =RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES=. Purpose: Enumerator of =rgsaddle_status_t=.
+- =RGSADDLE_NOT_CONVERGED=. Purpose: Enumerator of =rgsaddle_status_t=.
 - =RGSADDLE_TANGENT_SIMPLE=. Purpose: Enumerator of =rgsaddle_tangent_t=.
 - =RGSADDLE_TANGENT_IMPROVED=. Purpose: Enumerator of =rgsaddle_tangent_t=.
 - =RGSADDLE_SPRING_UNIFORM=. Purpose: Enumerator of =rgsaddle_spring_t=.

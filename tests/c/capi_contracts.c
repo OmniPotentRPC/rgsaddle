@@ -255,7 +255,7 @@ static int test_minmode_rotation_angle_defaults_and_torque_window(void) {
 }
 
 static int test_status_and_gates(void) {
-  for (int c = -15; c <= 0; ++c) {
+  for (int c = -16; c <= 0; ++c) {
     const char *name = rgsaddle_status_name((rgsaddle_status_t)c);
     CHECK(name != NULL && strlen(name) > 0, "status name non-empty");
   }

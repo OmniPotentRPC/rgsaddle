@@ -240,7 +240,7 @@ Every public configuration struct, its public fields, and the corresponding chai
 This section lists the entry points, codes and flags of =include/rgsaddle.h=.
 A C host reaches them through the application binary interface (ABI).
 =RGSADDLE_ABI_MAJOR= is 1.
-Status codes include =RGSADDLE_OK=, =RGSADDLE_SHAPE=, =RGSADDLE_SURFACE_FAILED=, =RGSADDLE_ABI_MISMATCH=, =RGSADDLE_NOT_EQUILIBRATED= and =RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES=.
+Status codes include =RGSADDLE_OK=, =RGSADDLE_SHAPE=, =RGSADDLE_SURFACE_FAILED=, =RGSADDLE_ABI_MISMATCH=, =RGSADDLE_NOT_EQUILIBRATED=, =RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES= and =RGSADDLE_NOT_CONVERGED=.
 The methods on the wire are the fast inertial relaxation engine (FIRE) and quick-min.
 Limited-memory Broyden-Fletcher-Goldfarb-Shanno (L-BFGS) is also on the wire.
 From minor 22 so is ODE12r (=RGSADDLE_METHOD_ODE12R=), the adaptive ordinary differential equation (ODE) step.

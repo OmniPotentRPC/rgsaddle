@@ -76,6 +76,7 @@ fn a_flat_geodesic_is_the_straight_segment_of_length_five() {
         report.length
     );
     assert!(report.sweeps >= 1, "sweeps {}", report.sweeps);
+    assert!(report.converged);
     assert_eq!(report.images, initial.nrows());
     assert!(
         (report.lower - FLAT_LENGTH).abs() < 1e-6,
@@ -114,6 +115,7 @@ fn morse_dissociation_recovers_the_eq7_length() {
         report.upper
     );
     assert!(report.sweeps >= 1, "sweeps {}", report.sweeps);
+    assert!(report.converged);
     assert!(report.images >= initial.nrows());
     assert!(report.lower + 1e-8 >= 0.95 * report.length);
     assert!(report.upper <= 1.1 * report.length + 1e-6);
@@ -707,4 +709,158 @@ fn c_abi_size_products_that_overflow_return_an_error_status() {
         morse_call(2, (1 << 32) + (1 << 31)),
         RGSADDLE_INVALID_PARAMETER
     );
+}
+
+#[test]
+fn a_run_that_exhausts_max_sweeps_is_reported_as_not_converged() {
+    let initial = bowed_flat();
+    let tight = GeodesicConfig::default()
+        .with_max_sweeps(1)
+        .with_step_tol(1e-12);
+    let (path, report) = geodesic_path(initial.view(), &Flat, &tight).unwrap();
+    assert!(!report.converged, "one sweep cannot settle a bowed path");
+    assert_eq!(report.sweeps, 1);
+    assert!(path.iter().all(|v| v.is_finite()));
+    assert!(report.length < geodesic_lengths(initial.view(), &Flat, 10).unwrap().length);
+
+    let (_, settled) = geodesic_path(
+        initial.view(),
+        &Flat,
+        &GeodesicConfig::default().with_step_tol(1e-12),
+    )
+    .unwrap();
+    assert!(settled.converged);
+
+    let ends = bowed_morse();
+    let (_, interpolated) = geodesic_interpolate(
+        ends.row(0),
+        ends.row(ends.nrows() - 1),
+        6,
+        &morse(),
+        &GeodesicConfig::default()
+            .with_max_sweeps(1)
+            .with_step_tol(1e-14),
+    )
+    .unwrap();
+    assert!(!interpolated.converged);
+}
+
+#[test]
+#[cfg(feature = "capi")]
+fn c_abi_returns_not_converged_with_the_last_iterate() {
+    use std::os::raw::c_void;
+
+    use rgsaddle::capi::{
+        RGSADDLE_NOT_CONVERGED, RGSADDLE_OK, RgsaddleGeodesicConfig,
+        rgsaddle_geodesic_config_default, rgsaddle_geodesic_morse, rgsaddle_geodesic_path,
+    };
+
+    extern "C" fn flat_chart(
+        _ctx: *mut c_void,
+        x: *const f64,
+        dof: i64,
+        q: *mut f64,
+        b: *mut f64,
+        n_coords: i64,
+    ) -> i32 {
+        if dof != 2 || n_coords != 2 {
+            return 1;
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(x, q, 2);
+            *b = 1.0;
+            *b.add(1) = 0.0;
+            *b.add(2) = 0.0;
+            *b.add(3) = 1.0;
+        }
+        0
+    }
+
+    let mut config = RgsaddleGeodesicConfig {
+        version: rgsaddle::capi::RgsaddleVersion { major: 0, minor: 0 },
+        flags: 0,
+        step_tol: 0.0,
+        grad_tol: 0.0,
+        max_move: 0.0,
+        lower_ratio: 0.0,
+        upper_ratio: 0.0,
+        max_sweeps: 0,
+        max_iterations: 0,
+        memory: 0,
+        bound_samples: 0,
+        max_images: 0,
+        seed: 0,
+    };
+    assert_eq!(
+        unsafe { rgsaddle_geodesic_config_default(&mut config) },
+        RGSADDLE_OK
+    );
+    config.max_sweeps = 1;
+    config.step_tol = 1e-12;
+
+    let initial = bowed_flat();
+    let mut out = vec![-1.0; initial.len()];
+    let (mut length, mut lower, mut upper) = (0.0, 0.0, 0.0);
+    let rc = unsafe {
+        rgsaddle_geodesic_path(
+            initial.nrows() as i64,
+            2,
+            initial.as_slice().unwrap().as_ptr(),
+            2,
+            Some(flat_chart),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            &config,
+            out.as_mut_ptr(),
+            &mut length,
+            &mut lower,
+            &mut upper,
+        )
+    };
+    assert_eq!(rc, RGSADDLE_NOT_CONVERGED);
+    assert!(out.iter().all(|v| v.is_finite() && *v != -1.0), "{out:?}");
+    assert!(length.is_finite() && length > 0.0);
+
+    config.max_sweeps = 40;
+    let rc = unsafe {
+        rgsaddle_geodesic_path(
+            initial.nrows() as i64,
+            2,
+            initial.as_slice().unwrap().as_ptr(),
+            2,
+            Some(flat_chart),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            &config,
+            out.as_mut_ptr(),
+            &mut length,
+            &mut lower,
+            &mut upper,
+        )
+    };
+    assert_eq!(rc, RGSADDLE_OK);
+
+    config.max_sweeps = 1;
+    config.step_tol = 1e-14;
+    let ends = bowed_morse();
+    let reactant = ends.row(0).to_vec();
+    let product = ends.row(ends.nrows() - 1).to_vec();
+    let mut morse_out = vec![-1.0; 6 * 6];
+    let rc = unsafe {
+        rgsaddle_geodesic_morse(
+            6,
+            2,
+            reactant.as_ptr(),
+            product.as_ptr(),
+            [1.0, 1.0].as_ptr(),
+            std::ptr::null(),
+            &config,
+            morse_out.as_mut_ptr(),
+            &mut length,
+            &mut lower,
+            &mut upper,
+        )
+    };
+    assert_eq!(rc, RGSADDLE_NOT_CONVERGED);
+    assert!(morse_out.iter().all(|v| v.is_finite() && *v != -1.0));
 }

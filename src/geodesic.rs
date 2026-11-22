@@ -349,6 +349,7 @@ impl GeodesicConfig {
 
 /// Eq. (17) length and the two bounds, for one path.
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub struct GeodesicLengths {
     /// Sum of the midpoint formula over segments.
     pub length: f64,
@@ -360,6 +361,7 @@ pub struct GeodesicLengths {
 
 /// Result of [`geodesic_path`] or [`geodesic_interpolate`].
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub struct GeodesicReport {
     /// Eq. (17) length of the returned path.
     pub length: f64,
@@ -371,6 +373,11 @@ pub struct GeodesicReport {
     pub images: usize,
     /// Forward and reverse passes actually run.
     pub sweeps: usize,
+    /// False when the last round of sweeps used all of `max_sweeps` with the
+    /// largest image displacement still above `step_tol`. The path is then the
+    /// last iterate, not a stationary one. Loose bounds at the image cap do not
+    /// clear this flag. Read `lower` and `upper` for those.
+    pub converged: bool,
 }
 
 /// Length and bounds of `path` without moving it.
@@ -396,6 +403,11 @@ pub fn geodesic_lengths<C: GeodesicChart + ?Sized>(
 /// Row 0 and the last row stay at the input endpoints. Each interior row
 /// is an L-BFGS minimization of the Eq. (17) length, with the analytic
 /// gradient of Algorithm 1, swept forward and then back.
+///
+/// A round of sweeps that uses all of [`GeodesicConfig::max_sweeps`]
+/// with an image still moving by more than `step_tol` ends the run with
+/// [`GeodesicReport::converged`] false. The path returned is then the
+/// last iterate. Callers that need a stationary path check that flag.
 ///
 /// # Errors
 ///
@@ -450,7 +462,7 @@ pub fn geodesic_path<C: GeodesicChart + ?Sized>(
     // The first measure rejects a chart that is already undefined.
     measure(path.view(), chart, config.bound_samples, None)?;
     let mut sweeps = 0usize;
-    let lengths = loop {
+    let (lengths, converged) = loop {
         let mut moved = f64::MAX;
         for _ in 0..config.max_sweeps {
             moved = sweep(&mut path, chart, config)?;
@@ -459,15 +471,16 @@ pub fn geodesic_path<C: GeodesicChart + ?Sized>(
                 break;
             }
         }
+        let settled = moved <= config.step_tol;
         let measured = measure(path.view(), chart, config.bound_samples, None)?;
-        if bounds_tight(&measured.total, config) || moved > config.step_tol {
-            break measured.total;
+        if !settled || bounds_tight(&measured.total, config) {
+            break (measured.total, settled);
         }
         let grown = insert_midpoints(&path, &measured.segments, config, chart.cell());
         if grown.nrows() == path.nrows()
             || measure(grown.view(), chart, config.bound_samples, None).is_err()
         {
-            break measured.total;
+            break (measured.total, true);
         }
         path = grown;
     };
@@ -480,6 +493,7 @@ pub fn geodesic_path<C: GeodesicChart + ?Sized>(
             upper: lengths.upper,
             images,
             sweeps,
+            converged,
         },
     ))
 }
