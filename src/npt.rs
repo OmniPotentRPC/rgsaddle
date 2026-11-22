@@ -37,7 +37,8 @@ pub struct NptConfig {
     pub compressibility_per_ev_a3: f64,
     /// Target thermodynamic pressure in eV per cubic Angstrom.
     pub target_pressure_ev_a3: f64,
-    /// Seed for the deterministic thermostat stream.
+    /// Seed for the deterministic thermostat stream. Every seed, including
+    /// consecutive ones, starts an unrelated stream.
     pub seed: u64,
 }
 
@@ -94,25 +95,53 @@ pub struct NptReport {
     pub pressure_converged: bool,
 }
 
+/// Seed expansion of Steele, Lea and Flood (the SplitMix64 generator).
+fn splitmix64(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// xoshiro256** (Blackman and Vigna) with SplitMix64 seeding, the
+/// initialisation its authors prescribe. Nearby seeds give unrelated
+/// states, so no warm-up is needed.
 #[derive(Clone, Copy)]
 struct Rng {
-    state: u64,
+    state: [u64; 4],
 }
 
 impl Rng {
     fn new(seed: u64) -> Self {
-        Self { state: seed | 1 }
+        let mut mixer = seed;
+        let mut state = [0_u64; 4];
+        for word in &mut state {
+            *word = splitmix64(&mut mixer);
+        }
+        Self { state }
     }
 
+    fn next_u64(&mut self) -> u64 {
+        let s = &mut self.state;
+        let result = s[1].wrapping_mul(5).rotate_left(7).wrapping_mul(9);
+        let t = s[1] << 17;
+        s[2] ^= s[0];
+        s[3] ^= s[1];
+        s[1] ^= s[2];
+        s[0] ^= s[3];
+        s[2] ^= t;
+        s[3] = s[3].rotate_left(45);
+        result
+    }
+
+    /// Uniform on `[0, 1)` with 53 random bits.
     fn uniform(&mut self) -> f64 {
-        self.state ^= self.state << 13;
-        self.state ^= self.state >> 7;
-        self.state ^= self.state << 17;
-        (self.state >> 11) as f64 * (1.0 / ((1_u64 << 53) as f64))
+        (self.next_u64() >> 11) as f64 * (1.0 / ((1_u64 << 53) as f64))
     }
 
     fn normal(&mut self) -> f64 {
-        let u1 = self.uniform().max(1.0e-16);
+        let u1 = 1.0 - self.uniform();
         let u2 = self.uniform();
         (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
     }
@@ -301,4 +330,76 @@ where
         }
     }
     report.ok_or_else(|| SaddleError::Invalid("NPT run produced no report".into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stream(seed: u64, length: usize) -> Vec<u64> {
+        let mut rng = Rng::new(seed);
+        (0..length).map(|_| rng.next_u64()).collect()
+    }
+
+    #[test]
+    fn splitmix64_matches_the_published_stream() {
+        let mut state = 0_u64;
+        assert_eq!(splitmix64(&mut state), 0xE220_A839_7B1D_CDAF);
+        assert_eq!(splitmix64(&mut state), 0x6E78_9E6A_A1B9_65F4);
+        assert_eq!(splitmix64(&mut state), 0x06C4_5D18_8009_454F);
+    }
+
+    #[test]
+    fn xoshiro_stream_is_pinned_for_a_zero_seed() {
+        assert_eq!(
+            stream(0, 3),
+            [
+                0x99EC_5F36_CB75_F2B4,
+                0xBF6E_1F78_4956_452A,
+                0x1A5F_849D_4933_E6E0
+            ]
+        );
+    }
+
+    #[test]
+    fn distinct_seeds_give_distinct_streams() {
+        let streams: Vec<Vec<u64>> = (0..64).map(|seed| stream(seed, 8)).collect();
+        for (a, first) in streams.iter().enumerate() {
+            for second in &streams[a + 1..] {
+                assert_ne!(first, second);
+                assert!(first.iter().zip(second).all(|(x, y)| x != y));
+            }
+        }
+        for pair in (0..32_u64).map(|k| (stream(2 * k, 8), stream(2 * k + 1, 8))) {
+            assert_ne!(pair.0, pair.1);
+        }
+    }
+
+    #[test]
+    fn nearby_seeds_are_uncorrelated_in_their_first_draw() {
+        let draws: Vec<f64> = (0..4096_u64).map(|seed| Rng::new(seed).uniform()).collect();
+        let mean = draws.iter().sum::<f64>() / draws.len() as f64;
+        let variance =
+            draws.iter().map(|d| (d - mean).powi(2)).sum::<f64>() / (draws.len() - 1) as f64;
+        assert!((mean - 0.5).abs() < 0.02, "{mean}");
+        assert!((variance - 1.0 / 12.0).abs() < 0.005, "{variance}");
+        let lag = draws
+            .windows(2)
+            .map(|pair| (pair[0] - mean) * (pair[1] - mean))
+            .sum::<f64>()
+            / (draws.len() - 1) as f64
+            / variance;
+        assert!(lag.abs() < 0.05, "{lag}");
+    }
+
+    #[test]
+    fn normal_draws_have_unit_variance() {
+        let mut rng = Rng::new(7);
+        let draws: Vec<f64> = (0..200_000).map(|_| rng.normal()).collect();
+        let mean = draws.iter().sum::<f64>() / draws.len() as f64;
+        let variance =
+            draws.iter().map(|d| (d - mean).powi(2)).sum::<f64>() / (draws.len() - 1) as f64;
+        assert!(mean.abs() < 0.01, "{mean}");
+        assert!((variance - 1.0).abs() < 0.02, "{variance}");
+    }
 }
