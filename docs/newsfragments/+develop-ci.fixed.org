@@ -1,0 +1,1 @@
+LineB passes warning-denied Clippy checks, and wheel smoke tests copy only test sources present in the source distribution.
