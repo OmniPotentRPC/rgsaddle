@@ -23,9 +23,12 @@ pub struct NptConfig {
     pub maximum_steps: usize,
     /// Number of steps added when the pressure criterion is not met.
     pub extension_steps: usize,
-    /// Steps discarded before block statistics are accumulated.
+    /// Steps discarded before statistics are accumulated.
     pub equilibration_steps: usize,
-    /// Number of production steps in one statistics block.
+    /// Number of production steps in one reported block. It sets
+    /// [`NptReport::blocks`] and the two-block floor on the production
+    /// length. The standard errors come from blocking the per-step series
+    /// at every length, so they do not depend on this value.
     pub block_steps: usize,
     /// Velocity-Verlet time step in seconds.
     pub timestep_s: f64,
@@ -76,22 +79,45 @@ impl Default for NptConfig {
     }
 }
 
-/// Block-averaged result of an NPT lattice run.
+/// Result of an NPT lattice run.
+///
+/// The standard errors are those of the mean of a correlated series, found
+/// by blocking (Flyvbjerg and Petersen, J. Chem. Phys. 91, 461 (1989),
+/// doi:10.1063/1.457480). Each is the largest estimate over the blocking
+/// levels that keep at least sixteen blocks, so it is on the conservative
+/// side for uncorrelated data. A `*_error_resolved` flag that is `false`
+/// says the estimate was still rising at the longest block length the run
+/// allows: the correlation time is not short against the run, and the
+/// standard error is then a lower bound.
+///
+/// Non-exhaustive: read the fields.
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub struct NptReport {
     /// Total number of integration steps.
     pub steps: usize,
-    /// Number of complete production blocks.
+    /// Number of complete production blocks of [`NptConfig::block_steps`].
     pub blocks: usize,
     /// Mean conventional lattice parameter in Angstrom.
     pub mean_lattice_a: f64,
-    /// Standard error of the lattice block means in Angstrom.
+    /// Standard error of the mean lattice parameter in Angstrom.
     pub lattice_standard_error: f64,
+    /// Whether the lattice standard error reached a blocking plateau.
+    pub lattice_error_resolved: bool,
     /// Mean thermodynamic pressure in eV per cubic Angstrom.
     pub mean_pressure: f64,
-    /// Standard error of the pressure block means.
+    /// Standard error of the mean pressure in eV per cubic Angstrom.
     pub pressure_standard_error: f64,
-    /// Whether `|mean pressure - target| <= 2 SE`, including exact zero.
+    /// Whether the pressure standard error reached a blocking plateau.
+    pub pressure_error_resolved: bool,
+    /// Indicative test that the pressure sits at the target: the pressure
+    /// standard error is resolved and `|mean pressure - target| <= 2 SE`,
+    /// where a series with no spread passes only at exactly zero residual.
+    ///
+    /// This is a screen, not a proof of equilibrium. It cannot see drift
+    /// slower than the run, and a two standard error window misses a real
+    /// bias about one time in twenty. Treat a `true` as "no evidence of
+    /// bias at this run length", not as a measured zero pressure.
     pub pressure_converged: bool,
 }
 
@@ -169,44 +195,102 @@ fn determinant(cell: Cell) -> f64 {
         + h[0][2] * (h[1][0] * h[2][1] - h[1][1] * h[2][0])
 }
 
-fn block_statistics(values: &[f64], block_steps: usize) -> (f64, f64, usize) {
-    let blocks = values.len() / block_steps;
-    let means: Vec<f64> = values[..blocks * block_steps]
-        .chunks_exact(block_steps)
-        .map(|block| block.iter().sum::<f64>() / block.len() as f64)
-        .collect();
-    let mean = means.iter().sum::<f64>() / blocks as f64;
-    let variance = if blocks > 1 {
-        means
-            .iter()
-            .map(|value| (value - mean).powi(2))
-            .sum::<f64>()
-            / (blocks - 1) as f64
+/// Fewest blocks a blocking level may keep and still be trusted. The
+/// relative error of a standard error from `n` blocks is
+/// `1 / sqrt(2 (n - 1))`, which is 18 per cent at sixteen.
+const MIN_BLOCKS: usize = 16;
+
+struct Blocked {
+    mean: f64,
+    standard_error: f64,
+    resolved: bool,
+}
+
+fn mean_and_standard_error(values: &[f64]) -> (f64, f64) {
+    let mut mean = 0.0;
+    for (index, value) in values.iter().enumerate() {
+        mean += (value - mean) / (index + 1) as f64;
+    }
+    if values.len() < 2 {
+        return (mean, 0.0);
+    }
+    let spread = values
+        .iter()
+        .map(|value| (value - mean).powi(2))
+        .sum::<f64>();
+    let count = values.len() as f64;
+    (mean, (spread / ((count - 1.0) * count)).sqrt())
+}
+
+/// Mean of a correlated series and the standard error of that mean by
+/// blocking (Flyvbjerg and Petersen, 1989).
+///
+/// Averaging neighbouring pairs doubles the block length. While blocks are
+/// shorter than the correlation time the standard error of the block means
+/// rises with every doubling, and it stops rising once blocks are
+/// independent. The estimate is the largest value over the levels that keep
+/// at least [`MIN_BLOCKS`] blocks. It is `resolved` when the last doubling
+/// raised it by no more than its own sampling error, and a series with no
+/// spread is resolved with a standard error of zero. A series too short to
+/// block twice cannot show a plateau and is not resolved.
+fn blocked_statistics(values: &[f64]) -> Blocked {
+    let mut level = values.to_vec();
+    let mut estimates: Vec<(f64, usize)> = Vec::new();
+    let mut mean = 0.0;
+    while level.len() >= MIN_BLOCKS || (estimates.is_empty() && level.len() >= 2) {
+        let (level_mean, standard_error) = mean_and_standard_error(&level);
+        if estimates.is_empty() {
+            mean = level_mean;
+        }
+        estimates.push((standard_error, level.len()));
+        level = (0..level.len() / 2)
+            .map(|pair| 0.5 * (level[2 * pair] + level[2 * pair + 1]))
+            .collect();
+    }
+    if estimates.is_empty() {
+        let (mean, _) = mean_and_standard_error(values);
+        return Blocked {
+            mean,
+            standard_error: 0.0,
+            resolved: false,
+        };
+    }
+    let standard_error = estimates
+        .iter()
+        .fold(0.0_f64, |worst, &(estimate, _)| worst.max(estimate));
+    let resolved = if estimates[0].0 == 0.0 {
+        true
+    } else if let [.., (previous, _), (last, blocks)] = estimates[..] {
+        last - previous <= last / (2.0 * (blocks as f64 - 1.0)).sqrt()
     } else {
-        0.0
+        false
     };
-    (mean, (variance / blocks as f64).sqrt(), blocks)
+    Blocked {
+        mean,
+        standard_error,
+        resolved,
+    }
 }
 
 fn summarize(lattice: &[f64], pressure: &[f64], config: NptConfig, steps: usize) -> NptReport {
-    let (mean_lattice_a, lattice_standard_error, blocks) =
-        block_statistics(lattice, config.block_steps);
-    let (mean_pressure, pressure_standard_error, _) =
-        block_statistics(pressure, config.block_steps);
-    let residual = (mean_pressure - config.target_pressure_ev_a3).abs();
-    let pressure_converged = if pressure_standard_error == 0.0 {
+    let lattice = blocked_statistics(lattice);
+    let pressure_stats = blocked_statistics(pressure);
+    let residual = (pressure_stats.mean - config.target_pressure_ev_a3).abs();
+    let within = if pressure_stats.standard_error == 0.0 {
         residual == 0.0
     } else {
-        residual <= 2.0 * pressure_standard_error
+        residual <= 2.0 * pressure_stats.standard_error
     };
     NptReport {
         steps,
-        blocks,
-        mean_lattice_a,
-        lattice_standard_error,
-        mean_pressure,
-        pressure_standard_error,
-        pressure_converged,
+        blocks: pressure.len() / config.block_steps,
+        mean_lattice_a: lattice.mean,
+        lattice_standard_error: lattice.standard_error,
+        lattice_error_resolved: lattice.resolved,
+        mean_pressure: pressure_stats.mean,
+        pressure_standard_error: pressure_stats.standard_error,
+        pressure_error_resolved: pressure_stats.resolved,
+        pressure_converged: pressure_stats.resolved && within,
     }
 }
 
@@ -401,5 +485,96 @@ mod tests {
             draws.iter().map(|d| (d - mean).powi(2)).sum::<f64>() / (draws.len() - 1) as f64;
         assert!(mean.abs() < 0.01, "{mean}");
         assert!((variance - 1.0).abs() < 0.02, "{variance}");
+    }
+
+    fn autoregressive(seed: u64, phi: f64, length: usize) -> Vec<f64> {
+        let mut rng = Rng::new(seed);
+        let mut value = rng.normal() / (1.0 - phi * phi).sqrt();
+        (0..length)
+            .map(|_| {
+                value = phi * value + rng.normal();
+                value
+            })
+            .collect()
+    }
+
+    /// Standard error of the mean of a long stationary AR(1) series with
+    /// unit innovations: `sqrt((1 + phi) / (1 - phi) / (1 - phi^2) / n)`.
+    fn exact_standard_error(phi: f64, length: usize) -> f64 {
+        ((1.0 + phi) / (1.0 - phi) / (1.0 - phi * phi) / length as f64).sqrt()
+    }
+
+    #[test]
+    fn blocking_recovers_the_standard_error_of_correlated_data() {
+        let phi = 0.995;
+        let length = 1 << 17;
+        let exact = exact_standard_error(phi, length);
+        let seeds = 24;
+        let mut ratio = 0.0;
+        let mut resolved = 0;
+        let mut naive_ratio = 0.0;
+        for seed in 0..seeds {
+            let series = autoregressive(seed, phi, length);
+            let blocked = blocked_statistics(&series);
+            ratio += blocked.standard_error / exact / seeds as f64;
+            resolved += usize::from(blocked.resolved);
+            let means: Vec<f64> = (0..series.len() / 250)
+                .map(|block| series[250 * block..250 * (block + 1)].iter().sum::<f64>() / 250.0)
+                .collect();
+            naive_ratio += mean_and_standard_error(&means).1 / exact / seeds as f64;
+        }
+        eprintln!(
+            "AR(1) phi {phi}: blocked over exact {ratio:.3}, 250-step blocks over exact \
+             {naive_ratio:.3}, resolved {resolved} of {seeds}"
+        );
+        assert!((ratio - 1.0).abs() < 0.25, "blocked over exact {ratio}");
+        assert!(resolved >= 3 * seeds as usize / 4, "resolved {resolved}");
+        assert!(
+            naive_ratio < 0.75,
+            "250-step blocks should underestimate, got {naive_ratio}"
+        );
+    }
+
+    #[test]
+    fn blocking_does_not_resolve_a_run_shorter_than_the_correlation() {
+        let phi = 0.995;
+        let mut resolved = 0;
+        let mut ratio = 0.0;
+        let seeds = 24;
+        for seed in 0..seeds {
+            let series = autoregressive(100 + seed, phi, 1000);
+            let blocked = blocked_statistics(&series);
+            resolved += usize::from(blocked.resolved);
+            ratio += blocked.standard_error / exact_standard_error(phi, 1000) / seeds as f64;
+        }
+        eprintln!("short AR(1): SE over exact {ratio:.3}, resolved {resolved} of {seeds}");
+        assert!(resolved <= seeds as usize / 4, "resolved {resolved}");
+        assert!(ratio < 0.8, "a short run is a lower bound, got {ratio}");
+    }
+
+    #[test]
+    fn blocking_matches_the_plain_error_for_uncorrelated_data() {
+        let length = 1 << 14;
+        let mut ratio = 0.0;
+        let seeds = 24;
+        for seed in 0..seeds {
+            let mut rng = Rng::new(200 + seed);
+            let series: Vec<f64> = (0..length).map(|_| rng.normal()).collect();
+            let blocked = blocked_statistics(&series);
+            ratio += blocked.standard_error * (length as f64).sqrt() / seeds as f64;
+        }
+        eprintln!("iid: blocked SE over plain SE {ratio:.3}");
+        assert!((1.0..1.2).contains(&ratio), "{ratio}");
+    }
+
+    #[test]
+    fn a_series_without_spread_has_zero_error_and_is_resolved() {
+        let blocked = blocked_statistics(&[3.6; 40]);
+        assert_eq!(blocked.mean, 3.6);
+        assert_eq!(blocked.standard_error, 0.0);
+        assert!(blocked.resolved);
+        let short = blocked_statistics(&[1.0, 2.0, 4.0]);
+        assert!(!short.resolved);
+        assert!(short.standard_error > 0.0);
     }
 }

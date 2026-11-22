@@ -130,6 +130,12 @@ fn ideal_gas_pressure_is_the_kinetic_density() {
         "{} vs {expected}",
         report.mean_pressure
     );
+    assert!(
+        (report.mean_pressure - expected).abs() < 4.0 * report.pressure_standard_error,
+        "{} vs {expected}, SE {}",
+        report.mean_pressure,
+        report.pressure_standard_error
+    );
 }
 
 /// Atoms tethered to sites that scale with the cell, with no other
