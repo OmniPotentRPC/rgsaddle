@@ -187,18 +187,15 @@ fn end_rate(sample: &Sample, u: f64, from_start: bool) -> Result<f64, SaddleErro
     } else {
         -sample.slope
     };
-    let rate = if sample.sigma > 0.0 && u > 0.0 {
-        2.0 * u * sample.speed / sample.sigma
-    } else if (u <= 0.0 || u.is_nan()) && (sample.sigma <= 0.0 || sample.sigma.is_nan()) {
+    let rate = if u <= 0.0 || u.is_nan() {
         if rise <= 0.0 || rise.is_nan() {
             return Err(SaddleError::Invalid(
                 "the potential does not rise as the path enters the barrier".into(),
             ));
         }
         2.0 * sample.speed / (2.0 * rise).sqrt()
-    } else if u <= 0.0 || u.is_nan() {
-        // `V > E` at the knot, so the `u = 0` sample of `2 u / σ` is zero.
-        0.0
+    } else if sample.sigma > 0.0 {
+        2.0 * u * sample.speed / sample.sigma
     } else {
         return Err(SaddleError::Invalid(format!(
             "the tunneling momentum vanishes before the end of the path at E={}, λ={}, V−E={}, u={}, inward slope={}",
@@ -294,9 +291,7 @@ fn refine_endpoint_to_energy<S: PointSurface>(
         }
         note_bracket(&mut s_below, &mut s_above, s, trial_gap);
         if let (Some((lo, _)), Some((hi, _))) = (s_below, s_above) {
-            return Ok(root_along_ray(
-                surface, masses, &point, &hat, lo, hi, energy,
-            )?);
+            return root_along_ray(surface, masses, &point, &hat, lo, hi, energy);
         }
         let trial_force = masses.weighted_force(trial_g.view())?;
         // g(s) = V − E, g' = ∇_q V · f̂ = −f · f̂.
@@ -326,9 +321,7 @@ fn refine_endpoint_to_energy<S: PointSurface>(
         }
     }
     if let (Some((lo, _)), Some((hi, _))) = (s_below, s_above) {
-        return Ok(root_along_ray(
-            surface, masses, &point, &hat, lo, hi, energy,
-        )?);
+        return root_along_ray(surface, masses, &point, &hat, lo, hi, energy);
     }
     Ok(point)
 }
@@ -389,9 +382,7 @@ fn root_along_ray<S: PointSurface>(
     // V = E, then the side above E so end-chord samples keep σ > 0.
     if gap_lo == 0.0 {
         Ok(at(s_lo)?.0)
-    } else if gap_hi == 0.0 {
-        Ok(at(s_hi)?.0)
-    } else if gap_hi > 0.0 {
+    } else if gap_hi >= 0.0 {
         Ok(at(s_hi)?.0)
     } else {
         Ok(at(s_lo)?.0)
@@ -515,7 +506,11 @@ impl<S: PointSurface> PointSurface for Measured<'_, S> {
     }
 
     fn eval_batch(&self, points: ArrayView2<f64>) -> Result<Vec<(f64, Array1<f64>)>, SaddleError> {
-        points.rows().into_iter().map(|row| self.eval(row)).collect()
+        points
+            .rows()
+            .into_iter()
+            .map(|row| self.eval(row))
+            .collect()
     }
 
     fn hessian_vector(

@@ -90,22 +90,8 @@ pub struct LinebConfig {
     /// [`rgmin::quickmin_project`] after the kick. Feasible-set retries,
     /// force caching, and surface-error returns match the default path.
     pub projected_verlet: bool,
-    /// End the orbit spline along the surface gradient at each turning point.
-    ///
-    /// Off by default, which keeps the not-a-knot ends through the images.
-    /// The optimizer constrains the chord between the first two images, and
-    /// the not-a-knot tangent can still differ from the gradient by several
-    /// degrees on a curved band. The turning replica of the ring then keeps
-    /// a force residual of `|∇V| sin θ` for that angle `θ`. When set, two
-    /// more surface evaluations at the end images fix both tangents.
-    ///
-    /// This is a diagnostic of path resolution and not a correction. The
-    /// cubic then bends inside its first interval to reach the second
-    /// image, and the residual moves from the turning replica to the
-    /// replicas of that interval. On a ten-image ammonia borane band 1 eV
-    /// below the saddle the turning residual fell from 0.12 to 0.0001 of
-    /// `|∇V|` while the largest replica force rose from 0.20 to 0.53 eV/Å.
-    /// More images near the turning points lower both.
+    /// Use unit mass-weighted surface-gradient directions as the endpoint
+    /// tangents of the measured path spline.
     pub gradient_end_tangents: bool,
 }
 
@@ -931,7 +917,11 @@ impl LinebSession {
                 along += force[k] * (weighted[(neighbour, k)] - weighted[(end, k)]);
             }
             let toward_neighbour = if along >= 0.0 { 1.0 } else { -1.0 };
-            let sign = if end == 0 { toward_neighbour } else { -toward_neighbour };
+            let sign = if end == 0 {
+                toward_neighbour
+            } else {
+                -toward_neighbour
+            };
             Ok(force.iter().map(|f| sign * f / norm).collect())
         };
         Ok((tangent(0, 1)?, tangent(last, last - 1)?))

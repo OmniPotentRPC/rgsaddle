@@ -346,7 +346,8 @@ fn interpolated_rate<S: PointSurface>(
 ) -> Result<(HqtstRate, Option<LinebRateOrbit>), SaddleError> {
     let replicas = path::replicas(path.weighted.view(), &path.time_table, beads)?;
     let kappa = spring_constant(replicas.period, path.hbar, beads)?;
-    let curve = Curve::with_end_tangents(path.weighted.view(), path.time_table.end_tangents.as_ref())?;
+    let curve =
+        Curve::with_end_tangents(path.weighted.view(), path.time_table.end_tangents.as_ref())?;
     let blocks = interpolated_blocks(
         hessians,
         curve.knots(),
