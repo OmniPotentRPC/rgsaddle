@@ -611,8 +611,11 @@ impl FixedEnergyTrajectory {
     /// # Errors
     ///
     /// [`SaddleError::Shape`] when the arrays disagree or there are fewer
-    /// than two images. [`SaddleError::Invalid`] when the mass-weighted
-    /// path has no arc length, and the errors of [`Spline::new`].
+    /// than two images. [`SaddleError::NonFinite`] when a position,
+    /// gradient, mass, mass-weighted coordinate, or parallel force is not
+    /// finite. [`SaddleError::Invalid`] when a mass is not positive, when
+    /// the mass-weighted path has no arc length, or when a tangent has no
+    /// length, and the errors of [`Spline::new`].
     pub fn from_gradients(
         positions: &Array2<f64>,
         gradients: &Array2<f64>,
@@ -630,6 +633,20 @@ impl FixedEnergyTrajectory {
                 "fixed-energy path gradients and masses must match the images".into(),
             ));
         }
+        if !positions.iter().all(|value| value.is_finite()) {
+            return Err(SaddleError::NonFinite("fixed-energy path positions"));
+        }
+        if !gradients.iter().all(|value| value.is_finite()) {
+            return Err(SaddleError::NonFinite("fixed-energy path gradients"));
+        }
+        if !masses.iter().all(|mass| mass.is_finite()) {
+            return Err(SaddleError::NonFinite("fixed-energy path masses"));
+        }
+        if !masses.iter().all(|mass| *mass > 0.0) {
+            return Err(SaddleError::Invalid(
+                "fixed-energy path masses must be positive".into(),
+            ));
+        }
         let sqrt_mass = masses.mapv(f64::sqrt);
         let mut coordinate = Array2::zeros((images, width));
         for image in 0..images {
@@ -637,6 +654,9 @@ impl FixedEnergyTrajectory {
                 coordinate[(image, coordinate_index)] =
                     positions[(image, coordinate_index)] * sqrt_mass[coordinate_index];
             }
+        }
+        if !coordinate.iter().all(|value| value.is_finite()) {
+            return Err(SaddleError::NonFinite("fixed-energy path positions"));
         }
         let mut knots = vec![0.0; images];
         for image in 1..images {
@@ -649,7 +669,10 @@ impl FixedEnergyTrajectory {
             knots[image] = knots[image - 1] + length2.sqrt();
         }
         let total = knots[images - 1];
-        if !(total.is_finite() && total > 0.0) {
+        if !total.is_finite() {
+            return Err(SaddleError::NonFinite("fixed-energy path"));
+        }
+        if total <= 0.0 {
             return Err(SaddleError::Invalid(
                 "fixed-energy path has zero arc length".into(),
             ));
@@ -669,7 +692,20 @@ impl FixedEnergyTrajectory {
                 force +=
                     -gradients[(image, coordinate_index)] * direction / sqrt_mass[coordinate_index];
             }
-            parallel[(image, 0)] = force / tangent_norm2.sqrt();
+            if !tangent_norm2.is_finite() || !force.is_finite() {
+                return Err(SaddleError::NonFinite("fixed-energy path parallel force"));
+            }
+            let speed = tangent_norm2.sqrt();
+            if speed <= 0.0 {
+                return Err(SaddleError::Invalid(
+                    "fixed-energy path has a singular tangent".into(),
+                ));
+            }
+            let parallel_force = force / speed;
+            if !parallel_force.is_finite() {
+                return Err(SaddleError::NonFinite("fixed-energy path parallel force"));
+            }
+            parallel[(image, 0)] = parallel_force;
         }
         Ok(Self {
             coordinate: coordinate_spline,
@@ -1915,6 +1951,60 @@ mod tests {
         assert!((period - 2.0 * half.last().unwrap().time).abs() < 1e-15);
         let mid = arc_at_time(&half, 0.0).unwrap();
         assert_eq!(mid, 0.0);
+    }
+
+    #[test]
+    fn from_gradients_rejects_non_finite_and_non_positive_input() {
+        let positions = array![[0.0], [1.0]];
+        let gradients = array![[1.0], [1.0]];
+        let build = |positions: &Array2<f64>, gradients: &Array2<f64>, mass: f64| {
+            FixedEnergyTrajectory::from_gradients(positions, gradients, array![mass].view())
+        };
+
+        let mut nan_positions = positions.clone();
+        nan_positions[(0, 0)] = f64::NAN;
+        assert!(matches!(
+            build(&nan_positions, &gradients, 1.0),
+            Err(SaddleError::NonFinite(_))
+        ));
+
+        let mut infinite_positions = positions.clone();
+        infinite_positions[(1, 0)] = f64::INFINITY;
+        assert!(matches!(
+            build(&infinite_positions, &gradients, 1.0),
+            Err(SaddleError::NonFinite(_))
+        ));
+
+        let mut nan_gradients = gradients.clone();
+        nan_gradients[(0, 0)] = f64::NAN;
+        assert!(matches!(
+            build(&positions, &nan_gradients, 1.0),
+            Err(SaddleError::NonFinite(_))
+        ));
+
+        let mut infinite_gradients = gradients.clone();
+        infinite_gradients[(1, 0)] = f64::NEG_INFINITY;
+        assert!(matches!(
+            build(&positions, &infinite_gradients, 1.0),
+            Err(SaddleError::NonFinite(_))
+        ));
+
+        assert!(matches!(
+            build(&positions, &gradients, f64::NAN),
+            Err(SaddleError::NonFinite(_))
+        ));
+        assert!(matches!(
+            build(&positions, &gradients, f64::INFINITY),
+            Err(SaddleError::NonFinite(_))
+        ));
+        assert!(matches!(
+            build(&positions, &gradients, 0.0),
+            Err(SaddleError::Invalid(_))
+        ));
+        assert!(matches!(
+            build(&positions, &gradients, -1.0),
+            Err(SaddleError::Invalid(_))
+        ));
     }
 }
 

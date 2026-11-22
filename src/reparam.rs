@@ -278,33 +278,19 @@ impl Spline {
     /// ```
     pub fn new(knots: &[f64], values: &Array2<f64>, ends: SplineEnds) -> Result<Self, SaddleError> {
         match ends {
-            SplineEnds::NotAKnot => Self::fit(knots, values).ok_or_else(|| {
-                SaddleError::Invalid(
-                    "not-a-knot spline needs finite, strictly increasing knots and matching rows"
-                        .into(),
-                )
-            }),
+            SplineEnds::NotAKnot => Self::not_a_knot(knots, values),
             SplineEnds::Natural => Self::natural_ends(knots, values),
         }
     }
 
-    /// [`Spline::new`] with [`SplineEnds::Natural`].
-    ///
-    /// # Errors
-    ///
-    /// The errors of [`Spline::new`].
-    pub fn natural(knots: &[f64], values: &Array2<f64>) -> Result<Self, SaddleError> {
-        Self::new(knots, values, SplineEnds::Natural)
-    }
-
-    fn natural_ends(knots: &[f64], values: &Array2<f64>) -> Result<Self, SaddleError> {
+    /// Shape, spacing, and finiteness checks shared by every end condition.
+    fn validate_spline_input(knots: &[f64], values: &Array2<f64>) -> Result<(), SaddleError> {
         if knots.len() != values.nrows() || knots.len() < 2 {
             return Err(SaddleError::Shape(
                 "cubic interpolation needs at least two equally counted knots and rows".into(),
             ));
         }
-        let width = values.ncols();
-        if width == 0 {
+        if values.ncols() == 0 {
             return Err(SaddleError::Shape(
                 "cubic interpolation rows must have one common nonzero width".into(),
             ));
@@ -317,6 +303,34 @@ impl Spline {
                 ));
             }
         }
+        if !values.iter().all(|value| value.is_finite()) {
+            return Err(SaddleError::NonFinite("cubic interpolation"));
+        }
+        Ok(())
+    }
+
+    fn not_a_knot(knots: &[f64], values: &Array2<f64>) -> Result<Self, SaddleError> {
+        Self::validate_spline_input(knots, values)?;
+        let spline = Self::fit(knots, values)
+            .ok_or_else(|| SaddleError::Invalid("not-a-knot spline has no solution".into()))?;
+        if !spline.m.iter().all(|value| value.is_finite()) {
+            return Err(SaddleError::NonFinite("cubic interpolation"));
+        }
+        Ok(spline)
+    }
+
+    /// [`Spline::new`] with [`SplineEnds::Natural`].
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`Spline::new`].
+    pub fn natural(knots: &[f64], values: &Array2<f64>) -> Result<Self, SaddleError> {
+        Self::new(knots, values, SplineEnds::Natural)
+    }
+
+    fn natural_ends(knots: &[f64], values: &Array2<f64>) -> Result<Self, SaddleError> {
+        Self::validate_spline_input(knots, values)?;
+        let width = values.ncols();
         let count = knots.len();
         let mut second = Array2::zeros(values.raw_dim());
         if count > 2 {
@@ -948,5 +962,23 @@ mod tests {
             default_option.sample(0.0).unwrap().second[0],
             not_a_knot.sample(0.0).unwrap().second[0]
         );
+    }
+
+    fn assert_same_spline_error(knots: &[f64], values: &Array2<f64>) {
+        let not_a_knot = Spline::new(knots, values, SplineEnds::NotAKnot).expect_err("not-a-knot");
+        let natural = Spline::new(knots, values, SplineEnds::Natural).expect_err("natural");
+        assert_eq!(not_a_knot.to_string(), natural.to_string());
+    }
+
+    #[test]
+    fn not_a_knot_rejects_empty_and_non_finite_input() {
+        assert_same_spline_error(&[], &Array2::zeros((0, 1)));
+        assert_same_spline_error(&[], &Array2::zeros((0, 0)));
+        assert_same_spline_error(&[0.0, 1.0], &Array2::zeros((2, 0)));
+        assert_same_spline_error(&[0.0, 1.0, 2.0], &array![[0.0], [1.0]]);
+        assert_same_spline_error(&[f64::NAN, 1.0], &array![[0.0], [1.0]]);
+        assert_same_spline_error(&[0.0, f64::INFINITY], &array![[0.0], [1.0]]);
+        assert_same_spline_error(&[0.0, 1.0], &array![[f64::NAN], [1.0]]);
+        assert_same_spline_error(&[0.0, 1.0], &array![[0.0], [f64::NEG_INFINITY]]);
     }
 }
