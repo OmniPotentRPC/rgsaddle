@@ -970,7 +970,7 @@ mod tests {
     #[test]
     fn lanczos_presets_reject_invalid_rotation_angle_tolerances() {
         for preset in [Preset::Lanczos, Preset::Art] {
-            for rotation_angle_tol in [-1.0, f64::NAN] {
+            for rotation_angle_tol in [-1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
                 let err = Stencil::point(array_grad(0.0, 0.0))
                     .preset(preset)
                     .rotation_angle_tol(rotation_angle_tol)
