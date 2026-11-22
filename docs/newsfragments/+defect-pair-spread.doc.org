@@ -1,0 +1,1 @@
+The defect-pair guide no longer says that the 0.0006 Å seed spread is larger than the lattice offsets. Compared with the differences of the listed columns, that spread is smaller than four of the five offsets and larger only than the 500 K offset.
