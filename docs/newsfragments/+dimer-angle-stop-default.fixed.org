@@ -1,0 +1,6 @@
+For C min-mode configs built at ABI minor 62, passing
+~rotation_angle_tol = 0~ now keeps the documented default improved-dimer
+angle stop unless ~RGSADDLE_MINMODE_EXPLICIT_ROTATION_ANGLE_TOL~ marks
+that zero as explicit.
+Callers built against minors 5 through 61 keep the older behaviour,
+where ~rotation_angle_tol = 0~ disables the angle stop.

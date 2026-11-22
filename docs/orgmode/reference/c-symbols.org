@@ -290,6 +290,7 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =RGSADDLE_BAND_NO_MIN_MODE=. Purpose: Band config flags bit 3, ABI minor 21.
 - =RGSADDLE_BAND_SPLINE_REPARAM=. Purpose: Band config flags bit 4, ABI minor 38.
 - =RGSADDLE_BAND_STRING=. Purpose: Band config flags bit 5, ABI minor 44.
+- =RGSADDLE_MINMODE_EXPLICIT_ROTATION_ANGLE_TOL=. Purpose: Min-mode config flags bit 0, ABI minor 62.
 - =RGSADDLE_REQ_ONE_IMAGE=. Purpose: Request flags bit 0.
 - =RGSADDLE_REQ_CLIMBING_IMAGE=. Purpose: Request flags bit 1, ABI minor 23.
 - =RGSADDLE_VERSION_INIT=. Purpose: Macro constant in include/rgsaddle.h.

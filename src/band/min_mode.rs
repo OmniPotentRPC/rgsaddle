@@ -110,6 +110,8 @@ pub struct MinModeRefine {
     pub difference: FiniteDifference,
     /// Dimer rotation stop and budget.
     pub rotation_tol: f64,
+    /// Dimer optimal-angle stop in radians. Zero disables it.
+    pub rotation_angle_tol: f64,
     /// Most dimer rotations, or Lanczos actions, in one estimate.
     pub max_rotations: usize,
     /// The mode is estimated again once the followed model curvature
@@ -137,6 +139,7 @@ with_setters!(MinModeRefine {
     with_dr => dr: val f64,
     with_difference => difference: val FiniteDifference,
     with_rotation_tol => rotation_tol: val f64,
+    with_rotation_angle_tol => rotation_angle_tol: val f64,
     with_max_rotations => max_rotations: val usize,
     with_curvature_retained => curvature_retained: val f64,
     with_min_overlap => min_overlap: val f64,
@@ -160,6 +163,7 @@ impl Default for MinModeRefine {
             dr: 1e-3,
             difference: FiniteDifference::Forward,
             rotation_tol: 1e-4,
+            rotation_angle_tol: MinModeConfig::default().rotation_angle_tol,
             max_rotations: 20,
             curvature_retained: 0.3,
             min_overlap: 0.8,
@@ -183,6 +187,7 @@ impl MinModeRefine {
             && positive(self.dr)
             && positive(self.lanczos_rel_tol)
             && non_negative(self.rotation_tol)
+            && non_negative(self.rotation_angle_tol)
             && fraction(self.alignment_tol)
             && fraction(self.curvature_retained)
             && fraction(self.min_overlap)
@@ -737,6 +742,7 @@ impl BandSession {
             .with_dr(config.dr)
             .with_difference(config.difference)
             .with_rotation_tol(config.rotation_tol)
+            .with_rotation_angle_tol(config.rotation_angle_tol)
             .with_max_rotations(config.max_rotations)
             .with_krylov_dim(config.krylov_dim)
             .with_force_tol(self.config.force_tol)

@@ -8,9 +8,9 @@ use ndarray::Array2;
 use super::{
     CSurface, RGSADDLE_ABI_MAJOR, RGSADDLE_ABI_MINOR, RGSADDLE_INVALID_PARAMETER,
     RGSADDLE_NULL_REPORT, RGSADDLE_NULL_SESSION, RGSADDLE_NULL_SURFACE, RGSADDLE_OK,
-    RgsaddleBandConfig, RgsaddleMinModeConfig, RgsaddleVersion, parse_band_config, status_of,
+    RgsaddleBandConfig, RgsaddleMinModeConfig, RgsaddleVersion, minmode_config_from,
+    parse_band_config, status_of,
 };
-use crate::minmode::{FiniteDifference, MinModeConfig, MinModeKind};
 use crate::ocineb::{OcinebConfig, OcinebPhase, OcinebSession, OcinebStatus};
 
 #[repr(C)]
@@ -50,38 +50,6 @@ pub struct RgsaddleOcineb {
     per_image: bool,
 }
 
-fn minmode_config_from(cfg: &RgsaddleMinModeConfig) -> Option<MinModeConfig> {
-    if cfg.version.major != RGSADDLE_ABI_MAJOR || cfg.method == 3 {
-        return None;
-    }
-    Some(
-        MinModeConfig::default()
-            .with_kind(if cfg.kind == 1 {
-                MinModeKind::Lanczos
-            } else {
-                MinModeKind::Dimer
-            })
-            .with_dr(cfg.dr)
-            .with_difference(if cfg.version.minor >= 5 && cfg.difference == 1 {
-                FiniteDifference::Central
-            } else {
-                FiniteDifference::Forward
-            })
-            .with_rotation_tol(cfg.rotation_tol)
-            .with_rotation_angle_tol(if cfg.version.minor >= 5 {
-                cfg.rotation_angle_tol
-            } else {
-                0.0
-            })
-            .with_max_rotations(cfg.max_rotations as usize)
-            .with_krylov_dim(cfg.krylov_dim as usize)
-            .with_force_tol(cfg.force_tol)
-            .with_max_move(cfg.max_move)
-            .with_method(super::method_of(cfg.method, 0))
-            .with_seed_curvature(false),
-    )
-}
-
 fn stamp(out: &mut RgsaddleOcinebReport) {
     out.version = RgsaddleVersion {
         major: RGSADDLE_ABI_MAJOR,
@@ -111,7 +79,7 @@ pub unsafe extern "C" fn rgsaddle_ocineb_create(
     let band = unsafe { &*band };
     let minmode = unsafe { &*minmode };
     let config = unsafe { &*config };
-    if config.version.major != RGSADDLE_ABI_MAJOR {
+    if config.version.major != RGSADDLE_ABI_MAJOR || minmode.method == 3 {
         return std::ptr::null_mut();
     }
     let dof = (3 * n_atoms) as usize;

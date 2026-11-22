@@ -67,8 +67,9 @@ static RgsaddleBand *open_band(const double *pos, long n_images, int32_t method,
 }
 
 int main(void) {
-  if (rgsaddle_abi_version() != (int)((RGSADDLE_ABI_MAJOR << 16) | 60u)) {
-    return fail(RGSADDLE_ABI_MISMATCH, "ABI minor is not 60");
+  if (rgsaddle_abi_version() !=
+      (int)((RGSADDLE_ABI_MAJOR << 16) | RGSADDLE_ABI_MINOR)) {
+    return fail(RGSADDLE_ABI_MISMATCH, "ABI minor disagrees with the header");
   }
   if (rgsaddle_band_set_refine(NULL, RGSADDLE_REFINE_LBFGS, 0.5, 20) != RGSADDLE_NULL_BAND) {
     return fail(RGSADDLE_NULL_BAND, "null band");

@@ -29,6 +29,16 @@ static rgsaddle_status_t surface(void *user, rgsaddle_surface_request_t *req) {
   return RGSADDLE_OK;
 }
 
+static void initial_positions(double *pos, long n_images) {
+  memset(pos, 0, (size_t)n_images * 3 * sizeof *pos);
+  for (long i = 0; i < n_images; ++i) {
+    const double t = (double)i / (double)(n_images - 1);
+    pos[i * 3 + 0] = -1.0 + 2.0 * t;
+    pos[i * 3 + 1] =
+        0.3 * sin(3.141592653589793 * t) + 0.2 * t * (1.0 - t) * (t - 0.5);
+  }
+}
+
 int main(void) {
   if (rgsaddle_ocineb_step(NULL, NULL, NULL, NULL) != RGSADDLE_NULL_SESSION) {
     return fail(RGSADDLE_NULL_SESSION, "null step");
@@ -39,12 +49,7 @@ int main(void) {
 
   const long n_images = 9, n_atoms = 1;
   double pos[9 * 3];
-  memset(pos, 0, sizeof pos);
-  for (long i = 0; i < n_images; ++i) {
-    const double t = (double)i / (double)(n_images - 1);
-    pos[i * 3 + 0] = -1.0 + 2.0 * t;
-    pos[i * 3 + 1] = 0.3 * sin(3.141592653589793 * t);
-  }
+  initial_positions(pos, n_images);
 
   rgsaddle_band_config_t band;
   memset(&band, 0, sizeof band);
@@ -66,7 +71,7 @@ int main(void) {
   mm.kind = RGSADDLE_MINMODE_DIMER;
   mm.method = RGSADDLE_METHOD_FIRE;
   mm.dr = 1e-3;
-  mm.rotation_tol = 1e-4;
+  mm.rotation_tol = 1e-8;
   mm.max_rotations = 20;
   mm.krylov_dim = 8;
   mm.force_tol = 1e-3;
@@ -93,6 +98,7 @@ int main(void) {
   }
 
   int saw_align = 0, saw_minmode = 0, saw_fallback = 0;
+  int default_align_rotations = -1;
   rgsaddle_ocineb_report_t report;
   memset(&report, 0, sizeof report);
   for (int i = 0; i < 4000; ++i) {
@@ -107,6 +113,9 @@ int main(void) {
     }
     if (report.phase == RGSADDLE_OCINEB_ALIGN) {
       saw_align = 1;
+      if (default_align_rotations < 0) {
+        default_align_rotations = (int)report.rotations;
+      }
     }
     if (report.phase == RGSADDLE_OCINEB_MINMODE) {
       saw_minmode = 1;
@@ -158,6 +167,32 @@ int main(void) {
     return fail(RGSADDLE_SOLVER, "reset");
   }
   rgsaddle_ocineb_free(session);
+
+  initial_positions(pos, n_images);
+  mm.flags = RGSADDLE_MINMODE_EXPLICIT_ROTATION_ANGLE_TOL;
+  session = rgsaddle_ocineb_create(&band, &mm, &cfg, n_images, n_atoms, pos);
+  if (!session) {
+    return fail(RGSADDLE_ALLOC, "create with explicit zero angle tolerance");
+  }
+  int explicit_zero_rotations = -1;
+  for (int i = 0; i < 4000; ++i) {
+    rgsaddle_status_t st = rgsaddle_ocineb_step(session, surface, NULL, &report);
+    if (st != RGSADDLE_OK) {
+      rgsaddle_ocineb_free(session);
+      return fail(st, "explicit-zero step");
+    }
+    if (report.phase == RGSADDLE_OCINEB_ALIGN) {
+      explicit_zero_rotations = (int)report.rotations;
+      break;
+    }
+  }
+  rgsaddle_ocineb_free(session);
+  if (default_align_rotations < 0 || explicit_zero_rotations <= default_align_rotations) {
+    fprintf(stderr, "angle-stop rotations default=%d explicit-zero=%d\n",
+            default_align_rotations, explicit_zero_rotations);
+    return 1;
+  }
+
   printf("RGSADDLE_OCINEB_ABI_OK force=%.6g iter=%lld\n", report.max_force,
          (long long)report.iteration);
   return 0;

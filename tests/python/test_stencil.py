@@ -79,3 +79,35 @@ def test_unknown_preset_is_a_value_error() -> None:
         assert "preset" in str(err)
     else:
         raise AssertionError("unknown preset returned")
+
+
+def test_dimer_stencil_keeps_the_documented_default_rotation_angle_stop() -> None:
+    x = np.array([0.25039659, 0.0744665, 0.04690885], dtype=np.float64)
+    mode = np.array([-0.06095266, -0.99814066, 0.0], dtype=np.float64)
+
+    def saddle3(row: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        v = np.ascontiguousarray(row, dtype=np.float64)[0]
+        energy = np.array([-2.0 * v[0] * v[0] + 5.0 * v[1] * v[1] + v[2] * v[2]], dtype=np.float64)
+        gradient = np.array([[-4.0 * v[0], 10.0 * v[1], 2.0 * v[2]]], dtype=np.float64)
+        return energy, gradient
+
+    stock = Stencil.point(
+        x,
+        preset="dimer",
+        mode=mode,
+        rotation_tol=1e-4,
+        max_rotations=20,
+    )
+    tight = Stencil.point(
+        x,
+        preset="dimer",
+        mode=mode,
+        rotation_tol=1e-8,
+        max_rotations=20,
+    )
+
+    report_stock = stock.step(saddle3)
+    report_tight = tight.step(saddle3)
+    assert report_stock.evaluations == report_tight.evaluations
+    assert np.allclose(stock.mode(), tight.mode(), atol=0.0, rtol=0.0)
+    assert np.allclose(stock.positions(), tight.positions(), atol=0.0, rtol=0.0)

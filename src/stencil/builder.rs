@@ -404,7 +404,7 @@ impl PointBuilder {
     }
 
     /// The dimer also stops when one rotation's angle falls under this many radians. Zero disables that test.
-    /// Unset, it is five degrees at the stock `rotation_tol` and off under a tighter one.
+    /// Unset, a dimer keeps the default five-degree stop at every `rotation_tol`.
     pub fn rotation_angle_tol(mut self, rotation_angle_tol: f64) -> Self {
         self.rotation_angle_tol = Some(rotation_angle_tol);
         self
@@ -634,7 +634,10 @@ fn mode_session(builder: &PointBuilder, mode: Array1<f64>) -> Result<MinModeSess
         .with_method(Method::fire(FireKind::V2))
         .with_seed_curvature(false)
         .with_saddle_check(None);
-    if let Some(rotation_angle_tol) = builder.rotation_angle_tol {
+    if kind == MinModeKind::Dimer {
+        let rotation_angle_tol = builder
+            .rotation_angle_tol
+            .unwrap_or_else(|| MinModeConfig::default().rotation_angle_tol);
         config = config.with_rotation_angle_tol(rotation_angle_tol);
     }
     if builder.preset == Preset::Art || builder.artn.is_some() {
