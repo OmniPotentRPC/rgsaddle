@@ -198,6 +198,8 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =rgsaddle_lineb_solve_counted_orbit=. Purpose: Counted solve with optional bead observations. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_lineb_solve_counted_turning=. Purpose: Counted orbit solve with optional return-turn geometry and energy checks. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_lineb_solve_counted_rate=. Purpose: Counted solve with selectable image-Hessian interpolation. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_band_set_refine=. Purpose: Per-step refine stepper, ABI minor 60. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_band_is_refining=. Purpose: 1 when the last first-order step used the refine stepper, else 0. Parameters: the declaration. Units: the caller's.
 
 * Types and callbacks
 
@@ -270,6 +272,7 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =rgsaddle_lineb_orbit_t=. Purpose: Opt-in observations from the rate's own surface calls.
 - =rgsaddle_lineb_turning_t=. Purpose: Return-turn agreement for the interpolated-force clock, in the caller's units.
 - =rgsaddle_lineb_rate_diagnostics_t=. Purpose: Geometry counts within the rate, and the Cartesian finite-difference displacement used at the path images (NaN for direct or path-only solves).
+- =rgsaddle_refine_method_t=. Purpose: Refine stepper of rgsaddle_band_set_refine, ABI minor 60.
 - =rgsaddle_hyperplane_emit_fn=. Purpose: Callback typedef in include/rgsaddle.h.
 - =rgsaddle_sample_hyperplane_fn=. Purpose: Callback typedef in include/rgsaddle.h.
 - =rgsaddle_surface_fn=. Purpose: Callback typedef in include/rgsaddle.h.
@@ -391,3 +394,5 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =RGSADDLE_GROWING_STRING_JOINED=. Purpose: Enumerator of =rgsaddle_growing_string_phase_t=.
 - =RGSADDLE_FREE_END_FIRST=. Purpose: Enumerator of =rgsaddle_free_end_side_t=.
 - =RGSADDLE_FREE_END_LAST=. Purpose: Enumerator of =rgsaddle_free_end_side_t=.
+- =RGSADDLE_REFINE_NONE=. Purpose: Enumerator of =rgsaddle_refine_method_t=.
+- =RGSADDLE_REFINE_LBFGS=. Purpose: Enumerator of =rgsaddle_refine_method_t=.

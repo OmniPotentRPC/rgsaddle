@@ -5,7 +5,7 @@
 #include <stddef.h>
 
 _Static_assert(RGSADDLE_ABI_MAJOR == 1u, "main ABI major");
-_Static_assert(RGSADDLE_ABI_MINOR == 48u, "ABI minor");
+_Static_assert(RGSADDLE_ABI_MINOR == 60u, "ABI minor");
 _Static_assert(RGSADDLE_LINEB_LINEAR_SEED == (1u << 0), "lineb flag bit 0");
 _Static_assert(RGSADDLE_LINEB_ENDPOINT_CONVERGENCE == (1u << 1), "lineb flag bit 1");
 _Static_assert(RGSADDLE_LINEB_PROJECTED_VERLET == (1u << 2), "lineb flag bit 2");
@@ -22,6 +22,8 @@ _Static_assert(RGSADDLE_REQ_CLIMBING_IMAGE == (1ull << 1), "request flag bit 1")
 _Static_assert(RGSADDLE_NOT_EQUILIBRATED == -14, "status NOT_EQUILIBRATED");
 _Static_assert(RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES == -15,
                "status INSUFFICIENT_EFFECTIVE_SAMPLES");
+_Static_assert(RGSADDLE_REFINE_NONE == 0, "refine method NONE");
+_Static_assert(RGSADDLE_REFINE_LBFGS == 1, "refine method LBFGS");
 
 typedef struct {
   uint32_t major;
@@ -621,5 +623,11 @@ typedef rgsaddle_status_t (*abi46_signature_rgsaddle_lineb_solve)(
     double energy, int64_t max_steps, int64_t beads, rgsaddle_surface_fn surface,
     void *user, double *optimized_positions, rgsaddle_lineb_result_t *out);
 _Static_assert(_Generic(&rgsaddle_lineb_solve, abi46_signature_rgsaddle_lineb_solve: 1, default: 0), "rgsaddle_lineb_solve signature");
+typedef rgsaddle_status_t (*abi60_signature_rgsaddle_band_set_refine)(
+    RgsaddleBand *band, int32_t method, double threshold, int64_t memory);
+_Static_assert(_Generic(&rgsaddle_band_set_refine, abi60_signature_rgsaddle_band_set_refine: 1, default: 0), "rgsaddle_band_set_refine signature");
+
+typedef int32_t (*abi60_signature_rgsaddle_band_is_refining)(const RgsaddleBand *band);
+_Static_assert(_Generic(&rgsaddle_band_is_refining, abi60_signature_rgsaddle_band_is_refining: 1, default: 0), "rgsaddle_band_is_refining signature");
 
 #endif

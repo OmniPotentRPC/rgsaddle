@@ -2396,6 +2396,22 @@ NB_MODULE(_core, m) {
           nb::arg("window_offset") = 1, nb::arg("cubic") = true,
           "Enable or clear free-end adaptive NEB on the band (ABI minor 45).")
       .def(
+          "set_refine",
+          [](PyBand &self, bool enabled, double threshold, std::int64_t memory) {
+            const auto method = enabled ? RGSADDLE_REFINE_LBFGS : RGSADDLE_REFINE_NONE;
+            const auto status = rgsaddle_band_set_refine(self.handle, method, threshold, memory);
+            if (status != RGSADDLE_OK) {
+              status_error(status);
+            }
+          },
+          nb::arg("enabled") = true, nb::arg("threshold") = 0.0, nb::arg("memory") = 20,
+          "Install or clear the per-step L-BFGS refine stepper (ABI minor 60). "
+          "A threshold of 0 selects 0.5, in the host's force units.")
+      .def(
+          "is_refining",
+          [](const PyBand &self) { return rgsaddle_band_is_refining(self.handle) != 0; },
+          "True when the last first-order step used the refine stepper.")
+      .def(
           "target_energy_residual",
           [](const PyBand &self) -> nb::object {
             double out = 0.0;
