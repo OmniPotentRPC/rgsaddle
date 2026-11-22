@@ -1,5 +1,5 @@
 use ndarray::Array1;
-use rgsaddle::{Cell, NptConfig, npt_lattice};
+use rgsaddle::{Cell, NptConfig, NptReport, SaddleError, npt_lattice};
 
 fn one_atom(a: f64) -> (Array1<f64>, Cell) {
     (
@@ -276,4 +276,180 @@ fn configuration_is_built_from_defaults_with_setters() {
     assert_eq!(config.target_pressure_ev_a3, 1.0e-4);
     assert_eq!(config.seed, 0);
     assert_eq!(config.repeats, NptConfig::default().repeats);
+}
+
+fn two_atoms(a: f64) -> (Array1<f64>, Cell) {
+    (
+        Array1::from_vec(vec![
+            0.25 * a,
+            0.25 * a,
+            0.25 * a,
+            0.75 * a,
+            0.75 * a,
+            0.75 * a,
+        ]),
+        Cell([[a, 0.0, 0.0], [0.0, a, 0.0], [0.0, 0.0, a]]),
+    )
+}
+
+fn short_config() -> NptConfig {
+    NptConfig::default()
+        .with_repeats(1)
+        .with_steps(40)
+        .with_maximum_steps(40)
+        .with_equilibration_steps(20)
+        .with_block_steps(5)
+        .with_seed(11)
+}
+
+/// Run on a free two-atom cell and count the evaluator calls.
+fn run_free(
+    positions: &mut Array1<f64>,
+    cell: &mut Cell,
+    temperature_k: f64,
+    mass_amu: f64,
+    config: NptConfig,
+) -> (Result<NptReport, SaddleError>, usize) {
+    let mut calls = 0;
+    let result = npt_lattice(positions, cell, temperature_k, mass_amu, config, |x, _| {
+        calls += 1;
+        Ok((0.0, Array1::zeros(x.len()), [[0.0; 3]; 3]))
+    });
+    (result, calls)
+}
+
+type Setter = fn(NptConfig, f64) -> NptConfig;
+
+const NON_FINITE: [f64; 3] = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY];
+
+#[test]
+fn non_finite_controls_are_refused_before_any_evaluation() {
+    let controls: [(&str, Setter); 5] = [
+        ("timestep", NptConfig::with_timestep_s),
+        ("friction", NptConfig::with_langevin_gamma_per_s),
+        ("coupling time", NptConfig::with_berendsen_tau_s),
+        ("compressibility", NptConfig::with_compressibility_per_ev_a3),
+        ("target pressure", NptConfig::with_target_pressure_ev_a3),
+    ];
+    for (name, set) in controls {
+        for value in NON_FINITE {
+            let (mut positions, mut cell) = two_atoms(3.6);
+            let before = (positions.clone(), cell);
+            let (result, calls) = run_free(
+                &mut positions,
+                &mut cell,
+                0.0,
+                63.546,
+                set(short_config(), value),
+            );
+            assert!(
+                matches!(result, Err(SaddleError::Invalid(_))),
+                "{name} {value}: {result:?}"
+            );
+            assert_eq!(calls, 0, "{name} {value}");
+            assert_eq!(positions, before.0, "{name} {value}");
+            assert_eq!(cell.0, before.1.0, "{name} {value}");
+        }
+    }
+    for value in NON_FINITE {
+        for (temperature, mass) in [(value, 63.546), (300.0, value)] {
+            let (mut positions, mut cell) = two_atoms(3.6);
+            let (result, calls) =
+                run_free(&mut positions, &mut cell, temperature, mass, short_config());
+            assert!(matches!(result, Err(SaddleError::Invalid(_))), "{result:?}");
+            assert_eq!(calls, 0);
+        }
+    }
+}
+
+#[test]
+fn a_negative_target_pressure_is_allowed_and_a_non_finite_one_is_not() {
+    let (mut positions, mut cell) = two_atoms(3.6);
+    let config = short_config().with_target_pressure_ev_a3(-1.0e-4);
+    let (result, _) = run_free(&mut positions, &mut cell, 0.0, 63.546, config);
+    assert!(result.is_ok(), "{result:?}");
+}
+
+#[test]
+fn non_finite_positions_or_cell_are_refused_without_evaluating() {
+    for value in NON_FINITE {
+        let (mut positions, mut cell) = two_atoms(3.6);
+        positions[4] = value;
+        let (result, calls) = run_free(&mut positions, &mut cell, 300.0, 63.546, short_config());
+        assert!(
+            matches!(result, Err(SaddleError::NonFinite(_))),
+            "positions {value}: {result:?}"
+        );
+        assert_eq!(calls, 0);
+
+        let (mut positions, mut cell) = two_atoms(3.6);
+        cell.0[1][1] = value;
+        let (result, calls) = run_free(&mut positions, &mut cell, 300.0, 63.546, short_config());
+        assert!(
+            matches!(result, Err(SaddleError::NonFinite(_))),
+            "cell {value}: {result:?}"
+        );
+        assert_eq!(calls, 0);
+    }
+}
+
+#[test]
+fn a_cell_without_volume_is_refused_rather_than_divided_by() {
+    let flat = [
+        Cell([[0.0; 3]; 3]),
+        Cell([[3.6, 0.0, 0.0], [3.6, 0.0, 0.0], [0.0, 0.0, 3.6]]),
+        Cell([[3.6, 0.0, 0.0], [0.0, 3.6, 0.0], [0.0, 0.0, 0.0]]),
+    ];
+    for start in flat {
+        let (mut positions, mut cell) = two_atoms(3.6);
+        cell.0 = start.0;
+        let (result, calls) = run_free(&mut positions, &mut cell, 300.0, 63.546, short_config());
+        assert!(
+            matches!(result, Err(SaddleError::Invalid(_))),
+            "{start:?}: {result:?}"
+        );
+        assert_eq!(calls, 0);
+        assert_eq!(cell.0, start.0);
+    }
+}
+
+#[test]
+fn a_barostat_that_overflows_is_an_error_and_not_a_nan_report() {
+    // The coupling constant overflows to infinity, and infinity times a
+    // zero pressure drive is NaN. The run used to return a report whose
+    // mean lattice parameter was NaN and whose standard error was zero.
+    let (mut positions, mut cell) = two_atoms(3.6);
+    let config = short_config()
+        .with_compressibility_per_ev_a3(f64::MAX)
+        .with_berendsen_tau_s(1.0e-30);
+    let (result, _) = run_free(&mut positions, &mut cell, 0.0, 63.546, config);
+    assert!(
+        matches!(result, Err(SaddleError::NonFinite(_))),
+        "{result:?}"
+    );
+}
+
+#[test]
+fn a_non_finite_evaluator_result_is_an_error() {
+    let (mut positions, mut cell) = two_atoms(3.6);
+    let result = npt_lattice(
+        &mut positions,
+        &mut cell,
+        0.0,
+        63.546,
+        short_config(),
+        |x, _| Ok((0.0, Array1::zeros(x.len()), [[f64::NAN; 3]; 3])),
+    );
+    assert!(matches!(result, Err(SaddleError::NonFinite(_))));
+
+    let (mut positions, mut cell) = two_atoms(3.6);
+    let result = npt_lattice(
+        &mut positions,
+        &mut cell,
+        0.0,
+        63.546,
+        short_config(),
+        |_, _| Ok((0.0, Array1::zeros(1), [[0.0; 3]; 3])),
+    );
+    assert!(matches!(result, Err(SaddleError::Shape(_))));
 }
