@@ -757,7 +757,7 @@ pub fn cartesian_image_hessian<S: PointSurface>(
         ));
     }
     let mut hessian = Array2::zeros((dof, dof));
-    for (column, pair) in samples.chunks_exact(2).enumerate() {
+    for (column, pair) in samples.as_chunks::<2>().0.iter().enumerate() {
         for row in 0..dof {
             hessian[(row, column)] = (pair[0].1[row] - pair[1].1[row]) / (2.0 * step);
         }

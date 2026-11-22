@@ -74,12 +74,12 @@ impl Curve {
             }
             knots.push(knots[j - 1] + length);
         }
-        if let Some((start, end)) = tangents {
-            if start.len() != dof || end.len() != dof {
-                return Err(SaddleError::Shape(
-                    "an end tangent needs one component per coordinate".into(),
-                ));
-            }
+        if let Some((start, end)) = tangents
+            && (start.len() != dof || end.len() != dof)
+        {
+            return Err(SaddleError::Shape(
+                "an end tangent needs one component per coordinate".into(),
+            ));
         }
         let mut coords = Vec::with_capacity(dof);
         for k in 0..dof {
