@@ -3,6 +3,7 @@
 use thiserror::Error;
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
 /// The SaddleError.
 pub enum SaddleError {
     #[error("shape mismatch: {0}")]
@@ -50,4 +51,7 @@ pub enum SaddleError {
     /// its tolerance: the step can no longer make progress.
     #[error("solver step left the state unchanged: {0}")]
     Stalled(String),
+    /// A dense factorization or spectrum hit a zero or underflowed pivot or mode.
+    #[error("singular matrix at pivot or mode {0}")]
+    Singular(usize),
 }
