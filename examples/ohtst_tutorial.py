@@ -48,7 +48,8 @@ def run_ohtst(repo_root: Path) -> dict[str, float]:
         raw = json.loads(result_path.read_text())
         if not isinstance(raw, dict):
             raise ValueError("OH-TST tutorial output must be a JSON object")
-        return {str(key): float(value) for key, value in raw.items()}
+        result: dict[str, float] = {str(key): float(value) for key, value in raw.items()}
+        return result
 
 
 def main() -> None:
