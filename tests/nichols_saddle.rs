@@ -151,6 +151,55 @@ fn an_overflowing_update_is_refused_and_leaves_the_hessian_alone() {
 }
 
 #[test]
+fn an_overflowing_step_norm_is_refused_and_leaves_the_hessian_alone() {
+    let step = array![1e155, 0.0];
+    let dg = array![0.0, 1e153];
+    let seed = Array2::<f64>::zeros((2, 2));
+
+    let mut powell = seed.clone();
+    assert!(matches!(
+        powell_update(&mut powell, step.view(), dg.view()),
+        Err(SaddleError::NonFinite(_))
+    ));
+    assert_eq!(powell, seed);
+
+    let mut bofill = seed.clone();
+    assert!(matches!(
+        bofill_update(&mut bofill, step.view(), dg.view()),
+        Err(SaddleError::NonFinite(_))
+    ));
+    assert_eq!(bofill, seed);
+}
+
+#[test]
+fn an_overflowing_bofill_residual_norm_is_refused() {
+    let step = array![1.0, 0.0];
+    let dg = array![1e150, 1e155];
+    let seed = Array2::<f64>::eye(2);
+    let mut h = seed.clone();
+
+    assert!(matches!(
+        bofill_update(&mut h, step.view(), dg.view()),
+        Err(SaddleError::NonFinite(_))
+    ));
+    assert_eq!(h, seed);
+}
+
+#[test]
+fn an_overflowing_bofill_denominator_is_refused() {
+    let step = array![1e5, 0.0];
+    let dg = array![1e148, 1e150];
+    let seed = Array2::<f64>::eye(2);
+    let mut h = seed.clone();
+
+    assert!(matches!(
+        bofill_update(&mut h, step.view(), dg.view()),
+        Err(SaddleError::NonFinite(_))
+    ));
+    assert_eq!(h, seed);
+}
+
+#[test]
 fn powell_and_bofill_match_the_reference_update() {
     let step = array![0.2, -0.1];
     let dg = array![-0.05, 0.4];

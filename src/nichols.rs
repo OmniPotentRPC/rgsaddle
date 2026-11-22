@@ -486,6 +486,9 @@ fn prepare_update(
         return Err(SaddleError::NonFinite("Hessian update"));
     }
     let ss = step.dot(&step);
+    if !ss.is_finite() {
+        return Err(SaddleError::NonFinite("Hessian update"));
+    }
     // A zero step has no secant pair. i-PI divides by d·d; skipping
     // leaves H unchanged, which is the pair's only finite value.
     if ss < 1e-30 {
@@ -493,6 +496,9 @@ fn prepare_update(
     }
     let mut xi = dg.to_owned();
     xi -= &h.dot(&step);
+    if xi.iter().any(|v| !v.is_finite()) {
+        return Err(SaddleError::NonFinite("Hessian update"));
+    }
     Ok(Some((xi, ss)))
 }
 
@@ -514,6 +520,9 @@ pub fn powell_update(
     };
     let ddi = 1.0 / ss;
     let xix = xi.dot(&step);
+    if !xix.is_finite() {
+        return Err(SaddleError::NonFinite("Hessian update"));
+    }
     let n = step.len();
     let mut next = h.clone();
     for i in 0..n {
@@ -530,8 +539,8 @@ pub fn powell_update(
 ///
 /// `phi = (s^T xi)^2 / ((s^T s)(xi^T xi))` with `xi = dg - H s`.
 ///
-/// As for [`powell_update`], an overflowing update returns
-/// [`SaddleError::NonFinite`] and leaves `h` unchanged.
+/// Overflow anywhere in the update returns [`SaddleError::NonFinite`]
+/// and leaves `h` unchanged.
 pub fn bofill_update(
     h: &mut Array2<f64>,
     step: ArrayView1<f64>,
@@ -541,15 +550,25 @@ pub fn bofill_update(
         return Ok(());
     };
     let xixi = xi.dot(&xi);
+    if !xixi.is_finite() {
+        return Err(SaddleError::NonFinite("Hessian update"));
+    }
     if xixi < 1e-30 {
         return Ok(());
     }
     let xix = xi.dot(&step);
-    let phi = (xix * xix) / (ss * xixi);
+    let denom = ss * xixi;
+    if !denom.is_finite() {
+        return Err(SaddleError::NonFinite("Hessian update"));
+    }
+    let phi = (xix * xix) / denom;
+    if !phi.is_finite() {
+        return Err(SaddleError::NonFinite("Hessian update"));
+    }
     let ddi = 1.0 / ss;
     let powell_scale = (1.0 - phi) * ddi;
     let rank_ss = (1.0 - phi) * xix * ddi * ddi;
-    let ms = xix / (ss * xixi);
+    let ms = xix / denom;
     let n = step.len();
     let mut next = h.clone();
     for i in 0..n {
