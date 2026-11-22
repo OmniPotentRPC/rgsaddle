@@ -101,6 +101,24 @@ Keep =with_weight(1.0)=. The stiffness of a strain in the generalized coordinate
 
 Held diagonals are the one mask that moves the cell at a fixed diagonal and volume, so they are the run that finds a surface that misses tilts. On rgpot's copper EAM at the hop saddle in an untilted cell stretched 1.2%, a box refreshed only when lx, ly or lz change matches the diagonal of the finite-difference stress to 2e-10 eV/Å³. Frozen, fully free and with the shears held it takes the same steps, calls and final energies as the surface that follows every entry: the frozen cell never moves the box, and the other two change a diagonal entry at every evaluation. Those are 43 steps fully free, with the tilt moved by 0.007 Å, and 43 with the shears held. With the diagonals held the right surface converges in 18 steps and moves the tilt by 0.0074 Å, while this box runs it to -0.034, -0.275 and -0.480 Å after 40, 80 and 160 steps and the largest force in the true cell grows from 0.06 to 1.2 eV/Å. Its shear entry is 1.97e-4 eV/Å³ where the derivative of its energy is -2.8e-5. That gap is under the 3.1e-4 a tolerance on the largest entry allowed, and the per-entry check stops the box before the first step. =tests/mishin_cu.rs= stops the same box at the Mishin saddle, where the shear stress is 2.01e-4 eV/Å³ under a tension of 0.0306.
 
+** Certify a minimum and a saddle before Vineyard rates
+
+A Hessian index classifies a stationary point only. A point on the slope of a well has no negative mode and a point off a ridge still has one, so an index count alone would pass them as a minimum and a saddle. =certify_vineyard_pair= checks both points first and returns a =VineyardIndexReport= holding the =IndexReport= of the =minimum= and of the =saddle= when the pair is ready for a Vineyard prefactor.
+
+Each point must be stationary: the largest absolute component of its projected gradient is at most =force_tol=, which must be positive and finite. The minimum must then have no projected eigenvalue below =IndexCheck::negative= and the saddle exactly one. Exactly one needs the second eigenvalue as well as the first, so =IndexCheck::lowest= must be at least two. With a single resolved eigenvalue every index-two point and every maximum would count one negative mode, so a smaller value returns =VineyardIndexError::Evaluation= wrapping =SaddleError::Invalid=, as do an empty or non-finite coordinate and an unusable check, all before either surface is evaluated. =VineyardIndexReport= and =VineyardIndexError= are non-exhaustive, so match the error with a wildcard arm. An eigenvalue between that cutoff and zero is not counted, so the cutoff is the resolution of the certificate. The two points may live on different surfaces, for example the full system and an active region, and each surface names its own constrained or rigid directions through =PointSurface::excluded_modes=. Nothing else is projected, so an open cluster has to name its rotations as well as its translations.
+
+A pair that fails returns a =VineyardIndexError=, one variant for each reason:
+
+| Variant | Meaning |
+|---------+---------|
+| =Evaluation= | A gradient, Hessian action or excluded-mode query failed, or an argument was invalid. Wraps the =SaddleError=. |
+| =MinimumForce= | The reactant is not stationary. Carries =max_force= and =tolerance=. |
+| =SaddleForce= | The transition state is not stationary. Carries =max_force= and =tolerance=. |
+| =Minimum= | The reactant has projected negative modes. Carries =negative= and the full =report=. |
+| =Saddle= | The transition state does not have exactly one. Carries =negative= and the full =report=. |
+
+=SolidDimerConfig::frozen_first_order= builds a fixed-cell dimer that certifies the projected index when it converges. A point that is still not index one after the escapes are spent comes back with =SolidDimerReport::rejected= set while its status stays converged, so a caller reads that flag before it passes the point on.
+
 ** A barrier that moves with the cell
 
 =tests/solid_dimer_barrier.rs= couples a double well to the shear. The model is =(u^2 - 1)^2 + 6 (γ - 0.2 u)^2= plus penalties that are zero on the path. At the saddle =u = 0= and =γ = 0=, so the energy is exactly 1. Both minima sit at energy 0, and the barrier is exactly 1. The variable-cell dimer takes 88 generalized evaluations and stops at energy 1. The solid-state band on the same surface takes 92 rows and its climbing image is at energy 1. Freezing the cell at zero shear leaves the one-dimensional barrier at 0.7744, and that dimer takes 42 evaluations. An imposed shear of 0.1 moves the frozen barrier off 0.7744 by the amount of the one-dimensional scan.

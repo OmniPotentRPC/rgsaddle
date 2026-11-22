@@ -78,6 +78,7 @@ while report.status != BandStatus::Converged {
    howto/ssneb
    howto/strain-rate
    howto/defect-pair-rates
+   howto/npt-lattice
    howto/pafi
    howto/oh-tst
    howto/lammps-hyperplane

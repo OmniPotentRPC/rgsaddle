@@ -51,6 +51,7 @@ SECTIONS: list[tuple[str, list[tuple[str, str]]]] = [
             ("howto/ssneb.org", "Generalized solid-state NEB on the joint atom-strain chart"),
             ("howto/strain-rate.org", "Elastic dipoles, multipoles, FMM fields, and strain response of a hop"),
             ("howto/defect-pair-rates.org", "Defect-pair hop rates, PAFI free energy, Bennett-Chandler kappa, and pair networks"),
+            ("howto/npt-lattice.org", "Isotropic NPT lattice sampling with blocking standard errors"),
             ("howto/oh-tst.org", "Optimal hyperplanar transition state theory (OH-TST) and reversible work"),
             ("howto/lammps-hyperplane.org", "Plane-constrained BAOAB sampling with LAMMPS through lammpc"),
             ("howto/sparse-hessian.org", "Direct Curtis-Powell-Reid sparse Hessian recovery by distance-2 colouring"),

@@ -37,6 +37,7 @@ rgsaddle is system-agnostic and unit-agnostic: surfaces supply energies, gradien
 - [Solid-state NEB](https://omnipotentrpc.github.io/rgsaddle/howto/ssneb.html): Generalized solid-state NEB on the joint atom-strain chart (`docs/orgmode/howto/ssneb.org`)
 - [Strain response of a hop](https://omnipotentrpc.github.io/rgsaddle/howto/strain-rate.html): Elastic dipoles, multipoles, FMM fields, and strain response of a hop (`docs/orgmode/howto/strain-rate.org`)
 - [Defect-pair hop rates](https://omnipotentrpc.github.io/rgsaddle/howto/defect-pair-rates.html): Defect-pair hop rates, PAFI free energy, Bennett-Chandler kappa, and pair networks (`docs/orgmode/howto/defect-pair-rates.org`)
+- [NPT lattice sampling](https://omnipotentrpc.github.io/rgsaddle/howto/npt-lattice.html): Isotropic NPT lattice sampling with blocking standard errors (`docs/orgmode/howto/npt-lattice.org`)
 - [Optimal hyperplanar transition state theory](https://omnipotentrpc.github.io/rgsaddle/howto/oh-tst.html): Optimal hyperplanar transition state theory (OH-TST) and reversible work (`docs/orgmode/howto/oh-tst.org`)
 - [Sample a hyperplane with LAMMPS](https://omnipotentrpc.github.io/rgsaddle/howto/lammps-hyperplane.html): Plane-constrained BAOAB sampling with LAMMPS through lammpc (`docs/orgmode/howto/lammps-hyperplane.org`)
 - [Recover a sparse Hessian](https://omnipotentrpc.github.io/rgsaddle/howto/sparse-hessian.html): Direct Curtis-Powell-Reid sparse Hessian recovery by distance-2 colouring (`docs/orgmode/howto/sparse-hessian.org`)
