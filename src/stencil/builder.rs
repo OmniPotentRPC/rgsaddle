@@ -404,7 +404,7 @@ impl PointBuilder {
     }
 
     /// The dimer also stops when one rotation's angle falls under this many radians. Zero disables that test.
-    /// Unset, it is five degrees at the stock `rotation_tol` and off under a tighter one.
+    /// Unset, a dimer keeps the default five-degree stop at every `rotation_tol`.
     pub fn rotation_angle_tol(mut self, rotation_angle_tol: f64) -> Self {
         self.rotation_angle_tol = Some(rotation_angle_tol);
         self
