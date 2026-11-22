@@ -634,11 +634,10 @@ fn mode_session(builder: &PointBuilder, mode: Array1<f64>) -> Result<MinModeSess
         .with_method(Method::fire(FireKind::V2))
         .with_seed_curvature(false)
         .with_saddle_check(None);
-    if kind == MinModeKind::Dimer {
-        let rotation_angle_tol = builder
-            .rotation_angle_tol
-            .unwrap_or_else(|| MinModeConfig::default().rotation_angle_tol);
+    if let Some(rotation_angle_tol) = builder.rotation_angle_tol {
         config = config.with_rotation_angle_tol(rotation_angle_tol);
+    } else if kind == MinModeKind::Dimer {
+        config = config.with_rotation_angle_tol(MinModeConfig::default().rotation_angle_tol);
     }
     if builder.preset == Preset::Art || builder.artn.is_some() {
         let artn = builder.artn.clone().unwrap_or_else(|| {
@@ -966,6 +965,25 @@ mod tests {
         search.step(&saddle()).unwrap();
         assert_ne!(search.position()[1].to_le_bytes(), (0.3_f64).to_le_bytes());
         assert!(search.curvature() < 0.0);
+    }
+
+    #[test]
+    fn lanczos_presets_reject_invalid_rotation_angle_tolerances() {
+        for preset in [Preset::Lanczos, Preset::Art] {
+            for rotation_angle_tol in [-1.0, f64::NAN] {
+                let err = Stencil::point(array_grad(0.0, 0.0))
+                    .preset(preset)
+                    .rotation_angle_tol(rotation_angle_tol)
+                    .build()
+                    .err()
+                    .expect("build rejects the invalid rotation angle tolerance");
+                assert!(
+                    err.to_string()
+                        .contains("rotation tolerances must be finite and non-negative"),
+                    "{preset:?}: {err}"
+                );
+            }
+        }
     }
 
     #[test]
