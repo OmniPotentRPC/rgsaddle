@@ -1169,6 +1169,9 @@ pub fn dense_logabsdet(a: ArrayView2<f64>) -> Result<f64, SaddleError> {
 
 /// Log-determinant `ln det(A)` of a symmetric positive-definite matrix via Cholesky (`LL^T`).
 ///
+/// A pivot `L_ii^2` at or below [`relative_zero_tolerance`] of `max |a_ij|` is
+/// refused, so a uniform rescaling of `a` never changes whether it is accepted.
+///
 /// # Errors
 ///
 /// [`SaddleError::Shape`] when `a` is not square; [`SaddleError::NonFinite`]
@@ -1217,10 +1220,11 @@ pub fn spd_logdet(a: ArrayView2<f64>) -> Result<f64, SaddleError> {
             .llt(faer::Side::Lower)
             .map_err(|_| SaddleError::Solver("matrix is not symmetric positive definite".into()))?;
         let l = llt.L();
+        let diag_tol = tol.sqrt();
         let mut log_det = 0.0;
         for i in 0..n {
             let d = l[(i, i)];
-            if !d.is_finite() || d <= tol {
+            if !d.is_finite() || d <= diag_tol {
                 return Err(SaddleError::Solver(
                     "matrix is not symmetric positive definite".into(),
                 ));
@@ -1241,7 +1245,7 @@ pub fn spd_logdet(a: ArrayView2<f64>) -> Result<f64, SaddleError> {
                 sum -= l[(i, k)] * l[(j, k)];
             }
             if i == j {
-                if !sum.is_finite() || sum <= tol * tol {
+                if !sum.is_finite() || sum <= tol {
                     return Err(SaddleError::Solver(
                         "matrix is not symmetric positive definite".into(),
                     ));
@@ -1956,6 +1960,43 @@ mod tests {
                 spd_logdet(asym.view()),
                 Err(SaddleError::Invalid(_))
             ));
+        }
+    }
+
+    #[test]
+    fn spd_logdet_pivot_tolerance_is_invariant_under_uniform_scaling() {
+        // n = 4 takes the manual Cholesky; n = 40 takes faer when that feature is on.
+        for &n in &[4usize, 40usize] {
+            let mut tridiag = Array2::<f64>::zeros((n, n));
+            for i in 0..n {
+                tridiag[(i, i)] = 2.0;
+                if i + 1 < n {
+                    tridiag[(i, i + 1)] = -1.0;
+                    tridiag[(i + 1, i)] = -1.0;
+                }
+            }
+            let base_tridiag = ((n + 1) as f64).ln();
+            let mut deficient = Array2::<f64>::eye(n);
+            deficient[(0, 1)] = 1.0;
+            deficient[(1, 0)] = 1.0;
+            for &s in &[1.0e-30_f64, 1.0, 1.0e30, 1.0e32] {
+                let shift = n as f64 * s.ln();
+                let tol = 1e-12 * shift.abs().max(1.0);
+                let identity = Array2::<f64>::eye(n) * s;
+                let got = spd_logdet(identity.view()).unwrap();
+                assert!((got - shift).abs() < tol, "n={n} s={s:e} identity {got}");
+                let scaled = &tridiag * s;
+                let got = spd_logdet(scaled.view()).unwrap();
+                assert!(
+                    (got - (shift + base_tridiag)).abs() < tol,
+                    "n={n} s={s:e} tridiag {got}"
+                );
+                let singular = &deficient * s;
+                assert!(
+                    matches!(spd_logdet(singular.view()), Err(SaddleError::Solver(_))),
+                    "n={n} s={s:e} rank-deficient accepted"
+                );
+            }
         }
     }
 
