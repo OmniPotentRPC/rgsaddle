@@ -604,3 +604,107 @@ fn c_abi_periodic_chart_and_morse_follow_the_minimum_image() {
         assert!((1.5 - 1e-3..=2.5 + 1e-3).contains(&r), "pair distance {r}");
     }
 }
+
+#[test]
+fn a_chart_whose_wilson_matrix_cannot_be_allocated_is_a_shape_error() {
+    struct Huge;
+    impl GeodesicChart for Huge {
+        fn n_coords(&self) -> usize {
+            usize::MAX / 2
+        }
+
+        fn eval(
+            &self,
+            _x: ArrayView1<f64>,
+            _q: &mut Array1<f64>,
+            _b: &mut Array2<f64>,
+        ) -> Result<(), SaddleError> {
+            unreachable!("the size check comes before any allocation")
+        }
+    }
+    let path = Array2::zeros((3, 4));
+    assert!(matches!(
+        geodesic_lengths(path.view(), &Huge, 4),
+        Err(SaddleError::Shape(_))
+    ));
+}
+
+#[test]
+#[cfg(feature = "capi")]
+fn c_abi_size_products_that_overflow_return_an_error_status() {
+    use std::os::raw::c_void;
+    use std::ptr::NonNull;
+
+    use rgsaddle::capi::{
+        RGSADDLE_INVALID_PARAMETER, rgsaddle_geodesic_morse, rgsaddle_geodesic_path,
+    };
+
+    extern "C" fn never_called(
+        _ctx: *mut c_void,
+        _x: *const f64,
+        _dof: i64,
+        _q: *mut f64,
+        _b: *mut f64,
+        _n_coords: i64,
+    ) -> i32 {
+        panic!("an overflowing size must be rejected before the chart runs");
+    }
+
+    // Nothing behind these pointers is read or written: every call below must
+    // fail on its size arithmetic first.
+    let input = NonNull::<f64>::dangling().as_ptr();
+    let output = NonNull::<f64>::dangling().as_ptr();
+    let (mut length, mut lower, mut upper) = (0.0, 0.0, 0.0);
+    let mut path_call = |n_images: i64, dof: i64, n_coords: i64| unsafe {
+        rgsaddle_geodesic_path(
+            n_images,
+            dof,
+            input,
+            n_coords,
+            Some(never_called),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            std::ptr::null(),
+            output,
+            &mut length,
+            &mut lower,
+            &mut upper,
+        )
+    };
+    // n_images * dof overflows usize.
+    assert_eq!(path_call(i64::MAX, 3, 1), RGSADDLE_INVALID_PARAMETER);
+    // n_images * dof is 2^59 and under the slice limit, but n_coords * dof is 2^64.
+    assert_eq!(path_call(2, 1 << 58, 64), RGSADDLE_INVALID_PARAMETER);
+    // n_images * dof fits in usize but is more bytes than a slice may span.
+    assert_eq!(path_call(2, 1 << 62, 1), RGSADDLE_INVALID_PARAMETER);
+    // n_images * dof is fine and n_coords * dof is more bytes than a slice may span.
+    assert_eq!(path_call(2, 1 << 58, 1 << 5), RGSADDLE_INVALID_PARAMETER);
+
+    let radii = NonNull::<f64>::dangling().as_ptr();
+    let mut morse_call = |n_images: i64, n_atoms: i64| unsafe {
+        rgsaddle_geodesic_morse(
+            n_images,
+            n_atoms,
+            input,
+            input,
+            radii,
+            std::ptr::null(),
+            std::ptr::null(),
+            output,
+            &mut length,
+            &mut lower,
+            &mut upper,
+        )
+    };
+    // 3 * n_atoms overflows usize.
+    assert_eq!(morse_call(2, i64::MAX), RGSADDLE_INVALID_PARAMETER);
+    // 3 * n_atoms fits, n_images * 3 * n_atoms overflows.
+    assert_eq!(morse_call(i64::MAX, 1 << 40), RGSADDLE_INVALID_PARAMETER);
+    // Both of those fit, n_pairs * 3 * n_atoms does not: about 2^63 pairs of 3 * 2^32 doubles.
+    assert_eq!(morse_call(2, 1 << 32), RGSADDLE_INVALID_PARAMETER);
+    // n_atoms * (n_atoms - 1) overflows usize.
+    assert_eq!(
+        morse_call(2, (1 << 32) + (1 << 31)),
+        RGSADDLE_INVALID_PARAMETER
+    );
+}
