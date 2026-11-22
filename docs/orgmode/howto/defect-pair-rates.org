@@ -113,13 +113,17 @@ The lattice parameter is from a zero-pressure Langevin run with a Berendsen baro
 
 | T / K | a / Å, this work | a / Å, Table 1 |
 |-------+------------------+----------------|
-| 300 | 3.63132 | 3.631 |
-| 400 | 3.63779 | 3.637 |
-| 500 | 3.64398 | 3.643 |
-| 600 | 3.65059 | 3.649 |
-| 700 | 3.65713 | 3.655 |
+| 300 | 3.63195 | 3.631 |
+| 400 | 3.63817 | 3.637 |
+| 500 | 3.64349 | 3.643 |
+| 600 | 3.65095 | 3.649 |
+| 700 | 3.65747 | 3.655 |
 
-The slope matches Table 1 and the offset is 0.0003 to 0.002 Å. The 600 K run misses the two standard error rule on its mean pressure at 4000 steps; the bias this leaves in =a= is about 0.0003 Å. The table before this one read 3.62831, 3.63371, 3.63867, 3.64416 and 3.64979 Å. Those runs left the kinetic pressure out of the barostat, which accounts for most of the 0.004 Å offset it showed. Benchmark files and figures produced with the older lattice constants are stale until they are rerun. =cargo test --release --test mishin_cu npt_lattice_table -- --ignored --nocapture= regenerates the table.
+The slope matches Table 1 and the offset is 0.0005 to 0.0025 Å. Each entry is one 4000 step run (2000 discarded) with seed =17 T + 11=, so it carries the scatter of a short run. At 600 K, eight seeds of that length (1 to 8) gave a spread of 0.0006 Å in the lattice parameter, which is larger than the offsets, so they are not resolved. The standard errors that =npt_lattice= reports for those runs, 0.00004 to 0.00013 Å, are smaller than that spread because the blocking estimate had not reached a plateau (=lattice_error_resolved= is false); they are lower bounds. Only the 500 K run passes the pressure screen at 4000 steps (see @@rst::doc:`NPT lattice sampling </howto/npt-lattice>`@@).
+
+To see what the run length leaves in =a=, the 600 K system was run with eight seeds at 4000 steps and four seeds at 40000 steps, 2000 discarded in both, with the settings above. The means are 3.650662 Å (spread 0.000606 Å, standard error 0.000214 Å) and 3.650629 Å (spread 0.000161 Å, standard error 0.000081 Å). They differ by 0.00003 ± 0.00023 Å, so the run length leaves no bias that this comparison can resolve, and none of the four 40000 step runs misses the pressure screen. =cargo test --release --test mishin_cu npt_lattice_run_length -- --ignored --nocapture= repeats it.
+
+The table before this one read 3.62831, 3.63371, 3.63867, 3.64416 and 3.64979 Å. Those runs left the kinetic pressure out of the barostat, which accounts for most of the 0.004 Å offset it showed. Benchmark files and figures produced with the older lattice constants are stale until they are rerun. =cargo test --release --test mishin_cu npt_lattice_table -- --ignored --nocapture= regenerates the table.
 
 Climbing L-BFGS follows the highest image. On the copper band that image was a collision left by the initial path, and the step ran up the wall; the NEB guards drop such a step and do not make it the saddle. The band used here relaxes with FIRE and climbing off, then climbs. A path is kept only when the force is at most 0.01 eV/Å and the zero-temperature integral of the path force reproduces ΔE0.
 
