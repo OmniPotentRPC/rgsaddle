@@ -215,6 +215,7 @@ fn c_abi_morse_and_chart_match_the_published_lengths() {
             2,
             Some(flat_chart),
             std::ptr::null_mut(),
+            std::ptr::null(),
             &config,
             out.as_mut_ptr(),
             &mut length,
@@ -271,6 +272,7 @@ fn c_abi_morse_and_chart_match_the_published_lengths() {
             1,
             Some(morse_chart),
             std::ptr::null_mut(),
+            std::ptr::null(),
             &config,
             bow_out.as_mut_ptr(),
             &mut length,
@@ -315,6 +317,7 @@ fn c_abi_morse_and_chart_match_the_published_lengths() {
             2,
             Some(flat_chart),
             std::ptr::null_mut(),
+            std::ptr::null(),
             &config,
             out.as_mut_ptr(),
             &mut length,
@@ -323,4 +326,281 @@ fn c_abi_morse_and_chart_match_the_published_lengths() {
         )
     };
     assert_eq!(bad, RGSADDLE_INVALID_PARAMETER);
+}
+
+/// Eq. (7) for r_e = 2, alpha 1.7, beta 0.01.
+fn pair_q(r: f64) -> f64 {
+    (-MORSE_ALPHA * (r - 2.0) / 2.0).exp() + MORSE_BETA * 2.0 / r
+}
+
+fn periodic_box() -> minimage::Cell {
+    minimage::Cell::ortho(10.0, 10.0, 10.0).unwrap()
+}
+
+/// Atom 0 stays at x = 2. Atom 1 is 1.5 from it at x = 0.5 and 2.5 from it at
+/// x = -0.5. The wrapped endpoint stores that last position as x = 9.5, so a
+/// naive difference of the two endpoints is 9.0 along x.
+fn crossing_ends(wrapped: bool) -> (Array1<f64>, Array1<f64>) {
+    let end = if wrapped { 9.5 } else { -0.5 };
+    (
+        Array1::from_vec(vec![2.0, 5.0, 5.0, 0.5, 5.0, 5.0]),
+        Array1::from_vec(vec![2.0, 5.0, 5.0, end, 5.0, 5.0]),
+    )
+}
+
+fn pair_distance(row: ndarray::ArrayView1<f64>, cell: &minimage::Cell) -> f64 {
+    let d = cell.displacement([row[0], row[1], row[2]], [row[3], row[4], row[5]]);
+    (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
+}
+
+#[test]
+fn a_periodic_path_across_the_box_relaxes_like_the_unwrapped_one() {
+    let cell = periodic_box();
+    let periodic = MorsePairChart::new(Array1::from_vec(vec![1.0, 1.0]))
+        .unwrap()
+        .with_cell(cell);
+    let free = morse();
+    // Bowed through y and z. Atom 1 moves from 0.5 to -0.5 in x.
+    let rows = |wrap: bool| {
+        let (a, b) = crossing_ends(wrap);
+        let xs = [0.5, 0.17, -0.17];
+        let ys = [5.0, 5.7, 4.4, 5.0];
+        let zs = [5.0, 5.3, 4.8, 5.0];
+        let mut path = Array2::zeros((4, 6));
+        path.row_mut(0).assign(&a);
+        path.row_mut(3).assign(&b);
+        for i in 1..3 {
+            let x = if wrap && xs[i] < 0.0 {
+                xs[i] + 10.0
+            } else {
+                xs[i]
+            };
+            path.row_mut(i)
+                .assign(&Array1::from_vec(vec![2.0, 5.0, 5.0, x, ys[i], zs[i]]));
+        }
+        path
+    };
+    let config = GeodesicConfig::default();
+    let (wrapped_path, wrapped) = geodesic_path(rows(true).view(), &periodic, &config).unwrap();
+    let (free_path, unwrapped) = geodesic_path(rows(false).view(), &free, &config).unwrap();
+    let expect = pair_q(1.5) - pair_q(2.5);
+    assert!((wrapped.length - expect).abs() < 1e-4, "{}", wrapped.length);
+    assert!(
+        (wrapped.length - unwrapped.length).abs() < 1e-8,
+        "{} vs {}",
+        wrapped.length,
+        unwrapped.length
+    );
+    assert_eq!(wrapped.images, unwrapped.images);
+    for (u, v) in wrapped_path.iter().zip(free_path.iter()) {
+        let d = u - v;
+        let nearest = d - 10.0 * (d / 10.0).round();
+        assert!(nearest.abs() < 1e-6, "{u} vs {v}");
+    }
+    // Read as free space, the same wrapped rows are a path of length ~q(1.5) - q(7.5).
+    let naive = geodesic_lengths(rows(true).view(), &free, 10).unwrap();
+    let proper = geodesic_lengths(rows(true).view(), &periodic, 10).unwrap();
+    assert!(
+        naive.length > proper.length + 0.2,
+        "{} {}",
+        naive.length,
+        proper.length
+    );
+}
+
+#[test]
+fn periodic_interpolation_never_takes_the_long_way_around() {
+    let cell = periodic_box();
+    let chart = MorsePairChart::new(Array1::from_vec(vec![1.0, 1.0]))
+        .unwrap()
+        .with_cell(cell);
+    let (a, b) = crossing_ends(true);
+    let (path, report) = geodesic_interpolate(
+        a.view(),
+        b.view(),
+        7,
+        &chart,
+        &GeodesicConfig::default().with_seed(3),
+    )
+    .unwrap();
+    let expect = pair_q(1.5) - pair_q(2.5);
+    assert!((report.length - expect).abs() < 1e-4, "{}", report.length);
+    assert!((report.lower - expect).abs() < 1e-4, "{}", report.lower);
+    let cell = periodic_box();
+    let mut previous = 1.5 - 1e-9;
+    for row in path.rows() {
+        let r = pair_distance(row, &cell);
+        assert!((1.5 - 1e-3..=2.5 + 1e-3).contains(&r), "pair distance {r}");
+        assert!(r + 1e-3 >= previous, "{r} after {previous}");
+        previous = r;
+    }
+    assert_eq!(path.row(0), a.view());
+    assert_eq!(path.row(path.nrows() - 1), b.view());
+}
+
+#[test]
+fn a_cell_needs_three_cartesians_per_atom() {
+    let chart = MorsePairChart::new(Array1::from_vec(vec![1.0, 1.0]))
+        .unwrap()
+        .with_cell(periodic_box());
+    let path = Array2::zeros((3, 5));
+    assert!(matches!(
+        geodesic_path(path.view(), &chart, &GeodesicConfig::default()),
+        Err(SaddleError::Shape(_))
+    ));
+}
+
+#[test]
+#[cfg(feature = "capi")]
+fn c_abi_periodic_chart_and_morse_follow_the_minimum_image() {
+    use std::os::raw::c_void;
+
+    use rgsaddle::capi::{
+        RGSADDLE_OK, RGSADDLE_SHAPE, RgsaddleGeodesicConfig, rgsaddle_geodesic_config_default,
+        rgsaddle_geodesic_morse, rgsaddle_geodesic_path,
+    };
+
+    // The host chart wraps through the same minimage cell as the library.
+    extern "C" fn periodic_morse(
+        ctx: *mut c_void,
+        x: *const f64,
+        dof: i64,
+        q: *mut f64,
+        b: *mut f64,
+        n_coords: i64,
+    ) -> i32 {
+        if dof != 6 || n_coords != 1 || ctx.is_null() || x.is_null() || q.is_null() || b.is_null() {
+            return 1;
+        }
+        unsafe {
+            let cell = &*(ctx as *const minimage::Cell);
+            let x = std::slice::from_raw_parts(x, 6);
+            let d = cell.displacement([x[0], x[1], x[2]], [x[3], x[4], x[5]]);
+            let r = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+            if r <= 1e-12 {
+                return 1;
+            }
+            let e = (-0.85 * (r - 2.0)).exp();
+            *q = e + 0.02 / r;
+            let scale = (-0.85 * e - 0.02 / (r * r)) / r;
+            let b = std::slice::from_raw_parts_mut(b, 6);
+            for c in 0..3 {
+                b[c] = -scale * d[c];
+                b[3 + c] = scale * d[c];
+            }
+        }
+        0
+    }
+
+    let mut config = RgsaddleGeodesicConfig {
+        version: rgsaddle::capi::RgsaddleVersion { major: 0, minor: 0 },
+        flags: 0,
+        step_tol: 0.0,
+        grad_tol: 0.0,
+        max_move: 0.0,
+        lower_ratio: 0.0,
+        upper_ratio: 0.0,
+        max_sweeps: 0,
+        max_iterations: 0,
+        memory: 0,
+        bound_samples: 0,
+        max_images: 0,
+        seed: 0,
+    };
+    assert_eq!(
+        unsafe { rgsaddle_geodesic_config_default(&mut config) },
+        RGSADDLE_OK
+    );
+
+    let lattice = [10.0, 0.0, 0.0, 0.0, 10.0, 0.0, 0.0, 0.0, 10.0];
+    let host_cell = periodic_box();
+    let (a, b) = crossing_ends(true);
+    let n_images = 6usize;
+    let mut path = Array2::zeros((n_images, 6));
+    for i in 0..n_images {
+        let t = i as f64 / (n_images - 1) as f64;
+        // The wrapped way in x. y and z bow the interior so there is work to do.
+        let bow = if i == 0 || i == n_images - 1 {
+            0.0
+        } else {
+            0.5
+        };
+        path.row_mut(i).assign(&Array1::from_vec(vec![
+            2.0,
+            5.0,
+            5.0,
+            0.5 - t + if 0.5 - t < 0.0 { 10.0 } else { 0.0 },
+            5.0 + bow,
+            5.0,
+        ]));
+    }
+    path.row_mut(0).assign(&a);
+    path.row_mut(n_images - 1).assign(&b);
+    let mut out = vec![0.0; path.len()];
+    let (mut length, mut lower, mut upper) = (0.0, 0.0, 0.0);
+    let rc = unsafe {
+        rgsaddle_geodesic_path(
+            n_images as i64,
+            6,
+            path.as_slice().unwrap().as_ptr(),
+            1,
+            Some(periodic_morse),
+            &host_cell as *const minimage::Cell as *mut c_void,
+            lattice.as_ptr(),
+            &config,
+            out.as_mut_ptr(),
+            &mut length,
+            &mut lower,
+            &mut upper,
+        )
+    };
+    assert_eq!(rc, RGSADDLE_OK);
+    let expect = pair_q(1.5) - pair_q(2.5);
+    assert!((length - expect).abs() < 1e-4, "{length}");
+    for row in out.chunks(6) {
+        let r = pair_distance(ndarray::ArrayView1::from(row), &host_cell);
+        assert!((1.5 - 1e-3..=2.5 + 1e-3).contains(&r), "pair distance {r}");
+    }
+
+    let shape = unsafe {
+        rgsaddle_geodesic_path(
+            n_images as i64,
+            5,
+            path.as_slice().unwrap().as_ptr(),
+            1,
+            Some(periodic_morse),
+            std::ptr::null_mut(),
+            lattice.as_ptr(),
+            &config,
+            out.as_mut_ptr(),
+            &mut length,
+            &mut lower,
+            &mut upper,
+        )
+    };
+    assert_eq!(shape, RGSADDLE_SHAPE);
+
+    let radii = [1.0, 1.0];
+    let mut morse_out = vec![0.0; 5 * 6];
+    let rc = unsafe {
+        rgsaddle_geodesic_morse(
+            5,
+            2,
+            a.as_ptr(),
+            b.as_ptr(),
+            radii.as_ptr(),
+            lattice.as_ptr(),
+            &config,
+            morse_out.as_mut_ptr(),
+            &mut length,
+            &mut lower,
+            &mut upper,
+        )
+    };
+    assert_eq!(rc, RGSADDLE_OK);
+    assert!((length - expect).abs() < 1e-4, "{length}");
+    for row in morse_out.chunks(6) {
+        let r = pair_distance(ndarray::ArrayView1::from(row), &host_cell);
+        assert!((1.5 - 1e-3..=2.5 + 1e-3).contains(&r), "pair distance {r}");
+    }
 }

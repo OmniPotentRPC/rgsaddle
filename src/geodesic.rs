@@ -27,10 +27,10 @@
 //! `[A, x, B]` is relaxed with the middle image free, and the images are
 //! copied onto thirds of the path before the final relaxation.
 
+use minimage::Cell;
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ArrayViewMut1};
 
 use crate::error::SaddleError;
-use crate::mic::{self, Cell};
 use crate::stats::Rng;
 
 /// Morse exponent of Zhu, Thompson, and Martinez, Eq. (7).
@@ -74,6 +74,18 @@ const DEFAULT_SEED: u64 = 0;
 pub trait GeodesicChart: Sync {
     /// Number of redundant coordinates.
     fn n_coords(&self) -> usize;
+
+    /// Periodic cell of the Cartesian rows, or `None` in free space.
+    ///
+    /// With a cell, a row holds one 3-vector per atom. Every midpoint,
+    /// sample, and inserted image of the path moves along the
+    /// [`minimage::Cell::displacement`] of its two ends, so a segment
+    /// that crosses the box takes the short way. The chart must apply the
+    /// same convention to its own distances. The cell should be
+    /// tilt-reduced, the engine convention of [`minimage`].
+    fn cell(&self) -> Option<&Cell> {
+        None
+    }
 
     /// Write `q(x)` and `dq/dx` (`b` is row major, one row per coordinate).
     ///
@@ -166,6 +178,10 @@ impl GeodesicChart for MorsePairChart {
         n.saturating_mul(n.saturating_sub(1)) / 2
     }
 
+    fn cell(&self) -> Option<&Cell> {
+        self.cell.as_ref()
+    }
+
     fn eval(
         &self,
         x: ArrayView1<f64>,
@@ -190,16 +206,15 @@ impl GeodesicChart for MorsePairChart {
         q.fill(0.0);
         b.fill(0.0);
         let mut row = 0;
-        let mut diff = Array1::zeros(3);
         for i in 0..n {
+            let at_i = [x[3 * i], x[3 * i + 1], x[3 * i + 2]];
             for j in (i + 1)..n {
-                for c in 0..3 {
-                    diff[c] = x[3 * i + c] - x[3 * j + c];
-                }
-                if let Some(cell) = &self.cell {
-                    mic::wrap_difference(cell, &mut diff);
-                }
-                let r2 = diff.dot(&diff);
+                let at_j = [x[3 * j], x[3 * j + 1], x[3 * j + 2]];
+                let diff = match &self.cell {
+                    Some(cell) => cell.displacement(at_j, at_i),
+                    None => [at_i[0] - at_j[0], at_i[1] - at_j[1], at_i[2] - at_j[2]],
+                };
+                let r2 = diff[0] * diff[0] + diff[1] * diff[1] + diff[2] * diff[2];
                 if !r2.is_finite() {
                     return Err(SaddleError::NonFinite("geodesic pair distance"));
                 }
@@ -425,7 +440,7 @@ pub fn geodesic_path<C: GeodesicChart + ?Sized>(
     config: &GeodesicConfig,
 ) -> Result<(Array2<f64>, GeodesicReport), SaddleError> {
     config.check()?;
-    check_path(path)?;
+    check_path(path, chart.cell())?;
     if chart.n_coords() == 0 {
         return Err(SaddleError::Shape(
             "geodesic chart has no coordinates".into(),
@@ -448,7 +463,7 @@ pub fn geodesic_path<C: GeodesicChart + ?Sized>(
         if bounds_tight(&measured.total, config) || moved > config.step_tol {
             break measured.total;
         }
-        let grown = insert_midpoints(&path, &measured.segments, config);
+        let grown = insert_midpoints(&path, &measured.segments, config, chart.cell());
         if grown.nrows() == path.nrows()
             || measure(grown.view(), chart, config.bound_samples, None).is_err()
         {
@@ -495,6 +510,11 @@ pub fn geodesic_interpolate<C: GeodesicChart + ?Sized>(
     }
     if !reactant.iter().all(|v| v.is_finite()) || !product.iter().all(|v| v.is_finite()) {
         return Err(SaddleError::NonFinite("geodesic path"));
+    }
+    if chart.cell().is_some() && !dof.is_multiple_of(3) {
+        return Err(SaddleError::Shape(
+            "a periodic geodesic path holds three Cartesians per atom".into(),
+        ));
     }
     if n_images < 3 {
         let mut path = Array2::zeros((n_images, dof));
@@ -616,10 +636,15 @@ struct Measured {
     segments: Vec<Segment>,
 }
 
-fn check_path(path: ArrayView2<f64>) -> Result<(), SaddleError> {
+fn check_path(path: ArrayView2<f64>, cell: Option<&Cell>) -> Result<(), SaddleError> {
     if path.nrows() < 2 || path.ncols() == 0 {
         return Err(SaddleError::Shape(
             "geodesic path needs at least two images".into(),
+        ));
+    }
+    if cell.is_some() && !path.ncols().is_multiple_of(3) {
+        return Err(SaddleError::Shape(
+            "a periodic geodesic path holds three Cartesians per atom".into(),
         ));
     }
     if path.iter().any(|v| !v.is_finite()) {
@@ -643,6 +668,36 @@ fn sample<C: GeodesicChart + ?Sized>(chart: &C, x: ArrayView1<f64>) -> Result<Sa
         return Err(SaddleError::NonFinite("geodesic chart"));
     }
     Ok(Sample { q, b })
+}
+
+/// `left + t (right - left)` for one row, the difference taken per atom
+/// through [`Cell::displacement`] when the chart is periodic.
+fn toward(
+    cell: Option<&Cell>,
+    left: ArrayView1<f64>,
+    right: ArrayView1<f64>,
+    t: f64,
+) -> Array1<f64> {
+    let mut out = Array1::zeros(left.len());
+    match cell {
+        None => {
+            for k in 0..left.len() {
+                out[k] = left[k] + t * (right[k] - left[k]);
+            }
+        }
+        Some(cell) => {
+            for atom in 0..left.len() / 3 {
+                let at = 3 * atom;
+                let from = [left[at], left[at + 1], left[at + 2]];
+                let to = [right[at], right[at + 1], right[at + 2]];
+                let step = cell.displacement(from, to);
+                for c in 0..3 {
+                    out[at + c] = from[c] + t * step[c];
+                }
+            }
+        }
+    }
+    out
 }
 
 fn chord(a: &Array1<f64>, b: &Array1<f64>) -> f64 {
@@ -672,7 +727,7 @@ fn measure<C: GeodesicChart + ?Sized>(
     bound_samples: usize,
     mut grad: Option<&mut Array2<f64>>,
 ) -> Result<Measured, SaddleError> {
-    check_path(path)?;
+    check_path(path, chart.cell())?;
     if bound_samples < 2 {
         return Err(SaddleError::Invalid(
             "geodesic bound samples must be at least 2".into(),
@@ -699,10 +754,7 @@ fn measure<C: GeodesicChart + ?Sized>(
     for i in 0..n - 1 {
         let left = path.row(i);
         let right = path.row(i + 1);
-        let mut mid_x = Array1::zeros(dof);
-        for k in 0..dof {
-            mid_x[k] = MIDPOINT_WEIGHT * (left[k] + right[k]);
-        }
+        let mid_x = toward(chart.cell(), left, right, MIDPOINT_WEIGHT);
         let mid = sample(chart, mid_x.view())?;
         let n_left = chord(&mid.q, &images[i].q);
         let n_right = chord(&mid.q, &images[i + 1].q);
@@ -773,10 +825,7 @@ fn upper_bound<C: GeodesicChart + ?Sized>(
     let denom = samples as f64;
     for k in 1..samples {
         let t = (k as f64) / denom;
-        let mut x = Array1::zeros(left.len());
-        for c in 0..left.len() {
-            x[c] = (1.0 - t) * left[c] + t * right[c];
-        }
+        let x = toward(chart.cell(), left, right, t);
         let next = sample(chart, x.view())?;
         total += chord(&next.q, &prev);
         prev = next.q;
@@ -812,6 +861,7 @@ fn insert_midpoints(
     path: &Array2<f64>,
     segments: &[Segment],
     config: &GeodesicConfig,
+    cell: Option<&Cell>,
 ) -> Array2<f64> {
     let n = path.nrows();
     if n < 2 || segments.len() != n - 1 || segments.is_empty() || path.nrows() >= config.max_images
@@ -860,11 +910,7 @@ fn insert_midpoints(
     for (i, &split) in loose.iter().enumerate().take(n - 1) {
         rows.push(path.row(i).to_owned());
         if split {
-            let mut mid = Array1::zeros(dof);
-            for k in 0..dof {
-                mid[k] = MIDPOINT_WEIGHT * (path[(i, k)] + path[(i + 1, k)]);
-            }
-            rows.push(mid);
+            rows.push(toward(cell, path.row(i), path.row(i + 1), MIDPOINT_WEIGHT));
         }
     }
     rows.push(path.row(n - 1).to_owned());
@@ -1080,10 +1126,35 @@ mod tests {
         }
     }
 
+    /// Compare every component of the analytic length gradient, endpoints included,
+    /// with a central difference of the Eq. (17) length.
+    fn assert_dense_gradient(chart: &MorsePairChart, path: &Array2<f64>, samples: usize) {
+        let (rows, cols) = path.dim();
+        let mut grad = Array2::zeros((rows, cols));
+        measure(path.view(), chart, samples, Some(&mut grad)).unwrap();
+        let eps = 1e-6;
+        for image in 0..rows {
+            for col in 0..cols {
+                let mut plus = path.clone();
+                let mut minus = path.clone();
+                plus[(image, col)] += eps;
+                minus[(image, col)] -= eps;
+                let lp = geodesic_lengths(plus.view(), chart, samples).unwrap();
+                let lm = geodesic_lengths(minus.view(), chart, samples).unwrap();
+                let finite = (lp.length - lm.length) / (2.0 * eps);
+                assert!(
+                    (grad[(image, col)] - finite).abs() < 1e-5 * (1.0 + finite.abs()),
+                    "image {image} col {col}: {} vs {finite}",
+                    grad[(image, col)],
+                );
+            }
+        }
+    }
+
     #[test]
-    fn length_gradient_matches_a_central_difference() {
+    fn length_gradient_matches_a_central_difference_in_every_component() {
         let chart = MorsePairChart::new(array![1.0, 1.0]).unwrap();
-        let path = Array2::from_shape_vec(
+        let pair = Array2::from_shape_vec(
             (3, 6),
             vec![
                 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.1, -0.2, 0.0, 0.4, 2.2, 0.1, 0.0, 0.0, 0.0, 5.0,
@@ -1091,25 +1162,170 @@ mod tests {
             ],
         )
         .unwrap();
-        let mut grad = Array2::zeros((3, 6));
-        let measured = measure(path.view(), &chart, 4, Some(&mut grad)).unwrap();
-        let eps = 1e-6;
-        // The interior image is the only one the sweep moves. Check it, and one endpoint column.
-        for (image, col) in [(1, 3), (1, 4), (0, 3)] {
-            let mut plus = path.clone();
-            let mut minus = path.clone();
-            plus[(image, col)] += eps;
-            minus[(image, col)] -= eps;
-            let lp = geodesic_lengths(plus.view(), &chart, 4).unwrap();
-            let lm = geodesic_lengths(minus.view(), &chart, 4).unwrap();
-            let finite = (lp.length - lm.length) / (2.0 * eps);
-            assert!(
-                (grad[(image, col)] - finite).abs() < 1e-5,
-                "image {image} col {col}: {} vs {finite} (length {})",
-                grad[(image, col)],
-                measured.total.length
-            );
+        assert_dense_gradient(&chart, &pair, 4);
+
+        let triple = MorsePairChart::new(array![1.0, 0.8, 1.2]).unwrap();
+        let path = Array2::from_shape_vec(
+            (3, 9),
+            vec![
+                0.0, 0.0, 0.0, 1.6, 0.1, 0.0, 3.4, -0.2, 0.3, 0.1, 0.2, -0.1, 1.9, 1.1, 0.2, 2.4,
+                1.8, 0.4, 0.0, 0.0, 0.0, 0.3, 1.7, 0.0, 2.8, 2.9, -0.3,
+            ],
+        )
+        .unwrap();
+        assert_dense_gradient(&triple, &path, 4);
+    }
+
+    fn periodic_box() -> Cell {
+        Cell::ortho(10.0, 10.0, 10.0).unwrap()
+    }
+
+    /// The pair coordinate of Eq. (7) for r_e = 2.
+    fn pair_q(r: f64) -> f64 {
+        (-MORSE_ALPHA * (r - 2.0) / 2.0).exp() + MORSE_BETA * 2.0 / r
+    }
+
+    /// Atom 1 sits 1.5 from atom 0 in the reactant and 2.5 in the product. The
+    /// product places it at x = 9.5, so the naive difference is 8.0 along x.
+    fn crossing_pair() -> Array2<f64> {
+        Array2::from_shape_vec(
+            (2, 6),
+            vec![
+                2.0, 5.0, 5.0, 0.5, 5.0, 5.0, //
+                2.0, 5.0, 5.0, 9.5, 5.0, 5.0,
+            ],
+        )
+        .unwrap()
+    }
+
+    fn periodic_pair() -> MorsePairChart {
+        MorsePairChart::new(array![1.0, 1.0])
+            .unwrap()
+            .with_cell(periodic_box())
+    }
+
+    #[test]
+    fn a_periodic_midpoint_takes_the_short_way_across_the_box() {
+        let cell = periodic_box();
+        let left = array![9.5, 5.0, 5.0];
+        let right = array![0.5, 5.0, 5.0];
+        let mid = toward(Some(&cell), left.view(), right.view(), 0.5);
+        assert!((mid[0] - 10.0).abs() < 1e-12, "{}", mid[0]);
+        let naive = toward(None, left.view(), right.view(), 0.5);
+        assert!((naive[0] - 5.0).abs() < 1e-12);
+        let quarter = toward(Some(&cell), left.view(), right.view(), 0.25);
+        assert!((quarter[0] - 9.75).abs() < 1e-12, "{}", quarter[0]);
+    }
+
+    #[test]
+    fn a_segment_across_the_box_has_the_chord_length_and_bounds() {
+        let chart = periodic_pair();
+        let path = crossing_pair();
+        let measured = measure(path.view(), &chart, 10, None).unwrap();
+        let expect = pair_q(1.5) - pair_q(2.5);
+        // The pair distance runs 1.5, 2.0, 2.5 by the short way. Every sample lies
+        // on that line, so the length and both bounds telescope to the chord.
+        assert!(
+            (measured.total.length - expect).abs() < 1e-12,
+            "{}",
+            measured.total.length
+        );
+        assert!(
+            (measured.total.lower - expect).abs() < 1e-12,
+            "{}",
+            measured.total.lower
+        );
+        assert!(
+            (measured.total.upper - expect).abs() < 1e-12,
+            "{}",
+            measured.total.upper
+        );
+    }
+
+    #[test]
+    fn an_inserted_image_crosses_the_box_with_the_segment() {
+        let cell = periodic_box();
+        let path = crossing_pair();
+        let loose = Segment {
+            length: 1.0,
+            lower: 0.0,
+            upper: 5.0,
+        };
+        let grown = insert_midpoints(&path, &[loose], &GeodesicConfig::default(), Some(&cell));
+        assert_eq!(grown.nrows(), 3);
+        assert!(grown[(1, 3)].abs() < 1e-12, "{}", grown[(1, 3)]);
+        let free = insert_midpoints(
+            &path,
+            &[Segment {
+                length: 1.0,
+                lower: 0.0,
+                upper: 5.0,
+            }],
+            &GeodesicConfig::default(),
+            None,
+        );
+        assert!((free[(1, 3)] - 5.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_wrapped_cluster_matches_the_same_cluster_unwrapped_in_free_space() {
+        let radii = array![1.0, 0.8, 1.2];
+        let periodic = MorsePairChart::new(radii.clone())
+            .unwrap()
+            .with_cell(periodic_box());
+        let free = MorsePairChart::new(radii).unwrap();
+        // The cluster straddles the x = 0 face. Atoms 0 and 2 are wrapped to
+        // x near 10 in the wrapped rows and left at negative x in the free rows.
+        let unwrapped = Array2::from_shape_vec(
+            (3, 9),
+            vec![
+                0.3, 5.0, 5.0, 1.5, 5.5, 5.0, 0.8, 4.0, 5.2, //
+                0.1, 5.1, 5.0, 1.2, 5.4, 5.1, 0.3, 3.9, 5.2, //
+                -0.4, 5.0, 5.0, 0.9, 5.4, 5.0, -0.2, 3.9, 5.1,
+            ],
+        )
+        .unwrap();
+        let mut wrapped = unwrapped.clone();
+        for row in 0..3 {
+            for atom in 0..3 {
+                if wrapped[(row, 3 * atom)] < 0.0 {
+                    wrapped[(row, 3 * atom)] += 10.0;
+                }
+            }
         }
+        assert!(wrapped[(2, 0)] > 9.0);
+        let mut grad_free = Array2::zeros((3, 9));
+        let mut grad_wrapped = Array2::zeros((3, 9));
+        let on_free = measure(unwrapped.view(), &free, 10, Some(&mut grad_free)).unwrap();
+        let on_wrapped = measure(wrapped.view(), &periodic, 10, Some(&mut grad_wrapped)).unwrap();
+        assert!((on_free.total.length - on_wrapped.total.length).abs() < 1e-10);
+        assert!((on_free.total.lower - on_wrapped.total.lower).abs() < 1e-10);
+        assert!((on_free.total.upper - on_wrapped.total.upper).abs() < 1e-10);
+        for (u, v) in grad_free.iter().zip(grad_wrapped.iter()) {
+            assert!((u - v).abs() < 1e-9, "{u} vs {v}");
+        }
+        let naive = measure(wrapped.view(), &free, 10, None).unwrap();
+        assert!(
+            (naive.total.length - on_wrapped.total.length).abs() > 0.05,
+            "the box crossing must matter: {} vs {}",
+            naive.total.length,
+            on_wrapped.total.length
+        );
+    }
+
+    #[test]
+    fn the_periodic_length_gradient_matches_a_central_difference_across_the_box() {
+        let chart = periodic_pair();
+        let path = Array2::from_shape_vec(
+            (3, 6),
+            vec![
+                2.0, 5.0, 5.0, 0.5, 5.2, 5.0, //
+                2.0, 5.0, 5.0, 0.1, 5.3, 4.9, //
+                2.0, 5.0, 5.0, 9.4, 5.1, 5.1,
+            ],
+        )
+        .unwrap();
+        assert_dense_gradient(&chart, &path, 4);
     }
 
     fn dissociation_ends() -> (Array1<f64>, Array1<f64>) {

@@ -2264,14 +2264,18 @@ rgsaddle_status_t rgsaddle_geodesic_config_default(
  * room for inserted midpoints. The first and last images are copied
  * through.
  * `chart` writes `n_coords` redundant coordinates and their Wilson B
- * matrix. `config` NULL selects the defaults. `length`, `lower`, and
+ * matrix. `cell` is a row-major 3x3 lattice, or NULL in free space.
+ * With a cell, `dof` is a multiple of 3 and every midpoint, sample, and
+ * inserted image follows the minimum image displacement of its two
+ * segment ends; the chart applies the same convention to its own
+ * distances. `config` NULL selects the defaults. `length`, `lower`, and
  * `upper` may be NULL; otherwise they receive the Eq. (17) length and
  * the Eq. (B5) and Eq. (B18) bounds. A nonzero chart return is
  * `RGSADDLE_SURFACE_FAILED` when it happens on the starting path.
  */
 rgsaddle_status_t rgsaddle_geodesic_path(
     int64_t n_images, int64_t dof, const double *path, int64_t n_coords,
-    rgsaddle_geodesic_chart_fn chart, void *ctx,
+    rgsaddle_geodesic_chart_fn chart, void *ctx, const double *cell,
     const rgsaddle_geodesic_config_t *config, double *out, double *length,
     double *lower, double *upper);
 
