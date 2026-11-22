@@ -160,8 +160,8 @@ its Polak-Ribiere rotational history across translations. Lanczos
 stops on the Ritz residual; `FiniteDifference::Central` is available
 for the actions, and `rotation_angle_tol` stops a dimer rotation whose
 optimal angle falls under it (five degrees by default). In the C ABI,
-config minors 5 through 61 read `rotation_angle_tol` as given, so 0
-disables the test; from minor 62, 0 keeps the default unless
+config minors 5 through 62 read `rotation_angle_tol` as given, so 0
+disables the test; from minor 63, 0 keeps the default unless
 `RGSADDLE_MINMODE_EXPLICIT_ROTATION_ANGLE_TOL` marks it explicit.
 A non-negative curvature takes one step along the mode on
 which the largest atom moves `max_move` (eOn's FIRE and L-BFGS), or
