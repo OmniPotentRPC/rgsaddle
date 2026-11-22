@@ -38,6 +38,26 @@ pub struct ModeSweepDirectionPlan {
     pub minimum_squared_mode_weight: f64,
 }
 
+/// Select a deterministic soft-to-stiff schedule over an available mode band.
+///
+/// A short schedule takes the midpoint of each equal-width spectral stratum,
+/// so the maximum unsampled mode-index gap is at most
+/// `ceil(total_modes / draws)`. A schedule at least as long as the mode band
+/// visits every mode once before cycling.
+pub fn mode_sweep_schedule(total_modes: usize, draws: usize) -> Result<Vec<usize>, SaddleError> {
+    if total_modes == 0 || draws == 0 {
+        return Err(SaddleError::Invalid(
+            "mode sweep schedule needs at least one mode and one draw".into(),
+        ));
+    }
+    if draws >= total_modes {
+        return Ok((0..draws).map(|draw| draw % total_modes).collect());
+    }
+    Ok((0..draws)
+        .map(|draw| ((2 * draw + 1) * total_modes) / (2 * draws))
+        .collect())
+}
+
 /// Build one localized seed for every non-rigid Hessian mode, soft to stiff.
 ///
 /// `localization_weights`, when present, has one row per localization centre
@@ -236,7 +256,7 @@ fn sample_on_sphere(dim: usize, rng: &mut SplitMix64) -> Array1<f64> {
 mod tests {
     use ndarray::{Array1, ArrayView1, array};
 
-    use super::{hessian_mode_sweep_directions, spectral_gap_rank};
+    use super::{hessian_mode_sweep_directions, mode_sweep_schedule, spectral_gap_rank};
     use crate::{PointSurface, SaddleError};
 
     struct DiagonalHarmonic;
@@ -283,6 +303,17 @@ mod tests {
         let plan = hessian_mode_sweep_directions(&LargeHarmonic, minimum.view(), 3, 0.25, None)
             .expect("large mode sweep");
         assert_eq!(plan.directions.len(), 96);
+    }
+
+    #[test]
+    fn short_chirp_stratifies_the_whole_mode_band() {
+        assert_eq!(mode_sweep_schedule(10, 4).unwrap(), vec![1, 3, 6, 8]);
+        assert_eq!(
+            mode_sweep_schedule(3, 7).unwrap(),
+            vec![0, 1, 2, 0, 1, 2, 0]
+        );
+        assert!(mode_sweep_schedule(0, 1).is_err());
+        assert!(mode_sweep_schedule(3, 0).is_err());
     }
 
     #[test]
