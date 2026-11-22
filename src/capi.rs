@@ -2237,3 +2237,20 @@ mod solid;
 pub use solid::*;
 mod stencil;
 pub use stencil::*;
+
+#[cfg(test)]
+mod strict_endpoint_status {
+    use super::{RGSADDLE_INVALID_PARAMETER, status_of};
+    use crate::line_neb::LineNebEndpointViolation;
+
+    #[test]
+    fn a_strict_endpoint_maps_to_invalid_parameter() {
+        let err = LineNebEndpointViolation {
+            endpoint: "last",
+            energy_difference: -0.25,
+            step: 3,
+        }
+        .to_error();
+        assert_eq!(status_of(&err), RGSADDLE_INVALID_PARAMETER);
+    }
+}

@@ -1163,6 +1163,68 @@ fn eval_geometry_chunk<S: PointSurface>(
     Ok(())
 }
 
+/// Pair blocks of the Hessian action, one per caller pair.
+///
+/// Block `(i, j)` stores the three products of atom `i`'s Cartesian
+/// axes, restricted to atom `j`:
+/// `block[axis * 3 + component] = (H e_{i,axis})[j, component]`.
+/// This is not a finite difference. A surface with no
+/// [`PointSurface::hessian_vector`] is refused; cutoff recovery stays
+/// [`sparse_hessian`].
+///
+/// Pairs are checked with [`SparsityPattern::from_adjacency`]. A
+/// self-pair is still returned, in the caller's order.
+///
+/// # Errors
+///
+/// [`SaddleError::Shape`] when `x` is not Cartesian triples or an action
+/// has the wrong length. [`SaddleError::Invalid`] when a pair leaves the
+/// geometry or the surface has no Hessian action. The errors of
+/// [`PointSurface::hessian_vector`].
+pub fn action_pair_blocks<S: PointSurface>(
+    surface: &S,
+    x: ArrayView1<f64>,
+    pairs: &[(usize, usize)],
+) -> Result<Vec<[f64; 9]>, SaddleError> {
+    if !x.len().is_multiple_of(3) {
+        return Err(SaddleError::Shape(
+            "hessian points are Cartesian triples".into(),
+        ));
+    }
+    let n_atoms = x.len() / 3;
+    let _pattern = SparsityPattern::from_adjacency(n_atoms, pairs)?;
+    let mut blocks = Vec::with_capacity(pairs.len());
+    for &(i, j) in pairs {
+        if i >= n_atoms || j >= n_atoms {
+            return Err(SaddleError::Invalid(
+                "pair atom is outside the geometry".into(),
+            ));
+        }
+        let mut block = [0.0; 9];
+        for axis in 0..3 {
+            let mut direction = Array1::zeros(x.len());
+            direction[i * 3 + axis] = 1.0;
+            let image = surface
+                .hessian_vector(x, direction.view())?
+                .ok_or_else(|| {
+                    SaddleError::Invalid(
+                        "pair blocks need a Hessian action; this surface has none".into(),
+                    )
+                })?;
+            if image.len() != x.len() {
+                return Err(SaddleError::Shape(
+                    "Hessian action length does not match the geometry".into(),
+                ));
+            }
+            for component in 0..3 {
+                block[axis * 3 + component] = image[j * 3 + component];
+            }
+        }
+        blocks.push(block);
+    }
+    Ok(blocks)
+}
+
 /// Direct CPR recovery from a distance-2 colouring of `pattern`.
 pub fn sparse_hessian<S: PointSurface>(
     surface: &S,

@@ -133,6 +133,7 @@ use std::sync::{Arc, Mutex};
 use rgmin::{Control, Error, Method, Oracle, Solver, Status, StopNorm};
 
 use crate::Region;
+use crate::band::BandSurface;
 use crate::error::SaddleError;
 use crate::minmode::PointSurface;
 use crate::projector::{
@@ -140,7 +141,7 @@ use crate::projector::{
     HyperplaneSampler, ProjectedConstraint, TangentProjector,
 };
 use crate::relax::RelaxConfig;
-use crate::reparam::Spline;
+use crate::reparam::{Spline, SplineEnds};
 use crate::stats::{EquilibrationReport, Rng, block_mean, equilibrate};
 
 /// Time discretization of the projected overdamped Langevin equation.
@@ -547,6 +548,326 @@ impl ArcPath {
             arc,
         })
     }
+}
+
+impl PathGeometry {
+    /// Position, tangent, and curvature of `spline` at `arc`.
+    ///
+    /// The polyline geometry of [`ArcPath`] stays a chord. This reads the
+    /// cubic [`Spline`] instead, which is the path a fixed-energy
+    /// trajectory integrates.
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`Spline::sample`].
+    pub fn on_spline(spline: &Spline, arc: f64) -> Result<Self, SaddleError> {
+        let sample = spline.sample(arc)?;
+        // The third derivative is the one-sided value from `derivatives`,
+        // the same segment `ArcPath::geometry` reads.
+        let jerk = spline.derivatives(arc)[3].clone();
+        Ok(Self {
+            positions: sample.value,
+            tangent: sample.first,
+            curvature: sample.second,
+            jerk,
+            arc,
+        })
+    }
+}
+
+/// One sample of inverted-potential motion on a normalized path.
+#[derive(Clone, Copy, Debug)]
+pub struct TrajectoryPoint {
+    /// Time from the left turning point.
+    pub time: f64,
+    /// Normalized arc coordinate.
+    pub arc: f64,
+    /// `d(arc)/dt`.
+    pub velocity: f64,
+}
+
+/// Mass-weighted path and the parallel force along it.
+///
+/// Knots are the normalized polyline arc length of the mass-weighted
+/// images. Both splines use [`SplineEnds::Natural`]. [`Self::half`] integrates
+/// the constrained dynamics of `-V` in that normalized coordinate.
+///
+/// On a fixed-energy tunnelling path from [`crate::LineNebSession`]
+/// this is the dynamics along the path that Ásgeirsson, Arnaldsson, and
+/// Jónsson, J. Chem. Phys. 148, 102334 (2018), doi:10.1063/1.5007180,
+/// use to find the temperature at which the path is an instanton.
+#[derive(Clone, Debug)]
+pub struct FixedEnergyTrajectory {
+    coordinate: Spline,
+    parallel_force: Spline,
+}
+
+impl FixedEnergyTrajectory {
+    /// Spline images whose Cartesian gradients are already known.
+    ///
+    /// `positions` and `gradients` have one image per row.
+    /// `masses` has one positive entry per coordinate.
+    ///
+    /// # Errors
+    ///
+    /// [`SaddleError::Shape`] when the arrays disagree or there are fewer
+    /// than two images. [`SaddleError::Invalid`] when the mass-weighted
+    /// path has no arc length, and the errors of [`Spline::new`].
+    pub fn from_gradients(
+        positions: &Array2<f64>,
+        gradients: &Array2<f64>,
+        masses: ArrayView1<f64>,
+    ) -> Result<Self, SaddleError> {
+        let images = positions.nrows();
+        let width = positions.ncols();
+        if images < 2 || width == 0 {
+            return Err(SaddleError::Shape(
+                "a fixed-energy path needs at least two nonempty images".into(),
+            ));
+        }
+        if gradients.nrows() != images || gradients.ncols() != width || masses.len() != width {
+            return Err(SaddleError::Shape(
+                "fixed-energy path gradients and masses must match the images".into(),
+            ));
+        }
+        let sqrt_mass = masses.mapv(f64::sqrt);
+        let mut coordinate = Array2::zeros((images, width));
+        for image in 0..images {
+            for coordinate_index in 0..width {
+                coordinate[(image, coordinate_index)] =
+                    positions[(image, coordinate_index)] * sqrt_mass[coordinate_index];
+            }
+        }
+        let mut knots = vec![0.0; images];
+        for image in 1..images {
+            let mut length2 = 0.0;
+            for coordinate_index in 0..width {
+                let step = coordinate[(image, coordinate_index)]
+                    - coordinate[(image - 1, coordinate_index)];
+                length2 += step * step;
+            }
+            knots[image] = knots[image - 1] + length2.sqrt();
+        }
+        let total = knots[images - 1];
+        if !(total.is_finite() && total > 0.0) {
+            return Err(SaddleError::Invalid(
+                "fixed-energy path has zero arc length".into(),
+            ));
+        }
+        for value in &mut knots {
+            *value /= total;
+        }
+        let coordinate_spline = Spline::new(&knots, &coordinate, SplineEnds::Natural)?;
+        let mut parallel = Array2::zeros((images, 1));
+        for image in 0..images {
+            let geometry = PathGeometry::on_spline(&coordinate_spline, knots[image])?;
+            let mut tangent_norm2 = 0.0;
+            let mut force = 0.0;
+            for coordinate_index in 0..width {
+                let direction = geometry.tangent[coordinate_index];
+                tangent_norm2 += direction * direction;
+                force +=
+                    -gradients[(image, coordinate_index)] * direction / sqrt_mass[coordinate_index];
+            }
+            parallel[(image, 0)] = force / tangent_norm2.sqrt();
+        }
+        Ok(Self {
+            coordinate: coordinate_spline,
+            parallel_force: Spline::new(&knots, &parallel, SplineEnds::Natural)?,
+        })
+    }
+
+    /// Evaluate each image once, in order, and spline the path.
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`BandSurface::eval`] and [`Self::from_gradients`].
+    pub fn from_images<S: BandSurface>(
+        surface: &S,
+        positions: &Array2<f64>,
+        masses: ArrayView1<f64>,
+    ) -> Result<Self, SaddleError> {
+        let images = positions.nrows();
+        let width = positions.ncols();
+        let mut gradients = Array2::zeros((images, width));
+        for image in 0..images {
+            let mut one = Array2::zeros((1, width));
+            one.row_mut(0).assign(&positions.row(image));
+            let mut energies = Array1::zeros(1);
+            let mut gradient = Array2::zeros((1, width));
+            surface.eval(one.view(), &mut energies, &mut gradient)?;
+            gradients.row_mut(image).assign(&gradient.row(0));
+        }
+        Self::from_gradients(positions, &gradients, masses)
+    }
+
+    /// Mass-weighted coordinate spline. Knots lie in `[0, 1]`.
+    pub fn coordinate(&self) -> &Spline {
+        &self.coordinate
+    }
+
+    /// Parallel-force spline, one value per knot.
+    pub fn parallel_force(&self) -> &Spline {
+        &self.parallel_force
+    }
+
+    /// Acceleration of the normalized arc on the inverted potential.
+    ///
+    /// # Errors
+    ///
+    /// [`SaddleError::Invalid`] when the coordinate tangent has no
+    /// length, and the errors of [`Spline::sample`].
+    pub fn acceleration(&self, arc: f64, velocity: f64) -> Result<f64, SaddleError> {
+        let geometry = PathGeometry::on_spline(&self.coordinate, arc)?;
+        let force = self.parallel_force.sample(arc)?.value[0];
+        let metric = geometry.tangent.dot(&geometry.tangent);
+        if !(metric.is_finite() && metric > 0.0) {
+            return Err(SaddleError::Invalid(
+                "path spline has a singular metric".into(),
+            ));
+        }
+        let bend = geometry.tangent.dot(&geometry.curvature);
+        Ok((-force * metric.sqrt() - bend * velocity * velocity) / metric)
+    }
+
+    /// Integrate from the left endpoint until the path ends or the
+    /// velocity turns back. `time_step` is the fixed step of that
+    /// integration. `max_steps` is how many of those steps may be taken.
+    ///
+    /// A proposal that reaches or passes the end knot is an integration
+    /// event: the corrector acceleration is sampled at that knot, and the
+    /// stored arc is the knot. No state past the knot is formed.
+    ///
+    /// # Errors
+    ///
+    /// [`SaddleError::Invalid`] when `time_step` is not positive and
+    /// finite, when a step stops advancing, and, with a message that
+    /// starts `work budget exhausted`, when `max_steps` is used up. The
+    /// errors of [`Self::acceleration`].
+    pub fn half(
+        &self,
+        time_step: f64,
+        max_steps: usize,
+    ) -> Result<Vec<TrajectoryPoint>, SaddleError> {
+        if !(time_step.is_finite() && time_step > 0.0) {
+            return Err(SaddleError::Invalid(
+                "fixed-energy trajectory step must be positive and finite".into(),
+            ));
+        }
+        let mut trajectory = vec![TrajectoryPoint {
+            time: 0.0,
+            arc: 0.0,
+            velocity: 0.0,
+        }];
+        let mut steps = 0usize;
+        loop {
+            if steps == max_steps {
+                return Err(SaddleError::Invalid(
+                    "work budget exhausted: fixed-energy trajectory used its step budget".into(),
+                ));
+            }
+            steps += 1;
+            let current = *trajectory.last().ok_or_else(|| {
+                SaddleError::Solver("fixed-energy trajectory lost its initial point".into())
+            })?;
+            let a0 = self.acceleration(current.arc, current.velocity)?;
+            let proposed_arc =
+                current.arc + time_step * current.velocity + 0.5 * time_step.powi(2) * a0;
+            let predicted_velocity = current.velocity + time_step * a0;
+            if !(proposed_arc.is_finite() && predicted_velocity.is_finite()) {
+                return Err(SaddleError::Invalid(format!(
+                    "inverted-potential trajectory stopped at s={:.17e}, v={:.17e}, a={:.17e}",
+                    current.arc, current.velocity, a0
+                )));
+            }
+            if proposed_arc >= 1.0 {
+                let a1 = self.acceleration(1.0, predicted_velocity)?;
+                let proposed_velocity = current.velocity + 0.5 * time_step * (a0 + a1);
+                let ds = proposed_arc - current.arc;
+                if !(ds.is_finite() && ds > 0.0 && proposed_velocity.is_finite()) {
+                    return Err(SaddleError::Invalid(format!(
+                        "inverted-potential trajectory stopped at s={:.17e}, v={:.17e}, a={:.17e}",
+                        current.arc, current.velocity, a0
+                    )));
+                }
+                let fraction = (1.0 - current.arc) / ds;
+                trajectory.push(TrajectoryPoint {
+                    time: current.time + fraction * time_step,
+                    arc: 1.0,
+                    velocity: current.velocity + fraction * (proposed_velocity - current.velocity),
+                });
+                return Ok(trajectory);
+            }
+            let a1 = self.acceleration(proposed_arc, predicted_velocity)?;
+            let proposed_velocity = current.velocity + 0.5 * time_step * (a0 + a1);
+            let next_time = current.time + time_step;
+            if current.velocity > 0.0 && proposed_velocity <= 0.0 {
+                let fraction = current.velocity / (current.velocity - proposed_velocity);
+                trajectory.push(TrajectoryPoint {
+                    time: current.time + fraction * time_step,
+                    arc: current.arc + fraction * (proposed_arc - current.arc),
+                    velocity: 0.0,
+                });
+                return Ok(trajectory);
+            }
+            if !(proposed_arc > current.arc
+                && proposed_velocity.is_finite()
+                && next_time.is_finite())
+            {
+                return Err(SaddleError::Invalid(format!(
+                    "inverted-potential trajectory stopped at s={:.17e}, v={:.17e}, a={:.17e}",
+                    current.arc, current.velocity, a0
+                )));
+            }
+            trajectory.push(TrajectoryPoint {
+                time: next_time,
+                arc: proposed_arc,
+                velocity: proposed_velocity,
+            });
+        }
+    }
+
+    /// Round trip: twice the time [`Self::half`] takes to cross or turn.
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`Self::half`].
+    pub fn period(&self, time_step: f64, max_steps: usize) -> Result<f64, SaddleError> {
+        let trajectory = self.half(time_step, max_steps)?;
+        let last = trajectory.last().ok_or_else(|| {
+            SaddleError::Shape("fixed-energy trajectory produced no points".into())
+        })?;
+        Ok(2.0 * last.time)
+    }
+}
+
+/// Cubic Hermite arc at `time` on a half-trajectory.
+///
+/// An exact node time returns that node's arc. Between nodes the
+/// interpolant uses both endpoint velocities.
+///
+/// # Errors
+///
+/// [`SaddleError::Shape`] when `trajectory` has fewer than two points.
+pub fn arc_at_time(trajectory: &[TrajectoryPoint], time: f64) -> Result<f64, SaddleError> {
+    if trajectory.len() < 2 {
+        return Err(SaddleError::Shape(
+            "arc interpolation needs two trajectory points".into(),
+        ));
+    }
+    let index = match trajectory.binary_search_by(|point| point.time.total_cmp(&time)) {
+        Ok(index) => return Ok(trajectory[index].arc),
+        Err(index) => index.saturating_sub(1).min(trajectory.len() - 2),
+    };
+    let left = trajectory[index];
+    let right = trajectory[index + 1];
+    let h = right.time - left.time;
+    let u = (time - left.time) / h;
+    let h00 = 2.0 * u.powi(3) - 3.0 * u.powi(2) + 1.0;
+    let h10 = u.powi(3) - 2.0 * u.powi(2) + u;
+    let h01 = -2.0 * u.powi(3) + 3.0 * u.powi(2);
+    let h11 = u.powi(3) - u.powi(2);
+    Ok(h00 * left.arc + h10 * h * left.velocity + h01 * right.arc + h11 * h * right.velocity)
 }
 
 /// Mean free-energy gradient on one hyperplane.
@@ -1570,6 +1891,30 @@ mod tests {
         assert_eq!(sampler.planes.len(), 1);
         assert_eq!(sampler.planes[0].point(), geometry.positions);
         assert_eq!(sampler.planes[0].normal(), array![1.0, 0.0]);
+    }
+
+    #[test]
+    fn a_straight_inverted_path_has_constant_acceleration() {
+        let positions = array![[0.0], [1.0], [2.0]];
+        let gradients = array![[2.0], [2.0], [2.0]];
+        let path =
+            FixedEnergyTrajectory::from_gradients(&positions, &gradients, array![1.0].view())
+                .unwrap();
+        let geometry = PathGeometry::on_spline(path.coordinate(), 0.5).unwrap();
+        assert!((geometry.tangent[0] - 2.0).abs() < 1e-12);
+        assert!(geometry.curvature[0].abs() < 1e-12);
+        let acceleration = path.acceleration(0.25, 0.0).unwrap();
+        assert!((acceleration - 1.0).abs() < 1e-12);
+        let half = path.half(0.1, 10_000).unwrap();
+        assert!((half.last().unwrap().arc - 1.0).abs() < 1e-12);
+        assert!(matches!(
+            path.half(0.1, 1),
+            Err(SaddleError::Invalid(message)) if message.starts_with("work budget exhausted")
+        ));
+        let period = path.period(0.1, 10_000).unwrap();
+        assert!((period - 2.0 * half.last().unwrap().time).abs() < 1e-15);
+        let mid = arc_at_time(&half, 0.0).unwrap();
+        assert_eq!(mid, 0.0);
     }
 }
 
