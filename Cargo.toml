@@ -111,6 +111,10 @@ name = "ohtst_tutorial"
 required-features = ["ohtst"]
 
 [[example]]
+name = "ohtst_analytic"
+required-features = ["ohtst"]
+
+[[example]]
 name = "howto_restart"
 required-features = ["ohtst"]
 

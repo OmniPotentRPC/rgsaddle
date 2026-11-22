@@ -506,8 +506,11 @@ pub fn reversible_work_along<E: HyperplaneSampler>(
     let integrated = (work, variance.sqrt());
     let (selected, selected_error) = match config.estimate {
         WorkEstimate::Integration => integrated,
-        WorkEstimate::Bar => bar.unwrap_or(integrated),
-        WorkEstimate::Mbar => mbar_estimate.unwrap_or(integrated),
+        WorkEstimate::Bar => {
+            bar.ok_or_else(|| SaddleError::Solver("BAR estimate was not computed".into()))?
+        }
+        WorkEstimate::Mbar => mbar_estimate
+            .ok_or_else(|| SaddleError::Solver("MBAR estimate was not computed".into()))?,
     };
     Ok(ReversibleWork {
         work: selected,

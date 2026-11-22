@@ -91,6 +91,12 @@ impl OhTstRate {
         rate.rate *= factor;
         rate.error *= factor;
         rate.log_rate += factor.ln();
+        if ![rate.rate, rate.error, rate.log_rate]
+            .iter()
+            .all(|value| value.is_finite())
+        {
+            return Err(SaddleError::NonFinite("rate"));
+        }
         Ok(rate)
     }
 }
@@ -187,11 +193,73 @@ impl RateMultiplicity {
     }
 }
 
-fn same_plane(a: &Hyperplane, b: &Hyperplane) -> bool {
+const DEFAULT_NORMAL_GAP: f64 = 1.0 / 1_000_000_000_000.0;
+const DEFAULT_OFFSET_FRACTION: f64 = 1.0 / 1_000_000_000.0;
+const DEFAULT_THERMAL_FRACTION: f64 = 1.0 / 1_000_000_000_000.0;
+
+fn same_plane(a: &Hyperplane, b: &Hyperplane, config: &OhTstRateConfig) -> bool {
     let scale = 1.0 + a.point().dot(&a.point()).sqrt();
     a.dim() == b.dim()
-        && a.normal().dot(&b.normal()) > 1.0 - 1.0e-12
-        && a.distance(b.point()).abs() <= 1.0e-9 * scale
+        && a.normal().dot(&b.normal()) >= 1.0 - config.normal_gap
+        && a.distance(b.point()).abs() <= config.offset_fraction * scale
+}
+
+/// Tolerances used when combining a reactant density and reversible work.
+#[non_exhaustive]
+#[derive(Clone, Debug)]
+pub struct OhTstRateConfig {
+    /// Largest gap between the dot product of two unit normals and one.
+    pub normal_gap: f64,
+    /// Largest plane-offset difference as a fraction of `1 + |point|`.
+    pub offset_fraction: f64,
+    /// Largest temperature difference as a fraction of `kT`.
+    pub thermal_fraction: f64,
+}
+
+impl Default for OhTstRateConfig {
+    fn default() -> Self {
+        Self {
+            normal_gap: DEFAULT_NORMAL_GAP,
+            offset_fraction: DEFAULT_OFFSET_FRACTION,
+            thermal_fraction: DEFAULT_THERMAL_FRACTION,
+        }
+    }
+}
+
+impl OhTstRateConfig {
+    /// Set [`Self::normal_gap`].
+    #[must_use]
+    pub fn with_normal_gap(mut self, normal_gap: f64) -> Self {
+        self.normal_gap = normal_gap;
+        self
+    }
+
+    /// Set [`Self::offset_fraction`].
+    #[must_use]
+    pub fn with_offset_fraction(mut self, offset_fraction: f64) -> Self {
+        self.offset_fraction = offset_fraction;
+        self
+    }
+
+    /// Set [`Self::thermal_fraction`].
+    #[must_use]
+    pub fn with_thermal_fraction(mut self, thermal_fraction: f64) -> Self {
+        self.thermal_fraction = thermal_fraction;
+        self
+    }
+
+    fn check(&self) -> Result<(), SaddleError> {
+        if [self.normal_gap, self.offset_fraction, self.thermal_fraction]
+            .iter()
+            .all(|value| value.is_finite() && *value >= 0.0)
+        {
+            Ok(())
+        } else {
+            Err(SaddleError::Invalid(
+                "OH-TST rate tolerances must be finite and non-negative".into(),
+            ))
+        }
+    }
 }
 
 /// An estimate of `Z_H / Z_R` per unit mass-weighted length along the
@@ -229,9 +297,26 @@ pub fn ohtst_rate<D: PlaneDensity + ?Sized>(
     density: &D,
     work: &ReversibleWork,
 ) -> Result<OhTstRate, SaddleError> {
+    ohtst_rate_with_config(density, work, &OhTstRateConfig::default())
+}
+
+/// Combine a reactant density and reversible work using explicit matching
+/// tolerances.
+pub fn ohtst_rate_with_config<D: PlaneDensity + ?Sized>(
+    density: &D,
+    work: &ReversibleWork,
+    config: &OhTstRateConfig,
+) -> Result<OhTstRate, SaddleError> {
+    config.check()?;
     let kt = density.thermal();
+    if !(kt.is_finite() && work.thermal.is_finite()) {
+        return Err(SaddleError::NonFinite("thermal"));
+    }
+    if !(kt > 0.0 && work.thermal > 0.0) {
+        return Err(SaddleError::Invalid("kT must be positive".into()));
+    }
     let (value, value_error) = density.density();
-    if (work.thermal - kt).abs() > 1.0e-12 * kt {
+    if (work.thermal - kt).abs() > config.thermal_fraction * kt {
         return Err(SaddleError::Invalid(
             "the reactant density and the work come from different temperatures".into(),
         ));
@@ -240,30 +325,84 @@ pub fn ohtst_rate<D: PlaneDensity + ?Sized>(
         .nodes
         .first()
         .ok_or_else(|| SaddleError::Invalid("the work path has no nodes".into()))?;
-    if !same_plane(&start.plane, density.plane()) {
+    if !same_plane(&start.plane, density.plane(), config) {
         return Err(SaddleError::Invalid(
             "the work path does not start at the plane of the reactant density".into(),
         ));
     }
-    if !(value.is_finite() && value > 0.0) {
+    if !value.is_finite() {
+        return Err(SaddleError::NonFinite("density"));
+    }
+    if value <= 0.0 {
         return Err(SaddleError::Invalid(format!(
             "the reactant density {value} ± {value_error} is not positive; sample longer or move the plane toward the minimum"
         )));
     }
-    let flux = (kt / TAU).sqrt();
-    let log_rate = flux.ln() + value.ln() - work.work / kt;
-    let log_rate_error = ((value_error / value).powi(2) + (work.error / kt).powi(2)).sqrt();
+    rate_from_parts(kt, value, value_error, work.work, work.error)
+}
+
+/// `k = √(kT/2π) ρ exp(-ΔA/kT)` from the parts [`ohtst_rate`] multiplies.
+///
+/// `ρ` is the reactant density on the first plane of the work path and
+/// `ΔA` is the reversible work from that plane. The caller has already
+/// checked that both belong to the same temperature and the same plane.
+pub fn rate_from_parts(
+    thermal: f64,
+    density: f64,
+    density_error: f64,
+    free_energy: f64,
+    free_energy_error: f64,
+) -> Result<OhTstRate, SaddleError> {
+    if !thermal.is_finite() {
+        return Err(SaddleError::NonFinite("thermal"));
+    }
+    if thermal <= 0.0 {
+        return Err(SaddleError::Invalid("kT must be positive".into()));
+    }
+    if !density.is_finite() {
+        return Err(SaddleError::NonFinite("density"));
+    }
+    if density <= 0.0 {
+        return Err(SaddleError::Invalid(
+            "the reactant density must be positive".into(),
+        ));
+    }
+    if !density_error.is_finite() {
+        return Err(SaddleError::NonFinite("density_error"));
+    }
+    if !free_energy.is_finite() {
+        return Err(SaddleError::NonFinite("work"));
+    }
+    if !free_energy_error.is_finite() {
+        return Err(SaddleError::NonFinite("work_error"));
+    }
+    if density_error < 0.0 || free_energy_error < 0.0 {
+        return Err(SaddleError::Invalid(
+            "standard errors of the density and the free energy must be non-negative".into(),
+        ));
+    }
+    let flux = (thermal / TAU).sqrt();
+    let log_rate = flux.ln() + density.ln() - free_energy / thermal;
+    let log_rate_error =
+        ((density_error / density).powi(2) + (free_energy_error / thermal).powi(2)).sqrt();
     let rate = log_rate.exp();
+    let error = rate * log_rate_error;
+    if ![rate, error, log_rate, log_rate_error, flux]
+        .iter()
+        .all(|value| value.is_finite())
+    {
+        return Err(SaddleError::NonFinite("rate"));
+    }
     Ok(OhTstRate {
         rate,
-        error: rate * log_rate_error,
+        error,
         log_rate,
         log_rate_error,
         flux,
-        density: value,
-        density_error: value_error,
-        free_energy: work.work,
-        free_energy_error: work.error,
+        density,
+        density_error,
+        free_energy,
+        free_energy_error,
     })
 }
 
@@ -494,12 +633,107 @@ mod tests {
         let mut hot = density.clone();
         hot.thermal = 0.6;
         assert!(ohtst_rate(&hot, &work).is_err());
+        let tolerant = OhTstRateConfig::default().with_thermal_fraction(0.25);
+        assert!(ohtst_rate_with_config(&hot, &work, &tolerant).is_ok());
+        let invalid = OhTstRateConfig::default().with_normal_gap(f64::NAN);
+        assert!(ohtst_rate_with_config(&density, &work, &invalid).is_err());
         let mut elsewhere = density.clone();
         elsewhere.plane = Hyperplane::new(array![-0.4, 0.0], array![1.0, 0.0]).unwrap();
         assert!(ohtst_rate(&elsewhere, &work).is_err());
         let mut empty = density;
         empty.density = -0.01;
         assert!(ohtst_rate(&empty, &work).is_err());
+        assert!(rate_from_parts(kt, 0.4, -0.02, 3.0, 0.1).is_err());
+        assert!(rate_from_parts(kt, 0.4, 0.02, 3.0, -0.1).is_err());
+        assert!(matches!(
+            rate_from_parts(1.0, 1.0, 0.0, -1000.0, 0.0),
+            Err(SaddleError::NonFinite("rate"))
+        ));
+        assert!(matches!(
+            rate_from_parts(1.0, 1.0, 0.1, -1000.0, 0.1),
+            Err(SaddleError::NonFinite("rate"))
+        ));
+        assert!(matches!(
+            rate_from_parts(1.0, 1.0, 0.0, 0.0, f64::MAX),
+            Err(SaddleError::NonFinite("rate"))
+        ));
+        let mut overflow_work = work.clone();
+        overflow_work.thermal = 1.0;
+        overflow_work.work = -1000.0;
+        overflow_work.error = 0.0;
+        let mut unit_density = empty.clone();
+        unit_density.thermal = 1.0;
+        unit_density.density = 1.0;
+        unit_density.density_error = 0.0;
+        assert!(matches!(
+            ohtst_rate(&unit_density, &overflow_work),
+            Err(SaddleError::NonFinite("rate"))
+        ));
+        let mut nan_work = work.clone();
+        nan_work.thermal = f64::NAN;
+        assert!(ohtst_rate(&unit_density, &nan_work).is_err());
+        let mut inf_work = work.clone();
+        inf_work.thermal = f64::INFINITY;
+        assert!(ohtst_rate(&unit_density, &inf_work).is_err());
+        let mut nan_density = unit_density.clone();
+        nan_density.thermal = f64::NAN;
+        assert!(ohtst_rate(&nan_density, &work).is_err());
+        let exact_normal = OhTstRateConfig::default().with_normal_gap(0.0);
+        let mut matching_density = unit_density;
+        matching_density.thermal = kt;
+        assert!(ohtst_rate_with_config(&matching_density, &work, &exact_normal).is_ok());
+    }
+
+    #[test]
+    fn non_finite_thermal_is_rejected_by_rate() {
+        let plane = Hyperplane::new(array![-0.5, 0.0], array![1.0, 0.0]).unwrap();
+        let config = LangevinConfig::default().with_records(200);
+        let end = sample_plane(&Bowl, &plane, None, &config).unwrap();
+        let node = WorkNode {
+            leg: 0,
+            s: 0.0,
+            plane: plane.clone(),
+            derivative: 0.0,
+            error: 0.0,
+            work: 0.0,
+            bar_work: None,
+            overlap: None,
+            transport_weight: None,
+            mbar_work: None,
+        };
+        let work = ReversibleWork {
+            work: 3.0,
+            error: 0.1,
+            estimate: WorkEstimate::Integration,
+            integrated_work: 3.0,
+            integrated_error: 0.1,
+            nodes: vec![node],
+            end,
+            evaluations: 0,
+            thermal: f64::NAN,
+            bar_work: None,
+            bar_error: None,
+            mbar_work: None,
+            mbar_error: None,
+            overlap: None,
+            warnings: Vec::new(),
+        };
+        let density = ReactantDensity {
+            plane,
+            thermal: 0.5,
+            density: 0.4,
+            density_error: 0.02,
+            crossing_density: 0.4,
+            crossing_error: 0.05,
+            behind: 0.3,
+            tau: 1.0,
+            records: 1,
+            evaluations: 0,
+            acceptance: 1.0,
+            wall_hits: 0,
+            last: array![0.0, 0.0],
+        };
+        assert!(ohtst_rate(&density, &work).is_err());
     }
 
     #[test]
