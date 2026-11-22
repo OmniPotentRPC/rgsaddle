@@ -350,7 +350,8 @@ pub use samd::{
     project_velocity, retract_samd, soften_velocity_on, transport_velocity, verlet_increment,
 };
 pub use seed_direction::{
-    SoftModeDirectionPlan, soft_mode_then_full_directions, spectral_gap_rank,
+    ModeSweepDirectionPlan, SoftModeDirectionPlan, hessian_mode_sweep_directions,
+    soft_mode_then_full_directions, spectral_gap_rank,
 };
 
 pub use sella_min::{SellaMinConfig, SellaMinReport, SellaMinSession};
