@@ -8,7 +8,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use ndarray::{Array1, ArrayView1};
 use rgsaddle::{
     ArcPath, PafiConfig, PafiIntegrator, PathFrame, PointSurface, RelaxConfig, SaddleError,
-    average_hyperplane, integrate_profile, pafi_profile, zero_temperature_barrier,
+    anchored_barriers, average_hyperplane, balanced_barriers, integrate_profile, pafi_profile,
+    zero_temperature_barrier,
 };
 
 struct AlongX;
@@ -222,6 +223,79 @@ fn trajectory_ensemble_uses_the_reference_error() {
     assert_eq!(ensemble.gradient, mean);
     assert_eq!(ensemble.error, error);
     assert_eq!(ensemble.samples, trajectories * config.samples);
+}
+
+#[test]
+fn reverse_barrier_runs_from_the_last_plane() {
+    let profile = integrate_profile(
+        &[0.0, 1.0, 2.0, 3.0],
+        &[0.0, 2.0, -1.0, -3.0],
+        &[0.1, 0.1, 0.2, 0.2],
+    )
+    .expect("profile");
+    assert_eq!(profile.dividing, 2);
+    assert!((profile.barrier - 1.5).abs() < 1.0e-12);
+    let (barrier, error) = profile.reverse_barrier();
+    assert!((barrier - 2.0).abs() < 1.0e-12, "reverse {barrier}");
+    assert!((error - 0.02_f64.sqrt()).abs() < 1.0e-12, "error {error}");
+}
+
+/// The profile above ends 0.5 below its start. Told that the ends differ
+/// by 0.1, the two barriers weigh in by their errors and the remaining
+/// -0.6 is drift.
+#[test]
+fn balanced_barriers_close_on_the_end_gap() {
+    let profile = integrate_profile(
+        &[0.0, 1.0, 2.0, 3.0],
+        &[0.0, 2.0, -1.0, -3.0],
+        &[0.1, 0.1, 0.2, 0.2],
+    )
+    .expect("profile");
+    let balanced = profile.balanced(0.1).expect("balanced");
+    let (forward, reverse) = ((1.5, profile.barrier_error), profile.reverse_barrier());
+    let (weight_f, weight_r) = (forward.1.powi(-2), reverse.1.powi(-2));
+    let mean = (weight_f * forward.0 + weight_r * (reverse.0 + 0.1)) / (weight_f + weight_r);
+    assert!(
+        (balanced.drift + 0.6).abs() < 1.0e-12,
+        "drift {}",
+        balanced.drift
+    );
+    assert!((balanced.forward - mean).abs() < 1.0e-12);
+    assert!((balanced.forward - balanced.reverse - 0.1).abs() < 1.0e-12);
+    let error = ((weight_f + weight_r).recip() + 0.09).sqrt();
+    assert!(
+        (balanced.error - error).abs() < 1.0e-12,
+        "error {}",
+        balanced.error
+    );
+    let even = balanced_barriers((1.0, 0.1), (0.8, 0.1), 0.0).expect("even");
+    assert!((even.forward - 0.9).abs() < 1.0e-12 && (even.reverse - 0.9).abs() < 1.0e-12);
+    assert!(balanced_barriers((1.0, 0.0), (0.8, 0.1), 0.0).is_err());
+    assert!(balanced_barriers((1.0, 0.1), (f64::NAN, 0.1), 0.0).is_err());
+}
+
+/// The same profile anchored on its forward barrier: the reverse barrier
+/// is the forward one less the end gap, the error is the forward one, and
+/// the drift is the same -0.6.
+#[test]
+fn anchored_barriers_keep_the_forward_barrier() {
+    let profile = integrate_profile(
+        &[0.0, 1.0, 2.0, 3.0],
+        &[0.0, 2.0, -1.0, -3.0],
+        &[0.1, 0.1, 0.2, 0.2],
+    )
+    .expect("profile");
+    let anchored = profile.anchored(0.1).expect("anchored");
+    assert!((anchored.forward - 1.5).abs() < 1.0e-12);
+    assert!((anchored.reverse - 1.4).abs() < 1.0e-12);
+    assert!((anchored.error - profile.barrier_error).abs() < 1.0e-12);
+    assert!(
+        (anchored.drift + 0.6).abs() < 1.0e-12,
+        "drift {}",
+        anchored.drift
+    );
+    assert!(anchored_barriers((1.0, 0.0), (0.8, 0.1), 0.0).is_err());
+    assert!(anchored_barriers((1.0, 0.1), (0.8, 0.1), f64::INFINITY).is_err());
 }
 
 #[test]

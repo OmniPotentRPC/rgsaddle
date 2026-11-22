@@ -10381,6 +10381,9 @@ fn assemble_run12() {
     let rates = catalogue_text();
     let mut out = File::create(root.join("defect_pair_run12_volume.csv")).expect("volume");
     writeln!(out, "temperature_K,method,volume_over_Omega,sigma,spontaneous_sites,kinetic_sites,demkowicz_8788,note").unwrap();
+    // Table 1 D_i in Å²/s: 4951 D* from their Ref. [12], a tracer sum over
+    // the atoms rather than the defect diffusivity
+    // (validation/direct_md_dynamics.md).
     let diffusivity = |temperature: f64| match temperature as i32 {
         300 => 0.143e12,
         500 => 0.526e12,
@@ -10532,13 +10535,13 @@ fn assemble_run12() {
             f64::NAN
         };
         let tau_cell = cell_averaged_time(repeats, a, k_mig, max_r, tau_near);
-        let nu_tst = (2.0 / 3.0) * k_mig;
-        let nu_table = (2.0 / 3.0) * diffusivity(temperature) / (a * a);
+        let nu_tst = k_mig;
+        let nu_table = dumbbell_channel_rate(a, diffusivity(temperature)).unwrap_or(f64::NAN);
         if tau_cell.is_finite() && tau_cell > 0.0 {
             let volume_tst = n_atoms / (tau_cell * nu_tst);
             let volume_table = n_atoms / (tau_cell * nu_table);
-            writeln!(out, "{temperature},mean-time-tst,{volume_tst:.4},,{spont_sites:.4},,{demkowicz},tau {tau_cell:.6e} s; nu=(2/3)*k_translation from this run").unwrap();
-            writeln!(out, "{temperature},mean-time-table,{volume_table:.4},,{spont_sites:.4},,{demkowicz},same tau; nu=(2/3)*D/a^2 with D from their Table 1").unwrap();
+            writeln!(out, "{temperature},mean-time-tst,{volume_tst:.4},,{spont_sites:.4},,{demkowicz},tau {tau_cell:.6e} s; nu=k_translation from this run").unwrap();
+            writeln!(out, "{temperature},mean-time-table,{volume_table:.4},,{spont_sites:.4},,{demkowicz},same tau; nu=D/((2/3)*a^2) with D from their Table 1").unwrap();
             eprintln!(
                 "13^3 mean-time {temperature} K tst {volume_tst:.2} table-D {volume_table:.2} tau {tau_cell:.3e}"
             );
@@ -11657,7 +11660,7 @@ fn sphere_volumes(
     let omega = a * a * a / 4.0;
     let thermal = temperature * rgsaddle::BOLTZMANN_EV_PER_K;
     let d_graph = dumbbell_diffusivity(a, k_mig, k_rot).unwrap_or(f64::NAN);
-    let nu = (2.0 / 3.0) * d_graph / (a * a);
+    let nu = dumbbell_channel_rate(a, d_graph).unwrap_or(f64::NAN);
     let n_atoms = 4.0 * (13usize * 13 * 13) as f64;
     let energy = |radius: f64| {
         field
@@ -11709,6 +11712,12 @@ fn assemble_run13() {
             k_mig = measured;
         }
         let omega = a * a * a / 4.0;
+        // 4π R D over ν = D / (α a²) and Ω: the infinite-crystal sphere.
+        let free_sphere = |radius: f64| {
+            4.0 * std::f64::consts::PI * radius
+                / dumbbell_channel_rate(a, 1.0).unwrap_or(f64::NAN)
+                / omega
+        };
         let thermal = temperature * rgsaddle::BOLTZMANN_EV_PER_K;
         let copper = FastCopper::new();
         if (temperature - 300.0).abs() < 1.0 {
@@ -11822,9 +11831,9 @@ fn assemble_run13() {
             let delta = previous
                 .map(|prior: f64| sphere - prior)
                 .unwrap_or(f64::NAN);
-            writeln!(out, "{temperature},smoluchowski,{sphere:.4},,{spont_sites:.4},{r_eff:.4},{table},cutoff {cutoff:.1}; infinite crystal 24 pi R_eff/a; chain R {chain_radius:.4} before the Debye far field; D_graph {d_ps:.6}; delta {delta:.4}", d_ps = d_graph / 1.0e12).unwrap();
+            writeln!(out, "{temperature},smoluchowski,{sphere:.4},,{spont_sites:.4},{r_eff:.4},{table},cutoff {cutoff:.1}; infinite crystal 16 pi alpha R_eff/a with alpha=2/3; chain R {chain_radius:.4} before the Debye far field; D_graph {d_ps:.6}; delta {delta:.4}", d_ps = d_graph / 1.0e12).unwrap();
             writeln!(out, "{temperature},cell-decay,{decay_volume:.4},,{spont_sites:.4},{r_eff:.4},{table},cutoff {cutoff:.1}; long-time decay of the uniform survival in the 13^3 cell, L {cell_length:.4}").unwrap();
-            writeln!(out, "{temperature},mean-time,{mean_volume:.4},,{spont_sites:.4},{r_eff:.4},{table},cutoff {cutoff:.1}; uniform-start mean time in the 13^3 cell {tau_cell:.6e} s; nu=(2/3)*D_graph/a^2").unwrap();
+            writeln!(out, "{temperature},mean-time,{mean_volume:.4},,{spont_sites:.4},{r_eff:.4},{table},cutoff {cutoff:.1}; uniform-start mean time in the 13^3 cell {tau_cell:.6e} s; nu=D_graph/((2/3)*a^2)").unwrap();
             writeln!(out, "{temperature},site-sum,{total:.4},{sigma:.4},{spont_sites:.4},,{table},cutoff {cutoff:.1}; this sum grows with the shell count").unwrap();
             eprintln!(
                 "run19 {temperature} K R {cutoff:.1} sphere {sphere:.2} (d {delta:.2}) chain {chain_radius:.3} R_eff {r_eff:.3} cell {decay_volume:.2}/{mean_volume:.2} site-sum {total:.2} D {:.4}",
@@ -11864,7 +11873,7 @@ fn assemble_run13() {
                     let r_variant =
                         rgsaddle::debye_matched_radius(variant.11, max_r, thermal, energy)
                             .unwrap_or(variant.11);
-                    let v_variant = 24.0 * std::f64::consts::PI * r_variant / a;
+                    let v_variant = free_sphere(r_variant);
                     writeln!(out, "{temperature},isotropic-{label},{v_variant:.4},,{:.4},{r_variant:.4},{table},cutoff {cutoff:.1}; a shell is spontaneous in every orientation when {label} of its orientations are; infinite crystal", variant.2).unwrap();
                     eprintln!(
                         "run19 {temperature} K isotropic-{label} R_eff {r_variant:.3} V {v_variant:.2}"
@@ -11886,7 +11895,7 @@ fn assemble_run13() {
                     true,
                     &|_, _| 0.0,
                 );
-                let v_unbiased = 24.0 * std::f64::consts::PI * unbiased.11 / a;
+                let v_unbiased = free_sphere(unbiased.11);
                 writeln!(out, "{temperature},no-strain-bias,{v_unbiased:.4},,{:.4},{:.4},{table},cutoff {cutoff:.1}; hop rates without the dipole interaction and no Debye far field; infinite crystal", unbiased.2, unbiased.11).unwrap();
                 eprintln!(
                     "run19 {temperature} K no-strain-bias R_eff {:.3} V {v_unbiased:.2}",
@@ -12986,10 +12995,12 @@ fn neighbor_translation_barrier(temperature: f64) -> Option<f64> {
     })
 }
 
-/// Tracer diffusivity per (temperature, timestep, friction) from the replica CSV.
+/// Defect diffusivity per (temperature, timestep, friction) from the replica CSV.
 ///
 /// Returns the replica mean of the multi-origin MSD slope, its standard
-/// error, the mean committed-jump diffusivity, and the replica count.
+/// error, the mean committed-jump diffusivity, and the replica count. The
+/// MSD is that of the doubly occupied site, not the tracer sum over atoms
+/// that Table 1 quotes as D_i (`validation/direct_md_dynamics.md`).
 #[allow(clippy::type_complexity)]
 fn md_replica_diffusivity() -> std::collections::BTreeMap<(i64, i64, i64), (f64, f64, f64, usize)> {
     let path = std::env::var("RUN19_DIFFUSION")
@@ -13234,9 +13245,12 @@ fn direct_md_capture_radius() {
             let captured = keep.iter().filter(|&&i| records[i].captured).count();
             let rates =
                 |r: f64| rgsaddle::periodic_sink_rate(r, length, 1.0).expect("periodic rate");
+            // k/D in Å over ν/D = 1 / (α a²) and Ω = a³/4: V/Ω = 4 α (k/D) / a.
+            let unit_channel = dumbbell_channel_rate(lattice, 1.0).expect("channel rate");
+            let to_volume = |k_over_d: f64| k_over_d / unit_channel / (lattice.powi(3) / 4.0);
             let cell_volume = |r: f64| {
                 if r.is_finite() && r > 0.0 {
-                    6.0 * rates(r).decay / lattice
+                    to_volume(rates(r).decay)
                 } else {
                     f64::NAN
                 }
@@ -13244,9 +13258,9 @@ fn direct_md_capture_radius() {
             let (v_inf, v_decay, v_mean) = if r_fit.is_finite() && r_fit > 0.0 {
                 let rate = rates(r_fit);
                 (
-                    24.0 * std::f64::consts::PI * r_fit / lattice,
-                    6.0 * rate.decay / lattice,
-                    6.0 * rate.mean_time / lattice,
+                    to_volume(4.0 * std::f64::consts::PI * r_fit),
+                    to_volume(rate.decay),
+                    to_volume(rate.mean_time),
                 )
             } else {
                 (f64::NAN, f64::NAN, f64::NAN)
@@ -13265,7 +13279,7 @@ fn direct_md_capture_radius() {
                 let lambda = events as f64 / exposure.max(1.0e-12);
                 let k_tail = lambda * length.powi(3);
                 let k_se = k_tail / (events.max(1) as f64).sqrt();
-                let v_tail = 6.0 * k_tail / (d_md * lattice);
+                let v_tail = to_volume(k_tail / d_md);
                 let target = k_tail / d_md;
                 // The tail is the slowest mode only after a few of these.
                 let relax =
