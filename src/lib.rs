@@ -289,8 +289,9 @@ pub use cell_log::{CellChart, expm_3x3, logm_3x3};
 pub use constraints::{Constraints, Equality, InternalCounts};
 
 pub use eigensolve::{
-    EigenDevice, ExpandKind, eigh_on, exact_eigh, expand, lowest_on, rayleigh_ritz,
-    rayleigh_ritz_iter,
+    EigenDevice, ExpandKind, dense_logabsdet, eigh_on, exact_eigh, exact_eigvalsh, expand,
+    faer_eigh, lowest_on, rayleigh_ritz, rayleigh_ritz_iter, relative_zero_tolerance, solve_dense,
+    solve_dense_matrix, spd_logdet,
 };
 
 pub use force::ForceGate;
