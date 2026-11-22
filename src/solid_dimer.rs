@@ -161,6 +161,16 @@ impl SolidDimerConfig {
         Self::new(search).with_mask(CellMask::frozen())
     }
 
+    /// Fixed-cell dimer that accepts only a projected first-order saddle.
+    ///
+    /// This is the appropriate configuration for harmonic transition-state
+    /// calculations. Extra unstable modes trigger the bounded escape policy
+    /// in [`IndexCheck::first_order`] instead of being returned as a
+    /// transition state.
+    pub fn frozen_first_order(search: MinModeConfig) -> Self {
+        Self::frozen(search).with_index_check(IndexCheck::first_order())
+    }
+
     /// Dimer or Lanczos search and its rgmin translator.
     #[must_use]
     pub fn with_search(mut self, search: MinModeConfig) -> Self {
@@ -1997,6 +2007,17 @@ mod tests {
             self.cells.fetch_add(1, Ordering::Relaxed);
             self.eval(r)
         }
+    }
+
+    #[test]
+    fn frozen_first_order_enables_projected_index_certification() {
+        let config = SolidDimerConfig::frozen_first_order(MinModeConfig::default());
+        let check = config
+            .index
+            .expect("Vineyard searches must certify one projected negative mode");
+        assert_eq!(check.lowest, IndexCheck::first_order().lowest);
+        assert_eq!(check.negative, IndexCheck::first_order().negative);
+        assert!(check.escapes > 0);
     }
 
     #[test]
