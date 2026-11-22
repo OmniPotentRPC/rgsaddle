@@ -1,0 +1,3 @@
+~SaddleError~ has a new ~Singular(usize)~ variant, returned by ~solve_dense~, ~solve_dense_matrix~, ~dense_logabsdet~ and ~expand~ when a pivot falls at or below ~relative_zero_tolerance~, and by ~spd_logdet~ for an all-zero matrix.
+The C ABI reports it as ~RGSADDLE_SOLVER~, as before.
+~SaddleError~ is now ~#[non_exhaustive]~, so a ~match~ on it outside rgsaddle needs a wildcard arm, and later variants will not break such a match again.
