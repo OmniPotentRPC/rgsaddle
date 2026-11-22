@@ -189,6 +189,16 @@ fn product_len(a: usize, b: usize) -> Result<usize, i32> {
         .and_then(buffer_len)
 }
 
+/// `max_images` is the insertion cap. The output buffer holds `n_images`
+/// rows and cannot grow, so a cap above that count is out of range.
+fn image_cap(config: &GeodesicConfig, n_images: usize) -> Result<(), i32> {
+    if config.max_images > n_images {
+        Err(RGSADDLE_INVALID_PARAMETER)
+    } else {
+        Ok(())
+    }
+}
+
 fn as_i64(value: usize) -> Result<i64, i32> {
     i64::try_from(value).map_err(|_| RGSADDLE_INVALID_PARAMETER)
 }
@@ -312,13 +322,14 @@ pub unsafe extern "C" fn rgsaddle_geodesic_path(
         Ok(cell) => cell,
         Err(code) => return code,
     };
-    let mut config = match config_from(config) {
+    let config = match config_from(config) {
         Ok(config) => config,
         Err(code) => return code,
     };
-    // `out` has one row per input image, so midpoint insertion stops there.
-    if config.max_images > n_images {
-        config.max_images = n_images;
+    // `out` has `n_images` rows. A larger cap cannot be stored, so it is
+    // refused rather than clamped down to the buffer.
+    if let Err(code) = image_cap(&config, n_images) {
+        return code;
     }
     let raw = unsafe { slice::from_raw_parts(path, total) };
     let owned = match Array2::from_shape_vec((n_images, dof), raw.to_vec()) {
@@ -399,13 +410,14 @@ pub unsafe extern "C" fn rgsaddle_geodesic_morse(
     if let Err(code) = product_len(n_pairs, dof) {
         return code;
     }
-    let mut config = match config_from(config) {
+    let config = match config_from(config) {
         Ok(config) => config,
         Err(code) => return code,
     };
-    // `out` has `n_images` rows, so midpoint insertion stops there.
-    if config.max_images > n_images {
-        config.max_images = n_images;
+    // `out` has `n_images` rows. A larger cap cannot be stored, so it is
+    // refused rather than clamped down to the buffer.
+    if let Err(code) = image_cap(&config, n_images) {
+        return code;
     }
     let reactant_raw = unsafe { slice::from_raw_parts(reactant, dof) };
     let product_raw = unsafe { slice::from_raw_parts(product, dof) };

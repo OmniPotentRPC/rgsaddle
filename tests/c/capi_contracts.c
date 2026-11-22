@@ -311,6 +311,11 @@ static int test_geodesic_config_and_status(void) {
   const double bowed[8] = {0.0, 0.0, 1.0, 2.0, 2.0, 0.5, 3.0, 4.0};
   double out[8];
   double length = 0.0, lower = 0.0, upper = 0.0;
+  config.max_images = 8;
+  CHECK(rgsaddle_geodesic_path(4, 2, bowed, 2, flat_chart, NULL, NULL, &config, out, &length,
+                               &lower, &upper) == RGSADDLE_INVALID_PARAMETER,
+        "an image cap above n_images is refused");
+  config.max_images = 4;
   int rc = rgsaddle_geodesic_path(4, 2, bowed, 2, flat_chart, NULL, NULL, &config, out, &length,
                                   &lower, &upper);
   CHECK(rc == RGSADDLE_OK, "geodesic path converges on a flat chart");

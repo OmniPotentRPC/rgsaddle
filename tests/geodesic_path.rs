@@ -203,6 +203,7 @@ fn c_abi_morse_and_chart_match_the_published_lengths() {
         RGSADDLE_OK
     );
     assert_eq!(config.version.minor, rgsaddle::capi::RGSADDLE_ABI_MINOR);
+    config.max_images = 4;
 
     let initial = bowed_flat();
     let mut out = vec![0.0; initial.len()];
@@ -285,6 +286,7 @@ fn c_abi_morse_and_chart_match_the_published_lengths() {
     assert_eq!(bow, RGSADDLE_OK);
     assert!((length - MORSE_LENGTH).abs() < 1e-4, "{length}");
 
+    config.max_images = 5;
     let morse_path = bowed_morse();
     let reactant = morse_path.row(0).to_vec();
     let product = morse_path.row(morse_path.nrows() - 1).to_vec();
@@ -513,6 +515,7 @@ fn c_abi_periodic_chart_and_morse_follow_the_minimum_image() {
         unsafe { rgsaddle_geodesic_config_default(&mut config) },
         RGSADDLE_OK
     );
+    config.max_images = 6;
 
     let lattice = [10.0, 0.0, 0.0, 0.0, 10.0, 0.0, 0.0, 0.0, 10.0];
     let host_cell = periodic_box();
@@ -582,6 +585,7 @@ fn c_abi_periodic_chart_and_morse_follow_the_minimum_image() {
     };
     assert_eq!(shape, RGSADDLE_SHAPE);
 
+    config.max_images = 5;
     let radii = [1.0, 1.0];
     let mut morse_out = vec![0.0; 5 * 6];
     let rc = unsafe {
@@ -797,6 +801,7 @@ fn c_abi_returns_not_converged_with_the_last_iterate() {
     );
     config.max_sweeps = 1;
     config.step_tol = 1e-12;
+    config.max_images = 4;
 
     let initial = bowed_flat();
     let mut out = vec![-1.0; initial.len()];
@@ -842,6 +847,7 @@ fn c_abi_returns_not_converged_with_the_last_iterate() {
 
     config.max_sweeps = 1;
     config.step_tol = 1e-14;
+    config.max_images = 6;
     let ends = bowed_morse();
     let reactant = ends.row(0).to_vec();
     let product = ends.row(ends.nrows() - 1).to_vec();
@@ -998,4 +1004,312 @@ fn c_config_layout_and_defaults_match_the_header() {
     assert_eq!(rust.bound_samples, 10);
     assert_eq!(rust.max_images, 32);
     assert_eq!(rust.seed, 0);
+}
+
+/// q rises to 1 at the Cartesian midpoint and is 0 at both ends.
+struct Tent;
+
+impl GeodesicChart for Tent {
+    fn n_coords(&self) -> usize {
+        1
+    }
+
+    fn eval(
+        &self,
+        x: ArrayView1<f64>,
+        q: &mut Array1<f64>,
+        b: &mut Array2<f64>,
+    ) -> Result<(), SaddleError> {
+        let t = x[0];
+        q[0] = (1.0 - (2.0 * t - 1.0).abs()).max(0.0);
+        b[(0, 0)] = if t < 0.5 {
+            2.0
+        } else if t > 0.5 {
+            -2.0
+        } else {
+            0.0
+        };
+        Ok(())
+    }
+}
+
+#[test]
+fn odd_bound_samples_are_rejected_and_even_counts_upper_bound_the_length() {
+    let path = Array2::from_shape_vec((2, 1), vec![0.0, 1.0]).unwrap();
+    for samples in [3usize, 5, 11] {
+        assert!(
+            matches!(
+                geodesic_lengths(path.view(), &Tent, samples),
+                Err(SaddleError::Invalid(_))
+            ),
+            "odd count {samples} must be rejected"
+        );
+        assert!(
+            GeodesicConfig::default()
+                .with_bound_samples(samples)
+                .check()
+                .is_err(),
+            "config rejects {samples}"
+        );
+    }
+    for samples in [2usize, 4, 10] {
+        let lengths = geodesic_lengths(path.view(), &Tent, samples).unwrap();
+        assert!(
+            lengths.upper + 1e-12 >= lengths.length,
+            "samples {samples}: upper {} length {}",
+            lengths.upper,
+            lengths.length
+        );
+        assert!((lengths.length - 2.0).abs() < 1e-12, "{}", lengths.length);
+        assert!(
+            GeodesicConfig::default()
+                .with_bound_samples(samples)
+                .check()
+                .is_ok()
+        );
+    }
+}
+
+struct OnlyThese {
+    allowed: Vec<Array1<f64>>,
+}
+
+impl GeodesicChart for OnlyThese {
+    fn n_coords(&self) -> usize {
+        2
+    }
+
+    fn eval(
+        &self,
+        x: ArrayView1<f64>,
+        q: &mut Array1<f64>,
+        b: &mut Array2<f64>,
+    ) -> Result<(), SaddleError> {
+        let known = self.allowed.iter().any(|row| {
+            row.len() == x.len()
+                && row
+                    .iter()
+                    .zip(x.iter())
+                    .all(|(left, right)| left.to_bits() == right.to_bits())
+        });
+        if !known {
+            return Err(SaddleError::Invalid(
+                "geometry is not on the initial path".into(),
+            ));
+        }
+        q.assign(&x);
+        b.fill(0.0);
+        b[(0, 0)] = 1.0;
+        b[(1, 1)] = 1.0;
+        Ok(())
+    }
+}
+
+fn segment_midpoint(left: ArrayView1<f64>, right: ArrayView1<f64>) -> Array1<f64> {
+    let mut out = Array1::zeros(left.len());
+    for k in 0..left.len() {
+        out[k] = left[k] + 0.5 * (right[k] - left[k]);
+    }
+    out
+}
+
+fn whitelist(path: &Array2<f64>) -> Vec<Array1<f64>> {
+    let mut allowed: Vec<Array1<f64>> = (0..path.nrows()).map(|i| path.row(i).to_owned()).collect();
+    for i in 0..path.nrows() - 1 {
+        allowed.push(segment_midpoint(path.row(i), path.row(i + 1)));
+    }
+    allowed
+}
+
+#[test]
+fn a_refused_trial_with_zero_displacement_is_not_converged() {
+    let kink = Array2::from_shape_vec((3, 2), vec![0.0, 0.0, 1.0, 2.0, 3.0, 4.0]).unwrap();
+    let config = GeodesicConfig::default()
+        .with_bound_samples(2)
+        .with_max_images(3)
+        .with_max_sweeps(1)
+        .with_max_iterations(4);
+    let chart = OnlyThese {
+        allowed: whitelist(&kink),
+    };
+    let (path, report) = geodesic_path(kink.view(), &chart, &config).unwrap();
+    assert!(
+        !report.converged,
+        "a refused trial must not report convergence"
+    );
+    assert_eq!(path, kink);
+
+    let straight = Array2::from_shape_vec((3, 2), vec![0.0, 0.0, 1.5, 2.0, 3.0, 4.0]).unwrap();
+    let chart = OnlyThese {
+        allowed: whitelist(&straight),
+    };
+    let (path, report) = geodesic_path(straight.view(), &chart, &config).unwrap();
+    assert!(
+        report.converged,
+        "an accepted stationary image still converges"
+    );
+    assert_eq!(path, straight);
+}
+
+#[test]
+fn with_radii_rejects_a_non_positive_radius() {
+    let chart = MorsePairChart::new(Array1::from_vec(vec![1.0, 1.0])).unwrap();
+    assert!(matches!(
+        chart.clone().with_radii(Array1::from_vec(vec![-1.0, 1.0])),
+        Err(SaddleError::Invalid(_))
+    ));
+    assert!(matches!(
+        chart.clone().with_radii(Array1::from_vec(vec![0.0, 1.0])),
+        Err(SaddleError::Invalid(_))
+    ));
+    assert!(matches!(
+        chart
+            .clone()
+            .with_radii(Array1::from_vec(vec![f64::NAN, 1.0])),
+        Err(SaddleError::Invalid(_))
+    ));
+    assert!(matches!(
+        chart.clone().with_radii(Array1::zeros(0)),
+        Err(SaddleError::Shape(_))
+    ));
+    let replaced = chart.with_radii(Array1::from_vec(vec![0.4, 0.6])).unwrap();
+    assert!((replaced.radii()[0] - 0.4).abs() < 1e-15);
+    assert!((replaced.radii()[1] - 0.6).abs() < 1e-15);
+}
+
+#[test]
+fn extreme_finite_morse_parameters_are_non_finite() {
+    let chart = MorsePairChart::new(Array1::from_vec(vec![1.0e200, 1.0e200]))
+        .unwrap()
+        .with_beta(1.0e200);
+    let x = Array1::from_vec(vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+    let mut q = Array1::zeros(1);
+    let mut b = Array2::zeros((1, 6));
+    let err = chart.eval(x.view(), &mut q, &mut b).unwrap_err();
+    assert!(matches!(err, SaddleError::NonFinite(_)), "{err}");
+    assert!(
+        q.iter().all(|value| *value == 0.0) && b.iter().all(|value| *value == 0.0),
+        "the refused pair is not written"
+    );
+}
+
+#[test]
+#[cfg(feature = "capi")]
+fn c_abi_max_images_above_the_buffer_is_rejected() {
+    use std::os::raw::c_void;
+
+    use rgsaddle::capi::{
+        RGSADDLE_INVALID_PARAMETER, RGSADDLE_OK, RgsaddleGeodesicConfig,
+        rgsaddle_geodesic_config_default, rgsaddle_geodesic_morse, rgsaddle_geodesic_path,
+    };
+
+    extern "C" fn flat_chart(
+        _ctx: *mut c_void,
+        x: *const f64,
+        dof: i64,
+        q: *mut f64,
+        b: *mut f64,
+        n_coords: i64,
+    ) -> i32 {
+        if dof != 2 || n_coords != 2 {
+            return 1;
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(x, q, 2);
+            for i in 0..4 {
+                *b.add(i) = 0.0;
+            }
+            *b = 1.0;
+            *b.add(3) = 1.0;
+        }
+        0
+    }
+
+    let mut config = RgsaddleGeodesicConfig {
+        version: rgsaddle::capi::RgsaddleVersion { major: 0, minor: 0 },
+        flags: 0,
+        step_tol: 0.0,
+        grad_tol: 0.0,
+        max_move: 0.0,
+        lower_ratio: 0.0,
+        upper_ratio: 0.0,
+        max_sweeps: 0,
+        max_iterations: 0,
+        memory: 0,
+        bound_samples: 0,
+        max_images: 0,
+        seed: 0,
+    };
+    assert_eq!(
+        unsafe { rgsaddle_geodesic_config_default(&mut config) },
+        RGSADDLE_OK
+    );
+    let path = [0.0, 0.0, 3.0, 4.0];
+    let mut out = [0.0; 4];
+    let (mut length, mut lower, mut upper) = (0.0, 0.0, 0.0);
+    let mut call = |config: *const RgsaddleGeodesicConfig| unsafe {
+        rgsaddle_geodesic_path(
+            2,
+            2,
+            path.as_ptr(),
+            2,
+            Some(flat_chart),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            config,
+            out.as_mut_ptr(),
+            &mut length,
+            &mut lower,
+            &mut upper,
+        )
+    };
+    assert_eq!(call(std::ptr::null()), RGSADDLE_INVALID_PARAMETER);
+    assert_eq!(call(&config), RGSADDLE_INVALID_PARAMETER);
+    config.max_images = 3;
+    assert_eq!(call(&config), RGSADDLE_INVALID_PARAMETER);
+    config.max_images = 2;
+    config.bound_samples = 3;
+    assert_eq!(call(&config), RGSADDLE_INVALID_PARAMETER);
+    config.bound_samples = 2;
+    assert_eq!(call(&config), RGSADDLE_OK);
+    assert!((length - FLAT_LENGTH).abs() < 1e-8, "{length}");
+
+    let reactant = [0.0, 0.0, 0.0, 2.0, 0.0, 0.0];
+    let product = [0.0, 0.0, 0.0, 6.0, 0.0, 0.0];
+    let radii = [1.0, 1.0];
+    let mut morse_out = [0.0; 12];
+    config.max_images = 3;
+    let rc = unsafe {
+        rgsaddle_geodesic_morse(
+            2,
+            2,
+            reactant.as_ptr(),
+            product.as_ptr(),
+            radii.as_ptr(),
+            std::ptr::null(),
+            &config,
+            morse_out.as_mut_ptr(),
+            &mut length,
+            &mut lower,
+            &mut upper,
+        )
+    };
+    assert_eq!(rc, RGSADDLE_INVALID_PARAMETER);
+    config.max_images = 2;
+    let rc = unsafe {
+        rgsaddle_geodesic_morse(
+            2,
+            2,
+            reactant.as_ptr(),
+            product.as_ptr(),
+            radii.as_ptr(),
+            std::ptr::null(),
+            &config,
+            morse_out.as_mut_ptr(),
+            &mut length,
+            &mut lower,
+            &mut upper,
+        )
+    };
+    assert_eq!(rc, RGSADDLE_OK);
 }

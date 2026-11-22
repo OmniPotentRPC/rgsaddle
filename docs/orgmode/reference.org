@@ -301,7 +301,7 @@ From a band config at minor 22, the refinement's one-image requests also set bit
 Their =image= is then the climbing image's band index.
 =rgsaddle_idpp_path= writes the image-dependent pair potential initial path with its endpoints.
 It takes a row-major cell or NULL.
-=rgsaddle_geodesic_config_default=, =rgsaddle_geodesic_path=, and =rgsaddle_geodesic_morse= interpolate a path in a redundant coordinate chart (Zhu, Thompson, and Martinez, J. Chem. Phys. 150, 164103 (2019), doi:10.1063/1.5090303). =rgsaddle_geodesic_path= takes a host chart. =rgsaddle_geodesic_morse= uses Eq. (7) with alpha 1.7 and beta 0.01. A NULL config selects the defaults.
+=rgsaddle_geodesic_config_default=, =rgsaddle_geodesic_path=, and =rgsaddle_geodesic_morse= interpolate a path in a redundant coordinate chart (Zhu, Thompson, and Martinez, J. Chem. Phys. 150, 164103 (2019), doi:10.1063/1.5090303). =rgsaddle_geodesic_path= takes a host chart. =rgsaddle_geodesic_morse= uses Eq. (7) with alpha 1.7 and beta 0.01. A NULL config selects the defaults, including an image cap of 32, so it requires =n_images= of at least 32. A supplied cap above =n_images= is =RGSADDLE_INVALID_PARAMETER=.
 =rgsaddle_ocineb_step= reports the hand-off phase (band, tangent alignment, or minimum-mode translation).
 =rgsaddle_connect= runs the double-ended search of =connect= to completion on two endpoint arrays and a host surface.
 The surface writes energy and the Cartesian gradient for one image.

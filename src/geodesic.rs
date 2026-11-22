@@ -10,7 +10,9 @@
 //! the geodesic is the straight line (Appendix A). The lower bound is
 //! the sum of the endpoint chords in coordinate space (Eq. B5). The
 //! upper bound subdivides each Cartesian segment into `bound_samples`
-//! equal pieces (Eq. B18, ten pieces in the paper).
+//! equal pieces (Eq. B18, ten pieces in the paper). `bound_samples` is
+//! even, so one of those pieces ends on the Cartesian midpoint and the
+//! chord sum is at least the midpoint length.
 //!
 //! Interior images move one at a time, forward and then back, until the
 //! largest displacement of a pass falls under `step_tol` (Algorithm 2).
@@ -118,7 +120,10 @@ pub trait GeodesicChart: Sync {
 #[non_exhaustive]
 pub struct MorsePairChart {
     /// Covalent radius of each atom, in the path's length unit. Finite and positive.
-    pub radii: Array1<f64>,
+    ///
+    /// Private so a replacement goes through [`Self::with_radii`], which repeats
+    /// the check in [`Self::new`].
+    radii: Array1<f64>,
     /// Exponent weight. The paper uses [`MORSE_ALPHA`]. Finite.
     pub alpha: f64,
     /// Inverse distance weight. The paper uses [`MORSE_BETA`]. Finite.
@@ -128,7 +133,6 @@ pub struct MorsePairChart {
 }
 
 with_setters!(MorsePairChart {
-    with_radii => radii: val Array1<f64>,
     with_alpha => alpha: val f64,
     with_beta => beta: val f64,
     with_cell => cell: opt Cell,
@@ -153,16 +157,7 @@ impl MorsePairChart {
     /// [`SaddleError::Shape`] when `radii` is empty, and
     /// [`SaddleError::Invalid`] when a radius is not finite and positive.
     pub fn new(radii: Array1<f64>) -> Result<Self, SaddleError> {
-        if radii.is_empty() {
-            return Err(SaddleError::Shape(
-                "Morse chart needs a covalent radius per atom".into(),
-            ));
-        }
-        if radii.iter().any(|r| !(r.is_finite() && *r > 0.0)) {
-            return Err(SaddleError::Invalid(
-                "Morse covalent radii must be finite and positive".into(),
-            ));
-        }
+        check_morse_radii(&radii)?;
         Ok(Self {
             radii,
             alpha: MORSE_ALPHA,
@@ -170,6 +165,37 @@ impl MorsePairChart {
             cell: None,
         })
     }
+
+    /// Covalent radius of each atom.
+    pub fn radii(&self) -> ndarray::ArrayView1<'_, f64> {
+        self.radii.view()
+    }
+
+    /// Replace the covalent radii.
+    ///
+    /// # Errors
+    ///
+    /// [`SaddleError::Shape`] when `radii` is empty, and
+    /// [`SaddleError::Invalid`] when a radius is not finite and positive.
+    pub fn with_radii(mut self, radii: Array1<f64>) -> Result<Self, SaddleError> {
+        check_morse_radii(&radii)?;
+        self.radii = radii;
+        Ok(self)
+    }
+}
+
+fn check_morse_radii(radii: &Array1<f64>) -> Result<(), SaddleError> {
+    if radii.is_empty() {
+        return Err(SaddleError::Shape(
+            "Morse chart needs a covalent radius per atom".into(),
+        ));
+    }
+    if radii.iter().any(|r| !(r.is_finite() && *r > 0.0)) {
+        return Err(SaddleError::Invalid(
+            "Morse covalent radii must be finite and positive".into(),
+        ));
+    }
+    Ok(())
 }
 
 impl GeodesicChart for MorsePairChart {
@@ -229,13 +255,24 @@ impl GeodesicChart for MorsePairChart {
                 if !exp_term.is_finite() {
                     return Err(SaddleError::NonFinite("geodesic Morse coordinate"));
                 }
-                q[row] = exp_term + self.beta * re / r;
+                let q_val = exp_term + self.beta * re / r;
                 let dq_dr = -(self.alpha / re) * exp_term - self.beta * re / (r * r);
                 let scale = dq_dr / r;
+                if !q_val.is_finite() || !dq_dr.is_finite() || !scale.is_finite() {
+                    return Err(SaddleError::NonFinite("geodesic Morse coordinate"));
+                }
+                let mut columns = [0.0; 3];
                 for c in 0..3 {
                     let d = scale * diff[c];
-                    b[(row, 3 * i + c)] = d;
-                    b[(row, 3 * j + c)] = -d;
+                    if !d.is_finite() {
+                        return Err(SaddleError::NonFinite("geodesic Morse coordinate"));
+                    }
+                    columns[c] = d;
+                }
+                q[row] = q_val;
+                for c in 0..3 {
+                    b[(row, 3 * i + c)] = columns[c];
+                    b[(row, 3 * j + c)] = -columns[c];
                 }
                 row += 1;
             }
@@ -270,7 +307,8 @@ pub struct GeodesicConfig {
     pub max_iterations: usize,
     /// L-BFGS vector pairs. At least 1.
     pub memory: usize,
-    /// Cartesian pieces in the upper bound. At least 2. The paper uses 10.
+    /// Cartesian pieces in the upper bound. Even and at least 2, so the equal
+    /// partition includes the Cartesian midpoint. The paper uses 10.
     pub bound_samples: usize,
     /// Image cap, endpoints included, after midpoint insertion. At least 2.
     pub max_images: usize,
@@ -338,9 +376,14 @@ impl GeodesicConfig {
                 "geodesic sweeps, iterations, and memory must be at least 1".into(),
             ));
         }
-        if self.bound_samples < 2 || self.max_images < 2 {
+        if !bound_samples_include_midpoint(self.bound_samples) {
             return Err(SaddleError::Invalid(
-                "geodesic bound samples and image cap must be at least 2".into(),
+                "geodesic bound samples must be even and at least 2 so the equal partition includes the Cartesian midpoint".into(),
+            ));
+        }
+        if self.max_images < 2 {
+            return Err(SaddleError::Invalid(
+                "geodesic image cap must be at least 2".into(),
             ));
         }
         Ok(())
@@ -389,7 +432,7 @@ pub struct GeodesicReport {
 ///
 /// [`SaddleError::Shape`] when the path has fewer than two images or the
 /// chart has no coordinates, [`SaddleError::Invalid`] when `bound_samples`
-/// is below 2, and the chart's own errors.
+/// is odd or below 2, and the chart's own errors.
 pub fn geodesic_lengths<C: GeodesicChart + ?Sized>(
     path: ArrayView2<f64>,
     chart: &C,
@@ -415,7 +458,9 @@ pub fn geodesic_lengths<C: GeodesicChart + ?Sized>(
 /// chart has no coordinates, [`SaddleError::Invalid`] from [`GeodesicConfig::check`],
 /// [`SaddleError::NonFinite`] when an input is not finite, and the chart's
 /// own errors on the starting path. A later trial the chart refuses is
-/// discarded and that image keeps its last accepted point.
+/// discarded and that image keeps its last accepted point. Convergence
+/// counts only an accepted step that meets the stop: a refused trial that
+/// leaves the image unmoved does not settle the pass.
 ///
 /// # Examples
 ///
@@ -750,9 +795,9 @@ fn measure<C: GeodesicChart + ?Sized>(
     mut grad: Option<&mut Array2<f64>>,
 ) -> Result<Measured, SaddleError> {
     check_path(path, chart.cell())?;
-    if bound_samples < 2 {
+    if !bound_samples_include_midpoint(bound_samples) {
         return Err(SaddleError::Invalid(
-            "geodesic bound samples must be at least 2".into(),
+            "geodesic bound samples must be even and at least 2 so the equal partition includes the Cartesian midpoint".into(),
         ));
     }
     let n = path.nrows();
@@ -842,11 +887,22 @@ fn upper_bound<C: GeodesicChart + ?Sized>(
     q_right: &Array1<f64>,
     samples: usize,
 ) -> Result<f64, SaddleError> {
+    if !bound_samples_include_midpoint(samples) {
+        return Err(SaddleError::Invalid(
+            "geodesic bound samples must be even and at least 2 so the equal partition includes the Cartesian midpoint".into(),
+        ));
+    }
     let mut prev = q_left.clone();
     let mut total = 0.0;
     let denom = samples as f64;
     for k in 1..samples {
-        let t = (k as f64) / denom;
+        // An even count has a node at 1/2. Write that node as 0.5 so it is
+        // the Cartesian midpoint even when `k / samples` is not exact.
+        let t = if k * 2 == samples {
+            MIDPOINT_WEIGHT
+        } else {
+            (k as f64) / denom
+        };
         let x = toward(chart.cell(), left, right, t);
         let next = sample(chart, x.view())?;
         total += chord(&next.q, &prev);
@@ -857,6 +913,10 @@ fn upper_bound<C: GeodesicChart + ?Sized>(
         return Err(SaddleError::NonFinite("geodesic length"));
     }
     Ok(total)
+}
+
+fn bound_samples_include_midpoint(samples: usize) -> bool {
+    samples >= 2 && samples.is_multiple_of(2)
 }
 
 fn bounds_tight(lengths: &GeodesicLengths, config: &GeodesicConfig) -> bool {
@@ -956,9 +1016,12 @@ fn sweep<C: GeodesicChart + ?Sized>(
     let reverse: Vec<usize> = (1..n - 1).rev().collect();
     order.extend(reverse);
     let mut max_disp = 0.0;
+    let mut accepted_stop = true;
     for index in order {
         let before = path.row(index).to_owned();
-        relax_image(path, index, chart, config)?;
+        if !relax_image(path, index, chart, config)? {
+            accepted_stop = false;
+        }
         let mut acc = 0.0;
         for k in 0..path.ncols() {
             let d = path[(index, k)] - before[k];
@@ -969,6 +1032,11 @@ fn sweep<C: GeodesicChart + ?Sized>(
             max_disp = disp;
         }
     }
+    // A refused trial reverts the image, so the displacement is zero. That
+    // zero is not an accepted step and must not settle the pass.
+    if !accepted_stop && max_disp <= config.step_tol {
+        max_disp = config.step_tol.next_up();
+    }
     Ok(max_disp)
 }
 
@@ -977,7 +1045,7 @@ fn relax_image<C: GeodesicChart + ?Sized>(
     index: usize,
     chart: &C,
     config: &GeodesicConfig,
-) -> Result<(), SaddleError> {
+) -> Result<bool, SaddleError> {
     use rgmin::{Accept, Control, Method, Oracle, Solver};
 
     let dof = path.ncols();
@@ -993,8 +1061,17 @@ fn relax_image<C: GeodesicChart + ?Sized>(
         current.row_mut(index).assign(&trial);
         let mut grad = Array2::zeros((current.nrows(), dof));
         match measure(current.view(), chart, samples, Some(&mut grad)) {
-            Ok(measured) => (measured.total.length, grad.row(index).to_owned()),
-            Err(_) => (f64::MAX, Array1::zeros(dof)),
+            Ok(measured) => {
+                let row = grad.row(index).to_owned();
+                if measured.total.length.is_finite() && row.iter().all(|v| v.is_finite()) {
+                    (measured.total.length, row)
+                } else {
+                    refused_oracle(dof)
+                }
+            }
+            // A refused geometry is non-finite, not a zero gradient. A zero
+            // gradient would tell the solver the trial had already converged.
+            Err(_) => refused_oracle(dof),
         }
     });
     let mut solver = Solver::new(
@@ -1009,27 +1086,34 @@ fn relax_image<C: GeodesicChart + ?Sized>(
     solver.set_accept(Accept::Energy);
     let start = y.clone();
     let mut last_good = y.clone();
+    let mut rejected = false;
     for _ in 0..iterations {
         match solver.step(&oracle, &mut y) {
             Ok(report) => {
                 if !y.iter().all(|v| v.is_finite()) {
                     y.assign(&last_good);
+                    path.row_mut(index).assign(&y);
+                    rejected = true;
                     break;
                 }
                 path.row_mut(index).assign(&y);
                 if measure(path.view(), chart, samples, None).is_err() {
                     y.assign(&last_good);
                     path.row_mut(index).assign(&y);
+                    rejected = true;
                     break;
                 }
                 last_good.assign(&y);
-                if report.grad_norm < grad_tol {
+                // `report` describes this accepted point. A refused trial
+                // never reaches here.
+                if report.grad_norm.is_finite() && report.grad_norm < grad_tol {
                     break;
                 }
             }
             Err(_) => {
                 y.assign(&last_good);
                 path.row_mut(index).assign(&y);
+                rejected = true;
                 break;
             }
         }
@@ -1037,8 +1121,37 @@ fn relax_image<C: GeodesicChart + ?Sized>(
     path.row_mut(index).assign(&y);
     if measure(path.view(), chart, samples, None).is_err() {
         path.row_mut(index).assign(&start);
+        rejected = true;
     }
-    Ok(())
+    if !rejected {
+        return Ok(true);
+    }
+    // The restored point settles the image only when its own gradient,
+    // measured on that accepted geometry, meets the tolerance.
+    Ok(image_gradient_meets(path, index, chart, samples, grad_tol))
+}
+
+fn refused_oracle(dof: usize) -> (f64, Array1<f64>) {
+    (f64::NAN, Array1::from_elem(dof, f64::NAN))
+}
+
+fn image_gradient_meets<C: GeodesicChart + ?Sized>(
+    path: &Array2<f64>,
+    index: usize,
+    chart: &C,
+    samples: usize,
+    grad_tol: f64,
+) -> bool {
+    let mut grad = Array2::zeros((path.nrows(), path.ncols()));
+    let Ok(_) = measure(path.view(), chart, samples, Some(&mut grad)) else {
+        return false;
+    };
+    let mut acc = 0.0;
+    for value in grad.row(index) {
+        acc += value * value;
+    }
+    let gnorm = acc.sqrt();
+    gnorm.is_finite() && gnorm < grad_tol
 }
 
 fn pull_to_target<C: GeodesicChart + ?Sized>(
@@ -1057,7 +1170,7 @@ fn pull_to_target<C: GeodesicChart + ?Sized>(
         match sample(chart, trial) {
             Ok(taken) => {
                 if taken.q.len() != target.len() {
-                    return (f64::MAX, Array1::zeros(dof));
+                    return refused_oracle(dof);
                 }
                 let mut energy = 0.0;
                 let mut residual = Array1::zeros(taken.q.len());
@@ -1067,9 +1180,12 @@ fn pull_to_target<C: GeodesicChart + ?Sized>(
                 }
                 let mut grad = Array1::zeros(dof);
                 add_bt_u(&mut grad.view_mut(), &taken.b, &residual, 1.0);
+                if !energy.is_finite() || grad.iter().any(|value| !value.is_finite()) {
+                    return refused_oracle(dof);
+                }
                 (energy, grad)
             }
-            Err(_) => (f64::MAX, Array1::zeros(dof)),
+            Err(_) => refused_oracle(dof),
         }
     });
     let mut solver = Solver::new(

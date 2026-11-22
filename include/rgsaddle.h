@@ -2232,8 +2232,12 @@ typedef int (*rgsaddle_geodesic_chart_fn)(void *ctx, const double *x,
 /**
  * Geodesic interpolation controls. Lengths are in the path's unit.
  * `flags` must be 0. `lower_ratio` is in (0, 1] and `upper_ratio` is
- * at least 1. Counts are at least 1, and `bound_samples` and
- * `max_images` are at least 2. `seed` seeds the ten noisy starts of
+ * at least 1. Counts are at least 1. `bound_samples` is even and at
+ * least 2, so the equal partition of a segment includes its Cartesian
+ * midpoint. `max_images` is at least 2. Both entry points refuse a cap
+ * above their `n_images`, because the output buffer cannot grow; the
+ * call returns `RGSADDLE_INVALID_PARAMETER` instead of clamping the cap.
+ * `seed` seeds the ten noisy starts of
  * Algorithm 3 in `rgsaddle_geodesic_morse` and takes any value.
  */
 typedef struct {
@@ -2266,14 +2270,17 @@ rgsaddle_status_t rgsaddle_geodesic_config_default(
  *
  * `path` and `out` hold `n_images * dof` doubles, image-major, with
  * `n_images` at least 2. The image count is unchanged: `out` has no
- * room for inserted midpoints. The first and last images are copied
- * through.
+ * room for inserted midpoints. `config->max_images` must be at most
+ * `n_images`; a larger cap is `RGSADDLE_INVALID_PARAMETER`. The first
+ * and last images are copied through.
  * `chart` writes `n_coords` redundant coordinates and their Wilson B
  * matrix. `cell` is a row-major 3x3 lattice, or NULL in free space.
  * With a cell, `dof` is a multiple of 3 and every midpoint, sample, and
  * inserted image follows the minimum image displacement of its two
  * segment ends; the chart applies the same convention to its own
- * distances. `config` NULL selects the defaults. `length`, `lower`, and
+ * distances. `config` NULL selects the defaults, including an image cap
+ * of 32, so a NULL config requires `n_images` of at least 32. `length`,
+ * `lower`, and
  * `upper` may be NULL; otherwise they receive the Eq. (17) length and
  * the Eq. (B5) and Eq. (B18) bounds. A nonzero chart return is
  * `RGSADDLE_SURFACE_FAILED` when it happens on the starting path.
@@ -2296,8 +2303,11 @@ rgsaddle_status_t rgsaddle_geodesic_path(
  * doubles. `radii` holds one covalent radius per atom. `cell` is a
  * row-major 3x3 lattice, or NULL in free space. `n_images` counts the
  * endpoints and must be at least 2. `out` holds `n_images * 3 * n_atoms`
- * doubles. Alpha 1.7 and beta 0.01 are Eq. (7) of Zhu, Thompson, and
- * Martinez (2019). `config` NULL selects the defaults. The scalar
+ * doubles. `config->max_images` must be at most `n_images`; a larger cap
+ * is `RGSADDLE_INVALID_PARAMETER`. Alpha 1.7 and beta 0.01 are Eq. (7)
+ * of Zhu, Thompson, and Martinez (2019). `config` NULL selects the
+ * defaults, including an image cap of 32, so a NULL config requires
+ * `n_images` of at least 32. The scalar
  * outputs follow `rgsaddle_geodesic_path`. `n_images * 3 * n_atoms` and
  * the pair count times `3 * n_atoms` must fit in memory sizes; an
  * overflow returns `RGSADDLE_INVALID_PARAMETER`.
