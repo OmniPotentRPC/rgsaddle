@@ -864,3 +864,138 @@ fn c_abi_returns_not_converged_with_the_last_iterate() {
     assert_eq!(rc, RGSADDLE_NOT_CONVERGED);
     assert!(morse_out.iter().all(|v| v.is_finite() && *v != -1.0));
 }
+
+#[test]
+fn ten_seeded_noisy_starts_give_the_same_geodesic_length() {
+    // Atom 1 slides along the chain from atom 0's side toward atom 2 and off the axis.
+    let chart = MorsePairChart::new(Array1::from_vec(vec![0.7, 0.7, 0.7])).unwrap();
+    let a = Array1::from_vec(vec![0.0, 0.0, 0.0, 1.4, 0.0, 0.0, 4.2, 0.0, 0.0]);
+    let b = Array1::from_vec(vec![0.0, 0.0, 0.0, 2.8, 0.3, 0.0, 4.2, 0.0, 0.0]);
+    let n_images = 5;
+    let mut straight = Array2::zeros((n_images, 9));
+    for i in 0..n_images {
+        let t = i as f64 / (n_images - 1) as f64;
+        for k in 0..9 {
+            straight[(i, k)] = (1.0 - t) * a[k] + t * b[k];
+        }
+    }
+    let cartesian = geodesic_lengths(straight.view(), &chart, 10)
+        .unwrap()
+        .length;
+
+    let config = GeodesicConfig::default()
+        .with_step_tol(1e-3)
+        .with_max_sweeps(10);
+    let mut lengths = Vec::new();
+    for seed in 0..10u64 {
+        let seeded = config.clone().with_seed(seed);
+        let (path, report) =
+            geodesic_interpolate(a.view(), b.view(), n_images, &chart, &seeded).unwrap();
+        assert_eq!(path.row(0), a.view());
+        assert_eq!(path.row(n_images - 1), b.view());
+        assert!(path.iter().all(|v| v.is_finite()), "seed {seed}");
+        assert!(
+            report.converged || report.sweeps >= config.max_sweeps,
+            "seed {seed} stopped early without converging"
+        );
+        assert!(report.lower <= report.length + 1e-9, "seed {seed}");
+        assert!(
+            report.length < cartesian - 0.05,
+            "seed {seed}: {} against the straight Cartesian path {cartesian}",
+            report.length
+        );
+        lengths.push(report.length);
+    }
+    let shortest = lengths.iter().cloned().fold(f64::INFINITY, f64::min);
+    let longest = lengths.iter().cloned().fold(0.0, f64::max);
+    assert!(
+        longest - shortest < 1e-3,
+        "lengths across seeds run from {shortest} to {longest}"
+    );
+
+    let again = config.clone().with_seed(2);
+    let first = geodesic_interpolate(a.view(), b.view(), n_images, &chart, &again).unwrap();
+    let second = geodesic_interpolate(a.view(), b.view(), n_images, &chart, &again).unwrap();
+    assert_eq!(first.0, second.0, "the same seed repeats the path");
+}
+
+#[test]
+#[cfg(feature = "capi")]
+fn c_config_layout_and_defaults_match_the_header() {
+    use std::mem::{align_of, offset_of, size_of};
+
+    use rgsaddle::capi::{
+        RGSADDLE_ABI_MAJOR, RGSADDLE_ABI_MINOR, RGSADDLE_INVALID_PARAMETER, RGSADDLE_OK,
+        RgsaddleGeodesicConfig, RgsaddleVersion, rgsaddle_geodesic_config_default,
+    };
+
+    assert_eq!(size_of::<RgsaddleGeodesicConfig>(), 104);
+    assert_eq!(align_of::<RgsaddleGeodesicConfig>(), 8);
+    assert_eq!(offset_of!(RgsaddleGeodesicConfig, version), 0);
+    assert_eq!(offset_of!(RgsaddleGeodesicConfig, flags), 8);
+    assert_eq!(offset_of!(RgsaddleGeodesicConfig, step_tol), 16);
+    assert_eq!(offset_of!(RgsaddleGeodesicConfig, grad_tol), 24);
+    assert_eq!(offset_of!(RgsaddleGeodesicConfig, max_move), 32);
+    assert_eq!(offset_of!(RgsaddleGeodesicConfig, lower_ratio), 40);
+    assert_eq!(offset_of!(RgsaddleGeodesicConfig, upper_ratio), 48);
+    assert_eq!(offset_of!(RgsaddleGeodesicConfig, max_sweeps), 56);
+    assert_eq!(offset_of!(RgsaddleGeodesicConfig, max_iterations), 64);
+    assert_eq!(offset_of!(RgsaddleGeodesicConfig, memory), 72);
+    assert_eq!(offset_of!(RgsaddleGeodesicConfig, bound_samples), 80);
+    assert_eq!(offset_of!(RgsaddleGeodesicConfig, max_images), 88);
+    assert_eq!(offset_of!(RgsaddleGeodesicConfig, seed), 96);
+
+    let mut config = RgsaddleGeodesicConfig {
+        version: RgsaddleVersion {
+            major: u32::MAX,
+            minor: u32::MAX,
+        },
+        flags: u64::MAX,
+        step_tol: f64::NAN,
+        grad_tol: f64::NAN,
+        max_move: f64::NAN,
+        lower_ratio: f64::NAN,
+        upper_ratio: f64::NAN,
+        max_sweeps: -1,
+        max_iterations: -1,
+        memory: -1,
+        bound_samples: -1,
+        max_images: -1,
+        seed: u64::MAX,
+    };
+    assert_eq!(
+        unsafe { rgsaddle_geodesic_config_default(&mut config) },
+        RGSADDLE_OK
+    );
+    assert_eq!(config.version.major, RGSADDLE_ABI_MAJOR);
+    assert_eq!(config.version.minor, RGSADDLE_ABI_MINOR);
+    assert_eq!(config.flags, 0);
+    assert_eq!(config.step_tol, 1e-6);
+    assert_eq!(config.grad_tol, 1e-6);
+    assert_eq!(config.max_move, 0.5);
+    assert_eq!(config.lower_ratio, 0.95);
+    assert_eq!(config.upper_ratio, 1.1);
+    assert_eq!(config.max_sweeps, 40);
+    assert_eq!(config.max_iterations, 40);
+    assert_eq!(config.memory, 8);
+    assert_eq!(config.bound_samples, 10);
+    assert_eq!(config.max_images, 32);
+    assert_eq!(config.seed, 0);
+    assert_eq!(
+        unsafe { rgsaddle_geodesic_config_default(std::ptr::null_mut()) },
+        RGSADDLE_INVALID_PARAMETER
+    );
+
+    let rust = GeodesicConfig::default();
+    assert_eq!(rust.step_tol, 1e-6);
+    assert_eq!(rust.grad_tol, 1e-6);
+    assert_eq!(rust.max_move, 0.5);
+    assert_eq!(rust.lower_ratio, 0.95);
+    assert_eq!(rust.upper_ratio, 1.1);
+    assert_eq!(rust.max_sweeps, 40);
+    assert_eq!(rust.max_iterations, 40);
+    assert_eq!(rust.memory, 8);
+    assert_eq!(rust.bound_samples, 10);
+    assert_eq!(rust.max_images, 32);
+    assert_eq!(rust.seed, 0);
+}
