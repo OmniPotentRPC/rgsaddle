@@ -50,19 +50,97 @@ pub struct ModeSweepDirectionPlan {
 /// equal-width stratum of the mode index, so the longest run of unsampled
 /// modes, ends included, is at most `ceil(total_modes / draws)`. A schedule
 /// at least as long as the mode band visits every mode once before cycling.
-/// The result is integer arithmetic and does not depend on the platform.
+/// The stratum index is `floor((2 * draw + 1) * total_modes / (2 * draws))`,
+/// evaluated with a wide product so a `usize` intermediate cannot overflow.
+/// The result does not depend on the platform. A schedule longer than a
+/// [`Vec`] can store (`isize::MAX` bytes) is an error.
 pub fn mode_sweep_schedule(total_modes: usize, draws: usize) -> Result<Vec<usize>, SaddleError> {
     if total_modes == 0 || draws == 0 {
         return Err(SaddleError::Invalid(
             "mode sweep schedule needs at least one mode and one draw".into(),
         ));
     }
+    if !schedule_length_fits(draws) {
+        return Err(SaddleError::Invalid(
+            "mode sweep schedule is too long to represent".into(),
+        ));
+    }
     if draws >= total_modes {
         return Ok((0..draws).map(|draw| draw % total_modes).collect());
     }
-    Ok((0..draws)
-        .map(|draw| ((2 * draw + 1) * total_modes) / (2 * draws))
-        .collect())
+    let mut schedule = Vec::with_capacity(draws);
+    for draw in 0..draws {
+        schedule.push(stratum_midpoint(draw, total_modes, draws)?);
+    }
+    Ok(schedule)
+}
+
+/// `true` when a `Vec<usize>` of this length is within the allocation limit.
+fn schedule_length_fits(draws: usize) -> bool {
+    (draws as u128).saturating_mul(std::mem::size_of::<usize>() as u128) <= isize::MAX as u128
+}
+
+/// `floor((2 * draw + 1) * total_modes / (2 * draws))` without a wrapping product.
+fn stratum_midpoint(draw: usize, total_modes: usize, draws: usize) -> Result<usize, SaddleError> {
+    let odd = 2u128 * draw as u128 + 1;
+    let denominator = 2u128 * draws as u128;
+    let index = mul_div_floor(odd, total_modes as u128, denominator)
+        .ok_or_else(|| SaddleError::Invalid("mode sweep schedule arithmetic overflows".into()))?;
+    usize::try_from(index)
+        .map_err(|_| SaddleError::Invalid("mode sweep schedule arithmetic overflows".into()))
+}
+
+/// `floor(a * b / d)`. `None` when `d` is zero or the quotient does not fit in `u128`.
+fn mul_div_floor(a: u128, b: u128, d: u128) -> Option<u128> {
+    if d == 0 {
+        return None;
+    }
+    let (hi, lo) = widening_mul(a, b);
+    div_wide(hi, lo, d)
+}
+
+/// `a * b` as a 256-bit value `(hi, lo)` with value `hi * 2^128 + lo`.
+fn widening_mul(a: u128, b: u128) -> (u128, u128) {
+    let a0 = a as u64 as u128;
+    let a1 = a >> 64;
+    let b0 = b as u64 as u128;
+    let b1 = b >> 64;
+    let p0 = a0 * b0;
+    let p1 = a0 * b1;
+    let p2 = a1 * b0;
+    let p3 = a1 * b1;
+    let mid = (p0 >> 64) + (p1 & u64::MAX as u128) + (p2 & u64::MAX as u128);
+    let lo = (p0 & u64::MAX as u128) | ((mid & u64::MAX as u128) << 64);
+    let hi = p3 + (p1 >> 64) + (p2 >> 64) + (mid >> 64);
+    (hi, lo)
+}
+
+/// `floor((hi * 2^128 + lo) / d)` when the quotient fits in `u128`.
+fn div_wide(hi: u128, lo: u128, d: u128) -> Option<u128> {
+    if d == 0 || hi >= d {
+        return None;
+    }
+    if hi == 0 {
+        return Some(lo / d);
+    }
+    let mut rem = hi;
+    let mut quot = 0u128;
+    for bit_index in (0..128).rev() {
+        let bit = (lo >> bit_index) & 1;
+        let rem_overflow = rem > (u128::MAX >> 1);
+        let doubled = (rem << 1) | bit;
+        if rem_overflow || doubled >= d {
+            rem = if rem_overflow {
+                doubled.wrapping_sub(d)
+            } else {
+                doubled - d
+            };
+            quot |= 1u128 << bit_index;
+        } else {
+            rem = doubled;
+        }
+    }
+    Some(quot)
 }
 
 /// Build one localized seed for every non-rigid Hessian mode, soft to stiff.
@@ -291,8 +369,8 @@ mod tests {
     use ndarray::{Array1, Array2, ArrayView1, array};
 
     use super::{
-        hessian_mode_sweep_directions, mode_sweep_schedule, soft_mode_then_full_directions,
-        spectral_gap_rank, unit,
+        div_wide, hessian_mode_sweep_directions, mode_sweep_schedule,
+        soft_mode_then_full_directions, spectral_gap_rank, unit, widening_mul,
     };
     use crate::{
         PointSurface, SaddleError, SparseHessianOpts, SparsityPattern, exact_eigh,
@@ -354,6 +432,54 @@ mod tests {
         );
         assert!(mode_sweep_schedule(0, 1).is_err());
         assert!(mode_sweep_schedule(3, 0).is_err());
+    }
+
+    #[test]
+    fn schedule_is_exact_at_usize_max_edges() {
+        // `(2 * draw + 1) * total_modes` does not fit in `usize` for these
+        // inputs. The old product panicked in debug and wrapped in release.
+        let total = usize::MAX as u128;
+        let expect = |draws: usize| -> Vec<usize> {
+            (0..draws)
+                .map(|draw| {
+                    let index = (2 * draw as u128 + 1) * total / (2 * draws as u128);
+                    usize::try_from(index).unwrap()
+                })
+                .collect()
+        };
+        assert_eq!(mode_sweep_schedule(usize::MAX, 1).unwrap(), expect(1));
+        assert_eq!(mode_sweep_schedule(usize::MAX, 2).unwrap(), expect(2));
+        assert_eq!(mode_sweep_schedule(usize::MAX, 3).unwrap(), expect(3));
+        assert!(mode_sweep_schedule(usize::MAX, usize::MAX).is_err());
+        assert!(mode_sweep_schedule(2, usize::MAX).is_err());
+        assert!(mode_sweep_schedule(0, usize::MAX).is_err());
+    }
+
+    #[test]
+    fn wide_division_reproduces_the_product() {
+        let samples = [
+            (1u128, 1u128, 1u128),
+            (3, u128::MAX, 4),
+            (5, u128::MAX, 6),
+            (1 << 64, 1 << 64, 1 << 64),
+            (u128::MAX, u128::MAX, u128::MAX),
+            (2 * (usize::MAX as u128) + 1, usize::MAX as u128, 6),
+        ];
+        for (a, b, d) in samples {
+            let (hi, lo) = widening_mul(a, b);
+            let quot = div_wide(hi, lo, d).expect("quotient fits");
+            if let Some(product) = a.checked_mul(b) {
+                assert_eq!(quot, product / d, "{a} * {b} / {d}");
+            }
+            let (qhi, qlo) = widening_mul(quot, d);
+            let (rem_lo, borrow) = lo.overflowing_sub(qlo);
+            let rem_hi = hi - qhi - u128::from(borrow);
+            assert_eq!(rem_hi, 0, "remainder limb {a} {b} {d}");
+            assert!(rem_lo < d, "remainder {rem_lo} vs {d}");
+        }
+        assert_eq!(widening_mul(1 << 64, 1 << 64), (1, 0));
+        assert_eq!(widening_mul(u128::MAX, u128::MAX), (u128::MAX - 1, 1));
+        assert_eq!(div_wide(1, 5, u128::MAX).unwrap(), 1);
     }
 
     #[test]
