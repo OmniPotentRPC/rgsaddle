@@ -678,7 +678,7 @@ fn cell9_of(cell: &Cell) -> [f64; 9] {
     [a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2]]
 }
 
-fn lattice_of(cell: &Cell) -> [[f64; 3]; 3] {
+pub(crate) fn lattice_of(cell: &Cell) -> [[f64; 3]; 3] {
     let o = cell.origin();
     let a = cell.cartesian([1.0, 0.0, 0.0]);
     let b = cell.cartesian([0.0, 1.0, 0.0]);

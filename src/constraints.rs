@@ -19,11 +19,18 @@ use rgmin::Manifold;
 use rgmin::vecops::{axpy, dot, nrm2};
 
 use crate::SaddleError;
+use crate::cell_log::{m3_inv, m3_mul};
 use crate::internal::{CartAxis, Displacement, Rotation, Translation};
 
 const RESTORE_ITERS: usize = 12;
 const RESTORE_TOL: f64 = 1e-12;
 const RANK_TOL: f64 = 1e-10;
+/// A basis-change entry this close to an integer is that integer.
+const BASIS_ROUND_TOL: f64 = 1.0 / 1_000_000.0;
+
+/// Cartesian shift of each atom of one primitive; only the first
+/// `atoms.len()` rows are read.
+type Offsets = [[f64; 3]; 4];
 
 /// One Sella equality: a coordinate plus its target.
 #[derive(Clone, Debug)]
@@ -73,25 +80,25 @@ pub enum Equality {
 }
 
 impl Equality {
-    fn value(&self, x: ArrayView1<f64>) -> Result<f64, SaddleError> {
+    fn value(&self, x: ArrayView1<f64>, off: &Offsets) -> Result<f64, SaddleError> {
         match self {
             Self::Translation { coord, .. } => coord.value(x),
             Self::Rotation { coord, .. } => coord.value(x),
             Self::Displacement { coord, .. } => coord.value(x),
-            Self::Bond { atoms, .. } => bond_value(x, *atoms),
-            Self::Angle { atoms, .. } => angle_value(x, *atoms),
-            Self::Dihedral { atoms, .. } => dihedral_value(x, *atoms),
+            Self::Bond { atoms, .. } => bond_value(x, *atoms, off),
+            Self::Angle { atoms, .. } => angle_value(x, *atoms, off),
+            Self::Dihedral { atoms, .. } => dihedral_value(x, *atoms, off),
         }
     }
 
-    fn gradient(&self, x: ArrayView1<f64>) -> Result<Array1<f64>, SaddleError> {
+    fn gradient(&self, x: ArrayView1<f64>, off: &Offsets) -> Result<Array1<f64>, SaddleError> {
         match self {
             Self::Translation { coord, .. } => coord.gradient(x),
             Self::Rotation { coord, .. } => coord.gradient(x),
             Self::Displacement { coord, .. } => coord.gradient(x),
-            Self::Bond { atoms, .. } => bond_grad(x, *atoms),
-            Self::Angle { atoms, .. } => angle_grad(x, *atoms),
-            Self::Dihedral { atoms, .. } => dihedral_grad(x, *atoms),
+            Self::Bond { atoms, .. } => bond_grad(x, *atoms, off),
+            Self::Angle { atoms, .. } => angle_grad(x, *atoms, off),
+            Self::Dihedral { atoms, .. } => dihedral_grad(x, *atoms, off),
         }
     }
 
@@ -106,8 +113,8 @@ impl Equality {
         }
     }
 
-    fn residual(&self, x: ArrayView1<f64>) -> Result<f64, SaddleError> {
-        let raw = self.value(x)? - self.target();
+    fn residual(&self, x: ArrayView1<f64>, off: &Offsets) -> Result<f64, SaddleError> {
+        let raw = self.value(x, off)? - self.target();
         Ok(match self {
             Self::Dihedral { .. } => wrap_pi(raw),
             _ => raw,
@@ -151,11 +158,26 @@ impl InternalCounts {
     }
 }
 
+/// Lattice rows and the images of the equalities that carry one.
+#[derive(Clone, Debug, Default)]
+struct Periodic {
+    /// Row `i` is lattice vector `a_i`. Needed once an equality carries
+    /// an image.
+    lattice: Option<[[f64; 3]; 3]>,
+    /// Per equality, the lattice image of each atom of a bond, angle or
+    /// dihedral. `None` is the home cell for every atom; shorter than the
+    /// equality list when the later ones are all in the home cell.
+    images: Vec<Option<Vec<[i32; 3]>>>,
+}
+
 /// Equality internals on a 3N Cartesian frame.
 #[derive(Clone, Debug)]
 pub struct Constraints {
     n_atoms: usize,
     eqs: Vec<Equality>,
+    /// Lattice and images; absent for a set that never leaves the home
+    /// cell, so the common case stays small.
+    periodic: Option<Box<Periodic>>,
     /// Sella `ignore_rotation`: drop rotation residuals from `residual`.
     ignore_rotation: bool,
 }
@@ -171,6 +193,7 @@ impl Constraints {
         Ok(Self {
             n_atoms,
             eqs: Vec::new(),
+            periodic: None,
             ignore_rotation: true,
         })
     }
@@ -219,7 +242,7 @@ impl Constraints {
             Some(t) => t,
             None => coord.value(x)?,
         };
-        self.eqs.push(Equality::Translation { coord, target });
+        self.push_eq(Equality::Translation { coord, target }, None);
         Ok(())
     }
 
@@ -242,7 +265,7 @@ impl Constraints {
         self.check_frame(x)?;
         let refpos = gather_ref(x, &indices)?;
         let coord = Rotation::new(indices, axis, refpos)?;
-        self.eqs.push(Equality::Rotation { coord, target: 0.0 });
+        self.push_eq(Equality::Rotation { coord, target: 0.0 }, None);
         Ok(())
     }
 
@@ -271,7 +294,7 @@ impl Constraints {
             Some(t) => t,
             None => coord.value(x)?,
         };
-        self.eqs.push(Equality::Displacement { coord, target });
+        self.push_eq(Equality::Displacement { coord, target }, None);
         Ok(())
     }
 
@@ -282,12 +305,27 @@ impl Constraints {
         x: ArrayView1<f64>,
         target: Option<f64>,
     ) -> Result<(), SaddleError> {
+        self.fix_bond_image(atoms, [[0; 3]; 2], x, target)
+    }
+
+    /// Fix a bond length between periodic images. `images[k]` is the
+    /// integer lattice offset of `atoms[k]`; the position used is
+    /// `x_atom + images[k] . lattice`. A nonzero image needs
+    /// [`Self::set_lattice`] first.
+    pub fn fix_bond_image(
+        &mut self,
+        atoms: [usize; 2],
+        images: [[i32; 3]; 2],
+        x: ArrayView1<f64>,
+        target: Option<f64>,
+    ) -> Result<(), SaddleError> {
         self.check_frame(x)?;
+        let off = self.offsets_for(&images)?;
         let target = match target {
             Some(t) => t,
-            None => bond_value(x, atoms)?,
+            None => bond_value(x, atoms, &off)?,
         };
-        self.eqs.push(Equality::Bond { atoms, target });
+        self.push_eq(Equality::Bond { atoms, target }, image_entry(&images));
         Ok(())
     }
 
@@ -298,12 +336,25 @@ impl Constraints {
         x: ArrayView1<f64>,
         target: Option<f64>,
     ) -> Result<(), SaddleError> {
+        self.fix_angle_image(atoms, [[0; 3]; 3], x, target)
+    }
+
+    /// Fix a valence angle between periodic images. See
+    /// [`Self::fix_bond_image`] for `images`.
+    pub fn fix_angle_image(
+        &mut self,
+        atoms: [usize; 3],
+        images: [[i32; 3]; 3],
+        x: ArrayView1<f64>,
+        target: Option<f64>,
+    ) -> Result<(), SaddleError> {
         self.check_frame(x)?;
+        let off = self.offsets_for(&images)?;
         let target = match target {
             Some(t) => t,
-            None => angle_value(x, atoms)?,
+            None => angle_value(x, atoms, &off)?,
         };
-        self.eqs.push(Equality::Angle { atoms, target });
+        self.push_eq(Equality::Angle { atoms, target }, image_entry(&images));
         Ok(())
     }
 
@@ -314,13 +365,81 @@ impl Constraints {
         x: ArrayView1<f64>,
         target: Option<f64>,
     ) -> Result<(), SaddleError> {
+        self.fix_dihedral_image(atoms, [[0; 3]; 4], x, target)
+    }
+
+    /// Fix a dihedral between periodic images. See
+    /// [`Self::fix_bond_image`] for `images`.
+    pub fn fix_dihedral_image(
+        &mut self,
+        atoms: [usize; 4],
+        images: [[i32; 3]; 4],
+        x: ArrayView1<f64>,
+        target: Option<f64>,
+    ) -> Result<(), SaddleError> {
         self.check_frame(x)?;
+        let off = self.offsets_for(&images)?;
         let target = match target {
             Some(t) => t,
-            None => dihedral_value(x, atoms)?,
+            None => dihedral_value(x, atoms, &off)?,
         };
-        self.eqs.push(Equality::Dihedral { atoms, target });
+        self.push_eq(Equality::Dihedral { atoms, target }, image_entry(&images));
         Ok(())
+    }
+
+    /// Lattice vectors, one per row, that turn an image offset into a
+    /// Cartesian shift.
+    pub fn set_lattice(&mut self, lattice: [[f64; 3]; 3]) {
+        self.periodic.get_or_insert_with(Box::default).lattice = Some(lattice);
+    }
+
+    /// The lattice set by [`Self::set_lattice`], if any.
+    pub fn lattice(&self) -> Option<[[f64; 3]; 3]> {
+        self.periodic.as_ref().and_then(|p| p.lattice)
+    }
+
+    /// Rewrite image indices for a new basis of the same lattice.
+    ///
+    /// `lattice` must be an integer unimodular combination of the stored
+    /// basis, as a Niggli reduction is. Cartesian image offsets are
+    /// unchanged. A chart with no periodic image only stores the basis.
+    pub(crate) fn retarget_lattice(&mut self, lattice: [[f64; 3]; 3]) -> Result<(), SaddleError> {
+        let Some(old) = self.lattice() else {
+            return Ok(());
+        };
+        if !self.is_periodic() {
+            self.set_lattice(lattice);
+            return Ok(());
+        }
+        let change = m3_mul(lattice, m3_inv(old)?);
+        let forward = round_unimodular(change)?;
+        let backward = unimodular_inverse(forward)?;
+        let Some(periodic) = self.periodic.as_mut() else {
+            return Ok(());
+        };
+        for images in periodic.images.iter_mut().flatten() {
+            for shift in images.iter_mut() {
+                *shift = row_times(*shift, backward);
+            }
+        }
+        periodic.lattice = Some(lattice);
+        Ok(())
+    }
+
+    /// Lattice image of each atom of equality `index`. `None` when the
+    /// equality sits in the home cell.
+    pub fn images(&self, index: usize) -> Option<&[[i32; 3]]> {
+        self.periodic
+            .as_ref()
+            .and_then(|p| p.images.get(index))
+            .and_then(|v| v.as_deref())
+    }
+
+    /// Whether any equality carries a lattice image.
+    pub fn is_periodic(&self) -> bool {
+        self.periodic
+            .as_ref()
+            .is_some_and(|p| p.images.iter().any(Option::is_some))
     }
 
     /// Current internals values, length `equalities`.
@@ -328,7 +447,7 @@ impl Constraints {
         self.check_frame(x)?;
         let mut q = Array1::zeros(self.eqs.len());
         for (i, eq) in self.eqs.iter().enumerate() {
-            q[i] = eq.value(x)?;
+            q[i] = eq.value(x, &self.offsets_at(i)?)?;
         }
         Ok(q)
     }
@@ -344,7 +463,7 @@ impl Constraints {
                 r[i] = 0.0;
                 continue;
             }
-            r[i] = eq.residual(x)?;
+            r[i] = eq.residual(x, &self.offsets_at(i)?)?;
         }
         Ok(r)
     }
@@ -354,7 +473,7 @@ impl Constraints {
         self.check_frame(x)?;
         let mut j = Array2::zeros((self.eqs.len(), x.len()));
         for (i, eq) in self.eqs.iter().enumerate() {
-            let g = eq.gradient(x)?;
+            let g = eq.gradient(x, &self.offsets_at(i)?)?;
             for k in 0..x.len() {
                 j[(i, k)] = g[k];
             }
@@ -385,6 +504,43 @@ impl Constraints {
             axpy(1.0, s.view(), &mut x);
         }
         Ok(x)
+    }
+
+    fn push_eq(&mut self, eq: Equality, images: Option<Vec<[i32; 3]>>) {
+        let index = self.eqs.len();
+        self.eqs.push(eq);
+        if images.is_some() {
+            let periodic = self.periodic.get_or_insert_with(Box::default);
+            periodic.images.resize(index, None);
+            periodic.images.push(images);
+        }
+    }
+
+    fn offsets_for(&self, images: &[[i32; 3]]) -> Result<Offsets, SaddleError> {
+        let mut off = [[0.0; 3]; 4];
+        if images.iter().all(|im| *im == [0; 3]) {
+            return Ok(off);
+        }
+        let Some(lattice) = self.lattice() else {
+            return Err(SaddleError::Shape(
+                "a periodic image needs a lattice on the constraint set".into(),
+            ));
+        };
+        for (k, im) in images.iter().enumerate() {
+            for d in 0..3 {
+                for c in 0..3 {
+                    off[k][c] += f64::from(im[d]) * lattice[d][c];
+                }
+            }
+        }
+        Ok(off)
+    }
+
+    fn offsets_at(&self, i: usize) -> Result<Offsets, SaddleError> {
+        match self.images(i) {
+            None => Ok([[0.0; 3]; 4]),
+            Some(v) => self.offsets_for(v),
+        }
     }
 
     fn check_frame(&self, x: ArrayView1<f64>) -> Result<(), SaddleError> {
@@ -449,6 +605,70 @@ fn wrap_pi(a: f64) -> f64 {
     w - std::f64::consts::PI
 }
 
+fn round_unimodular(m: [[f64; 3]; 3]) -> Result<[[i32; 3]; 3], SaddleError> {
+    let mut out = [[0i32; 3]; 3];
+    for i in 0..3 {
+        for j in 0..3 {
+            let nearest = m[i][j].round();
+            if !nearest.is_finite() || (m[i][j] - nearest).abs() > BASIS_ROUND_TOL {
+                return Err(SaddleError::Invalid(
+                    "lattice basis change is not an integer unimodular rewrite".into(),
+                ));
+            }
+            out[i][j] = i32::try_from(nearest as i64).map_err(|_| {
+                SaddleError::Invalid(
+                    "lattice basis change is not an integer unimodular rewrite".into(),
+                )
+            })?;
+        }
+    }
+    let det = det_unimodular(out);
+    if det != 1 && det != -1 {
+        return Err(SaddleError::Invalid(
+            "lattice basis change is not an integer unimodular rewrite".into(),
+        ));
+    }
+    Ok(out)
+}
+
+fn det_unimodular(m: [[i32; 3]; 3]) -> i64 {
+    let e = |i: usize, j: usize| i64::from(m[i][j]);
+    e(0, 0) * (e(1, 1) * e(2, 2) - e(1, 2) * e(2, 1))
+        - e(0, 1) * (e(1, 0) * e(2, 2) - e(1, 2) * e(2, 0))
+        + e(0, 2) * (e(1, 0) * e(2, 1) - e(1, 1) * e(2, 0))
+}
+
+fn unimodular_inverse(m: [[i32; 3]; 3]) -> Result<[[i32; 3]; 3], SaddleError> {
+    let det = det_unimodular(m);
+    let minor = |r0: usize, r1: usize, c0: usize, c1: usize| -> i64 {
+        i64::from(m[r0][c0]) * i64::from(m[r1][c1]) - i64::from(m[r0][c1]) * i64::from(m[r1][c0])
+    };
+    let cofactor = [
+        [minor(1, 2, 1, 2), -minor(1, 2, 0, 2), minor(1, 2, 0, 1)],
+        [-minor(0, 2, 1, 2), minor(0, 2, 0, 2), -minor(0, 2, 0, 1)],
+        [minor(0, 1, 1, 2), -minor(0, 1, 0, 2), minor(0, 1, 0, 1)],
+    ];
+    let mut inv = [[0i32; 3]; 3];
+    for (i, row) in inv.iter_mut().enumerate() {
+        for (j, entry) in row.iter_mut().enumerate() {
+            *entry = i32::try_from(det * cofactor[j][i]).map_err(|_| {
+                SaddleError::Invalid(
+                    "lattice basis change is not an integer unimodular rewrite".into(),
+                )
+            })?;
+        }
+    }
+    Ok(inv)
+}
+
+fn row_times(n: [i32; 3], m: [[i32; 3]; 3]) -> [i32; 3] {
+    [
+        n[0] * m[0][0] + n[1] * m[1][0] + n[2] * m[2][0],
+        n[0] * m[0][1] + n[1] * m[1][1] + n[2] * m[2][1],
+        n[0] * m[0][2] + n[1] * m[1][2] + n[2] * m[2][2],
+    ]
+}
+
 fn atom3(x: ArrayView1<f64>, i: usize) -> Result<[f64; 3], SaddleError> {
     let slot = 3 * i;
     if slot + 2 >= x.len() {
@@ -457,6 +677,19 @@ fn atom3(x: ArrayView1<f64>, i: usize) -> Result<[f64; 3], SaddleError> {
         ));
     }
     Ok([x[slot], x[slot + 1], x[slot + 2]])
+}
+
+fn atom3_at(x: ArrayView1<f64>, i: usize, off: [f64; 3]) -> Result<[f64; 3], SaddleError> {
+    let p = atom3(x, i)?;
+    Ok([p[0] + off[0], p[1] + off[1], p[2] + off[2]])
+}
+
+fn image_entry(images: &[[i32; 3]]) -> Option<Vec<[i32; 3]>> {
+    if images.iter().all(|im| *im == [0; 3]) {
+        None
+    } else {
+        Some(images.to_vec())
+    }
 }
 
 fn sub3(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
@@ -494,9 +727,9 @@ fn scatter3(g: &mut Array1<f64>, atom: usize, v: [f64; 3]) {
     g[slot + 2] += v[2];
 }
 
-fn bond_value(x: ArrayView1<f64>, atoms: [usize; 2]) -> Result<f64, SaddleError> {
-    let a = atom3(x, atoms[0])?;
-    let b = atom3(x, atoms[1])?;
+fn bond_value(x: ArrayView1<f64>, atoms: [usize; 2], off: &Offsets) -> Result<f64, SaddleError> {
+    let a = atom3_at(x, atoms[0], off[0])?;
+    let b = atom3_at(x, atoms[1], off[1])?;
     let r = nrm3(sub3(b, a));
     if r <= f64::MIN_POSITIVE {
         return Err(SaddleError::NonFinite("constraint bond"));
@@ -504,9 +737,13 @@ fn bond_value(x: ArrayView1<f64>, atoms: [usize; 2]) -> Result<f64, SaddleError>
     Ok(r)
 }
 
-fn bond_grad(x: ArrayView1<f64>, atoms: [usize; 2]) -> Result<Array1<f64>, SaddleError> {
-    let a = atom3(x, atoms[0])?;
-    let b = atom3(x, atoms[1])?;
+fn bond_grad(
+    x: ArrayView1<f64>,
+    atoms: [usize; 2],
+    off: &Offsets,
+) -> Result<Array1<f64>, SaddleError> {
+    let a = atom3_at(x, atoms[0], off[0])?;
+    let b = atom3_at(x, atoms[1], off[1])?;
     let d = sub3(b, a);
     let r = nrm3(d);
     if r <= f64::MIN_POSITIVE {
@@ -519,10 +756,10 @@ fn bond_grad(x: ArrayView1<f64>, atoms: [usize; 2]) -> Result<Array1<f64>, Saddl
     Ok(g)
 }
 
-fn angle_value(x: ArrayView1<f64>, atoms: [usize; 3]) -> Result<f64, SaddleError> {
-    let a = atom3(x, atoms[0])?;
-    let b = atom3(x, atoms[1])?;
-    let c = atom3(x, atoms[2])?;
+fn angle_value(x: ArrayView1<f64>, atoms: [usize; 3], off: &Offsets) -> Result<f64, SaddleError> {
+    let a = atom3_at(x, atoms[0], off[0])?;
+    let b = atom3_at(x, atoms[1], off[1])?;
+    let c = atom3_at(x, atoms[2], off[2])?;
     let u = sub3(a, b);
     let v = sub3(c, b);
     let denom = nrm3(u) * nrm3(v);
@@ -532,10 +769,14 @@ fn angle_value(x: ArrayView1<f64>, atoms: [usize; 3]) -> Result<f64, SaddleError
     Ok((dot3(u, v) / denom).clamp(-1.0, 1.0).acos())
 }
 
-fn angle_grad(x: ArrayView1<f64>, atoms: [usize; 3]) -> Result<Array1<f64>, SaddleError> {
-    let a = atom3(x, atoms[0])?;
-    let b = atom3(x, atoms[1])?;
-    let c = atom3(x, atoms[2])?;
+fn angle_grad(
+    x: ArrayView1<f64>,
+    atoms: [usize; 3],
+    off: &Offsets,
+) -> Result<Array1<f64>, SaddleError> {
+    let a = atom3_at(x, atoms[0], off[0])?;
+    let b = atom3_at(x, atoms[1], off[1])?;
+    let c = atom3_at(x, atoms[2], off[2])?;
     let u = sub3(a, b);
     let v = sub3(c, b);
     let ru = nrm3(u);
@@ -565,11 +806,15 @@ fn angle_grad(x: ArrayView1<f64>, atoms: [usize; 3]) -> Result<Array1<f64>, Sadd
     Ok(g)
 }
 
-fn dihedral_value(x: ArrayView1<f64>, atoms: [usize; 4]) -> Result<f64, SaddleError> {
-    let p0 = atom3(x, atoms[0])?;
-    let p1 = atom3(x, atoms[1])?;
-    let p2 = atom3(x, atoms[2])?;
-    let p3 = atom3(x, atoms[3])?;
+fn dihedral_value(
+    x: ArrayView1<f64>,
+    atoms: [usize; 4],
+    off: &Offsets,
+) -> Result<f64, SaddleError> {
+    let p0 = atom3_at(x, atoms[0], off[0])?;
+    let p1 = atom3_at(x, atoms[1], off[1])?;
+    let p2 = atom3_at(x, atoms[2], off[2])?;
+    let p3 = atom3_at(x, atoms[3], off[3])?;
     let dx1 = sub3(p1, p0);
     let dx2 = sub3(p2, p1);
     let dx3 = sub3(p3, p2);
@@ -583,12 +828,16 @@ fn dihedral_value(x: ArrayView1<f64>, atoms: [usize; 4]) -> Result<f64, SaddleEr
     Ok(numer.atan2(denom))
 }
 
-fn dihedral_grad(x: ArrayView1<f64>, atoms: [usize; 4]) -> Result<Array1<f64>, SaddleError> {
+fn dihedral_grad(
+    x: ArrayView1<f64>,
+    atoms: [usize; 4],
+    off: &Offsets,
+) -> Result<Array1<f64>, SaddleError> {
     let pts = [
-        atom3(x, atoms[0])?,
-        atom3(x, atoms[1])?,
-        atom3(x, atoms[2])?,
-        atom3(x, atoms[3])?,
+        atom3_at(x, atoms[0], off[0])?,
+        atom3_at(x, atoms[1], off[1])?,
+        atom3_at(x, atoms[2], off[2])?,
+        atom3_at(x, atoms[3], off[3])?,
     ];
     let dx1 = sub3(pts[1], pts[0]);
     let dx2 = sub3(pts[2], pts[1]);
@@ -622,7 +871,8 @@ fn dihedral_grad(x: ArrayView1<f64>, atoms: [usize; 4]) -> Result<Array1<f64>, S
                 dot3(ddx2, cross3(n1, n2)) + dot3(dx2, add3(cross3(dn1, n2), cross3(n1, dn2)));
             let dnorm = dot3(dx2, ddx2) / dx2_norm;
             let ddenom = dnorm * dot3(n1, n2) + dx2_norm * (dot3(dn1, n2) + dot3(n1, dn2));
-            g[3 * atoms[local] + dim] = (denom * dnumer - numer * ddenom) / atan_n2;
+            // Distinct images of one atom both land on this slot.
+            g[3 * atoms[local] + dim] += (denom * dnumer - numer * ddenom) / atan_n2;
         }
     }
     Ok(g)
@@ -745,6 +995,8 @@ mod tests {
     use crate::internal::pack_cart;
     use rgmin::ManifoldKind;
 
+    const ZERO: Offsets = [[0.0; 3]; 4];
+
     fn water() -> Array1<f64> {
         pack_cart(&[[0.0, 0.0, 0.0], [0.96, 0.0, 0.0], [-0.24, 0.93, 0.0]])
     }
@@ -812,12 +1064,12 @@ mod tests {
         let x = water();
         let mut cons = Constraints::new(3).unwrap();
         cons.fix_bond([0, 1], x.view(), None).unwrap();
-        let r0 = bond_value(x.view(), [0, 1]).unwrap();
+        let r0 = bond_value(x.view(), [0, 1], &ZERO).unwrap();
         let mut step = Array1::zeros(9);
         step[0] = 0.2;
         step[3] = -0.15;
         let y = cons.retract(&x, &step);
-        let r1 = bond_value(y.view(), [0, 1]).unwrap();
+        let r1 = bond_value(y.view(), [0, 1], &ZERO).unwrap();
         assert!((r0 - r1).abs() < 1e-10, "bond {r0} -> {r1}");
         assert!(cons.residual_norm(y.view()).unwrap() < 1e-10);
     }
@@ -827,12 +1079,12 @@ mod tests {
         let x = water();
         let mut cons = Constraints::new(3).unwrap();
         cons.fix_angle([1, 0, 2], x.view(), None).unwrap();
-        let a0 = angle_value(x.view(), [1, 0, 2]).unwrap();
+        let a0 = angle_value(x.view(), [1, 0, 2], &ZERO).unwrap();
         let mut step = Array1::zeros(9);
         step[3] = 0.05;
         step[7] = -0.04;
         let y = cons.retract(&x, &step);
-        let a1 = angle_value(y.view(), [1, 0, 2]).unwrap();
+        let a1 = angle_value(y.view(), [1, 0, 2], &ZERO).unwrap();
         assert!((a0 - a1).abs() < 1e-9, "angle {a0} -> {a1}");
     }
 
@@ -875,12 +1127,12 @@ mod tests {
         ]);
         let mut cons = Constraints::new(4).unwrap();
         cons.fix_dihedral([0, 1, 2, 3], x.view(), None).unwrap();
-        let d0 = dihedral_value(x.view(), [0, 1, 2, 3]).unwrap();
+        let d0 = dihedral_value(x.view(), [0, 1, 2, 3], &ZERO).unwrap();
         let mut step = Array1::zeros(12);
         step[9] = 0.05;
         step[10] = -0.04;
         let y = cons.retract(&x, &step);
-        let d1 = dihedral_value(y.view(), [0, 1, 2, 3]).unwrap();
+        let d1 = dihedral_value(y.view(), [0, 1, 2, 3], &ZERO).unwrap();
         assert!(wrap_pi(d0 - d1).abs() < 1e-9, "dummy dihedral {d0} -> {d1}");
         assert!(cons.residual_norm(y.view()).unwrap() < 1e-10);
         let t = cons.transport(&x, &y, &step);
@@ -891,15 +1143,15 @@ mod tests {
     #[test]
     fn bond_gradient_matches_central_difference() {
         let x = water();
-        let g = bond_grad(x.view(), [0, 2]).unwrap();
+        let g = bond_grad(x.view(), [0, 2], &ZERO).unwrap();
         let mut gfd = Array1::zeros(9);
         let h = 1e-6;
         let mut xp = x.clone();
         for i in 0..9 {
             xp[i] = x[i] + h;
-            let fp = bond_value(xp.view(), [0, 2]).unwrap();
+            let fp = bond_value(xp.view(), [0, 2], &ZERO).unwrap();
             xp[i] = x[i] - h;
-            let fm = bond_value(xp.view(), [0, 2]).unwrap();
+            let fm = bond_value(xp.view(), [0, 2], &ZERO).unwrap();
             xp[i] = x[i];
             gfd[i] = (fp - fm) / (2.0 * h);
         }

@@ -174,6 +174,10 @@ pub struct SellaSaddleSession {
     /// for a small search. Grows and shrinks with the rho schedule.
     /// Unused while [`Self::atom_ceiling`] is off.
     atom_delta: f64,
+    /// Rebuilds of an automatic internals chart so far.
+    restarts: usize,
+    /// The most recent of them.
+    last_rebuild: Option<crate::RebuildReport>,
 }
 
 impl SellaSaddleSession {
@@ -218,6 +222,8 @@ impl SellaSaddleSession {
             hvp_started: false,
             hvp_since: 0,
             atom_delta,
+            restarts: 0,
+            last_rebuild: None,
         })
     }
 
@@ -244,7 +250,56 @@ impl SellaSaddleSession {
             hvp_started: false,
             hvp_since: 0,
             atom_delta,
+            restarts: 0,
+            last_rebuild: None,
         })
+    }
+
+    /// P-RFO in automatic internals: bonds, angles, dihedrals and
+    /// dummy atoms found from the geometry (see
+    /// [`crate::InternalTopology`]).
+    ///
+    /// The chart is rebuilt at the accepted geometry when it goes
+    /// singular or a bend nears linear; the Hessian is carried across and
+    /// the trust history restarts. [`Self::on_internal`] and a
+    /// [`crate::VocnFound`] chart keep their charts as given.
+    pub fn on_auto_internal(
+        config: SellaSaddleConfig,
+        x: Array1<f64>,
+        masses: Array1<f64>,
+        elements: &[u8],
+        cell: Option<&crate::mic::Cell>,
+        topology: &crate::TopologyConfig,
+    ) -> Result<Self, SaddleError> {
+        let pes = InternalPes::auto(x, masses, elements, cell, topology)?;
+        let n_free = pes.n_int().max(1);
+        let geom = SellaGeom::Chart(pes.chart().clone());
+        let delta = config.delta * n_free as f64;
+        let atom_delta = atomic_ceiling(config.delta);
+        Ok(Self {
+            pes: SellaPes::Internal(pes),
+            config,
+            geom,
+            delta,
+            rho: 1.0,
+            steps_since_diag: 0,
+            ritz_v: None,
+            hvp_started: false,
+            hvp_since: 0,
+            atom_delta,
+            restarts: 0,
+            last_rebuild: None,
+        })
+    }
+
+    /// How many times an automatic internals chart has been rebuilt.
+    pub fn topology_restarts(&self) -> usize {
+        self.restarts
+    }
+
+    /// The most recent rebuild of an automatic internals chart.
+    pub fn last_rebuild(&self) -> Option<&crate::RebuildReport> {
+        self.last_rebuild.as_ref()
     }
 
     /// P-RFO in packed `[x_cart; cell_params]`.
@@ -271,6 +326,8 @@ impl SellaSaddleSession {
             hvp_started: false,
             hvp_since: 0,
             atom_delta,
+            restarts: 0,
+            last_rebuild: None,
         })
     }
 
@@ -300,6 +357,8 @@ impl SellaSaddleSession {
             hvp_started: false,
             hvp_since: 0,
             atom_delta,
+            restarts: 0,
+            last_rebuild: None,
         })
     }
 
@@ -330,6 +389,8 @@ impl SellaSaddleSession {
             hvp_started: false,
             hvp_since: 0,
             atom_delta,
+            restarts: 0,
+            last_rebuild: None,
         })
     }
 
@@ -435,6 +496,12 @@ impl SellaSaddleSession {
     /// Reset.
     pub fn reset(&mut self) {
         self.pes.reset();
+        self.restart_trust();
+    }
+
+    /// Start the trust history over: the radius from `delta0` and the
+    /// current number of free coordinates, no memory of past steps.
+    fn restart_trust(&mut self) {
         let n_free = match &self.pes {
             SellaPes::Internal(p) => p.n_int().max(1),
             SellaPes::Cell(p) => p.packed_len().max(1),
@@ -448,6 +515,24 @@ impl SellaSaddleSession {
         self.hvp_started = false;
         self.hvp_since = 0;
         self.atom_delta = atomic_ceiling(self.config.delta);
+    }
+
+    /// Rebuild an automatic chart that has gone stale, before the
+    /// gradient is read in it.
+    fn refresh_topology(&mut self) -> Result<(), SaddleError> {
+        let report = match &mut self.pes {
+            SellaPes::Internal(p) => p.rebuild_if_stale()?,
+            SellaPes::Cartesian(_) | SellaPes::Cell(_) | SellaPes::CellInternal(_) => None,
+        };
+        if let Some(report) = report {
+            if let SellaPes::Internal(p) = &self.pes {
+                self.geom = SellaGeom::Chart(p.chart().clone());
+            }
+            self.restart_trust();
+            self.restarts += 1;
+            self.last_rebuild = Some(report);
+        }
+        Ok(())
     }
 
     /// Index of the step inside its stage.
@@ -854,6 +939,7 @@ impl SellaSaddleSession {
         &mut self,
         surface: &S,
     ) -> Result<SellaSaddleReport, SaddleError> {
+        self.refresh_topology()?;
         let x;
         let energy;
         let g;

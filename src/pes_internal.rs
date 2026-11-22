@@ -23,6 +23,10 @@ use crate::mic::Cell;
 use crate::minmode::PointSurface;
 use crate::pes::{CartesianPes, HessUpdate};
 
+mod auto;
+
+pub use auto::{HessianCarry, RebuildReason, RebuildReport};
+
 /// Sella `InternalPES`: Cartesian geometry, internals chart, internals Hessian.
 pub struct InternalPes {
     cart: CartesianPes,
@@ -31,6 +35,9 @@ pub struct InternalPes {
     update: HessUpdate,
     /// Extra 3-vectors Sella hangs on linear fragments. Not in the surface.
     dummies: Array1<f64>,
+    /// Present when the chart was built by [`InternalPes::auto`]; a
+    /// hand-specified chart keeps `None` and is never rebuilt.
+    auto: Option<Box<auto::AutoState>>,
 }
 
 impl InternalPes {
@@ -55,6 +62,7 @@ impl InternalPes {
             hess: BfgsModel::identity(nint),
             update: HessUpdate::Bfgs,
             dummies: Array1::zeros(0),
+            auto: None,
         };
         pes.guess_hessian();
         Ok(pes)
@@ -100,6 +108,7 @@ impl InternalPes {
             hess: BfgsModel::identity(nint),
             update: HessUpdate::Bfgs,
             dummies,
+            auto: None,
         };
         pes.guess_hessian();
         Ok(pes)
@@ -151,14 +160,7 @@ impl InternalPes {
         }
         self.hess.forget();
         for (i, eq) in self.chart.equalities().iter().enumerate() {
-            let lam = match eq {
-                crate::constraints::Equality::Translation { .. } => 70.0,
-                crate::constraints::Equality::Bond { .. } => 0.5,
-                crate::constraints::Equality::Angle { .. } => 0.2,
-                crate::constraints::Equality::Dihedral { .. } => 0.1,
-                crate::constraints::Equality::Rotation { .. } => 1.0,
-                crate::constraints::Equality::Displacement { .. } => 1.0,
-            };
+            let lam = guess_curvature(eq);
             let mut u = Array1::zeros(nint);
             u[i] = 1.0;
             self.hess.seed_mode(&u, lam);
@@ -191,6 +193,28 @@ impl InternalPes {
         &self.chart
     }
 
+    /// Keep a periodic chart on the living cell. Image indices stay, so
+    /// this is a deformation of the same basis.
+    pub(crate) fn follow_lattice(&mut self, lattice: [[f64; 3]; 3]) {
+        if self.chart.is_periodic() {
+            self.chart.set_lattice(lattice);
+        }
+        if let Some(auto) = self.auto.as_mut() {
+            auto.follow_lattice(lattice);
+        }
+    }
+
+    /// Point a periodic chart at a new basis of the same lattice.
+    pub(crate) fn retarget_lattice(&mut self, lattice: [[f64; 3]; 3]) -> Result<(), SaddleError> {
+        if self.chart.is_periodic() || self.chart.lattice().is_some() {
+            self.chart.retarget_lattice(lattice)?;
+        }
+        if let Some(auto) = self.auto.as_mut() {
+            auto.retarget_lattice(lattice)?;
+        }
+        Ok(())
+    }
+
     /// Cartesian.
     pub fn cartesian(&self) -> &CartesianPes {
         &self.cart
@@ -211,6 +235,13 @@ impl InternalPes {
     /// Internals gradient `B^{+T} g` on the Wilson frame. Dummy
     /// slots have zero Cartesian force.
     pub fn internals_grad(&self, g_cart: ArrayView1<f64>) -> Result<Array1<f64>, SaddleError> {
+        if let Some(auto) = &self.auto {
+            let frame = self.frame();
+            let j = self.effective_jacobian(&frame)?;
+            return Ok(
+                crate::topology::Wilson::new(&j, auto.sv_tol())?.gradient(&g_cart.to_owned())
+            );
+        }
         let b = self.b_matrix()?;
         let g = self.pad_grad(g_cart);
         internals_grad_from_b(&b, g.view())
@@ -218,6 +249,10 @@ impl InternalPes {
 
     /// Map `dq` onto the Wilson frame by `B dx = dq`. No surface eval.
     pub fn displace(&mut self, dq: ArrayView1<f64>) -> Result<(), SaddleError> {
+        if self.auto.is_some() {
+            let dx = self.move_auto(dq)?;
+            return self.cart.displace(dx.view());
+        }
         let b = self.b_matrix()?;
         if dq.len() != b.nrows() {
             return Err(SaddleError::Shape(
@@ -242,6 +277,9 @@ impl InternalPes {
         surface: &S,
         dq: ArrayView1<f64>,
     ) -> Result<(f64, Array1<f64>), SaddleError> {
+        if self.auto.is_some() {
+            return self.kick_auto(surface, dq);
+        }
         let b = self.b_matrix()?;
         if dq.len() != b.nrows() {
             return Err(SaddleError::Shape(
@@ -273,6 +311,19 @@ impl InternalPes {
     pub fn reset(&mut self) {
         self.cart.reset();
         self.guess_hessian();
+    }
+}
+
+/// Sella `Internals.guess_hessian` diagonal entry of one internal.
+pub(crate) fn guess_curvature(eq: &crate::constraints::Equality) -> f64 {
+    use crate::constraints::Equality;
+    match eq {
+        Equality::Translation { .. } => 70.0,
+        Equality::Bond { .. } => 0.5,
+        Equality::Angle { .. } => 0.2,
+        Equality::Dihedral { .. } => 0.1,
+        Equality::Rotation { .. } => 1.0,
+        Equality::Displacement { .. } => 1.0,
     }
 }
 
@@ -634,6 +685,12 @@ impl CellCartesianPes {
 }
 
 /// Internals PES plus a periodic cell.
+///
+/// The primitives stay as given. A periodic chart's lattice follows the
+/// living cell: [`Self::set_cell`] and [`Self::kick_packed`] write the
+/// new vectors into the chart, and [`Self::maybe_niggli_reduce`] retargets
+/// the chart's images onto the reduced basis so Cartesian image offsets
+/// are unchanged.
 pub struct CellInternalPes {
     inner: InternalPes,
     state: CellState,
@@ -653,12 +710,14 @@ impl CellInternalPes {
         let n_atoms = inner.position().len() / 3;
         let state = CellState::new(cell, n_atoms);
         let n = inner.n_int() + state.n_cell_dof();
-        Ok(Self {
+        let mut pes = Self {
             inner,
             state,
             hess: PackedHess::identity(n),
             update: HessUpdate::Bfgs,
-        })
+        };
+        pes.inner.follow_lattice(pes.state.lattice());
+        Ok(pes)
     }
 
     /// Simulation cell. Row i is lattice vector a_i.
@@ -669,6 +728,7 @@ impl CellInternalPes {
     /// Set cell.
     pub fn set_cell(&mut self, cell: Cell) {
         self.state.set_cell(cell);
+        self.inner.follow_lattice(self.state.lattice());
     }
 
     /// Set update.
@@ -791,6 +851,7 @@ impl CellInternalPes {
         self.state.kick_params(&dcell)?;
         let dq = d.slice(s![..nint]).to_owned();
         self.inner.displace(dq.view())?;
+        self.inner.follow_lattice(self.state.lattice());
         let (e, g1) = surface.eval_in_cell(self.inner.position(), &self.cell9())?;
         if !g1.iter().all(|v| v.is_finite()) {
             return Err(SaddleError::NonFinite("pes gradient"));
@@ -807,13 +868,34 @@ impl CellInternalPes {
     }
 
     /// Sella `maybe_niggli_reduce`. Log chart transforms H; entries drops it.
+    ///
+    /// A periodic chart is checked against the reduced basis before the
+    /// cell moves, then retargeted once the reduction is applied. A
+    /// refusal leaves the cell and the images where they were.
     pub fn maybe_niggli_reduce(&mut self, angle_threshold: f64) -> Result<bool, SaddleError> {
+        let [a, b, c] = self.state.lattice();
+        let skew = [angle_deg(b, c), angle_deg(a, c), angle_deg(a, b)]
+            .into_iter()
+            .map(|x| (x - 90.0).abs())
+            .fold(0.0_f64, f64::max);
+        let staged = if skew > angle_threshold && self.inner.chart().is_periodic() {
+            let (a2, b2, c2) = niggli_reduce_vectors(a, b, c);
+            let next = [a2, b2, c2];
+            let mut trial = self.inner.chart().clone();
+            trial.retarget_lattice(next)?;
+            Some(next)
+        } else {
+            None
+        };
         let n_noncell = self.inner.n_int();
         let (applied, t) = self
             .state
             .maybe_niggli(angle_threshold, niggli_reduce_vectors)?;
         if !applied {
             return Ok(false);
+        }
+        if staged.is_some() {
+            self.inner.retarget_lattice(self.state.lattice())?;
         }
         if let Some(t) = t {
             let mut h = self.hess.hessian().to_owned();
