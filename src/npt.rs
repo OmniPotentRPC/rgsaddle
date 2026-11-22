@@ -1,12 +1,35 @@
-//! Isotropic NPT sampling of a crystal lattice: Langevin dynamics with a
-//! Berendsen barostat.
+//! Isotropic NPT sampling of a cubic crystal lattice: Langevin dynamics
+//! with a stochastic cell rescaling barostat.
 //!
 //! The force evaluator supplies a tension-positive Cauchy stress.  The
-//! reported pressure is therefore minus one third of its trace.
+//! reported pressure is therefore minus one third of its trace, plus the
+//! kinetic pressure.  The default barostat is stochastic cell rescaling
+//! (Bernetti and Bussi, J. Chem. Phys. 153, 114107 (2020),
+//! doi:10.1063/5.0020514), which samples the isotropic NPT ensemble.  The
+//! Berendsen barostat remains available for equilibration and does not
+//! report ensemble fluctuations.
 
 use ndarray::{Array1, ArrayView1};
 
 use crate::{BOLTZMANN_EV_PER_K, Cell, SaddleError, angular_scale_rad_s};
+
+/// Which isotropic barostat [`npt_lattice`] applies.
+///
+/// Non-exhaustive: construct a variant. The default is
+/// [`NptBarostat::StochasticCellRescaling`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum NptBarostat {
+    /// Stochastic cell rescaling. Samples the isotropic NPT ensemble, so
+    /// the volume variance does not depend on the coupling time.
+    #[default]
+    StochasticCellRescaling,
+    /// Berendsen pressure coupling, for equilibration only. The volume
+    /// distribution is not the NPT ensemble and depends on the coupling
+    /// time. The report carries means and no ensemble fluctuation
+    /// statistics.
+    Berendsen,
+}
 
 /// Controls an isotropic NPT lattice run.
 ///
@@ -34,7 +57,12 @@ pub struct NptConfig {
     pub timestep_s: f64,
     /// Langevin friction in inverse seconds.
     pub langevin_gamma_per_s: f64,
-    /// Berendsen pressure-coupling time in seconds.
+    /// Barostat that advances the cell. The default samples NPT.
+    /// [`NptBarostat::Berendsen`] is equilibration only.
+    pub barostat: NptBarostat,
+    /// Pressure-coupling time in seconds, for whichever [`Self::barostat`]
+    /// is selected. The name is the historical Berendsen parameter. It is
+    /// also τ_P in stochastic cell rescaling.
     pub berendsen_tau_s: f64,
     /// Isotropic compressibility in inverse eV per cubic Angstrom.
     pub compressibility_per_ev_a3: f64,
@@ -54,6 +82,7 @@ with_setters!(NptConfig {
     with_block_steps => block_steps: val usize,
     with_timestep_s => timestep_s: val f64,
     with_langevin_gamma_per_s => langevin_gamma_per_s: val f64,
+    with_barostat => barostat: val NptBarostat,
     with_berendsen_tau_s => berendsen_tau_s: val f64,
     with_compressibility_per_ev_a3 => compressibility_per_ev_a3: val f64,
     with_target_pressure_ev_a3 => target_pressure_ev_a3: val f64,
@@ -71,6 +100,7 @@ impl Default for NptConfig {
             block_steps: 250,
             timestep_s: 2.0e-15,
             langevin_gamma_per_s: 1.0e12,
+            barostat: NptBarostat::StochasticCellRescaling,
             berendsen_tau_s: 0.5e-12,
             compressibility_per_ev_a3: 1.0 / 0.87,
             target_pressure_ev_a3: 0.0,
@@ -118,7 +148,14 @@ pub struct NptReport {
     /// slower than the run, and a two standard error window misses a real
     /// bias about one time in twenty. Treat a `true` as "no evidence of
     /// bias at this run length", not as a measured zero pressure.
+    /// [`NptBarostat::Berendsen`] leaves this `false`: the screen needs
+    /// ensemble errors that barostat does not produce.
     pub pressure_converged: bool,
+    /// Whether the standard errors are fluctuations of the NPT ensemble.
+    /// `false` for [`NptBarostat::Berendsen`], which reports means only:
+    /// both standard errors are zero and both resolved flags are `false`,
+    /// and those zeros are not a measured variance.
+    pub ensemble_fluctuations: bool,
 }
 
 /// Seed expansion of Steele, Lea and Flood (the SplitMix64 generator).
@@ -293,6 +330,24 @@ fn summarize(
 ) -> Result<NptReport, SaddleError> {
     let lattice = blocked_statistics(lattice)?;
     let pressure_stats = blocked_statistics(pressure)?;
+    let blocks = pressure.len() / config.block_steps;
+    // Berendsen does not sample the NPT volume distribution. Reporting a
+    // blocking error would present a coupling-dependent number as an
+    // ensemble fluctuation, so the means are kept and the errors are not.
+    if config.barostat == NptBarostat::Berendsen {
+        return Ok(NptReport {
+            steps,
+            blocks,
+            mean_lattice_a: lattice.mean,
+            lattice_standard_error: 0.0,
+            lattice_error_resolved: false,
+            mean_pressure: pressure_stats.mean,
+            pressure_standard_error: 0.0,
+            pressure_error_resolved: false,
+            pressure_converged: false,
+            ensemble_fluctuations: false,
+        });
+    }
     let residual = (pressure_stats.mean - config.target_pressure_ev_a3).abs();
     let within = if pressure_stats.standard_error == 0.0 {
         residual == 0.0
@@ -301,7 +356,7 @@ fn summarize(
     };
     Ok(NptReport {
         steps,
-        blocks: pressure.len() / config.block_steps,
+        blocks,
         mean_lattice_a: lattice.mean,
         lattice_standard_error: lattice.standard_error,
         lattice_error_resolved: lattice.resolved,
@@ -309,6 +364,7 @@ fn summarize(
         pressure_standard_error: pressure_stats.standard_error,
         pressure_error_resolved: pressure_stats.resolved,
         pressure_converged: pressure_stats.resolved && within,
+        ensemble_fluctuations: true,
     })
 }
 
@@ -383,7 +439,97 @@ fn validate(
             "NPT cell must have a finite, non-zero volume".into(),
         ));
     }
+    require_cubic_cell(cell)?;
+    if !extension_schedule_fits(config.steps, config.extension_steps, config.maximum_steps) {
+        return Err(SaddleError::Invalid(
+            "NPT extension_steps overflows the step counter".into(),
+        ));
+    }
     Ok(())
+}
+
+/// Relative tolerance on edge lengths and on the cosine of the cell angles.
+/// A cell outside it is refused. It is not rescaled into a cube.
+const CUBIC_TOLERANCE: f64 = 1.0e-8;
+
+/// The reported lattice parameter is `cbrt(volume) / repeats`, which is the
+/// conventional cubic lattice constant. A non-cubic cell is an error.
+fn require_cubic_cell(cell: Cell) -> Result<(), SaddleError> {
+    let rows = cell.0;
+    let mut length = [0.0; 3];
+    for (index, row) in rows.iter().enumerate() {
+        length[index] = (row[0] * row[0] + row[1] * row[1] + row[2] * row[2]).sqrt();
+    }
+    let edge = length[0];
+    let refused = || {
+        SaddleError::Invalid(
+            "NPT lattice sampling reports one lattice parameter and accepts only a cubic cell"
+                .into(),
+        )
+    };
+    if !(edge.is_finite() && edge > 0.0) {
+        return Err(refused());
+    }
+    for len in length {
+        if (len - edge).abs() > CUBIC_TOLERANCE * edge {
+            return Err(refused());
+        }
+    }
+    for left in 0..3 {
+        for right in (left + 1)..3 {
+            let dot = rows[left][0] * rows[right][0]
+                + rows[left][1] * rows[right][1]
+                + rows[left][2] * rows[right][2];
+            if dot.abs() > CUBIC_TOLERANCE * edge * edge {
+                return Err(refused());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether every checkpoint before `maximum` can add `extension` without
+/// wrapping the step counter. A wrapped add skips the final report.
+fn extension_schedule_fits(steps: usize, extension: usize, maximum: usize) -> bool {
+    if extension == 0 {
+        return false;
+    }
+    if steps > maximum {
+        return false;
+    }
+    if steps == maximum {
+        return true;
+    }
+    let Some(room) = usize::MAX.checked_sub(extension) else {
+        return false;
+    };
+    if steps > room {
+        return false;
+    }
+    // Every index below `maximum` can take the add.
+    if maximum - 1 <= room {
+        return true;
+    }
+    // Otherwise the last checkpoint that is still safe to add to must land
+    // on `maximum` or beyond. Landing strictly between `room` and
+    // `maximum` would overflow on the following add.
+    let k_max = (room - steps) / extension;
+    let last_safe = steps + k_max * extension;
+    match last_safe.checked_add(extension) {
+        Some(next) => next >= maximum,
+        None => false,
+    }
+}
+
+fn advance_checkpoint(
+    current: usize,
+    extension: usize,
+    maximum: usize,
+) -> Result<usize, SaddleError> {
+    let sum = current.checked_add(extension).ok_or_else(|| {
+        SaddleError::Invalid("NPT extension_steps overflows the step counter".into())
+    })?;
+    Ok(sum.min(maximum))
 }
 
 /// Run isotropic NPT dynamics and return block standard errors.
@@ -391,8 +537,21 @@ fn validate(
 /// `evaluate` returns `(energy, gradient, tension-positive stress)` for
 /// Cartesian `positions` and the row-major `cell`.  Energy is accepted for
 /// evaluator compatibility but is not used by the integrator.  A run extends
-/// by `extension_steps` until the zero-pressure rule is met or
-/// `maximum_steps` is reached.
+/// by `extension_steps` until the pressure screen is met or `maximum_steps`
+/// is reached.  The cell must be cubic: equal, orthogonal edges within a
+/// relative tolerance of `1e-8`.  Outside that tolerance the call is
+/// refused rather than reporting `cbrt(volume) / repeats` for a cell that
+/// is not a cube.  The reported lattice parameter is that quotient, with
+/// [`NptConfig::repeats`] the number of conventional cells along an edge.
+///
+/// The default barostat is stochastic cell rescaling.  Its log-volume
+/// increment is the Berendsen drift plus the noise of Bernetti and Bussi
+/// (J. Chem. Phys. 153, 114107 (2020), doi:10.1063/5.0020514, eq. 5).
+/// Positions and the cell are scaled by the exponential of one third of
+/// that increment, and the velocities by the inverse, because the pressure
+/// uses the instantaneous kinetic energy.  [`NptBarostat::Berendsen`] keeps
+/// the deterministic rescaling, limited to half a percent, and reports no
+/// ensemble fluctuations.
 ///
 /// # Errors
 ///
@@ -400,8 +559,9 @@ fn validate(
 /// of freedom once the centre-of-mass momentum is removed, when `positions`
 /// is empty or not a multiple of three, when a control is not finite and
 /// positive (the target pressure only has to be finite), when the run is
-/// too short for two production blocks, or when the cell has no volume.
-/// [`SaddleError::NonFinite`]
+/// too short for two production blocks, when the cell has no volume, when
+/// the cell is not cubic, or when adding `extension_steps` to the step
+/// counter would overflow. [`SaddleError::NonFinite`]
 /// when `positions` or `cell` hold a NaN or an infinity, or when the
 /// evaluator or the integration produces one; no partial report is
 /// returned. Invalid input is refused before `evaluate` is called and
@@ -476,17 +636,45 @@ where
         if !hydrostatic_stress.is_finite() {
             return Err(SaddleError::NonFinite("NPT pressure"));
         }
-        let drive = hydrostatic_stress + config.target_pressure_ev_a3;
-        let volume_factor =
-            (1.0 - config.compressibility_per_ev_a3 * dt / tau * drive).clamp(0.995, 1.005);
-        if !volume_factor.is_finite() {
+        let internal_pressure = -hydrostatic_stress;
+        let coupling = config.compressibility_per_ev_a3 * dt / tau;
+        let (length_factor, scale_velocities) = match config.barostat {
+            NptBarostat::StochasticCellRescaling => {
+                // Eq. 5 of Bernetti and Bussi, integrated on the log volume.
+                // The Wiener increment has variance `dt`.
+                let drift = -coupling * (config.target_pressure_ev_a3 - internal_pressure);
+                let diffusion = (2.0 * thermal * coupling / volume).sqrt();
+                if !drift.is_finite() || !diffusion.is_finite() {
+                    return Err(SaddleError::NonFinite("NPT barostat volume factor"));
+                }
+                let d_log_volume = drift + diffusion * rng.normal();
+                if !d_log_volume.is_finite() {
+                    return Err(SaddleError::NonFinite("NPT barostat volume factor"));
+                }
+                ((d_log_volume / 3.0).exp(), true)
+            }
+            NptBarostat::Berendsen => {
+                let drive = config.target_pressure_ev_a3 - internal_pressure;
+                let volume_factor = (1.0 - coupling * drive).clamp(0.995, 1.005);
+                if !volume_factor.is_finite() || volume_factor <= 0.0 {
+                    return Err(SaddleError::NonFinite("NPT barostat volume factor"));
+                }
+                (volume_factor.cbrt(), false)
+            }
+        };
+        if !length_factor.is_finite() || length_factor <= 0.0 {
             return Err(SaddleError::NonFinite("NPT barostat volume factor"));
         }
-        let length_factor = volume_factor.cbrt();
         *positions *= length_factor;
         for row in &mut cell.0 {
             for value in row {
                 *value *= length_factor;
+            }
+        }
+        if scale_velocities {
+            velocity *= 1.0 / length_factor;
+            if velocity.iter().any(|value| !value.is_finite()) {
+                return Err(SaddleError::NonFinite("NPT velocity"));
             }
         }
 
@@ -505,10 +693,21 @@ where
                 return Ok(current);
             }
             report = Some(current);
-            next_check = (next_check + config.extension_steps).min(config.maximum_steps);
+            next_check =
+                advance_checkpoint(next_check, config.extension_steps, config.maximum_steps)?;
         }
     }
-    report.ok_or_else(|| SaddleError::Invalid("NPT run produced no report".into()))
+    // A checkpoint that was never visited must not hand back the previous
+    // one. The samples collected through the last step are the final state.
+    if lattice_samples.is_empty() {
+        return report.ok_or_else(|| SaddleError::Invalid("NPT run produced no report".into()));
+    }
+    summarize(
+        &lattice_samples,
+        &pressure_samples,
+        config,
+        config.maximum_steps,
+    )
 }
 
 #[cfg(test)]
@@ -686,6 +885,18 @@ mod tests {
         // A NaN used to vanish into a zero standard error.
         assert!(blocked_statistics(&[f64::NAN; 40]).is_err());
         assert!(blocked_statistics(&[f64::NAN, 1.0, 2.0]).is_err());
+    }
+
+    #[test]
+    fn extension_schedule_rejects_a_counter_that_would_wrap() {
+        assert!(extension_schedule_fits(40, 1_000, 4_000));
+        assert!(extension_schedule_fits(40, usize::MAX, 40));
+        assert!(!extension_schedule_fits(40, usize::MAX, usize::MAX));
+        assert!(!extension_schedule_fits(usize::MAX - 5, 10, usize::MAX));
+        assert!(extension_schedule_fits(10, usize::MAX / 2, 1_000));
+        assert!(!extension_schedule_fits(10, usize::MAX / 2, usize::MAX));
+        assert!(advance_checkpoint(40, 1_000, 4_000).is_ok());
+        assert!(advance_checkpoint(usize::MAX - 5, 10, usize::MAX).is_err());
     }
 
     #[test]

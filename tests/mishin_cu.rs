@@ -3295,9 +3295,8 @@ fn cart_of(key: (i32, i32, i32), a: f64) -> [f64; 3] {
 }
 
 /// `rgsaddle::npt_lattice` on the 6x6x6 Mishin cell: Langevin dynamics
-/// plus a Berendsen barostat whose pressure is the configurational
-/// stress, which this EAM returns tension-positive, plus the kinetic
-/// pressure.
+/// plus the selected barostat. The stress this EAM returns is
+/// tension-positive, and the barostat adds the kinetic pressure.
 fn npt_lattice_run(
     copper: &FastCopper,
     temperature: f64,
@@ -4986,8 +4985,10 @@ fn rotations_onto(from: [f64; 3], to: [f64; 3]) -> Vec<[[f64; 3]; 3]> {
 /// Zero-pressure lattice parameter of the Mishin crystal, in Angstrom.
 ///
 /// These come from `rgsaddle::npt_lattice` with the kinetic pressure
-/// included, one default 4000 step run per temperature (2000 discarded),
-/// seed `17 T + 11`. Regenerate them with
+/// included and the Berendsen barostat, one 4000 step run per temperature
+/// (2000 discarded), seed `17 T + 11`. That barostat is now
+/// `NptBarostat::Berendsen`. Regenerating with the default stochastic
+/// cell rescaling does not repeat these values. The command is
 /// `cargo test --release --test mishin_cu npt_lattice_table -- --ignored --nocapture`.
 ///
 /// Each entry is one run, so it carries the seed to seed scatter of a
