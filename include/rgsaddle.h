@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 62u
+#define RGSADDLE_ABI_MINOR 63u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -104,8 +104,8 @@ extern "C" {
 #define RGSADDLE_BAND_STRING (1ull << 5)
 
 /**
- * Min-mode config flags bit 0, ABI minor 62. rotation_angle_tol was
- * set explicitly. With the bit clear and version.minor >= 62,
+ * Min-mode config flags bit 0, ABI minor 63. rotation_angle_tol was
+ * set explicitly. With the bit clear and version.minor >= 63,
  * rgsaddle_minmode_create keeps the Rust default angle tolerance (five
  * degrees) when rotation_angle_tol is 0. With the bit set, the call
  * reads rotation_angle_tol as given, including 0.
@@ -591,8 +591,8 @@ typedef struct {
    * Minor 5: the dimer also stops rotating when an iteration's optimal
    * angle falls under this (radians). The Rust default is five degrees
    * (Kästner and Sherwood, J. Chem. Phys. 128, 014106 (2008); eOn
-   * converged_angle). For config minors 5 through 61 this field is read
-   * as given, and 0 disables the angle test. From minor 62, a value of
+   * converged_angle). For config minors 5 through 62 this field is read
+   * as given, and 0 disables the angle test. From minor 63, a value of
    * 0 keeps the Rust default unless
    * RGSADDLE_MINMODE_EXPLICIT_ROTATION_ANGLE_TOL is set; with that bit,
    * 0 disables the test. Ignored when version.minor < 5.
@@ -1324,7 +1324,7 @@ rgsaddle_status_t rgsaddle_minmode_set_highs(RgsaddleMinMode *session, int32_t e
  * Lanczos or the improved dimer angle test is disabled
  * (rotation_angle_tol <= 0). From ABI minor 46 an improved dimer with
  * positive rotation_angle_tol leaves the classic window off unless
- * `window` is 1. From ABI minor 62, a caller that leaves
+ * `window` is 1. From ABI minor 63, a caller that leaves
  * rotation_angle_tol at 0 with
  * RGSADDLE_MINMODE_EXPLICIT_ROTATION_ANGLE_TOL clear uses the default
  * improved-dimer angle stop and therefore leaves the classic window off
