@@ -169,6 +169,8 @@ contains
   subroutine check_default_configs_match_rust()
     type(rgsaddle_band_config_t) :: bcfg
     type(rgsaddle_ohtst_config_t) :: ocfg
+    type(rgsaddle_pafi_config_t) :: pcfg
+    type(rgsaddle_minmode_config_t) :: mcfg
     call init_band_config(bcfg)
     call check_i64("band flags", int(bcfg%flags, c_int), int(RGSADDLE_BAND_CI_AFTER, c_int))
     if (.not. close_enough(bcfg%ci_trigger_factor, 0.0_c_double, 1.0_c_double)) stop 6
@@ -186,6 +188,33 @@ contains
     if (ocfg%shooting_shots /= 256_c_int64_t) stop 6
     if (ocfg%shooting_seed /= 1_c_int64_t) stop 6
     if (ocfg%counting /= int(RGSADDLE_OHTST_COUNT_FIRST_CROSSING, c_int32_t)) stop 6
+
+    call init_pafi_config(pcfg)
+    if (.not. close_enough(pcfg%thermal, 0.02585_c_double, 1.0_c_double)) stop 6
+    if (.not. close_enough(pcfg%mobility, 1.0_c_double, 1.0_c_double)) stop 6
+    if (.not. close_enough(pcfg%time_step, 1.0e-3_c_double, 1.0_c_double)) stop 6
+    if (pcfg%thermalize /= 200_c_int64_t) stop 6
+    if (pcfg%stride /= 5_c_int64_t) stop 6
+    if (pcfg%samples /= 200_c_int64_t) stop 6
+    if (pcfg%blocks /= 5_c_int64_t) stop 6
+    if (pcfg%seed /= 1_c_int64_t) stop 6
+    if (pcfg%fix_com /= 1_c_int32_t) stop 6
+    if (pcfg%retain /= 16_c_int64_t) stop 6
+    if (.not. close_enough(pcfg%target_error, 0.0_c_double, 1.0_c_double)) stop 6
+    if (pcfg%max_rounds /= 4_c_int64_t) stop 6
+
+    call init_minmode_config(mcfg)
+    if (mcfg%kind /= int(RGSADDLE_MINMODE_DIMER, c_int32_t)) stop 6
+    if (.not. close_enough(mcfg%dr, 1.0e-3_c_double, 1.0_c_double)) stop 6
+    if (.not. close_enough(mcfg%rotation_tol, 1.0e-4_c_double, 1.0_c_double)) stop 6
+    if (mcfg%max_rotations /= 20_c_int64_t) stop 6
+    if (mcfg%krylov_dim /= 12_c_int64_t) stop 6
+    if (.not. close_enough(mcfg%force_tol, 1.0e-3_c_double, 1.0_c_double)) stop 6
+    if (.not. close_enough(mcfg%max_move, 0.2_c_double, 1.0_c_double)) stop 6
+    if (mcfg%difference /= 0_c_int32_t) stop 6
+    if (mcfg%method /= int(RGSADDLE_METHOD_FIRE, c_int32_t)) stop 6
+    if (.not. close_enough(mcfg%rotation_angle_tol, &
+        5.0_c_double * acos(-1.0_c_double) / 180.0_c_double, 1.0_c_double)) stop 6
   end subroutine check_default_configs_match_rust
 
   subroutine check_create_keeps_live_handle_on_invalid_args()
