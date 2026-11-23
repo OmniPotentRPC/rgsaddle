@@ -109,6 +109,14 @@ fn as_i64_saturated(value: usize) -> i64 {
     }
 }
 
+/// The total of per-plane evaluation counts, or `None` when it does not
+/// fit in an `int64_t`.
+fn summed_evaluations(counts: impl IntoIterator<Item = usize>) -> Option<i64> {
+    counts.into_iter().try_fold(0i64, |total, count| {
+        total.checked_add(i64::try_from(count).ok()?)
+    })
+}
+
 /// The PAFI config a C value asks for, or the status that refuses it.
 fn parse_pafi_config(config: &RgsaddlePafiConfig) -> Result<PafiConfig, i32> {
     if config.version.major != RGSADDLE_ABI_MAJOR {
@@ -295,12 +303,11 @@ pub unsafe extern "C" fn rgsaddle_pafi_result(
     let Some(profile) = session.profile.as_ref() else {
         return RGSADDLE_NO_EVALUATION;
     };
-    let evaluations: i64 = session
-        .planes
-        .iter()
-        .map(|plane| i64::try_from(plane.evaluations))
-        .collect::<Result<Vec<_>, _>>()
-        .map_or(i64::MAX, |values| values.into_iter().sum());
+    let Some(evaluations) =
+        summed_evaluations(session.planes.iter().map(|plane| plane.evaluations))
+    else {
+        return RGSADDLE_SHAPE;
+    };
     let out = unsafe { &mut *out };
     stamp(&mut out.version);
     out.flags = 0;
@@ -1053,6 +1060,48 @@ mod tests {
             );
         }
         unsafe { rgsaddle_ohtst_free(ohtst) };
+    }
+
+    #[test]
+    fn an_evaluation_total_past_int64_is_refused() {
+        assert_eq!(summed_evaluations([]), Some(0));
+        assert_eq!(summed_evaluations([3, 4]), Some(7));
+        let max = usize::try_from(i64::MAX).expect("64-bit usize");
+        assert_eq!(summed_evaluations([max]), Some(i64::MAX));
+        assert_eq!(summed_evaluations([max, 1]), None);
+        assert_eq!(summed_evaluations([max / 2 + 1, max / 2 + 1]), None);
+        assert_eq!(summed_evaluations([max + 1]), None);
+
+        let frames = [-1.0, 0.0, 1.0];
+        let session = unsafe {
+            rgsaddle_pafi_create(&pafi_config(), 3, 1, frames.as_ptr(), std::ptr::null(), 0)
+        };
+        assert!(!session.is_null());
+        assert_eq!(
+            unsafe { rgsaddle_pafi_run(session, Some(pafi_along_x), std::ptr::null_mut()) },
+            RGSADDLE_OK
+        );
+        unsafe {
+            for plane in &mut (*session).planes {
+                plane.evaluations = max;
+            }
+        }
+        let mut result = RgsaddlePafiResult {
+            version: RgsaddleVersion { major: 0, minor: 0 },
+            flags: 0,
+            barrier: 0.0,
+            barrier_error: 0.0,
+            dividing: -1,
+            samples: 0,
+            evaluations: 7,
+        };
+        assert_eq!(
+            unsafe { rgsaddle_pafi_result(session, &mut result) },
+            RGSADDLE_SHAPE
+        );
+        assert_eq!(result.evaluations, 7);
+        assert_eq!(result.version.major, 0);
+        unsafe { rgsaddle_pafi_free(session) };
     }
 
     #[test]
