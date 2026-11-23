@@ -493,13 +493,15 @@ pub struct BandConfig {
     /// doi:10.1063/1.4962019: one terminal image moves subject to the
     /// energy level-set constraint \(E(x_{\mathrm{end}}) = E_{\mathrm{target}}\)
     /// with repeated adaptive cut-and-remesh around the detected saddle.
-    /// `None`, the default, keeps both endpoints fixed.
+    /// `None`, the default, keeps both endpoints fixed. Not combined
+    /// with [`BandConfig::dynamic`]: session construction refuses both.
     pub free_end: Option<FreeEndConfig>,
     /// Dynamic NEB ([`DynamicNeb`]). `None`, the default, evaluates
     /// every image on every step. Images under the threshold keep their
     /// last energy and force, stay in the spring and the tangent, and
     /// are evaluated again when a neighbour moves enough that the
-    /// projected force exceeds the threshold.
+    /// projected force exceeds the threshold. Not combined with
+    /// [`BandConfig::free_end`]: session construction refuses both.
     pub dynamic: Option<DynamicNeb>,
 }
 
@@ -3783,8 +3785,9 @@ impl BandSession {
 
     /// Turn dynamic NEB on or off between steps. `None` restores a
     /// full evaluation of every image. The image cache is dropped, so
-    /// the next step evaluates the band again. A solid-state band and
-    /// the trust-region stepper are refused.
+    /// the next step evaluates the band again. A solid-state band, the
+    /// trust-region stepper, the simplified string method, and
+    /// free-end adaptive NEB are refused.
     pub fn set_dynamic(&mut self, dynamic: Option<DynamicNeb>) -> Result<(), SaddleError> {
         if let Some(spec) = dynamic {
             spec.check()?;
@@ -3802,6 +3805,11 @@ impl BandSession {
                 return Err(SaddleError::Invalid(
                     "dynamic NEB is for the NEB; the simplified string method evaluates every image"
                         .into(),
+                ));
+            }
+            if self.config.free_end.is_some() {
+                return Err(SaddleError::Invalid(
+                    "dynamic NEB cannot be combined with free-end adaptive NEB".into(),
                 ));
             }
         }

@@ -17,8 +17,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ndarray::{Array1, Array2, ArrayView2, array};
 use rgsaddle::{
-    BandConfig, BandSession, BandStatus, BandSurface, CiConfig, DEFAULT_FORCE_TOL, FeaNebSession,
-    FreeEndConfig, FreeEndSide, SaddleError, SaddleIndexCheck, SpringKind, linear_path,
+    BandConfig, BandSession, BandStatus, BandSurface, CiConfig, DEFAULT_FORCE_TOL, DynamicNeb,
+    FeaNebSession, FreeEndConfig, FreeEndSide, SaddleError, SaddleIndexCheck, SpringKind,
+    linear_path,
 };
 
 /// Narrow barrier near `x = 0.82` on a long tilted 2D valley `y = 0.25 x`
@@ -770,4 +771,52 @@ fn assert_cached_matches(session: &BandSession, surface: &impl BandSurface) {
     assert_eq!(held.energies, energies);
     assert_eq!(held.gradients, gradients);
     assert_eq!(held.projected.dim(), (n_images - 2, dof));
+}
+
+#[test]
+fn free_end_refuses_dynamic_neb() {
+    let free_end = FreeEndConfig::default();
+    let dynamic = DynamicNeb::default();
+
+    let both = BandConfig::default()
+        .with_free_end(free_end)
+        .with_dynamic(dynamic);
+    let err = match BandSession::new(both.clone(), tilted_band()) {
+        Err(err) => err,
+        Ok(_) => panic!("a band with free_end and dynamic was accepted"),
+    };
+    assert!(matches!(&err, SaddleError::Invalid(_)), "{err:?}");
+    assert!(
+        err.to_string().contains("dynamic NEB"),
+        "the error names the conflict: {err}"
+    );
+    assert!(matches!(
+        FeaNebSession::new(
+            BandConfig::default().with_dynamic(dynamic),
+            free_end,
+            tilted_band()
+        ),
+        Err(SaddleError::Invalid(_))
+    ));
+
+    let mut dynamic_band =
+        BandSession::new(BandConfig::default().with_dynamic(dynamic), tilted_band())
+            .expect("dynamic session");
+    assert!(matches!(
+        dynamic_band.set_free_end(Some(free_end)),
+        Err(SaddleError::Invalid(_))
+    ));
+    assert_eq!(dynamic_band.free_end(), None);
+
+    let mut free_end_band =
+        BandSession::new(BandConfig::default().with_free_end(free_end), tilted_band())
+            .expect("free-end session");
+    let err = free_end_band
+        .set_dynamic(Some(dynamic))
+        .expect_err("dynamic on a free-end band");
+    assert!(matches!(&err, SaddleError::Invalid(_)), "{err:?}");
+    assert!(err.to_string().contains("free-end"), "{err}");
+    free_end_band
+        .set_dynamic(None)
+        .expect("clearing is allowed");
 }
