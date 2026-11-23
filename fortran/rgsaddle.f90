@@ -194,7 +194,7 @@ module rgsaddle
 
   type, public :: band_handle
     private
-    type(c_ptr) :: raw = c_null_ptr
+    type(c_ptr), allocatable :: raw
   contains
     final :: band_finalize
     procedure, public :: create => band_create
@@ -207,7 +207,7 @@ module rgsaddle
 
   type, public :: minmode_handle
     private
-    type(c_ptr) :: raw = c_null_ptr
+    type(c_ptr), allocatable :: raw
   contains
     final :: minmode_finalize
     procedure, public :: create => minmode_create
@@ -221,7 +221,7 @@ module rgsaddle
 
   type, public :: pafi_handle
     private
-    type(c_ptr) :: raw = c_null_ptr
+    type(c_ptr), allocatable :: raw
   contains
     final :: pafi_finalize
     procedure, public :: create => pafi_create
@@ -236,7 +236,7 @@ module rgsaddle
 
   type, public :: ohtst_handle
     private
-    type(c_ptr) :: raw = c_null_ptr
+    type(c_ptr), allocatable :: raw
   contains
     final :: ohtst_finalize
     procedure, public :: create => ohtst_create
@@ -453,13 +453,13 @@ module rgsaddle
 
 contains
 
-  function abi_stamp(out) result(status)
+  recursive function abi_stamp(out) result(status)
     type(rgsaddle_version_t), intent(out) :: out
     integer(c_int) :: status
     status = c_rgsaddle_abi_stamp(out)
   end function abi_stamp
 
-  function status_name(status) result(name)
+  recursive function status_name(status) result(name)
     integer(c_int), value :: status
     character(len=:), allocatable :: name
     type(c_ptr) :: ptr
@@ -482,7 +482,7 @@ contains
     end do
   end function status_name
 
-  subroutine init_band_config(config)
+  recursive subroutine init_band_config(config)
     type(rgsaddle_band_config_t), intent(out) :: config
     integer(c_int) :: status
     config = rgsaddle_band_config_t(rgsaddle_version_t(0_c_int32_t, 0_c_int32_t), 0_c_int64_t, &
@@ -491,7 +491,7 @@ contains
     status = abi_stamp(config%version)
   end subroutine init_band_config
 
-  subroutine init_minmode_config(config, kind)
+  recursive subroutine init_minmode_config(config, kind)
     type(rgsaddle_minmode_config_t), intent(out) :: config
     integer(c_int32_t), intent(in), optional :: kind
     integer(c_int) :: status
@@ -515,7 +515,7 @@ contains
     status = abi_stamp(config%version)
   end subroutine init_minmode_config
 
-  subroutine init_pafi_config(config)
+  recursive subroutine init_pafi_config(config)
     type(rgsaddle_pafi_config_t), intent(out) :: config
     integer(c_int) :: status
     config = rgsaddle_pafi_config_t(rgsaddle_version_t(0_c_int32_t, 0_c_int32_t), 0_c_int64_t, &
@@ -524,7 +524,7 @@ contains
     status = abi_stamp(config%version)
   end subroutine init_pafi_config
 
-  subroutine init_ohtst_config(config)
+  recursive subroutine init_ohtst_config(config)
     type(rgsaddle_ohtst_config_t), intent(out) :: config
     integer(c_int) :: status
     config = rgsaddle_ohtst_config_t(rgsaddle_version_t(0_c_int32_t, 0_c_int32_t), 0_c_int64_t, &
@@ -535,12 +535,13 @@ contains
     status = abi_stamp(config%version)
   end subroutine init_ohtst_config
 
-  integer(c_int) function band_create(self, config, n_images, n_atoms, positions) result(status)
+  recursive integer(c_int) function band_create(self, config, n_images, n_atoms, positions) result(status)
     class(band_handle), intent(inout) :: self
     type(rgsaddle_band_config_t), intent(in) :: config
     integer(c_int64_t), value :: n_images
     integer(c_int64_t), value :: n_atoms
     real(c_double), intent(in) :: positions(*)
+    type(c_ptr) :: ptr
     logical :: shape_ok
     call band_finalize(self)
     shape_ok = n_images >= 3_c_int64_t .and. n_atoms >= 1_c_int64_t
@@ -551,12 +552,12 @@ contains
       status = create_status(c_null_ptr, config%version%major, shape_ok)
       return
     end if
-    self%raw = c_rgsaddle_band_create(config, n_images, n_atoms, positions)
-    status = create_status(self%raw, config%version%major, .true.)
-    if (status /= RGSADDLE_OK) call band_finalize(self)
+    ptr = c_rgsaddle_band_create(config, n_images, n_atoms, positions)
+    status = create_status(ptr, config%version%major, .true.)
+    if (status == RGSADDLE_OK) call store_raw(self%raw, ptr)
   end function band_create
 
-  integer(c_int) function band_step(self, callback, user, out) result(status)
+  recursive integer(c_int) function band_step(self, callback, user, out) result(status)
     class(band_handle), intent(inout) :: self
     procedure(surface_proc), pointer, intent(in) :: callback
     type(c_ptr), value, intent(in), optional :: user
@@ -567,11 +568,11 @@ contains
     box%point => null()
     box%user = c_null_ptr
     if (present(user)) box%user = user
-    status = c_rgsaddle_band_step(self%raw, c_funloc(fortran_surface_trampoline), c_loc(box), report)
+    status = c_rgsaddle_band_step(raw_ptr(self%raw), c_funloc(fortran_surface_trampoline), c_loc(box), report)
     if (present(out)) out = report
   end function band_step
 
-  integer(c_int) function band_step_c(self, surface, user, out) result(status)
+  recursive integer(c_int) function band_step_c(self, surface, user, out) result(status)
     class(band_handle), intent(inout) :: self
     type(c_funptr), value :: surface
     type(c_ptr), value, intent(in), optional :: user
@@ -580,22 +581,23 @@ contains
     type(c_ptr) :: user_ptr
     user_ptr = c_null_ptr
     if (present(user)) user_ptr = user
-    status = c_rgsaddle_band_step(self%raw, surface, user_ptr, report)
+    status = c_rgsaddle_band_step(raw_ptr(self%raw), surface, user_ptr, report)
     if (present(out)) out = report
   end function band_step_c
 
-  integer(c_int) function band_positions(self, positions) result(status)
+  recursive integer(c_int) function band_positions(self, positions) result(status)
     class(band_handle), intent(in) :: self
     real(c_double), intent(out) :: positions(*)
-    status = c_rgsaddle_band_positions(self%raw, positions)
+    status = c_rgsaddle_band_positions(raw_ptr(self%raw), positions)
   end function band_positions
 
-  integer(c_int) function minmode_create(self, config, n_atoms, position, mode) result(status)
+  recursive integer(c_int) function minmode_create(self, config, n_atoms, position, mode) result(status)
     class(minmode_handle), intent(inout) :: self
     type(rgsaddle_minmode_config_t), intent(in) :: config
     integer(c_int64_t), value :: n_atoms
     real(c_double), intent(in) :: position(*)
     real(c_double), intent(in) :: mode(*)
+    type(c_ptr) :: ptr
     logical :: shape_ok
     call minmode_finalize(self)
     shape_ok = n_atoms >= 1_c_int64_t
@@ -606,12 +608,12 @@ contains
       status = create_status(c_null_ptr, config%version%major, shape_ok)
       return
     end if
-    self%raw = c_rgsaddle_minmode_create(config, n_atoms, position, mode)
-    status = create_status(self%raw, config%version%major, .true.)
-    if (status /= RGSADDLE_OK) call minmode_finalize(self)
+    ptr = c_rgsaddle_minmode_create(config, n_atoms, position, mode)
+    status = create_status(ptr, config%version%major, .true.)
+    if (status == RGSADDLE_OK) call store_raw(self%raw, ptr)
   end function minmode_create
 
-  integer(c_int) function minmode_step(self, callback, user, out) result(status)
+  recursive integer(c_int) function minmode_step(self, callback, user, out) result(status)
     class(minmode_handle), intent(inout) :: self
     procedure(surface_proc), pointer, intent(in) :: callback
     type(c_ptr), value, intent(in), optional :: user
@@ -622,11 +624,11 @@ contains
     box%point => null()
     box%user = c_null_ptr
     if (present(user)) box%user = user
-    status = c_rgsaddle_minmode_step(self%raw, c_funloc(fortran_surface_trampoline), c_loc(box), report)
+    status = c_rgsaddle_minmode_step(raw_ptr(self%raw), c_funloc(fortran_surface_trampoline), c_loc(box), report)
     if (present(out)) out = report
   end function minmode_step
 
-  integer(c_int) function minmode_step_c(self, surface, user, out) result(status)
+  recursive integer(c_int) function minmode_step_c(self, surface, user, out) result(status)
     class(minmode_handle), intent(inout) :: self
     type(c_funptr), value :: surface
     type(c_ptr), value, intent(in), optional :: user
@@ -635,30 +637,30 @@ contains
     type(c_ptr) :: user_ptr
     user_ptr = c_null_ptr
     if (present(user)) user_ptr = user
-    status = c_rgsaddle_minmode_step(self%raw, surface, user_ptr, report)
+    status = c_rgsaddle_minmode_step(raw_ptr(self%raw), surface, user_ptr, report)
     if (present(out)) out = report
   end function minmode_step_c
 
-  integer(c_int) function minmode_position(self, position) result(status)
+  recursive integer(c_int) function minmode_position(self, position) result(status)
     class(minmode_handle), intent(in) :: self
     real(c_double), intent(out) :: position(*)
-    status = c_rgsaddle_minmode_position(self%raw, position)
+    status = c_rgsaddle_minmode_position(raw_ptr(self%raw), position)
   end function minmode_position
 
-  integer(c_int) function minmode_mode(self, mode) result(status)
+  recursive integer(c_int) function minmode_mode(self, mode) result(status)
     class(minmode_handle), intent(in) :: self
     real(c_double), intent(out) :: mode(*)
-    status = c_rgsaddle_minmode_mode(self%raw, mode)
+    status = c_rgsaddle_minmode_mode(raw_ptr(self%raw), mode)
   end function minmode_mode
 
-  integer(c_int) function pafi_create(self, config, n_frames, n_dof, frames, arcs) result(status)
+  recursive integer(c_int) function pafi_create(self, config, n_frames, n_dof, frames, arcs) result(status)
     class(pafi_handle), intent(inout) :: self
     type(rgsaddle_pafi_config_t), intent(in) :: config
     integer(c_int64_t), value :: n_frames
     integer(c_int64_t), value :: n_dof
     real(c_double), intent(in) :: frames(*)
     real(c_double), intent(in), contiguous, target, optional :: arcs(:)
-    type(c_ptr) :: arcs_ptr
+    type(c_ptr) :: arcs_ptr, ptr
     integer(c_int64_t) :: n_arcs
     logical :: shape_ok
     call pafi_finalize(self)
@@ -678,22 +680,24 @@ contains
       status = create_status(c_null_ptr, config%version%major, shape_ok)
       return
     end if
-    self%raw = c_rgsaddle_pafi_create(config, n_frames, n_dof, frames, arcs_ptr, n_arcs)
-    status = create_status(self%raw, config%version%major, .true.)
-    if (status /= RGSADDLE_OK) call pafi_finalize(self)
+    ptr = c_rgsaddle_pafi_create(config, n_frames, n_dof, frames, arcs_ptr, n_arcs)
+    status = create_status(ptr, config%version%major, .true.)
+    if (status == RGSADDLE_OK) call store_raw(self%raw, ptr)
   end function pafi_create
 
-  integer(c_int) function pafi_set_config(self, config) result(status)
+  recursive integer(c_int) function pafi_set_config(self, config) result(status)
     class(pafi_handle), intent(inout) :: self
     type(rgsaddle_pafi_config_t), intent(in) :: config
-    if (.not. c_associated(self%raw)) then
+    type(c_ptr) :: ptr
+    ptr = raw_ptr(self%raw)
+    if (.not. c_associated(ptr)) then
       status = RGSADDLE_NULL_SESSION
       return
     end if
-    status = c_rgsaddle_pafi_set_config(self%raw, config)
+    status = c_rgsaddle_pafi_set_config(ptr, config)
   end function pafi_set_config
 
-  integer(c_int) function pafi_run(self, callback, user) result(status)
+  recursive integer(c_int) function pafi_run(self, callback, user) result(status)
     class(pafi_handle), intent(inout) :: self
     procedure(point_surface_proc), pointer, intent(in) :: callback
     type(c_ptr), value, intent(in), optional :: user
@@ -702,26 +706,26 @@ contains
     box%point => callback
     box%user = c_null_ptr
     if (present(user)) box%user = user
-    status = c_rgsaddle_pafi_run(self%raw, c_funloc(fortran_point_surface_trampoline), c_loc(box))
+    status = c_rgsaddle_pafi_run(raw_ptr(self%raw), c_funloc(fortran_point_surface_trampoline), c_loc(box))
   end function pafi_run
 
-  integer(c_int) function pafi_run_c(self, surface, user) result(status)
+  recursive integer(c_int) function pafi_run_c(self, surface, user) result(status)
     class(pafi_handle), intent(inout) :: self
     type(c_funptr), value :: surface
     type(c_ptr), value, intent(in), optional :: user
     type(c_ptr) :: user_ptr
     user_ptr = c_null_ptr
     if (present(user)) user_ptr = user
-    status = c_rgsaddle_pafi_run(self%raw, surface, user_ptr)
+    status = c_rgsaddle_pafi_run(raw_ptr(self%raw), surface, user_ptr)
   end function pafi_run_c
 
-  integer(c_int) function pafi_result(self, out) result(status)
+  recursive integer(c_int) function pafi_result(self, out) result(status)
     class(pafi_handle), intent(in) :: self
     type(rgsaddle_pafi_result_t), intent(out) :: out
-    status = c_rgsaddle_pafi_result(self%raw, out)
+    status = c_rgsaddle_pafi_result(raw_ptr(self%raw), out)
   end function pafi_result
 
-  integer(c_int) function pafi_profile(self, arcs, gradients, gradient_errors, &
+  recursive integer(c_int) function pafi_profile(self, arcs, gradients, gradient_errors, &
       free_energy, free_energy_errors, written) result(status)
     class(pafi_handle), intent(in) :: self
     real(c_double), intent(out) :: arcs(:)
@@ -736,17 +740,18 @@ contains
     cap = min(size(arcs, kind=c_int64_t), size(gradients, kind=c_int64_t), &
       size(gradient_errors, kind=c_int64_t), size(free_energy, kind=c_int64_t), &
       size(free_energy_errors, kind=c_int64_t))
-    status = c_rgsaddle_pafi_profile(self%raw, arcs, gradients, gradient_errors, &
+    status = c_rgsaddle_pafi_profile(raw_ptr(self%raw), arcs, gradients, gradient_errors, &
       free_energy, free_energy_errors, cap, n_written)
     if (present(written)) written = n_written
   end function pafi_profile
 
-  integer(c_int) function ohtst_create(self, config, n_dof, point, normal) result(status)
+  recursive integer(c_int) function ohtst_create(self, config, n_dof, point, normal) result(status)
     class(ohtst_handle), intent(inout) :: self
     type(rgsaddle_ohtst_config_t), intent(in) :: config
     integer(c_int64_t), value :: n_dof
     real(c_double), intent(in) :: point(*)
     real(c_double), intent(in) :: normal(*)
+    type(c_ptr) :: ptr
     logical :: shape_ok
     call ohtst_finalize(self)
     shape_ok = n_dof >= 1_c_int64_t
@@ -754,22 +759,24 @@ contains
       status = create_status(c_null_ptr, config%version%major, shape_ok)
       return
     end if
-    self%raw = c_rgsaddle_ohtst_create(config, n_dof, point, normal)
-    status = create_status(self%raw, config%version%major, .true.)
-    if (status /= RGSADDLE_OK) call ohtst_finalize(self)
+    ptr = c_rgsaddle_ohtst_create(config, n_dof, point, normal)
+    status = create_status(ptr, config%version%major, .true.)
+    if (status == RGSADDLE_OK) call store_raw(self%raw, ptr)
   end function ohtst_create
 
-  integer(c_int) function ohtst_set_config(self, config) result(status)
+  recursive integer(c_int) function ohtst_set_config(self, config) result(status)
     class(ohtst_handle), intent(inout) :: self
     type(rgsaddle_ohtst_config_t), intent(in) :: config
-    if (.not. c_associated(self%raw)) then
+    type(c_ptr) :: ptr
+    ptr = raw_ptr(self%raw)
+    if (.not. c_associated(ptr)) then
       status = RGSADDLE_NULL_SESSION
       return
     end if
-    status = c_rgsaddle_ohtst_set_config(self%raw, config)
+    status = c_rgsaddle_ohtst_set_config(ptr, config)
   end function ohtst_set_config
 
-  integer(c_int) function ohtst_run(self, callback, user) result(status)
+  recursive integer(c_int) function ohtst_run(self, callback, user) result(status)
     class(ohtst_handle), intent(inout) :: self
     procedure(point_surface_proc), pointer, intent(in) :: callback
     type(c_ptr), value, intent(in), optional :: user
@@ -778,26 +785,26 @@ contains
     box%point => callback
     box%user = c_null_ptr
     if (present(user)) box%user = user
-    status = c_rgsaddle_ohtst_run(self%raw, c_funloc(fortran_point_surface_trampoline), c_loc(box))
+    status = c_rgsaddle_ohtst_run(raw_ptr(self%raw), c_funloc(fortran_point_surface_trampoline), c_loc(box))
   end function ohtst_run
 
-  integer(c_int) function ohtst_run_c(self, surface, user) result(status)
+  recursive integer(c_int) function ohtst_run_c(self, surface, user) result(status)
     class(ohtst_handle), intent(inout) :: self
     type(c_funptr), value :: surface
     type(c_ptr), value, intent(in), optional :: user
     type(c_ptr) :: user_ptr
     user_ptr = c_null_ptr
     if (present(user)) user_ptr = user
-    status = c_rgsaddle_ohtst_run(self%raw, surface, user_ptr)
+    status = c_rgsaddle_ohtst_run(raw_ptr(self%raw), surface, user_ptr)
   end function ohtst_run_c
 
-  integer(c_int) function ohtst_result(self, out) result(status)
+  recursive integer(c_int) function ohtst_result(self, out) result(status)
     class(ohtst_handle), intent(in) :: self
     type(rgsaddle_ohtst_result_t), intent(out) :: out
-    status = c_rgsaddle_ohtst_result(self%raw, out)
+    status = c_rgsaddle_ohtst_result(raw_ptr(self%raw), out)
   end function ohtst_result
 
-  integer(c_int) function ohtst_curve(self, times, kappa_of_t, written) result(status)
+  recursive integer(c_int) function ohtst_curve(self, times, kappa_of_t, written) result(status)
     class(ohtst_handle), intent(in) :: self
     real(c_double), intent(out) :: times(:)
     real(c_double), intent(out) :: kappa_of_t(:)
@@ -806,39 +813,39 @@ contains
     integer(c_int64_t) :: cap
     n_written = 0_c_int64_t
     cap = min(size(times, kind=c_int64_t), size(kappa_of_t, kind=c_int64_t))
-    status = c_rgsaddle_ohtst_curve(self%raw, times, kappa_of_t, cap, n_written)
+    status = c_rgsaddle_ohtst_curve(raw_ptr(self%raw), times, kappa_of_t, cap, n_written)
     if (present(written)) written = n_written
   end function ohtst_curve
 
-  subroutine band_finalize(self)
+  recursive subroutine band_finalize(self)
     type(band_handle), intent(inout) :: self
-    if (c_associated(self%raw)) then
-      call c_rgsaddle_band_free(self%raw)
-      self%raw = c_null_ptr
+    if (allocated(self%raw)) then
+      if (c_associated(self%raw)) call c_rgsaddle_band_free(self%raw)
+      deallocate(self%raw)
     end if
   end subroutine band_finalize
 
-  subroutine minmode_finalize(self)
+  recursive subroutine minmode_finalize(self)
     type(minmode_handle), intent(inout) :: self
-    if (c_associated(self%raw)) then
-      call c_rgsaddle_minmode_free(self%raw)
-      self%raw = c_null_ptr
+    if (allocated(self%raw)) then
+      if (c_associated(self%raw)) call c_rgsaddle_minmode_free(self%raw)
+      deallocate(self%raw)
     end if
   end subroutine minmode_finalize
 
-  subroutine pafi_finalize(self)
+  recursive subroutine pafi_finalize(self)
     type(pafi_handle), intent(inout) :: self
-    if (c_associated(self%raw)) then
-      call c_rgsaddle_pafi_free(self%raw)
-      self%raw = c_null_ptr
+    if (allocated(self%raw)) then
+      if (c_associated(self%raw)) call c_rgsaddle_pafi_free(self%raw)
+      deallocate(self%raw)
     end if
   end subroutine pafi_finalize
 
-  subroutine ohtst_finalize(self)
+  recursive subroutine ohtst_finalize(self)
     type(ohtst_handle), intent(inout) :: self
-    if (c_associated(self%raw)) then
-      call c_rgsaddle_ohtst_free(self%raw)
-      self%raw = c_null_ptr
+    if (allocated(self%raw)) then
+      if (c_associated(self%raw)) call c_rgsaddle_ohtst_free(self%raw)
+      deallocate(self%raw)
     end if
   end subroutine ohtst_finalize
 
@@ -913,7 +920,27 @@ contains
     status = box%point(box%user, n_dof, position, energy, gradient)
   end function fortran_point_surface_trampoline
 
-  integer(c_int) function create_status(handle, major, shape_ok) result(status)
+  pure recursive function raw_ptr(slot) result(ptr)
+    type(c_ptr), allocatable, intent(in) :: slot
+    type(c_ptr) :: ptr
+    if (allocated(slot)) then
+      ptr = slot
+    else
+      ptr = c_null_ptr
+    end if
+  end function raw_ptr
+
+  recursive subroutine store_raw(slot, ptr)
+    type(c_ptr), allocatable, intent(inout) :: slot
+    type(c_ptr), value :: ptr
+    if (allocated(slot)) deallocate(slot)
+    if (c_associated(ptr)) then
+      allocate(slot)
+      slot = ptr
+    end if
+  end subroutine store_raw
+
+  recursive integer(c_int) function create_status(handle, major, shape_ok) result(status)
     type(c_ptr), intent(in) :: handle
     integer(c_int32_t), intent(in) :: major
     logical, intent(in) :: shape_ok
@@ -928,7 +955,7 @@ contains
     end if
   end function create_status
 
-  integer(c_int) function buffer_extent(n_images, n_atoms, one_image, n_pos, n_eval) result(status)
+  recursive integer(c_int) function buffer_extent(n_images, n_atoms, one_image, n_pos, n_eval) result(status)
     integer(c_int64_t), intent(in) :: n_images, n_atoms
     logical, intent(in) :: one_image
     integer(c_int64_t), intent(out) :: n_pos, n_eval
@@ -963,110 +990,90 @@ contains
     status = RGSADDLE_OK
   end function buffer_extent
 
-  pure function uint64_bits(high, low) result(bits)
+  pure recursive function uint64_bits(high, low) result(bits)
     integer(c_int64_t), intent(in) :: high, low
     integer(c_int64_t) :: bits
     integer(c_int64_t), parameter :: mask32 = int(z'FFFFFFFF', c_int64_t)
     bits = ior(shiftl(iand(high, mask32), 32), iand(low, mask32))
   end function uint64_bits
 
-  subroutine release_band(self)
+  recursive subroutine release_band(self)
     class(band_handle), intent(inout) :: self
     call band_finalize(self)
   end subroutine release_band
 
-  subroutine release_minmode(self)
+  recursive subroutine release_minmode(self)
     class(minmode_handle), intent(inout) :: self
     call minmode_finalize(self)
   end subroutine release_minmode
 
-  subroutine release_pafi(self)
+  recursive subroutine release_pafi(self)
     class(pafi_handle), intent(inout) :: self
     call pafi_finalize(self)
   end subroutine release_pafi
 
-  subroutine release_ohtst(self)
+  recursive subroutine release_ohtst(self)
     class(ohtst_handle), intent(inout) :: self
     call ohtst_finalize(self)
   end subroutine release_ohtst
 
-  subroutine move_from_band(self, src)
+  recursive subroutine move_from_band(self, src)
     class(band_handle), intent(inout) :: self
     type(band_handle), intent(inout) :: src
-    type(c_ptr) :: stolen
-    if (c_associated(self%raw, src%raw)) return
-    stolen = src%raw
+    if (c_associated(raw_ptr(self%raw), raw_ptr(src%raw))) return
     call band_finalize(self)
-    self%raw = stolen
-    src%raw = c_null_ptr
+    if (allocated(src%raw)) call move_alloc(src%raw, self%raw)
   end subroutine move_from_band
 
-  subroutine move_from_minmode(self, src)
+  recursive subroutine move_from_minmode(self, src)
     class(minmode_handle), intent(inout) :: self
     type(minmode_handle), intent(inout) :: src
-    type(c_ptr) :: stolen
-    if (c_associated(self%raw, src%raw)) return
-    stolen = src%raw
+    if (c_associated(raw_ptr(self%raw), raw_ptr(src%raw))) return
     call minmode_finalize(self)
-    self%raw = stolen
-    src%raw = c_null_ptr
+    if (allocated(src%raw)) call move_alloc(src%raw, self%raw)
   end subroutine move_from_minmode
 
-  subroutine move_from_pafi(self, src)
+  recursive subroutine move_from_pafi(self, src)
     class(pafi_handle), intent(inout) :: self
     type(pafi_handle), intent(inout) :: src
-    type(c_ptr) :: stolen
-    if (c_associated(self%raw, src%raw)) return
-    stolen = src%raw
+    if (c_associated(raw_ptr(self%raw), raw_ptr(src%raw))) return
     call pafi_finalize(self)
-    self%raw = stolen
-    src%raw = c_null_ptr
+    if (allocated(src%raw)) call move_alloc(src%raw, self%raw)
   end subroutine move_from_pafi
 
-  subroutine move_from_ohtst(self, src)
+  recursive subroutine move_from_ohtst(self, src)
     class(ohtst_handle), intent(inout) :: self
     type(ohtst_handle), intent(inout) :: src
-    type(c_ptr) :: stolen
-    if (c_associated(self%raw, src%raw)) return
-    stolen = src%raw
+    if (c_associated(raw_ptr(self%raw), raw_ptr(src%raw))) return
     call ohtst_finalize(self)
-    self%raw = stolen
-    src%raw = c_null_ptr
+    if (allocated(src%raw)) call move_alloc(src%raw, self%raw)
   end subroutine move_from_ohtst
 
-  subroutine assign_band(lhs, rhs)
+  recursive subroutine assign_band(lhs, rhs)
     type(band_handle), intent(inout) :: lhs
     type(band_handle), intent(in) :: rhs
-    type(c_ptr) :: seen
-    seen = rhs%raw
-    if (c_associated(lhs%raw, seen)) error stop RGSADDLE_HANDLE_NOT_ASSIGNABLE
+    if (c_associated(raw_ptr(lhs%raw), raw_ptr(rhs%raw))) error stop RGSADDLE_HANDLE_NOT_ASSIGNABLE
     error stop RGSADDLE_HANDLE_NOT_ASSIGNABLE
   end subroutine assign_band
 
-  subroutine assign_minmode(lhs, rhs)
+  recursive subroutine assign_minmode(lhs, rhs)
     type(minmode_handle), intent(inout) :: lhs
     type(minmode_handle), intent(in) :: rhs
-    type(c_ptr) :: seen
-    seen = rhs%raw
-    if (c_associated(lhs%raw, seen)) error stop RGSADDLE_HANDLE_NOT_ASSIGNABLE
+    if (c_associated(raw_ptr(lhs%raw), raw_ptr(rhs%raw))) error stop RGSADDLE_HANDLE_NOT_ASSIGNABLE
     error stop RGSADDLE_HANDLE_NOT_ASSIGNABLE
   end subroutine assign_minmode
 
-  subroutine assign_pafi(lhs, rhs)
+  recursive subroutine assign_pafi(lhs, rhs)
     type(pafi_handle), intent(inout) :: lhs
     type(pafi_handle), intent(in) :: rhs
-    type(c_ptr) :: seen
-    seen = rhs%raw
-    if (c_associated(lhs%raw, seen)) error stop RGSADDLE_HANDLE_NOT_ASSIGNABLE
+    if (c_associated(raw_ptr(lhs%raw), raw_ptr(rhs%raw))) error stop RGSADDLE_HANDLE_NOT_ASSIGNABLE
     error stop RGSADDLE_HANDLE_NOT_ASSIGNABLE
   end subroutine assign_pafi
 
-  subroutine assign_ohtst(lhs, rhs)
+  recursive subroutine assign_ohtst(lhs, rhs)
     type(ohtst_handle), intent(inout) :: lhs
     type(ohtst_handle), intent(in) :: rhs
-    type(c_ptr) :: seen
-    seen = rhs%raw
-    if (c_associated(lhs%raw, seen)) error stop RGSADDLE_HANDLE_NOT_ASSIGNABLE
+    if (c_associated(raw_ptr(lhs%raw), raw_ptr(rhs%raw))) error stop RGSADDLE_HANDLE_NOT_ASSIGNABLE
     error stop RGSADDLE_HANDLE_NOT_ASSIGNABLE
   end subroutine assign_ohtst
 
