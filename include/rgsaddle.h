@@ -319,7 +319,7 @@ const char *rgsaddle_thermodynamic_derivative_observable(void);
  * image carried (endpoints 0 and band - 1 appear only on the first
  * evaluation), positions and gradients are 3 * n_atoms, energies is
  * one value, and n_images is the length of the band.
- * From ABI minor 46 a dynamic NEB step sends this request, without
+ * From ABI minor 45 a dynamic NEB step sends this request, without
  * RGSADDLE_REQ_CLIMBING_IMAGE, for an interior image a neighbour
  * pulled back over its threshold.
  *

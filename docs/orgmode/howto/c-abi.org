@@ -140,9 +140,9 @@ A supplied ~max_images~ above ~n_images~ is ~RGSADDLE_INVALID_PARAMETER~: the ou
 ~bound_samples~ is even. ~length~, ~lower~, and ~upper~ may be NULL.
 A host that loads the library at run time checks ~rgsaddle_abi_version()~ for at least minor 64 before resolving these symbols.
 
-ABI minor 46 adds dynamic NEB.
+ABI minor 45 also adds dynamic NEB.
 ~rgsaddle_band_set_dynamic~ takes 0 to clear it or 1 to set ~fmax~ and ~scale_fmax~; any other flag returns ~RGSADDLE_INVALID_PARAMETER~ and leaves the band unchanged.
 A solid-state band, the trust-region stepper, the simplified string method, and the free-end adaptive NEB are refused.
 ~rgsaddle_dyneb_mask~ applies the same mask to a projected band the host already holds.
 While the option is on, an interior image that a neighbour pulls back over its threshold is requested alone: ~RGSADDLE_REQ_ONE_IMAGE~ is set, ~image~ is that image's band index, ~n_images~ is the band length, and ~RGSADDLE_REQ_CLIMBING_IMAGE~ is not set.
-A host that loads the library at run time checks ~rgsaddle_abi_version()~ for at least minor 46 before resolving either symbol.
+A host that loads the library at run time checks ~rgsaddle_abi_version()~ for at least minor 45 before resolving either symbol.
