@@ -224,8 +224,8 @@ impl Default for ArtConfig {
             quench: RelaxConfig::default(),
             push_over: 1.0,
             saddle: SaddleIndexCheck::default(),
-            basin_rmsd: 1.0,
-            duplicate_rmsd: 1.0,
+            basin_rmsd: 0.08,
+            duplicate_rmsd: 0.08,
             permute_identical: false,
         }
     }

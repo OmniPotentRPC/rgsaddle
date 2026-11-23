@@ -11,8 +11,7 @@ use rgsaddle::{
 
 use cu_morse::{CuMorse, ENERGY_SCALE, LENGTH_SCALE};
 
-#[test]
-fn metal_scaled_art_finds_four_cu_vacancy_saddles() {
+fn cu_vacancy_setup() -> (CuMorse, Array1<f64>, Vec<ArtSeed>) {
     let (surface, unrelaxed, vacancy) = CuMorse::vacancy_4x4x4();
     assert_eq!(unrelaxed.len(), 3 * 63);
     let reactant_relax = RelaxConfig::default()
@@ -68,9 +67,18 @@ fn metal_scaled_art_finds_four_cu_vacancy_saddles() {
                 && message.contains("mode_force_tol=1e-2 energy/length")
     ));
 
-    let config = ArtConfig::for_units(ENERGY_SCALE, LENGTH_SCALE).unwrap();
-    let batch = run_events(&config, &reactant, &seeds, &surface, 800)
-        .expect("units-aware ART runs on copper");
+    (surface, reactant, seeds)
+}
+
+fn assert_four_cu_vacancy_saddles(
+    surface: &CuMorse,
+    reactant: &Array1<f64>,
+    seeds: &[ArtSeed],
+    config: &ArtConfig,
+    label: &str,
+) {
+    let batch =
+        run_events(config, reactant, seeds, surface, 800).expect("ART runs on copper vacancy");
     let reactant_energy = surface.eval(reactant.view()).unwrap().0;
     let connected = batch
         .outcomes
@@ -79,7 +87,7 @@ fn metal_scaled_art_finds_four_cu_vacancy_saddles() {
         .count();
     let distinct = connected - batch.duplicates.len();
     eprintln!(
-        "Cu vacancy ART: {connected} connected, {distinct} distinct, {} duplicates",
+        "Cu vacancy ART ({label}): {connected} connected, {distinct} distinct, {} duplicates",
         batch.duplicates.len()
     );
     assert_eq!(connected, 4);
@@ -97,4 +105,18 @@ fn metal_scaled_art_finds_four_cu_vacancy_saddles() {
             "Cu01 vacancy barrier {barrier}"
         );
     }
+}
+
+#[test]
+fn metal_scaled_art_finds_four_cu_vacancy_saddles() {
+    let (surface, reactant, seeds) = cu_vacancy_setup();
+    let config = ArtConfig::for_units(ENERGY_SCALE, LENGTH_SCALE).unwrap();
+    assert_four_cu_vacancy_saddles(&surface, &reactant, &seeds, &config, "for_units");
+}
+
+#[test]
+fn default_art_finds_four_cu_vacancy_saddles() {
+    let (surface, reactant, seeds) = cu_vacancy_setup();
+    let config = ArtConfig::default();
+    assert_four_cu_vacancy_saddles(&surface, &reactant, &seeds, &config, "default");
 }
