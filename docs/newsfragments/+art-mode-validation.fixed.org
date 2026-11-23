@@ -1,0 +1,3 @@
+~ArtConfig::validate~, ~ArtSession::new~ and ~run_events~ now hold ~ArtConfig::mode~ to every check that ~MinModeSession::new~ makes, including the new ~MinModeConfig::time_step~.
+A zero Krylov or rotation budget, a finite-difference step or time step that is not finite and positive, a negative or non-finite rotation tolerance, an infinite or NaN ~max_move~ and a stepper that tests the oracle value return ~SaddleError::Invalid~ with an ~ART mode:~ message before the first evaluation, where an event could stop part way through.
+~ArtConfig::for_units~ leaves both rotation tolerances as they are, scales the climb time step and each relaxation opening step by its own dimension, and a configuration converted to another unit system and back keeps every field.
