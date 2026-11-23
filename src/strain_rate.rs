@@ -43,9 +43,11 @@ use std::fmt;
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 
 use crate::cell_log::M3;
+use crate::eigensolve::exact_eigvalsh;
 use crate::elastic::{LocalField, Quadrupole, quadrupole_energy};
 use crate::error::SaddleError;
-use crate::minmode::{MinModeConfig, MinModeStatus, PointSurface};
+use crate::hessian_free::{DeflatedAction, HessianAction, lanczos_lowest_modes, slq_logdet_ratio};
+use crate::minmode::{FiniteDifference, MinModeConfig, MinModeStatus, PointSurface};
 use crate::solid_dimer::{IndexCheck, SolidDimer, SolidDimerConfig};
 
 /// Absolute barrier error, in eV, used as the default validity tolerance.
@@ -1206,23 +1208,14 @@ pub fn angular_scale_rad_s() -> f64 {
     (ELEMENTARY_CHARGE_C / (ATOMIC_MASS_KG * ANGSTROM2_M2)).sqrt()
 }
 
-/// Vineyard prefactor in Hz.
+/// Vineyard prefactor in Hz from positive mass-weighted Hessian eigenvalues
+/// in eV/(u Å²).
 ///
-/// `min_lambda` and `sad_lambda` are positive Cartesian Hessian eigenvalues
-/// in eV/Å². Translations are already removed, and the saddle's negative
-/// eigenvalue is not included. Every atom has the same mass `mass_amu`.
-/// `ν_i = ω_i / 2π` with `ω_i = sqrt(λ_i / m)`, and the prefactor is
-/// `(∏ ν_min) / (∏ ν_sad)`.
-pub fn vineyard_prefactor(
+/// Translations are already excluded and the saddle's unstable mode is left out.
+pub fn vineyard_prefactor_weighted(
     min_lambda: &[f64],
     sad_lambda: &[f64],
-    mass_amu: f64,
 ) -> Result<f64, SaddleError> {
-    if !(mass_amu.is_finite() && mass_amu > 0.0) {
-        return Err(SaddleError::Invalid(
-            "Vineyard mass must be finite and positive".into(),
-        ));
-    }
     if min_lambda.is_empty() {
         return Err(SaddleError::Invalid(
             "Vineyard needs at least one positive minimum eigenvalue".into(),
@@ -1251,9 +1244,497 @@ pub fn vineyard_prefactor(
         log_ratio -= 0.5 * lambda.ln();
     }
     let extra = (min_lambda.len() - sad_lambda.len()) as f64;
-    log_ratio -= 0.5 * extra * mass_amu.ln();
     log_ratio -= extra * (2.0 * std::f64::consts::PI).ln();
     let hertz = log_ratio.exp() * angular_scale_rad_s().powf(extra);
+    if !hertz.is_finite() || hertz <= 0.0 {
+        return Err(SaddleError::NonFinite("Vineyard prefactor"));
+    }
+    Ok(hertz)
+}
+
+/// Symmetrize a Cartesian Hessian and mass-weight it by per-coordinate masses
+/// in unified atomic mass units (`u`): `D_ij = 0.5 * (H_ij + H_ji) / sqrt(m_i m_j)`.
+pub fn mass_weight_hessian(
+    hessian: ArrayView2<f64>,
+    dof_masses_amu: &[f64],
+) -> Result<Array2<f64>, SaddleError> {
+    let n = hessian.nrows();
+    if n == 0 || n != hessian.ncols() {
+        return Err(SaddleError::Shape(format!(
+            "Hessian must be non-empty and square, got {} x {}",
+            hessian.nrows(),
+            hessian.ncols()
+        )));
+    }
+    if dof_masses_amu.len() != n {
+        return Err(SaddleError::Shape(format!(
+            "DOF mass length {} does not match Hessian dimension {n}",
+            dof_masses_amu.len()
+        )));
+    }
+    let mut inv_sqrt = Vec::with_capacity(n);
+    for (i, &m) in dof_masses_amu.iter().enumerate() {
+        if !m.is_finite() || m <= 0.0 {
+            return Err(SaddleError::Invalid(format!(
+                "coordinate mass at index {i} must be positive and finite, got {m}"
+            )));
+        }
+        inv_sqrt.push(1.0 / m.sqrt());
+    }
+    let mut weighted = Array2::zeros((n, n));
+    for i in 0..n {
+        for j in 0..=i {
+            let hij = hessian[(i, j)];
+            let hji = hessian[(j, i)];
+            if !hij.is_finite() || !hji.is_finite() {
+                return Err(SaddleError::NonFinite("Hessian entry"));
+            }
+            let val = 0.5 * (hij + hji) * inv_sqrt[i] * inv_sqrt[j];
+            weighted[(i, j)] = val;
+            weighted[(j, i)] = val;
+        }
+    }
+    Ok(weighted)
+}
+
+/// Mass-weight a `3N x 3N` Cartesian Hessian using one mass in `u` per atom.
+pub fn mass_weight_atom_hessian(
+    hessian: ArrayView2<f64>,
+    atom_masses_amu: &[f64],
+) -> Result<Array2<f64>, SaddleError> {
+    let mut dof_masses = Vec::with_capacity(atom_masses_amu.len() * 3);
+    for &m in atom_masses_amu {
+        dof_masses.extend_from_slice(&[m, m, m]);
+    }
+    mass_weight_hessian(hessian, &dof_masses)
+}
+
+/// Assemble a dense symmetrized Cartesian finite-difference Hessian on a [`PointSurface`].
+///
+/// Returns `(hessian, evaluations)`.
+pub fn dense_hessian<S: PointSurface>(
+    surface: &S,
+    x: ArrayView1<f64>,
+    step: f64,
+    difference: FiniteDifference,
+) -> Result<(Array2<f64>, usize), SaddleError> {
+    let n = x.len();
+    if n == 0 {
+        return Err(SaddleError::Shape(
+            "dense_hessian requires a non-empty coordinate vector".into(),
+        ));
+    }
+    if !step.is_finite() || step <= 0.0 {
+        return Err(SaddleError::Invalid(
+            "finite-difference step must be positive and finite".into(),
+        ));
+    }
+    if x.iter().any(|v| !v.is_finite()) {
+        return Err(SaddleError::NonFinite("position"));
+    }
+    let mut evals = 0usize;
+    let g0 = match difference {
+        FiniteDifference::Forward => {
+            let (_, g) = surface.eval(x)?;
+            evals += 1;
+            if g.len() != n {
+                return Err(SaddleError::Shape(format!(
+                    "gradient length {} does not match dimension {n}",
+                    g.len()
+                )));
+            }
+            Some(g)
+        }
+        FiniteDifference::Central => None,
+    };
+    let mut hess = Array2::<f64>::zeros((n, n));
+    let mut trial = x.to_owned();
+    for col in 0..n {
+        let base = x[col];
+        trial[col] = base + step;
+        let (_, gp) = surface.eval(trial.view())?;
+        evals += 1;
+        if gp.len() != n {
+            return Err(SaddleError::Shape(format!(
+                "gradient length {} does not match dimension {n}",
+                gp.len()
+            )));
+        }
+        match difference {
+            FiniteDifference::Forward => {
+                let g0_ref = g0.as_ref().expect("forward baseline gradient initialized");
+                for row in 0..n {
+                    hess[(row, col)] = (gp[row] - g0_ref[row]) / step;
+                }
+            }
+            FiniteDifference::Central => {
+                trial[col] = base - step;
+                let (_, gm) = surface.eval(trial.view())?;
+                evals += 1;
+                if gm.len() != n {
+                    return Err(SaddleError::Shape(format!(
+                        "gradient length {} does not match dimension {n}",
+                        gm.len()
+                    )));
+                }
+                for row in 0..n {
+                    hess[(row, col)] = (gp[row] - gm[row]) / (2.0 * step);
+                }
+            }
+        }
+        trial[col] = base;
+    }
+    for i in 0..n {
+        for j in 0..i {
+            let sym = 0.5 * (hess[(i, j)] + hess[(j, i)]);
+            if !sym.is_finite() {
+                return Err(SaddleError::NonFinite("Hessian entry"));
+            }
+            hess[(i, j)] = sym;
+            hess[(j, i)] = sym;
+        }
+        if !hess[(i, i)].is_finite() {
+            return Err(SaddleError::NonFinite("Hessian diagonal"));
+        }
+    }
+    Ok((hess, evals))
+}
+
+/// Settings for dense finite-difference Vineyard prefactor calculations.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct VineyardConfig {
+    /// Finite-difference step in length units.
+    pub step: f64,
+    /// Finite-difference scheme (`Forward` or `Central`).
+    pub difference: FiniteDifference,
+    /// Mass-weighted eigenvalues above this threshold (in eV/(u Å²)) count as vibrational modes.
+    pub positive_tol: f64,
+    /// Mass-weighted eigenvalues below `-negative_tol` (in eV/(u Å²)) count as unstable modes.
+    pub negative_tol: f64,
+}
+
+impl Default for VineyardConfig {
+    fn default() -> Self {
+        Self {
+            step: 1.0e-2,
+            difference: FiniteDifference::Central,
+            positive_tol: 1.0e-8,
+            negative_tol: 1.0e-4,
+        }
+    }
+}
+
+impl VineyardConfig {
+    /// Set the finite-difference step size.
+    pub fn with_step(mut self, step: f64) -> Self {
+        self.step = step;
+        self
+    }
+
+    /// Set the finite-difference scheme.
+    pub fn with_difference(mut self, difference: FiniteDifference) -> Self {
+        self.difference = difference;
+        self
+    }
+
+    /// Set the positive vibrational eigenvalue threshold in eV/(u Å²).
+    pub fn with_positive_tol(mut self, positive_tol: f64) -> Self {
+        self.positive_tol = positive_tol;
+        self
+    }
+
+    /// Set the negative curvature threshold magnitude in eV/(u Å²).
+    pub fn with_negative_tol(mut self, negative_tol: f64) -> Self {
+        self.negative_tol = negative_tol;
+        self
+    }
+
+    /// Validate configuration parameters.
+    pub fn validate(&self) -> Result<(), SaddleError> {
+        if !self.step.is_finite() || self.step <= 0.0 {
+            return Err(SaddleError::Invalid(
+                "Vineyard finite-difference step must be positive and finite".into(),
+            ));
+        }
+        if !self.positive_tol.is_finite() || self.positive_tol < 0.0 {
+            return Err(SaddleError::Invalid(
+                "Vineyard positive_tol must be finite and non-negative".into(),
+            ));
+        }
+        if !self.negative_tol.is_finite() || self.negative_tol <= 0.0 {
+            return Err(SaddleError::Invalid(
+                "Vineyard negative_tol must be positive and finite".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Summary of a mass-weighted harmonic Vineyard prefactor evaluation.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VineyardReport {
+    /// Attempt frequency prefactor in Hz.
+    pub prefactor_hz: f64,
+    /// Unstable mass-weighted eigenvalue at the saddle, in eV/(u Å²).
+    pub unstable_eigenvalue: f64,
+    /// Number of positive vibrational modes kept at the minimum.
+    pub n_min_modes: usize,
+    /// Number of positive vibrational modes kept at the saddle.
+    pub n_saddle_modes: usize,
+    /// Difference `ln det'(D_min) - ln det'(D_sad)` across the kept modes.
+    pub log_det_ratio: f64,
+    /// Monte Carlo / SLQ standard error on `prefactor_hz`, when stochastic.
+    pub std_err: Option<f64>,
+    /// Number of surface or operator evaluations used.
+    pub evaluations: usize,
+}
+
+/// Compute a mass-weighted Vineyard prefactor from full mass-weighted Hessian
+/// eigenvalue spectra in eV/(u Å²).
+pub fn vineyard_prefactor_from_spectra(
+    min_evals: &[f64],
+    sad_evals: &[f64],
+    positive_tol: f64,
+    negative_tol: f64,
+) -> Result<VineyardReport, SaddleError> {
+    if !positive_tol.is_finite() || positive_tol < 0.0 {
+        return Err(SaddleError::Invalid(
+            "positive_tol must be finite and non-negative".into(),
+        ));
+    }
+    if !negative_tol.is_finite() || negative_tol <= 0.0 {
+        return Err(SaddleError::Invalid(
+            "negative_tol must be positive and finite".into(),
+        ));
+    }
+    if min_evals.is_empty() || sad_evals.is_empty() {
+        return Err(SaddleError::Invalid(
+            "Vineyard spectra cannot be empty".into(),
+        ));
+    }
+    let mut min_neg = 0usize;
+    let mut min_pos = Vec::new();
+    for &lambda in min_evals {
+        if !lambda.is_finite() {
+            return Err(SaddleError::NonFinite("minimum Hessian eigenvalue"));
+        }
+        if lambda < -negative_tol {
+            min_neg += 1;
+        } else if lambda > positive_tol {
+            min_pos.push(lambda);
+        }
+    }
+    if min_neg > 0 {
+        return Err(SaddleError::Solver(format!(
+            "minimum has {min_neg} negative mode(s) below -{negative_tol}"
+        )));
+    }
+
+    let mut sad_neg = Vec::new();
+    let mut sad_pos = Vec::new();
+    for &lambda in sad_evals {
+        if !lambda.is_finite() {
+            return Err(SaddleError::NonFinite("saddle Hessian eigenvalue"));
+        }
+        if lambda < -negative_tol {
+            sad_neg.push(lambda);
+        } else if lambda > positive_tol {
+            sad_pos.push(lambda);
+        }
+    }
+    if sad_neg.len() != 1 {
+        return Err(SaddleError::Solver(format!(
+            "expected index-1 saddle, found {} negative mode(s) below -{negative_tol}",
+            sad_neg.len()
+        )));
+    }
+    if min_pos.len() != sad_pos.len() + 1 {
+        return Err(SaddleError::Solver(format!(
+            "positive mode count mismatch: minimum has {}, saddle has {}",
+            min_pos.len(),
+            sad_pos.len()
+        )));
+    }
+    let log_det_ratio =
+        min_pos.iter().map(|v| v.ln()).sum::<f64>() - sad_pos.iter().map(|v| v.ln()).sum::<f64>();
+    let prefactor_hz = vineyard_prefactor_weighted(&min_pos, &sad_pos)?;
+    Ok(VineyardReport {
+        prefactor_hz,
+        unstable_eigenvalue: sad_neg[0],
+        n_min_modes: min_pos.len(),
+        n_saddle_modes: sad_pos.len(),
+        log_det_ratio,
+        std_err: None,
+        evaluations: 0,
+    })
+}
+
+/// Compute a mass-weighted Vineyard prefactor from precomputed Cartesian Hessians
+/// at the minimum and saddle and per-coordinate masses in `u`.
+pub fn vineyard_prefactor_dense_matrices(
+    h_min: ArrayView2<f64>,
+    h_sad: ArrayView2<f64>,
+    dof_masses_amu: &[f64],
+    config: &VineyardConfig,
+) -> Result<VineyardReport, SaddleError> {
+    config.validate()?;
+    let d_min = mass_weight_hessian(h_min, dof_masses_amu)?;
+    let d_sad = mass_weight_hessian(h_sad, dof_masses_amu)?;
+    let min_evals = exact_eigvalsh(d_min.view())?;
+    let sad_evals = exact_eigvalsh(d_sad.view())?;
+    vineyard_prefactor_from_spectra(
+        min_evals.as_slice().unwrap_or(&[]),
+        sad_evals.as_slice().unwrap_or(&[]),
+        config.positive_tol,
+        config.negative_tol,
+    )
+}
+
+/// Compute a mass-weighted Vineyard prefactor by assembling dense finite-difference
+/// Hessians on `PointSurface` endpoints.
+pub fn vineyard_prefactor_dense<SMin: PointSurface, SSad: PointSurface>(
+    min_surface: &SMin,
+    min_x: ArrayView1<f64>,
+    sad_surface: &SSad,
+    sad_x: ArrayView1<f64>,
+    dof_masses_amu: &[f64],
+    config: &VineyardConfig,
+) -> Result<VineyardReport, SaddleError> {
+    config.validate()?;
+    let (h_min, evals_min) = dense_hessian(min_surface, min_x, config.step, config.difference)?;
+    let (h_sad, evals_sad) = dense_hessian(sad_surface, sad_x, config.step, config.difference)?;
+    let mut report =
+        vineyard_prefactor_dense_matrices(h_min.view(), h_sad.view(), dof_masses_amu, config)?;
+    report.evaluations = evals_min + evals_sad;
+    Ok(report)
+}
+
+/// Compute a mass-weighted Vineyard prefactor from full Lanczos spectra on
+/// mass-weighted [`HessianAction`] operators.
+pub fn vineyard_prefactor_lanczos(
+    min_op: &mut dyn HessianAction,
+    sad_op: &mut dyn HessianAction,
+    positive_tol: f64,
+    negative_tol: f64,
+    tol: f64,
+    seed: u64,
+) -> Result<VineyardReport, SaddleError> {
+    let n = min_op.dim();
+    if n == 0 || n != sad_op.dim() {
+        return Err(SaddleError::Shape(format!(
+            "operator dimensions ({n}, {}) must match and be positive",
+            sad_op.dim()
+        )));
+    }
+    let min_spec = lanczos_lowest_modes(min_op, n, n, tol, seed)?;
+    let sad_spec = lanczos_lowest_modes(sad_op, n, n, tol, seed.wrapping_add(1))?;
+    let mut report = vineyard_prefactor_from_spectra(
+        min_spec.eigenvalues.as_slice().unwrap_or(&[]),
+        sad_spec.eigenvalues.as_slice().unwrap_or(&[]),
+        positive_tol,
+        negative_tol,
+    )?;
+    report.evaluations = min_spec.n_applies + sad_spec.n_applies;
+    Ok(report)
+}
+
+/// Compute a mass-weighted Vineyard prefactor by identifying and deflating the
+/// saddle's unstable mode with Lanczos and estimating `log det'(D_min) - log det'(D_sad)`
+/// via common-probe stochastic Lanczos quadrature.
+///
+/// Both `min_op` and `sad_op` must represent positive-definite mass-weighted
+/// Hessians on the subspace orthogonal to any unstable mode (the unstable mode
+/// of `sad_op` is extracted and deflated automatically).
+#[allow(clippy::too_many_arguments)]
+pub fn vineyard_prefactor_slq<A: HessianAction, B: HessianAction>(
+    min_op: &mut A,
+    mut sad_op: B,
+    n_probes: usize,
+    lanczos_steps: usize,
+    seed: u64,
+    saddle_mode_iters: usize,
+    saddle_mode_tol: f64,
+    negative_tol: f64,
+) -> Result<VineyardReport, SaddleError> {
+    let n = min_op.dim();
+    if n == 0 || n != sad_op.dim() {
+        return Err(SaddleError::Shape(format!(
+            "operator dimensions ({n}, {}) must match and be positive",
+            sad_op.dim()
+        )));
+    }
+    if !negative_tol.is_finite() || negative_tol <= 0.0 {
+        return Err(SaddleError::Invalid(
+            "negative_tol must be positive and finite".into(),
+        ));
+    }
+    let k_check = n.min(2);
+    let sad_low = lanczos_lowest_modes(
+        &mut sad_op,
+        k_check,
+        saddle_mode_iters,
+        saddle_mode_tol,
+        seed,
+    )?;
+    let unstable = sad_low.eigenvalues[0];
+    if unstable >= -negative_tol {
+        return Err(SaddleError::Solver(format!(
+            "saddle has no unstable mode below -{negative_tol} (lowest {unstable})"
+        )));
+    }
+    if k_check == 2 && sad_low.eigenvalues[1] < -negative_tol {
+        return Err(SaddleError::Solver(format!(
+            "expected index-1 saddle, second mode {} is also below -{negative_tol}",
+            sad_low.eigenvalues[1]
+        )));
+    }
+    let unstable_vec = sad_low.eigenvectors.column(0).to_owned();
+    let mut deflated_sad = DeflatedAction::new(sad_op, &[unstable_vec])?;
+    let slq = slq_logdet_ratio(
+        min_op,
+        &mut deflated_sad,
+        n_probes,
+        lanczos_steps,
+        seed.wrapping_add(0x517cc1b727220a95),
+    )?;
+    let scale_hz = angular_scale_rad_s() / (2.0 * std::f64::consts::PI);
+    let prefactor_hz = (0.5 * slq.delta_logdet).exp() * scale_hz;
+    if !prefactor_hz.is_finite() || prefactor_hz <= 0.0 {
+        return Err(SaddleError::NonFinite("SLQ Vineyard prefactor"));
+    }
+    let std_err = prefactor_hz * 0.5 * slq.std_err;
+    Ok(VineyardReport {
+        prefactor_hz,
+        unstable_eigenvalue: unstable,
+        n_min_modes: n,
+        n_saddle_modes: n - 1,
+        log_det_ratio: slq.delta_logdet,
+        std_err: Some(std_err),
+        evaluations: sad_low.n_applies + slq.n_applies,
+    })
+}
+
+/// Vineyard prefactor in Hz.
+///
+/// `min_lambda` and `sad_lambda` are positive Cartesian Hessian eigenvalues
+/// in eV/Å². Translations are already removed, and the saddle's negative
+/// eigenvalue is not included. Every atom has the same mass `mass_amu`.
+/// `ν_i = ω_i / 2π` with `ω_i = sqrt(λ_i / m)`, and the prefactor is
+/// `(∏ ν_min) / (∏ ν_sad)`.
+pub fn vineyard_prefactor(
+    min_lambda: &[f64],
+    sad_lambda: &[f64],
+    mass_amu: f64,
+) -> Result<f64, SaddleError> {
+    if !(mass_amu.is_finite() && mass_amu > 0.0) {
+        return Err(SaddleError::Invalid(
+            "Vineyard mass must be finite and positive".into(),
+        ));
+    }
+    let extra = min_lambda.len().saturating_sub(sad_lambda.len()) as f64;
+    let unit = vineyard_prefactor_weighted(min_lambda, sad_lambda)?;
+    let hertz = unit / mass_amu.sqrt().powf(extra);
     if !hertz.is_finite() || hertz <= 0.0 {
         return Err(SaddleError::NonFinite("Vineyard prefactor"));
     }
