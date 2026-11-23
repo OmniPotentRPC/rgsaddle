@@ -43,6 +43,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdint>
 #include <cstring>
 #include <exception>
 #include <map>
@@ -783,6 +784,17 @@ nb::ndarray<nb::numpy, double> copy_vector(const std::vector<double> &values) {
   return nb::ndarray<nb::numpy, double>(raw, 1, shape, owner);
 }
 
+nb::ndarray<nb::numpy, std::uint8_t> copy_bytes(const std::vector<std::uint8_t> &values) {
+  const std::size_t n = values.empty() ? 1 : values.size();
+  auto *raw = new std::uint8_t[n];
+  if (!values.empty()) {
+    std::memcpy(raw, values.data(), values.size() * sizeof(std::uint8_t));
+  }
+  nb::capsule owner(raw, [](void *ptr) noexcept { delete[] static_cast<std::uint8_t *>(ptr); });
+  const std::size_t shape[1] = {values.size()};
+  return nb::ndarray<nb::numpy, std::uint8_t>(raw, 1, shape, owner);
+}
+
 bool raise_status(int code) {
   // The status name is a local fallback. Storing it would make the next
   // call reuse this code's name, including after OK.
@@ -1243,6 +1255,32 @@ nb::tuple project_band(Matrix positions, Vector energies, Matrix gradients, doub
     status_error(status);
   }
   return nb::make_tuple(copy_vector(forces), ci);
+}
+
+// ASE 3.29 DyNEB mask on a whole band. Returns the masked forces and
+// one byte per image: 1 when the optimizer would leave that image
+// where it is (both ends, and an interior image whose remaining
+// per-atom force is strictly below fmax).
+nb::tuple dyneb_mask_py(Vector positions, Vector energies, Vector forces, double fmax, double scale_fmax) {
+  if (energies.shape(0) < 3 || positions.shape(0) <= 0 || forces.shape(0) != positions.shape(0) ||
+      positions.shape(0) % energies.shape(0) != 0) {
+    throw nb::value_error("DyNEB mask needs energies and a 3N position and force per image");
+  }
+  const auto rows = energies.shape(0);
+  const auto dof = positions.shape(0) / rows;
+  if (dof == 0 || dof % 3 != 0) {
+    throw nb::value_error("DyNEB mask needs energies and a 3N position and force per image");
+  }
+  const auto atoms = dof / 3;
+  std::vector<double> out(static_cast<std::size_t>(positions.shape(0)));
+  std::copy_n(forces.data(), out.size(), out.begin());
+  std::vector<std::uint8_t> frozen(static_cast<std::size_t>(rows), 0);
+  const auto status = rgsaddle_dyneb_mask(rows, atoms, positions.data(), energies.data(), out.data(), fmax,
+                                           scale_fmax, frozen.data());
+  if (status != RGSADDLE_OK) {
+    status_error(status);
+  }
+  return nb::make_tuple(copy_vector(out), copy_bytes(frozen));
 }
 
 nb::ndarray<nb::numpy, double> idpp_path_py(Vector reactant, Vector product, std::int64_t n_images,
@@ -2237,6 +2275,18 @@ NB_MODULE(_core, m) {
       "1 for a fixed atom (ABI minor 39): its force rows are zero, tangents and "
       "springs use the free atoms, and the mean force stays. The endpoints must "
       "agree on every fixed atom.");
+
+  m.def(
+      "dyneb_mask", &dyneb_mask_py, nb::arg("positions").noconvert(), nb::arg("energies").noconvert(),
+      nb::arg("forces").noconvert(), nb::arg("fmax"), nb::arg("scale_fmax"),
+      nb::sig("def dyneb_mask(positions: numpy.typing.NDArray[numpy.float64], energies: "
+              "numpy.typing.NDArray[numpy.float64], forces: numpy.typing.NDArray[numpy.float64], "
+              "fmax: float, scale_fmax: float) -> tuple[numpy.typing.NDArray[numpy.float64], "
+              "numpy.typing.NDArray[numpy.uint8]]"),
+      "ASE 3.29 DyNEB mask on a whole band (image-major positions, energies and projected "
+      "forces). Returns (forces, frozen). An interior image whose largest per-atom force norm is "
+      "strictly below fmax * (1 + distance * scale_fmax) is zeroed, except the highest-energy "
+      "image. frozen is one uint8 per image, 1 when the optimizer would leave it in place.");
 
   m.def(
       "idpp_path", &idpp_path_py, nb::arg("reactant").noconvert(), nb::arg("product").noconvert(),

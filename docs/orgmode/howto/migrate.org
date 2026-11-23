@@ -16,7 +16,7 @@ The spring constant defaults to 0.1, ASE's value. A ~BandSession~ still defaults
 
 ~FixAtoms~ on the images is read into the band's fixed-atom mask, as ~rgsaddle_band_set_fixed_atoms~ takes it from C. The fixed atoms get zero force rows, keep the mean force even with ~remove_rotation_and_translation=True~, and stay where the first image has them through ~interpolate()~. Every image must fix the same atoms. Other constraints act through ~get_forces()~ as before.
 
-~dynamic_relaxation~, ~fmax~, and ~scale_fmax~ raise ~NotImplementedError~. Dynamic NEB is not implemented. A variable cell in a periodic direction raises ~NotImplementedError~ as well.
+~dynamic_relaxation~, ~fmax~, and ~scale_fmax~ on ~NEB~ raise ~NotImplementedError~. ~DyNEB~ takes them: an image under ~fmax~ is left in place, ~scale_fmax~ loosens that test with the distance from the highest-energy image, and the default band is unchanged. A variable cell in a periodic direction raises ~NotImplementedError~ as well.
 
 * From ASE's dimer and from Sella
 ~rgsaddle.ase.MinModeAtoms(atoms, mode=...)~ estimates a dimer or Lanczos mode and returns the effective force. Above the well the perpendicular force is dropped. Below it the force along the mode is reflected. An ASE optimizer can drive that object.
@@ -33,7 +33,7 @@ eOn's client reads a config file and a potential plugin. Here the host passes po
 Live Onsager-Machlup displacements are the atomic force over ~2k~. A solid-state band has a cell block in the same vector, so that spring is refused at construction rather than applied as zeros.
 
 * ASE 3.29 tests
-~tests/python/ase_upstream~ vendors ASE 3.29.0's NEB and dimer tests (LGPL-2.1-or-later) and substitutes ~rgsaddle.ase.NEB~, ~MinModeAtoms~, ~DimerControl~, ~MinModeTranslate~, ~interpolate~, and ~idpp_interpolate~. The Python CI job sets ~RGSADDLE_REQUIRE_ASE=1~, so a missing ASE install fails collection. ~ase/test/neb/test_dynamic_neb.py~ is not vendored: it drives DyNEB. ~ase/optimize/test/neb.py~ is not vendored: it is a script with no pytest entry and no assertion.
+~tests/python/ase_upstream~ vendors ASE 3.29.0's NEB and dimer tests (LGPL-2.1-or-later) and substitutes ~rgsaddle.ase.NEB~, ~DyNEB~, ~MinModeAtoms~, ~DimerControl~, ~MinModeTranslate~, ~interpolate~, and ~idpp_interpolate~. The Python CI job sets ~RGSADDLE_REQUIRE_ASE=1~, so a missing ASE install fails collection. ~ase/optimize/test/neb.py~ is not vendored: it is a script with no pytest entry and no assertion.
 
 | Result | Test | Why |
 |--------+------+-----|
@@ -53,7 +53,7 @@ Live Onsager-Machlup displacements are the atomic force over ~2k~. A solid-state
 | skipped | ~test_integrate_forces~ | integrates forces on ASE's spline fit, not the band force |
 | skipped | ~test_neb_methods~ ~spline~ and ~string~, and any precon | spline, string, and preconditioned NEB have no rgsaddle force |
 | skipped | ~test_neb_tr~ | FIRE step-count ratio follows ASE's partial BFGS IDPP path; the band force matches on one geometry and the barriers agree, but the aligned run is not faster by the factor 0.75 |
-| not supported | DyNEB (~dynamic_relaxation~, ~fmax~, ~scale_fmax~) | dynamic NEB is not implemented |
+| passing | ~test_dynamic_neb~ | Pt(111)+O, EMT, BFGS; dynamic and scaled DyNEB use fewer force calls than the plain band, and the barriers agree |
 | not supported | ~method~ ~spline~ and ~string~, ~precon~ | no force equivalent; the name is in the ~NotImplementedError~ |
 | not supported | ~parallel~ with ~world.size > 1~ | no MPI image distribution |
 | not supported | ~idpp~ ~mic~ on a partially periodic cell | ~idpp_path~ wraps every axis |
