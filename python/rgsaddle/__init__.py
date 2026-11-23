@@ -21,6 +21,8 @@ from rgsaddle._core import (
     SessionReport as SessionReport,
     Stencil as Stencil,
     StencilReport as StencilReport,
+    VineyardReport as VineyardReport,
+    atomic_mass as atomic_mass,
     connect as connect,
     THERMODYNAMIC_DERIVATIVE as THERMODYNAMIC_DERIVATIVE,
     hyperplane_thermodynamic_integration as hyperplane_thermodynamic_integration,
@@ -31,6 +33,7 @@ from rgsaddle._core import (
     reparametrize as reparametrize,
     saddle_index as saddle_index,
     version as _version,
+    vineyard_prefactor_fd as vineyard_prefactor_fd,
 )
 
 __version__ = _version()
@@ -121,7 +124,9 @@ __all__ = [
     "Stencil",
     "StencilReport",
     "THERMODYNAMIC_DERIVATIVE",
+    "VineyardReport",
     "__version__",
+    "atomic_mass",
     "connect",
     "hyperplane_thermodynamic_integration",
     "idpp_path",
@@ -130,4 +135,5 @@ __all__ = [
     "raise_status",
     "reparametrize",
     "saddle_index",
+    "vineyard_prefactor_fd",
 ]

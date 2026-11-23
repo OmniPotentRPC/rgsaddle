@@ -283,9 +283,10 @@ For config minors 5 through 62 this field is read as given, so 0 disables the an
 From minor 63, 0 keeps the Rust default unless flag bit 0, =RGSADDLE_MINMODE_EXPLICIT_ROTATION_ANGLE_TOL=, is set; then 0 disables it.
 The Rust default is five degrees. With an explicit 0 (legacy minors, or minor 63 with the explicit flag) the stop is off.
 Both fields are read only from a config whose version minor is 5 or newer.
-=RGSADDLE_ABI_MINOR= is 65.
+=RGSADDLE_ABI_MINOR= is 66.
 =rgsaddle_band_set_dynamic= (minor 65) sets or clears =DynamicNeb= on a band.
 =rgsaddle_dyneb_mask= (minor 65) applies that mask to a projected band.
+From minor 66, =rgsaddle_atomic_mass=, =rgsaddle_atomic_mass_by_symbol=, =rgsaddle_vineyard_config_default=, and =rgsaddle_vineyard_fd= (with =rgsaddle_vineyard_config_t= and =rgsaddle_vineyard_report_t=) expose standard atomic-mass lookup and mass-weighted finite-difference Vineyard prefactors.
 From minor 24, =rgsaddle_sella_saddle_set_symmetrized_ritz= sets =SellaSaddleConfig::symmetrized_ritz= from 0 or 1.
 It returns =RGSADDLE_INVALID_PARAMETER= for any other value.
 =rgsaddle_sella_saddle_set_small_system_atom_ceiling= (minor 25) sets =SellaSaddleConfig::small_system_atom_ceiling= from 0 or 1.
@@ -373,6 +374,8 @@ The importable package is =rgsaddle=. =rgsaddle._core= is the nanobind extension
 | =rgsaddle.ase.SingleCalculatorNEB= | ASE's deprecated shared-calculator band. Constructing it warns with ASE's =FutureWarning= and is ~NEB(allow_shared_calculator=True)~ |
 | =rgsaddle.ase.DyNEB= | ASE 3.29 dynamic NEB. =dynamic_relaxation= (default true) leaves an image in place once its per-atom force is below =fmax=. =scale_fmax= scales that test by the distance from the highest-energy image. =dynamic_relaxation= false is the ordinary band |
 | =rgsaddle.idpp_path= | Image-dependent pair-potential path, endpoints included, shape =(n_images, 3N)=. =cell= is the 3x3 row-major lattice |
+| =rgsaddle.atomic_mass= | Standard atomic mass in amu by atomic number (=1..=118=) or IUPAC element symbol |
+| =rgsaddle.vineyard_prefactor_fd= | Mass-weighted finite-difference Vineyard prefactor on a callback surface at =x_min= and =x_saddle=, returning =VineyardReport= (=prefactor_hz=, =nu0_thz=, =unstable_eigenvalue=, =n_min_modes=, =n_saddle_modes=, =evaluations=) |
 | =rgsaddle.ase.DimerControl=, =MinModeAtoms=, =MinModeTranslate= | ASE's dimer. The mode and curvature come from =MinMode=. The trial step and conjugate gradient are ASE's. =order= other than 1 and a gauss displacement raise =NotImplementedError= |
 
 =SurfaceAdapter= keeps =get_forces(apply_constraint=False)= on =raw_forces=. The returned gradient is minus =get_forces()= after constraints. The adapter evaluates the given rows in order on the calling thread. =owners()= and =reentrant()= are what a driver uses to group. A second call while the first holds the adapter raises =RuntimeError=.
