@@ -72,3 +72,26 @@ fn dumbbell_diffusivity(
     let _ = rotation_rate;
     Ok((2.0 / 3.0) * translation_rate * lattice * lattice)
 }
+
+/// Rate of one translation channel of a `<100>` dumbbell with defect
+/// diffusivity `diffusivity`, the inverse of [`dumbbell_diffusivity`]:
+/// `ν = D / (α a²)` with `α = 2/3`.
+///
+/// This is the SIA migration frequency in `K_iv = V_iv D_i / (α a²) = V_iv ν`
+/// (Mwungeli, Liu, and Demkowicz, Phys. Rev. Materials 9, 023601 (2025),
+/// section 1), so `D` must be the diffusivity of the defect itself. A
+/// tracer diffusivity summed over atoms, `Σ_i ⟨|Δr_i|²⟩ / 6t`, is smaller by
+/// the tracer correlation factor and gives a smaller `ν`.
+fn dumbbell_channel_rate(lattice: f64, diffusivity: f64) -> Result<f64, rgsaddle::SaddleError> {
+    if !(lattice.is_finite() && lattice > 0.0) {
+        return Err(rgsaddle::SaddleError::Invalid(
+            "the lattice parameter must be finite and positive".into(),
+        ));
+    }
+    if !(diffusivity.is_finite() && diffusivity >= 0.0) {
+        return Err(rgsaddle::SaddleError::Invalid(
+            "the diffusivity must be finite and non-negative".into(),
+        ));
+    }
+    Ok(diffusivity / ((2.0 / 3.0) * lattice * lattice))
+}

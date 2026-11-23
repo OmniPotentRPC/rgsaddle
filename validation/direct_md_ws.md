@@ -248,11 +248,13 @@ The fraction is the number of trajectories of that shell and orientation that ha
 | 200.00 | 333.67 |
 | 300.00 | 338.67 |
 
-The first method of Mwungeli, Liu, and Demkowicz fits ln(n(t)/N) against time through the origin. The slope is -k/V_model, with V_model the 13³ cell volume. n(t)/N here counts every lattice site: a simulated shell contributes its capture fraction, and a site outside 10.8 Å is counted as not yet recombined. The recombination volume is k a² / (α D_i) with α = 2/3, divided by Ω = a³/4.
+The first method of Mwungeli, Liu, and Demkowicz fits ln(n(t)/N) against time through the origin. The slope is -k/V_model, with V_model the 13³ cell volume. n(t)/N here counts every lattice site: a simulated shell contributes its capture fraction, and a site outside 10.8 Å is counted as not yet recombined. The recombination volume is V_iv = k α a² / D_i with α = 2/3, from K_iv = V_iv D_i / (α a²) = V_iv ν in section 1 of that paper, divided by Ω = a³/4.
 
 Fit on 11 samples up to 300 ps: slope -1.826161e-4 ± 3.322177e-5 /ps, k 1.916385e1 ± 3.486312e0 Å³/ps.
 
-Table 1 quotes the Ref. [12] SIA diffusivity as 0.143 ± 0.006 Å²/ps at this temperature. First-method V_iv = 221.61 ± 41.37 Ω.
+Table 1 lists D_i = 0.143 ± 0.006 Å²/ps at this temperature, 4951 D* from Ref. [12] (see `direct_md_dynamics.md`). With it, first-method V_iv = 98.49 ± 18.39 Ω.
+
+The defect diffusivity with these dynamics, `D_msd` of `direct_md_sia_d.md` over 8 replicas, is 0.278 ± 0.033 Å²/ps. With it, first-method V_iv = 50.57 ± 10.96 Ω.
 
 ### 500 K
 
@@ -321,11 +323,13 @@ Table 1 quotes the Ref. [12] SIA diffusivity as 0.143 ± 0.006 Å²/ps at this t
 | 200.00 | 322.17 |
 | 300.00 | 339.83 |
 
-The first method of Mwungeli, Liu, and Demkowicz fits ln(n(t)/N) against time through the origin. The slope is -k/V_model, with V_model the 13³ cell volume. n(t)/N here counts every lattice site: a simulated shell contributes its capture fraction, and a site outside 10.8 Å is counted as not yet recombined. The recombination volume is k a² / (α D_i) with α = 2/3, divided by Ω = a³/4.
+The first method of Mwungeli, Liu, and Demkowicz fits ln(n(t)/N) against time through the origin. The slope is -k/V_model, with V_model the 13³ cell volume. n(t)/N here counts every lattice site: a simulated shell contributes its capture fraction, and a site outside 10.8 Å is counted as not yet recombined. The recombination volume is V_iv = k α a² / D_i with α = 2/3, from K_iv = V_iv D_i / (α a²) = V_iv ν in section 1 of that paper, divided by Ω = a³/4.
 
 Fit on 11 samples up to 300 ps: slope -1.852807e-4 ± 4.050107e-5 /ps, k 1.961042e1 ± 4.286700e0 Å³/ps.
 
-Table 1 quotes the Ref. [12] SIA diffusivity as 0.526 ± 0.006 Å²/ps at this temperature. First-method V_iv = 61.48 ± 13.46 Ω.
+Table 1 lists D_i = 0.526 ± 0.006 Å²/ps at this temperature, 4951 D* from Ref. [12] (see `direct_md_dynamics.md`). With it, first-method V_iv = 27.32 ± 5.98 Ω.
+
+The defect diffusivity with these dynamics, `D_msd` of `direct_md_sia_d.md` over 8 replicas, is 0.860 ± 0.071 Å²/ps. With it, first-method V_iv = 16.70 ± 3.90 Ω.
 
 ### 700 K
 
@@ -394,10 +398,12 @@ Table 1 quotes the Ref. [12] SIA diffusivity as 0.526 ± 0.006 Å²/ps at this t
 | 200.00 | 341.00 |
 | 300.00 | 351.00 |
 
-The first method of Mwungeli, Liu, and Demkowicz fits ln(n(t)/N) against time through the origin. The slope is -k/V_model, with V_model the 13³ cell volume. n(t)/N here counts every lattice site: a simulated shell contributes its capture fraction, and a site outside 10.8 Å is counted as not yet recombined. The recombination volume is k a² / (α D_i) with α = 2/3, divided by Ω = a³/4.
+The first method of Mwungeli, Liu, and Demkowicz fits ln(n(t)/N) against time through the origin. The slope is -k/V_model, with V_model the 13³ cell volume. n(t)/N here counts every lattice site: a simulated shell contributes its capture fraction, and a site outside 10.8 Å is counted as not yet recombined. The recombination volume is V_iv = k α a² / D_i with α = 2/3, from K_iv = V_iv D_i / (α a²) = V_iv ν in section 1 of that paper, divided by Ω = a³/4.
 
 Fit on 11 samples up to 300 ps: slope -1.930328e-4 ± 4.370099e-5 /ps, k 2.061883e1 ± 4.667929e0 Å³/ps.
 
-Table 1 quotes the Ref. [12] SIA diffusivity as 0.910 ± 0.012 Å²/ps at this temperature. First-method V_iv = 37.25 ± 8.45 Ω.
+Table 1 lists D_i = 0.910 ± 0.012 Å²/ps at this temperature, 4951 D* from Ref. [12] (see `direct_md_dynamics.md`). With it, first-method V_iv = 16.55 ± 3.75 Ω.
+
+The defect diffusivity with these dynamics, `D_msd` of `direct_md_sia_d.md` over 8 replicas, is 1.886 ± 0.188 Å²/ps. With it, first-method V_iv = 7.99 ± 1.98 Ω.
 
 Raw per-trajectory outcomes are the CSV this note was written from.

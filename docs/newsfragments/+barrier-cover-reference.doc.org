@@ -1,0 +1,2 @@
+The PAFI reference describes =BalancedBarriers= and the calls that build one from a profile or from two barrier estimates.
+The public reference describes =SensitivityCover= and how its order, covered count and remaining shift choose which hop classes to compute.
