@@ -174,6 +174,182 @@ static rgsaddle_status_t surface(void *user, rgsaddle_surface_request_t *req) {
   return RGSADDLE_OK;
 }
 
+static rgsaddle_status_t point_double_well(void *user, int64_t n_dof,
+                                           const double *x, double *energy,
+                                           double *gradient) {
+  (void)user;
+  if (n_dof < 1 || !x || !energy || !gradient) {
+    return RGSADDLE_INVALID_PARAMETER;
+  }
+  const double q = x[0];
+  *energy = (1.0 - q * q) * (1.0 - q * q);
+  for (int64_t i = 0; i < n_dof; ++i) {
+    gradient[i] = 0.0;
+  }
+  gradient[0] = -4.0 * q * (1.0 - q * q);
+  return RGSADDLE_OK;
+}
+
+static rgsaddle_status_t point_quadratic_saddle(void *user, int64_t n_dof,
+                                                const double *x, double *energy,
+                                                double *gradient) {
+  (void)user;
+  if (n_dof != 2 || !x || !energy || !gradient) {
+    return RGSADDLE_INVALID_PARAMETER;
+  }
+  *energy = 0.5 * (-x[0] * x[0] + 4.0 * x[1] * x[1]);
+  gradient[0] = -x[0];
+  gradient[1] = 4.0 * x[1];
+  return RGSADDLE_OK;
+}
+
+static rgsaddle_status_t pafi_and_ohtst(void) {
+  rgsaddle_pafi_config_t pcfg;
+  memset(&pcfg, 0, sizeof pcfg);
+  pcfg.version.major = RGSADDLE_ABI_MAJOR;
+  pcfg.version.minor = RGSADDLE_ABI_MINOR;
+  pcfg.thermal = 0.02;
+  pcfg.mobility = 1.0;
+  pcfg.time_step = 0.01;
+  pcfg.thermalize = 5;
+  pcfg.stride = 1;
+  pcfg.samples = 16;
+  pcfg.blocks = 2;
+  pcfg.seed = 3;
+  pcfg.fix_com = 0;
+  pcfg.retain = 1;
+  pcfg.target_error = 0.0;
+  pcfg.max_rounds = 1;
+
+  double frames[41];
+  for (int i = 0; i < 41; ++i) {
+    frames[i] = -1.0 + 2.0 * (double)i / 40.0;
+  }
+  if (rgsaddle_pafi_create(NULL, 41, 1, frames, NULL, 0) != NULL ||
+      rgsaddle_pafi_create(&pcfg, 1, 1, frames, NULL, 0) != NULL ||
+      rgsaddle_pafi_create(&pcfg, 41, 0, frames, NULL, 0) != NULL) {
+    return fail(RGSADDLE_INVALID_PARAMETER, "pafi create bad args");
+  }
+  rgsaddle_pafi_config_t bad_pcfg = pcfg;
+  bad_pcfg.thermal = -1.0;
+  if (rgsaddle_pafi_create(&bad_pcfg, 41, 1, frames, NULL, 0) != NULL) {
+    return fail(RGSADDLE_INVALID_PARAMETER, "pafi create negative thermal");
+  }
+  RgsaddlePafi *pafi = rgsaddle_pafi_create(&pcfg, 41, 1, frames, NULL, 0);
+  if (!pafi) {
+    return fail(RGSADDLE_SHAPE, "pafi create");
+  }
+  rgsaddle_pafi_result_t pres;
+  memset(&pres, 0, sizeof pres);
+  if (rgsaddle_pafi_result(NULL, &pres) != RGSADDLE_NULL_SESSION ||
+      rgsaddle_pafi_result(pafi, NULL) != RGSADDLE_NULL_REPORT ||
+      rgsaddle_pafi_result(pafi, &pres) != RGSADDLE_NO_EVALUATION ||
+      rgsaddle_pafi_run(NULL, point_double_well, NULL) != RGSADDLE_NULL_SESSION ||
+      rgsaddle_pafi_run(pafi, NULL, NULL) != RGSADDLE_NULL_SURFACE ||
+      rgsaddle_pafi_set_config(pafi, &bad_pcfg) != RGSADDLE_INVALID_PARAMETER) {
+    return fail(RGSADDLE_INVALID_PARAMETER, "pafi pre-run guards");
+  }
+  if (rgsaddle_pafi_run(pafi, point_double_well, NULL) != RGSADDLE_OK ||
+      rgsaddle_pafi_result(pafi, &pres) != RGSADDLE_OK) {
+    return fail(RGSADDLE_SOLVER, "pafi run/result");
+  }
+  if (fabs(pres.barrier - 0.9975) > 1e-12 || pres.dividing != 20) {
+    fprintf(stderr, "pafi barrier=%g dividing=%lld\n", pres.barrier,
+            (long long)pres.dividing);
+    return fail(RGSADDLE_SOLVER, "pafi barrier");
+  }
+  int64_t pwritten = 0;
+  if (rgsaddle_pafi_profile(pafi, NULL, NULL, NULL, NULL, NULL, -1, &pwritten) !=
+          RGSADDLE_SHAPE ||
+      rgsaddle_pafi_profile(pafi, NULL, NULL, NULL, NULL, NULL, 0, &pwritten) !=
+          RGSADDLE_INVALID_PARAMETER ||
+      pwritten != 41) {
+    return fail(RGSADDLE_SHAPE, "pafi profile query");
+  }
+  double parcs[41], pgrad[41], pfree[41];
+  if (rgsaddle_pafi_profile(pafi, parcs, pgrad, NULL, pfree, NULL, 41,
+                            &pwritten) != RGSADDLE_OK ||
+      pwritten != 41 || fabs(pfree[20] - 0.9975) > 1e-12) {
+    return fail(RGSADDLE_SOLVER, "pafi profile values");
+  }
+  rgsaddle_pafi_free(pafi);
+  rgsaddle_pafi_free(NULL);
+
+  rgsaddle_ohtst_config_t ocfg;
+  memset(&ocfg, 0, sizeof ocfg);
+  ocfg.version.major = RGSADDLE_ABI_MAJOR;
+  ocfg.version.minor = RGSADDLE_ABI_MINOR;
+  ocfg.thermal = 0.5;
+  ocfg.sample_time_step = 0.1;
+  ocfg.sample_friction = 1.0;
+  ocfg.sample_burn_in = 300;
+  ocfg.sample_stride = 5;
+  ocfg.sample_records = 1000;
+  ocfg.sample_blocks = 16;
+  ocfg.sample_seed = 9;
+  ocfg.sample_retain = 512;
+  ocfg.sample_integrator = RGSADDLE_OHTST_INTEGRATOR_BAOAB;
+  ocfg.shooting_friction = 1.5;
+  ocfg.shooting_time_step = 0.05;
+  ocfg.shooting_steps = 400;
+  ocfg.shooting_check_every = 40;
+  ocfg.shooting_commit = 0;
+  ocfg.shooting_shots = 4096;
+  ocfg.shooting_blocks = 32;
+  ocfg.shooting_seed = 17;
+  ocfg.counting = RGSADDLE_OHTST_COUNT_FINAL;
+
+  const double point[2] = {0.0, 0.0};
+  const double normal[2] = {1.0, 0.0};
+  const double zero_normal[2] = {0.0, 0.0};
+  if (rgsaddle_ohtst_create(NULL, 2, point, normal) != NULL ||
+      rgsaddle_ohtst_create(&ocfg, 2, point, zero_normal) != NULL) {
+    return fail(RGSADDLE_INVALID_PARAMETER, "ohtst create bad args");
+  }
+  rgsaddle_ohtst_config_t bad_ocfg = ocfg;
+  bad_ocfg.sample_retain = 0;
+  if (rgsaddle_ohtst_create(&bad_ocfg, 2, point, normal) != NULL) {
+    return fail(RGSADDLE_INVALID_PARAMETER, "ohtst create zero retain");
+  }
+  RgsaddleOhtst *ohtst = rgsaddle_ohtst_create(&ocfg, 2, point, normal);
+  if (!ohtst) {
+    return fail(RGSADDLE_SHAPE, "ohtst create");
+  }
+  rgsaddle_ohtst_result_t ores;
+  memset(&ores, 0, sizeof ores);
+  if (rgsaddle_ohtst_result(NULL, &ores) != RGSADDLE_NULL_SESSION ||
+      rgsaddle_ohtst_result(ohtst, NULL) != RGSADDLE_NULL_REPORT ||
+      rgsaddle_ohtst_result(ohtst, &ores) != RGSADDLE_NO_EVALUATION ||
+      rgsaddle_ohtst_run(NULL, point_quadratic_saddle, NULL) != RGSADDLE_NULL_SESSION ||
+      rgsaddle_ohtst_run(ohtst, NULL, NULL) != RGSADDLE_NULL_SURFACE ||
+      rgsaddle_ohtst_set_config(ohtst, &bad_ocfg) != RGSADDLE_INVALID_PARAMETER) {
+    return fail(RGSADDLE_INVALID_PARAMETER, "ohtst pre-run guards");
+  }
+  if (rgsaddle_ohtst_run(ohtst, point_quadratic_saddle, NULL) != RGSADDLE_OK ||
+      rgsaddle_ohtst_result(ohtst, &ores) != RGSADDLE_OK) {
+    return fail(RGSADDLE_SOLVER, "ohtst run/result");
+  }
+  const double kramers = sqrt(1.0 + 0.75 * 0.75) - 0.75;
+  if (fabs(ores.kappa - kramers) > 4.0 * ores.error + 1e-12) {
+    return fail(RGSADDLE_SOLVER, "ohtst kappa");
+  }
+  int64_t owritten = 0;
+  if (rgsaddle_ohtst_curve(ohtst, NULL, NULL, -1, &owritten) != RGSADDLE_SHAPE ||
+      rgsaddle_ohtst_curve(ohtst, NULL, NULL, 0, &owritten) !=
+          RGSADDLE_INVALID_PARAMETER ||
+      owritten < 1 || owritten > 16) {
+    return fail(RGSADDLE_SHAPE, "ohtst curve query");
+  }
+  double times[16], kappas[16];
+  if (rgsaddle_ohtst_curve(ohtst, times, kappas, 16, &owritten) != RGSADDLE_OK ||
+      fabs(kappas[owritten - 1] - kramers) > 4.0 * ores.error + 1e-12) {
+    return fail(RGSADDLE_SOLVER, "ohtst curve values");
+  }
+  rgsaddle_ohtst_free(ohtst);
+  rgsaddle_ohtst_free(NULL);
+  return RGSADDLE_OK;
+}
+
 int main(void) {
   rgsaddle_status_t st = RGSADDLE_OK;
   if (rgsaddle_abi_version() !=
@@ -559,6 +735,11 @@ int main(void) {
   }
 
   st = minmode_reuse();
+  if (st != RGSADDLE_OK) {
+    return st;
+  }
+
+  st = pafi_and_ohtst();
   if (st != RGSADDLE_OK) {
     return st;
   }
