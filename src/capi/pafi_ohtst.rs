@@ -996,6 +996,23 @@ mod tests {
     }
 
     #[test]
+    fn config_parsers_reject_nonzero_flags() {
+        let mut pafi = pafi_config();
+        pafi.flags = 1;
+        assert_eq!(
+            parse_pafi_config(&pafi).err(),
+            Some(RGSADDLE_INVALID_PARAMETER)
+        );
+
+        let mut ohtst = ohtst_config();
+        ohtst.flags = 1;
+        assert_eq!(
+            parse_ohtst_config(&ohtst, 2).err(),
+            Some(RGSADDLE_INVALID_PARAMETER)
+        );
+    }
+
+    #[test]
     fn set_config_refuses_another_major_and_a_null_session() {
         let frames = [-1.0, 0.0, 1.0];
         let good = pafi_config();
