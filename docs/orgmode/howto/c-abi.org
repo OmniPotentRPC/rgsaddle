@@ -142,7 +142,9 @@ A host that loads the library at run time checks ~rgsaddle_abi_version()~ for at
 
 ABI minor 65 adds dynamic NEB.
 ~rgsaddle_band_set_dynamic~ takes 0 to clear it or 1 to set ~fmax~ and ~scale_fmax~; any other flag returns ~RGSADDLE_INVALID_PARAMETER~ and leaves the band unchanged.
+A non-finite ~fmax~ or ~scale_fmax~ returns ~RGSADDLE_NON_FINITE~ when the call would turn the option on. Clearing it ignores both values.
 A solid-state band, the trust-region stepper, the simplified string method, and the free-end adaptive NEB are refused.
 ~rgsaddle_dyneb_mask~ applies the same mask to a projected band the host already holds.
+A non-finite position, energy, force, ~fmax~, or ~scale_fmax~ returns ~RGSADDLE_NON_FINITE~.
 While the option is on, an interior image that a neighbour pulls back over its threshold is requested alone: ~RGSADDLE_REQ_ONE_IMAGE~ is set, ~image~ is that image's band index, ~n_images~ is the band length, and ~RGSADDLE_REQ_CLIMBING_IMAGE~ is not set.
 A host that loads the library at run time checks ~rgsaddle_abi_version()~ for at least minor 65 before resolving either symbol.

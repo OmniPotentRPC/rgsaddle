@@ -1486,8 +1486,9 @@ rgsaddle_status_t rgsaddle_band_set_string(RgsaddleBand *band, int32_t enabled,
                                            int32_t scheme);
 
 /**
- * Dynamic NEB (Lindgren, Kastlunger and Peterson, J. Chem. Theory
- * Comput. 15, 5787 (2019); ASE 3.29 DyNEB). ABI minor 65.
+ * Select dynamic NEB on the band, ABI minor 65.
+ * This is the method of Lindgren, Kastlunger and Peterson
+ * (J. Chem. Theory Comput. 15, 5787 (2019); ASE 3.29 DyNEB).
  * `enabled` 0 clears it and ignores fmax and scale_fmax. `enabled` 1
  * leaves an image in place once the largest per-atom norm of its
  * projected force is strictly below `fmax`, scaled by
@@ -1499,11 +1500,13 @@ rgsaddle_status_t rgsaddle_band_set_string(RgsaddleBand *band, int32_t enabled,
  * energy image is never given a zero force. The default band, with
  * this unset, evaluates every image.
  *
- * Refused on a solid-state band and on the trust-region stepper.
- * Returns RGSADDLE_NULL_BAND for a null band, and
- * RGSADDLE_INVALID_PARAMETER for enabled other than 0 or 1, a
- * non-finite fmax or scale_fmax, a solid-state band, or the
- * trust-region stepper.
+ * Refused on a solid-state band, the trust-region stepper, the
+ * simplified string method and free-end adaptive NEB. A refused call
+ * leaves the band unchanged.
+ * Returns RGSADDLE_NULL_BAND for a null band,
+ * RGSADDLE_INVALID_PARAMETER for enabled other than 0 or 1 or for one
+ * of those refused bands, and RGSADDLE_NON_FINITE for a non-finite
+ * fmax or scale_fmax when enabled is 1.
  */
 rgsaddle_status_t rgsaddle_band_set_dynamic(RgsaddleBand *band, int32_t enabled,
                                             double fmax, double scale_fmax);
@@ -1520,8 +1523,8 @@ rgsaddle_status_t rgsaddle_band_set_dynamic(RgsaddleBand *band, int32_t enabled,
  * mask is strictly below `fmax`). Both endpoints are 1.
  *
  * Returns RGSADDLE_SHAPE for a null pointer, fewer than 3 images or a
- * non-positive atom count, RGSADDLE_NON_FINITE for a non-finite input,
- * and RGSADDLE_INVALID_PARAMETER for a non-finite fmax or scale_fmax.
+ * non-positive atom count, and RGSADDLE_NON_FINITE for a non-finite
+ * position, energy, force, fmax or scale_fmax.
  */
 rgsaddle_status_t rgsaddle_dyneb_mask(int64_t n_images, int64_t n_atoms,
                                       const double *positions,

@@ -1040,6 +1040,8 @@ unsafe fn project_band(
 }
 
 /// ASE 3.29 DyNEB mask. See [`rgsaddle_dyneb_mask`] in the C header.
+/// A non-finite position, energy, force, `fmax` or `scale_fmax` is
+/// [`RGSADDLE_NON_FINITE`].
 ///
 /// # Safety
 /// `positions`, `energies` and `forces` address `n_images * 3 * n_atoms`
