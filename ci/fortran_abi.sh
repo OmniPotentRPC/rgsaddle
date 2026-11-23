@@ -125,17 +125,19 @@ run_assign() {
 run_container_assign() {
   local fc="$1"
   local exe="$2"
-  local rc
-  set +e
-  "$exe"
-  rc=$?
-  set -e
-  if [[ "$rc" -eq 17 ]]; then
-    pass=$((pass + 1))
-  else
-    echo "FAIL $fc container assignment rc=$rc" >&2
-    fail=$((fail + 1))
-  fi
+  local kind rc
+  for kind in band minmode pafi ohtst; do
+    set +e
+    "$exe" "$kind"
+    rc=$?
+    set -e
+    if [[ "$rc" -eq 17 ]]; then
+      pass=$((pass + 1))
+    else
+      echo "FAIL $fc container assignment $kind rc=$rc" >&2
+      fail=$((fail + 1))
+    fi
+  done
 }
 
 link_runtime() {

@@ -27,7 +27,7 @@ The module exports typed handles with finalizers for:
 - projected average force integration (PAFI)
 - optimal-hyperplane transition-state theory (OH-TST)
 
-A handle is not copyable. =b = a= stops the program with status =RGSADDLE_HANDLE_NOT_ASSIGNABLE= (17), because both finalizers would free the same session. =call b%move_from(a)= transfers the session and leaves =a= null. =call a%release()= frees it before the finalizer would. The finalizer runs when the handle goes out of scope in a procedure; a main-program variable may not be finalized.
+A handle is not copyable. =b = a= stops the program with status =RGSADDLE_HANDLE_NOT_ASSIGNABLE= (17), because both finalizers would free the same session. Assigning a derived type that holds a handle as a component stops the same way, for every handle type. =call b%move_from(a)= transfers the session and leaves =a= null. =call a%release()= frees it before the finalizer would. The finalizer runs when the handle goes out of scope in a procedure; a main-program variable may not be finalized.
 
 Surface callbacks are available in two forms:
 
