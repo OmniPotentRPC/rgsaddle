@@ -82,6 +82,7 @@ declare -a tests=(
   test_pafi
   test_ohtst
   test_handles
+  test_callbacks
 )
 
 pass=0
