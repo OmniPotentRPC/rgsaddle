@@ -174,10 +174,24 @@ _SKIPS: tuple[tuple[str, str], ...] = (
     ),
 )
 
+_HEAVY_VENDORED: tuple[str, ...] = (
+    "test_COCu111.py::test_COCu111",
+    "test_COCu111_2.py::test_COCu111_2",
+    "test_dimer_method.py::test_dimer_method",
+    "test_dynamic_neb.py::test_dynamic_neb",
+    "test_idpp.py::test_idpp",
+    "test_neb.py::test_unconstrained_forces",
+    "test_precon_neb.py::test_neb_methods",
+)
+
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     for item in items:
         node = item.nodeid
+        if any(needle in node for needle in _HEAVY_VENDORED):
+            # Full ASE optimizations nest OpenBLAS/Rayon work, so outer repetition oversubscribes CI.
+            item.add_marker(pytest.mark.thread_unsafe)
+            item.add_marker(pytest.mark.iterations(1))
         if "test_interpolate_images.py::test_interpolate_images_fixed" in node:
             # pytest-run-parallel iterations share this mutable Atoms fixture.
             # Run the three calls as one serialized state transition; repeating
