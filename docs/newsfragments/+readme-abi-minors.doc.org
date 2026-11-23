@@ -1,0 +1,2 @@
+The readme now follows the C ABI constants: config minors 5 through 62 read ~rotation_angle_tol~ as given, and minor 63 keeps the default five degree stop when that field is 0 unless ~RGSADDLE_MINMODE_EXPLICIT_ROTATION_ANGLE_TOL~ is set.
+The minimum-mode explanation marks the Lanczos torque window bound as ~rotation_tol >= 1e-4~, which Org can render, and ~llms-full.txt~ is regenerated from the Org sources.
