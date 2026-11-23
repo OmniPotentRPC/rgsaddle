@@ -48,7 +48,7 @@ For config minors 5 through 62, ~rotation_angle_tol~ is read as given and 0 keep
 From minor 63, ~rotation_angle_tol~ = 0 keeps the Rust default angle stop unless flag bit 0, ~RGSADDLE_MINMODE_EXPLICIT_ROTATION_ANGLE_TOL~, is set; with that bit and 0 the old stop-off behaviour remains.
 Any other value returns ~RGSADDLE_INVALID_PARAMETER~ and leaves the session unchanged.
 A library below minor 32 does not export the symbol.
-From minor 41 a Lanczos session reads the window too: a step's estimate stops once two Krylov vectors leave the Ritz residual under 1, and the value 0 runs it to its residual as before.
+From minor 41 a Lanczos session reads the window too: a step's estimate stops once two Krylov vectors leave the Ritz residual divided by the absolute Ritz value under 1. A Ritz value near zero compares that residual with 1 directly. The value 0 runs the estimate to its dimensionless residual as before.
 
 ABI minor 43 adds the opt-in ART nouveau controls.
 ~rgsaddle_artn_config_default~ initializes an ~rgsaddle_artn_config_t~ with the published defaults, and ~rgsaddle_minmode_set_artn~ enables those controls on a Lanczos session.

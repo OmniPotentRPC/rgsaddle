@@ -34,8 +34,12 @@ pub struct RgsaddleIndexKConfig {
     /// Dimer separation, or finite-difference displacement of the Hessian
     /// action, in Angstrom.
     pub dr: f64,
-    /// Rotation stop, in eV/Angstrom^2: the rotational force of the dimer, or
-    /// the Ritz residual of Lanczos. The core crate's default is 0.0001.
+    /// Rotation stop. For the dimer this is the rotational force in
+    /// eV/Angstrom^2. For Lanczos it is dimensionless: the lowest Ritz
+    /// residual divided by the absolute Ritz value, and, with no host
+    /// relative tolerance, the relative change of that value. A Ritz
+    /// value near zero compares the residual with this bound directly.
+    /// The core crate's default is 0.0001.
     pub rotation_tol: f64,
     /// Cap on dimer rotations, or Lanczos actions, in one step; zero or more.
     pub max_rotations: i64,

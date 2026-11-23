@@ -285,11 +285,12 @@ impl ArtConfig {
     /// [`MinModeConfig::time_step`] scales as length over the square root of
     /// energy, because the opening move from rest is the force times its
     /// square. [`MinModeConfig::rotation_angle_tol`] is an angle in radians,
-    /// so it keeps its value. [`MinModeConfig::rotation_tol`] is first the
-    /// relative change of the lowest Ritz value, which has no unit. The same
-    /// number is also compared with the Ritz residual, which is a curvature.
-    /// No single factor converts both readings, so it keeps its value as the
-    /// relative tolerance.
+    /// so it keeps its value. For Lanczos,
+    /// [`MinModeConfig::rotation_tol`] is dimensionless: the lowest Ritz
+    /// residual divided by the absolute Ritz value, and the relative
+    /// change of that value. It keeps its value. A dimer reads the same
+    /// field as a rotational force in curvature units, so that reading is
+    /// multiplied by `energy_scale / length_scale^2`.
     ///
     /// [`RelaxConfig::initial_step`] follows the relaxation method. FIRE
     /// and quick-min read it as a time step, length over the square root
@@ -324,6 +325,12 @@ impl ArtConfig {
         self.mode.force_tol *= force_scale;
         self.mode.max_move *= length_scale;
         self.mode.time_step *= time_scale;
+        // Lanczos reads this as a dimensionless residual and as the
+        // relative change of the lowest Ritz value. The dimer reads it
+        // as a rotational force in curvature units.
+        if self.mode.kind == MinModeKind::Dimer {
+            self.mode.rotation_tol *= curvature_scale;
+        }
         self.eigen_threshold *= curvature_scale;
         self.push_length *= length_scale;
         self.push_step *= length_scale;
@@ -1913,6 +1920,21 @@ mod tests {
     }
 
     #[test]
+    fn art_scales_a_dimer_rotation_tolerance_as_a_curvature() {
+        let mut reduced = ArtConfig::lj_art();
+        reduced.mode.kind = MinModeKind::Dimer;
+        let scaled = reduced.clone().scaled(2.0, 4.0).unwrap();
+        let curvature_scale = 2.0 / (4.0 * 4.0);
+        assert_eq!(
+            scaled.mode.rotation_tol,
+            curvature_scale * reduced.mode.rotation_tol
+        );
+        let lanczos = ArtConfig::lj_art();
+        let lanczos_scaled = lanczos.clone().scaled(2.0, 4.0).unwrap();
+        assert_eq!(lanczos_scaled.mode.rotation_tol, lanczos.mode.rotation_tol);
+    }
+
+    #[test]
     fn art_initial_step_scale_follows_the_relaxation_method() {
         let time = 4.0 / 2.0_f64.sqrt();
         let mobility = 4.0 * 4.0 / 2.0;
@@ -2056,8 +2078,10 @@ mod tests {
     ///
     /// With unit mass a time is a length over the square root of an energy.
     /// A force is an energy per length and a curvature an energy per length
-    /// squared. The rotation stop is a relative Ritz change, and the
-    /// rotation angle is in radians, so neither carries a unit.
+    /// squared. The Lanczos rotation stop is a relative residual and a
+    /// relative Ritz change, and the rotation angle is in radians, so
+    /// neither carries a unit. A dimer rotation stop is a curvature;
+    /// [`ArtConfig::scaled`] converts that reading when the mode is a dimer.
     fn dimension(name: &str) -> (f64, i32) {
         match name {
             "mode.dr"
@@ -2132,6 +2156,53 @@ mod tests {
                 ],
             ))
         }
+    }
+
+    fn art_lanczos_estimate(energy: f64, length: f64) -> (usize, Array1<f64>, f64) {
+        let config = ArtConfig::for_units(energy, length).unwrap();
+        let surface = ScaledWell { energy, length };
+        let position = array![0.2 * length, 0.35 * length, -0.15 * length];
+        let seed = array![0.3, 0.8, -0.2];
+        let mut session = MinModeSession::new(config.mode, position, seed).unwrap();
+        let estimate = session.estimate_mode(&surface).unwrap();
+        (estimate.rotations, estimate.mode, estimate.curvature)
+    }
+
+    fn assert_lanczos_unit_pair(energy: f64, length: f64) {
+        let (rotations, mode, curvature) = art_lanczos_estimate(1.0, 1.0);
+        let (scaled_rotations, scaled_mode, scaled_curvature) =
+            art_lanczos_estimate(energy, length);
+        assert_eq!(
+            scaled_rotations, rotations,
+            "energy {energy} length {length}"
+        );
+        let sign = if mode.dot(&scaled_mode) < 0.0 {
+            -1.0
+        } else {
+            1.0
+        };
+        for (reduced, scaled) in mode.iter().zip(scaled_mode.iter()) {
+            assert!(
+                (reduced - sign * scaled).abs() <= 1e-8,
+                "mode {mode} vs {scaled_mode}"
+            );
+        }
+        let factor = energy / (length * length);
+        let expected = curvature * factor;
+        assert!(
+            (scaled_curvature - expected).abs() <= 1e-8 * expected.abs().max(1e-12),
+            "curvature {scaled_curvature:e} vs {expected:e}"
+        );
+    }
+
+    #[test]
+    fn art_lanczos_is_invariant_under_energy_unit_scaling() {
+        assert_lanczos_unit_pair(1.0e-4, 1.0);
+    }
+
+    #[test]
+    fn art_lanczos_is_invariant_under_length_unit_scaling() {
+        assert_lanczos_unit_pair(1.0, 100.0);
     }
 
     #[test]

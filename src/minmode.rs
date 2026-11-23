@@ -135,9 +135,12 @@ pub enum MinModeKind {
     #[default]
     Dimer,
     /// Lanczos on finite-difference Hessian actions: a Krylov
-    /// subspace per compute, one gradient per action, stopped when
-    /// the lowest Ritz pair's residual meets `rotation_tol`, or under
-    /// the dimer's torque window once two vectors leave it under 1.
+    /// subspace per compute, one gradient per action. The estimate
+    /// stops when the lowest Ritz pair's residual divided by the
+    /// absolute Ritz value meets `rotation_tol`, together with the
+    /// relative change of that value. A Ritz value near zero compares
+    /// the residual with `rotation_tol` directly. The torque window
+    /// stops once two vectors leave that same ratio under 1.
     Lanczos,
 }
 
@@ -268,18 +271,26 @@ pub struct MinModeConfig {
     pub dr: f64,
     /// Forward (default) or central difference for the actions.
     pub difference: FiniteDifference,
-    /// Rotation stops when the rotational force `|H v - (v.H v) v|`
-    /// falls under this. The default is 1e-4. At that value and any
-    /// looser one, a dimer with its angle test disabled also stops after
-    /// one rotation once the rotational force is under 1. Lanczos stops
-    /// once two vectors leave the Ritz residual under 1. The improved
-    /// dimer default uses the angle test instead. A tighter value keeps
-    /// driving the residual, and the torque window stays out of that
-    /// loop.
+    /// Rotation stop. The default is 1e-4.
+    ///
+    /// A dimer reads this as the rotational force
+    /// `|H v - (v.H v) v|`, in the host's curvature units. At the
+    /// default and any looser value, a dimer with its angle test
+    /// disabled also stops after one rotation once that force is under one.
+    /// The improved dimer default uses the angle test instead. A tighter
+    /// value keeps driving the residual, and the torque window stays out
+    /// of that loop.
     /// [`MinModeSession::set_torque_window`] turns the window on or off
-    /// whatever this value is. Lanczos
-    /// uses the same number as the Ritz residual. With no host relative
-    /// tolerance it is also the relative change of the lowest Ritz value.
+    /// whatever this value is.
+    ///
+    /// Lanczos reads the same number as a dimensionless tolerance. The
+    /// estimate stops when the lowest Ritz residual divided by the
+    /// absolute Ritz value is at most this, and, with no host relative
+    /// tolerance, when the relative change of that Ritz value is too.
+    /// A Ritz value whose magnitude is at most 1e-14 has no scale, so
+    /// the residual is compared with this number directly and the
+    /// quotient is never formed. Once two vectors are in hand, the
+    /// torque window stops when that same ratio is under 1.
     pub rotation_tol: f64,
     /// Dimer rotation also stops when the optimal rotation angle of an
     /// iteration falls under this many radians. The default is eOn's
@@ -534,8 +545,10 @@ const STOCK_ROTATION_TOL: f64 = 1e-4;
 
 /// eOn `dimer_torque_max`. After one rotation, a rotational force under
 /// this is finished (classic dimer, `torque_min` .. `torque_max`,
-/// `rotations_min` = 1). Lanczos reads it as the Ritz residual once it
-/// holds two vectors.
+/// `rotations_min` = 1). Lanczos reads it as the bound on the
+/// dimensionless residual once it holds two vectors: the Ritz residual
+/// divided by the absolute Ritz value, or the residual itself when that
+/// value is near zero.
 const TORQUE_MAX: f64 = 1.0;
 
 /// Scale of the step that replaces a capped FIRE move which left the
@@ -1304,6 +1317,42 @@ const FIRE_STALL_STEPS: u32 = 2000;
 /// Slow progress (a fraction of a percent per step) must not latch.
 const FIRE_STALL_DROP: f64 = 1e-4;
 
+/// Whether `|residual| / |curvature|` is at most `tol`.
+///
+/// `curvature` is the Ritz value. Dividing the residual by its absolute
+/// value cancels the energy and length units, so one `tol` means the
+/// same stop after a change of units. A curvature whose magnitude is at
+/// most 1e-14, the same guard as [`ritz_value_agreed`], has no usable
+/// scale: the residual is then compared with `tol` itself. The quotient
+/// is never formed. A non-finite residual, curvature, or tolerance does
+/// not agree.
+fn lanczos_residual_agreed(residual: f64, curvature: f64, tol: f64) -> bool {
+    if !(residual.is_finite() && curvature.is_finite() && tol.is_finite() && tol >= 0.0) {
+        return false;
+    }
+    let scale = curvature.abs();
+    if scale <= 1e-14 {
+        return residual <= tol;
+    }
+    residual <= tol * scale
+}
+
+/// Torque-window form of [`lanczos_residual_agreed`].
+///
+/// The ratio is strictly under `bound`. A curvature near zero uses the
+/// same 1e-14 guard: the residual is compared with `bound` itself, and
+/// the quotient is never formed.
+fn lanczos_residual_below(residual: f64, curvature: f64, bound: f64) -> bool {
+    if !(residual.is_finite() && curvature.is_finite() && bound.is_finite() && bound >= 0.0) {
+        return false;
+    }
+    let scale = curvature.abs();
+    if scale <= 1e-14 {
+        return residual < bound;
+    }
+    residual < bound * scale
+}
+
 /// Relative change of a Ritz value. A vanishing previous value only
 /// counts as agreement when the new value is inside the tolerance too,
 /// matching eOn's guarded division (a zero denominator does not report
@@ -1345,10 +1394,11 @@ pub type KrylovBlock = Vec<(Array1<f64>, Array1<f64>)>;
 /// Olsen, Kroes, Henkelman, Arnaldsson, and Jónsson, J. Chem. Phys.
 /// 121, 9776 (2004), doi:10.1063/1.1809574, as eOn implements it: stop
 /// when the relative change in the lowest Ritz value falls under
-/// `rotation_tol`, or when the residual `beta |s|` does. A seed that
-/// is already the mode closes the Krylov on the first product. Under
-/// the torque window the estimate also stops once it holds two vectors
-/// and the residual is under [`TORQUE_MAX`], where the dimer stops.
+/// `rotation_tol`, or when the residual `beta |s|` divided by the
+/// absolute Ritz value does. A seed that is already the mode closes the
+/// Krylov on the first product. Under the torque window the estimate
+/// also stops once it holds two vectors and that ratio is under
+/// [`TORQUE_MAX`]. The dimer window stays an absolute rotational force.
 #[allow(clippy::too_many_arguments)]
 fn lanczos_mode<S: PointSurface>(
     surface: &Counted<'_, S>,
@@ -1443,17 +1493,20 @@ fn lanczos_mode<S: PointSurface>(
         // `rel_tol` replaces `rotation_tol` for that relative test.
         let agreed = lanczos_ritz_agreed(stop.rel_tol, config.rotation_tol, theta, ew_old);
         // The Ritz residual `H y - theta y` is the rotational force of
-        // the Ritz vector `y`, and `theta` its curvature: the dimer's
-        // force-error stop reads the same pair.
-        let residual_ok = residual <= config.rotation_tol
+        // the Ritz vector `y`, and `theta` its curvature. Dividing by
+        // `|theta|` makes the stop dimensionless, so a change of energy
+        // or length units does not move it. The curvature-aware length
+        // stop still reads the pair in curvature units.
+        let residual_ok = lanczos_residual_agreed(residual, theta, config.rotation_tol)
             || rotation_force_converged(residual, theta, stop.length, config.force_tol);
         // The first two vectors span the dimer's rotation plane {v, H v},
         // and their Ritz vector is the dimer rotated to the lowest
         // curvature in it (Zeng, Xiao, and Henkelman, J. Chem. Phys. 140,
-        // 044115 (2014), doi:10.1063/1.4862410). The window ends both
-        // estimates on the same rotational force. It is not a converged
-        // solve: the next estimate still spends its second product.
-        let windowed = stop.window && j >= 1 && residual < TORQUE_MAX;
+        // 044115 (2014), doi:10.1063/1.4862410). The Lanczos window uses
+        // the same ratio as the residual stop, strictly under 1. It is
+        // not a converged solve: the next estimate still spends its
+        // second product.
+        let windowed = stop.window && j >= 1 && lanczos_residual_below(residual, theta, TORQUE_MAX);
         let capped = alpha.len() == m;
         if residual_ok || agreed || windowed || capped || b <= 1e-12 {
             let mut mode = Array1::zeros(n);
@@ -1789,7 +1842,8 @@ pub struct MinModeSession {
     /// if the Rayleigh quotient agrees with the carried curvature to
     /// this fraction, and later products stop on the relative change of
     /// the lowest Ritz value. `None` keeps the stock test: the residual
-    /// and the relative Ritz change, both at `rotation_tol`.
+    /// divided by the absolute Ritz value, and the relative Ritz change,
+    /// both at `rotation_tol`.
     lanczos_rel_tol: Option<f64>,
     /// Classic dimer torque window. `None` turns it on when
     /// `rotation_tol` is at least the stock 1e-4.
@@ -2075,8 +2129,9 @@ impl MinModeSession {
     /// so a translation does not wait for a tight residual. A set
     /// tolerance also leaves the inferred torque window out; only
     /// [`MinModeSession::set_torque_window`] with `Some(true)` adds it.
-    /// `None` restores the stock residual and the relative Ritz change,
-    /// both at `rotation_tol`, and the inferred window.
+    /// `None` restores the stock test: the residual divided by the
+    /// absolute Ritz value, and the relative Ritz change, both at
+    /// `rotation_tol`, and the inferred window.
     pub fn set_lanczos_rel_tol(&mut self, tol: Option<f64>) -> Result<(), SaddleError> {
         if let Some(tol) = tol
             && !(tol.is_finite() && tol > 0.0)
@@ -2098,10 +2153,11 @@ impl MinModeSession {
 
     /// Turn the classic dimer torque window on or off apart from
     /// `rotation_tol`. With the window on, a rotation also stops after
-    /// one iteration once the rotational force is under 1 (eOn
+    /// one iteration once the rotational force is under one (eOn
     /// `torque_max`), and a Lanczos estimate stops once two vectors
-    /// leave the Ritz residual, the rotational force of the Ritz
-    /// vector, under 1. `None`, the default, keeps the window on for a
+    /// leave the Ritz residual divided by the absolute Ritz value under
+    /// one. A Ritz value near zero compares that residual with one
+    /// directly. `None`, the default, keeps the window on for a
     /// dimer exactly when its angle test is disabled and `rotation_tol`
     /// is at least the stock 1e-4. Lanczos keeps the window only while
     /// no [`MinModeSession::set_lanczos_rel_tol`] is set.
@@ -4525,6 +4581,25 @@ mod tests {
         assert_abs_diff_eq!(lanczos.mode.dot(&dimer.mode).abs(), 1.0, epsilon = 1e-8);
         assert!(torque(&lanczos.mode) > 0.1 && torque(&lanczos.mode) < 1.0);
         assert!(!ready, "a windowed estimate is not a converged solve");
+    }
+
+    #[test]
+    fn lanczos_residual_agreement_is_relative_and_guards_a_vanishing_ritz_value() {
+        assert!(super::lanczos_residual_agreed(1.0e-6, -2.0, 1.0e-4));
+        assert!(!super::lanczos_residual_agreed(3.0e-4, -2.0, 1.0e-4));
+        assert!(super::lanczos_residual_agreed(1.0e-4, 0.0, 1.0e-4));
+        assert!(!super::lanczos_residual_agreed(2.0e-4, 0.0, 1.0e-4));
+        assert!(super::lanczos_residual_agreed(1.0e-4, 1.0e-15, 1.0e-4));
+        assert!(!super::lanczos_residual_agreed(1.0e-4, 1.0e-12, 1.0e-4));
+        assert!(!super::lanczos_residual_agreed(0.0, f64::NAN, 1.0e-4));
+        assert!(!super::lanczos_residual_agreed(f64::NAN, -1.0, 1.0e-4));
+        assert!(!super::lanczos_residual_agreed(0.0, -1.0, f64::NAN));
+        assert!(super::lanczos_residual_below(0.5, -2.0, 1.0));
+        assert!(!super::lanczos_residual_below(2.5, -2.0, 1.0));
+        assert!(!super::lanczos_residual_below(2.0, -2.0, 1.0));
+        assert!(super::lanczos_residual_below(0.5, 0.0, 1.0));
+        assert!(!super::lanczos_residual_below(1.0, 0.0, 1.0));
+        assert!(!super::lanczos_residual_below(0.0, f64::INFINITY, 1.0));
     }
 
     #[test]

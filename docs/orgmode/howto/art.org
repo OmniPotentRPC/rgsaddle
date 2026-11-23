@@ -32,8 +32,12 @@ the climb's =MinModeConfig::time_step=, scales as length over the square root
 of energy, because the opening move is the force times the square of that
 step. The opening step of steepest descent, L-BFGS, nonlinear CG, DIIS and
 Barzilai-Borwein multiplies the force, so it scales as length squared over
-energy, and Adam's scales as a length. The rotation stops =rotation_tol= and
-=rotation_angle_tol= keep their values. Any other relaxation method is an
+energy, and Adam's scales as a length. The angle stop =rotation_angle_tol=
+keeps its value. =rotation_tol= is dimensionless for Lanczos, the residual
+of the lowest Ritz pair divided by the absolute Ritz value and the relative
+change of that value, so it keeps its value. A dimer reads =rotation_tol=
+as a rotational force in curvature units, and unit conversion multiplies it
+by energy over length squared. Any other relaxation method is an
 error from =for_units=. =ArtConfig::validate()=
 returns an invalid parameter error when the perpendicular relaxation force
 tolerance is looser than the mode force tolerance, and when the mode force
