@@ -75,17 +75,17 @@ fn walk(symmetrized: Option<bool>) -> (Vec<usize>, Array1<f64>) {
 /// ceiling off, recorded before either option existed.
 const DEFAULT_BITS: [u64; 12] = [
     0xbfff7a56b3b9309e,
-    0xbfec29aa047b94bb,
-    0xbfa8f3f517a51ba2,
-    0x3fecdce5b34f0ac4,
-    0x3fe15c67823c9e63,
-    0x3fa1bca4339c3026,
-    0x3fe709b76c7b6194,
-    0x3fd43e6e43dc47d0,
-    0x3fbdb120d09b163c,
-    0x3fe0d09fa3d0eab8,
-    0x3fc87abcdd6c3fa8,
-    0x3fadc094618b10fc,
+    0xbfec29aa047b94c8,
+    0xbfa8f3f517a51bc9,
+    0x3fecdce5b34f0ac0,
+    0x3fe15c67823c9e6c,
+    0x3fa1bca4339c305c,
+    0x3fe709b76c7b6199,
+    0x3fd43e6e43dc47b6,
+    0x3fbdb120d09b1650,
+    0x3fe0d09fa3d0eaba,
+    0x3fc87abcdd6c3fe7,
+    0x3fadc094618b10c0,
 ];
 
 #[test]

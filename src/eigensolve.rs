@@ -179,10 +179,218 @@ pub fn exact_eigh(a: ArrayView2<f64>) -> Result<(Array1<f64>, Array2<f64>), Sadd
     }
 }
 
-/// Relative singularity and zero-mode threshold `scale * (n as f64) * f64::EPSILON`
-/// for an `n x n` matrix of entry or spectral magnitude `scale`.
+/// Relative singularity, zero-mode, and backward eigenpair-residual threshold
+/// `scale * (n as f64) * f64::EPSILON` for an `n x n` matrix of entry or
+/// spectral magnitude `scale` (or `0.0` when `scale` is non-finite or
+/// non-positive).
+///
+/// # Derivation
+///
+/// For an `n x n` matrix `A` with magnitude `scale = max_{i,j} |A_{ij}|`, each
+/// component of `A v - lambda v` or `V^T A V` is an `n`-term inner product with
+/// unit-vector weights `|V_{kj}| <= 1`. By standard floating-point inner-product
+/// error analysis (Higham, *Accuracy and Stability of Numerical Algorithms*,
+/// 2nd ed., Lemma 3.1; Wilkinson, *The Algebraic Eigenvalue Problem*, Ch. 3),
+/// the backward perturbation `||Delta A||_2` across `n` dimensions is bounded to
+/// first order by `scale * n * f64::EPSILON`. By Weyl's inequality
+/// (`|tilde_lambda_k - lambda_k| <= ||Delta A||_2`) and Gershgorin's circle
+/// theorem, `scale * n * f64::EPSILON` is the `n`-dimensional backward roundoff
+/// threshold for zero modes, LU/Cholesky pivots, and full-matrix eigenpair
+/// residuals.
+///
+/// At `n = 1`, `relative_zero_tolerance(scale, 1) = scale * f64::EPSILON` is a
+/// single binary64 ULP at magnitude `scale`. In a Rayleigh-Ritz matrix `R` with
+/// diagonal entries `O(scale)`, a Givens rotation annihilating `R_{pq}` shifts
+/// the diagonal by `-t * R_{pq}` with `|t| <= 1`; when `|R_{pq}| <= scale * f64::EPSILON`,
+/// that diagonal shift is at or below one binary64 ULP of `scale` and cannot
+/// refine the floating-point eigenvalues further.
 pub fn relative_zero_tolerance(scale: f64, n: usize) -> f64 {
-    scale * (n as f64) * f64::EPSILON
+    if scale.is_finite() && scale > 0.0 {
+        scale * (n as f64) * f64::EPSILON
+    } else {
+        0.0
+    }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static TEST_JACOBI_SWEEP_BUDGET: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn with_jacobi_sweep_budget<T>(budget: usize, f: impl FnOnce() -> T) -> T {
+    struct Reset(Option<usize>);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            TEST_JACOBI_SWEEP_BUDGET.with(|cell| cell.set(self.0));
+        }
+    }
+    let prev = TEST_JACOBI_SWEEP_BUDGET.with(|cell| {
+        let old = cell.get();
+        cell.set(Some(budget));
+        old
+    });
+    let _reset = Reset(prev);
+    f()
+}
+
+/// Active-subspace cyclic Jacobi refinement on the `m x m` Rayleigh-Ritz
+/// submatrix `r` (row stride `stride`), accumulating rotations in `q_col`
+/// (`m x m` column-major).
+///
+/// # Derivation of tolerances and sweep budget
+///
+/// - **Stopping tolerance `res_tol = scale * n * f64::EPSILON`**: matches the
+///   `n`-dimensional backward inner-product error bound of [`relative_zero_tolerance`].
+/// - **Rotation threshold `rot_tol = scale * f64::EPSILON`**: any off-diagonal
+///   entry `|R_{pq}| <= scale * f64::EPSILON` is within one binary64 ULP at
+///   magnitude `scale`, so its quadratic Givens diagonal update `t * R_{pq}`
+///   vanishes in binary64 arithmetic.
+/// - **Sweep budget `max_sweeps = m` (`m = |S| >= 2`)**: `faer_eigh` invokes
+///   this loop only after `faer::Mat::self_adjoint_eigen` and a Newton-Schulz
+///   orthonormalization step, so `R = V_orth^T A V_orth` enters with relative
+///   off-diagonal norm `||E||_F / scale << 1`, strictly inside the asymptotic
+///   quadratic-convergence basin of Wilkinson's cyclic Jacobi theorem
+///   (Wilkinson 1962, *Numer. Math.* 4, 296-300). Each cyclic sweep squares the
+///   relative off-diagonal coupling across the `m - 1 < m` independent elimination
+///   stages of the `m x m` active submatrix, so `m` sweeps (`m >= 2`) is an
+///   upper bound for convergence from pre-diagonalized eigenpairs.
+#[cfg(feature = "faer")]
+fn cyclic_jacobi_subspace(
+    r: &mut [f64],
+    q_col: &mut [f64],
+    m: usize,
+    stride: usize,
+    res_tol: f64,
+    rot_tol: f64,
+    max_sweeps: usize,
+) -> Result<(), SaddleError> {
+    if m <= 1 {
+        return Ok(());
+    }
+    for _sweep in 0..max_sweeps {
+        let mut max_off = 0.0_f64;
+        for p in 0..m {
+            let row_p = &r[p * stride..p * stride + m];
+            if !row_p[p].is_finite() {
+                return Err(SaddleError::NonFinite("faer_eigh Jacobi diagonal"));
+            }
+            for &rpq in &row_p[(p + 1)..m] {
+                if !rpq.is_finite() {
+                    return Err(SaddleError::NonFinite("faer_eigh Jacobi off-diagonal"));
+                }
+                let mag = rpq.abs();
+                if mag > max_off {
+                    max_off = mag;
+                }
+            }
+        }
+        if max_off <= res_tol {
+            return Ok(());
+        }
+        let mut changed = false;
+        for p in 0..m {
+            for q in (p + 1)..m {
+                let rpq = r[p * stride + q];
+                if rpq.abs() <= rot_tol {
+                    r[p * stride + q] = 0.0;
+                    r[q * stride + p] = 0.0;
+                    continue;
+                }
+                changed = true;
+                let rpp = r[p * stride + p];
+                let rqq = r[q * stride + q];
+                let tau = (rqq - rpp) / (2.0 * rpq);
+                let t = if tau >= 0.0 {
+                    1.0 / (tau + (1.0 + tau * tau).sqrt())
+                } else {
+                    -1.0 / (-tau + (1.0 + tau * tau).sqrt())
+                };
+                let c = 1.0 / (1.0 + t * t).sqrt();
+                let s = t * c;
+                r[p * stride + p] = rpp - t * rpq;
+                r[q * stride + q] = rqq + t * rpq;
+                r[p * stride + q] = 0.0;
+                r[q * stride + p] = 0.0;
+                if s.abs() * max_off > rot_tol {
+                    for k in 0..m {
+                        if k != p && k != q {
+                            let rkp = r[p * stride + k];
+                            let rkq = r[q * stride + k];
+                            if rkp == 0.0 && rkq == 0.0 {
+                                continue;
+                            }
+                            let nkp = c * rkp - s * rkq;
+                            let nkq = s * rkp + c * rkq;
+                            r[p * stride + k] = nkp;
+                            r[k * stride + p] = nkp;
+                            r[q * stride + k] = nkq;
+                            r[k * stride + q] = nkq;
+                        }
+                    }
+                }
+                let (left, right) = q_col.split_at_mut(q * m);
+                let qp_slice = &mut left[p * m..(p + 1) * m];
+                let qq_slice = &mut right[..m];
+                for (qp, qq) in qp_slice.iter_mut().zip(qq_slice.iter_mut()) {
+                    let x = *qp;
+                    let y = *qq;
+                    *qp = c * x - s * y;
+                    *qq = s * x + c * y;
+                }
+            }
+        }
+        if !changed {
+            return Ok(());
+        }
+    }
+    let mut final_off = 0.0_f64;
+    for p in 0..m {
+        let row_p = &r[p * stride..p * stride + m];
+        if !row_p[p].is_finite() {
+            return Err(SaddleError::NonFinite("faer_eigh Jacobi diagonal"));
+        }
+        for &rpq in &row_p[(p + 1)..m] {
+            if !rpq.is_finite() {
+                return Err(SaddleError::NonFinite("faer_eigh Jacobi off-diagonal"));
+            }
+            let mag = rpq.abs();
+            if mag > final_off {
+                final_off = mag;
+            }
+        }
+    }
+    if final_off <= res_tol {
+        Ok(())
+    } else {
+        Err(SaddleError::Solver(
+            "Jacobi refinement did not converge within sweep budget".into(),
+        ))
+    }
+}
+
+#[cfg(feature = "faer")]
+fn max_eigenpair_residual(
+    av: &faer::Mat<f64>,
+    vectors: faer::MatRef<'_, f64>,
+    values: faer::diag::DiagRef<'_, f64>,
+    n: usize,
+) -> Result<f64, SaddleError> {
+    let mut raw_res = 0.0_f64;
+    for col in 0..n {
+        let lam = values[col];
+        for row in 0..n {
+            let err = (av[(row, col)] - vectors[(row, col)] * lam).abs();
+            if !err.is_finite() {
+                return Err(SaddleError::NonFinite("faer_eigh residual"));
+            }
+            if err > raw_res {
+                raw_res = err;
+            }
+        }
+    }
+    Ok(raw_res)
 }
 
 /// Self-adjoint spectrum from faer. `a` is symmetrised as `(a + a^T) / 2` first.
@@ -221,30 +429,138 @@ pub fn faer_eigh(a: &Array2<f64>) -> Result<(Array1<f64>, Array2<f64>), SaddleEr
     }
     #[cfg(feature = "faer")]
     {
-        let mat = faer::Mat::from_fn(n, n, |i, j| 0.5 * (a[(i, j)] + a[(j, i)]));
+        let mut scale = 0.0_f64;
+        let mat = faer::Mat::from_fn(n, n, |i, j| {
+            let s = 0.5 * (a[(i, j)] + a[(j, i)]);
+            let abs = s.abs();
+            if abs > scale {
+                scale = abs;
+            }
+            s
+        });
+        if scale == 0.0 {
+            return Ok((Array1::zeros(n), Array2::eye(n)));
+        }
         let evd = mat
             .self_adjoint_eigen(faer::Side::Lower)
             .map_err(|_| SaddleError::Solver("self-adjoint eigen did not converge".into()))?;
         let values_ref = evd.S();
         let vectors_ref = evd.U();
+        for column in 0..n {
+            if !values_ref[column].is_finite() {
+                return Err(SaddleError::NonFinite("faer_eigh eigenvalue"));
+            }
+            for row in 0..n {
+                if !vectors_ref[(row, column)].is_finite() {
+                    return Err(SaddleError::NonFinite("faer_eigh eigenvector"));
+                }
+            }
+        }
+        let res_tol = relative_zero_tolerance(scale, n);
+        let av_raw = &mat * vectors_ref;
+        let raw_res = max_eigenpair_residual(&av_raw, vectors_ref, values_ref, n)?;
+        if raw_res <= res_tol {
+            let mut values = Array1::zeros(n);
+            let mut vectors = Array2::zeros((n, n));
+            for col in 0..n {
+                values[col] = values_ref[col];
+                for row in 0..n {
+                    vectors[(row, col)] = vectors_ref[(row, col)];
+                }
+                if nrm2(vectors.column(col)) <= f64::EPSILON {
+                    return Err(SaddleError::Solver(
+                        "self-adjoint eigen produced a zero eigenvector".into(),
+                    ));
+                }
+            }
+            return Ok((values, vectors));
+        }
+
+        let mut gram = vectors_ref.transpose() * vectors_ref;
+        for i in 0..n {
+            gram[(i, i)] = 1.5 - 0.5 * gram[(i, i)];
+            for j in 0..i {
+                let s = -0.25 * (gram[(i, j)] + gram[(j, i)]);
+                gram[(i, j)] = s;
+                gram[(j, i)] = s;
+            }
+        }
+        let v_orth = vectors_ref * &gram;
+        let av = &mat * &v_orth;
+        let r_mat = v_orth.transpose() * &av;
+        let rot_tol = relative_zero_tolerance(scale, 1);
+        let mut active = Vec::with_capacity(n);
+        for i in 0..n {
+            if !r_mat[(i, i)].is_finite() {
+                return Err(SaddleError::NonFinite("faer_eigh Rayleigh quotient"));
+            }
+            let mut row_off = 0.0_f64;
+            for j in 0..n {
+                if i != j {
+                    let rij = 0.5 * (r_mat[(i, j)] + r_mat[(j, i)]).abs();
+                    if !rij.is_finite() {
+                        return Err(SaddleError::NonFinite("faer_eigh Rayleigh quotient"));
+                    }
+                    if rij > row_off {
+                        row_off = rij;
+                    }
+                }
+            }
+            if row_off > rot_tol {
+                active.push(i);
+            }
+        }
+
+        let mut all_vals: Vec<f64> = (0..n).map(|i| r_mat[(i, i)]).collect();
+        let mut v_full = v_orth;
+        if !active.is_empty() {
+            let m = active.len();
+            let stride = m | 1;
+            let mut q_col = vec![0.0_f64; m * m];
+            let mut r = vec![0.0_f64; m * stride];
+            for (i, &ri) in active.iter().enumerate() {
+                q_col[i * m + i] = 1.0;
+                r[i * stride + i] = all_vals[ri];
+                for (j, &rj) in active.iter().enumerate().skip(i + 1) {
+                    let rij = 0.5 * (r_mat[(ri, rj)] + r_mat[(rj, ri)]);
+                    if rij.abs() > rot_tol {
+                        r[i * stride + j] = rij;
+                        r[j * stride + i] = rij;
+                    }
+                }
+            }
+            let max_sweeps = m;
+            #[cfg(test)]
+            let max_sweeps = TEST_JACOBI_SWEEP_BUDGET.with(|cell| cell.get().unwrap_or(max_sweeps));
+            cyclic_jacobi_subspace(&mut r, &mut q_col, m, stride, res_tol, rot_tol, max_sweeps)?;
+            let v_act = faer::Mat::from_fn(n, m, |row, j| v_full[(row, active[j])]);
+            let q_mat = faer::Mat::from_fn(m, m, |row, col| q_col[col * m + row]);
+            let v_act_rot = &v_act * &q_mat;
+            for (j, &col) in active.iter().enumerate() {
+                all_vals[col] = r[j * stride + j];
+                for row in 0..n {
+                    v_full[(row, col)] = v_act_rot[(row, j)];
+                }
+            }
+        }
+        let mut order: Vec<usize> = (0..n).collect();
+        order.sort_by(|&i, &j| all_vals[i].total_cmp(&all_vals[j]));
         let mut values = Array1::zeros(n);
         let mut vectors = Array2::zeros((n, n));
-        for column in 0..n {
-            let val = values_ref[column];
+        for (dst, &src) in order.iter().enumerate() {
+            let val = all_vals[src];
             if !val.is_finite() {
                 return Err(SaddleError::NonFinite("faer_eigh eigenvalue"));
             }
-            values[column] = val;
+            values[dst] = val;
             for row in 0..n {
-                let vec_entry = vectors_ref[(row, column)];
+                let vec_entry = v_full[(row, src)];
                 if !vec_entry.is_finite() {
                     return Err(SaddleError::NonFinite("faer_eigh eigenvector"));
                 }
-                vectors[(row, column)] = vec_entry;
+                vectors[(row, dst)] = vec_entry;
             }
-        }
-        for column in 0..n {
-            if nrm2(vectors.column(column)) <= f64::EPSILON {
+            if nrm2(vectors.column(dst)) <= f64::EPSILON {
                 return Err(SaddleError::Solver(
                     "self-adjoint eigen produced a zero eigenvector".into(),
                 ));
@@ -1278,22 +1594,37 @@ fn matmul(a: ArrayView2<f64>, b: ArrayView2<f64>) -> Array2<f64> {
     c
 }
 
-/// Cyclic Jacobi for a small dense symmetric matrix.
+/// Classical Jacobi eigensolver for a small dense symmetric `n x n` matrix.
+///
+/// # Derivation of tolerance and rotation budget
+///
+/// - **Stopping tolerance `tol = relative_zero_tolerance(scale, n) = scale * n * f64::EPSILON`**:
+///   when `max_{i < j} |a_{ij}| <= tol`, Gershgorin's circle theorem bounds the
+///   off-diagonal eigenvalue perturbation by `(n - 1) * tol < scale * n^2 * f64::EPSILON`
+///   and the quadratic Rayleigh-Ritz shift `sum_{j != i} |a_{ij}|^2 / |lambda_i - lambda_j|`
+///   is below binary64 roundoff.
+/// - **Rotation budget `16 + 8 * n * n`**: each iteration selects the largest
+///   off-diagonal pivot `|a_{pq}| = max_{i < j} |a_{ij}|` among the
+///   `N = n * (n - 1) / 2 < n^2 / 2` upper-triangular pairs, so
+///   `|a_{pq}|^2 >= off(A)^2 / N` and `off(A_{k+1})^2 = (1 - 1/N) off(A_k)^2 <= exp(-1/N) off(A_k)^2`
+///   (Jacobi 1846; Golub & Van Loan, *Matrix Computations*, 4th ed., Sec. 8.5.2).
+///   Even under the worst-case linear contraction rate `exp(-1 / (2N))`, `12` sweeps
+///   (`12 * N < 6 * n^2` rotations) contract `off(A)` by `exp(-6) approx 2.48e-3`,
+///   entering Wilkinson's quadratic-convergence basin (`off(A) / scale < 1/4`,
+///   Henrici 1958; Wilkinson 1962), from which at most `4` quadratic sweeps
+///   (`4 * N < 2 * n^2` rotations) reach binary64 precision `2^-52 approx exp(-36.04)`.
+///   Summing `12 + 4 = 16` sweeps of `< n^2 / 2` pairs gives `8 * n^2` rotations,
+///   plus `16` rotations for small `n in {2, 3}`.
 fn jacobi_eigh(a: &mut Array2<f64>) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
-    let n = a.nrows();
-    jacobi_eigh_with_budget(a, 16 + 8 * n * n)
-}
-
-fn jacobi_eigh_with_budget(
-    a: &mut Array2<f64>,
-    max_sweeps: usize,
-) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
     let n = a.nrows();
     if a.ncols() != n {
         return Err(SaddleError::Shape(
             "jacobi_eigh needs a square matrix".into(),
         ));
     }
+    let max_sweeps = 16 + 8 * n * n;
+    #[cfg(test)]
+    let max_sweeps = TEST_JACOBI_SWEEP_BUDGET.with(|cell| cell.get().unwrap_or(max_sweeps));
     let mut scale = 0.0_f64;
     for &x in a.iter() {
         if !x.is_finite() {
@@ -1316,11 +1647,7 @@ fn jacobi_eigh_with_budget(
         evals[0] = a[(0, 0)];
         return Ok((evals, v));
     }
-    let tol = if scale >= 1e-2 {
-        1e-14
-    } else {
-        relative_zero_tolerance(scale, n)
-    };
+    let tol = relative_zero_tolerance(scale, n);
     let mut converged = scale == 0.0;
     for _ in 0..max_sweeps {
         let mut p = 0;
@@ -2001,14 +2328,268 @@ mod tests {
                 );
             }
         }
+
+        // Scale-invariant relative pivot cutoff across both the host (n = 2 < 32)
+        // and faer (n = 40 >= 32) paths for spd_logdet (C1, C2) and LU (LU1-LU3):
+        // - 1e32 * I_2, 1e32 * I_40, 1e-30 * I_2, and 1e-30 * I_40 are accepted;
+        // - diag(1, ..., 1, 1e-17) and 1e-30 * diag(1, ..., 1, 1e-17) (and 1e30 * diag(1, ..., 1, 1e-17))
+        //   have a nonzero sub-tolerance pivot 1e-17 * scale <= n * eps * scale and are refused.
+        for &n in &[2usize, 40usize] {
+            for &scale in &[1.0e32_f64, 1.0e-30_f64, 1.0_f64] {
+                let scaled_eye = Array2::<f64>::from_diag(&Array1::from_elem(n, scale));
+                let expected_logdet = (n as f64) * scale.ln();
+                let chol = spd_logdet(scaled_eye.view()).unwrap();
+                let lu = dense_logabsdet(scaled_eye.view()).unwrap();
+                assert!(
+                    (chol - expected_logdet).abs() <= 1.0e-12 * (1.0 + expected_logdet.abs()),
+                    "n={n} scale={scale:e} spd_logdet={chol} expected={expected_logdet}"
+                );
+                assert!(
+                    (lu - expected_logdet).abs() <= 1.0e-12 * (1.0 + expected_logdet.abs()),
+                    "n={n} scale={scale:e} dense_logabsdet={lu} expected={expected_logdet}"
+                );
+                let rhs = Array1::from_elem(n, scale);
+                let x = solve_dense(scaled_eye.view(), rhs.view()).unwrap();
+                let x_mat = solve_dense_matrix(scaled_eye.view(), scaled_eye.view()).unwrap();
+                for i in 0..n {
+                    assert!((x[i] - 1.0).abs() <= 1.0e-12);
+                    assert!((x_mat[(i, i)] - 1.0).abs() <= 1.0e-12);
+                }
+
+                // Above-tolerance smallest pivot 1e-13 * scale > n * eps * scale is accepted.
+                let mut above_tol = scaled_eye.clone();
+                above_tol[(n - 1, n - 1)] = scale * 1.0e-13;
+                let expected_above = ((n - 1) as f64) * scale.ln() + (scale * 1.0e-13).ln();
+                let chol_above = spd_logdet(above_tol.view()).unwrap();
+                let lu_above = dense_logabsdet(above_tol.view()).unwrap();
+                assert!(
+                    (chol_above - expected_above).abs() <= 1.0e-11 * (1.0 + expected_above.abs()),
+                    "n={n} scale={scale:e} chol_above={chol_above} expected={expected_above}"
+                );
+                assert!(
+                    (lu_above - expected_above).abs() <= 1.0e-11 * (1.0 + expected_above.abs()),
+                    "n={n} scale={scale:e} lu_above={lu_above} expected={expected_above}"
+                );
+                assert!(solve_dense(above_tol.view(), rhs.view()).is_ok());
+                assert!(solve_dense_matrix(above_tol.view(), scaled_eye.view()).is_ok());
+            }
+
+            for &scale in &[1.0_f64, 1.0e-30_f64, 1.0e30_f64] {
+                let mut sub_tol = Array2::<f64>::from_diag(&Array1::from_elem(n, scale));
+                sub_tol[(n - 1, n - 1)] = scale * 1.0e-17;
+                assert!(
+                    matches!(spd_logdet(sub_tol.view()), Err(SaddleError::Solver(_))),
+                    "spd_logdet must refuse n={n} scale={scale:e} diag(1,..,1e-17)"
+                );
+                assert!(
+                    matches!(
+                        dense_logabsdet(sub_tol.view()),
+                        Err(SaddleError::Singular(_))
+                    ),
+                    "dense_logabsdet must refuse n={n} scale={scale:e} diag(1,..,1e-17)"
+                );
+                assert!(
+                    matches!(
+                        solve_dense(sub_tol.view(), Array1::from_elem(n, scale).view()),
+                        Err(SaddleError::Singular(_))
+                    ),
+                    "solve_dense must refuse n={n} scale={scale:e} diag(1,..,1e-17)"
+                );
+                assert!(
+                    matches!(
+                        solve_dense_matrix(sub_tol.view(), Array2::eye(n).view()),
+                        Err(SaddleError::Singular(_))
+                    ),
+                    "solve_dense_matrix must refuse n={n} scale={scale:e} diag(1,..,1e-17)"
+                );
+            }
+        }
+
+        // relative_zero_tolerance guard: non-finite, non-positive, or n == 0 return 0.0.
+        assert_eq!(relative_zero_tolerance(0.0, 8), 0.0);
+        assert_eq!(relative_zero_tolerance(-0.0, 8), 0.0);
+        assert_eq!(relative_zero_tolerance(-3.5, 8), 0.0);
+        assert_eq!(relative_zero_tolerance(f64::NAN, 8), 0.0);
+        assert_eq!(relative_zero_tolerance(f64::INFINITY, 8), 0.0);
+        assert_eq!(relative_zero_tolerance(f64::NEG_INFINITY, 8), 0.0);
+        assert_eq!(relative_zero_tolerance(2.5, 0), 0.0);
+        assert_eq!(relative_zero_tolerance(2.5, 8), 2.5 * 8.0 * f64::EPSILON);
+    }
+
+    fn coupled_stiff_rings_192() -> (Array2<f64>, f64) {
+        let l = 64usize;
+        let rings = 3usize;
+        let n = rings * l;
+        let mut a = Array2::<f64>::zeros((n, n));
+        let c = 1.0e8_f64;
+        let mut max_abs = 0.0_f64;
+        for ring in 0..rings {
+            let base = ring * l;
+            let split = (ring as f64) * 1.0e-5;
+            for i in 0..l {
+                let v = 1.0 + 0.5 * (2.0 * std::f64::consts::PI * (i as f64) / (l as f64)).cos();
+                let diag = 2.0 * c + 37.0 * v + split;
+                a[(base + i, base + i)] = diag;
+                a[(base + i, base + (i + 1) % l)] = -c;
+                a[(base + (i + 1) % l, base + i)] = -c;
+                if diag.abs() > max_abs {
+                    max_abs = diag.abs();
+                }
+            }
+        }
+        for i in 0..l {
+            for r1 in 0..rings {
+                for r2 in (r1 + 1)..rings {
+                    let coup = 1.0e-5 * ((i + r1 + r2) as f64 + 1.0);
+                    a[(r1 * l + i, r2 * l + i)] = coup;
+                    a[(r2 * l + i, r1 * l + i)] = coup;
+                }
+            }
+        }
+        (a, max_abs)
     }
 
     #[test]
     fn jacobi_eigh_refuses_to_return_ok_when_sweep_budget_is_exhausted() {
-        let mut a = array![[4.0, 1.0, 0.5], [1.0, 2.0, -0.7], [0.5, -0.7, 3.0]];
+        let a_small = array![[4.0, 1.0, 0.5], [1.0, 2.0, -0.7], [0.5, -0.7, 3.0]];
         assert!(matches!(
-            jacobi_eigh_with_budget(&mut a, 1),
+            with_jacobi_sweep_budget(1, || exact_eigh(a_small.view())),
             Err(SaddleError::Solver(_))
         ));
+        #[cfg(feature = "faer")]
+        {
+            let (coupled, _) = coupled_stiff_rings_192();
+            assert!(matches!(
+                with_jacobi_sweep_budget(1, || faer_eigh(&coupled)),
+                Err(SaddleError::Solver(_))
+            ));
+            assert!(matches!(
+                with_jacobi_sweep_budget(1, || exact_eigh(coupled.view())),
+                Err(SaddleError::Solver(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn faer_eigh_rayleigh_ritz_refinement_reaches_machine_precision() {
+        let (coupled, coupled_max_abs) = coupled_stiff_rings_192();
+        let coupled_n = coupled.nrows();
+        let (c_evals, c_evecs) = exact_eigh(coupled.view()).unwrap();
+        let (f_evals, f_evecs) = faer_eigh(&coupled).unwrap();
+        let c_only = exact_eigvalsh(coupled.view()).unwrap();
+        let c_bound = relative_zero_tolerance(coupled_max_abs, coupled_n);
+        let c_orth_bound = (coupled_n as f64) * f64::EPSILON;
+        for j in 0..coupled_n {
+            assert_eq!(c_evals[j].to_bits(), f_evals[j].to_bits());
+            let dlam = (c_evals[j] - c_only[j]).abs();
+            assert!(dlam <= c_bound, "coupled j={j} dlam={dlam:e} > {c_bound:e}");
+        }
+        let c_av = matmul(coupled.view(), f_evecs.view());
+        let c_vtv = matmul(f_evecs.t(), f_evecs.view());
+        for i in 0..coupled_n {
+            for j in 0..coupled_n {
+                assert_eq!(c_evecs[(i, j)].to_bits(), f_evecs[(i, j)].to_bits());
+                let res = (c_av[(i, j)] - f_evals[j] * f_evecs[(i, j)]).abs();
+                assert!(
+                    res <= c_bound,
+                    "coupled ({i},{j}) res={res:e} > {c_bound:e}"
+                );
+                let expect = if i == j { 1.0 } else { 0.0 };
+                let orth = (c_vtv[(i, j)] - expect).abs();
+                assert!(
+                    orth <= c_orth_bound,
+                    "coupled ({i},{j}) orth={orth:e} > {c_orth_bound:e}"
+                );
+            }
+        }
+
+        for &n in &[96usize, 192usize, 256usize] {
+            let mut a = Array2::<f64>::zeros((n, n));
+            let c = (n * n) as f64;
+            let mut max_abs = 0.0_f64;
+            for i in 0..n {
+                let v = 1.0 + 0.5 * (2.0 * std::f64::consts::PI * (i as f64) / (n as f64)).cos();
+                let diag = 2.0 * c + 37.0 * v;
+                a[(i, i)] = diag;
+                a[(i, (i + 1) % n)] = -c;
+                a[((i + 1) % n, i)] = -c;
+                if diag.abs() > max_abs {
+                    max_abs = diag.abs();
+                }
+            }
+            let (evals, evecs) = faer_eigh(&a).unwrap();
+            let evals_only = exact_eigvalsh(a.view()).unwrap();
+            let bound = relative_zero_tolerance(max_abs, n);
+            let orth_bound = (n as f64) * f64::EPSILON;
+            for j in 0..n {
+                let dlam = (evals[j] - evals_only[j]).abs();
+                assert!(dlam <= bound, "n={n} j={j} dlam={dlam:e} > {bound:e}");
+            }
+            let av = matmul(a.view(), evecs.view());
+            let vt_v = matmul(evecs.t(), evecs.view());
+            for i in 0..n {
+                for j in 0..n {
+                    let res = (av[(i, j)] - evals[j] * evecs[(i, j)]).abs();
+                    assert!(res <= bound, "n={n} ({i},{j}) res={res:e} > {bound:e}");
+                    let expect = if i == j { 1.0 } else { 0.0 };
+                    let orth = (vt_v[(i, j)] - expect).abs();
+                    assert!(
+                        orth <= orth_bound,
+                        "n={n} ({i},{j}) orth={orth:e} > {orth_bound:e}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "faer")]
+    fn faer_eigh_residual_gate_fails_closed_on_nan() {
+        let mut av = faer::Mat::<f64>::zeros(2, 2);
+        av[(0, 0)] = 1.0;
+        av[(1, 0)] = f64::NAN;
+        let vectors = faer::Mat::<f64>::identity(2, 2);
+        let values = faer::Col::<f64>::from_fn(2, |_| 1.0);
+        let res = max_eigenpair_residual(&av, vectors.as_ref(), values.as_ref().as_diagonal(), 2);
+        assert!(
+            matches!(res, Err(SaddleError::NonFinite("faer_eigh residual"))),
+            "expected NonFinite on NaN residual, got {res:?}"
+        );
+    }
+
+    #[test]
+    fn jacobi_eigh_diagonalizes_sub_1e14_off_diagonals_down_to_relative_tolerance() {
+        let s = 1.0e-20_f64;
+        let a_scaled = array![[2.0 * s, s], [s, 2.0 * s]];
+        let (evals_s, evecs_s) = exact_eigh(a_scaled.view()).unwrap();
+        let tol_s = relative_zero_tolerance(2.0 * s, 2);
+        assert!(
+            (evals_s[0] - s).abs() <= tol_s && (evals_s[1] - 3.0 * s).abs() <= tol_s,
+            "sub-1e-14 scaled matrix was not diagonalized: evals={evals_s:?}"
+        );
+        let inv_sqrt2 = std::f64::consts::FRAC_1_SQRT_2;
+        assert!(
+            (evecs_s[(0, 0)].abs() - inv_sqrt2).abs() <= 1.0e-12
+                && (evecs_s[(1, 0)].abs() - inv_sqrt2).abs() <= 1.0e-12,
+            "sub-1e-14 scaled eigenvectors did not rotate: {evecs_s:?}"
+        );
+
+        let delta = 5.0e-15_f64;
+        let a_unit = array![[1.0, delta], [delta, 1.0]];
+        let (evals_u, evecs_u) = exact_eigh(a_unit.view()).unwrap();
+        let tol_u = relative_zero_tolerance(1.0, 2);
+        assert!(delta > tol_u && delta < 1.0e-14);
+        assert!(
+            (evals_u[0] - (1.0 - delta)).abs() <= tol_u
+                && (evals_u[1] - (1.0 + delta)).abs() <= tol_u,
+            "off-diagonal in (tol, 1e-14) was not diagonalized: evals={evals_u:?}"
+        );
+        let av_u = matmul(a_unit.view(), evecs_u.view());
+        for i in 0..2 {
+            for j in 0..2 {
+                let res = (av_u[(i, j)] - evals_u[j] * evecs_u[(i, j)]).abs();
+                assert!(res <= tol_u, "({i},{j}) res={res:e} > tol_u={tol_u:e}");
+            }
+        }
     }
 }
