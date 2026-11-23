@@ -1,0 +1,1 @@
+Fortran handles now reject direct assignment and assignment through a containing object before a raw session pointer can be copied. Release no longer allocates an ownership flag.

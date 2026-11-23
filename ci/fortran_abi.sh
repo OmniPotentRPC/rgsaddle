@@ -82,6 +82,7 @@ declare -a tests=(
   test_pafi
   test_ohtst
   test_handles
+  test_handle_leaks
   test_callbacks
 )
 
@@ -121,6 +122,22 @@ run_assign() {
   done
 }
 
+run_container_assign() {
+  local fc="$1"
+  local exe="$2"
+  local rc
+  set +e
+  "$exe"
+  rc=$?
+  set -e
+  if [[ "$rc" -eq 17 ]]; then
+    pass=$((pass + 1))
+  else
+    echo "FAIL $fc container assignment rc=$rc" >&2
+    fail=$((fail + 1))
+  fi
+}
+
 link_runtime() {
   printf '%s\n' -L"$lib_dir" -lrgsaddle -Wl,-rpath,"$lib_dir"
 }
@@ -152,13 +169,26 @@ gfortran -std=f2008 -Wall -Wextra -Werror -fcheck=all \
 run_assign gfortran "$work/test_assign.gfortran.x"
 # gfortran with -std=f2008 rejects finalized-structure intrinsic assignment
 # (f08/0011). Compile this regression probe under the newer standard.
-compile_and_run gfortran test_handle_container_assign \
+gfortran \
   -std=f2018 -Wall -Wextra -Werror -fcheck=all \
   -J"$work/gfortran-mods" \
   $pc_cflags \
   "$test_dir/support.f90" "$test_dir/test_handle_container_assign.f90" \
   $(link_runtime) \
-  $pc_libs
+  $pc_libs \
+  -o "$work/test_handle_container_assign.gfortran.x"
+run_container_assign gfortran "$work/test_handle_container_assign.gfortran.x"
+
+if command -v valgrind >/dev/null 2>&1; then
+  valgrind \
+    --quiet \
+    --leak-check=full \
+    --show-leak-kinds=definite \
+    --errors-for-leak-kinds=definite \
+    --error-exitcode=99 \
+    "$work/test_handle_leaks.gfortran.x"
+  pass=$((pass + 1))
+fi
 
 cat >"$work/smoke.f90" <<'EOF'
 program smoke
@@ -244,6 +274,13 @@ if command -v flang-20 >/dev/null 2>&1; then
     $(link_runtime) \
     -o "$work/test_assign.flang-20.x"
   run_assign flang-20 "$work/test_assign.flang-20.x"
+  flang-20 -std=f2018 \
+    -module-dir "$work/flang-mods" \
+    "$root/fortran/rgsaddle.f90" \
+    "$test_dir/support.f90" "$test_dir/test_handle_container_assign.f90" \
+    $(link_runtime) \
+    -o "$work/test_handle_container_assign.flang-20.x"
+  run_container_assign flang-20 "$work/test_handle_container_assign.flang-20.x"
 fi
 
 if command -v ifx >/dev/null 2>&1; then
@@ -263,6 +300,13 @@ if command -v ifx >/dev/null 2>&1; then
     $(link_runtime) \
     -o "$work/test_assign.ifx.x"
   run_assign ifx "$work/test_assign.ifx.x"
+  ifx -stand f18 \
+    -module "$work/ifx-mods" \
+    "$root/fortran/rgsaddle.f90" \
+    "$test_dir/support.f90" "$test_dir/test_handle_container_assign.f90" \
+    $(link_runtime) \
+    -o "$work/test_handle_container_assign.ifx.x"
+  run_container_assign ifx "$work/test_handle_container_assign.ifx.x"
 fi
 
 # The packaged archive, not only the pkg-config link line.

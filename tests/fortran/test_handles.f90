@@ -6,6 +6,7 @@ program test_handles
 
   call check_new_statuses()
   call check_create_status()
+  call check_set_config_status()
   call check_default_configs_match_rust()
   call check_create_keeps_live_handle_on_invalid_args()
   call check_band_release()
@@ -73,6 +74,33 @@ contains
     call check_i64("ohtst shape", status, RGSADDLE_SHAPE)
   end subroutine check_create_status
 
+  subroutine check_set_config_status()
+    type(pafi_handle) :: pafi
+    type(ohtst_handle) :: ohtst
+    type(rgsaddle_pafi_config_t) :: pafi_cfg
+    type(rgsaddle_ohtst_config_t) :: ohtst_cfg
+    real(c_double) :: frames(2), point(2), normal(2)
+    integer(c_int) :: status
+
+    frames = [-1.0_c_double, 1.0_c_double]
+    point = 0.0_c_double
+    normal = [1.0_c_double, 0.0_c_double]
+
+    call init_pafi_config(pafi_cfg)
+    status = pafi%create(pafi_cfg, 2_c_int64_t, 1_c_int64_t, frames)
+    call check_status("pafi set config create", status)
+    pafi_cfg%version%major = 9_c_int32_t
+    status = pafi%set_config(pafi_cfg)
+    call check_i64("pafi set config major", status, RGSADDLE_ABI_MISMATCH)
+
+    call init_ohtst_config(ohtst_cfg)
+    status = ohtst%create(ohtst_cfg, 2_c_int64_t, point, normal)
+    call check_status("ohtst set config create", status)
+    ohtst_cfg%version%major = 9_c_int32_t
+    status = ohtst%set_config(ohtst_cfg)
+    call check_i64("ohtst set config major", status, RGSADDLE_ABI_MISMATCH)
+  end subroutine check_set_config_status
+
   subroutine check_band_release()
     integer(c_int64_t), parameter :: n_atoms = 20000_c_int64_t
     integer(c_int64_t), parameter :: n_images = 3_c_int64_t
@@ -125,6 +153,7 @@ contains
     call check_i64("band flags", int(bcfg%flags, c_int), int(RGSADDLE_BAND_CI_AFTER, c_int))
     if (.not. close_enough(bcfg%ci_trigger_factor, 0.0_c_double, 1.0_c_double)) stop 6
     if (.not. close_enough(bcfg%ci_trigger_force, 0.5_c_double, 1.0_c_double)) stop 6
+    if (.not. close_enough(bcfg%force_tol, 1.0e-3_c_double, 1.0_c_double)) stop 6
     if (.not. close_enough(bcfg%max_move, 0.2_c_double, 1.0_c_double)) stop 6
 
     call init_ohtst_config(ocfg)
