@@ -2051,10 +2051,14 @@ Lennard-Jones reduced units, where \(\epsilon = 1\) and
 \(\sigma = 1\). For a potential
 whose characteristic energy and length are not one in the host units, use
 `ArtConfig::for_units(energy_scale, length_scale)`. It scales lengths,
-forces, and curvatures separately. A FIRE initial step scales as length over
-the square root of energy, because the opening move is the force times the
-square of that step, and a line search initial step scales as a length. Any
-other relaxation method is an error from `for_units`. `ArtConfig::validate()`
+forces, and curvatures separately. A FIRE or quick-min time step, including
+the climb's `MinModeConfig::time_step`, scales as length over the square root
+of energy, because the opening move is the force times the square of that
+step. The opening step of steepest descent, L-BFGS, nonlinear CG, DIIS and
+Barzilai-Borwein multiplies the force, so it scales as length squared over
+energy, and Adam's scales as a length. The rotation stops `rotation_tol` and
+`rotation_angle_tol` keep their values. Any other relaxation method is an
+error from `for_units`. `ArtConfig::validate()`
 returns an invalid parameter error when the perpendicular relaxation force
 tolerance is looser than the mode force tolerance, and when the mode force
 tolerance is not finite and positive. Sessions and batches call it before

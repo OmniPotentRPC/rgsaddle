@@ -279,15 +279,32 @@ impl ArtConfig {
     ///
     /// `energy_scale` is the host energy represented by one reduced energy
     /// unit and `length_scale` is the host length represented by one reduced
-    /// length unit. Lengths scale by `length_scale`, forces by
-    /// `energy_scale / length_scale`, and curvatures by
-    /// `energy_scale / length_scale^2`. [`RelaxConfig::initial_step`] follows
-    /// the relaxation method. A FIRE opening move is the force times the
-    /// square of that step, so the step scales as length over the square root
-    /// of energy. A line search opening step scales as a length. Any other
-    /// relaxation method returns [`SaddleError::Invalid`]. The preset does
-    /// not read [`SaddleIndexCheck::escape`], so that push is left unset.
+    /// length unit. Each field scales by its own unit. Lengths scale by
+    /// `length_scale`, forces by `energy_scale / length_scale`, and
+    /// curvatures by `energy_scale / length_scale^2`. The FIRE time step
+    /// [`MinModeConfig::time_step`] scales as length over the square root of
+    /// energy, because the opening move from rest is the force times its
+    /// square. [`MinModeConfig::rotation_angle_tol`] is an angle in radians
+    /// and [`MinModeConfig::rotation_tol`] is taken as a dimensionless
+    /// rotation stop, so both keep their values.
+    ///
+    /// [`RelaxConfig::initial_step`] follows the relaxation method. FIRE
+    /// and quick-min read it as a time step, length over the square root
+    /// of energy. Steepest descent, L-BFGS, nonlinear CG, DIIS and
+    /// Barzilai-Borwein multiply the force by it in their first step, so it
+    /// is length squared over energy. Adam moves along a direction of unit
+    /// atom length, so it is a length. Any other relaxation method returns
+    /// [`SaddleError::Invalid`]. The preset does not read
+    /// [`SaddleIndexCheck::escape`], so that push is left unset.
     pub fn for_units(energy_scale: f64, length_scale: f64) -> Result<Self, SaddleError> {
+        let config = Self::lj_art().scaled(energy_scale, length_scale)?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// This configuration with every dimensioned field converted by the
+    /// unit factors of [`Self::for_units`].
+    fn scaled(mut self, energy_scale: f64, length_scale: f64) -> Result<Self, SaddleError> {
         if !(energy_scale.is_finite()
             && energy_scale > 0.0
             && length_scale.is_finite()
@@ -299,38 +316,31 @@ impl ArtConfig {
         }
         let force_scale = energy_scale / length_scale;
         let curvature_scale = force_scale / length_scale;
-        let mut config = Self::lj_art();
-        config.mode.dr *= length_scale;
-        config.mode.rotation_tol *= curvature_scale;
-        config.mode.force_tol *= force_scale;
-        config.mode.max_move *= length_scale;
-        config.eigen_threshold *= curvature_scale;
-        config.push_length *= length_scale;
-        config.push_step *= length_scale;
-        config.perpendicular.force_tol *= force_scale;
-        config.perpendicular.max_atom_move *= length_scale;
-        config.perpendicular.initial_step = scaled_initial_step(
-            &config.perpendicular.method,
-            config.perpendicular.initial_step,
-            energy_scale,
-            length_scale,
-        )?;
-        config.quench.force_tol *= force_scale;
-        config.quench.max_atom_move *= length_scale;
-        config.quench.initial_step = scaled_initial_step(
-            &config.quench.method,
-            config.quench.initial_step,
-            energy_scale,
-            length_scale,
-        )?;
-        config.push_over *= length_scale;
-        config.saddle.residual_tol *= curvature_scale;
-        config.saddle.negative_tol *= curvature_scale;
-        config.saddle.dr *= length_scale;
-        config.basin_rmsd *= length_scale;
-        config.duplicate_rmsd *= length_scale;
-        config.validate()?;
-        Ok(config)
+        let time_scale = length_scale / energy_scale.sqrt();
+        self.mode.dr *= length_scale;
+        self.mode.force_tol *= force_scale;
+        self.mode.max_move *= length_scale;
+        self.mode.time_step *= time_scale;
+        self.eigen_threshold *= curvature_scale;
+        self.push_length *= length_scale;
+        self.push_step *= length_scale;
+        for relax in [&mut self.perpendicular, &mut self.quench] {
+            relax.force_tol *= force_scale;
+            relax.max_atom_move *= length_scale;
+            relax.initial_step = scaled_initial_step(
+                &relax.method,
+                relax.initial_step,
+                energy_scale,
+                length_scale,
+            )?;
+        }
+        self.push_over *= length_scale;
+        self.saddle.residual_tol *= curvature_scale;
+        self.saddle.negative_tol *= curvature_scale;
+        self.saddle.dr *= length_scale;
+        self.basin_rmsd *= length_scale;
+        self.duplicate_rmsd *= length_scale;
+        Ok(self)
     }
 
     /// Reject a configuration the session cannot run.
@@ -398,10 +408,15 @@ impl ArtConfig {
 
 /// Scale one relaxation opening step into the host's units.
 ///
-/// FIRE's first move from rest is `F dt^2` with unit mass, so `dt` has units
-/// of length over the square root of energy. A line search opening step is a
-/// length. Every other method is refused: its step is not left at the
-/// reduced unit value.
+/// FIRE's and quick-min's first move from rest is `F dt^2` with unit mass,
+/// so `dt` has units of length over the square root of energy. Steepest
+/// descent, empty-memory L-BFGS, unpreconditioned nonlinear CG, DIIS and
+/// Barzilai-Borwein open on `-step * g`, so the step is length squared over
+/// energy. Adam opens along a direction scaled to unit atom length, so its
+/// step is a length. BFGS opens every line search on its inverse Hessian,
+/// which starts as the identity and then carries the secant units, so no
+/// one factor converts it. That method and every other one is refused: its
+/// step is not left at the reduced unit value.
 fn scaled_initial_step(
     method: &Method,
     initial_step: f64,
@@ -409,14 +424,13 @@ fn scaled_initial_step(
     length_scale: f64,
 ) -> Result<f64, SaddleError> {
     let factor = match method {
-        Method::Fire { .. } => length_scale / energy_scale.sqrt(),
-        Method::Bfgs
+        Method::Fire { .. } | Method::QuickMin => length_scale / energy_scale.sqrt(),
+        Method::Steepest
         | Method::Lbfgs { .. }
         | Method::Nlcg { .. }
-        | Method::Steepest
-        | Method::Adam { .. }
         | Method::Diis { .. }
-        | Method::Bb => length_scale,
+        | Method::Bb => length_scale * length_scale / energy_scale,
+        Method::Adam { .. } => length_scale,
         _ => {
             return Err(SaddleError::Invalid(format!(
                 "ART cannot scale the initial step of relaxation method {}",
@@ -1859,9 +1873,10 @@ mod tests {
             scaled.quench.force_tol,
             force_scale * reduced.quench.force_tol
         );
+        assert_eq!(scaled.mode.rotation_tol, reduced.mode.rotation_tol);
         assert_eq!(
-            scaled.mode.rotation_tol,
-            curvature_scale * reduced.mode.rotation_tol
+            scaled.mode.rotation_angle_tol,
+            reduced.mode.rotation_angle_tol
         );
         assert_eq!(
             scaled.eigen_threshold,
@@ -1876,6 +1891,7 @@ mod tests {
             curvature_scale * reduced.saddle.negative_tol
         );
         let step_scale = length_scale / 2.0_f64.sqrt();
+        assert_eq!(scaled.mode.time_step, step_scale * reduced.mode.time_step);
         assert_eq!(
             scaled.perpendicular.initial_step,
             step_scale * reduced.perpendicular.initial_step
@@ -1889,21 +1905,122 @@ mod tests {
 
     #[test]
     fn art_initial_step_scale_follows_the_relaxation_method() {
-        let fire = scaled_initial_step(&Method::fire(rgmin::FireKind::V2), 0.05, 2.0, 4.0).unwrap();
-        assert_eq!(fire, 0.05 * 4.0 / 2.0_f64.sqrt());
-        let line_search = scaled_initial_step(&Method::lbfgs(), 0.05, 2.0, 4.0).unwrap();
-        assert_eq!(line_search, 0.05 * 4.0);
-        match scaled_initial_step(&Method::Dogleg, 0.05, 2.0, 4.0) {
-            Err(SaddleError::Invalid(message)) => {
-                assert!(message.contains("relaxation method dogleg"));
-            }
-            other => panic!("unexpected ART step scale result: {other:?}"),
+        let time = 4.0 / 2.0_f64.sqrt();
+        let mobility = 4.0 * 4.0 / 2.0;
+        for (method, factor) in [
+            (Method::fire(rgmin::FireKind::V2), time),
+            (Method::QuickMin, time),
+            (Method::Steepest, mobility),
+            (Method::lbfgs(), mobility),
+            (Method::polak_ribiere_plus(), mobility),
+            (Method::diis(), mobility),
+            (Method::Bb, mobility),
+            (Method::adam(), 4.0),
+        ] {
+            let step = scaled_initial_step(&method, 0.05, 2.0, 4.0).unwrap();
+            assert_eq!(step, 0.05 * factor, "{}", method.as_str());
         }
-        match scaled_initial_step(&Method::Ode12r, 0.05, 2.0, 4.0) {
-            Err(SaddleError::Invalid(message)) => {
-                assert!(message.contains("relaxation method ode12r"));
+        for (method, name) in [
+            (Method::Bfgs, "bfgs"),
+            (Method::Dogleg, "dogleg"),
+            (Method::Ode12r, "ode12r"),
+        ] {
+            match scaled_initial_step(&method, 0.05, 2.0, 4.0) {
+                Err(SaddleError::Invalid(message)) => {
+                    assert!(message.contains(&format!("relaxation method {name}")));
+                }
+                other => panic!("unexpected ART step scale result: {other:?}"),
             }
-            other => panic!("unexpected ART step scale result: {other:?}"),
+        }
+    }
+
+    fn unit_fields(config: &ArtConfig) -> [(&'static str, f64); 23] {
+        [
+            ("mode.dr", config.mode.dr),
+            ("mode.force_tol", config.mode.force_tol),
+            ("mode.max_move", config.mode.max_move),
+            ("mode.time_step", config.mode.time_step),
+            ("mode.rotation_tol", config.mode.rotation_tol),
+            ("mode.rotation_angle_tol", config.mode.rotation_angle_tol),
+            ("eigen_threshold", config.eigen_threshold),
+            ("push_length", config.push_length),
+            ("push_step", config.push_step),
+            ("perpendicular.force_tol", config.perpendicular.force_tol),
+            (
+                "perpendicular.max_atom_move",
+                config.perpendicular.max_atom_move,
+            ),
+            (
+                "perpendicular.initial_step",
+                config.perpendicular.initial_step,
+            ),
+            ("quench.force_tol", config.quench.force_tol),
+            ("quench.max_atom_move", config.quench.max_atom_move),
+            ("quench.initial_step", config.quench.initial_step),
+            ("push_over", config.push_over),
+            ("saddle.residual_tol", config.saddle.residual_tol),
+            ("saddle.negative_tol", config.saddle.negative_tol),
+            ("saddle.dr", config.saddle.dr),
+            ("basin_rmsd", config.basin_rmsd),
+            ("duplicate_rmsd", config.duplicate_rmsd),
+            ("mode.krylov_dim", config.mode.krylov_dim as f64),
+            ("max_pushes", config.max_pushes as f64),
+        ]
+    }
+
+    fn assert_same_units(left: &ArtConfig, right: &ArtConfig, label: &str) {
+        for ((name, a), (_, b)) in unit_fields(left).into_iter().zip(unit_fields(right)) {
+            assert!(
+                (a - b).abs() <= 1e-14 * a.abs().max(b.abs()),
+                "{label}: {name} {a:e} != {b:e}"
+            );
+        }
+    }
+
+    #[test]
+    fn art_unit_scaling_round_trips() {
+        let reduced = ArtConfig::lj_art();
+        assert_same_units(
+            &ArtConfig::for_units(1.0, 1.0).unwrap(),
+            &reduced,
+            "identity",
+        );
+        for (energy, length) in [(2.0, 4.0), (0.4093, 2.338), (1.0e-3, 50.0), (7.5, 0.3)] {
+            let there = ArtConfig::for_units(energy, length).unwrap();
+            let back = there.clone().scaled(1.0 / energy, 1.0 / length).unwrap();
+            assert_same_units(&back, &reduced, "inverse");
+            let composed = reduced
+                .clone()
+                .scaled(energy, 1.0)
+                .unwrap()
+                .scaled(1.0, length)
+                .unwrap();
+            assert_same_units(&composed, &there, "composed");
+        }
+    }
+
+    #[test]
+    fn art_unit_scaling_round_trips_each_relaxation_method() {
+        for method in [
+            Method::QuickMin,
+            Method::Steepest,
+            Method::lbfgs(),
+            Method::Bb,
+            Method::adam(),
+        ] {
+            let relax = RelaxConfig::default()
+                .with_method(method.clone())
+                .with_force_tol(0.01);
+            let config = ArtConfig::lj_art()
+                .with_perpendicular(relax.clone())
+                .with_quench(relax);
+            let back = config
+                .clone()
+                .scaled(0.4093, 2.338)
+                .unwrap()
+                .scaled(1.0 / 0.4093, 1.0 / 2.338)
+                .unwrap();
+            assert_same_units(&back, &config, method.as_str());
         }
     }
 
