@@ -167,6 +167,9 @@ The top-level `meson.build` provides the headers as the dependency `rgsaddle-hea
 Defaults: improved tangent, uniform spring `k ` 5=, NEB projection, climbing image with trigger factor 0.5.
 `BandConfig::with_string(StringConfig::default())` opts out of springs and tangent projection for the simplified string method of E, Ren, and Vanden-Eijnden (2007), evolving interior images under the full potential force and reparametrizing to equal arc length on the not-a-knot cubic spline or the polyline; see [the band how-to](howto/band.html).
 
+## Interpolate a geodesic initial path
+`howto/geodesic` minimizes the redundant coordinate length of Zhu, Thompson, and Martinez, J. Chem. Phys. 150, 164103 (2019), doi:10.1063/1.5090303. The chart is caller supplied. `MorsePairChart` is their Eq. (7). The endpoints stay fixed. This is an initial path, not a band step: it does not evaluate a potential.
+
 ## Leave a minimum with ART nouveau
 `howto/art` is the phased search: a host seed and mask, perpendicular relaxation, Lanczos, a lowest-mode climb, an index-1 certificate, a push both ways off the saddle, and the two quenches. `ArtStatus::Reverted` is not a completed exit.
 
@@ -309,6 +312,7 @@ The table below lists the main types.
 | `Preset`                       | `Min`, `Dimer`, `Lanczos`, `Art`, `EigenFollow`, and the named band presets                                         |
 | `ConnectConfig`                | IDPP Lanczos climb and the COMPASS fallback. `optbench` sets the LJ38 force tolerance, eight Lanczos actions, relative tolerance 0.05, and quenched split nodes |
 | `sidpp_path`                   | Sequential IDPP (S-IDPP) initial path. `SidppConfig` holds the spring, the two force stops, and the quick-min step. `idpp_path` is the per-image IDPP start |
+| `geodesic_path`                | Geodesic interpolation on a caller supplied chart (Zhu, Thompson, and Martinez, J. Chem. Phys. 150, 164103 (2019)). `GeodesicConfig` and `MorsePairChart` are non-exhaustive. `geodesic_interpolate` builds the path from the two endpoints |
 | `connect`                      | Double-ended search. The callback returns energy and the Cartesian gradient. `evaluations` counts finite differences that decide a step or an index. The Lanczos acceptance does not build a dense Hessian |
 
 `SellaSaddleConfig` has options that follow Sella.
@@ -482,7 +486,7 @@ Every public configuration struct, its public fields, and the corresponding chai
 This section lists the entry points, codes and flags of `include/rgsaddle.h`.
 A C host reaches them through the application binary interface (ABI).
 `RGSADDLE_ABI_MAJOR` is 1.
-Status codes include `RGSADDLE_OK`, `RGSADDLE_SHAPE`, `RGSADDLE_SURFACE_FAILED`, `RGSADDLE_ABI_MISMATCH`, `RGSADDLE_NOT_EQUILIBRATED` and `RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES`.
+Status codes include `RGSADDLE_OK`, `RGSADDLE_SHAPE`, `RGSADDLE_SURFACE_FAILED`, `RGSADDLE_ABI_MISMATCH`, `RGSADDLE_NOT_EQUILIBRATED`, `RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES` and, from minor 64, `RGSADDLE_NOT_CONVERGED`.
 The methods on the wire are the fast inertial relaxation engine (FIRE) and quick-min.
 Limited-memory Broyden-Fletcher-Goldfarb-Shanno (L-BFGS) is also on the wire.
 From minor 22 so is ODE12r (`RGSADDLE_METHOD_ODE12R`), the adaptive ordinary differential equation (ODE) step.
@@ -510,7 +514,7 @@ For config minors 5 through 62 this field is read as given, so 0 disables the an
 From minor 63, 0 keeps the Rust default unless flag bit 0, `RGSADDLE_MINMODE_EXPLICIT_ROTATION_ANGLE_TOL`, is set; then 0 disables it.
 The Rust default is five degrees. With an explicit 0 (legacy minors, or minor 63 with the explicit flag) the stop is off.
 Both fields are read only from a config whose version minor is 5 or newer.
-`RGSADDLE_ABI_MINOR` is 63.
+`RGSADDLE_ABI_MINOR` is 64.
 From minor 24, `rgsaddle_sella_saddle_set_symmetrized_ritz` sets `SellaSaddleConfig::symmetrized_ritz` from 0 or 1.
 It returns `RGSADDLE_INVALID_PARAMETER` for any other value.
 `rgsaddle_sella_saddle_set_small_system_atom_ceiling` (minor 25) sets `SellaSaddleConfig::small_system_atom_ceiling` from 0 or 1.
@@ -543,6 +547,7 @@ From a band config at minor 22, the refinement's one-image requests also set bit
 Their `image` is then the climbing image's band index.
 `rgsaddle_idpp_path` writes the image-dependent pair potential initial path with its endpoints.
 It takes a row-major cell or NULL.
+From minor 64, `rgsaddle_geodesic_config_default`, `rgsaddle_geodesic_path`, and `rgsaddle_geodesic_morse` interpolate a path in a redundant coordinate chart (Zhu, Thompson, and Martinez, J. Chem. Phys. 150, 164103 (2019), doi:10.1063/1.5090303). `rgsaddle_geodesic_path` takes a host chart. `rgsaddle_geodesic_morse` uses Eq. (7) with alpha 1.7 and beta 0.01. A NULL config selects the defaults, including an image cap of 32, so it requires `n_images` of at least 32. A supplied cap above `n_images` is `RGSADDLE_INVALID_PARAMETER`.
 `rgsaddle_ocineb_step` reports the hand-off phase (band, tangent alignment, or minimum-mode translation).
 `rgsaddle_connect` runs the double-ended search of `connect` to completion on two endpoint arrays and a host surface.
 The surface writes energy and the Cartesian gradient for one image.
@@ -3696,7 +3701,7 @@ CMAKE_POLICY_VERSION_MINIMUM=3.5 cargo build --locked --features chemfiles
 
 > Stepping bands, minimum-mode sessions, Sella, IRC, and strings from C and C++
 
-`include/rgsaddle.h` declares the C application binary interface (ABI), major 1, minor 63. It preserves the main band, minimum-mode and index-1 layouts and adds intrinsic reaction coordinate (IRC), Sella, constraint and geometry controls. Include this header rather than duplicating its structures. Check `rgsaddle_abi_stamp` before constructing a session. A meson project takes the headers from the top-level `meson.build`; see [the meson how-to](meson.html).
+`include/rgsaddle.h` declares the C application binary interface (ABI), major 1, minor 64. It preserves the main band, minimum-mode and index-1 layouts and adds intrinsic reaction coordinate (IRC), Sella, constraint and geometry controls. Include this header rather than duplicating its structures. Check `rgsaddle_abi_stamp` before constructing a session. A meson project takes the headers from the top-level `meson.build`; see [the meson how-to](meson.html).
 
 A surface callback returns `rgsaddle_status_t` and receives one `rgsaddle_surface_request_t`. Positions and gradients are image-major Cartesian triples. The host supplies the energy and gradient arrays for every requested image; the library performs no Message Passing Interface (MPI) communication.
 From ABI minor 42, `RGSADDLE_NOT_EQUILIBRATED` and `RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES` report constrained-ensemble tails that fail the drift or effective-sample guards.
@@ -3827,6 +3832,15 @@ The `RGSADDLE_LINEB_INTERPOLATED_FORCE_CLOCK` option selects the signed image fo
 
 ABI minor 60 adds the per-step refine stepper. `rgsaddle_refine_method_t` is `RGSADDLE_REFINE_NONE` or `RGSADDLE_REFINE_LBFGS`. `rgsaddle_band_set_refine` installs L-BFGS for steps whose convergence force is at or under `threshold`, in the host's force units, and leaves every other step on the band method. A threshold of 0 selects 0.5, and `memory` less than or equal to 0 selects 20 pairs. `RGSADDLE_REFINE_NONE` clears the stepper and does not read the threshold. A negative or non-finite threshold and an unknown method are refused. `rgsaddle_band_is_refining` is 1 when the last first-order step used the refine stepper. A string, trust-region, solid-state, quick-min, or free-end band ignores the call. `include/rgsaddle/session.hpp` wraps the pair as `Band::set_refine` and `Band::is_refining`, and Python exposes `Band.set_refine` and `Band.is_refining`. A host checks `rgsaddle_abi_version()` for minor 60 or newer. The worked example is `tests/band_refine.rs`.
 
+ABI minor 64 adds geodesic interpolation (Zhu, Thompson, and Martinez, J. Chem. Phys. 150, 164103 (2019), doi:10.1063/1.5090303 [zhuGeodesicInterpolation2019]).
+`rgsaddle_geodesic_config_default` fills an `rgsaddle_geodesic_config_t`.
+`rgsaddle_geodesic_path` minimizes the length of an existing image-major path under a host chart callback, and `rgsaddle_geodesic_morse` builds the path between two geometries with the Morse pair coordinates of their Eq. (7) (alpha 1.7, beta 0.01).
+`rgsaddle_geodesic_path` and `rgsaddle_geodesic_morse` return `RGSADDLE_NOT_CONVERGED` when a round of sweeps uses all of `max_sweeps` with an image still moving; the outputs then hold the last iterate.
+A NULL config selects the defaults, including `max_images` 32, so it requires `n_images` of at least 32.
+A supplied `max_images` above `n_images` is `RGSADDLE_INVALID_PARAMETER`: the output buffer cannot grow, and the cap is not clamped.
+`bound_samples` is even. `length`, `lower`, and `upper` may be NULL.
+A host that loads the library at run time checks `rgsaddle_abi_version()` for at least minor 64 before resolving these symbols.
+
 # Use the headers from a meson project (`docs/orgmode/howto/meson.org`)
 
 > Consuming rgsaddle headers from Meson wrap-git or pkg-config
@@ -3929,7 +3943,7 @@ assert rgsaddle.ForceGate(2) is rgsaddle.ForceGate.MAX_FORCE_ON_ATOM
 ```
 
 ## Status codes
-`raise_status(code)` maps `rgsaddle_status_t`. `RGSADDLE_OK` returns true. `RGSADDLE_SHAPE` and `RGSADDLE_INVALID_PARAMETER` raise `ValueError`. `RGSADDLE_NON_FINITE` raises `NumericalError`, a subclass of `ArithmeticError`. `RGSADDLE_SURFACE_FAILED` raises `RuntimeError`. It does not re-raise a stored calculator exception. Every other code, including `RGSADDLE_NOT_EQUILIBRATED` and `RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES`, raises `RuntimeError`. The exception message is the thread-local text when that text is non-empty, and the status name otherwise. `raise_status` clears that text. `last_error()` is reserved for the C ABI last-error text. It returns an empty string unless an error text was set. Convergence is not a status code.
+`raise_status(code)` maps `rgsaddle_status_t`. `RGSADDLE_OK` returns true. `RGSADDLE_SHAPE` and `RGSADDLE_INVALID_PARAMETER` raise `ValueError`. `RGSADDLE_NON_FINITE` raises `NumericalError`, a subclass of `ArithmeticError`. `RGSADDLE_SURFACE_FAILED` raises `RuntimeError`. It does not re-raise a stored calculator exception. Every other code, including `RGSADDLE_NOT_EQUILIBRATED` and `RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES`, raises `RuntimeError`. The exception message is the thread-local text when that text is non-empty, and the status name otherwise. `raise_status` clears that text. `last_error()` is reserved for the C ABI last-error text. It returns an empty string unless an error text was set. Convergence of a stepping run is a report, not a status code. The geodesic interpolation is the exception, and its `RGSADDLE_NOT_CONVERGED` raises `RuntimeError` like any other remaining code.
 
 ## Surface adapter
 =SurfaceAdapter(images, allow_shared_calculator=False)` checks the image list, then evaluates C ABI request rows `(ids, x) -> (energies, gradients)=.
@@ -4064,6 +4078,8 @@ An intrinsic reaction coordinate follows the gradient in mass-weighted coordinat
 The inner steps of both sphere kinds use a moving constraint whose radius is measured in that metric. The displacement and the stored path offset appear together in the constraint, so the sphere is not the unit sphere centred at the coordinate origin. The steps follow the full mass-weighted gradient. Only the launch mode that `from_surface` estimates leaves out the excluded directions of the surface, such as rigid-body motion.
 
 The launch direction is the lowest eigenvector `u` of the mass-weighted Hessian `M^{-1/2} H M^{-1/2}`, taken as the Cartesian displacement `M^{-1/2} u`. A surface that supports Hessian actions can supply it without materializing a dense Hessian. An existing dense Hessian can use the corresponding eigensolver. The host chooses the method and verifies the physical saddle before tracing its branches.
+
+A geodesic initial path (Zhu, Thompson, and Martinez, J. Chem. Phys. 150, 164103 (2019), doi:10.1063/1.5090303) places images by minimizing redundant coordinate length before any potential call. `geodesic_path` does that for a caller supplied chart. It is not itself a minimum energy path.
 
 In unweighted Cartesian coordinates, a minimum energy path between two basins satisfies \(\nabla V(x)^\perp = 0\) along the curve. `BandSession` approximates that path either by the nudged elastic band, which projects the potential force perpendicular to a discrete tangent and spaces images with tangential springs, or by the simplified string method of E, Ren, and Vanden-Eijnden, J. Chem. Phys. 126, 164103 (2007), doi:10.1063/1.2720838 [eSimplifiedImprovedString2007] (`StringConfig`), which evolves images under the full potential force \(-\nabla V\) and restores equal arc length geometrically on the not-a-knot cubic spline or the polyline after each step.
 
@@ -5142,6 +5158,9 @@ The narrative for a session is the C and C++ how-to, not this list.
 - `rgsaddle_lineb_solve_counted_rate`. Purpose: Counted solve with selectable image-Hessian interpolation. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_band_set_refine`. Purpose: Per-step refine stepper, ABI minor 60. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_band_is_refining`. Purpose: 1 when the last first-order step used the refine stepper, else 0. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_geodesic_config_default`. Purpose: Fill `out` with the default geodesic controls (step and gradient tolerances 1e-6, max_move 0.5, lower_ratio 0.95, upper_ratio 1.1, 40 sweeps, 40 iterations, memory 8, 10 bound samples, 32 images, seed 0). Parameters: the declaration. Units: the caller's.
+- `rgsaddle_geodesic_path`. Purpose: Minimize the geodesic length of an existing path. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_geodesic_morse`. Purpose: Morse pair geodesic between two geometries. Parameters: the declaration. Units: the caller's.
 
 ## Types and callbacks
 
@@ -5215,12 +5234,14 @@ The narrative for a session is the C and C++ how-to, not this list.
 - `rgsaddle_lineb_turning_t`. Purpose: Return-turn agreement for the interpolated-force clock, in the caller's units.
 - `rgsaddle_lineb_rate_diagnostics_t`. Purpose: Geometry counts within the rate, and the Cartesian finite-difference displacement used at the path images (NaN for direct or path-only solves).
 - `rgsaddle_refine_method_t`. Purpose: Refine stepper of rgsaddle_band_set_refine, ABI minor 60.
+- `rgsaddle_geodesic_config_t`. Purpose: Geodesic interpolation controls.
 - `rgsaddle_hyperplane_emit_fn`. Purpose: Callback typedef in include/rgsaddle.h.
 - `rgsaddle_sample_hyperplane_fn`. Purpose: Callback typedef in include/rgsaddle.h.
 - `rgsaddle_surface_fn`. Purpose: Callback typedef in include/rgsaddle.h.
 - `rgsaddle_solid_surface_fn`. Purpose: Callback typedef in include/rgsaddle.h.
 - `rgsaddle_hessian_fn`. Purpose: Callback typedef in include/rgsaddle.h.
 - `rgsaddle_stencil_eval_fn`. Purpose: Callback typedef in include/rgsaddle.h.
+- `rgsaddle_geodesic_chart_fn`. Purpose: Redundant coordinate chart for geodesic interpolation.
 
 ## Macros and enum constants
 
@@ -5291,6 +5312,7 @@ The narrative for a session is the C and C++ how-to, not this list.
 - `RGSADDLE_STALLED`. Purpose: Enumerator of `rgsaddle_status_t`.
 - `RGSADDLE_NOT_EQUILIBRATED`. Purpose: Enumerator of `rgsaddle_status_t`.
 - `RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES`. Purpose: Enumerator of `rgsaddle_status_t`.
+- `RGSADDLE_NOT_CONVERGED`. Purpose: Enumerator of `rgsaddle_status_t`.
 - `RGSADDLE_TANGENT_SIMPLE`. Purpose: Enumerator of `rgsaddle_tangent_t`.
 - `RGSADDLE_TANGENT_IMPROVED`. Purpose: Enumerator of `rgsaddle_tangent_t`.
 - `RGSADDLE_SPRING_UNIFORM`. Purpose: Enumerator of `rgsaddle_spring_t`.

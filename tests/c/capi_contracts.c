@@ -224,8 +224,9 @@ static int minmode_rotations(RgsaddleMinMode *session) {
 }
 
 static int test_minmode_rotation_angle_defaults_and_torque_window(void) {
-  RgsaddleMinMode *legacy = new_dimer_session(1e-8, RGSADDLE_ABI_MINOR - 1, 0, 0.0);
-  RgsaddleMinMode *defaulted = new_dimer_session(1e-8, RGSADDLE_ABI_MINOR, 0, 0.0);
+  /* Zero means stop-off only before minor 63. Later minors keep the new rule. */
+  RgsaddleMinMode *legacy = new_dimer_session(1e-8, 62, 0, 0.0);
+  RgsaddleMinMode *defaulted = new_dimer_session(1e-8, 63, 0, 0.0);
   RgsaddleMinMode *explicit_zero = new_dimer_session(
       1e-8, RGSADDLE_ABI_MINOR, RGSADDLE_MINMODE_EXPLICIT_ROTATION_ANGLE_TOL, 0.0);
   RgsaddleMinMode *nonzero = new_dimer_session(1e-8, RGSADDLE_ABI_MINOR, 0, 1e-2);
@@ -255,7 +256,7 @@ static int test_minmode_rotation_angle_defaults_and_torque_window(void) {
 }
 
 static int test_status_and_gates(void) {
-  for (int c = -15; c <= 0; ++c) {
+  for (int c = -16; c <= 0; ++c) {
     const char *name = rgsaddle_status_name((rgsaddle_status_t)c);
     CHECK(name != NULL && strlen(name) > 0, "status name non-empty");
   }
@@ -266,6 +267,73 @@ static int test_status_and_gates(void) {
   CHECK(strcmp(rgsaddle_force_gate_name(RGSADDLE_FORCE_LINF), "LINF") == 0, "LINF name");
   CHECK(strcmp(rgsaddle_force_gate_name(RGSADDLE_FORCE_MAX_ATOM), "MAX_ATOM") == 0, "MAX_ATOM name");
   CHECK(rgsaddle_force_gate_name((rgsaddle_force_gate_t)99) == NULL, "unknown force gate NULL");
+  return 0;
+}
+
+static int flat_chart(void *ctx, const double *x, int64_t dof, double *q, double *b,
+                      int64_t n_coords) {
+  (void)ctx;
+  if (dof != 2 || n_coords != 2) {
+    return 1;
+  }
+  q[0] = x[0];
+  q[1] = x[1];
+  b[0] = 1.0;
+  b[1] = 0.0;
+  b[2] = 0.0;
+  b[3] = 1.0;
+  return 0;
+}
+
+static int test_geodesic_config_and_status(void) {
+  rgsaddle_geodesic_config_t config;
+  memset(&config, 0xAB, sizeof config);
+  CHECK(rgsaddle_geodesic_config_default(&config) == RGSADDLE_OK, "geodesic default fills");
+  CHECK(config.version.major == RGSADDLE_ABI_MAJOR, "geodesic default major");
+  CHECK(config.version.minor == RGSADDLE_ABI_MINOR, "geodesic default minor");
+  CHECK(config.flags == 0u, "geodesic default flags");
+  CHECK(config.step_tol == 1e-6, "geodesic default step_tol");
+  CHECK(config.grad_tol == 1e-6, "geodesic default grad_tol");
+  CHECK(config.max_move == 0.5, "geodesic default max_move");
+  CHECK(config.lower_ratio == 0.95, "geodesic default lower_ratio");
+  CHECK(config.upper_ratio == 1.1, "geodesic default upper_ratio");
+  CHECK(config.max_sweeps == 40, "geodesic default max_sweeps");
+  CHECK(config.max_iterations == 40, "geodesic default max_iterations");
+  CHECK(config.memory == 8, "geodesic default memory");
+  CHECK(config.bound_samples == 10, "geodesic default bound_samples");
+  CHECK(config.max_images == 32, "geodesic default max_images");
+  CHECK(config.seed == 0u, "geodesic default seed");
+  CHECK(rgsaddle_geodesic_config_default(NULL) == RGSADDLE_INVALID_PARAMETER,
+        "geodesic default refuses NULL");
+  CHECK(RGSADDLE_NOT_CONVERGED == -16, "NOT_CONVERGED value");
+  CHECK(strcmp(rgsaddle_status_name(RGSADDLE_NOT_CONVERGED), "NOT_CONVERGED") == 0,
+        "NOT_CONVERGED name");
+
+  const double bowed[8] = {0.0, 0.0, 1.0, 2.0, 2.0, 0.5, 3.0, 4.0};
+  double out[8];
+  double length = 0.0, lower = 0.0, upper = 0.0;
+  config.max_images = 8;
+  CHECK(rgsaddle_geodesic_path(4, 2, bowed, 2, flat_chart, NULL, NULL, &config, out, &length,
+                               &lower, &upper) == RGSADDLE_INVALID_PARAMETER,
+        "an image cap above n_images is refused");
+  config.max_images = 4;
+  int rc = rgsaddle_geodesic_path(4, 2, bowed, 2, flat_chart, NULL, NULL, &config, out, &length,
+                                  &lower, &upper);
+  CHECK(rc == RGSADDLE_OK, "geodesic path converges on a flat chart");
+  CHECK(fabs(length - 5.0) < 1e-6, "flat geodesic length is the 3-4-5 chord");
+  CHECK(out[0] == 0.0 && out[1] == 0.0 && out[6] == 3.0 && out[7] == 4.0, "endpoints stay fixed");
+
+  config.max_sweeps = 1;
+  config.step_tol = 1e-12;
+  rc = rgsaddle_geodesic_path(4, 2, bowed, 2, flat_chart, NULL, NULL, &config, out, &length,
+                              &lower, &upper);
+  CHECK(rc == RGSADDLE_NOT_CONVERGED, "one sweep is reported as not converged");
+  CHECK(isfinite(length) && isfinite(out[2]), "not converged still writes the last iterate");
+
+  config.max_images = 1;
+  CHECK(rgsaddle_geodesic_path(4, 2, bowed, 2, flat_chart, NULL, NULL, &config, out, &length,
+                               &lower, &upper) == RGSADDLE_INVALID_PARAMETER,
+        "an image cap under 2 is refused");
   return 0;
 }
 
@@ -925,6 +993,9 @@ static int test_band_minmode_index1_and_sessions_cdylib(void) {
 
 int main(void) {
   if (test_status_and_gates() != 0) {
+    return 1;
+  }
+  if (test_geodesic_config_and_status() != 0) {
     return 1;
   }
   if (test_ocineb_lanczos_rtr_mb() != 0) {

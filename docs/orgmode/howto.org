@@ -33,6 +33,9 @@ The top-level =meson.build= provides the headers as the dependency =rgsaddle-hea
 Defaults: improved tangent, uniform spring =k = 5=, NEB projection, climbing image with trigger factor 0.5.
 =BandConfig::with_string(StringConfig::default())= opts out of springs and tangent projection for the simplified string method of E, Ren, and Vanden-Eijnden (2007), evolving interior images under the full potential force and reparametrizing to equal arc length on the not-a-knot cubic spline or the polyline; see @@rst::doc:`the band how-to <howto/band>`@@.
 
+* Interpolate a geodesic initial path
+=howto/geodesic= minimizes the redundant coordinate length of Zhu, Thompson, and Martinez, J. Chem. Phys. 150, 164103 (2019), doi:10.1063/1.5090303. The chart is caller supplied. =MorsePairChart= is their Eq. (7). The endpoints stay fixed. This is an initial path, not a band step: it does not evaluate a potential.
+
 * Leave a minimum with ART nouveau
 =howto/art= is the phased search: a host seed and mask, perpendicular relaxation, Lanczos, a lowest-mode climb, an index-1 certificate, a push both ways off the saddle, and the two quenches. =ArtStatus::Reverted= is not a completed exit.
 

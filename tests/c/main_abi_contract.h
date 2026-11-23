@@ -5,7 +5,7 @@
 #include <stddef.h>
 
 _Static_assert(RGSADDLE_ABI_MAJOR == 1u, "main ABI major");
-_Static_assert(RGSADDLE_ABI_MINOR == 63u, "ABI minor");
+_Static_assert(RGSADDLE_ABI_MINOR == 64u, "ABI minor");
 _Static_assert(RGSADDLE_LINEB_LINEAR_SEED == (1u << 0), "lineb flag bit 0");
 _Static_assert(RGSADDLE_LINEB_ENDPOINT_CONVERGENCE == (1u << 1), "lineb flag bit 1");
 _Static_assert(RGSADDLE_LINEB_PROJECTED_VERLET == (1u << 2), "lineb flag bit 2");
@@ -26,6 +26,7 @@ _Static_assert(RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES == -15,
                "status INSUFFICIENT_EFFECTIVE_SAMPLES");
 _Static_assert(RGSADDLE_REFINE_NONE == 0, "refine method NONE");
 _Static_assert(RGSADDLE_REFINE_LBFGS == 1, "refine method LBFGS");
+_Static_assert(RGSADDLE_NOT_CONVERGED == -16, "status NOT_CONVERGED");
 
 typedef struct {
   uint32_t major;
@@ -631,5 +632,44 @@ _Static_assert(_Generic(&rgsaddle_band_set_refine, abi60_signature_rgsaddle_band
 
 typedef int32_t (*abi60_signature_rgsaddle_band_is_refining)(const RgsaddleBand *band);
 _Static_assert(_Generic(&rgsaddle_band_is_refining, abi60_signature_rgsaddle_band_is_refining: 1, default: 0), "rgsaddle_band_is_refining signature");
+
+_Static_assert(sizeof(rgsaddle_geodesic_config_t) == 104, "geodesic config size");
+_Static_assert(_Alignof(rgsaddle_geodesic_config_t) == 8, "geodesic config alignment");
+#define ABI64_GEODESIC_FIELD(field, offset, type)                                              \
+  _Static_assert(offsetof(rgsaddle_geodesic_config_t, field) == (offset),                      \
+                 "rgsaddle_geodesic_config_t." #field " offset");                              \
+  _Static_assert(_Generic(((rgsaddle_geodesic_config_t *)0)->field, type : 1, default : 0),    \
+                 "rgsaddle_geodesic_config_t." #field " type")
+ABI64_GEODESIC_FIELD(version, 0, rgsaddle_version_t);
+ABI64_GEODESIC_FIELD(flags, 8, uint64_t);
+ABI64_GEODESIC_FIELD(step_tol, 16, double);
+ABI64_GEODESIC_FIELD(grad_tol, 24, double);
+ABI64_GEODESIC_FIELD(max_move, 32, double);
+ABI64_GEODESIC_FIELD(lower_ratio, 40, double);
+ABI64_GEODESIC_FIELD(upper_ratio, 48, double);
+ABI64_GEODESIC_FIELD(max_sweeps, 56, int64_t);
+ABI64_GEODESIC_FIELD(max_iterations, 64, int64_t);
+ABI64_GEODESIC_FIELD(memory, 72, int64_t);
+ABI64_GEODESIC_FIELD(bound_samples, 80, int64_t);
+ABI64_GEODESIC_FIELD(max_images, 88, int64_t);
+ABI64_GEODESIC_FIELD(seed, 96, uint64_t);
+#undef ABI64_GEODESIC_FIELD
+
+typedef rgsaddle_status_t (*abi64_signature_rgsaddle_geodesic_config_default)(
+    rgsaddle_geodesic_config_t *out);
+_Static_assert(_Generic(&rgsaddle_geodesic_config_default, abi64_signature_rgsaddle_geodesic_config_default: 1, default: 0), "rgsaddle_geodesic_config_default signature");
+
+typedef rgsaddle_status_t (*abi64_signature_rgsaddle_geodesic_path)(
+    int64_t n_images, int64_t dof, const double *path, int64_t n_coords,
+    rgsaddle_geodesic_chart_fn chart, void *ctx, const double *cell,
+    const rgsaddle_geodesic_config_t *config, double *out, double *length, double *lower,
+    double *upper);
+_Static_assert(_Generic(&rgsaddle_geodesic_path, abi64_signature_rgsaddle_geodesic_path: 1, default: 0), "rgsaddle_geodesic_path signature");
+
+typedef rgsaddle_status_t (*abi64_signature_rgsaddle_geodesic_morse)(
+    int64_t n_images, int64_t n_atoms, const double *reactant, const double *product,
+    const double *radii, const double *cell, const rgsaddle_geodesic_config_t *config, double *out,
+    double *length, double *lower, double *upper);
+_Static_assert(_Generic(&rgsaddle_geodesic_morse, abi64_signature_rgsaddle_geodesic_morse: 1, default: 0), "rgsaddle_geodesic_morse signature");
 
 #endif

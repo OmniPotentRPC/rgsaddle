@@ -1,0 +1,56 @@
+#+TITLE: Geodesic initial paths
+#+OPTIONS: toc:nil num:nil
+
+#+begin_export rst
+:cite:`zhuGeodesicInterpolation2019`
+#+end_export
+
+~geodesic_path~ shortens an initial path in a redundant coordinate chart before any potential evaluation.
+Zhu, Thompson, and Martinez, J. Chem. Phys. 150, 164103 (2019), doi:10.1063/1.5090303, define the length of one Cartesian segment by the two point midpoint formula (their Eq. 17): the redundant coordinate distance from each end to the image of the Cartesian midpoint.
+On a flat chart that length is the polyline length, and the geodesic is the straight line (Appendix A).
+The lower bound is the sum of the coordinate chords between segment ends (Eq. B5).
+The upper bound subdivides each Cartesian segment into ~bound_samples~ equal pieces (Eq. B18). The paper uses ten.
+~bound_samples~ is even and at least 2, so one sample is the Cartesian midpoint and the chord sum is at least the midpoint length. An odd count is rejected.
+
+The chart implements ~GeodesicChart~. ~eval~ writes ~q(x)~ and the Wilson B matrix ~dq/dx~, one row per redundant coordinate.
+~MorsePairChart~ is Eq. (7): \(q = \exp(-\alpha (r - r_e) / r_e) + \beta r_e / r\), with ~alpha~ 1.7, ~beta~ 0.01, and ~r_e~ the sum of covalent radii.
+~MORSE_ALPHA~ and ~MORSE_BETA~ hold those two values, and ~with_radii~ replaces the radii of an existing chart.
+It returns an error when the list is empty or a radius is non-finite or not positive. The field itself is not public.
+A finite alpha, beta, or radius that makes a coordinate or a Wilson entry overflow is ~SaddleError::NonFinite~, and the output buffers are left unchanged for that pair.
+Pairs are lexicographic. A periodic ~cell~ (a ~minimage::Cell~) takes every pair displacement through ~Cell::displacement~. A pair distance at or below the distance floor is rejected rather than shifted.
+
+~GeodesicConfig~ and ~MorsePairChart~ are non-exhaustive.
+Start from ~GeodesicConfig::default~ or ~MorsePairChart::new~ and chain the ~with_*~ setters.
+The default stop is a pass displacement of 1e-6, a length gradient norm of 1e-6, and an L-BFGS step of 0.5 in the path's unit.
+The default bounds are 0.95 and 1.1, the paper's insertion thresholds.
+~with_lower_ratio~ and ~with_upper_ratio~ change them, and ~with_max_sweeps~ caps the passes.
+
+~geodesic_path~ keeps the first and last images fixed.
+Each interior image is one L-BFGS minimization of the total length, using the analytic gradient of their Algorithm 1.
+Images are swept forward and then back until the largest displacement of a pass is at or below ~step_tol~.
+A round of sweeps that uses all of ~max_sweeps~ with an image still moving by more than ~step_tol~ ends the run with ~GeodesicReport::converged~ false, and the path is the last iterate.
+If the bounds are still loose, Cartesian midpoints are inserted on the loose segments, up to ~max_images~, and the sweeps start again.
+A trial the chart refuses is discarded. That image keeps its last accepted point.
+The pass counts as converged only when an accepted step meets the stop. A refused trial that leaves the image where it was does not.
+A chart that returns a ~cell~ from ~GeodesicChart::cell~ marks the rows as one 3-vector per atom in a periodic box.
+The Cartesian midpoint of Eq. (17), the subdivision samples of Eq. (B18), and the images inserted between two images all move along ~Cell::displacement~ of their two ends, so a segment that crosses the box takes the short way.
+The cell should be tilt-reduced, the engine convention of minimage.
+
+~geodesic_interpolate~ builds the first path from the reactant and the product by their Algorithm 3.
+With three or more images the target is the average of the redundant coordinates, \(q_{\mathrm{mid}} = (q(A) + q(B)) / 2\), and not the coordinates of the Cartesian average.
+Ten starts alternate between the reactant (odd starts) and the product (even starts), each with Gaussian noise of scale 0.1 in the path's unit from a generator seeded by ~GeodesicConfig::seed~ (~with_seed~).
+Each start minimizes \(|q(x) - q_{\mathrm{mid}}|^2\), and the shortest three point path \([A, x, B]\) wins.
+The geodesic procedure then adjusts that middle image on the three point path with no insertion, and the result is copied onto the thirds of the images.
+The same seed repeats the path.
+~geodesic_path~ then minimizes the length.
+~geodesic_lengths~ reports the length and both bounds without moving the path, as ~GeodesicLengths~.
+~geodesic_path~ and ~geodesic_interpolate~ return the path with a ~GeodesicReport~: the length, both bounds, the image count, and the passes run.
+
+On the Morse pair chart a dissociation whose distance only increases has length ~|q(end) - q(start)|~, the equality case of Eq. (B5).
+~tests/geodesic_path.rs~ checks that length for ~r_e = 2~ from ~r = 2~ to ~r = 6~, and the straight segment of length 5 on a flat chart (Appendix A).
+
+From C, ABI minor 64, ~rgsaddle_geodesic_config_default~ fills ~rgsaddle_geodesic_config_t~, ~rgsaddle_geodesic_path~ takes a host chart and an optional row-major cell, and ~rgsaddle_geodesic_morse~ uses Eq. (7).
+A host chart given a cell applies the same minimum image to its own distances.
+A run that exhausts ~max_sweeps~ without settling returns ~RGSADDLE_NOT_CONVERGED~ with ~out~, ~length~, ~lower~, and ~upper~ holding the last iterate.
+A NULL config selects the defaults. ~length~, ~lower~, and ~upper~ may be NULL.
+A host that loads the library at run time checks ~rgsaddle_abi_version()~ for at least minor 64 before resolving these symbols.
