@@ -5,7 +5,8 @@
 #include <stddef.h>
 
 _Static_assert(RGSADDLE_ABI_MAJOR == 1u, "main ABI major");
-_Static_assert(RGSADDLE_ABI_MINOR == 63u, "ABI minor");
+_Static_assert(RGSADDLE_ABI_MINOR == 64u, "ABI minor");
+_Static_assert(RGSADDLE_OHTST_MINOR == 64u, "OH-TST ABI minor");
 _Static_assert(RGSADDLE_LINEB_LINEAR_SEED == (1u << 0), "lineb flag bit 0");
 _Static_assert(RGSADDLE_LINEB_ENDPOINT_CONVERGENCE == (1u << 1), "lineb flag bit 1");
 _Static_assert(RGSADDLE_LINEB_PROJECTED_VERLET == (1u << 2), "lineb flag bit 2");
@@ -24,6 +25,7 @@ _Static_assert(RGSADDLE_REQ_CLIMBING_IMAGE == (1ull << 1), "request flag bit 1")
 _Static_assert(RGSADDLE_NOT_EQUILIBRATED == -14, "status NOT_EQUILIBRATED");
 _Static_assert(RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES == -15,
                "status INSUFFICIENT_EFFECTIVE_SAMPLES");
+_Static_assert(RGSADDLE_NOT_CONVERGED == -16, "status NOT_CONVERGED");
 _Static_assert(RGSADDLE_REFINE_NONE == 0, "refine method NONE");
 _Static_assert(RGSADDLE_REFINE_LBFGS == 1, "refine method LBFGS");
 
@@ -631,5 +633,62 @@ _Static_assert(_Generic(&rgsaddle_band_set_refine, abi60_signature_rgsaddle_band
 
 typedef int32_t (*abi60_signature_rgsaddle_band_is_refining)(const RgsaddleBand *band);
 _Static_assert(_Generic(&rgsaddle_band_is_refining, abi60_signature_rgsaddle_band_is_refining: 1, default: 0), "rgsaddle_band_is_refining signature");
+_Static_assert(sizeof(rgsaddle_ohtst_sample_config_t) == 80, "ohtst sample config");
+_Static_assert(offsetof(rgsaddle_ohtst_sample_config_t, thermal) == 16, "ohtst sample thermal");
+_Static_assert(sizeof(rgsaddle_ohtst_sample_report_t) == 72, "ohtst sample report");
+_Static_assert(sizeof(rgsaddle_ohtst_optimize_config_t) == 160, "ohtst optimize config");
+_Static_assert(offsetof(rgsaddle_ohtst_optimize_config_t, max_evaluations) == 88, "ohtst max evaluations");
+_Static_assert(offsetof(rgsaddle_ohtst_optimize_config_t, max_records) == 96, "ohtst max records");
+_Static_assert(offsetof(rgsaddle_ohtst_optimize_config_t, tolerance) == 120, "ohtst tolerance");
+_Static_assert(offsetof(rgsaddle_ohtst_optimize_config_t, translate) == 144, "ohtst translate");
+_Static_assert(offsetof(rgsaddle_ohtst_optimize_config_t, patience) == 152, "ohtst patience");
+_Static_assert(sizeof(rgsaddle_ohtst_optimize_report_t) == 80, "ohtst optimize report");
+_Static_assert(offsetof(rgsaddle_ohtst_optimize_report_t, status) == 16, "ohtst optimize status");
+_Static_assert(offsetof(rgsaddle_ohtst_optimize_report_t, records) == 40, "ohtst optimize records");
+_Static_assert(sizeof(rgsaddle_ohtst_work_config_t) == 104, "ohtst work config");
+_Static_assert(offsetof(rgsaddle_ohtst_work_config_t, mbar) == 96, "ohtst mbar flag");
+_Static_assert(sizeof(rgsaddle_ohtst_work_report_t) == 88, "ohtst work report");
+_Static_assert(sizeof(rgsaddle_ohtst_transmission_config_t) == 80, "ohtst transmission config");
+_Static_assert(sizeof(rgsaddle_ohtst_transmission_report_t) == 72, "ohtst transmission report");
+_Static_assert(sizeof(rgsaddle_ohtst_rate_in_t) == 56, "ohtst rate in");
+_Static_assert(sizeof(rgsaddle_ohtst_rate_out_t) == 56, "ohtst rate out");
+
+typedef rgsaddle_status_t (*abi46_signature_rgsaddle_ohtst_optimize)(
+    const rgsaddle_ohtst_optimize_config_t *config, int64_t n, double *point, double *normal,
+    rgsaddle_point_fn surface, void *user, rgsaddle_ohtst_optimize_report_t *report);
+_Static_assert(_Generic(&rgsaddle_ohtst_optimize, abi46_signature_rgsaddle_ohtst_optimize: 1, default: 0), "rgsaddle_ohtst_optimize signature");
+
+typedef rgsaddle_status_t (*abi46_signature_rgsaddle_ohtst_optimize_config_default)(
+    rgsaddle_ohtst_optimize_config_t *config);
+_Static_assert(_Generic(&rgsaddle_ohtst_optimize_config_default,
+                        abi46_signature_rgsaddle_ohtst_optimize_config_default: 1, default: 0),
+               "rgsaddle_ohtst_optimize_config_default signature");
+
+typedef rgsaddle_status_t (*abi46_signature_rgsaddle_ohtst_work)(
+    const rgsaddle_ohtst_work_config_t *config, int64_t n, int64_t n_planes, const double *points,
+    const double *normals, const double *start, rgsaddle_point_fn surface, void *user,
+    rgsaddle_ohtst_work_report_t *report);
+_Static_assert(_Generic(&rgsaddle_ohtst_work, abi46_signature_rgsaddle_ohtst_work: 1, default: 0), "rgsaddle_ohtst_work signature");
+
+typedef rgsaddle_status_t (*abi46_signature_rgsaddle_ohtst_transmission)(
+    const rgsaddle_ohtst_transmission_config_t *config, int64_t n, const double *point,
+    const double *normal, int64_t n_starts, const double *starts, rgsaddle_point_fn surface,
+    void *user, rgsaddle_ohtst_transmission_report_t *report);
+_Static_assert(_Generic(&rgsaddle_ohtst_transmission, abi46_signature_rgsaddle_ohtst_transmission: 1, default: 0), "rgsaddle_ohtst_transmission signature");
+
+typedef rgsaddle_status_t (*abi46_signature_rgsaddle_ohtst_sample)(
+    const rgsaddle_ohtst_sample_config_t *config, int64_t n, const double *point,
+    const double *normal, rgsaddle_point_fn surface, void *user, double *centroid,
+    double *grad_normal, rgsaddle_ohtst_sample_report_t *report);
+_Static_assert(_Generic(&rgsaddle_ohtst_sample, abi46_signature_rgsaddle_ohtst_sample: 1, default: 0), "rgsaddle_ohtst_sample signature");
+
+typedef rgsaddle_status_t (*abi46_signature_rgsaddle_ohtst_mbar)(
+    int64_t samples, int64_t states, const double *reduced, const int64_t *counts,
+    const double *initial, double *free_energies, double *covariance, double *overlap);
+_Static_assert(_Generic(&rgsaddle_ohtst_mbar, abi46_signature_rgsaddle_ohtst_mbar: 1, default: 0), "rgsaddle_ohtst_mbar signature");
+
+typedef rgsaddle_status_t (*abi46_signature_rgsaddle_ohtst_rate)(
+    const rgsaddle_ohtst_rate_in_t *input, rgsaddle_ohtst_rate_out_t *out);
+_Static_assert(_Generic(&rgsaddle_ohtst_rate, abi46_signature_rgsaddle_ohtst_rate: 1, default: 0), "rgsaddle_ohtst_rate signature");
 
 #endif

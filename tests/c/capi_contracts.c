@@ -224,7 +224,7 @@ static int minmode_rotations(RgsaddleMinMode *session) {
 }
 
 static int test_minmode_rotation_angle_defaults_and_torque_window(void) {
-  RgsaddleMinMode *legacy = new_dimer_session(1e-8, RGSADDLE_ABI_MINOR - 1, 0, 0.0);
+  RgsaddleMinMode *legacy = new_dimer_session(1e-8, 62u, 0, 0.0);
   RgsaddleMinMode *defaulted = new_dimer_session(1e-8, RGSADDLE_ABI_MINOR, 0, 0.0);
   RgsaddleMinMode *explicit_zero = new_dimer_session(
       1e-8, RGSADDLE_ABI_MINOR, RGSADDLE_MINMODE_EXPLICIT_ROTATION_ANGLE_TOL, 0.0);

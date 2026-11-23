@@ -47,19 +47,32 @@ pub(crate) fn mbar(
             "MBAR needs two states or more and one count and start per state".into(),
         ));
     }
-    if counts.contains(&0) || counts.iter().sum::<usize>() != samples {
+    let total = counts
+        .iter()
+        .try_fold(0usize, |acc, &count| acc.checked_add(count))
+        .ok_or_else(|| {
+            SaddleError::Invalid("MBAR needs samples from every state, as many as the rows".into())
+        })?;
+    if counts.contains(&0) || total != samples {
         return Err(SaddleError::Invalid(
             "MBAR needs samples from every state, as many as the rows".into(),
         ));
     }
-    if u.iter().any(|v| v.is_nan() || *v == f64::NEG_INFINITY) {
+    if u.iter().any(|v| v.is_nan() || *v == f64::NEG_INFINITY)
+        || u.rows()
+            .into_iter()
+            .any(|row| row.iter().all(|v| !v.is_finite()))
+    {
         return Err(SaddleError::NonFinite("MBAR reduced potential"));
+    }
+    if !initial.iter().all(|v| v.is_finite()) {
+        return Err(SaddleError::NonFinite("MBAR initial free energies"));
     }
     let n: Array1<f64> = counts.iter().map(|&c| c as f64).collect();
     let log_n = n.mapv(f64::ln);
     let mut f = Array1::from_iter(initial.iter().map(|x| x - initial[0]));
     if !f.iter().all(|v| v.is_finite()) {
-        f.fill(0.0);
+        return Err(SaddleError::NonFinite("MBAR initial free energies"));
     }
     let mut converged = false;
     for _ in 0..200 {
@@ -131,6 +144,12 @@ pub(crate) fn mbar(
     let vs = &v * &sigma.view().insert_axis(Axis(0));
     let covariance = vs.dot(&pseudo).dot(&vs.t());
     let overlap = &gram * &n.view().insert_axis(Axis(0));
+    if !f.iter().all(|v| v.is_finite())
+        || !covariance.iter().all(|v| v.is_finite())
+        || !overlap.iter().all(|v| v.is_finite())
+    {
+        return Err(SaddleError::NonFinite("MBAR output"));
+    }
     Ok(Mbar {
         free_energies: f,
         covariance,
@@ -161,6 +180,58 @@ fn evaluate(u: &Array2<f64>, log_n: &Array1<f64>, f: &Array1<f64>) -> (f64, Arra
     }
     let counts = log_n.mapv(f64::exp);
     (total - counts.dot(f), w)
+}
+
+/// Settings of [`mbar_free_energies`].
+#[non_exhaustive]
+#[derive(Clone, Debug, Default)]
+pub struct MbarConfig {
+    /// Starting reduced free energies, one per state. `None` starts at zero.
+    /// The solved energies are shifted so the first state is zero.
+    pub initial: Option<Array1<f64>>,
+}
+
+impl MbarConfig {
+    /// Set [`Self::initial`].
+    #[must_use]
+    pub fn with_initial(mut self, initial: impl Into<Option<Array1<f64>>>) -> Self {
+        self.initial = initial.into();
+        self
+    }
+}
+
+/// Reduced free energies from MBAR, with `f_0 = 0`, their covariance, and
+/// the overlap matrix whose rows sum to one.
+#[non_exhaustive]
+#[derive(Clone, Debug)]
+pub struct MbarFreeEnergy {
+    /// Reduced free energy of every state.
+    pub free_energies: Array1<f64>,
+    /// Asymptotic covariance of [`Self::free_energies`].
+    pub covariance: Array2<f64>,
+    /// Overlap matrix. `O_ij` is the chance a sample of state `i` is taken
+    /// for one of state `j`.
+    pub overlap: Array2<f64>,
+}
+
+/// Solve MBAR for reduced potentials `reduced`, one row per sample and one
+/// column per state, with `counts[k]` samples drawn from state `k`.
+pub fn mbar_free_energies(
+    reduced: &Array2<f64>,
+    counts: &[usize],
+    config: &MbarConfig,
+) -> Result<MbarFreeEnergy, SaddleError> {
+    let states = reduced.ncols();
+    let initial = match &config.initial {
+        Some(start) => start.to_vec(),
+        None => vec![0.0; states],
+    };
+    let solved = mbar(reduced, counts, &initial)?;
+    Ok(MbarFreeEnergy {
+        free_energies: solved.free_energies,
+        covariance: solved.covariance,
+        overlap: solved.overlap,
+    })
 }
 
 /// The overlap `O_ab` of two states from the forward works `w_F` of the
@@ -233,5 +304,30 @@ mod tests {
         assert!((pair_overlap(&zeros, &zeros, 0.0) - 0.5).abs() < 1e-12);
         let far: Vec<f64> = vec![60.0; 50];
         assert!(pair_overlap(&far, &far, 0.0) < 1e-20);
+    }
+
+    #[test]
+    fn mbar_rejects_overflowing_count_sum() {
+        let u = Array2::zeros((2, 2));
+        let err = mbar_free_energies(&u, &[usize::MAX, 2], &MbarConfig::default()).unwrap_err();
+        assert!(matches!(err, SaddleError::Invalid(_)), "{err:?}");
+    }
+
+    #[test]
+    fn mbar_rejects_non_finite_initial_and_all_infinite_row() {
+        let u = Array2::zeros((2, 2));
+        let cfg = MbarConfig::default().with_initial(Array1::from(vec![0.0, f64::NAN]));
+        let err = mbar_free_energies(&u, &[1, 1], &cfg).unwrap_err();
+        assert!(
+            matches!(err, SaddleError::NonFinite("MBAR initial free energies")),
+            "{err:?}"
+        );
+        let inf_row =
+            Array2::from_shape_vec((2, 2), vec![f64::INFINITY, f64::INFINITY, 0.0, 0.0]).unwrap();
+        let err = mbar_free_energies(&inf_row, &[1, 1], &MbarConfig::default()).unwrap_err();
+        assert!(
+            matches!(err, SaddleError::NonFinite("MBAR reduced potential")),
+            "{err:?}"
+        );
     }
 }
