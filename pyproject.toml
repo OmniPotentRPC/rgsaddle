@@ -80,6 +80,10 @@ environment = { PATH = "$USERPROFILE\\.cargo\\bin;$PATH" }
 testpaths = ["tests/python"]
 timeout = 120
 faulthandler_timeout = 60
+markers = [
+    "optimize: ASE optimizer test",
+    "slow: ASE slow test",
+]
 
 [tool.mypy]
 mypy_path = "python"

@@ -12,6 +12,7 @@ raw force.
 
 from __future__ import annotations
 
+import warnings
 from typing import Any, Literal
 
 import numpy as np
@@ -363,6 +364,195 @@ def saddle_index(
     )
 
 
+def _springs(k: Any, n_springs: int) -> tuple[list[float], float | None]:
+    """One constant, or one per segment. A scalar also comes back as the scalar."""
+    if isinstance(k, (str, bytes)):
+        raise NotImplementedError("k must be a number or a sequence of springs")
+    if np.ndim(k) == 0:
+        try:
+            scalar = float(k)
+        except (TypeError, ValueError) as err:
+            raise NotImplementedError("k must be a number or a sequence of springs") from err
+        if not np.isfinite(scalar):
+            raise ValueError("k must be finite")
+        return [scalar] * max(n_springs, 0), scalar
+    values = [float(v) for v in np.asarray(k, dtype=np.float64).reshape(-1)]
+    if n_springs > 0 and len(values) != n_springs:
+        raise ValueError(f"k must be one constant or {n_springs} springs, got {len(values)}")
+    if any(not np.isfinite(v) for v in values):
+        raise ValueError("k must be finite")
+    return values, None
+
+
+def _band_cell(images: list[Any]) -> Float64 | None:
+    """3x3 lattice with non-periodic rows zeroed, or None in free space."""
+    pbc = np.asarray(images[0].pbc, dtype=bool)
+    if not bool(pbc.any()):
+        return None
+    cell = np.array(images[0].cell, dtype=np.float64, copy=True)
+    for axis, flag in enumerate(pbc.tolist()):
+        if not flag:
+            cell[axis, :] = 0.0
+    return np.ascontiguousarray(cell, dtype=np.float64)
+
+
+def _check_images(images: list[Any]) -> None:
+    if len(images) == 0:
+        return
+    numbers = np.asarray(images[0].get_atomic_numbers())
+    pbc = np.asarray(images[0].pbc)
+    cell = np.asarray(images[0].cell, dtype=np.float64)
+    for image in images:
+        if len(image) != len(images[0]):
+            raise ValueError("Images have different numbers of atoms")
+        if np.any(np.asarray(image.pbc) != pbc):
+            raise ValueError("Images have different boundary conditions")
+        if np.any(np.asarray(image.get_atomic_numbers()) != numbers):
+            raise ValueError("Images have atoms in different orders")
+        for flag, row, row0 in zip(np.asarray(image.pbc), np.asarray(image.cell), cell):
+            if flag and np.any(np.abs(np.asarray(row) - row0) > 1e-8):
+                raise NotImplementedError(
+                    "Variable cell in periodic directions is not implemented yet for NEB"
+                )
+
+
+def _pin_fixed(images: list[Any]) -> None:
+    fixed = _fixed_atoms(images)
+    if fixed is None:
+        return
+    start = np.asarray(images[0].get_positions(), dtype=np.float64)
+    for image in images[1:-1]:
+        row = np.array(image.get_positions(), dtype=np.float64, copy=True)
+        row[fixed == 1] = start[fixed == 1]
+        image.set_positions(row, apply_constraint=False)
+
+
+def interpolate(
+    images: list[Any],
+    mic: bool = False,
+    interpolate_cell: bool = False,
+    use_scaled_coord: bool = False,
+    apply_constraint: bool | None = None,
+) -> None:
+    """Linear placement of the interior images, the ASE ``mep.interpolate`` call.
+
+    ``mic`` uses the minimum image of the end-to-end displacement.
+    ``apply_constraint=None`` raises ``RuntimeError`` when a constraint
+    would move an image off that line, which is ASE's behaviour.
+    """
+    if len(images) < 2:
+        return
+    if use_scaled_coord:
+        pos1 = np.asarray(images[0].get_scaled_positions(wrap=mic), dtype=np.float64)
+        pos2 = np.asarray(images[-1].get_scaled_positions(wrap=mic), dtype=np.float64)
+    else:
+        pos1 = np.asarray(images[0].get_positions(), dtype=np.float64)
+        pos2 = np.asarray(images[-1].get_positions(), dtype=np.float64)
+    step = pos2 - pos1
+    if not use_scaled_coord and mic:
+        from ase.geometry import find_mic
+
+        step = find_mic(step, images[0].get_cell(), images[0].pbc)[0]
+    step = step / (len(images) - 1.0)
+    cell1 = None
+    cell_step = None
+    if interpolate_cell:
+        cell1 = np.array(images[0].get_cell(), dtype=np.float64, copy=True)
+        cell_step = (np.array(images[-1].get_cell(), dtype=np.float64) - cell1) / (len(images) - 1.0)
+    for index in range(1, len(images) - 1):
+        if interpolate_cell and cell1 is not None and cell_step is not None:
+            images[index].set_cell(cell1 + index * cell_step)
+        new_pos = pos1 + index * step
+        if use_scaled_coord:
+            images[index].set_scaled_positions(new_pos)
+            continue
+        if apply_constraint is None:
+            unconstrained = images[index].copy()
+            unconstrained.set_positions(new_pos, apply_constraint=False)
+            images[index].set_positions(new_pos, apply_constraint=True)
+            if not np.allclose(unconstrained.positions, images[index].positions):
+                raise RuntimeError(
+                    f"Constraints in image {index}\n"
+                    "affect the interpolation results.\n"
+                    "Please specify if you want to\n"
+                    "apply or ignore the constraints\n"
+                    "during the interpolation\n"
+                    "with the apply_constraint argument."
+                )
+        else:
+            images[index].set_positions(new_pos, apply_constraint=apply_constraint)
+
+
+def _place_idpp(
+    images: list[Any],
+    *,
+    mic: bool,
+    max_iterations: int = 5000,
+    grad_tol: float = 1e-3,
+) -> None:
+    """Interior images from ``rgsaddle.idpp_path``. Endpoints stay put."""
+    from rgsaddle._core import idpp_path
+
+    if mic and not bool(np.asarray(images[0].pbc, dtype=bool).all()):
+        if bool(np.asarray(images[0].pbc, dtype=bool).any()):
+            raise NotImplementedError("idpp mic on a partially periodic cell")
+    cell = None
+    if mic and bool(np.asarray(images[0].pbc, dtype=bool).all()):
+        cell = np.ascontiguousarray(np.array(images[0].cell, dtype=np.float64), dtype=np.float64)
+    start = np.ascontiguousarray(images[0].get_positions(), dtype=np.float64).reshape(-1)
+    end = np.ascontiguousarray(images[-1].get_positions(), dtype=np.float64).reshape(-1)
+    path = np.asarray(
+        idpp_path(
+            start,
+            end,
+            len(images),
+            cell=cell,
+            max_iterations=max_iterations,
+            grad_tol=grad_tol,
+        ),
+        dtype=np.float64,
+    )
+    natoms = len(images[0])
+    for index, image in enumerate(images[1:-1], start=1):
+        image.set_positions(path[index].reshape(natoms, 3), apply_constraint=False)
+    _pin_fixed(images)
+
+
+def idpp_interpolate(
+    images: Any,
+    traj: str | None = "idpp.traj",
+    log: str | None = "idpp.log",
+    fmax: float = 0.1,
+    optimizer: Any = None,
+    mic: bool = False,
+    steps: int = 100,
+) -> None:
+    """IDPP placement. ``images`` is a list or an object with ``.images``.
+
+    The path is ``rgsaddle.idpp_path`` (L-BFGS on the pair potential).
+    ``steps`` is that minimizer's iteration cap and ``fmax`` its gradient
+    tolerance. ``traj`` and ``log`` raise ``NotImplementedError`` unless
+    they are the ASE defaults, because this path writes no trajectory.
+    ``optimizer`` may be ``MDMin`` or ``BFGS``. Either one runs this
+    L-BFGS path. Any other optimizer raises ``NotImplementedError``.
+    """
+    if traj not in (None, "idpp.traj") or log not in (None, "idpp.log"):
+        raise NotImplementedError("idpp_interpolate traj and log: the Rust path writes no trajectory")
+    if optimizer is not None:
+        from ase.optimize import BFGS, MDMin
+
+        # The observable is the minimized IDPP path. MDMin is ASE's default
+        # and BFGS is the other optimizer its tests pass. Both run
+        # rgsaddle.idpp_path. Any other optimizer is named and refused.
+        if optimizer not in (MDMin, BFGS):
+            name = getattr(optimizer, "__name__", repr(optimizer))
+            raise NotImplementedError(
+                f"idpp_interpolate optimizer '{name}': the path is rgsaddle.idpp_path (L-BFGS)"
+            )
+    band = images.images if hasattr(images, "images") else images
+    _place_idpp(band, mic=mic, max_iterations=max(int(steps), 1), grad_tol=float(fmax))
+
+
 class _NebView:
     """ASE optimizable view of interior images."""
 
@@ -391,88 +581,119 @@ class _NebView:
     def converged(self, gradient: Float64, fmax: float) -> bool:
         return self.gradient_norm(gradient) < fmax
 
-    def iterimages(self) -> list[Any]:
-        return list(self._neb.images)
+    def iterimages(self) -> Any:
+        return self._neb.iterimages()
 
 
 class NEB:
     """Nudged elastic band over a list of ASE ``Atoms``.
 
-    The constructor matches ``ase.mep.NEB``: ``images`` carry the
-    calculators, ``k`` is the spring constant, and ``climb`` turns the
-    climbing image on for every force call.     ``get_positions`` and
-    ``get_forces`` are the interior images only, shape
-    ``((n_images - 2) * n_atoms, 3)``, which is what ASE's optimizer
-    reads. ``get_potential_energy`` is the highest interior energy,
-    the value ASE's NEB reports. A higher fixed endpoint does not
-    replace it.
+    The constructor follows ``ase.mep.NEB``: ``k`` is one spring or one
+    per segment, ``climb`` turns the climbing image on for every force
+    call, and ``method`` is ``improvedtangent`` (default), ``aseneb``,
+    ``eb``, or ``dneb``. ``spline`` and ``string`` raise
+    ``NotImplementedError``. So does ``precon``, and any of
+    ``dynamic_relaxation``, ``fmax``, or ``scale_fmax`` (DyNEB).
+
+    ``get_positions`` and ``get_forces`` are the interior images only,
+    shape ``((n_images - 2) * n_atoms, 3)``. ``get_potential_energy`` is
+    the highest interior energy. ``ase.optimize`` drives the band through
+    ``__ase_optimizable__``.
 
     ``climb=True`` does not climb an interior image when a higher
-    endpoint slopes down into the band. ASE's ``NEB`` climbs the
-    highest image on every call, including that slope. The force is
-    then the reflected true force, and the image is driven up a slope
-    that has no saddle on it.
+    endpoint slopes down into the band. ASE's ``NEB`` climbs the highest
+    image on every call, including that slope.
 
-    ``method`` is ``improvedtangent`` (default), ``aseneb``, ``eb``, or
-    ``dneb``. The tangents are unit vectors, so ``aseneb`` and
-    ``improvedtangent`` project the same force. ``spline`` and
-    ``string`` are not this class. ``remove_rotation_and_translation``
-    removes the mean Cartesian force. It does not rotate the images:
-    a Kabsch step would move the geometry the calculator sees, and the
-    unit tangent already fixes the path direction.
+    ``remove_rotation_and_translation=True`` aligns each free, non-periodic
+    image to the previous one with ASE's rigid fit, and otherwise removes
+    the mean Cartesian force. A fixed atom is not rotated.
 
-    ``FixAtoms`` on the images is the band's fixed-atom mask (rgsaddle
-    ABI minor 39): those atoms get zero force rows, tangents and
-    springs use the free atoms, and the mean force stays even with
-    ``remove_rotation_and_translation``. Every image must fix the same
-    atoms, and the endpoints must agree on where they sit.
+    ``parallel=True`` with a single rank evaluates images on the calling
+    thread. An MPI world (``world.size > 1``) raises ``NotImplementedError``.
+    Shared calculators with ``parallel=True`` raise ``RuntimeError``.
 
-    Lengths and energies are the calculator's.
+    ``interpolate(method='linear')`` is the straight line, with ``mic``.
+    ``method='idpp'`` then runs ``idpp_path``. ``FixAtoms`` stays on the
+    first image. Lengths and energies are the calculator's.
     """
 
     def __init__(
         self,
         images: list[Any],
-        k: float = 0.1,
+        k: Any = 0.1,
         climb: bool = False,
         parallel: bool = False,
         remove_rotation_and_translation: bool = False,
+        world: Any = None,
         method: str | None = None,
         allow_shared_calculator: bool = False,
         precon: Any = None,
         **kwargs: Any,
     ) -> None:
-        if parallel:
-            raise ValueError("this NEB evaluates images on the calling thread")
-        if precon is not None:
-            raise ValueError("preconditioning belongs on BandConfig.exp_precon")
+        for keyword in ("dynamic_relaxation", "fmax", "scale_fmax"):
+            if keyword in kwargs:
+                raise NotImplementedError(f"{keyword}: dynamic NEB (DyNEB) is not implemented")
         if kwargs:
             name = next(iter(kwargs))
-            raise ValueError(f"unsupported NEB argument {name}")
+            raise NotImplementedError(f"unsupported NEB argument {name}")
+        if precon is not None:
+            raise NotImplementedError("precon: preconditioned NEB is not implemented")
+        _check_images(images)
         self.images = images
-        self.k = float(k)
         self.climb = bool(climb)
+        self.parallel = bool(parallel)
+        self.allow_shared_calculator = bool(allow_shared_calculator)
         self.remove_rotation_and_translation = bool(remove_rotation_and_translation)
-        chosen = "improvedtangent" if method is None else method
-        if chosen in ("improvedtangent", "aseneb"):
-            self._projection = "neb"
-            self._tangent = "improved"
-        elif chosen == "eb":
-            self._projection = "eb"
-            self._tangent = "improved"
-        elif chosen == "dneb":
-            self._projection = "dneb"
-            self._tangent = "improved"
-        else:
-            raise ValueError(
-                "method must be improvedtangent, aseneb, eb, or dneb; "
+        if world is None:
+            import ase.parallel
+
+            world = ase.parallel.world
+        self.world = world
+        if self.parallel and self.allow_shared_calculator:
+            raise RuntimeError("Cannot use shared calculators in parallel in NEB.")
+        if self.parallel and int(getattr(self.world, "size", 1)) > 1:
+            raise NotImplementedError("parallel NEB over an MPI world (world.size > 1)")
+        n_springs = max(len(images) - 1, 0)
+        self.k, self._k_scalar = _springs(k, n_springs)
+        if method is None:
+            warnings.warn(
+                "The default method has changed from 'aseneb' to 'improvedtangent'. "
+                "Set method='improvedtangent' to silence this warning.",
+                UserWarning,
+                stacklevel=2,
+            )
+            method = "improvedtangent"
+        if method == "spline":
+            raise NotImplementedError("method 'spline': rgsaddle has no spline force projection")
+        if method == "string":
+            raise NotImplementedError(
+                "method 'string': NEB has no string-method force; "
                 "use SimplifiedString for the simplified string method"
             )
-        self.method = chosen
-        self._adapter = SurfaceAdapter(images, allow_shared_calculator=allow_shared_calculator)
+        forces = {
+            "improvedtangent": ("neb", "improved"),
+            "aseneb": ("neb", "improved"),
+            "eb": ("eb", "improved"),
+            "dneb": ("dneb", "improved"),
+        }
+        if method not in forces:
+            raise NotImplementedError(method)
+        self.method = method
+        self._projection, self._tangent = forces[method]
+        self._adapter: SurfaceAdapter | None = None
         self.energies: Float64 | None = None
         self.emax = float("nan")
+        self.imax: int | None = None
         self.ci: int | None = None
+        self._real_forces: Float64 | None = None
+
+    @property
+    def natoms(self) -> int:
+        return len(self.images[0])
+
+    @property
+    def nimages(self) -> int:
+        return len(self.images)
 
     def __len__(self) -> int:
         if len(self.images) < 2:
@@ -482,40 +703,103 @@ class NEB:
     def __ase_optimizable__(self) -> _NebView:
         return _NebView(self)
 
-    def interpolate(self, method: str = "linear", mic: bool = False, apply_constraint: bool = True) -> None:
-        """Place the interior images on the straight line between the ends.
+    @staticmethod
+    def freeze_results_on_image(atoms: Any, **results: Any) -> None:
+        from ase.calculators.singlepoint import SinglePointCalculator
 
-        ``mic=True`` is refused: pass images the host has already
-        unwrapped. A ``Cell`` on the Rust band applies the minimum
-        image to force differences, not to this placement.
-        """
-        del apply_constraint
-        if method != "linear":
-            raise ValueError("interpolate linearly here; idpp_path builds an IDPP start in Rust")
-        if mic:
-            raise ValueError("unwrap the images first; interpolation here is Cartesian")
+        atoms.calc = SinglePointCalculator(atoms, **results)
+
+    def _refuse_shared(self) -> None:
+        if self.allow_shared_calculator:
+            return
+        seen: dict[int, int] = {}
+        for index, image in enumerate(self.images):
+            calc = getattr(image, "calc", None)
+            if calc is None:
+                continue
+            owner = id(calc)
+            if owner in seen:
+                raise ValueError(
+                    "One or more NEB images share the same calculator. "
+                    "Each image must have its own calculator."
+                )
+            seen[owner] = index
+
+    def _adapter_for(self) -> SurfaceAdapter:
+        self._refuse_shared()
+        if self._adapter is None:
+            self._adapter = SurfaceAdapter(
+                self.images, allow_shared_calculator=self.allow_shared_calculator
+            )
+        return self._adapter
+
+    def _can_align(self) -> bool:
+        """Kabsch is safe only for a free, non-periodic band."""
+        if not self.remove_rotation_and_translation or len(self.images) < 2:
+            return False
+        if _fixed_atoms(self.images) is not None:
+            return False
+        return not bool(np.asarray(self.images[0].pbc, dtype=bool).any())
+
+    def _align_endpoints(self) -> None:
+        """Move the product onto the reactant, as ASE's interpolate does."""
+        if not self._can_align():
+            return
+        from ase.build import minimize_rotation_and_translation
+
+        minimize_rotation_and_translation(self.images[0], self.images[-1])
+
+    def _align(self) -> bool:
+        """Align each image onto the previous one. True when that ran."""
+        if not self._can_align():
+            return False
+        from ase.build import minimize_rotation_and_translation
+
+        for index in range(1, len(self.images)):
+            minimize_rotation_and_translation(self.images[index - 1], self.images[index])
+        return True
+
+    def interpolate(self, method: str = "linear", mic: bool = False, apply_constraint: bool | None = None) -> None:
+        """Place interior images. ``method`` is ``linear`` or ``idpp``."""
+        if method not in ("linear", "idpp"):
+            raise NotImplementedError(f"interpolate method '{method}'")
         if len(self.images) < 3:
             raise ValueError("interpolation needs two endpoints and one interior image")
-        start = np.asarray(self.images[0].get_positions(), dtype=np.float64)
-        end = np.asarray(self.images[-1].get_positions(), dtype=np.float64)
-        fixed = _fixed_atoms(self.images)
-        last = len(self.images) - 1
-        for index, image in enumerate(self.images[1:-1], start=1):
-            weight = index / last
-            row = (1.0 - weight) * start + weight * end
-            if fixed is not None:
-                row[fixed == 1] = start[fixed == 1]
-            image.set_positions(row, apply_constraint=False)
+        if self.remove_rotation_and_translation:
+            self._align_endpoints()
+        if apply_constraint is True:
+            interpolate(self.images, mic=mic, apply_constraint=True)
+        else:
+            interpolate(self.images, mic=mic, apply_constraint=False)
+            if apply_constraint is None:
+                _pin_fixed(self.images)
+        if method == "idpp":
+            _place_idpp(self.images, mic=mic)
+
+    def idpp_interpolate(
+        self,
+        traj: str | None = "idpp.traj",
+        log: str | None = "idpp.log",
+        fmax: float = 0.1,
+        optimizer: Any = None,
+        mic: bool = False,
+        steps: int = 100,
+    ) -> None:
+        warnings.warn(
+            "Please use NEB.interpolate(method='idpp') or idpp_interpolate",
+            FutureWarning,
+            stacklevel=2,
+        )
+        idpp_interpolate(self, traj=traj, log=log, fmax=fmax, optimizer=optimizer, mic=mic, steps=steps)
 
     def get_positions(self) -> Float64:
-        blocks = [
-            np.asarray(image.get_positions(), dtype=np.float64) for image in self.images[1:-1]
-        ]
+        blocks = [np.asarray(image.get_positions(), dtype=np.float64) for image in self.images[1:-1]]
         if not blocks:
             return np.zeros((0, 3), dtype=np.float64)
         return np.concatenate(blocks, axis=0)
 
-    def set_positions(self, positions: Any) -> None:
+    def set_positions(self, positions: Any, adjust_positions: bool = True) -> None:
+        del adjust_positions
         natoms = len(self.images[0])
         array = np.asarray(positions, dtype=np.float64).reshape((-1, 3))
         expect = (len(self.images) - 2) * natoms
@@ -525,6 +809,26 @@ class NEB:
         for index, image in enumerate(self.images[1:-1]):
             image.set_positions(array[index * natoms : (index + 1) * natoms], apply_constraint=False)
 
+    def set_calculators(self, calculators: Any) -> None:
+        """Attach one calculator, or one per image, or one per interior image."""
+        if not isinstance(calculators, list):
+            if self.allow_shared_calculator:
+                calculators = [calculators] * self.nimages
+            else:
+                raise RuntimeError(
+                    "Cannot set shared calculator to NEB with allow_shared_calculator=False"
+                )
+        n = len(calculators)
+        if n == self.nimages:
+            for index in range(self.nimages):
+                self.images[index].calc = calculators[index]
+        elif n == self.nimages - 2:
+            for index in range(1, self.nimages - 1):
+                self.images[index].calc = calculators[index - 1]
+        else:
+            raise RuntimeError(f"len(calculators)={n} does not fit to len(images)={self.nimages}")
+        self._adapter = None
+
     def get_potential_energy(self) -> float:
         if self.energies is None:
             self.get_forces()
@@ -533,28 +837,66 @@ class NEB:
     def get_forces(self) -> Float64:
         from rgsaddle._core import project_band
 
+        aligned = self._align()
         positions = _image_positions(self.images)
         ids = np.arange(positions.shape[0], dtype=np.int64)
-        energies, gradients = self._adapter(ids, positions)
+        energies, gradients = self._adapter_for()(ids, positions)
+        springs, scalar = self.k, self._k_scalar
+        call: dict[str, Any] = {
+            "climb": self.climb,
+            "projection": self._projection,
+            "tangent": self._tangent,
+            "remove_translation": self.remove_rotation_and_translation and not aligned,
+            "fixed": _fixed_atoms(self.images),
+            "cell": _band_cell(self.images),
+        }
+        if scalar is None:
+            call["k"] = springs[0] if springs else 0.1
+            call["spring_ks"] = np.ascontiguousarray(springs, dtype=np.float64)
+        else:
+            call["k"] = scalar
         flat, ci = project_band(
             positions,
             np.ascontiguousarray(energies, dtype=np.float64),
             np.ascontiguousarray(gradients, dtype=np.float64),
-            k=self.k,
-            climb=self.climb,
-            projection=self._projection,
-            tangent=self._tangent,
-            remove_translation=self.remove_rotation_and_translation,
-            fixed=_fixed_atoms(self.images),
+            **call,
         )
         count = len(self.images)
         natoms = len(self.images[0])
         forces = np.asarray(flat, dtype=np.float64).reshape(count, natoms, 3)
         self.energies = np.asarray(energies, dtype=np.float64).reshape(-1)
         interior = self.energies[1:-1]
-        self.emax = float(np.max(interior)) if interior.size else float("nan")
+        if interior.size:
+            self.imax = 1 + int(np.argmax(interior))
+            self.emax = float(interior[self.imax - 1])
+        else:
+            self.imax = None
+            self.emax = float("nan")
         self.ci = None if int(ci) < 0 else int(ci)
+        raw = self._adapter_for().raw_forces
+        if raw is not None:
+            self._real_forces = np.asarray(raw, dtype=np.float64).reshape(count, natoms, 3)
         return np.ascontiguousarray(forces[1:-1].reshape(-1, 3), dtype=np.float64)
+
+    def get_residual(self) -> float:
+        """Largest per-atom force on the interior images."""
+        forces = self.get_forces().reshape(-1, 3)
+        if forces.size == 0:
+            return 0.0
+        return float(np.max(np.linalg.norm(forces, axis=1)))
+
+    def iterimages(self) -> Any:
+        for index, atoms in enumerate(self.images):
+            if index == 0 or index == len(self.images) - 1 or self.energies is None or self._real_forces is None:
+                yield atoms
+            else:
+                copied = atoms.copy()
+                self.freeze_results_on_image(
+                    copied,
+                    energy=float(self.energies[index]),
+                    forces=np.array(self._real_forces[index], dtype=np.float64, copy=True),
+                )
+                yield copied
 
     def saddle_index(self, **options: Any) -> SaddleIndex:
         """Saddle index of the climbing image, seeded with its tangent.
@@ -573,6 +915,23 @@ class NEB:
         return saddle_index(self.images[self.ci], tangent, **options)
 
 
+class SingleCalculatorNEB(NEB):
+    """``NEB(allow_shared_calculator=True)``.
+
+    ASE deprecated this class in 3.23. Constructing it warns and sets
+    the shared-calculator flag.
+    """
+
+    def __init__(self, images: list[Any], *args: Any, **kwargs: Any) -> None:
+        warnings.warn(
+            "Please use NEB(allow_shared_calculator=True) instead of SingleCalculatorNEB",
+            FutureWarning,
+            stacklevel=2,
+        )
+        kwargs["allow_shared_calculator"] = True
+        super().__init__(images, *args, **kwargs)
+
+
 def _effective_force(forces: Float64, mode: Float64, curvature: float) -> Float64:
     """ASE force after the minimum-mode translation of the gradient."""
     flat = np.asarray(forces, dtype=np.float64).reshape(-1)
@@ -589,6 +948,85 @@ def _effective_force(forces: Float64, mode: Float64, curvature: float) -> Float6
     return eff.reshape(forces.shape)
 
 
+class DimerControl:
+    """Parameters of ASE's dimer search.
+
+    Unknown names raise ``ValueError``. ``logfile=None`` keeps the run
+    quiet. An MPI communicator with ``size > 1`` raises
+    ``NotImplementedError``.
+    """
+
+    _DEFAULTS: dict[str, Any] = {
+        "eigenmode_method": "dimer",
+        "f_rot_min": 0.1,
+        "f_rot_max": 1.00,
+        "max_num_rot": 1,
+        "trial_angle": float(np.pi / 4.0),
+        "trial_trans_step": 0.001,
+        "maximum_translation": 0.1,
+        "cg_translation": True,
+        "use_central_forces": True,
+        "dimer_separation": 0.0001,
+        "initial_eigenmode_method": "gauss",
+        "extrapolate_forces": False,
+        "displacement_method": "gauss",
+        "gauss_std": 0.1,
+        "order": 1,
+        "mask": None,
+        "displacement_center": None,
+        "displacement_radius": None,
+        "number_of_displacement_atoms": None,
+    }
+
+    def __init__(
+        self,
+        logfile: Any = "-",
+        eigenmode_logfile: Any = None,
+        comm: Any = None,
+        **kwargs: Any,
+    ) -> None:
+        if comm is not None and int(getattr(comm, "size", 1)) > 1:
+            raise NotImplementedError("DimerControl comm with world.size > 1")
+        self.parameters = dict(self._DEFAULTS)
+        for key, value in kwargs.items():
+            self.set_parameter(key, value, log=False)
+        self.logfile = None if logfile in (None, "-") else logfile
+        self.eigenmode_logfile = None if eigenmode_logfile in (None, "-") else eigenmode_logfile
+        self.counters = {"forcecalls": 0, "rotcount": 0, "optcount": 0}
+
+    def __enter__(self) -> DimerControl:
+        return self
+
+    def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> Literal[False]:
+        del exc_type, exc_value, traceback
+        return False
+
+    def set_parameter(self, parameter: str, value: Any, log: bool = True) -> None:
+        del log
+        if parameter not in self.parameters:
+            raise ValueError(
+                f"Invalid parameter >>{parameter}<< with value >>{value!s}<< in DimerControl"
+            )
+        self.parameters[parameter] = value
+
+    def get_parameter(self, parameter: str) -> Any:
+        if parameter not in self.parameters:
+            raise ValueError(f"Invalid parameter >>{parameter}<<")
+        return self.parameters[parameter]
+
+    def get_logfile(self) -> Any:
+        return self.logfile
+
+    def get_eigenmode_logfile(self) -> Any:
+        return self.eigenmode_logfile
+
+    def get_counter(self, counter: str) -> int:
+        return int(self.counters[counter])
+
+    def increment_counter(self, counter: str) -> None:
+        self.counters[counter] = int(self.counters[counter]) + 1
+
+
 class _MinModeView:
     def __init__(self, search: MinModeAtoms) -> None:
         self._search = search
@@ -601,7 +1039,7 @@ class _MinModeView:
         self._search.atoms.set_positions(
             np.asarray(x, dtype=np.float64).reshape(count, 3), apply_constraint=False
         )
-        self._search._moved()
+        self._search._invalidate()
 
     def get_gradient(self) -> Float64:
         return -np.ascontiguousarray(self._search.get_forces(), dtype=np.float64).reshape(-1)
@@ -612,43 +1050,156 @@ class _MinModeView:
     def ndofs(self) -> int:
         return 3 * len(self._search.atoms)
 
+    def gradient_norm(self, gradient: Float64) -> float:
+        forces = np.asarray(gradient, dtype=np.float64).reshape(-1, 3)
+        return float(np.max(np.linalg.norm(forces, axis=1)))
+
+    def converged(self, gradient: Float64, fmax: float) -> bool:
+        if not self.gradient_norm(gradient) < fmax:
+            return False
+        curvature = self._search.curvature
+        return bool(np.isfinite(curvature) and curvature < 0.0)
+
+    def iterimages(self) -> Any:
+        yield self._search.atoms
+
 
 class MinModeAtoms:
     """One ASE ``Atoms`` object driven by a dimer or Lanczos mode.
 
     ``get_forces`` estimates the lowest mode and returns the effective
-    force an ASE optimizer should follow. Positive curvature drops the
-    force perpendicular to the mode. Negative curvature reflects the
-    force along the mode. The atoms object itself is not copied.
+    force. Positive curvature drops the force perpendicular to the mode.
+    Negative curvature reflects the force along the mode.
+
+    The ASE call is ``MinModeAtoms(atoms, control)`` with a
+    ``DimerControl``. ``displace``, ``get_eigenmode``, ``get_curvature``
+    and ``get_barrier_energy`` are that interface. ``mode=``, ``kind``,
+    ``dr`` and ``max_rotations`` remain for a search that does not build
+    a control object. ``order`` other than 1 and a non-dimer
+    ``eigenmode_method`` raise ``NotImplementedError``.
     """
 
     def __init__(
         self,
         atoms: Any,
+        control: Any = None,
         mode: Any = None,
         *,
+        eigenmodes: Any = None,
         kind: str = "dimer",
         dr: float = 1e-3,
         max_rotations: int = 10,
+        random_seed: int | None = None,
+        comm: Any = None,
+        **kwargs: Any,
     ) -> None:
+        del random_seed
+        if comm is not None and int(getattr(comm, "size", 1)) > 1:
+            raise NotImplementedError("MinModeAtoms comm with world.size > 1")
+        if control is not None and mode is None and not hasattr(control, "get_parameter"):
+            mode = control
+            control = None
         if getattr(atoms, "calc", None) is None:
             raise ValueError("atoms has no calculator")
+        if control is None and kwargs:
+            control = DimerControl(**kwargs)
+        elif control is not None:
+            for key, value in kwargs.items():
+                control.set_parameter(key, value)
         self.atoms = atoms
+        self.control = control
         self.kind = kind
         self.dr = float(dr)
         self.max_rotations = int(max_rotations)
-        count = len(atoms)
-        if mode is None:
+        if control is not None:
+            method_name = str(control.get_parameter("eigenmode_method")).lower()
+            if method_name != "dimer":
+                raise NotImplementedError(f"eigenmode_method '{method_name}'")
+            if int(control.get_parameter("order")) != 1:
+                raise NotImplementedError("order other than 1")
+            self.kind = "dimer"
+            self.dr = float(control.get_parameter("dimer_separation"))
+            # ASE's max_num_rot counts Fourier rotations. This dimer takes
+            # up to that many rotations, and at least a few, so one ASE
+            # rotation does not leave the mode at its initial guess.
+            self.max_rotations = max(4, int(control.get_parameter("max_num_rot")))
+        self._origin = np.array(atoms.get_positions(), dtype=np.float64, copy=True)
+        self._origin_energy = float(atoms.get_potential_energy())
+        self._have_mode = False
+        self._mode0 = np.zeros(len(atoms) * 3, dtype=np.float64)
+        if eigenmodes is not None and mode is None:
+            mode = eigenmodes[0]
+        if mode is not None:
+            self._mode0 = self._unit_mode(np.asarray(mode, dtype=np.float64).reshape(-1))
+            self._have_mode = True
+        self._session: Any = None
+        self._session_pos: Float64 | None = None
+        self.mode: Float64 | None = None
+        self._eigenmode: Float64 | None = None
+        self.curvature = float("nan")
+        self.curvatures: list[float] | None = None
+        self._cache_pos: Float64 | None = None
+        self._cache_forces: Float64 | None = None
+        self._cache_raw: Float64 | None = None
+
+    def __len__(self) -> int:
+        return len(self.atoms)
+
+    def __getattr__(self, attr: str) -> Any:
+        if attr.startswith("_"):
+            raise AttributeError(attr)
+        if "original" in attr.split("_"):
+            renamed = attr.replace("_original_", "_")
+            if renamed == "get_positions":
+                return lambda: self._origin.copy()
+            if renamed == "get_potential_energy":
+                return lambda: self._origin_energy
+            return getattr(self._atoms_origin(), renamed)
+        return getattr(self.atoms, attr)
+
+    def _atoms_origin(self) -> Any:
+        copied = self.atoms.copy()
+        copied.set_positions(self._origin, apply_constraint=False)
+        return copied
+
+    def get_control(self) -> Any:
+        return self.control
+
+    def _invalidate(self) -> None:
+        self._cache_pos = None
+
+    def _unit_mode(self, flat: Float64) -> Float64:
+        mode = np.asarray(flat, dtype=np.float64).reshape(-1).copy()
+        fixed = _fixed_atoms([self.atoms])
+        if fixed is not None:
+            mode.reshape(-1, 3)[fixed == 1] = 0.0
+        norm = float(np.dot(mode, mode) ** 0.5)
+        if norm == 0.0:
+            mode = np.zeros_like(mode)
+            mode[0] = 1.0
+            return mode
+        return mode / norm
+
+    def _initialize_eigenmode(self) -> None:
+        if self._have_mode:
+            return
+        count = len(self.atoms)
+        if self.control is None:
             guess = np.zeros(count * 3, dtype=np.float64)
             guess[0] = 1.0
         else:
-            guess = np.ascontiguousarray(mode, dtype=np.float64).reshape(-1)
-        self._mode0 = guess
-        self._session: Any = None
-        self.mode: Float64 | None = None
-        self.curvature = float("nan")
-
-    def _moved(self) -> None:
+            method = str(self.control.get_parameter("initial_eigenmode_method")).lower()
+            pos = np.asarray(self.atoms.get_positions(), dtype=np.float64)
+            if method == "displacement" and np.any(pos - self._origin):
+                guess = (pos - self._origin).reshape(-1)
+            elif method == "gauss":
+                raise NotImplementedError("initial_eigenmode_method 'gauss'")
+            else:
+                raise NotImplementedError(
+                    f"initial_eigenmode_method '{method}' needs a displacement from the original positions"
+                )
+        self._mode0 = self._unit_mode(np.asarray(guess, dtype=np.float64))
+        self._have_mode = True
         self._session = None
 
     def __ase_optimizable__(self) -> _MinModeView:
@@ -667,26 +1218,258 @@ class MinModeAtoms:
         return np.array([energy], dtype=np.float64), gradient
 
     def _ensure(self) -> Any:
-        if self._session is None:
-            from rgsaddle._core import MinMode
+        self._initialize_eigenmode()
+        from rgsaddle._core import MinMode
 
-            coordinates = np.ascontiguousarray(self.atoms.get_positions(), dtype=np.float64).reshape(-1)
+        coordinates = np.ascontiguousarray(self.atoms.get_positions(), dtype=np.float64).reshape(-1)
+        if self._session is None:
             self._session = MinMode(
                 coordinates,
-                self._mode0,
+                np.ascontiguousarray(self._mode0, dtype=np.float64),
                 kind=self.kind,
                 dr=self.dr,
                 max_rotations=self.max_rotations,
             )
+            self._session_pos = coordinates.copy()
+            return self._session
+        if self._session_pos is None or not np.array_equal(coordinates, self._session_pos):
+            self._session.set_position(coordinates)
+            self._session_pos = coordinates.copy()
         return self._session
 
-    def get_forces(self) -> Float64:
+    def _remember(self, raw: Float64, effective: Float64, mode: Float64, curvature: float) -> None:
+        self._cache_raw = raw
+        self._cache_forces = effective
+        self._cache_pos = np.array(self.atoms.get_positions(), dtype=np.float64, copy=True)
+        self.mode = mode
+        self._eigenmode = mode.reshape(len(self.atoms), 3)
+        self.curvature = curvature
+        self.curvatures = [curvature]
+
+    def _estimate(self) -> None:
         search = self._ensure()
         report = search.estimate(self._surface)
-        self.curvature = float(report.curvature)
-        self.mode = np.asarray(search.mode(), dtype=np.float64)
-        forces = np.array(self.atoms.get_forces(), dtype=np.float64, copy=True)
-        return _effective_force(forces, self.mode, self.curvature)
+        curvature = float(report.curvature)
+        mode = self._unit_mode(np.asarray(search.mode(), dtype=np.float64))
+        # The curvature and the effective force are even in the mode.
+        # Keep the sign of the guess so a displacement stays a displacement.
+        if float(np.dot(mode, self._mode0)) < 0.0:
+            mode = -mode
+        raw = np.array(self.atoms.get_forces(), dtype=np.float64, copy=True)
+        self._remember(raw, _effective_force(raw, mode, curvature), mode, curvature)
+        if self.control is not None:
+            self.control.increment_counter("forcecalls")
+            self.control.increment_counter("optcount")
+
+    def get_forces(self, real: bool = False, pos: Any = None, **kwargs: Any) -> Float64:
+        del kwargs
+        if pos is not None:
+            raw = self._forces_at(pos)
+            if real:
+                return raw
+            if self._eigenmode is None:
+                self._estimate()
+            return _effective_force(raw, self._eigenmode.reshape(-1), self.curvature)
+        current = np.asarray(self.atoms.get_positions(), dtype=np.float64)
+        if (
+            self._cache_pos is not None
+            and self._cache_forces is not None
+            and self._cache_raw is not None
+            and np.array_equal(current, self._cache_pos)
+        ):
+            return self._cache_raw if real else self._cache_forces
+        self._estimate()
+        assert self._cache_raw is not None and self._cache_forces is not None
+        return self._cache_raw if real else self._cache_forces
+
+    def _forces_at(self, pos: Any) -> Float64:
+        saved = np.array(self.atoms.get_positions(), dtype=np.float64, copy=True)
+        try:
+            self.atoms.set_positions(
+                np.asarray(pos, dtype=np.float64).reshape(len(self.atoms), 3),
+                apply_constraint=False,
+            )
+            return np.array(self.atoms.get_forces(), dtype=np.float64, copy=True)
+        finally:
+            self.atoms.set_positions(saved, apply_constraint=False)
+
+    def get_projected_forces(self, pos: Any = None) -> Float64:
+        return self.get_forces(real=False, pos=pos)
+
+    def get_potential_energy(self) -> float:
+        return float(self.atoms.get_potential_energy())
+
+    def get_barrier_energy(self) -> float:
+        return float(self.get_potential_energy() - self._origin_energy)
+
+    def get_curvature(self, order: Any = "max") -> float:
+        if self.curvatures is None:
+            self.get_forces()
+        assert self.curvatures is not None
+        if order == "max":
+            return float(max(self.curvatures))
+        if int(order) != 1:
+            raise NotImplementedError("curvature order other than 1")
+        return float(self.curvatures[0])
+
+    def get_eigenmode(self, order: int = 1) -> Float64:
+        if order != 1:
+            raise NotImplementedError("eigenmode order other than 1")
+        if self._eigenmode is None:
+            self.get_forces()
+        assert self._eigenmode is not None
+        return self._eigenmode
+
+    def displace(
+        self,
+        displacement_vector: Any = None,
+        mask: Any = None,
+        method: str | None = None,
+        displacement_center: Any = None,
+        radius: float | None = None,
+        number_of_atoms: int | None = None,
+        gauss_std: float | None = None,
+        mic: bool = True,
+        log: bool = True,
+    ) -> None:
+        """Move atoms. ``method='vector'`` applies ``displacement_vector``."""
+        del log
+        refused = [
+            name
+            for name, value in (
+                ("displacement_center", displacement_center),
+                ("radius", radius),
+                ("number_of_atoms", number_of_atoms),
+                ("gauss_std", gauss_std),
+            )
+            if value is not None
+        ]
+        if refused:
+            raise NotImplementedError("displace " + ", ".join(refused))
+        if mic is not True:
+            raise NotImplementedError("displace mic")
+        if self.control is not None:
+            if mask is None:
+                mask = self.control.get_parameter("mask")
+            if method is None:
+                method = self.control.get_parameter("displacement_method")
+        if method is None:
+            method = "vector" if displacement_vector is not None else "gauss"
+        method_name = str(method).lower()
+        if displacement_vector is not None and method_name != "vector":
+            raise ValueError(
+                f"displacement_vector was supplied but a different method ('{method}') was chosen."
+            )
+        if displacement_vector is None and method_name == "vector":
+            raise ValueError(f"A displacement_vector must be supplied when using method = '{method}'.")
+        if method_name != "vector":
+            raise NotImplementedError(f"displacement_method '{method}'")
+        vector = np.array(displacement_vector, dtype=np.float64, copy=True)
+        if mask is not None:
+            selected = np.asarray(mask, dtype=bool)
+            vector[~selected] = 0.0
+        self.atoms.set_positions(self.atoms.get_positions() + vector)
+        self._have_mode = False
+        self._session = None
+        self._eigenmode = None
+        self._invalidate()
+
+
+class MinModeTranslate:
+    """ASE's minimum-mode translation, on ``rgsaddle``'s mode and force.
+
+    The trial step and the conjugate-gradient direction are ASE's.
+    The mode and the curvature come from ``MinModeAtoms.get_forces``.
+    """
+
+    def __init__(self, dimeratoms: MinModeAtoms, logfile: Any = "-", trajectory: Any = None) -> None:
+        from ase.optimize.optimize import Optimizer
+
+        translate = self
+
+        class _Driver(Optimizer):
+            def initialize(self) -> None:
+                return None
+
+            def read(self) -> None:
+                return None
+
+            def step(self) -> None:  # pyright: ignore[reportIncompatibleMethodOverride]
+                translate._step()
+
+        self.dimeratoms = dimeratoms
+        self.control = dimeratoms.get_control()
+        if self.control is None:
+            raise ValueError("MinModeTranslate needs a MinModeAtoms object with a control")
+        self.cg_on = bool(self.control.get_parameter("cg_translation"))
+        self.trial_step = float(self.control.get_parameter("trial_trans_step"))
+        self.max_step = float(self.control.get_parameter("maximum_translation"))
+        self._cg_init = True
+        self._direction_old: Float64 | None = None
+        self._cg_direction: Float64 | None = None
+        self._driver = _Driver(dimeratoms, logfile=logfile, trajectory=trajectory)
+
+    def __enter__(self) -> MinModeTranslate:
+        self._driver.__enter__()
+        return self
+
+    def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> Any:
+        return self._driver.__exit__(exc_type, exc_value, traceback)
+
+    def run(self, fmax: float = 0.05, steps: int | None = None) -> bool:
+        if steps is None:
+            return bool(self._driver.run(fmax=fmax))
+        return bool(self._driver.run(fmax=fmax, steps=steps))
+
+    def _cg(self, direction: Float64) -> Float64:
+        if self._cg_init or self._direction_old is None or self._cg_direction is None:
+            self._cg_init = False
+            self._direction_old = np.array(direction, dtype=np.float64, copy=True)
+            self._cg_direction = np.array(direction, dtype=np.float64, copy=True)
+            return self._cg_direction.copy()
+        old_norm = float(np.dot(self._direction_old.ravel(), self._direction_old.ravel()))
+        beta = 0.0
+        if old_norm != 0.0:
+            beta = float(
+                np.dot(direction.ravel(), (direction - self._direction_old).ravel()) / old_norm
+            )
+        if beta < 0.0:
+            beta = 0.0
+        self._cg_direction = direction + self._cg_direction * beta
+        self._direction_old = np.array(direction, dtype=np.float64, copy=True)
+        return self._cg_direction.copy()
+
+    def _step(self) -> None:
+        atoms = self.dimeratoms
+        forces = np.array(atoms.get_forces(), dtype=np.float64, copy=True)
+        positions = np.array(atoms.get_positions(), dtype=np.float64, copy=True)
+        curvature = float(atoms.get_curvature())
+        direction = forces.copy()
+        if self.cg_on:
+            direction = self._cg(direction)
+        if not np.isfinite(direction).all():
+            raise RuntimeError("Dimer calculation diverged")
+        length = float(np.linalg.norm(direction))
+        if length == 0.0:
+            return
+        direction = direction / length
+        if curvature > 0.0:
+            step = direction * self.max_step
+        else:
+            trial = positions + direction * self.trial_step
+            trial_force = np.asarray(atoms.get_projected_forces(trial), dtype=np.float64).reshape(-1)
+            along = direction.reshape(-1)
+            current = forces.reshape(-1)
+            midpoint = float(np.dot(trial_force + current, along) / 2.0)
+            stiffness = float(np.dot(trial_force - current, along) / self.trial_step)
+            if stiffness == 0.0 or not np.isfinite(stiffness):
+                step = direction * self.max_step
+            else:
+                coeff = -midpoint / stiffness + self.trial_step / 2.0
+                step = coeff * direction
+                if float(np.linalg.norm(step)) > self.max_step or not np.isfinite(step).all():
+                    step = direction * self.max_step
+        atoms.set_positions(positions + step)
 
 
 class _SellaView:

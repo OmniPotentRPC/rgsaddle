@@ -65,12 +65,16 @@ def test_interpolate_places_the_interior_on_the_segment() -> None:
     neb = NEB(images, k=0.1, climb=False)
     neb.interpolate()
     assert images[1].positions[0, 0] == 0.0
-    try:
-        neb.interpolate(method="idpp")
-    except ValueError as err:
-        assert "idpp_path" in str(err)
-    else:
-        raise AssertionError("idpp interpolation was accepted")
+    neb.interpolate(method="idpp")
+    assert np.isfinite(images[1].positions).all()
+    with pytest.raises(NotImplementedError, match="spline"):
+        NEB(images, method="spline")
+    with pytest.raises(NotImplementedError, match="dynamic_relaxation"):
+        NEB(images, dynamic_relaxation=True)
+    listed = NEB(images, k=[0.2, 0.4], method="improvedtangent")
+    assert np.all(np.isfinite(listed.get_forces()))
+    with pytest.raises(ValueError, match="springs"):
+        NEB(images, k=[0.2])
 
 
 def test_a_slope_into_the_band_does_not_climb() -> None:
