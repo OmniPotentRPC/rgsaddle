@@ -695,7 +695,13 @@ void rgsaddle_minmode_free(RgsaddleMinMode *session);
 
 typedef struct RgsaddlePafi RgsaddlePafi;
 
-/** Point-surface callback used by PAFI and OH-TST handles. */
+/**
+ * Point-surface callback used by PAFI and OH-TST handles.
+ *
+ * The library may call this concurrently on rayon worker threads during
+ * PAFI and OH-TST runs. Host state reachable through `user` must therefore
+ * be thread-safe.
+ */
 typedef rgsaddle_status_t (*rgsaddle_point_surface_fn)(
     void *user, int64_t n_dof, const double *position, double *energy,
     double *gradient);
@@ -743,7 +749,10 @@ RgsaddlePafi *rgsaddle_pafi_create(const rgsaddle_pafi_config_t *config,
 /** Replace the PAFI configuration between runs. */
 rgsaddle_status_t rgsaddle_pafi_set_config(
     RgsaddlePafi *session, const rgsaddle_pafi_config_t *config);
-/** Run PAFI and store the profile in the session. */
+/**
+ * Run PAFI and store the profile in the session.
+ * `surface` may be called concurrently on rayon worker threads.
+ */
 rgsaddle_status_t rgsaddle_pafi_run(RgsaddlePafi *session,
                                     rgsaddle_point_surface_fn surface,
                                     void *user);
@@ -833,7 +842,10 @@ RgsaddleOhtst *rgsaddle_ohtst_create(const rgsaddle_ohtst_config_t *config,
 /** Replace the OH-TST configuration between runs. */
 rgsaddle_status_t rgsaddle_ohtst_set_config(
     RgsaddleOhtst *session, const rgsaddle_ohtst_config_t *config);
-/** Sample the plane, run transmission shooting, and store the result. */
+/**
+ * Sample the plane, run transmission shooting, and store the result.
+ * `surface` may be called concurrently on rayon worker threads.
+ */
 rgsaddle_status_t rgsaddle_ohtst_run(RgsaddleOhtst *session,
                                      rgsaddle_point_surface_fn surface,
                                      void *user);

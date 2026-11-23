@@ -32,6 +32,7 @@ module rgsaddle
   integer(c_int), parameter, public :: RGSADDLE_OHTST_COUNT_FINAL = 0_c_int
   integer(c_int), parameter, public :: RGSADDLE_OHTST_COUNT_FIRST_CROSSING = 1_c_int
   integer(c_int64_t), parameter, public :: RGSADDLE_BAND_PER_IMAGE = 1_c_int64_t
+  integer(c_int64_t), parameter, public :: RGSADDLE_BAND_CI_AFTER = 4_c_int64_t
   integer(c_int64_t), parameter, public :: RGSADDLE_REQ_ONE_IMAGE = 1_c_int64_t
   ! `error stop` code for `b = a` on a handle. Assignment would copy the
   ! raw pointer and both finalizers would free it.
@@ -184,6 +185,8 @@ module rgsaddle
   abstract interface
     integer(c_int) function point_surface_proc(user, n_dof, position, energy, gradient) result(status)
       import :: c_ptr, c_int, c_int64_t, c_double
+      ! PAFI and OH-TST may evaluate callbacks concurrently on rayon worker
+      ! threads. Host state reachable through `user` must be thread-safe.
       type(c_ptr), value :: user
       integer(c_int64_t), value :: n_dof
       real(c_double), intent(in) :: position(*)
@@ -195,6 +198,7 @@ module rgsaddle
   type, public :: band_handle
     private
     type(c_ptr), allocatable :: raw
+    type(c_ptr) :: owner
   contains
     final :: band_finalize
     procedure, public :: create => band_create
@@ -208,6 +212,7 @@ module rgsaddle
   type, public :: minmode_handle
     private
     type(c_ptr), allocatable :: raw
+    type(c_ptr) :: owner
   contains
     final :: minmode_finalize
     procedure, public :: create => minmode_create
@@ -222,6 +227,7 @@ module rgsaddle
   type, public :: pafi_handle
     private
     type(c_ptr), allocatable :: raw
+    type(c_ptr) :: owner
   contains
     final :: pafi_finalize
     procedure, public :: create => pafi_create
@@ -237,6 +243,7 @@ module rgsaddle
   type, public :: ohtst_handle
     private
     type(c_ptr), allocatable :: raw
+    type(c_ptr) :: owner
   contains
     final :: ohtst_finalize
     procedure, public :: create => ohtst_create
@@ -255,8 +262,11 @@ module rgsaddle
   type :: callback_box
     procedure(surface_proc), pointer, nopass :: surface => null()
     procedure(point_surface_proc), pointer, nopass :: point => null()
+    ! PAFI and OH-TST callbacks can run concurrently across rayon workers.
+    ! `user` therefore points to host-owned thread-safe state.
     type(c_ptr) :: user = c_null_ptr
   end type callback_box
+
 
   interface assignment(=)
     module procedure assign_band
@@ -270,6 +280,12 @@ module rgsaddle
     abi_stamp, status_name, surface_proc, point_surface_proc, uint64_bits
 
   interface
+    function c_malloc(size) bind(C, name="malloc") result(ptr)
+      import :: c_ptr, c_size_t
+      integer(c_size_t), value :: size
+      type(c_ptr) :: ptr
+    end function c_malloc
+
     function c_rgsaddle_abi_stamp(out) bind(C, name="rgsaddle_abi_stamp") result(status)
       import :: c_int, rgsaddle_version_t
       type(rgsaddle_version_t), intent(out) :: out
@@ -485,9 +501,11 @@ contains
   recursive subroutine init_band_config(config)
     type(rgsaddle_band_config_t), intent(out) :: config
     integer(c_int) :: status
-    config = rgsaddle_band_config_t(rgsaddle_version_t(0_c_int32_t, 0_c_int32_t), 0_c_int64_t, &
+    ! Rust `BandConfig::default`: climbing armed by force threshold 0.5
+    ! (RGSADDLE_BAND_CI_AFTER), trigger_factor 0, and max_move 0.2.
+    config = rgsaddle_band_config_t(rgsaddle_version_t(0_c_int32_t, 0_c_int32_t), RGSADDLE_BAND_CI_AFTER, &
       1_c_int32_t, 0_c_int32_t, 1_c_int32_t, RGSADDLE_METHOD_FIRE, 5.0_c_double, c_null_ptr, &
-      0.5_c_double, 0.0_c_double, c_null_ptr, sqrt(epsilon(1.0_c_double)), 0.1_c_double, 10_c_int64_t)
+      0.0_c_double, 0.5_c_double, c_null_ptr, sqrt(epsilon(1.0_c_double)), 0.2_c_double, 10_c_int64_t)
     status = abi_stamp(config%version)
   end subroutine init_band_config
 
@@ -527,11 +545,12 @@ contains
   recursive subroutine init_ohtst_config(config)
     type(rgsaddle_ohtst_config_t), intent(out) :: config
     integer(c_int) :: status
+    ! Rust defaults: LangevinConfig::default + TransmissionConfig::default.
     config = rgsaddle_ohtst_config_t(rgsaddle_version_t(0_c_int32_t, 0_c_int32_t), 0_c_int64_t, &
-      0.02585_c_double, 0.1_c_double, 1.0_c_double, 300_c_int64_t, 5_c_int64_t, 1000_c_int64_t, &
-      16_c_int64_t, 1_c_int64_t, 256_c_int64_t, int(RGSADDLE_OHTST_INTEGRATOR_BAOAB, c_int32_t), &
-      1.0_c_double, 0.05_c_double, 400_c_int64_t, 40_c_int64_t, 0_c_int64_t, 1024_c_int64_t, &
-      16_c_int64_t, 2_c_int64_t, int(RGSADDLE_OHTST_COUNT_FINAL, c_int32_t))
+      0.02585_c_double, 0.05_c_double, 1.0_c_double, 500_c_int64_t, 5_c_int64_t, 2000_c_int64_t, &
+      20_c_int64_t, 1_c_int64_t, 16_c_int64_t, int(RGSADDLE_OHTST_INTEGRATOR_BAOAB, c_int32_t), &
+      0.0_c_double, 0.05_c_double, 400_c_int64_t, 40_c_int64_t, 0_c_int64_t, 256_c_int64_t, &
+      16_c_int64_t, 1_c_int64_t, int(RGSADDLE_OHTST_COUNT_FIRST_CROSSING, c_int32_t))
     status = abi_stamp(config%version)
   end subroutine init_ohtst_config
 
@@ -543,7 +562,6 @@ contains
     real(c_double), intent(in) :: positions(*)
     type(c_ptr) :: ptr
     logical :: shape_ok
-    call band_finalize(self)
     shape_ok = n_images >= 3_c_int64_t .and. n_atoms >= 1_c_int64_t
     if (shape_ok) then
       if (n_atoms > max_atoms_for_triplet / n_images) shape_ok = .false.
@@ -554,7 +572,11 @@ contains
     end if
     ptr = c_rgsaddle_band_create(config, n_images, n_atoms, positions)
     status = create_status(ptr, config%version%major, .true.)
-    if (status == RGSADDLE_OK) call store_raw(self%raw, ptr)
+    if (status == RGSADDLE_OK) then
+      call band_finalize(self)
+      call store_raw(self%raw, ptr)
+      call store_owner(self%owner)
+    end if
   end function band_create
 
   recursive integer(c_int) function band_step(self, callback, user, out) result(status)
@@ -599,7 +621,6 @@ contains
     real(c_double), intent(in) :: mode(*)
     type(c_ptr) :: ptr
     logical :: shape_ok
-    call minmode_finalize(self)
     shape_ok = n_atoms >= 1_c_int64_t
     if (shape_ok) then
       if (n_atoms > max_atoms_for_triplet) shape_ok = .false.
@@ -610,7 +631,11 @@ contains
     end if
     ptr = c_rgsaddle_minmode_create(config, n_atoms, position, mode)
     status = create_status(ptr, config%version%major, .true.)
-    if (status == RGSADDLE_OK) call store_raw(self%raw, ptr)
+    if (status == RGSADDLE_OK) then
+      call minmode_finalize(self)
+      call store_raw(self%raw, ptr)
+      call store_owner(self%owner)
+    end if
   end function minmode_create
 
   recursive integer(c_int) function minmode_step(self, callback, user, out) result(status)
@@ -663,7 +688,6 @@ contains
     type(c_ptr) :: arcs_ptr, ptr
     integer(c_int64_t) :: n_arcs
     logical :: shape_ok
-    call pafi_finalize(self)
     arcs_ptr = c_null_ptr
     n_arcs = 0_c_int64_t
     if (present(arcs)) then
@@ -682,7 +706,11 @@ contains
     end if
     ptr = c_rgsaddle_pafi_create(config, n_frames, n_dof, frames, arcs_ptr, n_arcs)
     status = create_status(ptr, config%version%major, .true.)
-    if (status == RGSADDLE_OK) call store_raw(self%raw, ptr)
+    if (status == RGSADDLE_OK) then
+      call pafi_finalize(self)
+      call store_raw(self%raw, ptr)
+      call store_owner(self%owner)
+    end if
   end function pafi_create
 
   recursive integer(c_int) function pafi_set_config(self, config) result(status)
@@ -753,7 +781,6 @@ contains
     real(c_double), intent(in) :: normal(*)
     type(c_ptr) :: ptr
     logical :: shape_ok
-    call ohtst_finalize(self)
     shape_ok = n_dof >= 1_c_int64_t
     if (config%version%major /= int(RGSADDLE_ABI_MAJOR, c_int32_t) .or. .not. shape_ok) then
       status = create_status(c_null_ptr, config%version%major, shape_ok)
@@ -761,7 +788,11 @@ contains
     end if
     ptr = c_rgsaddle_ohtst_create(config, n_dof, point, normal)
     status = create_status(ptr, config%version%major, .true.)
-    if (status == RGSADDLE_OK) call store_raw(self%raw, ptr)
+    if (status == RGSADDLE_OK) then
+      call ohtst_finalize(self)
+      call store_raw(self%raw, ptr)
+      call store_owner(self%owner)
+    end if
   end function ohtst_create
 
   recursive integer(c_int) function ohtst_set_config(self, config) result(status)
@@ -820,33 +851,37 @@ contains
   recursive subroutine band_finalize(self)
     type(band_handle), intent(inout) :: self
     if (allocated(self%raw)) then
-      if (c_associated(self%raw)) call c_rgsaddle_band_free(self%raw)
+      if (c_associated(self%raw) .and. should_free_owner(self%owner)) call c_rgsaddle_band_free(self%raw)
       deallocate(self%raw)
     end if
+    self%owner = c_null_ptr
   end subroutine band_finalize
 
   recursive subroutine minmode_finalize(self)
     type(minmode_handle), intent(inout) :: self
     if (allocated(self%raw)) then
-      if (c_associated(self%raw)) call c_rgsaddle_minmode_free(self%raw)
+      if (c_associated(self%raw) .and. should_free_owner(self%owner)) call c_rgsaddle_minmode_free(self%raw)
       deallocate(self%raw)
     end if
+    self%owner = c_null_ptr
   end subroutine minmode_finalize
 
   recursive subroutine pafi_finalize(self)
     type(pafi_handle), intent(inout) :: self
     if (allocated(self%raw)) then
-      if (c_associated(self%raw)) call c_rgsaddle_pafi_free(self%raw)
+      if (c_associated(self%raw) .and. should_free_owner(self%owner)) call c_rgsaddle_pafi_free(self%raw)
       deallocate(self%raw)
     end if
+    self%owner = c_null_ptr
   end subroutine pafi_finalize
 
   recursive subroutine ohtst_finalize(self)
     type(ohtst_handle), intent(inout) :: self
     if (allocated(self%raw)) then
-      if (c_associated(self%raw)) call c_rgsaddle_ohtst_free(self%raw)
+      if (c_associated(self%raw) .and. should_free_owner(self%owner)) call c_rgsaddle_ohtst_free(self%raw)
       deallocate(self%raw)
     end if
+    self%owner = c_null_ptr
   end subroutine ohtst_finalize
 
   recursive integer(c_int) function fortran_surface_trampoline(user, req_ptr) &
@@ -1022,7 +1057,11 @@ contains
     type(band_handle), intent(inout) :: src
     if (c_associated(raw_ptr(self%raw), raw_ptr(src%raw))) return
     call band_finalize(self)
-    if (allocated(src%raw)) call move_alloc(src%raw, self%raw)
+    if (allocated(src%raw)) then
+      call move_alloc(src%raw, self%raw)
+      self%owner = src%owner
+      src%owner = c_null_ptr
+    end if
   end subroutine move_from_band
 
   recursive subroutine move_from_minmode(self, src)
@@ -1030,7 +1069,11 @@ contains
     type(minmode_handle), intent(inout) :: src
     if (c_associated(raw_ptr(self%raw), raw_ptr(src%raw))) return
     call minmode_finalize(self)
-    if (allocated(src%raw)) call move_alloc(src%raw, self%raw)
+    if (allocated(src%raw)) then
+      call move_alloc(src%raw, self%raw)
+      self%owner = src%owner
+      src%owner = c_null_ptr
+    end if
   end subroutine move_from_minmode
 
   recursive subroutine move_from_pafi(self, src)
@@ -1038,7 +1081,11 @@ contains
     type(pafi_handle), intent(inout) :: src
     if (c_associated(raw_ptr(self%raw), raw_ptr(src%raw))) return
     call pafi_finalize(self)
-    if (allocated(src%raw)) call move_alloc(src%raw, self%raw)
+    if (allocated(src%raw)) then
+      call move_alloc(src%raw, self%raw)
+      self%owner = src%owner
+      src%owner = c_null_ptr
+    end if
   end subroutine move_from_pafi
 
   recursive subroutine move_from_ohtst(self, src)
@@ -1046,8 +1093,38 @@ contains
     type(ohtst_handle), intent(inout) :: src
     if (c_associated(raw_ptr(self%raw), raw_ptr(src%raw))) return
     call ohtst_finalize(self)
-    if (allocated(src%raw)) call move_alloc(src%raw, self%raw)
+    if (allocated(src%raw)) then
+      call move_alloc(src%raw, self%raw)
+      self%owner = src%owner
+      src%owner = c_null_ptr
+    end if
   end subroutine move_from_ohtst
+
+  recursive subroutine store_owner(slot)
+    type(c_ptr), intent(inout) :: slot
+    slot = alloc_owner_flag()
+  end subroutine store_owner
+
+  recursive logical function should_free_owner(owner) result(free_it)
+    type(c_ptr), intent(in) :: owner
+    integer(c_signed_char), pointer :: flag
+    free_it = .true.
+    if (.not. c_associated(owner)) return
+    call c_f_pointer(owner, flag)
+    if (.not. associated(flag)) return
+    free_it = flag /= 0_c_signed_char
+    flag = 0_c_signed_char
+  end function should_free_owner
+
+  recursive function alloc_owner_flag() result(slot)
+    type(c_ptr) :: slot
+    integer(c_signed_char), pointer :: flag
+    slot = c_malloc(int(1, c_size_t))
+    if (c_associated(slot)) then
+      call c_f_pointer(slot, flag)
+      if (associated(flag)) flag = 1_c_signed_char
+    end if
+  end function alloc_owner_flag
 
   recursive subroutine assign_band(lhs, rhs)
     type(band_handle), intent(inout) :: lhs
