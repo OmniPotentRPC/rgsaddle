@@ -1,0 +1,24 @@
+set(rgsaddleFortran_VERSION "@RGSADDLE_FORTRAN_VERSION@")
+set(rgsaddleFortran_MODULE_DIR "@RGSADDLE_FORTRAN_MODULE_DIR@")
+set(rgsaddleFortran_INCLUDE_DIR "@RGSADDLE_FORTRAN_INCLUDE_DIR@")
+
+find_library(
+  rgsaddleFortran_LIBRARY
+  NAMES rgsaddle_fortran
+  PATHS "@RGSADDLE_FORTRAN_LIB_DIR@"
+  NO_DEFAULT_PATH
+)
+if(NOT rgsaddleFortran_LIBRARY)
+  find_library(rgsaddleFortran_LIBRARY NAMES rgsaddle_fortran)
+endif()
+
+if(NOT TARGET rgsaddle::fortran)
+  add_library(rgsaddle::fortran UNKNOWN IMPORTED)
+  set_target_properties(
+    rgsaddle::fortran
+    PROPERTIES
+      IMPORTED_LOCATION "${rgsaddleFortran_LIBRARY}"
+      INTERFACE_INCLUDE_DIRECTORIES
+        "${rgsaddleFortran_INCLUDE_DIR};${rgsaddleFortran_MODULE_DIR}"
+  )
+endif()

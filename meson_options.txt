@@ -1,0 +1,6 @@
+option(
+  'fortran',
+  type: 'feature',
+  value: 'disabled',
+  description: 'Build Fortran 2008 bindings for the C ABI',
+)

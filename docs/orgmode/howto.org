@@ -17,6 +17,9 @@ There is no run-to-completion C entry point. Units are the caller's. Positions a
 * Use the headers from meson
 The top-level =meson.build= provides the headers as the dependency =rgsaddle-headers= (also =rgsaddle=), from a wrap or from an installed =rgsaddle-headers.pc=. It does not build the library. =howto/meson= has the wrap, the migration from a packagefiles overlay, and the run-time loading.
 
+* Use the Fortran module
+Enable meson's optional =fortran= feature to build the =rgsaddle= Fortran 2008 module and =librgsaddle_fortran=. =howto/fortran= has the callback contract, finalizer-backed handles, and the pkg-config and CMake entries.
+
 * Grow the band with AutoNEB
 =howto/autoneb= is the AutoNEB loop: insert where the resolution is worst, relax a local window, and climb. The tuning sits on =BandConfig::autoneb=. A weighted spring supplied by the host is refused for now; zoom-NEB will recompute it.
 

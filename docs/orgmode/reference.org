@@ -6,6 +6,7 @@ The hosted [[https://docs.rs/rgsaddle][Rust API reference]] includes the default
 =cargo doc --no-deps --features capi,ohtst,readcon-db --open= builds these pages from a checkout.
 The =lammps= feature adds the LAMMPS adapter to a local documentation build.
 Runnable examples open =BandSession=, =AutoNeb=, =OcinebSession=, =MinModeSession=, =Index1Session=, =IndexKSession=, =SolidDimer=, =SolidNeb=, =Stencil= and the =ohtst= module, and, with =--features capi=, the C band, min-mode and stencil handles.
+=meson -Dfortran=enabled= adds the Fortran 2008 =rgsaddle= module on the same C ABI.
 =cargo test --doc= runs them.
 Every public configuration struct is non-exhaustive.
 Start from =Default= or the type's named constructor and chain the =with_*= setters, as in =BandConfig::default().with_force_tol(1e-3)=.
@@ -324,6 +325,7 @@ The surface writes energy and the Cartesian gradient for one image.
 It also carries the kind (=s=, =u=, or =f=), the Hessian index and the evaluation count.
 That count includes the finite differences that decide a step or an index.
 The Lanczos acceptance does not build a dense Hessian.
+=howto/fortran= wraps this ABI for Fortran with finalizer-backed handles for band and min-mode sessions, and leaves PAFI and OH-TST as explicit unsupported placeholders until those symbols exist on this ABI.
 Band flag bit 2 is =RGSADDLE_BAND_CI_AFTER=.
 It arms the climbing image under =ci_trigger_force= or =ci_trigger_factor= times the first force.
 Either of the two may be 0.

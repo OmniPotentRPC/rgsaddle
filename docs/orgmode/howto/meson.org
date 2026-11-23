@@ -1,7 +1,7 @@
 #+TITLE: Use the headers from a meson project
 #+OPTIONS: toc:nil num:nil
 
-The top-level =meson.build= gives a C or C++ project the rgsaddle headers: =rgsaddle.h=, =rgsaddle/session.hpp= and =rgsaddle/stencil.hpp=. It does not build the Rust library. The host links the library that =cargo build --features capi= or =cargo cinstall= produces, or loads it at run time. The headers are the hand-written contract, the same files cargo-c installs, so there is nothing to generate.
+The top-level =meson.build= gives a C or C++ project the rgsaddle headers: =rgsaddle.h=, =rgsaddle/session.hpp= and =rgsaddle/stencil.hpp=. By default it is headers only. The optional =-Dfortran=enabled= feature adds the Fortran 2008 wrappers documented in =howto/fortran=. The Rust library is still built by cargo; the host links that library (for example from =cargo build --features capi= or =cargo cinstall=) or loads it at run time. The headers are the hand-written contract, the same files cargo-c installs, so there is nothing to generate.
 
 The meson project is =rgsaddle=, and its version is the crate's. =tests/package_version.rs= fails when =meson.build= and =Cargo.toml= disagree. The dependency answers to two names, =rgsaddle-headers= and =rgsaddle=, and the variable =rgsaddle_headers_dep= holds it.
 
