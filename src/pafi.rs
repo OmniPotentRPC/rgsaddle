@@ -305,7 +305,7 @@ impl Default for PafiConfig {
 }
 
 impl PafiConfig {
-    fn check(&self) -> Result<(), SaddleError> {
+    pub(crate) fn check(&self) -> Result<(), SaddleError> {
         if !(self.thermal.is_finite() && self.thermal > 0.0) {
             return Err(SaddleError::Invalid(
                 "PAFI kT must be finite and positive".into(),

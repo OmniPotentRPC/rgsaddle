@@ -519,7 +519,7 @@ For config minors 5 through 62 this field is read as given, so 0 disables the an
 From minor 63, 0 keeps the Rust default unless flag bit 0, `RGSADDLE_MINMODE_EXPLICIT_ROTATION_ANGLE_TOL`, is set; then 0 disables it.
 The Rust default is five degrees. With an explicit 0 (legacy minors, or minor 63 with the explicit flag) the stop is off.
 Both fields are read only from a config whose version minor is 5 or newer.
-`RGSADDLE_ABI_MINOR` is 65.
+`RGSADDLE_ABI_MINOR` is 66.
 `rgsaddle_band_set_dynamic` (minor 65) sets or clears `DynamicNeb` on a band.
 `rgsaddle_dyneb_mask` (minor 65) applies that mask to a projected band.
 From minor 24, `rgsaddle_sella_saddle_set_symmetrized_ritz` sets `SellaSaddleConfig::symmetrized_ritz` from 0 or 1.
@@ -547,6 +547,7 @@ The feature macro `RGSADDLE_HAS_LINEB_RATE_DIAGNOSTICS` advertises
 `rgsaddle_lineb_solve_counted_diagnostics`. Its final two optional signed
 64-bit outputs give the number of negative and total retained fluctuation
 modes. Each reports `-1` for a path-only or failed solve.
+From minor 66, `rgsaddle_pafi_*` exposes an ordered path, overdamped sampling controls, adaptive rounds, a barrier result and a bulk profile, and `rgsaddle_ohtst_*` exposes a fixed dividing plane, plane sampling and shooting controls, a transmission result and a bulk \(\kappa(t)\) curve. The bulk readers set `written` to the required length and return `RGSADDLE_INVALID_PARAMETER` without writing arrays when capacity is too small. Their point callback may run concurrently on Rayon worker threads. A dynamically loading host checks `rgsaddle_abi_version()` for major 1 and minor 66 or newer before resolving these symbols.
 
 From minor 60, `rgsaddle_band_set_refine` installs or clears the per-step L-BFGS refine stepper, and `rgsaddle_band_is_refining` reports whether the last first-order step used it. A host checks `rgsaddle_abi_version()` for minor 60 or newer. The worked example is `tests/band_refine.rs`.
 The request flags are `RGSADDLE_REQ_ONE_IMAGE` (bit 0) and `RGSADDLE_REQ_CLIMBING_IMAGE` (bit 1).
@@ -562,7 +563,7 @@ The surface writes energy and the Cartesian gradient for one image.
 It also carries the kind (`s`, `u`, or `f`), the Hessian index and the evaluation count.
 That count includes the finite differences that decide a step or an index.
 The Lanczos acceptance does not build a dense Hessian.
-`howto/fortran` wraps this ABI for Fortran with finalizer-backed handles for band, min-mode, PAFI, and OH-TST sessions (`rgsaddle_pafi_*` and `rgsaddle_ohtst_*`, ABI minor 45).
+`howto/fortran` wraps this ABI for Fortran with finalizer-backed handles for band, min-mode, PAFI, and OH-TST sessions (`rgsaddle_pafi_*` and `rgsaddle_ohtst_*`, ABI minor 66).
 Band flag bit 2 is `RGSADDLE_BAND_CI_AFTER`.
 It arms the climbing image under `ci_trigger_force` or `ci_trigger_factor` times the first force.
 Either of the two may be 0.
@@ -3740,7 +3741,7 @@ CMAKE_POLICY_VERSION_MINIMUM=3.5 cargo build --locked --features chemfiles
 
 > Stepping bands, minimum-mode sessions, Sella, IRC, and strings from C and C++
 
-`include/rgsaddle.h` declares the C application binary interface (ABI), major 1, minor 65. It preserves the main band, minimum-mode and index-1 layouts and adds intrinsic reaction coordinate (IRC), Sella, constraint and geometry controls. Include this header rather than duplicating its structures. Check `rgsaddle_abi_stamp` before constructing a session. A meson project takes the headers from the top-level `meson.build`; see [the meson how-to](meson.html).
+`include/rgsaddle.h` declares the C application binary interface (ABI), major 1, minor 66. It preserves the main band, minimum-mode and index-1 layouts and adds intrinsic reaction coordinate (IRC), Sella, constraint and geometry controls. ABI minor 66 also exposes opaque PAFI and OH-TST sessions. Include this header rather than duplicating its structures. Check `rgsaddle_abi_stamp` before constructing a session. A meson project takes the headers from the top-level `meson.build`; see [the meson how-to](meson.html).
 
 A surface callback returns `rgsaddle_status_t` and receives one `rgsaddle_surface_request_t`. Positions and gradients are image-major Cartesian triples. The host supplies the energy and gradient arrays for every requested image; the library performs no Message Passing Interface (MPI) communication.
 From ABI minor 42, `RGSADDLE_NOT_EQUILIBRATED` and `RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES` report constrained-ensemble tails that fail the drift or effective-sample guards.
@@ -3885,6 +3886,16 @@ A solid-state band, the trust-region stepper, the simplified string method, and 
 `rgsaddle_dyneb_mask` applies the same mask to a projected band the host already holds.
 While the option is on, an interior image that a neighbour pulls back over its threshold is requested alone: `RGSADDLE_REQ_ONE_IMAGE` is set, `image` is that image's band index, `n_images` is the band length, and `RGSADDLE_REQ_CLIMBING_IMAGE` is not set.
 A host that loads the library at run time checks `rgsaddle_abi_version()` for at least minor 65 before resolving either symbol.
+
+ABI minor 66 adds the PAFI and OH-TST C subset. PAFI exposes an ordered row-major path, optional arc grid, overdamped sampling controls, adaptive sampling rounds, a barrier summary, and the stored free-energy profile. OH-TST exposes one fixed dividing plane, BAOAB or GHMC plane sampling, Langevin shooting, final-state or first-crossing counting, a transmission summary, and the stored \(\kappa(t)\) curve. The C layer does not expose the Rust APIs for custom samplers, dynamics, basin definitions, masses, plane optimization, or reversible-work paths. Each handle has create, set-config, run, result, bulk-output, and free calls.
+
+The create calls return NULL for a null or invalid config, a bad shape, or invalid path or plane data; they cannot report which check failed. The status-returning calls use `RGSADDLE_OK` for success, `RGSADDLE_NULL_SESSION`, `RGSADDLE_NULL_SURFACE`, and `RGSADDLE_NULL_REPORT` for the named null input, `RGSADDLE_ABI_MISMATCH` for a config whose major is not 1, `RGSADDLE_INVALID_PARAMETER` for a null or invalid config or a short output buffer, and `RGSADDLE_NO_EVALUATION` when no successful run has stored a result. `RGSADDLE_SHAPE` reports a negative capacity, a shape or size overflow, or a PAFI evaluation total that cannot fit in `int64_t`. A nonzero callback return becomes `RGSADDLE_SURFACE_FAILED` rather than being propagated. `RGSADDLE_NON_FINITE` and `RGSADDLE_SOLVER` report those calculation failures.
+
+`rgsaddle_pafi_profile` and `rgsaddle_ohtst_curve` treat `capacity` as the writable length of every non-NULL output. They set `*written` to the required length when that pointer is non-NULL. A short buffer returns `RGSADDLE_INVALID_PARAMETER` without changing any output array; a negative capacity returns `RGSADDLE_SHAPE`. NULL output arrays skip those columns, so a call with NULL arrays and capacity 0 queries the required length, returning success only for an empty stored series.
+
+PAFI and OH-TST may invoke `rgsaddle_point_surface_fn` concurrently on Rayon worker threads, not only on the thread that entered the run call. The callback and everything reachable through `user` must be safe for overlapping calls and remain valid until the run returns. Each invocation receives one contiguous position of `n_dof` doubles and writable energy and gradient storage.
+
+A dynamically loading host checks `rgsaddle_abi_version()` before resolving the minor-66 symbols: the return value packs the major in the high 16 bits and the minor in the low 16 bits, so require major 1 and minor at least 66. The config's version is still checked on create and set-config; a newer library does not make an older symbol table safe to call.
 
 # Use the headers from a meson project (`docs/orgmode/howto/meson.org`)
 
@@ -5077,18 +5088,18 @@ The narrative for a session is the C and C++ how-to, not this list.
 - `rgsaddle_minmode_mode`. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_minmode_reset`. Purpose: Clear optimizer/rotation history, carried curvature, and the centre cache. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_minmode_free`. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
-- `rgsaddle_pafi_create`. Purpose: Create a PAFI session from path frames. Parameters: the declaration. Units: the caller's.
-- `rgsaddle_pafi_set_config`. Purpose: Replace the PAFI configuration between runs. Parameters: the declaration. Units: the caller's.
-- `rgsaddle_pafi_run`. Purpose: Run PAFI and store the profile in the session. Parameters: the declaration. Units: the caller's.
-- `rgsaddle_pafi_result`. Purpose: Read the last PAFI barrier summary. Parameters: the declaration. Units: the caller's.
-- `rgsaddle_pafi_profile`. Purpose: Read the full stored profile. Parameters: the declaration. Units: the caller's.
-- `rgsaddle_pafi_free`. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
-- `rgsaddle_ohtst_create`. Purpose: Create an OH-TST session on one dividing plane. Parameters: the declaration. Units: the caller's.
-- `rgsaddle_ohtst_set_config`. Purpose: Replace the OH-TST configuration between runs. Parameters: the declaration. Units: the caller's.
-- `rgsaddle_ohtst_run`. Purpose: Sample the plane, run transmission shooting, and store the result. Parameters: the declaration. Units: the caller's.
-- `rgsaddle_ohtst_result`. Purpose: Read the last OH-TST transmission summary. Parameters: the declaration. Units: the caller's.
-- `rgsaddle_ohtst_curve`. Purpose: Read the stored κ(t) curve. Parameters: the declaration. Units: the caller's.
-- `rgsaddle_ohtst_free`. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_pafi_create`. Purpose: Create a PAFI session from path frames, ABI minor 66. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_pafi_set_config`. Purpose: Replace the PAFI configuration between runs, ABI minor 66. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_pafi_run`. Purpose: Run PAFI and store the profile in the session, ABI minor 66. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_pafi_result`. Purpose: Read the last PAFI barrier summary, ABI minor 66. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_pafi_profile`. Purpose: Read the full stored profile, ABI minor 66. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_pafi_free`. Purpose: Free a PAFI session, ABI minor 66. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_ohtst_create`. Purpose: Create an OH-TST session on one dividing plane, ABI minor 66. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_ohtst_set_config`. Purpose: Replace the OH-TST configuration between runs, ABI minor 66. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_ohtst_run`. Purpose: Sample the plane, run transmission shooting, and store the result, ABI minor 66. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_ohtst_result`. Purpose: Read the last OH-TST transmission summary, ABI minor 66. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_ohtst_curve`. Purpose: Read the stored κ(t) curve, ABI minor 66. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_ohtst_free`. Purpose: Free an OH-TST session, ABI minor 66. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_nichols_step`. Purpose: Nichols displacement from a spectrum of the mass-weighted energy Hessian. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_prfo_step`. Purpose: Restricted-step partitioned RFO. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_hessian_powell`. Purpose: Powell symmetric Broyden update of a Cartesian energy Hessian. Parameters: the declaration. Units: the caller's.
@@ -5257,8 +5268,8 @@ The narrative for a session is the C and C++ how-to, not this list.
 - `RgsaddleBand`. Purpose: Opaque session handle in include/rgsaddle.h.
 - `RgsaddleMinMode`. Purpose: Opaque session handle in include/rgsaddle.h.
 - `RgsaddleHyperplaneSampler`. Purpose: Opaque session handle in include/rgsaddle.h.
-- `RgsaddlePafi`. Purpose: Opaque session handle in include/rgsaddle.h.
-- `RgsaddleOhtst`. Purpose: Opaque session handle in include/rgsaddle.h.
+- `RgsaddlePafi`. Purpose: Opaque PAFI session handle, ABI minor 66.
+- `RgsaddleOhtst`. Purpose: Opaque OH-TST session handle, ABI minor 66.
 - `RgsaddleIndex1`. Purpose: Opaque session handle in include/rgsaddle.h.
 - `RgsaddleIrc`. Purpose: Opaque session handle in include/rgsaddle.h.
 - `RgsaddleSellaMin`. Purpose: Opaque session handle in include/rgsaddle.h.
@@ -5293,12 +5304,12 @@ The narrative for a session is the C and C++ how-to, not this list.
 - `rgsaddle_quickmin_t`. Purpose: Quick-min variants (rgmin QuickMinOptions).
 - `rgsaddle_minmode_config_t`. Purpose: Minimum-mode configuration.
 - `rgsaddle_artn_config_t`. Purpose: ART nouveau protocol controls, ABI minor 43.
-- `rgsaddle_pafi_config_t`. Purpose: PAFI configuration.
-- `rgsaddle_pafi_result_t`. Purpose: PAFI barrier summary after rgsaddle_pafi_run.
-- `rgsaddle_ohtst_integrator_t`. Purpose: OH-TST sample integrator kind for rgsaddle_ohtst_config_t: 0 BAOAB, 1 GHMC.
-- `rgsaddle_ohtst_counting_t`. Purpose: OH-TST trajectory counting kind for rgsaddle_ohtst_config_t: 0 final state, 1 first crossing.
-- `rgsaddle_ohtst_config_t`. Purpose: OH-TST configuration.
-- `rgsaddle_ohtst_result_t`. Purpose: OH-TST summary after rgsaddle_ohtst_run.
+- `rgsaddle_pafi_config_t`. Purpose: PAFI configuration, ABI minor 66.
+- `rgsaddle_pafi_result_t`. Purpose: PAFI barrier summary after rgsaddle_pafi_run, ABI minor 66.
+- `rgsaddle_ohtst_integrator_t`. Purpose: OH-TST sample integrator kind for rgsaddle_ohtst_config_t, ABI minor 66: 0 BAOAB, 1 GHMC.
+- `rgsaddle_ohtst_counting_t`. Purpose: OH-TST trajectory counting kind for rgsaddle_ohtst_config_t, ABI minor 66: 0 final state, 1 first crossing.
+- `rgsaddle_ohtst_config_t`. Purpose: OH-TST configuration, ABI minor 66.
+- `rgsaddle_ohtst_result_t`. Purpose: OH-TST summary after rgsaddle_ohtst_run, ABI minor 66.
 - `rgsaddle_hess_update_t`. Purpose: C enum typedef in include/rgsaddle.h.
 - `rgsaddle_nichols_mode_t`. Purpose: C enum typedef in include/rgsaddle.h.
 - `rgsaddle_prfo_t`. Purpose: C enum typedef in include/rgsaddle.h.
@@ -5337,7 +5348,7 @@ The narrative for a session is the C and C++ how-to, not this list.
 - `rgsaddle_sample_hyperplane_fn`. Purpose: Callback typedef in include/rgsaddle.h.
 - `rgsaddle_surface_fn`. Purpose: Callback typedef in include/rgsaddle.h.
 - `rgsaddle_solid_surface_fn`. Purpose: Callback typedef in include/rgsaddle.h.
-- `rgsaddle_point_surface_fn`. Purpose: Point-surface callback used by PAFI and OH-TST handles.
+- `rgsaddle_point_surface_fn`. Purpose: Point-surface callback used by PAFI and OH-TST handles, ABI minor 66.
 - `rgsaddle_hessian_fn`. Purpose: Callback typedef in include/rgsaddle.h.
 - `rgsaddle_stencil_eval_fn`. Purpose: Callback typedef in include/rgsaddle.h.
 - `rgsaddle_geodesic_chart_fn`. Purpose: Redundant coordinate chart for geodesic interpolation.
