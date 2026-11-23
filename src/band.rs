@@ -4160,22 +4160,32 @@ impl BandSession {
         })
     }
 
-    pub(super) fn cache_free_end_evaluation(
+    /// Keep the evaluation a free-end step ended on. `metric` is the
+    /// metric `projected` and `driving` were assembled with; `driving`
+    /// is the preconditioned force under that metric, and `None` when
+    /// the band carries none. A `metric` of `None` leaves the forces
+    /// unassembled, so a later read assembles them again.
+    fn cache_free_end_evaluation(
         &self,
         energies: Array1<f64>,
         gradients: Array2<f64>,
         projected: Array1<f64>,
+        driving: Option<Array1<f64>>,
+        metric: Option<MetricBuildId>,
     ) {
         let x = self.interior_flat();
-        let assembly_metric = self.expected_metric_at(x.view());
+        let (projected, driving) = match metric {
+            Some(_) => (projected, driving.unwrap_or_else(|| Array1::zeros(0))),
+            None => (Array1::zeros(0), Array1::zeros(0)),
+        };
         let evaluation = BandEval {
             x,
             energies,
             gradients,
-            driving: projected.clone(),
+            driving,
             projected,
             assembly_ci: i64::MIN,
-            assembly_metric,
+            assembly_metric: metric,
             stresses: Array2::zeros((0, 0)),
             band_positions: Array2::zeros((0, 0)),
             band_cells: Vec::new(),
