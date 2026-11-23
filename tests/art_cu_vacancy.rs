@@ -70,6 +70,44 @@ fn cu_vacancy_setup() -> (CuMorse, Array1<f64>, Vec<ArtSeed>) {
     (surface, reactant, seeds)
 }
 
+/// Connected events that are not a repeat of an earlier saddle.
+///
+/// Duplicates are recorded for every event that reached a saddle,
+/// whatever its status, so they are not subtracted from the connected
+/// count.
+fn distinct_connected(events: impl IntoIterator<Item = (ArtStatus, Option<usize>)>) -> usize {
+    events
+        .into_iter()
+        .filter(|(status, duplicate_of)| *status == ArtStatus::Connected && duplicate_of.is_none())
+        .count()
+}
+
+#[test]
+fn distinct_count_ignores_duplicates_of_unconnected_events() {
+    let events = [
+        (ArtStatus::Reverted, None),
+        (ArtStatus::Reverted, Some(0)),
+        (ArtStatus::NotDownhill, Some(0)),
+        (ArtStatus::Connected, None),
+    ];
+    let connected = events
+        .iter()
+        .filter(|(status, _)| *status == ArtStatus::Connected)
+        .count();
+    let duplicates = events.iter().filter(|(_, of)| of.is_some()).count();
+    assert!(connected.checked_sub(duplicates).is_none());
+    assert_eq!(distinct_connected(events), 1);
+    assert_eq!(
+        distinct_connected([
+            (ArtStatus::Connected, None),
+            (ArtStatus::Connected, Some(0)),
+            (ArtStatus::Irreversible, None),
+        ]),
+        1
+    );
+    assert_eq!(distinct_connected([]), 0);
+}
+
 fn assert_four_cu_vacancy_saddles(
     surface: &CuMorse,
     reactant: &Array1<f64>,
@@ -85,7 +123,12 @@ fn assert_four_cu_vacancy_saddles(
         .iter()
         .filter(|outcome| outcome.status == ArtStatus::Connected)
         .count();
-    let distinct = connected - batch.duplicates.len();
+    let distinct = distinct_connected(
+        batch
+            .outcomes
+            .iter()
+            .map(|outcome| (outcome.status, outcome.duplicate_of)),
+    );
     eprintln!(
         "Cu vacancy ART ({label}): {connected} connected, {distinct} distinct, {} duplicates",
         batch.duplicates.len()
