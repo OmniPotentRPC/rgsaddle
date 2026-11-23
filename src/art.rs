@@ -251,7 +251,9 @@ impl ArtConfig {
     /// unit and `length_scale` is the host length represented by one reduced
     /// length unit. Lengths scale by `length_scale`, forces by
     /// `energy_scale / length_scale`, and curvatures by
-    /// `energy_scale / length_scale^2`.
+    /// `energy_scale / length_scale^2`. Method-specific solver controls such
+    /// as [`RelaxConfig::initial_step`] are unchanged: for FIRE that value is
+    /// a time step, not a length.
     pub fn for_units(energy_scale: f64, length_scale: f64) -> Result<Self, SaddleError> {
         if !(energy_scale.is_finite()
             && energy_scale > 0.0
@@ -274,10 +276,8 @@ impl ArtConfig {
         config.push_step *= length_scale;
         config.perpendicular.force_tol *= force_scale;
         config.perpendicular.max_atom_move *= length_scale;
-        config.perpendicular.initial_step *= length_scale;
         config.quench.force_tol *= force_scale;
         config.quench.max_atom_move *= length_scale;
-        config.quench.initial_step *= length_scale;
         config.push_over *= length_scale;
         config.saddle.residual_tol *= curvature_scale;
         config.saddle.negative_tol *= curvature_scale;
