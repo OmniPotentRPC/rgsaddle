@@ -148,8 +148,10 @@ opt-level = 3
 # Unoptimized, one recovery of the 6911-atom cell takes about 105s and
 # the full test runs for hours. At opt-level 3 that recovery takes
 # about 13s, and one recovery of the 10975-atom cell takes about 20s.
-# Debug assertions stay on.
-[profile.test]
+# Debug assertions stay on. Only this crate is raised: dependencies
+# must build identically under dev and test, or the doctests that
+# `cargo test` links against the dev rlibs see two copies of `ndarray`.
+[profile.test.package.rgsaddle]
 opt-level = 3
 
 # include/rgsaddle.h is the hand-written contract (surface request,
