@@ -3475,7 +3475,19 @@ pub unsafe extern "C" fn rgsaddle_growing_string_config_default(
     RGSADDLE_OK
 }
 
+/// `len` when a slice of that many doubles stays within the `isize::MAX`
+/// bytes that [`slice::from_raw_parts`] allows.
+fn f64_slice_len(len: usize) -> Option<usize> {
+    len.checked_mul(std::mem::size_of::<f64>())
+        .filter(|&bytes| bytes <= isize::MAX as usize)
+        .map(|_| len)
+}
+
 /// Open a [`RgsaddleGrowingString`] between `reactant` and `product` (ABI minor 44).
+///
+/// Returns NULL when `3 * n_atoms` doubles, or `n_images * 3 * n_atoms`
+/// doubles for the whole string, do not fit in an `isize::MAX` byte
+/// allocation.
 ///
 /// # Safety
 /// `config`, `reactant`, and `product` must be valid for `3 * n_atoms`.
@@ -3493,7 +3505,21 @@ pub unsafe extern "C" fn rgsaddle_growing_string_create(
     if cfg.version.major != RGSADDLE_ABI_MAJOR || cfg.n_images < 4 {
         return std::ptr::null_mut();
     }
-    let dof = (3 * n_atoms) as usize;
+    let Some(dof) = usize::try_from(n_atoms)
+        .ok()
+        .and_then(|atoms| atoms.checked_mul(3))
+        .and_then(f64_slice_len)
+    else {
+        return std::ptr::null_mut();
+    };
+    if usize::try_from(cfg.n_images)
+        .ok()
+        .and_then(|images| images.checked_mul(dof))
+        .and_then(f64_slice_len)
+        .is_none()
+    {
+        return std::ptr::null_mut();
+    }
     let Some(parsed) = (unsafe { parse_band_config(&cfg.band, cfg.n_images, dof, None) }) else {
         return std::ptr::null_mut();
     };
@@ -4434,5 +4460,54 @@ mod torque_window_abi_tests {
         assert_eq!(lanczos_step_actions(Some(-1)), 3);
         assert_eq!(lanczos_step_actions(Some(1)), 3);
         assert_eq!(lanczos_step_actions(Some(0)), 4);
+    }
+}
+
+#[cfg(test)]
+mod growing_string_abi_tests {
+    use super::*;
+
+    fn default_config() -> RgsaddleGrowingStringConfig {
+        let mut cfg = std::mem::MaybeUninit::<RgsaddleGrowingStringConfig>::zeroed();
+        let status = unsafe { rgsaddle_growing_string_config_default(cfg.as_mut_ptr()) };
+        assert_eq!(status, RGSADDLE_OK);
+        unsafe { cfg.assume_init() }
+    }
+
+    fn create(cfg: &RgsaddleGrowingStringConfig, n_atoms: i64) -> *mut RgsaddleGrowingString {
+        let reactant = [-1.0_f64, 0.0, 0.0];
+        let product = [1.0_f64, 0.0, 0.0];
+        unsafe { rgsaddle_growing_string_create(cfg, n_atoms, reactant.as_ptr(), product.as_ptr()) }
+    }
+
+    #[test]
+    fn create_accepts_a_small_string() {
+        let cfg = default_config();
+        let handle = create(&cfg, 1);
+        assert!(!handle.is_null());
+        unsafe { rgsaddle_growing_string_free(handle) };
+    }
+
+    #[test]
+    fn create_refuses_an_atom_count_whose_dof_overflows() {
+        let cfg = default_config();
+        assert!(create(&cfg, i64::MAX).is_null());
+        assert!(create(&cfg, i64::MAX / 3 + 1).is_null());
+    }
+
+    #[test]
+    fn create_refuses_an_atom_count_past_the_slice_byte_limit() {
+        let cfg = default_config();
+        let doubles_limit = isize::MAX as i64 / 8;
+        assert!(create(&cfg, doubles_limit / 3 + 1).is_null());
+    }
+
+    #[test]
+    fn create_refuses_an_image_count_past_the_slice_byte_limit() {
+        let mut cfg = default_config();
+        cfg.n_images = i64::MAX;
+        assert!(create(&cfg, 1).is_null());
+        cfg.n_images = isize::MAX as i64 / 8 / 3 + 1;
+        assert!(create(&cfg, 1).is_null());
     }
 }
