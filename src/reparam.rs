@@ -695,7 +695,11 @@ fn not_a_knot_moments(t: &[f64], y: &Array2<f64>) -> Option<Array2<f64>> {
     lower[n - 1] -= h[k - 2] * h[k - 2] / h[k - 3];
     diagonal[n - 1] += h[k - 2] * (h[k - 3] + h[k - 2]) / h[k - 3];
 
-    solve_tridiagonal(&lower, &mut diagonal, &upper, &mut rhs)?;
+    let scale = t[k - 1] - t[0];
+    if !(scale.is_finite() && scale > 0.0) {
+        return None;
+    }
+    solve_tridiagonal(&lower, &mut diagonal, &upper, &mut rhs, scale)?;
     let mut moments = Array2::zeros(y.raw_dim());
     moments.slice_mut(ndarray::s![1..k - 1, ..]).assign(&rhs);
     for col in 0..y.ncols() {
@@ -708,16 +712,21 @@ fn not_a_knot_moments(t: &[f64], y: &Array2<f64>) -> Option<Array2<f64>> {
 }
 
 /// Solve a tridiagonal system in place for all columns of `rhs`.
+///
+/// `scale` is the knot span. A pivot that is not strictly larger than
+/// one unit in the last place of that span is singular: the spacing
+/// that produced it is lost in the roundoff of the span.
 fn solve_tridiagonal(
     lower: &[f64],
     diagonal: &mut [f64],
     upper: &[f64],
     rhs: &mut Array2<f64>,
+    scale: f64,
 ) -> Option<()> {
     let n = diagonal.len();
     for row in 1..n {
         let pivot = diagonal[row - 1];
-        if pivot == 0.0 || !pivot.is_finite() {
+        if pivot_vanishes(pivot, scale) {
             return None;
         }
         let factor = lower[row] / pivot;
@@ -727,13 +736,13 @@ fn solve_tridiagonal(
         target.scaled_add(-factor, &source);
     }
     let last = diagonal[n - 1];
-    if last == 0.0 || !last.is_finite() {
+    if pivot_vanishes(last, scale) {
         return None;
     }
     rhs.row_mut(n - 1).mapv_inplace(|value| value / last);
     for row in (0..n - 1).rev() {
         let pivot = diagonal[row];
-        if pivot == 0.0 || !pivot.is_finite() {
+        if pivot_vanishes(pivot, scale) {
             return None;
         }
         let coefficient = upper[row];
@@ -743,6 +752,16 @@ fn solve_tridiagonal(
         target.mapv_inplace(|value| value / pivot);
     }
     Some(())
+}
+
+/// A pivot lost in the roundoff of `scale`, or not finite.
+fn pivot_vanishes(pivot: f64, scale: f64) -> bool {
+    let gap = pivot.abs();
+    let limit = scale * f64::EPSILON;
+    !matches!(
+        gap.partial_cmp(&limit),
+        Some(Ordering::Greater) if gap.is_finite()
+    )
 }
 
 /// Dense reference used to check the linear-time spline solve.
@@ -907,6 +926,28 @@ mod tests {
     #[test]
     fn a_fit_refuses_repeated_knots() {
         assert!(Spline::fit(&[0.0, 1.0, 1.0, 2.0], &Array2::zeros((4, 1))).is_none());
+    }
+
+    #[test]
+    fn a_near_duplicate_knot_span_refuses_the_spline() {
+        let span = 2.5;
+        let gap = span * f64::EPSILON / 8.0;
+        let knots = [0.0, gap, 2.0 * gap, 3.0 * gap, span];
+        let mut values = Array2::zeros((knots.len(), 3));
+        for (row, &t) in knots.iter().enumerate() {
+            values.row_mut(row).assign(&Array1::from(cubic(t).to_vec()));
+        }
+        assert!(Spline::fit(&knots, &values).is_none());
+
+        let separated = span * f64::EPSILON.sqrt();
+        let knots = [0.0, separated, 2.0 * separated, 3.0 * separated, span];
+        let mut values = Array2::zeros((knots.len(), 1));
+        for (row, &t) in knots.iter().enumerate() {
+            values[(row, 0)] = t;
+        }
+        let spline = Spline::fit(&knots, &values).expect("gaps above the span roundoff");
+        let at = 0.5 * (knots[3] + span);
+        assert_abs_diff_eq!(spline.eval(at)[0], at, epsilon = 1e-12);
     }
 
     #[test]
