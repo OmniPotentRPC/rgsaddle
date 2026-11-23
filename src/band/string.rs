@@ -455,10 +455,18 @@ impl BandSession {
         let endpoint_first = self.positions.row(0).to_owned();
         let endpoint_last = self.positions.row(n_images - 1).to_owned();
         let before = self.interior_flat();
-        let metrics = self.exp.as_ref().map(|e| BandMetrics {
-            per_image: e.metrics.as_slice(),
-            free: e.free.as_deref(),
-        });
+        let metrics = match &self.exp {
+            Some(exp) => Some(
+                exp.fresh_metrics(before.view(), n_images - 2)
+                    .ok_or_else(|| {
+                        SaddleError::Invalid(
+                            "exponential metric is not current at the start of the string step"
+                                .into(),
+                        )
+                    })?,
+            ),
+            None => None,
+        };
 
         let (e_start, evol_start, step_force_start, _) = assemble_string_with(
             &self.config,
