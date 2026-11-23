@@ -58,6 +58,20 @@ int main() {
         return 1;
     }
 
+    static_assert(rgsaddle::growing_string_abi_minor == 44,
+                  "growing string C API arrived at ABI minor 44");
+    const rgsaddle_version_t before_growing_string = {RGSADDLE_ABI_MAJOR, 43};
+    const rgsaddle_version_t with_growing_string = {RGSADDLE_ABI_MAJOR, 44};
+    const rgsaddle_version_t other_major = {RGSADDLE_ABI_MAJOR + 1, 44};
+    if (rgsaddle::abi_stamp_at_least(before_growing_string, rgsaddle::growing_string_abi_minor) ||
+        !rgsaddle::abi_stamp_at_least(with_growing_string, rgsaddle::growing_string_abi_minor) ||
+        rgsaddle::abi_stamp_at_least(other_major, rgsaddle::growing_string_abi_minor) ||
+        !rgsaddle::abi_at_least(rgsaddle::growing_string_abi_minor) ||
+        rgsaddle::abi_at_least(RGSADDLE_ABI_MINOR + 1)) {
+        std::fprintf(stderr, "growing string ABI minor gate\n");
+        return 1;
+    }
+
     if (rgsaddle_band_set_highs(nullptr, 0) != RGSADDLE_NULL_BAND ||
         rgsaddle_minmode_set_highs(nullptr, 0) != RGSADDLE_NULL_SESSION) {
         std::fprintf(stderr, "null feasible-step control\n");
