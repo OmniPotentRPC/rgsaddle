@@ -2061,8 +2061,11 @@ energy, and Adam's scales as a length. The rotation stops `rotation_tol` and
 error from `for_units`. `ArtConfig::validate()`
 returns an invalid parameter error when the perpendicular relaxation force
 tolerance is looser than the mode force tolerance, and when the mode force
-tolerance is not finite and positive. Sessions and batches call it before
-consuming a configuration.
+tolerance is not finite and positive. It also holds `ArtConfig::mode` to the
+checks of `MinModeSession::new`, so a zero Krylov or rotation budget, a step
+or time step that is not finite and positive, or a stepper that tests the
+oracle value is an `ART mode:` error rather than a value adjusted during the
+search. Sessions and batches call it before consuming a configuration.
 
 The runnable example is the doctest on `ArtSession`: a one-dimensional double well in three coordinates, a host seed, and a connected index-1 exit. `tests/art_session.rs` repeats the paper's census on LJ7, starting from the pentagonal bipyramid.
 

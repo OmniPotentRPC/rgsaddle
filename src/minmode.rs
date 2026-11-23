@@ -369,6 +369,63 @@ impl MinModeConfig {
         self
     }
 
+    /// Refuse a configuration no minimum-mode search can run.
+    ///
+    /// Returns [`SaddleError::Invalid`] when the finite-difference step or
+    /// [`Self::time_step`] is not finite and positive, the force or a
+    /// rotation tolerance is negative or not finite, the rotation or Krylov
+    /// budget is zero, [`Self::max_move`] is not finite, the saddle check
+    /// or ART nouveau block is refused, or [`Self::method`] tests the
+    /// oracle value. [`MinModeSession::new`] calls this; nothing is clamped.
+    pub(crate) fn validate(&self) -> Result<(), SaddleError> {
+        if !(self.dr.is_finite() && self.dr > 0.0) {
+            return Err(SaddleError::Invalid(
+                "finite-difference step must be positive and finite".into(),
+            ));
+        }
+        if !(self.force_tol.is_finite() && self.force_tol >= 0.0) {
+            return Err(SaddleError::Invalid(
+                "force tolerance must be finite and non-negative".into(),
+            ));
+        }
+        if !(self.rotation_tol.is_finite()
+            && self.rotation_tol >= 0.0
+            && self.rotation_angle_tol.is_finite()
+            && self.rotation_angle_tol >= 0.0)
+        {
+            return Err(SaddleError::Invalid(
+                "rotation tolerances must be finite and non-negative".into(),
+            ));
+        }
+        if self.max_rotations == 0 {
+            return Err(SaddleError::Invalid(
+                "max_rotations must be at least 1".into(),
+            ));
+        }
+        if self.krylov_dim == 0 {
+            return Err(SaddleError::Invalid(
+                "Lanczos krylov dimension must be at least 1".into(),
+            ));
+        }
+        if !self.max_move.is_finite() {
+            return Err(SaddleError::Invalid(
+                "max_move must be finite; a non-positive value leaves the step uncapped".into(),
+            ));
+        }
+        if !(self.time_step.is_finite() && self.time_step > 0.0) {
+            return Err(SaddleError::Invalid(
+                "FIRE time step must be finite and positive".into(),
+            ));
+        }
+        if let Some(check) = &self.saddle_check {
+            check.validate()?;
+        }
+        if let Some(artn) = &self.artn {
+            validate_artn(self.kind, artn)?;
+        }
+        crate::band::check_force_driven(&self.method)
+    }
+
     /// Enable the ART nouveau push--relax protocol.
     #[must_use]
     pub fn with_artn(mut self, artn: ArtNConfig) -> Self {
@@ -1875,58 +1932,13 @@ impl MinModeSession {
         if !x.iter().all(|v| v.is_finite()) {
             return Err(SaddleError::NonFinite("position"));
         }
-        if !(config.dr.is_finite() && config.dr > 0.0) {
-            return Err(SaddleError::Invalid(
-                "finite-difference step must be positive and finite".into(),
-            ));
-        }
-        if !(config.force_tol.is_finite() && config.force_tol >= 0.0) {
-            return Err(SaddleError::Invalid(
-                "force tolerance must be finite and non-negative".into(),
-            ));
-        }
-        if !(config.rotation_tol.is_finite()
-            && config.rotation_tol >= 0.0
-            && config.rotation_angle_tol.is_finite()
-            && config.rotation_angle_tol >= 0.0)
-        {
-            return Err(SaddleError::Invalid(
-                "rotation tolerances must be finite and non-negative".into(),
-            ));
-        }
-        if config.max_rotations == 0 {
-            return Err(SaddleError::Invalid(
-                "max_rotations must be at least 1".into(),
-            ));
-        }
-        if config.krylov_dim == 0 {
-            return Err(SaddleError::Invalid(
-                "Lanczos krylov dimension must be at least 1".into(),
-            ));
-        }
-        if !config.max_move.is_finite() {
-            return Err(SaddleError::Invalid(
-                "max_move must be finite; a non-positive value leaves the step uncapped".into(),
-            ));
-        }
-        if !(config.time_step.is_finite() && config.time_step > 0.0) {
-            return Err(SaddleError::Invalid(
-                "FIRE time step must be finite and positive".into(),
-            ));
-        }
-        if let Some(check) = &config.saddle_check {
-            check.validate()?;
-        }
-        if let Some(artn) = &config.artn {
-            validate_artn(config.kind, artn)?;
-        }
+        config.validate()?;
         let mode = checked_mode(mode)?;
         let artn = config.artn.as_ref().map(|_| ArtNState {
             push_direction: mode.clone(),
             basin_pushes: 0,
             activated: false,
         });
-        crate::band::check_force_driven(&config.method)?;
         let lbfgs_guards = true;
         let solver = build_solver(
             &config.method,

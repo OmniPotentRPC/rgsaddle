@@ -347,7 +347,9 @@ impl ArtConfig {
     ///
     /// Returns [`SaddleError::Invalid`] when a length is not finite and
     /// positive, a budget is zero, the nested relaxation or saddle check is
-    /// refused, or the mode force tolerance is not finite and positive. A
+    /// refused, or the mode force tolerance is not finite and positive. The
+    /// Lanczos block is held to the checks a minimum-mode session makes,
+    /// and that message starts with `ART mode:`. A
     /// perpendicular force tolerance looser than that mode force tolerance
     /// is the same error and the message names both values. [`ArtSession::new`]
     /// and [`run_events`] call this before the first evaluation.
@@ -387,6 +389,10 @@ impl ArtConfig {
                 "ART mode force tolerance must be finite and positive".into(),
             ));
         }
+        self.estimator().validate().map_err(|error| match error {
+            SaddleError::Invalid(message) => SaddleError::Invalid(format!("ART mode: {message}")),
+            other => other,
+        })?;
         if self.perpendicular.force_tol > self.mode.force_tol {
             return Err(SaddleError::Invalid(format!(
                 "ART perpendicular_force_tol={:e} energy/length is looser than \
@@ -2056,6 +2062,108 @@ mod tests {
         ] {
             assert!(matches!(config.validate(), Err(SaddleError::Invalid(_))));
         }
+    }
+
+    fn assert_mode_refused(mode: MinModeConfig, expected: &str) {
+        let config = ArtConfig::default().with_mode(mode);
+        match config.validate() {
+            Err(SaddleError::Invalid(message)) => {
+                assert!(
+                    message.starts_with("ART mode: ") && message.contains(expected),
+                    "{message}"
+                );
+            }
+            other => panic!("unexpected ART mode validation result: {other:?}"),
+        }
+        assert!(matches!(
+            ArtSession::new(
+                config,
+                array![-1.0, 0.0, 0.0],
+                array![1.0, 0.0, 0.0],
+                full_mask(3),
+            ),
+            Err(SaddleError::Invalid(message)) if message.starts_with("ART mode: ")
+        ));
+    }
+
+    #[test]
+    fn art_mode_finite_difference_step_is_checked() {
+        for dr in [0.0, -1.0e-3, f64::NAN, f64::INFINITY] {
+            assert_mode_refused(
+                ArtConfig::default().mode.with_dr(dr),
+                "finite-difference step must be positive and finite",
+            );
+        }
+    }
+
+    #[test]
+    fn art_mode_rotation_tolerances_are_checked() {
+        for tol in [-1.0e-4, f64::NAN, f64::INFINITY] {
+            assert_mode_refused(
+                ArtConfig::default().mode.with_rotation_tol(tol),
+                "rotation tolerances must be finite and non-negative",
+            );
+            assert_mode_refused(
+                ArtConfig::default().mode.with_rotation_angle_tol(tol),
+                "rotation tolerances must be finite and non-negative",
+            );
+        }
+    }
+
+    #[test]
+    fn art_mode_rotation_budget_is_checked() {
+        assert_mode_refused(
+            ArtConfig::default().mode.with_max_rotations(0),
+            "max_rotations must be at least 1",
+        );
+    }
+
+    #[test]
+    fn art_mode_krylov_dimension_is_checked() {
+        assert_mode_refused(
+            ArtConfig::default().mode.with_krylov_dim(0),
+            "Lanczos krylov dimension must be at least 1",
+        );
+    }
+
+    #[test]
+    fn art_mode_max_move_is_checked() {
+        for max_move in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_mode_refused(
+                ArtConfig::default().mode.with_max_move(max_move),
+                "max_move must be finite",
+            );
+        }
+    }
+
+    #[test]
+    fn art_mode_time_step_is_checked() {
+        for time_step in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert_mode_refused(
+                ArtConfig::default().mode.with_time_step(time_step),
+                "FIRE time step must be finite and positive",
+            );
+        }
+    }
+
+    #[test]
+    fn art_mode_stepper_is_checked() {
+        assert_mode_refused(
+            ArtConfig::default().mode.with_method(Method::Bfgs),
+            "tests the oracle value",
+        );
+    }
+
+    #[test]
+    fn art_unit_scaling_refuses_an_invalid_mode() {
+        let scaled = ArtConfig::lj_art()
+            .with_mode(ArtConfig::lj_art().mode.with_krylov_dim(0))
+            .scaled(2.0, 4.0)
+            .unwrap();
+        assert!(matches!(
+            scaled.validate(),
+            Err(SaddleError::Invalid(message)) if message.starts_with("ART mode: ")
+        ));
     }
 
     #[test]
