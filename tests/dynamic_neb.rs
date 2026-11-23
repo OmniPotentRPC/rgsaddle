@@ -95,3 +95,53 @@ fn dynamic_neb_skips_force_rows_and_matches_the_plain_path() {
     }
     assert!(gap <= 0.05, "path gap {gap} above the band tolerance");
 }
+
+#[test]
+fn scaled_dynamic_neb_converges_with_fewer_rows() {
+    let band = bowed(9);
+    let (_plain, plain_rows) = relax(None, &band);
+    let spec = DynamicNeb::default().with_fmax(0.05).with_scale_fmax(6.0);
+    let (_scaled, scaled_rows) = relax(Some(spec), &band);
+    println!("plain force rows {plain_rows}");
+    println!("scaled force rows {scaled_rows}");
+    assert!(
+        scaled_rows < plain_rows,
+        "scaled {scaled_rows} plain {plain_rows}"
+    );
+}
+
+#[test]
+fn dynamic_default_converges_at_the_stock_tolerances() {
+    let band = bowed(9);
+    let surface = Well {
+        rows: AtomicUsize::new(0),
+    };
+    let mut session = BandSession::new(
+        BandConfig::default()
+            .with_max_move(0.1)
+            .with_climbing(None)
+            .with_min_mode(None)
+            .with_saddle_check(None)
+            .with_dynamic(Some(DynamicNeb::default())),
+        band,
+    )
+    .expect("band");
+    let mut report = session.step(&surface).expect("step");
+    for _ in 0..800 {
+        if report.status == BandStatus::Converged {
+            break;
+        }
+        report = session.step(&surface).expect("step");
+    }
+    println!(
+        "default dynamic rows {} max force {}",
+        surface.rows.load(Ordering::Relaxed),
+        report.max_force
+    );
+    assert_eq!(
+        report.status,
+        BandStatus::Converged,
+        "max force {}",
+        report.max_force
+    );
+}

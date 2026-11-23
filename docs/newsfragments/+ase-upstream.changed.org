@@ -1,5 +1,5 @@
 ~rgsaddle.ase.NEB~ takes ~k~ as one spring or one per segment, ~interpolate(method='idpp', mic=True)~, and ~remove_rotation_and_translation~ as a rigid fit on a free non-periodic band.
 ~idpp_path~ is the image-dependent pair-potential path those calls run.
 ~DimerControl~, ~MinModeAtoms(atoms, control)~, ~displace~, and ~MinModeTranslate~ follow ASE's dimer call, with the mode from this dimer.
-An ASE option with no equivalent, including DyNEB, ~spline~, ~string~, ~precon~, and an MPI world, raises ~NotImplementedError~ naming it.
+An ASE option with no equivalent, including ~spline~, ~string~, ~precon~, and an MPI world, raises ~NotImplementedError~ naming it.
 ~tests/python/ase_upstream~ runs ASE 3.29.0's NEB and dimer tests against these drivers, and the Python CI job sets ~RGSADDLE_REQUIRE_ASE=1~.

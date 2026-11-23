@@ -2361,6 +2361,89 @@ fn climb_target(
     (!blocked).then_some(max_i)
 }
 
+/// Convergence force of each interior row of an unmasked projected force.
+fn row_convergence(
+    state: &BandState,
+    projected: &Array1<f64>,
+    n_interior: usize,
+    dof: usize,
+) -> Vec<f64> {
+    (0..n_interior)
+        .map(|i| {
+            let row = projected.slice(s![i * dof..(i + 1) * dof]).to_owned();
+            state.convergence_force(&row)
+        })
+        .collect()
+}
+
+/// Record the dynamic mask at `origin` from the evaluation already
+/// stored there. A solver that cached this point does not ask for it
+/// again, and the trial it does ask for must not be what pins the images.
+fn seed_dynamic_decision(state: &BandState, origin: ArrayView1<f64>, force_tol: f64) {
+    let Some(spec) = state.dynamic_spec() else {
+        return;
+    };
+    let Some((projected, energies, n_interior, dof)) = cached_dynamic_inputs(state, origin) else {
+        return;
+    };
+    let mut rows = Array2::zeros((n_interior, dof));
+    for i in 0..n_interior {
+        rows.row_mut(i)
+            .assign(&projected.slice(s![i * dof..(i + 1) * dof]));
+    }
+    let Ok(interior) = origin.to_shape((n_interior, dof)) else {
+        return;
+    };
+    let Ok(mask) = dynamic_mask(
+        interior.view(),
+        energies.slice(s![1..n_interior + 1]),
+        &mut rows,
+        spec,
+    ) else {
+        return;
+    };
+    let mut masked = Array1::zeros(origin.len());
+    for i in 0..n_interior {
+        masked
+            .slice_mut(s![i * dof..(i + 1) * dof])
+            .assign(&rows.row(i));
+    }
+    let visible = state.convergence_force(&masked);
+    let row_gate = row_convergence(state, &projected, n_interior, dof);
+    let _zeroed = state
+        .dynamic_run()
+        .decision(origin, &mask, visible, &row_gate, force_tol);
+}
+
+fn cached_dynamic_inputs(
+    state: &BandState,
+    origin: ArrayView1<f64>,
+) -> Option<(Array1<f64>, Array1<f64>, usize, usize)> {
+    let slot = state.last.lock().unwrap_or_else(|e| e.into_inner());
+    let last = slot.as_ref()?;
+    if last.x != origin {
+        return None;
+    }
+    let n_images = last.energies.len();
+    if n_images < 3 {
+        return None;
+    }
+    let n_interior = n_images - 2;
+    if n_interior == 0 || !origin.len().is_multiple_of(n_interior) {
+        return None;
+    }
+    let dof = origin.len() / n_interior;
+    if last.projected.len() != origin.len() || dof == 0 || !dof.is_multiple_of(3) {
+        return None;
+    }
+    Some((
+        last.projected.clone(),
+        last.energies.clone(),
+        n_interior,
+        dof,
+    ))
+}
+
 /// Assemble the projected band force at interior `x`. Returns
 /// (pseudo-energy, projected interior forces, max abs component).
 ///
@@ -2550,7 +2633,10 @@ fn assemble_band_with(
                 .assign(&rows.row(i));
         }
         let visible = state.convergence_force(&masked_flat);
-        let zeroed = state.dynamic_run().decision(x, &mask, visible);
+        let row_gate = row_convergence(state, &saved, n_interior, dof);
+        let zeroed = state
+            .dynamic_run()
+            .decision(x, &mask, visible, &row_gate, config.force_tol);
         if zeroed.len() != n_interior {
             return Err(SaddleError::Shape(
                 "dynamic NEB image count changed during the step".into(),
@@ -3837,6 +3923,10 @@ impl BandSession {
         let mut x = self.interior_flat();
         if config.dynamic.is_some() {
             state.dynamic_run().begin_step(x.clone());
+            // The solver reuses its cached force at this geometry, so
+            // the oracle's first call is a trial and would not record
+            // the mask. Record it from the evaluation already stored.
+            seed_dynamic_decision(state, x.view(), config.force_tol);
         }
         let oracle = Oracle::unbounded(interior_dof, |query: ArrayView1<f64>| {
             let pinned = if config.dynamic.is_some() {
