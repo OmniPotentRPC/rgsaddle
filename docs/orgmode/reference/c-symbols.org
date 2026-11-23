@@ -43,6 +43,18 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =rgsaddle_minmode_mode=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_minmode_reset=. Purpose: Clear optimizer/rotation history, carried curvature, and the centre cache. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_minmode_free=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_pafi_create=. Purpose: Create a PAFI session from path frames. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_pafi_set_config=. Purpose: Replace the PAFI configuration between runs. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_pafi_run=. Purpose: Run PAFI and store the profile in the session. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_pafi_result=. Purpose: Read the last PAFI barrier summary. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_pafi_profile=. Purpose: Read the full stored profile. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_pafi_free=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_ohtst_create=. Purpose: Create an OH-TST session on one dividing plane. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_ohtst_set_config=. Purpose: Replace the OH-TST configuration between runs. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_ohtst_run=. Purpose: Sample the plane, run transmission shooting, and store the result. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_ohtst_result=. Purpose: Read the last OH-TST transmission summary. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_ohtst_curve=. Purpose: Read the stored κ(t) curve. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_ohtst_free=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_nichols_step=. Purpose: Nichols displacement from a spectrum of the mass-weighted energy Hessian. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_prfo_step=. Purpose: Restricted-step partitioned RFO. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_hessian_powell=. Purpose: Powell symmetric Broyden update of a Cartesian energy Hessian. Parameters: the declaration. Units: the caller's.
