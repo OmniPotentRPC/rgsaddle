@@ -3343,6 +3343,7 @@ impl BandSession {
                 .then(|| free_coordinates(&self.config.fixed_atoms)),
         });
         self.state.invalidate_assembly();
+        self.solver.forget_evaluation();
         Ok(())
     }
 
@@ -3579,6 +3580,7 @@ impl BandSession {
             // replaced. Drop it on every slot, as set_exp_precon does,
             // so the next assembly cannot reuse it.
             self.state.invalidate_assembly();
+            self.solver.forget_evaluation();
         }
         Ok(())
     }
@@ -5342,6 +5344,37 @@ mod tests {
         assert!(
             session.state.pcg_solves.load(Ordering::Relaxed) > solves,
             "the rebuilt metric reused the cached driving force"
+        );
+    }
+
+    #[test]
+    fn step_after_metric_rebuild_starts_with_the_new_driving_force() {
+        let positions = Array2::from_shape_vec(
+            (3, 9),
+            vec![
+                0.0, 0.0, 0.0, 1.1, 0.0, 0.0, 0.0, 1.2, 0.1, 0.2, 0.1, 0.0, 1.2, 0.2, 0.0, 0.1,
+                1.3, 0.2, 0.4, 0.2, 0.0, 1.3, 0.4, 0.1, 0.2, 1.4, 0.3,
+            ],
+        )
+        .expect("positions");
+        let config = BandConfig::default()
+            .with_method(Method::fire(rgmin::FireKind::V2))
+            .with_climbing(None)
+            .with_min_mode(None)
+            .with_saddle_check(None)
+            .with_remove_translation(false)
+            .with_exp_precon(ExpBandPrecon::default().with_mu(1.0));
+        let mut session = BandSession::new(config, positions).expect("band");
+        let surface = Harmonic;
+        session.step(&surface).expect("first step");
+
+        session.exp.as_mut().expect("metric state").precon.a *= 4.0;
+        session.build_metrics(&surface).expect("metric rebuild");
+        let solves = session.state.pcg_solves.load(Ordering::Relaxed);
+        session.step(&surface).expect("step after rebuild");
+        assert!(
+            session.state.pcg_solves.load(Ordering::Relaxed) >= solves + 2,
+            "the solver skipped the new-metric force at the accepted start"
         );
     }
 }
