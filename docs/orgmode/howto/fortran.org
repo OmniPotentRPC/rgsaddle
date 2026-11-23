@@ -13,8 +13,12 @@ The install has:
 
 - =librgsaddle_fortran=, the wrapper library
 - =rgsaddle.mod= under =include/rgsaddle/fortran=
-- =rgsaddle-fortran.pc=
+- =rgsaddle-fortran.pc=, which also names =-lrgsaddle=
 - CMake package files under =lib/cmake/rgsaddleFortran= (or =<libdir>/cmake/rgsaddleFortran=)
+
+=librgsaddle= itself is the cargo cdylib (=cargo build --features capi= or =cargo cinstall=). The pkg-config and CMake files name it, and the link still needs the directory that holds it, for example =-Ltarget/debug -Wl,-rpath,target/debug= before the pkg-config libraries. The CMake imported target =rgsaddle::fortran= links =librgsaddle= when =find_library= locates it, or when =rgsaddleFortran_CAPI_LIBRARY= is set. The package paths are relative to the config file, so the prefix can be moved.
+
+The module binds a subset of the C ABI: band create, step, and positions; minimum-mode create, step, position, and mode; and the PAFI and OH-TST create, set-config, run, result, and profile or curve calls. It does not bind set-positions, reset, estimate, connect, index-k, Sella, or the solid-state band. Status codes and the method, minimum-mode, OH-TST, band-per-image, and one-image constants used by those calls are exported. The rest of the C enums (tangent, spring, projection, difference, RTR, quick-min, LOBPCG) are not; pass the integer values from =rgsaddle.h=.
 
 The module exports typed handles with finalizers for:
 
@@ -23,12 +27,22 @@ The module exports typed handles with finalizers for:
 - projected average force integration (PAFI)
 - optimal-hyperplane transition-state theory (OH-TST)
 
+A handle is not copyable. =b = a= stops the program with status =RGSADDLE_HANDLE_NOT_ASSIGNABLE= (17), because both finalizers would free the same session. =call b%move_from(a)= transfers the session and leaves =a= null. =call a%release()= frees it before the finalizer would. The finalizer runs when the handle goes out of scope in a procedure; a main-program variable may not be finalized.
+
 Surface callbacks are available in two forms:
 
-1. A native Fortran callback, =surface_proc=, that receives positions, energies and gradients in image-major order.
-2. A raw C callback path (=step_c=) that takes a =c_funptr= to an existing C-compatible callback.
+1. A native Fortran callback, =surface_proc= or =point_surface_proc=. The trampoline passes the number of rows that are actually in the buffers. For =RGSADDLE_REQ_ONE_IMAGE= that number is 1 and =image= is the band index; a batch passes =image = -1=.
+2. A raw C callback path (=step_c= / =run_c=) that takes a =c_funptr= to an existing C-compatible callback.
 
-Both routes call the same Rust C ABI and are checked against each other by the Fortran tests.
+The position, energy, and gradient arguments are assumed-size. The caller, and the trampoline, must supply the length the C request describes. A request whose row count does not fit in the default integer returns =RGSADDLE_SHAPE= and does not call the callback.
+
+PAFI and OH-TST call the point callback from worker threads. The procedure must be safe to run concurrently and must be declared =recursive= (gfortran's recursion check treats those calls as re-entrant). The callback and its =user= pointer travel in the C user-context argument for that call. There is no module-level callback, so one run can call back into another.
+
+=init_minmode_config= fills the Rust =MinModeConfig= defaults, including the five-degree rotation-angle stop. =seed=, =sample_seed=, and =shooting_seed= are the bits of the C =uint64_t=. Values above 2^63-1 are negative =integer(c_int64_t)= values; =uint64_bits(high, low)= builds them from the low 32 bits of each argument.
+
+=profile= and =curve= take the array length as the capacity. When the arrays are shorter than the stored series, the call returns =RGSADDLE_INVALID_PARAMETER= and sets the =written= argument to the length that was required. The same contract is on =rgsaddle_pafi_profile= and =rgsaddle_ohtst_curve=. A null =create= keeps =RGSADDLE_ABI_MISMATCH= when the config major is not 1 and =RGSADDLE_SHAPE= when the dimensions are not a session, instead of reporting both as =RGSADDLE_INVALID_PARAMETER=.
+
+Both callback routes call the same Rust C ABI. The Fortran tests check convergence on an analytic surface, not only that the two routes agree.
 
 * Minimal loop
 1. Fill and stamp =rgsaddle_band_config_t= with =init_band_config=.
@@ -48,7 +62,7 @@ module demo_surfaces
   use rgsaddle, only: RGSADDLE_OK, RGSADDLE_INVALID_PARAMETER
   implicit none
 contains
-  integer(c_int) function double_well(user, n_dof, position, energy, gradient) result(status)
+  recursive integer(c_int) function double_well(user, n_dof, position, energy, gradient) result(status)
     type(c_ptr), value :: user
     integer(c_int64_t), value :: n_dof
     real(c_double), intent(in) :: position(*)
@@ -65,7 +79,7 @@ contains
     status = RGSADDLE_OK
   end function double_well
 
-  integer(c_int) function quad_saddle(user, n_dof, position, energy, gradient) result(status)
+  recursive integer(c_int) function quad_saddle(user, n_dof, position, energy, gradient) result(status)
     type(c_ptr), value :: user
     integer(c_int64_t), value :: n_dof
     real(c_double), intent(in) :: position(*)
@@ -150,16 +164,19 @@ program pafi_ohtst_demo
 end program pafi_ohtst_demo
 #+end_src
 
-Build and run it against the installed prefix and =librgsaddle=:
+Build and run it against the installed prefix. =-L= for the cargo library comes before the pkg-config libraries, which already include =-lrgsaddle=:
 
 #+begin_src sh
 cargo build --locked --features capi
 meson setup build -Dfortran=enabled --prefix "$PWD/dist" --libdir=lib
 meson install -C build
 PKG_CONFIG_PATH="$PWD/dist/lib/pkgconfig:$PWD/dist/share/pkgconfig" \
-  gfortran -std=f2008 $(pkg-config --cflags rgsaddle-fortran) \
-  pafi_ohtst_demo.f90 $(pkg-config --libs rgsaddle-fortran) \
-  -Ltarget/debug -lrgsaddle -Wl,-rpath,"$PWD/target/debug" -o pafi_ohtst_demo.x
+  gfortran -std=f2008 -fcheck=all \
+  $(pkg-config --cflags rgsaddle-fortran) \
+  pafi_ohtst_demo.f90 \
+  -Ltarget/debug -Wl,-rpath,"$PWD/target/debug" \
+  $(pkg-config --libs rgsaddle-fortran) \
+  -o pafi_ohtst_demo.x
 ./pafi_ohtst_demo.x
 #+end_src
 

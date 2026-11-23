@@ -752,7 +752,10 @@ rgsaddle_status_t rgsaddle_pafi_result(const RgsaddlePafi *session,
                                        rgsaddle_pafi_result_t *out);
 /**
  * Read the full stored profile. `capacity` is the writable length of
- * every non-NULL array output.
+ * every non-NULL array output. When `capacity` is shorter than the
+ * stored profile the call returns RGSADDLE_INVALID_PARAMETER and, if
+ * `written` is non-NULL, sets `*written` to the number of points the
+ * profile needs. The output arrays are left unchanged in that case.
  */
 rgsaddle_status_t rgsaddle_pafi_profile(const RgsaddlePafi *session,
                                         double *arcs, double *gradients,
@@ -839,7 +842,10 @@ rgsaddle_status_t rgsaddle_ohtst_result(const RgsaddleOhtst *session,
                                         rgsaddle_ohtst_result_t *out);
 /**
  * Read the stored κ(t) curve. `capacity` is the writable length of every
- * non-NULL output.
+ * non-NULL output. When `capacity` is shorter than the stored curve the
+ * call returns RGSADDLE_INVALID_PARAMETER and, if `written` is non-NULL,
+ * sets `*written` to the number of points the curve needs. The output
+ * arrays are left unchanged in that case.
  */
 rgsaddle_status_t rgsaddle_ohtst_curve(const RgsaddleOhtst *session,
                                        double *times, double *kappa_of_t,
