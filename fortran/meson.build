@@ -41,24 +41,34 @@ if not meson.is_subproject()
     )
 
     pkg = import('pkgconfig')
+    # `${prefix}` stays literal so pkg-config recomputes it from the
+    # .pc location. `-lrgsaddle` is the cargo cdylib; it is not installed
+    # by meson, and the link line must also have its directory.
     pkg.generate(
         name: 'rgsaddle-fortran',
         description: 'Fortran 2008 ISO C binding interfaces for the rgsaddle C ABI',
         version: meson.project_version(),
-        libraries: rgsaddle_fortran_lib,
+        libraries: [rgsaddle_fortran_lib, '-lrgsaddle'],
         requires: ['rgsaddle-headers'],
         subdirs: 'rgsaddle/fortran',
         variables: [
-            'moduledir=' + get_option('prefix') / fortran_moduledir,
+            'moduledir=${prefix}/' + fortran_moduledir,
         ],
     )
 
     cmake_dir = get_option('libdir') / 'cmake' / 'rgsaddleFortran'
+    # One `..` per component of the package dir reaches the prefix.
+    # includedir and libdir are the relative install directories.
+    _prefix_ups = []
+    foreach _part : cmake_dir.split('/')
+        _prefix_ups += '..'
+    endforeach
     cfg = configuration_data()
     cfg.set('RGSADDLE_FORTRAN_VERSION', meson.project_version())
-    cfg.set('RGSADDLE_FORTRAN_MODULE_DIR', get_option('prefix') / fortran_moduledir)
-    cfg.set('RGSADDLE_FORTRAN_INCLUDE_DIR', get_option('prefix') / get_option('includedir'))
-    cfg.set('RGSADDLE_FORTRAN_LIB_DIR', get_option('prefix') / get_option('libdir'))
+    cfg.set('RGSADDLE_PREFIX_FROM_CONFIG', '/'.join(_prefix_ups))
+    cfg.set('RGSADDLE_FORTRAN_MODULE_REL', fortran_moduledir)
+    cfg.set('RGSADDLE_FORTRAN_INCLUDE_REL', get_option('includedir'))
+    cfg.set('RGSADDLE_FORTRAN_LIB_REL', get_option('libdir'))
 
     configure_file(
         input: files('cmake/rgsaddleFortranConfig.cmake.in'),
