@@ -171,3 +171,32 @@ fn dynamic_neb_and_the_simplified_string_method_exclude_each_other() {
     ));
     assert!(dynamic.string().is_none());
 }
+
+/// FNV-1a over the bit patterns of the band after forty steps.
+fn trajectory_hash(spec: DynamicNeb) -> u64 {
+    let surface = Well {
+        rows: AtomicUsize::new(0),
+    };
+    let mut session = BandSession::new(config(Some(spec)), bowed(9)).expect("band");
+    for _ in 0..40 {
+        session.step(&surface).expect("step");
+    }
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for value in session.positions().iter() {
+        hash ^= value.to_bits();
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// The projected force a dynamic step caches is the unmasked one, and the
+/// band assembly must not hand it back as the masked force when the same
+/// point is assembled again. Both hashes were taken before the assembly
+/// cache existed.
+#[test]
+fn dynamic_neb_trajectory_is_unchanged_by_the_assembly_cache() {
+    let plain = DynamicNeb::default().with_fmax(0.05);
+    let scaled = plain.with_scale_fmax(6.0);
+    assert_eq!(trajectory_hash(plain), 0xdba2_f370_6de8_a25f);
+    assert_eq!(trajectory_hash(scaled), 0xb1d1_1171_8c79_00d2);
+}
