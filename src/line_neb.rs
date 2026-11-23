@@ -667,26 +667,13 @@ fn one_surface(
     Ok((energies[0], gradients.row(0).to_owned()))
 }
 
-fn coordinate_extent(values: impl Iterator<Item = f64>) -> Result<f64, SaddleError> {
-    let mut extent = 0.0;
-    for value in values {
-        let magnitude = value.abs();
-        if !magnitude.is_finite() {
-            return Err(SaddleError::NonFinite("MEP coordinate"));
-        }
-        if magnitude > extent {
-            extent = magnitude;
-        }
-    }
-    Ok(extent)
-}
-
 /// Opening step as a fraction of a path length.
 ///
 /// The fraction is `sqrt(f64::EPSILON)`, which is dimensionless, so the
 /// step has the unit of `length_scale`. A uniform change of length unit
 /// scales the step with the coordinates. The value is fixed for a given
-/// length scale.
+/// length scale. The length scale is a distance along the path, never a
+/// coordinate, so a translation of the path leaves the step unchanged.
 fn opening_step(length_scale: f64) -> Result<f64, SaddleError> {
     if !(length_scale.is_finite() && length_scale > 0.0) {
         return Err(SaddleError::Invalid(
@@ -710,11 +697,79 @@ fn charge(budget: &mut usize) -> Result<(), SaddleError> {
     Ok(())
 }
 
+/// Fraction of the first energy drop that sets the length scale of a branch.
+const SCALE_DROP_FRACTION: f64 = 0.1;
+
+/// Distance along `direction` from `start_q` at which the energy has fallen
+/// to `level`.
+///
+/// The distance is the length scale of a branch: it is measured on the
+/// surface, so it has the unit of the coordinates and does not depend on
+/// where the path sits. The search brackets a crossing from a trial of 1
+/// by doubling or halving, then bisects to a relative width of
+/// `sqrt(f64::EPSILON)`. The level is a small fraction of the first energy
+/// drop, so the crossing lies close to the saddle.
+fn level_distance(
+    surface: &impl BandSurface,
+    start_q: ArrayView1<'_, f64>,
+    direction: ArrayView1<'_, f64>,
+    sqrt_masses: ArrayView1<'_, f64>,
+    level: f64,
+    budget: &mut usize,
+) -> Result<f64, SaddleError> {
+    let mut energy_at = |distance: f64| -> Result<f64, SaddleError> {
+        let trial_q = start_q.to_owned() + distance * &direction;
+        let trial = &trial_q / &sqrt_masses;
+        charge(budget)?;
+        Ok(one_surface(surface, trial.view())?.0)
+    };
+    let mut lower;
+    let mut upper = 1.0;
+    if energy_at(upper)? > level {
+        loop {
+            lower = upper;
+            upper += upper;
+            if !upper.is_finite() {
+                return Err(SaddleError::Invalid(
+                    "MEP length scale did not reach the first energy level".into(),
+                ));
+            }
+            if energy_at(upper)? <= level {
+                break;
+            }
+        }
+    } else {
+        loop {
+            let trial = 0.5 * upper;
+            if trial < f64::MIN_POSITIVE {
+                return Err(SaddleError::Invalid(
+                    "MEP length scale found no energy above the first level at the saddle".into(),
+                ));
+            }
+            if energy_at(trial)? > level {
+                lower = trial;
+                break;
+            }
+            upper = trial;
+        }
+    }
+    while upper - lower > f64::EPSILON.sqrt() * upper {
+        let middle = lower + 0.5 * (upper - lower);
+        if energy_at(middle)? > level {
+            lower = middle;
+        } else {
+            upper = middle;
+        }
+    }
+    Ok(upper)
+}
+
 fn energy_slice(
     surface: &impl BandSurface,
     q: ArrayView1<'_, f64>,
     sqrt_masses: ArrayView1<'_, f64>,
     target: f64,
+    spacing: f64,
     budget: &mut usize,
 ) -> Result<Array1<f64>, SaddleError> {
     let position = &q / &sqrt_masses;
@@ -732,15 +787,10 @@ fn energy_slice(
     }
     let direction = force_q / force_norm;
     let mut lower = 0.0;
-    let extent = coordinate_extent(q.iter().copied())?;
-    if extent <= 0.0 {
-        return Err(SaddleError::Invalid(
-            "MEP energy slice has no coordinate extent".into(),
-        ));
-    }
-    // Linear in the coordinate extent, so a change of length unit scales
-    // the bracket with the path.
-    let mut upper = opening_step(extent)?;
+    // Linear in the spacing of the images already placed, so a change of
+    // length unit scales the bracket with the path and a translation of
+    // the path leaves it unchanged.
+    let mut upper = opening_step(spacing)?;
     loop {
         let trial_q = q.to_owned() + upper * &direction;
         let trial = &trial_q / &sqrt_masses;
@@ -821,17 +871,20 @@ with_setters!(FixedEnergySeed {
 /// is the surface-call budget for every slice on both branches.
 ///
 /// The opening displacement off the saddle, and the first trial step of
-/// each energy slice, is `sqrt(f64::EPSILON)` times a length scale of the
-/// mass-scaled coordinates. The scale is the largest absolute coordinate.
-/// A saddle at the origin has no extent, and the scale is then the length
-/// of the normalized unstable mode, which is 1. The factor is
-/// dimensionless, so the step is a length and a uniform change of length
-/// unit scales it with the coordinates. The step is fixed for a given
-/// saddle, mode, masses, and [`FixedEnergySeed`].
+/// each energy slice, is `sqrt(f64::EPSILON)` times a distance along the
+/// path. The opening displacement uses the distance from the saddle, along
+/// the mode of that branch, at which the energy has fallen by a tenth of the
+/// first energy drop. A slice uses the distance between the last two images
+/// already placed on its branch. Both are measured on the surface in
+/// mass-scaled coordinates, so a translation of the saddle and the surface
+/// together leaves the seed unchanged, and a uniform change of length unit
+/// scales the step with the coordinates. The factor is dimensionless. The
+/// seed is fixed for a given saddle, mode, masses, and [`FixedEnergySeed`].
 ///
 /// # Errors
 ///
-/// [`SaddleError::Invalid`] when the input is inconsistent, when a slice
+/// [`SaddleError::Invalid`] when the input is inconsistent, when the energy
+/// along the mode never falls to the length-scale level, when a slice
 /// meets a stationary point or never crosses its level, and, with a
 /// message that starts `work budget exhausted`, when the budget is used
 /// up. [`SaddleError::NonFinite`] when the surface returns a non-finite
@@ -865,26 +918,44 @@ pub fn fixed_energy_mep_seed(
         ));
     }
     let direction = mode_q / mode_norm;
-    let extent = coordinate_extent(saddle_q.iter().copied())?;
-    // A saddle at the origin has no coordinate extent. The length scale
-    // is then the normalized mode, whose length is 1 after the division
-    // above. The step is linear in that scale.
-    let length_scale = if extent > 0.0 {
-        extent
-    } else {
-        direction.dot(&direction).sqrt()
-    };
-    let displacement = opening_step(length_scale)?;
+    if !saddle_q.iter().all(|value| value.is_finite()) {
+        return Err(SaddleError::NonFinite("MEP coordinate"));
+    }
+    let first_drop = (seed.saddle_energy - seed.target_energy) / (seed.images - 1) as f64;
+    let scale_level = seed.saddle_energy - SCALE_DROP_FRACTION * first_drop;
     let mut budget = seed.max_evaluations;
     let mut branches = Vec::with_capacity(2);
     for sign in [-1.0, 1.0] {
+        let branch_direction = sign * &direction;
+        let scale = level_distance(
+            surface,
+            saddle_q.view(),
+            branch_direction.view(),
+            sqrt_masses.view(),
+            scale_level,
+            &mut budget,
+        )?;
+        let mut spacing = scale;
         let mut branch = Vec::with_capacity(seed.images);
         branch.push(saddle_q.clone());
-        let mut q = &saddle_q + sign * displacement * &direction;
+        let mut q = &saddle_q + opening_step(scale)? * &branch_direction;
         for slice in 1..seed.images {
             let fraction = slice as f64 / (seed.images - 1) as f64;
             let level = seed.saddle_energy + fraction * (seed.target_energy - seed.saddle_energy);
-            q = energy_slice(surface, q.view(), sqrt_masses.view(), level, &mut budget)?;
+            let next = energy_slice(
+                surface,
+                q.view(),
+                sqrt_masses.view(),
+                level,
+                spacing,
+                &mut budget,
+            )?;
+            let step = &next - &branch[slice - 1];
+            let moved = step.dot(&step).sqrt();
+            if moved > 0.0 {
+                spacing = moved;
+            }
+            q = next;
             branch.push(q.clone());
         }
         branches.push(branch);
@@ -1251,5 +1322,131 @@ mod opening_step_tests {
         assert!(opening_step(0.0).is_err());
         assert!(opening_step(f64::NAN).is_err());
         assert!(opening_step(f64::INFINITY).is_err());
+    }
+}
+
+#[cfg(test)]
+mod level_distance_tests {
+    use super::level_distance;
+    use crate::{BandSurface, SaddleError};
+    use ndarray::{Array1, Array2, ArrayView2, array};
+
+    struct Cup {
+        offset: f64,
+        width: f64,
+    }
+
+    impl BandSurface for Cup {
+        fn eval(
+            &self,
+            positions: ArrayView2<'_, f64>,
+            energies: &mut Array1<f64>,
+            gradients: &mut Array2<f64>,
+        ) -> Result<(), SaddleError> {
+            for (i, row) in positions.outer_iter().enumerate() {
+                let x = (row[0] - self.offset) / self.width;
+                energies[i] = 1.0 - x * x;
+                gradients[(i, 0)] = -2.0 * x / self.width;
+            }
+            Ok(())
+        }
+    }
+
+    fn distance(offset: f64, width: f64, level: f64) -> f64 {
+        let mut budget = 10_000;
+        level_distance(
+            &Cup { offset, width },
+            array![offset].view(),
+            array![1.0].view(),
+            array![1.0].view(),
+            level,
+            &mut budget,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn the_level_distance_ignores_translation_and_follows_length() {
+        let exact = 0.5_f64.sqrt();
+        let tolerance = 4.0 * f64::EPSILON.sqrt();
+        for width in [1.0e-6, 1.0, 1.0e6] {
+            let reference = distance(0.0, width, 0.5);
+            assert!((reference / width - exact).abs() <= tolerance * exact);
+            for offset in [-3.0e3, 17.0, 5.0e4] {
+                let shifted = distance(offset, width, 0.5);
+                assert!(
+                    (shifted - reference).abs() <= 1.0e-6 * reference + 1.0e-12 * offset.abs(),
+                    "width {width} offset {offset}: {shifted} against {reference}"
+                );
+            }
+        }
+    }
+
+    struct Hill;
+
+    impl BandSurface for Hill {
+        fn eval(
+            &self,
+            positions: ArrayView2<'_, f64>,
+            energies: &mut Array1<f64>,
+            gradients: &mut Array2<f64>,
+        ) -> Result<(), SaddleError> {
+            for (i, row) in positions.outer_iter().enumerate() {
+                let x = row[0];
+                energies[i] = 1.0 / (1.0 + x * x);
+                gradients[(i, 0)] = -2.0 * (x / (1.0 + x * x)) / (1.0 + x * x);
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn the_level_distance_refuses_a_level_the_energy_never_reaches() {
+        let mut budget = 10_000;
+        let below = level_distance(
+            &Hill,
+            array![0.0].view(),
+            array![1.0].view(),
+            array![1.0].view(),
+            -1.0,
+            &mut budget,
+        );
+        assert!(matches!(
+            below,
+            Err(SaddleError::Invalid(message)) if message.contains("did not reach")
+        ));
+        let mut budget = 10_000;
+        let above = level_distance(
+            &Hill,
+            array![0.0].view(),
+            array![1.0].view(),
+            array![1.0].view(),
+            2.0,
+            &mut budget,
+        );
+        assert!(matches!(
+            above,
+            Err(SaddleError::Invalid(message)) if message.contains("no energy above")
+        ));
+    }
+
+    #[test]
+    fn the_level_distance_spends_the_budget() {
+        let mut budget = 3;
+        let err = level_distance(
+            &Cup {
+                offset: 0.0,
+                width: 1.0,
+            },
+            array![0.0].view(),
+            array![1.0].view(),
+            array![1.0].view(),
+            0.5,
+            &mut budget,
+        );
+        assert!(matches!(
+            err,
+            Err(SaddleError::Invalid(message)) if message.starts_with("work budget exhausted")
+        ));
     }
 }

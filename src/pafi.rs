@@ -586,6 +586,73 @@ pub struct TrajectoryPoint {
     pub velocity: f64,
 }
 
+/// Mass-weighted coordinates and normalized arc-length knots of a path.
+///
+/// Every check that needs only the positions and masses lives here, so a
+/// caller can run them before any surface call.
+fn mass_weighted_path(
+    positions: &Array2<f64>,
+    masses: ArrayView1<f64>,
+) -> Result<(Array2<f64>, Vec<f64>), SaddleError> {
+    let images = positions.nrows();
+    let width = positions.ncols();
+    if images < 2 || width == 0 {
+        return Err(SaddleError::Shape(
+            "a fixed-energy path needs at least two nonempty images".into(),
+        ));
+    }
+    if masses.len() != width {
+        return Err(SaddleError::Shape(
+            "fixed-energy path masses must have one entry per coordinate".into(),
+        ));
+    }
+    if !positions.iter().all(|value| value.is_finite()) {
+        return Err(SaddleError::NonFinite("fixed-energy path positions"));
+    }
+    if !masses.iter().all(|mass| mass.is_finite()) {
+        return Err(SaddleError::NonFinite("fixed-energy path masses"));
+    }
+    if !masses.iter().all(|mass| *mass > 0.0) {
+        return Err(SaddleError::Invalid(
+            "fixed-energy path masses must be positive".into(),
+        ));
+    }
+    let sqrt_mass = masses.mapv(f64::sqrt);
+    let mut coordinate = Array2::zeros((images, width));
+    for image in 0..images {
+        for coordinate_index in 0..width {
+            coordinate[(image, coordinate_index)] =
+                positions[(image, coordinate_index)] * sqrt_mass[coordinate_index];
+        }
+    }
+    if !coordinate.iter().all(|value| value.is_finite()) {
+        return Err(SaddleError::NonFinite("fixed-energy path positions"));
+    }
+    let mut knots = vec![0.0; images];
+    for image in 1..images {
+        let mut length2 = 0.0;
+        for coordinate_index in 0..width {
+            let step =
+                coordinate[(image, coordinate_index)] - coordinate[(image - 1, coordinate_index)];
+            length2 += step * step;
+        }
+        knots[image] = knots[image - 1] + length2.sqrt();
+    }
+    let total = knots[images - 1];
+    if !total.is_finite() {
+        return Err(SaddleError::NonFinite("fixed-energy path"));
+    }
+    if total <= 0.0 {
+        return Err(SaddleError::Invalid(
+            "fixed-energy path has zero arc length".into(),
+        ));
+    }
+    for value in &mut knots {
+        *value /= total;
+    }
+    Ok((coordinate, knots))
+}
+
 /// Mass-weighted path and the parallel force along it.
 ///
 /// Knots are the normalized polyline arc length of the mass-weighted
@@ -621,65 +688,18 @@ impl FixedEnergyTrajectory {
         gradients: &Array2<f64>,
         masses: ArrayView1<f64>,
     ) -> Result<Self, SaddleError> {
+        let (coordinate, knots) = mass_weighted_path(positions, masses)?;
         let images = positions.nrows();
         let width = positions.ncols();
-        if images < 2 || width == 0 {
-            return Err(SaddleError::Shape(
-                "a fixed-energy path needs at least two nonempty images".into(),
-            ));
-        }
-        if gradients.nrows() != images || gradients.ncols() != width || masses.len() != width {
+        if gradients.nrows() != images || gradients.ncols() != width {
             return Err(SaddleError::Shape(
                 "fixed-energy path gradients and masses must match the images".into(),
             ));
         }
-        if !positions.iter().all(|value| value.is_finite()) {
-            return Err(SaddleError::NonFinite("fixed-energy path positions"));
-        }
         if !gradients.iter().all(|value| value.is_finite()) {
             return Err(SaddleError::NonFinite("fixed-energy path gradients"));
         }
-        if !masses.iter().all(|mass| mass.is_finite()) {
-            return Err(SaddleError::NonFinite("fixed-energy path masses"));
-        }
-        if !masses.iter().all(|mass| *mass > 0.0) {
-            return Err(SaddleError::Invalid(
-                "fixed-energy path masses must be positive".into(),
-            ));
-        }
         let sqrt_mass = masses.mapv(f64::sqrt);
-        let mut coordinate = Array2::zeros((images, width));
-        for image in 0..images {
-            for coordinate_index in 0..width {
-                coordinate[(image, coordinate_index)] =
-                    positions[(image, coordinate_index)] * sqrt_mass[coordinate_index];
-            }
-        }
-        if !coordinate.iter().all(|value| value.is_finite()) {
-            return Err(SaddleError::NonFinite("fixed-energy path positions"));
-        }
-        let mut knots = vec![0.0; images];
-        for image in 1..images {
-            let mut length2 = 0.0;
-            for coordinate_index in 0..width {
-                let step = coordinate[(image, coordinate_index)]
-                    - coordinate[(image - 1, coordinate_index)];
-                length2 += step * step;
-            }
-            knots[image] = knots[image - 1] + length2.sqrt();
-        }
-        let total = knots[images - 1];
-        if !total.is_finite() {
-            return Err(SaddleError::NonFinite("fixed-energy path"));
-        }
-        if total <= 0.0 {
-            return Err(SaddleError::Invalid(
-                "fixed-energy path has zero arc length".into(),
-            ));
-        }
-        for value in &mut knots {
-            *value /= total;
-        }
         let coordinate_spline = Spline::new(&knots, &coordinate, SplineEnds::Natural)?;
         let mut parallel = Array2::zeros((images, 1));
         for image in 0..images {
@@ -715,14 +735,26 @@ impl FixedEnergyTrajectory {
 
     /// Evaluate each image once, in order, and spline the path.
     ///
+    /// The positions and masses are checked before the first surface
+    /// call, so a surface is never evaluated on input that
+    /// [`Self::from_gradients`] would refuse for its positions or masses.
+    ///
     /// # Errors
     ///
-    /// The errors of [`BandSurface::eval`] and [`Self::from_gradients`].
+    /// [`SaddleError::Shape`] when `masses` does not have one entry per
+    /// coordinate or there are fewer than two nonempty images.
+    /// [`SaddleError::NonFinite`] when a position, a mass, or a
+    /// mass-weighted coordinate is not finite. [`SaddleError::Invalid`]
+    /// when a mass is not positive or the mass-weighted path has no arc
+    /// length. All of these are returned before the surface is called.
+    /// Then the errors of [`BandSurface::eval`] and
+    /// [`Self::from_gradients`].
     pub fn from_images<S: BandSurface>(
         surface: &S,
         positions: &Array2<f64>,
         masses: ArrayView1<f64>,
     ) -> Result<Self, SaddleError> {
+        mass_weighted_path(positions, masses)?;
         let images = positions.nrows();
         let width = positions.ncols();
         let mut gradients = Array2::zeros((images, width));
@@ -2151,6 +2183,115 @@ mod tests {
             build(&positions, &gradients, -1.0),
             Err(SaddleError::Invalid(_))
         ));
+    }
+
+    struct CountingSurface {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl CountingSurface {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl BandSurface for CountingSurface {
+        fn eval(
+            &self,
+            positions: ndarray::ArrayView2<'_, f64>,
+            energies: &mut Array1<f64>,
+            gradients: &mut Array2<f64>,
+        ) -> Result<(), SaddleError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            for (image, row) in positions.outer_iter().enumerate() {
+                energies[image] = 0.5 * row.dot(&row);
+                gradients.row_mut(image).assign(&row);
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn from_images_evaluates_each_image_once_on_good_input() {
+        let surface = CountingSurface::new();
+        let positions = array![[0.0], [1.0], [2.0]];
+        let path =
+            FixedEnergyTrajectory::from_images(&surface, &positions, array![1.0].view()).unwrap();
+        assert_eq!(surface.calls(), 3);
+        let by_gradient =
+            FixedEnergyTrajectory::from_gradients(&positions, &positions, array![1.0].view())
+                .unwrap();
+        assert_eq!(
+            path.parallel_force().sample(0.5).unwrap().value,
+            by_gradient.parallel_force().sample(0.5).unwrap().value
+        );
+    }
+
+    #[test]
+    fn from_images_checks_positions_and_masses_before_the_surface() {
+        let surface = CountingSurface::new();
+        let good = array![[0.0, 0.0], [1.0, 0.0], [2.0, 0.5]];
+        let masses = array![1.0, 2.0];
+        let build = |positions: &Array2<f64>, masses: &Array1<f64>| {
+            FixedEnergyTrajectory::from_images(&surface, positions, masses.view())
+        };
+
+        assert!(matches!(
+            build(&array![[0.0, 0.0]], &masses),
+            Err(SaddleError::Shape(_))
+        ));
+        assert!(matches!(
+            build(&Array2::zeros((3, 0)), &Array1::zeros(0)),
+            Err(SaddleError::Shape(_))
+        ));
+        assert!(matches!(
+            build(&good, &array![1.0]),
+            Err(SaddleError::Shape(_))
+        ));
+        assert!(matches!(
+            build(&good, &array![1.0, 2.0, 3.0]),
+            Err(SaddleError::Shape(_))
+        ));
+
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut positions = good.clone();
+            positions[(1, 1)] = bad;
+            assert!(matches!(
+                build(&positions, &masses),
+                Err(SaddleError::NonFinite(_))
+            ));
+            assert!(matches!(
+                build(&good, &array![1.0, bad]),
+                Err(SaddleError::NonFinite(_))
+            ));
+        }
+
+        for mass in [0.0, -1.0] {
+            assert!(matches!(
+                build(&good, &array![1.0, mass]),
+                Err(SaddleError::Invalid(message)) if message.contains("positive")
+            ));
+        }
+
+        let overflow = array![[0.0, 0.0], [f64::MAX, 0.0], [0.0, 0.0]];
+        assert!(matches!(
+            build(&overflow, &array![f64::MAX, 1.0]),
+            Err(SaddleError::NonFinite(_))
+        ));
+
+        let coincident = array![[1.0, 1.0], [1.0, 1.0]];
+        assert!(matches!(
+            build(&coincident, &masses),
+            Err(SaddleError::Invalid(message)) if message.contains("zero arc length")
+        ));
+
+        assert_eq!(surface.calls(), 0);
     }
 }
 
