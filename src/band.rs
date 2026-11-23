@@ -1165,10 +1165,29 @@ impl BandState {
         }
     }
 
+    /// Forget which climbing image an assembly belongs to.
+    ///
+    /// The projected force and its metric stamp stay, so
+    /// [`BandSession::evaluation`] still reports the force the last
+    /// step used. The next assembly misses this key, recaptures the
+    /// baseline, and can arm again. Dropping the force here made
+    /// `evaluation` report nothing after [`BandSession::restart`].
+    fn retire_assembly_key(&self) {
+        for slot in [&self.last, &self.previous] {
+            let mut guard = match slot.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if let Some(eval) = guard.as_mut() {
+                eval.assembly_ci = i64::MIN;
+            }
+        }
+    }
+
     /// The climbing baseline and the armed image belong to one
-    /// relaxation; the surface caches stay.
+    /// relaxation; the surface caches and the last projected force stay.
     fn restart(&self) {
-        self.invalidate_assembly();
+        self.retire_assembly_key();
         *self.baseline.lock().unwrap_or_else(|e| e.into_inner()) = None;
         *self.atom_baseline.lock().unwrap_or_else(|e| e.into_inner()) = None;
         self.armed.store(false, Ordering::Relaxed);
@@ -5801,5 +5820,70 @@ mod tests {
         assert_ne!(second.3, first.3);
         assert!(session.has_assembled_at(x.view(), x.len()));
         assert!(session.evaluation().is_some());
+    }
+
+    #[test]
+    fn restart_keeps_the_projected_force_and_retires_the_climbing_key() {
+        struct AlongX;
+        impl BandSurface for AlongX {
+            fn eval(
+                &self,
+                positions: ArrayView2<f64>,
+                energies: &mut Array1<f64>,
+                gradients: &mut Array2<f64>,
+            ) -> Result<(), SaddleError> {
+                for (i, row) in positions.outer_iter().enumerate() {
+                    energies[i] = row[1];
+                    gradients.row_mut(i).fill(0.0);
+                    gradients[(i, 1)] = 1.0;
+                }
+                Ok(())
+            }
+        }
+        let positions =
+            Array2::from_shape_vec((3, 3), vec![-1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0])
+                .expect("positions");
+        let config = BandConfig::default()
+            .with_climbing(CiConfig::always())
+            .with_min_mode(None)
+            .with_remove_translation(false);
+        let mut session = BandSession::new(config, positions).expect("band");
+        session.step(&AlongX).expect("first step");
+        let (projected, metric, assembly_ci) = {
+            let slot = session.state.last.lock().unwrap_or_else(|e| e.into_inner());
+            let eval = slot.as_ref().expect("assembly");
+            (
+                eval.projected.clone(),
+                eval.assembly_metric,
+                eval.assembly_ci,
+            )
+        };
+        assert!(projected.iter().any(|value| *value != 0.0));
+        assert!(metric.is_some());
+        assert!(assembly_ci >= 0);
+        assert!(session.climbing_image().is_some());
+
+        session.restart();
+        assert!(session.climbing_image().is_none());
+        {
+            let slot = session.state.last.lock().unwrap_or_else(|e| e.into_inner());
+            let eval = slot.as_ref().expect("surface cache");
+            assert_eq!(eval.projected, projected);
+            assert_eq!(eval.assembly_metric, metric);
+            assert_eq!(eval.assembly_ci, i64::MIN);
+        }
+        let kept = session
+            .evaluation()
+            .expect("restart keeps the last evaluation");
+        assert_eq!(kept.projected.len(), projected.len());
+        assert!(
+            kept.projected
+                .iter()
+                .zip(projected.iter())
+                .all(|(got, want)| got == want)
+        );
+
+        session.step(&AlongX).expect("step after restart");
+        assert!(session.climbing_image().is_some());
     }
 }
