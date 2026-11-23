@@ -10238,6 +10238,25 @@ fn demkowicz_lattice(temperature: f64) -> f64 {
     }
 }
 
+#[test]
+fn demkowicz_lattice_reads_every_table_1_row() {
+    for (temperature, a) in [
+        (300.0, 3.631),
+        (400.0, 3.637),
+        (500.0, 3.643),
+        (600.0, 3.649),
+        (700.0, 3.655),
+    ] {
+        assert_eq!(demkowicz_lattice(temperature), a, "{temperature} K");
+    }
+}
+
+#[test]
+#[should_panic(expected = "Table 1 has no lattice parameter at 650 K")]
+fn demkowicz_lattice_has_no_fallback_row() {
+    demkowicz_lattice(650.0);
+}
+
 fn shell_772(a: f64, repeats: usize) -> Option<[f64; 3]> {
     let target = a * 4.5_f64.sqrt();
     shell_table(a, repeats)
@@ -10837,6 +10856,34 @@ fn rotation_channel(text: &str, temperature: f64) -> (f64, String) {
             "TST of the measured {barrier:.6} eV barrier with the {nu_t:.0} K attempt frequency {nu:.6e} Hz; no {temperature:.0} K rotation PAFI"
         ),
     )
+}
+
+const ROTATION_CHANNEL_ROWS: &str = "\
+pafi,isolated,100,rotate,tangential,300,0.230041,0.229786,0.166127,0.010056,1.43421620e12,7.03333985e8,rated,0.00140,note
+rotation,isolated,100,rotate,500,0.225502,8.927472e-4,1.500000e-3,true,rotation,note
+";
+
+#[test]
+fn rotation_channel_prices_a_measured_barrier_with_the_nearest_attempt_frequency() {
+    let (rate, note) = rotation_channel(ROTATION_CHANNEL_ROWS, 500.0);
+    let thermal = 500.0 * rgsaddle::BOLTZMANN_EV_PER_K;
+    assert_eq!(rate, 1.43421620e12 * (-0.225502 / thermal).exp());
+    assert!(note.contains("300 K attempt frequency"), "{note}");
+}
+
+#[test]
+#[should_panic(expected = "no 600 K isolated rotation barrier")]
+fn rotation_channel_refuses_a_temperature_without_a_barrier() {
+    rotation_channel(ROTATION_CHANNEL_ROWS, 600.0);
+}
+
+#[test]
+#[should_panic(expected = "no isolated rotation attempt frequency")]
+fn rotation_channel_refuses_a_barrier_without_an_attempt_frequency() {
+    rotation_channel(
+        "rotation,isolated,100,rotate,500,0.225502,8.927472e-4,1.500000e-3,true,rotation,note\n",
+        500.0,
+    );
 }
 
 fn strain_away_factor(text: &str, temperature: f64, radius_ours: f64, free: f64) -> f64 {
