@@ -36,7 +36,7 @@ use crate::tangent::TangentKind;
 /// The RGSADDLE ABI MAJOR.
 pub const RGSADDLE_ABI_MAJOR: u32 = 1;
 /// The RGSADDLE ABI MINOR.
-pub const RGSADDLE_ABI_MINOR: u32 = 64;
+pub const RGSADDLE_ABI_MINOR: u32 = 65;
 
 /// A band, min-mode or OCI-NEB config of this minor or newer certifies
 /// the saddle index at convergence by default.
@@ -73,7 +73,7 @@ pub(crate) const BAND_STRING_MINOR: u32 = 44;
 /// Min-mode config bit 0 (ABI minor 63). `rotation_angle_tol` was set
 /// explicitly by the caller and must be read even when it is zero.
 pub const RGSADDLE_MINMODE_EXPLICIT_ROTATION_ANGLE_TOL: u64 = 1;
-const MINMODE_EXPLICIT_ROTATION_ANGLE_TOL_MINOR: u32 = 63;
+pub(crate) const MINMODE_EXPLICIT_ROTATION_ANGLE_TOL_MINOR: u32 = 63;
 
 /// The trust-region reparametrization a band config asks for.
 pub(crate) fn rtr_reparametrization(cfg: &RgsaddleBandConfig) -> crate::Reparametrization {

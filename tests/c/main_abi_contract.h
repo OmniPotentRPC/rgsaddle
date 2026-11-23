@@ -5,7 +5,7 @@
 #include <stddef.h>
 
 _Static_assert(RGSADDLE_ABI_MAJOR == 1u, "main ABI major");
-_Static_assert(RGSADDLE_ABI_MINOR == 64u, "ABI minor");
+_Static_assert(RGSADDLE_ABI_MINOR == 65u, "ABI minor");
 _Static_assert(RGSADDLE_LINEB_LINEAR_SEED == (1u << 0), "lineb flag bit 0");
 _Static_assert(RGSADDLE_LINEB_ENDPOINT_CONVERGENCE == (1u << 1), "lineb flag bit 1");
 _Static_assert(RGSADDLE_LINEB_PROJECTED_VERLET == (1u << 2), "lineb flag bit 2");
@@ -672,13 +672,13 @@ typedef rgsaddle_status_t (*abi64_signature_rgsaddle_geodesic_morse)(
     double *length, double *lower, double *upper);
 _Static_assert(_Generic(&rgsaddle_geodesic_morse, abi64_signature_rgsaddle_geodesic_morse: 1, default: 0), "rgsaddle_geodesic_morse signature");
 
-typedef rgsaddle_status_t (*abi45_signature_rgsaddle_band_set_dynamic)(
+typedef rgsaddle_status_t (*abi65_signature_rgsaddle_band_set_dynamic)(
     RgsaddleBand *band, int32_t enabled, double fmax, double scale_fmax);
-_Static_assert(_Generic(&rgsaddle_band_set_dynamic, abi45_signature_rgsaddle_band_set_dynamic: 1, default: 0), "rgsaddle_band_set_dynamic signature");
+_Static_assert(_Generic(&rgsaddle_band_set_dynamic, abi65_signature_rgsaddle_band_set_dynamic: 1, default: 0), "rgsaddle_band_set_dynamic signature");
 
-typedef rgsaddle_status_t (*abi45_signature_rgsaddle_dyneb_mask)(
+typedef rgsaddle_status_t (*abi65_signature_rgsaddle_dyneb_mask)(
     int64_t n_images, int64_t n_atoms, const double *positions, const double *energies,
     double *forces, double fmax, double scale_fmax, uint8_t *frozen);
-_Static_assert(_Generic(&rgsaddle_dyneb_mask, abi45_signature_rgsaddle_dyneb_mask: 1, default: 0), "rgsaddle_dyneb_mask signature");
+_Static_assert(_Generic(&rgsaddle_dyneb_mask, abi65_signature_rgsaddle_dyneb_mask: 1, default: 0), "rgsaddle_dyneb_mask signature");
 
 #endif

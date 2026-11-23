@@ -3734,7 +3734,7 @@ pub unsafe extern "C" fn rgsaddle_growing_string_set_fixed_atoms(
     }
 }
 
-/// Dynamic NEB on the band (ABI minor 45). `enabled` 0 clears it.
+/// Dynamic NEB on the band (ABI minor 65). `enabled` 0 clears it.
 ///
 /// # Safety
 /// `band` is a live session or null.
