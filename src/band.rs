@@ -3560,6 +3560,10 @@ impl BandSession {
             exp.r_nn = r_nn;
             exp.mu = Some(mu);
             exp.metrics = metrics;
+            // The cached driving force was solved with the matrices just
+            // replaced. Drop it on every slot, as set_exp_precon does,
+            // so the next assembly cannot reuse it.
+            self.state.invalidate_assembly();
         }
         Ok(())
     }
@@ -5171,5 +5175,65 @@ mod tests {
         )
         .expect("cached finish");
         assert_eq!(session.state.pcg_solves.load(Ordering::Relaxed), finished);
+    }
+
+    #[test]
+    fn rebuilding_the_metric_drops_the_cached_driving_force() {
+        let positions = Array2::from_shape_vec(
+            (3, 9),
+            vec![
+                0.0, 0.0, 0.0, 1.1, 0.0, 0.0, 0.0, 1.2, 0.1, 0.2, 0.1, 0.0, 1.2, 0.2, 0.0, 0.1,
+                1.3, 0.2, 0.4, 0.2, 0.0, 1.3, 0.4, 0.1, 0.2, 1.4, 0.3,
+            ],
+        )
+        .expect("positions");
+        let gradient = Array2::from_shape_fn((3, 9), |(row, col)| {
+            0.2 * (row + 1) as f64 - 0.03 * col as f64
+        });
+        let surface = Prescribed {
+            energy: vec![0.0, 1.0, 0.2],
+            gradient,
+        };
+        let config = BandConfig::default()
+            .with_climbing(None)
+            .with_min_mode(None)
+            .with_remove_translation(false)
+            .with_exp_precon(ExpBandPrecon::default().with_mu(1.0));
+        let mut session = BandSession::new(config, positions).expect("band");
+        session.refresh_exp(&surface).expect("metric");
+        let x = session.interior_flat();
+        let _ = assemble_band_with(
+            &session.config,
+            &session.state,
+            &surface,
+            session.positions.row(0),
+            session.positions.row(2),
+            x.view(),
+            metric_view(&session),
+        )
+        .expect("assembly");
+        let solves = session.state.pcg_solves.load(Ordering::Relaxed);
+        {
+            let mut last = session.state.last.lock().unwrap_or_else(|e| e.into_inner());
+            let eval = last.as_mut().expect("cached evaluation");
+            eval.driving.fill(f64::NAN);
+        }
+        session.build_metrics(&surface).expect("rebuild");
+        let again = assemble_band_with(
+            &session.config,
+            &session.state,
+            &surface,
+            session.positions.row(0),
+            session.positions.row(2),
+            x.view(),
+            metric_view(&session),
+        )
+        .expect("assembly after rebuild");
+        let driving = again.3.expect("driving force");
+        assert!(driving.iter().all(|v| v.is_finite()));
+        assert!(
+            session.state.pcg_solves.load(Ordering::Relaxed) > solves,
+            "the rebuilt metric reused the cached driving force"
+        );
     }
 }
