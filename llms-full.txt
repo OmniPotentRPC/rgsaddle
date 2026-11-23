@@ -406,7 +406,7 @@ Every public configuration struct, its public fields, and the corresponding chai
 | `AdaptiveOhTstConfig` | `max_iterations` (`with_max_iterations`), `max_planes` (`with_max_planes`), `sampler` (`with_sampler`, `with_thermal`) |
 | `AffineSymmetry` | `linear` (`with_linear`), `translation` (`with_translation`) |
 | `AnharmonicConfig` | `hvp_step` (`with_hvp_step`), `krylov` (`with_krylov`), `krylov_tolerance` (`with_krylov_tolerance`), `probes` (`with_probes`), `seed` (`with_seed`), `step` (`with_step`) |
-| `ArtConfig` | `basin_rmsd` (`with_basin_rmsd`), `duplicate_rmsd` (`with_duplicate_rmsd`), `eigen_threshold` (`with_eigen_threshold`), `max_climbs` (`with_max_climbs`), `max_pushes` (`with_max_pushes`), `mode` (`with_mode`), `permute_identical` (`with_permute_identical`), `perpendicular` (`with_perpendicular`), `push_length` (`with_push_length`), `push_over` (`with_push_over`), `push_step` (`with_push_step`), `quench` (`with_quench`), `saddle` (`with_saddle`) |
+| `ArtConfig` | Constructors: `lj_art` (Lennard-Jones reduced units), `for_units`. Validation: `validate`. Fields: `basin_rmsd` (`with_basin_rmsd`), `duplicate_rmsd` (`with_duplicate_rmsd`), `eigen_threshold` (`with_eigen_threshold`), `max_climbs` (`with_max_climbs`), `max_pushes` (`with_max_pushes`), `mode` (`with_mode`), `permute_identical` (`with_permute_identical`), `perpendicular` (`with_perpendicular`), `push_length` (`with_push_length`), `push_over` (`with_push_over`), `push_step` (`with_push_step`), `quench` (`with_quench`), `saddle` (`with_saddle`) |
 | `ArtNConfig` | `activation_relaxations` (`with_activation_relaxations`), `basin_push` (`with_basin_push`), `basin_relaxations` (`with_basin_relaxations`), `curvature_floor` (`with_curvature_floor`), `eigenvalue_threshold` (`with_eigenvalue_threshold`), `lanczos_actions` (`with_lanczos_actions`), `lanczos_start` (`with_lanczos_start`), `relaxation_step` (`with_relaxation_step`) |
 | `AutoNebTuning` | `climb` (`with_climb`), `climb_max_steps` (`with_climb_max_steps`), `full_band` (`with_full_band`), `interpolant` (`with_interpolant`), `local_force_tol` (`with_local_force_tol`), `local_max_steps` (`with_local_max_steps`), `n_max` (`with_n_max`), `n_simul` (`with_n_simul`), `record_samples` (`with_record_samples`), `space_energy_ratio` (`with_space_energy_ratio`), `threads` (`with_threads`) |
 | `BandConfig` | `autoneb` (`with_autoneb`), `cell` (`with_cell`), `climbing` (`with_climbing`), `exp_precon` (`with_exp_precon`), `fixed_atoms` (`with_fixed_atoms`), `force_tol` (`with_force_tol`), `free_end` (`with_free_end`), `max_move` (`with_max_move`), `method` (`with_method`), `min_mode` (`with_min_mode`), `projection` (`with_projection`), `quickmin` (`with_quickmin`), `quickmin_options` (`with_quickmin_options`), `remove_translation` (`with_remove_translation`), `saddle_check` (`with_saddle_check`), `solid` (`with_solid`), `spring` (`with_spring`), `string` (`with_string`), `tangent` (`with_tangent`), `time_step` (`with_time_step`), `zoom` (`with_zoom`) |
@@ -2043,6 +2043,15 @@ The phase is stored on the session. `step` runs one phase and leaves the next on
 `ArtStatus::Connected` requires a converged index-1 certificate, both quench energies below the saddle, one quenched image on the reactant, and the other image a different minimum. Either sign of the push-over may be the return: the mode at the saddle is not required to point back along the path that arrived. `ArtStatus::Reverted` is the other case of one basin, and it is not a completed exit. The structural distance is Euclidean for one atom. For several atoms it is the Kabsch RMSD, or the RMSD of the sorted pair distances when `permute_identical` is set, which is the identical-atom comparison used for the LJ clusters in the paper.
 
 `ArtConfig::mode` is the Lanczos block. Its `artn` shortcut and its `saddle_check` are cleared: those steps are the phases above. `MinModeConfig::with_artn` remains the shorter opt-in inside one minimum-mode iteration. The point stencil's `Preset::Art` is still the push followed by a minimum-mode climb.
+
+The named `ArtConfig::lj_art()` preset is only for Lennard-Jones reduced
+units, where \(\epsilon = 1\) and
+\(\sigma = 1\). For a potential whose characteristic
+energy and length are not one in the host units, use
+`ArtConfig::for_units(energy_scale, length_scale)`. It scales lengths,
+forces, and curvatures separately. `ArtConfig::validate()` rejects a
+perpendicular-relaxation force tolerance looser than the mode-following force
+tolerance; sessions and batches call it before consuming a configuration.
 
 The runnable example is the doctest on `ArtSession`: a one-dimensional double well in three coordinates, a host seed, and a connected index-1 exit. `tests/art_session.rs` repeats the paper's census on LJ7, starting from the pentagonal bipyramid.
 
