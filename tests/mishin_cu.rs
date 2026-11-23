@@ -10847,12 +10847,11 @@ fn rotation_channel(text: &str, temperature: f64) -> (f64, String) {
         }
     }
     let Some(barrier) = barrier else {
-        return (0.0, "no rotation barrier".into());
+        panic!("no {temperature:.0} K isolated rotation barrier and no rated rotation PAFI");
     };
     let Some((nu_t, nu)) = pafi else {
-        return (
-            0.0,
-            format!("barrier {barrier:.6} eV and no attempt frequency"),
+        panic!(
+            "barrier {barrier:.6} eV at {temperature:.0} K but no isolated rotation attempt frequency"
         );
     };
     let thermal = temperature * rgsaddle::BOLTZMANN_EV_PER_K;
@@ -10876,6 +10875,16 @@ fn rotation_channel_prices_a_measured_barrier_with_the_nearest_attempt_frequency
     let thermal = 500.0 * rgsaddle::BOLTZMANN_EV_PER_K;
     assert_eq!(rate, 1.43421620e12 * (-0.225502 / thermal).exp());
     assert!(note.contains("300 K attempt frequency"), "{note}");
+}
+
+#[test]
+fn rotation_channel_prices_every_catalogued_temperature() {
+    for rates in [recorded_rates(), converged_rates()] {
+        for temperature in [300.0, 500.0, 700.0] {
+            let (rate, note) = rotation_channel(&rates, temperature);
+            assert!(rate.is_finite() && rate > 0.0, "{temperature} K: {note}");
+        }
+    }
 }
 
 #[test]
@@ -12198,9 +12207,17 @@ fn assemble_converged(recorded: bool) {
     let mut out = String::from(
         "temperature_K,estimator,volume_over_Omega,sigma,spontaneous_sites,R_eff_A,demkowicz_8788,note\n",
     );
-    for temperature in [300.0_f64, 500.0, 700.0] {
+    let temperatures: Vec<f64> = env_csv("RGSADDLE_TEMPS", "300,500,700")
+        .iter()
+        .map(|item| item.parse().expect("temperature"))
+        .collect();
+    for temperature in temperatures {
         let a = demkowicz_lattice(temperature);
         let fractions = census_fractions(&census, temperature);
+        assert!(
+            !fractions.is_empty(),
+            "the flow census has no {temperature:.0} K rows"
+        );
         let recombined: usize = fractions.iter().map(|shell| shell.1).sum();
         let spontaneous = |id: &str| {
             let radius: f64 = id
