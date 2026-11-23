@@ -13,6 +13,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ndarray::{Array1, ArrayView1, array};
+use rayon::prelude::*;
 use rgsaddle::{
     MinModeConfig, MinModeKind, MinModeSession, MinModeStatus, PointSurface, SaddleError,
     soft_mode_then_full_directions,
@@ -222,7 +223,9 @@ fn run_one<S: PointSurface>(
     Ok((false, calls_to_cover))
 }
 
-fn run_surface<S: PointSurface>(spec: &SurfaceSpec<'_, S>) -> Result<SurfaceResult, SaddleError> {
+fn run_surface<S: PointSurface + Sync>(
+    spec: &SurfaceSpec<'_, S>,
+) -> Result<SurfaceResult, SaddleError> {
     let mut random_calls = Vec::new();
     let mut soft_calls = Vec::new();
     let mut random_success_calls = Vec::new();
@@ -233,10 +236,16 @@ fn run_surface<S: PointSurface>(spec: &SurfaceSpec<'_, S>) -> Result<SurfaceResu
     let mut soft_success = 0usize;
 
     let pilot_n = 14usize;
-    for i in 0..pilot_n {
-        let run_seed = 20261119u64 + (i as u64) * 37;
-        let (ok_r, c_r) = run_one(spec, run_seed, Strategy::IsotropicRandom)?;
-        let (ok_s, c_s) = run_one(spec, run_seed, Strategy::SoftModeFirst)?;
+    let pilot_rows: Vec<_> = (0..pilot_n)
+        .into_par_iter()
+        .map(|i| {
+            let run_seed = 20261119u64 + (i as u64) * 37;
+            let r = run_one(spec, run_seed, Strategy::IsotropicRandom)?;
+            let s = run_one(spec, run_seed, Strategy::SoftModeFirst)?;
+            Ok((r, s))
+        })
+        .collect::<Result<Vec<_>, SaddleError>>()?;
+    for ((ok_r, c_r), (ok_s, c_s)) in pilot_rows {
         random_success += usize::from(ok_r);
         soft_success += usize::from(ok_s);
         random_calls.push(c_r as f64);
@@ -258,10 +267,16 @@ fn run_surface<S: PointSurface>(spec: &SurfaceSpec<'_, S>) -> Result<SurfaceResu
     let n_target =
         ((1.1 * pilot_n as f64 * (pilot_se / 0.03).powi(2)).ceil() as usize).clamp(pilot_n, 2048);
 
-    for i in pilot_n..n_target {
-        let run_seed = 20261119u64 + (i as u64) * 37;
-        let (ok_r, c_r) = run_one(spec, run_seed, Strategy::IsotropicRandom)?;
-        let (ok_s, c_s) = run_one(spec, run_seed, Strategy::SoftModeFirst)?;
+    let extra_rows: Vec<_> = (pilot_n..n_target)
+        .into_par_iter()
+        .map(|i| {
+            let run_seed = 20261119u64 + (i as u64) * 37;
+            let r = run_one(spec, run_seed, Strategy::IsotropicRandom)?;
+            let s = run_one(spec, run_seed, Strategy::SoftModeFirst)?;
+            Ok((r, s))
+        })
+        .collect::<Result<Vec<_>, SaddleError>>()?;
+    for ((ok_r, c_r), (ok_s, c_s)) in extra_rows {
         random_success += usize::from(ok_r);
         soft_success += usize::from(ok_s);
         random_calls.push(c_r as f64);
@@ -347,11 +362,16 @@ fn softmode_seeding_protocol_and_significance() {
         per_run_seeds: 14,
     };
 
-    let results = [
-        run_surface(&muller).unwrap(),
-        run_surface(&product).unwrap(),
-        run_surface(&coupled).unwrap(),
-    ];
+    let (r_muller, (r_product, r_coupled)) = rayon::join(
+        || run_surface(&muller).unwrap(),
+        || {
+            rayon::join(
+                || run_surface(&product).unwrap(),
+                || run_surface(&coupled).unwrap(),
+            )
+        },
+    );
+    let results = [r_muller, r_product, r_coupled];
     let names = [muller.name, product.name, coupled.name];
 
     let success_p: Vec<f64> = results.iter().map(|r| r.success_mcnemar_p).collect();

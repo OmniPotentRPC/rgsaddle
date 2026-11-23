@@ -32,6 +32,7 @@ use ohtst_surfaces::{
 };
 
 /// Stationary points of the surface and its barrier `E_A`.
+#[derive(Clone, Copy)]
 struct Geometry {
     reactant: [f64; 2],
     product: [f64; 2],
@@ -41,17 +42,20 @@ struct Geometry {
 }
 
 fn geometry() -> Geometry {
-    let reactant = descend(LepsHo::energy, [0.75, 1.3]);
-    let product = descend(LepsHo::energy, [3.0, -1.3]);
-    let saddle = stationary(LepsHo::energy, [2.02, -0.17]);
-    let saddle_energy = LepsHo::energy(saddle[0], saddle[1]).0;
-    Geometry {
-        reactant,
-        product,
-        saddle,
-        saddle_energy,
-        barrier: saddle_energy - LepsHo::energy(reactant[0], reactant[1]).0,
-    }
+    static GEOMETRY: std::sync::OnceLock<Geometry> = std::sync::OnceLock::new();
+    *GEOMETRY.get_or_init(|| {
+        let reactant = descend(LepsHo::energy, [0.75, 1.3]);
+        let product = descend(LepsHo::energy, [3.0, -1.3]);
+        let saddle = stationary(LepsHo::energy, [2.02, -0.17]);
+        let saddle_energy = LepsHo::energy(saddle[0], saddle[1]).0;
+        Geometry {
+            reactant,
+            product,
+            saddle,
+            saddle_energy,
+            barrier: saddle_energy - LepsHo::energy(reactant[0], reactant[1]).0,
+        }
+    })
 }
 
 impl Geometry {
@@ -168,18 +172,24 @@ fn harmonic_rate(geometry: &Geometry, kt: f64) -> f64 {
 
 /// The plane of a dimer run from near the saddle, and its curvature.
 fn dimer_plane() -> (Hyperplane, f64) {
-    let config = MinModeConfig::default().with_force_tol(1.0e-8);
-    let mut session = MinModeSession::new(config, array![1.9, -0.05], array![1.0, 0.2]).unwrap();
-    for _ in 0..2000 {
-        let report = session.step(&LepsHo).unwrap();
-        if report.status == MinModeStatus::Converged {
-            return (
-                Hyperplane::from_min_mode(&session).unwrap(),
-                report.curvature,
-            );
-        }
-    }
-    panic!("the dimer did not converge");
+    static DIMER: std::sync::OnceLock<(Hyperplane, f64)> = std::sync::OnceLock::new();
+    DIMER
+        .get_or_init(|| {
+            let config = MinModeConfig::default().with_force_tol(1.0e-8);
+            let mut session =
+                MinModeSession::new(config, array![1.9, -0.05], array![1.0, 0.2]).unwrap();
+            for _ in 0..2000 {
+                let report = session.step(&LepsHo).unwrap();
+                if report.status == MinModeStatus::Converged {
+                    return (
+                        Hyperplane::from_min_mode(&session).unwrap(),
+                        report.curvature,
+                    );
+                }
+            }
+            panic!("the dimer did not converge");
+        })
+        .clone()
 }
 
 fn sampler(kt: f64, time_step: f64) -> LangevinConfig {
@@ -319,28 +329,47 @@ fn leps_rate_against_quadrature_and_harmonic_tst() {
         - free_energy(&geometry, geometry.reactant, geometry.guideline(), kt))
         / kt;
     let density_exact = exact / (kt / (2.0 * std::f64::consts::PI)).sqrt() * rise.exp();
+    let nodes = 17;
 
-    let density = reactant_density(
-        &LepsHo,
-        &start,
-        reactant.view(),
-        std::slice::from_ref(&optimal),
-        &sampler(kt, 0.1).with_records(16_000),
-    )
-    .unwrap();
+    let config = ReversibleWorkConfig::default()
+        .with_sampler(sampler(kt, 0.1).with_records(2000).with_retain(128))
+        .with_nodes(nodes);
+    let ((density, basin), work) = rayon::join(
+        || {
+            rayon::join(
+                || {
+                    reactant_density(
+                        &LepsHo,
+                        &start,
+                        reactant.view(),
+                        std::slice::from_ref(&optimal),
+                        &sampler(kt, 0.1).with_records(16_000),
+                    )
+                    .unwrap()
+                },
+                || {
+                    basin_density(
+                        &LepsHo,
+                        reactant.view(),
+                        start.normal(),
+                        &BasinConfig::default().with_sampler(sampler(kt, 0.1).with_records(4000)),
+                    )
+                    .unwrap()
+                },
+            )
+        },
+        || {
+            let mut engine = AnalyticSurfaceSampler::new(&LepsHo, config.sampler.clone())
+                .with_start(reactant.clone());
+            reversible_work(&mut engine, &[start.clone(), optimal.clone()], &config).unwrap()
+        },
+    );
     assert!(
         (density.density - density_exact).abs() < 4.0 * density.density_error,
         "density {} ± {} against {density_exact}",
         density.density,
         density.density_error
     );
-    let basin = basin_density(
-        &LepsHo,
-        reactant.view(),
-        start.normal(),
-        &BasinConfig::default().with_sampler(sampler(kt, 0.1).with_records(4000)),
-    )
-    .unwrap();
     assert!(
         (basin.density - density_exact).abs()
             < 4.0 * basin.density_error + basin.quadrature_error * basin.density,
@@ -350,7 +379,6 @@ fn leps_rate_against_quadrature_and_harmonic_tst() {
     );
     assert!(basin.density_error < 0.002 * density_exact);
 
-    let nodes = 17;
     let layout = simpson_on_leg(
         &geometry,
         kt,
@@ -359,12 +387,6 @@ fn leps_rate_against_quadrature_and_harmonic_tst() {
         nodes,
     );
     assert!((layout - rise).abs() < 0.01, "{layout} against {rise}");
-    let config = ReversibleWorkConfig::default()
-        .with_sampler(sampler(kt, 0.1).with_records(2000).with_retain(128))
-        .with_nodes(nodes);
-    let mut engine =
-        AnalyticSurfaceSampler::new(&LepsHo, config.sampler.clone()).with_start(reactant.clone());
-    let work = reversible_work(&mut engine, &[start, optimal], &config).unwrap();
     let (value, error) = (work.work / kt, work.error / kt);
     assert!(
         (value - rise).abs() < 4.0 * error,
@@ -515,20 +537,26 @@ fn leps_rate_approaches_harmonic_tst_at_low_temperature() {
     let optimal = line(geometry.off_saddle(offset, theta), theta);
     let start = geometry.reactant_line();
     let reactant = array![geometry.reactant[0], geometry.reactant[1]];
-    let density = reactant_density(
-        &LepsHo,
-        &start,
-        reactant.view(),
-        std::slice::from_ref(&optimal),
-        &sampler(kt, 0.1).with_records(16_000),
-    )
-    .unwrap();
     let config = ReversibleWorkConfig::default()
         .with_sampler(sampler(kt, 0.1).with_records(4000))
         .with_nodes(17);
-    let mut engine =
-        AnalyticSurfaceSampler::new(&LepsHo, config.sampler.clone()).with_start(reactant);
-    let work = reversible_work(&mut engine, &[start, optimal], &config).unwrap();
+    let (density, work) = rayon::join(
+        || {
+            reactant_density(
+                &LepsHo,
+                &start,
+                reactant.view(),
+                std::slice::from_ref(&optimal),
+                &sampler(kt, 0.1).with_records(16_000),
+            )
+            .unwrap()
+        },
+        || {
+            let mut engine = AnalyticSurfaceSampler::new(&LepsHo, config.sampler.clone())
+                .with_start(reactant.clone());
+            reversible_work(&mut engine, &[start.clone(), optimal.clone()], &config).unwrap()
+        },
+    );
     let rate = ohtst_rate(&density, &work).unwrap();
     assert!(rate.log_rate_error < 0.25, "{rate:?}");
     for (reference, name) in [

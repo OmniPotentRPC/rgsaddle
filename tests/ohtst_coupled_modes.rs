@@ -286,7 +286,12 @@ fn coupled_modes_planes_against_quadrature() {
         .with_seed(4);
     let optimum = model.optimal_offset(kt);
     let plane = Hyperplane::new(&axis * optimum, axis.clone()).unwrap();
-    let sample = sample_plane(&model, &plane, None, &config).unwrap();
+    let saddle = Hyperplane::new(Array1::zeros(N), axis).unwrap();
+    let (sample_opt, sample_sad) = rayon::join(
+        || sample_plane(&model, &plane, None, &config).unwrap(),
+        || sample_plane(&model, &saddle, None, &config).unwrap(),
+    );
+    let sample = sample_opt;
     assert!(
         sample.normal_force.abs() < 4.0 * sample.normal_force_error,
         "force {} ± {}",
@@ -308,8 +313,7 @@ fn coupled_modes_planes_against_quadrature() {
         sample.virial_error
     );
 
-    let saddle = Hyperplane::new(Array1::zeros(N), axis).unwrap();
-    let sample = sample_plane(&model, &saddle, None, &config).unwrap();
+    let sample = sample_sad;
     let h = 1.0e-4;
     let exact = kt * (model.log_plane(h, kt) - model.log_plane(-h, kt)) / (2.0 * h);
     assert!(
@@ -344,25 +348,16 @@ fn coupled_modes_control_variates() {
     let mut e = Array1::zeros(N);
     e[1] = 1.0;
     let across = model.rotate(e);
-    let flat = sample_plane(
-        &model,
-        &Hyperplane::new(Array1::zeros(N), axis.clone()).unwrap(),
-        None,
-        &config,
-    )
-    .unwrap();
-    let raw = flat.uncontrolled.as_ref().unwrap();
-    assert!((flat.normal_force - raw.normal_force).abs() < 1.0e-9);
-
     let tilt: f64 = 0.3;
     let normal = &axis * tilt.cos() + &across * tilt.sin();
-    let tilted = sample_plane(
-        &model,
-        &Hyperplane::new(Array1::zeros(N), normal).unwrap(),
-        None,
-        &config,
-    )
-    .unwrap();
+    let flat_plane = Hyperplane::new(Array1::zeros(N), axis.clone()).unwrap();
+    let tilted_plane = Hyperplane::new(Array1::zeros(N), normal).unwrap();
+    let (flat, tilted) = rayon::join(
+        || sample_plane(&model, &flat_plane, None, &config).unwrap(),
+        || sample_plane(&model, &tilted_plane, None, &config).unwrap(),
+    );
+    let raw = flat.uncontrolled.as_ref().unwrap();
+    assert!((flat.normal_force - raw.normal_force).abs() < 1.0e-9);
     let raw = tilted.uncontrolled.as_ref().unwrap();
     assert!(
         (tilted.normal_force - raw.normal_force).abs() < 4.0 * raw.normal_force_error,
@@ -401,8 +396,7 @@ fn coupled_modes_control_variates() {
 /// at the offset 0.068867 ± 0.000224; the harmonic metric took 13
 /// iterations and 692733 force calls to 0.00219 rad and
 /// 0.068874 ± 0.000224. The optimum is 0.068873.
-#[test]
-fn coupled_modes_optimizer_turns_back_to_the_axis() {
+fn assert_optimizer_turns_back_to_the_axis(name: &str, metric: PlaneMetric) {
     let model = CoupledModes::new();
     let kt = 0.2;
     let axis = model.axis();
@@ -427,36 +421,41 @@ fn coupled_modes_optimizer_turns_back_to_the_axis() {
         / (h * h);
     let stiffest = model.omega2.iter().fold(0.0_f64, |m, w| m.max(*w));
     let rotation = kt * (1.0 + 4.0 * V0 / stiffest);
-    for (name, metric) in [
-        ("block", PlaneMetric::Blocks),
-        (
-            "harmonic",
-            PlaneMetric::Harmonic(HarmonicReference::new(Array1::zeros(N))),
-        ),
-    ] {
-        let config = PlaneOptimizerConfig::default()
-            .with_sampler(sampler.clone())
-            .with_metric(metric);
-        let optimum = PlaneOptimizer::new(&start, config)
-            .unwrap()
-            .run(&model)
-            .unwrap();
-        let normal = optimum.plane.normal();
-        let angle = normal.dot(&axis).min(1.0).acos();
-        let shift = normal.dot(&optimum.plane.point());
-        let last = optimum.trace.last().unwrap();
-        let angle_error = last.rotation_error / rotation;
-        let offset_error = last.normal_force_error / curvature.abs();
-        assert!(
-            angle < 4.0 * angle_error,
-            "{name} metric: {angle} rad off the axis, error {angle_error}"
-        );
-        assert!(
-            (shift - s).abs() < 4.0 * offset_error,
-            "{name} metric: offset {shift} ± {offset_error} against {s}"
-        );
-        assert_eq!(optimum.trace.len(), optimum.accepted + 1);
-    }
+    let config = PlaneOptimizerConfig::default()
+        .with_sampler(sampler)
+        .with_metric(metric);
+    let optimum = PlaneOptimizer::new(&start, config)
+        .unwrap()
+        .run(&model)
+        .unwrap();
+    let normal = optimum.plane.normal();
+    let angle = normal.dot(&axis).min(1.0).acos();
+    let shift = normal.dot(&optimum.plane.point());
+    let last = optimum.trace.last().unwrap();
+    let angle_error = last.rotation_error / rotation;
+    let offset_error = last.normal_force_error / curvature.abs();
+    assert!(
+        angle < 4.0 * angle_error,
+        "{name} metric: {angle} rad off the axis, error {angle_error}"
+    );
+    assert!(
+        (shift - s).abs() < 4.0 * offset_error,
+        "{name} metric: offset {shift} ± {offset_error} against {s}"
+    );
+    assert_eq!(optimum.trace.len(), optimum.accepted + 1);
+}
+
+#[test]
+fn block_optimizer_turns_back_to_the_axis() {
+    assert_optimizer_turns_back_to_the_axis("block", PlaneMetric::Blocks);
+}
+
+#[test]
+fn harmonic_optimizer_turns_back_to_the_axis() {
+    assert_optimizer_turns_back_to_the_axis(
+        "harmonic",
+        PlaneMetric::Harmonic(HarmonicReference::new(Array1::zeros(N))),
+    );
 }
 
 /// Parallel planes along `q₁` around the minimum at `kT = 0.2` give
@@ -629,10 +628,17 @@ fn coupled_modes_work_to_the_saddle_plane() {
         .with_nodes(9)
         .with_mbar(true)
         .with_estimate(WorkEstimate::Mbar);
-    for transport in [Transport::Rigid, GaussianTransport::default().into()] {
+    let run_transport = |transport: Transport| {
         let run_config = config.clone().with_transport(transport.clone());
         let mut engine = AnalyticSurfaceSampler::new(&model, run_config.sampler.clone());
         let work = reversible_work_along(&mut engine, &path, &run_config).unwrap();
+        (transport, work)
+    };
+    let (rigid, gaussian) = rayon::join(
+        || run_transport(Transport::Rigid),
+        || run_transport(GaussianTransport::default().into()),
+    );
+    for (transport, work) in [rigid, gaussian] {
         let estimates = [
             ("integration", work.integrated_work, work.integrated_error),
             ("BAR", work.bar_work.unwrap(), work.bar_error.unwrap()),
