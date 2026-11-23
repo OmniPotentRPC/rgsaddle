@@ -3784,10 +3784,11 @@ impl BandSession {
     }
 
     /// Turn dynamic NEB on or off between steps. `None` restores a
-    /// full evaluation of every image. The image cache is dropped, so
-    /// the next step evaluates the band again. A solid-state band, the
-    /// trust-region stepper, the simplified string method, and
-    /// free-end adaptive NEB are refused.
+    /// full evaluation of every image. The image cache, the assembled
+    /// force and the solver's stored force are dropped, so the next
+    /// step evaluates the band again and does not reuse a masked
+    /// driving force. A solid-state band, the trust-region stepper, the
+    /// simplified string method, and free-end adaptive NEB are refused.
     pub fn set_dynamic(&mut self, dynamic: Option<DynamicNeb>) -> Result<(), SaddleError> {
         if let Some(spec) = dynamic {
             spec.check()?;
@@ -3815,6 +3816,12 @@ impl BandSession {
         }
         self.config.dynamic = dynamic;
         self.state.install_dynamic(dynamic);
+        // The assembly stores the unmasked residual beside the driving
+        // force after the mask. Leaving that pair in place made
+        // `set_dynamic(None)` on an exponential-metric band hand the
+        // solver the zeroed driving force.
+        self.state.invalidate_assembly();
+        self.forget_solver_evaluation();
         Ok(())
     }
 
@@ -4012,14 +4019,16 @@ impl BandSession {
 
     /// The model-update boundary: drop quasi-Newton history, the
     /// climbing baseline, the armed climbing image, and every cached
-    /// surface value (endpoint energies, the last evaluation). The
-    /// next evaluation carries the whole band. Use it when the surface
+    /// surface value (endpoint energies, the last evaluation, and the
+    /// dynamic NEB image answers, step and origin). The next
+    /// evaluation carries the whole band. Use it when the surface
     /// itself changed (a surrogate refit, a new calculator setting).
     pub fn reset(&mut self) {
         self.restart();
         self.state.set_endpoints(None);
         self.free_end_state.forget_fixed_endpoint();
         self.state.drop_last();
+        self.state.dynamic_run().clear_answers();
     }
 
     /// Set the force tolerance without dropping quasi-Newton pairs.
@@ -5903,5 +5912,195 @@ mod tests {
 
         session.step(&AlongX).expect("step after restart");
         assert!(session.climbing_image().is_some());
+    }
+
+    fn same_coords(left: ArrayView1<f64>, right: ArrayView1<f64>) -> bool {
+        left.len() == right.len() && left.iter().zip(right.iter()).all(|(a, b)| a == b)
+    }
+
+    /// `set_dynamic(None)` on an exponential-metric band must not hand
+    /// back the driving force the mask zeroed, and the solver must not
+    /// keep that force as its cached evaluation.
+    #[test]
+    fn set_dynamic_none_drops_the_masked_driving_force() {
+        let positions = Array2::from_shape_vec(
+            (4, 6),
+            vec![
+                0.0, 0.0, 0.0, 1.3, 0.2, 0.0, 0.35, 0.25, 0.05, 1.55, 0.45, 0.1, 0.8, 0.15, 0.1,
+                2.05, 0.3, 0.05, 1.4, 0.0, 0.0, 2.7, 0.15, 0.0,
+            ],
+        )
+        .expect("positions");
+        let config = BandConfig::default()
+            .with_climbing(None)
+            .with_min_mode(None)
+            .with_saddle_check(None)
+            .with_remove_translation(false)
+            .with_force_tol(1e-8)
+            .with_max_move(0.05)
+            .with_exp_precon(ExpBandPrecon::default().with_mu(1.0))
+            .with_dynamic(Some(DynamicNeb::default().with_fmax(1.0e6)));
+        let mut session = BandSession::new(config, positions).expect("band");
+        session.step(&Harmonic).expect("dynamic step");
+
+        let dof = 6;
+        let (masked_driving, masked_projected) = {
+            let slot = lock_guard(&session.state.last);
+            let last = slot.as_ref().expect("cached assembly");
+            (last.driving.clone(), last.projected.clone())
+        };
+        assert_eq!(masked_driving.len(), 2 * dof);
+        let zero_row = (0..2).find(|&i| {
+            let drive = masked_driving.slice(s![i * dof..(i + 1) * dof]);
+            let projected = masked_projected.slice(s![i * dof..(i + 1) * dof]);
+            drive.iter().all(|v| *v == 0.0) && projected.iter().any(|v| v.abs() > 1e-8)
+        });
+        let Some(zero_row) = zero_row else {
+            panic!(
+                "dynamic mask did not zero a driving row that still has a residual: {masked_driving:?}"
+            );
+        };
+
+        let x = session.interior_flat();
+        session.set_dynamic(None).expect("clear dynamic NEB");
+        let metrics = session
+            .exp
+            .as_ref()
+            .expect("metric")
+            .fresh_metrics(x.view(), 2)
+            .expect("metric is current");
+        let (_, _, _, driving) = assemble_band_with(
+            &session.config,
+            &session.state,
+            &Harmonic,
+            session.positions.row(0),
+            session.positions.row(3),
+            x.view(),
+            Some(metrics),
+        )
+        .expect("reassembly without the mask");
+        let driving = driving.expect("preconditioned driving force");
+        let restored = driving.slice(s![zero_row * dof..(zero_row + 1) * dof]);
+        assert!(
+            restored.iter().any(|v| v.abs() > 1e-8),
+            "clearing dynamic NEB returned the zeroed driving row {restored}"
+        );
+
+        let asked = AtomicBool::new(false);
+        let start = x.clone();
+        let oracle = Oracle::unbounded(start.len(), |query: ArrayView1<f64>| {
+            if same_coords(query, start.view()) {
+                asked.store(true, Ordering::Relaxed);
+            }
+            (1.0, Array1::zeros(query.len()))
+        });
+        let mut trial = start.clone();
+        session
+            .solver
+            .step(&oracle, &mut trial)
+            .expect("solver step after clearing dynamic NEB");
+        assert!(
+            asked.load(Ordering::Relaxed),
+            "the solver reused the masked driving force"
+        );
+    }
+
+    /// A surface change goes through `reset`. Dynamic NEB must not
+    /// answer the next interior evaluation from the previous energies.
+    #[test]
+    fn reset_drops_dynamic_image_answers() {
+        struct Scaled {
+            scale_bits: AtomicU64,
+            calls: AtomicUsize,
+        }
+        impl BandSurface for Scaled {
+            fn eval(
+                &self,
+                positions: ArrayView2<f64>,
+                energies: &mut Array1<f64>,
+                gradients: &mut Array2<f64>,
+            ) -> Result<(), SaddleError> {
+                self.calls.fetch_add(positions.nrows(), Ordering::Relaxed);
+                let scale = f64::from_bits(self.scale_bits.load(Ordering::Relaxed));
+                for (i, row) in positions.outer_iter().enumerate() {
+                    energies[i] = scale + row[0];
+                    gradients.row_mut(i).fill(0.0);
+                    gradients[(i, 0)] = scale;
+                }
+                Ok(())
+            }
+        }
+
+        let positions = Array2::from_shape_vec(
+            (4, 3),
+            vec![-1.0, 0.0, 0.0, -0.2, 0.2, 0.0, 0.4, 0.1, 0.0, 1.0, 0.0, 0.0],
+        )
+        .expect("positions");
+        let config = BandConfig::default()
+            .with_climbing(None)
+            .with_min_mode(None)
+            .with_saddle_check(None)
+            .with_remove_translation(false)
+            .with_force_tol(1e-6)
+            .with_max_move(0.1)
+            .with_dynamic(Some(DynamicNeb::default()));
+        let surface = Scaled {
+            scale_bits: AtomicU64::new(1.0_f64.to_bits()),
+            calls: AtomicUsize::new(0),
+        };
+        let mut session = BandSession::new(config, positions).expect("band");
+        session.step(&surface).expect("dynamic step");
+        {
+            let run = session.state.dynamic_run();
+            assert!(run.spec.is_some());
+            assert!(run.origin.is_some());
+            assert!(run.step.is_some());
+            assert!(run.images.iter().any(|image| image.is_some()));
+        }
+
+        let scale = 4.0_f64;
+        surface.scale_bits.store(scale.to_bits(), Ordering::Relaxed);
+        session.reset();
+        {
+            let run = session.state.dynamic_run();
+            assert!(run.spec.is_some(), "reset keeps dynamic NEB on");
+            assert!(run.origin.is_none());
+            assert!(run.step.is_none());
+            assert!(
+                run.images.is_empty(),
+                "reset kept {} dynamic image answers",
+                run.images.len()
+            );
+        }
+
+        let ends = session.positions();
+        session
+            .seed_endpoint_energies([scale + ends[(0, 0)], scale + ends[(3, 0)]])
+            .expect("endpoint energies");
+        surface.calls.store(0, Ordering::Relaxed);
+        let x = session.interior_flat();
+        let expected: Vec<f64> = (1..3)
+            .map(|i| scale + session.positions()[(i, 0)])
+            .collect();
+        assemble_band_with(
+            &session.config,
+            &session.state,
+            &surface,
+            session.positions.row(0),
+            session.positions.row(3),
+            x.view(),
+            None,
+        )
+        .expect("assembly after reset");
+        assert!(
+            surface.calls.load(Ordering::Relaxed) >= 2,
+            "the new surface was not asked for the interior images"
+        );
+        let slot = lock_guard(&session.state.last);
+        let last = slot.as_ref().expect("fresh evaluation");
+        for (i, want) in expected.iter().enumerate() {
+            assert_abs_diff_eq!(last.energies[i + 1], *want, epsilon = 1e-12);
+            assert_abs_diff_eq!(last.gradients[(i + 1, 0)], scale, epsilon = 1e-12);
+        }
     }
 }
