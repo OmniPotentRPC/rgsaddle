@@ -38,10 +38,13 @@ impl PointSurface for CPointSurface {
         }
         let mut energy = 0.0;
         let mut gradient = vec![0.0; self.n_dof];
+        // A non-unit stride would make `as_ptr` skip coordinates. The
+        // callback always receives a contiguous row.
+        let layout = x.as_standard_layout();
         let rc = (self.callback)(
             self.user,
             self.n_dof as i64,
-            x.as_ptr(),
+            layout.as_ptr(),
             &mut energy,
             gradient.as_mut_ptr(),
         );
@@ -913,5 +916,43 @@ mod tests {
         );
         unsafe { rgsaddle_ohtst_free(tilt_session) };
         unsafe { rgsaddle_ohtst_free(session) };
+    }
+
+    #[test]
+    fn a_strided_point_is_passed_contiguously() {
+        extern "C" fn identity(
+            _user: *mut c_void,
+            n_dof: i64,
+            x: *const f64,
+            energy: *mut f64,
+            gradient: *mut f64,
+        ) -> i32 {
+            if n_dof != 3 || x.is_null() || energy.is_null() || gradient.is_null() {
+                return RGSADDLE_INVALID_PARAMETER;
+            }
+            let point = unsafe { slice::from_raw_parts(x, 3) };
+            if point != [1.0, 2.0, 3.0] {
+                return RGSADDLE_INVALID_PARAMETER;
+            }
+            let grad = unsafe { slice::from_raw_parts_mut(gradient, 3) };
+            grad.copy_from_slice(point);
+            unsafe {
+                *energy = point[0] + point[1] + point[2];
+            }
+            RGSADDLE_OK
+        }
+
+        let surface = CPointSurface {
+            callback: identity,
+            user: std::ptr::null_mut(),
+            n_dof: 3,
+        };
+        let stored = Array1::from_vec(vec![1.0, 0.0, 2.0, 0.0, 3.0, 0.0]);
+        let row = stored.slice(ndarray::s![..; 2]);
+        assert_eq!(row.len(), 3);
+        assert!(!row.is_standard_layout());
+        let (energy, gradient) = surface.eval(row).expect("strided eval");
+        assert_eq!(energy, 6.0);
+        assert_eq!(gradient.as_slice(), Some(&[1.0, 2.0, 3.0][..]));
     }
 }
