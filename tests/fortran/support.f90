@@ -11,8 +11,8 @@ module rgsaddle_fortran_test_support
   real(c_double), parameter :: x0(4) = [ 1.0_c_double, 0.0_c_double, -0.5_c_double, -1.0_c_double ]
   real(c_double), parameter :: y0(4) = [ 0.0_c_double, 0.5_c_double, 1.5_c_double, 1.0_c_double ]
 
-  public :: fill_linear_band, fortran_surface, c_surface, pafi_along_x_surface, ohtst_quadratic_surface, &
-    close_enough, check_status
+  public :: fill_linear_band, fortran_surface, c_surface, pafi_along_x_surface, &
+    pafi_widening_surface, ohtst_quadratic_surface, close_enough, check_status
 
 contains
 
@@ -142,6 +142,27 @@ contains
     gradient(1) = -4.0_c_double * x * (1.0_c_double - x * x)
     status = RGSADDLE_OK
   end function pafi_along_x_surface
+
+  integer(c_int) function pafi_widening_surface(user, n_dof, position, energy, gradient) result(status)
+    type(c_ptr), value :: user
+    integer(c_int64_t), value :: n_dof
+    real(c_double), intent(in) :: position(*)
+    real(c_double), intent(inout) :: energy
+    real(c_double), intent(inout) :: gradient(*)
+    real(c_double) :: x, y, well, stiffness
+    if (n_dof /= 2_c_int64_t) then
+      status = RGSADDLE_INVALID_PARAMETER
+      return
+    end if
+    x = position(1)
+    y = position(2)
+    well = (1.0_c_double - x * x) * (1.0_c_double - x * x)
+    stiffness = 1.5_c_double + 0.5_c_double * x
+    energy = well + 0.5_c_double * stiffness * y * y
+    gradient(1) = -4.0_c_double * x * (1.0_c_double - x * x) + 0.25_c_double * y * y
+    gradient(2) = stiffness * y
+    status = RGSADDLE_OK
+  end function pafi_widening_surface
 
   integer(c_int) function ohtst_quadratic_surface(user, n_dof, position, energy, gradient) result(status)
     type(c_ptr), value :: user

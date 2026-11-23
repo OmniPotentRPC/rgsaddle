@@ -60,6 +60,10 @@ program test_ohtst
     write(*, '(a)') 'FAIL ohtst empty curve'
     stop 3
   end if
+  if (abs(curve(written) - kramers) > margin) then
+    write(*, '(a,1x,f12.6,1x,a,1x,f12.6)') 'FAIL ohtst curve end', curve(written), 'expected', kramers
+    stop 3
+  end if
 
   theta = 25.0_c_double * acos(-1.0_c_double) / 180.0_c_double
   tilted_normal = [cos(theta), sin(theta)]
@@ -76,6 +80,21 @@ program test_ohtst
     write(*, '(a,1x,f12.6,1x,a,1x,f12.6,1x,a,1x,f12.6)') 'FAIL tilted ohtst kappa', &
       tilted_result%kappa, 'expected', expected_tilted, 'margin', margin
     stop 4
+  end if
+
+  config%sample_integrator = int(RGSADDLE_OHTST_INTEGRATOR_GHMC, c_int32_t)
+  config%counting = int(RGSADDLE_OHTST_COUNT_FIRST_CROSSING, c_int32_t)
+  status = tilted%set_config(config)
+  call check_status("set_config tilted ohtst", status)
+  status = tilted%run(cb, c_null_ptr)
+  call check_status("run tilted ghmc ohtst", status)
+  status = tilted%result(tilted_result)
+  call check_status("result tilted ghmc ohtst", status)
+  margin = 4.0_c_double * tilted_result%error + epsilon(1.0_c_double)
+  if (abs(tilted_result%kappa - expected_tilted) > margin) then
+    write(*, '(a,1x,f12.6,1x,a,1x,f12.6,1x,a,1x,f12.6)') 'FAIL tilted ghmc kappa', &
+      tilted_result%kappa, 'expected', expected_tilted, 'margin', margin
+    stop 5
   end if
 
   write(*, '(a,1x,f10.6,1x,a,1x,f10.6)') 'PASS ohtst kappa', result%kappa, 'tilted', tilted_result%kappa
