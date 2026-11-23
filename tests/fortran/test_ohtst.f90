@@ -97,5 +97,26 @@ program test_ohtst
     stop 5
   end if
 
+  call check_short_curve(written)
   write(*, '(a,1x,f10.6,1x,a,1x,f10.6)') 'PASS ohtst kappa', result%kappa, 'tilted', tilted_result%kappa
+
+contains
+
+  subroutine check_short_curve(needed)
+    integer(c_int64_t), intent(in) :: needed
+    real(c_double) :: one_t(1), one_k(1)
+    integer(c_int64_t) :: n_written
+    integer(c_int) :: st
+    n_written = -1_c_int64_t
+    st = session%curve(one_t, one_k, n_written)
+    if (st /= RGSADDLE_INVALID_PARAMETER) then
+      write(*, '(a,1x,i0)') 'FAIL short curve status', st
+      stop 6
+    end if
+    if (n_written /= needed .or. n_written < 1_c_int64_t) then
+      write(*, '(a,1x,i0,1x,i0)') 'FAIL short curve written', n_written, needed
+      stop 6
+    end if
+  end subroutine check_short_curve
+
 end program test_ohtst

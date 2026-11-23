@@ -879,7 +879,8 @@ contains
     call c_f_pointer(req%gradients, gradients, [int(n_pos, kind=kind(0))])
     ! n_eval is the number of rows in the buffers: 1 for ONE_IMAGE,
     ! the request's row count otherwise. req%image is the band index
-    ! or -1 for a batch.
+    ! for ONE_IMAGE and for a batched climbing-image refinement
+    ! (which also carries one row), or -1 for an ordinary batch.
     status = box%surface(box%user, n_eval, req%n_atoms, positions, energies, gradients, req%image)
   end function fortran_surface_trampoline
 

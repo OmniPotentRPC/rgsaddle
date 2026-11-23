@@ -118,5 +118,152 @@ program test_pafi
     end if
   end do
 
+  call check_arcs_and_config()
+  call check_short_profile()
   write(*, '(a,1x,f10.6,1x,a,1x,f10.6)') 'PASS pafi barrier', result%barrier, 'widening', w_result%barrier
+
+contains
+
+  subroutine cheap_config(out)
+    type(rgsaddle_pafi_config_t), intent(out) :: out
+    call init_pafi_config(out)
+    out%thermal = 0.02_c_double
+    out%mobility = 1.0_c_double
+    out%time_step = 0.01_c_double
+    out%thermalize = 1_c_int64_t
+    out%stride = 1_c_int64_t
+    out%samples = 8_c_int64_t
+    out%blocks = 2_c_int64_t
+    out%seed = 3_c_int64_t
+    out%fix_com = 0_c_int32_t
+    out%retain = 1_c_int64_t
+    out%target_error = 0.0_c_double
+    out%max_rounds = 1_c_int64_t
+  end subroutine cheap_config
+
+  subroutine check_arcs_and_config()
+    type(pafi_handle) :: partial, full, tuned
+    type(rgsaddle_pafi_config_t) :: cfg
+    type(rgsaddle_pafi_result_t) :: partial_result, full_result, first, second
+    integer, parameter :: n = 11
+    integer, parameter :: n_arc = 4
+    real(c_double) :: frames(n), full_arcs(n), near(n_arc)
+    real(c_double) :: bad(3), wide(2, n)
+    real(c_double) :: g1(n), g2(n), free_e(n), free_err(n), grad_err(n)
+    integer(c_int64_t) :: n_written
+    integer(c_int) :: st
+    integer :: k
+    procedure(point_surface_proc), pointer :: pcb
+    pcb => pafi_along_x_surface
+    do k = 1, n
+      frames(k) = -1.0_c_double + 2.0_c_double * real(k - 1, c_double) / real(n - 1, c_double)
+      full_arcs(k) = 2.0_c_double * real(k - 1, c_double) / real(n - 1, c_double)
+    end do
+    near = [0.0_c_double, 0.05_c_double, 0.10_c_double, 0.15_c_double]
+    bad = [0.0_c_double, 1.0_c_double, 0.5_c_double]
+    call cheap_config(cfg)
+    st = partial%create(cfg, int(n, c_int64_t), 1_c_int64_t, frames, bad)
+    if (st == RGSADDLE_OK) then
+      write(*, '(a,1x,i0)') 'FAIL invalid arcs accepted', st
+      stop 8
+    end if
+    st = partial%create(cfg, int(n, c_int64_t), 1_c_int64_t, frames, near)
+    call check_status("create partial arcs", st)
+    st = partial%run(pcb, c_null_ptr)
+    call check_status("run partial arcs", st)
+    st = partial%result(partial_result)
+    call check_status("result partial arcs", st)
+    st = full%create(cfg, int(n, c_int64_t), 1_c_int64_t, frames, full_arcs)
+    call check_status("create full arcs", st)
+    st = full%run(pcb, c_null_ptr)
+    call check_status("run full arcs", st)
+    st = full%result(full_result)
+    call check_status("result full arcs", st)
+    if (.not. (partial_result%barrier < 0.4_c_double .and. full_result%barrier > 0.7_c_double)) then
+      write(*, '(a,1x,f12.6,1x,f12.6)') 'FAIL arcs did not change the barrier', &
+        partial_result%barrier, full_result%barrier
+      stop 8
+    end if
+
+    ! A 1D path has no perpendicular direction, so the Langevin seed
+    ! cannot move the tangent gradient. The widening well's x gradient
+    ! depends on y^2, and the high bit of the seed is a uint64 pattern.
+    pcb => pafi_widening_surface
+    do k = 1, n
+      wide(1, k) = -1.0_c_double + real(k - 1, c_double) / real(n - 1, c_double)
+      wide(2, k) = 0.0_c_double
+    end do
+    call cheap_config(cfg)
+    cfg%thermal = 0.05_c_double
+    cfg%time_step = 0.004_c_double
+    cfg%thermalize = 400_c_int64_t
+    cfg%stride = 8_c_int64_t
+    cfg%samples = 600_c_int64_t
+    cfg%blocks = 6_c_int64_t
+    cfg%seed = uint64_bits(int(z'80000000', c_int64_t), 1_c_int64_t)
+    st = tuned%create(cfg, int(n, c_int64_t), 2_c_int64_t, wide)
+    call check_status("create high seed", st)
+    st = tuned%run(pcb, c_null_ptr)
+    call check_status("run high seed", st)
+    st = tuned%profile(full_arcs, g1, grad_err, free_e, free_err, n_written)
+    call check_status("profile high seed", st)
+    cfg%seed = 1_c_int64_t
+    st = tuned%set_config(cfg)
+    call check_status("set seed", st)
+    st = tuned%run(pcb, c_null_ptr)
+    call check_status("run low seed", st)
+    st = tuned%profile(full_arcs, g2, grad_err, free_e, free_err, n_written)
+    call check_status("profile low seed", st)
+    if (all(abs(g1 - g2) < 1.0_c_double / 1000000.0_c_double)) then
+      write(*, '(a,1x,f16.8)') 'FAIL seed did not change the profile', maxval(abs(g1 - g2))
+      stop 9
+    end if
+
+    call cheap_config(cfg)
+    cfg%thermalize = 400_c_int64_t
+    cfg%stride = 8_c_int64_t
+    cfg%samples = 600_c_int64_t
+    cfg%blocks = 6_c_int64_t
+    st = tuned%set_config(cfg)
+    call check_status("set few samples", st)
+    st = tuned%run(pcb, c_null_ptr)
+    call check_status("run few samples", st)
+    st = tuned%result(first)
+    call check_status("result few samples", st)
+    cfg%samples = 2600_c_int64_t
+    st = tuned%set_config(cfg)
+    call check_status("set many samples", st)
+    st = tuned%run(pcb, c_null_ptr)
+    call check_status("run many samples", st)
+    st = tuned%result(second)
+    call check_status("result many samples", st)
+    if (second%evaluations < first%evaluations * 4_c_int64_t) then
+      write(*, '(a,1x,i0,1x,i0)') 'FAIL set_config ignored', first%evaluations, second%evaluations
+      stop 9
+    end if
+    cfg%thermal = -1.0_c_double
+    st = tuned%set_config(cfg)
+    if (st == RGSADDLE_OK) then
+      write(*, '(a)') 'FAIL invalid config accepted'
+      stop 9
+    end if
+  end subroutine check_arcs_and_config
+
+  subroutine check_short_profile()
+    real(c_double) :: one_arc(1), one_g(1), one_ge(1), one_f(1), one_fe(1)
+    integer(c_int64_t) :: n_written
+    integer(c_int) :: st
+    n_written = -1_c_int64_t
+    one_arc = 0.0_c_double
+    st = session%profile(one_arc, one_g, one_ge, one_f, one_fe, n_written)
+    if (st /= RGSADDLE_INVALID_PARAMETER) then
+      write(*, '(a,1x,i0)') 'FAIL short profile status', st
+      stop 10
+    end if
+    if (n_written /= int(n_frames, c_int64_t)) then
+      write(*, '(a,1x,i0)') 'FAIL short profile written', n_written
+      stop 10
+    end if
+  end subroutine check_short_profile
+
 end program test_pafi
