@@ -223,6 +223,8 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =RgsaddleBand=. Purpose: Opaque session handle in include/rgsaddle.h.
 - =RgsaddleMinMode=. Purpose: Opaque session handle in include/rgsaddle.h.
 - =RgsaddleHyperplaneSampler=. Purpose: Opaque session handle in include/rgsaddle.h.
+- =RgsaddlePafi=. Purpose: Opaque session handle in include/rgsaddle.h.
+- =RgsaddleOhtst=. Purpose: Opaque session handle in include/rgsaddle.h.
 - =RgsaddleIndex1=. Purpose: Opaque session handle in include/rgsaddle.h.
 - =RgsaddleIrc=. Purpose: Opaque session handle in include/rgsaddle.h.
 - =RgsaddleSellaMin=. Purpose: Opaque session handle in include/rgsaddle.h.
@@ -257,6 +259,12 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =rgsaddle_quickmin_t=. Purpose: Quick-min variants (rgmin QuickMinOptions).
 - =rgsaddle_minmode_config_t=. Purpose: Minimum-mode configuration.
 - =rgsaddle_artn_config_t=. Purpose: ART nouveau protocol controls, ABI minor 43.
+- =rgsaddle_pafi_config_t=. Purpose: PAFI configuration.
+- =rgsaddle_pafi_result_t=. Purpose: PAFI barrier summary after rgsaddle_pafi_run.
+- =rgsaddle_ohtst_integrator_t=. Purpose: OH-TST sample integrator kind for rgsaddle_ohtst_config_t: 0 BAOAB, 1 GHMC.
+- =rgsaddle_ohtst_counting_t=. Purpose: OH-TST trajectory counting kind for rgsaddle_ohtst_config_t: 0 final state, 1 first crossing.
+- =rgsaddle_ohtst_config_t=. Purpose: OH-TST configuration.
+- =rgsaddle_ohtst_result_t=. Purpose: OH-TST summary after rgsaddle_ohtst_run.
 - =rgsaddle_hess_update_t=. Purpose: C enum typedef in include/rgsaddle.h.
 - =rgsaddle_nichols_mode_t=. Purpose: C enum typedef in include/rgsaddle.h.
 - =rgsaddle_prfo_t=. Purpose: C enum typedef in include/rgsaddle.h.
@@ -295,6 +303,7 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =rgsaddle_sample_hyperplane_fn=. Purpose: Callback typedef in include/rgsaddle.h.
 - =rgsaddle_surface_fn=. Purpose: Callback typedef in include/rgsaddle.h.
 - =rgsaddle_solid_surface_fn=. Purpose: Callback typedef in include/rgsaddle.h.
+- =rgsaddle_point_surface_fn=. Purpose: Point-surface callback used by PAFI and OH-TST handles.
 - =rgsaddle_hessian_fn=. Purpose: Callback typedef in include/rgsaddle.h.
 - =rgsaddle_stencil_eval_fn=. Purpose: Callback typedef in include/rgsaddle.h.
 - =rgsaddle_geodesic_chart_fn=. Purpose: Redundant coordinate chart for geodesic interpolation.
@@ -394,6 +403,10 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =RGSADDLE_QUICKMIN_RGMIN=. Purpose: Enumerator of =rgsaddle_quickmin_t=.
 - =RGSADDLE_QUICKMIN_EON=. Purpose: Enumerator of =rgsaddle_quickmin_t=.
 - =RGSADDLE_QUICKMIN_PER_ATOM=. Purpose: Enumerator of =rgsaddle_quickmin_t=.
+- =RGSADDLE_OHTST_INTEGRATOR_BAOAB=. Purpose: Enumerator of =rgsaddle_ohtst_integrator_t=.
+- =RGSADDLE_OHTST_INTEGRATOR_GHMC=. Purpose: Enumerator of =rgsaddle_ohtst_integrator_t=.
+- =RGSADDLE_OHTST_COUNT_FINAL=. Purpose: Enumerator of =rgsaddle_ohtst_counting_t=.
+- =RGSADDLE_OHTST_COUNT_FIRST_CROSSING=. Purpose: Enumerator of =rgsaddle_ohtst_counting_t=.
 - =RGSADDLE_HESS_POWELL=. Purpose: Enumerator of =rgsaddle_hess_update_t=.
 - =RGSADDLE_HESS_BOFILL=. Purpose: Enumerator of =rgsaddle_hess_update_t=.
 - =RGSADDLE_NICHOLS_MINIMIZE=. Purpose: Enumerator of =rgsaddle_nichols_mode_t=.
