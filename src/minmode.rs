@@ -294,7 +294,7 @@ pub struct MinModeConfig {
     pub rotation_angle_tol: f64,
     /// Whether [`MinModeConfig::with_rotation_angle_tol`] set
     /// `rotation_angle_tol`.
-    rotation_angle_tol_set: bool,
+    pub(crate) rotation_angle_tol_set: bool,
     /// Most dimer rotations, or Lanczos actions, in one estimate.
     pub max_rotations: usize,
     /// Krylov dimension for [`MinModeKind::Lanczos`].
@@ -3778,7 +3778,7 @@ impl MinModeSession {
 #[cfg(test)]
 mod tests {
     use super::{
-        ArtNConfig, MinModeConfig, MinModeKind, MinModeSession, PointSurface,
+        ArtNConfig, MinModeConfig, MinModeKind, MinModeSession, PointSurface, SaddleIndexCheck,
         rotation_force_converged, rotation_force_error, translated_gradient,
     };
     use crate::error::SaddleError;
@@ -4167,6 +4167,117 @@ mod tests {
                 other => panic!("unexpected time step result: {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn minimum_mode_config_validation_rejects_each_field_with_its_own_message() {
+        MinModeConfig::default().validate().unwrap();
+        let lanczos = || MinModeConfig::default().with_kind(MinModeKind::Lanczos);
+        let bad_artn = |artn: ArtNConfig| lanczos().with_artn(artn);
+        let cases: Vec<(MinModeConfig, &str)> = vec![
+            (
+                MinModeConfig::default().with_dr(0.0),
+                "finite-difference step must be positive and finite",
+            ),
+            (
+                MinModeConfig::default().with_dr(f64::NAN),
+                "finite-difference step must be positive and finite",
+            ),
+            (
+                MinModeConfig::default().with_force_tol(-1.0e-3),
+                "force tolerance must be finite and non-negative",
+            ),
+            (
+                MinModeConfig::default().with_force_tol(f64::INFINITY),
+                "force tolerance must be finite and non-negative",
+            ),
+            (
+                MinModeConfig::default().with_rotation_tol(-1.0e-4),
+                "rotation tolerances must be finite and non-negative",
+            ),
+            (
+                MinModeConfig::default().with_rotation_angle_tol(f64::NAN),
+                "rotation tolerances must be finite and non-negative",
+            ),
+            (
+                MinModeConfig::default().with_max_rotations(0),
+                "max_rotations must be at least 1",
+            ),
+            (
+                MinModeConfig::default().with_krylov_dim(0),
+                "Lanczos krylov dimension must be at least 1",
+            ),
+            (
+                MinModeConfig::default().with_max_move(f64::NAN),
+                "max_move must be finite",
+            ),
+            (
+                MinModeConfig::default().with_time_step(0.0),
+                "FIRE time step must be finite and positive",
+            ),
+            (
+                MinModeConfig::default().with_time_step(f64::NEG_INFINITY),
+                "FIRE time step must be finite and positive",
+            ),
+            (
+                MinModeConfig::default()
+                    .with_saddle_check(SaddleIndexCheck::default().with_block(0)),
+                "saddle-index check needs",
+            ),
+            (
+                bad_artn(ArtNConfig::default().with_basin_push(0.0)),
+                "ARTn basin push must be positive and finite",
+            ),
+            (
+                MinModeConfig::default().with_method(Method::Bfgs),
+                "tests the oracle value",
+            ),
+        ];
+        for (config, expected) in cases {
+            match config.validate() {
+                Err(SaddleError::Invalid(message)) => {
+                    assert!(message.contains(expected), "{message} lacks {expected}");
+                }
+                other => panic!("unexpected validation result for {expected}: {other:?}"),
+            }
+        }
+        for artn in [
+            ArtNConfig::default().with_eigenvalue_threshold(0.1),
+            ArtNConfig::default().with_relaxation_step(f64::NAN),
+            ArtNConfig::default().with_lanczos_actions(0),
+            ArtNConfig::default().with_curvature_floor(0.0),
+        ] {
+            assert!(matches!(
+                MinModeConfig::default()
+                    .with_kind(MinModeKind::Lanczos)
+                    .with_artn(artn)
+                    .validate(),
+                Err(SaddleError::Invalid(_))
+            ));
+        }
+        assert!(matches!(
+            MinModeConfig::default()
+                .with_kind(MinModeKind::Dimer)
+                .with_artn(ArtNConfig::default())
+                .validate(),
+            Err(SaddleError::Invalid(message)) if message.contains("requires the Lanczos")
+        ));
+    }
+
+    #[test]
+    fn minimum_mode_config_validation_keeps_an_uncapped_max_move() {
+        MinModeConfig::default()
+            .with_max_move(0.0)
+            .validate()
+            .unwrap();
+        MinModeConfig::default()
+            .with_max_move(-1.0)
+            .validate()
+            .unwrap();
+        MinModeConfig::default()
+            .with_force_tol(0.0)
+            .validate()
+            .unwrap();
     }
 
     #[test]
