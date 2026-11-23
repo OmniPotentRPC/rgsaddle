@@ -142,6 +142,16 @@ opt-level = 3
 [profile.dev.package.gemm-common]
 opt-level = 3
 
+# cargo test inherits dev and would compile this crate at opt-level 0.
+# colour_block_strong_scaling_on_vacancy_cells recovers a 10975-atom
+# vacancy and a 97555-atom vacancy, five times at each thread count.
+# Unoptimized, one recovery of the 6911-atom cell takes about 105s and
+# the full test runs for hours. At opt-level 3 that recovery takes
+# about 13s, and one recovery of the 10975-atom cell takes about 20s.
+# Debug assertions stay on.
+[profile.test]
+opt-level = 3
+
 # include/rgsaddle.h is the hand-written contract (surface request,
 # status enum, stepping semantics); cargo-c installs it as is instead
 # of a cbindgen rendering of src/capi.rs.
