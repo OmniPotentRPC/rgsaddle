@@ -309,6 +309,13 @@ pub struct MinModeConfig {
     /// [`MinModeSession::set_cg_translate`] that step has this global
     /// Euclidean norm, then is shortened so no atom moves farther.
     pub max_move: f64,
+    /// FIRE's opening time step for the translation, 1 by default. The
+    /// integrator's largest time step is 2.5 times this. With unit mass
+    /// the first move from rest is `F dt^2`, so the step has units of
+    /// length over the square root of energy. The stalled-FIRE probe
+    /// reads the stability bound `|λ| > 4 / dt^2` from it. L-BFGS does
+    /// not read it.
+    pub time_step: f64,
     /// Which rgmin stepper advances the assembled force.
     pub method: Method,
     /// Seed an empty translation from the mode curvature.
@@ -346,6 +353,7 @@ with_setters!(MinModeConfig {
     with_krylov_dim => krylov_dim: val usize,
     with_force_tol => force_tol: val f64,
     with_max_move => max_move: val f64,
+    with_time_step => time_step: val f64,
     with_method => method: val Method,
     with_seed_curvature => seed_curvature: val bool,
     with_saddle_check => saddle_check: opt SaddleIndexCheck,
@@ -382,6 +390,7 @@ impl Default for MinModeConfig {
             krylov_dim: 12,
             force_tol: 1e-3,
             max_move: 0.2,
+            time_step: FIRE_OPENING_DT,
             method: Method::fire(rgmin::FireKind::V2),
             seed_curvature: false,
             saddle_check: Some(SaddleIndexCheck::default()),
@@ -481,7 +490,7 @@ const TORQUE_MAX: f64 = 1.0;
 /// opening delay leaves `dt` unchanged (Guénolé, Nöhring, Vaid, Houllé,
 /// Xie, Prakash, and Bitzek, Comput. Mater. Sci. 175, 109584 (2020),
 /// doi:10.1016/j.commatsci.2020.109584, Algorithm 2; the initial `dt` is
-/// [`FIRE_OPENING_DT`]). When that move exceeds `max_move` the per-atom
+/// [`MinModeConfig::time_step`]). When that move exceeds `max_move` the per-atom
 /// cap truncates it, and the truncated move can leave the
 /// negative-curvature neighborhood. The replacement, taken from the last
 /// point that was still negative, is the empty-memory L-BFGS step
@@ -489,7 +498,7 @@ const TORQUE_MAX: f64 = 1.0;
 /// basin wider than `max_move` follows the integrator.
 const FIRE_EMPTY_SCALE: f64 = 0.01;
 
-/// FIRE's opening time step for the min-mode translation.
+/// Default [`MinModeConfig::time_step`].
 const FIRE_OPENING_DT: f64 = 1.0;
 
 /// Each replaced capped FIRE move restarts the integrator with `dt`
@@ -1226,9 +1235,9 @@ fn curvature_scale(curvature: f64) -> Option<f64> {
     (scale.is_finite() && scale > 0.0).then_some(scale)
 }
 
-/// Stiffness past which FIRE's opening timestep of 1 is unstable.
-/// Symplectic Euler wants `dt < 2/sqrt(|λ|)`, so `|λ| > 4` is already
-/// past that timestep.
+/// Stiffness past which FIRE's opening timestep `dt` is unstable, times
+/// `dt^2`. Symplectic Euler wants `dt < 2/sqrt(|λ|)`, so `|λ| > 4 / dt^2`
+/// is already past that timestep.
 const FIRE_CURVATURE_FLOOR: f64 = 4.0;
 /// Force evaluations with no real drop before a probe is allowed.
 /// A short plateau still belongs to FIRE. The vacancy cycle does not
@@ -1756,7 +1765,7 @@ pub struct MinModeSession {
     /// neighborhood; the step is replaced from [`CappedFireStep::origin`].
     capped_fire: Option<CappedFireStep>,
     /// FIRE time step the translation solver restarts with; below
-    /// [`FIRE_OPENING_DT`] after a capped move was replaced.
+    /// [`MinModeConfig::time_step`] after a capped move was replaced.
     fire_dt: f64,
     /// The translator has already taken a step, so a later FIRE move
     /// is the integrator's own.
@@ -1900,6 +1909,11 @@ impl MinModeSession {
                 "max_move must be finite; a non-positive value leaves the step uncapped".into(),
             ));
         }
+        if !(config.time_step.is_finite() && config.time_step > 0.0) {
+            return Err(SaddleError::Invalid(
+                "FIRE time step must be finite and positive".into(),
+            ));
+        }
         if let Some(check) = &config.saddle_check {
             check.validate()?;
         }
@@ -1918,10 +1932,11 @@ impl MinModeSession {
             &config.method,
             x.len(),
             config.max_move,
-            FIRE_OPENING_DT,
+            config.time_step,
             false,
             lbfgs_guards,
         );
+        let fire_dt = config.time_step;
         Ok(Self {
             config,
             force_gate: ForceGate::LinfNorm,
@@ -1944,7 +1959,7 @@ impl MinModeSession {
             lanczos_ready: false,
             lanczos_carry: None,
             capped_fire: None,
-            fire_dt: FIRE_OPENING_DT,
+            fire_dt,
             solver_stepped: false,
             lbfgs_seeded: false,
             fire_curvature: true,
@@ -2203,7 +2218,7 @@ impl MinModeSession {
     fn set_fire_dt(&mut self, dt: f64) -> Result<(), SaddleError> {
         let config = rgmin::FireConfig::ase()
             .with_dt(dt)
-            .with_dt_max(2.5 * FIRE_OPENING_DT);
+            .with_dt_max(2.5 * self.config.time_step);
         self.solver
             .set_fire_config(config)
             .map_err(|e| SaddleError::Solver(e.to_string()))?;
@@ -2223,9 +2238,9 @@ impl MinModeSession {
 
     fn forget_search(&mut self) {
         self.solver.forget();
-        if self.fire_dt != FIRE_OPENING_DT {
+        if self.fire_dt != self.config.time_step {
             // Only a FIRE session lowers fire_dt, so the restore cannot fail.
-            let _ = self.set_fire_dt(FIRE_OPENING_DT);
+            let _ = self.set_fire_dt(self.config.time_step);
         }
         self.dimer_rotation.clear();
         self.clear_cg();
@@ -2945,7 +2960,8 @@ impl MinModeSession {
     /// already small and the perpendicular force is not, so a cap of
     /// 0.2 steps across that well and the force stalls near 1. The
     /// probe is used only after a long stretch with no drop in force
-    /// or energy, only when `|λ|` is past [`FIRE_CURVATURE_FLOOR`],
+    /// or energy, only when `|λ|` is past [`FIRE_CURVATURE_FLOOR`]
+    /// over the square of [`MinModeConfig::time_step`],
     /// and only for a step no longer than 0.05 that does not raise
     /// the energy. After that stall the probe stays in place while
     /// the curvature remains steep, so the opening timestep cannot
@@ -2958,7 +2974,8 @@ impl MinModeSession {
         mode: &Array1<f64>,
         curvature: f64,
     ) -> Result<Option<(Array1<f64>, PointEval)>, SaddleError> {
-        if !(curvature.is_finite() && curvature < -FIRE_CURVATURE_FLOOR) {
+        let floor = FIRE_CURVATURE_FLOOR / (self.config.time_step * self.config.time_step);
+        if !(curvature.is_finite() && curvature < -floor) {
             if self.fire_stall_count >= FIRE_STALL_STEPS {
                 self.fire_stall_count = 0;
                 self.fire_stall_force = f64::NAN;
@@ -4110,6 +4127,34 @@ mod tests {
         .unwrap();
         assert_eq!(session.fire_dt, 1.0);
         assert_eq!(session.lanczos_rel_tol, None);
+    }
+
+    #[test]
+    fn minimum_mode_fire_opens_at_the_configured_timestep() {
+        let mut session = MinModeSession::new(
+            MinModeConfig::default().with_time_step(0.25),
+            array![0.0, 0.0, 0.0],
+            array![1.0, 0.0, 0.0],
+        )
+        .unwrap();
+        assert_eq!(session.fire_dt, 0.25);
+        session.set_fire_dt(0.125).unwrap();
+        session.forget_search();
+        assert_eq!(session.fire_dt, 0.25);
+        for time_step in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            match MinModeSession::new(
+                MinModeConfig::default().with_time_step(time_step),
+                array![0.0, 0.0, 0.0],
+                array![1.0, 0.0, 0.0],
+            )
+            .err()
+            {
+                Some(SaddleError::Invalid(message)) => {
+                    assert_eq!(message, "FIRE time step must be finite and positive");
+                }
+                other => panic!("unexpected time step result: {other:?}"),
+            }
+        }
     }
 
     #[test]
