@@ -358,7 +358,7 @@ pub(super) struct RefineState {
     prev_ci: Option<usize>,
     cached_mode: Option<Array1<f64>>,
     run: Option<Run>,
-    converged: bool,
+    pub(super) converged: bool,
     last: Option<RefineStep>,
     /// An escape started a climb; it runs under the default controls
     /// when the band has none.
@@ -856,7 +856,8 @@ impl BandSession {
     }
 
     /// Write one image and its surface answer into the band and its
-    /// last evaluation. The other rows keep their cached values.
+    /// last evaluation. The other rows keep their cached surface values;
+    /// tangents, springs, climbing forces and metric solves do not.
     pub(super) fn put_image(&mut self, image: usize, point: &Point, projected: ArrayView1<f64>) {
         self.positions.row_mut(image).assign(&point.x);
         self.pin_fixed();
@@ -873,6 +874,9 @@ impl BandSession {
                     .assign(&projected);
             }
         }
+        drop(slot);
+        self.state.invalidate_assembly();
+        self.solver.forget_evaluation();
     }
 
     pub(super) fn image_tangent(
@@ -949,4 +953,97 @@ pub(super) fn one_row<S: BandSurface + ?Sized>(
     let mut gradients = ndarray::Array2::zeros((1, x.len()));
     surface.eval(row, &mut energies, &mut gradients)?;
     Ok((energies[0], gradients.row(0).to_owned()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::band::{BandConfig, CiConfig, assemble_band_with};
+    use crate::minmode::MinModeConfig;
+    use ndarray::{Array2, ArrayView2, array};
+    use rgmin::Method;
+
+    struct Ridge;
+
+    impl BandSurface for Ridge {
+        fn eval(
+            &self,
+            positions: ArrayView2<f64>,
+            energies: &mut Array1<f64>,
+            gradients: &mut Array2<f64>,
+        ) -> Result<(), SaddleError> {
+            for (i, row) in positions.outer_iter().enumerate() {
+                energies[i] = 1.0 - row[0] * row[0];
+                gradients[(i, 0)] = 1.0;
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn first_band_step_after_refine_finish_uses_the_climbing_force() {
+        let positions = array![[-1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
+        let config = BandConfig::default()
+            .with_method(Method::lbfgs())
+            .with_climbing(CiConfig::always())
+            .with_min_mode(None)
+            .with_saddle_check(None)
+            .with_remove_translation(false)
+            .with_max_move(0.1);
+        let mut band = BandSession::new(config, positions).expect("band");
+        let surface = Ridge;
+        let x = band.interior_flat();
+        assemble_band_with(
+            &band.config,
+            &band.state,
+            &surface,
+            band.positions.row(0),
+            band.positions.row(2),
+            x.view(),
+            None,
+        )
+        .expect("armed climbing assembly");
+        assert_eq!(band.state.ci(), Some(1));
+
+        let saved = Point {
+            x: array![0.0, 0.0, 0.0],
+            energy: 1.0,
+            gradient: array![1.0, 0.0, 0.0],
+        };
+        let current = Point {
+            x: array![0.2, 0.0, 0.0],
+            energy: 0.96,
+            gradient: array![1.0, 0.0, 0.0],
+        };
+        let refine_config = MinModeRefine::default().with_restore_unhelpful(false);
+        band.refine.run = Some(Run {
+            image: 1,
+            saved,
+            entry_force: 1.0,
+            tangent: array![1.0, 0.0, 0.0],
+            session: MinModeSession::new(
+                MinModeConfig::default().with_saddle_check(None),
+                current.x.clone(),
+                array![1.0, 0.0, 0.0],
+            )
+            .expect("refinement session"),
+            climb: None,
+            current,
+            previous: None,
+            best: None,
+            alignment: 1.0,
+            steps: refine_config.max_steps,
+            since_refresh: 0,
+            escape: false,
+        });
+        band.refine_finish(&refine_config, Outcome::Leave);
+        let refined_x = band.positions[(1, 0)];
+        assert_eq!(refined_x, 0.2);
+
+        band.step(&surface).expect("first band step");
+        assert!(
+            band.positions[(1, 0)] > refined_x,
+            "the climbing image followed the raw negative gradient"
+        );
+    }
 }
