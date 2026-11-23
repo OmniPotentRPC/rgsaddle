@@ -701,3 +701,184 @@ fn the_seed_perturbation_is_invariant_under_a_change_of_length_unit() {
         assert!((scaled[(endpoint, 0)] - expected * scale).abs() < 1e-8 * scale);
     }
 }
+
+/// Evaluates `inner` at `positions - offset`, so the whole landscape is
+/// the inner one moved by `offset`.
+struct Translated<S> {
+    inner: S,
+    offset: Array1<f64>,
+}
+
+impl<S: BandSurface> BandSurface for Translated<S> {
+    fn eval(
+        &self,
+        positions: ArrayView2<'_, f64>,
+        energies: &mut Array1<f64>,
+        gradients: &mut Array2<f64>,
+    ) -> Result<(), SaddleError> {
+        let moved = &positions - &self.offset;
+        self.inner.eval(moved.view(), energies, gradients)
+    }
+}
+
+#[test]
+fn translating_every_image_leaves_the_seed_unchanged() {
+    let seed = FixedEnergySeed::default()
+        .with_saddle_energy(1.0)
+        .with_target_energy(0.25)
+        .with_images(9)
+        .with_max_evaluations(20_000);
+    let masses = array![1.0, 2.0];
+    let saddle = array![0.0, 0.0];
+    let mode = array![1.0, 0.0];
+    let reference =
+        fixed_energy_mep_seed(&DoubleWell, saddle.view(), mode.view(), masses.view(), seed)
+            .unwrap();
+    for offset in [
+        array![1.0e3, -2.5e2],
+        array![-40.0, 7.0e4],
+        array![0.5, 0.5],
+    ] {
+        let moved = fixed_energy_mep_seed(
+            &Translated {
+                inner: DoubleWell,
+                offset: offset.clone(),
+            },
+            (&saddle + &offset).view(),
+            mode.view(),
+            masses.view(),
+            seed,
+        )
+        .unwrap();
+        assert_eq!(moved.raw_dim(), reference.raw_dim());
+        for (image, row) in moved.outer_iter().enumerate() {
+            for (coordinate, value) in row.iter().enumerate() {
+                let expected = reference[(image, coordinate)] + offset[coordinate];
+                assert!(
+                    (value - expected).abs() <= 1.0e-9 + 1.0e-12 * offset[coordinate].abs(),
+                    "offset {offset} image {image} coordinate {coordinate}: {value} against {expected}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn translating_a_scaled_seed_still_scales_with_the_length_unit() {
+    let seed = FixedEnergySeed::default()
+        .with_saddle_energy(1.0)
+        .with_target_energy(0.25)
+        .with_images(5)
+        .with_max_evaluations(20_000);
+    let scale = 8.0;
+    let offset = array![300.0, -125.0];
+    let unit = fixed_energy_mep_seed(
+        &ScaledShiftedWell { scale: 1.0 },
+        array![2.0, 0.0].view(),
+        array![1.0, 0.0].view(),
+        array![1.0, 1.0].view(),
+        seed,
+    )
+    .unwrap();
+    let moved = fixed_energy_mep_seed(
+        &Translated {
+            inner: ScaledShiftedWell { scale },
+            offset: offset.clone(),
+        },
+        array![2.0 * scale + offset[0], offset[1]].view(),
+        array![1.0, 0.0].view(),
+        array![1.0, 1.0].view(),
+        seed,
+    )
+    .unwrap();
+    for (image, row) in moved.outer_iter().enumerate() {
+        for (coordinate, value) in row.iter().enumerate() {
+            let expected = unit[(image, coordinate)] * scale + offset[coordinate];
+            assert!(
+                (value - expected).abs() <= 1.0e-8 * scale,
+                "image {image} coordinate {coordinate}: {value} against {expected}"
+            );
+        }
+    }
+}
+
+struct Recording<S> {
+    inner: S,
+    visited: std::sync::Mutex<Vec<Array1<f64>>>,
+}
+
+impl<S: BandSurface> BandSurface for Recording<S> {
+    fn eval(
+        &self,
+        positions: ArrayView2<'_, f64>,
+        energies: &mut Array1<f64>,
+        gradients: &mut Array2<f64>,
+    ) -> Result<(), SaddleError> {
+        let mut visited = self.visited.lock().unwrap();
+        for row in positions.outer_iter() {
+            visited.push(row.to_owned());
+        }
+        drop(visited);
+        self.inner.eval(positions, energies, gradients)
+    }
+}
+
+/// Smallest distance from `saddle` to a point the seed evaluated, which is
+/// the opening displacement off the saddle.
+fn opening_displacement(visited: &[Array1<f64>], saddle: &Array1<f64>) -> f64 {
+    visited
+        .iter()
+        .map(|point| {
+            let step = point - saddle;
+            step.dot(&step).sqrt()
+        })
+        .filter(|distance| *distance > 0.0)
+        .fold(f64::INFINITY, f64::min)
+}
+
+#[test]
+fn the_opening_displacement_does_not_depend_on_where_the_saddle_sits() {
+    let seed = FixedEnergySeed::default()
+        .with_saddle_energy(1.0)
+        .with_target_energy(0.25)
+        .with_images(9)
+        .with_max_evaluations(20_000);
+    let saddle = array![0.0, 0.0];
+    let reference_surface = Recording {
+        inner: DoubleWell,
+        visited: std::sync::Mutex::new(Vec::new()),
+    };
+    fixed_energy_mep_seed(
+        &reference_surface,
+        saddle.view(),
+        array![1.0, 0.0].view(),
+        array![1.0, 1.0].view(),
+        seed,
+    )
+    .unwrap();
+    let reference = opening_displacement(&reference_surface.visited.lock().unwrap(), &saddle);
+    assert!(reference > 0.0 && reference < 1.0e-6);
+    for offset in [array![1.0e3, -2.5e2], array![-40.0, 7.0e4]] {
+        let moved_saddle = &saddle + &offset;
+        let surface = Recording {
+            inner: Translated {
+                inner: DoubleWell,
+                offset: offset.clone(),
+            },
+            visited: std::sync::Mutex::new(Vec::new()),
+        };
+        fixed_energy_mep_seed(
+            &surface,
+            moved_saddle.view(),
+            array![1.0, 0.0].view(),
+            array![1.0, 1.0].view(),
+            seed,
+        )
+        .unwrap();
+        let moved = opening_displacement(&surface.visited.lock().unwrap(), &moved_saddle);
+        assert!(
+            (moved - reference).abs() <= 1.0e-3 * reference,
+            "offset {offset}: opening displacement {moved} against {reference}"
+        );
+    }
+}
