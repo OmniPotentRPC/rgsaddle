@@ -3989,7 +3989,7 @@ impl BandSession {
             self.positions.row_mut(i).assign(&new_row);
             if i == 0 || i == n_images - 1 {
                 self.state.set_endpoints(None);
-                self.free_end_state.fixed_endpoint_energy = None;
+                self.free_end_state.forget_fixed_endpoint();
                 // The interior may be unchanged, so the solver's own
                 // cached force (assembled against the old endpoint)
                 // would answer the next step; drop it, keep the memory.
@@ -4018,7 +4018,7 @@ impl BandSession {
     pub fn reset(&mut self) {
         self.restart();
         self.state.set_endpoints(None);
-        self.free_end_state.fixed_endpoint_energy = None;
+        self.free_end_state.forget_fixed_endpoint();
         self.state.drop_last();
     }
 

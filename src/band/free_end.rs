@@ -319,6 +319,11 @@ struct FreeEndMeasurement {
 pub(super) struct FreeEndState {
     pub(super) resolved_target: Option<f64>,
     pub(super) fixed_endpoint_energy: Option<f64>,
+    /// Gradient of the fixed terminal image, held with its energy.
+    pub(super) fixed_endpoint_gradient: Option<Array1<f64>>,
+    /// Band the last cached evaluation was taken at. The next step
+    /// reuses that evaluation only while the band is unchanged.
+    pub(super) evaluated_band: Option<Array2<f64>>,
     pub(super) initial_fixed_energy: Option<f64>,
     pub(super) last_residual: Option<f64>,
     pub(super) last_endpoint_energy: Option<f64>,
@@ -331,6 +336,15 @@ pub(super) struct FreeEndState {
     pub(super) endpoint_dt: Option<f64>,
     pub(super) prev_end_pos: Option<Array1<f64>>,
     pub(super) prev_end_force: Option<Array1<f64>>,
+}
+
+impl FreeEndState {
+    /// Forget the fixed terminal image's energy and gradient, so the
+    /// next evaluation carries that image again.
+    pub(super) fn forget_fixed_endpoint(&mut self) {
+        self.fixed_endpoint_energy = None;
+        self.fixed_endpoint_gradient = None;
+    }
 }
 
 fn lock_guard<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -683,28 +697,54 @@ impl BandSession {
         self.free_end_state.initial_fixed_energy
     }
 
-    /// Energies, gradients, and projected forces at the positions the
-    /// step is about to report.
-    fn measure_free_end<S: BandSurface>(
+    /// Evaluate the band at the current positions. The fixed terminal
+    /// image never moves between cuts, so its energy and gradient are
+    /// asked of the surface once and held; every later call evaluates
+    /// the other `n_images - 1` rows only.
+    fn evaluate_free_end_band<S: BandSurface>(
         &mut self,
         surface: &S,
-        side: FreeEndSide,
-        end_idx: usize,
-        neigh_idx: usize,
-        ci_at: Option<usize>,
-    ) -> Result<FreeEndMeasurement, SaddleError> {
+        fixed_idx: usize,
+    ) -> Result<(Array1<f64>, Array2<f64>), SaddleError> {
         let n_images = self.positions.nrows();
         let dof = self.positions.ncols();
         let mut energies = Array1::zeros(n_images);
         let mut gradients = Array2::zeros((n_images, dof));
-        self.state.eval_rows(
-            surface,
-            0..n_images,
-            self.positions.view(),
-            &mut energies,
-            &mut gradients,
-        )?;
-        self.state.rows.fetch_add(n_images, Ordering::Relaxed);
+        let held = match (
+            self.free_end_state.fixed_endpoint_energy,
+            self.free_end_state.fixed_endpoint_gradient.clone(),
+        ) {
+            (Some(energy), Some(gradient)) => Some((energy, gradient)),
+            _ => None,
+        };
+        let range = match (&held, fixed_idx) {
+            (None, _) => 0..n_images,
+            (Some(_), 0) => 1..n_images,
+            (Some(_), _) => 0..n_images - 1,
+        };
+        let count = range.len();
+        if held.is_none() {
+            self.state.eval_rows(
+                surface,
+                range,
+                self.positions.view(),
+                &mut energies,
+                &mut gradients,
+            )?;
+        } else {
+            let mut sub_e = Array1::zeros(count);
+            let mut sub_g = Array2::zeros((count, dof));
+            let view = self.positions.slice(s![range.clone(), ..]);
+            self.state
+                .eval_rows(surface, range.clone(), view, &mut sub_e, &mut sub_g)?;
+            energies.slice_mut(s![range.clone()]).assign(&sub_e);
+            gradients.slice_mut(s![range, ..]).assign(&sub_g);
+        }
+        self.state.rows.fetch_add(count, Ordering::Relaxed);
+        if let Some((energy, gradient)) = &held {
+            energies[fixed_idx] = *energy;
+            gradients.row_mut(fixed_idx).assign(gradient);
+        }
         if !energies.iter().all(|energy| energy.is_finite()) {
             return Err(SaddleError::NonFinite("band energies"));
         }
@@ -716,6 +756,50 @@ impl BandSession {
                 zero_fixed(&self.state.fixed, &mut row);
             }
         }
+        if held.is_none() {
+            self.free_end_state.fixed_endpoint_energy = Some(energies[fixed_idx]);
+            self.free_end_state.fixed_endpoint_gradient = Some(gradients.row(fixed_idx).to_owned());
+            if self.free_end_state.initial_fixed_energy.is_none() {
+                self.free_end_state.initial_fixed_energy = Some(energies[fixed_idx]);
+            }
+        }
+        Ok((energies, gradients))
+    }
+
+    /// The evaluation the previous step cached, when the band has not
+    /// changed since. It carries every image, so the step that follows
+    /// asks the surface for none of them.
+    fn reusable_free_end_evaluation(&self) -> Option<(Array1<f64>, Array2<f64>)> {
+        let band = self.free_end_state.evaluated_band.as_ref()?;
+        if *band != self.positions {
+            return None;
+        }
+        let last = lock_guard(&self.state.last);
+        let last = last.as_ref()?;
+        let (n_images, dof) = self.positions.dim();
+        if last.x != self.interior_flat()
+            || last.energies.len() != n_images
+            || last.gradients.dim() != (n_images, dof)
+        {
+            return None;
+        }
+        Some((last.energies.clone(), last.gradients.clone()))
+    }
+
+    /// Energies, gradients, and projected forces at the positions the
+    /// step is about to report.
+    fn measure_free_end<S: BandSurface>(
+        &mut self,
+        surface: &S,
+        side: FreeEndSide,
+        end_idx: usize,
+        neigh_idx: usize,
+        fixed_idx: usize,
+        ci_at: Option<usize>,
+    ) -> Result<FreeEndMeasurement, SaddleError> {
+        let n_images = self.positions.nrows();
+        let dof = self.positions.ncols();
+        let (energies, gradients) = self.evaluate_free_end_band(surface, fixed_idx)?;
         let mut grad_end = gradients.row(end_idx).to_owned();
         zero_fixed(&self.config.fixed_atoms, &mut grad_end);
         let endpoint = assembled_free_end_force(
@@ -839,51 +923,10 @@ impl BandSession {
         self.state.rows.store(0, Ordering::Relaxed);
         self.refresh_exp(surface)?;
 
-        let mut energies = Array1::zeros(n_images);
-        let mut gradients = Array2::zeros((n_images, dof));
-        match self.free_end_state.fixed_endpoint_energy {
-            None => {
-                self.state.eval_rows(
-                    surface,
-                    0..n_images,
-                    self.positions.view(),
-                    &mut energies,
-                    &mut gradients,
-                )?;
-                self.state.rows.fetch_add(n_images, Ordering::Relaxed);
-                self.free_end_state.fixed_endpoint_energy = Some(energies[fixed_idx]);
-                if self.free_end_state.initial_fixed_energy.is_none() {
-                    self.free_end_state.initial_fixed_energy = Some(energies[fixed_idx]);
-                }
-            }
-            Some(e_fixed) => {
-                let range = match fe_cfg.side {
-                    FreeEndSide::First => 0..n_images - 1,
-                    FreeEndSide::Last => 1..n_images,
-                };
-                let count = range.len();
-                let mut sub_e = Array1::zeros(count);
-                let mut sub_g = Array2::zeros((count, dof));
-                let view = self.positions.slice(s![range.clone(), ..]);
-                self.state
-                    .eval_rows(surface, range.clone(), view, &mut sub_e, &mut sub_g)?;
-                self.state.rows.fetch_add(count, Ordering::Relaxed);
-                energies[fixed_idx] = e_fixed;
-                energies.slice_mut(s![range.clone()]).assign(&sub_e);
-                gradients.slice_mut(s![range, ..]).assign(&sub_g);
-            }
-        }
-        if !energies.iter().all(|e| e.is_finite()) {
-            return Err(SaddleError::NonFinite("band energies"));
-        }
-        if !gradients.iter().all(|g| g.is_finite()) {
-            return Err(SaddleError::NonFinite("band gradients"));
-        }
-        if !self.state.fixed.is_empty() {
-            for mut row in gradients.outer_iter_mut() {
-                zero_fixed(&self.state.fixed, &mut row);
-            }
-        }
+        let (mut energies, mut gradients) = match self.reusable_free_end_evaluation() {
+            Some(held) => held,
+            None => self.evaluate_free_end_band(surface, fixed_idx)?,
+        };
 
         let target_energy = match fe_cfg.target_energy {
             Some(t) => t,
@@ -1292,11 +1335,21 @@ impl BandSession {
                 cut_this_step = true;
             }
         }
+        if cut_this_step {
+            // The window edge is the new fixed terminal image, so its
+            // held energy and gradient belong to a point that is gone.
+            self.free_end_state.forget_fixed_endpoint();
+        }
 
         let report_ci = if cut_this_step { None } else { ci_at };
-        let measured =
-            self.measure_free_end(surface, fe_cfg.side, end_idx, neigh_idx, report_ci)?;
-        self.free_end_state.fixed_endpoint_energy = Some(measured.energies[fixed_idx]);
+        let measured = self.measure_free_end(
+            surface,
+            fe_cfg.side,
+            end_idx,
+            neigh_idx,
+            fixed_idx,
+            report_ci,
+        )?;
         let residual = measured.energies[end_idx] - target_energy;
         let e_end = measured.energies[end_idx];
         let max_force = measured.max_force;
@@ -1306,6 +1359,7 @@ impl BandSession {
         self.free_end_state.last_endpoint_force = Some(endpoint_force_norm);
         *lock_guard(&self.state.last_max_force) = max_force;
         self.cache_free_end_evaluation(measured.energies, measured.gradients, measured.projected);
+        self.free_end_state.evaluated_band = Some(self.positions.clone());
 
         let all_cuts_done = fe_cfg.max_cuts == 0 || self.free_end_state.cuts >= fe_cfg.max_cuts;
         let status = if !cut_this_step && all_cuts_done && max_force <= self.config.force_tol {
