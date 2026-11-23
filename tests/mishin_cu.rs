@@ -10227,15 +10227,22 @@ fn defect_pair_passage() {
     assemble_passage();
 }
 
+/// Table 1 of the accepted manuscript, Phys. Rev. Materials 9, 023601,
+/// section 4. These are their zero-pressure lattice parameters, not ours.
+const DEMKOWICZ_TABLE_1: [(f64, f64); 5] = [
+    (300.0, 3.631),
+    (400.0, 3.637),
+    (500.0, 3.643),
+    (600.0, 3.649),
+    (700.0, 3.655),
+];
+
 fn demkowicz_lattice(temperature: f64) -> f64 {
-    // Table 1 of the accepted manuscript, Phys. Rev. Materials 9, 023601,
-    // section 4. These are their zero-pressure lattice parameters, not ours.
-    match temperature as i32 {
-        300 => 3.631,
-        500 => 3.643,
-        700 => 3.655,
-        _ => 3.643,
-    }
+    DEMKOWICZ_TABLE_1
+        .iter()
+        .find(|(row, _)| (row - temperature).abs() < 0.5)
+        .map(|(_, a)| *a)
+        .unwrap_or_else(|| panic!("Table 1 has no lattice parameter at {temperature} K"))
 }
 
 #[test]
