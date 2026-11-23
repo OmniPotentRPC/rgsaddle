@@ -89,6 +89,7 @@ const COINCIDENT: f64 = 1e-12;
 
 /// [`solve_dense`] takes a pivot at or below this fraction of the largest
 /// entry as zero.
+#[cfg(test)]
 const PIVOT_TOLERANCE: f64 = 1e-14;
 
 /// A target arc this close to an end of the curve, as a fraction of the
@@ -659,32 +660,93 @@ impl Spline {
 /// last rows ask the third derivative to be continuous at the second
 /// and the second-to-last knot (de Boor, A Practical Guide to Splines,
 /// Springer (1978), Ch. IV): `h_1 M_0 - (h_0 + h_1) M_1 + h_0 M_2 = 0`
-/// and its mirror. The system is solved by Gaussian elimination with
-/// partial pivoting, one right-hand side per coordinate.
+/// and its mirror. Eliminating `M_0` and `M_{k-1}` from those boundary
+/// equations leaves a tridiagonal system for `M_1..M_{k-2}`. Thomas
+/// elimination solves every coordinate together in `O(k * ncols)`.
 fn not_a_knot_moments(t: &[f64], y: &Array2<f64>) -> Option<Array2<f64>> {
     let k = t.len();
     let h: Vec<f64> = t.windows(2).map(|w| w[1] - w[0]).collect();
-    let mut a = vec![0.0; k * k];
-    let mut rhs = Array2::zeros(y.raw_dim());
-    a[0] = h[1];
-    a[1] = -(h[0] + h[1]);
-    a[2] = h[0];
-    for i in 1..k - 1 {
-        a[i * k + i - 1] = h[i - 1];
-        a[i * k + i] = 2.0 * (h[i - 1] + h[i]);
-        a[i * k + i + 1] = h[i];
-        let slope = |j: usize| -> Array1<f64> { (&y.row(j + 1) - &y.row(j)) / h[j] };
-        rhs.row_mut(i).assign(&((slope(i) - slope(i - 1)) * 6.0));
+    let n = k - 2;
+    let mut lower = vec![0.0; n];
+    let mut diagonal = vec![0.0; n];
+    let mut upper = vec![0.0; n];
+    let mut rhs = Array2::zeros((n, y.ncols()));
+    for row in 0..n {
+        let i = row + 1;
+        if row > 0 {
+            lower[row] = h[i - 1];
+        }
+        diagonal[row] = 2.0 * (h[i - 1] + h[i]);
+        if row + 1 < n {
+            upper[row] = h[i];
+        }
+        for col in 0..y.ncols() {
+            let left = (y[(i, col)] - y[(i - 1, col)]) / h[i - 1];
+            let right = (y[(i + 1, col)] - y[(i, col)]) / h[i];
+            rhs[(row, col)] = 6.0 * (right - left);
+        }
     }
-    let last = (k - 1) * k;
-    a[last + k - 3] = h[k - 2];
-    a[last + k - 2] = -(h[k - 3] + h[k - 2]);
-    a[last + k - 1] = h[k - 3];
-    solve_dense(&mut a, &mut rhs).then_some(rhs)
+
+    // M0 = ((h0 + h1) M1 - h0 M2) / h1.
+    diagonal[0] += h[0] * (h[0] + h[1]) / h[1];
+    upper[0] -= h[0] * h[0] / h[1];
+    // M{k-1} = ((h{k-3} + h{k-2}) M{k-2}
+    //             - h{k-2} M{k-3}) / h{k-3}.
+    lower[n - 1] -= h[k - 2] * h[k - 2] / h[k - 3];
+    diagonal[n - 1] += h[k - 2] * (h[k - 3] + h[k - 2]) / h[k - 3];
+
+    solve_tridiagonal(&lower, &mut diagonal, &upper, &mut rhs)?;
+    let mut moments = Array2::zeros(y.raw_dim());
+    moments.slice_mut(ndarray::s![1..k - 1, ..]).assign(&rhs);
+    for col in 0..y.ncols() {
+        moments[(0, col)] = ((h[0] + h[1]) * moments[(1, col)] - h[0] * moments[(2, col)]) / h[1];
+        moments[(k - 1, col)] = ((h[k - 3] + h[k - 2]) * moments[(k - 2, col)]
+            - h[k - 2] * moments[(k - 3, col)])
+            / h[k - 3];
+    }
+    Some(moments)
 }
 
-/// Solve `A X = B` in place, `A` row-major square. False when a pivot
-/// vanishes against the row scale.
+/// Solve a tridiagonal system in place for all columns of `rhs`.
+fn solve_tridiagonal(
+    lower: &[f64],
+    diagonal: &mut [f64],
+    upper: &[f64],
+    rhs: &mut Array2<f64>,
+) -> Option<()> {
+    let n = diagonal.len();
+    for row in 1..n {
+        let pivot = diagonal[row - 1];
+        if pivot == 0.0 || !pivot.is_finite() {
+            return None;
+        }
+        let factor = lower[row] / pivot;
+        diagonal[row] -= factor * upper[row - 1];
+        let (source, mut target) =
+            rhs.multi_slice_mut((ndarray::s![row - 1, ..], ndarray::s![row, ..]));
+        target.scaled_add(-factor, &source);
+    }
+    let last = diagonal[n - 1];
+    if last == 0.0 || !last.is_finite() {
+        return None;
+    }
+    rhs.row_mut(n - 1).mapv_inplace(|value| value / last);
+    for row in (0..n - 1).rev() {
+        let pivot = diagonal[row];
+        if pivot == 0.0 || !pivot.is_finite() {
+            return None;
+        }
+        let coefficient = upper[row];
+        let (mut target, source) =
+            rhs.multi_slice_mut((ndarray::s![row, ..], ndarray::s![row + 1, ..]));
+        target.scaled_add(-coefficient, &source);
+        target.mapv_inplace(|value| value / pivot);
+    }
+    Some(())
+}
+
+/// Dense reference used to check the linear-time spline solve.
+#[cfg(test)]
 fn solve_dense(a: &mut [f64], b: &mut Array2<f64>) -> bool {
     let k = b.nrows();
     let scale = a.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
@@ -845,6 +907,50 @@ mod tests {
     #[test]
     fn a_fit_refuses_repeated_knots() {
         assert!(Spline::fit(&[0.0, 1.0, 1.0, 2.0], &Array2::zeros((4, 1))).is_none());
+    }
+
+    #[test]
+    fn tridiagonal_moments_match_dense_not_a_knot_system() {
+        let mut seed = 0x6a09_e667_f3bc_c909_u64;
+        let mut random = || {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 11) as f64 / (1_u64 << 53) as f64
+        };
+        for k in 4..40 {
+            let mut knots = vec![0.0; k];
+            for i in 1..k {
+                knots[i] = knots[i - 1] + 0.05 + random();
+            }
+            let values = Array2::from_shape_fn((k, 17), |_| 2.0 * random() - 1.0);
+            let got = not_a_knot_moments(&knots, &values).expect("tridiagonal solve");
+
+            let h: Vec<f64> = knots.windows(2).map(|w| w[1] - w[0]).collect();
+            let mut matrix = vec![0.0; k * k];
+            let mut want = Array2::zeros(values.raw_dim());
+            matrix[0] = h[1];
+            matrix[1] = -(h[0] + h[1]);
+            matrix[2] = h[0];
+            for i in 1..k - 1 {
+                matrix[i * k + i - 1] = h[i - 1];
+                matrix[i * k + i] = 2.0 * (h[i - 1] + h[i]);
+                matrix[i * k + i + 1] = h[i];
+                for col in 0..values.ncols() {
+                    let left = (values[(i, col)] - values[(i - 1, col)]) / h[i - 1];
+                    let right = (values[(i + 1, col)] - values[(i, col)]) / h[i];
+                    want[(i, col)] = 6.0 * (right - left);
+                }
+            }
+            let last = (k - 1) * k;
+            matrix[last + k - 3] = h[k - 2];
+            matrix[last + k - 2] = -(h[k - 3] + h[k - 2]);
+            matrix[last + k - 1] = h[k - 3];
+            assert!(solve_dense(&mut matrix, &mut want));
+            for (actual, expected) in got.iter().zip(want.iter()) {
+                assert_abs_diff_eq!(actual, expected, epsilon = 2e-10);
+            }
+        }
     }
 
     #[test]

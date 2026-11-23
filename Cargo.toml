@@ -126,6 +126,10 @@ required-features = ["ohtst"]
 name = "lineb"
 required-features = ["lineb-oracle"]
 
+[[bench]]
+name = "band_scaling"
+harness = false
+
 [profile.dev.package.faer]
 opt-level = 3
 

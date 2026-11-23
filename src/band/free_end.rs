@@ -740,6 +740,7 @@ impl BandSession {
                 metrics.and_then(|band| band.per_image.get(image - 1).map(|p| (p, band.free)));
             let (force, _) = image_force(
                 &self.config,
+                &self.state,
                 &resolved_spring,
                 image,
                 ci_at == Some(image),
@@ -1011,6 +1012,7 @@ impl BandSession {
             let rows = s![(i - 1) * dof..i * dof];
             let (proj, drv) = image_force(
                 &self.config,
+                &self.state,
                 &resolved_spring,
                 i,
                 ci_at == Some(i),
@@ -1060,6 +1062,7 @@ impl BandSession {
                 let rows = s![(ci_i - 1) * dof..ci_i * dof];
                 let (proj, drv) = image_force(
                     &self.config,
+                    &self.state,
                     &resolved_spring,
                     ci_i,
                     true,
@@ -1139,6 +1142,7 @@ impl BandSession {
                     let rows = s![(i - 1) * dof..i * dof];
                     match image_force(
                         config_ref,
+                        state_ref,
                         &tr_spring,
                         i,
                         ci_at == Some(i),
