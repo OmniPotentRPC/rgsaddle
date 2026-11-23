@@ -24,11 +24,15 @@
 //!    reaching `max_steps_per_node`) spawns a new frontier node inward
 //!    across the gap with a fresh [`ImageId`] and reparametrizes its
 //!    fragment to equal arc length.
-//! 5. Once the fragments meet (`left_nodes + right_nodes == n_images`
-//!    or the frontier gap falls within `join_tol`), the fragments merge
-//!    into a continuous equal-arc-length chain and hand off to
-//!    [`StringSession`], preserving every image's [`ImageId`] and
-//!    cached endpoint energies.
+//! 5. The fragments join when the string is full
+//!    (`left_nodes + right_nodes == n_images`) and either this step
+//!    added the node that filled the last slot or both frontiers
+//!    satisfy the node-add criterion, so no node is left to grow, or
+//!    when the frontier gap falls within `join_tol`. A full string
+//!    whose frontiers are not both ready keeps relaxing as fragments.
+//!    On a join the fragments merge into a continuous equal-arc-length
+//!    chain and hand off to [`StringSession`], preserving every
+//!    image's [`ImageId`] and cached endpoint energies.
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
 use rgmin::{FireKind, Method, Oracle, Solver};
